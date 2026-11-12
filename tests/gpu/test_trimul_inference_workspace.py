@@ -132,18 +132,16 @@ def test_trimul_refiner_sizes_tiled(backend: str, outgoing: bool, P: int, R: int
     with torch.no_grad():
         gold = copy.deepcopy(m).float()(small["pair"].float(), small["mask"]).float()
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            at_p = kern(**small).float()
+            at_p = copy.deepcopy(m)(**small).float()  # the PyTorch reference at the case dtype (P need not be a served length)
         pair = small["pair"].repeat(1, R, R, 1).contiguous()
         mask = small["mask"].repeat(1, R)
-        why = kern.unsupported(pair, mask)
-        if why is not None:
-            pytest.skip(f"not served: {why}")
+        assert kern.unsupported(pair, mask) is None
         with torch.autocast("cuda", dtype=torch.bfloat16):
             big = kern(pair, mask)
     scale = gold.abs().max()
-    err_p = float((at_p - gold).abs().max() / scale)
+    err_p = float((at_p - gold).abs().max() / scale)  # the measurer's GREEN bound: max(err_pytorch, 8e-3)
     for i in (0, R // 2, R - 1):
         for j in (0, R - 1):
             block = big[:, i * P : (i + 1) * P, j * P : (j + 1) * P].float()
             err = float((block - gold).abs().max() / scale)
-            assert err <= max(1.5 * err_p, 8e-3), f"block ({i}, {j}): {err:.3e} (at P: {err_p:.3e})"
+            assert err <= max(err_p, 8e-3), f"block ({i}, {j}): {err:.3e} (pytorch at P: {err_p:.3e})"

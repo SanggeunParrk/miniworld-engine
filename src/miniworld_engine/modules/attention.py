@@ -81,7 +81,7 @@ def _pad_tokens(single, pair, mask, extra, n):
     keys[:, :L] = True if mask is None else mask
     return (
         F.pad(single, (0, 0, 0, p)).contiguous(),
-        F.pad(pair, (0, 0, 0, p, 0, p)).contiguous(),
+        None if pair is None else F.pad(pair, (0, 0, 0, p, 0, p)).contiguous(),
         keys,
         None if extra is None else F.pad(extra, (0, p, 0, p)),
     )
@@ -337,7 +337,16 @@ class AttentionPairBias(BackendModule, MasterWeights):
             # inference at L % 128 != 0 (FoldForge OpenDDE n = 12: 2976 structural tokens): the kernels take whole 128-token tiles, so the
             # call runs at the next multiple of 128 -- zero single rows and pair entries, the pad keys masked (-inf: no weight), the pad
             # query rows dropped. Every real row attends over the same keys with the same logits as unpadded.
-            single_p, pair_p, mask_p, extra_p = _pad_tokens(single, pair, mask, extra_pair_bias, -(-L // 128) * 128)
+            lp = -(-L // 128) * 128
+            if torch.cuda.get_device_capability(single.device) == (8, 0):
+                # A100 (the composed path): the pair stays as it is -- its bias kernel writes the [H, Lp, Lp] planes from the [L, L] pair,
+                # the pad keys masked, the pad query rows 0 -- so only single / mask / extra_pair_bias are padded (no padded pair copy)
+                from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
+
+                single_p, _, mask_p, extra_p = _pad_tokens(single, None, mask, extra_pair_bias, lp)
+                extra = None if extra_p is None else _extra_planes(extra_p, single.shape[0], self.n_head, lp)
+                return sm80.update_generic(self, single_p, pair, mask_p, False, extra=extra)[:, :L].contiguous()
+            single_p, pair_p, mask_p, extra_p = _pad_tokens(single, pair, mask, extra_pair_bias, lp)
             return self._forward_cuda(single_p, pair_p, mask_p, extra_p)[:, :L].contiguous()
         # extra_pair_bias (eval only, ``_supports_cuda``): [B, H, L, L] planes added to the kernels' hoisted bias before the core (FoldForge R3)
         extra = None if extra_pair_bias is None else _extra_planes(extra_pair_bias, single.shape[0], self.n_head, single.shape[1])

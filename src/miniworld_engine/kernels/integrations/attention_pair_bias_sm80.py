@@ -815,10 +815,13 @@ def _gfwd_row(single, pair, mask, params, heads, gate_bias, eps_s, eps_p, save, 
         qkvg = torch.addmm(b, s, w.t())
         q, k, v, g = (qkvg[:, i * n : (i + 1) * n] for i in range(4))
         m = None if mask is None else mask.reshape(L)
+        nz = pair.shape[1]  # < L: the caller padded single / mask / extra to L (inference); the bias kernel masks the keys past nz
         bias = (
             _bias_split(pair[0], wcm, m, L, eps_p)
-            if f32 and pair.shape[-1] >= 512 and L <= 128 and heads % 8 == 0
-            else sm80.pair_bias_generic(pair[0], wcm, m, L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L))
+            if f32 and pair.shape[-1] >= 512 and L <= 128 and heads % 8 == 0 and nz == L
+            else sm80.pair_bias_generic(
+                pair[0], wcm, None if m is None else m[:nz], L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L)
+            )
         )
         if extra is not None:  # the bias in the core's units (bf16: x sqrt(head dim)); a masked key stays far below every real logit
             bias.add_(extra[0].to(bias.dtype), alpha=1.0 if f32 else math.sqrt(hd))
