@@ -4,7 +4,7 @@ GeForce RTX 5090 (``parameter_cast_sm120``, the same source for sm_120a); ``_ext
 from pathlib import Path
 
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
-from ._arch import per_arch
+from ..._sm120_builds import per_arch
 
 
 def _build(suffix: str, gencode: str):

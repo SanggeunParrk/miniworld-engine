@@ -1,9 +1,11 @@
-"""The two cards the sm_80 Transition sources are built for: the A100 (``sm_80``) and the GeForce RTX 5090 (``sm_120a``, card key ``5090_sm120``).
+"""Per-arch builds of the engine's sm_80 sources (Transition, AdaLN, ConditionedTransition): the A100 (``sm_80``) and the GeForce RTX 5090
+(``sm_120a``, card key ``5090_sm120``).
 
 The RTX 5090 runs the A100's mma.sync / ldmatrix / cp.async kernels unchanged, compiled for sm_120a into extensions of their own (the ``_sm120``
 names); the A100 builds keep their names and flags, so their artifacts are untouched.  What differs is the shared memory: 99 KB a block (101376 B)
-against the A100's 163 KB, so the kernels whose tile configs need more (the one-kernel fused forward / backward of ``fused_sm80``,
-``fused_fwd_sm80``, ``fused_bwd_sm80``) are not served on the 5090: the wide chain (``fused_wide_sm80``) serves every call there.
+against the A100's 163 KB, so kernels whose tiles need more are not served on the 5090 (their gates check :func:`is_sm120`): the one-kernel
+Transition builds (``fused_sm80`` / ``fused_fwd_sm80`` / ``fused_bwd_sm80``; the wide chain serves there) and the fused atom-width (d = 128) AdaLN /
+ConditionedTransition kernels (the row passes + cuBLAS serve there).
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from collections.abc import Callable
 
 import torch
 
-from ..._compile import device_constant
+from miniworld_engine.kernels._compile import device_constant
 
 SM80 = "-gencode=arch=compute_80,code=sm_80"
 SM120 = "-gencode=arch=compute_120a,code=sm_120a"

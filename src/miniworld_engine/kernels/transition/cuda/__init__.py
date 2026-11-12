@@ -186,7 +186,7 @@ def prebuild(target, rows):
             yield fused_bwd_sm80._ext
     elif target.arch == "sm120":
         # GeForce RTX 5090 (transition_sm80 on sm_120a): the wide extension and the fp32-master cast built for sm_120a; the one-kernel builds
-        # (fused_sm80 / fused_fwd_sm80 / fused_bwd_sm80) need more shared memory than its 99 KB a block and are not served there (_arch.py)
+        # (fused_sm80 / fused_fwd_sm80 / fused_bwd_sm80) need more shared memory than its 99 KB a block and are not served there (kernels/_sm120_builds.py)
         from . import fused_wide_sm80, parameter_cast_sm80
 
         served = {k: v for k, v in half.items() if v and k[0] in fused_wide_sm80.WIDTHS}
