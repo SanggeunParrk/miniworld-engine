@@ -35,6 +35,9 @@ struct MsgBwdParams {
 #define MP_BWD_STAGE 0           // 1: the three outputs (a, dproj, dP) leave through a shared staging tile as 16-byte stores (a store from the fragment layout is 4 bytes per lane: 8 rows x 16 B per instruction).
                                  // Measured on the A100: 1383 us instead of 1314 us at 16384 groups (the extra shared-memory traffic and the 10 instead of 12 warps cost more than the wider stores save): off.
 #endif
+#if defined(MWE_SM120) && !defined(MP_BWD_NW)
+#define MP_BWD_NW 8              // RTX 5090 (sm_120a): 99 KB of shared memory a block -- 33 KB + 8 x 8.1 KB (12 warps need 130 KB)
+#endif
 #ifndef MP_BWD_NW
 #define MP_BWD_NW (MP_BWD_STAGE ? 10 : 12)
 #endif
@@ -48,6 +51,9 @@ struct MsgBwdCfg {
   static constexpr int WSTRIDE = TILE + DPT + 128 + STG;                                                      // P tile | dproj^T [128 o][16 n] | 16 mask floats (padded) | the staging tile
   static constexpr int SMEM = W_BYTES + 512 + NW * WSTRIDE;                                                    // + the bias (256 B, padded)
 };
+#ifdef MWE_SM120
+static_assert(MsgBwdCfg::SMEM <= 101376, "the RTX 5090 allows 99 KB of shared memory a block");
+#endif
 
 #define STG_A(p, v) stg32(p, v)
 #define STG_D(p, v) stg32(p, v)

@@ -79,6 +79,9 @@ std::vector<torch::Tensor> pack(bool tr0, bool tr1, bool tr2, torch::Tensor w0, 
 #endif
 constexpr int FWD_NW = MPNN_FWD_NW;
 constexpr int FWD_SMEM = IMG_BYTES + TAB_FLOATS * 4;
+#ifdef MWE_SM120
+static_assert(FWD_SMEM <= 101376 && MLP_FWD_SMEM <= 101376 && DW_SMEM_PLAIN <= 101376 && DW_SMEM_GELU <= 101376, "the RTX 5090 allows 99 KB of shared memory a block");
+#endif
 
 template <bool SAVE, bool DROP>
 static void launch_fwd(const TailFwdParams& p, int ntile, cudaStream_t st) {

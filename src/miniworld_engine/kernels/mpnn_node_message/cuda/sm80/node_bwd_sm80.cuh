@@ -39,11 +39,19 @@ struct NodeBwdParams {
   float inv_scale;
 };
 
+#ifdef MWE_SM120
+#define MP_NODE_BWD_NW 2         // RTX 5090 (sm_120a): 99 KB of shared memory a block -- the two weights (64.5 KB) + 2 x 12 KB
+#else
+#define MP_NODE_BWD_NW 8
+#endif
 struct NodeBwdCfg {
-  static constexpr int NW = 8, NTHR = NW * 32, MINB = 1;
+  static constexpr int NW = MP_NODE_BWD_NW, NTHR = NW * 32, MINB = 1;
   static constexpr int W_BYTES = 2 * 128 * 256, BIAS_BYTES = 512, TILE = 16 * 256, WSTRIDE = 3 * TILE;   // the two weights | the bias | per warp: the edge tile | the gathered neighbour tile | dh^T [128 o'][16 n]
   static constexpr int SMEM = W_BYTES + BIAS_BYTES + NW * WSTRIDE;
 };
+#ifdef MWE_SM120
+static_assert(NodeBwdCfg::SMEM <= 101376, "the RTX 5090 allows 99 KB of shared memory a block");
+#endif
 
 // the dh^T tile: 128 rows (o') of 32 B (16 n), 16-B granule jn of row o' stored at granule jn ^ ((o' >> 2) & 1)
 DEVI uint32_t ht_swz(uint32_t o, uint32_t jn) { return o * 32u + ((jn ^ ((o >> 2) & 1u)) << 4); }

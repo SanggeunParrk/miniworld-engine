@@ -29,6 +29,9 @@ struct MsgFwdCfg {
   static constexpr int W_BYTES = 128 * 256, TILE = 16 * 256, WSTRIDE = TILE + 128;       // + 16 mask floats (64 B), padded
   static constexpr int SMEM = W_BYTES + NW * WSTRIDE;
 };
+#ifdef MWE_SM120
+static_assert(MsgFwdCfg::SMEM <= 101376, "the RTX 5090 allows 99 KB of shared memory a block");
+#endif
 
 __global__ void __launch_bounds__(MsgFwdCfg::NTHR, MsgFwdCfg::MINB) msg_fwd_kernel(const MsgFwdParams p) {
   using C = MsgFwdCfg;

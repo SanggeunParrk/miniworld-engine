@@ -7,6 +7,7 @@ Each module is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 import torch.nn as nn
@@ -253,12 +254,13 @@ class ProteinMPNN(BackendModule):
     transitions, the other norms and the output projection are the PyTorch statements. Each child states its range (bf16, widths 128,
     48 neighbours) and raises ``BackendUnsupported`` outside it.
 
-    ``"cuda"`` (A100 only): the same composition with the children's ``"cuda"`` backends, the sm_80 kernels of ``kernels/mpnn_*/cuda/sm80``
+    ``"cuda"`` (A100; RTX 5090 as sm_120a builds of the same sources): the same composition with the children's ``"cuda"`` backends, the sm_80 kernels of ``kernels/mpnn_*/cuda/sm80``
     (``kernels/integrations/mpnn_msg_sm80.py``: the hidden-message reduction, the fused node message, the relative-position backward;
     ``mpnn_edge_sm80.py``: the fused edge tail, the edge MLP, the edge LayerNorm backward, the packed-mask dropout). Other cards have no
     hand-written CUDA of these families (the H100 runs the Triton kernels), so the backend refuses there."""
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:5090_sm120": 1}  # 2026-11-12: the sm_80 sources built for sm_120a (RTX 5090)
 
     backends = ("pytorch", "triton", "cuda")
 
