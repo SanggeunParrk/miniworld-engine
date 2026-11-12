@@ -127,13 +127,15 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) fused_f1_kernel(const F1Para
   cp_async_wait<0>();
   __syncthreads();
 
-  const unsigned L = (unsigned)p.L, LL = L * L;
+  const unsigned L = (unsigned)p.L;
+  const size_t LL = (size_t)L * L;                              // 64-bit token math: z L^2 and the token index never wrap
   uint32_t wb[KBI];
 #pragma unroll
   for (int kb = 0; kb < KBI; ++kb) wb[kb] = sb + fwoff<ROWB>(g8, 4 * kb + q4);
 
-  for (unsigned tile = blockIdx.x * G::NW + warp; tile < p.ntile; tile += gridDim.x * G::NW) {
-    const unsigned t0 = tile * 32, z = t0 / LL, rem0 = t0 - z * LL, arow = rem0 / L, b0 = rem0 - arow * L;
+  for (size_t tile = (size_t)blockIdx.x * G::NW + warp; tile < p.ntile; tile += (size_t)gridDim.x * G::NW) {
+    const size_t t0 = tile * 32, z = t0 / LL;
+    const unsigned rem0 = (unsigned)(t0 - z * LL), arow = rem0 / L, b0 = rem0 - arow * L;
 
     uint4 xr[2][2][KBI];
 #pragma unroll
@@ -141,7 +143,7 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) fused_f1_kernel(const F1Para
 #pragma unroll
       for (int hh = 0; hh < 2; ++hh) {
         const unsigned r = mt * 16 + g8 + 8 * hh;
-        const size_t src = p.transposed ? (size_t)(z * LL + (b0 + r) * L + arow) : (size_t)(t0 + r);
+        const size_t src = p.transposed ? z * LL + (size_t)(b0 + r) * L + arow : (size_t)(t0 + r);
 #pragma unroll
         for (int kb = 0; kb < KBI; ++kb) xr[mt][hh][kb] = ldg128(p.x + src * DIN + 32 * kb + 8 * q4);
       }
@@ -285,18 +287,20 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) fused_f3_kernel(const F3Para
   cp_async_wait<0>();
   __syncthreads();
 
-  const unsigned L = (unsigned)p.L, LL = L * L;
+  const unsigned L = (unsigned)p.L;
+  const size_t LL = (size_t)L * L;                              // 64-bit token math: z L^2 and the token index never wrap
   uint32_t wb[KBH];
 #pragma unroll
   for (int kb = 0; kb < KBH; ++kb) wb[kb] = sb + fwoff<ROWB>(g8, 4 * kb + q4);
 
-  for (unsigned tile = blockIdx.x * G::NW + warp; tile < p.ntile; tile += gridDim.x * G::NW) {
-    const unsigned t0 = tile * 16, z = t0 / LL, rem0 = t0 - z * LL, arow = rem0 / L, b0 = rem0 - arow * L;
+  for (size_t tile = (size_t)blockIdx.x * G::NW + warp; tile < p.ntile; tile += (size_t)gridDim.x * G::NW) {
+    const size_t t0 = tile * 16, z = t0 / LL;
+    const unsigned rem0 = (unsigned)(t0 - z * LL), arow = rem0 / L, b0 = rem0 - arow * L;
     size_t drow[2];
 #pragma unroll
     for (int hh = 0; hh < 2; ++hh) {
       const unsigned r = g8 + 8 * hh;
-      drow[hh] = p.transposed ? (size_t)(z * LL + (b0 + r) * L + arow) : (size_t)(t0 + r);
+      drow[hh] = p.transposed ? z * LL + (size_t)(b0 + r) * L + arow : (size_t)(t0 + r);
     }
 
     uint4 ov[2][KBH], gv[2][KBH], rv[2][NOG];
@@ -372,18 +376,20 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) fused_b3_kernel(const B3Para
   cp_async_wait<0>();
   __syncthreads();
 
-  const unsigned L = (unsigned)p.L, LL = L * L;
+  const unsigned L = (unsigned)p.L;
+  const size_t LL = (size_t)L * L;                              // 64-bit token math: z L^2 and the token index never wrap
   uint32_t wb[KBI];
 #pragma unroll
   for (int kb = 0; kb < KBI; ++kb) wb[kb] = sb + fwoff<ROWB>(g8, 4 * kb + q4);
 
-  for (unsigned tile = blockIdx.x * G::NW + warp; tile < p.ntile; tile += gridDim.x * G::NW) {
-    const unsigned t0 = tile * 16, z = t0 / LL, rem0 = t0 - z * LL, arow = rem0 / L, b0 = rem0 - arow * L;
+  for (size_t tile = (size_t)blockIdx.x * G::NW + warp; tile < p.ntile; tile += (size_t)gridDim.x * G::NW) {
+    const size_t t0 = tile * 16, z = t0 / LL;
+    const unsigned rem0 = (unsigned)(t0 - z * LL), arow = rem0 / L, b0 = rem0 - arow * L;
     size_t drow[2];
 #pragma unroll
     for (int hh = 0; hh < 2; ++hh) {
       const unsigned r = g8 + 8 * hh;
-      drow[hh] = p.transposed ? (size_t)(z * LL + (b0 + r) * L + arow) : (size_t)(t0 + r);
+      drow[hh] = p.transposed ? z * LL + (size_t)(b0 + r) * L + arow : (size_t)(t0 + r);
     }
 
     uint4 dv[2][KBI], ov[2][KBH], gv[2][KBH];
@@ -495,18 +501,20 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) fused_b1_kernel(const B1Para
   cp_async_wait<0>();
   __syncthreads();
 
-  const unsigned L = (unsigned)p.L, LL = L * L;
+  const unsigned L = (unsigned)p.L;
+  const size_t LL = (size_t)L * L;                              // 64-bit token math: z L^2 and the token index never wrap
   uint32_t wb[KBH];
 #pragma unroll
   for (int kb = 0; kb < KBH; ++kb) wb[kb] = sb + fwoff<ROWB>(g8, 4 * kb + q4);
 
-  for (unsigned tile = blockIdx.x * G::NW + warp; tile < p.ntile; tile += gridDim.x * G::NW) {
-    const unsigned t0 = tile * 16, z = t0 / LL, rem0 = t0 - z * LL, arow = rem0 / L, b0 = rem0 - arow * L;
+  for (size_t tile = (size_t)blockIdx.x * G::NW + warp; tile < p.ntile; tile += (size_t)gridDim.x * G::NW) {
+    const size_t t0 = tile * 16, z = t0 / LL;
+    const unsigned rem0 = (unsigned)(t0 - z * LL), arow = rem0 / L, b0 = rem0 - arow * L;
     size_t drow[2];
 #pragma unroll
     for (int hh = 0; hh < 2; ++hh) {
       const unsigned r = g8 + 8 * hh;
-      drow[hh] = p.transposed ? (size_t)(z * LL + (b0 + r) * L + arow) : (size_t)(t0 + r);
+      drow[hh] = p.transposed ? z * LL + (size_t)(b0 + r) * L + arow : (size_t)(t0 + r);
     }
 
     float acc[NTO][4];

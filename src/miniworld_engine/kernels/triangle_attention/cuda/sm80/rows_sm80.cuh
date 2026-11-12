@@ -78,7 +78,7 @@ struct LnRowsParams {
   const __nv_bfloat16* x;       // [T][D], the module's layout
   __nv_bfloat16* xh;            // [T][D + 8]: bf16((x - mean) rstd) | 1 | 1 | 0 ... (the starting frame)
   float* stats;                 // [T][2] (mean, rstd) or nullptr
-  unsigned T;
+  size_t T;
   int L, transposed;
   float eps;
 };
@@ -107,7 +107,7 @@ template <int D, int PAD = 8>
 __global__ void __launch_bounds__(256) ln_rows_kernel(const LnRowsParams p) {
   using S = RowShape<D>;
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, sub = lane / S::TPR, tl = lane - sub * S::TPR;
-  for (unsigned grp = blockIdx.x * 8 + warp;; grp += gridDim.x * 8) {
+  for (size_t grp = (size_t)blockIdx.x * 8 + warp;; grp += (size_t)gridDim.x * 8) {
     const size_t t = (size_t)grp * S::RPW + sub;
     if ((size_t)grp * S::RPW >= p.T) break;
     const bool valid = t < p.T;
@@ -160,7 +160,7 @@ struct BiasPlanesParams {
   const uint8_t* mask;          // [Z][L] key mask (non-zero = real key) or nullptr
   __nv_bfloat16* bias;          // [Z][H][L][L]
   long long ldy;
-  unsigned T;
+  size_t T;
   int col0, H, L;
   int flip;                     // AlphaFold 3's ending-node orientation: token (a, b) is written to bias[z][h][b][a], masked by keep(z, a)
 };
@@ -195,7 +195,7 @@ struct GateRowsParams {
   const __nv_bfloat16* g;       // [T][ldg]
   __nv_bfloat16* a;             // [T][DHp]
   long long ldg;
-  unsigned T;
+  size_t T;
   int DHp;
 };
 
@@ -213,7 +213,7 @@ struct OutRowsParams {
   const __nv_bfloat16* res;
   const __nv_bfloat16* ds;
   __nv_bfloat16* out;
-  unsigned T;
+  size_t T;
   int L, D, transposed;
 };
 
@@ -238,7 +238,7 @@ struct DyRowsParams {
   const __nv_bfloat16* dout;
   const __nv_bfloat16* ds;
   __nv_bfloat16* dy;
-  unsigned T;
+  size_t T;
   int L, D, transposed;
 };
 
@@ -266,7 +266,7 @@ struct GateBwdParams {
   __nv_bfloat16* a;             // [T][DHp]
   float* delta;                 // [Z][H][L][L] or nullptr
   long long ldg, lddg;
-  unsigned T;
+  size_t T;
   int DHp, L, H;
 };
 
@@ -323,7 +323,7 @@ struct LnBwdParams {
   const __nv_bfloat16* dout;    // [T][D] the module's layout
   const float* gamma;           // [D] fp32
   __nv_bfloat16* dpair;         // [T][D] the module's layout
-  unsigned T;
+  size_t T;
   int L, H, transposed;
 };
 
@@ -336,7 +336,7 @@ __global__ void __launch_bounds__(256) ln_bwd_rows_kernel(const LnBwdParams p) {
   __syncthreads();
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, sub = lane / S::TPR, tl = lane - sub * S::TPR;
   const size_t LL = (size_t)p.L * p.L;
-  for (unsigned grp = blockIdx.x * 8 + warp;; grp += gridDim.x * 8) {
+  for (size_t grp = (size_t)blockIdx.x * 8 + warp;; grp += (size_t)gridDim.x * 8) {
     const size_t t = (size_t)grp * S::RPW + sub;
     if ((size_t)grp * S::RPW >= p.T) break;
     const bool valid = t < p.T;

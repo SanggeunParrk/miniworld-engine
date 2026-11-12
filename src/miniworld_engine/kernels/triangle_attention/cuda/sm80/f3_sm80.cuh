@@ -23,7 +23,7 @@ struct F3Params {
   const __nv_bfloat16* ds;      // [Z][L][128] dropout scale (broadcast over the pair row; training) or nullptr
   __nv_bfloat16* out;           // [T][128] result, in the module's layout
   long long ldg;
-  unsigned ntile;               // T / 16
+  size_t ntile;                 // T / 16
   int L, transposed;            // T = Z L^2 tokens, L a multiple of 128
 };
 
@@ -51,19 +51,21 @@ __global__ void __launch_bounds__(G::NTHR, 1) f3_kernel(const F3Params p) {
   cp_async_wait<0>();
   __syncthreads();
 
-  const unsigned L = (unsigned)p.L, LL = L * L;
+  const unsigned L = (unsigned)p.L;
+  const size_t LL = (size_t)L * L;                              // 64-bit token math: z L^2 and the token index never wrap
   uint32_t wb[4];
 #pragma unroll
   for (int kb = 0; kb < 4; ++kb) wb[kb] = sb + f1_woff(g8, 4 * kb + q4);
 
-  for (unsigned tile = blockIdx.x * G::NW + warp; tile < p.ntile; tile += gridDim.x * G::NW) {
+  for (size_t tile = (size_t)blockIdx.x * G::NW + warp; tile < p.ntile; tile += (size_t)gridDim.x * G::NW) {
     // 16 tokens of one pair row (L is a multiple of 128): problem z, row arow, columns b0 .. b0 + 15
-    const unsigned t0 = tile * 16, z = t0 / LL, rem0 = t0 - z * LL, arow = rem0 / L, b0 = rem0 - arow * L;
+    const size_t t0 = tile * 16, z = t0 / LL;
+    const unsigned rem0 = (unsigned)(t0 - z * LL), arow = rem0 / L, b0 = rem0 - arow * L;
     size_t drow[2];                                              // the token's row in the module's layout (residual, result)
 #pragma unroll
     for (int hh = 0; hh < 2; ++hh) {
       const unsigned r = g8 + 8 * hh;
-      drow[hh] = p.transposed ? (size_t)(z * LL + (b0 + r) * L + arow) : (size_t)(t0 + r);
+      drow[hh] = p.transposed ? z * LL + (size_t)(b0 + r) * L + arow : (size_t)(t0 + r);
     }
 
     // ---- loads: o and g (A fragments), then the residual rows (needed only at the end)

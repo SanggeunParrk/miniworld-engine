@@ -31,7 +31,7 @@ struct F1Params {
   __nv_bfloat16* bias;          // [Z][4][L][L]
   float* lnst;                  // [T][2] (mean, rstd) or nullptr
   __nv_bfloat16* xh;            // [T][136] the normalised input bf16(xh) | 1 | 0 ... (training: the operand of the weight-gradient GEMM, whose ones column gives the column sums) or nullptr
-  unsigned ntile;               // T / 32
+  size_t ntile;                 // T / 32
   int L, transposed;            // T = Z L^2 tokens, L a multiple of 128
   int flip;                     // AlphaFold 3's ending-node bias orientation: token (a, b) writes bias[z][h][b][a], masked by mask[z][a] (the transpose + key mask the
                                 // unfused path ran as three more kernels)
@@ -96,14 +96,16 @@ __global__ void __launch_bounds__(G::NTHR, 1) f1_kernel(const F1Params p) {
   cp_async_wait<0>();
   __syncthreads();
 
-  const unsigned L = (unsigned)p.L, LL = L * L;
+  const unsigned L = (unsigned)p.L;
+  const size_t LL = (size_t)L * L;                              // 64-bit token math: z L^2 and the token index never wrap
   uint32_t wb[4];                                                // this thread's B-fragment address of channel block kb in row g8 of block 0
 #pragma unroll
   for (int kb = 0; kb < 4; ++kb) wb[kb] = sb + f1_woff(g8, 4 * kb + q4);
 
-  for (unsigned tile = blockIdx.x * G::NW + warp; tile < p.ntile; tile += gridDim.x * G::NW) {
+  for (size_t tile = (size_t)blockIdx.x * G::NW + warp; tile < p.ntile; tile += (size_t)gridDim.x * G::NW) {
     // 32 tokens of one pair row (L is a multiple of 128): problem z, row arow, columns b0 .. b0 + 31
-    const unsigned t0 = tile * 32, z = t0 / LL, rem0 = t0 - z * LL, arow = rem0 / L, b0 = rem0 - arow * L;
+    const size_t t0 = tile * 32, z = t0 / LL;
+    const unsigned rem0 = (unsigned)(t0 - z * LL), arow = rem0 / L, b0 = rem0 - arow * L;
 
     // ---- tokens: 2 m tiles x rows (g8, g8 + 8) x 4 blocks of 8 channels, straight from global memory
     uint4 xr[2][2][4];
@@ -112,7 +114,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) f1_kernel(const F1Params p) {
 #pragma unroll
       for (int hh = 0; hh < 2; ++hh) {
         const unsigned r = mt * 16 + g8 + 8 * hh;
-        const size_t src = p.transposed ? (size_t)(z * LL + (b0 + r) * L + arow) : (size_t)(t0 + r);   // the ending node reads element (b, a)
+        const size_t src = p.transposed ? z * LL + (size_t)(b0 + r) * L + arow : (size_t)(t0 + r);   // the ending node reads element (b, a)
 #pragma unroll
         for (int kb = 0; kb < 4; ++kb) xr[mt][hh][kb] = ldg128(p.x + src * 128 + 32 * kb + 8 * q4);
       }

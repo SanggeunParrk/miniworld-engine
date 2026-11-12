@@ -46,12 +46,13 @@ __global__ void __launch_bounds__(NT) rope_kernel(const XT* __restrict__ Q, cons
   {
     const long it = (long)blockIdx.x * NW + warp;
     if (it * RPW >= total) return;
-    const int rr = (int)(it * RPW + sub);                // total < 2^31 (checked by the launcher): 32-bit index arithmetic
-    const bool valid = rr < (int)total;
-    const int pos = rr / (NTEN * H);
-    const int rem = rr - pos * (NTEN * H);
+    const long rr = it * RPW + sub;                      // 64-bit row / position arithmetic (the element offsets below are 64-bit too)
+    const bool valid = rr < total;
+    const long pos = rr / (NTEN * H);
+    const int rem = (int)(rr - pos * (NTEN * H));
     const int t = rem / H, h = rem - t * H;
-    const int n = pos / SEQ, s = pos - n * SEQ;
+    const long n = pos / SEQ;
+    const int s = (int)(pos - n * SEQ);
     const Str& si = t == 0 ? sq : sk;
     const XT* xp = (t == 0 ? Q : K) + n * si.n + s * si.s + h * si.h + c * CE;
     uint4 xr = make_uint4(0u, 0u, 0u, 0u), gr = make_uint4(0u, 0u, 0u, 0u);
@@ -124,7 +125,7 @@ __global__ void __launch_bounds__(NT) rope_kernel(const XT* __restrict__ Q, cons
       for (int e = 0; e < CE; ++e) o[e] = rot ? v[e] * cs[e] + (lo ? -1.f : 1.f) * (pv[e] * sn[e]) : v[e];
     }
     if (valid) {
-      XT* op = (t == 0 ? OQ : OK) + (long)(pos * H + h) * D + c * CE;
+      XT* op = (t == 0 ? OQ : OK) + (pos * H + h) * D + c * CE;
       Chunk<XT>::store(op, o);
     }
   }

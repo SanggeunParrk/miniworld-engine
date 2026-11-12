@@ -6,7 +6,7 @@
 #include "b1_finalize_exact.cuh"
 namespace triattn_b1_finish80 {
 void run(torch::Tensor dd,torch::Tensor db,torch::Tensor x,torch::Tensor stats,torch::Tensor dout,torch::Tensor dpair,torch::Tensor wt,torch::Tensor wbt,torch::Tensor gamma,torch::Tensor partial,torch::Tensor out,int64_t length,bool transposed){
- const c10::cuda::CUDAGuard guard(x.device()); const int T=x.numel()/128;
+ const c10::cuda::CUDAGuard guard(x.device()); const int64_t T=x.numel()/128;
  TORCH_CHECK(x.is_cuda()&&x.scalar_type()==at::kBFloat16&&x.is_contiguous()&&T>0&&T%(length*length)==0&&length%128==0,"pair shape");
  TORCH_CHECK(dd.is_contiguous()&&dd.scalar_type()==at::kBFloat16&&dd.numel()==(int64_t)T*512&&db.is_contiguous()&&db.numel()==(int64_t)T*4,"gradient shapes");
  TORCH_CHECK(stats.scalar_type()==at::kFloat&&stats.is_contiguous()&&stats.numel()==(int64_t)T*2,"stats");
