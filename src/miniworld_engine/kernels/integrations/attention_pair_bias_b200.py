@@ -64,9 +64,7 @@ _cores: dict = {}
 EXACT_DWB = False
 
 
-def refusal(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool, padded: bool = False
-) -> str | None:
+def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool, padded: bool = False) -> str | None:
     """Why the H100 (sm_90) native path cannot take this call (``grad``: the training Function, else the inference op), or ``None``.
     The ``cuda`` backend of ``AttentionPairBias`` states exactly this. ``padded``: the caller pads L to a multiple of 128 (inference)."""
     if not single.is_cuda:

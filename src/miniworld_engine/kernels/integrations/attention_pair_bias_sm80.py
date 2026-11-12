@@ -140,9 +140,7 @@ def _sm80():
     return sm80
 
 
-def refusal(
-    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool, padded: bool = False
-) -> str | None:
+def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool, padded: bool = False) -> str | None:
     """Why the A100 (sm_80) paths cannot take this call (``grad``: the training Function, else the inference op), or ``None``: the fused C++ step
     (``_step_refusal``), else the composed path (``_generic_refusal``: fp32 on the TF32 core, the wide pairs, ``gate_bias``). The ``cuda`` backend of
     ``AttentionPairBias`` states exactly this on an A100."""
