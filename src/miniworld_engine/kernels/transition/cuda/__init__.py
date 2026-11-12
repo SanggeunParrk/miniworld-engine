@@ -43,9 +43,25 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
     limit = fused_fwd_sm80.max_rows(x.device, x.dtype)
     grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, ln_weight, ln_bias, wa, wb, ws))
     if rows > limit and not grad:
-        # inference past one call's rows (the kernels' work lists / row grid): one call per contiguous row block (rows are independent), joined.
+        # inference past one call's rows (the kernels' work lists / row grid): one call per contiguous row block (rows are independent).
         # Training past it is refused by modules.Transition (the backward would need the same split of its weight-gradient sums).
         flat = x.reshape(-1, x.shape[-1]).contiguous()
+        d, h = x.shape[-1], wa.shape[0]
+        # balanced blocks of whole 256-row tiles (no short tail block), each written into its rows of one output: the wide chain's hand squeeze
+        # writes there directly (no join copy: at 2976^2 rows of D 384 the copy was 8 % of the call)
+        nblk = -(-rows // limit)
+        per = -(-rows // nblk)
+        step = min(-(-per // 256) * 256, limit)
+        starts = range(0, rows, step)
+        if (
+            x.dtype is torch.bfloat16
+            and fused_wide_sm80.route(flat[:step], wa, ws) == "wide"
+            and all(fused_wide_sm80.writes_into(min(step, rows - r), d, h) for r in starts)
+        ):
+            out = torch.empty_like(flat)
+            for r in starts:
+                fused_wide_sm80.forward_into(flat[r : r + step], ln_weight, ln_bias, wa, wb, ws, float(eps), out[r : r + step])
+            return out.reshape(x.shape)
         parts = [transition_sm80(flat[r : r + limit], ln_weight, ln_bias, wa, wb, ws, eps) for r in range(0, rows, limit)]
         if any(p is None for p in parts):
             return None

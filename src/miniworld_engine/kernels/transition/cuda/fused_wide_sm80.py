@@ -263,6 +263,44 @@ def _fwd_launch(
     )
 
 
+def writes_into(m: int, d: int, h: int) -> bool:
+    """The inference forward of an ``m``-row bf16 call can write its output into a caller's buffer (``forward_into``): the chain whose squeeze is the hand
+    ``gemm_res`` (``_hand_squeeze``), not the one-kernel D 64 / 128 forward."""
+    return _hand_squeeze(m, d, True) and not fused_fwd_sm80.supports(d, h, m)
+
+
+def _fwd_into_fake(x, gamma, beta, wa, wb, ws, eps, out):
+    """Writes ``out`` only."""
+    return None
+
+
+@opaque(fake=_fwd_into_fake, name="transition_wide_fwd_into_sm80", mutates_args=("out",))
+def forward_into(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    eps: float,
+    out: torch.Tensor,
+) -> None:
+    """``_fwd_launch``'s inference forward (``save`` off, ``ln`` on) of x [M, D] written into ``out`` (contiguous [M, D] bf16, a row block of a larger
+    output: ``transition_sm80`` joins the blocks of a split call without a copy).  The same launches as ``_fwd_launch`` where ``writes_into(M, D, H)``
+    (LayerNorm, dual GEMM + SwiGLU, the hand squeeze with the residual): the same output bits."""
+    if _is_fake(x, wa):
+        return
+    m, d = x.shape
+    ext = _ext()
+    gamma, beta = _f32(gamma, True), _f32(beta, True)
+    wa, wb, ws = _kernel_weights(wa, wb, ws, x.dtype, cache=True)
+    dual, res = _tiles(m, d, wa.shape[0])
+    xn, _ = ext.ln_fwd(x, gamma, beta, eps, False)
+    hid = ext.dual_swiglu(xn, wa, wb, dual)
+    del xn
+    ext.gemm_res(hid, ws, x, res, out)
+
+
 def _bwd_launch_fake(dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, ln, gdt, wdt):
     """(dx like x, dgamma, dbeta [D] in ``gdt`` (empty without ``ln``), dW = [dWa; dWb] [2H, D], dWs [D, H] in ``wdt``)."""
     d = x.shape[1]

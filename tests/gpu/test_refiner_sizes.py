@@ -167,3 +167,59 @@ def test_triangle_attention_sm80_padded_length(starting: bool, length: int) -> N
             assert kern.unsupported(**inputs) is None
             out = kern(**inputs)
     assert _err(out, gold) <= max(err_pt, FIXED)
+
+
+def _transition_rows(rows: int, step: int) -> list[tuple[int, int]]:
+    """Row ranges checked at a refiner size: the first rows, both sides of every block boundary of a split call, the last rows."""
+    span = 32768
+    out = [(0, span)]
+    out += [(r - span, r + span) for r in range(step, rows, step)]
+    out.append((rows - span, rows))
+    return out
+
+
+@pytest.mark.skipif(_card() not in ((9, 0), (8, 0)), reason="H100 / A100")
+@pytest.mark.parametrize("backend", ["cuda", "triton"])
+@pytest.mark.parametrize("S", [2976, 3968])
+def test_transition_refiner_sizes_rows(backend: str, S: int) -> None:
+    """Transition d_hidden 384 n 2 (master) at the refiner's pair rows (S^2: past one sm_80 launch's rows, the call is split): the module is
+    row-wise, so the float32 reference on the first / last rows and on both sides of each block boundary checks the whole call, at the measurer's
+    GREEN bound there. On A100 the cuda rows also equal (bitwise) one unsplit call on the same rows."""
+    from miniworld_engine.kernels.transition.cuda import fused_fwd_sm80, fused_wide_sm80
+    from miniworld_engine.modules import Transition
+
+    base = Transition(384, n=2).cuda().float().eval()
+    C.randomize(base, torch.Generator(device="cuda").manual_seed(0))
+    base.set_master_weights()
+    kern = copy.deepcopy(base).set_backend(backend)
+    gen = torch.Generator(device="cuda").manual_seed(1)
+    x = base.make_inputs(length=S, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=gen)["x"]
+    rows = S * S
+    with torch.no_grad():
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            assert kern.unsupported(x) is None
+            big = kern(x).reshape(rows, 384)
+        flat = x.reshape(rows, 384)
+        del x
+        sm80 = _card() == (8, 0)
+        limit = fused_fwd_sm80.max_rows(flat.device) if sm80 else rows
+        nblk = -(-rows // limit)
+        per = -(-rows // nblk)
+        step = min(-(-per // 256) * 256, limit)  # transition_sm80's balanced blocks
+        ref32 = copy.deepcopy(base).float()
+        ref_pt = copy.deepcopy(base)
+        for lo, hi in _transition_rows(rows, step):
+            sub = flat[lo:hi]
+            gold = ref32(sub.float()).float()
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                err_pt = _err(ref_pt(sub), gold)
+            err = _err(big[lo:hi], gold)
+            tol = max(err_pt, FIXED)
+            assert err <= tol, f"rows [{lo}, {hi}): {err:.3e} > tol {tol:.3e} (pytorch {err_pt:.3e})"
+            if sm80 and backend == "cuda":
+                p = kern
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    whole = fused_wide_sm80.transition_wide_sm80(
+                        sub.contiguous(), p.ln_in.weight, p.ln_in.bias, p.expand_a.weight, p.expand_b.weight, p.squeeze.weight, p.ln_in.eps
+                    )
+                assert torch.equal(big[lo:hi], whole), f"rows [{lo}, {hi}): the split call differs from one unsplit call"
