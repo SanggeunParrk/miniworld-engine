@@ -207,9 +207,7 @@ def test_refusals():
 def test_input_feature_embedder(dtype, grad, features, window, token_pool):
     """The composition on "triton" (its SWAAtomTransformer's Triton block stages, window or global; its norms' Triton kernels) vs its
     PyTorch statements in float64. The atom positions stay fp32 (the RoPE tables); bf16 runs under bf16 autocast (the "master" dtype)."""
-    m = _randomize(
-        InputFeatureEmbedder(128, 384, 4, 3, swa_window_size=window, features=features, token_pool=token_pool).cuda(), seed=3
-    )
+    m = _randomize(InputFeatureEmbedder(128, 384, 4, 3, swa_window_size=window, features=features, token_pool=token_pool).cuda(), seed=3)
     with torch.no_grad():  # adaLN-Zero scale: keep the residual stream bounded through three blocks
         for name, p in m.named_parameters():
             if "adaln_modulation" in name:
