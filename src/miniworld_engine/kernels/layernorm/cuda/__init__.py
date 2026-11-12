@@ -5,11 +5,11 @@ backward). The legacy warp-per-row backward (``layer_norm_cuda_kernel.cu``) was 
 def prebuild(target, rows):
     """Every build of the LayerNorm family (kernels/_prebuild.py): the pipelined and the general-width extensions, each when a row
     needs one of their kernels (the forward of the main kernels is Triton)."""
-    if target.arch == "sm80":  # A100: the sm_80 row kernels (sm80.py), for the LayerNorm / RMSNorm rows
+    if target.arch in ("sm80", "sm120"):  # A100 / RTX 5090: the row kernels (sm80.py), for the LayerNorm / RMSNorm rows
         from . import sm80
 
         if any(row["module"] in ("LayerNorm", "RMSNorm") for row in rows):
-            yield sm80.ext
+            yield sm80.ext_sm80 if target.arch == "sm80" else sm80.ext_sm120
         return
     from . import general, pipe
 

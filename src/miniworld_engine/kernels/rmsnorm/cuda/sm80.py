@@ -48,7 +48,7 @@ def _rmsnorm_fwd_fake(x: Tensor, weight: Tensor | None, eps: float) -> Tensor:
 def _rmsnorm_fwd(x: Tensor, weight: Tensor | None, eps: float) -> Tensor:
     """Inference forward over the rows of x [M, N] (contiguous): ``x rstd w``, no statistic saved."""
     y = torch.empty_like(x)
-    _rows.ext().norm_fwd(x, weight, None, None, y, None, None, eps, True)
+    _rows.ext(x.device).norm_fwd(x, weight, None, None, y, None, None, eps, True)
     return y
 
 
@@ -62,7 +62,7 @@ def _rmsnorm_train_fwd(x: Tensor, weight: Tensor | None, eps: float) -> tuple[Te
     """Training forward: ``(y, rstd)`` of the rows of x [M, N]; ``rstd`` (fp32) is what the backward reads."""
     y = torch.empty_like(x)
     rstd = x.new_empty((x.shape[0],), dtype=torch.float32)
-    _rows.ext().norm_fwd(x, weight, None, None, y, None, rstd, eps, True)
+    _rows.ext(x.device).norm_fwd(x, weight, None, None, y, None, rstd, eps, True)
     return y, rstd
 
 
@@ -78,7 +78,7 @@ def _rmsnorm_train_bwd(dy: Tensor, x: Tensor, weight: Tensor | None, rstd: Tenso
     dx = torch.empty_like(x)
     want = need_dw and weight is not None
     dw = weight.new_empty((x.shape[1],)) if want else x.new_empty((0,))
-    _rows.ext().norm_bwd(dy, x, weight, None, None, rstd, dx, dw if want else None, None, True)
+    _rows.ext(x.device).norm_bwd(dy, x, weight, None, None, rstd, dx, dw if want else None, None, True)
     return dx, dw
 
 
