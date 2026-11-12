@@ -40,11 +40,51 @@ __device__ __forceinline__ float scl(float v) {
   if constexpr (SIG) return sigm(v); else return v;
 }
 
-// out = xhat * f(ms) + mb for this thread's 4 columns (xhat = (x - mean) rstd)
-template <int NT, typename GT, typename OutT, bool RND = false, bool SIG = true>
-__device__ __forceinline__ void adaln_out(float a, float b, float c, float d, float rstd, const GT* ms, const GT* mb, OutT* out) {
+// The conditioning folded into its GEMM (bf16 steps): the four AdaLN tables and the two gates come out of ONE GEMM of the RAW
+// conditioning rows, G = c [W1; W2]^T (fp32, no bias: cuBLAS's bias epilogue for an fp32 output from bf16 doubled the GEMM's time),
+// instead of a LayerNorm pass over c and two GEMMs. A gate is G2 + b2 (gb, added where it is read). The AdaLN tables' LayerNorm of c
+// is applied where a table is read:  LN(c) W^T + b = rstd_c (c W^T - mean_c W 1) + b,  so a table entry is
+// rstd_c (G - mean_c r) + b with r = W1 1 (the rows' sums of the packed W1, fp32) and b = b1. (mean_c, rstd_c) of conditioning row tok:
+// computed by adaln_in_cf (from c) and stored at st[tok] by its rows tok < P; resgate_adaln_cf reads them.
+struct CondFold {
+  const float* r = nullptr;    // [4 D] the row sums of W1 (table j at r + j D)
+  const float* b = nullptr;    // [4 D] b1
+  const float* gb = nullptr;   // [2 D] b2, the gates' bias (gate j at gb + j D)
+  float2* st = nullptr;        // [P] (mean, rstd) of the conditioning rows
+  const __nv_bfloat16* c = nullptr;  // [P, dc] the raw conditioning rows (adaln_in_cf), row stride sc
+  long sc = 0;
+  int dc = 0;
+  float eps = 1e-5f;
+  int js = 0;                  // the table index of ms (mb: js + 1; the parallel block's second AdaLN: js + 2, js + 3)
+};
+
+// the table pair (ms, mb) of index js corrected by the conditioning's LayerNorm (CondFold)
+template <int NT>
+__device__ __forceinline__ void cond_fix(float4& m, float4& h, const CondFold& cf, int js, float2 s) {
+  constexpr int D = NT * 4;
+  const int col = threadIdx.x * 4;
+  const float4 rs = V4<float>::load(cf.r + js * D + col), rb = V4<float>::load(cf.r + (js + 1) * D + col);
+  const float4 bs = V4<float>::load(cf.b + js * D + col), bb = V4<float>::load(cf.b + (js + 1) * D + col);
+  m.x = s.y * fmaf(-s.x, rs.x, m.x) + bs.x; m.y = s.y * fmaf(-s.x, rs.y, m.y) + bs.y;
+  m.z = s.y * fmaf(-s.x, rs.z, m.z) + bs.z; m.w = s.y * fmaf(-s.x, rs.w, m.w) + bs.w;
+  h.x = s.y * fmaf(-s.x, rb.x, h.x) + bb.x; h.y = s.y * fmaf(-s.x, rb.y, h.y) + bb.y;
+  h.z = s.y * fmaf(-s.x, rb.z, h.z) + bb.z; h.w = s.y * fmaf(-s.x, rb.w, h.w) + bb.w;
+}
+
+// a gate of the folded conditioning: G2 + b2 (gate j)
+template <int NT>
+__device__ __forceinline__ float4 gate_fix(float4 g, const CondFold& cf, int j) {
+  const float4 b = V4<float>::load(cf.gb + j * NT * 4 + threadIdx.x * 4);
+  return make_float4(g.x + b.x, g.y + b.y, g.z + b.z, g.w + b.w);
+}
+
+// out = xhat * f(ms) + mb for this thread's 4 columns (xhat = (x - mean) rstd); CF: the tables corrected first (CondFold, stats s)
+template <int NT, typename GT, typename OutT, bool RND = false, bool SIG = true, bool CF = false>
+__device__ __forceinline__ void adaln_out(float a, float b, float c, float d, float rstd, const GT* ms, const GT* mb, OutT* out,
+                                          const CondFold& cf = CondFold(), int js = 0, float2 s = make_float2(0.f, 1.f)) {
   const int col = threadIdx.x * 4;
   float4 m = V4<GT>::load(ms + col), h = V4<GT>::load(mb + col), o;
+  if constexpr (CF) cond_fix<NT>(m, h, cf, js, s);
   o.x = a * rstd * scl<SIG>(m.x) + h.x;
   o.y = b * rstd * scl<SIG>(m.y) + h.y;
   o.z = c * rstd * scl<SIG>(m.z) + h.z;
@@ -55,15 +95,16 @@ __device__ __forceinline__ void adaln_out(float a, float b, float c, float d, fl
 
 // ms2 / mb2 / out2 (TWO): a second AdaLN of the same LN(x) -- the parallel block's transition input (RoseTTAFold3, Chai-1); RND2: that
 // output rounded to TF32 (the fp32 fused expand GEMM reads it)
-template <int NT, typename GT, typename OutT, bool RND = false, bool SIG = true, bool TWO = false, bool RND2 = false>
+template <int NT, typename GT, typename OutT, bool RND = false, bool SIG = true, bool TWO = false, bool RND2 = false, bool CF = false>
 __device__ __forceinline__ void adaln_store(float4 x, float eps, const GT* ms, const GT* mb, OutT* out, float* red,
-                                            const GT* ms2 = nullptr, const GT* mb2 = nullptr, OutT* out2 = nullptr) {
+                                            const GT* ms2 = nullptr, const GT* mb2 = nullptr, OutT* out2 = nullptr,
+                                            const CondFold& cf = CondFold(), float2 s = make_float2(0.f, 1.f)) {
   constexpr int D = NT * 4;
   const float mean = block_sum<NT>(x.x + x.y + x.z + x.w, red) / D;
   const float a = x.x - mean, b = x.y - mean, c = x.z - mean, d = x.w - mean;
   const float rstd = rsqrtf(block_sum<NT>(a * a + b * b + c * c + d * d, red) / D + eps);
-  adaln_out<NT, GT, OutT, RND, SIG>(a, b, c, d, rstd, ms, mb, out);
-  if constexpr (TWO) adaln_out<NT, GT, OutT, RND2, SIG>(a, b, c, d, rstd, ms2, mb2, out2);
+  adaln_out<NT, GT, OutT, RND, SIG, CF>(a, b, c, d, rstd, ms, mb, out, cf, cf.js, s);
+  if constexpr (TWO) adaln_out<NT, GT, OutT, RND2, SIG, CF>(a, b, c, d, rstd, ms2, mb2, out2, cf, cf.js + 2, s);
 }
 
 template <int NT, typename GT, typename OutT, bool SIG = true>
@@ -90,6 +131,49 @@ __global__ void __launch_bounds__(NT) adaln_in_rows_kernel(const XT* __restrict_
                                                    TWO ? OUT2 + row * (NT * 4) : nullptr);
 }
 
+// Sum over the block of two values at once (block_sum per component, the same order: the same sums as two block_sum calls)
+template <int NT>
+__device__ __forceinline__ float2 block_sum2(float2 v, float2* red) {
+  v.x = warp_sum(v.x); v.y = warp_sum(v.y);
+  const int w = threadIdx.x / 32, l = threadIdx.x % 32;
+  if (l == 0) red[w] = v;
+  __syncthreads();
+  float2 t = make_float2(0.f, 0.f);
+#pragma unroll
+  for (int i = 0; i < NT / 32; ++i) { t.x += red[i].x; t.y += red[i].y; }
+  __syncthreads();
+  return t;
+}
+
+// The folded conditioning's first pass (CondFold, bf16): out = AdaLN(xin) with the tables 0, 1 (TWO: out2 with 2, 3: the parallel
+// block's transition input). The LayerNorm statistics of the row xin and of its conditioning row c[tok] in the same two block
+// reductions; the conditioning row's (mean, rstd) stored at st[tok] by the first sample's row (resgate_adaln_cf reads them). No fp32
+// copy of xin: the later passes read it.
+// SIG = false: the identity AdaLN (Chai-1) reads the raw c: its tables are G + b1 (no LayerNorm of c, no stats).
+template <int NT, bool TWO, bool SIG = true>
+__global__ void __launch_bounds__(NT) adaln_in_cf_kernel(const __nv_bfloat16* __restrict__ XIN, const float* __restrict__ G,
+    __nv_bfloat16* __restrict__ OUT, __nv_bfloat16* __restrict__ OUT2, int P, long sxin, long sg, float eps, CondFold cf) {
+  constexpr int D = NT * 4;
+  __shared__ float2 red[NT / 32];
+  asm volatile("griddepcontrol.wait;" ::: "memory");   // PDL: the previous kernel's writes (a no-op without the launch attribute)
+  const long row = blockIdx.x;
+  const int tok = row % P, col = threadIdx.x * 4;
+  const float4 x = V4<__nv_bfloat16>::load(XIN + row * sxin + col);
+  const bool on = SIG && col < cf.dc;
+  const float4 v = on ? V4<__nv_bfloat16>::load(cf.c + (long)tok * cf.sc + col) : make_float4(0.f, 0.f, 0.f, 0.f);
+  const float2 m = block_sum2<NT>(make_float2(x.x + x.y + x.z + x.w, v.x + v.y + v.z + v.w), red);
+  const float mean = m.x / D, cmean = m.y / (float)cf.dc;
+  const float a = x.x - mean, b = x.y - mean, c = x.z - mean, d = x.w - mean;
+  const float ca = v.x - cmean, cb = v.y - cmean, cc = v.z - cmean, cd = v.w - cmean;
+  const float2 q = block_sum2<NT>(make_float2(a * a + b * b + c * c + d * d, on ? ca * ca + cb * cb + cc * cc + cd * cd : 0.f), red);
+  const float rstd = rsqrtf(q.x / D + eps);
+  const float2 s = SIG ? make_float2(cmean, rsqrtf(q.y / (float)cf.dc + cf.eps)) : make_float2(0.f, 1.f);
+  if (SIG && row < P && threadIdx.x == 0) cf.st[tok] = s;   // one writer per conditioning row (the first sample's)
+  const float* Gt = G + (long)tok * sg;
+  adaln_out<NT, float, __nv_bfloat16, false, SIG, true>(a, b, c, d, rstd, Gt, Gt + D, OUT + row * D, cf, 0, s);
+  if constexpr (TWO) adaln_out<NT, float, __nv_bfloat16, false, SIG, true>(a, b, c, d, rstd, Gt + 2 * D, Gt + 3 * D, OUT2 + row * D, cf, 2, s);
+}
+
 // out = x + sigmoid(gl) y [+ sigmoid(gl2) y2 (TWO: the parallel block's two updates in one pass)]
 template <int NT, typename YT, typename GT, typename FT, bool TWO = false>
 __global__ void __launch_bounds__(NT) resgate_out_rows_kernel(const float* __restrict__ X, const YT* __restrict__ Y,
@@ -105,6 +189,48 @@ __global__ void __launch_bounds__(NT) resgate_out_rows_kernel(const float* __res
     x.x += sigm(g2.x) * y2.x; x.y += sigm(g2.y) * y2.y; x.z += sigm(g2.z) * y2.z; x.w += sigm(g2.w) * y2.w;
   }
   V4<FT>::store(OUT + row * (NT * 4) + col, x);
+}
+
+// ---- the folded conditioning's residual passes (CondFold, bf16): the block input xin stays the residual's source -- no fp32 copy of
+// the stream reaches HBM. x = xin + sigmoid(gA) ya is recomputed where it is needed (resgate_adaln_cf for the transition's AdaLN,
+// resgate_out_cf for the output), with the same fp32 operations in the same order, so both see the same x (the value the fp32 residual
+// buffer held). Gates: G[:, 4 D + j D] + b2 (gate 0: the attention's, 1: the transition's).
+template <int NT>
+__device__ __forceinline__ float4 gate_cf(const float* G, const CondFold& cf, int j) {
+  return gate_fix<NT>(V4<float>::load(G + (4 + j) * NT * 4 + threadIdx.x * 4), cf, j);
+}
+
+// out = AdaLN(x) with the tables js, js + 1 (corrected with the stats adaln_in_rows_cf stored), x = xin + sigmoid(gA) ya
+template <int NT>
+__global__ void __launch_bounds__(NT) resgate_adaln_cf_kernel(const __nv_bfloat16* __restrict__ XIN, const __nv_bfloat16* __restrict__ YA,
+    const float* __restrict__ G, __nv_bfloat16* __restrict__ OUT, int P, long sxin, long sya, long sg, float eps, CondFold cf) {
+  __shared__ float red[NT / 32];
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  const long row = blockIdx.x;
+  const int tok = row % P, col = threadIdx.x * 4;
+  const float* Gt = G + (long)tok * sg;
+  float4 x = V4<__nv_bfloat16>::load(XIN + row * sxin + col);
+  const float4 y = V4<__nv_bfloat16>::load(YA + row * sya + col), g = gate_cf<NT>(Gt, cf, 0);
+  x.x += sigm(g.x) * y.x; x.y += sigm(g.y) * y.y; x.z += sigm(g.z) * y.z; x.w += sigm(g.w) * y.w;
+  adaln_store<NT, float, __nv_bfloat16, false, true, false, false, true>(x, eps, Gt + cf.js * NT * 4, Gt + (cf.js + 1) * NT * 4,
+      OUT + row * (NT * 4), red, nullptr, nullptr, nullptr, cf, cf.st[tok]);
+}
+
+// out = (xin + sigmoid(gA) ya) + sigmoid(gT) y: the sequential block's two residuals and the parallel block's one (the same sum)
+template <int NT>
+__global__ void __launch_bounds__(NT) resgate_out_cf_kernel(const __nv_bfloat16* __restrict__ XIN, const __nv_bfloat16* __restrict__ YA,
+    const __nv_bfloat16* __restrict__ Y, const float* __restrict__ G, __nv_bfloat16* __restrict__ OUT, int P, long sxin, long sya,
+    long sy, long sg, CondFold cf) {
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  const long row = blockIdx.x;
+  const int tok = row % P, col = threadIdx.x * 4;
+  const float* Gt = G + (long)tok * sg;
+  float4 x = V4<__nv_bfloat16>::load(XIN + row * sxin + col);
+  const float4 ya = V4<__nv_bfloat16>::load(YA + row * sya + col), ga = gate_cf<NT>(Gt, cf, 0);
+  x.x += sigm(ga.x) * ya.x; x.y += sigm(ga.y) * ya.y; x.z += sigm(ga.z) * ya.z; x.w += sigm(ga.w) * ya.w;
+  const float4 y = V4<__nv_bfloat16>::load(Y + row * sy + col), gt = gate_cf<NT>(Gt, cf, 1);
+  x.x += sigm(gt.x) * y.x; x.y += sigm(gt.y) * y.y; x.z += sigm(gt.z) * y.z; x.w += sigm(gt.w) * y.w;
+  V4<__nv_bfloat16>::store(OUT + row * (NT * 4) + col, x);
 }
 
 // LayerNorm of C-wide rows (C = 128, 256 or 384), no affine: one warp per row (C / 128 float4 per lane), 8 rows per block.
@@ -400,6 +526,106 @@ void adaln_in_rows(at::Tensor xin, at::Tensor x, at::Tensor ms, at::Tensor mb, a
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+
+// ---- the conditioning folded into its GEMM (CondFold): bf16 step rows, ONE fp32 table G [P, 6 D] = c [W1; W2]^T (no bias; the AdaLN
+// tables at columns j D, j < 4, the gates at 4 D + j D), r / b1 fp32 [4 D], b2 fp32 [2 D], st fp32 [P, 2], c bf16 [P, dc]; the sigmoid
+// AdaLN only (the identity AdaLN reads the raw c: no fold). The residual stream is the bf16 block input xin (no fp32 copy).
+static CondFold make_fold(const at::Tensor& g, const at::Tensor& r, const at::Tensor& b, const at::Tensor& b2, const at::Tensor& stats,
+                          const c10::optional<at::Tensor>& c, int64_t D, double ceps, int js) {
+  const int64_t P = g.size(0);
+  TORCH_CHECK(g.scalar_type() == at::kFloat && g.dim() == 2 && g.stride(1) == 1 && g.size(1) == 6 * D && g.stride(0) % 4 == 0,
+              "cond fold: g fp32 [P, 6 D]");
+  check_rows(g, "g", D);
+  for (const at::Tensor* t : {&r, &b, &b2})
+    TORCH_CHECK(t->scalar_type() == at::kFloat && t->is_contiguous() && t->numel() == (t == &b2 ? 2 : 4) * D, "cond fold: r / b1 [4 D], b2 [2 D] fp32");
+  TORCH_CHECK(stats.scalar_type() == at::kFloat && stats.is_contiguous() && stats.numel() == 2 * P, "cond fold: stats fp32 [P, 2]");
+  CondFold f;
+  f.r = ptr<const float>(r); f.b = ptr<const float>(b); f.gb = ptr<const float>(b2);
+  f.st = reinterpret_cast<float2*>(stats.data_ptr()); f.eps = (float)ceps; f.js = js;
+  if (c.has_value()) {
+    TORCH_CHECK(c->scalar_type() == at::kBFloat16 && c->dim() == 2 && c->size(0) == P && c->stride(1) == 1 && c->size(1) <= D
+                && c->size(1) % 4 == 0 && c->stride(0) % 4 == 0 && reinterpret_cast<uintptr_t>(c->data_ptr()) % 8 == 0,
+                "cond fold: c bf16 [P, dc], dc <= D, 8-byte aligned rows");
+    f.c = ptr<const __nv_bfloat16>(*c); f.sc = c->stride(0); f.dc = (int)c->size(1);
+  }
+  return f;
+}
+
+static void check_bf16_rows(const at::Tensor& t, const char* name, int64_t M, int64_t D) {
+  TORCH_CHECK(t.scalar_type() == at::kBFloat16 && t.size(0) == M, name, ": bf16 [M, D]");
+  check_rows(t, name, D);
+}
+
+// One row per block of NT threads; pdl: a programmatic dependent launch (the kernel waits on griddepcontrol.wait before its first read,
+// so its launch overlaps the tail of the kernel before it)
+template <typename... KArgs, typename... Args>
+static void launch_rows(void (*kern)(KArgs...), int64_t M, int nt, bool pdl, Args... args) {
+  cudaLaunchConfig_t cfg{};
+  cfg.gridDim = dim3((unsigned)M);
+  cfg.blockDim = dim3((unsigned)nt);
+  cfg.dynamicSmemBytes = 0;
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  at[0].val.programmaticStreamSerializationAllowed = 1;
+  cfg.attrs = at;
+  cfg.numAttrs = pdl ? 1 : 0;
+  const cudaError_t err = cudaLaunchKernelEx(&cfg, kern, static_cast<KArgs>(args)...);
+  TORCH_CHECK(err == cudaSuccess, "token DiT rows launch: ", cudaGetErrorString(err));
+}
+
+// out = AdaLN(xin) with the tables 0, 1 (out2: the parallel block's second AdaLN, tables 2, 3), the conditioning rows' stats computed
+// from c and stored for resgate_adaln_cf
+void adaln_in_rows_cf(at::Tensor xin, at::Tensor g, at::Tensor r, at::Tensor b, at::Tensor b2, at::Tensor c, at::Tensor stats,
+                      at::Tensor out, double eps, double ceps, c10::optional<at::Tensor> out2, bool pdl, bool sig) {
+  const int64_t M = xin.size(0), D = xin.size(1), P = g.size(0);
+  TORCH_CHECK(M % P == 0 && out.is_contiguous(), "adaln_in_rows_cf: M a multiple of P, contiguous out");
+  check_bf16_rows(xin, "xin", M, D); check_bf16_rows(out, "out", M, D);
+  if (out2.has_value()) { TORCH_CHECK(out2->is_contiguous(), "adaln_in_rows_cf: contiguous out2"); check_bf16_rows(*out2, "out2", M, D); }
+  const CondFold f = make_fold(g, r, b, b2, stats, c, D, ceps, 0);
+  const at::cuda::CUDAGuard gd(xin.device());
+  using bf = __nv_bfloat16;
+  bf* o2 = out2.has_value() ? ptr<bf>(*out2) : nullptr;
+  TDR_WIDTH(D, NT, [&] {
+    auto kern = out2.has_value() ? (sig ? adaln_in_cf_kernel<NT, true, true> : adaln_in_cf_kernel<NT, true, false>)
+                                  : (sig ? adaln_in_cf_kernel<NT, false, true> : adaln_in_cf_kernel<NT, false, false>);
+    launch_rows(kern, M, NT, pdl, ptr<const bf>(xin),
+                ptr<const float>(g), ptr<bf>(out), o2, (int)P, (long)xin.stride(0), (long)g.stride(0), (float)eps, f);
+  });
+}
+
+// out = AdaLN(xin + sigmoid(gA) ya) with the tables 2, 3 and the stats adaln_in_rows_cf stored (the sequential block's transition input)
+void resgate_adaln_cf(at::Tensor xin, at::Tensor ya, at::Tensor g, at::Tensor r, at::Tensor b, at::Tensor b2, at::Tensor stats,
+                      at::Tensor out, double eps, bool pdl) {
+  const int64_t M = xin.size(0), D = xin.size(1), P = g.size(0);
+  TORCH_CHECK(M % P == 0 && out.is_contiguous(), "resgate_adaln_cf: M a multiple of P, contiguous out");
+  check_bf16_rows(xin, "xin", M, D); check_bf16_rows(ya, "ya", M, D); check_bf16_rows(out, "out", M, D);
+  const CondFold f = make_fold(g, r, b, b2, stats, c10::nullopt, D, 1e-5, 2);
+  const at::cuda::CUDAGuard gd(xin.device());
+  using bf = __nv_bfloat16;
+  TDR_WIDTH(D, NT, [&] {
+    launch_rows(resgate_adaln_cf_kernel<NT>, M, NT, pdl, ptr<const bf>(xin), ptr<const bf>(ya), ptr<const float>(g), ptr<bf>(out), (int)P,
+                (long)xin.stride(0), (long)ya.stride(0), (long)g.stride(0), (float)eps, f);
+  });
+}
+
+// out = (xin + sigmoid(gA) ya) + sigmoid(gT) y: the block's output (sequential and parallel)
+void resgate_out_cf(at::Tensor xin, at::Tensor ya, at::Tensor y, at::Tensor g, at::Tensor b2, at::Tensor out, bool pdl) {
+  const int64_t M = xin.size(0), D = xin.size(1), P = g.size(0);
+  TORCH_CHECK(M % P == 0 && out.is_contiguous() && g.scalar_type() == at::kFloat && g.size(1) == 6 * D && b2.scalar_type() == at::kFloat
+              && b2.is_contiguous() && b2.numel() == 2 * D, "resgate_out_cf: fp32 G [P, 6 D], b2 [2 D], contiguous out");
+  check_bf16_rows(xin, "xin", M, D); check_bf16_rows(ya, "ya", M, D); check_bf16_rows(y, "y", M, D); check_bf16_rows(out, "out", M, D);
+  check_rows(g, "g", D);
+  CondFold f;
+  f.gb = ptr<const float>(b2);
+  const at::cuda::CUDAGuard gd(xin.device());
+  using bf = __nv_bfloat16;
+  TDR_WIDTH(D, NT, [&] {
+    launch_rows(resgate_out_cf_kernel<NT>, M, NT, pdl, ptr<const bf>(xin), ptr<const bf>(ya), ptr<const bf>(y), ptr<const float>(g),
+                ptr<bf>(out), (int)P, (long)xin.stride(0), (long)ya.stride(0), (long)y.stride(0), (long)g.stride(0), f);
+  });
+}
+
 
 // y2 / gl2: the parallel block's second update (out = x + sigmoid(gl) y + sigmoid(gl2) y2)
 void resgate_out_rows(at::Tensor x, at::Tensor y, at::Tensor gl, at::Tensor out, int64_t L, c10::optional<at::Tensor> y2,
@@ -895,5 +1121,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rna_rows_cuda", &rna_rows);
   m.def("adaln_in_rows_cuda", &adaln_in_rows);
   m.def("resgate_out_rows_cuda", &resgate_out_rows);
+  m.def("adaln_in_rows_cf_cuda", &adaln_in_rows_cf);
+  m.def("resgate_adaln_cf_cuda", &resgate_adaln_cf);
+  m.def("resgate_out_cf_cuda", &resgate_out_cf);
   m.def("layernorm_rows_cuda", &layernorm_rows);
 }

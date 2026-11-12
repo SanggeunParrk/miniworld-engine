@@ -424,7 +424,8 @@ class TokenDiTProtenix(BackendModule):
         "cuda:a100_sm80": 3,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
-    }  # 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton attention core returns its bias gradient head-major on the A100 / H100 (every subclass)
+        "cuda:h100_sm90": 2,
+    }  # cuda:h100_sm90 2 (2026-11-12): bf16 inference folds the conditioning into one grouped GEMM (CondFold), 128 x 128 SwiGLU tiles at small M, PDL row passes (outputs change: fp32 tables; every subclass); 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton attention core returns its bias gradient head-major on the A100 / H100 (every subclass)
 
     #: The q / k RMSNorm of the attention (:class:`TokenDiTMiniWorld`).
     qk_norm: bool = False
@@ -698,7 +699,9 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
     #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
+    #: 5 (2026-11-12): bf16 inference on the folded, grouped conditioning GEMM (TokenDiTProtenix cuda:h100_sm90 2); Boltz-2: the up-gate
+    #: transition in the SwiGLU GEMM's epilogue
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 5}
 
     backends = (
         "pytorch",
@@ -795,7 +798,9 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
     #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
+    #: 5 (2026-11-12): bf16 inference on the folded, grouped conditioning GEMM (TokenDiTProtenix cuda:h100_sm90 2); Boltz-2: the up-gate
+    #: transition in the SwiGLU GEMM's epilogue
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 5}
 
     backends = (
         "pytorch",
@@ -839,7 +844,9 @@ class TokenDiTChai1(MasterEntryCast, VariantTokenCuda, TokenDiTProtenix):
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
     #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
+    #: 5 (2026-11-12): bf16 inference on the folded, grouped conditioning GEMM (TokenDiTProtenix cuda:h100_sm90 2); Boltz-2: the up-gate
+    #: transition in the SwiGLU GEMM's epilogue
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 5}
 
     backends = (
         "pytorch",
