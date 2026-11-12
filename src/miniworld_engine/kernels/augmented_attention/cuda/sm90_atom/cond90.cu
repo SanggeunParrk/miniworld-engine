@@ -91,14 +91,11 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void cond90_split(const T* __re
   if (upc > 1) issue(1); else cp_commit();
   Tile x;
   ld_tile(x, c + row0 * 128, 128, 0, g, t);
-  if (!IDENT && u0 < 12) cond_in(x, eps);  // matrices 0 .. 5 read LN(c) (IDENT: the raw c), 6 and 7 the raw conditioning (reloaded at u = 12)
+  if (!IDENT && u0 < 12) cond_in(x, eps);  // matrices 0 .. 5 read LN(c) (IDENT: the raw c), 6 and 7 the raw conditioning
   rna(x);
 #pragma unroll 1
   for (int ul = 0; ul < upc; ++ul) {
     const int u = u0 + ul;
-    // a CTA whose units cross 12 (grid.y = 1 or 2: units 8 .. 15) read LN(c) so far: the last two matrices read the raw conditioning
-    // (missing before 2026-11-12: grid.y = 2, 132 .. 263 tiles = 8448 .. 16832 rows, gave so / st of LN(c))
-    if (!IDENT && u == 12 && ul > 0) { ld_tile(x, c + row0 * 128, 128, 0, g, t); rna(x); }
     cp_wait<1>();
     proxy_fence();
     __syncthreads();
