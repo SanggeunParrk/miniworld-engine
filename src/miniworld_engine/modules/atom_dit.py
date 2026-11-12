@@ -345,9 +345,10 @@ class _LocalAtomDiT(BackendModule):
         return self.transition(single, cond)
 
     # ------------------------------------------------------------------------------------------------------------ "triton"
-    def _supports_triton(self, single, cond, pair, mask=None, **kw) -> str | None:
-        if set(kw) - {"uid"}:
-            return f"{', '.join(sorted(set(kw) - {'uid'}))} (not an input of the block)"
+    def _supports_triton(self, single, cond, pair, mask=None, uid=None, **kw) -> str | None:
+        # ``uid`` positional as in the forward that takes it (AtomDiTChai1): FoldForge asks ``unsupported(*forward args)``
+        if kw:
+            return f"{', '.join(sorted(kw))} (not an input of the block)"
         if not single.is_cuda:
             return "the Triton window attention runs on CUDA tensors only"
         if single.dtype not in (_BF, _F32):
@@ -362,7 +363,6 @@ class _LocalAtomDiT(BackendModule):
             return f"pair must be the trunked atom pair [B, {windows(n)}, {QUERIES}, {KEYS}, d_pair], got {tuple(pair.shape)}"
         if mask is not None and tuple(mask.shape) != (b, n):
             return f"mask must be [B, N], got {tuple(mask.shape)}"
-        uid = kw.get("uid")
         if uid is not None and tuple(uid.shape) != (b, n):
             return f"uid must be [B, N], got {tuple(uid.shape)}"
         return None
@@ -396,8 +396,7 @@ class _LocalAtomDiT(BackendModule):
     # (``local_dit.WEIGHTS`` + ``CROSS_WEIGHTS``), the K / V AdaLN chained (Protenix) or parallel (AlphaFold 3), the clipped window or AlphaFold
     # 3's slid one or IntelliFold2's slide_qblock (their edge windows recomputed and differentiated in torch), inference and training.
     # Listed only by the classes with a K / V AdaLN (Protenix, OpenFold3).
-    def _supports_cuda(self, single, cond, pair, mask=None, **kw) -> str | None:
-        uid = kw.pop("uid", None)
+    def _supports_cuda(self, single, cond, pair, mask=None, uid=None, **kw) -> str | None:
         if kw:
             return f"{', '.join(kw)} (not an input of the H100 atom block)"
         if _a100(single):
@@ -845,14 +844,14 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     def _forward_pytorch(self, single, cond, pair, mask=None):
         return super()._forward_pytorch(single, cond, pair, self._mask(mask))
 
-    def _supports_triton(self, single, cond, pair, mask=None, **kw) -> str | None:
-        return super()._supports_triton(single, cond, pair, self._mask(mask), **kw)
+    def _supports_triton(self, single, cond, pair, mask=None, uid=None, **kw) -> str | None:
+        return super()._supports_triton(single, cond, pair, self._mask(mask), uid, **kw)
 
     def _forward_triton(self, single, cond, pair, mask=None):
         return super()._forward_triton(single, cond, pair, self._mask(mask))
 
-    def _supports_cuda(self, single, cond, pair, mask=None, **kw) -> str | None:
-        return super()._supports_cuda(single, cond, pair, self._mask(mask), **kw)
+    def _supports_cuda(self, single, cond, pair, mask=None, uid=None, **kw) -> str | None:
+        return super()._supports_cuda(single, cond, pair, self._mask(mask), uid, **kw)
 
     def _forward_cuda(self, single, cond, pair, mask=None, uid=None):
         return super()._forward_cuda(single, cond, pair, self._mask(mask), uid)
