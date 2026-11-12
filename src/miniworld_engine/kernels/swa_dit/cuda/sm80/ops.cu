@@ -317,7 +317,7 @@ void launch_ffn_bwd_dy(const sw80::FfnBwdDyParams& p) {
 
 // FFN backward (two kernels): dy (= dq2), q1, y, ffn [M, C] bf16, mod [B S, 6C] fp32, Wu [2 hidden, C], Wd^T [hidden, C], Wu^T [C, 2 hidden] -> dq1, dffn [M, C], hh [M, hidden], dab [M, 2 hidden] bf16
 // and d shift_f | d scale_f | d gate_f of dmod (columns 3C .. 6C).  gate_cfg 0: 8 warps x 1 CTA, 1: 4 x 2, 2: 6 x 2, 3: 2 x 2, 4: 1 x 2; hsplit (1 / 2 / 4 / 8): the hidden
-// chunks of a tile group over that many CTAs; dy_cfg 0: 16 warps, 1: 8, then the N split (warps per tile x tiles per CTA) 2: 2 x 1, 3: 4 x 1, 4: 2 x 2, 5: 8 x 1 (the same values)
+// chunks of a tile group over that many CTAs; dy_cfg 0: 16 warps, 1: 8, then the N split (warps per tile x tiles per CTA; the same values) 2: 2 x 1, 3: 4 x 1, 4: 2 x 2, the K split 5: 4 x 1, 6: 2 x 1
 void swa_ffn_bwd(torch::Tensor dy, torch::Tensor q1, torch::Tensor y, torch::Tensor ffn, torch::Tensor mod, torch::Tensor wu, torch::Tensor wdt, torch::Tensor wut, torch::Tensor dq1, torch::Tensor dffn,
                  torch::Tensor hh, torch::Tensor dab, torch::Tensor dmod, int64_t S, int64_t B, double eps, int64_t mode, int64_t gate_cfg, int64_t dy_cfg, int64_t hsplit) {
   TORCH_CHECK(hsplit == 1 || hsplit == 2 || hsplit == 4 || hsplit == 8, "hsplit must be 1, 2, 4 or 8");
@@ -348,7 +348,8 @@ void swa_ffn_bwd(torch::Tensor dy, torch::Tensor q1, torch::Tensor y, torch::Ten
       case 2: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<1, 2>, MODE>(pd); break;
       case 3: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<1, 4>, MODE>(pd); break;
       case 4: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<2, 2>, MODE>(pd); break;
-      case 5: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<1, 8>, MODE>(pd); break;
+      case 5: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<1, 4, true>, MODE>(pd); break;   // the K split (deterministic, another fp32 summation order)
+      case 6: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<1, 2, true>, MODE>(pd); break;
       default: TORCH_CHECK(false, "unknown FFN backward (dy) configuration");
     }
   });
@@ -387,10 +388,10 @@ void swa_qkvg_bwd(torch::Tensor qi, torch::Tensor pq, torch::Tensor pk, torch::T
     switch (cfg) {
       case 0: launch_qkvg_bwd<sw80::QkvgBwdCfg<8>, MODE>(p); break;
       case 1: launch_qkvg_bwd<sw80::QkvgBwdCfg<4>, MODE>(p); break;
-      case 2: launch_qkvg_bwd<sw80::QkvgBwdCfg<1, 2>, MODE>(p); break;   // the N split (warps per tile x tiles per CTA): the same values
-      case 3: launch_qkvg_bwd<sw80::QkvgBwdCfg<1, 4>, MODE>(p); break;
-      case 4: launch_qkvg_bwd<sw80::QkvgBwdCfg<2, 2>, MODE>(p); break;
-      case 5: launch_qkvg_bwd<sw80::QkvgBwdCfg<1, 8>, MODE>(p); break;
+      // the K split (warps per tile x tiles per CTA): deterministic, the fp32 sums of the K blocks in another order
+      case 2: launch_qkvg_bwd<sw80::QkvgBwdCfg<1, 2, true>, MODE>(p); break;
+      case 3: launch_qkvg_bwd<sw80::QkvgBwdCfg<1, 4, true>, MODE>(p); break;
+      case 4: launch_qkvg_bwd<sw80::QkvgBwdCfg<2, 2, true>, MODE>(p); break;
       default: TORCH_CHECK(false, "unknown qkvg backward configuration");
     }
   });

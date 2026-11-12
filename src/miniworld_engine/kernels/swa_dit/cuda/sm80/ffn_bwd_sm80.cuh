@@ -196,10 +196,12 @@ struct FfnBwdDyParams {
   float eps;
 };
 
-// NS > 1: the N split (@ref ns_gather) -- NS warps per 16-row tile, NW tiles per CTA
-template <int NW_, int NS_ = 1>
+// NS > 1: NS warps per 16-row tile, NW tiles per CTA -- the N split (ns_gather) or, with KS, the K split (ks_gather)
+template <int NW_, int NS_ = 1, bool KS_ = false>
 struct FfnBwdDyCfg {
-  static constexpr int NW = NW_, NS = NS_, NTHR = NW_ * NS_ * 32, SMEM = 128 * 1024 + (NS_ > 1 ? NW_ * 8192 : 0);
+  static constexpr int NW = NW_, NS = NS_, NTHR = NW_ * NS_ * 32;
+  static constexpr bool KS = KS_;
+  static constexpr int SMEM = 128 * 1024 + (NS_ > 1 ? NW_ * (KS_ ? NS_ - 1 : 1) * 8192 : 0);
 };
 
 // The N split of the dy / qkvg backward for calls of few row tiles: NS warps share a 16-row tile, warp part p computing the n tiles nt with
@@ -207,6 +209,27 @@ struct FfnBwdDyCfg {
 // memory (xb: [16 nt][4][32 lanes] fp32 per tile), and part 0 runs the epilogue (its row reductions in the one-warp order).
 template <int NS>
 DEVI bool ns_mine(int nt, int part) { return NS == 1 || (nt * NS) / 16 == part; }
+
+// The K split: NS warps share a 16-row tile, warp part p summing the K blocks [16 p / NS, 16 (p + 1) / NS) for every n tile; the parts' partial sums meet in
+// shared memory (xb: NS - 1 slabs of [16 nt][4][32 lanes] fp32 per tile) and part 0 adds them in the fixed order 1 .. NS - 1 (deterministic; the values differ
+// from the one-warp kernel's by the fp32 summation order only), then runs the epilogue.
+template <int NS>
+DEVI void ks_gather(float (&acc)[4][4][4], float* xb, int part, int lane) {
+  if (part != 0) {
+#pragma unroll
+    for (int nt = 0; nt < 16; ++nt)
+#pragma unroll
+      for (int e = 0; e < 4; ++e) xb[(part - 1) * 2048 + (nt * 4 + e) * 32 + lane] = acc[nt >> 2][nt & 3][e];
+  }
+  __syncthreads();
+  if (part == 0) {
+    for (int q = 1; q < NS; ++q)
+#pragma unroll
+      for (int nt = 0; nt < 16; ++nt)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) acc[nt >> 2][nt & 3][e] += xb[(q - 1) * 2048 + (nt * 4 + e) * 32 + lane];
+  }
+}
 
 template <int NS>
 DEVI void ns_gather(float (&acc)[4][4][4], float* xb, int part, int lane) {
@@ -236,6 +259,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) ffn_bwd_dy_kernel(const FfnBwdDyPa
   const uint32_t sw = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g8 = lane >> 2, q4 = lane & 3;
   const int slot = warp / G::NS, nsp = warp % G::NS;             // the tile of the CTA's NW and this warp's share of its n tiles (ns_gather)
+  const int kb0 = G::KS ? nsp * (16 / G::NS) : 0, kb1 = G::KS ? kb0 + 16 / G::NS : 16;   // the K blocks of this warp (the K split)
 
   // Wu^T into shared memory in the f1 row order (smem row r holds output channel qf_channel(r)), once per CTA
   for (int i = tid; i < 128 * 64; i += G::NTHR) cp_async16(sw + wut_off(i >> 6, i & 63), p.wut + (size_t)qf_channel(i >> 6) * 512 + (i & 63) * 8);
@@ -262,18 +286,18 @@ __global__ void __launch_bounds__(G::NTHR, 1) ffn_bwd_dy_kernel(const FfnBwdDyPa
 #pragma unroll
       for (int hh = 0; hh < 2; ++hh) dst[hh] = rm.rok[hh] ? ldg128(p.dab + (size_t)rm.rr[hh] * 512 + 32 * kbl + 8 * q4) : make_uint4(0u, 0u, 0u, 0u);
     };
-    load_dab(0, u0);
-    load_dab(1, u1);
-    load_dab(2, u2);
+    load_dab(kb0, u0);
+    load_dab(kb0 + 1, u1);
+    load_dab(kb0 + 2, u2);
 #pragma unroll 1
-    for (int kb = 0; kb < 16; ++kb) {
-      if (kb + 3 < 16) load_dab(kb + 3, u3);
+    for (int kb = kb0; kb < kb1; ++kb) {
+      if (kb + 3 < kb1) load_dab(kb + 3, u3);
       uint32_t a[2][4];
 #pragma unroll
       for (int hh = 0; hh < 2; ++hh) { a[0][hh] = u0[hh].x; a[0][2 + hh] = u0[hh].y; a[1][hh] = u0[hh].z; a[1][2 + hh] = u0[hh].w; }
 #pragma unroll
       for (int nt = 0; nt < 16; ++nt) {
-        if (!ns_mine<G::NS>(nt, nsp)) continue;
+        if (!G::KS && !ns_mine<G::NS>(nt, nsp)) continue;
         const uint4 b = lds128_ro(sw + nt * 8 * 1024 + wlane + 64u * (kb ^ gpar));
         mma16816(acc[nt >> 2][nt & 3], a[0], b.x, b.y);
         mma16816(acc[nt >> 2][nt & 3], a[1], b.z, b.w);
@@ -283,7 +307,8 @@ __global__ void __launch_bounds__(G::NTHR, 1) ffn_bwd_dy_kernel(const FfnBwdDyPa
     }
 
     // ---- the adaLN backward: d scale_f -> dmod columns 512 .., d shift_f -> 384 .., dq1 = rn(dq2 + ...)
-    if constexpr (G::NS > 1) ns_gather<G::NS>(acc, reinterpret_cast<float*>(smem_raw + 128 * 1024) + slot * 2048, nsp, lane);
+    if constexpr (G::KS) ks_gather<G::NS>(acc, reinterpret_cast<float*>(smem_raw + 128 * 1024) + slot * (G::NS - 1) * 2048, nsp, lane);
+    else if constexpr (G::NS > 1) ns_gather<G::NS>(acc, reinterpret_cast<float*>(smem_raw + 128 * 1024) + slot * 2048, nsp, lane);
     if (nsp == 0) adaln_bwd_epilogue<MODE>(acc, rm, lane, p.q1, p.dy, p.mod, 512, p.dq1, p.dmod, 384, p.B, p.S, p.eps);
     if constexpr (G::NS > 1) __syncthreads();                         // xb is free for the next tile
   }
