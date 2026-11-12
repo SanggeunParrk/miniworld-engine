@@ -65,18 +65,19 @@ __device__ __forceinline__ float row_sum(float v, float* red) {
   if constexpr (NT == 32) return warp_sum(v); else return block_sum<NT>(v, red);
 }
 
-// The output gates take a ``raw`` flag (raw logits, no sigmoid; the ESMFold2 form): every launcher passes false.  ``mode`` bit 0 of the AdaLN kernels:
-// sigmoid scale (Boltz-2 / RF3).
+// ESMFold2 (``rms``, AtomDiTESMFold2Pair): every AdaLN is an affine-free RMSNorm (statistics mean 0, so xhat = x rstd) and the output gates are
+// raw logits (no sigmoid): the same kernels, with these two switches. ``mode`` bit 0 of the AdaLN kernels: sigmoid scale (Boltz-2 / RF3), bit 1:
+// ESMFold2. The residual-out passes take the ``raw`` gate flag directly.
 __device__ __forceinline__ float4 gate_f(float4 v, bool raw) { return raw ? v : sig4(v); }
 __device__ __forceinline__ float4 gate_df(float4 g, bool raw) {
   return raw ? make_float4(1.f, 1.f, 1.f, 1.f) : mul4(g, sub4(make_float4(1.f, 1.f, 1.f, 1.f), g));
 }
 
-// LayerNorm (no affine) of a row: x -> xhat, with mean and rstd
+// LayerNorm (no affine) of a row: x -> xhat, with mean and rstd (rms: RMSNorm, mean 0)
 template <int NT>
-__device__ __forceinline__ float4 ln_row(float4 x, float eps, float* red, float& mean, float& rstd) {
+__device__ __forceinline__ float4 ln_row(float4 x, float eps, float* red, float& mean, float& rstd, bool rms = false) {
   constexpr int D = NT * 4;
-  mean = row_sum<NT>(sum4(x), red) / D;
+  mean = rms ? 0.f : row_sum<NT>(sum4(x), red) / D;
   const float4 d = make_float4(x.x - mean, x.y - mean, x.z - mean, x.w - mean);
   rstd = rsqrtf(row_sum<NT>(sum4(mul4(d, d)), red) / D + eps);
   return mul4(d, rstd);
@@ -97,10 +98,10 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) ln_mod_fwd_k(const XT* __res
   constexpr int D = NT * 4;
   const long row = Geo<NT>::row();
   if (row >= M) return;
-  const bool sig = mode & 1;
+  const bool sig = mode & 1, rms = mode & 2;
   const int tok = row % L, col = Geo<NT>::col();
   float mean, rstd;
-  const float4 xh = ln_row<NT>(V4<XT>::load(X + row * D + col), eps, red, mean, rstd);
+  const float4 xh = ln_row<NT>(V4<XT>::load(X + row * D + col), eps, red, mean, rstd, rms);
   if (Geo<NT>::lead()) ST[row] = make_float2(mean, rstd);
 #pragma unroll
   for (int i = 0; i < 3; ++i) {
@@ -149,13 +150,13 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) res_ln_fwd_k(const XT* __res
   constexpr int D = NT * 4;
   const long row = Geo<NT>::row();
   if (row >= M) return;
-  const bool sig = mode & 1;
+  const bool sig = mode & 1, rms = mode & 2;
   const int tok = row % L, col = Geo<NT>::col();
   float4 x = V4<XT>::load(X + row * D + col);
-  x = fma4(gate_f(V4<AT>::load(GA + tok * sTab + col), false), V4<AT>::load(YA + row * D + col), x);
+  x = fma4(gate_f(V4<AT>::load(GA + tok * sTab + col), rms), V4<AT>::load(YA + row * D + col), x);
   V4<float>::store(XP + row * D + col, x);
   float mean, rstd;
-  const float4 xh = ln_row<NT>(x, eps, red, mean, rstd);
+  const float4 xh = ln_row<NT>(x, eps, red, mean, rstd, rms);
   if (Geo<NT>::lead()) ST[row] = make_float2(mean, rstd);
   const float4 s = V4<AT>::load(SC + tok * sTab + col), h = V4<AT>::load(SH + tok * sTab + col);
   V4<AT>::store(XT_ + row * D + col, fma4(xh, sig ? sig4(s) : s, h));
@@ -274,13 +275,13 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) res_adaln_bwd_k(const XT* __
   constexpr int D = NT * 4;
   const long u = TGeo<NT>::unit();
   if (u >= (long)L * S) return;
-  const bool sig = mode & 1;
+  const bool sig = mode & 1, rms = mode & 2;
   const int tok = u % L, s = u / L, col = Geo<NT>::col();
   const float4 sc = V4<AT>::load(SC + tok * sTab + col);
   const float4 f = sig ? sig4(sc) : sc, df = sig ? make_float4(f.x * (1.f - f.x), f.y * (1.f - f.y), f.z * (1.f - f.z), f.w * (1.f - f.w))
                                                  : make_float4(1.f, 1.f, 1.f, 1.f);
-  const float4 ga = gate_f(V4<AT>::load(GA + tok * sTab + col), false);
-  const float4 dga = gate_df(ga, false);
+  const float4 ga = gate_f(V4<AT>::load(GA + tok * sTab + col), rms);
+  const float4 dga = gate_df(ga, rms);
   float4 asc = zero4(), ash = zero4(), ag = zero4();
   for (int a = s; a < A; a += S) {
     const long row = (long)a * L + tok;
@@ -291,7 +292,7 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) res_adaln_bwd_k(const XT* __
     const float4 dxh = mul4(dt, f);
     asc = fma4(mul4(dt, xh), df, asc);
     ash = add4(ash, dt);
-    const float m1 = row_sum<NT>(sum4(dxh), red) / D, m2 = row_sum<NT>(sum4(mul4(dxh, xh)), red) / D;
+    const float m1 = rms ? 0.f : row_sum<NT>(sum4(dxh), red) / D, m2 = row_sum<NT>(sum4(mul4(dxh, xh)), red) / D;
     const float4 dln = mul4(sub4(sub4(dxh, make_float4(m1, m1, m1, m1)), mul4(xh, m2)), st.y);
     const float4 dxp = add4(V4<XT>::load(DOUT + row * D + col), dln);
     V4<float>::store(DXP + row * D + col, dxp);
@@ -403,7 +404,7 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) adaln_bwd_k(const XT* __rest
   constexpr int D = NT * 4;
   const long u = TGeo<NT>::unit();
   if (u >= (long)L * S) return;
-  const bool sig = mode & 1;
+  const bool sig = mode & 1, rms = mode & 2;
   const int tok = u % L, s = u / L, col = Geo<NT>::col();
   float4 f[3], df[3], asc[3], ash[3];
 #pragma unroll
@@ -431,7 +432,7 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) adaln_bwd_k(const XT* __rest
         ash[i] = add4(ash[i], da);
       }
     }
-    const float m1 = row_sum<NT>(sum4(dxh), red) / D, m2 = row_sum<NT>(sum4(mul4(dxh, xh)), red) / D;
+    const float m1 = rms ? 0.f : row_sum<NT>(sum4(dxh), red) / D, m2 = row_sum<NT>(sum4(mul4(dxh, xh)), red) / D;
     const float4 dln = mul4(sub4(sub4(dxh, make_float4(m1, m1, m1, m1)), mul4(xh, m2)), st.y);
     V4<XT>::store(DX + row * D + col, add4(V4<BT>::load(PASS + row * D + col), dln));
   }
