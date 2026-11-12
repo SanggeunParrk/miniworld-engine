@@ -619,6 +619,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     t = target(args.arch)
+    if t.arch == "sm120":  # the sm_80 builders compile for sm_120a under <name>_sm120 (kernels/_sm120.py), here and in every worker
+        os.environ["MINIWORLD_ENGINE_BUILD_ARCH"] = "sm120"
     if args.cutlass:
         os.environ["CUTLASS_PATH"] = args.cutlass
     if args.mathdx:
