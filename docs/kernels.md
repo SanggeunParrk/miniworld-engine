@@ -22,7 +22,7 @@ attention, token / bias-only / local DiT, OPM and PWA training, APB; A100: the `
 | `layernorm`, `layernorm_linear`, `rmsnorm` | LayerNorm and the norms inside other modules | [h100/layernorm.md](h100/layernorm.md) |
 | `augmented_attention`, `adaln`, `rope`, `gated_projection` | AttentionPairBias, token / atom DiT attention and conditioning | [h100/attention_pair_bias.md](h100/attention_pair_bias.md), [h100/token_dit.md](h100/token_dit.md), [h100/local_atom_dit.md](h100/local_atom_dit.md) |
 | `bias_only_dit` | TokenDiTMiniWorldBiasOnly | [h100/bias_only_dit.md](h100/bias_only_dit.md) |
-| `dit_variants` | H100: the slid-window edge kernels (`cuda/edge.cu`) of every atom DiT class; A100: the atom DiT blocks `integrations/local_dit_sm80_block` does not take (Boltz-2 / RoseTTAFold3 / Chai-1, the parallel K / V AdaLN, the slid windows, fp32; `cuda/train.py`, `sm80.py`) | [h100/dit_variants.md](h100/dit_variants.md) |
+| `dit_variants` | H100: the slid-window edge kernels (`cuda/edge.cu`) of every atom DiT class and the training step of AtomDiTESMFold2Pair (`train_rows.cu` sm_90a); A100: the atom DiT blocks `integrations/local_dit_sm80_block` does not take (Boltz-2 / RoseTTAFold3 / Chai-1, the parallel K / V AdaLN, the slid windows, fp32; `cuda/train.py`, `sm80.py`) and AtomDiTESMFold2Pair (`integrations/local_dit_esm.py`: `train_rows.cu`, `lattn90_esm.cu`, `qknorm_local.cu` for sm_80) | [h100/dit_variants.md](h100/dit_variants.md) |
 | `swa_dit` | AtomDiTMiniWorld, AtomDiTESMFold2, SWAAtomTransformer | [h100/swa_atom_dit.md](h100/swa_atom_dit.md) |
 | `sampler_ops` | AugmentNoise, AlignEuler, PoolAtoms | [h100/sampler_ops.md](h100/sampler_ops.md) |
 | `smooth_lddt` | SmoothLddtLoss | [h100/smooth_lddt.md](h100/smooth_lddt.md) |

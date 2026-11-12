@@ -58,7 +58,7 @@ Some ops have one class per model; a selector builds the model's own class (not 
 | selector | map | example |
 |---|---|---|
 | `TokenDiT(model, ...)` | `TOKEN_DIT_MODELS` in `token_dit.py` | `af3`, `protenix`, `openfold3`, `esmfold2`, ... -> `TokenDiTProtenix`; `boltz2`, `rosettafold3`, `chai1`, `miniworld`, `miniworld_bias_only` -> their classes |
-| `AtomDiT(model, ...)` | `ATOM_DIT_MODELS` in `atom_dit.py` | `af3` / `openfold3` / `intellifold2` -> `AtomDiTOpenFold3`; `protenix` / `opendde` -> `AtomDiTProtenix`; `esmfold2`, `miniworld`, `boltz2`, `rosettafold3`, `chai1` |
+| `AtomDiT(model, ...)` | `ATOM_DIT_MODELS` in `atom_dit.py` | `af3` / `openfold3` / `intellifold2` -> `AtomDiTOpenFold3`; `protenix` / `opendde` -> `AtomDiTProtenix`; `esmfold2` (released pair-free SWA block), `esmfold2_pair` -> `AtomDiTESMFold2Pair` (FoldForge's ESMFold2 atom stack with the atom pair), `miniworld`, `boltz2`, `rosettafold3`, `chai1` |
 | `TriangleAttention(..., model=)` | `triangle.py` | `chai1` -> `TriangleAttentionChai1`; `af3` -> `TriangleAttentionAF3`; `rf3`; `chai1_confidence` |
 | `TriangleMultiplication(..., model=)` | `triangle.py` | `rf3` -> `TriangleMultiplicationRF3` |
 
@@ -145,6 +145,18 @@ of every class the nine 5I28 models build carry 1024 | 1536 | 2048, their atom r
 - **A100 triangle attention, training**: refused with a reason by the sm_80 kernels' training bias-gradient budget at L 1536 (OpenDDE
   d_pair 384) and L 2048 (d_pair 256 / 384, Chai-1 d_pair 256, RoseTTAFold3 d_pair 64 with d_hidden 256); inference is served at every
   5I28 length.
+- **OpenDDE's structural-token refiner pair, > 2**31 elements**: OpenDDE runs a pairformer-like refiner on a [S, S, 384] pair with S
+  well above the token count (S = 1963 / 2944 / ~3900 at n = 8 / 12 / 16; 1.5e9 / 3.3e9 / 5.8e9 elements). No requirement row covers
+  it (the rows stop at L 2048; a 10-minute job cannot measure every backend there, and the float64 / float32 reference does not fit next
+  to a kernel's at S 2944). The Triton TriMul's fused back half indexed its channel-major contraction in int32 (`channel * L * L`): an
+  illegal address on A100 and a silently wrong result on H100 past 2**31 elements. It now takes a 64-bit channel offset above that
+  bound (`back.py` `WIDE`; the 32-bit kernel below it, unchanged speed). Probed at S 2944, d_pair 384 (bf16 / master inference, both
+  cards, against the float32 reference at S / 8 tiled 8 x 8 -- TriMul, triangle attention and the row-wise ops are invariant under
+  that tiling): `TriangleMultiplication` (triton; cuda), `TriangleAttention` (n_head 12, triton; cuda), `LayerNorm` 384, `Transition`
+  384 n = 2 / 4 and `OuterProductMean` -> 384 (triton; cuda) all match the reference at S / 8; compute-sanitizer memcheck clean
+  (Triton TriMul at L 2400). The A100 TriMul `cuda` kernels refuse L 3900 (n = 16) with their reason; the Triton one serves it
+  (66 GB peak). The Triton TriMul's *training* pipeline keeps 32-bit strided offsets in its output LayerNorm (layernorm_linear
+  `te_style`): it refuses L * L * max(d_pair, d_hidden) >= 2**31 (bidirectional: 2 * d_hidden) with a reason.
 - **Accuracy at these lengths**: the float64 gold of a triangle attention does not fit past ~1024 tokens (N^3 x heads x 8 B), so the
   measurer skips those cases by design; checked against a float32 gold instead at 1024 (every width: cuda / triton within the pytorch
   backend's error), not a judge measurement.
@@ -200,7 +212,7 @@ FoldForge's engine requests (its `docs/ENGINE-REQUESTS.md`) that are answered by
 
 | request | decision |
 |---|---|
-| R6: ESMFold2 atom stack with the atom pair | Not the same function as `AtomDiTESMFold2`: the engine block is ESMFold2's released pair-free `SWAAtomBlock` (fused `Wqkv`, adaLN-Zero with six modulations, 3D RoPE inside, no pair bias); FoldForge's stack is the AF3 block over a 32 x 192 atom pair with RMS / SiLU AdaLN, raw gates and a rotary keyed by `uid`. No option of either class makes it the other. Serving FoldForge's stack would be a new atom DiT class with a 192-key window (`functional.slide_starts(keys=192)` already states the window) and its own kernels; not taken in this cycle (no requirement row asks for it). |
+| R6: ESMFold2 atom stack with the atom pair | Implemented as a class of its own, `AtomDiTESMFold2Pair` (`AtomDiT(model="esmfold2_pair")`), restored from the 2.4.x `local_dit` ESMFold2 variant (`LocalDiTBlock(**ESMFOLD2)`, commit 2df9a5a82): AF3 block over the trunked 32 x 192 atom pair, AdaptiveRMSNorm AdaLNs, raw `W silu(c)` gates, the +/- 64 rank window, affine-free q / k RMSNorm + rotary from per-atom tables (`forward(..., rope=(cos, sin))`). Backends pytorch / triton / cuda (H100 inference: sm90_atom row kernels with `RMS`, `qknorm_local.cu`, `lattn90_esm.cu`; H100 training and A100: `train_rows.cu` + cuBLAS around the same attention). `AtomDiT("esmfold2")` stays ESMFold2's released pair-free `SWAAtomBlock` (`AtomDiTESMFold2`): the two are different functions. |
 | R8: fp32 `TriangleMultiplication` / `TriangleAttention` / `Transition` kernels | Declined by policy: TriMul is bf16 / master only, the trunk (pairformer-side) rows are master-only, `Transition` serves fp32 only on the five diffusion-head conditioning rows. An fp32 fold of the Protenix lineage runs those classes on `pytorch` by design (`_supports_cuda` refuses with that reason). |
 | R9: Chai-1 `circular` key window | Not needed: Chai-1's release masks the wrapped keys (`get_qkv_indices_for_blocks`' `kv_mask`, ANDed in by `get_block_atom_pair_mask`), so `AtomDiTChai1(key_window="pad")` + `uid` is the release for every system (`AtomDiTChai1` docstring; tested in `tests/cpu/test_chai1_key_window.py`). |
 | R11: an MSA block (Chai-1's parallel schedule with `OuterProductMean(groups=8)`, the AF3 / Boltz orders) | Not taken: every part is a served engine class (`OuterProductMean` with `groups=8`, `MSAPairWeightedAveraging`, `Transition`, the triangle classes); a block class would compose them in torch with no kernel of its own and no speed change, which the caller's composition already is. Revisit with R12 (`parallel_residual`) if a fused residual of the parallel parts is wanted. |

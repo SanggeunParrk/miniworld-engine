@@ -53,6 +53,7 @@ NOT_WEIGHT_DERIVED = {
     "kernels/transition/cuda/fused_fwd_sm80.py:_SMS": "SM count per device",
     "kernels/conditioned_transition/cuda/__init__.py:_TOKEN_STREAMS": "side streams",
     "kernels/integrations/local_dit_h100.py:_CONST": "constant tensors per shape / device",
+    "kernels/integrations/local_dit_esm.py:_CONST": "constant vectors per value / width / device",
     "kernels/integrations/token_dit.py:_CONST": "constant tensors per shape / device",
     "kernels/integrations/augattn_sm80.py:_ZEROS": "zero tensors per shape / device",
     "kernels/integrations/attention_pair_bias_sm80.py:_zeros": "zero tensors per shape / dtype / device",
