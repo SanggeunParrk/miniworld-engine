@@ -84,7 +84,7 @@ void ln_rows(torch::Tensor x, torch::Tensor xh, torch::Tensor stats, int64_t D, 
   TORCH_CHECK(!stats.numel() || (stats.scalar_type() == at::kFloat && stats.is_contiguous() && stats.numel() == 2 * T), "ln_rows: stats [T, 2] fp32");
   a100::LnRowsParams p;
   p.x = bp(x); p.xh = bm(xh); p.stats = stats.numel() ? stats.data_ptr<float>() : nullptr;
-  p.T = (unsigned)T; p.L = (int)L; p.transposed = (int)transposed; p.eps = (float)eps;
+  p.T = (size_t)T; p.L = (int)L; p.transposed = (int)transposed; p.eps = (float)eps;
   if (padded) {
 #define LN_PAD_CASE(DD) case DD: { using S = a100::RowShape<DD>; \
     const unsigned grid = (unsigned)std::min<int64_t>((T + 8 * S::RPW - 1) / (8 * S::RPW), (int64_t)nsm() * 16); \
@@ -113,7 +113,7 @@ void bias_planes(torch::Tensor y, torch::Tensor mask, torch::Tensor bias, int64_
   TORCH_CHECK(!mask.numel() || (mask.scalar_type() == at::kByte && mask.is_contiguous() && mask.numel() == Z * L), "bias_planes: mask [Z, L] uint8");
   a100::BiasPlanesParams p;
   p.y = bp(y); p.mask = mask.numel() ? mask.data_ptr<uint8_t>() : nullptr; p.bias = bm(bias); p.ldy = y.stride(0);
-  p.T = (unsigned)T; p.col0 = (int)col0; p.H = (int)H; p.L = (int)L; p.flip = (int)flip;
+  p.T = (size_t)T; p.col0 = (int)col0; p.H = (int)H; p.L = (int)L; p.flip = (int)flip;
   a100::bias_planes_kernel<<<(unsigned)((T + 255) / 256), 256, 0, stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -126,7 +126,7 @@ void gate_rows(torch::Tensor o, torch::Tensor g, torch::Tensor a) {
   check_rows(a, T, DHp, "gate_rows a");
   check_strided_rows(g, T, DHp, "gate_rows g");
   a100::GateRowsParams p;
-  p.o = bp(o); p.g = bp(g); p.a = bm(a); p.ldg = g.stride(0); p.T = (unsigned)T; p.DHp = (int)DHp;
+  p.o = bp(o); p.g = bp(g); p.a = bm(a); p.ldg = g.stride(0); p.T = (size_t)T; p.DHp = (int)DHp;
   a100::gate_rows_kernel<<<(unsigned)((T + 7) / 8), dim3((unsigned)(DHp / 8), 8), 0, stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -142,7 +142,7 @@ void out_rows(torch::Tensor y, torch::Tensor res, torch::Tensor ds, torch::Tenso
   TORCH_CHECK(!ds.numel() || (ds.scalar_type() == at::kBFloat16 && ds.is_contiguous() && ds.numel() == (T / L) * D && aligned16(ds)), "out_rows: ds [Z, L, D] bf16");
   a100::OutRowsParams p;
   p.y = bp(y); p.res = bp(res); p.ds = ds.numel() ? bp(ds) : nullptr; p.out = bm(out);
-  p.T = (unsigned)T; p.L = (int)L; p.D = (int)D; p.transposed = (int)transposed;
+  p.T = (size_t)T; p.L = (int)L; p.D = (int)D; p.transposed = (int)transposed;
   a100::out_rows_kernel<<<(unsigned)((T + 7) / 8), dim3((unsigned)(D / 8), 8), 0, stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -235,7 +235,7 @@ void dy_rows(torch::Tensor dout, torch::Tensor ds, torch::Tensor dy, int64_t L, 
   check_rows(dy, T, D, "dy_rows dy");
   TORCH_CHECK(!ds.numel() || (ds.scalar_type() == at::kBFloat16 && ds.is_contiguous() && ds.numel() == (T / L) * D && aligned16(ds)), "dy_rows: ds [Z, L, D] bf16");
   a100::DyRowsParams p;
-  p.dout = bp(dout); p.ds = ds.numel() ? bp(ds) : nullptr; p.dy = bm(dy); p.T = (unsigned)T; p.L = (int)L; p.D = (int)D; p.transposed = (int)transposed;
+  p.dout = bp(dout); p.ds = ds.numel() ? bp(ds) : nullptr; p.dy = bm(dy); p.T = (size_t)T; p.L = (int)L; p.D = (int)D; p.transposed = (int)transposed;
   a100::dy_rows_kernel<<<(unsigned)((T + 7) / 8), dim3((unsigned)(D / 8), 8), 0, stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -253,7 +253,7 @@ void gate_bwd(torch::Tensor da, torch::Tensor o, torch::Tensor g, torch::Tensor 
   TORCH_CHECK(!delta.numel() || (delta.scalar_type() == at::kFloat && delta.is_contiguous() && delta.numel() == T * H), "gate_bwd: delta [Z, H, L, L] fp32");
   a100::GateBwdParams p;
   p.da = bp(da); p.o = bp(o); p.g = bp(g); p.dg = bm(dg); p.dov = bm(dov); p.a = bm(a); p.delta = delta.numel() ? delta.data_ptr<float>() : nullptr;
-  p.ldg = g.stride(0); p.lddg = dg.stride(0); p.T = (unsigned)T; p.DHp = (int)DHp; p.L = (int)L; p.H = (int)H;
+  p.ldg = g.stride(0); p.lddg = dg.stride(0); p.T = (size_t)T; p.DHp = (int)DHp; p.L = (int)L; p.H = (int)H;
   a100::gate_bwd_rows_kernel<<<(unsigned)((T + 7) / 8), dim3((unsigned)(DHp / 8), 8), (unsigned)(H * 8 * sizeof(float)), stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -275,7 +275,7 @@ void ln_bwd(torch::Tensor dxn, torch::Tensor db, torch::Tensor wb, torch::Tensor
   TORCH_CHECK(dpair.data_ptr() != x.data_ptr() && dpair.data_ptr() != dout.data_ptr(), "ln_bwd: dpair must not alias x or dout");
   a100::LnBwdParams p;
   p.dxn = bp(dxn); p.db = bp(db); p.wb = bp(wb); p.x = bp(x); p.stats = stats.data_ptr<float>(); p.dout = bp(dout); p.gamma = gamma.data_ptr<float>(); p.dpair = bm(dpair);
-  p.T = (unsigned)T; p.L = (int)L; p.H = (int)H; p.transposed = (int)transposed;
+  p.T = (size_t)T; p.L = (int)L; p.H = (int)H; p.transposed = (int)transposed;
   const unsigned smem = (unsigned)(H * D * 2);
 #define LB_CASE(DD) case DD: { using S = a100::RowShape<DD>; \
     const unsigned grid = (unsigned)std::min<int64_t>((T + 8 * S::RPW - 1) / (8 * S::RPW), (int64_t)nsm() * 8); \
@@ -332,8 +332,8 @@ void launch_fused(void (*kernel)(const Params), int smem, const Params& p, int n
     C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
     set[dev] = true;
   }
-  const unsigned ntile = p.ntile;
-  const unsigned grid = std::min<unsigned>((unsigned)(nsm_ * G::MINB), (ntile + G::NW - 1) / G::NW);
+  const size_t ntile = p.ntile;
+  const unsigned grid = (unsigned)std::min<size_t>((size_t)(nsm_ * G::MINB), (ntile + G::NW - 1) / G::NW);
   kernel<<<grid, G::NTHR, smem, stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -388,7 +388,7 @@ void fused_front(torch::Tensor x, torch::Tensor w, torch::Tensor bvec, torch::Te
   a100::F1Params p;
   p.x = bp(x); p.w = bp(w); p.bvec = bvec.data_ptr<float>(); p.mask = mask.numel() ? mask.data_ptr<uint8_t>() : nullptr;
   p.out = bm(out); p.bias = bm(bias); p.lnst = lnst.numel() ? lnst.data_ptr<float>() : nullptr; p.xh = xh.numel() ? bm(xh) : nullptr;
-  p.L = (int)L; p.transposed = (int)(transposed & 1); p.flip = (int)((transposed >> 1) & 1); p.eps = (float)eps; p.ntile = (unsigned)(T / 32);   // transposed bit 1: flip (F1Params)
+  p.L = (int)L; p.transposed = (int)(transposed & 1); p.flip = (int)((transposed >> 1) & 1); p.eps = (float)eps; p.ntile = (size_t)(T / 32);   // transposed bit 1: flip (F1Params)
   FUSED_WIDTHS(DIN, DH, hd, {
     using G = a100::FusedCfg<kDIN, kDH, 8, 1, kHD>;
     launch_fused<G, 32>(a100::fused_f1_kernel<G>, G::F1_SMEM, p, nsm());
@@ -409,7 +409,7 @@ void fused_back(torch::Tensor o, torch::Tensor g, torch::Tensor wo, torch::Tenso
   TORCH_CHECK(!ds.numel() || (ds.scalar_type() == at::kBFloat16 && ds.is_contiguous() && ds.numel() == (T / L) * DIN && aligned16(ds)), "fused_back: ds [Z, L, DIN] bf16");
   a100::F3Params p;
   p.o = bp(o); p.g = bp(g); p.wo = bp(wo); p.res = bp(res); p.out = bm(out); p.ds = ds.numel() ? bp(ds) : nullptr;
-  p.ldg = g.stride(0); p.ntile = (unsigned)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
+  p.ldg = g.stride(0); p.ntile = (size_t)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
   FUSED_WIDTHS(DIN, DH, hd, {
     using G = a100::FusedCfg<kDIN, kDH, 8, 1, kHD>;
     launch_fused<G, 16>(a100::fused_f3_kernel<G>, G::F3_SMEM, p, nsm());
@@ -434,7 +434,7 @@ void fused_back_bwd(torch::Tensor dout, torch::Tensor ds, torch::Tensor o, torch
   a100::B3Params p;
   p.dout = bp(dout); p.ds = ds.numel() ? bp(ds) : nullptr; p.o = bp(o); p.g = bp(g); p.wot = bp(wot); p.dg = bm(dg); p.dov = bm(dov); p.dy = bm(dy); p.a = bm(a);
   p.delta = delta.numel() ? delta.data_ptr<float>() : nullptr;
-  p.ldg = g.stride(0); p.lddg = dg.stride(0); p.ntile = (unsigned)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
+  p.ldg = g.stride(0); p.lddg = dg.stride(0); p.ntile = (size_t)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
   FUSED_WIDTHS(DIN, DH, hd, {
     using G = a100::FusedCfg<kDIN, kDH, 8, 1, kHD>;
     launch_fused<G, 16>(a100::fused_b3_kernel<G>, G::B3_SMEM, p, nsm());
@@ -460,7 +460,7 @@ void fused_front_bwd(torch::Tensor d, torch::Tensor db, torch::Tensor x, torch::
   TORCH_CHECK(gamma.scalar_type() == at::kFloat && gamma.is_contiguous() && gamma.numel() == DIN, "fused_front_bwd: gamma [DIN] fp32");
   a100::B1Params p;
   p.d = bp(d); p.db = bp(db); p.x = bp(x); p.lnst = lnst.data_ptr<float>(); p.dout = bp(dout); p.dpair = bm(dpair); p.wt = bp(wt); p.wbt = bp(wbt); p.gamma = gamma.data_ptr<float>();
-  p.ldd = d.stride(0); p.ntile = (unsigned)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
+  p.ldd = d.stride(0); p.ntile = (size_t)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
   FUSED_WIDTHS(DIN, DH, hd, {
     using G = a100::FusedCfg<kDIN, kDH, 8, 1, kHD>;
     launch_fused<G, 16>(a100::fused_b1_kernel<G>, G::B1_SMEM, p, nsm());

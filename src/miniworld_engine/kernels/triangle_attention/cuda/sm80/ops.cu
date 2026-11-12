@@ -38,7 +38,7 @@ void launch_front(const a100::F1Params& p, int nsm) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(a100::f1_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
     set[dev] = true;
   }
-  const unsigned grid = std::min<unsigned>((unsigned)nsm, (p.ntile + G::NW - 1) / G::NW);
+  const unsigned grid = (unsigned)std::min<size_t>((size_t)nsm, (p.ntile + G::NW - 1) / G::NW);
   a100::f1_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -52,7 +52,7 @@ void launch_back(const a100::F3Params& p, int nsm) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(a100::f3_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
     set[dev] = true;
   }
-  const unsigned grid = std::min<unsigned>((unsigned)nsm, (p.ntile + G::NW - 1) / G::NW);
+  const unsigned grid = (unsigned)std::min<size_t>((size_t)nsm, (p.ntile + G::NW - 1) / G::NW);
   a100::f3_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -64,20 +64,20 @@ __global__ void compact_mask_kernel(const uint8_t* mask, int* indices, int* coun
   const int z = blockIdx.x, lane = threadIdx.x;
   int n = 0;
   for (int j = lane; j < L; j += 32) {
-    const bool keep = mask[z * L + j];
+    const bool keep = mask[(size_t)z * L + j];
     const unsigned bits = __ballot_sync(0xffffffffu, keep);
-    if (keep) indices[z * L + n + __popc(bits & ((1u << lane) - 1))] = j;
+    if (keep) indices[(size_t)z * L + n + __popc(bits & ((1u << lane) - 1))] = j;
     n += __popc(bits);
   }
   if (lane == 0) counts[z] = n;
-  for (int j = n + lane; j < L; j += 32) indices[z * L + j] = -1;
+  for (int j = n + lane; j < L; j += 32) indices[(size_t)z * L + j] = -1;
 }
 
 __global__ void compact_bias_kernel(const __nv_bfloat16* in, __nv_bfloat16* out, const int* indices, int L, int H) {
   const int j = blockIdx.x * 256 + threadIdx.x, row = blockIdx.y, zh = blockIdx.z, z = zh / H;
   if (j < L) {
     const long long t = ((long long)zh * L + row) * L + j;
-    const int source = indices[z * L + j];
+    const int source = indices[(size_t)z * L + j];
     out[t] = source < 0 ? __float2bfloat16_rn(-3.3895313892515355e38f) : in[t - j + source];
   }
 }
@@ -283,7 +283,7 @@ void front(torch::Tensor x, torch::Tensor w, torch::Tensor bvec, torch::Tensor m
   p.lnst = lnst.numel() ? lnst.data_ptr<float>() : nullptr;
   TORCH_CHECK(!xh.numel() || (xh.scalar_type() == at::kBFloat16 && xh.is_contiguous() && xh.numel() == T * 136), "front: xh [T, 136] bf16 (training)");
   p.xh = xh.numel() ? reinterpret_cast<__nv_bfloat16*>(xh.data_ptr()) : nullptr;
-  p.L = (int)L; p.transposed = (int)(transposed & 1); p.flip = (int)((transposed >> 1) & 1); p.eps = (float)eps; p.ntile = (unsigned)(T / 32);   // transposed bit 1: flip (F1Params)
+  p.L = (int)L; p.transposed = (int)(transposed & 1); p.flip = (int)((transposed >> 1) & 1); p.eps = (float)eps; p.ntile = (size_t)(T / 32);   // transposed bit 1: flip (F1Params)
   const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   if (nw == 8) launch_front<a100::F1Cfg<8>>(p, nsm);
   else if (nw == 12) launch_front<a100::F1Cfg<12>>(p, nsm);
@@ -333,7 +333,7 @@ void back(torch::Tensor o, torch::Tensor g, torch::Tensor wo, torch::Tensor res,
   TORCH_CHECK(!ds.numel() || (ds.scalar_type() == at::kBFloat16 && ds.is_contiguous() && ds.numel() == (T / L) * 128 && reinterpret_cast<uintptr_t>(ds.data_ptr()) % 16 == 0),
               "back: ds [Z, L, 128] bf16 (the dropout scale, training)");
   p.ds = ds.numel() ? reinterpret_cast<const __nv_bfloat16*>(ds.data_ptr()) : nullptr;
-  p.ldg = g.stride(0); p.ntile = (unsigned)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
+  p.ldg = g.stride(0); p.ntile = (size_t)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
   const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   if (nw == 8) launch_back<a100::F3Cfg<8>>(p, nsm);
   else if (nw == 12) launch_back<a100::F3Cfg<12>>(p, nsm);
@@ -352,7 +352,7 @@ void launch_back_bwd(const a100::B3Params& p, int nsm) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(a100::b3_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
     set[dev] = true;
   }
-  const unsigned grid = std::min<unsigned>((unsigned)nsm, (p.ntile + G::NW - 1) / G::NW);
+  const unsigned grid = (unsigned)std::min<size_t>((size_t)nsm, (p.ntile + G::NW - 1) / G::NW);
   a100::b3_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -381,7 +381,7 @@ void back_bwd(torch::Tensor dout, torch::Tensor ds, torch::Tensor o, torch::Tens
   p.dy = reinterpret_cast<__nv_bfloat16*>(dy.data_ptr()); p.a = reinterpret_cast<__nv_bfloat16*>(a.data_ptr());
   TORCH_CHECK(!delta.numel() || (delta.scalar_type() == at::kFloat && delta.is_contiguous() && delta.numel() == 4 * T), "back_bwd: delta [Z, 4, L, L] fp32");
   p.delta = delta.numel() ? delta.data_ptr<float>() : nullptr;
-  p.ldg = g.stride(0); p.lddg = dg.stride(0); p.ntile = (unsigned)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
+  p.ldg = g.stride(0); p.lddg = dg.stride(0); p.ntile = (size_t)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
   const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   if (nw == 8) launch_back_bwd<a100::F3Cfg<8>>(p, nsm);
   else if (nw == 12) launch_back_bwd<a100::F3Cfg<12>>(p, nsm);
@@ -399,7 +399,7 @@ void launch_front_bwd(const a100::B1Params& p, int nsm) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(a100::b1_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
     set[dev] = true;
   }
-  const unsigned grid = std::min<unsigned>((unsigned)nsm, (p.ntile + G::NW - 1) / G::NW);
+  const unsigned grid = (unsigned)std::min<size_t>((size_t)nsm, (p.ntile + G::NW - 1) / G::NW);
   a100::b1_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -427,7 +427,7 @@ void front_bwd(torch::Tensor d, torch::Tensor db, torch::Tensor x, torch::Tensor
   p.dout = reinterpret_cast<const __nv_bfloat16*>(dout.data_ptr()); p.dpair = reinterpret_cast<__nv_bfloat16*>(dpair.data_ptr());
   p.wt = reinterpret_cast<const __nv_bfloat16*>(wt.data_ptr()); p.wbt = reinterpret_cast<const __nv_bfloat16*>(wbt.data_ptr());
   p.gamma = gamma.data_ptr<float>();
-  p.ldd = d.stride(0); p.ntile = (unsigned)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
+  p.ldd = d.stride(0); p.ntile = (size_t)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
   const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   if (nw == 8) launch_front_bwd<a100::B1Cfg<8>>(p, nsm);
   else if (nw == 12) launch_front_bwd<a100::B1Cfg<12>>(p, nsm);
