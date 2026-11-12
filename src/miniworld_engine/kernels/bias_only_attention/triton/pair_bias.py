@@ -74,7 +74,7 @@ def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, shape_key, C: tl.constexp
     hh = tl.arange(0, NP)
     w = tl.load(W + hh[:, None] * C + cols[None, :], mask=(hh < N)[:, None], other=0.0)
     acc = tf32_dot(w, tl.trans(xh))  # [NP, BR]; fp32: TF32 rounded to nearest
-    tl.store(OUT + hh[:, None] * R + rows[None, :], acc.to(OUT.dtype.element_ty), mask=(hh < N)[:, None] & rm[None, :])
+    tl.store(OUT + hh.to(tl.int64)[:, None] * R + rows[None, :], acc.to(OUT.dtype.element_ty), mask=(hh < N)[:, None] & rm[None, :])
     tl.store(MEAN + rows, mean, mask=rm)
     tl.store(RSTD + rows, rstd, mask=rm)
 
@@ -101,7 +101,7 @@ def _ln_bias_bwd_kernel(X, W, DL, MEAN, RSTD, DX, DW, R, shape_key, C: tl.conste
         mean = tl.load(MEAN + rows, mask=rm, other=0.0)
         rstd = tl.load(RSTD + rows, mask=rm, other=0.0)
         xh = (x - mean[:, None]) * rstd[:, None]
-        dl = tl.load(DL + hh[:, None] * R + rows[None, :], mask=hm[:, None] & rm[None, :], other=0.0)  # [NP, BR]
+        dl = tl.load(DL + hh.to(tl.int64)[:, None] * R + rows[None, :], mask=hm[:, None] & rm[None, :], other=0.0)  # [NP, BR]
         dxh = tf32_dot(tl.trans(dl), w)  # [BR, C]
         dw = tf32_dot(dl, xh.to(X.dtype.element_ty), dw)
         c1 = tl.sum(dxh, axis=1) / C

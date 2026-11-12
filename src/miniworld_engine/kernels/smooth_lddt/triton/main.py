@@ -73,7 +73,7 @@ def smooth_lddt_prep_kernel(
     BLOCK_P: tl.constexpr,
 ):
     """One program: a BLOCK_P x BLOCK_P block of the pair matrix, written as (BLOCK_P / 32)^2 flag tiles."""
-    b = tl.program_id(0)
+    b = tl.program_id(0).to(tl.int64)  # 64-bit per-sample bases (b * N * 3, b * NF * NF)
     gb = G + b * N * 3
     for si in tl.static_range(BLOCK_P // 32):
         ri = (tl.program_id(1) * (BLOCK_P // 32) + si) * 32 + tl.arange(0, 32)
@@ -130,7 +130,7 @@ def smooth_lddt_fwd_kernel(
     BLOCK_J: tl.constexpr,
 ):
     """OUT[ab, i] = sum over the pairs (i, j) of the loss of the pair score; one program owns BLOCK_I rows."""
-    ab = tl.program_id(0)
+    ab = tl.program_id(0).to(tl.int64)  # 64-bit per-sample bases (ab * N * 3)
     b = ab % B
     i0 = tl.program_id(1) * BLOCK_I
     ri = i0 + tl.arange(0, BLOCK_I)
@@ -187,7 +187,7 @@ def smooth_lddt_bwd_kernel(
     BLOCK_I: tl.constexpr,
     BLOCK_J: tl.constexpr,
 ):
-    ab = tl.program_id(0)
+    ab = tl.program_id(0).to(tl.int64)  # 64-bit per-sample bases (ab * N * 3)
     b = ab % B
     i0 = tl.program_id(1) * BLOCK_I
     ri = i0 + tl.arange(0, BLOCK_I)

@@ -12,6 +12,7 @@ from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tiles import tile_grid
+from miniworld_engine.kernels._wide import needs_wide
 from miniworld_engine.kernels.bias_only_attention.triton import gate_out
 
 _forward_body = gate_out._gate_out_fwd.fn
@@ -42,6 +43,7 @@ def swa_gate_out_fwd_kernel(
     BLOCK_K: tl.constexpr,
     shape_key,
     GROUP_M: tl.constexpr,
+    WIDE: tl.constexpr = False,
 ):
     _forward_body(
         gate_ptr,
@@ -64,6 +66,7 @@ def swa_gate_out_fwd_kernel(
         BLOCK_K,
         shape_key,
         GROUP_M,
+        WIDE,
     )
 
 
@@ -92,6 +95,7 @@ def _forward(gate: torch.Tensor, out: torch.Tensor, weight: torch.Tensor, key: i
             *weight.stride(),
             *result.stride(),
             shape_key=key,
+            WIDE=needs_wide(gate, out),
         )
     return result
 

@@ -23,6 +23,7 @@ eager/compiled path runs — one launch, cond_aff read once, TF32 policy for fp3
 from __future__ import annotations
 
 from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 # The weighted-LayerNorm kernel that used to live here was fused3.py's `_ln_kernel` with
 # HAS_W=True -- bitwise equal on the output (.bench/direct.out). Imported now.
@@ -135,6 +136,7 @@ def _cond_affine(
         0,  # no second reduction
         HAS_W=True,
         shape_key=pack(shape_key, N=N),
+        WIDE=needs_wide(cond, aff),
     )
     return aff
 
@@ -194,6 +196,7 @@ def _cond_affine_stats(
         HAS_W=True,
         shape_key=pack(shape_key, N=N, N2=N2),
         HAS_STATS=True,
+        WIDE=needs_wide(cond, aff, x),
     )
     return aff, rstd, c1
 
@@ -204,7 +207,22 @@ def _cond_affine_stats(
 @configured("adaln_epilogue_triton", key=["shape_key"], default=dict(BLOCK_K=64, BLOCK_M1=64, num_warps=2, num_stages=2))
 @triton.jit
 def _adaln_epilogue_kernel(
-    X, SB, Y, M, N: tl.constexpr, eps, sx0, sx1, ss0, ss1, sy0, sy1, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key
+    X,
+    SB,
+    Y,
+    M,
+    N: tl.constexpr,
+    eps,
+    sx0,
+    sx1,
+    ss0,
+    ss1,
+    sy0,
+    sy1,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    shape_key,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # SB is (M, 2N): cols [0:N] = scale (incl. scale_b), [N:2N] = bias.
     row = tl.program_id(0).to(tl.int64)
@@ -224,23 +242,23 @@ def _adaln_epilogue_kernel(
     if BLOCK_K >= N:
         cols = tl.arange(0, BLOCK_K)
         mask = rmask[:, None] & (cols[None, :] < N)
-        x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
         mean = tl.sum(x, axis=1) / N
         xc = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / N
         rstd = 1.0 / tl.sqrt(var + eps)
         x_hat = xc * rstd[:, None]
-        scale = tl.load(SB + rm[:, None] * ss0 + cols[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
-        bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
+        scale = tl.load(SB + rm[:, None] * ss0 + wide(cols, WIDE)[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
+        bias = tl.load(SB + rm[:, None] * ss0 + (wide(cols, WIDE)[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
         y = tl.sigmoid(scale) * x_hat + bias
-        tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
+        tl.store(Y + rm[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
     else:
         s = tl.zeros([BLOCK_M1], dtype=tl.float32)
         ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
         for n0 in range(0, N, BLOCK_K):
             cols = n0 + tl.arange(0, BLOCK_K)
             mask = rmask[:, None] & (cols[None, :] < N)
-            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
             s += tl.sum(x, axis=1)
             ss += tl.sum(x * x, axis=1)
         mean = s / N
@@ -249,12 +267,12 @@ def _adaln_epilogue_kernel(
         for n0 in range(0, N, BLOCK_K):
             cols = n0 + tl.arange(0, BLOCK_K)
             mask = rmask[:, None] & (cols[None, :] < N)
-            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
             x_hat = (x - mean[:, None]) * rstd[:, None]
-            scale = tl.load(SB + rm[:, None] * ss0 + cols[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
-            bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
+            scale = tl.load(SB + rm[:, None] * ss0 + wide(cols, WIDE)[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
+            bias = tl.load(SB + rm[:, None] * ss0 + (wide(cols, WIDE)[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
             y = tl.sigmoid(scale) * x_hat + bias
-            tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
+            tl.store(Y + rm[:, None] * sy0 + wide(cols, WIDE)[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
 
 
 def _adaln_epilogue_fake(x, sb, eps, shape_key=None):
@@ -294,6 +312,7 @@ def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float, shape_key: in
         y.stride(0),
         y.stride(1),
         shape_key=pack(shape_key, N=N),
+        WIDE=needs_wide(x, sb, y),
     )
     return y
 
@@ -346,6 +365,7 @@ def _adaln_gemm_gate_kernel(
     GROUP_M: tl.constexpr,
     shape_key,
     PRE: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit row offsets (launcher: needs_wide on the activations)
 ):
     """y = sigmoid(CondN @ SW + SB) * (x*rstd - c1) + CondN @ BW, one program per output tile.
 
@@ -364,7 +384,7 @@ def _adaln_gemm_gate_kernel(
     block looping over all of NX. That was worth 0.776 -> 0.580 ms on its own: a per-row program
     serialises NX/BLOCK_N iterations inside one CTA, which is parallelism left on the floor.
     """
-    pid_m, pid_n = tile_order(tl.program_id(0), tl.cdiv(M, BLOCK_M), tl.cdiv(NX, BLOCK_N), GROUP_M)
+    pid_m, pid_n = tile_order(wide(tl.program_id(0), WIDE), tl.cdiv(M, BLOCK_M), tl.cdiv(NX, BLOCK_N), GROUP_M)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     rmask = rows < M
@@ -447,6 +467,7 @@ def _adaln_gemm_gate(
         y.stride(0),
         shape_key=pack(shape_key, NX=NX, NC=NC),
         PRE=pre,
+        WIDE=needs_wide(cond_n, x, y),
     )
     return y
 
@@ -500,6 +521,7 @@ def _cond_affine_stats_saved(
         MC=mean_c,
         RC=rstd_c,
         SAVE_C=True,
+        WIDE=needs_wide(cond, aff, x),
     )
     return aff, rstd, c1, mean_c, rstd_c
 
@@ -591,6 +613,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
     BLOCK_K_NC: tl.constexpr,
     shape_key,
     PRE: tl.constexpr = False,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -601,7 +624,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
     for cs in range(0, NC, BLOCK_K_NC):
         cc = cs + tl.arange(0, BLOCK_K_NC)
         cm = row_mask[:, None] & (cc[None, :] < NC)
-        co = rows[:, None] * scr + cc[None, :] * scc
+        co = rows[:, None] * scr + wide(cc, WIDE)[None, :] * scc
         v = tl.load(Cond + co, mask=cm, other=0.0).to(tl.float32)
         mean_c += tl.sum(tl.where(cm, v, 0.0), axis=1)
     mean_c /= NC
@@ -609,7 +632,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
     for cs in range(0, NC, BLOCK_K_NC):
         cc = cs + tl.arange(0, BLOCK_K_NC)
         cm = row_mask[:, None] & (cc[None, :] < NC)
-        co = rows[:, None] * scr + cc[None, :] * scc
+        co = rows[:, None] * scr + wide(cc, WIDE)[None, :] * scc
         v = tl.load(Cond + co, mask=cm, other=0.0).to(tl.float32)
         vc = tl.where(cm, v - mean_c[:, None], 0.0)
         var_c += tl.sum(vc * vc, axis=1)
@@ -620,7 +643,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
     for xs in range(0, NX, BLOCK_K_NX):
         xc = xs + tl.arange(0, BLOCK_K_NX)
         xm = row_mask[:, None] & (xc[None, :] < NX)
-        xo = rows[:, None] * sxr + xc[None, :] * sxc
+        xo = rows[:, None] * sxr + wide(xc, WIDE)[None, :] * sxc
         v = tl.load(X + xo, mask=xm, other=0.0).to(tl.float32)
         mean_x += tl.sum(tl.where(xm, v, 0.0), axis=1)
     mean_x /= NX
@@ -628,7 +651,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
     for xs in range(0, NX, BLOCK_K_NX):
         xc = xs + tl.arange(0, BLOCK_K_NX)
         xm = row_mask[:, None] & (xc[None, :] < NX)
-        xo = rows[:, None] * sxr + xc[None, :] * sxc
+        xo = rows[:, None] * sxr + wide(xc, WIDE)[None, :] * sxc
         v = tl.load(X + xo, mask=xm, other=0.0).to(tl.float32)
         vc = tl.where(xm, v - mean_x[:, None], 0.0)
         var_x += tl.sum(vc * vc, axis=1)
@@ -638,7 +661,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
     for xs in range(0, NX, BLOCK_K_NX):
         xc = xs + tl.arange(0, BLOCK_K_NX)
         xm = row_mask[:, None] & (xc[None, :] < NX)
-        xo = rows[:, None] * sxr + xc[None, :] * sxc
+        xo = rows[:, None] * sxr + wide(xc, WIDE)[None, :] * sxc
         xv = tl.load(X + xo, mask=xm, other=0.0).to(tl.float32)
         x_hat = (xv - mean_x[:, None]) * rstd_x[:, None]
 
@@ -648,7 +671,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
         for cs in range(0, NC, BLOCK_K_NC):
             cc = cs + tl.arange(0, BLOCK_K_NC)
             cm = row_mask[:, None] & (cc[None, :] < NC)
-            co = rows[:, None] * scr + cc[None, :] * scc
+            co = rows[:, None] * scr + wide(cc, WIDE)[None, :] * scc
             v = tl.load(Cond + co, mask=cm, other=0.0).to(tl.float32)
             cond_norm = (v - mean_c[:, None]) * rstd_c[:, None]
             lnw = tl.load(LnW + cc, mask=cc < NC, other=0.0).to(tl.float32)
@@ -667,7 +690,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
             bias += tf32_dot(cond_aff, bw, out_dtype=tl.float32, pre_b=PRE)
         scale += scale_b[None, :]
         y = tl.sigmoid(scale) * x_hat + bias
-        yo = rows[:, None] * syr + xc[None, :] * syc
+        yo = rows[:, None] * syr + wide(xc, WIDE)[None, :] * syc
         tl.store(Y + yo, y.to(Y.dtype.element_ty), mask=xm)
 
 
@@ -731,6 +754,7 @@ def adaln_inference_fused(
         PRE=pre,
         # L is x's pre-flatten shape[-2]; m = B*A is the row count, not the shape.
         shape_key=atom_key(length_of(orig_x_shape), NX=nx, NC=nc),
+        WIDE=needs_wide(x2d, cond2d, y),
     )
     return y.reshape(orig_x_shape)
 

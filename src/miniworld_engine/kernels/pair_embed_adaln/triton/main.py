@@ -237,7 +237,7 @@ def _adaln_dw(
 def _adaln_bwd_reduce(PART, OUT, total, count, stride, off, BLOCK: tl.constexpr, shape_key):
     """OUT[g, k] = sum over r < count of PART[(g * count + r) * stride + off + k], in the order r = 0, 1, ..."""
     g = tl.program_id(1).to(tl.int64)
-    k = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    k = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     m = k < total
     acc = tl.zeros([BLOCK], dtype=tl.float32)
     for r in range(count):

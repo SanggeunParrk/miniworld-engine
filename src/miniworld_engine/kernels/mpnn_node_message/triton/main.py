@@ -143,15 +143,15 @@ def _node_message_fwd_kernel(
     hidden_bias = tl.load(hidden_bias_ptr + columns).to(tl.bfloat16)
 
     for slot in range(GROUPS):
-        group = tl.program_id(0) * GROUPS + slot
+        group = tl.program_id(0).to(tl.int64) * GROUPS + slot
         valid = window_valid & (group < groups_total)
-        rows = group * NEIGHBORS + window
-        offsets = rows[:, None] * WIDTH + columns[None, :]
-        edge = tl.load(edge_ptr + offsets, mask=valid[:, None], other=0.0).to(tl.bfloat16)
+        row0 = group * NEIGHBORS  # the group's first edge row (int64)
+        tile = window[:, None] * WIDTH + columns[None, :]  # in-group offsets (int32)
+        edge = tl.load(edge_ptr + row0 * WIDTH + tile, mask=valid[:, None], other=0.0).to(tl.bfloat16)
         query = tl.load(query_ptr + group * WIDTH + columns, mask=group < groups_total, other=0.0).to(tl.float32)
-        neighbor_rows = tl.load(index_ptr + rows, mask=valid, other=0)
+        neighbor_rows = tl.load(index_ptr + row0 + window, mask=valid, other=0)
         neighbor = tl.load(
-            neighbor_ptr + neighbor_rows[:, None] * WIDTH + columns[None, :],
+            neighbor_ptr + neighbor_rows.to(tl.int64)[:, None] * WIDTH + columns[None, :],
             mask=valid[:, None],
             other=0.0,
         ).to(tl.float32)
@@ -163,12 +163,12 @@ def _node_message_fwd_kernel(
         activated = _gelu(preactivation.to(tl.float32)).to(tl.bfloat16)
         hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(tl.bfloat16)
         if SAVE_PREACT:
-            tl.store(preactivation_ptr + offsets, preactivation, mask=valid[:, None])
-            tl.store(hidden_ptr + offsets, hidden, mask=valid[:, None])
+            tl.store(preactivation_ptr + row0 * WIDTH + tile, preactivation, mask=valid[:, None])
+            tl.store(hidden_ptr + row0 * WIDTH + tile, hidden, mask=valid[:, None])
         # The separate reduction kernel rounds the second GELU to BF16 before the
         # FP32 accumulation; keep that boundary.
         gated = _gelu(hidden.to(tl.float32)).to(tl.bfloat16).to(tl.float32)
-        weights = tl.load(mask_ptr + rows, mask=valid, other=0.0).to(tl.float32)
+        weights = tl.load(mask_ptr + row0 + window, mask=valid, other=0.0).to(tl.float32)
         reduced = tl.sum(tl.where(valid[:, None], gated * weights[:, None], 0.0), axis=0)
         tl.store(
             reduced_ptr + group * WIDTH + columns,
@@ -228,19 +228,19 @@ def _node_message_replay_kernel(
     grad_hidden_bias = tl.zeros((WIDTH,), tl.float32)
 
     for slot in range(GROUPS):
-        local_group = tl.program_id(0) * GROUPS + slot
+        local_group = tl.program_id(0).to(tl.int64) * GROUPS + slot
         group = local_group + group_offset
         alive = (local_group < chunk_groups) & (group < groups_total)
         valid = window_valid & alive
-        rows = group * NEIGHBORS + window
-        offsets = rows[:, None] * WIDTH + columns[None, :]
-        local_offsets = (local_group * NEIGHBORS + window)[:, None] * WIDTH + columns[None, :]
+        row0 = group * NEIGHBORS  # the group's first edge row (int64)
+        tile = window[:, None] * WIDTH + columns[None, :]  # in-group offsets (int32)
+        local_row0 = local_group * NEIGHBORS
 
-        edge = tl.load(edge_ptr + offsets, mask=valid[:, None], other=0.0).to(tl.bfloat16)
+        edge = tl.load(edge_ptr + row0 * WIDTH + tile, mask=valid[:, None], other=0.0).to(tl.bfloat16)
         query = tl.load(query_ptr + group * WIDTH + columns, mask=alive, other=0.0).to(tl.float32)
-        neighbor_rows = tl.load(index_ptr + rows, mask=valid, other=0)
+        neighbor_rows = tl.load(index_ptr + row0 + window, mask=valid, other=0)
         neighbor = tl.load(
-            neighbor_ptr + neighbor_rows[:, None] * WIDTH + columns[None, :],
+            neighbor_ptr + neighbor_rows.to(tl.int64)[:, None] * WIDTH + columns[None, :],
             mask=valid[:, None],
             other=0.0,
         ).to(tl.float32)
@@ -253,14 +253,14 @@ def _node_message_replay_kernel(
         # The separate reduction-backward kernel rounds to BF16 before applying the
         # GELU derivative; keep that boundary.
         grad_reduced = tl.load(grad_reduced_ptr + group * WIDTH + columns, mask=alive, other=0.0).to(tl.float32)
-        weights = tl.load(mask_ptr + rows, mask=valid, other=0.0).to(tl.float32)
+        weights = tl.load(mask_ptr + row0 + window, mask=valid, other=0.0).to(tl.float32)
         grad_gated = (grad_reduced[None, :] * weights[:, None] / neighbor_scale).to(tl.bfloat16)
         grad_hidden = (grad_gated.to(tl.float32) * _gelu_grad(hidden.to(tl.float32))).to(tl.bfloat16)
         grad_hidden_bias += tl.sum(tl.where(valid[:, None], grad_hidden.to(tl.float32), 0.0), axis=0)
 
-        tl.store(preactivation_ptr + local_offsets, preactivation, mask=valid[:, None])
-        tl.store(activated_ptr + local_offsets, activated, mask=valid[:, None])
-        tl.store(grad_hidden_ptr + local_offsets, grad_hidden, mask=valid[:, None])
+        tl.store(preactivation_ptr + local_row0 * WIDTH + tile, preactivation, mask=valid[:, None])
+        tl.store(activated_ptr + local_row0 * WIDTH + tile, activated, mask=valid[:, None])
+        tl.store(grad_hidden_ptr + local_row0 * WIDTH + tile, grad_hidden, mask=valid[:, None])
 
     tl.atomic_add(grad_hidden_bias_ptr + columns, grad_hidden_bias)
 
@@ -306,20 +306,20 @@ def _node_message_dx_kernel(
     hidden_weight_rows = tl.load(hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]).to(tl.bfloat16)
 
     for slot in range(GROUPS):
-        local_group = tl.program_id(0) * GROUPS + slot
+        local_group = tl.program_id(0).to(tl.int64) * GROUPS + slot
         group = local_group + group_offset
         alive = (local_group < chunk_groups) & (group < groups_total)
         valid = window_valid & alive
-        rows = group * NEIGHBORS + window
-        offsets = rows[:, None] * WIDTH + columns[None, :]
-        local_offsets = (local_group * NEIGHBORS + window)[:, None] * WIDTH + columns[None, :]
+        row0 = group * NEIGHBORS  # the group's first edge row (int64)
+        tile = window[:, None] * WIDTH + columns[None, :]  # in-group offsets (int32)
+        local_row0 = local_group * NEIGHBORS
 
-        grad_hidden = tl.load(grad_hidden_ptr + local_offsets, mask=valid[:, None], other=0.0).to(tl.bfloat16)
-        preactivation = tl.load(preactivation_ptr + local_offsets, mask=valid[:, None], other=0.0).to(tl.float32)
+        grad_hidden = tl.load(grad_hidden_ptr + local_row0 * WIDTH + tile, mask=valid[:, None], other=0.0).to(tl.bfloat16)
+        preactivation = tl.load(preactivation_ptr + local_row0 * WIDTH + tile, mask=valid[:, None], other=0.0).to(tl.float32)
         grad_preactivation = (tl.dot(grad_hidden, hidden_weight_rows) * _gelu_grad(preactivation)).to(tl.bfloat16)
 
         tl.store(
-            grad_edge_ptr + offsets,
+            grad_edge_ptr + row0 * WIDTH + tile,
             tl.dot(grad_preactivation, edge_weight_rows),
             mask=valid[:, None],
         )
@@ -328,14 +328,14 @@ def _node_message_dx_kernel(
             tl.sum(tl.where(valid[:, None], grad_preactivation.to(tl.float32), 0.0), axis=0),
             mask=alive & (columns < WIDTH),
         )
-        neighbor_rows = tl.load(index_ptr + rows, mask=valid, other=0)
+        neighbor_rows = tl.load(index_ptr + row0 + window, mask=valid, other=0)
         tl.atomic_add(
-            grad_neighbor_ptr + neighbor_rows[:, None] * WIDTH + columns[None, :],
+            grad_neighbor_ptr + neighbor_rows.to(tl.int64)[:, None] * WIDTH + columns[None, :],
             grad_preactivation.to(tl.float32),
             mask=valid[:, None],
         )
         tl.store(
-            grad_preactivation_ptr + local_offsets,
+            grad_preactivation_ptr + local_row0 * WIDTH + tile,
             grad_preactivation,
             mask=valid[:, None],
         )

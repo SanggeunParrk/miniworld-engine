@@ -38,6 +38,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine.kernels._launch_config import configured
+from miniworld_engine.kernels._wide import needs_wide, wide
 from miniworld_engine.kernels._shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
 
@@ -67,6 +68,7 @@ def rmsnorm_fwd_kernel(
     BLOCK_K: tl.constexpr,
     shape_key,
     HAS_WEIGHT: tl.constexpr,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     """``x / sqrt(mean(x^2) + eps) (* w)`` over the last axis. No modulation: the adaLN modulate
     that folds a projection into this step is `rmsnorm_adamod`, its own family; this one is the
@@ -91,7 +93,7 @@ def rmsnorm_fwd_kernel(
             rows = tl.arange(0, BLOCK_M1) + t * BLOCK_M1
             row_mask = rows < M
             mask = row_mask[:, None] & col_mask[None, :]
-            x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
             # Masked lanes load 0.0 and contribute exactly nothing to the sum of squares, so the
             # tail columns need no fixup -- the same reason layernorm dropped its own.
             var = tl.sum(x * x, axis=1) / N
@@ -101,7 +103,7 @@ def rmsnorm_fwd_kernel(
             y = x * rstd[:, None]
             if HAS_WEIGHT:
                 y = y * w[None, :]
-            tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
+            tl.store(Y + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, y, mask=mask)
     else:
         for t in range(pid, tiles, nprog):
             rows = tl.arange(0, BLOCK_M1) + t * BLOCK_M1
@@ -110,7 +112,7 @@ def rmsnorm_fwd_kernel(
             for n0 in range(0, N, BLOCK_K):
                 cols = n0 + tl.arange(0, BLOCK_K)
                 mask = row_mask[:, None] & (cols[None, :] < N)
-                x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
+                x = tl.load(X + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
                 ss += tl.sum(x * x, axis=1)
             rstd = tl.math.rsqrt(ss / N + eps)
             tl.store(Rstd + rows, rstd, mask=row_mask)
@@ -119,12 +121,12 @@ def rmsnorm_fwd_kernel(
                 cols = n0 + tl.arange(0, BLOCK_K)
                 col_mask = cols < N
                 mask = row_mask[:, None] & col_mask[None, :]
-                x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
+                x = tl.load(X + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
                 y = x * rstd[:, None]
                 if HAS_WEIGHT:
                     w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
                     y = y * w[None, :]
-                tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
+                tl.store(Y + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, y, mask=mask)
 
 
 @configured(
@@ -149,6 +151,7 @@ def rmsnorm_bwd_kernel(
     BLOCK_K: tl.constexpr,
     shape_key,
     HAS_WEIGHT: tl.constexpr,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # Parameter sums are initialized before this launch and consumed after it.
     # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
@@ -185,8 +188,8 @@ def rmsnorm_bwd_kernel(
             row_mask = rows < M
             mask = row_mask[:, None] & col_mask[None, :]
             rstd = tl.load(Rstd + rows, mask=row_mask, other=0.0).to(tl.float32)
-            x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
-            dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
+            dy = tl.load(DY + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
             xhat = tl.where(mask, x * rstd[:, None], 0.0)
             if HAS_WEIGHT:
                 dw_acc += tl.sum(dy * xhat, axis=0)
@@ -196,7 +199,7 @@ def rmsnorm_bwd_kernel(
             # No c2: without the mean there is only the rstd term in the derivative.
             c1 = tl.sum(xhat * wdy, axis=1) / N
             dx = (wdy - xhat * c1[:, None]) * rstd[:, None]
-            tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
+            tl.store(DX + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, dx, mask=mask)
         if HAS_WEIGHT:
             tl.atomic_add(DW + cols, dw_acc, mask=col_mask, sem="relaxed")
     else:
@@ -209,8 +212,8 @@ def rmsnorm_bwd_kernel(
                 cols = n0 + tl.arange(0, BLOCK_K)
                 col_mask = cols < N
                 mask = row_mask[:, None] & col_mask[None, :]
-                x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
-                dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
+                x = tl.load(X + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
+                dy = tl.load(DY + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
                 xhat = tl.where(mask, x * rstd[:, None], 0.0)
                 if HAS_WEIGHT:
                     w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
@@ -225,8 +228,8 @@ def rmsnorm_bwd_kernel(
                 cols = n0 + tl.arange(0, BLOCK_K)
                 col_mask = cols < N
                 mask = row_mask[:, None] & col_mask[None, :]
-                x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
-                dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
+                x = tl.load(X + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
+                dy = tl.load(DY + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, mask=mask, other=0.0).to(tl.float32)
                 xhat = tl.where(mask, x * rstd[:, None], 0.0)
                 if HAS_WEIGHT:
                     w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
@@ -234,7 +237,7 @@ def rmsnorm_bwd_kernel(
                 else:
                     wdy = tl.where(mask, dy, 0.0)
                 dx = (wdy - xhat * c1[:, None]) * rstd[:, None]
-                tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
+                tl.store(DX + rows[:, None] * stride_r + wide(cols, WIDE)[None, :] * stride_c, dx, mask=mask)
 
 
 @configured(
@@ -268,6 +271,7 @@ def rmsnorm_adamod_fwd_kernel(
     BLOCK_K: tl.constexpr,
     shape_key,
     HAS_WEIGHT: tl.constexpr,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     """``(rmsnorm(q) * (1 + c@Wsc^T) + c@Wsh^T,  c@Wg^T)`` -- adaLN modulate + gate, one kernel.
 
@@ -307,7 +311,7 @@ def rmsnorm_adamod_fwd_kernel(
         cols = tl.arange(0, BLOCK_N)
         col_mask = cols < N
         mask = row_mask[:, None] & col_mask[None, :]
-        q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
+        q = tl.load(Q + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
         rstd = 1 / tl.sqrt(tl.sum(q * q, axis=1) / N + eps)
         tl.store(Rstd + rows, rstd, mask=row_mask)
 
@@ -322,7 +326,9 @@ def rmsnorm_adamod_fwd_kernel(
         for k0 in range(0, K, BLOCK_K):
             ks = k0 + tl.arange(0, BLOCK_K)
             k_mask = ks < K
-            c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc, mask=row_mask[:, None] & k_mask[None, :], other=0.0)
+            c = tl.load(
+                C + rows[:, None] * stride_cr + wide(ks, WIDE)[None, :] * stride_cc, mask=row_mask[:, None] & k_mask[None, :], other=0.0
+            )
             wmask = k_mask[:, None] & col_mask[None, :]
             wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk, mask=wmask, other=0.0)
             wsh = tl.load(WSH + cols[None, :] * stride_wn + ks[:, None] * stride_wk, mask=wmask, other=0.0)
@@ -335,15 +341,15 @@ def rmsnorm_adamod_fwd_kernel(
             w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
             y = y * w[None, :]
         y = y * (1.0 + acc_sc) + acc_sh
-        tl.store(Y + rows[:, None] * stride_qr + cols[None, :] * stride_qc, y, mask=mask)
-        tl.store(GATE + rows[:, None] * stride_qr + cols[None, :] * stride_qc, acc_g, mask=mask)
+        tl.store(Y + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, y, mask=mask)
+        tl.store(GATE + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, acc_g, mask=mask)
         return
 
     ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
     for n0 in range(0, N, BLOCK_N):
         cols = n0 + tl.arange(0, BLOCK_N)
         mask = row_mask[:, None] & (cols[None, :] < N)
-        q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
+        q = tl.load(Q + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
         ss += tl.sum(q * q, axis=1)
     rstd = 1 / tl.sqrt(ss / N + eps)
     tl.store(Rstd + rows, rstd, mask=row_mask)
@@ -365,7 +371,9 @@ def rmsnorm_adamod_fwd_kernel(
             k_mask = ks < K
             # bf16 operands into tl.dot, fp32 accumulator: casting to fp32 first would drop the
             # tensor cores this loop exists to use.
-            c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc, mask=row_mask[:, None] & k_mask[None, :], other=0.0)
+            c = tl.load(
+                C + rows[:, None] * stride_cr + wide(ks, WIDE)[None, :] * stride_cc, mask=row_mask[:, None] & k_mask[None, :], other=0.0
+            )
             wmask = k_mask[:, None] & col_mask[None, :]
             wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk, mask=wmask, other=0.0)
             wsh = tl.load(WSH + cols[None, :] * stride_wn + ks[:, None] * stride_wk, mask=wmask, other=0.0)
@@ -373,14 +381,14 @@ def rmsnorm_adamod_fwd_kernel(
             acc_sh += tl.dot(c, wsh, input_precision="ieee")
             wg = tl.load(WG + cols[None, :] * stride_wn + ks[:, None] * stride_wk, mask=wmask, other=0.0)
             acc_g += tl.dot(c, wg, input_precision="ieee")
-        q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
+        q = tl.load(Q + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
         y = q * rstd[:, None]
         if HAS_WEIGHT:
             w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
             y = y * w[None, :]
         y = y * (1.0 + acc_sc) + acc_sh
-        tl.store(Y + rows[:, None] * stride_qr + cols[None, :] * stride_qc, y, mask=mask)
-        tl.store(GATE + rows[:, None] * stride_qr + cols[None, :] * stride_qc, acc_g, mask=mask)
+        tl.store(Y + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, y, mask=mask)
+        tl.store(GATE + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, acc_g, mask=mask)
 
 
 def _rms_fwd_fake(x_2d, weight, eps, has_w, shape_key):
@@ -410,6 +418,7 @@ def _rms_fwd(x_2d: torch.Tensor, weight: torch.Tensor | None, eps: float, has_w:
         eps,
         shape_key=shape_key,
         HAS_WEIGHT=has_w,
+        WIDE=needs_wide(x_2d, y),
     )
     return y, rstd
 
@@ -454,6 +463,7 @@ def _rms_bwd(
         n,
         shape_key=shape_key,
         HAS_WEIGHT=has_w,
+        WIDE=needs_wide(x_2d, dy_2d, dx),
     )
     return dx.reshape(tuple(input_shape)), dw
 
@@ -529,6 +539,7 @@ def rmsnorm_adamod_bwd_kernel(
     BLOCK_K: tl.constexpr,
     shape_key,
     HAS_WEIGHT: tl.constexpr,
+    WIDE: tl.constexpr = False,  # 64-bit column offsets (launcher: needs_wide on the activations)
 ):
     # Parameter sums are initialized before this launch and consumed after it.
     # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
@@ -557,11 +568,13 @@ def rmsnorm_adamod_bwd_kernel(
         for k0 in range(0, K, BLOCK_K):
             ks = k0 + tl.arange(0, BLOCK_K)
             k_mask = ks < K
-            c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc, mask=row_mask[:, None] & k_mask[None, :], other=0.0)
+            c = tl.load(
+                C + rows[:, None] * stride_cr + wide(ks, WIDE)[None, :] * stride_cc, mask=row_mask[:, None] & k_mask[None, :], other=0.0
+            )
             wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk, mask=k_mask[:, None] & col_mask[None, :], other=0.0)
             acc_sc += tl.dot(c, wsc, input_precision="ieee")
-        q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
-        dy = tl.load(DY + rows[:, None] * stride_qr + cols[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
+        q = tl.load(Q + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
+        dy = tl.load(DY + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
         xhat = tl.where(mask, q * rstd[:, None], 0.0)
         normed = xhat
         if HAS_WEIGHT:
@@ -572,7 +585,7 @@ def rmsnorm_adamod_bwd_kernel(
         # caller would otherwise pay for -- and it turns the caller's four GEMMs into two:
         #   dWpair = [dscale|dy]^T @ cs      (was dWsc and dWsh separately)
         #   dc     = [dscale|dy] @ [Wsc;Wsh] (was two [M,N]@[N,K] and an add)
-        tl.store(DSD + rows[:, None] * stride_sr + cols[None, :] * stride_sc, dy * normed, mask=mask)
+        tl.store(DSD + rows[:, None] * stride_sr + wide(cols, WIDE)[None, :] * stride_sc, dy * normed, mask=mask)
         tl.store(DSD + rows[:, None] * stride_sr + (N + cols[None, :]) * stride_sc, dy, mask=mask)
         dnormed = tl.where(mask, dy * (1.0 + acc_sc), 0.0)
         if HAS_WEIGHT:
@@ -582,7 +595,7 @@ def rmsnorm_adamod_bwd_kernel(
             wdy = dnormed
         c1 = tl.sum(xhat * wdy, axis=1) / N
         dq = (wdy - xhat * c1[:, None]) * rstd[:, None]
-        tl.store(DQ + rows[:, None] * stride_qr + cols[None, :] * stride_qc, dq, mask=mask)
+        tl.store(DQ + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, dq, mask=mask)
     else:
         c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
         for n0 in range(0, N, BLOCK_N):
@@ -593,13 +606,15 @@ def rmsnorm_adamod_bwd_kernel(
             for k0 in range(0, K, BLOCK_K):
                 ks = k0 + tl.arange(0, BLOCK_K)
                 k_mask = ks < K
-                c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc, mask=row_mask[:, None] & k_mask[None, :], other=0.0)
+                c = tl.load(
+                    C + rows[:, None] * stride_cr + wide(ks, WIDE)[None, :] * stride_cc, mask=row_mask[:, None] & k_mask[None, :], other=0.0
+                )
                 wsc = tl.load(
                     WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk, mask=k_mask[:, None] & col_mask[None, :], other=0.0
                 )
                 acc_sc += tl.dot(c, wsc, input_precision="ieee")
-            q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
-            dy = tl.load(DY + rows[:, None] * stride_qr + cols[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
+            q = tl.load(Q + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
+            dy = tl.load(DY + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
             xhat = tl.where(mask, q * rstd[:, None], 0.0)
             normed = xhat
             if HAS_WEIGHT:
@@ -610,7 +625,7 @@ def rmsnorm_adamod_bwd_kernel(
             # caller would otherwise pay for -- and it turns the caller's four GEMMs into two:
             #   dWpair = [dscale|dy]^T @ cs      (was dWsc and dWsh separately)
             #   dc     = [dscale|dy] @ [Wsc;Wsh] (was two [M,N]@[N,K] and an add)
-            tl.store(DSD + rows[:, None] * stride_sr + cols[None, :] * stride_sc, dy * normed, mask=mask)
+            tl.store(DSD + rows[:, None] * stride_sr + wide(cols, WIDE)[None, :] * stride_sc, dy * normed, mask=mask)
             tl.store(DSD + rows[:, None] * stride_sr + (N + cols[None, :]) * stride_sc, dy, mask=mask)
             dnormed = tl.where(mask, dy * (1.0 + acc_sc), 0.0)
             if HAS_WEIGHT:
@@ -629,13 +644,15 @@ def rmsnorm_adamod_bwd_kernel(
             for k0 in range(0, K, BLOCK_K):
                 ks = k0 + tl.arange(0, BLOCK_K)
                 k_mask = ks < K
-                c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc, mask=row_mask[:, None] & k_mask[None, :], other=0.0)
+                c = tl.load(
+                    C + rows[:, None] * stride_cr + wide(ks, WIDE)[None, :] * stride_cc, mask=row_mask[:, None] & k_mask[None, :], other=0.0
+                )
                 wsc = tl.load(
                     WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk, mask=k_mask[:, None] & col_mask[None, :], other=0.0
                 )
                 acc_sc += tl.dot(c, wsc, input_precision="ieee")
-            q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
-            dy = tl.load(DY + rows[:, None] * stride_qr + cols[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
+            q = tl.load(Q + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
+            dy = tl.load(DY + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, mask=mask, other=0.0).to(tl.float32)
             xhat = tl.where(mask, q * rstd[:, None], 0.0)
             dnormed = tl.where(mask, dy * (1.0 + acc_sc), 0.0)
             if HAS_WEIGHT:
@@ -644,7 +661,7 @@ def rmsnorm_adamod_bwd_kernel(
             else:
                 wdy = dnormed
             dq = (wdy - xhat * c1[:, None]) * rstd[:, None]
-            tl.store(DQ + rows[:, None] * stride_qr + cols[None, :] * stride_qc, dq, mask=mask)
+            tl.store(DQ + rows[:, None] * stride_qr + wide(cols, WIDE)[None, :] * stride_qc, dq, mask=mask)
 
 
 def _adamod_fwd_fake(q_2d, c_2d, wsc, wsh, wg, weight, eps, has_w, shape_key):
@@ -694,6 +711,7 @@ def _adamod_fwd(
         eps,
         shape_key=shape_key,
         HAS_WEIGHT=has_w,
+        WIDE=needs_wide(q_2d, c_2d, y, gate),
     )
     return y, rstd, gate
 
@@ -763,6 +781,7 @@ def _adamod_bwd(
         k,
         shape_key=shape_key,
         HAS_WEIGHT=has_w,
+        WIDE=needs_wide(q_2d, c_2d, dy_2d, dq, dsd),
     )
     return dq, dsd, dw
 
