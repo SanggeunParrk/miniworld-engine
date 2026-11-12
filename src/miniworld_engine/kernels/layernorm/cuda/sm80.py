@@ -36,7 +36,7 @@ _dir = Path(__file__).parent / "sm80"
 MAX_N = 4096
 
 
-def _build(name: str, gencode: str):
+def _build(name: str, gencode: str, extra: tuple = ()):
     ensure_cuda_home()
     return load_extension(
         name=name,
@@ -47,6 +47,7 @@ def _build(name: str, gencode: str):
             "-O3",
             gencode,
             f"-I{_dir}",
+            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
@@ -63,7 +64,7 @@ def ext_sm80():
 def ext_sm120():
     """The GeForce RTX 5090 build of the same sources (``norm_rows_sm120``, sm_120a): nothing in them is A100-specific (cp.async, shuffles,
     at most 64 KB of dynamic shared memory, under the 5090's 99 KB a block)."""
-    return _build("norm_rows_sm120", "-gencode=arch=compute_120a,code=sm_120a")
+    return _build("norm_rows_sm120", "-gencode=arch=compute_120a,code=sm_120a", ("-DMWE_SM120",))
 
 
 @device_constant
