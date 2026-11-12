@@ -12,6 +12,7 @@ from pathlib import Path
 import torch
 
 from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
+from ..._sm120_builds import per_arch
 from .fused_fwd_sm80 import SHAPES, _o_perm, max_rows
 
 _dir = Path(__file__).parent / "sm80"
@@ -21,23 +22,27 @@ _dir = Path(__file__).parent / "sm80"
 MIN_ROWS = {(64, 128): 8192, (64, 256): 2048, (128, 256): 8192, (128, 512): 8192}
 
 
-@functools.lru_cache(maxsize=1)
-def _ext():
+def _build(suffix: str, gencode: str):
     ensure_cuda_home()
     return load_extension(
-        name="transition_bwd_sm80",
+        name=f"transition_bwd_{suffix}",
         sources=[str(_dir / "transition_bwd_sm80.cu")],
         extra_cuda_cflags=[
             *host_flags(),
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
+            gencode,
             f"-I{_dir}",
             "-DPW_XN",
+            *(["-DMWE_SM120"] if suffix == "sm120" else []),  # the RTX 5090 tiles (99 KB a block): 32-row PW stages, a 5-slot X ring at D = 128
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )
+
+
+#: the A100 build (``transition_bwd_sm80``, unchanged) and the GeForce RTX 5090 one (``transition_bwd_sm120``: the same source for sm_120a with its tiles)
+_ext, _ext_sm80, _ext_sm120 = per_arch(_build)
 
 
 @torch.compiler.assume_constant_result

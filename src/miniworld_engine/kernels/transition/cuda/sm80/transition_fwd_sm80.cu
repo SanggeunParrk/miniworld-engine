@@ -44,7 +44,13 @@ std::vector<torch::Tensor> fwd_t(torch::Tensor x, torch::Tensor w, torch::Tensor
   p.trace = nullptr;
   p.T = (int)T; p.num_tiles = (p.T + G::BM - 1) / G::BM; p.eps = (float)eps;
   if (T == 0) return {out, xn, stats};
+#if defined(MWE_SM120)
+  // RTX 5090: an SM's f32-accumulate tensor rate is ~0.4x the A100's, so a 256-row tile takes ~2.4x longer; with at most half as many tiles
+  // as SMs every tile runs as two half tiles (16 rows per warp) on twice the CTAs (the kernel's half-tile schedule: grid > tiles)
+  const int g = G::MTF == 2 && 2 * p.num_tiles <= num_sms() * G::MINB ? (p.T + G::BM / 2 - 1) / (G::BM / 2) : std::min(p.num_tiles, num_sms() * G::MINB);
+#else
   const int g = std::min(p.num_tiles, num_sms() * G::MINB);
+#endif
   TORCH_CHECK(p.num_tiles / g + 2 <= G::MAX_ITEMS, "fwd: too many work items per CTA");
   set_smem(a100::tr_fwd_kernel<G, LN>, G::SMEM);
   a100::tr_fwd_kernel<G, LN><<<g, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
