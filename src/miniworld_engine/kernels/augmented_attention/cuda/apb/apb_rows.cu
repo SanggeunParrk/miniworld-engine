@@ -145,9 +145,11 @@ __device__ __forceinline__ void wf_frags(const bf* W, uint32_t (&b)[NT8][DPW / 1
 
 // ST (optional): the (mean, rstd) of every pair row, for a backward that does not recompute them; BU (optional): the unmasked bias
 // fp32 head-major [NH, L, L] (the wide backward's S2 = sum_h dbias_h bias_h)
+// NB pairs (the batched inference, 2026-11-12): Z [NB, L, L, DPW], MASK [NB, L], OUT [NH, NB, L, L] (head-major, then the batch row: the
+// inference core's per-sample bias groups, attn_inf nbg = NB); the tiles of every batch row in one persistent pass. NB = 1 is the one-pair op.
 template <int NH, int DPW = DP>
 __global__ void __launch_bounds__(32 * fwd_warps<DPW>()) pair_bias_fwd_k(const bf* __restrict__ Z, const bf* __restrict__ W,
-    const bool* __restrict__ MASK, bf* __restrict__ OUT, float2* __restrict__ ST, float* __restrict__ BU, int L, float eps, float neg) {
+    const bool* __restrict__ MASK, bf* __restrict__ OUT, float2* __restrict__ ST, float* __restrict__ BU, int L, float eps, float neg, int NB = 1) {
   constexpr int NT8 = nhp<NH>() / 8, NHP = nhp<NH>(), NSF = fwd_stages<DPW>(), FT = fwd_tile<DPW>(), UU = DPW / 32;
   constexpr int TR = fwd_rows<DPW>(), NTH = 32 * fwd_warps<DPW>(), TC = TR / 8;   // keys per tile, threads, 8-key chunks per tile
   extern __shared__ __align__(128) uint8_t smem[];
@@ -155,7 +157,7 @@ __global__ void __launch_bounds__(32 * fwd_warps<DPW>()) pair_bias_fwd_k(const b
   uint64_t* full = reinterpret_cast<uint64_t*>(smem + NSF * FT + 2 * NHP * (128 + 4) * 4);
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, q = lane & 3;
   const int ntj = (L + TR - 1) / TR;
-  const long ntiles = (long)L * ntj;
+  const long ntiles = (long)NB * L * ntj;
   auto issue = [&](long n) {                                                // thread 0: this block's n-th tile into its stage
     const long t = blockIdx.x + n * gridDim.x;
     if (t >= ntiles) return;
@@ -177,7 +179,9 @@ __global__ void __launch_bounds__(32 * fwd_warps<DPW>()) pair_bias_fwd_k(const b
   for (long n = 0;; ++n) {
     const long t = blockIdx.x + n * gridDim.x;
     if (t >= ntiles) break;
-    const int i = (int)(t / ntj), j0 = (int)(t % ntj) * TR, rows = min(TR, L - j0), st = (int)(n % NSF);
+    const int ig = (int)(t / ntj), j0 = (int)(t % ntj) * TR, rows = min(TR, L - j0), st = (int)(n % NSF);
+    const int bb = ig / L, i = ig - bb * L;                                // batch row, query row (ig: the row of [NB L])
+    const bool* mrow = MASK ? MASK + (long)bb * L : nullptr;
     mbar_wait(&full[st], (uint32_t)((n / NSF) & 1));
     const uint8_t* tile = smem + st * FT;
     float (*os)[128 + 4] = out_s[n & 1];
@@ -221,8 +225,8 @@ __global__ void __launch_bounds__(32 * fwd_warps<DPW>()) pair_bias_fwd_k(const b
       gram_stats<DPW>(g0, g1, cs, eps, m0, rs0, m1, rs1);
       const int jl = rb + g;
       if (ST != nullptr && q == 0) {
-        ST[(long)i * L + j0 + jl] = make_float2(m0, rs0);
-        ST[(long)i * L + j0 + jl + 8] = make_float2(m1, rs1);
+        ST[(long)ig * L + j0 + jl] = make_float2(m0, rs0);
+        ST[(long)ig * L + j0 + jl + 8] = make_float2(m1, rs1);
       }
 #pragma unroll
       for (int nt = 0; nt < NT8; ++nt) {
@@ -237,18 +241,18 @@ __global__ void __launch_bounds__(32 * fwd_warps<DPW>()) pair_bias_fwd_k(const b
       const int h = task / TC, ch = task % TC, j = j0 + ch * 8;
       if (ch * 8 >= rows) continue;
       if (BU != nullptr) {
-        float* bu = BU + ((long)h * L + i) * L + j;
+        float* bu = BU + (((long)h * NB + bb) * L + i) * L + j;
         *reinterpret_cast<float4*>(bu) = make_float4(os[h][ch * 8], os[h][ch * 8 + 1], os[h][ch * 8 + 2], os[h][ch * 8 + 3]);
         *reinterpret_cast<float4*>(bu + 4) = make_float4(os[h][ch * 8 + 4], os[h][ch * 8 + 5], os[h][ch * 8 + 6], os[h][ch * 8 + 7]);
       }
       uint32_t o[4];
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
-        float a = os[h][ch * 8 + 2 * e], bb = os[h][ch * 8 + 2 * e + 1];
-        if (MASK) { if (!MASK[j + 2 * e]) a = neg; if (!MASK[j + 2 * e + 1]) bb = neg; }
-        o[e] = pack2(a, bb);
+        float a = os[h][ch * 8 + 2 * e], c1 = os[h][ch * 8 + 2 * e + 1];
+        if (mrow) { if (!mrow[j + 2 * e]) a = neg; if (!mrow[j + 2 * e + 1]) c1 = neg; }
+        o[e] = pack2(a, c1);
       }
-      *reinterpret_cast<uint4*>(OUT + ((long)h * L + i) * L + j) = make_uint4(o[0], o[1], o[2], o[3]);
+      *reinterpret_cast<uint4*>(OUT + (((long)h * NB + bb) * L + i) * L + j) = make_uint4(o[0], o[1], o[2], o[3]);
     }
   }
 }
@@ -1219,45 +1223,51 @@ int nsm_of(const at::Tensor& t) {
 
 template <int NH, int DPW>
 void pair_bias_fwd_t(const at::Tensor& z, const at::Tensor& w, const c10::optional<at::Tensor>& mask, at::Tensor& out, float2* st, float* bu,
-                     int64_t L, double eps, double neg) {
+                     int64_t L, double eps, double neg, int64_t NB = 1) {
   static bool attr = false;
   if (!attr) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_fwd_k<NH, DPW>, cudaFuncAttributeMaxDynamicSharedMemorySize, fwd_smem<NH, DPW>()));
     attr = true;
   }
   constexpr int TR = fwd_rows<DPW>();
-  const long ntiles = L * ((L + TR - 1) / TR);
+  const long ntiles = NB * L * ((L + TR - 1) / TR);
   const long per_sm = DPW > 128 ? 1 : 2;  // the wide ring fills the SM's shared memory
   pair_bias_fwd_k<NH, DPW><<<(unsigned)std::min<long>(per_sm * nsm_of(z), ntiles), 32 * fwd_warps<DPW>(), fwd_smem<NH, DPW>(), S()>>>(
-      CP<bf>(z), CP<bf>(w), mask ? CP<bool>(*mask) : nullptr, P<bf>(out), st, bu, (int)L, (float)eps, (float)neg);
+      CP<bf>(z), CP<bf>(w), mask ? CP<bool>(*mask) : nullptr, P<bf>(out), st, bu, (int)L, (float)eps, (float)neg, (int)NB);
 }
 // d_pair 128 (8 / 12 / 16 / 24 heads), 256 (8 / 16 heads), 384 (8 / 16 heads) or 512 (16 heads); ``stats`` (optional [L L, 2] fp32)
 // receives every row's (mean, rstd), ``unmasked`` (optional [NH, L, L] fp32) the bias before the key mask
 void pair_bias_fwd_impl(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, c10::optional<at::Tensor> stats,
-                        c10::optional<at::Tensor> unmasked, int64_t L, double eps, double neg) {
+                        c10::optional<at::Tensor> unmasked, int64_t L, double eps, double neg, int64_t NB = 1) {
   chk(z, at::kBFloat16, "pair"); chk(w, at::kBFloat16, "wf"); chk(out, at::kBFloat16, "bias");
   const int64_t nh = w.size(0), dp = w.size(1);
   TORCH_CHECK(dp == DP || ((dp == 2 * DP || dp == 3 * DP) && (nh == 8 || nh == 16)) || (dp == 4 * DP && nh == 16),
               "pair_bias: d_pair 128, 256 / 384 with 8 or 16 heads, or 512 with 16 heads");
-  TORCH_CHECK(L % 16 == 0 && z.numel() == L * L * dp && w.numel() == nh * dp && out.numel() == nh * L * L, "pair_bias_fwd shapes");
+  TORCH_CHECK(NB >= 1 && (NB == 1 || (!stats && !unmasked)), "pair_bias_fwd: a batch of pairs takes no stats / unmasked bias");
+  TORCH_CHECK(L % 16 == 0 && z.numel() == NB * L * L * dp && w.numel() == nh * dp && out.numel() == nh * NB * L * L, "pair_bias_fwd shapes");
   TORCH_CHECK(nh == 8 || nh == 12 || nh == 16 || nh == 24, "pair_bias: 8, 12, 16 or 24 heads");
-  if (mask) { chk(*mask, at::kBool, "mask"); TORCH_CHECK(mask->numel() == L, "mask [L]"); }
+  if (mask) { chk(*mask, at::kBool, "mask"); TORCH_CHECK(mask->numel() == NB * L, "mask [NB, L]"); }
   float2* st = nullptr;
   if (stats) { chk(*stats, at::kFloat, "stats"); TORCH_CHECK(stats->numel() == 2 * L * L, "stats [L L, 2]"); st = reinterpret_cast<float2*>(stats->data_ptr()); }
   float* bu = nullptr;
   if (unmasked) { chk(*unmasked, at::kFloat, "unmasked"); TORCH_CHECK(unmasked->numel() == nh * L * L, "unmasked [NH, L, L]"); bu = P<float>(*unmasked); }
   const at::cuda::CUDAGuard gd(z.device());
-  if (dp == 4 * DP) pair_bias_fwd_t<16, 4 * DP>(z, w, mask, out, st, bu, L, eps, neg);
-  else if (dp == 3 * DP) { if (nh == 16) pair_bias_fwd_t<16, 3 * DP>(z, w, mask, out, st, bu, L, eps, neg); else pair_bias_fwd_t<8, 3 * DP>(z, w, mask, out, st, bu, L, eps, neg); }
-  else if (dp == 2 * DP) { if (nh == 16) pair_bias_fwd_t<16, 2 * DP>(z, w, mask, out, st, bu, L, eps, neg); else pair_bias_fwd_t<8, 2 * DP>(z, w, mask, out, st, bu, L, eps, neg); }
-  else if (nh == 8) pair_bias_fwd_t<8, DP>(z, w, mask, out, st, bu, L, eps, neg);
-  else if (nh == 12) pair_bias_fwd_t<12, DP>(z, w, mask, out, st, bu, L, eps, neg);
-  else if (nh == 16) pair_bias_fwd_t<16, DP>(z, w, mask, out, st, bu, L, eps, neg);
-  else pair_bias_fwd_t<24, DP>(z, w, mask, out, st, bu, L, eps, neg);
+  if (dp == 4 * DP) pair_bias_fwd_t<16, 4 * DP>(z, w, mask, out, st, bu, L, eps, neg, NB);
+  else if (dp == 3 * DP) { if (nh == 16) pair_bias_fwd_t<16, 3 * DP>(z, w, mask, out, st, bu, L, eps, neg, NB); else pair_bias_fwd_t<8, 3 * DP>(z, w, mask, out, st, bu, L, eps, neg, NB); }
+  else if (dp == 2 * DP) { if (nh == 16) pair_bias_fwd_t<16, 2 * DP>(z, w, mask, out, st, bu, L, eps, neg, NB); else pair_bias_fwd_t<8, 2 * DP>(z, w, mask, out, st, bu, L, eps, neg, NB); }
+  else if (nh == 8) pair_bias_fwd_t<8, DP>(z, w, mask, out, st, bu, L, eps, neg, NB);
+  else if (nh == 12) pair_bias_fwd_t<12, DP>(z, w, mask, out, st, bu, L, eps, neg, NB);
+  else if (nh == 16) pair_bias_fwd_t<16, DP>(z, w, mask, out, st, bu, L, eps, neg, NB);
+  else pair_bias_fwd_t<24, DP>(z, w, mask, out, st, bu, L, eps, neg, NB);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void pair_bias_fwd(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, int64_t L, double eps, double neg) {
   pair_bias_fwd_impl(z, w, mask, out, c10::nullopt, c10::nullopt, L, eps, neg);
+}
+// The batched inference pass (H100, AttentionPairBias B > 1): z [NB, L, L, dp] -> out [nh, NB, L, L], mask [NB, L] (one launch)
+void pair_bias_fwd_batch(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, int64_t NB, int64_t L, double eps,
+                         double neg) {
+  pair_bias_fwd_impl(z, w, mask, out, c10::nullopt, c10::nullopt, L, eps, neg, NB);
 }
 void pair_bias_fwd_stats(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, at::Tensor stats, int64_t L, double eps, double neg) {
   pair_bias_fwd_impl(z, w, mask, out, stats, c10::nullopt, L, eps, neg);
@@ -2396,6 +2406,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("zero_acc", &zero_acc);
   m.def("pair_bwd_blocks", &pair_bwd_blocks);
   m.def("pair_bias_fwd", &pair_bias_fwd);
+  m.def("pair_bias_fwd_batch", &pair_bias_fwd_batch);
   m.def("pair_bias_fwd_stats", &pair_bias_fwd_stats);
   m.def("pair_bias_bwd", &pair_bias_bwd);
   m.def("pair_bias_fwd_train", &pair_bias_fwd_train);

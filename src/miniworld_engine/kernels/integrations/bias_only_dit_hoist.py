@@ -30,8 +30,10 @@ bf16 (pair bf16; the weights in any dtype, folded in fp32 and rounded to bf16 as
 accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtype. fp32 (pair and weights fp32, no autocast): the
 same structure, the GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp32.
 
-``serves()`` is the gate (B200, an engine implementation, pair [1, L, L, 128] bf16 or fp32); anything else (H100 included) takes the
-PyTorch fold of ``modules.token_dit.pair_bias_all``.
+``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, C] bf16 or fp32, C = 128, or 256 on H100); anything
+else (A100 included) takes the PyTorch fold of ``modules.token_dit.pair_bias_all``. H100 (2026-11-12, as engine 2.4.4 served it): the
+PyTorch fold hands out head-major views of a [1, L, L, N] product, which the H100 block copies to [H, L, L] on every call (5.5 ms of
+9.8 ms in a 24-block L 768 stack); this op's buffer is head-major already.
 """
 
 from __future__ import annotations
@@ -43,6 +45,10 @@ import torch
 from miniworld_engine.kernels._compile import opaque
 
 DP = 128
+#: the pair widths served: 128 everywhere, 256 on H100 (ln0_rows / ln0_bwd_rows are templates on the width; the GEMMs take any K)
+DPS = (128, 256)
+#: the cards: B200 (sm_100) and H100 (sm_90)
+CARDS = ((10, 0), (9, 0))
 BF = torch.bfloat16
 F32 = torch.float32
 #: the attribute of each hoisted bias that names its slot of the shared gradient buffer: (``_Sink``, block index)
@@ -50,15 +56,18 @@ SINK_ATTR = "_bias_only_dit_hoist_sink"
 
 
 def serves(implementation, attns, pair) -> bool:
-    """The fused hoist serves ``pair`` [1, L, L, 128] on a B200 and the attention modules ``attns`` (eps / head count / no
-    offset checked by the caller)."""
+    """The fused hoist serves ``pair`` [1, L, L, C] (C 128, or 256 on H100) on a B200 or an H100 and the attention modules ``attns``
+    (eps / head count / no offset checked by the caller)."""
 
     if implementation != "miniworld":
         return False
-    if not pair.is_cuda or torch.cuda.get_device_capability(pair.device) != (10, 0):
+    if not pair.is_cuda or torch.cuda.get_device_capability(pair.device) not in CARDS:
         return False
     dp = pair.shape[-1]
-    if pair.ndim != 4 or pair.shape[0] != 1 or pair.shape[1] != pair.shape[2] or dp != DP or pair.shape[1] == 0:
+    wide_ok = torch.cuda.get_device_capability(pair.device) == (9, 0)
+    if pair.ndim != 4 or pair.shape[0] != 1 or pair.shape[1] != pair.shape[2] or pair.shape[1] == 0:
+        return False
+    if dp not in DPS or (dp != DP and not wide_ok):
         return False
     ws = [p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)]
     if any(p is None or not p.is_cuda or p.device != pair.device or p.shape[-1] != dp for p in ws):

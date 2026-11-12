@@ -164,3 +164,29 @@ def test_tc_pair_backward(channels: int, heads: int) -> None:
         assert torch.equal(rows[0][0], dz[b]) and torch.equal(rows[1][0], dw[b])
     again = sm80.pair_bias_generic_backward_tc(z, wcm, db, mask, length)
     assert torch.equal(again[0], dz) and torch.equal(again[1], dw)
+
+
+@pytest.mark.skipif(not (torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)), reason="H100 (sm_90)")
+@pytest.mark.parametrize(("d_pair", "heads", "extra"), [(128, 8, False), (128, 12, True), (256, 16, False)])
+def test_h100_batched_chunks_equal_rows(monkeypatch, d_pair: int, heads: int, extra: bool) -> None:
+    """H100 bf16 inference runs the batch rows together (one launch per stage), in chunks of rows bounded by ``BATCH_BIAS_BYTES``: with
+    the bound forcing chunks of 2 rows out of 5 (and the last of 1), every row still equals its one-row call bitwise."""
+    from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
+
+    m = AttentionPairBias(d_single=384, d_pair=d_pair, n_head=heads).cuda().float()
+    C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
+    built: typing.Any = C.cast(m, "master")
+    built.set_backend("cuda").eval()
+    inp = _inputs(built, 5, 128, "master")
+    planes = None
+    if extra:
+        planes = torch.randn(5, heads, 128, 128, device="cuda", generator=torch.Generator(device="cuda").manual_seed(2)).to(torch.bfloat16)
+    monkeypatch.setattr(native, "BATCH_BIAS_BYTES", 2 * 2 * heads * 128 * 128)
+    assert native._batch_chunk(5, heads, 128) == 2
+    with torch.no_grad(), _autocast("master"):
+        y = built(inp["single"], inp["pair"], inp["mask"], planes)
+        rows = [
+            built(inp["single"][b : b + 1], inp["pair"][b : b + 1], inp["mask"][b : b + 1], None if planes is None else planes[b : b + 1])
+            for b in range(5)
+        ]
+    torch.testing.assert_close(y, torch.cat(rows), rtol=0, atol=0)

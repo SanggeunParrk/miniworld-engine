@@ -9,7 +9,8 @@ and cuBLAS at L 384 / 768 for the five head layouts (ln_pair has no beta, so onl
 repaired), which materializes extra FP32 workspaces and costs about 2x the step.
 
 Contract: bf16 activations (parameters bf16 or fp32 masters) or, H100, fp32 activations with fp32 parameters (the TF32 path at the
-end of this file), B >= 1 (one step per batch row, the packs made once: FoldForge 5I28 confidence head), d_single 384 as 8
+end of this file), B >= 1 (H100 bf16 inference: the batch rows in one launch per stage; else one step per batch row; the packs made
+once: FoldForge 5I28 confidence head), d_single 384 as 8
 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention), or d_single 512 as 16 x 32; d_pair 128 (any
 of those), 256 / 384 (8 or 16 heads) or 512 (16 heads) -- the wide pair kernels, inference and training --; gate_bias (a
 constant on the gate rows of the packed bias); no QK-norm, sm_90 (H100: ``refusal`` is the whole gate, the ``cuda`` backend of
@@ -253,6 +254,16 @@ def _prep(leaves, qs: float, ws: float, gate_bias: float = 0.0):
     return wpack, bvec, wf, wop, wbo
 
 
+#: the H100 batched inference's bias planes per launch, at most (bytes, bf16 [H, rows, L, L]): the batch runs in chunks of rows under it
+#: (deterministic, the same values: each row's math is the per-row step's), so a long L does not hold B rows of planes at once
+BATCH_BIAS_BYTES = 256 << 20
+
+
+def _batch_chunk(B: int, H: int, L: int) -> int:
+    """Batch rows per launch of the H100 batched inference (``BATCH_BIAS_BYTES``), at least 1."""
+    return max(1, min(B, BATCH_BIAS_BYTES // (2 * H * L * L)))
+
+
 def _inference_fake(single, pair, mask, leaves, eps_s, eps_p, gate_bias=0.0, extra=None):
     return torch.empty_like(single)
 
@@ -271,8 +282,9 @@ def inference(
     """single [B, L, 384], pair [B, L, L, 128] bf16, mask [B, L] bool or None, leaves as ``_leaves`` -> single + APB(single). ``extra``
     [B, H, L, L] (any strides): an additive logit term (``extra_pair_bias``), added to the bias planes in their exp2 units.
 
-    B > 1: the one-row step per batch row (FoldForge 5I28 confidence head: the samples' rows), the weight packs made once, each row
-    written into its slice of the one output -- the per-row math of a B = 1 call, launch for launch."""
+    B > 1 (FoldForge 5I28 confidence head: the samples' rows), the weight packs made once: H100 runs the batch rows together, one
+    launch per stage (chunks of ``_batch_chunk`` rows; the per-row math of a B = 1 call, bit for bit), B200 the one-row step per batch
+    row, each row written into its slice of the one output."""
     B, L = single.shape[:2]
     rows, dev = _rows(), single.device
     params = leaves
@@ -287,6 +299,23 @@ def inference(
         if core is None:
             core = _cores[(dev.index, H, D)] = _inference_core(dev, H, D)
         out = torch.empty_like(single)  # each row: the residual seed ln_rows writes; to_out accumulates onto it
+        if B > 1 and torch.cuda.get_device_capability(dev) == (9, 0):
+            # H100, B > 1: the batch rows in one launch per stage (LN rows and the GEMMs over the chunk's rows, the pair pass and the
+            # core with the batch in the grid) -- per-row results identical to the per-row step, 5 launches per chunk instead of 5 B
+            cb = _batch_chunk(B, H, L)
+            for b0 in range(0, B, cb):
+                b1 = min(B, b0 + cb)
+                n = (b1 - b0) * L
+                x, y = single[b0:b1].view(n, D), out[b0:b1].view(n, D)
+                xa = single.new_empty((n, D))
+                rows.ext().ln_rows(x, lnw, lnb, xa, None, eps_s, y)
+                qkvg = torch.addmm(bvec, xa, wpack.t())
+                bias = rows.pair_bias_batch(pair[b0:b1], wf, None if mask is None else mask[b0:b1], eps_p, neg)  # [H, b1 - b0, L, L]
+                if extra is not None:
+                    bias.add_(extra[b0:b1].transpose(0, 1).to(bias.dtype), alpha=LOG2E)
+                core.batch(qkvg, bias)
+                y.addmm_(qkvg[:, :W], wo.t())
+            return out
         xa = single.new_empty((L, D))  # one row's LN(single), rewritten row after row (stream order)
         for b in range(B):
             x, y = single[b], out[b]
