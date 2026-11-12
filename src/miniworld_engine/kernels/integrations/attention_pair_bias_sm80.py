@@ -651,10 +651,11 @@ def _generic_refusal(module, single, pair, mask, grad: bool, padded: bool = Fals
         return "the kernels take the affine LayerNorms"
     idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
     hdp = _hdp(hd)
+    lc = -(-L // 128) * 128 if padded else L  # the core runs at the padded length
     if not (
-        sm80.supported_plain(torch.bfloat16, L, H * hdp, H, idx) if dt is torch.bfloat16 else sm80.supported_tf32(dt, L, H * hdp, H, idx)
+        sm80.supported_plain(torch.bfloat16, lc, H * hdp, H, idx) if dt is torch.bfloat16 else sm80.supported_tf32(dt, lc, H * hdp, H, idx)
     ):
-        return f"{H} x {hdp}, L {L}: outside the sm_80 attention core"
+        return f"{H} x {hdp}, L {lc}: outside the sm_80 attention core"
     if not _generic_loads(dt):
         return "the sm_80 attention extensions failed to build / load"
     return None

@@ -116,10 +116,12 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "anthropic": 2,
         "cueq": 2,
         "cuda:a100_sm80": 4,
+        "cuda:h100_sm90": 2,
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
     # (2026-11-12): row-blocked inference past a whole-pair budget (FoldForge OpenDDE refiner, 2976 / 3968 tokens at d_pair 384; A100: also
-    # L % 128 != 0, padded) -- served sizes up to L2048 keep their path
+    # L % 128 != 0, padded); cuda:h100_sm90 2 (2026-11-12): row blocks of <= 2 GiB of q | k | v | g far past the working-set cap -- served
+    # sizes up to L2048 keep their path
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
