@@ -274,7 +274,7 @@ void attn_fwd_gate_rows(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch
   TORCH_CHECK(L % a100::TA_BM == 0 && L >= 256, "attn_fwd_gate_rows: L a multiple of 128, at least 256");
   TORCH_CHECK(rows >= G::R && rows % G::R == 0 && rows <= L && rows / G::R <= 65535 && H <= 65535, "attn_fwd_gate_rows: rows a multiple of 2 up to L");
   const int64_t T = rows * L;
-  for (auto [t, ld] : {std::pair<const torch::Tensor*, int64_t>{&q, ldq}, {&k, ldk}, {&v, ldv}, {&gate, ldgate}, {&aout, ldao}}) {
+  for (auto [t, ld] : std::initializer_list<std::pair<const torch::Tensor*, int64_t>>{{&q, ldq}, {&k, ldk}, {&v, ldv}, {&gate, ldgate}, {&aout, ldao}}) {
     TORCH_CHECK(ld >= H * 32 && ld % 8 == 0 && reinterpret_cast<uintptr_t>(t->data_ptr()) % 16 == 0, "attn_fwd_gate_rows: row strides / alignment");
     TORCH_CHECK((t->storage_offset() + (T - 1) * ld + H * 32) * t->element_size() <= (int64_t)t->storage().nbytes(), "attn_fwd_gate_rows: tensor extents");
   }
