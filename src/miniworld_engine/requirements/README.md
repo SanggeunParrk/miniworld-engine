@@ -27,7 +27,10 @@ What every engine module must serve, and how a backend of it is judged.
   `dims` / `options` are constructor arguments: `options` holds only arguments that change the class's math (not ones the class
   ignores, e.g. a flag only its caller reads) and, for the model classes (`TokenDiT*` / `AtomDiT*`), only values that differ from the
   class default (each model class defaults to its release's values). Rows with equal (module, stream, dims, options) are one row: the
-  union of lengths / dtypes / modes / selector keys, the per-mode sample counts kept, all sources listed.
+  union of lengths / dtypes / modes / selector keys, the per-mode sample counts kept, all sources listed -- except training lengths:
+  no model trains at the long inference lengths (1024 / 1536 / 2048 tokens, 12288 / 16384 atoms; the FoldForge 5I28 benchmark is
+  inference), so a case set reaching them is two rows: an `eval` row with every length and a `train` row (appended at the end of the
+  file) with the training lengths only (<= 768 tokens, <= 8192 atoms); their modes never overlap (user decision 2026-11-12).
   `source` says who builds the row (FoldForge / MiniWorld models, or `engine-own`: kept by the engine although no
   downstream constructor builds it).
 - `requirements_kernel.csv` — `name,family,modules,role,version`: each kernel of the engine, the module classes whose backend
