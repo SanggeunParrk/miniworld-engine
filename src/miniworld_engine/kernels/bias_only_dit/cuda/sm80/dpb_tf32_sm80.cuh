@@ -14,10 +14,21 @@ namespace bo80 {
 template <int DH_, int NST_, int MINB_>
 struct DpbTCfg {
   static constexpr int DH = DH_, NST = NST_, MINB = MINB_, NTHR = 256, BM = 128, BN = 128, KS = DH_ / 8;
-  static constexpr int ROW = DH_ * 4 + 16;                       // 144 / 208 / 272 B: 9 / 13 / 17 granules
+#ifdef MWE_SM120
+  // RTX 5090 (99 KB a block): head width 48 takes unpadded rows (192 B) with the granules rotated by the row (granule g of row r at (g + r) % 12: the 8 rows of an
+  // ldmatrix fall in 8 distinct 16-B bank groups) -- 98816 B in place of the padded 107008
+  static constexpr bool ROT = DH_ == 48;
+#else
+  static constexpr bool ROT = false;
+#endif
+  static constexpr int ROW = ROT ? DH_ * 4 : DH_ * 4 + 16;      // 144 / 208 / 272 B: 9 / 13 / 17 granules (sm_120a, 48: 192 B rotated)
   static constexpr int ABYTES = BM * ROW, BBYTES = BN * ROW;
   static constexpr int STAGE = ABYTES + BBYTES;
   static constexpr int SMEM = NST_ * STAGE + BM * 4;
+#ifdef MWE_SM120
+  static_assert(SMEM <= 101376, "dpb_tf32: the RTX 5090 has 101376 B of shared memory per block");
+#endif
+  static DEVI uint32_t off(int row, int gr) { return (uint32_t)(row * ROW + (ROT ? (gr + row) % (DH_ / 4) : gr) * 16); }   // byte offset of granule gr of row
 };
 
 struct DpbTParams {
@@ -36,11 +47,11 @@ DEVI void dpbt_load_stage(const DpbTParams& p, uint32_t stage, int a, int i0, in
   const size_t row0 = (size_t)a * p.L;
   for (int i = tid; i < G::BM * GPR; i += G::NTHR) {
     const int row = i / GPR, gr = i - row * GPR;
-    cp_async16(stage + row * G::ROW + gr * 16, p.dout + (row0 + i0 + row) * p.lddo + (size_t)h * G::DH + gr * 4);
+    cp_async16(stage + G::off(row, gr), p.dout + (row0 + i0 + row) * p.lddo + (size_t)h * G::DH + gr * 4);
   }
   for (int i = tid; i < G::BN * GPR; i += G::NTHR) {
     const int row = i / GPR, gr = i - row * GPR;
-    cp_async16(stage + G::ABYTES + row * G::ROW + gr * 16, p.v + (row0 + j0 + row) * p.ldv + (size_t)h * G::DH + gr * 4);
+    cp_async16(stage + G::ABYTES + G::off(row, gr), p.v + (row0 + j0 + row) * p.ldv + (size_t)h * G::DH + gr * 4);
   }
 }
 
@@ -83,7 +94,7 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) dpb_tf32_kernel(const DpbTPa
       uint32_t a[2][4];
 #pragma unroll
       for (int m = 0; m < 2; ++m) {
-        ldsm_x4(a[m], sa + (32 * wm + 16 * m + (lane & 7) + ((lane >> 3) & 1) * 8) * G::ROW + (lane >> 4) * 16 + ks * 32);
+        ldsm_x4(a[m], sa + G::off(32 * wm + 16 * m + (lane & 7) + ((lane >> 3) & 1) * 8, (lane >> 4) + ks * 2));
 #pragma unroll
         for (int k = 0; k < 4; ++k) a[m][k] = tf32_rna(__uint_as_float(a[m][k]));
       }
@@ -91,7 +102,7 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) dpb_tf32_kernel(const DpbTPa
       for (int nn = 0; nn < 4; ++nn) {
         uint32_t b[4];
         const int mi = lane >> 3;
-        ldsm_x4(b, sbb + (64 * wn + 16 * nn + (mi >> 1) * 8 + (lane & 7)) * G::ROW + ks * 32 + (mi & 1) * 16);
+        ldsm_x4(b, sbb + G::off(64 * wn + 16 * nn + (mi >> 1) * 8 + (lane & 7), ks * 2 + (mi & 1)));
 #pragma unroll
         for (int k = 0; k < 4; ++k) b[k] = tf32_rna(__uint_as_float(b[k]));
 #pragma unroll

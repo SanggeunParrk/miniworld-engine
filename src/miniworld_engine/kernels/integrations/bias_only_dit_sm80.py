@@ -99,6 +99,8 @@ def refusal(module, single, cond, pair, mask, bias, grad: bool) -> str | None:
         return (
             f"A100: {heads} heads x {da // heads if da % heads == 0 else da / heads} (the sm_80 core: 16 x 48, 24 x 32, 12 x 64, 16 x 64)"
         )
+    if grad and dt is F32 and da // heads == 64 and torch.cuda.get_device_capability(single.device) == (12, 0):
+        return "RTX 5090: fp32 training at head width 64 (the TF32 bias-gradient core needs 131 KB of shared memory; the card has 99 KB a block)"
     dp = at.ln_pair.weight.shape[0]
     if tuple(pair.shape) != (1, length, length, dp):
         return f"A100: pair must be [1, L, L, d_pair], got {tuple(pair.shape)}"

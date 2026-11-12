@@ -205,7 +205,9 @@ void dpb32(torch::Tensor dout, torch::Tensor v, torch::Tensor P, torch::Tensor d
   switch (dh) {
     case 32: launch_dpb32<32, 2, 2>(p); break;
     case 48: launch_dpb32<48, 2, 1>(p); break;
+#ifndef MWE_SM120  // head width 64: 131 KB even unpadded; the RTX 5090 path refuses it (bias_only_dit_sm80.refusal)
     case 64: launch_dpb32<64, 2, 1>(p); break;
+#endif
     default: TORCH_CHECK(false, "head width must be 32, 48 or 64");
   }
 }
