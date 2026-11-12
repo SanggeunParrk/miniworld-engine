@@ -118,9 +118,13 @@ def _tiles_sm120(m: int, d: int, h: int) -> tuple[int, int]:
     dual config 2 (64 x 64, 48 KB) is 20-30 % faster than config 0 from 16 k rows on (the 8-warp configs 1 / 5 gain at most 2-4 % at the
     largest D 256+ calls); the squeeze takes config 3 (128 x 64) at D 64 / D 128 n 2, config 2 (64 x 128) at D 128 n 4 below 393 k rows and
     config 8 (its 5-slice twin of config 3) above, and at D >= 256 config 2 below 5e10 multiply-adds and config 7 (256 x 128, 8 warps,
-    96 KB) above (5-8 % over config 0)."""
+    96 KB) above (5-8 % over config 0).  At few rows (token-single calls, at most ``SM120_SMALL_ROWS``) the dual GEMM takes config
+    13 (64 x 32: twice the CTAs of config 2) and the squeeze, the hand GEMM from ``SM120_HAND_SQUEEZE_MIN_ROWS`` on, config 12 (64 x 64): cuBLAS picks
+    its slow wmma kernels there on sm_120 (bench.py, CUDA graph, L2 flushed: d 384 .. 768 at 128 .. 2048 rows, 5-20 % faster)."""
     if h == 0:
         return 2, (3 if d <= 128 else 2)
+    if m <= SM120_SMALL_ROWS:
+        return 13, 12
     if d <= 64 or (d == 128 and h <= 256):
         res = 3
     elif d == 128:
@@ -128,6 +132,18 @@ def _tiles_sm120(m: int, d: int, h: int) -> tuple[int, int]:
     else:
         res = 7 if m * d * h >= 5e10 else 2
     return 2, res
+
+
+#: RTX 5090 few-row thresholds (``_tiles_sm120``, ``_hand_squeeze``, the gate backward's tile)
+SM120_SMALL_ROWS = 2048
+SM120_HAND_SQUEEZE_MIN_ROWS = 512
+
+
+def _gate_tile(m: int, d: int, h: int, sm120: bool) -> int:
+    """Tile config of ``gate_bwd`` (the dual GEMM with the SwiGLU backward): the forward's dual config of ``_tiles`` (A100), config 13 at few rows on the RTX 5090."""
+    if sm120 and m <= SM120_SMALL_ROWS:
+        return 13
+    return _tiles(m, d, h)[0]
 
 
 def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -162,14 +178,14 @@ def _f32(t: torch.Tensor, cache: bool) -> torch.Tensor:
 HAND_SQUEEZE_MIN_ROWS = 8192
 
 
-def _hand_squeeze(m: int, d: int, ln: bool) -> bool:
-    """True: the hand ``gemm_res``; False: cuBLAS ``mm`` (+ ``add_res`` with the residual)."""
-    return ln and m >= HAND_SQUEEZE_MIN_ROWS
+def _hand_squeeze(m: int, d: int, ln: bool, sm120: bool = False) -> bool:
+    """True: the hand ``gemm_res``; False: cuBLAS ``mm`` (+ ``add_res`` with the residual).  The RTX 5090 runs the hand GEMM from ``SM120_HAND_SQUEEZE_MIN_ROWS`` rows on."""
+    return ln and m >= (SM120_HAND_SQUEEZE_MIN_ROWS if sm120 else HAND_SQUEEZE_MIN_ROWS)
 
 
 def _squeeze(ext, hid: torch.Tensor, ws: torch.Tensor, x: torch.Tensor, ln: bool, res_cfg: int) -> torch.Tensor:
     """h Ws^T (+ x): the hand GEMM with the residual folded in where ``_hand_squeeze``, else cuBLAS and ``add_res``."""
-    if _hand_squeeze(hid.shape[0], ws.shape[0], ln):
+    if _hand_squeeze(hid.shape[0], ws.shape[0], ln, is_sm120(x.device)):
         return ext.gemm_res(hid, ws, x, res_cfg)
     out = torch.mm(hid, ws.t())
     if ln:
@@ -204,8 +220,8 @@ def _kernel_weights(wa, wb, ws, dtype, cache: bool):
 
 
 def _one_kernel_bwd(m: int, d: int, h: int, device: torch.device) -> bool:
-    """The one-kernel backward (``fused_bwd_sm80``) serves: an A100 (its tiles need more than the RTX 5090's 99 KB of shared memory) and a build for (d, h) at m rows."""
-    return not is_sm120(device) and fused_bwd_sm80.supports(d, h, m) and fused_bwd_sm80.loads()
+    """The one-kernel backward (``fused_bwd_sm80``) serves: a build for (d, h) at m rows (the A100 build, or the RTX 5090 one with its 99 KB tiles)."""
+    return fused_bwd_sm80.supports(d, h, m) and fused_bwd_sm80.loads()
 
 
 def _save_ab(m: int, d: int, h: int, save: bool, device: torch.device) -> bool:
@@ -333,7 +349,7 @@ def _bwd_launch(
         return fused_bwd_sm80.backward(dy, x, xn, stats, gamma, wa, wb, ws, ln, gdt, wdt)
     ext = _ext()
     a_in = xn if ln else x
-    dual, _ = _tiles(m, d, h)
+    dual = _gate_tile(m, d, h, is_sm120(x.device))
     if ab.numel():
         # one kernel: dh = dy Ws and the SwiGLU backward from the saved a | b (the forward saved h as well)
         dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h, is_sm120(x.device)))
@@ -383,7 +399,7 @@ def _bwd_dx(
     if ab.numel():
         dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h, is_sm120(x.device)))
     else:
-        dual, _ = _tiles(m, d, h)
+        dual = _gate_tile(m, d, h, is_sm120(x.device))
         dab, _ = ext.gate_bwd(xn if ln else x, wa, wb, torch.mm(dy, ws), dual)
     wab = _wab(wa, wb)
     if not ln:

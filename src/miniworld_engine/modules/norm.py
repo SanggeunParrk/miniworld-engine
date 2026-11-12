@@ -224,7 +224,9 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         "anthropic": 2,
         "cuda:h100_sm90": 2,
         "cuda:a100_sm80": 2,
-    }  # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward
+        "cuda:5090_sm120": 2,
+    }  # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward;
+    # 2026-11-13: RTX 5090 (cuda:5090_sm120 2): the staged odd-width forward from 16 rows on, fp32 d 768 rows with early parameters and two row groups a warp
 
     def __init__(
         self,

@@ -50,7 +50,12 @@ template <typename XT, int G, int V, int UN, bool RMS>
 __global__ void __launch_bounds__(NTF) fwd_vec(const XT* __restrict__ X, XT* __restrict__ Y, const void* __restrict__ W, const void* __restrict__ B, bool w_bf,
                                                const XT* __restrict__ RS, float* __restrict__ MEAN, float* __restrict__ RSTD, long M, int N, float eps) {
   constexpr int CE = Chunk<XT>::CE, RPW = 32 / G;
+#if defined(MWE_SM120)
+  // RTX 5090: fp32 rows of up to 6 chunks a lane (d 768) also load their weight / bias up front (lnbench.py, L2 flushed: 768 x 2560 fp32 18.1 -> 11.8 us)
+  constexpr bool WEARLY = V <= (sizeof(XT) == 4 ? 6 : 4);
+#else
   constexpr bool WEARLY = V <= 4;        // weight / bias loaded up front (wide rows load them per chunk to stay inside the register budget)
+#endif
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int g = lane & (G - 1), sub = lane / G;
   const long rg0 = (long)blockIdx.x * (NTF / 32) + warp;
@@ -908,6 +913,13 @@ bool launch_fwd_vec(int NV, const XT* X, XT* Y, const void* W, const void* B, bo
       un = c.UN;
     }
   }
+
+#if defined(MWE_SM120)
+  // RTX 5090: fp32 rows of 6 chunks a lane (d 768) take two row groups a warp (more bytes in flight: 768 x 2560 fp32 11.8 -> 10.6 us with the early parameters)
+  if constexpr (std::is_same_v<XT, float>) {
+    if (G == 32 && V == 6) { run_fwd_vec<XT, RMS, 32, 6, 2>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
+  }
+#endif
 #define TRY(g, v) if (G == g && V == v && un == 1) { run_fwd_vec<XT, RMS, g, v, 1>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
   NORMS_PAIRS_FWD(TRY)
 #undef TRY
@@ -942,6 +954,13 @@ void launch_fwd_scalar(const XT* X, XT* Y, const void* W, const void* B, bool w_
 int gcd_i(int a, int b) { while (b) { const int t = a % b; a = b; b = t; } return a; }
 constexpr int STAGE_MAX_N = 1024;                     // widest odd row of the staged path (the scalar path beyond)
 constexpr long STAGE_MIN_ROWS = 4096;                 // fewer rows: the scalar kernels (a CTA per tile is not worth it)
+#if defined(MWE_SM120)
+// RTX 5090: bf16 rows take the staged forward from one 16-row unit on (the scalar kernel left most of its SMs idle at 128 .. 768 rows: 833 x 128 bf16
+// 8.9 -> 6.2 us, lnbench.py); fp32 rows keep the scalar kernel below STAGE_MIN_ROWS (the staged one was 15-20 % slower at 768 .. 2048 rows of 451 / 831 / 833)
+template <typename XT> constexpr long STAGE_MIN_ROWS_FWD = sizeof(XT) == 2 ? 16 : STAGE_MIN_ROWS;
+#else
+template <typename XT> constexpr long STAGE_MIN_ROWS_FWD = STAGE_MIN_ROWS;
+#endif
 constexpr size_t STAGE_TILE_BYTES = 10 * 1024;        // target bytes of one tensor of a tile
 
 struct StageGeom { int U, R; long rowb; };
@@ -973,7 +992,7 @@ void run_fwd_stage(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, 
 
 template <typename XT, bool RMS>
 bool launch_fwd_stage(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
-  if (N > STAGE_MAX_N || M < STAGE_MIN_ROWS || !aligned16(X) || !aligned16(Y)) return false;
+  if (N > STAGE_MAX_N || M < STAGE_MIN_ROWS_FWD<XT> || !aligned16(X) || !aligned16(Y)) return false;
   const long rowb = (long)N * (long)sizeof(XT);
   const int U = 16 / gcd_i(16, (int)(rowb % 16 == 0 ? 16 : rowb % 16));
   const int R = (int)(std::max<long>(1, STAGE_FWD_TILE / ((long)U * rowb)) * U);

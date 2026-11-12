@@ -194,12 +194,12 @@ def prebuild(target, rows):
         if any((d, d * n) in fused_fwd_sm80.SHAPES for d, n in served):
             yield fused_fwd_sm80._ext_sm80
         if any((d, d * n) in fused_fwd_sm80.SHAPES and "train" in modes for (d, n), modes in served.items()):
-            yield fused_bwd_sm80._ext
+            yield fused_bwd_sm80._ext_sm80
     elif target.arch == "sm120":
-        # GeForce RTX 5090 (transition_sm80 on sm_120a): the wide extension and the fp32-master cast built for sm_120a; the one-kernel builds
-        # (fused_sm80 / fused_bwd_sm80) need more shared memory than its 99 KB a block and are not served there (kernels/_sm120_builds.py); the
-        # one-kernel forward (fused_fwd_sm80) is, with a shallower weight ring
-        from . import fused_fwd_sm80, fused_wide_sm80, parameter_cast_sm80
+        # GeForce RTX 5090 (transition_sm80 on sm_120a): the wide extension and the fp32-master cast built for sm_120a; fused_sm80 needs more shared
+        # memory than its 99 KB a block and is not served there (kernels/_sm120_builds.py); the one-kernel forward (fused_fwd_sm80) and backward
+        # (fused_bwd_sm80) are, with their sm_120 tiles (a shallower weight ring; 32-row PW stages)
+        from . import fused_bwd_sm80, fused_fwd_sm80, fused_wide_sm80, parameter_cast_sm80
 
         served = {k: v for k, v in half.items() if v and k[0] in fused_wide_sm80.WIDTHS}
         f32 = any(dt == "float32" for (d, _n), v in shapes.items() if d in fused_wide_sm80.F32_WIDTHS for (dt, _m) in v)
@@ -208,3 +208,5 @@ def prebuild(target, rows):
             yield parameter_cast_sm80._ext_sm120
         if any((d, d * n) in fused_fwd_sm80.SHAPES for d, n in served) or any((d, d * n) in fused_fwd_sm80.F32_SHAPES for (d, n), v in shapes.items() for (dt, _m) in v if dt == "float32"):
             yield fused_fwd_sm80._ext_sm120
+        if any((d, d * n) in fused_fwd_sm80.SHAPES and "train" in modes for (d, n), modes in served.items()):
+            yield fused_bwd_sm80._ext_sm120
