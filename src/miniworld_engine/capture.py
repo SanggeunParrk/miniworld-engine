@@ -49,7 +49,10 @@ serve the next item with the SAME graph::
     not under ``static_weights()``. It runs eagerly (once per item, before the replay) and may itself be captured into a graph replayed in
     front of the step graph.
 ``release_static_inputs(root=None, *, tables=None)``
-    Drop the refresh records (each holds its table and inputs alive): with the graph that read them.
+    Drop the refresh records (each holds its table and inputs alive): with the graph that read them. The records also go with the
+    ``static_inputs()`` handle that holds them: keep it (``with static_inputs() as tables``) for as long as its graph is refreshed (a
+    refresh of a module whose records went with a dropped handle raises ``StaleStaticInputs``); a caller that captures a new graph per item
+    and never refreshes can drop it -- nothing then keeps a finished item's inputs or tables alive.
 ``signature(root, *inputs)``
     A hashable key for a per-shape graph cache: ``root``'s identity and each input's shape / strides / dtype / device (metadata only).
 

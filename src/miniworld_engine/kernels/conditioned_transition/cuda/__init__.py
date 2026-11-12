@@ -505,6 +505,16 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         valid=lambda e: not e[1].expired() and e[1].cdata == StorageWeakRef(pair.untyped_storage()).cdata,
         alive=lambda e: not e[1].expired(),
         inputs=(pair, mask, extra),  # make_bias reads these (and the weight pack) only: _capture.refresh_static_inputs remakes it in place
+        # the key without the versions: a pair refilled in place (a new version) replaces its old bias instead of keeping both
+        lineage=(
+            pair.data_ptr(),
+            tuple(pair.shape),
+            None if mask is None else mask.data_ptr(),
+            wf.data_ptr(),
+            heads,
+            fp32,
+            None if extra is None else extra.data_ptr(),
+        ),
     )[0]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = (
