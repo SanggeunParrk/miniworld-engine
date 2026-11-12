@@ -84,6 +84,9 @@ def test_long_training_on_cuda(d_msa: int, d_pair: int, d_hidden: int, length: i
         tol = max(err_ref, FIXED)
         worst = max(worst, err / tol)
         lines.append(f"{name} {err:.2e} (pytorch {err_ref:.2e})")
-    print(f"\nL{length} d_msa {d_msa} d_pair {d_pair} 8x{d_hidden}: peak {peak:.2f} GiB, worst err/tol {worst:.2f}, deterministic {same}: " + "; ".join(lines))
+    print(
+        f"\nL{length} d_msa {d_msa} d_pair {d_pair} 8x{d_hidden}: peak {peak:.2f} GiB, worst err/tol {worst:.2f}, deterministic {same}: "
+        + "; ".join(lines)
+    )
     assert same, "two cuda training steps differ"
     assert worst <= 5.0, f"RED: worst err/tol {worst:.2f}: " + "; ".join(lines)
