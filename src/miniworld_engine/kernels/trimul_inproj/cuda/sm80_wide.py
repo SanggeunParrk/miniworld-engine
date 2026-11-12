@@ -300,14 +300,16 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
         E.stats_rows(zf, st_in, eps_in)
     k1 = E.k1w if save else E.k1w_row_mask
     x = zf.new_empty((hs, n, n))
-    if _grouped(z, hs, direction, save):
+    planes = None
+    if _grouped(z, hs, direction, save):  # inference only (save=False): no plane pair is kept
         _grouped_front(k1, zf, pk, st_in, mask, x, hs, n, direction, eps_in, fuse_z)
     else:
         planes = zf.new_empty((2 * hs, T))
         k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
         with _tf32(z):
             _contract(planes, x, hs, n, direction)
-        del planes
+        if not save:  # training saves the planes for the backward
+            planes = None
     st_out = torch.empty((T, 2), dtype=torch.float32, device=z.device)
     if not fuse_x:
         E.stats_cm(x.view(hs, T), st_out, eps_out)
