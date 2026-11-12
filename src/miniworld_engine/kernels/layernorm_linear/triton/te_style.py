@@ -33,6 +33,7 @@ x_normed materialization.
 from __future__ import annotations
 from miniworld_engine.kernels._launch_config import configured
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 import contextlib
 
@@ -113,7 +114,10 @@ def _ln_mat_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     shape_key,
+    WIDE: tl.constexpr = False,
 ):
+    # 64-bit offsets: rm is int64 (the program id); `cols * sx1` is int32 and wraps on an m-major view (sx1 = M) once K * M >= 2**31 --
+    # WIDE (the launcher, from the tensors' extents) casts the column index first.
     row = tl.program_id(0).to(tl.int64)
     rm = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
     rmask = rm < M
@@ -134,7 +138,7 @@ def _ln_mat_kernel(
         cols = tl.arange(0, BLOCK_K)
         cmask = cols < N
         mask = rmask[:, None] & cmask[None, :]
-        x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
         mean = tl.sum(x, axis=1) / N
         xc = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / N
@@ -144,14 +148,14 @@ def _ln_mat_kernel(
         g = tl.load(G + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
         b = tl.load(B + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
         xn = xc * rstd[:, None] * g + b
-        tl.store(Xn + rm[:, None] * sn0 + cols[None, :] * sn1, xn.to(Xn.dtype.element_ty), mask=mask)
+        tl.store(Xn + rm[:, None] * sn0 + wide(cols, WIDE)[None, :] * sn1, xn.to(Xn.dtype.element_ty), mask=mask)
     else:
         s = tl.zeros([BLOCK_M1], dtype=tl.float32)
         ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
         for n0 in range(0, N, BLOCK_K):
             cols = n0 + tl.arange(0, BLOCK_K)
             mask = rmask[:, None] & (cols[None, :] < N)
-            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
             s += tl.sum(x, axis=1)
             ss += tl.sum(x * x, axis=1)
         mean = s / N
@@ -163,11 +167,11 @@ def _ln_mat_kernel(
             cols = n0 + tl.arange(0, BLOCK_K)
             cmask = cols < N
             mask = rmask[:, None] & cmask[None, :]
-            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
             g = tl.load(G + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
             b = tl.load(B + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
             xn = (x - mean[:, None]) * rstd[:, None] * g + b
-            tl.store(Xn + rm[:, None] * sn0 + cols[None, :] * sn1, xn.to(Xn.dtype.element_ty), mask=mask)
+            tl.store(Xn + rm[:, None] * sn0 + wide(cols, WIDE)[None, :] * sn1, xn.to(Xn.dtype.element_ty), mask=mask)
 
 
 def _ln_materialize_fake(x, gamma, beta, eps, shape_key=None):
@@ -218,6 +222,7 @@ def _ln_materialize(
         xn.stride(0),
         xn.stride(1),
         shape_key=both_key(0, N=int(K)) if shape_key is None else pack(shape_key, N=int(K)),
+        WIDE=needs_wide(x, xn),
     )
     return xn, mean, rstd
 
@@ -256,6 +261,7 @@ def _ln_bwd_kernel(
     sr0=0,
     sr1=0,
     HAS_DXR: tl.constexpr = False,
+    WIDE: tl.constexpr = False,
 ):
     # NOTE: one tile per program (atomic_add per block for dγ/dβ). A grid-stride variant (one
     # atomic per program) sped up CONTIGUOUS large-d (d512 0.96→1.07x) but CATASTROPHICALLY
@@ -267,8 +273,8 @@ def _ln_bwd_kernel(
     cols = tl.arange(0, N_PAD)
     cmask = cols < N
     mask = rmask[:, None] & cmask[None, :]
-    dxn = tl.load(DXn + rm[:, None] * sdn0 + cols[None, :] * sdn1, mask=mask, other=0.0).to(tl.float32)
-    x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+    dxn = tl.load(DXn + rm[:, None] * sdn0 + wide(cols, WIDE)[None, :] * sdn1, mask=mask, other=0.0).to(tl.float32)
+    x = tl.load(X + rm[:, None] * sx0 + wide(cols, WIDE)[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
     mean = tl.load(Mean + rm, mask=rmask, other=0.0)[:, None]
     rstd = tl.load(Rstd + rm, mask=rmask, other=0.0)[:, None]
     g = tl.load(G + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
@@ -279,8 +285,8 @@ def _ln_bwd_kernel(
     c1 = tl.sum(tl.where(cmask[None, :], dxhat * xhat, 0.0), axis=1) * inv_n  # meanₖ(dx̂·x̂)
     dx = rstd * (dxhat - c2[:, None] - xhat * c1[:, None])
     if HAS_DXR:  # a gradient that joins dx on its way out (another consumer of the same input), added before the one rounding
-        dx += tl.load(DXR + rm[:, None] * sr0 + cols[None, :] * sr1, mask=mask, other=0.0).to(tl.float32)
-    tl.store(DX + rm[:, None] * sdx0 + cols[None, :] * sdx1, dx.to(DX.dtype.element_ty), mask=mask)
+        dx += tl.load(DXR + rm[:, None] * sr0 + wide(cols, WIDE)[None, :] * sr1, mask=mask, other=0.0).to(tl.float32)
+    tl.store(DX + rm[:, None] * sdx0 + wide(cols, WIDE)[None, :] * sdx1, dx.to(DX.dtype.element_ty), mask=mask)
     pdg = tl.sum(tl.where(mask, dxn * xhat, 0.0), axis=0)
     pdb = tl.sum(tl.where(mask, dxn, 0.0), axis=0)
     # These atomics only accumulate parameter gradients; no CTA reads their result.

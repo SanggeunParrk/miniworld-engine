@@ -35,6 +35,7 @@ import triton.language as tl
 
 from .main import layer_norm_fwd_fused
 from miniworld_engine.kernels._shape_key import both_key, length_of, rows_of, pack
+from miniworld_engine.kernels._wide import needs_wide, wide
 
 # Persistent grid = (#SMs * PERSIST_WAVES) blocks on axis 0. A couple of blocks per SM keeps
 # the memory system saturated while keeping the partial buffer (and its final
@@ -63,7 +64,10 @@ def _ln_bwd_persistent(
     M, N: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
     shape_key,
+    WIDE: tl.constexpr = False,
 ):
+    # 64-bit offsets: pid / pid_n are int64, so `rows` and `offs_n * stride_c` are; the gather loop's `cn * stride_c` is int32 and wraps on
+    # an m-major view (stride_c = M) once N * M >= 2**31 -- WIDE (the launcher, from the tensors' extents) casts it first.
     # Grid is 2-D: axis 0 = the persistent programs that grid-stride over row tiles (this is the
     # axis PART_DW/PART_DB are indexed by), axis 1 = the column tile this program owns. The column
     # axis has to be a GRID axis, not an inner loop, because dγ/dβ are accumulated per COLUMN in
@@ -125,7 +129,7 @@ def _ln_bwd_persistent(
                 cn = n0 + tl.arange(0, BLOCK_K)
                 cm = cn < N
                 m2 = row_mask[:, None] & cm[None, :]
-                q = rows[:, None] * stride_r + cn[None, :] * stride_c
+                q = rows[:, None] * stride_r + wide(cn, WIDE)[None, :] * stride_c
                 xr = tl.load(X + q, mask=m2, other=0.0).to(tl.float32)
                 dyr = tl.load(DY + q, mask=m2, other=0.0).to(tl.float32)
                 wr = tl.load(W + cn, mask=cm, other=0.0).to(tl.float32)
@@ -256,6 +260,7 @@ def _persist_bwd(
         m,
         N=n,
         shape_key=pack(shape_key, N=n),
+        WIDE=needs_wide(x, dy_2d, dx_2d),
     )
 
     dw = partial_dw.sum(dim=0).to(weight.dtype)
