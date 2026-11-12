@@ -407,7 +407,8 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     )
     r01 = torch.empty(2 * d, **f32)
     E.colsum(part, r01)
-    dor = torch.mm(cw[5].t(), dpr.t())  # [Hs, T] = r_o dy_o, channel-major like X
+    # [Hs, T] = r_o dy_o, channel-major like X (RTX 5090: W_o^T contiguous first, cuBLAS takes a 1.5-1.8x faster kernel for that layout there)
+    dor = torch.mm(cw[5].t().contiguous() if _d128.on_sm120() else cw[5].t(), dpr.t())
     dt = torch.empty_like(xcm)
     part_o = torch.empty((T // (128 if is32 else 256), 2 * hs), **f32)
     E.lnout_bwd(dor, xcm, st_out, s12, go32, dt, part_o)

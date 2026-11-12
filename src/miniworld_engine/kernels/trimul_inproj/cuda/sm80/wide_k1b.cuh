@@ -25,15 +25,26 @@ struct K1wbParams {
 
 using K1wbTile = WTile<128, 128, 2, 2, 3, false, false>;
 constexpr int K1WB_DA = 272;                                        // bytes per staged da row (256 + 16)
+// The da tile (64 x 272 B) is prefetched into its own buffer under the mainloop (A100: 66.5 KB, two CTAs per SM).  The RTX 5090 build (MWE_SM120,
+// 100 KB per SM) loads it into the free ring after the mainloop instead (48 KB: two CTAs per SM, the other CTA's mainloop covers the load).
+#ifdef MWE_SM120
+constexpr int K1WB_SMEM = K1wbTile::SMEM;
+#else
 constexpr int K1WB_SMEM = K1wbTile::SMEM + 64 * K1WB_DA;
+#endif
 
 __global__ void __launch_bounds__(128, 2) k1wb_kernel(const K1wbParams p) {
   extern __shared__ __align__(128) uint8_t smem[];
+#ifdef MWE_SM120
+  const uint32_t s0 = smem_u32(smem), sda = s0;
+#else
   const uint32_t s0 = smem_u32(smem), sda = s0 + K1wbTile::SMEM;
+#endif
   const int tid = threadIdx.x;
   const int ntn = p.ncol >> 7;
   const int mtile = (int)blockIdx.x / ntn, ntile = (int)blockIdx.x - mtile * ntn;
   const int t0 = mtile * 128, j0 = ntile * 128;
+#ifndef MWE_SM120
   // da tile: plane channels [64 ntile, 64 ntile + 64) x tokens [t0, t0 + 128)
 #pragma unroll
   for (int e = 0; e < 8; ++e) {
@@ -41,8 +52,18 @@ __global__ void __launch_bounds__(128, 2) k1wb_kernel(const K1wbParams p) {
     cp_async16(sda + r * K1WB_DA + gk * 16, p.da + (size_t)(ntile * 64 + r) * p.T + t0 + 8 * gk);
   }
   cp_async_commit();
+#endif
   K1wbTile tl;
   tl.run_fast(s0, p.D >> 5, GemmOps{p.z, (size_t)p.D, t0, p.T, p.w1, (size_t)p.D, j0, p.ncol});
+#ifdef MWE_SM120
+  // the ring is free (run_fast ends with every cp.async landed and a barrier): the da tile goes to its start
+#pragma unroll
+  for (int e = 0; e < 8; ++e) {
+    const int idx = tid + 128 * e, r = idx >> 4, gk = idx & 15;
+    cp_async16(sda + r * K1WB_DA + gk * 16, p.da + (size_t)(ntile * 64 + r) * p.T + t0 + 8 * gk);
+  }
+  cp_async_commit();
+#endif
   // ---- epilogue: the fragment words of dg / dp, then one staged tile of 128 tokens x 128 packed columns leaves as 16-byte row stores
   const int warp = tid >> 5, lane = tid & 31, wm = warp >> 1, wn = warp & 1, g8 = lane >> 2, q = lane & 3;
   constexpr int MT = K1wbTile::MT, NP = K1wbTile::NP;
@@ -58,6 +79,10 @@ __global__ void __launch_bounds__(128, 2) k1wb_kernel(const K1wbParams p) {
       if (p.mask != nullptr) { const int i = tok / p.L, j = tok - i * p.L; m = (__ldg(p.mask + i) != 0 && __ldg(p.mask + j) != 0) ? 1.f : 0.f; }
       mk[mt][rh] = m;
     }
+#ifdef MWE_SM120
+  cp_async_wait<0>();   // the da tile (its load overlapped the statistics / mask reads above)
+  __syncthreads();
+#endif
   uint32_t wdg[MT][NP][2], wdp[MT][NP][2];
 #pragma unroll
   for (int np = 0; np < NP; ++np) {
@@ -87,6 +112,9 @@ __global__ void __launch_bounds__(128, 2) k1wb_kernel(const K1wbParams p) {
         wdp[mt][np][rh] = pack_bf16(dp[0], dp[1]);
       }
   }
+#ifdef MWE_SM120
+  __syncthreads();   // every warp is done reading the da tile before the staged output overwrites it
+#endif
 #pragma unroll
   for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
