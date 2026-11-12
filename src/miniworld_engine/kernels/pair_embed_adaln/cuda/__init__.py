@@ -9,7 +9,7 @@ def prebuild(target, rows):
 
     if rows and target.arch == "sm90":
         yield ext
-    elif rows and target.arch == "sm80":  # the A100 build of the same source (sm80/__init__.py)
+    elif rows and target.arch in ("sm80", "sm120"):  # the A100 build of the same source (sm80/__init__.py; sm_120a on the RTX 5090: _sm120.py)
         from .sm80 import ext as sm80_ext
 
         yield sm80_ext

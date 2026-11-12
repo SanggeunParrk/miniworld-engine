@@ -19,11 +19,16 @@ _dir = Path(__file__).parent
 BLK = 128  # atoms per tile / threads per CTA (slddt_*: one thread per atom row)
 FBLK = 512  # threads per CTA of the whole-structure kernels (slddt_*_full) on B200; H100 picks 128 / 256 / 512 (:func:`_fblk`)
 FULL_SMEM = 110 * 1024  # whole-structure kernels need N * 32 B of shared memory; two CTAs per SM (N <= 3520 atoms) beat the tile kernels
+FULL_SMEM_SM120 = 98 * 1024  # RTX 5090: 99 KB a block at most, static shared memory (the CTA reduction) included (N <= 3136 atoms)
 FORCE_TILE = False  # tests set it to compare the tile kernel with the whole-structure one
 
 
-def _full(n: int) -> bool:
-    return not FORCE_TILE and FORCE_SPLIT <= 0 and n * 32 <= FULL_SMEM
+def _full_smem(index: int) -> int:
+    return FULL_SMEM_SM120 if _arch(index) == "sm_120a" else FULL_SMEM
+
+
+def _full(n: int, index: int) -> bool:
+    return not FORCE_TILE and FORCE_SPLIT <= 0 and n * 32 <= _full_smem(index)
 
 
 FORCE_FWD = ""  # tests / probes: a fixed forward variant "<threads>s<threads per row>" of FWD_VARIANTS (the whole-structure kernel)
@@ -43,10 +48,10 @@ def _split(x: torch.Tensor, n_augment_batch: int, nb: int) -> int:
     if FORCE_SPLIT:
         return max(1, min(nb, FORCE_SPLIT))
     arch = _arch(_dev(x))
-    if arch not in ("sm_90a", "sm_80"):
+    if arch not in ("sm_90a", "sm_80", "sm_120a"):
         return 1
     ctas = n_augment_batch * nb
-    fill = SPLIT_FILL if arch == "sm_90a" else SPLIT_FILL_SM80
+    fill = SPLIT_FILL if arch == "sm_90a" else SPLIT_FILL_SM80  # the RTX 5090 (170 SMs) takes the A100's fill
     return max(1, min(nb, -(-fill * num_sms(_dev(x)) // ctas)))
 
 
@@ -81,9 +86,9 @@ def _fwd_variant(x: torch.Tensor, n_augment_batch: int, n: int) -> str:
 
 
 def _arch(index: int) -> str:
-    """nvcc arch of the device: sm_100a (B200), sm_90a (H100) or sm_80 (A100). The kernels are plain CUDA-core code, the same source serves all."""
+    """nvcc arch of the device: sm_100a (B200), sm_90a (H100), sm_80 (A100) or sm_120a (RTX 5090). The kernels are plain CUDA-core code, the same source serves all."""
     major, _ = torch.cuda.get_device_capability(index)
-    return "sm_80" if major == 8 else "sm_90a" if major == 9 else "sm_100a"
+    return "sm_80" if major == 8 else "sm_90a" if major == 9 else "sm_120a" if major == 12 else "sm_100a"
 
 
 @functools.lru_cache(maxsize=None)
@@ -110,7 +115,7 @@ def _kernels(index: int):
             *(f"slddt_fwd_full_{v}" for v in FWD_VARIANTS),
             *(f"slddt_bwd_full_{fb}" for fb in (128, 256, 512)),
         )
-        return {name: driver.Kernel(cubin(_arch(index)), name, FULL_SMEM if "_full" in name else 0) for name in names}
+        return {name: driver.Kernel(cubin(_arch(index)), name, _full_smem(index) if "_full" in name else 0) for name in names}
 
 
 def _dev(t: torch.Tensor) -> int:
@@ -140,7 +145,7 @@ def forward(x, gt, tile, fm):
     out = torch.empty(A * B, nb, device=x.device, dtype=torch.float32)
     parts = _split(x, A * B, nb)  # H100: a split launch beats the whole-structure kernels too (A1: 0.051 / 0.079 ms at N 1024)
     with torch.cuda.device(x.device):
-        if _full(N) and parts == 1:
+        if _full(N, _dev(x)) and parts == 1:
             v = _fwd_variant(x, A * B, N)
             fb, s = (int(p) for p in v.split("s"))
             k = ks[f"slddt_fwd_full_{v}"]
@@ -163,7 +168,7 @@ def backward(x, gt, nuc, tile, um, go):
     gx = torch.empty_like(x)
     parts = _split(x, A * B, nb)
     with torch.cuda.device(x.device):
-        if _full(N) and parts == 1:
+        if _full(N, _dev(x)) and parts == 1:
             fb = _fblk(x, A * B, N)
             k = ks[f"slddt_bwd_full_{fb}"]
             k.smem = N * 32

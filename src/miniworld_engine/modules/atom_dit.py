@@ -1856,6 +1856,7 @@ class AtomDiTESMFold2Pair(BackendModule):
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     backends = ("pytorch", "triton", "cuda")
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:5090_sm120": 1}  # 2026-11-12: the sm_80 paths built for sm_120a (bias tile / band read from global memory)
 
     def __init__(
         self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *, backend: str = "pytorch"

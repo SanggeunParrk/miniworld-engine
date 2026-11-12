@@ -76,7 +76,7 @@ class TokenPairInit(BackendModule):
     """
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: the sm_80 build of the H100 kernels
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build
 
     backends = ("pytorch", "cuda", "triton")
 
@@ -141,7 +141,16 @@ class TokenPairInit(BackendModule):
         return _first(
             self._supports_kernels(left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond),
             _cuda_arch(left.device) if left.device.type == "cuda" else None,
+            self._sm120_smem(left),
         )
+
+    def _sm120_smem(self, left: torch.Tensor) -> str | None:
+        """Why the call's CTAs do not fit an RTX 5090's 99 KB of shared memory a block, else ``None`` (and on every other card)."""
+        if left.device.type != "cuda" or torch.cuda.get_device_capability(left.device) != (12, 0):
+            return None
+        from miniworld_engine.kernels.token_pair_init.cuda.sm80 import smem_refusal
+
+        return smem_refusal(left.shape[1], n_rel(self.r_max, self.s_max) + 2)
 
     def _supports_triton(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond) -> str | None:
         return self._supports_kernels(left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond)

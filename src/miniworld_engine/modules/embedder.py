@@ -98,7 +98,8 @@ class InputFeatureEmbedder(BackendModule):
     # few-row modulation backward on cuBLAS (sm80.train_cfg)
     # cuda:h100_sm90 3 (2026-11-12): bf16 / master global attention on the composed bf16 stages around FlashAttention-4 (was the native stages)
     # triton 2 (2026-11-12): served (its SWAAtomTransformer gained "triton", window and global)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 3, "triton": 2}
+    # cuda:5090_sm120 1 (2026-11-12): routed on the RTX 5090 (its children's sm_120a builds)
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 3, "triton": 2, "cuda:5090_sm120": 1}
     #: The engine backends this composition hands to its children.
     _ENGINE_BACKENDS = ("cuda", "triton")
 
@@ -187,15 +188,15 @@ class InputFeatureEmbedder(BackendModule):
         return self._forward_pytorch(*args, **kwargs)  # the atom transformer runs its own backend
 
     def _supports_engine(self, backend: str, pos: torch.Tensor) -> str | None:
-        from miniworld_engine.modules.norm import a100, h100_unsupported, triton_unsupported
+        from miniworld_engine.modules.norm import a100, h100_unsupported, sm120, triton_unsupported
 
         if backend not in self.atom_transformer.backends:
             return f"its atom transformer ({type(self.atom_transformer).__name__}) has no {backend!r} backend"
         missing = [type(c).__name__ for c in self._engine_children() if backend not in c.backends]
         if missing:
             return f"its {', '.join(missing)} has no {backend!r} backend"
-        if backend == "cuda":  # the H100 or (the children's sm_80 builds) the A100; each child states its own range when it runs
-            return None if a100(pos) else h100_unsupported(pos)
+        if backend == "cuda":  # the H100 or (the children's sm_80 builds) the A100 and the RTX 5090; each child states its own range when it runs
+            return None if a100(pos) or sm120(pos) else h100_unsupported(pos)
         return triton_unsupported(pos)
 
     def _supports_cuda(self, pos: torch.Tensor, *args, **kwargs) -> str | None:

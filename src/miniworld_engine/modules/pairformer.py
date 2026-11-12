@@ -69,9 +69,11 @@ class PairformerBlock(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 4,
         "cuda:h100_sm90": 2,
+        "cuda:5090_sm120": 1,
     }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
     # batched (the cuda AttentionPairBias takes B > 1: no refusal-driven per-sample path)
     # cuda:a100_sm80 4 (2026-11-12): its AttentionPairBias's generic sm_80 pair-bias backward faster (the same values)
+    # cuda:5090_sm120 1 (2026-11-12): the sub-modules' sm_120a builds
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()

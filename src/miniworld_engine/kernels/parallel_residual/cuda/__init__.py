@@ -1,5 +1,5 @@
 """The hand-written CUDA kernels of the fused parallel residual (``modules/residual.py``, ``parallel_residual.cu``): ONE source built as
-``parallel_residual_sm90`` (H100, sm_90a) and ``parallel_residual_sm80`` (A100, sm_80); the dtype and the branch count are template
+``parallel_residual_sm90`` (H100, sm_90a), ``parallel_residual_sm80`` (A100, sm_80) and ``parallel_residual_sm120`` (RTX 5090, sm_120a); the dtype and the branch count are template
 instances of one extension, the sizes launch arguments (no shape-dependent build). Launched on torch's current stream (CUDA-graph
 capturable); built ahead of time by the prebuild (:func:`prebuild`), never at import."""
 
@@ -11,12 +11,12 @@ from pathlib import Path
 import torch
 
 _dir = Path(__file__).parent
-_ARCH = {"sm90": "90a", "sm80": "80"}
+_ARCH = {"sm90": "90a", "sm80": "80", "sm120": "120a"}  # sm120: the GeForce RTX 5090 (sm_120a), the same source
 
 
 @functools.lru_cache(maxsize=None)
 def ext(arch: str):
-    """The extension of ``arch`` (``"sm90"`` / ``"sm80"``)."""
+    """The extension of ``arch`` (``"sm90"`` / ``"sm80"`` / ``"sm120"``)."""
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
@@ -30,7 +30,7 @@ def ext(arch: str):
 
 
 def _device_ext(device: torch.device):
-    return ext("sm80" if torch.cuda.get_device_capability(device) == (8, 0) else "sm90")
+    return ext({(8, 0): "sm80", (12, 0): "sm120"}.get(torch.cuda.get_device_capability(device), "sm90"))
 
 
 def forward(x: torch.Tensor, branches: list[torch.Tensor]) -> torch.Tensor:

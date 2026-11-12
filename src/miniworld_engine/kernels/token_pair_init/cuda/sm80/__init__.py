@@ -18,7 +18,8 @@ _dir = Path(__file__).parent
 
 @functools.lru_cache(maxsize=None)
 def ext():
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags
+    from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # RTX 5090: the same source for sm_120a (kernels/_sm120.py)
 
     ensure_cuda_home()
     return load_extension(
@@ -39,13 +40,27 @@ def _on_this_build(fn):
     return types.FunctionType(fn.__code__, _G, fn.__name__, fn.__defaults__, fn.__closure__)
 
 
-#: rows of z per forward CTA on this card (measured L128 / L256 / L384, L2 flushed: 2 / 3 / 2 rows; the H100 takes 4 up to L 256)
-_G["fwd_rows"] = lambda L: 3 if 128 < L <= 256 else 2
+#: rows of z per forward CTA on this card (measured L128 / L256 / L384, L2 flushed: 2 / 3 / 2 rows; the H100 takes 4 up to L 256); the RTX 5090's
+#: sm_120a build (16-warp CTAs, one per SM) takes 1 row (measured R 1-8 at L128 / L256 / L384: 12.5 / 27.8 / 56.9 us, the best or within 1 %)
+_G["fwd_rows"] = lambda L: 1 if torch.cuda.get_device_capability() == (12, 0) else 3 if 128 < L <= 256 else 2
 forward = _on_this_build(_h100.forward)
 backward = _on_this_build(_h100.backward)
 prep = _on_this_build(_h100.prep)
 
 
 def device_build():
-    """The launchers of the current device's build: this one on an A100, else the H100 (sm_90a) one."""
-    return sys.modules[__name__] if torch.cuda.get_device_capability() == (8, 0) else _h100
+    """The launchers of the current device's build: this one on an A100 (and its sm_120a build on an RTX 5090), else the H100 (sm_90a) one."""
+    return sys.modules[__name__] if torch.cuda.get_device_capability() in ((8, 0), (12, 0)) else _h100
+
+
+def smem_refusal(L: int, nbin: int) -> str | None:
+    """Why a call of length ``L`` with ``nbin`` table rows does not fit the RTX 5090's 99 KB of shared memory a block (forward: the class-row table
+    and the R rows' packed bins; backward: the per-warp table-gradient and row accumulators and the row block's bins), or ``None``. The A100's
+    163 KB and the H100's 227 KB take every requirements length."""
+    from miniworld_engine.kernels._sm120 import SMEM_MAX
+
+    fwd = nbin * _h100.P * 4 + _G["fwd_rows"](L) * L * 4
+    bwd = (4 * nbin * 32 + 4 * _h100.RB * 32 + _h100.RB * L) * 4
+    if max(fwd, bwd) > SMEM_MAX:
+        return f"length {L} with {nbin} table rows needs {max(fwd, bwd)} B of shared memory a block, above the RTX 5090's {SMEM_MAX} B"
+    return None

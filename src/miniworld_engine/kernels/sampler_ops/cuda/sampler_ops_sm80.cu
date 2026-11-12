@@ -15,16 +15,20 @@
 #include <climits>
 #include <cuda_bf16.h>
 
+#ifndef MWE_SM120  // the RTX 5090 (sm_120a build, kernels/_sm120.py) has programmatic dependent launch: the H100 chain keeps it there
 #define volatile(...) volatile("")
 #define cudaLaunchAttributeProgrammaticStreamSerialization cudaLaunchAttributeIgnore
+#endif
 #pragma push_macro("PYBIND11_MODULE")
 #undef PYBIND11_MODULE
 #define PYBIND11_MODULE(name, variable) [[maybe_unused]] static void sampler_ops_base_bindings(pybind11::module_& variable)
 #include "sampler_ops.cu"
 #undef PYBIND11_MODULE
 #pragma pop_macro("PYBIND11_MODULE")
+#ifndef MWE_SM120
 #undef volatile
 #undef cudaLaunchAttributeProgrammaticStreamSerialization
+#endif
 
 namespace {
 //: The one-kernel path's bound on the atoms all its blocks read together (B * C * N): every block re-reads its sample, so the redundant L2 traffic

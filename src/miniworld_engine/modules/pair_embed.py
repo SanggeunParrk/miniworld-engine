@@ -25,12 +25,12 @@ N_ROWS_CA = 157  # 127 sequence separations | 30 CA distances
 
 
 def _cuda_arch(device: torch.device) -> str | None:
-    """Why the hand-written CUDA kernels cannot run on ``device`` (their builds are H100 sm_90a and A100 sm_80), or ``None``."""
+    """Why the hand-written CUDA kernels cannot run on ``device`` (their builds are H100 sm_90a, A100 sm_80 and that source for the RTX 5090, sm_120a), or ``None``."""
     if device.type != "cuda":
         return "the kernels run on CUDA tensors only"
     cc = torch.cuda.get_device_capability(device)
-    if cc not in ((9, 0), (8, 0)):
-        return f"the CUDA kernels are built for H100 (sm_90a) and A100 (sm_80), got sm_{cc[0]}{cc[1]}"
+    if cc not in ((9, 0), (8, 0), (12, 0)):
+        return f"the CUDA kernels are built for H100 (sm_90a), A100 (sm_80) and RTX 5090 (sm_120a), got sm_{cc[0]}{cc[1]}"
     return None
 
 
@@ -96,7 +96,7 @@ class PairEmbedAdaLN(BackendModule):
     """
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: the sm_80 build of the H100 kernels
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build
 
     backends = ("pytorch", "cuda", "triton")
 
@@ -302,7 +302,7 @@ class PairEmbedGeom(BackendModule):
     """
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: the sm_80 build of the H100 kernels
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build
 
     backends = ("pytorch", "cuda", "triton")
     rows = N_ROWS_GEOM
@@ -412,7 +412,7 @@ class PairEmbedCA(BackendModule):
     """
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: the sm_80 build of the H100 kernels
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build
 
     backends = ("pytorch", "cuda", "triton")
     rows = N_ROWS_CA

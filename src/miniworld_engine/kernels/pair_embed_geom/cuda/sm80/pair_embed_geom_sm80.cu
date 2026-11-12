@@ -18,8 +18,17 @@
 
 void backward(torch::Tensor g, torch::Tensor codes, torch::Tensor tpart, torch::Tensor dtbl, int64_t mode, int64_t impl);
 #define backward(...) backward_h100(__VA_ARGS__)   // the H100 definition only: the pybind entry `&backward` names the one below
+#ifdef MWE_SM120
+// RTX 5090 (sm_120a, 99 KB of shared memory a block): the LayerNorm backward of the encoder pair (mode 0) cannot keep its 317-row table
+// (162 KB) in shared memory; `ln_backward` below reads it through the L1 there (mode 1, 80 KB, keeps the H100 kernel).
+void ln_backward(torch::Tensor tbl, torch::Tensor codes, torch::Tensor dh, torch::Tensor dx, int64_t mode, double eps);
+#define ln_backward(...) ln_backward_h100(__VA_ARGS__)
+#endif
 #include "../sm90/pair_embed_geom.cu"
 #undef backward
+#ifdef MWE_SM120
+#undef ln_backward
+#endif
 
 namespace {
 constexpr int KS = 2;   // concurrent pair chunks of impl 3
@@ -72,3 +81,60 @@ void backward(torch::Tensor g, torch::Tensor codes, torch::Tensor tpart, torch::
   pg80_reduce_tbl<<<(ntab * C + 255) / 256, 256, 0, main>>>(tp, reinterpret_cast<__nv_bfloat16*>(dtbl.data_ptr<at::BFloat16>()), ntab, KS * NBLK);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+
+#ifdef MWE_SM120
+namespace {
+// pg_ln_bwd with the table read from global memory (through the L1) instead of a shared-memory copy: the same warp-per-pair schedule, the
+// same two-deep load pipeline and the same arithmetic (ln_bwd_group), so the result is bitwise the shared-memory kernel's.
+template <int MODE, int UL>
+__global__ void __launch_bounds__(16 * 32, 1)
+pg120_ln_bwd_gt(const __nv_bfloat16* __restrict__ tbl, const uint4* codes, const __nv_bfloat16* dh, __nv_bfloat16* dx, long long P, float eps) {
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, c0 = lane * 8;
+  const long long stride = (long long)gridDim.x * 16;
+  const long long p0 = (long long)blockIdx.x * 16 + warp;
+  auto ldc = [&](long long p) { return p < P ? codes[p] : make_uint4(0u, 0u, 0u, 0u); };
+  auto ldg = [&](long long p, const uint4& cd) { return (p < P && (cd.x & LIVE)) ? *reinterpret_cast<const uint4*>(dh + (size_t)p * C + c0) : make_uint4(0u, 0u, 0u, 0u); };
+  uint4 cA[UL], gA[UL], cB[UL], gB[UL], cC[UL];
+#pragma unroll
+  for (int u = 0; u < UL; u++) { cA[u] = ldc(p0 + u * stride); cB[u] = ldc(p0 + (UL + u) * stride); }
+#pragma unroll
+  for (int u = 0; u < UL; u++) gA[u] = ldg(p0 + u * stride, cA[u]);
+  for (long long p = p0; p < P; p += UL * stride) {
+#pragma unroll
+    for (int u = 0; u < UL; u++) gB[u] = ldg(p + (UL + u) * stride, cB[u]);
+#pragma unroll
+    for (int u = 0; u < UL; u++) cC[u] = ldc(p + (2 * UL + u) * stride);
+    {
+      uint4 o[UL];
+      bool any = false;
+#pragma unroll
+      for (int u = 0; u < UL; u++) any |= (cA[u].x & LIVE) != 0;
+      if (any) ln_bwd_group<MODE, UL>(tbl, cA, gA, c0, eps, o);
+      else {
+#pragma unroll
+        for (int u = 0; u < UL; u++) o[u] = make_uint4(0u, 0u, 0u, 0u);
+      }
+#pragma unroll
+      for (int u = 0; u < UL; u++) {
+        const long long pu = p + u * stride;
+        if (pu < P) *reinterpret_cast<uint4*>(dx + (size_t)pu * C + c0) = o[u];
+      }
+    }
+#pragma unroll
+    for (int u = 0; u < UL; u++) { cA[u] = cB[u]; gA[u] = gB[u]; cB[u] = cC[u]; }
+  }
+}
+}  // namespace
+
+void ln_backward(torch::Tensor tbl, torch::Tensor codes, torch::Tensor dh, torch::Tensor dx, int64_t mode, double eps) {
+  static_assert((size_t)NT_CA * C * sizeof(__nv_bfloat16) <= 101376, "the decoder table must fit the 5090's 99 KB of shared memory");
+  if (mode != 0) { ln_backward_h100(tbl, codes, dh, dx, mode, eps); return; }
+  const at::cuda::CUDAGuard guard(tbl.device());
+  const long long P = (long long)dh.size(0) * dh.size(1) * dh.size(2);
+  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  pg120_ln_bwd_gt<0, UL_G><<<sms, 16 * 32, 0, at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>()), reinterpret_cast<const uint4*>(codes.data_ptr<int>()),
+      reinterpret_cast<const __nv_bfloat16*>(dh.data_ptr<at::BFloat16>()), reinterpret_cast<__nv_bfloat16*>(dx.data_ptr<at::BFloat16>()), P, (float)eps);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+#endif

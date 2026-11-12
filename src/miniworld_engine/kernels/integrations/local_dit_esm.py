@@ -90,7 +90,8 @@ def _h100(t) -> bool:
 
 
 def _a100(t) -> bool:
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (8, 0)
+    """An A100 (sm_80) or an RTX 5090 (capability 12.0: the same sm_80 paths built for sm_120a, kernels/_sm120.py)."""
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0))
 
 
 def _shared(cond) -> bool:
@@ -102,7 +103,7 @@ def _shared(cond) -> bool:
 def reason(module, single, cond, pair, mask, rope) -> str | None:
     """Why ``AtomDiTESMFold2Pair``'s ``"cuda"`` backend does not take this call, or None."""
     if not (_h100(single) or _a100(single)):
-        return "the ESMFold2 atom block kernels run on an H100 (sm_90) or A100 (sm_80) CUDA tensor only"
+        return "the ESMFold2 atom block kernels run on an H100 (sm_90), A100 (sm_80) or RTX 5090 (sm_120a) CUDA tensor only"
     att, tr = module.attention, module.transition
     geometry = (att.n_head, att.to_query.weight.shape[0], tr.d_cond, att.to_bias.weight.shape[1], tr.expand_a.weight.shape[0])
     if geometry != (NH, DS, DC, DP, 2 * DS):
