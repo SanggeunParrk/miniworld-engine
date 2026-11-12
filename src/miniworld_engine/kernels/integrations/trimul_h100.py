@@ -839,3 +839,15 @@ def _uni_wide_inference_ok(module, pair: torch.Tensor) -> bool:
     )
 
     return serves(module, pair)
+
+
+def dropout_scale(pair: torch.Tensor, p: float) -> torch.Tensor:
+    """The row dropout scale [B, 1, L, D] of the training path (``modules.functional.dropout_scale(pair, p, 1)``, the reference's draw):
+    one launch of the H100 Philox kernel (``kernels/triangle_attention/cuda/h100_triattn.drop_scale``: the same tensor, bit for bit, for
+    the same generator state), the torch statements where that kernel does not take the call (not a BF16 square pair)."""
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_triattn
+    from miniworld_engine.modules.functional import dropout_scale as reference
+
+    if h100_triattn.drop_scale_serves(pair, p):
+        return h100_triattn.drop_scale(pair, p, 1)
+    return reference(pair, p, 1)

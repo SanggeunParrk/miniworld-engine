@@ -210,9 +210,16 @@ __global__ void drop_scale_kernel(__nv_bfloat16* out,int64_t n,at::PhiloxCudaSta
     }
   }
 }
-torch::Tensor drop_scale(torch::Tensor pair,double probability) {
+// The broadcast dropout scale of modules.functional.dropout_scale on a BF16 pair:
+// torch.rand([B,1,L,C] | [B,L,1,C], dtype=BF16) > p, divided by 1 - p, in one launch.
+// The caller passes the operands as that torch statement rounds them: threshold =
+// BF16(p) (the comparison's scalar operand) and inverse = 1.f / float(1 - p)
+// (the division's FP32 reciprocal of its scalar operand); the kernel rounds
+// inverse to BF16 as the division's result is.
+torch::Tensor drop_scale(torch::Tensor pair,double threshold,double inverse) {
   TORCH_CHECK(pair.is_cuda() && pair.scalar_type()==torch::kBFloat16 && pair.dim()==4
-    && pair.size(1)==pair.size(2) && probability>0. && probability<1.,"BF16 square pair and 0<p<1 required");
+    && pair.size(1)==pair.size(2) && pair.numel()>0 && threshold>0. && threshold<1. && inverse>1.,
+    "BF16 square nonempty pair, 0<threshold<1 and inverse>1 required");
   c10::cuda::CUDAGuard guard(pair.device());
   enable_graph_rng_writer();
   auto out=torch::empty({pair.size(0),pair.size(1),pair.size(3)},pair.options());
@@ -223,9 +230,9 @@ torch::Tensor drop_scale(torch::Tensor pair,double probability) {
   at::PhiloxCudaState state;
   {std::lock_guard<std::mutex> lock(gen->mutex_);state=gen->philox_cuda_state(increment);}
   register_graph_rng(state);
-  auto* dst=(__nv_bfloat16*)out.data_ptr();float p=probability,inverse=1.f/(1.f-p);
+  auto* dst=(__nv_bfloat16*)out.data_ptr();float p=threshold,scale=inverse;
   cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,drop_scale_kernel));
-  void* args[]={&dst,&n,&state,&p,&inverse};
+  void* args[]={&dst,&n,&state,&p,&scale};
   C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
