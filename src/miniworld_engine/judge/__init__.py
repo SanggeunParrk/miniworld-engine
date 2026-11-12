@@ -46,7 +46,7 @@ from miniworld_engine.measure import config as cfgmod
 HERE = Path(__file__).resolve().parent
 TOKENS = HERE / "tokens"  # per card, one file per module class: tokens/<gpu>/<module>.jsonl, sorted by case
 #: The cards results are kept for (``kernels._launch_config.gpu_key``) and their compute capability.
-GPUS = {"h100_sm90": [9, 0], "a100_sm80": [8, 0]}
+GPUS = {"h100_sm90": [9, 0], "a100_sm80": [8, 0], "5090_sm120": [12, 0]}  # 5090_sm120: GeForce RTX 5090, baselines (pytorch, anthropic, cueq) only
 ANSWERS = HERE / "answers.jsonl"  # a person's answers: {"part", "old", "new", "verdict": keep | remeasure, "reason", "date"}
 PACKAGE = Path(__file__).resolve().parents[1]
 CONFIGS = {"accuracy": PACKAGE / "measure" / "configs" / "accuracy.yaml", "speed": PACKAGE / "measure" / "configs" / "speed.yaml"}

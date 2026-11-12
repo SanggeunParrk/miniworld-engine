@@ -1,0 +1,415 @@
+"""Public entry points of the fused ESMFold2 SWA atom DiT block (kernel family ``swa_dit``).
+
+The supported H100 window64 path defaults to handwritten CUDA plus cuBLAS, including live FP32 master parameters and
+native caller-gradient accumulation. Unsupported selected-native contracts raise. Explicit
+``settings.swa_dit_h100_native=False`` retains the historical backend descriptions below.
+
+Provenance: moved from team-gm (``src/team_gm/modules/blocks/swa_fused_triton.py`` and ``swa_cuda/``, introduced by team-gm
+commit 14f2c73 "research(swa): preserve opt-in fused atom transformer work", copied from team-gm 4fafa83). Kernel math is
+unchanged; the engine owns the autotune keys, the config sets, the CUDA build and the runtime switches (``settings.swa_dit_*``).
+
+The block is team-gm's ``SWAAtomBlock`` with ``block_style="esmfold2"`` -- the same equations as
+``modules.swa_dit.SWADiTBlock`` -- over the flattened ``[N = A*B, S]`` atom sequence:
+
+    mod = silu(c) @ Wmod^T -> shift_a | scale_a | gate_a | shift_f | scale_f | gate_f        (per (b, atom), hoisted)
+    x   = rmsnorm(q) * (1 + scale_a) + shift_a
+    q_h, k_h, v_h = split_heads(x @ Wqkv^T);  q_h, k_h = rope(rmsnorm_D(q_h)), rope(rmsnorm_D(k_h))
+    o   = sliding-window attention (|i - j| <= half_window, keys / queries >= seqused masked, padding rows 0)
+    q   = q + gate_a * ((sigmoid(x @ Wg^T) * o) @ Wo^T)
+    y   = rmsnorm(q) * (1 + scale_f) + shift_f ;  q = q + gate_f * ((silu(y Wu1^T) * (y Wu2^T)) @ Wd^T)
+
+Both RMSNorms and the per-head q/k RMSNorm use fp32's epsilon (what ``nn.RMSNorm(eps=None)`` does on bf16). The
+modulation depends only on (b, atom): it is computed ONCE per (batch element, atom) from the augment-invariant
+conditioning (``swa_dit_hoist_modulation``) and every augment ``a`` of batch element ``b`` -- rows ``(a*B + b)*S + s`` --
+reads row ``b*S + s`` of it. A caller without that structure passes ``B = N`` (one modulation row per sequence row).
+
+Served: bf16 or fp32 (all activations, conditioning and weights in one of the two), d_atom 128 with 4 heads of 32, SwiGLU
+hidden 256, half window 64 (window 128) -- or GLOBAL attention (``is_global``: bf16 on B200 only, the attention stage runs
+FlashAttention-4 around the same sm_100a stages) -- 3D-RoPE cos/sin of D/2 = 16 frequencies. bf16 runs hand-CUDA kernels
+for every stage on sm_90 (``cuda/``), the sm_100a stages on B200 and the Triton kernels (``triton/forward.py``, ``backward.py``)
+elsewhere. fp32 keeps the residual stream and every elementwise step in fp32: on B200 (window attention, S a multiple of 128)
+every stage runs on hand-written TF32 tensor-core kernels for inference (``cuda/sm100/tf32_fwd``; the attention on TF32
+operands, the hoisted modulation too; fp32 training keeps Triton until a TF32 backward lands), on sm_90 the CUDA extension
+``cuda/swa_fp32.cu`` (TF32 allowed), elsewhere ``triton/forward_fp32.py`` and ``backward_fp32.py``, which run the projections as
+TF32 and the window attention on bf16 operands -- the precisions of the per-op fp32 path it replaces (see those files).
+:func:`refusal` says why anything else is not served; it never raises.
+"""
+
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+
+#: The contract the kernels are written for (literals in the CUDA tiles; tl.arange extents in Triton).
+D_ATOM = 128
+N_HEAD = 4
+N_HIDDEN = 256
+HALF_WINDOW = 64
+FP32_EPS = float(torch.finfo(torch.float32).eps)
+#: A half window at or above this (or negative) means global attention: every valid atom attends to every valid atom. The
+#: model configures it as a large ``swa_window_size`` (``flash_window_seqused``'s ``half_window < 0`` is the same thing).
+GLOBAL_HALF_WINDOW = 1 << 16
+
+
+def is_global(half_window: int) -> bool:
+    """Whether ``half_window`` selects global attention (no window) -- negative, or at least ``GLOBAL_HALF_WINDOW``."""
+    return half_window < 0 or half_window >= GLOBAL_HALF_WINDOW
+
+
+def _global_gate() -> str | None:
+    """Why global attention cannot run in this process (it has no Triton fallback, unlike the windowed block), or None: the switches
+    that turn the sm_100a stages off, an earlier build / load failure of them, and a missing FlashAttention-4."""
+
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.swa_dit import dispatch
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+    if (
+        not settings.current().swa_dit_sm100
+    ) or settings.current().force_portable_kernels:
+        return "global attention runs on the sm_100a stages only, and settings.swa_dit_sm100=0 / force_portable_kernels=True turn them off"
+    if dispatch._SM100_FAILED:
+        return "the sm_100a SWA atom DiT kernels failed to build or load earlier in this process"
+    if not sm100.FA4_AVAILABLE:
+        return "global attention needs FlashAttention-4 (flash_attn.cute), which is not installed"
+    return None
+
+
+def _matmul_precision() -> str:
+    """torch's float32 matmul precision, read as a constant under torch.compile (Dynamo cannot trace the getter)."""
+    return torch.get_float32_matmul_precision()
+
+
+_matmul_precision = torch.compiler.assume_constant_result(_matmul_precision)
+
+
+def highest_fp32_on_hopper_blackwell(q: torch.Tensor, half_window: int) -> bool:
+    """fp32 activations under ``torch.set_float32_matmul_precision("highest")`` on H100 / B200 that the native sm_90a stages do not
+    take. Off those stages the fused fp32 block is the sm_100a TF32 kernels (B200) or the Triton fp32 kernels, neither of which
+    "highest" asks for, and those cards have no Triton fallback: the callers run the PyTorch statements instead. The native H100
+    stages stay (fp32 rows, cuBLAS projections in exact fp32 under "highest", bf16 attention operands as the per-op path has them)."""
+    if q.dtype != torch.float32 or not q.is_cuda or _matmul_precision() != "highest":
+        return False
+    from miniworld_engine.kernels.swa_dit.dispatch import (
+        _h100_global,
+        native_h100_enabled,
+    )
+    from miniworld_engine.modules.dispatch import restricted_card
+
+    return restricted_card(q.device) and not (native_h100_enabled(q) or _h100_global(q, half_window))
+
+
+def refusal(
+    q: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    seqused: torch.Tensor,
+    wqkv: torch.Tensor,
+    wg: torch.Tensor,
+    wo: torch.Tensor,
+    wu: torch.Tensor,
+    wd: torch.Tensor,
+    *,
+    n_head: int,
+    half_window: int,
+    cond: torch.Tensor | None = None,
+    wmod: torch.Tensor | None = None,
+) -> str | None:
+    """None if the fused block can run this call, else why it cannot. Never raises.
+
+    ``q`` [N, S, C]; ``cos``/``sin`` the SWA attention params' RoPE tensors ([N or B, S, C/n_head/2] fp32);
+    ``seqused`` [N] int32; the five block weights as the modules hold them (``Wqkv`` [3C, C], ``gate_proj`` [C, C],
+    ``out_proj`` [C, C], ``w_up`` [2*hidden, C], ``w_down`` [C, hidden]). ``cond`` / ``wmod`` (the conditioning and the
+    adaLN projection weight [6C, d_cond]) are checked when given. Only tensor metadata is read, so it traces under
+    ``torch.compile`` without a graph break.
+    """
+    tensors = {
+        "q": q,
+        "Wqkv": wqkv,
+        "gate_proj": wg,
+        "out_proj": wo,
+        "w_up": wu,
+        "w_down": wd,
+    }
+    if cond is not None:
+        tensors["cond"] = cond
+    if wmod is not None:
+        tensors["adaln weight"] = wmod
+    if q.dtype not in (torch.bfloat16, torch.float32):
+        return f"the fused block runs bf16 or fp32, got q {q.dtype}"
+    if highest_fp32_on_hopper_blackwell(q, half_window):
+        return "fp32 under matmul precision 'highest' off the native H100 stages runs the PyTorch statements on H100 / B200"
+    for name, t in tensors.items():
+        # the weights may also be an fp32 master over bf16 activations (cast for the kernels outside autograd)
+        if t.dtype != q.dtype and not (
+            name not in ("q", "cond") and t.dtype == torch.float32
+        ):
+            return (
+                f"mixed dtypes: q is {q.dtype} but {name} is {t.dtype}; the fused block runs all-bf16 or all-fp32 "
+                f"activations and conditioning, with weights in that dtype or fp32"
+            )
+    if q.dim() != 3:
+        return f"q must be [N, S, d_atom], got {tuple(q.shape)}"
+    c = q.shape[-1]
+    if (c, n_head) != (D_ATOM, N_HEAD):
+        return f"the kernels serve d_atom={D_ATOM} with {N_HEAD} heads, got d_atom={c}, n_head={n_head}"
+    if is_global(half_window):
+        hopper = q.is_cuda and torch.cuda.get_device_capability(q.device) == (9, 0)
+        if hopper:
+            # H100: the native sm_90a stages (bf16 or fp32 activations) around a FlashAttention-4 global attention
+            from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+            if not sm100.FA4_AVAILABLE:
+                return "global attention needs FlashAttention-4 (flash_attn.cute), which is not installed"
+        else:
+            if q.dtype != torch.bfloat16:
+                return f"global attention is served in bf16 (sm_100a stages + FlashAttention-4), got {q.dtype}"
+            if q.is_cuda and torch.cuda.get_device_capability(q.device) != (10, 0):
+                return "global attention is served on B200 (sm_100a) and H100 (sm_90a) only"
+            why = _global_gate()
+            if why is not None:
+                return why
+    elif half_window != HALF_WINDOW:
+        return (
+            f"the fused block is validated at half_window={HALF_WINDOW} (window {2 * HALF_WINDOW}) or global attention, "
+            f"got {half_window}"
+        )
+    shapes = {
+        "Wqkv": (wqkv, (3 * c, c)),
+        "gate_proj": (wg, (c, c)),
+        "out_proj": (wo, (c, c)),
+        "w_up": (wu, (2 * N_HIDDEN, c)),
+        "w_down": (wd, (c, N_HIDDEN)),
+    }
+    for name, (t, want) in shapes.items():
+        if tuple(t.shape) != want:
+            return f"{name} must be {want} (SwiGLU hidden {N_HIDDEN}), got {tuple(t.shape)}"
+    half = c // n_head // 2
+    for name, t in (("cos", cos), ("sin", sin)):
+        if t.dim() == 0 or t.dtype != torch.float32 or t.shape[-1] != half:
+            return f"{name} must be fp32 [..., {half}], got {t.dtype} {tuple(t.shape)}"
+        if t.requires_grad and torch.is_grad_enabled():
+            return f"{name} requires grad; the fused block does not differentiate the RoPE angles"
+    if seqused.dtype != torch.int32 or tuple(seqused.shape) != (q.shape[0],):
+        return f"seqused must be int32 [N={q.shape[0]}], got {seqused.dtype} {tuple(seqused.shape)}"
+    if cond is not None and wmod is not None:
+        if (
+            cond.dim() != 3
+            or cond.shape[0] == 0
+            or cond.shape[1] != q.shape[1]
+            or q.shape[0] % cond.shape[0] != 0
+        ):
+            return f"cond must be [B, S, d_cond] with N % B == 0, got {tuple(cond.shape)} for q {tuple(q.shape)}"
+        if tuple(wmod.shape) != (6 * c, cond.shape[-1]):
+            return f"the adaLN weight must be [{6 * c}, d_cond={cond.shape[-1]}], got {tuple(wmod.shape)}"
+    if not q.is_cuda:
+        return "the input is not on a CUDA device"
+    return None
+
+
+def _mod_sm100(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
+    """Whether the hoisted modulation runs on the sm_100a kernels: B200, bf16 c, bf16 or fp32 Wmod, d_cond = C = 128, rows a multiple
+    of 128, and the kernels load (``settings.swa_dit_sm100=0`` or ``force_portable_kernels=True`` keep the fp32 GEMM)."""
+
+    from miniworld_engine import settings
+
+    if (
+        not settings.current().swa_dit_sm100
+    ) or settings.current().force_portable_kernels:
+        return False
+    if not (
+        c_base.is_cuda
+        and c_base.dtype == torch.bfloat16
+        and wmod.dtype in (torch.bfloat16, torch.float32)
+    ):
+        return False
+    if (
+        c_base.shape[-1] != D_ATOM
+        or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM)
+        or (c_base.numel() // D_ATOM) % 128
+    ):
+        return False
+    if torch.cuda.get_device_capability(c_base.device) != (10, 0):
+        return False
+    from miniworld_engine.kernels.swa_dit.dispatch import _sm100
+
+    return (
+        _sm100(c_base.reshape(1, -1, D_ATOM), N_HIDDEN, HALF_WINDOW, FP32_EPS)
+        is not None
+    )
+
+
+def _mod_tf32(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
+    """Whether the hoisted modulation runs on the sm_100a TF32 kernel (mod_fwd_tf32): B200, fp32 c and Wmod, d_cond = C = 128, rows a
+    multiple of 128, the TF32 kernels load (``settings.swa_dit_tf32=0`` / ``settings.swa_dit_sm100=0`` / ``force_portable_kernels=True``
+    keep the torch fp32 GEMM) -- and no gradient is recorded (there is no TF32 backward at the moment: ``dispatch._tf32_bwd_ready``).
+    Traceable: tensor metadata and the per-device constant ``dispatch._tf32_ready`` (which owns the build / load)."""
+    if not (
+        c_base.is_cuda and c_base.dtype == torch.float32 and wmod.dtype == torch.float32
+    ):
+        return False
+    if (
+        c_base.shape[-1] != D_ATOM
+        or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM)
+        or (c_base.numel() // D_ATOM) % 128
+    ):
+        return False
+    from miniworld_engine.kernels.swa_dit.dispatch import _tf32_ready
+
+    grad = torch.is_grad_enabled() and (c_base.requires_grad or wmod.requires_grad)
+    return _tf32_ready(c_base.device, grad)
+
+
+_MOD_HOIST: dict = {}  # (conditioning tensor, adaLN weight) -> the H100 hoisted modulation of an inference call
+
+
+def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
+    """The block's adaLN modulation, once per (batch element, atom): ``[B*S, 6C]`` fp32 = silu(c) @ Wmod^T.
+
+    ``c_base`` [B, S, d_cond] is the augment-invariant conditioning (``c[a*B + b] == c_base[b]``), or the per-row
+    conditioning [N, S, d_cond] when there is no augment structure. silu runs in ``c_base``'s dtype, then the product is
+    accumulated and kept in fp32 (as the engine's rmsnorm_adamod keeps its projections in registers). Differentiable. On B200 a
+    bf16 call runs the sm_100a mod_fwd / mod_bwd kernels, an fp32 call without a gradient the TF32 mod_fwd_tf32 kernel.
+    """
+    from miniworld_engine.kernels.swa_dit.dispatch import (
+        native_h100_enabled,
+        native_h100_mod_fwd,
+    )
+    if native_h100_enabled(c_base):
+        from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationH100
+        if (c_base.ndim != 3 or c_base.shape[-1] != 128 or c_base.numel() == 0
+                or not c_base.is_contiguous() or not wmod.is_contiguous()
+                or c_base.dtype not in (torch.bfloat16, torch.float32)
+                or wmod.dtype not in (c_base.dtype, torch.float32)
+                or tuple(wmod.shape) != (768, 128) or wmod.device != c_base.device):
+            raise ValueError("native H100 SWA modulation requires contiguous BF16/FP32 width128 and [768,128] weights")
+        c = c_base.reshape(-1, c_base.shape[-1])
+        if torch.is_grad_enabled() and (c.requires_grad or wmod.requires_grad):
+            from miniworld_engine.kernels.integrations.token_dit_train import (
+                _native_caller_output,
+            )
+            out = SWADiTModulationH100.apply(c, wmod)
+            return _native_caller_output(out, c_base, wmod, force=True)
+        # No gradient: the table is a function of the conditioning and the adaLN weight only, so a sampler's steps (eager) and a captured step
+        # under ``_capture.static_inputs()`` (a replay) read it from the hoist instead of making it again (silu + casts + GEMM, 16-22 us).
+        from miniworld_engine.kernels import _capture
+
+        if torch.compiler.is_compiling():         # the hoist reads storage addresses: a traced graph keeps the opaque op
+            return native_h100_mod_fwd(c, wmod)[0]
+        try:
+            key = ("swa_mod_h100", wmod.data_ptr(), wmod._version, wmod.dtype, tuple(wmod.shape))
+        except RuntimeError:                      # inference tensors carry no version counter: not cached
+            return native_h100_mod_fwd(c, wmod)[0]
+        return _capture.hoisted_table(_MOD_HOIST, c_base, key, lambda: native_h100_mod_fwd(c, wmod)[0])
+    if _mod_sm100(
+        c_base, wmod
+    ):  # B200, bf16, d_cond 128: the sm_100a mod_fwd / mod_bwd kernels
+        from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationSm100
+        from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_sm100
+
+        c2 = c_base.reshape(-1, c_base.shape[-1]).contiguous()
+        w = wmod.contiguous()
+        if torch.is_grad_enabled() and (c2.requires_grad or w.requires_grad):
+            return SWADiTModulationSm100.apply(c2, w)
+        from miniworld_engine.kernels import _capture
+
+        return swa_dit_mod_fwd_sm100(
+            c2, _capture.param_forms("swa_mod", (w,), lambda: w.to(c2.dtype))
+        )
+    if _mod_tf32(
+        c_base, wmod
+    ):  # B200, fp32, d_cond 128, no gradient: the TF32 mod_fwd_tf32 kernel
+        from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_tf32
+
+        return swa_dit_mod_fwd_tf32(
+            c_base.reshape(-1, c_base.shape[-1]).contiguous(), wmod.contiguous()
+        )
+    from miniworld_engine.kernels.swa_dit.dispatch import mod_sm90
+
+    if mod_sm90(c_base, wmod):                           # H100, bf16 or fp32 (TF32 allowed): the sm_90a mod_fwd / mod_bwd kernels
+        from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationSm90
+        from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_sm90
+
+        c2 = c_base.reshape(-1, c_base.shape[-1]).contiguous()
+        w = wmod.contiguous()
+        if torch.is_grad_enabled() and (c2.requires_grad or w.requires_grad):
+            return SWADiTModulationSm90.apply(c2, w)
+        return swa_dit_mod_fwd_sm90(c2, w, False)[0]
+    a = F.silu(c_base).float()
+    return (a.reshape(-1, a.shape[-1]) @ wmod.float().t()).contiguous()
+
+
+def swa_dit_block(
+    q: torch.Tensor,
+    mod: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    seqused: torch.Tensor,
+    wqkv: torch.Tensor,
+    wg: torch.Tensor,
+    wo: torch.Tensor,
+    wu: torch.Tensor,
+    wd: torch.Tensor,
+    B: int,
+    half_window: int = HALF_WINDOW,
+) -> torch.Tensor:
+    """The fused block, differentiable in ``q``, ``mod`` and the five weights. Returns [N, S, C] in q's dtype.
+
+    ``q`` [N = A*B, S, C] bf16 or fp32 (the weights alike, or fp32 over bf16 q; gradients come back in each input's dtype); ``mod`` [B*S, 6C] fp32 (:func:`swa_dit_hoist_modulation`); ``cos``/``sin`` [B*S, C/8]
+    or [B, S, C/8] fp32 -- one row per (batch element, atom), which is what ``build_attention_params`` repeats over the
+    augments, so ``cos[:B]`` of its output is this argument; ``seqused`` [N] int32 (valid atoms front-packed per row).
+    Check :func:`refusal` first. A call that records no gradient runs the inference forward (nothing saved).
+    """
+    from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction
+    from miniworld_engine.kernels.swa_dit.dispatch import (
+        native_h100_enabled,
+        swa_dit_block_fwd,
+    )
+
+    if native_h100_enabled(q) and (
+            q.ndim != 3 or q.shape[-1] != 128 or q.numel() == 0
+            or q.dtype not in (torch.bfloat16, torch.float32)
+            or any(not t.is_contiguous() for t in (q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd))
+            or any(w.dtype not in (q.dtype, torch.float32) for w in (wqkv, wg, wo, wu, wd))):
+        raise ValueError("native H100 SWA requires canonical contiguous BF16/FP32 operands")
+
+    s = q.shape[1]
+    cos = cos.reshape(-1, cos.shape[-1]).contiguous()
+    sin = sin.reshape(-1, sin.shape[-1]).contiguous()
+    mod = mod.reshape(-1, mod.shape[-1]).contiguous()
+    if cos.shape[0] != B * s or mod.shape[0] != B * s or q.shape[0] % B != 0:
+        msg = (
+            f"swa_dit_block: B={B} batch elements of S={s} atoms need cos/sin/mod with {B * s} rows and N % B == 0; "
+            f"got cos {tuple(cos.shape)}, mod {tuple(mod.shape)}, q {tuple(q.shape)}"
+        )
+        raise ValueError(msg)
+    q = q.contiguous()
+    weights = [w.contiguous() for w in (wqkv, wg, wo, wu, wd)]
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (q, mod, *weights)):
+        return SWADiTBlockFunction.apply(
+            q, mod, cos, sin, seqused, *weights, B, half_window
+        )
+    from miniworld_engine.kernels import _capture
+
+    dt = q.dtype
+    wk = _capture.param_forms(
+        f"swa_block_{dt}", weights, lambda: tuple(w.to(dt) for w in weights)
+    )
+    return swa_dit_block_fwd(
+        q, mod, cos, sin, seqused, *wk, B, half_window, FP32_EPS, False
+    )[0]
+
+
+__all__ = [
+    "D_ATOM",
+    "FP32_EPS",
+    "GLOBAL_HALF_WINDOW",
+    "HALF_WINDOW",
+    "N_HEAD",
+    "N_HIDDEN",
+    "highest_fp32_on_hopper_blackwell",
+    "is_global",
+    "refusal",
+    "swa_dit_block",
+    "swa_dit_hoist_modulation",
+]
