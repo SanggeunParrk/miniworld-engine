@@ -418,13 +418,27 @@ def _infer_launch(
         L, L8 = single.shape[2], _pad8(single.shape[2])
         if bkey is not None and hit is not None and hit[0] == bkey:
             bias = hit[1]
+            if bkey[0] is None and not hit[3] and torch.cuda.is_current_stream_capturing():
+                # a capture (static_weights) reads the eager bias: kernels._capture.refresh_static_inputs remakes it in place, from the
+                # caller's pair and mask as the miss below does
+                p0, m0 = pair, mask
+
+                def rebuild():
+                    p, m = p0, m0
+                    if L8 != L:
+                        p = torch.nn.functional.pad(p, (0, 0, 0, L8 - L, 0, L8 - L))
+                        m = torch.nn.functional.pad(m.to(torch.bool), (0, L8 - L), value=False)
+                    return runner.hoist(p.contiguous(), m)
+
+                _capture.note_static_read((id(runner), "bias", bias.data_ptr()), bias, rebuild, (pair, mask))
         else:
             if L8 != L:  # padded keys: zero pair rows / columns, masked out of every softmax
                 pair = torch.nn.functional.pad(pair, (0, 0, 0, L8 - L, 0, L8 - L))
                 mask = torch.nn.functional.pad(mask.to(torch.bool), (0, L8 - L), value=False)
             bias = runner.hoist(pair.contiguous(), mask)
             if bkey is not None:
-                runner.__dict__["_bias_cache"] = (bkey, bias, pinned)  # (an attribute of this cache, not of the runner class)
+                # (an attribute of this cache, not of the runner class); [3]: made inside a capture (a replay remakes it: no refresh)
+                runner.__dict__["_bias_cache"] = (bkey, bias, pinned, torch.cuda.is_current_stream_capturing())
         if L8 == L:
             return runner.step(single, cond, bias)
         # padded query rows: zero single / cond rows, computed and dropped (a shared cond stays one table)

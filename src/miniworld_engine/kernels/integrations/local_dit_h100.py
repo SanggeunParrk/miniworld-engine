@@ -240,19 +240,23 @@ def _fwd(
         p = k90.pack([*weights, wup] if up else weights, tf32)  # UP: + W_u chunks beside [Wa_j; Wb_j]
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
-        c2 = (_ld._padded(cond[:1], n).reshape(groups * n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
         nmod = groups * n if shared else m  # shared: one conditioning per (group, atom), read modulo G N (rows are [A][G][N])
         hoist = not save
         wkey = (tuple((w.data_ptr(), w._version) for w in weights), parallel_kv, ident, pars, eps) if hoist else None
 
+        # The hoisted tables' builds derive everything from the inputs they are keyed on (cond, pair) and the weights: a hit skips the
+        # padding copies too, and kernels._capture.refresh_static_inputs can remake them in place from a new item's inputs.
         def tables():
+            c2 = (_ld._padded(cond[:1], n).reshape(groups * n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
             return k90.cond_fwd(c2, p, tf32, options=opts)
 
         mod, mkv = _ld._hoisted(_HOIST_COND, cond, (wkey, n), tables) if hoist else tables()
-        zs = [_ld._trunk(pair[g : g + 1], n).contiguous() for g in range(groups)]
+
+        def trunks():
+            return [_ld._trunk(pair[g : g + 1], n).contiguous() for g in range(groups)]
 
         def pair_bias():
-            biases = [local.pair_bias_mma(zg, p["gamma"], p["wbias"], kmask, n) for zg in zs]
+            biases = [local.pair_bias_mma(zg, p["gamma"], p["wbias"], kmask, n) for zg in trunks()]
             if uid is not None:  # Chai-1: a real query sees only the keys of its own conformer
                 same = _same_conformer(uid, kmask, n)
                 for b in biases:
@@ -281,7 +285,7 @@ def _fwd(
         if slide:
 
             def edges():
-                return [_edge_tables(zg, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, uid) for zg in zs]
+                return [_edge_tables(zg, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, uid) for zg in trunks()]
 
             edge_tables = (
                 _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk, qblock, None if uid is None else _ld._tkey(uid)), edges)

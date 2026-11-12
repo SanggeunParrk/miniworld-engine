@@ -117,7 +117,18 @@ def test_public_names():
     assert capture.static_weights is _capture.static_weights
     assert capture.static_inputs is _capture.static_inputs
     assert capture.clear_weight_caches is _capture.clear_weight_caches
-    assert set(capture.__all__) == {"clear_weight_caches", "static_inputs", "static_weights", "weight_caches"}
+    assert capture.refresh_static_inputs is _capture.refresh_static_inputs
+    assert set(capture.__all__) == {
+        "StaleStaticInputs",
+        "StaticTables",
+        "clear_weight_caches",
+        "refresh_static_inputs",
+        "release_static_inputs",
+        "signature",
+        "static_inputs",
+        "static_weights",
+        "weight_caches",
+    }
 
 
 def test_static_contexts_set_and_restore():
@@ -187,3 +198,39 @@ def test_instance_cache_attributes_cleared():
     capture.clear_weight_caches(block)
     assert "_anthropic_pack" not in block.attention.__dict__
     assert "_anthropic_params" not in block.attention.__dict__
+
+
+def test_refresh_records_a_capture_read_and_rewrites_in_place(monkeypatch):
+    """R26 on the CPU (the capture faked): a hit served to a capture under ``static_inputs()`` is recorded with its build; a refresh writes the
+    build from the input's current contents into the recorded table (same storage); a changed weight raises ``StaleStaticInputs``."""
+    store = _capture.weight_cache("test_capture_api.refresh")
+    try:
+        owner = torch.nn.Linear(2, 2)
+        x = torch.ones(4)
+        build = lambda: (x * 2, 7)
+        key = (x.data_ptr(), x._version)
+        with capture.static_weights(), capture.static_inputs() as tables:
+            table = _capture.lookup_inputs(store, key, build, inputs=(x,))[0]  # the eager warm-up
+            monkeypatch.setattr(_capture, "_graph_capture_id", lambda: 1)  # "inside a capture"
+            _capture.CALLER[0] = owner
+            assert _capture.lookup_inputs(store, key, build, inputs=(x,))[0] is table
+            _capture.CALLER[0] = None
+            monkeypatch.undo()
+        assert len(tables) == 1
+        ptr = table.data_ptr()
+        x.copy_(torch.arange(4.0))  # the next item, written in place
+        assert capture.refresh_static_inputs(torch.nn.Sequential(torch.nn.Identity())) == 0  # another root: not its table
+        assert capture.refresh_static_inputs(owner) == 1
+        assert table.data_ptr() == ptr and torch.equal(table, torch.arange(4.0) * 2)
+        assert capture.signature(owner, x) == capture.signature(owner, x.clone())
+        with torch.no_grad():
+            owner.weight.add_(1)
+        try:
+            capture.refresh_static_inputs(owner)
+            raise AssertionError("a changed weight must raise")
+        except capture.StaleStaticInputs:
+            pass
+        assert tables.release() == 1 and len(tables) == 0
+    finally:
+        _capture._WEIGHT_CACHES.pop("test_capture_api.refresh", None)
+        _capture.CALLER[0] = None

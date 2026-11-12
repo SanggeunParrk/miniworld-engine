@@ -200,17 +200,19 @@ def _infer_h100(
         p = k90.pack(weights, tf32)
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
-        c2 = (_ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
         nmod = n if shared else m
         wkey = (tuple((w.data_ptr(), w._version) for w in weights), "esm")
 
+        # the hoisted builds derive everything from the inputs they are keyed on (cond, pair) and the weights (a hit skips the padding
+        # copies; kernels._capture.refresh_static_inputs remakes them in place from a new item's inputs)
         def tables():
+            c2 = (_ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
             return k90.cond_fwd(c2, p, tf32, options=opts)
 
         mod, mkv = _ld._hoisted(_HOIST_COND, cond, (wkey, n), tables)
-        z = _ld._trunk(pair, n).contiguous()
 
         def pair_bias():
+            z = _ld._trunk(pair, n).contiguous()
             nreal = kmask.sum(dtype=torch.int32) if kmask is not None else torch.full((), n0, device=single.device, dtype=torch.int32)
             return local.pair_bias_esm(z, p["gamma"], p["wbias"], kmask, nreal, n)
 

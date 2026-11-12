@@ -21,6 +21,13 @@ DiT inference block goes from 84 us to 200 us). ``static_weights()`` (or ``set_s
 scoping is off and a capture serves from, and fills, the same caches as an eager call, as the integrations did before the scoping.
 Under it an in-place weight update after the capture is *not* seen by replays -- do not set it around a training graph, nor around a
 sampling run inside one. The benchmark harness sets it for ``mode=inference``.
+
+**Refreshing hoisted tables (FoldForge R26).** Under ``static_inputs()`` a capture is served the per-item tables (``lookup_inputs`` /
+``hoisted_table``) its warm-up made eagerly, and the graph reads those tensors at every replay. A caller that keeps the graph for the next
+item writes that item's inputs into the same input tensors and calls ``refresh_static_inputs``: every such read was recorded
+(``note_static_read``: the table, the call's ``build``, its inputs, the module that ran -- ``CALLER``, set by ``BackendModule.forward``) and
+the refresh writes a new ``build()`` into the recorded tensors. A ``build`` therefore derives its table from the keyed inputs and the weights
+only. Entries made inside a capture are recorded into the graph (every replay remakes them) and are not refreshed.
 """
 
 from __future__ import annotations
@@ -59,11 +66,18 @@ def set_static_inputs(on: bool) -> bool:
 def static_inputs(on: bool = True):
     """Within the block, hoisted per-item tables (``lookup_inputs``) serve a capture from the eager entries: a replay then runs none of the
     kernels that make them. The caller promises that the weights AND the conditioning / pair tensors keep their contents between replays (an
-    inference run over one item); a sampler that refills them in place between replays must not set it."""
+    inference run over one item) -- or, when it refills them in place between replays (a sampler graph reused over folds), that it calls
+    :func:`refresh_static_inputs` (or the yielded handle's ``refresh``) after each refill and before the next replay (the module docstring,
+    "Refreshing hoisted tables").
+
+    Yields a :class:`StaticTables` handle: the hoisted tables that the captures inside the block read from the eager cache."""
     prev = set_static_inputs(on)
+    handle = StaticTables()
+    _HANDLES.append(handle)
     try:
-        yield
+        yield handle
     finally:
+        _HANDLES.remove(handle)
         set_static_inputs(prev)
 
 
@@ -174,7 +188,7 @@ def lookup(store: dict, key, build, limit: int = 64):
     return out
 
 
-def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=None):
+def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=None, inputs=()):
     """``lookup`` for a table made from a per-item INPUT (a conditioning tensor, a pair): the table is the same for every call that reads that
     tensor unchanged, so a sampler's steps (eager) and a captured step's block calls share it. Scoped to the capture like every pack, except
     under ``static_inputs()``: then a capture serves from, and fills, the eager entries and a replay re-runs none of the producing kernels.
@@ -184,7 +198,12 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
     ``alive(entry)`` of every entry when the store is pruned (False: the tensor is gone, the entry is dropped).
 
     The scope is the capture itself, not ``capture_id()``: ``static_weights()`` says nothing about the inputs, so a capture under it alone
-    still makes its own tables and a replay remakes them."""
+    still makes its own tables and a replay remakes them.
+
+    Refresh contract (``refresh_static_inputs``): a capture under ``static_inputs()`` served an eager entry records ``build`` with the entry, and
+    a refresh writes a new ``build()`` into the entry's tensors. So ``build`` must derive the table from ``inputs`` (the per-item tensors the
+    key names: their CURRENT contents) and the weights only -- never from an intermediate made by the caller before the lookup (that one
+    belongs to the capture and is stale until the graph replays)."""
     if _STATIC_INPUTS[0]:
         cid = None
     else:
@@ -194,9 +213,15 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
     if alive is not None:
         _INPUT_STORES[id(store)] = (store, alive)
     sk = (cid, key)
-    pinned = _pin_if_static_capture(store, sk)
+    # an eager-scope call inside a capture (static_inputs): the entry is pinned, and a hit read from the eager cache is recorded
+    eager_in_capture = cid is None and _graph_capture_id() is not None
+    pinned = _PINNED.setdefault(id(store), set())
+    if eager_in_capture:
+        pinned.add(sk)
     hit = store.get(sk)
     if hit is not None and (valid is None or valid(hit)):
+        if eager_in_capture and (id(store), sk) not in _CAPTURE_BUILT:
+            note_static_read((id(store), sk), hit, build, inputs)
         return hit
     if not _STATIC_INPUTS[0]:
         prune(store, cid)
@@ -207,6 +232,10 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
     if sk not in store:
         _evict(store, pinned, limit, sk)
     out = store[sk] = build()
+    if eager_in_capture:  # an eager-scope entry made inside a capture: its kernels are recorded, every replay remakes it (no refresh)
+        _CAPTURE_BUILT.add((id(store), sk))
+    elif _CAPTURE_BUILT:
+        _CAPTURE_BUILT.discard((id(store), sk))
     return out
 
 
@@ -283,6 +312,7 @@ def clear_weight_caches(*modules: torch.nn.Module) -> None:
     for store in _WEIGHT_CACHES.values():
         store.clear()
     _PINNED.clear()
+    _CAPTURE_BUILT.clear()
     for module in modules:
         for sub in module.modules():
             for attr in _INSTANCE_CACHE_ATTRS:
@@ -362,5 +392,187 @@ def hoisted_table(store: dict, tensor: torch.Tensor, key, build, limit: int = 64
         limit=limit,
         valid=lambda e: e[1] or e[0]() is root,
         alive=lambda e: e[1] or e[0]() is not None,
+        inputs=(tensor,),
     )
     return entry[2]
+
+
+# ------------------------------------------------------------------------------------------- refreshing hoisted tables (FoldForge R26)
+class StaleStaticInputs(RuntimeError):
+    """A refresh cannot rewrite a recorded hoisted table: the weights it was made from changed (version / object), its input's layout
+    changed (shape, strides, dtype, device, address), the capture that read it was not under ``static_weights()``, or a rebuilt table no
+    longer has the recorded table's shape / dtype. The graph that read the table must be captured again."""
+
+
+#: The module whose ``forward`` runs now (``BackendModule.forward`` sets it on every eager call): the owner of the hoisted tables a capture
+#: records in it (``refresh_static_inputs(root)`` refreshes the tables of the modules under ``root``).
+CALLER: list = [None]
+
+#: (id(store), scoped key) of the eager-scope entries made INSIDE a capture (``static_inputs()``): their kernels are recorded, every replay
+#: remakes them, so a capture that reads one records nothing to refresh.
+_CAPTURE_BUILT: set = set()
+
+#: The ``static_inputs()`` handles open now: each collects the tables the captures inside its block read.
+_HANDLES: list = []
+
+
+class _Read:
+    """One hoisted table a capture read from the eager cache: the tensors the graph reads, how to make them again, and what they were made from."""
+
+    __slots__ = ("build", "inputs", "owner", "params", "table", "unsafe")
+
+
+def _layout(t: torch.Tensor) -> tuple:
+    return (t.data_ptr(), tuple(t.shape), t.stride(), t.dtype, t.device)
+
+
+def _version_of(p: torch.Tensor) -> int | None:
+    try:
+        return p._version
+    except RuntimeError:  # an inference tensor has no version counter: identity only
+        return None
+
+
+def _params_of(owner) -> tuple:
+    return tuple((weakref.ref(p), _version_of(p)) for p in owner.parameters())
+
+
+#: (id(store), key) -> ``_Read``: every hoisted table a capture under ``static_inputs()`` read from the eager cache (so a replay reads it as it
+#: is then, without its producing kernels). Registered: ``clear_weight_caches`` drops the records with the stores.
+_READS: dict = weight_cache("capture.static_reads")
+
+
+def note_static_read(rkey, table, build, inputs=()) -> None:
+    """Record that the capture running now reads the hoisted ``table`` from the eager cache (``lookup_inputs`` does it for its stores; a cache of
+    its own calls it on a hit served to a capture from the eager scope). ``build()`` makes the table again from the CURRENT contents of
+    ``inputs`` (the per-item tensors it is made from: their layout is checked at a refresh) and the weights; ``rkey`` names the entry (one
+    record per entry, whichever capture read it first)."""
+    old = _READS.get(rkey)
+    if old is None or old.table is not table:
+        r = _Read()
+        r.table, r.build = table, build
+        r.inputs = tuple((t, _layout(t)) for t in inputs if t is not None)
+        owner = CALLER[0]
+        r.owner = None if owner is None else weakref.ref(owner)
+        r.params = () if owner is None else _params_of(owner)
+        # the table's build reads weight packs: without static_weights() a capture packs its own (made by its kernels, valid only after a
+        # replay), so an eager refresh before the replay would read garbage
+        r.unsafe = None if _STATIC[0] else "the capture was not under static_weights() (its weight packs are the graph's own)"
+        _READS[rkey] = r
+    for handle in _HANDLES:
+        handle._keys.add(rkey)
+
+
+def _copy_into(old, new) -> None:
+    """Write the rebuilt ``new`` into the recorded ``old`` (same structure): tensors element-wise into the recorded storage (a tensor at the same
+    address is an input the entry holds: skipped), Python values must be equal, other objects (weak references) are skipped."""
+    if isinstance(old, torch.Tensor):
+        if not isinstance(new, torch.Tensor):
+            raise StaleStaticInputs(f"refresh: a table slot was a tensor, the rebuild gave {type(new).__name__}")
+        if old.data_ptr() == new.data_ptr():
+            return
+        if old.shape != new.shape or old.dtype != new.dtype:
+            raise StaleStaticInputs(
+                f"refresh: the rebuilt table is {tuple(new.shape)} {new.dtype}, the captured one {tuple(old.shape)} {old.dtype}"
+            )
+        old.copy_(new)
+    elif isinstance(old, (tuple, list)):
+        if not isinstance(new, (tuple, list)) or len(new) != len(old):
+            raise StaleStaticInputs("refresh: the rebuilt table has another structure")
+        for a, b in zip(old, new, strict=True):
+            _copy_into(a, b)
+    elif isinstance(old, dict):
+        if not isinstance(new, dict) or new.keys() != old.keys():
+            raise StaleStaticInputs("refresh: the rebuilt table has another structure")
+        for k in old:
+            _copy_into(old[k], new[k])
+    elif isinstance(old, (bool, int, float, str)) and old != new:
+        raise StaleStaticInputs(f"refresh: a table value changed ({old!r} -> {new!r}); the graph baked the old one")
+
+
+def _stale(r: _Read) -> str | None:
+    if r.unsafe is not None:
+        return r.unsafe
+    for ref, version in r.params:
+        p = ref()
+        if p is None:
+            return "a weight of the module that made it is gone"
+        if version is not None and p._version != version:
+            return "a weight of the module that made it changed after the capture"
+    for t, layout in r.inputs:
+        if _layout(t) != layout:
+            return f"its input's layout changed after the capture ({layout[1:]} -> {_layout(t)[1:]})"
+    return None
+
+
+def _selected(root, keys) -> list:
+    keys = [k for k in keys if k in _READS]
+    if root is None:
+        return keys
+    under = {id(m) for m in root.modules()}
+    out = []
+    for k in keys:
+        owner = _READS[k].owner
+        if owner is not None and id(owner()) in under:
+            out.append(k)
+    return out
+
+
+def refresh_static_inputs(root: torch.nn.Module | None = None, *, tables: StaticTables | None = None) -> int:
+    """Make every hoisted per-item table that a capture under ``static_inputs()`` reads from the eager cache again, from the CURRENT contents of
+    its input tensors, INTO the tensors the graph reads (same storage, no reallocation of the tables; the rebuild's temporaries come and go on
+    the current stream, one table at a time). Call it after writing a new item's inputs into the graph's static input tensors (in place) and
+    before replaying: the replay then equals a fresh capture -- and eager -- on the new inputs, bitwise.
+
+    ``root``: only the tables made by modules under ``root`` (``root.modules()``); ``tables``: only those a ``static_inputs()`` block's
+    captures read (the handle it yielded). Neither: every recorded table. Returns the number of tables rewritten. Every selected table is
+    checked first and :class:`StaleStaticInputs` is raised -- nothing written -- when one cannot be refreshed (its module's weights changed
+    or were replaced, its input's layout changed, the capture was not under ``static_weights()``).
+
+    Runs eagerly on the current stream; it may itself be captured (a graph of the rebuilds, replayed before the step graph): the rebuilds
+    allocate, read the inputs and write the tables with no host synchronisation."""
+    keys = _selected(root, list(_READS) if tables is None else list(tables._keys))
+    for k in keys:
+        why = _stale(_READS[k])
+        if why is not None:
+            raise StaleStaticInputs(f"refresh_static_inputs: a hoisted table cannot be refreshed: {why}; capture the graph again")
+    for k in keys:
+        r = _READS[k]
+        _copy_into(r.table, r.build())
+    return len(keys)
+
+
+def release_static_inputs(root: torch.nn.Module | None = None, *, tables: StaticTables | None = None) -> int:
+    """Drop the refresh records (``refresh_static_inputs``'s selection); returns how many. A record holds its table, its inputs and the
+    capture's build closure: drop it with the graph that read the table (``clear_weight_caches`` drops them all)."""
+    keys = _selected(root, list(_READS) if tables is None else list(tables._keys))
+    for k in keys:
+        del _READS[k]
+    if tables is not None:
+        tables._keys.difference_update(keys)
+    return len(keys)
+
+
+class StaticTables:
+    """The hoisted tables the captures inside one ``static_inputs()`` block read from the eager cache (yielded by ``static_inputs()``)."""
+
+    def __init__(self) -> None:
+        self._keys: set = set()
+
+    def __len__(self) -> int:
+        return sum(1 for k in self._keys if k in _READS)
+
+    def refresh(self, root: torch.nn.Module | None = None) -> int:
+        """``refresh_static_inputs(root, tables=self)``."""
+        return refresh_static_inputs(root, tables=self)
+
+    def release(self) -> int:
+        """``release_static_inputs(tables=self)``."""
+        return release_static_inputs(tables=self)
+
+
+def signature(root: torch.nn.Module, *tensors: torch.Tensor | None) -> tuple:
+    """A hashable key of a captured graph's static layout: ``root``'s identity and each input's (shape, strides, dtype, device) -- what must be
+    equal for a graph captured on one set of static inputs to serve another item through ``refresh_static_inputs``. Host metadata only (no
+    device read, no parameter walk: a changed weight is caught by the refresh itself, which raises :class:`StaleStaticInputs`)."""
+    return (id(root), tuple(None if t is None else (tuple(t.shape), t.stride(), t.dtype, t.device) for t in tensors))

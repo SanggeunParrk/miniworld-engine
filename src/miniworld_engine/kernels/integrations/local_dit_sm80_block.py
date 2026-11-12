@@ -272,6 +272,7 @@ def _hoisted(store, tensor, key, build):
         limit=64,
         valid=lambda e: e[0]() is tensor,
         alive=lambda e: e[0]() is not None,
+        inputs=(tensor,),
     )
     return entry[1]
 
@@ -337,9 +338,11 @@ def _block_fwd(
     with torch.cuda.device(single.device):
         pk = _weights(weights)
         s2 = single.reshape(m, DS_).contiguous()
-        c2 = cond.reshape(m, DC_).contiguous()
 
+        # the hoisted builds derive everything from the inputs they are keyed on (cond, pair) and the weights
+        # (kernels._capture.refresh_static_inputs remakes them in place from a new item's inputs)
         def make_mod():
+            c2 = cond.reshape(m, DC_).contiguous()
             return rows.cond_fwd(c2, pk.w_cond, pk.b_cond, pk.gamma, EPS, cross)
 
         def make_bias():
