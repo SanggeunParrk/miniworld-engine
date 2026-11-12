@@ -390,6 +390,10 @@ def _mm32(a, b):
 def _gemm_tk(a, b):
     """a [T, M], b [T, N] (or a transposed view) -> a^T b in fp32 with K = T split into chunks (a batched GEMM + a sum): cuBLAS picks a
     non-split-K kernel for these 128 x 256 x L^2 shapes (0.99 ms instead of ~0.3 at L = 768)."""
+    if on_sm120():
+        # RTX 5090: cuBLAS runs the unsplit long-K GEMM well here (split-K inside), while the chunked bmm with an fp32 output takes 32 x 32 WMMA kernels
+        # (2-3x slower); b^T a then a transposed copy measured best of the layouts (bench_tk, 2026-11-12); fp32 accumulation either way
+        return torch.mm(b.t(), a, out_dtype=torch.float32).t().contiguous()
     T = a.shape[0]
     S = next((s for s in (32, 16, 8, 4, 2) if T % s == 0 and T // s >= 256), 1)
     if S == 1:

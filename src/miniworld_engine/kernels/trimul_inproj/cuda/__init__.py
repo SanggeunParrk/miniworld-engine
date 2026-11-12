@@ -271,9 +271,9 @@ def _sm80(cells):
 def _sm120(cells):
     """The RTX 5090 builds: the sm_80 wide sources built for sm_120a (``sm80_wide``: every width, D128 included -- the fused D128 set is
     A100-only, its tiles need 164 KB of shared memory -- and ``sm80_wide512`` for the D512 training rows)."""
-    from . import sm80_wide, sm80_wide512
+    from . import contract_sm80, sm80_wide, sm80_wide512
 
-    calls = {sm80_wide._ext120: None}
+    calls = {sm80_wide._ext120: None, contract_sm80._ext120: None}  # + the own plane GEMM (the contraction, forward and backward)
     for c in cells:
         if c.d == 512 and "train" in c.modes:
             calls[sm80_wide512._ext120] = None

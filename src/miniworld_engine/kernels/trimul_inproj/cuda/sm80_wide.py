@@ -27,6 +27,7 @@ import torch
 from ... import _capture
 from ..._compile import opaque
 from ..._nvcc import build_failed
+from . import contract_sm80 as _cp
 from . import sm80 as _d128
 
 _dir = Path(__file__).parent / "sm80"
@@ -220,13 +221,14 @@ def _tf32(z: torch.Tensor):
 
 # ------------------------------------------------------------------------------------------------------------------------------ forward
 def _contract(planes, x, hs, n, direction):
-    """cuBLAS contraction of the plane pair: channels [0, h) outgoing (sum_k a[i,k] b[j,k]), the rest incoming (sum_k a[k,i] b[k,j])."""
+    """The contraction of the plane pair: channels [0, h) outgoing (sum_k a[i,k] b[j,k]), the rest incoming (sum_k a[k,i] b[k,j]); cuBLAS, or the
+    own plane GEMM on an RTX 5090 (``contract_sm80.planes``)."""
     a, b = planes[:hs].view(hs, n, n), planes[hs:].view(hs, n, n)
     h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
     if h:
-        torch.bmm(a[:h], b[:h].transpose(1, 2), out=x[:h])
+        _cp.planes(0, a[:h], b[:h], x[:h])
     if h < hs:
-        torch.bmm(a[h:].transpose(1, 2), b[h:], out=x[h:])
+        _cp.planes(1, a[h:], b[h:], x[h:])
 
 
 #: bf16 with a hidden width <= 128 (D64 both modules, D128 one direction): the statistics kernels are replaced by in-kernel two-pass statistics of k1w / k3w (see ``_run_forward``); False keeps the kernels (probe switch for A / B timings).
@@ -373,16 +375,17 @@ def _gemm_tk(a, b):
 
 
 def _contract_bwd(planes, dx, dplanes, hs, n, direction):
-    """dX [Hs, L, L] -> the plane gradients [2 Hs, L, L] (cuBLAS): X = A B^T: dA = dX B, dB = dX^T A; X = A^T B: dA = B dX^T, dB = A dX."""
+    """dX [Hs, L, L] -> the plane gradients [2 Hs, L, L] (cuBLAS, or the own plane GEMM on an RTX 5090): X = A B^T: dA = dX B, dB = dX^T A;
+    X = A^T B: dA = B dX^T, dB = A dX."""
     a, b = planes[:hs].view(hs, n, n), planes[hs:].view(hs, n, n)
     da, db = dplanes[:hs], dplanes[hs:]
     h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
     if h:
-        torch.bmm(dx[:h], b[:h], out=da[:h])
-        torch.bmm(dx[:h].transpose(1, 2), a[:h], out=db[:h])
+        _cp.planes(2, dx[:h], b[:h], da[:h])
+        _cp.planes(1, dx[:h], a[:h], db[:h])
     if h < hs:
-        torch.bmm(b[h:], dx[h:].transpose(1, 2), out=da[h:])
-        torch.bmm(a[h:], dx[h:], out=db[h:])
+        _cp.planes(0, b[h:], dx[h:], da[h:])
+        _cp.planes(2, a[h:], dx[h:], db[h:])
 
 
 def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
