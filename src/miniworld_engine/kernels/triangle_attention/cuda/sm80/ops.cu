@@ -3,6 +3,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 #include <climits>
+#include <initializer_list>
+#include <utility>
 
 #include "attn_fwd_sm80.cuh"
 
@@ -187,7 +189,7 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
   // q / k / v / out are token-major views (rows of H * 32 channels, element stride ld between tokens: the projections of the front keep q | k | v | g in one
   // [T, 512] buffer), so the extents are the storage's, and the 16-byte loads need aligned bases and strides
   const int64_t T = Z * L * L;
-  for (auto [t, ld] : {std::pair<const torch::Tensor*, int64_t>{&q, ldq}, {&k, ldk}, {&v, ldv}, {&out, ldo}}) {
+  for (auto [t, ld] : std::initializer_list<std::pair<const torch::Tensor*, int64_t>>{{&q, ldq}, {&k, ldk}, {&v, ldv}, {&out, ldo}}) {
     TORCH_CHECK(ld >= H * 32 && ld % 8 == 0 && reinterpret_cast<uintptr_t>(t->data_ptr()) % 16 == 0, "attn_fwd: row strides / alignment");
     TORCH_CHECK((t->storage_offset() + (T - 1) * ld + H * 32) * t->element_size() <= (int64_t)t->storage().nbytes(), "attn_fwd: tensor extents");
   }
@@ -233,7 +235,7 @@ void attn_fwd_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
   TORCH_CHECK(bias.is_contiguous() && bias.numel() == Z * H * L * L, "attn_fwd_gate: bias [z, H, L, L] contiguous");
   TORCH_CHECK(L % a100::TA_BM == 0 && L >= a100::TA_BM && L % 32 == 0, "attn_fwd_gate: L must be a multiple of 128");
   const int64_t T = Z * L * L;
-  for (auto [t, ld] : {std::pair<const torch::Tensor*, int64_t>{&q, ldq}, {&k, ldk}, {&v, ldv}, {&gate, ldgate}, {&aout, ldao}}) {
+  for (auto [t, ld] : std::initializer_list<std::pair<const torch::Tensor*, int64_t>>{{&q, ldq}, {&k, ldk}, {&v, ldv}, {&gate, ldgate}, {&aout, ldao}}) {
     TORCH_CHECK(ld >= H * 32 && ld % 8 == 0 && reinterpret_cast<uintptr_t>(t->data_ptr()) % 16 == 0, "attn_fwd_gate: row strides / alignment");
     TORCH_CHECK((t->storage_offset() + (T - 1) * ld + H * 32) * t->element_size() <= (int64_t)t->storage().nbytes(), "attn_fwd_gate: tensor extents");
   }
@@ -459,7 +461,7 @@ void attn_bwd_dq(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tenso
     TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kFloat && t->is_contiguous() && t->numel() == Z * H * L * L, "attn_bwd_dq: lse / delta [z, H, L, L] fp32");
   TORCH_CHECK(L % a100::TA_BM == 0 && L >= a100::TA_BM && L % bn == 0 && L % rows == 0, "attn_bwd_dq: L must be a multiple of 128");
   const int64_t T = Z * L * L;
-  for (auto [t, ld] : {std::pair<const torch::Tensor*, int64_t>{&q, ldq}, {&k, ldk}, {&v, ldv}, {&dov, lddo}, {&dq, lddq}}) {
+  for (auto [t, ld] : std::initializer_list<std::pair<const torch::Tensor*, int64_t>>{{&q, ldq}, {&k, ldk}, {&v, ldv}, {&dov, lddo}, {&dq, lddq}}) {
     TORCH_CHECK(ld >= H * 32 && ld % 8 == 0 && reinterpret_cast<uintptr_t>(t->data_ptr()) % 16 == 0, "attn_bwd_dq: row strides / alignment");
     TORCH_CHECK((t->storage_offset() + (T - 1) * ld + H * 32) * t->element_size() <= (int64_t)t->storage().nbytes(), "attn_bwd_dq: tensor extents");
   }
@@ -514,7 +516,7 @@ void attn_bwd_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
     TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kFloat && t->is_contiguous() && t->numel() == Z * H * L * L, "attn_bwd_dkv: lse / delta [z, H, L, L] fp32");
   TORCH_CHECK(L % a100::TA_BM == 0 && L >= a100::TA_BM && L % bn == 0, "attn_bwd_dkv: L must be a multiple of 128");
   const int64_t T = Z * L * L;
-  for (auto [t, ld] : {std::pair<const torch::Tensor*, int64_t>{&q, ldq}, {&k, ldk}, {&v, ldv}, {&dov, lddo}, {&dk, lddk}, {&dv, lddv}}) {
+  for (auto [t, ld] : std::initializer_list<std::pair<const torch::Tensor*, int64_t>>{{&q, ldq}, {&k, ldk}, {&v, ldv}, {&dov, lddo}, {&dk, lddk}, {&dv, lddv}}) {
     TORCH_CHECK(ld >= H * 32 && ld % 8 == 0 && reinterpret_cast<uintptr_t>(t->data_ptr()) % 16 == 0, "attn_bwd_dkv: row strides / alignment");
     TORCH_CHECK((t->storage_offset() + (T - 1) * ld + H * 32) * t->element_size() <= (int64_t)t->storage().nbytes(), "attn_bwd_dkv: tensor extents");
   }
