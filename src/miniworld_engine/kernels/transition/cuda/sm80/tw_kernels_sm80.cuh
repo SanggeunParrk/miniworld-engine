@@ -120,6 +120,91 @@ __global__ void __launch_bounds__(128) ln_bwd_kernel(const float* __restrict__ d
   for (int i = 0; i < XPL; ++i)
 #pragma unroll
     for (int e = 0; e < 8; ++e) dg[i][e] = db[i][e] = 0.f;
+  // bf16 rows at D 256 .. 512 (one row per warp): RU rows of the warp's sequence in flight per step (x, d_xn, dy all loaded before the row reductions), the
+  // same rows per lane in the same order as the one-row loop below: the same dx and partial bits, more loads in flight (the kernel runs 4 warps x 2 CTAs per SM)
+  constexpr int RU = (!F32IO && RPW == 1 && D >= 256 && D <= 512) ? 2 : 1;
+  if constexpr (RU > 1) {
+    const int stride = gridDim.x * 4;
+    float gm[XPL][8];
+#pragma unroll
+    for (int i = 0; i < XPL; ++i) {
+      const int c = cl + i * LPR;
+      float4 g0 = make_float4(0.f, 0.f, 0.f, 0.f), g1 = g0;
+      if (c < CH) {
+        g0 = *reinterpret_cast<const float4*>(gamma + c * 8);
+        g1 = *reinterpret_cast<const float4*>(gamma + c * 8 + 4);
+      }
+      gm[i][0] = g0.x; gm[i][1] = g0.y; gm[i][2] = g0.z; gm[i][3] = g0.w; gm[i][4] = g1.x; gm[i][5] = g1.y; gm[i][6] = g1.z; gm[i][7] = g1.w;
+    }
+    for (int base = blockIdx.x * 4 + warp; base < M; base += RU * stride) {
+      uint4 u[RU][XPL], y[RU][XPL];
+      float4 d0[RU][XPL], d1[RU][XPL];
+      float2 st[RU];
+      bool valid[RU];
+#pragma unroll
+      for (int r = 0; r < RU; ++r) {
+        const int row = base + r * stride;
+        valid[r] = row < M;
+        st[r] = valid[r] ? stats[row] : make_float2(0.f, 1.f);
+#pragma unroll
+        for (int i = 0; i < XPL; ++i) {
+          const int c = cl + i * LPR;
+          u[r][i] = y[r][i] = make_uint4(0u, 0u, 0u, 0u);
+          d0[r][i] = d1[r][i] = make_float4(0.f, 0.f, 0.f, 0.f);
+          if (valid[r] && c < CH) {
+            u[r][i] = *reinterpret_cast<const uint4*>(x + (size_t)row * D + c * 8);
+            d0[r][i] = *reinterpret_cast<const float4*>(dxn + (size_t)row * D + c * 8);
+            d1[r][i] = *reinterpret_cast<const float4*>(dxn + (size_t)row * D + c * 8 + 4);
+            if (RES) y[r][i] = *reinterpret_cast<const uint4*>(dy + (size_t)row * D + c * 8);
+          }
+        }
+      }
+#pragma unroll
+      for (int r = 0; r < RU; ++r) {
+        if (!valid[r]) continue;   // (warp-uniform: one row per warp)
+        const int row = base + r * stride;
+        float xh[XPL][8], g[XPL][8];
+        float s1 = 0.f, s2 = 0.f;
+#pragma unroll
+        for (int i = 0; i < XPL; ++i) {
+          const uint32_t w[4] = {u[r][i].x, u[r][i].y, u[r][i].z, u[r][i].w};
+          const float dd[8] = {d0[r][i].x, d0[r][i].y, d0[r][i].z, d0[r][i].w, d1[r][i].x, d1[r][i].y, d1[r][i].z, d1[r][i].w};
+#pragma unroll
+          for (int e = 0; e < 4; ++e) {
+#pragma unroll
+            for (int k = 0; k < 2; ++k) {
+              const int j = 2 * e + k;
+              const float xv = k ? bf16hi(w[e]) : bf16lo(w[e]);
+              xh[i][j] = (xv - st[r].x) * st[r].y;
+              g[i][j] = gm[i][j] * dd[j];
+              s1 = fmaf(g[i][j], xh[i][j], s1);
+              s2 += g[i][j];
+              dg[i][j] = fmaf(dd[j], xh[i][j], dg[i][j]);
+              db[i][j] += dd[j];
+            }
+          }
+        }
+#pragma unroll
+        for (int o = LPR / 2; o > 0; o >>= 1) { s1 += __shfl_xor_sync(0xffffffffu, s1, o); s2 += __shfl_xor_sync(0xffffffffu, s2, o); }
+        const float c1 = s1 * (1.f / D), c2 = s2 * (1.f / D);
+#pragma unroll
+        for (int i = 0; i < XPL; ++i) {
+          const int c = cl + i * LPR;
+          if (c < CH) {
+            const uint32_t yw[4] = {y[r][i].x, y[r][i].y, y[r][i].z, y[r][i].w};
+            uint32_t o[4];
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+              const float v0 = fmaf(g[i][2 * e] - fmaf(xh[i][2 * e], c1, c2), st[r].y, bf16lo(yw[e]));
+              const float v1 = fmaf(g[i][2 * e + 1] - fmaf(xh[i][2 * e + 1], c1, c2), st[r].y, bf16hi(yw[e]));
+              o[e] = pack_bf16(v0, v1);
+            }
+            *reinterpret_cast<uint4*>(dx + (size_t)row * D + c * 8) = make_uint4(o[0], o[1], o[2], o[3]);
+          }
+        }
+      }
+    }
+  } else
   for (int base = (blockIdx.x * 4 + warp) * RPW; base < M; base += gridDim.x * 4 * RPW) {
     const int row = base + sub;
     const bool valid = row < M;
