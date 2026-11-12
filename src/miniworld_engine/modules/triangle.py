@@ -113,7 +113,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "anthropic": 2,
+        "anthropic": 3,  # 3 (2026-11-13): the block folds the residual (z += block(z)); the cu129 triattn prebuilts
         "cueq": 2,
         "cuda:a100_sm80": 4,
         "cuda:h100_sm90": 3,
@@ -349,6 +349,10 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
             PF, W, kw, block_why = self._anthropic_block_call(pair, mask)
             if block_why is None:
                 try:
+                    if pair.dtype == torch.bfloat16:
+                        # the kits' block statement: z += block(z), the residual folded in the epilogue (the ending node scattered back by
+                        # address math). The module returns a new tensor, so the block updates a copy of the pair in place.
+                        return PF.tri_attn_block(pair.clone(), W, **{**kw, "residual": True})
                     return pair + PF.tri_attn_block(pair, W, **kw).to(pair.dtype)
                 except PF.Refused as e:
                     # the library's own run-time refusal (a cell whose build fails on this stack, e.g. the c512 h8 d64 epilogue's ptxas
@@ -1365,7 +1369,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
     #: ``serves_single`` / ``update``), bf16 only.
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "anthropic": 2,
+        "anthropic": 3,  # 3 (2026-11-13): the sealed CUDA-13 rows served wherever the driver loads them
         "cueq": 2,
         "cuda:a100_sm80": 3,
         "cuda:h100_sm90": 5,
@@ -1505,7 +1509,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
             int(pair.shape[1]),
             "outgoing" if self.outgoing else "incoming",
             word="fast",
-            exclude=self._ANTHROPIC_EXCLUDED_ROWS,
+            exclude=None if _anthropic.cuda13_cubins_load() else self._ANTHROPIC_EXCLUDED_ROWS,
             batch=int(pair.shape[0]),
         )
 
@@ -1577,6 +1581,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     #: ``"anthropic"``: see the anthropic section below.
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 3,  # 2026-11-13: the sealed CUDA-13 rows served wherever the driver loads them
         "cuda:a100_sm80": 4,
         "cuda:h100_sm90": 3,
     }  # 2026-11-10: sm_80 paths; 3: the inference pack read by captures; 4: A100 D64 persistent front (k1w64); cuda:h100_sm90 2

@@ -91,6 +91,26 @@ def unavailable(module: str, device, *, path: str = "common/opt_core") -> str | 
     return None
 
 
+@cache
+def driver_version() -> int:
+    """``cuDriverGetVersion`` of the process's libcuda (e.g. 12090, 13000), 0 when it cannot be read."""
+    import ctypes
+
+    try:
+        lib = ctypes.CDLL("libcuda.so.1")
+        v = ctypes.c_int(0)
+        return int(v.value) if lib.cuDriverGetVersion(ctypes.byref(v)) == 0 else 0
+    except OSError:
+        return 0
+
+
+def cuda13_cubins_load() -> bool:
+    """Whether the release's sealed CUDA-13.0 cubins (trimul_native, esm_v61, the ef2_t16 transition cubin) load in this process: their
+    README's rule, a driver of the CUDA 13 line or newer (the kits run them through the CUDA 13 forward-compatible libcuda of their cu130
+    container). Below it a launch dumps core, so the backends exclude those rows by name and the provider's next row serves."""
+    return driver_version() >= 13000
+
+
 def kernel_selection(provider: ModuleType, *args, **kwargs):
     """``(Selection, None)`` for the row an ``opt_core.kernels`` provider's ``select(*args, **kwargs)`` names -- a kernel row or a stock row
     (``STOCK_ROWS``: SDPA, torch_swiglu, torch_math, the cuEquivariance op, the engine's own module ...): the release serves that row for the
