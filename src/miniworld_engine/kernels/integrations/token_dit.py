@@ -418,6 +418,7 @@ def _infer_launch(
         L, L8 = single.shape[2], _pad8(single.shape[2])
         if bkey is not None and hit is not None and hit[0] == bkey:
             bias = hit[1]
+            _capture.hold(hit, bkey[0] is None)  # a capture reads it: the next pair replacing the entry must not free it under the graph
             if bkey[0] is None and not hit[3] and torch.cuda.is_current_stream_capturing():
                 # a capture (static_weights) reads the eager bias: kernels._capture.refresh_static_inputs remakes it in place, from the
                 # caller's pair and mask as the miss below does
@@ -439,6 +440,7 @@ def _infer_launch(
             if bkey is not None:
                 # (an attribute of this cache, not of the runner class); [3]: made inside a capture (a replay remakes it: no refresh)
                 runner.__dict__["_bias_cache"] = (bkey, bias, pinned, torch.cuda.is_current_stream_capturing())
+                _capture.hold(runner.__dict__["_bias_cache"], False)
         if L8 == L:
             return runner.step(single, cond, bias)
         # padded query rows: zero single / cond rows, computed and dropped (a shared cond stays one table)
