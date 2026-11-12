@@ -40,8 +40,9 @@ def _on_this_build(fn):
     return types.FunctionType(fn.__code__, _G, fn.__name__, fn.__defaults__, fn.__closure__)
 
 
-#: rows of z per forward CTA on this card (measured L128 / L256 / L384, L2 flushed: 2 / 3 / 2 rows; the H100 takes 4 up to L 256)
-_G["fwd_rows"] = lambda L: 3 if 128 < L <= 256 else 2
+#: rows of z per forward CTA on this card (measured L128 / L256 / L384, L2 flushed: 2 / 3 / 2 rows; the H100 takes 4 up to L 256); the RTX 5090's
+#: sm_120a build (16-warp CTAs, one per SM) takes 1 row (measured R 1-8 at L128 / L256 / L384: 12.5 / 27.8 / 56.9 us, the best or within 1 %)
+_G["fwd_rows"] = lambda L: 1 if torch.cuda.get_device_capability() == (12, 0) else 3 if 128 < L <= 256 else 2
 forward = _on_this_build(_h100.forward)
 backward = _on_this_build(_h100.backward)
 prep = _on_this_build(_h100.prep)

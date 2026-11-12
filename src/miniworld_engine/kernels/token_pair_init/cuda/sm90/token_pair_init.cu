@@ -24,7 +24,11 @@
 #include <vector>
 
 constexpr int P = 128;
+#ifdef MWE_SM120
+constexpr int NWARP = 16;                          // RTX 5090 (sm_120a build): the 72 KB class-row table leaves one forward CTA per SM, so it takes twice the warps
+#else
 constexpr int NWARP = 8;
+#endif
 constexpr int RB = 8;                              // rows per backward CTA
 constexpr int BW = 4;                              // warps per backward CTA
 
