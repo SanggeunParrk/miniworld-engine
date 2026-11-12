@@ -176,7 +176,7 @@ A paper describing the engine is in preparation. Until then, please cite the rep
   author  = {Park, Sanggeun},
   title   = {miniworld-engine: GPU kernels for AlphaFold 3-style modules},
   year    = {2026},
-  version = {2.5.5},
+  version = {2.5.6},
   note    = {TODO: replace with the paper reference}
 }
 ```
