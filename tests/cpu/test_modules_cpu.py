@@ -96,6 +96,8 @@ def test_tiny_forward_on_cpu(module: str):
 
 #: the OuterProductMean rows with AlphaFold 3's divisor n + count_offset (FoldForge R2: served by the kernels, eval and train)
 COUNT_OFFSET = [(n, r) for n, r in ROWS if r["module"] == "OuterProductMean" and "count_offset" in r["options"]]
+#: their train rows (a case set past the training lengths is an eval row + a train row: requirements/README.md)
+COUNT_OFFSET_TRAIN = [(n, r) for n, r in COUNT_OFFSET if "train" in r["modes"].split("|")]
 
 
 @pytest.mark.parametrize(
@@ -105,10 +107,9 @@ def test_tiny_backward_on_cpu(module: str):
     _tiny_backward(*FIRST[module])
 
 
-@pytest.mark.parametrize(("n", "row"), COUNT_OFFSET, ids=[f"r{n}" for n, _ in COUNT_OFFSET])
+@pytest.mark.parametrize(("n", "row"), COUNT_OFFSET_TRAIN, ids=[f"r{n}" for n, _ in COUNT_OFFSET_TRAIN])
 def test_count_offset_rows_train_on_cpu(n: int, row: dict):
-    """FoldForge R2: the count_offset rows exist for train, build with the offset, and the reference trains through them."""
-    assert "train" in row["modes"].split("|")
+    """FoldForge R2: the count_offset train rows build with the offset, and the reference trains through them."""
     m, _ = _build(_case(n, row, mode="train"))
     assert getattr(m, "count_offset", None) == pytest.approx(1e-3)
     _tiny_backward(n, row)
@@ -116,6 +117,7 @@ def test_count_offset_rows_train_on_cpu(n: int, row: dict):
 
 def test_count_offset_rows_exist():
     assert COUNT_OFFSET, "FoldForge R2: no OuterProductMean requirement row with count_offset"
+    assert COUNT_OFFSET_TRAIN, "FoldForge R2: no OuterProductMean count_offset row trains"
 
 
 def test_pool_atoms_rows_train():

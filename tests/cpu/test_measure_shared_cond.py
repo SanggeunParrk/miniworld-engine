@@ -180,7 +180,8 @@ def test_shared_rows_exist_for_the_dit_classes():
     assert {"AtomDiTProtenix", "AtomDiTOpenFold3", "AtomDiTBoltz2", "AtomDiTChai1", "TokenDiTProtenix", "TokenDiTChai1"} <= classes
     for _, r in SHARED_ROWS:
         assert r["source"].startswith("FoldForge shared cond"), r["source"]
-        assert all(int(s) > 1 for s in r["eval_samples"].split("|")), "a shared conditioning needs S > 1 samples"
+        for mode in r["modes"].split("|"):  # an eval row and its appended train row (the training-length cap) each state their own samples
+            assert all(int(s) > 1 for s in r[f"{mode}_samples"].split("|")), "a shared conditioning needs S > 1 samples"
 
 
 @pytest.mark.parametrize(("n", "row"), SHARED_ROWS, ids=[f"r{n}-{r['module']}-{r['stream']}" for n, r in SHARED_ROWS])
