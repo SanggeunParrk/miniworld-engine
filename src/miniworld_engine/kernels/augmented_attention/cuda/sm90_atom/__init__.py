@@ -388,7 +388,10 @@ def cond_fwd(c, p, tf32: bool, eps: float = 1e-5, options: tuple = ()):
     mod = torch.empty(M, 768, device=c.device, dtype=dt)
     mkv = torch.empty(M, 256, device=c.device, dtype=dt)
     tiles = M // ROWS
-    ns = _split_for(tiles, (1, 2, 4, 8, 16))
+    # cond90_split normalises a CTA's c once (LN(c) for matrices 0 .. 5, units 0 .. 11; the raw c for 6 and 7, units 12 .. 15), so a
+    # CTA's 16 / grid.y units must not cross unit 12: grid.y 4, 8 or 16, never 2 (grid.y 2 at 132 .. 263 row tiles = 8448 .. 16832 rows
+    # gave the out gates so / st of LN(c) until 2026-11-12; grid.y 4 there measured 18 / 31-40 us bf16 / TF32 at 12288-16384 rows)
+    ns = _split_for(tiles, (1, 4, 8, 16))
     kernel("cond_split" if ns > 1 else "cond", tf32, _dev(c), options)(
         (tiles, ns, 1),
         (NWARP * 32, 1, 1),
