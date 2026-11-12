@@ -545,7 +545,7 @@ transition_wide_gemm_res_sm80,transition,Transition|PairformerBlock,forward,2
 transition_wide_add_res_sm80,transition,Transition|PairformerBlock,forward,1
 transition_wide_gate_bwd_sm80,transition,Transition|PairformerBlock,backward,1
 transition_wide_gate_dh_sm80,transition,Transition|PairformerBlock,backward,1
-transition_wide_ln_bwd_sm80,transition,Transition|PairformerBlock,backward,1
+transition_wide_ln_bwd_sm80,transition,Transition|PairformerBlock,backward,2
 transition_wide_ln_finalize_sm80,transition,Transition|PairformerBlock,backward,1
 transition_fused_fwd_sm80,transition,Transition|PairformerBlock,forward,1
 transition_fused_fwd_pack_sm80,transition,Transition|PairformerBlock,forward,1
