@@ -1028,6 +1028,8 @@ _ESM_KERNELS = {
     "h_esm_dkv32": ("h_attn_esm_dkv_tf32", 4 * 16 * 164 * 4 + (192 * 2 + 64 * 2) * 36 * 4 + 2 * 192 * 4),
     "h_pbb_esm": ("h_pair_bias_esm_bwd", 0),
 }
+#: shared bytes of the bias tile / band the sm_120a build (RTX 5090) does without (lattn90_esm.cu E_BIAS / K_BIAS32 under MWE_SM120)
+_ESM_BIAS_SM120 = {"h_esm": 64 * 168 * 4, "h_esm32": 64 * 168 * 4, "h_esm_dq": 64 * 168 * 4, "h_esm_dq32": 64 * 168 * 4, "h_esm_dkv32": 4 * 16 * 164 * 4}
 
 
 def esm_cubin(hopper: bool) -> str:
@@ -1046,6 +1048,8 @@ def _esm_load(name: str, device_index: int):
 
     hopper = _hopper(device_index)
     func, smem = _ESM_KERNELS[name]
+    if not hopper and torch.cuda.get_device_capability(device_index) == (12, 0):
+        smem -= _ESM_BIAS_SM120.get(name, 0)  # the sm_120a build reads the bias from global memory (lattn90_esm.cu, MWE_SM120): 99 KB a block
     with torch.cuda.device(device_index):
         return driver.Kernel(esm_cubin(hopper), func, smem, pdl=hopper)
 
