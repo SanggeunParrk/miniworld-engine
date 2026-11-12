@@ -29,6 +29,9 @@ void check_strided(const torch::Tensor& t, const a100::Lay& l, int64_t Z, int64_
 
 template <class G, class P>
 void launch(void (*kernel)(const P), int smem, dim3 grid, const P& p) {
+#ifdef TRIATTN_SM120
+  static_assert(G::SMEM <= 101376, "RTX 5090: 99 KB of dynamic shared memory per block");
+#endif
   static bool set[64] = {};                                   // the attribute is per device and per instantiation
   const int dev = at::cuda::current_device() & 63;
   if (!set[dev]) {
@@ -116,6 +119,11 @@ void attn2_bwd_dq(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
                   int64_t Z, int64_t hd, double scl, double sm_scale) {
   constexpr int ROWS = 4;
   constexpr int ROWS64 = 2;                                   // 64-channel heads: Q and dO of 2 rows (128 B rows) fit the shared memory
+#ifdef TRIATTN_SM120
+  constexpr int NKV64 = 2;                                    // RTX 5090 (99 KB per block): a two-stage K | V ring keeps the 64-channel dq kernel at 98 KB (3 stages: 106 KB)
+#else
+  constexpr int NKV64 = 3;
+#endif
   TORCH_CHECK(hd == 16 || hd == 32 || hd == 64, "attn2_bwd_dq: head dim 16, 32 or 64");
   TORCH_CHECK(L % 128 == 0 && L >= 128 && Z * H <= 65535 && L / ROWS <= 65535, "attn2_bwd_dq: L a multiple of 128, grid");
   const a100::Lay Lq = lay_of(lq), Lk = lay_of(lk), Lv = lay_of(lv), Ld = lay_of(ld), Ldq = lay_of(ldq);
@@ -141,8 +149,8 @@ void attn2_bwd_dq(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
 #define DQ2S(NKV_, BN_, MINB_) { using G = a100::Dq2Cfg<16, ROWS, NKV_, BN_, MINB_, false>; launch<G>(a100::attn2_bwd_dq_kernel<G>, G::SMEM, grid, p); }
   if (hd == 64) {
     const dim3 g((unsigned)(L / a100::T2_BM), (unsigned)(L / ROWS64), (unsigned)(Z * H));
-    if (mask) { using G = a100::Dq2Cfg<64, ROWS64, 3, 32, 1, true>; launch<G>(a100::attn2_bwd_dq_kernel<G>, G::SMEM, g, p); }
-    else { using G = a100::Dq2Cfg<64, ROWS64, 3, 32, 1, false>; launch<G>(a100::attn2_bwd_dq_kernel<G>, G::SMEM, g, p); }
+    if (mask) { using G = a100::Dq2Cfg<64, ROWS64, NKV64, 32, 1, true>; launch<G>(a100::attn2_bwd_dq_kernel<G>, G::SMEM, g, p); }
+    else { using G = a100::Dq2Cfg<64, ROWS64, NKV64, 32, 1, false>; launch<G>(a100::attn2_bwd_dq_kernel<G>, G::SMEM, g, p); }
     return;
   }
   if (hd == 16 && !mask && g_dq_sched != 0) {                                 // schedule experiments of the 16-channel query side (rows stay 4: the bias-gradient partials)
