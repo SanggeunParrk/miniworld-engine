@@ -68,3 +68,43 @@ def test_cuda_is_bitwise_deterministic(module: str, mode: str):
         assert torch.equal(a, b), (
             f"{case.label}: tensor {i} differs between two identical calls (max |diff| {(a - b).abs().max().item():.3e})"
         )
+
+
+#: TriMul training paths past the minimum case above: (class, d_pair, length, outgoing): the single-direction L384 legacy path
+#: (incoming D256), the bidirectional L384 / L768 legacy paths (D384 / D512: their LayerNorm dgamma / dbeta) and the B200-style port at
+#: D384 (the W_o column sums).
+TRIMUL_TRAIN_CELLS = (
+    ("TriangleMultiplication", 256, 384, False),
+    ("BidirectionalTriangleMultiplication", 384, 384, None),
+    ("BidirectionalTriangleMultiplication", 512, 768, None),
+    ("TriangleMultiplication", 384, 640, True),
+)
+
+
+@pytest.mark.parametrize(("module", "d_pair", "length", "outgoing"), TRIMUL_TRAIN_CELLS)
+def test_trimul_training_paths_are_bitwise_deterministic(module: str, d_pair: int, length: int, outgoing: bool | None):
+    cfg = cfgmod.from_dict(
+        {
+            "modules": [module],
+            "lengths": [length],
+            "depths": "min",
+            "samples": "min",
+            "dtypes": ["master"],
+            "modes": ["train"],
+            "device": "cuda",
+        }
+    )
+    case = next(c for c in cfgmod.cases(cfg) if c.kwargs.get("d_pair") == d_pair and c.kwargs.get("outgoing") == outgoing)
+    m = cfgmod.build(case, device="cuda").set_backend("cuda")
+    accuracy._quiet(m)
+    inputs = cfgmod.inputs(case, m, device="cuda")
+    with torch.enable_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        why = m.unsupported(**inputs)
+    if why is not None:
+        pytest.skip(f"cuda does not serve {case.label}: {why}")
+    gen = torch.Generator(device="cuda").manual_seed(1)
+    upstream = [torch.randn(inputs["pair"].shape, device="cuda", generator=gen)]
+    first = _call(m, inputs, upstream, True)
+    second = _call(m, inputs, upstream, True)
+    for i, (a, b) in enumerate(zip(first, second, strict=True)):
+        assert torch.equal(a, b), f"{case.label}: tensor {i} differs between two identical calls"

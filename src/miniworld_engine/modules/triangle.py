@@ -1368,11 +1368,13 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         "anthropic": 2,
         "cueq": 2,
         "cuda:a100_sm80": 3,
-        "cuda:h100_sm90": 4,
+        "cuda:h100_sm90": 5,
     }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64);
     # cuda:h100_sm90 2 (2026-11-12): inference planes past 8 GiB (OpenDDE refiner, d_pair 384 at 2976 / 3968) run K1 + the contraction in two
     # halves of the hidden channels; cuda:h100_sm90 3 (2026-11-12): the training row-dropout scale by the H100 Philox kernel in one launch (the
-    # same bits as the torch draw) and the small-L inference K1 / K3 tiles of the TriMul table (trimul_inproj h100_sm90 version 4)
+    # same bits as the torch draw) and the small-L inference K1 / K3 tiles of the TriMul table (trimul_inproj h100_sm90 version 4);
+    # cuda:h100_sm90 5 (2026-11-13): deterministic training backward at D256-512 (W_o column sums and the wide LayerNorm dgamma / dbeta by
+    # per-block partials reduced in block order, no atomics)
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         return _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=False)[1]
@@ -1740,9 +1742,11 @@ class BidirectionalTriangleMultiplication(BackendModule, MasterWeights):
     backends = ("pytorch", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 2,
-        "cuda:h100_sm90": 3,
+        "cuda:h100_sm90": 4,
     }  # 2026-11-10: sm_80 k1w64 front (D64); cuda:h100_sm90 2 (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the
-    # small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version
+    # small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version;
+    # cuda:h100_sm90 4 (2026-11-13): deterministic training backward at D256-512 (W_o column sums and the wide LayerNorm dgamma / dbeta by
+    # per-block partials reduced in block order, no atomics)
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         return _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=True)[1]
