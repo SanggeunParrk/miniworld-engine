@@ -19,6 +19,8 @@ autocast) run the TF32 kernels; bf16 activations take bf16 or fp32 (master) para
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn.functional as Fn
 from torch.autograd.function import once_differentiable
@@ -214,13 +216,15 @@ def _infer_h100(
 
         mk = None if kmask is None else _ld._tkey(kmask)
         bias2 = _ld._hoisted(_HOIST_BIAS, pair, (wkey, n, mk), pair_bias)
-        qraw, sg, kraw, v = k90.pre_fwd(s2, mod, mkv, p, tf32, eps=RMS_EPS, nmod=nmod, parallel_kv=1, options=opts)
+        qraw, sg, kraw, v = cast(
+            "tuple[torch.Tensor, ...]", k90.pre_fwd(s2, mod, mkv, p, tf32, eps=RMS_EPS, nmod=nmod, parallel_kv=1, options=opts)
+        )
         q, k = torch.empty_like(qraw), torch.empty_like(kraw)
         one = _const(single.device, 1.0, DS // NH)
         _qk_kernels(single.device).qknorm_rope_fwd(qraw, kraw, one, one, RMS_EPS, RMS_EPS, cos, sin, q, k)
         del qraw, kraw
         o = local.attn_esm(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2, tf32).view(m, DS)
-        out = k90.post_fwd(s2, o, sg, mod, p, tf32, eps=RMS_EPS, nmod=nmod, options=opts)
+        out = cast(torch.Tensor, k90.post_fwd(s2, o, sg, mod, p, tf32, eps=RMS_EPS, nmod=nmod, options=opts))
     return _ld._unpadded(out.view(a, 1, n, DS), single.shape)
 
 

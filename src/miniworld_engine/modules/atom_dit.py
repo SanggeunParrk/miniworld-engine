@@ -47,6 +47,9 @@ Each class hard-codes its model's math (no option flags); :data:`ATOM_DIT_MODELS
       AtomDiTESMFold2       ESMFold2's release atom block: the same block (its own class, ESMFold2's constructor names)
       SWAAtomTransformer    ``n_block`` of them
 
+* FoldForge's ESMFold2 atom block with the atom pair (FoldForge R6), :class:`AtomDiTESMFold2Pair`: the AF3 block above over a 32 x 192
+  trunked pair with AdaptiveRMSNorm AdaLNs, raw gates, the +/- 64 rank window and q / k RMSNorm + rotary (``AtomDiT(model="esmfold2_pair")``).
+
 Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
 """
 
@@ -1508,7 +1511,7 @@ class AtomDiTESMFold2(AtomDiTMiniWorld):
     (:func:`~miniworld_engine.modules.functional.build_attention_params`). ``backend="anthropic"``: ESMFold2's own band core.
 
     Not FoldForge's ESMFold2 atom stack (FoldForge R6): that one is the AF3 block over a 32 x 192 atom pair (a pair bias this block has no
-    input for); no option turns one into the other (docs/modules.md, "Downstream requests")."""
+    input for), :class:`AtomDiTESMFold2Pair` (``AtomDiT(model="esmfold2_pair")``); no option turns one into the other."""
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 

@@ -2,6 +2,8 @@
 SiLU row kernels (H100 inference) or the train_rows block, the q / k RMSNorm + rotary and the 192-key rank-window attention, inference and
 training. Adapted from the 2.4.x ``tests/gpu/sm90/test_h100_local_dit_esmfold2_gpu.py``."""
 
+import typing
+
 import pytest
 import torch
 
@@ -139,10 +141,10 @@ def _train_run(blk, a, n, real, dtype, autocast, shared, seed=1):
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
         y = blk(s, cb.expand(a, 1, n, 128), z, mask, rope=rope)
     (y * dy).sum().backward()
-    out = {"out": y.detach()[:, :, :real].double(), "dsingle": s.grad[:, :, :real].double(), "dcond": cb.grad[:, :, :real].double(),
-           "dpair": z.grad.double()}  # fmt: skip
+    grad = lambda t: typing.cast("torch.Tensor", t.grad).double()
+    out = {"out": y.detach()[:, :, :real].double(), "dsingle": grad(s)[:, :, :real], "dcond": grad(cb)[:, :, :real], "dpair": grad(z)}
     for name, p in blk.named_parameters():
-        out["d." + name] = p.grad.double()
+        out["d." + name] = grad(p)
     return out
 
 
