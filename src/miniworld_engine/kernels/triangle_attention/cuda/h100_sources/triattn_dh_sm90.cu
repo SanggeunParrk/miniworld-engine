@@ -6,7 +6,8 @@
 // q | k | v | g are column blocks of one projection row (b, n, s) of width 4 HD (HD = H D): q at h D, k at HD + h D, v at 2 HD + h D,
 // g at 3 HD + h D. bias [B, H, S, S] bf16 in natural units (masked keys -inf), shared by the N pair rows. u [B N S, HD] bf16.
 //
-// CTA = 64 queries of one (b, n, h); 4 warps x 16 queries; key tiles of 64 through a two-stage cp.async ring (K, V and the bias tile).
+// CTA = 64 MT queries of one (b, n, h); 4 warps x 16 MT queries (MT 1, or 2 for 64-channel heads from S 384: h100_dh.query_tile); key
+// tiles of 64 through a two-stage cp.async ring (K, V and the bias tile).
 // Per key tile a warp computes S = Q K^T (16 x 64), adds the bias, keeps a running maximum (log2 units) and sum, and accumulates
 // O += P V with P rounded to bf16 in registers (the S accumulator re-read as the A operand).
 //
@@ -72,22 +73,26 @@ DEVI float quad_sum(float v) {
 }
 
 // shared tiles: rows of D (+8 pad) bf16 for Q / K / V, 64 (+8 pad) for the bias -- conflict-free ldmatrix
-template <int D> struct Smem {
+template <int D, int BMT = BM> struct Smem {
   static constexpr int LD = D + 8, LB = BN + 8;
-  bf16 q[BM * LD];
+  bf16 q[BMT * LD];
   bf16 k[2][BN * LD];
   bf16 v[2][BN * LD];
-  bf16 b[2][BM * LB];
+  bf16 b[2][BMT * LB];
 };
 
-template <int D, bool TRAIN = false>
+// MT m16 tiles of queries per warp (BMT = 64 MT queries per CTA, 4 warps): each K / V fragment read from shared memory (ldmatrix) feeds MT
+// MMAs. MT 2 halves the shared-memory traffic per query (the 16-query warp tile is bound by it on H100 at head width 64) and gives every
+// warp two independent softmax chains. A query's arithmetic is the same for every MT (bitwise equal results).
+template <int D, bool TRAIN = false, int MT = 1>
 __global__ void __launch_bounds__(THREADS) triattn_dh_fwd(const bf16* __restrict__ P, const bf16* __restrict__ BIAS, bf16* __restrict__ U,
     const float* __restrict__ GB, int S, int H, float scale, bf16* __restrict__ O = nullptr, float* __restrict__ LSE = nullptr) {
-  constexpr int LD = Smem<D>::LD, LB = Smem<D>::LB, KD = D / 16, ND = D / 8;
+  constexpr int BMT = BM * MT;
+  constexpr int LD = Smem<D, BMT>::LD, LB = Smem<D, BMT>::LB, KD = D / 16, ND = D / 8;
   extern __shared__ __align__(16) unsigned char smem_raw[];
-  Smem<D>& sm = *reinterpret_cast<Smem<D>*>(smem_raw);
+  Smem<D, BMT>& sm = *reinterpret_cast<Smem<D, BMT>*>(smem_raw);
   const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32, g = lane / 4, t = lane % 4;
-  const int q0 = blockIdx.x * BM, h = blockIdx.y;
+  const int q0 = blockIdx.x * BMT, h = blockIdx.y;
   const long bn = blockIdx.z;                      // b * N + n (N == S)
   const int b = (int)(bn / S);
   const int HD = H * D, ld = 4 * HD;
@@ -95,19 +100,19 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_fwd(const bf16* __restrict
   const bf16* bias = BIAS + ((long)b * H + h) * S * S;
 
   // Q tile and the first K | V | bias stage
-  constexpr int QC = BM * D / 8;                   // 16-byte chunks of a Q / K / V tile
+  constexpr int QC = BMT * D / 8, KC = BN * D / 8;  // 16-byte chunks of a Q / K | V tile
   for (int c = tid; c < QC; c += THREADS) {
     const int r = c / (D / 8), col = (c % (D / 8)) * 8;
     cp16(su(&sm.q[r * LD + col]), rows + (long)(q0 + r) * ld + h * D + col);
   }
   auto stage = [&](int j, int s) {
     const int k0 = j * BN;
-    for (int c = tid; c < QC; c += THREADS) {
+    for (int c = tid; c < KC; c += THREADS) {
       const int r = c / (D / 8), col = (c % (D / 8)) * 8;
       cp16(su(&sm.k[s][r * LD + col]), rows + (long)(k0 + r) * ld + HD + h * D + col);
       cp16(su(&sm.v[s][r * LD + col]), rows + (long)(k0 + r) * ld + 2 * HD + h * D + col);
     }
-    for (int c = tid; c < BM * BN / 8; c += THREADS) {
+    for (int c = tid; c < BMT * BN / 8; c += THREADS) {
       const int r = c / (BN / 8), col = (c % (BN / 8)) * 8;
       cp16(su(&sm.b[s][r * LB + col]), bias + (long)(q0 + r) * S + k0 + col);
     }
@@ -115,13 +120,19 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_fwd(const bf16* __restrict
   stage(0, 0);
   cp_commit();
 
-  uint32_t qa[KD][4];
-  float o[ND][4];
+  uint32_t qa[MT][KD][4];
+  float o[MT][ND][4];
+  float m0[MT], m1[MT], l0[MT], l1[MT];
 #pragma unroll
-  for (int n = 0; n < ND; ++n) o[n][0] = o[n][1] = o[n][2] = o[n][3] = 0.f;
-  float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.f, l1 = 0.f;
+  for (int mt = 0; mt < MT; ++mt) {
+#pragma unroll
+    for (int n = 0; n < ND; ++n) o[mt][n][0] = o[mt][n][1] = o[mt][n][2] = o[mt][n][3] = 0.f;
+    m0[mt] = m1[mt] = -INFINITY;
+    l0[mt] = l1[mt] = 0.f;
+  }
   const float sc = scale * LOG2E;
   const int ntiles = S / BN;
+  const int wr = warp * 16 * MT;                   // the warp's first query row in the tile
   for (int j = 0; j < ntiles; ++j) {
     const int s = j & 1;
     if (j + 1 < ntiles) stage(j + 1, s ^ 1);
@@ -130,56 +141,67 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_fwd(const bf16* __restrict
     __syncthreads();
     if (j == 0) {
 #pragma unroll
-      for (int kk = 0; kk < KD; ++kk) ldsm4(qa[kk], su(&sm.q[(warp * 16 + lane % 16) * LD + kk * 16 + (lane / 16) * 8]));
+      for (int mt = 0; mt < MT; ++mt)
+#pragma unroll
+        for (int kk = 0; kk < KD; ++kk) ldsm4(qa[mt][kk], su(&sm.q[(wr + mt * 16 + lane % 16) * LD + kk * 16 + (lane / 16) * 8]));
     }
     // S = Q K^T: 8 n-tiles of 8 keys
-    float sacc[BN / 8][4];
+    float sacc[MT][BN / 8][4];
 #pragma unroll
-    for (int n = 0; n < BN / 8; ++n) sacc[n][0] = sacc[n][1] = sacc[n][2] = sacc[n][3] = 0.f;
+    for (int mt = 0; mt < MT; ++mt)
+#pragma unroll
+      for (int n = 0; n < BN / 8; ++n) sacc[mt][n][0] = sacc[mt][n][1] = sacc[mt][n][2] = sacc[mt][n][3] = 0.f;
 #pragma unroll
     for (int kk = 0; kk < KD; ++kk) {
 #pragma unroll
       for (int n = 0; n < BN / 8; n += 2) {
         uint32_t kb[4];
         ldsm4(kb, su(&sm.k[s][(n * 8 + (lane % 8) + (lane / 16) * 8) * LD + kk * 16 + ((lane / 8) % 2) * 8]));
-        mma(sacc[n], qa[kk], kb[0], kb[1]);
-        mma(sacc[n + 1], qa[kk], kb[2], kb[3]);
+#pragma unroll
+        for (int mt = 0; mt < MT; ++mt) {
+          mma(sacc[mt][n], qa[mt][kk], kb[0], kb[1]);
+          mma(sacc[mt][n + 1], qa[mt][kk], kb[2], kb[3]);
+        }
       }
     }
-    // log2-unit logits with the bias; running maximum and sum per row (g, g + 8)
-    const int r0 = warp * 16 + g;
-    float mx0 = m0, mx1 = m1;
+    uint32_t pa[MT][BN / 16][4];
 #pragma unroll
-    for (int n = 0; n < BN / 8; ++n) {
-      const int col = n * 8 + 2 * t;
-      const __nv_bfloat162 b0 = *reinterpret_cast<const __nv_bfloat162*>(&sm.b[s][r0 * LB + col]);
-      const __nv_bfloat162 b1 = *reinterpret_cast<const __nv_bfloat162*>(&sm.b[s][(r0 + 8) * LB + col]);
-      sacc[n][0] = sacc[n][0] * sc + __low2float(b0) * LOG2E;
-      sacc[n][1] = sacc[n][1] * sc + __high2float(b0) * LOG2E;
-      sacc[n][2] = sacc[n][2] * sc + __low2float(b1) * LOG2E;
-      sacc[n][3] = sacc[n][3] * sc + __high2float(b1) * LOG2E;
-      mx0 = fmaxf(mx0, fmaxf(sacc[n][0], sacc[n][1]));
-      mx1 = fmaxf(mx1, fmaxf(sacc[n][2], sacc[n][3]));
-    }
-    mx0 = quad_max(mx0);
-    mx1 = quad_max(mx1);
-    // a row whose keys are all masked so far keeps a finite offset (its p are 0)
-    const float off0 = mx0 == -INFINITY ? 0.f : mx0, off1 = mx1 == -INFINITY ? 0.f : mx1;
-    const float a0 = ex2((m0 == -INFINITY ? off0 : m0) - off0), a1 = ex2((m1 == -INFINITY ? off1 : m1) - off1);
-    m0 = mx0;
-    m1 = mx1;
-    l0 *= a0;
-    l1 *= a1;
+    for (int mt = 0; mt < MT; ++mt) {
+      // log2-unit logits with the bias; running maximum and sum per row (g, g + 8)
+      const int r0 = wr + mt * 16 + g;
+      float mx0 = m0[mt], mx1 = m1[mt];
 #pragma unroll
-    for (int n = 0; n < ND; ++n) { o[n][0] *= a0; o[n][1] *= a0; o[n][2] *= a1; o[n][3] *= a1; }
-    uint32_t pa[BN / 16][4];
+      for (int n = 0; n < BN / 8; ++n) {
+        const int col = n * 8 + 2 * t;
+        const __nv_bfloat162 b0 = *reinterpret_cast<const __nv_bfloat162*>(&sm.b[s][r0 * LB + col]);
+        const __nv_bfloat162 b1 = *reinterpret_cast<const __nv_bfloat162*>(&sm.b[s][(r0 + 8) * LB + col]);
+        sacc[mt][n][0] = sacc[mt][n][0] * sc + __low2float(b0) * LOG2E;
+        sacc[mt][n][1] = sacc[mt][n][1] * sc + __high2float(b0) * LOG2E;
+        sacc[mt][n][2] = sacc[mt][n][2] * sc + __low2float(b1) * LOG2E;
+        sacc[mt][n][3] = sacc[mt][n][3] * sc + __high2float(b1) * LOG2E;
+        mx0 = fmaxf(mx0, fmaxf(sacc[mt][n][0], sacc[mt][n][1]));
+        mx1 = fmaxf(mx1, fmaxf(sacc[mt][n][2], sacc[mt][n][3]));
+      }
+      mx0 = quad_max(mx0);
+      mx1 = quad_max(mx1);
+      // a row whose keys are all masked so far keeps a finite offset (its p are 0)
+      const float off0 = mx0 == -INFINITY ? 0.f : mx0, off1 = mx1 == -INFINITY ? 0.f : mx1;
+      const float a0 = ex2((m0[mt] == -INFINITY ? off0 : m0[mt]) - off0), a1 = ex2((m1[mt] == -INFINITY ? off1 : m1[mt]) - off1);
+      m0[mt] = mx0;
+      m1[mt] = mx1;
+      l0[mt] *= a0;
+      l1[mt] *= a1;
 #pragma unroll
-    for (int n = 0; n < BN / 8; ++n) {
-      const float p0 = ex2(sacc[n][0] - off0), p1 = ex2(sacc[n][1] - off0), p2 = ex2(sacc[n][2] - off1), p3 = ex2(sacc[n][3] - off1);
-      l0 += p0 + p1;
-      l1 += p2 + p3;
-      pa[n / 2][(n % 2) * 2] = pk(p0, p1);
-      pa[n / 2][(n % 2) * 2 + 1] = pk(p2, p3);
+      for (int n = 0; n < ND; ++n) { o[mt][n][0] *= a0; o[mt][n][1] *= a0; o[mt][n][2] *= a1; o[mt][n][3] *= a1; }
+#pragma unroll
+      for (int n = 0; n < BN / 8; ++n) {
+        const float p0 = ex2(sacc[mt][n][0] - off0), p1 = ex2(sacc[mt][n][1] - off0);
+        const float p2 = ex2(sacc[mt][n][2] - off1), p3 = ex2(sacc[mt][n][3] - off1);
+        l0[mt] += p0 + p1;
+        l1[mt] += p2 + p3;
+        pa[mt][n / 2][(n % 2) * 2] = pk(p0, p1);
+        pa[mt][n / 2][(n % 2) * 2 + 1] = pk(p2, p3);
+      }
     }
     // O += P V: k = 64 keys (4 steps of 16), n = D dims
 #pragma unroll
@@ -188,37 +210,42 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_fwd(const bf16* __restrict
       for (int n = 0; n < ND; n += 2) {
         uint32_t vb[4];
         ldsm4t(vb, su(&sm.v[s][(kk * 16 + (lane % 8) + ((lane / 8) % 2) * 8) * LD + n * 8 + (lane / 16) * 8]));
-        mma(o[n], pa[kk], vb[0], vb[1]);
-        mma(o[n + 1], pa[kk], vb[2], vb[3]);
+#pragma unroll
+        for (int mt = 0; mt < MT; ++mt) {
+          mma(o[mt][n], pa[mt][kk], vb[0], vb[1]);
+          mma(o[mt][n + 1], pa[mt][kk], vb[2], vb[3]);
+        }
       }
     }
     __syncthreads();
   }
-  l0 = quad_sum(l0);
-  l1 = quad_sum(l1);
-  const float i0 = l0 > 0.f ? 1.f / l0 : 0.f, i1 = l1 > 0.f ? 1.f / l1 : 0.f;
-  if constexpr (TRAIN) {
-    if (t == 0) {
-      float* lse = LSE + (bn * H + h) * S + q0 + warp * 16 + g;
-      lse[0] = l0 > 0.f ? m0 + __log2f(l0) : INFINITY;
-      lse[8] = l1 > 0.f ? m1 + __log2f(l1) : INFINITY;
+#pragma unroll
+  for (int mt = 0; mt < MT; ++mt) {
+    const float L0 = quad_sum(l0[mt]), L1 = quad_sum(l1[mt]);
+    const float i0 = L0 > 0.f ? 1.f / L0 : 0.f, i1 = L1 > 0.f ? 1.f / L1 : 0.f;
+    if constexpr (TRAIN) {
+      if (t == 0) {
+        float* lse = LSE + (bn * H + h) * S + q0 + wr + mt * 16 + g;
+        lse[0] = L0 > 0.f ? m0[mt] + __log2f(L0) : INFINITY;
+        lse[8] = L1 > 0.f ? m1[mt] + __log2f(L1) : INFINITY;
+      }
     }
-  }
-  // u = sigmoid(g (+ gb)) o, bf16 into U [B N S, HD]
-  const long row0 = bn * S + q0 + warp * 16 + g;
+    // u = sigmoid(g (+ gb)) o, bf16 into U [B N S, HD]
+    const long row0 = bn * S + q0 + wr + mt * 16 + g;
 #pragma unroll
-  for (int n = 0; n < ND; ++n) {
-    const int col = h * D + n * 8 + 2 * t;
+    for (int n = 0; n < ND; ++n) {
+      const int col = h * D + n * 8 + 2 * t;
 #pragma unroll
-    for (int half = 0; half < 2; ++half) {
-      const long row = row0 + half * 8;
-      const __nv_bfloat162 gv = *reinterpret_cast<const __nv_bfloat162*>(P + row * ld + 3 * HD + col);
-      float ga = __low2float(gv), gb = __high2float(gv);
-      if (GB != nullptr) { ga += GB[col]; gb += GB[col + 1]; }
-      const float inv = half ? i1 : i0;
-      const float v0 = o[n][2 * half] * inv / (1.f + __expf(-ga)), v1 = o[n][2 * half + 1] * inv / (1.f + __expf(-gb));
-      *reinterpret_cast<uint32_t*>(U + row * HD + col) = pk(v0, v1);
-      if constexpr (TRAIN) *reinterpret_cast<uint32_t*>(O + row * HD + col) = pk(o[n][2 * half] * inv, o[n][2 * half + 1] * inv);
+      for (int half = 0; half < 2; ++half) {
+        const long row = row0 + half * 8;
+        const __nv_bfloat162 gv = *reinterpret_cast<const __nv_bfloat162*>(P + row * ld + 3 * HD + col);
+        float ga = __low2float(gv), gb = __high2float(gv);
+        if (GB != nullptr) { ga += GB[col]; gb += GB[col + 1]; }
+        const float inv = half ? i1 : i0;
+        const float v0 = o[mt][n][2 * half] * inv / (1.f + __expf(-ga)), v1 = o[mt][n][2 * half + 1] * inv / (1.f + __expf(-gb));
+        *reinterpret_cast<uint32_t*>(U + row * HD + col) = pk(v0, v1);
+        if constexpr (TRAIN) *reinterpret_cast<uint32_t*>(O + row * HD + col) = pk(o[mt][n][2 * half] * inv, o[mt][n][2 * half + 1] * inv);
+      }
     }
   }
 }
@@ -533,16 +560,25 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_bwd_q(const bf16* __restri
   }
 }
 
-template <int D, bool TRAIN = false>
-void launch(const at::Tensor& proj, const at::Tensor& bias, at::Tensor& u, const float* gb, int B, int S, int H, double scale,
-            bf16* o = nullptr, float* lse = nullptr) {
-  auto f = triattn_dh_fwd<D, TRAIN>;
-  const int smem = (int)sizeof(Smem<D>);
+template <int D, bool TRAIN, int MT>
+void launch_bm(const at::Tensor& proj, const at::Tensor& bias, at::Tensor& u, const float* gb, int B, int S, int H, double scale,
+               bf16* o, float* lse) {
+  auto f = triattn_dh_fwd<D, TRAIN, MT>;
+  const int smem = (int)sizeof(Smem<D, BM * MT>);
   cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-  dim3 grid(S / BM, H, (unsigned)B * S);
+  dim3 grid(S / (BM * MT), H, (unsigned)B * S);
   f<<<grid, THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const bf16*>(proj.data_ptr()),
       reinterpret_cast<const bf16*>(bias.data_ptr()), reinterpret_cast<bf16*>(u.data_ptr()), gb, S, H, (float)scale, o, lse);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// the query tile: 128 (4 warps x 32 queries: each K | V fragment feeds two MMAs) or 64 (4 warps x 16 queries)
+template <int D, bool TRAIN = false>
+void launch(const at::Tensor& proj, const at::Tensor& bias, at::Tensor& u, const float* gb, int B, int S, int H, double scale, int bm,
+            bf16* o = nullptr, float* lse = nullptr) {
+  TORCH_CHECK(bm == 64 || (bm == 128 && S % 128 == 0), "query tile 64, or 128 with S a multiple of 128");
+  if (bm == 128) launch_bm<D, TRAIN, 2>(proj, bias, u, gb, B, S, H, scale, o, lse);
+  else launch_bm<D, TRAIN, 1>(proj, bias, u, gb, B, S, H, scale, o, lse);
 }
 
 template <int D>
@@ -584,7 +620,7 @@ void check_core(const at::Tensor& proj, const at::Tensor& bias, int64_t H, int64
 }  // namespace
 
 // proj [B S S, 4 H D] bf16 (q | k | v | g), bias [B, H, S, S] bf16 -> u [B S S, H D] bf16. gate_bias: fp32 [H D] or empty.
-at::Tensor triattn_dh_forward(at::Tensor proj, at::Tensor bias, at::Tensor gate_bias, int64_t H, int64_t D, double scale) {
+at::Tensor triattn_dh_forward(at::Tensor proj, at::Tensor bias, at::Tensor gate_bias, int64_t H, int64_t D, double scale, int64_t bm) {
   check_core(proj, bias, H, D);
   const int B = (int)bias.size(0), S = (int)bias.size(2);
   TORCH_CHECK(gate_bias.numel() == 0 || (gate_bias.scalar_type() == at::kFloat && gate_bias.is_contiguous() && gate_bias.numel() == H * D),
@@ -592,8 +628,8 @@ at::Tensor triattn_dh_forward(at::Tensor proj, at::Tensor bias, at::Tensor gate_
   const at::cuda::OptionalCUDAGuard guard(proj.device());
   auto u = at::empty({proj.size(0), H * D}, proj.options());
   const float* gb = gate_bias.numel() ? gate_bias.data_ptr<float>() : nullptr;
-  if (D == 64) launch<64>(proj, bias, u, gb, B, S, (int)H, scale);
-  else launch<32>(proj, bias, u, gb, B, S, (int)H, scale);
+  if (D == 64) launch<64>(proj, bias, u, gb, B, S, (int)H, scale, (int)bm);
+  else launch<32>(proj, bias, u, gb, B, S, (int)H, scale, (int)bm);
   return u;
 }
 
@@ -606,8 +642,8 @@ std::vector<at::Tensor> triattn_dh_forward_train(at::Tensor proj, at::Tensor bia
   auto o = at::empty({proj.size(0), H * D}, proj.options());
   auto lse = at::empty({B, S, H, S}, proj.options().dtype(at::kFloat));
   bf16* op = reinterpret_cast<bf16*>(o.data_ptr());
-  if (D == 64) launch<64, true>(proj, bias, u, nullptr, B, S, (int)H, scale, op, lse.data_ptr<float>());
-  else launch<32, true>(proj, bias, u, nullptr, B, S, (int)H, scale, op, lse.data_ptr<float>());
+  if (D == 64) launch<64, true>(proj, bias, u, nullptr, B, S, (int)H, scale, 64, op, lse.data_ptr<float>());
+  else launch<32, true>(proj, bias, u, nullptr, B, S, (int)H, scale, 64, op, lse.data_ptr<float>());
   return {o, lse, u};
 }
 

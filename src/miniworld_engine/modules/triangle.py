@@ -719,6 +719,8 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 2}
 
     transposed_bias = False
     _anthropic_block = True
@@ -756,6 +758,8 @@ class _TriangleAttentionFp32Softmax(_TriangleAttentionBase):
     """The RoseTTAFold3 / Chai-1 variants: AlphaFold 3's bias orientation, the softmax in fp32 (:meth:`_attention_fp32_softmax`)."""
 
     transposed_bias = False
+    #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 2}
     #: RoseTTAFold3: the gate and the out-projection carry a bias.
     _projection_biases: bool = False
 
