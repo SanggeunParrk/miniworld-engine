@@ -210,6 +210,8 @@ void swa_mod_bwd(torch::Tensor g, torch::Tensor c, torch::Tensor a, torch::Tenso
     case 5: launch_mod_dc<sw80::ModDcCfg<4, 1, 64, 2>>(pd); break;
     case 6: launch_mod_dc<sw80::ModDcCfg<8, 2, 64, 2>>(pd); break;
     case 7: launch_mod_dc<sw80::ModDcCfg<8, 1, 64, 2>>(pd); break;
+    case 8: launch_mod_dc<sw80::ModDcCfg<1, 2, 64, 2>>(pd); break;   // 4 with tiles of 16 / 32 rows (more CTAs on a call of few rows; the same values)
+    case 9: launch_mod_dc<sw80::ModDcCfg<2, 2, 64, 2>>(pd); break;
     default: TORCH_CHECK(false, "unknown modulation backward configuration");
   }
   const int nchunk = (int)((R + sw80::DW_RC - 1) / sw80::DW_RC), cpc = (int)((nchunk + P - 1) / P);
@@ -295,7 +297,7 @@ void launch_ffn_bwd_gate(const sw80::FfnBwdGateParams& p) {
     attr = true;
   }
   const int ntile = bwd_ntile_host(MODE, p.M, p.S, p.B), ngrp = (ntile + G::NW - 1) / G::NW;
-  const unsigned ctas = (unsigned)std::min(num_sms() * G::MINB, ngrp);
+  const unsigned ctas = (unsigned)std::min(num_sms() * G::MINB, ngrp * p.hsplit);
   sw80::ffn_bwd_gate_kernel<G, MODE><<<ctas, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -314,9 +316,11 @@ void launch_ffn_bwd_dy(const sw80::FfnBwdDyParams& p) {
 }
 
 // FFN backward (two kernels): dy (= dq2), q1, y, ffn [M, C] bf16, mod [B S, 6C] fp32, Wu [2 hidden, C], Wd^T [hidden, C], Wu^T [C, 2 hidden] -> dq1, dffn [M, C], hh [M, hidden], dab [M, 2 hidden] bf16
-// and d shift_f | d scale_f | d gate_f of dmod (columns 3C .. 6C).  gate_cfg 0: 8 warps x 1 CTA, 1: 4 x 2, 2: 6 x 2; dy_cfg 0: 16 warps, 1: 8
+// and d shift_f | d scale_f | d gate_f of dmod (columns 3C .. 6C).  gate_cfg 0: 8 warps x 1 CTA, 1: 4 x 2, 2: 6 x 2, 3: 2 x 2, 4: 1 x 2; hsplit (1 / 2 / 4 / 8): the hidden
+// chunks of a tile group over that many CTAs; dy_cfg 0: 16 warps, 1: 8, then the N split (warps per tile x tiles per CTA) 2: 2 x 1, 3: 4 x 1, 4: 2 x 2, 5: 8 x 1 (the same values)
 void swa_ffn_bwd(torch::Tensor dy, torch::Tensor q1, torch::Tensor y, torch::Tensor ffn, torch::Tensor mod, torch::Tensor wu, torch::Tensor wdt, torch::Tensor wut, torch::Tensor dq1, torch::Tensor dffn,
-                 torch::Tensor hh, torch::Tensor dab, torch::Tensor dmod, int64_t S, int64_t B, double eps, int64_t mode, int64_t gate_cfg, int64_t dy_cfg) {
+                 torch::Tensor hh, torch::Tensor dab, torch::Tensor dmod, int64_t S, int64_t B, double eps, int64_t mode, int64_t gate_cfg, int64_t dy_cfg, int64_t hsplit) {
+  TORCH_CHECK(hsplit == 1 || hsplit == 2 || hsplit == 4 || hsplit == 8, "hsplit must be 1, 2, 4 or 8");
   CHECK_CUDA_BF16(dy); CHECK_CUDA_BF16(q1); CHECK_CUDA_BF16(y); CHECK_CUDA_BF16(ffn); CHECK_CUDA_BF16(wu); CHECK_CUDA_BF16(wdt); CHECK_CUDA_BF16(wut);
   CHECK_CUDA_BF16(dq1); CHECK_CUDA_BF16(dffn); CHECK_CUDA_BF16(hh); CHECK_CUDA_BF16(dab); CHECK_CUDA_F32(mod); CHECK_CUDA_F32(dmod);
   CHECK_CONTIG(dy); CHECK_CONTIG(q1); CHECK_CONTIG(y); CHECK_CONTIG(ffn); CHECK_CONTIG(mod); CHECK_CONTIG(wu); CHECK_CONTIG(wdt); CHECK_CONTIG(wut);
@@ -326,7 +330,7 @@ void swa_ffn_bwd(torch::Tensor dy, torch::Tensor q1, torch::Tensor y, torch::Ten
               wut.size(0) == 128 && wut.size(1) == 512 && hh.numel() == M * 256 && dab.numel() == M * 512, "bad operand sizes");
   check_bwd_mode(mode, M, S, B, dmod.numel());
   c10::cuda::CUDAGuard guard(dy.device());
-  sw80::FfnBwdGateParams pg{bptr(dy), bptr(y), bptr(ffn), mod.data_ptr<float>(), bptr(wu), bptr(wdt), bptr_w(dffn), bptr_w(hh), bptr_w(dab), dmod.data_ptr<float>(), (int)M, (int)S, (int)B};
+  sw80::FfnBwdGateParams pg{bptr(dy), bptr(y), bptr(ffn), mod.data_ptr<float>(), bptr(wu), bptr(wdt), bptr_w(dffn), bptr_w(hh), bptr_w(dab), dmod.data_ptr<float>(), (int)M, (int)S, (int)B, (int)hsplit};
   sw80::FfnBwdDyParams pd{bptr(dab), bptr(q1), bptr(dy), mod.data_ptr<float>(), bptr(wut), bptr_w(dq1), dmod.data_ptr<float>(), (int)M, (int)S, (int)B, (float)eps};
   with_mode(mode, [&](auto mc) {
     constexpr int MODE = decltype(mc)::value;
@@ -334,11 +338,17 @@ void swa_ffn_bwd(torch::Tensor dy, torch::Tensor q1, torch::Tensor y, torch::Ten
       case 0: launch_ffn_bwd_gate<sw80::FfnBwdGateCfg<8, 1>, MODE>(pg); break;
       case 1: launch_ffn_bwd_gate<sw80::FfnBwdGateCfg<4, 2>, MODE>(pg); break;
       case 2: launch_ffn_bwd_gate<sw80::FfnBwdGateCfg<6, 2>, MODE>(pg); break;
+      case 3: launch_ffn_bwd_gate<sw80::FfnBwdGateCfg<2, 2>, MODE>(pg); break;
+      case 4: launch_ffn_bwd_gate<sw80::FfnBwdGateCfg<1, 2>, MODE>(pg); break;
       default: TORCH_CHECK(false, "unknown FFN backward (gate) configuration");
     }
     switch (dy_cfg) {
       case 0: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<16>, MODE>(pd); break;
       case 1: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<8>, MODE>(pd); break;
+      case 2: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<1, 2>, MODE>(pd); break;
+      case 3: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<1, 4>, MODE>(pd); break;
+      case 4: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<2, 2>, MODE>(pd); break;
+      case 5: launch_ffn_bwd_dy<sw80::FfnBwdDyCfg<1, 8>, MODE>(pd); break;
       default: TORCH_CHECK(false, "unknown FFN backward (dy) configuration");
     }
   });
@@ -377,6 +387,10 @@ void swa_qkvg_bwd(torch::Tensor qi, torch::Tensor pq, torch::Tensor pk, torch::T
     switch (cfg) {
       case 0: launch_qkvg_bwd<sw80::QkvgBwdCfg<8>, MODE>(p); break;
       case 1: launch_qkvg_bwd<sw80::QkvgBwdCfg<4>, MODE>(p); break;
+      case 2: launch_qkvg_bwd<sw80::QkvgBwdCfg<1, 2>, MODE>(p); break;   // the N split (warps per tile x tiles per CTA): the same values
+      case 3: launch_qkvg_bwd<sw80::QkvgBwdCfg<1, 4>, MODE>(p); break;
+      case 4: launch_qkvg_bwd<sw80::QkvgBwdCfg<2, 2>, MODE>(p); break;
+      case 5: launch_qkvg_bwd<sw80::QkvgBwdCfg<1, 8>, MODE>(p); break;
       default: TORCH_CHECK(false, "unknown qkvg backward configuration");
     }
   });

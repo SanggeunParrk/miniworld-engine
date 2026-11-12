@@ -31,9 +31,10 @@ struct QkvgBwdParams {
   float eps, qk_eps;
 };
 
-template <int NW_>
+// NS > 1: the N split of ``ffn_bwd_sm80.cuh`` (ns_gather) -- NS warps per 16-row tile, NW tiles per CTA
+template <int NW_, int NS_ = 1>
 struct QkvgBwdCfg {
-  static constexpr int NW = NW_, NTHR = NW_ * 32, SMEM = 128 * 1024;
+  static constexpr int NW = NW_, NS = NS_, NTHR = NW_ * NS_ * 32, SMEM = 128 * 1024 + (NS_ > 1 ? NW_ * 8192 : 0);
 };
 
 template <class G, int MODE>
@@ -41,6 +42,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) qkvg_bwd_kernel(const QkvgBwdParam
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sw = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g8 = lane >> 2, q4 = lane & 3;
+  const int slot = warp / G::NS, nsp = warp % G::NS;             // the tile of the CTA's NW and this warp's share of its n tiles (ns_gather)
 
   for (int i = tid; i < 128 * 64; i += G::NTHR) cp_async16(sw + wut_off(i >> 6, i & 63), p.wt + (size_t)qf_channel(i >> 6) * 512 + (i & 63) * 8);
   cp_async_commit();
@@ -51,7 +53,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) qkvg_bwd_kernel(const QkvgBwdParam
 
   const int ntile = bwd_ntile<MODE>(p.M, p.S, p.B);
   for (int base = blockIdx.x * G::NW; base < ntile; base += G::NW * gridDim.x) {
-    const int tile = base + warp;
+    const int tile = base + slot;
     const RowMap rm = row_map<MODE>(tile, p.M, p.S, p.B, g8);
     float cs[2][8], sn[2][8];                                      // RoPE tables of the thread's frequencies f = 8 (q4 & 1) .. + 7
 #pragma unroll
@@ -123,10 +125,11 @@ __global__ void __launch_bounds__(G::NTHR, 1) qkvg_bwd_kernel(const QkvgBwdParam
           u = make_uint4(pack_bf16(d[0], d[1]), pack_bf16(d[2], d[3]), pack_bf16(d[4], d[5]), pack_bf16(d[6], d[7]));
         }
         a[0][hh] = u.x; a[0][2 + hh] = u.y; a[1][hh] = u.z; a[1][2 + hh] = u.w;
-        if (rm.rok[hh]) stg128(p.dp + (size_t)rm.rr[hh] * 512 + 128 * part + 32 * h + 8 * q4, u);
+        if (nsp == 0 && rm.rok[hh]) stg128(p.dp + (size_t)rm.rr[hh] * 512 + 128 * part + 32 * h + 8 * q4, u);
       }
 #pragma unroll
       for (int nt = 0; nt < 16; ++nt) {
+        if (!ns_mine<G::NS>(nt, nsp)) continue;
         const uint4 b = lds128_ro(sw + nt * 8 * 1024 + wlane + 64u * (kb ^ gpar));
         mma16816(acc[nt >> 2][nt & 3], a[0], b.x, b.y);
         mma16816(acc[nt >> 2][nt & 3], a[1], b.z, b.w);
@@ -136,7 +139,9 @@ __global__ void __launch_bounds__(G::NTHR, 1) qkvg_bwd_kernel(const QkvgBwdParam
     }
 
     // ---- the adaLN backward of the input RMS norm: d shift_a -> dmod columns 0 .., d scale_a -> 128 ..
-    adaln_bwd_epilogue<MODE>(acc, rm, lane, p.qi, p.dq1, p.mod, 128, p.dq, p.dmod, 0, p.B, p.S, p.eps);
+    if constexpr (G::NS > 1) ns_gather<G::NS>(acc, reinterpret_cast<float*>(smem_raw + 128 * 1024) + slot * 2048, nsp, lane);
+    if (nsp == 0) adaln_bwd_epilogue<MODE>(acc, rm, lane, p.qi, p.dq1, p.mod, 128, p.dq, p.dmod, 0, p.B, p.S, p.eps);
+    if constexpr (G::NS > 1) __syncthreads();                         // xb is free for the next tile
   }
 }
 

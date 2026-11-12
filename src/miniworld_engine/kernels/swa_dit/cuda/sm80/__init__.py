@@ -343,10 +343,12 @@ def ffn_bwd(
     eps: float,
     mode: int,
     cfg: tuple[int, int] = (2, 1),
+    hsplit: int = 1,
 ):
     """The FFN backward: ``dy`` (= dq2, the gradient of the block output) / ``q1`` / ``y`` / ``ffn`` [M, 128] bf16 (``y``, ``ffn`` and ``q1`` saved by the forward), ``mod`` [b S, 768] fp32,
     ``wu`` [512, 128], ``wd`` [128, 256].  Returns ``(dq1, dffn, hh, dab)`` bf16 -- [M, 128], [M, 128], [M, 256], [M, 512] (da | db): the gradient of q1 and the dW operands; d shift_f | d scale_f | d gate_f go
-    into columns 384 .. 767 of ``dmod`` (see :func:`dmod_buffer`)."""
+    into columns 384 .. 767 of ``dmod`` (see :func:`dmod_buffer`).  ``cfg`` (gate, dy) and ``hsplit`` (the hidden chunks of a tile group over
+    1 / 2 / 4 / 8 CTAs) select the launch shapes (see ``ops.cu``; every one gives the same values)."""
     m = dy.shape[0]
     dev = dy.device
     dq1, dffn = (torch.empty(m, C, device=dev, dtype=torch.bfloat16) for _ in range(2))
@@ -372,6 +374,7 @@ def ffn_bwd(
         mode,
         cfg[0],
         cfg[1],
+        hsplit,
     )
     return dq1, dffn, hh, dab
 
