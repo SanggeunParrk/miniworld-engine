@@ -38,8 +38,15 @@ struct Dq32Cfg {
   static constexpr int STAGE = KV_BYTES + PEN_BYTES;
   static constexpr int B_BYTES = BM * BN * 4;
   static constexpr int NBIAS = (NKV - 1) / R + 1;
-  static constexpr int OFF_Q = 0, OFF_DO = OFF_Q + R * Q_BYTES, OFF_KV = OFF_DO + R * Q_BYTES, OFF_B = OFF_KV + NKV * STAGE;
-  static constexpr int SMEM = OFF_B + NBIAS * B_BYTES;
+  static constexpr int QSIDE = 2 * R * Q_BYTES;
+#ifdef MWE_SM120
+  // RTX 5090 (99 KB a block): when this layout does not fit, the query-side tiles are read into registers once and the K | V ring takes their space
+  static constexpr bool QREG = QSIDE + NKV * STAGE + NBIAS * B_BYTES > 101376;
+#else
+  static constexpr bool QREG = false;
+#endif
+  static constexpr int OFF_Q = 0, OFF_DO = OFF_Q + R * Q_BYTES, OFF_KV = QREG ? 0 : OFF_DO + R * Q_BYTES, OFF_B = OFF_KV + NKV * STAGE;
+  static constexpr int SMEM = QREG && QSIDE > OFF_B + NBIAS * B_BYTES ? QSIDE : OFF_B + NBIAS * B_BYTES;
 };
 
 template <class G>
@@ -62,8 +69,10 @@ __global__ void __launch_bounds__(256, G::MINB) attn_bwd_dq_tf32_kernel(const Dq
       cp_async16(sbase + G::OFF_Q + r * G::Q_BYTES + T::off(token, g), p.q + t * p.ldq + h * HD + g * 4);
       cp_async16(sbase + G::OFF_DO + r * G::Q_BYTES + T::off(token, g), p.dov + t * p.lddo + h * HD + g * 4);
     }
+  if constexpr (!G::QREG) {
 #pragma unroll
-  for (int s = 0; s < NKV - 1; ++s) loader.issue(sbase, s, NS);
+    for (int s = 0; s < NKV - 1; ++s) loader.issue(sbase, s, NS);
+  }
 
   float acc[R][NO][4], lsev[R][2], dlt[R][2], b2[NT][4], dbacc[NT][4];
 #pragma unroll
@@ -80,6 +89,22 @@ __global__ void __launch_bounds__(256, G::MINB) attn_bwd_dq_tf32_kernel(const Dq
 
   const int qrow = warp * 16 + (lane & 7) + 8 * ((lane >> 3) & 1);
   const int krow = (lane & 7) + 8 * (lane >> 4);
+  uint32_t qf[G::QREG ? R : 1][G::QREG ? KS : 1][4], df[G::QREG ? R : 1][G::QREG ? KS : 1][4];
+  if constexpr (G::QREG) {                                       // Q and dO into registers, then the ring over their space
+    cp_async_commit();
+    cp_async_wait<0>();
+    __syncthreads();
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+      for (int ks = 0; ks < KS; ++ks) {
+        ldsm_x4(qf[r][ks], sbase + G::OFF_Q + r * G::Q_BYTES + T::off(qrow, 2 * ks + (lane >> 4)));
+        ldsm_x4(df[r][ks], sbase + G::OFF_DO + r * G::Q_BYTES + T::off(qrow, 2 * ks + (lane >> 4)));
+      }
+    __syncthreads();
+#pragma unroll
+    for (int s = 0; s < NKV - 1; ++s) loader.issue(sbase, s, NS);
+  }
   for (int j = 0; j < NJ; ++j) {
 #pragma unroll
     for (int r = 0; r < R; ++r) {
@@ -111,8 +136,13 @@ __global__ void __launch_bounds__(256, G::MINB) attn_bwd_dq_tf32_kernel(const Dq
 #pragma unroll
       for (int ks = 0; ks < KS; ++ks) {
         uint32_t qa[4], da[4];
-        ldsm_x4(qa, sbase + G::OFF_Q + r * G::Q_BYTES + T::off(qrow, 2 * ks + (lane >> 4)));
-        ldsm_x4(da, sbase + G::OFF_DO + r * G::Q_BYTES + T::off(qrow, 2 * ks + (lane >> 4)));
+        if constexpr (G::QREG) {
+#pragma unroll
+          for (int e = 0; e < 4; ++e) { qa[e] = qf[r][ks][e]; da[e] = df[r][ks][e]; }
+        } else {
+          ldsm_x4(qa, sbase + G::OFF_Q + r * G::Q_BYTES + T::off(qrow, 2 * ks + (lane >> 4)));
+          ldsm_x4(da, sbase + G::OFF_DO + r * G::Q_BYTES + T::off(qrow, 2 * ks + (lane >> 4)));
+        }
 #pragma unroll
         for (int pp = 0; pp < NT / 2; ++pp) {
           uint32_t kb[4], vb[4];

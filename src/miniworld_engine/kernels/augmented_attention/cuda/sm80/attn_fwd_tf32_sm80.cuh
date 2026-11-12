@@ -75,8 +75,15 @@ struct Fwd32Cfg {
   static constexpr int STAGE = KV_BYTES + PEN_BYTES;
   static constexpr int B_BYTES = BM * BN * 4;                // fp32 bias tile
   static constexpr int NBIAS = (NKV - 1) / R + 1;            // the bias tile of key tile j rides with the K | V of its first sample: the tiles in flight
-  static constexpr int OFF_Q = 0, OFF_KV = OFF_Q + Q_BYTES, OFF_B = OFF_KV + NKV * STAGE;
-  static constexpr int SMEM = OFF_B + NBIAS * B_BYTES;
+  static constexpr int QSIDE = Q_BYTES;
+#ifdef MWE_SM120
+  // RTX 5090 (99 KB a block): when this layout does not fit, the query-side tiles are read into registers once and the K | V ring takes their space
+  static constexpr bool QREG = QSIDE + NKV * STAGE + NBIAS * B_BYTES > 101376;
+#else
+  static constexpr bool QREG = false;
+#endif
+  static constexpr int OFF_Q = 0, OFF_KV = QREG ? 0 : OFF_Q + Q_BYTES, OFF_B = OFF_KV + NKV * STAGE;
+  static constexpr int SMEM = QREG && QSIDE > OFF_B + NBIAS * B_BYTES ? QSIDE : OFF_B + NBIAS * B_BYTES;
 };
 
 // The cp.async work of one pipeline stage of the forward and of the query-side backward: the K | V tile of sub-step s = (key tile j = s / R, sample r = s % R) (and its penalties) and,
@@ -147,8 +154,10 @@ __global__ void __launch_bounds__(256, G::MINB) attn_fwd_tf32_kernel(const Fwd32
     const int token = c / HG, g = c - token * HG;
     cp_async16(sbase + G::OFF_Q + T::off(token, g), p.q + ((long long)a * p.ss + qt * BM + token) * p.ldq + h * HD + g * 4);
   }
+  if constexpr (!G::QREG) {
 #pragma unroll
-  for (int s = 0; s < NKV - 1; ++s) loader.issue(sbase, s, NJ);                  // (R = 1: sub-step = key tile)
+    for (int s = 0; s < NKV - 1; ++s) loader.issue(sbase, s, NJ);                // (R = 1: sub-step = key tile)
+  }
 
   float acc[NO][4], m[2], l[2];
   m[0] = m[1] = -INFINITY;
@@ -158,6 +167,17 @@ __global__ void __launch_bounds__(256, G::MINB) attn_fwd_tf32_kernel(const Fwd32
 
   const int qrow = warp * 16 + (lane & 7) + 8 * ((lane >> 3) & 1);        // ldmatrix row of this lane in the Q tile (matrices 0 / 1: rows 0-7 / 8-15; 2 / 3 the same rows, +4 columns)
   const int krow = (lane & 7) + 8 * (lane >> 4);                           // ldmatrix row of this lane in a pair of K n-tiles
+  uint32_t qf[G::QREG ? KS : 1][4];
+  if constexpr (G::QREG) {                                                 // Q into registers, then the ring over its space
+    cp_async_commit();
+    cp_async_wait<0>();
+    __syncthreads();
+#pragma unroll
+    for (int ks = 0; ks < KS; ++ks) ldsm_x4(qf[ks], sbase + G::OFF_Q + T::off(qrow, 2 * ks + (lane >> 4)));
+    __syncthreads();
+#pragma unroll
+    for (int s = 0; s < NKV - 1; ++s) loader.issue(sbase, s, NJ);
+  }
   for (int j = 0; j < NJ; ++j) {
     cp_async_wait<NKV - 2>();
     __syncthreads();                                   // key tile j landed; every warp is past j - 1, so its stage is free for j + NKV - 1
@@ -171,7 +191,8 @@ __global__ void __launch_bounds__(256, G::MINB) attn_fwd_tf32_kernel(const Fwd32
 #pragma unroll
     for (int ks = 0; ks < KS; ++ks) {
       uint32_t qa[4];
-      ldsm_x4(qa, sbase + G::OFF_Q + T::off(qrow, 2 * ks + (lane >> 4)));
+      if constexpr (G::QREG) { qa[0] = qf[ks][0]; qa[1] = qf[ks][1]; qa[2] = qf[ks][2]; qa[3] = qf[ks][3]; }
+      else ldsm_x4(qa, sbase + G::OFF_Q + T::off(qrow, 2 * ks + (lane >> 4)));
 #pragma unroll
       for (int pp = 0; pp < NT / 2; ++pp) {
         uint32_t kb[4];
