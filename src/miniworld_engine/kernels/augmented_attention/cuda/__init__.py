@@ -552,6 +552,21 @@ def prebuild(target, rows):
                 }
                 for opts in sorted(optsets):
                     calls.append(ft.partial(sm90_atom.kernel_cubin, kind, tf32, opts))
+        # AtomDiTESMFold2Pair (integrations/local_dit_esm): its inference rows on the sm90_atom row kernels built with RMS, the q / k RMSNorm +
+        # rotary (qknorm_local.cu) and the 192-key rank-window attention (lattn90_esm.cu; its pair-bias backward finishes on lbias.cu)
+        for tf32 in (False, True):
+            if need(["atom_rms_rows_fwd"], "f32" if tf32 else "bf16"):
+                for kind in ("cond", "cond_split", "pre", "pre_split", "post"):
+                    calls.append(ft.partial(sm90_atom.kernel_cubin, kind, tf32, ("RMS",)))
+        if need(["atom_rms_rows_fwd"]):
+            calls.append(ft.partial(sm90_atom.kernel_cubin, "pack", False, ()))
+        if need(["qknorm_rope_fwd", "qknorm_rope_bwd"]):
+            ext("qknorm_local")
+        if need(["local_esm_attn_fwd", "local_esm_pair_bias_fwd", "local_esm_attn_bwd_dq", "local_esm_attn_bwd_dkv"]):
+            calls.append(ft.partial(sm100_atom_local.esm_cubin, True))
+        if need(["local_esm_pair_bias_bwd"]):
+            calls.append(ft.partial(sm100_atom_local.esm_cubin, True))
+            calls.append(ft.partial(sm100_atom_local.cubin, "lbias", True))
         # sm_90a halves of the sm100_atom / sm100_atom_local sources
         for stem, _, _, _, *defs in sm100_atom._HOPPER_KERNELS.values():
             if need(_ATOM_STEMS[stem]):

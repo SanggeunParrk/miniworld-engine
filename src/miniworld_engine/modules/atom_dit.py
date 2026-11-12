@@ -47,6 +47,9 @@ Each class hard-codes its model's math (no option flags); :data:`ATOM_DIT_MODELS
       AtomDiTESMFold2       ESMFold2's release atom block: the same block (its own class, ESMFold2's constructor names)
       SWAAtomTransformer    ``n_block`` of them
 
+* FoldForge's ESMFold2 atom block with the atom pair (FoldForge R6), :class:`AtomDiTESMFold2Pair`: the AF3 block above over a 32 x 192
+  trunked pair with AdaptiveRMSNorm AdaLNs, raw gates, the +/- 64 rank window and q / k RMSNorm + rotary (``AtomDiT(model="esmfold2_pair")``).
+
 Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
 """
 
@@ -76,8 +79,17 @@ from miniworld_engine.modules.functional import (
     build_attention_params,
     slide_starts,
 )
-from miniworld_engine.modules.norm import AdaptiveLayerNorm, IdentityAdaptiveLayerNorm, RMSNorm
-from miniworld_engine.modules.primitives import BackendModule, Linear, MPLinear, key_mask, master_autocast, random_input, wide
+from miniworld_engine.modules.norm import RMS_EPS, AdaptiveLayerNorm, AdaptiveRMSNorm, IdentityAdaptiveLayerNorm, LayerNorm, RMSNorm
+from miniworld_engine.modules.primitives import (
+    BackendModule,
+    Linear,
+    MPLinear,
+    key_mask,
+    master_autocast,
+    master_linear,
+    random_input,
+    wide,
+)
 from miniworld_engine.modules.transition import ConditionedTransition, UpGatedConditionedTransition
 
 for _attr in ("_katom_key", "_katom_packs"):  # the ESMFold2 kit's atom packs (clear_weight_caches)
@@ -1498,7 +1510,7 @@ class AtomDiTESMFold2(AtomDiTMiniWorld):
     (:func:`~miniworld_engine.modules.functional.build_attention_params`). ``backend="anthropic"``: ESMFold2's own band core.
 
     Not FoldForge's ESMFold2 atom stack (FoldForge R6): that one is the AF3 block over a 32 x 192 atom pair (a pair bias this block has no
-    input for); no option turns one into the other (docs/modules.md, "Downstream requests")."""
+    input for), :class:`AtomDiTESMFold2Pair` (``AtomDiT(model="esmfold2_pair")``); no option turns one into the other."""
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
@@ -1673,6 +1685,230 @@ class SWAAtomTransformer(BackendModule):
         return {"q": q, "c": c, "attention_params": params}
 
 
+# ================================================================ ESMFold2's atom block with the atom pair (FoldForge R6)
+#: The 192-key subset and the +/- 64 rank window of :class:`AtomDiTESMFold2Pair`.
+ESM_KEYS, ESM_HALF = 192, 64
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Rotary on the head axis ``x [..., N, h, d]`` with per-atom tables ``cos`` / ``sin`` [..., N, r] (r <= d / 2), split into halves:
+    channel ``c < r`` pairs with ``c + r``, ``(a, b) -> (a cos - b sin, b cos + a sin)``; channels from ``2 r`` on pass unchanged (FoldForge
+    ``diffusion_transformer.apply_rope``: tiled tables, not interleaved)."""
+    r = cos.shape[-1]
+    c, s = cos[..., None, :].to(x.dtype), sin[..., None, :].to(x.dtype)
+    a, b = x[..., :r], x[..., r : 2 * r]
+    return torch.cat([a * c - b * s, b * c + a * s, x[..., 2 * r :]], dim=-1)
+
+
+def _rms(x: torch.Tensor) -> torch.Tensor:
+    """Affine-free RMSNorm over the last axis at float32's epsilon (FoldForge ``RMSNorm``, ESMFold2's ``rope_norm``)."""
+    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + RMS_EPS)
+
+
+class _ESMAttention(nn.Module):
+    """The attention half of :class:`AtomDiTESMFold2Pair` (parameters only; the math is the block's)."""
+
+    def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int) -> None:
+        super().__init__()
+        self.n_head = n_head
+        self.ada_ln_in = AdaptiveRMSNorm(d_single, d_cond)
+        self.ada_ln_kv = AdaptiveRMSNorm(d_single, d_cond)
+        self.to_query = Linear(d_single, d_single, bias=True)
+        self.to_key = Linear(d_single, d_single, bias=False)
+        self.to_value = Linear(d_single, d_single, bias=False)
+        self.ln_pair = LayerNorm(d_pair, bias=False)
+        self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
+        self.to_gate = Linear(d_single, d_single, bias=False, init="gating")
+        self.to_out = Linear(d_single, d_single, bias=False, init="zero")
+        self.to_scale = Linear(d_cond, d_single, bias=False, init="zero")
+
+
+class _ESMTransition(nn.Module):
+    """The transition half of :class:`AtomDiTESMFold2Pair` (parameters only)."""
+
+    def __init__(self, d_hidden: int, d_cond: int, n: int) -> None:
+        super().__init__()
+        self.d_hidden, self.d_cond = d_hidden, d_cond
+        self.ada_ln_in = AdaptiveRMSNorm(d_hidden, d_cond)
+        self.expand_a = Linear(d_hidden, n * d_hidden, bias=False)
+        self.expand_b = Linear(d_hidden, n * d_hidden, bias=False)
+        self.squeeze = Linear(n * d_hidden, d_hidden, bias=False, init="zero")
+        self.to_scale = Linear(d_cond, d_hidden, bias=False, init="zero")
+
+
+class AtomDiTESMFold2Pair(BackendModule):
+    """FoldForge's ESMFold2 / ESMFold2-fast atom block (FoldForge R6; ``dense/diffusion_transformer.py`` ``CrossAttention`` +
+    ``DiffusionTransition`` under ``spec.ESMFOLD2``): AlphaFold 3's atom block -- parallel K / V AdaLN of the raw atoms, the slid key
+    window, a pair bias from the trunked atom pair, the sequential schedule -- with four changes:
+
+    * every AdaLN is :class:`~miniworld_engine.modules.norm.AdaptiveRMSNorm`: ``(1 + W_s silu(c)) * rms(x) + W_b silu(c)`` (no biases);
+    * both output gates are raw ``W silu(c)`` (no sigmoid, no bias);
+    * the key window is a 192-key subset slid AlphaFold 3's way (``[32 w - 80, 32 w + 112)``,
+      :func:`~miniworld_engine.modules.functional.slide_starts` with ``keys=192``) in which query ``i`` sees key ``j`` only when
+      ``|i - j| <= 64`` (the rank among the real atoms, which come first);
+    * q and k pass an affine-free per-head RMSNorm and a rotary with per-atom tables the caller supplies: ``forward(..., rope=(cos, sin))``,
+      each ``[B, N, r]``, ``r <= head_dim / 2`` (the keys take their own atoms' rows; FoldForge ``build_atom_rope``).
+
+    ``single`` / ``cond`` ``[A, B, N, d]``, trunked ``pair`` ``[B, nwin, 32, 192, d_pair]`` (the window's keys laid out from its first key,
+    as FoldForge's ``pair_cond`` gathered with the same subsets), key ``mask`` ``[B, N]`` (real atoms first). Not :class:`AtomDiTESMFold2`:
+    that is ESMFold2's released pair-free ``SWAAtomBlock`` (fused ``Wqkv``, adaLN-Zero, 3D RoPE inside); this is the block FoldForge's
+    ESMFold2 port builds (``AtomDiT(model="esmfold2_pair")``).
+
+    Backends: ``"pytorch"`` (the reference), ``"triton"`` (the window attention core on ``kernels/augmented_attention/triton/window.py``, the
+    rest as ``"pytorch"``), ``"cuda"`` (``kernels/integrations/local_dit_esm.py``: H100 inference on the sm90_atom row kernels built with
+    ``RMS``, the q / k RMSNorm + rotary of ``qknorm_local.cu`` and the 192-key rank-window attention of ``lattn90_esm.cu``; H100 training and
+    A100 inference / training on the row passes of ``dit_variants/cuda/train_rows.cu`` + cuBLAS around the same attention kernels).
+    """
+
+    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
+    backends = ("pytorch", "triton", "cuda")
+
+    def __init__(
+        self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *, backend: str = "pytorch"
+    ) -> None:
+        super().__init__()
+        self.attention = _ESMAttention(d_single, d_cond, d_pair, n_head)
+        self.transition = _ESMTransition(d_single, d_cond, n)
+        self.set_backend(backend)
+
+    # --------------------------------------------------------------------------------------------------------------------- the math
+    def attention_operands(self, single, cond, pair, mask, rope):
+        """``x`` (the q AdaLN output), q / k (normalised and rotated, fp32 or wider) and v [A, B, N, H, D], the pair bias
+        [B, H, nwin, 32, 192], the window starts [B, nwin] and the key mask [B, N] (float)."""
+        att = self.attention
+        x = att.ada_ln_in(single, cond)
+        xkv = att.ada_ln_kv(single, cond)
+        a, b, n, c = x.shape
+        h = att.n_head
+        d = c // h
+        nwin = windows(n)
+        if tuple(pair.shape[:4]) != (b, nwin, QUERIES, ESM_KEYS):
+            raise ValueError(f"pair must be the trunked atom pair [B, {nwin}, {QUERIES}, {ESM_KEYS}, d_pair], got {tuple(pair.shape)}")
+        if rope is None or len(rope) != 2:
+            raise ValueError("this block rotates q and k: pass rope=(cos, sin), each [B, N, r]")
+        cos, sin = rope
+        if tuple(cos.shape[:2]) not in ((b, n), (1, n)) or cos.shape != sin.shape or 2 * cos.shape[-1] > d:
+            raise ValueError(f"rope tables must be [B, N, r] with r <= {d // 2}, got {tuple(cos.shape)} / {tuple(sin.shape)}")
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
+        bias = F.linear(z, att.to_bias.weight.to(z.dtype)).permute(0, 4, 1, 2, 3)
+        w = wide(x)
+        q = master_linear(att.to_query, x)
+        k = master_linear(att.to_key, xkv)
+        v = master_linear(att.to_value, xkv).reshape(a, b, n, h, d)
+        q = apply_rope(_rms(q.to(w).reshape(a, b, n, h, d)), cos.to(w), sin.to(w))
+        k = apply_rope(_rms(k.to(w).reshape(a, b, n, h, d)), cos.to(w), sin.to(w))
+        keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
+        starts = slide_starts(keep.sum(-1).long(), nwin, ESM_KEYS)
+        return x, q, k, v, bias, starts, keep
+
+    def _gates(self, single, cond, x, out):
+        """``W_sc silu(c) * W_o (sigmoid(W_g x) * out)``: the attention's update from its core output ``out`` [A, B, N, H * D]."""
+        att = self.attention
+        out = master_linear(att.to_out, torch.sigmoid(master_linear(att.to_gate, x)) * out)
+        return master_linear(att.to_scale, F.silu(cond)) * out
+
+    def attention_delta(self, single, cond, pair, mask=None, rope=None) -> torch.Tensor:
+        """The attention's update (no residual), PyTorch: softmax over each window's 192 keys, the +/- 64 band and the key mask."""
+        x, q, k, v, bias, starts, keep = self.attention_operands(single, cond, pair, mask, rope)
+        a, b, n, h, d = q.shape
+        nwin, keys = windows(n), ESM_KEYS
+        w = q.dtype
+        key_pos = starts[:, :, None] + torch.arange(keys, device=x.device)  # [B, nwin, keys]
+        qw = F.pad(q.reshape(a, b, n, h * d), (0, 0, 0, nwin * QUERIES - n)).reshape(a, b, nwin, QUERIES, h, d)
+        kw = _gather_windows(k.reshape(a, b, n, h * d), key_pos).reshape(a, b, nwin, keys, h, d)
+        vw = _gather_windows(v.reshape(a, b, n, h * d), key_pos).reshape(a, b, nwin, keys, h, d)
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            scores = torch.einsum("abwqhd,abwkhd->abhwqk", qw, kw.to(w)) * d**-0.5 + bias.to(w)[None]
+        valid = _gather_windows(keep[None, ..., None], key_pos)[0, ..., 0] > 0  # [B, nwin, keys]
+        query_pos = torch.arange(nwin * QUERIES, device=x.device).view(1, nwin, QUERIES, 1)
+        valid = valid[:, :, None, :] & ((query_pos - key_pos[:, :, None, :]).abs() <= ESM_HALF)  # [B, nwin, 32, keys]
+        scores = scores.masked_fill(~valid[None, :, None], float("-inf"))
+        probs = torch.nan_to_num(torch.softmax(scores, dim=-1))
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            out = torch.einsum("abhwqk,abwkhd->abwqhd", probs, vw.to(w)).to(x.dtype)
+        out = out.reshape(a, b, nwin * QUERIES, h * d)[:, :, :n]
+        return self._gates(single, cond, x, out)
+
+    def transition_delta(self, single, cond) -> torch.Tensor:
+        """The transition's update (no residual): AdaptiveRMSNorm, SwiGLU, the raw gate ``W silu(c)``."""
+        tr = self.transition
+        x = tr.ada_ln_in(single, cond)
+        hidden = F.silu(master_linear(tr.expand_a, x)) * master_linear(tr.expand_b, x)
+        return master_linear(tr.to_scale, F.silu(cond)) * master_linear(tr.squeeze, hidden)
+
+    def _step(self, single, cond, pair, mask, rope, delta):
+        single = single + delta(single, cond, pair, mask, rope)
+        return single + self.transition_delta(single, cond)
+
+    def _forward_pytorch(self, single, cond, pair, mask=None, rope=None):
+        """``single`` [A, B, N, d_single], ``cond`` [A, B, N, d_cond], trunked ``pair`` [B, nwin, 32, 192, d_pair], key ``mask`` [B, N],
+        ``rope`` (cos, sin) [B, N, r] -> the stream after the attention and the transition (both residuals included)."""
+        return self._step(single, cond, pair, mask, rope, self.attention_delta)
+
+    # ------------------------------------------------------------------------------------------------------------ "triton"
+    def _supports_triton(self, single, cond, pair, mask=None, rope=None) -> str | None:
+        if not single.is_cuda:
+            return "the Triton window attention runs on CUDA tensors only"
+        if single.dtype not in (_BF, _F32):
+            return f"dtype {single.dtype} (bfloat16 / float32 only)"
+        if single.ndim != 4 or cond.ndim != 4:
+            return f"single / cond must be [A, B, N, d], got {tuple(single.shape)} / {tuple(cond.shape)}"
+        b, n, c = single.shape[1:]
+        h = self.attention.n_head
+        if c % h or c // h > 64:
+            return f"head dim {c / h:g} (the Triton window kernel takes a whole head dim <= 64)"
+        if tuple(pair.shape[:4]) != (b, windows(n), QUERIES, ESM_KEYS):
+            return f"pair must be the trunked atom pair [B, {windows(n)}, {QUERIES}, {ESM_KEYS}, d_pair], got {tuple(pair.shape)}"
+        if mask is not None and tuple(mask.shape) != (b, n):
+            return f"mask must be [B, N], got {tuple(mask.shape)}"
+        if rope is None:
+            return "rope=(cos, sin) is required"
+        return None
+
+    def _attention_delta_triton(self, single, cond, pair, mask=None, rope=None) -> torch.Tensor:
+        """:meth:`attention_delta` with the window softmax on the Triton kernel (same windows, band, key mask and empty-row zero)."""
+        from miniworld_engine.kernels.augmented_attention.triton.window import window_attention
+
+        x, q, k, v, bias, starts, keep = self.attention_operands(single, cond, pair, mask, rope)
+        a, b, n, h, d = q.shape
+        q, k = q.to(x.dtype), k.to(x.dtype)
+        out = window_attention(q, k, v, bias, starts.to(torch.int32).contiguous(), keep > 0, keys=ESM_KEYS, window_half=ESM_HALF)
+        return self._gates(single, cond, x, out.to(x.dtype).reshape(a, b, n, h * d))
+
+    def _forward_triton(self, single, cond, pair, mask=None, rope=None):
+        return self._step(single, cond, pair, mask, rope, self._attention_delta_triton)
+
+    # -------------------------------------------------------------------------------------------------------------- "cuda"
+    def _supports_cuda(self, single, cond, pair, mask=None, rope=None) -> str | None:
+        from miniworld_engine.kernels.integrations import local_dit_esm
+
+        return local_dit_esm.reason(self, single, cond, pair, mask, rope)
+
+    def _forward_cuda(self, single, cond, pair, mask=None, rope=None):
+        from miniworld_engine.kernels.integrations import local_dit_esm
+
+        # the kernels' precision is their own (bf16 operands, or TF32 for fp32): an enclosing autocast must not recast their torch glue
+        with torch.autocast("cuda", enabled=False):
+            return local_dit_esm.run_block(self, single, cond, pair, mask, rope)
+
+    def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
+        """``single`` / ``cond`` [S, 1, N, d] (S samples), the trunked ``pair`` [1, nwin, 32, 192, d_pair], the key ``mask`` [1, N] (real atoms
+        first, padding inside the last query window) and the rotary tables ``rope`` [1, N, head_dim / 2] (fp32: FoldForge builds them so)."""
+        d_single, d_cond = self.transition.d_hidden, self.transition.d_cond
+        d_pair = self.attention.ln_pair.normalized_shape[0]
+        half = d_single // self.attention.n_head // 2
+        angle = 3 * random_input((1, length, half), dtype=torch.float32, device=device, generator=generator)
+        rdt = torch.float64 if dtype == torch.float64 else torch.float32
+        return {
+            "single": random_input((samples, 1, length, d_single), dtype=dtype, device=device, generator=generator),
+            "cond": random_input((samples, 1, length, d_cond), dtype=dtype, device=device, generator=generator),
+            "pair": random_input((1, windows(length), QUERIES, ESM_KEYS, d_pair), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(1, length, device=device, pad=QUERIES - 8),
+            "rope": (angle.cos().to(rdt), angle.sin().to(rdt)),
+        }
+
+
 # ======================================================================================================================== selector
 #: model name -> its atom DiT class. Several models share a class where their blocks are the same math.
 ATOM_DIT_MODELS: dict[str, type[BackendModule]] = {
@@ -1687,6 +1923,7 @@ ATOM_DIT_MODELS: dict[str, type[BackendModule]] = {
     "protenix_v2": AtomDiTProtenix,
     "opendde": AtomDiTProtenix,
     "esmfold2": AtomDiTESMFold2,
+    "esmfold2_pair": AtomDiTESMFold2Pair,
     "miniworld": AtomDiTMiniWorld,
 }
 
@@ -1707,6 +1944,8 @@ class AtomDiT:
 
 __all__ = [
     "ATOM_DIT_MODELS",
+    "ESM_HALF",
+    "ESM_KEYS",
     "KEYS",
     "KEY_OFFSET",
     "KEY_WINDOWS",
@@ -1715,6 +1954,7 @@ __all__ = [
     "AtomDiTBoltz2",
     "AtomDiTChai1",
     "AtomDiTESMFold2",
+    "AtomDiTESMFold2Pair",
     "AtomDiTMiniWorld",
     "AtomDiTOpenFold3",
     "AtomDiTProtenix",

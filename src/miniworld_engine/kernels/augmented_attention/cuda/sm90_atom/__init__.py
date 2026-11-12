@@ -103,6 +103,8 @@ _KERNELS = {
 #:   PARS   the parallel block (RF3, Chai-1): the transition's AdaLN normalises the block input
 #:   NOOUT  no gating query and no out projection (Chai-1): u = o exactly (no out-projection GEMM, forward or backward)
 #:   KQLN   the affine LayerNorm of the flat q / k (RF3): in pre90, its backward the kqln_bwd90 row pass
+#:   RMS    ESMFold2's conditioning (AtomDiTESMFold2Pair, inference only: kernels/integrations/local_dit_esm.py): RMSNorm AdaLNs, tables of
+#:          silu(c), (1 + s) scales and raw gates (rms90.cuh)
 #:   UP     the up-gate transition (Boltz-2): Wu chunks beside [Wa; Wb] in post90 / tr_bwd90, a 6-block dx2 in post_bwd90 (the pack90 jobs wu, wut)
 #: (one AdaLN for q and k / v is a runtime mode of pre90 and the pre_bwd90_sh entry.)
 _OPTION_KERNELS = {
@@ -122,6 +124,7 @@ _OPTION_KERNELS = {
     "NOOUT": ("post", "post_bwd", "post_bwd_s"),
     "KQLN": ("pre", "pre_split"),
     "UP": ("post", "tr_bwd", "post_bwd", "post_bwd_s"),
+    "RMS": ("cond", "cond_split", "pre", "pre_split", "post"),
 }
 
 
