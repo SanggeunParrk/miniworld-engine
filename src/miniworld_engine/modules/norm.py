@@ -42,6 +42,12 @@ def a100(t: torch.Tensor) -> bool:
     return t.device.type == "cuda" and torch.cuda.get_device_capability(t.device) == (8, 0)
 
 
+def sm120(t: torch.Tensor) -> bool:
+    """A CUDA tensor on a GeForce RTX 5090 (capability 12.0, card key ``5090_sm120``): the ``"cuda"`` backends of the classes that have sm_120a
+    builds route there to them (the H100 and A100 paths are unchanged). Device only: capture-safe."""
+    return t.device.type == "cuda" and torch.cuda.get_device_capability(t.device) == (12, 0)
+
+
 def triton_unsupported(*tensors: torch.Tensor) -> str | None:
     """Why the engine's ``"triton"`` backends cannot take these tensors (not CUDA), or ``None``."""
     if tensors[0].device.type != "cuda":
