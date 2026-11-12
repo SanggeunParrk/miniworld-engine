@@ -1368,7 +1368,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         "anthropic": 2,
         "cueq": 2,
         "cuda:a100_sm80": 3,
-        "cuda:h100_sm90": 3,
+        "cuda:h100_sm90": 4,
     }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64);
     # cuda:h100_sm90 2 (2026-11-12): inference planes past 8 GiB (OpenDDE refiner, d_pair 384 at 2976 / 3968) run K1 + the contraction in two
     # halves of the hidden channels; cuda:h100_sm90 3 (2026-11-12): the training row-dropout scale by the H100 Philox kernel in one launch (the
@@ -1576,9 +1576,9 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 4,
-        "cuda:h100_sm90": 2,
+        "cuda:h100_sm90": 3,
     }  # 2026-11-10: sm_80 paths; 3: the inference pack read by captures; 4: A100 D64 persistent front (k1w64); cuda:h100_sm90 2
-    # (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the small-L inference tiles of the TriMul table
+    # (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):
@@ -1740,9 +1740,9 @@ class BidirectionalTriangleMultiplication(BackendModule, MasterWeights):
     backends = ("pytorch", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 2,
-        "cuda:h100_sm90": 2,
+        "cuda:h100_sm90": 3,
     }  # 2026-11-10: sm_80 k1w64 front (D64); cuda:h100_sm90 2 (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the
-    # small-L inference tiles of the TriMul table
+    # small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         return _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=True)[1]

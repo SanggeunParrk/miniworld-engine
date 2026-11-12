@@ -748,12 +748,25 @@ def _update_inference_body(module, pair, mask, bidirectional, out):
     )
     # K1 packs the first four matrices with live stride-aware CUDA operations.
     # Preserve native column-major parameters instead of copying them first.
-    if pair.shape[-1] in (64, 128) or native_residual or native_aux:
-        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_weights
+    # fp32 masters under bf16 activations: the casts are made once per parameter version, not per call (FoldForge: 2712 copy launches
+    # per ESMFold2 n = 1 trunk on the d 256 path).
+    from miniworld_engine.kernels import _capture
 
-        matrices = cast_weights(weights)
+    packed = pair.shape[-1] in (64, 128) or native_residual or native_aux
+    form = "pack" if packed else "plain"
+
+    def build():
+        if packed:
+            from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_weights
+
+            return cast_weights(weights)
+        return [w.to(pair.dtype) if i < 4 else w.to(pair.dtype).contiguous() for i, w in enumerate(weights)]
+
+    # cached only when a cast happens: an entry of the parameters themselves would hold them alive past their module
+    if all(w.dtype == pair.dtype for w in weights):
+        matrices = build()
     else:
-        matrices = [w.to(pair.dtype) if i < 4 else w.to(pair.dtype).contiguous() for i, w in enumerate(weights)]
+        matrices = _capture.param_forms(("trimul_h100_inference_weights", form, pair.dtype), weights, build, capture_reads_eager=True)
     weights = [
         *matrices,
         module.ln_pair.weight.float().contiguous(),

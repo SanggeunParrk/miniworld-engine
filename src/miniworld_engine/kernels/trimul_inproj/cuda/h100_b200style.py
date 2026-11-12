@@ -734,9 +734,19 @@ def trimul(leaves, mask, ds, direction=0, out=None):
     ):
         raise ValueError("invalid B200-style Hopper weights, norm affines, mask or dropout scale")
     if not torch.is_grad_enabled():
+        # fp32 masters: the bf16 casts once per parameter version, not per call (FoldForge: thousands of copy launches per trunk)
+        mats = list(leaves[1:7])
+        if all(w.dtype == torch.bfloat16 for w in mats):
+            cast = cast_training_weights(mats)
+        else:
+            from miniworld_engine.kernels import _capture
+
+            cast = _capture.param_forms(
+                "trimul_h100_b200style_inference_weights", mats, lambda: cast_training_weights(mats), capture_reads_eager=True
+            )
         kernel_leaves = [
             x,
-            *cast_training_weights(leaves[1:7]),
+            *cast,
             *leaves[7:],
         ]
         if out is not None:
