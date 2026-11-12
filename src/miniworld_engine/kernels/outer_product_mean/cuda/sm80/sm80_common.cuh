@@ -6,6 +6,13 @@
 
 #define DEVI __device__ __forceinline__
 
+// the dynamic shared memory a block may use: 163 KiB on the A100; 99 KiB on the RTX 5090 (MWE_SM120: the sm_120a build of these sources, kernels/_msa_card.py)
+#ifdef MWE_SM120
+#define MWE_SMEM_MAX 101376
+#else
+#define MWE_SMEM_MAX 166912
+#endif
+
 namespace opm80 {
 
 DEVI uint32_t smem_u32(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }

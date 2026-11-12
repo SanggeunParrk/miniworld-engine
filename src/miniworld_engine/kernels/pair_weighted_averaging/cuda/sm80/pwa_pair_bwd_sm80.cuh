@@ -34,11 +34,16 @@ struct PairBwdParams {
 
 template <int DZ> struct PairBwdCfg {
   static constexpr int NW = 8, NTHR = 256, GJ = 16, NK = DZ / 16, NCHK = DZ / 8;
+#ifdef MWE_SM120   // 99 KiB: one tile buffer; at d_pair 384 four warps take the key tiles (and hold the M partials)
+  static constexpr int NBUF = 1, LW = DZ >= 384 ? 4 : NW;
+#else
   static constexpr int NBUF = DZ <= 256 ? 2 : 1;                       // tile buffers per warp (the next tile's rows arrive while this one is processed)
-  static constexpr int TILE = GJ * DZ * 2, TILES = NW * NBUF * TILE;
+  static constexpr int LW = NW;                                        // the warps that take key tiles
+#endif
+  static constexpr int TILE = GJ * DZ * 2, TILES = LW * NBUF * TILE;
   static constexpr int PREP = DZ * 4 * 4 + 2 * DZ * 4;                 // wbt [DZ][4] words, gamma / beta
   static constexpr int NCH64 = DZ / 64;                                // 64-column chunks (4 ks, 8 n8 tiles)
-  static_assert(NW * DZ * 8 * 4 <= TILES, "the partials of M reuse the tile buffers");
+  static_assert(LW * DZ * 8 * 4 <= TILES, "the partials of M reuse the tile buffers");
 };
 
 DEVI uint32_t movT(uint32_t v) {                                        // the transposed 8x8 b16 matrix of a warp-wide fragment
@@ -104,7 +109,7 @@ __global__ void __launch_bounds__(256, NMINB) pwa_pair_bwd_kernel(const PairBwdP
       dv[t][0] = a.x; dv[t][1] = a.y; dv[t][2] = a.z; dv[t][3] = a.w;
 #pragma unroll
       for (int e = 0; e < 4; ++e) ok[t][e] = ((m4 >> (8 * e)) & 0xffu) != 0u;
-      if (t == 0 && warp < ngroups) pb_load_tile<DZ>(tb0, p.z + ((long)i * L + warp * C::GJ) * DZ, lane);   // the warp's first tile under the loads above
+      if (t == 0 && warp < C::LW && warp < ngroups) pb_load_tile<DZ>(tb0, p.z + ((long)i * L + warp * C::GJ) * DZ, lane);   // the warp's first tile under the loads above
       if (t == 0) cp_async_commit();
     }
     float sd = 0.f;
@@ -136,13 +141,13 @@ __global__ void __launch_bounds__(256, NMINB) pwa_pair_bwd_kernel(const PairBwdP
   for (int mt = 0; mt < C::NK; ++mt) cm[mt][0] = cm[mt][1] = cm[mt][2] = cm[mt][3] = 0.f;
 
   int it = 0;
-  for (int gi = warp; gi < ngroups; gi += C::NW, ++it) {
+  for (int gi = warp < C::LW ? warp : ngroups; gi < ngroups; gi += C::LW, ++it) {
     const int buf = it % C::NBUF;
     const uint32_t tile = tb0 + buf * C::TILE;
     const int j0 = gi * C::GJ;
     cp_async_wait<0>();
     __syncwarp();
-    if (C::NBUF == 2 && gi + C::NW < ngroups) pb_load_tile<DZ>(tb0 + (buf ^ 1) * C::TILE, p.z + ((long)i * L + (gi + C::NW) * C::GJ) * DZ, lane);
+    if (C::NBUF == 2 && gi + C::LW < ngroups) pb_load_tile<DZ>(tb0 + (buf ^ 1) * C::TILE, p.z + ((long)i * L + (gi + C::LW) * C::GJ) * DZ, lane);
     if (C::NBUF == 2) cp_async_commit();
 
     // ---- statistics (two passes over the tile)
@@ -238,7 +243,7 @@ __global__ void __launch_bounds__(256, NMINB) pwa_pair_bwd_kernel(const PairBwdP
     }
     __syncwarp();
     if (C::NBUF == 1) {
-      if (gi + C::NW < ngroups) pb_load_tile<DZ>(tile, p.z + ((long)i * L + (gi + C::NW) * C::GJ) * DZ, lane);
+      if (gi + C::LW < ngroups) pb_load_tile<DZ>(tile, p.z + ((long)i * L + (gi + C::LW) * C::GJ) * DZ, lane);
       cp_async_commit();
     }
   }
@@ -246,7 +251,7 @@ __global__ void __launch_bounds__(256, NMINB) pwa_pair_bwd_kernel(const PairBwdP
   __syncthreads();
 
   // ---- M^T partials: warp w writes [h][d] floats at sbase + w * 8 DZ * 4; the eight are summed in order
-  {
+  if (warp < C::LW) {
     float* mp = reinterpret_cast<float*>(smem) + warp * 8 * DZ;
 #pragma unroll
     for (int mt = 0; mt < C::NK; ++mt) {
@@ -260,7 +265,7 @@ __global__ void __launch_bounds__(256, NMINB) pwa_pair_bwd_kernel(const PairBwdP
   for (int e = tid; e < 8 * DZ; e += C::NTHR) {
     float s = 0.f;
 #pragma unroll
-    for (int w = 0; w < 8; ++w) s += red[w * 8 * DZ + e];
+    for (int w = 0; w < C::LW; ++w) s += red[w * 8 * DZ + e];
     p.pM[(long)i * 8 * DZ + e] = s;
   }
 }

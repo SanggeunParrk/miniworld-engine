@@ -212,7 +212,7 @@ def _pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
 
 def _native128_pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
     return (
-        True
+        not _card.sm120()  # the A100-tuned short pipeline (pipeline_native128_sm80) is not built for the RTX 5090
         and len(leaves) == 6  # (no projection biases)
         and msa.shape[1:3] == (1024, 128)
         and msa.shape[-1] == 64

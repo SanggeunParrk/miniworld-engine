@@ -150,7 +150,7 @@ def dgrad(
     dO = dz.new_empty((length * CH, length * CH))
     dzn = torch.empty_like(dz)
     if variant is None:
-        variant = 0  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
+        variant = 3 if _card.sm120() and cz in (256, 384) else 0  # RTX 5090 (99 KiB): the 64-pair CTA; else the shipped schedule
     bi = (
         2 if (variant == 3 and cz != 128) or cz == 512 else 4
     )  # variant 3: the 64-pair CTA (two per SM) at d_pair 256 / 384; d_pair 512 always

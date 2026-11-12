@@ -53,25 +53,47 @@ int num_sms() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCou
 template <int DZ> void launch_pair_fwd(const pwa80::PairFwdParams& p, cudaStream_t st) {
   using C = pwa80::PairFwdCfg<DZ>;
   const int smem = C::FIXED + 8 * (p.L + 4) * 4;
-  TORCH_CHECK(smem <= 166912, "pair_fwd: L too long for the shared-memory logits");
-  raise_smem(pwa80::pwa_pair_fwd_kernel<DZ>, 166912);                 // the attribute is set once: the largest dynamic size any L may ask for
+  TORCH_CHECK(smem <= MWE_SMEM_MAX, "pair_fwd: L too long for the shared-memory logits");
+  raise_smem(pwa80::pwa_pair_fwd_kernel<DZ>, MWE_SMEM_MAX);                 // the attribute is set once: the largest dynamic size any L may ask for
   pwa80::pwa_pair_fwd_kernel<DZ><<<p.L, C::NTHR, smem, st>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 template <int D, int C, bool ST> void launch_ln_v(const pwa80::LnVParams& p, cudaStream_t st) {
   using G = pwa80::LnVCfg<D, C>;
+#ifdef MWE_SM120
+  pwa80::LnVParams pp = p;                                                   // the tile height of this card's build
+  pp.ntile_s = (p.S + G::NTOK - 1) / G::NTOK; pp.ntile = p.L * pp.ntile_s;
+  const pwa80::LnVParams& q = pp;
+#else
+  const pwa80::LnVParams& q = p;
+#endif
   raise_smem(pwa80::pwa_ln_v_kernel<D, C, ST>, G::SMEM);
-  const int grid = std::min(p.ntile, num_sms() * (G::SMEM <= 80 * 1024 ? 2 : 1));
-  pwa80::pwa_ln_v_kernel<D, C, ST><<<grid, G::NTHR, G::SMEM, st>>>(p);
+  const int grid = std::min(q.ntile, num_sms() * (G::SMEM <= 80 * 1024 ? 2 : 1));
+  pwa80::pwa_ln_v_kernel<D, C, ST><<<grid, G::NTHR, G::SMEM, st>>>(q);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+#ifdef MWE_SM120
+template <int D, int C> constexpr int go_warps() {                           // 99 KiB: the widest tile (8, 4 or 2 warps of 16 rows) that fits
+  return pwa80::GoCfg<D, C, 8>::SMEM <= MWE_SMEM_MAX ? 8 : (pwa80::GoCfg<D, C, 4>::SMEM <= MWE_SMEM_MAX ? 4 : 2);
+}
+#endif
 template <int D, int C> void launch_gate_out(const pwa80::GateOutParams& p, cudaStream_t st) {
+#ifdef MWE_SM120
+  constexpr int NW = go_warps<D, C>();
+  using G = pwa80::GoCfg<D, C, NW>;
+  pwa80::GateOutParams q = p;
+  q.ntile_s = (p.S + G::NTOK - 1) / G::NTOK; q.ntile = p.L * q.ntile_s;
+  raise_smem(pwa80::pwa_gate_out_kernel<D, C, NW>, G::SMEM);
+  const int grid = std::min(q.ntile, num_sms());
+  pwa80::pwa_gate_out_kernel<D, C, NW><<<grid, G::NTHR, G::SMEM, st>>>(q);
+#else
   using G = pwa80::GoCfg<D, C>;
   raise_smem(pwa80::pwa_gate_out_kernel<D, C>, G::SMEM);
   const int grid = std::min(p.ntile, num_sms());
   pwa80::pwa_gate_out_kernel<D, C><<<grid, G::NTHR, G::SMEM, st>>>(p);
+#endif
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -99,8 +121,8 @@ template <int D, int C> void launch_dgv(const pwa80::DgvParams& p, int nb, cudaS
 template <int DZ, int NMINB> void launch_pair_bwd(const pwa80::PairBwdParams& p, cudaStream_t st) {
   using C = pwa80::PairBwdCfg<DZ>;
   const int smem = C::TILES + C::PREP + 16 * p.L;
-  TORCH_CHECK(smem <= 166912, "pair_bwd: L too long for shared memory");
-  raise_smem(pwa80::pwa_pair_bwd_kernel<DZ, NMINB>, 166912);
+  TORCH_CHECK(smem <= MWE_SMEM_MAX, "pair_bwd: L too long for shared memory");
+  raise_smem(pwa80::pwa_pair_bwd_kernel<DZ, NMINB>, MWE_SMEM_MAX);
   pwa80::pwa_pair_bwd_kernel<DZ, NMINB><<<p.L, C::NTHR, smem, st>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -196,8 +218,13 @@ void gate_out(torch::Tensor m, torch::Tensor o, torch::Tensor lnw, torch::Tensor
 std::vector<int64_t> bwd_grids(int64_t S, int64_t L, int64_t D, int64_t C) {
   const int ntok = D == 64 ? pwa80::GlueCfg<64, 8>::NTOK : pwa80::GlueCfg<128, 8>::NTOK;      // rows per glue tile: 16 per warp
   const int ntile_g = (int)(L * ((S + ntok - 1) / ntok));
+#ifdef MWE_SM120
+#define GR(D_, C_) if (D == D_ && C == C_) { constexpr int nt = pwa80::DgvCfg<D_, C_>::NTOK; \
+    return {glue_ctas<D_, C_>(ntile_g), dgv_ctas<D_, C_>((int)(L * ((S + nt - 1) / nt)))}; }
+#else
   const int ntile_d = (int)(L * ((S + 127) / 128));
 #define GR(D_, C_) if (D == D_ && C == C_) return {glue_ctas<D_, C_>(ntile_g), dgv_ctas<D_, C_>(ntile_d)};
+#endif
   GR(64, 8) GR(64, 16) GR(64, 32) GR(128, 8) GR(128, 16)
 #undef GR
   TORCH_CHECK(false, "bwd_grids: unsupported (d_msa, d_hidden)");
@@ -245,10 +272,16 @@ void dgv_bwd(torch::Tensor m, torch::Tensor dres, torch::Tensor dgp, torch::Tens
   p.wg = ptr<__nv_bfloat16>(wg); p.wv = ptr<__nv_bfloat16>(wv); p.dm = reinterpret_cast<__nv_bfloat16*>(dm.data_ptr()); p.part = part.data_ptr<float>();
   p.S = S; p.L = L; p.ntile_s = (S + 127) / 128; p.ntile = L * p.ntile_s; p.kp = hm.kp; p.ns = hm.ns; p.eps = (float)eps;
   auto st = at::cuda::getCurrentCUDAStream();
-#define DG(D_, C_) if (D == D_ && C == C_) { const int nb = dgv_ctas<D_, C_>(p.ntile); \
+#ifdef MWE_SM120
+#define DG_TILES(D_, C_) p.ntile_s = (S + pwa80::DgvCfg<D_, C_>::NTOK - 1) / pwa80::DgvCfg<D_, C_>::NTOK; p.ntile = L * p.ntile_s;
+#else
+#define DG_TILES(D_, C_)
+#endif
+#define DG(D_, C_) if (D == D_ && C == C_) { DG_TILES(D_, C_) const int nb = dgv_ctas<D_, C_>(p.ntile); \
     TORCH_CHECK(part.numel() == (int64_t)nb * (8 * C_ * D_ + 2 * D_), "dgv_bwd: part [nb, 8 C D + 2 D]"); launch_dgv<D_, C_>(p, nb, st); return; }
   DG(64, 8) DG(64, 16) DG(64, 32) DG(128, 8) DG(128, 16)
 #undef DG
+#undef DG_TILES
   TORCH_CHECK(false, "dgv_bwd: unsupported (d_msa, d_hidden)");
 }
 
