@@ -35,7 +35,8 @@ def _enabled() -> bool:
 
 
 def _a100(device: torch.device) -> bool:
-    return device.type == "cuda" and torch.cuda.get_device_capability(device) == (8, 0)
+    """A card the sm_80 sources are built for: the A100 (8.0) or the RTX 5090 (12.0, the same sources as ``*_sm120`` extensions for sm_120a)."""
+    return device.type == "cuda" and torch.cuda.get_device_capability(device) in ((8, 0), (12, 0))
 
 
 def _load(name: str, module: str) -> bool:

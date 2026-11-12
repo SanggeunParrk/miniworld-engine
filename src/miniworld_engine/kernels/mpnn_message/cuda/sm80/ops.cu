@@ -69,6 +69,9 @@ int64_t msg_bwd_fused(torch::Tensor p, torch::Tensor w, torch::Tensor bias, torc
   TORCH_CHECK(p.numel() > 0 && p.numel() % (48 * 128) == 0, "P must hold groups x 48 x 128 elements");
   const int64_t groups = p.numel() / (48 * 128), tiles = groups * 3;
   TORCH_CHECK(w.numel() == 128 * 128 && bias.numel() == 128 && mask.numel() == groups * 48 && gred.numel() == groups * 128, "bad operand sizes");
+#ifdef MWE_SM120
+  TORCH_CHECK(false, "msg_bwd_fused: its per-warp tiles need 162 KB of shared memory a block, the RTX 5090 allows 99 KB (sm_120a runs the split backward msg_bwd + cuBLAS)");
+#endif
   TORCH_CHECK(dp.numel() == p.numel(), "bad output sizes");
   using C = mp80::MsgBwdFCfg;
   const int64_t ctas = std::min<int64_t>((int64_t)num_sms() * C::MINB, (tiles + C::NW - 1) / C::NW);
