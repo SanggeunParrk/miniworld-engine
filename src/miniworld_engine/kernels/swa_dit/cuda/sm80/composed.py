@@ -102,9 +102,10 @@ def _fwd_bf16(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
     FF]``."""
     n, s, _ = q.shape
     qf = q.reshape(n * s, C)
-    qh, kh, vh, g, xs, pqs, pks = sm80.qkvg_fwd(qf, mod, cos, sin, wqkv, wg, n, s, FP32_EPS, FP32_EPS, save)
+    tc = sm80.train_cfg(n * s) if save else {}  # the training launch shapes (the same values)
+    qh, kh, vh, g, xs, pqs, pks = sm80.qkvg_fwd(qf, mod, cos, sin, wqkv, wg, n, s, FP32_EPS, FP32_EPS, save, **tc.get("qkvg_fwd", {}))
     o, lse = attention_fwd(qh, kh, vh, seqused, half_window)
-    out, q1s, atts, ys, ffs = sm80.ffn_fwd(qf, g, o, mod, wo, wu, wd, n, s, FP32_EPS, save)
+    out, q1s, atts, ys, ffs = sm80.ffn_fwd(qf, g, o, mod, wo, wu, wd, n, s, FP32_EPS, save, **tc.get("ffn_fwd", {}))
     outputs = [out.view(n, s, C)]
     if save:
         outputs += [qh, kh, vh, g, o, lse, q1s, xs, pqs, pks, atts, ys, ffs]
@@ -119,10 +120,12 @@ def _bwd_bf16(
     m = n * s
     mode = sm80.MODE_SINGLE
     dmod = sm80.dmod_buffer(mode, n, n, s, q.device)
-    dq1, dffn, hh, dab = sm80.ffn_bwd(dy.reshape(m, C), q1, y, ffn, mod, wu, wd, dmod, n, s, FP32_EPS, mode)
-    d_o, dg, datt, gated, delta = sm80.oproj_bwd(dq1, o, g, att, mod, wo, dmod, n, s, mode)
+    tc = sm80.train_cfg(m)
+    dq1, dffn, hh, dab = sm80.ffn_bwd(dy.reshape(m, C), q1, y, ffn, mod, wu, wd, dmod, n, s, FP32_EPS, mode, **tc.get("ffn_bwd", {}))
+    d_o, dg, datt, gated, delta = sm80.oproj_bwd(dq1, o, g, att, mod, wo, dmod, n, s, mode, **tc.get("oproj_bwd", {}))
     dqh, dkh, dvh = attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window)
-    dq, dp = sm80.qkvg_bwd(q.reshape(m, C), pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wqkv, wg, dmod, n, s, FP32_EPS, FP32_EPS, mode)
+    qkvg_args = (q.reshape(m, C), pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wqkv, wg, dmod, n, s, FP32_EPS, FP32_EPS, mode)
+    dq, dp = sm80.qkvg_bwd(*qkvg_args, **tc.get("qkvg_bwd", {}))
     return [
         dq.view(n, s, C),
         dmod,
@@ -329,7 +332,7 @@ def _mod_fwd(c: torch.Tensor, wmod: torch.Tensor, save: bool) -> list[torch.Tens
 def _mod_bwd(dmod: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """(dc in c's dtype, dWmod fp32)."""
     if c.dtype == _BF:
-        return sm80.mod_bwd(dmod, c, a, wmod, dw_dtype=_F32)
+        return sm80.mod_bwd(dmod, c, a, wmod, dw_dtype=_F32, **sm80.train_cfg(c.shape[0]).get("mod_bwd", {}))
     da, dw = _mm(dmod, wmod), _mm(dmod.t(), a)
     dc = torch.empty_like(c)
     sm80._ext().native_rows([c, da], [dc], 14, 1, 1, c.shape[0], False, FP32_EPS)

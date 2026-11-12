@@ -1202,7 +1202,8 @@ class AtomDiTMiniWorld(BackendModule):
     # "triton": 2026-11-12, the fused block's Triton stages (engine 2.4's SWADiTBlock)
     backends = ("pytorch", "anthropic", "cuda", "triton")
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 4, "cuda:h100_sm90": 2}
+    # cuda:a100_sm80 5 (2026-11-12): the bf16 training stages take row-count launch shapes (sm80.train_cfg; the same values)
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 5, "cuda:h100_sm90": 2}
 
     def __init__(
         self,
@@ -1590,7 +1591,8 @@ class SWAAtomTransformer(BackendModule):
 
     backends = ("pytorch", "anthropic", "cuda", "triton")  # "triton": every block's (AtomDiTMiniWorld._forward_triton)
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 4, "cuda:h100_sm90": 2}
+    # cuda:a100_sm80 5 (2026-11-12): the bf16 training stages take row-count launch shapes (sm80.train_cfg; the same values)
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 5, "cuda:h100_sm90": 2}
 
     class Config(BaseModel):
         """Configuration for the SWA atom transformer."""

@@ -491,3 +491,28 @@ _INFER_CFG = ((3072, dict(cfg=1, nsplit=8), 1), (5120, dict(cfg=1, nsplit=2), 1)
 def infer_cfg(m: int) -> tuple[dict, int]:
     """(qkvg keywords, ffn cfg) of an inference call over ``m`` rows (``_INFER_CFG``; past its last bound the defaults)."""
     return next(((q, f) for top, q, f in _INFER_CFG if m <= top), ({}, 0))
+
+
+#: the training launch shapes of the bf16 stages (``composed.SWABlockA100``: forward with saves, backward) by the row count M (rows <= the
+#: bound): keywords of ``qkvg_fwd`` / ``ffn_fwd`` / ``oproj_bwd`` / ``ffn_bwd`` / ``qkvg_bwd`` / ``mod_bwd``. A call of few row tiles
+#: splits the qkvg output blocks over 4 warps and runs the other stages on CTAs of fewer warps (more CTAs) -- the same values bitwise.
+#: A100 80GB, AtomDiTESMFold2 master train, S 1, graph timing (2026-11-12): 0.88 / 0.89 / 0.91 / 0.93 / 0.93 of the default launches at
+#: L 1024 / 2048 / 3072 / 4096 / 5120; at 8192 rows the defaults are faster (1.09).
+_TRAIN_CFG = (
+    (
+        5120,
+        dict(
+            qkvg_fwd=dict(cfg=1, nsplit=4),
+            ffn_fwd=dict(cfg=1),
+            oproj_bwd=dict(cfg=1),
+            ffn_bwd=dict(cfg=(1, 1)),
+            qkvg_bwd=dict(cfg=1),
+            mod_bwd=dict(dc_cfg=5),
+        ),
+    ),
+)
+
+
+def train_cfg(m: int) -> dict[str, dict]:
+    """The per-stage keywords of a training call over ``m`` rows (``_TRAIN_CFG``; past its last bound none: the defaults)."""
+    return next((c for top, c in _TRAIN_CFG if m <= top), {})
