@@ -986,10 +986,10 @@ def _trimul_cuda_route(module, pair, mask, dropout_p, *, bidirectional: bool) ->
     if not pair.is_cuda:
         return None, "the kernels run on CUDA tensors only"
     cap = torch.cuda.get_device_capability(pair.device)
-    if cap == (8, 0):
+    if cap in ((8, 0), (12, 0)):  # A100 and RTX 5090: the sm_80 sources (built for sm_120a on the 5090)
         return _trimul_cuda_route_sm80(module, pair, mask)
     if cap != (9, 0):
-        return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) kernels"
+        return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) / RTX 5090 (sm_120a) kernels"
     if pair.dtype != torch.bfloat16:
         return None, f"dtype {pair.dtype}: the H100 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
     if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:
@@ -1016,7 +1016,7 @@ def _trimul_cuda_route_sm80(module, pair, mask) -> tuple[str | None, str | None]
     """``("sm80", None)``: the A100 TriMul (``kernels/integrations/trimul_sm80``: the D128 fused set, the wide set for D 64 / 256 / 384 / 512,
     inference and training, one plane per launch), else ``(None, reason)``. bf16 only (no fp32 TriMul, by policy)."""
     if pair.dtype != torch.bfloat16:
-        return None, f"dtype {pair.dtype}: the A100 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
+        return None, f"dtype {pair.dtype}: the A100 / RTX 5090 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
     if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:
         return None, f"pair must be [B, L, L, d_pair], got {tuple(pair.shape)}"
     if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(pair.shape[:2])):
@@ -1208,6 +1208,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         "anthropic": 2,
         "cueq": 2,
         "cuda:a100_sm80": 3,
+        "cuda:5090_sm120": 1,
     }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64)
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
@@ -1411,12 +1412,13 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     #: ``"anthropic"``: see the anthropic section below.
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 4
+        "cuda:a100_sm80": 4,
+        "cuda:5090_sm120": 1,
     }  # 2026-11-10: sm_80 paths; 3: the inference pack read by captures; 4: A100 D64 persistent front (k1w64)
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
-        if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):
-            return "the RF3 length factor is wired to the H100 (sm_90a) / A100 (sm_80) TriMul kernels only"
+        if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0), (12, 0)):
+            return "the RF3 length factor is wired to the H100 (sm_90a) / A100 (sm_80) / RTX 5090 (sm_120a) TriMul kernels only"
         one = pair[:1] if mask is not None and pair.shape[0] > 1 else pair  # per-sample launches: one sample's contract
         return _trimul_cuda_route(self, one, None if mask is None else mask[: one.shape[0]], dropout_p, bidirectional=False)[1]
 
@@ -1572,7 +1574,7 @@ class BidirectionalTriangleMultiplication(BackendModule, MasterWeights):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: sm_80 k1w64 front (D64)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: sm_80 k1w64 front (D64); 5090: the sm_80 sources for sm_120a
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         return _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=True)[1]
