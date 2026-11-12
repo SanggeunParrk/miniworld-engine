@@ -8,6 +8,12 @@ What every engine module must serve, and how a backend of it is judged.
   (class, stream, dims, options): `module,model,stream,lengths,depths,dims,options,dtypes,modes,eval_samples,train_samples,source`.
   Streams `token_folds` / `atom_folds` (TokenDiT* / AtomDiT* rows): the multi-fold layout `[S samples, F folds, L, d]`, one pair per fold, F = the
   row's `depths` (docs/modules.md, multi-fold contract).
+  Streams ending in `_shared_cond` (`atom_single_shared_cond`, `token_single_shared_cond`, `atom_folds_shared_cond`,
+  `token_folds_shared_cond`; source "FoldForge shared cond"): the base stream's layout with the DiT `cond` shared across the S samples, one
+  tensor `[1, F, N, d]` expanded with stride 0 over S, as FoldForge's `AtomDiTStack` / `TokenDiTStack` / grouped sampler call the blocks;
+  the backends serve that layout on dedicated shared paths. `make_inputs` gives that layout and the measurers keep it expanded (the base
+  copied and expanded again; in train its gradient is the sum over the samples): docs/measure.md, shared conditioning. Only the classes
+  with a shared path have such rows, with S > 1 (S = 1 has nothing to share).
   `module` is a class of `miniworld_engine.modules`; `model` the selector keys that build it; `dtypes` among
   `float32|master` (master = fp32 parameters, bf16 activations, forward under bf16 autocast: this is the only bf16 case, the engine has no
   bf16-parameter requirement, so no row says `bfloat16`; a class without parameters runs its bf16 activations as `master`); `modes` among
