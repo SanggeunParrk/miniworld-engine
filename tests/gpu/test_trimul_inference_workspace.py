@@ -82,3 +82,66 @@ def test_wide_transition_row_chunks_are_bitwise(monkeypatch: pytest.MonkeyPatch)
         assert fw._inference_chunk_rows(200 * 200, 384, 768) < 200 * 200
         chunked = m(x)
     assert torch.equal(one, chunked)
+
+
+@pytest.mark.skipif(_card() != (9, 0), reason="H100 (the b200style TriMul)")
+@pytest.mark.parametrize("outgoing", [True, False])
+def test_trimul_split_planes_matches_one_call(outgoing: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Planes past ``SPLIT_PLANES_BYTES`` run K1 / the contraction in two halves of the hidden channels: the same output as one call
+    (each channel the same K1 dot product; the contraction a bmm over the half's planes) and no allocation of two pair sizes."""
+    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as BS
+
+    m = TriangleMultiplication(384, outgoing=outgoing).cuda().float().eval()
+    C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
+    m.set_master_weights()
+    kern = copy.deepcopy(m).set_backend("cuda")
+    gen = torch.Generator(device="cuda").manual_seed(1)
+    inputs = m.make_inputs(length=1024, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=gen)
+    pair, mask = inputs["pair"], inputs["mask"]
+    plane = pair.numel() * pair.element_size()
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        one = kern(pair, mask)
+        monkeypatch.setattr(BS, "SPLIT_PLANES_BYTES", plane)  # 2 pair sizes > 1: split
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        before = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        halves = kern(pair, mask)
+        torch.cuda.synchronize()
+        peak = torch.cuda.max_memory_allocated() - before
+        again = kern(pair, mask)
+    assert torch.equal(halves, again)  # deterministic
+    torch.testing.assert_close(halves.float(), one.float(), rtol=0, atol=2e-2)  # bf16 output: at most one rounding step apart
+    assert peak <= 2.2 * plane, f"peak {peak / plane:.2f} pair sizes above the input (tri + one half's planes, then y)"
+
+
+@pytest.mark.skipif(_card() not in ((9, 0), (8, 0)), reason="H100 / A100")
+@pytest.mark.parametrize("backend", ["cuda", "triton"])
+@pytest.mark.parametrize("outgoing", [True, False])
+@pytest.mark.parametrize(("P", "R"), [(248, 16), (186, 16)])  # OpenDDE's refiner: S = 3968 (n = 16), 2976 (n = 12)
+def test_trimul_refiner_sizes_tiled(backend: str, outgoing: bool, P: int, R: int) -> None:
+    """d_pair 384 at the refiner's lengths against the float32 reference, which does not fit at S: tiling the input R x R over the token
+    axes leaves every P x P block of the output equal to the output at P (the contraction sums R equal copies, a constant factor the
+    output LayerNorm removes), as tests/gpu/test_trimul_big_plane.py does."""
+    m = TriangleMultiplication(384, outgoing=outgoing).cuda().float().eval()
+    C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
+    m.set_master_weights()
+    kern = copy.deepcopy(m).set_backend(backend)
+    gen = torch.Generator(device="cuda").manual_seed(1)
+    small = m.make_inputs(length=P, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=gen)
+    with torch.no_grad():
+        gold = copy.deepcopy(m).float()(small["pair"].float(), small["mask"]).float()
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            at_p = copy.deepcopy(m)(**small).float()  # the PyTorch reference at the case dtype (P need not be a served length)
+        pair = small["pair"].repeat(1, R, R, 1).contiguous()
+        mask = small["mask"].repeat(1, R)
+        assert kern.unsupported(pair, mask) is None
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            big = kern(pair, mask)
+    scale = gold.abs().max()
+    err_p = float((at_p - gold).abs().max() / scale)  # the measurer's GREEN bound: max(err_pytorch, 8e-3)
+    for i in (0, R // 2, R - 1):
+        for j in (0, R - 1):
+            block = big[:, i * P : (i + 1) * P, j * P : (j + 1) * P].float()
+            err = float((block - gold).abs().max() / scale)
+            assert err <= max(err_p, 8e-3), f"block ({i}, {j}): {err:.3e} (pytorch at P: {err_p:.3e})"

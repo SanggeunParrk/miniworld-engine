@@ -115,8 +115,13 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cueq": 2,
-        "cuda:a100_sm80": 3,
-    }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures
+        "cuda:a100_sm80": 4,
+        "cuda:h100_sm90": 2,
+        "triton": 2,
+    }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
+    # (2026-11-12): row-blocked inference past a whole-pair budget (FoldForge OpenDDE refiner, 2976 / 3968 tokens at d_pair 384; A100: also
+    # L % 128 != 0, padded); cuda:h100_sm90 2 (2026-11-12): row blocks of <= 2 GiB of q | k | v | g far past the working-set cap -- served
+    # sizes up to L2048 keep their path
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -478,7 +483,64 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
 
     def _forward_triton(self, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         with master_autocast(pair, self):  # fp32 master matrices under bf16 activations: the projections run bf16, as the reference's do
+            if self._rows_blocked(pair):
+                return self._attention_rows(pair, mask, _triton_core)
             return self._residual(pair, mask, _triton_core if self.use_self_attention else self._bias_only_triton)
+
+    #: An inference pair larger than this runs :meth:`_attention_rows` (the Triton core; FoldForge OpenDDE's refiner: d_pair 384 at 2976 /
+    #: 3968 structural tokens, 6.3 / 11.3 GiB); requirement sizes up to L2048 (3 GiB at d_pair 384) keep the whole-pair composition.
+    ROWS_BLOCKED_BYTES = 4 << 30
+    #: The rows of one block of :meth:`_attention_rows`: about this many bytes of the attended frame per pair-shaped temporary.
+    ROWS_BLOCK_BYTES = 1 << 30
+
+    def _rows_blocked(self, pair: torch.Tensor) -> bool:
+        """Whether the call runs :meth:`_attention_rows`: inference (no autograd, no live dropout), the self-attention update of
+        :meth:`_attention` (not the fp32-softmax variants, not a dead instance), a pair past ``ROWS_BLOCKED_BYTES``."""
+        return (
+            self.use_self_attention
+            and not isinstance(self, _TriangleAttentionFp32Softmax)
+            and not self.dead
+            and not (self.training and self.p_drop > 0.0)
+            and not (torch.is_grad_enabled() and (pair.requires_grad or any(p.requires_grad for p in self.parameters())))
+            and pair.numel() * pair.element_size() > self.ROWS_BLOCKED_BYTES
+        )
+
+    def _attention_rows(self, pair: torch.Tensor, mask: torch.Tensor | None, core) -> torch.Tensor:
+        """``pair + update(pair)`` of :meth:`_attention` (with ``core``) in blocks of the attended frame's rows i: the rows are
+        independent given the bias b_jk, which is made first (block by block, [B, H, L, L], the masked keys filled once), then each block
+        normalises its rows, projects q / k / v / g, runs the core against every key, gates, projects out and adds its residual into its
+        rows of the output. No pair-sized temporary: the whole-pair composition holds the normalised pair, q, k, v, the gate, the core
+        output and the update (7 pair sizes; 79 GiB at 3968 tokens, d_pair 384), this holds one block of each. The same statements per
+        row (a projection GEMM over fewer rows may pick another cuBLAS kernel)."""
+        B, L, _, C = pair.shape
+        H = self.n_head
+        frame = pair if self.starting else pair.transpose(1, 2)
+        out = torch.empty_like(pair)
+        frame_out = out if self.starting else out.transpose(1, 2)
+        rows = max(1, min(L, self.ROWS_BLOCK_BYTES // (L * C * pair.element_size())))
+        bias = pair.new_empty((B, H, L, L))
+        for i0 in range(0, L, rows):
+            x = self.ln_pair(frame[:, i0 : i0 + rows].contiguous())
+            bias[:, :, i0 : i0 + rows] = self.to_bias(x).permute(0, 3, 1, 2)
+        if self._bias_untransposed:
+            bias = bias.transpose(-1, -2).contiguous()
+        if mask is not None:
+            bias.masked_fill_(~mask.bool()[:, None, None, :], torch.finfo(bias.dtype).min)  # the cores' own fill, once
+        for i0 in range(0, L, rows):
+            x = self.ln_pair(frame[:, i0 : i0 + rows].contiguous())
+            n = x.shape[1]
+
+            def heads(t, n=n):  # [B, n, L, H * d] -> [B, n, H, L, d]
+                return t.view(B, n, L, H, -1).transpose(2, 3)
+
+            q, k, v = heads(self.to_query(x)), heads(self.to_key(x)), heads(self.to_value(x))
+            if self.use_qk_norm:
+                q, k = self.norm_query(q), self.norm_key(k)
+            o = core(q, k, v, bias[:, None], None).transpose(2, 3).reshape(B, n, L, -1)
+            del q, k, v
+            frame_out[:, i0 : i0 + n] = frame[:, i0 : i0 + n] + self.to_out(sigmoid_gate(self.to_gate(x), o))
+            del x, o
+        return out
 
     # The bias-only form (``use_self_attention=False``; engine 2.4's ``_bias_only_inference`` and its portable training path): the attention
     # weights ``softmax_k(b_jk)`` do not depend on the row i, so the core is one batched GEMM per (batch, head). Triton: the LayerNorm fused
@@ -1302,7 +1364,10 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         "anthropic": 2,
         "cueq": 2,
         "cuda:a100_sm80": 3,
-    }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64)
+        "cuda:h100_sm90": 2,
+    }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64);
+    # cuda:h100_sm90 2 (2026-11-12): inference planes past 8 GiB (OpenDDE refiner, d_pair 384 at 2976 / 3968) run K1 + the contraction in two
+    # halves of the hidden channels
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         return _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=False)[1]

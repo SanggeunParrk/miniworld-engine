@@ -214,6 +214,11 @@ def _h100(cells):
             save = {512: h100_b200style_tmasave, 384: h100_b200style_d384_tmasave, 256: h100_b200style_scalar_tmasave}[d]
             yield _call(save.output_kernel, d, h, cfg)
 
+    # inference planes past BS.SPLIT_PLANES_BYTES (OpenDDE's refiner, D384 at 2976 / 3968 structural tokens): K1 at half the hidden width
+    for c, m in infer:
+        if c.d in (256, 384) and not c.bidir and any(BS._split_planes(c.ch, n, -(-n // 16) * 16, 1, False) for n in m.lengths):
+            yield _call(h100_b200style_direct._kernel, c.d, c.ch // 2, BS._config(c.d))
+
     # row-padded K1 / K3 (inference, any L): per length of the cell
     for c, m in infer:
         if c.ch in _ROWPAD.get(c.d, ()):

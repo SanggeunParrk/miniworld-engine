@@ -264,24 +264,51 @@ def _output_kernel(d, h, cfg, save=False):
     return _output_kernel_standard(d, h, cfg)
 
 
-def _contract(ab, d, direction):
+def _contract(ab, d, direction, out=None):
     """B200's contraction (``b200_infer._contract``) for both directions; one direction through ``_h100_bmm.contract`` (the measured
     cuBLASLt configuration where one is listed)."""
     from .b200_infer import _contract as contract, _fold
 
     if direction == 0:
+        assert out is None
         return contract(ab, d, direction)
     from ._h100_bmm import contract as lt_contract
 
     n = ab.shape[-1]
     samples = ab.numel() // (ab.shape[0] * n * n)
-    t = ab.new_empty((d * samples, n, n))
+    t = ab.new_empty((d * samples, n, n)) if out is None else out.view(d * samples, n, n)
     left, right = _fold(ab[:d]), _fold(ab[d : 2 * d])
     if direction == 1:
         lt_contract(left, right.transpose(1, 2), t)
     else:
         lt_contract(left.transpose(1, 2), right, t)
     return t.view(d, *ab.shape[1:])
+
+
+#: Inference planes ([2 h, rows, n] bf16) larger than this run as two halves of the hidden channels: K1 on the half's rows of the four
+#: projection matrices (its own instantiation at h / 2), the half's contraction written into its channels of one tri, the half's planes
+#: freed before the next half. The largest allocation is then one pair size, not two (D384 at OpenDDE's 3968 structural tokens: 11.3 GiB
+#: halves instead of one 22.5 GiB block, which a fragmented allocator could not place). Every channel is the same K1 dot product and the
+#: same per-channel contraction (the bmm over h / 2 planes instead of the measured cuBLASLt plan over h): requirement sizes
+#: (planes <= 6 GiB at L2048) keep one call.
+SPLIT_PLANES_BYTES = 8 << 30
+
+
+def _split_planes(h, prow, np_, direction, save):
+    """Whether an inference call runs its K1 / contraction in two halves of the hidden channels (``SPLIT_PLANES_BYTES``)."""
+    return not save and direction in (1, 2) and h % 64 == 0 and 2 * h * prow * np_ * 2 > SPLIT_PLANES_BYTES
+
+
+def _front_contract_halves(front, x, weights, token, gi, bi, xs, h, prow, np_, direction):
+    """K1 + contraction in two halves of the hidden channels (``SPLIT_PLANES_BYTES``): tri [h, prow, np_]."""
+    hc = h // 2
+    tri = x.new_empty((h, prow, np_))
+    for c0 in (0, hc):
+        ab = x.new_empty((2 * hc, prow, np_))
+        front(x, [w[c0 : c0 + hc] for w in weights], token, gi, bi, ab, xs)
+        _contract(ab, hc, direction, out=tri[c0 : c0 + hc])
+        del ab
+    return tri
 
 
 def _saved(x, direction):
@@ -329,7 +356,6 @@ def _run_rowpad(leaves, mask, direction, out=None):
     if bsz > 1 and npad != n:
         raise ValueError("B samples need L % 16 == 0")
     with T.native_context(x.device):
-        ab = x.new_empty((2 * h, rows if bsz > 1 else npad, npad))
         xs = x.new_empty((rows * n, 2), dtype=torch.float32)
         vec = x.new_empty((4, d), dtype=torch.float32)
         weights = [w.contiguous() for w in (wl, wlg, wr, wrg)]  # bf16 already (trimul casts the matrices: cast_training_weights)
@@ -340,9 +366,14 @@ def _run_rowpad(leaves, mask, direction, out=None):
         )
         from .h100_b200style_direct import front
 
-        front(x, weights, token, gi, bi, ab, xs)
-        tri = _contract(ab, d, direction)  # [h, (B,) np, np]
-        del ab  # the planes are dead once contracted: freed before y, so the peak is x + planes + tri, not + y (FoldForge 5I28 OpenDDE)
+        prow_ = rows if bsz > 1 else npad
+        if _split_planes(h, prow_, npad, direction, False):
+            tri = _front_contract_halves(front, x, weights, token, gi, bi, xs, h, prow_, npad, direction)
+        else:
+            ab = x.new_empty((2 * h, prow_, npad))
+            front(x, weights, token, gi, bi, ab, xs)
+            tri = _contract(ab, d, direction)  # [h, (B,) np, np]
+            del ab  # the planes are dead once contracted: freed before y, so the peak is x + planes + tri, not + y (FoldForge 5I28 OpenDDE)
         prow = rows if bsz > 1 else npad  # pair rows of the planes / tri
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
         _aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
@@ -389,7 +420,6 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
     m = rows * n
     h = wp.shape[1]
     with T.native_context(x.device):
-        ab = x.new_empty((2 * h, rows, n))
         xs = x.new_empty((m, 2), dtype=torch.float32)
         vec = x.new_empty((4, d), dtype=torch.float32)
         mu = x.new_empty((m,), dtype=torch.float32) if save else None
@@ -412,13 +442,20 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
         ):
             from .h100_b200style_direct import front
 
-            front(x, weights, mask, gi, bi, ab, xs)
+            if _split_planes(h, rows, n, direction, save) and ds is None:
+                ab = None
+                tri = _front_contract_halves(front, x, weights, mask, gi, bi, xs, h, rows, n, direction)
+            else:
+                ab = x.new_empty((2 * h, rows, n))
+                front(x, weights, mask, gi, bi, ab, xs)
+                tri = _contract(ab, d, direction)
         else:
+            ab = x.new_empty((2 * h, rows, n))
             w1 = x.new_empty((4 * h, d))
             pack_into_cuda(w1, wl, wlg, wr, wrg)
             pm = owned_bf16_mask(mask, n, x.device, bsz)
             _front(x, w1, pm, gi, bi, ab, xs, xn=saved_xn)
-        tri = _contract(ab, d, direction)
+            tri = _contract(ab, d, direction)
         # inference: the planes are dead once contracted; free them before y is allocated, so the peak is x + planes + tri (not
         # + y): at D384 L3968 (FoldForge 5I28 OpenDDE n=16, the structural-token refiner) that is 45 GiB instead of 56 GiB
         planes = ab if save else None

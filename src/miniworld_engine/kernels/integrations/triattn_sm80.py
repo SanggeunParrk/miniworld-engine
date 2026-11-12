@@ -228,7 +228,8 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: boo
     if not _serves_kind(module, pair, mask, train=train):
         return (
             f"L {pair.shape[1]}, d_pair {d_pair}, {module.n_head} heads, {'training' if train else 'inference'}: refused by the A100 kernels' "
-            "gates (L % 128 == 0, contiguous [B, L, L, d_pair], the training bias-gradient budget) or their extensions failed to build"
+            "gates (L % 128 == 0 for training and the fused d_pair 64 / 128 geometries, L > 128 for inference of the others, contiguous "
+            "[B, L, L, d_pair], the training bias-gradient budget) or their extensions failed to build"
         )
     return None
 
@@ -253,7 +254,10 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     if kind is not None and kind[0] == "wide":
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
 
-        return sm80_wide.forward(
+        # L not a multiple of 128, or a whole-pair front output past sm80_wide.ROWS_BLOCKED_BYTES (FoldForge OpenDDE's refiner: 2976 / 3968
+        # tokens at d_pair 384): blocks of the attended frame's rows, at L padded to a multiple of 128
+        call = sm80_wide.forward_rows if sm80_wide.rows_blocked(pair, kind[1]) else sm80_wide.forward
+        return call(
             pair,
             kind[1],
             weights,
