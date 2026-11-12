@@ -70,7 +70,7 @@ def prebuild(target, rows):
             yield ft.partial(b200_triattn._core, rows_per_task)
         yield b200_triattn._mod
         yield b200_triattn._wide
-    elif target.arch == "sm80":
+    elif target.arch in ("sm80", "sm120"):  # the 5090 builds the same sources for sm_120a (sm80_arch)
         yield from _sm80(rows)
 
 

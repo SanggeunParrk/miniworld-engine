@@ -30,6 +30,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from ..._compile import opaque
+from . import sm80_arch as _arch
 from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 from . import sm80 as _core
 from . import sm80_core2 as _core2
@@ -87,6 +88,8 @@ def cfg_for(d_pair: int, d_hidden: int, n_head: int) -> Cfg | None:
     if hd not in (16, 32) or d_pair % 64 or not 64 <= d_pair <= MAX_D:
         return None
     fused = d_pair in (64, 128) and n_head in (2, 4)
+    if fused and _arch.sm120_build() and d_pair == 128 and n_head == 4:  # (a 16-channel head pads to 32: hidden 128 either way)
+        fused = False  # RTX 5090: the d_pair-128 / hidden-128 weights (133 KiB) do not fit 99 KB of shared memory -- the rows engine
     return Cfg(d_pair, n_head, hd, fused)
 
 
@@ -94,13 +97,13 @@ def cfg_for(d_pair: int, d_hidden: int, n_head: int) -> Cfg | None:
 def _rows():
     ensure_cuda_home()
     return load_extension(
-        name="triattn_sm80_rows",
+        name=_arch.name("triattn_sm80_rows"),
         sources=[str(_dir / "rows_ops.cu")],
         extra_cuda_cflags=[
             *host_flags(),
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
+            *_arch.gencode(),
             f"-I{_dir}",
         ],
         extra_cflags=["-std=c++17", "-O3"],

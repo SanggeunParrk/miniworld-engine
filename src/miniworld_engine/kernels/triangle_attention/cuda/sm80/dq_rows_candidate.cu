@@ -23,7 +23,7 @@ void attn_bwd_dq(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tenso
     TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kFloat && t->is_contiguous() && t->numel() == Z * H * L * L, "attn_bwd_dq: lse / delta [z, H, L, L] fp32");
   TORCH_CHECK(L % a100::TA_BM == 0 && L >= a100::TA_BM && L % bn == 0 && L % rows == 0, "attn_bwd_dq: L must be a multiple of 128");
   const int64_t T = Z * L * L;
-  for (auto [t, ld] : {std::pair<const torch::Tensor*, int64_t>{&q, ldq}, {&k, ldk}, {&v, ldv}, {&dov, lddo}, {&dq, lddq}}) {
+  for (auto [t, ld] : std::initializer_list<std::pair<const torch::Tensor*, int64_t>>{{&q, ldq}, {&k, ldk}, {&v, ldv}, {&dov, lddo}, {&dq, lddq}}) {
     TORCH_CHECK(ld >= H * 32 && ld % 8 == 0 && reinterpret_cast<uintptr_t>(t->data_ptr()) % 16 == 0, "attn_bwd_dq: row strides / alignment");
     TORCH_CHECK((t->storage_offset() + (T - 1) * ld + H * 32) * t->element_size() <= (int64_t)t->storage().nbytes(), "attn_bwd_dq: tensor extents");
   }

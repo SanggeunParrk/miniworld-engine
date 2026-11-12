@@ -108,6 +108,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "anthropic": 2,
         "cueq": 2,
         "cuda:a100_sm80": 3,
+        "cuda:5090_sm120": 1,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
@@ -382,10 +383,10 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         if not pair.is_cuda:
             return None, "the kernels run on CUDA tensors only"
         cap = torch.cuda.get_device_capability(pair.device)
-        if cap == (8, 0):
+        if cap in ((8, 0), (12, 0)):  # A100, or the RTX 5090: the same sm_80 sources built for sm_120a
             return self._cuda_route_sm80(pair, mask)
         if cap != (9, 0):
-            return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) kernels"
+            return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) / RTX 5090 (sm_120a) kernels"
         why = self._core_refusal(pair, mask)
         if why is not None:
             return None, why
@@ -848,7 +849,7 @@ class BidirectionalTriangleAttention(BackendModule, MasterWeights):
     """
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: the sm_80 build of the H100 path
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: the sm_80 build of the H100 path; 2026-11-12: its sm_120a build
 
     backends = ("pytorch", "cuda")
 
