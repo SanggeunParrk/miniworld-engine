@@ -25,7 +25,8 @@ from pathlib import Path
 
 import torch
 
-from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import ensure_cuda_home, host_flags
+from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # sm_120a: same sources (kernels/_sm120.py)
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -140,7 +141,7 @@ def bias_pack(
 
 @functools.lru_cache(maxsize=8)
 def _ampere_cached(index: int) -> bool:
-    return torch.cuda.get_device_capability(index) == (8, 0)
+    return torch.cuda.get_device_capability(index) in ((8, 0), (12, 0))  # 12.0: the RTX 5090 (sm_120a build, kernels/_sm120.py)
 
 
 @torch.compiler.assume_constant_result
@@ -314,10 +315,21 @@ def _dkv_schedule(head_dim: int) -> tuple[int, int]:
     return (4, 2) if head_dim == 32 else (DKV_NST, DKV_MINB)
 
 
-def _dq_schedule(samples: int) -> tuple[int, int, int]:
+def _dq_schedule(samples: int, head_dim: int = HD) -> tuple[int, int, int]:
     """(samples per CTA, K | V ring stages, CTAs per SM) of the query side.  Four samples per CTA halve the bias-gradient partials that two write and
-    read back (A = 48: dq + reduction 12-20 % faster), at one CTA per SM; two samples when A is not a multiple of four, one when it is odd."""
+    read back (A = 48: dq + reduction 12-20 % faster), at one CTA per SM; two samples when A is not a multiple of four, one when it is odd.
+
+    The RTX 5090 (99 KB of shared memory per block): the Q | dO tiles of four samples (and of two at head dim 48 / 64) do not fit beside the ring, so
+    one sample a CTA there, two at head dim 32 for an even sample count."""
+    if _sm120_build():
+        return (2, 4, 1) if head_dim <= 32 and samples % 2 == 0 else (1, 3, 2)
     return (4, 3, 1) if samples % 4 == 0 else (2, 4, 1) if samples % 2 == 0 else (1, 3, 2)
+
+
+def _sm120_build() -> bool:
+    from miniworld_engine.kernels._sm120 import building_sm120
+
+    return building_sm120()
 
 
 def backward(
@@ -590,7 +602,7 @@ def plain_backward(
     ext.attn_delta(dob, o, delta, samples, length, heads, head_dim)
     dq, dk, dv = (torch.empty(m, d, device=dev, dtype=torch.bfloat16) if t is None else t for t in (dq, dk, dv))
     pen, kps = _penalty(kpen, kps, length)
-    rows, nkv, minb = (1, 3, 4 if warps == 2 else 2) if warps < 8 else _dq_schedule(samples)
+    rows, nkv, minb = (1, 3, 4 if warps == 2 else 2) if warps < 8 else _dq_schedule(samples, head_dim)
     assert warps == 8 or (samples == 1 and kpen is None and warps in (2, 4)), (
         samples,
         warps,
@@ -703,6 +715,13 @@ def pair_bias_forward(
     return bo
 
 
+def _smem_cap() -> int:
+    """The opt-in shared memory per block the generic pair-bias kernels may take: 160 KB (A100), 99 KB on the RTX 5090 (``ops.cu``'s ``AA80_SMEM_CAP``)."""
+    from miniworld_engine.kernels._sm120 import SMEM_MAX, building_sm120
+
+    return SMEM_MAX if building_sm120() else 160 * 1024
+
+
 #: head counts of the generic pair-bias kernel (``pair_bias_gen``)
 GEN_HEADS = (4, 8, 12, 16, 24, 32)
 #: rows a thread of the generic kernel takes (1, 2 or 4): the A100 port's verified default
@@ -716,7 +735,7 @@ def pair_bias_generic_supported(dp: int, heads: int, dtype: torch.dtype) -> bool
         and dp % 8 == 0
         and dp >= 8
         and heads in GEN_HEADS
-        and (dp * heads + heads) * 4 <= 160 * 1024
+        and (dp * heads + heads) * 4 <= _smem_cap()
     )
 
 
@@ -762,7 +781,7 @@ def pair_bias_generic_bwd_supported(dp: int, heads: int, dtype: torch.dtype) -> 
         te is not None
         and dtype in (torch.bfloat16, torch.float32)
         and heads in GEN_BWD_HEADS
-        and (dp * heads + 2 * te * (dp + 4) + te * heads) * 4 <= 160 * 1024
+        and (dp * heads + 2 * te * (dp + 4) + te * heads) * 4 <= _smem_cap()
     )
 
 

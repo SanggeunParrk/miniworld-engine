@@ -3,7 +3,8 @@
 import functools, pathlib
 import torch
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
+from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags
+from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # sm_120a: same sources (kernels/_sm120.py)
 from miniworld_engine.kernels.swa_dit.cuda import sm80
 
 

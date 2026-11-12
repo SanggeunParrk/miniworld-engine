@@ -340,8 +340,14 @@ def _h100_reason(single: torch.Tensor) -> str | None:
 
 
 def _a100(single: torch.Tensor) -> bool:
-    """A CUDA tensor on an A100 (sm_80): the card of the ``"cuda"`` backend's sm_80 paths (``kernels/integrations/*_sm80.py``)."""
-    return single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)
+    """A CUDA tensor on an A100 (sm_80) or an RTX 5090 (sm_120a builds of the same sources, ``kernels/_sm120.py``): the cards of the
+    ``"cuda"`` backend's sm_80 paths (``kernels/integrations/*_sm80.py``)."""
+    return single.is_cuda and torch.cuda.get_device_capability(single.device) in ((8, 0), (12, 0))
+
+
+def _card(single: torch.Tensor) -> str:
+    """The card the sm_80 paths run on, for refusal reasons."""
+    return "RTX 5090 (sm_120a build of the sm_80 path)" if torch.cuda.get_device_capability(single.device) == (12, 0) else "A100"
 
 
 def _a100_dtype(
@@ -351,11 +357,11 @@ def _a100_dtype(
     without bf16 autocast) or fp32 activations without autocast (TF32 tensor cores)."""
     dt = single.dtype
     if dt not in (torch.bfloat16, torch.float32) or cond.dtype != dt or (pair is not None and pair.dtype != dt):
-        return None, f"A100: dtypes {single.dtype} / {cond.dtype} / {None if pair is None else pair.dtype} (all bfloat16 or all float32)"
+        return None, f"{_card(single)}: dtypes {single.dtype} / {cond.dtype} / {None if pair is None else pair.dtype} (all bfloat16 or all float32)"
     if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != torch.bfloat16 or dt != torch.bfloat16):
-        return None, "A100: autocast: bfloat16 activations under bfloat16 autocast only (float32 activations run without autocast, on TF32)"
+        return None, f"{_card(single)}: autocast: bfloat16 activations under bfloat16 autocast only (float32 activations run without autocast, on TF32)"
     if compute_dtype not in (None, dt):
-        return None, f"A100: compute_dtype {compute_dtype} (the sm_80 kernels run in the activations' dtype)"
+        return None, f"{_card(single)}: compute_dtype {compute_dtype} (the sm_80 kernels run in the activations' dtype)"
     return dt, None
 
 
@@ -532,20 +538,25 @@ class TokenDiTProtenix(BackendModule):
         from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
 
         if extra_pair_bias is not None:
-            return None, "A100: extra_pair_bias (not an input of the sm_80 attention kernels)"
+            return None, f"{_card(single)}: extra_pair_bias (not an input of the sm_80 attention kernels)"
         dt, why = _a100_dtype(single, cond, pair, compute_dtype)
         if why is not None:
             return None, why
         if single.ndim != 4 or cond.ndim != 4:
-            return None, f"A100: single / cond must be [A, B, L, d], got {tuple(single.shape)} / {tuple(cond.shape)}"
+            return None, f"{_card(single)}: single / cond must be [A, B, L, d], got {tuple(single.shape)} / {tuple(cond.shape)}"
         if not ct_sm80.serves(self.transition, single, cond, cast(torch.dtype, dt), _wants_grad(self, single, cond, pair)):
+            if torch.cuda.get_device_capability(single.device) == (12, 0):
+                return None, (
+                    f"{_card(single)}: the transition -- kernels/integrations/conditioned_transition_sm80 has no sm_120a build yet "
+                    "(the ConditionedTransition / AdaLN port), or the call is outside its range"
+                )
             return None, (
-                "A100: outside the sm_80 ConditionedTransition kernels' range (bf16 / fp32, widths of their table, sigmoid AdaLN "
+                f"{_card(single)}: outside the sm_80 ConditionedTransition kernels' range (bf16 / fp32, widths of their table, sigmoid AdaLN "
                 "without a shift bias, bias-free SwiGLU)"
             )
         if not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond=cond):
             return None, (
-                "A100: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or "
+                f"{_card(single)}: outside the sm_80 AugmentedAttentionPairBias kernels' range (bf16 / fp32 with weights in that dtype or "
                 "fp32, head dim 32, 48 or 64, pair LayerNorm eps 1e-5, a bool key mask [B, L] / [A, B, L] or none)"
             )
         return "a100", None
@@ -939,6 +950,8 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
             from miniworld_engine.kernels.integrations import bias_only_dit_sm80
 
             why = bias_only_dit_sm80.refusal(self, single, cond, pair, mask, bias, _wants_grad(self, single, cond, pair, bias))
+            if why is not None:
+                why = f"{_card(single)}: {why.removeprefix('A100: ')}"
             return (None, why) if why is not None else ("a100", None)
         why = _h100_reason(single)
         if why is not None:

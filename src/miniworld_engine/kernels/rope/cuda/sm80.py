@@ -20,7 +20,8 @@ from torch import Tensor
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
+from miniworld_engine.kernels._nvcc import build_failed, ensure_cuda_home, host_flags
+from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # sm_120a: same sources (kernels/_sm120.py)
 from miniworld_engine.kernels.layernorm.cuda import sm80 as _rows
 
 _dir = Path(__file__).parent / "sm80"

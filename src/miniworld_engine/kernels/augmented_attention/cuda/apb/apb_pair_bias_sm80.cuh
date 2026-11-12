@@ -221,11 +221,18 @@ void pair_bias_fwd_raw(at::Tensor z, at::Tensor wb, at::Tensor lpw, double ws, c
 #endif
 constexpr int BTP80 = 128 * DP * 2;
 template <int NH> constexpr int bwd80_bps() { return NH == 8 ? 2 : 1; }
+#ifdef MWE_SM120
+// RTX 5090 (99 KB of shared memory per block): 16 / 24 heads take a two-stage ring (three stages of 40-44 KB tiles do not fit)
+#define BWD80_RW 4   // warps whose dWf tiles the end reduce holds at once (two passes)
+template <int NH> constexpr int bwd80_stages() { return NH == 8 ? BWD80_STAGES : 2; }
+#else
 template <int NH> constexpr int bwd80_stages() { return NH == 8 ? BWD80_STAGES : 3; }
+#define BWD80_RW 8
+#endif
 // DBT: the dtype of dbias, fp32 or bf16 (the attention backward's partial, already the bias gradient when one sample: no reduction pass between)
 template <int NH, class DBT = float> constexpr int bwd80_tile() { return BTP80 + NH * 128 * (int)sizeof(DBT); }   // pair, then dbias
 template <int NH, class DBT = float> constexpr int bwd80_smem() {
-  constexpr int red = 8 * (NH * DP + NH) * 4, ring = bwd80_stages<NH>() * bwd80_tile<NH, DBT>();    // the end reduce reuses the ring
+  constexpr int red = BWD80_RW * (NH * DP + NH) * 4, ring = bwd80_stages<NH>() * bwd80_tile<NH, DBT>();    // the end reduce reuses the ring
   return (ring > red ? ring : red) + 128 + 32 * 16 * 4 * (nhp80<NH>() / 8);
 }
 __device__ __forceinline__ uint32_t swzb80(int r, int c) {                  // byte offset of (row, channel) in a swizzled pair tile
@@ -260,7 +267,7 @@ __global__ void __launch_bounds__(256, bwd80_bps<NH>()) pair_bias_bwd80_k(const 
   constexpr int NT8 = nhp80<NH>() / 8, BW = NT8, BT = bwd80_tile<NH, DBT>(), NSB = bwd80_stages<NH>();   // BW: dx^ B words per tile (one per group)
   constexpr int DCH = 128 * (int)sizeof(DBT) / 16;                          // 16-B granules of one head's 128 dbias values
   constexpr bool YP = NH == 8;                                              // S2 from the projection y (8) or a first dx^ pass (12, 16)
-  constexpr int RING = NSB * BT > 8 * (NH * DP + NH) * 4 ? NSB * BT : 8 * (NH * DP + NH) * 4;
+  constexpr int RING = NSB * BT > BWD80_RW * (NH * DP + NH) * 4 ? NSB * BT : BWD80_RW * (NH * DP + NH) * 4;
   extern __shared__ uint8_t smem_raw[];
   uint8_t* smem = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 127) & ~uintptr_t(127));
   uint32_t* bwt = reinterpret_cast<uint32_t*>(smem + RING);               // [u][lane][4 tiles x BW words]: Wf[heads][f(t, g)]
@@ -442,6 +449,49 @@ __global__ void __launch_bounds__(256, bwd80_bps<NH>()) pair_bias_bwd80_k(const 
   // dWf -= the per-head mean term, then block-reduce the warps' tiles and head sums; one atomic add per entry
   constexpr int RS = NH * DP + NH;
   float* red = reinterpret_cast<float*>(smem);                              // the ring is idle now
+#ifdef MWE_SM120
+  // RTX 5090 (99 KB a block): the reduce area holds four warps' tiles (24 heads: 8 x 12.4 KB do not fit next to the ring); two passes of four
+  // warps, each thread's sums kept in registers across them, in the same order (warps 0 .. 7) as the single pass below
+  constexpr int NPT = (RS + 255) / 256;
+  float part[NPT];
+#pragma unroll
+  for (int i = 0; i < NPT; ++i) part[i] = 0.f;
+#pragma unroll 1
+  for (int pass = 0; pass < 2; ++pass) {
+    if (pass) __syncthreads();                                              // the first pass's reads are done
+    if ((warp >> 2) == pass) {
+      float* pw = red + (warp & 3) * RS;
+#pragma unroll
+  for (int nt = 0; nt < NT8; ++nt) {
+    const float cq = quad_sum(corr[nt]), hq = quad_sum(hsum[nt]);           // head g + 8 nt
+    const float c0 = __shfl_sync(0xffffffffu, cq, 8 * q), c1 = __shfl_sync(0xffffffffu, cq, 8 * q + 4);   // heads 2q, 2q + 1 (+ 8 nt)
+    const int h0 = 2 * q + 8 * nt;
+    if (h0 < NH) {                                                          // (NH is even: h0 + 1 < NH too)
+#pragma unroll
+      for (int mt = 0; mt < 8; ++mt) {
+        pw[h0 * DP + 16 * mt + g] = acc[mt][nt][0] - c0; pw[(h0 + 1) * DP + 16 * mt + g] = acc[mt][nt][1] - c1;
+        pw[h0 * DP + 16 * mt + g + 8] = acc[mt][nt][2] - c0; pw[(h0 + 1) * DP + 16 * mt + g + 8] = acc[mt][nt][3] - c1;
+      }
+    }
+    if (q == 0 && g + 8 * nt < NH) pw[NH * DP + g + 8 * nt] = hq;
+  }
+    }
+    __syncthreads();
+#pragma unroll
+    for (int i = 0; i < NPT; ++i) {
+      const int c = threadIdx.x + 256 * i;
+      if (c < RS) {
+#pragma unroll
+        for (int w = 0; w < 4; ++w) part[i] += red[w * RS + c];
+      }
+    }
+  }
+#pragma unroll
+  for (int i = 0; i < NPT; ++i) {
+    const int c = threadIdx.x + 256 * i;
+    if (c < RS) atomicAdd(c < NH * DP ? AWF + c : AHS + (c - NH * DP), part[i]);
+  }
+#else
   float* pw = red + warp * RS;
 #pragma unroll
   for (int nt = 0; nt < NT8; ++nt) {
@@ -464,6 +514,7 @@ __global__ void __launch_bounds__(256, bwd80_bps<NH>()) pair_bias_bwd80_k(const 
     for (int w = 0; w < 8; ++w) v += red[w * RS + c];
     atomicAdd(c < NH * DP ? AWF + c : AHS + (c - NH * DP), v);
   }
+#endif
 }
 
 template <int NH, class DBT>
