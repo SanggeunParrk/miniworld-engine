@@ -40,6 +40,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from miniworld_engine.kernels import _capture
+
 
 def trunc_normal_std(
     weights: torch.Tensor,
@@ -153,7 +155,15 @@ class BackendModule(nn.Module):
         reason = self.unsupported(*args, **kwargs) if self.backend != "pytorch" else None
         if reason is not None:
             raise BackendUnsupported(f"{type(self).__name__} backend {self.backend!r}: {reason}")
-        return getattr(self, f"_forward_{self.backend}")(*args, **kwargs)
+        if torch.compiler.is_compiling():
+            return getattr(self, f"_forward_{self.backend}")(*args, **kwargs)
+        # the running module owns the hoisted tables a CUDA-graph capture records in it (kernels._capture.refresh_static_inputs(root))
+        caller = _capture.CALLER
+        prev, caller[0] = caller[0], self
+        try:
+            return getattr(self, f"_forward_{self.backend}")(*args, **kwargs)
+        finally:
+            caller[0] = prev
 
     def extra_repr(self) -> str:
         inner = super().extra_repr()

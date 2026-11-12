@@ -1006,10 +1006,13 @@ def prebuild(target, rows):
         return
     if target.arch != "sm90":
         return
-    from . import tf32, train
+    from . import hoist, tf32, train
 
     bf16, fp32, eval_, train_ = {"bfloat16"}, {"float32"}, {"eval"}, {"train"}
     builds = (
+        # the fused pair-bias hoist's backward rows (integrations/bias_only_dit_hoist.py: ln0_bwd_rows, H100 since 2026-11-12); its
+        # forward LayerNorm is the conditioned_transition rows
+        (hoist.ext, None, train_),
         (h100_ext, None, None),  # pv_gate_inf.cu: the attention core (bf16 pv_cta / fp32 pv_cta_tf32), dpb, swiglu pipeline
         (h100_gemm_ext, bf16, eval_),  # one-launch conditioning tables, squeeze + out-projection (the bf16 inference step)
         (functools.partial(_rows_ext, True), bf16, None),

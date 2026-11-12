@@ -748,12 +748,25 @@ def _update_inference_body(module, pair, mask, bidirectional, out):
     )
     # K1 packs the first four matrices with live stride-aware CUDA operations.
     # Preserve native column-major parameters instead of copying them first.
-    if pair.shape[-1] in (64, 128) or native_residual or native_aux:
-        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_weights
+    # fp32 masters under bf16 activations: the casts are made once per parameter version, not per call (FoldForge: 2712 copy launches
+    # per ESMFold2 n = 1 trunk on the d 256 path).
+    from miniworld_engine.kernels import _capture
 
-        matrices = cast_weights(weights)
+    packed = pair.shape[-1] in (64, 128) or native_residual or native_aux
+    form = "pack" if packed else "plain"
+
+    def build():
+        if packed:
+            from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_weights
+
+            return cast_weights(weights)
+        return [w.to(pair.dtype) if i < 4 else w.to(pair.dtype).contiguous() for i, w in enumerate(weights)]
+
+    # cached only when a cast happens: an entry of the parameters themselves would hold them alive past their module
+    if all(w.dtype == pair.dtype for w in weights):
+        matrices = build()
     else:
-        matrices = [w.to(pair.dtype) if i < 4 else w.to(pair.dtype).contiguous() for i, w in enumerate(weights)]
+        matrices = _capture.param_forms(("trimul_h100_inference_weights", form, pair.dtype), weights, build, capture_reads_eager=True)
     weights = [
         *matrices,
         module.ln_pair.weight.float().contiguous(),
@@ -839,3 +852,15 @@ def _uni_wide_inference_ok(module, pair: torch.Tensor) -> bool:
     )
 
     return serves(module, pair)
+
+
+def dropout_scale(pair: torch.Tensor, p: float) -> torch.Tensor:
+    """The row dropout scale [B, 1, L, D] of the training path (``modules.functional.dropout_scale(pair, p, 1)``, the reference's draw):
+    one launch of the H100 Philox kernel (``kernels/triangle_attention/cuda/h100_triattn.drop_scale``: the same tensor, bit for bit, for
+    the same generator state), the torch statements where that kernel does not take the call (not a BF16 square pair)."""
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_triattn
+    from miniworld_engine.modules.functional import dropout_scale as reference
+
+    if h100_triattn.drop_scale_serves(pair, p):
+        return h100_triattn.drop_scale(pair, p, 1)
+    return reference(pair, p, 1)

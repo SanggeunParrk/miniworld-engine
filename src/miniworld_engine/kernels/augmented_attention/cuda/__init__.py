@@ -119,6 +119,15 @@ class ApbInferenceCore:
         self.extension.attn_inf(qkvg, bias, 0, 1, 1)
         return qkvg
 
+    def batch(self, qkvg: torch.Tensor, bias: torch.Tensor):
+        """S samples in one launch: qkvg [S L, 4 W], bias [H, S, L, L] (``apb.pair_bias_batch``: sample s reads its own planes, the
+        core's ``nbg = S`` groups). Each sample's rows are exactly a one-sample call's."""
+        H, S, L = bias.shape[0], bias.shape[1], bias.shape[2]
+        if H != self.heads or qkvg.shape[0] != S * L or not bias.is_contiguous():
+            raise ValueError("Hopper APB batched inference requires qkvg [S L, 4 W] and a contiguous head-major bias [H, S, L, L]")
+        self.extension.attn_inf(qkvg, bias.view(H * S, L, L), 0, S, S)
+        return qkvg
+
 
 def _apb_training_defs(heads: int, d: int):
     from .apb import GEOMETRY, width

@@ -236,18 +236,16 @@ OUT_LN = {256: ("d256", 32, 3), 384: ("d384", 16, 2), 512: ("d512", 16, 2)}
 
 
 def _output_ln(tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
-    """Output-LN backward (dgo / dbo accumulate: zeroed by the caller)."""
+    """Output-LN backward: dt, and dgo / dbo from per-block partials reduced in block order (``MW_LN_PARTIALS``: deterministic at
+    every cell; the atomic build ran run-to-run different dgamma / dbeta outside the preserved scopes)."""
     H, n = tri.shape[0], tri.shape[1]
     M = n * n
-    native = T.preserve_training(H)
     family, rows, minblocks = OUT_LN[H]
     buffers = 2 if family in ("d256", "d512") else 4
     defines_ = dict(MW_MINB=1, MW_K1_STREAM=0, WIDTH=H // 2, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0, LN_MINBLOCKS=minblocks)
     sb = rows * H * 2
     stats = buffers * sb + 128 + 4 * H
-    defines = W._defines(**defines_, LN_STATS_OFFSET=stats)
-    if native:
-        defines += W._defines(MW_LN_PARTIALS=1)
+    defines = W._defines(**defines_, LN_STATS_OFFSET=stats) + W._defines(MW_LN_PARTIALS=1)
     smem = stats + rows * 8 * (buffers // 2) + (640 if family == "d512" else 0)
     source = f"output_ln_{family}_l384.cu"
     swizzle = "64B" if rows == 32 else "32B"
@@ -255,17 +253,13 @@ def _output_ln(tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     maps.append(W._map(dn, [64, rows, H // 64], [64, M, H // 64], [H * 2, 128]))
     k = W._kernel(source, "mw_independent_output_ln", "upstream", defines, smem)
     grid = W._resident_grid(source, "mw_independent_output_ln", "upstream", defines, 128, smem)
-    if native:
-        pg, pb = [torch.empty((grid, H), device=tri.device, dtype=torch.float32) for _ in range(2)]
-    else:
-        pg, pb = dgo, dbo
+    pg, pb = [torch.empty((grid, H), device=tri.device, dtype=torch.float32) for _ in range(2)]
     W._launch(k, grid, 128, smem, W._params(f"uni_{source}", [*maps, dn, mu, rs, go, pg, pb, M]))
-    if native:
-        if defer:
-            return pg, pb, dgo, dbo
-        from ._h100_pack import finish_affine_partials
+    if defer:
+        return pg, pb, dgo, dbo
+    from ._h100_pack import finish_affine_partials
 
-        finish_affine_partials(pg, pb, dgo, dbo)
+    finish_affine_partials(pg, pb, dgo, dbo)
 
 
 def _contract_gp(dt, ab, pre, mask, gp, outgoing):
@@ -293,30 +287,24 @@ def _contract_gp(dt, ab, pre, mask, gp, outgoing):
 
 
 def _input_ln(x, dxn, dy, dx, gi, dgi, dbi, defer=False):
-    """Input-LN backward + identity residual (dgi / dbi accumulate: zeroed by the caller)."""
+    """Input-LN backward + identity residual; dgi / dbi from per-block partials reduced in block order (deterministic, as
+    ``_output_ln``)."""
     n, D = x.shape[1], x.shape[-1]
     M = n * n
-    native = T.preserve_training(D)
-    defines = W._defines(WIDTH=D, INPUT_ROWS=16, INPUT_THREADS=128, INPUT_MINBLOCKS=4, INPUT_NO_REDUCE=1)
-    if native:
-        defines += W._defines(MW_LN_PARTIALS=1)
+    defines = W._defines(WIDTH=D, INPUT_ROWS=16, INPUT_THREADS=128, INPUT_MINBLOCKS=4, INPUT_NO_REDUCE=1) + W._defines(MW_LN_PARTIALS=1)
     smem = max(3 * 16 * D * 2 + 128, 2 * 4 * D * 4) + D * 4
     source = "input_ln_d384_l384.cu" if D == 384 else "input_ln_l384.cu"
     k = W._kernel(source, "mw_independent_input_ln", "upstream", defines, smem)
     maps = [W._map(t, [64, 16], [D, M], [D * 2]) for t in (x, dxn, dy, dx)]
     grid = num_sms() * {256: 6, 384: 5, 512: 4}[D]
-    if native:
-        pg, pb = [torch.empty((grid, D), device=x.device, dtype=torch.float32) for _ in range(2)]
-    else:
-        pg, pb = dgi, dbi
+    pg, pb = [torch.empty((grid, D), device=x.device, dtype=torch.float32) for _ in range(2)]
     fields = [*maps, gi, pg, pb, None, None, None, None, None, *([None] if D == 384 else []), M]
     W._launch(k, grid, 128, smem, W._params(f"uni_{source}", fields))
-    if native:
-        if defer:
-            return pg, pb, dgi, dbi
-        from ._h100_pack import finish_affine_partials
+    if defer:
+        return pg, pb, dgi, dbi
+    from ._h100_pack import finish_affine_partials
 
-        finish_affine_partials(pg, pb, dgi, dbi)
+    finish_affine_partials(pg, pb, dgi, dbi)
 
 
 def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
@@ -335,8 +323,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     dn = W._mm(dp, wp)
     dwp = W._mm(dp.t(), norm, **({"out_dtype": torch.float32} if master else {}))
     dt = torch.empty_like(tri)
-    affine_alloc = torch.empty if T.preserve_training(D) else torch.zeros
-    dgo, dbo = affine_alloc(D, **f32), affine_alloc(D, **f32)
+    dgo, dbo = torch.empty(D, **f32), torch.empty(D, **f32)  # written by the partials' finish
     out_affine = _output_ln(tri, dt, dn, mu, rs, go, dgo, dbo, defer=fused_glue)
     _contract_gp(dt, ab, pre, pmask, gp, outgoing)
     # One GEMM for [dW_g; dW_l; dW_lg; dW_r; dW_rg] (five D x D products over K = M: 2x faster than
@@ -352,7 +339,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
         wcat = torch.cat((wg, wl, wlg, wr, wrg))
     dxn = W._mm(dxin.t(), wcat)
     dx = T.take_input_grad(x)
-    dgi, dbi = affine_alloc(D, **f32), affine_alloc(D, **f32)
+    dgi, dbi = torch.empty(D, **f32), torch.empty(D, **f32)
     in_affine = _input_ln(x, dxn, dy, dx, gi, dgi, dbi, defer=fused_glue)
     if fused_glue:
         from ._h100_pack import finish_affine_pair
@@ -472,7 +459,8 @@ def _front_defines(D, hidden):
 def prebuild_units(D, n, bidirectional):
     """``(source, include, defines, pool)`` of every ``W._unit`` the wide training (D, n) can build for the bidirectional or the
     single-direction module (the single-direction wide training), with the launchers' define tuples
-    (preserved-native ``MW_LN_PARTIALS`` both ways; both directions of a single-direction module)."""
+    (the LayerNorm backward units with and without ``MW_LN_PARTIALS``: the launchers run the partials build, the atomic one stays in the
+    bundle; both directions of a single-direction module)."""
     fw, up = "forward", "upstream"
     units = []
 

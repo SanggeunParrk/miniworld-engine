@@ -174,7 +174,7 @@ def _tables_of(rope, n0, n):
 
 
 # ------------------------------------------------------------------------------------------------------------------ H100 inference
-def _infer_fake(single, cond, pair, kmask, weights, cos, sin):
+def _infer_fake(single, cond, pair, mask, weights, cos, sin):
     return torch.empty_like(single)
 
 
@@ -183,7 +183,7 @@ def _infer_h100(
     single: torch.Tensor,
     cond: torch.Tensor,
     pair: torch.Tensor,
-    kmask: torch.Tensor | None,
+    mask: torch.Tensor | None,
     weights: list[torch.Tensor],
     cos: torch.Tensor,
     sin: torch.Tensor,
@@ -201,22 +201,25 @@ def _infer_h100(
         p = k90.pack(weights, tf32)
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
-        c2 = (_ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
         nmod = n if shared else m
         wkey = (tuple((w.data_ptr(), w._version) for w in weights), "esm")
 
+        # the hoisted builds derive everything from the inputs they are keyed on (cond, pair) and the weights (a hit skips the padding
+        # copies; kernels._capture.refresh_static_inputs remakes them in place from a new item's inputs)
         def tables():
+            c2 = (_ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
             return k90.cond_fwd(c2, p, tf32, options=opts)
 
         mod, mkv = _ld._hoisted(_HOIST_COND, cond, (wkey, n), tables)
-        z = _ld._trunk(pair, n).contiguous()
 
         def pair_bias():
+            z = _ld._trunk(pair, n).contiguous()
+            kmask = _ld._keys(mask, n0, n)  # the caller's [1, N] mask padded here: the table is keyed on the caller's tensor
             nreal = kmask.sum(dtype=torch.int32) if kmask is not None else torch.full((), n0, device=single.device, dtype=torch.int32)
             return local.pair_bias_esm(z, p["gamma"], p["wbias"], kmask, nreal, n)
 
-        mk = None if kmask is None else _ld._tkey(kmask)
-        bias2 = _ld._hoisted(_HOIST_BIAS, pair, (wkey, n, mk), pair_bias)
+        mk = (n0, None if mask is None else _ld._tkey(mask))
+        bias2 = _ld._hoisted(_HOIST_BIAS, pair, (wkey, n, mk), pair_bias, () if mask is None else (mask,))
         qraw, sg, kraw, v = cast(
             "tuple[torch.Tensor, ...]", k90.pre_fwd(s2, mod, mkv, p, tf32, eps=RMS_EPS, nmod=nmod, parallel_kv=1, options=opts)
         )
@@ -490,11 +493,10 @@ def run_block(module, single, cond, pair, mask=None, rope=None):
     assert rope is not None  # reason() accepted the call
     n0 = single.shape[2]
     n = _ld._padded_length(n0)
-    kmask = _ld._keys(mask, n0, n)
     cos, sin = _tables_of(rope, n0, n)
     grad = torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *module.parameters()))
     if not grad and _h100(single):
         if not (cond.is_contiguous() or _shared(cond)):
             cond = cond.contiguous()
-        return _infer_h100(single.contiguous(), cond, pair.contiguous(), kmask, _weights(module), cos, sin)
-    return _block(module, single.contiguous(), cond, pair.contiguous(), kmask, cos, sin)
+        return _infer_h100(single.contiguous(), cond, pair.contiguous(), mask, _weights(module), cos, sin)
+    return _block(module, single.contiguous(), cond, pair.contiguous(), _ld._keys(mask, n0, n), cos, sin)

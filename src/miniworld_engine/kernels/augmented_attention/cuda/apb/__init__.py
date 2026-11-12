@@ -125,6 +125,16 @@ def pair_bias(
     return out, st, bu
 
 
+def pair_bias_batch(pair: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, eps: float, neg: float) -> torch.Tensor:
+    """``pair_bias`` over a batch of pairs in one launch (H100 / B200 builds): pair [NB, L, L, dp] bf16 contiguous, mask [NB, L] bool
+    contiguous or None -> bias [H, NB, L, L] bf16 (head-major, then the batch row: the inference core's per-sample bias groups,
+    ``attn_inf(..., S=NB, nbg=NB)``); batch row b's planes are exactly ``pair_bias(pair[b], ..., mask[b])``'s."""
+    nb, L = pair.shape[0], pair.shape[1]
+    out = torch.empty(wf.shape[0], nb, L, L, device=pair.device, dtype=torch.bfloat16)
+    ext().pair_bias_fwd_batch(pair.view(nb * L * L, wf.shape[1]), wf, mask, out, int(nb), int(L), float(eps), float(neg))
+    return out
+
+
 def pair_bias_raw(
     pair2d: torch.Tensor,
     wb: torch.Tensor,
@@ -177,4 +187,17 @@ def pair_bias_bwd(
     return dz, acc[o : o + heads * dp].view(heads, dp), acc[o + heads * dp :]
 
 
-__all__ = ["DP", "GEOMETRY", "PAIR_WIDTHS", "RW", "acc_n", "ext", "ext_sm80", "pair_bias", "pair_bias_bwd", "pair_bias_raw", "width"]
+__all__ = [
+    "DP",
+    "GEOMETRY",
+    "PAIR_WIDTHS",
+    "RW",
+    "acc_n",
+    "ext",
+    "ext_sm80",
+    "pair_bias",
+    "pair_bias_batch",
+    "pair_bias_bwd",
+    "pair_bias_raw",
+    "width",
+]

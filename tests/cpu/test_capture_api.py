@@ -14,6 +14,7 @@ import importlib
 from pathlib import Path
 
 import torch
+from torch.multiprocessing.reductions import StorageWeakRef
 
 from miniworld_engine import capture
 from miniworld_engine.kernels import _capture
@@ -29,8 +30,10 @@ NOT_WEIGHT_DERIVED = {
     "kernels/_pretune.py:_BASE_NAME": "tuning bucket names",
     "kernels/_pretune.py:_SQUEUE": "tuning queue",
     "kernels/_capture.py:_PINNED": "pinned keys of the registered stores (cleared with them)",
+    "kernels/_capture.py:_INPUT_STORES": "the per-input stores lookup_inputs filled (registered ones) and their alive tests",
     "kernels/_capture.py:_WEIGHT_CACHES": "the registry itself",
     "kernels/_capture.py:_FORMS": 'registered below its definition: weight_cache("capture.forms", _FORMS)',
+    "kernels/_capture.py:_LINEAGES": 'registered below its definition: weight_cache("capture.input_lineages", _LINEAGES)',
     "kernels/_nvcc.py:_KEY_OF": "extension build keys",
     "kernels/_nvcc.py:_LOADED": "loaded extensions",
     "kernels/augmented_attention/cuda/sm100/__init__.py:_apb_runs": "TMA launches keyed by buffer addresses (hold no tensor)",
@@ -51,7 +54,10 @@ NOT_WEIGHT_DERIVED = {
     "kernels/trimul_inproj/cuda/sm80.py:_SIDE": "side streams",
     "kernels/transition/cuda/fused_generic_sm90a.py:_SIDE_STREAMS": "side streams",
     "kernels/transition/cuda/fused_fwd_sm80.py:_SMS": "SM count per device",
+    "kernels/transition/cuda/fused_wide_sm80.py:_weight_streams": "side streams",
     "kernels/conditioned_transition/cuda/__init__.py:_TOKEN_STREAMS": "side streams",
+    "kernels/conditioned_transition/cuda/__init__.py:_COND_STREAMS": "side streams",
+    "kernels/conditioned_transition/cuda/__init__.py:_COND_PIPE": "per-input (conditioning) events and grouped GEMM outputs, capture-scoped",
     "kernels/integrations/local_dit_h100.py:_CONST": "constant tensors per shape / device",
     "kernels/integrations/local_dit_esm.py:_CONST": "constant vectors per value / width / device",
     "kernels/integrations/token_dit.py:_CONST": "constant tensors per shape / device",
@@ -113,7 +119,18 @@ def test_public_names():
     assert capture.static_weights is _capture.static_weights
     assert capture.static_inputs is _capture.static_inputs
     assert capture.clear_weight_caches is _capture.clear_weight_caches
-    assert set(capture.__all__) == {"clear_weight_caches", "static_inputs", "static_weights", "weight_caches"}
+    assert capture.refresh_static_inputs is _capture.refresh_static_inputs
+    assert set(capture.__all__) == {
+        "StaleStaticInputs",
+        "StaticTables",
+        "clear_weight_caches",
+        "refresh_static_inputs",
+        "release_static_inputs",
+        "signature",
+        "static_inputs",
+        "static_weights",
+        "weight_caches",
+    }
 
 
 def test_static_contexts_set_and_restore():
@@ -183,3 +200,149 @@ def test_instance_cache_attributes_cleared():
     capture.clear_weight_caches(block)
     assert "_anthropic_pack" not in block.attention.__dict__
     assert "_anthropic_params" not in block.attention.__dict__
+
+
+def test_refresh_records_a_capture_read_and_rewrites_in_place(monkeypatch):
+    """R26 on the CPU (the capture faked): a hit served to a capture under ``static_inputs()`` is recorded with its build; a refresh writes the
+    build from the input's current contents into the recorded table (same storage); a changed weight raises ``StaleStaticInputs``."""
+    store = _capture.weight_cache("test_capture_api.refresh")
+    try:
+        owner = torch.nn.Linear(2, 2)
+        x = torch.ones(4)
+        build = lambda: (x * 2, 7)
+        key = (x.data_ptr(), x._version)
+        with capture.static_weights(), capture.static_inputs() as tables:
+            table = _capture.lookup_inputs(store, key, build, inputs=(x,))[0]  # the eager warm-up
+            monkeypatch.setattr(_capture, "_graph_capture_id", lambda: 1)  # "inside a capture"
+            _capture.CALLER[0] = owner
+            assert _capture.lookup_inputs(store, key, build, inputs=(x,))[0] is table
+            _capture.CALLER[0] = None
+            monkeypatch.undo()
+        assert len(tables) == 1
+        ptr = table.data_ptr()
+        x.copy_(torch.arange(4.0))  # the next item, written in place
+        assert capture.refresh_static_inputs(torch.nn.Sequential(torch.nn.Identity())) == 0  # another root: not its table
+        assert capture.refresh_static_inputs(owner) == 1
+        assert table.data_ptr() == ptr and torch.equal(table, torch.arange(4.0) * 2)
+        assert capture.signature(owner, x) == capture.signature(owner, x.clone())
+        with torch.no_grad():
+            owner.weight.add_(1)
+        try:
+            capture.refresh_static_inputs(owner)
+            raise AssertionError("a changed weight must raise")
+        except capture.StaleStaticInputs:
+            pass
+        assert tables.release() == 1 and len(tables) == 0
+    finally:
+        _capture._WEIGHT_CACHES.pop("test_capture_api.refresh", None)
+        _capture.CALLER[0] = None
+
+
+def _record_one(store, monkeypatch, x: torch.Tensor, owner: torch.nn.Module, keep: bool = True):
+    """One refresh record of ``store`` over the input ``x`` (an eager warm-up, then a hit inside a faked capture), as a sampler warm-up +
+    capture under ``static_inputs()`` makes it; returns the table and the handle (None when ``keep`` is off: the handle is dropped)."""
+    key = (x.data_ptr(), x._version)
+
+    def build():
+        return (x * 2, 7, StorageWeakRef(x.untyped_storage()))
+
+    with capture.static_weights(), capture.static_inputs() as tables:
+        table = _capture.lookup_inputs(store, key, build, inputs=(x,), alive=lambda e: not e[2].expired())[0]
+        monkeypatch.setattr(_capture, "_graph_capture_id", lambda: 1)  # "inside a capture"
+        _capture.CALLER[0] = owner
+        assert _capture.lookup_inputs(store, key, build, inputs=(x,), alive=lambda e: not e[2].expired())[0] is table
+        _capture.CALLER[0] = None
+        monkeypatch.undo()
+    assert len(tables) == 1
+    return table, (tables if keep else None)
+
+
+def test_refresh_records_go_with_their_handle(monkeypatch):
+    """FoldForge 5I28 OpenDDE n = 16: a refresh record holds its input (``inputs``, the build closure) and its table. The records belong to
+    the ``static_inputs()`` handle: a caller that captures a new graph per item and drops the handle (FoldForge) leaves nothing that keeps the
+    item alive once it drops the input itself (the table entry and the input's storage go at ``release_dead_inputs``); while the handle is
+    kept a refresh rewrites the table in place; a refresh of a module whose records went with a dropped handle raises; a record made with no
+    handle open (``set_static_inputs``) is held until released."""
+    store = _capture.weight_cache("test_capture_api.records")
+    owner = torch.nn.Linear(2, 2)
+    try:
+        # the handle dropped, the caller still holding its input (the graph is replayed): the table entry stays, the record is gone
+        x = torch.ones(4)
+        held = StorageWeakRef(x.untyped_storage())
+        table, _ = _record_one(store, monkeypatch, x, owner, keep=False)
+        assert not _capture._READS or all(r() is None for r in _capture._READS.values())
+        _capture.release_dead_inputs()
+        assert len(store) == 1 and store[next(iter(store))][0] is table
+        # a refresh would rewrite nothing: it raises
+        try:
+            capture.refresh_static_inputs(owner)
+            raise AssertionError("a refresh of tables whose records went with their handle must raise")
+        except capture.StaleStaticInputs:
+            pass
+        # the caller drops the item: the entry, the table and the input's storage go
+        del x, table
+        _capture.release_dead_inputs()
+        assert held.expired() and not store
+
+        # the handle kept: a new capture of the module clears the mark; the refresh rewrites in place
+        x = torch.ones(4)
+        table, tables = _record_one(store, monkeypatch, x, owner)
+        x.copy_(torch.arange(4.0))
+        assert capture.refresh_static_inputs(owner) == 1 and torch.equal(table, torch.arange(4.0) * 2)
+        assert tables is not None and tables.release() == 1 and len(tables) == 0
+        del tables
+
+        # no handle open (set_static_inputs alone): the record is held until released
+        x2 = torch.ones(4)
+        prev_w, prev_i = _capture.set_static_weights(True), _capture.set_static_inputs(True)
+        try:
+            key = (x2.data_ptr(), x2._version)
+            build = lambda: (x2 * 3, 7, StorageWeakRef(x2.untyped_storage()))
+            t2 = _capture.lookup_inputs(store, key, build, inputs=(x2,))[0]
+            monkeypatch.setattr(_capture, "_graph_capture_id", lambda: 1)
+            _capture.CALLER[0] = owner
+            assert _capture.lookup_inputs(store, key, build, inputs=(x2,))[0] is t2
+            _capture.CALLER[0] = None
+            monkeypatch.undo()
+        finally:
+            _capture.set_static_weights(prev_w)
+            _capture.set_static_inputs(prev_i)
+        x2.fill_(2.0)
+        assert capture.refresh_static_inputs(owner) == 1 and torch.equal(t2, torch.full((4,), 6.0))
+        assert capture.release_static_inputs(owner) == 1 and not _capture._UNOWNED
+    finally:
+        _capture._WEIGHT_CACHES.pop("test_capture_api.records", None)
+        _capture.CALLER[0] = None
+
+
+def test_lineage_replaces_the_entry_of_an_earlier_version(monkeypatch):
+    """An input written in place (a new version) misses its old key; with ``lineage`` the new entry replaces the old one instead of both
+    staying while the input lives (FoldForge 5I28 OpenDDE n = 16: two versions' 24 token-DiT pair biases, 2 x 11.3 GiB). An entry a capture
+    under ``static_inputs()`` read stays (that graph may replay it)."""
+    store = _capture.weight_cache("test_capture_api.lineage")
+    try:
+        x = torch.ones(4)
+
+        def call():
+            key, lineage = (x.data_ptr(), x._version), (x.data_ptr(),)
+            return _capture.lookup_inputs(
+                store, key, lambda: (x * 2, StorageWeakRef(x.untyped_storage())), alive=lambda e: not e[1].expired(), lineage=lineage
+            )[0]
+
+        first = call()
+        assert call() is first and len(store) == 1
+        x.add_(1)  # in place: a new version
+        second = call()
+        assert second is not first and torch.equal(second, torch.full((4,), 4.0)) and len(store) == 1
+
+        # read by a capture under static_inputs(): kept when the input moves on
+        with capture.static_weights(), capture.static_inputs() as tables:
+            monkeypatch.setattr(_capture, "_graph_capture_id", lambda: 1)
+            assert call() is second
+            monkeypatch.undo()
+        x.add_(1)
+        third = call()
+        assert third is not second and len(store) == 2
+        del tables
+    finally:
+        _capture._WEIGHT_CACHES.pop("test_capture_api.lineage", None)

@@ -308,8 +308,8 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
         k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
         with _tf32(z):
             _contract(planes, x, hs, n, direction)
-        if not save:  # training saves the planes for the backward
-            planes = None
+    saved_planes = planes if save else None
+    del planes  # inference: dead once contracted -- freed before the output is allocated (peak z + planes + X, not + out)
     st_out = torch.empty((T, 2), dtype=torch.float32, device=z.device)
     if not fuse_x:
         E.stats_cm(x.view(hs, T), st_out, eps_out)
@@ -338,7 +338,7 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
         eps_out,
         fuse_x,
     )
-    return out.view_as(z), ((planes, x, st_in, st_out, ps, gs) if save else None)
+    return out.view_as(z), ((saved_planes, x, st_in, st_out, ps, gs) if save else None)
 
 
 def _forward_nograd_fake(leaves, mask, ds, direction, eps_in, eps_out):

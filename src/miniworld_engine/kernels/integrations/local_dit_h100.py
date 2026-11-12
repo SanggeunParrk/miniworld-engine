@@ -144,11 +144,19 @@ def _dims(single):
     return a * g, n0, n, a * g * n
 
 
+def _padded_keys(mask, uid, n0, n):
+    """(the valid-key bytes [n] or None, the conformer ids [n] padded with -1 or None) of the caller's [1, N] ``mask`` / ``uid``."""
+    u = None
+    if uid is not None:
+        u = (uid[0] if n == n0 else torch.nn.functional.pad(uid[0], (0, n - n0), value=-1)).contiguous()
+    return _ld._keys(mask, n0, n), u
+
+
 def _fwd_fake(
     single,
     cond,
     pair,
-    kmask,
+    mask,
     weights,
     save,
     parallel_kv=0,
@@ -195,7 +203,7 @@ def _fwd(
     single: torch.Tensor,
     cond: torch.Tensor,
     pair: torch.Tensor,
-    kmask: torch.Tensor | None,
+    mask: torch.Tensor | None,
     weights: list[torch.Tensor],
     save: bool,
     parallel_kv: int = 0,
@@ -210,7 +218,10 @@ def _fwd(
     eps: float = 1e-5,
     uid: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
-    """``parallel_kv``: the K / V source (0 chained, 1 AF3 parallel, 2 one AdaLN); ``ident`` / ``pars`` / ``eps`` / ``uid``: the model options
+    """``mask`` / ``uid``: the CALLER's bool key mask / conformer ids [1, N] (unpadded): the hoisted tables are keyed on them and pad them in
+    their builds (a padded copy made per call is a new tensor every call: the tables missed at every call of an N that is not a multiple of
+    128, and a captured step remade them in every replay).
+    ``parallel_kv``: the K / V source (0 chained, 1 AF3 parallel, 2 one AdaLN); ``ident`` / ``pars`` / ``eps`` / ``uid``: the model options
     (``options``, ``run_block``); ``slide``: its slid key window (``qblock``: IntelliFold2's rule); the
     saved ``o`` holds the slid edge windows' output, ``lse`` the clipped kernel's (``_bwd`` takes those windows from torch).
     The block output [A, 1, N, 128] and, when ``save``, the tensors the backward reads (bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2,
@@ -240,30 +251,39 @@ def _fwd(
         p = k90.pack([*weights, wup] if up else weights, tf32)  # UP: + W_u chunks beside [Wa_j; Wb_j]
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
-        c2 = (_ld._padded(cond[:1], n).reshape(groups * n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
         nmod = groups * n if shared else m  # shared: one conditioning per (group, atom), read modulo G N (rows are [A][G][N])
         hoist = not save
         wkey = (tuple((w.data_ptr(), w._version) for w in weights), parallel_kv, ident, pars, eps) if hoist else None
+        # the kernels' key bytes / conformer ids at the padded length: made once per call without the hoist, inside the builds with it
+        padded_keys = None if hoist else _padded_keys(mask, uid, _n0, n)
 
+        def keys():
+            return padded_keys if padded_keys is not None else _padded_keys(mask, uid, _n0, n)
+
+        # The hoisted tables' builds derive everything from the inputs they are keyed on (cond, pair) and the weights: a hit skips the
+        # padding copies too, and kernels._capture.refresh_static_inputs can remake them in place from a new item's inputs.
         def tables():
+            c2 = (_ld._padded(cond[:1], n).reshape(groups * n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
             return k90.cond_fwd(c2, p, tf32, options=opts)
 
         mod, mkv = _ld._hoisted(_HOIST_COND, cond, (wkey, n), tables) if hoist else tables()
-        zs = [_ld._trunk(pair[g : g + 1], n).contiguous() for g in range(groups)]
+
+        def trunks():
+            return [_ld._trunk(pair[g : g + 1], n).contiguous() for g in range(groups)]
 
         def pair_bias():
-            biases = [local.pair_bias_mma(zg, p["gamma"], p["wbias"], kmask, n) for zg in zs]
-            if uid is not None:  # Chai-1: a real query sees only the keys of its own conformer
-                same = _same_conformer(uid, kmask, n)
+            kmask, u = keys()
+            biases = [local.pair_bias_mma(zg, p["gamma"], p["wbias"], kmask, n) for zg in trunks()]
+            if u is not None:  # Chai-1: a real query sees only the keys of its own conformer
+                same = _same_conformer(u, kmask, n)
                 for b in biases:
                     b.masked_fill_(~same[None], float("-inf"))
             return biases[0] if groups == 1 else torch.stack(biases).contiguous()  # [G, 4, nwin, 32, 128]
 
-        if hoist:
-            mk = None if kmask is None else _ld._tkey(kmask)
-            bias2 = _ld._hoisted(_HOIST_BIAS, pair, (wkey, n, mk, None if uid is None else _ld._tkey(uid)), pair_bias)
-        else:
-            bias2 = pair_bias()
+        # keyed on the caller's mask / uid (and N): stable across the calls of a sampler and its captured steps
+        mk = (_n0, None if mask is None else _ld._tkey(mask), None if uid is None else _ld._tkey(uid)) if hoist else None
+        also = tuple(t for t in (mask, uid) if t is not None)
+        bias2 = _ld._hoisted(_HOIST_BIAS, pair, (wkey, n, mk), pair_bias, also) if hoist else pair_bias()
         if save:
             q, sg, k, v, x1, xkv, *rest = cast(
                 "tuple[torch.Tensor, ...]",
@@ -281,13 +301,10 @@ def _fwd(
         if slide:
 
             def edges():
-                return [_edge_tables(zg, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, uid) for zg in zs]
+                kmask, u = keys()
+                return [_edge_tables(zg, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, u) for zg in trunks()]
 
-            edge_tables = (
-                _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk, qblock, None if uid is None else _ld._tkey(uid)), edges)
-                if hoist
-                else edges()
-            )
+            edge_tables = _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk, qblock), edges, also) if hoist else edges()
             _slid_edges(o, q, k, v, edge_tables, a, groups, n)
         o = o.view(m, DS)
         if not save:
@@ -584,10 +601,10 @@ class _H100Block(torch.autograd.Function):
     """The whole block: forward saving what the backward kernels read, backward on the same warp-level kernels."""
 
     @staticmethod
-    def forward(ctx, kmask, uid, flags, single, cond, pair, *weights):
-        out, *saved = _fwd(single, cond, pair, kmask, list(weights), True, *flags, uid=uid)
+    def forward(ctx, mask, uid, flags, single, cond, pair, *weights):
+        out, *saved = _fwd(single, cond, pair, mask, list(weights), True, *flags, uid=uid)
         ctx.flags = flags
-        ctx.save_for_backward(kmask, uid, single, cond, pair, *saved, *weights)
+        ctx.save_for_backward(mask, uid, single, cond, pair, *saved, *weights)
         ctx.n_saved = len(saved)
         if out._is_view():  # the kernels' rows reshaped: hand back a tensor of its own (same storage, no copy), so a caller may write
             # into the block output in place while autograd records (a Function output that is a view refuses in-place writes)
@@ -599,9 +616,11 @@ class _H100Block(torch.autograd.Function):
     @staticmethod
     @once_differentiable
     def backward(ctx, dy):
-        kmask, uid, single, cond, pair, *rest = ctx.saved_tensors
+        mask, uid, single, cond, pair, *rest = ctx.saved_tensors
         saved, weights = rest[: ctx.n_saved], rest[ctx.n_saved :]
-        grads = _bwd(dy, single, cond, pair, kmask, list(weights), list(saved), *ctx.flags, uid=uid)
+        n0 = single.shape[2]
+        kmask, u = _padded_keys(mask, uid, n0, _ld._padded_length(n0))
+        grads = _bwd(dy, single, cond, pair, kmask, list(weights), list(saved), *ctx.flags, uid=u)
         return (None, None, None, *grads)
 
 
@@ -716,16 +735,10 @@ def run_block(module, single, cond, pair, mask=None, uid=None):
     """The block's output stream on the H100 warp-level kernels; ``AtomDiT._supports_cuda`` must have accepted the call. ``uid`` [1, N]:
     the conformer ids (Chai-1)."""
     weights = _weights_of(module)
-    n0 = single.shape[2]
-    n = _ld._padded_length(n0)
-    kmask = _ld._keys(mask, n0, n)
     opts = options(module)
     assert opts is not None  # AtomDiT._supports_cuda accepted the block
     kvm, ident, pars, noout, up, kqln, kq_eps, eps = opts
-    u = None
-    if uid is not None:
-        u = uid[0] if n == n0 else torch.nn.functional.pad(uid[0], (0, n - n0), value=-1)
-        u = u.contiguous()
+    # the caller's mask / uid go down unpadded: ``_fwd`` keys its hoisted tables on them and pads them in the builds
     flags = (
         kvm,
         module.key_window in ("slide", "slide_qblock"),
@@ -739,5 +752,5 @@ def run_block(module, single, cond, pair, mask=None, uid=None):
         eps,
     )
     if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights)):
-        return _H100Block.apply(kmask, u, flags, single, cond, pair, *weights)
-    return _fwd(single, cond, pair, kmask, weights, False, *flags, uid=u)[0]
+        return _H100Block.apply(mask, uid, flags, single, cond, pair, *weights)
+    return _fwd(single, cond, pair, mask, weights, False, *flags, uid=uid)[0]

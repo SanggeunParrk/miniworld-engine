@@ -147,6 +147,9 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
     lf = left.reshape(H, L, L)
     rf = right.reshape(H, L, L)
     tri = _contract(lf, rf, outgoing)  # (H, L, L)
+    # the projections are dead once contracted: freed before the back half allocates the output (peak x_n + left + right + tri, not
+    # + y; FoldForge 5I28 OpenDDE n = 16 on A100: the refiner's second TriMul at 3968 structural tokens, d_pair 384)
+    del left, right, lf, rf
     # Fused back-half: LN_out + proj-gemm + gate-gemm + mul in ONE kernel (``trimul_back_triton``),
     # which replaces the 2-kernel ``_te_forward`` (LN_out+proj) + ``gate_elem_triton`` (gate+mul) split:
     # one fewer launch and one fewer HBM round-trip of the [L,L,D] proj tensor. All triton, so it

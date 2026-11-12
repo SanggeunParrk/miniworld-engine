@@ -309,6 +309,44 @@ def _fwd_launch(
     )
 
 
+def writes_into(m: int, d: int, h: int) -> bool:
+    """The inference forward of an ``m``-row bf16 call can write its output into a caller's buffer (``forward_into``): the chain whose squeeze is the hand
+    ``gemm_res`` (``_hand_squeeze``), not the one-kernel D 64 / 128 forward."""
+    return _hand_squeeze(m, d, True) and not fused_fwd_sm80.supports(d, h, m)
+
+
+def _fwd_into_fake(x, gamma, beta, wa, wb, ws, eps, out):
+    """Writes ``out`` only."""
+    return None
+
+
+@opaque(fake=_fwd_into_fake, name="transition_wide_fwd_into_sm80", mutates_args=("out",))
+def forward_into(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    eps: float,
+    out: torch.Tensor,
+) -> None:
+    """``_fwd_launch``'s inference forward (``save`` off, ``ln`` on) of x [M, D] written into ``out`` (contiguous [M, D] bf16, a row block of a larger
+    output: ``transition_sm80`` joins the blocks of a split call without a copy).  The same launches as ``_fwd_launch`` where ``writes_into(M, D, H)``
+    (LayerNorm, dual GEMM + SwiGLU, the hand squeeze with the residual): the same output bits."""
+    if _is_fake(x, wa):
+        return
+    m, d = x.shape
+    ext = _ext()
+    gamma, beta = _f32(gamma, True), _f32(beta, True)
+    wa, wb, ws = _kernel_weights(wa, wb, ws, x.dtype, cache=True)
+    dual, res = _tiles(m, d, wa.shape[0])
+    xn, _ = ext.ln_fwd(x, gamma, beta, eps, False)
+    hid = ext.dual_swiglu(xn, wa, wb, dual)
+    del xn
+    ext.gemm_res(hid, ws, x, res, out)
+
+
 def _bwd_launch_fake(dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, ln, gdt, wdt):
     """(dx like x, dgamma, dbeta [D] in ``gdt`` (empty without ``ln``), dW = [dWa; dWb] [2H, D], dWs [D, H] in ``wdt``)."""
     d = x.shape[1]
@@ -350,16 +388,18 @@ def _bwd_launch(
     ext = _ext()
     a_in = xn if ln else x
     dual = _gate_tile(m, d, h, is_sm120(x.device))
+    # B200's wide backward also keeps weight accumulators in FP32. Direct BF16
+    # GEMM outputs fail the existing expand-weight gradient band at protocol D256.
+    full_precision_grad = d == 256
+    mm_w = _mm_f32 if wdt is torch.float32 or full_precision_grad else torch.mm
+    if ab.numel() and ln:
+        return _bwd_saved_overlap(ext, dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, gdt, wdt, mm_w)
     if ab.numel():
         # one kernel: dh = dy Ws and the SwiGLU backward from the saved a | b (the forward saved h as well)
         dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h, is_sm120(x.device)))
     else:
         dh = torch.mm(dy, ws)  # [M, H]
         dab, hid = ext.gate_bwd(a_in, wa, wb, dh, dual)  # dA | dB [M, 2H], h [M, H]
-    # B200's wide backward also keeps weight accumulators in FP32. Direct BF16
-    # GEMM outputs fail the existing expand-weight gradient band at protocol D256.
-    full_precision_grad = d == 256
-    mm_w = _mm_f32 if wdt is torch.float32 or full_precision_grad else torch.mm
     dws = mm_w(dy.t(), hid)  # [D, H]
     dwab = mm_w(dab.t(), a_in)  # [2H, D] = [dWa; dWb]
     dwab, dws = dwab.to(wdt), dws.to(wdt)  # (the grad_cast kernel of the extension is the opt-in alternative; not used)
@@ -373,6 +413,46 @@ def _bwd_launch(
             torch.empty((0,), dtype=gdt, device=x.device) for _ in range(2)
         )  # distinct placeholders: custom-op outputs must not alias
     return dx, dgam, dbeta, dwab, dws
+
+
+_weight_streams: dict = {}
+
+
+def _weight_stream(device: torch.device) -> torch.cuda.Stream:
+    """The high-priority side stream (one per device) the saved-activation backward runs its two weight-gradient GEMMs on."""
+    key = device.index if device.index is not None else torch.cuda.current_device()
+    s = _weight_streams.get(key)
+    if s is None:
+        lo, hi = torch.cuda.Stream.priority_range()
+        s = _weight_streams[key] = torch.cuda.Stream(device=device, priority=min(lo, hi))
+    return s
+
+
+def _bwd_saved_overlap(ext, dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, gdt, wdt, mm_w):
+    """The saved-activation (``_save_ab``) Transition backward with its weight-gradient GEMMs on a high-priority side stream:
+    dWs = dy^T h runs alongside ``gate_dh`` (half memory-bound), [dWa; dWb] = dAB^T xn alongside the d_xn GEMM and ``ln_bwd`` (memory-bound).
+    The same kernels on the same operands as the one-stream order: the same bits (A100 master train step, with the two-rows-in-flight ``ln_bwd``: d384 n2 4-6 %, d256 2-3 %, d512 n2 0-2 % faster)."""
+    m, d, h = x.shape[0], x.shape[1], wa.shape[0]
+    main = torch.cuda.current_stream(x.device)
+    side = _weight_stream(x.device)
+    side.wait_stream(main)
+    with torch.cuda.stream(side):
+        dws = mm_w(dy.t(), hid)  # [D, H]
+    dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h, is_sm120(x.device)))  # dA | dB [M, 2H]
+    ready = torch.cuda.Event()
+    ready.record(main)
+    with torch.cuda.stream(side):
+        side.wait_event(ready)
+        dwab = mm_w(dab.t(), xn)  # [2H, D] = [dWa; dWb]
+    dxn = _mm_f32(dab, _wab(wa, wb))  # [M, D] f32
+    dx, dgam, dbeta = ext.ln_bwd(dxn, x, stats, gamma, dy, gdt)
+    main.wait_stream(side)
+    # the side stream's outputs are used (and freed) on the main stream, its operands were read on the side stream
+    for t in (dws, dwab):
+        t.record_stream(main)
+    for t in (dy, hid, dab, xn):
+        t.record_stream(side)
+    return dx, dgam, dbeta, dwab.to(wdt), dws.to(wdt)
 
 
 def _bwd_dx_fake(dy, x, xn, stats, gamma, wa, wb, ws, ab, ln):

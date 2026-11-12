@@ -338,15 +338,20 @@ std::vector<torch::Tensor> ln_bwd_scaled(torch::Tensor dxn, torch::Tensor x, tor
   return ln_bwd_impl(dxn, x, stats, gamma, dy, adt, dscale.data_ptr<float>(), &job);
 }
 
-// out = rn(rn(a w^T) + res); res may be an empty tensor (no residual)
-torch::Tensor gemm_res(torch::Tensor a, torch::Tensor w, torch::Tensor res, int64_t cfg) {
+// out = rn(rn(a w^T) + res); res may be an empty tensor (no residual). out_buf: a caller-owned contiguous [M, N] bf16 buffer to write into (a row block of
+// a larger output: transition_sm80 splits a call past one launch's rows and joins the blocks without a copy), else a fresh tensor
+torch::Tensor gemm_res(torch::Tensor a, torch::Tensor w, torch::Tensor res, int64_t cfg, c10::optional<torch::Tensor> out_buf = c10::nullopt) {
   TORCH_CHECK(a.is_cuda() && a.is_contiguous() && a.dim() == 2 && a.scalar_type() == at::kBFloat16, "a: [M, K] bf16");
   TORCH_CHECK(w.is_contiguous() && w.dim() == 2 && w.size(1) == a.size(1) && w.scalar_type() == at::kBFloat16, "w: [N, K] bf16");
   const int64_t M = a.size(0), K = a.size(1), N = w.size(0);
   const bool has_res = res.numel() > 0;
   TORCH_CHECK(!has_res || (res.is_contiguous() && res.size(0) == M && res.size(1) == N && res.scalar_type() == at::kBFloat16), "res: [M, N] bf16");
   TORCH_CHECK(N % bn_of_res((int)cfg) == 0, "N % BN");
-  auto out = torch::empty({M, N}, a.options());
+  if (out_buf.has_value())
+    TORCH_CHECK(out_buf->is_cuda() && out_buf->is_contiguous() && out_buf->dim() == 2 && out_buf->size(0) == M && out_buf->size(1) == N &&
+                    out_buf->scalar_type() == at::kBFloat16 && reinterpret_cast<uintptr_t>(out_buf->data_ptr()) % 16 == 0,
+                "out: contiguous [M, N] bf16, 16-byte aligned");
+  auto out = out_buf.has_value() ? *out_buf : torch::empty({M, N}, a.options());
   if (M == 0) return out;
   a100::ResParams p{};
   p.a = cptr<__nv_bfloat16>(a); p.w = cptr<__nv_bfloat16>(w); p.res = has_res ? cptr<__nv_bfloat16>(res) : nullptr; p.out = mptr<__nv_bfloat16>(out);
@@ -631,7 +636,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_bwd_scaled", &ln_bwd_scaled);
   m.def("grad_cast", &grad_cast);
   m.def("add_res", &add_res);
-  m.def("gemm_res", &gemm_res);
+  m.def("gemm_res", &gemm_res, pybind11::arg("a"), pybind11::arg("w"), pybind11::arg("res"), pybind11::arg("cfg"), pybind11::arg("out") = pybind11::none());
   m.def("ln_fwd", &ln_fwd);
   m.def("dual_swiglu", &dual_swiglu, pybind11::arg("a"), pybind11::arg("wa"), pybind11::arg("wb"), pybind11::arg("cfg"), pybind11::arg("epi") = 0);
   m.def("dual_swiglu_save", &dual_swiglu_save);

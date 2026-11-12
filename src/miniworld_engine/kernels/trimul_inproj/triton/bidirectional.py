@@ -318,6 +318,7 @@ def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h,
     # Reuse the training contraction launcher: both cuBLAS calls write directly
     # into disjoint slices of the final buffer, with no intermediate cat copy.
     tri = packed_forward(lf, rf, h)  # (H, L, L)
+    del left, right, lf, rf  # dead once contracted: freed before the back half allocates the output
     if x_n.dtype != torch.bfloat16:
         # `_back_kernel` is registered BF16 only: it rounds the LN'd tile to bf16 for the proj
         # dot, which does not compile against an fp32 Wp. Other dtypes take the same split

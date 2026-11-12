@@ -140,14 +140,14 @@ def _sm80():
     return sm80
 
 
-def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool) -> str | None:
+def refusal(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, grad: bool, padded: bool = False) -> str | None:
     """Why the A100 (sm_80) paths cannot take this call (``grad``: the training Function, else the inference op), or ``None``: the fused C++ step
     (``_step_refusal``), else the composed path (``_generic_refusal``: fp32 on the TF32 core, the wide pairs, ``gate_bias``). The ``cuda`` backend of
     ``AttentionPairBias`` states exactly this on an A100."""
     why = _step_refusal(module, single, pair, mask, grad)
     if why is None:
         return None
-    generic = _generic_refusal(module, single, pair, mask, grad)
+    generic = _generic_refusal(module, single, pair, mask, grad, padded)
     return None if generic is None else f"{why}; composed path: {generic}"
 
 
@@ -620,7 +620,7 @@ def _hdp(hd: int) -> int:
     return max(hd, 32)
 
 
-def _generic_refusal(module, single, pair, mask, grad: bool) -> str | None:
+def _generic_refusal(module, single, pair, mask, grad: bool, padded: bool = False) -> str | None:
     sm80 = _sm80()
     if module.use_qk_norm:
         return "per-head q / k RMSNorm"
@@ -635,7 +635,7 @@ def _generic_refusal(module, single, pair, mask, grad: bool) -> str | None:
     if single.ndim != 3 or single.shape[0] < 1:
         return "single must be [B, L, d_single] (B >= 1)"
     B, L, H = single.shape[0], single.shape[1], module.n_head
-    if L % 128:
+    if L % 128 and not padded:  # padded: the caller pads L (inference: AttentionPairBias._forward_cuda)
         return f"L {L}: a multiple of 128"
     hd = module.to_query.weight.shape[0] // H
     if hd not in GENERIC_HEAD_DIMS or module.to_query.weight.shape[0] != H * hd:
@@ -651,10 +651,11 @@ def _generic_refusal(module, single, pair, mask, grad: bool) -> str | None:
         return "the kernels take the affine LayerNorms"
     idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
     hdp = _hdp(hd)
+    lc = -(-L // 128) * 128 if padded else L  # the core runs at the padded length
     if not (
-        sm80.supported_plain(torch.bfloat16, L, H * hdp, H, idx) if dt is torch.bfloat16 else sm80.supported_tf32(dt, L, H * hdp, H, idx)
+        sm80.supported_plain(torch.bfloat16, lc, H * hdp, H, idx) if dt is torch.bfloat16 else sm80.supported_tf32(dt, lc, H * hdp, H, idx)
     ):
-        return f"{H} x {hdp}, L {L}: outside the sm_80 attention core"
+        return f"{H} x {hdp}, L {lc}: outside the sm_80 attention core"
     if not _generic_loads(dt):
         return "the sm_80 attention extensions failed to build / load"
     return None
@@ -814,10 +815,13 @@ def _gfwd_row(single, pair, mask, params, heads, gate_bias, eps_s, eps_p, save, 
         qkvg = torch.addmm(b, s, w.t())
         q, k, v, g = (qkvg[:, i * n : (i + 1) * n] for i in range(4))
         m = None if mask is None else mask.reshape(L)
+        nz = pair.shape[1]  # < L: the caller padded single / mask / extra to L (inference); the bias kernel masks the keys past nz
         bias = (
             _bias_split(pair[0], wcm, m, L, eps_p)
-            if f32 and pair.shape[-1] >= 512 and L <= 128 and heads % 8 == 0
-            else sm80.pair_bias_generic(pair[0], wcm, m, L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L))
+            if f32 and pair.shape[-1] >= 512 and L <= 128 and heads % 8 == 0 and nz == L
+            else sm80.pair_bias_generic(
+                pair[0], wcm, None if m is None else m[:nz], L, eps_p, oscale=1.0 if f32 else math.sqrt(hd), rows=_gen_rows(L)
+            )
         )
         if extra is not None:  # the bias in the core's units (bf16: x sqrt(head dim)); a masked key stays far below every real logit
             bias.add_(extra[0].to(bias.dtype), alpha=1.0 if f32 else math.sqrt(hd))

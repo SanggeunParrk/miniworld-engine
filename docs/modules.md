@@ -180,9 +180,36 @@ from the package root; the public capture API is the module `miniworld_engine.ca
 | name | meaning |
 |---|---|
 | `static_weights()` | context manager: weights stay fixed between graph replays (inference graphs only); a capture inside it serves from, and fills, the eager weight-pack caches, so a replay runs no packing kernel |
-| `static_inputs()` | context manager: the conditioning / pair inputs of hoisted per-item tables keep their contents for the life of the graph (and the weights too); a replay re-runs none of their producing kernels |
-| `clear_weight_caches(*modules)` | drop every weight / input-derived cache of the engine (all stores registered with `kernels._capture.weight_cache`, the parameter-form cache, the TF32 operand cache) and, for the given modules, the per-instance caches; call it before replacing weights (a second model, a test that builds many) and drop graphs captured before the clear |
+| `static_inputs()` | context manager: the conditioning / pair inputs of hoisted per-item tables keep their contents for the life of the graph (and the weights too); a replay re-runs none of their producing kernels, unless the caller refreshes them (below). Yields a `StaticTables` handle |
+| `clear_weight_caches(*modules)` | drop every weight / input-derived cache of the engine (all stores registered with `kernels._capture.weight_cache`, the parameter-form cache, the TF32 operand cache, the refresh records) and, for the given modules, the per-instance caches; call it before replacing weights (a second model, a test that builds many) and drop graphs captured before the clear |
 | `weight_caches()` | the registered stores by name (inspection) |
+| `refresh_static_inputs(root=None, *, tables=None)` | rebuild every hoisted table a `static_inputs()` capture reads from the eager cache, from the current contents of its inputs, into the tensors the graph reads (FoldForge R26: one graph per shape, many items); returns the count; raises `StaleStaticInputs` (nothing written) when the weights changed, an input's layout changed, or the capture was not under `static_weights()` |
+| `release_static_inputs(root=None, *, tables=None)` | drop the refresh records (they hold their tables and inputs): with the graph |
+| `signature(root, *inputs)` | hashable per-shape graph-cache key: `root`'s identity and the inputs' shape / strides / dtype / device |
+
+### One sampler graph per shape (FoldForge R26)
+
+A captured sampler step bakes in the addresses of its inputs and of the tables the engine hoisted in the warm-up (read from the eager
+cache under `static_inputs()`, so a replay runs none of their kernels). To reuse the graph for another item of the same shape:
+
+```python
+with static_weights(), static_inputs() as tables:      # once per shape
+    step(); step()                                      # eager warm-up on the static inputs
+    with torch.cuda.graph(g):
+        step()
+for item in items:                                      # every later item
+    copy_into_static_inputs(item)                       # copy_ into the same tensors (no new tensors, same layout)
+    refresh_static_inputs(model)                        # the hoisted tables, rebuilt in place
+    g.replay()                                          # bitwise == eager == a fresh capture on the item
+```
+
+The tables covered are those served to a capture from the eager cache (`kernels._capture.lookup_inputs` / `hoisted_table` stores and
+`note_static_read` callers): the H100 token DiT's pair bias (every `TokenDiT*` key: Protenix family, ESMFold2, Boltz-2, RoseTTAFold3,
+Chai-1, with or without `extra_pair_bias`, B >= 1 trunk_seeds), the atom blocks' conditioning tables, windowed pair bias and slid-edge
+tables (every `AtomDiT*` key on H100, the ESMFold2 rotary atom block, the A100 atom block), the bias-only token DiT's attention weights
+and conditioning tables. The token DiT's grouped conditioning GEMMs are capture-scoped (recomputed by every replay) and need nothing.
+A table's owner is the `BackendModule` whose forward made the call; `root` selects by owner. The refresh may run eagerly (once per item,
+on the stream the graph replays on) or be captured itself and replayed before the step graph.
 
 A new cache in kernel code registers itself: `_STORE = _capture.weight_cache("family.name")` (a dict), or for a per-instance attribute
 `_capture.instance_cache_attr("_name")`. `tests/cpu/test_capture_api.py` scans the kernel sources so that a module-level dict that is

@@ -22,8 +22,19 @@ STAT_W = 128  # kept for the runner's buffer layout (the Triton module's statist
 
 
 def _ext():
-    arch = "90a" if torch.cuda.get_device_capability() == (9, 0) else "100"
-    return _arch_ext(arch)
+    return _device_ext(torch.cuda.current_device())
+
+
+@functools.lru_cache(maxsize=None)
+def _device_ext(index: int):
+    """The current device's build, resolved once per device (a token step asks several times per call: the capability query is not free)."""
+    return _arch_ext("90a" if torch.cuda.get_device_capability(index) == (9, 0) else "100")
+
+
+@functools.lru_cache(maxsize=None)
+def _capability(device: torch.device) -> tuple[int, int]:
+    """``torch.cuda.get_device_capability`` of a tensor's device (always indexed), once per device."""
+    return torch.cuda.get_device_capability(device)
 
 
 @functools.lru_cache(maxsize=None)
@@ -77,7 +88,10 @@ def _token_swiglu(device_index):
 #: Hopper fp32 token inference: the expand GEMM with the SwiGLU in its epilogue on TF32 wgmma (False: cuBLAS + ``swiglu_rows``)
 _FP32_SWIGLU_GEMM = True  # expand + SwiGLU as one TF32 wgmma GEMM; xa is RNA-rounded by its row kernel (the TMA-fed operands truncate)
 _TF32_WAB: dict = _capture.weight_cache("conditioned_transition.tf32_wab")
-_PAIR_BIAS: dict = _capture.weight_cache("conditioned_transition.pair_bias")  # hoisted pair biases, keyed on the pair / mask / weight pack (kernels/_capture.lookup_inputs)
+_BF16_WAB64: dict = _capture.weight_cache("conditioned_transition.bf16_wab64")  # the bf16 pack's SwiGLU rows per 64 (``_bf16_wab64``)
+_PAIR_BIAS: dict = _capture.weight_cache(
+    "conditioned_transition.pair_bias"
+)  # hoisted pair biases, keyed on the pair / mask / weight pack (kernels/_capture.lookup_inputs)
 
 
 def _swiglu_gemm_ok(xa, wab) -> bool:
@@ -90,17 +104,42 @@ def _swiglu_gemm_ok(xa, wab) -> bool:
     )
 
 
-def _swiglu_ht(M: int, H: int, nsm: int) -> int:
-    """Hidden units per tile of the fp32 fused expand: 128 (128 x 256 tiles) or 64 (twice the tiles): the one whose last wave of the
-    persistent grid is fuller (ties: 128, the larger tile)."""
+def _swiglu_ht(M: int, H: int, nsm: int, bf16: bool = False) -> int:
+    """Hidden units per tile of the fused expand: 128 (128 x 256 tiles) or 64 (twice the tiles). bf16: the one whose last wave of the
+    persistent grid is fuller (ties: 128, the larger tile); fp32: 128."""
 
     def eff(ht):
         tiles = (M // 128) * (H // ht)
         return tiles / (-(-tiles // nsm) * nsm)
 
-    # Measured: HT = 64 raises the last wave's fill (M = 1920: 68 -> 91 %; M = 3200: 76 -> 91 %) but loses at both (24 x 32 L384
+    # fp32, measured: HT = 64 raises the last wave's fill (M = 1920: 68 -> 91 %; M = 3200: 76 -> 91 %) but loses at both (24 x 32 L384
     # 1.07 -> 1.04, L640 1.00 -> 0.96 of Anthropic's block): the narrower tile's MMA / TMA ratio costs more than the wave. Kept, not chosen.
+    # bf16 (H = 1536, H100 132 SMs, graph replay): M = 640 10.3 -> 6.6 us, 1920 19.0 -> 16.4; ties at 1280 / 2560 / 3840 keep 128
+    # (10.9 / 10.8, 19.5 / 22.3, 28.5 / 31.6): the fill rule picks each of these
+    if bf16 and eff(64) > eff(128):
+        return 64
     return 128
+
+
+def _bf16_wab64(wab, up=False):
+    """The SwiGLU GEMM's bf16 operand re-tiled per 64 hidden units, once per weight pack: the pack's [Wa 128 | Wb 128] per-tile rows
+    (``token_pack``) -> [Wa 64 | Wb 64] per tile (the 128 x 128-tile form, ``_swiglu_ht``); ``up``: [W_a; W_b; W_u] (the up-gate
+    transition's ``wab3``) -> [Wa 64 | Wb 64 | Wu 64] per tile (the 128 x 192-tile up-gate form)."""
+    from ... import _capture
+
+    def build():
+        K = wab.shape[1]
+        if up:
+            return wab.view(3, -1, 64, K).transpose(0, 1).reshape(wab.shape).contiguous()
+        return wab.view(-1, 2, 2, 64, K).transpose(1, 2).reshape(wab.shape).contiguous()
+
+    # the entry holds ``wab``: a freed pack's address cannot alias another tensor while the entry lives
+    return _capture.lookup(
+        _BF16_WAB64,
+        (wab.data_ptr(), wab._version, tuple(wab.shape), up),
+        lambda: (build(), wab),
+        limit=_capture.BLOCK_CACHE_LIMIT,
+    )[0]
 
 
 def _tf32_wab(wab, ht=128):
@@ -148,7 +187,121 @@ def _pair_bias_wide(z2d, wf, mask, L):
 #: A bias-free query (RoseTTAFold3) is a zero to_query.bias leaf, the identity AdaLN a ones ln_cond / to_scale.bias leaf, no gating
 #: query a zero to_gate leaf: the caller's leaf list (``kernels/integrations/token_dit.leaves``).
 VARIANT_DEFAULT = (0.0, 1.0, 1e-5, 1.0, 0.0, 0.0, 1e-5, 0.0)
-_STATIC_PACKS: dict = _capture.weight_cache("conditioned_transition.static_packs")  # the weight packs of the blocks with model options (``token_inference``)
+_COND_FOLD: dict = _capture.weight_cache("conditioned_transition.cond_fold")  # [W1; W2], W1 1, b1, b2 per weight pack (``_cond_fold_pack``)
+
+
+def _cond_fold_pack(w1, b1, w2, b2):
+    """The folded conditioning's operands of a bf16 weight pack, once per pack: ``[W1; W2]`` (bf16 [6 D, d_cond], the ONE conditioning
+    GEMM's weight), ``W1 1`` (fp32 row sums of the packed W1: the LayerNorm of c applied after the GEMM), b1 and b2 in fp32. The entry
+    holds the pack's tensors: a freed pack's address cannot alias another while it lives."""
+    from ... import _capture
+
+    def build():
+        return (torch.cat([w1, w2]).contiguous(), w1.float().sum(1), b1.float().contiguous(), b2.float().contiguous(), (w1, b1, w2, b2))
+
+    key = tuple((t.data_ptr(), t._version, tuple(t.shape), t.dtype) for t in (w1, b1, w2, b2))
+    return (*_capture.lookup(_COND_FOLD, key, build, limit=_capture.BLOCK_CACHE_LIMIT)[:4], key)
+
+
+#: The folded conditioning GEMMs of a stack, grouped and off the blocks' critical path. A stack's blocks read the SAME conditioning
+#: tensor (one sampler step: FoldForge's and the engine's TokenDiTStack pass one object to every block), and a block's conditioning
+#: GEMM reads nothing else. So:
+#:   - the blocks that read one conditioning are learned in call order (per first block: ``_COND_GROUPS``, the last pass's sequence);
+#:   - a block whose successors are known issues ONE GEMM for the next chunk of them ([P, d_cond] x [d_cond, n 6 D]: the stack-level
+#:     conditioning hoist of the variant stacks, at most ``_COND_CHUNK_BYTES`` of output a chunk) on a side stream, from its own start --
+#:     it runs under this block's kernels, which leave SMs idle at a sampler step's few rows -- and each of those blocks joins it before
+#:     its first row pass, reading its [P, 6 D] column slice;
+#:   - a block not covered by a chunk (the first of a pass, a stack seen once, a capture whose chunk weight was never built eagerly) runs
+#:     its own GEMM on the side stream from the start of the previous block that read this conditioning.
+#: Per (capture, stream, conditioning tensor) entry (``_COND_PIPE``): the pass's sequence, the chunks issued for later positions, the
+#: last block's start event. Capture-scoped by the capture's own id, whatever is declared static: a sampler step's conditioning changes
+#: between replays (FoldForge makes it inside the captured denoiser step), so nothing made from it outlives a capture or a replay -- only
+#: the ORDER and the grouping of the GEMMs change, never what a block computes (a chunk's columns are the block's own [W1; W2] rows, a
+#: block's key is checked before it is served). The chunk weights ([W1; W2] of n blocks, ``_COND_CHUNKS``) are made outside captures
+#: only (a capture would record the concatenation into every replay). Off for big tables (P rows over ``_COND_PIPE_ROWS``).
+_COND_PIPE: dict = {}
+_COND_PIPE_ROWS = 1024
+_COND_CHUNK_BYTES = 32 << 20
+_COND_GROUPS: dict = _capture.weight_cache("conditioned_transition.cond_groups")
+_COND_CHUNKS: dict = _capture.weight_cache("conditioned_transition.cond_chunks")
+_COND_STREAMS: dict = {}
+#: bf16 token steps: the CUDA row passes and the SwiGLU GEMM launched as programmatic dependent launches (each waits on
+#: griddepcontrol.wait before its first read, so its launch overlaps the end of the kernel before it)
+_PDL = True
+
+
+def _cond_gemm(c, wc, fkey):
+    """G = c [W1; W2]^T in fp32 ([P, 6 D]) of the block whose fold pack key is ``fkey``: grouped and pipelined when possible
+    (``_COND_PIPE``)."""
+    P = c.shape[0]
+    cid = _capture._graph_capture_id()
+    if P > _COND_PIPE_ROWS or cid == 0:
+        return torch.mm(c, wc.t(), out_dtype=torch.float32)
+    dev = c.device
+    cur = torch.cuda.current_stream(dev)
+    side = _COND_STREAMS.get((dev.index, cur.cuda_stream))
+    if side is None:
+        side = _COND_STREAMS[(dev.index, cur.cuda_stream)] = torch.cuda.Stream(device=dev)
+    storage = StorageWeakRef(c.untyped_storage())
+    key = (cid, cur.cuda_stream, c.data_ptr(), c._version, tuple(c.shape), c.stride())
+    E = _COND_PIPE.get(key)
+    if E is not None and (E["storage"].expired() or E["storage"].cdata != storage.cdata):
+        E = None
+    if E is None or E["seq"][0][0] == fkey:  # a new conditioning, or a new pass over the same one (its first block again)
+        if E is None:
+            for k in [k for k, e in _COND_PIPE.items() if e["storage"].expired() or k[0] != cid]:
+                del _COND_PIPE[k]  # gone conditionings, other captures' entries (a capture's events are its own)
+            while len(_COND_PIPE) >= 16:
+                _COND_PIPE.pop(next(iter(_COND_PIPE)))
+        start = torch.cuda.Event()
+        start.record(cur)  # the conditioning is ready here
+        E = _COND_PIPE[key] = {"storage": storage, "seq": [], "pending": {}, "last": start, "group": _COND_GROUPS.get(fkey)}
+    pos = len(E["seq"])
+    E["seq"].append((fkey, wc))
+    _COND_GROUPS[E["seq"][0][0]] = tuple(E["seq"])  # the next pass's group (the longest prefix seen so far in this one)
+    hit = E["pending"].pop(pos, None)
+    if hit is not None and hit[0] == fkey:
+        _, G, done, whole = hit
+        cur.wait_event(done)
+        whole.record_stream(cur)  # allocated on the side stream, read here: not reused before this stream's readers ran
+    else:
+        side.wait_event(E["last"])
+        with torch.cuda.stream(side):
+            G = torch.mm(c, wc.t(), out_dtype=torch.float32)
+            done = torch.cuda.Event()
+            done.record(side)
+        cur.wait_event(done)
+        G.record_stream(cur)
+    # look ahead: one GEMM for the next chunk of this pass's learned group, from this block's start
+    group, nxt = E["group"], pos + 1
+    if group is not None and nxt < len(group) and nxt not in E["pending"] and group[pos][0] == fkey:
+        n = max(1, min(len(group) - nxt, _COND_CHUNK_BYTES // (P * wc.shape[0] * 4)))
+        keys = tuple(k for k, _ in group[nxt : nxt + n])
+        W = _COND_CHUNKS.get(keys)
+        if W is None and cid is None:
+            while len(_COND_CHUNKS) >= 4:
+                _COND_CHUNKS.pop(next(iter(_COND_CHUNKS)))
+            W = _COND_CHUNKS[keys] = torch.cat([w for _, w in group[nxt : nxt + n]])
+        if W is not None:
+            fork = torch.cuda.Event()
+            fork.record(cur)
+            side.wait_event(fork)
+            with torch.cuda.stream(side):
+                Gc = torch.mm(c, W.t(), out_dtype=torch.float32)  # [P, n 6 D]
+                ready = torch.cuda.Event()
+                ready.record(side)
+            w6 = wc.shape[0]
+            for j, k in enumerate(keys):
+                E["pending"][nxt + j] = (k, Gc[:, j * w6 : (j + 1) * w6], ready, Gc)
+    mine = torch.cuda.Event()
+    mine.record(cur)  # this block's start: an uncovered next block's GEMM forks here
+    E["last"] = mine
+    return G
+
+
+_STATIC_PACKS: dict = _capture.weight_cache(
+    "conditioned_transition.static_packs"
+)  # the weight packs of the blocks with model options (``token_inference``)
 _NO_GATE = 1.0e4  # gate logits of a block without a gating query: sigmoid(1e4) == 1.0 in fp32
 
 
@@ -185,7 +338,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         or tuple(pair.shape[:3]) != (B, L, L)
         or pair.shape[3] not in (128, 256, 512)  # 256: Protenix-v2's diffusion pair; 512: IntelliFold2's
         or not pair.is_contiguous()
-        or torch.cuda.get_device_capability(single.device) != (9, 0)
+        or _capability(single.device) != (9, 0)
     ):
         raise ValueError(
             "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768 (12 / 16 / 24 heads) or 1024 (16 heads) / cond 384 or 768 / pair 128, 256 or 512"
@@ -351,15 +504,33 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         limit=_capture.BLOCK_CACHE_LIMIT,
         valid=lambda e: not e[1].expired() and e[1].cdata == StorageWeakRef(pair.untyped_storage()).cdata,
         alive=lambda e: not e[1].expired(),
+        inputs=(pair, mask, extra),  # make_bias reads these (and the weight pack) only: _capture.refresh_static_inputs remakes it in place
+        # the key without the versions: a pair refilled in place (a new version) replaces its old bias instead of keeping both
+        lineage=(
+            pair.data_ptr(),
+            tuple(pair.shape),
+            None if mask is None else mask.data_ptr(),
+            wf.data_ptr(),
+            heads,
+            fp32,
+            None if extra is None else extra.data_ptr(),
+        ),
     )[0]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = (
         cond[0].reshape(-1, DC) if shared else cond.reshape(-1, DC)
     )  # shared: the [B L] table of the trunk_seeds (rows are [A][B][L]: row % (B L))
     P = c.shape[0]
-    cn = single.new_empty((P, DC))
-    cc = torch.empty_like(cn)
-    cond_rows(c, cn, cc, 1e-5)
+    # bf16: the conditioning folded into ONE GEMM of the raw c ([W1; W2], fp32 out); the sigmoid AdaLN's tables take the LayerNorm of c
+    # in the row kernels that read them (``token_dit_rows.cu`` CondFold), the identity AdaLN (Chai-1, parallel) reads the raw c anyway --
+    # the LayerNorm pass and the second GEMM are gone
+    fold = not fp32 and (sig or parallel) and c.dtype is torch.bfloat16 and DC <= D
+    if not fold:
+        cn = single.new_empty((P, DC))
+        cc = torch.empty_like(cn)
+        cond_rows(c, cn, cc, 1e-5)
+    elif c.stride(-1) != 1 or c.stride(0) % 4 or c.data_ptr() % 8:
+        c = c.contiguous()
     if late_pack is not None and late_pack["pending"]:
         stream = late_pack["stream"]
         stream.wait_stream(torch.cuda.current_stream(single.device))
@@ -370,14 +541,24 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     if cond_ready is not None:
         torch.cuda.current_stream(single.device).wait_event(cond_ready)
     # the AdaLN tables: the sigmoid form reads LN(c) (its cond-LN weight folded into w1), the identity form the raw c (its + 1 in b1)
-    g1 = torch.addmm(b1, cn if sig else cc, w1.t()).view(P, 4, D)
-    g2 = torch.addmm(b2, cc, w2.t()).view(P, 2, D)
+    if fold:
+        wc, r1, b1f, b2f, fkey = _cond_fold_pack(w1, b1, w2, b2)
+        G = _cond_gemm(c, wc, fkey)  # [P, 6 D] fp32: the AdaLN tables (before the LayerNorm of c), then the gates (no b2)
+        stats = single.new_empty((P, 2), dtype=torch.float32)
+    else:
+        g1 = torch.addmm(b1, cn if sig else cc, w1.t()).view(P, 4, D)
+        g2 = torch.addmm(b2, cc, w2.t()).view(P, 2, D)
     M = A * B * L
-    x = single.new_empty((M, D), dtype=torch.float32)
+    xin = single.view(M, D)
+    # the fp32 residual (the folded passes read xin instead: no fp32 copy of the stream)
+    x = single.new_empty((0 if fold else M, D), dtype=torch.float32)
     xa = single.new_empty((M, D))
     # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
     fused_expand = fp32 and _FP32_SWIGLU_GEMM and not up and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
-    if parallel:
+    if fold:
+        xt = torch.empty_like(xa) if parallel else xa
+        _ext().adaln_in_rows_cf_cuda(xin, G, r1, b1f, b2f, c, stats, xa, ada_eps, 1e-5, xt if parallel else None, _PDL, sig)
+    elif parallel:
         # both parts read the block input: the transition's AdaLN comes out of the same LN pass (TF32-rounded for the fused expand)
         xt = torch.empty_like(xa)
         adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, ada_eps, sig, second=(g1[:, 2], g1[:, 3], xt), rnd2=fused_expand)
@@ -407,10 +588,17 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     else:
         attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B)
     ya = torch.mm(qkvg[:, :D], wo.t())
-    if not parallel:
+    if not parallel and fold:
+        _ext().resgate_adaln_cf_cuda(xin, ya, G, r1, b1f, b2f, stats, xa, ada_eps, _PDL)
+    elif not parallel:
         resgate_adaln_rows(x, ya, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, ada_eps, tf32_round=fused_expand, sig=sig)
     h = single.new_empty((M, ws.shape[1]))
-    if up:
+    if up and not fp32:
+        # silu(a) b u in the SwiGLU GEMM's epilogue (128 x 192 tiles, [Wa 64 | Wb 64 | Wu 64]): [a | b | u] never reaches HBM.
+        # H100 graph replay, K 768, H 1536: M = 640 8.3 against 12.1 us for cuBLAS + the row pass, 1920 20.6 / 30.0, 5120 55.6 / 87.8
+        op = _token_swiglu(single.device.index)
+        op.ext.gemm_swiglu(xt, _bf16_wab64(vpack["wab3"], up=True), h, op.nsm, 64, True, _PDL)
+    elif up:
         ab = torch.mm(xt, vpack["wab3"].t())  # [M, 3 n D] a | b | u
         swiglu_rows(ab, h, up=True)
     elif fused_expand:
@@ -424,10 +612,13 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         swiglu_rows(ab, h)
     else:
         op = _token_swiglu(single.device.index)
-        op.ext.gemm_swiglu(xt, wab, h, op.nsm)
+        ht = _swiglu_ht(M, ws.shape[1], op.nsm, bf16=True)
+        op.ext.gemm_swiglu(xt, wab if ht == 128 else _bf16_wab64(wab), h, op.nsm, ht, False, _PDL)
     y = torch.mm(h, ws.t())
     out = torch.empty_like(xa)
-    if parallel:
+    if fold:  # out = (xin + sigmoid(gA) ya) + sigmoid(gT) y: both schedules' output
+        _ext().resgate_out_cf_cuda(xin, ya, y, G, b2f, out, _PDL)
+    elif parallel:
         resgate_out_rows(x, ya, g2[:, 0], out, P, y2=y, gl2=g2[:, 1])
     else:
         resgate_out_rows(x, y, g2[:, 1], out, P)

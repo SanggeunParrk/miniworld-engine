@@ -249,6 +249,8 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     x = zf.new_empty((hs, n, n))
     with _tf32(z):
         _contract(planes, x, hs, n, direction)
+    saved_planes = planes if save else None
+    del planes  # inference: dead once contracted -- freed before the output is allocated (peak z + planes + X, not + out)
     st_out = torch.empty((T, 2), dtype=torch.float32, device=z.device)
     if not fuse_x:
         E.stats_cm(x.view(hs, T), st_out, eps_out)
@@ -277,7 +279,7 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
         eps_out,
         fuse_x,
     )
-    return out.view_as(z), ((planes, x, st_in, st_out, ps, gs) if save else None)
+    return out.view_as(z), ((saved_planes, x, st_in, st_out, ps, gs) if save else None)
 
 
 def _forward_nograd_fake(leaves, mask, ds, direction, eps_in, eps_out):

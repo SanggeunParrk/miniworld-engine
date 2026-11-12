@@ -241,7 +241,12 @@ def issue(paths: list[str], now: Now) -> int:
     equal the current ones (it was made by what is current); the token replaces any older token of the same case."""
     tokens, counts, stale = load_tokens(now.gpu), collections.Counter(), collections.Counter()
     files = sorted(
-        {f for p in paths for f in (glob.glob(os.path.join(p, "*.jsonl")) if os.path.isdir(p) else [p]) if not f.endswith(".plans.jsonl")}
+        {
+            f
+            for p in paths
+            for f in (glob.glob(os.path.join(p, "*.jsonl")) if os.path.isdir(p) else [p] if os.path.exists(p) else [])
+            if not f.endswith(".plans.jsonl")
+        }
     )
     for path in files:
         with open(path) as fh:

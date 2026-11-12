@@ -341,17 +341,58 @@ def _core_provider(q, k, v, bias, mask_rows, gate, sel, *, cell: str = "dit_h16d
 class _View:
     """``module`` with some attributes overridden (read-only forwarding of everything else, parameters included)."""
 
+    # The overrides are the view's own attributes, so only the other names reach ``__getattr__``; no ``object.__getattribute__`` (Dynamo
+    # cannot trace it: a graph break per block call inside FoldForge's compiled sampler step).
     def __init__(self, module, **over):
-        object.__setattr__(self, "_module", module)
-        object.__setattr__(self, "_over", over)
+        self._module = module
+        for name, value in over.items():
+            setattr(self, name, value)
 
     def __getattr__(self, name):
-        over = object.__getattribute__(self, "_over")
-        return over[name] if name in over else getattr(object.__getattribute__(self, "_module"), name)
+        if name == "_module":
+            raise AttributeError(name)
+        return getattr(self._module, name)
 
 
 def _kernel_view(block):
     return _View(block, implementation="miniworld", attention=_View(block.attention, _backend="portable"))
+
+
+# ------------------------------------------------------------------------------------------------------------ per-block call cache
+# A sampler calls every block with the same shapes tens of times (FoldForge: 2 eager warm-up steps + a capture per forward), and the
+# block's "cuda" decision (``_cuda_route``) and the fused step's per-call constants (``token_dit.infer_args``: the leaves, the options)
+# are the same at every such call. They were re-derived at each one -- ~25 parameter lookups and two range checks through the kernel
+# view, about as much host time as the step's own launches. Kept per block (``block.__dict__``), keyed by the call's metadata (shapes,
+# strides, dtypes, devices: no device read), for grad-free calls only (a training call's route reads ``requires_grad``). Stale when:
+#   * any module registers a parameter or a submodule (a replaced weight / part: the global registration hooks below bump _STRUCTURE);
+#   * the block is converted (``.to`` / ``.float`` / ``set_master_weights``: ``TokenDiTProtenix._apply`` drops it);
+#   * ``kernels._capture.clear_weight_caches(block)`` (a registered instance cache attribute).
+# A plain attribute edit after the first call (a LayerNorm's eps, ``use_qk_norm``) is not seen: call ``clear_weight_caches(block)``.
+# Under Dynamo nothing is cached: the trace itself is the cache (its guards are the key).
+_CALL_CACHE = _capture.instance_cache_attr("_cuda_call_cache")
+_STRUCTURE = [0]
+
+
+def _structure_changed(*_args) -> None:
+    _STRUCTURE[0] += 1
+
+
+torch.nn.modules.module.register_module_parameter_registration_hook(_structure_changed)
+torch.nn.modules.module.register_module_module_registration_hook(_structure_changed)
+
+
+def _call_cache(block) -> dict | None:
+    """The block's call cache (see above), or None when this call must not use one (grad mode, Dynamo tracing)."""
+    if torch.is_grad_enabled() or torch.compiler.is_compiling():
+        return None
+    entry = block.__dict__.get(_CALL_CACHE)
+    if entry is None or entry[0] != _STRUCTURE[0]:
+        entry = block.__dict__[_CALL_CACHE] = (_STRUCTURE[0], {})
+    return entry[1]
+
+
+def _meta(t: torch.Tensor | None):
+    return None if t is None else (t.shape, t.stride(), t.dtype, t.device)
 
 
 def _h100_reason(single: torch.Tensor) -> str | None:
@@ -430,7 +471,8 @@ class TokenDiTProtenix(BackendModule):
         "cuda:a100_sm80": 3,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
-    }  # 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton attention core returns its bias gradient head-major on the A100 / H100 (every subclass)
+        "cuda:h100_sm90": 2,
+    }  # cuda:h100_sm90 2 (2026-11-12): bf16 inference folds the conditioning into one grouped GEMM (CondFold), 128 x 128 SwiGLU tiles at small M, PDL row passes (outputs change: fp32 tables; every subclass); 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton attention core returns its bias gradient head-major on the A100 / H100 (every subclass)
 
     #: The q / k RMSNorm of the attention (:class:`TokenDiTMiniWorld`).
     qk_norm: bool = False
@@ -505,8 +547,29 @@ class TokenDiTProtenix(BackendModule):
     # pair per trunk_seed, the key mask expanded over B), 16 heads x 48, cond 384 or 768, pair 128 / 256 / 512 (the fused blocks' row
     # kernels and weight packs are built per cond / pair width), transition n = 2, LayerNorm eps 1e-5,
     # a key mask shared by the samples; inference L a multiple of 128, training any L (padded to 128).
+    def _apply(self, fn, *args, **kwargs):
+        self.__dict__.pop(_CALL_CACHE, None)  # a conversion can change the parameters' dtype / device (the call cache's constants)
+        return super()._apply(fn, *args, **kwargs)
+
     def _cuda_route(self, single, cond, pair, mask, compute_dtype, extra_pair_bias) -> tuple[str | None, Any]:
-        """("infer" | "train", the [B, L] key mask), ("a100", None) or (None, why not)."""
+        """("infer" | "train", the [B, L] key mask), ("a100", None) or (None, why not). A grad-free H100 decision is kept in the block's
+        call cache (``_call_cache``), keyed by the call's metadata."""
+        cache = _call_cache(self)
+        if cache is None:
+            return self._cuda_route_of(single, cond, pair, mask, compute_dtype, extra_pair_bias)
+        key = ("route", _meta(single), _meta(cond), _meta(pair), _meta(mask), compute_dtype, _meta(extra_pair_bias))
+        hit = cache.get(key)
+        if hit is not None:
+            return ("infer", _shared_key_mask(mask)[0]) if hit == "infer" else (None, hit[1])
+        route, out = self._cuda_route_of(single, cond, pair, mask, compute_dtype, extra_pair_bias)
+        if _h100_reason(single) is None:  # the H100 route only (the A100 route also reads the autocast state)
+            if route == "infer":
+                cache[key] = "infer"
+            elif route is None:
+                cache[key] = (None, out)
+        return route, out
+
+    def _cuda_route_of(self, single, cond, pair, mask, compute_dtype, extra_pair_bias) -> tuple[str | None, Any]:
         if _a100(single):
             return self._a100_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
         why = _h100_reason(single)
@@ -551,7 +614,13 @@ class TokenDiTProtenix(BackendModule):
             return token_dit_train.block(view, single, cond, pair, km, compute_dtype, extra_pair_bias)
         from miniworld_engine.kernels.integrations import token_dit
 
-        return token_dit.update(view, single, cond, pair, km, extra_pair_bias)
+        cache = _call_cache(self)
+        if cache is None:
+            return token_dit.update(view, single, cond, pair, km, extra_pair_bias)
+        args = cache.get(("args", single.dtype))
+        if args is None:
+            args = cache["args", single.dtype] = token_dit.infer_args(view, single.dtype)
+        return token_dit.update(view, single, cond, pair, km, extra_pair_bias, args)
 
     # A100 (sm_80): the block's two parts on their sm_80 paths, forward and backward. The attention: kernels/integrations/augattn_sm80 (the
     # module's AdaLN, then one autograd Function from the AdaLN output to the residual: cuBLAS projections, the pair bias kernels, the
@@ -709,7 +778,9 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
     #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
+    #: 5 (2026-11-12): bf16 inference on the folded, grouped conditioning GEMM (TokenDiTProtenix cuda:h100_sm90 2); Boltz-2: the up-gate
+    #: transition in the SwiGLU GEMM's epilogue
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 5}
 
     backends = (
         "pytorch",
@@ -806,7 +877,9 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
     #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
+    #: 5 (2026-11-12): bf16 inference on the folded, grouped conditioning GEMM (TokenDiTProtenix cuda:h100_sm90 2); Boltz-2: the up-gate
+    #: transition in the SwiGLU GEMM's epilogue
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 5}
 
     backends = (
         "pytorch",
@@ -850,7 +923,9 @@ class TokenDiTChai1(MasterEntryCast, VariantTokenCuda, TokenDiTProtenix):
     #: 2026-11-10: H100 bf16 / fp32 inference with a conditioning per sample in one call (was one kernel call per sample)
     #: 3 (2026-11-10): H100 fp32 training / inference bias made key-permuted by the pair LayerNorm (no gathers), the pair passed as a view
     #: 4 (2026-11-10): H100 on the one token DiT algorithm (TokenDiTProtenix's cuda route with this block's options), eval and train
-    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 4}
+    #: 5 (2026-11-12): bf16 inference on the folded, grouped conditioning GEMM (TokenDiTProtenix cuda:h100_sm90 2); Boltz-2: the up-gate
+    #: transition in the SwiGLU GEMM's epilogue
+    backend_versions: ClassVar[dict[str, int]] = {**TokenDiTProtenix.backend_versions, "cuda:h100_sm90": 5}
 
     backends = (
         "pytorch",
@@ -930,7 +1005,9 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # 2026-11-10: sm_80 paths; cuda:h100_sm90 2 (2026-11-12): the inference pair-bias hoist (runner.hoist) in one pass for a 256-wide
     # bf16 pair, and on the TF32 tensor-core kernel (3 terms) for a 128-wide fp32 pair
     # cuda:a100_sm80 3 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd: padded W' pitch, next row prefetched; same values) 2.1x faster
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 2}
+    # cuda:h100_sm90 3 (2026-11-12): pair_bias_all on H100 is the fused hoist (head-major contiguous biases, as engine 2.4.4): the
+    # inference block no longer copies a permuted bias view per call (L 768 24-block stack 9.8 -> ~3.8 ms)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 3}
 
     def __init__(
         self,
@@ -1075,8 +1152,9 @@ def pair_bias_all(blocks, pair: torch.Tensor) -> tuple[torch.Tensor, ...]:
             raise ValueError(
                 "pair_bias_all: the blocks must share eps and head count, ln_pair must have a weight and no offset, to_bias no bias"
             )
-    # the "cuda" backend on a B200: the fused hoist (one LayerNorm and one GEMM for every block, the blocks' bias gradients written into
-    # one buffer); pair [1, L, L, 128] bf16 or fp32 -- any other pair (and every H100 call) takes the PyTorch fold below
+    # the "cuda" backend on a B200 or an H100: the fused hoist (one LayerNorm and one GEMM for every block, the blocks' bias gradients
+    # written into one buffer, each block's bias a contiguous head-major [1, H, L, L] slice); pair [1, L, L, 128] (or 256 on H100) bf16 or
+    # fp32 -- any other pair (and the A100) takes the PyTorch fold below, whose per-block biases are permuted views
     if getattr(mods[0], "backend", "pytorch") == "cuda":
         from miniworld_engine.kernels.integrations import bias_only_dit_hoist
 

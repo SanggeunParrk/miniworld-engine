@@ -486,13 +486,13 @@ def _tri_attn_fwd_fake(q, k, v, bias, shape_key):
     projection-layout buffer -- its strides are part of the contract, not just its shape (see
     below) -- and ``m`` the ``(B, H, L, L)`` fp32 per-row logsumexp.
     """
-    B, H, L, _, D = q.shape
+    B, H, R, L, D = q.shape
     # Mirror the real allocation EXACTLY, strides included: `out` is a strided view over a
-    # [B, L, L2, H*D] projection-layout buffer, and the module's rearrange back to that layout is
+    # [B, R, L2, H*D] projection-layout buffer, and the module's rearrange back to that layout is
     # only free if the graph knows those strides. A contiguous fake here would silently reinstate
     # the ~0.2 ms output copy this layout exists to remove.
-    out = rearrange(q.new_empty((B, L, L, H * D)), "B L L2 (H D) -> B H L L2 D", H=H)
-    return out, q.new_empty((B, H, L, L), dtype=torch.float32)
+    out = rearrange(q.new_empty((B, R, L, H * D)), "B L L2 (H D) -> B H L L2 D", H=H)
+    return out, q.new_empty((B, H, R, L), dtype=torch.float32)
 
 
 @opaque(fake=_tri_attn_fwd_fake, name="triangle_attention_fwd")
@@ -504,16 +504,16 @@ def _tri_attn_fwd(
     Split out of ``TritonTriangleAttentionPairBiasFunction.forward`` so ``bias.contiguous()`` and
     ``save_for_backward`` stay traceable -- see ``kernels._compile``.
     """
-    B, H, L, _, D = q.shape
+    B, H, R, L, D = q.shape  # R pair rows (L of them, or a block of the rows: TriangleAttention._attention_rows), L queries = keys
     sm_scale = D**-0.5
     # B: write `out` into PROJECTION layout [B,L,L2,H*D] via a strided (B,H,L,L2,D) view
     # (head_dim stride-1 -> coalesced write, free like q/k/v). The module's rearrange-back
     # "B H L L2 D -> B L L2 (H D)" is then a FREE view -> kills the ~0.2 ms fwd out copy.
-    out_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=q.dtype)
+    out_proj = torch.empty(B, R, L, H * D, device=q.device, dtype=q.dtype)
     out = rearrange(out_proj, "B L L2 (H D) -> B H L L2 D", H=H)
-    m = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
+    m = torch.empty(B, H, R, L, device=q.device, dtype=torch.float32)
 
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, R]
     _attn_fwd[grid](
         q,
         k,
@@ -673,7 +673,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         # bias IS contiguous (its strided key-dim stride=H is a fully-gappy load = the whole
         # 2.3x penalty; the copy is tiny, ~1MB). out/m are freshly-allocated contiguous.
         bias = bias.contiguous()
-        out, m = _tri_attn_fwd(q, k, v, bias, token_key(q.shape[2]))
+        out, m = _tri_attn_fwd(q, k, v, bias, token_key(q.shape[3]))  # the queries (= the rows unless a row block)
         ctx.save_for_backward(q, k, v, bias, m, out)
         return out
 

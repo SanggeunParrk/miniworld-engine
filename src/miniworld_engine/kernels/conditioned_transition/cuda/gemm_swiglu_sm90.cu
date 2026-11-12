@@ -25,17 +25,17 @@ TMN_DEVI void mma_n128_tf32(float (&d)[64], uint64_t a, uint64_t b) {
 }
 
 constexpr int TBM = 128;
-// HT: hidden units (h columns) per tile; the tile's B rows are HT of Wa then the same HT of Wb (TBN = 2 HT). HT = 64 (fp32 only) doubles
-// the tile count: at M = 1920 / 3200 the 128 x 256 form fills 68 % / 76 % of its last wave, this one 91 %.
-template <bool F32, int HTW> struct Cfg {
+// HT: hidden units (h columns) per tile; the tile's B rows are HT of Wa then the same HT of Wb (TBN = 2 HT). HT = 64 doubles the tile
+// count: fp32 at M = 1920 / 3200 the 128 x 256 form fills 68 % / 76 % of its last wave, this one 91 %; bf16 at a small M (S L rows of a
+// sampler step: 640 at L 128, S 5) the 128 x 256 form leaves half the SMs idle.
+template <bool F32, int HTW, bool UP = false> struct Cfg {
   static constexpr int TBK = F32 ? 32 : 64;                              // K elements a 128-B slab row
   static constexpr int NST = F32 ? 3 : 4;
-  static constexpr int HT = HTW, TBN = 2 * HTW;
+  static constexpr int HT = HTW, TBN = (UP ? 3 : 2) * HTW;                // UP: [Wa | Wb | Wu] HT rows each (bf16, HT = 64: n192)
   static constexpr int F_SA = TBM * 128, F_SB = TBN * 128, F_ST = F_SA + F_SB;    // A 16 KB + B 16 / 32 KB a stage
   static constexpr int STGW = 64 * HT * (F32 ? 4 : 2);                   // per consumer warpgroup: h [64][HT]
   static constexpr int STG = NST * F_ST, BAR = STG + 2 * STGW, SMEM = BAR + 256;
   static_assert(SMEM + 1024 <= 232448, "shared memory budget");
-  static_assert(F32 || HTW == 128, "the bf16 kernel is the 128 x 256 form");
 };
 
 TMN_DEVI float sigmoid_(float a) { float t; asm("tanh.approx.f32 %0, %1;" : "=f"(t) : "f"(0.5f * a)); return fmaf(0.5f, t, 0.5f); }
@@ -45,11 +45,11 @@ TMN_DEVI void tma_store_2d(const CUtensorMap* map, const void* src, int c0, int 
                :: "l"(map), "r"(smem_u32(src)), "r"(c0), "r"(c1) : "memory");
 }
 
-template <bool F32, int HTW>
+template <bool F32, int HTW, bool UP = false>
 __global__ void __launch_bounds__(384, 1)
 gemm_swiglu_sm90(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUtensorMap mB,
                  const __grid_constant__ CUtensorMap mH, int M, int K, int H) {
-  using C = Cfg<F32, HTW>;
+  using C = Cfg<F32, HTW, UP>;
   constexpr int NSTAGE = C::NST, TBK = C::TBK, HT = C::HT, TBN = C::TBN, F_SA = C::F_SA, F_ST = C::F_ST;
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
@@ -63,6 +63,7 @@ gemm_swiglu_sm90(const __grid_constant__ CUtensorMap mA, const __grid_constant__
     fence_barrier_init();
   }
   __syncthreads();
+  asm volatile("griddepcontrol.wait;" ::: "memory");   // PDL: the previous kernel's writes (x) are visible past here (a no-op otherwise)
   if (wg == 0) {                                                          // ---------------------------------- producer
     setmaxnreg_dec<40>();
     if (tid != 0) return;
@@ -100,7 +101,9 @@ gemm_swiglu_sm90(const __grid_constant__ CUtensorMap mA, const __grid_constant__
       for (int ks = 0; ks < 4; ++ks) {
         if constexpr (F32 && HTW == 128) mma_n256_tf32(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
         else if constexpr (F32) mma_n128_tf32(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
-        else mma_n256(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
+        else if constexpr (UP) mma_n192(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
+        else if constexpr (HTW == 128) mma_n256(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
+        else mma_n128(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
       }
       wgmma_commit();
       if (prev >= 0) { wgmma_wait<1>(); fence_regs(acc); if (wtid == 0) mbar_arrive(empty + prev); }
@@ -126,13 +129,15 @@ gemm_swiglu_sm90(const __grid_constant__ CUtensorMap mA, const __grid_constant__
     } else {
       const int mi = lane >> 3, mrow = 16 * warp + 8 * (mi & 1) + (lane & 7);
 #pragma unroll
-      for (int gp = 0; gp < 8; ++gp) {                                    // 16 h columns a chunk
+      for (int gp = 0; gp < HT / 16; ++gp) {                               // 16 h columns a chunk
         uint32_t hp[4];
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
-          const int g = 2 * gp + (q >> 1), rb = q & 1, ia = 4 * g + 2 * rb, ib = 4 * (g + 16) + 2 * rb;
+          const int g = 2 * gp + (q >> 1), rb = q & 1, ia = 4 * g + 2 * rb, ib = 4 * (g + HT / 8) + 2 * rb;
           const float x0 = acc[ia], x1 = acc[ia + 1];
-          hp[q] = pack_bf16(x0 * sigmoid_(x0) * acc[ib], x1 * sigmoid_(x1) * acc[ib + 1]);
+          float h0 = x0 * sigmoid_(x0) * acc[ib], h1 = x1 * sigmoid_(x1) * acc[ib + 1];
+          if constexpr (UP) { const int iu = 4 * (g + HT / 4) + 2 * rb; h0 *= acc[iu]; h1 *= acc[iu + 1]; }   // Boltz-2: silu(a) b u
+          hp[q] = pack_bf16(h0, h1);
         }
         const int col = 8 * (2 * (gp & 3) + (mi >> 1));                  // within the 64-column half gp / 4
         stsm_x4(smem_u32(stg + (gp >> 2) * 8192) + swz128((uint32_t)mrow, (uint32_t)(col * 2)), hp[0], hp[1], hp[2], hp[3]);
@@ -141,7 +146,7 @@ gemm_swiglu_sm90(const __grid_constant__ CUtensorMap mA, const __grid_constant__
     fence_proxy_async();
     named_bar_sync(1 + cw, 128);
     if (wtid == 0) {
-      constexpr int NBOX = F32 ? HT / 32 : 2, BOXC = F32 ? 32 : 64;
+      constexpr int NBOX = F32 ? HT / 32 : HT / 64, BOXC = F32 ? 32 : 64;
 #pragma unroll
       for (int b = 0; b < NBOX; ++b) tma_store_2d(&mH, stg + b * 8192, nt * HT + b * BOXC, m0 + 64 * cw);
       tma_store_commit();
@@ -177,18 +182,28 @@ CUtensorMap map2d(void* p, bool f32, uint64_t rows, uint64_t cols, uint64_t rs, 
                         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) == CUDA_SUCCESS, "tensor map encode failed");
   return map;
 }
-template <bool F32, int HTW>
-void run(torch::Tensor& x, torch::Tensor& wab, torch::Tensor& h, int64_t sms) {
-  using C = Cfg<F32, HTW>;
+template <bool F32, int HTW, bool UP = false>
+void run(torch::Tensor& x, torch::Tensor& wab, torch::Tensor& h, int64_t sms, bool pdl = false) {
+  using C = Cfg<F32, HTW, UP>;
   const int64_t M = x.size(0), K = x.size(1), H = h.size(1);
   TORCH_CHECK(M % TBM == 0 && K % C::TBK == 0 && H % C::HT == 0, "shapes: M % 128, K % (64 bf16 / 32 fp32), H % HT");
-  const auto mA = map2d(x.data_ptr(), F32, M, K, x.stride(0), C::TBK, TBM), mB = map2d(wab.data_ptr(), F32, 2 * H, K, K, C::TBK, C::TBN),
+  const auto mA = map2d(x.data_ptr(), F32, M, K, x.stride(0), C::TBK, TBM), mB = map2d(wab.data_ptr(), F32, (UP ? 3 : 2) * H, K, K, C::TBK, C::TBN),
              mH = map2d(h.data_ptr(), F32, M, H, H, F32 ? 32 : 64, 64);
   const int tiles = (int)((M / TBM) * (H / C::HT));
-  cudaFuncSetAttribute(gemm_swiglu_sm90<F32, HTW>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM + 1024);
-  gemm_swiglu_sm90<F32, HTW><<<(unsigned)std::min<int64_t>(tiles, sms), 384, C::SMEM + 1024, at::cuda::getCurrentCUDAStream()>>>(
-      mA, mB, mH, (int)M, (int)K, (int)H);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  cudaFuncSetAttribute(gemm_swiglu_sm90<F32, HTW, UP>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM + 1024);
+  // pdl: a programmatic dependent launch (every thread waits on griddepcontrol.wait before touching global memory)
+  cudaLaunchConfig_t cfg{};
+  cfg.gridDim = dim3((unsigned)std::min<int64_t>(tiles, sms));
+  cfg.blockDim = dim3(384);
+  cfg.dynamicSmemBytes = C::SMEM + 1024;
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  at[0].val.programmaticStreamSerializationAllowed = 1;
+  cfg.attrs = at;
+  cfg.numAttrs = pdl ? 1 : 0;
+  const cudaError_t err = cudaLaunchKernelEx(&cfg, gemm_swiglu_sm90<F32, HTW, UP>, mA, mB, mH, (int)M, (int)K, (int)H);
+  TORCH_CHECK(err == cudaSuccess, "gemm_swiglu launch: ", cudaGetErrorString(err));
 }
 }  // namespace
 
@@ -196,16 +211,24 @@ void run(torch::Tensor& x, torch::Tensor& wab, torch::Tensor& h, int64_t sms) {
 // (TF32 tensor cores). M % 128 == 0, K % 64 (bf16) / 32 (fp32) == 0, H % 128 == 0. grid: min(tiles, sms).
 // (A variant that also stored [a | b] for the training backward, through the same staging tile, measured 731 us at
 // M = 36864 against 380 for cuBLAS + the row pass: the extra stores serialise the epilogue. Not kept.)
-void gemm_swiglu(torch::Tensor x, torch::Tensor wab, torch::Tensor h, int64_t sms, int64_t ht = 128) {
+// up: Boltz-2's up-gate transition, h = silu(a) b u: wab [3H, K] packed per 192-row tile [Wa 64 | Wb 64 | Wu 64] (bf16, ht 64).
+// pdl: launched as a programmatic dependent launch of the kernel before it on the stream.
+void gemm_swiglu(torch::Tensor x, torch::Tensor wab, torch::Tensor h, int64_t sms, int64_t ht = 128, bool up = false, bool pdl = false) {
   const auto dt = x.scalar_type();
   TORCH_CHECK((dt == torch::kBFloat16 || dt == torch::kFloat32) && wab.scalar_type() == dt && h.scalar_type() == dt,
               "bf16 or fp32 operands, all alike");
-  TORCH_CHECK(x.stride(1) == 1 && wab.is_contiguous() && h.is_contiguous() && wab.size(0) == 2 * h.size(1)
+  TORCH_CHECK(x.stride(1) == 1 && wab.is_contiguous() && h.is_contiguous() && wab.size(0) == (up ? 3 : 2) * h.size(1)
               && wab.size(1) == x.size(1) && h.size(0) == x.size(0), "shapes");
   const at::cuda::CUDAGuard guard(x.device());
-  TORCH_CHECK(ht == 128 || (ht == 64 && dt == torch::kFloat32), "ht: 128 (both dtypes) or 64 (fp32): wab packed per 2 ht rows");
-  if (dt == torch::kFloat32) { if (ht == 64) run<true, 64>(x, wab, h, sms); else run<true, 128>(x, wab, h, sms); }
-  else run<false, 128>(x, wab, h, sms);
+  TORCH_CHECK(ht == 128 || ht == 64, "ht: 128 or 64: wab packed per 2 ht rows");
+  TORCH_CHECK(!up || (ht == 64 && dt == torch::kBFloat16), "up: bf16, ht 64");
+  if (up) { run<false, 64, true>(x, wab, h, sms, pdl); return; }
+  if (dt == torch::kFloat32) { if (ht == 64) run<true, 64>(x, wab, h, sms, pdl); else run<true, 128>(x, wab, h, sms, pdl); }
+  else if (ht == 64) run<false, 64>(x, wab, h, sms, pdl);
+  else run<false, 128>(x, wab, h, sms, pdl);
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("gemm_swiglu", &gemm_swiglu, pybind11::arg("x"), pybind11::arg("wab"), pybind11::arg("h"), pybind11::arg("sms"), pybind11::arg("ht") = 128); }
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("gemm_swiglu", &gemm_swiglu, pybind11::arg("x"), pybind11::arg("wab"), pybind11::arg("h"), pybind11::arg("sms"), pybind11::arg("ht") = 128,
+        pybind11::arg("up") = false, pybind11::arg("pdl") = false);
+}

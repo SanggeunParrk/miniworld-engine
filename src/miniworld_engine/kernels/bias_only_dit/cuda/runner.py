@@ -379,6 +379,7 @@ class FusedBiasOnlyDiT:
             limit=16,
             valid=lambda e: e[0]() is cond,
             alive=lambda e: e[0]() is not None,
+            inputs=(cond,),
         )
         return entry[1]
 
@@ -536,6 +537,7 @@ class FusedBiasOnlyDiT:
             limit=16,
             valid=lambda e: e[0]() is cond,
             alive=lambda e: e[0]() is not None,
+            inputs=(cond,),
         )
         return entry[1]
 
