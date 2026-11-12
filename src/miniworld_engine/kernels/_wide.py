@@ -53,4 +53,4 @@ def row_tile(N_CTX, BLOCK: tl.constexpr):
 
 def row_tile_grid(rows: int, n_ctx: int, block: int) -> list[int]:
     """The 1-D grid ``row_tile`` decodes: ``rows * cdiv(n_ctx, block)`` programs on axis x."""
-    return [rows * triton.cdiv(n_ctx, block)]
+    return [rows * ((n_ctx + block - 1) // block)]
