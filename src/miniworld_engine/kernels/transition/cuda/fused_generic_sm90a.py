@@ -509,7 +509,19 @@ def transition_generic_sm90a(x, gamma, beta, wa, wb, ws, eps):
     off, or nothing requiring grad) runs the forward without the saves."""
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
-        kw = _kernel_weights(x, wa, wb, ws)  # fp32: the launch rounds them once per parameter version (_weights.tf32_rounded_triple)
+        # fp32 masters under bf16 activations: cast once per parameter version, not per call (FoldForge: ~1200 copy launches per OpenDDE
+        # fold); fp32: the launch rounds them once per parameter version (_weights.tf32_rounded_triple)
+        from miniworld_engine.kernels import _capture
+
+        if all(w.dtype == x.dtype for w in (wa, wb, ws)):  # nothing to cast: no entry (it would hold the parameters alive)
+            kw = _kernel_weights(x, wa, wb, ws)
+        else:
+            kw = _capture.param_forms(
+                ("transition_generic_kernel_weights", x.dtype),
+                (wa, wb, ws),
+                lambda: _kernel_weights(x, wa, wb, ws),
+                capture_reads_eager=True,
+            )
         out, *_ = _fwd_launch(
             x.reshape(-1, shape[-1]).contiguous(),
             gamma.float().contiguous(),
