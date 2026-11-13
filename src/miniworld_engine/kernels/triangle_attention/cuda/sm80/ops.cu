@@ -83,9 +83,9 @@ bool try_attn_rf(const a100::AttnParams& p, int z, double scl) {
   if (mode < 0) mode = 0;
   if (p.L % 128 != 0) return false;
   switch (mode) {
-    case 1: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 3, GATE>>(p, z, scl); return true;
-    case 2: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl); return true;
-    case 3: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 3, GATE>>(p, z, scl); return true;
+    case 1: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl); return true;
+    case 2: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE>>(p, z, scl); return true;
+    case 3: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 5, GATE>>(p, z, scl); return true;
     default: return false;
   }
 }
