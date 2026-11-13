@@ -193,14 +193,18 @@ _COND_FOLD: dict = _capture.weight_cache("conditioned_transition.cond_fold")  # 
 def _cond_fold_pack(w1, b1, w2, b2):
     """The folded conditioning's operands of a bf16 weight pack, once per pack: ``[W1; W2]`` (bf16 [6 D, d_cond], the ONE conditioning
     GEMM's weight), ``W1 1`` (fp32 row sums of the packed W1: the LayerNorm of c applied after the GEMM), b1 and b2 in fp32. The entry
-    holds the pack's tensors: a freed pack's address cannot alias another while it lives."""
+    holds the pack's tensors: a freed pack's address cannot alias another while it lives. Last: whether THIS call made the operands (their
+    kernels were issued on the caller's stream just now: ``_cond_gemm``'s side stream must not read ``[W1; W2]`` before them)."""
     from ... import _capture
 
+    made = []
+
     def build():
+        made.append(True)
         return (torch.cat([w1, w2]).contiguous(), w1.float().sum(1), b1.float().contiguous(), b2.float().contiguous(), (w1, b1, w2, b2))
 
     key = tuple((t.data_ptr(), t._version, tuple(t.shape), t.dtype) for t in (w1, b1, w2, b2))
-    return (*_capture.lookup(_COND_FOLD, key, build, limit=_capture.BLOCK_CACHE_LIMIT)[:4], key)
+    return (*_capture.lookup(_COND_FOLD, key, build, limit=_capture.BLOCK_CACHE_LIMIT)[:4], key, bool(made))
 
 
 #: The folded conditioning GEMMs of a stack, grouped and off the blocks' critical path. A stack's blocks read the SAME conditioning
@@ -211,34 +215,55 @@ def _cond_fold_pack(w1, b1, w2, b2):
 #:     conditioning hoist of the variant stacks, at most ``_COND_CHUNK_BYTES`` of output a chunk) on a side stream, from its own start --
 #:     it runs under this block's kernels, which leave SMs idle at a sampler step's few rows -- and each of those blocks joins it before
 #:     its first row pass, reading its [P, 6 D] column slice;
-#:   - a block not covered by a chunk (the first of a pass, a stack seen once, a capture whose chunk weight was never built eagerly) runs
+#:   - a block not covered by a chunk (the first of a pass, a stack seen once, a chunk weight not made in the capture's weight scope) runs
 #:     its own GEMM on the side stream from the start of the previous block that read this conditioning.
 #: Per (capture, stream, conditioning tensor) entry (``_COND_PIPE``): the pass's sequence, the chunks issued for later positions, the
 #: last block's start event. Capture-scoped by the capture's own id, whatever is declared static: a sampler step's conditioning changes
 #: between replays (FoldForge makes it inside the captured denoiser step), so nothing made from it outlives a capture or a replay -- only
 #: the ORDER and the grouping of the GEMMs change, never what a block computes (a chunk's columns are the block's own [W1; W2] rows, a
-#: block's key is checked before it is served). The chunk weights ([W1; W2] of n blocks, ``_COND_CHUNKS``) are made outside captures
-#: only (a capture would record the concatenation into every replay).
-#: A capture that reads a chunk holds it (``_capture.hold``: the LRU of 4 below evicts the chunks of other shapes, and a graph kept per
-#: shape still reads its own). Off for big tables (P rows over ``_COND_PIPE_ROWS``).
+#: block's key is checked before it is served).
+#:
+#: **What a side-stream GEMM depends on.** A captured graph replays its kernels in the order of the recorded dependencies only (and an
+#: eager side stream runs beside the caller's stream, whose kernels may still be queued), so every GEMM forks from an event of the
+#: caller's stream that is issued AFTER the kernels that make its operands:
+#:   - the conditioning: made before the pass's first block (the pass's start event);
+#:   - a block's ``[W1; W2]``: made in an EARLIER call (a cache hit) it is older than the previous block's start, where the block's own
+#:     GEMM forks; made in THIS call (``made``: the first call after the weights' version changed, and every pack of a capture outside
+#:     ``static_weights()``, whose packs are the capture's own and remade by every replay) it is issued after that start, and the GEMM
+#:     forks from an event recorded now. (Forking it from the previous block's start read the pack before its kernels ran: the first
+#:     replay of such a capture, and an eager call right after an optimizer step, computed the tables from unwritten memory.)
+#:   - a chunk weight: the concatenation of its blocks' ``[W1; W2]``, made on the caller's stream before the fork.
+#: **Weight scope.** The groups and the chunk weights are scoped like every weight pack (``_capture.capture_id()``): the eager scope
+#: (eager calls, and captures under ``static_weights()``, which read the chunk the warm-up made and never make one), or one capture
+#: outside ``static_weights()`` -- whose packs are remade by every replay, so its chunks are concatenated from ITS packs inside the capture
+#: (learned in the capture's first pass over the stack, used from its second: a captured rollout of several steps) and a replay after an
+#: optimizer step reads the new weights. (An eager chunk served to such a capture kept the weights of the capture's time.)
+#: **A capture ends with nothing pending.** In a capture the block that issues a chunk joins it at its end (``token_inference``): the
+#: caller's stream then depends on every GEMM issued so far, so a pass that stops before the chunk's blocks (a shorter stack than the
+#: learned group) leaves no unjoined work in the graph, and whatever the side stream read (the conditioning, a pack, a chunk weight of the
+#: graph's pool) may be freed and its memory reused by the caller's stream after the block.
+#: A capture that reads an eager chunk holds it (``_capture.hold``: the LRU of 4 below evicts the chunks of other shapes, and a graph
+#: kept per shape still reads its own). Off for big tables (P rows over ``_COND_PIPE_ROWS``).
 _COND_PIPE: dict = {}
 _COND_PIPE_ROWS = 1024
 _COND_CHUNK_BYTES = 32 << 20
-_COND_GROUPS: dict = _capture.weight_cache("conditioned_transition.cond_groups")
-_COND_CHUNKS: dict = _capture.weight_cache("conditioned_transition.cond_chunks")
+_COND_GROUPS: dict = _capture.weight_cache("conditioned_transition.cond_groups")  # (weight scope, first block's key) -> the pass
+_COND_CHUNKS: dict = _capture.weight_cache("conditioned_transition.cond_chunks")  # (weight scope, the blocks' keys) -> [n 6 D, d_cond]
 _COND_STREAMS: dict = {}
 #: bf16 token steps: the CUDA row passes and the SwiGLU GEMM launched as programmatic dependent launches (each waits on
 #: griddepcontrol.wait before its first read, so its launch overlaps the end of the kernel before it)
 _PDL = True
 
 
-def _cond_gemm(c, wc, fkey):
+def _cond_gemm(c, wc, fkey, made=False):
     """G = c [W1; W2]^T in fp32 ([P, 6 D]) of the block whose fold pack key is ``fkey``: grouped and pipelined when possible
-    (``_COND_PIPE``)."""
+    (``_COND_PIPE``). ``made``: ``wc`` was made in this call (``_cond_fold_pack``). Returns G and, in a capture, the event of the
+    look-ahead GEMM this call issued (None: none) -- the caller's stream waits for it at the end of the block."""
     P = c.shape[0]
     cid = _capture._graph_capture_id()
     if P > _COND_PIPE_ROWS or cid == 0:
-        return torch.mm(c, wc.t(), out_dtype=torch.float32)
+        return torch.mm(c, wc.t(), out_dtype=torch.float32), None
+    ws = _capture.capture_id()  # the weight scope: None for eager calls and captures under static_weights(), else this capture
     dev = c.device
     cur = torch.cuda.current_stream(dev)
     side = _COND_STREAMS.get((dev.index, cur.cuda_stream))
@@ -255,19 +280,28 @@ def _cond_gemm(c, wc, fkey):
                 del _COND_PIPE[k]  # gone conditionings, other captures' entries (a capture's events are its own)
             while len(_COND_PIPE) >= 16:
                 _COND_PIPE.pop(next(iter(_COND_PIPE)))
+            _capture.prune(_COND_GROUPS, ws)  # other captures' groups and chunks (their packs are those captures' own)
+            _capture.prune(_COND_CHUNKS, ws)
         start = torch.cuda.Event()
-        start.record(cur)  # the conditioning is ready here
-        E = _COND_PIPE[key] = {"storage": storage, "seq": [], "pending": {}, "last": start, "group": _COND_GROUPS.get(fkey)}
+        start.record(cur)  # the conditioning and this block's pack are ready here
+        made = False
+        E = _COND_PIPE[key] = {"storage": storage, "seq": [], "pending": {}, "last": start, "group": _COND_GROUPS.get((ws, fkey))}
     pos = len(E["seq"])
     E["seq"].append((fkey, wc))
-    _COND_GROUPS[E["seq"][0][0]] = tuple(E["seq"])  # the next pass's group (the longest prefix seen so far in this one)
+    _COND_GROUPS[(ws, E["seq"][0][0])] = tuple(E["seq"])  # the next pass's group (the longest prefix seen so far in this one)
     hit = E["pending"].pop(pos, None)
     if hit is not None and hit[0] == fkey:
         _, G, done, whole = hit
         cur.wait_event(done)
         whole.record_stream(cur)  # allocated on the side stream, read here: not reused before this stream's readers ran
     else:
-        side.wait_event(E["last"])
+        if made:
+            # the pack's kernels were issued after the previous block's start: fork behind them
+            ready = torch.cuda.Event()
+            ready.record(cur)
+            side.wait_event(ready)
+        else:
+            side.wait_event(E["last"])
         with torch.cuda.stream(side):
             G = torch.mm(c, wc.t(), out_dtype=torch.float32)
             done = torch.cuda.Event()
@@ -275,17 +309,21 @@ def _cond_gemm(c, wc, fkey):
         cur.wait_event(done)
         G.record_stream(cur)
     # look ahead: one GEMM for the next chunk of this pass's learned group, from this block's start
+    join = None
     group, nxt = E["group"], pos + 1
     if group is not None and nxt < len(group) and nxt not in E["pending"] and group[pos][0] == fkey:
         n = max(1, min(len(group) - nxt, _COND_CHUNK_BYTES // (P * wc.shape[0] * 4)))
         keys = tuple(k for k, _ in group[nxt : nxt + n])
-        W = _COND_CHUNKS.get(keys)
-        if W is None and cid is None:
-            while len(_COND_CHUNKS) >= 4:
-                _COND_CHUNKS.pop(next(iter(_COND_CHUNKS)))
-            W = _COND_CHUNKS[keys] = torch.cat([w for _, w in group[nxt : nxt + n]])
+        W = _COND_CHUNKS.get((ws, keys))
+        if W is None and ws == cid:  # an eager call, or a capture of its own weight scope: the concatenation is recorded into it
+            eager = [k for k in _COND_CHUNKS if k[0] is None]
+            if ws is None and len(eager) >= 4:  # (a capture's chunks are its graph's memory: they go with the capture's scope)
+                for k in eager[: len(eager) - 3]:
+                    del _COND_CHUNKS[k]
+            W = _COND_CHUNKS[(ws, keys)] = torch.cat([w for _, w in group[nxt : nxt + n]])
         if W is not None:
-            _capture.hold(W)  # a capture reads the chunk: another shape's chunks (an LRU of 4) must not free it under the graph
+            # a capture reads the chunk: another shape's chunks (an LRU of 4) must not free it under the graph
+            _capture.hold(W, ws is None)
             fork = torch.cuda.Event()
             fork.record(cur)
             side.wait_event(fork)
@@ -296,10 +334,12 @@ def _cond_gemm(c, wc, fkey):
             w6 = wc.shape[0]
             for j, k in enumerate(keys):
                 E["pending"][nxt + j] = (k, Gc[:, j * w6 : (j + 1) * w6], ready, Gc)
+            if cid is not None:
+                join = ready
     mine = torch.cuda.Event()
     mine.record(cur)  # this block's start: an uncovered next block's GEMM forks here
     E["last"] = mine
-    return G
+    return G, join
 
 
 _STATIC_PACKS: dict = _capture.weight_cache(
@@ -547,8 +587,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         torch.cuda.current_stream(single.device).wait_event(cond_ready)
     # the AdaLN tables: the sigmoid form reads LN(c) (its cond-LN weight folded into w1), the identity form the raw c (its + 1 in b1)
     if fold:
-        wc, r1, b1f, b2f, fkey = _cond_fold_pack(w1, b1, w2, b2)
-        G = _cond_gemm(c, wc, fkey)  # [P, 6 D] fp32: the AdaLN tables (before the LayerNorm of c), then the gates (no b2)
+        wc, r1, b1f, b2f, fkey, made = _cond_fold_pack(w1, b1, w2, b2)
+        # [P, 6 D] fp32: the AdaLN tables (before the LayerNorm of c), then the gates (no b2)
+        G, cond_join = _cond_gemm(c, wc, fkey, made)
         stats = single.new_empty((P, 2), dtype=torch.float32)
     else:
         g1 = torch.addmm(b1, cn if sig else cc, w1.t()).view(P, 4, D)
@@ -623,6 +664,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     out = torch.empty_like(xa)
     if fold:  # out = (xin + sigmoid(gA) ya) + sigmoid(gT) y: both schedules' output
         _ext().resgate_out_cf_cuda(xin, ya, y, G, b2f, out, _PDL)
+        if cond_join is not None:
+            # a capture: the look-ahead GEMM this block issued joins here (it ran under this block's kernels; the next block reads it first)
+            torch.cuda.current_stream(single.device).wait_event(cond_join)
     elif parallel:
         resgate_out_rows(x, ya, g2[:, 0], out, P, y2=y, gl2=g2[:, 1])
     else:
