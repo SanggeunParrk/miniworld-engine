@@ -176,8 +176,10 @@ def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False):
     if kind == FUSED:
         from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import inference
 
-        w4, wb16, wo16 = _packed(kind, tuple(weights))
-        return inference(pair, lnw.float(), lnb.float(), w4, wb16, wo16, mask, eps, trans, out, flip, gate_bias, out_bias)
+        # the wide pack (d_pair 256) folds the LayerNorm in: its parameters are part of the pack's key
+        wide = pair.shape[-1] != 128
+        w4, wb16, wo16, *fold = _packed(kind, (*weights, lnw, lnb) if wide else tuple(weights))
+        return inference(pair, lnw.float(), lnb.float(), w4, wb16, wo16, mask, eps, trans, out, flip, gate_bias, out_bias, *fold)
     from miniworld_engine.kernels.triangle_attention.cuda import (
         h100_sm90_generic as gen,
     )

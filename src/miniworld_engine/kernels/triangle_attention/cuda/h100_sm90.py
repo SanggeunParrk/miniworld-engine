@@ -129,14 +129,14 @@ def wide(d_pair: int, d_hidden: int, n_head: int) -> bool:
     return WIDE.get(d_pair) == n_head and d_hidden == d_pair
 
 
-def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, out=None, flip=False, gate_bias=None, out_bias=None):
+def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, out=None, flip=False, gate_bias=None, out_bias=None, fold=None):
     """pair + TriangleAttention(pair) for the starting node, no grad: front (LN + projections + bias) -> core -> tail (gate +
     out-projection + residual).  w4, wb16 = pack_front(...); wo16 = Wo in bf16; `out`: a contiguous tensor like pair to write into.  ``flip``: the ending node (``trans``) takes its
     bias from the pair as it is (:func:`flip_bias`). ``gate_bias`` [128] / ``out_bias`` [C]: biases of the gate / out-projection
-    (RoseTTAFold3), added to the front's gate and to the result.  At a ``WIDE`` width (w4, wb16, wo16 = ``_pack_params(...)``, the
-    wide pack) the call runs :func:`inference_wide`."""
+    (RoseTTAFold3), added to the front's gate and to the result.  At a ``WIDE`` width (w4, wb16, wo16, fold = ``_pack_params(..., lnw, lnb)``,
+    the wide pack) the call runs :func:`inference_wide`."""
     if pair.shape[-1] != C:
-        return inference_wide(pair, lnw, lnb, w4, wb16, wo16, mask, eps, trans, out, flip, gate_bias, out_bias)
+        return inference_wide(pair, fold, w4, wb16, wo16, mask, eps, trans, out, flip, gate_bias, out_bias)
     B, L, _, _ = pair.shape
     x = pair.contiguous().view(-1, C)
     m = _mod()
@@ -173,10 +173,11 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, 
 
 
 @torch.autocast("cuda", enabled=False)
-def inference_wide(pair, lnw, lnb, wpk, wb8, wo16, mask=None, eps=1e-5, trans=False, out=None, flip=False, gate_bias=None, out_bias=None):
+def inference_wide(pair, fold, wpk, wb8, wo16, mask=None, eps=1e-5, trans=False, out=None, flip=False, gate_bias=None, out_bias=None):
     """``inference`` at a ``WIDE`` width (d_pair 256, 8 heads x 32): the wide front (LN + q | k | v | g + head-major bias in one kernel,
     ``tri_front_wide``) -> the core with the gate in its epilogue (u = sigmoid(g) o O, as the width-generic path) -> x + u Wo^T [+ bo]
-    (cublasLt, the residual in its epilogue: the generic path's out-projection).  wpk, wb8, wo16 = ``_pack_params(...)``."""
+    (cublasLt, the residual in its epilogue: the generic path's out-projection).  wpk, wb8, wo16, fold = ``_pack_params(..., lnw, lnb)``:
+    the LayerNorm is folded into the pack (W diag(gamma) and per-output constants), so the front's GEMM operand is the pair as loaded."""
     from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90_generic as gen
 
     B, L, _, cw = pair.shape
@@ -187,8 +188,7 @@ def inference_wide(pair, lnw, lnb, wpk, wb8, wo16, mask=None, eps=1e-5, trans=Fa
     gb = None if gate_bias is None else gate_bias.float().contiguous()
     q, k, v, g, sbias = _mod().tri_front_wide(
         x,
-        lnw.float().contiguous(),
-        lnb.float().contiguous(),
+        fold,
         eps,
         wpk,
         wb8,
@@ -224,14 +224,15 @@ def _bwd(defs: tuple[str, ...] = ()):
     )
 
 
-def _pack_params(wq, wk, wv, wg, wb, wo):
+def _pack_params(wq, wk, wv, wg, wb, wo, lnw=None, lnb=None):
     """(w4, wb16, wo16) in one launch when the six parameters share a dtype (fp32 master or bf16); the torch pack otherwise.
-    At a ``WIDE`` width: (wpk, wb8, wo16) of ``tri_pack_wide`` (one launch; parameters of mixed dtypes are cast to bf16 first)."""
+    At a ``WIDE`` width: (wpk, wb8, wo16, fold) of ``tri_pack_wide`` with the LayerNorm (``lnw`` / ``lnb``) folded in (parameters of
+    mixed dtypes are cast to bf16 first)."""
     if wq.shape[1] != C:
         ws = (wq, wk, wv, wg, wb, wo)
         if len({t.dtype for t in ws}) != 1 or wq.dtype not in (torch.float32, torch.bfloat16):
             ws = tuple(t.to(torch.bfloat16) for t in ws)
-        return _mod().tri_pack_wide(*(t.contiguous() for t in ws))
+        return _mod().tri_pack_wide(*(t.contiguous() for t in ws), lnw.float().contiguous(), lnb.float().contiguous())
     if (
         len({t.dtype for t in (wq, wk, wv, wg, wb, wo)}) == 1
         and wq.dtype in (torch.float32, torch.bfloat16)
