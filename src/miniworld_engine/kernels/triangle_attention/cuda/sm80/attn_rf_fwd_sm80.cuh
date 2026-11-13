@@ -22,10 +22,10 @@
 
 namespace a100 {
 
-template <int WR_, int RW_, int QG_, int ST_, bool GATE_ = false>
+template <int WR_, int RW_, int QG_, int ST_, bool GATE_ = false, bool PIPE_ = false>
 struct AttnRCfg {
   static constexpr int WR = WR_, RW = RW_, QG = QG_, ST = ST_;
-  static constexpr bool GATE = GATE_;
+  static constexpr bool GATE = GATE_, PIPE = PIPE_;   // PIPE: the software-pipelined hot loop (one slice deferred into the next slot)
   static constexpr int R = WR * RW, BM = 32 * QG, NW = WR * QG, NTHR = 32 * NW;
   static constexpr int KEYS = 32;                            // keys per ring slot
   static constexpr int ROWB = TA_D * 2;                      // 64-byte rows (32 bf16) everywhere: swz64
@@ -59,7 +59,7 @@ DEVI void mma_acc(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b
 template <class G, bool SAFE>
 DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
   constexpr int RW = G::RW, ST = G::ST;
-  constexpr int LA = SAFE ? ST - 1 : ST - 2;              // slots in flight ahead of the one consumed (the hot loop defers one slice: one slot less)
+  constexpr int LA = (SAFE || !G::PIPE) ? ST - 1 : ST - 2;              // slots in flight ahead of the one consumed (the hot loop defers one slice: one slot less)
   static_assert(LA >= 1, "ring too short");
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sbase = smem_u32(smem_raw);
@@ -208,7 +208,7 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
     }
   };
 
-  if constexpr (!SAFE) {
+  if constexpr (!SAFE && G::PIPE) {
     // Software-pipelined: the exponentials of column jj - 1 follow the tensor work of column jj, the products of slice 0 run under the
     // exponentials of columns 2 / 3, and the last slice's P V of slot u - 1 is deferred into slot u (behind its first S columns).
     uint32_t pd[RW][2][4];                                    // the deferred slice: packed P of keys 16-31 of the previous slot
@@ -264,6 +264,7 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
 #pragma unroll
       for (int w = 0; w < RW; ++w) {
         float mu[2][2];
+        if constexpr (SAFE) {
 #pragma unroll
         for (int mt = 0; mt < 2; ++mt)
 #pragma unroll
@@ -281,12 +282,13 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
 #pragma unroll
             for (int dn = 0; dn < 4; ++dn) { o[w][mt][dn][2 * hh] *= alpha; o[w][mt][dn][2 * hh + 1] *= alpha; }
           }
+        }
 #pragma unroll
         for (int mt = 0; mt < 2; ++mt)
 #pragma unroll
           for (int jj = 0; jj < 4; ++jj)
 #pragma unroll
-            for (int e = 0; e < 4; ++e) sc[w][mt][jj][e] = ex2f(fmaf(sc[w][mt][jj][e], c1, -mu[mt][e >> 1]));
+            for (int e = 0; e < 4; ++e) sc[w][mt][jj][e] = (SAFE ? ex2f(fmaf(sc[w][mt][jj][e], c1, -mu[mt][e >> 1])) : ex2f(sc[w][mt][jj][e] * c1));
 #pragma unroll
         for (int kl = 0; kl < 2; ++kl) {
           uint32_t pa[2][4];
