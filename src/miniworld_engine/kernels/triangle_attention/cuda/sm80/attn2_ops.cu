@@ -106,12 +106,11 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
     r.q = p.q; r.k = p.k; r.v = p.v; r.bias = p.bias; r.out = p.out; r.lse = nullptr;
     r.ldq = Lq.tok; r.ldk = Lk.tok; r.ldv = Lv.tok; r.ldo = Lo.tok; r.L = (int)L; r.H = (int)H; r.scl = (float)scl;
     switch (rf) {
-      case 1: launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16>>(r, Z, scl, q); return;
-      case 2: launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16, true>>(r, Z, scl, q); return;
-      case 3: launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16, false, true>>(r, Z, scl, q); return;
-      case 4: launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16, true, true>>(r, Z, scl, q); return;
-      case 5: launch_rf16<a100::AttnRCfg<2, 2, 2, 4, false, 16, true, true>>(r, Z, scl, q); return;
-      default: launch_rf16<a100::AttnRCfg<1, 2, 4, 6, false, 16, true, true>>(r, Z, scl, q); return;
+      case 1: launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16, true>>(r, Z, scl, q); return;
+      case 2: launch_rf16<a100::AttnRCfg<1, 4, 4, 4, false, 16, true>>(r, Z, scl, q); return;
+      case 3: launch_rf16<a100::AttnRCfg<1, 4, 4, 5, false, 16, true>>(r, Z, scl, q); return;
+      case 4: launch_rf16<a100::AttnRCfg<2, 2, 2, 4, false, 16, true>>(r, Z, scl, q); return;
+      default: launch_rf16<a100::AttnRCfg<1, 4, 4, 3, false, 16, true>>(r, Z, scl, q); return;
     }
   }
   const int64_t eff = sched != 0 ? sched : (L >= 256 ? 4 : 0);

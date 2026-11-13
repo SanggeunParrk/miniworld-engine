@@ -22,11 +22,10 @@
 
 namespace a100 {
 
-template <int WR_, int RW_, int QG_, int ST_, bool GATE_ = false, int HD_ = 32, bool FSUM_ = false, bool BCVT_ = false>
+template <int WR_, int RW_, int QG_, int ST_, bool GATE_ = false, int HD_ = 32, bool BCVT_ = false>
 struct AttnRCfg {
   static constexpr int WR = WR_, RW = RW_, QG = QG_, ST = ST_, HD = HD_;
   static constexpr bool GATE = GATE_;
-  static constexpr bool FSUM = FSUM_;   // row sums by fp32 adds of the weights (else: of the bf16 P, a ones-column mma)
   static constexpr bool BCVT = BCVT_;   // the bias / scale operand converted in registers (else: the bias-scaling mma)
   static constexpr int R = WR * RW, BM = 32 * QG, NW = WR * QG, NTHR = 32 * NW;
   static constexpr int KEYS = 32;                            // keys per ring slot
@@ -42,7 +41,7 @@ struct AttnRCfg {
   static constexpr int KV_IT = R * CPR / NTHR;               // 16-byte K (and V) chunks per thread and slot
   static constexpr int B_IT = BM * 4 / NTHR;                 // bias chunks per thread and slot
   static constexpr int Q_IT = R * BM * GR / NTHR;
-  static_assert(RW == 1 || RW == 2, "rows per warp");
+  static_assert(RW == 1 || RW == 2 || RW == 4, "rows per warp");
   static_assert(HD == 16 || HD == 32, "head dim");
   static_assert(NTHR % CPR == 0 && (R * CPR) % NTHR == 0, "whole pair rows of K / V chunks per thread step");
   static_assert(Q_BYTES <= SLOT, "Q rides in through one ring slot");
@@ -233,12 +232,7 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
       pa[mt][1] = pack_bf16(pw[0][2], pw[0][3]);
       pa[mt][2] = pack_bf16(pw[1][0], pw[1][1]);
       pa[mt][3] = pack_bf16(pw[1][2], pw[1][3]);
-      if constexpr (G::FSUM) {                                // lane partials: l4[.][0] row g, l4[.][2] row g + 8 (quad-reduced in the epilogue)
-        l4[w][mt][0] += (pw[0][0] + pw[0][1]) + (pw[1][0] + pw[1][1]);
-        l4[w][mt][2] += (pw[0][2] + pw[0][3]) + (pw[1][2] + pw[1][3]);
-      } else {
-        mma_acc(l4[w][mt], pa[mt], ONES, ONES);
-      }
+      mma_acc(l4[w][mt], pa[mt], ONES, ONES);
     }
   };
   // O += P V of the 16-key slice kl of slot sb, row w
@@ -297,7 +291,7 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
     for (int mt = 0; mt < 2; ++mt)
 #pragma unroll
       for (int hh = 0; hh < 2; ++hh) {
-        const float lt = G::FSUM ? quad_sum(l4[w][mt][2 * hh]) : l4[w][mt][2 * hh];
+        const float lt = l4[w][mt][2 * hh];
         if constexpr (!SAFE) {
           bad |= !(lt >= 0x1p-80f && lt <= 3.0e38f);
 #pragma unroll
