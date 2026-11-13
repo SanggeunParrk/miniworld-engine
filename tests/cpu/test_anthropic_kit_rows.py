@@ -102,7 +102,10 @@ def test_exclusions_are_per_capability(driver, monkeypatch):
     monkeypatch.setattr(_anthropic, "load", lambda *a, **k: Prov)
     driver(12080)
     pair = torch.zeros(1, 4, 4, 128, dtype=torch.bfloat16)
-    for cap, rows, refused in (((8, 0), TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS_SM80, False), ((9, 0), TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS, True)):
+    for cap, rows, refused in (
+        ((8, 0), TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS_SM80, False),
+        ((9, 0), TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS, True),
+    ):
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a, cap=cap: cap)
         seen["cc"] = "{}.{}".format(*cap)
         TriangleMultiplication(d_pair=128)._anthropic_select(pair)

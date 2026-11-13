@@ -97,7 +97,14 @@ def test_transition_sm80_train_overlap_backward_bits(d_hidden: int, n: int) -> N
     dws = fw._mm_f32(dyf.t(), hid)
     dwab = fw._mm_f32(dab.t(), xn)
     dx, dgam, dbeta = ext.ln_bwd(fw._mm_f32(dab, fw._wab(wa16, wb16)), flat, stats, m.ln_in.weight.float(), dyf, torch.float32)
-    ref = {"dx": dx, "ln_in.weight": dgam, "ln_in.bias": dbeta, "expand_a.weight": dwab[:h], "expand_b.weight": dwab[h:], "squeeze.weight": dws}
+    ref = {
+        "dx": dx,
+        "ln_in.weight": dgam,
+        "ln_in.bias": dbeta,
+        "expand_a.weight": dwab[:h],
+        "expand_b.weight": dwab[h:],
+        "squeeze.weight": dws,
+    }
     names = ["y", "dx"] + [k for k, _ in m.named_parameters()]
     got = dict(zip(names, first, strict=True))
     assert torch.equal(got["dx"].reshape(-1, d_hidden), ref["dx"])

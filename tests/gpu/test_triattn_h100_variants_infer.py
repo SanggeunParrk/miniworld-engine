@@ -66,7 +66,11 @@ def test_chai_layouts_on_the_sm90_path(cls, starting: bool, L: int) -> None:
 
 @pytest.mark.parametrize(
     "cls,d,kw",
-    [(TriangleAttentionRF3, 64, {"d_hidden": 256}), (TriangleAttentionChai1, 256, {}), (TriangleAttentionChai1Confidence, 64, {"d_hidden": 256})],
+    [
+        (TriangleAttentionRF3, 64, {"d_hidden": 256}),
+        (TriangleAttentionChai1, 256, {}),
+        (TriangleAttentionChai1Confidence, 64, {"d_hidden": 256}),
+    ],
 )
 @pytest.mark.parametrize("starting", [True, False])
 def test_dh_skip_is_bitwise(cls, d: int, kw: dict, starting: bool, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -156,7 +156,9 @@ def wide(d_pair: int, d_hidden: int, n_head: int) -> bool:
     return WIDE.get(d_pair) == n_head and d_hidden == d_pair
 
 
-def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, out=None, flip=False, gate_bias=None, out_bias=None, fold=None):
+def inference(
+    pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, out=None, flip=False, gate_bias=None, out_bias=None, fold=None
+):
     """pair + TriangleAttention(pair) for the starting node, no grad: front (LN + projections + bias) -> core -> tail (gate +
     out-projection + residual).  w4, wb16 = pack_front(...); wo16 = Wo in bf16; `out`: a contiguous tensor like pair to write into.  ``flip``: the ending node (``trans``) takes its
     bias from the pair as it is (:func:`flip_bias`). ``gate_bias`` [128] / ``out_bias`` [C]: biases of the gate / out-projection

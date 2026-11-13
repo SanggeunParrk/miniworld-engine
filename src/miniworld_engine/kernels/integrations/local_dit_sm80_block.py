@@ -252,7 +252,9 @@ def _weights_bwd(weights):
     return _capture.hold(pack, False)
 
 
-_HOIST_COND: dict = _capture.weight_cache("local_dit_sm80_block.hoist_cond")  # (conditioning tensor, weights) -> mod: the per-item conditioning table of an inference call
+_HOIST_COND: dict = _capture.weight_cache(
+    "local_dit_sm80_block.hoist_cond"
+)  # (conditioning tensor, weights) -> mod: the per-item conditioning table of an inference call
 _HOIST_BIAS: dict = _capture.weight_cache("local_dit_sm80_block.hoist_bias")  # (pair tensor, LN / bias weights) -> the windowed pair bias
 
 

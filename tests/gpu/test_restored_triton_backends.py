@@ -145,7 +145,12 @@ def test_bias_only_token_dit_block(dtype):
 def test_swa_atom_block(dtype, grad, half_window):
     m = _randomize(AtomDiTMiniWorld(half_window=half_window).cuda())
     inputs = m.make_inputs(
-        length=320 if half_window != 64 else 256, samples=2, depth=None, dtype=torch.float32, device="cuda", generator=torch.Generator("cuda").manual_seed(0)
+        length=320 if half_window != 64 else 256,
+        samples=2,
+        depth=None,
+        dtype=torch.float32,
+        device="cuda",
+        generator=torch.Generator("cuda").manual_seed(0),
     )
     _check(m, inputs, dtype, grad=grad, tol=6e-2 if dtype == torch.bfloat16 else 2e-2)  # the window attention runs on bf16 operands
 

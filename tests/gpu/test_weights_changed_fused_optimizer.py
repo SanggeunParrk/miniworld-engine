@@ -32,7 +32,9 @@ def test_fused_adam_step_is_seen_after_weights_changed(target) -> None:
     m.set_backend("cuda")
     params = [p for p in m.parameters() if p.requires_grad]
     opt = torch.optim.Adam(params, lr=1e-2, fused=True)
-    inp = m.make_inputs(length=128, samples=5, depth=None, dtype=torch.bfloat16, device="cuda", generator=torch.Generator(device="cuda").manual_seed(1))
+    inp = m.make_inputs(
+        length=128, samples=5, depth=None, dtype=torch.bfloat16, device="cuda", generator=torch.Generator(device="cuda").manual_seed(1)
+    )
 
     def infer():
         m.eval()

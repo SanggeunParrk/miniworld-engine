@@ -53,7 +53,9 @@ def test_accumulated_gradients_are_the_sum_of_the_passes(samples) -> None:
     blocks = _blocks(3)
     params = [p for b in blocks for p in b.parameters() if p.requires_grad]
     g = torch.Generator(device="cuda").manual_seed(1)
-    inps = [blocks[0].make_inputs(length=128, samples=samples, depth=None, dtype=torch.bfloat16, device="cuda", generator=g) for _ in range(3)]
+    inps = [
+        blocks[0].make_inputs(length=128, samples=samples, depth=None, dtype=torch.bfloat16, device="cuda", generator=g) for _ in range(3)
+    ]
 
     def single(inp):
         for p in params:
