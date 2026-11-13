@@ -144,25 +144,29 @@ void weight_grad(torch::Tensor d, torch::Tensor v, torch::Tensor out, int64_t cf
                               at::cuda::getCurrentCUDAStream());
 }
 
-// out = op(a) op(b) (+ c) (one GEMM, row-major bf16): a [M, K] (trans_a: [K, M]), b [K, N] (trans_b: [N, K]), c [M, N] or empty -> out [M, N] bf16
+// out = op(a) op(b) (+ c), row-major bf16, one GEMM or a batch: a [(B,) M, K] (trans_a: [(B,) K, M]), b [(B,) K, N] (trans_b: [(B,) N, K]),
+// c [(B,) M, N] or empty -> out [(B,) M, N] bf16 (a 2-D operand is shared by the batch)
 void mm(torch::Tensor a, torch::Tensor b, torch::Tensor c, torch::Tensor out, bool trans_a, bool trans_b, int64_t cfg) {
   for (auto* t : {&a, &b, &out})
-    TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kBFloat16 && t->is_contiguous() && t->dim() == 2, "pwa gemm_sm120 mm: contiguous bf16 2-D");
-  const int64_t M = trans_a ? a.size(1) : a.size(0), K = trans_a ? a.size(0) : a.size(1), N = trans_b ? b.size(0) : b.size(1);
-  TORCH_CHECK((trans_b ? b.size(1) : b.size(0)) == K && out.size(0) == M && out.size(1) == N && M % 8 == 0 && N % 8 == 0 && K % 8 == 0, "pwa gemm_sm120 mm: shapes");
+    TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kBFloat16 && t->is_contiguous() && (t->dim() == 2 || t->dim() == 3), "pwa gemm_sm120 mm: contiguous bf16 2-D / 3-D");
+  const int64_t B = out.dim() == 3 ? out.size(0) : 1;
+  TORCH_CHECK((a.dim() == 2 || a.size(0) == B) && (b.dim() == 2 || b.size(0) == B), "pwa gemm_sm120 mm: batch");
+  const int64_t ar = a.size(a.dim() - 2), ac = a.size(a.dim() - 1), br = b.size(b.dim() - 2), bc = b.size(b.dim() - 1);
+  const int64_t M = trans_a ? ac : ar, K = trans_a ? ar : ac, N = trans_b ? br : bc;
+  TORCH_CHECK((trans_b ? bc : br) == K && out.size(out.dim() - 2) == M && out.size(out.dim() - 1) == N && M % 8 == 0 && N % 8 == 0 && K % 8 == 0, "pwa gemm_sm120 mm: shapes");
   const at::cuda::CUDAGuard guard(a.device());
   auto s = at::cuda::getCurrentCUDAStream();
-  const int64_t lda = a.size(1), ldb = b.size(1);
-  TORCH_CHECK(c.numel() == 0 || (c.scalar_type() == at::kBFloat16 && c.is_contiguous() && c.sizes() == out.sizes()), "pwa gemm_sm120 mm: c bf16 [M, N] or empty");
+  const int64_t sa = a.dim() == 3 ? ar * ac : 0, sb = b.dim() == 3 ? br * bc : 0, so = M * N;
+  TORCH_CHECK(c.numel() == 0 || (c.scalar_type() == at::kBFloat16 && c.is_contiguous() && c.sizes() == out.sizes()), "pwa gemm_sm120 mm: c bf16 like out or empty");
   const void* cin = c.numel() ? c.data_ptr() : nullptr;
   if (trans_a && trans_b)
-    dispatch<ColM, ColM, bf>((int)cfg, a.data_ptr(), lda, 0, 1, b.data_ptr(), ldb, 0, out.data_ptr(), N, 0, cin, (int)M, (int)N, (int)K, 1, s);
+    dispatch<ColM, ColM, bf>((int)cfg, a.data_ptr(), ac, sa, 1, b.data_ptr(), bc, sb, out.data_ptr(), N, so, cin, (int)M, (int)N, (int)K, (int)B, s);
   else if (trans_a)
-    dispatch<ColM, RowM, bf>((int)cfg, a.data_ptr(), lda, 0, 1, b.data_ptr(), ldb, 0, out.data_ptr(), N, 0, cin, (int)M, (int)N, (int)K, 1, s);
+    dispatch<ColM, RowM, bf>((int)cfg, a.data_ptr(), ac, sa, 1, b.data_ptr(), bc, sb, out.data_ptr(), N, so, cin, (int)M, (int)N, (int)K, (int)B, s);
   else if (trans_b)
-    dispatch<RowM, ColM, bf>((int)cfg, a.data_ptr(), lda, 0, 1, b.data_ptr(), ldb, 0, out.data_ptr(), N, 0, cin, (int)M, (int)N, (int)K, 1, s);
+    dispatch<RowM, ColM, bf>((int)cfg, a.data_ptr(), ac, sa, 1, b.data_ptr(), bc, sb, out.data_ptr(), N, so, cin, (int)M, (int)N, (int)K, (int)B, s);
   else
-    dispatch<RowM, RowM, bf>((int)cfg, a.data_ptr(), lda, 0, 1, b.data_ptr(), ldb, 0, out.data_ptr(), N, 0, cin, (int)M, (int)N, (int)K, 1, s);
+    dispatch<RowM, RowM, bf>((int)cfg, a.data_ptr(), ac, sa, 1, b.data_ptr(), bc, sb, out.data_ptr(), N, so, cin, (int)M, (int)N, (int)K, (int)B, s);
 }
 
 // ---- the BIG width's value | gate projection with the head-major store (pwa_wide_sm80): [v | g] = y [Wv; Wg]^T, y [S L, 256] (rows (s, j)),

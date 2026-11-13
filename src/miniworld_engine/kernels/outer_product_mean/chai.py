@@ -164,8 +164,12 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
     dbet = w32.t() @ dbo
     do = cuda.chai_bwd(dy, y, st, n)
     del dy
-    da = torch.bmm(b.view(G, s, n * K), do.transpose(1, 2))  # [8, S, N K]
-    db = torch.bmm(a.view(G, s, n * K), do)
+    bwd_products = getattr(cuda, "chai_bwd_products", None)  # A100 / RTX 5090: the card's batched GEMMs
+    if bwd_products is not None:
+        da, db = bwd_products(a, b, do, s, n)  # [8, S, N K]
+    else:
+        da = torch.bmm(b.view(G, s, n * K), do.transpose(1, 2))  # [8, S, N K]
+        db = torch.bmm(a.view(G, s, n * K), do)
     del do
     x = msa[0].reshape(t, CM).contiguous()
     mk = None

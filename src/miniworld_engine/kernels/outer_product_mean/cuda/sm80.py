@@ -125,7 +125,9 @@ def epilogue(
     length = o.shape[0] // CH
     out = o.new_empty((length, length, wo.shape[0]))
     if variant is None:
-        variant = 0  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
+        # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one.  The RTX 5090 at d_pair 256 from L 512: the wide CTA (16 warps,
+        # all channels; its 99 KiB hold one 2-CTA schedule CTA, so the shipped overlap is gone there): 6-9 % faster, the same bits
+        variant = 1 if _card.sm120() and wo.shape[0] == 256 and length >= 512 else 0
     ext().epilogue(
         o,
         _none(o, torch.float32) if norm is None else norm,

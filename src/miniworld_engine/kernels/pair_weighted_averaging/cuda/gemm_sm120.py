@@ -72,10 +72,11 @@ def weight_grad(d: torch.Tensor, v: torch.Tensor, cfg: int | None = None) -> tor
 
 
 def mm(a: torch.Tensor, b: torch.Tensor, trans_a: bool, trans_b: bool, cfg: int = 0, c: torch.Tensor | None = None) -> torch.Tensor:
-    """op(a) @ op(b) (+ c, fp32 sum rounded once), row-major bf16 2-D -> bf16 [M, N]."""
-    m = a.shape[1] if trans_a else a.shape[0]
-    n = b.shape[0] if trans_b else b.shape[1]
-    out = a.new_empty((m, n))
+    """op(a) @ op(b) (+ c, fp32 sum rounded once), row-major bf16 -> bf16 [M, N]; with a 3-D operand a batch [B, M, N] (a 2-D operand shared)."""
+    m = a.shape[-1] if trans_a else a.shape[-2]
+    n = b.shape[-2] if trans_b else b.shape[-1]
+    batch = a.shape[0] if a.dim() == 3 else b.shape[0] if b.dim() == 3 else None
+    out = a.new_empty((m, n) if batch is None else (batch, m, n))
     ext().mm(a, b, a.new_empty((0,)) if c is None else c, out, trans_a, trans_b, cfg)
     return out
 

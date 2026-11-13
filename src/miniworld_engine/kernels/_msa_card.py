@@ -88,7 +88,7 @@ def prebuild_sm120(rows_opm: bool = True, rows_pwa: bool = True, rows_chai: bool
     if rows_opm:
         loaders += [opm.ext, ogemm_sm80.ext, mask_count_ballot_sm80._ext, mask_epilogue_sm80._ext, gemm_sm120.ext]
     if rows_chai:
-        loaders += [chai_sm80.ext, ogemm_sm80.ext]
+        loaders += [chai_sm80.ext, ogemm_sm80.ext, gemm_sm120.ext]
     if rows_pwa:
         loaders += [pwa.ext, gemm_sm120.ext]  # (the cuBLAS broadcast_bmm is not reached on the 5090: gemm_sm120 serves the contraction)
     if rows_wide:
