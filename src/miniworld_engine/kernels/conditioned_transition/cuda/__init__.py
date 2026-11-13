@@ -16,6 +16,7 @@ import torch
 from torch.multiprocessing.reductions import StorageWeakRef
 
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels._key_len import key_len
 
 _dir = Path(__file__).parent
 STAT_W = 128  # kept for the runner's buffer layout (the Triton module's statistics width)
@@ -527,12 +528,14 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         # every past trajectory's biases (and, with the static captures pinning them, filled the store so the next trajectory's
         # entries were evicted before its capture read them: the rebuild was recorded into every replay -- +41 % on a 512-token
         # Protenix-v2 sampler from its second call).
-        return bias, StorageWeakRef(pair.untyped_storage()), mask, wf, extra
+        # klen: 1 + the last attended key (``kernels._key_len``), held with the bias: a static input refresh rewrites it in place with the
+        # mask (the core skips the key blocks past it, the same bits)
+        return bias, StorageWeakRef(pair.untyped_storage()), mask, wf, extra, key_len(mask, L)
 
     # The pair bias depends on the pair, the key mask and the weights only: the same at every solver step. Served from the
     # per-input cache (``static_inputs()``: a replay re-runs no producing kernel, as the harness and a sampler declare);
     # a capture without it records the build once and every replay rebuilds it from the pair as it is then.
-    bias = _capture.lookup_inputs(
+    entry = _capture.lookup_inputs(
         _PAIR_BIAS,
         (
             pair.data_ptr(),
@@ -560,7 +563,8 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
             fp32,
             None if extra is None else extra.data_ptr(),
         ),
-    )[0]
+    )
+    bias, klen = entry[0], entry[5]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = (
         cond[0].reshape(-1, DC) if shared else cond.reshape(-1, DC)
@@ -630,9 +634,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         vt = torch.mm(wqkvg[3 * D :], xa.t())
         if qk_rna:
             rna_rows(vt, M)  # v^T rounded as q / k (the core truncates)
-        attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads)
+        attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads, klen=klen)
     else:
-        attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B)
+        attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B, klen=klen)
     ya = torch.mm(qkvg[:, :D], wo.t())
     if not parallel and fold:
         _ext().resgate_adaln_cf_cuda(xin, ya, G, r1, b1f, b2f, stats, xa, ada_eps, _PDL)

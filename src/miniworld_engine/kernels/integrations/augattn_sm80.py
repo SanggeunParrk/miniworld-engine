@@ -40,6 +40,7 @@ import torch
 import torch.nn.functional as F
 
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels._key_len import key_len
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import build_failed
 
@@ -484,12 +485,23 @@ def _fwd(
                 cast(torch.Tensor, kmask)[b] if mask_kind == 1 else None,
             )
     kpen = _penalties(cast(torch.Tensor, kmask), a, batch, length, padded) if mask_kind == 2 else None
+    # inference (bf16 core): the key tiles past each fold's (kind 2: each sample's) last attended key, and the pad keys to Lp, are skipped by
+    # the core (``kernels._key_len``; the same bits)
+    klens = None
+    if not save and dt is BF:
+        if mask_kind == 1:
+            klens = key_len(kmask, length)  # [B]
+        elif mask_kind == 2:
+            klens = key_len(cast(torch.Tensor, kmask).transpose(0, 1), length).view(batch, a)
+        elif padded != length:
+            klens = torch.full((batch,), length, device=dev, dtype=torch.int32)
     if save:
         o = torch.empty(m, d, device=dev, dtype=dt)
         lse = torch.empty(batch * a, heads, padded, device=dev, dtype=torch.float32)
     for b in range(batch):
         rows = slice(b * n, (b + 1) * n)
         kp = None if kpen is None else kpen[b]
+        kl = None if klens is None else (klens[b] if mask_kind == 2 else klens[b : b + 1])
         if f32 and save:
             sm80.tf32_forward(
                 q[rows],
@@ -560,6 +572,7 @@ def _fwd(
                 save_lse=False,
                 kpen=kp,
                 out=q[rows],
+                klen=kl,
             )
         else:
             sm80.pgate_forward(
@@ -574,6 +587,7 @@ def _fwd(
                 hd,
                 kpen=kp,
                 out=q[rows],
+                klen=kl,
             )
         if mask_kind == 1 and dt is BF and d == 128 and hd == 32:
             from miniworld_engine.kernels.augmented_attention.cuda import (

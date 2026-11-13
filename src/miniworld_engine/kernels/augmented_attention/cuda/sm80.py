@@ -450,6 +450,7 @@ def plain_forward(
     out: torch.Tensor | None = None,
     lse: torch.Tensor | None = None,
     warps: int = 8,
+    klen: torch.Tensor | None = None,
 ):
     """``softmax(q k^T / sqrt(hd) + bias) v`` for ``samples`` problems that share the bias: ``q`` / ``k`` / ``v`` token-major bf16 views ``[A L, H hd]`` (row
     strides >= H hd and a multiple of 8), ``bias`` head-major bf16 ``[H, L, L]`` **in raw units**, ``bias_natural / sm_scale`` (the units of ``q . k``: the kernel adds it
@@ -457,7 +458,8 @@ def plain_forward(
     log-sum-exp) or an empty tensor.  ``sm_scale`` (default 1 / sqrt(head_dim)) is the softmax scale: a head padded with zero columns (24 -> 32) keeps its real one.
     ``kpen`` (``key_penalty`` of a bool ``[A, L]`` mask, sample stride ``kps`` floats, default L) is a key mask that differs per sample; ``out``: write ``o`` into this
     bf16 ``[A L, >= H hd]`` view instead of a new tensor, ``lse`` the fp32 ``[A, H, L]`` tensor the log-sum-exp goes into (with ``save_lse``).  ``warps`` 2 or 4 (one
-    sample, no ``kpen``): CTAs of that many warps, 16 queries each, instead of 8 (a latency-bound grid of a few dozen CTAs gets more, shorter ones)."""
+    sample, no ``kpen``): CTAs of that many warps, 16 queries each, instead of 8 (a latency-bound grid of a few dozen CTAs gets more, shorter ones).
+    ``klen`` (int32 [1] or [samples], ``kernels._key_len.key_len``) or None: the key tiles past each sample's last attended key are skipped (the same bits)."""
     assert head_dim in HEAD_DIMS or (head_dim == 16 and samples == 1 and kpen is None), head_dim
     dev = q.device
     sm_scale = 1.0 / math.sqrt(head_dim) if sm_scale is None else sm_scale
@@ -492,7 +494,10 @@ def plain_forward(
         pen,
         kps,
     )
-    if warps < 8:
+    if klen is not None:
+        assert warps == 8 or (samples == 1 and kpen is None and warps in (2, 4)), (samples, warps)
+        _ext().attn_fwd_kl(*args, warps, klen)
+    elif warps < 8:
         assert samples == 1 and kpen is None and warps in (2, 4), (samples, warps)
         _ext().attn_fwd_nw(*args, warps)
     else:
@@ -515,14 +520,15 @@ def pgate_forward(
     kpen: torch.Tensor | None = None,
     kps: int = 0,
     out: torch.Tensor | None = None,
+    klen: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """The module-level inference core: ``sigmoid(g) softmax(q k^T / sqrt(hd) + bias) v`` bf16 ``[A L, H hd]`` (the operands, the raw-unit bias, ``kpen`` and ``out`` as for
-    :func:`plain_forward`; ``g`` token-major like q).  ``out`` may be ``q`` itself (the result is written over it: q is dead once its tile is loaded)."""
+    :func:`plain_forward`; ``g`` token-major like q).  ``out`` may be ``q`` itself (the result is written over it: q is dead once its tile is loaded). ``klen``: as :func:`plain_forward`'s."""
     assert head_dim in HEAD_DIMS, head_dim
     sm_scale = 1.0 / math.sqrt(head_dim) if sm_scale is None else sm_scale
     o = torch.empty(samples * length, heads * head_dim, device=q.device, dtype=torch.bfloat16) if out is None else out
     pen, kps = _penalty(kpen, kps, length)
-    _ext().attn_fwd(
+    args = (
         q,
         k,
         v,
@@ -547,6 +553,10 @@ def pgate_forward(
         pen,
         kps,
     )
+    if klen is None:
+        _ext().attn_fwd(*args)
+    else:
+        _ext().attn_fwd_kl(*args, 8, klen)
     return o
 
 

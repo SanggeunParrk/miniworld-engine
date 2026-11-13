@@ -44,6 +44,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels import _capture, _cast_cuda
+from miniworld_engine.kernels._key_len import key_len
 from miniworld_engine.kernels._compile import opaque
 
 DP = 128
@@ -295,6 +296,8 @@ def inference(
         wpack, bvec, wf, wop, _ = _inference_packs(params, leaves, gate_bias)
         wo = leaves[7] if wop is None else wop
         neg = -math.inf if torch.cuda.get_device_capability(dev) == (9, 0) else NEG
+        # H100: each row's key blocks past its last attended key are skipped by the core (``kernels._key_len``; the same bits)
+        klen = key_len(mask, L) if neg == -math.inf else None
         core = _cores.get((dev.index, H, D))
         if core is None:
             core = _cores[(dev.index, H, D)] = _inference_core(dev, H, D)
@@ -313,7 +316,7 @@ def inference(
                 bias = rows.pair_bias_batch(pair[b0:b1], wf, None if mask is None else mask[b0:b1], eps_p, neg)  # [H, b1 - b0, L, L]
                 if extra is not None:
                     bias.add_(extra[b0:b1].transpose(0, 1).to(bias.dtype), alpha=LOG2E)
-                core.batch(qkvg, bias)
+                core.batch(qkvg, bias, None if klen is None else klen[b0:b1])
                 y.addmm_(qkvg[:, :W], wo.t())
             return out
         xa = single.new_empty((L, D))  # one row's LN(single), rewritten row after row (stream order)
@@ -324,7 +327,10 @@ def inference(
             bias = rows.pair_bias(pair[b].view(L * L, wf.shape[1]), wf, _row(mask, b), L, eps_p, neg)
             if extra is not None:  # a masked key stays at -inf (H100) / NEG + extra (B200: finite, still far below every real logit)
                 bias.add_(extra[b].to(bias.dtype), alpha=LOG2E)
-            core(qkvg, bias)
+            if klen is None:
+                core(qkvg, bias)
+            else:
+                core(qkvg, bias, klen[b : b + 1])
             y.addmm_(qkvg[:, :W], wo.t())
         return out
 
@@ -824,6 +830,7 @@ def inference32(
     with torch.cuda.device(single.device):
         w3, b3, wv, wo, wf = _inference32_packs(leaves, gate_bias)
         out = torch.empty_like(single)
+        klen = key_len(mask, L)  # each row's key blocks past its last attended key skipped by the TF32 core (the same bits)
         xa = single.new_empty((L, D))
         for b in range(B):
             x, y = single[b], out[b]
@@ -834,7 +841,7 @@ def inference32(
             E.pair_bias32_fwd(pair[b].view(L * L, dp), wf, _row(mask, b), bias, None, None, L, eps_p, -math.inf)
             if extra is not None:
                 bias.add_(extra[b].to(bias.dtype)[:, :, _key_perm32(L, single.device)[0]], alpha=LOG2E)
-            _sm90().tf32_gated_inference(qkg, vt, bias, 0, 1, 2 * W, nh=H, dh=dhp)
+            _sm90().tf32_gated_inference(qkg, vt, bias, 0, 1, 2 * W, nh=H, dh=dhp, klen=None if klen is None else klen[b : b + 1])
             y.addmm_(qkg[:, :W], wo.t())
         return out
 

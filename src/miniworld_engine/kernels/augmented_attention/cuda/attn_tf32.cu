@@ -206,7 +206,7 @@ template <bool GATED, bool HASM>
 __global__ void __launch_bounds__(128 * NWG + 32, BLKSM)
 attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk,
                      const __grid_constant__ CUtensorMap mvt, const __grid_constant__ CUtensorMap mb, const float* __restrict__ Bias, const float* __restrict__ KM,
-                     float* __restrict__ O, float* __restrict__ LSE, float* __restrict__ OUT, long so, long goff, int L, int A) {
+                     float* __restrict__ O, float* __restrict__ LSE, float* __restrict__ OUT, long so, long goff, int L, int A, const int* __restrict__ KLEN) {
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint8_t* sq = sm;
@@ -220,7 +220,9 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
   const int samp = blockIdx.x % A, cid = blockIdx.x / A;
   const int m_tile = cid % mt, head = cid / mt;
   const int m0 = m_tile * QM, qcol = head * DH, srow = samp * L;
-  const int nblocks = L / FBN;
+  // KLEN (inference, one int: the samples share the key mask): 1 + the last attended key, L when none is. The key blocks past it are
+  // masked in every row (exact zeros after the live max; key_perm keeps a key inside its 8-key group): neither loaded nor computed.
+  const int nblocks = KLEN ? max(1, min(L / FBN, (KLEN[0] + FBN - 1) / FBN)) : L / FBN;
 
   if (tid == 0) {
     for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], 2); mbar_init(&empty[s], 4 * NWG); }
@@ -1344,7 +1346,7 @@ CUtensorMap map_kperm(const float* p, uint64_t rows, uint64_t cols, uint64_t rs,
 
 template <bool GATED, bool HASM>
 void launch(int A, int L, const CUtensorMap& mq, const CUtensorMap& mk, const CUtensorMap& mvt, const float* bias,
-            const float* km, float* o, float* lse, float* out, long so, long goff) {
+            const float* km, float* o, float* lse, float* out, long so, long goff, const int* klen = nullptr) {
   const CUtensorMap mb = map2d(bias, (uint64_t)NH * L, L, L, QM);   // the bias as [head * L + row, key]: the L2 prefetch's descriptor
 #if FWD_PIPE
   const size_t smem = 1024 + Q_BYTES + PSTAGES * ST_BYTES + 256;
@@ -1359,7 +1361,7 @@ void launch(int A, int L, const CUtensorMap& mq, const CUtensorMap& mk, const CU
                                                                                     goff, L, A);
 #else
   kern<<<A * NH * (L / QM), 128 * NWG + 32, smem, at::cuda::getCurrentCUDAStream()>>>(mq, mk, mvt, mb, bias, km, o, lse, out, so,
-                                                                                    goff, L, A);
+                                                                                    goff, L, A, klen);
 #endif
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -1429,7 +1431,9 @@ void attn_tf32_fwd_og(torch::Tensor q, torch::Tensor k, torch::Tensor vt, torch:
 // Inference: qkg [S L, >= 3 * 768] fp32 (q | k at columns 0 | 768, q in exp2 units; g at column goff), vt = v^T [768, S L];
 // bias_all [nb 16, L, L] fp32, key-permuted, log2 units (masked keys -inf). Writes sigmoid(g) softmax(q k^T + bias) v over q
 // for ``block``'s slice of the bias.
-void attn_tf32_inf(torch::Tensor qkg, torch::Tensor vt, torch::Tensor bias_all, int64_t block, int64_t S, int64_t goff) {
+// ``klen`` (optional, int32 [1], ``kernels._key_len``): the key blocks past it are skipped (bitwise the same outputs).
+void attn_tf32_inf(torch::Tensor qkg, torch::Tensor vt, torch::Tensor bias_all, int64_t block, int64_t S, int64_t goff,
+                   c10::optional<torch::Tensor> klen) {
   const int L = bias_all.size(1);
   for (auto* t : {&qkg, &vt, &bias_all}) check_f32(*t, "operand");
   const uint64_t rows = (uint64_t)S * L, rs = qkg.size(1);
@@ -1443,12 +1447,14 @@ void attn_tf32_inf(torch::Tensor qkg, torch::Tensor vt, torch::Tensor bias_all, 
   float* bias = bias_all.data_ptr<float>() + (size_t)block * NH * L * L;
   int cs = 1;
   for (int c = 8; c >= 2; --c) if (S % c == 0) { cs = c; break; }   // samples of one (head, row tile) share the bias tile
-  if (MC_BIAS && FBN == 64 && cs > 1) {
+  const bool hk = klen.has_value() && klen->defined();
+  TORCH_CHECK(!hk || (klen->is_cuda() && klen->scalar_type() == torch::kInt32 && klen->numel() == 1), "klen must be an int32 [1]");
+  if (MC_BIAS && FBN == 64 && cs > 1 && !hk) {   // (the cluster kernel bounds no key loop: klen takes the one-CTA kernel)
     const auto mb = map2d(bias, (uint64_t)NH * L, L, L, QM);          // [head * L + row, key]: boxes of 32 keys x QM rows
     launch_mc<false>((int)S, L, cs, mq, mk, mvt, mb, nullptr, base, (long)rs, (long)goff);
     return;
   }
-  launch<true, false>((int)S, L, mq, mk, mvt, bias, nullptr, nullptr, nullptr, base, (long)rs, (long)goff);
+  launch<true, false>((int)S, L, mq, mk, mvt, bias, nullptr, nullptr, nullptr, base, (long)rs, (long)goff, hk ? klen->data_ptr<int>() : nullptr);
 }
 
 // Backward, dK and dV: q (exp2 units), dob = dO, k, v [A L, 768] fp32; qt, dot = q^T, dO^T [768, A L]; bt [16, L(key), L]
@@ -1517,7 +1523,8 @@ void attn_tf32_dqb(torch::Tensor q, torch::Tensor dob, torch::Tensor k, torch::T
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("attn_tf32_fwd", &attn_tf32_fwd);
   m.def("attn_tf32_fwd_og", &attn_tf32_fwd_og);
-  m.def("attn_tf32_inf", &attn_tf32_inf);
+  m.def("attn_tf32_inf", &attn_tf32_inf, py::arg("qkg"), py::arg("vt"), py::arg("bias_all"), py::arg("block"), py::arg("S"), py::arg("goff"),
+        py::arg("klen") = py::none());
   m.def("attn_tf32_dkv", &attn_tf32_dkv);
   m.def("attn_tf32_dqb", &attn_tf32_dqb);
 }

@@ -73,6 +73,8 @@ struct FwdParams {
   int L, H;
   float scl;                        // multiplies q . k (1 when q is pre-scaled by sm_scale log2 e)
   float bscl;                       // multiplies the bias (log2 e, or 1 when the bias is already in base 2)
+  const int* klen;                  // inference: 1 + the last attended key per sample (sample stride kls ints; L when none is) or null (attn_fwd_kernel)
+  int kls;
 };
 
 // RAWB: the bias rides through the tensor core in raw units (MODE_PLAIN, MODE_PGATE); the other modes add it in fp32 base-2 units
@@ -212,8 +214,16 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) attn_fwd_kernel(const FwdPar
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sbase = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int L = p.L, NJ = L / BN, NS = R * NJ;
   const int qt = blockIdx.x, a0 = blockIdx.y * R, h = blockIdx.z;
+  // klen: the key tiles past the last attended key of every sample of the CTA are masked in every row -- exact zeros after the row's live
+  // max (masked logits at -inf or a fill far below every live one) -- so they are neither loaded nor computed (the same bits)
+  int kl = p.L;
+  if (p.klen) {
+    kl = 0;
+#pragma unroll
+    for (int r = 0; r < R; ++r) kl = max(kl, p.klen[(a0 + r) * p.kls]);
+  }
+  const int L = p.L, NJ = max(1, min(L / BN, (kl + BN - 1) / BN)), NS = R * NJ;
 
   // ---- loads: sub-step s = (key tile j = s / R, sample r = s % R) brings its K | V, and the first sample of a key tile also its bias tile
   const KVBiasLoader<G> loader(p.k, p.v, p.ldk, p.ldv, p.bias, L, a0, h, qt, tid, p.ss, p.kpen, p.kps);
