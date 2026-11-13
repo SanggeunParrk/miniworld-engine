@@ -24,6 +24,10 @@ def _h100() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
 
 
+def _hooked(node) -> bool:
+    return bool(typing.cast(dict, node.metadata).get(FLAG))
+
+
 def _blocks(n: int) -> list:
     out = []
     for i in range(n):
@@ -64,7 +68,7 @@ def test_accumulated_gradients_are_the_sum_of_the_passes(samples) -> None:
             loss = _loss(blocks, inp)
             for p in params:  # no Python hook between the engine and a parameter's accumulation
                 node = torch.autograd.graph.get_gradient_edge(p).node
-                assert not node.metadata.get(FLAG), node.name()
+                assert not _hooked(node), node.name()
             loss.backward()
         return [typing.cast(torch.Tensor, p.grad).clone() for p in params]
 
@@ -89,7 +93,7 @@ def test_sample_expanded_conditioning_keeps_its_sum_hook() -> None:
         cond = base.expand(5, *base.shape[1:])
         loss = _loss(blocks, {**inp, "cond": cond})
         node = torch.autograd.graph.get_gradient_edge(cond).node
-        assert node.name() == "ExpandBackward0" and node.metadata.get(FLAG)
+        assert node.name() == "ExpandBackward0" and _hooked(node)
         loss.backward()
         return typing.cast(torch.Tensor, base.grad).clone()
 
