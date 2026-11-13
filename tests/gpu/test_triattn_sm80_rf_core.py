@@ -68,16 +68,16 @@ def _run32(mode: int, q, k, v, g, bias, gate: bool, key_mask: torch.Tensor | Non
     return out
 
 
-def _run16(mode: int, q, k, v, bias, key_mask: torch.Tensor | None = None) -> torch.Tensor:
+def _run16(mode: int, q, k, v, bias, key_mask: torch.Tensor | None = None, hd: int = 16) -> torch.Tensor:
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_core2 as c2
 
     L, H = q.shape[1], bias.shape[1]
-    out = torch.empty(1, L, L, H * 16, device="cuda", dtype=torch.bfloat16)
-    lay, lay_o = c2.token_major(L, q.stride(2), 16), c2.token_major(L, H * 16, 16)
+    out = torch.empty(1, L, L, H * hd, device="cuda", dtype=torch.bfloat16)
+    lay, lay_o = c2.token_major(L, q.stride(2), hd), c2.token_major(L, H * hd, hd)
     c2.ext().attn2_rf_set(mode)
     try:
-        c2.forward(q, k, v, bias, torch.empty(0, dtype=torch.uint8, device="cuda"), out, torch.empty(0, device="cuda"), (lay, lay, lay, lay_o), L, H, 1, 16,
-                   c2.default_scale(16), fixed=True, key_mask=key_mask)
+        c2.forward(q, k, v, bias, torch.empty(0, dtype=torch.uint8, device="cuda"), out, torch.empty(0, device="cuda"), (lay, lay, lay, lay_o), L, H, 1, hd,
+                   c2.default_scale(hd), fixed=hd == 16, key_mask=key_mask)
     finally:
         c2.ext().attn2_rf_set(-1)
     return out
@@ -106,15 +106,17 @@ def test_rf_core_32(kind: str, gate: bool) -> None:
 
 
 @pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+@pytest.mark.parametrize("hd", [16, 32, 64])
 @pytest.mark.parametrize("kind", KINDS)
-def test_rf_core_16(kind: str) -> None:
+def test_rf_core_attn2(kind: str, hd: int) -> None:
+    """The generalised core's entry: 16-channel heads (fixed-shift callers), 32 / 64 (the RoseTTAFold3 / Chai-1 variants, online softmax callers)."""
     L, H = 512, 4
-    q, k, v, g, bias = _inputs(L, H, 16, kind, seed=1)
+    q, k, v, g, bias = _inputs(L, H, hd, kind, seed=1)
     rows = [0, 3, L // 2 + 1, L - 1]
-    ref = _reference(q, k, v, g, bias, rows, 16, False)
-    rf = _run16(1, q, k, v, bias)
-    assert torch.equal(rf, _run16(1, q, k, v, bias)), "not bitwise deterministic"
-    base = _run16(0, q, k, v, bias)
+    ref = _reference(q, k, v, g, bias, rows, hd, False)
+    rf = _run16(1, q, k, v, bias, hd=hd)
+    assert torch.equal(rf, _run16(1, q, k, v, bias, hd=hd)), "not bitwise deterministic"
+    base = _run16(0, q, k, v, bias, hd=hd)
     err_rf = float((rf[0, rows].float() - ref).abs().max())
     err_base = float((base[0, rows].float() - ref).abs().max())
     assert not rf.isnan().any()

@@ -58,7 +58,7 @@ static int g_rf16 = -1;
 void attn2_rf_set(int64_t mode) { g_rf16 = (int)mode; }
 
 namespace {
-bool token_major16(const a100::Lay& l, int64_t L, int64_t Z) { return l.head == 16 && l.row == L * l.tok && (Z == 1 || l.z == L * l.row); }
+bool token_major_hd(const a100::Lay& l, int64_t L, int64_t Z, int64_t hd) { return l.head == hd && l.row == L * l.tok && (Z == 1 || l.z == L * l.row); }
 
 template <class G>
 void launch_rf16(const a100::AttnParams& p, int64_t Z, double scl, const torch::Tensor& like) {
@@ -108,13 +108,18 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
     if (fixed == 2) { using G = a100::Attn2Cfg<16, R_, NKV_, BN_, MINB_, false, 2>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); } \
     else { using G = a100::Attn2Cfg<16, R_, NKV_, BN_, MINB_, false, 1>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); } }
   // schedules of the 16-channel fixed-shift core (R rows, NKV stages, BN keys, CTAs / SM); 0 = automatic: 4 rows x 4 stages from L = 256 (measured -5..-8 % at L384-768, +4 % at L128), else the base 2 x 4
-  const int rf = g_rf16 >= 0 ? g_rf16 : (L >= 1024 ? 1 : 0);   // measured: L 1024-2048 -3 .. -7 % (A100 80GB, 4 heads); L 512-768 the attn2 core
-  if (hd == 16 && !mask && fixed && !lse.numel() && rf > 0 && L >= 512 && token_major16(Lq, L, Z) && token_major16(Lk, L, Z) && token_major16(Lv, L, Z) &&
-      token_major16(Lo, L, Z)) {
+  // the register-resident core (attn_rf_fwd_sm80.cuh) for unmasked token-major inference: 16-channel heads (the fixed-shift callers) from L 1024, 32 / 64-channel
+  // heads (the RoseTTAFold3 / Chai-1 variants: its own running-max recomputation replaces their online softmax) from L 512
+  const int rf = g_rf16 >= 0 ? g_rf16 : (hd == 16 ? (L >= 1024 && fixed) : L >= 512);
+  if (!mask && !lse.numel() && rf > 0 && L >= 512 && token_major_hd(Lq, L, Z, hd) && token_major_hd(Lk, L, Z, hd) && token_major_hd(Lv, L, Z, hd) &&
+      token_major_hd(Lo, L, Z, hd)) {
     a100::AttnParams r{};
     r.q = p.q; r.k = p.k; r.v = p.v; r.bias = p.bias; r.out = p.out; r.lse = nullptr;
     r.ldq = Lq.tok; r.ldk = Lk.tok; r.ldv = Lv.tok; r.ldo = Lo.tok; r.L = (int)L; r.H = (int)H; r.scl = (float)scl; r.key_tiles = p.key_tiles;
-    launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16, true>>(r, Z, scl, q); return;   // 2 rows x 128 queries, the bias operand converted in registers
+    if (hd == 16) launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16, true>>(r, Z, scl, q);   // 2 rows x 128 queries, the bias operand converted in registers
+    else if (hd == 32) launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 32>>(r, Z, scl, q);              // as the d_pair-128 core
+    else launch_rf16<a100::AttnRCfg<2, 1, 2, 4, false, 64, true>>(r, Z, scl, q);                  // 2 x 2 warps, 2 rows x 64 queries, one row per warp
+    return;
   }
   const int64_t eff = sched != 0 ? sched : (L >= 256 ? 4 : 0);
   if (hd == 16 && !mask && fixed && eff != 0) {

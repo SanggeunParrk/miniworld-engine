@@ -40,11 +40,13 @@ struct AttnRCfg {
   static constexpr int SMEM = ST * SLOT;
   static constexpr bool KV_PART = R * CPR < NTHR;            // fewer K (V) chunks than threads: threads [0, R CPR) copy one each
   static constexpr int KV_IT = KV_PART ? 1 : R * CPR / NTHR;  // 16-byte K (and V) chunks per thread and slot
+  static constexpr int KV_M = CPR > NTHR ? CPR / NTHR : 1;     // chunk steps per pair row (HD 64: a slot row is 256 chunks)
+  static constexpr int KV_RS = CPR > NTHR ? 1 : NTHR / CPR;    // pair rows per chunk step otherwise
   static constexpr int B_IT = BM * 4 / NTHR;                 // bias chunks per thread and slot
   static constexpr int Q_IT = R * BM * GR / NTHR;
   static_assert(RW == 1 || RW == 2 || RW == 4, "rows per warp");
-  static_assert(HD == 16 || HD == 32, "head dim");
-  static_assert(KV_PART ? (R * CPR) % 32 == 0 : (NTHR % CPR == 0 && (R * CPR) % NTHR == 0), "whole pair rows of K / V chunks per thread step");
+  static_assert(HD == 16 || HD == 32 || HD == 64, "head dim");
+  static_assert(KV_PART ? (R * CPR) % 32 == 0 : ((NTHR % CPR == 0 || CPR % NTHR == 0) && (R * CPR) % NTHR == 0), "whole chunk steps of K / V per pair row");
   static_assert(BM * 4 % NTHR == 0 && (R * BM * GR) % NTHR == 0, "bias / Q chunks per thread");
   static_assert(Q_BYTES <= SLOT, "Q rides in through one ring slot");
   static_assert(2 * Q_BYTES <= ST * SLOT, "the epilogue stages O and g in the ring");
@@ -61,7 +63,8 @@ DEVI void mma_c(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1,
 // ldmatrix matrix cover all 32 banks either way; the phase is periodic in 8 rows.
 template <int HD>
 DEVI uint32_t rf_swz(uint32_t row, uint32_t g) {
-  if constexpr (HD == 32) return swz64(row, g);
+  if constexpr (HD == 64) return swz<128>(row, g * 16);
+  else if constexpr (HD == 32) return swz64(row, g);
   else return row * 32u + ((g ^ ((row >> 2) & 1u)) << 4);
 }
 
@@ -87,12 +90,13 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
   // ---- per-thread copy plan of a slot: K / V chunk i = pair row tid / CPR + i NTHR / CPR, key (tid / GR) % 32, granule tid % GR; bias chunk i =
   // query (tid >> 2) + i NTHR / 4, granule tid & 3 (the swizzles are periodic in 8 rows, so chunk i's destination is chunk 0's + a constant)
   const int ck = (tid / GR) % 32, cg = tid % GR, cr = tid / G::CPR;
-  constexpr int RSTEP = G::NTHR / G::CPR;                    // pair rows per chunk step
+  // chunk step i: pair row (i / KV_M) KV_RS further, keys (i % KV_M) NTHR / GR further (the 128-byte swizzle is periodic in 8 rows: 16-key steps keep it)
+  auto kv_row = [](int i) { return (i / G::KV_M) * G::KV_RS; };
+  auto kv_key = [](int i) { return (i % G::KV_M) * (G::NTHR / GR); };
   const __nv_bfloat16* ksrc = p.k + (tok0 + (long long)(row0 + cr) * L + ck) * p.ldk + h * HD + cg * 8;
   const __nv_bfloat16* vsrc = p.v + (tok0 + (long long)(row0 + cr) * L + ck) * p.ldv + h * HD + cg * 8;
   const __nv_bfloat16* bsrc = p.bias + ((long long)(z * p.H + h) * L + qt * G::BM + (tid >> 2)) * L + (tid & 3) * 8;
   const uint32_t kdst = G::KOFF + cr * G::KV_ROW + rf_swz<HD>(ck, cg), bdst = swz64(tid >> 2, tid & 3);
-  const long long kstep = (long long)RSTEP * L * p.ldk, vstep = (long long)RSTEP * L * p.ldv;
   const long long kadv = (long long)G::KEYS * p.ldk, vadv = (long long)G::KEYS * p.ldv;
   auto issue = [&](int u) {             // called for u = 0, 1, 2, ... in order: the sources advance by one slot per call
     if (u < NU) {
@@ -100,8 +104,9 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
 #pragma unroll
       for (int i = 0; i < G::KV_IT; ++i) {
         if (G::KV_PART && tid >= G::R * G::CPR) break;
-        cp_async16(s + kdst + i * RSTEP * G::KV_ROW, ksrc + i * kstep);
-        cp_async16(s + kdst + (G::VOFF - G::KOFF) + i * RSTEP * G::KV_ROW, vsrc + i * vstep);
+        const uint32_t d = kv_row(i) * G::KV_ROW + kv_key(i) * G::RB;
+        cp_async16(s + kdst + d, ksrc + ((long long)kv_row(i) * L + kv_key(i)) * p.ldk);
+        cp_async16(s + kdst + (G::VOFF - G::KOFF) + d, vsrc + ((long long)kv_row(i) * L + kv_key(i)) * p.ldv);
       }
 #pragma unroll
       for (int i = 0; i < G::B_IT; ++i) cp_async16(s + bdst + i * (G::NTHR / 4) * G::ROWB, bsrc + (long long)i * (G::NTHR / 4) * L);
@@ -164,6 +169,7 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
 
   const uint32_t a_off = swz64(qw + lrow, 0);                // bias A tile rows of mt 0 (mt 1: + 16 rows: same swizzle phase); lanes 16-31 repeat 0-15
   const uint32_t k_off = rf_swz<HD>(lane & 7, (lane >> 3) & (GR - 1));   // K: keys 8jj + (lane & 7), granule (lane >> 3): all HD channels of one 8-key column (HD 16: lanes 0-15)
+  const uint32_t k_off_hi = rf_swz<HD>(lane & 7, ((lane >> 3) + 4) & (GR - 1));   // HD 64: channels 32-63 of the column
   uint32_t v_off[GR / 2];                                    // V^T: keys 16kl + .., granule 2np + (lane >> 4)
 #pragma unroll
   for (int np = 0; np < GR / 2; ++np) v_off[np] = rf_swz<HD>(8 * ((lane >> 3) & 1) + (lane & 7), 2 * np + (lane >> 4));
@@ -193,7 +199,10 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
     for (int w = 0; w < RW; ++w) {
       uint32_t kb[2 * KK];
       const uint32_t ka = sb + G::KOFF + (wr * RW + w) * G::KV_ROW + jj * 8 * G::RB + k_off;
-      if constexpr (KK == 2) ldsm_x4(*reinterpret_cast<uint32_t(*)[4]>(kb), ka);
+      if constexpr (KK == 4) {
+        ldsm_x4(*reinterpret_cast<uint32_t(*)[4]>(kb), ka);
+        ldsm_x4(*reinterpret_cast<uint32_t(*)[4]>(kb + 4), sb + G::KOFF + (wr * RW + w) * G::KV_ROW + jj * 8 * G::RB + k_off_hi);
+      } else if constexpr (KK == 2) ldsm_x4(*reinterpret_cast<uint32_t(*)[4]>(kb), ka);
       else ldsm_x2(*reinterpret_cast<uint32_t(*)[2]>(kb), ka);
 #pragma unroll
       for (int mt = 0; mt < 2; ++mt) {
