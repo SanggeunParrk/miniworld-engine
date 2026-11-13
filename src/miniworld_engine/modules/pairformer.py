@@ -69,7 +69,7 @@ class PairformerBlock(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,  # 2026-11-13: its sub-modules' anthropic paths (TriAttn folded block + cu129 core prebuilts, Transition folded residual)
         "cuda:a100_sm80": 4,
-        "cuda:h100_sm90": 5,
+        "cuda:h100_sm90": 6,
     }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
     # batched (the cuda AttentionPairBias takes B > 1: no refusal-driven per-sample path)
     # cuda:a100_sm80 4 (2026-11-12): its AttentionPairBias's generic sm_80 pair-bias backward faster (the same values)
@@ -77,6 +77,8 @@ class PairformerBlock(BackendModule, MasterWeights):
     # cuda:h100_sm90 4 (2026-11-13): its TriMul / Transition inference cast fp32-master weights once per parameter version
     # cuda:h100_sm90 5 (2026-11-13): its TriangleAttention at d_pair 128 x 4 heads projects the gate in the inference tail (fp32), d_pair
     # 256 x 8 heads keeps the wide front's CTA groups in step
+    # cuda:h100_sm90 6 (2026-11-13): its TriangleAttention: d_pair 256 x 8 heads LayerNorm folded into the wide front's pack, d_pair 128
+    # ending-node tail reads o transposed (bitwise the same), AF3 d_pair 64 one-kernel front up to L2048
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()

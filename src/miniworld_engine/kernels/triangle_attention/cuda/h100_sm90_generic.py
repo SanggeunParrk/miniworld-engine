@@ -253,9 +253,11 @@ def _front_ext(cutlass_inc):
     )
 
 
-#: (d_pair, 32 x heads) -> the longest L served by the one-kernel front (LN + projection + bias); to be tuned per entry
+#: (d_pair, 32 x heads) -> the longest L served by the one-kernel front (LN + projection + bias); to be tuned per entry.
+#: (64, 64) (AF3 d_pair 64, 4 heads x 16): 2048 since 2026-11-13 -- beyond L768 the one-kernel front beats LN + cuBLAS GEMM + bias glue
+#: by 0.23-0.3 ms at L1024 (module 2.61 -> 2.31 ms), 0.6 ms at L1536, 0.8-0.9 ms at L2048
 _FRONT_L = {
-    (64, 64): 768,
+    (64, 64): 2048,
     (64, 128): 768,
     (128, 128): 128,
     (128, 256): 128,

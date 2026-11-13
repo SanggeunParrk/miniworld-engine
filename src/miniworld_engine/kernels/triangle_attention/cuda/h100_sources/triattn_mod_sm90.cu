@@ -237,6 +237,9 @@ __device__ __forceinline__ float sigmoid_t(float x) {   // 0.5 + 0.5 tanh(x / 2)
 
 template <bool GLN>
 __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm90(
+    // tr: the ending node.  1: the tiles are rows of the transposed pair (x / out through the 4-D maps, g / o as stored); 2: the tiles
+    // are rows of the pair as stored (x / out plain) and o is read transposed through its 4-D map -- one strided stream instead of two
+    // (the out store among them), for calls without a dropout scale (its rows are indexed in the transposed order)
     int L, int ntiles, const __nv_bfloat16* __restrict__ DROP, int tr, const float* __restrict__ BO, const float* __restrict__ GB,
     const __grid_constant__ CUtensorMap gmap,             // g / o / x [R][128] bf16, box (64, 128), 128B swizzle (GLN: gmap unused)
     const __grid_constant__ CUtensorMap omap,
@@ -282,7 +285,7 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm90(
         const CUtensorMap* maps[3] = {GLN ? &omap : &gmap, GLN ? &xmap : &omap, &xmap};
         for (int a = 0; a < NA; ++a)
           for (int kh = 0; kh < 2; ++kh)
-            load_pair(maps[a], sX + ((st * NA + a) * XT + kh * BM * 64) * 2, xf(st), kh * 64, t * BM, L, a == NA - 1 ? tr : 0);
+            load_pair(maps[a], sX + ((st * NA + a) * XT + kh * BM * 64) * 2, xf(st), kh * 64, t * BM, L, a == NA - 1 ? tr == 1 : a == NA - 2 ? tr == 2 : 0);
         if (++st == NX) { st = 0; ph ^= 1; }
       }
     }
@@ -428,7 +431,7 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm90(
     fence_proxy_async();
     named_sync(3 + w, 128);
     if (T == 0) {
-      for (int kh = 0; kh < 2; ++kh) store_pair(&ymap, ss + kh * BM * 128 + 64 * w * 128, kh * 64, t * BM + 64 * w, L, tr);
+      for (int kh = 0; kh < 2; ++kh) store_pair(&ymap, ss + kh * BM * 128 + 64 * w * 128, kh * 64, t * BM + 64 * w, L, tr == 1);
       bulk_commit();
       bulk_wait_read<0>();
     }
@@ -1165,7 +1168,7 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
     const __grid_constant__ CUtensorMap xmap,             // x [R][CW] bf16, box (64, 64), 128B swizzle (tr: the 4-D transposed pair map)
     const __grid_constant__ CUtensorMap wmap,             // packed W [4 * 256][CW] bf16 (tri_pack_wide's row order), box (64, 256)
     const __grid_constant__ CUtensorMap wbmap,            // Wb8 [8][CW] bf16, box (64, 8)
-    const float* __restrict__ LNW, const float* __restrict__ LNB,
+    const float* __restrict__ FOLD,                       // [2][4 CW + 8] fp32: S1 | S0 of tri_pack_wide (the folded LayerNorm)
     const bool* __restrict__ MASK,                        // [B][L] key mask or nullptr
     const float* __restrict__ GBIAS,                      // [CW] fp32 gate bias (RoseTTAFold3) or nullptr
     fw::Outs outs,                                        // q / k / v ([R][CW], fp16 when h16, else bf16), g ([R][CW] bf16)
@@ -1177,14 +1180,17 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
   const uint32_t sW = sa(smb), sWb = sW + WT * 2, sX = sWb + WBT * 2, sGB = sX + 2 * XT * 2, bar0 = sGB + 3 * CW * 4;
-  float* gb = reinterpret_cast<float*>(smb + (sGB - sW));                    // gamma [CW] | beta [CW] | gate bias [CW]
+  float* gb = reinterpret_cast<float*>(smb + (sGB - sW));                    // this projection's S1 [CW] | S0 [CW] (+ gate bias) | the heads' S1 [8] | S0 [8]
   const uint32_t wf = bar0;
   auto xf = [&](int s) { return bar0 + 8 + 8 * s; };
   auto xe = [&](int s) { return bar0 + 24 + 8 * s; };                       // count 4: every warp of the consumer holds its fragments
   const int tid = threadIdx.x, wg = tid >> 7, lane = tid & 31;
   const int grp = blockIdx.x & 3, G = gridDim.x >> 2, idx = blockIdx.x >> 2;
-  for (int c = tid; c < 3 * CW; c += THREADS)
-    gb[c] = c < CW ? LNW[c] : c < 2 * CW ? LNB[c - CW] : (GBIAS != nullptr ? GBIAS[c - 2 * CW] : 0.f);
+  constexpr int NS = 4 * CW + HB;                          // FOLD: S1 [NS] | S0 [NS]; entries = the q | k | v | g output columns, then the heads
+  for (int c = tid; c < 2 * CW + 2 * HB; c += THREADS)
+    gb[c] = c < CW ? FOLD[grp * CW + c]
+          : c < 2 * CW ? FOLD[NS + grp * CW + c - CW] + (grp == 3 && GBIAS != nullptr ? GBIAS[c - CW] : 0.f)
+          : c < 2 * CW + HB ? FOLD[4 * CW + c - 2 * CW] : FOLD[NS + 4 * CW + c - 2 * CW - HB];
   if (tid == 0) {
     uint64_t* bars = reinterpret_cast<uint64_t*>(smb + (bar0 - sW));
     bar_init(bars, 1);
@@ -1236,7 +1242,7 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
   reg_alloc<232>();
   const int w = wg - 1, T = tid - 128 * wg, wi = T >> 5, g8 = lane >> 2, t4 = lane & 3;
   const int lrow = 16 * wi + (lane & 7) + 8 * ((lane >> 3) & 1), lcol8 = lane >> 4;
-  const bool half_out = h16 && grp < 3, has_gb = grp == 3 && GBIAS != nullptr;
+  const bool half_out = h16 && grp < 3;
   wait(wf, 0);
   int k = w;
   for (int t = idx + w * G; t < ntiles; t += 2 * G, k += 2) {
@@ -1249,14 +1255,8 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
     uint32_t xa[4 * KB][4];
 #pragma unroll
     for (int kb = 0; kb < 4 * KB; ++kb) ldsm_x4(chunk(2 * kb + lcol8), xa[kb]);
-    // LayerNorm of rows g (words 0, 2 of each block) and g + 8 (words 1, 3), fp32
-    float s0 = 0.f, s1 = 0.f;
-#pragma unroll
-    for (int kb = 0; kb < 4 * KB; ++kb) {
-      const float2 a = bf2f(xa[kb][0]), b = bf2f(xa[kb][2]), c = bf2f(xa[kb][1]), d = bf2f(xa[kb][3]);
-      s0 += (a.x + a.y) + (b.x + b.y); s1 += (c.x + c.y) + (d.x + d.y);
-    }
-    // every fragment is in registers (the sums read them all): hand the stage back to the producer
+    // every fragment is in registers: hand the stage back to the producer
+    fence_regs(xa[4 * KB - 1]);
     fence_proxy_async();
     __syncwarp();
 #if !(FW_ABL & 8)
@@ -1266,32 +1266,6 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
     if (lane == 0) arrive(xe(w));
 #endif
 #endif
-    const float mu0 = quad_sum(s0) * (1.f / CW), mu1 = quad_sum(s1) * (1.f / CW);
-    float v0 = 0.f, v1 = 0.f;
-#pragma unroll
-    for (int kb = 0; kb < 4 * KB; ++kb) {
-      const float2 a = bf2f(xa[kb][0]), b = bf2f(xa[kb][2]), c = bf2f(xa[kb][1]), d = bf2f(xa[kb][3]);
-      v0 += (a.x - mu0) * (a.x - mu0) + (a.y - mu0) * (a.y - mu0) + (b.x - mu0) * (b.x - mu0) + (b.y - mu0) * (b.y - mu0);
-      v1 += (c.x - mu1) * (c.x - mu1) + (c.y - mu1) * (c.y - mu1) + (d.x - mu1) * (d.x - mu1) + (d.y - mu1) * (d.y - mu1);
-    }
-    const float r0 = rsqrtf(quad_sum(v0) * (1.f / CW) + eps), r1 = rsqrtf(quad_sum(v1) * (1.f / CW) + eps);
-    uint32_t ya[4 * KB][4];
-#pragma unroll
-    for (int kb = 0; kb < 4 * KB; ++kb) {
-#pragma unroll
-      for (int hf = 0; hf < 2; ++hf) {                        // channels 16 kb + 8 hf + 2 t4 + {0, 1}
-        const int c = 16 * kb + 8 * hf + 2 * t4;
-        const float2 gm = *reinterpret_cast<const float2*>(gb + c), bt = *reinterpret_cast<const float2*>(gb + CW + c);
-        const float2 a = bf2f(xa[kb][2 * hf]), d = bf2f(xa[kb][2 * hf + 1]);
-        ya[kb][2 * hf] = pack2(fmaf((a.x - mu0) * r0, gm.x, bt.x), fmaf((a.y - mu0) * r0, gm.y, bt.y));
-        ya[kb][2 * hf + 1] = pack2(fmaf((d.x - mu1) * r1, gm.x, bt.x), fmaf((d.y - mu1) * r1, gm.y, bt.y));
-      }
-    }
-#if FW_ABL & 4
-#pragma unroll
-    for (int kb = 0; kb < 4 * KB; ++kb)
-      for (int j = 0; j < 4; ++j) ya[kb][j] = xa[kb][j] ^ __float_as_uint(r0 + r1);
-#endif
     const long row = (long)t * BM + 16 * wi + g8;              // this lane's first row; its second is row + 8
     float accs[2][64];
     float accb[4];
@@ -1299,7 +1273,7 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
     if (grp == 3) {
       wg_fence();
 #pragma unroll
-      for (int kb = 0; kb < 4 * KB; ++kb) mma_rs_n8(accb, ya[kb], desc_k128(sWb + (kb >> 2) * HB * 128 + (kb & 3) * 32), kb ? 1u : 0u);
+      for (int kb = 0; kb < 4 * KB; ++kb) mma_rs_n8(accb, xa[kb], desc_k128(sWb + (kb >> 2) * HB * 128 + (kb & 3) * 32), kb ? 1u : 0u);
       wg_commit();
     }
 #pragma unroll
@@ -1308,12 +1282,35 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
 #pragma unroll
       for (int kb = 0; kb < 4 * KB; ++kb)
 #if FW_ABL & 2
-        for (int j = 0; j < 4; ++j) accs[c][4 * kb + j] = __uint_as_float(ya[kb][j] ^ c);
+        for (int j = 0; j < 4; ++j) accs[c][4 * kb + j] = __uint_as_float(xa[kb][j] ^ c);
 #else
-        mma_rs_n128<0>(accs[c], ya[kb], desc_k128(sW + ((kb >> 2) * NG + c * 128) * 128 + (kb & 3) * 32), kb ? 1u : 0u);
+        mma_rs_n128<0>(accs[c], xa[kb], desc_k128(sW + ((kb >> 2) * NG + c * 128) * 128 + (kb & 3) * 32), kb ? 1u : 0u);
 #endif
       wg_commit();
     }
+    // the row statistics while the chains run: rows g (words 0, 2 of each block) and g + 8 (words 1, 3), fp32
+    float s0 = 0.f, s1 = 0.f;
+#pragma unroll
+    for (int kb = 0; kb < 4 * KB; ++kb) {
+      const float2 a = bf2f(xa[kb][0]), b = bf2f(xa[kb][2]), c = bf2f(xa[kb][1]), d = bf2f(xa[kb][3]);
+      s0 += (a.x + a.y) + (b.x + b.y); s1 += (c.x + c.y) + (d.x + d.y);
+    }
+    const float mu0 = quad_sum(s0) * (1.f / CW), mu1 = quad_sum(s1) * (1.f / CW);
+    float v0 = 0.f, v1 = 0.f;
+#pragma unroll
+    for (int kb = 0; kb < 4 * KB; ++kb) {
+      const float2 a = bf2f(xa[kb][0]), b = bf2f(xa[kb][2]), c = bf2f(xa[kb][1]), d = bf2f(xa[kb][3]);
+      v0 += (a.x - mu0) * (a.x - mu0) + (a.y - mu0) * (a.y - mu0) + (b.x - mu0) * (b.x - mu0) + (b.y - mu0) * (b.y - mu0);
+      v1 += (c.x - mu1) * (c.x - mu1) + (c.y - mu1) * (c.y - mu1) + (d.x - mu1) * (d.x - mu1) + (d.y - mu1) * (d.y - mu1);
+    }
+#if FW_ABL & 4
+    const float rs[2] = {1.f, 1.f}, nm[2] = {0.f * (mu0 + v0), 0.f * (mu1 + v1)};
+#else
+    // the folded LayerNorm: out = r (x . Wf^T - mu S1) + S0 per row (Wf = W diag(gamma), S1 = Wf 1, S0 = W beta: tri_pack_wide), so x
+    // is the GEMM operand as loaded -- no normalised copy of the tile; r = rsqrt(var + eps), nm = -mu r
+    const float rs[2] = {rsqrtf(quad_sum(v0) * (1.f / CW) + eps), rsqrtf(quad_sum(v1) * (1.f / CW) + eps)};
+    const float nm[2] = {-mu0 * rs[0], -mu1 * rs[1]};
+#endif
 #pragma unroll
     for (int c = 0; c < 2; ++c) {
       float (&acc)[64] = accs[c];
@@ -1331,7 +1328,8 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
 #pragma unroll
             for (int e = 0; e < 2; ++e) {
               const int h = 2 * t4 + e;
-              const float val = keep ? accb[2 * hf + e] * inv_scale : -INFINITY;
+              const float pb = fmaf(rs[hf], accb[2 * hf + e], fmaf(nm[hf], gb[2 * CW + h], gb[2 * CW + HB + h]));
+              const float val = keep ? pb * inv_scale : -INFINITY;
               const long at = ((b * nh + h) * L + i) * L + j;
               if (h16) reinterpret_cast<__half*>(BIAS)[at] = __float2half_rn(val > -INFINITY ? fmaxf(fminf(val, 6.0e4f), -6.0e4f) : val);
               else reinterpret_cast<__nv_bfloat16*>(BIAS)[at] = __float2bfloat16_rn(val);
@@ -1345,15 +1343,16 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
 #pragma unroll
       for (int m = 0; m < 4; ++m) {
         const int col = c * 128 + 32 * m + 8 * t4;
-        float bia[8];
+        float k1[8], k0[8];
 #pragma unroll
-        for (int e = 0; e < 8; ++e) bia[e] = has_gb ? gb[2 * CW + col + e] : 0.f;
+        for (int e = 0; e < 8; ++e) { k1[e] = gb[col + e]; k0[e] = gb[CW + col + e]; }
 #pragma unroll
         for (int hf = 0; hf < 2; ++hf) {
           uint32_t wv[4];
 #pragma unroll
           for (int q = 0; q < 4; ++q) {
-            const float a = acc[16 * m + 4 * q + 2 * hf] + bia[2 * q], b = acc[16 * m + 4 * q + 2 * hf + 1] + bia[2 * q + 1];
+            const float a = fmaf(rs[hf], acc[16 * m + 4 * q + 2 * hf], fmaf(nm[hf], k1[2 * q], k0[2 * q]));
+            const float b = fmaf(rs[hf], acc[16 * m + 4 * q + 2 * hf + 1], fmaf(nm[hf], k1[2 * q + 1], k0[2 * q + 1]));
             wv[q] = half_out ? pack2h(a, b) : pack2(a, b);
           }
 #if FW_ABL & 1
@@ -1440,12 +1439,13 @@ torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch:
   auto out = out_into.has_value() ? out_into->view({R, C}) : torch::empty({R, C}, x.options());
   auto m2 = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
-  auto pm = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
-    if (!trans) return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what);
+  auto pm = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what, bool tp) {
+    if (!tp) return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what);
     return make_map<4>(t.data_ptr(), {(uint64_t)C, (uint64_t)L, (uint64_t)L, (uint64_t)(rows / ((uint64_t)L * L))},
                        {(uint64_t)L * C, (uint64_t)C, (uint64_t)L * L * C}, {64, br, 1, 1}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
-  CUtensorMap gm = m2(gln ? o : g, R, 128, "g"), om = m2(o, R, 128, "o"), xm = pm(x, R, 128, "x"), wm = m2(wo, C, 128, "wo"),
-              ym = pm(out, R, 64, "out"), wgm = m2(gln ? *wg : wo, C, 128, "wg");
+  const int tr = !trans ? 0 : (gln && !dr) ? 2 : 1;        // see tri_tail_sm90
+  CUtensorMap gm = m2(gln ? o : g, R, 128, "g"), om = pm(o, R, 128, "o", tr == 2), xm = pm(x, R, 128, "x", tr == 1), wm = m2(wo, C, 128, "wo"),
+              ym = pm(out, R, 64, "out", tr == 1), wgm = m2(gln ? *wg : wo, C, 128, "wg");
   static bool attr = false;
   if (!attr) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(tri_tail_sm90<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, tl::Cfg<false>::SMEM));
@@ -1456,7 +1456,7 @@ torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch:
   const int jb = (int)(L / tl::BM), grid = std::max(jb, std::min(ntiles, num_sms(x.device().index())) / jb * jb);   // a multiple of the j blocks
   (gln ? tri_tail_sm90<true> : tri_tail_sm90<false>)<<<grid, tl::THREADS, gln ? tl::Cfg<true>::SMEM : tl::Cfg<false>::SMEM,
                                                        at::cuda::getCurrentCUDAStream()>>>(
-      (int)L, ntiles, dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, (int)trans,
+      (int)L, ntiles, dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, tr,
       bo.has_value() ? bo->data_ptr<float>() : nullptr, gb.has_value() ? gb->data_ptr<float>() : nullptr, gm, om, xm, wm, ym, wgm,
       gln ? lnw->data_ptr<float>() : nullptr, gln ? lnb->data_ptr<float>() : nullptr, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1619,10 +1619,11 @@ std::vector<torch::Tensor> tri_pack(torch::Tensor wq, torch::Tensor wk, torch::T
 
 // ---------------------------------------------------------------------------------------------------------------------------------
 // wide front (d_pair 256, 8 heads x 32), inference.
-// x [R, 256] bf16 (rows (b, i, j)); lnw / lnb fp32 [256]; wpk [1024, 256] bf16 = tri_pack_wide's [Wq; Wk; Wv; Wg] (rows permuted within
-// each 128-row half); wb8 [8, 256] bf16 (Wb, zero rows below nh); mask [B, L] bool or empty; gb fp32 [256] gate bias or none
+// x [R, 256] bf16 (rows (b, i, j)); fold fp32 [2, 1032], wpk [1024, 256] bf16, wb8 [8, 256] bf16 = tri_pack_wide(..., lnw, lnb): the
+// LayerNorm folded into the weights ([Wq; Wk; Wv; Wg] diag(gamma), rows permuted within each 128-row half; Wb diag(gamma), zero rows
+// below nh) and its per-output constants; mask [B, L] bool or empty; gb fp32 [256] gate bias or none
 // -> (q, k, v [R, 256] fp16 when h16 else bf16, g [R, 256] bf16, sbias [B, nh, L, L] fp16 / bf16 = bias / scale, masked keys -inf)
-std::vector<torch::Tensor> tri_front_wide(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor wpk,
+std::vector<torch::Tensor> tri_front_wide(torch::Tensor x, torch::Tensor fold, double eps, torch::Tensor wpk,
                                           torch::Tensor wb8, torch::Tensor mask, int64_t B, int64_t L, int64_t nh, double scale, bool trans,
                                           bool h16, c10::optional<torch::Tensor> gbias, bool packed) {
   constexpr int CW = 256;
@@ -1647,7 +1648,8 @@ std::vector<torch::Tensor> tri_front_wide(torch::Tensor x, torch::Tensor lnw, to
     q = torch::empty({R, CW}, hopt); k = torch::empty({R, CW}, hopt); v = torch::empty({R, CW}, hopt); g = torch::empty({R, CW}, opt);
   }
   auto bias = torch::empty({B, nh, L, L}, hopt);
-  auto lw = lnw.to(torch::kFloat32).contiguous(), lb = lnb.to(torch::kFloat32).contiguous();
+  TORCH_CHECK(fold.is_cuda() && fold.scalar_type() == torch::kFloat32 && fold.is_contiguous() && fold.numel() == 2 * (4 * CW + fw::HB),
+              "fold: fp32 [2, 4 * 256 + 8] (tri_pack_wide)");
   const bool* mp = nullptr;
   torch::Tensor mk;
   if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * L, "mask [B, L]"); mp = mk.data_ptr<bool>(); }
@@ -1673,22 +1675,25 @@ std::vector<torch::Tensor> tri_front_wide(torch::Tensor x, torch::Tensor lnw, to
   at[0].id = cudaLaunchAttributeClusterDimension; at[0].val.clusterDim.x = 4; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
   cfg.attrs = at; cfg.numAttrs = 1;
   C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, tri_front_wide_sm90<CW>,
-      (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, (int)nh, xm, wm, wbm, lw.data_ptr<float>(), lb.data_ptr<float>(),
+      (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, (int)nh, xm, wm, wbm, fold.data_ptr<float>(),
       mp, gbias.has_value() ? gbias->data_ptr<float>() : nullptr, outs, bias.data_ptr(), nullptr));
 #else
   tri_front_wide_sm90<CW><<<4 * groups, fw::THREADS, Q::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, (int)nh, xm, wm, wbm, lw.data_ptr<float>(), lb.data_ptr<float>(),
+      (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, (int)nh, xm, wm, wbm, fold.data_ptr<float>(),
       mp, gbias.has_value() ? gbias->data_ptr<float>() : nullptr, outs, bias.data_ptr(), FW_LAG > 0 ? sync.data_ptr<int>() : nullptr);
 #endif
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {q, k, v, g, bias};
 }
 
-// one launch: [Wq; Wk; Wv; Wg] [C, C] each -> wpk [4 C, C] bf16 in the wide front's row order (within each 128-row half, packed row
-// n = 8 i + 2 t + e holds output row 32 (i / 4) + 8 t + 2 (i % 4) + e), Wb [nh, C] -> wb8 [8, C] (rows >= nh zero), Wo -> wo16 [C, C] bf16
+// the wide pack, LayerNorm folded in (y = (x - mu) r gamma + beta, so y . W^T = r (x . Wf^T - mu S1) + S0 with Wf = W diag(gamma),
+// S1 = Wf 1 (of the bf16 Wf the GEMM reads), S0 = W beta): [Wq; Wk; Wv; Wg] [C, C] each -> wpk [4 C, C] bf16 = Wf in the wide front's row order (within each 128-row half, packed row
+// n = 8 i + 2 t + e holds output row 32 (i / 4) + 8 t + 2 (i % 4) + e), Wb [nh, C] -> wb8 [8, C] = Wb diag(gamma) (rows >= nh zero), Wo -> wo16 [C, C] bf16;
+// tri_fold_wide_k: fold [2][4 C + 8] fp32 = S1 | S0 per output column of q | k | v | g, then per head (sums in fp64, one thread each)
 template <typename T>
 __global__ void __launch_bounds__(256) tri_pack_wide_k(const T* __restrict__ wq, const T* __restrict__ wk, const T* __restrict__ wv,
-                                                       const T* __restrict__ wg, const T* __restrict__ wb, const T* __restrict__ wo, int Cw, int nh,
+                                                       const T* __restrict__ wg, const T* __restrict__ wb, const T* __restrict__ wo,
+                                                       const float* __restrict__ gam, int Cw, int nh,
                                                        __nv_bfloat16* __restrict__ wpk, __nv_bfloat16* __restrict__ wb8,
                                                        __nv_bfloat16* __restrict__ wo16) {
   const long cc = (long)Cw * Cw, n4 = 4 * cc, nb = (long)fw::HB * Cw;
@@ -1700,17 +1705,37 @@ __global__ void __launch_bounds__(256) tri_pack_wide_k(const T* __restrict__ wq,
       const int n = prow & 127, ii = n >> 3, tt = (n >> 1) & 3, ee = n & 1;
       const int orow = (prow & ~127) + 32 * (ii >> 2) + 8 * tt + 2 * (ii & 3) + ee;
       const T* src = t == 0 ? wq : t == 1 ? wk : t == 2 ? wv : wg;
-      wpk[i] = __float2bfloat16_rn(to_f32(src[(long)orow * Cw + c]));
+      wpk[i] = __float2bfloat16_rn(to_f32(src[(long)orow * Cw + c]) * gam[c]);
     } else if (i < n4 + nb) {
       const long j = i - n4;
-      wb8[j] = __float2bfloat16_rn(j < (long)nh * Cw ? to_f32(wb[j]) : 0.f);
+      wb8[j] = __float2bfloat16_rn(j < (long)nh * Cw ? to_f32(wb[j]) * gam[j % Cw] : 0.f);
     } else {
       const long j = i - n4 - nb;
       wo16[j] = __float2bfloat16_rn(to_f32(wo[j]));
     }
   }
 }
-std::vector<torch::Tensor> tri_pack_wide(torch::Tensor wq, torch::Tensor wk, torch::Tensor wv, torch::Tensor wg, torch::Tensor wb, torch::Tensor wo) {
+template <typename T>
+__global__ void __launch_bounds__(256) tri_fold_wide_k(const T* __restrict__ wq, const T* __restrict__ wk, const T* __restrict__ wv,
+                                                       const T* __restrict__ wg, const T* __restrict__ wb, const float* __restrict__ gam,
+                                                       const float* __restrict__ bet, int Cw, int nh, float* __restrict__ fold) {
+  const int ns = 4 * Cw + fw::HB, n = blockIdx.x * 256 + threadIdx.x;
+  if (n >= ns) return;
+  const int t = n / Cw, row = n - t * Cw;                    // t = 4: the heads
+  double s1 = 0.0, s0 = 0.0;
+  if (t < 4 || row < nh) {
+    const T* src = (t == 0 ? wq : t == 1 ? wk : t == 2 ? wv : t == 3 ? wg : wb) + (long)row * Cw;
+    for (int c = 0; c < Cw; ++c) {
+      const float w = to_f32(src[c]);
+      s1 += (double)__bfloat162float(__float2bfloat16_rn(w * gam[c]));
+      s0 += (double)w * (double)bet[c];
+    }
+  }
+  fold[n] = (float)s1;
+  fold[ns + n] = (float)s0;
+}
+std::vector<torch::Tensor> tri_pack_wide(torch::Tensor wq, torch::Tensor wk, torch::Tensor wv, torch::Tensor wg, torch::Tensor wb, torch::Tensor wo,
+                                         torch::Tensor lnw, torch::Tensor lnb) {
   const auto dt = wq.scalar_type();
   const long Cw = wq.size(1);
   const int nh = (int)wb.size(0);
@@ -1718,26 +1743,38 @@ std::vector<torch::Tensor> tri_pack_wide(torch::Tensor wq, torch::Tensor wk, tor
   for (const auto* t : {&wq, &wk, &wv, &wg, &wo}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == dt && t->is_contiguous() && t->numel() == Cw * Cw, "w [C, C]");
   TORCH_CHECK(wb.scalar_type() == dt && wb.is_contiguous() && nh <= fw::HB && wb.numel() == nh * Cw, "wb [nh <= 8, C]");
   TORCH_CHECK(dt == torch::kFloat32 || dt == torch::kBFloat16, "fp32 or bf16 parameters");
+  for (const auto* t : {&lnw, &lnb})
+    TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kFloat32 && t->is_contiguous() && t->numel() == Cw, "lnw / lnb: fp32 [C]");
   auto bopt = wq.options().dtype(torch::kBFloat16);
   auto wpk = torch::empty({4 * Cw, Cw}, bopt), wb8 = torch::empty({fw::HB, Cw}, bopt), wo16 = torch::empty({Cw, Cw}, bopt);
+  auto fold = torch::empty({2, 4 * Cw + fw::HB}, wq.options().dtype(torch::kFloat32));
+  const float *gp = lnw.data_ptr<float>(), *bp = lnb.data_ptr<float>();
+  const int fgrid = (int)((4 * Cw + fw::HB + 255) / 256);
   const long total = 5 * Cw * Cw + fw::HB * Cw;
   const int grid = (int)std::min<long>((total + 255) / 256, 2048);
   auto stream = at::cuda::getCurrentCUDAStream();
-  if (dt == torch::kFloat32)
+  if (dt == torch::kFloat32) {
     tri_pack_wide_k<float><<<grid, 256, 0, stream>>>(wq.data_ptr<float>(), wk.data_ptr<float>(), wv.data_ptr<float>(), wg.data_ptr<float>(),
-        wb.data_ptr<float>(), wo.data_ptr<float>(), (int)Cw, nh, bf16ptr(wpk), bf16ptr(wb8), bf16ptr(wo16));
-  else
-    tri_pack_wide_k<__nv_bfloat16><<<grid, 256, 0, stream>>>(bf16c(wq), bf16c(wk), bf16c(wv), bf16c(wg), bf16c(wb), bf16c(wo), (int)Cw, nh,
+        wb.data_ptr<float>(), wo.data_ptr<float>(), gp, (int)Cw, nh, bf16ptr(wpk), bf16ptr(wb8), bf16ptr(wo16));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    tri_fold_wide_k<float><<<fgrid, 256, 0, stream>>>(wq.data_ptr<float>(), wk.data_ptr<float>(), wv.data_ptr<float>(), wg.data_ptr<float>(),
+        wb.data_ptr<float>(), gp, bp, (int)Cw, nh, fold.data_ptr<float>());
+  } else {
+    tri_pack_wide_k<__nv_bfloat16><<<grid, 256, 0, stream>>>(bf16c(wq), bf16c(wk), bf16c(wv), bf16c(wg), bf16c(wb), bf16c(wo), gp, (int)Cw, nh,
         bf16ptr(wpk), bf16ptr(wb8), bf16ptr(wo16));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    tri_fold_wide_k<__nv_bfloat16><<<fgrid, 256, 0, stream>>>(bf16c(wq), bf16c(wk), bf16c(wv), bf16c(wg), bf16c(wb), gp, bp, (int)Cw, nh,
+        fold.data_ptr<float>());
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {wpk, wb8, wo16};
+  return {wpk, wb8, wo16, fold};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tri_front_wide", &tri_front_wide, "sm90 TriangleAttention front at d_pair 256 / 8 heads x 32 (inference): LN + q|k|v|g + head-major bias / scale",
-        py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wpk"), py::arg("wb8"), py::arg("mask"), py::arg("B"),
+        py::arg("x"), py::arg("fold"), py::arg("eps"), py::arg("wpk"), py::arg("wb8"), py::arg("mask"), py::arg("B"),
         py::arg("L"), py::arg("nh"), py::arg("scale"), py::arg("trans") = false, py::arg("h16") = true, py::arg("gb") = py::none(), py::arg("packed") = false);
-  m.def("tri_pack_wide", &tri_pack_wide, "sm90 TriangleAttention wide weight pack: (wpk [4C, C], wb8 [8, C], wo16 [C, C]) bf16 in one launch");
+  m.def("tri_pack_wide", &tri_pack_wide, "sm90 TriangleAttention wide weight pack, LayerNorm folded: (wpk [4C, C], wb8 [8, C], wo16 [C, C] bf16, fold [2, 4C + 8] fp32)");
   m.def("tri_wgrad", &tri_wgrad, "sm90 TriangleAttention parameter gradients: (dWq, dWk, dWv, dWg [128,128], dgamma, dbeta [128], dWb [4,128], dWo [128,128])");
   m.def("tri_pack", &tri_pack, "sm90 TriangleAttention weight pack: (w4 [512,128] bf16, wb16 [16,128] bf16, wo16 [128,128] bf16) in one launch");
   m.def("tri_head_bwd", &tri_head_bwd, "sm90 TriangleAttention head backward: projection dgrad + LN backward, dx added into dpair");

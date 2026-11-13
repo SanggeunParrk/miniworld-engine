@@ -56,7 +56,7 @@ Names from `requirements/requirements_kernel.csv` (family `triangle_attention`);
 | `triangle_attention_wgrad_sm90`, `triangle_attention_wgrad_reduce_sm90`, `triangle_attention_param_finish_sm90` | backward | `tri_wgrad` (d128): weight / LN-parameter gradients from per-CTA partial slots, summed in a fixed order, then the parameter algebra `dW_t = gamma M_t + beta cs_t` |
 | `triangle_attention_generic_pack_sm90` | forward | glue `pack`: Wcat = [Wq; Wk; Wv; Wg; Wb (heads rounded up to 8 rows)] bf16 and Wo; 16-channel heads zero-padded to 32 |
 | `triangle_attention_generic_layernorm_fwd_sm90` | forward | glue `ln_fwd`: y = LN(x) (bf16, or fp16 for fp16 inference GEMMs) + fp32 mean / rstd; also the dh path's LN |
-| `triangle_attention_front_fused_sm90` | forward_infer | `front_fused3_sm90.cu` `front`: LN + [Wq; Wk; Wv; Wg; Wb] in one kernel for short inference (`_FRONT_L`: d_pair 64 up to L768, wider up to L128) |
+| `triangle_attention_front_fused_sm90` | forward_infer | `front_fused3_sm90.cu` `front`: LN + [Wq; Wk; Wv; Wg; Wb] in one kernel for short inference (`_FRONT_L`: AF3 d_pair 64 with 16-channel heads up to L2048, d_pair 64 with 32-channel heads up to L768, wider up to L128) |
 | `triangle_attention_generic_front_bias_sm90` | forward | glue `front_bias`: the bias GEMM's [M, Hp] output -> head-major scaled / masked sbias |
 | `triangle_attention_generic_residual_sm90` | forward_train | glue `residual`: `x + drop o t` (training with dropout; without dropout the residual is in the cublasLt epilogue) |
 | `triangle_attention_generic_gate_bwd_in_sm90`, `..._gate_bwd_out_sm90` | backward | `ddrop = dy o drop`; do, dg into `dall`, Delta per head |
@@ -101,6 +101,10 @@ dropout scale; backward gate_bwd -> bwd_kv -> bwd_q -> head_bwd -> wgrad.
 - **Tail.** Tile = 128 rows; g, o and x are ldmatrix-loaded in the A-fragment layout, which is also the accumulator layout:
   `u = sigmoid(g) o o` is the A operand of the m64n128 chain over Wo, `drop o acc + x` is added in place, one rounding. RF3's
   gate / out biases are added in fp32 inside the tail before that rounding.
+  Inference (`tri_tail_sm90<true>`): the gate is projected here from x (`g = LN(x) Wg^T`, fp32). Ending node without a dropout scale
+  (`tr = 2`): the tiles are rows of the pair as stored -- x and the output go through plain 2-D maps and only o is read through the
+  4-D transposed map (one strided stream instead of two, the store contiguous; the same values bit for bit; same-job A/B 2026-11-13,
+  ending tail L1024 / 1536 / 2048: 0.314 / 0.748 / 1.307 -> 0.281 / 0.618 / 1.108 ms, equal to the starting node).
 - **Backward.** `tri_gate_bwd` forms do, dg, Delta and dWo (SS wgmma, register accumulator over the CTA's tiles) and writes the
   residual seed dpair = dy. `triattn_bwd_kv`: task = (b, h, 128-key tile) x 2 rows, 64-query steps; `S^T` starts from `bias^T`
   (ldmatrix.trans of the same tile), P^T recomputed from the LSE, `dV += P^T dO`, `dK += dS^T Q`, FA3 order. `triattn_bwd_q`: dQ
@@ -118,6 +122,13 @@ dropout scale; backward gate_bwd -> bwd_kv -> bwd_q -> head_bwd -> wgrad.
 projection p (128 KiB resident) and walking the same 64-row tiles (x read from HBM once, from L2 three times); the g CTA also
 writes the head-major bias. Packed weight rows are permuted (`tri_pack_wide`) so each lane stores 16 contiguous bytes from
 registers. Then the fp16 core with the gate in its epilogue and `x + u Wo^T` on cublasLt with the residual in the epilogue.
+The LayerNorm is folded into the pack (`tri_pack_wide(..., lnw, lnb)`): `y W^T = r (x Wf^T - mu S1) + S0` with `Wf = W diag(gamma)`
+(bf16), `S1 = Wf 1`, `S0 = W beta` (fp32, summed in fp64; `fold [2, 4 C + 8]`), so the GEMM operand is x as loaded (no normalised
+bf16 copy of the tile, one rounding fewer), the chains are issued right after the ldmatrix loads and the row statistics (two-pass
+mean / variance in fp32, as before) are computed while they run; the epilogue is two FMAs per output. The front is bound by the
+tensor core: four 256 x 256 projections of L^2 rows, GEMM-only ablation (no loads / stores / statistics) 1.07 ms of 1.25 ms at L1024;
+one m64n256 chain or step-interleaved halves were not faster (1.09 / 1.20 ms), the CTA-group lockstep `FW_LAG` 3 still wins over
+free-running (1.26 vs 1.32 ms).
 Training at this width runs the width-generic path.
 
 ## Width-generic path: d_pair <= 512 (multiple of 8), heads of 16 / 32 channels, <= 16 heads
