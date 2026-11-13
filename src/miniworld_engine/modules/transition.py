@@ -60,7 +60,13 @@ class Transition(BackendModule, MasterWeights):
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 3, "cuda:h100_sm90": 5, "cuda:a100_sm80": 6, "triton:a100_sm80": 2}
+    backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 3,
+        "anthropic:a100_sm80": 4,  # 2026-11-13: the A100 kit stack; the pair_c256_n4 exclusion is capability 9.0 only (A100: the provider cell serves)
+        "cuda:h100_sm90": 5,
+        "cuda:a100_sm80": 6,
+        "triton:a100_sm80": 2,
+    }
     # 2026-11-13: anthropic 3 = the pair transition folds the residual in the kernel (the kits' block statement); the esm_t16 cell served wherever the driver loads its CUDA-13 cubin
     # 2026-11-13 (H100): cuda 5 = the inference forward casts fp32-master weights once per parameter version (param_forms), not per call
     # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train; A100 capture forms + fp32 (TF32) build.

@@ -18,6 +18,14 @@ differed:
   (refused by digest), loadable only under a CUDA-13 driver. On a 12.x driver the backends exclude them by name and the provider's next row
   serves; the kits' own timings of those rows are measured on the kit stack with `kit_stack.sh`.
 
+A100 (capability 8.0; cssb3: driver 570.211.01 = CUDA 12.8), 2026-11-13. The kits' fast rows there are `trimul_native` row `native` (sm_80
+cubins of the sealed CUDA-13.0 package; most TriMul cells from L 768) and `triattn_native@v11`'s sm_80 member (`triattn_sm80_ext`, prebuilt
+for cu126 / cu128 / cu130 only); the pair Transition rows (v2 / pf / v1) are portable Triton. The A100 anthropic tokens before this date ran
+the step-asides (TriMul esm_v5_fwd / esm_shapes / v4 / tmk3_fast; TriAttn k2b). The A100 kit stack is `kit_stack_compat.sh`: the engine env
+with the CUDA-13.0 forward-compatible libcuda in front of the host's (no container: the nodes are Ubuntu 24.04) and `triattn_sm80_ext` built
+for cu129 by `ARCH=sm80 build_local.sh` (load checks bitwise equal to the release's digests). It times the anthropic backend within 2 % of
+the kits' own venv130 on the same GPU (LOCAL_BUILD.json `local_builds`, `kit_stack`).
+
 | Source | Backend | GPU entries | SHA-256 |
 |---|---|---:|---|
 | [af3_jax/opt/af3_jax_opt/inprocess/af3_jax_atom_attn_pallas.py](upstream/af3_jax/opt/af3_jax_opt/inprocess/af3_jax_atom_attn_pallas.py) | pallas | 0 | `b30bd8de3d8189c4` |

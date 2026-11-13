@@ -114,6 +114,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 3,  # 3 (2026-11-13): the block folds the residual (z += block(z)); the cu129 triattn prebuilts
+        "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: triattn_native's sm_80 core instead of the k2b step-aside)
         "cueq": 2,
         "cuda:a100_sm80": 4,
         "cuda:h100_sm90": 4,
@@ -1380,6 +1381,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 3,  # 3 (2026-11-13): the sealed CUDA-13 rows served wherever the driver loads them
+        "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: trimul_native's sm_80 row native)
         "cueq": 2,
         "cuda:a100_sm80": 4,  # 4 (2026-11-13): D64 k1w64 two column groups at hidden 128, k3w gate tiles issued ahead (the same values)
         "cuda:h100_sm90": 7,
@@ -1601,6 +1603,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 3,  # 2026-11-13: the sealed CUDA-13 rows served wherever the driver loads them
+        "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: trimul_native's sm_80 row native)
         "cuda:a100_sm80": 5,  # 5 (2026-11-13): as TriangleMultiplication's 4 (D64 k1w64 / k3w, the same values)
         "cuda:h100_sm90": 3,
     }  # 2026-11-10: sm_80 paths; 3: the inference pack read by captures; 4: A100 D64 persistent front (k1w64); cuda:h100_sm90 2

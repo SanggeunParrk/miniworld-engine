@@ -241,8 +241,26 @@ def test_kit_stack_backend_compares_with_the_kit_environment():
     assert ("ask", "env:cuda") in _parts(_diff("speed", _token(backend="anthropic"), now))
     assert _diff("speed", _token(backend="cuda"), now) == []
     assert ("ask", "env:cuda") in _parts(_diff("speed", _token(backend="cuda", env=kit_env), now))
-    # a card without a kit stack: anthropic compares with this process's stack
+    # an A100 kit stack is the engine's environment under a CUDA-13 driver library: the env keys are this process's
     assert _diff("speed", _token(backend="anthropic"), FakeNow(gpu="a100_sm80")) == []
+
+
+def test_kit_stack_records_are_told_by_the_cuda_13_torch_or_driver_library():
+    """A record is a kit-stack record when its torch is a CUDA-13 build (the H100 container) or its process loaded a CUDA-13 driver
+    library (``cuda_driver``: the forward-compatible libcuda of the A100 wrapper); both cards measure anthropic there, and only an
+    adapter keyed by the card (``anthropic:a100_sm80``) makes the A100's anthropic tokens owed without touching the H100's."""
+    assert cfgmod.on_kit_stack({"cuda": "13.0"})
+    assert cfgmod.on_kit_stack({"cuda": "12.9", "cuda_driver": "13.0"})
+    assert not cfgmod.on_kit_stack({"cuda": "12.9", "cuda_driver": "12.8"})
+    assert not cfgmod.on_kit_stack({"cuda": "12.9"})  # a record made before ``cuda_driver`` was recorded
+    assert cfgmod.kit_stack("a100_sm80", "anthropic") and cfgmod.kit_stack("h100_sm90", "anthropic")
+    assert not cfgmod.kit_stack("a100_sm80", "cuda")
+    assert cfgmod.kit_stack_env("a100_sm80") == {} and cfgmod.kit_stack_env("h100_sm90") == cfgmod.KIT_STACK_ENV
+    old = _token(backend="anthropic", versions=_versions(backends={"anthropic": "3"}))
+    cur = _versions(backends={"anthropic": "3", "anthropic:a100_sm80": "4"})
+    assert ("owed", "adapter:anthropic") in _parts(_diff("speed", old, FakeNow(cur, gpu="a100_sm80")))
+    kit_env = {**ENV, **cfgmod.KIT_STACK_ENV}
+    assert _diff("speed", _token(backend="anthropic", versions=_versions(backends={"anthropic": "3"}), env=kit_env), FakeNow(cur)) == []
 
 
 def test_plan_puts_kit_stack_cases_into_k_groups(tmp_path):

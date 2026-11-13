@@ -16,13 +16,19 @@
 #   PLAN_GROUPS (default PARALLEL)              groups the plan is split into (more groups than GPUs keeps every free GPU busy)
 #   NODELIST   (optional)                       --nodelist for every job (a cluster where only some nodes are free)
 #   KITS_DIR, FF_SCRATCH, KIT_VENV, MINIWORLD_ANTHROPIC_ROOT   the kit stack of the K* groups (third_party/anthropic/kit_stack.sh): the plan puts
-#              the cases of measure.config.KIT_STACK_BACKENDS (H100: anthropic) there; they run in the kits' CUDA-13 container
+#              the cases of measure.config.KIT_STACK_BACKENDS (anthropic) there; an H100 runs them in the kits' CUDA-13 container
+#   KIT_COMPAT_DIR, KIT_STACK   an A100 (CARD=a100_sm80) runs the K* groups through third_party/anthropic/kit_stack_compat.sh: the engine env with
+#              the CUDA-13.0 forward-compatible libcuda of KIT_COMPAT_DIR in front; KIT_STACK overrides the wrapper
 set -u
 if [ "${1:-}" = "--job" ]; then                       # inside a measurement job: work through one group file
   shift; PLAN=$1; GROUP=$2
   start=$(date +%s); mkdir -p "$PLAN/out" "$PLAN/done"
   RUN=""   # K* groups: the backends measured on the kits' CUDA-13 stack (measure.config.KIT_STACK_BACKENDS)
-  case $GROUP in K*) RUN="${CYCLE_REPO:?}/third_party/anthropic/kit_stack.sh";; esac
+  # (KIT_STACK names the wrapper; default by card: the CUDA-13 container on an H100, the compat driver library on an A100)
+  case $GROUP in K*)
+    case ${CARD:-h100_sm90} in a100_sm80) RUN="${CYCLE_REPO:?}/third_party/anthropic/kit_stack_compat.sh";; *) RUN="${CYCLE_REPO:?}/third_party/anthropic/kit_stack.sh";; esac
+    RUN=${KIT_STACK:-$RUN};;
+  esac
   while read -r kind module cfg; do
     [ -z "$kind" ] && continue
     [ -e "$PLAN/done/$kind.$module" ] && continue
