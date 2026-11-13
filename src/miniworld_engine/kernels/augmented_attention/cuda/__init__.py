@@ -113,19 +113,20 @@ class ApbInferenceCore:
                 ),
             )
 
-    def __call__(self, qkvg: torch.Tensor, bias: torch.Tensor):
+    def __call__(self, qkvg: torch.Tensor, bias: torch.Tensor, kmask: torch.Tensor | None = None):
         if bias.shape[0] != self.heads or qkvg.shape[0] != bias.shape[1]:
             raise ValueError("Hopper APB inference requires one sample and head-major bias")
-        self.extension.attn_inf(qkvg, bias, 0, 1, 1)
+        self.extension.attn_inf(qkvg, bias, 0, 1, 1, kmask)
         return qkvg
 
-    def batch(self, qkvg: torch.Tensor, bias: torch.Tensor):
+    def batch(self, qkvg: torch.Tensor, bias: torch.Tensor, kmask: torch.Tensor | None = None):
         """S samples in one launch: qkvg [S L, 4 W], bias [H, S, L, L] (``apb.pair_bias_batch``: sample s reads its own planes, the
-        core's ``nbg = S`` groups). Each sample's rows are exactly a one-sample call's."""
+        core's ``nbg = S`` groups). Each sample's rows are exactly a one-sample call's. ``kmask`` bool [S, L] (``kernels._key_len``)
+        or None: each sample's key blocks past its last attended key are skipped (the same bits)."""
         H, S, L = bias.shape[0], bias.shape[1], bias.shape[2]
         if H != self.heads or qkvg.shape[0] != S * L or not bias.is_contiguous():
             raise ValueError("Hopper APB batched inference requires qkvg [S L, 4 W] and a contiguous head-major bias [H, S, L, L]")
-        self.extension.attn_inf(qkvg, bias.view(H * S, L, L), 0, S, S)
+        self.extension.attn_inf(qkvg, bias.view(H * S, L, L), 0, S, S, kmask)
         return qkvg
 
 
@@ -251,15 +252,17 @@ def dq_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
     return fwd_defs(nh, dh) + (() if dh == D else (f"RSQDV={dh**-0.5!r}f",))
 
 
-def gated_inference(qkvg, bias_all, block, S, nh=H, dh=D, groups=1):
+def gated_inference(qkvg, bias_all, block, S, nh=H, dh=D, groups=1, kmask=None):
     """The token DiT step's inference core (attn_fwd.cu, GATED): qkvg [S L, 3072] bf16 with q in exp2 units, bias_all
     [nb 16, L, L] bf16 in log2 units (masked keys -inf); writes sigmoid(g) softmax(q k^T + bias) v over q for ``block``'s
     slice of the bias.
 
     ``groups`` > 1: ``groups`` distinct hoisted biases (one per trunk_seed, each its own pair), bias_all [nb H, groups, L, L] with the
-    samples laid out [A][groups][L] (S = A groups): sample s reads group s % groups. The same build serves every ``groups`` (a kernel argument)."""
+    samples laid out [A][groups][L] (S = A groups): sample s reads group s % groups. The same build serves every ``groups`` (a kernel argument).
+    ``kmask`` the bool key mask [1, L] (or [groups, L]) or None (``kernels._key_len``): the key blocks past its last attended key are skipped
+    (the same bits)."""
     L = bias_all.shape[-1]
-    _ext("attn_fwd", fwd_defs(nh, dh)).attn_inf(qkvg, bias_all.view(-1, L, L), int(block), int(S), int(groups))
+    _ext("attn_fwd", fwd_defs(nh, dh)).attn_inf(qkvg, bias_all.view(-1, L, L), int(block), int(S), int(groups), kmask)
 
 
 def tf32_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
@@ -283,11 +286,12 @@ def tf32_inference_core_supported(dtype: torch.dtype, L: int, d: int, h: int, de
     return dtype is torch.float32 and h > 0 and d % h == 0 and (h, d // h) in TF32_LAYOUTS and L % 128 == 0 and _is_hopper(device_index)
 
 
-def tf32_gated_inference(qkg, vt, bias_all, block, S, goff, nh=H, dh=D):
+def tf32_gated_inference(qkg, vt, bias_all, block, S, goff, nh=H, dh=D, kmask=None):
     """The fp32 step's inference core (attn_tf32.cu, TF32 wgmma): qkg [S L, >= 2304] fp32 with q | k at columns 0 | 768 (q
     in exp2 units) and g at ``goff``; vt = v^T [768, S L]; bias_all [nb 16, L, L] fp32 in log2 units with its key columns in
-    ``conditioned_transition.cuda.key_perm`` order (masked keys -inf). Writes sigmoid(g) softmax(q k^T + bias) v over q."""
-    _ext("attn_tf32", tf32_fwd_defs(nh, dh)).attn_tf32_inf(qkg, vt, bias_all, int(block), int(S), int(goff))
+    ``conditioned_transition.cuda.key_perm`` order (masked keys -inf). Writes sigmoid(g) softmax(q k^T + bias) v over q.
+    ``kmask`` the bool key mask [L] or None: as ``gated_inference``'s."""
+    _ext("attn_tf32", tf32_fwd_defs(nh, dh)).attn_tf32_inf(qkg, vt, bias_all, int(block), int(S), int(goff), kmask)
 
 
 def tf32_forward(q, k, vt, bias, km, A, L, qkvg=None, nh=H, dh=D):

@@ -484,12 +484,16 @@ def _fwd(
                 cast(torch.Tensor, kmask)[b] if mask_kind == 1 else None,
             )
     kpen = _penalties(cast(torch.Tensor, kmask), a, batch, length, padded) if mask_kind == 2 else None
+    # inference: the key tiles past each fold's (kind 2: each sample's) last attended key are skipped by the core, which reads the mask
+    # (``kernels._key_len``; the same bits)
+    kms = None if save or mask_kind == 0 else cast(torch.Tensor, kmask)
     if save:
         o = torch.empty(m, d, device=dev, dtype=dt)
         lse = torch.empty(batch * a, heads, padded, device=dev, dtype=torch.float32)
     for b in range(batch):
         rows = slice(b * n, (b + 1) * n)
         kp = None if kpen is None else kpen[b]
+        km = None if kms is None else (kms[:, b] if mask_kind == 2 else kms[b : b + 1])
         if f32 and save:
             sm80.tf32_forward(
                 q[rows],
@@ -517,6 +521,7 @@ def _fwd(
                 out=q[rows],
                 lse=torch.empty(a, heads, padded, device=dev, dtype=torch.float32),
                 kpen=kp,
+                kmask=km,
             )
         elif f32:
             sm80.tf32_forward(
@@ -531,6 +536,7 @@ def _fwd(
                 gate=g[rows],
                 out=q[rows],
                 kpen=kp,
+                kmask=km,
             )
         elif save:
             sm80.plain_forward(
@@ -560,6 +566,7 @@ def _fwd(
                 save_lse=False,
                 kpen=kp,
                 out=q[rows],
+                kmask=km,
             )
         else:
             sm80.pgate_forward(
@@ -574,6 +581,7 @@ def _fwd(
                 hd,
                 kpen=kp,
                 out=q[rows],
+                kmask=km,
             )
         if mask_kind == 1 and dt is BF and d == 128 and hd == 32:
             from miniworld_engine.kernels.augmented_attention.cuda import (

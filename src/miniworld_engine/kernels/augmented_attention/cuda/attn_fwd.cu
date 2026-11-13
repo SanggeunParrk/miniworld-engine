@@ -16,6 +16,7 @@
 // [nb H, L, L] bias (key mask folded in as -inf), and the epilogue writes sigmoid(g) o as bf16 over q -- no O, no LSE.
 // A CTA reads only its own q tile, and before its epilogue writes that tile.
 #include "tmn_kernels.cuh"
+#include "key_len.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
 #ifndef STAGES
@@ -154,7 +155,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
                 const __grid_constant__ CUtensorMap mg,
                 const float* __restrict__ KM, float* __restrict__ O, float* __restrict__ LSE, __nv_bfloat16* __restrict__ QKVG,
                 __nv_bfloat16* __restrict__ OG,
-                int L, int H, int A, int mt, int nbg) {
+                int L, int H, int A, int mt, int nbg, const uint8_t* __restrict__ KMB, long kms) {
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + STAGES * ST_BYTES);
@@ -177,7 +178,13 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   const int m0 = m_tile * QM, qcol = head * DH, row0 = samp * L + m0;
   const int wgi = tid >> 7;                                         // consumer warpgroup index
   const int wg = wgi % NWG, kspl = wgi / NWG;                       // its 64-row group, and its key split
-  const int nblocks = L / BN;
+  // KMB (inference, FCLS 1): the key mask bytes of each bias group (sample s reads row (s % nbg), rows kms bytes apart; kms 0: one row
+  // for all). The key blocks past the row's last attended key are masked in every row -- exact zeros after the row's live max -- so they
+  // are neither loaded nor computed (the same bits). Every warp reads the bound itself (key_len.cuh), producer and consumers alike, once its
+  // first loads are in flight (the mask read hides under them).
+  const bool kbound = FCLS == 1 && KMB != nullptr;
+  const uint8_t* kmrow = kbound ? KMB + (nbg > 1 ? samp % nbg : 0) * kms : nullptr;
+  int nblocks = L / BN;
   // nbg distinct biases, bias [H, nbg, L, L], the samples laid out [A / nbg][nbg]: sample s reads bias s % nbg. nbg = 1: one bias per head shared by
   // every sample [H, L, L]; nbg = A: one bias per sample (the PSB layout); 1 < nbg < A: one per trunk_seed (each its own pair), shared by its A / nbg samples
   const int brow = (nbg > 1 ? head * nbg + samp % nbg : head) * L + m0;                             // this tile's first row in the [H nbg L, L] bias map
@@ -204,6 +211,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
         tma_load_2d(sg, &mg, gbar, qcol, row0);
       }
     }
+    if (kbound) nblocks = warp_key_tiles(kmrow, L, L, BN);
     if (iss < NISS) mbar_wait(qdone, 0);
     if (iss < NISS) {
       for (int n = 0; n < nblocks; ++n) {
@@ -237,6 +245,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
 #pragma unroll
   for (int i = 0; i < DH / 2; ++i) acc[i] = 0.f;
   float m_i[2] = {-INFINITY, -INFINITY}, l_i[2] = {0.f, 0.f};
+  if (kbound) nblocks = warp_key_tiles(kmrow, L, L, BN);
   mbar_wait(qbar, 0);
   const uint32_t sq = smem_u32(sm) + QSTAGE + wg * 8192;
   uint32_t qr[DH / 16][4];
@@ -470,7 +479,7 @@ template <typename K>
 void launch(K kern, int grid, const CUtensorMap& mq, const CUtensorMap& mk, const CUtensorMap& mv, const CUtensorMap& mb,
             const CUtensorMap& mg,
             const float* km, float* O, float* LSE, __nv_bfloat16* qkvg, int L, int H, int A, int mt, int nbg,
-            __nv_bfloat16* og = nullptr) {
+            __nv_bfloat16* og = nullptr, const uint8_t* kmb = nullptr, long kms = 0) {
   const size_t smem = 1024 + STAGES * ST_BYTES + 256 + QM * DH * 2 + (size_t)(APB_KS - 1) * NWG * 128 * (DH / 2 + 4) * 4;   // + g tile, key-split scratch
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   cudaLaunchConfig_t cfg{};
@@ -482,7 +491,7 @@ void launch(K kern, int grid, const CUtensorMap& mq, const CUtensorMap& mk, cons
   at[0].id = cudaLaunchAttributeClusterDimension;
   at[0].val.clusterDim.x = FCLS; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
   cfg.attrs = at; cfg.numAttrs = 1;
-  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, mq, mk, mv, mb, mg, km, O, LSE, qkvg, og, L, H, A, mt, nbg) == cudaSuccess, "launch failed");
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, mq, mk, mv, mb, mg, km, O, LSE, qkvg, og, L, H, A, mt, nbg, kmb, kms) == cudaSuccess, "launch failed");
 }
 }  // namespace
 
@@ -564,7 +573,9 @@ void attn_fwd_o_og(torch::Tensor qkvg, torch::Tensor bias, torch::Tensor O, torc
 // sigmoid(g) softmax(q k^T + bias) v over q.
 // ``nbg`` distinct hoisted biases (one per trunk_seed, each its own pair): bias_all [nb * H * nbg, L, L], the S samples laid out [S / nbg][nbg]
 // (sample s reads bias s % nbg); nbg = 1 is the one-bias core.
-void attn_inf(torch::Tensor qkvg, torch::Tensor bias_all, int64_t block, int64_t S, int64_t nbg) {
+// ``kmask`` (optional): the bool key mask [1, L] (every group) or [nbg, L], the key blocks past each row's last attended key
+// are skipped (bitwise the same outputs; key_len.cuh).
+void attn_inf(torch::Tensor qkvg, torch::Tensor bias_all, int64_t block, int64_t S, int64_t nbg, c10::optional<torch::Tensor> kmask) {
   const int L = bias_all.size(1), H = DM / DH;
   TORCH_CHECK(nbg >= 1 && S % nbg == 0, "samples must be a whole number of [S / nbg][nbg] groups");
   TORCH_CHECK(qkvg.is_contiguous() && qkvg.scalar_type() == torch::kBFloat16 && qkvg.size(1) == 4 * DM
@@ -581,12 +592,18 @@ void attn_inf(torch::Tensor qkvg, torch::Tensor bias_all, int64_t block, int64_t
   auto mv = tile_map(base + 2 * DM, rows, DM, 4 * DM, QW, BN);
   auto mb = tile_map(reinterpret_cast<__nv_bfloat16*>(bias_all.data_ptr()) + (size_t)block * H * nbg * L * L, (uint64_t)H * nbg * L, L, L, BN, QM);
   auto mg = tile_map(base + 3 * DM, rows, DM, 4 * DM, DH, QM, CU_TENSOR_MAP_SWIZZLE_NONE);
-  launch(attn_fwd_kernel<false, 1>, (int)S * H * mt, mq, mk, mv, mb, mg, nullptr, nullptr, nullptr, base, L, H, (int)S, mt, (int)nbg);
+  const bool hk = kmask.has_value() && kmask->defined();
+  TORCH_CHECK(!hk || (kmask->is_cuda() && kmask->element_size() == 1 && kmask->is_contiguous()
+                      && (kmask->numel() == L || kmask->numel() == (int64_t)nbg * L)),
+              "kmask must be a contiguous bool [1, L] or [nbg, L]");
+  launch(attn_fwd_kernel<false, 1>, (int)S * H * mt, mq, mk, mv, mb, mg, nullptr, nullptr, nullptr, base, L, H, (int)S, mt, (int)nbg, nullptr,
+         hk ? reinterpret_cast<const uint8_t*>(kmask->data_ptr()) : nullptr, hk && kmask->numel() > L ? (long)L : 0L);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("attn_fwd", &attn_fwd);
-  m.def("attn_inf", &attn_inf);
+  m.def("attn_inf", &attn_inf, py::arg("qkvg"), py::arg("bias_all"), py::arg("block"), py::arg("S"), py::arg("nbg"),
+        py::arg("kmask") = py::none());
   m.def("attn_fwd_og", &attn_fwd_og);
   m.def("attn_fwd_o_og", &attn_fwd_o_og);
 }

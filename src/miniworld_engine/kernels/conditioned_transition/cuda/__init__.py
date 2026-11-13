@@ -16,6 +16,7 @@ import torch
 from torch.multiprocessing.reductions import StorageWeakRef
 
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels._key_len import kernel_mask
 
 _dir = Path(__file__).parent
 STAT_W = 128  # kept for the runner's buffer layout (the Triton module's statistics width)
@@ -626,13 +627,15 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         qk_ln_rows(qkvg, *vpack["kq"], kq_eps, D, rnd=qk_rna)  # q / k rounded on the way (qk_rna)
     elif qk_rna:
         rna_rows(qkvg, 2 * D)
+    # the core skips the key tiles past the last attended key of a padded mask, reading the mask itself (``kernels._key_len``; the same bits)
+    kmask = kernel_mask(mask, L)
     if fp32:
         vt = torch.mm(wqkvg[3 * D :], xa.t())
         if qk_rna:
             rna_rows(vt, M)  # v^T rounded as q / k (the core truncates)
-        attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads)
+        attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads, kmask=kmask)
     else:
-        attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B)
+        attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B, kmask=kmask)
     ya = torch.mm(qkvg[:, :D], wo.t())
     if not parallel and fold:
         _ext().resgate_adaln_cf_cuda(xin, ya, G, r1, b1f, b2f, stats, xa, ada_eps, _PDL)
