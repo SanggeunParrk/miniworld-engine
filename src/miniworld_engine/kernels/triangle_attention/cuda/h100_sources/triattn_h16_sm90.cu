@@ -61,6 +61,9 @@ using namespace sm90;
 #ifndef TA_DYN
 #define TA_DYN 1          // dynamic task schedule (a global counter)
 #endif
+#ifndef KM_MAXB
+#define KM_MAXB 64        // the most batch elements whose live key tiles the kernel counts from the key mask itself (KM)
+#endif
 namespace {
 constexpr int D = 32, BM = 128, BN = 128, R = 2, NKV = TA_NKV, NB = TA_NB;
 constexpr int QT = BM * D;                                 // Q tile [128 q][32], 64B swizzle (8 KiB)
@@ -112,8 +115,8 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
                           // MUFU.  8 (every other pair; sustained, power-capped, c256 / 8 heads): L512 level, 768 / 1024 -0.5 %, 1536 -2.7 %,
                           // 2048 -3.3 %, accuracy level; 2 / 4: level or +1.5 %; 16 (all): +12 %
 #endif
-__device__ __forceinline__ uint32_t hexp(uint32_t a, int i) {
-  if (TA_POLY > 0 && i % (16 / (TA_POLY > 0 ? TA_POLY : 1)) == (16 / (TA_POLY > 0 ? TA_POLY : 1)) - 1) return hex2_poly(a);
+template <bool POLY> __device__ __forceinline__ uint32_t hexp(uint32_t a, int i) {
+  if (POLY && TA_POLY > 0 && i % (16 / (TA_POLY > 0 ? TA_POLY : 1)) == (16 / (TA_POLY > 0 ? TA_POLY : 1)) - 1) return hex2_poly(a);
   return hex2(a);
 }
 __device__ __forceinline__ float hlo(uint32_t a) { return __half2float(__ushort_as_half((unsigned short)(a & 0xffffu))); }
@@ -125,7 +128,7 @@ __device__ __forceinline__ float hround(float x) { return __half2float(__float2h
 // SPEC: the speculative offset (fix list written to FIX); else the exact form, which with FIX set runs the tasks of that list (static schedule).
 // ORD1: task order query tile, head in its group of hg, row group, head group (the CTAs running together share the bias of hg heads; hg = 1:
 // one head), else query tile, head, row group.
-template <bool SPEC, bool ORD1, int DH>   // DH: channels per head in q / k / v / gate / out / U: 32, or 16 (compact; the core pads to 32)
+template <bool SPEC, bool ORD1, int DH, bool POLY, bool BTR>   // BTR: the bias stored [B, H, key, query] (AF3's ending node from the one-kernel front), read transposed; POLY: TA_POLY of the exponentials on the FMA pipes (32-channel heads); DH: channels per head in q / k / v / gate / out / U: 32, or 16 (compact; the core pads to 32)
 __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     int N, int H, int S, int ntasks, float scl,          // scl = scale * log2(e)
     int hg,                                              // ORD1: heads per group (a divisor of H)
@@ -141,7 +144,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     __nv_bfloat16* __restrict__ U, long ldg,
     int* __restrict__ SCHED,                             // zeroed task counter (dynamic schedule), or nullptr: static
     int* __restrict__ FIX,                               // fix list: FIX[0] = count (zeroed), FIX[1..] = task ids (written by SPEC, read by the exact form)
-    const int* __restrict__ KT) {                        // live key tiles of each batch element [B] (every key past them is masked in every row), or nullptr: all
+    const int* __restrict__ KT,                          // live key tiles of each batch element [B] (every key past them is masked in every row), or nullptr: all
+    const unsigned char* __restrict__ KM) {              // or the key mask itself (bool [B][S], 16-byte aligned, B <= KM_MAXB): the live key tiles
+                                                         // counted by the producer warpgroup once per CTA (no glue kernels before the launch)
   constexpr bool VOTE = SPEC && TA_SPEC == 2;    // TA_SPEC 2: no fix list (see X)
   constexpr bool LIST = SPEC && !VOTE;
   const bool LISTM = !SPEC && FIX != nullptr;
@@ -191,33 +196,76 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     else asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];\n"
                       :: "r"(dst), "l"(map), "r"(bar), "r"(0), "r"(h), "r"(row) : "memory");
   };
+  __shared__ int kts[KM_MAXB];                       // KM: 1 + the last attended key of each batch element (0: none)
   if (wg == 0) {
     reg_dealloc<40>();
+    int lt = 0, st = 0, kph = 0, bs = 0, bph = 0;
+    // one key tile of a task: its bias tile and the K / V tiles of both rows
+    auto issue_tile = [&](int b, int h, int qt, int g, int j) {
+      wait(bem(bs), bph ^ 1);
+      expect_tx(bfu(bs), BT * 2);
+      for (int hh = 0; hh < 2; ++hh)   // key halves [128 queries][64 keys], or (BTR) query halves [128 keys][64 queries]
+        if (BTR) load_2d(&bmap, sB + (bs * BT + hh * BM * 64) * 2, bfu(bs), qt * BM + hh * 64, (b * H + h) * S + j * BN);
+        else load_2d(&bmap, sB + (bs * BT + hh * BM * 64) * 2, bfu(bs), j * BN + hh * 64, (b * H + h) * S + qt * BM);
+      if (++bs == NB) { bs = 0; bph ^= 1; }
+      for (int r = 0; r < R; ++r) {
+        wait(kve(st), kph ^ 1);
+        expect_tx(kvf(st), 2 * KVT * 2);
+        const int rw = row0(b, g * R + r) + j * BN;
+        load_head(&kmap, sKV + st * STG * 2, kvf(st), h, rw);
+        load_head(&vmap, sKV + (st * STG + KVT) * 2, kvf(st), h, rw);
+        if (++st == NKV) { st = 0; kph ^= 1; }
+      }
+    };
+    // KM: the first task's Q tiles and first key tile (needed whatever the count) are requested before the mask is read; its Q barrier
+    // takes the bytes now and its arrival once the count is handed over (below), so the scan's load latency overlaps theirs
+    const bool pre = KM != nullptr && (int)blockIdx.x < nt;
+    if (tid == 0) prefetch_map(&qmap), prefetch_map(&kmap), prefetch_map(&vmap), prefetch_map(&bmap);
+    if (pre && tid == 0) {
+      int b, h, qt, g; decode(LISTM ? FIX[1 + blockIdx.x] : (int)blockIdx.x, b, h, qt, g);
+      asm volatile("mbarrier.expect_tx.relaxed.cta.shared::cta.b64 [%0], %1;\n" :: "r"(qf), "r"(R * QT * 2) : "memory");
+      for (int r = 0; r < R; ++r) load_head(&qmap, sQ + r * QT * 2, qf, h, row0(b, g * R + r) + qt * BM);
+      issue_tile(b, h, qt, g, 0);
+    }
+    if (KM != nullptr) {
+      // what key_tiles() computes, by the 128 producer threads: 16-byte chunks of the mask, the last set byte of each, a max over the 8 lanes
+      // of a 128-key group (S % 128 == 0: one batch element), one shared atomic per group
+      const int nb = ntasks / (H * NG * QTILES), chunks = nb * S / 16;
+      for (int b = tid; b < nb; b += 128) kts[b] = 0;
+      named_sync(1, 128);
+      for (int c0 = 0; c0 < chunks; c0 += 128) {
+        const int c = c0 + tid;
+        int last = 0;
+        if (c < chunks) {
+          const uint4 v = __ldg(reinterpret_cast<const uint4*>(KM) + c);
+          const uint32_t w4[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+          for (int i = 0; i < 4; ++i)
+            if (w4[i] != 0u) last = (c * 16) % S + 4 * i + (31 - __clz(w4[i])) / 8 + 1;
+        }
+        last = max(last, __shfl_xor_sync(0xffffffffu, last, 1));
+        last = max(last, __shfl_xor_sync(0xffffffffu, last, 2));
+        last = max(last, __shfl_xor_sync(0xffffffffu, last, 4));
+        if ((tid & 7) == 0 && c < chunks && last > 0) atomicMax(&kts[(c * 16) / S], last);
+      }
+      named_sync(1, 128);
+    }
     if (tid == 0) {
-      prefetch_map(&qmap); prefetch_map(&kmap); prefetch_map(&vmap); prefetch_map(&bmap);
-      int lt = 0, st = 0, kph = 0, bs = 0, bph = 0;
       for (int t = blockIdx.x; t < nt; t = SCHED ? (int)gridDim.x + atomicAdd(SCHED, 1) : t + (int)gridDim.x, ++lt) {
         int b, h, qt, g; decode(LISTM ? FIX[1 + t] : t, b, h, qt, g);
-        const int nk = KT != nullptr ? min(NK, max(1, __ldg(KT + b))) : NK;   // the dead trailing key tiles are not streamed
-        wait(qe, (lt & 1) ^ 1);
+        const int nk = KM != nullptr ? min(NK, max(1, (kts[b] + BN - 1) / BN))
+                     : KT != nullptr ? min(NK, max(1, __ldg(KT + b))) : NK;   // the dead trailing key tiles are not streamed
+        const bool first = pre && lt == 0;               // its Q tiles and key tile 0 already requested
+        if (!first) wait(qe, (lt & 1) ^ 1);
         if (SCHED) *slot = t;
-        if (KT != nullptr) *nkslot = nk;
-        expect_tx(qf, R * QT * 2);
-        for (int r = 0; r < R; ++r) load_head(&qmap, sQ + r * QT * 2, qf, h, row0(b, g * R + r) + qt * BM);
-        for (int j = 0; j < nk; ++j) {
-          wait(bem(bs), bph ^ 1);
-          expect_tx(bfu(bs), BT * 2);
-          for (int hh = 0; hh < 2; ++hh) load_2d(&bmap, sB + (bs * BT + hh * BM * 64) * 2, bfu(bs), j * BN + hh * 64, (b * H + h) * S + qt * BM);
-          if (++bs == NB) { bs = 0; bph ^= 1; }
-          for (int r = 0; r < R; ++r) {
-            wait(kve(st), kph ^ 1);
-            expect_tx(kvf(st), 2 * KVT * 2);
-            const int rw = row0(b, g * R + r) + j * BN;
-            load_head(&kmap, sKV + st * STG * 2, kvf(st), h, rw);
-            load_head(&vmap, sKV + (st * STG + KVT) * 2, kvf(st), h, rw);
-            if (++st == NKV) { st = 0; kph ^= 1; }
-          }
+        if (KT != nullptr || KM != nullptr) *nkslot = nk;
+        if (first) {
+          arrive(qf);                                    // (the bytes were expected before the scan)
+        } else {
+          expect_tx(qf, R * QT * 2);
+          for (int r = 0; r < R; ++r) load_head(&qmap, sQ + r * QT * 2, qf, h, row0(b, g * R + r) + qt * BM);
         }
+        for (int j = first ? 1 : 0; j < nk; ++j) issue_tile(b, h, qt, g, j);
       }
       if (SCHED) {                                   // the end: once the consumers took the last task's Q, a task-free phase of qf
         wait(qe, (lt & 1) ^ 1);
@@ -234,6 +282,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // ldmatrix lane geometry: matrices (rows +0 / +8) x (columns +0 / +8) of a 16 x 16 block
   const int lrow = qrow + (lane & 7) + 8 * ((lane >> 3) & 1), lcol8 = lane >> 4, x7 = lane & 7;
   const uint32_t qlane = sQ + lrow * D * 2, blane = sB + lrow * 128;
+  // BTR (the bias tile stored [key][query]: AF3's ending node, the pair-as-stored bias): query half w, key row 8 (lane / 16) + lane % 8 of a
+  // 16-key block, the 16-byte chunk of queries 16 wi + 8 ((lane / 8) % 2) (128-byte swizzle: chunk ^ row % 8)
+  const uint32_t tlane = sB + w * BM * 128 + (8 * lcol8 + x7) * 128 + (((2 * wi + ((lane >> 3) & 1)) ^ x7) << 4);
   const uint64_t kd0 = desc_k64(sKV), vd0 = desc_mn64(sKV + KVT * 2, KVT * 2);   // built once: a wgmma operand costs one 32-bit add
   const uint32_t scl2 = hdup(scl);
   // cursors: the K | V stage and bias stage the next G phase reads; the stage whose PV was issued last (released once it retired)
@@ -246,10 +297,12 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   auto G = [&](int r) {
     if (r == 0) wait(bfu(bs), bph);
     const uint32_t btile = blane + bs * BT * 2;
+    const uint32_t ttile = tlane + bs * BT * 2;
 #pragma unroll
     for (int i2 = 0; i2 < 8; ++i2) {
       uint32_t r4[4];
-      ldsm_x4(btile + (i2 >> 2) * BM * 128 + ((((2 * i2 + lcol8) & 7) ^ x7) << 4), r4);
+      if (BTR) ldsm_x4_t(ttile + i2 * 16 * 128, r4);   // the [key][query] tile: the transposed 8 x 8 matrices are the same fragments
+      else ldsm_x4(btile + (i2 >> 2) * BM * 128 + ((((2 * i2 + lcol8) & 7) ^ x7) << 4), r4);
       // r4 = (row g, block 2 i2), (row g + 8, block 2 i2), (row g, block 2 i2 + 1), (row g + 8, block 2 i2 + 1)
 #pragma unroll
       for (int e = 0; e < 4; ++e) sc[r][4 * i2 + e] = r4[e];
@@ -264,7 +317,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     wait(kvf(gst), gph);
     wg_fence();
     mma_h16_n128(sc[r], qa[r][0], desc_off(kd0, gst * STG * 2));
-    mma_h16_n128(sc[r], qa[r][1], desc_off(kd0, gst * STG * 2 + 32));
+    if (DH == D) mma_h16_n128(sc[r], qa[r][1], desc_off(kd0, gst * STG * 2 + 32));   // (heads of 16: channels 16-31 are zeros, their k16 step adds exact zeros)
     wg_commit();
     if (++gst == NKV) { gst = 0; gph ^= 1; }
   };
@@ -321,7 +374,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     }
     const uint32_t nm0 = hdup(m[r][0] > -INFINITY ? -m[r][0] : 0.f), nm1 = hdup(m[r][1] > -INFINITY ? -m[r][1] : 0.f);
 #pragma unroll
-    for (int i = 0; i < 16; ++i) { sc[r][2 * i] = hexp(hfma2(sc[r][2 * i], scl2, nm0), i); sc[r][2 * i + 1] = hexp(hfma2(sc[r][2 * i + 1], scl2, nm1), i); }
+    for (int i = 0; i < 16; ++i) { sc[r][2 * i] = hexp<POLY>(hfma2(sc[r][2 * i], scl2, nm0), i); sc[r][2 * i + 1] = hexp<POLY>(hfma2(sc[r][2 * i + 1], scl2, nm1), i); }
   };
   // after the PV of a tile of row rr retired: its row-sum increment is at least its largest probability; past 2^TA_TS the offset rises by the
   // power of two that brings it back to about 1 (o and l scaled exactly); a non-finite one (an fp16 probability overflowed) cannot be repaired
@@ -363,7 +416,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       if (t < 0) break;
     }
     int b, h, qt, g; decode(LISTM ? FIX[1 + t] : t, b, h, qt, g);
-    const int nk = KT != nullptr ? *nkslot : NK;   // (the producer's count: it streams these tiles)
+    const int nk = (KT != nullptr || KM != nullptr) ? *nkslot : NK;   // (the producer's count: it streams these tiles)
     // Q fragments of the warp's 16 rows (A of the QK^T wgmma), two k16 blocks per pair row
 #pragma unroll
     for (int r = 0; r < R; ++r)
@@ -484,9 +537,12 @@ torch::Tensor& flags_for(const torch::Device& dev) {
 // could not absorb and the exact launch recomputed; u = sigmoid(gate) o out when `gate` is given).  `key_tiles`: int32 [B], the 128-key tiles of
 // each batch element up to its last attended key (`key_tiles` in h100_sm90.py); the tiles past them, whose keys are masked (-inf) in every row,
 // are neither loaded nor computed: their exponentials are exact zeros, so the result is the same bits
+// (`key_mask`, bool [B, S]: the same tiles counted inside the kernel from the mask, B <= KM_MAXB)
+// `bias_transposed`: sbias holds bias[b, h, key, query] (the transpose of the layout above), read through ldmatrix.trans
 std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor sbias, double scale, bool want_lse,
                                            c10::optional<torch::Tensor> gate, bool want_out,
-                                           c10::optional<torch::Tensor> key_tiles) {
+                                           c10::optional<torch::Tensor> key_tiles, c10::optional<torch::Tensor> key_mask,
+                                           bool bias_transposed) {
   TORCH_CHECK(q.is_cuda() && q.dim() == 5 && (q.size(4) == D || q.size(4) == 16), "q [B, N, S, H, 32 | 16]");
   const long dh = q.size(4);   // 16: heads of 16 channels stored compact (zero-padded to 32 by the loads)
   const long B = q.size(0), N = q.size(1), S = q.size(2), H = q.size(3);
@@ -512,6 +568,11 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
   TORCH_CHECK(!key_tiles.has_value() || (key_tiles->is_cuda() && key_tiles->scalar_type() == torch::kInt32 && key_tiles->is_contiguous() &&
               key_tiles->numel() == B), "key_tiles: int32 [B] contiguous");
   const int* kt = key_tiles.has_value() ? key_tiles->data_ptr<int>() : nullptr;
+  // key_mask (instead of key_tiles): bool [B, S], the kernel counts the live key tiles itself
+  TORCH_CHECK(!key_mask.has_value() || (!key_tiles.has_value() && key_mask->is_cuda() && key_mask->scalar_type() == torch::kBool &&
+              key_mask->is_contiguous() && key_mask->numel() == B * S && B <= KM_MAXB && reinterpret_cast<uintptr_t>(key_mask->data_ptr()) % 16 == 0),
+              "key_mask: bool [B, S] contiguous, 16-byte aligned, B <= KM_MAXB (else key_tiles)");
+  const unsigned char* km_ptr = key_mask.has_value() ? reinterpret_cast<const unsigned char*>(key_mask->data_ptr()) : nullptr;
   const bool has_gate = gate.has_value();
   const bool store_out = want_out || !has_gate;
   TORCH_CHECK(!has_gate || ((gate->scalar_type() == torch::kBFloat16 || gate->scalar_type() == torch::kHalf) && gate->is_cuda() && gate->sizes() == q.sizes() && gate->stride(4) == 1 &&
@@ -541,31 +602,37 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
       (int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), hg, qm, km, vm, bm,
       store_out ? reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()) : nullptr, want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>(),
       has_gate ? reinterpret_cast<const __nv_bfloat16*>(gate->data_ptr()) : nullptr, (int)(has_gate && gate->scalar_type() == torch::kHalf),
-      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, fx, kt);
+      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, fx, kt, km_ptr);
   };
   // the head width is a template argument: the 32-channel kernels are the ones without the compact form, instruction for instruction
-  auto run = [&](auto dhc) {
+  auto run = [&](auto dhc, auto btc) {
     constexpr int DH = decltype(dhc)::value;
+    constexpr bool BT = decltype(btc)::value;
+    // the polynomial exponentials only on the 32-channel heads (tuned there, 2026-10); heads of 16 channels run every exponential on the MUFU
+    // (their score step is half as long: the polynomial's extra instructions cost more than they relieve -- d_pair 64 module, L128-1536)
+    constexpr bool POLY = DH == D;
     static bool attr = false;
     if (!attr) {
-      for (auto kk : {triattn_h16_sm90<false, false, DH>, triattn_h16_sm90<false, true, DH>, triattn_h16_sm90<true, false, DH>,
-                      triattn_h16_sm90<true, true, DH>})
+      for (auto kk : {triattn_h16_sm90<false, false, DH, POLY, BT>, triattn_h16_sm90<false, true, DH, POLY, BT>, triattn_h16_sm90<true, false, DH, POLY, BT>,
+                      triattn_h16_sm90<true, true, DH, POLY, BT>})
         C10_CUDA_CHECK(cudaFuncSetAttribute(kk, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
       attr = true;
     }
     if (spec) {
-      launch(ord1 ? triattn_h16_sm90<true, true, DH> : triattn_h16_sm90<true, false, DH>, dyn ? sched.data_ptr<int>() : nullptr,
+      launch(ord1 ? triattn_h16_sm90<true, true, DH, POLY, BT> : triattn_h16_sm90<true, false, DH, POLY, BT>, dyn ? sched.data_ptr<int>() : nullptr,
              list ? fix.data_ptr<int>() : nullptr);
       if (list) {
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        launch(ord1 ? triattn_h16_sm90<false, true, DH> : triattn_h16_sm90<false, false, DH>, nullptr, fix.data_ptr<int>());
+        launch(ord1 ? triattn_h16_sm90<false, true, DH, POLY, BT> : triattn_h16_sm90<false, false, DH, POLY, BT>, nullptr, fix.data_ptr<int>());
       }
     } else {
-      launch(ord1 ? triattn_h16_sm90<false, true, DH> : triattn_h16_sm90<false, false, DH>, dyn ? sched.data_ptr<int>() : nullptr, nullptr);
+      launch(ord1 ? triattn_h16_sm90<false, true, DH, POLY, BT> : triattn_h16_sm90<false, false, DH, POLY, BT>, dyn ? sched.data_ptr<int>() : nullptr, nullptr);
     }
   };
-  if (dh == D) run(std::integral_constant<int, D>{});
-  else run(std::integral_constant<int, 16>{});
+  using T_ = std::true_type;
+  using F_ = std::false_type;
+  if (dh == D) bias_transposed ? run(std::integral_constant<int, D>{}, T_{}) : run(std::integral_constant<int, D>{}, F_{});
+  else bias_transposed ? run(std::integral_constant<int, 16>{}, T_{}) : run(std::integral_constant<int, 16>{}, F_{});
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {out, lse, flags, u};
 }
@@ -574,5 +641,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("triattn_fwd_h16", &triattn_fwd_h16, "sm90 triangle-attention forward, inference, fp16 operands (D = 32): q/k/v [B, N, S, H, 32] fp16, "
         "sbias = bias / scale fp16 [B, H, S, S] -> out bf16, optional base-2 LSE; with `gate` also u = sigmoid(gate) o out",
         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("sbias"), py::arg("scale"), py::arg("want_lse"), py::arg("gate") = py::none(),
-        py::arg("want_out") = true, py::arg("key_tiles") = py::none());
+        py::arg("want_out") = true, py::arg("key_tiles") = py::none(), py::arg("key_mask") = py::none(),
+        py::arg("bias_transposed") = false);
 }

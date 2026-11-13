@@ -460,6 +460,7 @@ def _forward(
     compact = fused and h16 and compact_ok and L <= compact_l
     dq = COMPACT if compact else dc  # channels a head in q / k / v / g / u
     wo_use = _compact_out(wo_p, H) if compact else wo_p
+    btr = False  # the bias tiles the core reads transposed (set by the fused front for AF3's ending node)
     if fused:  # LN + projection + head-major scaled bias: one kernel (and the flip of AF3's ending node in its bias store)
         y = mean = rstd = None
         proj, sbias, _ = _front().front(
@@ -477,6 +478,7 @@ def _forward(
             h16,
             flip,
         )
+        btr = flip  # AF3's ending node: the front stored the bias as its rows have it; the core reads its tiles transposed
         flip = False
         qkvg = None
         q, k, v, gt = ((proj[i].view(torch.float16) if h16 and i < 3 else proj[i]).view(B, L, L, H, dq) for i in range(4))
@@ -523,9 +525,10 @@ def _forward(
     else:
         if h16:  # inference: the dead trailing key tiles skipped
             o, lse, _, u = _core_mod._core_h16().triattn_fwd_h16(
-                q, k, v, sbias, scale, need, gt, need, key_tiles=_core_mod.key_tiles(mask, L)
+                q, k, v, sbias, scale, need, gt, need, **_core_mod.key_args(mask, L), bias_transposed=btr
             )
         else:
+            assert not btr, "the fused front's flipped bias is read by the fp16 core only"
             o, lse, _, u = _core_mod._core().triattn_fwd(q, k, v, sbias, scale, need, gt, need)
     # (the ending node's out-projection writes its transposed rows as a strided batch over i: one cublasLt GEMM per sample; one GEMM
     # + the residual kernel's transposed store was slower except at d_pair 64 L128, measured 2026-10-20)

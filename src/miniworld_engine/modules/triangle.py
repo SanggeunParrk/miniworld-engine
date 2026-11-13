@@ -118,7 +118,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: triattn_native's sm_80 core instead of the k2b step-aside)
         "cueq": 2,
         "cuda:a100_sm80": 5,  # 5 (2026-11-13): the register-resident inference core (attn_rf_fwd_sm80.cuh) at L >= 512, plain and gated
-        "cuda:h100_sm90": 6,
+        "cuda:h100_sm90": 7,
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
     # (2026-11-12): row-blocked inference past a whole-pair budget (FoldForge OpenDDE refiner, 2976 / 3968 tokens at d_pair 384; A100: also
@@ -133,6 +133,10 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     # transposed and x / the output as stored (bitwise the same); AF3 d_pair 64 (4 heads x 16): the one-kernel front up to L2048 (was 768)
     # cuda:h100_sm90 6 (2026-11-13): inference on the fp16 core: the 128-key tiles past each sample's last attended key (masked in every
     # row) are neither loaded nor computed (h100_sm90.key_tiles; bitwise the same outputs)
+    # cuda:h100_sm90 7 (2026-11-14): the fp16 core counts the live key tiles from the mask itself (h100_sm90.key_args: no glue launches,
+    # bitwise the same) and requests the first task's tiles before reading it; heads of 16 channels (d_pair 64 x 4): one k16 score step (the
+    # padded half adds exact zeros) and every exponential on the MUFU (outputs change within rounding); the one-kernel
+    # front at d_pair 64 on two weight stages, without stored LayerNorm statistics, AF3's flipped bias stored by the whole warpgroup (bitwise)
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -799,7 +803,7 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
     version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged); 3: the
     #: training dropout scale by the H100 Philox kernel (as the base class)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 6}  # 6: as the base class
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 7}  # 6, 7: as the base
 
     transposed_bias = False
     _anthropic_block = True
@@ -842,8 +846,9 @@ class _TriangleAttentionFp32Softmax(_TriangleAttentionBase):
     #: 4: as the base class (RF3 at d_pair 128); 5: as the base class (RF3 at d_pair 128: the ending node's tail, bitwise the same); 6: as
     #: the base class (the fp16 core skips the dead trailing key tiles); 7 (2026-11-13): inference on the h100_dh core (64-channel heads)
     #: skips the dead trailing 64-key tiles (bitwise the same outputs)
-    #: 8 (2026-11-13): 64-channel heads at L a multiple of 128 on the wgmma core (h100_dh.ext_d64; outputs change within rounding)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 8}
+    #: 8 (2026-11-13): 64-channel heads at L a multiple of 128 on the wgmma core (h100_dh.ext_d64; outputs change within rounding); 9: as
+    #: the base class (the fp16 core counts the live key tiles from the mask)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 9}
     #: RoseTTAFold3: the gate and the out-projection carry a bias.
     _projection_biases: bool = False
 
@@ -971,7 +976,7 @@ class TriangleAttentionChai1(_TriangleAttentionFp32Softmax):
     #: inference with heads of 32 (d_pair 64, d_hidden 128) on the width-generic kernels and the fp16 core (the ending node's
     #: untransposed output in their out-projection; outputs change within rounding), 64-channel heads skip the dead key tiles; 5: the
     #: d_pair 256 heads (64 channels) on the wgmma core (L a multiple of 128) (as the parent class 8)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 5}
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 6}
 
     untransposed_output = True
 
@@ -986,7 +991,7 @@ class TriangleAttentionChai1Confidence(_TriangleAttentionFp32Softmax):
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     #: cuda:h100_sm90 stays 3 (as TriangleAttentionChai1); 4 (2026-11-13): the dead key tiles skipped on the h100_dh core (bitwise); 5:
     #: the wgmma core of 64-channel heads (as TriangleAttentionChai1 5)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 5}
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 6}
 
     dual_output = True
 

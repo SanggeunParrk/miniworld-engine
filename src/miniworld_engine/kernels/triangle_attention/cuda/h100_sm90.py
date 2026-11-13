@@ -92,6 +92,22 @@ def key_tiles(mask, length, tile=TOK):
     return ((last + (tile - 1)) // tile).clamp_min(1).to(torch.int32)
 
 
+#: the fp16 core counts the live key tiles from the key mask itself up to this many batch elements (KM_MAXB of triattn_h16_sm90.cu)
+KEY_MASK_MAXB = 64
+
+
+def key_args(mask, length):
+    """The fp16 core's key-tile arguments: ``key_mask`` (the bool [B, L] mask as it is: the kernel counts each element's live 128-key tiles,
+    no glue kernels -- seven small launches of ``key_tiles`` were a fifth of a d_pair 64 L128 call) when it fits the kernel's table, else
+    ``key_tiles``; nothing without a mask."""
+    if mask is None:
+        return {}
+    m = mask.reshape(-1, length)
+    if m.dtype == torch.bool and m.is_contiguous() and m.shape[0] <= KEY_MASK_MAXB and m.storage_offset() % 16 == 0:
+        return {"key_mask": m}
+    return {"key_tiles": key_tiles(mask, length)}
+
+
 def scaled_bias(bias, scale=D**-0.5):
     """The core's bias operand: bf16(bias / scale) [B, H, S, S] (the module's front writes it directly)."""
     return (bias.float() / scale).to(torch.bfloat16).contiguous()
@@ -171,7 +187,7 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, 
         sbias = flip_bias(sbias, mask)
     shp = (B, L, L, H, D)
     if INFERENCE_FP16:  # the dead trailing key tiles skipped
-        o = _core_h16().triattn_fwd_h16(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, key_tiles=key_tiles(mask, L))[0]
+        o = _core_h16().triattn_fwd_h16(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, **key_args(mask, L))[0]
     else:
         o = _core().triattn_fwd(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False)[0]
     # the biases in fp32 inside the tail, before its one rounding: added to the bf16 gate / sum afterwards they were a second
@@ -219,8 +235,9 @@ def inference_wide(pair, fold, wpk, wb8, wo16, mask=None, eps=1e-5, trans=False,
         sbias = flip_bias(sbias, mask)
     shp = (B, L, L, nh, D)
     if INFERENCE_FP16:  # the dead trailing key tiles skipped
-        kt = key_tiles(mask, L)
-        u = _core_h16().triattn_fwd_h16(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, g.view(shp), False, key_tiles=kt)[3]
+        u = _core_h16().triattn_fwd_h16(
+            q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, g.view(shp), False, **key_args(mask, L)
+        )[3]
     else:
         u = _core().triattn_fwd(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, g.view(shp), False)[3]
     bo = None if out_bias is None else out_bias.to(torch.bfloat16).contiguous()

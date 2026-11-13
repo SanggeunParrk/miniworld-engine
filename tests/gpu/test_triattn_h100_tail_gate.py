@@ -150,3 +150,34 @@ def test_af3_compact_front_past_768(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not torch.equal(a, b)  # two fronts
     upd = b.float() - x.float()
     assert float(((a.float() - b.float()) ** 2).mean().sqrt() / (upd**2).mean().sqrt()) < 3e-2
+
+
+@pytest.mark.parametrize("L", [128, 384])
+def test_af3_flip_bias_read_transposed(L: int) -> None:
+    """AF3 d_pair 64 ending node on the one-kernel front: the bias is stored as the front's rows have it (each masked row whole) and the fp16
+    core reads its tiles transposed (``triattn_fwd_h16(bias_transposed=True)``).  Against the PyTorch reference with a ragged key mask with
+    holes: the update within bf16 rounding (a wrong transpose or mask axis is O(1)), bitwise run to run."""
+    _needs_h100()
+    from miniworld_engine.modules.triangle import TriangleAttentionAF3
+
+    torch.manual_seed(0)
+    m = TriangleAttentionAF3(64, 4, starting=False, master_weights=True, backend="cuda").cuda().eval()
+    with torch.no_grad():
+        for p in m.parameters():
+            if p.dim() == 2:
+                p.normal_(0, p.shape[1] ** -0.5)
+        m.to_bias.weight.mul_(4.0)  # a bias that dominates the logits: its orientation decides the result
+    ref = copy.deepcopy(m)
+    ref.set_backend("pytorch")
+    g = torch.Generator(device="cuda").manual_seed(7)
+    x = torch.randn(2, L, L, 64, device="cuda", generator=g).bfloat16()
+    mask = torch.rand(2, L, device="cuda", generator=g) > 0.25
+    mask[1, L - 50 :] = False
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        a = m(x, mask)
+        again = m(x, mask)
+        r = ref(x, mask)
+    assert torch.equal(a, again)
+    keep = mask[:, :, None] & mask[:, None, :]  # rows / columns the reference defines (fully masked rows are 0 / NaN by convention)
+    upd, err = (r.float() - x.float())[keep], (a.float() - r.float())[keep]
+    assert float((err**2).mean().sqrt() / (upd**2).mean().sqrt()) < 2e-2
