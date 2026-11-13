@@ -188,7 +188,7 @@ def _backward(dy, msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, saved):
     do_hm = torch.empty_like(o_hm)
     dvg = torch.empty(S * L, 2 * HC, device=msa.device, dtype=torch.bfloat16)  # [dv | dg]
     gc = _gcol(vg)
-    e.gate_bwd(du, vg, gc, o_hm, do_hm, dvg if gc else dvg[:, HC:], S, L)  # dg into [dv | dg]'s g columns (the gate's column in vg: HC, or 0 in g alone)
+    e.gate_bwd(du, vg, gc, o_hm, do_hm, dvg if gc else dvg[:, HC:], S, L)  # dg lands in [dv | dg]'s g columns either way
     del du
     if _sm120():  # the RTX 5090's CUTLASS GEMMs (cuBLAS picks a WMMA kernel at half the rate for L 128..640 there)
         e.from_hm(_gemm_sm120().contract(w, do_hm, True), dvg, S, L)
