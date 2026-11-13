@@ -69,6 +69,12 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None) -> int | None:
 
     if not gen.supports(d_pair, d_hidden, module.n_head, pair.shape[1]):
         return None
+    if _variant(module) & (UNTRANSPOSED | DUAL):
+        # Chai-1's output layouts: the width-generic kernels (the fused fronts / tails write the standard layout), one block of rows
+        # (the row-blocked path writes the standard layout too; past it the h100_dh core serves them)
+        if getattr(module, "dual_output", False) and module.to_out_t.bias is not None:
+            return None
+        return GENERIC if _rows_blocks(GENERIC, pair, module.n_head) == 1 else None
     return FUSED if _fused_shape(module, pair) else GENERIC
 
 
@@ -145,7 +151,7 @@ def _packed(kind: int, weights: tuple[torch.Tensor, ...]):
 
 # ---------------------------------------------------------------- custom ops
 # args = [pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop]; mask [B, L] bool and drop [B, L, C] bf16 are empty when absent.
-def _infer_fake(kind, args, eps, n_head, head_dim, trans, flip):
+def _infer_fake(kind, args, eps, n_head, head_dim, trans, flip, variant):
     return torch.empty_like(args[0])
 
 
@@ -158,13 +164,15 @@ def _infer_op(
     head_dim: int,
     trans: bool,
     flip: bool,
+    variant: int,
 ) -> torch.Tensor:
-    return _infer(kind, args, eps, n_head, head_dim, trans, None, flip)
+    return _infer(kind, args, eps, n_head, head_dim, trans, None, flip, variant)
 
 
-def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False):
+def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False, variant=0):
     """The inference kernels; `out`: a contiguous tensor like the pair to write the result into (a chunk's rows of a batch's output,
-    eager only: an op output may not alias an input)."""
+    eager only: an op output may not alias an input; the standard output only).  ``variant``: ``_variant``'s bits -- UNTRANSPOSED / DUAL
+    (Chai-1's layouts; args[13] the second out-projection) on the width-generic kernels in one block."""
     pair, lnw, lnb, *weights = args[:9]
     mask = args[9]
     gate_bias, out_bias = (t if t.numel() else None for t in args[11:13]) if len(args) > 11 else (None, None)
@@ -185,6 +193,14 @@ def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False):
     )
 
     wcat, wo_p = _packed(kind, tuple(weights))
+    if variant & (UNTRANSPOSED | DUAL):
+        wt = args[13] if len(args) > 13 and args[13].numel() else None
+        wt_p = None
+        if wt is not None:
+            wt_p = _capture.param_forms(("triattn_h100_sm90_wt", n_head), (wt,), lambda: gen.pack_out(wt, n_head), capture_reads_eager=True)
+        return gen.inference(
+            pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, None, flip, gate_bias, out_bias, _out_mode(variant), wt_p
+        )
     return gen.inference(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias)
 
 
@@ -620,7 +636,7 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
         # inference chunks write their rows of one output (eager, L a multiple of 128 and no dropout: the tail / out-projection
         # take the rows as their output); otherwise each chunk's result is copied into it
         out = torch.empty(pair.shape, dtype=pair.dtype, device=pair.device)
-        into = drop is None and _padded(L) == L and not torch.compiler.is_compiling()
+        into = drop is None and _padded(L) == L and not torch.compiler.is_compiling() and not _variant(module) & (UNTRANSPOSED | DUAL)
         start = 0
         for n in sizes:
             sl = slice(start, start + n)
@@ -816,12 +832,13 @@ def _forward_one(
     if drop is None and not needs_grad:
         out = _infer_op(
             kind,
-            [pair, *params, mask_t, drop_t, *_bias_args(module, pair)],
+            [pair, *params, mask_t, drop_t, *_bias_args(module, pair), *_out_t_arg(module, pair)],
             eps,
             module.n_head,
             head_dim,
             trans,
             flip,
+            _variant(module) & (UNTRANSPOSED | DUAL),
         )
     else:
         out = _TriAttnFn.apply(
@@ -849,3 +866,8 @@ def _biases(module) -> tuple[torch.Tensor | None, torch.Tensor | None]:
 def _bias_args(module, like: torch.Tensor) -> list[torch.Tensor]:
     """The inference op's trailing arguments: the two biases, an empty tensor for an absent one."""
     return [b.detach() if b is not None else like.new_empty(0) for b in _biases(module)]
+
+
+def _out_t_arg(module, like: torch.Tensor) -> list[torch.Tensor]:
+    """The inference op's last argument: Chai-1 confidence's second out-projection (an empty tensor for every other module)."""
+    return [module.to_out_t.weight.detach() if getattr(module, "dual_output", False) else like.new_empty(0)]

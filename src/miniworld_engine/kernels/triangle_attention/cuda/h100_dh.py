@@ -122,6 +122,7 @@ def _pack(module):
 
 
 def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import key_tiles
     from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _glue
 
     B, L0, _, C = pair.shape
@@ -147,7 +148,9 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> tor
     if mask is not None:
         bias = bias.masked_fill(~mask[:, None, None, :], float("-inf"))
     gb = pack["gb"] if pack["gb"] is not None else proj.new_empty(0, dtype=torch.float32)
-    u = ext().triattn_dh_forward(proj, bias.contiguous(), gb, H, D, D**-0.5, query_tile(L, D))
+    # the 64-key tiles past each sample's last attended key (masked in every row, the padding included) skipped: the same bits
+    kt = key_tiles(mask, L, 64)
+    u = ext().triattn_dh_forward(proj, bias.contiguous(), gb, H, D, D**-0.5, query_tile(L, D), kt)
 
     def project(w):
         t = torch.mm(u, w.t())
