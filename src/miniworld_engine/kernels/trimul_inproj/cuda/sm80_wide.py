@@ -221,14 +221,17 @@ def _tf32(z: torch.Tensor):
 
 
 # ------------------------------------------------------------------------------------------------------------------------------ forward
-def _contract(planes, x, hs, n, direction):
-    """cuBLAS contraction of the plane pair: channels [0, h) outgoing (sum_k a[i,k] b[j,k]), the rest incoming (sum_k a[k,i] b[k,j])."""
+def _contract(planes, x, hs, n, direction, token=None):
+    """cuBLAS contraction of the plane pair: channels [0, h) outgoing (sum_k a[i,k] b[j,k]), the rest incoming (sum_k a[k,i] b[k,j]).
+    ``token`` (inference: the [L] token mask, empty = none): the bounded contraction where ``_bounded.CELLS`` lists the cell."""
+    from ._bounded import bmm
+
     a, b = planes[:hs].view(hs, n, n), planes[hs:].view(hs, n, n)
     h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
     if h:
-        torch.bmm(a[:h], b[:h].transpose(1, 2), out=x[:h])
+        bmm(a[:h], b[:h].transpose(1, 2), x[:h], token)
     if h < hs:
-        torch.bmm(a[h:].transpose(1, 2), b[h:], out=x[h:])
+        bmm(a[h:].transpose(1, 2), b[h:], x[h:], token)
 
 
 #: bf16 with a hidden width <= 128 (D64 both modules, D128 one direction): the statistics kernels are replaced by in-kernel two-pass statistics of k1w / k3w (see ``_run_forward``); False keeps the kernels (probe switch for A / B timings).
@@ -274,7 +277,7 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
     x = zf.new_empty((hs, n, n))
     with _tf32(z):
-        _contract(planes, x, hs, n, direction)
+        _contract(planes, x, hs, n, direction, None if save or ds.numel() else mask)
     saved_planes = planes if save else None
     del planes  # inference: dead once contracted -- freed before the output is allocated (peak z + planes + X, not + out)
     st_out = torch.empty((T, 2), dtype=torch.float32, device=z.device)

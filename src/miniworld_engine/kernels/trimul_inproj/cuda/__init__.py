@@ -267,4 +267,8 @@ def _sm80(cells):
         calls[sm80_wide._ext] = None
         if c.d == 512 and "train" in c.modes:
             calls[sm80_wide512._ext] = None
+    if any("eval" in c.modes for c in cells):  # the bounded contraction of the inference paths (_bounded.CELLS)
+        from . import _bounded
+
+        calls[_bounded._ext_sm80] = None
     yield from calls
