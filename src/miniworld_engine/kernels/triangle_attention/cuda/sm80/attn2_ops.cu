@@ -62,7 +62,7 @@ bool token_major16(const a100::Lay& l, int64_t L, int64_t Z) { return l.head == 
 
 template <class G>
 void launch_rf16(const a100::AttnParams& p, int64_t Z, double scl, const torch::Tensor& like) {
-  const auto fix = at::empty({a100::rf_fix_ints<G>(p.L, (int)(Z * p.H))}, like.options().dtype(at::kInt));
+  const at::Tensor fix = at::empty({a100::rf_fix_ints<G>(p.L, (int)(Z * p.H))}, like.options().dtype(at::kInt));
   int* fp = fix.data_ptr<int>();
   const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   const cudaError_t err = a100::attn_rf_launch<G>(p, (int)Z, scl, fp, at::cuda::getCurrentCUDAStream(), nsm);
