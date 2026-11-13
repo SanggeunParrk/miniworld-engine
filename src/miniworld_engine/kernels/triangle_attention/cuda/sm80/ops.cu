@@ -68,7 +68,7 @@ void launch_attn_rf(const a100::AttnParams& p, int z, double scl, const at::Tens
   C10_CUDA_CHECK(err);
 }
 
-// Inference core selection of the fast entries: -1 = the measured rule (rf_auto), 0 = the tuned AttnCfg cores, 1..3 = an rf geometry (A/B knob).
+// Inference core selection of the fast entries (attn_rf_set): -1 = the measured rule, 0 = the tuned AttnCfg cores, 1 / 2 = an rf geometry (A/B knob).
 int g_rf_mode = -1;
 
 template <bool GATE>
@@ -77,8 +77,8 @@ bool try_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorO
   if (mode < 0) mode = 2;               // L >= 512 (the callers' gate): the rf core at every measured cell (A100 80GB, d128 / d256, L 512-2048)
   if (p.L % 128 != 0) return false;
   switch (mode) {
-    case 1: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl, opts); return true;
-    case 2: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE>>(p, z, scl, opts); return true;
+    case 1: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl, opts); return true;   // 2 x 2 warps, 4 rows x 64 queries (A/B)
+    case 2: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE>>(p, z, scl, opts); return true;   // 4 warps, 2 rows x 128 queries, 4 slots
     default: return false;
   }
 }
