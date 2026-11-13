@@ -102,7 +102,7 @@ def test_apb_skip_bitwise(dtype: str, B: int, L: int, monkeypatch: pytest.Monkey
             _no_skip(mp)
             with torch.no_grad(), _autocast(dtype):
                 ref = m(inp["single"], inp["pair"].clone(), mask.clone())
-        torch.testing.assert_close(y, ref, rtol=0, atol=0)
+        torch.testing.assert_close(y, ref, rtol=0, atol=0, equal_nan=True)  # (the same NaN positions too)
 
 
 def _token(key: str, dtype: str, d_cond: int = 384, d_pair: int = 128) -> typing.Any:
@@ -134,7 +134,7 @@ def test_token_dit_skip_bitwise(key: str, dtype: str, L: int, monkeypatch: pytes
             # fresh pair / mask storage: the hoisted bias (and its klen) is keyed on them
             with torch.no_grad(), _autocast(dtype):
                 ref = m(**dict(kw, pair=inp["pair"].clone(), mask=mask.clone()))
-        torch.testing.assert_close(y, ref, rtol=0, atol=0)
+        torch.testing.assert_close(y, ref, rtol=0, atol=0, equal_nan=True)  # (the same NaN positions too)
 
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) static input refresh")
