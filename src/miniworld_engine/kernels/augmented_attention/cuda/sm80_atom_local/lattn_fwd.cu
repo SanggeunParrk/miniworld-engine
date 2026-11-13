@@ -31,6 +31,8 @@ local_attn_fwd(const __nv_bfloat16* __restrict__ gq, const __nv_bfloat16* __rest
   const int kbase = WQ * w - KOFF;
 
   // bias [32][128] of this (head, window) in log2 units + the key additive term (0 or -inf) -> smem
+  bool live = false;                                              // some key of the window is valid
+  // bias [32][128] of this (head, window) in log2 units + the key additive term (0 or -inf) -> smem
   {
     const float* src = gbias + ((size_t)h * nwin + w) * (WQ * WK);
     for (int i = tid; i < WQ * WK / 4; i += 128) {
@@ -41,10 +43,23 @@ local_attn_fwd(const __nv_bfloat16* __restrict__ gq, const __nv_bfloat16* __rest
       for (int e = 0; e < 4; ++e) {
         const int key = kbase + c + e;
         ka[e] = (key >= 0 && key < N && (kmask == nullptr || kmask[key])) ? 0.f : -INFINITY;
+        live |= ka[e] == 0.f;
       }
       b.x = fmaf(b.x, LOG2E, ka[0]); b.y = fmaf(b.y, LOG2E, ka[1]); b.z = fmaf(b.z, LOG2E, ka[2]); b.w = fmaf(b.w, LOG2E, ka[3]);
       *reinterpret_cast<float4*>(sbias + r * BS + c) = b;
     }
+  }
+  if (!__syncthreads_or(live)) {
+    // every key of the window is masked (a padded tail of atoms): what the computation gives -- zero rows, LSE 1e30 -- for every sample
+    // of the CTA, without loading or computing them (the same bits)
+    for (int p = z; p < npair; p += psplit)
+      for (int sl = 0; sl < 2; ++sl) {
+        const int a = 2 * p + sl, q = WQ * w + (tid >> 2);
+        if (a >= A || q >= N) continue;
+        *reinterpret_cast<uint4*>(gO + ((size_t)a * N + q) * DM + h * DH + (tid & 3) * 8) = make_uint4(0u, 0u, 0u, 0u);
+        if ((tid & 3) == 0) LSE[((size_t)a * NH + h) * N + q] = 1e30f;
+      }
+    return;
   }
 
   // copy mapping: thread -> (row tid / 4 + 32 k, 16-byte chunk tid % 4); the swizzle depends on bits 1-2 of the row only

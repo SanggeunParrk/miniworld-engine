@@ -27,6 +27,7 @@
 #include <ATen/Context.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
+#include "../key_len.cuh"
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cstdlib>
@@ -158,11 +159,19 @@ __global__ void __launch_bounds__(32 * fwd_warps<DPW>()) pair_bias_fwd_k(const b
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, q = lane & 3;
   const int ntj = (L + TR - 1) / TR;
   const long ntiles = (long)NB * L * ntj;
+  // a tile past its batch row's last attended key (a padded tail; inference: no ST / BU, which want the unmasked values) holds masked keys
+  // only: it is written neg without loading or computing its pair rows (the same bits). Each warp takes rows' bounds from the mask
+  // (key_len.cuh) while the first NSF tiles load (those go unbounded); the tiles from NSF on, issued after the loop's first barrier, use them.
+  constexpr int KLB = 64;                                                   // batch rows with a bound (more: no skip)
+  __shared__ int klen_s[KLB];
+  const bool skip_dead = MASK != nullptr && ST == nullptr && BU == nullptr && NB <= KLB;
+  auto dead_tile = [&](long n, int ig, int j0) { return skip_dead && n >= NSF && j0 >= klen_s[ig / L]; };
   auto issue = [&](long n) {                                                // thread 0: this block's n-th tile into its stage
     const long t = blockIdx.x + n * gridDim.x;
     if (t >= ntiles) return;
     const int i = (int)(t / ntj), j0 = (int)(t % ntj) * TR, rows = min(TR, L - j0);
     uint64_t* fb = &full[n % NSF];
+    if (dead_tile(n, i, j0)) { mbar_expect_tx(fb, 0); return; }                           // completes the stage's phase: nothing to load
     mbar_expect_tx(fb, (uint32_t)rows * DPW * 2);
     bulk_g2s(smem + (n % NSF) * FT, Z + ((long)i * L + j0) * DPW, (uint32_t)rows * DPW * 2, fb);
   };
@@ -173,6 +182,11 @@ __global__ void __launch_bounds__(32 * fwd_warps<DPW>()) pair_bias_fwd_k(const b
   __syncthreads();
   if (threadIdx.x == 0)
     for (int k = 0; k < NSF; ++k) issue(k);
+  if (skip_dead)
+    for (int r = warp; r < NB; r += NTH / 32) {
+      const int kl = warp_key_len(reinterpret_cast<const uint8_t*>(MASK) + (long)r * L, L);
+      if (lane == 0) klen_s[r] = kl;
+    }
   uint32_t b[NT8][DPW / 16][2];
   float sw0[NT8], sw1[NT8];
   wf_frags<NT8, NH, DPW>(W, b, sw0, sw1);
@@ -183,10 +197,11 @@ __global__ void __launch_bounds__(32 * fwd_warps<DPW>()) pair_bias_fwd_k(const b
     const int bb = ig / L, i = ig - bb * L;                                // batch row, query row (ig: the row of [NB L])
     const bool* mrow = MASK ? MASK + (long)bb * L : nullptr;
     mbar_wait(&full[st], (uint32_t)((n / NSF) & 1));
+    const bool dead = dead_tile(n, ig, j0);
     const uint8_t* tile = smem + st * FT;
     float (*os)[128 + 4] = out_s[n & 1];
     const int rb = warp * 16;
-    if (rb < rows) {
+    if (!dead && rb < rows) {
       float c[NT8][4] = {}, g0[4] = {}, g1[4] = {}, cs[4] = {};
       if constexpr (DPW <= 256) {                                           // the row words held for the whole tile
         uint4 r0[UU], r1[UU];
@@ -240,6 +255,11 @@ __global__ void __launch_bounds__(32 * fwd_warps<DPW>()) pair_bias_fwd_k(const b
     for (int task = threadIdx.x; task < NH * TC; task += NTH) {             // (head, 8 keys) per task: 16-B stores
       const int h = task / TC, ch = task % TC, j = j0 + ch * 8;
       if (ch * 8 >= rows) continue;
+      if (dead) {
+        const uint32_t nn = pack2(neg, neg);
+        *reinterpret_cast<uint4*>(OUT + (((long)h * NB + bb) * L + i) * L + j) = make_uint4(nn, nn, nn, nn);
+        continue;
+      }
       if (BU != nullptr) {
         float* bu = BU + (((long)h * NB + bb) * L + i) * L + j;
         *reinterpret_cast<float4*>(bu) = make_float4(os[h][ch * 8], os[h][ch * 8 + 1], os[h][ch * 8 + 2], os[h][ch * 8 + 3]);

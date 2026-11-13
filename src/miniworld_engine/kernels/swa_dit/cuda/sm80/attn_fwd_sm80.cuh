@@ -55,6 +55,24 @@ __global__ void __launch_bounds__(AF_NW * 32, 2) attn_fwd_kernel(const AttnFwdPa
   const size_t hq = p.qs.base(n, h), hk = p.ks.base(n, h), hv = p.vs.base(n, h);   // element offsets of this (n, h) plane of q, k, v
   const long long rq = row_stride<HM>(p.qs.s), rk = row_stride<HM>(p.ks.s), rv = row_stride<HM>(p.vs.s);
 
+  // ---- a tile past seqused (a padded tail of atoms), inference (no LSE): every row is written 0 below, so write it without loading or
+  // computing anything (the same bits; the H100 kernel exits the same way). With an LSE the rows past seqused keep theirs (it is not 0).
+  if (i0 >= su && p.lse == nullptr) {
+    const int z0 = i0 + warp * 16 + g8, z1 = z0 + 8;
+#pragma unroll
+    for (int nt = 0; nt < 4; ++nt) {
+      const int col = 8 * nt + 2 * q4;
+      if (p.o32) {
+        if (z0 < S) *reinterpret_cast<float2*>(p.o32 + ((size_t)n * S + z0) * AF_C + h * AF_HD + col) = make_float2(0.f, 0.f);
+        if (z1 < S) *reinterpret_cast<float2*>(p.o32 + ((size_t)n * S + z1) * AF_C + h * AF_HD + col) = make_float2(0.f, 0.f);
+        continue;
+      }
+      if (z0 < S) stg32(p.o + ((size_t)n * S + z0) * AF_C + h * AF_HD + col, 0u);
+      if (z1 < S) stg32(p.o + ((size_t)n * S + z1) * AF_C + h * AF_HD + col, 0u);
+    }
+    return;
+  }
+
   // ---- K | V span into shared memory (zero rows outside [0, seqused): the products read them, so they must be finite)
   for (int c = tid; c < AF_SPAN * 4; c += AF_NW * 32) {
     const int t = c >> 2, part = c & 3, j = i0 - AF_HW + t;
