@@ -1,3 +1,4 @@
+# ruff: noqa: B023, F821  (timing closures read the loop variables of the cell they time, called inside it before the del)
 """TriangleMultiplication (cuda backend, inference, master weights, bf16 pair) before / after the bounded contraction: the same build timed
 with ``_bounded.CELLS`` emptied (the cuBLAS contraction, the state before) and as shipped, on an unpadded mask, the last L // 8 padded and
 ~25 % padded. CUDA-graph timing, interleaved rounds, median. One line per (d, L, direction)."""

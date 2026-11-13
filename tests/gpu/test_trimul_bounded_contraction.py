@@ -128,7 +128,7 @@ def test_module_bitwise(d: int, L: int, outgoing: bool, monkeypatch: pytest.Monk
             _force_cells(monkeypatch, card, d, L)
             calls = []
             real = _bounded.contract
-            monkeypatch.setattr(_bounded, "contract", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+            monkeypatch.setattr(_bounded, "contract", lambda *a, calls=calls, real=real, **k: (calls.append(1), real(*a, **k))[1])
             got = m(x, mask)
             monkeypatch.setattr(_bounded, "contract", real)
             assert calls, "the bounded contraction did not run"

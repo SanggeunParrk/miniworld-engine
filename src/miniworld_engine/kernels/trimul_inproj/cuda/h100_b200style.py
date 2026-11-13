@@ -439,7 +439,9 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
     m = rows * n
     h = wp.shape[1]
     # inference: the bounded contraction (``_bounded``) may stop at each sample's last live token (a bool token mask [B n])
-    live = mask if (not save and ds is None and mask.dtype == torch.bool and mask.numel() == rows) else None
+    live = None
+    if not save and ds is None:  # no mask: True (the full product on the bounded kernel where its cells list the shape)
+        live = mask if mask.dtype == torch.bool and mask.numel() == rows else True if mask.numel() == 0 else None
     with T.native_context(x.device):
         xs = x.new_empty((m, 2), dtype=torch.float32)
         vec = x.new_empty((4, d), dtype=torch.float32)

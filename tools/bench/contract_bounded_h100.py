@@ -1,3 +1,4 @@
+# ruff: noqa: B023, F821  (timing closures read the loop variables of the cell they time, called inside it before the del)
 """H100: the bounded TriMul contraction (``trimul_inproj/cuda/_bounded.py``, ``h100_sources/bounded``) against the path's cuBLAS contraction
 (``_h100_bmm.contract``: the measured cuBLASLt configurations where listed), unpadded and with zero tails (L // 8, L // 4). A quick pass
 ranks (config, swizzle, raster); the best three are timed interleaved with cuBLAS (ROUNDS rounds, median ratio). One line per cell."""
