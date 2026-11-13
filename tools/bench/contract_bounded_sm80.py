@@ -16,7 +16,7 @@ ensure_cuda_home()
 SRC = os.path.join(os.path.dirname(__file__), "../../src/miniworld_engine/kernels/trimul_inproj/cuda/sm80/contract_bounded.cu")
 t0 = time.time()
 ext = load(
-    "contract_bounded_sm80_bench2",
+    "contract_bounded_sm80_bench3",
     [os.path.abspath(SRC)],
     extra_include_paths=[str(cutlass_include())],
     extra_cuda_cflags=["-O3", "-std=c++17", "-gencode=arch=compute_80,code=sm_80", "--expt-relaxed-constexpr"],
@@ -27,7 +27,7 @@ print("build", round(time.time() - t0), "s", flush=True)
 if os.environ.get("BUILD_ONLY"):
     sys.exit(0)
 DEADLINE = time.time() + float(os.environ.get("BUDGET", "400"))
-NCFG = int(os.environ.get("NCFG", "6"))
+CFGS = [int(x) for x in os.environ.get("CFGS", "0,1,2,3,4,5,6,7,8").split(",")]
 ROUNDS = int(os.environ.get("ROUNDS", "5"))
 
 
@@ -79,7 +79,7 @@ for h, L in SHAPES:
         torch.bmm(A, B, out=ref)
         res = []
         d = torch.empty_like(a)
-        for c in range(NCFG):
+        for c in CFGS:
             for lg in (0, 1, 2, 3):
                 ext.contract(a, b, d, mode, c, None, 1, lg)
                 res.append((tm(lambda c=c, lg=lg: ext.contract(a, b, d, mode, c, None, 1, lg)), c, lg, torch.equal(d, ref)))
