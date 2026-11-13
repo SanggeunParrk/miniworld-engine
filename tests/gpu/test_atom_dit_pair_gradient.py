@@ -7,8 +7,8 @@ its ``AtomCrossAttEncoder.prepare`` discards the pair that ``_per_atom_condition
 as AF3's release does; they get None on the ``pytorch`` backend too.
 
 FoldForge's pattern: 610 real atoms of 1024, the output masked to the real atoms (``_mask_atoms``), so the upstream gradient is zero on
-the padding rows. ``test_padding_windows_past_the_last_real_one`` records where ``cuda`` "slide" differs from the reference: the query
-windows wholly past the last real atom (padding queries only)."""
+the padding rows. ``test_padding_windows_past_the_last_real_one``: the same with an upstream gradient on every row, so the query windows
+wholly past the last real atom (padding queries only) count too."""
 
 import typing
 
@@ -58,9 +58,6 @@ def _grads(backend: str, key_window: str, dtype: str, *, masked_dy: bool, real: 
     return out
 
 
-_KNOWN = "known: cuda 'slide' padding query windows past the last real window keep the clipped key window"
-
-
 def _err(got: torch.Tensor, ref: torch.Tensor) -> float:
     return ((got - ref).abs().max() / ref.abs().max()).item()
 
@@ -80,15 +77,13 @@ def test_pair_gradient_matches_pytorch(backend: str, key_window: str, dtype: str
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device")
-@pytest.mark.parametrize(
-    "backend", [pytest.param(b, marks=pytest.mark.xfail(strict=True, reason=_KNOWN)) if b == "cuda" else b for b in _backends()]
-)
+@pytest.mark.parametrize("backend", _backends())
 def test_padding_windows_past_the_last_real_one(backend: str) -> None:
     """ "slide": a query window wholly past the last real atom (padding queries only) reads, in the reference, the slid key window
-    ``[R - 128, R)`` (``functional.slide_starts``). ``cuda`` (H100 local_dit_h100, A100 kernels/dit_variants) recomputes only the five edge
-    windows chosen on the device (0, 1 and the last three real ones), so those padding windows keep the clipped window: their output rows,
-    and with a nonzero upstream gradient on them the pair gradient of those windows and their single gradient, differ from the reference
-    (the real rows and every gradient under a masked output agree: ``test_pair_gradient_matches_pytorch``)."""
+    ``[R - 128, R)`` (``functional.slide_starts``). ``cuda`` (H100 local_dit_h100, A100 kernels/dit_variants) computes those windows on the
+    tail kernels (``dit_variants/cuda/edge.cu``; before them they kept the clipped window): with a nonzero upstream gradient on their rows,
+    the output, the pair gradient and the single gradient agree with the reference at every position
+    (tests/gpu/test_atom_dit_slide_tail.py: every class and key window, both dtypes)."""
     res = _grads(backend, "slide", "float32", masked_dy=False)
     if res is None:
         pytest.skip(f"{backend} refuses the call")

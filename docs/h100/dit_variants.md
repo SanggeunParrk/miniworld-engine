@@ -67,6 +67,25 @@ operands, fp32 inside:
 | `dit_variants_edge_bwd_apply_sm90` | backward | after it: the side buffers added into dq / dk / dv (one CTA per (sample, head, 8 columns), windows in order, deterministic) |
 | `dit_variants_edge_bias_bwd_sm90` | backward | the edge windows' pair LayerNorm / projection backward into dz, d gamma_pair, d Wb |
 
+**The tail.** On a padded atom count every query window past the last real one (`w >= t0 = max(last + 1, 2)`, padding queries only)
+also differs: in the reference they all read the same slid keys `[R_rule - 128, R_rule)` (`R_rule`: the real count, or rounded up to a
+whole query window for `slide_qblock`; keys past the real atoms masked; a padding query is spared Chai-1's conformer mask). How many there
+are is data-dependent, so `local_dit_h100.tail_info` puts `[t0, s, R]` in a device tensor and the tail kernels read it (nothing to do
+below `t0`: a call without a padding window costs the launches only; capturable, and the tail bias is hoisted / refreshed with the edge
+tables):
+
+| kernel (`requirements_kernel.csv`) | role | what it does |
+|---|---|---|
+| `dit_variants_tail_bias_fwd_sm90` | forward | `LN(z_w) gamma . Wb` of the tail windows, natural units, `-inf` off the valid keys; hoisted per pair in inference |
+| `dit_variants_tail_attn_fwd_sm90` | forward | the tail windows' rows of `o`: CTA = (sample, head, window chunk), the shared 128 keys staged once per CTA |
+| `dit_variants_tail_bwd_dq_sm90` | backward | before the window backward: CTA = (window, head, sample chunk): dq rows (side buffer), d bias summed over the chunk |
+| `dit_variants_tail_bwd_kv_sm90` | backward | then CTA = (sample, head): dk / dv of the shared keys over the tail windows in order (fp32), and the tail rows of dO / D zeroed |
+| `dit_variants_tail_bwd_apply_sm90` | backward | after the window backward (and `edge_bwd_apply`): dq rows and dk / dv added into dq / dk / dv, one owner per element |
+| `dit_variants_tail_bias_bwd_sm90` | backward | the tail windows' pair LayerNorm / projection backward (d bias = the chunk partials summed in order) added into dz |
+
+The A100 path (`dit_variants/cuda/train.py`) runs the same kernels from the sm_80 build (`_sm80` rows; its tail bias is an autograd
+Function, `_TailBias`, whose gradient `dit_variants_tail_dbias_sum_sm80` sums from the chunk partials).
+
 The rows list all five atom classes (`AtomDiTProtenix` / `AtomDiTOpenFold3` take the same kernels for their slid windows).
 
 ## Other files of `kernels/dit_variants`

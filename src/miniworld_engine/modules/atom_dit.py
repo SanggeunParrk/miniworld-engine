@@ -242,8 +242,10 @@ class _LocalAtomDiT(BackendModule):
     backends = ("pytorch", "anthropic", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
-        "cuda:a100_sm80": 3,
+        "cuda:a100_sm80": 4,
     }  # 2026-11-10: kits; sm_80 paths; cuda:a100_sm80 3 (2026-11-13): a CTA whose keys are all masked writes its zero rows without computing (bitwise the same)
+    # cuda:a100_sm80 4 (2026-11-13): "slide" / "slide_qblock": the query windows past the last real one (padding queries only) read the slid
+    # keys [R - 128, R) as the reference does (the tail kernels of dit_variants edge.cu); they kept the clipped window. Real rows unchanged.
 
     #: The default of the constructor's ``key_window``: one of :data:`KEY_WINDOWS` (see the module docstring).
     key_window: str = "slide"
@@ -811,7 +813,9 @@ class AtomDiTProtenix(_LocalAtomDiT):
     kv_norm = "chained"
     #: 2026-11-10: H100 "slide": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
     #: 2026-11-12: 3, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
+    #: 2026-11-13: 4, H100 "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R) (the tail
+    #: kernels of dit_variants edge.cu; they kept the clipped window). Real rows unchanged.
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
 
 
 class AtomDiTOpenFold3(_LocalAtomDiT):
@@ -837,7 +841,9 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     backends = ("pytorch", "anthropic", "cuda", "triton")
     #: 2026-11-10: H100 "slide" / "slide_qblock": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
     #: 2026-11-12: 3, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
+    #: 2026-11-13: 4, H100 "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R) (the tail
+    #: kernels of dit_variants edge.cu; they kept the clipped window). Real rows unchanged.
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
     #: ``"keys"`` or ``"af3"`` (see the class docstring)
     mask_form: str = "keys"
 
@@ -921,7 +927,9 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     transition_part = UpGatedConditionedTransition
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
     #: 2026-11-12: 4, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
+    #: 2026-11-13: 5, H100 "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R) (the tail
+    #: kernels of dit_variants edge.cu; they kept the clipped window). Real rows unchanged.
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 5}
     _release_module = "boltz_atom_kernels"
     _release_path = "boltz2/opt/forward/atom/src"
 
@@ -1000,7 +1008,9 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     attention_part = FlatQKNormAugmentedAttention
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
     #: 2026-11-12: 4, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
+    #: 2026-11-13: 5, H100 "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R) (the tail
+    #: kernels of dit_variants edge.cu; they kept the clipped window). Real rows unchanged.
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 5}
 
 
 class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
@@ -1028,7 +1038,9 @@ class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
     parallel = True
     attention_part = UngatedAugmentedAttention
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
+    #: 2026-11-13: 4, H100 "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R) (the tail
+    #: kernels of dit_variants edge.cu; they kept the clipped window). Real rows unchanged.
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
 
     def __init__(
         self,

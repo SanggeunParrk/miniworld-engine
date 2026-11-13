@@ -240,7 +240,7 @@ def test_refresh_refuses_changed_weights_and_reports_timing():
 
 #: The kernels that make the hoisted atom tables (the windowed pair bias, the slid edge windows' bias): none may run in a replay that is
 #: served the tables from the eager cache.
-_TABLE_KERNELS = ("pair_bias", "edge_bias_fwd")
+_TABLE_KERNELS = ("pair_bias", "edge_bias_fwd", "tail_bias_fwd")
 
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) path")

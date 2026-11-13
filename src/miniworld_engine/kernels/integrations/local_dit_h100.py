@@ -7,7 +7,8 @@ run the TF32 kernels; operands are rounded to nearest tf32, the residual stream,
     inference  cond90 (hoisted) -> pre90 -> window attention -> post90
     training   the same forward saving its activations; tr_bwd90 -> post_bwd90 -> window attention backward -> pre_bwd90 (pre_bwd90_par:
                the parallel K / V AdaLN) -> cond_bwd90 -> finalize90. The slid window (AF3 "slide", IntelliFold2 "slide_qblock"): the clipped
-               kernels for every window, the five edge windows recomputed and differentiated by the edge kernels (dit_variants edge.cu).
+               kernels for every window, the five edge windows recomputed and differentiated by the edge kernels (dit_variants edge.cu), and
+               the TAIL windows (every query window past the last real one; they all read the last 128 real atoms) by its tail kernels.
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ F32 = torch.float32
 BF = torch.bfloat16
 _HOIST_COND: dict = _capture.weight_cache("local_dit_h100.hoist_cond")
 _HOIST_BIAS: dict = _capture.weight_cache("local_dit_h100.hoist_bias")
-_HOIST_EDGES: dict = _capture.weight_cache("local_dit_h100.hoist_edges")  # (pair tensor, LN / bias weights) -> the slid edge windows' indices, key mask and pair bias
+_HOIST_EDGES: dict = _capture.weight_cache(
+    "local_dit_h100.hoist_edges"
+)  # (pair tensor, LN / bias weights) -> the slid edge windows' indices, key mask and pair bias
 
 
 def _edge_ext():
@@ -62,6 +65,76 @@ def _edge_index(z, n, kmask, n0, qblock=False):
     starts = torch.minimum((32 * idx - 48).clamp(min=0), (n_rule - DS).clamp(min=0))
     keys = starts[:, None] + torch.arange(DS, device=z.device)  # [5, 128]
     return idx, keys, keys < n_real  # a system under 128 real atoms has keys past them
+
+
+def tail_info(n_real, qblock=False):
+    """[t0, s, n_real] (int64, on the device) of the slid window's TAIL: the query windows ``w >= t0 = max(last + 1, 2)`` (``last = (n_real - 1)
+    // 32``, the last window holding a real atom; windows 0 and 1 are edge windows) hold padding queries only and all read the same keys
+    ``[s, s + 128)``, ``s = max(n_rule - 128, 0)`` (``n_rule``: ``n_real``, or rounded up to a whole query window for ``slide_qblock``), the
+    valid ones those below ``n_real`` (``atom_dit._window_positions``; a padding query is spared the conformer mask). ``n_real``: a 0-d int64
+    tensor; no host read."""
+    n_rule = (n_real + 31) // 32 * 32 if qblock else n_real
+    t0 = torch.clamp(torch.div(n_real - 1, 32, rounding_mode="floor") + 1, min=2)
+    return torch.stack([t0, (n_rule - DS).clamp(min=0), n_real]).to(torch.int64)
+
+
+def tail_loop(n0: int) -> int:
+    """The query windows the tail kernels run over: those of the caller's ``n0`` atoms (the kernels' own padding to a multiple of 128 is cut
+    from the output, so its windows are not computed)."""
+    return (n0 + 31) // 32
+
+
+def _tail_tables(zs, gamma, wb, kmask, n0, qblock=False):
+    """The tail of the slid window (``tail_info``): (info [3], the tail windows' pair bias tb [G, nloop, h, 32, 128] fp32, natural units, -inf
+    off the valid keys; ``tail_bias_fwd``, written for the windows from t0 on only), one bias per pair ``zs[g]``. Inference hoists it with the
+    edge tables."""
+    n_real = kmask.sum() if kmask is not None else torch.full((), n0, device=zs[0].device, dtype=torch.int64)
+    info = tail_info(n_real, qblock)
+    tb = torch.empty(len(zs), tail_loop(n0), NH, 32, DS, device=zs[0].device, dtype=F32)
+    ext = _edge_ext()
+    for g, z in enumerate(zs):
+        ext.tail_bias_fwd(z, gamma.float().contiguous(), wb.float().contiguous(), info, _ld.EPS, tb[g])
+    return info, tb
+
+
+def _slid_tail(o, q, k, v, tail, a, n):
+    """Overwrite the attention output ``o`` [A, N, 128] of the tail windows (``tail_info``) with the attention over their slid keys
+    (``tail_attn_fwd``; sample ``i`` reads pair ``i % G``). The window count is read on the device: a call without a padding window launches
+    and returns."""
+    info, tb = tail
+    _edge_ext().tail_attn_fwd(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), info, tb, o.view(a, n, DS))
+
+
+def tail_chunks(a: int, nloop: int) -> int:
+    """Sample chunks of the tail dq / d bias kernel: up to 8, the partial d bias [SC, nloop, h, 32, 128] fp32 kept under 64 MB."""
+    return max(1, min(a, 8, 1024 // max(nloop, 1)))
+
+
+def _slid_tail_bwd(do, dd, q, k, v, tail, a, n):
+    """The tail windows' backward before the window kernels (after ``_slid_edges_bwd``; one pair, training): ``tail_bwd`` takes their dq
+    (``dqt``), the dk / dv of the shared keys (``dkvt`` fp32) and d bias (``dtbp``, sample-chunk partials), then zeroes their rows of ``do`` /
+    ``dd`` so the kernels give them nothing. -> what ``_slid_tail_add`` adds."""
+    info, tb = tail
+    nloop = tb.shape[1]
+    dev = q.device
+    dqt = torch.empty(a, n, DS, device=dev, dtype=q.dtype)
+    dkvt = torch.empty(a, DS, 2 * DS, device=dev, dtype=F32)
+    dtbp = torch.empty(tail_chunks(a, nloop), nloop, NH, 32, DS, device=dev, dtype=F32)
+    _edge_ext().tail_bwd(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), do.view(a, n, DS), dd, info, tb, dqt, dkvt, dtbp)
+    return dqt, dkvt, dtbp
+
+
+def _slid_tail_add(tails, tail, dp, dz, z, gamma, wb, a, n):
+    """Add ``_slid_tail_bwd``'s gradients: dq of the tail rows and dk / dv of the shared keys into ``dp[:, 128:512]`` (``tail_bwd_apply``, after
+    ``edge_bwd_apply``), and the tail windows' pair LayerNorm / projection backward into ``dz`` (in place, ``tail_bias_bwd``). -> the extra
+    d gamma_pair [16] and d Wb [h, 16]."""
+    info, tb = tail
+    dqt, dkvt, dtbp = tails
+    ext = _edge_ext()
+    ext.tail_bwd_apply(dp[:, DS:], info, dqt, dkvt, a, n, tb.shape[1])
+    part = ext.tail_bias_bwd(z, gamma.float().contiguous(), wb.float().contiguous(), dtbp, info, dz, _ld.EPS)
+    tot = part.sum(0)
+    return tot[:DP], tot[DP:].view(NH, DP)
 
 
 def _edge_valid(valid, idx, keys, kmask, uid):
@@ -302,10 +375,16 @@ def _fwd(
 
             def edges():
                 kmask, u = keys()
-                return [_edge_tables(zg, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, u) for zg in trunks()]
+                zs = trunks()
+                gamma, wb = weights[_ld._GAMMA], weights[_ld._WBIAS]
+                return (
+                    [_edge_tables(zg, gamma, wb, n, kmask, _n0, qblock, u) for zg in zs],
+                    _tail_tables(zs, gamma, wb, kmask, _n0, qblock),
+                )
 
-            edge_tables = _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk, qblock), edges, also) if hoist else edges()
+            edge_tables, tail = _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk, qblock), edges, also) if hoist else edges()
             _slid_edges(o, q, k, v, edge_tables, a, groups, n)
+            _slid_tail(o, q, k, v, tail, a, n)
         o = o.view(m, DS)
         if not save:
             return [
@@ -435,9 +514,13 @@ def _bwd(
         da2, du, gated, do, dd, cs_so, cs_sc2 = k90.post_bwd(
             dab, dyp, s2 if pars else a2, mod, u, sg, o, pb, dmod, dp, n, tf32, eps=eps, nmod=nmod, shared=sh, options=opts
         )
-        if slide:  # the edge windows: their do / dd rows zeroed for the window kernels, their gradients from the edge kernels
+        if (
+            slide
+        ):  # the edge and tail windows: their do / dd rows zeroed for the window kernels, their gradients from the edge / tail kernels
             etab = _edge_tables(z, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0, qblock, uid)
+            ttab = _tail_tables([z], weights[_ld._GAMMA], weights[_ld._WBIAS], kmask, _n0, qblock)
             edges = _slid_edges_bwd(do, dd, q, k, v, etab, a, n)
+            tails = _slid_tail_bwd(do, dd, q, k, v, ttab, a, n)
         dbias = local.attn_bwd_mma(
             q.view(a, n, DS),
             k.view(a, n, DS),
@@ -450,9 +533,10 @@ def _bwd(
             tf32,
         )
         dzk, dgamma_pair, dwb = local.pair_bias_bwd_mma(z, p["gamma"], p["wbias"], dbias)
-        if slide:  # after the kernels wrote dp and dz: add the edge windows' dq / dk / dv / d z
+        if slide:  # after the kernels wrote dp and dz: add the edge windows' dq / dk / dv / d z, then the tail windows'
             dz, dg_e, dwb_e = _slid_edges_add(edges, etab, dp, dzk, z, weights[_ld._GAMMA], weights[_ld._WBIAS], a, n)
-            dgamma_pair, dwb = dgamma_pair + dg_e, dwb + dwb_e
+            dg_t, dwb_t = _slid_tail_add(tails, ttab, dp, dz, z, weights[_ld._GAMMA], weights[_ld._WBIAS], a, n)
+            dgamma_pair, dwb = dgamma_pair + dg_e + dg_t, dwb + dwb_e + dwb_t
         else:
             dz = dzk
         if kqln:  # the flat q / k LayerNorm backward on dp's dq / dk (after the attention backward and the edge windows)
