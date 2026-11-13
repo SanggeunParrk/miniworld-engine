@@ -12,8 +12,9 @@ captures are dropped. The scope of a call is the id of the capture sequence its 
 the capture shares it).
 
 One case no key can catch: an update that writes a tensor without bumping its ``_version``. torch's fused optimizers
-(``Adam(..., fused=True)`` and the like) do that; after their step call ``torch.autograd.graph.increment_version(params)``
-(no kernel) so eager calls repack.
+(``Adam(..., fused=True)`` and the like) do that. The contract (public: ``miniworld_engine.capture``): after such a step call
+``weights_changed(optimizer)`` (or ``torch.autograd.graph.increment_version(params)``, which is what it does: no kernel) so eager calls
+repack, or ``clear_weight_caches(model)``.
 
 **Static weights.** A graph whose weights never change between replays (inference: a sampling run, a served model) gains nothing
 from repacking and pays for it: every replay then re-runs the packing kernels (tens of small copies and casts per block -- a token
@@ -389,6 +390,43 @@ def clear_weight_caches(*modules: torch.nn.Module) -> None:
                 sub.__dict__.pop(attr, None)
 
 
+def weights_changed(*targets) -> int:
+    """Tell the engine that weights were written in place WITHOUT a version bump: call it after every such write, before the next forward.
+
+    The engine's weight caches (packs, casts, folds, the per-block call caches) are keyed on each parameter's ``(data_ptr, _version)``.
+    torch's fused optimizers (``Adam`` / ``AdamW`` / ``SGD`` ... with ``fused=True``) update the parameters in one kernel and do NOT bump
+    ``_version`` (so do writes through ``.data`` and raw kernels): the next eager forward would then be served the packs of the OLD
+    weights, silently. This bumps the version of every given parameter (``torch.autograd.graph.increment_version``: a host-side counter,
+    no kernel, no cache dropped -- the stale entries are replaced when their blocks are next called), so::
+
+        optimizer.step()                       # fused=True
+        weights_changed(optimizer)             # or weights_changed(model), or weights_changed(params)
+
+    ``targets``: modules (their parameters), optimizers (their param groups' parameters), tensors, or iterables of tensors. Returns how
+    many tensors were bumped. Inference tensors (no version counter; the engine does not cache their forms) are skipped. An optimizer
+    step that bumps the versions itself (every non-fused torch optimizer) needs no call; an extra bump only costs one repack.
+
+    What it does not do: a graph captured under ``static_weights()`` / ``static_inputs()`` keeps reading the packs of capture time
+    (that is their contract: weights fixed between replays -- capture again); a graph captured outside them repacks at every replay and
+    needs nothing. To drop the caches instead (new weight TENSORS: a second model), use ``clear_weight_caches``."""
+    params: list[torch.Tensor] = []
+    for target in targets:
+        if isinstance(target, torch.nn.Module):
+            params.extend(target.parameters())
+        elif isinstance(target, torch.optim.Optimizer):
+            for group in target.param_groups:
+                params.extend(group["params"])
+        elif isinstance(target, torch.Tensor):
+            params.append(target)
+        else:
+            params.extend(target)
+    seen: set[int] = set()
+    unique = [p for p in params if not p.is_inference() and not (id(p) in seen or seen.add(id(p)))]
+    if unique:
+        torch.autograd.graph.increment_version(unique)
+    return len(unique)
+
+
 weight_cache("capture.forms", _FORMS)
 weight_cache("capture.input_lineages", _LINEAGES)
 
@@ -405,7 +443,7 @@ def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads
     a freed storage's address reused by another tensor at the same version misses). An entry lives as long as its parameters and is
     replaced when they are cached at a newer version -- never evicted by count: a captured graph reads the entry it hit, and a size cap
     that freed a live entry freed memory a replay still read (the Transition's 64-entry ``Ws^T`` cache faulted Boltz-2's trunk graph so).
-    A fused optimizer step does not bump ``_version`` -- as for every other pack, call ``torch.autograd.graph.increment_version(params)``
+    A fused optimizer step does not bump ``_version`` -- as for every other pack, call ``weights_changed`` (``increment_version``)
     after it. Inference tensors carry no version counter: not cached.
 
     ``inputs_scope``: ``static_inputs()`` (whose contract covers the weights too) also shares the eager entry with a capture, as

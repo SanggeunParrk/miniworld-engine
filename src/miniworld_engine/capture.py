@@ -3,12 +3,15 @@
 ``miniworld_engine`` is a namespace package (no ``__init__.py``: the prebuilt kernel wheels install into it), so nothing is exported from
 the package root; this module is the public home of what a caller that captures CUDA graphs or replaces weights needs::
 
-    from miniworld_engine.capture import clear_weight_caches, static_inputs, static_weights
+    from miniworld_engine.capture import clear_weight_caches, static_inputs, static_weights, weights_changed
 
     with static_weights(), static_inputs():      # an inference graph over one item: weights and inputs fixed between replays
         graph = capture(model_step)
 
     clear_weight_caches(model)                   # before loading a second set of weights (drop old graphs first)
+
+    optimizer.step()                             # a fused optimizer (fused=True) does not bump the parameters' _version
+    weights_changed(optimizer)                   # ... so tell the engine: its weight packs are keyed on (data_ptr, _version)
 
 ``static_weights()``
     Weights stay fixed between graph replays (inference graphs only): a capture inside it serves from, and fills, the eager weight-pack
@@ -25,6 +28,15 @@ the package root; this module is the public home of what a caller that captures 
     submodules, the per-instance cache attributes. Call it before weights are replaced by new tensors (a second model, a test that builds
     many): a new tensor allocated at the address of a freed one must not be served the old one's form. Graphs captured before the call may
     read the dropped entries: drop them first.
+``weights_changed(*targets)``
+    **The fused-optimizer contract.** The engine's weight caches are keyed on each parameter's ``(data_ptr, _version)``. An update that
+    writes the weights in place without bumping ``_version`` -- torch's fused optimizers (``Adam(..., fused=True)`` and the like), a
+    write through ``.data``, a raw kernel -- is invisible to them: the next eager forward is served the packs of the OLD weights. After
+    every such update, before the next forward, call ``weights_changed(optimizer)`` (or ``weights_changed(model)`` / ``(params)``): it
+    bumps the parameters' versions (``torch.autograd.graph.increment_version``: no kernel, nothing dropped; each block repacks at its
+    next call) and returns how many. ``clear_weight_caches(model)`` is the heavier alternative. A non-fused optimizer bumps the versions
+    itself and needs no call. Graphs: one captured outside ``static_weights()`` repacks at every replay (nothing to do); one captured
+    under ``static_weights()`` / ``static_inputs()`` keeps the weights of capture time by contract -- capture again.
 ``weight_caches()``
     The registered stores by name (inspection; a kernel module not imported yet has registered nothing and filled nothing).
 
@@ -94,6 +106,7 @@ from miniworld_engine.kernels._capture import (
     static_inputs,
     static_weights,
     weight_caches,
+    weights_changed,
 )
 
 __all__ = [
@@ -106,4 +119,5 @@ __all__ = [
     "static_inputs",
     "static_weights",
     "weight_caches",
+    "weights_changed",
 ]

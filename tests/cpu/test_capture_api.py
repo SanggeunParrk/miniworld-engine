@@ -134,7 +134,9 @@ def test_public_names():
         "static_inputs",
         "static_weights",
         "weight_caches",
+        "weights_changed",
     }
+    assert capture.weights_changed is _capture.weights_changed
 
 
 def test_static_contexts_set_and_restore():
@@ -168,6 +170,27 @@ def test_param_form_replaced_weight_picked_up_after_clear():
     assert torch.equal(form(), torch.full((4,), 2.0))  # the cached form: stale
     capture.clear_weight_caches()
     assert torch.equal(form(), torch.full((4,), 6.0))
+
+
+def test_weights_changed_bumps_versions_so_a_silent_update_is_seen():
+    """The fused-optimizer contract: an in-place update that does not bump ``_version`` (here ``.data``, as ``Adam(fused=True)`` on CUDA)
+    is served the old form until ``weights_changed`` -- given a module, an optimizer, a tensor or a list -- bumps the versions."""
+    model = torch.nn.Linear(4, 3)
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+    w = model.weight
+    form = lambda: _capture.param_forms("test_weights_changed", (w,), lambda: w.detach() * 2)
+    for target in (model, opt, w, [w, model.bias]):
+        want_stale = form().clone()
+        v = w._version
+        w.data.add_(1.0)  # no version bump
+        assert w._version == v and torch.equal(form(), want_stale)
+        n = capture.weights_changed(target)
+        assert n == (1 if target is w else 2) and w._version == v + 1
+        assert torch.equal(form(), w.detach() * 2)
+    assert capture.weights_changed(model, opt, w) == 2  # each tensor once
+    assert w._version == v + 2
+    assert capture.weights_changed() == 0
+    capture.clear_weight_caches()
 
 
 def test_lookup_store_cleared():
