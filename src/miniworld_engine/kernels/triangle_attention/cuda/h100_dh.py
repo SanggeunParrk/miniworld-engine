@@ -2,8 +2,10 @@
 standard output) do not take: heads of 64 channels (Chai-1's trunk, RoseTTAFold3's template stack) and Chai-1's output variants.
 
     y = LN(pair) (the generic glue kernel; the ending node reads the pair transposed)  ->  q | k | v | g = y W^T and the pair bias
-    (cuBLAS; the bias from the transposed pair or, ``transposed_bias=False``, from the pair as it is; masked keys -inf)  ->  the
-    mma.sync core ``h100_sources/triattn_dh_sm90.cu`` (u = sigmoid(g [+ gate bias]) softmax(q k^T / sqrt(d) + bias) v)  ->  u Wo^T
+    (cuBLAS; the bias from the transposed pair or, ``transposed_bias=False``, from the pair as it is; masked keys -inf)  ->  the core
+    (u = sigmoid(g [+ gate bias]) softmax(q k^T / sqrt(d) + bias) v; the 64-key tiles past each sample's last attended key skipped):
+    64-channel heads at L a multiple of 128 on the wgmma core ``h100_sources/triattn_d64_sm90.cu`` (``ext_d64``: two pair rows per CTA
+    share the bias tile, TMA ring, fp32 softmax), else the mma.sync core ``h100_sources/triattn_dh_sm90.cu``  ->  u Wo^T
     [+ out bias] (cuBLAS), back into the pair's layout:
 
     standard           the ending node's update transposed back
@@ -47,6 +49,26 @@ def ext():
 #: halve it (H100, core alone: 0.98 / 0.93 / 0.87 / 0.94 / 0.83 / 0.86 of the 64 tile at S 384 / 512 / 768 / 1024 / 1536 / 2048; 1.04 at
 #: S 256). 32-channel heads keep 64 (the 128 tile is 1.17-1.30x slower there: 4 x 16 queries already fit its registers twice over).
 QUERY_TILE_128_MIN = 384
+
+
+#: inference of 64-channel heads on the wgmma core (h100_sources/triattn_d64_sm90.cu: two pair rows per CTA share the bias tile, TMA, fp32
+#: softmax) for L a multiple of 128 from this length on, else the mma.sync core (H100, core alone, padded mask: 0.94 / 0.84 / 0.78 / 0.78 /
+#: 0.74 / 0.69 / 0.68 / 0.65 / 0.60 of the mma.sync time at L 128 / 256 / 384 / 512 / 640 / 768 / 1024 / 1536 / 2048)
+D64_WGMMA_MIN = 128
+
+
+@functools.lru_cache(maxsize=None)
+def ext_d64():
+    """The wgmma inference core of 64-channel heads."""
+    from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import _flags
+
+    ensure_cuda_home()
+    return load_extension(name="triattn_h100_d64", sources=[str(_SRC / "triattn_d64_sm90.cu")], extra_cuda_cflags=_flags(), verbose=False)
+
+
+def wgmma_d64(length: int, d: int) -> bool:
+    """64-channel heads take the wgmma core at ``length`` (the padded S): a pure function of the shape."""
+    return d == 64 and length % 128 == 0 and length >= D64_WGMMA_MIN
 
 
 def query_tile(length: int, d: int) -> int:
@@ -122,6 +144,7 @@ def _pack(module):
 
 
 def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import key_tiles
     from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _glue
 
     B, L0, _, C = pair.shape
@@ -147,7 +170,12 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> tor
     if mask is not None:
         bias = bias.masked_fill(~mask[:, None, None, :], float("-inf"))
     gb = pack["gb"] if pack["gb"] is not None else proj.new_empty(0, dtype=torch.float32)
-    u = ext().triattn_dh_forward(proj, bias.contiguous(), gb, H, D, D**-0.5, query_tile(L, D))
+    # the 64-key tiles past each sample's last attended key (masked in every row, the padding included) skipped: the same bits
+    kt = key_tiles(mask, L, 64)
+    if wgmma_d64(L, D):
+        u = ext_d64().triattn_d64_forward(proj, bias.contiguous(), gb, H, D**-0.5, kt)
+    else:
+        u = ext().triattn_dh_forward(proj, bias.contiguous(), gb, H, D, D**-0.5, query_tile(L, D), kt)
 
     def project(w):
         t = torch.mm(u, w.t())
