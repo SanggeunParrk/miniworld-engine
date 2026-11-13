@@ -205,7 +205,7 @@ def test_atom_dead_windows(name: str, kw: dict | None, dtype: str) -> None:
     from miniworld_engine.modules import atom_dit as AD
 
     cls = getattr(AD, name)
-    m = (cls() if kw is None else cls(d_single=128, d_cond=128, d_pair=16, n_head=4, n=2, **kw)).cuda().float()
+    m: typing.Any = (cls() if kw is None else cls(d_single=128, d_cond=128, d_pair=16, n_head=4, n=2, **kw)).cuda().float()
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
     m = C.cast(m, dtype).eval()
     act = torch.float32 if dtype == "float32" else torch.bfloat16
