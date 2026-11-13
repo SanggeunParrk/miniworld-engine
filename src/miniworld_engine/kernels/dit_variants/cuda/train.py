@@ -769,10 +769,9 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
             rows = ATOM_WQ * widx[:, None] + torch.arange(ATOM_WQ, device=dev)
             valid = valid & ((uid[rows][:, :, None] == uid[keys][:, None, :]) | ~kmask[rows][:, :, None])
         valid = valid.expand(5, ATOM_WQ, ATOM_WK).to(torch.uint8).contiguous()
-        # the tail: every query window past the last real one reads the same 128 keys (local_dit_h100.tail_info)
-        from miniworld_engine.kernels.integrations.local_dit_h100 import tail_info
-
-        tinfo = tail_info(kmask.contiguous(), n, stack.key_window == "slide_qblock", single)
+        # the tail: every query window past the last real one reads the same 128 keys ([t0, s, n_real] on the device: the tail_info kernel of
+        # this sm_80 build; local_dit_h100.tail_info documents it)
+        tinfo = _edge(single).tail_info(kmask.contiguous(), n, stack.key_window == "slide_qblock", single)
     z = pair.contiguous()
     x = single.reshape(a * n, d).contiguous()
     empty = single.new_empty(0, dtype=torch.float32)
