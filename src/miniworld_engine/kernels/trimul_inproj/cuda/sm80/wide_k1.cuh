@@ -375,19 +375,19 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
 // in chunks of 64 rows (32 channels) through a two-slot cp.async ring.  ~33 KB of shared memory: four CTAs per SM.  k1w64 splits hidden 128 into two
 // column groups that each re-read the tile and recompute its statistics.  Per plane word: the same MMAs in the same k order, the same statistics and epilogue
 // arithmetic as k1w64 (chunk c = k1w64's n-tile c / 2, warp column c % 2): bit-identical planes and statistics.
-template <int HS>
+template <int HS, int ST = 2>
 struct K1t {
-  static constexpr int D = 64, NCOL = 4 * HS, NCH = NCOL / 64, NTHR = 128;
+  static constexpr int D = 64, NCOL = 4 * HS, NCH = NCOL / 64, NTHR = 128, MINB = ST == 2 ? 4 : 3;   // ST weight-ring slots (ST - 1 chunks in flight)
   static constexpr int Z_KT = 128 * 64;                  // bytes of one 32-wide k-tile of the 128-token input tile
   static constexpr int W_KT = 64 * 64;                   // bytes of one k-tile of a 64-row weight chunk
   static constexpr int WOFF = 2 * Z_KT, WSLOT = 2 * W_KT; // the weight ring after the input tile
-  static constexpr int STOFF = WOFF + 2 * WSLOT;          // (mean, rstd) of the tile's 128 tokens
+  static constexpr int STOFF = WOFF + ST * WSLOT;         // (mean, rstd) of the tile's 128 tokens
   static constexpr int SMEM = STOFF + 128 * 8;
 };
 
-template <int HS>
-__global__ void __launch_bounds__(128, 4) k1t_kernel(const K1wParams p) {
-  using C = K1t<HS>;
+template <int HS, int ST = 2>
+__global__ void __launch_bounds__(128, K1t<HS, ST>::MINB) k1t_kernel(const K1wParams p) {
+  using C = K1t<HS, ST>;
   extern __shared__ __align__(128) uint8_t smem[];
   const uint32_t s0 = smem_u32(smem);
   const int tid = threadIdx.x, wm = tid >> 5, lane = tid & 31, g8 = lane >> 2, q = lane & 3;
@@ -398,9 +398,9 @@ __global__ void __launch_bounds__(128, 4) k1t_kernel(const K1wParams p) {
     const int g = tid + C::NTHR * e, row = g >> 3, kt = (g >> 2) & 1, c = g & 3;
     cp_async16(s0 + kt * C::Z_KT + wkmaj(row, c), p.z + (size_t)(t0 + row) * C::D + kt * 32 + c * 8);
   }
-  auto issue_w = [&](int ch) {   // weight chunk ch (packed rows [64 ch, 64 ch + 64)) into slot ch & 1: 512 granules, 4 per thread
+  auto issue_w = [&](int ch) {   // weight chunk ch (packed rows [64 ch, 64 ch + 64)) into slot ch % ST: 512 granules, 4 per thread
     if (ch < C::NCH) {
-      const uint32_t sw = s0 + C::WOFF + (ch & 1) * C::WSLOT;
+      const uint32_t sw = s0 + C::WOFF + (ch % ST) * C::WSLOT;
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const int g = tid + C::NTHR * e, row = g >> 3, kt = (g >> 2) & 1, c = g & 3;
@@ -410,8 +410,9 @@ __global__ void __launch_bounds__(128, 4) k1t_kernel(const K1wParams p) {
     cp_async_commit();
   };
   cp_async_commit();
-  issue_w(0);
-  cp_async_wait<1>();
+#pragma unroll
+  for (int ch = 0; ch < ST - 1; ++ch) issue_w(ch);
+  cp_async_wait<ST - 1>();
   __syncthreads();
   {   // k1w64's statistics: one thread per token row, two passes, the same order
     float sum = 0.f;
@@ -466,10 +467,10 @@ __global__ void __launch_bounds__(128, 4) k1t_kernel(const K1wParams p) {
     }
 #pragma unroll 1
   for (int chn = 0; chn < C::NCH; ++chn) {
-    cp_async_wait<0>();
-    __syncthreads();                                       // chunk chn landed; every warp finished chunk chn - 1, so its slot takes chunk chn + 1
-    issue_w(chn + 1);
-    const uint32_t sw = s0 + C::WOFF + (chn & 1) * C::WSLOT;
+    cp_async_wait<ST - 2>();
+    __syncthreads();                                       // chunk chn landed; every warp finished chunk chn - 1, so its slot takes chunk chn + ST - 1
+    issue_w(chn + ST - 1);
+    const uint32_t sw = s0 + C::WOFF + (chn % ST) * C::WSLOT;
     float acc[2][8][4];
 #pragma unroll
     for (int mt = 0; mt < 2; ++mt)
