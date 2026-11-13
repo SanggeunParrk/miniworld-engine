@@ -58,6 +58,9 @@
 #ifndef TMN_K1_STORE32
 #define TMN_K1_STORE32 0        // experiment: 1 = TMA plane store for BJ == 32 tiles (host supplies the [32][2][32] box)
 #endif
+#ifndef TMN_K1_FOLD
+#define TMN_K1_FOLD 0           // K1 n128 blocks: 1 = the host passes W_g / 2 and W_p / 2 (exact) and the epilogue is tanh(g) p + p per value; the
+#endif                          //   mask factor (binary) zeroes the A rows instead of multiplying every output; accumulators not pre-zeroed
 #ifndef TMN_K1_BN
 #define TMN_K1_BN 64            // K1 weight block = the n of one wgmma: 64 ([32 gate | 32 proj] rows, 32 plane channels) or 128 ([64 gate | 64 proj], 64
 #endif                          //   channels; in-place weights and TMA plane stores only): the same products, half the wgmma instructions
@@ -166,8 +169,10 @@ struct K1Cfg {
 #else
   static constexpr int SCHED = SCHED_ >= 0 ? SCHED_ : ((W_RESIDENT || NSLOT >= 3 * SPB) ? 0 : 1);
 #endif
-  static_assert(SCHED == 0 || SCHED == 1, "K1 schedules: 0 (two blocks in flight) | 1 (one block, per-slot waits)");
-  static constexpr int SMEM_A = NKCA * CHUNK_BYTES;
+  static_assert(SCHED == 0 || SCHED == 1 || (SCHED == 6 && BW == 128 && SKCH == 1 && !ZF32 && CHUNK_BYTES == WCHUNK),
+                "K1 schedules: 0 (two blocks in flight) | 1 (one block, per-slot waits) | 6 (n128: 1 with the z tile through the ring)");
+  // schedule 6: no z tile buffer -- the tile's NKCA z chunks travel through the weight ring ahead of its weight chunks (same 16 KB slots)
+  static constexpr int SMEM_A = SCHED == 6 ? 0 : NKCA * CHUNK_BYTES;
   static constexpr int SMEM_W = NSLOT * SLOT_BYTES;
   static constexpr int SMEM_STAGE = NCWG * 2 * STG;      // per consumer warpgroup: 2 x [CPB ch][64 tok] bf16 epilogue transpose buffers
   static constexpr int SMEM_GB = 2 * CZ * 4;            // gamma, beta fp32
@@ -703,7 +708,7 @@ TMN_DEVI void k1_body(const P& p) {
   if (wg == 0) {
     // ------------------------------------------------------------------ producer warpgroup
     setmaxnreg_dec<G::PROD_REGS>();
-    if (warp == 0 && lane == 0) {                       // z tiles: one load per tile, issued as soon as the consumers have pulled the previous tile into registers
+    if (G::SCHED != 6 && warp == 0 && lane == 0) {      // z tiles: one load per tile, issued as soon as the consumers have pulled the previous tile into registers
       pdl_wait();                                       // TMN_PDL: z (and mask) may still be written by the previous grid; the weight ring is already in flight
       for (int it = 0; it < n_iter; ++it) {
         const int tile = (int)blockIdx.x + it * (int)gridDim.x;
@@ -712,6 +717,45 @@ TMN_DEVI void k1_body(const P& p) {
         mbar_arrive_expect_tx(barA_full, G::SMEM_A);
 #pragma unroll
         for (int kc = 0; kc < G::NKCA; ++kc) tma_load_3d(sA + kc * G::CHUNK_BYTES, &p.tm_z, barA_full, kc * G::CHUNK_CH, j0, i0);
+      }
+    } else if (G::SCHED == 6 && warp == 1 && lane == 0) {
+      // z chunks through the ring (schedule 6): per tile, a group of NKCA z chunk slots, then NBLK groups of SPB weight slots. A weight
+      // block is two 2-D TMA loads of its SPB contiguous slots from the packed weights (tm_wq[0]: [chunk][BW n][64 k] images): its bytes
+      // complete on the first slot's barrier, the other slots' barriers are arrived empty. One thread, in ring order (a slot's empty barrier is
+      // waited by parity: a thread running two uses ahead would pass it early). The issue of a TMA load is the producer's cost: two loads
+      // per 16 KB slot from the four in-place weights kept this thread, and with it the whole kernel, at the stream's rate.
+      if constexpr (G::SCHED == 6 && k1_has_wq<P>::value) {
+        static_assert(G::NKCA == SPB && NSLOT % SPB == 0, "ring groups of SPB contiguous slots");
+        pdl_wait();
+        const uint32_t groups = (uint32_t)(1 + NBLK);
+        const uint32_t n_g = (uint32_t)n_iter * groups;
+        for (uint32_t g = 0; g < n_g; ++g) {
+          const uint32_t r = g % groups;
+          const uint32_t w0 = g * (uint32_t)SPB;
+          const int s0 = (int)(w0 % NSLOT); const uint32_t u = w0 / NSLOT;
+          if (u > 0) {
+#pragma unroll
+            for (int j = 0; j < SPB; ++j) mbar_wait(barW_empty + s0 + j, (u - 1) & 1);
+          }
+          if (r == 0) {
+            const int tile = (int)blockIdx.x + (int)(g / groups) * (int)gridDim.x;
+            const int i0 = (tile / p.tiles_j) * BI, j0 = (tile % p.tiles_j) * BJ;
+#pragma unroll
+            for (int kc = 0; kc < G::NKCA; ++kc) {
+              mbar_arrive_expect_tx(barW_full + s0 + kc, SLOT_BYTES);
+              tma_load_3d(sW + (s0 + kc) * SLOT_BYTES, &p.tm_z, barW_full + s0 + kc, kc * G::CHUNK_CH, j0, i0);
+            }
+          } else {
+            // two 2-D loads of [64 k][256 rows] (two chunks = two slots each: the largest box), all on the first slot's barrier
+            mbar_arrive_expect_tx(barW_full + s0, SPB * SLOT_BYTES);
+#pragma unroll
+            for (int j = 0; j < SPB; j += 2) tma_load_2d(sW + (s0 + j) * SLOT_BYTES, &p.tm_wq[0], barW_full + s0, 0, ((int)(r - 1) * SPB + j) * G::BW);
+#pragma unroll
+            for (int j = 1; j < SPB; ++j) mbar_arrive(barW_full + s0 + j);
+          }
+        }
+      } else {
+        __trap();                                        // (the ring stream needs the packed weight map of K1ParamsQ)
       }
     } else if (warp == 1 && lane == 0) {                // weight ring: NBLK * SPB slot loads per tile, identical sequence every tile (L2-resident after the first)
       const uint32_t per_tile = (uint32_t)(NBLK * SPB);
@@ -759,6 +803,11 @@ TMN_DEVI void k1_body(const P& p) {
   const bool st_elect = (wiw == 0) && (lane == 0);
 
   pdl_wait();                                                     // TMN_PDL: consumers read the mask and write the planes
+#ifndef TMN_K1_PROF
+#define TMN_K1_PROF 0            // measurement builds only: per-phase clock64 sums of one consumer thread, written over the first rows of p.stats
+#endif
+  unsigned long long pf[8] = {0, 0, 0, 0, 0, 0, 0, 0}, pf_t = clock64();
+  auto PF = [&](int i) { if (TMN_K1_PROF) { const unsigned long long now = clock64(); pf[i] += now - pf_t; pf_t = now; } };
   if (K1OFF > 0 && cw == 1 && n_iter > 0) mbar_wait(barGo, 0);   // start offset: warpgroup 0's first K1OFF weight blocks retire before warpgroup 1 starts
   for (int t_local = 0; t_local < n_iter; ++t_local) {
     const int tile = (int)blockIdx.x + t_local * (int)gridDim.x;
@@ -785,13 +834,25 @@ TMN_DEVI void k1_body(const P& p) {
     __nv_bfloat16* gw1 = p.ab + (size_t)lane * plane + (size_t)is_w1 * p.Np + js_w1;
     const uint32_t wl_off0 = (uint32_t)lane * 128 + (uint32_t)(((2 * wiw) ^ (lane & SWM)) * 16), wl_off1 = (uint32_t)lane * 128 + (uint32_t)(((2 * wiw + 1) ^ (lane & SWM)) * 16);
 
+    PF(0);
     // ---- A fragments: from the swizzled z tile, LayerNorm applied (bf16: in registers; fp32: from smem, output bf16)
-    mbar_wait(barA_full, t_local & 1);
+    if constexpr (G::SCHED != 6) mbar_wait(barA_full, t_local & 1);
     if (tid == 128) { if (t_local == 0) TMN_TS(p.stats, 1, clock64()); if (t_local == n_iter - 1) TMN_TS(p.stats, 2, clock64()); }
+    PF(1);
     uint32_t fa[KS][4];
     LnStats st;
     if (G::ZF32) {
       st = ln_rows_f32<KS, G::CHUNK_BYTES>(fa, sA_u, rowA, rowB, sGamma, sBeta, lane, p.eps);
+    } else if constexpr (G::SCHED == 6) {                 // the z chunks arrive in ring slots w_iter .. w_iter + NKCA - 1
+      const int mat = lane >> 3, r8 = lane & 7;
+      const int row = rho0 + r8 + ((mat & 1) ? 8 : 0);
+#pragma unroll
+      for (int ks = 0; ks < KS; ++ks) {
+        const uint32_t wi = w_iter + (uint32_t)(ks >> 2);
+        const int s = (int)(wi % NSLOT);
+        if ((ks & 3) == 0) mbar_wait(barW_full + s, (wi / NSLOT) & 1u);
+        ldsm_x4(fa[ks], sW_u + s * SLOT_BYTES + swz128(row, ((ks & 3) * 16 + ((mat & 2) ? 8 : 0)) * 2));
+      }
     } else {
       load_frag_bf16<KS, G::CHUNK_BYTES>(fa, sA_u, rho0, lane);
     }
@@ -799,13 +860,28 @@ TMN_DEVI void k1_body(const P& p) {
     // release alone does not order the two; fence.proxy.async does.
     fence_proxy_async();
     __syncwarp();
-    if (lane == 0) mbar_arrive(barA_empty);              // the producer may refill sA with the next tile now
+    if constexpr (G::SCHED == 6) {                       // the z slots go back to the ring: the weight chunks behind them move up
+      if (lane == 0) {
+#pragma unroll
+        for (int kc = 0; kc < G::NKCA; ++kc) mbar_arrive(barW_empty + (int)((w_iter + (uint32_t)kc) % NSLOT));
+      }
+      w_iter += G::NKCA;
+    } else {
+      if (lane == 0) mbar_arrive(barA_empty);            // the producer may refill sA with the next tile now
+    }
     if (!G::ZF32) {
       constexpr bool LNSER = KS >= 24;                   // the affine pass serialised at 24+ k-steps (96 live fragment registers): schedule only, same values
       if (LNM == 1) st = ln_fragment<KS, LNSER>(fa, sGamma, sBeta, lane, p.eps);
       else if (LNM == 4) st = ln_fragment<KS, false, math::TX>(fa, sGamma, sBeta, lane, p.eps);
       else if (LNM == 2) st = ln_stock<0, LNSER>(fa, sGamma, sBeta, lane, p.eps);
       else st = LnStats{0.f, 1.f, 0.f, 1.f};
+    }
+    if constexpr (TMN_K1_FOLD != 0) {                   // masked / invalid rows: zero rows of the A operand (binary mask factors)
+#pragma unroll
+      for (int ks = 0; ks < KS; ++ks) {
+        if (mA == 0.f) { fa[ks][0] = 0u; fa[ks][2] = 0u; }
+        if (mB == 0.f) { fa[ks][1] = 0u; fa[ks][3] = 0u; }
+      }
     }
     if (EMITX) {                                          // the normalised rows as bf16 for K3's gate operand: 4-byte stores, 4 lanes cover 32 contiguous bytes
       const int q = lane & 3;
@@ -824,6 +900,7 @@ TMN_DEVI void k1_body(const P& p) {
       }
     }
 
+    PF(2);
     // ---- NBLK weight blocks of 32 channels (n64 = gate | proj); MMAs of block b+1 are issued before the epilogue of block b
     float acc0[G::BW / 2], acc1[G::BW / 2];
     auto slot_of = [&](uint32_t wi) -> int { return G::W_RESIDENT ? (int)(wi % (uint32_t)(NBLK * SPB)) : (int)(wi % NSLOT); };
@@ -838,7 +915,7 @@ TMN_DEVI void k1_body(const P& p) {
         dlo[j] = (uint32_t)d; dhi[j] = (uint32_t)(d >> 32);
       }
 #pragma unroll
-      for (int i = 0; i < G::BW / 2; ++i) ac[i] = 0.f;
+      for (int i = 0; i < (TMN_K1_FOLD ? 0 : G::BW / 2); ++i) ac[i] = 0.f;   // (TMN_K1_FOLD: the first MMA of the chain does not read the accumulator)
       fence_regs(ac);
       wgmma_fence();
       if constexpr ((TMN_K1_DIAG & 4) != 0) {
@@ -870,6 +947,15 @@ TMN_DEVI void k1_body(const P& p) {
 #pragma unroll
           for (int qq = 0; qq < 2; ++qq) {
             const int q = 2 * j + qq;
+#if TMN_K1_FOLD
+            // W_g / 2 and W_p / 2 (host): sigmoid(g) p = (tanh(g / 2) / 2 + 1 / 2) p = tanh(g / 2) (p / 2) + p / 2, one fused multiply-add;
+            // masked / invalid rows are zero rows of the A operand (their products are exact zeros)
+            float vA0 = __fmaf_rn(math::tanh_approx(ac[4 * q + 0]), ac[4 * (q + 8) + 0], ac[4 * (q + 8) + 0]);
+            float vA1 = __fmaf_rn(math::tanh_approx(ac[4 * q + 1]), ac[4 * (q + 8) + 1], ac[4 * (q + 8) + 1]);
+            float vB0 = __fmaf_rn(math::tanh_approx(ac[4 * q + 2]), ac[4 * (q + 8) + 2], ac[4 * (q + 8) + 2]);
+            float vB1 = __fmaf_rn(math::tanh_approx(ac[4 * q + 3]), ac[4 * (q + 8) + 3], ac[4 * (q + 8) + 3]);
+            if ((TMN_K1_DIAG & 2) != 0) { vA0 = ac[4 * q]; vA1 = ac[4 * q + 1]; vB0 = ac[4 * q + 2]; vB1 = ac[4 * q + 3]; }
+#else
             float vA0 = math::gate(ac[4 * q + 0], ac[4 * (q + 8) + 0], mA), vA1 = math::gate(ac[4 * q + 1], ac[4 * (q + 8) + 1], mA);
             float vB0 = math::gate(ac[4 * q + 2], ac[4 * (q + 8) + 2], mB), vB1 = math::gate(ac[4 * q + 3], ac[4 * (q + 8) + 3], mB);
             if ((TMN_K1_DIAG & 2) != 0) { vA0 = ac[4 * q]; vA1 = ac[4 * q + 1]; vB0 = ac[4 * q + 2]; vB1 = ac[4 * q + 3]; }
@@ -877,14 +963,17 @@ TMN_DEVI void k1_body(const P& p) {
               if (!vA) { vA0 = 0.f; vA1 = 0.f; }
               if (!vB) { vB0 = 0.f; vB1 = 0.f; }
             }
+#endif
             pk2[qq][0] = pack_bf16(vA0, vA1); pk2[qq][1] = pack_bf16(vB0, vB1);
           }
           stsm_x4_t(sbuf + sts_off0 + (uint32_t)(j * 2048), pk2[0][0], pk2[0][1], pk2[1][0], pk2[1][1]);   // channels 16 j .. 16 j + 15
         }
+        PF(6);
         fence_proxy_async();                                                 // the stmatrix writes -> visible to the async proxy that reads the buffer
         if (st_elect) tma_store_wait_read<0>();                              // the store from the other buffer a block ago has read it
         named_bar_sync(bar_id, 128);
         if (st_elect) { tma_store_3d(&p.tm_ab, sStage + cw * (2 * G::STG) + (b & 1) * G::STG, jw, iw, G::CPB * b); tma_store_commit(); }
+        PF(7);
         return;
       }
       uint32_t pk[4][2];
@@ -925,7 +1014,7 @@ TMN_DEVI void k1_body(const P& p) {
       }
     };
 
-    if constexpr (G::SCHED == 1) {
+    if constexpr (G::SCHED == 1 || G::SCHED == 6) {       // (6: with the z chunks through the ring)
       // ---- schedule 1: one block at a time — per-slot waits under the earlier slots' MMAs, full retire, every slot released before the epilogue
       (void)acc1; (void)issue_block;
 #pragma unroll 1
@@ -934,18 +1023,21 @@ TMN_DEVI void k1_body(const P& p) {
           constexpr int J = decltype(Jc)::value;
           const int s = slot_of(w_iter + J);
           if (!(TMN_WSKIP != 0 && G::W_RESIDENT && t_local > 0)) mbar_wait(barW_full + s, phase_of(w_iter + J));
+          PF(J == 0 ? 3 : 1);
           const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
           if (J == 0) {
 #pragma unroll
-            for (int i = 0; i < G::BW / 2; ++i) acc0[i] = 0.f;
+            for (int i = 0; i < (TMN_K1_FOLD ? 0 : G::BW / 2); ++i) acc0[i] = 0.f;
             fence_regs(acc0);
           }
           wgmma_fence();
           if constexpr (G::BW == 128) mma_group128<SKCH, KS, J>(acc0, fa, (uint32_t)d, (uint32_t)(d >> 32));
           else mma_group<SKCH, KS, J>(acc0, fa, (uint32_t)d, (uint32_t)(d >> 32));
           wgmma_commit();                                // a group per slot: the wait for the next slot never sits inside an open (uncommitted) MMA group
+          PF(4);
         });
         wgmma_wait<0>();
+        PF(5);
         if (!G::W_RESIDENT) {                            // every slot of the block back to the producer before any epilogue work (measured: earlier than
 #pragma unroll                                           // inside the epilogue after its register fence is worth ~6 % of K1 at c_z 384)
           for (int j = 0; j < SPB; ++j) { __syncwarp(); if (lane == 0) mbar_arrive(barW_empty + slot_of(w_iter + j)); }
@@ -969,6 +1061,7 @@ TMN_DEVI void k1_body(const P& p) {
     for (int ks = 0; ks < KS; ++ks) fence_regs(fa[ks]);
   }
   if (TMAST && st_elect) tma_store_wait_all();           // every bulk store of this CTA complete before its shared memory is released
+  if (TMN_K1_PROF && p.stats != nullptr && tid == 128 + TMN_K1_PROF - 1 && blockIdx.x == 5) for (int i = 0; i < 8; ++i) reinterpret_cast<unsigned long long*>(p.stats)[i] = pf[i];
   if (tid == 128) { TMN_TS(p.stats, 3, clock64()); TMN_TS(p.stats, 5, tmn_globaltimer()); }
 }
 
