@@ -59,6 +59,16 @@ CELLS: dict[tuple, tuple] = {
     ("a100", 128, 2048, 1): (2, 2),  # 1.028; 1.51x / 2.37x
     ("a100", 256, 2048, 1): (2, 2),  # 1.000-1.016; 1.40x / 2.09x
     ("a100", 384, 2048, 1): (2, 0),  # 1.005; 1.40x / 2.09x
+    # H100 (2026-11-14, tools/bench/contract_bounded_h100.py; vs _h100_bmm.contract): (config, swizzle, raster 8 + 1 | 2: CUTLASS's tile order when
+    # every token is live, live tiles first otherwise). Config 3 = pingpong 128 x 192, cluster 2 x 1. Only cells >= 0.99 of cuBLAS unpadded
+    # in two separate sweeps; L 640-1280 and most L 2048 cells measured 0.80-0.98 (cuBLAS's nvjet kernels stay ahead), L 768 padded L // 8 slower.
+    ("h100", 64, 1536, 0): (3, 2, 10),  # 1.039 / 1.040 unpadded; 1.12x / 1.49x padded (L // 8, L // 4)
+    ("h100", 64, 1536, 1): (3, 2, 10),  # 1.065 / 1.065; 1.14x / 1.53x
+    ("h100", 64, 2048, 1): (3, 1, 9),  # 0.990 / 0.992; 1.19x / 1.67x
+    ("h100", 128, 1536, 0): (3, 1, 10),  # 1.017 / 1.055; 1.11x / 1.48x
+    ("h100", 128, 1536, 1): (3, 1, 10),  # 1.054 / 1.056; 1.12x / 1.53x
+    ("h100", 256, 1536, 1): (3, 2, 10),  # 1.040 / 1.054; 1.13x / 1.56x
+    ("h100", 384, 1536, 1): (3, 2, 10),  # 1.059 / 1.055; 1.12x / 1.55x
 }
 
 

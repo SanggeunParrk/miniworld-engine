@@ -131,6 +131,10 @@ def _h100(cells):
 
     # glue shared by every path
     yield _call(P._owned_blas_ext)
+    if infer:  # the bounded contraction of the inference paths (_bounded.CELLS)
+        from . import _bounded
+
+        yield _call(_bounded._ext_h100)
     yield _call(P._aux_unit)
     yield _call(h100_b200style_aux._unit)
 
@@ -267,4 +271,8 @@ def _sm80(cells):
         calls[sm80_wide._ext] = None
         if c.d == 512 and "train" in c.modes:
             calls[sm80_wide512._ext] = None
+    if any("eval" in c.modes for c in cells):  # the bounded contraction of the inference paths (_bounded.CELLS)
+        from . import _bounded
+
+        calls[_bounded._ext_sm80] = None
     yield from calls

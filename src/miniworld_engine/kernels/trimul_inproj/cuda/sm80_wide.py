@@ -225,6 +225,7 @@ def _contract(planes, x, hs, n, direction, token=None):
     """cuBLAS contraction of the plane pair: channels [0, h) outgoing (sum_k a[i,k] b[j,k]), the rest incoming (sum_k a[k,i] b[k,j]).
     ``token`` (inference: the [L] token mask, empty = none): the bounded contraction where ``_bounded.CELLS`` lists the cell."""
     from ._bounded import bmm
+
     a, b = planes[:hs].view(hs, n, n), planes[hs:].view(hs, n, n)
     h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
     if h:

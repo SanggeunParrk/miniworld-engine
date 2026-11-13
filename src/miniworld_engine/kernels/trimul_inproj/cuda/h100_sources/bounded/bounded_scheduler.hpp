@@ -21,7 +21,7 @@ using cutlass::gemm::to_gemm_coord;
 
 struct BoundedParams : PersistentTileSchedulerSm90Params {
   const int* bounds = nullptr;   // bounded
-  int nsamples = 1, tile_m = 1, tile_n = 1, tile_k = 1, k_full = 0, group = 1;
+  int nsamples = 1, tile_m = 1, tile_n = 1, tile_k = 1, k_full = 0, m_full = 0, n_full = 0, group = 1, order = 1;
 };
 
 struct BoundedArguments {
@@ -30,12 +30,15 @@ struct BoundedArguments {
   const int* bounds = nullptr;  // bounded
   int nsamples = 1;
   int group = 1;  // bounded: live units in strips of this many along the raster's minor mode (CUTLASS's swizzle; its own stays 1)
+  int order = 1;  // bounded: 1 = live units first, 0 = CUTLASS's tile order (per-tile k counts only), 2 = 0 when every sample is fully live
+                  // (the unpadded speed of CUTLASS's order), else 1 (resolved on the device per launch)
 };
 
 class BoundedPersistentSm90 {
  private:
   uint64_t current_work_linear_idx_;
   uint64_t total_grid_size_;
+  int order_ = 1;  // bounded: the order this launch runs (order 2 resolves to 0 when every sample is fully live, else 1)
 
  public:
   struct WorkTileInfo {
@@ -81,10 +84,13 @@ class BoundedPersistentSm90 {
     params.bounds = arguments.bounds;  // bounded
     params.nsamples = arguments.nsamples;
     params.group = arguments.group < 1 ? 1 : arguments.group;
+    params.order = arguments.order;
     params.tile_m = size<0>(tile_shape);
     params.tile_n = size<1>(tile_shape);
     params.tile_k = size<2>(tile_shape);
     params.k_full = static_cast<int>(get<2>(problem_shape_mnkl));
+    params.m_full = static_cast<int>(get<0>(problem_shape_mnkl));
+    params.n_full = static_cast<int>(get<1>(problem_shape_mnkl));
     return params;
   }
 
@@ -96,6 +102,24 @@ class BoundedPersistentSm90 {
   // with dead tiles in place left some clusters with more live tiles than others). Without bounds every unit is live (plane-major).
   CUTLASS_DEVICE explicit BoundedPersistentSm90(Params const& params_) : scheduler_params(params_) {
 #if defined(__CUDA_ARCH__)
+    order_ = params_.order;
+    if (order_ == 2) {  // every sample fully live -> CUTLASS's order (the same for every CTA: they read the same bounds)
+      bool full = true;
+      for (int s = 0; s < params_.nsamples && full && params_.bounds != nullptr; ++s) {
+        const int* b = params_.bounds + 3 * s;
+        full = __ldg(b) >= params_.m_full && __ldg(b + 1) >= params_.n_full && __ldg(b + 2) >= params_.k_full;
+      }
+      order_ = full ? 0 : 1;
+    }
+    if (order_ == 0) {  // CUTLASS's CTA-linear order
+      if (params_.raster_order_ == RasterOrder::AlongN) {
+        current_work_linear_idx_ = uint64_t(blockIdx.x) + uint64_t(blockIdx.y) * uint64_t(gridDim.x);
+      } else {
+        current_work_linear_idx_ = uint64_t(blockIdx.x) * uint64_t(gridDim.y) + uint64_t(blockIdx.y);
+      }
+      total_grid_size_ = uint64_t(gridDim.x) * uint64_t(gridDim.y) * uint64_t(gridDim.z);
+      return;
+    }
     const dim3 cid = cute::cluster_id_in_grid(), cgrid = cute::cluster_grid_dims();
     current_work_linear_idx_ = uint64_t(cid.x) + uint64_t(cgrid.x) * (uint64_t(cid.y) + uint64_t(cgrid.y) * uint64_t(cid.z));
     total_grid_size_ = uint64_t(cgrid.x) * uint64_t(cgrid.y) * uint64_t(cgrid.z);
@@ -125,8 +149,32 @@ class BoundedPersistentSm90 {
     kt = k < 1 ? 1 : k;
   }
 
+  // bounded, order 0: CUTLASS's tile order over every tile (CTA-linear index), each tile's k count from its sample's live extents (a
+  // cluster tile past the live rows / columns: one k tile)
+  CUTLASS_DEVICE WorkTileInfo cutlass_order_work(uint64_t linear_idx) const {
+    const Params& p = scheduler_params;
+    if (linear_idx >= p.blocks_per_problem_) {
+      return WorkTileInfo::invalid_work_tile();
+    }
+    uint64_t work_idx_l, remainder;
+    p.divmod_batch_(work_idx_l, remainder, linear_idx);
+    uint64_t blk_per_grid_dim = p.divmod_cluster_shape_minor_.divide(remainder);
+    auto [m, n] = get_work_idx_m_and_n(blk_per_grid_dim, p.divmod_cluster_shape_major_, p.divmod_cluster_shape_minor_,
+                                       p.divmod_cluster_blk_major_, p.log_swizzle_size_, p.raster_order_);
+    const int l = int(work_idx_l);
+    int lm, ln, kt;
+    live_units(l % p.nsamples, lm, ln, kt);
+    if (m / int(p.cluster_shape_m_) >= lm || n / int(p.cluster_shape_n_) >= ln) {
+      kt = 1;
+    }
+    return {m, n, l, true, kt};
+  }
+
   CUTLASS_DEVICE WorkTileInfo get_current_work_for_linear_idx(uint64_t unit) const {
     const Params& p = scheduler_params;
+    if (order_ == 0) {
+      return cutlass_order_work(unit);
+    }
     const int cm = int(p.problem_tiles_m_), cn = int(p.problem_tiles_n_), planes = int(p.problem_tiles_l_), ns = p.nsamples;
     const int per_sample = planes / ns;  // planes l = c * ns + s: per_sample planes of each sample
     if (unit >= uint64_t(planes) * uint64_t(cm) * uint64_t(cn)) {

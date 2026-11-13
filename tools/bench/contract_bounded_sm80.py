@@ -66,7 +66,9 @@ def interleaved(fa, fb, it=10):
     return statistics.median(ra), statistics.median(rb), statistics.median(x / y for x, y in zip(ra, rb, strict=True))
 
 
-SHAPES = [tuple(map(int, x.split("x"))) for x in os.environ.get("SHAPES", "128x768,128x1024,128x1536,256x1024,128x2048,256x2048").split(",")]
+SHAPES = [
+    tuple(map(int, x.split("x"))) for x in os.environ.get("SHAPES", "128x768,128x1024,128x1536,256x1024,128x2048,256x2048").split(",")
+]
 for h, L in SHAPES:
     a = torch.randn(h, L, L, device="cuda").bfloat16()
     b = torch.randn(h, L, L, device="cuda").bfloat16()

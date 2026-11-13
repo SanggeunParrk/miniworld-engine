@@ -21,6 +21,8 @@ DEADLINE = time.time() + float(os.environ.get("BUDGET", "400"))
 CFGS = [int(x) for x in os.environ.get("CFGS", ",".join(map(str, range(_bounded.H100_CONFIGS)))).split(",")]
 SWZ = [int(x) for x in os.environ.get("SWZ", "1,2,4").split(",")]
 ROUNDS = int(os.environ.get("ROUNDS", "7"))
+# raster 1 / 2 (along m / n), + 4: CUTLASS's tile order instead of live units first
+RASTERS = [int(x) for x in os.environ.get("RASTERS", "1,2,5,6").split(",")]
 
 
 def graph(fn, it):
@@ -74,7 +76,7 @@ for h, L in SHAPES:
         d = torch.empty_like(a)
         for c in CFGS:
             for s in SWZ:
-                for r in (1, 2):
+                for r in RASTERS:
                     ext.contract(a, b, d, mode, c, None, 1, s, r)
                     res.append((tm(lambda c=c, s=s, r=r: ext.contract(a, b, d, mode, c, None, 1, s, r)), c, s, r, torch.equal(d, ref)))
         res.sort()

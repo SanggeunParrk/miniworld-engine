@@ -69,8 +69,13 @@ struct BGemm {
                                   hw};
     args.scheduler.bounds = bounds;
     args.scheduler.nsamples = nsamples;
-    args.scheduler.max_swizzle_size = 1;  // the problem tiles unrounded; the unit order's own strips instead
-    args.scheduler.group = swizzle;
+    // raster: 0 heuristic, 1 along m, 2 along n; + 4: CUTLASS's tile order (its swizzle) instead of live units first (our strips; the
+    // problem tiles unrounded); + 8: CUTLASS's order when every sample is fully live, else live units first (resolved on the device)
+    const int order = raster >= 8 ? 2 : raster >= 4 ? 0 : 1;
+    raster %= 4;
+    args.scheduler.order = order;
+    args.scheduler.max_swizzle_size = order == 1 ? 1 : swizzle;
+    args.scheduler.group = order == 1 ? swizzle : 1;
     using RO = typename Kernel::TileScheduler::RasterOrderOptions;
     args.scheduler.raster_order = raster == 0 ? RO::Heuristic : raster == 1 ? RO::AlongM : RO::AlongN;
     Gemm g;
