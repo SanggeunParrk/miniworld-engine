@@ -167,7 +167,9 @@ void compact_attention_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, t
     p.aout = reinterpret_cast<__nv_bfloat16*>(out.data_ptr()); p.ldao = H * 32;
     p.dense_bias = reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr());
     if (FAST && L >= 512 && H <= 8) {
-      launch_density<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>, true>(p, Z);
+      a100::AttnParams d = p;   // the dense branch: the rf core on the unpermuted bias where the batch is dense (device-side count)
+      d.bias = p.dense_bias;
+      if (!try_attn_rf<true>(d, (int)Z, scl, q.options())) launch_density<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>, true>(p, Z);
       launch_density<a100::AttnCfg<2, 2, 64, 3, true, true, 64>, false>(p, Z);
       return;
     }
@@ -183,7 +185,9 @@ void compact_attention_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, t
   } else {
     if (FAST && L >= 512) {
       p.dense_bias = reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr());
-      launch_density<a100::AttnCfg<2, 2, 64, 3, false, false, 64, true>, true>(p, Z);
+      a100::AttnParams d = p;   // the dense branch: the rf core on the unpermuted bias where the batch is dense (device-side count)
+      d.bias = p.dense_bias;
+      if (!try_attn_rf<false>(d, (int)Z, scl, q.options())) launch_density<a100::AttnCfg<2, 2, 64, 3, false, false, 64, true>, true>(p, Z);
       launch_density<a100::AttnCfg<2, 2, 48, 2, false, true>, false>(p, Z);
       return;
     }

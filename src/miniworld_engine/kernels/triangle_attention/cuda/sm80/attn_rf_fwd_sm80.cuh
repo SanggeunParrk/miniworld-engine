@@ -38,12 +38,14 @@ struct AttnRCfg {
   static constexpr int KOFF = BIAS_BYTES, VOFF = KOFF + R * KV_ROW, SLOT = VOFF + R * KV_ROW;
   static constexpr int Q_BYTES = R * BM * RB;
   static constexpr int SMEM = ST * SLOT;
-  static constexpr int KV_IT = R * CPR / NTHR;               // 16-byte K (and V) chunks per thread and slot
+  static constexpr bool KV_PART = R * CPR < NTHR;            // fewer K (V) chunks than threads: threads [0, R CPR) copy one each
+  static constexpr int KV_IT = KV_PART ? 1 : R * CPR / NTHR;  // 16-byte K (and V) chunks per thread and slot
   static constexpr int B_IT = BM * 4 / NTHR;                 // bias chunks per thread and slot
   static constexpr int Q_IT = R * BM * GR / NTHR;
   static_assert(RW == 1 || RW == 2 || RW == 4, "rows per warp");
   static_assert(HD == 16 || HD == 32, "head dim");
-  static_assert(NTHR % CPR == 0 && (R * CPR) % NTHR == 0, "whole pair rows of K / V chunks per thread step");
+  static_assert(KV_PART ? (R * CPR) % 32 == 0 : (NTHR % CPR == 0 && (R * CPR) % NTHR == 0), "whole pair rows of K / V chunks per thread step");
+  static_assert(BM * 4 % NTHR == 0 && (R * BM * GR) % NTHR == 0, "bias / Q chunks per thread");
   static_assert(Q_BYTES <= SLOT, "Q rides in through one ring slot");
   static_assert(2 * Q_BYTES <= ST * SLOT, "the epilogue stages O and g in the ring");
   static_assert(ST >= 2 && SMEM <= 163 * 1024, "ring");
@@ -97,6 +99,7 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
       const uint32_t s = sbase + (u % ST) * G::SLOT;
 #pragma unroll
       for (int i = 0; i < G::KV_IT; ++i) {
+        if (G::KV_PART && tid >= G::R * G::CPR) break;
         cp_async16(s + kdst + i * RSTEP * G::KV_ROW, ksrc + i * kstep);
         cp_async16(s + kdst + (G::VOFF - G::KOFF) + i * RSTEP * G::KV_ROW, vsrc + i * vstep);
       }
@@ -328,11 +331,12 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
   return false;
 }
 
-// The hot pass over every CTA tile.  A tile it cannot finish is appended to the fix list (fix[0] = count, cleared by the launcher; fix[1 + i] = the
+// The hot pass over every CTA tile (with p.counts set: the tiles of the batches whose live-key count makes them dense, read on device at every replay).  A tile it cannot finish is appended to the fix list (fix[0] = count, cleared by the launcher; fix[1 + i] = the
 // tile's linear index) and recomputed by attn_rf_fix_kernel -- a separate kernel, so the hot kernel's register allocation is its own.  The list
 // order may vary; the tiles are disjoint and each is recomputed whole, so the output does not.
 template <class G>
 __global__ void __launch_bounds__(G::NTHR, 2) attn_rf_fwd_kernel(const AttnParams p, float sinv_hi, float sinv_lo, int* fix) {
+  if (p.counts != nullptr && p.counts[blockIdx.z / p.H] * 4 <= p.L * 3) return;   // the dense branch of a density split (attn_density_fwd_kernel's rule): a sparse batch is the compact core's
   if (attn_rf_body<G, false>(p, sinv_hi, sinv_lo, blockIdx.x, blockIdx.y, blockIdx.z) && threadIdx.x == 0)
     fix[1 + atomicAdd(fix, 1)] = (int)((blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x);
 }
