@@ -59,18 +59,19 @@ void launch_back(const a100::F3Params& p, int nsm) {
 }
 
 // The register-resident inference core (attn_rf_fwd_sm80.cuh).  Its bias-scaling operand: 1 / scale = log2 e / scl in two bf16 words.
-template <class G>
+template <class G, bool HOT_ONLY = false>
 void launch_attn_rf(const a100::AttnParams& p, int z, double scl) {
+  auto* kern = HOT_ONLY ? a100::attn_rf_hot_kernel<G> : a100::attn_rf_fwd_kernel<G>;
   static bool set[64] = {};
   const int dev = at::cuda::current_device() & 63;
   if (!set[dev]) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(a100::attn_rf_fwd_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
     set[dev] = true;
   }
   const double s = 1.4426950408889634 / scl;
   const float hi = __bfloat162float(__float2bfloat16_rn((float)s)), lo = __bfloat162float(__float2bfloat16_rn((float)(s - hi)));
   dim3 grid(p.L / G::BM, p.L / G::R, z * p.H);
-  a100::attn_rf_fwd_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p, hi, lo);
+  kern<<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p, hi, lo);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -88,6 +89,7 @@ bool try_attn_rf(const a100::AttnParams& p, int z, double scl) {
     case 3: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 5, GATE>>(p, z, scl); return true;
     case 4: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 3, GATE>>(p, z, scl); return true;
     case 6: launch_attn_rf<a100::AttnRCfg<2, 1, 4, 4, GATE>>(p, z, scl); return true;
+    case 7: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE>, true>(p, z, scl); return true;
     default: return false;
   }
 }

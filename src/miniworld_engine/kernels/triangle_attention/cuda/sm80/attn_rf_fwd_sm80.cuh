@@ -297,3 +297,11 @@ __global__ void __launch_bounds__(G::NTHR, 2) attn_rf_fwd_kernel(const AttnParam
 }
 
 }  // namespace a100
+
+namespace a100 {
+// probe: the hot pass alone (no recomputation of flagged CTAs)
+template <class G>
+__global__ void __launch_bounds__(G::NTHR, 2) attn_rf_hot_kernel(const AttnParams p, float sinv_hi, float sinv_lo) {
+  attn_rf_body<G, false>(p, sinv_hi, sinv_lo);
+}
+}  // namespace a100
