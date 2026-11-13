@@ -241,6 +241,16 @@ void k3w(torch::Tensor x, torch::Tensor z, torch::Tensor wo3, torch::Tensor wg3,
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
   }
+  if (TUNED && D == 64 && fuse && !ps.numel()) {
+    // D64 inference with in-kernel statistics: the gate GEMM's z tile and weights are issued before the output projection runs and the residual reads z from
+    // that resident tile (k3w_kernel ZPRE): the same MMAs and epilogue arithmetic, bit-identical outputs.
+    using Cfg = a100::K3wCfg<64>;
+    static bool set = false;
+    if (!set) { set_smem(a100::k3w_kernel<64, true, 4, true>, Cfg::SMEM_Z); set = true; }
+    a100::k3w_kernel<64, true, 4, true><<<p.T / 128, Cfg::NTHR, Cfg::SMEM_Z, stream()>>>(p);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
   if (D % 128 == 0) launch_k3w<128>(p, fuse); else launch_k3w<64>(p, fuse);
 }
 

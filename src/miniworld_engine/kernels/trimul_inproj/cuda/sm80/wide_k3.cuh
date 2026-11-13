@@ -25,7 +25,7 @@ namespace a100 {
 // are coalesced 16-byte loads issued four granules ahead of their use, so a thread never waits on a global load between two dependent instructions (the per-element 4-byte
 // loads this replaces made the output stage's epilogue about half of its time).  With a row scale the product ``o ds`` is rounded to bf16 before the add, as before.
 template <int BN, int NTHR>
-DEVI void k3_residual_pass(uint32_t s0, const __nv_bfloat16* z, const __nv_bfloat16* ds, __nv_bfloat16* out, int t0, int n0, int D, int L, int tid) {
+DEVI void k3_residual_pass(uint32_t s0, const __nv_bfloat16* z, const __nv_bfloat16* ds, __nv_bfloat16* out, int t0, int n0, int D, int L, int tid, uint32_t zsm = 0u, uint32_t zstage = 0u) {
   constexpr int GR = BN / 8, PER = 128 * GR / NTHR;      // granules per row; granules per thread
   static_assert(PER % 4 == 0, "batches of four granules");
 #pragma unroll
@@ -35,7 +35,7 @@ DEVI void k3_residual_pass(uint32_t s0, const __nv_bfloat16* z, const __nv_bfloa
     for (int e = 0; e < 4; ++e) {
       const int idx = tid + NTHR * (4 * b + e), r = idx / GR, gk = idx % GR;
       const size_t off = (size_t)(t0 + r) * D + n0 + 8 * gk;
-      zv[e] = __ldg(reinterpret_cast<const uint4*>(z + off));
+      zv[e] = zsm != 0u ? lds128(zsm + (uint32_t)(gk >> 2) * zstage + wkmaj(r, gk & 3)) : __ldg(reinterpret_cast<const uint4*>(z + off));
       dv[e] = ds != nullptr ? __ldg(reinterpret_cast<const uint4*>(ds + (size_t)((t0 + r) % L) * D + n0 + 8 * gk)) : make_uint4(0u, 0u, 0u, 0u);
     }
 #pragma unroll
@@ -78,11 +78,14 @@ struct K3wCfg {
   using TG = WTile<128, BN, 4, 2, ST, false, false>;
   static constexpr int NTHR = TP::NTHR, SMEM = TP::SMEM, SMEM_X = TP::SMEM + 3072;     // + the statistics exchange: sums, squares, (mean, rstd) of the 128 tokens
   static_assert(TP::SMEM == TG::SMEM, "one ring for both phases");
+  // ZPRE (D = BN = 64, in-kernel statistics): the gate GEMM's ZK = D / 32 k-tiles get their own stages after the statistics exchange, issued before the output
+  // projection runs (k3w_kernel) -- two CTAs still fit an SM
+  static constexpr int ZK = 2, SMEM_Z = SMEM_X + ZK * TG::STAGE;
 };
 
 // XSTATS (Hc <= 128: every k-tile of the X operand is still in its ring slot when the first GEMM ends): the LayerNorm_out statistics come from the tile instead of
 // ln_stats_cm -- thread (token, half) sums its half of the channels from shared memory, two passes, the halves merged through shared memory (exact in fp32)
-template <int BN, bool XSTATS, int ST = 4>
+template <int BN, bool XSTATS, int ST = 4, bool ZPRE = false>
 __global__ void __launch_bounds__(256, BN == 64 ? 2 : 1) k3w_kernel(const K3wParams p) {
   using Cfg = K3wCfg<BN, ST>;
   using TP = typename Cfg::TP;
@@ -93,6 +96,9 @@ __global__ void __launch_bounds__(256, BN == 64 ? 2 : 1) k3w_kernel(const K3wPar
   const int mtile = (int)blockIdx.x / ntn, ntile = (int)blockIdx.x - mtile * ntn;
   const int t0 = mtile * 128, n0 = ntile * BN;
   TP tp;
+  TG tg;
+  const uint32_t zs = s0 + Cfg::SMEM_X;                              // ZPRE: the gate GEMM's stages (the z tile and Wg'), after the statistics exchange
+  if constexpr (ZPRE) tg.issue_all(zs, Cfg::ZK, GemmOps{p.z, (size_t)p.D, t0, p.T, p.wg, (size_t)p.D, n0, p.D});
   tp.run_fast(s0, p.Hc >> 5, GemmOps{p.x, (size_t)p.T, t0, p.T, p.wo, (size_t)p.Hc, n0, p.D});
   if constexpr (XSTATS) {
     const uint32_t xs = s0 + TP::SMEM;                              // float sum[2][128], sq[2][128], float2 sts[128]
@@ -124,8 +130,8 @@ __global__ void __launch_bounds__(256, BN == 64 ? 2 : 1) k3w_kernel(const K3wPar
     }
     __syncthreads();
   }
-  TG tg;
-  tg.run_fast(s0, p.D >> 5, GemmOps{p.z, (size_t)p.D, t0, p.T, p.wg, (size_t)p.D, n0, p.D});
+  if constexpr (ZPRE) tg.run_loaded(zs, Cfg::ZK); else
+    tg.run_fast(s0, p.D >> 5, GemmOps{p.z, (size_t)p.D, t0, p.T, p.wg, (size_t)p.D, n0, p.D});
   // ---- epilogue pass 1: o = bf16(p' (1 + tanh g')) into the staged tile (no global load in this loop; training keeps the fragment words of p' and g')
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, wm = warp >> 1, wn = warp & 1, g8 = lane >> 2, q = lane & 3;
   constexpr int MT = TP::MT, NT = 2 * TP::NP, WTN = TP::WTN;
@@ -161,7 +167,8 @@ __global__ void __launch_bounds__(256, BN == 64 ? 2 : 1) k3w_kernel(const K3wPar
       }
   }
   __syncthreads();
-  k3_residual_pass<BN, 256>(s0, p.z, p.ds, p.out, t0, n0, p.D, p.L, tid);
+  if constexpr (ZPRE) k3_residual_pass<BN, 256>(s0, p.z, p.ds, p.out, t0, n0, p.D, p.L, tid, zs, (uint32_t)TG::STAGE);   // z from the gate GEMM's resident tile
+  else k3_residual_pass<BN, 256>(s0, p.z, p.ds, p.out, t0, n0, p.D, p.L, tid);
   auto emit = [&](const uint32_t (&w)[MT][NT][2], __nv_bfloat16* dst) {
     __syncthreads();
 #pragma unroll
