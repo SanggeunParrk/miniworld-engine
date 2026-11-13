@@ -28,6 +28,7 @@ struct K1wParams {
   const uint8_t* mask;         // [L] token mask or nullptr
   __nv_bfloat16* planes;       // [4 Hs / 2][T]
   int T, L, D, ncol;           // ncol = 4 Hs packed rows
+  int trans = 0;               // k1w64 only (inference, outgoing): planes stored transposed -- token (i, k) at k L + i -- so the contraction is the incoming form
 };
 
 using K1wTile = WTile<128, 128, 2, 2, 4, false, true>;
@@ -238,13 +239,25 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, wm = warp >> 1, wn = warp & 1, g8 = lane >> 2, q = lane & 3;
   const int ntiles = p.T >> 7;
   const int grp = (int)blockIdx.x % C::G, cta = (int)blockIdx.x / C::G, step = (int)gridDim.x / C::G;   // column group; the CTA's first token tile and its stride
+  // token of local row lt of tile `tile`, and its plane position: 128 consecutive tokens, or (trans) 16 rows i x 8 columns k, i fastest -- a thread's two
+  // consecutive local rows are rows i, i + 1 of one column k: adjacent plane words of the transposed plane, as the plain plane's
+  const int nkb = p.L >> 3;
+  auto tok_of = [&](int tile, int lt) -> int {
+    if (!p.trans) return tile * 128 + lt;
+    const int ib = tile / nkb, kb = tile - ib * nkb;
+    return (16 * ib + (lt & 15)) * p.L + 8 * kb + (lt >> 4);
+  };
+  auto pos_of = [&](int tile, int lt) -> int {
+    if (!p.trans) return tile * 128 + lt;
+    const int ib = tile / nkb, kb = tile - ib * nkb;
+    return (8 * kb + (lt >> 4)) * p.L + 16 * ib + (lt & 15);
+  };
   // input tile loader: 1024 granules (128 rows x 2 k-tiles x 4), 4 per thread
   auto issue_z = [&](int tile, int buf) {
-    const __nv_bfloat16* src = p.z + (size_t)tile * 128 * C::D;
 #pragma unroll
     for (int e = 0; e < 4; ++e) {
       const int g = tid + C::NTHR * e, row = g >> 3, kt = (g >> 2) & 1, c = g & 3;
-      cp_async16(s0 + C::ZOFF + buf * C::ZBUF + kt * C::Z_KT + wkmaj(row, c), src + row * C::D + kt * 32 + c * 8);
+      cp_async16(s0 + C::ZOFF + buf * C::ZBUF + kt * C::Z_KT + wkmaj(row, c), p.z + (size_t)tok_of(tile, row) * C::D + kt * 32 + c * 8);
     }
   };
   // ---- the packed weights (once) + the first tile
@@ -266,7 +279,6 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
   }
 #pragma unroll 1
   for (int buf = 0; tile < ntiles; tile += step, buf ^= 1) {
-    const int t0 = tile * 128;
     // the next tile into the other buffer (its readers finished before the previous iteration's second barrier)
     if (tile + step < ntiles) issue_z(tile + step, buf ^ 1);
     cp_async_commit();
@@ -295,7 +307,7 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
         }
       const float rstd = rsqrtf(q2 * (1.f / C::D) + p.eps);
       sts64(s0 + C::STOFF + tid * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
-      if (grp == 0) p.stw[t0 + tid] = make_float2(mean, rstd);
+      if (grp == 0) p.stw[tok_of(tile, tid)] = make_float2(mean, rstd);
     }
     uint32_t af[2][4][4];
 #pragma unroll
@@ -308,7 +320,7 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
     for (int mt = 0; mt < 2; ++mt)
 #pragma unroll
       for (int rh = 0; rh < 2; ++rh) {
-        const int lt = 32 * wm + 16 * mt + 2 * g8 + rh, tok = t0 + lt;
+        const int lt = 32 * wm + 16 * mt + 2 * g8 + rh, tok = tok_of(tile, lt);
         const uint2 u = lds64(s0 + C::STOFF + lt * 8);
         const float mean = __uint_as_float(u.x), rstd = __uint_as_float(u.y);
         rs[mt][rh] = rstd; mr[mt][rh] = mean * rstd;
@@ -359,7 +371,7 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
               const float pp = fmaf(rs[mt][rh], ap, fmaf(-mr[mt][rh], cc ? sp.y : sp.x, cc ? bp.y : bp.x));
               u[rh][cc] = round_bf16f(fmaf(pp, tanh_approx(g), pp)) * mk[mt][rh];
             }
-          __nv_bfloat16* o = p.planes + (size_t)ch * p.T + t0 + 32 * wm + 16 * mt + 2 * g8;
+          __nv_bfloat16* o = p.planes + (size_t)ch * p.T + pos_of(tile, 32 * wm + 16 * mt + 2 * g8);
           stg32(o, pack_bf16(u[0][0], u[1][0]));
           stg32(o + p.T, pack_bf16(u[0][1], u[1][1]));
         }

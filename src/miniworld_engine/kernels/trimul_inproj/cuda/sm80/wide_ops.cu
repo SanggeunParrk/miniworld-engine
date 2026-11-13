@@ -139,7 +139,9 @@ void launch_k1w64(const a100::K1wParams& p) {
 
 // z [T, D], w1 [4 Hs, D], vs / vb [4 Hs], st [T, 2], mask [L] uint8 or empty -> planes [2 Hs, T].  fuse (bf16, D <= 128): st is an OUTPUT, the kernel computes (mean, rstd) of the rows
 // itself (eps); otherwise st holds ln_stats_rows' result
-template <bool ROW_MASK>
+// TRANS (the D64 persistent kernel, inference of the outgoing direction): the planes are stored transposed (token (i, k) at k L + i), so the contraction
+// sum_k a[i,k] b[j,k] runs as the incoming form a^T b (cuBLAS nt instead of tn)
+template <bool ROW_MASK, bool TRANS = false>
 void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, torch::Tensor st, torch::Tensor mask, torch::Tensor planes, int64_t L, double eps, bool fuse) {
   const int T = (int)z.size(0), D = (int)z.size(1), ncol = (int)w1.size(0);
   TORCH_CHECK(T % 128 == 0 && D % 32 == 0 && ncol % 128 == 0 && planes.size(0) == ncol / 2 && planes.size(1) == T && z.scalar_type() == w1.scalar_type() &&
@@ -161,6 +163,8 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
   p.mask = mask.numel() ? mask.data_ptr<uint8_t>() : nullptr;
   p.planes = mbf(planes);
   p.T = T; p.D = D; p.L = (int)L; p.ncol = ncol;
+  TORCH_CHECK(!TRANS || (fuse && D == 64 && (ncol == 256 || ncol == 512) && L % 16 == 0 && (int64_t)L * L == T), "k1w: transposed planes are the D64 persistent kernel's (L % 16 == 0)");
+  p.trans = TRANS ? 1 : 0;
   if (ROW_MASK && D == 512 && !fuse && L % 128 == 0) {
     static bool set_row = false;
     if (!set_row) { set_smem(a100::k1w_kernel<false, true>, a100::K1wTile::SMEM); set_row = true; }
@@ -434,6 +438,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("wpack", &wpack);
   m.def("k1w", &k1w<false>);
   m.def("k1w_row_mask", &k1w<true>);
+  m.def("k1w_row_mask_t", &k1w<true, true>);
   m.def("k3w", &k3w<false>);
   m.def("k3w_tuned", &k3w<true>);
   m.def("k3s_set", &k3s_set);

@@ -231,6 +231,9 @@ def _contract(planes, x, hs, n, direction):
         torch.bmm(a[h:].transpose(1, 2), b[h:], out=x[h:])
 
 
+#: D64 inference of the outgoing direction with transposed planes and the nt contraction (see ``_run_forward``); False keeps the plain planes (probe switch)
+_OUT_NT = True
+
 #: bf16 with a hidden width <= 128 (D64 both modules, D128 one direction): the statistics kernels are replaced by in-kernel two-pass statistics of k1w / k3w (see ``_run_forward``); False keeps the kernels (probe switch for A / B timings).
 _FUSE_STATS = True
 _FUSE_STATS_WIDE = (
@@ -270,11 +273,14 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     if not fuse_z:
         E.stats_rows(zf, st_in, eps_in)
     planes = zf.new_empty((2 * hs, T))
-    k1 = E.k1w if save else E.k1w_row_mask
+    # D64 inference, outgoing: k1 stores the planes transposed (token (i, k) at k L + i), so the contraction sum_k a[i,k] b[j,k] is the incoming form a^T b
+    # (cuBLAS nt, as the kit's; the tn form of the plain planes measured 3-5 % slower at L 768-2048)
+    trans = _OUT_NT and not save and direction == OUTGOING and d == 64 and fuse_z and z.dtype is torch.bfloat16 and hs in (64, 128) and n % 16 == 0
+    k1 = E.k1w if save else (E.k1w_row_mask_t if trans else E.k1w_row_mask)
     k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
     x = zf.new_empty((hs, n, n))
     with _tf32(z):
-        _contract(planes, x, hs, n, direction)
+        _contract(planes, x, hs, n, INCOMING if trans else direction)
     saved_planes = planes if save else None
     del planes  # inference: dead once contracted -- freed before the output is allocated (peak z + planes + X, not + out)
     st_out = torch.empty((T, 2), dtype=torch.float32, device=z.device)
