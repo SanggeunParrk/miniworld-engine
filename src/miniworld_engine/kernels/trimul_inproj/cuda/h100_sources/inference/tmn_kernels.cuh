@@ -58,6 +58,9 @@
 #ifndef TMN_K1_STORE32
 #define TMN_K1_STORE32 0        // experiment: 1 = TMA plane store for BJ == 32 tiles (host supplies the [32][2][32] box)
 #endif
+#ifndef TMN_K1_BN
+#define TMN_K1_BN 64            // K1 weight block = the n of one wgmma: 64 ([32 gate | 32 proj] rows, 32 plane channels) or 128 ([64 gate | 64 proj], 64
+#endif                          //   channels; in-place weights and TMA plane stores only): the same products, half the wgmma instructions
 #ifndef TMN_K3_LN_SERIAL
 #define TMN_K3_LN_SERIAL 1      // experiment: 0 = K3 LayerNorm affine passes not serialised (register pressure: check spills)
 #endif
@@ -149,9 +152,14 @@ struct K1Cfg {
   static constexpr int NKCA = CZ / CHUNK_CH;            // z chunks per tile
   static constexpr int KS = CZ / 16;                    // k-steps of the projection MMAs
   static constexpr int NKC = CZ / 64;                   // 64-wide k chunks of a weight block ([64 n][64 k] bf16 = 8 KB each)
-  static constexpr int SLOT_BYTES = SKCH * 8192;        // ring slot = SKCH consecutive k chunks of one block
+  static constexpr int BW = TMN_K1_BN;                  // weight block rows = the n of one wgmma: 64 ([32 gate | 32 proj]) or 128 ([64 gate | 64 proj])
+  static constexpr int CPB = BW / 2;                    // plane channels per weight block
+  static constexpr int WCHUNK = BW * 128;               // one weight k chunk [BW n][64 k] bf16
+  static constexpr int STG = CPB * 128;                 // one staging buffer [CPB ch][64 tok] bf16
+  static constexpr int SLOT_BYTES = SKCH * WCHUNK;      // ring slot = SKCH consecutive k chunks of one block
   static constexpr int SPB = NKC / SKCH;                // ring slots per weight block
-  static constexpr int NBLK = CH / 16;                  // n64 weight blocks = 4 C_H / 64 (each: 32 gate rows | 32 proj rows -> 32 plane channels)
+  static constexpr int NBLK = 4 * CH / BW;              // weight blocks (n64: C_H / 16 blocks of 32 gate rows | 32 proj rows -> 32 plane channels)
+  static_assert(BW == 64 || BW == 128, "K1 weight blocks of n64 or n128");
   static constexpr bool W_RESIDENT = NSLOT >= NBLK * SPB;   // the whole weight stream fits the ring: loaded once per CTA, never released
 #ifdef TMN_K1_FORCE_SCHED   // experiment: force the K1 weight-ring / MMA schedule for every instantiation
   static constexpr int SCHED = TMN_K1_FORCE_SCHED;
@@ -161,7 +169,7 @@ struct K1Cfg {
   static_assert(SCHED == 0 || SCHED == 1, "K1 schedules: 0 (two blocks in flight) | 1 (one block, per-slot waits)");
   static constexpr int SMEM_A = NKCA * CHUNK_BYTES;
   static constexpr int SMEM_W = NSLOT * SLOT_BYTES;
-  static constexpr int SMEM_STAGE = NCWG * 8192;        // per consumer warpgroup: 2 x [32 ch][64 tok] bf16 epilogue transpose buffers
+  static constexpr int SMEM_STAGE = NCWG * 2 * STG;      // per consumer warpgroup: 2 x [CPB ch][64 tok] bf16 epilogue transpose buffers
   static constexpr int SMEM_GB = 2 * CZ * 4;            // gamma, beta fp32
   static constexpr int NBAR = 2 + 2 * NSLOT;
   static constexpr int SMEM_BAR = ((NBAR * 8 + 127) / 128) * 128;
@@ -543,23 +551,76 @@ TMN_DEVI void pdl_trigger() {
 // per-CTA timeline probes (TMN_CTA_TS): slot 0 start, 1 first tile ready (consumer), 2 last tile start, 3 end (clock64); 4 start, 5 end (globaltimer); 6 n_iter
 TMN_DEVI unsigned long long tmn_globaltimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
 #define TMN_TS(buf, slot, val) do { if (TMN_CTA_TS && (buf)) reinterpret_cast<unsigned long long*>(buf)[blockIdx.x * 8 + (slot)] = (val); } while (0)
+// D[64x128 f32] (64 registers) = A[64x16 bf16, registers] * B[16x128 via smem desc, K-major] (+ D): the n128 K1 block (TMN_K1_BN), the
+// descriptor as (lo, hi) plus an immediate byte offset, as wgmma_m64n64k16_rs_off
+template <int OFF_BYTES>
+TMN_DEVI void wgmma_m64n128k16_rs_off(float (&d)[64], const uint32_t (&a)[4], uint32_t desc_lo, uint32_t desc_hi, int scale_d) {
+  asm volatile(
+    "{\n"
+    ".reg .pred p;\n"
+    ".reg .b32 lo;\n"
+    ".reg .b64 dsc;\n"
+    "setp.ne.b32 p, %70, 0;\n"
+    "add.u32 lo, %68, %71;\n"
+    "mov.b64 dsc, {lo, %69};\n"
+    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+    "{%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, "
+    " %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, "
+    " %32, %33, %34, %35, %36, %37, %38, %39, %40, %41, %42, %43, %44, %45, %46, %47, "
+    " %48, %49, %50, %51, %52, %53, %54, %55, %56, %57, %58, %59, %60, %61, %62, %63},"
+    "{%64, %65, %66, %67}, dsc, p, 1, 1, 0;\n"
+    "}\n"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]),
+      "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]),
+      "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]),
+      "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]),
+      "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]),
+      "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]),
+      "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]),
+      "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(desc_lo), "r"(desc_hi), "r"(scale_d), "n"(OFF_BYTES >> 4));
+}
+// The full K chain of one n128 block: k-step ks reads k chunk ks/4 (slot (ks/4)/SKCH, byte offset ((ks/4) % SKCH) * 16384), sub-step (ks%4) * 32 B
+template <int SKCH, int KS, int NS, int... Is>
+TMN_DEVI void mma_chain128_(float (&acc)[64], const uint32_t (&f)[KS][4], const uint32_t (&dlo)[NS], const uint32_t (&dhi)[NS], std::integer_sequence<int, Is...>) {
+  (wgmma_m64n128k16_rs_off<(((Is >> 2) % SKCH) * 16384 + (Is & 3) * 32)>(acc, f[Is], dlo[(Is >> 2) / SKCH], dhi[(Is >> 2) / SKCH], Is > 0 ? 1 : 0), ...);
+}
+template <int SKCH, int KS, int NS>
+TMN_DEVI void mma_chain128(float (&acc)[64], const uint32_t (&f)[KS][4], const uint32_t (&dlo)[NS], const uint32_t (&dhi)[NS]) {
+  static_assert(NS * SKCH * 4 == KS, "one descriptor per slot, SKCH chunks of 4 k-steps per slot");
+  mma_chain128_<SKCH>(acc, f, dlo, dhi, std::make_integer_sequence<int, KS>{});
+}
+// The part of the n128 K chain living in ONE ring slot (as mma_group): k-steps [4 SKCH J, 4 SKCH (J + 1)), k chunks 16 KB apart
+template <int SKCH, int KS, int J, int... Is>
+TMN_DEVI void mma_group128_(float (&acc)[64], const uint32_t (&f)[KS][4], uint32_t dlo, uint32_t dhi, std::integer_sequence<int, Is...>) {
+  (wgmma_m64n128k16_rs_off<((Is >> 2) * 16384 + (Is & 3) * 32)>(acc, f[4 * SKCH * J + Is], dlo, dhi, (4 * SKCH * J + Is) > 0 ? 1 : 0), ...);
+}
+template <int SKCH, int KS, int J>
+TMN_DEVI void mma_group128(float (&acc)[64], const uint32_t (&f)[KS][4], uint32_t dlo, uint32_t dhi) {
+  static_assert(4 * SKCH * (J + 1) <= KS, "group inside the K chain");
+  mma_group128_<SKCH, KS, J>(acc, f, dlo, dhi, std::make_integer_sequence<int, 4 * SKCH>{});
+}
 // K1 weight ring slot: weight block b, k-slot h = SKCH 8 KB k-chunks of [32 gate | 32 proj] rows x 64 k. Host-packed tm_w, or
 // (K1ParamsQ, pad0 != 0) the four row-major weights read in place: block b = rows [32 b, 32 b + 32) of cat(left, right).
+// n128 blocks (TMN_K1_BN, in place only): 16 KB k-chunks, block b = rows [64 b, 64 b + 64), maps with 64-row boxes.
 template <class G, class P>
 TMN_DEVI void k1_load_weight_slot(const P& p, uint8_t* slot, uint64_t* bar, int h, int b) {
   bool in_place = false;
   if constexpr (k1_has_wq<P>::value) in_place = p.pad0 != 0;
   if (in_place) {
     if constexpr (k1_has_wq<P>::value) {
-      const int side = 32 * b >= G::CH, row = 32 * b - side * G::CH;
+      constexpr int CPB = G::CPB;
+      const int side = CPB * b >= G::CH, row = CPB * b - side * G::CH;
 #pragma unroll
       for (int kk = 0; kk < G::SKCH; ++kk) {
-        uint8_t* dst = slot + kk * 8192;
+        uint8_t* dst = slot + kk * G::WCHUNK;
         const int k0 = (h * G::SKCH + kk) * 64;
         tma_load_2d(dst, &p.tm_wq[2 * side + 1], bar, k0, row);
-        tma_load_2d(dst + 4096, &p.tm_wq[2 * side], bar, k0, row);
+        tma_load_2d(dst + CPB * 128, &p.tm_wq[2 * side], bar, k0, row);
       }
     }
+  } else if constexpr (G::BW != 64) {
+    __trap();                                            // n128 blocks read the four weights in place (no packed form)
   } else {
 #pragma unroll
     for (int kk = 0; kk < G::SKCH; ++kk) tma_load_2d(slot + kk * 8192, &p.tm_w, bar, (h * G::SKCH + kk) * 64, 64 * b);
@@ -672,7 +733,7 @@ TMN_DEVI void k1_body(const P& p) {
   const int cw = wg - 1;                 // 0 .. NCWG-1 : token rows [64 cw, 64 cw + 64) of the tile
   const int wiw = warp & 3;              // warp within warpgroup: rows 16*wiw.. of the m64 tile
   const uint32_t sA_u = smem_u32(sA), sW_u = smem_u32(sW);
-  const uint32_t stage_u = smem_u32(sStage) + (uint32_t)(cw * 8192);   // this warpgroup's 2 x 4 KB staging buffers [32 ch][64 tok]
+  const uint32_t stage_u = smem_u32(sStage) + (uint32_t)(cw * (2 * G::STG));   // this warpgroup's 2 staging buffers [CPB ch][64 tok]
   const int NI = k_rows(p.rows, p.N), NPI = p.rows > 0 ? p.rows : p.Np;   // batched samples: B N rows of i (planes [2 C_H][B N][N], Np == N)
   const size_t plane = (size_t)NPI * (size_t)p.Np;
   const int rho0 = 64 * cw + 16 * wiw;                  // first of this warp's 16 token rows (tile-relative)
@@ -764,10 +825,10 @@ TMN_DEVI void k1_body(const P& p) {
     }
 
     // ---- NBLK weight blocks of 32 channels (n64 = gate | proj); MMAs of block b+1 are issued before the epilogue of block b
-    float acc0[32], acc1[32];
+    float acc0[G::BW / 2], acc1[G::BW / 2];
     auto slot_of = [&](uint32_t wi) -> int { return G::W_RESIDENT ? (int)(wi % (uint32_t)(NBLK * SPB)) : (int)(wi % NSLOT); };
     auto phase_of = [&](uint32_t wi) -> uint32_t { return G::W_RESIDENT ? 0u : ((wi / NSLOT) & 1u); };
-    auto issue_block = [&](float (&ac)[32], uint32_t wi) {
+    auto issue_block = [&](float (&ac)[G::BW / 2], uint32_t wi) {
       uint32_t dlo[SPB], dhi[SPB];
 #pragma unroll
       for (int j = 0; j < SPB; ++j) {
@@ -777,13 +838,18 @@ TMN_DEVI void k1_body(const P& p) {
         dlo[j] = (uint32_t)d; dhi[j] = (uint32_t)(d >> 32);
       }
 #pragma unroll
-      for (int i = 0; i < 32; ++i) ac[i] = 0.f;
+      for (int i = 0; i < G::BW / 2; ++i) ac[i] = 0.f;
       fence_regs(ac);
       wgmma_fence();
-      if ((TMN_K1_DIAG & 4) == 0) mma_chain<SKCH>(ac, fa, dlo, dhi);
+      if constexpr ((TMN_K1_DIAG & 4) != 0) {
+      } else if constexpr (G::BW == 128) {
+        mma_chain128<SKCH>(ac, fa, dlo, dhi);
+      } else {
+        mma_chain<SKCH>(ac, fa, dlo, dhi);
+      }
       wgmma_commit();
     };
-    auto epilogue = [&](float (&ac)[32], int b, uint32_t wi, bool release) {   // release: free the block's ring slots here (schedule 0) or not (already freed)
+    auto epilogue = [&](float (&ac)[G::BW / 2], int b, uint32_t wi, bool release) {   // release: free the block's ring slots here (schedule 0) or not (already freed)
       fence_regs(ac);
       __syncwarp();
       if (K1OFF > 0 && cw == 0 && t_local == 0 && b == K1OFF - 1 && wiw == 0 && lane == 0) mbar_arrive(barGo);   // warpgroup 1 may start
@@ -792,6 +858,34 @@ TMN_DEVI void k1_body(const P& p) {
 #pragma unroll
           for (int j = 0; j < SPB; ++j) mbar_arrive(barW_empty + slot_of(wi + j));
         }
+      }
+      if constexpr (G::BW == 128) {
+        // n128 block: accumulator column 8 g + 2 (lane & 3) + {0, 1}; g < 8 the gate rows, g + 8 the projection rows of the same plane
+        // channel. Staged [64 ch][64 tok] (four stmatrix x4 of 16 channels) and stored by one TMA store (TMAST tiles, 16-byte plane rows).
+        static_assert(TMAST, "n128 K1 blocks store the planes by TMA");
+        const uint32_t sbuf = stage_u + (uint32_t)((b & 1) * G::STG);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+          uint32_t pk2[2][2];
+#pragma unroll
+          for (int qq = 0; qq < 2; ++qq) {
+            const int q = 2 * j + qq;
+            float vA0 = math::gate(ac[4 * q + 0], ac[4 * (q + 8) + 0], mA), vA1 = math::gate(ac[4 * q + 1], ac[4 * (q + 8) + 1], mA);
+            float vB0 = math::gate(ac[4 * q + 2], ac[4 * (q + 8) + 2], mB), vB1 = math::gate(ac[4 * q + 3], ac[4 * (q + 8) + 3], mB);
+            if ((TMN_K1_DIAG & 2) != 0) { vA0 = ac[4 * q]; vA1 = ac[4 * q + 1]; vB0 = ac[4 * q + 2]; vB1 = ac[4 * q + 3]; }
+            if (TMN_K1_NO_VSEL == 0) {
+              if (!vA) { vA0 = 0.f; vA1 = 0.f; }
+              if (!vB) { vB0 = 0.f; vB1 = 0.f; }
+            }
+            pk2[qq][0] = pack_bf16(vA0, vA1); pk2[qq][1] = pack_bf16(vB0, vB1);
+          }
+          stsm_x4_t(sbuf + sts_off0 + (uint32_t)(j * 2048), pk2[0][0], pk2[0][1], pk2[1][0], pk2[1][1]);   // channels 16 j .. 16 j + 15
+        }
+        fence_proxy_async();                                                 // the stmatrix writes -> visible to the async proxy that reads the buffer
+        if (st_elect) tma_store_wait_read<0>();                              // the store from the other buffer a block ago has read it
+        named_bar_sync(bar_id, 128);
+        if (st_elect) { tma_store_3d(&p.tm_ab, sStage + cw * (2 * G::STG) + (b & 1) * G::STG, jw, iw, G::CPB * b); tma_store_commit(); }
+        return;
       }
       uint32_t pk[4][2];
 #pragma unroll
@@ -812,7 +906,7 @@ TMN_DEVI void k1_body(const P& p) {
         fence_proxy_async();                                                 // the stmatrix writes -> visible to the async proxy that reads the buffer
         if (st_elect) tma_store_wait_read<0>();                              // the store issued from the other buffer's twin a block ago has read it
         named_bar_sync(bar_id, 128);
-        if (st_elect) { tma_store_3d(&p.tm_ab, sStage + cw * 8192 + (b & 1) * 4096, jw, iw, 32 * b); tma_store_commit(); }
+        if (st_elect) { tma_store_3d(&p.tm_ab, sStage + cw * (2 * G::STG) + (b & 1) * G::STG, jw, iw, G::CPB * b); tma_store_commit(); }
       } else if (TMN_K1_WARPSTORE != 0) {              // warp-local: this warp reads back only the granules its own stmatrix wrote -> no warpgroup barrier
         __syncwarp();
         const uint4 v0 = lds128(sbuf + wl_off0), v1 = lds128(sbuf + wl_off1);
@@ -843,11 +937,12 @@ TMN_DEVI void k1_body(const P& p) {
           const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
           if (J == 0) {
 #pragma unroll
-            for (int i = 0; i < 32; ++i) acc0[i] = 0.f;
+            for (int i = 0; i < G::BW / 2; ++i) acc0[i] = 0.f;
             fence_regs(acc0);
           }
           wgmma_fence();
-          mma_group<SKCH, KS, J>(acc0, fa, (uint32_t)d, (uint32_t)(d >> 32));
+          if constexpr (G::BW == 128) mma_group128<SKCH, KS, J>(acc0, fa, (uint32_t)d, (uint32_t)(d >> 32));
+          else mma_group<SKCH, KS, J>(acc0, fa, (uint32_t)d, (uint32_t)(d >> 32));
           wgmma_commit();                                // a group per slot: the wait for the next slot never sits inside an open (uncommitted) MMA group
         });
         wgmma_wait<0>();

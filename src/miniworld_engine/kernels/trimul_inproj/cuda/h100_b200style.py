@@ -71,7 +71,9 @@ def _headers(backward=False):
     return dest
 
 
-def _config(d, backward=False, n=None):
+def _config(d, backward=False, n=None, direct=False):
+    if d == 256 and direct and not backward:
+        return K1_DIRECT_256
     if d == 256 and not backward:
         return (2, 64, 4, 4, 1, 0)
     if d == 128 and not backward:
@@ -87,6 +89,19 @@ def _output_config(d):
     if d == 64:
         return (64, K3_STAGES_64)
     return (192, 4) if d == 384 else (256, 3)
+
+
+#: The direct K1 (in-place weights, h100_b200style_direct) at D256: (BI, BJ, NSLOT, SKCH, MINB, schedule, block): n128 weight
+#: blocks (one m64n128k16 chain per 64 plane channels: half the wgmma instructions of the n64 blocks), schedule 1 over a ring of eight
+#: [128 n][64 k] slots; the same products and planes bit for bit, 7-8 % less K1 time at L1024-2048 (2026-11-13)
+K1_DIRECT_256 = (2, 64, 8, 1, 1, 1, 128)
+#: Inference K3 weight-ring depth (k3.cu WSTAGES: the weight chunks in a ring of their own beside the operand ring) by width; 0 = one ring
+K3_WSTAGES = {256: 3}
+
+
+def _inference_output_config(d):
+    """The static (inference) K3 tile: ``_output_config`` plus the weight-ring depth."""
+    return (*_output_config(d), K3_WSTAGES.get(d, 0))
 
 
 #: K3 ring depth at D128 (BN = 128: one column block, [128 tok + 128 n] x 64 k per stage)
@@ -378,11 +393,11 @@ def _run_rowpad(leaves, mask, direction, out=None):
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
         _aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
         y = T.take_output(x) if out is None else out
-        cfg = _output_config(d)
+        cfg = _inference_output_config(d)
         from .h100_b200style_static import output_kernel
 
         kernel, smem = output_kernel(d, h, cfg, rowpad=True, xbuf=K3_XBUF.get(d, 1))
-        bn, _ = cfg
+        bn = cfg[0]
         cj = -(-n // 64)
         tiles = -(-(rows * cj) // 2)
         fields = [
@@ -467,10 +482,10 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
         if not save and ds is None:
             from .h100_b200style_static import output_kernel
 
-            kernel, smem = output_kernel(d, h, cfg)
+            kernel, smem = output_kernel(d, h, _inference_output_config(d))
         else:
             kernel, smem = _output_kernel(d, h, cfg, save)
-        bn, _ = cfg
+        bn = cfg[0]
         fields = [
             I._map(tri, [64, 64], [m, h], [m * 2]),
             I._map(x, [64, 128], [d, m], [d * 2]),

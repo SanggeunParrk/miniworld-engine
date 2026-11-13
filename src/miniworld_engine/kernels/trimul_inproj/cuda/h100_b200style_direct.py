@@ -6,6 +6,26 @@ from . import h100_uni_wide_inference as I
 from . import _h100_runtime as T
 
 
+def _block(cfg):
+    """Weight block rows = the n of one wgmma (cfg[6]): 64 ([32 gate | 32 proj], 32 plane channels) or 128 (64 channels)."""
+    return cfg[6] if len(cfg) > 6 else 64
+
+
+def _smem(d, cfg):
+    """K1Cfg::SMEM of the direct K1 (tmn_kernels.cuh): z tile, weight ring, staging buffers, LN affine, barriers."""
+    a, b, slots, sk, mb = cfg[:5]
+    if _block(cfg) == 64:
+        return I._k1_smem(d, (*cfg[:5], 2))
+    bw = _block(cfg)
+    if d // 64 % sk:
+        raise ValueError("K1 slots")
+    bars = 2 + 2 * slots
+    size = a * b * d * 2 + slots * sk * bw * 128 + a * b // 64 * 2 * bw // 2 * 128 + 8 * d + (bars * 8 + 127) // 128 * 128
+    if size * mb > 232448:
+        raise ValueError("K1 resources")
+    return size
+
+
 @T.device_cache
 def _kernel(d, h, cfg, lnm=1, extra=()):
     """lnm / extra: measurement builds only (lnm 0 = no input LayerNorm, extra e.g. -DTMN_K1_DIAG=2)."""
@@ -32,9 +52,10 @@ def _kernel(d, h, cfg, lnm=1, extra=()):
         "-DTMN_SIGMOID_TANH=1",
         "-DTMN_WSKIP=1",
         "-DTMN_K1_BULK_STORE=1",
+        *([f"-DTMN_K1_BN={_block(cfg)}"] if _block(cfg) != 64 else []),
         *extra,
     ]
-    smem = I._k1_smem(d, (*cfg[:5], 2))
+    smem = _smem(d, cfg)
     kernel = T.load_unit(str(T.compile_text(body, flags)), "b200style_k1_direct").kernel(name)
     kernel.set_max_dynamic_smem(smem)
     return kernel, smem
@@ -48,15 +69,18 @@ def front(x, weights, token_mask, gi, bi, ab, xs, diag=()):
     np_ = ab.shape[-1]
     if np_ != n and rows != n:
         raise ValueError("padded planes take one sample")
-    cfg = K._config(d, n=n)
+    cfg = K._config(d, n=n, direct=True)
     a, b, _, _, mb = cfg[:5]
+    cpb = _block(cfg) // 2  # plane channels per weight block: the weight maps' row box and the plane store's channel box
+    if cpb != 32 and (np_ % 8 or b % 64):
+        raise ValueError("the n128 K1 stores planes by TMA: 64-token plane row segments, 16-byte plane rows")
     kernel, smem = _kernel(d, h, cfg, *diag)
     tj = -(-np_ // b)
     tiles = (-(-(rows if rows != n else np_) // a)) * tj
     fields = [
         I._map(x, [64, b, a], [d, n, rows], [d * 2, n * d * 2]),
         T._launch_module().TensorMap(b"\0" * 128),
-        I._map(ab, [64, 1, 32], [np_, rows if rows != n else np_, 2 * h], [np_ * 2, (rows if rows != n else np_) * np_ * 2]),
+        I._map(ab, [64, 1, cpb], [np_, rows if rows != n else np_, 2 * h], [np_ * 2, (rows if rows != n else np_) * np_ * 2]),
         token_mask,
         gi,
         bi,
@@ -76,7 +100,7 @@ def front(x, weights, token_mask, gi, bi, ab, xs, diag=()):
         1,
         1,
         0 if rows == n else rows,  # K1Params.rows (batched samples; 0 = one sample), before K1ParamsQ.tm_wq
-        *(I._map(w, [64, 32], [d, h], [d * 2]) for w in weights),
+        *(I._map(w, [64, cpb], [d, h], [d * 2]) for w in weights),
     ]
     param = T._launch_module().Struct(fields)
     assert len(param.pack()) == 1024

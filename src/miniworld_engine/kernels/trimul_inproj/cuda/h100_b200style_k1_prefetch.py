@@ -18,7 +18,7 @@ def headers(base):
             lead = (T.SOURCES / "b200style/k1wb_epilogue.inc").read_text().split("mbar_wait(barD_full")[0]
             assert source.count(lead) == 1
             source = source.replace(lead, "")
-            anchor = "    auto epilogue = [&](float (&ac)[32], int b, uint32_t wi, bool release) {"
+            anchor = "    auto epilogue = [&](float (&ac)[G::BW / 2], int b, uint32_t wi, bool release) {"
             assert source.count(anchor) == 1
             source = source.replace(
                 anchor,
