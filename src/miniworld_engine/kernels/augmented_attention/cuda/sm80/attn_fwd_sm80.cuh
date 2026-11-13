@@ -219,14 +219,9 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) attn_fwd_kernel(const FwdPar
   const int qt = blockIdx.x, a0 = blockIdx.y * R, h = blockIdx.z;
   // kmb: the key tiles past the last attended key of every sample of the CTA are masked in every row -- exact zeros after the row's live
   // max (masked logits at -inf or a fill far below every live one) -- so they are neither loaded nor computed (the same bits)
-  // (each warp reads the bound from the mask itself, key_len.cuh)
-  int nj = p.L / BN;
-  if (p.kmb) {
-    nj = 1;
-#pragma unroll
-    for (int r = 0; r < R; ++r) nj = max(nj, warp_key_tiles(p.kmb + (a0 + r) * p.kms, p.kml, p.L, BN));
-  }
-  const int L = p.L, NJ = nj, NS = R * NJ;
+  // (each warp reads the bound from the mask itself, key_len.cuh, once the prologue's loads are in flight: those go unbounded)
+  const int L = p.L;
+  int NJ = L / BN, NS = R * NJ;
 
   // ---- loads: sub-step s = (key tile j = s / R, sample r = s % R) brings its K | V, and the first sample of a key tile also its bias tile
   const KVBiasLoader<G> loader(p.k, p.v, p.ldk, p.ldv, p.bias, L, a0, h, qt, tid, p.ss, p.kpen, p.kps);
@@ -241,6 +236,13 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) attn_fwd_kernel(const FwdPar
     }
 #pragma unroll
   for (int s = 0; s < NKV - 1; ++s) issue(s);
+  if (p.kmb) {
+    int nj = 1;
+#pragma unroll
+    for (int r = 0; r < R; ++r) nj = max(nj, warp_key_tiles(p.kmb + (a0 + r) * p.kms, p.kml, L, BN));
+    NJ = nj;
+    NS = R * NJ;
+  }
 
   // MODE_PLAIN takes the bias in raw units (bias / sm_scale, the units of q . k) and adds it into S through the tensor core (RAWB); the other modes take it in base-2 units
   // (times bscl) and add it in fp32
@@ -376,6 +378,10 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) attn_fwd_kernel(const FwdPar
     }
   }
 
+  if (p.kmb) {                                              // prologue stages past a short bound may still be landing: done before the epilogue
+    cp_async_wait<0>();
+    __syncthreads();
+  }
   fwd_epilogue<G>(p, acc, m, l, qt, a0, h, warp, lane);
 }
 
