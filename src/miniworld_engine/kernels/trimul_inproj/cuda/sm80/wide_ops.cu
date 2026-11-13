@@ -207,6 +207,18 @@ void launch_k3w32(const a100::K3w32Params& p) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// D64 inference k3: 1 = k3s_kernel (64-token CTAs, single stage), 0 = the k3w ZPRE form (A/B knob, k3s_set)
+static int g_k3s = 1;
+void k3s_set(int64_t v) { g_k3s = (int)v; }
+template <int HC>
+void launch_k3s(const a100::K3wParams& p) {
+  using C = a100::K3s<HC>;
+  static bool set = false;
+  if (!set) { set_smem(a100::k3s_kernel<HC>, C::SMEM); set = true; }
+  a100::k3s_kernel<HC><<<p.T / C::BM, C::NTHR, C::SMEM, stream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // x [Hc, T], z [T, D], wo3 [D, Hc], wg3 [D, D], fold vectors [D], sto / sti [T, 2], ds [L, D] or empty -> out [T, D]; ps / gs [T, D] (training saves) or empty.  fuse (bf16, Hc <= 128 and
 // D <= 128: one CTA per token tile): sto is an OUTPUT, the kernel computes LayerNorm_out's (mean, rstd) of X itself (eps)
 template <bool TUNED>
@@ -241,6 +253,11 @@ void k3w(torch::Tensor x, torch::Tensor z, torch::Tensor wo3, torch::Tensor wg3,
     if (!set) { set_smem(a100::k3w_kernel<128, false, 5>, Cfg::SMEM); set = true; }
     a100::k3w_kernel<128, false, 5><<<(p.T / 128) * (p.D / 128), Cfg::NTHR, Cfg::SMEM, stream()>>>(p);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
+  if (TUNED && D == 64 && fuse && !ps.numel() && g_k3s && (Hc == 64 || Hc == 128) && T % 64 == 0) {
+    // D64 inference: the 64-token single-stage form (k3s_kernel; bit-identical to the k3w ZPRE form below)
+    if (Hc == 64) launch_k3s<64>(p); else launch_k3s<128>(p);
     return;
   }
   if (TUNED && D == 64 && fuse && !ps.numel()) {
@@ -419,6 +436,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("k1w_row_mask", &k1w<true>);
   m.def("k3w", &k3w<false>);
   m.def("k3w_tuned", &k3w<true>);
+  m.def("k3s_set", &k3s_set);
   m.def("gate_bwd_blocks", &gate_bwd_blocks);
   m.def("lnin_bwd_blocks", &lnin_bwd_blocks);
   m.def("gate_bwd", &gate_bwd);
