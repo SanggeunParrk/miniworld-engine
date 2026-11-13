@@ -273,29 +273,31 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
     cp_async_wait<1>();
     __syncthreads();
     const uint32_t zb = s0 + C::ZOFF + buf * C::ZBUF;
-    if (tid < 128) {   // k1w's STATS statistics: one thread per token row, two passes, the same order
+    {   // the input rows' statistics, two passes: two threads per token row (one k-tile of 32 channels each, the halves merged by a shuffle), so all 8 warps share
+        // the work (one thread per row left half the CTA waiting at the next barrier)
+      const int row = tid >> 1, kt = tid & 1;
       float sum = 0.f;
 #pragma unroll
-      for (int kt = 0; kt < 2; ++kt)
-#pragma unroll
-        for (int c = 0; c < 4; ++c) {
-          const uint4 v = lds128(zb + kt * C::Z_KT + wkmaj(tid, c));
-          sum += (bf16lo(v.x) + bf16hi(v.x)) + (bf16lo(v.y) + bf16hi(v.y)) + ((bf16lo(v.z) + bf16hi(v.z)) + (bf16lo(v.w) + bf16hi(v.w)));
-        }
+      for (int c = 0; c < 4; ++c) {
+        const uint4 v = lds128(zb + kt * C::Z_KT + wkmaj(row, c));
+        sum += (bf16lo(v.x) + bf16hi(v.x)) + (bf16lo(v.y) + bf16hi(v.y)) + ((bf16lo(v.z) + bf16hi(v.z)) + (bf16lo(v.w) + bf16hi(v.w)));
+      }
+      sum += __shfl_xor_sync(0xffffffffu, sum, 1);
       const float mean = sum * (1.f / C::D);
       float q2 = 0.f;
 #pragma unroll
-      for (int kt = 0; kt < 2; ++kt)
-#pragma unroll
-        for (int c = 0; c < 4; ++c) {
-          const uint4 v = lds128(zb + kt * C::Z_KT + wkmaj(tid, c));
+      for (int c = 0; c < 4; ++c) {
+        const uint4 v = lds128(zb + kt * C::Z_KT + wkmaj(row, c));
           const uint32_t w[4] = {v.x, v.y, v.z, v.w};
 #pragma unroll
           for (int i = 0; i < 4; ++i) { const float a = bf16lo(w[i]) - mean, b = bf16hi(w[i]) - mean; q2 = fmaf(a, a, fmaf(b, b, q2)); }
-        }
-      const float rstd = rsqrtf(q2 * (1.f / C::D) + p.eps);
-      sts64(s0 + C::STOFF + tid * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
-      if (grp == 0) p.stw[t0 + tid] = make_float2(mean, rstd);
+      }
+      q2 += __shfl_xor_sync(0xffffffffu, q2, 1);
+      if (kt == 0) {
+        const float rstd = rsqrtf(q2 * (1.f / C::D) + p.eps);
+        sts64(s0 + C::STOFF + row * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
+        if (grp == 0) p.stw[t0 + row] = make_float2(mean, rstd);
+      }
     }
     uint32_t af[2][4][4];
 #pragma unroll
