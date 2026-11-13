@@ -128,6 +128,9 @@ void dispatch(int64_t cfg, torch::Tensor a, torch::Tensor b, torch::Tensor out, 
     case 6: launch<MODE, 128, 128, 32, 64, 32, 5>(a, b, out, bounds, ns, lg); break;
     case 7: launch<MODE, 128, 128, 32, 32, 64, 5>(a, b, out, bounds, ns, lg); break;
     case 8: launch<MODE, 256, 128, 64, 64, 64, 3>(a, b, out, bounds, ns, lg); break;
+    case 9: launch<MODE, 256, 128, 32, 64, 64, 4>(a, b, out, bounds, ns, lg); break;
+    case 10: launch<MODE, 128, 256, 32, 64, 64, 4>(a, b, out, bounds, ns, lg); break;
+    case 11: launch<MODE, 128, 128, 64, 64, 64, 4>(a, b, out, bounds, ns, lg); break;
     default: TORCH_CHECK(false, "contract_bounded: config ", cfg);
   }
 }

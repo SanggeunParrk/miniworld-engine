@@ -16,7 +16,7 @@ ensure_cuda_home()
 SRC = os.path.join(os.path.dirname(__file__), "../../src/miniworld_engine/kernels/trimul_inproj/cuda/sm80/contract_bounded.cu")
 t0 = time.time()
 ext = load(
-    "contract_bounded_sm80_bench3",
+    "contract_bounded_sm80_bench4",
     [os.path.abspath(SRC)],
     extra_include_paths=[str(cutlass_include())],
     extra_cuda_cflags=["-O3", "-std=c++17", "-gencode=arch=compute_80,code=sm_80", "--expt-relaxed-constexpr"],
