@@ -46,3 +46,26 @@ def test_k3s_bitwise_k3w(cls, d_hidden, outgoing: bool, length: int) -> None:
     finally:
         ext.k3s_set(1)
     assert torch.equal(outs[0], outs[1])
+
+
+@pytest.mark.parametrize("length", [640, 1536])
+@pytest.mark.parametrize("outgoing", [True, False])
+def test_k1t_bitwise_k1w64(outgoing: bool, length: int) -> None:
+    """The hidden-128 front in one CTA per token tile (``k1t_kernel``; 2 ring slots below L 1536, 3 from it) gives the output bits of the two-group
+    persistent ``k1w64_kernel``."""
+    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+
+    ext = sm80_wide._ext()
+    base = _module(TriangleMultiplication, outgoing, 128)
+    gen = torch.Generator(device="cuda").manual_seed(2)
+    inputs = base.make_inputs(length=length, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=gen)
+    kern = copy.deepcopy(base).set_backend("cuda")
+    outs = []
+    try:
+        for flag in (0, -1):
+            ext.k1t_set(flag)
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                outs.append(kern(**inputs).clone())
+    finally:
+        ext.k1t_set(-1)
+    assert torch.equal(outs[0], outs[1])

@@ -137,6 +137,17 @@ void launch_k1w64(const a100::K1wParams& p) {
   a100::k1w64_kernel<HS><<<G * std::min(p.T / 128, std::max(1, grid_cap / G)), 256, a100::K1w64<HS>::SMEM, stream()>>>(p);
 }
 
+// D64 front, one CTA per token tile with all packed rows (k1t_kernel): -1 = the measured rule (hidden 128), 0 = k1w64 everywhere, 1 = k1t at both widths, 3 = k1t with 3 ring slots at hidden 128 (A/B knob)
+static int g_k1t = -1;
+void k1t_set(int64_t v) { g_k1t = (int)v; }
+template <int HS, int ST = 2>
+void launch_k1t(const a100::K1wParams& p) {
+  using C = a100::K1t<HS, ST>;
+  static bool set = false;
+  if (!set) { set_smem(a100::k1t_kernel<HS, ST>, C::SMEM); set = true; }
+  a100::k1t_kernel<HS, ST><<<p.T / 128, C::NTHR, C::SMEM, stream()>>>(p);
+}
+
 // z [T, D], w1 [4 Hs, D], vs / vb [4 Hs], st [T, 2], mask [L] uint8 or empty -> planes [2 Hs, T].  fuse (bf16, D <= 128): st is an OUTPUT, the kernel computes (mean, rstd) of the rows
 // itself (eps); otherwise st holds ln_stats_rows' result
 template <bool ROW_MASK>
@@ -169,6 +180,12 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
     return;
   }
   if (fuse && D == 64 && (ncol == 256 || ncol == 512)) {   // D64: the persistent variant (same planes and statistics, bit for bit)
+    if (g_k1t > 0 || (g_k1t < 0 && ncol == 512)) {   // hidden 128: one CTA per tile with all 512 packed rows (bit-identical to k1w64)
+      if (ncol == 256) launch_k1t<64>(p); else if (g_k1t == 3 || (g_k1t < 0 && L >= 1536)) launch_k1t<128, 3>(p);   // 3 ring slots from L 1536 (measured -2..-6 % of the kernel at L 2048)
+      else launch_k1t<128>(p);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      return;
+    }
     if (ncol == 256) launch_k1w64<64>(p); else launch_k1w64<128>(p);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
@@ -434,6 +451,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("wpack", &wpack);
   m.def("k1w", &k1w<false>);
   m.def("k1w_row_mask", &k1w<true>);
+  m.def("k1t_set", &k1t_set);
   m.def("k3w", &k3w<false>);
   m.def("k3w_tuned", &k3w<true>);
   m.def("k3s_set", &k3s_set);
