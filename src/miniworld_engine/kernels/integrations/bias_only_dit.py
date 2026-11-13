@@ -36,6 +36,7 @@ import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._key_len import kernel_mask
 
 D, DC, DP = 768, 384, 128
 #: the conditioning widths on H100 (the conditioning LayerNorm rows are built for both; the table GEMMs take any width): 384, and 768
@@ -196,7 +197,8 @@ def _infer(
                 # kernels are recorded: a replay remakes it)
                 runner.__dict__["_p_cache"] = (pkey, P, (pair, mask), capturing)  # (an attribute of this cache, not of the runner class)
                 _capture.hold(runner.__dict__["_p_cache"], False)
-        return runner.step(single, cond, P)
+        # the core skips the key blocks past the mask's last attended key (P = 0 there; it reads the mask itself: ``kernels._key_len``)
+        return runner.step(single, cond, P, kmask=kernel_mask(mask, single.shape[2]))
 
 
 def _fake_bias(single, cond, bias, mask, weights):
@@ -225,7 +227,7 @@ def _infer_bias(
             from miniworld_engine.kernels.bias_only_dit import cuda as C
 
             C.softmax_rows(bias.reshape(H * L, L), P.view(H * L, L), m)
-        return runner.step(single, cond, P)
+        return runner.step(single, cond, P, kmask=kernel_mask(m, L))
 
 
 _ALL_TRUE: dict = {}

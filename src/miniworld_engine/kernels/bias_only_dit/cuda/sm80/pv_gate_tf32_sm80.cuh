@@ -9,6 +9,7 @@
 // 16-bit elements, not words).  Rows are padded (P 144 B, v (DH + 8) words) so that both are conflict-free without a swizzle.
 #pragma once
 #include "sm80_common.cuh"
+#include "../../../augmented_attention/cuda/key_len.cuh"
 
 namespace bo80 {
 
@@ -37,6 +38,7 @@ struct PvTParams {
   float* out;                   // [S L][..], row stride ldo
   int L, nh, S;
   long long ldv, ldg, ldo;
+  const uint8_t* kmb;           // inference: the bool key mask [L] P was made with, or null (pv_gate_sm80.cuh)
 };
 
 template <class G>
@@ -61,7 +63,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) pv_gate_tf32_kernel(const PvTParam
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g8 = lane >> 2, q4 = lane & 3;
   const int q0 = blockIdx.x * G::QT, h = blockIdx.y, s0 = blockIdx.z * G::SG;
   const int ns = min(G::SG, p.S - s0);
-  const int nch = p.L / G::KC;
+  int nch = p.L / G::KC;
 
   float o[G::MT][G::SG][G::NT][4];
 #pragma unroll
@@ -76,6 +78,9 @@ __global__ void __launch_bounds__(G::NTHR, 1) pv_gate_tf32_kernel(const PvTParam
     if (c0 < nch) pvt_load_chunk<G>(p, sb + c0 * G::STAGE, c0, q0, h, s0, ns, tid);
     cp_async_commit();
   }
+  // kmb (inference: the bool key mask [L] P was made with): the chunks past its last attended key hold P = 0 in every row; the warps read the bound
+  // (key_len.cuh) once the ring's first chunks are in flight (those load unbounded) and stop there (the same bits)
+  if (p.kmb) nch = warp_key_tiles(p.kmb, p.L, p.L, G::KC);
   for (int c = 0; c < nch; ++c) {
     cp_async_wait<G::NST - 2>();
     __syncthreads();
@@ -105,6 +110,8 @@ __global__ void __launch_bounds__(G::NTHR, 1) pv_gate_tf32_kernel(const PvTParam
       }
     }
   }
+
+  if (p.kmb) cp_async_wait<0>();                            // ring chunks past a short bound may still be landing
 
   // ---- epilogue: the gate, fp32 out
 #pragma unroll

@@ -371,8 +371,9 @@ class PvGateCoreH100TF32:
         self.device_index, self.nh, self.dh = device_index, nh, dh
         self.nsm = num_sms(device_index)
 
-    def __call__(self, vt, P, out, S, g):
-        h100_ext().pv_cta_tf32(vt, P, out, S, g, self.nh, self.dh, self.nsm)
+    def __call__(self, vt, P, out, S, g, kmask=None):
+        """``kmask``: the bool key mask [1, L] P was made with or None: the key blocks past its last attended key (P = 0) are skipped."""
+        h100_ext().pv_cta_tf32(vt, P, out, S, g, self.nh, self.dh, self.nsm, kmask=kmask)
         return out
 
 

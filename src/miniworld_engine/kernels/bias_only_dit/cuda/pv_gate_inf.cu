@@ -4,6 +4,7 @@
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 #include "wgmma_n.cuh"
+#include "../../augmented_attention/cuda/key_len.cuh"
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -464,17 +465,22 @@ template<int DHT> TMN_DEVI void mma_tf32_ns(int ns,float*acc,uint64_t da,uint64_
 }
 template<int WGS,int DHT>
 __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ CUtensorMap mp,const __grid_constant__ CUtensorMap mv,
- const float*__restrict__ g,float*__restrict__ out,int L,int A,int H,int DH,int gs,int os,int SG) {
+ const float*__restrict__ g,float*__restrict__ out,int L,int A,int H,int DH,int gs,int os,int SG,const uint8_t*__restrict__ KMB) {
  constexpr int ST=Pvx32Cfg<WGS,DHT>::ST,SB=Pvx32Cfg<WGS,DHT>::SB,JJ=Pvx32Dims<DHT>::JJ,ACC=Pvx32Dims<DHT>::ACC,SGM=Pvx32Dims<DHT>::SGM,SBY=Pvx32Dims<DHT>::SBYTES;
  extern __shared__ __align__(1024) unsigned char sm[];
  uint64_t*full=reinterpret_cast<uint64_t*>(sm+ST*SB),*empty=full+ST;
  int tid=threadIdx.x,wg=tid/128,wtid=tid&127,warp=wtid/32,lane=tid&31,mt=L/(64*WGS),ng=(A+SG-1)/SG,KB=L/32;
- if(!tid){for(int s=0;s<ST;++s){mbar_init(full+s,1);mbar_init(empty+s,WGS);}fence_barrier_init();}
+ int*kb_s=reinterpret_cast<int*>(sm+ST*SB+96);              // the bound and its flag past the barriers (2 ST x 8 <= 80 bytes; the launch's 1 KB slack)
+ if(!tid){for(int s=0;s<ST;++s){mbar_init(full+s,1);mbar_init(empty+s,WGS);}kb_s[1]=0;fence_barrier_init();}
  __syncthreads();
+ // KMB: as pvx's (an idle producer warp reads the bound, the thread takes it once the ring is full, the consumers read it themselves)
+ const int KB0=KB,KMIN=KB0<ST?KB0:ST;
+ bool kbound=KMB!=nullptr;
  const int items=H*mt*ng;
  unsigned it=0;
  if(wg==0){
    setmaxnreg_dec<40>();
+   if(kbound&&warp==1){const int t=max(KMIN,warp_key_tiles(KMB,L,L,32));if(lane==0){kb_s[0]=t;__threadfence_block();*(volatile int*)(kb_s+1)=1;}}
    if(tid==0)for(int item=blockIdx.x;item<items;item+=gridDim.x){
      int m=item%mt,head=(item/mt)%H,group=item/(mt*H),a0=group*SG,ns=min(SG,A-a0),m0=m*64*WGS;
      for(int kb=0;kb<KB;++kb,++it){
@@ -484,11 +490,13 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ C
        #pragma unroll
        for(int w=0;w<WGS;++w)tma_load_2d(st+w*8192,&mp,full+s,kb*32,head*L+m0+w*64);
        for(int j=0;j<ns;++j)tma_load_2d(st+WGS*8192+j*SBY,&mv,full+s,(a0+j)*L+kb*32,head*DHT);
+       if(kbound&&kb+1==KMIN){kbound=false;while(*(volatile int*)(kb_s+1)==0){}KB=*(volatile int*)kb_s;}   // the ring full: the idle warp's bound
      }
    }
    return;
  }
  setmaxnreg_inc<232>();
+ if(KMB)KB=max(KMIN,warp_key_tiles(KMB,L,L,32));
  const int cw=wg-1;
  for(int item=blockIdx.x;item<items;item+=gridDim.x){
    int m=item%mt,head=(item/mt)%H,group=item/(mt*H),a0=group*SG,ns=min(SG,A-a0),m0=m*64*WGS+cw*64;
@@ -558,21 +566,24 @@ static void pvx32_pick(int L,int A,int H,int DH,int nsm,int&wgs,int&sg){
      if(t<best){best=t;wgs=w;sg=g;}
    }}
 }
-template<int WGS,int DHT> static void pvx32_launch(at::Tensor vt,at::Tensor p,at::Tensor out,at::Tensor gate,int A,int H,int nsm,int SG){
+template<int WGS,int DHT> static void pvx32_launch(at::Tensor vt,at::Tensor p,at::Tensor out,at::Tensor gate,int A,int H,int nsm,int SG,const uint8_t* kmb=nullptr){
  int L=vt.size(1)/A;constexpr int smem=Pvx32Cfg<WGS,DHT>::ST*Pvx32Cfg<WGS,DHT>::SB+64+1024;
  auto ma=map32(p,32,64),mb=map32(vt,32,DHT);int ng=(A+SG-1)/SG;int grid=std::min<int>(nsm,H*(L/(64*WGS))*ng);
  cudaFuncSetAttribute(pvx32<WGS,DHT>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
- pvx32<WGS,DHT><<<grid,128*(WGS+1),smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,(const float*)gate.data_ptr(),(float*)out.data_ptr(),L,A,H,DHT,(int)gate.stride(0),(int)out.stride(0),SG);
+ pvx32<WGS,DHT><<<grid,128*(WGS+1),smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,(const float*)gate.data_ptr(),(float*)out.data_ptr(),L,A,H,DHT,(int)gate.stride(0),(int)out.stride(0),SG,kmb);
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
-void pv_cta_tf32(at::Tensor vt,at::Tensor p,at::Tensor out,int64_t A,at::Tensor gate,int64_t H,int64_t DH,int64_t nsm){
+void pv_cta_tf32(at::Tensor vt,at::Tensor p,at::Tensor out,int64_t A,at::Tensor gate,int64_t H,int64_t DH,int64_t nsm,c10::optional<at::Tensor> kmask){
  at::cuda::CUDAGuard guard(vt.device());cudaSetDevice(vt.get_device());int L=vt.size(1)/A;
  TORCH_CHECK(L%128==0&&L<=3072&&(DH==32||DH==48||DH==64)&&vt.scalar_type()==at::kFloat&&p.scalar_type()==at::kFloat&&gate.scalar_type()==at::kFloat&&out.scalar_type()==at::kFloat,"pvx32 shape/dtype");
  TORCH_CHECK(vt.size(0)==H*DH&&vt.is_contiguous()&&p.is_contiguous()&&gate.stride(1)==1&&out.stride(1)==1,"pvx32 layout");
  int wgs=2,sg=1;pvx32_pick(L,A,H,(int)DH,nsm,wgs,sg);
- if(DH==32){ if(wgs==2)pvx32_launch<2,32>(vt,p,out,gate,A,H,nsm,sg);else pvx32_launch<1,32>(vt,p,out,gate,A,H,nsm,sg); }
- else if(DH==48){ if(wgs==2)pvx32_launch<2,48>(vt,p,out,gate,A,H,nsm,sg);else pvx32_launch<1,48>(vt,p,out,gate,A,H,nsm,sg); }
- else { if(wgs==2)pvx32_launch<2,64>(vt,p,out,gate,A,H,nsm,sg);else pvx32_launch<1,64>(vt,p,out,gate,A,H,nsm,sg); }
+ const bool hk=kmask.has_value()&&kmask->defined();
+ TORCH_CHECK(!hk||(kmask->is_cuda()&&kmask->element_size()==1&&kmask->is_contiguous()&&kmask->numel()==L),"pvx32: kmask must be a contiguous bool [L]");
+ const uint8_t* kmb=hk?reinterpret_cast<const uint8_t*>(kmask->data_ptr()):nullptr;
+ if(DH==32){ if(wgs==2)pvx32_launch<2,32>(vt,p,out,gate,A,H,nsm,sg,kmb);else pvx32_launch<1,32>(vt,p,out,gate,A,H,nsm,sg,kmb); }
+ else if(DH==48){ if(wgs==2)pvx32_launch<2,48>(vt,p,out,gate,A,H,nsm,sg,kmb);else pvx32_launch<1,48>(vt,p,out,gate,A,H,nsm,sg,kmb); }
+ else { if(wgs==2)pvx32_launch<2,64>(vt,p,out,gate,A,H,nsm,sg,kmb);else pvx32_launch<1,64>(vt,p,out,gate,A,H,nsm,sg,kmb); }
 }
 __global__ __launch_bounds__(256,2) void dpb_pipe(const __grid_constant__ CUtensorMap md,const __grid_constant__ CUtensorMap mv,
  const bf*p,const float*dd,bf*out,int L,int A,int H,int DH){
@@ -801,7 +812,7 @@ void swiglu(at::Tensor x,at::Tensor w,at::Tensor ab,at::Tensor h){
  expand<<<std::min(132,(M/64)*(H/64)),128,0,at::cuda::getCurrentCUDAStream()>>>(map(x,64,64),map(w,64,64),(bf*)ab.data_ptr(),(bf*)h.data_ptr(),M,K,H);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){m.def("pv",&bo90::pv);m.def("grouped_pv",&bo90::grouped_pv);m.def("dpb",&bo90::dpb);m.def("swiglu",&bo90::swiglu);m.def("grouped_pv_pipeline",&bo90::grouped_pv_pipeline);m.def("pv_cta",&bo90::pv_cta);m.def("pv_cta_pdl",&bo90::pv_cta_pdl);m.def("dpb2",&bo90::dpb2_launch);m.def("pv_cta_tf32",&bo90::pv_cta_tf32);m.def("pv_cta_prof",&bo90::pv_cta_prof);m.def("dpb_pipeline",&bo90::dpb_pipeline);m.def("swiglu_pipeline",&bo90::swiglu_pipeline);}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){m.def("pv",&bo90::pv);m.def("grouped_pv",&bo90::grouped_pv);m.def("dpb",&bo90::dpb);m.def("swiglu",&bo90::swiglu);m.def("grouped_pv_pipeline",&bo90::grouped_pv_pipeline);m.def("pv_cta",&bo90::pv_cta);m.def("pv_cta_pdl",&bo90::pv_cta_pdl);m.def("dpb2",&bo90::dpb2_launch);m.def("pv_cta_tf32",&bo90::pv_cta_tf32,py::arg("vt"),py::arg("p"),py::arg("out"),py::arg("A"),py::arg("gate"),py::arg("H"),py::arg("DH"),py::arg("nsm"),py::arg("kmask")=py::none());m.def("pv_cta_prof",&bo90::pv_cta_prof);m.def("dpb_pipeline",&bo90::dpb_pipeline);m.def("swiglu_pipeline",&bo90::swiglu_pipeline);}
 #else
 // pv_gate_inf.cu -- the bias-only token DiT's INFERENCE attention core, sm_100a:
 //
