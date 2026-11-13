@@ -294,7 +294,8 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     fuse_x = _FUSE_STATS and z.dtype is torch.bfloat16 and hs <= 128
     # input rows: <= 4 CTAs share a token tile at hs <= 128 (the redundant per-CTA statistics are cheaper than the kernels); at D = 256 / 384 k1w accumulates them
     # while its stages go by (``K1StatHook``), so ``ln_stats_rows`` and its read of z are gone there too
-    fuse_z = fuse_x or (_FUSE_STATS and _FUSE_STATS_WIDE and z.dtype is torch.bfloat16 and 128 < d <= 384)
+    # (the RTX 5090 takes the in-loop statistics at D = 256 / 384: 1-5 % faster there, 2026-11-13)
+    fuse_z = fuse_x or (_FUSE_STATS and (_FUSE_STATS_WIDE or _d128.on_sm120()) and z.dtype is torch.bfloat16 and 128 < d <= 384)
     st_in = torch.empty((T, 2), dtype=torch.float32, device=z.device)
     if not fuse_z:
         E.stats_rows(zf, st_in, eps_in)
@@ -409,6 +410,40 @@ def _gemm_tk(a, b):
     return torch.bmm(a.unflatten(0, (s, t // s)).transpose(1, 2), b.unflatten(0, (s, t // s))).sum(0)
 
 
+#: RTX 5090 (sm_120a): the cuBLAS call of the two weight GEMMs of the backward per (D, Hs, L).  cuBLAS's kernel choice for these tall-skinny shapes is erratic
+#: on sm_120 (the same product 1.1-1.8x apart between layouts); listed where an alternative measured >= 5 % faster (``gsweep``, 2026-11-13, L2 flushed,
+#: median, two sweeps).  ``dxn = dcat W_dx``: "t" W_dx^T contiguous (a column-major B), "b4" four batched row blocks; unlisted shapes the plain product.
+_SM120_DXN: dict[tuple[int, int, int], str] = {
+    **dict.fromkeys(((64, 64, 128), (64, 128, 128), (64, 128, 384), (128, 128, 256), (128, 128, 512), (384, 384, 128), (384, 768, 128)), "t"),
+    **dict.fromkeys(((128, 256, n) for n in (128, 256, 384, 512, 640, 768)), "b4"),
+    **dict.fromkeys(((256, 256, 256), (256, 512, 256), (512, 1024, 128)), "b4"),
+    **dict.fromkeys(((384, 384, n) for n in (256, 384, 512, 640, 768)), "b4"),
+    **dict.fromkeys(((384, 768, n) for n in (384, 512, 640, 768)), "b4"),
+}
+#: ``dor = W_o^T dpr^T``: shapes where the strided W_o^T view (the A100 call) beats the contiguous copy on sm_120 (D64)
+_SM120_DOR_VIEW = frozenset({(64, 64, 384), (64, 64, 512), (64, 64, 640), (64, 64, 768), (64, 128, 256), (64, 128, 384), (64, 128, 512), (64, 128, 640)})
+
+
+def _dxn(dcat: torch.Tensor, wdx: torch.Tensor, hs: int, n: int) -> torch.Tensor:
+    """``dcat @ wdx`` [T, D] (the input LayerNorm's output gradient); the RTX 5090 takes the call ``_SM120_DXN`` names for the shape."""
+    if dcat.dtype is torch.bfloat16 and _d128.on_sm120():
+        t, k = dcat.shape
+        d = wdx.shape[1]
+        how = _SM120_DXN.get((d, hs, n))
+        if how == "t":
+            return torch.mm(dcat, wdx.t().contiguous().t())
+        if how == "b4":
+            return torch.bmm(dcat.view(4, t // 4, k), wdx.expand(4, k, d)).view(t, d)
+    return dcat @ wdx
+
+
+def _dor(wo: torch.Tensor, dpr: torch.Tensor, hs: int, n: int) -> torch.Tensor:
+    """``W_o^T dpr^T`` [Hs, T], channel-major like X (RTX 5090: W_o^T contiguous first, cuBLAS takes a 1.5-1.8x faster kernel for that layout there,
+    except the D64 shapes of ``_SM120_DOR_VIEW``)."""
+    sm120 = _d128.on_sm120() and (wo.shape[0], hs, n) not in _SM120_DOR_VIEW
+    return torch.mm(wo.t().contiguous() if sm120 else wo.t(), dpr.t())
+
+
 def _contract_bwd(planes, dx, dplanes, hs, n, direction):
     """dX [Hs, L, L] -> the plane gradients [2 Hs, L, L] (cuBLAS, or the own plane GEMM on an RTX 5090): X = A B^T: dA = dX B, dB = dX^T A;
     X = A^T B: dA = B dX^T, dB = A dX."""
@@ -468,8 +503,7 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     )
     r01 = torch.empty(2 * d, **f32)
     E.colsum(part, r01)
-    # [Hs, T] = r_o dy_o, channel-major like X (RTX 5090: W_o^T contiguous first, cuBLAS takes a 1.5-1.8x faster kernel for that layout there)
-    dor = torch.mm(cw[5].t().contiguous() if _d128.on_sm120() else cw[5].t(), dpr.t())
+    dor = _dor(cw[5], dpr, hs, n)  # [Hs, T] = r_o dy_o, channel-major like X
     dt = torch.empty_like(xcm)
     part_o = torch.empty((T // (128 if is32 else 256), 2 * hs), **f32)
     E.lnout_bwd(dor, xcm, st_out, s12, go32, dt, part_o)
@@ -489,7 +523,7 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     E.ln_apply(zf, st_in, gi32, bi32, xn)
     dw1 = _gemm_tk(dcat, xn)  # [4 Hs + D, D] fp32, k1w packed order then W_g
     del xn
-    dxn = dcat @ pk["wdx"]  # [T, D]
+    dxn = _dxn(dcat, pk["wdx"], hs, n)  # [T, D]
     del dcat
     dx = torch.empty_like(zf)
     nbi = E.lnin_bwd_blocks(T, d, is32)

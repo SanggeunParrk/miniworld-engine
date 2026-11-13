@@ -26,6 +26,7 @@ from ..._compile import opaque
 from ..._nvcc import build_failed
 from . import contract_sm80 as _cp
 from . import sm80 as _d128
+from . import sm80_wide as _wide
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -409,8 +410,7 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     )
     r01 = torch.empty(2 * d, **f32)
     E.colsum(part, r01)
-    # [Hs, T] = r_o dy_o, channel-major like X (RTX 5090: W_o^T contiguous first, cuBLAS takes a 1.5-1.8x faster kernel for that layout there)
-    dor = torch.mm(cw[5].t().contiguous() if _d128.on_sm120() else cw[5].t(), dpr.t())
+    dor = _wide._dor(cw[5], dpr, hs, n)  # [Hs, T] = r_o dy_o, channel-major like X
     dt = torch.empty_like(xcm)
     part_o = torch.empty((T // (128 if is32 else 256), 2 * hs), **f32)
     E.lnout_bwd(dor, xcm, st_out, s12, go32, dt, part_o)
@@ -430,7 +430,7 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     E.ln_apply(zf, st_in, gi32, bi32, xn)
     dw1 = _gemm_tk(dcat, xn)  # [4 Hs + D, D] fp32, k1w packed order then W_g
     del xn
-    dxn = dcat @ pk["wdx"]  # [T, D]
+    dxn = _wide._dxn(dcat, pk["wdx"], hs, n)  # [T, D]
     del dcat
     dx = torch.empty_like(zf)
     nbi = E.lnin_bwd_blocks(T, d, is32)

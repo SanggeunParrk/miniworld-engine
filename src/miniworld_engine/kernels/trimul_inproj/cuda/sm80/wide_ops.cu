@@ -231,6 +231,12 @@ void k3w(torch::Tensor x, torch::Tensor z, torch::Tensor wo3, torch::Tensor wg3,
   p.out = mbf(out);
   p.ps = ps.numel() ? mbf(ps) : nullptr; p.gs = gs.numel() ? mbf(gs) : nullptr;
   p.T = T; p.D = D; p.Hc = Hc; p.L = (int)L;
+#ifdef MWE_SM120
+  {
+    const char* e = getenv("MWE_K3"); const int knob = e ? atoi(e) : 0;
+    if (knob != 128 && !fuse && !(knob == 5 && D == 512)) { launch_k3w<64>(p, fuse); return; }
+  }
+#endif
   if (TUNED && D == 512 && !fuse && !ps.numel()) {
     // The wider inference projections benefit from one extra prefetch stage.
     // Statistics-fused and training calls retain the four-stage schedule.
