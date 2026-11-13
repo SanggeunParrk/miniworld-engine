@@ -40,6 +40,7 @@ struct AttnRCfg {
   static_assert(RW == 1 || RW == 2, "rows per warp");
   static_assert(NTHR % 128 == 0, "a K / V slot row is 128 chunks");
   static_assert(Q_BYTES <= SLOT, "Q rides in through one ring slot");
+  static_assert(2 * Q_BYTES <= ST * SLOT, "the epilogue stages O and g in the ring");
   static_assert(ST >= 2 && SMEM <= 163 * 1024, "ring");
 };
 
@@ -291,7 +292,22 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
     }
   }
 
-  // ---- epilogue: O / l (a zero sum -> zero output), bf16 stores (gated: bf16(sigmoid(g) bf16(o)))
+  // ---- epilogue through shared memory (the ring is free): the bf16 O tile [R][BM][32] (and, gated, the g tile by cp.async) staged, then
+  // 16-byte coalesced stores.  O / l, a zero sum -> zero output; gated: bf16(sigmoid(g) bf16(o)), the module's statement.  A CTA the hot
+  // pass flags for recomputation stores nothing.
+  cp_async_wait<0>();
+  __syncthreads();
+  const uint32_t so = sbase, sg = sbase + G::Q_BYTES;
+  auto tile_chunk = [&](int i, int& r, int& q, int& g) { const int c = tid + G::NTHR * i; r = c / (G::BM * 4); q = (c >> 2) % G::BM; g = c & 3; };
+  if constexpr (G::GATE) {
+#pragma unroll
+    for (int i = 0; i < G::Q_IT; ++i) {
+      int r, q, g;
+      tile_chunk(i, r, q, g);
+      cp_async16(sg + r * G::BM * G::ROWB + swz64(q, g), p.gate + (tok0 + (long long)(row0 + r) * L + qt * G::BM + q) * p.ldgate + h * TA_D + g * 8);
+    }
+    cp_async_commit();
+  }
   bool bad = false;
 #pragma unroll
   for (int w = 0; w < RW; ++w)
@@ -306,25 +322,34 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
           for (int dn = 0; dn < 4; ++dn) bad |= !isfinite(o[w][mt][dn][2 * hh]) || !isfinite(o[w][mt][dn][2 * hh + 1]);
         }
         const float inv = lt > 0.f ? 1.f / lt : 0.f;
-        const int query = qt * G::BM + qw + 16 * mt + gq + 8 * hh;
-        const long long tok = tok0 + (long long)(row0 + wr * RW + w) * L + query;
-        uint32_t gw[4];
-        if constexpr (G::GATE) {
+        const uint32_t row = so + (wr * RW + w) * G::BM * G::ROWB, qr = qw + 16 * mt + gq + 8 * hh;
 #pragma unroll
-          for (int dn = 0; dn < 4; ++dn) gw[dn] = *reinterpret_cast<const uint32_t*>(p.gate + tok * p.ldgate + h * TA_D + 8 * dn + 2 * tq);
-        }
-#pragma unroll
-        for (int dn = 0; dn < 4; ++dn) {
-          const uint32_t ow = pack_bf16(o[w][mt][dn][2 * hh] * inv, o[w][mt][dn][2 * hh + 1] * inv);
-          if (!G::GATE || p.out != nullptr) stg32(p.out + tok * p.ldo + h * TA_D + 8 * dn + 2 * tq, ow);
-          if constexpr (G::GATE)
-            stg32(p.aout + tok * p.ldao + h * TA_D + 8 * dn + 2 * tq,
-                  pack_bf16(bf16lo(ow) * sigmoid(bf16lo(gw[dn])), bf16hi(ow) * sigmoid(bf16hi(gw[dn]))));
-        }
+        for (int dn = 0; dn < 4; ++dn) sts32(row + swz64(qr, dn) + 4 * tq, pack_bf16(o[w][mt][dn][2 * hh] * inv, o[w][mt][dn][2 * hh + 1] * inv));
       }
-  cp_async_wait<0>();
-  if constexpr (SAFE) return false;
-  return __syncthreads_or(bad);
+  if constexpr (G::GATE) cp_async_wait<0>();
+  if constexpr (!SAFE) {
+    if (__syncthreads_or(bad)) return true;
+  } else {
+    __syncthreads();
+  }
+#pragma unroll
+  for (int i = 0; i < G::Q_IT; ++i) {
+    int r, q, g;
+    tile_chunk(i, r, q, g);
+    const uint32_t a = r * G::BM * G::ROWB + swz64(q, g);
+    const uint4 ov = lds128(so + a);
+    const long long tok = tok0 + (long long)(row0 + r) * L + qt * G::BM + q;
+    if (!G::GATE || p.out != nullptr) stg128(p.out + tok * p.ldo + h * TA_D + g * 8, ov);
+    if constexpr (G::GATE) {
+      const uint4 gv = lds128(sg + a);
+      const uint32_t* ow = &ov.x; const uint32_t* gw = &gv.x;
+      uint32_t aw[4];
+#pragma unroll
+      for (int e = 0; e < 4; ++e) aw[e] = pack_bf16(bf16lo(ow[e]) * sigmoid(bf16lo(gw[e])), bf16hi(ow[e]) * sigmoid(bf16hi(gw[e])));
+      stg128(p.aout + tok * p.ldao + h * TA_D + g * 8, make_uint4(aw[0], aw[1], aw[2], aw[3]));
+    }
+  }
+  return false;
 }
 
 template <class G>
