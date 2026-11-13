@@ -782,8 +782,9 @@ def _rows_forward(
     a multiple of 128 (zero pair entries, the pad keys masked, the pad rows / queries dropped).  Pass 1 normalises each block and projects
     its bias heads into the sample's ``[H, Lp, Lp]`` planes (masked keys = bf16 min, the ``bias_planes`` values); pass 2 normalises each
     block again, projects q | k | v | g (one GEMM against the packed front weights' rows), runs the gated core over the block's rows
-    (``attn_fwd_gate_rows``: the kernel and schedule of the whole-pair inference core) and writes ``bf16(x + a Wo^T)`` (one GEMM with the
-    residual as its C operand, as ``out_gemm_residual``).  The largest temporaries are one block's: no pair-sized buffer beyond the output."""
+    (``attn_fwd_gate_rows``: the core and schedule the whole-pair inference call takes at Lp, keys streamed up to the last live one, so each
+    row's bits are the whole-pair call's) and writes ``bf16(x + a Wo^T)`` (one GEMM with the residual as its C operand, as
+    ``out_gemm_residual``).  The largest temporaries are one block's: no pair-sized buffer beyond the output."""
     cfg = Cfg(x.shape[-1], n_head, hd, False)
     rows, core = _rows(), _core._ext()
     b, length, d = x.shape[0], x.shape[1], x.shape[-1]
@@ -841,7 +842,22 @@ def _rows_forward(
             ld = 4 * dhp
             a = x.new_empty((r * lp, dhp))
             core.attn_fwd_gate_rows(
-                y[:, :dhp], y[:, dhp : 2 * dhp], y[:, 2 * dhp : 3 * dhp], bias, y[:, 3 * dhp :], a, lp, h, r, ld, ld, ld, ld, dhp, scl
+                y[:, :dhp],
+                y[:, dhp : 2 * dhp],
+                y[:, 2 * dhp : 3 * dhp],
+                bias,
+                y[:, 3 * dhp :],
+                a,
+                lp,
+                h,
+                r,
+                ld,
+                ld,
+                ld,
+                ld,
+                dhp,
+                scl,
+                keys,
             )
             del y
             real = min(length, i0 + r) - i0

@@ -394,14 +394,15 @@ inline cudaError_t rf_key_tiles(const uint8_t* mask, int* key_tiles, int Z, int 
 // The host helpers have internal linkage (an anonymous namespace): the two extensions that include this header (triattn_sm80, triattn_sm80_core2) each keep
 // their own once-per-device shared-memory opt-in flag -- a shared inline static would let the second one skip its cudaFuncSetAttribute.
 namespace {
-// Host launch (torch-free): the hot pass over the grid (L / BM, L / R, z H), then the recomputation of the listed tiles.  fix: int32 [1 + tiles]
-// (rf_fix_ints) device scratch; its count is cleared here.  scl = sm_scale log2 e; the bias-scaling operand is 1 / sm_scale = log2 e / scl in two
-// bf16 words.
+// Host launch (torch-free): the hot pass over the grid (L / BM, rows / R, z H), then the recomputation of the listed tiles.  rows: the pair rows of
+// the call (0 = all L; fewer: a block of one sample's rows, token (i, j) of the block at i L + j, as attn_fwd_gate_rows hands it: every tile is the
+// whole-pair call's tile of those rows, the same bits).  fix: int32 [1 + tiles] (rf_fix_ints) device scratch; its count is cleared here.
+// scl = sm_scale log2 e; the bias-scaling operand is 1 / sm_scale = log2 e / scl in two bf16 words.
 template <class G>
-inline long long rf_fix_ints(int L, int zh) { return 1 + (long long)(L / G::BM) * (L / G::R) * zh; }
+inline long long rf_fix_ints(int L, int zh, int rows = 0) { return 1 + (long long)(L / G::BM) * ((rows > 0 ? rows : L) / G::R) * zh; }
 
 template <class G>
-inline cudaError_t attn_rf_launch(const AttnParams& p, int z, double scl, int* fix, cudaStream_t stream, int nsm) {
+inline cudaError_t attn_rf_launch(const AttnParams& p, int z, double scl, int* fix, cudaStream_t stream, int nsm, int rows = 0) {
   static bool set[64] = {};
   int dev = 0;
   cudaError_t e = cudaGetDevice(&dev);
@@ -413,7 +414,7 @@ inline cudaError_t attn_rf_launch(const AttnParams& p, int z, double scl, int* f
   }
   const double s = 1.4426950408889634 / scl;
   const float hi = __bfloat162float(__float2bfloat16_rn((float)s)), lo = __bfloat162float(__float2bfloat16_rn((float)(s - hi)));
-  const dim3 grid(p.L / G::BM, p.L / G::R, z * p.H);
+  const dim3 grid(p.L / G::BM, (rows > 0 ? rows : p.L) / G::R, z * p.H);
   const long long ntile = (long long)grid.x * grid.y * grid.z;
   if ((e = cudaMemsetAsync(fix, 0, sizeof(int), stream)) != cudaSuccess) return e;
   attn_rf_fwd_kernel<G><<<grid, G::NTHR, G::SMEM, stream>>>(p, hi, lo, fix);

@@ -747,6 +747,10 @@ class TriangleAttention(_TriangleAttentionBase):
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2: (2026-11-13) the H100 d_pair 128 x 4 heads inference gate in fp32 inside the tail (backend_versions cuda:h100_sm90 4)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:a100_sm80": 6}
+    # cuda:a100_sm80 6 (2026-11-14): the A100 row-blocked inference (sm80_wide.forward_rows: OpenDDE's refiner 2976 / 3968, L % 128 != 0) runs
+    # the whole-pair call's core at the padded L (the rf core at L >= 512, keys up to the last live one): each row's bits equal the whole-pair
+    # call's (was the 64-key AttnCfg core: within a bf16 ulp). Cases at multiples of 128 up to L2048 keep their path and bits.
 
     _anthropic_block = True
 
