@@ -116,13 +116,16 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "anthropic": 3,  # 3 (2026-11-13): the block folds the residual (z += block(z)); the cu129 triattn prebuilts
         "cueq": 2,
         "cuda:a100_sm80": 4,
-        "cuda:h100_sm90": 3,
+        "cuda:h100_sm90": 4,
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
     # (2026-11-12): row-blocked inference past a whole-pair budget (FoldForge OpenDDE refiner, 2976 / 3968 tokens at d_pair 384; A100: also
     # L % 128 != 0, padded); cuda:h100_sm90 2 (2026-11-12): row blocks of <= 2 GiB of q | k | v | g far past the working-set cap -- served
     # sizes up to L2048 keep their path; cuda:h100_sm90 3 (2026-11-12): the training dropout scale drawn by the H100 Philox kernel in one
     # launch (kernels/triangle_attention/cuda/h100_triattn.drop_scale; the same bits as the torch draw)
+    # cuda:h100_sm90 4 (2026-11-13): d_pair 128 x 4 heads inference: the tail projects the gate from x (fp32, never stored; the front
+    # writes q | k | v only) -- outputs change within rounding, see the classes' `version`; d_pair 256 x 8 heads: the wide front's CTA
+    # groups kept in step (FW_LAG; bitwise the same)
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -735,7 +738,8 @@ class TriangleAttention(_TriangleAttentionBase):
 
     """
 
-    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    #: 2: (2026-11-13) the H100 d_pair 128 x 4 heads inference gate in fp32 inside the tail (backend_versions cuda:h100_sm90 4)
 
     _anthropic_block = True
 
@@ -785,10 +789,10 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
     Parameters as :class:`TriangleAttention` (always self-attention, no q / k norm).
     """
 
-    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged); 3: the
     #: training dropout scale by the H100 Philox kernel (as the base class)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 3}
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 4}
 
     transposed_bias = False
     _anthropic_block = True
@@ -828,7 +832,8 @@ class _TriangleAttentionFp32Softmax(_TriangleAttentionBase):
     transposed_bias = False
     #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged); 3: the
     #: training dropout scale by the H100 Philox kernel (as the base class)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 3}
+    #: 4: as the base class (RF3 at d_pair 128)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 4}
     #: RoseTTAFold3: the gate and the out-projection carry a bias.
     _projection_biases: bool = False
 
@@ -871,7 +876,8 @@ class TriangleAttentionRF3(_TriangleAttentionFp32Softmax):
     Parameters as :class:`TriangleAttentionAF3`.
     """
 
-    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
+    #: 3: (2026-11-13) the H100 d_pair 128 x 4 heads inference gate in fp32 inside the tail
 
     _projection_biases = True
 
@@ -951,6 +957,8 @@ class TriangleAttentionChai1(_TriangleAttentionFp32Softmax):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    #: cuda:h100_sm90 stays 3: no Chai-1 shape takes the d_pair 128 x 4 heads or the d_pair 256 x 8 heads path
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 3}
 
     untransposed_output = True
 
@@ -963,6 +971,8 @@ class TriangleAttentionChai1Confidence(_TriangleAttentionFp32Softmax):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    #: cuda:h100_sm90 stays 3 (as TriangleAttentionChai1)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 3}
 
     dual_output = True
 

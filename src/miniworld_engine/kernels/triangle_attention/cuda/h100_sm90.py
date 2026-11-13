@@ -66,6 +66,9 @@ def _core_h16(defs: tuple[str, ...] = ()):
 
 # inference(): the front writes q / k / v and the bias in fp16 for the fp16 core (faster, and closer to fp32: see triattn_h16_sm90.cu)
 INFERENCE_FP16 = True
+#: inference(): the tail projects the gate from x itself (g = LN(x) . Wg^T in fp32, ``tri_tail(wg=...)``) and the front skips g -- a
+#: [R, 128] bf16 store and its load fewer (2026-11-13)
+INFERENCE_TAIL_GATE = True
 
 
 def supports(length: int) -> bool:
@@ -151,6 +154,7 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, 
         D**-0.5,
         trans,
         INFERENCE_FP16,
+        not INFERENCE_TAIL_GATE,
     )
     if flip:
         sbias = flip_bias(sbias, mask)
@@ -160,6 +164,11 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, 
     # the biases in fp32 inside the tail, before its one rounding: added to the bf16 gate / sum afterwards they were a second
     # rounding each, the out bias at the residual's scale (RoseTTAFold3's trunk drifted from its reference by it)
     fp32 = lambda t: None if t is None else t.float().contiguous()  # noqa: E731
+    if INFERENCE_TAIL_GATE:  # w4 = [Wq; Wk; Wv; Wg]: rows 3C.. are Wg (contiguous)
+        gate = dict(wg=w4[3 * C :], lnw=lnw, lnb=lnb, eps=eps)
+        return m.tri_tail(
+            empty.bfloat16(), o.view(-1, C), x, wo16, empty.bfloat16(), L, trans, out, bo=fp32(out_bias), gb=fp32(gate_bias), **gate
+        ).view(B, L, L, C)
     return m.tri_tail(g, o.view(-1, C), x, wo16, empty.bfloat16(), L, trans, out, bo=fp32(out_bias), gb=fp32(gate_bias)).view(B, L, L, C)
 
 
