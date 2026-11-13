@@ -22,10 +22,10 @@
 
 namespace a100 {
 
-template <int WR_, int RW_, int QG_, int ST_, bool GATE_ = false, bool PIPE_ = false>
+template <int WR_, int RW_, int QG_, int ST_, bool GATE_ = false>
 struct AttnRCfg {
   static constexpr int WR = WR_, RW = RW_, QG = QG_, ST = ST_;
-  static constexpr bool GATE = GATE_, PIPE = PIPE_;   // PIPE: the software-pipelined hot loop (one slice deferred into the next slot)
+  static constexpr bool GATE = GATE_;
   static constexpr int R = WR * RW, BM = 32 * QG, NW = WR * QG, NTHR = 32 * NW;
   static constexpr int KEYS = 32;                            // keys per ring slot
   static constexpr int ROWB = TA_D * 2;                      // 64-byte rows (32 bf16) everywhere: swz64
@@ -60,8 +60,6 @@ DEVI void mma_acc(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b
 template <class G, bool SAFE>
 DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
   constexpr int RW = G::RW, ST = G::ST;
-  constexpr int LA = (SAFE || !G::PIPE) ? ST - 1 : ST - 2;              // slots in flight ahead of the one consumed (the hot loop defers one slice: one slot less)
-  static_assert(LA >= 1, "ring too short");
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sbase = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
@@ -106,12 +104,12 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
     cp_async_commit();
   }
 #pragma unroll
-  for (int u = 0; u < LA; ++u) issue(u);
+  for (int u = 0; u < ST - 1; ++u) issue(u);
 
   const int qw = qg * 32;                                     // the warp's first query in the tile
   const int lrow = (lane & 7) + 8 * ((lane >> 3) & 1);        // ldmatrix A-operand row of this lane in a 16-row tile
   uint32_t qa[RW][2][2][4];
-  cp_async_wait<LA>();
+  cp_async_wait<ST - 1>();
   __syncthreads();
   {
     const uint32_t qs = sbase + (ST - 1) * G::SLOT;
@@ -150,9 +148,9 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
   const uint32_t k_off = swz64(lane & 7, lane >> 3);          // K: keys 8jj + (lane & 7), granule lane >> 3 (all 32 channels of one 8-key column)
   const uint32_t v_off = swz64(8 * ((lane >> 3) & 1) + (lane & 7), lane >> 4);   // V^T: keys 16kl + .., granule 2np + (lane >> 4)
 
-  // ---- the per-column blocks of one slot.
-  // S of 8-key column jj for every row of the warp: bias / scale (one product per m tile, shared by the rows) + Q K^T
-  auto s_column = [&](uint32_t sb, int jj, float (&sc)[RW][2][4][4]) {
+  // ---- one slot = two 16-key slices; per slice and row only S of 16 keys is live (RW x 2 x 2 x 4 registers).
+  // S of 8-key column jj of the slot into sc[.][.][jj & 1], every row of the warp: bias / scale (one product per m tile, shared by the rows) + Q K^T
+  auto s_column = [&](uint32_t sb, int jj, float (&sc)[RW][2][2][4]) {
     float cb[2][4];
 #pragma unroll
     for (int mt = 0; mt < 2; ++mt) {
@@ -168,125 +166,66 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
       ldsm_x4(kb, sb + G::KOFF + (wr * RW + w) * G::KV_ROW + jj * 8 * G::ROWB + k_off);
 #pragma unroll
       for (int mt = 0; mt < 2; ++mt) {
-        mma_c(sc[w][mt][jj], qa[w][mt][0], kb[0], kb[1], cb[mt]);
-        mma_acc(sc[w][mt][jj], qa[w][mt][1], kb[2], kb[3]);
-      }
-    }
-  };
-  // unshifted weights of column jj of row w
-  auto exp_column = [&](float (&sc)[RW][2][4][4], int w, int jj) {
-#pragma unroll
-    for (int mt = 0; mt < 2; ++mt)
-#pragma unroll
-      for (int e = 0; e < 4; ++e) sc[w][mt][jj][e] = ex2f(sc[w][mt][jj][e] * c1);
-  };
-  // bf16 P of the 16-key slice kl of row w and its row sums (ones-column mma)
-  auto pack_slice = [&](float (&sc)[RW][2][4][4], int w, int kl, uint32_t (&pa)[2][4]) {
-#pragma unroll
-    for (int mt = 0; mt < 2; ++mt) {
-      pa[mt][0] = pack_bf16(sc[w][mt][2 * kl][0], sc[w][mt][2 * kl][1]);
-      pa[mt][1] = pack_bf16(sc[w][mt][2 * kl][2], sc[w][mt][2 * kl][3]);
-      pa[mt][2] = pack_bf16(sc[w][mt][2 * kl + 1][0], sc[w][mt][2 * kl + 1][1]);
-      pa[mt][3] = pack_bf16(sc[w][mt][2 * kl + 1][2], sc[w][mt][2 * kl + 1][3]);
-      mma_acc(l4[w][mt], pa[mt], ONES, ONES);
-    }
-  };
-  // O += P V for the 16-key slice kl of row w (V of slot sb)
-  auto pv_slice = [&](uint32_t sb, int w, int kl, const uint32_t (&pa)[2][4]) {
-#pragma unroll
-    for (int np = 0; np < 2; ++np) {
-      uint32_t vb[4];
-      ldsm_x4_t(vb, sb + G::VOFF + (wr * RW + w) * G::KV_ROW + kl * 16 * G::ROWB + (v_off ^ (np << 5)));
-#pragma unroll
-      for (int mt = 0; mt < 2; ++mt) {
-        mma_acc(o[w][mt][2 * np], pa[mt], vb[0], vb[1]);
-        mma_acc(o[w][mt][2 * np + 1], pa[mt], vb[2], vb[3]);
+        mma_c(sc[w][mt][jj & 1], qa[w][mt][0], kb[0], kb[1], cb[mt]);
+        mma_acc(sc[w][mt][jj & 1], qa[w][mt][1], kb[2], kb[3]);
       }
     }
   };
 
-  if constexpr (!SAFE && G::PIPE) {
-    // Software-pipelined: the exponentials of column jj - 1 follow the tensor work of column jj, the products of slice 0 run under the
-    // exponentials of columns 2 / 3, and the last slice's P V of slot u - 1 is deferred into slot u (behind its first S columns).
-    uint32_t pd[RW][2][4];                                    // the deferred slice: packed P of keys 16-31 of the previous slot
-    uint32_t sprev = 0;
-    for (int u = 0; u < NU; ++u) {
-      cp_async_wait<LA - 1>();
-      __syncthreads();                                        // slot u landed; every warp finished slot u - 2 (its deferred slice ran in u - 1)
-      issue(u + LA);
-      const uint32_t sb = sbase + (u % ST) * G::SLOT;
-      float sc[RW][2][4][4];
-      s_column(sb, 0, sc);
-      if (u > 0) pv_slice(sprev, 0, 1, pd[0]);
-      s_column(sb, 1, sc);
+  for (int u = 0; u < NU; ++u) {
+    cp_async_wait<ST - 2>();
+    __syncthreads();                                          // slot u landed; every warp is past u - 1, so its slot is free for u + ST - 1
+    issue(u + ST - 1);
+    const uint32_t sb = sbase + (u % ST) * G::SLOT;
 #pragma unroll
-      for (int w = 0; w < RW; ++w) exp_column(sc, w, 0);
-      if (u > 0) {
-#pragma unroll
-        for (int w = 1; w < RW; ++w) pv_slice(sprev, w, 1, pd[w]);
-      }
-      s_column(sb, 2, sc);
-#pragma unroll
-      for (int w = 0; w < RW; ++w) exp_column(sc, w, 1);
+    for (int kl = 0; kl < 2; ++kl) {
+      float sc[RW][2][2][4];
+      s_column(sb, 2 * kl, sc);
+      s_column(sb, 2 * kl + 1, sc);
 #pragma unroll
       for (int w = 0; w < RW; ++w) {
+        float mu[2][2] = {{0.f, 0.f}, {0.f, 0.f}};
+        if constexpr (SAFE) {                                 // running max over the slices (rescale O and the sums when it rises)
+#pragma unroll
+          for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+            for (int hh = 0; hh < 2; ++hh) {
+              float mx = fmaxf(fmaxf(sc[w][mt][0][2 * hh], sc[w][mt][0][2 * hh + 1]), fmaxf(sc[w][mt][1][2 * hh], sc[w][mt][1][2 * hh + 1]));
+              mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
+              mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
+              const float mnew = fmaxf(m[w][mt][hh], mx * c1);
+              mu[mt][hh] = mnew == -INFINITY ? 0.f : mnew;
+              const float alpha = ex2f(m[w][mt][hh] - mu[mt][hh]);   // 0 from the initial -inf
+              m[w][mt][hh] = mnew;
+              l4[w][mt][2 * hh] *= alpha; l4[w][mt][2 * hh + 1] *= alpha;
+#pragma unroll
+              for (int dn = 0; dn < 4; ++dn) { o[w][mt][dn][2 * hh] *= alpha; o[w][mt][dn][2 * hh + 1] *= alpha; }
+            }
+        }
+        // weights (unshifted in the hot pass), bf16 P, its row sums (ones-column mma), O += P V
         uint32_t pa[2][4];
-        pack_slice(sc, w, 0, pa);
-        pv_slice(sb, w, 0, pa);
-      }
-      s_column(sb, 3, sc);
 #pragma unroll
-      for (int w = 0; w < RW; ++w) exp_column(sc, w, 2);
+        for (int mt = 0; mt < 2; ++mt) {
+          float pw[2][4];
 #pragma unroll
-      for (int w = 0; w < RW; ++w) exp_column(sc, w, 3);
+          for (int c = 0; c < 2; ++c)
 #pragma unroll
-      for (int w = 0; w < RW; ++w) pack_slice(sc, w, 1, pd[w]);
-      sprev = sb;
-    }
-#pragma unroll
-    for (int w = 0; w < RW; ++w) pv_slice(sprev, w, 1, pd[w]);
-  } else {
-    for (int u = 0; u < NU; ++u) {
-      cp_async_wait<LA - 1>();
-      __syncthreads();
-      issue(u + LA);
-      const uint32_t sb = sbase + (u % ST) * G::SLOT;
-      float sc[RW][2][4][4];
-#pragma unroll
-      for (int jj = 0; jj < 4; ++jj) s_column(sb, jj, sc);
-#pragma unroll
-      for (int w = 0; w < RW; ++w) {
-        float mu[2][2];
-        if constexpr (SAFE) {
-#pragma unroll
-        for (int mt = 0; mt < 2; ++mt)
-#pragma unroll
-          for (int hh = 0; hh < 2; ++hh) {
-            float mx = -INFINITY;
-#pragma unroll
-            for (int jj = 0; jj < 4; ++jj) mx = fmaxf(mx, fmaxf(sc[w][mt][jj][2 * hh], sc[w][mt][jj][2 * hh + 1]));
-            mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
-            mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
-            const float mnew = fmaxf(m[w][mt][hh], mx * c1);
-            mu[mt][hh] = mnew == -INFINITY ? 0.f : mnew;
-            const float alpha = ex2f(m[w][mt][hh] - mu[mt][hh]);   // 0 from the initial -inf
-            m[w][mt][hh] = mnew;
-            l4[w][mt][2 * hh] *= alpha; l4[w][mt][2 * hh + 1] *= alpha;
-#pragma unroll
-            for (int dn = 0; dn < 4; ++dn) { o[w][mt][dn][2 * hh] *= alpha; o[w][mt][dn][2 * hh + 1] *= alpha; }
-          }
+            for (int e = 0; e < 4; ++e) pw[c][e] = SAFE ? ex2f(fmaf(sc[w][mt][c][e], c1, -mu[mt][e >> 1])) : ex2f(sc[w][mt][c][e] * c1);
+          pa[mt][0] = pack_bf16(pw[0][0], pw[0][1]);
+          pa[mt][1] = pack_bf16(pw[0][2], pw[0][3]);
+          pa[mt][2] = pack_bf16(pw[1][0], pw[1][1]);
+          pa[mt][3] = pack_bf16(pw[1][2], pw[1][3]);
+          mma_acc(l4[w][mt], pa[mt], ONES, ONES);
         }
 #pragma unroll
-        for (int mt = 0; mt < 2; ++mt)
+        for (int np = 0; np < 2; ++np) {
+          uint32_t vb[4];
+          ldsm_x4_t(vb, sb + G::VOFF + (wr * RW + w) * G::KV_ROW + kl * 16 * G::ROWB + (v_off ^ (np << 5)));
 #pragma unroll
-          for (int jj = 0; jj < 4; ++jj)
-#pragma unroll
-            for (int e = 0; e < 4; ++e) sc[w][mt][jj][e] = (SAFE ? ex2f(fmaf(sc[w][mt][jj][e], c1, -mu[mt][e >> 1])) : ex2f(sc[w][mt][jj][e] * c1));
-#pragma unroll
-        for (int kl = 0; kl < 2; ++kl) {
-          uint32_t pa[2][4];
-          pack_slice(sc, w, kl, pa);
-          pv_slice(sb, w, kl, pa);
+          for (int mt = 0; mt < 2; ++mt) {
+            mma_acc(o[w][mt][2 * np], pa[mt], vb[0], vb[1]);
+            mma_acc(o[w][mt][2 * np + 1], pa[mt], vb[2], vb[3]);
+          }
         }
       }
     }
