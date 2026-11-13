@@ -449,7 +449,7 @@ void pair_softmax_f32(torch::Tensor z, torch::Tensor wcm, torch::Tensor kv, torc
     kern<<<(unsigned)L, 256, smem, s>>>(z.data_ptr<float>(), wcm.data_ptr<float>(), mk, p.data_ptr<float>(), (int)L, (float)eps);
   };
   if (C == 128) run(r120::pair_softmax_kernel<128, 4>, r120::ps_smem<128>((int)L));
-  else run(r120::pair_softmax_kernel<256, 2>, r120::ps_smem<256>((int)L));
+  else run(r120::pair_softmax_kernel<256, 4>, r120::ps_smem<256>((int)L));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

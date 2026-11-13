@@ -271,8 +271,7 @@ def _bwd(
         (core.Dpb32 if f32 else core.Dpb)(heads, hd)(
             do, vg[:, :da], P.view(heads * length, length), dd, db.view(heads * length, length), samples
         )
-        # RTX 5090: the bf16 bias gradient read as is by the backward (its sm_120a build takes a bf16 db: no fp32 copy)
-        dz, dwf = _sm80().pair_bias_generic_backward(pair[0], wcm, db if f32 or _sm120(x) else db.float(), None, length, EPS)
+        dz, dwf = _sm80().pair_bias_generic_backward(pair[0], wcm, db if f32 else db.float(), None, length, EPS)
         dx = torch.mm(dvg, wvg)
         dwvg = _wgrad(dvg, x)  # [2 da, d] fp32
         dcond = torch.mm(dg2, ws)
@@ -312,6 +311,10 @@ class _Attention(torch.autograd.Function):
             None,
             *(g if need[6 + i] else None for i, g in enumerate(pg)),
         )
+
+
+#: RTX 5090 training: the AdaLN inside the attention's Function (_AdaAttention120)
+ADA_ATTN_120 = True
 
 
 class _AdaAttention120(torch.autograd.Function):
@@ -396,7 +399,7 @@ def block(module, single, cond, pair, mask, grad: bool) -> torch.Tensor:
             return _block_eval_sm120(module, single, cond, pair, mask)
         if not grad and _fused_eval_f32(module, single, cond):
             return _block_eval_sm120_f32(module, single, cond, pair, mask)
-        if grad and _sm120(single) and d != 128:  # RTX 5090 training: the AdaLN inside the attention's Function (_AdaAttention120)
+        if ADA_ATTN_120 and grad and _sm120(single) and d != 128:  # RTX 5090 training: the AdaLN inside the attention's Function (_AdaAttention120)
             ada = at.ada_ln_in
             cs = cond.to(dt).expand(a, 1, length, cond.shape[-1]).reshape(a * length, cond.shape[-1]).contiguous()
             xs, pr = single.to(dt).reshape(a * length, d).contiguous(), pair.contiguous()

@@ -271,9 +271,6 @@ template <int C_, int H_ = 0> struct PbBwdCfg {
   static constexpr int wp(int H) { return ((H / 4) & 1) ? H : H + 4; }
   static constexpr int smem(int H) { return (C_ * wp(H) + 2 * TE * P + TE * H) * 4; }
 };
-// one bias-gradient value as fp32 (pair_bias_gen_bwd_kernel's DB)
-__device__ __forceinline__ float pb_dbf(const float* p) { return __ldg(p); }
-__device__ __forceinline__ float pb_dbf(const __nv_bfloat16* p) { return __bfloat162float(__ldg(p)); }
 // The raw 16-byte vectors of 8 channels (bf16: one uint4; fp32: two float4), held in registers between the prefetch and the shared-memory fill.
 template <typename T> struct PbRaw8;
 template <> struct PbRaw8<__nv_bfloat16> {
@@ -295,9 +292,8 @@ template <> struct PbRaw8<float> {
   __device__ __forceinline__ void put(float* d) const { reinterpret_cast<float4*>(d)[0] = a; reinterpret_cast<float4*>(d)[1] = b; }
 };
 
-// DB: the bias gradient's dtype -- fp32, or (RTX 5090 build only: the token DiT's bf16 training, bias_only_dit_sm80) the bf16 core output read as is (its fp32 values exactly)
-template <int H, int C, typename T, typename DB = float>
-__global__ void __launch_bounds__(256) pair_bias_gen_bwd_kernel(const T* __restrict__ z, const float* __restrict__ wcm, const DB* __restrict__ db, T* __restrict__ dz, float* __restrict__ pw,
+template <int H, int C, typename T>
+__global__ void __launch_bounds__(256) pair_bias_gen_bwd_kernel(const T* __restrict__ z, const float* __restrict__ wcm, const float* __restrict__ db, T* __restrict__ dz, float* __restrict__ pw,
                                                                 int N, int NZ, int RPC, const unsigned char* __restrict__ kv, float eps) {
   using G = PbBwdCfg<C, H>;
   constexpr int TE = G::TE, TPE = G::TPE, P = G::P, CB = G::CB, HB = H / 4, WP = G::wp(H);
@@ -338,7 +334,7 @@ __global__ void __launch_bounds__(256) pair_bias_gen_bwd_kernel(const T* __restr
       const int idx = tid + 256 * t;
       if (TE * H % 256 != 0 && idx >= TE * H) continue;
       const int h = idx / TE, el = idx - h * TE, j = j0 + el;
-      gr[t] = j < NZ ? pb_dbf(db + ((size_t)h * N + i) * N + j) : 0.f;
+      gr[t] = j < NZ ? __ldg(db + ((size_t)h * N + i) * N + j) : 0.f;
       kr[t] = j < NZ && (kv == nullptr || kv[j]);
     }
   };
