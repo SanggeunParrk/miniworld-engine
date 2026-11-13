@@ -91,10 +91,12 @@ def _output_config(d):
     return (192, 4) if d == 384 else (256, 3)
 
 
-#: The direct K1 (in-place weights, h100_b200style_direct) at D256: (BI, BJ, NSLOT, SKCH, MINB, schedule, block): n128 weight
-#: blocks (one m64n128k16 chain per 64 plane channels: half the wgmma instructions of the n64 blocks), schedule 1 over a ring of eight
-#: [128 n][64 k] slots; the same products and planes bit for bit, 7-8 % less K1 time at L1024-2048 (2026-11-13)
-K1_DIRECT_256 = (2, 64, 8, 1, 1, 1, 128)
+#: The direct K1 (h100_b200style_direct) at D256: (BI, BJ, NSLOT, SKCH, MINB, schedule, block): n128 weight blocks (one m64n128k16
+#: chain per 64 plane channels), schedule 6 = schedule 1 with the z tile travelling through the weight ring (no z tile buffer: twelve
+#: 16 KB slots) and every weight block loaded by two TMA loads from one packed, halved copy of the four weights (the producer thread's
+#: TMA issue rate bounded the old stream: 72 loads per tile, now 12); the gate is tanh(g / 2) (p / 2) + p / 2 in one FMA and the mask
+#: zeroes A rows. K1 at L1024 0.99 -> 0.90 ms, L1536 2.14 -> 1.90, L2048 3.75 -> 3.34 (2026-11-13); planes within 1 bf16 ulp of before
+K1_DIRECT_256 = (2, 64, 12, 1, 1, 6, 128)
 #: Inference K3 weight-ring depth (k3.cu WSTAGES: the weight chunks in a ring of their own beside the operand ring) by width; 0 = one ring
 K3_WSTAGES = {256: 3}
 
