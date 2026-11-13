@@ -116,7 +116,9 @@ one AdaLN for q and k / v (Boltz-2, RF3, Chai-1); the backward entries are `pre_
 except for windows 0, 1 and the last three real windows; `_slid_edges` recomputes those five windows with the `edge.cu` kernels
 (`edge_attn_fwd`, fp32 inside) from the kernels' q / k / v and overwrites the attention output; in training `edge_bwd_compute` takes
 their gradients before the window backward and `edge_bwd_apply` / `edge_bias_bwd` add them after it. The five window indices come from
-the real atom count on the device, so there is no host read and the call can be captured.
+the real atom count on the device, so there is no host read and the call can be captured. On a padded atom count the query windows past
+the last real one (padding queries only; the TAIL) all read the same slid keys `[R - 128, R)`: `_slid_tail` / `_slid_tail_bwd` /
+`_slid_tail_add` run them on the tail kernels (`tail_*` in `edge.cu`), the window count read on the device (`tail_info`).
 
 **Inference hoist.** Without `save`, the conditioning tables, the pair bias and the slid-edge tables are made once per input tensor
 (storage address, in-place version, shape) and weight version, via `kernels/_capture.hoisted_table` (scoped to CUDA-graph capture);

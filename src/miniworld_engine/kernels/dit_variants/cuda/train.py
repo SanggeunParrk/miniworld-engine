@@ -34,7 +34,8 @@ def _mm_t(a, b):
 # The atom DiT blocks (128 wide, 4 heads x 32, 32 queries x 128 keys per window): the same row kernels at D = 128, the local DiT's mma.sync
 # window attention (``attn_fwd_mma`` / ``attn_bwd_mma``), cuBLAS. Per block the tables are [N, 8 D]: q-AdaLN scale | shift, k-AdaLN scale |
 # shift, attention gate, transition scale | shift | gate. The slid key window's five edge windows (the only ones whose keys differ from the
-# clipped window the kernel reads) are redone in torch over their own keys, forward and backward.
+# clipped window the kernel reads, with the tail of windows past the last real one) are redone over their own keys on edge.cu, forward and
+# backward.
 ATOM_D, ATOM_H, ATOM_DH, ATOM_WQ, ATOM_WK = 128, 4, 32, 32, 128
 A_SC_Q, A_SH_Q, A_SC_K, A_SH_K, A_G_A, A_SC_T, A_SH_T, A_G_T = range(8)
 ATOM_SPLITS = 2
@@ -112,6 +113,29 @@ class _EdgeBias(torch.autograd.Function):
         return dz, tot[:16].to(gamma.dtype), tot[16:].view(4, 16).to(wb.dtype), None, None, None
 
 
+class _TailBias(torch.autograd.Function):
+    """The slid window's tail bias tb [1, nwin, 4, 32, 128] (natural units, -inf off the valid keys; ``local_dit_h100.tail_info``: the query
+    windows past the last real one, which all read the same 128 keys) from the trunked pair z: LN(z[w]) gamma . Wb for the windows from t0 on
+    (``tail_bias_fwd``; the rows below t0 are not written and never read)."""
+
+    @staticmethod
+    def forward(ctx, z, gamma, wb, info, eps):  # noqa: D102
+        ctx.save_for_backward(z, gamma, wb, info)
+        ctx.eps = eps
+        tb = torch.empty(1, z.shape[0], ATOM_H, ATOM_WQ, ATOM_WK, device=z.device, dtype=torch.float32)
+        _edge(z).tail_bias_fwd(z, gamma.float().contiguous(), wb.float().contiguous(), info, eps, tb[0])
+        return tb
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, dtb):  # noqa: D102
+        z, gamma, wb, info = ctx.saved_tensors
+        dz = torch.zeros_like(z)
+        part = _edge(z).tail_bias_bwd(z, gamma.float().contiguous(), wb.float().contiguous(), dtb.contiguous(), info, dz, ctx.eps)
+        tot = part.sum(0)
+        return dz, tot[:16].to(gamma.dtype), tot[16:].view(4, 16).to(wb.dtype), None, None
+
+
 def _afwd_specs(M, N, at, xdt, par, gating, proj, kq, up, chain=False):
     D = ATOM_D
     f32 = torch.float32
@@ -154,6 +178,8 @@ def _atom_fwd_fake(
     widx,
     keys,
     ebias,
+    tinfo,
+    tb,
     wq,
     bq,
     wk,
@@ -188,6 +214,8 @@ def atom_fwd(
     widx: torch.Tensor,
     keys: torch.Tensor,
     ebias: torch.Tensor,
+    tinfo: torch.Tensor,
+    tb: torch.Tensor,
     wq: torch.Tensor,
     bq: torch.Tensor,
     wk: torch.Tensor,
@@ -210,7 +238,8 @@ def atom_fwd(
     chain: bool = False,
 ) -> list[torch.Tensor]:
     """One atom block's forward: [out, saved ...] (``_ANAMES``). x [A N, 128], tab [N, 8 D], bias2 [4, nwin, 32, 128] fp32 (log2, -inf off the
-    keys); the slid edge windows (widx [5], keys [5, 128], ebias [5, 4, 32, 128] natural units) when ``slide``."""
+    keys); the slid edge windows (widx [5], keys [5, 128], ebias [5, 4, 32, 128] natural units) and its tail (tinfo [3], tb [1, nwin, 4, 32,
+    128] natural units: ``_TailBias``) when ``slide``."""
     ext = _atom_ext(x)
     local = _local(x)
     M, D = x.shape
@@ -256,6 +285,7 @@ def atom_fwd(
     )
     if slide:
         _edge(x).edge_attn_fwd(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), keys, widx, ebias, o)
+        _edge(x).tail_attn_fwd(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), tinfo, tb, o)
     o = o.view(M, D)
     if gating:
         og = torch.empty_like(o)
@@ -288,6 +318,8 @@ def _atom_bwd_fake(
     widx,
     keys,
     ebias,
+    tinfo,
+    tb,
     saved,
     wq,
     wk,
@@ -309,7 +341,7 @@ def _atom_bwd_fake(
     eps_qk,
     chain=False,
 ):
-    """dx, dtab, dbias2, debias, the weight gradients (fp32) and the four qk-norm vectors."""
+    """dx, dtab, dbias2, debias, the weight gradients (fp32), the four qk-norm vectors and dtb."""
     D = ATOM_D
     f32 = torch.float32
     return [
@@ -329,6 +361,7 @@ def _atom_bwd_fake(
         wq.new_empty((D,), dtype=f32),
         wq.new_empty((D,), dtype=f32),
         wq.new_empty((D,), dtype=f32),
+        tb.new_empty(tb.shape, dtype=f32),
     ]
 
 
@@ -341,6 +374,8 @@ def atom_bwd(
     widx: torch.Tensor,
     keys: torch.Tensor,
     ebias: torch.Tensor,
+    tinfo: torch.Tensor,
+    tb: torch.Tensor,
     saved: list[torch.Tensor],
     wq: torch.Tensor,
     wk: torch.Tensor,
@@ -429,14 +464,26 @@ def atom_bwd(
         _edge(x).edge_bwd_compute(
             qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), dd, keys, widx, ebias, dqe, dke, dve, dbp
         )
+        # then the tail windows (every query window past the last real one; local_dit_h100.tail_info): the same, on the tail kernels
+        from miniworld_engine.kernels.integrations.local_dit_h100 import tail_chunks
+
+        nloop = tb.shape[1]
+        dqt = torch.empty(A, N, D, device=dev, dtype=at)
+        sc, wc = tail_chunks(A, nloop)
+        dkvt = torch.empty(wc, A, ATOM_WK, 2 * D, device=dev, dtype=f32)
+        dtbp = torch.empty(sc, nloop, ATOM_H, ATOM_WQ, ATOM_WK, device=dev, dtype=f32)
+        _edge(x).tail_bwd(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), dd, tinfo, tb, dqt, dkvt, dtbp)
     dbias2 = local.attn_bwd_mma(
         qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), bias2, s["lse"], dd, dp[:, D:], at == torch.float32
     )
     if slide:
         _edge(x).edge_bwd_apply(dp[:, D:], keys, widx, dqe, dke, dve, A, N)
+        _edge(x).tail_bwd_apply(dp[:, D:], tinfo, dqt, dkvt, A, N, nloop)
         debias = dbp.sum(0)
+        dtb = _edge(x).tail_dbias_sum(dtbp, tinfo)
     else:
         debias = ebias.new_empty(ebias.shape, dtype=f32)
+        dtb = tb.new_empty(tb.shape, dtype=f32)
     if kq:
         nblk = (M + QKV_RPB - 1) // QKV_RPB
         qpart = torch.empty(nblk, 5 * D, device=dev, dtype=f32)
@@ -529,12 +576,13 @@ def atom_bwd(
         dbq_ln,
         dwk_ln,
         dbk_ln,
+        dtb,
     ]
 
 
 class _AtomBlock(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl, cfg):  # noqa: D102
+    def forward(ctx, x, tab, bias2, widx, keys, ebias, tinfo, tb, wq, bq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl, cfg):  # noqa: D102
         par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, *chain = cfg
         chain = bool(chain and chain[0])
         qkw = [wql, bql, wkl, bkl] if kq else []
@@ -545,6 +593,8 @@ class _AtomBlock(torch.autograd.Function):
             widx,
             keys,
             ebias,
+            tinfo,
+            tb,
             wq,
             bq,
             wk,
@@ -566,7 +616,7 @@ class _AtomBlock(torch.autograd.Function):
             eps_qk,
             chain,
         )
-        ctx.save_for_backward(x, tab, bias2, widx, keys, ebias, *saved, wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl)
+        ctx.save_for_backward(x, tab, bias2, widx, keys, ebias, tinfo, tb, *saved, wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl)
         ctx.cfg, ctx.n_saved = cfg, len(saved)
         return out
 
@@ -575,7 +625,7 @@ class _AtomBlock(torch.autograd.Function):
     def backward(ctx, dout):  # noqa: D102
         par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, *chain = ctx.cfg
         chain = bool(chain and chain[0])
-        x, tab, bias2, widx, keys, ebias, *rest = ctx.saved_tensors
+        x, tab, bias2, widx, keys, ebias, tinfo, tb, *rest = ctx.saved_tensors
         saved, (wq, wk, wv, wg, wo, wexp, wsq, wql, bql, wkl, bkl) = rest[: ctx.n_saved], rest[ctx.n_saved :]
         qkw = [wql, bql, wkl, bkl] if kq else []
         res = atom_bwd(
@@ -586,6 +636,8 @@ class _AtomBlock(torch.autograd.Function):
             widx,
             keys,
             ebias,
+            tinfo,
+            tb,
             list(saved),
             wq,
             wk,
@@ -607,7 +659,7 @@ class _AtomBlock(torch.autograd.Function):
             eps_qk,
             chain,
         )
-        dx, dtab, dbias2, debias, dwq, dbq, dwk, dwv, dwg, dwo, dwexp, dwsq, dwql, dbql, dwkl, dbkl = res
+        dx, dtab, dbias2, debias, dwq, dbq, dwk, dwv, dwg, dwo, dwexp, dwsq, dwql, dbql, dwkl, dbkl, dtb = res
         return (
             dx,
             dtab.to(tab.dtype),
@@ -615,6 +667,8 @@ class _AtomBlock(torch.autograd.Function):
             None,
             None,
             debias if slide else None,
+            None,
+            dtb if slide else None,
             dwq,
             dbq,
             dwk,
@@ -700,7 +754,7 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
     if uid is not None:
         idx = (ATOM_WQ * torch.arange(nwin, device=dev) - 48)[:, None] + j
         same = (uid.view(nwin, ATOM_WQ, 1) == uid[idx.clamp(0, n - 1)][:, None, :]) | ~kmask.view(nwin, ATOM_WQ, 1)
-    widx = keys = valid = None
+    widx = keys = valid = tinfo = None
     if slide:
         n_real = kmask.sum()
         last = (n_real - 1) // 32
@@ -715,6 +769,9 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
             rows = ATOM_WQ * widx[:, None] + torch.arange(ATOM_WQ, device=dev)
             valid = valid & ((uid[rows][:, :, None] == uid[keys][:, None, :]) | ~kmask[rows][:, :, None])
         valid = valid.expand(5, ATOM_WQ, ATOM_WK).to(torch.uint8).contiguous()
+        # the tail: every query window past the last real one reads the same 128 keys ([t0, s, n_real] on the device: the tail_info kernel of
+        # this sm_80 build; local_dit_h100.tail_info documents it)
+        tinfo = _edge(single).tail_info(kmask.contiguous(), n, stack.key_window == "slide_qblock", single)
     z = pair.contiguous()
     x = single.reshape(a * n, d).contiguous()
     empty = single.new_empty(0, dtype=torch.float32)
@@ -726,8 +783,9 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
             bias2 = bias2.masked_fill(~same[None], float("-inf"))
         if slide:
             ebias = _EdgeBias.apply(z, norm.weight, wb, widx, valid, norm.eps)
+            tb = _TailBias.apply(z, norm.weight, wb, tinfo, norm.eps)
         else:
-            ebias = empty
+            ebias = tb = empty
         tab = _atom_tables(blk, cond)
         qk = (blk.q_norm.weight, blk.q_norm.bias, blk.k_norm.weight, blk.k_norm.bias) if blk.kq_norm else (empty,) * 4
         cfg = (
@@ -753,6 +811,8 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
             widx if slide else empty,
             keys if slide else empty,
             ebias,
+            tinfo if slide else empty,
+            tb,
             blk.to_q.weight,
             blk.to_q.bias,
             blk.to_k.weight,
