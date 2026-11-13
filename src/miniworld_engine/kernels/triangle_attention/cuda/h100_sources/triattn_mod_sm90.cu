@@ -1134,7 +1134,7 @@ __device__ __forceinline__ void l2_prefetch_pair(const void* map, int c0, int ro
 #define FW_ABL 0      // ablations (wrong output by design): 1 = no stores, 2 = no GEMM, 4 = no LayerNorm, 8 = no x loads
 #endif
 #ifndef FW_LAG
-#define FW_LAG 2      // the four producers of a group stay within this many tiles of each other (a counter per group in global memory):
+#define FW_LAG 3      // the four producers of a group stay within this many tiles of each other (a counter per group in global memory):
 #endif                // free-running, the group's CTAs drifted apart and x left the L2 between their reads (1.44 GB of DRAM reads for
                       // 0.54 GB of x at L1024, 2026-11-13).  0: free-running
 __device__ __forceinline__ int ld_acquire_gpu(const int* p) {
