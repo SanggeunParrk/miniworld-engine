@@ -106,14 +106,14 @@ def test_ending_tail_reads_o_transposed_bitwise() -> None:
     _needs_h100()
     L, C = 256, 128
     g = torch.Generator(device="cuda").manual_seed(4)
-    bf = lambda *s: torch.randn(*s, device="cuda", generator=g).bfloat16()  # noqa: E731
+    bf = lambda *s: torch.randn(*s, device="cuda", generator=g).bfloat16()
     x, o = bf(L * L, C), bf(L * L, C)
     wo, wg = bf(C, C) * C**-0.5, bf(C, C) * C**-0.5
     lnw, lnb = torch.rand(C, device="cuda", generator=g) + 0.5, torch.randn(C, device="cuda", generator=g) * 0.1
     mod = hs._mod()
     empty = torch.empty(0, device="cuda", dtype=torch.bfloat16)
     ones = torch.ones(1, L, C, device="cuda", dtype=torch.bfloat16)
-    kw = dict(wg=wg, lnw=lnw, lnb=lnb, eps=1e-5)
+    kw = {"wg": wg, "lnw": lnw, "lnb": lnb, "eps": 1e-5}
     a = mod.tri_tail(empty, o, x, wo, empty, L, True, None, **kw)
     b = mod.tri_tail(empty, o, x, wo, ones, L, True, None, **kw)
     assert torch.equal(a, b)
