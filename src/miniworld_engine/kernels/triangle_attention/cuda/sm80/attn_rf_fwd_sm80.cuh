@@ -78,17 +78,18 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
   const __nv_bfloat16* bsrc = p.bias + ((long long)(z * p.H + h) * L + qt * G::BM + (tid >> 2)) * L + cg * 8;
   const uint32_t kdst = G::KOFF + cr * G::KV_ROW + swz64(ck, cg), bdst = swz64(tid >> 2, cg);
   const long long kstep = (long long)(G::NTHR / 128) * L * p.ldk, vstep = (long long)(G::NTHR / 128) * L * p.ldv;
-  auto issue = [&](int u) {
+  const long long kadv = (long long)G::KEYS * p.ldk, vadv = (long long)G::KEYS * p.ldv;
+  auto issue = [&](int u) {             // called for u = 0, 1, 2, ... in order: the sources advance by one slot per call
     if (u < NU) {
       const uint32_t s = sbase + (u % ST) * G::SLOT;
-      const long long kk = (long long)u * G::KEYS;
 #pragma unroll
       for (int i = 0; i < G::KV_IT; ++i) {
-        cp_async16(s + kdst + i * (G::NTHR / 128) * G::KV_ROW, ksrc + kk * p.ldk + i * kstep);
-        cp_async16(s + kdst + (G::VOFF - G::KOFF) + i * (G::NTHR / 128) * G::KV_ROW, vsrc + kk * p.ldv + i * vstep);
+        cp_async16(s + kdst + i * (G::NTHR / 128) * G::KV_ROW, ksrc + i * kstep);
+        cp_async16(s + kdst + (G::VOFF - G::KOFF) + i * (G::NTHR / 128) * G::KV_ROW, vsrc + i * vstep);
       }
 #pragma unroll
-      for (int i = 0; i < G::B_IT; ++i) cp_async16(s + bdst + i * (G::NTHR / 4) * G::ROWB, bsrc + kk + (long long)i * (G::NTHR / 4) * L);
+      for (int i = 0; i < G::B_IT; ++i) cp_async16(s + bdst + i * (G::NTHR / 4) * G::ROWB, bsrc + (long long)i * (G::NTHR / 4) * L);
+      ksrc += kadv; vsrc += vadv; bsrc += G::KEYS;
     }
     cp_async_commit();
   };
@@ -144,24 +145,19 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
       m[w][mt][0] = m[w][mt][1] = -INFINITY;
     }
 
-  const uint32_t a_off = swz64(qw + lrow, lane >> 4);         // bias A tile rows of mt 0 (mt 1: + 16 rows: same swizzle phase)
+  const uint32_t a_off = swz64(qw + lrow, 0);                // bias A tile rows of mt 0 (mt 1: + 16 rows: same swizzle phase); lanes 16-31 repeat 0-15
   const uint32_t k_off = swz64(lane & 7, lane >> 3);          // K: keys 8jj + (lane & 7), granule lane >> 3 (all 32 channels of one 8-key column)
   const uint32_t v_off = swz64(8 * ((lane >> 3) & 1) + (lane & 7), lane >> 4);   // V^T: keys 16kl + .., granule 2np + (lane >> 4)
 
-  // ---- the per-column blocks of one slot.  bias fragments (A operand) of the warp's 32 queries x 32 keys: ab[mt][16-key slice]
-  auto load_bias = [&](uint32_t sb, uint32_t (&ab)[2][2][4]) {
-#pragma unroll
-    for (int mt = 0; mt < 2; ++mt)
-#pragma unroll
-      for (int s = 0; s < 2; ++s) ldsm_x4(ab[mt][s], sb + mt * 16 * G::ROWB + (a_off ^ (s << 5)));
-  };
+  // ---- the per-column blocks of one slot.
   // S of 8-key column jj for every row of the warp: bias / scale (one product per m tile, shared by the rows) + Q K^T
-  auto s_column = [&](uint32_t sb, const uint32_t (&ab)[2][2][4], int jj, float (&sc)[RW][2][4][4]) {
+  auto s_column = [&](uint32_t sb, int jj, float (&sc)[RW][2][4][4]) {
     float cb[2][4];
 #pragma unroll
     for (int mt = 0; mt < 2; ++mt) {
-      const uint32_t* r = ab[mt][jj >> 1];
-      uint32_t a[4] = {r[2 * (jj & 1)], r[2 * (jj & 1) + 1], r[2 * (jj & 1)], r[2 * (jj & 1) + 1]};
+      // A = the bias of 16 queries x keys 8jj..8jj+7, twice (k 0-7 and 8-15: the lanes 16-31 address the same rows), so B = [diag(s_hi); diag(s_lo)]
+      uint32_t a[4];
+      ldsm_x4(a, sb + mt * 16 * G::ROWB + (a_off ^ (jj << 4)));
       const float zero[4] = {0.f, 0.f, 0.f, 0.f};
       mma_c(cb[mt], a, bs0, bs1, zero);
     }
@@ -218,19 +214,17 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
       __syncthreads();                                        // slot u landed; every warp finished slot u - 2 (its deferred slice ran in u - 1)
       issue(u + LA);
       const uint32_t sb = sbase + (u % ST) * G::SLOT;
-      uint32_t ab[2][2][4];
-      load_bias(sb, ab);
       float sc[RW][2][4][4];
-      s_column(sb, ab, 0, sc);
+      s_column(sb, 0, sc);
       if (u > 0) pv_slice(sprev, 0, 1, pd[0]);
-      s_column(sb, ab, 1, sc);
+      s_column(sb, 1, sc);
 #pragma unroll
       for (int w = 0; w < RW; ++w) exp_column(sc, w, 0);
       if (u > 0) {
 #pragma unroll
         for (int w = 1; w < RW; ++w) pv_slice(sprev, w, 1, pd[w]);
       }
-      s_column(sb, ab, 2, sc);
+      s_column(sb, 2, sc);
 #pragma unroll
       for (int w = 0; w < RW; ++w) exp_column(sc, w, 1);
 #pragma unroll
@@ -239,7 +233,7 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
         pack_slice(sc, w, 0, pa);
         pv_slice(sb, w, 0, pa);
       }
-      s_column(sb, ab, 3, sc);
+      s_column(sb, 3, sc);
 #pragma unroll
       for (int w = 0; w < RW; ++w) exp_column(sc, w, 2);
 #pragma unroll
@@ -256,11 +250,9 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
       __syncthreads();
       issue(u + LA);
       const uint32_t sb = sbase + (u % ST) * G::SLOT;
-      uint32_t ab[2][2][4];
-      load_bias(sb, ab);
       float sc[RW][2][4][4];
 #pragma unroll
-      for (int jj = 0; jj < 4; ++jj) s_column(sb, ab, jj, sc);
+      for (int jj = 0; jj < 4; ++jj) s_column(sb, jj, sc);
 #pragma unroll
       for (int w = 0; w < RW; ++w) {
         float mu[2][2];

@@ -88,6 +88,7 @@ bool try_attn_rf(const a100::AttnParams& p, int z, double scl) {
     case 3: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 5, GATE>>(p, z, scl); return true;
     case 4: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 3, GATE>>(p, z, scl); return true;
     case 5: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 5, GATE, true>>(p, z, scl); return true;
+    case 6: launch_attn_rf<a100::AttnRCfg<2, 1, 4, 4, GATE>>(p, z, scl); return true;
     default: return false;
   }
 }
