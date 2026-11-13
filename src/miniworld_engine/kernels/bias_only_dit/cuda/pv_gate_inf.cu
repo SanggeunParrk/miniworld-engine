@@ -184,7 +184,8 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUt
  const bool tmae=DH==48;
  int tid=threadIdx.x,wg=tid/128,wtid=tid&127,warp=wtid/32,lane=tid&31,mt=L/(64*WGS),ng=(A+SG-1)/SG,KB=L/64;
  const uint32_t rank=CS>1?cluster_rank_():0;
- if(!tid){for(int s=0;s<ST;++s){mbar_init(full+s,1);mbar_init(empty+s,WGS*CS);}for(int b=0;b<2*WGS;++b)mbar_init(gfull+b,1);fence_barrier_init();}
+ int*kb_s=reinterpret_cast<int*>(sm+ST*SB+248);             // the key-block bound and its ready flag (the barriers take at most 96 of the area's 256 bytes)
+ if(!tid){for(int s=0;s<ST;++s){mbar_init(full+s,1);mbar_init(empty+s,WGS*CS);}for(int b=0;b<2*WGS;++b)mbar_init(gfull+b,1);kb_s[1]=0;fence_barrier_init();}
  __syncthreads();
  if(CS>1)cluster_sync_();
  // programmatic dependent launch (the H100 three-kernel inference step, pv_cta_pdl): no kernel-made tensor is read and nothing is
@@ -193,16 +194,17 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUt
  asm volatile("griddepcontrol.wait;" ::: "memory");
  // KMB (inference: the key mask [L] bytes the samples share): the key blocks past its last attended key hold P = 0 in every row (the
  // softmax's masked keys after a live max): neither loaded nor multiplied (the same bits; key_len.cuh). The bound is read off the critical
- // path: the producer thread reads it once the ring is full and hands it to the consumers in the barrier area (written before the arrive of
- // stage KMIN - 1, read after its wait). Never below the ring depth, so the blocks issued before the bound was known are consumed too.
+ // path: an idle warp of the producer warpgroup reads it (warp-wide) while the producer thread fills the ring; the thread takes it once
+ // the ring is full and hands it to the consumers in the barrier area (written before the arrive of stage KMIN - 1, read after its wait).
+ // Never below the ring depth, so the blocks issued before the bound was known are consumed too.
  const int KB0=KB,KMIN=KB0<ST?KB0:ST;
  bool kbound=KMB!=nullptr;
- int*kb_s=reinterpret_cast<int*>(sm+ST*SB+248);             // (the barriers take at most 96 of the area's 256 bytes)
  const int mtc=mt/CS,citems=H*mtc*ng,cstride=gridDim.x/CS;
  unsigned it=0;
  if(wg==0){
    setmaxnreg_dec<40>();
    long long pw=0,pt=0;if(PROF)pt=clock64();
+   if(kbound&&warp==1){const int t=max(KMIN,warp_key_tiles(KMB,L,L,64));if(lane==0){kb_s[0]=t;__threadfence_block();*(volatile int*)(kb_s+1)=1;}}
    if(tid==0)for(int ci=blockIdx.x/CS;ci<citems;ci+=cstride){
      int m=(ci%mtc)*CS+rank,head=(ci/mtc)%H,group=ci/(mtc*H),a0=group*SG,ns=min(SG,A-a0),m0=m*64*WGS;
      for(int kb=0;kb<KB;++kb,++it){
@@ -210,7 +212,7 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUt
        int s=it%ST;if(it>=ST)mbar_wait(empty+s,((it/ST)-1)&1);
        if(PROF){pw+=clock64()-t0;}
        unsigned char*st=sm+s*SB;
-       if(kbound&&kb+1==KMIN){kbound=false;KB=max(KMIN,thread_key_tiles(KMB,L,L,64));*kb_s=KB;}   // before the arrive that releases it
+       if(kbound&&kb+1==KMIN){kbound=false;while(*(volatile int*)(kb_s+1)==0){}KB=*(volatile int*)kb_s;}   // before the arrive that releases it
        mbar_arrive_expect_tx(full+s,(WGS+ns)*8192);
        #pragma unroll
        for(int w=0;w<WGS;++w)tma_load_2d(st+w*8192,&mp,full+s,kb*64,head*L+m0+w*64);
@@ -485,15 +487,17 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ C
  extern __shared__ __align__(1024) unsigned char sm[];
  uint64_t*full=reinterpret_cast<uint64_t*>(sm+ST*SB),*empty=full+ST;
  int tid=threadIdx.x,wg=tid/128,wtid=tid&127,warp=wtid/32,lane=tid&31,mt=L/(64*WGS),ng=(A+SG-1)/SG,KB=L/32;
- if(!tid){for(int s=0;s<ST;++s){mbar_init(full+s,1);mbar_init(empty+s,WGS);}fence_barrier_init();}
+ int*kb_s=reinterpret_cast<int*>(sm+ST*SB+96);              // the bound and its flag past the barriers (2 ST x 8 <= 80 bytes; the launch's 1 KB slack)
+ if(!tid){for(int s=0;s<ST;++s){mbar_init(full+s,1);mbar_init(empty+s,WGS);}kb_s[1]=0;fence_barrier_init();}
  __syncthreads();
- // KMB: as pvx's (the bound off the critical path, never below the ring depth)
+ // KMB: as pvx's (an idle producer warp reads the bound, the thread takes it once the ring is full, the consumers read it themselves)
  const int KB0=KB,KMIN=KB0<ST?KB0:ST;
  bool kbound=KMB!=nullptr;
  const int items=H*mt*ng;
  unsigned it=0;
  if(wg==0){
    setmaxnreg_dec<40>();
+   if(kbound&&warp==1){const int t=max(KMIN,warp_key_tiles(KMB,L,L,32));if(lane==0){kb_s[0]=t;__threadfence_block();*(volatile int*)(kb_s+1)=1;}}
    if(tid==0)for(int item=blockIdx.x;item<items;item+=gridDim.x){
      int m=item%mt,head=(item/mt)%H,group=item/(mt*H),a0=group*SG,ns=min(SG,A-a0),m0=m*64*WGS;
      for(int kb=0;kb<KB;++kb,++it){
@@ -503,7 +507,7 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ C
        #pragma unroll
        for(int w=0;w<WGS;++w)tma_load_2d(st+w*8192,&mp,full+s,kb*32,head*L+m0+w*64);
        for(int j=0;j<ns;++j)tma_load_2d(st+WGS*8192+j*SBY,&mv,full+s,(a0+j)*L+kb*32,head*DHT);
-       if(kbound&&kb+1==KMIN){kbound=false;KB=max(KMIN,thread_key_tiles(KMB,L,L,32));}   // the ring full: then the bound
+       if(kbound&&kb+1==KMIN){kbound=false;while(*(volatile int*)(kb_s+1)==0){}KB=*(volatile int*)kb_s;}   // the ring full: the idle warp's bound
      }
    }
    return;
