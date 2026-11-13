@@ -5,6 +5,7 @@
 #include <climits>
 
 #include "attn_fwd_sm80.cuh"
+#include "attn_rf_fwd_sm80.cuh"
 
 #include "attn_bwd_dq_sm80.cuh"
 #include "attn_bwd_dkv_sm80.cuh"
@@ -55,6 +56,38 @@ void launch_back(const a100::F3Params& p, int nsm) {
   const unsigned grid = (unsigned)std::min<size_t>((size_t)nsm, (p.ntile + G::NW - 1) / G::NW);
   a100::f3_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// The register-resident inference core (attn_rf_fwd_sm80.cuh).  Its bias-scaling operand: 1 / scale = log2 e / scl in two bf16 words.
+template <class G>
+void launch_attn_rf(const a100::AttnParams& p, int z, double scl) {
+  static bool set[64] = {};
+  const int dev = at::cuda::current_device() & 63;
+  if (!set[dev]) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(a100::attn_rf_fwd_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
+    set[dev] = true;
+  }
+  const double s = 1.4426950408889634 / scl;
+  const float hi = __bfloat162float(__float2bfloat16_rn((float)s)), lo = __bfloat162float(__float2bfloat16_rn((float)(s - hi)));
+  dim3 grid(p.L / G::BM, p.L / G::R, z * p.H);
+  a100::attn_rf_fwd_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p, hi, lo);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// Inference core selection of the fast entries: -1 = the measured rule (rf_auto), 0 = the tuned AttnCfg cores, 1..3 = an rf geometry (A/B knob).
+int g_rf_mode = -1;
+
+template <bool GATE>
+bool try_attn_rf(const a100::AttnParams& p, int z, double scl) {
+  int mode = g_rf_mode;
+  if (mode < 0) mode = 0;
+  if (p.L % 128 != 0) return false;
+  switch (mode) {
+    case 1: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 3, GATE>>(p, z, scl); return true;
+    case 2: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl); return true;
+    case 3: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 3, GATE>>(p, z, scl); return true;
+    default: return false;
+  }
 }
 
 }  // namespace
@@ -204,6 +237,7 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
     launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, false, false, 128, true>>(p, (int)Z);
     return;
   }
+  if (TUNED == 3 && !lse.numel() && L >= 512 && rows == 2 && bn == 32 && minb == 2 && try_attn_rf<false>(p, (int)Z, scl)) return;
   if (TUNED == 3 && !lse.numel() && L >= 512 && rows == 2 && bn == 32 && minb == 2) {
     launch_attn_fwd<a100::AttnCfg<2, 2, 64, 3, false, false, 64, true>>(p, (int)Z);
     return;
@@ -251,6 +285,7 @@ void attn_fwd_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
     launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>>(p, (int)Z);   // training forward (out / lse kept): the fixed-shift gated core
     return;
   }
+  if (TUNED == 3 && !lse.numel() && !out.numel() && L >= 512 && try_attn_rf<true>(p, (int)Z, scl)) return;
   if (TUNED == 3 && !lse.numel() && !out.numel() && L >= 512 && (L < 768 || H <= 8))
     launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>>(p, (int)Z);
   else if (TUNED >= 2 && !lse.numel() && !out.numel() && L >= 256)
@@ -634,6 +669,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     compact_attention_impl<false, true>(q, k, v, bias, mask, out, indices, counts, cbias, scl, torch::Tensor());
   });
   m.def("compact_attention_gate_fast", &compact_attention_impl<true, true>);
+  m.def("attn_rf_set", [](int64_t mode) { g_rf_mode = (int)mode; });
   m.def("attn_fwd", &attn_fwd<false>);
   m.def("attn_fwd_tuned", &attn_fwd<true>);
   m.def("attn_fwd_internal", &attn_fwd<2>);
