@@ -116,7 +116,8 @@ def _fastln():
         return hit
     import hashlib
 
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags
+    from miniworld_engine.kernels._sm120 import sm80_load_extension
     from miniworld_engine.modules import _anthropic
 
     base = _anthropic.root() / _FASTLN_SRC
@@ -135,7 +136,8 @@ def _fastln():
         for p in ((Path(home) / "include", Path(home) / "targets" / "x86_64-linux" / "include") if home else ())
         if (p / "cuda_runtime.h").is_file()
     ]
-    ext = load_extension(
+    # sm_80 / sm_90 builds; on the RTX 5090 the same sources as ``..._sm120`` (sm_120a), whose card the sm_80 / sm_90 images do not run on
+    ext = sm80_load_extension(
         name="anthropic_protenix_fast_layer_norm_v1",
         sources=[str(base / "layer_norm_cuda.cpp"), str(base / "layer_norm_cuda_kernel.cu")],
         extra_include_paths=[str(base), *cuda_inc],
