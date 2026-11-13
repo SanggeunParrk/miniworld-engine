@@ -230,6 +230,9 @@ struct K1w64 {
   static constexpr int SMEM = STOFF + 128 * 8;
 };
 
+#ifndef K1W64_TI
+#define K1W64_TI 32   // rows i of a transposed-plane tile (A/B: 16, 32, 64)
+#endif
 template <int HS, bool TRANS = false>
 __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
   using C = K1w64<HS>;
@@ -241,13 +244,14 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
   // token of local row lt of a tile and its plane position: 128 consecutive tokens, or (TRANS) 64 rows i x 2 columns k, i fastest -- a thread's two consecutive
   // local rows are rows i, i + 1 of one column k: adjacent words of the transposed plane.  A TRANS tile writes whole 128-byte lines of each of its two plane
   // rows k per channel (shorter i-runs left half-filled DRAM bursts: the 16 x 8 form ran 1.5-2x slower).  tb / pb: the tile's token / position bases (once per tile).
-  const int nib = p.L >> 6;
+  constexpr int TI = K1W64_TI, TK = 128 / TI;                // TRANS tile: TI rows i x TK columns k
+  const int nib = p.L / TI;
   auto bases = [&](int tile, int& tb, int& pb) {
-    if constexpr (TRANS) { const int kb = tile / nib, ib = tile - kb * nib; tb = 64 * ib * p.L + 2 * kb; pb = 2 * kb * p.L + 64 * ib; }
+    if constexpr (TRANS) { const int kb = tile / nib, ib = tile - kb * nib; tb = TI * ib * p.L + TK * kb; pb = TK * kb * p.L + TI * ib; }
     else { tb = pb = tile * 128; }
   };
-  auto tok_of = [&](int tb, int lt) -> int { return TRANS ? tb + (lt & 63) * p.L + (lt >> 6) : tb + lt; };
-  auto pos_of = [&](int pb, int lt) -> int { return TRANS ? pb + (lt >> 6) * p.L + (lt & 63) : pb + lt; };
+  auto tok_of = [&](int tb, int lt) -> int { return TRANS ? tb + (lt % TI) * p.L + lt / TI : tb + lt; };
+  auto pos_of = [&](int pb, int lt) -> int { return TRANS ? pb + (lt / TI) * p.L + lt % TI : pb + lt; };
   // input tile loader: 1024 granules (128 rows x 2 k-tiles x 4), 4 per thread
   auto issue_z = [&](int tile, int buf) {
     int tb, pb;
