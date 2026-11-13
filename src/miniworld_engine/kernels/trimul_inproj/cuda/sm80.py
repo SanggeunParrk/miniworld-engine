@@ -214,16 +214,20 @@ def _pack_reference(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool) ->
 
 
 # ------------------------------------------------------------------------------------------------------------------ forward
-def _contract(ext, ab, x, ch, n, direction):
+def _contract(ext, ab, x, ch, n, direction, token=None):
+    """The contraction of the a | b planes into x. ``token`` (inference: the [L] token mask, empty = none): one direction may take the
+    bounded contraction (``_bounded``) where its cells list the shape."""
+    from ._bounded import bmm
+
     a, b = ab[:ch].view(ch, n, n), ab[ch:].view(ch, n, n)
     h = ch // 2 if direction == BIDIR else (ch if direction == OUTGOING else 0)  # channels [0, h) outgoing (NT), the rest incoming (TN)
     if direction == BIDIR and n <= _CUSTOM_CONTRACT_MAX_L and n % 128 == 0:
         ext.contract(a, b, x, h, 0)  # both halves in one launch
         return
     if h:
-        torch.bmm(a[:h], b[:h].transpose(1, 2), out=x[:h])  # outgoing: sum_k a[i,k] b[j,k]
+        bmm(a[:h], b[:h].transpose(1, 2), x[:h], token)  # outgoing: sum_k a[i,k] b[j,k]
     if h < ch:
-        torch.bmm(a[h:].transpose(1, 2), b[h:], out=x[h:])  # incoming: sum_k a[k,i] b[k,j]
+        bmm(a[h:].transpose(1, 2), b[h:], x[h:], token)  # incoming: sum_k a[k,i] b[k,j]
 
 
 def _front(ext, zf, mk, pk, n):
@@ -245,7 +249,7 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     pk = _pack(*leaves[1:], train=False)
     pk["eps_in"] = eps_in
     ab, x, zst = _front(ext, zf, mask, pk, n)
-    _contract(ext, ab, x, pk["ch"], n, direction)
+    _contract(ext, ab, x, pk["ch"], n, direction, None if save or ds.numel() else mask)
     if not save and ds.numel() == 0:
         del ab  # inference: the planes are dead once contracted -- freed before the output is allocated
     out = torch.empty_like(zf)

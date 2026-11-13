@@ -239,10 +239,21 @@ def _square_planes(t):
     return None
 
 
-def contract(a, b, out):
+def contract(a, b, out, *, bounded=False, mask=None, samples=1):
     """``bmm(a, b, out)`` for the TriMul contraction (a, b: [P, n, n] views of contiguous bf16 planes, one of them may be transposed;
     out contiguous [P, n, n]), through the measured cuBLASLt configuration for (n, a transposed, P) when ``LT_CONFIGS`` has one and
-    the heuristic offers it; the same products and fp32 accumulation either way."""
+    the heuristic offers it; the same products and fp32 accumulation either way.
+
+    ``bounded`` (inference): on a cell of ``_bounded.CELLS`` the bounded contraction instead, which stops at the live extents of
+    ``mask`` (the token mask [samples * n] or [samples, n]; plane l is sample l % ``samples``; None: the full product)."""
+    if bounded:
+        from . import _bounded
+
+        ta = _square_planes(a)
+        cfg = _bounded.cell(a.shape[0], a.shape[-1], int(bool(ta)), a.device) if ta is not None else None
+        if cfg is not None:
+            _bounded.contract(a, b, out, _bounded.live_bounds(mask, samples), samples, cfg)
+            return out
     ta, tb = _square_planes(a), _square_planes(b)
     key = (a.shape[-1], ta, a.shape[0])
     want = LT_CONFIGS.get(key)
