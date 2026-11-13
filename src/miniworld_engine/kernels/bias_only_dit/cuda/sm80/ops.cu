@@ -272,7 +272,121 @@ void delta_planes(torch::Tensor dO, torch::Tensor O, torch::Tensor dd, int64_t A
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+#ifdef MWE_SM120
+#include "gemm_sm120.cuh"
+namespace {
+template <typename T, int EPI, int BM, int BN, int WM, int WN, int ST, int RB, int MINB>
+void run_gemm120(const g120::Params<T>& p, cudaStream_t st) {
+  constexpr int smem = g120::smem_bytes<BM, BN, ST, RB>();
+  static_assert(smem <= 101376 && MINB * smem <= 101376, "the RTX 5090's 99 KB of shared memory an SM");
+  constexpr bool PAIRED = EPI == g120::EPI_ADALN || EPI == g120::EPI_SWIGLU;
+  TORCH_CHECK(p.M % BM == 0 && p.N % (PAIRED ? 64 : BN) == 0 && p.K % (RB / (int)sizeof(T)) == 0, "gemm120: M, N, K multiples of the tile (", BM, ", ",
+              PAIRED ? 64 : BN, ", ", RB / (int)sizeof(T), ")");
+  auto k = g120::gemm<T, EPI, BM, BN, WM, WN, ST, RB, MINB>;
+  C10_CUDA_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  k<<<dim3(p.N / (PAIRED ? 64 : BN), p.M / BM), WM * WN * 32, smem, st>>>(p);
+}
+// cfg: the CTA tile (BM x BN, K-block row bytes, stages, CTAs an SM). 128-byte K-blocks: 0: 128 x 128 (3 stages), 1: 64 x 128, 2: 64 x 64,
+// 3: 128 x 64, 4: 32 x 128 (4 stages); 64-byte K-blocks: 5: 128 x 128 (3 stages, 2 CTAs an SM), 6: 64 x 128 (4, 2), 7: 128 x 128 (4, 1),
+// 8: 64 x 64 (4, 3), 9: 32 x 64 (4, 4), 10: 32 x 128 (4, 2). The paired epilogues (64 output columns = BN 128) take 0, 1, 4, 5, 6, 7, 10.
+template <typename T, int EPI>
+void dispatch_gemm120(const g120::Params<T>& p, int cfg, cudaStream_t st) {
+  constexpr bool PAIRED = EPI == g120::EPI_ADALN || EPI == g120::EPI_SWIGLU;
+  switch (cfg) {
+    case 0: run_gemm120<T, EPI, 128, 128, 2, 4, 3, 128, 1>(p, st); break;
+    case 1: run_gemm120<T, EPI, 64, 128, 2, 4, 4, 128, 1>(p, st); break;
+    case 4: run_gemm120<T, EPI, 32, 128, 1, 4, 4, 128, 1>(p, st); break;
+    case 5: run_gemm120<T, EPI, 128, 128, 2, 4, 3, 64, 2>(p, st); break;
+    case 6: run_gemm120<T, EPI, 64, 128, 2, 4, 4, 64, 2>(p, st); break;
+    case 7: run_gemm120<T, EPI, 128, 128, 2, 4, 4, 64, 1>(p, st); break;
+    case 10: run_gemm120<T, EPI, 32, 128, 1, 4, 4, 64, 2>(p, st); break;
+    case 11: if constexpr (!PAIRED) { run_gemm120<T, EPI, 64, 64, 2, 2, 6, 64, 2>(p, st); break; } [[fallthrough]];
+    case 12: if constexpr (!PAIRED) { run_gemm120<T, EPI, 128, 64, 4, 2, 6, 64, 1>(p, st); break; } [[fallthrough]];
+    case 9: if constexpr (!PAIRED) { run_gemm120<T, EPI, 32, 64, 1, 2, 4, 64, 4>(p, st); break; } [[fallthrough]];
+    case 2: if constexpr (!PAIRED) { run_gemm120<T, EPI, 64, 64, 2, 2, 4, 128, 1>(p, st); break; } [[fallthrough]];
+    case 3: if constexpr (!PAIRED) { run_gemm120<T, EPI, 128, 64, 4, 2, 4, 128, 1>(p, st); break; } [[fallthrough]];
+    case 8: if constexpr (!PAIRED) { run_gemm120<T, EPI, 64, 64, 2, 2, 4, 64, 3>(p, st); break; } [[fallthrough]];
+    default: TORCH_CHECK(false, "gemm120: config 0 .. 8 (paired epilogues: 0, 1, 4, 5, 6, 7), got ", cfg);
+  }
+}
+template <typename T>
+const T* opt(const c10::optional<torch::Tensor>& t) {
+  return t.has_value() ? reinterpret_cast<const T*>(t->data_ptr()) : nullptr;
+}
+template <typename T>
+void gemm120_t(int64_t epi, const torch::Tensor& a, const torch::Tensor& w1, const c10::optional<torch::Tensor>& w2, torch::Tensor& out,
+               const c10::optional<torch::Tensor>& bias, const c10::optional<torch::Tensor>& r, const c10::optional<torch::Tensor>& g,
+               const c10::optional<torch::Tensor>& x, const c10::optional<torch::Tensor>& xst, const c10::optional<torch::Tensor>& sb, int cfg,
+               cudaStream_t st) {
+  g120::Params<T> p{};
+  const bool paired = epi == g120::EPI_ADALN || epi == g120::EPI_SWIGLU;
+  p.A = reinterpret_cast<const T*>(a.data_ptr());
+  p.W1 = reinterpret_cast<const T*>(w1.data_ptr());
+  p.W2 = opt<T>(w2);
+  p.N1 = (int)w1.size(0);
+  p.M = (int)a.size(0);
+  p.K = (int)a.size(1);
+  p.N = paired ? (int)w1.size(0) : (int)(w1.size(0) + (w2.has_value() ? w2->size(0) : 0));
+  p.C = reinterpret_cast<T*>(out.data_ptr());
+  p.ldc = out.stride(0);
+  p.bias = opt<T>(bias);
+  p.R = opt<T>(r);
+  p.G = opt<T>(g);
+  p.P = g.has_value() ? g->size(0) : 1;
+  p.X = opt<T>(x);
+  p.xst = xst.has_value() ? reinterpret_cast<const float2*>(xst->data_ptr<float>()) : nullptr;
+  p.sb = opt<T>(sb);
+  TORCH_CHECK(out.dim() == 2 && out.size(0) == p.M && out.size(1) == p.N && out.stride(1) == 1, "gemm120: out a row-major [M, N] view");
+  TORCH_CHECK(!paired || (w2.has_value() && w2->size(0) == w1.size(0)), "gemm120: the paired epilogues take W1, W2 of one shape");
+  TORCH_CHECK(epi != g120::EPI_GATERES || (g.has_value() && g->size(1) == p.N && (!r.has_value() || r->size(1) == p.N)), "gemm120: G [P, N], R [M, N]");
+  TORCH_CHECK(epi != g120::EPI_ADALN || (x.has_value() && xst.has_value() && sb.has_value() && x->size(1) == p.N && p.ldc == p.N),
+              "gemm120: ADALN takes X [M, N], its row statistics, sb [N]");
+  switch (epi) {
+    case g120::EPI_PLAIN: dispatch_gemm120<T, g120::EPI_PLAIN>(p, cfg, st); break;
+    case g120::EPI_GATERES: dispatch_gemm120<T, g120::EPI_GATERES>(p, cfg, st); break;
+    case g120::EPI_ADALN: dispatch_gemm120<T, g120::EPI_ADALN>(p, cfg, st); break;
+    case g120::EPI_SWIGLU: dispatch_gemm120<T, g120::EPI_SWIGLU>(p, cfg, st); break;
+    default: TORCH_CHECK(false, "gemm120: epilogue 0 .. 3");
+  }
+}
+}  // namespace
+
+// RTX 5090: the block's inference GEMMs with their epilogues (gemm_sm120.cuh): out = epi(a [M, K] [w1; w2]^T); every tensor contiguous
+// (out: a row-major view, any leading dimension), one dtype (bf16, or fp32 on TF32), xst fp32 [M, 2]
+void gemm120(int64_t epi, torch::Tensor a, torch::Tensor w1, c10::optional<torch::Tensor> w2, torch::Tensor out, c10::optional<torch::Tensor> bias,
+             c10::optional<torch::Tensor> r, c10::optional<torch::Tensor> g, c10::optional<torch::Tensor> x, c10::optional<torch::Tensor> xst,
+             c10::optional<torch::Tensor> sb, int64_t cfg) {
+  const at::cuda::CUDAGuard guard(a.device());
+  TORCH_CHECK(a.is_contiguous() && w1.is_contiguous() && w1.size(1) == a.size(1) && a.scalar_type() == w1.scalar_type() && out.scalar_type() == a.scalar_type(),
+              "gemm120: contiguous a [M, K], w [N, K] of one dtype, out of that dtype");
+  auto st = at::cuda::getCurrentCUDAStream();
+  if (a.scalar_type() == at::kBFloat16) gemm120_t<__nv_bfloat16>(epi, a, w1, w2, out, bias, r, g, x, xst, sb, (int)cfg, st);
+  else {
+    TORCH_CHECK(a.scalar_type() == at::kFloat, "gemm120: bf16 or fp32");
+    gemm120_t<float>(epi, a, w1, w2, out, bias, r, g, x, xst, sb, (int)cfg, st);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// the (mean, rstd) [M, 2] fp32 of every row of x [M, 768] (bf16 / fp32): the AdaLN epilogue's LayerNorm statistics
+void row_stats120(torch::Tensor x, torch::Tensor st, double eps) {
+  const at::cuda::CUDAGuard guard(x.device());
+  TORCH_CHECK(x.is_contiguous() && x.size(1) == 768 && st.scalar_type() == at::kFloat, "row_stats120: x [M, 768] contiguous, st fp32");
+  const int M = x.size(0);
+  auto s = at::cuda::getCurrentCUDAStream();
+  auto* sp = reinterpret_cast<float2*>(st.data_ptr<float>());
+  if (x.scalar_type() == at::kBFloat16)
+    g120::row_stats<__nv_bfloat16, 768><<<(M + 7) / 8, 256, 0, s>>>(reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), sp, M, (float)eps);
+  else g120::row_stats<float, 768><<<(M + 7) / 8, 256, 0, s>>>(x.data_ptr<float>(), sp, M, (float)eps);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+#endif
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+#ifdef MWE_SM120
+  m.def("gemm120", &gemm120);
+  m.def("row_stats120", &row_stats120);
+#endif
   m.def("pv_gate", &pv_gate);
   m.def("pv_gate32", &pv_gate32);
   m.def("dpb", &dpb);

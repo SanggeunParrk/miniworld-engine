@@ -8,9 +8,13 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._sm120 import is_sm120
 
 D_PAIR = 256
 N_ROWS = {0: 317, 1: 157}
+#: RTX 5090: the fused LayerNorm + table gradient above this many pairs (measured, L2 flushed: L 384 encoder 264 vs 274 us, decoder 172 vs
+#: 192; L 256 equal; L 128 the two-kernel path faster, 45 vs 49 / 35 vs 41 us)
+LN_FUSED_MIN_PAIRS = 256 * 256
 
 
 def _ln_eps(eps: float) -> float | None:
@@ -130,6 +134,44 @@ def pair_embed_geom_ln_bwd(tbl: torch.Tensor, codes: torch.Tensor, dh: torch.Ten
     return device_build().ln_backward(tbl, codes, dh, mode, eps)
 
 
+def _eval_fake(weight, a, *rest):
+    B, n = a.shape[:2]
+    return torch.empty((B, n, n, D_PAIR), dtype=torch.bfloat16, device=a.device)
+
+
+@opaque(fake=_eval_fake, name="pair_embed_geom_eval_sm120")
+def pair_embed_geom_eval_sm120(
+    weight: torch.Tensor,
+    bb: torch.Tensor,
+    ca_mask: torch.Tensor,
+    has_cb: torch.Tensor,
+    mask: torch.Tensor,
+    residue_idx: torch.Tensor,
+    chains: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """RTX 5090 inference: the encoder pair (its LayerNorm when ``eps`` >= 0) straight from the module's inputs and weight (sm80/__init__.py forward_eval)."""
+    from miniworld_engine.kernels.pair_embed_geom.cuda.sm80 import forward_eval
+
+    return forward_eval(weight, bb, ca_mask, has_cb, mask, residue_idx, chains, eps)
+
+
+@opaque(fake=_eval_fake, name="pair_embed_ca_eval_sm120")
+def pair_embed_ca_eval_sm120(weight: torch.Tensor, ca: torch.Tensor, mask: torch.Tensor, residue_idx: torch.Tensor, eps: float) -> torch.Tensor:
+    """RTX 5090 inference: the decoder pair (its LayerNorm when ``eps`` >= 0) straight from the module's inputs and weight (sm80/__init__.py forward_ca_eval)."""
+    from miniworld_engine.kernels.pair_embed_geom.cuda.sm80 import forward_ca_eval
+
+    return forward_ca_eval(weight, ca, mask, residue_idx, eps)
+
+
+@opaque(fake=_bwd_fake, name="pair_embed_geom_ln_tbl_bwd_sm120")
+def pair_embed_geom_ln_tbl_bwd(g: torch.Tensor, codes: torch.Tensor, tbl: torch.Tensor, mode: int, eps: float) -> torch.Tensor:
+    """RTX 5090: the table gradient straight from d LayerNorm(pair) = ``g`` (the LayerNorm backward fused in; sm80/__init__.py ln_table_grad)."""
+    from miniworld_engine.kernels.pair_embed_geom.cuda.sm80 import ln_table_grad
+
+    return ln_table_grad(tbl, codes, g, mode, eps)
+
+
 class PairEmbedFunction(torch.autograd.Function):
     """``mode`` 0: the encoder pair (``a`` = bb [B, n, 4, 3]); 1: the decoder pair (``a`` = CA [B, n, 3]; ``cb`` / ``chains`` / ``alim`` unused)."""
 
@@ -147,6 +189,9 @@ class PairEmbedFunction(torch.autograd.Function):
     def backward(ctx, g):
         codes, tbl = ctx.saved_tensors
         g = g.to(torch.bfloat16).contiguous()
+        if ctx.eps >= 0 and is_sm120(g.device) and g.shape[0] * g.shape[1] * g.shape[2] > LN_FUSED_MIN_PAIRS:
+            # RTX 5090: the LayerNorm backward fused into the table gradient
+            return (pair_embed_geom_ln_tbl_bwd(g, codes, tbl, ctx.mode, ctx.eps), *([None] * 10))
         if ctx.eps >= 0:
             g = pair_embed_geom_ln_bwd(tbl, codes, g, ctx.mode, ctx.eps)
         return (pair_embed_geom_bwd(g, codes, ctx.mode), *([None] * 10))
