@@ -16,7 +16,7 @@
 //     (< 2^-80) row sum sends the whole CTA through the running-max instantiation of the same routine), the row sums from the same bf16 P by a
 //     ones-column mma;
 //   * K | V | bias stream in 32-key slots through an ST-stage cp.async ring (one __syncthreads per slot); Q rides in through the last slot.
-// Each output element is written by the same thread in either pass, so a recomputed CTA simply overwrites its tile.
+// A flagged CTA stores nothing in the hot pass; the recomputation kernel writes its tile.
 #pragma once
 #include "attn_fwd_sm80.cuh"
 
@@ -58,14 +58,14 @@ DEVI void mma_acc(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b
 
 // One pass over the CTA tile.  SAFE = false: the unshifted softmax, returns whether the CTA must be recomputed; SAFE = true: running max.
 template <class G, bool SAFE>
-DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
+DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx, int by, int bz) {
   constexpr int RW = G::RW, ST = G::ST;
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sbase = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int wr = warp / G::QG, qg = warp - wr * G::QG;
-  const int L = p.L, qt = blockIdx.x, row0 = blockIdx.y * G::R;
-  const int h = blockIdx.z % p.H, z = blockIdx.z / p.H;
+  const int L = p.L, qt = bx, row0 = by * G::R;
+  const int h = bz % p.H, z = bz / p.H;
   const long long tok0 = (long long)z * L * L;
   const int NU = L / G::KEYS;
 
@@ -291,17 +291,24 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo) {
   return false;
 }
 
+// The hot pass over every CTA tile.  A tile it cannot finish is appended to the fix list (fix[0] = count, cleared by the launcher; fix[1 + i] = the
+// tile's linear index) and recomputed by attn_rf_fix_kernel -- a separate kernel, so the hot kernel's register allocation is its own.  The list
+// order may vary; the tiles are disjoint and each is recomputed whole, so the output does not.
 template <class G>
-__global__ void __launch_bounds__(G::NTHR, 2) attn_rf_fwd_kernel(const AttnParams p, float sinv_hi, float sinv_lo) {
-  if (attn_rf_body<G, false>(p, sinv_hi, sinv_lo)) attn_rf_body<G, true>(p, sinv_hi, sinv_lo);
+__global__ void __launch_bounds__(G::NTHR, 2) attn_rf_fwd_kernel(const AttnParams p, float sinv_hi, float sinv_lo, int* fix) {
+  if (attn_rf_body<G, false>(p, sinv_hi, sinv_lo, blockIdx.x, blockIdx.y, blockIdx.z) && threadIdx.x == 0)
+    fix[1 + atomicAdd(fix, 1)] = (int)((blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x);
 }
 
-}  // namespace a100
-
-namespace a100 {
-// probe: the hot pass alone (no recomputation of flagged CTAs)
+// The running-max recomputation of the listed tiles: a few persistent CTAs walk the list (none listed: they leave at once).
 template <class G>
-__global__ void __launch_bounds__(G::NTHR, 2) attn_rf_hot_kernel(const AttnParams p, float sinv_hi, float sinv_lo) {
-  attn_rf_body<G, false>(p, sinv_hi, sinv_lo);
+__global__ void __launch_bounds__(G::NTHR, 1) attn_rf_fix_kernel(const AttnParams p, float sinv_hi, float sinv_lo, const int* fix, int nx, int ny) {
+  const int n = fix[0];
+  for (int i = blockIdx.x; i < n; i += gridDim.x) {
+    const int t = fix[1 + i];
+    attn_rf_body<G, true>(p, sinv_hi, sinv_lo, t % nx, (t / nx) % ny, t / (nx * ny));
+    __syncthreads();                                          // the next tile's copies reuse the shared memory
+  }
 }
+
 }  // namespace a100
