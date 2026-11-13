@@ -216,8 +216,27 @@ def shared_cond_stream(stream: str | None) -> tuple[str | None, bool]:
     return stream, False
 
 
+#: Whether ``key_mask`` pads (see ``unpadded_masks``): True for the accuracy measurer and the tests (the masked paths are exercised).
+_PADDED_MASKS = [True]
+
+
+@contextlib.contextmanager
+def unpadded_masks():
+    """Inside: every ``key_mask`` is all True (no padding position). The speed measurer builds its inputs this way, so a timing is the
+    cost of the full length: a kernel that skips padded keys (as the kits' cores do) would otherwise look faster on the L // 8 padding
+    alone (2026-11-13). The accuracy measurer keeps the padding, so the masked paths stay checked."""
+    _PADDED_MASKS.append(False)
+    try:
+        yield
+    finally:
+        _PADDED_MASKS.pop()
+
+
 def key_mask(rows: int, length: int, *, device, pad: int | None = None) -> torch.Tensor:
-    """A bool key mask ``[rows, length]``: real positions first, the last ``pad`` (default ``length // 8``) padding."""
+    """A bool key mask ``[rows, length]``: real positions first, the last ``pad`` (default ``length // 8``) padding; no padding at all
+    inside ``unpadded_masks()``."""
+    if not _PADDED_MASKS[-1]:
+        return torch.ones(rows, length, dtype=torch.bool, device=device)
     pad = length // 8 if pad is None else min(pad, length - 1)
     return (torch.arange(length, device=device) < length - pad).expand(rows, length).contiguous()
 
