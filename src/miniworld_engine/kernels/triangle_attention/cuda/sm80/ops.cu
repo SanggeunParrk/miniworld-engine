@@ -88,14 +88,13 @@ int g_rf_mode = -1;
 template <bool GATE>
 bool try_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts) {
   int mode = g_rf_mode;
-  if (mode < 0) mode = GATE ? 2 : 3;     // provisional rule
+  if (mode < 0) mode = 2;     // provisional rule
   if (p.L % 128 != 0) return false;
   switch (mode) {
     case 1: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl, opts); return true;
     case 2: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE>>(p, z, scl, opts); return true;
-    case 3: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 5, GATE>>(p, z, scl, opts); return true;
-    case 4: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 3, GATE>>(p, z, scl, opts); return true;
-    case 6: launch_attn_rf<a100::AttnRCfg<2, 1, 4, 4, GATE>>(p, z, scl, opts); return true;
+    case 8: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE, 32, true>>(p, z, scl, opts); return true;
+    case 9: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE, 32, true>>(p, z, scl, opts); return true;
     default: return false;
   }
 }
