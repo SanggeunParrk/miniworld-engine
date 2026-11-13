@@ -212,7 +212,14 @@ def test_atom_dead_windows(name: str, kw: dict | None, dtype: str) -> None:
     N, n = 2048, 1400  # windows from (1400 + 48) / 32 on have no valid key
     g = torch.Generator(device="cuda").manual_seed(1)
     inp = m.make_inputs(length=N, samples=5, depth=None, dtype=act, device="cuda", generator=g)
-    inp["mask"] = (torch.arange(N, device="cuda") < n)[None]
+    if "attention_params" in inp:  # the SWA block: its front-packed valid mask rebuilt for the padded count
+        from miniworld_engine.modules.functional import build_attention_params
+
+        cos, sin = inp["attention_params"][0], inp["attention_params"][1]
+        valid = (torch.arange(N, device="cuda") < n)[None].expand(cos.shape[0], N).contiguous()
+        inp["attention_params"] = build_attention_params(cos[:1], sin[:1], valid, cos.shape[0])
+    else:
+        inp["mask"] = (torch.arange(N, device="cuda") < n)[None]
     with torch.no_grad(), _autocast(dtype):
         m.set_backend("pytorch")
         ref = m(**inp).double()

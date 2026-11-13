@@ -180,8 +180,11 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   const int wg = wgi % NWG, kspl = wgi / NWG;                       // its 64-row group, and its key split
   // KMB (inference, FCLS 1): the key mask bytes of each bias group (sample s reads row (s % nbg), rows kms bytes apart; kms 0: one row
   // for all). The key blocks past the row's last attended key are masked in every row -- exact zeros after the row's live max -- so they
-  // are neither loaded nor computed (the same bits). Every warp reads the bound itself (key_len.cuh), producer and consumers alike.
-  const int nblocks = (FCLS == 1 && KMB) ? warp_key_tiles(KMB + (nbg > 1 ? samp % nbg : 0) * kms, L, L, BN) : L / BN;
+  // are neither loaded nor computed (the same bits). Every warp reads the bound itself (key_len.cuh), producer and consumers alike, once its
+  // first loads are in flight (the mask read hides under them).
+  const bool kbound = FCLS == 1 && KMB != nullptr;
+  const uint8_t* kmrow = kbound ? KMB + (nbg > 1 ? samp % nbg : 0) * kms : nullptr;
+  int nblocks = L / BN;
   // nbg distinct biases, bias [H, nbg, L, L], the samples laid out [A / nbg][nbg]: sample s reads bias s % nbg. nbg = 1: one bias per head shared by
   // every sample [H, L, L]; nbg = A: one bias per sample (the PSB layout); 1 < nbg < A: one per trunk_seed (each its own pair), shared by its A / nbg samples
   const int brow = (nbg > 1 ? head * nbg + samp % nbg : head) * L + m0;                             // this tile's first row in the [H nbg L, L] bias map
@@ -208,6 +211,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
         tma_load_2d(sg, &mg, gbar, qcol, row0);
       }
     }
+    if (kbound) nblocks = warp_key_tiles(kmrow, L, L, BN);
     if (iss < NISS) mbar_wait(qdone, 0);
     if (iss < NISS) {
       for (int n = 0; n < nblocks; ++n) {
@@ -241,6 +245,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
 #pragma unroll
   for (int i = 0; i < DH / 2; ++i) acc[i] = 0.f;
   float m_i[2] = {-INFINITY, -INFINITY}, l_i[2] = {0.f, 0.f};
+  if (kbound) nblocks = warp_key_tiles(kmrow, L, L, BN);
   mbar_wait(qbar, 0);
   const uint32_t sq = smem_u32(sm) + QSTAGE + wg * 8192;
   uint32_t qr[DH / 16][4];
