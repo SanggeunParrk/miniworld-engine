@@ -140,7 +140,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     int gate_h16,                                        // (gate_h16: the width-generic front's fp16 GEMM output)
     __nv_bfloat16* __restrict__ U, long ldg,
     int* __restrict__ SCHED,                             // zeroed task counter (dynamic schedule), or nullptr: static
-    int* __restrict__ FIX) {                             // fix list: FIX[0] = count (zeroed), FIX[1..] = task ids (written by SPEC, read by the exact form)
+    int* __restrict__ FIX,                               // fix list: FIX[0] = count (zeroed), FIX[1..] = task ids (written by SPEC, read by the exact form)
+    const int* __restrict__ KT) {                        // live key tiles of each batch element [B] (every key past them is masked in every row), or nullptr: all
   constexpr bool VOTE = SPEC && TA_SPEC == 2;    // TA_SPEC 2: no fix list (see X)
   constexpr bool LIST = SPEC && !VOTE;
   const bool LISTM = !SPEC && FIX != nullptr;
@@ -180,6 +181,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // dynamic schedule: the producer takes each next task from the global counter and hands it to the consumers in this slot (written before
   // the Q tiles' arrive, read after its completion; -1 ends the CTA)
   volatile int* slot = reinterpret_cast<volatile int*>(smb + (bar0 - sB) + 240);
+  volatile int* nkslot = reinterpret_cast<volatile int*>(smb + (bar0 - sB) + 252);   // the task's key tiles, handed over the same way (KT: no global load on the consumers' path between tasks)
 
   // a head's [128 rows][32 channels] tile of q / k / v: 2-D at column h * 32, or (dh 16: heads of 16 channels stored compact) the 3-D map
   // [rows][H][16] whose box of 32 channels reads the head's 16 and zero-fills the 16 past the dimension (padded channels are 0, as the
@@ -196,11 +198,13 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       int lt = 0, st = 0, kph = 0, bs = 0, bph = 0;
       for (int t = blockIdx.x; t < nt; t = SCHED ? (int)gridDim.x + atomicAdd(SCHED, 1) : t + (int)gridDim.x, ++lt) {
         int b, h, qt, g; decode(LISTM ? FIX[1 + t] : t, b, h, qt, g);
+        const int nk = KT != nullptr ? min(NK, max(1, __ldg(KT + b))) : NK;   // the dead trailing key tiles are not streamed
         wait(qe, (lt & 1) ^ 1);
         if (SCHED) *slot = t;
+        if (KT != nullptr) *nkslot = nk;
         expect_tx(qf, R * QT * 2);
         for (int r = 0; r < R; ++r) load_head(&qmap, sQ + r * QT * 2, qf, h, row0(b, g * R + r) + qt * BM);
-        for (int j = 0; j < NK; ++j) {
+        for (int j = 0; j < nk; ++j) {
           wait(bem(bs), bph ^ 1);
           expect_tx(bfu(bs), BT * 2);
           for (int hh = 0; hh < 2; ++hh) load_2d(&bmap, sB + (bs * BT + hh * BM * 64) * 2, bfu(bs), j * BN + hh * 64, (b * H + h) * S + qt * BM);
@@ -359,6 +363,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       if (t < 0) break;
     }
     int b, h, qt, g; decode(LISTM ? FIX[1 + t] : t, b, h, qt, g);
+    const int nk = KT != nullptr ? *nkslot : NK;   // (the producer's count: it streams these tiles)
     // Q fragments of the warp's 16 rows (A of the QK^T wgmma), two k16 blocks per pair row
 #pragma unroll
     for (int r = 0; r < R; ++r)
@@ -382,8 +387,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     fence_regs(sc[0]);
     X(0);
     uint4 gpre[R][2];                                // the gate's values of this lane's output columns, loaded under the last key tile
-    for (int j = 0; j < NK; ++j) {
-      if (GATE != nullptr && j == NK - 1) {
+    for (int j = 0; j < nk; ++j) {
+      if (GATE != nullptr && j == nk - 1) {
 #pragma unroll
         for (int r = 0; r < R; ++r) {
           const int n = min(g * R + r, N - 1);
@@ -393,7 +398,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         }
       }
       step(1);
-      if (j + 1 < NK) step(0);
+      if (j + 1 < nk) step(0);
     }
     PV(1);                                           // the last sub-step's PV
     wg_wait<0>();
@@ -476,9 +481,12 @@ torch::Tensor& flags_for(const torch::Device& dev) {
 // q, k, v [B, N, S, H, 32] fp16 (the projection layout; rows may sit at a common wider stride); sbias fp16 [B, H, S, S] contiguous = bias / scale
 // (masked keys -inf); S % 128 == 0.  -> (out [B, N, S, H, 32] bf16, lse fp32 [B, N, H, S] base 2 (empty unless want_lse), flags int32 [2], per-device
 // counters accumulated over every call: [0] rows whose sum left (0, 3e38) -- a row with every key masked --, [1] tasks the speculative offset
-// could not absorb and the exact launch recomputed; u = sigmoid(gate) o out when `gate` is given)
+// could not absorb and the exact launch recomputed; u = sigmoid(gate) o out when `gate` is given).  `key_tiles`: int32 [B], the 128-key tiles of
+// each batch element up to its last attended key (`key_tiles` in h100_sm90.py); the tiles past them, whose keys are masked (-inf) in every row,
+// are neither loaded nor computed: their exponentials are exact zeros, so the result is the same bits
 std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor sbias, double scale, bool want_lse,
-                                           c10::optional<torch::Tensor> gate, bool want_out) {
+                                           c10::optional<torch::Tensor> gate, bool want_out,
+                                           c10::optional<torch::Tensor> key_tiles) {
   TORCH_CHECK(q.is_cuda() && q.dim() == 5 && (q.size(4) == D || q.size(4) == 16), "q [B, N, S, H, 32 | 16]");
   const long dh = q.size(4);   // 16: heads of 16 channels stored compact (zero-padded to 32 by the loads)
   const long B = q.size(0), N = q.size(1), S = q.size(2), H = q.size(3);
@@ -501,6 +509,9 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
   CUtensorMap qm = m2(q, "q"), km = m2(k, "k"), vm = m2(v, "v");
   CUtensorMap bm = make_map<2>(sbias.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B,
                                "sbias", CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
+  TORCH_CHECK(!key_tiles.has_value() || (key_tiles->is_cuda() && key_tiles->scalar_type() == torch::kInt32 && key_tiles->is_contiguous() &&
+              key_tiles->numel() == B), "key_tiles: int32 [B] contiguous");
+  const int* kt = key_tiles.has_value() ? key_tiles->data_ptr<int>() : nullptr;
   const bool has_gate = gate.has_value();
   const bool store_out = want_out || !has_gate;
   TORCH_CHECK(!has_gate || ((gate->scalar_type() == torch::kBFloat16 || gate->scalar_type() == torch::kHalf) && gate->is_cuda() && gate->sizes() == q.sizes() && gate->stride(4) == 1 &&
@@ -530,7 +541,7 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
       (int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), hg, qm, km, vm, bm,
       store_out ? reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()) : nullptr, want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>(),
       has_gate ? reinterpret_cast<const __nv_bfloat16*>(gate->data_ptr()) : nullptr, (int)(has_gate && gate->scalar_type() == torch::kHalf),
-      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, fx);
+      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, fx, kt);
   };
   // the head width is a template argument: the 32-channel kernels are the ones without the compact form, instruction for instruction
   auto run = [&](auto dhc) {
@@ -563,5 +574,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("triattn_fwd_h16", &triattn_fwd_h16, "sm90 triangle-attention forward, inference, fp16 operands (D = 32): q/k/v [B, N, S, H, 32] fp16, "
         "sbias = bias / scale fp16 [B, H, S, S] -> out bf16, optional base-2 LSE; with `gate` also u = sigmoid(gate) o out",
         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("sbias"), py::arg("scale"), py::arg("want_lse"), py::arg("gate") = py::none(),
-        py::arg("want_out") = true);
+        py::arg("want_out") = true, py::arg("key_tiles") = py::none());
 }

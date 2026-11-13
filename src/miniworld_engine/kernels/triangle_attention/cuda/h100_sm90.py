@@ -57,7 +57,7 @@ def _core_h16(defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
     return load_extension(
-        name=f"triattn_h100_core_h16{tag}_v2",
+        name=f"triattn_h100_core_h16{tag}_v3",
         sources=[str(_SRC / "triattn_h16_sm90.cu")],
         extra_cuda_cflags=[*_flags(), *(f"-D{d}" for d in defs)],
         verbose=True,
@@ -79,6 +79,17 @@ def supports(length: int) -> bool:
 def attention(q, k, v, bias, scale=D**-0.5, want_lse=False, rows=2, defs=()):
     """softmax(scale q.k + bias) v on [B, N, S, H, 32] tensors, bias [B, H, S, S] -> (out, lse, flags)."""
     return _core(rows, tuple(defs)).triattn_fwd(q, k, v, scaled_bias(bias, scale), scale, want_lse)
+
+
+def key_tiles(mask, length):
+    """The fp16 core's ``key_tiles``: int32 [B], the 128-key tiles of each batch element up to its last attended key (at least 1), or None
+    without a mask.  The tiles past them hold keys masked in every row (-inf in the bias): the core skips them (same bits, fewer tiles;
+    the requirement inputs pad the last L // 8 keys, the kit's core skips them too)."""
+    if mask is None:
+        return None
+    pos = torch.arange(1, length + 1, device=mask.device, dtype=torch.int32)
+    last = (mask.reshape(-1, length).to(torch.int32) * pos).amax(-1)  # 1 + the last attended key, 0 when none
+    return ((last + (TOK - 1)) // TOK).clamp_min(1).to(torch.int32)
 
 
 def scaled_bias(bias, scale=D**-0.5):
@@ -159,8 +170,10 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, 
     if flip:
         sbias = flip_bias(sbias, mask)
     shp = (B, L, L, H, D)
-    core = _core_h16().triattn_fwd_h16 if INFERENCE_FP16 else _core().triattn_fwd
-    o, _, _, _ = core(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False)
+    if INFERENCE_FP16:  # the dead trailing key tiles skipped
+        o = _core_h16().triattn_fwd_h16(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, key_tiles=key_tiles(mask, L))[0]
+    else:
+        o = _core().triattn_fwd(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False)[0]
     # the biases in fp32 inside the tail, before its one rounding: added to the bf16 gate / sum afterwards they were a second
     # rounding each, the out bias at the residual's scale (RoseTTAFold3's trunk drifted from its reference by it)
     fp32 = lambda t: None if t is None else t.float().contiguous()  # noqa: E731
@@ -205,8 +218,11 @@ def inference_wide(pair, fold, wpk, wb8, wo16, mask=None, eps=1e-5, trans=False,
     if flip:
         sbias = flip_bias(sbias, mask)
     shp = (B, L, L, nh, D)
-    core = _core_h16().triattn_fwd_h16 if INFERENCE_FP16 else _core().triattn_fwd
-    _, _, _, u = core(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, g.view(shp), False)
+    if INFERENCE_FP16:  # the dead trailing key tiles skipped
+        kt = key_tiles(mask, L)
+        u = _core_h16().triattn_fwd_h16(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, g.view(shp), False, key_tiles=kt)[3]
+    else:
+        u = _core().triattn_fwd(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, g.view(shp), False)[3]
     bo = None if out_bias is None else out_bias.to(torch.bfloat16).contiguous()
     return gen._lt().lt_mm(u.view(M, cw), wo16, x, L, trans, out, bo).view(B, L, L, cw)
 
