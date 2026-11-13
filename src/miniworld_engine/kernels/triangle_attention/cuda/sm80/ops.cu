@@ -62,7 +62,10 @@ void launch_back(const a100::F3Params& p, int nsm) {
 template <class G>
 void launch_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts) {
   const auto fix = at::empty({a100::rf_fix_ints<G>(p.L, z * p.H)}, opts.dtype(at::kInt));   // [count, tiles...] of the recomputation
-  C10_CUDA_CHECK(a100::attn_rf_launch<G>(p, z, scl, fix.data_ptr<int>(), at::cuda::getCurrentCUDAStream(), at::cuda::getCurrentDeviceProperties()->multiProcessorCount));
+  int* fp = fix.data_ptr<int>();
+  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const cudaError_t err = a100::attn_rf_launch<G>(p, z, scl, fp, at::cuda::getCurrentCUDAStream(), nsm);
+  C10_CUDA_CHECK(err);
 }
 
 // Inference core selection of the fast entries: -1 = the measured rule (rf_auto), 0 = the tuned AttnCfg cores, 1..3 = an rf geometry (A/B knob).
