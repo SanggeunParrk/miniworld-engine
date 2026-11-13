@@ -1,0 +1,426 @@
+// attn_rf_fwd_sm80.cuh -- triangle-attention core, inference forward, A100 / sm_80, the register-resident schedule ("rf"): heads of HD = 16, 32 or 64
+// channels, bf16 operands, fp32 softmax and accumulation, bf16 out (optionally the sigmoid-gated operand of the output projection).  The same op and
+// the same AttnParams as attn_fwd_sm80.cuh (token-major q / k / v / out with row strides; bias [z][H][L][L], masked keys = the bf16 minimum):
+//
+//   out[z, i, j, h, :] = softmax_k( scale * q[z, i, j, h, :] . k[z, i, k, h, :] + bias[z, h, j, k] ) @ v[z, i, k, h, :]
+//
+// What differs from attn_fwd_sm80.cuh's schedule (16 queries per warp, Q re-read from shared memory every sub-step, bias converted per element):
+//   * one CTA = R = WR * RW pair rows x BM = 32 QG queries of one (z, head) as WR x QG warps; warp (wr, qg) owns queries [32 qg, 32 qg + 32) of
+//     the RW consecutive pair rows [RW wr, RW wr + RW).  Two m16 tiles per warp: every K / V fragment loaded by ldmatrix feeds two mma; the Q
+//     fragments of the warp's rows stay in registers for the whole key loop, as do O and the row sums (up to 255 registers, two CTAs per SM);
+//   * the pair bias enters the score accumulator as the C operand: S = bias / scale + Q K^T.  Default: an exact bias-scaling product
+//     A_bias B_sel (A_bias = the bf16 bias of 16 queries x 8 keys twice, by one ldmatrix with repeated lane addresses; B_sel = [diag(s_hi);
+//     diag(s_lo)], s_hi + s_lo = 1 / scale in two bf16 words; one mma per 16 x 8 tile, shared by the RW rows of the warp).  BCVT: the C
+//     fragment read from shared memory and scaled in registers instead (cheaper where the products are short: 16 / 64-channel forms);
+//   * p = 2^(S scale log2 e) without a shift; the row sums from the same bf16 P by a ones-column mma.  A tile whose sums overflow, turn
+//     non-finite or vanish (< 2^-80) is appended to a fix list and recomputed by the running-max instantiation in a separate kernel
+//     (attn_rf_fix_kernel), so the hot kernel's register allocation is its own;
+//   * K | V | bias stream in 32-key slots through an ST-stage cp.async ring (one __syncthreads per slot), each slot in two 16-key slices (only
+//     the slice's scores are live); Q rides in through the last slot; the epilogue stages O (and the gate tile) in shared memory for 16-byte
+//     stores, a flagged tile stores nothing;
+//   * key_tiles (optional, rf_key_tiles from the global key mask): only the slots up to each sample's last live key are streamed (the keys past it
+//     are dead in every pair row: the same output bits);
+//   * with p.counts set (the dense branch of the masked density split): the CTAs of sparse batches leave at once.
+#pragma once
+#include "attn_fwd_sm80.cuh"
+
+namespace a100 {
+
+template <int WR_, int RW_, int QG_, int ST_, bool GATE_ = false, int HD_ = 32, bool BCVT_ = false>
+struct AttnRCfg {
+  static constexpr int WR = WR_, RW = RW_, QG = QG_, ST = ST_, HD = HD_;
+  static constexpr bool GATE = GATE_;
+  static constexpr bool BCVT = BCVT_;   // the bias / scale operand converted in registers (else: the bias-scaling mma)
+  static constexpr int R = WR * RW, BM = 32 * QG, NW = WR * QG, NTHR = 32 * NW;
+  static constexpr int KEYS = 32;                            // keys per ring slot
+  static constexpr int GR = HD / 8, KK = HD / 16, DN = HD / 8;   // 16-byte granules per Q / K / V / O row, k steps of Q K^T, n tiles of O
+  static constexpr int ROWB = 64;                            // bias tile rows: 32 keys (swz64)
+  static constexpr int RB = HD * 2;                          // Q / K / V / O tile rows (rf_swz)
+  static constexpr int CPR = KEYS * GR;                      // 16-byte chunks of one pair row's K (or V) in a slot
+  static constexpr int BIAS_BYTES = BM * ROWB;               // [BM queries][32 keys] bf16
+  static constexpr int KV_ROW = KEYS * RB;                   // 32 keys x HD channels of one pair row
+  static constexpr int KOFF = BIAS_BYTES, VOFF = KOFF + R * KV_ROW, SLOT = VOFF + R * KV_ROW;
+  static constexpr int Q_BYTES = R * BM * RB;
+  static constexpr int SMEM = ST * SLOT;
+  static constexpr bool KV_PART = R * CPR < NTHR;            // fewer K (V) chunks than threads: threads [0, R CPR) copy one each
+  static constexpr int KV_IT = KV_PART ? 1 : R * CPR / NTHR;  // 16-byte K (and V) chunks per thread and slot
+  static constexpr int KV_M = CPR > NTHR ? CPR / NTHR : 1;     // chunk steps per pair row (HD 64: a slot row is 256 chunks)
+  static constexpr int KV_RS = CPR > NTHR ? 1 : NTHR / CPR;    // pair rows per chunk step otherwise
+  static constexpr int B_IT = BM * 4 / NTHR;                 // bias chunks per thread and slot
+  static constexpr int Q_IT = R * BM * GR / NTHR;
+  static_assert(RW == 1 || RW == 2 || RW == 4, "rows per warp");
+  static_assert(HD == 16 || HD == 32 || HD == 64, "head dim");
+  static_assert(KV_PART ? (R * CPR) % 32 == 0 : ((NTHR % CPR == 0 || CPR % NTHR == 0) && (R * CPR) % NTHR == 0), "whole chunk steps of K / V per pair row");
+  static_assert(BM * 4 % NTHR == 0 && (R * BM * GR) % NTHR == 0, "bias / Q chunks per thread");
+  static_assert(Q_BYTES <= SLOT, "Q rides in through one ring slot");
+  static_assert(2 * Q_BYTES <= ST * SLOT, "the epilogue stages O and g in the ring");
+  static_assert(ST >= 2 && SMEM <= 163 * 1024, "ring");
+};
+
+// mma with a separate C operand (d = a b + c), and the in-place form; not volatile (pure register ops: the scheduler may move them)
+DEVI void mma_c(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1, const float (&c)[4]) {
+  asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+      : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+}
+// Q / K / V / O tile rows of HD channels: 64-byte rows (HD 32) swz64; 32-byte rows (HD 16): granule g of row r at g ^ ((r >> 2) & 1).  The 8 rows of one
+// ldmatrix matrix cover all 32 banks either way; the phase is periodic in 8 rows.
+template <int HD>
+DEVI uint32_t rf_swz(uint32_t row, uint32_t g) {
+  if constexpr (HD == 64) return swz<128>(row, g * 16);
+  else if constexpr (HD == 32) return swz64(row, g);
+  else return row * 32u + ((g ^ ((row >> 2) & 1u)) << 4);
+}
+
+DEVI void mma_acc(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+  asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+// One pass over the CTA tile.  SAFE = false: the unshifted softmax, returns whether the CTA must be recomputed; SAFE = true: running max.
+template <class G, bool SAFE>
+DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx, int by, int bz) {
+  constexpr int RW = G::RW, ST = G::ST, HD = G::HD, GR = G::GR, KK = G::KK, DN = G::DN;
+  extern __shared__ __align__(128) unsigned char smem_raw[];
+  const uint32_t sbase = smem_u32(smem_raw);
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int wr = warp / G::QG, qg = warp - wr * G::QG;
+  const int L = p.L, qt = bx, row0 = by * G::R;
+  const int h = bz % p.H, z = bz / p.H;
+  const long long tok0 = (long long)z * L * L;
+  const int NU = p.key_tiles ? min(L / G::KEYS, max(1, p.key_tiles[z])) : L / G::KEYS;   // slots streamed: up to the last live key of the sample
+
+  // ---- per-thread copy plan of a slot: K / V chunk i = pair row tid / CPR + i NTHR / CPR, key (tid / GR) % 32, granule tid % GR; bias chunk i =
+  // query (tid >> 2) + i NTHR / 4, granule tid & 3 (the swizzles are periodic in 8 rows, so chunk i's destination is chunk 0's + a constant)
+  const int ck = (tid / GR) % 32, cg = tid % GR, cr = tid / G::CPR;
+  // chunk step i: pair row (i / KV_M) KV_RS further, keys (i % KV_M) NTHR / GR further (the 128-byte swizzle is periodic in 8 rows: 16-key steps keep it)
+  auto kv_row = [](int i) { return (i / G::KV_M) * G::KV_RS; };
+  auto kv_key = [](int i) { return (i % G::KV_M) * (G::NTHR / GR); };
+  const __nv_bfloat16* ksrc = p.k + (tok0 + (long long)(row0 + cr) * L + ck) * p.ldk + h * HD + cg * 8;
+  const __nv_bfloat16* vsrc = p.v + (tok0 + (long long)(row0 + cr) * L + ck) * p.ldv + h * HD + cg * 8;
+  const __nv_bfloat16* bsrc = p.bias + ((long long)(z * p.H + h) * L + qt * G::BM + (tid >> 2)) * L + (tid & 3) * 8;
+  const uint32_t kdst = G::KOFF + cr * G::KV_ROW + rf_swz<HD>(ck, cg), bdst = swz64(tid >> 2, tid & 3);
+  const long long kadv = (long long)G::KEYS * p.ldk, vadv = (long long)G::KEYS * p.ldv;
+  auto issue = [&](int u) {             // called for u = 0, 1, 2, ... in order: the sources advance by one slot per call
+    if (u < NU) {
+      const uint32_t s = sbase + (u % ST) * G::SLOT;
+#pragma unroll
+      for (int i = 0; i < G::KV_IT; ++i) {
+        if (G::KV_PART && tid >= G::R * G::CPR) break;
+        const uint32_t d = kv_row(i) * G::KV_ROW + kv_key(i) * G::RB;
+        cp_async16(s + kdst + d, ksrc + ((long long)kv_row(i) * L + kv_key(i)) * p.ldk);
+        cp_async16(s + kdst + (G::VOFF - G::KOFF) + d, vsrc + ((long long)kv_row(i) * L + kv_key(i)) * p.ldv);
+      }
+#pragma unroll
+      for (int i = 0; i < G::B_IT; ++i) cp_async16(s + bdst + i * (G::NTHR / 4) * G::ROWB, bsrc + (long long)i * (G::NTHR / 4) * L);
+      ksrc += kadv; vsrc += vadv; bsrc += G::KEYS;
+    }
+    cp_async_commit();
+  };
+
+  // ---- Q of the R rows through the last ring slot (group 0), then the first ST - 1 slots
+  {
+    const uint32_t qs = sbase + (ST - 1) * G::SLOT;
+#pragma unroll
+    for (int i = 0; i < G::Q_IT; ++i) {
+      const int c = tid + G::NTHR * i, r = c / (G::BM * GR), q = (c / GR) % G::BM, g = c % GR;
+      cp_async16(qs + r * G::BM * G::RB + rf_swz<HD>(q, g), p.q + (tok0 + (long long)(row0 + r) * L + qt * G::BM + q) * p.ldq + h * HD + g * 8);
+    }
+    cp_async_commit();
+  }
+#pragma unroll
+  for (int u = 0; u < ST - 1; ++u) issue(u);
+
+  const int qw = qg * 32;                                     // the warp's first query in the tile
+  const int lrow = (lane & 7) + 8 * ((lane >> 3) & 1);        // ldmatrix A-operand row of this lane in a 16-row tile
+  uint32_t qa[RW][2][KK][4];
+  cp_async_wait<ST - 1>();
+  __syncthreads();
+  {
+    const uint32_t qs = sbase + (ST - 1) * G::SLOT;
+#pragma unroll
+    for (int w = 0; w < RW; ++w)
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+        for (int kk = 0; kk < KK; ++kk)
+          ldsm_x4(qa[w][mt][kk], qs + (wr * RW + w) * G::BM * G::RB + rf_swz<HD>(qw + 16 * mt + lrow, 2 * kk + (lane >> 4)));
+  }
+
+  // B operands of the bias-scaling product: b0 = diag(s_hi) (keys 0-7 of the A slice), b1 = diag(s_lo) (keys 8-15); the lane holds rows
+  // 2t, 2t+1 of column g.  And the ones column of the row sums.
+  const int gq = lane >> 2, tq = lane & 3;
+  const uint32_t bs0 = pack_bf16(2 * tq == gq ? sinv_hi : 0.f, 2 * tq + 1 == gq ? sinv_hi : 0.f);
+  const uint32_t bs1 = pack_bf16(2 * tq == gq ? sinv_lo : 0.f, 2 * tq + 1 == gq ? sinv_lo : 0.f);
+  constexpr uint32_t ONES = 0x3f803f80u;
+  const float c1 = p.scl;
+  const float sinv = sinv_hi + sinv_lo;
+
+  float o[RW][2][DN][4], l4[RW][2][4], m[RW][2][2];
+#pragma unroll
+  for (int w = 0; w < RW; ++w)
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt) {
+#pragma unroll
+      for (int e = 0; e < 4; ++e) {
+        l4[w][mt][e] = 0.f;
+#pragma unroll
+        for (int dn = 0; dn < DN; ++dn) o[w][mt][dn][e] = 0.f;
+      }
+      m[w][mt][0] = m[w][mt][1] = -INFINITY;
+    }
+
+  const uint32_t a_off = swz64(qw + lrow, 0);                // bias A tile rows of mt 0 (mt 1: + 16 rows: same swizzle phase); lanes 16-31 repeat 0-15
+  const uint32_t k_off = rf_swz<HD>(lane & 7, (lane >> 3) & (GR - 1));   // K: keys 8jj + (lane & 7), granule (lane >> 3): all HD channels of one 8-key column (HD 16: lanes 0-15)
+  const uint32_t k_off_hi = rf_swz<HD>(lane & 7, ((lane >> 3) + 4) & (GR - 1));   // HD 64: channels 32-63 of the column
+  uint32_t v_off[GR / 2];                                    // V^T: keys 16kl + .., granule 2np + (lane >> 4)
+#pragma unroll
+  for (int np = 0; np < GR / 2; ++np) v_off[np] = rf_swz<HD>(8 * ((lane >> 3) & 1) + (lane & 7), 2 * np + (lane >> 4));
+
+  // ---- one slot = two 16-key slices; per slice and row only S of 16 keys is live (RW x 2 x 2 x 4 registers).
+  // S of 8-key column jj of the slot into sc[.][.][jj & 1], every row of the warp: bias / scale (one product per m tile, shared by the rows) + Q K^T
+  auto s_column = [&](uint32_t sb, int jj, float (&sc)[RW][2][2][4]) {
+    float cb[2][4];
+    if constexpr (G::BCVT) {                                  // the C fragment read and scaled per element
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt) {
+        const uint32_t r0 = sb + swz64(qw + 16 * mt + gq, jj) + 4 * tq;
+        const uint32_t u0 = lds32(r0), u1 = lds32(r0 + 8 * G::ROWB);
+        cb[mt][0] = bf16lo(u0) * sinv; cb[mt][1] = bf16hi(u0) * sinv; cb[mt][2] = bf16lo(u1) * sinv; cb[mt][3] = bf16hi(u1) * sinv;
+      }
+    } else {
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt) {
+        // A = the bias of 16 queries x keys 8jj..8jj+7, twice (k 0-7 and 8-15: the lanes 16-31 address the same rows), so B = [diag(s_hi); diag(s_lo)]
+        uint32_t a[4];
+        ldsm_x4(a, sb + mt * 16 * G::ROWB + (a_off ^ (jj << 4)));
+        const float zero[4] = {0.f, 0.f, 0.f, 0.f};
+        mma_c(cb[mt], a, bs0, bs1, zero);
+      }
+    }
+#pragma unroll
+    for (int w = 0; w < RW; ++w) {
+      uint32_t kb[2 * KK];
+      const uint32_t ka = sb + G::KOFF + (wr * RW + w) * G::KV_ROW + jj * 8 * G::RB + k_off;
+      if constexpr (KK == 4) {
+        ldsm_x4(*reinterpret_cast<uint32_t(*)[4]>(kb), ka);
+        ldsm_x4(*reinterpret_cast<uint32_t(*)[4]>(kb + 4), sb + G::KOFF + (wr * RW + w) * G::KV_ROW + jj * 8 * G::RB + k_off_hi);
+      } else if constexpr (KK == 2) ldsm_x4(*reinterpret_cast<uint32_t(*)[4]>(kb), ka);
+      else ldsm_x2(*reinterpret_cast<uint32_t(*)[2]>(kb), ka);
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt) {
+        mma_c(sc[w][mt][jj & 1], qa[w][mt][0], kb[0], kb[1], cb[mt]);
+#pragma unroll
+        for (int kk = 1; kk < KK; ++kk) mma_acc(sc[w][mt][jj & 1], qa[w][mt][kk], kb[2 * kk], kb[2 * kk + 1]);
+      }
+    }
+  };
+
+  // weights of the slice in sc for row w (SAFE: after raising the running max, rescaling O and the sums), bf16 P, its row sums (ones-column mma)
+  auto weights = [&](float (&sc)[RW][2][2][4], int w, uint32_t (&pa)[2][4]) {
+    float mu[2][2] = {{0.f, 0.f}, {0.f, 0.f}};
+    if constexpr (SAFE) {
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+        for (int hh = 0; hh < 2; ++hh) {
+          float mx = fmaxf(fmaxf(sc[w][mt][0][2 * hh], sc[w][mt][0][2 * hh + 1]), fmaxf(sc[w][mt][1][2 * hh], sc[w][mt][1][2 * hh + 1]));
+          mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
+          mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
+          const float mnew = fmaxf(m[w][mt][hh], mx * c1);
+          mu[mt][hh] = mnew == -INFINITY ? 0.f : mnew;
+          const float alpha = ex2f(m[w][mt][hh] - mu[mt][hh]);   // 0 from the initial -inf
+          m[w][mt][hh] = mnew;
+          l4[w][mt][2 * hh] *= alpha; l4[w][mt][2 * hh + 1] *= alpha;
+#pragma unroll
+          for (int dn = 0; dn < DN; ++dn) { o[w][mt][dn][2 * hh] *= alpha; o[w][mt][dn][2 * hh + 1] *= alpha; }
+        }
+    }
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt) {
+      float pw[2][4];
+#pragma unroll
+      for (int c = 0; c < 2; ++c)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) pw[c][e] = SAFE ? ex2f(fmaf(sc[w][mt][c][e], c1, -mu[mt][e >> 1])) : ex2f(sc[w][mt][c][e] * c1);
+      pa[mt][0] = pack_bf16(pw[0][0], pw[0][1]);
+      pa[mt][1] = pack_bf16(pw[0][2], pw[0][3]);
+      pa[mt][2] = pack_bf16(pw[1][0], pw[1][1]);
+      pa[mt][3] = pack_bf16(pw[1][2], pw[1][3]);
+      mma_acc(l4[w][mt], pa[mt], ONES, ONES);
+    }
+  };
+  // O += P V of the 16-key slice kl of slot sb, row w
+  auto pv = [&](uint32_t sb, int kl, int w, const uint32_t (&pa)[2][4]) {
+#pragma unroll
+    for (int np = 0; np < GR / 2; ++np) {
+      uint32_t vb[4];
+      ldsm_x4_t(vb, sb + G::VOFF + (wr * RW + w) * G::KV_ROW + kl * 16 * G::RB + v_off[np]);
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt) {
+        mma_acc(o[w][mt][2 * np], pa[mt], vb[0], vb[1]);
+        mma_acc(o[w][mt][2 * np + 1], pa[mt], vb[2], vb[3]);
+      }
+    }
+  };
+
+  for (int u = 0; u < NU; ++u) {
+    cp_async_wait<ST - 2>();
+    __syncthreads();                                          // slot u landed; every warp is past u - 1, so its slot is free for u + ST - 1
+    issue(u + ST - 1);
+    const uint32_t sb = sbase + (u % ST) * G::SLOT;
+#pragma unroll
+    for (int kl = 0; kl < 2; ++kl) {
+      float sc[RW][2][2][4];
+      s_column(sb, 2 * kl, sc);
+      s_column(sb, 2 * kl + 1, sc);
+#pragma unroll
+      for (int w = 0; w < RW; ++w) {
+        uint32_t pa[2][4];
+        weights(sc, w, pa);
+        pv(sb, kl, w, pa);
+      }
+    }
+  }
+
+  // ---- epilogue through shared memory (the ring is free): the bf16 O tile [R][BM][32] (and, gated, the g tile by cp.async) staged, then
+  // 16-byte coalesced stores.  O / l, a zero sum -> zero output; gated: bf16(sigmoid(g) bf16(o)), the module's statement.  A CTA the hot
+  // pass flags for recomputation stores nothing.
+  cp_async_wait<0>();
+  __syncthreads();
+  const uint32_t so = sbase, sg = sbase + G::Q_BYTES;
+  auto tile_chunk = [&](int i, int& r, int& q, int& g) { const int c = tid + G::NTHR * i; r = c / (G::BM * GR); q = (c / GR) % G::BM; g = c % GR; };
+  if constexpr (G::GATE) {
+#pragma unroll
+    for (int i = 0; i < G::Q_IT; ++i) {
+      int r, q, g;
+      tile_chunk(i, r, q, g);
+      cp_async16(sg + r * G::BM * G::RB + rf_swz<HD>(q, g), p.gate + (tok0 + (long long)(row0 + r) * L + qt * G::BM + q) * p.ldgate + h * HD + g * 8);
+    }
+    cp_async_commit();
+  }
+  bool bad = false;
+#pragma unroll
+  for (int w = 0; w < RW; ++w)
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+      for (int hh = 0; hh < 2; ++hh) {
+        const float lt = l4[w][mt][2 * hh];
+        if constexpr (!SAFE) {
+          bad |= !(lt >= 0x1p-80f && lt <= 3.0e38f);
+#pragma unroll
+          for (int dn = 0; dn < DN; ++dn) bad |= !isfinite(o[w][mt][dn][2 * hh]) || !isfinite(o[w][mt][dn][2 * hh + 1]);
+        }
+        const float inv = lt > 0.f ? 1.f / lt : 0.f;
+        const uint32_t row = so + (wr * RW + w) * G::BM * G::RB, qr = qw + 16 * mt + gq + 8 * hh;
+#pragma unroll
+        for (int dn = 0; dn < DN; ++dn) sts32(row + rf_swz<HD>(qr, dn) + 4 * tq, pack_bf16(o[w][mt][dn][2 * hh] * inv, o[w][mt][dn][2 * hh + 1] * inv));
+      }
+  if constexpr (G::GATE) cp_async_wait<0>();
+  if constexpr (!SAFE) {
+    if (__syncthreads_or(bad)) return true;
+  } else {
+    __syncthreads();
+  }
+#pragma unroll
+  for (int i = 0; i < G::Q_IT; ++i) {
+    int r, q, g;
+    tile_chunk(i, r, q, g);
+    const uint32_t a = r * G::BM * G::RB + rf_swz<HD>(q, g);
+    const uint4 ov = lds128(so + a);
+    const long long tok = tok0 + (long long)(row0 + r) * L + qt * G::BM + q;
+    if (!G::GATE || p.out != nullptr) stg128(p.out + tok * p.ldo + h * HD + g * 8, ov);
+    if constexpr (G::GATE) {
+      const uint4 gv = lds128(sg + a);
+      const uint32_t* ow = &ov.x; const uint32_t* gw = &gv.x;
+      uint32_t aw[4];
+#pragma unroll
+      for (int e = 0; e < 4; ++e) aw[e] = pack_bf16(bf16lo(ow[e]) * sigmoid(bf16lo(gw[e])), bf16hi(ow[e]) * sigmoid(bf16hi(gw[e])));
+      stg128(p.aout + tok * p.ldao + h * HD + g * 8, make_uint4(aw[0], aw[1], aw[2], aw[3]));
+    }
+  }
+  return false;
+}
+
+// The hot pass over every CTA tile (with p.counts set: the tiles of the batches whose live-key count makes them dense, read on device at every replay).  A tile it cannot finish is appended to the fix list (fix[0] = count, cleared by the launcher; fix[1 + i] = the
+// tile's linear index) and recomputed by attn_rf_fix_kernel -- a separate kernel, so the hot kernel's register allocation is its own.  The list
+// order may vary; the tiles are disjoint and each is recomputed whole, so the output does not.
+template <class G>
+__global__ void __launch_bounds__(G::NTHR, 2) attn_rf_fwd_kernel(const AttnParams p, float sinv_hi, float sinv_lo, int* fix) {
+  if (p.counts != nullptr && p.counts[blockIdx.z / p.H] * 4 <= p.L * 3) return;   // the dense branch of a density split (attn_density_fwd_kernel's rule): a sparse batch is the compact core's
+  if (attn_rf_body<G, false>(p, sinv_hi, sinv_lo, blockIdx.x, blockIdx.y, blockIdx.z) && threadIdx.x == 0)
+    fix[1 + atomicAdd(fix, 1)] = (int)((blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x);
+}
+
+// The running-max recomputation of the listed tiles: a few persistent CTAs walk the list (none listed: they leave at once).
+template <class G>
+__global__ void __launch_bounds__(G::NTHR, 1) attn_rf_fix_kernel(const AttnParams p, float sinv_hi, float sinv_lo, const int* fix, int nx, int ny) {
+  const int n = fix[0];
+  for (int i = blockIdx.x; i < n; i += gridDim.x) {
+    const int t = fix[1 + i];
+    attn_rf_body<G, true>(p, sinv_hi, sinv_lo, t % nx, (t / nx) % ny, t / (nx * ny));
+    __syncthreads();                                          // the next tile's copies reuse the shared memory
+  }
+}
+
+
+namespace {
+// key_tiles[z] = the 32-key slots up to the last live key of sample z (mask [Z, L] bytes, non-zero = live), at least 1: the keys past it are dead in
+// every pair row (their bias is the bf16 minimum), so the cores stream only those slots -- the same output bits (each skipped weight is an exact 0).
+__global__ void rf_key_tiles_kernel(const uint8_t* mask, int* key_tiles, int L) {
+  const int z = blockIdx.x;
+  int last = -1;
+  for (int j = threadIdx.x; j < L; j += blockDim.x)
+    if (mask[(size_t)z * L + j]) last = j;
+  last = __reduce_max_sync(0xffffffffu, last);
+  __shared__ int warp_last[32];
+  if ((threadIdx.x & 31) == 0) warp_last[threadIdx.x >> 5] = last;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    int v = threadIdx.x < (blockDim.x >> 5) ? warp_last[threadIdx.x] : -1;
+    v = __reduce_max_sync(0xffffffffu, v);
+    if (threadIdx.x == 0) key_tiles[z] = max(1, (v + 32) / 32);
+  }
+}
+
+inline cudaError_t rf_key_tiles(const uint8_t* mask, int* key_tiles, int Z, int L, cudaStream_t stream) {
+  rf_key_tiles_kernel<<<Z, 256, 0, stream>>>(mask, key_tiles, L);
+  return cudaGetLastError();
+}
+}  // namespace
+
+// The host helpers have internal linkage (an anonymous namespace): the two extensions that include this header (triattn_sm80, triattn_sm80_core2) each keep
+// their own once-per-device shared-memory opt-in flag -- a shared inline static would let the second one skip its cudaFuncSetAttribute.
+namespace {
+// Host launch (torch-free): the hot pass over the grid (L / BM, L / R, z H), then the recomputation of the listed tiles.  fix: int32 [1 + tiles]
+// (rf_fix_ints) device scratch; its count is cleared here.  scl = sm_scale log2 e; the bias-scaling operand is 1 / sm_scale = log2 e / scl in two
+// bf16 words.
+template <class G>
+inline long long rf_fix_ints(int L, int zh) { return 1 + (long long)(L / G::BM) * (L / G::R) * zh; }
+
+template <class G>
+inline cudaError_t attn_rf_launch(const AttnParams& p, int z, double scl, int* fix, cudaStream_t stream, int nsm) {
+  static bool set[64] = {};
+  int dev = 0;
+  cudaError_t e = cudaGetDevice(&dev);
+  if (e != cudaSuccess) return e;
+  if (!set[dev & 63]) {
+    if ((e = cudaFuncSetAttribute(attn_rf_fwd_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM)) != cudaSuccess) return e;
+    if ((e = cudaFuncSetAttribute(attn_rf_fix_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM)) != cudaSuccess) return e;
+    set[dev & 63] = true;
+  }
+  const double s = 1.4426950408889634 / scl;
+  const float hi = __bfloat162float(__float2bfloat16_rn((float)s)), lo = __bfloat162float(__float2bfloat16_rn((float)(s - hi)));
+  const dim3 grid(p.L / G::BM, p.L / G::R, z * p.H);
+  const long long ntile = (long long)grid.x * grid.y * grid.z;
+  if ((e = cudaMemsetAsync(fix, 0, sizeof(int), stream)) != cudaSuccess) return e;
+  attn_rf_fwd_kernel<G><<<grid, G::NTHR, G::SMEM, stream>>>(p, hi, lo, fix);
+  if ((e = cudaGetLastError()) != cudaSuccess) return e;
+  attn_rf_fix_kernel<G><<<(unsigned)(ntile < nsm ? ntile : nsm), G::NTHR, G::SMEM, stream>>>(p, hi, lo, fix, (int)grid.x, (int)grid.y);
+  return cudaGetLastError();
+}
+}  // namespace
+
+}  // namespace a100

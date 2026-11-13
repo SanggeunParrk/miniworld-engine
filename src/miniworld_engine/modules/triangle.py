@@ -98,8 +98,9 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     The engine's own backends. ``"cuda"`` (H100 sm_90a, bf16 activations and parameters): the whole update (LN, projections, core, gate,
     out-projection, residual, dropout) on ``kernels/integrations/triattn_h100_sm90`` (d_pair <= 512 multiple of 8, heads of 16 / 32
     channels -- training also 64 --, <= 16 heads, L % 16 == 0, no q / k norm; training for every variant: AF3's ending-node bias, RF3's
-    projection biases, Chai-1's untransposed / dual output) or, inference only, ``kernels/triangle_attention/cuda/h100_dh`` (heads of
-    32 / 64 channels, Chai-1's output variants).
+    projection biases, Chai-1's untransposed / dual output; inference too, Chai-1's layouts at heads of 16 / 32 on the width-generic
+    kernels in one block of rows) or, inference only, ``kernels/triangle_attention/cuda/h100_dh`` (heads of 64 channels, and Chai-1's
+    layouts past one block of rows).
     ``"triton"``: the attention core on ``kernels/triangle_attention/triton/main`` (flash-style, forward + backward), every other statement
     the module's own (as the library cores), bf16 only.
 
@@ -116,7 +117,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "anthropic": 3,  # 3 (2026-11-13): the block folds the residual (z += block(z)); the cu129 triattn prebuilts
         "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: triattn_native's sm_80 core instead of the k2b step-aside)
         "cueq": 2,
-        "cuda:a100_sm80": 4,
+        "cuda:a100_sm80": 5,  # 5 (2026-11-13): the register-resident inference core (attn_rf_fwd_sm80.cuh) at L >= 512, plain and gated
         "cuda:h100_sm90": 6,
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
@@ -439,7 +440,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
                 "training: the H100 kernels take d_pair = to_query in-features <= 512 (multiple of 8), heads of 16 / 32 / 64 "
                 f"channels, <= 16 heads, L % 16 == 0 (got d_pair {c}, head width {d}, {self.n_head} heads, L {pair.shape[1]})"
             )
-        if not (self.untransposed_output or self.dual_output) and triattn_h100_sm90.serves(self, pair, mask):
+        if triattn_h100_sm90.serves(self, pair, mask):  # Chai-1's output layouts too (heads of 16 / 32, one block of rows)
             return "sm90", None
         if d in (32, 64) and c % 8 == 0 and c <= 512 and self.to_query.weight.shape[1] == c:
             return "dh", None
@@ -839,8 +840,10 @@ class _TriangleAttentionFp32Softmax(_TriangleAttentionBase):
     #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged); 3: the
     #: training dropout scale by the H100 Philox kernel (as the base class)
     #: 4: as the base class (RF3 at d_pair 128); 5: as the base class (RF3 at d_pair 128: the ending node's tail, bitwise the same); 6: as
-    #: the base class (the fp16 core skips the dead trailing key tiles)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 6}
+    #: the base class (the fp16 core skips the dead trailing key tiles); 7 (2026-11-13): inference on the h100_dh core (64-channel heads)
+    #: skips the dead trailing 64-key tiles (bitwise the same outputs)
+    #: 8 (2026-11-13): 64-channel heads at L a multiple of 128 on the wgmma core (h100_dh.ext_d64; outputs change within rounding)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 8}
     #: RoseTTAFold3: the gate and the out-projection carry a bias.
     _projection_biases: bool = False
 
@@ -964,8 +967,11 @@ class TriangleAttentionChai1(_TriangleAttentionFp32Softmax):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
-    #: cuda:h100_sm90 stays 3: no Chai-1 shape takes the d_pair 128 x 4 heads or the d_pair 256 x 8 heads path
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 3}
+    #: cuda:h100_sm90 stays 3: no Chai-1 shape takes the d_pair 128 x 4 heads or the d_pair 256 x 8 heads path; 4 (2026-11-13):
+    #: inference with heads of 32 (d_pair 64, d_hidden 128) on the width-generic kernels and the fp16 core (the ending node's
+    #: untransposed output in their out-projection; outputs change within rounding), 64-channel heads skip the dead key tiles; 5: the
+    #: d_pair 256 heads (64 channels) on the wgmma core (L a multiple of 128) (as the parent class 8)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 5}
 
     untransposed_output = True
 
@@ -978,8 +984,9 @@ class TriangleAttentionChai1Confidence(_TriangleAttentionFp32Softmax):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
-    #: cuda:h100_sm90 stays 3 (as TriangleAttentionChai1)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 3}
+    #: cuda:h100_sm90 stays 3 (as TriangleAttentionChai1); 4 (2026-11-13): the dead key tiles skipped on the h100_dh core (bitwise); 5:
+    #: the wgmma core of 64-channel heads (as TriangleAttentionChai1 5)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 5}
 
     dual_output = True
 
@@ -1389,7 +1396,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         "anthropic": 3,  # 3 (2026-11-13): the sealed CUDA-13 rows served wherever the driver loads them
         "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: trimul_native's sm_80 row native)
         "cueq": 2,
-        "cuda:a100_sm80": 4,  # 4 (2026-11-13): D64 k1w64 two column groups at hidden 128, k3w gate tiles issued ahead (the same values)
+        "cuda:a100_sm80": 5,  # 5 (2026-11-14): D64 inference k3s (64-token CTAs, bit-identical); 4: k1w64 / k3w
         "cuda:h100_sm90": 7,
     }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64);
     # cuda:h100_sm90 2 (2026-11-12): inference planes past 8 GiB (OpenDDE refiner, d_pair 384 at 2976 / 3968) run K1 + the contraction in two
@@ -1610,7 +1617,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 3,  # 2026-11-13: the sealed CUDA-13 rows served wherever the driver loads them
         "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: trimul_native's sm_80 row native)
-        "cuda:a100_sm80": 5,  # 5 (2026-11-13): as TriangleMultiplication's 4 (D64 k1w64 / k3w, the same values)
+        "cuda:a100_sm80": 6,  # 6 (2026-11-14), 5: as TriangleMultiplication's 5, 4
         "cuda:h100_sm90": 3,
     }  # 2026-11-10: sm_80 paths; 3: the inference pack read by captures; 4: A100 D64 persistent front (k1w64); cuda:h100_sm90 2
     # (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version
@@ -1775,7 +1782,7 @@ class BidirectionalTriangleMultiplication(BackendModule, MasterWeights):
 
     backends = ("pytorch", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 3,  # 3 (2026-11-13): D64 k1w64 two column groups, k3w gate tiles issued ahead (the same values)
+        "cuda:a100_sm80": 4,  # 4 (2026-11-14): D64 inference k3s (bit-identical); 3: k1w64 / k3w
         "cuda:h100_sm90": 4,
     }  # 2026-11-10: sm_80 k1w64 front (D64); cuda:h100_sm90 2 (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the
     # small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version;

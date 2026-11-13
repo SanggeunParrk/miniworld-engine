@@ -41,6 +41,7 @@ struct AttnParams {
   long long ldgate, ldao;
   const int *indices = nullptr, *counts = nullptr;  // optional compact key order and live counts, [Z, L] / [Z]
   const __nv_bfloat16* dense_bias = nullptr;        // unpermuted bias for the adaptive gated inference core
+  const int* key_tiles = nullptr;                   // optional [z]: 32-key slots up to each sample's last live key (rf_key_tiles); later keys are dead in every row
 };
 
 #ifndef A100_ATTN_FIXALL
@@ -141,7 +142,7 @@ DEVI bool attn_fwd_body(const AttnParams p) {
   const int L = p.L;
   const int qt = blockIdx.x, row0 = blockIdx.y * R;
   const int h = blockIdx.z % p.H, z = blockIdx.z / p.H;
-  const int NJ = G::COMPACT ? (p.counts[z] + BN - 1) / BN : L / BN, NS = R * NJ;
+  const int NJ = G::COMPACT ? (p.counts[z] + BN - 1) / BN : (p.key_tiles ? min(L / BN, max(1, (p.key_tiles[z] * 32 + BN - 1) / BN)) : L / BN), NS = R * NJ;
   const long long tok0 = (long long)z * L * L;
 
   // ---- loads: sub-step s = (key tile j = s / R, row r = s % R) brings its K | V, and the first row of a key tile also its bias tile

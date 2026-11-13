@@ -86,7 +86,8 @@ template <int D, int BMT = BM> struct Smem {
 // warp two independent softmax chains. A query's arithmetic is the same for every MT (bitwise equal results).
 template <int D, bool TRAIN = false, int MT = 1>
 __global__ void __launch_bounds__(THREADS) triattn_dh_fwd(const bf16* __restrict__ P, const bf16* __restrict__ BIAS, bf16* __restrict__ U,
-    const float* __restrict__ GB, int S, int H, float scale, bf16* __restrict__ O = nullptr, float* __restrict__ LSE = nullptr) {
+    const float* __restrict__ GB, int S, int H, float scale, bf16* __restrict__ O = nullptr, float* __restrict__ LSE = nullptr,
+    const int* __restrict__ KT = nullptr) {
   constexpr int BMT = BM * MT;
   constexpr int LD = Smem<D, BMT>::LD, LB = Smem<D, BMT>::LB, KD = D / 16, ND = D / 8;
   extern __shared__ __align__(16) unsigned char smem_raw[];
@@ -131,7 +132,9 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_fwd(const bf16* __restrict
     l0[mt] = l1[mt] = 0.f;
   }
   const float sc = scale * LOG2E;
-  const int ntiles = S / BN;
+  // KT (inference): the 64-key tiles of sample b up to its last attended key; the tiles past them are -inf in every row of the bias
+  // (p = 0, the running maximum and sum unchanged): skipping them gives the same bits
+  const int ntiles = KT != nullptr ? KT[b] : S / BN;
   const int wr = warp * 16 * MT;                   // the warp's first query row in the tile
   for (int j = 0; j < ntiles; ++j) {
     const int s = j & 1;
@@ -562,23 +565,23 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_bwd_q(const bf16* __restri
 
 template <int D, bool TRAIN, int MT>
 void launch_bm(const at::Tensor& proj, const at::Tensor& bias, at::Tensor& u, const float* gb, int B, int S, int H, double scale,
-               bf16* o, float* lse) {
+               bf16* o, float* lse, const int* kt) {
   auto f = triattn_dh_fwd<D, TRAIN, MT>;
   const int smem = (int)sizeof(Smem<D, BM * MT>);
   cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
   dim3 grid(S / (BM * MT), H, (unsigned)B * S);
   f<<<grid, THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const bf16*>(proj.data_ptr()),
-      reinterpret_cast<const bf16*>(bias.data_ptr()), reinterpret_cast<bf16*>(u.data_ptr()), gb, S, H, (float)scale, o, lse);
+      reinterpret_cast<const bf16*>(bias.data_ptr()), reinterpret_cast<bf16*>(u.data_ptr()), gb, S, H, (float)scale, o, lse, kt);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // the query tile: 128 (4 warps x 32 queries: each K | V fragment feeds two MMAs) or 64 (4 warps x 16 queries)
 template <int D, bool TRAIN = false>
 void launch(const at::Tensor& proj, const at::Tensor& bias, at::Tensor& u, const float* gb, int B, int S, int H, double scale, int bm,
-            bf16* o = nullptr, float* lse = nullptr) {
+            bf16* o = nullptr, float* lse = nullptr, const int* kt = nullptr) {
   TORCH_CHECK(bm == 64 || (bm == 128 && S % 128 == 0), "query tile 64, or 128 with S a multiple of 128");
-  if (bm == 128) launch_bm<D, TRAIN, 2>(proj, bias, u, gb, B, S, H, scale, o, lse);
-  else launch_bm<D, TRAIN, 1>(proj, bias, u, gb, B, S, H, scale, o, lse);
+  if (bm == 128) launch_bm<D, TRAIN, 2>(proj, bias, u, gb, B, S, H, scale, o, lse, kt);
+  else launch_bm<D, TRAIN, 1>(proj, bias, u, gb, B, S, H, scale, o, lse, kt);
 }
 
 template <int D>
@@ -619,8 +622,10 @@ void check_core(const at::Tensor& proj, const at::Tensor& bias, int64_t H, int64
 }
 }  // namespace
 
-// proj [B S S, 4 H D] bf16 (q | k | v | g), bias [B, H, S, S] bf16 -> u [B S S, H D] bf16. gate_bias: fp32 [H D] or empty.
-at::Tensor triattn_dh_forward(at::Tensor proj, at::Tensor bias, at::Tensor gate_bias, int64_t H, int64_t D, double scale, int64_t bm) {
+// proj [B S S, 4 H D] bf16 (q | k | v | g), bias [B, H, S, S] bf16 -> u [B S S, H D] bf16. gate_bias: fp32 [H D] or empty. key_tiles:
+// int32 [B] (1 .. S / 64: the 64-key tiles of each sample up to its last attended key, h100_dh.key_tiles) or None (all S / 64)
+at::Tensor triattn_dh_forward(at::Tensor proj, at::Tensor bias, at::Tensor gate_bias, int64_t H, int64_t D, double scale, int64_t bm,
+                              std::optional<at::Tensor> key_tiles) {
   check_core(proj, bias, H, D);
   const int B = (int)bias.size(0), S = (int)bias.size(2);
   TORCH_CHECK(gate_bias.numel() == 0 || (gate_bias.scalar_type() == at::kFloat && gate_bias.is_contiguous() && gate_bias.numel() == H * D),
@@ -628,8 +633,14 @@ at::Tensor triattn_dh_forward(at::Tensor proj, at::Tensor bias, at::Tensor gate_
   const at::cuda::OptionalCUDAGuard guard(proj.device());
   auto u = at::empty({proj.size(0), H * D}, proj.options());
   const float* gb = gate_bias.numel() ? gate_bias.data_ptr<float>() : nullptr;
-  if (D == 64) launch<64>(proj, bias, u, gb, B, S, (int)H, scale, (int)bm);
-  else launch<32>(proj, bias, u, gb, B, S, (int)H, scale, (int)bm);
+  const int* kt = nullptr;
+  if (key_tiles.has_value()) {
+    TORCH_CHECK(key_tiles->scalar_type() == at::kInt && key_tiles->is_contiguous() && key_tiles->numel() == B && key_tiles->is_cuda(),
+                "key_tiles: int32 [B] on the device");
+    kt = key_tiles->data_ptr<int>();
+  }
+  if (D == 64) launch<64>(proj, bias, u, gb, B, S, (int)H, scale, (int)bm, nullptr, nullptr, kt);
+  else launch<32>(proj, bias, u, gb, B, S, (int)H, scale, (int)bm, nullptr, nullptr, kt);
   return u;
 }
 
@@ -668,7 +679,8 @@ at::Tensor triattn_dh_backward(at::Tensor proj, at::Tensor bias, at::Tensor dout
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("triattn_dh_forward", &triattn_dh_forward);
+  m.def("triattn_dh_forward", &triattn_dh_forward, py::arg("proj"), py::arg("bias"), py::arg("gate_bias"), py::arg("H"), py::arg("D"), py::arg("scale"),
+        py::arg("bm"), py::arg("key_tiles") = py::none());
   m.def("triattn_dh_forward_train", &triattn_dh_forward_train);
   m.def("triattn_dh_backward", &triattn_dh_backward);
 }

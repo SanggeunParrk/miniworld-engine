@@ -40,6 +40,7 @@ struct Attn2Params {
   Lay lq, lk, lv, lo;
   int L, H;
   float scl;                        // log2 e / sqrt(HD)
+  const int* key_tiles = nullptr;   // optional [z]: 32-key slots up to each sample's last live key; later keys are dead in every row (inference)
 };
 
 // The per-pair-row key masks as bit words: word w of a row = the mask bytes of its keys [32 w, 32 w + 32) as bits (bit c set = key 32 w + c is real).  A CTA builds the words of its R rows once
@@ -253,7 +254,7 @@ DEVI bool attn2_fwd_body(const Attn2Params& p) {   // true: a fixed-shift CTA wh
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sbase = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int L = p.L, NJ = L / BN, NS = R * NJ;
+  const int L = p.L, NJ = p.key_tiles ? min(L / BN, max(1, (p.key_tiles[blockIdx.z / p.H] * 32 + BN - 1) / BN)) : L / BN, NS = R * NJ;
   const int qt = blockIdx.x, row0 = blockIdx.y * R;
   const int h = blockIdx.z % p.H, z = blockIdx.z / p.H;
 
