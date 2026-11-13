@@ -236,6 +236,8 @@ _FUSE_STATS = True
 _FUSE_STATS_WIDE = (
     False  # in-loop input statistics in k1w at D = 256 / 384: measured 4-8 % SLOWER than ln_stats_rows (A100, 2026-10-30), kept off
 )
+#: the RTX 5090 takes them (1-5 % faster there, 2026-11-13)
+_FUSE_STATS_WIDE_SM120 = True
 
 
 def _aligned(t: torch.Tensor) -> torch.Tensor:
@@ -294,8 +296,8 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     fuse_x = _FUSE_STATS and z.dtype is torch.bfloat16 and hs <= 128
     # input rows: <= 4 CTAs share a token tile at hs <= 128 (the redundant per-CTA statistics are cheaper than the kernels); at D = 256 / 384 k1w accumulates them
     # while its stages go by (``K1StatHook``), so ``ln_stats_rows`` and its read of z are gone there too
-    # (the RTX 5090 takes the in-loop statistics at D = 256 / 384: 1-5 % faster there, 2026-11-13)
-    fuse_z = fuse_x or (_FUSE_STATS and (_FUSE_STATS_WIDE or _d128.on_sm120()) and z.dtype is torch.bfloat16 and 128 < d <= 384)
+    wide = _FUSE_STATS_WIDE or (_FUSE_STATS_WIDE_SM120 and _d128.on_sm120())
+    fuse_z = fuse_x or (_FUSE_STATS and wide and z.dtype is torch.bfloat16 and 128 < d <= 384)
     st_in = torch.empty((T, 2), dtype=torch.float32, device=z.device)
     if not fuse_z:
         E.stats_rows(zf, st_in, eps_in)
@@ -413,15 +415,16 @@ def _gemm_tk(a, b):
 #: RTX 5090 (sm_120a): the cuBLAS call of the two weight GEMMs of the backward per (D, Hs, L).  cuBLAS's kernel choice for these tall-skinny shapes is erratic
 #: on sm_120 (the same product 1.1-1.8x apart between layouts); listed where an alternative measured >= 5 % faster (``gsweep``, 2026-11-13, L2 flushed,
 #: median, two sweeps).  ``dxn = dcat W_dx``: "t" W_dx^T contiguous (a column-major B), "b4" four batched row blocks; unlisted shapes the plain product.
+_SM120_DXN_T = ((64, 64, 128), (64, 128, 128), (64, 128, 384), (128, 128, 256), (128, 128, 512), (384, 384, 128), (384, 768, 128))
 _SM120_DXN: dict[tuple[int, int, int], str] = {
-    **dict.fromkeys(((64, 64, 128), (64, 128, 128), (64, 128, 384), (128, 128, 256), (128, 128, 512), (384, 384, 128), (384, 768, 128)), "t"),
+    **dict.fromkeys(_SM120_DXN_T, "t"),
     **dict.fromkeys(((128, 256, n) for n in (128, 256, 384, 512, 640, 768)), "b4"),
-    **dict.fromkeys(((256, 256, 256), (256, 512, 256), (512, 1024, 128)), "b4"),
+    **dict.fromkeys(((256, 256, 256), (256, 512, 256), (512, 512, 128), (512, 512, 256), (512, 1024, 128)), "b4"),
     **dict.fromkeys(((384, 384, n) for n in (256, 384, 512, 640, 768)), "b4"),
     **dict.fromkeys(((384, 768, n) for n in (384, 512, 640, 768)), "b4"),
 }
 #: ``dor = W_o^T dpr^T``: shapes where the strided W_o^T view (the A100 call) beats the contiguous copy on sm_120 (D64)
-_SM120_DOR_VIEW = frozenset({(64, 64, 384), (64, 64, 512), (64, 64, 640), (64, 64, 768), (64, 128, 256), (64, 128, 384), (64, 128, 512), (64, 128, 640)})
+_SM120_DOR_VIEW = frozenset({(64, 64, n) for n in (384, 512, 640, 768)} | {(64, 128, n) for n in (256, 384, 512, 640)})
 
 
 def _dxn(dcat: torch.Tensor, wdx: torch.Tensor, hs: int, n: int) -> torch.Tensor:

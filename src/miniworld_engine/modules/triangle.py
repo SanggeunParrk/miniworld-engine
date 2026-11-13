@@ -1384,7 +1384,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         "cueq": 2,
         "cuda:a100_sm80": 3,
         "cuda:h100_sm90": 6,
-        "cuda:5090_sm120": 1,  # the sm_80 sources built for sm_120a (2026-11-12)
+        "cuda:5090_sm120": 2,  # the sm_80 sources built for sm_120a (2026-11-12); 2 (2026-11-13): sm_120 k1w / k3w launch choices, backward GEMM calls per shape
     }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64);
     # cuda:h100_sm90 2 (2026-11-12): inference planes past 8 GiB (OpenDDE refiner, d_pair 384 at 2976 / 3968) run K1 + the contraction in two
     # halves of the hidden channels; cuda:h100_sm90 3 (2026-11-12): the training row-dropout scale by the H100 Philox kernel in one launch (the
@@ -1597,7 +1597,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
         "anthropic": 3,  # 2026-11-13: the sealed CUDA-13 rows served wherever the driver loads them
         "cuda:a100_sm80": 4,
         "cuda:h100_sm90": 3,
-        "cuda:5090_sm120": 1,  # the sm_80 sources built for sm_120a (2026-11-12)
+        "cuda:5090_sm120": 2,  # the sm_80 sources built for sm_120a (2026-11-12); 2 (2026-11-13): sm_120 k1w / k3w launch choices, backward GEMM calls per shape
     }  # 2026-11-10: sm_80 paths; 3: the inference pack read by captures; 4: A100 D64 persistent front (k1w64); cuda:h100_sm90 2
     # (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version
 
@@ -1762,7 +1762,7 @@ class BidirectionalTriangleMultiplication(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 2,
         "cuda:h100_sm90": 4,
-        "cuda:5090_sm120": 1,  # the sm_80 sources built for sm_120a (2026-11-12)
+        "cuda:5090_sm120": 2,  # the sm_80 sources built for sm_120a (2026-11-12); 2 (2026-11-13): sm_120 k1w / k3w launch choices, backward GEMM calls per shape
     }  # 2026-11-10: sm_80 k1w64 front (D64); cuda:h100_sm90 2 (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the
     # small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version;
     # cuda:h100_sm90 4 (2026-11-13): deterministic training backward at D256-512 (W_o column sums and the wide LayerNorm dgamma / dbeta by

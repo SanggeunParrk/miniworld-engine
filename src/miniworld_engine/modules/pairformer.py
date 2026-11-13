@@ -70,7 +70,7 @@ class PairformerBlock(BackendModule, MasterWeights):
         "anthropic": 2,  # 2026-11-13: its sub-modules' anthropic paths (TriAttn folded block + cu129 core prebuilts, Transition folded residual)
         "cuda:a100_sm80": 4,
         "cuda:h100_sm90": 5,
-        "cuda:5090_sm120": 2,  # the sub-modules sm_120a builds (1, 2026-11-12); 2 (2026-11-13): their main-merge changes on sm_120a
+        "cuda:5090_sm120": 3,  # the sub-modules sm_120a builds (1, 2026-11-12); 2 (2026-11-13): their main-merge changes on sm_120a; 3 (2026-11-13): its TriMul sm_120 launch choices
     }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
     # batched (the cuda AttentionPairBias takes B > 1: no refusal-driven per-sample path)
     # cuda:a100_sm80 4 (2026-11-12): its AttentionPairBias's generic sm_80 pair-bias backward faster (the same values)

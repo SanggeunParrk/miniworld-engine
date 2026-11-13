@@ -232,10 +232,10 @@ void k3w(torch::Tensor x, torch::Tensor z, torch::Tensor wo3, torch::Tensor wg3,
   p.ps = ps.numel() ? mbf(ps) : nullptr; p.gs = gs.numel() ? mbf(gs) : nullptr;
   p.T = T; p.D = D; p.Hc = Hc; p.L = (int)L;
 #ifdef MWE_SM120
-  {
-    const char* e = getenv("MWE_K3"); const int knob = e ? atoi(e) : 0;
-    if (knob != 128 && !fuse && !(knob == 5 && D == 512)) { launch_k3w<64>(p, fuse); return; }
-  }
+  // RTX 5090: BN 64 at two CTAs per SM (48 KB ring each in the 100 KB of an SM) unless the statistics are fused (they need the whole X in a 4-stage BN 128 ring):
+  // the epilogue of one CTA runs under the other one's mainloop -- 2-5 % faster whole-module at D 128 bidirectional .. 512 (one CTA per SM at BN 128: 128
+  // accumulator registers per thread), 2026-11-13
+  if (!fuse) { launch_k3w<64>(p, fuse); return; }
 #endif
   if (TUNED && D == 512 && !fuse && !ps.numel()) {
     // The wider inference projections benefit from one extra prefetch stage.
