@@ -27,15 +27,6 @@ DEVI void cp16(uint32_t d, const void* s, bool ok) {
 }
 DEVI void cp16f(uint32_t d, const void* s) { asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(d), "l"(s) : "memory"); }
 DEVI void cp_commit() { asm volatile("cp.async.commit_group;" ::: "memory"); }
-// the CTA's bias tile [64][BSQ] (64 rows x 128 keys) is -inf everywhere: every key of its two windows is masked (a block-wide vote)
-DEVI bool dead_tile(const float* sb, int tid) {
-  bool live = false;
-  for (int i = tid; i < 64 * 32; i += 128) {
-    const float4 b = *reinterpret_cast<const float4*>(sb + (i >> 5) * BSQ + (i & 31) * 4);
-    live |= (b.x != -INFINITY) | (b.y != -INFINITY) | (b.z != -INFINITY) | (b.w != -INFINITY);
-  }
-  return !__syncthreads_or(live);
-}
 template <int N> DEVI void cp_wait() { asm volatile("cp.async.wait_group %0;" ::"n"(N) : "memory"); }
 DEVI void mma(float* d, const uint32_t* a, uint32_t b0, uint32_t b1) {
   asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
@@ -86,16 +77,6 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_fwd_tf32(const float* _
     cp_commit();
     cp_wait<0>();
     __syncthreads();
-    if (a == a0 && dead_tile(sb, tid)) {
-      // every key of both windows is masked (a padded tail of atoms): what the computation gives -- zero rows, LSE 1e30 -- for every
-      // sample, without computing them (the same bits)
-      for (int aa = a0; aa < a1; ++aa) {
-        for (int i = tid; i < 64 * 8; i += 128)
-          *reinterpret_cast<float4*>(out + ((size_t)aa * N + q0 + (i >> 3)) * 128 + h * 32 + (i & 7) * 4) = make_float4(0.f, 0.f, 0.f, 0.f);
-        if (tid < 64) lse[((size_t)aa * 4 + h) * N + q0 + tid] = 1e30f;
-      }
-      return;
-    }
     uint32_t aq[4][4];
 #pragma unroll
     for (int kt = 0; kt < 4; ++kt) {

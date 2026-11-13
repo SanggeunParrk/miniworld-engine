@@ -811,10 +811,7 @@ class AtomDiTProtenix(_LocalAtomDiT):
     kv_norm = "chained"
     #: 2026-11-10: H100 "slide": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
     #: 2026-11-12: 3, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
-    backend_versions: ClassVar[dict[str, int]] = {
-        **_LocalAtomDiT.backend_versions,
-        "cuda:h100_sm90": 4,
-    }  # +1 (2026-11-13): a window CTA whose keys are all masked writes its zero rows without computing (the same bits)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
 
 
 class AtomDiTOpenFold3(_LocalAtomDiT):
@@ -840,10 +837,7 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     backends = ("pytorch", "anthropic", "cuda", "triton")
     #: 2026-11-10: H100 "slide" / "slide_qblock": the five edge windows on the edge kernels (dit_variants edge.cu; were torch)
     #: 2026-11-12: 3, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
-    backend_versions: ClassVar[dict[str, int]] = {
-        **_LocalAtomDiT.backend_versions,
-        "cuda:h100_sm90": 4,
-    }  # +1 (2026-11-13): a window CTA whose keys are all masked writes its zero rows without computing (the same bits)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
     #: ``"keys"`` or ``"af3"`` (see the class docstring)
     mask_form: str = "keys"
 
@@ -927,10 +921,7 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     transition_part = UpGatedConditionedTransition
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
     #: 2026-11-12: 4, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
-    backend_versions: ClassVar[dict[str, int]] = {
-        **_LocalAtomDiT.backend_versions,
-        "cuda:h100_sm90": 5,
-    }  # +1 (2026-11-13): a window CTA whose keys are all masked writes its zero rows without computing (the same bits)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
     _release_module = "boltz_atom_kernels"
     _release_path = "boltz2/opt/forward/atom/src"
 
@@ -1009,10 +1000,7 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     attention_part = FlatQKNormAugmentedAttention
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
     #: 2026-11-12: 4, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
-    backend_versions: ClassVar[dict[str, int]] = {
-        **_LocalAtomDiT.backend_versions,
-        "cuda:h100_sm90": 5,
-    }  # +1 (2026-11-13): a window CTA whose keys are all masked writes its zero rows without computing (the same bits)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
 
 
 class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
@@ -1040,10 +1028,7 @@ class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
     parallel = True
     attention_part = UngatedAugmentedAttention
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
-    backend_versions: ClassVar[dict[str, int]] = {
-        **_LocalAtomDiT.backend_versions,
-        "cuda:h100_sm90": 4,
-    }  # +1 (2026-11-13): a window CTA whose keys are all masked writes its zero rows without computing (the same bits)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 3}
 
     def __init__(
         self,
