@@ -18,6 +18,7 @@
 #include <cuda_bf16.h>
 
 #include <algorithm>
+#include <type_traits>
 
 #include "../../conditioned_transition/cuda/token_dit_common.cuh"
 
@@ -333,12 +334,15 @@ __global__ void __launch_bounds__(128) edge_bwd_apply_k(AT* __restrict__ DKV, lo
 // queries). How many there are is data-dependent, so the kernels read ``info`` = [t0, s, n_real] (int64, on the device) and do nothing
 // for the windows below t0: no host read, capturable; a call without padding windows costs only the launches.
 //
+//   tail_info        info from the valid-key bytes (one CTA)
 //   tail_bias_fwd    LN(z_w) gamma . Wb of the tail windows, -inf off the valid keys -> tb [nloop, 4, 32, 128] (rows below t0 unwritten)
-//   tail_attn_fwd    o rows of the tail windows: softmax(q k^T / sqrt(32) + tb) v over the shared 128 keys (K / V staged once per CTA)
+//   tail_attn_fwd    o rows of the tail windows: softmax(q k^T / sqrt(32) + tb) v over the shared 128 keys, on tensor cores (K / V
+//                    staged once per CTA; bf16 mma, or TF32 for fp32 operands as the window kernels)
 //   tail_bwd         dq kernel: CTA = (window, head, sample chunk): dq rows into dqt, d tb summed over the chunk's samples (dtbp [SC, ...]);
-//                    then dk / dv kernel: CTA = (sample, head): dk / dv of the 128 shared keys summed over the tail windows in order
-//                    (dkvt [A, 128, 256] fp32), then the tail rows of dO / D zeroed (the main kernel then adds nothing for them)
-//   tail_bwd_apply   after the main backward kernel: dqt rows and dkvt added into dq / dk / dv (one owner per element, deterministic)
+//                    then dk / dv kernel: CTA = (sample, head, window chunk): dk / dv of the 128 shared keys over its windows in order
+//                    (dkvt [WC, A, 128, 256] fp32), then those rows of dO / D zeroed (the main kernel then adds nothing for them)
+//   tail_bwd_apply   after the main backward kernel: dqt rows and dkvt (its WC chunks summed in order) added into dq / dk / dv (one
+//                    owner per element, deterministic)
 //   tail_bias_bwd    the LN / projection backward of the tail windows (d tb = the sum of the SC partials, in order) added into dz;
 //                    per-block partial sums of d gamma, d Wb
 //   tail_dbias_sum   (A100 autograd) the SC partials summed into one d tb [1, nloop, 4, 32, 128]
@@ -386,27 +390,177 @@ __device__ __forceinline__ void load_rows(const AT* X, int a, long w, int h, lon
   }
 }
 
-// CTA = (sample, head, window chunk c): windows t0 + c, t0 + c + C, ...
+// ---- the tail forward on tensor cores (mma.sync: bf16 m16n8k16, or TF32 m16n8k8 for fp32 operands; fp32 accumulation, softmax in fp32)
+__device__ __forceinline__ void mma16816(float (&c)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
+  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+               : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+__device__ __forceinline__ void mma1688(float (&c)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
+  asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+               : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+__device__ __forceinline__ uint32_t tf32_bits(float x) {
+  uint32_t r;
+  asm("cvt.rna.tf32.f32 %0, %1;\n" : "=r"(r) : "f"(x));
+  return r;
+}
+__device__ __forceinline__ uint32_t pack_bf2(float lo, float hi) {
+  __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
+  return *reinterpret_cast<uint32_t*>(&v);
+}
+__device__ __forceinline__ uint32_t ld32(const void* p) { return *reinterpret_cast<const uint32_t*>(p); }
+
+// shared tiles of the tensor-core tail: bf16: K [128][40] and V^T [32][136] (bf16); fp32: K [128][36] and V [128][40] (tf32-rounded fp32)
+constexpr int TK_BF = 40, TV_BF = 136, TK_F = 36, TV_F = 40;
+constexpr size_t SMEM_TC_BF = (size_t)(WK * TK_BF + DH * TV_BF) * 2, SMEM_TC_F = (size_t)(WK * TK_F + WK * TV_F) * 4;
+
+// CTA = (sample, head, chunk c) of 4 warps; warp pair p (warps 2p, 2p + 1: query rows 0-15 / 16-31) takes windows t0 + 2 c + p, then
+// every 2 C-th. A warp owns 16 query rows x all 128 keys: S = Q K^T on mma, scale + bias, the row softmax in registers (quad shuffles),
+// P (unnormalized, bf16 / tf32) V on mma, / row sum. A row with no valid key gets zeros.
 template <typename AT>
 __global__ void __launch_bounds__(128) tail_attn_fwd_k(const AT* __restrict__ Q, const AT* __restrict__ K, const AT* __restrict__ V,
                                                        const int64_t* __restrict__ INFO, const float* __restrict__ TB, AT* __restrict__ O, long N,
                                                        int nloop, int G, int C) {
-  extern __shared__ __align__(16) float sm[];
+  constexpr bool BF = std::is_same<AT, bf>::value;
+  extern __shared__ __align__(16) unsigned char smraw[];
   const int h = blockIdx.x % NH, c = (blockIdx.x / NH) % C, a = blockIdx.x / (NH * C);
   const long t0 = INFO[0], s = INFO[1];
-  if (t0 + c >= nloop) return;
-  float* sq = sm + SM_Q; float* sk = sm + SM_K; float* sv = sm + SM_V; float* sP = sm + SM_P;
-  load_tail_kv<AT>(K, V, s, a, h, N, sk, sv);
-  const float* tb = TB + (long)(a % G) * nloop * NH * (WQ * WK);
-  const int w = threadIdx.x / 32, l = threadIdx.x % 32;
-  for (long win = t0 + c; win < nloop; win += C) {
-    load_rows<AT>(Q, a, win, h, N, sq);
-    __syncthreads();                        // also: every warp is past the previous window's P V
-    scores_probs(sq, sk, tb, (int)win, h, sP);
-    float acc[8];
-    mat_times(sP, sv, w, l, acc);
+  if (t0 + 2 * c >= nloop) return;
+  // stage the shared keys [s, s + 128) of (a, h) (a key past N reads row N - 1: invalid, bias -inf)
+  for (int i = threadIdx.x; i < WK * DH; i += 128) {
+    const int j = i / DH, d = i % DH;
+    const long row = (long)a * N + min(s + j, N - 1);
+    const long off = row * DM + h * DH + d;
+    if constexpr (BF) {
+      bf* ks = reinterpret_cast<bf*>(smraw);
+      bf* vt = ks + WK * TK_BF;
+      ks[j * TK_BF + d] = K[off];
+      vt[d * TV_BF + j] = V[off];
+    } else {
+      float* ks = reinterpret_cast<float*>(smraw);
+      float* vs = ks + WK * TK_F;
+      ks[j * TK_F + d] = __uint_as_float(tf32_bits(K[off]));
+      vs[j * TV_F + d] = __uint_as_float(tf32_bits(V[off]));
+    }
+  }
+  __syncthreads();
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane / 4, t = lane % 4;
+  const int p = warp / 2, mh = warp % 2;
+  const float scale = 0.17677669529663687f;
+  const float* tbg = TB + (long)(a % G) * nloop * NH * (WQ * WK);
+  for (long win = t0 + 2 * c + p; win < nloop; win += 2 * (long)C) {
+    const long r0 = (long)a * N + win * WQ + 16 * mh;            // this warp's first query row
+    const AT* q0 = Q + (r0 + g) * DM + h * DH;
+    const AT* q1 = q0 + 8 * DM;
+    float S[16][4];
 #pragma unroll
-    for (int i = 0; i < 8; ++i) st(O + ((long)a * N + win * WQ + 8 * w + i) * DM + h * DH + l, acc[i]);
+    for (int nt = 0; nt < 16; ++nt) S[nt][0] = S[nt][1] = S[nt][2] = S[nt][3] = 0.f;
+    if constexpr (BF) {
+      const bf* ks = reinterpret_cast<const bf*>(smraw);
+#pragma unroll
+      for (int kk = 0; kk < 2; ++kk) {
+        const uint32_t a0 = ld32(q0 + kk * 16 + 2 * t), a1 = ld32(q1 + kk * 16 + 2 * t);
+        const uint32_t a2 = ld32(q0 + kk * 16 + 2 * t + 8), a3 = ld32(q1 + kk * 16 + 2 * t + 8);
+#pragma unroll
+        for (int nt = 0; nt < 16; ++nt) {
+          const bf* kr = ks + (nt * 8 + g) * TK_BF + kk * 16 + 2 * t;
+          mma16816(S[nt], a0, a1, a2, a3, ld32(kr), ld32(kr + 8));
+        }
+      }
+    } else {
+      const float* ks = reinterpret_cast<const float*>(smraw);
+#pragma unroll
+      for (int kk = 0; kk < 4; ++kk) {
+        const uint32_t a0 = tf32_bits(ld(q0 + kk * 8 + t)), a1 = tf32_bits(ld(q1 + kk * 8 + t));
+        const uint32_t a2 = tf32_bits(ld(q0 + kk * 8 + t + 4)), a3 = tf32_bits(ld(q1 + kk * 8 + t + 4));
+#pragma unroll
+        for (int nt = 0; nt < 16; ++nt) {
+          const float* kr = ks + (nt * 8 + g) * TK_F + kk * 8 + t;
+          mma1688(S[nt], a0, a1, a2, a3, __float_as_uint(kr[0]), __float_as_uint(kr[4]));
+        }
+      }
+    }
+    // scale + bias, row max / sum (rows g and g + 8 of this warp's 16)
+    const float* eb0 = tbg + ((long)win * NH + h) * (WQ * WK) + (16 * mh + g) * WK + 2 * t;
+    const float* eb1 = eb0 + 8 * WK;
+    float m0 = -INFINITY, m1 = -INFINITY;
+#pragma unroll
+    for (int nt = 0; nt < 16; ++nt) {
+      const float2 b0 = *reinterpret_cast<const float2*>(eb0 + nt * 8), b1 = *reinterpret_cast<const float2*>(eb1 + nt * 8);
+      S[nt][0] = S[nt][0] * scale + b0.x; S[nt][1] = S[nt][1] * scale + b0.y;
+      S[nt][2] = S[nt][2] * scale + b1.x; S[nt][3] = S[nt][3] * scale + b1.y;
+      m0 = fmaxf(m0, fmaxf(S[nt][0], S[nt][1]));
+      m1 = fmaxf(m1, fmaxf(S[nt][2], S[nt][3]));
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+      m0 = fmaxf(m0, __shfl_xor_sync(0xffffffffu, m0, o));
+      m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, o));
+    }
+    float l0 = 0.f, l1 = 0.f;
+#pragma unroll
+    for (int nt = 0; nt < 16; ++nt) {
+      S[nt][0] = m0 == -INFINITY ? 0.f : __expf(S[nt][0] - m0);
+      S[nt][1] = m0 == -INFINITY ? 0.f : __expf(S[nt][1] - m0);
+      S[nt][2] = m1 == -INFINITY ? 0.f : __expf(S[nt][2] - m1);
+      S[nt][3] = m1 == -INFINITY ? 0.f : __expf(S[nt][3] - m1);
+      l0 += S[nt][0] + S[nt][1];
+      l1 += S[nt][2] + S[nt][3];
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+      l0 += __shfl_xor_sync(0xffffffffu, l0, o);
+      l1 += __shfl_xor_sync(0xffffffffu, l1, o);
+    }
+    // O = P V
+    float Oa[4][4];
+#pragma unroll
+    for (int nd = 0; nd < 4; ++nd) Oa[nd][0] = Oa[nd][1] = Oa[nd][2] = Oa[nd][3] = 0.f;
+    if constexpr (BF) {
+      const bf* vt = reinterpret_cast<const bf*>(smraw) + WK * TK_BF;
+#pragma unroll
+      for (int kk = 0; kk < 8; ++kk) {
+        const uint32_t a0 = pack_bf2(S[2 * kk][0], S[2 * kk][1]), a1 = pack_bf2(S[2 * kk][2], S[2 * kk][3]);
+        const uint32_t a2 = pack_bf2(S[2 * kk + 1][0], S[2 * kk + 1][1]), a3 = pack_bf2(S[2 * kk + 1][2], S[2 * kk + 1][3]);
+#pragma unroll
+        for (int nd = 0; nd < 4; ++nd) {
+          const bf* vr = vt + (nd * 8 + g) * TV_BF + kk * 16 + 2 * t;
+          mma16816(Oa[nd], a0, a1, a2, a3, ld32(vr), ld32(vr + 8));
+        }
+      }
+    } else {
+      const float* vs = reinterpret_cast<const float*>(smraw) + WK * TK_F;
+      const int src1 = (lane & ~3) | (t >> 1), src2 = src1 + 2;
+      const bool odd = t & 1;
+#pragma unroll
+      for (int kk = 0; kk < 16; ++kk) {          // keys 8 kk .. 8 kk + 7: S tile kk, re-laid as the A operand (cols t, t + 4)
+        const float x0 = __shfl_sync(0xffffffffu, S[kk][0], src1), x1 = __shfl_sync(0xffffffffu, S[kk][1], src1);
+        const float y0 = __shfl_sync(0xffffffffu, S[kk][2], src1), y1 = __shfl_sync(0xffffffffu, S[kk][3], src1);
+        const float z0 = __shfl_sync(0xffffffffu, S[kk][0], src2), z1 = __shfl_sync(0xffffffffu, S[kk][1], src2);
+        const float w0 = __shfl_sync(0xffffffffu, S[kk][2], src2), w1 = __shfl_sync(0xffffffffu, S[kk][3], src2);
+        const uint32_t a0 = tf32_bits(odd ? x1 : x0), a1 = tf32_bits(odd ? y1 : y0), a2 = tf32_bits(odd ? z1 : z0), a3 = tf32_bits(odd ? w1 : w0);
+#pragma unroll
+        for (int nd = 0; nd < 4; ++nd) {
+          const float* vr = vs + (kk * 8 + t) * TV_F + nd * 8 + g;
+          mma1688(Oa[nd], a0, a1, a2, a3, __float_as_uint(vr[0]), __float_as_uint(vr[4 * TV_F]));
+        }
+      }
+    }
+    const float i0 = l0 > 0.f ? 1.f / l0 : 0.f, i1 = l1 > 0.f ? 1.f / l1 : 0.f;
+    AT* o0 = O + (r0 + g) * DM + h * DH + 2 * t;
+    AT* o1 = o0 + 8 * DM;
+#pragma unroll
+    for (int nd = 0; nd < 4; ++nd) {
+      if constexpr (BF) {
+        *reinterpret_cast<uint32_t*>(o0 + nd * 8) = pack_bf2(Oa[nd][0] * i0, Oa[nd][1] * i0);
+        *reinterpret_cast<uint32_t*>(o1 + nd * 8) = pack_bf2(Oa[nd][2] * i1, Oa[nd][3] * i1);
+      } else {
+        *reinterpret_cast<float2*>(o0 + nd * 8) = make_float2(Oa[nd][0] * i0, Oa[nd][1] * i0);
+        *reinterpret_cast<float2*>(o1 + nd * 8) = make_float2(Oa[nd][2] * i1, Oa[nd][3] * i1);
+      }
+    }
   }
 }
 
@@ -470,24 +624,26 @@ __global__ void __launch_bounds__(128) tail_bwd_dq_k(const AT* __restrict__ Q, c
   for (int q = 0; q < WQ; ++q) pb[q * WK + j] = db[q];
 }
 
-// CTA = (sample, head): dk / dv of the shared keys over the tail windows in order (dkvt [A, 128, 256] fp32: dk | dv), then the tail rows of
-// dO (this head's columns) and D zeroed. Runs after tail_bwd_dq_k (which reads dO).
+
+// CTA = (sample, head, window chunk c of WC): dk / dv of the shared keys over the tail windows t0 + c, t0 + c + WC, ... in order (dkvt
+// [WC, A, 128, 256] fp32: dk | dv; a chunk without a window writes zeros), then those windows' rows of dO (this head's columns) and D
+// zeroed. Runs after tail_bwd_dq_k (which reads dO).
 template <typename AT>
 __global__ void __launch_bounds__(128) tail_bwd_kv_k(const AT* __restrict__ Q, const AT* __restrict__ K, const AT* __restrict__ V, AT* __restrict__ DO,
                                                      float* __restrict__ DD, const int64_t* __restrict__ INFO, const float* __restrict__ TB,
-                                                     float* __restrict__ DKVT, long N, int nloop) {
+                                                     float* __restrict__ DKVT, long N, int nloop, int A, int WC) {
   extern __shared__ __align__(16) float sm[];
-  const int h = blockIdx.x % NH, a = blockIdx.x / NH;
+  const int h = blockIdx.x % NH, a = (blockIdx.x / NH) % A, wc = blockIdx.x / (NH * A);
   const long t0 = INFO[0], s = INFO[1];
   if (t0 >= nloop) return;
   float* sq = sm + SM_Q; float* sk = sm + SM_K; float* sv = sm + SM_V; float* sP = sm + SM_P; float* sdo = sm + SM_O; float* sdS = sm + SM_S;
   const int j = threadIdx.x;
   const float scale = 0.17677669529663687f;
-  load_tail_kv<AT>(K, V, s, a, h, N, sk, sv);
   float av[32], ak[32];
 #pragma unroll
   for (int i = 0; i < 32; ++i) { av[i] = 0.f; ak[i] = 0.f; }
-  for (long win = t0; win < nloop; ++win) {
+  if (t0 + wc < nloop) load_tail_kv<AT>(K, V, s, a, h, N, sk, sv);
+  for (long win = t0 + wc; win < nloop; win += WC) {
     load_rows<AT>(Q, a, win, h, N, sq);
     load_rows<AT>(DO, a, win, h, N, sdo);
     __syncthreads();
@@ -503,25 +659,27 @@ __global__ void __launch_bounds__(128) tail_bwd_kv_k(const AT* __restrict__ Q, c
     }
     __syncthreads();                        // the next window's tiles overwrite Q / dO
   }
-  float* pk = DKVT + ((long)a * WK + j) * (2 * DM) + h * DH;
+  float* pk = DKVT + (((long)wc * A + a) * WK + j) * (2 * DM) + h * DH;
   float* pv = pk + DM;
 #pragma unroll
   for (int i = 0; i < 8; ++i) {
     *reinterpret_cast<float4*>(pk + 4 * i) = make_float4(ak[4 * i] * scale, ak[4 * i + 1] * scale, ak[4 * i + 2] * scale, ak[4 * i + 3] * scale);
     *reinterpret_cast<float4*>(pv + 4 * i) = make_float4(av[4 * i], av[4 * i + 1], av[4 * i + 2], av[4 * i + 3]);
   }
-  for (long i = threadIdx.x; i < (nloop - t0) * WQ * 8; i += 128) {
-    const long row = t0 * WQ + i / 8;
-    const int c = (i % 8) * 4;
-    V4<AT>::store(DO + ((long)a * N + row) * DM + h * DH + c, zero4());
+  for (long win = t0 + wc; win < nloop; win += WC) {
+    for (int i = threadIdx.x; i < WQ * 8; i += 128) {
+      const long row = win * WQ + i / 8;
+      V4<AT>::store(DO + ((long)a * N + row) * DM + h * DH + (i % 8) * 4, zero4());
+    }
+    if (threadIdx.x < WQ) DD[((long)a * NH + h) * N + win * WQ + threadIdx.x] = 0.f;
   }
-  for (long row = t0 * WQ + threadIdx.x; row < (long)nloop * WQ; row += 128) DD[((long)a * NH + h) * N + row] = 0.f;
 }
 
-// CTA = (sample, head, 8 columns): the tail rows' dq (dqt) and the shared keys' dk / dv (dkvt) added into DKV = [dq | dk | dv] (ld ldd)
+// CTA = (sample, head, 8 columns): the tail rows' dq (dqt) and the shared keys' dk / dv (the WC chunk partials of dkvt, summed in order)
+// added into DKV = [dq | dk | dv] (ld ldd)
 template <typename AT>
 __global__ void __launch_bounds__(128) tail_bwd_apply_k(AT* __restrict__ DKV, long ldd, const int64_t* __restrict__ INFO, const AT* __restrict__ DQT,
-                                                        const float* __restrict__ DKVT, long N, int nloop) {
+                                                        const float* __restrict__ DKVT, long N, int nloop, int A, int WC) {
   const int dc = blockIdx.x % 4, h = (blockIdx.x / 4) % NH, a = blockIdx.x / (4 * NH);
   const long t0 = INFO[0], s = INFO[1];
   if (t0 >= nloop) return;
@@ -532,15 +690,21 @@ __global__ void __launch_bounds__(128) tail_bwd_apply_k(AT* __restrict__ DKV, lo
     AT* p = DKV + row * ldd + col + c;
     V4<AT>::store(p, add4(V4<AT>::load(p), V4<AT>::load(DQT + row * DM + col + c)));
   }
+  const long slab = (long)A * WK * (2 * DM);
   for (int i = threadIdx.x; i < WK * 2; i += 128) {
     const int j = i / 2, c = (i % 2) * 4;
     if (s + j >= N) continue;               // a key past N: invalid, zero gradient
     const long row = (long)a * N + s + j;
     const float* src = DKVT + ((long)a * WK + j) * (2 * DM) + col + c;
+    float4 dk = *reinterpret_cast<const float4*>(src), dv = *reinterpret_cast<const float4*>(src + DM);
+    for (int w = 1; w < WC; ++w) {
+      dk = add4(dk, *reinterpret_cast<const float4*>(src + w * slab));
+      dv = add4(dv, *reinterpret_cast<const float4*>(src + w * slab + DM));
+    }
     AT* pk = DKV + row * ldd + DM + col + c;
     AT* pv = DKV + row * ldd + 2 * DM + col + c;
-    V4<AT>::store(pk, add4(V4<AT>::load(pk), *reinterpret_cast<const float4*>(src)));
-    V4<AT>::store(pv, add4(V4<AT>::load(pv), *reinterpret_cast<const float4*>(src + DM)));
+    V4<AT>::store(pk, add4(V4<AT>::load(pk), dk));
+    V4<AT>::store(pv, add4(V4<AT>::load(pv), dv));
   }
 }
 
@@ -601,6 +765,26 @@ __global__ void __launch_bounds__(256) tail_bias_bwd_k(const ZT* __restrict__ Z,
 #pragma unroll
     for (int i = 0; i < 8; ++i) t += red[i][threadIdx.x];
     PART[(long)blockIdx.x * (PC + NH * PC) + threadIdx.x] = t;
+  }
+}
+
+// info = [t0, s, n_real] of the tail from the valid-key bytes KM [n] (real atoms first; nullptr: n0 real atoms): one CTA, integer sums
+__global__ void tail_info_k(const bool* __restrict__ KM, long n, long n0, int qblock, int64_t* __restrict__ INFO) {
+  __shared__ unsigned long long tot;
+  if (threadIdx.x == 0) tot = 0ULL;
+  __syncthreads();
+  unsigned long long c = 0ULL;
+  if (KM != nullptr)
+    for (long i = threadIdx.x; i < n; i += blockDim.x) c += KM[i] ? 1ULL : 0ULL;
+  atomicAdd(&tot, c);
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const long nreal = KM != nullptr ? (long)tot : n0;
+    const long last = nreal >= 1 ? (nreal - 1) / WQ : -1;
+    const long rule = qblock ? (nreal + WQ - 1) / WQ * WQ : nreal;
+    INFO[0] = last + 1 > 2 ? last + 1 : 2;
+    INFO[1] = rule - WK > 0 ? rule - WK : 0;
+    INFO[2] = nreal;
   }
 }
 
@@ -690,6 +874,17 @@ void edge_bwd_apply(at::Tensor dkv, at::Tensor keys, at::Tensor widx, at::Tensor
 }
 
 
+at::Tensor tail_info(c10::optional<at::Tensor> kmask, int64_t n0, bool qblock, at::Tensor like) {
+  // [t0, s, n_real] int64 on the device (local_dit_h100.tail_info); kmask: bool [n] valid keys, real atoms first (None: n0 real atoms)
+  const c10::cuda::CUDAGuard guard(like.device());
+  auto info = at::empty({3}, like.options().dtype(at::kLong));
+  const bool has = kmask.has_value() && kmask->defined();
+  if (has) TORCH_CHECK(kmask->scalar_type() == at::kBool && kmask->is_contiguous() && kmask->device() == like.device(), "tail_info: kmask bool, contiguous");
+  tail_info_k<<<1, 1024, 0, S_()>>>(has ? CP<bool>(*kmask) : nullptr, has ? kmask->numel() : 0, n0, qblock ? 1 : 0, P<int64_t>(info));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return info;
+}
+
 at::Tensor tail_bias_fwd(at::Tensor z, at::Tensor gamma, at::Tensor wb, at::Tensor info, double eps, at::Tensor tb) {
   // z [>= nloop, 32, 128, 16] (its first nloop windows), tb [nloop, 4, 32, 128] fp32 (a contiguous slot; rows below t0 left as they are)
   const c10::cuda::CUDAGuard guard(z.device());
@@ -712,14 +907,15 @@ void tail_attn_fwd(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor info, at
   const int A = q.size(0), G = tb.size(0), nloop = tb.size(1);
   TORCH_CHECK(tb.is_contiguous() && tb.dim() == 5 && A % G == 0 && (long)nloop * WQ <= N, "tail_attn_fwd: tb [G, nloop, 4, 32, 128]");
   const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-  const int C = std::max(1, std::min(nloop, (2 * sms + A * NH - 1) / (A * NH)));
+  // about 6 CTAs per SM (from the shapes only), two windows per CTA per step
+  const int C = std::max(1, std::min((nloop + 1) / 2, (6 * sms + A * NH - 1) / (A * NH)));
   const int blocks = A * NH * C;
   if (is_bf(q)) {
-    prep(tail_attn_fwd_k<bf>, smem_fwd());
-    tail_attn_fwd_k<bf><<<blocks, 128, smem_fwd(), S_()>>>(CP<bf>(q), CP<bf>(k), CP<bf>(v), CP<int64_t>(info), CP<float>(tb), P<bf>(o), N, nloop, G, C);
+    prep(tail_attn_fwd_k<bf>, SMEM_TC_BF);
+    tail_attn_fwd_k<bf><<<blocks, 128, SMEM_TC_BF, S_()>>>(CP<bf>(q), CP<bf>(k), CP<bf>(v), CP<int64_t>(info), CP<float>(tb), P<bf>(o), N, nloop, G, C);
   } else {
-    prep(tail_attn_fwd_k<float>, smem_fwd());
-    tail_attn_fwd_k<float><<<blocks, 128, smem_fwd(), S_()>>>(CP<float>(q), CP<float>(k), CP<float>(v), CP<int64_t>(info), CP<float>(tb), P<float>(o), N,
+    prep(tail_attn_fwd_k<float>, SMEM_TC_F);
+    tail_attn_fwd_k<float><<<blocks, 128, SMEM_TC_F, S_()>>>(CP<float>(q), CP<float>(k), CP<float>(v), CP<int64_t>(info), CP<float>(tb), P<float>(o), N,
                                                                 nloop, G, C);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -727,26 +923,26 @@ void tail_attn_fwd(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor info, at
 
 void tail_bwd(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor dO, at::Tensor dd, at::Tensor info, at::Tensor tb, at::Tensor dqt, at::Tensor dkvt,
               at::Tensor dtbp) {
-  // tb [1, nloop, 4, 32, 128]; dqt like q; dkvt [A, 128, 256] fp32; dtbp [SC, nloop, 4, 32, 128] fp32
+  // tb [1, nloop, 4, 32, 128]; dqt like q; dkvt [WC, A, 128, 256] fp32 (WC window chunks); dtbp [SC, nloop, 4, 32, 128] fp32
   const c10::cuda::CUDAGuard guard(q.device());
   const long N = q.size(1);
-  const int A = q.size(0), nloop = tb.size(1), SC = dtbp.size(0);
-  TORCH_CHECK(tb.size(0) == 1 && dtbp.size(1) == nloop && dkvt.size(0) == A, "tail_bwd: one pair; dtbp [SC, nloop, ...]; dkvt [A, 128, 256]");
-  const int b1 = nloop * NH * SC, b2 = A * NH;
+  const int A = q.size(0), nloop = tb.size(1), SC = dtbp.size(0), WC = dkvt.size(0);
+  TORCH_CHECK(tb.size(0) == 1 && dtbp.size(1) == nloop && dkvt.size(1) == A, "tail_bwd: one pair; dtbp [SC, nloop, ...]; dkvt [WC, A, 128, 256]");
+  const int b1 = nloop * NH * SC, b2 = A * NH * WC;
   if (is_bf(q)) {
     prep(tail_bwd_dq_k<bf>, smem_bwd());
     prep(tail_bwd_kv_k<bf>, smem_bwd());
     tail_bwd_dq_k<bf><<<b1, 128, smem_bwd(), S_()>>>(CP<bf>(q), CP<bf>(k), CP<bf>(v), CP<bf>(dO), CP<int64_t>(info), CP<float>(tb), P<bf>(dqt), P<float>(dtbp),
                                                      N, nloop, A, SC);
     tail_bwd_kv_k<bf><<<b2, 128, smem_bwd(), S_()>>>(CP<bf>(q), CP<bf>(k), CP<bf>(v), P<bf>(dO), P<float>(dd), CP<int64_t>(info), CP<float>(tb),
-                                                     P<float>(dkvt), N, nloop);
+                                                     P<float>(dkvt), N, nloop, A, WC);
   } else {
     prep(tail_bwd_dq_k<float>, smem_bwd());
     prep(tail_bwd_kv_k<float>, smem_bwd());
     tail_bwd_dq_k<float><<<b1, 128, smem_bwd(), S_()>>>(CP<float>(q), CP<float>(k), CP<float>(v), CP<float>(dO), CP<int64_t>(info), CP<float>(tb),
                                                         P<float>(dqt), P<float>(dtbp), N, nloop, A, SC);
     tail_bwd_kv_k<float><<<b2, 128, smem_bwd(), S_()>>>(CP<float>(q), CP<float>(k), CP<float>(v), P<float>(dO), P<float>(dd), CP<int64_t>(info),
-                                                        CP<float>(tb), P<float>(dkvt), N, nloop);
+                                                        CP<float>(tb), P<float>(dkvt), N, nloop, A, WC);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -754,16 +950,16 @@ void tail_bwd(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor dO, at::Tenso
 void tail_bwd_apply(at::Tensor dkv, at::Tensor info, at::Tensor dqt, at::Tensor dkvt, int64_t A, int64_t N, int64_t nloop) {
   const c10::cuda::CUDAGuard guard(dkv.device());
   const int blocks = A * NH * 4;
-  if (is_bf(dkv)) tail_bwd_apply_k<bf><<<blocks, 128, 0, S_()>>>(P<bf>(dkv), dkv.stride(0), CP<int64_t>(info), CP<bf>(dqt), CP<float>(dkvt), N, (int)nloop);
-  else tail_bwd_apply_k<float><<<blocks, 128, 0, S_()>>>(P<float>(dkv), dkv.stride(0), CP<int64_t>(info), CP<float>(dqt), CP<float>(dkvt), N, (int)nloop);
+  if (is_bf(dkv)) tail_bwd_apply_k<bf><<<blocks, 128, 0, S_()>>>(P<bf>(dkv), dkv.stride(0), CP<int64_t>(info), CP<bf>(dqt), CP<float>(dkvt), N, (int)nloop, (int)A, (int)dkvt.size(0));
+  else tail_bwd_apply_k<float><<<blocks, 128, 0, S_()>>>(P<float>(dkv), dkv.stride(0), CP<int64_t>(info), CP<float>(dqt), CP<float>(dkvt), N, (int)nloop, (int)A, (int)dkvt.size(0));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 at::Tensor tail_bias_bwd(at::Tensor z, at::Tensor gamma, at::Tensor wb, at::Tensor dtbp, at::Tensor info, at::Tensor dz, double eps) {
-  // dz (z's shape and dtype) += the tail windows' LN / projection backward of sum_sc dtbp[sc]; -> per-block partials [40, 80]
+  // dz (z's shape and dtype) += the tail windows' LN / projection backward of sum_sc dtbp[sc]; -> per-block partials [4 x SMs, 80] (a fixed grid per device: the same partials, in the same order, every call)
   const c10::cuda::CUDAGuard guard(z.device());
   TORCH_CHECK(dz.is_contiguous() && dz.sizes() == z.sizes() && dz.scalar_type() == z.scalar_type(), "tail_bias_bwd: dz like z");
-  const int blocks = 40, SC = dtbp.size(0), nloop = dtbp.size(1);
+  const int blocks = 4 * at::cuda::getCurrentDeviceProperties()->multiProcessorCount, SC = dtbp.size(0), nloop = dtbp.size(1);
   TORCH_CHECK(dtbp.is_contiguous() && nloop <= z.size(0), "tail_bias_bwd: dtbp [SC, nloop <= W, 4, 32, 128]");
   auto part = at::empty({blocks, PC + NH * PC}, z.options().dtype(at::kFloat));
   if (is_bf(z)) tail_bias_bwd_k<bf><<<blocks, 256, 0, S_()>>>(CP<bf>(z), CP<float>(gamma), CP<float>(wb), CP<float>(dtbp), SC, CP<int64_t>(info), P<bf>(dz),
@@ -798,4 +994,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tail_bwd_apply", &tail_bwd_apply);
   m.def("tail_bias_bwd", &tail_bias_bwd);
   m.def("tail_dbias_sum", &tail_dbias_sum);
+  m.def("tail_info", &tail_info);
 }

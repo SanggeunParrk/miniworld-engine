@@ -76,11 +76,12 @@ tables):
 
 | kernel (`requirements_kernel.csv`) | role | what it does |
 |---|---|---|
+| `dit_variants_tail_info_sm90` | forward | `[t0, s, R]` from the valid-key bytes (one CTA) |
 | `dit_variants_tail_bias_fwd_sm90` | forward | `LN(z_w) gamma . Wb` of the tail windows, natural units, `-inf` off the valid keys; hoisted per pair in inference |
-| `dit_variants_tail_attn_fwd_sm90` | forward | the tail windows' rows of `o`: CTA = (sample, head, window chunk), the shared 128 keys staged once per CTA |
+| `dit_variants_tail_attn_fwd_sm90` | forward | the tail windows' rows of `o` on tensor cores (mma.sync bf16, TF32 for fp32 operands): CTA = (sample, head, chunk) of 4 warps, the shared 128 keys staged once per CTA, a warp pair per window (16 query rows x 128 keys per warp, the softmax in registers) |
 | `dit_variants_tail_bwd_dq_sm90` | backward | before the window backward: CTA = (window, head, sample chunk): dq rows (side buffer), d bias summed over the chunk |
-| `dit_variants_tail_bwd_kv_sm90` | backward | then CTA = (sample, head): dk / dv of the shared keys over the tail windows in order (fp32), and the tail rows of dO / D zeroed |
-| `dit_variants_tail_bwd_apply_sm90` | backward | after the window backward (and `edge_bwd_apply`): dq rows and dk / dv added into dq / dk / dv, one owner per element |
+| `dit_variants_tail_bwd_kv_sm90` | backward | then CTA = (sample, head, window chunk): dk / dv of the shared keys over its windows in order (fp32 chunk partials), and those rows of dO / D zeroed |
+| `dit_variants_tail_bwd_apply_sm90` | backward | after the window backward (and `edge_bwd_apply`): dq rows and dk / dv (chunk partials summed in order) added into dq / dk / dv, one owner per element |
 | `dit_variants_tail_bias_bwd_sm90` | backward | the tail windows' pair LayerNorm / projection backward (d bias = the chunk partials summed in order) added into dz |
 
 The A100 path (`dit_variants/cuda/train.py`) runs the same kernels from the sm_80 build (`_sm80` rows; its tail bias is an autograd

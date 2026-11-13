@@ -67,15 +67,14 @@ def _edge_index(z, n, kmask, n0, qblock=False):
     return idx, keys, keys < n_real  # a system under 128 real atoms has keys past them
 
 
-def tail_info(n_real, qblock=False):
-    """[t0, s, n_real] (int64, on the device) of the slid window's TAIL: the query windows ``w >= t0 = max(last + 1, 2)`` (``last = (n_real - 1)
-    // 32``, the last window holding a real atom; windows 0 and 1 are edge windows) hold padding queries only and all read the same keys
-    ``[s, s + 128)``, ``s = max(n_rule - 128, 0)`` (``n_rule``: ``n_real``, or rounded up to a whole query window for ``slide_qblock``), the
-    valid ones those below ``n_real`` (``atom_dit._window_positions``; a padding query is spared the conformer mask). ``n_real``: a 0-d int64
-    tensor; no host read."""
-    n_rule = (n_real + 31) // 32 * 32 if qblock else n_real
-    t0 = torch.clamp(torch.div(n_real - 1, 32, rounding_mode="floor") + 1, min=2)
-    return torch.stack([t0, (n_rule - DS).clamp(min=0), n_real]).to(torch.int64)
+def tail_info(kmask, n0: int, qblock: bool, like: torch.Tensor) -> torch.Tensor:
+    """[t0, s, n_real] (int64, on the device; one small kernel, ``tail_info`` of edge.cu) of the slid window's TAIL: the query windows
+    ``w >= t0 = max(last + 1, 2)`` (``last = (n_real - 1) // 32``, the last window holding a real atom; windows 0 and 1 are edge windows) hold
+    padding queries only and all read the same keys ``[s, s + 128)``, ``s = max(n_rule - 128, 0)`` (``n_rule``: ``n_real``, or rounded up to a
+    whole query window for ``slide_qblock``), the valid ones those below ``n_real`` (``atom_dit._window_positions``; a padding query is spared
+    the conformer mask). ``kmask``: the bool valid keys [n], real atoms first (None: ``n0`` real atoms); ``like``: a tensor on the device. No
+    host read."""
+    return _edge_ext().tail_info(kmask, n0, qblock, like)
 
 
 def tail_loop(n0: int) -> int:
@@ -88,8 +87,7 @@ def _tail_tables(zs, gamma, wb, kmask, n0, qblock=False):
     """The tail of the slid window (``tail_info``): (info [3], the tail windows' pair bias tb [G, nloop, h, 32, 128] fp32, natural units, -inf
     off the valid keys; ``tail_bias_fwd``, written for the windows from t0 on only), one bias per pair ``zs[g]``. Inference hoists it with the
     edge tables."""
-    n_real = kmask.sum() if kmask is not None else torch.full((), n0, device=zs[0].device, dtype=torch.int64)
-    info = tail_info(n_real, qblock)
+    info = tail_info(kmask, n0, qblock, zs[0])
     tb = torch.empty(len(zs), tail_loop(n0), NH, 32, DS, device=zs[0].device, dtype=F32)
     ext = _edge_ext()
     for g, z in enumerate(zs):
@@ -105,9 +103,10 @@ def _slid_tail(o, q, k, v, tail, a, n):
     _edge_ext().tail_attn_fwd(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), info, tb, o.view(a, n, DS))
 
 
-def tail_chunks(a: int, nloop: int) -> int:
-    """Sample chunks of the tail dq / d bias kernel: up to 8, the partial d bias [SC, nloop, h, 32, 128] fp32 kept under 64 MB."""
-    return max(1, min(a, 8, 1024 // max(nloop, 1)))
+def tail_chunks(a: int, nloop: int) -> tuple[int, int]:
+    """(SC, WC): the sample chunks of the tail dq / d bias kernel (up to 8; the partial d bias [SC, nloop, h, 32, 128] fp32 kept under 64 MB)
+    and the window chunks of its dk / dv kernel (CTAs (sample, head, chunk): about 512 of them, up to 16 chunks; partials [WC, A, 128, 256])."""
+    return max(1, min(a, 8, 1024 // max(nloop, 1))), max(1, min(16, nloop, 512 // (a * NH)))
 
 
 def _slid_tail_bwd(do, dd, q, k, v, tail, a, n):
@@ -118,8 +117,9 @@ def _slid_tail_bwd(do, dd, q, k, v, tail, a, n):
     nloop = tb.shape[1]
     dev = q.device
     dqt = torch.empty(a, n, DS, device=dev, dtype=q.dtype)
-    dkvt = torch.empty(a, DS, 2 * DS, device=dev, dtype=F32)
-    dtbp = torch.empty(tail_chunks(a, nloop), nloop, NH, 32, DS, device=dev, dtype=F32)
+    sc, wc = tail_chunks(a, nloop)
+    dkvt = torch.empty(wc, a, DS, 2 * DS, device=dev, dtype=F32)
+    dtbp = torch.empty(sc, nloop, NH, 32, DS, device=dev, dtype=F32)
     _edge_ext().tail_bwd(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), do.view(a, n, DS), dd, info, tb, dqt, dkvt, dtbp)
     return dqt, dkvt, dtbp
 

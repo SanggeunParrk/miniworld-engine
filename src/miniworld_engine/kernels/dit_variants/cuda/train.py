@@ -469,8 +469,9 @@ def atom_bwd(
 
         nloop = tb.shape[1]
         dqt = torch.empty(A, N, D, device=dev, dtype=at)
-        dkvt = torch.empty(A, ATOM_WK, 2 * D, device=dev, dtype=f32)
-        dtbp = torch.empty(tail_chunks(A, nloop), nloop, ATOM_H, ATOM_WQ, ATOM_WK, device=dev, dtype=f32)
+        sc, wc = tail_chunks(A, nloop)
+        dkvt = torch.empty(wc, A, ATOM_WK, 2 * D, device=dev, dtype=f32)
+        dtbp = torch.empty(sc, nloop, ATOM_H, ATOM_WQ, ATOM_WK, device=dev, dtype=f32)
         _edge(x).tail_bwd(qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), dd, tinfo, tb, dqt, dkvt, dtbp)
     dbias2 = local.attn_bwd_mma(
         qa.view(A, N, D), ka.view(A, N, D), s["v"].view(A, N, D), dO.view(A, N, D), bias2, s["lse"], dd, dp[:, D:], at == torch.float32
@@ -771,7 +772,7 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
         # the tail: every query window past the last real one reads the same 128 keys (local_dit_h100.tail_info)
         from miniworld_engine.kernels.integrations.local_dit_h100 import tail_info
 
-        tinfo = tail_info(n_real, stack.key_window == "slide_qblock")
+        tinfo = tail_info(kmask.contiguous(), n, stack.key_window == "slide_qblock", single)
     z = pair.contiguous()
     x = single.reshape(a * n, d).contiguous()
     empty = single.new_empty(0, dtype=torch.float32)
