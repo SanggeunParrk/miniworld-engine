@@ -42,7 +42,8 @@ def test_k1tw_planes(length: int) -> None:
     ext = sm80_wide._ext()
     m = _module(TriangleMultiplication, 256, True)
     ws = [m.to_left.weight, m.to_left_gate.weight, m.to_right.weight, m.to_right_gate.weight, m.to_gate.weight, m.to_out.weight]
-    pk = sm80_wide._pack(*(w.detach() for w in ws), m.ln_pair.weight, m.ln_pair.bias, m.ln_out.weight, m.ln_out.bias, adt=torch.bfloat16)
+    w0, w1, w2, w3, w4, w5 = (w.detach() for w in ws)
+    pk = sm80_wide._pack(w0, w1, w2, w3, w4, w5, m.ln_pair.weight, m.ln_pair.bias, m.ln_out.weight, m.ln_out.bias, adt=torch.bfloat16)
     gen = torch.Generator(device="cuda").manual_seed(3)
     n, hs, eps = length, pk["hs"], m.ln_pair.eps
     z = (torch.randn((n * n, 256), generator=gen, device="cuda") * 1.5 + 0.3).bfloat16()
