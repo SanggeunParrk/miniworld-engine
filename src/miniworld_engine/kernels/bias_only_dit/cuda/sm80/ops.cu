@@ -372,12 +372,10 @@ void gemm120(int64_t epi, torch::Tensor a, torch::Tensor w1, c10::optional<torch
 
 // RTX 5090 training: dh = a w^T (a = dz [M, K], w = Ws^T [N, K]) with the SwiGLU backward in the epilogue: dab [M, 2 N] = [da | db], h [M, N]
 // from ab [M, 2 N] = [a | b] (bf16, contiguous; dh never leaves the registers)
-void gemm120_swiglu_bwd(torch::Tensor a, torch::Tensor w, torch::Tensor ab, torch::Tensor dab, torch::Tensor h, int64_t cfg) {
-  const at::cuda::CUDAGuard guard(a.device());
+namespace {
+template <typename B>
+void swiglu_bwd120_t(torch::Tensor& a, torch::Tensor& w, torch::Tensor& ab, torch::Tensor& dab, torch::Tensor& h, int64_t cfg) {
   const int64_t M = a.size(0), K = a.size(1), N = w.size(0);
-  for (auto* t : {&a, &w, &ab, &dab, &h}) TORCH_CHECK(t->is_contiguous() && t->scalar_type() == at::kBFloat16 && t->dim() == 2, "gemm120_swiglu_bwd: contiguous bf16 2-D");
-  TORCH_CHECK(w.size(1) == K && ab.size(0) == M && ab.size(1) == 2 * N && dab.sizes() == ab.sizes() && h.size(0) == M && h.size(1) == N, "gemm120_swiglu_bwd: shapes");
-  using B = __nv_bfloat16;
   g120::Params<B> p{};
   p.A = reinterpret_cast<const B*>(a.data_ptr());
   p.W1 = reinterpret_cast<const B*>(w.data_ptr());
@@ -390,6 +388,19 @@ void gemm120_swiglu_bwd(torch::Tensor a, torch::Tensor w, torch::Tensor ab, torc
   p.AB = reinterpret_cast<const B*>(ab.data_ptr());
   p.H = reinterpret_cast<B*>(h.data_ptr());
   dispatch_gemm120<B, g120::EPI_SWIGLU_BWD>(p, (int)cfg, at::cuda::getCurrentCUDAStream());
+}
+}  // namespace
+void gemm120_swiglu_bwd(torch::Tensor a, torch::Tensor w, torch::Tensor ab, torch::Tensor dab, torch::Tensor h, int64_t cfg) {
+  const at::cuda::CUDAGuard guard(a.device());
+  const int64_t M = a.size(0), K = a.size(1), N = w.size(0);
+  for (auto* t : {&a, &w, &ab, &dab, &h})
+    TORCH_CHECK(t->is_contiguous() && t->scalar_type() == a.scalar_type() && t->dim() == 2, "gemm120_swiglu_bwd: contiguous 2-D of one dtype (bf16, or fp32 on TF32)");
+  TORCH_CHECK(w.size(1) == K && ab.size(0) == M && ab.size(1) == 2 * N && dab.sizes() == ab.sizes() && h.size(0) == M && h.size(1) == N, "gemm120_swiglu_bwd: shapes");
+  if (a.scalar_type() == at::kBFloat16) swiglu_bwd120_t<__nv_bfloat16>(a, w, ab, dab, h, cfg);
+  else {
+    TORCH_CHECK(a.scalar_type() == at::kFloat, "gemm120_swiglu_bwd: bf16 or fp32");
+    swiglu_bwd120_t<float>(a, w, ab, dab, h, cfg);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

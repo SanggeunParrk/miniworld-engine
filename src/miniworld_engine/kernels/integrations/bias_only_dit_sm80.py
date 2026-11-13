@@ -35,7 +35,7 @@ import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32, _wgrad, cached
+from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32, cached
 from miniworld_engine.kernels.integrations.conditioned_transition_sm80 import _train_bwd_fake as _ct_train_bwd_fake
 from miniworld_engine.kernels.integrations.conditioned_transition_sm80 import _train_fwd_fake as _ct_train_fwd_fake
 
@@ -260,7 +260,7 @@ def _bwd(
         dy, dg2 = torch.empty_like(y), torch.empty_like(g2)
         _sm80().res_gate_bwd(dout, y, g2, dy, dg2)
         dA = _ltm(dy, wo)  # [M, da]
-        dwo = _wgrad(dy, a)  # [d, da] fp32
+        dwo = _wgrad120(dy, a)  # [d, da] fp32
         dvg = torch.empty_like(vg)
         do = torch.empty_like(a)
         dd = torch.empty(samples, heads, length, device=dev, dtype=F32)
@@ -269,10 +269,19 @@ def _bwd(
         else:
             _rows().gate_bwd_rows(dA, a, vg[:, da:], do, dvg[:, da:], dd, length)
         (core.PvGateTF32 if f32 else core.PvGate)(heads, hd)(do, Pt.view(heads * length, length), dvg[:, :da], samples)  # dv = P^T do
-        db = torch.empty_like(P)
-        (core.Dpb32 if f32 else core.Dpb)(heads, hd)(
-            do, vg[:, :da], P.view(heads * length, length), dd, db.view(heads * length, length), samples
-        )
+        if _sm120(x) and length <= DPB_GEMM_MAXL and samples >= 8:
+            # RTX 5090, short L: the bias-gradient core has only H (L / 128)^2 CTAs (16 at L 128 for 170 SMs); sum_a do v^T per head as ONE
+            # batched GEMM over K = A dh (head-major copies of do and v), then P (S - D) in one elementwise pass
+            def hm(t):
+                return t.reshape(samples, length, heads, hd).permute(2, 1, 0, 3).reshape(heads, length, samples * hd)
+
+            s_ = torch.bmm(hm(do), hm(vg[:, :da]).transpose(1, 2), out_dtype=F32) if not f32 else torch.bmm(hm(do), hm(vg[:, :da]).transpose(1, 2))
+            db = (P.float() * (s_ - dd.sum(0)[:, :, None])).to(P.dtype)
+        else:
+            db = torch.empty_like(P)
+            (core.Dpb32 if f32 else core.Dpb)(heads, hd)(
+                do, vg[:, :da], P.view(heads * length, length), dd, db.view(heads * length, length), samples
+            )
         if PB_TE and not f32 and _sm120(x) and heads == 16 and wcm.shape[0] == 256 and pair.shape[1] == length:
             # RTX 5090, d_pair 256: the backward on tiles of PB_TE elements (two blocks an SM; 32 rows a block)
             nz, c = pair.shape[1], wcm.shape[0]
@@ -283,9 +292,9 @@ def _bwd(
         else:
             dz, dwf = _sm80().pair_bias_generic_backward(pair[0], wcm, db if f32 else db.float(), None, length, EPS)
         dx = _ltm(dvg, wvg)
-        dwvg = _wgrad(dvg, x)  # [2 da, d] fp32
+        dwvg = _wgrad120(dvg, x)  # [2 da, d] fp32
         dcond = _ltm(dg2, ws)
-        dws = _wgrad(dg2, cond)
+        dws = _wgrad120(dg2, cond)
         dbs = torch.sum(dg2, dim=0, dtype=F32)
         dlnw = (dwf * wb.float()).sum(0)
         dwb = dwf * lnw.float()[None]
@@ -329,8 +338,12 @@ ADA_ATTN_120 = True
 CT_120 = True
 #: RTX 5090 bf16 training, d_pair 256: the pair-bias backward's tile (augmented_attention sm80 pair_bias_gen_bwd_te; 0: the shared kernel's 32)
 PB_TE = 8
+#: RTX 5090 training: the attention's bias gradient as a batched GEMM (+ one elementwise pass) up to this L, else the Dpb core
+DPB_GEMM_MAXL = 128  # (measured: L 128 S48 -2.4 % fp32 / -1 % master; L 256 and S1 slower)
 #: RTX 5090 bf16 training: the transition's dh GEMM + SwiGLU backward as one gemm120 (its CTA tile config), None: at::mm + swiglu_bwd
 SWB_CFG: int | None = 6  # 64 x 128 tiles, 64-byte K-blocks, 2 CTAs an SM: 667 us against at::mm + swiglu_bwd 930 (M 36864)
+#: the same for fp32 (TF32, operands rounded to nearest; dh unrounded fp32): 258 us against at::mm + swiglu_bwd 315 (M 6144)
+SWB_CFG32: int | None = 6
 
 
 class _AdaAttention120(torch.autograd.Function):
@@ -355,7 +368,7 @@ class _AdaAttention120(torch.autograd.Function):
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, dout):
-        from miniworld_engine.kernels.integrations.adaln_sm80 import Branch, _mm, like
+        from miniworld_engine.kernels.integrations.adaln_sm80 import Branch, like
 
         heads, npar, fp32 = ctx.meta
         v = ctx.saved_tensors
@@ -368,7 +381,7 @@ class _AdaAttention120(torch.autograd.Function):
         with torch.cuda.device(xs.device):
             dm, dx, psb = k.bwd_x(dxa, xs, xst, sbt, sbc, dout, xs.dtype)  # + the residual's gradient
             br = Branch(xs.device)
-            dw = br.run(lambda: _wgrad(dm, aff), dm, aff)  # [2 d, dc] fp32: [dWs; dWb]
+            dw = br.run(lambda: _wgrad120(dm, aff), dm, aff)  # [2 d, dc] fp32: [dWs; dWb]
             dca = _ltm(dm, wcat, f32=True)
             dcond, pw = k.cond_bwd(dca, cs, cst, lnw, dc)  # + the attention's cond gradient
             br.join()
@@ -393,14 +406,24 @@ _LT_TRAIN: dict[tuple, tuple[int, ...]] = {  # us at::mm -> this (2026-11-14)
 }
 
 
+#: the fp32 training's GEMMs (TF32, fp32 out), as _LT_TRAIN
+_LT_TRAIN32: dict[tuple, tuple[int, ...]] = {  # S48 L128 rows (6144); us at::mm -> this (2026-11-14)
+    (6144, 3072, 768, False, True, True): (21, 20, 9, 1, 0, 0, 0),  # xa [Wa; Wb]^T: 348.1 -> 311.3
+    (6144, 1536, 768, False, True, True): (21, 17, 9, 1, 0, 0, 0),  # x [Wv; Wg]^T: 184.1 -> 171.8
+    (6144, 1536, 384, False, True, True): (21, 23, 3, 1, 0, 0, 0),  # LN(c) [Ws; Wb]^T: 102.4 -> 98.3
+    (6144, 1536, 768, False, False, True): (21, 17, 9, 1, 0, 0, 0),  # dz Ws: 182.3 -> 172.0
+    (1536, 768, 6144, True, False, True): (21, 20, 9, 7, 1, 0, 0),  # d[Wv; Wg], dWs^T (split-K 7): 174.1 -> 167.5
+}
+
+
 def _ltm(a: torch.Tensor, b: torch.Tensor, *, ta: bool = False, tb: bool = False, f32: bool = False) -> torch.Tensor:
     """op(a) op(b) (op: transposed when ta / tb), in a's dtype or (``f32``) fp32 -- at::mm, or cuBLASLt with a _LT_TRAIN configuration (RTX 5090, bf16)."""
     A, B = (a.t() if ta else a), (b.t() if tb else b)
     cfg = None
-    if LT_TRAIN_ON and a.dtype is BF and b.dtype is BF and a.is_contiguous() and b.is_contiguous() and _sm120(a):
-        cfg = _LT_TRAIN.get((A.shape[0], B.shape[1], A.shape[1], ta, tb, f32))
+    if LT_TRAIN_ON and a.dtype is b.dtype and a.dtype in (BF, F32) and a.is_contiguous() and b.is_contiguous() and _sm120(a):
+        cfg = (_LT_TRAIN if a.dtype is BF else _LT_TRAIN32).get((A.shape[0], B.shape[1], A.shape[1], ta, tb, f32 or a.dtype is F32))
     if cfg is None:
-        if f32:
+        if f32 or a.dtype is F32:  # fp32 operands: TF32 forced (_mm), as _mm_op / the attention's _tf32 context
             from miniworld_engine.kernels.integrations.adaln_sm80 import _mm
 
             return _mm(A, B)
@@ -410,6 +433,13 @@ def _ltm(a: torch.Tensor, b: torch.Tensor, *, ta: bool = False, tb: bool = False
     return out
 
 
+def _wgrad120(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """adaln_sm80._wgrad (x^T y fp32, the larger operand first) through _ltm (cuBLASLt with a measured configuration where one is listed)."""
+    if x.shape[1] >= y.shape[1]:
+        return _ltm(x, y, ta=True, f32=True)
+    return _ltm(y, x, ta=True, f32=True).t()
+
+
 # The transition's training on the RTX 5090: conditioned_transition_sm80's train_fwd / train_bwd (the row passes, the branch) with the
 # GEMMs above through _ltm (the shared sm_80 functions stay as they are for every other module and card).
 @opaque(fake=_ct_train_fwd_fake, name="bias_only_dit_sm120_ct_train_fwd")
@@ -417,7 +447,7 @@ def _ct_fwd120(
     x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws1: torch.Tensor, sb1: torch.Tensor, wb1: torch.Tensor, wa: torch.Tensor,
     wb: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor, eps_x: float, eps_c: float, residual: bool) -> list[torch.Tensor]:
     from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as C
-    from miniworld_engine.kernels.integrations.adaln_sm80 import Branch, _mm_op
+    from miniworld_engine.kernels.integrations.adaln_sm80 import Branch
 
     ka, kt = C._adaln(), C._tail()
     with torch.cuda.device(x.device):
@@ -425,9 +455,9 @@ def _ct_fwd120(
         br = Branch(x.device)
         g = br.run(lambda: C._gate_logits(cond, wsc, bsc), cond, wsc, bsc)
         aff, cst = ka.cond_ln(cond, lnw, x.dtype, eps_c, stats=True)
-        sbt = _mm_op(aff, wcat.t())
+        sbt = _ltm(aff, wcat, tb=True)
         xa, xst = ka.epilogue(x, sbt, sb1, eps_x, stats=True)
-        ab = _mm_op(xa, wab.t())
+        ab = _ltm(xa, wab, tb=True)
         z = _ltm(kt.swiglu_fwd(ab), ws, tb=True)
         br.join()
         y = kt.gate_res_fwd(x if residual else None, z, g)
@@ -442,26 +472,27 @@ def _ct_bwd120(
     wab: torch.Tensor, residual: bool, fp32_grads: bool = False,
 ) -> list[torch.Tensor]:
     from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as C
-    from miniworld_engine.kernels.integrations.adaln_sm80 import Branch, _mm_op, like
+    from miniworld_engine.kernels.integrations.adaln_sm80 import Branch, like
 
     ka, kt = C._adaln(), C._tail()
     d, nd = x.shape[1], wa.shape[0]
     with torch.cuda.device(x.device):
         dz, dg, pbsc = kt.gate_res_bwd(dy, z, g)
         br = Branch(x.device)
-        dwsc = br.run(lambda: _wgrad(dg, cond), dg, cond)
+        dwsc = br.run(lambda: _wgrad120(dg, cond), dg, cond)
         dcond2 = br.run(lambda: _ltm(dg, wsc), dg, wsc)
         dcond2_ready = br.mark()
-        if SWB_CFG is not None and x.dtype is BF and x.shape[0] % 128 == 0 and x.shape[0] >= 4096:  # (a few rows: at::mm, r104 L384 S1 GREEN) dh = dz Ws with the SwiGLU backward in gemm120's epilogue (dh stays in registers)
+        swb = SWB_CFG if x.dtype is BF else SWB_CFG32
+        if swb is not None and x.shape[0] % 128 == 0 and x.shape[0] >= 4096:  # (a few rows: at::mm, r104 L384 S1 GREEN) dh = dz Ws with the SwiGLU backward in gemm120's epilogue (dh stays in registers)
             dab, h = torch.empty_like(ab), ab.new_empty(ab.shape[0], nd)
-            _core()._ext().gemm120_swiglu_bwd(dz, ws.t().contiguous(), ab, dab, h, SWB_CFG)
+            _core()._ext().gemm120_swiglu_bwd(dz, ws.t().contiguous(), ab, dab, h, swb)
         else:
-            dab, h = kt.swiglu_bwd(_mm_op(dz, ws), ab)
-        dws = br.run(lambda: _wgrad(dz, h), dz, h)
+            dab, h = kt.swiglu_bwd(_ltm(dz, ws), ab)
+        dws = br.run(lambda: _wgrad120(dz, h), dz, h)
         dwab = br.run(lambda: _ltm(dab, xa, ta=True, f32=True), dab, xa)
         dxa = _ltm(dab, wab)
         dm, dx, psb1 = ka.bwd_x(dxa, x, xst, sbt, sb1, dy if residual else None, x.dtype)
-        dw1 = br.run(lambda: _wgrad(dm, aff), dm, aff)
+        dw1 = br.run(lambda: _wgrad120(dm, aff), dm, aff)
         dca = _ltm(dm, wcat, f32=True)
         br.wait(dcond2_ready, dcond2)
         dcond, plw = ka.cond_bwd(dca, cond, cst, lnw, dcond2)
@@ -620,7 +651,7 @@ def _mm120(a: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None = None) -
     """RTX 5090: ``a w^T (+ bias)`` of the training forward (_fwd) on gemm120 (cuBLAS picks 32 x 32 wmma kernels for several of these
     shapes on sm_120); rows not a multiple of 32: cuBLAS."""
     if a.dtype is not BF or a.shape[0] % 32 or not a.is_contiguous() or not w.is_contiguous():
-        return torch.mm(a, w.t()) if bias is None else torch.addmm(bias, a, w.t())
+        return _ltm(a, w, tb=True) if bias is None else torch.addmm(bias, a, w.t())
     from miniworld_engine.kernels.bias_only_dit.cuda.sm80 import EPI_PLAIN, gemm120
 
     return gemm120(EPI_PLAIN, a, w, a.new_empty(a.shape[0], w.shape[0]), bias=bias, cfg=_tile(False, a, w.shape[0]))

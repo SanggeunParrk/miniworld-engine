@@ -1016,7 +1016,8 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # attention's Function (the residual and cond gradients summed in its row passes)
     # cuda:5090_sm120 5 (2026-11-14): bf16 / master training -- the transition on its own Function with dh = dz Ws and the SwiGLU backward in
     # one gemm120 (dh unrounded), the backward GEMMs on cuBLASLt with measured configurations at the S48 L768 rows, the d_pair 256 pair-bias
-    # backward on 8-element tiles
+    # backward on 8-element tiles; fp32 training too: the measured TF32 GEMM configurations at the S48 L128 rows, dh + SwiGLU backward in one
+    # gemm120 (TF32), the attention's bias gradient at L 128 (S >= 8) as one batched GEMM in place of the 16-CTA core
     backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 3, "cuda:5090_sm120": 5}
 
     def __init__(
