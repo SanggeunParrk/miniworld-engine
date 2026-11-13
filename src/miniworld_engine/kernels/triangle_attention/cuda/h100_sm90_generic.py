@@ -520,8 +520,12 @@ def _forward(
 
         o, lse, u = h100_dh.train_core(qkvg, sbias, H, dc, scale)
     else:
-        core = _core_mod._core_h16().triattn_fwd_h16 if h16 else _core_mod._core().triattn_fwd
-        o, lse, _, u = core(q, k, v, sbias, scale, need, gt, need)
+        if h16:  # inference: the dead trailing key tiles skipped
+            o, lse, _, u = _core_mod._core_h16().triattn_fwd_h16(
+                q, k, v, sbias, scale, need, gt, need, key_tiles=_core_mod.key_tiles(mask, L)
+            )
+        else:
+            o, lse, _, u = _core_mod._core().triattn_fwd(q, k, v, sbias, scale, need, gt, need)
     # (the ending node's out-projection writes its transposed rows as a strided batch over i: one cublasLt GEMM per sample; one GEMM
     # + the residual kernel's transposed store was slower except at d_pair 64 L128, measured 2026-10-20)
     # RoseTTAFold3's out bias in the same epilogue, before its one rounding: added to the bf16 sum afterwards it was a second

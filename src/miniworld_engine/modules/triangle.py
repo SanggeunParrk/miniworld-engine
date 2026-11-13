@@ -117,7 +117,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: triattn_native's sm_80 core instead of the k2b step-aside)
         "cueq": 2,
         "cuda:a100_sm80": 4,
-        "cuda:h100_sm90": 5,
+        "cuda:h100_sm90": 6,
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
     # (2026-11-12): row-blocked inference past a whole-pair budget (FoldForge OpenDDE refiner, 2976 / 3968 tokens at d_pair 384; A100: also
@@ -130,6 +130,8 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     # cuda:h100_sm90 5 (2026-11-13): d_pair 256 x 8 heads inference: the LayerNorm folded into the wide front's weight pack (the GEMM
     # reads the pair as loaded; outputs change within rounding, backend-only); d_pair 128 x 4 heads ending node: the tail reads o
     # transposed and x / the output as stored (bitwise the same); AF3 d_pair 64 (4 heads x 16): the one-kernel front up to L2048 (was 768)
+    # cuda:h100_sm90 6 (2026-11-13): inference on the fp16 core: the 128-key tiles past each sample's last attended key (masked in every
+    # row) are neither loaded nor computed (h100_sm90.key_tiles; bitwise the same outputs)
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -796,7 +798,7 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
     version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged); 3: the
     #: training dropout scale by the H100 Philox kernel (as the base class)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 5}  # 5: as the base class
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 6}  # 6: as the base class
 
     transposed_bias = False
     _anthropic_block = True
@@ -836,8 +838,9 @@ class _TriangleAttentionFp32Softmax(_TriangleAttentionBase):
     transposed_bias = False
     #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged); 3: the
     #: training dropout scale by the H100 Philox kernel (as the base class)
-    #: 4: as the base class (RF3 at d_pair 128); 5: as the base class (RF3 at d_pair 128: the ending node's tail, bitwise the same)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 5}
+    #: 4: as the base class (RF3 at d_pair 128); 5: as the base class (RF3 at d_pair 128: the ending node's tail, bitwise the same); 6: as
+    #: the base class (the fp16 core skips the dead trailing key tiles)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 6}
     #: RoseTTAFold3: the gate and the out-projection carry a bias.
     _projection_biases: bool = False
 
