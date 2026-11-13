@@ -23,8 +23,8 @@ import math
 import torch
 
 from miniworld_engine.kernels import _capture
-from miniworld_engine.kernels._key_len import key_len
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._key_len import kernel_mask
 from miniworld_engine.kernels._nvcc import build_failed
 
 DP = 128
@@ -351,9 +351,6 @@ def _inference_cpp(single, pair, mask, leaves, eps_s, eps_p):
     wpack, bvec, wf, wop, lnw, lnb, wo_k = _inference_packs(leaves)
     ext = _rows().ext()
     overlap, warps = _overlap(), _core_warps(Lp, H)
-    # each row's key tiles past its last attended key (and the pad keys to Lp) skipped by the core (``kernels._key_len``; the same bits)
-    L = single.shape[1]
-    klen = key_len(mask, L) if mask is not None else (torch.full((B,), L, device=single.device, dtype=torch.int32) if Lp != L else None)
 
     def step(b):
         return ext.apb_inference(
@@ -371,7 +368,6 @@ def _inference_cpp(single, pair, mask, leaves, eps_s, eps_p):
             overlap,
             warps,
             _ATTN_BN,
-            None if klen is None else klen[b : b + 1],
         )
 
     if B == 1:
@@ -841,12 +837,12 @@ def _gfwd_row(single, pair, mask, params, heads, gate_bias, eps_s, eps_p, save, 
             og = torch.empty_like(o)
             sm80.gate_rows(o, g, og)
         else:
+            # the key tiles past the last attended key skipped by the core, which reads the mask (``kernels._key_len``; the same bits)
+            km = kernel_mask(m, L)
             if f32:
-                sm80.tf32_forward(q, k, v, bias, 1, L, heads, hdp, sm_scale=scale, gate=g, out=q, rna=True)
+                sm80.tf32_forward(q, k, v, bias, 1, L, heads, hdp, sm_scale=scale, gate=g, out=q, rna=True, kmask=km)
             else:
-                # the key tiles past the last attended key (and the pad keys past nz) skipped by the core (``kernels._key_len``; the same bits)
-                kl = key_len(m, L) if m is not None else (torch.full((1,), nz, device=x.device, dtype=torch.int32) if nz < L else None)
-                sm80.pgate_forward(q, k, v, g, bias, 1, L, heads, hdp, sm_scale=scale, out=q, klen=kl)
+                sm80.pgate_forward(q, k, v, g, bias, 1, L, heads, hdp, sm_scale=scale, out=q, kmask=km)
             og = q
         out = torch.addmm(x, og, wop.t()).view(single.shape)
     if not save:

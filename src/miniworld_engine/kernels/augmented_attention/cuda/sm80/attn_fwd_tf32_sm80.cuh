@@ -18,6 +18,7 @@
 // Epilogues: GATE: sigmoid(g) o written to ``out`` (may alias q: a CTA reads its q tile before any other thread writes it); else o and the log-sum-exp lse[a][h][i] = m + log2 l.
 #pragma once
 #include "attn_fwd_sm80.cuh"
+#include "../key_len.cuh"
 
 namespace aa80 {
 
@@ -59,6 +60,9 @@ struct Fwd32Params {
   long long ldq, ldk, ldv, ldg, ldo, ss, kps;
   int L, H;
   float scl, bscl;
+  const uint8_t* kmb;               // inference: the bool key mask rows (kms bytes apart, 0: one row; kml keys) or null (key_len.cuh)
+  long long kms;
+  int kml;
 };
 
 template <int HD_, int NKV_, int MINB_, int GATE_, int KM_>
@@ -138,8 +142,10 @@ __global__ void __launch_bounds__(256, G::MINB) attn_fwd_tf32_kernel(const Fwd32
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sbase = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g8 = lane >> 2, q4 = lane & 3;
-  const int L = p.L, NJ = L / BN;
   const int qt = blockIdx.x, a = blockIdx.y, h = blockIdx.z;
+  // kmb: the key tiles past the sample's last attended key are masked in every row (exact zeros after the row's live max): neither loaded
+  // nor computed (the same bits)
+  const int L = p.L, NJ = p.kmb ? warp_key_tiles(p.kmb + a * p.kms, p.kml, L, BN) : L / BN;
 
   const KVBias32Loader<G> loader(p.k, p.v, p.ldk, p.ldv, p.bias, L, a, h, qt, tid, p.ss, p.kpen, p.kps);
   // Q rides in group 0

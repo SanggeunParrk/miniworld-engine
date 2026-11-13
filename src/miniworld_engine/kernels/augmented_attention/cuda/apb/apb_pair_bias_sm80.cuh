@@ -75,12 +75,21 @@ __global__ void __launch_bounds__(256, 2) pair_bias_fwd80_k(const bf* __restrict
   const int ntj = LP / 128;
   const long ntiles = (long)LP * ntj;
   const uint32_t sbase = su32_80(smem);
+  // the tiles past the last attended key (a padded tail) hold masked keys only: warp 0 takes the bound from the mask (key_len.cuh; 0: no key
+  // attended, every tile masked), the stores write those tiles as neg without their pair rows (the same bits)
+  __shared__ int klen_s;
+  if (warp == 0) {
+    const int kl = MASK != nullptr ? warp_key_len(reinterpret_cast<const uint8_t*>(MASK), L) : LP;
+    if (lane == 0) klen_s = kl;
+  }
+  __syncthreads();
   // tile n of this block: its query row, first key, number of real keys in it (0 for a padded query row)
   auto tile_of = [&](long n, int& i, int& j0, int& rows) -> bool {
     const long t = blockIdx.x + n * (long)gridDim.x;
     if (t >= ntiles) return false;
     i = (int)(t / ntj); j0 = (int)(t % ntj) * 128;
     rows = i < L ? min(128, L - j0) : 0;
+    if (j0 >= klen_s) rows = 0;                                            // every key of the tile masked: stored as neg below, not loaded or computed
     return true;
   };
   auto issue = [&](long n) {                                                // every thread: its granules of tile n into stage n % NS80 (always one group)

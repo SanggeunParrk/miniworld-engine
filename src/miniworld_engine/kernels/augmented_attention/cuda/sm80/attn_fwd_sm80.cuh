@@ -32,6 +32,7 @@
 // [A, B, L] tokens and the call serves one batch element b through the pointers' offsets).
 #pragma once
 #include "sm80_common.cuh"
+#include "../key_len.cuh"
 
 namespace aa80 {
 
@@ -73,8 +74,9 @@ struct FwdParams {
   int L, H;
   float scl;                        // multiplies q . k (1 when q is pre-scaled by sm_scale log2 e)
   float bscl;                       // multiplies the bias (log2 e, or 1 when the bias is already in base 2)
-  const int* klen;                  // inference: 1 + the last attended key per sample (sample stride kls ints; L when none is) or null (attn_fwd_kernel)
-  int kls;
+  const uint8_t* kmb;               // inference: the bool key mask rows of the samples (kms bytes apart, 0: one row; kml keys) or null:
+  long long kms;                    // the key tiles past the last attended key are skipped (key_len.cuh)
+  int kml;
 };
 
 // RAWB: the bias rides through the tensor core in raw units (MODE_PLAIN, MODE_PGATE); the other modes add it in fp32 base-2 units
@@ -215,15 +217,16 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) attn_fwd_kernel(const FwdPar
   const uint32_t sbase = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int qt = blockIdx.x, a0 = blockIdx.y * R, h = blockIdx.z;
-  // klen: the key tiles past the last attended key of every sample of the CTA are masked in every row -- exact zeros after the row's live
+  // kmb: the key tiles past the last attended key of every sample of the CTA are masked in every row -- exact zeros after the row's live
   // max (masked logits at -inf or a fill far below every live one) -- so they are neither loaded nor computed (the same bits)
-  int kl = p.L;
-  if (p.klen) {
-    kl = 0;
+  // (each warp reads the bound from the mask itself, key_len.cuh)
+  int nj = p.L / BN;
+  if (p.kmb) {
+    nj = 1;
 #pragma unroll
-    for (int r = 0; r < R; ++r) kl = max(kl, p.klen[(a0 + r) * p.kls]);
+    for (int r = 0; r < R; ++r) nj = max(nj, warp_key_tiles(p.kmb + (a0 + r) * p.kms, p.kml, p.L, BN));
   }
-  const int L = p.L, NJ = max(1, min(L / BN, (kl + BN - 1) / BN)), NS = R * NJ;
+  const int L = p.L, NJ = nj, NS = R * NJ;
 
   // ---- loads: sub-step s = (key tile j = s / R, sample r = s % R) brings its K | V, and the first sample of a key tile also its bias tile
   const KVBiasLoader<G> loader(p.k, p.v, p.ldk, p.ldv, p.bias, L, a0, h, qt, tid, p.ss, p.kpen, p.kps);

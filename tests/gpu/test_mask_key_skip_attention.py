@@ -1,15 +1,17 @@
-"""Attention cores skip the key blocks past each sample's last attended key (``kernels._key_len``).
+"""Attention kernels skip what a padded key mask makes dead (``kernels._key_len``, ``augmented_attention/cuda/key_len.cuh``).
 
-A padded tail (FoldForge buckets token counts: mask True for the first n) is masked in every query row; after a row's live max its
-exponentials are exact zeros, so a core that stops its key loop at the block holding the last attended key writes the same bits. Checked
-here against the same call with the skip off (``key_len`` patched to None in the module that computes it), bitwise, at every position
-(the padded query rows included), for paddings that drop 0, some and most key blocks, a fully masked row (kept whole: the references'
-finite fill makes it a uniform average) and a mask with holes.
+A padded tail (FoldForge buckets token / atom counts: mask True for the first n) is masked in every query row; after a row's live max its
+exponentials are exact zeros, so a core that stops its key loop at the tile holding the last attended key writes the same bits; a pair-bias
+tile whose keys are all masked is written as the mask value without reading the pair; a window / tile of atoms with no valid key writes
+its zero rows without computing them.
 
-- AttentionPairBias (H100 attn_inf bf16 one row / the B > 1 batch, TF32 fp32; A100 the fused step and the composed path);
-- the token DiT block (H100 attn_inf / attn_tf32_inf with the klen held next to the hoisted pair bias; A100 the sm_80 core);
-- the bias-only block (H100 pvx / pvx32, A100 pv_gate);
-- R26: a captured token stack replayed after ``refresh_static_inputs`` on a mask with another live count equals eager.
+- the token cores (AttentionPairBias: H100 attn_inf bf16 one row / the B > 1 batch, TF32 fp32; the token DiT block) against the same call
+  with the core's mask off (``kernel_mask`` patched to None where the module hands it to the core), bitwise, at every position, for
+  paddings that drop 0, some and most key tiles, a fully masked row (kept whole: the references' finite fill makes it a uniform average)
+  and a mask with holes; where the kernels read the mask themselves (A100 fused step, pair-bias tiles) the before / after bits are compared
+  across trees by the mask-skip benchmark, and here against the PyTorch reference at every position;
+- R26: a captured token stack replayed after ``refresh_static_inputs`` on a mask with another live count equals eager;
+- the atom windows (AtomDiT pad / Chai-1 / the SWA DiT) against the PyTorch reference at every position, padded rows included.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from miniworld_engine.modules.attention import AttentionPairBias
 
 pytestmark = [pytest.mark.gpu]
 
-#: the modules that compute klen for a core (patched to None for the reference call)
+#: the modules that hand the key mask to a core (``kernel_mask`` patched to None for the reference call)
 _SITES = (
     "miniworld_engine.kernels.integrations.attention_pair_bias_b200",
     "miniworld_engine.kernels.integrations.attention_pair_bias_sm80",
@@ -50,8 +52,8 @@ def _no_skip(monkeypatch: pytest.MonkeyPatch) -> None:
             mod = importlib.import_module(name)
         except ImportError:
             continue
-        if hasattr(mod, "key_len"):
-            monkeypatch.setattr(mod, "key_len", lambda mask, length: None)
+        if hasattr(mod, "kernel_mask"):
+            monkeypatch.setattr(mod, "kernel_mask", lambda mask, length: None)
 
 
 def _masks(B: int, L: int) -> list[torch.Tensor]:
@@ -192,3 +194,62 @@ def test_refresh_with_another_live_count() -> None:
             assert torch.equal(out, ref), f"fold {seed} (n {n}): refresh + replay != eager"
     finally:
         release_static_inputs(tables=tables)
+
+
+@pytest.mark.skipif(not _card(), reason="H100 (sm_90) or A100 (sm_80)")
+@pytest.mark.parametrize("dtype", ["master", "float32"])
+@pytest.mark.parametrize(("name", "kw"), [("AtomDiTProtenix", {"key_window": "pad"}), ("AtomDiTChai1", {}), ("AtomDiTMiniWorld", None)])
+def test_atom_dead_windows(name: str, kw: dict | None, dtype: str) -> None:
+    """A padded atom tail whose windows have no valid key: the window kernels write those CTAs' rows (0, LSE 1e30) without computing them.
+    The block output against the PyTorch reference at every position (padded rows included), and two calls bitwise the same."""
+    from miniworld_engine.modules import atom_dit as AD
+
+    cls = getattr(AD, name)
+    m = (cls() if kw is None else cls(d_single=128, d_cond=128, d_pair=16, n_head=4, n=2, **kw)).cuda().float()
+    C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
+    m = C.cast(m, dtype).eval()
+    act = torch.float32 if dtype == "float32" else torch.bfloat16
+    N, n = 2048, 1400  # windows from (1400 + 48) / 32 on have no valid key
+    g = torch.Generator(device="cuda").manual_seed(1)
+    inp = m.make_inputs(length=N, samples=5, depth=None, dtype=act, device="cuda", generator=g)
+    inp["mask"] = (torch.arange(N, device="cuda") < n)[None]
+    with torch.no_grad(), _autocast(dtype):
+        m.set_backend("pytorch")
+        ref = m(**inp).double()
+        m.set_backend("cuda")
+        if m.unsupported(**inp) is not None:
+            pytest.skip(f"not served: {m.unsupported(**inp)}")
+        out = m(**inp)
+        again = m(**inp)
+    assert torch.equal(out, again)
+    tol = 3e-2 if dtype == "master" else 3e-3
+    scale = ref.abs().max()
+    for rows in (slice(0, n), slice(n, N)):  # the real rows and the padded tail
+        err = ((out.double() - ref)[..., rows, :].abs().max() / scale).item()
+        assert err < tol, (rows, err)
+
+
+@pytest.mark.skipif(not _card(), reason="H100 (sm_90) or A100 (sm_80)")
+@pytest.mark.parametrize("dtype", ["master", "float32"])
+@pytest.mark.parametrize("which", ["apb", "protenix", "boltz2"])
+def test_padded_against_reference(which: str, dtype: str) -> None:
+    """Padded tails that drop most key tiles (and the pair-bias tiles past them): every position, the padded rows included, against PyTorch."""
+    L = 512
+    if which == "apb":
+        m, B = _apb(128, dtype), 2
+    else:
+        m, B = _token(which, dtype), 5
+    act = torch.float32 if dtype == "float32" else torch.bfloat16
+    g = torch.Generator(device="cuda").manual_seed(4)
+    inp = m.make_inputs(length=L, samples=B, depth=None, dtype=act, device="cuda", generator=g)
+    rows = inp["mask"].shape[0]
+    inp["mask"] = (torch.arange(L, device="cuda")[None] < torch.tensor([150, 400][:rows], device="cuda")[:, None]).contiguous()
+    with torch.no_grad(), _autocast(dtype):
+        if m.unsupported(**inp) is not None:
+            pytest.skip(f"not served: {m.unsupported(**inp)}")
+        out = m(**inp).double()
+        m.set_backend("pytorch")
+        ref = m(**inp).double()
+        m.set_backend("cuda")
+    err = ((out - ref).abs().max() / ref.abs().max()).item()
+    assert err < (3e-2 if dtype == "master" else 3e-3), err

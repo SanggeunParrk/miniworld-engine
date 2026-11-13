@@ -93,7 +93,7 @@ void check_grad_view(const torch::Tensor& t, const char* name, int64_t T, int64_
 void attn_fwd_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor gate, torch::Tensor out, torch::Tensor lse,
                    int64_t A, int64_t L, int64_t H, int64_t hd, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldg, int64_t ldo,
                    double scl, double bscl, int64_t mode, int64_t rows, int64_t nkv, int64_t minb, int64_t ss, torch::Tensor kpen, int64_t kps, int64_t nw,
-                   const torch::Tensor& klen) {
+                   const torch::Tensor& kmask) {
   for (auto* t : {&q, &k, &v, &bias}) check_bf16(*t, "attn_fwd");
   TORCH_CHECK(bias.is_contiguous() && bias.numel() == H * L * L, "attn_fwd: bias [H, L, L] contiguous");
   TORCH_CHECK(L % aa80::BM == 0 && L >= aa80::BM && A % rows == 0 && A / rows <= 65535 && H <= 65535, "attn_fwd: L a multiple of 128, A a multiple of rows");
@@ -131,12 +131,11 @@ void attn_fwd_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
     p.kpen = kpen.data_ptr<float>(); p.kps = kps;
   }
   p.ldq = ldq; p.ldk = ldk; p.ldv = ldv; p.ldg = ldg; p.ldo = ldo; p.ss = ss; p.L = (int)L; p.H = (int)H; p.scl = (float)scl; p.bscl = (float)bscl;
-  // klen: int32 [1] (the samples share it) or [A] (``kernels._key_len``), or empty: the key tiles past it are skipped (the same bits)
-  p.klen = nullptr; p.kls = 0;
-  if (klen.numel() > 0) {
-    TORCH_CHECK(klen.is_cuda() && klen.scalar_type() == at::kInt && klen.is_contiguous() && (klen.numel() == 1 || klen.numel() == A),
-                "attn_fwd: klen int32 [1] or [A]");
-    p.klen = klen.data_ptr<int>(); p.kls = klen.numel() > 1 ? 1 : 0;
+  p.kmb = nullptr; p.kms = 0; p.kml = 0;
+  if (kmask.numel() > 0) {   // the bool key mask [1 or A, n] (rows of unit stride): each sample's key tiles past its last attended key are skipped
+    TORCH_CHECK(kmask.is_cuda() && kmask.element_size() == 1 && kmask.dim() == 2 && kmask.stride(1) == 1 && (kmask.size(0) == 1 || kmask.size(0) == A) &&
+                kmask.size(1) <= L, "attn_fwd: kmask bool [1 or A, n <= L]");
+    p.kmb = reinterpret_cast<const uint8_t*>(kmask.data_ptr()); p.kms = kmask.size(0) > 1 ? kmask.stride(0) : 0; p.kml = (int)kmask.size(1);
   }
   const at::cuda::CUDAGuard guard(q.device());
   const int64_t cfg = (((((hd * 10 + rows) * 10 + nkv) * 10 + minb) * 10 + mode) * 10 + km) * 10 + nw;
@@ -181,12 +180,12 @@ void attn_fwd_nw(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tenso
   attn_fwd_impl(q, k, v, bias, gate, out, lse, A, L, H, hd, ldq, ldk, ldv, ldg, ldo, scl, bscl, mode, rows, nkv, minb, ss, kpen, kps, nw, torch::Tensor());
 }
 
-// attn_fwd_nw with ``klen`` (int32 [1] or [A], or empty): each sample's key tiles past its last attended key skipped
-void attn_fwd_kl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor gate, torch::Tensor out, torch::Tensor lse,
+// attn_fwd_nw with ``kmask`` (bool [1 or A, n], or empty): each sample's key tiles past its last attended key skipped
+void attn_fwd_km(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor gate, torch::Tensor out, torch::Tensor lse,
                  int64_t A, int64_t L, int64_t H, int64_t hd, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldg, int64_t ldo,
                  double scl, double bscl, int64_t mode, int64_t rows, int64_t nkv, int64_t minb, int64_t ss, torch::Tensor kpen, int64_t kps, int64_t nw,
-                 torch::Tensor klen) {
-  attn_fwd_impl(q, k, v, bias, gate, out, lse, A, L, H, hd, ldq, ldk, ldv, ldg, ldo, scl, bscl, mode, rows, nkv, minb, ss, kpen, kps, nw, klen);
+                 torch::Tensor kmask) {
+  attn_fwd_impl(q, k, v, bias, gate, out, lse, A, L, H, hd, ldq, ldk, ldv, ldg, ldo, scl, bscl, mode, rows, nkv, minb, ss, kpen, kps, nw, kmask);
 }
 
 // The backward, query side (attn_bwd_dq_sm80.cuh): q / k / v token-major bf16 views, dov [A L][lddo] bf16, bias [H][L][L] natural units (masked keys -inf),
@@ -595,7 +594,7 @@ void pair_bias_bwd(torch::Tensor z, torch::Tensor w, torch::Tensor db, torch::Te
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("attn_fwd", &attn_fwd);
   m.def("attn_fwd_nw", &attn_fwd_nw);
-  m.def("attn_fwd_kl", &attn_fwd_kl);
+  m.def("attn_fwd_km", &attn_fwd_km);
   m.def("attn_bwd_dq", &attn_bwd_dq);
   m.def("attn_bwd_dq_nw", &attn_bwd_dq_nw);
   m.def("db_reduce", &db_reduce);
