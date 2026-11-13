@@ -4,3 +4,5 @@
 {"date": "2026-11-10T13:33:59", "new": "3", "old": "2", "part": "measurer:accuracy", "reason": "TF32 on for every backend (user 2026-11-10); pytorch measures as before; triton, cuda, anthropic and cueq are measured again with --again", "verdict": "keep"}
 {"date": "2026-11-10T13:33:59", "new": "3", "old": "1", "part": "measurer:speed", "reason": "TF32 on for every backend (user 2026-11-10); pytorch measures as before; triton, cuda, anthropic and cueq are measured again with --again", "verdict": "keep"}
 {"date": "2026-11-10T13:33:59", "new": "3", "old": "2", "part": "measurer:speed", "reason": "TF32 on for every backend (user 2026-11-10); pytorch measures as before; triton, cuda, anthropic and cueq are measured again with --again", "verdict": "keep"}
+{"date": "2026-11-13T09:21:47", "new": "13.0", "old": "12.9", "part": "env:cuda", "reason": "anthropic on the kit stack (cu130 container, 2026-11-13)", "verdict": "remeasure"}
+{"date": "2026-11-13T09:21:48", "new": "2.13.0+cu130", "old": "2.13.0+cu129", "part": "env:torch", "reason": "anthropic on the kit stack (cu130 container, 2026-11-13)", "verdict": "remeasure"}

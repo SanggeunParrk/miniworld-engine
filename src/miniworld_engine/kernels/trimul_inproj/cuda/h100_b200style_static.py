@@ -9,7 +9,8 @@ from . import h100_wide_inference as BI
 def output_kernel(d, h, cfg, rowpad=False, xbuf=1, extra=()):
     """rowpad: the any-L one-sample form (k3.cu ROWPAD: 64-token chunks of one pair row, padded planes); xbuf: residual / output
     tiles per warpgroup (k3.cu XBUF)."""
-    bn, stages = cfg
+    bn, stages = cfg[:2]
+    wstages = cfg[2] if len(cfg) > 2 else 0  # the weight chunks in their own ring (k3.cu WSTAGES)
     source = K.R / ("k3reorder.cu" if d == 512 else "k3.cu")
     body = source.read_text()
     for anchor in (
@@ -35,6 +36,7 @@ def output_kernel(d, h, cfg, rowpad=False, xbuf=1, extra=()):
         f"-DHIDDEN={h}",
         f"-DBLOCKN={bn}",
         f"-DSTAGES={stages}",
+        *([f"-DWSTAGES={wstages}"] if wstages else []),
         "-DGFOLD=1",
         "-DTMN_SIGMOID_TANH=1",
         "-DMW_MINB=1",
@@ -44,7 +46,10 @@ def output_kernel(d, h, cfg, rowpad=False, xbuf=1, extra=()):
         *extra,  # measurement builds only (e.g. -DK3_DIAG=1)
     ]
     kernel = T.load_unit(str(T.compile_text(body, flags)), "b200style_k3_static").kernel(name)
-    smem = BI._k3_smem(d, bn, stages) + (xbuf - 1) * (2 * 64 * bn * 2 + 16)
+    if wstages:  # operand ring + weight ring + residual tiles + LN vectors / partials + barriers (k3.cu shared layout)
+        smem = stages * 128 * 128 + wstages * bn * 128 + xbuf * 2 * 64 * bn * 2 + 16 * d + 4096 + 3 * 512 + 16 * (stages + xbuf + wstages)
+    else:
+        smem = BI._k3_smem(d, bn, stages) + (xbuf - 1) * (2 * 64 * bn * 2 + 16)
     if smem > 232448:
         raise ValueError("K3 resources")
     kernel.set_max_dynamic_smem(smem)

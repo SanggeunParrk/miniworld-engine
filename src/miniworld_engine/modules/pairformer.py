@@ -67,14 +67,17 @@ class PairformerBlock(BackendModule, MasterWeights):
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 2,  # 2026-11-13: its sub-modules' anthropic paths (TriAttn folded block + cu129 core prebuilts, Transition folded residual)
         "cuda:a100_sm80": 4,
-        "cuda:h100_sm90": 4,
+        "cuda:h100_sm90": 5,
         "cuda:5090_sm120": 2,  # the sub-modules sm_120a builds (1, 2026-11-12); 2 (2026-11-13): their main-merge changes on sm_120a
     }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
     # batched (the cuda AttentionPairBias takes B > 1: no refusal-driven per-sample path)
     # cuda:a100_sm80 4 (2026-11-12): its AttentionPairBias's generic sm_80 pair-bias backward faster (the same values)
     # cuda:h100_sm90 3 (2026-11-12): its TriMul / TriangleAttention training dropout scale by the H100 Philox kernel, TriMul small-L tiles
     # cuda:h100_sm90 4 (2026-11-13): its TriMul / Transition inference cast fp32-master weights once per parameter version
+    # cuda:h100_sm90 5 (2026-11-13): its TriangleAttention at d_pair 128 x 4 heads projects the gate in the inference tail (fp32), d_pair
+    # 256 x 8 heads keeps the wide front's CTA groups in step
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()
@@ -319,6 +322,7 @@ class Pairformer(BackendModule, MasterWeights):
     """The Pairformer stack: ``config.n_block`` :class:`PairformerBlock` in sequence."""
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}  # 2026-11-13: the blocks' anthropic paths (see PairformerBlock)
 
     def __init__(self, config: PairformerConfig | None = None, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()

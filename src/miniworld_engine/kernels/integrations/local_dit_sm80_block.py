@@ -197,13 +197,13 @@ def _weights(weights):
     if hit is not None:
         refs, seen, pack = hit
         if seen == versions and all(r() is x for r, x in zip(refs, weights, strict=True)):
-            return pack
+            return _capture.hold(pack, key[0] is None)  # a capture reads it: the count limit below must not free it under the graph
     _capture.prune(_PACKS)
     if len(_PACKS) >= 64:  # a model's worth of blocks; drop the oldest
         _PACKS.pop(next(iter(_PACKS)))
     pack = _pack(weights, cross)
     _PACKS[key] = (tuple(weakref.ref(x) for x in weights), versions, pack)
-    return pack
+    return _capture.hold(pack, False)
 
 
 _PACKS_BWD: dict = _capture.weight_cache("local_dit_sm80_block.packs_bwd")
@@ -245,13 +245,13 @@ def _weights_bwd(weights):
     if hit is not None:
         refs, seen, pack = hit
         if seen == versions and all(r() is x for r, x in zip(refs, weights, strict=True)):
-            return pack
+            return _capture.hold(pack, key[0] is None)  # a capture reads it: the count limit below must not free it under the graph
     _capture.prune(_PACKS_BWD)
     if len(_PACKS_BWD) >= 64:
         _PACKS_BWD.pop(next(iter(_PACKS_BWD)))
     pack = _pack_bwd(weights, cross)
     _PACKS_BWD[key] = (tuple(weakref.ref(x) for x in weights), versions, pack)
-    return pack
+    return _capture.hold(pack, False)
 
 
 _HOIST_COND: dict = _capture.weight_cache("local_dit_sm80_block.hoist_cond")  # (conditioning tensor, weights) -> mod: the per-item conditioning table of an inference call

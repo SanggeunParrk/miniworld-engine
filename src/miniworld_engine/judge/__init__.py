@@ -132,6 +132,10 @@ class Now:
             self._env = {"capability": GPUS[self.gpu], "torch": torch.__version__, "cuda": torch.version.cuda, "triton": tv}
         return self._env
 
+    def env_for(self, backend: str) -> dict:
+        """The environment a backend's results are measured in: the kits' stack for ``cfgmod.KIT_STACK_BACKENDS``, else this one."""
+        return {**self.env, **cfgmod.KIT_STACK_ENV} if cfgmod.kit_stack(self.gpu, backend) else self.env
+
 
 def _plain(obj):
     """Values as a record stores them (JSON round trip: tuples become lists)."""
@@ -181,7 +185,8 @@ def differences(kind: str, tok: dict, now: Now) -> list[tuple[str, str, object, 
         out.append(("ask", "config_version", tok["config_version"], now.config_version))
     if tok.get("prebuild_version", "1") != now.prebuild_version:
         out.append(("ask", "prebuild_version", tok.get("prebuild_version", "1"), now.prebuild_version))
-    out.extend(("ask", f"env:{k}", tok["env"].get(k), now.env[k]) for k in ENV_KEYS if tok["env"].get(k) != now.env[k])
+    env = now.env_for(b)
+    out.extend(("ask", f"env:{k}", tok["env"].get(k), env[k]) for k in ENV_KEYS if tok["env"].get(k) != env[k])
     return out
 
 
@@ -259,6 +264,9 @@ def issue(paths: list[str], now: Now) -> int:
                     continue
                 if (rec.get("gpu") or card_of(meta.get("env") or {})) != now.gpu:
                     counts[f"record of another card (not {now.gpu})"] += 1
+                    continue
+                if cfgmod.kit_stack(now.gpu, rec["backend"]) != cfgmod.on_kit_stack(meta.get("env") or {}):
+                    counts["record not from its backend's stack (kit stack: KIT_STACK_BACKENDS)"] += 1
                     continue
                 key = case_key(kind, rec)
                 tok = {
@@ -381,7 +389,7 @@ def owed(
             if state == "owed":
                 for part, old, new in why:
                     reasons[(kind, part if old is None else f"{part} {old}->{new}")] += 1
-                t = todo[(kind, rec["module"])]
+                t = todo[(kind, rec["module"], "kit" if cfgmod.kit_stack(now.gpu, rec["backend"]) else "")]
                 t["rows"].add(rec["row"])
                 t["lengths"].add(rec["length"])
                 t["backends"].add(rec["backend"])
@@ -431,17 +439,18 @@ def write_plan(plan_dir: str, todo: dict, n_groups: int = 4) -> None:
     not form a product: the extra cases are measured again, which is harmless), in ``n_groups`` balanced groups (one measurement job
     each, run in parallel). A (kind, module) owing more than its share of the total is split into several configs (by row, else by
     (row, length)), each its own label ``<module>.p<i>`` (its own record file and done marker), so a lone large module still fills
-    every group."""
+    every group. Cases of a backend measured on the kits' stack (``measure.config.KIT_STACK_BACKENDS``) get their own configs
+    (label ``<module>.kit``) in groups ``K<i>``, which tools/slurm/cycle.sh runs through third_party/anthropic/kit_stack.sh."""
     d = Path(plan_dir)
     (d / "cfg").mkdir(parents=True, exist_ok=True)
     total = sum(t["n"] for t in todo.values())
     share = max(1, -(-total // max(1, n_groups)))
     jobs = []
-    for (kind, module), t in sorted(todo.items()):
+    for (kind, module, stack), t in sorted(todo.items()):
         parts = min(n_groups, -(-t["n"] // share), len(t["cells"]) or 1)
         chunks = _split_cells(t["cells"], parts) if parts > 1 else [list(t["cells"])]
         for i, cells in enumerate(chunks, 1):
-            label = module if len(chunks) == 1 else f"{module}.p{i}"
+            label = (module if len(chunks) == 1 else f"{module}.p{i}") + (f".{stack}" if stack else "")
             base = yaml.safe_load(CONFIGS[kind].read_text())
             base.update(
                 modules=[module],
@@ -453,15 +462,21 @@ def write_plan(plan_dir: str, todo: dict, n_groups: int = 4) -> None:
             )
             path = d / "cfg" / f"{kind}.{label}.yaml"
             path.write_text(yaml.safe_dump(base, sort_keys=False))
-            jobs.append((sum(t["cells"][c] for c in cells) if cells else t["n"], kind, label, str(path)))
-    groups, load = [[] for _ in range(n_groups)], [0] * n_groups
-    for n, kind, module, path in sorted(jobs, reverse=True):
-        i = load.index(min(load))
-        groups[i].append(f"{kind} {module} {path}")
-        load[i] += n
-    for i, g in enumerate(groups, 1):
-        (d / f"G{i}").write_text("".join(line + "\n" for line in g))
-    print(f"[judge] plan: {len(jobs)} runs in {plan_dir}, groups of {load} owed cases")
+            jobs.append((sum(t["cells"][c] for c in cells) if cells else t["n"], stack, kind, label, str(path)))
+    for stack, prefix in (("", "G"), ("kit", "K")):
+        mine = [j for j in jobs if j[1] == stack]
+        n = n_groups if stack == "" else min(n_groups, len(mine))
+        groups, load = [[] for _ in range(n)], [0] * n
+        for cases, _, kind, label, path in sorted(mine, reverse=True):
+            i = load.index(min(load))
+            groups[i].append(f"{kind} {label} {path}")
+            load[i] += cases
+        for i, g in enumerate(groups, 1):
+            (d / f"{prefix}{i}").write_text("".join(line + "\n" for line in g))
+        if mine or stack == "":
+            print(
+                f"[judge] plan: {len(mine)} runs in {plan_dir}, groups {prefix}* of {load} owed cases" + (" (kit stack)" if stack else "")
+            )
 
 
 # ------------------------------------------------------------------------------------------------------------------- sign, status

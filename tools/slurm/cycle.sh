@@ -15,16 +15,20 @@
 #   PARALLEL   (default 4)                      measurement jobs (GPUs) at once
 #   PLAN_GROUPS (default PARALLEL)              groups the plan is split into (more groups than GPUs keeps every free GPU busy)
 #   NODELIST   (optional)                       --nodelist for every job (a cluster where only some nodes are free)
+#   KITS_DIR, FF_SCRATCH, KIT_VENV, MINIWORLD_ANTHROPIC_ROOT   the kit stack of the K* groups (third_party/anthropic/kit_stack.sh): the plan puts
+#              the cases of measure.config.KIT_STACK_BACKENDS (H100: anthropic) there; they run in the kits' CUDA-13 container
 set -u
 if [ "${1:-}" = "--job" ]; then                       # inside a measurement job: work through one group file
   shift; PLAN=$1; GROUP=$2
   start=$(date +%s); mkdir -p "$PLAN/out" "$PLAN/done"
+  RUN=""   # K* groups: the backends measured on the kits' CUDA-13 stack (measure.config.KIT_STACK_BACKENDS)
+  case $GROUP in K*) RUN="${CYCLE_REPO:?}/third_party/anthropic/kit_stack.sh";; esac
   while read -r kind module cfg; do
     [ -z "$kind" ] && continue
     [ -e "$PLAN/done/$kind.$module" ] && continue
     left=$(( 570 - ($(date +%s) - start) )); [ $left -lt 60 ] && { echo "TIME UP before $kind $module"; exit 0; }
     echo "=== $kind $module (budget ${left}s) $(date +%T)"
-    timeout $left python -m miniworld_engine.measure.$kind "$cfg" --out "$PLAN/out/$kind.$module.jsonl" \
+    timeout $left $RUN python -m miniworld_engine.measure.$kind "$cfg" --out "$PLAN/out/$kind.$module.jsonl" \
       > "$PLAN/logs/$kind.$module.${SLURM_JOB_ID:-local}.log" 2>&1; rc=$?
     echo "=== $kind $module rc=$rc $(date +%T)"
     # done either way: a module cut by the time limit keeps the records it wrote and its other cases are owed again next cycle
@@ -36,6 +40,7 @@ fi
 
 PLAN=$(realpath -m "${1:?usage: cycle.sh PLAN_DIR [owed options]}"); shift
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
+export CYCLE_REPO=$REPO   # the measurement jobs run a spooled copy of this script: they find the repo by this
 ENV=${ENGINE_ENV:-$REPO/.pixi/envs/default}
 export PATH=$ENV/bin:$PATH LD_LIBRARY_PATH=$ENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} PYTHONPATH=$REPO/src PYTHONUNBUFFERED=1
 SB=(sbatch --parsable --time=00:10:00)
@@ -66,7 +71,7 @@ run_group() {
   done
   say "$g NOT DONE after 12 jobs"
 }
-for g in $(ls "$PLAN" | grep -E '^G[0-9]+$'); do
+for g in $(ls "$PLAN" | grep -E '^[GK][0-9]+$'); do
   while [ "$(jobs -rp | wc -l)" -ge "${PARALLEL:-4}" ]; do sleep 15; done
   run_group "$g" &
 done; wait

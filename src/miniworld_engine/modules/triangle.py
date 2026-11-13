@@ -113,10 +113,10 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
 
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "anthropic": 2,
+        "anthropic": 3,  # 3 (2026-11-13): the block folds the residual (z += block(z)); the cu129 triattn prebuilts
         "cueq": 2,
         "cuda:a100_sm80": 4,
-        "cuda:h100_sm90": 3,
+        "cuda:h100_sm90": 4,
         "cuda:5090_sm120": 3,  # 2: the bias-only one-direction path on sm_120a; 3 (2026-11-13): main's row-blocked / padded inference on the sm_120a build
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
@@ -124,6 +124,9 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
     # L % 128 != 0, padded); cuda:h100_sm90 2 (2026-11-12): row blocks of <= 2 GiB of q | k | v | g far past the working-set cap -- served
     # sizes up to L2048 keep their path; cuda:h100_sm90 3 (2026-11-12): the training dropout scale drawn by the H100 Philox kernel in one
     # launch (kernels/triangle_attention/cuda/h100_triattn.drop_scale; the same bits as the torch draw)
+    # cuda:h100_sm90 4 (2026-11-13): d_pair 128 x 4 heads inference: the tail projects the gate from x (fp32, never stored; the front
+    # writes q | k | v only) -- outputs change within rounding, see the classes' `version`; d_pair 256 x 8 heads: the wide front's CTA
+    # groups kept in step (FW_LAG; bitwise the same)
 
     #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
     dead: bool = False
@@ -350,6 +353,10 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
             PF, W, kw, block_why = self._anthropic_block_call(pair, mask)
             if block_why is None:
                 try:
+                    if pair.dtype == torch.bfloat16:
+                        # the kits' block statement: z += block(z), the residual folded in the epilogue (the ending node scattered back by
+                        # address math). The module returns a new tensor, so the block updates a copy of the pair in place.
+                        return PF.tri_attn_block(pair.clone(), W, **{**kw, "residual": True})
                     return pair + PF.tri_attn_block(pair, W, **kw).to(pair.dtype)
                 except PF.Refused as e:
                     # the library's own run-time refusal (a cell whose build fails on this stack, e.g. the c512 h8 d64 epilogue's ptxas
@@ -732,7 +739,8 @@ class TriangleAttention(_TriangleAttentionBase):
 
     """
 
-    version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    #: 2: (2026-11-13) the H100 d_pair 128 x 4 heads inference gate in fp32 inside the tail (backend_versions cuda:h100_sm90 4)
 
     _anthropic_block = True
 
@@ -782,10 +790,10 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
     Parameters as :class:`TriangleAttention` (always self-attention, no q / k norm).
     """
 
-    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged); 3: the
     #: training dropout scale by the H100 Philox kernel (as the base class)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 3}
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 4}
 
     transposed_bias = False
     _anthropic_block = True
@@ -825,7 +833,8 @@ class _TriangleAttentionFp32Softmax(_TriangleAttentionBase):
     transposed_bias = False
     #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged); 3: the
     #: training dropout scale by the H100 Philox kernel (as the base class)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 3}
+    #: 4: as the base class (RF3 at d_pair 128)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 4}
     #: RoseTTAFold3: the gate and the out-projection carry a bias.
     _projection_biases: bool = False
 
@@ -868,7 +877,8 @@ class TriangleAttentionRF3(_TriangleAttentionFp32Softmax):
     Parameters as :class:`TriangleAttentionAF3`.
     """
 
-    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
+    #: 3: (2026-11-13) the H100 d_pair 128 x 4 heads inference gate in fp32 inside the tail
 
     _projection_biases = True
 
@@ -948,6 +958,8 @@ class TriangleAttentionChai1(_TriangleAttentionFp32Softmax):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    #: cuda:h100_sm90 stays 3: no Chai-1 shape takes the d_pair 128 x 4 heads or the d_pair 256 x 8 heads path
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 3}
 
     untransposed_output = True
 
@@ -960,6 +972,8 @@ class TriangleAttentionChai1Confidence(_TriangleAttentionFp32Softmax):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    #: cuda:h100_sm90 stays 3 (as TriangleAttentionChai1)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 3}
 
     dual_output = True
 
@@ -1366,17 +1380,18 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
     #: ``serves_single`` / ``update``), bf16 only.
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "anthropic": 2,
+        "anthropic": 3,  # 3 (2026-11-13): the sealed CUDA-13 rows served wherever the driver loads them
         "cueq": 2,
         "cuda:a100_sm80": 3,
-        "cuda:h100_sm90": 5,
+        "cuda:h100_sm90": 6,
         "cuda:5090_sm120": 1,  # the sm_80 sources built for sm_120a (2026-11-12)
     }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64);
     # cuda:h100_sm90 2 (2026-11-12): inference planes past 8 GiB (OpenDDE refiner, d_pair 384 at 2976 / 3968) run K1 + the contraction in two
     # halves of the hidden channels; cuda:h100_sm90 3 (2026-11-12): the training row-dropout scale by the H100 Philox kernel in one launch (the
     # same bits as the torch draw) and the small-L inference K1 / K3 tiles of the TriMul table (trimul_inproj h100_sm90 version 4);
     # cuda:h100_sm90 5 (2026-11-13): deterministic training backward at D256-512 (W_o column sums and the wide LayerNorm dgamma / dbeta by
-    # per-block partials reduced in block order, no atomics)
+    # per-block partials reduced in block order, no atomics); cuda:h100_sm90 6 (2026-11-13): the D256 port's K1 in n128 weight blocks
+    # (schedule 1, eight-slot ring) and its inference K3 with the weights in a ring of their own (k3.cu WSTAGES 3); outputs bitwise unchanged
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         return _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=False)[1]
@@ -1507,7 +1522,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
             int(pair.shape[1]),
             "outgoing" if self.outgoing else "incoming",
             word="fast",
-            exclude=self._ANTHROPIC_EXCLUDED_ROWS,
+            exclude=None if _anthropic.cuda13_cubins_load() else self._ANTHROPIC_EXCLUDED_ROWS,
             batch=int(pair.shape[0]),
         )
 
@@ -1579,6 +1594,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     #: ``"anthropic"``: see the anthropic section below.
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 3,  # 2026-11-13: the sealed CUDA-13 rows served wherever the driver loads them
         "cuda:a100_sm80": 4,
         "cuda:h100_sm90": 3,
         "cuda:5090_sm120": 1,  # the sm_80 sources built for sm_120a (2026-11-12)

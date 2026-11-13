@@ -285,7 +285,8 @@ def _pack(P, dev):
     slot = _capture.scoped(next(iter(P.values())).data_ptr())
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
-        return hit[1]
+        # a capture reads it: a replacement must not free it under the graph
+        return _capture.hold(hit[1], slot is not None and slot[0] is None)
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 
     W = _pack_h100(P) if h100_enabled(dev) else _pack_one(P, dev, mid) if one else None
@@ -293,6 +294,7 @@ def _pack(P, dev):
         if slot is not None:
             _capture.prune(_PACKS)
             _PACKS[slot] = (key, W, tuple(P.values()))  # keeps the key tensors alive
+            _capture.hold(W, False)
         return W
     g = lambda n: P[n]
     w1, w2 = (
@@ -347,6 +349,7 @@ def _pack(P, dev):
     if slot is not None:
         _capture.prune(_PACKS)
         _PACKS[slot] = (key, W, tuple(P.values()))  # keeps the key tensors alive
+        _capture.hold(W, False)
     return W
 
 
@@ -1228,7 +1231,8 @@ def _pack32(P, dev):
     slot = _capture.scoped((next(iter(P.values())).data_ptr(), "tf32"))
     hit = None if slot is None else _PACKS32.get(slot)
     if hit is not None and hit[0] == key:
-        return hit[1]
+        # a capture reads it: a replacement must not free it under the graph
+        return _capture.hold(hit[1], slot is not None and slot[0] is None)
     g = lambda n: _f32(P[n])  # the parameters themselves (fp32 contiguous: no copy)
     w1, w2 = (
         g("attention.ada_ln_in.ln_cond.weight"),
@@ -1289,6 +1293,7 @@ def _pack32(P, dev):
     if slot is not None:
         _capture.prune(_PACKS32)
         _PACKS32[slot] = (key, W, tuple(P.values()))  # keeps the key tensors alive
+        _capture.hold(W, False)
     return W
 
 
