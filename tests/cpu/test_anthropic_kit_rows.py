@@ -79,3 +79,34 @@ def test_transition_pair_folds_the_residual(monkeypatch):
     m._anthropic_select(torch.zeros(1, 8, 256))  # single [B, L, c]
     m._anthropic_select(torch.zeros(1, 3, 8, 256))  # MSA rows [B, S, L, c]
     assert seen == [("pair", True), ("single", False), ("rows", False)]
+
+
+def test_exclusions_are_per_capability(driver, monkeypatch):
+    """Capability 8.0 (A100): below CUDA 13 only the sealed ``trimul_native`` rows are excluded (the sm_90a rows do not exist there) and the
+    transition cell pair_c256_n4 (a portable Triton row on that card) is never refused; capability 9.0 keeps its lists."""
+    import types
+
+    import torch
+
+    seen = {}
+
+    class Prov:
+        @staticmethod
+        def select(*args, **kwargs):
+            seen["exclude"] = kwargs.get("exclude")
+            return types.SimpleNamespace(cell_key=f"{seen['cc']}|bf16|pair_c256_n4|N<=800|eager|fwd")
+
+        class Refusal(Exception):
+            pass
+
+    monkeypatch.setattr(_anthropic, "load", lambda *a, **k: Prov)
+    driver(12080)
+    pair = torch.zeros(1, 4, 4, 128, dtype=torch.bfloat16)
+    for cap, rows, refused in (((8, 0), TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS_SM80, False), ((9, 0), TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS, True)):
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a, cap=cap: cap)
+        seen["cc"] = "{}.{}".format(*cap)
+        TriangleMultiplication(d_pair=128)._anthropic_select(pair)
+        assert seen["exclude"] == rows
+        why = Transition(d_hidden=256, n=4)._anthropic_core_refusal(torch.zeros(1, 8, 8, 256, dtype=torch.bfloat16))
+        assert (why is not None) == refused
+    assert set(TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS_SM80) < set(TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS)

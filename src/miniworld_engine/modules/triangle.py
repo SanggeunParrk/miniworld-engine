@@ -271,7 +271,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         prov = _anthropic.load("opt_core.kernels.triattn")
         return prov, _anthropic.kernel_selection(
             prov,
-            "{}.{}".format(*torch.cuda.get_device_capability(pair.device)),
+            "{}.{}".format(*cc),
             {torch.bfloat16: "bf16", torch.float32: "fp32"}[pair.dtype],
             self._head_dim(),
             self.n_head,
@@ -1381,7 +1381,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 3,  # 3 (2026-11-13): the sealed CUDA-13 rows served wherever the driver loads them
         "cueq": 2,
-        "cuda:a100_sm80": 3,
+        "cuda:a100_sm80": 4,  # 4 (2026-11-13): D64 k1w64 two column groups at hidden 128, k3w gate tiles issued ahead (the same values)
         "cuda:h100_sm90": 7,
     }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64);
     # cuda:h100_sm90 2 (2026-11-12): inference planes past 8 GiB (OpenDDE refiner, d_pair 384 at 2976 / 3968) run K1 + the contraction in two
@@ -1401,11 +1401,14 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
             return pair
         return _trimul_cuda_forward(self, pair, mask, dropout_p, bidirectional=False)
 
-    #: Rows excluded by name on this H100 stack (driver 575 / CUDA 12.9, torch 2.13 + cu129): the sealed ``trimul_native`` package's
+    #: Rows excluded by name on capability 9.0 below a CUDA-13 driver (H100: driver 575 / CUDA 12.9, torch 2.13 + cu129): the sealed ``trimul_native`` package's
     #: rows ``native`` / ``native_exact`` and the sealed ``esm_v61`` package (CUDA-13 cubins) dump core when launched; ``tx_sm90a`` /
     #: ``tx_sm90a_exact`` have no prebuilt binary for this ABI and the provider's step-aside from them lands on a dumping row. The
     #: provider's next measured row of the cell serves instead (``select(exclude=...)``, the provider's own step-aside mechanism).
     _ANTHROPIC_EXCLUDED_ROWS = ("native", "native_exact", "native:f32in", "esm_v61", "tx_sm90a", "tx_sm90a_exact")
+    #: The same on capability 8.0 (A100): only the sealed ``trimul_native`` rows exist there (its sm_80 cubins are CUDA-13.0 builds too; cssb3's
+    #: driver 570 is CUDA 12.8); ``esm_v61`` / ``tx_sm90a`` are sm_90a rows the provider never names on an A100.
+    _ANTHROPIC_EXCLUDED_ROWS_SM80 = ("native", "native_exact", "native:f32in")
 
     def _library_refusal(self, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None:
         if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:
@@ -1513,16 +1516,19 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         from miniworld_engine.modules import _anthropic
 
         prov = _anthropic.load("opt_core.kernels.trimul")
+        cc = torch.cuda.get_device_capability(pair.device)
         return prov, _anthropic.kernel_selection(
             prov,
-            "{}.{}".format(*torch.cuda.get_device_capability(pair.device)),
+            "{}.{}".format(*cc),
             {torch.bfloat16: "bf16", torch.float32: "fp32"}[pair.dtype],
             int(pair.shape[-1]),
             self.d_hidden,
             int(pair.shape[1]),
             "outgoing" if self.outgoing else "incoming",
             word="fast",
-            exclude=None if _anthropic.cuda13_cubins_load() else self._ANTHROPIC_EXCLUDED_ROWS,
+            exclude=None
+            if _anthropic.cuda13_cubins_load()
+            else (self._ANTHROPIC_EXCLUDED_ROWS_SM80 if cc[0] == 8 else self._ANTHROPIC_EXCLUDED_ROWS),
             batch=int(pair.shape[0]),
         )
 
@@ -1595,7 +1601,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 3,  # 2026-11-13: the sealed CUDA-13 rows served wherever the driver loads them
-        "cuda:a100_sm80": 4,
+        "cuda:a100_sm80": 5,  # 5 (2026-11-13): as TriangleMultiplication's 4 (D64 k1w64 / k3w, the same values)
         "cuda:h100_sm90": 3,
     }  # 2026-11-10: sm_80 paths; 3: the inference pack read by captures; 4: A100 D64 persistent front (k1w64); cuda:h100_sm90 2
     # (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version
@@ -1671,6 +1677,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     #: ``W_b`` (the right projection, before the gate product) scaled by ``1 / (unmasked residues)`` -- ``t / n = sum_k a_ik (b_jk / n)``;
     #: one provider call per sample.
     _ANTHROPIC_EXCLUDED_ROWS = TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS
+    _ANTHROPIC_EXCLUDED_ROWS_SM80 = TriangleMultiplication._ANTHROPIC_EXCLUDED_ROWS_SM80
     _library_refusal = TriangleMultiplication._library_refusal
     _pair_mask = TriangleMultiplication._pair_mask
 
@@ -1759,7 +1766,7 @@ class BidirectionalTriangleMultiplication(BackendModule, MasterWeights):
 
     backends = ("pytorch", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 2,
+        "cuda:a100_sm80": 3,  # 3 (2026-11-13): D64 k1w64 two column groups, k3w gate tiles issued ahead (the same values)
         "cuda:h100_sm90": 4,
     }  # 2026-11-10: sm_80 k1w64 front (D64); cuda:h100_sm90 2 (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the
     # small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version;
