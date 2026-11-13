@@ -60,7 +60,13 @@ class Transition(BackendModule, MasterWeights):
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 3, "cuda:h100_sm90": 5, "cuda:a100_sm80": 6, "triton:a100_sm80": 2}
+    backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 3,
+        "anthropic:a100_sm80": 4,  # 2026-11-13: the A100 kit stack; the pair_c256_n4 exclusion is capability 9.0 only (A100: the provider cell serves)
+        "cuda:h100_sm90": 5,
+        "cuda:a100_sm80": 6,
+        "triton:a100_sm80": 2,
+    }
     # 2026-11-13: anthropic 3 = the pair transition folds the residual in the kernel (the kits' block statement); the esm_t16 cell served wherever the driver loads its CUDA-13 cubin
     # 2026-11-13 (H100): cuda 5 = the inference forward casts fp32-master weights once per parameter version (param_forms), not per call
     # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train; A100 capture forms + fp32 (TF32) build.
@@ -114,8 +120,9 @@ class Transition(BackendModule, MasterWeights):
     # ------------------------------------------------------------------------------------------------------------------ anthropic
     #: The activation dtypes the provider has transition cells for (its cell table: bf16 | fp32).
     _ANTHROPIC_DTYPES = (torch.bfloat16, torch.float32)
-    #: Provider cells that dump core on this H100 stack (driver 575 / CUDA 12.9, torch 2.13 + cu129), refused by name: pair_c256_n4 (its
-    #: serving call engages the cell's esm_t16 cubin, built with nvrtc 13.0, at every size measured: L 128 and 384).
+    #: Provider cells of capability 9.0 that dump core below a CUDA-13 driver (H100: driver 575 / CUDA 12.9), refused by name: pair_c256_n4 (its
+    #: serving call engages the cell's esm_t16 cubin, an sm_90a binary built with nvrtc 13.0, at every size measured: L 128 and 384). The same
+    #: cell name on capability 8.0 (A100) is a portable Triton row (pf / v1): never excluded there.
     _ANTHROPIC_EXCLUDED_CELLS: tuple[str, ...] = ("|pair_c256_n4|",)
 
     @staticmethod
@@ -146,8 +153,13 @@ class Transition(BackendModule, MasterWeights):
         sel, why = self._anthropic_select(x)[1]
         from miniworld_engine.modules import _anthropic
 
-        if sel is not None and not _anthropic.cuda13_cubins_load() and any(c in str(sel.cell_key) for c in self._ANTHROPIC_EXCLUDED_CELLS):
-            return f"the provider cell {sel.cell_key} dumps core on this H100 stack (driver 575 / CUDA 12.9): refused by name"
+        if (
+            sel is not None
+            and str(sel.cell_key).startswith("9.")
+            and not _anthropic.cuda13_cubins_load()
+            and any(c in str(sel.cell_key) for c in self._ANTHROPIC_EXCLUDED_CELLS)
+        ):
+            return f"the provider cell {sel.cell_key} dumps core below a CUDA-13 driver (its sm_90a cubin): refused by name"
         return why
 
     #: Where the shared core's provider has no cell for the call, the kits' own transition kernels of that form (the module is model-agnostic:

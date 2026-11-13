@@ -52,14 +52,21 @@ REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements" / "requireme
 DTYPES = {"bfloat16": torch.bfloat16, "float32": torch.float32, "master": torch.bfloat16}
 FIXED = {"bfloat16": 8e-3, "master": 8e-3, "float32": 1e-5}
 EXTERNAL = ("anthropic", "cueq")
-#: Backends measured on the model kits' own stack, per card: the Anthropic kits run in-model on torch 2.13.0+cu130 inside a CUDA-13.0
-#: container (forward-compatible libcuda on the host's 575 driver), where the release's sealed CUDA-13.0 cubins (trimul_native, esm_v61,
-#: the ef2_t16 transition cubin) load; on the engine's CUDA-12.9 stack they cannot, and the provider serves slower step-aside rows. The
-#: judge plans these backends' cases into separate groups that run through third_party/anthropic/kit_stack.sh (tools/slurm/cycle.sh K*
-#: groups), takes their tokens only from records of that stack, and compares their environment with ``KIT_STACK_ENV`` (2026-11-13).
-KIT_STACK_BACKENDS = {"h100_sm90": ("anthropic",)}
-#: The kit stack's environment as records state it (env keys of the judge): the esmfold2 kit venv130 in the cu130 container.
+#: Backends measured on the model kits' own stack, per card: the Anthropic kits run in-model under a CUDA-13 driver, where the release's
+#: sealed CUDA-13.0 cubins load (trimul_native on both cards; esm_v61 and the ef2_t16 transition cubin on an H100); on the engine's
+#: CUDA-12.x driver they cannot, and the provider serves slower step-aside rows. The judge plans these backends' cases into separate
+#: groups that tools/slurm/cycle.sh runs through the card's kit-stack wrapper (K* groups), takes their tokens only from records of that
+#: stack (``on_kit_stack``), and compares their environment with ``kit_stack_env(card)`` (2026-11-13).
+#:   h100_sm90  third_party/anthropic/kit_stack.sh: torch 2.13.0+cu130 (a kit venv) inside the kits' CUDA-13.0 container.
+#:   a100_sm80  third_party/anthropic/kit_stack_compat.sh: the engine's own environment (torch cu129) with the CUDA-13.0 forward-compatible
+#:              libcuda in front of the host's (cssb3: driver 570 = CUDA 12.8) and the release's sm_80 triangle-attention extension built
+#:              for cu129 by build_local.sh. Measured equal to the kit venv130 on the same GPU within 2 % (TriMul / TriAttn, L 768 / 1024).
+KIT_STACK_BACKENDS = {"h100_sm90": ("anthropic",), "a100_sm80": ("anthropic",)}
+#: The H100 kit stack's environment as records state it (env keys of the judge): the esmfold2 kit venv130 in the cu130 container.
 KIT_STACK_ENV = {"torch": "2.13.0+cu130", "cuda": "13.0", "triton": "3.7.1"}
+#: Per card: the judge's env keys a kit-stack record differs in from this process's environment (A100: none -- the engine's environment;
+#: what makes it the kit stack is the CUDA-13 driver library, which records state as ``cuda_driver`` and tokens keep as evidence).
+KIT_STACK_ENVS = {"h100_sm90": KIT_STACK_ENV, "a100_sm80": {}}
 
 
 def kit_stack(gpu: str, backend: str) -> bool:
@@ -67,9 +74,16 @@ def kit_stack(gpu: str, backend: str) -> bool:
     return backend in KIT_STACK_BACKENDS.get(gpu, ())
 
 
+def kit_stack_env(gpu: str) -> dict:
+    """The env keys of the judge as a kit-stack record of card ``gpu`` states them where they differ from this process's (``KIT_STACK_ENVS``)."""
+    return KIT_STACK_ENVS.get(gpu, {})
+
+
 def on_kit_stack(env: dict) -> bool:
-    """Whether a record's environment is the kits' CUDA-13 stack (its CUDA major version)."""
-    return str(env.get("cuda") or "").split(".")[0] == KIT_STACK_ENV["cuda"].split(".")[0]
+    """Whether a record's environment is a kits' CUDA-13 stack: its torch is a CUDA-13 build (the H100 container) or its process ran on a
+    CUDA-13 driver library (``cuda_driver``, ``cuDriverGetVersion``: the forward-compatible libcuda of the A100 wrapper)."""
+    major = lambda v: str(v or "").split(".")[0]
+    return major(env.get("cuda")) == "13" or major(env.get("cuda_driver")) == "13"
 
 
 #: Backends measured with TF32 products allowed in float32 PyTorch matmuls: every backend (user decisions 2026-11-10: first the
@@ -387,6 +401,12 @@ def environment() -> dict:
             )
         except Exception:  # recorded as absent
             env["driver"] = None
+        # the CUDA version of the driver LIBRARY this process loaded (cuDriverGetVersion), e.g. "12.9" / "13.0": a forward-compatible libcuda
+        # in front of the host's raises it above the kernel driver's (the kit stack of an A100, see KIT_STACK_BACKENDS)
+        from miniworld_engine.modules._anthropic import driver_version
+
+        v = driver_version()
+        env["cuda_driver"] = f"{v // 1000}.{v % 1000 // 10}" if v else None
     return env
 
 

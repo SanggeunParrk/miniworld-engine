@@ -264,6 +264,56 @@ struct WTile {
     cp_async_wait<0>();
     __syncthreads();
   }
+
+  // ---- a whole operand pair issued ahead of its GEMM (a kernel with two GEMM phases issues the second phase's tiles before the first runs, so their global-memory
+  // latency passes under the first phase instead of between the phases): ``issue_all`` puts the nk k-tiles into nk consecutive stages at ``s`` as ONE commit group (the
+  // caller's later ``cp_async_wait`` calls retire it with the older groups); ``run_loaded`` is run_fast()'s MMA sequence over those stages once they have landed and a
+  // barrier has published them -- the same MMAs in the same order as run() / run_fast(): bit-identical accumulators.  No bounds handling (whole tiles, as run_fast).
+  DEVI void issue_all(uint32_t s, int nk, const GemmOps& o) const {
+#pragma unroll 1
+    for (int kt = 0; kt < nk; ++kt) load_stage(s, kt, kt, o);
+    cp_async_commit();
+  }
+  DEVI void run_loaded(uint32_t s, int nk) {
+    constexpr int KK = BK / 16;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int wm = warp / WN, wn = warp % WN;
+    zero();
+    const int mi = lane >> 3, r8 = lane & 7;
+    uint32_t afk[KK], afm[MT], bo[KK];
+#pragma unroll
+    for (int kk = 0; kk < KK; ++kk) {
+      afk[kk] = AM ? 0u : wkmaj(WTM * wm + (RP ? 2 * r8 + (mi & 1) : r8 + (mi & 1) * 8), 2 * kk + (mi >> 1));
+      bo[kk] = TILE_A + wkmaj(WTN * wn + r8 + (mi >> 1) * 8, 2 * kk + (mi & 1));
+    }
+#pragma unroll
+    for (int t = 0; t < MT; ++t) afm[t] = AM ? wmmaj<BM>((mi >> 1) * 8 + r8, (WTM / 8) * wm + 2 * t + (mi & 1)) : 0u;
+    uint32_t af[2][MT][4], bf[2][NP][4];
+    auto load_frags = [&](int buf, uint32_t sa, int kk) {
+#pragma unroll
+      for (int mt = 0; mt < MT; ++mt) {
+        if constexpr (!AM) ldsm_x4(af[buf][mt], sa + afk[kk] + mt * 1024); else ldsm_x4_t(af[buf][mt], sa + afm[mt] + kk * (16 * BM * 2));
+      }
+#pragma unroll
+      for (int np = 0; np < NP; ++np) ldsm_x4(bf[buf][np], sa + bo[kk] + np * 1024);
+    };
+    load_frags(0, s, 0);
+#pragma unroll 1
+    for (int kt = 0; kt < nk; ++kt) {
+#pragma unroll
+      for (int kk = 0; kk < KK; ++kk) {
+        if (kk == KK - 1) { if (kt + 1 < nk) load_frags((kk + 1) & 1, s + (kt + 1) * STAGE, 0); }
+        else load_frags((kk + 1) & 1, s + kt * STAGE, kk + 1);
+#pragma unroll
+        for (int mt = 0; mt < MT; ++mt)
+#pragma unroll
+          for (int np = 0; np < NP; ++np) {
+            mma16816(acc[mt][2 * np], af[kk & 1][mt], bf[kk & 1][np][0], bf[kk & 1][np][1]);
+            mma16816(acc[mt][2 * np + 1], af[kk & 1][mt], bf[kk & 1][np][2], bf[kk & 1][np][3]);
+          }
+      }
+    }
+  }
 };
 
 // ---- epilogue tiles: a [ROWS][COLS] bf16 tile is staged in shared memory (rows of COLS * 2 + 16 bytes: the words of one mma fragment row group land in 32

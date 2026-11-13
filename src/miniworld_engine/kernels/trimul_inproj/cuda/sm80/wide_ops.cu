@@ -132,7 +132,9 @@ void launch_k1w64(const a100::K1wParams& p) {
     C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, a100::k1w64_kernel<HS>, 256, a100::K1w64<HS>::SMEM));
     grid_cap = std::max(1, per_sm) * num_sms();
   }
-  a100::k1w64_kernel<HS><<<std::min(p.T / 128, grid_cap), 256, a100::K1w64<HS>::SMEM, stream()>>>(p);
+  // G column groups of CTAs (K1w64): the resident CTAs split evenly between the groups, each group walks every token tile
+  constexpr int G = a100::K1w64<HS>::G;
+  a100::k1w64_kernel<HS><<<G * std::min(p.T / 128, std::max(1, grid_cap / G)), 256, a100::K1w64<HS>::SMEM, stream()>>>(p);
 }
 
 // z [T, D], w1 [4 Hs, D], vs / vb [4 Hs], st [T, 2], mask [L] uint8 or empty -> planes [2 Hs, T].  fuse (bf16, D <= 128): st is an OUTPUT, the kernel computes (mean, rstd) of the rows
@@ -238,6 +240,16 @@ void k3w(torch::Tensor x, torch::Tensor z, torch::Tensor wo3, torch::Tensor wg3,
     static bool set = false;
     if (!set) { set_smem(a100::k3w_kernel<128, false, 5>, Cfg::SMEM); set = true; }
     a100::k3w_kernel<128, false, 5><<<(p.T / 128) * (p.D / 128), Cfg::NTHR, Cfg::SMEM, stream()>>>(p);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
+  if (TUNED && D == 64 && fuse && !ps.numel()) {
+    // D64 inference with in-kernel statistics: the gate GEMM's z tile and weights are issued before the output projection runs and the residual reads z from
+    // that resident tile (k3w_kernel ZPRE): the same MMAs and epilogue arithmetic, bit-identical outputs.
+    using Cfg = a100::K3wCfg<64>;
+    static bool set = false;
+    if (!set) { set_smem(a100::k3w_kernel<64, true, 4, true>, Cfg::SMEM_Z); set = true; }
+    a100::k3w_kernel<64, true, 4, true><<<p.T / 128, Cfg::NTHR, Cfg::SMEM_Z, stream()>>>(p);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
   }

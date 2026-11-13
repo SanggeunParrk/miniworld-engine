@@ -133,8 +133,8 @@ class Now:
         return self._env
 
     def env_for(self, backend: str) -> dict:
-        """The environment a backend's results are measured in: the kits' stack for ``cfgmod.KIT_STACK_BACKENDS``, else this one."""
-        return {**self.env, **cfgmod.KIT_STACK_ENV} if cfgmod.kit_stack(self.gpu, backend) else self.env
+        """The environment a backend's results are measured in: the card's kit stack for ``cfgmod.KIT_STACK_BACKENDS``, else this one."""
+        return {**self.env, **cfgmod.kit_stack_env(self.gpu)} if cfgmod.kit_stack(self.gpu, backend) else self.env
 
 
 def _plain(obj):
@@ -299,6 +299,12 @@ def issue(paths: list[str], now: Now) -> int:
                     "evidence": {
                         "host": (meta.get("env") or {}).get("host"),
                         "gpu": (meta.get("env") or {}).get("gpu"),
+                        # a kit-stack backend: the CUDA version of the driver library its record ran on (what makes an A100 record the kit stack)
+                        **(
+                            {"cuda_driver": (meta.get("env") or {}).get("cuda_driver")}
+                            if cfgmod.kit_stack(now.gpu, rec["backend"]) and (meta.get("env") or {}).get("cuda_driver")
+                            else {}
+                        ),
                         "record": os.path.relpath(path),
                     },
                     "issued": datetime.datetime.now().isoformat(timespec="seconds"),  # noqa: DTZ005 -- local wall-clock time, as every token so far

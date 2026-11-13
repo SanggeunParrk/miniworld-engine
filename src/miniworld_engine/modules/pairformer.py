@@ -68,6 +68,7 @@ class PairformerBlock(BackendModule, MasterWeights):
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,  # 2026-11-13: its sub-modules' anthropic paths (TriAttn folded block + cu129 core prebuilts, Transition folded residual)
+        "anthropic:a100_sm80": 3,  # 2026-11-13: the A100 kit stack (its TriMul / TriAttn sub-modules on the kits' sm_80 native rows)
         "cuda:a100_sm80": 4,
         "cuda:h100_sm90": 6,
     }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
@@ -323,7 +324,7 @@ class Pairformer(BackendModule, MasterWeights):
     """The Pairformer stack: ``config.n_block`` :class:`PairformerBlock` in sequence."""
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2}  # 2026-11-13: the blocks' anthropic paths (see PairformerBlock)
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "anthropic:a100_sm80": 3}  # 2026-11-13: the blocks' anthropic paths (see PairformerBlock)
 
     def __init__(self, config: PairformerConfig | None = None, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()
