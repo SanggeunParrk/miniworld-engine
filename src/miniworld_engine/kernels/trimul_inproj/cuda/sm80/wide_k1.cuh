@@ -17,6 +17,20 @@
 
 namespace a100 {
 
+// the token of plane position pos: itself, or (tr) the transposed one -- plane (r, c) = token (c, r)
+DEVI size_t k1_token(int pos, int L, int tr) {
+  if (!tr) return (size_t)pos;
+  const int r = pos / L;
+  return (size_t)(pos - r * L) * L + r;
+}
+// the first plane position of one-tile-per-CTA block b.  Transposed planes with L % 128 == 0: the plane row runs fastest (b = column tile * L + row), so the CTAs in
+// flight read adjacent row-sized pieces of the SAME input rows (tokens (c, r), (c, r + 1), ...: contiguous memory) instead of 128 rows each far apart
+DEVI int k1_tile_origin(int b, int L, int tr) {
+  if (!tr || (L & 127) != 0) return b * 128;
+  const int ct = b / L;
+  return (b - ct * L) * L + ct * 128;
+}
+
 struct K1wParams {
   const __nv_bfloat16* z;      // [T][D]
   const __nv_bfloat16* w1;     // [4 Hs][D] packed rows
@@ -28,6 +42,7 @@ struct K1wParams {
   const uint8_t* mask;         // [L] token mask or nullptr
   __nv_bfloat16* planes;       // [4 Hs / 2][T]
   int T, L, D, ncol;           // ncol = 4 Hs packed rows
+  int tr = 0;                  // k1t / k1w64: plane (r, c) holds token (c, r) (the input rows are read transposed; L % 128 == 0)
 };
 
 using K1wTile = WTile<128, 128, 2, 2, 4, false, true>;
@@ -240,11 +255,11 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
   const int grp = (int)blockIdx.x % C::G, cta = (int)blockIdx.x / C::G, step = (int)gridDim.x / C::G;   // column group; the CTA's first token tile and its stride
   // input tile loader: 1024 granules (128 rows x 2 k-tiles x 4), 4 per thread
   auto issue_z = [&](int tile, int buf) {
-    const __nv_bfloat16* src = p.z + (size_t)tile * 128 * C::D;
 #pragma unroll
     for (int e = 0; e < 4; ++e) {
       const int g = tid + C::NTHR * e, row = g >> 3, kt = (g >> 2) & 1, c = g & 3;
-      cp_async16(s0 + C::ZOFF + buf * C::ZBUF + kt * C::Z_KT + wkmaj(row, c), src + row * C::D + kt * 32 + c * 8);
+      const __nv_bfloat16* src = p.z + k1_token(tile * 128 + row, p.L, p.tr) * C::D;
+      cp_async16(s0 + C::ZOFF + buf * C::ZBUF + kt * C::Z_KT + wkmaj(row, c), src + kt * 32 + c * 8);
     }
   };
   // ---- the packed weights (once) + the first tile
@@ -295,7 +310,7 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
         }
       const float rstd = rsqrtf(q2 * (1.f / C::D) + p.eps);
       sts64(s0 + C::STOFF + tid * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
-      if (grp == 0) p.stw[t0 + tid] = make_float2(mean, rstd);
+      if (grp == 0) p.stw[k1_token(t0 + tid, p.L, p.tr)] = make_float2(mean, rstd);
     }
     uint32_t af[2][4][4];
 #pragma unroll
@@ -391,12 +406,12 @@ __global__ void __launch_bounds__(128, K1t<HS, ST>::MINB) k1t_kernel(const K1wPa
   extern __shared__ __align__(128) uint8_t smem[];
   const uint32_t s0 = smem_u32(smem);
   const int tid = threadIdx.x, wm = tid >> 5, lane = tid & 31, g8 = lane >> 2, q = lane & 3;
-  const int t0 = (int)blockIdx.x * 128;
+  const int t0 = k1_tile_origin((int)blockIdx.x, p.L, p.tr);
   // input tile (group 0): 1024 granules, 8 per thread
 #pragma unroll
   for (int e = 0; e < 8; ++e) {
     const int g = tid + C::NTHR * e, row = g >> 3, kt = (g >> 2) & 1, c = g & 3;
-    cp_async16(s0 + kt * C::Z_KT + wkmaj(row, c), p.z + (size_t)(t0 + row) * C::D + kt * 32 + c * 8);
+    cp_async16(s0 + kt * C::Z_KT + wkmaj(row, c), p.z + k1_token(t0 + row, p.L, p.tr) * C::D + kt * 32 + c * 8);
   }
   auto issue_w = [&](int ch) {   // weight chunk ch (packed rows [64 ch, 64 ch + 64)) into slot ch % ST: 512 granules, 4 per thread
     if (ch < C::NCH) {
@@ -436,7 +451,7 @@ __global__ void __launch_bounds__(128, K1t<HS, ST>::MINB) k1t_kernel(const K1wPa
       }
     const float rstd = rsqrtf(q2 * (1.f / C::D) + p.eps);
     sts64(s0 + C::STOFF + tid * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
-    p.stw[t0 + tid] = make_float2(mean, rstd);
+    p.stw[k1_token(t0 + tid, p.L, p.tr)] = make_float2(mean, rstd);
   }
   // A fragments of all of K (k1w64's RP token permutation)
   const int mi = lane >> 3, r8 = lane & 7;
@@ -514,6 +529,185 @@ __global__ void __launch_bounds__(128, K1t<HS, ST>::MINB) k1t_kernel(const K1wPa
       }
     }
   }
+}
+
+}  // namespace a100
+
+namespace a100 {
+
+// ----------------------------------------------------------------------------------------------------------------------------------- k1tw
+// The k1t form at D = 256 (bf16 inference): one CTA per 128-token tile with all 4 Hs packed rows.  The tile's input rows (128 x 256 bf16, 64 KB) are read ONCE into
+// shared memory and stay there; their LayerNorm_in statistics are computed once from that copy (one thread per token row, k1w's two passes) and written to ``stw``
+// (ln_stats_rows and its read of z are gone); the packed weights stream from L2 in chunks of 64 rows (32 channels), one 32-wide k-tile (4 KB) per ring slot, one
+// ring across the chunks so the next chunk's first k-tiles are in flight under the current chunk's epilogue.  ~81 KB of shared memory: two CTAs per SM.
+// 4 warps of 32 tokens x the chunk's 64 packed rows; the epilogue stores the plane words straight from the accumulators (k1t's RP permutation: 32 contiguous bytes
+// per channel and warp store).  k1w re-read each token tile once per 128-row n-tile (8x at hidden 256) through 8-k-tile CTAs whose prologue and epilogue latency
+// was half their time (A100 ncu: 58 % SM throughput, 12.5 % occupancy).
+//
+// TR (the outgoing direction): the tile is plane row r = t0 / L, plane columns c0 = t0 % L .. + 127, and plane (r, c) holds TOKEN (c, r): the input rows are read
+// transposed (128 rows of 512 contiguous bytes at a stride of L rows), so the planes come out [k][i] and the contraction of either direction is X = A^T B -- the
+// cuBLAS shape that runs 4-6 % faster on an A100 than A B^T at every TriMul plane size (the kit's sm_80 member contracts this way for the same reason).  The
+// statistics are written at the token's own index.  Requires L % 128 == 0 (a tile never crosses a plane row).
+template <int ST>
+struct K1tw {
+  static constexpr int D = 256, NK = D / 32, NTHR = 128;
+  static constexpr int Z_KT = 128 * 64;                  // bytes of one 32-wide k-tile of the 128-token input tile
+  static constexpr int W_KT = 64 * 64;                   // bytes of one k-tile of a 64-row weight chunk (one ring slot)
+  static constexpr int WOFF = NK * Z_KT;                  // the weight ring after the input tile
+  static constexpr int STOFF = WOFF + ST * W_KT;          // (mean, rstd) of the tile's 128 tokens
+  static constexpr int SMEM = STOFF + 128 * 8;
+};
+
+template <int ST, bool TR>
+__global__ void __launch_bounds__(128, 2) k1tw_kernel(const K1wParams p) {
+  using C = K1tw<ST>;
+  extern __shared__ __align__(128) uint8_t smem[];
+  const uint32_t s0 = smem_u32(smem);
+  const int tid = threadIdx.x, wm = tid >> 5, lane = tid & 31, g8 = lane >> 2, q = lane & 3;
+  const int t0 = k1_tile_origin((int)blockIdx.x, p.L, TR ? 1 : 0);
+  const int prow = TR ? t0 / p.L : 0, c0 = TR ? t0 - prow * p.L : 0;
+  {   // input tile: thread tid loads granule tid & 3 of every k-tile of rows (tid >> 2) + 32 e
+    const int rb = tid >> 2, cb = tid & 3;
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      const int row = rb + 32 * e;
+      const size_t tok = TR ? (size_t)(c0 + row) * p.L + prow : (size_t)(t0 + row);
+      const __nv_bfloat16* src = p.z + tok * C::D + cb * 8;
+#pragma unroll
+      for (int kt = 0; kt < C::NK; ++kt) cp_async16(s0 + kt * C::Z_KT + wkmaj(row, cb), src + kt * 32);
+    }
+  }
+  cp_async_commit();
+  const int nst = (p.ncol / 64) * C::NK;                   // ring stages: chunk ch, k-tile kt = stage ch * NK + kt
+  auto issue_w = [&](int s) {                              // stage s into slot s % ST: 64 rows x 4 granules, 2 per thread
+    if (s < nst) {
+      const int ch = s / C::NK, kt = s - ch * C::NK;
+      const uint32_t sw = s0 + C::WOFF + (s % ST) * C::W_KT;
+#pragma unroll
+      for (int e = 0; e < 2; ++e) {
+        const int g = tid + C::NTHR * e, row = g >> 2, c = g & 3;
+        cp_async16(sw + wkmaj(row, c), p.w1 + (size_t)(64 * ch + row) * C::D + kt * 32 + c * 8);
+      }
+    }
+    cp_async_commit();
+  };
+#pragma unroll
+  for (int s = 0; s < ST - 1; ++s) issue_w(s);
+  cp_async_wait<ST - 1>();                                 // the input tile landed (the weight stages may still be in flight)
+  __syncthreads();
+  {   // k1w's STATS statistics: one thread per token row, two passes, the same order
+    float sum = 0.f;
+#pragma unroll 1
+    for (int kt = 0; kt < C::NK; ++kt)
+#pragma unroll
+      for (int c = 0; c < 4; ++c) {
+        const uint4 v = lds128(s0 + kt * C::Z_KT + wkmaj(tid, c));
+        sum += (bf16lo(v.x) + bf16hi(v.x)) + (bf16lo(v.y) + bf16hi(v.y)) + ((bf16lo(v.z) + bf16hi(v.z)) + (bf16lo(v.w) + bf16hi(v.w)));
+      }
+    const float mean = sum * (1.f / C::D);
+    float q2 = 0.f;
+#pragma unroll 1
+    for (int kt = 0; kt < C::NK; ++kt)
+#pragma unroll
+      for (int c = 0; c < 4; ++c) {
+        const uint4 v = lds128(s0 + kt * C::Z_KT + wkmaj(tid, c));
+        const uint32_t w[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+        for (int i = 0; i < 4; ++i) { const float a = bf16lo(w[i]) - mean, b = bf16hi(w[i]) - mean; q2 = fmaf(a, a, fmaf(b, b, q2)); }
+      }
+    const float rstd = rsqrtf(q2 * (1.f / C::D) + p.eps);
+    sts64(s0 + C::STOFF + tid * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
+    const size_t tok = TR ? (size_t)(c0 + tid) * p.L + prow : (size_t)(t0 + tid);
+    p.stw[tok] = make_float2(mean, rstd);
+  }
+  __syncthreads();                                         // the statistics published
+  float rs[2][2], mr[2][2], mk[2][2];
+  const bool mrow = !TR || p.mask == nullptr || __ldg(p.mask + prow) != 0;
+#pragma unroll
+  for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+    for (int rh = 0; rh < 2; ++rh) {
+      const int lt = 32 * wm + 16 * mt + 2 * g8 + rh;
+      const uint2 u = lds64(s0 + C::STOFF + lt * 8);
+      const float mean = __uint_as_float(u.x), rstd = __uint_as_float(u.y);
+      rs[mt][rh] = rstd; mr[mt][rh] = mean * rstd;
+      float m = 1.f;
+      if (p.mask != nullptr) {
+        if constexpr (TR) m = (mrow && __ldg(p.mask + c0 + lt) != 0) ? 1.f : 0.f;   // pair mask m_r m_c is symmetric
+        else {
+          const int tok = t0 + lt, i = tok / p.L, j = tok - i * p.L;
+          m = (__ldg(p.mask + i) != 0 && __ldg(p.mask + j) != 0) ? 1.f : 0.f;
+        }
+      }
+      mk[mt][rh] = m;
+    }
+  // lane-constant fragment offsets: A (RP token permutation; + 1024 per m16 tile), B (+ 1024 per n16), per k16 half of a k-tile
+  const int mi = lane >> 3, r8 = lane & 7;
+  uint32_t aoff[2], boff[2];
+#pragma unroll
+  for (int k2 = 0; k2 < 2; ++k2) {
+    aoff[k2] = wkmaj(32 * wm + 2 * r8 + (mi & 1), 2 * k2 + (mi >> 1));
+    boff[k2] = wkmaj(r8 + (mi >> 1) * 8, 2 * k2 + (mi & 1));
+  }
+  __nv_bfloat16* const obase = p.planes + t0 + 32 * wm + 2 * g8;
+  int s = 0;
+#pragma unroll 1
+  for (int chn = 0; chn < p.ncol / 64; ++chn) {
+    float acc[2][8][4];
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+      for (int n = 0; n < 8; ++n)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) acc[mt][n][e] = 0.f;
+#pragma unroll
+    for (int kt = 0; kt < C::NK; ++kt, ++s) {
+      cp_async_wait<ST - 2>();
+      __syncthreads();                                     // stage s landed; every warp finished stage s - 1, so its slot takes stage s + ST - 1
+      issue_w(s + ST - 1);
+      const uint32_t sw = s0 + C::WOFF + (s % ST) * C::W_KT, sa = s0 + kt * C::Z_KT;
+#pragma unroll
+      for (int k2 = 0; k2 < 2; ++k2) {
+        uint32_t af[2][4];
+#pragma unroll
+        for (int mt = 0; mt < 2; ++mt) ldsm_x4(af[mt], sa + aoff[k2] + mt * 1024);
+#pragma unroll
+        for (int np = 0; np < 4; ++np) {
+          uint32_t bf[4];
+          ldsm_x4(bf, sw + boff[k2] + np * 1024);
+#pragma unroll
+          for (int mt = 0; mt < 2; ++mt) {
+            mma16816(acc[mt][2 * np], af[mt], bf[0], bf[1]);
+            mma16816(acc[mt][2 * np + 1], af[mt], bf[2], bf[3]);
+          }
+        }
+      }
+    }
+#pragma unroll
+    for (int np = 0; np < 4; ++np) {
+      const int R = 64 * chn + 16 * np + 2 * q;
+      const float2 sg = __ldg(reinterpret_cast<const float2*>(p.vs + R)), sp = __ldg(reinterpret_cast<const float2*>(p.vs + R + 8));
+      const float2 bg = __ldg(reinterpret_cast<const float2*>(p.vb + R)), bp = __ldg(reinterpret_cast<const float2*>(p.vb + R + 8));
+      const int ch = 32 * chn + 8 * np + 2 * q;
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt) {
+        float u[2][2];
+#pragma unroll
+        for (int rh = 0; rh < 2; ++rh)
+#pragma unroll
+          for (int cc = 0; cc < 2; ++cc) {
+            const float ag = acc[mt][2 * np][2 * rh + cc], ap = acc[mt][2 * np + 1][2 * rh + cc];
+            const float g = fmaf(rs[mt][rh], ag, fmaf(-mr[mt][rh], cc ? sg.y : sg.x, cc ? bg.y : bg.x));
+            const float pp = fmaf(rs[mt][rh], ap, fmaf(-mr[mt][rh], cc ? sp.y : sp.x, cc ? bp.y : bp.x));
+            u[rh][cc] = round_bf16f(fmaf(pp, tanh_approx(g), pp)) * mk[mt][rh];
+          }
+        __nv_bfloat16* o = obase + (size_t)ch * p.T + 16 * mt;
+        stg32(o, pack_bf16(u[0][0], u[1][0]));
+        stg32(o + p.T, pack_bf16(u[0][1], u[1][1]));
+      }
+    }
+  }
+  cp_async_wait<0>();
 }
 
 }  // namespace a100

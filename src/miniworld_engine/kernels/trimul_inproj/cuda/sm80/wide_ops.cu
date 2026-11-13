@@ -137,7 +137,8 @@ void launch_k1w64(const a100::K1wParams& p) {
   a100::k1w64_kernel<HS><<<G * std::min(p.T / 128, std::max(1, grid_cap / G)), 256, a100::K1w64<HS>::SMEM, stream()>>>(p);
 }
 
-// D64 front, one CTA per token tile with all packed rows (k1t_kernel): -1 = the measured rule (hidden 128), 0 = k1w64 everywhere, 1 = k1t at both widths, 3 = k1t with 3 ring slots at hidden 128 (A/B knob)
+// D64 front, one CTA per token tile with all packed rows (k1t_kernel): -1 = the measured rule (hidden 128; hidden 64 from L 640 and wherever the planes are
+// transposed: A100 2026-11-14, 1-7 % faster than k1w64 from L 640, within noise or slower at L 128 - 512), 0 = k1w64 everywhere, 1 = k1t at both widths, 3 = k1t with 3 ring slots at hidden 128 (A/B knob)
 static int g_k1t = -1;
 void k1t_set(int64_t v) { g_k1t = (int)v; }
 template <int HS, int ST = 2>
@@ -149,13 +150,14 @@ void launch_k1t(const a100::K1wParams& p) {
 }
 
 // z [T, D], w1 [4 Hs, D], vs / vb [4 Hs], st [T, 2], mask [L] uint8 or empty -> planes [2 Hs, T].  fuse (bf16, D <= 128): st is an OUTPUT, the kernel computes (mean, rstd) of the rows
-// itself (eps); otherwise st holds ln_stats_rows' result
+// itself (eps); otherwise st holds ln_stats_rows' result.  tr (bf16 D64 fused): plane (r, c) holds token (c, r) (k1t / k1w64 read the input rows transposed)
 template <bool ROW_MASK>
-void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, torch::Tensor st, torch::Tensor mask, torch::Tensor planes, int64_t L, double eps, bool fuse) {
+void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, torch::Tensor st, torch::Tensor mask, torch::Tensor planes, int64_t L, double eps, bool fuse, bool tr) {
   const int T = (int)z.size(0), D = (int)z.size(1), ncol = (int)w1.size(0);
   TORCH_CHECK(T % 128 == 0 && D % 32 == 0 && ncol % 128 == 0 && planes.size(0) == ncol / 2 && planes.size(1) == T && z.scalar_type() == w1.scalar_type() &&
               planes.scalar_type() == z.scalar_type(), "k1w: shapes");
   TORCH_CHECK(!fuse || (!is_f32(z) && D <= 384 && st.numel() == 2 * T), "k1w: the in-kernel statistics are bf16 with D <= 384");
+  TORCH_CHECK(!tr || (fuse && D == 64 && !is_f32(z)), "k1w: transposed planes (tr) are the bf16 D64 fused front only");
   if (is_f32(z)) {
     a100::K1w32Params p;
     p.z = z.data_ptr<float>(); p.w1 = w1.data_ptr<float>(); p.vs = vs.data_ptr<float>(); p.vb = vb.data_ptr<float>(); p.st = f2(st);
@@ -171,7 +173,7 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
   p.z = cbf(z); p.w1 = cbf(w1); p.vs = vs.data_ptr<float>(); p.vb = vb.data_ptr<float>(); p.st = fuse ? nullptr : f2(st); p.stw = fuse ? mf2(st) : nullptr; p.eps = (float)eps;
   p.mask = mask.numel() ? mask.data_ptr<uint8_t>() : nullptr;
   p.planes = mbf(planes);
-  p.T = T; p.D = D; p.L = (int)L; p.ncol = ncol;
+  p.T = T; p.D = D; p.L = (int)L; p.ncol = ncol; p.tr = tr ? 1 : 0;
   if (ROW_MASK && D == 512 && !fuse && L % 128 == 0) {
     static bool set_row = false;
     if (!set_row) { set_smem(a100::k1w_kernel<false, true>, a100::K1wTile::SMEM); set_row = true; }
@@ -180,7 +182,7 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
     return;
   }
   if (fuse && D == 64 && (ncol == 256 || ncol == 512)) {   // D64: the persistent variant (same planes and statistics, bit for bit)
-    if (g_k1t > 0 || (g_k1t < 0 && ncol == 512)) {   // hidden 128: one CTA per tile with all 512 packed rows (bit-identical to k1w64)
+    if (g_k1t > 0 || (g_k1t < 0 && (tr || ncol == 512 || L >= 640))) {   // one CTA per tile with all packed rows (bit-identical to k1w64; transposed planes always)
       if (ncol == 256) launch_k1t<64>(p); else if (g_k1t == 3 || (g_k1t < 0 && L >= 1536)) launch_k1t<128, 3>(p);   // 3 ring slots from L 1536 (measured -2..-6 % of the kernel at L 2048)
       else launch_k1t<128>(p);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -203,6 +205,28 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
   if (fuse) a100::k1w_kernel<true><<<(T / 128) * (ncol / 128), 128, a100::K1W_STATS_SMEM, stream()>>>(p);
   else a100::k1w_kernel<false><<<(T / 128) * (ncol / 128), 128, a100::K1wTile::SMEM, stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// D256 bf16 inference front (k1tw_kernel): z [T, 256], w1 [4 Hs, 256], vs / vb, mask [L] uint8 or empty -> planes [2 Hs, T] and the input statistics st [T, 2] (an OUTPUT).
+// tr: the planes hold the transposed tokens (plane (r, c) = token (c, r); needs L % 128 == 0).  The weight ring has 4 slots (two CTAs per SM; 3 measured 0-2 % slower).
+template <int ST, bool TR>
+void launch_k1tw(const a100::K1wParams& p) {
+  using C = a100::K1tw<ST>;
+  static bool set = false;
+  if (!set) { set_smem(a100::k1tw_kernel<ST, TR>, C::SMEM); set = true; }
+  a100::k1tw_kernel<ST, TR><<<p.T / 128, C::NTHR, C::SMEM, stream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+void k1tw(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, torch::Tensor st, torch::Tensor mask, torch::Tensor planes, int64_t L, double eps, bool tr) {
+  const int T = (int)z.size(0), D = (int)z.size(1), ncol = (int)w1.size(0);
+  TORCH_CHECK(!is_f32(z) && D == 256 && T % 128 == 0 && T == L * L && ncol % 64 == 0 && w1.size(1) == D && planes.size(0) == ncol / 2 && planes.size(1) == T &&
+              st.numel() == 2 * T && (!tr || L % 128 == 0), "k1tw: bf16 D256 shapes");
+  a100::K1wParams p;
+  p.z = cbf(z); p.w1 = cbf(w1); p.vs = vs.data_ptr<float>(); p.vb = vb.data_ptr<float>(); p.st = nullptr; p.stw = mf2(st); p.eps = (float)eps;
+  p.mask = mask.numel() ? mask.data_ptr<uint8_t>() : nullptr;
+  p.planes = mbf(planes);
+  p.T = T; p.D = D; p.L = (int)L; p.ncol = ncol;
+  if (tr) launch_k1tw<4, true>(p); else launch_k1tw<4, false>(p);
 }
 
 // --------------------------------------------------------------------------------------------------------------------------------------------- k3w
@@ -452,6 +476,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("k1w", &k1w<false>);
   m.def("k1w_row_mask", &k1w<true>);
   m.def("k1t_set", &k1t_set);
+  m.def("k1tw", &k1tw);
   m.def("k3w", &k3w<false>);
   m.def("k3w_tuned", &k3w<true>);
   m.def("k3s_set", &k3s_set);

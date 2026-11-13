@@ -221,13 +221,14 @@ def _tf32(z: torch.Tensor):
 
 
 # ------------------------------------------------------------------------------------------------------------------------------ forward
-def _contract(planes, x, hs, n, direction, token=None):
+def _contract(planes, x, hs, n, direction, token=None, transposed=False):
     """cuBLAS contraction of the plane pair: channels [0, h) outgoing (sum_k a[i,k] b[j,k]), the rest incoming (sum_k a[k,i] b[k,j]).
+    ``transposed``: the outgoing planes were written transposed (``k1tw`` TR: plane (r, c) = token (c, r)), so every channel contracts as A^T B.
     ``token`` (inference: the [L] token mask, empty = none): the bounded contraction where ``_bounded.CELLS`` lists the cell."""
     from ._bounded import bmm
 
     a, b = planes[:hs].view(hs, n, n), planes[hs:].view(hs, n, n)
-    h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
+    h = 0 if transposed else hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
     if h:
         bmm(a[:h], b[:h].transpose(1, 2), x[:h], token)
     if h < hs:
@@ -239,6 +240,15 @@ _FUSE_STATS = True
 _FUSE_STATS_WIDE = (
     False  # in-loop input statistics in k1w at D = 256 / 384: measured 4-8 % SLOWER than ln_stats_rows (A100, 2026-10-30), kept off
 )
+
+
+#: D256 bf16 inference front ``k1tw`` (``wide_k1.cuh``) instead of ln_stats_rows + k1w; False keeps those (probe switch for A / B timings).
+_K1TW = True
+#: inference outgoing planes written transposed (contraction A^T B) where the front supports it; False keeps A B^T (probe switch for A / B timings).
+_TRANSPOSED = True
+#: D64: the transposed planes from this length on, per hidden width (their transposed input reads cost the k1t front about what the A^T B contraction saves
+#: below it; A100 2026-11-14, module medians: hidden 64 L 1024 / 2048 -3 / -2 %, L 768 +6 %; hidden 128 L 512 - 2048 -0.5 .. -1.7 %, L 384 +4 %)
+_TR64_MIN_L = {64: 1024, 128: 512}
 
 
 def _aligned(t: torch.Tensor) -> torch.Tensor:
@@ -270,14 +280,27 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     # while its stages go by (``K1StatHook``), so ``ln_stats_rows`` and its read of z are gone there too
     fuse_z = fuse_x or (_FUSE_STATS and _FUSE_STATS_WIDE and z.dtype is torch.bfloat16 and 128 < d <= 384)
     st_in = torch.empty((T, 2), dtype=torch.float32, device=z.device)
-    if not fuse_z:
-        E.stats_rows(zf, st_in, eps_in)
     planes = zf.new_empty((2 * hs, T))
-    k1 = E.k1w if save else E.k1w_row_mask
-    k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
+    # D256 bf16 inference, one direction, L >= 512: k1tw (one CTA per token tile, the statistics in-kernel; below L 512 its L^2 / 128 CTAs underfill the card:
+    # L 128 +23 %, L 256 / 384 +2 % on the module).  Inference outgoing at D256 / D64 (the fused k1t / k1w64 fronts):
+    # the planes are written transposed (plane (r, c) = token (c, r)) so the contraction runs as A^T B, the faster cuBLAS shape on an A100 (4-6 %)
+    tile = _K1TW and not save and z.dtype is torch.bfloat16 and d == 256 and hs == d and direction != BIDIR and n >= 512
+    transposed = (
+        _TRANSPOSED
+        and not save
+        and direction == OUTGOING
+        and ((tile and n % 128 == 0) or (fuse_z and d == 64 and n >= _TR64_MIN_L.get(hs, 1 << 30)))
+    )
+    if tile:
+        E.k1tw(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, transposed)
+    else:
+        if not fuse_z:
+            E.stats_rows(zf, st_in, eps_in)
+        k1 = E.k1w if save else E.k1w_row_mask
+        k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z, transposed)
     x = zf.new_empty((hs, n, n))
     with _tf32(z):
-        _contract(planes, x, hs, n, direction, None if save or ds.numel() else mask)
+        _contract(planes, x, hs, n, direction, None if save or ds.numel() else mask, transposed)
     saved_planes = planes if save else None
     del planes  # inference: dead once contracted -- freed before the output is allocated (peak z + planes + X, not + out)
     st_out = torch.empty((T, 2), dtype=torch.float32, device=z.device)
