@@ -195,7 +195,9 @@ class FusedBiasOnlyDiT:
             pst = torch.empty(L * L, 2, device=pair.device, dtype=torch.float32)  # the row statistics the kernel writes (unused here)
             z = z2d.contiguous()
             for b in range(self.nb):
-                train_ext().pair_bias_cuda(z, self.pw[b * self.h : (b + 1) * self.h].contiguous(), P[b * self.h : (b + 1) * self.h], pst, EPS)
+                train_ext().pair_bias_cuda(
+                    z, self.pw[b * self.h : (b + 1) * self.h].contiguous(), P[b * self.h : (b + 1) * self.h], pst, EPS
+                )
             C.softmax_rows(P.view(-1, L), P.view(-1, L), m)
             return P
         zh = torch.empty(L * L, self.dp, device=pair.device, dtype=self.dtype)

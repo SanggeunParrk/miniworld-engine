@@ -193,7 +193,9 @@ def _fwd(
         core = _core()
         # inference: the core skips the key chunks past the mask's last attended key (P = 0 there; it reads the mask: ``kernels._key_len``)
         km = None if save or mask is None else mask.reshape(1, length)
-        (core.PvGateTF32 if f32 else core.PvGate)(heads, da // heads)(vg[:, :da], P.view(heads * length, length), a, samples, g=vg[:, da:], kmask=km)
+        (core.PvGateTF32 if f32 else core.PvGate)(heads, da // heads)(
+            vg[:, :da], P.view(heads * length, length), a, samples, g=vg[:, da:], kmask=km
+        )
         y = torch.mm(a, wo.t())
         g2 = torch.addmm(bs, cond, ws.t())
         out = torch.empty_like(res)
