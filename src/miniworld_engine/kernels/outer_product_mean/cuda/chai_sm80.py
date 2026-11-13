@@ -28,6 +28,11 @@ def ext():
 
 
 def chai_epilogue(o, wfold, bias, residual=None, save=False, eps=0.1):
+    if _sm120():  # the RTX 5090 build takes the column sums of W' (cached while the folded weights are the same tensor)
+        from miniworld_engine.kernels import _capture
+
+        (colsum,) = _capture.param_forms("chai_colsum_sm120", [wfold], lambda: (wfold.float().sum(1).contiguous(),), capture_reads_eager=not save)
+        return ext().chai_epilogue(o, wfold, bias, residual, bool(save), float(eps), colsum)
     return ext().chai_epilogue(o, wfold, bias, residual, bool(save), float(eps))
 
 
@@ -48,6 +53,9 @@ def chai_products(a, b, mask, s, n):
     (``ogemm_sm80``; their blocks are exactly 0), one launch per group, from L 384; else the cuBLAS batched GEMM."""
     import torch
 
+    if _sm120() and mask is not None:  # the RTX 5090: one batched launch that writes the dead-token tiles as zeros (256 x 128 tiles, 64 x 128 at N 128)
+        live = _gemm_sm120().live_tokens(mask, s, n)  # (10-15 % ahead of cuBLAS / the per-group masked product at L 128..512)
+        return _gemm_sm120().mm(a.view(8, s, n * 8), b.view(8, s, n * 8), True, False, 2 if n >= 256 else 4, live=live, ch=8)
     if mask is None or n < 384:  # short lengths: the eight launches cost more than the skipped blocks save (measured L128 1.4x)
         cfg = _products_cfg(s, n) if _sm120() else -1  # the RTX 5090: the CUTLASS batched GEMM where it beats cuBLAS (-1: cuBLAS)
         if cfg >= 0:

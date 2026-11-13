@@ -21,7 +21,11 @@ using namespace opm80;
 
 constexpr int G = 8, KK = 8, P = 512;
 constexpr int BM = 64;                     // pairs per epilogue tile
+#ifdef MWE_SM120   // the RTX 5090 (99 KiB): a 2-stage ring, two epilogue CTAs per SM (4 stages fit one)
+constexpr int KB = 32, NKB = P / KB, NS = 2;
+#else
 constexpr int KB = 32, NKB = P / KB, NS = 4;   // K blocks of 32 products (4 chunks: four (g, k) runs), ring stages
+#endif
 
 DEVI uint32_t r64(int row, int chunk) { return row * 64u + (((chunk ^ (row >> 1)) & 3u) << 4); }      // 64-byte rows (4 chunks)
 
@@ -221,7 +225,12 @@ __global__ void __launch_bounds__(256) chai_bwd_kernel(const bf16* __restrict__ 
 }  // namespace
 
 // O [G, N K, N K] bf16, wfold [CZ, 512] bf16, bias [CZ] fp32, residual [1, N, N, CZ] bf16 (optional) -> [z, y [N N, 512], stats [N N, 2] (with save)]
+#ifdef MWE_SM120   // the RTX 5090: the column sums of W' come from the caller (cached with the folded weights: two kernels less a call)
+std::vector<at::Tensor> chai_epilogue(at::Tensor O, at::Tensor wfold, at::Tensor bias, c10::optional<at::Tensor> residual, bool save, double eps,
+                                      at::Tensor colsum_in) {
+#else
 std::vector<at::Tensor> chai_epilogue(at::Tensor O, at::Tensor wfold, at::Tensor bias, c10::optional<at::Tensor> residual, bool save, double eps) {
+#endif
   TORCH_CHECK(O.is_cuda() && O.is_contiguous() && O.scalar_type() == at::kBFloat16 && O.dim() == 3 && O.size(0) == G && O.size(1) == O.size(2)
               && O.size(1) % (KK * BM) == 0, "O: contiguous bf16 [8, N K, N K] with N a multiple of 64 and K = 8");
   const int64_t N = O.size(1) / KK, CZ = wfold.size(0);
@@ -237,7 +246,12 @@ std::vector<at::Tensor> chai_epilogue(at::Tensor O, at::Tensor wfold, at::Tensor
   at::Tensor st = save ? at::empty({N * N, 2}, O.options().dtype(at::kFloat)) : at::empty({0}, O.options().dtype(at::kFloat));
   const int zt = 256;
   const int tasks = (int)(N * N / BM * (CZ / zt));
+#ifdef MWE_SM120
+  TORCH_CHECK(colsum_in.is_cuda() && colsum_in.scalar_type() == at::kFloat && colsum_in.is_contiguous() && colsum_in.numel() == CZ, "colsum: fp32 [CZ]");
+  const at::Tensor& colsum = colsum_in;
+#else
   const at::Tensor colsum = wfold.to(at::kFloat).sum(1).contiguous();      // the epilogue's mean term: sum_p W'[o, p]
+#endif
   const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   auto launch = [&](auto kernel, int smem) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
@@ -281,19 +295,33 @@ __device__ __forceinline__ void mma16816p(float* d, const uint32_t* a, uint32_t 
                : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
+#ifdef MWE_SM120   // the RTX 5090: 8 warps x 16 rows a CTA (the projection weights staged once per 128 rows)
+#define CHAI_PJ_NW 8
+__global__ void __launch_bounds__(256) chai_proj_kernel(const bf16* __restrict__ X, const unsigned char* __restrict__ mask, const float* __restrict__ gamma,
+#else
+#define CHAI_PJ_NW 4
 __global__ void __launch_bounds__(128) chai_proj_kernel(const bf16* __restrict__ X, const unsigned char* __restrict__ mask, const float* __restrict__ gamma,
+#endif
                                                          const float* __restrict__ beta, const bf16* __restrict__ W, bf16* __restrict__ A,
                                                          bf16* __restrict__ B, float* __restrict__ stats, long T, float eps) {
   __shared__ __align__(16) bf16 sW[128 * WLD];
   __shared__ float sg[64], sb[64];
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+#ifdef MWE_SM120
+  for (int i = tid; i < 128 * 8; i += 32 * CHAI_PJ_NW) {
+#else
   for (int i = tid; i < 128 * 8; i += 128) {
+#endif
     const int r = i >> 3, c = i & 7;
     *reinterpret_cast<uint4*>(sW + r * WLD + c * 8) = *reinterpret_cast<const uint4*>(W + r * 64 + c * 8);
   }
   if (tid < 64) { sg[tid] = gamma[tid]; sb[tid] = beta[tid]; }
   __syncthreads();
+#ifdef MWE_SM120
+  const long t0 = (long)blockIdx.x * (16 * CHAI_PJ_NW) + warp * 16;
+#else
   const long t0 = (long)blockIdx.x * 64 + warp * 16;
+#endif
   const int r0 = lane >> 2, q = lane & 3;
   const long ra = t0 + r0, rb = ra + 8;
   uint32_t xa[4][2], xb[4][2];                            // [k step][k, k + 8] pairs of bf16 of row ra / rb
@@ -383,7 +411,11 @@ std::vector<at::Tensor> chai_proj(at::Tensor x, c10::optional<at::Tensor> mask, 
     TORCH_CHECK(mask->is_cuda() && mask->is_contiguous() && mask->scalar_type() == at::kBool && mask->numel() == T, "mask: bool [T]");
     mp = reinterpret_cast<const unsigned char*>(mask->data_ptr());
   }
+#ifdef MWE_SM120
+  chai_proj_kernel<<<(unsigned)((T + 16 * CHAI_PJ_NW - 1) / (16 * CHAI_PJ_NW)), 32 * CHAI_PJ_NW, 0, at::cuda::getCurrentCUDAStream()>>>(
+#else
   chai_proj_kernel<<<(unsigned)((T + 63) / 64), 128, 0, at::cuda::getCurrentCUDAStream()>>>(
+#endif
       reinterpret_cast<const bf16*>(x.data_ptr()), mp, gamma.data_ptr<float>(), beta.data_ptr<float>(), reinterpret_cast<const bf16*>(w.data_ptr()),
       reinterpret_cast<bf16*>(a.data_ptr()), reinterpret_cast<bf16*>(b.data_ptr()), save ? st.data_ptr<float>() : nullptr, T, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -397,23 +429,49 @@ std::vector<at::Tensor> chai_proj(at::Tensor x, c10::optional<at::Tensor> mask, 
 // LayerNorm output ln16 [T, 64] (bf16), dx [T, 64] and per-block sums of dgamma / dbeta; dln = dcat Wlr (mma.sync), then the LayerNorm backward on
 // the accumulator rows (statistics of the forward).  A block = 4 warps x 16 rows.
 namespace {
+#ifdef MWE_SM120   // the RTX 5090 (99 KiB: one CTA per SM): 8 warps x 16 rows a block (two of the 64-row groups, each with its own partial row), the same sums
+#define CHAI_PB_NW 8
+#else
+#define CHAI_PB_NW 4
+#endif
+#ifdef MWE_SM120
+__global__ void __launch_bounds__(256) chai_projbwd_kernel(const bf16* __restrict__ X, const unsigned char* __restrict__ mask, const bf16* __restrict__ DA,
+#else
 __global__ void __launch_bounds__(128) chai_projbwd_kernel(const bf16* __restrict__ X, const unsigned char* __restrict__ mask, const bf16* __restrict__ DA,
+#endif
                                                             const bf16* __restrict__ DB, const float* __restrict__ gamma, const float* __restrict__ beta,
                                                             const float* __restrict__ stats, const bf16* __restrict__ Wlr, bf16* __restrict__ DCAT,
                                                             bf16* __restrict__ LN16, bf16* __restrict__ DX, float* __restrict__ part, long T) {
   __shared__ __align__(16) bf16 sWT[64 * 136];             // [n][k] of the stacked projection weight (k = 128 channels of dcat)
+#ifdef MWE_SM120
+  __shared__ float sg[64], sb[64], sred[CHAI_PB_NW][2][64];
+#else
   __shared__ float sg[64], sb[64], sred[4][2][64];
+#endif
   extern __shared__ __align__(16) bf16 dynS[];                                 // per warp: dcat, ln16, dx rows, flushed as 16-byte rows
+#ifdef MWE_SM120
+  bf16* const sStage[8] = {dynS, dynS + 8960 / 2, dynS + 2 * (8960 / 2), dynS + 3 * (8960 / 2), dynS + 4 * (8960 / 2), dynS + 5 * (8960 / 2), dynS + 6 * (8960 / 2),
+                           dynS + 7 * (8960 / 2)};
+#else
   bf16* const sStage[4] = {dynS, dynS + 8960 / 2, dynS + 2 * (8960 / 2), dynS + 3 * (8960 / 2)};
+#endif
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+#ifdef MWE_SM120
+  for (int i = tid; i < 128 * 64; i += 32 * CHAI_PB_NW) {
+#else
   for (int i = tid; i < 128 * 64; i += 128) {              // Wlr [128 k][64 n] -> sWT[n][k]
+#endif
     const int k = i >> 6, n = i & 63;
     sWT[n * 136 + k] = Wlr[i];
   }
   if (tid < 64) { sg[tid] = gamma[tid]; sb[tid] = beta[tid]; }
   __syncthreads();
   const int r0 = lane >> 2, q = lane & 3;
+#ifdef MWE_SM120
+  const long ta = (long)blockIdx.x * (16 * CHAI_PB_NW) + warp * 16 + r0, tb = ta + 8;
+#else
   const long ta = (long)blockIdx.x * 64 + warp * 16 + r0, tb = ta + 8;
+#endif
   const bool va = ta < T, vb = tb < T;
   const bool ka = va && (mask == nullptr || mask[ta] != 0), kb = vb && (mask == nullptr || mask[tb] != 0);
   float acc[8][4];
@@ -477,7 +535,11 @@ __global__ void __launch_bounds__(128) chai_projbwd_kernel(const bf16* __restric
   }
   __syncwarp();
   {
+#ifdef MWE_SM120
+    const long t0 = (long)blockIdx.x * (16 * CHAI_PB_NW) + warp * 16;
+#else
     const long t0 = (long)blockIdx.x * 64 + warp * 16;
+#endif
     const bf16* sDc = sStage[warp]; const bf16* sLn = sDc + 16 * 136; const bf16* sDx = sLn + 16 * 72;
 #pragma unroll
     for (int u = 0; u < 8; ++u) {                          // dcat: 16 rows x 16 chunks of 16 B
@@ -494,10 +556,19 @@ __global__ void __launch_bounds__(128) chai_projbwd_kernel(const bf16* __restric
     }
   }
   __syncthreads();
+#ifdef MWE_SM120
+  {                                                        // one partial row per 64-row group (4 warps), summed in the same order as the 4-warp block
+    const int grp = tid >> 7, w = (tid >> 6) & 1, c = tid & 63;
+    const long row = (long)blockIdx.x * (CHAI_PB_NW / 4) + grp;
+    if (row < (T + 63) / 64)
+      part[row * 128 + (tid & 127)] = sred[4 * grp][w][c] + sred[4 * grp + 1][w][c] + sred[4 * grp + 2][w][c] + sred[4 * grp + 3][w][c];
+  }
+#else
   if (tid < 128) {
     const int w = tid >> 6, c = tid & 63;
     part[(long)blockIdx.x * 128 + tid] = sred[0][w][c] + sred[1][w][c] + sred[2][w][c] + sred[3][w][c];
   }
+#endif
 }
 }  // namespace
 
@@ -515,8 +586,14 @@ std::vector<at::Tensor> chai_projbwd(at::Tensor x, c10::optional<at::Tensor> mas
   auto part = at::empty({blocks, 128}, x.options().dtype(at::kFloat));
   const unsigned char* mp = nullptr;
   if (mask.has_value()) mp = reinterpret_cast<const unsigned char*>(mask->data_ptr());
+#ifdef MWE_SM120
+  const long ctas = (T + 16 * CHAI_PB_NW - 1) / (16 * CHAI_PB_NW);
+  cudaFuncSetAttribute(chai_projbwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, CHAI_PB_NW * 8960);
+  chai_projbwd_kernel<<<(unsigned)ctas, 32 * CHAI_PB_NW, CHAI_PB_NW * 8960, at::cuda::getCurrentCUDAStream()>>>(
+#else
   cudaFuncSetAttribute(chai_projbwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 4 * 8960);
   chai_projbwd_kernel<<<(unsigned)blocks, 128, 4 * 8960, at::cuda::getCurrentCUDAStream()>>>(
+#endif
       reinterpret_cast<const bf16*>(x.data_ptr()), mp, reinterpret_cast<const bf16*>(da.data_ptr()), reinterpret_cast<const bf16*>(db.data_ptr()),
       gamma.data_ptr<float>(), beta.data_ptr<float>(), stats.data_ptr<float>(), reinterpret_cast<const bf16*>(wlr.data_ptr()),
       reinterpret_cast<bf16*>(dcat.data_ptr()), reinterpret_cast<bf16*>(ln16.data_ptr()), reinterpret_cast<bf16*>(dx.data_ptr()), part.data_ptr<float>(), T);

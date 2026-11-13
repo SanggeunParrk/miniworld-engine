@@ -78,13 +78,23 @@ def weight_grad(d: torch.Tensor, v: torch.Tensor, cfg: int | None = None) -> tor
     return out
 
 
-def mm(a: torch.Tensor, b: torch.Tensor, trans_a: bool, trans_b: bool, cfg: int = 0, c: torch.Tensor | None = None) -> torch.Tensor:
+def mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    trans_a: bool,
+    trans_b: bool,
+    cfg: int = 0,
+    c: torch.Tensor | None = None,
+    live: torch.Tensor | None = None,
+    ch: int = 1,
+) -> torch.Tensor:
     """op(a) @ op(b) (+ c, fp32 sum rounded once), row-major bf16 -> bf16 [M, N]; with a 3-D operand a batch [B, M, N] (a 2-D operand shared)."""
     m = a.shape[-1] if trans_a else a.shape[-2]
     n = b.shape[-2] if trans_b else b.shape[-1]
     batch = a.shape[0] if a.dim() == 3 else b.shape[0] if b.dim() == 3 else None
     out = a.new_empty((m, n) if batch is None else (batch, m, n))
-    ext().mm(a, b, a.new_empty((0,)) if c is None else c, out, trans_a, trans_b, cfg)
+    empty = a.new_empty((0,))
+    ext().mm(a, b, empty if c is None else c, out, trans_a, trans_b, cfg, empty.view(torch.uint8) if live is None else live, ch)
     return out
 
 
@@ -95,3 +105,36 @@ def vg_head_major(y: torch.Tensor, wvg: torch.Tensor, depth: int, length: int) -
     flat = y.new_empty((2 * rows * 256,))
     ext().vg_head_major(y, wvg, flat, depth, length)
     return flat[: rows * 256].view(8, length, depth * 32), flat[rows * 256 :].view(rows, 256)
+
+
+def chai_wo_grads(dwp: torch.Tensor, dbo: torch.Tensor, wo: torch.Tensor, gam: torch.Tensor, bet: torch.Tensor):
+    """The Chai-1 OuterProductMean's out-projection gradients in one kernel (W' = W gamma, b' = b + W beta): (dWo, dgamma, dbeta) fp32 from
+    dW' [CZ, P] / dbo [CZ] fp32, W [CZ, P], gamma / beta [P]."""
+    dwo = torch.empty_like(dwp)
+    dgam = dwp.new_empty((dwp.shape[1],))
+    dbet = dwp.new_empty((dwp.shape[1],))
+    ext().chai_wo_grads(dwp, dbo, wo.contiguous(), gam.float().contiguous(), bet.float().contiguous(), dwo, dgam, dbet)
+    return dwo, dgam, dbet
+
+
+def live_tokens(mask: torch.Tensor, depth: int, length: int) -> torch.Tensor:
+    """[S N] bool / uint8 MSA mask -> [N] uint8: 1 where some MSA row keeps the token (one small kernel)."""
+    live = torch.empty((length,), dtype=torch.uint8, device=mask.device)
+    ext().live_tokens(mask.reshape(depth, length).contiguous(), live)
+    return live
+
+
+def colsum2(part: torch.Tensor, split: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Column sums of fp32 [R, C] partials as two separate tensors (columns [0, split) and [split, C)), one launch."""
+    out_a = part.new_empty((split,))
+    flat = part.reshape(part.shape[0], -1)
+    out_b = part.new_empty((flat.shape[1] - split,))
+    ext().colsum2(flat, out_a, out_b)
+    return out_a, out_b
+
+
+def wgrad_parts(a: torch.Tensor, b: torch.Tensor, cfg: int, splits: int) -> torch.Tensor:
+    """The split-K fp32 partials [splits, M, N] of a^T b (``wgrad`` without the sum)."""
+    part = torch.empty((splits, a.shape[1], b.shape[1]), dtype=torch.float32, device=a.device)
+    ext().wgrad_splitk(a, b, part, cfg)
+    return part
