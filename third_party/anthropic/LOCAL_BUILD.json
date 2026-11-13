@@ -27,6 +27,11 @@
       "path": "common/opt_core/opt_core/kernels/trimul/tx_sm90a/prebuilt/manifest.json",
       "original_sha256": "65fa66f24ab2aa0b08f437d359363f7a46f512db30e89eafea30a9ef797828fc",
       "local_sha256": "b615b04455742153eb7015c7361053656626571f012bd74e68616f0b157346c4"
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/SHA256SUMS",
+      "original_sha256": "0ff0d3162c65f5979b0ea2908f94b651c21c1192c5aedae9aeeb840f2b00d9df",
+      "local_sha256": "a2b0f7b04328469091fe581749231da6ab2c51e7975b860d1593b769908081f3"
     }
   ],
   "local_binaries_and_manifests": [
@@ -1324,7 +1329,67 @@
       "path": "protenix_v2/opt/forward/flashpairformer/third_party/protenix_fpf_triatt_procuda/prebuilt/libtriatt_procuda_sm90a.so",
       "sha256": "e9009ba57e432421cf1943cbbe5c22777bc1a674ca0423448ac2f06b9baecbcf",
       "bytes": 1025792
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu129-cpython-312-x86_64-linux-gnu/triattn_sm90_ext.so",
+      "sha256": "2c1002c8a62fd953907c0e503a3fb302d20ab08d9222db91b11480a1e0f6163d",
+      "bytes": 783280
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu129-cpython-312-x86_64-linux-gnu/triattn_sm90_ext.json",
+      "sha256": "2a4e087b8ca782ba872d5af0071fd4e428805ea07ba7a5b0d33617ce32d6d726",
+      "bytes": 1498
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu129-cpython-312-x86_64-linux-gnu/triattn_m1_ext.so",
+      "sha256": "a69629556130466617f5839a63518c4e66ba9e9821def8c2b646f1a53194803a",
+      "bytes": 1579400
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu129-cpython-312-x86_64-linux-gnu/triattn_m1_ext.json",
+      "sha256": "c17ee5070d581689d3ba347a4f3c5874c8528e44aad33656b7b4cbac491c63ab",
+      "bytes": 1998
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu129-cpython-312-x86_64-linux-gnu/triattn_mw_ext_g3x4.so",
+      "sha256": "fba9acd257aa54f21d816ad908e24d86b79d563f29d6c3a135d82af042a9877d",
+      "bytes": 1360592
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/triattn_native/pkg/v11/triattn_pkg/prebuilt/torch2.13.0+cu129-cpython-312-x86_64-linux-gnu/triattn_mw_ext_g3x4.json",
+      "sha256": "a2c8217d9fd7c934b9c4f19f802b5fea6a6a3fcc8b8032984045658e4e439cad",
+      "bytes": 1390
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.13.0+cu129-cpython-312-x86_64-linux-gnu-sm90/triattn_cuda_sm90.so",
+      "sha256": "4258741d3f2e75d2d398fd0f836296937c6b44bfc0263a7273f559968c25f826",
+      "bytes": 648336
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.13.0+cu129-cpython-312-x86_64-linux-gnu-sm90/manifest.json",
+      "sha256": "b4ecd31b4817b52823341015c5847e89a6fc1f8a9069a3f6187ff2cab3a8c900",
+      "bytes": 1229
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.13.0+cu129-cpython-312-x86_64-linux-gnu-sm90/loadcheck.pt",
+      "sha256": "e121db6ce0ed7af8e387313010bb0089cd6c9c5ea473e6f1dbf55c5d5f88c17b",
+      "bytes": 506547
+    },
+    {
+      "path": "common/opt_core/opt_core/kernels/triattn/cuda_sm90a/prebuilt/torch2.13.0+cu129-cpython-312-x86_64-linux-gnu-sm90/SHA256SUMS",
+      "sha256": "e8fb9f3d9ed012b7df8f5d0fa592c112f1398d8f72943462375c8910bd1c472e",
+      "bytes": 87
     }
   ],
-  "policy": "No imported kernel source edits; only runtime binaries and build manifests/checksums may differ. Local rebuilt binaries have no inherited upstream certification."
+  "policy": "No imported kernel source edits; only runtime binaries and build manifests/checksums may differ. Local rebuilt binaries have no inherited upstream certification.",
+  "local_builds": [
+    {
+      "date": "2026-11-13",
+      "what": "triattn_native v11 (triattn_sm90_ext, triattn_m1_ext, triattn_mw_ext_g3x4) and cuda_sm90a (triattn_cuda_sm90) for stack torch2.13.0+cu129-cpython-312-x86_64-linux-gnu",
+      "how": "third_party/anthropic/build_local.sh: the release's own build_prebuilt.py (its csrc and flags, unmodified) in the engine env (torch 2.13.0+cu129, CPython 3.12, nvcc 12.9, CUTLASS 4.2 headers) on an H100; SHA256SUMS lines appended for the new binaries",
+      "verification": "load checks bitwise equal to the release's recorded digests of the cu128 / cu130 builds: triattn_m1_ext s512_prefixvar 489a59714e79094d s1024_prefix 94c8550906990e5c; triattn_sm90_ext s384_endstrided b51395b940080c97; triattn_mw_ext_g3x4 s3584_prefix e9c37e84cb11c294; triattn_cuda_sm90 mask_B2_S150 9678bf3ccfea4269 nomask_S200 4206a7327578db20 rows2to6_S260_prefix 70585af2be2fbe3c",
+      "why": "the kits run these rows in-model (word fast); without a prebuilt for the engine's stack the provider served the k2b Triton step-aside (1.3-1.6x slower)",
+      "not_built": "trimul_native v5, esm_v61, the ef2_t16 transition cubin: sealed CUDA-13.0 cubins (a rebuild is refused by digest); they load only under a CUDA-13 driver -- see third_party/anthropic/kit_stack.sh"
+    }
+  ]
 }

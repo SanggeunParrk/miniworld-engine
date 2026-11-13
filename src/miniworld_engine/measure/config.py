@@ -52,6 +52,26 @@ REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements" / "requireme
 DTYPES = {"bfloat16": torch.bfloat16, "float32": torch.float32, "master": torch.bfloat16}
 FIXED = {"bfloat16": 8e-3, "master": 8e-3, "float32": 1e-5}
 EXTERNAL = ("anthropic", "cueq")
+#: Backends measured on the model kits' own stack, per card: the Anthropic kits run in-model on torch 2.13.0+cu130 inside a CUDA-13.0
+#: container (forward-compatible libcuda on the host's 575 driver), where the release's sealed CUDA-13.0 cubins (trimul_native, esm_v61,
+#: the ef2_t16 transition cubin) load; on the engine's CUDA-12.9 stack they cannot, and the provider serves slower step-aside rows. The
+#: judge plans these backends' cases into separate groups that run through third_party/anthropic/kit_stack.sh (tools/slurm/cycle.sh K*
+#: groups), takes their tokens only from records of that stack, and compares their environment with ``KIT_STACK_ENV`` (2026-11-13).
+KIT_STACK_BACKENDS = {"h100_sm90": ("anthropic",)}
+#: The kit stack's environment as records state it (env keys of the judge): the esmfold2 kit venv130 in the cu130 container.
+KIT_STACK_ENV = {"torch": "2.13.0+cu130", "cuda": "13.0", "triton": "3.7.1"}
+
+
+def kit_stack(gpu: str, backend: str) -> bool:
+    """Whether ``backend``'s results on card ``gpu`` are measured on the kits' stack (see ``KIT_STACK_BACKENDS``)."""
+    return backend in KIT_STACK_BACKENDS.get(gpu, ())
+
+
+def on_kit_stack(env: dict) -> bool:
+    """Whether a record's environment is the kits' CUDA-13 stack (its CUDA major version)."""
+    return str(env.get("cuda") or "").split(".")[0] == KIT_STACK_ENV["cuda"].split(".")[0]
+
+
 #: Backends measured with TF32 products allowed in float32 PyTorch matmuls: every backend (user decisions 2026-11-10: first the
 #: reference and the Triton rung, then "TF32 on for all, always").
 TF32_BACKENDS = ("pytorch", "triton", "cuda", *EXTERNAL)

@@ -4,6 +4,20 @@ Upstream: [f4f62fa6592ae4938d49b1757bea0cfeff9f468e](https://github.com/anthropi
 
 A source inventory, not proof of execution or full training support. Duplicate SHA-256 values identify identical copies. Per-source GPU qualification is recorded separately.
 
+## Stacks and local builds (2026-11-13)
+
+The kits run on torch 2.13.0+cu130 inside a CUDA-13.0 container (forward-compatible libcuda on the host's 575 driver); the engine runs on
+torch 2.13.0+cu129 with the 575 driver (CUDA 12.9). The vendored opt_core (0.5.228.0) is byte-identical to the kit installs used on 2026-11-11
+(`diff -r` against each kit's `common/opt_core`: only generated `_gen` caches differ), so the release itself is current; the stack is what
+differed:
+
+- triangle attention core (kernels.triattn rows `triattn_native`, `cuda_sm90a`): prebuilt only for cu126 / cu128 / cu130 stacks. Built for the
+  engine stack by `build_local.sh` with the release's own `build_prebuilt.py`; load checks bitwise equal to the release's recorded digests
+  (LOCAL_BUILD.json `local_builds`). The upstream tree is not tracked: run `build_local.sh` on an H100 after a fresh clone.
+- `trimul_native` (row `native`), `esm_v61`, the `ef2_t16` transition cubin (cell `pair_c256_n4`): sealed CUDA-13.0 cubins, not rebuildable
+  (refused by digest), loadable only under a CUDA-13 driver. On a 12.x driver the backends exclude them by name and the provider's next row
+  serves; the kits' own timings of those rows are measured on the kit stack with `kit_stack.sh`.
+
 | Source | Backend | GPU entries | SHA-256 |
 |---|---|---:|---|
 | [af3_jax/opt/af3_jax_opt/inprocess/af3_jax_atom_attn_pallas.py](upstream/af3_jax/opt/af3_jax_opt/inprocess/af3_jax_atom_attn_pallas.py) | pallas | 0 | `b30bd8de3d8189c4` |

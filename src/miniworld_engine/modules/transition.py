@@ -60,7 +60,8 @@ class Transition(BackendModule, MasterWeights):
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:h100_sm90": 5, "cuda:a100_sm80": 6, "triton:a100_sm80": 2}
+    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 3, "cuda:h100_sm90": 5, "cuda:a100_sm80": 6, "triton:a100_sm80": 2}
+    # 2026-11-13: anthropic 3 = the pair transition folds the residual in the kernel (the kits' block statement); the esm_t16 cell served wherever the driver loads its CUDA-13 cubin
     # 2026-11-13 (H100): cuda 5 = the inference forward casts fp32-master weights once per parameter version (param_forms), not per call
     # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train; A100 capture forms + fp32 (TF32) build.
     # 2026-11-11 (A100): cuda 3 = the fused D 64 / 128 builds again + the fused fp32 eval forward; triton 2 = TF32-tuned fp32 d768 keys
@@ -136,14 +137,16 @@ class Transition(BackendModule, MasterWeights):
             n_tokens=int(x.shape[-2]),
             dtype={torch.bfloat16: "bf16", torch.float32: "fp32"}[x.dtype],
             family=self._anthropic_family(x),
-            residual=False,
+            residual=self._anthropic_family(x) == "pair",
             cc="{}.{}".format(*torch.cuda.get_device_capability(x.device)),
             rows_count=x.numel() // self.d_hidden,
         )
 
     def _anthropic_core_refusal(self, x: torch.Tensor) -> str | None:
         sel, why = self._anthropic_select(x)[1]
-        if sel is not None and any(c in str(sel.cell_key) for c in self._ANTHROPIC_EXCLUDED_CELLS):
+        from miniworld_engine.modules import _anthropic
+
+        if sel is not None and not _anthropic.cuda13_cubins_load() and any(c in str(sel.cell_key) for c in self._ANTHROPIC_EXCLUDED_CELLS):
             return f"the provider cell {sel.cell_key} dumps core on this H100 stack (driver 575 / CUDA 12.9): refused by name"
         return why
 
@@ -313,8 +316,9 @@ class Transition(BackendModule, MasterWeights):
             )
             self._anthropic_pack_key = key
         x = x.contiguous()
+        folded = self._anthropic_family(x) == "pair"  # the kits fold the pair block's residual into the kernel (z += T(z))
         y, served = prov.transition(
-            x, self._anthropic_pack, word="fast", residual=False, n_tokens=int(x.shape[-2]), family=self._anthropic_family(x)
+            x, self._anthropic_pack, word="fast", residual=folded, n_tokens=int(x.shape[-2]), family=self._anthropic_family(x)
         )
         if served.row != sel.row:
             from miniworld_engine.modules.primitives import BackendUnsupported
@@ -322,7 +326,8 @@ class Transition(BackendModule, MasterWeights):
             raise BackendUnsupported(
                 f"Transition backend 'anthropic': the provider served row {served.row!r}, its selection was {sel.row!r}"
             )
-        return y + x  # the update in the activation dtype, then the residual: the reference's two roundings
+        # pair: x + update folded in the kernel (the kits' block statement); otherwise the update, then the residual (two roundings)
+        return y if folded else y + x
 
     # ------------------------------------------------------------------------------------------------------------- engine kernels
     def _supports_engine(self, x: torch.Tensor) -> str | None:
