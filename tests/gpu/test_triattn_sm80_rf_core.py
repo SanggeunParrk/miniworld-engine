@@ -23,7 +23,9 @@ def _a100() -> bool:
 def _inputs(L: int, H: int, d: int, kind: str, seed: int = 0):
     g = torch.Generator(device="cuda").manual_seed(seed)
     c = H * d
-    buf = torch.randn(1, L, L, 4 * c, device="cuda", generator=g).to(torch.bfloat16)  # q | k | v | g columns of one buffer (the module's strides)
+    buf = torch.randn(1, L, L, 4 * c, device="cuda", generator=g).to(
+        torch.bfloat16
+    )  # q | k | v | g columns of one buffer (the module's strides)
     scale = {"overflow": 300.0, "big": 30.0}.get(kind, 1.0)
     bias = (torch.randn(1, H, L, L, device="cuda", generator=g) * scale).to(torch.bfloat16)
     if kind == "masked":
@@ -60,7 +62,27 @@ def _run32(mode: int, q, k, v, g, bias, gate: bool, key_mask: torch.Tensor | Non
     ext.attn_rf_set(mode)
     try:
         if gate:
-            ext.attn_fwd_gate_fast(q, k, v, bias, torch.empty(0, device="cuda", dtype=torch.bfloat16), empty, g, out, L, H, 1, ld, ld, ld, c, ld, c, L2E / math.sqrt(32), km)
+            ext.attn_fwd_gate_fast(
+                q,
+                k,
+                v,
+                bias,
+                torch.empty(0, device="cuda", dtype=torch.bfloat16),
+                empty,
+                g,
+                out,
+                L,
+                H,
+                1,
+                ld,
+                ld,
+                ld,
+                c,
+                ld,
+                c,
+                L2E / math.sqrt(32),
+                km,
+            )
         else:
             ext.attn_fwd_fast(q, k, v, bias, out, empty, L, H, 1, ld, ld, ld, c, L2E / math.sqrt(32), 2, 32, 2, km)
     finally:
@@ -76,8 +98,23 @@ def _run16(mode: int, q, k, v, bias, key_mask: torch.Tensor | None = None, hd: i
     lay, lay_o = c2.token_major(L, q.stride(2), hd), c2.token_major(L, H * hd, hd)
     c2.ext().attn2_rf_set(mode)
     try:
-        c2.forward(q, k, v, bias, torch.empty(0, dtype=torch.uint8, device="cuda"), out, torch.empty(0, device="cuda"), (lay, lay, lay, lay_o), L, H, 1, hd,
-                   c2.default_scale(hd), fixed=hd == 16, key_mask=key_mask)
+        c2.forward(
+            q,
+            k,
+            v,
+            bias,
+            torch.empty(0, dtype=torch.uint8, device="cuda"),
+            out,
+            torch.empty(0, device="cuda"),
+            (lay, lay, lay, lay_o),
+            L,
+            H,
+            1,
+            hd,
+            c2.default_scale(hd),
+            fixed=hd == 16,
+            key_mask=key_mask,
+        )
     finally:
         c2.ext().attn2_rf_set(-1)
     return out
@@ -136,7 +173,7 @@ def test_dead_tail_keys_skipped_bitwise(d: int, mode: int) -> None:
     g = torch.Generator(device="cuda").manual_seed(2)
     c = H * d
     buf = torch.randn(2, L, L, 4 * c, device="cuda", generator=g).to(torch.bfloat16)
-    q, k, v, gt = buf[..., :c], buf[..., c : 2 * c], buf[..., 2 * c : 3 * c], buf[..., 3 * c :]
+    q, k, v = buf[..., :c], buf[..., c : 2 * c], buf[..., 2 * c : 3 * c]
     bias = torch.randn(2, H, L, L, device="cuda", generator=g).to(torch.bfloat16)
     mask = torch.ones(2, L, dtype=torch.bool, device="cuda")
     mask[0, L - L // 8 :] = False
@@ -167,8 +204,23 @@ def test_dead_tail_keys_skipped_bitwise(d: int, mode: int) -> None:
             out = torch.empty(2, L, L, c, device="cuda", dtype=torch.bfloat16)
             c2.ext().attn2_rf_set(1 if mode else 0)
             try:
-                c2.forward(q, k, v, bias, torch.empty(0, dtype=torch.uint8, device="cuda"), out, torch.empty(0, device="cuda"), (lay, lay, lay, lay_o), L, H, 2,
-                           16, c2.default_scale(16), fixed=True, key_mask=km)
+                c2.forward(
+                    q,
+                    k,
+                    v,
+                    bias,
+                    torch.empty(0, dtype=torch.uint8, device="cuda"),
+                    out,
+                    torch.empty(0, device="cuda"),
+                    (lay, lay, lay, lay_o),
+                    L,
+                    H,
+                    2,
+                    16,
+                    c2.default_scale(16),
+                    fixed=True,
+                    key_mask=km,
+                )
             finally:
                 c2.ext().attn2_rf_set(-1)
             return out
