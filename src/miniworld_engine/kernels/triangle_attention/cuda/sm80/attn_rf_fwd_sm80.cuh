@@ -82,7 +82,7 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
   const int L = p.L, qt = bx, row0 = by * G::R;
   const int h = bz % p.H, z = bz / p.H;
   const long long tok0 = (long long)z * L * L;
-  const int NU = L / G::KEYS;
+  const int NU = p.key_tiles ? min(L / G::KEYS, max(1, p.key_tiles[z])) : L / G::KEYS;   // slots streamed: up to the last live key of the sample
 
   // ---- per-thread copy plan of a slot: K / V chunk i = pair row tid / CPR + i NTHR / CPR, key (tid / GR) % 32, granule tid % GR; bias chunk i =
   // query (tid >> 2) + i NTHR / 4, granule tid & 3 (the swizzles are periodic in 8 rows, so chunk i's destination is chunk 0's + a constant)
@@ -352,6 +352,29 @@ __global__ void __launch_bounds__(G::NTHR, 1) attn_rf_fix_kernel(const AttnParam
   }
 }
 
+
+// key_tiles[z] = the 32-key slots up to the last live key of sample z (mask [Z, L] bytes, non-zero = live), at least 1: the keys past it are dead in
+// every pair row (their bias is the bf16 minimum), so the cores stream only those slots -- the same output bits (each skipped weight is an exact 0).
+__global__ void rf_key_tiles_kernel(const uint8_t* mask, int* key_tiles, int L) {
+  const int z = blockIdx.x;
+  int last = -1;
+  for (int j = threadIdx.x; j < L; j += blockDim.x)
+    if (mask[(size_t)z * L + j]) last = j;
+  last = __reduce_max_sync(0xffffffffu, last);
+  __shared__ int warp_last[32];
+  if ((threadIdx.x & 31) == 0) warp_last[threadIdx.x >> 5] = last;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    int v = threadIdx.x < (blockDim.x >> 5) ? warp_last[threadIdx.x] : -1;
+    v = __reduce_max_sync(0xffffffffu, v);
+    if (threadIdx.x == 0) key_tiles[z] = max(1, (v + 32) / 32);
+  }
+}
+
+inline cudaError_t rf_key_tiles(const uint8_t* mask, int* key_tiles, int Z, int L, cudaStream_t stream) {
+  rf_key_tiles_kernel<<<Z, 256, 0, stream>>>(mask, key_tiles, L);
+  return cudaGetLastError();
+}
 
 // Host launch (torch-free): the hot pass over the grid (L / BM, L / R, z H), then the recomputation of the listed tiles.  fix: int32 [1 + tiles]
 // (rf_fix_ints) device scratch; its count is cleared here.  scl = sm_scale log2 e; the bias-scaling operand is 1 / sm_scale = log2 e / scl in two

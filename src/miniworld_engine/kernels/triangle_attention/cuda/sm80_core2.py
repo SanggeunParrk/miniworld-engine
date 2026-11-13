@@ -94,9 +94,11 @@ def forward(
     head_dim,
     sm_scale,
     fixed=False,
+    key_mask=None,
 ) -> None:
     """``out = softmax(sm_scale q k^T + bias [+ the per-row key mask]) v`` for q / k / v / out the strided views ``lays = (lq, lk, lv, lo)``; ``bias`` ``[B, H, L, L]`` bf16 contiguous,
-    ``rowmask`` ``[B, L, L]`` uint8 or an empty tensor, ``lse`` ``[B, H, L, L]`` fp32 or an empty tensor (the base-2 log-sum-exp the backward reads)."""
+    ``rowmask`` ``[B, L, L]`` uint8 or an empty tensor, ``lse`` ``[B, H, L, L]`` fp32 or an empty tensor (the base-2 log-sum-exp the backward reads).  ``key_mask``: the global
+    ``[B, L]`` key mask already folded into ``bias`` (or None): an inference call without ``rowmask`` streams the keys only up to each sample's last live one."""
     lq, lk, lv, lo = lays
     ext().attn2_fwd(
         q,
@@ -117,6 +119,7 @@ def forward(
         sm_scale * _L2E,
         (FIXMODE if fixed else 0),
         SCHED,
+        key_mask if key_mask is not None else torch.empty(0, device=q.device),
     )
 
 

@@ -73,7 +73,7 @@ void launch_rf16(const a100::AttnParams& p, int64_t Z, double scl, const torch::
 // Forward: out (Lay lo) = softmax(sm_scale q . k + bias [+ rowmask]) v with q / k / v / out strided [z, a, j, h, d] views (a = the pair row, L of them); bias [z, H, L, L] bf16 contiguous
 // (the shared key mask folded in: masked = bf16 min); rowmask [z, L, L] uint8 (the per-row key mask) or empty; lse [z, H, L, L] fp32 or empty.  The default schedule (2 rows, 32 keys, 2 CTAs / SM).
 void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor rowmask, torch::Tensor out, torch::Tensor lse, std::vector<int64_t> lq,
-               std::vector<int64_t> lk, std::vector<int64_t> lv, std::vector<int64_t> lo, int64_t L, int64_t H, int64_t Z, int64_t hd, double scl, int64_t fixed, int64_t sched) {
+               std::vector<int64_t> lk, std::vector<int64_t> lv, std::vector<int64_t> lo, int64_t L, int64_t H, int64_t Z, int64_t hd, double scl, int64_t fixed, int64_t sched, torch::Tensor key_mask) {
   TORCH_CHECK(hd == 16 || hd == 32 || hd == 64, "attn2_fwd: head dim 16, 32 or 64");
   TORCH_CHECK(L % 128 == 0 && L >= 128 && Z * H <= 65535 && L / 2 <= 65535, "attn2_fwd: L a multiple of 128, grid");
   const a100::Lay Lq = lay_of(lq), Lk = lay_of(lk), Lv = lay_of(lv), Lo = lay_of(lo);
@@ -91,6 +91,15 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
   p.bias = reinterpret_cast<const bf*>(bias.data_ptr()); p.rowmask = rowmask.numel() ? rowmask.data_ptr<uint8_t>() : nullptr;
   p.out = reinterpret_cast<bf*>(out.data_ptr()); p.lse = lse.numel() ? lse.data_ptr<float>() : nullptr;
   p.lq = Lq; p.lk = Lk; p.lv = Lv; p.lo = Lo; p.L = (int)L; p.H = (int)H; p.scl = (float)scl;
+  at::Tensor kt;   // inference without per-row masks: stream keys only up to each sample's last live key (the global mask, already in the bias)
+  if (!lse.numel() && !rowmask.numel() && key_mask.defined() && key_mask.numel()) {
+    TORCH_CHECK(key_mask.is_cuda() && key_mask.device() == q.device() && (key_mask.scalar_type() == at::kBool || key_mask.scalar_type() == at::kByte) &&
+                key_mask.is_contiguous() && key_mask.numel() == Z * L, "attn2_fwd: key_mask bool / uint8 [Z, L]");
+    kt = at::empty({Z}, q.options().dtype(at::kInt));
+    const cudaError_t err = a100::rf_key_tiles(reinterpret_cast<const uint8_t*>(key_mask.data_ptr()), kt.data_ptr<int>(), (int)Z, (int)L, at::cuda::getCurrentCUDAStream());
+    C10_CUDA_CHECK(err);
+    p.key_tiles = kt.data_ptr<int>();
+  }
   const dim3 grid((unsigned)(L / a100::T2_BM), (unsigned)(L / 2), (unsigned)(Z * H));
   const bool mask = rowmask.numel() != 0;
 #define FWD2(HD, MASK, FIX) { using G = a100::Attn2Cfg<HD, 2, 4, 32, 2, MASK, FIX>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, grid, p); }
@@ -104,13 +113,8 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
       token_major16(Lo, L, Z)) {
     a100::AttnParams r{};
     r.q = p.q; r.k = p.k; r.v = p.v; r.bias = p.bias; r.out = p.out; r.lse = nullptr;
-    r.ldq = Lq.tok; r.ldk = Lk.tok; r.ldv = Lv.tok; r.ldo = Lo.tok; r.L = (int)L; r.H = (int)H; r.scl = (float)scl;
-    switch (rf) {
-      case 2: launch_rf16<a100::AttnRCfg<2, 1, 4, 4, false, 16, true>>(r, Z, scl, q); return;
-      case 3: launch_rf16<a100::AttnRCfg<2, 1, 4, 4, false, 16>>(r, Z, scl, q); return;
-      case 4: launch_rf16<a100::AttnRCfg<2, 1, 4, 6, false, 16, true>>(r, Z, scl, q); return;
-      default: launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16, true>>(r, Z, scl, q); return;   // 2 rows x 128 queries, the bias operand converted in registers
-    }
+    r.ldq = Lq.tok; r.ldk = Lk.tok; r.ldv = Lv.tok; r.ldo = Lo.tok; r.L = (int)L; r.H = (int)H; r.scl = (float)scl; r.key_tiles = p.key_tiles;
+    launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16, true>>(r, Z, scl, q); return;   // 2 rows x 128 queries, the bias operand converted in registers
   }
   const int64_t eff = sched != 0 ? sched : (L >= 256 ? 4 : 0);
   if (hd == 16 && !mask && fixed && eff != 0) {

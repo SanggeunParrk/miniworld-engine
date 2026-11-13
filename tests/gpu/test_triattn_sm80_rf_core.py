@@ -48,7 +48,7 @@ def _reference(q, k, v, g, bias, rows, d: int, gate: bool) -> torch.Tensor:
     return torch.stack(out)
 
 
-def _run32(mode: int, q, k, v, g, bias, gate: bool) -> torch.Tensor:
+def _run32(mode: int, q, k, v, g, bias, gate: bool, key_mask: torch.Tensor | None = None) -> torch.Tensor:
     from miniworld_engine.kernels.triangle_attention.cuda import sm80
 
     ext = sm80._ext()
@@ -56,18 +56,19 @@ def _run32(mode: int, q, k, v, g, bias, gate: bool) -> torch.Tensor:
     c, ld = H * 32, q.stride(2)
     out = torch.empty(1, L, L, c, device="cuda", dtype=torch.bfloat16)
     empty = torch.empty(0, device="cuda")
+    km = key_mask if key_mask is not None else torch.empty(0, device="cuda", dtype=torch.uint8)
     ext.attn_rf_set(mode)
     try:
         if gate:
-            ext.attn_fwd_gate_fast(q, k, v, bias, torch.empty(0, device="cuda", dtype=torch.bfloat16), empty, g, out, L, H, 1, ld, ld, ld, c, ld, c, L2E / math.sqrt(32))
+            ext.attn_fwd_gate_fast(q, k, v, bias, torch.empty(0, device="cuda", dtype=torch.bfloat16), empty, g, out, L, H, 1, ld, ld, ld, c, ld, c, L2E / math.sqrt(32), km)
         else:
-            ext.attn_fwd_fast(q, k, v, bias, out, empty, L, H, 1, ld, ld, ld, c, L2E / math.sqrt(32), 2, 32, 2)
+            ext.attn_fwd_fast(q, k, v, bias, out, empty, L, H, 1, ld, ld, ld, c, L2E / math.sqrt(32), 2, 32, 2, km)
     finally:
         ext.attn_rf_set(-1)
     return out
 
 
-def _run16(mode: int, q, k, v, bias) -> torch.Tensor:
+def _run16(mode: int, q, k, v, bias, key_mask: torch.Tensor | None = None) -> torch.Tensor:
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_core2 as c2
 
     L, H = q.shape[1], bias.shape[1]
@@ -76,7 +77,7 @@ def _run16(mode: int, q, k, v, bias) -> torch.Tensor:
     c2.ext().attn2_rf_set(mode)
     try:
         c2.forward(q, k, v, bias, torch.empty(0, dtype=torch.uint8, device="cuda"), out, torch.empty(0, device="cuda"), (lay, lay, lay, lay_o), L, H, 1, 16,
-                   c2.default_scale(16), fixed=True)
+                   c2.default_scale(16), fixed=True, key_mask=key_mask)
     finally:
         c2.ext().attn2_rf_set(-1)
     return out
@@ -120,3 +121,55 @@ def test_rf_core_16(kind: str) -> None:
     assert err_rf <= max(1.5 * err_base, 0.02), f"rf {err_rf:.4f} vs the attn2 core {err_base:.4f}"
     if kind == "allmasked":
         assert rf[0, :, 5:9].abs().max() == 0
+
+
+@pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+@pytest.mark.parametrize("d", [32, 16])
+@pytest.mark.parametrize("mode", [2, 0])
+def test_dead_tail_keys_skipped_bitwise(d: int, mode: int) -> None:
+    """The global key mask (padded samples: the last keys dead in every row, their bias the bf16 minimum) lets the inference cores stop
+    streaming at each sample's last live key; the output is the same to the bit (every skipped weight is an exact 0).  Two samples with
+    different tails, and the old cores (mode 0) as well as the rf core."""
+    L, H = 640, 4
+    g = torch.Generator(device="cuda").manual_seed(2)
+    c = H * d
+    buf = torch.randn(2, L, L, 4 * c, device="cuda", generator=g).to(torch.bfloat16)
+    q, k, v, gt = buf[..., :c], buf[..., c : 2 * c], buf[..., 2 * c : 3 * c], buf[..., 3 * c :]
+    bias = torch.randn(2, H, L, L, device="cuda", generator=g).to(torch.bfloat16)
+    mask = torch.ones(2, L, dtype=torch.bool, device="cuda")
+    mask[0, L - L // 8 :] = False
+    mask[1, 300:] = False
+    mask[1, 17] = False  # an interior hole is kept in the stream (only the tail is skipped)
+    bias.masked_fill_(~mask[:, None, None, :], BF16_MIN)
+    if d == 32:
+        from miniworld_engine.kernels.triangle_attention.cuda import sm80
+
+        ext, L2Ed = sm80._ext(), L2E / math.sqrt(32)
+        empty, out = torch.empty(0, device="cuda"), torch.empty(2, L, L, c, device="cuda", dtype=torch.bfloat16)
+
+        def run(km):
+            ext.attn_rf_set(mode)
+            try:
+                ext.attn_fwd_fast(q, k, v, bias, out, empty, L, H, 2, 4 * c, 4 * c, 4 * c, c, L2Ed, 2, 32, 2, km)
+            finally:
+                ext.attn_rf_set(-1)
+            return out.clone()
+
+        full, skipped = run(torch.empty(0, device="cuda", dtype=torch.uint8)), run(mask)
+    else:
+        from miniworld_engine.kernels.triangle_attention.cuda import sm80_core2 as c2
+
+        lay, lay_o = c2.token_major(L, 4 * c, 16), c2.token_major(L, c, 16)
+
+        def run(km):
+            out = torch.empty(2, L, L, c, device="cuda", dtype=torch.bfloat16)
+            c2.ext().attn2_rf_set(1 if mode else 0)
+            try:
+                c2.forward(q, k, v, bias, torch.empty(0, dtype=torch.uint8, device="cuda"), out, torch.empty(0, device="cuda"), (lay, lay, lay, lay_o), L, H, 2,
+                           16, c2.default_scale(16), fixed=True, key_mask=km)
+            finally:
+                c2.ext().attn2_rf_set(-1)
+            return out
+
+        full, skipped = run(None), run(mask)
+    assert torch.equal(full, skipped)

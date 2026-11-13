@@ -61,14 +61,22 @@ _L2E = 1.4426950408889634
 _TRAIN_FAST = True
 
 
-def _forward_entry(ext, save: bool, *, gate: bool = False):
-    """Select inference specializations inside the opaque op; training keeps its core."""
+def _forward_entry(ext, save: bool, *, gate: bool = False, key_mask: torch.Tensor | None = None):
+    """Select inference specializations inside the opaque op; training keeps its core.  The entry returned takes the launch arguments; the global
+    key mask ``[B, L]`` (already folded into the bias) is appended for inference, where the cores stream the keys only up to each sample's last
+    live one (an empty tensor otherwise)."""
     name = "attn_fwd_gate" if gate else "attn_fwd"
     if save and _TRAIN_FAST:
-        return getattr(ext, name + "_trainfast")  # the fixed-shift core with the log-sum-exp the backward reads
-    if not save:
-        name += "_fast"  # the 64 x 64 internal schedule with the fixed first-tile softmax shift
-    return getattr(ext, name)
+        name += "_trainfast"  # the fixed-shift core with the log-sum-exp the backward reads
+    elif not save:
+        name += "_fast"  # the rf core (L >= 512) or the 64 x 64 internal schedule with the fixed first-tile softmax shift
+    fn = getattr(ext, name)
+    use = key_mask is not None and not save and key_mask.numel() > 0
+
+    def entry(*args):
+        return fn(*args, key_mask if use else args[0].new_empty((0,), dtype=torch.uint8))
+
+    return entry
 
 
 @functools.lru_cache(maxsize=1)
@@ -145,7 +153,7 @@ def _is_fake(*tensors) -> bool:
     return any(isinstance(t, FakeTensor) for t in tensors)
 
 
-def _attention_fake(q, k, v, bias, sm_scale, save_lse):
+def _attention_fake(q, k, v, bias, sm_scale, save_lse, key_mask):
     """[out token-major [B, L, L2, H * D] (contiguous), lse [B, H, L, L2] fp32 when ``save_lse`` else empty]."""
     b, length, length2, c = q.shape
     lse = q.new_empty((b, c // D, length, length2), dtype=torch.float32) if save_lse else q.new_empty((0,), dtype=torch.float32)
@@ -160,15 +168,17 @@ def _attention(
     bias: torch.Tensor,
     sm_scale: float,
     save_lse: bool,
+    key_mask: torch.Tensor | None,
 ) -> list[torch.Tensor]:
     """The attention core on token-major ``[B, L, L2, H * D]`` q / k / v and ``[B, H, L, L]`` bias; returns [out, lse]
-    (lse = m + log2 l in the base-2 domain of the scaled logits, per (b, h, i, j); empty unless ``save_lse``)."""
+    (lse = m + log2 l in the base-2 domain of the scaled logits, per (b, h, i, j); empty unless ``save_lse``).  ``key_mask``: the global ``[B, L]``
+    key mask already in ``bias`` (or None; inference streams the keys up to each sample's last live one)."""
     b, length, _, c = q.shape
     h = c // D
     out = torch.empty((b, length, length, c), dtype=q.dtype, device=q.device)
     lse = torch.empty((b, h, length, length), dtype=torch.float32, device=q.device) if save_lse else q.new_empty((0,), dtype=torch.float32)
     ext = _ext()
-    fwd = _forward_entry(ext, save_lse)
+    fwd = _forward_entry(ext, save_lse, key_mask=key_mask)
     fwd(
         q,
         k,
@@ -244,7 +254,9 @@ def attention(
             1.0 / math.sqrt(d),
         )
     else:
-        out, lse = _attention(q, k, v, bias.contiguous(), 1.0 / math.sqrt(d), save_lse)
+        out, lse = _attention(
+            q, k, v, bias.contiguous(), 1.0 / math.sqrt(d), save_lse, None if compact_key_mask is None else compact_key_mask.contiguous()
+        )
     return out.view(b, length, length2, h, d).permute(0, 3, 1, 2, 4), (lse if save_lse else None)
 
 

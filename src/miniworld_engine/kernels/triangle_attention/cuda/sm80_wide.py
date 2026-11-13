@@ -406,9 +406,10 @@ def _original_forward_ops(
                 16,
                 1.0 / math.sqrt(hd),
                 fixed=True,
+                key_mask=None if save else mask,
             )
         else:
-            fwd = _core._forward_entry(core, save)
+            fwd = _core._forward_entry(core, save, key_mask=mask)
             fwd(
                 q,
                 k,
@@ -465,7 +466,7 @@ def _original_forward_ops(
                 g.view(shape),
             )
         else:
-            fwd = _core._forward_entry(core, save, gate=True)
+            fwd = _core._forward_entry(core, save, gate=True, key_mask=mask)
             fwd(q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl)
         out = torch.empty_like(x)
         if not save and (d, cfg.h, hd) == (256, 8, 32) and length == 128:
@@ -587,9 +588,10 @@ def _accurate_training_forward_ops(
                 16,
                 1.0 / math.sqrt(hd),
                 fixed=True,
+                key_mask=None if save else mask,
             )
         else:
-            fwd = _core._forward_entry(core, save)
+            fwd = _core._forward_entry(core, save, key_mask=mask)
             fwd(
                 q,
                 k,
@@ -645,7 +647,7 @@ def _accurate_training_forward_ops(
                 g.view(shape),
             )
         else:
-            fwd = _core._forward_entry(core, save, gate=True)
+            fwd = _core._forward_entry(core, save, gate=True, key_mask=mask)
             fwd(q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl)
         out = torch.empty_like(x)
         if not save and (d, cfg.h, hd) == (256, 8, 32) and length == 128:
@@ -1354,7 +1356,20 @@ def variant_forward_ops(
     lse = torch.empty((b, h, length, length), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     q, k, v, g = (y[:, i * dhp : (i + 1) * dhp] for i in range(4))
     _core2.forward(
-        q, k, v, bias, x.new_empty((0,), dtype=torch.uint8), o, lse, (lay_y, lay_y, lay_y, lay_o), length, h, b, ch, 1.0 / math.sqrt(hd)
+        q,
+        k,
+        v,
+        bias,
+        x.new_empty((0,), dtype=torch.uint8),
+        o,
+        lse,
+        (lay_y, lay_y, lay_y, lay_o),
+        length,
+        h,
+        b,
+        ch,
+        1.0 / math.sqrt(hd),
+        key_mask=None if save else mask,
     )
     a = torch.empty((t, dhp), dtype=BF, device=dev)
     rows.gate_rows(o, g, a)
