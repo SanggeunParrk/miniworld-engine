@@ -520,6 +520,35 @@ void pair_bias_gen_bwd(torch::Tensor z, torch::Tensor wcm, torch::Tensor db, tor
   else launch_gen_bwd_c<float>(C, H, z, wcm, db, dz, pw, kvp, N, NZ, rows, eps);
 }
 
+#ifdef MWE_SM120
+// RTX 5090 (the token DiT's bf16 training, bias_only_dit_sm80): pair_bias_gen_bwd with a smaller tile of te = 8 or 16 elements (two blocks an SM at C 256):
+// 16 heads, C 128 / 256, bf16 z; pw [grid.x grid.y, 16, C] with grid.x = ceil(NZ / te)
+void pair_bias_gen_bwd_te(torch::Tensor z, torch::Tensor wcm, torch::Tensor db, torch::Tensor dz, torch::Tensor pw, torch::Tensor kv, int64_t N, int64_t NZ, double eps, int64_t rows,
+                          int64_t te) {
+  TORCH_CHECK(z.is_cuda() && z.scalar_type() == at::kBFloat16 && dz.scalar_type() == at::kBFloat16 && z.is_contiguous() && dz.is_contiguous() && dz.numel() == z.numel(),
+              "pair_bias_gen_bwd_te: bf16 z, dz contiguous");
+  const int64_t C = z.numel() / (NZ * NZ), H = wcm.size(1);
+  TORCH_CHECK(H == 16 && (C == 128 || C == 256) && (te == 8 || te == 16) && NZ <= N && N % 64 == 0 && rows >= 1 && wcm.is_contiguous() && wcm.scalar_type() == at::kFloat && wcm.size(0) == C,
+              "pair_bias_gen_bwd_te: 16 heads, C 128 / 256, te 8 / 16");
+  check_f32(db, "pair_bias_gen_bwd_te db", H * N * N);
+  const unsigned char* kvp = mask_bytes(kv, NZ, "pair_bias_gen_bwd_te");
+  const at::cuda::CUDAGuard guard(z.device());
+  auto go = [&](auto kern, int TE, int smem) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+    dim3 grid((unsigned)((NZ + TE - 1) / TE), (unsigned)((NZ + rows - 1) / rows));
+    TORCH_CHECK(pw.numel() >= (int64_t)grid.x * grid.y * H * C, "pair_bias_gen_bwd_te: pw too small");
+    kern<<<grid, 256, smem, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const __nv_bfloat16*>(z.data_ptr()), wcm.data_ptr<float>(), db.data_ptr<float>(),
+                                                               reinterpret_cast<__nv_bfloat16*>(dz.data_ptr()), pw.data_ptr<float>(), (int)N, (int)NZ, (int)rows, kvp, (float)eps);
+  };
+  using B = __nv_bfloat16;
+  if (C == 256 && te == 8) go(aa80::pair_bias_gen_bwd_kernel<16, 256, B, 8>, 8, aa80::PbBwdCfg<256, 16, 8>::smem(16));
+  else if (C == 256) go(aa80::pair_bias_gen_bwd_kernel<16, 256, B, 16>, 16, aa80::PbBwdCfg<256, 16, 16>::smem(16));
+  else if (te == 8) go(aa80::pair_bias_gen_bwd_kernel<16, 128, B, 8>, 8, aa80::PbBwdCfg<128, 16, 8>::smem(16));
+  else go(aa80::pair_bias_gen_bwd_kernel<16, 128, B, 16>, 16, aa80::PbBwdCfg<128, 16, 16>::smem(16));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+#endif
+
 namespace {
 template <int C, int H>
 void launch_gen_bwd_tc(const torch::Tensor& z, const torch::Tensor& wcm, const torch::Tensor& db, torch::Tensor& dz, torch::Tensor& pw, const unsigned char* kvp, int64_t N, int64_t NZ,
@@ -622,6 +651,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pair_bias_fwd", &pair_bias_fwd);
   m.def("pair_bias_gen", &pair_bias_gen);
   m.def("pair_bias_gen_bwd", &pair_bias_gen_bwd);
+#ifdef MWE_SM120
+  m.def("pair_bias_gen_bwd_te", &pair_bias_gen_bwd_te);
+#endif
   m.def("pair_bias_gen_bwd_tc", &pair_bias_gen_bwd_tc);
   m.def("pair_bias_bwd", &pair_bias_bwd);
 }

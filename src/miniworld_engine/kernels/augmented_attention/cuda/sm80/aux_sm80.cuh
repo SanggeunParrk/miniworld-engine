@@ -260,9 +260,10 @@ __global__ void __launch_bounds__(PB_NT) pair_bias_gen_kernel(const TI* __restri
 // the pair 768 x 768 (C 128: 1.07 -> 0.74; C 512 H 24, 256 x 256: 0.82 -> 0.59), the same values bitwise.
 // MWE_SM120 (the RTX 5090's 99 KB per block): C 512 with more than 12 heads takes tiles of 8 elements (one warp per element; 16 elements need 108 / 125 KB at
 // H 16 / 24); every other (C, H) keeps the A100 tile. The sm_80 build ignores H_.
-template <int C_, int H_ = 0> struct PbBwdCfg {
+// TEO (RTX 5090 build only, the token DiT's bf16 training: bias_only_dit_sm80): a smaller tile of TEO elements, so two blocks share an SM (C 256: 89 KB at 32)
+template <int C_, int H_ = 0, int TEO = 0> struct PbBwdCfg {
 #ifdef MWE_SM120
-  static constexpr int TE = C_ == 64 ? 128 : C_ == 128 ? 64 : C_ == 256 ? 32 : (C_ == 512 && H_ > 12) ? 8 : 16;
+  static constexpr int TE = TEO ? TEO : C_ == 64 ? 128 : C_ == 128 ? 64 : C_ == 256 ? 32 : (C_ == 512 && H_ > 12) ? 8 : 16;
 #else
   static constexpr int TE = C_ == 64 ? 128 : C_ == 128 ? 64 : C_ == 256 ? 32 : 16;
 #endif
@@ -292,10 +293,15 @@ template <> struct PbRaw8<float> {
   __device__ __forceinline__ void put(float* d) const { reinterpret_cast<float4*>(d)[0] = a; reinterpret_cast<float4*>(d)[1] = b; }
 };
 
-template <int H, int C, typename T>
-__global__ void __launch_bounds__(256) pair_bias_gen_bwd_kernel(const T* __restrict__ z, const float* __restrict__ wcm, const float* __restrict__ db, T* __restrict__ dz, float* __restrict__ pw,
+template <int H, int C, typename T, int TEO = 0>
+#ifdef MWE_SM120
+__global__ void __launch_bounds__(256, TEO ? 2 : 1) pair_bias_gen_bwd_kernel(
+#else
+__global__ void __launch_bounds__(256) pair_bias_gen_bwd_kernel(
+#endif
+                                                                const T* __restrict__ z, const float* __restrict__ wcm, const float* __restrict__ db, T* __restrict__ dz, float* __restrict__ pw,
                                                                 int N, int NZ, int RPC, const unsigned char* __restrict__ kv, float eps) {
-  using G = PbBwdCfg<C, H>;
+  using G = PbBwdCfg<C, H, TEO>;
   constexpr int TE = G::TE, TPE = G::TPE, P = G::P, CB = G::CB, HB = H / 4, WP = G::wp(H);
 #ifdef MWE_SM120
   static_assert(G::smem(H) <= 101376, "sm_120a: 99 KB of shared memory per block");

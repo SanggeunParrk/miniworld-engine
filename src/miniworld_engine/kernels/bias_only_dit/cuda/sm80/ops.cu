@@ -370,6 +370,29 @@ void gemm120(int64_t epi, torch::Tensor a, torch::Tensor w1, c10::optional<torch
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// RTX 5090 training: dh = a w^T (a = dz [M, K], w = Ws^T [N, K]) with the SwiGLU backward in the epilogue: dab [M, 2 N] = [da | db], h [M, N]
+// from ab [M, 2 N] = [a | b] (bf16, contiguous; dh never leaves the registers)
+void gemm120_swiglu_bwd(torch::Tensor a, torch::Tensor w, torch::Tensor ab, torch::Tensor dab, torch::Tensor h, int64_t cfg) {
+  const at::cuda::CUDAGuard guard(a.device());
+  const int64_t M = a.size(0), K = a.size(1), N = w.size(0);
+  for (auto* t : {&a, &w, &ab, &dab, &h}) TORCH_CHECK(t->is_contiguous() && t->scalar_type() == at::kBFloat16 && t->dim() == 2, "gemm120_swiglu_bwd: contiguous bf16 2-D");
+  TORCH_CHECK(w.size(1) == K && ab.size(0) == M && ab.size(1) == 2 * N && dab.sizes() == ab.sizes() && h.size(0) == M && h.size(1) == N, "gemm120_swiglu_bwd: shapes");
+  using B = __nv_bfloat16;
+  g120::Params<B> p{};
+  p.A = reinterpret_cast<const B*>(a.data_ptr());
+  p.W1 = reinterpret_cast<const B*>(w.data_ptr());
+  p.N1 = (int)N;
+  p.M = (int)M;
+  p.K = (int)K;
+  p.N = (int)N;
+  p.C = reinterpret_cast<B*>(dab.data_ptr());
+  p.ldc = 2 * N;
+  p.AB = reinterpret_cast<const B*>(ab.data_ptr());
+  p.H = reinterpret_cast<B*>(h.data_ptr());
+  dispatch_gemm120<B, g120::EPI_SWIGLU_BWD>(p, (int)cfg, at::cuda::getCurrentCUDAStream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // the (mean, rstd) [M, 2] fp32 of every row of x [M, 768] (bf16 / fp32): the AdaLN epilogue's LayerNorm statistics
 void row_stats120(torch::Tensor x, torch::Tensor st, double eps) {
   const at::cuda::CUDAGuard guard(x.device());
@@ -484,12 +507,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef MWE_SM120
   m.def("gemm120", &gemm120);
   m.def("row_stats120", &row_stats120);
+  m.def("gemm120_swiglu_bwd", &gemm120_swiglu_bwd);
   m.def("cond3_f32", &cond3_f32);
   m.def("resgate_adaln_f32", &resgate_adaln_f32);
   m.def("gate_res_b_f32", &gate_res_b_f32);
   m.def("pair_softmax_f32", &pair_softmax_f32);
   m.def("lt_mm32", &lt120::mm);
   m.def("lt_algos32", &lt120::algos);
+  m.def("lt_mm", &lt120::mmg);
+  m.def("lt_algos", &lt120::algosg);
 #endif
   m.def("pv_gate", &pv_gate);
   m.def("pv_gate32", &pv_gate32);

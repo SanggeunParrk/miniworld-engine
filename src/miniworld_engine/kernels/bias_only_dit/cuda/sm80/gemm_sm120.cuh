@@ -23,7 +23,7 @@
 
 namespace g120 {
 
-enum { EPI_PLAIN = 0, EPI_GATERES = 1, EPI_ADALN = 2, EPI_SWIGLU = 3 };
+enum { EPI_PLAIN = 0, EPI_GATERES = 1, EPI_ADALN = 2, EPI_SWIGLU = 3, EPI_SWIGLU_BWD = 4 };
 
 template <typename T> struct Params {
   const T* A; const T* W1; const T* W2; int N1;
@@ -31,6 +31,7 @@ template <typename T> struct Params {
   const T* bias;                                            // PLAIN
   const T* R; const T* G; long long P;                      // GATERES (R may be null)
   const T* X; const float2* xst; const T* sb;               // ADALN
+  const T* AB; T* H;                                        // SWIGLU_BWD: [a | b] [M, 2 N]; C = [da | db] (ldc 2 N), H = silu(a) b [M, N]
 };
 
 __device__ __forceinline__ void cp16(void* dst, const void* src) {
@@ -197,6 +198,14 @@ gemm(const Params<T> p) {
             const float2 r = p.R != nullptr ? load2(p.R + (size_t)row * p.N + col) : make_float2(0.f, 0.f);
             y0 = fmaf(sig(g.x), y0, r.x);
             y1 = fmaf(sig(g.y), y1, r.y);
+          } else if constexpr (EPI == EPI_SWIGLU_BWD) {   // acc = dh rounded to T first (the unfused path's dh, so the gradients are its values): da = dh b s (1 + a (1 - s)), db = dh a s, h = a s b
+            if constexpr (sizeof(T) == 2) { y0 = __bfloat162float(__float2bfloat16_rn(y0)); y1 = __bfloat162float(__float2bfloat16_rn(y1)); }
+            const float2 av = load2(p.AB + (size_t)row * 2 * p.N + col), bv2 = load2(p.AB + (size_t)row * 2 * p.N + p.N + col);
+            const float sa0 = sig(av.x), sa1 = sig(av.y);
+            store2(p.C + (size_t)row * p.ldc + col, y0 * bv2.x * sa0 * (1.f + av.x * (1.f - sa0)), y1 * bv2.y * sa1 * (1.f + av.y * (1.f - sa1)));
+            store2(p.C + (size_t)row * p.ldc + p.N + col, y0 * (av.x * sa0), y1 * (av.y * sa1));
+            store2(p.H + (size_t)row * p.N + col, (av.x * sa0) * bv2.x, (av.y * sa1) * bv2.y);
+            continue;
           } else {
             y0 += bv.x;
             y1 += bv.y;

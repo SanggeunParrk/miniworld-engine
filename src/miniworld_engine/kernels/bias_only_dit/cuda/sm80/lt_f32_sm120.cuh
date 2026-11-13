@@ -149,4 +149,112 @@ inline std::vector<std::vector<int64_t>> algos(at::Tensor a, at::Tensor w, at::T
   return outv;
 }
 
+// ---- the general form (the bf16 / master training's GEMMs): out [M, N] (row-major, any leading dimension) = op(a) op(b), a / b contiguous 2-D of one
+// dtype (bf16: fp32 accumulation, CUBLAS_COMPUTE_32F; fp32: TF32), op = transpose when ta / tb; out bf16 or fp32 (bf16 operands) -- the arithmetic of
+// at::mm (and of an fp32-output mm of bf16 operands: one rounding of the fp32 accumulator).
+struct GPlan {
+  bool ok = false;
+  cublasLtMatmulDesc_t op = nullptr;
+  cublasLtMatrixLayout_t la = nullptr, lb = nullptr, lc = nullptr;
+  cublasLtMatmulAlgo_t algo{};
+  size_t ws = 0;
+};
+using GKey = std::tuple<int, int, int, int64_t, int64_t, int64_t, int64_t, int, int, Cfg>;
+
+inline cudaDataType_t dt_of(const at::Tensor& t) { return t.scalar_type() == at::kBFloat16 ? CUDA_R_16BF : CUDA_R_32F; }
+
+// the column-major view: C^T (N x M) = op(b)^T op(a)^T; b first (rows = its columns), a second
+inline bool glayouts(GPlan& p, const at::Tensor& a, const at::Tensor& b, int64_t M, int64_t N, int64_t ldc, bool ta, bool tb, cudaDataType_t tc) {
+  const cudaDataType_t ti = dt_of(a);
+  const cublasComputeType_t ct = ti == CUDA_R_32F ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F;
+  const cublasOperation_t o1 = tb ? CUBLAS_OP_T : CUBLAS_OP_N, o2 = ta ? CUBLAS_OP_T : CUBLAS_OP_N;
+  if (cublasLtMatmulDescCreate(&p.op, ct, CUDA_R_32F) != CUBLAS_STATUS_SUCCESS) return false;
+  cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSA, &o1, sizeof(o1));
+  cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSB, &o2, sizeof(o2));
+  if (cublasLtMatrixLayoutCreate(&p.la, ti, b.size(1), b.size(0), b.size(1)) != CUBLAS_STATUS_SUCCESS) return false;
+  if (cublasLtMatrixLayoutCreate(&p.lb, ti, a.size(1), a.size(0), a.size(1)) != CUBLAS_STATUS_SUCCESS) return false;
+  if (cublasLtMatrixLayoutCreate(&p.lc, tc, N, M, ldc) != CUBLAS_STATUS_SUCCESS) return false;
+  return true;
+}
+
+inline void gdims(const at::Tensor& a, const at::Tensor& b, const at::Tensor& out, bool ta, bool tb, int64_t& M, int64_t& N, int64_t& K) {
+  TORCH_CHECK(a.is_cuda() && b.is_cuda() && out.is_cuda() && a.dim() == 2 && b.dim() == 2 && out.dim() == 2 && a.is_contiguous() && b.is_contiguous() &&
+                  a.scalar_type() == b.scalar_type() && (a.scalar_type() == at::kBFloat16 || a.scalar_type() == at::kFloat) &&
+                  (out.scalar_type() == at::kFloat || out.scalar_type() == a.scalar_type()),
+              "lt_mm: contiguous 2-D a, b of one dtype (bf16 / fp32), out fp32 or theirs");
+  M = ta ? a.size(1) : a.size(0);
+  K = ta ? a.size(0) : a.size(1);
+  N = tb ? b.size(0) : b.size(1);
+  TORCH_CHECK((tb ? b.size(1) : b.size(0)) == K && out.size(0) == M && out.size(1) == N && out.stride(1) == 1, "lt_mm: shapes");
+}
+
+inline void mmg(at::Tensor a, at::Tensor b, at::Tensor out, bool ta, bool tb, std::vector<int64_t> cv) {
+  TORCH_CHECK(cv.size() == 7, "lt_mm: cfg = 7 ints");
+  int64_t M, N, K;
+  gdims(a, b, out, ta, tb, M, N, K);
+  const Cfg c{cv[0], cv[1], cv[2], cv[3], cv[4], cv[5], cv[6]};
+  const int64_t ldc = out.stride(0);
+  static std::mutex mu;
+  static std::map<GKey, GPlan> plans;
+  const at::cuda::CUDAGuard guard(a.device());
+  const GPlan* plan;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    const GKey key{(int)a.get_device(), (int)dt_of(a), (int)dt_of(out), M, N, K, ldc, (int)ta, (int)tb, c};
+    auto it = plans.find(key);
+    if (it == plans.end()) {
+      GPlan p;
+      auto handle = at::cuda::getCurrentCUDABlasLtHandle();
+      const cudaDataType_t ti = dt_of(a), tc = dt_of(out);
+      const cublasComputeType_t ct = ti == CUDA_R_32F ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F;
+      if (glayouts(p, a, b, M, N, ldc, ta, tb, tc) &&
+          cublasLtMatmulAlgoInit(handle, ct, CUDA_R_32F, ti, ti, tc, tc, (int)c[0], &p.algo) == CUBLAS_STATUS_SUCCESS) {
+        auto set = [&](cublasLtMatmulAlgoConfigAttributes_t at, int64_t v) {
+          uint32_t x = (uint32_t)v;
+          return cublasLtMatmulAlgoConfigSetAttribute(&p.algo, at, &x, sizeof(x)) == CUBLAS_STATUS_SUCCESS;
+        };
+        cublasLtMatmulHeuristicResult_t hr;
+        if (set(CUBLASLT_ALGO_CONFIG_TILE_ID, c[1]) && set(CUBLASLT_ALGO_CONFIG_STAGES_ID, c[2]) && set(CUBLASLT_ALGO_CONFIG_SPLITK_NUM, c[3]) &&
+            set(CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, c[4]) && set(CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, c[5]) && set(CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, c[6]) &&
+            cublasLtMatmulAlgoCheck(handle, p.op, p.la, p.lb, p.lc, p.lc, &p.algo, &hr) == CUBLAS_STATUS_SUCCESS && hr.workspaceSize <= WS_MAX) {
+          p.ws = hr.workspaceSize;
+          p.ok = true;
+        }
+      }
+      it = plans.emplace(key, p).first;
+    }
+    plan = &it->second;
+  }
+  TORCH_CHECK(plan->ok, "lt_mm: cuBLASLt does not accept the configuration for M ", M, " N ", N, " K ", K);
+  at::Tensor ws;
+  if (plan->ws > 0) ws = at::empty({(int64_t)plan->ws}, a.options().dtype(at::kByte));
+  const float alpha = 1.f, beta = 0.f;
+  const auto st = cublasLtMatmul(at::cuda::getCurrentCUDABlasLtHandle(), plan->op, &alpha, b.data_ptr(), plan->la, a.data_ptr(), plan->lb, &beta, out.data_ptr(), plan->lc,
+                                 out.data_ptr(), plan->lc, &plan->algo, plan->ws > 0 ? ws.data_ptr() : nullptr, plan->ws, at::cuda::getCurrentCUDAStream());
+  TORCH_CHECK(st == CUBLAS_STATUS_SUCCESS, "lt_mm: cuBLASLt GEMM failed: ", (int)st);
+}
+
+inline std::vector<std::vector<int64_t>> algosg(at::Tensor a, at::Tensor b, at::Tensor out, bool ta, bool tb, int64_t count) {
+  int64_t M, N, K;
+  gdims(a, b, out, ta, tb, M, N, K);
+  const at::cuda::CUDAGuard guard(a.device());
+  GPlan p;
+  TORCH_CHECK(glayouts(p, a, b, M, N, out.stride(0), ta, tb, dt_of(out)), "lt_algos: layouts");
+  cublasLtMatmulPreference_t pref;
+  cublasLtMatmulPreferenceCreate(&pref);
+  const size_t wsm = WS_MAX;
+  cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsm, sizeof(wsm));
+  std::vector<cublasLtMatmulHeuristicResult_t> r((size_t)count);
+  int got = 0;
+  cublasLtMatmulAlgoGetHeuristic(at::cuda::getCurrentCUDABlasLtHandle(), p.op, p.la, p.lb, p.lc, p.lc, pref, (int)count, r.data(), &got);
+  cublasLtMatmulPreferenceDestroy(pref);
+  std::vector<std::vector<int64_t>> outv;
+  for (int i = 0; i < got; ++i)
+    if (r[i].state == CUBLAS_STATUS_SUCCESS) {
+      const Cfg c = cfg_of(r[i].algo);
+      outv.emplace_back(c.begin(), c.end());
+    }
+  return outv;
+}
+
 }  // namespace lt120
