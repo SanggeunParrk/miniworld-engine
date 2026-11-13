@@ -82,7 +82,7 @@ def kit_stack_env(gpu: str) -> dict:
 def on_kit_stack(env: dict) -> bool:
     """Whether a record's environment is a kits' CUDA-13 stack: its torch is a CUDA-13 build (the H100 container) or its process ran on a
     CUDA-13 driver library (``cuda_driver``, ``cuDriverGetVersion``: the forward-compatible libcuda of the A100 wrapper)."""
-    major = lambda v: str(v or "").split(".")[0]  # noqa: E731
+    major = lambda v: str(v or "").split(".")[0]
     return major(env.get("cuda")) == "13" or major(env.get("cuda_driver")) == "13"
 
 
