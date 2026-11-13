@@ -24,9 +24,9 @@ namespace a100 {
 // The residual pass of the output stages: the staged tile at s0 holds o (bf16, rows of BN * 2 + 16 bytes); y = z + [ds] o, written in 16-byte granules.  The loads of z (and ds)
 // are coalesced 16-byte loads issued four granules ahead of their use, so a thread never waits on a global load between two dependent instructions (the per-element 4-byte
 // loads this replaces made the output stage's epilogue about half of its time).  With a row scale the product ``o ds`` is rounded to bf16 before the add, as before.
-template <int BN, int NTHR>
+template <int BN, int NTHR, int ROWS = 128>
 DEVI void k3_residual_pass(uint32_t s0, const __nv_bfloat16* z, const __nv_bfloat16* ds, __nv_bfloat16* out, int t0, int n0, int D, int L, int tid, uint32_t zsm = 0u, uint32_t zstage = 0u) {
-  constexpr int GR = BN / 8, PER = 128 * GR / NTHR;      // granules per row; granules per thread
+  constexpr int GR = BN / 8, PER = ROWS * GR / NTHR;     // granules per row; granules per thread
   static_assert(PER % 4 == 0, "batches of four granules");
 #pragma unroll
   for (int b = 0; b < PER / 4; ++b) {
@@ -181,6 +181,100 @@ __global__ void __launch_bounds__(256, BN == 64 ? 2 : 1) k3w_kernel(const K3wPar
     tile_store16<128, BN, 256>(s0, dst + (size_t)t0 * p.D + n0, p.D);
   };
   if (p.ps != nullptr) { emit(wp, p.ps); emit(wg, p.gs); }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------- k3s (D64 inference)
+// k3w for D = 64, bf16 inference with in-kernel statistics (Hc = 64 or 128): the same arithmetic in 64-token CTAs of 4 warps (each warp 16 tokens x all 64
+// output channels), single stage -- every k-tile of both GEMMs (X . Wo'^T: Hc / 32 stages, then z . Wg'^T: 2 stages) is issued at the start as two commit groups,
+// so the gate operands land while the output projection runs -- and three (Hc 128) or four (Hc 64) CTAs per SM.  k3w's 128-token, 8-warp CTA with a 4-stage
+// ring ran two per SM and was latency-bound on its reads of X / z.  Every output element sees the same MMAs in the same k order and the statistics the same
+// per-thread two-pass sums in the same order (the halves merged the same way): the outputs are bit-identical to k3w_kernel<64, true, 4, true>.
+template <int HC>
+struct K3s {
+  static constexpr int BM = 64, BN = 64, NTHR = 128, NKX = HC / 32, NKZ = 2;
+  using TP = WTile<BM, BN, 4, 1, 3, true, false>;            // the ring depth template argument is unused here (run_loaded over NKX consecutive stages)
+  using TG = WTile<BM, BN, 4, 1, 3, false, false>;
+  static_assert(TP::STAGE == TG::STAGE, "one stage size");
+  static constexpr int STAGE = TP::STAGE, ZOFF = NKX * STAGE, XS = ZOFF + NKZ * STAGE;   // X / Wo' stages, z / Wg' stages, the statistics exchange
+  static constexpr int SMEM = XS + 1536;                     // float sum[2][64], sq[2][64], float2 sts[64]
+  static_assert(BM * (BN * 2 + 16) <= ZOFF, "the output tile is staged over the dead X stages");
+};
+
+template <int HC>
+__global__ void __launch_bounds__(128, HC == 64 ? 4 : 3) k3s_kernel(const K3wParams p) {
+  using C = K3s<HC>;
+  using TP = typename C::TP;
+  using TG = typename C::TG;
+  extern __shared__ __align__(128) uint8_t smem[];
+  const uint32_t s0 = smem_u32(smem), zs = s0 + C::ZOFF, xs = s0 + C::XS;
+  const int t0 = (int)blockIdx.x * C::BM;
+  TP tp;
+  TG tg;
+  tp.issue_all(s0, C::NKX, GemmOps{p.x, (size_t)p.T, t0, p.T, p.wo, (size_t)p.Hc, 0, p.D});
+  tg.issue_all(zs, C::NKZ, GemmOps{p.z, (size_t)p.D, t0, p.T, p.wg, (size_t)p.D, 0, p.D});
+  cp_async_wait<1>();
+  __syncthreads();
+  tp.run_loaded(s0, C::NKX);
+  // ---- LayerNorm_out statistics of the 64 tokens from the resident X tile: thread (token, half) sums its half of each k-tile's 32 channels, two passes
+  {
+    const int tk = threadIdx.x & 63, hf = threadIdx.x >> 6;
+    auto elem = [&](int kt, int k) {
+      unsigned short b;
+      asm volatile("ld.shared.u16 %0, [%1];\n" : "=h"(b) : "r"(s0 + kt * C::STAGE + wmmaj<C::BM>(k, tk >> 3) + (tk & 7) * 2));
+      return __uint_as_float(((uint32_t)b) << 16);
+    };
+    float sum = 0.f;
+#pragma unroll
+    for (int kt = 0; kt < C::NKX; ++kt)
+#pragma unroll
+      for (int kr = 0; kr < 16; ++kr) sum += elem(kt, 16 * hf + kr);
+    sts32(xs + (hf * 64 + tk) * 4, __float_as_uint(sum));
+    __syncthreads();
+    const float mean = (__uint_as_float(lds32(xs + tk * 4)) + __uint_as_float(lds32(xs + (64 + tk) * 4))) * (1.f / HC);
+    float q2 = 0.f;
+#pragma unroll
+    for (int kt = 0; kt < C::NKX; ++kt)
+#pragma unroll
+      for (int kr = 0; kr < 16; ++kr) { const float a = elem(kt, 16 * hf + kr) - mean; q2 = fmaf(a, a, q2); }
+    sts32(xs + 512 + (hf * 64 + tk) * 4, __float_as_uint(q2));
+    __syncthreads();
+    if (hf == 0) {
+      const float rstd = rsqrtf((__uint_as_float(lds32(xs + 512 + tk * 4)) + __uint_as_float(lds32(xs + 512 + (64 + tk) * 4))) * (1.f / HC) + p.eps);
+      sts64(xs + 1024 + tk * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
+      p.stw[t0 + tk] = make_float2(mean, rstd);
+    }
+  }
+  cp_async_wait<0>();
+  __syncthreads();                                            // the gate operands landed; the statistics published; every warp past the X stages
+  tg.run_loaded(zs, C::NKZ);
+  // ---- epilogue: o = bf16(p' (1 + tanh g')) staged over the X stages, then the residual pass (z from the resident gate tile)
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g8 = lane >> 2, q = lane & 3;
+  constexpr int NT = 2 * TP::NP;
+  float ro[2], mro[2], ri[2], mri[2];
+#pragma unroll
+  for (int rh = 0; rh < 2; ++rh) {
+    const int lt = 16 * warp + g8 + 8 * rh;
+    const uint2 u = lds64(xs + 1024 + lt * 8);
+    const float2 b = __ldg(p.sti + t0 + lt);
+    ro[rh] = __uint_as_float(u.y); mro[rh] = __uint_as_float(u.x) * __uint_as_float(u.y);
+    ri[rh] = b.y; mri[rh] = b.x * b.y;
+  }
+#pragma unroll
+  for (int nt = 0; nt < NT; ++nt) {
+    const int col = 8 * nt + 2 * q;
+    const float2 vso = __ldg(reinterpret_cast<const float2*>(p.so + col)), veo = __ldg(reinterpret_cast<const float2*>(p.eo + col));
+    const float2 vsg = __ldg(reinterpret_cast<const float2*>(p.sg + col)), veg = __ldg(reinterpret_cast<const float2*>(p.eg + col));
+#pragma unroll
+    for (int rh = 0; rh < 2; ++rh) {
+      const float p0 = round_bf16f(fmaf(ro[rh], tp.acc[0][nt][2 * rh], fmaf(-mro[rh], vso.x, veo.x)));
+      const float p1 = round_bf16f(fmaf(ro[rh], tp.acc[0][nt][2 * rh + 1], fmaf(-mro[rh], vso.y, veo.y)));
+      const float g0 = fmaf(ri[rh], tg.acc[0][nt][2 * rh], fmaf(-mri[rh], vsg.x, veg.x));
+      const float g1 = fmaf(ri[rh], tg.acc[0][nt][2 * rh + 1], fmaf(-mri[rh], vsg.y, veg.y));
+      stage_word(s0, 16 * warp + g8 + 8 * rh, 4 * nt + q, C::BN, pack_bf16(fmaf(p0, tanh_approx(g0), p0), fmaf(p1, tanh_approx(g1), p1)));
+    }
+  }
+  __syncthreads();
+  k3_residual_pass<C::BN, C::NTHR, C::BM>(s0, p.z, p.ds, p.out, t0, 0, p.D, p.L, tid, zs, (uint32_t)C::STAGE);
 }
 
 }  // namespace a100
