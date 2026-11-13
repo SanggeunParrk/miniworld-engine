@@ -181,7 +181,8 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
   }
   if (fuse && D == 64 && (ncol == 256 || ncol == 512)) {   // D64: the persistent variant (same planes and statistics, bit for bit)
     if (g_k1t > 0 || (g_k1t < 0 && ncol == 512)) {   // hidden 128: one CTA per tile with all 512 packed rows (bit-identical to k1w64)
-      if (ncol == 256) launch_k1t<64>(p); else if (g_k1t == 3) launch_k1t<128, 3>(p); else launch_k1t<128>(p);
+      if (ncol == 256) launch_k1t<64>(p); else if (g_k1t == 3 || (g_k1t < 0 && L >= 1536)) launch_k1t<128, 3>(p);   // 3 ring slots from L 1536 (measured -2..-6 % of the kernel at L 2048)
+      else launch_k1t<128>(p);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
       return;
     }
