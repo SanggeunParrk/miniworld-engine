@@ -362,6 +362,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) attn_rf_fix_kernel(const AttnParam
 }
 
 
+namespace {
 // key_tiles[z] = the 32-key slots up to the last live key of sample z (mask [Z, L] bytes, non-zero = live), at least 1: the keys past it are dead in
 // every pair row (their bias is the bf16 minimum), so the cores stream only those slots -- the same output bits (each skipped weight is an exact 0).
 __global__ void rf_key_tiles_kernel(const uint8_t* mask, int* key_tiles, int L) {
@@ -384,7 +385,11 @@ inline cudaError_t rf_key_tiles(const uint8_t* mask, int* key_tiles, int Z, int 
   rf_key_tiles_kernel<<<Z, 256, 0, stream>>>(mask, key_tiles, L);
   return cudaGetLastError();
 }
+}  // namespace
 
+// The host helpers have internal linkage (an anonymous namespace): the two extensions that include this header (triattn_sm80, triattn_sm80_core2) each keep
+// their own once-per-device shared-memory opt-in flag -- a shared inline static would let the second one skip its cudaFuncSetAttribute.
+namespace {
 // Host launch (torch-free): the hot pass over the grid (L / BM, L / R, z H), then the recomputation of the listed tiles.  fix: int32 [1 + tiles]
 // (rf_fix_ints) device scratch; its count is cleared here.  scl = sm_scale log2 e; the bias-scaling operand is 1 / sm_scale = log2 e / scl in two
 // bf16 words.
@@ -412,5 +417,6 @@ inline cudaError_t attn_rf_launch(const AttnParams& p, int z, double scl, int* f
   attn_rf_fix_kernel<G><<<(unsigned)(ntile < nsm ? ntile : nsm), G::NTHR, G::SMEM, stream>>>(p, hi, lo, fix, (int)grid.x, (int)grid.y);
   return cudaGetLastError();
 }
+}  // namespace
 
 }  // namespace a100
