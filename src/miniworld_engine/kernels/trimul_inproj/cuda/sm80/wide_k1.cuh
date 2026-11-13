@@ -369,4 +369,150 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
   cp_async_wait<0>();
 }
 
+
+// k1w for D = 64, one CTA per 128-token tile with all 4 Hs packed rows ("k1t"): 4 warps of 32 tokens, the tile's input rows read ONCE and their statistics
+// computed once (one thread per token row, k1w64's two passes), the tile's A fragments (all of K) held in registers while the packed weights stream from L2
+// in chunks of 64 rows (32 channels) through a two-slot cp.async ring.  ~33 KB of shared memory: four CTAs per SM.  k1w64 splits hidden 128 into two
+// column groups that each re-read the tile and recompute its statistics.  Per plane word: the same MMAs in the same k order, the same statistics and epilogue
+// arithmetic as k1w64 (chunk c = k1w64's n-tile c / 2, warp column c % 2): bit-identical planes and statistics.
+template <int HS>
+struct K1t {
+  static constexpr int D = 64, NCOL = 4 * HS, NCH = NCOL / 64, NTHR = 128;
+  static constexpr int Z_KT = 128 * 64;                  // bytes of one 32-wide k-tile of the 128-token input tile
+  static constexpr int W_KT = 64 * 64;                   // bytes of one k-tile of a 64-row weight chunk
+  static constexpr int WOFF = 2 * Z_KT, WSLOT = 2 * W_KT; // the weight ring after the input tile
+  static constexpr int STOFF = WOFF + 2 * WSLOT;          // (mean, rstd) of the tile's 128 tokens
+  static constexpr int SMEM = STOFF + 128 * 8;
+};
+
+template <int HS>
+__global__ void __launch_bounds__(128, 4) k1t_kernel(const K1wParams p) {
+  using C = K1t<HS>;
+  extern __shared__ __align__(128) uint8_t smem[];
+  const uint32_t s0 = smem_u32(smem);
+  const int tid = threadIdx.x, wm = tid >> 5, lane = tid & 31, g8 = lane >> 2, q = lane & 3;
+  const int t0 = (int)blockIdx.x * 128;
+  // input tile (group 0): 1024 granules, 8 per thread
+#pragma unroll
+  for (int e = 0; e < 8; ++e) {
+    const int g = tid + C::NTHR * e, row = g >> 3, kt = (g >> 2) & 1, c = g & 3;
+    cp_async16(s0 + kt * C::Z_KT + wkmaj(row, c), p.z + (size_t)(t0 + row) * C::D + kt * 32 + c * 8);
+  }
+  auto issue_w = [&](int ch) {   // weight chunk ch (packed rows [64 ch, 64 ch + 64)) into slot ch & 1: 512 granules, 4 per thread
+    if (ch < C::NCH) {
+      const uint32_t sw = s0 + C::WOFF + (ch & 1) * C::WSLOT;
+#pragma unroll
+      for (int e = 0; e < 4; ++e) {
+        const int g = tid + C::NTHR * e, row = g >> 3, kt = (g >> 2) & 1, c = g & 3;
+        cp_async16(sw + kt * C::W_KT + wkmaj(row, c), p.w1 + (size_t)(64 * ch + row) * C::D + kt * 32 + c * 8);
+      }
+    }
+    cp_async_commit();
+  };
+  cp_async_commit();
+  issue_w(0);
+  cp_async_wait<1>();
+  __syncthreads();
+  {   // k1w64's statistics: one thread per token row, two passes, the same order
+    float sum = 0.f;
+#pragma unroll
+    for (int kt = 0; kt < 2; ++kt)
+#pragma unroll
+      for (int c = 0; c < 4; ++c) {
+        const uint4 v = lds128(s0 + kt * C::Z_KT + wkmaj(tid, c));
+        sum += (bf16lo(v.x) + bf16hi(v.x)) + (bf16lo(v.y) + bf16hi(v.y)) + ((bf16lo(v.z) + bf16hi(v.z)) + (bf16lo(v.w) + bf16hi(v.w)));
+      }
+    const float mean = sum * (1.f / C::D);
+    float q2 = 0.f;
+#pragma unroll
+    for (int kt = 0; kt < 2; ++kt)
+#pragma unroll
+      for (int c = 0; c < 4; ++c) {
+        const uint4 v = lds128(s0 + kt * C::Z_KT + wkmaj(tid, c));
+        const uint32_t w[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+        for (int i = 0; i < 4; ++i) { const float a = bf16lo(w[i]) - mean, b = bf16hi(w[i]) - mean; q2 = fmaf(a, a, fmaf(b, b, q2)); }
+      }
+    const float rstd = rsqrtf(q2 * (1.f / C::D) + p.eps);
+    sts64(s0 + C::STOFF + tid * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
+    p.stw[t0 + tid] = make_float2(mean, rstd);
+  }
+  // A fragments of all of K (k1w64's RP token permutation)
+  const int mi = lane >> 3, r8 = lane & 7;
+  uint32_t af[2][4][4], boff[4];
+#pragma unroll
+  for (int kk = 0; kk < 4; ++kk) {
+    const uint32_t aoff = (kk >> 1) * C::Z_KT + wkmaj(32 * wm + 2 * r8 + (mi & 1), 2 * (kk & 1) + (mi >> 1));
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt) ldsm_x4(af[mt][kk], s0 + aoff + mt * 1024);
+    boff[kk] = (kk >> 1) * C::W_KT + wkmaj(r8 + (mi >> 1) * 8, 2 * (kk & 1) + (mi & 1));
+  }
+  __syncthreads();                                         // the statistics published
+  float rs[2][2], mr[2][2], mk[2][2];
+#pragma unroll
+  for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+    for (int rh = 0; rh < 2; ++rh) {
+      const int lt = 32 * wm + 16 * mt + 2 * g8 + rh, tok = t0 + lt;
+      const uint2 u = lds64(s0 + C::STOFF + lt * 8);
+      const float mean = __uint_as_float(u.x), rstd = __uint_as_float(u.y);
+      rs[mt][rh] = rstd; mr[mt][rh] = mean * rstd;
+      float m = 1.f;
+      if (p.mask != nullptr) {
+        const int i = tok / p.L, j = tok - i * p.L;
+        m = (__ldg(p.mask + i) != 0 && __ldg(p.mask + j) != 0) ? 1.f : 0.f;
+      }
+      mk[mt][rh] = m;
+    }
+#pragma unroll 1
+  for (int chn = 0; chn < C::NCH; ++chn) {
+    cp_async_wait<0>();
+    __syncthreads();                                       // chunk chn landed; every warp finished chunk chn - 1, so its slot takes chunk chn + 1
+    issue_w(chn + 1);
+    const uint32_t sw = s0 + C::WOFF + (chn & 1) * C::WSLOT;
+    float acc[2][8][4];
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+      for (int n = 0; n < 8; ++n)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) acc[mt][n][e] = 0.f;
+#pragma unroll
+    for (int kk = 0; kk < 4; ++kk)
+#pragma unroll
+      for (int np = 0; np < 4; ++np) {
+        uint32_t bf[4];
+        ldsm_x4(bf, sw + boff[kk] + np * 1024);
+#pragma unroll
+        for (int mt = 0; mt < 2; ++mt) {
+          mma16816(acc[mt][2 * np], af[mt][kk], bf[0], bf[1]);
+          mma16816(acc[mt][2 * np + 1], af[mt][kk], bf[2], bf[3]);
+        }
+      }
+#pragma unroll
+    for (int np = 0; np < 4; ++np) {
+      const int R = 64 * chn + 16 * np + 2 * q;           // k1w64: n-tile chn / 2, warp column chn % 2
+      const float2 sg = __ldg(reinterpret_cast<const float2*>(p.vs + R)), sp = __ldg(reinterpret_cast<const float2*>(p.vs + R + 8));
+      const float2 bg = __ldg(reinterpret_cast<const float2*>(p.vb + R)), bp = __ldg(reinterpret_cast<const float2*>(p.vb + R + 8));
+      const int ch = 32 * chn + 8 * np + 2 * q;
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt) {
+        float u[2][2];
+#pragma unroll
+        for (int rh = 0; rh < 2; ++rh)
+#pragma unroll
+          for (int cc = 0; cc < 2; ++cc) {
+            const float ag = acc[mt][2 * np][2 * rh + cc], ap = acc[mt][2 * np + 1][2 * rh + cc];
+            const float g = fmaf(rs[mt][rh], ag, fmaf(-mr[mt][rh], cc ? sg.y : sg.x, cc ? bg.y : bg.x));
+            const float pp = fmaf(rs[mt][rh], ap, fmaf(-mr[mt][rh], cc ? sp.y : sp.x, cc ? bp.y : bp.x));
+            u[rh][cc] = round_bf16f(fmaf(pp, tanh_approx(g), pp)) * mk[mt][rh];
+          }
+        __nv_bfloat16* o = p.planes + (size_t)ch * p.T + t0 + 32 * wm + 16 * mt + 2 * g8;
+        stg32(o, pack_bf16(u[0][0], u[1][0]));
+        stg32(o + p.T, pack_bf16(u[0][1], u[1][1]));
+      }
+    }
+  }
+}
+
 }  // namespace a100
