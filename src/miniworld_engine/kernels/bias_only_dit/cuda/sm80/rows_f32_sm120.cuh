@@ -36,7 +36,7 @@ R120_DEVI int vcol(int v, int lane) { return (v * 32 + lane) * 4; }
 // C3 [3][M][D]: LN(c) w1, LN(c) w2, c
 template <int D>
 __global__ void __launch_bounds__(RW * 32) cond3_kernel(const float* __restrict__ C, long sc, const float* __restrict__ W1, const float* __restrict__ W2, float* __restrict__ C3,
-                                                        long M, float eps) {
+                                                        long M, float eps, bool copy) {
   constexpr int NV = D / 128;
   const int lane = threadIdx.x & 31;
   const long row = (long)blockIdx.x * RW + (threadIdx.x >> 5);
@@ -46,7 +46,7 @@ __global__ void __launch_bounds__(RW * 32) cond3_kernel(const float* __restrict_
 #pragma unroll
   for (int v = 0; v < NV; ++v) {
     c[v] = ld4(C + row * sc + vcol(v, lane));
-    st4(C3 + 2 * M * D + row * D + vcol(v, lane), c[v]);
+    if (copy) st4(C3 + 2 * M * D + row * D + vcol(v, lane), c[v]);
     s += sum4(c[v]);
   }
   const float mean = warp_sum(s) / D;
@@ -119,12 +119,13 @@ namespace r120 {
 // the LayerNorm of the C channels, mean / rstd = rsqrt(max(E x^2 - mean^2, 0) + eps), the H dot products with the folded weight W' = Wb diag(ln w)) and the softmax of
 // softmax_rows (bias_only_dit_f32_rows.cu: masked keys at -3e38, __expf, the sum pairwise per float4, 1 / sum) -- only the order of the channel sums differs (a warp
 // owns an element: lane l takes channels 4 (32 v + l) .. + 3, the H + 2 sums then reduced across the lanes).
-constexpr int PS_H = 16, PS_WP = 20;  // heads; the padded W' row (20 floats: a warp's 16-B reads of 8 consecutive rows hit distinct bank quads)
+constexpr int PS_H = 16, PS_WP = 32;  // heads; a W' row: 32 floats, its 4 float4s at the slots q ^ ((c >> 2) & 7) (the 8 lanes of a 16-B read phase take rows 4 apart: distinct bank quads)
+__device__ __forceinline__ int ps_w(int c, int h) { return c * PS_WP + ((((h >> 2) ^ (c >> 2)) & 7) << 2) + (h & 3); }
 template <int C>
 constexpr int ps_smem(int L) { return (PS_H * L + C * PS_WP + PS_H) * 4; }
 
-template <int C, int U>
-__global__ void __launch_bounds__(256, 1) pair_softmax_kernel(const float* __restrict__ Z, const float* __restrict__ WCM, const bool* __restrict__ MASK, float* __restrict__ P, int L,
+template <int C, int U, int NT = 256>
+__global__ void __launch_bounds__(NT, 1) pair_softmax_kernel(const float* __restrict__ Z, const float* __restrict__ WCM, const bool* __restrict__ MASK, float* __restrict__ P, int L,
                                                                float eps) {
   constexpr int H = PS_H, NV = C / 128;
   extern __shared__ __align__(16) float pssm[];
@@ -133,17 +134,17 @@ __global__ void __launch_bounds__(256, 1) pair_softmax_kernel(const float* __res
   float* sw = Wp + C * PS_WP;            // [H] sum_c W'
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const int i = blockIdx.x;
-  for (int k = tid; k < C * H; k += 256) Wp[(k / H) * PS_WP + k % H] = WCM[k];
+  for (int k = tid; k < C * H; k += NT) Wp[ps_w(k / H, k % H)] = WCM[k];
   __syncthreads();
   if (tid < H) {
     float s = 0.f;
-    for (int c = 0; c < C; ++c) s += Wp[c * PS_WP + tid];
+    for (int c = 0; c < C; ++c) s += Wp[ps_w(c, tid)];
     sw[tid] = s;
   }
   __syncthreads();
   const int head = ((lane >> 4) & 1) * 8 + ((lane >> 3) & 1) * 4 + ((lane >> 2) & 1) * 2 + ((lane >> 1) & 1);
   const float* zi = Z + (size_t)i * L * C;
-  for (int j0 = warp * U; j0 < L; j0 += 8 * U) {
+  for (int j0 = warp * U; j0 < L; j0 += (NT / 32) * U) {
     float4 x[U][NV];
 #pragma unroll
     for (int u = 0; u < U; ++u)
@@ -160,10 +161,10 @@ __global__ void __launch_bounds__(256, 1) pair_softmax_kernel(const float* __res
     for (int v = 0; v < NV; ++v)
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
-        const float4* wr = reinterpret_cast<const float4*>(Wp + (4 * (32 * v + lane) + e) * PS_WP);
+        const int cw = 4 * (32 * v + lane) + e;
         float w[H];
 #pragma unroll
-        for (int q = 0; q < H / 4; ++q) { const float4 t = wr[q]; w[4 * q] = t.x; w[4 * q + 1] = t.y; w[4 * q + 2] = t.z; w[4 * q + 3] = t.w; }
+        for (int q = 0; q < H / 4; ++q) { const float4 t = *reinterpret_cast<const float4*>(Wp + ps_w(cw, 4 * q)); w[4 * q] = t.x; w[4 * q + 1] = t.y; w[4 * q + 2] = t.z; w[4 * q + 3] = t.w; }
 #pragma unroll
         for (int u = 0; u < U; ++u) {
           const float xv = e == 0 ? x[u][v].x : e == 1 ? x[u][v].y : e == 2 ? x[u][v].z : x[u][v].w;
@@ -195,12 +196,12 @@ __global__ void __launch_bounds__(256, 1) pair_softmax_kernel(const float* __res
     }
   }
   __syncthreads();
-  // the softmax of the row's H x L biases: warp w takes heads w and w + 8
+  // the softmax of the row's H x L biases: warp w takes heads w, w + NT / 32, ...
   constexpr float NEG = -3.0e38f;
   const int nch = L / 4;
 #pragma unroll 1
-  for (int hh = 0; hh < 2; ++hh) {
-    const int h = warp + 8 * hh;
+  for (int hh = 0; hh < H / (NT / 32); ++hh) {
+    const int h = warp + (NT / 32) * hh;
     const float* b = S + h * L;
     float* out = P + ((size_t)h * L + i) * L;
     float mx = NEG;

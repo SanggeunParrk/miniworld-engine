@@ -73,10 +73,10 @@ def row_stats120(x: torch.Tensor, eps: float) -> torch.Tensor:
     return st
 
 
-def cond3_f32(c: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, eps: float) -> torch.Tensor:
+def cond3_f32(c: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, eps: float, copy: bool = True) -> torch.Tensor:
     """RTX 5090 only (rows_f32_sm120.cuh): ``[3, M, dc]`` fp32 = (LN(c) w1, LN(c) w2, c) for c [M, dc] (dc 384 / 768): the operands of the
     fp32 block's one batched cond GEMM."""
-    out = torch.empty(3, c.shape[0], c.shape[1], device=c.device, dtype=torch.float32)
+    out = torch.empty(3 if copy else 2, c.shape[0], c.shape[1], device=c.device, dtype=torch.float32)  # without copy: the two LayerNorms only
     _ext().cond3_f32(c, w1, w2, out, float(eps))
     return out
 
@@ -95,12 +95,12 @@ def gate_res_b_f32(x, z, g, b) -> torch.Tensor:
     return y
 
 
-def pair_softmax_f32(z: torch.Tensor, wcm: torch.Tensor, mask: torch.Tensor | None, length: int, eps: float) -> torch.Tensor:
+def pair_softmax_f32(z: torch.Tensor, wcm: torch.Tensor, mask: torch.Tensor | None, length: int, eps: float, cfg: int = 0) -> torch.Tensor:
     """RTX 5090 only (rows_f32_sm120.cuh pair_softmax): P [16, L, L] fp32 = softmax over the keys of the pair bias LN(z) W'^T of z [L, L, C] fp32
     (C 128 / 256, W' = wcm [C, 16] fp32), masked keys (a bool [L] mask) 0 -- the pair bias never leaves shared memory. L a multiple of 128, <= 1024."""
     p = torch.empty(16, length, length, device=z.device, dtype=torch.float32)
     kv = mask.reshape(length).contiguous() if mask is not None else torch.empty(0, dtype=torch.bool, device=z.device)
-    _ext().pair_softmax_f32(z, wcm, kv, p, length, float(eps))
+    _ext().pair_softmax_f32(z, wcm, kv, p, length, float(eps), cfg)
     return p
 
 

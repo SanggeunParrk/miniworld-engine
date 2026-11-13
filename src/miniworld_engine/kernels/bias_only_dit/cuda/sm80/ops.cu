@@ -397,13 +397,14 @@ void cond3_f32(torch::Tensor c, torch::Tensor w1, torch::Tensor w2, torch::Tenso
   const at::cuda::CUDAGuard guard(c.device());
   const int64_t M = c.size(0), dc = c.size(1);
   f32_rows(c, dc, "cond3_f32 c");
-  TORCH_CHECK(c3.is_contiguous() && c3.scalar_type() == at::kFloat && c3.numel() == 3 * M * dc, "cond3_f32: c3 [3, M, dc] fp32 contiguous");
+  TORCH_CHECK(c3.is_contiguous() && c3.scalar_type() == at::kFloat && (c3.numel() == 3 * M * dc || c3.numel() == 2 * M * dc), "cond3_f32: c3 [3 or 2, M, dc] fp32 contiguous");
+  const bool copy = c3.numel() == 3 * M * dc;
   TORCH_CHECK(w1.is_contiguous() && w2.is_contiguous() && w1.numel() == dc && w2.numel() == dc && w1.scalar_type() == at::kFloat && w2.scalar_type() == at::kFloat,
               "cond3_f32: w1, w2 [dc] fp32");
   auto s = at::cuda::getCurrentCUDAStream();
   const unsigned grid = (unsigned)((M + r120::RW - 1) / r120::RW);
-  if (dc == 384) r120::cond3_kernel<384><<<grid, r120::RW * 32, 0, s>>>(c.data_ptr<float>(), c.stride(0), w1.data_ptr<float>(), w2.data_ptr<float>(), c3.data_ptr<float>(), M, (float)eps);
-  else if (dc == 768) r120::cond3_kernel<768><<<grid, r120::RW * 32, 0, s>>>(c.data_ptr<float>(), c.stride(0), w1.data_ptr<float>(), w2.data_ptr<float>(), c3.data_ptr<float>(), M, (float)eps);
+  if (dc == 384) r120::cond3_kernel<384><<<grid, r120::RW * 32, 0, s>>>(c.data_ptr<float>(), c.stride(0), w1.data_ptr<float>(), w2.data_ptr<float>(), c3.data_ptr<float>(), M, (float)eps, copy);
+  else if (dc == 768) r120::cond3_kernel<768><<<grid, r120::RW * 32, 0, s>>>(c.data_ptr<float>(), c.stride(0), w1.data_ptr<float>(), w2.data_ptr<float>(), c3.data_ptr<float>(), M, (float)eps, copy);
   else TORCH_CHECK(false, "cond3_f32: dc 384 or 768");
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -431,7 +432,7 @@ void resgate_adaln_f32(torch::Tensor y, torch::Tensor g, torch::Tensor bs, torch
 
 // P [16, L, L] fp32 = softmax over the keys of the pair bias of z [L, L, C] fp32 (C 128 / 256) with W' = wcm [C, 16] fp32, kv a bool [L] key mask or empty;
 // L a multiple of 128, at most 1024 (the row's biases in shared memory)
-void pair_softmax_f32(torch::Tensor z, torch::Tensor wcm, torch::Tensor kv, torch::Tensor p, int64_t L, double eps) {
+void pair_softmax_f32(torch::Tensor z, torch::Tensor wcm, torch::Tensor kv, torch::Tensor p, int64_t L, double eps, int64_t cfg) {
   const at::cuda::CUDAGuard guard(z.device());
   TORCH_CHECK(z.is_cuda() && z.scalar_type() == at::kFloat && z.is_contiguous() && wcm.is_contiguous() && wcm.scalar_type() == at::kFloat && wcm.dim() == 2 && wcm.size(1) == r120::PS_H,
               "pair_softmax_f32: z fp32 contiguous [L, L, C], wcm fp32 [C, 16]");
@@ -444,12 +445,20 @@ void pair_softmax_f32(torch::Tensor z, torch::Tensor wcm, torch::Tensor kv, torc
     mk = kv.data_ptr<bool>();
   }
   auto s = at::cuda::getCurrentCUDAStream();
-  auto run = [&](auto kern, int smem) {
+  auto run = [&](auto kern, int smem, int nt) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-    kern<<<(unsigned)L, 256, smem, s>>>(z.data_ptr<float>(), wcm.data_ptr<float>(), mk, p.data_ptr<float>(), (int)L, (float)eps);
+    kern<<<(unsigned)L, nt, smem, s>>>(z.data_ptr<float>(), wcm.data_ptr<float>(), mk, p.data_ptr<float>(), (int)L, (float)eps);
   };
-  if (C == 128) run(r120::pair_softmax_kernel<128, 4>, r120::ps_smem<128>((int)L));
-  else run(r120::pair_softmax_kernel<256, 4>, r120::ps_smem<256>((int)L));
+  // cfg: 0 256 threads, 4 elements a warp; 1 512 threads, 2 elements; 2 512 threads, 4 elements
+  if (C == 128) {
+    if (cfg == 1) run(r120::pair_softmax_kernel<128, 2, 512>, r120::ps_smem<128>((int)L), 512);
+    else if (cfg == 2) run(r120::pair_softmax_kernel<128, 4, 512>, r120::ps_smem<128>((int)L), 512);
+    else run(r120::pair_softmax_kernel<128, 4>, r120::ps_smem<128>((int)L), 256);
+  } else {
+    if (cfg == 1) run(r120::pair_softmax_kernel<256, 2, 512>, r120::ps_smem<256>((int)L), 512);
+    else if (cfg == 2) run(r120::pair_softmax_kernel<256, 4, 512>, r120::ps_smem<256>((int)L), 512);
+    else run(r120::pair_softmax_kernel<256, 4>, r120::ps_smem<256>((int)L), 256);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

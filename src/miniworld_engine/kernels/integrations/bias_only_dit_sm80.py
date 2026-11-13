@@ -559,16 +559,20 @@ def _block_eval_sm120(module, single, cond, pair, mask) -> torch.Tensor:
 
 # ---------------------------------------------------------------------------------------------------- RTX 5090 fp32 inference block
 # fp32 activations and weights, no gradient: every GEMM stays cuBLAS on TF32 (the values of the sm_80 path's GEMMs: gemm120's TF32 form moved
-# 3 cases GREEN -> YELLOW, see FP32_FUSED), but the block's cond-only work is ONE strided-batched GEMM -- [M, dc] x [dc, 1536] three times:
-# the two AdaLN tables [S | B] (LN(c) w1, LN(c) w2) and the two residual gates' logits (c), whose operands one row pass writes
-# (bias_only_dit/cuda/sm80/rows_f32_sm120.cuh cond3) -- where the sm_80 path ran five GEMMs at 1536 / 768 columns, each leaving most of a
-# last wave of the 170 SMs idle; the attention's residual gate and the transition's AdaLN are one row pass; the transition's gate adds its
-# bias in its row pass. The packed weights ([Ws; Wb] x 3, [Wv; Wg], [Wa; Wb], the folded pair weight) are param_forms read by a capture as
+# 3 cases GREEN -> YELLOW, see FP32_FUSED; the GEMMs go through cuBLASLt with measured configurations, _LT_F32), but the two AdaLN tables
+# [S | B] are ONE strided-batched GEMM of the two cond LayerNorms one row pass writes (rows_f32_sm120.cuh cond3), the two residual gates'
+# logits one GEMM [Wsg; Wsc] on the side stream behind the pair bias + softmax (one pass, pair_softmax) -- where the sm_80 path ran five
+# GEMMs at 1536 / 768 columns on the main stream, each leaving most of a last wave of the 170 SMs idle; the attention's residual gate and the
+# transition's AdaLN are one row pass; both gates add their bias in their row pass. The packed weights ([Ws; Wb] x 3, [Wv; Wg], [Wa; Wb], the folded pair weight) are param_forms read by a capture as
 # its eager warm-up made them (capture_reads_eager: no concatenation in a replay -- 20 us a call at L 128-384).
 
 
 #: the pair bias and its softmax in one pass (bias_only_dit/cuda/sm80 pair_softmax_f32: 16 heads, d_pair 128 / 256, L <= 1024)
 PAIR_SOFTMAX_F32 = True
+#: its launch (0: 256 threads, 4 elements a warp; 1: 512, 2; 2: 512, 4)
+PS_CFG = 0
+#: the gate logits' GEMM on the side stream behind the pair work (else the third batch of the cond GEMM, whose operand c cond3 copies)
+GATE_SIDE = True
 
 
 def _fused_eval_f32(module, single: torch.Tensor, cond: torch.Tensor) -> bool:
@@ -625,18 +629,23 @@ def _block_eval_sm120_f32(module, single, cond, pair, mask) -> torch.Tensor:
         side.wait_stream(main)
         with torch.cuda.stream(side):
             if PAIR_SOFTMAX_F32 and heads == 16 and wcm.shape[0] in (128, 256) and length <= 1024:
-                P = core.pair_softmax_f32(pr[0], wcm, mask, length, EPS)  # the pair bias stays in shared memory
+                P = core.pair_softmax_f32(pr[0], wcm, mask, length, EPS, PS_CFG)  # the pair bias stays in shared memory
             else:
                 bias = _sm80().pair_bias_generic(pr[0], wcm, None, length, EPS, oscale=1.0)  # [H, L, L], natural units
                 P, _ = _softmax(bias, mask, False)
                 del bias
-        c3 = core.cond3_f32(cs, ada.ln_cond.weight, cada.ln_cond.weight, float(ada.ln_cond.eps))
-        t3 = _mm32(c3, w3)  # [3, M, 1536]: [S | B] of the attention's AdaLN, of the transition's, [g2 | gc] (no bias)
+            gs = _mm32(cs, w3[2]) if GATE_SIDE else None  # the residual gates' logits [g2 | gc] (no bias) behind the pair work
+        c3 = core.cond3_f32(cs, ada.ln_cond.weight, cada.ln_cond.weight, float(ada.ln_cond.eps), copy=not GATE_SIDE)
+        t3 = _mm32(c3, w3[:2] if GATE_SIDE else w3)  # [S | B] of the attention's AdaLN, of the transition's (, [g2 | gc], no bias)
         del c3
+        gg = t3[2] if gs is None else gs
         xa, _ = _adaln_k().epilogue(xs, t3[0], ada.to_scale.bias, float(ada.ln_in.eps))
         vg = _mm32(xa, wvg)
         main.wait_stream(side)
         P.record_stream(main)
+        if gs is not None:
+            gs.record_stream(main)
+            cs.record_stream(side)
         for t in (pr, wcm):
             t.record_stream(side)
         if mask is not None:
@@ -644,10 +653,10 @@ def _block_eval_sm120_f32(module, single, cond, pair, mask) -> torch.Tensor:
         att = torch.empty(m, da, device=single.device, dtype=F32)
         core.PvGateTF32(heads, da // heads)(vg[:, :da], P.view(heads * length, length), att, a_, g=vg[:, da:])
         y = _mm32(att, at.to_out.weight)
-        out, xa2 = core.resgate_adaln_f32(y, t3[2, :, :d], at.to_scale.bias, xs, t3[1], cada.to_scale.bias, float(cada.ln_in.eps))
+        out, xa2 = core.resgate_adaln_f32(y, gg[:, :d], at.to_scale.bias, xs, t3[1], cada.to_scale.bias, float(cada.ln_in.eps))
         h = _ct_k().swiglu_fwd(_mm32(xa2, wab))
         z = _mm32(h, ct.squeeze.weight)
-        res = core.gate_res_b_f32(out, z, t3[2, :, d:], ct.to_scale.bias)
+        res = core.gate_res_b_f32(out, z, gg[:, d:], ct.to_scale.bias)
     return res.view(single.shape)
 
 
