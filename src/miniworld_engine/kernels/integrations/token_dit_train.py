@@ -273,14 +273,23 @@ def _native_caller_output(output, *tensors, force: bool = False):
 
 
 def _native_caller_hooks(*tensors, force: bool = False):
-    """Keep caller autograd edges while replacing their CUDA sum/add operations.
+    """Keep the caller's autograd edges while replacing the CUDA sum of a sample-expanded input's gradient.
 
-    Hooks bracket individual existing nodes; no mode escapes to other nodes or
-    the caller, and gradients remain ordinary Tensors. This experimental option
-    is for the manual CUDA-graph path, not a torch.compile transformation.
+    A caller tensor expanded over the samples (stride 0: a shared conditioning / pair) has an ``ExpandBackward0`` / ``AsStridedBackward0``
+    node whose sum over the samples runs on ``caller_sum90`` (a fixed-order fp32 sum per element). Hooks bracket that one node; no mode
+    escapes to other nodes or the caller, and gradients remain ordinary Tensors. Not a torch.compile transformation.
+
+    The leaves' ``AccumulateGrad`` nodes are NOT hooked: their ``grad += new`` is ATen's ``add_`` in the autograd engine, no Python. (They
+    were: a pre- and a post-hook, a ``TorchDispatchMode`` entered and left, and a Python ``__torch_dispatch__`` per accumulation -- one per
+    parameter per backward, ~2,800 per FoldForge training micro step of a 24-block token DiT -- to run ``caller_add90``, which computes
+    exactly what ``add_`` does: T(float(a) + float(b)) per element. The gradients are bitwise the same without it.)
     """
     if not force or torch.compiler.is_compiling():
         return
+    # a leaf (every parameter) has an AccumulateGrad node: nothing to hook; only a sample-expanded view has the sum
+    views = [t for t in tensors if t.requires_grad and not t.is_leaf and t.dim() and t.stride(0) == 0]
+    if not views:
+        return  # the usual call: no class, no extension lookup per block call
     import threading
 
     from torch.autograd.graph import get_gradient_edge
@@ -372,17 +381,10 @@ def _native_caller_hooks(*tensors, force: bool = False):
         node.register_hook(post)
         node.metadata["miniworld_h100_native_caller"] = True
 
-    for tensor in tensors:
-        if not tensor.requires_grad:
-            continue
+    for tensor in views:
         node = get_gradient_edge(tensor).node
-        if node.name().endswith("AccumulateGrad"):
+        if node.name() in ("ExpandBackward0", "AsStridedBackward0"):
             install(node)
-        elif node.name() in ("ExpandBackward0", "AsStridedBackward0") and tensor.stride(0) == 0:
-            install(node)
-            for ancestor, _ in node.next_functions:
-                if ancestor is not None and ancestor.name().endswith("AccumulateGrad"):
-                    install(ancestor)
 
 
 def _pack(P, qk, dev, at, opts=None):

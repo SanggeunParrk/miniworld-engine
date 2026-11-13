@@ -234,8 +234,11 @@ packing) and `token_dit_train_rows.cu` (training forward / backward row passes a
 `cond_transition_gemm_swiglu_sm90` (`gemm_swiglu_sm90.cu`: the expand GEMM with SwiGLU in its epilogue, bf16 or TF32, persistent,
 producer + two consumer warpgroups, `m64n256`, [Wa|Wb] packed per 256-row tile). Products not listed are cuBLAS. These are part of the
 token DiT design ([token_dit.md](token_dit.md)). Two rows of the family serve other modules: `cond_transition_caller_grad_sum_sm90` /
-`..._add_sm90` (`caller_sum90_k` / `caller_add90_k`) replace autograd's gradient accumulation on the leaves of the H100 fused Transition,
-OPM, PWA, TriMul, AttentionPairBias and atom-DiT outputs (`integrations/token_dit_train._native_caller_output` / `_native_caller_hooks`).
+`..._add_sm90` (`caller_sum90_k` / `caller_add90_k`) replace the sum over the samples in the `ExpandBackward0` / `AsStridedBackward0`
+node of a sample-expanded (stride 0) input of the H100 fused Transition, OPM, PWA, TriMul, AttentionPairBias and atom-DiT outputs
+(`integrations/token_dit_train._native_caller_output` / `_native_caller_hooks`: a dispatch mode around that one node). The leaves'
+`AccumulateGrad` nodes are not hooked (their `grad += new` is ATen's `add_`, the same values; a Python hook pair and a dispatch mode
+per parameter per backward cost ~50 ms of host time per training micro step of a 24-block token DiT).
 `kernels/conditioned_transition/configs/h100_sm90.json` holds the Triton ops of that family.
 
 ## History
