@@ -81,15 +81,15 @@ def attention(q, k, v, bias, scale=D**-0.5, want_lse=False, rows=2, defs=()):
     return _core(rows, tuple(defs)).triattn_fwd(q, k, v, scaled_bias(bias, scale), scale, want_lse)
 
 
-def key_tiles(mask, length):
-    """The fp16 core's ``key_tiles``: int32 [B], the 128-key tiles of each batch element up to its last attended key (at least 1), or None
-    without a mask.  The tiles past them hold keys masked in every row (-inf in the bias): the core skips them (same bits, fewer tiles;
-    the requirement inputs pad the last L // 8 keys, the kit's core skips them too)."""
+def key_tiles(mask, length, tile=TOK):
+    """The fp16 core's ``key_tiles``: int32 [B], the ``tile``-key tiles (128; the h100_dh core: 64) of each batch element up to its last
+    attended key (at least 1), or None without a mask.  The tiles past them hold keys masked in every row (-inf in the bias): the core
+    skips them (same bits, fewer tiles; the requirement inputs pad the last L // 8 keys, the kit's core skips them too)."""
     if mask is None:
         return None
     pos = torch.arange(1, length + 1, device=mask.device, dtype=torch.int32)
     last = (mask.reshape(-1, length).to(torch.int32) * pos).amax(-1)  # 1 + the last attended key, 0 when none
-    return ((last + (TOK - 1)) // TOK).clamp_min(1).to(torch.int32)
+    return ((last + (tile - 1)) // tile).clamp_min(1).to(torch.int32)
 
 
 def scaled_bias(bias, scale=D**-0.5):

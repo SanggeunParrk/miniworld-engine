@@ -62,6 +62,8 @@ def prebuild(target, rows):
             "triangle_attention_dh_bwd_q_sm90",
         ):
             yield h100_dh.ext
+        if needs("triangle_attention_d64_fwd_sm90"):
+            yield h100_dh.ext_d64
     elif target.arch == "sm100":
         from . import b200_triattn
 

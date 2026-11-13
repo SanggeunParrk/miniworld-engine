@@ -443,7 +443,8 @@ def _forward(
     # ``flip`` (the ending node on AF3's bias orientation): the bias is made unmasked and masked after the transpose
     front_mask = mask if mask is not None and not flip else empty.bool()
     # the one-kernel front's L limit: ``_FRONT_L``, or ``_FRONT_L_COMPACT`` for 16-channel heads kept compact on the fp16 core
-    compact_ok = head_dim == COMPACT and _core_mod.INFERENCE_FP16 and (C, H * COMPACT) in _FRONT_L
+    # (the standard output only: Chai-1's layouts project the padded u)
+    compact_ok = head_dim == COMPACT and _core_mod.INFERENCE_FP16 and (C, H * COMPACT) in _FRONT_L and out_mode == STANDARD
     compact_l = max(_FRONT_L[(C, H * COMPACT)], _FRONT_L_COMPACT.get(C, 0)) if compact_ok else 0
     fused = (
         (not need)
@@ -577,10 +578,15 @@ def inference(
     flip=False,
     gate_bias=None,
     out_bias=None,
+    out_mode=STANDARD,
+    wt_p=None,
 ):
-    """pair + TriangleAttention(pair), starting node, no grad; wcat, wo_p = pack_weights(...); L a multiple of 128; `out`: a contiguous
-    tensor like pair to write into."""
-    return _forward(pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans, out, flip, gate_bias, out_bias)[0]
+    """pair + TriangleAttention(pair), no grad; wcat, wo_p = pack_weights(...); L a multiple of 128; `out`: a contiguous tensor like pair
+    to write into (the standard output only). ``out_mode`` UNTRANSPOSED / DUAL: Chai-1's layouts as in training (``wt_p`` = pack_out of
+    the second out-projection), a fresh output."""
+    return _forward(
+        pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans, out, flip, gate_bias, out_bias, out_mode, wt_p
+    )[0]
 
 
 def _mm_f32(a, b):
