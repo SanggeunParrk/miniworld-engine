@@ -271,7 +271,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         prov = _anthropic.load("opt_core.kernels.triattn")
         return prov, _anthropic.kernel_selection(
             prov,
-            "{}.{}".format(*cc),
+            "{}.{}".format(*torch.cuda.get_device_capability(pair.device)),
             {torch.bfloat16: "bf16", torch.float32: "fp32"}[pair.dtype],
             self._head_dim(),
             self.n_head,
