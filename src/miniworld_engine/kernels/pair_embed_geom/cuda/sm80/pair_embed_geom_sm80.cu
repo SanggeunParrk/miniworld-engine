@@ -502,8 +502,14 @@ void ln_table_grad_sm120(torch::Tensor tbl, torch::Tensor codes, torch::Tensor d
 namespace {
 __device__ __forceinline__ float as_f32(float v) { return v; }
 __device__ __forceinline__ float as_f32(__nv_bfloat16 v) { return __bfloat162float(v); }
+// programmatic dependent launch: the forwards are launched with programmatic stream serialization behind pg120_table and wait for it only
+// before their first table read (their binning overlaps the transpose); griddepcontrol.wait is a no-op for a launch without a primary
+__device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
+__device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
+
 template <typename TI>
 __global__ void pg120_table(const TI* __restrict__ w, __nv_bfloat16* __restrict__ t, int nt) {   // w [256][nt] -> t [nt][256] bf16
+  pdl_trigger();
   __shared__ float tile[32][33];
   const int r0 = blockIdx.x * 32, c0 = blockIdx.y * 32;
   for (int k = threadIdx.y; k < 32; k += 8) {
@@ -517,9 +523,28 @@ __global__ void pg120_table(const TI* __restrict__ w, __nv_bfloat16* __restrict_
   }
 }
 
+// `kernel<<<grid, block, 0, st>>>(args...)` with programmatic stream serialization (pdl): it may start while the previous kernel runs and
+// waits for it at its griddepcontrol.wait
+template <typename... KArgs, typename... Args>
+void launch_pdl(void (*kernel)(KArgs...), dim3 grid, dim3 block, cudaStream_t st, bool pdl, Args&&... args) {
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = grid;
+  cfg.blockDim = block;
+  cfg.dynamicSmemBytes = 0;
+  cfg.stream = st;
+  cudaLaunchAttribute attr[1];
+  attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attr[0].val.programmaticStreamSerializationAllowed = 1;
+  cfg.attrs = attr;
+  cfg.numAttrs = pdl ? 1 : 0;
+  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kernel, std::forward<Args>(args)...));
+}
+
 // the bf16 table [nt][256]: `tbl` itself, or the transpose of a [256][nt] weight (fp32 / bf16)
-torch::Tensor table_of(torch::Tensor tbl, int nt, cudaStream_t st) {
+torch::Tensor table_of(torch::Tensor tbl, int nt, cudaStream_t st, bool& transposed) {
+  transposed = false;
   if (tbl.size(0) == nt && tbl.size(1) == C && tbl.scalar_type() == at::kBFloat16) return tbl;
+  transposed = true;
   TORCH_CHECK(tbl.dim() == 2 && tbl.size(0) == C && tbl.size(1) == nt && tbl.is_contiguous(), "table: [NT, 256] bf16 or a contiguous [256, NT] weight");
   auto t = torch::empty({nt, C}, tbl.options().dtype(at::kBFloat16));
   const dim3 grid((nt + 31) / 32, C / 32), block(32, 8);
@@ -608,12 +633,162 @@ pg120_fwd(const __nv_bfloat16* tbl, const float* bb, const uint8_t* ca, const ui
   }
 }
 
+// The encoder, one non-persistent CTA per PB consecutive pairs (in (b, i, j) order, across rows): thread t bins pair t (pg_fwd's arithmetic),
+// then warp w gathers and stores pairs 32 w .. 32 w + 31 PU at a time (pg_fwd's warp-per-pair layout and LayerNorm, store_pairs).
+template <typename IdxT, int PB>
+__global__ void __launch_bounds__(PB)
+pg120_fwd_blk(const __nv_bfloat16* tbl, const float* bb, const uint8_t* ca, const uint8_t* cb, const uint8_t* mask, const IdxT* idx, const IdxT* chains,
+              const float* dlim, const float* alim, __nv_bfloat16* out, uint4* codes, int n, long long P, int ln, float eps) {
+  __shared__ float dlim_s[32], alim_s[32];
+  __shared__ uint32_t w0s[PB], w1s[PB];
+  __shared__ float cvs[PB];
+  if (threadIdx.x < 32) { dlim_s[threadIdx.x] = threadIdx.x < 20 ? dlim[threadIdx.x] : 0.f; alim_s[threadIdx.x] = threadIdx.x < 20 ? alim[threadIdx.x] : 0.f; }
+  __syncthreads();
+  const long long pb = (long long)blockIdx.x * PB;
+  {
+    const long long p = pb + threadIdx.x;
+    uint32_t w0 = MASKED, w1 = 0;
+    float cv = 0.f;
+    if (p < P) {
+      const long long row = p / n;
+      const int j = (int)(p - row * n), i = (int)(row % n);
+      const int b = (int)(row / n);
+      if (mask[b * n + i] && mask[b * n + j]) {
+        const int s = (int)min(max((long long)idx[b * n + i] - (long long)idx[b * n + j] + 63, 0LL), 126LL);
+        w0 = (uint32_t)s;
+        cv = (float)(chains[b * n + i] * chains[b * n + j]);
+        if (ca[b * n + i] && ca[b * n + j]) {
+          const V3 Ni = atom(bb, b, n, i, 0), CAi = atom(bb, b, n, i, 1), CBi = atom(bb, b, n, i, 3);
+          const V3 Nj = atom(bb, b, n, j, 0), CAj = atom(bb, b, n, j, 1), Cj = atom(bb, b, n, j, 2), CBj = atom(bb, b, n, j, 3);
+          const float d0 = nrm(sub(CAi, Nj)), d1 = nrm(sub(CAi, CAj)), d2 = nrm(sub(CAi, Cj)), d3 = cb[b * n + j] ? nrm(sub(CAi, CBj)) : 0.f;
+          w0 |= F_DIST | ((uint32_t)bucket(d0, dlim_s, 20) << 8) | ((uint32_t)bucket(d1, dlim_s, 20) << 13) | ((uint32_t)bucket(d2, dlim_s, 20) << 18) |
+                ((uint32_t)bucket(d3, dlim_s, 20) << 23);
+          if (cb[b * n + i]) {
+            const float a0 = dihedral(Ni, CAi, CBi, CBj), a1 = dihedral(Nj, CAj, CBj, CBi), a2 = bond(CAi, CBi, CBj), a3 = bond(CAj, CBj, CBi),
+                        a4 = dihedral(CAi, CBi, CBj, CAj);
+            w0 |= F_ORI;
+            w1 = (uint32_t)bucket(a0, alim_s, 20) | ((uint32_t)bucket(a1, alim_s, 20) << 5) | ((uint32_t)bucket(a2, alim_s, 20) << 10) |
+                 ((uint32_t)bucket(a3, alim_s, 20) << 15) | ((uint32_t)bucket(a4, alim_s, 20) << 20);
+          }
+        }
+      }
+      if (codes != nullptr) codes[p] = make_uint4(w0 ^ MASKED, w1, __float_as_uint(cv), 0u);
+    }
+    w0s[threadIdx.x] = w0; w1s[threadIdx.x] = w1; cvs[threadIdx.x] = cv;
+  }
+  __syncthreads();
+  pdl_wait();                                                 // the table (pg120_table) from here on
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, c0 = lane * 8;
+  const long long p0 = pb + warp * 32;
+  if (p0 >= P) return;
+  const int cnt = (int)min(32LL, P - p0);
+  for (int t0 = 0; t0 < cnt; t0 += PU) {
+    float x[PU][8];
+#pragma unroll
+    for (int u = 0; u < PU; u++) {
+      const int t = warp * 32 + t0 + u;
+      const uint32_t q0 = w0s[t], q1 = w1s[t];
+      const float pc = cvs[t];
+#pragma unroll
+      for (int e = 0; e < 8; e++) x[u][e] = 0.f;
+      if (!(q0 & MASKED)) {
+        auto add = [&](int r, float scale) {
+          const uint4 v = trow<true>(tbl, r, c0);
+          x[u][0] += scale * bf_lo(v.x); x[u][1] += scale * bf_hi(v.x); x[u][2] += scale * bf_lo(v.y); x[u][3] += scale * bf_hi(v.y);
+          x[u][4] += scale * bf_lo(v.z); x[u][5] += scale * bf_hi(v.z); x[u][6] += scale * bf_lo(v.w); x[u][7] += scale * bf_hi(v.w);
+        };
+        add(q0 & 127, 1.f);
+        if (q0 & F_DIST) {
+          add(R_DIST + ((q0 >> 8) & 31), 1.f);
+          add(R_DIST + 21 + ((q0 >> 13) & 31), 1.f);
+          add(R_DIST + 42 + ((q0 >> 18) & 31), 1.f);
+          add(R_DIST + 63 + ((q0 >> 23) & 31), 1.f);
+        }
+        if (q0 & F_ORI) {
+#pragma unroll
+          for (int k = 0; k < 5; k++) add(R_ANG + 21 * k + ((q1 >> (5 * k)) & 31), 1.f);
+        }
+        if (pc != 0.f) add(R_CHAIN, pc);
+      }
+    }
+    store_pairs<true>(out + (size_t)p0 * C + c0, t0, cnt, x, ln != 0, eps);
+  }
+}
+
+// The decoder, one non-persistent CTA per PB consecutive pairs (in (b, i, j) order, across rows): a half-warp per pair (16 lanes x 16 channels:
+// channels 8 l .. 8 l + 7 and 128 + 8 l .. of lane l, so that a half-warp's store writes 256 contiguous bytes), its 16 lanes binning the pair
+// redundantly (broadcast loads), no item loop: the launch is a stream of short CTAs, as a fill is.
+template <typename IdxT, int PB>
+__global__ void __launch_bounds__(PB * 16)
+pg120_fwd_ca_blk(const __nv_bfloat16* __restrict__ tbl, const float* __restrict__ ca, const uint8_t* __restrict__ mask, const IdxT* __restrict__ idx,
+                 const float* __restrict__ dlim, __nv_bfloat16* __restrict__ out, uint4* codes, int n, long long P, int nd, int ln, float eps) {
+  __shared__ float dlim_s[32];
+  if (threadIdx.x < 32) dlim_s[threadIdx.x] = threadIdx.x < nd ? dlim[threadIdx.x] : 0.f;
+  __syncthreads();
+  const int hl = threadIdx.x & 15, cc = hl * 8;
+  const long long p = (long long)blockIdx.x * PB + (threadIdx.x >> 4);
+  if (p >= P) return;                                         // whole half-warps leave together (the shuffles below are per half)
+  const long long row = p / n;
+  const int j = (int)(p - row * n), i = (int)(row % n);
+  const long long b = row / n;
+  uint32_t w0 = MASKED;
+  if (mask[b * n + i] && mask[b * n + j]) {
+    const float* pi = ca + (size_t)row * 3;
+    const float* pj = ca + ((size_t)b * n + j) * 3;
+    const float dx = pi[0] - pj[0], dy = pi[1] - pj[1], dz = pi[2] - pj[2];
+    const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+    const long long s = (long long)idx[b * n + i] - (long long)idx[b * n + j] + 63;
+    w0 = (uint32_t)min(max(s, 0LL), 126LL) | ((uint32_t)bucket(d, dlim_s, nd) << 8);
+  }
+  if (codes != nullptr && hl == 0) codes[p] = make_uint4(w0 ^ MASKED, 0u, 0u, 0u);
+  float x[16];
+#pragma unroll
+  for (int e = 0; e < 16; e++) x[e] = 0.f;
+  pdl_wait();                                                 // the table (pg120_table) from here on
+  if (!(w0 & MASKED)) {
+    const int r0 = w0 & 127, r1 = R_CAD + ((w0 >> 8) & 31);
+#pragma unroll
+    for (int k = 0; k < 2; k++) {
+      const uint4 v = trow<true>(tbl, r0, cc + 128 * k), u = trow<true>(tbl, r1, cc + 128 * k);
+      float* y = x + 8 * k;
+      y[0] += bf_lo(v.x); y[1] += bf_hi(v.x); y[2] += bf_lo(v.y); y[3] += bf_hi(v.y);
+      y[4] += bf_lo(v.z); y[5] += bf_hi(v.z); y[6] += bf_lo(v.w); y[7] += bf_hi(v.w);
+      y[0] += bf_lo(u.x); y[1] += bf_hi(u.x); y[2] += bf_lo(u.y); y[3] += bf_hi(u.y);
+      y[4] += bf_lo(u.z); y[5] += bf_hi(u.z); y[6] += bf_lo(u.w); y[7] += bf_hi(u.w);
+    }
+  }
+  const unsigned hm = 0xFFFFu << (threadIdx.x & 16);          // this half-warp's lanes
+  float s = 0.f, rs = 1.f;
+  if (ln) {
+#pragma unroll
+    for (int e = 0; e < 16; e++) { x[e] = __bfloat162float(__float2bfloat16_rn(x[e])); s += x[e]; }
+#pragma unroll
+    for (int o = 8; o; o >>= 1) s += __shfl_xor_sync(hm, s, o);
+    s *= 1.f / C;
+    float q = 0.f;
+#pragma unroll
+    for (int e = 0; e < 16; e++) { const float d = x[e] - s; q += d * d; }
+#pragma unroll
+    for (int o = 8; o; o >>= 1) q += __shfl_xor_sync(hm, q, o);
+    rs = rsqrtf(q * (1.f / C) + eps);
+  }
+#pragma unroll
+  for (int k = 0; k < 2; k++) {
+    uint4 w;
+    __nv_bfloat162* hw = reinterpret_cast<__nv_bfloat162*>(&w);
+#pragma unroll
+    for (int e = 0; e < 4; e++)
+      hw[e] = ln ? __floats2bfloat162_rn((x[8 * k + 2 * e] - s) * rs, (x[8 * k + 2 * e + 1] - s) * rs) : __floats2bfloat162_rn(x[8 * k + 2 * e], x[8 * k + 2 * e + 1]);
+    *reinterpret_cast<uint4*>(out + (size_t)p * C + cc + 128 * k) = w;
+  }
+}
+
 // The decoder: pg_fwd_ca's half-warp schedule (two pairs a warp, 16 lanes x 16 channels a pair, for the pair and its LayerNorm alike) with each
 // lane's channels laid out so that a store instruction writes 256 contiguous bytes per half-warp (channels 8 l .. 8 l + 7 and 128 + 8 l .. 128 +
 // 8 l + 7 of lane l of the half; the H100 kernel's lane holds 16 adjacent channels, each store half-filling 32-byte sectors), the bin inputs of
 // the next item loaded ahead. The LayerNorm sums run over a different lane order than pg_fwd_ca's (the same fp32 statistics, other roundings).
-template <bool CS, typename IdxT, int VAR = 0>
-__global__ void __launch_bounds__(GT_THREADS, VAR == 2 ? 6 : GT_CPS)
+template <bool CS, typename IdxT>
+__global__ void __launch_bounds__(GT_THREADS, GT_CPS)
 pg120_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const IdxT* idx, const float* dlim, __nv_bfloat16* out, uint4* codes,
              int B, int n, int nd, int ln, float eps, int jp) {
   __shared__ float dlim_s[32];
@@ -660,7 +835,7 @@ pg120_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, con
         const uint32_t p0 = __shfl_sync(0xffffffffu, w0, t0 + 2 * u + hh);   // < 32; a lane past the chunk holds MASKED
 #pragma unroll
         for (int e = 0; e < 16; e++) x[u][e] = 0.f;
-        if (VAR != 1 && !(p0 & MASKED)) {
+        if (!(p0 & MASKED)) {
           auto add = [&](int r) {
 #pragma unroll
             for (int k = 0; k < 2; k++) {
@@ -736,20 +911,33 @@ void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::
   const int B = idx.size(0), n = idx.size(1);
   const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   auto st = at::cuda::getCurrentCUDAStream();
-  const torch::Tensor t = table_of(tbl, NT_CA, st);
+  bool pdl = false;
+  const torch::Tensor t = table_of(tbl, NT_CA, st, pdl);
   uint4* cp = codes.defined() && codes.numel() > 0 ? reinterpret_cast<uint4*>(codes.data_ptr<int>()) : nullptr;
-  const Launch L = fwd_launch(B, n, sms, 2 * GT_CPS, GT_THREADS / 32, (int)jp, 16);
   const auto* tp = reinterpret_cast<const __nv_bfloat16*>(t.data_ptr<at::BFloat16>());
   const auto* mp = static_cast<const uint8_t*>(mask.data_ptr());
+  const float* xp = ca.data_ptr<float>();
+  const float* lp = dlim.data_ptr<float>();
   auto* op = reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>());
-  if (idx.scalar_type() == at::kLong) {
-    auto f = gt == 4 ? pg120_fwd_ca<false, long long, 1> : gt == 5 ? pg120_fwd_ca<false, long long, 2> : gt == 6 ? pg120_fwd_ca<true, long long, 0>
-                                                                                                             : pg120_fwd_ca<false, long long, 0>;
-    f<<<L.grid, L.nw * 32, 0, st>>>(tp, ca.data_ptr<float>(), mp, reinterpret_cast<const long long*>(idx.data_ptr<int64_t>()), dlim.data_ptr<float>(), op, cp,
-                                    B, n, (int)dlim.numel(), (int)ln, (float)eps, L.jp);
-  } else
-    pg120_fwd_ca<false, int><<<L.grid, L.nw * 32, 0, st>>>(tp, ca.data_ptr<float>(), mp, idx.data_ptr<int>(), dlim.data_ptr<float>(), op, cp, B, n,
-                                                         (int)dlim.numel(), (int)ln, (float)eps, L.jp);
+  const long long P = (long long)B * n * n;
+  const int nd = (int)dlim.numel(), l = (int)ln;
+  const float e = (float)eps;
+  if (gt == 2) {                                              // the launch: CTAs of 32 pairs
+    const dim3 grid((unsigned)((P + 31) / 32)), block(512);
+    if (idx.scalar_type() == at::kLong)
+      launch_pdl(pg120_fwd_ca_blk<long long, 32>, grid, block, st, pdl, tp, xp, mp, reinterpret_cast<const long long*>(idx.data_ptr<int64_t>()), lp, op, cp, n,
+                 P, nd, l, e);
+    else
+      launch_pdl(pg120_fwd_ca_blk<int, 32>, grid, block, st, pdl, tp, xp, mp, (const int*)idx.data_ptr<int>(), lp, op, cp, n, P, nd, l, e);
+    return;
+  }
+  // gt 3: the persistent item kernel (A/B)
+  const Launch L = fwd_launch(B, n, sms, 2 * GT_CPS, GT_THREADS / 32, (int)jp, 16);
+  if (idx.scalar_type() == at::kLong)
+    pg120_fwd_ca<false, long long><<<L.grid, L.nw * 32, 0, st>>>(tp, xp, mp, reinterpret_cast<const long long*>(idx.data_ptr<int64_t>()), lp, op, cp, B, n,
+                                                               nd, l, e, L.jp);
+  else
+    pg120_fwd_ca<false, int><<<L.grid, L.nw * 32, 0, st>>>(tp, xp, mp, idx.data_ptr<int>(), lp, op, cp, B, n, nd, l, e, L.jp);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -764,7 +952,8 @@ void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tenso
   const int B = idx.size(0), n = idx.size(1);
   const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   auto st = at::cuda::getCurrentCUDAStream();
-  const torch::Tensor t = table_of(tbl, NT, st);
+  bool pdl = false;
+  const torch::Tensor t = table_of(tbl, NT, st, pdl);
   uint4* cp = codes.defined() && codes.numel() > 0 ? reinterpret_cast<uint4*>(codes.data_ptr<int>()) : nullptr;
   const Launch L = fwd_launch(B, n, sms, 2 * GT_CPS, GT_THREADS / 32, (int)jp);
   const auto* tp = reinterpret_cast<const __nv_bfloat16*>(t.data_ptr<at::BFloat16>());
@@ -772,6 +961,31 @@ void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tenso
   const auto* m2 = static_cast<const uint8_t*>(cb.data_ptr());
   const auto* m3 = static_cast<const uint8_t*>(mask.data_ptr());
   auto* op = reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>());
+  // gt 2: from 4 x 128 pairs per SM on, CTAs of 32 pairs (pg120_fwd_blk); below, the persistent item kernel (pg120_fwd), the faster there
+  // (measured, the lean inputs, L2 flushed: L 128 20.5 vs 28.7 us, L 256 34.8 vs 36.6; L 384 61.4 vs 65.5, its LayerNorm 67.6 vs 71.7)
+  const bool blk = gt == 2 ? (long long)B * n * n >= 4LL * sms * 128 : gt >= 4;
+  if (blk) {
+    // CTAs of PB pairs: 32 (gt 2 / 5); gt 4 / 6: 64 / 128 (A/B)
+    const long long P = (long long)B * n * n;
+    const int pb = gt == 4 ? 64 : gt == 6 ? 128 : 32;
+    const dim3 grid((unsigned)((P + pb - 1) / pb)), block(pb);
+    const float* bp = bb.data_ptr<float>();
+    const float *dl = dlim.data_ptr<float>(), *al = alim.data_ptr<float>();
+    const int l = (int)ln;
+    const float e = (float)eps;
+    auto go = [&](auto ip, auto hp) {
+      using I = std::remove_cv_t<std::remove_pointer_t<decltype(ip)>>;
+      if (pb == 128) launch_pdl(pg120_fwd_blk<I, 128>, grid, block, st, pdl, tp, bp, m1, m2, m3, ip, hp, dl, al, op, cp, n, P, l, e);
+      else if (pb == 64) launch_pdl(pg120_fwd_blk<I, 64>, grid, block, st, pdl, tp, bp, m1, m2, m3, ip, hp, dl, al, op, cp, n, P, l, e);
+      else launch_pdl(pg120_fwd_blk<I, 32>, grid, block, st, pdl, tp, bp, m1, m2, m3, ip, hp, dl, al, op, cp, n, P, l, e);
+    };
+    if (idx.scalar_type() == at::kLong)
+      go(reinterpret_cast<const long long*>(idx.data_ptr<int64_t>()), reinterpret_cast<const long long*>(chains.data_ptr<int64_t>()));
+    else
+      go(static_cast<const int*>(idx.data_ptr<int>()), static_cast<const int*>(chains.data_ptr<int>()));
+    return;
+  }
+  // the persistent item kernel (gt 2 below the threshold, gt 3)
   if (idx.scalar_type() == at::kLong)
     pg120_fwd<long long><<<L.grid, L.nw * 32, 0, st>>>(tp, bb.data_ptr<float>(), m1, m2, m3, reinterpret_cast<const long long*>(idx.data_ptr<int64_t>()),
                                                        reinterpret_cast<const long long*>(chains.data_ptr<int64_t>()), dlim.data_ptr<float>(),

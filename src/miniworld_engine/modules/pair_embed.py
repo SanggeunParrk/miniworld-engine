@@ -309,7 +309,9 @@ class PairEmbedGeom(BackendModule):
     """
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build
+    # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build; cuda:5090_sm120 2 (2026-11-13): the RTX 5090's own
+    # table gradient (pg120_bwd), the fused LayerNorm + table gradient, the one-launch inference forward (pg120_fwd_blk)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 2}
 
     backends = ("pytorch", "cuda", "triton")
     rows = N_ROWS_GEOM
@@ -424,7 +426,9 @@ class PairEmbedCA(BackendModule):
     """
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build
+    # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build; cuda:5090_sm120 2 (2026-11-13): the RTX 5090's own
+    # table gradient (pg120_bwd), the fused LayerNorm + table gradient, the one-launch inference forward (pg120_fwd_ca_blk)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 2}
 
     backends = ("pytorch", "cuda", "triton")
     rows = N_ROWS_CA
