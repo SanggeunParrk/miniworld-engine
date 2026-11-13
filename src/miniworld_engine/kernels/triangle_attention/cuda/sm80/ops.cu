@@ -17,15 +17,17 @@
 
 namespace {
 
+// rows: the pair rows of the call (0 = all L; attn_fwd_gate_rows: a block of one sample's rows, token (i, j) of the block at i L + j).
 template <class G>
-void launch_attn_fwd(const a100::AttnParams& p, int z) {
+void launch_attn_fwd(const a100::AttnParams& p, int z, int rows = 0) {
   static bool set[64] = {};                                   // the attribute is per device
   const int dev = at::cuda::current_device() & 63;
   if (!set[dev]) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(a100::attn_fwd_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
     set[dev] = true;
   }
-  dim3 grid(p.L / G::BM, p.L / G::R, z * p.H);
+  TORCH_CHECK(rows % G::R == 0, "attn_fwd: a row block of whole CTA rows");
+  dim3 grid(p.L / G::BM, (rows > 0 ? rows : p.L) / G::R, z * p.H);
   a100::attn_fwd_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -59,12 +61,13 @@ void launch_back(const a100::F3Params& p, int nsm) {
 }
 
 // The register-resident inference core (attn_rf_fwd_sm80.cuh).  Its bias-scaling operand: 1 / scale = log2 e / scl in two bf16 words.
+// rows: the pair rows of the call (0 = all L; attn_fwd_gate_rows: a block of one sample's rows).
 template <class G>
-void launch_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts) {
-  const at::Tensor fix = at::empty({a100::rf_fix_ints<G>(p.L, z * p.H)}, opts.dtype(at::kInt));   // [count, tiles...] of the recomputation
+void launch_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts, int rows = 0) {
+  const at::Tensor fix = at::empty({a100::rf_fix_ints<G>(p.L, z * p.H, rows)}, opts.dtype(at::kInt));   // [count, tiles...] of the recomputation
   int* fp = fix.data_ptr<int>();
   const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-  const cudaError_t err = a100::attn_rf_launch<G>(p, z, scl, fp, at::cuda::getCurrentCUDAStream(), nsm);
+  const cudaError_t err = a100::attn_rf_launch<G>(p, z, scl, fp, at::cuda::getCurrentCUDAStream(), nsm, rows);
   C10_CUDA_CHECK(err);
 }
 
@@ -83,14 +86,19 @@ at::Tensor key_tiles_of(const torch::Tensor& key_mask, int64_t Z, int64_t L, con
 // Inference core selection of the fast entries (attn_rf_set): -1 = the measured rule, 0 = the tuned AttnCfg cores, 1 / 2 = an rf geometry (A/B knob).
 int g_rf_mode = -1;
 
+// rows: as launch_attn_rf (a row block must be a whole number of the geometry's CTA rows, else false).
 template <bool GATE>
-bool try_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts) {
+bool try_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts, int rows = 0) {
   int mode = g_rf_mode;
   if (mode < 0) mode = 2;               // L >= 512 (the callers' gate): the rf core at every measured cell (A100 80GB, d128 / d256, L 512-2048)
   if (p.L % 128 != 0) return false;
   switch (mode) {
-    case 1: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl, opts); return true;   // 2 x 2 warps, 4 rows x 64 queries (A/B)
-    case 2: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE>>(p, z, scl, opts); return true;   // 4 warps, 2 rows x 128 queries, 4 slots
+    case 1:                                                                                   // 2 x 2 warps, 4 rows x 64 queries (A/B)
+      if (rows % a100::AttnRCfg<2, 2, 2, 4, GATE>::R) return false;
+      launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl, opts, rows); return true;
+    case 2:                                                                                   // 4 warps, 2 rows x 128 queries, 4 slots
+      if (rows % a100::AttnRCfg<1, 2, 4, 4, GATE>::R) return false;
+      launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE>>(p, z, scl, opts, rows); return true;
     default: return false;
   }
 }
@@ -272,6 +280,21 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
   else TORCH_CHECK(false, "attn_fwd: unsupported schedule (rows, bn, minb)");
 }
 
+// The gated inference core of attn_fwd_gate_fast (no plain output, no log-sum-exp; p.key_tiles optional) over every pair row (rows = 0) or over a block
+// of one sample's rows (attn_fwd_gate_rows, z = 1).  One selection for both, so a row block computes the bits of the whole-pair call's rows: the rf
+// core at L >= 512, the tuned AttnCfg cores otherwise.
+static void launch_gate_inference(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts, int rows = 0) {
+  const int L = p.L, H = p.H;
+  if (L >= 512 && try_attn_rf<true>(p, z, scl, opts, rows)) return;
+  if (L >= 512 && (L < 768 || H <= 8))
+    launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>>(p, z, rows);
+  else if (L >= 256)
+    launch_attn_fwd<a100::AttnCfg<2, 2, 64, 3, true, false, 64, (bool)A100_ATTN_FIXALL>>(p, z, rows);
+  else if (L % 384 == 0)
+    launch_attn_fwd<a100::AttnCfg<2, 2, 48, 2, true, false, 128, (bool)A100_ATTN_FIXALL>>(p, z, rows);
+  else launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true>>(p, z, rows);
+}
+
 // Attention core forward with the sigmoid gate fused into its epilogue (the generic-width path): aout [z L L, ldao] = bf16(sigmoid(gate) bf16(out)) where gate is the front's g columns
 // (token-major view, row stride ldgate); `out` (the plain attention output, needed by the backward) may be an empty tensor.  The default schedule (2 rows, 32 keys, 2 CTAs per SM).
 template <int TUNED>
@@ -301,10 +324,11 @@ void attn_fwd_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
     launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>>(p, (int)Z);   // training forward (out / lse kept): the fixed-shift gated core
     return;
   }
-  if (TUNED == 3 && !lse.numel() && !out.numel() && L >= 512 && try_attn_rf<true>(p, (int)Z, scl, q.options())) return;
-  if (TUNED == 3 && !lse.numel() && !out.numel() && L >= 512 && (L < 768 || H <= 8))
-    launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>>(p, (int)Z);
-  else if (TUNED >= 2 && !lse.numel() && !out.numel() && L >= 256)
+  if (TUNED == 3 && !lse.numel() && !out.numel()) {
+    launch_gate_inference(p, (int)Z, scl, q.options());
+    return;
+  }
+  if (TUNED >= 2 && !lse.numel() && !out.numel() && L >= 256)
     launch_attn_fwd<a100::AttnCfg<2, 2, 64, 3, true, false, 64, (bool)A100_ATTN_FIXALL>>(p, (int)Z);
   else if (TUNED && !lse.numel() && !out.numel() && L % 384 == 0)
     launch_attn_fwd<a100::AttnCfg<2, 2, 48, 2, true, false, 128, (bool)A100_ATTN_FIXALL>>(p, (int)Z);
@@ -313,15 +337,16 @@ void attn_fwd_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
 
 // The gated inference core of `attn_fwd_gate_fast` on a block of `rows` pair rows of one sample (the row-blocked inference of the wide path, sm80_wide.forward_rows:
 // pairs whose whole-pair projections would not fit).  q / k / v / gate / aout are token-major views of the block ([rows L, ld], token (i, j) at i L + j); bias
-// [1, H, L, L] is the whole sample's (query j, key k; masked keys = bf16 min), shared by every row.  The same kernel and schedule as attn_fwd_gate_fast at L >= 256
-// (2 rows, 64 keys, 3 CTAs / SM, the fixed-shift softmax); the grid covers the block's rows only.  No plain output, no log-sum-exp (inference).
+// [1, H, L, L] is the whole sample's (query j, key k; masked keys = bf16 min), shared by every row; key_mask: the sample's [1, L] key mask (bool / uint8) or
+// an empty tensor, as attn_fwd_gate_fast takes it (the keys streamed up to the last live one).  The core and schedule of attn_fwd_gate_fast at the same L
+// (launch_gate_inference: the rf core at L >= 512), the grid covering the block's rows only: each row's output bits are the whole-pair call's.  No plain
+// output, no log-sum-exp (inference).
 void attn_fwd_gate_rows(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor gate, torch::Tensor aout, int64_t L, int64_t H, int64_t rows,
-                        int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldgate, int64_t ldao, double scl) {
-  using G = a100::AttnCfg<2, 2, 64, 3, true, false, 64, (bool)A100_ATTN_FIXALL>;
+                        int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldgate, int64_t ldao, double scl, torch::Tensor key_mask) {
   for (auto* t : {&q, &k, &v, &bias, &gate, &aout}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kBFloat16, "attn_fwd_gate_rows: bf16 CUDA tensors");
   TORCH_CHECK(bias.is_contiguous() && bias.numel() == H * L * L && reinterpret_cast<uintptr_t>(bias.data_ptr()) % 16 == 0, "attn_fwd_gate_rows: bias [1, H, L, L] contiguous");
   TORCH_CHECK(L % a100::TA_BM == 0 && L >= 256, "attn_fwd_gate_rows: L a multiple of 128, at least 256");
-  TORCH_CHECK(rows >= G::R && rows % G::R == 0 && rows <= L && rows / G::R <= 65535 && H <= 65535, "attn_fwd_gate_rows: rows a multiple of 2 up to L");
+  TORCH_CHECK(rows >= 2 && rows % 2 == 0 && rows <= L && rows / 2 <= 65535 && H <= 65535, "attn_fwd_gate_rows: rows a multiple of 2 up to L");
   const int64_t T = rows * L;
   for (auto [t, ld] : {std::pair<const torch::Tensor*, int64_t>{&q, ldq}, {&k, ldk}, {&v, ldv}, {&gate, ldgate}, {&aout, ldao}}) {
     TORCH_CHECK(ld >= H * 32 && ld % 8 == 0 && reinterpret_cast<uintptr_t>(t->data_ptr()) % 16 == 0, "attn_fwd_gate_rows: row strides / alignment");
@@ -334,15 +359,9 @@ void attn_fwd_gate_rows(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch
   p.out = nullptr; p.lse = nullptr;
   p.ldq = ldq; p.ldk = ldk; p.ldv = ldv; p.ldo = 0; p.L = (int)L; p.H = (int)H; p.scl = (float)scl;
   p.gate = reinterpret_cast<const __nv_bfloat16*>(gate.data_ptr()); p.aout = reinterpret_cast<__nv_bfloat16*>(aout.data_ptr()); p.ldgate = ldgate; p.ldao = ldao;
-  static bool set[64] = {};                                   // the attribute is per device
-  const int dev = at::cuda::current_device() & 63;
-  if (!set[dev]) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(a100::attn_fwd_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
-    set[dev] = true;
-  }
-  const dim3 grid((unsigned)(L / G::BM), (unsigned)(rows / G::R), (unsigned)H);   // z = 0: token (i, j) of the block at i L + j
-  a100::attn_fwd_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  const at::Tensor kt = key_tiles_of(key_mask, 1, L, q);   // z = 0: token (i, j) of the block at i L + j
+  if (kt.defined()) p.key_tiles = kt.data_ptr<int>();
+  launch_gate_inference(p, 1, scl, q.options(), (int)rows);
 }
 
 // The front: input LayerNorm + q | k | v | g + bias projections (f1_sm80.cuh).  x [T, 128] bf16 (T = Z L^2 tokens of Z square pair stacks, L a multiple of
