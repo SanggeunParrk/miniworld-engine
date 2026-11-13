@@ -45,6 +45,58 @@ __global__ void __launch_bounds__(GK::kThreadCount) ogemm_skip_kernel(typename G
 }
 }  // namespace
 
+#ifdef MWE_SM120
+// The RTX 5090 (sm_120a, 99 KB of shared memory): from 16384 product rows (L 512 at 32 channels) a 256 x 128 tile, 3 stages (72 KB; 3-5 % ahead
+// of 128 x 128 there, behind it on the shorter products, which keep the kernel above).
+namespace sm120 {
+constexpr int TM = 256, TN = 128, TK = 32;
+using Gemm = cutlass::gemm::device::Gemm<bf, cutlass::layout::ColumnMajor, bf, cutlass::layout::RowMajor, bf, cutlass::layout::RowMajor, float,
+                                         cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80, cutlass::gemm::GemmShape<TM, TN, TK>,
+                                         cutlass::gemm::GemmShape<64, 64, TK>, cutlass::gemm::GemmShape<16, 8, 16>,
+                                         cutlass::epilogue::thread::LinearCombination<bf, 8, float, float>,
+                                         cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>, 3>;
+using GK = Gemm::GemmKernel;
+static_assert(sizeof(GK::SharedStorage) <= 101376, "the RTX 5090's 99 KB of shared memory per block");
+
+__global__ void __launch_bounds__(GK::kThreadCount) ogemm_skip_kernel(typename GK::Params params, const uint8_t* __restrict__ live, bf* __restrict__ out,
+                                                                     int ldo, int ch) {
+  extern __shared__ __align__(16) unsigned char smem[];
+  typename GK::ThreadblockSwizzle sw;
+  const cutlass::gemm::GemmCoord tile = sw.get_tile_offset(params.swizzle_log_tile);
+  if (params.grid_tiled_shape.m() <= tile.m() || params.grid_tiled_shape.n() <= tile.n()) return;
+  const int tpm = TM / ch, tpn = TN / ch, t0 = tile.m() * tpm, u0 = tile.n() * tpn;  // tokens per tile side
+  uint32_t lm = 0u, ln = 0u;
+  for (int w = 0; w < tpm / 4; ++w) lm |= *reinterpret_cast<const uint32_t*>(live + t0 + 4 * w);
+  for (int w = 0; w < tpn / 4; ++w) ln |= *reinterpret_cast<const uint32_t*>(live + u0 + 4 * w);
+  if (lm != 0u && ln != 0u) {
+    GK op;
+    op(params, *reinterpret_cast<typename GK::SharedStorage*>(smem));
+    return;
+  }
+  const int r0 = tile.m() * TM, c0 = tile.n() * TN;
+  for (int v = threadIdx.x; v < TM * (TN / 8); v += GK::kThreadCount) {
+    const int r = v / (TN / 8), c = v % (TN / 8);
+    *reinterpret_cast<uint4*>(out + (long)(r0 + r) * ldo + c0 + c * 8) = make_uint4(0, 0, 0, 0);
+  }
+}
+
+void launch(bf* A, bf* B, bf* C, const uint8_t* live, int M, int K, int ch) {
+  const cutlass::gemm::GemmCoord problem(M, M, K);
+  typename GK::ThreadblockSwizzle sw;
+  const cutlass::gemm::GemmCoord grid_shape = sw.get_tiled_shape(problem, {TM, TN, TK}, 1);
+  typename GK::Params params(problem, grid_shape, {A, M}, {B, M}, {C, M}, {C, M}, {1.f, 0.f});
+  const int smem = (int)sizeof(typename GK::SharedStorage);
+  static bool configured = false;
+  if (!configured) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(ogemm_skip_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+    configured = true;
+  }
+  ogemm_skip_kernel<<<sw.get_grid_shape(grid_shape), GK::kThreadCount, smem, at::cuda::getCurrentCUDAStream()>>>(params, live, C, M, ch);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+}  // namespace sm120
+#endif
+
 // a, b [S, ch L] bf16 (row-major), live [L] uint8 (0 = a token masked in every MSA row), out [ch L, ch L] bf16 = a^T b; ch = 32 or 8 (128 / ch tokens a tile side)
 void ogemm_skip(torch::Tensor a, torch::Tensor b, torch::Tensor live, torch::Tensor out, int64_t ch) {
   TORCH_CHECK(ch == 32 || ch == 8, "ogemm_skip: 32 or 8 channels a token");
@@ -59,6 +111,12 @@ void ogemm_skip(torch::Tensor a, torch::Tensor b, torch::Tensor live, torch::Ten
   bf* A = reinterpret_cast<bf*>(a.data_ptr());
   bf* B = reinterpret_cast<bf*>(b.data_ptr());
   bf* C = reinterpret_cast<bf*>(out.data_ptr());
+#ifdef MWE_SM120
+  if (M >= 16384 && M % sm120::TM == 0) {
+    sm120::launch(A, B, C, reinterpret_cast<const uint8_t*>(live.data_ptr()), M, K, (int)ch);
+    return;
+  }
+#endif
   const cutlass::gemm::GemmCoord problem(M, M, K);
   typename GK::ThreadblockSwizzle sw;
   const cutlass::gemm::GemmCoord grid_shape = sw.get_tiled_shape(problem, {TM, TN, TK}, 1);
