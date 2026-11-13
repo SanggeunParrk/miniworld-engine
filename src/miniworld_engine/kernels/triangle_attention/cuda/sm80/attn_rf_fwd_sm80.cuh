@@ -1,22 +1,26 @@
-// attn_rf_fwd_sm80.cuh -- triangle-attention core, inference forward, A100 / sm_80, the register-resident schedule ("rf"): head dim 32, bf16
-// operands, fp32 softmax and accumulation, bf16 out (optionally the sigmoid-gated operand of the output projection).  The same op and the same
-// AttnParams as attn_fwd_sm80.cuh:
+// attn_rf_fwd_sm80.cuh -- triangle-attention core, inference forward, A100 / sm_80, the register-resident schedule ("rf"): heads of HD = 16, 32 or 64
+// channels, bf16 operands, fp32 softmax and accumulation, bf16 out (optionally the sigmoid-gated operand of the output projection).  The same op and
+// the same AttnParams as attn_fwd_sm80.cuh (token-major q / k / v / out with row strides; bias [z][H][L][L], masked keys = the bf16 minimum):
 //
 //   out[z, i, j, h, :] = softmax_k( scale * q[z, i, j, h, :] . k[z, i, k, h, :] + bias[z, h, j, k] ) @ v[z, i, k, h, :]
 //
 // What differs from attn_fwd_sm80.cuh's schedule (16 queries per warp, Q re-read from shared memory every sub-step, bias converted per element):
 //   * one CTA = R = WR * RW pair rows x BM = 32 QG queries of one (z, head) as WR x QG warps; warp (wr, qg) owns queries [32 qg, 32 qg + 32) of
-//     the RW consecutive pair rows [RW wr, RW wr + RW).  Two m16 tiles per warp: every K / V fragment loaded by ldmatrix feeds two mma, the Q
-//     fragments of the warp's rows stay in registers for the whole key loop (RW x 2 x 2 x 4 registers), as do O and the row sums;
-//   * the pair bias enters the score accumulator through the tensor core: S = bias / scale + Q K^T, the C operand being an exact bias-scaling
-//     product A_bias B_sel (A_bias = the bf16 bias of 16 queries x 16 keys by ldmatrix, B_sel = diag(s_hi) over its first 8 keys and diag(s_lo)
-//     over the second 8, s_hi + s_lo = 1 / scale in two bf16 words; one mma per 16 x 8 tile, shared by the RW rows of the warp) -- no per-element
-//     conversion or multiply;
-//   * p = 2^(S scale log2 e) without a shift (the fixed-shift "no shift" softmax of the tuned cores: an overflowed, non-finite or vanishing
-//     (< 2^-80) row sum sends the whole CTA through the running-max instantiation of the same routine), the row sums from the same bf16 P by a
-//     ones-column mma;
-//   * K | V | bias stream in 32-key slots through an ST-stage cp.async ring (one __syncthreads per slot); Q rides in through the last slot.
-// A flagged CTA stores nothing in the hot pass; the recomputation kernel writes its tile.
+//     the RW consecutive pair rows [RW wr, RW wr + RW).  Two m16 tiles per warp: every K / V fragment loaded by ldmatrix feeds two mma; the Q
+//     fragments of the warp's rows stay in registers for the whole key loop, as do O and the row sums (up to 255 registers, two CTAs per SM);
+//   * the pair bias enters the score accumulator as the C operand: S = bias / scale + Q K^T.  Default: an exact bias-scaling product
+//     A_bias B_sel (A_bias = the bf16 bias of 16 queries x 8 keys twice, by one ldmatrix with repeated lane addresses; B_sel = [diag(s_hi);
+//     diag(s_lo)], s_hi + s_lo = 1 / scale in two bf16 words; one mma per 16 x 8 tile, shared by the RW rows of the warp).  BCVT: the C
+//     fragment read from shared memory and scaled in registers instead (cheaper where the products are short: 16 / 64-channel forms);
+//   * p = 2^(S scale log2 e) without a shift; the row sums from the same bf16 P by a ones-column mma.  A tile whose sums overflow, turn
+//     non-finite or vanish (< 2^-80) is appended to a fix list and recomputed by the running-max instantiation in a separate kernel
+//     (attn_rf_fix_kernel), so the hot kernel's register allocation is its own;
+//   * K | V | bias stream in 32-key slots through an ST-stage cp.async ring (one __syncthreads per slot), each slot in two 16-key slices (only
+//     the slice's scores are live); Q rides in through the last slot; the epilogue stages O (and the gate tile) in shared memory for 16-byte
+//     stores, a flagged tile stores nothing;
+//   * key_tiles (optional, rf_key_tiles from the global key mask): only the slots up to each sample's last live key are streamed (the keys past it
+//     are dead in every pair row: the same output bits);
+//   * with p.counts set (the dense branch of the masked density split): the CTAs of sparse batches leave at once.
 #pragma once
 #include "attn_fwd_sm80.cuh"
 
