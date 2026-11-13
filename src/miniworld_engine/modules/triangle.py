@@ -842,7 +842,8 @@ class _TriangleAttentionFp32Softmax(_TriangleAttentionBase):
     #: 4: as the base class (RF3 at d_pair 128); 5: as the base class (RF3 at d_pair 128: the ending node's tail, bitwise the same); 6: as
     #: the base class (the fp16 core skips the dead trailing key tiles); 7 (2026-11-13): inference on the h100_dh core (64-channel heads)
     #: skips the dead trailing 64-key tiles (bitwise the same outputs)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 7}
+    #: 8 (2026-11-13): 64-channel heads at L a multiple of 128 on the wgmma core (h100_dh.ext_d64; outputs change within rounding)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 8}
     #: RoseTTAFold3: the gate and the out-projection carry a bias.
     _projection_biases: bool = False
 
@@ -968,8 +969,9 @@ class TriangleAttentionChai1(_TriangleAttentionFp32Softmax):
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     #: cuda:h100_sm90 stays 3: no Chai-1 shape takes the d_pair 128 x 4 heads or the d_pair 256 x 8 heads path; 4 (2026-11-13):
     #: inference with heads of 32 (d_pair 64, d_hidden 128) on the width-generic kernels and the fp16 core (the ending node's
-    #: untransposed output in their out-projection; outputs change within rounding), 64-channel heads skip the dead key tiles
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 4}
+    #: untransposed output in their out-projection; outputs change within rounding), 64-channel heads skip the dead key tiles; 5: the
+    #: d_pair 256 heads (64 channels) on the wgmma core (L a multiple of 128) (as the parent class 8)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 5}
 
     untransposed_output = True
 
@@ -982,8 +984,9 @@ class TriangleAttentionChai1Confidence(_TriangleAttentionFp32Softmax):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
-    #: cuda:h100_sm90 stays 3 (as TriangleAttentionChai1); 4 (2026-11-13): the dead key tiles skipped on the h100_dh core (bitwise)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 4}
+    #: cuda:h100_sm90 stays 3 (as TriangleAttentionChai1); 4 (2026-11-13): the dead key tiles skipped on the h100_dh core (bitwise); 5:
+    #: the wgmma core of 64-channel heads (as TriangleAttentionChai1 5)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 5}
 
     dual_output = True
 
