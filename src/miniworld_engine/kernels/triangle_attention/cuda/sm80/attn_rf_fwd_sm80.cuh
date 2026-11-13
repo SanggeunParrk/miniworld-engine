@@ -22,11 +22,11 @@
 
 namespace a100 {
 
-template <int WR_, int RW_, int QG_, int ST_, bool GATE_ = false, int HD_ = 32, bool FSUM_ = false>
+template <int WR_, int RW_, int QG_, int ST_, bool GATE_ = false, int HD_ = 32, bool PIPE_ = false>
 struct AttnRCfg {
   static constexpr int WR = WR_, RW = RW_, QG = QG_, ST = ST_, HD = HD_;
   static constexpr bool GATE = GATE_;
-  static constexpr bool FSUM = FSUM_;                        // row sums by fp32 adds of the weights (else: of the bf16 P by a ones-column mma)
+  static constexpr bool PIPE = PIPE_;                        // the hot loop software-pipelined across slots (one slot less in flight)
   static constexpr int R = WR * RW, BM = 32 * QG, NW = WR * QG, NTHR = 32 * NW;
   static constexpr int KEYS = 32;                            // keys per ring slot
   static constexpr int GR = HD / 8, KK = HD / 16, DN = HD / 8;   // 16-byte granules per Q / K / V / O row, k steps of Q K^T, n tiles of O
@@ -73,6 +73,8 @@ DEVI void mma_acc(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b
 template <class G, bool SAFE>
 DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx, int by, int bz) {
   constexpr int RW = G::RW, ST = G::ST, HD = G::HD, GR = G::GR, KK = G::KK, DN = G::DN;
+  constexpr int LA = (G::PIPE && !SAFE) ? ST - 2 : ST - 1;   // slots in flight ahead of the one consumed
+  static_assert(LA >= 1, "ring too short");
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sbase = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
@@ -118,12 +120,12 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
     cp_async_commit();
   }
 #pragma unroll
-  for (int u = 0; u < ST - 1; ++u) issue(u);
+  for (int u = 0; u < LA; ++u) issue(u);
 
   const int qw = qg * 32;                                     // the warp's first query in the tile
   const int lrow = (lane & 7) + 8 * ((lane >> 3) & 1);        // ldmatrix A-operand row of this lane in a 16-row tile
   uint32_t qa[RW][2][KK][4];
-  cp_async_wait<ST - 1>();
+  cp_async_wait<LA>();
   __syncthreads();
   {
     const uint32_t qs = sbase + (ST - 1) * G::SLOT;
@@ -191,65 +193,101 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
     }
   };
 
-  for (int u = 0; u < NU; ++u) {
-    cp_async_wait<ST - 2>();
-    __syncthreads();                                          // slot u landed; every warp is past u - 1, so its slot is free for u + ST - 1
-    issue(u + ST - 1);
-    const uint32_t sb = sbase + (u % ST) * G::SLOT;
+  // weights of the slice in sc for row w (SAFE: after raising the running max, rescaling O and the sums), bf16 P, its row sums (ones-column mma)
+  auto weights = [&](float (&sc)[RW][2][2][4], int w, uint32_t (&pa)[2][4]) {
+    float mu[2][2] = {{0.f, 0.f}, {0.f, 0.f}};
+    if constexpr (SAFE) {
 #pragma unroll
-    for (int kl = 0; kl < 2; ++kl) {
+      for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+        for (int hh = 0; hh < 2; ++hh) {
+          float mx = fmaxf(fmaxf(sc[w][mt][0][2 * hh], sc[w][mt][0][2 * hh + 1]), fmaxf(sc[w][mt][1][2 * hh], sc[w][mt][1][2 * hh + 1]));
+          mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
+          mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
+          const float mnew = fmaxf(m[w][mt][hh], mx * c1);
+          mu[mt][hh] = mnew == -INFINITY ? 0.f : mnew;
+          const float alpha = ex2f(m[w][mt][hh] - mu[mt][hh]);   // 0 from the initial -inf
+          m[w][mt][hh] = mnew;
+          l4[w][mt][2 * hh] *= alpha; l4[w][mt][2 * hh + 1] *= alpha;
+#pragma unroll
+          for (int dn = 0; dn < DN; ++dn) { o[w][mt][dn][2 * hh] *= alpha; o[w][mt][dn][2 * hh + 1] *= alpha; }
+        }
+    }
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt) {
+      float pw[2][4];
+#pragma unroll
+      for (int c = 0; c < 2; ++c)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) pw[c][e] = SAFE ? ex2f(fmaf(sc[w][mt][c][e], c1, -mu[mt][e >> 1])) : ex2f(sc[w][mt][c][e] * c1);
+      pa[mt][0] = pack_bf16(pw[0][0], pw[0][1]);
+      pa[mt][1] = pack_bf16(pw[0][2], pw[0][3]);
+      pa[mt][2] = pack_bf16(pw[1][0], pw[1][1]);
+      pa[mt][3] = pack_bf16(pw[1][2], pw[1][3]);
+      mma_acc(l4[w][mt], pa[mt], ONES, ONES);
+    }
+  };
+  // O += P V of the 16-key slice kl of slot sb, row w
+  auto pv = [&](uint32_t sb, int kl, int w, const uint32_t (&pa)[2][4]) {
+#pragma unroll
+    for (int np = 0; np < GR / 2; ++np) {
+      uint32_t vb[4];
+      ldsm_x4_t(vb, sb + G::VOFF + (wr * RW + w) * G::KV_ROW + kl * 16 * G::RB + v_off[np]);
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt) {
+        mma_acc(o[w][mt][2 * np], pa[mt], vb[0], vb[1]);
+        mma_acc(o[w][mt][2 * np + 1], pa[mt], vb[2], vb[3]);
+      }
+    }
+  };
+
+  if constexpr (G::PIPE && !SAFE) {
+    // Software-pipelined across slots: the P V of a slot's second slice runs in the next slot, next to its first S product and exponentials
+    // (one slot less in flight: the deferred slice still reads slot u - 1 while u + ST - 2 lands).
+    uint32_t pd[RW][2][4];
+    uint32_t sprev = 0;
+    for (int u = 0; u < NU; ++u) {
+      cp_async_wait<LA - 1>();
+      __syncthreads();                                        // slot u landed; every warp finished slot u - 2 (its deferred slice ran in u - 1)
+      issue(u + LA);
+      const uint32_t sb = sbase + (u % ST) * G::SLOT;
       float sc[RW][2][2][4];
-      s_column(sb, 2 * kl, sc);
-      s_column(sb, 2 * kl + 1, sc);
+      s_column(sb, 0, sc);
+      s_column(sb, 1, sc);
+      if (u > 0) {
+#pragma unroll
+        for (int w = 0; w < RW; ++w) pv(sprev, 1, w, pd[w]);
+      }
 #pragma unroll
       for (int w = 0; w < RW; ++w) {
-        float mu[2][2] = {{0.f, 0.f}, {0.f, 0.f}};
-        if constexpr (SAFE) {                                 // running max over the slices (rescale O and the sums when it rises)
-#pragma unroll
-          for (int mt = 0; mt < 2; ++mt)
-#pragma unroll
-            for (int hh = 0; hh < 2; ++hh) {
-              float mx = fmaxf(fmaxf(sc[w][mt][0][2 * hh], sc[w][mt][0][2 * hh + 1]), fmaxf(sc[w][mt][1][2 * hh], sc[w][mt][1][2 * hh + 1]));
-              mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
-              mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
-              const float mnew = fmaxf(m[w][mt][hh], mx * c1);
-              mu[mt][hh] = mnew == -INFINITY ? 0.f : mnew;
-              const float alpha = ex2f(m[w][mt][hh] - mu[mt][hh]);   // 0 from the initial -inf
-              m[w][mt][hh] = mnew;
-              l4[w][mt][2 * hh] *= alpha; l4[w][mt][2 * hh + 1] *= alpha;
-#pragma unroll
-              for (int dn = 0; dn < DN; ++dn) { o[w][mt][dn][2 * hh] *= alpha; o[w][mt][dn][2 * hh + 1] *= alpha; }
-            }
-        }
-        // weights (unshifted in the hot pass), bf16 P, its row sums (ones-column mma), O += P V
         uint32_t pa[2][4];
+        weights(sc, w, pa);
+        pv(sb, 0, w, pa);
+      }
+      s_column(sb, 2, sc);
+      s_column(sb, 3, sc);
 #pragma unroll
-        for (int mt = 0; mt < 2; ++mt) {
-          float pw[2][4];
+      for (int w = 0; w < RW; ++w) weights(sc, w, pd[w]);
+      sprev = sb;
+    }
 #pragma unroll
-          for (int c = 0; c < 2; ++c)
+    for (int w = 0; w < RW; ++w) pv(sprev, 1, w, pd[w]);
+  } else {
+    for (int u = 0; u < NU; ++u) {
+      cp_async_wait<LA - 1>();
+      __syncthreads();                                        // slot u landed; every warp is past u - 1, so its slot is free for u + ST - 1
+      issue(u + LA);
+      const uint32_t sb = sbase + (u % ST) * G::SLOT;
 #pragma unroll
-            for (int e = 0; e < 4; ++e) pw[c][e] = SAFE ? ex2f(fmaf(sc[w][mt][c][e], c1, -mu[mt][e >> 1])) : ex2f(sc[w][mt][c][e] * c1);
-          pa[mt][0] = pack_bf16(pw[0][0], pw[0][1]);
-          pa[mt][1] = pack_bf16(pw[0][2], pw[0][3]);
-          pa[mt][2] = pack_bf16(pw[1][0], pw[1][1]);
-          pa[mt][3] = pack_bf16(pw[1][2], pw[1][3]);
-          if constexpr (G::FSUM) {               // per-lane partial sums: l4[.][0] row g, l4[.][2] row g + 8 (quad-reduced in the epilogue)
-            l4[w][mt][0] += (pw[0][0] + pw[0][1]) + (pw[1][0] + pw[1][1]);
-            l4[w][mt][2] += (pw[0][2] + pw[0][3]) + (pw[1][2] + pw[1][3]);
-          } else {
-            mma_acc(l4[w][mt], pa[mt], ONES, ONES);
-          }
-        }
+      for (int kl = 0; kl < 2; ++kl) {
+        float sc[RW][2][2][4];
+        s_column(sb, 2 * kl, sc);
+        s_column(sb, 2 * kl + 1, sc);
 #pragma unroll
-        for (int np = 0; np < GR / 2; ++np) {
-          uint32_t vb[4];
-          ldsm_x4_t(vb, sb + G::VOFF + (wr * RW + w) * G::KV_ROW + kl * 16 * G::RB + v_off[np]);
-#pragma unroll
-          for (int mt = 0; mt < 2; ++mt) {
-            mma_acc(o[w][mt][2 * np], pa[mt], vb[0], vb[1]);
-            mma_acc(o[w][mt][2 * np + 1], pa[mt], vb[2], vb[3]);
-          }
+        for (int w = 0; w < RW; ++w) {
+          uint32_t pa[2][4];
+          weights(sc, w, pa);
+          pv(sb, kl, w, pa);
         }
       }
     }
@@ -278,7 +316,7 @@ DEVI bool attn_rf_body(const AttnParams& p, float sinv_hi, float sinv_lo, int bx
     for (int mt = 0; mt < 2; ++mt)
 #pragma unroll
       for (int hh = 0; hh < 2; ++hh) {
-        const float lt = G::FSUM ? quad_sum(l4[w][mt][2 * hh]) : l4[w][mt][2 * hh];
+        const float lt = l4[w][mt][2 * hh];
         if constexpr (!SAFE) {
           bad |= !(lt >= 0x1p-80f && lt <= 3.0e38f);
 #pragma unroll

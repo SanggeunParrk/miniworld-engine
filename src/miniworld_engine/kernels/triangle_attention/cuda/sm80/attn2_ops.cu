@@ -107,7 +107,7 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
     r.ldq = Lq.tok; r.ldk = Lk.tok; r.ldv = Lv.tok; r.ldo = Lo.tok; r.L = (int)L; r.H = (int)H; r.scl = (float)scl;
     switch (rf) {
       case 2: launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16>>(r, Z, scl, q); return;
-      case 3: launch_rf16<a100::AttnRCfg<2, 1, 4, 4, false, 16>>(r, Z, scl, q); return;
+      case 3: launch_rf16<a100::AttnRCfg<1, 2, 4, 6, false, 16>>(r, Z, scl, q); return;
       case 4: launch_rf16<a100::AttnRCfg<2, 2, 2, 6, false, 16>>(r, Z, scl, q); return;
       default: launch_rf16<a100::AttnRCfg<2, 2, 2, 4, false, 16>>(r, Z, scl, q); return;
     }

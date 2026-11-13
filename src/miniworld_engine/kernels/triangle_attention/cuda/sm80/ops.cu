@@ -79,8 +79,8 @@ bool try_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorO
   switch (mode) {
     case 1: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl, opts); return true;
     case 2: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE>>(p, z, scl, opts); return true;
-    case 8: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE, 32, true>>(p, z, scl, opts); return true;
-    case 9: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE, 32, true>>(p, z, scl, opts); return true;
+    case 8: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 5, GATE, 32, true>>(p, z, scl, opts); return true;
+    case 9: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE, 32, true>>(p, z, scl, opts); return true;
     default: return false;
   }
 }
