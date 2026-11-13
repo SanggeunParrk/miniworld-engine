@@ -82,7 +82,7 @@ def prebuild_sm120(rows_opm: bool = True, rows_pwa: bool = True, rows_chai: bool
     from miniworld_engine.kernels.outer_product_mean.cuda import chai_sm80, mask_count_ballot_sm80, mask_epilogue_sm80, ogemm_sm80
     from miniworld_engine.kernels.outer_product_mean.cuda import sm80 as opm
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80 as pwa
-    from miniworld_engine.kernels.pair_weighted_averaging.cuda import wide_sm80
+    from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120, wide_sm80
 
     loaders = []
     if rows_opm:
@@ -90,12 +90,12 @@ def prebuild_sm120(rows_opm: bool = True, rows_pwa: bool = True, rows_chai: bool
     if rows_chai:
         loaders += [chai_sm80.ext, ogemm_sm80.ext]
     if rows_pwa:
-        loaders += [pwa.ext, pwa._bmm_ext]
+        loaders += [pwa.ext, gemm_sm120.ext]  # (the cuBLAS broadcast_bmm is not reached on the 5090: gemm_sm120 serves the contraction)
     if rows_wide:
         from miniworld_engine.kernels.integrations import pwa_wide_sm80
         from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _lt
 
-        loaders += [wide_sm80.ext, pwa_wide_sm80._glue_sm120, _lt]
+        loaders += [wide_sm80.ext, pwa_wide_sm80._glue_sm120, _lt, gemm_sm120.ext]
     seen = set()
     for fn in loaders:
         if fn not in seen:

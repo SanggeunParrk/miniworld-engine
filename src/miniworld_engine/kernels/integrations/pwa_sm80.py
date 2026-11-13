@@ -38,6 +38,8 @@ def _loads() -> bool:
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
     try:
         _sm80().ext()
+        if _card.sm120():
+            _gemm_sm120().ext()
     except Exception as exc:  # a build / load failure is an error, never a fallback
         build_failed("sm_80 MSAPairWeightedAveraging", exc)
         return False  # reached only while planning (build_failed returns there)
@@ -48,6 +50,13 @@ def _sm80():
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80
 
     return sm80
+
+
+def _gemm_sm120():
+    """The RTX 5090's batched GEMMs of the contraction (``pair_weighted_averaging/cuda/gemm_sm120.py``)."""
+    from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120
+
+    return gemm_sm120
 
 
 def refusal(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None:
@@ -225,7 +234,7 @@ def inference(
 
             out, _ = contract_gate_fused_sm80.result(m, w, v, lnm_w, lnm_b, wg, wo, eps=eps_m, mode=1)
         else:
-            o = sm.lt_bcast(w, v) if ns > 1 and _LT else None
+            o = _gemm_sm120().contract(w, v) if _card.sm120() else sm.lt_bcast(w, v) if ns > 1 and _LT else None
             if o is None:
                 o = sm.broadcast_bmm(w, v) if ns > 1 else torch.bmm(_expand(w, ns), v)
             del v, w
@@ -271,6 +280,8 @@ def _expand(w: torch.Tensor, ns: int) -> torch.Tensor:
 
 def _broadcast_contract(w: torch.Tensor, v: torch.Tensor, transpose: bool = False) -> torch.Tensor:
     """Native contractions for qualified L128 training rows; preserve the faster path elsewhere."""
+    if _card.sm120():  # the RTX 5090: its CUTLASS GEMM at every L (cuBLAS picks a WMMA kernel at half the rate for L 128..640 there)
+        return _gemm_sm120().contract(w, v, transpose)
     if (
         not _card.sm120()
         and w.shape[1] == 128
@@ -308,6 +319,8 @@ def _broadcast_contract(w: torch.Tensor, v: torch.Tensor, transpose: bool = Fals
 
 def _weight_contract(do: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Native dw for qualified L384/640 rows; explicit1 tests other candidates."""
+    if _card.sm120():  # the RTX 5090: the CUTLASS tile (or cuBLAS) measured best for the shape
+        return _gemm_sm120().weight_grad(do, v)
     if (
         _DW_EARLY
         and do.shape == v.shape

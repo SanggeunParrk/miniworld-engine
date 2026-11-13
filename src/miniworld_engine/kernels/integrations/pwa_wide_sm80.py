@@ -62,6 +62,19 @@ def _glue_sm120():
     )
 
 
+def _sm120() -> bool:
+    from miniworld_engine.kernels import _msa_card
+
+    return _msa_card.sm120()
+
+
+def _gemm_sm120():
+    """The RTX 5090's batched GEMMs of the contraction (``pair_weighted_averaging/cuda/gemm_sm120.py``)."""
+    from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120
+
+    return gemm_sm120
+
+
 def _lt():
     # the TriangleAttention family's host-only cublasLt glue (no device code: the same build serves every card)
     from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _lt as lt
@@ -134,7 +147,7 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
     u = torch.empty(S * L, HC, device=msa.device, dtype=torch.bfloat16)
     v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
     e.to_hm(vg, v_hm, S, L)
-    o_hm = torch.bmm(w, v_hm)
+    o_hm = _gemm_sm120().contract(w, v_hm) if _sm120() else torch.bmm(w, v_hm)
     e.gate_fwd(o_hm, vg, HC, u, S, L)
     if keep is None:  # m + u Wo^T in one cublasLt call (D != C: no copy of m into the output first)
         out = _lt().lt_mm(u, wo, mf, 0, False, None, None)
@@ -162,8 +175,12 @@ def _backward(dy, msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, saved):
     dvg = torch.empty(S * L, 2 * HC, device=msa.device, dtype=torch.bfloat16)  # [dv | dg]
     e.gate_bwd(du, vg, HC, o_hm, do_hm, dvg, S, L)
     del du
-    e.from_hm(torch.bmm(w.transpose(1, 2), do_hm), dvg, S, L)
-    dw = torch.bmm(do_hm, v_hm.transpose(1, 2), out_dtype=f32)  # [8, L, L]
+    if _sm120():  # the RTX 5090's CUTLASS GEMMs (cuBLAS picks a WMMA kernel at half the rate for L 128..640 there)
+        e.from_hm(_gemm_sm120().contract(w, do_hm, True), dvg, S, L)
+        dw = _gemm_sm120().weight_grad(do_hm, v_hm)  # [8, L, L] fp32
+    else:
+        e.from_hm(torch.bmm(w.transpose(1, 2), do_hm), dvg, S, L)
+        dw = torch.bmm(do_hm, v_hm.transpose(1, 2), out_dtype=f32)  # [8, L, L]
     del do_hm
     dyln = torch.mm(dvg, wvg)
     dwvg = torch.mm(dvg.t(), y, out_dtype=f32)
