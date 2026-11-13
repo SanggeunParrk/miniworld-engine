@@ -5,9 +5,7 @@ triattn_native for this stack (third_party/anthropic/build_local.sh); skipped wh
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0), reason="H100 (sm_90) only"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0), reason="H100 (sm_90) only")
 
 
 def _have_prebuilt() -> bool:
@@ -18,7 +16,7 @@ def _have_prebuilt() -> bool:
     tn = _anthropic.load("opt_core.kernels.triattn.triattn_native")
     try:
         return tn.stack_key() in tn.stacks_built()
-    except Exception:  # noqa: BLE001 -- any import failure: the payload is not servable here
+    except Exception:  # any import failure: the payload is not servable here
         return False
 
 
@@ -30,12 +28,12 @@ def test_triattn_anthropic_serves_the_kit_core(length):
     from miniworld_engine.modules.triangle import TriangleAttention
 
     torch.manual_seed(0)
-    m = TriangleAttention(d_pair=128, n_head=4, starting=True).cuda().eval()
+    m = TriangleAttention(d_pair=128, n_head=4, starting=True, master_weights=True).cuda().eval()
     m.set_backend("anthropic")
     pair = torch.randn(1, length, length, 128, device="cuda", dtype=torch.bfloat16)
     PF = _anthropic.load("opt_core.attn.pair_fused")
     PF.SERVED_CORES.clear()
-    with torch.no_grad():
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):  # the master case: fp32 weights, bf16 activations
         assert m.unsupported(pair) is None
         out = m._forward_anthropic(pair)
         ref = m._forward_pytorch(pair)

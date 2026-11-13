@@ -146,11 +146,7 @@ class Transition(BackendModule, MasterWeights):
         sel, why = self._anthropic_select(x)[1]
         from miniworld_engine.modules import _anthropic
 
-        if (
-            sel is not None
-            and not _anthropic.cuda13_cubins_load()
-            and any(c in str(sel.cell_key) for c in self._ANTHROPIC_EXCLUDED_CELLS)
-        ):
+        if sel is not None and not _anthropic.cuda13_cubins_load() and any(c in str(sel.cell_key) for c in self._ANTHROPIC_EXCLUDED_CELLS):
             return f"the provider cell {sel.cell_key} dumps core on this H100 stack (driver 575 / CUDA 12.9): refused by name"
         return why
 

@@ -37,6 +37,9 @@ class FakeNow:
     def versions(self, module: str, mode: str) -> dict:
         return self._v
 
+    def env_for(self, backend: str) -> dict:
+        return judge.Now.env_for(cast(judge.Now, self), backend)
+
 
 def _token(backend: str = "cuda", dtype: str = "master", versions: dict | None = None, **over) -> dict:
     tok = {
@@ -106,7 +109,7 @@ def test_kernel_version_change_owes_engine_backends_only():
     now = FakeNow(_versions(kernels={"k_a": "2"}))
     assert _parts(_diff("accuracy", _token(backend="cuda"), now)) == [("owed", "kernel:k_a")]
     for backend in ("pytorch", *cfgmod.EXTERNAL):  # they run none of the engine's kernels
-        assert _diff("accuracy", _token(backend=backend), now) == []
+        assert _diff("accuracy", _token(backend=backend, env=now.env_for(backend)), now) == []  # made on its stack
 
 
 def test_a_new_kernel_row_alone_owes_nothing():
@@ -227,3 +230,41 @@ def test_differences_does_not_mutate_its_inputs():
     _diff("accuracy", tok, now)
     assert tok == before
     assert now.versions("Transition", "train")["kernels"] == {"k_a": "9"}
+
+
+def test_kit_stack_backend_compares_with_the_kit_environment():
+    """H100 anthropic results are measured on the kits' CUDA-13 stack (measure.config.KIT_STACK_BACKENDS): a token from that stack is
+    current, one from the engine's CUDA-12.9 stack asks a person (env), and the engine backends keep comparing with this process's stack."""
+    kit_env = {**ENV, **cfgmod.KIT_STACK_ENV}
+    now = FakeNow()
+    assert _diff("speed", _token(backend="anthropic", env=kit_env), now) == []
+    assert ("ask", "env:cuda") in _parts(_diff("speed", _token(backend="anthropic"), now))
+    assert _diff("speed", _token(backend="cuda"), now) == []
+    assert ("ask", "env:cuda") in _parts(_diff("speed", _token(backend="cuda", env=kit_env), now))
+    # a card without a kit stack: anthropic compares with this process's stack
+    assert _diff("speed", _token(backend="anthropic"), FakeNow(gpu="a100_sm80")) == []
+
+
+def test_plan_puts_kit_stack_cases_into_k_groups(tmp_path):
+    import collections
+
+    def entry(backends):
+        return {
+            "rows": {1},
+            "lengths": {128},
+            "backends": set(backends),
+            "dtypes": {"master"},
+            "modes": {"eval"},
+            "n": 2,
+            "cells": collections.Counter({(1, 128): 2}),
+        }
+
+    todo = {("speed", "LayerNorm", ""): entry(["cuda"]), ("speed", "LayerNorm", "kit"): entry(["anthropic"])}
+    judge.write_plan(str(tmp_path), todo, n_groups=2)
+    g = (tmp_path / "G1").read_text() + (tmp_path / "G2").read_text()
+    k = (tmp_path / "K1").read_text()
+    assert "LayerNorm " in g and ".kit" not in g
+    assert "speed LayerNorm.kit " in k
+    import yaml
+
+    assert yaml.safe_load((tmp_path / "cfg" / "speed.LayerNorm.kit.yaml").read_text())["backends"] == ["anthropic", "pytorch"]
