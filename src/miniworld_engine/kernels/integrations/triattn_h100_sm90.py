@@ -276,7 +276,8 @@ def _generic_rows(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans
             q, k, v, gt = (qkvg.view(-1).as_strided((1, R, L, H, D), (R * L * ld, L * ld, ld, D, 1), i * HD) for i in range(4))
             if gb is not None:
                 gt.add_(gb.to(gt.dtype))
-            u = core(q, k, v, sbias, scale, False, gt, False)[3]
+            kw = {"key_tiles": core_mod.key_tiles(m, L)} if h16 else {}  # the dead trailing key tiles skipped
+            u = core(q, k, v, sbias, scale, False, gt, False, **kw)[3]
             del qkvg, q, k, v, gt
             if trans:
                 res = lt.lt_mm(u.view(R * L, HD), wo_p, x, L, False, None, bo)
