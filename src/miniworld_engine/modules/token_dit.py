@@ -1011,7 +1011,10 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # pair bias + softmax on a side stream beside the [v | g] / gate GEMMs, inference compositions without packed weights below 1024 rows;
     # cuda:5090_sm120 3 (2026-11-14): the inference block on gemm120 with the AdaLN / SwiGLU / residual-gate epilogues fused (bf16; fp32 on TF32
     # rounded to nearest), the training forward's [v | g] / gate / out GEMMs on gemm120
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 3, "cuda:5090_sm120": 3}
+    # cuda:5090_sm120 4 (2026-11-13): the fp32 inference block (cuBLASLt TF32 GEMMs with measured configurations, the cond-only GEMMs as one
+    # strided batch, the pair bias + softmax in one pass, the residual gate + AdaLN in one row pass); bf16 / master training: the AdaLN inside the
+    # attention's Function (the residual and cond gradients summed in its row passes), the pair-bias backward reads the bf16 bias gradient
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 3, "cuda:5090_sm120": 4}
 
     def __init__(
         self,

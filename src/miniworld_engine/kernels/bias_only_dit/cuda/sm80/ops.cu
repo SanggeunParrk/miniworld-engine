@@ -274,6 +274,8 @@ void delta_planes(torch::Tensor dO, torch::Tensor O, torch::Tensor dd, int64_t A
 
 #ifdef MWE_SM120
 #include "gemm_sm120.cuh"
+#include "rows_f32_sm120.cuh"
+#include "lt_f32_sm120.cuh"
 namespace {
 template <typename T, int EPI, int BM, int BN, int WM, int WN, int ST, int RB, int MINB>
 void run_gemm120(const g120::Params<T>& p, cudaStream_t st) {
@@ -380,12 +382,105 @@ void row_stats120(torch::Tensor x, torch::Tensor st, double eps) {
   else g120::row_stats<float, 768><<<(M + 7) / 8, 256, 0, s>>>(x.data_ptr<float>(), sp, M, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+
+// ---- the fp32 inference block's row passes (rows_f32_sm120.cuh)
+namespace {
+void f32_rows(const torch::Tensor& t, int64_t cols, const char* name) {
+  TORCH_CHECK(t.is_cuda() && t.scalar_type() == at::kFloat && t.dim() == 2 && t.size(1) == cols && t.stride(1) == 1 && t.stride(0) % 4 == 0 &&
+                  reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0,
+              name, ": an fp32 [rows, ", cols, "] view, unit column stride, 16-byte aligned rows");
+}
+}  // namespace
+
+// c3 [3, M, dc] = (LN(c) w1, LN(c) w2, c); c [M, dc] fp32 rows, dc 384 / 768
+void cond3_f32(torch::Tensor c, torch::Tensor w1, torch::Tensor w2, torch::Tensor c3, double eps) {
+  const at::cuda::CUDAGuard guard(c.device());
+  const int64_t M = c.size(0), dc = c.size(1);
+  f32_rows(c, dc, "cond3_f32 c");
+  TORCH_CHECK(c3.is_contiguous() && c3.scalar_type() == at::kFloat && c3.numel() == 3 * M * dc, "cond3_f32: c3 [3, M, dc] fp32 contiguous");
+  TORCH_CHECK(w1.is_contiguous() && w2.is_contiguous() && w1.numel() == dc && w2.numel() == dc && w1.scalar_type() == at::kFloat && w2.scalar_type() == at::kFloat,
+              "cond3_f32: w1, w2 [dc] fp32");
+  auto s = at::cuda::getCurrentCUDAStream();
+  const unsigned grid = (unsigned)((M + r120::RW - 1) / r120::RW);
+  if (dc == 384) r120::cond3_kernel<384><<<grid, r120::RW * 32, 0, s>>>(c.data_ptr<float>(), c.stride(0), w1.data_ptr<float>(), w2.data_ptr<float>(), c3.data_ptr<float>(), M, (float)eps);
+  else if (dc == 768) r120::cond3_kernel<768><<<grid, r120::RW * 32, 0, s>>>(c.data_ptr<float>(), c.stride(0), w1.data_ptr<float>(), w2.data_ptr<float>(), c3.data_ptr<float>(), M, (float)eps);
+  else TORCH_CHECK(false, "cond3_f32: dc 384 or 768");
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// out = x + sigmoid(g + bs) y, xa = sigmoid(S + sb) LN(out) + B; y / x / out / xa [M, 768] contiguous, g [M, 768] view, sbt [M, 1536] view
+void resgate_adaln_f32(torch::Tensor y, torch::Tensor g, torch::Tensor bs, torch::Tensor x, torch::Tensor sbt, torch::Tensor sb, torch::Tensor out, torch::Tensor xa,
+                       double eps) {
+  const at::cuda::CUDAGuard guard(y.device());
+  const int64_t M = y.size(0);
+  for (auto* t : {&y, &x, &out, &xa}) TORCH_CHECK(t->is_contiguous() && t->size(0) == M, "resgate_adaln_f32: contiguous [M, 768] rows");
+  f32_rows(y, 768, "resgate_adaln_f32 y");
+  f32_rows(x, 768, "resgate_adaln_f32 x");
+  f32_rows(out, 768, "resgate_adaln_f32 out");
+  f32_rows(xa, 768, "resgate_adaln_f32 xa");
+  f32_rows(g, 768, "resgate_adaln_f32 g");
+  f32_rows(sbt, 1536, "resgate_adaln_f32 sbt");
+  TORCH_CHECK(g.size(0) == M && sbt.size(0) == M, "resgate_adaln_f32: g, sbt with M rows");
+  TORCH_CHECK(bs.is_contiguous() && sb.is_contiguous() && bs.numel() == 768 && sb.numel() == 768 && bs.scalar_type() == at::kFloat && sb.scalar_type() == at::kFloat,
+              "resgate_adaln_f32: bs, sb [768] fp32");
+  r120::resgate_adaln_kernel<768><<<(unsigned)((M + r120::RW - 1) / r120::RW), r120::RW * 32, 0, at::cuda::getCurrentCUDAStream()>>>(
+      y.data_ptr<float>(), g.data_ptr<float>(), g.stride(0), bs.data_ptr<float>(), x.data_ptr<float>(), sbt.data_ptr<float>(), sbt.stride(0), sb.data_ptr<float>(),
+      out.data_ptr<float>(), xa.data_ptr<float>(), M, (float)eps);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// P [16, L, L] fp32 = softmax over the keys of the pair bias of z [L, L, C] fp32 (C 128 / 256) with W' = wcm [C, 16] fp32, kv a bool [L] key mask or empty;
+// L a multiple of 128, at most 1024 (the row's biases in shared memory)
+void pair_softmax_f32(torch::Tensor z, torch::Tensor wcm, torch::Tensor kv, torch::Tensor p, int64_t L, double eps) {
+  const at::cuda::CUDAGuard guard(z.device());
+  TORCH_CHECK(z.is_cuda() && z.scalar_type() == at::kFloat && z.is_contiguous() && wcm.is_contiguous() && wcm.scalar_type() == at::kFloat && wcm.dim() == 2 && wcm.size(1) == r120::PS_H,
+              "pair_softmax_f32: z fp32 contiguous [L, L, C], wcm fp32 [C, 16]");
+  const int64_t C = wcm.size(0);
+  TORCH_CHECK(L % 128 == 0 && L <= 1024 && z.numel() == L * L * C && (C == 128 || C == 256), "pair_softmax_f32: L a multiple of 128 <= 1024, C 128 or 256");
+  TORCH_CHECK(p.is_contiguous() && p.scalar_type() == at::kFloat && p.numel() == r120::PS_H * L * L, "pair_softmax_f32: p fp32 [16, L, L]");
+  const bool* mk = nullptr;
+  if (kv.numel() > 0) {
+    TORCH_CHECK(kv.scalar_type() == at::kBool && kv.is_contiguous() && kv.numel() == L, "pair_softmax_f32: kv bool [L]");
+    mk = kv.data_ptr<bool>();
+  }
+  auto s = at::cuda::getCurrentCUDAStream();
+  auto run = [&](auto kern, int smem) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+    kern<<<(unsigned)L, 256, smem, s>>>(z.data_ptr<float>(), wcm.data_ptr<float>(), mk, p.data_ptr<float>(), (int)L, (float)eps);
+  };
+  if (C == 128) run(r120::pair_softmax_kernel<128, 4>, r120::ps_smem<128>((int)L));
+  else run(r120::pair_softmax_kernel<256, 2>, r120::ps_smem<256>((int)L));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// y = x + sigmoid(g + b) z; x / z / y [M, 768] contiguous, g [M, 768] view
+void gate_res_b_f32(torch::Tensor x, torch::Tensor z, torch::Tensor g, torch::Tensor b, torch::Tensor y) {
+  const at::cuda::CUDAGuard guard(x.device());
+  const int64_t M = x.size(0);
+  for (auto* t : {&x, &z, &y}) TORCH_CHECK(t->is_contiguous() && t->size(0) == M, "gate_res_b_f32: contiguous [M, 768] rows");
+  f32_rows(x, 768, "gate_res_b_f32 x");
+  f32_rows(z, 768, "gate_res_b_f32 z");
+  f32_rows(y, 768, "gate_res_b_f32 y");
+  f32_rows(g, 768, "gate_res_b_f32 g");
+  TORCH_CHECK(g.size(0) == M && b.is_contiguous() && b.numel() == 768 && b.scalar_type() == at::kFloat, "gate_res_b_f32: g [M, 768], b [768] fp32");
+  const long n = M * 192;
+  const unsigned grid = (unsigned)std::min<long>((n + 255) / 256, 170L * 8);
+  r120::gate_res_b_kernel<768><<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(x.data_ptr<float>(), z.data_ptr<float>(), g.data_ptr<float>(), g.stride(0),
+                                                                                    b.data_ptr<float>(), y.data_ptr<float>(), M);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 #endif
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef MWE_SM120
   m.def("gemm120", &gemm120);
   m.def("row_stats120", &row_stats120);
+  m.def("cond3_f32", &cond3_f32);
+  m.def("resgate_adaln_f32", &resgate_adaln_f32);
+  m.def("gate_res_b_f32", &gate_res_b_f32);
+  m.def("pair_softmax_f32", &pair_softmax_f32);
+  m.def("lt_mm32", &lt120::mm);
+  m.def("lt_algos32", &lt120::algos);
 #endif
   m.def("pv_gate", &pv_gate);
   m.def("pv_gate32", &pv_gate32);

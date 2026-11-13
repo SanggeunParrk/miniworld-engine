@@ -33,6 +33,7 @@ from typing import cast
 
 import torch
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32, _wgrad, cached
 
@@ -270,7 +271,8 @@ def _bwd(
         (core.Dpb32 if f32 else core.Dpb)(heads, hd)(
             do, vg[:, :da], P.view(heads * length, length), dd, db.view(heads * length, length), samples
         )
-        dz, dwf = _sm80().pair_bias_generic_backward(pair[0], wcm, db if f32 else db.float(), None, length, EPS)
+        # RTX 5090: the bf16 bias gradient read as is by the backward (its sm_120a build takes a bf16 db: no fp32 copy)
+        dz, dwf = _sm80().pair_bias_generic_backward(pair[0], wcm, db if f32 or _sm120(x) else db.float(), None, length, EPS)
         dx = torch.mm(dvg, wvg)
         dwvg = _wgrad(dvg, x)  # [2 da, d] fp32
         dcond = torch.mm(dg2, ws)
@@ -312,6 +314,49 @@ class _Attention(torch.autograd.Function):
         )
 
 
+class _AdaAttention120(torch.autograd.Function):
+    """RTX 5090 training: the attention's AdaLN (adaln_sm80's train_fwd and its backward's passes) and the attention (_fwd / _bwd) in ONE
+    Function, so the backward hands the residual's gradient (dout) to the AdaLN's x pass (bwd_x's dres) and the attention's cond gradient to
+    its cond pass (cond_bwd's dextra) -- autograd's two adds over [M, d] and [M, dc] are gone (the same values: each sum is taken in fp32
+    once, where autograd added two rounded tensors). Takes the AdaLN's parameters themselves (fp32 masters: cast here, outside autograd;
+    their gradients come back unrounded in fp32)."""
+
+    @staticmethod
+    def forward(ctx, xs, cs, pr, mask, heads, eps_x, eps_c, lnw, ws, sb, wb, *params):
+        from miniworld_engine.kernels.integrations import adaln_sm80
+
+        fp32 = adaln_sm80.master((ws,), xs.dtype)
+        wsc, sbc, wbc = adaln_sm80.cast_params((ws, sb, wb), xs.dtype, False)
+        xa, aff, cst, sbt, xst, wcat = adaln_sm80.train_fwd(xs, cs, lnw, wsc, sbc, wbc, eps_x, eps_c)
+        out, *saved = _fwd(xa, cs, pr, xs, mask, list(params), heads, True)
+        ctx.save_for_backward(xs, cs, pr, lnw, ws, sb, wb, sbc, aff, cst, sbt, xst, wcat, xa, *params, *saved)
+        ctx.meta = (heads, len(params), fp32)
+        return out
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, dout):
+        from miniworld_engine.kernels.integrations.adaln_sm80 import Branch, _mm, like
+
+        heads, npar, fp32 = ctx.meta
+        v = ctx.saved_tensors
+        xs, cs, pr, lnw, ws, sb, wb, sbc, aff, cst, sbt, xst, wcat, xa = v[:14]
+        params, saved = list(v[14 : 14 + npar]), list(v[14 + npar :])
+        dout = dout.contiguous()
+        dxa, dc, dz, *pg = _bwd(dout, xa, cs, pr, params, saved, heads)
+        k = _adaln_k()
+        d = xs.shape[1]
+        with torch.cuda.device(xs.device):
+            dm, dx, psb = k.bwd_x(dxa, xs, xst, sbt, sbc, dout, xs.dtype)  # + the residual's gradient
+            br = Branch(xs.device)
+            dw = br.run(lambda: _wgrad(dm, aff), dm, aff)  # [2 d, dc] fp32: [dWs; dWb]
+            dca = _mm(dm, wcat)
+            dcond, pw = k.cond_bwd(dca, cs, cst, lnw, dc)  # + the attention's cond gradient
+            br.join()
+            dsb, dlnw, dws, dwb = k.finish([psb, pw], [like(sb, fp32), lnw], [dw[:d], dw[d:]], [like(ws, fp32), like(wb, fp32)])
+        return dx, dcond, dz, None, None, None, None, dlnw, dws, dsb, dwb, *pg
+
+
 def _params(at) -> list[torch.Tensor]:
     return [
         at.to_value.weight,
@@ -349,6 +394,17 @@ def block(module, single, cond, pair, mask, grad: bool) -> torch.Tensor:
     with torch.autocast("cuda", enabled=False):
         if not grad and _fused_eval(module, single, cond):
             return _block_eval_sm120(module, single, cond, pair, mask)
+        if not grad and _fused_eval_f32(module, single, cond):
+            return _block_eval_sm120_f32(module, single, cond, pair, mask)
+        if grad and _sm120(single) and d != 128:  # RTX 5090 training: the AdaLN inside the attention's Function (_AdaAttention120)
+            ada = at.ada_ln_in
+            cs = cond.to(dt).expand(a, 1, length, cond.shape[-1]).reshape(a * length, cond.shape[-1]).contiguous()
+            xs, pr = single.to(dt).reshape(a * length, d).contiguous(), pair.contiguous()
+            out = _AdaAttention120.apply(
+                xs, cs, pr, mask, at.n_head, float(ada.ln_in.eps), float(ada.ln_cond.eps),
+                ada.ln_cond.weight, ada.to_scale.weight, ada.to_scale.bias, ada.to_bias.weight, *_params(at),
+            )  # fmt: skip
+            return ct_sm80.update(module.transition, out.view(a, 1, length, d), cond, True, dt, grad)
         xa = adaln_sm80.update(at.ada_ln_in, single, cond, dt, grad)
         cs = cond.to(dt).expand(a, 1, length, cond.shape[-1]).reshape(a * length, cond.shape[-1]).contiguous()
         xs, rs, pr = xa.reshape(a * length, d).contiguous(), single.reshape(a * length, d).contiguous(), pair.contiguous()
@@ -496,6 +552,154 @@ def _block_eval_sm120(module, single, cond, pair, mask) -> torch.Tensor:
         h = gemm(EPI_SWIGLU, xa2, wa, wa.shape[0], w2=wbb)
         y = gemm(EPI_GATERES, h, wsq, d, r=out, g=gc)
     return y.view(single.shape)
+
+
+# ---------------------------------------------------------------------------------------------------- RTX 5090 fp32 inference block
+# fp32 activations and weights, no gradient: every GEMM stays cuBLAS on TF32 (the values of the sm_80 path's GEMMs: gemm120's TF32 form moved
+# 3 cases GREEN -> YELLOW, see FP32_FUSED), but the block's cond-only work is ONE strided-batched GEMM -- [M, dc] x [dc, 1536] three times:
+# the two AdaLN tables [S | B] (LN(c) w1, LN(c) w2) and the two residual gates' logits (c), whose operands one row pass writes
+# (bias_only_dit/cuda/sm80/rows_f32_sm120.cuh cond3) -- where the sm_80 path ran five GEMMs at 1536 / 768 columns, each leaving most of a
+# last wave of the 170 SMs idle; the attention's residual gate and the transition's AdaLN are one row pass; the transition's gate adds its
+# bias in its row pass. The packed weights ([Ws; Wb] x 3, [Wv; Wg], [Wa; Wb], the folded pair weight) are param_forms read by a capture as
+# its eager warm-up made them (capture_reads_eager: no concatenation in a replay -- 20 us a call at L 128-384).
+
+
+#: the pair bias and its softmax in one pass (bias_only_dit/cuda/sm80 pair_softmax_f32: 16 heads, d_pair 128 / 256, L <= 1024)
+PAIR_SOFTMAX_F32 = True
+
+
+def _fused_eval_f32(module, single: torch.Tensor, cond: torch.Tensor) -> bool:
+    """The RTX 5090 fp32 inference block serves this call: sm_120, fp32 activations, the block's widths (768 / cond 384 or 768 / attention
+    768 / transition n = 2), one conditioning row per token, equal cond-LayerNorm eps."""
+    if not _sm120(single) or single.dtype is not F32 or cond.dtype is not F32:
+        return False
+    at, ct = module.attention, module.transition
+    a, _, length, d = single.shape
+    dc = cond.shape[-1]
+    return (
+        d == 768
+        and dc in (384, 768)
+        and at.to_value.weight.shape[0] == 768
+        and ct.expand_a.weight.shape == (1536, 768)
+        and tuple(cond.shape[:-1]) == (a, 1, length)
+        and at.ada_ln_in.ln_cond.eps == ct.ada_ln_in.ln_cond.eps
+        and all(p.dtype is F32 for p in module.parameters())
+    )
+
+
+def _f32_packs(module):
+    at, ct = module.attention, module.transition
+    ada, cada = at.ada_ln_in, ct.ada_ln_in
+    params = (ada.to_scale.weight, ada.to_bias.weight, cada.to_scale.weight, cada.to_bias.weight, at.to_scale.weight, ct.to_scale.weight,
+              at.to_scale.bias, ct.to_scale.bias, at.to_value.weight, at.to_gate.weight, ct.expand_a.weight, ct.expand_b.weight,
+              at.ln_pair.weight, at.to_bias.weight)  # fmt: skip
+
+    def build():
+        ws, wb, ws1, wb1, wsg, wsc, bs, bsc, wv, wg, wa, wbb, lnw, wbias = (p.detach() for p in params)
+        return (
+            torch.stack([torch.cat([ws, wb]), torch.cat([ws1, wb1]), torch.cat([wsg, wsc])]).contiguous(),  # [3, 1536, dc]
+            torch.cat([wv, wg]).contiguous(),  # [1536, 768]
+            torch.cat([wa, wbb]).contiguous(),  # [3072, 768]
+            (wbias.float() * lnw.float()[None]).t().contiguous(),  # [dp, H]
+        )
+
+    return _capture.param_forms("bias_only_dit_sm120_f32", params, build, capture_reads_eager=True)
+
+
+def _block_eval_sm120_f32(module, single, cond, pair, mask) -> torch.Tensor:
+    core = _core()
+    at, ct = module.attention, module.transition
+    ada, cada = at.ada_ln_in, ct.ada_ln_in
+    a_, _, length, d = single.shape
+    m = a_ * length
+    xs = single.reshape(m, d).contiguous()
+    cs = cond.reshape(m, cond.shape[-1]).contiguous()
+    w3, wvg, wab, wcm = _f32_packs(module)
+    heads, da = at.n_head, at.to_value.weight.shape[0]
+    pr = pair.contiguous()
+    main, side = torch.cuda.current_stream(), _side_stream(single.device)
+    with torch.cuda.device(single.device), _tf32(True):
+        side.wait_stream(main)
+        with torch.cuda.stream(side):
+            if PAIR_SOFTMAX_F32 and heads == 16 and wcm.shape[0] in (128, 256) and length <= 1024:
+                P = core.pair_softmax_f32(pr[0], wcm, mask, length, EPS)  # the pair bias stays in shared memory
+            else:
+                bias = _sm80().pair_bias_generic(pr[0], wcm, None, length, EPS, oscale=1.0)  # [H, L, L], natural units
+                P, _ = _softmax(bias, mask, False)
+                del bias
+        c3 = core.cond3_f32(cs, ada.ln_cond.weight, cada.ln_cond.weight, float(ada.ln_cond.eps))
+        t3 = _mm32(c3, w3)  # [3, M, 1536]: [S | B] of the attention's AdaLN, of the transition's, [g2 | gc] (no bias)
+        del c3
+        xa, _ = _adaln_k().epilogue(xs, t3[0], ada.to_scale.bias, float(ada.ln_in.eps))
+        vg = _mm32(xa, wvg)
+        main.wait_stream(side)
+        P.record_stream(main)
+        for t in (pr, wcm):
+            t.record_stream(side)
+        if mask is not None:
+            mask.record_stream(side)
+        att = torch.empty(m, da, device=single.device, dtype=F32)
+        core.PvGateTF32(heads, da // heads)(vg[:, :da], P.view(heads * length, length), att, a_, g=vg[:, da:])
+        y = _mm32(att, at.to_out.weight)
+        out, xa2 = core.resgate_adaln_f32(y, t3[2, :, :d], at.to_scale.bias, xs, t3[1], cada.to_scale.bias, float(cada.ln_in.eps))
+        h = _ct_k().swiglu_fwd(_mm32(xa2, wab))
+        z = _mm32(h, ct.squeeze.weight)
+        res = core.gate_res_b_f32(out, z, t3[2, :, d:], ct.to_scale.bias)
+    return res.view(single.shape)
+
+
+#: the fp32 block's GEMMs on cuBLASLt with an explicit configuration (lt_f32_sm120.cuh: algorithm, tile, stages, split-K, reduction,
+#: swizzle, custom option) per (batch, M, N, K): the fastest of a search over cuBLASLt's candidates and a grid of tiles / stages / split-K
+#: (graph replay, L2 flushed; error vs at::mm <= 1e-4 of its maximum, 0 without split-K); a shape not listed runs at::mm / at::bmm
+_LT_F32: dict[tuple[int, int, int, int], tuple[int, ...]] = {  # (B, M, N, K): config  -- us at::mm -> this (2026-11-13)
+    (3, 640, 1536, 384): (21, 15, 6, 1, 0, 0, 0),  # 50.9 -> 36.9
+    (3, 640, 1536, 768): (21, 15, 6, 1, 0, 0, 0),  # 91.9 -> 67.3
+    (1, 640, 1536, 768): (21, 17, 6, 1, 0, 0, 0),  # 28.2 -> 26.4
+    (1, 640, 3072, 768): (21, 15, 12, 1, 0, 1, 0),  # 48.9 -> 44.8
+    (3, 1280, 1536, 384): (21, 15, 6, 1, 0, 0, 0),  # 75.5 -> 61.2
+    (3, 1280, 1536, 768): (21, 15, 6, 1, 0, 0, 0),  # 135.2 -> 122.6
+    (1, 1280, 1536, 768): (21, 15, 12, 1, 0, 1, 0),  # 49.1 -> 45.1
+    (1, 1280, 3072, 768): (21, 17, 6, 1, 0, 1, 0),  # 92.1 -> 77.5
+    (1, 1280, 768, 1536): (21, 15, 6, 4, 1, 0, 0),  # 48.9 -> 46.8 (split-K 4)
+    (3, 1920, 1536, 384): (21, 15, 6, 1, 0, 0, 0),  # 100.1 -> 90.1
+    (3, 1920, 1536, 768): (21, 17, 9, 1, 0, 1, 0),  # 180.0 -> 171.8
+    (1, 1920, 1536, 768): (21, 15, 6, 1, 0, 1, 0),  # 91.9 -> 65.5
+    (1, 1920, 768, 768): (21, 15, 6, 2, 1, 0, 0),  # 46.8 -> 38.7 (split-K 2)
+    (1, 1920, 3072, 768): (21, 15, 6, 1, 0, 0, 0),  # 136.7 -> 120.6
+    (1, 1920, 768, 1536): (21, 15, 6, 3, 1, 0, 0),  # 87.8 -> 65.5 (split-K 3)
+    (1, 2560, 1536, 768): (21, 17, 6, 1, 0, 1, 0),  # 92.1 -> 77.6
+    (1, 2560, 768, 768): (21, 15, 12, 1, 0, 0, 0),  # 48.9 -> 45.0
+    (1, 2560, 768, 1536): (21, 15, 12, 1, 0, 0, 0),  # 89.8 -> 81.7
+    (1, 3200, 1536, 768): (21, 23, 3, 1, 0, 0, 0),  # 93.9 -> 92.1
+    (1, 3200, 3072, 768): (21, 23, 3, 1, 0, 1, 0),  # 184.1 -> 177.9
+    (1, 3840, 1536, 768): (21, 15, 6, 1, 0, 1, 0),  # 135.2 -> 120.6
+    (1, 3840, 768, 768): (21, 15, 6, 1, 0, 0, 0),  # 91.9 -> 67.3
+    (1, 3840, 3072, 768): (21, 17, 9, 1, 0, 1, 0),  # 225.0 -> 215.1
+    (1, 3840, 768, 1536): (21, 15, 6, 3, 1, 0, 0),  # 173.8 -> 124.9 (split-K 3)
+}
+
+
+def _mm32(a: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """a w^T in fp32 on TF32 (a [M, K] / w [N, K], or a strided batch [B, M, K] / [B, N, K])."""
+    bat = a.dim() == 3
+    key = (a.shape[0] if bat else 1, a.shape[-2], w.shape[-2], a.shape[-1])
+    cfg = _LT_F32.get(key)
+    if cfg is None:
+        return torch.bmm(a, w.transpose(1, 2)) if bat else torch.mm(a, w.t())
+    out = a.new_empty(*a.shape[:-1], w.shape[-2])
+    return _core().lt_mm32(a, w, out, cfg)
+
+
+def _adaln_k():
+    from miniworld_engine.kernels.adaln.cuda import sm80
+
+    return sm80
+
+
+def _ct_k():
+    from miniworld_engine.kernels.conditioned_transition.cuda import sm80
+
+    return sm80
 
 
 __all__ = ["block", "refusal"]
