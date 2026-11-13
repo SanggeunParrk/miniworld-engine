@@ -275,7 +275,7 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     planes = zf.new_empty((2 * hs, T))
     # D64 inference, outgoing: k1 stores the planes transposed (token (i, k) at k L + i), so the contraction sum_k a[i,k] b[j,k] is the incoming form a^T b
     # (cuBLAS nt, as the kit's; the tn form of the plain planes measured 3-5 % slower at L 768-2048)
-    trans = _OUT_NT and not save and direction == OUTGOING and d == 64 and fuse_z and z.dtype is torch.bfloat16 and hs in (64, 128) and n % 16 == 0
+    trans = _OUT_NT and not save and direction == OUTGOING and d == 64 and fuse_z and z.dtype is torch.bfloat16 and hs in (64, 128) and n % 64 == 0
     k1 = E.k1w if save else (E.k1w_row_mask_t if trans else E.k1w_row_mask)
     k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
     x = zf.new_empty((hs, n, n))

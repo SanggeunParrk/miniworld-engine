@@ -163,7 +163,7 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
   p.mask = mask.numel() ? mask.data_ptr<uint8_t>() : nullptr;
   p.planes = mbf(planes);
   p.T = T; p.D = D; p.L = (int)L; p.ncol = ncol;
-  TORCH_CHECK(!TRANS || (fuse && D == 64 && (ncol == 256 || ncol == 512) && L % 16 == 0 && (int64_t)L * L == T), "k1w: transposed planes are the D64 persistent kernel's (L % 16 == 0)");
+  TORCH_CHECK(!TRANS || (fuse && D == 64 && (ncol == 256 || ncol == 512) && L % 64 == 0 && (int64_t)L * L == T), "k1w: transposed planes are the D64 persistent kernel's (L % 64 == 0)");
   if (ROW_MASK && D == 512 && !fuse && L % 128 == 0) {
     static bool set_row = false;
     if (!set_row) { set_smem(a100::k1w_kernel<false, true>, a100::K1wTile::SMEM); set_row = true; }

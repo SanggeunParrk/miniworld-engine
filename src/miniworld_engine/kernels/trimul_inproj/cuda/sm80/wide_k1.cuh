@@ -238,16 +238,16 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, wm = warp >> 1, wn = warp & 1, g8 = lane >> 2, q = lane & 3;
   const int ntiles = p.T >> 7;
   const int grp = (int)blockIdx.x % C::G, cta = (int)blockIdx.x / C::G, step = (int)gridDim.x / C::G;   // column group; the CTA's first token tile and its stride
-  // token of local row lt of a tile and its plane position: 128 consecutive tokens, or (TRANS) 16 rows i x 8 columns k, i fastest -- a thread's two consecutive
-  // local rows are rows i, i + 1 of one column k: adjacent words of the transposed plane.  TRANS tiles walk the i-blocks fastest, so the tiles in flight together
-  // write whole 128-byte lines of each plane row k.  tb / pb: the tile's token / position bases (once per tile).
-  const int nib = p.L >> 4;
+  // token of local row lt of a tile and its plane position: 128 consecutive tokens, or (TRANS) 64 rows i x 2 columns k, i fastest -- a thread's two consecutive
+  // local rows are rows i, i + 1 of one column k: adjacent words of the transposed plane.  A TRANS tile writes whole 128-byte lines of each of its two plane
+  // rows k per channel (shorter i-runs left half-filled DRAM bursts: the 16 x 8 form ran 1.5-2x slower).  tb / pb: the tile's token / position bases (once per tile).
+  const int nib = p.L >> 6;
   auto bases = [&](int tile, int& tb, int& pb) {
-    if constexpr (TRANS) { const int kb = tile / nib, ib = tile - kb * nib; tb = 16 * ib * p.L + 8 * kb; pb = 8 * kb * p.L + 16 * ib; }
+    if constexpr (TRANS) { const int kb = tile / nib, ib = tile - kb * nib; tb = 64 * ib * p.L + 2 * kb; pb = 2 * kb * p.L + 64 * ib; }
     else { tb = pb = tile * 128; }
   };
-  auto tok_of = [&](int tb, int lt) -> int { return TRANS ? tb + (lt & 15) * p.L + (lt >> 4) : tb + lt; };
-  auto pos_of = [&](int pb, int lt) -> int { return TRANS ? pb + (lt >> 4) * p.L + (lt & 15) : pb + lt; };
+  auto tok_of = [&](int tb, int lt) -> int { return TRANS ? tb + (lt & 63) * p.L + (lt >> 6) : tb + lt; };
+  auto pos_of = [&](int pb, int lt) -> int { return TRANS ? pb + (lt >> 6) * p.L + (lt & 63) : pb + lt; };
   // input tile loader: 1024 granules (128 rows x 2 k-tiles x 4), 4 per thread
   auto issue_z = [&](int tile, int buf) {
     int tb, pb;
