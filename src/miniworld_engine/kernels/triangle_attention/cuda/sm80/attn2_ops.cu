@@ -8,6 +8,7 @@
 #include "attn_bwd_dkv_sm80.cuh"      // bias_transpose_kernel
 #include "attn_bwd_dq_sm80.cuh"       // db_reduce_kernel
 #include "attn2_bwd_sm80.cuh"
+#include "attn_rf_fwd_sm80.cuh"      // the register-resident inference core (16-channel heads)
 
 namespace {
 
@@ -51,6 +52,21 @@ void check_mask(const torch::Tensor& m, int64_t Z, int64_t L, const char* what) 
 static int g_dq_sched = 0, g_dkv_sched = 0;
 void attn2_set_sched(int64_t dq, int64_t dkv) { g_dq_sched = (int)dq; g_dkv_sched = (int)dkv; }
 
+// The register-resident inference core (attn_rf_fwd_sm80.cuh) for unmasked 16-channel token-major calls without log-sum-exp: -1 = the measured rule,
+// 0 = off, 1.. = a geometry (A/B knob).
+static int g_rf16 = -1;
+void attn2_rf_set(int64_t mode) { g_rf16 = (int)mode; }
+
+namespace {
+bool token_major16(const a100::Lay& l, int64_t L, int64_t Z) { return l.head == 16 && l.row == L * l.tok && (Z == 1 || l.z == L * l.row); }
+
+template <class G>
+void launch_rf16(const a100::AttnParams& p, int64_t Z, double scl, const torch::Tensor& like) {
+  const auto fix = at::empty({a100::rf_fix_ints<G>(p.L, (int)(Z * p.H))}, like.options().dtype(at::kInt));
+  C10_CUDA_CHECK(a100::attn_rf_launch<G>(p, (int)Z, scl, fix.data_ptr<int>(), at::cuda::getCurrentCUDAStream(), at::cuda::getCurrentDeviceProperties()->multiProcessorCount));
+}
+}  // namespace
+
 // Forward: out (Lay lo) = softmax(sm_scale q . k + bias [+ rowmask]) v with q / k / v / out strided [z, a, j, h, d] views (a = the pair row, L of them); bias [z, H, L, L] bf16 contiguous
 // (the shared key mask folded in: masked = bf16 min); rowmask [z, L, L] uint8 (the per-row key mask) or empty; lse [z, H, L, L] fp32 or empty.  The default schedule (2 rows, 32 keys, 2 CTAs / SM).
 void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor rowmask, torch::Tensor out, torch::Tensor lse, std::vector<int64_t> lq,
@@ -80,6 +96,19 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
     if (fixed == 2) { using G = a100::Attn2Cfg<16, R_, NKV_, BN_, MINB_, false, 2>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); } \
     else { using G = a100::Attn2Cfg<16, R_, NKV_, BN_, MINB_, false, 1>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); } }
   // schedules of the 16-channel fixed-shift core (R rows, NKV stages, BN keys, CTAs / SM); 0 = automatic: 4 rows x 4 stages from L = 256 (measured -5..-8 % at L384-768, +4 % at L128), else the base 2 x 4
+  const int rf = g_rf16 < 0 ? 1 : g_rf16;
+  if (hd == 16 && !mask && fixed && !lse.numel() && rf > 0 && L >= 512 && token_major16(Lq, L, Z) && token_major16(Lk, L, Z) && token_major16(Lv, L, Z) &&
+      token_major16(Lo, L, Z)) {
+    a100::AttnParams r{};
+    r.q = p.q; r.k = p.k; r.v = p.v; r.bias = p.bias; r.out = p.out; r.lse = nullptr;
+    r.ldq = Lq.tok; r.ldk = Lk.tok; r.ldv = Lv.tok; r.ldo = Lo.tok; r.L = (int)L; r.H = (int)H; r.scl = (float)scl;
+    switch (rf) {
+      case 2: launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16>>(r, Z, scl, q); return;
+      case 3: launch_rf16<a100::AttnRCfg<2, 1, 4, 4, false, 16>>(r, Z, scl, q); return;
+      case 4: launch_rf16<a100::AttnRCfg<2, 2, 2, 6, false, 16>>(r, Z, scl, q); return;
+      default: launch_rf16<a100::AttnRCfg<2, 2, 2, 4, false, 16>>(r, Z, scl, q); return;
+    }
+  }
   const int64_t eff = sched != 0 ? sched : (L >= 256 ? 4 : 0);
   if (hd == 16 && !mask && fixed && eff != 0) {
     switch (eff) {
@@ -259,6 +288,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("attn2_delta", &attn2_delta);
   m.def("attn2_fwd", &attn2_fwd);
   m.def("attn2_set_sched", &attn2_set_sched);
+  m.def("attn2_rf_set", &attn2_rf_set);
   m.def("attn2_bwd_dq", &attn2_bwd_dq);
   m.def("attn2_db_reduce", &attn2_db_reduce);
   m.def("attn2_bias_transpose", &attn2_bias_transpose);

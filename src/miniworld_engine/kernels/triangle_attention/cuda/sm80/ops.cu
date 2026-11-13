@@ -61,25 +61,8 @@ void launch_back(const a100::F3Params& p, int nsm) {
 // The register-resident inference core (attn_rf_fwd_sm80.cuh).  Its bias-scaling operand: 1 / scale = log2 e / scl in two bf16 words.
 template <class G>
 void launch_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts) {
-  static bool set[64] = {};
-  const int dev = at::cuda::current_device() & 63;
-  if (!set[dev]) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(a100::attn_rf_fwd_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
-    C10_CUDA_CHECK(cudaFuncSetAttribute(a100::attn_rf_fix_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
-    set[dev] = true;
-  }
-  const double s = 1.4426950408889634 / scl;
-  const float hi = __bfloat162float(__float2bfloat16_rn((float)s)), lo = __bfloat162float(__float2bfloat16_rn((float)(s - hi)));
-  dim3 grid(p.L / G::BM, p.L / G::R, z * p.H);
-  const int64_t ntile = (int64_t)grid.x * grid.y * grid.z;
-  const auto fix = at::empty({1 + ntile}, opts.dtype(at::kInt));   // [count, tiles...] of the recomputation
-  const auto stream = at::cuda::getCurrentCUDAStream();
-  C10_CUDA_CHECK(cudaMemsetAsync(fix.data_ptr<int>(), 0, sizeof(int), stream));
-  a100::attn_rf_fwd_kernel<G><<<grid, G::NTHR, G::SMEM, stream>>>(p, hi, lo, fix.data_ptr<int>());
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-  a100::attn_rf_fix_kernel<G><<<(unsigned)std::min<int64_t>(ntile, nsm), G::NTHR, G::SMEM, stream>>>(p, hi, lo, fix.data_ptr<int>(), (int)grid.x, (int)grid.y);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  const auto fix = at::empty({a100::rf_fix_ints<G>(p.L, z * p.H)}, opts.dtype(at::kInt));   // [count, tiles...] of the recomputation
+  C10_CUDA_CHECK(a100::attn_rf_launch<G>(p, z, scl, fix.data_ptr<int>(), at::cuda::getCurrentCUDAStream(), at::cuda::getCurrentDeviceProperties()->multiProcessorCount));
 }
 
 // Inference core selection of the fast entries: -1 = the measured rule (rf_auto), 0 = the tuned AttnCfg cores, 1..3 = an rf geometry (A/B knob).
