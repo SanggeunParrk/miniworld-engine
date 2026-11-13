@@ -47,7 +47,7 @@ Names from `requirements/requirements_kernel.csv` (family `triangle_attention`);
 | `triangle_attention_pack_sm90` | forward | `tri_pack`: [Wq; Wk; Wv; Wg] -> bf16 [512, 128], Wb zero-padded to 16 rows, Wo bf16, one launch (fp32 or bf16 parameters) |
 | `triangle_attention_front_sm90` | forward | `tri_front` (d128): LN in registers + q / k / v / g + head-major `bf16(bias / scale)`, masked keys -inf |
 | `triangle_attention_fwd_sm90` | forward | `triattn_fwd` (`triattn_sm90.cu`): bf16 attention core, head dim 32, base-2 LSE when the backward needs it, optional gate epilogue |
-| `triangle_attention_fwd_fp16_sm90` | forward_infer | `triattn_fwd_h16` (`triattn_h16_sm90.cu`): the inference core on fp16 q / k / v / bias, bf16 out |
+| `triangle_attention_fwd_fp16_sm90` | forward_infer | `triattn_fwd_h16` (`triattn_h16_sm90.cu`): the inference core on fp16 q / k / v / bias, bf16 out; takes the key mask (live key tiles counted in the kernel) and, for AF3's ending node from the one-kernel front, reads the bias tiles transposed |
 | `triangle_attention_tail_sm90` | forward | `tri_tail` (d128): `x + drop o ((sigmoid(g) o o) Wo^T [+ bo])` in one pass |
 | `triangle_attention_front_wide_sm90`, `triangle_attention_pack_wide_sm90` | forward_infer | `tri_front_wide` / `tri_pack_wide`: the d128 front design at d_pair 256, 8 heads (groups of four CTAs, one projection each) |
 | `triangle_attention_gate_bwd_sm90` | backward | `tri_gate_bwd` (d128): `dyd = dy o drop`, `du = dyd Wo`, do, dg, Delta per head, dWo partials, dpair seed = dy |
@@ -141,6 +141,14 @@ residual kernels and cuBLAS GEMMs (bf16 in, fp32 accumulate).
   o O`; O itself only when the backward needs it) -> `x + u Wo^T` (cublasLt, residual and RF3 out bias in the epilogue) or, with
   dropout, `t = u Wo^T` then `residual`. Short inference uses one GEMM for q | k | v | g | bias (L <= 256) or the one-kernel front
   (`front_fused3`, `_FRONT_L`); fp16 inference beyond L 256 uses fp16 GEMMs.
+- inference at d_pair 64 x 4 heads x 16 (2026-11-14; 3 launches: front, fp16 core, cublasLt out-projection): the fp16 core takes the key
+  mask itself (`h100_sm90.key_args`: its producer warpgroup counts each batch element's live 128-key tiles once per CTA, after requesting
+  the first task's Q and first key tile -- the seven `key_tiles` glue launches were ~9 us of a 46 us L128 call); 16-channel heads issue one
+  k16 score step (the padded half adds exact zeros) and run every exponential on the MUFU (no `TA_POLY` polynomial: -4 to -6 % at L256-1536);
+  the front runs on two weight stages at d_pair 64 and stores no LayerNorm statistics; AF3's ending node stores its bias as the front's
+  rows have it (whole masked rows) and the core reads those tiles with `ldmatrix.trans` (`bias_transposed`, the `BTR` template) instead
+  of 16-bit stores at stride L (1.3 us at L128, 10 us at L512). Measurer 4 (graph, cold L2) ms before -> after, anthropic: L128 0.045-0.047
+  -> 0.033-0.035 (0.035); L256 0.111-0.118 -> 0.093-0.098 (0.101-0.102); L512 0.449-0.465 -> 0.416-0.422 (0.458-0.464).
 - backward: `gate_bwd_in` -> `du = ddrop Wo`, `dWo = ddrop^T u` (fp32 result) -> `gate_bwd_out` -> `triattn_bwd_kv` /
   `triattn_bwd_q` write dk / dv / dq into their columns of `dall [M, 4 HD + Hp]` -> `assemble` -> `dyln = dall Wcat` (bf16),
   `dW = dall^T y` (fp32 result) -> `ln_bwd` (dx = dy + LN backward; gamma / beta partials summed by torch).

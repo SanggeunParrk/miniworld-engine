@@ -7,8 +7,8 @@
 // shared memory; Q/K/V/G leave through TMA stores, the head bias is transposed in
 // shared memory so each head writes contiguous keys.
 // HD = 32 H (heads padded to 32 channels) or 16 H (16-channel heads kept compact for the fp16 core's 3-D loads).  ``flip`` (bit 1 of tr):
-// the ending node on AlphaFold 3's bias orientation -- the bias written transposed with the key mask on the transposed axis (what
-// h100_sm90.flip_bias did as three more kernels).
+// the ending node on AlphaFold 3's bias orientation -- the bias stored as the rows have it with the key mask on the transposed axis (each
+// masked row whole), which the fp16 core reads transposed (bias_transposed; what h100_sm90.flip_bias did as three more kernels).
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -26,7 +26,8 @@ constexpr int BN=128;
 #define MW_F3_SLOTS 1
 #endif
 constexpr int SLOTS=MW_F3_SLOTS;
-constexpr int stages_for(int){return MW_F3_STAGES;}
+// d_pair 64: one k tile, three weight blocks; two stages (a smaller footprint) were 2-4 % faster at L128-1024 (same bits)
+constexpr int stages_for(int C){return C<=64?2:MW_F3_STAGES;}
 #ifdef MW_F3_MINB_FORCE
 constexpr int minb_for(int){return MW_F3_MINB_FORCE;}
 #else
@@ -103,7 +104,7 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
       #pragma unroll
       for(int d=1;d<T;d<<=1) var+=__shfl_xor_sync(0xffffffff,var,d);
       float inv=rsqrtf(var/C+eps);
-      if(sub==0){stats[row*2]=mean;stats[row*2+1]=inv;}
+      if(sub==0 && stats){stats[row*2]=mean;stats[row*2+1]=inv;}
       int rw=r/64,rr=r%64;
       #pragma unroll
       for(int i=0;i<PER;++i) {
@@ -199,18 +200,15 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
         uint4 vec=*reinterpret_cast<uint4 const*>(stg+h*64+c*8);
         auto* v=reinterpret_cast<Element*>(&vec);
         if(tr&2) {
-          // flip (the ending node on AlphaFold 3's bias orientation): the transpose -- token (q, key) is bias[b, h, key, q] -- with the
-          // key mask on the transposed axis (q): 16-bit stores at stride L (the bias stays L2-resident; the sectors merge there)
-          const bool keep=!mask || mask[b*L+q];
-          auto* bb=reinterpret_cast<uint16_t*>(bias)+(int64_t(b)*H+h)*L*int64_t(L)+q;
-          #pragma unroll
-          for(int e=0;e<8;++e) {
-            uint16_t bits=reinterpret_cast<uint16_t const*>(v)[e];
-            if(!keep) bits=h16?uint16_t(0xFC00u):uint16_t(0xFF80u);     // -inf (as the unfused flip masks: fp16 / bf16)
-            bb[int64_t(key0+c*8+e)*L]=bits;
+          // flip (the ending node on AlphaFold 3's bias orientation): token (q, key) is the transpose's element, bias^T[b, h, key, q]. The
+          // bias is stored as the rows have it (the core reads its tiles transposed: triattn_fwd_h16(bias_transposed=True)), with the
+          // key mask on the transposed axis: row q masked whole. (Writing the transpose here took 16-bit stores at stride L: AF3's ending
+          // node was 1.3 us slower than the standard one at L128.)
+          if(mask && !mask[b*L+q]) {
+            #pragma unroll
+            for(int e=0;e<8;++e) reinterpret_cast<uint16_t*>(v)[e]=h16?uint16_t(0xFC00u):uint16_t(0xFF80u);   // -inf (fp16 / bf16)
           }
-        } else {
-        if(mask) {
+        } else if(mask) {
           #pragma unroll
           for(int e=0;e<8;++e) if(!mask[b*L+key0+c*8+e]) {
             if(h16) reinterpret_cast<uint16_t*>(v)[e]=0xFC00u;    // fp16 -inf
@@ -218,7 +216,6 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
           }
         }
         *reinterpret_cast<uint4*>(bias+((int64_t(b)*H+h)*L+q)*L+key0+c*8)=vec;
-        }
       }
       }
     }
@@ -236,7 +233,7 @@ template<int C,int HD> void launch(torch::Tensor x,torch::Tensor lnw,torch::Tens
   size_t smem=sizeof(Shared<C,HD>);
   C10_CUDA_CHECK(cudaFuncSetAttribute(front_v3<C,HD>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
   front_v3<C,HD><<<rows/128,256,smem,at::cuda::getCurrentCUDAStream()>>>(tw,to,(Element*)x.data_ptr(),lnw.data_ptr<float>(),lnb.data_ptr<float>(),
-    mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)bias.data_ptr(),stats.data_ptr<float>(),rows,L,H,eps,inv_scale,tr,h16);
+    mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)bias.data_ptr(),stats.numel()?stats.data_ptr<float>():nullptr,rows,L,H,eps,inv_scale,tr,h16);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -249,7 +246,7 @@ std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch
   TORCH_CHECK(mask.device()==x.device() && mask.is_contiguous() && mask.scalar_type()==torch::kBool && (mask.numel()==0 || mask.sizes()==torch::IntArrayRef({B,L})),"mask mismatch");
   // h16: planes 0-2 of p and the bias hold fp16 bits (the caller views them as fp16), plane 3 (g) bf16
   auto p=torch::empty({4,rows,HD},x.options()),bias=torch::empty({B,H,L,L},h16?x.options().dtype(torch::kHalf):x.options());
-  auto stats=torch::empty({rows,2},x.options().dtype(torch::kFloat32));
+  auto stats=torch::empty({0,2},x.options().dtype(torch::kFloat32));
   const int key=C*1000+HD;
   switch(key){
     case 64064: launch<64,64>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans)|(int(flip)<<1),int(h16));break;

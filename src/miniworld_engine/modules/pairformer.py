@@ -70,7 +70,7 @@ class PairformerBlock(BackendModule, MasterWeights):
         "anthropic": 2,  # 2026-11-13: its sub-modules' anthropic paths (TriAttn folded block + cu129 core prebuilts, Transition folded residual)
         "anthropic:a100_sm80": 3,  # 2026-11-13: the A100 kit stack (its TriMul / TriAttn sub-modules on the kits' sm_80 native rows)
         "cuda:a100_sm80": 8,  # 8 (2026-11-14): its TriMul's bounded contraction; 7: APB key-tile skip (mask-skip-attn); 6: TriMul D64 k3s; 5: TriAttn rf core
-        "cuda:h100_sm90": 8,
+        "cuda:h100_sm90": 9,
     }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
     # batched (the cuda AttentionPairBias takes B > 1: no refusal-driven per-sample path)
     # cuda:a100_sm80 4 (2026-11-12): its AttentionPairBias's generic sm_80 pair-bias backward faster (the same values)
@@ -83,6 +83,8 @@ class PairformerBlock(BackendModule, MasterWeights):
     # cuda:h100_sm90 7 (2026-11-13): its TriangleAttention inference skips the dead trailing key tiles of a padded mask (bitwise the same)
     # cuda:h100_sm90 8 / cuda:a100_sm80 6 (2026-11-13): its AttentionPairBias inference skips the core's key tiles past each row's last attended
     # key and the pair-bias tiles whose keys are all masked (bitwise the same)
+    # cuda:h100_sm90 9 (2026-11-14): its TriangleAttention fp16 core counts the live key tiles from the mask (no glue launches) and, at
+    # d_pair 64 x 4 heads, short-L schedule changes (see TriangleAttention cuda:h100_sm90 7)
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()

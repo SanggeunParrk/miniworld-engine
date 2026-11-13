@@ -1,7 +1,8 @@
 """H100 TriangleAttention inference, fp16 core: the 128-key tiles past each batch element's last attended key (``h100_sm90.key_tiles``)
 are not streamed.  Their keys are -inf in every row, so their exponentials are exact zeros: the module output is bitwise the same as
 with every tile computed -- d_pair 128 / 256 (fused fronts), the width-generic path (d_pair 64, d_hidden 128), starting / ending node,
-AF3's flip, two batch elements with different paddings, a mask whose last key is attended (no tile skipped) and a mask with holes."""
+AF3's flip, two batch elements with different paddings, a mask whose last key is attended (no tile skipped) and a mask with holes.
+The core counts the live tiles from the key mask itself (``h100_sm90.key_args``): the same bits as the counts of ``key_tiles``."""
 
 import pytest
 import torch
@@ -46,6 +47,9 @@ CASES = [
     (128, 4, {"model": "af3"}, 384),
     (64, 4, {"d_hidden": 128}, 384),  # the width-generic path (fp16 GEMMs from L 256 on)
     (256, 8, {}, 384),
+    (64, 4, {}, 384),  # 16-channel heads kept compact (the one-kernel front), the key mask counted in the core
+    (64, 4, {"model": "af3"}, 256),
+    (64, 4, {}, 128),
 ]
 
 
@@ -64,16 +68,19 @@ def test_skip_is_bitwise(d: int, h: int, kw: dict, L: int, starting: bool, monke
     holes = torch.rand(2, L, device="cuda", generator=g) > 0.2
     holes[:, 250:] = False  # a ragged mask ending inside tile 1: tile 2 dead in both samples
     masks.append(holes)
-    real = hs.key_tiles
+    real = hs.key_args
     kt = hs.key_tiles(pad, L)
     assert kt is not None
-    assert kt.tolist() == [2, 3]
+    assert kt.tolist() == {384: [2, 3], 256: [1, 2], 128: [1, 1]}[L]
     with torch.no_grad():
         for mask in masks:
-            skip = m(x, mask)
-            monkeypatch.setattr(hs, "key_tiles", lambda mk, n: None)
-            full = m(x, mask)
-            monkeypatch.setattr(hs, "key_tiles", real)
+            skip = m(x, mask)  # the key mask handed to the core, which counts the live tiles itself
+            monkeypatch.setattr(hs, "key_args", lambda mk, n: {"key_tiles": hs.key_tiles(mk, n)})
+            tiles = m(x, mask)  # the counts made by key_tiles
+            monkeypatch.setattr(hs, "key_args", lambda mk, n: {})
+            full = m(x, mask)  # every tile computed
+            monkeypatch.setattr(hs, "key_args", real)
+            assert torch.equal(skip, tiles)
             assert torch.isfinite(skip).all()
             assert not torch.equal(skip, x)  # the update is live
             assert torch.equal(skip, full)
