@@ -116,7 +116,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "anthropic": 3,  # 3 (2026-11-13): the block folds the residual (z += block(z)); the cu129 triattn prebuilts
         "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: triattn_native's sm_80 core instead of the k2b step-aside)
         "cueq": 2,
-        "cuda:a100_sm80": 4,
+        "cuda:a100_sm80": 5,  # 5 (2026-11-13): the register-resident inference core (attn_rf_fwd_sm80.cuh) at L >= 512, plain and gated
         "cuda:h100_sm90": 6,
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2

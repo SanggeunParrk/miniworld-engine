@@ -8,6 +8,7 @@
 #include "attn_bwd_dkv_sm80.cuh"      // bias_transpose_kernel
 #include "attn_bwd_dq_sm80.cuh"       // db_reduce_kernel
 #include "attn2_bwd_sm80.cuh"
+#include "attn_rf_fwd_sm80.cuh"      // the register-resident inference core (16-channel heads)
 
 namespace {
 
@@ -51,10 +52,28 @@ void check_mask(const torch::Tensor& m, int64_t Z, int64_t L, const char* what) 
 static int g_dq_sched = 0, g_dkv_sched = 0;
 void attn2_set_sched(int64_t dq, int64_t dkv) { g_dq_sched = (int)dq; g_dkv_sched = (int)dkv; }
 
+// The register-resident inference core (attn_rf_fwd_sm80.cuh) for unmasked 16-channel token-major calls without log-sum-exp: -1 = the measured rule,
+// 0 = off, 1.. = a geometry (A/B knob).
+static int g_rf16 = -1;
+void attn2_rf_set(int64_t mode) { g_rf16 = (int)mode; }
+
+namespace {
+bool token_major_hd(const a100::Lay& l, int64_t L, int64_t Z, int64_t hd) { return l.head == hd && l.row == L * l.tok && (Z == 1 || l.z == L * l.row); }
+
+template <class G>
+void launch_rf16(const a100::AttnParams& p, int64_t Z, double scl, const torch::Tensor& like) {
+  const at::Tensor fix = at::empty({a100::rf_fix_ints<G>(p.L, (int)(Z * p.H))}, like.options().dtype(at::kInt));
+  int* fp = fix.data_ptr<int>();
+  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const cudaError_t err = a100::attn_rf_launch<G>(p, (int)Z, scl, fp, at::cuda::getCurrentCUDAStream(), nsm);
+  C10_CUDA_CHECK(err);
+}
+}  // namespace
+
 // Forward: out (Lay lo) = softmax(sm_scale q . k + bias [+ rowmask]) v with q / k / v / out strided [z, a, j, h, d] views (a = the pair row, L of them); bias [z, H, L, L] bf16 contiguous
 // (the shared key mask folded in: masked = bf16 min); rowmask [z, L, L] uint8 (the per-row key mask) or empty; lse [z, H, L, L] fp32 or empty.  The default schedule (2 rows, 32 keys, 2 CTAs / SM).
 void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor rowmask, torch::Tensor out, torch::Tensor lse, std::vector<int64_t> lq,
-               std::vector<int64_t> lk, std::vector<int64_t> lv, std::vector<int64_t> lo, int64_t L, int64_t H, int64_t Z, int64_t hd, double scl, int64_t fixed, int64_t sched) {
+               std::vector<int64_t> lk, std::vector<int64_t> lv, std::vector<int64_t> lo, int64_t L, int64_t H, int64_t Z, int64_t hd, double scl, int64_t fixed, int64_t sched, torch::Tensor key_mask) {
   TORCH_CHECK(hd == 16 || hd == 32 || hd == 64, "attn2_fwd: head dim 16, 32 or 64");
   TORCH_CHECK(L % 128 == 0 && L >= 128 && Z * H <= 65535 && L / 2 <= 65535, "attn2_fwd: L a multiple of 128, grid");
   const a100::Lay Lq = lay_of(lq), Lk = lay_of(lk), Lv = lay_of(lv), Lo = lay_of(lo);
@@ -72,6 +91,15 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
   p.bias = reinterpret_cast<const bf*>(bias.data_ptr()); p.rowmask = rowmask.numel() ? rowmask.data_ptr<uint8_t>() : nullptr;
   p.out = reinterpret_cast<bf*>(out.data_ptr()); p.lse = lse.numel() ? lse.data_ptr<float>() : nullptr;
   p.lq = Lq; p.lk = Lk; p.lv = Lv; p.lo = Lo; p.L = (int)L; p.H = (int)H; p.scl = (float)scl;
+  at::Tensor kt;   // inference without per-row masks: stream keys only up to each sample's last live key (the global mask, already in the bias)
+  if (!lse.numel() && !rowmask.numel() && key_mask.defined() && key_mask.numel()) {
+    TORCH_CHECK(key_mask.is_cuda() && key_mask.device() == q.device() && (key_mask.scalar_type() == at::kBool || key_mask.scalar_type() == at::kByte) &&
+                key_mask.is_contiguous() && key_mask.numel() == Z * L, "attn2_fwd: key_mask bool / uint8 [Z, L]");
+    kt = at::empty({Z}, q.options().dtype(at::kInt));
+    const cudaError_t err = a100::rf_key_tiles(reinterpret_cast<const uint8_t*>(key_mask.data_ptr()), kt.data_ptr<int>(), (int)Z, (int)L, at::cuda::getCurrentCUDAStream());
+    C10_CUDA_CHECK(err);
+    p.key_tiles = kt.data_ptr<int>();
+  }
   const dim3 grid((unsigned)(L / a100::T2_BM), (unsigned)(L / 2), (unsigned)(Z * H));
   const bool mask = rowmask.numel() != 0;
 #define FWD2(HD, MASK, FIX) { using G = a100::Attn2Cfg<HD, 2, 4, 32, 2, MASK, FIX>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, grid, p); }
@@ -80,6 +108,19 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
     if (fixed == 2) { using G = a100::Attn2Cfg<16, R_, NKV_, BN_, MINB_, false, 2>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); } \
     else { using G = a100::Attn2Cfg<16, R_, NKV_, BN_, MINB_, false, 1>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); } }
   // schedules of the 16-channel fixed-shift core (R rows, NKV stages, BN keys, CTAs / SM); 0 = automatic: 4 rows x 4 stages from L = 256 (measured -5..-8 % at L384-768, +4 % at L128), else the base 2 x 4
+  // the register-resident core (attn_rf_fwd_sm80.cuh) for unmasked token-major inference: 16-channel heads (the fixed-shift callers) from L 1024, 32 / 64-channel
+  // heads (the RoseTTAFold3 / Chai-1 variants: its own running-max recomputation replaces their online softmax) from L 512
+  const int rf = g_rf16 >= 0 ? g_rf16 : (hd == 16 ? (L >= 1024 && fixed) : L >= 512);
+  if (!mask && !lse.numel() && rf > 0 && L >= 512 && token_major_hd(Lq, L, Z, hd) && token_major_hd(Lk, L, Z, hd) && token_major_hd(Lv, L, Z, hd) &&
+      token_major_hd(Lo, L, Z, hd)) {
+    a100::AttnParams r{};
+    r.q = p.q; r.k = p.k; r.v = p.v; r.bias = p.bias; r.out = p.out; r.lse = nullptr;
+    r.ldq = Lq.tok; r.ldk = Lk.tok; r.ldv = Lv.tok; r.ldo = Lo.tok; r.L = (int)L; r.H = (int)H; r.scl = (float)scl; r.key_tiles = p.key_tiles;
+    if (hd == 16) launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16, true>>(r, Z, scl, q);   // 2 rows x 128 queries, the bias operand converted in registers
+    else if (hd == 32) launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 32>>(r, Z, scl, q);              // as the d_pair-128 core
+    else launch_rf16<a100::AttnRCfg<2, 1, 2, 4, false, 64, true>>(r, Z, scl, q);                  // 2 x 2 warps, 2 rows x 64 queries, one row per warp
+    return;
+  }
   const int64_t eff = sched != 0 ? sched : (L >= 256 ? 4 : 0);
   if (hd == 16 && !mask && fixed && eff != 0) {
     switch (eff) {
@@ -259,6 +300,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("attn2_delta", &attn2_delta);
   m.def("attn2_fwd", &attn2_fwd);
   m.def("attn2_set_sched", &attn2_set_sched);
+  m.def("attn2_rf_set", &attn2_rf_set);
   m.def("attn2_bwd_dq", &attn2_bwd_dq);
   m.def("attn2_db_reduce", &attn2_db_reduce);
   m.def("attn2_bias_transpose", &attn2_bias_transpose);
