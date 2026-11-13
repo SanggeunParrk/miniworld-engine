@@ -196,7 +196,7 @@ def _h100(cells):
             yield _call(BS._front_kernel, d, h, False, BS._config(d))
             if tr:
                 yield _call(BS._front_kernel, d, h, True, BS._config(d, True))
-            yield _call(h100_b200style_direct._kernel, d, h, BS._config(d))
+            yield _call(h100_b200style_direct._kernel, d, h, BS._config(d, direct=True))
         else:
             if ev:
                 yield _call(h100_b200style_ss_regtune._kernel, d, h, False, h100_b200style_ss_regtune._config(d, False))
@@ -206,7 +206,7 @@ def _h100(cells):
                 yield _call(h100_b200style_ss._kernel, d, h, True, h100_b200style_ss._config(d, True))
         cfg = BS._output_config(d)
         if ev:
-            yield _call(h100_b200style_static.output_kernel, d, h, cfg)
+            yield _call(h100_b200style_static.output_kernel, d, h, BS._inference_output_config(d))
             yield _call(BS._output_kernel_standard, d, h, cfg)
             if d == 512:
                 yield _call(h100_b200style_reorder.output_kernel, d, h, cfg)
@@ -217,14 +217,14 @@ def _h100(cells):
     # inference planes past BS.SPLIT_PLANES_BYTES (OpenDDE's refiner, D384 at 2976 / 3968 structural tokens): K1 at half the hidden width
     for c, m in infer:
         if c.d in (256, 384) and not c.bidir and any(BS._split_planes(c.ch, n, -(-n // 16) * 16, 1, False) for n in m.lengths):
-            yield _call(h100_b200style_direct._kernel, c.d, c.ch // 2, BS._config(c.d))
+            yield _call(h100_b200style_direct._kernel, c.d, c.ch // 2, BS._config(c.d, direct=True))
 
     # row-padded K1 / K3 (inference, any L): per length of the cell
     for c, m in infer:
         if c.ch in _ROWPAD.get(c.d, ()):
             for n in sorted(m.lengths):
-                yield _call(h100_b200style_direct._kernel, c.d, c.ch, BS._config(c.d, n=n))
-            yield _call(h100_b200style_static.output_kernel, c.d, c.ch, BS._output_config(c.d), True, BS.K3_XBUF.get(c.d, 1))
+                yield _call(h100_b200style_direct._kernel, c.d, c.ch, BS._config(c.d, n=n, direct=True))
+            yield _call(h100_b200style_static.output_kernel, c.d, c.ch, BS._inference_output_config(c.d), True, BS.K3_XBUF.get(c.d, 1))
 
     # wide inference: bidirectional (wide_forward/selection.json, with / without a mask) and single direction D512
     wide = json.loads((T.SOURCES / "wide_forward/selection.json").read_text())

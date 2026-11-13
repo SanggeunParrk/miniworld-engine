@@ -1382,13 +1382,14 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         "anthropic": 3,  # 3 (2026-11-13): the sealed CUDA-13 rows served wherever the driver loads them
         "cueq": 2,
         "cuda:a100_sm80": 3,
-        "cuda:h100_sm90": 5,
+        "cuda:h100_sm90": 6,
     }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64);
     # cuda:h100_sm90 2 (2026-11-12): inference planes past 8 GiB (OpenDDE refiner, d_pair 384 at 2976 / 3968) run K1 + the contraction in two
     # halves of the hidden channels; cuda:h100_sm90 3 (2026-11-12): the training row-dropout scale by the H100 Philox kernel in one launch (the
     # same bits as the torch draw) and the small-L inference K1 / K3 tiles of the TriMul table (trimul_inproj h100_sm90 version 4);
     # cuda:h100_sm90 5 (2026-11-13): deterministic training backward at D256-512 (W_o column sums and the wide LayerNorm dgamma / dbeta by
-    # per-block partials reduced in block order, no atomics)
+    # per-block partials reduced in block order, no atomics); cuda:h100_sm90 6 (2026-11-13): the D256 port's K1 in n128 weight blocks
+    # (schedule 1, eight-slot ring) and its inference K3 with the weights in a ring of their own (k3.cu WSTAGES 3); outputs bitwise unchanged
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
         return _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=False)[1]

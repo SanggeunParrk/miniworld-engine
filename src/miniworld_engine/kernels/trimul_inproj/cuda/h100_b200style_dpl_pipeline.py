@@ -21,7 +21,7 @@ def headers(base):
                 s = s.replace(old, new)
 
             replace(
-                "static constexpr int SMEM_STAGE = NCWG * 8192;",
+                "static constexpr int SMEM_STAGE = NCWG * 2 * STG;",
                 "static constexpr int SMEM_STAGE = NCWG * 12288;",
             )
             replace(
