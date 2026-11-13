@@ -40,6 +40,13 @@ def _ext():
     )
 
 
+def gemm120(a: torch.Tensor, w: torch.Tensor, out: torch.Tensor, bias: torch.Tensor | None = None, cfg: int = 0) -> torch.Tensor:
+    """RTX 5090 only (the sm_120a build, gemm_sm120.cuh): ``out`` (a row-major [M, N] view, any leading dimension) = a [M, K] w [N, K]^T (+ bias),
+    bf16 operands; ``cfg`` the CTA tile (0: 128 x 128, 1: 64 x 128, 2: 64 x 64, 3: 128 x 64)."""
+    _ext().gemm120(a, w, bias, out, cfg)
+    return out
+
+
 def pick_group(S: int, L: int, nh: int, nsm: int) -> int:
     """Samples per CTA (1 .. 4): the fewest CTAs that still fill the card -- a group reads P once for all its samples, and a CTA alone on its SM is request-bound -- i.e. the smallest g with
     ``nh (L / 128) ceil(S / g) <= nsm``, else 2 when even that leaves a second wave (A = 48, 16 x 48: 149 / 458 us at L = 384 / 768 against 171 / 502 us for 4: the smaller group's registers

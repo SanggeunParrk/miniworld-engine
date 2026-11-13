@@ -1007,7 +1007,9 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # cuda:a100_sm80 3 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd: padded W' pitch, next row prefetched; same values) 2.1x faster
     # cuda:h100_sm90 3 (2026-11-12): pair_bias_all on H100 is the fused hoist (head-major contiguous biases, as engine 2.4.4): the
     # inference block no longer copies a permuted bias view per call (L 768 24-block stack 9.8 -> ~3.8 ms)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 3}
+    # cuda:5090_sm120 2 (2026-11-13; 1 = the sm_120a build of the sm_80 path): bf16 inference GEMMs on cuBLASLt at the measured row counts, the
+    # pair bias + softmax on a side stream beside the [v | g] / gate GEMMs, inference compositions without packed weights below 1024 rows
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 3, "cuda:5090_sm120": 2}
 
     def __init__(
         self,

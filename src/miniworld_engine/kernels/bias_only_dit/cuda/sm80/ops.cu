@@ -272,7 +272,54 @@ void delta_planes(torch::Tensor dO, torch::Tensor O, torch::Tensor dd, int64_t A
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+#ifdef MWE_SM120
+#include "gemm_sm120.cuh"
+namespace {
+template <typename T, int BM, int BN, int WM, int WN, int ST>
+void run_gemm120(const T* a, const T* w, const T* b, T* c, int M, int N, int K, long long ldc, cudaStream_t st) {
+  constexpr int smem = g120::smem_bytes<BM, BN, ST>();
+  static_assert(smem <= 101376, "the RTX 5090's 99 KB of shared memory a block");
+  TORCH_CHECK(M % BM == 0 && N % BN == 0 && K % (128 / (int)sizeof(T)) == 0, "gemm120: M, N, K multiples of the tile (", BM, ", ", BN, ", ",
+              128 / (int)sizeof(T), ")");
+  auto k = g120::gemm<T, BM, BN, WM, WN, ST>;
+  C10_CUDA_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  k<<<dim3(N / BN, M / BM), WM * WN * 32, smem, st>>>(a, w, b, c, M, N, K, ldc);
+}
+template <typename T>
+void dispatch_gemm120(const T* a, const T* w, const T* b, T* c, int M, int N, int K, long long ldc, int cfg, cudaStream_t st) {
+  switch (cfg) {
+    case 0: run_gemm120<T, 128, 128, 2, 4, 3>(a, w, b, c, M, N, K, ldc, st); break;
+    case 1: run_gemm120<T, 64, 128, 2, 4, 4>(a, w, b, c, M, N, K, ldc, st); break;
+    case 2: run_gemm120<T, 64, 64, 2, 2, 4>(a, w, b, c, M, N, K, ldc, st); break;
+    case 3: run_gemm120<T, 128, 64, 4, 2, 4>(a, w, b, c, M, N, K, ldc, st); break;
+    default: TORCH_CHECK(false, "gemm120: config 0 .. 3");
+  }
+}
+}  // namespace
+
+// RTX 5090: out (a row-major [M, N] view, any leading dimension) = a [M, K] w [N, K]^T (+ bias [N]); bf16 operands; cfg: the tile
+// (0: 128 x 128, 1: 64 x 128, 2: 64 x 64, 3: 128 x 64)
+void gemm120(torch::Tensor a, torch::Tensor w, c10::optional<torch::Tensor> bias, torch::Tensor out, int64_t cfg) {
+  const at::cuda::CUDAGuard guard(a.device());
+  const int M = a.size(0), K = a.size(1), N = w.size(0);
+  TORCH_CHECK(a.is_contiguous() && w.is_contiguous() && w.size(1) == K && a.scalar_type() == w.scalar_type() && out.scalar_type() == a.scalar_type(),
+              "gemm120: contiguous a [M, K], w [N, K] of one dtype, out of that dtype");
+  TORCH_CHECK(out.dim() == 2 && out.size(0) == M && out.size(1) == N && out.stride(1) == 1, "gemm120: out a row-major [M, N] view");
+  auto st = at::cuda::getCurrentCUDAStream();
+  const long long ldc = out.stride(0);
+  TORCH_CHECK(a.scalar_type() == at::kBFloat16, "gemm120: bf16 operands (the fp32 / TF32 inference GEMMs stay on cuBLAS: bias_only_dit_sm80.GEMM_PICK)");
+  using B = __nv_bfloat16;
+  const B* bp = bias.has_value() ? reinterpret_cast<const B*>(bias->data_ptr<at::BFloat16>()) : nullptr;
+  dispatch_gemm120<B>(reinterpret_cast<const B*>(a.data_ptr<at::BFloat16>()), reinterpret_cast<const B*>(w.data_ptr<at::BFloat16>()), bp,
+                      reinterpret_cast<B*>(out.data_ptr<at::BFloat16>()), M, N, K, ldc, (int)cfg, st);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+#endif
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+#ifdef MWE_SM120
+  m.def("gemm120", &gemm120);
+#endif
   m.def("pv_gate", &pv_gate);
   m.def("pv_gate32", &pv_gate32);
   m.def("dpb", &dpb);
