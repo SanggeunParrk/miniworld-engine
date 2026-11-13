@@ -1405,7 +1405,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         "anthropic": 3,  # 3 (2026-11-13): the sealed CUDA-13 rows served wherever the driver loads them
         "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: trimul_native's sm_80 row native)
         "cueq": 2,
-        "cuda:a100_sm80": 7,  # 7 (2026-11-14): inference contraction bounded by the mask's live extents on the measured L2048 cells (bitwise the same); 6: D64 hidden 128 k1t; 5: k3s; 4: k1w64 / k3w
+        "cuda:a100_sm80": 8,  # 8 (2026-11-14): inference fronts: D256 k1tw (statistics in-kernel), outgoing planes written transposed (A^T B contraction), D64 hidden 64 k1t from L 640; 7: inference contraction bounded by the mask's live extents on the measured L2048 cells (bitwise the same); 6: D64 hidden 128 k1t; 5: k3s; 4: k1w64 / k3w
         "cuda:h100_sm90": 7,
     }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64);
     # cuda:h100_sm90 2 (2026-11-12): inference planes past 8 GiB (OpenDDE refiner, d_pair 384 at 2976 / 3968) run K1 + the contraction in two
@@ -1626,7 +1626,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 3,  # 2026-11-13: the sealed CUDA-13 rows served wherever the driver loads them
         "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: trimul_native's sm_80 row native)
-        "cuda:a100_sm80": 7,  # 7 (2026-11-14): as TriangleMultiplication's 7 (the bounded contraction); 6, 5: as its 6 / 5, 4
+        "cuda:a100_sm80": 8,  # 8 (2026-11-14): as TriangleMultiplication's 8 (D64: transposed planes, k1t); 7: as its 7 (the bounded contraction); 6, 5: as its 6 / 5, 4
         "cuda:h100_sm90": 3,
     }  # 2026-11-10: sm_80 paths; 3: the inference pack read by captures; 4: A100 D64 persistent front (k1w64); cuda:h100_sm90 2
     # (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version
