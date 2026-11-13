@@ -193,10 +193,11 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUt
  asm volatile("griddepcontrol.wait;" ::: "memory");
  // KMB (inference: the key mask [L] bytes the samples share): the key blocks past its last attended key hold P = 0 in every row (the
  // softmax's masked keys after a live max): neither loaded nor multiplied (the same bits; key_len.cuh). The bound is read off the critical
- // path -- the producer after its first issue, the consumers before their first wait -- and is never below the ring depth, so the blocks
- // the producer issued before it knew the bound are consumed too.
+ // path: the producer thread reads it once the ring is full and hands it to the consumers in the barrier area (written before the arrive of
+ // stage KMIN - 1, read after its wait). Never below the ring depth, so the blocks issued before the bound was known are consumed too.
  const int KB0=KB,KMIN=KB0<ST?KB0:ST;
  bool kbound=KMB!=nullptr;
+ int*kb_s=reinterpret_cast<int*>(sm+ST*SB+248);             // (the barriers take at most 96 of the area's 256 bytes)
  const int mtc=mt/CS,citems=H*mtc*ng,cstride=gridDim.x/CS;
  unsigned it=0;
  if(wg==0){
@@ -209,6 +210,7 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUt
        int s=it%ST;if(it>=ST)mbar_wait(empty+s,((it/ST)-1)&1);
        if(PROF){pw+=clock64()-t0;}
        unsigned char*st=sm+s*SB;
+       if(kbound&&kb+1==KMIN){kbound=false;KB=max(KMIN,thread_key_tiles(KMB,L,L,64));*kb_s=KB;}   // before the arrive that releases it
        mbar_arrive_expect_tx(full+s,(WGS+ns)*8192);
        #pragma unroll
        for(int w=0;w<WGS;++w)tma_load_2d(st+w*8192,&mp,full+s,kb*64,head*L+m0+w*64);
@@ -216,13 +218,12 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUt
          if(CS==1)tma_load_2d(st+WGS*8192+j*8192,&mv,full+s,head*DH,(a0+j)*L+kb*64);
          else if((unsigned)(j%CS)==rank)tma_mc(st+WGS*8192+j*8192,&mv,full+s,head*DH,(a0+j)*L+kb*64,(uint16_t)((1u<<CS)-1));
        }
-       if(kbound&&kb+1==KMIN){kbound=false;KB=max(KMIN,thread_key_tiles(KMB,L,L,64));}   // the ring full: then the bound
      }
    }
    if(PROF&&tid==0){pvx_prof[blockIdx.x*8+6]=pw;pvx_prof[blockIdx.x*8+7]=clock64()-pt;}
  }else{
  setmaxnreg_inc<232>();
- if(KMB)KB=max(KMIN,warp_key_tiles(KMB,L,L,64));
+ bool kfirst=KMB!=nullptr;
  const int cw=wg-1;
  long long cw_full=0,cw_mma=0,cw_t0=0;if(PROF)cw_t0=clock64();
  uint32_t gph=0;
@@ -258,6 +259,7 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUt
      long long t0=0;if(PROF)t0=clock64();
      int s=it%ST;mbar_wait(full+s,(it/ST)&1);
      if(PROF)cw_full+=clock64()-t0;
+     if(kfirst&&kb+1==KMIN){kfirst=false;KB=*kb_s;}            // the producer's bound, released with this stage
      uint32_t a_base=smem_u32(sm)+s*SB+cw*8192,b_base=smem_u32(sm)+s*SB+WGS*8192;
      fence_regs(acc0);fence_regs(acc1);
      wgmma_fence();
