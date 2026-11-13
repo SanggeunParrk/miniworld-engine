@@ -81,13 +81,13 @@ import traceback
 import torch
 from torch.utils import _pytree
 
-from miniworld_engine.modules.primitives import BackendUnsupported
+from miniworld_engine.modules.primitives import BackendUnsupported, unpadded_masks
 
 TIMING_MODES = ("graph", "compile+graph", "eager")
 #: Human-managed version of this measurer's meaning (how a step is timed: graph capture, L2 flush, statistics, the TF32 rule): bump it
 #: when a change can alter a speed record, not for refactors. Recorded in ``meta`` with the config's version, the measurement settings and the
 #: environment.
-SPEED_VERSION = "3"
+SPEED_VERSION = "4"  # 4 (2026-11-13): inputs without padding positions (unpadded_masks)
 _FLUSH_BYTES = 256 * 1024 * 1024
 
 
@@ -366,7 +366,8 @@ def run(cfg, out_path: str, *, device: str = "cuda") -> list[dict]:
                         torch._dynamo.reset()
                         torch._dynamo.utils.counters.clear()
                         module = copy.deepcopy(base)
-                        inputs = config.inputs(case, module, device=dev)  # make_inputs with a generator seeded per case
+                        with unpadded_masks():  # timings are of the full length (no padding position)
+                            inputs = config.inputs(case, module, device=dev)  # make_inputs with a generator seeded per case
                         step = make_step(
                             module,
                             inputs,
@@ -398,7 +399,8 @@ def run(cfg, out_path: str, *, device: str = "cuda") -> list[dict]:
                             torch.cuda.synchronize(dev)
                             try:
                                 module = copy.deepcopy(base)
-                                inputs = config.inputs(case, module, device=dev)
+                                with unpadded_masks():
+                                    inputs = config.inputs(case, module, device=dev)
                                 step = make_step(
                                     module,
                                     inputs,

@@ -69,7 +69,7 @@ class PairformerBlock(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,  # 2026-11-13: its sub-modules' anthropic paths (TriAttn folded block + cu129 core prebuilts, Transition folded residual)
         "anthropic:a100_sm80": 3,  # 2026-11-13: the A100 kit stack (its TriMul / TriAttn sub-modules on the kits' sm_80 native rows)
-        "cuda:a100_sm80": 4,
+        "cuda:a100_sm80": 5,  # 5 (2026-11-13): its TriangleAttention's register-resident sm_80 inference core (L >= 512)
         "cuda:h100_sm90": 7,
     }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
     # batched (the cuda AttentionPairBias takes B > 1: no refusal-driven per-sample path)

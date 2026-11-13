@@ -5,6 +5,7 @@
 #include <climits>
 
 #include "attn_fwd_sm80.cuh"
+#include "attn_rf_fwd_sm80.cuh"
 
 #include "attn_bwd_dq_sm80.cuh"
 #include "attn_bwd_dkv_sm80.cuh"
@@ -55,6 +56,43 @@ void launch_back(const a100::F3Params& p, int nsm) {
   const unsigned grid = (unsigned)std::min<size_t>((size_t)nsm, (p.ntile + G::NW - 1) / G::NW);
   a100::f3_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// The register-resident inference core (attn_rf_fwd_sm80.cuh).  Its bias-scaling operand: 1 / scale = log2 e / scl in two bf16 words.
+template <class G>
+void launch_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts) {
+  const at::Tensor fix = at::empty({a100::rf_fix_ints<G>(p.L, z * p.H)}, opts.dtype(at::kInt));   // [count, tiles...] of the recomputation
+  int* fp = fix.data_ptr<int>();
+  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const cudaError_t err = a100::attn_rf_launch<G>(p, z, scl, fp, at::cuda::getCurrentCUDAStream(), nsm);
+  C10_CUDA_CHECK(err);
+}
+
+// The per-sample key tiles (a100::rf_key_tiles) of an inference call's global key mask [Z, L] (bool / uint8, non-zero = live), or an undefined
+// tensor when there is none: the cores then stream every key.
+at::Tensor key_tiles_of(const torch::Tensor& key_mask, int64_t Z, int64_t L, const torch::Tensor& like) {
+  if (!key_mask.defined() || !key_mask.numel()) return at::Tensor();
+  TORCH_CHECK(key_mask.is_cuda() && key_mask.device() == like.device() && (key_mask.scalar_type() == at::kBool || key_mask.scalar_type() == at::kByte) &&
+              key_mask.is_contiguous() && key_mask.numel() == Z * L, "key_mask: bool / uint8 [Z, L] on the device");
+  at::Tensor kt = at::empty({Z}, like.options().dtype(at::kInt));
+  const cudaError_t err = a100::rf_key_tiles(reinterpret_cast<const uint8_t*>(key_mask.data_ptr()), kt.data_ptr<int>(), (int)Z, (int)L, at::cuda::getCurrentCUDAStream());
+  C10_CUDA_CHECK(err);
+  return kt;
+}
+
+// Inference core selection of the fast entries (attn_rf_set): -1 = the measured rule, 0 = the tuned AttnCfg cores, 1 / 2 = an rf geometry (A/B knob).
+int g_rf_mode = -1;
+
+template <bool GATE>
+bool try_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts) {
+  int mode = g_rf_mode;
+  if (mode < 0) mode = 2;               // L >= 512 (the callers' gate): the rf core at every measured cell (A100 80GB, d128 / d256, L 512-2048)
+  if (p.L % 128 != 0) return false;
+  switch (mode) {
+    case 1: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl, opts); return true;   // 2 x 2 warps, 4 rows x 64 queries (A/B)
+    case 2: launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE>>(p, z, scl, opts); return true;   // 4 warps, 2 rows x 128 queries, 4 slots
+    default: return false;
+  }
 }
 
 }  // namespace
@@ -118,6 +156,7 @@ void compact_attention_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, t
   for (const auto& t : {indices, counts})
     TORCH_CHECK(t.device() == q.device() && t.scalar_type() == at::kInt && t.is_contiguous(), "compact_attention: int32 scratch");
   TORCH_CHECK(indices.numel() == Z * L && counts.numel() == Z, "compact_attention: scratch sizes");
+  const at::Tensor kt = key_tiles_of(mask, Z, L, q);   // the dense branch streams keys up to each sample's last live key
   const auto stream = at::cuda::getCurrentCUDAStream();
   compact_mask_kernel<<<Z, 32, 0, stream>>>(reinterpret_cast<const uint8_t*>(mask.data_ptr()), indices.data_ptr<int>(), counts.data_ptr<int>(), L);
   compact_bias_kernel<<<dim3((L + 255) / 256, L, Z * H), 256, 0, stream>>>(
@@ -141,7 +180,10 @@ void compact_attention_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, t
     p.aout = reinterpret_cast<__nv_bfloat16*>(out.data_ptr()); p.ldao = H * 32;
     p.dense_bias = reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr());
     if (FAST && L >= 512 && H <= 8) {
-      launch_density<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>, true>(p, Z);
+      a100::AttnParams d = p;   // the dense branch: the rf core on the unpermuted bias where the batch is dense (device-side count)
+      d.bias = p.dense_bias;
+      d.key_tiles = kt.data_ptr<int>();
+      if (!try_attn_rf<true>(d, (int)Z, scl, q.options())) launch_density<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>, true>(p, Z);
       launch_density<a100::AttnCfg<2, 2, 64, 3, true, true, 64>, false>(p, Z);
       return;
     }
@@ -157,7 +199,10 @@ void compact_attention_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, t
   } else {
     if (FAST && L >= 512) {
       p.dense_bias = reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr());
-      launch_density<a100::AttnCfg<2, 2, 64, 3, false, false, 64, true>, true>(p, Z);
+      a100::AttnParams d = p;   // the dense branch: the rf core on the unpermuted bias where the batch is dense (device-side count)
+      d.bias = p.dense_bias;
+      d.key_tiles = kt.data_ptr<int>();
+      if (!try_attn_rf<false>(d, (int)Z, scl, q.options())) launch_density<a100::AttnCfg<2, 2, 64, 3, false, false, 64, true>, true>(p, Z);
       launch_density<a100::AttnCfg<2, 2, 48, 2, false, true>, false>(p, Z);
       return;
     }
@@ -180,7 +225,7 @@ void compact_attention_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, t
 // per CTA, `bn` keys per tile, `minb` CTAs per SM the registers are bounded for.
 template <int TUNED>
 void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor out, torch::Tensor lse, int64_t L, int64_t H,
-              int64_t Z, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldo, double scl, int64_t rows, int64_t bn, int64_t minb) {
+              int64_t Z, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldo, double scl, int64_t rows, int64_t bn, int64_t minb, torch::Tensor key_mask) {
   for (auto* t : {&q, &k, &v, &bias, &out}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kBFloat16, "attn_fwd: bf16 CUDA tensors");
   TORCH_CHECK(bias.is_contiguous() && bias.numel() == Z * H * L * L, "attn_fwd: bias [z, H, L, L] contiguous");
   TORCH_CHECK(L % a100::TA_BM == 0 && L >= a100::TA_BM, "attn_fwd: L must be a multiple of 128");
@@ -199,11 +244,14 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
   p.out = reinterpret_cast<__nv_bfloat16*>(out.data_ptr()); p.lse = lse.numel() ? lse.data_ptr<float>() : nullptr;
   p.ldq = ldq; p.ldk = ldk; p.ldv = ldv; p.ldo = ldo; p.L = (int)L; p.H = (int)H; p.scl = (float)scl;
   TORCH_CHECK(L % bn == 0, "attn_fwd: L must be a multiple of bn");
+  at::Tensor kt;   // inference: stream keys only up to each sample's last live key
+  if (TUNED == 3 && !lse.numel() && (kt = key_tiles_of(key_mask, Z, L, q)).defined()) p.key_tiles = kt.data_ptr<int>();
   const int64_t cfg = rows * 10000 + bn * 10 + minb;
   if (TUNED == 4 && rows == 2 && bn == 32 && minb == 2) {                  // training forward: the fixed-shift core keeps the log-sum-exp
     launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, false, false, 128, true>>(p, (int)Z);
     return;
   }
+  if (TUNED == 3 && !lse.numel() && L >= 512 && rows == 2 && bn == 32 && minb == 2 && try_attn_rf<false>(p, (int)Z, scl, q.options())) return;
   if (TUNED == 3 && !lse.numel() && L >= 512 && rows == 2 && bn == 32 && minb == 2) {
     launch_attn_fwd<a100::AttnCfg<2, 2, 64, 3, false, false, 64, true>>(p, (int)Z);
     return;
@@ -228,7 +276,7 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
 // (token-major view, row stride ldgate); `out` (the plain attention output, needed by the backward) may be an empty tensor.  The default schedule (2 rows, 32 keys, 2 CTAs per SM).
 template <int TUNED>
 void attn_fwd_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor out, torch::Tensor lse, torch::Tensor gate, torch::Tensor aout, int64_t L,
-                   int64_t H, int64_t Z, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldo, int64_t ldgate, int64_t ldao, double scl) {
+                   int64_t H, int64_t Z, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldo, int64_t ldgate, int64_t ldao, double scl, torch::Tensor key_mask) {
   for (auto* t : {&q, &k, &v, &bias, &gate, &aout}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kBFloat16, "attn_fwd_gate: bf16 CUDA tensors");
   TORCH_CHECK(bias.is_contiguous() && bias.numel() == Z * H * L * L, "attn_fwd_gate: bias [z, H, L, L] contiguous");
   TORCH_CHECK(L % a100::TA_BM == 0 && L >= a100::TA_BM && L % 32 == 0, "attn_fwd_gate: L must be a multiple of 128");
@@ -247,10 +295,13 @@ void attn_fwd_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
   p.out = out.numel() ? reinterpret_cast<__nv_bfloat16*>(out.data_ptr()) : nullptr; p.lse = lse.numel() ? lse.data_ptr<float>() : nullptr;
   p.ldq = ldq; p.ldk = ldk; p.ldv = ldv; p.ldo = ldo; p.L = (int)L; p.H = (int)H; p.scl = (float)scl;
   p.gate = reinterpret_cast<const __nv_bfloat16*>(gate.data_ptr()); p.aout = reinterpret_cast<__nv_bfloat16*>(aout.data_ptr()); p.ldgate = ldgate; p.ldao = ldao;
+  at::Tensor kt;   // inference: stream keys only up to each sample's last live key
+  if (TUNED == 3 && !lse.numel() && !out.numel() && (kt = key_tiles_of(key_mask, Z, L, q)).defined()) p.key_tiles = kt.data_ptr<int>();
   if (TUNED == 4) {
     launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>>(p, (int)Z);   // training forward (out / lse kept): the fixed-shift gated core
     return;
   }
+  if (TUNED == 3 && !lse.numel() && !out.numel() && L >= 512 && try_attn_rf<true>(p, (int)Z, scl, q.options())) return;
   if (TUNED == 3 && !lse.numel() && !out.numel() && L >= 512 && (L < 768 || H <= 8))
     launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>>(p, (int)Z);
   else if (TUNED >= 2 && !lse.numel() && !out.numel() && L >= 256)
@@ -634,6 +685,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     compact_attention_impl<false, true>(q, k, v, bias, mask, out, indices, counts, cbias, scl, torch::Tensor());
   });
   m.def("compact_attention_gate_fast", &compact_attention_impl<true, true>);
+  m.def("attn_rf_set", [](int64_t mode) { g_rf_mode = (int)mode; });
   m.def("attn_fwd", &attn_fwd<false>);
   m.def("attn_fwd_tuned", &attn_fwd<true>);
   m.def("attn_fwd_internal", &attn_fwd<2>);
