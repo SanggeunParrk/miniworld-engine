@@ -34,6 +34,13 @@ def _cuda_arch(device: torch.device) -> str | None:
     return None
 
 
+def _eval_sm120(weight: torch.Tensor, x: torch.Tensor) -> bool:
+    """The ``"cuda"`` backend's RTX 5090 inference launch (``PairEmbedGeom`` / ``PairEmbedCA``): no gradient to the weight, an sm_120 device."""
+    from miniworld_engine.kernels._sm120 import is_sm120
+
+    return not (torch.is_grad_enabled() and weight.requires_grad) and is_sm120(x.device)
+
+
 def _first(*reasons: str | None) -> str | None:
     return next((r for r in reasons if r is not None), None)
 
@@ -376,6 +383,11 @@ class PairEmbedGeom(BackendModule):
         )
 
     def _forward_cuda(self, bb, ca_mask, has_cb, mask, residue_idx, chains):
+        if _eval_sm120(self.weight, bb):  # RTX 5090 inference: one launch from the module's own inputs (no per-call preparation kernels)
+            from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_geom_eval_sm120
+
+            eps = -1.0 if self.ln_eps is None else float(self.ln_eps)
+            return pair_embed_geom_eval_sm120(self.weight, bb, ca_mask, has_cb, mask, residue_idx, chains, eps)
         from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_geom_cuda
 
         return pair_embed_geom_cuda(*self._prepared(bb, ca_mask, has_cb, mask, residue_idx, chains))
@@ -497,6 +509,14 @@ class PairEmbedCA(BackendModule):
         )
 
     def _forward_cuda(self, ca, mask, residue_idx=None):
+        if _eval_sm120(self.weight, ca):  # RTX 5090 inference: one launch from the module's own inputs (no per-call preparation kernels)
+            from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_ca_eval_sm120
+
+            if residue_idx is None:
+                b, n = mask.shape
+                residue_idx = torch.arange(1, n + 1, device=ca.device, dtype=torch.int32).expand(b, n).contiguous()
+            eps = -1.0 if self.ln_eps is None else float(self.ln_eps)
+            return pair_embed_ca_eval_sm120(self.weight, ca, mask, residue_idx, eps)
         from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_ca_cuda
 
         return pair_embed_ca_cuda(*self._prepared(ca, mask, residue_idx))
