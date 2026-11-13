@@ -132,7 +132,9 @@ void launch_k1w64(const a100::K1wParams& p) {
     C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, a100::k1w64_kernel<HS>, 256, a100::K1w64<HS>::SMEM));
     grid_cap = std::max(1, per_sm) * num_sms();
   }
-  a100::k1w64_kernel<HS><<<std::min(p.T / 128, grid_cap), 256, a100::K1w64<HS>::SMEM, stream()>>>(p);
+  // G column groups of CTAs (K1w64): the resident CTAs split evenly between the groups, each group walks every token tile
+  constexpr int G = a100::K1w64<HS>::G;
+  a100::k1w64_kernel<HS><<<G * std::min(p.T / 128, std::max(1, grid_cap / G)), 256, a100::K1w64<HS>::SMEM, stream()>>>(p);
 }
 
 // z [T, D], w1 [4 Hs, D], vs / vb [4 Hs], st [T, 2], mask [L] uint8 or empty -> planes [2 Hs, T].  fuse (bf16, D <= 128): st is an OUTPUT, the kernel computes (mean, rstd) of the rows

@@ -219,7 +219,11 @@ namespace a100 {
 template <int HS>
 struct K1w64 {
   static constexpr int D = 64, NCOL = 4 * HS, NTN = NCOL / 128, NTHR = 256;
-  static constexpr int W_KT = NCOL * 64;                 // bytes of one 32-wide k-tile of the packed weights (wkmaj rows)
+  // G column groups (hidden 128: two): a CTA keeps the NCOLG = 256 packed rows of its group resident and does that group's NTNG = 2 n-tiles of every token tile it
+  // walks, so two CTAs fit an SM at either hidden width (16 warps; one 512-row CTA per SM ran at 12 % occupancy, latency-bound).  The groups of a token tile start
+  // together and walk the same tiles: the second read of an input tile is an L2 hit.  The same MMAs in the same k order per plane word: bit-identical planes.
+  static constexpr int G = HS / 64, NCOLG = NCOL / G, NTNG = NTN / G;
+  static constexpr int W_KT = NCOLG * 64;                // bytes of one 32-wide k-tile of the packed weights (wkmaj rows)
   static constexpr int Z_KT = 128 * 64;                  // bytes of one k-tile of a 128-token input tile
   static constexpr int ZOFF = 2 * W_KT, ZBUF = 2 * Z_KT;  // two input buffers after the weights
   static constexpr int STOFF = ZOFF + 2 * ZBUF;           // (mean, rstd) of the current tile's 128 tokens
@@ -227,12 +231,13 @@ struct K1w64 {
 };
 
 template <int HS>
-__global__ void __launch_bounds__(256, HS == 64 ? 2 : 1) k1w64_kernel(const K1wParams p) {
+__global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
   using C = K1w64<HS>;
   extern __shared__ __align__(128) uint8_t smem[];
   const uint32_t s0 = smem_u32(smem);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, wm = warp >> 1, wn = warp & 1, g8 = lane >> 2, q = lane & 3;
   const int ntiles = p.T >> 7;
+  const int grp = (int)blockIdx.x % C::G, cta = (int)blockIdx.x / C::G, step = (int)gridDim.x / C::G;   // column group; the CTA's first token tile and its stride
   // input tile loader: 1024 granules (128 rows x 2 k-tiles x 4), 4 per thread
   auto issue_z = [&](int tile, int buf) {
     const __nv_bfloat16* src = p.z + (size_t)tile * 128 * C::D;
@@ -244,11 +249,11 @@ __global__ void __launch_bounds__(256, HS == 64 ? 2 : 1) k1w64_kernel(const K1wP
   };
   // ---- the packed weights (once) + the first tile
 #pragma unroll
-  for (int e = 0; e < C::NCOL * 8 / C::NTHR; ++e) {
+  for (int e = 0; e < C::NCOLG * 8 / C::NTHR; ++e) {
     const int g = tid + C::NTHR * e, row = g >> 3, kt = (g >> 2) & 1, c = g & 3;
-    cp_async16(s0 + kt * C::W_KT + wkmaj(row, c), p.w1 + (size_t)row * C::D + kt * 32 + c * 8);
+    cp_async16(s0 + kt * C::W_KT + wkmaj(row, c), p.w1 + (size_t)(grp * C::NCOLG + row) * C::D + kt * 32 + c * 8);
   }
-  int tile = blockIdx.x;
+  int tile = cta;
   if (tile < ntiles) issue_z(tile, 0);
   cp_async_commit();
   // lane-constant fragment offsets: A (RP token permutation, as WTile) and B, per k16 step kk (k-tile kk >> 1)
@@ -260,10 +265,10 @@ __global__ void __launch_bounds__(256, HS == 64 ? 2 : 1) k1w64_kernel(const K1wP
     boff[kk] = (kk >> 1) * C::W_KT + wkmaj(64 * wn + r8 + (mi >> 1) * 8, 2 * (kk & 1) + (mi & 1));        // + 1024 per n16, + 8192 per n-tile
   }
 #pragma unroll 1
-  for (int buf = 0; tile < ntiles; tile += gridDim.x, buf ^= 1) {
+  for (int buf = 0; tile < ntiles; tile += step, buf ^= 1) {
     const int t0 = tile * 128;
     // the next tile into the other buffer (its readers finished before the previous iteration's second barrier)
-    if (tile + (int)gridDim.x < ntiles) issue_z(tile + gridDim.x, buf ^ 1);
+    if (tile + step < ntiles) issue_z(tile + step, buf ^ 1);
     cp_async_commit();
     cp_async_wait<1>();
     __syncthreads();
@@ -290,7 +295,7 @@ __global__ void __launch_bounds__(256, HS == 64 ? 2 : 1) k1w64_kernel(const K1wP
         }
       const float rstd = rsqrtf(q2 * (1.f / C::D) + p.eps);
       sts64(s0 + C::STOFF + tid * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
-      p.stw[t0 + tid] = make_float2(mean, rstd);
+      if (grp == 0) p.stw[t0 + tid] = make_float2(mean, rstd);
     }
     uint32_t af[2][4][4];
 #pragma unroll
@@ -315,7 +320,8 @@ __global__ void __launch_bounds__(256, HS == 64 ? 2 : 1) k1w64_kernel(const K1wP
         mk[mt][rh] = m;
       }
 #pragma unroll 1
-    for (int nt = 0; nt < C::NTN; ++nt) {
+    for (int nt = 0; nt < C::NTNG; ++nt) {
+      const int gnt = grp * C::NTNG + nt;                 // the n-tile among all NTN
       float acc[2][8][4];
 #pragma unroll
       for (int mt = 0; mt < 2; ++mt)
@@ -337,10 +343,10 @@ __global__ void __launch_bounds__(256, HS == 64 ? 2 : 1) k1w64_kernel(const K1wP
         }
 #pragma unroll
       for (int np = 0; np < 4; ++np) {
-        const int R = nt * 128 + 64 * wn + 16 * np + 2 * q;
+        const int R = gnt * 128 + 64 * wn + 16 * np + 2 * q;
         const float2 sg = __ldg(reinterpret_cast<const float2*>(p.vs + R)), sp = __ldg(reinterpret_cast<const float2*>(p.vs + R + 8));
         const float2 bg = __ldg(reinterpret_cast<const float2*>(p.vb + R)), bp = __ldg(reinterpret_cast<const float2*>(p.vb + R + 8));
-        const int ch = nt * 64 + 32 * wn + 8 * np + 2 * q;
+        const int ch = gnt * 64 + 32 * wn + 8 * np + 2 * q;
 #pragma unroll
         for (int mt = 0; mt < 2; ++mt) {
           float u[2][2];
