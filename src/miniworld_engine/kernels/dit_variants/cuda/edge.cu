@@ -768,15 +768,18 @@ __global__ void __launch_bounds__(256) tail_bias_bwd_k(const ZT* __restrict__ Z,
   }
 }
 
-// info = [t0, s, n_real] of the tail from the valid-key bytes KM [n] (real atoms first; nullptr: n0 real atoms): one CTA, integer sums
-__global__ void tail_info_k(const bool* __restrict__ KM, long n, long n0, int qblock, int64_t* __restrict__ INFO) {
-  __shared__ unsigned long long tot;
-  if (threadIdx.x == 0) tot = 0ULL;
+// info = [t0, s, n_real] of the tail from the valid-key bytes KM [n] (real atoms first; nullptr: n0 real atoms): one CTA of 1024 threads,
+// integer counts reduced per warp (shuffles), one shared atomic per warp
+__global__ void __launch_bounds__(1024) tail_info_k(const bool* __restrict__ KM, long n, long n0, int qblock, int64_t* __restrict__ INFO) {
+  __shared__ unsigned int tot;
+  if (threadIdx.x == 0) tot = 0u;
   __syncthreads();
-  unsigned long long c = 0ULL;
+  unsigned int c = 0u;
   if (KM != nullptr)
-    for (long i = threadIdx.x; i < n; i += blockDim.x) c += KM[i] ? 1ULL : 0ULL;
-  atomicAdd(&tot, c);
+    for (long i = threadIdx.x; i < n; i += blockDim.x) c += KM[i] ? 1u : 0u;
+#pragma unroll
+  for (int o = 16; o; o >>= 1) c += __shfl_xor_sync(0xffffffffu, c, o);
+  if (threadIdx.x % 32 == 0) atomicAdd(&tot, c);
   __syncthreads();
   if (threadIdx.x == 0) {
     const long nreal = KM != nullptr ? (long)tot : n0;
