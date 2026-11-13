@@ -75,10 +75,9 @@ __global__ void __launch_bounds__(256, 2) pair_bias_fwd80_k(const bf* __restrict
   const int ntj = LP / 128;
   const long ntiles = (long)LP * ntj;
   const uint32_t sbase = su32_80(smem);
-  // the tiles past the last attended key (a padded tail) hold masked keys only: warp 0 takes the bound from the mask (key_len.cuh; 0: no key
-  // attended, every tile masked) while the first tile loads, every thread reads it after the loop's first barrier; from then on those tiles
-  // are neither loaded nor computed, the stores write them as neg (the same bits). The first tile loads unbounded.
-  __shared__ int klen_s;
+  // the tiles past the last attended key (a padded tail) hold masked keys only: every warp takes the bound from the mask itself (key_len.cuh;
+  // 0: no key attended, every tile masked) while the first tile loads (no shared memory: the block's footprint is unchanged); from tile 1 on
+  // those tiles are neither loaded nor computed, the stores write them as neg (the same bits). The first tile loads unbounded.
   int kbound = LP;
   // tile n of this block: its query row, first key, number of real keys in it (0 for a padded query row)
   auto tile_of = [&](long n, int& i, int& j0, int& rows) -> bool {
@@ -123,15 +122,12 @@ __global__ void __launch_bounds__(256, 2) pair_bias_fwd80_k(const bf* __restrict
   float sw0[NT8], sw1[NT8];
   issue(0);                                                                 // the first tile is on its way while Wf's fragments load
   wf_frags80<NT8, NH>(W, b, sw0, sw1);
-  if (warp == 0) {
-    const int kl = MASK != nullptr ? warp_key_len(reinterpret_cast<const uint8_t*>(MASK), L) : LP;
-    if (lane == 0) klen_s = kl;
-  }
+  const int kl = MASK != nullptr ? warp_key_len(reinterpret_cast<const uint8_t*>(MASK), L) : LP;
   for (long n = 0;; ++n) {
     int i = 0, j0 = 0, rows = 0;
     cp_wait80<0>();                                                         // tile n has landed
     __syncthreads();                                                        // ... for every thread; the staged output of tile n - 1 is complete; stage (n + 1) % 2 is free
-    if (n == 0) kbound = klen_s;
+    if (n == 0) kbound = kl;
     const bool live = tile_of(n, i, j0, rows);
     if (live) issue(n + 1);
     const int rb = warp * 16;
