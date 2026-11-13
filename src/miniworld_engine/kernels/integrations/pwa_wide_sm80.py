@@ -75,6 +75,16 @@ def _gemm_sm120():
     return gemm_sm120
 
 
+def _mm_sm120(a: torch.Tensor, w: torch.Tensor, c: torch.Tensor | None = None) -> torch.Tensor:
+    """a w^T (+ c) on the RTX 5090: the 256 x 128 CUTLASS tile (cuBLASLt's pick runs a WMMA kernel there at 128 tokens and trails it 5-30 % past)."""
+    return _gemm_sm120().mm(a, w, False, True, 2, c)
+
+
+def _gcol(vg: torch.Tensor) -> int:
+    """The gate's first column in ``vg``: HC in [v | g], 0 in the RTX 5090's g alone (``gemm_sm120.vg_head_major``)."""
+    return HC if vg.shape[1] == 2 * HC else 0
+
+
 def _lt():
     # the TriangleAttention family's host-only cublasLt glue (no device code: the same build serves every card)
     from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _lt as lt
@@ -137,20 +147,24 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
         main, side = torch.cuda.current_stream(), _side_stream(msa.device)
         side.wait_stream(main)
         with torch.cuda.stream(side):
-            w = e.softmax_keys(e.pair_logits(zf, lnz_w, lnz_b, wb, eps_z, 0), key, L)
+            w = e.softmax_keys(e.pair_logits(zf, lnz_w, lnz_b, wb, eps_z, 3 if _sm120() else 0), key, L)
         w.record_stream(main)
     mf = msa[0].reshape(S * L, D_MSA)
     y, mmean, mrstd = g.ln_fwd(mf, lnm_w, lnm_b, eps_m, L, False)
-    vg = _lt().lt_mm(y, wvg, None, 0, False, None, None)  # [S L, 512] = [v | g] (cublasLt, the timed algorithm)
+    if _sm120():  # the RTX 5090: one CUTLASS GEMM stores v head-major and g natural ("vg" is then g alone: its gate column 0)
+        v_hm, vg = _gemm_sm120().vg_head_major(y, wvg, S, L)
+    else:
+        vg = _lt().lt_mm(y, wvg, None, 0, False, None, None)  # [S L, 512] = [v | g] (cublasLt, the timed algorithm)
     if not save:
         main.wait_stream(side)  # w joins before the contraction
     u = torch.empty(S * L, HC, device=msa.device, dtype=torch.bfloat16)
-    v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
-    e.to_hm(vg, v_hm, S, L)
+    if not _sm120():
+        v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
+        e.to_hm(vg, v_hm, S, L)
     o_hm = _gemm_sm120().contract(w, v_hm) if _sm120() else torch.bmm(w, v_hm)
-    e.gate_fwd(o_hm, vg, HC, u, S, L)
+    e.gate_fwd(o_hm, vg, _gcol(vg), u, S, L)
     if keep is None:  # m + u Wo^T in one cublasLt call (D != C: no copy of m into the output first)
-        out = _lt().lt_mm(u, wo, mf, 0, False, None, None)
+        out = _mm_sm120(u, wo, mf) if _sm120() else _lt().lt_mm(u, wo, mf, 0, False, None, None)
     else:
         out = torch.addcmul(
             mf.view(S, L, D_MSA), torch.mm(u, wo.t()).view(S, L, D_MSA), keep * dscale
@@ -173,7 +187,8 @@ def _backward(dy, msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, saved):
     del dt, u
     do_hm = torch.empty_like(o_hm)
     dvg = torch.empty(S * L, 2 * HC, device=msa.device, dtype=torch.bfloat16)  # [dv | dg]
-    e.gate_bwd(du, vg, HC, o_hm, do_hm, dvg, S, L)
+    gc = _gcol(vg)
+    e.gate_bwd(du, vg, gc, o_hm, do_hm, dvg if gc else dvg[:, HC:], S, L)  # dg into [dv | dg]'s g columns (the gate's column in vg: HC, or 0 in g alone)
     del du
     if _sm120():  # the RTX 5090's CUTLASS GEMMs (cuBLAS picks a WMMA kernel at half the rate for L 128..640 there)
         e.from_hm(_gemm_sm120().contract(w, do_hm, True), dvg, S, L)

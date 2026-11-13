@@ -86,7 +86,7 @@ def prebuild_sm120(rows_opm: bool = True, rows_pwa: bool = True, rows_chai: bool
 
     loaders = []
     if rows_opm:
-        loaders += [opm.ext, ogemm_sm80.ext, mask_count_ballot_sm80._ext, mask_epilogue_sm80._ext]
+        loaders += [opm.ext, ogemm_sm80.ext, mask_count_ballot_sm80._ext, mask_epilogue_sm80._ext, gemm_sm120.ext]
     if rows_chai:
         loaders += [chai_sm80.ext, ogemm_sm80.ext]
     if rows_pwa:

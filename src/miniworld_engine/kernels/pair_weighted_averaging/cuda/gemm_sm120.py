@@ -69,3 +69,21 @@ def weight_grad(d: torch.Tensor, v: torch.Tensor, cfg: int | None = None) -> tor
     out = torch.empty((d.shape[0], d.shape[1], d.shape[1]), dtype=torch.float32, device=d.device)
     ext().weight_grad(d, v, out, cfg)
     return out
+
+
+def mm(a: torch.Tensor, b: torch.Tensor, trans_a: bool, trans_b: bool, cfg: int = 0, c: torch.Tensor | None = None) -> torch.Tensor:
+    """op(a) @ op(b) (+ c, fp32 sum rounded once), row-major bf16 2-D -> bf16 [M, N]."""
+    m = a.shape[1] if trans_a else a.shape[0]
+    n = b.shape[0] if trans_b else b.shape[1]
+    out = a.new_empty((m, n))
+    ext().mm(a, b, a.new_empty((0,)) if c is None else c, out, trans_a, trans_b, cfg)
+    return out
+
+
+def vg_head_major(y: torch.Tensor, wvg: torch.Tensor, depth: int, length: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The BIG width's [v | g] = y [Wv; Wg]^T (y [S L, 256], wvg [512, 256]) -> (v head-major [8, L, S 32], g [S L, 256]): one GEMM whose
+    epilogue stores v head-major (no to_hm pass)."""
+    rows = depth * length
+    flat = y.new_empty((2 * rows * 256,))
+    ext().vg_head_major(y, wvg, flat, depth, length)
+    return flat[: rows * 256].view(8, length, depth * 32), flat[rows * 256 :].view(rows, 256)

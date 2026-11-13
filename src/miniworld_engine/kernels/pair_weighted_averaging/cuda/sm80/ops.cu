@@ -81,8 +81,8 @@ template <int D, int C, bool ST> void launch_ln_v(const pwa80::LnVParams& p, cud
 }
 
 #ifdef MWE_SM120
-template <int D, int C> constexpr int go_warps() {                           // 99 KiB: the widest tile (8, 4 or 2 warps of 16 rows) that fits
-  return pwa80::GoCfg<D, C, 8>::SMEM <= MWE_SMEM_MAX ? 8 : (pwa80::GoCfg<D, C, 4>::SMEM <= MWE_SMEM_MAX ? 4 : 2);
+template <int D, int C> constexpr int go_warps() {                           // 99 KiB: the widest tile (8, 4, 3 or 2 warps of 16 rows) that fits
+  return pwa80::GoCfg<D, C, 8>::SMEM <= MWE_SMEM_MAX ? 8 : pwa80::GoCfg<D, C, 4>::SMEM <= MWE_SMEM_MAX ? 4 : pwa80::GoCfg<D, C, 3>::SMEM <= MWE_SMEM_MAX ? 3 : 2;
 }
 #endif
 template <int D, int C> void launch_gate_out(const pwa80::GateOutParams& p, cudaStream_t st) {
