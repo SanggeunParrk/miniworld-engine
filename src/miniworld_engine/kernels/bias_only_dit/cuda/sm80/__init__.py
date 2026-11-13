@@ -40,11 +40,23 @@ def _ext():
     )
 
 
-def gemm120(a: torch.Tensor, w: torch.Tensor, out: torch.Tensor, bias: torch.Tensor | None = None, cfg: int = 0) -> torch.Tensor:
-    """RTX 5090 only (the sm_120a build, gemm_sm120.cuh): ``out`` (a row-major [M, N] view, any leading dimension) = a [M, K] w [N, K]^T (+ bias),
-    bf16 operands; ``cfg`` the CTA tile (0: 128 x 128, 1: 64 x 128, 2: 64 x 64, 3: 128 x 64)."""
-    _ext().gemm120(a, w, bias, out, cfg)
+#: gemm120's epilogues (gemm_sm120.cuh)
+EPI_PLAIN, EPI_GATERES, EPI_ADALN, EPI_SWIGLU = 0, 1, 2, 3
+
+
+def gemm120(epi: int, a: torch.Tensor, w1: torch.Tensor, out: torch.Tensor, *, w2=None, bias=None, r=None, g=None, x=None, xst=None, sb=None, cfg: int = 0):
+    """RTX 5090 only (the sm_120a build, gemm_sm120.cuh): ``out`` = the epilogue ``epi`` of a [M, K] [w1; w2]^T, bf16 operands or fp32 (TF32,
+    operands rounded to nearest): PLAIN (+ bias), GATERES (r + sigmoid(g) acc), ADALN (sigmoid(S + sb) LN(x) + B with x's row statistics
+    ``xst``), SWIGLU (silu(a) b); ``cfg`` the CTA tile (0: 128 x 128, 1: 64 x 128, 2: 64 x 64, 3: 128 x 64, 4: 32 x 128)."""
+    _ext().gemm120(epi, a, w1, w2, out, bias, r, g, x, xst, sb, cfg)
     return out
+
+
+def row_stats120(x: torch.Tensor, eps: float) -> torch.Tensor:
+    """RTX 5090 only: the (mean, rstd) [M, 2] fp32 of the rows of x [M, 768] (the AdaLN's LayerNorm, no affine)."""
+    st = torch.empty(x.shape[0], 2, device=x.device, dtype=torch.float32)
+    _ext().row_stats120(x, st, float(eps))
+    return st
 
 
 def pick_group(S: int, L: int, nh: int, nsm: int) -> int:

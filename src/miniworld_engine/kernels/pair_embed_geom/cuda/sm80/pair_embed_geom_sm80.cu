@@ -783,123 +783,6 @@ pg120_fwd_ca_blk(const __nv_bfloat16* __restrict__ tbl, const float* __restrict_
   }
 }
 
-// The decoder: pg_fwd_ca's half-warp schedule (two pairs a warp, 16 lanes x 16 channels a pair, for the pair and its LayerNorm alike) with each
-// lane's channels laid out so that a store instruction writes 256 contiguous bytes per half-warp (channels 8 l .. 8 l + 7 and 128 + 8 l .. 128 +
-// 8 l + 7 of lane l of the half; the H100 kernel's lane holds 16 adjacent channels, each store half-filling 32-byte sectors), the bin inputs of
-// the next item loaded ahead. The LayerNorm sums run over a different lane order than pg_fwd_ca's (the same fp32 statistics, other roundings).
-template <bool CS, typename IdxT>
-__global__ void __launch_bounds__(GT_THREADS, GT_CPS)
-pg120_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const IdxT* idx, const float* dlim, __nv_bfloat16* out, uint4* codes,
-             int B, int n, int nd, int ln, float eps, int jp) {
-  __shared__ float dlim_s[32];
-  const int nwb = blockDim.x >> 5;
-  if (threadIdx.x < 32) dlim_s[threadIdx.x] = threadIdx.x < nd ? dlim[threadIdx.x] : 0.f;
-  __syncthreads();
-  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, hh = lane >> 4, cc = (lane & 15) * 8;
-  const int nch = (n + jp - 1) / jp;
-  const long long total = (long long)B * n * nch, stride = (long long)gridDim.x * nwb;
-  // the bin inputs of an item (this lane's pair), loaded one item ahead: their global-load latency overlaps the previous item's stores
-  struct In { int row, j0, jend, s; float dx, dy, dz; bool live; };
-  auto load_in = [&](long long item, In& r) {
-    r.live = false;
-    if (item >= total) return;
-    r.row = (int)(item / nch);
-    r.j0 = (int)(item - (long long)r.row * nch) * jp;
-    r.jend = min(n, r.j0 + jp);
-    const int b = r.row / n, i = r.row % n, j = r.j0 + lane;
-    if (j < r.jend) {
-      const float* pi = ca + (size_t)r.row * 3;
-      const float* pj = ca + ((size_t)b * n + j) * 3;
-      r.dx = pi[0] - pj[0]; r.dy = pi[1] - pj[1]; r.dz = pi[2] - pj[2];
-      r.s = (int)max(min((long long)idx[b * n + i] - (long long)idx[b * n + j], 1LL << 20), -(1LL << 20));   // clamped to [0, 126] below
-      r.live = mask[b * n + i] && mask[b * n + j];
-    }
-  };
-  In cur, nxt;
-  load_in((long long)blockIdx.x * nwb + warp, cur);
-  for (long long item = (long long)blockIdx.x * nwb + warp; item < total; item += stride) {
-    const int row = cur.row, j0 = cur.j0, jend = cur.jend, j = j0 + lane;
-    uint32_t w0 = MASKED;
-    if (cur.live) {
-      const float d = sqrtf(cur.dx * cur.dx + cur.dy * cur.dy + cur.dz * cur.dz);
-      w0 = (uint32_t)min(max(cur.s + 63, 0), 126) | ((uint32_t)bucket(d, dlim_s, nd) << 8);
-    }
-    load_in(item + stride, nxt);
-    __nv_bfloat16* orow = out + (size_t)row * n * C;
-    if (codes != nullptr && j < jend) codes[(size_t)row * n + j] = make_uint4(w0 ^ MASKED, 0u, 0u, 0u);
-    const int cnt = jend - j0;
-    for (int t0 = 0; t0 < cnt; t0 += 2 * HP) {
-      float x[HP][16];
-#pragma unroll
-      for (int u = 0; u < HP; u++) {
-        const uint32_t p0 = __shfl_sync(0xffffffffu, w0, t0 + 2 * u + hh);   // < 32; a lane past the chunk holds MASKED
-#pragma unroll
-        for (int e = 0; e < 16; e++) x[u][e] = 0.f;
-        if (!(p0 & MASKED)) {
-          auto add = [&](int r) {
-#pragma unroll
-            for (int k = 0; k < 2; k++) {
-              const uint4 v = trow<true>(tbl, r, cc + 128 * k);
-              float* y = x[u] + 8 * k;
-              y[0] += bf_lo(v.x); y[1] += bf_hi(v.x); y[2] += bf_lo(v.y); y[3] += bf_hi(v.y);
-              y[4] += bf_lo(v.z); y[5] += bf_hi(v.z); y[6] += bf_lo(v.w); y[7] += bf_hi(v.w);
-            }
-          };
-          add(p0 & 127);
-          add(R_CAD + ((p0 >> 8) & 31));
-        }
-      }
-      float s[HP], rs[HP];
-      if (ln) {
-        float q[HP];
-#pragma unroll
-        for (int u = 0; u < HP; u++) {
-          s[u] = 0.f;
-#pragma unroll
-          for (int e = 0; e < 16; e++) { x[u][e] = __bfloat162float(__float2bfloat16_rn(x[u][e])); s[u] += x[u][e]; }
-        }
-#pragma unroll
-        for (int o = 8; o; o >>= 1)
-#pragma unroll
-          for (int u = 0; u < HP; u++) s[u] += __shfl_xor_sync(0xffffffffu, s[u], o);
-#pragma unroll
-        for (int u = 0; u < HP; u++) {
-          s[u] *= 1.f / C;
-          q[u] = 0.f;
-#pragma unroll
-          for (int e = 0; e < 16; e++) { const float d = x[u][e] - s[u]; q[u] += d * d; }
-        }
-#pragma unroll
-        for (int o = 8; o; o >>= 1)
-#pragma unroll
-          for (int u = 0; u < HP; u++) q[u] += __shfl_xor_sync(0xffffffffu, q[u], o);
-#pragma unroll
-        for (int u = 0; u < HP; u++) rs[u] = rsqrtf(q[u] * (1.f / C) + eps);
-      } else {
-#pragma unroll
-        for (int u = 0; u < HP; u++) { s[u] = 0.f; rs[u] = 1.f; }
-      }
-#pragma unroll
-      for (int u = 0; u < HP; u++) {
-        const int tt = t0 + 2 * u + hh;
-        if (tt >= cnt) continue;
-#pragma unroll
-        for (int k = 0; k < 2; k++) {
-          uint4 w;
-          __nv_bfloat162* hw = reinterpret_cast<__nv_bfloat162*>(&w);
-#pragma unroll
-          for (int e = 0; e < 4; e++)
-            hw[e] = ln ? __floats2bfloat162_rn((x[u][8 * k + 2 * e] - s[u]) * rs[u], (x[u][8 * k + 2 * e + 1] - s[u]) * rs[u])
-                       : __floats2bfloat162_rn(x[u][8 * k + 2 * e], x[u][8 * k + 2 * e + 1]);
-          uint4* d = reinterpret_cast<uint4*>(orow + (size_t)(j0 + tt) * C + cc + 128 * k);
-          if constexpr (CS) __stcs(d, w);
-          else *d = w;
-        }
-      }
-    }
-    cur = nxt;
-  }
-}
 }  // namespace
 
 void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::Tensor idx, torch::Tensor dlim, torch::Tensor out, torch::Tensor codes,
@@ -909,7 +792,6 @@ void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::
   TORCH_CHECK(dlim.numel() <= 31, "at most 31 bin limits");
   TORCH_CHECK(mask.element_size() == 1 && mask.is_contiguous() && idx.is_contiguous(), "mask: contiguous bool / uint8; idx: contiguous");
   const int B = idx.size(0), n = idx.size(1);
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   auto st = at::cuda::getCurrentCUDAStream();
   bool pdl = false;
   const torch::Tensor t = table_of(tbl, NT_CA, st, pdl);
@@ -931,14 +813,7 @@ void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::
       launch_pdl(pg120_fwd_ca_blk<int, 32>, grid, block, st, pdl, tp, xp, mp, (const int*)idx.data_ptr<int>(), lp, op, cp, n, P, nd, l, e);
     return;
   }
-  // gt 3: the persistent item kernel (A/B)
-  const Launch L = fwd_launch(B, n, sms, 2 * GT_CPS, GT_THREADS / 32, (int)jp, 16);
-  if (idx.scalar_type() == at::kLong)
-    pg120_fwd_ca<false, long long><<<L.grid, L.nw * 32, 0, st>>>(tp, xp, mp, reinterpret_cast<const long long*>(idx.data_ptr<int64_t>()), lp, op, cp, B, n,
-                                                               nd, l, e, L.jp);
-  else
-    pg120_fwd_ca<false, int><<<L.grid, L.nw * 32, 0, st>>>(tp, xp, mp, idx.data_ptr<int>(), lp, op, cp, B, n, nd, l, e, L.jp);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  TORCH_CHECK(false, "forward_ca: gt 0 / 1 (the H100 launches) or 2 (the RTX 5090 launch)");
 }
 
 void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tensor cb, torch::Tensor mask, torch::Tensor idx, torch::Tensor chains,
