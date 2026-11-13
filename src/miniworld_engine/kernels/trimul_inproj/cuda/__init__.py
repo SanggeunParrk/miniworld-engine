@@ -131,10 +131,6 @@ def _h100(cells):
 
     # glue shared by every path
     yield _call(P._owned_blas_ext)
-    if infer:  # the bounded contraction of the inference paths (_bounded.CELLS)
-        from . import _bounded
-
-        yield _call(_bounded._ext_h100)
     yield _call(P._aux_unit)
     yield _call(h100_b200style_aux._unit)
 

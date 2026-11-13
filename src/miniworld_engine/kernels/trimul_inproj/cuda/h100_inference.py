@@ -228,8 +228,6 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
             rows=None if bsz == 1 else rows,  # one sample: N rows, planes padded to Np
         )
         # [c, B N, N] -> [c B, N, N]: the samples join the channel planes in cuBLAS's batch dim (a view; B = 1 is the same shape as before)
-        # the bounded contraction (inference, the cells _bounded.CELLS lists) stops at each sample's last live token: a token mask only
-        token = mask if mask is not None and mask.ndim == 1 else None
         fold = lambda t: t.view(-1, npad, npad)
         left, right = ab[:ch], ab[ch:]
         if direction == 0:
@@ -237,9 +235,9 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
             _H100_BMM.bmm(fold(left[:h]), fold(right[:h]).transpose(-1, -2), out=fold(tri[:h]))
             _H100_BMM.bmm(fold(left[h:]).transpose(-1, -2), fold(right[h:]), out=fold(tri[h:]))
         elif direction == 1:
-            _H100_BMM.contract(fold(left), fold(right).transpose(-1, -2), out=fold(tri), bounded=True, mask=token, samples=bsz)
+            _H100_BMM.contract(fold(left), fold(right).transpose(-1, -2), out=fold(tri))
         else:
-            _H100_BMM.contract(fold(left).transpose(-1, -2), fold(right), out=fold(tri), bounded=True, mask=token, samples=bsz)
+            _H100_BMM.contract(fold(left).transpose(-1, -2), fold(right), out=fold(tri))
         kk.k3(
             tri,
             z,

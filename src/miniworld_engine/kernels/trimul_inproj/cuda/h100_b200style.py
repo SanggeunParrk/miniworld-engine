@@ -281,10 +281,9 @@ def _output_kernel(d, h, cfg, save=False):
     return _output_kernel_standard(d, h, cfg)
 
 
-def _contract(ab, d, direction, out=None, token=None):
+def _contract(ab, d, direction, out=None):
     """B200's contraction (``b200_infer._contract``) for both directions; one direction through ``_h100_bmm.contract`` (the measured
-    cuBLASLt configuration where one is listed). ``token`` (inference only: a bool token mask [B n], or True for no mask): one direction
-    may take the bounded contraction (``_bounded``), which stops at each sample's last live token."""
+    cuBLASLt configuration where one is listed)."""
     from .b200_infer import _contract as contract, _fold
 
     if direction == 0:
@@ -296,11 +295,10 @@ def _contract(ab, d, direction, out=None, token=None):
     samples = ab.numel() // (ab.shape[0] * n * n)
     t = ab.new_empty((d * samples, n, n)) if out is None else out.view(d * samples, n, n)
     left, right = _fold(ab[:d]), _fold(ab[d : 2 * d])
-    bkw = {} if token is None else {"bounded": True, "mask": None if token is True else token, "samples": samples}
     if direction == 1:
-        lt_contract(left, right.transpose(1, 2), t, **bkw)
+        lt_contract(left, right.transpose(1, 2), t)
     else:
-        lt_contract(left.transpose(1, 2), right, t, **bkw)
+        lt_contract(left.transpose(1, 2), right, t)
     return t.view(d, *ab.shape[1:])
 
 
@@ -325,7 +323,7 @@ def _front_contract_halves(front, x, weights, token, gi, bi, xs, h, prow, np_, d
     for c0 in (0, hc):
         ab = x.new_empty((2 * hc, prow, np_))
         front(x, [w[c0 : c0 + hc] for w in weights], token, gi, bi, ab, xs)
-        _contract(ab, hc, direction, out=tri[c0 : c0 + hc], token=token)
+        _contract(ab, hc, direction, out=tri[c0 : c0 + hc])
         del ab
     return tri
 
@@ -391,7 +389,7 @@ def _run_rowpad(leaves, mask, direction, out=None):
         else:
             ab = x.new_empty((2 * h, prow_, npad))
             front(x, weights, token, gi, bi, ab, xs)
-            tri = _contract(ab, d, direction, token=token)  # [h, (B,) np, np]
+            tri = _contract(ab, d, direction)  # [h, (B,) np, np]
             del ab  # the planes are dead once contracted: freed before y, so the peak is x + planes + tri, not + y (FoldForge 5I28 OpenDDE)
         prow = rows if bsz > 1 else npad  # pair rows of the planes / tri
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
@@ -438,10 +436,6 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
     rows = bsz * n
     m = rows * n
     h = wp.shape[1]
-    # inference: the bounded contraction (``_bounded``) may stop at each sample's last live token (a bool token mask [B n])
-    live = None
-    if not save and ds is None:  # no mask: True (the full product on the bounded kernel where its cells list the shape)
-        live = mask if mask.dtype == torch.bool and mask.numel() == rows else True if mask.numel() == 0 else None
     with T.native_context(x.device):
         xs = x.new_empty((m, 2), dtype=torch.float32)
         vec = x.new_empty((4, d), dtype=torch.float32)
@@ -471,14 +465,14 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
             else:
                 ab = x.new_empty((2 * h, rows, n))
                 front(x, weights, mask, gi, bi, ab, xs)
-                tri = _contract(ab, d, direction, token=live)
+                tri = _contract(ab, d, direction)
         else:
             ab = x.new_empty((2 * h, rows, n))
             w1 = x.new_empty((4 * h, d))
             pack_into_cuda(w1, wl, wlg, wr, wrg)
             pm = owned_bf16_mask(mask, n, x.device, bsz)
             _front(x, w1, pm, gi, bi, ab, xs, xn=saved_xn)
-            tri = _contract(ab, d, direction, token=live)
+            tri = _contract(ab, d, direction)
         # inference: the planes are dead once contracted; free them before y is allocated, so the peak is x + planes + tri (not
         # + y): at D384 L3968 (FoldForge 5I28 OpenDDE n=16, the structural-token refiner) that is 45 GiB instead of 56 GiB
         planes = ab if save else None
