@@ -25,7 +25,9 @@ def _module(cls, outgoing: bool, d_hidden: int | None):
 
 @pytest.mark.parametrize("length", [256, 640])
 @pytest.mark.parametrize("outgoing", [True, False])
-@pytest.mark.parametrize(("cls", "d_hidden"), [(TriangleMultiplication, None), (TriangleMultiplication, 128), (TriangleMultiplicationRF3, None)])
+@pytest.mark.parametrize(
+    ("cls", "d_hidden"), [(TriangleMultiplication, None), (TriangleMultiplication, 128), (TriangleMultiplicationRF3, None)]
+)
 def test_k3s_bitwise_k3w(cls, d_hidden, outgoing: bool, length: int) -> None:
     from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
 
