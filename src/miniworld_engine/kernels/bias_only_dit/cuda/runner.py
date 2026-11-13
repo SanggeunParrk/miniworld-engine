@@ -289,17 +289,19 @@ class FusedBiasOnlyDiT:
         return self._ops[key]
 
     # ------------------------------------------------------------------ once per solver step
-    def step(self, single, cond, P, out_dtype=None):
+    def step(self, single, cond, P, out_dtype=None, kmask=None):
         """One solver step: single [S, 1, L, D], cond [S or 1, 1, L, dc] (one conditioning shared by the samples when
-        its sample axis is 1 or has stride 0), P from ``hoist``. Returns [S, 1, L, D] in ``out_dtype`` (single's)."""
+        its sample axis is 1 or has stride 0), P from ``hoist``. Returns [S, 1, L, D] in ``out_dtype`` (single's). ``kmask``: the bool key
+        mask [1, L] P was made with (``kernels._key_len``) or None: the H100 core skips the key blocks past its last attended key, where
+        P is 0 in every row (the same bits; the sm_100 three-kernel steps take it and leave their cores as they are)."""
         if not self.fp32:
             if self._inf3b_ok(single.device):
-                return self._step3b(single, cond, P, out_dtype)
-            return self._step(single, cond, P, out_dtype)
+                return self._step3b(single, cond, P, out_dtype, kmask)
+            return self._step(single, cond, P, out_dtype, kmask)
         with _tf32().tf32_gemms():
             if self._inf3_ok(single.device):
-                return self._step3(single, cond, P, out_dtype)
-            return self._step(single, cond, P, out_dtype)
+                return self._step3(single, cond, P, out_dtype, kmask)
+            return self._step(single, cond, P, out_dtype, kmask)
 
     # ------------------------------------------------------------------ fp32, three kernels per block (default; INF3=0: off)
     def _inf3_ok(self, device) -> bool:
@@ -418,7 +420,7 @@ class FusedBiasOnlyDiT:
             )
         return self._buf[key]
 
-    def _step3(self, single, cond, P, out_dtype=None):
+    def _step3(self, single, cond, P, out_dtype=None, kmask=None):
         """The fp32 step as three kernels per block: front (LN + AdaLN + v|g GEMM) -> core -> tail (everything after the core)."""
         S, B, L, D = single.shape
         assert B == 1 and L % 128 == 0 and D == self.d
@@ -580,7 +582,7 @@ class FusedBiasOnlyDiT:
             )
         return self._buf[key]
 
-    def _step3b(self, single, cond, P, out_dtype=None):
+    def _step3b(self, single, cond, P, out_dtype=None, kmask=None):
         """The bf16 step as three kernels per block: front (LN + AdaLN + v|g GEMM) -> core -> tail (everything after the core); the
         block input the step's bf16 single, then the previous tail's fp32 output; the last tail writes the step's dtype."""
         from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
@@ -622,7 +624,7 @@ class FusedBiasOnlyDiT:
             xin = y
         return out.view(S, 1, L, D)
 
-    def _step(self, single, cond, P, out_dtype=None):
+    def _step(self, single, cond, P, out_dtype=None, kmask=None):
         S, B, L, D = single.shape
         assert B == 1 and L % 128 == 0 and D == self.d
         M, nb = S * L, self.nb
@@ -651,12 +653,12 @@ class FusedBiasOnlyDiT:
                 g1 = torch.addmm(self.b1, cn, self.w1.t()).view(T, nb, 4, D)
                 g2 = torch.addmm(self.b2, c, self.w2.t()).view(T, nb, 2, D)
         out = torch.empty(M, D, device=dev, dtype=out_dtype or single.dtype)
-        self._run(single.reshape(M, D), g1, g2, P, out, S, L, presig=cond_op is not None)
+        self._run(single.reshape(M, D), g1, g2, P, out, S, L, presig=cond_op is not None, kmask=kmask)
         return out.view(S, 1, L, D)
 
-    def _run(self, single, g1, g2, P, out, S, L, presig=False):
+    def _run(self, single, g1, g2, P, out, S, L, presig=False, kmask=None):
         """The blocks for S samples: single, out [S L, D]; g1, g2 the conditioning tables (row period T = their rows);
-        ``presig``: their scale and gate tables already hold the sigmoids."""
+        ``presig``: their scale and gate tables already hold the sigmoids. ``kmask``: as ``step``'s (read by the H100 cores)."""
         H, T, DA = self.h, g1.shape[0], self.da
         dev = single.device
         buf = self._buffers(S, L, dev)
@@ -673,12 +675,13 @@ class FusedBiasOnlyDiT:
         C.adaln_in_rows(single, x[:0] if nocopy else x, g1[:, 0, 0], g1[:, 0, 1], xa, T, EPS, ps)
         sqro = hopper and _H100_SQ_RESOUT and resln is None and not ps and not self.fp32
         h100_tf32 = self.fp32 and hopper
+        km = {"kmask": kmask} if kmask is not None and hopper else {}  # the H100 cores skip the key blocks past the last attended key
         for b, p in enumerate(self.per):
             if h100_tf32:
                 # TF32 wgmma reads K-major operands only: v^T = Wv xa^T from cuBLAS, g = xa Wg^T beside it
                 torch.mm(p["wvg"][:DA], xa.t(), out=buf["vt"])
                 torch.mm(xa, p["wvg"][DA:].t(), out=buf["gg"])
-                core(buf["vt"], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=buf["gg"])
+                core(buf["vt"], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=buf["gg"], **km)
             else:
                 torch.mm(xa, p["wvg"].t(), out=vg)
                 core(
@@ -687,6 +690,7 @@ class FusedBiasOnlyDiT:
                     a,
                     S,
                     g=vg[:, DA:],
+                    **km,
                 )  # sigmoid(g) * (P v)
             if resln is not None:  # out GEMM + residual + gate + AdaLN, one kernel
                 resln(a, p["wo"], x, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS)

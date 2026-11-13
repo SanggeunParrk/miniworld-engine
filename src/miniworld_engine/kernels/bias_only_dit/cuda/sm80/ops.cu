@@ -52,7 +52,8 @@ void launch_stages(const bo80::PvParams& p, int stages, int sg) {
 
 // out [S L, W] = sigmoid(g) * (P v) per head (g may be an empty tensor: the product alone): P [nh L, L] bf16 contiguous, v / g / out bf16 views [S L, W = nh DH] (any row stride), S samples;
 // ``stages`` (2 or 3) is the depth of the cp.async ring, ``sg`` (1 .. 4) the samples a CTA takes
-void pv_gate(torch::Tensor v, torch::Tensor P, torch::Tensor out, torch::Tensor g, int64_t S, int64_t nh, int64_t dh, int64_t stages, int64_t sg) {
+// kmask: the bool key mask [L] P was made with, or empty: the chunks past its last attended key (P = 0) are skipped (the same bits)
+void pv_gate(torch::Tensor v, torch::Tensor P, torch::Tensor out, torch::Tensor g, int64_t S, int64_t nh, int64_t dh, int64_t stages, int64_t sg, torch::Tensor kmask) {
   check_view(v, "v"); check_view(out, "out");
   const bool gate = g.numel() > 0;
   if (gate) check_view(g, "g");
@@ -63,7 +64,12 @@ void pv_gate(torch::Tensor v, torch::Tensor P, torch::Tensor out, torch::Tensor 
   TORCH_CHECK(stages >= 2 && stages <= 3, "the ring has 2 or 3 stages");
   TORCH_CHECK(sg >= 1 && sg <= 4, "a CTA takes 1 to 4 samples");
   c10::cuda::CUDAGuard guard(v.device());
-  bo80::PvParams p{bptr(P), bptr(v), gate ? bptr(g) : nullptr, bptr_w(out), (int)L, (int)nh, (int)S, v.stride(0), gate ? g.stride(0) : 0, out.stride(0), dh, dh, dh};
+  const uint8_t* kmb = nullptr;
+  if (kmask.numel() > 0) {
+    TORCH_CHECK(kmask.is_cuda() && kmask.element_size() == 1 && kmask.is_contiguous() && kmask.numel() == L, "kmask must be a contiguous bool [L]");
+    kmb = reinterpret_cast<const uint8_t*>(kmask.data_ptr());
+  }
+  bo80::PvParams p{bptr(P), bptr(v), gate ? bptr(g) : nullptr, bptr_w(out), (int)L, (int)nh, (int)S, v.stride(0), gate ? g.stride(0) : 0, out.stride(0), dh, dh, dh, kmb};
   switch (dh) {
     case 32: launch_stages<32>(p, (int)stages, (int)sg); break;
     case 48: launch_stages<48>(p, (int)stages, (int)sg); break;
@@ -108,7 +114,8 @@ void launch32_stages(const bo80::PvTParams& p, int stages, int sg, int mt) {
 }  // namespace
 
 // the fp32 / TF32 twin of pv_gate: P [nh L, L], v / g / out [S L, W] fp32
-void pv_gate32(torch::Tensor v, torch::Tensor P, torch::Tensor out, torch::Tensor g, int64_t S, int64_t nh, int64_t dh, int64_t stages, int64_t sg, int64_t mt) {
+void pv_gate32(torch::Tensor v, torch::Tensor P, torch::Tensor out, torch::Tensor g, int64_t S, int64_t nh, int64_t dh, int64_t stages, int64_t sg, int64_t mt,
+               torch::Tensor kmask) {
   check_view32(v, "v"); check_view32(out, "out");
   const bool gate = g.numel() > 0;
   if (gate) check_view32(g, "g");
@@ -119,7 +126,12 @@ void pv_gate32(torch::Tensor v, torch::Tensor P, torch::Tensor out, torch::Tenso
   TORCH_CHECK(stages >= 2 && stages <= 3, "the ring has 2 or 3 stages");
   TORCH_CHECK(sg >= 1 && sg <= 4 && (mt == 1 || mt == 2), "a CTA takes 1 to 4 samples, a warp 1 or 2 m16 tiles");
   c10::cuda::CUDAGuard guard(v.device());
-  bo80::PvTParams p{P.data_ptr<float>(), v.data_ptr<float>(), gate ? g.data_ptr<float>() : nullptr, out.data_ptr<float>(), (int)L, (int)nh, (int)S, v.stride(0), gate ? g.stride(0) : 0, out.stride(0)};
+  const uint8_t* kmb = nullptr;
+  if (kmask.numel() > 0) {
+    TORCH_CHECK(kmask.is_cuda() && kmask.element_size() == 1 && kmask.is_contiguous() && kmask.numel() == L, "kmask must be a contiguous bool [L]");
+    kmb = reinterpret_cast<const uint8_t*>(kmask.data_ptr());
+  }
+  bo80::PvTParams p{P.data_ptr<float>(), v.data_ptr<float>(), gate ? g.data_ptr<float>() : nullptr, out.data_ptr<float>(), (int)L, (int)nh, (int)S, v.stride(0), gate ? g.stride(0) : 0, out.stride(0), kmb};
   switch (dh) {
     case 32: launch32_stages<32>(p, (int)stages, (int)sg, (int)mt); break;
     case 48: launch32_stages<48>(p, (int)stages, (int)sg, (int)mt); break;

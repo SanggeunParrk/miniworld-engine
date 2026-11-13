@@ -371,8 +371,9 @@ class PvGateCoreH100TF32:
         self.device_index, self.nh, self.dh = device_index, nh, dh
         self.nsm = num_sms(device_index)
 
-    def __call__(self, vt, P, out, S, g):
-        h100_ext().pv_cta_tf32(vt, P, out, S, g, self.nh, self.dh, self.nsm)
+    def __call__(self, vt, P, out, S, g, kmask=None):
+        """``kmask``: the bool key mask [1, L] P was made with or None: the key blocks past its last attended key (P = 0) are skipped."""
+        h100_ext().pv_cta_tf32(vt, P, out, S, g, self.nh, self.dh, self.nsm, kmask=kmask)
         return out
 
 
@@ -470,11 +471,12 @@ class PvGateCore:
             return _LaunchPDL(k, grid, (256, 1, 1), *maps, L, S)
         return _Launch(k, grid, (256, 1, 1), *maps, L, S)
 
-    def __call__(self, v, P, out, S, g=None):
-        """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16."""
+    def __call__(self, v, P, out, S, g=None, kmask=None):
+        """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16. ``kmask``: the bool key
+        mask [1, L] P was made with or None: the H100 pvx core skips the key blocks past its last attended key (P = 0; the same bits)."""
         if h100_enabled(self.device_index):
             if _H100_PVX:
-                h100_ext().pv_cta(v, P, out, S, g, self.nh, self.dh, self.nsm, *_H100_PVX_FORCE)
+                h100_ext().pv_cta(v, P, out, S, g, self.nh, self.dh, self.nsm, *_H100_PVX_FORCE, kmask=kmask)
                 return out
             sg = _h100_group(S, v.shape[0] // S, self.nh, self.dh, self.nsm)
             h100_ext().grouped_pv_pipeline(v, P, out, S, g, self.nh, self.dh, sg)

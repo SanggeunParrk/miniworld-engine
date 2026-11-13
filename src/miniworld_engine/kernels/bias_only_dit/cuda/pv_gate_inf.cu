@@ -4,6 +4,7 @@
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 #include "wgmma_n.cuh"
+#include "../../augmented_attention/cuda/key_len.cuh"
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -174,7 +175,7 @@ TMN_DEVI uint32_t cluster_rank_(){uint32_t r;asm volatile("mov.u32 %0, %%cluster
 __device__ long long pvx_prof[512*8];
 template<bool GATE,int WGS,int CS,bool PROF=false>
 __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUtensorMap mp,const __grid_constant__ CUtensorMap mv,const __grid_constant__ CUtensorMap mo,const __grid_constant__ CUtensorMap mg,
- const bf*g,bf*out,int L,int A,int H,int DH,int gs,int os,int SG) {
+ const bf*g,bf*out,int L,int A,int H,int DH,int gs,int os,int SG,const uint8_t*__restrict__ KMB) {
  constexpr int ST=PvxCfg<WGS>::ST,SB=PvxCfg<WGS>::SB;
  extern __shared__ __align__(1024) unsigned char sm[];
  uint64_t*full=reinterpret_cast<uint64_t*>(sm+ST*SB),*empty=full+ST,*gfull=empty+ST;
@@ -190,6 +191,9 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUt
  // stored before the wait; without the launch attribute both instructions are no-ops
  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
  asm volatile("griddepcontrol.wait;" ::: "memory");
+ // KMB (inference: the key mask [L] bytes the samples share): the key blocks past its last attended key hold P = 0 in every row (the
+ // softmax's masked keys after a live max): neither loaded nor multiplied (the same bits; key_len.cuh, every warp reads the bound itself)
+ if(KMB)KB=warp_key_tiles(KMB,L,L,64);
  const int mtc=mt/CS,citems=H*mtc*ng,cstride=gridDim.x/CS;
  unsigned it=0;
  if(wg==0){
@@ -357,7 +361,7 @@ static CUtensorMap map_lin(at::Tensor t,int bc,int br){
 template<int WGS> constexpr int pvx_smem(){ return PvxCfg<WGS>::ST*PvxCfg<WGS>::SB+256+WGS*2*6144*2+1024; }
 // set by pv_cta_pdl around one pv_cta call: the launch carries the programmatic-dependent-launch attribute
 static bool g_pvx_pdl=false;
-template<bool GATE,int WGS,int CS> static void pvx_launch(at::Tensor v,at::Tensor p,at::Tensor out,int A,c10::optional<at::Tensor> gate,int H,int DH,int nsm,int SG){
+template<bool GATE,int WGS,int CS> static void pvx_launch(at::Tensor v,at::Tensor p,at::Tensor out,int A,c10::optional<at::Tensor> gate,int H,int DH,int nsm,int SG,const uint8_t* kmb=nullptr){
  int L=v.size(0)/A;constexpr int smem=pvx_smem<WGS>();
  auto ma=map(p,64,64),mb=map(v,64,64);int ng=(A+SG-1)/SG;int mt=L/(64*WGS);int citems=H*(mt/CS)*ng;
  auto mo=map_lin(out,(int)DH,64),mg=GATE?map_lin(*gate,(int)DH,64):map_lin(out,(int)DH,64);
@@ -368,15 +372,15 @@ template<bool GATE,int WGS,int CS> static void pvx_launch(at::Tensor v,at::Tenso
  cudaLaunchAttribute at[2];at[0].id=cudaLaunchAttributeClusterDimension;at[0].val.clusterDim.x=CS;at[0].val.clusterDim.y=1;at[0].val.clusterDim.z=1;
  at[1].id=cudaLaunchAttributeProgrammaticStreamSerialization;at[1].val.programmaticStreamSerializationAllowed=1;
  cfg.attrs=at;cfg.numAttrs=g_pvx_pdl?2:1;
- const cudaError_t err=cudaLaunchKernelEx(&cfg,kern,ma,mb,mo,mg,GATE?(const bf*)gate->data_ptr():(const bf*)nullptr,(bf*)out.data_ptr(),L,A,H,DH,GATE?(int)gate->stride(0):0,(int)out.stride(0),SG);
+ const cudaError_t err=cudaLaunchKernelEx(&cfg,kern,ma,mb,mo,mg,GATE?(const bf*)gate->data_ptr():(const bf*)nullptr,(bf*)out.data_ptr(),L,A,H,DH,GATE?(int)gate->stride(0):0,(int)out.stride(0),SG,kmb);
  TORCH_CHECK(err==cudaSuccess,"pvx launch failed: ",cudaGetErrorString(err));
 }
-template<bool GATE,int WGS> static void pvx_dispatch(int cs,at::Tensor v,at::Tensor p,at::Tensor out,int A,c10::optional<at::Tensor> gate,int H,int DH,int nsm,int sg){
+template<bool GATE,int WGS> static void pvx_dispatch(int cs,at::Tensor v,at::Tensor p,at::Tensor out,int A,c10::optional<at::Tensor> gate,int H,int DH,int nsm,int sg,const uint8_t* kmb=nullptr){
  switch(cs){
-  case 1: pvx_launch<GATE,WGS,1>(v,p,out,A,gate,H,DH,nsm,sg);break;
-  case 2: pvx_launch<GATE,WGS,2>(v,p,out,A,gate,H,DH,nsm,sg);break;
-  case 3: pvx_launch<GATE,WGS,3>(v,p,out,A,gate,H,DH,nsm,sg);break;
-  default: pvx_launch<GATE,WGS,6>(v,p,out,A,gate,H,DH,nsm,sg);break;
+  case 1: pvx_launch<GATE,WGS,1>(v,p,out,A,gate,H,DH,nsm,sg,kmb);break;
+  case 2: pvx_launch<GATE,WGS,2>(v,p,out,A,gate,H,DH,nsm,sg,kmb);break;
+  case 3: pvx_launch<GATE,WGS,3>(v,p,out,A,gate,H,DH,nsm,sg,kmb);break;
+  default: pvx_launch<GATE,WGS,6>(v,p,out,A,gate,H,DH,nsm,sg,kmb);break;
  }
 }
 at::Tensor pv_cta_prof(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,at::Tensor gate,int64_t H,int64_t DH,int64_t nsm){
@@ -384,23 +388,28 @@ at::Tensor pv_cta_prof(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,at::Te
  int ng=(A+SGX-1)/SGX,SG=(A+ng-1)/ng;constexpr int WGS=2;constexpr int smem=pvx_smem<WGS>();
  auto ma=map(p,64,64),mb=map(v,64,64);auto mo=map_lin(out,(int)DH,64),mg=map_lin(gate,(int)DH,64);int mt=L/(64*WGS);int citems=H*mt*((A+SG-1)/SG);int grid=std::max(1,std::min<int>(citems,(int)nsm));
  auto kern=pvx<true,WGS,1,true>;cudaFuncSetAttribute(kern,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
- kern<<<grid,128*(WGS+1),smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,mo,mg,(bf*)gate.data_ptr(),(bf*)out.data_ptr(),L,A,H,DH,(int)gate.stride(0),(int)out.stride(0),SG);
+ kern<<<grid,128*(WGS+1),smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,mo,mg,(bf*)gate.data_ptr(),(bf*)out.data_ptr(),L,A,H,DH,(int)gate.stride(0),(int)out.stride(0),SG,nullptr);
  C10_CUDA_KERNEL_LAUNCH_CHECK();
  auto t=at::zeros({512,8},v.options().dtype(at::kLong));
  cudaDeviceSynchronize();cudaMemcpyFromSymbol(t.data_ptr(),pvx_prof,512*8*8,0,cudaMemcpyDeviceToDevice);
  return t.slice(0,0,grid);
 }
-void pv_cta(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,c10::optional<at::Tensor> gate,int64_t H,int64_t DH,int64_t nsm,int64_t fw,int64_t fg,int64_t fc){
+// kmask (optional): the bool key mask [L] the samples share (P's masked keys are 0): the key blocks past its last attended key are skipped
+void pv_cta(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,c10::optional<at::Tensor> gate,int64_t H,int64_t DH,int64_t nsm,int64_t fw,int64_t fg,int64_t fc,
+            c10::optional<at::Tensor> kmask){
  at::cuda::CUDAGuard guard(v.device());cudaSetDevice(v.get_device());int L=v.size(0)/A;
  TORCH_CHECK(L%128==0&&L<=3072&&DH%2==0&&DH<=64&&v.scalar_type()==at::kBFloat16,"pvx shape");
  int wgs=2,sg=1,cs=1;pvx_pick(L,A,H,nsm,wgs,sg,cs,fw,fg,fc);
- if(gate){ if(wgs==2)pvx_dispatch<true,2>(cs,v,p,out,A,gate,H,DH,nsm,sg); else pvx_dispatch<true,1>(cs,v,p,out,A,gate,H,DH,nsm,sg); }
- else    { if(wgs==2)pvx_dispatch<false,2>(cs,v,p,out,A,gate,H,DH,nsm,sg); else pvx_dispatch<false,1>(cs,v,p,out,A,gate,H,DH,nsm,sg); }
+ const bool hk=kmask.has_value()&&kmask->defined();
+ TORCH_CHECK(!hk||(kmask->is_cuda()&&kmask->element_size()==1&&kmask->is_contiguous()&&kmask->numel()==L),"pvx: kmask must be a contiguous bool [L]");
+ const uint8_t* kmb=hk?reinterpret_cast<const uint8_t*>(kmask->data_ptr()):nullptr;
+ if(gate){ if(wgs==2)pvx_dispatch<true,2>(cs,v,p,out,A,gate,H,DH,nsm,sg,kmb); else pvx_dispatch<true,1>(cs,v,p,out,A,gate,H,DH,nsm,sg,kmb); }
+ else    { if(wgs==2)pvx_dispatch<false,2>(cs,v,p,out,A,gate,H,DH,nsm,sg,kmb); else pvx_dispatch<false,1>(cs,v,p,out,A,gate,H,DH,nsm,sg,kmb); }
 }
 // pv_cta launched with programmatic dependent launch (the H100 three-kernel inference step: front -> pvx -> tail)
 void pv_cta_pdl(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,c10::optional<at::Tensor> gate,int64_t H,int64_t DH,int64_t nsm){
  g_pvx_pdl=true;
- try{ pv_cta(v,p,out,A,gate,H,DH,nsm,0,0,0); }catch(...){ g_pvx_pdl=false; throw; }
+ try{ pv_cta(v,p,out,A,gate,H,DH,nsm,0,0,0,c10::nullopt); }catch(...){ g_pvx_pdl=false; throw; }
  g_pvx_pdl=false;
 }
 // ---- fp32 (TF32) PV core: K-major A = P fp32 tile, K-major B = v^T rows of 48 per sample (N = 48 x samples) -----------
@@ -464,13 +473,14 @@ template<int DHT> TMN_DEVI void mma_tf32_ns(int ns,float*acc,uint64_t da,uint64_
 }
 template<int WGS,int DHT>
 __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ CUtensorMap mp,const __grid_constant__ CUtensorMap mv,
- const float*__restrict__ g,float*__restrict__ out,int L,int A,int H,int DH,int gs,int os,int SG) {
+ const float*__restrict__ g,float*__restrict__ out,int L,int A,int H,int DH,int gs,int os,int SG,const uint8_t*__restrict__ KMB) {
  constexpr int ST=Pvx32Cfg<WGS,DHT>::ST,SB=Pvx32Cfg<WGS,DHT>::SB,JJ=Pvx32Dims<DHT>::JJ,ACC=Pvx32Dims<DHT>::ACC,SGM=Pvx32Dims<DHT>::SGM,SBY=Pvx32Dims<DHT>::SBYTES;
  extern __shared__ __align__(1024) unsigned char sm[];
  uint64_t*full=reinterpret_cast<uint64_t*>(sm+ST*SB),*empty=full+ST;
  int tid=threadIdx.x,wg=tid/128,wtid=tid&127,warp=wtid/32,lane=tid&31,mt=L/(64*WGS),ng=(A+SG-1)/SG,KB=L/32;
  if(!tid){for(int s=0;s<ST;++s){mbar_init(full+s,1);mbar_init(empty+s,WGS);}fence_barrier_init();}
  __syncthreads();
+ if(KMB)KB=warp_key_tiles(KMB,L,L,32);   // the key blocks past the shared mask's last attended key: P = 0 there (pvx's KMB)
  const int items=H*mt*ng;
  unsigned it=0;
  if(wg==0){
@@ -558,21 +568,24 @@ static void pvx32_pick(int L,int A,int H,int DH,int nsm,int&wgs,int&sg){
      if(t<best){best=t;wgs=w;sg=g;}
    }}
 }
-template<int WGS,int DHT> static void pvx32_launch(at::Tensor vt,at::Tensor p,at::Tensor out,at::Tensor gate,int A,int H,int nsm,int SG){
+template<int WGS,int DHT> static void pvx32_launch(at::Tensor vt,at::Tensor p,at::Tensor out,at::Tensor gate,int A,int H,int nsm,int SG,const uint8_t* kmb=nullptr){
  int L=vt.size(1)/A;constexpr int smem=Pvx32Cfg<WGS,DHT>::ST*Pvx32Cfg<WGS,DHT>::SB+64+1024;
  auto ma=map32(p,32,64),mb=map32(vt,32,DHT);int ng=(A+SG-1)/SG;int grid=std::min<int>(nsm,H*(L/(64*WGS))*ng);
  cudaFuncSetAttribute(pvx32<WGS,DHT>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
- pvx32<WGS,DHT><<<grid,128*(WGS+1),smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,(const float*)gate.data_ptr(),(float*)out.data_ptr(),L,A,H,DHT,(int)gate.stride(0),(int)out.stride(0),SG);
+ pvx32<WGS,DHT><<<grid,128*(WGS+1),smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,(const float*)gate.data_ptr(),(float*)out.data_ptr(),L,A,H,DHT,(int)gate.stride(0),(int)out.stride(0),SG,kmb);
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
-void pv_cta_tf32(at::Tensor vt,at::Tensor p,at::Tensor out,int64_t A,at::Tensor gate,int64_t H,int64_t DH,int64_t nsm){
+void pv_cta_tf32(at::Tensor vt,at::Tensor p,at::Tensor out,int64_t A,at::Tensor gate,int64_t H,int64_t DH,int64_t nsm,c10::optional<at::Tensor> kmask){
  at::cuda::CUDAGuard guard(vt.device());cudaSetDevice(vt.get_device());int L=vt.size(1)/A;
  TORCH_CHECK(L%128==0&&L<=3072&&(DH==32||DH==48||DH==64)&&vt.scalar_type()==at::kFloat&&p.scalar_type()==at::kFloat&&gate.scalar_type()==at::kFloat&&out.scalar_type()==at::kFloat,"pvx32 shape/dtype");
  TORCH_CHECK(vt.size(0)==H*DH&&vt.is_contiguous()&&p.is_contiguous()&&gate.stride(1)==1&&out.stride(1)==1,"pvx32 layout");
  int wgs=2,sg=1;pvx32_pick(L,A,H,(int)DH,nsm,wgs,sg);
- if(DH==32){ if(wgs==2)pvx32_launch<2,32>(vt,p,out,gate,A,H,nsm,sg);else pvx32_launch<1,32>(vt,p,out,gate,A,H,nsm,sg); }
- else if(DH==48){ if(wgs==2)pvx32_launch<2,48>(vt,p,out,gate,A,H,nsm,sg);else pvx32_launch<1,48>(vt,p,out,gate,A,H,nsm,sg); }
- else { if(wgs==2)pvx32_launch<2,64>(vt,p,out,gate,A,H,nsm,sg);else pvx32_launch<1,64>(vt,p,out,gate,A,H,nsm,sg); }
+ const bool hk=kmask.has_value()&&kmask->defined();
+ TORCH_CHECK(!hk||(kmask->is_cuda()&&kmask->element_size()==1&&kmask->is_contiguous()&&kmask->numel()==L),"pvx32: kmask must be a contiguous bool [L]");
+ const uint8_t* kmb=hk?reinterpret_cast<const uint8_t*>(kmask->data_ptr()):nullptr;
+ if(DH==32){ if(wgs==2)pvx32_launch<2,32>(vt,p,out,gate,A,H,nsm,sg,kmb);else pvx32_launch<1,32>(vt,p,out,gate,A,H,nsm,sg,kmb); }
+ else if(DH==48){ if(wgs==2)pvx32_launch<2,48>(vt,p,out,gate,A,H,nsm,sg,kmb);else pvx32_launch<1,48>(vt,p,out,gate,A,H,nsm,sg,kmb); }
+ else { if(wgs==2)pvx32_launch<2,64>(vt,p,out,gate,A,H,nsm,sg,kmb);else pvx32_launch<1,64>(vt,p,out,gate,A,H,nsm,sg,kmb); }
 }
 __global__ __launch_bounds__(256,2) void dpb_pipe(const __grid_constant__ CUtensorMap md,const __grid_constant__ CUtensorMap mv,
  const bf*p,const float*dd,bf*out,int L,int A,int H,int DH){
@@ -801,7 +814,7 @@ void swiglu(at::Tensor x,at::Tensor w,at::Tensor ab,at::Tensor h){
  expand<<<std::min(132,(M/64)*(H/64)),128,0,at::cuda::getCurrentCUDAStream()>>>(map(x,64,64),map(w,64,64),(bf*)ab.data_ptr(),(bf*)h.data_ptr(),M,K,H);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){m.def("pv",&bo90::pv);m.def("grouped_pv",&bo90::grouped_pv);m.def("dpb",&bo90::dpb);m.def("swiglu",&bo90::swiglu);m.def("grouped_pv_pipeline",&bo90::grouped_pv_pipeline);m.def("pv_cta",&bo90::pv_cta);m.def("pv_cta_pdl",&bo90::pv_cta_pdl);m.def("dpb2",&bo90::dpb2_launch);m.def("pv_cta_tf32",&bo90::pv_cta_tf32);m.def("pv_cta_prof",&bo90::pv_cta_prof);m.def("dpb_pipeline",&bo90::dpb_pipeline);m.def("swiglu_pipeline",&bo90::swiglu_pipeline);}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){m.def("pv",&bo90::pv);m.def("grouped_pv",&bo90::grouped_pv);m.def("dpb",&bo90::dpb);m.def("swiglu",&bo90::swiglu);m.def("grouped_pv_pipeline",&bo90::grouped_pv_pipeline);m.def("pv_cta",&bo90::pv_cta,py::arg("v"),py::arg("p"),py::arg("out"),py::arg("A"),py::arg("gate"),py::arg("H"),py::arg("DH"),py::arg("nsm"),py::arg("fw")=0,py::arg("fg")=0,py::arg("fc")=0,py::arg("kmask")=py::none());m.def("pv_cta_pdl",&bo90::pv_cta_pdl);m.def("dpb2",&bo90::dpb2_launch);m.def("pv_cta_tf32",&bo90::pv_cta_tf32,py::arg("vt"),py::arg("p"),py::arg("out"),py::arg("A"),py::arg("gate"),py::arg("H"),py::arg("DH"),py::arg("nsm"),py::arg("kmask")=py::none());m.def("pv_cta_prof",&bo90::pv_cta_prof);m.def("dpb_pipeline",&bo90::dpb_pipeline);m.def("swiglu_pipeline",&bo90::swiglu_pipeline);}
 #else
 // pv_gate_inf.cu -- the bias-only token DiT's INFERENCE attention core, sm_100a:
 //

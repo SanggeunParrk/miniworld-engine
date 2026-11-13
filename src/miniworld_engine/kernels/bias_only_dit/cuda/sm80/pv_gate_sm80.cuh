@@ -12,6 +12,7 @@
 // A single CTA per SM is request-bound (16-byte cp.async granules, ~18 GB/s per SM measured), so the grouping, not a deeper ring, is what shortens the core: see the table in cuda/sm80/__init__.py.
 #pragma once
 #include "sm80_common.cuh"
+#include "../../../augmented_attention/cuda/key_len.cuh"
 
 namespace bo80 {
 
@@ -32,6 +33,7 @@ struct PvParams {
   int L, nh, S;
   long long ldv, ldg, ldo;
   long long hsv, hsg, hso;      // element offset of head h in v / g / out: DH (head h at columns DH h of token rows), or a plane stride (head planes [S L][DH] one after the other: ldv = DH)
+  const uint8_t* kmb;           // inference: the bool key mask [L] P was made with, or null (the chunks past its last attended key are skipped)
 };
 
 template <class G>
@@ -58,7 +60,7 @@ __global__ void __launch_bounds__(G::NTHR, 1) pv_gate_kernel(const PvParams p) {
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g8 = lane >> 2, q4 = lane & 3;
   const int q0 = blockIdx.x * G::QT, h = blockIdx.y, s0 = blockIdx.z * G::SG;
   const int ns = min(G::SG, p.S - s0);                      // the samples of this group (the last group may be short)
-  const int nch = p.L / G::KC;
+  int nch = p.L / G::KC;
 
   float o[G::SG][G::NT][4];
 #pragma unroll
@@ -73,6 +75,9 @@ __global__ void __launch_bounds__(G::NTHR, 1) pv_gate_kernel(const PvParams p) {
     if (c0 < nch) pv_load_chunk<G>(p, sb + c0 * G::STAGE, c0, q0, h, s0, ns, tid);
     cp_async_commit();
   }
+  // kmb (inference: the bool key mask [L] P was made with): the chunks past its last attended key hold P = 0 in every row; the warps read the bound
+  // (key_len.cuh) once the ring's first chunks are in flight (those load unbounded) and stop there (the same bits)
+  if (p.kmb) nch = warp_key_tiles(p.kmb, p.L, p.L, G::KC);
   for (int c = 0; c < nch; ++c) {
     cp_async_wait<G::NST - 2>();
     __syncthreads();
@@ -98,6 +103,8 @@ __global__ void __launch_bounds__(G::NTHR, 1) pv_gate_kernel(const PvParams p) {
       }
     }
   }
+
+  if (p.kmb) cp_async_wait<0>();                            // ring chunks past a short bound may still be landing
 
   // ---- epilogue: the gate and the one rounding to bf16
   const int r0 = q0 + 16 * warp + g8, r1 = r0 + 8;

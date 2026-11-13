@@ -50,6 +50,12 @@ def pick_group(S: int, L: int, nh: int, nsm: int) -> int:
     return 2
 
 
+def _kmask(kmask: torch.Tensor | None, like: torch.Tensor) -> torch.Tensor:
+    """The cores' ``kmask`` operand: the bool key mask [L] (``kmask`` [1, L] or [L]) P was made with -- the chunks past its last attended key hold
+    P = 0 and are skipped (the same bits) -- or an empty tensor."""
+    return like.new_empty(0, dtype=torch.bool) if kmask is None else kmask.reshape(-1).to(torch.bool).contiguous()
+
+
 class PvGate:
     """The A100 twin of ``cuda.PvGateCore``: ``out [S L, W] = sigmoid(g) * (P v)`` -- or, without ``g``, ``P v`` -- per head and sample, W = nh dh."""
 
@@ -67,9 +73,11 @@ class PvGate:
         g: torch.Tensor | None = None,
         stages: int | None = None,
         sg: int | None = None,
+        kmask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """v [S L, W] view, P [nh L, L] contiguous, out [S L, W] view, g [S L, W] view or None; all bf16 (v, g, out: any row stride, unit column stride).
-        ``stages`` (2 or 3; default :data:`STAGES`) is the depth of the cp.async ring, ``sg`` (1 .. 4; default :func:`pick_group`) the samples a CTA takes."""
+        ``stages`` (2 or 3; default :data:`STAGES`) is the depth of the cp.async ring, ``sg`` (1 .. 4; default :func:`pick_group`) the samples a CTA takes. ``kmask``: the bool key mask [1, L] P
+        was made with, or None (``_kmask``)."""
         L = P.shape[1]
         _ext().pv_gate(
             v,
@@ -81,6 +89,7 @@ class PvGate:
             self.dh,
             STAGES if stages is None else stages,
             pick_group(S, L, self.nh, self.nsm) if sg is None else sg,
+            _kmask(kmask, v),
         )
         return out
 
@@ -107,6 +116,7 @@ class PvGateTF32:
         stages: int | None = None,
         sg: int | None = None,
         mt: int | None = None,
+        kmask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         L = P.shape[1]
         _ext().pv_gate32(
@@ -120,6 +130,7 @@ class PvGateTF32:
             2 if stages is None else stages,
             pick_group(S, L, self.nh, self.nsm) if sg is None else sg,
             MT32 if mt is None else mt,
+            _kmask(kmask, v),
         )
         return out
 
