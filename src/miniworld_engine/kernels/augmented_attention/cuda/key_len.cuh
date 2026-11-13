@@ -36,3 +36,32 @@ __device__ __forceinline__ int warp_key_tiles(const uint8_t* __restrict__ m, int
   const int kl = warp_key_len(m, n);
   return kl == 0 ? L / BN : max(1, min(L / BN, (kl + BN - 1) / BN));
 }
+
+// warp_key_len for one thread (a producer that issues alone): read from the end, eight 16-byte loads in flight per step when m is 16-byte
+// aligned and n a multiple of 16, so a padded tail costs one load latency per 128 masked keys.
+__device__ __forceinline__ int thread_key_len(const uint8_t* __restrict__ m, int n) {
+  if ((reinterpret_cast<uintptr_t>(m) & 15) == 0 && n % 16 == 0) {
+    for (int c = n / 16; c > 0; c -= 8) {
+      uint4 v[8];
+#pragma unroll
+      for (int i = 0; i < 8; ++i) v[i] = c - 1 - i >= 0 ? __ldg(reinterpret_cast<const uint4*>(m) + (c - 1 - i)) : make_uint4(0u, 0u, 0u, 0u);
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const uint32_t w[4] = {v[i].x, v[i].y, v[i].z, v[i].w};
+#pragma unroll
+        for (int e = 3; e >= 0; --e)
+          if (w[e]) return 16 * (c - 1 - i) + 4 * e + ((31 - __clz(w[e])) >> 3) + 1;
+      }
+    }
+    return 0;
+  }
+  for (int i = n - 1; i >= 0; --i)
+    if (__ldg(m + i)) return i + 1;
+  return 0;
+}
+
+// warp_key_tiles for one thread
+__device__ __forceinline__ int thread_key_tiles(const uint8_t* __restrict__ m, int n, int L, int BN) {
+  const int kl = thread_key_len(m, n);
+  return kl == 0 ? L / BN : max(1, min(L / BN, (kl + BN - 1) / BN));
+}

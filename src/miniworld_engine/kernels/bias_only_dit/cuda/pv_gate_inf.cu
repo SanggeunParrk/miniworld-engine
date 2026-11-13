@@ -192,8 +192,11 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUt
  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
  asm volatile("griddepcontrol.wait;" ::: "memory");
  // KMB (inference: the key mask [L] bytes the samples share): the key blocks past its last attended key hold P = 0 in every row (the
- // softmax's masked keys after a live max): neither loaded nor multiplied (the same bits; key_len.cuh, every warp reads the bound itself)
- if(KMB)KB=warp_key_tiles(KMB,L,L,64);
+ // softmax's masked keys after a live max): neither loaded nor multiplied (the same bits; key_len.cuh). The bound is read off the critical
+ // path -- the producer after its first issue, the consumers before their first wait -- and is never below the ring depth, so the blocks
+ // the producer issued before it knew the bound are consumed too.
+ const int KB0=KB,KMIN=KB0<ST?KB0:ST;
+ bool kbound=KMB!=nullptr;
  const int mtc=mt/CS,citems=H*mtc*ng,cstride=gridDim.x/CS;
  unsigned it=0;
  if(wg==0){
@@ -213,11 +216,13 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx(const __grid_constant__ CUt
          if(CS==1)tma_load_2d(st+WGS*8192+j*8192,&mv,full+s,head*DH,(a0+j)*L+kb*64);
          else if((unsigned)(j%CS)==rank)tma_mc(st+WGS*8192+j*8192,&mv,full+s,head*DH,(a0+j)*L+kb*64,(uint16_t)((1u<<CS)-1));
        }
+       if(kbound&&kb+1==KMIN){kbound=false;KB=max(KMIN,thread_key_tiles(KMB,L,L,64));}   // the ring full: then the bound
      }
    }
    if(PROF&&tid==0){pvx_prof[blockIdx.x*8+6]=pw;pvx_prof[blockIdx.x*8+7]=clock64()-pt;}
  }else{
  setmaxnreg_inc<232>();
+ if(KMB)KB=max(KMIN,warp_key_tiles(KMB,L,L,64));
  const int cw=wg-1;
  long long cw_full=0,cw_mma=0,cw_t0=0;if(PROF)cw_t0=clock64();
  uint32_t gph=0;
@@ -480,7 +485,9 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ C
  int tid=threadIdx.x,wg=tid/128,wtid=tid&127,warp=wtid/32,lane=tid&31,mt=L/(64*WGS),ng=(A+SG-1)/SG,KB=L/32;
  if(!tid){for(int s=0;s<ST;++s){mbar_init(full+s,1);mbar_init(empty+s,WGS);}fence_barrier_init();}
  __syncthreads();
- if(KMB)KB=warp_key_tiles(KMB,L,L,32);   // the key blocks past the shared mask's last attended key: P = 0 there (pvx's KMB)
+ // KMB: as pvx's (the bound off the critical path, never below the ring depth)
+ const int KB0=KB,KMIN=KB0<ST?KB0:ST;
+ bool kbound=KMB!=nullptr;
  const int items=H*mt*ng;
  unsigned it=0;
  if(wg==0){
@@ -494,11 +501,13 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ C
        #pragma unroll
        for(int w=0;w<WGS;++w)tma_load_2d(st+w*8192,&mp,full+s,kb*32,head*L+m0+w*64);
        for(int j=0;j<ns;++j)tma_load_2d(st+WGS*8192+j*SBY,&mv,full+s,(a0+j)*L+kb*32,head*DHT);
+       if(kbound&&kb+1==KMIN){kbound=false;KB=max(KMIN,thread_key_tiles(KMB,L,L,32));}   // the ring full: then the bound
      }
    }
    return;
  }
  setmaxnreg_inc<232>();
+ if(KMB)KB=max(KMIN,warp_key_tiles(KMB,L,L,32));
  const int cw=wg-1;
  for(int item=blockIdx.x;item<items;item+=gridDim.x){
    int m=item%mt,head=(item/mt)%H,group=item/(mt*H),a0=group*SG,ns=min(SG,A-a0),m0=m*64*WGS+cw*64;
