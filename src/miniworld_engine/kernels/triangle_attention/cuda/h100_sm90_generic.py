@@ -253,11 +253,9 @@ def _front_ext(cutlass_inc):
     )
 
 
-#: (d_pair, 32 x heads) -> the longest L served by the one-kernel front (LN + projection + bias); to be tuned per entry.
-#: (64, 64) (AF3 d_pair 64, 4 heads x 16): 2048 since 2026-11-13 -- beyond L768 the one-kernel front beats LN + cuBLAS GEMM + bias glue
-#: by 0.23-0.3 ms at L1024 (module 2.61 -> 2.31 ms), 0.6 ms at L1536, 0.8-0.9 ms at L2048
+#: (d_pair, 32 x heads) -> the longest L served by the one-kernel front (LN + projection + bias); to be tuned per entry
 _FRONT_L = {
-    (64, 64): 2048,
+    (64, 64): 768,
     (64, 128): 768,
     (128, 128): 128,
     (128, 256): 128,
@@ -265,6 +263,11 @@ _FRONT_L = {
     (384, 384): 128,
     (512, 512): 128,
 }
+#: d_pair -> the longest L of the one-kernel front when the heads have 16 channels and stay compact on the fp16 core (AF3 d_pair 64,
+#: 4 heads x 16): beyond ``_FRONT_L`` it still beats LN + cuBLAS GEMM + bias glue, which write the heads padded to 32 channels (module,
+#: 2026-11-13: L1024 2.61 -> 2.31 ms, L1536 7.5 -> 6.9 ms, L2048 17.4 -> 16.5 ms; 32-channel heads at d_pair 64 gain 0-3 % there and
+#: keep their limit)
+_FRONT_L_COMPACT = {64: 2048}
 
 
 def _wall(wcat, hd):
@@ -439,14 +442,21 @@ def _forward(
     empty = torch.empty(0, device=pair.device)
     # ``flip`` (the ending node on AF3's bias orientation): the bias is made unmasked and masked after the transpose
     front_mask = mask if mask is not None and not flip else empty.bool()
+    # the one-kernel front's L limit: ``_FRONT_L``, or ``_FRONT_L_COMPACT`` for 16-channel heads kept compact on the fp16 core
+    compact_ok = head_dim == COMPACT and _core_mod.INFERENCE_FP16 and (C, H * COMPACT) in _FRONT_L
+    compact_l = max(_FRONT_L[(C, H * COMPACT)], _FRONT_L_COMPACT.get(C, 0)) if compact_ok else 0
     fused = (
-        (not need) and (C, HD) in _FRONT_L and L <= _FRONT_L[(C, HD)] and _front() is not None and tuple(wcat.shape) == (4 * HD + _hp(H), C)
+        (not need)
+        and (C, HD) in _FRONT_L
+        and L <= max(_FRONT_L[(C, HD)], compact_l)
+        and _front() is not None
+        and tuple(wcat.shape) == (4 * HD + _hp(H), C)
     )
     # inference on the fp16 core (h100_sm90.INFERENCE_FP16): q / k / v and the bias in fp16, from the fused front or (L > 256) fp16 GEMMs
     h16 = (not need) and _core_mod.INFERENCE_FP16 and (fused or L > 256)
     # heads of 16 channels on the fused front + fp16 core: q / k / v / g / u stay compact (16 channels a head; the core's loads zero-pad
     # them to 32), half the bytes of the padded layout through the front's stores, the core's loads and the out-projection
-    compact = fused and h16 and head_dim == COMPACT and (C, H * COMPACT) in _FRONT_L and L <= _FRONT_L[(C, H * COMPACT)]
+    compact = fused and h16 and compact_ok and L <= compact_l
     dq = COMPACT if compact else dc  # channels a head in q / k / v / g / u
     wo_use = _compact_out(wo_p, H) if compact else wo_p
     if fused:  # LN + projection + head-major scaled bias: one kernel (and the flip of AF3's ending node in its bias store)

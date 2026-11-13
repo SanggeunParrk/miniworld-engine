@@ -122,3 +122,31 @@ def test_ending_tail_reads_o_transposed_bitwise() -> None:
     st = mod.tri_tail(empty, o, xt, wo, empty, L, False, None, **kw).view(L, L, C).transpose(0, 1).reshape(L * L, C)
     assert torch.equal(a, st)
     assert not torch.equal(a, s)
+
+
+def test_af3_compact_front_past_768(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AF3 d_pair 64 (4 heads x 16) beyond L768: the one-kernel front with compact heads (``_FRONT_L_COMPACT``) against the LN + GEMM
+    + bias-glue front it replaced there -- the same update within bf16 rounding, bitwise run to run."""
+    _needs_h100()
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90_generic as gen
+    from miniworld_engine.modules.triangle import TriangleAttentionAF3
+
+    torch.manual_seed(0)
+    m = TriangleAttentionAF3(64, 4, starting=False, master_weights=True, backend="cuda").cuda().eval()
+    with torch.no_grad():
+        for p in m.parameters():
+            if p.dim() == 2:
+                p.normal_(0, p.shape[1] ** -0.5)
+        m.ln_pair.weight.uniform_(0.5, 1.5)
+    L = 1024
+    g = torch.Generator(device="cuda").manual_seed(5)
+    x = torch.randn(1, L, L, 64, device="cuda", generator=g).bfloat16()
+    with torch.no_grad():
+        a = m(x)
+        again = m(x)
+        monkeypatch.setattr(gen, "_FRONT_L_COMPACT", {})
+        b = m(x)
+    assert torch.equal(a, again)
+    assert not torch.equal(a, b)  # two fronts
+    upd = b.float() - x.float()
+    assert float(((a.float() - b.float()) ** 2).mean().sqrt() / (upd**2).mean().sqrt()) < 3e-2
