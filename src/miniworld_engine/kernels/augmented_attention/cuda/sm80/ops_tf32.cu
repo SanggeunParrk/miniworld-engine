@@ -72,9 +72,9 @@ void launch_dkv32(const aa80::Dkv32Params& p, int A) {
 
 // q / k / v / gate: token-major fp32 views [A L][ld] (head h = columns [hd h, hd h + hd)), bias [H][L][L] fp32 natural units (masked keys -inf).  gate: g (sigmoid(g) o is written to
 // ``out``, which may be q; lse is not written) or an empty tensor (o is written and lse [A][H][L]).  ss: tokens between samples (<= 0: L); kpen: per-sample key penalties.
-void attn_fwd_tf32(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor gate, torch::Tensor out, torch::Tensor lse, int64_t A, int64_t L, int64_t H,
+void attn_fwd_tf32_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor gate, torch::Tensor out, torch::Tensor lse, int64_t A, int64_t L, int64_t H,
                    int64_t hd, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldg, int64_t ldo, double scl, double bscl, int64_t nkv, int64_t minb, int64_t ss, torch::Tensor kpen,
-                   int64_t kps) {
+                   int64_t kps, const torch::Tensor& kmask) {
   TORCH_CHECK(bias.is_cuda() && bias.scalar_type() == at::kFloat && bias.is_contiguous() && bias.numel() == H * L * L && reinterpret_cast<uintptr_t>(bias.data_ptr()) % 16 == 0,
               "attn_fwd_tf32: bias [H, L, L] fp32 contiguous");
   TORCH_CHECK(L % aa80::BM == 0 && L >= aa80::BM && A <= 65535 && H <= 65535, "attn_fwd_tf32: L a multiple of 128");
@@ -89,6 +89,12 @@ void attn_fwd_tf32(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
   if (gated) { check_f32t(gate, "attn_fwd_tf32 gate", T, ldg, cols); p.gate = gate.data_ptr<float>(); }
   else { check_f32v(lse, "attn_fwd_tf32 lse", A * H * L); p.lse = lse.data_ptr<float>(); }
   p.kpen = penalties(kpen, kps, A, L, "attn_fwd_tf32"); p.kps = p.kpen ? kps : 0;
+  p.kmb = nullptr; p.kms = 0; p.kml = 0;
+  if (kmask.numel() > 0) {   // the bool key mask [1 or A, n] (rows of unit stride): each sample's key tiles past its last attended key are skipped
+    TORCH_CHECK(kmask.is_cuda() && kmask.element_size() == 1 && kmask.dim() == 2 && kmask.stride(1) == 1 && (kmask.size(0) == 1 || kmask.size(0) == A) &&
+                kmask.size(1) <= L, "attn_fwd_tf32: kmask bool [1 or A, n <= L]");
+    p.kmb = reinterpret_cast<const uint8_t*>(kmask.data_ptr()); p.kms = kmask.size(0) > 1 ? kmask.stride(0) : 0; p.kml = (int)kmask.size(1);
+  }
   p.ldq = ldq; p.ldk = ldk; p.ldv = ldv; p.ldg = ldg; p.ldo = ldo; p.ss = ss; p.L = (int)L; p.H = (int)H; p.scl = (float)scl; p.bscl = (float)bscl;
   const at::cuda::CUDAGuard guard(q.device());
   const int64_t km = p.kpen != nullptr, cfg = ((((hd * 10 + nkv) * 10 + minb) * 10 + (gated ? 1 : 0)) * 10 + km);
@@ -101,6 +107,19 @@ void attn_fwd_tf32(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
   FWD32(64, 2, 1, 0, 0) FWD32(64, 2, 1, 1, 0) FWD32(64, 2, 1, 0, 1) FWD32(64, 2, 1, 1, 1)
 #undef FWD32
   TORCH_CHECK(false, "attn_fwd_tf32: unsupported schedule (hd, nkv, minb, gate, kpen)");
+}
+
+void attn_fwd_tf32(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor gate, torch::Tensor out, torch::Tensor lse, int64_t A, int64_t L, int64_t H,
+                   int64_t hd, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldg, int64_t ldo, double scl, double bscl, int64_t nkv, int64_t minb, int64_t ss, torch::Tensor kpen,
+                   int64_t kps) {
+  attn_fwd_tf32_impl(q, k, v, bias, gate, out, lse, A, L, H, hd, ldq, ldk, ldv, ldg, ldo, scl, bscl, nkv, minb, ss, kpen, kps, torch::Tensor());
+}
+
+// attn_fwd_tf32 with ``kmask`` (bool [1 or A, n]): each sample's key tiles past its last attended key skipped (the same bits)
+void attn_fwd_tf32_km(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor gate, torch::Tensor out, torch::Tensor lse, int64_t A, int64_t L,
+                      int64_t H, int64_t hd, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldg, int64_t ldo, double scl, double bscl, int64_t nkv, int64_t minb, int64_t ss,
+                      torch::Tensor kpen, int64_t kps, torch::Tensor kmask) {
+  attn_fwd_tf32_impl(q, k, v, bias, gate, out, lse, A, L, H, hd, ldq, ldk, ldv, ldg, ldo, scl, bscl, nkv, minb, ss, kpen, kps, kmask);
 }
 
 // The backward, query side: q / k / v / dov token-major fp32 views, bias [H][L][L] fp32 natural units, lse / delta [A][H][L] -> dq [A L][lddq] fp32 and the partial bias gradients
@@ -198,6 +217,7 @@ void attn_delta32(torch::Tensor dO, torch::Tensor O, torch::Tensor delta, int64_
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("attn_fwd_tf32", &attn_fwd_tf32);
+  m.def("attn_fwd_tf32_km", &attn_fwd_tf32_km);
   m.def("attn_bwd_dq_tf32", &attn_bwd_dq_tf32);
   m.def("db_reduce32", &db_reduce32);
   m.def("attn_bwd_dkv_tf32", &attn_bwd_dkv_tf32);

@@ -100,12 +100,15 @@ const __nv_bfloat16* bfp(const at::Tensor& t) { return reinterpret_cast<const __
 __nv_bfloat16* bfw(at::Tensor& t) { return reinterpret_cast<__nv_bfloat16*>(t.data_ptr()); }
 
 // the gated inference core, in place over q: sigmoid(g) o written into the q columns of qkvg [Lp, 4 W] (W = H hd)
-void step_core_gate(at::Tensor& qkvg, const at::Tensor& bias, int64_t Lp, int64_t H, int64_t hd, int nw, cudaStream_t st, int bn) {
+// kmb (the row's bool key mask, kml keys) or null: the key tiles past the row's last attended key are skipped (the same bits)
+void step_core_gate(at::Tensor& qkvg, const at::Tensor& bias, int64_t Lp, int64_t H, int64_t hd, int nw, cudaStream_t st, int bn,
+                    const uint8_t* kmb = nullptr, int kml = 0) {
   const int64_t W = H * hd, ld = qkvg.stride(0);
   aa80::FwdParams p{};
   p.q = bfp(qkvg); p.k = p.q + W; p.v = p.q + 2 * W; p.bias = bfp(bias); p.gate = p.q + 3 * W;
   p.out = qkvg.data_ptr(); p.lse = nullptr; p.kpen = nullptr;
   p.ldq = p.ldk = p.ldv = p.ldg = p.ldo = ld; p.ss = Lp; p.kps = 0; p.L = (int)Lp; p.H = (int)H; p.scl = 1.f; p.bscl = 1.f;
+  p.kmb = kmb; p.kms = 0; p.kml = kml;
   sa_fwd<aa80::MODE_GATE>((int)hd, nw, p, st, bn);
 }
 
@@ -135,7 +138,8 @@ at::Tensor apb_inference(at::Tensor single, at::Tensor pair, c10::optional<at::T
   } else {
     pair_bias_fwd(pair2, wf, mask, bias, L, eps_p, -1e30);
   }
-  step_core_gate(qkvg, bias, Lp, H, hd, (int)warps, st, (int)bn);
+  // the key tiles past the last attended key of the mask (and the pad keys to Lp) skipped by the core (key_len.cuh; the same bits)
+  step_core_gate(qkvg, bias, Lp, H, hd, (int)warps, st, (int)bn, mask.has_value() ? reinterpret_cast<const uint8_t*>(mask->data_ptr()) : nullptr, (int)L);
   y.addmm_(qkvg.slice(0, 0, L).slice(1, 0, W), wo.t());
   return y.view({1, L, D});
 }

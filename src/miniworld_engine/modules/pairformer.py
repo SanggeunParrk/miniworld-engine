@@ -69,8 +69,8 @@ class PairformerBlock(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,  # 2026-11-13: its sub-modules' anthropic paths (TriAttn folded block + cu129 core prebuilts, Transition folded residual)
         "anthropic:a100_sm80": 3,  # 2026-11-13: the A100 kit stack (its TriMul / TriAttn sub-modules on the kits' sm_80 native rows)
-        "cuda:a100_sm80": 7,  # 7 (2026-11-14): its TriMul's bounded contraction; 6: TriMul D64 k3s; 5: TriAttn rf core
-        "cuda:h100_sm90": 8,  # 8 (2026-11-14): its TriMul's inference contraction bounded by the mask's live extents (bitwise the same)
+        "cuda:a100_sm80": 8,  # 8 (2026-11-14): its TriMul's bounded contraction; 7: APB key-tile skip (mask-skip-attn); 6: TriMul D64 k3s; 5: TriAttn rf core
+        "cuda:h100_sm90": 9,  # 9 (2026-11-14): its TriMul's inference contraction bounded by the mask's live extents (bitwise the same); 8: mask-skip-attn
     }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
     # batched (the cuda AttentionPairBias takes B > 1: no refusal-driven per-sample path)
     # cuda:a100_sm80 4 (2026-11-12): its AttentionPairBias's generic sm_80 pair-bias backward faster (the same values)
@@ -81,6 +81,8 @@ class PairformerBlock(BackendModule, MasterWeights):
     # cuda:h100_sm90 6 (2026-11-13): its TriangleAttention: d_pair 256 x 8 heads LayerNorm folded into the wide front's pack, d_pair 128
     # ending-node tail reads o transposed (bitwise the same), AF3 d_pair 64 one-kernel front up to L2048
     # cuda:h100_sm90 7 (2026-11-13): its TriangleAttention inference skips the dead trailing key tiles of a padded mask (bitwise the same)
+    # cuda:h100_sm90 8 / cuda:a100_sm80 6 (2026-11-13): its AttentionPairBias inference skips the core's key tiles past each row's last attended
+    # key and the pair-bias tiles whose keys are all masked (bitwise the same)
 
     def __init__(self, config: PairformerConfig, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()
@@ -325,7 +327,10 @@ class Pairformer(BackendModule, MasterWeights):
     """The Pairformer stack: ``config.n_block`` :class:`PairformerBlock` in sequence."""
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "anthropic:a100_sm80": 3}  # 2026-11-13: the blocks' anthropic paths (see PairformerBlock)
+    backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 2,
+        "anthropic:a100_sm80": 3,
+    }  # 2026-11-13: the blocks' anthropic paths (see PairformerBlock)
 
     def __init__(self, config: PairformerConfig | None = None, master_weights: bool = False, *, backend: str = "pytorch") -> None:
         super().__init__()

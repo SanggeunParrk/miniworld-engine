@@ -24,6 +24,7 @@ import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._key_len import kernel_mask
 from miniworld_engine.kernels._nvcc import build_failed
 
 DP = 128
@@ -836,10 +837,12 @@ def _gfwd_row(single, pair, mask, params, heads, gate_bias, eps_s, eps_p, save, 
             og = torch.empty_like(o)
             sm80.gate_rows(o, g, og)
         else:
+            # the key tiles past the last attended key skipped by the core, which reads the mask (``kernels._key_len``; the same bits)
+            km = kernel_mask(m, L)
             if f32:
-                sm80.tf32_forward(q, k, v, bias, 1, L, heads, hdp, sm_scale=scale, gate=g, out=q, rna=True)
+                sm80.tf32_forward(q, k, v, bias, 1, L, heads, hdp, sm_scale=scale, gate=g, out=q, rna=True, kmask=km)
             else:
-                sm80.pgate_forward(q, k, v, g, bias, 1, L, heads, hdp, sm_scale=scale, out=q)
+                sm80.pgate_forward(q, k, v, g, bias, 1, L, heads, hdp, sm_scale=scale, out=q, kmask=km)
             og = q
         out = torch.addmm(x, og, wop.t()).view(single.shape)
     if not save:

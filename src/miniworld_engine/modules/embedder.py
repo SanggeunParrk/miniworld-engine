@@ -98,7 +98,12 @@ class InputFeatureEmbedder(BackendModule):
     # few-row modulation backward on cuBLAS (sm80.train_cfg)
     # cuda:h100_sm90 3 (2026-11-12): bf16 / master global attention on the composed bf16 stages around FlashAttention-4 (was the native stages)
     # triton 2 (2026-11-12): served (its SWAAtomTransformer gained "triton", window and global)
-    backend_versions: ClassVar[dict[str, int]] = {"anthropic": 2, "cuda:a100_sm80": 6, "cuda:h100_sm90": 3, "triton": 2}
+    backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 2,
+        "cuda:a100_sm80": 7,
+        "cuda:h100_sm90": 3,
+        "triton": 2,
+    }  # cuda:a100_sm80 7 (2026-11-13): its SWAAtomTransformer's
     #: The engine backends this composition hands to its children.
     _ENGINE_BACKENDS = ("cuda", "triton")
 
