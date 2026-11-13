@@ -1,5 +1,5 @@
-"""The bias-only token DiT's P v core skips the key blocks past the mask's last attended key (``kernels._key_len``; H100 pvx / pvx32,
-A100 pv_gate / pv_gate_tf32): P = softmax over the keys of the masked pair bias is exactly 0 there in every row that attends a key, so
+"""The bias-only token DiT's P v core skips the key blocks past the mask's last attended key (``kernels._key_len``; H100 pvx32 (fp32; the
+bf16 pvx is left as it was), A100 pv_gate / pv_gate_tf32): P = softmax over the keys of the masked pair bias is exactly 0 there in every row that attends a key, so
 the blocks add nothing and the output is the same bits. A row attending no key keeps every block (a uniform P).
 
 - H100: bitwise against the same call with the core's mask off (``kernel_mask`` patched to None in the integration), every position,

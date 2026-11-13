@@ -1011,7 +1011,7 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # cuda:h100_sm90 3 (2026-11-12): pair_bias_all on H100 is the fused hoist (head-major contiguous biases, as engine 2.4.4): the
     # inference block no longer copies a permuted bias view per call (L 768 24-block stack 9.8 -> ~3.8 ms)
     # cuda:a100_sm80 4 / cuda:h100_sm90 4 (2026-11-13): inference: the P v core skips the key blocks past the mask's last attended key (P = 0
-    # there; the core reads the mask, kernels._key_len; bitwise the same outputs)
+    # there; the core reads the mask, kernels._key_len; bitwise the same outputs) -- A100 bf16 / fp32, H100 fp32 (pvx32; the bf16 pvx unchanged)
     backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 4, "cuda:h100_sm90": 4}
 
     def __init__(

@@ -294,8 +294,8 @@ class FusedBiasOnlyDiT:
     def step(self, single, cond, P, out_dtype=None, kmask=None):
         """One solver step: single [S, 1, L, D], cond [S or 1, 1, L, dc] (one conditioning shared by the samples when
         its sample axis is 1 or has stride 0), P from ``hoist``. Returns [S, 1, L, D] in ``out_dtype`` (single's). ``kmask``: the bool key
-        mask [1, L] P was made with (``kernels._key_len``) or None: the H100 core skips the key blocks past its last attended key, where
-        P is 0 in every row (the same bits; the sm_100 three-kernel steps take it and leave their cores as they are)."""
+        mask [1, L] P was made with (``kernels._key_len``) or None: the H100 TF32 core (fp32) skips the key blocks past its last attended key,
+        where P is 0 in every row (the same bits; the sm_100 three-kernel steps take it and leave their cores as they are)."""
         if not self.fp32:
             if self._inf3b_ok(single.device):
                 return self._step3b(single, cond, P, out_dtype, kmask)
@@ -677,7 +677,8 @@ class FusedBiasOnlyDiT:
         C.adaln_in_rows(single, x[:0] if nocopy else x, g1[:, 0, 0], g1[:, 0, 1], xa, T, EPS, ps)
         sqro = hopper and _H100_SQ_RESOUT and resln is None and not ps and not self.fp32
         h100_tf32 = self.fp32 and hopper
-        km = {"kmask": kmask} if kmask is not None and hopper else {}  # the H100 cores skip the key blocks past the last attended key
+        # the H100 TF32 core skips the key blocks past the last attended key (the bf16 pvx core reads no mask: its skip cost every unpadded call)
+        km = {"kmask": kmask} if kmask is not None and h100_tf32 else {}
         for b, p in enumerate(self.per):
             if h100_tf32:
                 # TF32 wgmma reads K-major operands only: v^T = Wv xa^T from cuBLAS, g = xa Wg^T beside it
@@ -692,7 +693,6 @@ class FusedBiasOnlyDiT:
                     a,
                     S,
                     g=vg[:, DA:],
-                    **km,
                 )  # sigmoid(g) * (P v)
             if resln is not None:  # out GEMM + residual + gate + AdaLN, one kernel
                 resln(a, p["wo"], x, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS)
