@@ -80,7 +80,7 @@ int g_rf_mode = -1;
 template <bool GATE>
 bool try_attn_rf(const a100::AttnParams& p, int z, double scl) {
   int mode = g_rf_mode;
-  if (mode < 0) mode = 0;
+  if (mode < 0) mode = GATE ? 2 : 3;     // provisional rule
   if (p.L % 128 != 0) return false;
   switch (mode) {
     case 1: launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl); return true;
