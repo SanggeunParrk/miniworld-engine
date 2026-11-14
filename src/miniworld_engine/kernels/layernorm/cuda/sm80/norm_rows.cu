@@ -369,6 +369,13 @@ __global__ void __launch_bounds__(512) reduce_partials(const float* __restrict__
 // ------------------------------------------------------------------------------------------------------------------ scalar path (any width, any alignment)
 // VS > 0: the row is cached in registers, lane l holding columns l + 32 k (k < VS, N <= 32 VS); VS = 0: the row is read again from L1 for each pass.
 // one row held at `x` (global or shared memory) normalised into `y` (may be the same place) by the 32 lanes of a warp; mean / rstd come back in every lane
+// volatile read-only loads: the compiler keeps them in program order and does not sink a load behind the first use of an earlier one, so a row of 27 columns and its 54
+// parameter loads are all in flight together (left to itself it issued groups of six and waited for each group: ~14 dependent round trips, bf16 rows 1 us behind fp32 ones)
+__device__ __forceinline__ float ldg_f32(const float* p) { float v; asm volatile("ld.global.nc.f32 %0, [%1];" : "=f"(v) : "l"(p)); return v; }
+__device__ __forceinline__ float ldg_el(const float* p) { return ldg_f32(p); }
+__device__ __forceinline__ float ldg_el(const bf* p) { unsigned short u; asm volatile("ld.global.nc.u16 %0, [%1];" : "=h"(u) : "l"(p)); return __uint_as_float((unsigned)u << 16); }
+__device__ __forceinline__ float ldg_param(const void* p, bool is_bf16, int i) { return is_bf16 ? ldg_el(reinterpret_cast<const bf*>(p) + i) : ldg_f32(reinterpret_cast<const float*>(p) + i); }
+
 template <typename XT, int VS, bool RMS>
 __device__ __forceinline__ void norm_row_scalar(const XT* x, XT* y, int N, int lane, const void* W, const void* B, bool w_bf, float rs, float eps, float& mean_out, float& rstd_out) {
   const float invN = 1.f / (float)N;
@@ -379,13 +386,19 @@ __device__ __forceinline__ void norm_row_scalar(const XT* x, XT* y, int N, int l
     // every load of the row and of the parameters is issued before any is used (the stores come last: a load placed after a store is serialised behind it, which cost a 27-column
     // row 5 of its 9 microseconds)
 #pragma unroll
-    for (int k = 0; k < VS; ++k) {
-      const int c = lane + 32 * k;
-      const bool in = c < N;
-      xr[k] = in ? to_f(x[c]) : 0.f;
-      wr[k] = (W && in) ? param_at(W, w_bf, c) : 1.f;
-      br[k] = (B && in) ? param_at(B, w_bf, c) : 0.f;
+    for (int k = 0; k < VS; ++k) { const int c = lane + 32 * k; xr[k] = ldg_el(x + min(c, N - 1)); }
+#pragma unroll
+    for (int k = 0; k < VS; ++k) { wr[k] = 1.f; br[k] = 0.f; }
+    if (W) {
+#pragma unroll
+      for (int k = 0; k < VS; ++k) { const int c = lane + 32 * k; wr[k] = ldg_param(W, w_bf, min(c, N - 1)); }
     }
+    if (B) {
+#pragma unroll
+      for (int k = 0; k < VS; ++k) { const int c = lane + 32 * k; br[k] = ldg_param(B, w_bf, min(c, N - 1)); }
+    }
+#pragma unroll
+    for (int k = 0; k < VS; ++k) { if (lane + 32 * k >= N) xr[k] = 0.f; }
 #pragma unroll
     for (int k = 0; k < VS; ++k) s += xr[k];
   } else {
@@ -461,10 +474,14 @@ __global__ void __launch_bounds__(NW * 32) fwd_stage(const XT* __restrict__ X, X
   cp_async_commit();
   float wr[VS], br[VS];
 #pragma unroll
-  for (int k = 0; k < VS; ++k) {
-    const int c = lane + 32 * k;
-    wr[k] = (W && c < N) ? param_at(W, w_bf, c) : 1.f;
-    br[k] = (B && c < N) ? param_at(B, w_bf, c) : 0.f;
+  for (int k = 0; k < VS; ++k) { wr[k] = 1.f; br[k] = 0.f; }
+  if (W) {
+#pragma unroll
+    for (int k = 0; k < VS; ++k) { const int c = lane + 32 * k; if (c < N) wr[k] = ldg_param(W, w_bf, c); }
+  }
+  if (B) {
+#pragma unroll
+    for (int k = 0; k < VS; ++k) { const int c = lane + 32 * k; if (c < N) br[k] = ldg_param(B, w_bf, c); }
   }
   const float invN = 1.f / (float)N;
   cp_async_wait<0>();
@@ -903,13 +920,8 @@ inline const FwdDev& fwd_dev() {
   return d;
 }
 // weight / bias loaded up front: always for V <= 4; wider rows by this default
-template <typename XT, int V> constexpr bool early_default() {
-#if defined(MWE_SM120)
-  return V <= (sizeof(XT) == 4 ? 6 : 4);
-#else
-  return V <= 4;
-#endif
-}
+template <typename XT, int V> constexpr bool early_default() { return V <= 6; }   // wider rows (d 2560 bf16: V 10) only while the problem is small (below)
+constexpr long EARLY_MAX_ROWS = 2048;
 
 template <typename XT, bool RMS, int G, int V, int UN, bool E>
 void run_fwd_vec_cfg(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
@@ -927,7 +939,7 @@ void run_fwd_vec(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, co
     run_fwd_vec_cfg<XT, RMS, G, V, UN, true>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   } else {
     const int e = fwd_dev().early;
-    if (e < 0 ? early_default<XT, V>() : e != 0) run_fwd_vec_cfg<XT, RMS, G, V, UN, true>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
+    if (e < 0 ? (early_default<XT, V>() || M <= EARLY_MAX_ROWS) : e != 0) run_fwd_vec_cfg<XT, RMS, G, V, UN, true>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
     else run_fwd_vec_cfg<XT, RMS, G, V, UN, false>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   }
 }
