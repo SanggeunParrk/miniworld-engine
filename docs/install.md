@@ -40,7 +40,7 @@ Developers of the repository use the pixi environment in `pyproject.toml` (`pixi
 Every hand-written CUDA artifact is identified by a content key (its sources and the headers they reach, the flags, torch / CUDA /
 Python versions, the CUTLASS / MathDx release; `kernels/_codegraph.py`). An artifact is looked up, in order, in
 
-1. `miniworld_engine/_prebuilt/` -- filled by the `miniworld-engine-kernels-sm90-cu129` and `miniworld-engine-kernels-sm80-cu129`
+1. `miniworld_engine/_prebuilt/` -- filled by the `miniworld-engine-kernels-sm90-cu129`, `miniworld-engine-kernels-sm80-cu129` and `miniworld-engine-kernels-sm120-cu129`
    wheels, which `pip` installs automatically on Linux x86_64 with CPython 3.12 (the versions are pinned to the engine's; the sm80 wheel from
    2.5.2 on -- with 2.5.1 an A100 JIT-builds). They hold
    the H100 (sm_90a) and A100 (sm_80) builds for torch 2.13 / CUDA 12.9 (one directory, content-keyed paths: no per-arch subdirectory).

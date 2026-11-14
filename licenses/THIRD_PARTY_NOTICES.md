@@ -1,7 +1,7 @@
 # Third-party notices
 
 MiniWorld Engine is distributed as the `miniworld-engine` source distribution and pure-Python wheel and the wheels of prebuilt kernels,
-`miniworld-engine-kernels-sm90-cu129` (H100) and `miniworld-engine-kernels-sm80-cu129` (A100, from 2.5.2). All of them carry this file, the root `LICENSE` and the
+`miniworld-engine-kernels-sm90-cu129` (H100) and `miniworld-engine-kernels-sm80-cu129` (A100, from 2.5.2) and `miniworld-engine-kernels-sm120-cu129` (RTX 5090, from 2.5.8). All of them carry this file, the root `LICENSE` and the
 licence texts in `licenses/`. The package licence expression is `MIT AND Apache-2.0 AND BSD-3-Clause`:
 
 - **MIT** (root `LICENSE`, Copyright (c) 2026 Sanggeun Park): MiniWorld Engine's own code, unless a file says otherwise.
