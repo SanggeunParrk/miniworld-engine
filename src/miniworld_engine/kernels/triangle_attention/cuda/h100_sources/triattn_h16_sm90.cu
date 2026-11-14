@@ -64,22 +64,13 @@ using namespace sm90;
 #ifndef KM_MAXB
 #define KM_MAXB 64        // the most batch elements whose live key tiles the kernel counts from the key mask itself (KM)
 #endif
-#ifndef TA_MAXNREG
-#define TA_MAXNREG 120    // TA_W4: registers per thread (544 threads: 65536 / 544 = 120)
-#endif
-#ifndef TA_W4
-#define TA_W4 0           // 1: four consumer warpgroups, each one (pair row, 64 queries) with a single score buffer and no row alternation: twice the warps per scheduler
-                          // (the two-warpgroup kernel is latency-bound: 2 warps per scheduler, ~55 % issue slots busy).  Same arithmetic per element, bit-identical.
-#endif
 namespace {
 constexpr int D = 32, BM = 128, BN = 128, R = 2, NKV = TA_NKV, NB = TA_NB;
 constexpr int QT = BM * D;                                 // Q tile [128 q][32], 64B swizzle (8 KiB)
 constexpr int KVT = BN * D;                                // K or V tile [128 k][32], 64B swizzle (8 KiB)
 constexpr int STG = 3 * KVT;                               // a K | V stage: K, V, ones (24 KiB)
 constexpr int BT = BM * BN;                                // bias tile: fp16 [2 key halves][128 q][64], 128B swizzle (32 KiB)
-constexpr int THREADS = TA_W4 ? 544 : 384;           // TA_W4: a producer warpgroup + 4 consumer warpgroups (row r, query half w)
-constexpr int NR = TA_W4 ? 1 : R;                          // pair rows one consumer warpgroup holds
-constexpr int GINC = TA_W4 ? 2 : 1;                        // K | V ring stages a consumer advances per key tile (TA_W4: the stages of its own row only)
+constexpr int THREADS = 384;
 constexpr int SMEM = 1024 + (NB * BT + R * QT + NKV * STG) * 2 + 256;
 static_assert(SMEM <= 232448, "one CTA per SM");
 
@@ -187,12 +178,7 @@ __device__ __forceinline__ void load_2d_mc(const void* map, uint32_t dst, uint32
 // ORD1: task order query tile, head in its group of hg, row group, head group (the CTAs running together share the bias of hg heads; hg = 1:
 // one head), else query tile, head, row group.
 template <bool SPEC, bool ORD1, int DH, bool POLY, bool BTR, bool CL = false>   // CL: see TA_CL.  BTR: the bias stored [B, H, key, query] (AF3's ending node from the one-kernel front), read transposed; POLY: TA_POLY of the exponentials on the FMA pipes (32-channel heads); DH: channels per head in q / k / v / gate / out / U: 32, or 16 (compact; the core pads to 32)
-#if TA_W4
-#define TA_KATTR __maxnreg__(TA_MAXNREG)
-#else
-#define TA_KATTR __launch_bounds__(THREADS, 1)
-#endif
-__global__ void TA_KATTR triattn_h16_sm90(
+__global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     int N, int H, int S, int ntasks, float scl,          // scl = scale * log2(e)
     int hg,                                              // ORD1: heads per group (a divisor of H)
     const __grid_constant__ CUtensorMap qmap,            // q [B*N*S][H*32] fp16 (rows may sit at a wider stride), box (32, 128), 64B swizzle
@@ -211,8 +197,6 @@ __global__ void TA_KATTR triattn_h16_sm90(
     const unsigned char* __restrict__ KM) {              // or the key mask itself (bool [B][S], 16-byte aligned, B <= KM_MAXB): the live key tiles
                                                          // counted by the producer warpgroup once per CTA (no glue kernels before the launch)
   constexpr bool VOTE = SPEC && TA_SPEC == 2;    // TA_SPEC 2: no fix list (see X)
-  static_assert(!TA_W4 || (NKV % 2 == 0 && !TA_PP && !TA_SW && TA_SPEC != 1), "TA_W4: even ring, no PP / SW / list form");
-  static_assert(!TA_W4 || !CL, "TA_W4: no cluster form");
   constexpr bool LIST = SPEC && !VOTE;
   const bool LISTM = !SPEC && FIX != nullptr;
   const int nt = LISTM ? *reinterpret_cast<volatile int*>(FIX) : ntasks;
@@ -238,9 +222,9 @@ __global__ void TA_KATTR triattn_h16_sm90(
   }
   if (tid == 0) {
     uint64_t* bars = reinterpret_cast<uint64_t*>(smb + (bar0 - sB));
-    bar_init(bars, 1); bar_init(bars + 1, TA_W4 ? 16 : 8);
+    bar_init(bars, 1); bar_init(bars + 1, 8);
     for (int k = 0; k < NKV; ++k) { bar_init(bars + 2 + k, 1); bar_init(bars + 2 + NKV + k, CL ? 16 : 8); }
-    for (int k = 0; k < NB; ++k) { bar_init(bars + 2 + 2 * NKV + k, 1); bar_init(bars + 2 + 2 * NKV + NB + k, TA_W4 ? 16 : 8); }
+    for (int k = 0; k < NB; ++k) { bar_init(bars + 2 + 2 * NKV + k, 1); bar_init(bars + 2 + 2 * NKV + NB + k, 8); }
     if (CL) bar_init(bars + 2 + 2 * NKV + 2 * NB, 1);                              // the task-pair hand-over from rank 0
     bar_init_fence();
     reinterpret_cast<int*>(smb + (bar0 - sB) + 244)[0] = 0; reinterpret_cast<int*>(smb + (bar0 - sB) + 244)[1] = 0;     // the fix-list counters
@@ -269,10 +253,8 @@ __global__ void TA_KATTR triattn_h16_sm90(
                       :: "r"(dst), "l"(map), "r"(bar), "r"(0), "r"(h), "r"(row) : "memory");
   };
   __shared__ int kts[KM_MAXB];                       // KM: 1 + the last attended key of each batch element (0: none)
-  const int ptid = TA_W4 ? tid - 512 : tid;          // the producer's thread index (TA_W4: one warp after the four consumer warpgroups)
-  constexpr int PT = TA_W4 ? 32 : 128;
-  if (TA_W4 ? tid >= 512 : wg == 0) {
-    if (!TA_W4) reg_dealloc<40>();
+  if (wg == 0) {
+    reg_dealloc<40>();
     int lt = 0, st = 0, kph = 0, bs = 0, bph = 0;
     // one key tile of a task: its bias tile and the K / V tiles of both rows
     auto issue_tile = [&](int b, int h, int qt, int g, int j) {
@@ -300,8 +282,8 @@ __global__ void TA_KATTR triattn_h16_sm90(
     // KM: the first task's Q tiles and first key tile (needed whatever the count) are requested before the mask is read; its Q barrier
     // takes the bytes now and its arrival once the count is handed over (below), so the scan's load latency overlaps theirs
     const bool pre = KM != nullptr && (int)blockIdx.x < nt;
-    if (ptid == 0) prefetch_map(&qmap), prefetch_map(&kmap), prefetch_map(&vmap), prefetch_map(&bmap);
-    if (pre && ptid == 0) {
+    if (tid == 0) prefetch_map(&qmap), prefetch_map(&kmap), prefetch_map(&vmap), prefetch_map(&bmap);
+    if (pre && tid == 0) {
       int b, h, qt, g; decode(LISTM ? FIX[1 + blockIdx.x] : (int)blockIdx.x, b, h, qt, g);
       asm volatile("mbarrier.expect_tx.relaxed.cta.shared::cta.b64 [%0], %1;\n" :: "r"(qf), "r"(R * QT * 2) : "memory");
       for (int r = 0; r < R; ++r) load_head(&qmap, sQ + r * QT * 2, qf, h, row0(b, g * R + r) + qt * BM);
@@ -311,10 +293,10 @@ __global__ void TA_KATTR triattn_h16_sm90(
       // what key_tiles() computes, by the 128 producer threads: 16-byte chunks of the mask, the last set byte of each, a max over the 8 lanes
       // of a 128-key group (S % 128 == 0: one batch element), one shared atomic per group
       const int nb = ntasks / (H * NG * QTILES), chunks = nb * S / 16;
-      for (int b = ptid; b < nb; b += PT) kts[b] = 0;
-      named_sync(1, PT);
-      for (int c0 = 0; c0 < chunks; c0 += PT) {
-        const int c = c0 + ptid;
+      for (int b = tid; b < nb; b += 128) kts[b] = 0;
+      named_sync(1, 128);
+      for (int c0 = 0; c0 < chunks; c0 += 128) {
+        const int c = c0 + tid;
         int last = 0;
         if (c < chunks) {
           const uint4 v = __ldg(reinterpret_cast<const uint4*>(KM) + c);
@@ -326,11 +308,11 @@ __global__ void TA_KATTR triattn_h16_sm90(
         last = max(last, __shfl_xor_sync(0xffffffffu, last, 1));
         last = max(last, __shfl_xor_sync(0xffffffffu, last, 2));
         last = max(last, __shfl_xor_sync(0xffffffffu, last, 4));
-        if ((ptid & 7) == 0 && c < chunks && last > 0) atomicMax(&kts[(c * 16) / S], last);
+        if ((tid & 7) == 0 && c < chunks && last > 0) atomicMax(&kts[(c * 16) / S], last);
       }
-      named_sync(1, PT);
+      named_sync(1, 128);
     }
-    if (ptid == 0) {
+    if (tid == 0) {
       int pph = 0;
       // next task; CL: the pair index is taken by rank 0 from the counter and handed to rank 1 (remote store + remote arrive), the pair's tasks are 2 u + rank
       auto next_task = [&](int t) -> int {
@@ -366,21 +348,20 @@ __global__ void TA_KATTR triattn_h16_sm90(
     return;
   }
 
-  if (!TA_W4) reg_alloc<232>();
-  const int cw = TA_W4 ? wg : wg - 1, w = TA_W4 ? (cw & 1) : cw, crow = TA_W4 ? (cw >> 1) : 0;   // TA_W4: consumer warpgroup (row rr, query half w)
-  const int T = tid & 127, wi = T >> 5, g8 = lane >> 2, t4 = lane & 3;
+  reg_alloc<232>();
+  const int w = wg - 1, T = tid - 128 * wg, wi = T >> 5, g8 = lane >> 2, t4 = lane & 3;
   if (TA_PP && w == 1) named_arrive(2, 256);       // warpgroup 0 issues first
   const int qrow = 64 * w + 16 * wi;               // this warp's first query row in the tile
   // ldmatrix lane geometry: matrices (rows +0 / +8) x (columns +0 / +8) of a 16 x 16 block
   const int lrow = qrow + (lane & 7) + 8 * ((lane >> 3) & 1), lcol8 = lane >> 4, x7 = lane & 7;
-  const uint32_t qlane = sQ + crow * QT * 2 + lrow * D * 2, blane = sB + lrow * 128;
+  const uint32_t qlane = sQ + lrow * D * 2, blane = sB + lrow * 128;
   // BTR (the bias tile stored [key][query]: AF3's ending node, the pair-as-stored bias): query half w, key row 8 (lane / 16) + lane % 8 of a
   // 16-key block, the 16-byte chunk of queries 16 wi + 8 ((lane / 8) % 2) (128-byte swizzle: chunk ^ row % 8)
   const uint32_t tlane = sB + w * BM * 128 + (8 * lcol8 + x7) * 128 + (((2 * wi + ((lane >> 3) & 1)) ^ x7) << 4);
   const uint64_t kd0 = desc_k64(sKV), vd0 = desc_mn64(sKV + KVT * 2, KVT * 2);   // built once: a wgmma operand costs one 32-bit add
   const uint32_t scl2 = hdup(scl);
   // cursors: the K | V stage and bias stage the next G phase reads; the stage whose PV was issued last (released once it retired)
-  int gst = crow, gph = 0, bs = 0, bph = 0, xst = crow, bad = 0, ovf = 0;
+  int gst = 0, gph = 0, bs = 0, bph = 0, xst = 0, bad = 0, ovf = 0;
   uint32_t qa[R][2][4];
   float o[R][20], m[R][2];                          // [O | l] per row (columns 32..39 = the row sums: o[16] row g, o[18] row g + 8); the offsets
   float lprev[R][2];                                // the row sums before the tile in flight (the increment test of the speculative offset)
@@ -415,11 +396,11 @@ __global__ void TA_KATTR triattn_h16_sm90(
     if (DH == D && !(TA_ABL & 1)) mma_h16_n128(sc[r], qa[r][1], desc_off(kd0, gst * STG * 2 + 32));   // (heads of 16: channels 16-31 are zeros, their k16 step adds exact zeros)
     wg_commit();
     if (r == R - 1 && TA_FR) relb();                // TA_FR: the stage is released after the wgmma issue (the ldmatrix results were consumed by it)
-    gst += GINC; if (gst >= NKV) { gst -= NKV; gph ^= 1; }
+    if (++gst == NKV) { gst = 0; gph ^= 1; }
   };
   // PV of the previous sub-step (row r, stage xst): [O_r | l_r] += P_r [V | 1], issued and committed
   auto PV = [&](int r) {
-    if ((TA_SW && TA_SWF) || TA_W4) wg_fence();                          // TA_SW: the probabilities (A) were written after the last fence, with the next QK^T in flight
+    if (TA_SW && TA_SWF) wg_fence();                          // TA_SW: the probabilities (A) were written after the last fence, with the next QK^T in flight
 #pragma unroll
     for (int kk = 0; kk < BN / 16; ++kk) {
       const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
@@ -430,14 +411,7 @@ __global__ void TA_KATTR triattn_h16_sm90(
   auto release = [&]() {
     __syncwarp();
     if (lane == 0) { arrive(kve(xst)); if (CL) arrive_rank_cta(kve(xst), crank ^ 1u); }
-    xst += GINC; if (xst >= NKV) xst -= NKV;
-  };
-  // TA_W4: the bias stage is read by every consumer warp once per tile (G); released after the QK^T issue (the ldmatrix results were consumed by it)
-  auto rel_bias = [&]() {
-    fence_proxy_async();
-    __syncwarp();
-    if (lane == 0) arrive(bem(bs));
-    if (++bs == NB) { bs = 0; bph ^= 1; }
+    if (++xst == NKV) xst = 0;
   };
   // X phase of row r on sc[r] (its QK^T retired; o[r] idle: the PV in flight is the other row's): the offsets, the exponentials in place.
   // Exact form, and a row without a finite logit yet: the tile's row maximum (a tree of HMNMX2) raises the offset lazily.
@@ -446,16 +420,6 @@ __global__ void TA_KATTR triattn_h16_sm90(
     if (TA_ABL & 128) return;
     uint32_t t0[8], t1[8];
     auto tree = [&]() {                            // this thread's maximum of each of its two rows (no shuffle): a depth-4 tree of HMNMX2
-      if (TA_W4) {                                 // fewer live temporaries (register file of the 4-warpgroup kernel): two chains per row (max is order independent)
-        t0[0] = hmax2(sc[r][0], sc[r][2]); t1[0] = hmax2(sc[r][1], sc[r][3]); t0[1] = hmax2(sc[r][4], sc[r][6]); t1[1] = hmax2(sc[r][5], sc[r][7]);
-#pragma unroll
-        for (int i = 2; i < 8; i += 2) {
-          t0[0] = hmax2(t0[0], hmax2(sc[r][4 * i], sc[r][4 * i + 2])); t1[0] = hmax2(t1[0], hmax2(sc[r][4 * i + 1], sc[r][4 * i + 3]));
-          t0[1] = hmax2(t0[1], hmax2(sc[r][4 * i + 4], sc[r][4 * i + 6])); t1[1] = hmax2(t1[1], hmax2(sc[r][4 * i + 5], sc[r][4 * i + 7]));
-        }
-        t0[0] = hmax2(t0[0], t0[1]); t1[0] = hmax2(t1[0], t1[1]);
-        return;
-      }
 #pragma unroll
       for (int i = 0; i < 8; ++i) { t0[i] = hmax2(sc[r][4 * i], sc[r][4 * i + 2]); t1[i] = hmax2(sc[r][4 * i + 1], sc[r][4 * i + 3]); }
 #pragma unroll
@@ -565,50 +529,28 @@ __global__ void TA_KATTR triattn_h16_sm90(
     const int nk = (KT != nullptr || KM != nullptr) ? *nkslot : NK;   // (the producer's count: it streams these tiles)
     // Q fragments of the warp's 16 rows (A of the QK^T wgmma), two k16 blocks per pair row
 #pragma unroll
-    for (int r = 0; r < NR; ++r)
+    for (int r = 0; r < R; ++r)
 #pragma unroll
       for (int ks = 0; ks < 2; ++ks) ldsm_x4(qlane + r * QT * 2 + (((2 * ks + lcol8) ^ ((lrow >> 1) & 3)) << 4), qa[r][ks]);
 #pragma unroll
-    for (int r = 0; r < NR; ++r) { fence_regs(qa[r][0]); fence_regs(qa[r][1]); }   // loaded before sQ is released
+    for (int r = 0; r < R; ++r) { fence_regs(qa[r][0]); fence_regs(qa[r][1]); }   // loaded before sQ is released
     fence_proxy_async();
     __syncwarp();
     if (lane == 0) arrive(qe);
 #pragma unroll
-    for (int r = 0; r < NR; ++r) {
+    for (int r = 0; r < R; ++r) {
 #pragma unroll
       for (int i = 0; i < 20; ++i) o[r][i] = 0.f;
       m[r][0] = m[r][1] = -INFINITY;               // no finite logit seen yet
       lprev[r][0] = lprev[r][1] = 0.f;
     }
     ovf = 0;
-    uint4 gpre[R][2];                               // the gate's values of this lane's output columns, loaded under the last key tile
-    if (TA_W4) {
-      // one (row, 64 queries) per warpgroup, one score buffer: [bias -> sc, QK^T] -> wait -> X -> PV; the PV of a tile is waited for only before the next tile's
-      // ldmatrix overwrites its A registers (the other warpgroups of the scheduler fill the latency)
-      for (int j = 0; j < nk; ++j) {
-        if (GATE != nullptr && j == nk - 1) {
-          const int n = min(g * R + crow, N - 1);
-#pragma unroll
-          for (int half = 0; half < 2; ++half)
-            gpre[0][half] = 8 * t4 < DH ? __ldg(reinterpret_cast<const uint4*>(GATE + ((size_t)row0(b, n) + qt * BM + qrow + g8 + 8 * half) * ldg + h * DH + 8 * t4)) : make_uint4(0, 0, 0, 0);
-        }
-        if (j > 0) { wg_wait<0>(); fence_regs(o[0]); release(); }
-        G(0);
-        rel_bias();
-        wg_wait<0>();
-        fence_regs(sc[0]);
-        X(0);
-        PV(0);
-      }
-      wg_wait<0>();
-      fence_regs(o[0]);
-      release();
-    } else {
     G(0);                                            // sub-step (0, 0): no previous PV
     if (TA_PP) named_arrive(2 + (w ^ 1), 256);
     wg_wait<0>();
     fence_regs(sc[0]);
     if (!TA_SW) X(0);
+    uint4 gpre[R][2];                               // the gate's values of this lane's output columns, loaded under the last key tile
     if (TA_SW) step_sw(std::true_type{}, std::false_type{}, 0);
     for (int j = 0; j < nk; ++j) {
       if (GATE != nullptr && j == nk - 1) {
@@ -635,11 +577,10 @@ __global__ void TA_KATTR triattn_h16_sm90(
     fence_regs(o[0]); fence_regs(o[1]);
     if (LIST) check(1);
     release();
-    }
     // ---- epilogue: O_r / l_r -> bf16 -> out (a quad transposes its 4 x 4 words so each lane stores 16 contiguous bytes); LSE
 #pragma unroll
-    for (int r = 0; r < NR; ++r) {
-      const int n = g * R + (TA_W4 ? crow : r);
+    for (int r = 0; r < R; ++r) {
+      const int n = g * R + r;
       if (n >= N) continue;                          // a padding row: computed on row N - 1, not stored
       const float l0 = o[r][16], l1 = o[r][18];
       bad |= !(l0 > 0.f) || !(l0 < 3.0e38f) || !(l1 > 0.f) || !(l1 < 3.0e38f);
