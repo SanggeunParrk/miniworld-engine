@@ -98,6 +98,12 @@ __device__ __forceinline__ void mma_h16_n24(float (&d)[12], const uint32_t (&a)[
                : SM90_D8(0), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11])
                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
 }
+// ablation only (TA_ABL 1024): the 32-channel PV without the ones block (m64n32, row sums stay 0 -- WRONG results, time only)
+__device__ __forceinline__ void mma_h16_n32(float (&d)[20], const uint32_t (&a)[4], uint64_t b) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n32k16.f32.f16.f16 " SM90_L16 ", {%16, %17, %18, %19}, %20, p, 1, 1, 1;\n}\n"
+               : SM90_D16(0) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+}
 __device__ __forceinline__ uint32_t hmax2(uint32_t a, uint32_t b) { uint32_t r; asm("max.f16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 __device__ __forceinline__ uint32_t hfma2(uint32_t a, uint32_t b, uint32_t c) { uint32_t r; asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r; }
 __device__ __forceinline__ uint32_t hex2(uint32_t a) { uint32_t r; asm("ex2.approx.f16x2 %0, %1;" : "=r"(r) : "r"(a)); return r; }
@@ -140,7 +146,7 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
 #define TA_N24 1          // 16-channel heads: [O | l] += P [V | 1] as m64n24 (16 value channels + one 8-column ones block, V and ones in 32-byte-swizzle MN-major atoms) instead of n40 (32 zero-padded channels + ones).  Bit-identical (the extra columns were exact zeros)
 #endif
 #ifndef TA_ABL
-#define TA_ABL 0         // ablation bit mask (time only, WRONG results): 1 no QK wgmma, 2 no PV wgmma, 4 no exp, 8 no scale/offset HFMA2, 16 no max machinery, 32 no bias ldmatrix, 128 no X phase
+#define TA_ABL 0         // ablation bit mask (time only, WRONG results): 1 no QK wgmma, 2 no PV wgmma (the probabilities stay live), 4 no exp, 8 no scale/offset HFMA2, 16 no max machinery, 32 no bias ldmatrix, 128 no X phase
 #endif
 #ifndef TA_POLY
 #define TA_POLY 8         // pairs i (of 16 per row) whose exponentials run as hex2_poly: TA_POLY of every 16 (1, 2, 4, 8 or 16), the rest on the
@@ -418,7 +424,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
 #pragma unroll
     for (int kk = 0; kk < BN / 16; ++kk) {
       const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
-      if (!(TA_ABL & 2)) { if constexpr (N24) mma_h16_n24(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 512)); else mma_h16_n40(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024)); }
+      if (TA_ABL & 2) asm volatile("" :: "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]));   // PV ablated: the probabilities stay live (else ptxas drops the exponentials too)
+      if (!(TA_ABL & 2)) { if constexpr (N24) mma_h16_n24(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 512)); else if ((TA_ABL & 1024) != 0) mma_h16_n32(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024)); else mma_h16_n40(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024)); }
     }
     wg_commit();
   };
