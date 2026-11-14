@@ -449,6 +449,72 @@ __global__ void __launch_bounds__(NTF) fwd_scalar(const XT* __restrict__ X, XT* 
   }
 }
 
+// ------------------------------------------------------------------------------------------------------------------ row-per-CTA path (odd widths, few rows)
+// A row of N <= 1024 (any alignment) is normalised by a whole CTA of NTR threads, thread t on columns t + NTR k: a third of the loads / arithmetic a lane of the warp-per-row kernel
+// above has to issue for the same row (VS = 27 columns at d 833 against VK = 7), which is the whole latency of a call of a few hundred rows (each warp-per-row lane runs ~100 loads
+// and ~400 instructions in series while most SMs idle).  Every load of the row and of the parameters is issued up front (volatile, as in norm_row_scalar); the two row sums are a
+// warp shuffle and a fixed-order sum of the NTR / 32 warp partials through shared memory (deterministic).
+constexpr int NTR = 128;
+template <typename XT, int VK, bool RMS, bool WBF>
+__global__ void __launch_bounds__(NTR) fwd_rowcta(const XT* __restrict__ X, XT* __restrict__ Y, const void* __restrict__ W, const void* __restrict__ B, bool,
+                                                  const XT* __restrict__ RS, float* __restrict__ MEAN, float* __restrict__ RSTD, long M, int N, float eps) {
+  constexpr bool w_bf = WBF;
+  __shared__ float red[2][NTR / 32];
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+  const long row = blockIdx.x;                              // one row a CTA: the whole CTA is in range or out of it
+  if (row >= M) return;
+  const XT* x = X + row * N;
+  float xr[VK], wr[VK], br[VK];
+#pragma unroll
+  for (int k = 0; k < VK; ++k) { const int c = tid + NTR * k; xr[k] = ldg_el(x + min(c, N - 1)); wr[k] = 1.f; br[k] = 0.f; }
+  if (W) {
+#pragma unroll
+    for (int k = 0; k < VK; ++k) { const int c = tid + NTR * k; wr[k] = ldg_param(W, w_bf, min(c, N - 1)); }
+  }
+  if (B) {
+#pragma unroll
+    for (int k = 0; k < VK; ++k) { const int c = tid + NTR * k; br[k] = ldg_param(B, w_bf, min(c, N - 1)); }
+  }
+  const float invN = 1.f / (float)N;
+  float s = 0.f;
+#pragma unroll
+  for (int k = 0; k < VK; ++k) { if (tid + NTR * k >= N) xr[k] = 0.f; s += xr[k]; }
+  float mean = 0.f;
+  if constexpr (!RMS) {
+    s = warp_sum(s);
+    if (lane == 0) red[0][warp] = s;
+    __syncthreads();
+    float t = 0.f;
+#pragma unroll
+    for (int w = 0; w < NTR / 32; ++w) t += red[0][w];
+    mean = t * invN;
+  }
+  float q = 0.f;
+#pragma unroll
+  for (int k = 0; k < VK; ++k) {
+    xr[k] = tid + NTR * k < N ? xr[k] - mean : 0.f;
+    q = fmaf(xr[k], xr[k], q);
+  }
+  q = warp_sum(q);
+  if (lane == 0) red[1][warp] = q;
+  __syncthreads();
+  float t = 0.f;
+#pragma unroll
+  for (int w = 0; w < NTR / 32; ++w) t += red[1][w];
+  const float rstd = rsqrtf(t * invN + eps);
+  const float rs = RS ? to_f(RS[row]) : 1.f;
+  XT* y = Y + row * N;
+#pragma unroll
+  for (int k = 0; k < VK; ++k) {
+    const int c = tid + NTR * k;
+    if (c < N) y[c] = from_f<XT>(fmaf(xr[k] * rstd, wr[k], br[k]) * rs);
+  }
+  if (tid == 0) {
+    if (MEAN) MEAN[row] = mean;
+    if (RSTD) RSTD[row] = rstd;
+  }
+}
+
 // ------------------------------------------------------------------------------------------------------------------ staged path (odd widths, M large)
 // A row of N elements is not a whole number of 16-byte chunks, but U rows are (U = 16 / gcd(16, row bytes), 8 bf16 rows of 267): a unit of U rows is contiguous, 16-byte
 // aligned and a whole number of chunks.  A CTA of NW warps copies a tile of R rows (a multiple of U) into shared memory with cp.async (coalesced, 16 bytes a lane), the warps
@@ -910,11 +976,11 @@ FwdCfg fwd_cfg_bf16(int N, long M, int G0) {
 #define NORMS_TRIPLES_FWD_F32(X) X(32, 6, 2) X(32, 4, 2) X(32, 3, 2) X(32, 8, 2)
 
 // DEV (probe only): MWE_LN_FWD="early,stage,un" overrides the parameter-load mode (V > 4), the staged forward's minimum rows and the row groups a warp
-struct FwdDev { int early = -1, stage = -1, un = 0; };
+struct FwdDev { int early = -1, stage = -1, un = 0, rc = 0; };
 inline const FwdDev& fwd_dev() {
   static const FwdDev d = [] {
     FwdDev r;
-    if (const char* s = std::getenv("MWE_LN_FWD")) std::sscanf(s, "%d,%d,%d", &r.early, &r.stage, &r.un);
+    if (const char* s = std::getenv("MWE_LN_FWD")) std::sscanf(s, "%d,%d,%d,%d", &r.early, &r.stage, &r.un, &r.rc);
     return r;
   }();
   return d;
@@ -987,8 +1053,28 @@ void run_fwd_scalar(const XT* X, XT* Y, const void* W, const void* B, bool w_bf,
   else fwd_scalar<XT, VS, RMS, false><<<(unsigned)grid, NTF, 0, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps);
 }
 
+template <typename XT, bool RMS, int VK>
+void run_fwd_rowcta(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
+  if (w_bf) fwd_rowcta<XT, VK, RMS, true><<<(unsigned)M, NTR, 0, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps);
+  else fwd_rowcta<XT, VK, RMS, false><<<(unsigned)M, NTR, 0, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps);
+}
+
+// rows served by the row-per-CTA kernel instead of the warp-per-row one (odd widths up to 1024): DEV override MWE_LN_FWD 4th field (-1: never)
+constexpr long ROWCTA_MAX_ROWS = 2048;
+
 template <typename XT, bool RMS>
 void launch_fwd_scalar(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
+  {
+    const long lim = fwd_dev().rc != 0 ? (long)fwd_dev().rc : ROWCTA_MAX_ROWS;
+    if (N <= 1024 && N > 128 && M <= lim) {
+      const int vk = (N + NTR - 1) / NTR;
+      switch (vk) {
+#define RC(v) case v: run_fwd_rowcta<XT, RMS, v>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return;
+        RC(2) RC(3) RC(4) RC(5) RC(6) RC(7) RC(8)
+#undef RC
+      }
+    }
+  }
   if (N <= 64) run_fwd_scalar<XT, RMS, 2>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   else if (N <= 128) run_fwd_scalar<XT, RMS, 4>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   else if (N <= 256) run_fwd_scalar<XT, RMS, 8>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
