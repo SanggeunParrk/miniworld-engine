@@ -67,8 +67,10 @@ class Transition(BackendModule, MasterWeights):
         "cuda:h100_sm90": 5,
         "cuda:a100_sm80": 6,
         "triton:a100_sm80": 2,
-        "cuda:5090_sm120": 3,
+        "cuda:5090_sm120": 4,
     }
+    # 2026-11-14 (RTX 5090): cuda:5090_sm120 4 = calls past 64 x 65535 rows (L 2048 pair, D >= 256 eval) take 128-row tiles (they failed with a grid y
+    # overflow: invalid configuration argument)
     # 2026-11-13: anthropic 3 = the pair transition folds the residual in the kernel (the kits' block statement); the esm_t16 cell served wherever the driver loads its CUDA-13 cubin
     # 2026-11-13 (RTX 5090): cuda:5090_sm120 2 = the one-kernel D 64 / 128 backward on sm_120a (32-row PW stages), half tiles of the fused forward at few rows;
     # 3 = the main merge (the A100 changes 5 / 6 run on the sm_120a build too)

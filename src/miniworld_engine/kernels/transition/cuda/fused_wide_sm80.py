@@ -120,9 +120,11 @@ def _tiles_sm120(m: int, d: int, h: int) -> tuple[int, int]:
     config 8 (its 5-slice twin of config 3) above, and at D >= 256 config 2 below 5e10 multiply-adds and config 7 (256 x 128, 8 warps,
     96 KB) above (5-8 % over config 0).  At few rows (token-single calls, at most ``SM120_SMALL_ROWS``) the dual GEMM takes config
     13 (64 x 32: twice the CTAs of config 2) and the squeeze, the hand GEMM from ``SM120_HAND_SQUEEZE_MIN_ROWS`` on, config 12 (64 x 64): cuBLAS picks
-    its slow wmma kernels there on sm_120 (bench.py, CUDA graph, L2 flushed: d 384 .. 768 at 128 .. 2048 rows, 5-20 % faster)."""
+    its slow wmma kernels there on sm_120 (bench.py, CUDA graph, L2 flushed: d 384 .. 768 at 128 .. 2048 rows, 5-20 % faster).
+    Past ``_rows64_ok`` (more 64-row tiles than the grid's y extent: L 2048 pair calls, 4 M rows) the 64-row configs take their 128-row
+    counterparts: dual config 0 and, for the fp32 builds, squeeze config 3."""
     if h == 0:
-        return 2, (3 if d <= 128 else 2)
+        return (2, (3 if d <= 128 else 2)) if _rows64_ok(m) else (0, 3)
     if m <= SM120_SMALL_ROWS:
         return 13, 12
     if d <= 64 or (d == 128 and h <= 256):
@@ -131,7 +133,16 @@ def _tiles_sm120(m: int, d: int, h: int) -> tuple[int, int]:
         res = 2 if m < 393216 else 8
     else:
         res = 7 if m * d * h >= 5e10 else 2
-    return 2, res
+    return (2 if _rows64_ok(m) else 0), res
+
+
+#: the CUDA grid's y extent: the extension's GEMMs put a call's row tiles there
+_GRID_Y = 65535
+
+
+def _rows64_ok(m: int) -> bool:
+    """An ``m``-row call fits a 64-row tile config (its row tiles within ``_GRID_Y``)."""
+    return -(-m // 64) <= _GRID_Y
 
 
 #: RTX 5090 few-row thresholds (``_tiles_sm120``, ``_hand_squeeze``, the gate backward's tile)
@@ -238,9 +249,9 @@ def _dh_cfg(m: int, d: int, h: int, sm120: bool = False) -> int:
     """Tile config of ``gate_dh``: config 0 (128 x 64, two CTAs per SM). In isolation the 128 x 128 tile (config 1) is 6-10 % faster at D384 / D512 (147 k rows), but inside the training step it is
     0.5-2.5 % slower (interleaved A/B, D256 / D384 / D512), so it is not selected.  On the RTX
     5090 (one CTA of config 0's 80 KB an SM there): config 3 (64 x 64, 4 stages) at D <= 128 and config 4 (config 0 with a 5-slice ring) above,
-    1-7 % faster than config 0 at every requirement shape (probe_tiles)."""
+    1-7 % faster than config 0 at every requirement shape (probe_tiles); config 4 also past ``_rows64_ok``."""
     if sm120:
-        return 3 if d <= 128 else 4
+        return 3 if d <= 128 and _rows64_ok(m) else 4
     return 0
 
 
