@@ -48,6 +48,8 @@ def output_kernel(d, h, cfg, rowpad=False, xbuf=1, extra=()):
     kernel = T.load_unit(str(T.compile_text(body, flags)), "b200style_k3_static").kernel(name)
     if wstages:  # operand ring + weight ring + residual tiles + LN vectors / partials + barriers (k3.cu shared layout)
         smem = stages * 128 * 128 + wstages * bn * 128 + xbuf * 2 * 64 * bn * 2 + 16 * d + 4096 + 3 * 512 + 16 * (stages + xbuf + wstages)
+    elif any("K3_WRES=1" in e for e in extra):  # resident weights (k3.cu K3_WRES, one column block): the operand ring holds 16 KB chunks only
+        smem = stages * 128 * 128 + (d // 64 + h // 64) * bn * 128 + xbuf * 2 * 64 * bn * 2 + 16 * d + 4096 + 3 * 512 + 16 * (stages + xbuf + 1)
     else:
         smem = BI._k3_smem(d, bn, stages) + (xbuf - 1) * (2 * 64 * bn * 2 + 16)
     if smem > 232448:

@@ -43,12 +43,35 @@ using bf = __nv_bfloat16;
 #ifndef K3_DIAG
 #define K3_DIAG 0
 #endif
+// ---- pipeline variants (all default 0 = the code below unchanged; each is bit-identical to the default, only the schedule differs)
+// K3_XSPF: the LN_in statistics (mean, rstd) of the NEXT tile are loaded into registers at the top of the current tile (the default loads them
+//   after the gate MMAs of their own tile are issued, so the first FMUL waits the full global-load latency: 12 % of the D128 stall samples).
+// K3_XEARLY: the residual x tile TMA load is issued before the gate MMAs of the (tile, column block), not after them.
+#ifndef K3_XSPF
+#define K3_XSPF 0
+#endif
+#ifndef K3_XEARLY
+#define K3_XEARLY 0
+#endif
+// K3_EPI2: the P pair is rounded to bf16 with one packed convert (value-identical to two scalar round_bf16).
+// K3_DESC: the wgmma descriptors of the four k16 steps are the first one plus a constant (no per-step address arithmetic on the uniform datapath).
+#ifndef K3_EPI2
+#define K3_EPI2 0
+#endif
+#ifndef K3_DESC
+#define K3_DESC 0
+#endif
+// K3_WRES (NCB == 1, i.e. D128): both weight matrices stay resident in shared memory (loaded once per CTA), the operand ring holds only the [128 tok x 64 k]
+// chunks (16 KB stages), so the same shared memory gives a ring of 5-7 stages instead of 4 and the per-tile L2 weight traffic disappears.
+#ifndef K3_WRES
+#define K3_WRES 0
+#endif
 constexpr int XB = XBUF;
 // Hopper implementation of the B200 folded K3 algorithm. The saved tensors
 // are projection/gate values and LN statistics, never normalized H rows.
 constexpr int D = WIDTH, H = HIDDEN, BN = BLOCKN, NS = STAGES, MT = 128;
 constexpr int NCB = D / BN, KG = D / 64, KP = H / 64;
-constexpr int ABYTES = MT * 128, WBYTES = BN * 128, NW = WSTAGES, STAGE = ABYTES + (NW ? 0 : WBYTES);   // STAGE: one operand-ring slot
+constexpr int ABYTES = MT * 128, WBYTES = BN * 128, NW = WSTAGES, STAGE = ABYTES + ((NW || K3_WRES) ? 0 : WBYTES);   // STAGE: one operand-ring slot
 constexpr int XBYTES = 64 * BN * 2;                              // per warpgroup x / y tile
 constexpr int NACC = BN / 2;
 static_assert(D % BN == 0 && (BN == 64 || BN == 128 || BN == 192 || BN == 256), "column block");
@@ -80,7 +103,7 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
   extern __shared__ __align__(1024) uint8_t sm[];
   uint8_t* ring = sm;
   uint8_t* wring = sm + NS * STAGE;                              // WSTAGES: the weight ring
-  uint8_t* xbuf = wring + NW * WBYTES;                             // [2 wg][XB][BN/64 chunks][64 tok][128 B]
+  uint8_t* xbuf = wring + (K3_WRES ? (KG + KP) : NW) * WBYTES;                             // [2 wg][XB][BN/64 chunks][64 tok][128 B]
   float* su = reinterpret_cast<float*>(xbuf + 2 * XB * XBYTES);  // [4][D]
   const float* sv = su + D; const float* sug = su + 2 * D; const float* svg = su + 3 * D;
   float* red = su + 4 * D;                                       // [2 wg][4 grp][64 tok][2]  partial sums
@@ -99,6 +122,7 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
     for (int s = 0; s < NS; ++s) { mbar_init(full + s, 1); mbar_init(empty + s, 8); }
     for (int b = 0; b < 2 * XB; ++b) mbar_init(xfull + b, 1);
     for (int s = 0; s < NW; ++s) { mbar_init(wfull + s, 1); mbar_init(wempty + s, 8); }
+    if (K3_WRES) mbar_init(wfull, 1);
     fence_barrier_init();
     tma_prefetch_desc(&p.tri); tma_prefetch_desc(&p.xa); tma_prefetch_desc(&p.wp); tma_prefetch_desc(&p.wg);
     tma_prefetch_desc(&p.xm); tma_prefetch_desc(&p.ym);
@@ -109,6 +133,11 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
     setmaxnreg_dec<40>();
     if (warp == 0 && lane == 0) {
       uint32_t it = 0;
+      if constexpr (K3_WRES) {                                       // the resident weights: one load per CTA
+        mbar_arrive_expect_tx(wfull, (KG + KP) * WBYTES);
+        for (int kc = 0; kc < KG; ++kc) tma_load_2d(wring + kc * WBYTES, &p.wg, wfull, kc * 64, 0);
+        for (int k = 0; k < KP; ++k) tma_load_2d(wring + (KG + k) * WBYTES, &p.wp, wfull, k * 64, 0);
+      }
       for (int tile = blockIdx.x; tile < p.tiles; tile += gridDim.x) {
         const int tok0 = tile * MT;
 #if ROWPAD
@@ -119,7 +148,7 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
           for (int kc = 0; kc < KG + KP; ++kc, ++it) {
             const int s = it % NS; const uint32_t u = it / NS;
             if (u > 0) mbar_wait(empty + s, (u - 1) & 1);
-            const bool wload = NW == 0 && ((K3_DIAG & 4) == 0 || it < (uint32_t)NS);   // K3_DIAG 4 (measurement): weights only in the first NS stages
+            const bool wload = !K3_WRES && NW == 0 && ((K3_DIAG & 4) == 0 || it < (uint32_t)NS);   // K3_DIAG 4 (measurement): weights only in the first NS stages
             mbar_arrive_expect_tx(full + s, wload ? STAGE : ABYTES);
             uint8_t* a = ring + s * STAGE;
             if (kc < KG) {
@@ -177,13 +206,32 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
     if (lane == 0) { mbar_arrive(empty + (i % NS)); if constexpr (NW > 0) mbar_arrive(wempty + (i % (NW ? NW : 1))); }
   };
   const uint32_t wring_u = smem_u32(wring);
+  if constexpr (K3_WRES) mbar_wait(wfull, 0);
   // the operand chunk and the weight chunk of ring position i (one stage, or WSTAGES: the operand ring slot and the weight ring slot)
   auto wait_stage = [&](uint32_t i) {
     mbar_wait(full + (i % NS), (i / NS) & 1);
     if constexpr (NW > 0) mbar_wait(wfull + (i % (NW ? NW : 1)), (i / (NW ? NW : 1)) & 1);
   };
-  auto wchunk = [&](uint32_t i) -> uint32_t { return NW > 0 ? wring_u + (i % (NW ? NW : 1)) * WBYTES : ring_u + (i % NS) * STAGE + ABYTES; };
+  auto wchunk = [&](uint32_t i) -> uint32_t {
+    if constexpr (K3_WRES) return wring_u + (i % (KG + KP)) * WBYTES;                        // resident weights: chunk kc of the tile sequence (NCB == 1)
+    return NW > 0 ? wring_u + (i % (NW ? NW : 1)) * WBYTES : ring_u + (i % NS) * STAGE + ABYTES;
+  };
 
+#if K3_XSPF
+  float2 nxA = make_float2(0.f, 1.f), nxB = nxA;
+  auto load_xs = [&](int tl, float2& oa, float2& ob) {
+    oa = make_float2(0.f, 1.f); ob = oa;
+    const int t0 = tl * MT + 64 * w;
+#if ROWPAD
+    const int cii = (2 * tl + w) / p.CJ, cjj = ((2 * tl + w) % p.CJ) * 64;
+    if (cii < p.M && cjj + rowA < p.L) oa = ldg64f(p.xs + 2 * ((size_t)cii * p.L + cjj + rowA));
+    if (cii < p.M && cjj + rowB < p.L) ob = ldg64f(p.xs + 2 * ((size_t)cii * p.L + cjj + rowB));
+#else
+    oa = ldg64f(p.xs + 2 * (size_t)(t0 + rowA)); ob = ldg64f(p.xs + 2 * (size_t)(t0 + rowB));
+#endif
+  };
+  if (GFOLD && (int)blockIdx.x < p.tiles) load_xs(blockIdx.x, nxA, nxB);
+#endif
   for (int tile = blockIdx.x; tile < p.tiles; tile += gridDim.x) {
     const int tok0 = tile * MT + 64 * w;
 #if ROWPAD
@@ -193,7 +241,10 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
     const bf* const dsb = p.ds + (size_t)(tok0 / (p.L * p.L)) * p.L * D;
     float s1a = 0.f, s2a = 0.f, s1b = 0.f, s2b = 0.f, ka = 0.f, kb = 0.f;
     float2 xsA = make_float2(0.f, 1.f), xsB = xsA;
-#if ROWPAD
+#if K3_XSPF
+    xsA = nxA; xsB = nxB;
+    if (tile + (int)gridDim.x < p.tiles) load_xs(tile + gridDim.x, nxA, nxB);
+#elif ROWPAD
     if constexpr (GFOLD) {
       if (ci < p.M && cj + rowA < p.L) xsA = ldg64f(p.xs + 2 * ((size_t)ci * p.L + cj + rowA));   // ROWPAD: M = pair rows (B L, b-major)
       if (ci < p.M && cj + rowB < p.L) xsB = ldg64f(p.xs + 2 * ((size_t)ci * p.L + cj + rowB));
@@ -202,6 +253,25 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
     if constexpr (GFOLD) { xsA = ldg64f(p.xs + 2 * (size_t)(tok0 + rowA)); xsB = ldg64f(p.xs + 2 * (size_t)(tok0 + rowB)); }
 #endif
     for (int cb = 0; cb < NCB; ++cb) {
+      const int xbi = XB > 1 ? (int)(xe % XB) : 0;                // the residual tile: the y store that last used this buffer has left shared memory -> load x [64 tok][BN] over it
+      uint8_t* const xcur = xbuf + (w * XB + xbi) * XBYTES;
+      uint64_t* const xbar = xfull + w * XB + xbi;
+      const uint32_t xb_u = xb_w + xbi * XBYTES;
+      auto issue_x = [&](int cbi) {
+        if (elect) {
+          tma_store_wait_read<XB - 1>();
+          mbar_arrive_expect_tx(xbar, XBYTES);
+#pragma unroll
+#if ROWPAD
+          for (int j = 0; j < BN / 64; ++j) tma_load_3d(xcur + j * 8192, &p.xm, xbar, cbi * BN + 64 * j, cj, ci);
+#else
+          for (int j = 0; j < BN / 64; ++j) tma_load_2d(xcur + j * 8192, &p.xm, xbar, cbi * BN + 64 * j, tok0);
+#endif
+        }
+      };
+#if K3_XEARLY
+      issue_x(cb);
+#endif
       // ---- gate: G = xa . Wg^T (K = D)
       for (int kc = 0; kc < KG; ++kc, ++it) {
         const int s = it % NS;
@@ -209,7 +279,13 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
         const uint32_t a = ring_u + s * STAGE + 8192 * w, b = wchunk(it);
         fence_regs(acc); wgmma_fence();
 #pragma unroll
+#if K3_DESC
+        { const uint64_t da = smem_desc(a, 16, 1024, 1), db = smem_desc(b, 16, 1024, 1);
+#pragma unroll
+          for (int q = 0; q < 4; ++q) mma_n<0>(acc, da + 2 * q, db + 2 * q, kc > 0 || q > 0); }
+#else
         for (int q = 0; q < 4; ++q) mma_n<0>(acc, smem_desc(a + 32 * q, 16, 1024, 1), smem_desc(b + 32 * q, 16, 1024, 1), kc > 0 || q > 0);
+#endif
         wgmma_commit();
         if (kc > 0) { wgmma_wait<1>(); fence_regs(acc); release(it - 1); }
       }
@@ -227,21 +303,9 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
 #pragma unroll
         for (int g = 0; g < NACC / 4; ++g) { gp[2 * g] = pack_bf16(acc[4 * g], acc[4 * g + 1]); gp[2 * g + 1] = pack_bf16(acc[4 * g + 2], acc[4 * g + 3]); }
       }
-      // the residual tile: the y store that last used this buffer has left shared memory -> load x [64 tok][BN] over it
-      const int xbi = XB > 1 ? (int)(xe % XB) : 0;
-      uint8_t* const xcur = xbuf + (w * XB + xbi) * XBYTES;
-      uint64_t* const xbar = xfull + w * XB + xbi;
-      const uint32_t xb_u = xb_w + xbi * XBYTES;
-      if (elect) {
-        tma_store_wait_read<XB - 1>();
-        mbar_arrive_expect_tx(xbar, XBYTES);
-#pragma unroll
-#if ROWPAD
-        for (int j = 0; j < BN / 64; ++j) tma_load_3d(xcur + j * 8192, &p.xm, xbar, cb * BN + 64 * j, cj, ci);
-#else
-        for (int j = 0; j < BN / 64; ++j) tma_load_2d(xcur + j * 8192, &p.xm, xbar, cb * BN + 64 * j, tok0);
+#if !K3_XEARLY
+      issue_x(cb);
 #endif
-      }
       // ---- projection: raw tri (MN-major) . Wpf^T (K = H); output-LN statistics on the tile's first column block
       for (int kc = 0; kc < KP; ++kc, ++it) {
         const int s = it % NS;
@@ -249,7 +313,13 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
         const uint32_t a = ring_u + s * STAGE + 8192 * w, b = wchunk(it);
         fence_regs(acc); fence_regs(gp); wgmma_fence();
 #pragma unroll
+#if K3_DESC
+        { const uint64_t da = smem_desc(a, 16, 1024, 1), db = smem_desc(b, 16, 1024, 1);
+#pragma unroll
+          for (int q = 0; q < 4; ++q) mma_n<1>(acc, da + 128 * q, db + 2 * q, kc > 0 || q > 0); }
+#else
         for (int q = 0; q < 4; ++q) mma_n<1>(acc, smem_desc(a + 2048 * q, 16, 1024, 1), smem_desc(b + 32 * q, 16, 1024, 1), kc > 0 || q > 0);
+#endif
         wgmma_commit();
         if (cb == 0) {                                   // warp wiw: channels 16 wiw .. +15 of the chunk, tokens 2 lane, 2 lane + 1
           if (kc == 0) { const uint32_t v0 = lds32(a + swz128(0, 4 * lane)); ka = bf16lo(v0); kb = bf16hi(v0); }
@@ -290,10 +360,16 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
         const float2 uu = *reinterpret_cast<const float2*>(su + c), vv = *reinterpret_cast<const float2*>(sv + c);
         const uint32_t ad = xb_u + (cc / 64) * 8192 + swz128(rowA, (cc % 64) * 2), bd = xb_u + (cc / 64) * 8192 + swz128(rowB, (cc % 64) * 2);
         const uint32_t xa = lds32(ad), xb = lds32(bd);
+#if K3_EPI2
+        const uint32_t ppa = pack_bf16(fmaf(rsA, acc[4 * g + 0], fmaf(nmA, uu.x, vv.x)), fmaf(rsA, acc[4 * g + 1], fmaf(nmA, uu.y, vv.y)));
+        const uint32_t ppb = pack_bf16(fmaf(rsB, acc[4 * g + 2], fmaf(nmB, uu.x, vv.x)), fmaf(rsB, acc[4 * g + 3], fmaf(nmB, uu.y, vv.y)));
+        const float pa0 = bf16lo(ppa), pa1 = bf16hi(ppa), pb0 = bf16lo(ppb), pb1 = bf16hi(ppb);
+#else
         const float pa0 = math::round_bf16(fmaf(rsA, acc[4 * g + 0], fmaf(nmA, uu.x, vv.x)));
         const float pa1 = math::round_bf16(fmaf(rsA, acc[4 * g + 1], fmaf(nmA, uu.y, vv.y)));
         const float pb0 = math::round_bf16(fmaf(rsB, acc[4 * g + 2], fmaf(nmB, uu.x, vv.x)));
         const float pb1 = math::round_bf16(fmaf(rsB, acc[4 * g + 3], fmaf(nmB, uu.y, vv.y)));
+#endif
         const size_t ia = (size_t)(tok0 + rowA) * D + c, ib = (size_t)(tok0 + rowB) * D + c;
         if (p.pv) {
           *reinterpret_cast<uint32_t*>(p.pv + ia) = pack_bf16(pa0, pa1);
