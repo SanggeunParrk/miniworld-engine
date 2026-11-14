@@ -1,10 +1,11 @@
 # Benchmarks
 
-Speed figures and tables of the engine's requirement cases, one folder per card (`h100_sm90/`, `a100_sm80/`). Everything here is
+Speed figures and tables of the engine's requirement cases, one folder per card (`h100_sm90/`, `a100_sm80/`, `5090_sm120/`). Everything here is
 **generated from results that already exist**; nothing in this folder measures:
 
     python -m miniworld_engine.measure.plot --gpu h100_sm90                 # from the card's speed tokens (judge/tokens/<gpu>/)
     python -m miniworld_engine.measure.plot --gpu a100_sm80
+    python -m miniworld_engine.measure.plot --gpu 5090_sm120
     python -m miniworld_engine.measure.plot --gpu h100_sm90 --module Transition
     python -m miniworld_engine.measure.plot --gpu h100_sm90 --source RUN_DIR --out /scratch/plots   # from speed records not issued yet
 
