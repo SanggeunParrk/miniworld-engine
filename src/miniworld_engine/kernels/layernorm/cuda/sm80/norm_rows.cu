@@ -965,15 +965,22 @@ FwdCfg fwd_cfg_bf16(int N, long M, int G0) {
       return {8, 1};
     case 128: return {16, E < 1.2e6 ? 1 : 2};
     case 256: return {32, (E >= 1.2e6 && E < 1.2e7) ? 2 : 1};
+#if defined(MWE_SM120)
+    case 384: return {16, 1};   // RTX 5090 (kernel durations, L2 flushed, 16384 x 384 pair rows 17.0 -> 15.1 us; a second row group a warp only costs there)
+#else
     case 384: return {16, (E >= 4e6 && E < 1.2e7) ? 2 : 1};
+#endif
     case 512: return {32, (E >= 2e6 && E < 2e7) ? 2 : 1};
+#if defined(MWE_SM120)
+    case 768: return {32, 1};   // RTX 5090: one row group a warp at every size (7680 x 768 bf16 1.12 -> 1.09 of the Triton kernel, 10240 rows 1.12 -> 0.97)
+#else
     case 768: return {32, (E >= 2e6 && E < 8e6) ? 2 : 1};
+#endif
     default: return {G0, 1};
   }
 }
 // (lane group, chunks per lane, row groups per warp) the bf16 configurations above add to the default pairs
 #define NORMS_TRIPLES_FWD_BF(X) X(2, 1, 2) X(2, 1, 4) X(8, 1, 2) X(4, 2, 1) X(4, 2, 2) X(16, 1, 2) X(32, 1, 2) X(16, 3, 2) X(32, 2, 2) X(32, 3, 2)
-#define NORMS_TRIPLES_FWD_F32(X) X(32, 6, 2) X(32, 4, 2) X(32, 3, 2) X(32, 8, 2)
 
 // DEV (probe only): MWE_LN_FWD="early,stage,un" overrides the parameter-load mode (V > 4), the staged forward's minimum rows and the row groups a warp
 struct FwdDev { int early = -1, stage = -1, un = 0, rc = 0; };
@@ -1022,25 +1029,13 @@ bool launch_fwd_vec(int NV, const XT* X, XT* Y, const void* W, const void* B, bo
       un = c.UN;
     }
   }
-  if (fwd_dev().un > 0 && G > 0) un = fwd_dev().un;
 
-#if defined(MWE_SM120)
-  // RTX 5090: fp32 rows of 6 chunks a lane (d 768) take two row groups a warp (more bytes in flight: 768 x 2560 fp32 11.8 -> 10.6 us with the early parameters)
-  if constexpr (std::is_same_v<XT, float>) {
-    if (G == 32 && V == 6 && (fwd_dev().un == 2 || (fwd_dev().un == 0 && M >= 1536))) { run_fwd_vec<XT, RMS, 32, 6, 2>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
-  }
-#endif
 #define TRY(g, v) if (G == g && V == v && un == 1) { run_fwd_vec<XT, RMS, g, v, 1>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
   NORMS_PAIRS_FWD(TRY)
 #undef TRY
   if constexpr (std::is_same_v<XT, bf>) {
 #define TRY3(g, v, u) if (G == g && V == v && un == u) { run_fwd_vec<XT, RMS, g, v, u>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
     NORMS_TRIPLES_FWD_BF(TRY3)
-#undef TRY3
-  }
-  if constexpr (std::is_same_v<XT, float>) {
-#define TRY3(g, v, u) if (G == g && V == v && un == u) { run_fwd_vec<XT, RMS, g, v, u>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
-    NORMS_TRIPLES_FWD_F32(TRY3)
 #undef TRY3
   }
   return false;
