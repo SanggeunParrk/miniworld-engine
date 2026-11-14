@@ -32,6 +32,7 @@ def prebuild(target, _rows):
         from miniworld_engine.kernels import _msa_card
 
         yield from _msa_card.prebuild_sm120()
+        yield from _prebuild_mpnn()
         return
     if target.arch != "sm90":
         return
@@ -175,7 +176,14 @@ def _prebuild_sm80():
                 grad_reduce_vector_sm80._ext,
                 pair_partial_sm80._ext,
             )
-    # ProteinMPNN (its "cuda" backend: mpnn_msg_sm80 / mpnn_edge_sm80): the four shape-independent sm_80 extensions, for a bf16 (master) row
+    yield from _prebuild_mpnn()
+
+
+def _prebuild_mpnn():
+    """ProteinMPNN (its "cuda" backend: mpnn_msg_sm80 / mpnn_edge_sm80): the four shape-independent sm_80 extensions, for a bf16 (master) row;
+    on the RTX 5090 target their sm_120a builds (``<name>_sm120``, kernels/_sm120.py)."""
+    from miniworld_engine.kernels._prebuild import family_rows
+
     if any(r["dtype"] in ("bfloat16", "master") for r in family_rows("mpnn_message")):
         from miniworld_engine.kernels.mpnn_edge_tail.cuda import sm80 as edge
         from miniworld_engine.kernels.mpnn_message.cuda import sm80 as message

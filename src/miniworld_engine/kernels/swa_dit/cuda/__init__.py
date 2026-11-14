@@ -44,6 +44,14 @@ def prebuild(target, rows):
             from . import sm80
 
             yield sm80._ext
+    elif target.arch == "sm120":
+        # RTX 5090: the sm_120a build of those sm_80 stages (``swa_dit_sm80_sm120``) and its fused bf16 inference stages within 99 KB
+        # (``swa_dit_fused_sm120``); the sm_100a cubins below do not run there
+        if rows:
+            from . import sm80
+
+            yield sm80._ext
+            yield sm80._ext_sm120
     else:
         from .sm100 import CUBINS, cubin, tf32_fwd
 
