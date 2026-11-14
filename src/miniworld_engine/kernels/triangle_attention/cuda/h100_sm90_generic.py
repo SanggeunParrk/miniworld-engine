@@ -301,6 +301,10 @@ def _front_y16(defs: tuple[str, ...] = ()):
 #: (d_pair, 32 x heads) served by the fp16-exact fused front beyond ``_FRONT_L`` (fp16 inference, 32-channel heads): bit-identical to
 #: LN + cuBLAS fp16 GEMMs + bias kernel, which it replaces there.  ``FRONT_Y16`` False: the unfused route as before.
 FRONT_Y16 = True
+#: LABELED, default OFF: also take the fp16-exact front at the lengths where the bf16 one-kernel front is the default (d_pair 64, 32-channel heads,
+#: L 384..768): the q / k / v / g / bias bits then equal the unfused fp16 route's (the L > 768 default), not the bf16 front's (rounding of y and W
+#: in bf16 instead of fp16; numeric difference measured in the 2026-11-14 report)
+FRONT_Y16_SHORT = False
 #: extra -D knobs of the bf16 fused front build (experiments / controls: ("MW_F3_PF2=1",) = the load schedule before the prefetch)
 FRONT_DEFS: tuple[str, ...] = ()
 _FRONT_Y16_KEYS = {(64, 64), (64, 128)}
@@ -498,6 +502,8 @@ def _forward(
         and _front(FRONT_DEFS) is not None
         and tuple(wcat.shape) == (4 * HD + _hp(H), C)
     )
+    if FRONT_Y16_SHORT and FRONT_Y16 and fused and head_dim == D and (C, HD) in _FRONT_Y16_KEYS and L > 256 and _core_mod.INFERENCE_FP16:
+        fused = False  # LABELED (default off): the fp16-route front also below ``_FRONT_L`` (the bf16 front's bits change; see FRONT_Y16_SHORT)
     # inference on the fp16 core (h100_sm90.INFERENCE_FP16): q / k / v and the bias in fp16, from the fused front or (L > 256) fp16 GEMMs
     h16 = (not need) and _core_mod.INFERENCE_FP16 and (fused or L > 256)
     # heads of 16 channels on the fused front + fp16 core: q / k / v / g / u stay compact (16 channels a head; the core's loads zero-pad
