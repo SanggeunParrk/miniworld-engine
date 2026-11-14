@@ -91,6 +91,13 @@ __device__ __forceinline__ void mma_h16_n40(float (&d)[20], const uint32_t (&a)[
                : SM90_D16(0), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19])
                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
 }
+// [O | l] += P [V | 1] for 16-channel heads: m64n24k16 (columns 0..15 = V, 16..23 = ones).
+__device__ __forceinline__ void mma_h16_n24(float (&d)[12], const uint32_t (&a)[4], uint64_t b) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n24k16.f32.f16.f16 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11}, {%12, %13, %14, %15}, %16, p, 1, 1, 1;\n}\n"
+               : SM90_D8(0), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11])
+               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+}
 __device__ __forceinline__ uint32_t hmax2(uint32_t a, uint32_t b) { uint32_t r; asm("max.f16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 __device__ __forceinline__ uint32_t hfma2(uint32_t a, uint32_t b, uint32_t c) { uint32_t r; asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r; }
 __device__ __forceinline__ uint32_t hex2(uint32_t a) { uint32_t r; asm("ex2.approx.f16x2 %0, %1;" : "=r"(r) : "r"(a)); return r; }
@@ -128,6 +135,9 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
 #endif
 #ifndef TA_SWN
 #define TA_SWN 0          // TA_SW: pairs (of 16) exponentiated before the next QK^T is issued (> 0: ptxas serialises the wgmma stage, 17-20 % slower)
+#endif
+#ifndef TA_N24
+#define TA_N24 1          // 16-channel heads: [O | l] += P [V | 1] as m64n24 (16 value channels + one 8-column ones block, V and ones in 32-byte-swizzle MN-major atoms) instead of n40 (32 zero-padded channels + ones).  Bit-identical (the extra columns were exact zeros)
 #endif
 #ifndef TA_ABL
 #define TA_ABL 0         // ablation bit mask (time only, WRONG results): 1 no QK wgmma, 2 no PV wgmma, 4 no exp, 8 no scale/offset HFMA2, 16 no max machinery, 32 no bias ldmatrix, 128 no X phase
@@ -197,6 +207,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     const unsigned char* __restrict__ KM) {              // or the key mask itself (bool [B][S], 16-byte aligned, B <= KM_MAXB): the live key tiles
                                                          // counted by the producer warpgroup once per CTA (no glue kernels before the launch)
   constexpr bool VOTE = SPEC && TA_SPEC == 2;    // TA_SPEC 2: no fix list (see X)
+  constexpr bool N24 = (DH != D) && TA_N24;       // PV as m64n24 (see TA_N24); the V tile is then 16 channels in the 32-byte swizzle
+  constexpr int OW = (DH == D || !N24) ? 20 : 12;     // accumulator registers per row: [O | l] columns, the row sums in the last two pairs
+  constexpr int LS = OW - 4;                       // o[r][LS] = row g sum, o[r][LS + 2] = row g + 8
   constexpr bool SWM = (TA_SW == 2) ? (DH != D) : (TA_SW == 1);   // the software-pipelined sub-step (step_sw): TA_SW 2 = the 16-channel heads only
   constexpr bool LIST = SPEC && !VOTE;
   const bool LISTM = !SPEC && FIX != nullptr;
@@ -268,7 +281,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       for (int r = 0; r < R; ++r) {
         wait(kve(st), kph ^ 1);
         const bool skip = (TA_ABL & 256) && r == 1;
-        expect_tx(kvf(st), skip ? 0 : 2 * KVT * 2);
+        expect_tx(kvf(st), skip ? 0 : (N24 ? KVT * 2 + KVT : 2 * KVT * 2));
         const int rw = row0(b, g * R + r) + j * BN;
         if (CL) {   // rank 0: the K tile, rank 1: the V tile, each to both CTAs of the pair (both expect all 16 KiB on their own barrier)
           if (crank == 0) load_2d_mc(&kmap, sKV + st * STG * 2, kvf(st), h * D, rw, 3);
@@ -359,12 +372,12 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // BTR (the bias tile stored [key][query]: AF3's ending node, the pair-as-stored bias): query half w, key row 8 (lane / 16) + lane % 8 of a
   // 16-key block, the 16-byte chunk of queries 16 wi + 8 ((lane / 8) % 2) (128-byte swizzle: chunk ^ row % 8)
   const uint32_t tlane = sB + w * BM * 128 + (8 * lcol8 + x7) * 128 + (((2 * wi + ((lane >> 3) & 1)) ^ x7) << 4);
-  const uint64_t kd0 = desc_k64(sKV), vd0 = desc_mn64(sKV + KVT * 2, KVT * 2);   // built once: a wgmma operand costs one 32-bit add
+  const uint64_t kd0 = desc_k64(sKV), vd0 = N24 ? gdesc(sKV + KVT * 2, KVT * 2, 256, SW32) : desc_mn64(sKV + KVT * 2, KVT * 2);   // built once: a wgmma operand costs one 32-bit add
   const uint32_t scl2 = hdup(scl);
   // cursors: the K | V stage and bias stage the next G phase reads; the stage whose PV was issued last (released once it retired)
   int gst = 0, gph = 0, bs = 0, bph = 0, xst = 0, bad = 0, ovf = 0;
   uint32_t qa[R][2][4];
-  float o[R][20], m[R][2];                          // [O | l] per row (columns 32..39 = the row sums: o[16] row g, o[18] row g + 8); the offsets
+  float o[R][OW], m[R][2];                          // [O | l] per row (columns 32..39 = the row sums: o[16] row g, o[18] row g + 8); the offsets
   float lprev[R][2];                                // the row sums before the tile in flight (the increment test of the speculative offset)
   uint32_t sc[R][32];                               // per row: the score accumulator (fp16 pairs), then its probabilities = the A fragments of its PV
   // G phase of (tile j, row r): bias fragment -> sc[r] (the fp16 pairs ldmatrix returns are the accumulator's), S += Q_r K^T issued
@@ -405,7 +418,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
 #pragma unroll
     for (int kk = 0; kk < BN / 16; ++kk) {
       const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
-      if (!(TA_ABL & 2)) mma_h16_n40(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024));
+      if (!(TA_ABL & 2)) { if constexpr (N24) mma_h16_n24(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 512)); else mma_h16_n40(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024)); }
     }
     wg_commit();
   };
@@ -449,9 +462,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         const float n0 = u0 ? hround(m0 + (LIST ? TA_MARGIN : 0.f)) : m[r][0], n1 = u1 ? hround(m1 + (LIST ? TA_MARGIN : 0.f)) : m[r][1];
         const float f0 = u0 ? ex2f(m[r][0] - n0) : 1.f, f1 = u1 ? ex2f(m[r][1] - n1) : 1.f;     // 2^(-inf) = 0 scales an empty sum
 #pragma unroll
-        for (int i = 0; i < 5; ++i) { o[r][4 * i] *= f0; o[r][4 * i + 1] *= f0; o[r][4 * i + 2] *= f1; o[r][4 * i + 3] *= f1; }
+        for (int i = 0; i < OW / 4; ++i) { o[r][4 * i] *= f0; o[r][4 * i + 1] *= f0; o[r][4 * i + 2] *= f1; o[r][4 * i + 3] *= f1; }
         m[r][0] = n0; m[r][1] = n1;
-        if (LIST) { lprev[r][0] = o[r][16]; lprev[r][1] = o[r][18]; }
+        if (LIST) { lprev[r][0] = o[r][LS]; lprev[r][1] = o[r][LS + 2]; }
       }
     }
     nmr0 = hdup(m[r][0] > -INFINITY ? -m[r][0] : 0.f); nmr1 = hdup(m[r][1] > -INFINITY ? -m[r][1] : 0.f);
@@ -467,7 +480,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // power of two that brings it back to about 1 (o and l scaled exactly); a non-finite one (an fp16 probability overflowed) cannot be repaired
   // here: the task goes on the fix list
   auto check = [&](int rr) {
-    const float i0 = o[rr][16] - lprev[rr][0], i1 = o[rr][18] - lprev[rr][1];
+    const float i0 = o[rr][LS] - lprev[rr][0], i1 = o[rr][LS + 2] - lprev[rr][1];
     const float lim = exp2f(TA_TS);
     if (__any_sync(0xffffffffu, !(i0 <= lim) | !(i1 <= lim))) {
       const bool b0 = !(i0 <= lim), b1 = !(i1 <= lim);
@@ -476,10 +489,10 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       const float n0 = f0 ? hround(m[rr][0] + ceilf(__log2f(i0)) + TA_MARGIN) : m[rr][0], n1 = f1 ? hround(m[rr][1] + ceilf(__log2f(i1)) + TA_MARGIN) : m[rr][1];
       const float g0 = ex2f(m[rr][0] - n0), g1 = ex2f(m[rr][1] - n1);
 #pragma unroll
-      for (int i = 0; i < 5; ++i) { o[rr][4 * i] *= g0; o[rr][4 * i + 1] *= g0; o[rr][4 * i + 2] *= g1; o[rr][4 * i + 3] *= g1; }
+      for (int i = 0; i < OW / 4; ++i) { o[rr][4 * i] *= g0; o[rr][4 * i + 1] *= g0; o[rr][4 * i + 2] *= g1; o[rr][4 * i + 3] *= g1; }
       m[rr][0] = n0; m[rr][1] = n1;
     }
-    lprev[rr][0] = o[rr][16]; lprev[rr][1] = o[rr][18];
+    lprev[rr][0] = o[rr][LS]; lprev[rr][1] = o[rr][LS + 2];
   };
   // one pipelined sub-step (tile j, row r): QK^T of row r and PV of the previous sub-step (row 1 - r) issued, the exponentials of row r
   // run while that PV executes; nothing is left in flight at the end
@@ -539,7 +552,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
 #pragma unroll
     for (int r = 0; r < R; ++r) {
 #pragma unroll
-      for (int i = 0; i < 20; ++i) o[r][i] = 0.f;
+      for (int i = 0; i < OW; ++i) o[r][i] = 0.f;
       m[r][0] = m[r][1] = -INFINITY;               // no finite logit seen yet
       lprev[r][0] = lprev[r][1] = 0.f;
     }
@@ -581,7 +594,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     for (int r = 0; r < R; ++r) {
       const int n = g * R + r;
       if (n >= N) continue;                          // a padding row: computed on row N - 1, not stored
-      const float l0 = o[r][16], l1 = o[r][18];
+      const float l0 = o[r][LS], l1 = o[r][LS + 2];
       bad |= !(l0 > 0.f) || !(l0 < 3.0e38f) || !(l1 > 0.f) || !(l1 < 3.0e38f);
       ovf |= !(l0 < 3.0e38f) || !(l1 < 3.0e38f);
       const float inv0 = 1.f / l0, inv1 = 1.f / l1;
@@ -596,7 +609,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         const float inv = half ? inv1 : inv0;
         uint32_t in[4], outw[4];
 #pragma unroll
-        for (int i = 0; i < 4; ++i) in[i] = pack2(o[r][4 * i + 2 * half] * inv, o[r][4 * i + 2 * half + 1] * inv);
+        for (int i = 0; i < 4; ++i) in[i] = 4 * i < LS ? pack2(o[r][4 * i + 2 * half] * inv, o[r][4 * i + 2 * half + 1] * inv) : 0u;   // (channels past the head are zero: pack2(+0, +0))
         // lane t4 holds channels 8i + 2 t4 (i = 0..3); after the transpose it holds channels 8 t4 .. 8 t4 + 7
 #pragma unroll
         for (int k = 0; k < 4; ++k) {
@@ -682,6 +695,9 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
     return make_map<2>(t.data_ptr(), {(uint64_t)(H * D), rows}, {(uint64_t)ld}, {32, 128}, CU_TENSOR_MAP_SWIZZLE_64B, what,
                        CU_TENSOR_MAP_DATA_TYPE_FLOAT16); };
   CUtensorMap qm = m2(q, "q"), km = m2(k, "k"), vm = m2(v, "v");
+  if (dh != D && TA_N24)   // PV as n24: V read as the 16 channels only, in the 32-byte swizzle (MN-major atoms of 8 keys x 16 channels)
+    vm = make_map<3>(v.data_ptr(), {(uint64_t)dh, (uint64_t)H, rows}, {(uint64_t)dh, (uint64_t)ld}, {16, 1, 128}, CU_TENSOR_MAP_SWIZZLE_32B, "v",
+                     CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
   CUtensorMap bm = make_map<2>(sbias.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B,
                                "sbias", CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
   TORCH_CHECK(!key_tiles.has_value() || (key_tiles->is_cuda() && key_tiles->scalar_type() == torch::kInt32 && key_tiles->is_contiguous() &&
