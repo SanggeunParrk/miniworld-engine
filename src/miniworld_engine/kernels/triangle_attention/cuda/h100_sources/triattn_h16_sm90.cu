@@ -121,13 +121,13 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
 #define TA_FR 0           // 1: the bias stage is released after the QK^T wgmma issue instead of before it (fence.proxy + arrive off the issue path).  Scheduling only (bit-identical).
 #endif
 #ifndef TA_SW
-#define TA_SW 0           // 1: software pipelined sub-step (QK^T of the next sub-step issued in the middle of this one's exponentials; see step_sw).  Pure scheduling (bit-identical).
+#define TA_SW 2           // software pipelined sub-step (step_sw: the QK^T of the next sub-step is issued right after the PV of this one retired, the exponentials of this one are all done before): 0 off, 1 all heads, 2 the 16-channel heads only (default: -4 .. -7 % on them, level on 32-channel heads, bit-identical)
 #endif
 #ifndef TA_SWF
 #define TA_SWF 1
 #endif
 #ifndef TA_SWN
-#define TA_SWN 8          // TA_SW: pairs (of 16) exponentiated before the next QK^T is issued
+#define TA_SWN 0          // TA_SW: pairs (of 16) exponentiated before the next QK^T is issued (> 0: ptxas serialises the wgmma stage, 17-20 % slower)
 #endif
 #ifndef TA_ABL
 #define TA_ABL 0         // ablation bit mask (time only, WRONG results): 1 no QK wgmma, 2 no PV wgmma, 4 no exp, 8 no scale/offset HFMA2, 16 no max machinery, 32 no bias ldmatrix, 128 no X phase
@@ -197,6 +197,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     const unsigned char* __restrict__ KM) {              // or the key mask itself (bool [B][S], 16-byte aligned, B <= KM_MAXB): the live key tiles
                                                          // counted by the producer warpgroup once per CTA (no glue kernels before the launch)
   constexpr bool VOTE = SPEC && TA_SPEC == 2;    // TA_SPEC 2: no fix list (see X)
+  constexpr bool SWM = (TA_SW == 2) ? (DH != D) : (TA_SW == 1);   // the software-pipelined sub-step (step_sw): TA_SW 2 = the 16-channel heads only
   constexpr bool LIST = SPEC && !VOTE;
   const bool LISTM = !SPEC && FIX != nullptr;
   const int nt = LISTM ? *reinterpret_cast<volatile int*>(FIX) : ntasks;
@@ -400,7 +401,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   };
   // PV of the previous sub-step (row r, stage xst): [O_r | l_r] += P_r [V | 1], issued and committed
   auto PV = [&](int r) {
-    if (TA_SW && TA_SWF) wg_fence();                          // TA_SW: the probabilities (A) were written after the last fence, with the next QK^T in flight
+    if (SWM && TA_SWF) wg_fence();                          // TA_SW: the probabilities (A) were written after the last fence, with the next QK^T in flight
 #pragma unroll
     for (int kk = 0; kk < BN / 16; ++kk) {
       const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
@@ -494,13 +495,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     if (LIST) check(1 - r);
     release();
   };
-  // TA_SW (software pipelined sub-step; scheduling only, bit-identical): on entry the QK^T of (tile, row r) is already in flight (issued in the middle of the
-  // previous sub-step's exponentials).  PV of the previous row is issued first, the tree / vote / offsets of row r run when its scores land, the first TA_SWN
-  // pairs are exponentiated while that PV executes, then (PV retired, stage released) the QK^T of the NEXT sub-step is issued into the other row's scores
-  // and the remaining pairs run under it.  The QK^T latency and the vote chain are thereby off the warp's critical path.
-  // (revised) on entry the QK^T of (tile, row r) has landed; it is waited for at the end of the previous sub-step, before this sub-step's PV is issued
-  // (ptxas serialises a wgmma stage in which non-wgmma code defines the A registers of a later wgmma: the exponentials written under an in-flight QK^T
-  // must not be the A of a PV issued in the same stage).
+  // TA_SW (software pipelined sub-step; scheduling only, bit-identical; EXPERIMENT, not faster -- see docs of the 2026-11-14 SOL run): on entry the QK^T of (tile,
+  // row r) has landed.  PV of the previous row is issued, the tree / vote / offsets of row r and the first TA_SWN pairs of its exponentials run while that PV
+  // executes, then (PV retired, stage released) the QK^T of the NEXT sub-step is issued into the other row's scores and the remaining pairs run under it; it is
+  // waited for at the end, before the next sub-step's PV is issued.  ptxas serialises the wgmma stage (C7515) whenever non-wgmma code writes the exponentials
+  // while a PV is in flight and the next QK^T follows it (TA_SWN > 0): 17-20 % slower; TA_SWN = 0 compiles clean and is level with the default.
   auto step_sw = [&](auto FIRST, auto LAST, int r) {
     constexpr bool last = decltype(LAST)::value;
     constexpr bool first = decltype(FIRST)::value;
@@ -549,9 +548,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     if (TA_PP) named_arrive(2 + (w ^ 1), 256);
     wg_wait<0>();
     fence_regs(sc[0]);
-    if (!TA_SW) X(0);
+    if (!SWM) X(0);
     uint4 gpre[R][2];                               // the gate's values of this lane's output columns, loaded under the last key tile
-    if (TA_SW) step_sw(std::true_type{}, std::false_type{}, 0);
+    if (SWM) step_sw(std::true_type{}, std::false_type{}, 0);
     for (int j = 0; j < nk; ++j) {
       if (GATE != nullptr && j == nk - 1) {
 #pragma unroll
@@ -562,7 +561,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
             gpre[r][half] = 8 * t4 < DH ? __ldg(reinterpret_cast<const uint4*>(GATE + ((size_t)row0(b, n) + qt * BM + qrow + g8 + 8 * half) * ldg + h * DH + 8 * t4)) : make_uint4(0, 0, 0, 0);
         }
       }
-      if (TA_SW) {
+      if (SWM) {
         if (j + 1 < nk) { step_sw(std::false_type{}, std::false_type{}, 1); step_sw(std::false_type{}, std::false_type{}, 0); }
         else step_sw(std::false_type{}, std::true_type{}, 1);
       } else {
