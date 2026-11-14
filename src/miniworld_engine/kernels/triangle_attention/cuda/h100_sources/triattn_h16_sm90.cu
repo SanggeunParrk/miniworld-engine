@@ -110,12 +110,20 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
   asm("mul.rn.f16x2 %0, %1, %2;" : "=r"(r) : "r"(p), "r"(s));
   return r;
 }
+#ifndef TA_PP
+#define TA_PP 0           // 1: FlashAttention-3 pingpong: the two consumer warpgroups issue their wgmma groups strictly alternately (named barriers 2 / 3), so one warpgroup
+                          // exponentiates while the other's tensor work runs.  Pure scheduling (bit-identical).
+#endif
+#ifndef TA_ABL
+#define TA_ABL 0          // ablation bit mask (time only, WRONG results): 1 no QK wgmma, 2 no PV wgmma, 4 no exp, 8 no scale/offset HFMA2, 16 no max machinery, 32 no bias ldmatrix, 128 no X phase
+#endif
 #ifndef TA_POLY
 #define TA_POLY 8         // pairs i (of 16 per row) whose exponentials run as hex2_poly: TA_POLY of every 16 (1, 2, 4, 8 or 16), the rest on the
                           // MUFU.  8 (every other pair; sustained, power-capped, c256 / 8 heads): L512 level, 768 / 1024 -0.5 %, 1536 -2.7 %,
                           // 2048 -3.3 %, accuracy level; 2 / 4: level or +1.5 %; 16 (all): +12 %
 #endif
 template <bool POLY> __device__ __forceinline__ uint32_t hexp(uint32_t a, int i) {
+  if (TA_ABL & 4) return a;
   if (POLY && TA_POLY > 0 && i % (16 / (TA_POLY > 0 ? TA_POLY : 1)) == (16 / (TA_POLY > 0 ? TA_POLY : 1)) - 1) return hex2_poly(a);
   return hex2(a);
 }
@@ -125,10 +133,36 @@ __device__ __forceinline__ uint32_t hdup(float x) { const unsigned short h = __h
 __device__ __forceinline__ float hround(float x) { return __half2float(__float2half_rn(x)); }
 }  // namespace
 
+#ifndef TA_CL
+#define TA_CL 0           // 1: clusters of two CTAs on adjacent query tiles of the same (b, h, row group): the K / V tiles are loaded once for both (rank 0 loads K, rank 1 loads V,
+                          // each multicast to both), the stage is released by both CTAs' consumers (remote arrive).  The data and every arithmetic op are the same (bit-identical);
+                          // only the L2 -> SM traffic of K / V halves.  32-channel heads, S % 256 == 0.
+#endif
+namespace {
+__device__ __forceinline__ uint32_t cta_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(r)); return r; }
+__device__ __forceinline__ void cluster_sync_all() { asm volatile("barrier.cluster.arrive.release;\nbarrier.cluster.wait.acquire;\n" ::: "memory"); }
+__device__ __forceinline__ void arrive_rank(uint32_t bar, uint32_t rank) {    // arrive on the barrier at the same offset in CTA `rank`
+  asm volatile("{\n.reg .b32 ra;\nmapa.shared::cluster.u32 ra, %0, %1;\nmbarrier.arrive.release.cluster.shared::cluster.b64 _, [ra];\n}\n" :: "r"(bar), "r"(rank) : "memory");
+}
+__device__ __forceinline__ void arrive_rank_cta(uint32_t bar, uint32_t rank) {   // as CUTLASS' ClusterBarrier::arrive(cta_id): the default (cta-scope release) semantics
+  asm volatile("{\n.reg .b32 ra;\nmapa.shared::cluster.u32 ra, %0, %1;\nmbarrier.arrive.shared::cluster.b64 _, [ra];\n}\n" :: "r"(bar), "r"(rank) : "memory");
+}
+__device__ __forceinline__ void st_remote_i32(uint32_t addr, uint32_t rank, int v) {
+  asm volatile("{\n.reg .b32 ra;\nmapa.shared::cluster.u32 ra, %0, %1;\nst.shared::cluster.s32 [ra], %2;\n}\n" :: "r"(addr), "r"(rank), "r"(v) : "memory");
+}
+__device__ __forceinline__ void wait_cl(uint32_t bar, uint32_t parity) {   // acquire at cluster scope (the remote store before the remote arrive is visible)
+  asm volatile("{\n.reg .pred p;\nWAITC_%=:\nmbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], %1;\n@!p bra WAITC_%=;\n}\n" :: "r"(bar), "r"(parity) : "memory");
+}
+__device__ __forceinline__ void load_2d_mc(const void* map, uint32_t dst, uint32_t bar, int c0, int c1, uint16_t mask) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;\n"
+               :: "r"(dst), "l"(map), "r"(bar), "r"(c0), "r"(c1), "h"(mask) : "memory");
+}
+}  // namespace
+
 // SPEC: the speculative offset (fix list written to FIX); else the exact form, which with FIX set runs the tasks of that list (static schedule).
 // ORD1: task order query tile, head in its group of hg, row group, head group (the CTAs running together share the bias of hg heads; hg = 1:
 // one head), else query tile, head, row group.
-template <bool SPEC, bool ORD1, int DH, bool POLY, bool BTR>   // BTR: the bias stored [B, H, key, query] (AF3's ending node from the one-kernel front), read transposed; POLY: TA_POLY of the exponentials on the FMA pipes (32-channel heads); DH: channels per head in q / k / v / gate / out / U: 32, or 16 (compact; the core pads to 32)
+template <bool SPEC, bool ORD1, int DH, bool POLY, bool BTR, bool CL = false>   // CL: see TA_CL.  BTR: the bias stored [B, H, key, query] (AF3's ending node from the one-kernel front), read transposed; POLY: TA_POLY of the exponentials on the FMA pipes (32-channel heads); DH: channels per head in q / k / v / gate / out / U: 32, or 16 (compact; the core pads to 32)
 __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     int N, int H, int S, int ntasks, float scl,          // scl = scale * log2(e)
     int hg,                                              // ORD1: heads per group (a divisor of H)
@@ -163,6 +197,10 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   auto bfu = [&](int s) { return bar0 + 16 + 8 * (2 * NKV + s); };            // [NB]
   auto bem = [&](int s) { return bar0 + 16 + 8 * (2 * NKV + NB + s); };       // count 8: every consumer warp read its bias fragments
   const int tid = threadIdx.x, wg = tid >> 7, lane = tid & 31;
+  if (TA_ABL & 768) {   // traffic ablation: the bytes the skipped loads would have written stay zero
+    for (int i = tid; i < (NB * BT + R * QT + NKV * STG) / 2; i += THREADS) reinterpret_cast<uint32_t*>(smb)[i] = 0u;
+    __syncthreads();
+  }
   for (int i = tid; i < NKV * KVT / 2; i += THREADS) {     // the ones blocks: fp16 pairs (1, 1)
     const int s = i / (KVT / 2), e = i % (KVT / 2);
     reinterpret_cast<uint32_t*>(smb + (sKV - sB) + (s * STG + 2 * KVT) * 2)[e] = 0x3C003C00u;
@@ -170,13 +208,16 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   if (tid == 0) {
     uint64_t* bars = reinterpret_cast<uint64_t*>(smb + (bar0 - sB));
     bar_init(bars, 1); bar_init(bars + 1, 8);
-    for (int k = 0; k < NKV; ++k) { bar_init(bars + 2 + k, 1); bar_init(bars + 2 + NKV + k, 8); }
+    for (int k = 0; k < NKV; ++k) { bar_init(bars + 2 + k, 1); bar_init(bars + 2 + NKV + k, CL ? 16 : 8); }
     for (int k = 0; k < NB; ++k) { bar_init(bars + 2 + 2 * NKV + k, 1); bar_init(bars + 2 + 2 * NKV + NB + k, 8); }
+    if (CL) bar_init(bars + 2 + 2 * NKV + 2 * NB, 1);                              // the task-pair hand-over from rank 0
     bar_init_fence();
     reinterpret_cast<int*>(smb + (bar0 - sB) + 244)[0] = 0; reinterpret_cast<int*>(smb + (bar0 - sB) + 244)[1] = 0;     // the fix-list counters
   }
   fence_proxy_async();
-  __syncthreads();
+  if (CL) cluster_sync_all();                    // every barrier of the pair initialised before a remote arrive / multicast
+  else __syncthreads();
+  const uint32_t crank = CL ? cta_rank() : 0u;
   auto decode = [&](int t, int& b, int& h, int& qt, int& g) {
     qt = t % QTILES; int r = t / QTILES;
     if (ORD1) { const int hl = r % hg; r /= hg; g = r % NG; r /= NG; h = (r % (H / hg)) * hg + hl; b = r / (H / hg); }
@@ -203,17 +244,23 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     // one key tile of a task: its bias tile and the K / V tiles of both rows
     auto issue_tile = [&](int b, int h, int qt, int g, int j) {
       wait(bem(bs), bph ^ 1);
-      expect_tx(bfu(bs), BT * 2);
-      for (int hh = 0; hh < 2; ++hh)   // key halves [128 queries][64 keys], or (BTR) query halves [128 keys][64 queries]
+      expect_tx(bfu(bs), (TA_ABL & 512) ? BT : BT * 2);
+      for (int hh = 0; hh < ((TA_ABL & 512) ? 1 : 2); ++hh)   // key halves [128 queries][64 keys], or (BTR) query halves [128 keys][64 queries]
         if (BTR) load_2d(&bmap, sB + (bs * BT + hh * BM * 64) * 2, bfu(bs), qt * BM + hh * 64, (b * H + h) * S + j * BN);
         else load_2d(&bmap, sB + (bs * BT + hh * BM * 64) * 2, bfu(bs), j * BN + hh * 64, (b * H + h) * S + qt * BM);
       if (++bs == NB) { bs = 0; bph ^= 1; }
       for (int r = 0; r < R; ++r) {
         wait(kve(st), kph ^ 1);
-        expect_tx(kvf(st), 2 * KVT * 2);
+        const bool skip = (TA_ABL & 256) && r == 1;
+        expect_tx(kvf(st), skip ? 0 : 2 * KVT * 2);
         const int rw = row0(b, g * R + r) + j * BN;
-        load_head(&kmap, sKV + st * STG * 2, kvf(st), h, rw);
-        load_head(&vmap, sKV + (st * STG + KVT) * 2, kvf(st), h, rw);
+        if (CL) {   // rank 0: the K tile, rank 1: the V tile, each to both CTAs of the pair (both expect all 16 KiB on their own barrier)
+          if (crank == 0) load_2d_mc(&kmap, sKV + st * STG * 2, kvf(st), h * D, rw, 3);
+          else            load_2d_mc(&vmap, sKV + (st * STG + KVT) * 2, kvf(st), h * D, rw, 3);
+        } else if (!skip) {
+          load_head(&kmap, sKV + st * STG * 2, kvf(st), h, rw);
+          load_head(&vmap, sKV + (st * STG + KVT) * 2, kvf(st), h, rw);
+        }
         if (++st == NKV) { st = 0; kph ^= 1; }
       }
     };
@@ -251,7 +298,16 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       named_sync(1, 128);
     }
     if (tid == 0) {
-      for (int t = blockIdx.x; t < nt; t = SCHED ? (int)gridDim.x + atomicAdd(SCHED, 1) : t + (int)gridDim.x, ++lt) {
+      int pph = 0;
+      // next task; CL: the pair index is taken by rank 0 from the counter and handed to rank 1 (remote store + remote arrive), the pair's tasks are 2 u + rank
+      auto next_task = [&](int t) -> int {
+        if (!CL || !SCHED) return SCHED ? (int)gridDim.x + atomicAdd(SCHED, 1) : t + (int)gridDim.x;
+        int u;
+        if (crank == 0) { u = (int)(gridDim.x >> 1) + atomicAdd(SCHED, 1); st_remote_i32(bar0 + 232, 1, u); arrive_rank(bar0 + 16 + 8 * (2 * NKV + 2 * NB), 1); }
+        else { wait_cl(bar0 + 16 + 8 * (2 * NKV + 2 * NB), pph); pph ^= 1; u = *reinterpret_cast<volatile int*>(smb + (bar0 - sB) + 232); }
+        return 2 * u + (int)crank;
+      };
+      for (int t = blockIdx.x; t < nt; t = next_task(t), ++lt) {
         int b, h, qt, g; decode(LISTM ? FIX[1 + t] : t, b, h, qt, g);
         const int nk = KM != nullptr ? min(NK, max(1, (kts[b] + BN - 1) / BN))
                      : KT != nullptr ? min(NK, max(1, __ldg(KT + b))) : NK;   // the dead trailing key tiles are not streamed
@@ -273,11 +329,13 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         arrive(qf);
       }
     }
+    if (CL) cluster_sync_all();                    // no CTA of the pair leaves while the other may still multicast into it / arrive on it
     return;
   }
 
   reg_alloc<232>();
   const int w = wg - 1, T = tid - 128 * wg, wi = T >> 5, g8 = lane >> 2, t4 = lane & 3;
+  if (TA_PP && w == 1) named_arrive(2, 256);       // warpgroup 0 issues first
   const int qrow = 64 * w + 16 * wi;               // this warp's first query row in the tile
   // ldmatrix lane geometry: matrices (rows +0 / +8) x (columns +0 / +8) of a 16 x 16 block
   const int lrow = qrow + (lane & 7) + 8 * ((lane >> 3) & 1), lcol8 = lane >> 4, x7 = lane & 7;
@@ -301,7 +359,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
 #pragma unroll
     for (int i2 = 0; i2 < 8; ++i2) {
       uint32_t r4[4];
-      if (BTR) ldsm_x4_t(ttile + i2 * 16 * 128, r4);   // the [key][query] tile: the transposed 8 x 8 matrices are the same fragments
+      if (TA_ABL & 32) { r4[0] = r4[1] = r4[2] = r4[3] = 0u; }
+      else if (BTR) ldsm_x4_t(ttile + i2 * 16 * 128, r4);   // the [key][query] tile: the transposed 8 x 8 matrices are the same fragments
       else ldsm_x4(btile + (i2 >> 2) * BM * 128 + ((((2 * i2 + lcol8) & 7) ^ x7) << 4), r4);
       // r4 = (row g, block 2 i2), (row g + 8, block 2 i2), (row g, block 2 i2 + 1), (row g + 8, block 2 i2 + 1)
 #pragma unroll
@@ -315,9 +374,10 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       if (++bs == NB) { bs = 0; bph ^= 1; }
     }
     wait(kvf(gst), gph);
+    if (TA_PP) named_sync(2 + w, 256);              // pingpong: my turn on the tensor core
     wg_fence();
-    mma_h16_n128(sc[r], qa[r][0], desc_off(kd0, gst * STG * 2));
-    if (DH == D) mma_h16_n128(sc[r], qa[r][1], desc_off(kd0, gst * STG * 2 + 32));   // (heads of 16: channels 16-31 are zeros, their k16 step adds exact zeros)
+    if (!(TA_ABL & 1)) mma_h16_n128(sc[r], qa[r][0], desc_off(kd0, gst * STG * 2));
+    if (DH == D && !(TA_ABL & 1)) mma_h16_n128(sc[r], qa[r][1], desc_off(kd0, gst * STG * 2 + 32));   // (heads of 16: channels 16-31 are zeros, their k16 step adds exact zeros)
     wg_commit();
     if (++gst == NKV) { gst = 0; gph ^= 1; }
   };
@@ -326,18 +386,19 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
 #pragma unroll
     for (int kk = 0; kk < BN / 16; ++kk) {
       const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
-      mma_h16_n40(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024));
+      if (!(TA_ABL & 2)) mma_h16_n40(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024));
     }
     wg_commit();
   };
   auto release = [&]() {
     __syncwarp();
-    if (lane == 0) arrive(kve(xst));
+    if (lane == 0) { arrive(kve(xst)); if (CL) arrive_rank_cta(kve(xst), crank ^ 1u); }
     if (++xst == NKV) xst = 0;
   };
   // X phase of row r on sc[r] (its QK^T retired; o[r] idle: the PV in flight is the other row's): the offsets, the exponentials in place.
   // Exact form, and a row without a finite logit yet: the tile's row maximum (a tree of HMNMX2) raises the offset lazily.
   auto X = [&](int r) {
+    if (TA_ABL & 128) return;
     uint32_t t0[8], t1[8];
     auto tree = [&]() {                            // this thread's maximum of each of its two rows (no shuffle): a depth-4 tree of HMNMX2
 #pragma unroll
@@ -348,7 +409,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         for (int i = 0; i < n; ++i) { t0[i] = hmax2(t0[i], t0[i + n]); t1[i] = hmax2(t1[i], t1[i + n]); }
     };
     bool exact;
-    if (!SPEC) { tree(); exact = true; }
+    if (TA_ABL & 16) exact = false;
+    else if (!SPEC) { tree(); exact = true; }
     else if (VOTE) {                               // the exact path only when a lane of the warp sees a logit past its row's offset + TA_TAU (or a row has none yet)
       tree();
       const float p0 = fmaxf(hlo(t0[0]), hhi(t0[0])) * scl, p1 = fmaxf(hlo(t1[0]), hhi(t1[0])) * scl;
@@ -374,7 +436,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     }
     const uint32_t nm0 = hdup(m[r][0] > -INFINITY ? -m[r][0] : 0.f), nm1 = hdup(m[r][1] > -INFINITY ? -m[r][1] : 0.f);
 #pragma unroll
-    for (int i = 0; i < 16; ++i) { sc[r][2 * i] = hexp<POLY>(hfma2(sc[r][2 * i], scl2, nm0), i); sc[r][2 * i + 1] = hexp<POLY>(hfma2(sc[r][2 * i + 1], scl2, nm1), i); }
+    for (int i = 0; i < 16; ++i) { sc[r][2 * i] = hexp<POLY>((TA_ABL & 8) ? sc[r][2 * i] : hfma2(sc[r][2 * i], scl2, nm0), i); sc[r][2 * i + 1] = hexp<POLY>((TA_ABL & 8) ? sc[r][2 * i + 1] : hfma2(sc[r][2 * i + 1], scl2, nm1), i); }
   };
   // after the PV of a tile of row rr retired: its row-sum increment is at least its largest probability; past 2^TA_TS the offset rises by the
   // power of two that brings it back to about 1 (o and l scaled exactly); a non-finite one (an fp16 probability overflowed) cannot be repaired
@@ -399,6 +461,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   auto step = [&](int r) {
     G(r);
     PV(1 - r);
+    if (TA_PP) named_arrive(2 + (w ^ 1), 256);      // .. then the other warpgroup's
     wg_wait<1>();
     fence_regs(sc[r]);
     X(r);
@@ -436,6 +499,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     }
     ovf = 0;
     G(0);                                            // sub-step (0, 0): no previous PV
+    if (TA_PP) named_arrive(2 + (w ^ 1), 256);
     wg_wait<0>();
     fence_regs(sc[0]);
     X(0);
@@ -453,7 +517,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       step(1);
       if (j + 1 < nk) step(0);
     }
+    if (TA_PP) named_sync(2 + w, 256);
     PV(1);                                           // the last sub-step's PV
+    if (TA_PP) named_arrive(2 + (w ^ 1), 256);
     wg_wait<0>();
     fence_regs(o[0]); fence_regs(o[1]);
     if (LIST) check(1);
@@ -520,6 +586,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     }
   }
   if (bad) atomicAdd(FLAGS, 1);
+  if (CL) cluster_sync_all();
 }
 
 namespace {
@@ -604,6 +671,20 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
       has_gate ? reinterpret_cast<const __nv_bfloat16*>(gate->data_ptr()) : nullptr, (int)(has_gate && gate->scalar_type() == torch::kHalf),
       has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, fx, kt, km_ptr);
   };
+  // CL: the same launch as a cluster of two CTAs (adjacent query tiles share the K / V loads)
+  auto launch_cl = [&](auto kernel, int* sch) {
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3((unsigned)(grid & ~1)); cfg.blockDim = dim3(THREADS); cfg.dynamicSmemBytes = SMEM; cfg.stream = stream;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension; at[0].val.clusterDim.x = 2; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+    cfg.attrs = at; cfg.numAttrs = 1;
+    if (getenv("TA_CL_DEBUG")) { int nc = -1; cudaError_t e = cudaOccupancyMaxActiveClusters(&nc, kernel, &cfg); fprintf(stderr, "TA_CL grid %d max active clusters %d (%s)\n", (int)cfg.gridDim.x, nc, cudaGetErrorString(e)); }
+    C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kernel,
+      (int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), hg, qm, km, vm, bm,
+      store_out ? reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()) : nullptr, want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>(),
+      has_gate ? reinterpret_cast<const __nv_bfloat16*>(gate->data_ptr()) : nullptr, (int)(has_gate && gate->scalar_type() == torch::kHalf),
+      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, (int*)nullptr, kt, km_ptr));
+  };
   // the head width is a template argument: the 32-channel kernels are the ones without the compact form, instruction for instruction
   auto run = [&](auto dhc, auto btc) {
     constexpr int DH = decltype(dhc)::value;
@@ -617,6 +698,18 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
                       triattn_h16_sm90<true, true, DH, POLY, BT>})
         C10_CUDA_CHECK(cudaFuncSetAttribute(kk, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
       attr = true;
+    }
+    if constexpr (TA_CL && DH == D) {
+      if (spec && !list && (S / BM) % 2 == 0 && grid >= 2) {
+        static bool attr_cl = false;
+        if (!attr_cl) {
+          for (auto kk : {triattn_h16_sm90<true, false, DH, POLY, BT, true>, triattn_h16_sm90<true, true, DH, POLY, BT, true>})
+            C10_CUDA_CHECK(cudaFuncSetAttribute(kk, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
+          attr_cl = true;
+        }
+        launch_cl(ord1 ? triattn_h16_sm90<true, true, DH, POLY, BT, true> : triattn_h16_sm90<true, false, DH, POLY, BT, true>, dyn ? sched.data_ptr<int>() : nullptr);
+        return;
+      }
     }
     if (spec) {
       launch(ord1 ? triattn_h16_sm90<true, true, DH, POLY, BT> : triattn_h16_sm90<true, false, DH, POLY, BT>, dyn ? sched.data_ptr<int>() : nullptr,
