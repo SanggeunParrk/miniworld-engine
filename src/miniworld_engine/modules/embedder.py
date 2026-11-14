@@ -101,11 +101,11 @@ class InputFeatureEmbedder(BackendModule):
     # cuda:5090_sm120 1 (2026-11-12): routed on the RTX 5090 (its children's sm_120a builds)
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
-        "cuda:a100_sm80": 7,
+        "cuda:a100_sm80": 8,
         "cuda:h100_sm90": 3,
         "triton": 2,
         "cuda:5090_sm120": 2,
-    }  # cuda:5090_sm120 2 (2026-11-15): its atom_norm LayerNorm runs the changed sm_120a forward row kernels (LayerNorm cuda:5090_sm120 3; the _sm80 kernel rows count for the A100 only)
+    }  # cuda:a100_sm80 8 / cuda:5090_sm120 2 (2026-11-15): its atom_norm LayerNorm runs the changed forward row kernels (sm_80 / sm_120a; LayerNorm cuda 3 on both cards); no kernel row bump: one would also owe every triton case that lists it
     # cuda:a100_sm80 7 (2026-11-13): its SWAAtomTransformer's
     #: The engine backends this composition hands to its children.
     _ENGINE_BACKENDS = ("cuda", "triton")
