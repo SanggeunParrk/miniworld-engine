@@ -301,6 +301,8 @@ def _front_y16(defs: tuple[str, ...] = ()):
 #: (d_pair, 32 x heads) served by the fp16-exact fused front beyond ``_FRONT_L`` (fp16 inference, 32-channel heads): bit-identical to
 #: LN + cuBLAS fp16 GEMMs + bias kernel, which it replaces there.  ``FRONT_Y16`` False: the unfused route as before.
 FRONT_Y16 = True
+#: extra -D knobs of the bf16 fused front build (experiments / controls: ("MW_F3_PF2=1",) = the load schedule before the prefetch)
+FRONT_DEFS: tuple[str, ...] = ()
 _FRONT_Y16_KEYS = {(64, 64), (64, 128)}
 
 
@@ -493,7 +495,7 @@ def _forward(
         (not need)
         and (C, HD) in _FRONT_L
         and L <= max(_FRONT_L[(C, HD)], compact_l)
-        and _front() is not None
+        and _front(FRONT_DEFS) is not None
         and tuple(wcat.shape) == (4 * HD + _hp(H), C)
     )
     # inference on the fp16 core (h100_sm90.INFERENCE_FP16): q / k / v and the bias in fp16, from the fused front or (L > 256) fp16 GEMMs
@@ -510,7 +512,7 @@ def _forward(
     )  # the fp16-exact fused front where the unfused route would run LN + cuBLAS fp16 GEMMs + bias kernel
     if fused or y16:  # LN + projection + head-major scaled bias: one kernel (and the flip of AF3's ending node in its bias store)
         y = mean = rstd = None
-        proj, sbias, _ = (_front_y16() if y16 else _front()).front(
+        proj, sbias, _ = (_front_y16() if y16 else _front(FRONT_DEFS)).front(
             x,
             lnw.float().contiguous(),
             lnb.float().contiguous(),

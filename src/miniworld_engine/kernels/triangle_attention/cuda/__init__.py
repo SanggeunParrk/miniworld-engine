@@ -52,6 +52,7 @@ def prebuild(target, rows):
             yield h100_bidir.ext
         if needs("triangle_attention_front_fused_sm90"):
             yield lambda: h100_sm90_generic._front_ext(cutlass_include())
+            yield h100_sm90_generic._front_y16  # the fp16-exact variant (same source, MW_F3_Y16)
         # the MSA row dropout's Philox keep-mask (pwa_train: ``extension("pack").drop_keep``)
         if needs("triangle_attention_drop_scale_sm90", "triangle_attention_graph_rng_write_sm90"):
             yield ft.partial(h100_triattn.extension, "pack")
