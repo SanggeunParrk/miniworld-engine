@@ -148,6 +148,9 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
 #ifndef TA_K16
 #define TA_K16 1          // 16-channel heads with TA_N24: K read as the 16 channels only (32-byte swizzle, 4 KiB instead of 8 KiB per stage); the k16 step reads the same values (bit-identical)
 #endif
+#ifndef TA_PVH
+#define TA_PVH 0          // TA_SW: the first TA_PVH of the 8 k16 steps of a row's PV are issued as soon as their probabilities are done (under the exponentials of the rest and the next QK^T), the others at the next sub-step. Same accumulation order (bit-identical)
+#endif
 #ifndef TA_ABL
 #define TA_ABL 0         // ablation bit mask (time only, WRONG results): 1 no QK wgmma, 2 no PV wgmma (the probabilities stay live), 4 no exp, 8 no scale/offset HFMA2, 16 no max machinery, 32 no bias ldmatrix, 128 no X phase
 #endif
@@ -423,10 +426,10 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     if (++gst == NKV) { gst = 0; gph ^= 1; }
   };
   // PV of the previous sub-step (row r, stage xst): [O_r | l_r] += P_r [V | 1], issued and committed
-  auto PV = [&](int r) {
+  auto PV = [&](int r, int lo = 0, int hi = BN / 16) {
     if (SWM && TA_SWF) wg_fence();                          // TA_SW: the probabilities (A) were written after the last fence, with the next QK^T in flight
 #pragma unroll
-    for (int kk = 0; kk < BN / 16; ++kk) {
+    for (int kk = lo; kk < hi; ++kk) {
       const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
       if (TA_ABL & 2) asm volatile("" :: "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]));   // PV ablated: the probabilities stay live (else ptxas drops the exponentials too)
       if (!(TA_ABL & 2)) { if constexpr (N24) mma_h16_n24(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 512)); else if ((TA_ABL & 1024) != 0) mma_h16_n32(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024)); else mma_h16_n40(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024)); }
@@ -527,7 +530,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   auto step_sw = [&](auto FIRST, auto LAST, int r) {
     constexpr bool last = decltype(LAST)::value;
     constexpr bool first = decltype(FIRST)::value;
-    if (!first) PV(1 - r);
+    constexpr int PVH = (SWM && TA_PVH > 0 && TA_PVH < BN / 16) ? TA_PVH : 0;
+    if (!first) PV(1 - r, PVH);
     Xpre(r);
     Xexp(r, 0, TA_SWN);
     if (!first) {
@@ -537,8 +541,15 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       release();
     }
     if (!last) G(1 - r);
-    Xexp(r, TA_SWN, 16);
-    if (!last) { wg_wait<0>(); fence_regs(sc[1 - r]); }
+    if (PVH > 0 && !last) {
+      Xexp(r, TA_SWN, 2 * PVH);
+      PV(r, 0, PVH);                                    // the first part of this row's PV, queued behind the QK^T
+      Xexp(r, 2 * PVH, 16);
+      wg_wait<1>(); fence_regs(sc[1 - r]);               // the QK^T retired (groups retire in order)
+    } else {
+      Xexp(r, TA_SWN, 16);
+      if (!last) { wg_wait<0>(); fence_regs(sc[1 - r]); }
+    }
   };
   int lt = 0;
   for (int t = blockIdx.x;; t += SCHED ? 0 : (int)gridDim.x, ++lt) {
