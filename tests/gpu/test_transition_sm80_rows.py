@@ -80,7 +80,7 @@ def test_transition_sm80_train_overlap_backward_bits(d_hidden: int, n: int) -> N
     g = torch.Generator(device="cuda").manual_seed(2)
     x = torch.randn(1, 96, 96, d_hidden, device="cuda", generator=g).bfloat16()
     dy = torch.randn(1, 96, 96, d_hidden, device="cuda", generator=g).bfloat16()
-    assert fw._save_ab(96 * 96, d_hidden, d_hidden * n, True)
+    assert fw._save_ab(96 * 96, d_hidden, d_hidden * n, True, torch.device("cuda"))
     first = _train_grads(m, x, dy)
     again = _train_grads(m, x, dy)
     assert all(torch.equal(a, b) for a, b in zip(first, again, strict=True))
