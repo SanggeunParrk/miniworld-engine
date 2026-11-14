@@ -32,6 +32,9 @@ using XE=cutlass::bfloat16_t;   // the pair x is bf16 in both
 #define SCL inv_scale
 #define WSCALAR torch::kBFloat16
 #endif
+#ifndef MW_F3_PF
+#define MW_F3_PF 4   // Y16 LayerNorm: rows per thread whose global loads are issued together
+#endif
 #ifndef MW_F3_STAGES
 #define MW_F3_STAGES 4
 #endif
@@ -98,15 +101,25 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
     // order, xor tree LPR/2 .. 1, /C by a run-time C (fast-math division as the glue's), fmaf affine, cvt.rn.f16x2
     constexpr int LPR=C<=64?8:(C<=128?16:32),NV=C/8,NA=(NV+LPR-1)/LPR,RP=256/LPR;
     int sub=tid%LPR,rg=tid/LPR;
-    for(int r=rg;r<128;r+=RP) {
-      int64_t row=base+r,prow=row;
+    constexpr int RPT=128/RP,G=RPT<MW_F3_PF?RPT:MW_F3_PF;   // rows a thread normalises, rows whose loads are in flight together
+    for(int r0=0;r0<RPT;r0+=G) {
+    uint4 pre[G][NA];
+    #pragma unroll
+    for(int gi=0;gi<G;++gi) {
+      int64_t row=base+rg+RP*(r0+gi),prow=row;
       if(tr&1){int64_t ll=int64_t(L)*L,bb=row/ll,rem=row-bb*ll,ii=rem/L,jj=rem-ii*L;prow=bb*ll+jj*L+ii;}
+      #pragma unroll
+      for(int a=0;a<NA;++a) if(sub+LPR*a<NV) pre[gi][a]=*reinterpret_cast<uint4 const*>(x+prow*C+(sub+LPR*a)*8);
+    }
+    #pragma unroll
+    for(int gi=0;gi<G;++gi) {
+      const int r=rg+RP*(r0+gi);
       float v[NA][8],sm=0.f;
       #pragma unroll
       for(int a=0;a<NA;++a) {
         int idx=sub+LPR*a;
         if(idx<NV) {
-          uint4 vv=*reinterpret_cast<uint4 const*>(x+prow*C+idx*8);
+          uint4 vv=pre[gi][a];
           uint32_t w4[4]={vv.x,vv.y,vv.z,vv.w};
           #pragma unroll
           for(int e=0;e<4;++e){v[a][2*e]=__uint_as_float(w4[e]<<16);v[a][2*e+1]=__uint_as_float(w4[e]&0xffff0000u);}
@@ -140,6 +153,7 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
           *reinterpret_cast<uint4*>(s.z.data()+(rw*NK+col/64)*4096+al(make_coord(rr,col%64)))=vec;
         }
       }
+    }
     }
   }
 #else

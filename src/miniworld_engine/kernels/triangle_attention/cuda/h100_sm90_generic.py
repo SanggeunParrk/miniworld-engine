@@ -270,14 +270,14 @@ _FRONT_L = {
 _FRONT_L_COMPACT = {64: 2048}
 
 
-@functools.lru_cache(maxsize=1)
-def _front_y16():
+@functools.lru_cache(maxsize=None)
+def _front_y16(defs: tuple[str, ...] = ()):
     """The fp16-exact fused front (``front_fused3_sm90.cu`` with ``MW_F3_Y16``): the unfused fp16 inference route's LN + cuBLAS fp16
     GEMMs + bias kernel in one kernel, bit for bit (same extension source, fast-math as the glue's LayerNorm)."""
     from miniworld_engine.kernels._nvcc import cutlass_include
 
     return load_extension(
-        name="triattn_h100_front3y16_sm90_v1",
+        name="triattn_h100_front3y16" + "".join(f"_{d.replace(chr(61), chr(95)).lower()}" for d in defs) + "_sm90_v1",
         sources=[str(_SRC / "front_fused3_sm90.cu")],
         extra_include_paths=[str(_SRC), str(_SRC.parent), str(cutlass_include())],
         extra_cflags=["-O3"],
@@ -290,6 +290,7 @@ def _front_y16():
             "--expt-extended-lambda",
             "--use_fast_math",
             "-DMW_F3_Y16",
+            *(f"-D{d}" for d in defs),
             "-lineinfo",
         ],
         verbose=False,
