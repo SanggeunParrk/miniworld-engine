@@ -270,6 +270,47 @@ _FRONT_L = {
 _FRONT_L_COMPACT = {64: 2048}
 
 
+@functools.lru_cache(maxsize=1)
+def _front_y16():
+    """The fp16-exact fused front (``front_fused3_sm90.cu`` with ``MW_F3_Y16``): the unfused fp16 inference route's LN + cuBLAS fp16
+    GEMMs + bias kernel in one kernel, bit for bit (same extension source, fast-math as the glue's LayerNorm)."""
+    from miniworld_engine.kernels._nvcc import cutlass_include
+
+    return load_extension(
+        name="triattn_h100_front3y16_sm90_v1",
+        sources=[str(_SRC / "front_fused3_sm90.cu")],
+        extra_include_paths=[str(_SRC), str(_SRC.parent), str(cutlass_include())],
+        extra_cflags=["-O3"],
+        extra_cuda_cflags=[
+            *host_flags(),
+            *gencodes("90a"),
+            "-O3",
+            "-std=c++17",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
+            "--use_fast_math",
+            "-DMW_F3_Y16",
+            "-lineinfo",
+        ],
+        verbose=False,
+    )
+
+
+#: (d_pair, 32 x heads) served by the fp16-exact fused front beyond ``_FRONT_L`` (fp16 inference, 32-channel heads): bit-identical to
+#: LN + cuBLAS fp16 GEMMs + bias kernel, which it replaces there.  ``FRONT_Y16`` False: the unfused route as before.
+FRONT_Y16 = True
+_FRONT_Y16_KEYS = {(64, 64), (64, 128)}
+
+
+def _wall_h(wcat, hd):
+    """``_wall`` in fp16 (the fp16 GEMMs' weights), cached on the packed tensor."""
+    w = getattr(wcat, "_triattn_wall_h", None)
+    if w is None:
+        w = _wall(wcat, hd).half()
+        wcat._triattn_wall_h = w
+    return w
+
+
 def _wall(wcat, hd):
     """The fused front's weights: [4 HD + 64, C] (the bias rows zero-padded to 64), cached on the packed tensor."""
     w = getattr(wcat, "_triattn_wall", None)
@@ -461,13 +502,17 @@ def _forward(
     dq = COMPACT if compact else dc  # channels a head in q / k / v / g / u
     wo_use = _compact_out(wo_p, H) if compact else wo_p
     btr = False  # the bias tiles the core reads transposed (set by the fused front for AF3's ending node)
-    if fused:  # LN + projection + head-major scaled bias: one kernel (and the flip of AF3's ending node in its bias store)
+    y16 = (
+        FRONT_Y16 and h16 and not fused and (not need) and head_dim == D and (C, HD) in _FRONT_Y16_KEYS and L > 256
+        and tuple(wcat.shape) == (4 * HD + _hp(H), C)
+    )  # the fp16-exact fused front where the unfused route would run LN + cuBLAS fp16 GEMMs + bias kernel
+    if fused or y16:  # LN + projection + head-major scaled bias: one kernel (and the flip of AF3's ending node in its bias store)
         y = mean = rstd = None
-        proj, sbias, _ = _front().front(
+        proj, sbias, _ = (_front_y16() if y16 else _front()).front(
             x,
             lnw.float().contiguous(),
             lnb.float().contiguous(),
-            _wall16(wcat, H) if compact else _wall(wcat, HD),
+            _wall_h(wcat, HD) if y16 else _wall16(wcat, H) if compact else _wall(wcat, HD),
             mask if flip and mask is not None else front_mask,
             L,
             H,
@@ -481,7 +526,7 @@ def _forward(
         btr = flip  # AF3's ending node: the front stored the bias as its rows have it; the core reads its tiles transposed
         flip = False
         qkvg = None
-        q, k, v, gt = ((proj[i].view(torch.float16) if h16 and i < 3 else proj[i]).view(B, L, L, H, dq) for i in range(4))
+        q, k, v, gt = ((proj[i].view(torch.float16) if h16 and (i < 3 or y16) else proj[i]).view(B, L, L, H, dq) for i in range(4))
     else:
         y, mean, rstd = g.ln_fwd(
             x,
@@ -492,7 +537,7 @@ def _forward(
             trans,
             h16,  # h16: y in fp16 for fp16 GEMMs
         )
-    if fused:
+    if fused or y16:
         pass
     elif need or L > 256:
         ww = _half(wcat) if h16 else wcat
@@ -510,7 +555,7 @@ def _forward(
         # short inference calls: one GEMM for q | k | v | g | bias (a launch less); beyond L 256 the extra tile column costs more
         qkvg = _lt().lt_mm(y, wcat, None, 0, False, None, None)  # [M, 4 HD + Hp]
         sbias = g.front_bias(qkvg, front_mask, B, L, H, 4 * HD, scale)
-    if not fused:
+    if not (fused or y16):
         q, k, v, gt = _views(qkvg, B, L, HD, H, dc)
     if flip:
         sbias = _core_mod.flip_bias(sbias, mask)

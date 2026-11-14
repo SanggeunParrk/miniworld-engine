@@ -17,7 +17,21 @@
 #include "fa3_utils.h"
 #include <cuda_fp16.h>
 using namespace cute;
+#ifdef MW_F3_Y16
+// Y16: the fp16 inference route of the width-generic path, bit for bit: LN as ln_fwd_k (lanes per row, fmaf), fp16 y and weights,
+// fp16 q / k / v / g and fp16 bias (rounded before the scale) as the cuBLAS fp16 GEMMs + front_bias_k make them
+using Element=cutlass::half_t;
+#else
 using Element=cutlass::bfloat16_t;
+#endif
+using XE=cutlass::bfloat16_t;   // the pair x is bf16 in both
+#ifdef MW_F3_Y16
+#define SCL 1.0f
+#define WSCALAR torch::kHalf
+#else
+#define SCL inv_scale
+#define WSCALAR torch::kBFloat16
+#endif
 #ifndef MW_F3_STAGES
 #define MW_F3_STAGES 4
 #endif
@@ -52,9 +66,9 @@ template<int C,int HD> struct Shared {
 
 template<int C,int HD> __global__ __launch_bounds__(256,minb_for(C))
 void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
-              Element const* x,float const* lnw,float const* lnb,bool const* mask,
+              XE const* x,float const* lnw,float const* lnb,bool const* mask,
               Element* bias,float* stats,int rows,int L,int H,float eps,float inv_scale,int tr,
-              int h16) {      // h16: q / k / v and the bias leave as fp16 bits (the fp16 inference core; the TMA store moves bytes), g as bf16
+              int h16,int crt) {      // h16: q / k / v and the bias leave as fp16 bits (the fp16 inference core; the TMA store moves bytes), g as bf16
   constexpr int NK=C/64,COLS=4*HD+64,NB=(COLS+BN-1)/BN,STAGES=stages_for(C),total=NB*NK;
   extern __shared__ char memory[]; auto& s=*reinterpret_cast<Shared<C,HD>*>(memory);
   int tid=threadIdx.x,wgi=tid/128,wt=tid%128,base=blockIdx.x*128;
@@ -78,6 +92,57 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
 
   // ---- LayerNorm: T lanes per row, 16-byte chunks interleaved across the lanes ----
   auto al=as_position_independent_swizzle_layout(TileLayout{});
+#ifdef MW_F3_Y16
+  {
+    // ln_fwd_k's arithmetic per row: LPR lanes a row, lane `sub` takes 16-byte vectors sub, sub+LPR, ..; sums in vector then element
+    // order, xor tree LPR/2 .. 1, /C by a run-time C (fast-math division as the glue's), fmaf affine, cvt.rn.f16x2
+    constexpr int LPR=C<=64?8:(C<=128?16:32),NV=C/8,NA=(NV+LPR-1)/LPR,RP=256/LPR;
+    int sub=tid%LPR,rg=tid/LPR;
+    for(int r=rg;r<128;r+=RP) {
+      int64_t row=base+r,prow=row;
+      if(tr&1){int64_t ll=int64_t(L)*L,bb=row/ll,rem=row-bb*ll,ii=rem/L,jj=rem-ii*L;prow=bb*ll+jj*L+ii;}
+      float v[NA][8],sm=0.f;
+      #pragma unroll
+      for(int a=0;a<NA;++a) {
+        int idx=sub+LPR*a;
+        if(idx<NV) {
+          uint4 vv=*reinterpret_cast<uint4 const*>(x+prow*C+idx*8);
+          uint32_t w4[4]={vv.x,vv.y,vv.z,vv.w};
+          #pragma unroll
+          for(int e=0;e<4;++e){v[a][2*e]=__uint_as_float(w4[e]<<16);v[a][2*e+1]=__uint_as_float(w4[e]&0xffff0000u);}
+          #pragma unroll
+          for(int e=0;e<8;++e) sm+=v[a][e];
+        }
+      }
+      #pragma unroll
+      for(int o=LPR/2;o>0;o>>=1) sm+=__shfl_xor_sync(0xffffffffu,sm,o);
+      const float mean=sm/crt;
+      float q=0.f;
+      #pragma unroll
+      for(int a=0;a<NA;++a) if(sub+LPR*a<NV) {
+        #pragma unroll
+        for(int e=0;e<8;++e){const float d=v[a][e]-mean;q=fmaf(d,d,q);}
+      }
+      #pragma unroll
+      for(int o=LPR/2;o>0;o>>=1) q+=__shfl_xor_sync(0xffffffffu,q,o);
+      const float rstd=rsqrtf(q/crt+eps);
+      int rw=r/64,rr=r%64;
+      #pragma unroll
+      for(int a=0;a<NA;++a) {
+        int idx=sub+LPR*a;
+        if(idx<NV) {
+          int col=idx*8;float o[8];
+          #pragma unroll
+          for(int e=0;e<8;++e) o[e]=fmaf((v[a][e]-mean)*rstd,__ldg(lnw+col+e),__ldg(lnb+col+e));
+          uint4 vec;uint32_t* pw=reinterpret_cast<uint32_t*>(&vec);
+          #pragma unroll
+          for(int e=0;e<4;++e) asm("cvt.rn.f16x2.f32 %0, %1, %2;":"=r"(pw[e]):"f"(o[2*e+1]),"f"(o[2*e]));
+          *reinterpret_cast<uint4*>(s.z.data()+(rw*NK+col/64)*4096+al(make_coord(rr,col%64)))=vec;
+        }
+      }
+    }
+  }
+#else
   {
     constexpr int T=C<256?4:8,RP=256/T,CH=C/8,PER=CH/T;
     int sub=tid%T,rg=tid/T;
@@ -115,6 +180,7 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
       }
     }
   }
+#endif
   cutlass::arch::fence_view_async_shared();
   __syncthreads();
 
@@ -161,7 +227,11 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
       for(int j=0;j<size(acc);j+=2) {
         int rr=get<0>(coord(j)),cc=get<1>(coord(j));
         uint32_t word;
+#ifdef MW_F3_Y16
+        if(true) word=uint32_t(__half_as_ushort(__float2half_rn(acc(j))))|(uint32_t(__half_as_ushort(__float2half_rn(acc(j+1))))<<16);
+#else
         if(h16 && (col0+cc)/HD<3) word=uint32_t(__half_as_ushort(__float2half_rn(acc(j))))|(uint32_t(__half_as_ushort(__float2half_rn(acc(j+1))))<<16);
+#endif
         else {Element lo=Element(acc(j)),hi=Element(acc(j+1));word=uint32_t(lo.raw())|(uint32_t(hi.raw())<<16);}
         *reinterpret_cast<uint32_t*>(stg+(cc/64)*4096+al(make_coord(rr,cc%64)))=word;
       }
@@ -187,11 +257,16 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
       for(int j=0;j<size(acc);j+=2) {
         int rr=get<0>(coord(j)),cc=get<1>(coord(j));
         auto put=[&](int c,float v){
+#ifdef MW_F3_Y16
+          // the bias GEMM's fp16 output, then front_bias_k: float(half) * inv_scale, clamped, rounded
+          if(h16) reinterpret_cast<uint16_t*>(stg)[c*64+rr]=__half_as_ushort(__float2half_rn(fmaxf(fminf(__half2float(__float2half_rn(v))*inv_scale,6.0e4f),-6.0e4f)));
+#else
           if(h16) reinterpret_cast<uint16_t*>(stg)[c*64+rr]=__half_as_ushort(__float2half_rn(fmaxf(fminf(v,6.0e4f),-6.0e4f)));
+#endif
           else stg[c*64+rr]=Element(v);
         };
-        if(cc<H) put(cc,acc(j)*inv_scale);
-        if(cc+1<H) put(cc+1,acc(j+1)*inv_scale);
+        if(cc<H) put(cc,acc(j)*SCL);
+        if(cc+1<H) put(cc+1,acc(j+1)*SCL);
       }
       cutlass::arch::NamedBarrier::sync(128,1+wgi);
       if(wt<H*8) {
@@ -232,8 +307,8 @@ template<int C,int HD> void launch(torch::Tensor x,torch::Tensor lnw,torch::Tens
   auto to=make_tma_copy(SM90_TMA_STORE{},go,TileLayout{},Shape<_64,_64>{},_1{});
   size_t smem=sizeof(Shared<C,HD>);
   C10_CUDA_CHECK(cudaFuncSetAttribute(front_v3<C,HD>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
-  front_v3<C,HD><<<rows/128,256,smem,at::cuda::getCurrentCUDAStream()>>>(tw,to,(Element*)x.data_ptr(),lnw.data_ptr<float>(),lnb.data_ptr<float>(),
-    mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)bias.data_ptr(),stats.numel()?stats.data_ptr<float>():nullptr,rows,L,H,eps,inv_scale,tr,h16);
+  front_v3<C,HD><<<rows/128,256,smem,at::cuda::getCurrentCUDAStream()>>>(tw,to,(XE*)x.data_ptr(),lnw.data_ptr<float>(),lnb.data_ptr<float>(),
+    mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)bias.data_ptr(),stats.numel()?stats.data_ptr<float>():nullptr,rows,L,H,eps,inv_scale,tr,h16,C);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -241,7 +316,7 @@ std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch
   TORCH_CHECK(x.is_cuda() && x.scalar_type()==torch::kBFloat16 && x.is_contiguous() && x.dim()==2,"contiguous BF16 matrix required");
   c10::cuda::CUDAGuard guard(x.device());int C=x.size(1),rows=x.size(0),B=rows/(L*L);
   TORCH_CHECK(L>0 && L%128==0 && rows==B*L*L && (HD==32*H || HD==16*H) && H<=16 && HD%64==0,"invalid pair/head dimensions");
-  TORCH_CHECK(weights.device()==x.device() && weights.scalar_type()==torch::kBFloat16 && weights.is_contiguous() && weights.sizes()==torch::IntArrayRef({4*HD+64,C}),"packed weights mismatch");
+  TORCH_CHECK(weights.device()==x.device() && weights.scalar_type()==WSCALAR && weights.is_contiguous() && weights.sizes()==torch::IntArrayRef({4*HD+64,C}),"packed weights mismatch");
   for(auto t:{lnw,lnb}) TORCH_CHECK(t.device()==x.device() && t.scalar_type()==torch::kFloat32 && t.is_contiguous() && t.numel()==C,"FP32 LN affines required");
   TORCH_CHECK(mask.device()==x.device() && mask.is_contiguous() && mask.scalar_type()==torch::kBool && (mask.numel()==0 || mask.sizes()==torch::IntArrayRef({B,L})),"mask mismatch");
   // h16: planes 0-2 of p and the bias hold fp16 bits (the caller views them as fp16), plane 3 (g) bf16
