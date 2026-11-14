@@ -114,8 +114,17 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
 #define TA_PP 0           // 1: FlashAttention-3 pingpong: the two consumer warpgroups issue their wgmma groups strictly alternately (named barriers 2 / 3), so one warpgroup
                           // exponentiates while the other's tensor work runs.  Pure scheduling (bit-identical).
 #endif
+#ifndef TA_FR
+#define TA_FR 0           // 1: the bias stage is released after the QK^T wgmma issue instead of before it (fence.proxy + arrive off the issue path).  Scheduling only (bit-identical).
+#endif
+#ifndef TA_SW
+#define TA_SW 0           // 1: software pipelined sub-step (QK^T of the next sub-step issued in the middle of this one's exponentials; see step_sw).  Pure scheduling (bit-identical).
+#endif
+#ifndef TA_SWN
+#define TA_SWN 8          // TA_SW: pairs (of 16) exponentiated before the next QK^T is issued
+#endif
 #ifndef TA_ABL
-#define TA_ABL 0          // ablation bit mask (time only, WRONG results): 1 no QK wgmma, 2 no PV wgmma, 4 no exp, 8 no scale/offset HFMA2, 16 no max machinery, 32 no bias ldmatrix, 128 no X phase
+#define TA_ABL 0         // ablation bit mask (time only, WRONG results): 1 no QK wgmma, 2 no PV wgmma, 4 no exp, 8 no scale/offset HFMA2, 16 no max machinery, 32 no bias ldmatrix, 128 no X phase
 #endif
 #ifndef TA_POLY
 #define TA_POLY 8         // pairs i (of 16 per row) whose exponentials run as hex2_poly: TA_POLY of every 16 (1, 2, 4, 8 or 16), the rest on the
@@ -366,19 +375,21 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
 #pragma unroll
       for (int e = 0; e < 4; ++e) sc[r][4 * i2 + e] = r4[e];
     }
-    if (r == R - 1) {
-      fence_regs(sc[r]);                            // the ldmatrix data is in registers before the stage is released (an arrive does not
+    auto relb = [&]() {
+      if (!TA_FR) fence_regs(sc[r]);               // the ldmatrix data is in registers before the stage is released (an arrive does not
       fence_proxy_async();                          // wait for this thread's loads: the next TMA would race them)
       __syncwarp();
       if (lane == 0) arrive(bem(bs));
       if (++bs == NB) { bs = 0; bph ^= 1; }
-    }
+    };
+    if (r == R - 1 && !TA_FR) relb();
     wait(kvf(gst), gph);
     if (TA_PP) named_sync(2 + w, 256);              // pingpong: my turn on the tensor core
     wg_fence();
     if (!(TA_ABL & 1)) mma_h16_n128(sc[r], qa[r][0], desc_off(kd0, gst * STG * 2));
     if (DH == D && !(TA_ABL & 1)) mma_h16_n128(sc[r], qa[r][1], desc_off(kd0, gst * STG * 2 + 32));   // (heads of 16: channels 16-31 are zeros, their k16 step adds exact zeros)
     wg_commit();
+    if (r == R - 1 && TA_FR) relb();                // TA_FR: the stage is released after the wgmma issue (the ldmatrix results were consumed by it)
     if (++gst == NKV) { gst = 0; gph ^= 1; }
   };
   // PV of the previous sub-step (row r, stage xst): [O_r | l_r] += P_r [V | 1], issued and committed
@@ -397,7 +408,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   };
   // X phase of row r on sc[r] (its QK^T retired; o[r] idle: the PV in flight is the other row's): the offsets, the exponentials in place.
   // Exact form, and a row without a finite logit yet: the tile's row maximum (a tree of HMNMX2) raises the offset lazily.
-  auto X = [&](int r) {
+  uint32_t nmr0 = 0, nmr1 = 0;                       // the offsets of the row in X (set by Xpre, used by Xexp)
+  auto Xpre = [&](int r) {
     if (TA_ABL & 128) return;
     uint32_t t0[8], t1[8];
     auto tree = [&]() {                            // this thread's maximum of each of its two rows (no shuffle): a depth-4 tree of HMNMX2
@@ -434,10 +446,15 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         if (LIST) { lprev[r][0] = o[r][16]; lprev[r][1] = o[r][18]; }
       }
     }
-    const uint32_t nm0 = hdup(m[r][0] > -INFINITY ? -m[r][0] : 0.f), nm1 = hdup(m[r][1] > -INFINITY ? -m[r][1] : 0.f);
-#pragma unroll
-    for (int i = 0; i < 16; ++i) { sc[r][2 * i] = hexp<POLY>((TA_ABL & 8) ? sc[r][2 * i] : hfma2(sc[r][2 * i], scl2, nm0), i); sc[r][2 * i + 1] = hexp<POLY>((TA_ABL & 8) ? sc[r][2 * i + 1] : hfma2(sc[r][2 * i + 1], scl2, nm1), i); }
+    nmr0 = hdup(m[r][0] > -INFINITY ? -m[r][0] : 0.f); nmr1 = hdup(m[r][1] > -INFINITY ? -m[r][1] : 0.f);
   };
+  // the exponentials of the pairs [lo, hi) of row r (in place), with the offsets Xpre left
+  auto Xexp = [&](int r, int lo, int hi) {
+    if (TA_ABL & 128) return;
+#pragma unroll
+    for (int i = lo; i < hi; ++i) { sc[r][2 * i] = hexp<POLY>((TA_ABL & 8) ? sc[r][2 * i] : hfma2(sc[r][2 * i], scl2, nmr0), i); sc[r][2 * i + 1] = hexp<POLY>((TA_ABL & 8) ? sc[r][2 * i + 1] : hfma2(sc[r][2 * i + 1], scl2, nmr1), i); }
+  };
+  auto X = [&](int r) { Xpre(r); Xexp(r, 0, 16); };
   // after the PV of a tile of row rr retired: its row-sum increment is at least its largest probability; past 2^TA_TS the offset rises by the
   // power of two that brings it back to about 1 (o and l scaled exactly); a non-finite one (an fp16 probability overflowed) cannot be repaired
   // here: the task goes on the fix list
@@ -470,6 +487,26 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     if (LIST) check(1 - r);
     release();
   };
+  // TA_SW (software pipelined sub-step; scheduling only, bit-identical): on entry the QK^T of (tile, row r) is already in flight (issued in the middle of the
+  // previous sub-step's exponentials).  PV of the previous row is issued first, the tree / vote / offsets of row r run when its scores land, the first TA_SWN
+  // pairs are exponentiated while that PV executes, then (PV retired, stage released) the QK^T of the NEXT sub-step is issued into the other row's scores
+  // and the remaining pairs run under it.  The QK^T latency and the vote chain are thereby off the warp's critical path.
+  auto step_sw = [&](auto FIRST, int r, bool last) {
+    constexpr bool first = decltype(FIRST)::value;
+    if (!first) PV(1 - r);
+    if (first) wg_wait<0>(); else wg_wait<1>();
+    fence_regs(sc[r]);
+    Xpre(r);
+    Xexp(r, 0, TA_SWN);
+    if (!first) {
+      wg_wait<0>();
+      fence_regs(o[0]); fence_regs(o[1]);
+      if (LIST) check(1 - r);
+      release();
+    }
+    if (!last) G(1 - r);
+    Xexp(r, TA_SWN, 16);
+  };
   int lt = 0;
   for (int t = blockIdx.x;; t += SCHED ? 0 : (int)gridDim.x, ++lt) {
     if (SCHED == nullptr && t >= nt) break;
@@ -500,10 +537,13 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     ovf = 0;
     G(0);                                            // sub-step (0, 0): no previous PV
     if (TA_PP) named_arrive(2 + (w ^ 1), 256);
-    wg_wait<0>();
-    fence_regs(sc[0]);
-    X(0);
-    uint4 gpre[R][2];                                // the gate's values of this lane's output columns, loaded under the last key tile
+    if (!TA_SW) {
+      wg_wait<0>();
+      fence_regs(sc[0]);
+      X(0);
+    }
+    uint4 gpre[R][2];                               // the gate's values of this lane's output columns, loaded under the last key tile
+    if (TA_SW) step_sw(std::true_type{}, 0, false);
     for (int j = 0; j < nk; ++j) {
       if (GATE != nullptr && j == nk - 1) {
 #pragma unroll
@@ -514,8 +554,13 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
             gpre[r][half] = 8 * t4 < DH ? __ldg(reinterpret_cast<const uint4*>(GATE + ((size_t)row0(b, n) + qt * BM + qrow + g8 + 8 * half) * ldg + h * DH + 8 * t4)) : make_uint4(0, 0, 0, 0);
         }
       }
-      step(1);
-      if (j + 1 < nk) step(0);
+      if (TA_SW) {
+        step_sw(std::false_type{}, 1, j + 1 >= nk);
+        if (j + 1 < nk) step_sw(std::false_type{}, 0, false);
+      } else {
+        step(1);
+        if (j + 1 < nk) step(0);
+      }
     }
     if (TA_PP) named_sync(2 + w, 256);
     PV(1);                                           // the last sub-step's PV
