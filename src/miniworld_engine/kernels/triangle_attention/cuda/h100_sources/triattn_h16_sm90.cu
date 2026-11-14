@@ -114,11 +114,17 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
 #define TA_PP 0           // 1: FlashAttention-3 pingpong: the two consumer warpgroups issue their wgmma groups strictly alternately (named barriers 2 / 3), so one warpgroup
                           // exponentiates while the other's tensor work runs.  Pure scheduling (bit-identical).
 #endif
+#ifndef TA_ONE
+#define TA_ONE 0          // compile experiments: instantiate one kernel only
+#endif
 #ifndef TA_FR
 #define TA_FR 0           // 1: the bias stage is released after the QK^T wgmma issue instead of before it (fence.proxy + arrive off the issue path).  Scheduling only (bit-identical).
 #endif
 #ifndef TA_SW
 #define TA_SW 0           // 1: software pipelined sub-step (QK^T of the next sub-step issued in the middle of this one's exponentials; see step_sw).  Pure scheduling (bit-identical).
+#endif
+#ifndef TA_SWF
+#define TA_SWF 1
 #endif
 #ifndef TA_SWN
 #define TA_SWN 8          // TA_SW: pairs (of 16) exponentiated before the next QK^T is issued
@@ -394,6 +400,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   };
   // PV of the previous sub-step (row r, stage xst): [O_r | l_r] += P_r [V | 1], issued and committed
   auto PV = [&](int r) {
+    if (TA_SW && TA_SWF) wg_fence();                          // TA_SW: the probabilities (A) were written after the last fence, with the next QK^T in flight
 #pragma unroll
     for (int kk = 0; kk < BN / 16; ++kk) {
       const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
@@ -491,11 +498,13 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // previous sub-step's exponentials).  PV of the previous row is issued first, the tree / vote / offsets of row r run when its scores land, the first TA_SWN
   // pairs are exponentiated while that PV executes, then (PV retired, stage released) the QK^T of the NEXT sub-step is issued into the other row's scores
   // and the remaining pairs run under it.  The QK^T latency and the vote chain are thereby off the warp's critical path.
-  auto step_sw = [&](auto FIRST, int r, bool last) {
+  // (revised) on entry the QK^T of (tile, row r) has landed; it is waited for at the end of the previous sub-step, before this sub-step's PV is issued
+  // (ptxas serialises a wgmma stage in which non-wgmma code defines the A registers of a later wgmma: the exponentials written under an in-flight QK^T
+  // must not be the A of a PV issued in the same stage).
+  auto step_sw = [&](auto FIRST, auto LAST, int r) {
+    constexpr bool last = decltype(LAST)::value;
     constexpr bool first = decltype(FIRST)::value;
     if (!first) PV(1 - r);
-    if (first) wg_wait<0>(); else wg_wait<1>();
-    fence_regs(sc[r]);
     Xpre(r);
     Xexp(r, 0, TA_SWN);
     if (!first) {
@@ -506,6 +515,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     }
     if (!last) G(1 - r);
     Xexp(r, TA_SWN, 16);
+    if (!last) { wg_wait<0>(); fence_regs(sc[1 - r]); }
   };
   int lt = 0;
   for (int t = blockIdx.x;; t += SCHED ? 0 : (int)gridDim.x, ++lt) {
@@ -537,13 +547,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     ovf = 0;
     G(0);                                            // sub-step (0, 0): no previous PV
     if (TA_PP) named_arrive(2 + (w ^ 1), 256);
-    if (!TA_SW) {
-      wg_wait<0>();
-      fence_regs(sc[0]);
-      X(0);
-    }
+    wg_wait<0>();
+    fence_regs(sc[0]);
+    if (!TA_SW) X(0);
     uint4 gpre[R][2];                               // the gate's values of this lane's output columns, loaded under the last key tile
-    if (TA_SW) step_sw(std::true_type{}, 0, false);
+    if (TA_SW) step_sw(std::true_type{}, std::false_type{}, 0);
     for (int j = 0; j < nk; ++j) {
       if (GATE != nullptr && j == nk - 1) {
 #pragma unroll
@@ -555,8 +563,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         }
       }
       if (TA_SW) {
-        step_sw(std::false_type{}, 1, j + 1 >= nk);
-        if (j + 1 < nk) step_sw(std::false_type{}, 0, false);
+        if (j + 1 < nk) { step_sw(std::false_type{}, std::false_type{}, 1); step_sw(std::false_type{}, std::false_type{}, 0); }
+        else step_sw(std::false_type{}, std::true_type{}, 1);
       } else {
         step(1);
         if (j + 1 < nk) step(0);
@@ -737,6 +745,14 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
     // the polynomial exponentials only on the 32-channel heads (tuned there, 2026-10); heads of 16 channels run every exponential on the MUFU
     // (their score step is half as long: the polynomial's extra instructions cost more than they relieve -- d_pair 64 module, L128-1536)
     constexpr bool POLY = DH == D;
+    if constexpr (TA_ONE) {   // compile experiments only: one kernel (VOTE, ORD1, 32-channel heads, bias as stored)
+      if constexpr (DH == D && !BT) {
+        cudaFuncSetAttribute(triattn_h16_sm90<true, true, DH, POLY, BT>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+        cudaFuncSetAttribute(triattn_h16_sm90<true, false, DH, POLY, BT>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+        launch(ord1 ? triattn_h16_sm90<true, true, DH, POLY, BT> : triattn_h16_sm90<true, false, DH, POLY, BT>, dyn ? sched.data_ptr<int>() : nullptr, nullptr);
+      }
+      return;
+    }
     static bool attr = false;
     if (!attr) {
       for (auto kk : {triattn_h16_sm90<false, false, DH, POLY, BT>, triattn_h16_sm90<false, true, DH, POLY, BT>, triattn_h16_sm90<true, false, DH, POLY, BT>,
