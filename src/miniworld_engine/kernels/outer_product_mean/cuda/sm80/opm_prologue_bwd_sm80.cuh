@@ -37,7 +37,12 @@ template <int CM, int NBUF = 2> struct PbCfg {
   static constexpr int NTOK = 128, NTHR = 256, NCH = CM / 8;
   static constexpr int WB = 64 * CM * 2, DAB = NTOK * 128, XT = NTOK * CM * 2, YT = NTOK * CM * 2;
   static constexpr int STB = NTOK * 8;                                   // one tile's (mean, rstd) pairs
-  static constexpr int SMEM = WB + NBUF * DAB + NBUF * XT + YT + 2 * CM * 4 + 8 * 2 * CM * 4 + NBUF * STB;
+#ifdef MWE_SM120   // 99 KiB: the per-warp dgamma | dbeta rows live in registers and reach shared memory (the tile buffers) only at the end
+  static constexpr int RED = 0;
+#else
+  static constexpr int RED = 8 * 2 * CM * 4;
+#endif
+  static constexpr int SMEM = WB + NBUF * DAB + NBUF * XT + YT + 2 * CM * 4 + RED + NBUF * STB;
   static constexpr int PW = 64 * CM + 2 * CM;
   static_assert(CM == 64 || CM == 128, "d_msa");
   static_assert(NBUF == 1 || NBUF == 2, "buffers");
@@ -82,8 +87,17 @@ __global__ void __launch_bounds__(256, NMINB) opm_prologue_bwd_kernel(const PbPa
   __shared__ uint8_t smask[C::NTOK];
   const uint32_t sw = smem_u32(smem), sdab0 = sw + C::WB, sx0 = sdab0 + NBUF * C::DAB, sy = sx0 + NBUF * C::XT;
   float* sgb = reinterpret_cast<float*>(smem + C::WB + NBUF * C::DAB + NBUF * C::XT + C::YT);       // gamma [CM], beta [CM]
+#ifdef MWE_SM120
+  float* sred = reinterpret_cast<float*>(smem + C::WB);                                             // [8 warps][dgamma CM | dbeta CM]: the tile buffers, after the last tile
+  const float2* sst_gen = reinterpret_cast<const float2*>(sgb + 2 * CM);                              // [NBUF][128] (mean, rstd) of the tiles
+  float rg[CM / 64][4];                                                                               // this warp's dgamma | dbeta partials of columns nt * 8 + 2 q (+1), nt % 8 == gq
+#pragma unroll
+  for (int u = 0; u < CM / 64; ++u) rg[u][0] = rg[u][1] = rg[u][2] = rg[u][3] = 0.f;
+  static_assert(NBUF * C::DAB + NBUF * C::XT >= 8 * 2 * CM * 4, "the final dgamma | dbeta rows fit the tile buffers");
+#else
   float* sred = sgb + 2 * CM;                                                                         // [8 warps][dgamma CM | dbeta CM]
   const float2* sst_gen = reinterpret_cast<const float2*>(sred + 8 * 2 * CM);                         // [NBUF][128] (mean, rstd) of the tiles
+#endif
   const uint32_t sst0 = smem_u32(sst_gen);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int wm = warp & 1, wn = warp >> 1;       // dW tile: 2 (rows of [64]) x 4 (columns of CM)
@@ -94,7 +108,9 @@ __global__ void __launch_bounds__(256, NMINB) opm_prologue_bwd_kernel(const PbPa
     cp_async16(sw + swzn<C::NCH>(row, ch), (row < 32 ? p.wl + row * CM : p.wr + (row - 32) * CM) + ch * 8);
   }
   for (int k = tid; k < CM; k += C::NTHR) { sgb[k] = p.lnw[k]; sgb[CM + k] = p.lnb[k]; }
+#ifndef MWE_SM120
   for (int k = tid; k < 8 * 2 * CM; k += C::NTHR) sred[k] = 0.f;
+#endif
   int tl = blockIdx.x, buf = 0;
   if (tl < p.ntile) pb_load<CM, NBUF>(p, sdab0, sx0, sst0, tl, tid);
   cp_async_commit();
@@ -225,7 +241,12 @@ __global__ void __launch_bounds__(256, NMINB) opm_prologue_bwd_kernel(const PbPa
         gB += __shfl_xor_sync(0xffffffffu, gB, 4); gB += __shfl_xor_sync(0xffffffffu, gB, 8); gB += __shfl_xor_sync(0xffffffffu, gB, 16);
         bA += __shfl_xor_sync(0xffffffffu, bA, 4); bA += __shfl_xor_sync(0xffffffffu, bA, 8); bA += __shfl_xor_sync(0xffffffffu, bA, 16);
         bB += __shfl_xor_sync(0xffffffffu, bB, 4); bB += __shfl_xor_sync(0xffffffffu, bB, 8); bB += __shfl_xor_sync(0xffffffffu, bB, 16);
+#ifdef MWE_SM120
+        if (gq == (nt & 7)) { rg[nt >> 3][0] += gA; rg[nt >> 3][1] += gB; rg[nt >> 3][2] += bA; rg[nt >> 3][3] += bB; }   // the same adds, in registers
+        (void)wr;
+#else
         if (gq == 0) { wr[col] += gA; wr[col + 1] += gB; wr[CM + col] += bA; wr[CM + col + 1] += bB; }
+#endif
       }
     }
     // ---- dW += [da | db]^T y   (M = 64 channels, N = d_msa, K = the 128 tokens)
@@ -273,6 +294,17 @@ __global__ void __launch_bounds__(256, NMINB) opm_prologue_bwd_kernel(const PbPa
       stg64(part + (long)(r0 + 8) * CM + col, make_float2(aw[mt][nt][2], aw[mt][nt][3]));
     }
   __syncthreads();
+#ifdef MWE_SM120
+  {                                                                      // the warps' rows into the (now idle) tile buffers, then the fixed-order sum below
+    float* wr = sred + warp * 2 * CM;
+#pragma unroll
+    for (int nt = 0; nt < CM / 8; ++nt) {
+      const int col = nt * 8 + 2 * q;
+      if (gq == (nt & 7)) { wr[col] = rg[nt >> 3][0]; wr[col + 1] = rg[nt >> 3][1]; wr[CM + col] = rg[nt >> 3][2]; wr[CM + col + 1] = rg[nt >> 3][3]; }
+    }
+  }
+  __syncthreads();
+#endif
   for (int col = tid; col < 2 * CM; col += C::NTHR) {
     float a = 0.f;
 #pragma unroll
@@ -293,7 +325,11 @@ namespace opm80 {
 struct PbWide {
   static constexpr int CM = 256, NTOK = 64, NTHR = 256, NCH = CM / 8;
   static constexpr int WB = 64 * CM * 2, DAB = NTOK * 128, XT = NTOK * CM * 2, YT = NTOK * CM * 2, STB = NTOK * 8;
+#ifdef MWE_SM120   // 99 KiB: y takes the weights' place once dy is done (the weights are re-read from L2 with each tile)
+  static constexpr int OFF_Y = 0, OFF_DAB = WB, OFF_X = OFF_DAB + DAB, OFF_GB = OFF_X + XT;
+#else
   static constexpr int OFF_DAB = WB, OFF_X = OFF_DAB + DAB, OFF_Y = OFF_X + XT, OFF_GB = OFF_Y + YT;
+#endif
   static constexpr int OFF_RED = OFF_GB + 2 * CM * 4;                    // [4 token groups][dgamma CM | dbeta CM]
   static constexpr int OFF_RS = OFF_RED + 4 * 2 * CM * 4;                // [2 channel halves][NTOK][s1, s2]
   static constexpr int OFF_ST = OFF_RS + 2 * NTOK * 2 * 4;
@@ -305,6 +341,12 @@ struct PbWide {
 DEVI void pbw_load(const PbParams& p, uint32_t s0b, int tl, int tid) {
   using C = PbWide;
   constexpr int CM = C::CM;
+#ifdef MWE_SM120
+  for (int u = tid; u < 64 * C::NCH; u += C::NTHR) {                   // the stacked weights, every tile (y overwrote them)
+    const int row = u / C::NCH, ch = u % C::NCH;
+    cp_async16(s0b + swzn<C::NCH>(row, ch), (row < 32 ? p.wl + row * CM : p.wr + (row - 32) * CM) + ch * 8);
+  }
+#endif
   const int s0 = (tl % p.ntile_s) * 32, i0 = (tl / p.ntile_s) * 2;
   if (tid < C::NTOK) {
     const int t = tid, s = s0 + (t >> 1), i = i0 + (t & 1);
@@ -343,10 +385,12 @@ __global__ void __launch_bounds__(256, 1) opm_prologue_bwd_wide_kernel(const PbP
   const int tg = warp & 3, hf = warp >> 2;          // dy: the warp's 16 tokens and 128 channels
   const int wm = warp & 1, wn = warp >> 1;          // dW: 2 (rows of [64]) x 4 (columns of CM)
 
+#ifndef MWE_SM120
   for (int u = tid; u < 64 * C::NCH; u += C::NTHR) {
     const int row = u / C::NCH, ch = u % C::NCH;
     cp_async16(sw + swzn<C::NCH>(row, ch), (row < 32 ? p.wl + row * CM : p.wr + (row - 32) * CM) + ch * 8);
   }
+#endif
   for (int k = tid; k < CM; k += C::NTHR) { sgb[k] = p.lnw[k]; sgb[CM + k] = p.lnb[k]; }
   for (int k = tid; k < 4 * 2 * CM; k += C::NTHR) sred[k] = 0.f;
   int tl = blockIdx.x;
@@ -381,7 +425,7 @@ __global__ void __launch_bounds__(256, 1) opm_prologue_bwd_wide_kernel(const PbP
     }
     mk = fetch(tl + gridDim.x);
     // ---- y = bf16(LN(m)) from the saved statistics: warp w the rows 8 w .. 8 w + 7, lane = the 16-byte chunk
-    {
+    auto y_tile = [&]() {
       const int piece = lane;
       float lg[8], lb[8];
 #pragma unroll
@@ -403,7 +447,10 @@ __global__ void __launch_bounds__(256, 1) opm_prologue_bwd_wide_kernel(const PbP
         }
         sts128(sy + swzn<C::NCH>(t, piece), y);
       }
-    }
+    };
+#ifndef MWE_SM120
+    y_tile();
+#endif
     __syncthreads();
 
     // ---- dy = [da | db] [Wl; Wr] for the warp's 16 tokens x 128 channels
@@ -422,6 +469,10 @@ __global__ void __launch_bounds__(256, 1) opm_prologue_bwd_wide_kernel(const PbP
         mma16816(acc[2 * np + 1], af, bf[2], bf[3]);
       }
     }
+#ifdef MWE_SM120
+    __syncthreads();                     // every warp's dy is done: y overwrites the weights (read by dW after the row-sum barrier below)
+    y_tile();
+#endif
     // ---- LayerNorm backward: the row sums over this half, exchanged with the other half's warp, then dx -> the m tile in place (this half's columns)
     const int r0 = tg * 16 + gq, r1 = r0 + 8;
     const int sA = s0 + (r0 >> 1), iA = i0 + (r0 & 1), sB = s0 + (r1 >> 1), iB = i0 + (r1 & 1);

@@ -31,8 +31,8 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None
     """Why the H100 path does not serve this call (None: it does). Shapes / dtypes / flags only."""
     if not pair.is_cuda:
         return "the kernels run on CUDA tensors only"
-    if torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):
-        return "the cuda backend of BidirectionalTriangleAttention is the H100 (sm_90a) and A100 (sm_80) path"
+    if torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0), (12, 0)):
+        return "the cuda backend of BidirectionalTriangleAttention is the H100 (sm_90a), A100 (sm_80) and RTX 5090 (sm_120a) path"
     if module.use_self_attention:
         return "self-attention (use_self_attention=True) is not part of the H100 path (the bias-only block is)"
     if pair.dtype != torch.bfloat16:
@@ -54,11 +54,11 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None
 
 
 def _a100() -> bool:
-    return torch.cuda.get_device_capability() == (8, 0)
+    return torch.cuda.get_device_capability() in ((8, 0), (12, 0))  # A100, or the RTX 5090 (the same sources built for sm_120a)
 
 
 def _glue():
-    if _a100():  # the same sources built for sm_80
+    if _a100():  # the same sources built for sm_80 (sm_120a on the 5090)
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
 
         return sm80_bidir.glue()
@@ -217,8 +217,8 @@ def single_refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str
     """Why the single-direction bias-only path does not serve this call (None: it does)."""
     if not pair.is_cuda:
         return "the kernels run on CUDA tensors only"
-    if torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):
-        return "the bias-only TriangleAttention cuda path is the H100 (sm_90a) and A100 (sm_80) one"
+    if torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0), (12, 0)):  # 12.0: the sm_80 glue built for sm_120a (sm80_bidir)
+        return "the bias-only TriangleAttention cuda path is the H100 (sm_90a), A100 (sm_80) and RTX 5090 (sm_120a) one"
     if pair.dtype != torch.bfloat16:
         return f"dtype {pair.dtype}: bf16 activations only (the bias-only path's glue kernels)"
     if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:

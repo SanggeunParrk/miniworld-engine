@@ -47,6 +47,7 @@ from torch.autograd.function import once_differentiable
 
 from ... import _capture
 from ..._compile import opaque
+from . import sm80_arch as _arch
 from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
@@ -83,13 +84,13 @@ def _forward_entry(ext, save: bool, *, gate: bool = False, key_mask: torch.Tenso
 def _ext():
     ensure_cuda_home()
     return load_extension(
-        name="triattn_sm80",
+        name=_arch.name("triattn_sm80"),
         sources=[str(_dir / "ops.cu")],
         extra_cuda_cflags=[
             *host_flags(),
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
+            *_arch.gencode(),
             f"-I{_dir}",
         ],
         extra_cflags=["-std=c++17", "-O3"],
@@ -98,7 +99,7 @@ def _ext():
 
 
 def _is_ampere(index: int) -> bool:
-    return torch.cuda.get_device_capability(index) == (8, 0)
+    return _arch.is_card(index)  # A100, or the RTX 5090 (the same sources built for sm_120a)
 
 
 def _token_major(t: torch.Tensor) -> torch.Tensor | None:

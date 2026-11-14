@@ -16,7 +16,15 @@ namespace a100 {
 
 template <int D_, int H_>
 struct PwCfgT {
-  static constexpr int D = D_, H = H_, NTHR = 256, RS = 64, NSTAGE = 2;
+  static constexpr int D = D_, H = H_, NTHR = 256, NSTAGE = 2;
+#if defined(MWE_SM120)
+  // RTX 5090 (99 KB a block): 32-row stages (one m16 tile per warp in phase 1) halve the x | dy stages and the h | dA | dB tile -- 88 KB at D = 64, 92 KB at D = 128
+  static constexpr int RS = 32;
+#else
+  static constexpr int RS = 64;
+#endif
+  static constexpr int MT = RS / 32;                                 // m16 tiles per warp in phase 1 (the 8 warps: 2 row groups x 4 hidden steps)
+  static constexpr int NRB = RS / 16, NJP = 4 / NRB;              // copy-out: 16-row blocks per stage, warps sharing one (matrix, row block)
   static constexpr int SU = 8192 / D;                              // hidden units per slice CTA
   static constexpr int NSL = H / SU;                               // slices
   static constexpr int NS = D / 16;                                // k16 steps of phase 1
@@ -29,6 +37,9 @@ struct PwCfgT {
   static constexpr int OFF_ST = WRES, OFF_H = OFF_ST + NSTAGE * STAGE;
   static constexpr int SMEM = OFF_H + 3 * HT;
   static_assert(SMEM + 1024 <= 167936, "sm_80 shared memory");
+#if defined(MWE_SM120)
+  static_assert(SMEM <= 101376, "sm_120 shared memory (99 KB a block)");
+#endif
   static_assert(D == 64 || D == 128, "widths");
   static_assert(H % SU == 0, "hidden slices");
 };
@@ -87,7 +98,7 @@ DEVI void pwg_role(const PWParams& p, uint8_t* smem, int sl, int rr, int nrep) {
     const int row0 = (rr + i * nrep) * G::RS;
     const uint32_t buf = s_u + G::OFF_ST + (i % G::NSTAGE) * G::STAGE;
 #pragma unroll
-    for (int k = 0; k < D / 16; ++k) {
+    for (int k = 0; k < G::RS * D / 4 / G::NTHR; ++k) {
       const int c = tid + G::NTHR * k, m = c / (G::RS * GPR), r = (c / GPR) % G::RS, gr = c % GPR;
       cp_async16_full(buf + m * G::TILE + swz_rb<RB>(r, gr), (m ? p.dy : p.x) + (size_t)(row0 + r) * D + gr * 8);
     }
@@ -105,10 +116,10 @@ DEVI void pwg_role(const PWParams& p, uint8_t* smem, int sl, int rr, int nrep) {
   for (int m = 0; m < 3; ++m) pw_block<D>(3 * warp + m, bmat[m], bdh[m], bhm[m]);
   const int split = D == 128 ? ((warp == 1 || warp == 5) ? 1 : warp == 2 ? 2 : 0) : (warp == 2 ? 2 : 0);
   const int lrow = ((lane >> 4) << 3) + (lane & 7), lgr = (lane >> 3) & 1;
-  const int ar = rg * 32 + (((lane >> 3) & 1) << 3) + (lane & 7), ag = lane >> 4;
+  const int ar = rg * 16 * G::MT + (((lane >> 3) & 1) << 3) + (lane & 7), ag = lane >> 4;
   const uint32_t sh = s_u + G::OFF_H;
   // block copy-out: warp -> matrix (dA, dB) = warp / 4, row block warp % 4, the slice's SU / 16 K blocks
-  const int cm = warp >> 2, crb = warp & 3, car = (((lane >> 3) & 1) << 3) + (lane & 7), cag = lane >> 4;
+  const int cm = warp >> 2, crb = (warp & 3) % G::NRB, cjp = (warp & 3) / G::NRB, car = (((lane >> 3) & 1) << 3) + (lane & 7), cag = lane >> 4;
 
   if (n_mine > 0) load_stage(0);
   cp_async_commit();
@@ -125,19 +136,19 @@ DEVI void pwg_role(const PWParams& p, uint8_t* smem, int sl, int rr, int nrep) {
     for (int pp = 0; pp < SU / 64; ++pp) {
       const int st = ps + 4 * pp;
       const uint32_t w1_off = lgr * G::GR1 + lrow * 16 + st * 512, w3_off = G::W1 + lgr * G::GR3 + lrow * 16 + st * 256;
-      float acc1[2][4][4], accd[2][2][4];
+      float acc1[G::MT][4][4], accd[G::MT][2][4];
 #pragma unroll
-      for (int mt = 0; mt < 2; ++mt)
+      for (int mt = 0; mt < G::MT; ++mt)
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
 #pragma unroll
           for (int n = 0; n < 4; ++n) acc1[mt][n][e] = 0.f;
           accd[mt][0][e] = accd[mt][1][e] = 0.f;
         }
-      uint32_t fx[2][2][4], fy[2][2][4], ba[2][4], bb[2][4], bd[2][4];
+      uint32_t fx[2][G::MT][4], fy[2][G::MT][4], ba[2][4], bb[2][4], bd[2][4];
       auto ld = [&](int s, int cb) {
 #pragma unroll
-        for (int mt = 0; mt < 2; ++mt) {
+        for (int mt = 0; mt < G::MT; ++mt) {
           ldsm_x4(fx[cb][mt], sx + swz_rb<RB>(ar + 16 * mt, 2 * s + ag));
           ldsm_x4(fy[cb][mt], sy + swz_rb<RB>(ar + 16 * mt, 2 * s + ag));
         }
@@ -151,7 +162,7 @@ DEVI void pwg_role(const PWParams& p, uint8_t* smem, int sl, int rr, int nrep) {
         const int cb = s & 1;
         if (s < NS - 1) ld(s + 1, cb ^ 1);
 #pragma unroll
-        for (int mt = 0; mt < 2; ++mt) {
+        for (int mt = 0; mt < G::MT; ++mt) {
           mma16816(acc1[mt][0], fx[cb][mt], ba[cb][0], ba[cb][1]);
           mma16816(acc1[mt][1], fx[cb][mt], ba[cb][2], ba[cb][3]);
           mma16816(acc1[mt][2], fx[cb][mt], bb[cb][0], bb[cb][1]);
@@ -161,7 +172,7 @@ DEVI void pwg_role(const PWParams& p, uint8_t* smem, int sl, int rr, int nrep) {
         }
       }
 #pragma unroll
-      for (int mt = 0; mt < 2; ++mt)
+      for (int mt = 0; mt < G::MT; ++mt)
 #pragma unroll
         for (int n = 0; n < 2; ++n)
 #pragma unroll
@@ -177,7 +188,7 @@ DEVI void pwg_role(const PWParams& p, uint8_t* smem, int sl, int rr, int nrep) {
               vA[k] = d * bv * fmaf(-silu, t, silu + sp);                     // 2 dA = d b (2 sig + 2 silu (1 - sig))
             }
             // C element (row g8 + 8 hr, hidden 8 n + 2 q + k of the step) -> [mat][row][hidden] bf16
-            const int row = 32 * rg + 16 * mt + 8 * hr + g8, hid = 16 * st + 8 * n + 2 * q;
+            const int row = 16 * G::MT * rg + 16 * mt + 8 * hr + g8, hid = 16 * st + 8 * n + 2 * q;
             const uint32_t o = swz_rb<HROW>(row, hid >> 3) + (hid & 7) * 2;
             sts32(sh + 0 * G::HT + o, pack_bf16(vH[0], vH[1]));
             sts32(sh + 1 * G::HT + o, pack_bf16(vA[0], vA[1]));
@@ -188,7 +199,7 @@ DEVI void pwg_role(const PWParams& p, uint8_t* smem, int sl, int rr, int nrep) {
     {                                                           // dA | dB blocks for X
       uint4* const dst = p.ab + ((size_t)(row0 / 16 + crb) * HK + (SU / 16) * sl) * 96 + cm * 32 + lane;
 #pragma unroll
-      for (int j = 0; j < SU / 16; ++j) {
+      for (int j = cjp * (SU / 16 / G::NJP); j < (cjp + 1) * (SU / 16 / G::NJP); ++j) {
         uint32_t a[4];
         ldsm_x4(a, sh + (1 + cm) * G::HT + swz_rb<HROW>(16 * crb + car, 2 * j + cag));
         stg128(dst + j * 96, make_uint4(a[0], a[1], a[2], a[3]));

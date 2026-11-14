@@ -26,7 +26,8 @@ import torch
 
 from ... import _capture
 from ..._compile import opaque
-from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import build_failed
+from . import contract_sm80 as _cp
 from . import sm80 as _d128
 
 _dir = Path(__file__).parent / "sm80"
@@ -37,20 +38,18 @@ BIDIR, OUTGOING, INCOMING = _d128.BIDIR, _d128.OUTGOING, _d128.INCOMING
 
 @functools.lru_cache(maxsize=1)
 def _ext():
-    ensure_cuda_home()
-    return load_extension(
-        name="trimul_sm80_wide",
-        sources=[str(_dir / "wide_ops.cu")],
-        extra_cuda_cflags=[
-            *host_flags(),
-            "-std=c++17",
-            "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
-            f"-I{_dir}",
-        ],
-        extra_cflags=["-std=c++17", "-O3"],
-        verbose=False,
-    )
+    return _d128._build("trimul_sm80_wide", "wide_ops.cu", 80)
+
+
+@functools.lru_cache(maxsize=1)
+def _ext120():
+    """The same sources for the GeForce RTX 5090 (sm_120a)."""
+    return _d128._build("trimul_sm80_wide", "wide_ops.cu", 120)
+
+
+def _lib():
+    """The build for the current device: sm_80 (A100) or sm_120a (RTX 5090)."""
+    return _ext120() if _d128.on_sm120() else _ext()
 
 
 def shape_ok(shape, dtype, d_hidden: int, hs: int | None = None, mask_shape=None, mask_dtype=None) -> bool:
@@ -98,7 +97,7 @@ def _loads() -> bool:
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
     try:
-        _ext()
+        _lib()
     except Exception as exc:  # a build / load failure is an error, never a fallback
         build_failed("sm80 wide TriMul", exc)
         return False  # reached only while planning (build_failed returns there)
@@ -136,7 +135,7 @@ def _pack(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool = False, adt=
     so, eo, sg, eg = vec[8 * hs : 8 * hs + 4 * d].view(4, d).unbind(0)
     spx = vec[8 * hs + 4 * d :] if train else vec.new_empty((0,))
     wdx = torch.empty((4 * hs + d, d), dtype=wd, device=dev) if train else w1.new_empty((0,))
-    _ext().wpack(*ws, *ln, w1, vs, vb, wo3, so, eo, wg3, sg, eg, wdx, spx)
+    _lib().wpack(*ws, *ln, w1, vs, vb, wo3, so, eo, wg3, sg, eg, wdx, spx)
     pk = dict(
         hs=hs,
         d=d,
@@ -222,13 +221,20 @@ def _tf32(z: torch.Tensor):
 
 # ------------------------------------------------------------------------------------------------------------------------------ forward
 def _contract(planes, x, hs, n, direction, token=None, transposed=False):
-    """cuBLAS contraction of the plane pair: channels [0, h) outgoing (sum_k a[i,k] b[j,k]), the rest incoming (sum_k a[k,i] b[k,j]).
-    ``transposed``: the outgoing planes were written transposed (``k1tw`` TR: plane (r, c) = token (c, r)), so every channel contracts as A^T B.
-    ``token`` (inference: the [L] token mask, empty = none): the bounded contraction where ``_bounded.CELLS`` lists the cell."""
+    """The contraction of the plane pair: channels [0, h) outgoing (sum_k a[i,k] b[j,k]), the rest incoming (sum_k a[k,i] b[k,j]).
+    RTX 5090: the own plane GEMM (``contract_sm80.planes``). Otherwise cuBLAS: ``transposed``: the outgoing planes were written transposed (``k1tw`` TR:
+    plane (r, c) = token (c, r)), so every channel contracts as A^T B; ``token`` (inference: the [L] token mask, empty = none): the bounded
+    contraction where ``_bounded.CELLS`` lists the cell."""
     from ._bounded import bmm
 
     a, b = planes[:hs].view(hs, n, n), planes[hs:].view(hs, n, n)
     h = 0 if transposed else hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
+    if _d128.on_sm120():  # the 5090 keeps its own GEMM; the transposed / bounded A100 forms are not enabled there (``_run_forward``)
+        if h:
+            _cp.planes(0, a[:h], b[:h], x[:h])
+        if h < hs:
+            _cp.planes(1, a[h:], b[h:], x[h:])
+        return
     if h:
         bmm(a[:h], b[:h].transpose(1, 2), x[:h], token)
     if h < hs:
@@ -240,6 +246,8 @@ _FUSE_STATS = True
 _FUSE_STATS_WIDE = (
     False  # in-loop input statistics in k1w at D = 256 / 384: measured 4-8 % SLOWER than ln_stats_rows (A100, 2026-10-30), kept off
 )
+#: the RTX 5090 takes them (1-5 % faster there, 2026-11-13)
+_FUSE_STATS_WIDE_SM120 = True
 
 
 #: D256 bf16 inference front ``k1tw`` (``wide_k1.cuh``) instead of ln_stats_rows + k1w; False keeps those (probe switch for A / B timings).
@@ -256,8 +264,37 @@ def _aligned(t: torch.Tensor) -> torch.Tensor:
     return t if t.data_ptr() % 16 == 0 else t.clone()
 
 
+#: RTX 5090 inference past GROUP_TOKENS tokens: the plane pair [2 Hs, T] (two pair-sized buffers at Hs = D) is formed and contracted GROUP channels at a time
+#: (``_grouped_front``; a group's a | b rows are 4 GROUP = 128 packed rows, one k1w column tile), so the op's transient is the pair, one [64, T] plane group, X and the output (an AF3 trunk past L 3000 on 32 GB). A fixed function of the
+#: shape; per channel the same k1w rows and plane contraction as the whole call.
+GROUP_TOKENS = 2048 * 2048
+GROUP = 32
+
+
+def _grouped(z: torch.Tensor, hs: int, direction: int, save: bool) -> bool:
+    if save or z.dtype is not torch.bfloat16 or not _d128.on_sm120() or z.shape[1] * z.shape[2] <= GROUP_TOKENS:
+        return False
+    h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
+    return hs > GROUP and hs % GROUP == 0 and h % GROUP == 0
+
+
+def _grouped_front(k1, zf, pk, st_in, mask, x, hs, n, direction, eps_in, fuse_z) -> None:
+    """k1w + the plane contraction per group of GROUP channels: the group's a rows (packed rows 2 GROUP g ..) and b rows (2 Hs + 2 GROUP g ..) of the packed front
+    weights in one k1w call -> planes [2 GROUP, T] (a | b of the group), then the group's channels of X (outgoing below h, incoming above)."""
+    T = n * n
+    h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
+    w1, vs, vb = pk["w1"], pk["vs"], pk["vb"]
+    planes = zf.new_empty((2 * GROUP, T))
+    a, b = planes[:GROUP].view(GROUP, n, n), planes[GROUP:].view(GROUP, n, n)
+    for c0 in range(0, hs, GROUP):
+        ra, rb = slice(2 * c0, 2 * c0 + 2 * GROUP), slice(2 * hs + 2 * c0, 2 * hs + 2 * c0 + 2 * GROUP)
+        k1(zf, torch.cat([w1[ra], w1[rb]]), torch.cat([vs[ra], vs[rb]]), torch.cat([vb[ra], vb[rb]]), st_in, mask, planes, n, eps_in, fuse_z, False)
+        with _tf32(zf):
+            _cp.planes(0 if c0 < h else 1, a, b, x[c0 : c0 + GROUP])
+
+
 def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
-    E = _ext()
+    E = _lib()
     z = leaves[0]
     n, d = z.shape[1], z.shape[-1]
     T = n * n
@@ -278,29 +315,40 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     fuse_x = _FUSE_STATS and z.dtype is torch.bfloat16 and hs <= 128
     # input rows: <= 4 CTAs share a token tile at hs <= 128 (the redundant per-CTA statistics are cheaper than the kernels); at D = 256 / 384 k1w accumulates them
     # while its stages go by (``K1StatHook``), so ``ln_stats_rows`` and its read of z are gone there too
-    fuse_z = fuse_x or (_FUSE_STATS and _FUSE_STATS_WIDE and z.dtype is torch.bfloat16 and 128 < d <= 384)
+    wide = _FUSE_STATS_WIDE or (_FUSE_STATS_WIDE_SM120 and _d128.on_sm120())
+    fuse_z = fuse_x or (_FUSE_STATS and wide and z.dtype is torch.bfloat16 and 128 < d <= 384)
     st_in = torch.empty((T, 2), dtype=torch.float32, device=z.device)
-    planes = zf.new_empty((2 * hs, T))
+    planes = None
+    sm120 = _d128.on_sm120()
     # D256 bf16 inference, one direction, L >= 512: k1tw (one CTA per token tile, the statistics in-kernel; below L 512 its L^2 / 128 CTAs underfill the card:
     # L 128 +23 %, L 256 / 384 +2 % on the module).  Inference outgoing at D256 / D64 (the fused k1t / k1w64 fronts):
-    # the planes are written transposed (plane (r, c) = token (c, r)) so the contraction runs as A^T B, the faster cuBLAS shape on an A100 (4-6 %)
-    tile = _K1TW and not save and z.dtype is torch.bfloat16 and d == 256 and hs == d and direction != BIDIR and n >= 512
+    # the planes are written transposed (plane (r, c) = token (c, r)) so the contraction runs as A^T B, the faster cuBLAS shape on an A100 (4-6 %).
+    # Not on the RTX 5090: it keeps its own k1w fronts and plane GEMM (measured there), not these A100 fronts.
+    tile = not sm120 and _K1TW and not save and z.dtype is torch.bfloat16 and d == 256 and hs == d and direction != BIDIR and n >= 512
     transposed = (
-        _TRANSPOSED
+        not sm120
+        and _TRANSPOSED
         and not save
         and direction == OUTGOING
         and ((tile and n % 128 == 0) or (fuse_z and d == 64 and n >= _TR64_MIN_L.get(hs, 1 << 30)))
     )
-    if tile:
-        E.k1tw(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, transposed)
-    else:
+    if _grouped(z, hs, direction, save):  # RTX 5090 inference only (save=False): no plane pair is kept
         if not fuse_z:
             E.stats_rows(zf, st_in, eps_in)
-        k1 = E.k1w if save else E.k1w_row_mask
-        k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z, transposed)
-    x = zf.new_empty((hs, n, n))
-    with _tf32(z):
-        _contract(planes, x, hs, n, direction, None if save or ds.numel() else mask, transposed)
+        x = zf.new_empty((hs, n, n))
+        _grouped_front(E.k1w_row_mask, zf, pk, st_in, mask, x, hs, n, direction, eps_in, fuse_z)
+    else:
+        planes = zf.new_empty((2 * hs, T))
+        if tile:
+            E.k1tw(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, transposed)
+        else:
+            if not fuse_z:
+                E.stats_rows(zf, st_in, eps_in)
+            k1 = E.k1w if save else E.k1w_row_mask
+            k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z, transposed)
+        x = zf.new_empty((hs, n, n))
+        with _tf32(z):
+            _contract(planes, x, hs, n, direction, None if save or ds.numel() else mask, transposed)
     saved_planes = planes if save else None
     del planes  # inference: dead once contracted -- freed before the output is allocated (peak z + planes + X, not + out)
     st_out = torch.empty((T, 2), dtype=torch.float32, device=z.device)
@@ -402,17 +450,53 @@ def _gemm_tk(a, b):
     return torch.bmm(a.unflatten(0, (s, t // s)).transpose(1, 2), b.unflatten(0, (s, t // s))).sum(0)
 
 
+#: RTX 5090 (sm_120a): the cuBLAS call of the two weight GEMMs of the backward per (D, Hs, L).  cuBLAS's kernel choice for these tall-skinny shapes is erratic
+#: on sm_120 (the same product 1.1-1.8x apart between layouts); listed where an alternative measured >= 5 % faster (``gsweep``, 2026-11-13, L2 flushed,
+#: median, two sweeps).  ``dxn = dcat W_dx``: "t" W_dx^T contiguous (a column-major B), "b4" four batched row blocks; unlisted shapes the plain product.
+_SM120_DXN_T = ((64, 64, 128), (64, 128, 128), (64, 128, 384), (128, 128, 256), (128, 128, 512), (384, 384, 128), (384, 768, 128))
+_SM120_DXN: dict[tuple[int, int, int], str] = {
+    **dict.fromkeys(_SM120_DXN_T, "t"),
+    **dict.fromkeys(((128, 256, n) for n in (128, 256, 384, 512, 640, 768)), "b4"),
+    **dict.fromkeys(((256, 256, 256), (256, 512, 256), (512, 512, 128), (512, 512, 256), (512, 1024, 128)), "b4"),
+    **dict.fromkeys(((384, 384, n) for n in (256, 384, 512, 640, 768)), "b4"),
+    **dict.fromkeys(((384, 768, n) for n in (384, 512, 640, 768)), "b4"),
+}
+#: ``dor = W_o^T dpr^T``: shapes where the strided W_o^T view (the A100 call) beats the contiguous copy on sm_120 (D64)
+_SM120_DOR_VIEW = frozenset({(64, 64, n) for n in (384, 512, 640, 768)} | {(64, 128, n) for n in (256, 384, 512, 640)})
+
+
+def _dxn(dcat: torch.Tensor, wdx: torch.Tensor, hs: int, n: int) -> torch.Tensor:
+    """``dcat @ wdx`` [T, D] (the input LayerNorm's output gradient); the RTX 5090 takes the call ``_SM120_DXN`` names for the shape."""
+    if dcat.dtype is torch.bfloat16 and _d128.on_sm120():
+        t, k = dcat.shape
+        d = wdx.shape[1]
+        how = _SM120_DXN.get((d, hs, n))
+        if how == "t":
+            return torch.mm(dcat, wdx.t().contiguous().t())
+        if how == "b4":
+            return torch.bmm(dcat.view(4, t // 4, k), wdx.expand(4, k, d)).view(t, d)
+    return dcat @ wdx
+
+
+def _dor(wo: torch.Tensor, dpr: torch.Tensor, hs: int, n: int) -> torch.Tensor:
+    """``W_o^T dpr^T`` [Hs, T], channel-major like X (RTX 5090: W_o^T contiguous first, cuBLAS takes a 1.5-1.8x faster kernel for that layout there,
+    except the D64 shapes of ``_SM120_DOR_VIEW``)."""
+    sm120 = _d128.on_sm120() and (wo.shape[0], hs, n) not in _SM120_DOR_VIEW
+    return torch.mm(wo.t().contiguous() if sm120 else wo.t(), dpr.t())
+
+
 def _contract_bwd(planes, dx, dplanes, hs, n, direction):
-    """dX [Hs, L, L] -> the plane gradients [2 Hs, L, L] (cuBLAS): X = A B^T: dA = dX B, dB = dX^T A; X = A^T B: dA = B dX^T, dB = A dX."""
+    """dX [Hs, L, L] -> the plane gradients [2 Hs, L, L] (cuBLAS, or the own plane GEMM on an RTX 5090): X = A B^T: dA = dX B, dB = dX^T A;
+    X = A^T B: dA = B dX^T, dB = A dX."""
     a, b = planes[:hs].view(hs, n, n), planes[hs:].view(hs, n, n)
     da, db = dplanes[:hs], dplanes[hs:]
     h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
     if h:
-        torch.bmm(dx[:h], b[:h], out=da[:h])
-        torch.bmm(dx[:h].transpose(1, 2), a[:h], out=db[:h])
+        _cp.planes(2, dx[:h], b[:h], da[:h])
+        _cp.planes(1, dx[:h], a[:h], db[:h])
     if h < hs:
-        torch.bmm(b[h:], dx[h:].transpose(1, 2), out=da[h:])
-        torch.bmm(a[h:], dx[h:], out=db[h:])
+        _cp.planes(0, b[h:], dx[h:], da[h:])
+        _cp.planes(2, a[h:], dx[h:], db[h:])
 
 
 def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
@@ -421,7 +505,7 @@ def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
 
 
 def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
-    E = _ext()
+    E = _lib()
     z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo = leaves
     planes, x, st_in, st_out, ps, gs = saved
     n, d = z.shape[1], z.shape[-1]
@@ -460,7 +544,7 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     )
     r01 = torch.empty(2 * d, **f32)
     E.colsum(part, r01)
-    dor = torch.mm(cw[5].t(), dpr.t())  # [Hs, T] = r_o dy_o, channel-major like X
+    dor = _dor(cw[5], dpr, hs, n)  # [Hs, T] = r_o dy_o, channel-major like X
     dt = torch.empty_like(xcm)
     part_o = torch.empty((T // (128 if is32 else 256), 2 * hs), **f32)
     E.lnout_bwd(dor, xcm, st_out, s12, go32, dt, part_o)
@@ -480,7 +564,7 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     E.ln_apply(zf, st_in, gi32, bi32, xn)
     dw1 = _gemm_tk(dcat, xn)  # [4 Hs + D, D] fp32, k1w packed order then W_g
     del xn
-    dxn = dcat @ pk["wdx"]  # [T, D]
+    dxn = _dxn(dcat, pk["wdx"], hs, n)  # [T, D]
     del dcat
     dx = torch.empty_like(zf)
     nbi = E.lnin_bwd_blocks(T, d, is32)

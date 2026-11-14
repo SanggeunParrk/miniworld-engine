@@ -21,6 +21,7 @@ import torch
 
 
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from miniworld_engine.kernels import _msa_card as _card
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -34,8 +35,19 @@ MAX_LEN_INFER = 2048  # inference (FoldForge 5I28 E3): pair_fwd keeps the row in
 
 def max_len(d_pair: int, training: bool) -> int:
     """The longest L the kernels take: MAX_LEN in training, MAX_LEN_INFER in inference (every d_pair: a bf16 row of 2048 logits fits next to the
-    d_pair 384 tiles)."""
+    d_pair 384 tiles).  The RTX 5090 (99 KB) in inference: the longest bf16 row of logits that fits next to the tiles (``_sm120_infer_len``)."""
+    if not training and _card.sm120():
+        return _sm120_infer_len(d_pair)
     return MAX_LEN if training else MAX_LEN_INFER
+
+
+def _sm120_infer_len(d_pair: int) -> int:
+    """The RTX 5090's inference limit of ``pair_fwd`` (sm80/ops.cu launch_pair_fwd, sm80/pwa_pair_fwd_sm80.cuh PairFwdCfg under MWE_SM120): the shared memory is
+    FIXED + 8 (L + 4) 2 bytes (the bf16 row of logits of the 8 heads) within 101376 B; FIXED = LW warps x a [16][d_pair] bf16 tile + gamma / beta + the Wb^T fragments
+    (LW = 4 at d_pair >= 384, else 8).  L a multiple of 16: 4080 at d_pair 128, 1840 at 256, 2672 at 384."""
+    lw = 4 if d_pair >= 384 else 8
+    fixed = lw * 16 * d_pair * 2 + 2 * d_pair * 4 + d_pair * 16
+    return ((101376 - fixed) // 16 - 4) // 16 * 16
 
 
 @functools.lru_cache(maxsize=1)
@@ -43,10 +55,10 @@ def ext():
     """The extension (built on first use into ``TORCH_EXTENSIONS_DIR``)."""
     ensure_cuda_home()
     return load_extension(
-        name="pwa_sm80",
+        name=_card.name("pwa_sm80"),
         sources=[str(_dir / "ops.cu")],
         extra_include_paths=[str(_dir)],
-        extra_cuda_cflags=[
+        extra_cuda_cflags=_card.cflags([
             *host_flags(),
             "-O3",
             "-std=c++17",
@@ -55,7 +67,7 @@ def ext():
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        ],
+        ]),
         extra_cflags=["-std=c++17", "-O3"],
         extra_ldflags=["-lcublasLt"],  # the searched explicit batched-GEMM algorithms (pwa_lt_gemm.cuh)
         verbose=False,
@@ -66,9 +78,9 @@ def ext():
 def _bmm_ext():
     ensure_cuda_home()
     return load_extension(
-        name="pwa_broadcast_bmm_sm80",
+        name=_card.name("pwa_broadcast_bmm_sm80"),
         sources=[str(_dir / "broadcast_bmm.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80")],
+        extra_cuda_cflags=_card.cflags([*host_flags(), "-O3", "-std=c++17", *gencodes("80")]),
         extra_cflags=["-O3", "-std=c++17"],
         verbose=False,
     )

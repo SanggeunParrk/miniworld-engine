@@ -32,8 +32,10 @@ KERNELS = {
 def cubin(stem):
     """The cubin of ``<stem>.cu`` (sm_80), through ``_nvcc.cubin``: the packaged prebuilt kernels, the content-keyed cache, else built
     (``kernels/_prebuild.py`` plans it)."""
-    flags = ["-std=c++17", "-O3", "-arch=sm_80", "-cubin", "-lineinfo", f"-DATT_PF={int(PREFETCH)}", f"-I{_dir}"]
-    return str(_nvcc.cubin(f"atom_local_sm80/{stem}", flags, source=_dir / f"{stem}.cu"))
+    from miniworld_engine.kernels._sm120 import sm80_cubin_flags
+
+    suffix, flags = sm80_cubin_flags(["-std=c++17", "-O3", "-arch=sm_80", "-cubin", "-lineinfo", f"-DATT_PF={int(PREFETCH)}", f"-I{_dir}"])  # sm_120a on an RTX 5090
+    return str(_nvcc.cubin(f"atom_local_sm80{suffix}/{stem}", flags, source=_dir / f"{stem}.cu"))
 
 
 @functools.lru_cache(maxsize=None)

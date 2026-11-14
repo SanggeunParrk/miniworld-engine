@@ -12,7 +12,9 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
+from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags
+from miniworld_engine.kernels._sm120 import building_sm120
+from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # sm_120a: same sources (kernels/_sm120.py)
 
 _dir = Path(__file__).parent
 #: head widths the kernel is instantiated for
@@ -35,8 +37,71 @@ def _ext():
             f"-I{_dir}",
         ],
         extra_cflags=["-std=c++17", "-O3"],
+        **({"extra_ldflags": ["-lcublasLt"]} if building_sm120() else {}),  # sm_120a: the fp32 block's explicit cuBLASLt GEMMs (lt_f32_sm120.cuh)
         verbose=False,
     )
+
+
+def lt_mm32(a: torch.Tensor, w: torch.Tensor, out: torch.Tensor, cfg) -> torch.Tensor:
+    """RTX 5090 only (lt_f32_sm120.cuh): out = a w^T on TF32 through cuBLASLt with the explicit configuration ``cfg`` (7 ints); a / w / out [M, K] / [N, K] /
+    [M, N] (out a row-major view) or [B, M, K] / [B, N, K] / [B, M, N] (a strided batch)."""
+    _ext().lt_mm32(a, w, out, list(cfg))
+    return out
+
+
+def lt_algos32(a: torch.Tensor, w: torch.Tensor, out: torch.Tensor, count: int = 64) -> list[list[int]]:
+    """RTX 5090 only: cuBLASLt's heuristic candidates (7-int configurations) for the shape of ``lt_mm32(a, w, out)``."""
+    return _ext().lt_algos32(a, w, out, count)
+
+
+#: gemm120's epilogues (gemm_sm120.cuh)
+EPI_PLAIN, EPI_GATERES, EPI_ADALN, EPI_SWIGLU = 0, 1, 2, 3
+
+
+def gemm120(epi: int, a: torch.Tensor, w1: torch.Tensor, out: torch.Tensor, *, w2=None, bias=None, r=None, g=None, x=None, xst=None, sb=None, cfg: int = 0):
+    """RTX 5090 only (the sm_120a build, gemm_sm120.cuh): ``out`` = the epilogue ``epi`` of a [M, K] [w1; w2]^T, bf16 operands or fp32 (TF32,
+    operands rounded to nearest): PLAIN (+ bias), GATERES (r + sigmoid(g) acc), ADALN (sigmoid(S + sb) LN(x) + B with x's row statistics
+    ``xst``), SWIGLU (silu(a) b); ``cfg`` the CTA tile (0: 128 x 128, 1: 64 x 128, 2: 64 x 64, 3: 128 x 64, 4: 32 x 128)."""
+    _ext().gemm120(epi, a, w1, w2, out, bias, r, g, x, xst, sb, cfg)
+    return out
+
+
+def row_stats120(x: torch.Tensor, eps: float) -> torch.Tensor:
+    """RTX 5090 only: the (mean, rstd) [M, 2] fp32 of the rows of x [M, 768] (the AdaLN's LayerNorm, no affine)."""
+    st = torch.empty(x.shape[0], 2, device=x.device, dtype=torch.float32)
+    _ext().row_stats120(x, st, float(eps))
+    return st
+
+
+def cond3_f32(c: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, eps: float, copy: bool = True) -> torch.Tensor:
+    """RTX 5090 only (rows_f32_sm120.cuh): ``[3, M, dc]`` fp32 = (LN(c) w1, LN(c) w2, c) for c [M, dc] (dc 384 / 768): the operands of the
+    fp32 block's one batched cond GEMM."""
+    out = torch.empty(3 if copy else 2, c.shape[0], c.shape[1], device=c.device, dtype=torch.float32)  # without copy: the two LayerNorms only
+    _ext().cond3_f32(c, w1, w2, out, float(eps))
+    return out
+
+
+def resgate_adaln_f32(y, g, bs, x, sbt, sb, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """RTX 5090 only: ``(out, xa)``, out = x + sigmoid(g + bs) y, xa = sigmoid(S + sb) LN(out) + B (sbt = [S | B] [M, 1536]); fp32 [M, 768]."""
+    out, xa = torch.empty_like(x), torch.empty_like(x)
+    _ext().resgate_adaln_f32(y, g, bs, x, sbt, sb, out, xa, float(eps))
+    return out, xa
+
+
+def gate_res_b_f32(x, z, g, b) -> torch.Tensor:
+    """RTX 5090 only: x + sigmoid(g + b) z, fp32 [M, 768] (g a [M, 768] view)."""
+    y = torch.empty_like(x)
+    _ext().gate_res_b_f32(x, z, g, b, y)
+    return y
+
+
+def pair_softmax_f32(z: torch.Tensor, wcm: torch.Tensor, mask: torch.Tensor | None, length: int, eps: float, cfg: int = 0) -> torch.Tensor:
+    """RTX 5090 only (rows_f32_sm120.cuh pair_softmax): P [16, L, L] fp32 = softmax over the keys of the pair bias LN(z) W'^T of z [L, L, C] fp32
+    (C 128 / 256, W' = wcm [C, 16] fp32), masked keys (a bool [L] mask) 0 -- the pair bias never leaves shared memory. L a multiple of 128, <= 1024."""
+    p = torch.empty(16, length, length, device=z.device, dtype=torch.float32)
+    kv = mask.reshape(length).contiguous() if mask is not None else torch.empty(0, dtype=torch.bool, device=z.device)
+    _ext().pair_softmax_f32(z, wcm, kv, p, length, float(eps), cfg)
+    return p
 
 
 def pick_group(S: int, L: int, nh: int, nsm: int) -> int:

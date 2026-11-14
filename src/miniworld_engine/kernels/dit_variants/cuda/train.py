@@ -707,7 +707,7 @@ def atom_serves(stack, single, cond, pair, mask, uid, *, need_grad: bool = True)
         return False
     if need_grad and not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
         return False
-    if torch.cuda.get_device_capability(single.device) != (8, 0):  # A100 only (H100: the one atom DiT implementation, local_dit_h100)
+    if torch.cuda.get_device_capability(single.device) not in ((8, 0), (12, 0)):  # A100 or RTX 5090 (sm_120a build) only (H100: the one atom DiT implementation, local_dit_h100)
         return False
     a, n, d = single.shape
     return (

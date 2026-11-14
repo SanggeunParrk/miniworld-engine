@@ -33,6 +33,9 @@ struct NodeFwdParams {
 #ifndef MP_NODE_FWD_HALVES
 #define MP_NODE_FWD_HALVES 1     // 1: GEMM 1 and its epilogue run in two halves of 64 output channels (32 accumulators live instead of 64): the register budget of 12 warps per SM
 #endif
+#if defined(MWE_SM120) && !defined(MP_NODE_FWD_NW)
+#define MP_NODE_FWD_NW 4         // RTX 5090 (sm_120a): 99 KB of shared memory a block -- the two weights (64.5 KB) + 4 x 8 KB
+#endif
 #ifndef MP_NODE_FWD_NW
 #define MP_NODE_FWD_NW (MP_NODE_FWD_HALVES ? 12 : 8)
 #endif
@@ -42,6 +45,9 @@ struct NodeFwdCfg {
   static constexpr int W_BYTES = 2 * 128 * 256, BIAS_BYTES = 512, TILE = 16 * 256, WSTRIDE = 2 * TILE;                 // the two weights | the bias (256 B, padded) | per warp: the edge tile | the gathered neighbour tile
   static constexpr int SMEM = W_BYTES + BIAS_BYTES + NW * WSTRIDE;
 };
+#ifdef MWE_SM120
+static_assert(NodeFwdCfg::SMEM <= 101376, "the RTX 5090 allows 99 KB of shared memory a block");
+#endif
 
 template <bool MASK_BF16>
 __global__ void __launch_bounds__(NodeFwdCfg::NTHR, NodeFwdCfg::MINB) node_fwd_kernel(const NodeFwdParams p) {

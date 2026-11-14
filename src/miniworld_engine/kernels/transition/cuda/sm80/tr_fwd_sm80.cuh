@@ -76,7 +76,12 @@ struct TrCfgT {
 #define TR_XSTAGE 0        // 1: x through a per-warp cp.async staging buffer; 0: LN reads x from L2 (prefetched), the 64 KB go to the ring
 #endif
 #ifndef TR_NST
+#if defined(MWE_SM120)
+// RTX 5090 (sm_120a build): 99 KB of shared memory a block -- six 12 KB slots at D = 64 (75 KB), three 24 KB slots at D = 128 (75 KB)
+#define TR_NST (NWARP == 8 ? (D == 64 ? 6 : 3) * 32 / TR_CH : 2)
+#else
 #define TR_NST (NWARP == 8 ? (TR_XSTAGE ? 4 : 6) * 32 / TR_CH : 2)
+#endif
 #endif
 #ifndef TR_AHEAD
 #define TR_AHEAD (NWARP == 8 ? (TR_CH == 32 ? 2 : 1) : 1)
@@ -93,6 +98,9 @@ struct TrCfgT {
   static constexpr int MAX_ITEMS = 255, SMEM_SCHED = 4 * (MAX_ITEMS + 1);   // per-CTA work list, -1 terminated
   static constexpr int SMEM = SMEM_W + SMEM_X + BAR_BYTES + SMEM_GB + SMEM_SCHED;
   static_assert(MINB * (SMEM + 1024) <= 167936, "sm_80 shared memory");
+#if defined(MWE_SM120)
+  static_assert(SMEM <= 101376, "sm_120 shared memory (99 KB a block)");
+#endif
   static_assert(D % 32 == 0 && H % CH == 0, "widths");
 };
 using TrCfg = TrCfgT<128, 512>;

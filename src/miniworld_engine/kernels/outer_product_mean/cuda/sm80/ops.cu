@@ -39,6 +39,10 @@ template <typename T> const T* ptr(const torch::Tensor& t) { return t.numel() ? 
 
 template <int CM, int NB, bool ST> void launch_prologue(opm80::PrologueParams p, int L, cudaStream_t st) {
   using C = opm80::PrologueCfg<CM, NB>;
+#ifdef MWE_SM120
+  if constexpr (C::SMEM > MWE_SMEM_MAX) { TORCH_CHECK(false, "prologue: this schedule needs ", C::SMEM, " B of shared memory (> ", MWE_SMEM_MAX, ")"); } else
+#endif
+  {
   constexpr int NMINB = C::SMEM <= 80 * 1024 ? 2 : 1;                 // CTAs per SM
   raise_smem(opm80::opm_prologue_kernel<CM, NB, ST, NMINB>, C::SMEM);
   p.nti = (L + C::NTOK - 1) / C::NTOK;
@@ -47,6 +51,7 @@ template <int CM, int NB, bool ST> void launch_prologue(opm80::PrologueParams p,
   const int grid = std::min(p.ntile, nsm * NMINB);
   opm80::opm_prologue_kernel<CM, NB, ST, NMINB><<<grid, C::NTHR, C::SMEM, st>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
 }
 
 // variant 0: the shipped prefetch depth (3 tile buffers); 1: 2 buffers; 2: 4 buffers
@@ -58,25 +63,40 @@ template <int CM, bool ST> void launch_prologue_v(const opm80::PrologueParams& p
 
 template <int CZ, int NS, int NB, bool WIDE = false> void launch_epilogue(const opm80::EpilogueParams& p, cudaStream_t st) {
   using C = opm80::EpCfg<CZ, NS, NB, WIDE>;
+#ifdef MWE_SM120
+  if constexpr (C::SMEM > MWE_SMEM_MAX) { TORCH_CHECK(false, "epilogue: this schedule needs ", C::SMEM, " B of shared memory (> ", MWE_SMEM_MAX, ")"); } else
+#endif
+  {
   raise_smem(opm80::opm_epilogue_kernel<CZ, NS, NB, WIDE>, C::SMEM);
   dim3 grid(((p.L + C::BJ - 1) / C::BJ) * p.ntile, (p.L + C::BI - 1) / C::BI);
   opm80::opm_epilogue_kernel<CZ, NS, NB, WIDE><<<grid, C::NTHR, C::SMEM, st>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
 }
 
 template <int CZ, int NS, int NB, int BI_ = 4, int KR_ = 32> void launch_dgrad(const opm80::DgradParams& p, cudaStream_t st) {
   using C = opm80::DgCfg<CZ, NS, NB, BI_, KR_>;
+#ifdef MWE_SM120
+  if constexpr (C::SMEM > MWE_SMEM_MAX) { TORCH_CHECK(false, "dgrad: this schedule needs ", C::SMEM, " B of shared memory (> ", MWE_SMEM_MAX, ")"); } else
+#endif
+  {
   raise_smem(opm80::opm_dgrad_kernel<CZ, NS, NB, BI_, KR_>, C::SMEM);
   dim3 grid((p.L + C::BJ - 1) / C::BJ, (p.L + C::BI - 1) / C::BI);
   opm80::opm_dgrad_kernel<CZ, NS, NB, BI_, KR_><<<grid, C::NTHR, C::SMEM, st>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
 }
 
 template <int CM, int NB, int NMINB> void launch_pb(const opm80::PbParams& p, int nblk, cudaStream_t st) {
   using C = opm80::PbCfg<CM, NB>;
+#ifdef MWE_SM120
+  if constexpr (C::SMEM > MWE_SMEM_MAX) { TORCH_CHECK(false, "prologue_bwd: this schedule needs ", C::SMEM, " B of shared memory (> ", MWE_SMEM_MAX, ")"); } else
+#endif
+  {
   raise_smem(opm80::opm_prologue_bwd_kernel<CM, NB, NMINB>, C::SMEM);
   opm80::opm_prologue_bwd_kernel<CM, NB, NMINB><<<nblk, C::NTHR, C::SMEM, st>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
 }
 
 // block = 32 column quads x 8 row groups: thread (x, y) sums the rows y, y + 8, ... of its quad (loads in flight: R / 8 per thread), then the eight partials are summed in order
@@ -205,7 +225,11 @@ void dgrad(torch::Tensor dz, torch::Tensor norm, double norm_const, torch::Tenso
     if (variant == 1) launch_dgrad<384, 3, 1>(p, st); else if (variant == 3) launch_dgrad<384, 2, 2, 2>(p, st);
     else launch_dgrad<384, 2, 1, 4, 64>(p, st);
   } else if (CZ == 512) {                                                                   // 64 pairs (64 KB dz tile + 2 x 16 KB ring of 64-row Wo chunks + 16 KB output tile)
+#ifdef MWE_SM120
+    launch_dgrad<512, 2, 1, 2, 32>(p, st);                                                // 99 KiB: 32-row Wo chunks
+#else
     launch_dgrad<512, 2, 1, 2, 64>(p, st);
+#endif
   } else {
     TORCH_CHECK(false, "dgrad: d_pair must be 128, 256, 384 or 512");
   }
@@ -224,6 +248,9 @@ void dwo(torch::Tensor dzn, torch::Tensor O, torch::Tensor part, int64_t i_per, 
   dim3 grid(8, CZ / 128, splits);
   auto st = at::cuda::getCurrentCUDAStream();
   auto run = [&](auto kernel, int smem) { raise_smem(kernel, smem); kernel<<<grid, 256, smem, st>>>(p); };
+#ifdef MWE_SM120
+  TORCH_CHECK(variant != 4, "dwo: variant 4 needs 128 KiB of shared memory (> ", MWE_SMEM_MAX, ")");
+#endif
   if (variant == 1) run(opm80::opm_dwo_kernel<1, 4, 2>, opm80::DwoCfgT<1, 4>::SMEM);                // 32 pairs a barrier, 4 stages (the first schedule)
   else if (variant == 3) run(opm80::opm_dwo_kernel<2, 3, 1>, opm80::DwoCfgT<2, 3>::SMEM);           // 64 pairs, 3 stages, one CTA per SM
   else if (variant == 4) run(opm80::opm_dwo_kernel<4, 2, 1>, opm80::DwoCfgT<4, 2>::SMEM);           // 128 pairs, 2 stages, one CTA per SM
@@ -252,7 +279,11 @@ void prologue_bwd(torch::Tensor dA, torch::Tensor dB, torch::Tensor m, torch::Te
   auto st = at::cuda::getCurrentCUDAStream();
   // variant 0 (shipped): one tile buffer, two CTAs per SM (d_msa 64); variant 1: double-buffered tiles, one CTA per SM
   if (CM == 64) { if (variant == 1) launch_pb<64, 2, 1>(p, nblk, st); else launch_pb<64, 1, 2>(p, nblk, st); }
+#ifdef MWE_SM120
+  else if (CM == 128) launch_pb<128, 1, 1>(p, nblk, st);              // 99 KiB: one tile buffer (dgamma | dbeta in registers)
+#else
   else if (CM == 128) launch_pb<128, 2, 1>(p, nblk, st);
+#endif
   else if (CM == 256) {
     raise_smem(opm80::opm_prologue_bwd_wide_kernel, opm80::PbWide::SMEM);
     opm80::opm_prologue_bwd_wide_kernel<<<nblk, opm80::PbWide::NTHR, opm80::PbWide::SMEM, st>>>(p);

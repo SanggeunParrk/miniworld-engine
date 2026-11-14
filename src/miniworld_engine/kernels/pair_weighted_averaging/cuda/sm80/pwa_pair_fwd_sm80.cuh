@@ -28,7 +28,12 @@ struct PairFwdParams {
 template <int DZ> struct PairFwdCfg {
   static constexpr int NWARP = 8, NTHR = 256, GJ = 16, NK = DZ / 16, NCHK = DZ / 8;
   static constexpr int TILE = GJ * DZ * 2;                      // one warp's [16][DZ] bf16 tile
-  static constexpr int FIXED = NWARP * TILE + 2 * DZ * 4 + DZ * 16;   // tiles + gamma / beta + the B fragments of Wb^T ([NK][32 lanes] x 8 B)
+#ifdef MWE_SM120   // 99 KiB: at d_pair 384 four warps take the key tiles (all eight still take a head of the softmax)
+  static constexpr int LW = DZ >= 384 ? 4 : NWARP;
+#else
+  static constexpr int LW = NWARP;                              // the warps that take key tiles
+#endif
+  static constexpr int FIXED = LW * TILE + 2 * DZ * 4 + DZ * 16;   // tiles + gamma / beta + the B fragments of Wb^T ([NK][32 lanes] x 8 B)
   static_assert(DZ % 128 == 0 || DZ == 192, "d_pair");
 };
 
@@ -56,7 +61,7 @@ __global__ void __launch_bounds__(256, 1) pwa_pair_fwd_kernel(const PairFwdParam
   using C = PairFwdCfg<DZ>;
   extern __shared__ __align__(128) unsigned char smem[];
   const uint32_t sbase = smem_u32(smem);
-  float* sg = reinterpret_cast<float*>(smem + C::NWARP * C::TILE);           // gamma [DZ], beta [DZ]
+  float* sg = reinterpret_cast<float*>(smem + C::LW * C::TILE);             // gamma [DZ], beta [DZ]
   uint2* sbw = reinterpret_cast<uint2*>(sg + 2 * DZ);                       // B fragments of Wb^T: [ks][lane] = (n = head lane / 4, k = 16 ks + 2 (lane % 4) (+8)) pairs
   LT* sb = reinterpret_cast<LT*>(sbw + C::NK * 32);                         // logits [8][NP]
   const int NP = p.L + 4;
@@ -69,17 +74,17 @@ __global__ void __launch_bounds__(256, 1) pwa_pair_fwd_kernel(const PairFwdParam
   __syncthreads();
   const uint32_t tbase = sbase + warp * C::TILE;
   const int ngroups = p.L / C::GJ;
-  int gi = warp;
+  int gi = warp < C::LW ? warp : ngroups;
   if (gi < ngroups) pf_load_tile<DZ>(tbase, p.z + ((long)i * p.L + gi * C::GJ) * DZ, lane);
   cp_async_commit();
-  for (; gi < ngroups; gi += C::NWARP) {
+  for (; gi < ngroups; gi += C::LW) {
     cp_async_wait<0>();
     __syncwarp();
     uint32_t a[C::NK][4];
 #pragma unroll
     for (int ks = 0; ks < C::NK; ++ks) ldsm_x4(a[ks], tbase + tile_off<C::NCHK>(lane & 15, 2 * ks + (lane >> 4)));
     __syncwarp();
-    if (gi + C::NWARP < ngroups) pf_load_tile<DZ>(tbase, p.z + ((long)i * p.L + (gi + C::NWARP) * C::GJ) * DZ, lane);
+    if (gi + C::LW < ngroups) pf_load_tile<DZ>(tbase, p.z + ((long)i * p.L + (gi + C::LW) * C::GJ) * DZ, lane);
     cp_async_commit();
     // row statistics: this lane holds DZ/4 values of row g (a0, a2) and of row g + 8 (a1, a3); the quad completes a row
     float s0 = 0.f, s1 = 0.f;

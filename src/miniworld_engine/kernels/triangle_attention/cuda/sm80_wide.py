@@ -30,6 +30,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from ..._compile import opaque
+from . import sm80_arch as _arch
 from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 from . import sm80 as _core
 from . import sm80_core2 as _core2
@@ -87,6 +88,8 @@ def cfg_for(d_pair: int, d_hidden: int, n_head: int) -> Cfg | None:
     if hd not in (16, 32) or d_pair % 64 or not 64 <= d_pair <= MAX_D:
         return None
     fused = d_pair in (64, 128) and n_head in (2, 4)
+    if fused and _arch.sm120_build() and d_pair == 128 and n_head == 4:  # (a 16-channel head pads to 32: hidden 128 either way)
+        fused = False  # RTX 5090: the d_pair-128 / hidden-128 weights (133 KiB) do not fit 99 KB of shared memory -- the rows engine
     return Cfg(d_pair, n_head, hd, fused)
 
 
@@ -94,13 +97,13 @@ def cfg_for(d_pair: int, d_hidden: int, n_head: int) -> Cfg | None:
 def _rows():
     ensure_cuda_home()
     return load_extension(
-        name="triattn_sm80_rows",
+        name=_arch.name("triattn_sm80_rows"),
         sources=[str(_dir / "rows_ops.cu")],
         extra_cuda_cflags=[
             *host_flags(),
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
+            *_arch.gencode(),
             f"-I{_dir}",
         ],
         extra_cflags=["-std=c++17", "-O3"],
@@ -161,7 +164,8 @@ def supports(
     b, length, length2, d = pair.shape
     if d != cfg.d or length != length2 or b * length * length >= 2**31:
         return False
-    if length % 128 and (train or cfg.fused or length < 128):  # inference of the rows engine pads L (``forward_rows``)
+    # inference of the rows engine pads L (``forward_rows``); the RTX 5090's chunked inference pads inside each chunk (``_chunked_length``)
+    if length % 128 and (train or cfg.fused or length < 128) and not _chunked_length(pair, train):
         return False
     dh = cfg.h * cfg.hd
     shapes = [(dh, d)] * 4 + [(cfg.h, d)]
@@ -297,6 +301,110 @@ def _original_forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transp
     return out
 
 
+# ------------------------------------------------------------------------------------------------------------- RTX 5090: chunked inference
+#: The monolithic rows-engine inference keeps the front's output ``y`` [T, N] for every token (1040 B a token at d_pair 128: 7 GiB at L 2688) next to ``xh``
+#: and the gated output: an AF3 trunk past L 2656 no longer fits the 5090's 32 GB.  Above CHUNK_TOKENS tokens per sample the 5090 runs the front, the core
+#: and the back on chunks of pair rows instead (a fixed function of the shape: the same split every call); the outputs are those of the monolithic path's
+#: kernels (the bias heads come from their own GEMM over the rows, the core is the same schedule over a chunk of rows).
+CHUNK_TOKENS = 2048 * 2048
+#: the front's output of one chunk (bytes): the row count per chunk is the largest multiple of 16 that keeps y under it
+CHUNK_BYTES = 512 << 20
+
+
+@functools.lru_cache(maxsize=1)
+def _chunk_ext():
+    """The sm_120a-only launcher of the gated core over a chunk of rows (``sm80/rows_chunk_sm120.cu``)."""
+    ensure_cuda_home()
+    return load_extension(
+        name="triattn_rows_chunk_sm120",
+        sources=[str(_dir / "rows_chunk_sm120.cu")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_120a,code=sm_120a", "-DTRIATTN_SM120=1", f"-I{_dir}"],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
+    )
+
+
+def _chunked_length(pair: torch.Tensor, train: bool) -> bool:
+    """An L that is not a multiple of 128 (the core's query tile) is served on the RTX 5090 by the chunked inference, which pads the attention length to the
+    next multiple of 128 inside each chunk (masked keys, zero q / k / v): inference, L a multiple of 16, more than CHUNK_TOKENS tokens a sample."""
+    return not train and pair.shape[1] % 16 == 0 and pair.shape[1] * pair.shape[2] > CHUNK_TOKENS and _arch.on_sm120(pair)
+
+
+def _chunked(x: torch.Tensor, cfg: Cfg, ds: torch.Tensor, save: bool) -> bool:
+    """The RTX 5090 inference call runs on chunks of rows: no saved tensors, no dropout scale, more than CHUNK_TOKENS tokens a sample (a fused-engine geometry,
+    d_pair 64 / 128 with 2 or 4 heads, runs the rows engine there: its fused front has no row-chunk form)."""
+    return not save and not ds.numel() and _arch.on_sm120(x) and x.shape[1] * x.shape[2] > CHUNK_TOKENS and x.shape[1] % 16 == 0
+
+
+def _chunked_inference(x, weights, wo, ln_w, ln_b, mask, eps, transposed, cfg: Cfg, flip: bool) -> torch.Tensor:
+    """``pair + TriangleAttention(pair)`` (inference) on chunks of pair rows of the attention frame.
+
+    Pass 1 (rows of the module's layout): ``ln_rows`` + the bias heads' GEMM -> the bias planes [H, L, L] (masked keys = bf16 min).  Pass 2 (rows of the attention frame,
+    the module's columns for the ending node): ``ln_rows`` + the front GEMM -> q | k | v | g of the chunk, the gated core over its rows (the whole bias plane), the
+    output projection + the residual, written back at the chunk's rows (columns for the ending node).  Peak transient: ~2.3 CHUNK_BYTES besides the output and the bias.
+    L not a multiple of 128: the core runs at Lp = the next multiple of 128 -- the bias planes [H, Lp, Lp] carry bf16 min past L (padded keys masked, padded
+    queries see no key: a zero output, dropped), the chunk's normalised rows are placed in a zero-tailed [rows, Lp] buffer (zero q / k / v / g past L)."""
+    rows, chunk = _rows(), _chunk_ext()
+    b, length, d = x.shape[0], x.shape[1], cfg.d
+    lp = -(-length // 128) * 128
+    dhp, h = cfg.dhp, cfg.h
+    padding = 32 if d in (256, 384, 512) else 8  # the monolithic inference's padding at these lengths (L >= 512)
+    n = -(-cfg.n // 32) * 32 if padding == 32 else cfg.n
+    wp = _core.eval_form(("triattn_sm80w_folded", cfg, padding, n), (*weights, ln_w, ln_b), lambda: _pack_folded(weights, ln_w, ln_b, cfg, padding, n), False)
+    wo_p = _core.eval_form(("triattn_sm80w_wo", cfg), (wo,), lambda: _wo_padded(wo, cfg), False)
+    wpb = wp[4 * dhp : 4 * dhp + cfg.hpad]  # the bias heads' rows
+    scl = _core._L2E / math.sqrt(cfg.hd)
+    nostats = x.new_empty((0,), dtype=F32)
+    step = max(16, (CHUNK_BYTES // (lp * n * 2)) // 16 * 16)
+    neg = torch.finfo(BF).min
+    out = torch.empty_like(x)
+    xhp = torch.zeros((min(step, length), lp, d + padding), dtype=BF, device=x.device) if lp != length else None  # the padded rows stay zero
+    for z in range(b):
+        xz, oz = x[z], out[z]
+        # pass 1: the bias planes; P[h, i, j] = the bias head h of token (i, j) of the module's layout; the frame's plane is P (starting node) or P^T (ending node), and
+        # transposed again by AF3's ending-node orientation (flip)
+        bias = torch.empty((1, h, lp, lp), dtype=BF, device=x.device) if lp == length else torch.full((1, h, lp, lp), neg, dtype=BF, device=x.device)
+        real = bias[0, :, :length, :length]
+        plane = real if transposed == flip else real.transpose(1, 2)
+        for i0 in range(0, length, step):
+            i1 = min(length, i0 + step)
+            xc = xz[i0:i1].reshape(-1, d)
+            xh = torch.empty((xc.shape[0], d + padding), dtype=BF, device=x.device)
+            rows.ln_rows(xc, xh, nostats, d, 1, 0, float(eps))
+            pb = torch.mm(xh, wpb.t())
+            del xh
+            plane[:, i0:i1, :] = pb[:, :h].view(i1 - i0, length, h).permute(2, 0, 1)
+            del pb
+        if mask.numel():
+            real.masked_fill_(mask[z].view(1, 1, length) == 0, neg)  # the key mask on the bias plane's last axis (bias_planes: keep(b), or keep(a) under flip)
+        # pass 2: chunks of the frame's rows
+        for r0 in range(0, length, step):
+            r1 = min(length, r0 + step)
+            cr = r1 - r0
+            xc = (xz[:, r0:r1].transpose(0, 1).contiguous() if transposed else xz[r0:r1]).reshape(-1, d)
+            xh = torch.empty((xc.shape[0], d + padding), dtype=BF, device=x.device)
+            rows.ln_rows(xc, xh, nostats, d, 1, 0, float(eps))
+            if xhp is not None:
+                xhp[:cr, :length].copy_(xh.view(cr, length, d + padding))
+                xh = xhp[:cr].view(cr * lp, d + padding)
+            y = torch.mm(xh, wp.t())  # q | k | v | g | bias heads of the chunk ([cr, Lp] tokens)
+            del xh
+            a = torch.empty((cr * lp, dhp), dtype=BF, device=x.device)
+            chunk.attn_fwd_gate_rows(y[:, :dhp], y[:, dhp : 2 * dhp], y[:, 2 * dhp : 3 * dhp], bias, y[:, 3 * dhp : 4 * dhp], a, lp, h, cr, n, n, n, n, dhp, scl)
+            del y
+            if lp != length:
+                a = a.view(cr, lp, dhp)[:, :length].reshape(cr * length, dhp)
+            # bf16(x + a Wo^T) with the residual in the GEMM's epilogue (one rounding, as the monolithic call), in the frame's order: in place for the
+            # starting node, through a chunk buffer and a strided copy into the module's columns for the ending node
+            oc = torch.empty_like(xc) if transposed else oz[r0:r1].view(-1, d)
+            if not rows.out_gemm_residual(a, wo_p, xc, oc, 1, 0):
+                rows.out_rows(torch.mm(a, wo_p.t()), xc, x.new_empty((0,)), oc, 1, 0)
+            del a
+            if transposed:
+                oz[:, r0:r1].copy_(oc.view(cr, length, d).transpose(0, 1))
+    return out
+
+
 @opaque(fake=_original_forward_ops_fake, name="triangle_attention_sm80w_forward")
 def _original_forward_ops(
     x: torch.Tensor,
@@ -318,6 +426,8 @@ def _original_forward_ops(
     empty, ``ds`` the dropout scale ``[B, L, D]`` (indexed by the token's second index) or empty.  Returns [out] and, with ``save``, [xh, stats, y, bias, o, lse] for the backward
     (``xh`` the normalised input followed by the constant column(s), ``y`` the front's output [T, cfg.n])."""
     cfg = Cfg(x.shape[-1], n_head, hd, fused)
+    if _chunked(x, cfg, ds, save):  # RTX 5090, past CHUNK_TOKENS: chunks of rows (the monolithic transient does not fit 32 GB next to a trunk)
+        return [_chunked_inference(x, weights, wo, ln_w, ln_b, mask, eps, transposed, cfg._replace(fused=False), flip)]
     rows, core = _rows(), (None if cfg.native else _core._ext())
     b, length = x.shape[0], x.shape[1]
     t, d, dhp, n = b * length * length, cfg.d, cfg.dhp, cfg.n

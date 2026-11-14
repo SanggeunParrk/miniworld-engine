@@ -25,7 +25,7 @@ def serves_dims(
     if not msa.is_cuda or msa.dtype != torch.bfloat16 or msa.ndim != 4 or msa.shape[0] != 1:
         return False
     cap = torch.cuda.get_device_capability(msa.device)
-    if cap not in ((9, 0), (8, 0)) or (cap == (8, 0) and d_pair % 256):  # A100 (cuda/chai_sm80): d_pair a multiple of 256
+    if cap not in ((9, 0), (8, 0), (12, 0)) or (cap != (9, 0) and d_pair % 256):  # A100 / RTX 5090 (cuda/chai_sm80): d_pair a multiple of 256
         return False
     _, s, n, cm = msa.shape
     return (
@@ -50,7 +50,7 @@ def serves(module, msa: torch.Tensor, mask: torch.Tensor | None, *, training: bo
 
 def _kernels(t: torch.Tensor):
     """The pass kernels of the card: ``cuda`` (``chai.cu``, sm_90a) or ``cuda.chai_sm80`` (A100), the same entry points."""
-    if torch.cuda.get_device_capability(t.device) == (8, 0):
+    if torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0)):  # A100, RTX 5090 (the sm_120a build of the same sources)
         from miniworld_engine.kernels.outer_product_mean.cuda import chai_sm80
 
         return chai_sm80
@@ -158,14 +158,25 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
     dy = torch.mm(dz2, wf)  # [N N, 512] = dz W'
     dbo = torch.mm(dz2.new_ones((1, n * n)), dz2, out_dtype=f32).reshape(-1)  # sum over the pairs
     dwp = torch.mm(dz2.t(), y, out_dtype=f32)  # dW' = dz^T y
-    w32 = wo.float()
-    dwo = dwp * gam.float()[None, :] + dbo[:, None] * bet.float()[None, :]  # W' = W gamma, b' = b + W beta
-    dgam = (w32 * dwp).sum(0)
-    dbet = w32.t() @ dbo
+    # the RTX 5090: fewer, fused small kernels (dWo / dgamma / dbeta in one, split-K dW, one-launch column sums, dx returned without a copy)
+    rtx5090 = torch.cuda.get_device_capability(msa.device) == (12, 0) and wo.dtype in (torch.float32, torch.bfloat16) and t % 512 == 0
+    if rtx5090:
+        from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120
+
+        dwo, dgam, dbet = gemm_sm120.chai_wo_grads(dwp, dbo, wo, gam, bet)
+    else:
+        w32 = wo.float()
+        dwo = dwp * gam.float()[None, :] + dbo[:, None] * bet.float()[None, :]  # W' = W gamma, b' = b + W beta
+        dgam = (w32 * dwp).sum(0)
+        dbet = w32.t() @ dbo
     do = cuda.chai_bwd(dy, y, st, n)
     del dy
-    da = torch.bmm(b.view(G, s, n * K), do.transpose(1, 2))  # [8, S, N K]
-    db = torch.bmm(a.view(G, s, n * K), do)
+    bwd_products = getattr(cuda, "chai_bwd_products", None)  # A100 / RTX 5090: the card's batched GEMMs
+    if bwd_products is not None:
+        da, db = bwd_products(a, b, do, s, n)  # [8, S, N K]
+    else:
+        da = torch.bmm(b.view(G, s, n * K), do.transpose(1, 2))  # [8, S, N K]
+        db = torch.bmm(a.view(G, s, n * K), do)
     del do
     x = msa[0].reshape(t, CM).contiguous()
     mk = None
@@ -174,6 +185,20 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
         if mk.dtype != torch.bool:
             mk = mk != 0
     dcat, ln16, dx, part = cuda.chai_projbwd(x, mk, da.view(G, t, K), db.view(G, t, K), lnw32, lnb32, st1, wlr)
+    if rtx5090:  # dW = dcat^T ln16 as 64 K-chunk partials (64 x 64 tiles) summed into [W_left | W_right] directly
+        dwl, dwr = gemm_sm120.colsum2(gemm_sm120.wgrad_parts(dcat, ln16, 5, 64), G * K * CM)
+        dlw, dlb = gemm_sm120.colsum2(part, CM)
+        return [
+            dx.view(1, s, n, CM),
+            dlw.to(lnw.dtype),
+            dlb.to(lnb.dtype),
+            dwl.view(G * K, CM).to(wl.dtype),
+            dwr.view(G * K, CM).to(wr.dtype),
+            dgam.to(gam.dtype),
+            dbet.to(bet.dtype),
+            dwo.to(wo.dtype),
+            dbo.to(bo.dtype),
+        ]
     dw = torch.mm(dcat.t(), ln16, out_dtype=f32)  # [128, 64]
     dlw, dlb = part[:, :CM].sum(0), part[:, CM:].sum(0)
     return [

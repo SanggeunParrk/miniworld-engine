@@ -36,7 +36,7 @@ def serves(module, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
 def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None:
     """Why the A100 kernels cannot take this call (the ``cuda`` backend of the TriMul classes states it on an A100), or ``None``."""
     if pair.dtype != torch.bfloat16:
-        return f"dtype {pair.dtype}: the A100 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
+        return f"dtype {pair.dtype}: the A100 / RTX 5090 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
     if module.ln_pair.eps != module.ln_out.eps:
         return "LN_in and LN_out must share one epsilon"
     # the input LayerNorm's gradients are written by the kernel, in the parameters' dtype (bf16 or fp32, both alike)
@@ -67,7 +67,7 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None
     if _wide_kernels(plane).available(plane, module.d_hidden, plane_mask, hs=_wide_hs(module)):
         return None
     return (
-        f"d_pair {pair.shape[-1]}, d_hidden {module.d_hidden}, L {pair.shape[1]}, grad {torch.is_grad_enabled()}: outside the A100 TriMul "
+        f"d_pair {pair.shape[-1]}, d_hidden {module.d_hidden}, L {pair.shape[1]}, grad {torch.is_grad_enabled()}: outside the A100 / RTX 5090 TriMul "
         "kernels (sm80: D128 fused; sm80_wide / sm80_wide512: D 64 .. 512) or their extensions failed to build"
     )
 

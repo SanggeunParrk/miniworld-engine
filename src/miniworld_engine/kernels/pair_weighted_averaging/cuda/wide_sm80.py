@@ -7,6 +7,7 @@ import functools
 from pathlib import Path
 
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from miniworld_engine.kernels import _msa_card as _card
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -15,9 +16,9 @@ _dir = Path(__file__).parent / "sm80"
 def ext():
     ensure_cuda_home()
     return load_extension(
-        name="pwa_wide_sm80",
+        name=_card.name("pwa_wide_sm80"),
         sources=[str(_dir / "wide_ops.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80")],
+        extra_cuda_cflags=_card.cflags([*host_flags(), "-O3", "-std=c++17", *gencodes("80")]),
         extra_cflags=["-std=c++17", "-O3"],
         extra_ldflags=["-lcublas"],  # head_bmm: the per-head contraction on the natural layout
         verbose=False,

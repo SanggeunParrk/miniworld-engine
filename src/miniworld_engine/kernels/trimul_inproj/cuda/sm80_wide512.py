@@ -23,8 +23,10 @@ from pathlib import Path
 import torch
 
 from ..._compile import opaque
-from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import build_failed
+from . import contract_sm80 as _cp
 from . import sm80 as _d128
+from . import sm80_wide as _wide
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -34,22 +36,19 @@ BIDIR, OUTGOING, INCOMING = _d128.BIDIR, _d128.OUTGOING, _d128.INCOMING
 
 @functools.lru_cache(maxsize=1)
 def _ext():
-    ensure_cuda_home()
     # Keep template-local CUDA attribute caches independent for each extension.
-    return load_extension(
-        name="trimul_sm80_wide512",
-        sources=[str(_dir / "wide_train512_ops.cu")],
-        extra_cuda_cflags=[
-            *host_flags(),
-            "-std=c++17",
-            "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
-            f"-I{_dir}",
-            "-Xcompiler=-fno-gnu-unique",
-        ],
-        extra_cflags=["-std=c++17", "-O3", "-fno-gnu-unique"],
-        verbose=False,
-    )
+    return _d128._build("trimul_sm80_wide512", "wide_train512_ops.cu", 80, ("-Xcompiler=-fno-gnu-unique",), ("-fno-gnu-unique",))
+
+
+@functools.lru_cache(maxsize=1)
+def _ext120():
+    """The same sources for the GeForce RTX 5090 (sm_120a)."""
+    return _d128._build("trimul_sm80_wide512", "wide_train512_ops.cu", 120, ("-Xcompiler=-fno-gnu-unique",), ("-fno-gnu-unique",))
+
+
+def _lib():
+    """The build for the current device: sm_80 (A100) or sm_120a (RTX 5090)."""
+    return _ext120() if _d128.on_sm120() else _ext()
 
 
 def shape_ok(shape, dtype, d_hidden: int, hs: int | None = None, mask_shape=None, mask_dtype=None) -> bool:
@@ -95,7 +94,7 @@ def _loads() -> bool:
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
     try:
-        _ext()
+        _lib()
     except Exception as exc:  # a build / load failure is an error, never a fallback
         build_failed("sm80 wide TriMul", exc)
         return False  # reached only while planning (build_failed returns there)
@@ -131,7 +130,7 @@ def _pack(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool = False) -> d
     so, eo, sg, eg = vec[8 * hs : 8 * hs + 4 * d].view(4, d).unbind(0)
     spx = vec[8 * hs + 4 * d :] if train else vec.new_empty((0,))
     wdx = torch.empty((4 * hs + d, d), dtype=wd, device=dev) if train else w1.new_empty((0,))
-    _ext().wpack(*ws, *ln, w1, vs, vb, wo3, so, eo, wg3, sg, eg, wdx, spx)
+    _lib().wpack(*ws, *ln, w1, vs, vb, wo3, so, eo, wg3, sg, eg, wdx, spx)
     pk = dict(
         hs=hs,
         d=d,
@@ -208,13 +207,14 @@ def _tf32(z: torch.Tensor):
 
 # ------------------------------------------------------------------------------------------------------------------------------ forward
 def _contract(planes, x, hs, n, direction):
-    """cuBLAS contraction of the plane pair: channels [0, h) outgoing (sum_k a[i,k] b[j,k]), the rest incoming (sum_k a[k,i] b[k,j])."""
+    """The contraction of the plane pair: channels [0, h) outgoing (sum_k a[i,k] b[j,k]), the rest incoming (sum_k a[k,i] b[k,j]); cuBLAS, or the
+    own plane GEMM on an RTX 5090 (``contract_sm80.planes``)."""
     a, b = planes[:hs].view(hs, n, n), planes[hs:].view(hs, n, n)
     h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
     if h:
-        torch.bmm(a[:h], b[:h].transpose(1, 2), out=x[:h])
+        _cp.planes(0, a[:h], b[:h], x[:h])
     if h < hs:
-        torch.bmm(a[h:].transpose(1, 2), b[h:], out=x[h:])
+        _cp.planes(1, a[h:], b[h:], x[h:])
 
 
 #: bf16 with a hidden width <= 128 (D64 both modules, D128 one direction): the statistics kernels are replaced by in-kernel two-pass statistics of k1w / k3w (see ``_run_forward``); False keeps the kernels (probe switch for A / B timings).
@@ -227,7 +227,7 @@ def _aligned(t: torch.Tensor) -> torch.Tensor:
 
 
 def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
-    E = _ext()
+    E = _lib()
     z = leaves[0]
     n, d = z.shape[1], z.shape[-1]
     T = n * n
@@ -352,16 +352,17 @@ def _gemm_tk(a, b):
 
 
 def _contract_bwd(planes, dx, dplanes, hs, n, direction):
-    """dX [Hs, L, L] -> the plane gradients [2 Hs, L, L] (cuBLAS): X = A B^T: dA = dX B, dB = dX^T A; X = A^T B: dA = B dX^T, dB = A dX."""
+    """dX [Hs, L, L] -> the plane gradients [2 Hs, L, L] (cuBLAS, or the own plane GEMM on an RTX 5090): X = A B^T: dA = dX B, dB = dX^T A;
+    X = A^T B: dA = B dX^T, dB = A dX."""
     a, b = planes[:hs].view(hs, n, n), planes[hs:].view(hs, n, n)
     da, db = dplanes[:hs], dplanes[hs:]
     h = hs // 2 if direction == BIDIR else (hs if direction == OUTGOING else 0)
     if h:
-        torch.bmm(dx[:h], b[:h], out=da[:h])
-        torch.bmm(dx[:h].transpose(1, 2), a[:h], out=db[:h])
+        _cp.planes(2, dx[:h], b[:h], da[:h])
+        _cp.planes(1, dx[:h], a[:h], db[:h])
     if h < hs:
-        torch.bmm(b[h:], dx[h:].transpose(1, 2), out=da[h:])
-        torch.bmm(a[h:], dx[h:], out=db[h:])
+        _cp.planes(0, b[h:], dx[h:], da[h:])
+        _cp.planes(2, a[h:], dx[h:], db[h:])
 
 
 def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
@@ -370,7 +371,7 @@ def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
 
 
 def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
-    E = _ext()
+    E = _lib()
     z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo = leaves
     planes, x, st_in, st_out, ps, gs = saved
     n, d = z.shape[1], z.shape[-1]
@@ -409,7 +410,7 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     )
     r01 = torch.empty(2 * d, **f32)
     E.colsum(part, r01)
-    dor = torch.mm(cw[5].t(), dpr.t())  # [Hs, T] = r_o dy_o, channel-major like X
+    dor = _wide._dor(cw[5], dpr, hs, n)  # [Hs, T] = r_o dy_o, channel-major like X
     dt = torch.empty_like(xcm)
     part_o = torch.empty((T // (128 if is32 else 256), 2 * hs), **f32)
     E.lnout_bwd(dor, xcm, st_out, s12, go32, dt, part_o)
@@ -429,7 +430,7 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     E.ln_apply(zf, st_in, gi32, bi32, xn)
     dw1 = _gemm_tk(dcat, xn)  # [4 Hs + D, D] fp32, k1w packed order then W_g
     del xn
-    dxn = dcat @ pk["wdx"]  # [T, D]
+    dxn = _wide._dxn(dcat, pk["wdx"], hs, n)  # [T, D]
     del dcat
     dx = torch.empty_like(zf)
     nbi = E.lnin_bwd_blocks(T, d, is32)

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import torch
 
+from . import sm80_arch as _arch
 from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
@@ -38,13 +39,13 @@ Layout = tuple[int, int, int, int]
 def ext():
     ensure_cuda_home()
     return load_extension(
-        name="triattn_sm80_core2",
+        name=_arch.name("triattn_sm80_core2"),
         sources=[str(_dir / "attn2_ops.cu")],
         extra_cuda_cflags=[
             *host_flags(),
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
+            *_arch.gencode(),
             f"-I{_dir}",
         ],
         extra_cflags=["-std=c++17", "-O3"],

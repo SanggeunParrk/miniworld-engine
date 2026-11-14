@@ -25,7 +25,8 @@ from pathlib import Path
 
 import torch
 
-from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import ensure_cuda_home, host_flags
+from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # sm_120a: same sources (kernels/_sm120.py)
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -140,7 +141,7 @@ def bias_pack(
 
 @functools.lru_cache(maxsize=8)
 def _ampere_cached(index: int) -> bool:
-    return torch.cuda.get_device_capability(index) == (8, 0)
+    return torch.cuda.get_device_capability(index) in ((8, 0), (12, 0))  # 12.0: the RTX 5090 (sm_120a build, kernels/_sm120.py)
 
 
 @torch.compiler.assume_constant_result
@@ -314,10 +315,21 @@ def _dkv_schedule(head_dim: int) -> tuple[int, int]:
     return (4, 2) if head_dim == 32 else (DKV_NST, DKV_MINB)
 
 
-def _dq_schedule(samples: int) -> tuple[int, int, int]:
+def _dq_schedule(samples: int, head_dim: int = HD) -> tuple[int, int, int]:
     """(samples per CTA, K | V ring stages, CTAs per SM) of the query side.  Four samples per CTA halve the bias-gradient partials that two write and
-    read back (A = 48: dq + reduction 12-20 % faster), at one CTA per SM; two samples when A is not a multiple of four, one when it is odd."""
+    read back (A = 48: dq + reduction 12-20 % faster), at one CTA per SM; two samples when A is not a multiple of four, one when it is odd.
+
+    The RTX 5090 (99 KB of shared memory per block): the Q | dO tiles of four samples (and of two at head dim 48 / 64) do not fit beside the ring, so
+    one sample a CTA there, two at head dim 32 for an even sample count."""
+    if _sm120_build():
+        return (2, 4, 1) if head_dim <= 32 and samples % 2 == 0 else (1, 3, 2)
     return (4, 3, 1) if samples % 4 == 0 else (2, 4, 1) if samples % 2 == 0 else (1, 3, 2)
+
+
+def _sm120_build() -> bool:
+    from miniworld_engine.kernels._sm120 import building_sm120
+
+    return building_sm120()
 
 
 def backward(
@@ -601,7 +613,7 @@ def plain_backward(
     ext.attn_delta(dob, o, delta, samples, length, heads, head_dim)
     dq, dk, dv = (torch.empty(m, d, device=dev, dtype=torch.bfloat16) if t is None else t for t in (dq, dk, dv))
     pen, kps = _penalty(kpen, kps, length)
-    rows, nkv, minb = (1, 3, 4 if warps == 2 else 2) if warps < 8 else _dq_schedule(samples)
+    rows, nkv, minb = (1, 3, 4 if warps == 2 else 2) if warps < 8 else _dq_schedule(samples, head_dim)
     assert warps == 8 or (samples == 1 and kpen is None and warps in (2, 4)), (
         samples,
         warps,
@@ -714,6 +726,13 @@ def pair_bias_forward(
     return bo
 
 
+def _smem_cap() -> int:
+    """The opt-in shared memory per block the generic pair-bias kernels may take: 160 KB (A100), 99 KB on the RTX 5090 (``ops.cu``'s ``AA80_SMEM_CAP``)."""
+    from miniworld_engine.kernels._sm120 import SMEM_MAX, building_sm120
+
+    return SMEM_MAX if building_sm120() else 160 * 1024
+
+
 #: head counts of the generic pair-bias kernel (``pair_bias_gen``)
 GEN_HEADS = (4, 8, 12, 16, 24, 32)
 #: rows a thread of the generic kernel takes (1, 2 or 4): the A100 port's verified default
@@ -727,7 +746,7 @@ def pair_bias_generic_supported(dp: int, heads: int, dtype: torch.dtype) -> bool
         and dp % 8 == 0
         and dp >= 8
         and heads in GEN_HEADS
-        and (dp * heads + heads) * 4 <= 160 * 1024
+        and (dp * heads + heads) * 4 <= _smem_cap()
     )
 
 
@@ -766,14 +785,23 @@ _GEN_BWD_TE = {64: 128, 128: 64, 256: 32, 384: 16, 512: 16}
 GEN_BWD_HEADS = (8, 12, 16, 24)
 
 
+def _gen_bwd_te(dp: int, heads: int) -> int | None:
+    """Elements per tile of ``pair_bias_gen_bwd`` (``aux_sm80.cuh``'s ``PbBwdCfg``): :data:`_GEN_BWD_TE`, except d_pair 512 with more than 12 heads on
+    the RTX 5090 (sm_120a build): 8 (16 elements need 108 / 125 KB of shared memory at 16 / 24 heads, over its 99 KB)."""
+    te = _GEN_BWD_TE.get(dp)
+    if te is not None and dp == 512 and heads > 12 and _sm120_build():
+        return 8
+    return te
+
+
 def pair_bias_generic_bwd_supported(dp: int, heads: int, dtype: torch.dtype) -> bool:
     """The generic pair-bias backward's requirements: bf16 / fp32 pair, a width of 64 / 128 / 256 / 384 / 512, 8 / 12 / 16 / 24 heads, the tile in shared memory."""
-    te = _GEN_BWD_TE.get(dp)
+    te = _gen_bwd_te(dp, heads)
     return (
         te is not None
         and dtype in (torch.bfloat16, torch.float32)
         and heads in GEN_BWD_HEADS
-        and (dp * (heads if (heads // 4) % 2 else heads + 4) + 2 * te * (dp + 4) + te * heads) * 4 <= 160 * 1024
+        and (dp * (heads if (heads // 4) % 2 else heads + 4) + 2 * te * (dp + 4) + te * heads) * 4 <= _smem_cap()
     )
 
 
@@ -791,7 +819,8 @@ def pair_bias_generic_backward(
     ``[H, C]`` gradient of the folded weight (summed over the kernel's blocks in a fixed order: a replay is bit-identical).
     ``out``: a contiguous buffer of z's shape and dtype that ``dz`` is written into (a batch row of the caller's gradient)."""
     nz, c, heads = z.shape[0], z.shape[-1], wcm.shape[1]
-    te = _GEN_BWD_TE[c]
+    te = _gen_bwd_te(c, heads)
+    assert te is not None
     tiles = -(-nz // te)
     rows = max(1, min(8, nz * tiles // 864))  # about four waves of two blocks per SM
     pw = torch.empty(tiles * -(-nz // rows), heads, c, device=z.device, dtype=torch.float32)
@@ -823,7 +852,17 @@ GEN_BWD_TC_HEADS = (8, 16, 24)
 
 def pair_bias_generic_backward_tc_supported(dp: int, heads: int, dtype: torch.dtype) -> bool:
     """The fp32 tensor-core pair-bias backward's requirements: an fp32 pair of 128 / 256 / 384 / 512 channels, 8 / 16 / 24 heads."""
-    return dtype is torch.float32 and dp in GEN_BWD_TC_WIDTHS and heads in GEN_BWD_TC_HEADS
+    fits = not _sm120_build() or _tc_smem(dp, heads) <= _smem_cap()  # the RTX 5090: d_pair 512 x 16 / 24 heads take pair_bias_gen_bwd
+    return dtype is torch.float32 and dp in GEN_BWD_TC_WIDTHS and heads in GEN_BWD_TC_HEADS and fits
+
+
+def _tc_smem(dp: int, heads: int) -> int:
+    """Shared memory of ``pair_bias_gen_bwd_tc`` on the RTX 5090 (``aux_sm80.cuh``'s ``PbTcCfg`` with its 99 KB cap: 3 stages when they fit, else 2;
+    d_pair 512 x 16 / 24 heads exceed it even at 2 and take the one-pass kernel ``pair_bias_gen_bwd``)."""
+    hp, red = heads + 4, 4 * 8 * 16 + 2 * 16
+    fixed, stage = dp * hp + red, 16 * (dp + 8) + 16 * hp
+    stages = 3 if (fixed + 3 * stage) * 4 <= _smem_cap() else 2
+    return (fixed + stages * stage) * 4
 
 
 def pair_bias_generic_backward_tc(

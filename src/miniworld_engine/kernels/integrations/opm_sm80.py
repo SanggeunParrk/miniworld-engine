@@ -22,6 +22,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels import _msa_card as _card
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import build_failed
 
@@ -37,6 +38,10 @@ def _loads() -> bool:
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
     try:
         _sm80().ext()
+        if _card.sm120():  # the RTX 5090 backward products (gemm_sm120)
+            from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120
+
+            gemm_sm120.ext()
     except Exception as exc:  # a build / load failure is an error, never a fallback
         build_failed("sm_80 OuterProductMean", exc)
         return False  # reached only while planning (build_failed returns there)
@@ -57,8 +62,8 @@ def refusal(
     residual: torch.Tensor | None,
 ) -> str | None:
     """Why the sm_80 kernels cannot run this call, or ``None`` (the contract above). Shapes, dtypes and the device only, plus the build."""
-    if not msa.is_cuda or torch.cuda.get_device_capability(msa.device) != (8, 0):
-        return "the sm_80 OuterProductMean kernels are the A100 (capability 8.0) builds"
+    if not _card.device_ok(msa):
+        return "the sm_80 OuterProductMean kernels are the A100 (capability 8.0) and RTX 5090 (12.0, sm_120a) builds"
     if getattr(module, "groups", 1) > 1:
         return "grouped OPM (Chai-1): no sm_80 build"
     if module.mask_interchain and token_asym_id is not None:
@@ -215,7 +220,7 @@ def _pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
 
 def _native128_pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
     return (
-        True
+        not _card.sm120()  # the A100-tuned short pipeline (pipeline_native128_sm80) is not built for the RTX 5090
         and len(leaves) == 6  # (no projection biases)
         and msa.shape[1:3] == (1024, 128)
         and msa.shape[-1] == 64
@@ -231,6 +236,26 @@ def _outer(sm, a, b, mk):
     from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
 
     return ogemm_sm80.outer(a, b, ogemm_sm80.live_tokens(mk))
+
+
+def _bwd_cfg(rows: int, length: int) -> int:
+    """The RTX 5090's tile for dA / dB (M = S rows, N = K = 32 L; ``gemm_sm120.CFGS``), measured at S 384 / 1024, L 128..1024: 64 x 64 x 64 to
+    L 256, 64 x 128 x 64 to L 512 (and L 768 at S 384), 128 x 256 at L 768, 128 x 128 x 64 past it."""
+    if length <= 256:
+        return 5
+    if length <= 512 or (length <= 768 and rows <= 384):
+        return 4
+    return 1 if length <= 768 else 3
+
+
+def _bwd_mm(sm, x: torch.Tensor, d_o: torch.Tensor, trans: bool) -> torch.Tensor:
+    """x dO^T (``trans``) or x dO: the backward's [S, 32 L] products. The RTX 5090: CUTLASS tiles (``_bwd_cfg``; cuBLASLt's picks trail them up to
+    1.5x at L 128..512); the A100: cuBLASLt with the searched algorithm."""
+    if _card.sm120():
+        from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120
+
+        return gemm_sm120.mm(x, d_o, False, trans, _bwd_cfg(x.shape[0], x.shape[1] // CH))
+    return sm.lt_mm(x, d_o, False, trans)
 
 
 # ------------------------------------------------------------------------------------------------------------ inference
@@ -268,6 +293,12 @@ def inference(
         m = msa[0]
         mk = _mask_u8(mask)
         a, b, _ = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, False, None, *pb)
+        if _card.sm120() and m.shape[1] * m.shape[1] > sm.ROWS_TOKENS:  # RTX 5090 past L 2048: O per chunk of rows (2 KiB a pair in one piece)
+            norm, nconst = _norm(mk, m.shape[0], clamp=dmin > 0)
+            out = sm.epilogue_rows(
+                a, b, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first, dmin=dmin, doff=doff
+            )
+            return out.unsqueeze(0)
         o = _outer(sm, a, b, mk)
         del a, b
         if mk is not None and _mask_epilogue_enabled(m, wo):
@@ -482,8 +513,8 @@ def backward(
         if nrm is not None:
             nconst = 1.0
         dO, dzn, dbo = sm.dgrad(dz.contiguous().view(length, length, -1), nrm, nconst, wo16, norm_first, dmin=dmin, doff=doff)
-        da = sm.lt_mm(b, dO, False, True)  # [S, 32 L]: dA[s, (i, c)]
-        db = sm.lt_mm(a, dO, False, False)  # dB[s, (j, e)]
+        da = _bwd_mm(sm, b, dO, True)  # [S, 32 L]: dA[s, (i, c)]
+        db = _bwd_mm(sm, a, dO, False)  # dB[s, (j, e)]
         dpb = []
         if pb:  # the projection biases: sum over the valid (s, i) of dA | dB (a masked row lost its bias), one bf16 0 / 1 GEMM with fp32 accumulation
             rows = depth * length

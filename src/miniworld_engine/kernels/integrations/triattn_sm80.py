@@ -77,10 +77,10 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None):
     d_hidden, d_pair = module.to_query.weight.shape
     if pair.shape[-1] != d_pair:
         return None
-    if (d_pair, d_hidden, module.n_head) == (128, 128, 4):
+    from miniworld_engine.kernels.triangle_attention.cuda import sm80_arch, sm80_wide
+    # (the RTX 5090: the fused front keeps 133 KiB of weights in shared memory, over its 99 KB -- d_pair 128 takes the wide rows engine)
+    if (d_pair, d_hidden, module.n_head) == (128, 128, 4) and not sm80_arch.on_sm120(pair):
         return ("fused", None)
-    from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
-
     cfg = sm80_wide.cfg_for(d_pair, d_hidden, module.n_head)
     return None if cfg is None else ("wide", cfg)
 

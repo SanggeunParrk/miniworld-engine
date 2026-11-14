@@ -33,7 +33,7 @@ def ext(shadow: bool = False):
     """The row / pair extension. ``shadow`` (H100 only) also builds the fp32 pair-weight oracle (``integrations.attention_pair_bias_b200.EXACT_DWB``), which
     needs CUTLASS 4.2 headers (``CUTLASS_PATH``); the default build has no such dependency. An A100 gets the sm_80 build (``ext_sm80``)."""
     cap = torch.cuda.get_device_capability()
-    if cap == (8, 0):
+    if cap in ((8, 0), (12, 0)):  # the RTX 5090 (sm_120a) runs the sm_80 build of the same sources (kernels/_sm120.py)
         return ext_sm80()
     arch = "90a" if cap == (9, 0) else "100"
     return _ext(arch, shadow and arch == "90a")
@@ -43,7 +43,8 @@ def ext(shadow: bool = False):
 def ext_sm80():
     """The A100 (sm_80) build: ``apb_rows_sm80.cu`` with ``-DAPB_SM80`` (its pair passes from ``apb_pair_bias_sm80.cuh``, the C++ steps from
     ``step_sm80.cuh``); driven by ``kernels/integrations/attention_pair_bias_sm80.py``."""
-    from ...._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from ...._nvcc import ensure_cuda_home, gencodes, host_flags
+    from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension
 
     ensure_cuda_home()
     return load_extension(

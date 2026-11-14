@@ -18,6 +18,7 @@ from miniworld_engine.modules.norm import (
     _wants_grad,
     a100,
     h100_unsupported,
+    sm120,
     triton_unsupported,
 )
 from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWeights, master_linear, random_input, stream_shape
@@ -66,8 +67,11 @@ class Transition(BackendModule, MasterWeights):
         "cuda:h100_sm90": 5,
         "cuda:a100_sm80": 6,
         "triton:a100_sm80": 2,
+        "cuda:5090_sm120": 3,
     }
     # 2026-11-13: anthropic 3 = the pair transition folds the residual in the kernel (the kits' block statement); the esm_t16 cell served wherever the driver loads its CUDA-13 cubin
+    # 2026-11-13 (RTX 5090): cuda:5090_sm120 2 = the one-kernel D 64 / 128 backward on sm_120a (32-row PW stages), half tiles of the fused forward at few rows;
+    # 3 = the main merge (the A100 changes 5 / 6 run on the sm_120a build too)
     # 2026-11-13 (H100): cuda 5 = the inference forward casts fp32-master weights once per parameter version (param_forms), not per call
     # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train; A100 capture forms + fp32 (TF32) build.
     # 2026-11-11 (A100): cuda 3 = the fused D 64 / 128 builds again + the fused fp32 eval forward; triton 2 = TF32-tuned fp32 d768 keys
@@ -353,7 +357,7 @@ class Transition(BackendModule, MasterWeights):
         return None
 
     def _supports_cuda(self, x: torch.Tensor) -> str | None:
-        if a100(x):
+        if a100(x) or sm120(x):  # A100 / RTX 5090: the sm_80 sources (built for sm_120a on the 5090)
             return self._supports_cuda_sm80(x)
         from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
@@ -378,7 +382,7 @@ class Transition(BackendModule, MasterWeights):
     def _forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return x
-        if a100(x):
+        if a100(x) or sm120(x):
             from miniworld_engine.kernels.transition.cuda import transition_sm80
 
             out = transition_sm80(
@@ -401,7 +405,8 @@ class Transition(BackendModule, MasterWeights):
         return out
 
     def _supports_cuda_sm80(self, x: torch.Tensor) -> str | None:
-        """A100: ``kernels/transition/cuda.transition_sm80`` (``fused_sm80`` at D 128 / n 4 with whole 256-row tiles and enough rows,
+        """A100 and GeForce RTX 5090 (the same sources built for sm_120a; there only the wide chain: the one-kernel builds need more than its
+        99 KB of shared memory a block): ``kernels/transition/cuda.transition_sm80`` (``fused_sm80`` at D 128 / n 4 with whole 256-row tiles and enough rows,
         ``fused_wide_sm80`` at D 64 / 128 / 256 / 384 / 512 / 768 with a hidden width a multiple of 64, any row count): bf16 activations,
         bf16 or fp32-master parameters, forward and backward; fp32 activations where torch allows TF32 (``fused_wide_sm80.transition_f32_sm80``:
         fp16 products at TF32's rounding, a TF32 backward)."""

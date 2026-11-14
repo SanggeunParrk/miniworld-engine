@@ -71,7 +71,7 @@ class Target:
     gpu: str  # launch-config table key (_launch_config.gpu_key) of that card
 
 
-TARGETS = {"sm80": Target("sm80", 108, "a100_sm80"), "sm90": Target("sm90", 132, "h100_sm90"), "sm100": Target("sm100", 148, "b200_sm100")}
+TARGETS = {"sm80": Target("sm80", 108, "a100_sm80"), "sm120": Target("sm120", 170, "5090_sm120"), "sm90": Target("sm90", 132, "h100_sm90"), "sm100": Target("sm100", 148, "b200_sm100")}
 
 
 def target(arch: str) -> Target:
@@ -619,6 +619,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     t = target(args.arch)
+    if t.arch == "sm120":  # the sm_80 builders compile for sm_120a under <name>_sm120 (kernels/_sm120.py), here and in every worker
+        os.environ["MINIWORLD_ENGINE_BUILD_ARCH"] = "sm120"
     if args.cutlass:
         os.environ["CUTLASS_PATH"] = args.cutlass
     if args.mathdx:
@@ -666,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         for s in specs:
             log(f"  {'have' if present(s) else 'todo'} {s.kind:7s} {s.name}  [{s.key[:8]}]  {s.site}")
         return check(t, specs, problems) and 1 if args.check else 0
-    results = build(specs, args.jobs or default_jobs(), args.stop_after, {"sm80": "8.0", "sm90": "9.0a", "sm100": "10.0a"}[t.arch])
+    results = build(specs, args.jobs or default_jobs(), args.stop_after, {"sm80": "8.0", "sm90": "9.0a", "sm100": "10.0a", "sm120": "12.0a"}[t.arch])
     failed = {k: v for k, v in results.items() if v[1] is not None}
     index = write_index(t, specs)
     left = sum(present(s) is None for s in specs)

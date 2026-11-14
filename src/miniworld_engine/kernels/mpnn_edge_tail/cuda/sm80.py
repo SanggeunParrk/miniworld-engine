@@ -18,8 +18,8 @@ def ext():
         ensure_cuda_home,
         gencodes,
         host_flags,
-        load_extension,
     )
+    from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension
 
     ensure_cuda_home()
     flags = [

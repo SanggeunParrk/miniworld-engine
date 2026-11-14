@@ -25,7 +25,12 @@ struct LnVParams {
 };
 
 template <int D, int C> struct LnVCfg {
+#ifdef MWE_SM120   // 99 KiB: 64-token tiles (4 warps) where the 128-token one does not fit
+  static constexpr int NTOK = 2 * 128 * D * 2 + 8 * C * D * 2 + 128 * 8 * C * 2 + 2 * D * 4 <= MWE_SMEM_MAX ? 128 : 64, NTHR = 2 * NTOK;
+  static constexpr int NCH = D / 8, HC = 8 * C, NCO = HC / 8;
+#else
   static constexpr int NTHR = 256, NTOK = 128, NCH = D / 8, HC = 8 * C, NCO = HC / 8;   // 16 B chunks per m row, per staged output row
+#endif
   static constexpr int MB = NTOK * D * 2, WB = HC * D * 2, OB = NTOK * HC * 2;
   static constexpr int SMEM = 2 * MB + WB + OB + 2 * D * 4;
   static_assert((D == 64 || D == 128) && (C == 8 || C == 16 || C == 32), "d_msa / d_hidden");

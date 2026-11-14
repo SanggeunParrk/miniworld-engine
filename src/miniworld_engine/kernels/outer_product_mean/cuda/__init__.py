@@ -80,6 +80,8 @@ def prebuild(target, rows):
             yield chai_sm80.ext
             yield ogemm_sm80.ext  # the masked grouped product
         return
+    if target.arch == "sm120":  # RTX 5090: its builds (the Chai-1 passes included) are planned by kernels/integrations (kernels/_msa_card.prebuild_sm120)
+        return
     names = set().union(*(r["kernels"] for r in rows)) if rows else set()
     if "outer_product_mean_gather_sm90" in names:
         yield ext

@@ -42,7 +42,7 @@ class SmoothLddtLoss(BackendModule):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: A100 split tile launches (KS column parts)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: A100 split tile launches (KS column parts); 2026-11-12: the sm_120a cubin
 
     backends = ("pytorch", "cuda", "triton")
 
@@ -87,8 +87,8 @@ class SmoothLddtLoss(BackendModule):
         if why is not None:
             return why
         cc = torch.cuda.get_device_capability(x_pred.device)
-        if cc not in ((8, 0), (9, 0), (10, 0)):
-            return f"the CUDA kernels are the A100 (sm_80), H100 (sm_90a) and B200 (sm_100a) cubins, got sm_{cc[0]}{cc[1]}"
+        if cc not in ((8, 0), (9, 0), (10, 0), (12, 0)):
+            return f"the CUDA kernels are the A100 (sm_80), H100 (sm_90a), B200 (sm_100a) and RTX 5090 (sm_120a) cubins, got sm_{cc[0]}{cc[1]}"
         return None
 
     def _supports_triton(self, x_pred: torch.Tensor, gt: torch.Tensor, is_nuc: torch.Tensor, mask: torch.Tensor) -> str | None:

@@ -42,7 +42,7 @@ def prebuild(target, rows):
     step, kernels/integrations/local_dit_esm.py). Which build serves which card is this family's knowledge."""
     esm = [r for r in rows if r["module"] == "AtomDiTESMFold2Pair"]
     other = [r for r in rows if r["module"] != "AtomDiTESMFold2Pair"]
-    if target.arch == "sm80":
+    if target.arch in ("sm80", "sm120"):  # sm120: the same sm_80 builds, compiled for sm_120a (kernels/_sm120.py)
         # A100: the atom blocks' training path (every atom call, inference included: cuda/sm80.py); the A100 TokenDiTBoltz2 attention is
         # augmented_attention's
         import functools as ft

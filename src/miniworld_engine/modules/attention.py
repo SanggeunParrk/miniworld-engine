@@ -24,6 +24,8 @@ _capture.instance_cache_attr("_anthropic_params")  # the anthropic producer's fp
 # ------------------------------------------------------------------------------------------------------------------- "triton" core
 #: the head widths the Triton pair-bias attention core (kernels/augmented_attention/triton/main.py) is built for
 TRITON_MAX_HEAD_DIM = 64
+#: the cards whose ``cuda`` backend runs the sm_80 sources: the A100 and the RTX 5090 (sm_120a builds of them, kernels/_sm120.py)
+_SM80_BUILDS = ((8, 0), (12, 0))
 
 
 def _triton_core_reason(x: torch.Tensor, head_dim: int) -> str | None:
@@ -126,9 +128,11 @@ class AttentionPairBias(BackendModule, MasterWeights):
         "anthropic": 2,
         "cuda:a100_sm80": 8,
         "cuda:h100_sm90": 5,
+        "cuda:5090_sm120": 3,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
-    }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100; cuda:a100_sm80 4 / cuda:h100_sm90 2 (2026-11-11): B > 1 served (one step per batch row, FoldForge 5I28 confidence head); cuda:a100_sm80 5 (2026-11-12): the composed fp32 path's pair backward is one TF32 tensor-core launch for the batch (pair_bias_gen_bwd_tc); cuda:a100_sm80 6 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd, bf16 pairs) 1.4-2.1x faster, the same values;
+    }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100; cuda:a100_sm80 4 / cuda:h100_sm90 2 (2026-11-11): B > 1 served (one step per batch row, FoldForge 5I28 confidence head); cuda:a100_sm80 5 (2026-11-12): the composed fp32 path's pair backward is one TF32 tensor-core launch for the batch (pair_bias_gen_bwd_tc); cuda:a100_sm80 6 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd, bf16 pairs) 1.4-2.1x faster, the same values; cuda:5090_sm120 2 (2026-11-12): the pair-bias backwards fit 99 KB on sm_120a (TF32 tensor-core kernel at 2 stages, d_pair 512 x 16 / 24 heads on the one-pass kernel with 8-element tiles)
+    # cuda:5090_sm120 3 (2026-11-13, main merge): the padded L % 128 inference and batched B > 1 paths above on the sm_120a build
     # cuda:a100_sm80 7 / cuda:h100_sm90 3 (2026-11-12): inference at L % 128 != 0 runs padded to a multiple of 128 (FoldForge OpenDDE n = 12: 2976)
     # cuda:h100_sm90 4 (2026-11-12): bf16 inference at B > 1 runs the batch rows together, one launch per stage (5 launches per chunk of
     # rows instead of 5 per row; the per-row values bit for bit): engine 2.4.4 parity at L 128 for the confidence head's S = 5 / 8
@@ -306,7 +310,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
             # the training Functions keep the bias inside their passes and return no gradient for an additive logit term ("triton" does)
             return "extra_pair_bias with a gradient: the cuda backend folds it into the inference ops' bias planes only (eval)"
         padded = not grad and single.shape[1] % 128 != 0  # inference pads L to a multiple of 128 (``_forward_cuda``)
-        if single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0):
+        if single.is_cuda and torch.cuda.get_device_capability(single.device) in _SM80_BUILDS:  # A100, or the RTX 5090 (sm_120a build)
             from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
             if extra_pair_bias is not None:  # the fused C++ step makes its bias inside the step: the composed path, whose bias is a tensor
@@ -318,7 +322,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
     def _pads(self, single, pair, mask, extra_pair_bias) -> bool:
         """Whether a ``cuda`` inference call at L % 128 != 0 runs padded: H100 always (its kernels take whole 128-token tiles); A100 on the
         composed path (extra_pair_bias, or what the fused C++ step refuses; the step itself takes any L)."""
-        if torch.cuda.get_device_capability(single.device) != (8, 0):
+        if torch.cuda.get_device_capability(single.device) not in _SM80_BUILDS:  # (the RTX 5090 runs the A100 sources)
             return True
         from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
@@ -343,8 +347,8 @@ class AttentionPairBias(BackendModule, MasterWeights):
             # call runs at the next multiple of 128 -- zero single rows and pair entries, the pad keys masked (-inf: no weight), the pad
             # query rows dropped. Every real row attends over the same keys with the same logits as unpadded.
             lp = -(-L // 128) * 128
-            if torch.cuda.get_device_capability(single.device) == (8, 0):
-                # A100 (the composed path): the pair stays as it is -- its bias kernel writes the [H, Lp, Lp] planes from the [L, L] pair,
+            if torch.cuda.get_device_capability(single.device) in _SM80_BUILDS:
+                # A100 / RTX 5090 (the composed path): the pair stays as it is -- its bias kernel writes the [H, Lp, Lp] planes from the [L, L] pair,
                 # the pad keys masked, the pad query rows 0 -- so only single / mask / extra_pair_bias are padded (no padded pair copy)
                 from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
@@ -355,7 +359,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
             return self._forward_cuda(single_p, pair_p, mask_p, extra_p)[:, :L].contiguous()
         # extra_pair_bias (eval only, ``_supports_cuda``): [B, H, L, L] planes added to the kernels' hoisted bias before the core (FoldForge R3)
         extra = None if extra_pair_bias is None else _extra_planes(extra_pair_bias, single.shape[0], self.n_head, single.shape[1])
-        if torch.cuda.get_device_capability(single.device) == (8, 0):
+        if torch.cuda.get_device_capability(single.device) in _SM80_BUILDS:
             from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
             if extra is not None:

@@ -258,8 +258,16 @@ __global__ void __launch_bounds__(PB_NT) pair_bias_gen_kernel(const TI* __restri
 // channels, which then fall in distinct bank quads (a pitch of an even number of float4s -- H = 8, 16 -- put them 2- / 4-way on the same banks).
 // 2026-11-12 (A100): the padded pitch and the next row's tile prefetched into registers during the current row's two phases (PbRaw8): 3.65 -> 1.72 ms at H 16, C 256,
 // the pair 768 x 768 (C 128: 1.07 -> 0.74; C 512 H 24, 256 x 256: 0.82 -> 0.59), the same values bitwise.
-template <int C_> struct PbBwdCfg {
-  static constexpr int C = C_, TE = C_ == 64 ? 128 : C_ == 128 ? 64 : C_ == 256 ? 32 : 16, TPE = 256 / TE, P = C_ + 4, CB = C_ / 64;
+// MWE_SM120 (the RTX 5090's 99 KB per block): C 512 with more than 12 heads takes tiles of 8 elements (one warp per element; 16 elements need 108 / 125 KB at
+// H 16 / 24); every other (C, H) keeps the A100 tile. The sm_80 build ignores H_.
+// TEO (RTX 5090 build only, the token DiT's bf16 training: bias_only_dit_sm80): a smaller tile of TEO elements, so two blocks share an SM (C 256: 89 KB at 32)
+template <int C_, int H_ = 0, int TEO = 0> struct PbBwdCfg {
+#ifdef MWE_SM120
+  static constexpr int TE = TEO ? TEO : C_ == 64 ? 128 : C_ == 128 ? 64 : C_ == 256 ? 32 : (C_ == 512 && H_ > 12) ? 8 : 16;
+#else
+  static constexpr int TE = C_ == 64 ? 128 : C_ == 128 ? 64 : C_ == 256 ? 32 : 16;
+#endif
+  static constexpr int C = C_, TPE = 256 / TE, P = C_ + 4, CB = C_ / 64;
   static_assert(C_ % 64 == 0 && C_ <= 512, "C: 64 .. 512, a multiple of 64");
   static constexpr int wp(int H) { return ((H / 4) & 1) ? H : H + 4; }
   static constexpr int smem(int H) { return (C_ * wp(H) + 2 * TE * P + TE * H) * 4; }
@@ -285,11 +293,19 @@ template <> struct PbRaw8<float> {
   __device__ __forceinline__ void put(float* d) const { reinterpret_cast<float4*>(d)[0] = a; reinterpret_cast<float4*>(d)[1] = b; }
 };
 
-template <int H, int C, typename T>
-__global__ void __launch_bounds__(256) pair_bias_gen_bwd_kernel(const T* __restrict__ z, const float* __restrict__ wcm, const float* __restrict__ db, T* __restrict__ dz, float* __restrict__ pw,
+template <int H, int C, typename T, int TEO = 0>
+#ifdef MWE_SM120
+__global__ void __launch_bounds__(256, TEO ? 2 : 1) pair_bias_gen_bwd_kernel(
+#else
+__global__ void __launch_bounds__(256) pair_bias_gen_bwd_kernel(
+#endif
+                                                                const T* __restrict__ z, const float* __restrict__ wcm, const float* __restrict__ db, T* __restrict__ dz, float* __restrict__ pw,
                                                                 int N, int NZ, int RPC, const unsigned char* __restrict__ kv, float eps) {
-  using G = PbBwdCfg<C>;
+  using G = PbBwdCfg<C, H, TEO>;
   constexpr int TE = G::TE, TPE = G::TPE, P = G::P, CB = G::CB, HB = H / 4, WP = G::wp(H);
+#ifdef MWE_SM120
+  static_assert(G::smem(H) <= 101376, "sm_120a: 99 KB of shared memory per block");
+#endif
   constexpr int NT = (TE * (C / 8) + 255) / 256, NG = (TE * H + 255) / 256;  // z tasks (8 channels) / g values per thread and row
   static_assert(H % 4 == 0, "heads: a multiple of 4");
   extern __shared__ __align__(16) float bsm[];
@@ -486,8 +502,14 @@ template <int C_, int H_> struct PbTcCfg {
   static constexpr int HP = H_ + 4;         // dbias / W' row pitch (H + 4 = 4 mod 8: the fragment reads of 8 rows x 4 heads are conflict-free)
   static constexpr int ZST = TM * P, GST = TM * HP, RED = 4 * NW * TM + 2 * TM;
   static constexpr int FIXED = C_ * HP + RED;
-  static constexpr int STAGES = (FIXED + 3 * (ZST + GST)) * 4 <= 160 * 1024 ? 3 : 2;
+#ifdef MWE_SM120
+  static constexpr int CAP = 101376;        // the RTX 5090's 99 KB per block: C 384 x 16 heads at 2 stages (85.6 KB); C 512 x 16 / 24 heads do not fit (FITS false)
+#else
+  static constexpr int CAP = 160 * 1024;
+#endif
+  static constexpr int STAGES = (FIXED + 3 * (ZST + GST)) * 4 <= CAP ? 3 : 2;
   static constexpr int SMEM = (FIXED + STAGES * (ZST + GST)) * 4;
+  static constexpr bool FITS = SMEM <= CAP;
   static_assert(C_ % 128 == 0 && C_ <= 512 && H_ % 8 == 0 && H_ <= 24, "C: 128 .. 512 (a multiple of 128), H: 8, 16 or 24");
 };
 
@@ -496,6 +518,9 @@ __global__ void __launch_bounds__(256, 1) pair_bias_gen_bwd_tc_kernel(const floa
                                                                       float* __restrict__ pw, int N, int NZ, const unsigned char* __restrict__ kv, float eps) {
   using G = PbTcCfg<C, H>;
   constexpr int TM = G::TM, P = G::P, HP = G::HP, NW = G::NW, CW = G::CW, NN = G::NN, MT = G::MT, KH = G::KH, ST = G::STAGES;
+#ifdef MWE_SM120
+  static_assert(G::SMEM <= 101376, "sm_120a: 99 KB of shared memory per block");
+#endif
   extern __shared__ __align__(16) float tsm[];
   float* ws = tsm;                                  // W' channel-major [C][HP], fp32
   float* red = ws + C * HP;                         // [4][NW][TM]: row sums, centred squares, m1, m2 per warp

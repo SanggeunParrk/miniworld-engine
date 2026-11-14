@@ -70,7 +70,7 @@ class _ParallelResidualCudaFn(torch.autograd.Function):
 
 
 def _cuda_reason(x: torch.Tensor, branches: list[torch.Tensor]) -> str | None:
-    """The Triton range (the kernels read the same tensors) on the cards the CUDA kernel is built for (H100 sm_90a, A100 sm_80)."""
+    """The Triton range (the kernels read the same tensors) on the cards the CUDA kernel is built for (H100 sm_90a, A100 sm_80, RTX 5090 sm_120a)."""
     from miniworld_engine.modules.pair_embed import _cuda_arch
 
     why = _triton_reason(x, branches) or _cuda_arch(x.device)
@@ -114,7 +114,7 @@ class ParallelResidual(BackendModule):
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     backends = ("pytorch", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {}
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:5090_sm120": 1}  # 2026-11-12: the sm_120a build (RTX 5090)
 
     def __init__(self, d: int = 256, branches: int = 2, *, backend: str = "pytorch") -> None:
         super().__init__()

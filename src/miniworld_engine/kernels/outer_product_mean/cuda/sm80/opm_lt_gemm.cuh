@@ -32,6 +32,9 @@ struct Plan {
 };
 
 inline const Entry* find(int64_t M, int64_t N, int64_t K, int ta, int tb) {
+#ifdef MWE_SM120  // RTX 5090 build: the table was searched on the A100; the cuBLAS heuristic there
+  return nullptr;
+#endif
   for (const Entry& e : kTable)
     if (e.M == M && e.N == N && e.K == K && e.ta == ta && e.tb == tb) return &e;
   return nullptr;

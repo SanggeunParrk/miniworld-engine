@@ -34,7 +34,11 @@ struct PrologueParams {
 
 template <int CM, int NB> struct PrologueCfg {                              // NB: m tile buffers (the prefetch runs NB - 1 tiles ahead)
   // d_msa 256: 64 tokens (4 warps x 16) per tile, so that two 32 KiB m buffers, the 32 KiB weights and the staging fit (128 tokens would take 176 KiB)
+#ifdef MWE_SM120   // 99 KiB: d_msa 128 on 64 tokens, d_msa 256 on 32 (every prefetch depth fits)
+  static constexpr int NTOK = CM == 256 ? 32 : (CM == 128 ? 64 : 128), NTHR = 2 * NTOK, NCH = CM / 8;
+#else
   static constexpr int NTOK = CM == 256 ? 64 : 128, NTHR = 2 * NTOK, NCH = CM / 8;   // 16-byte chunks per m row
+#endif
   static constexpr int MB = NTOK * CM * 2, WB = 64 * CM * 2, OB = 2 * NTOK * 64;   // one m tile, stacked weights, the staged a | b tiles ([128][32] bf16 each)
   static constexpr int SMEM = NB * MB + WB + OB + 2 * CM * 4;
   static_assert(CM == 64 || CM == 128 || CM == 256, "d_msa");

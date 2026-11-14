@@ -59,7 +59,12 @@ template <int D, int H, bool LN>
 std::vector<torch::Tensor> bwd_t(torch::Tensor dy, torch::Tensor x, torch::Tensor a_in, torch::Tensor stats, torch::Tensor wdw, torch::Tensor wx, torch::Tensor gamma,
                                  int64_t nrep_in, at::ScalarType adt, at::ScalarType wdt) {
   using PG = a100::PwCfgT<D, H>;
+#if defined(MWE_SM120)
+  using XG = a100::BwdCfg<128 * D, D == 128 ? 5 : 8, 2, D, H>;   // RTX 5090 (99 KB a block): a 5-slot weight ring at D = 128 (90 KB)
+  static_assert(XG::SMEM + a100::XA_BYTES <= 101376, "sm_120 shared memory (99 KB a block)");
+#else
   using XG = a100::BwdCfg<128 * D, 8, 2, D, H>;
+#endif
   const int64_t T = x.size(0);
   TORCH_CHECK(dy.is_contiguous() && x.is_contiguous() && a_in.is_contiguous() && x.size(1) == D, "contiguous [T, D] inputs");
   TORCH_CHECK(T % 256 == 0 && dy.size(0) == T && a_in.size(0) == T, "T % 256 and matching rows");

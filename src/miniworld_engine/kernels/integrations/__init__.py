@@ -28,6 +28,11 @@ def prebuild(target, _rows):
     if target.arch == "sm80":
         yield from _prebuild_sm80()
         return
+    if target.arch == "sm120":  # RTX 5090: the sm_120a builds of the sm_80 OPM / PWA sources (kernels/_msa_card.py)
+        from miniworld_engine.kernels import _msa_card
+
+        yield from _msa_card.prebuild_sm120()
+        return
     if target.arch != "sm90":
         return
     ext = functools.partial(opm_train._ext, None, arch="sm90")

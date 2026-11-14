@@ -1,0 +1,1195 @@
+"""Derive the kernel work list from ``registry_module.csv`` by RUNNING the modules on fake tensors.
+
+The old plan was a hand-written ladder per axis in :mod:`builder`: the registry named WHICH
+constexpr a kernel buckets on, and a tuple in Python named the VALUES. Those tuples drifted from
+what the modules actually launch -- ``TOKEN_SHAPES`` stopped at 512 while the sweep ran to 1024,
+``MSA_WIDTHS`` held 64 while the config declares 64 and 128 -- and every drift is a bucket
+production reaches with no cache entry. 146 replay misses came out of that one split.
+
+What replaces it is not a better ladder. It is not reading the ladder off the source either:
+dispatch turns on values a parser cannot know (``H = 128 // D if D <= 128 else 1``;
+``self.training``; ``is_sm86(x.device)``), which is why the hand-written tuples existed in the
+first place. So this module RUNS each module row, and records the ``(op, dtype, bucket)`` of every
+Triton launch that happens. Python decides the branches, because Python is the thing that decides
+them in production too.
+
+Running it does not cost a real forward:
+
+* every tensor is a :class:`FakeTensor` -- shapes and dtypes propagate through the real launcher
+  code, nothing is allocated, and an 8192-atom pair activation is as cheap as a 128-token one;
+* the Triton launch itself is replaced by a recorder that reads the autotuner's own ``key=[...]``
+  and returns, so no config is compiled and no kernel runs.
+
+Two things it still needs a GPU for, and neither is compute:
+
+* ``compile_wrap`` must be ``disable``. The default registers every kernel entry point as a
+  ``torch.library`` custom op with a fake implementation, and under ``FakeTensorMode`` torch
+  dispatches to THAT -- correct output shapes, launcher never entered, zero ops recorded.
+* a CUDA device has to exist. ``.cuda()`` initialises a real context, and the autograd engine
+  refuses to start a device thread without one ("hasPrimaryContext expects a valid device index").
+  Forward-only derivation runs fine on a CPU node; the backward half does not.
+
+Because dispatch reads the compute capability, the derived list is PER ARCH -- the same module row
+yields different kernels on sm_86 and sm_90. That is a property of the code, not of this module.
+"""
+
+from __future__ import annotations
+
+import collections
+import contextlib
+import csv
+import dataclasses
+import functools
+import itertools
+import os
+import sys
+from pathlib import Path
+
+import torch
+
+from miniworld_engine.autotune.module_registry import (
+    REGISTRY_MODULE as REGISTRY_MODULE,
+)
+from miniworld_engine.autotune.module_registry import (
+    STREAM_LADDERS as STREAM_LADDERS,
+)
+from miniworld_engine.autotune.module_registry import (
+    ModuleRow as ModuleRow,
+)
+from miniworld_engine.autotune.module_registry import (
+    module_rows as module_rows,
+)
+
+REGISTRY_KERNEL = Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry_kernel.csv"
+
+
+@dataclasses.dataclass(frozen=True)
+class DeriveUnit:
+    """One module invocation to record: everything that can change which kernel fires."""
+
+    module: str
+    stream: str
+    length: int
+    dims: tuple[tuple[str, int], ...]
+    impl: str
+    dtype: str
+    compute: str
+    mode: str
+    option: tuple[str, str] | None
+    augmentation: int = 1
+
+    @property
+    def label(self) -> str:
+        d = ";".join(f"{k}={v}" for k, v in self.dims)
+        opt = f" {self.option[0]}={self.option[1]}" if self.option else ""
+        core = f"->{self.compute}" if self.compute else ""
+        return (f"{self.module}[{self.impl}/{self.dtype}{core}] stream={self.stream} {d} "
+                f"L={self.length} A={self.augmentation} {self.mode}{opt}")
+
+
+def units(rows: list[ModuleRow], arch: str | None = None) -> list[DeriveUnit]:
+    """Expand every row into the invocations to record.
+
+    Options are swept ONE AT A TIME against the defaults, not as a cross product: each option
+    selects among its own kernels, so pinning two at once records nothing the two single pins do
+    not, and the cross product is what made the unit count explode.
+    """
+    from miniworld_engine import build as build_matrix
+    from miniworld_engine.autotune.builder import switch_applies
+
+    sm = "sm_" + normalise_arch(arch).removeprefix("sm") if arch else None
+
+    def applies(option, mode: str, dtype: str) -> bool:
+        """A switch selects among kernels on ONE side of the pass.
+
+        ``ln_bwd_path`` pinned during an eval unit changes nothing and records exactly what the
+        unpinned unit already did -- a duplicate that costs a unit and covers no bucket. SWITCHES
+        already says which modes each switch reaches, so the gate reads it rather than restating
+        it here.
+        """
+        if option is None:
+            return True
+        return switch_applies(option[0], mode, dtype)
+
+    out = []
+    for row in rows:
+        for length, impl, dtype, mode in itertools.product(
+                row.lengths, row.impls, row.dtypes, row.modes):
+            if sm and not build_matrix.allows(sm, row.module, impl, dtype):
+                continue
+            computes = row.computes or ("",)
+            for compute in computes:
+                for option in (None, *row.options):
+                    from miniworld_engine.autotune import policy
+                    if not policy.allows(row.stream, length, mode, impl, option, row.impls):
+                        continue
+                    if not applies(option, mode, dtype):
+                        continue
+                    if (sm and option and option[0] == "trimul_impl"
+                            and not build_matrix.allows(sm, "triangle_multiplication", option[1], dtype)):
+                        continue
+                    out.append(DeriveUnit(
+                        module=row.module, stream=row.stream, length=length,
+                        dims=tuple(row.dims.items()), impl=impl, dtype=dtype,
+                        compute=compute, mode=mode, option=option,
+                        augmentation=row.augmentation(mode)))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# recording
+# --------------------------------------------------------------------------- #
+def install_module_apply() -> None:
+    """``nn.Module._apply`` reassigns parameters instead of swapping them.
+
+    torch takes the ``swap_tensors`` path unconditionally for a ``FakeTensor`` parameter
+    (``isinstance(param, FakeTensor)`` in ``Module._apply``), and ``swap_tensors`` refuses a tensor
+    that has a weakref on it -- which every fake tensor does, because the fake-tensor converter
+    holds one. So ``.cuda()`` on a module built under ``FakeTensorMode`` raises "Couldn't swap
+    LayerNorm.weight" and no case can be constructed at all. Neither
+    ``set_swap_module_params_on_conversion`` nor ``set_overwrite_module_params_on_conversion``
+    turns the branch off; the isinstance check is not gated on them.
+    """
+    from torch import nn
+
+    def _apply(self, fn, recurse=True):
+        if recurse:
+            for mod in self.children():
+                mod._apply(fn)
+        for key, param in self._parameters.items():
+            if param is None:
+                continue
+            with torch.no_grad():
+                applied = fn(param)
+            self._parameters[key] = nn.Parameter(applied, requires_grad=param.requires_grad)
+        for key, buf in self._buffers.items():
+            if buf is not None:
+                self._buffers[key] = fn(buf)
+        return self
+
+    nn.Module._apply = _apply
+
+
+def _arg_names(kernel) -> list[str]:
+    """Triton moved ``arg_names`` between the wrapper and the wrapped function across versions."""
+    for obj in (kernel, getattr(kernel, "fn", None), getattr(kernel, "base_fn", None)):
+        names = getattr(obj, "arg_names", None)
+        if names:
+            return list(names)
+    return []
+
+
+def install_recorder(sink: list) -> None:
+    """Every Triton launch appends ``(op, dtype, bucket)`` to ``sink`` and returns without running.
+
+    Recorded at the autotuner rather than at each kernel: ``bucket_of_autotuner`` reads the
+    autotuner's own ``key=[...]``, which is the same list Triton re-tunes on, so the bucket
+    recorded here is by construction the bucket the cache will be asked for. A kernel with no
+    autotuner has no cache entry to build, so it is recorded by name only.
+    """
+    import triton.runtime.autotuner as autotuner_mod
+    import triton.runtime.jit as jit_mod
+
+    from miniworld_engine.autotune.cache import bucket_of_autotuner, dtype_of_args
+    from miniworld_engine.autotune.configs import op_of
+
+    def tuned_run(self, *args, **kwargs):
+        _note_kernel(self)
+        nargs = dict(zip(_arg_names(self), args, strict=False))
+        nargs.update(kwargs)
+        op = op_of(getattr(self, "configs", None) or [])
+        if op is None:
+            sink.append((f"<untracked:{getattr(self.base_fn, '__name__', '?')}>", "", ""))
+            return
+        try:
+            bucket = bucket_of_autotuner(self, nargs, None)
+        except Exception as exc:                       # a key the fake args cannot answer
+            bucket = f"<unresolved:{type(exc).__name__}>"
+        sink.append((op, dtype_of_args(nargs), bucket))
+        # A launcher may use values recorded by its grid callback after the
+        # launch (e.g. attention's actual split count for dQ reduction). Real
+        # Triton evaluates that callback with the selected config. Derivation
+        # needs the same host-side effect, without compiling or timing a kernel.
+        # Use one declared config; this does not select a runtime winner.
+        grid = kwargs.get("grid")
+        if callable(grid):
+            meta = dict(nargs)
+            meta.update(self.configs[0].all_kwargs())
+            grid(meta)
+        return
+
+    def plain_run(self, *args, **kwargs):
+        _note_kernel(self)
+        # No autotuner => no config grid => nothing for the cache to hold. Recorded so the report
+        # can say the launch happened, never written to registry_kernel.csv.
+        sink.append((f"<unautotuned:{self.fn.__name__}>", "", ""))
+        return
+
+    from miniworld_engine.autotune import native
+    def native_choice(op, candidates, *, dtype, bucket, **kwargs):
+        if not candidates:
+            raise ValueError(f"{op}: no declared native schedule")
+        sink.append((op, dtype.removeprefix("torch."), bucket))
+        return dict(candidates[0])
+    # Monkeypatch: a module-level def is its own literal type to ty, so any replacement is refused.
+    native.choose_config = native_choice  # ty: ignore[invalid-assignment]
+    autotuner_mod.Autotuner.run = tuned_run
+    if hasattr(autotuner_mod, "Heuristics"):
+        autotuner_mod.Heuristics.run = tuned_run
+    jit_mod.JITFunction.run = plain_run
+
+
+@contextlib.contextmanager
+def _pin(option: tuple[str, str] | None):
+    """Apply one option for the duration of a unit, then put the settings back."""
+    from miniworld_engine import settings
+    from miniworld_engine.autotune.builder import SWITCH_SETTINGS
+
+    if option is None:
+        yield 0.0
+        return
+    name, raw = option
+    if name == "p_drop":
+        yield float(raw)
+        return
+    if name not in SWITCH_SETTINGS:          # a torch-level switch (``builder.torch_switch``: the fp32 matmul precision)
+        from miniworld_engine.autotune.builder import torch_switch
+
+        with torch_switch(name, raw):
+            yield 0.0
+        return
+    field, parse = SWITCH_SETTINGS[name]
+    before = getattr(settings.current(), field)
+    settings.configure(**{field: parse(raw)})
+    try:
+        yield 0.0
+    finally:
+        settings.configure(**{field: before})
+
+
+# --------------------------------------------------------------------------- #
+# what a unit depends on: the files that ran, the modules it imported, the data it opened
+# --------------------------------------------------------------------------- #
+_PKG = Path(__file__).resolve().parents[1]
+_STATE: dict = {"active": None, "installed": False}
+
+
+class UnitTrace:
+    """Evidence of one recorded unit. ``code``: files whose code ran (``sys.monitoring``, every thread -- the autograd engine's
+    backward threads included, which ``sys.setprofile`` cannot see); ``modules``: dotted names its import statements named (executed
+    lazy imports, ``importlib.import_module`` string dispatch); ``opened``: package files it opened (CSV / JSON data)."""
+
+    def __init__(self) -> None:
+        self.code: set[str] = set()
+        self.modules: set[str] = set()
+        self.opened: set[str] = set()
+
+    def package_files(self) -> tuple[set[str], set[str]]:
+        prefix = str(_PKG) + os.sep
+
+        def rel(names):
+            out = set()
+            for name in names:
+                path = os.path.abspath(name)
+                if path.startswith(prefix) and not path.endswith((".pyc", ".pyo")):
+                    out.add(Path(path).relative_to(_PKG).as_posix())
+            return out
+        return rel(self.code), rel(self.opened)
+
+
+def _install_trace() -> None:
+    import builtins
+    import importlib
+    import importlib.util
+    import sys
+
+    if _STATE["installed"]:
+        return
+    if sys.version_info < (3, 12):
+        raise RuntimeError("dev derive records which files each unit runs with sys.monitoring (Python >= 3.12): the older "
+                           "sys.setprofile cannot see the autograd backward threads, so the evidence would under-approximate")
+    mon = sys.monitoring
+    tool = 3
+    mon.use_tool_id(tool, "miniworld-derive")
+
+    def on_start(code, offset):
+        trace = _STATE["active"]
+        if trace is not None:
+            trace.code.add(code.co_filename)
+        return mon.DISABLE                                   # one event per code object per unit (restart_events re-arms them)
+
+    for event in (mon.events.PY_START, mon.events.PY_RESUME):
+        mon.register_callback(tool, event, on_start)
+    mon.set_events(tool, mon.events.PY_START | mon.events.PY_RESUME)
+
+    def audit(event, args):
+        trace = _STATE["active"]
+        if trace is not None and event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
+            trace.opened.add(os.fsdecode(args[0]))
+
+    sys.addaudithook(audit)
+
+    real_import = builtins.__import__
+
+    def traced_import(name, globals=None, locals=None, fromlist=(), level=0):
+        trace = _STATE["active"]
+        if trace is not None:
+            if level and globals:
+                package = globals.get("__package__") or globals.get("__name__", "").rpartition(".")[0]
+                parts = package.split(".")
+                base = ".".join(parts[: len(parts) - (level - 1)]) if level > 1 else package
+                name_abs = f"{base}.{name}" if name else base
+            else:
+                name_abs = name
+            trace.modules.add(name_abs)
+            trace.modules.update(f"{name_abs}.{item}" for item in (fromlist or ()) if isinstance(item, str))
+        return real_import(name, globals, locals, fromlist, level)
+
+    builtins.__import__ = traced_import
+    real_import_module = importlib.import_module
+
+    def traced_import_module(name, package=None):
+        trace = _STATE["active"]
+        if trace is not None:
+            trace.modules.add(importlib.util.resolve_name(name, package) if name.startswith(".") else name)
+        return real_import_module(name, package)
+
+    importlib.import_module = traced_import_module
+    _STATE["installed"] = True
+
+
+@contextlib.contextmanager
+def trace_unit():
+    """Collect a :class:`UnitTrace` for everything that runs inside the block."""
+    import sys
+
+    _install_trace()
+    sys.monitoring.restart_events()
+    trace = UnitTrace()
+    _STATE["active"] = trace
+    try:
+        yield trace
+    finally:
+        _STATE["active"] = None
+
+
+def _note_kernel(obj) -> None:
+    """A Triton launch the recorder swallows never runs the kernel's Python: name its file as executed."""
+    trace = _STATE["active"]
+    if trace is None:
+        return
+    for attr in (obj, getattr(obj, "fn", None), getattr(obj, "base_fn", None)):
+        code = getattr(getattr(attr, "__code__", None), "co_filename", None)
+        if code:
+            trace.code.add(code)
+
+
+def record(unit: DeriveUnit, cases: dict) -> tuple[list, str | None]:
+    """Run one declared unit and return launches plus any error that invalidates its evidence."""
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    case = cases[unit.module]
+    dims = dict(unit.dims)
+    from miniworld_engine.autotune.module_registry import torch_dtypes
+
+    dtype, act = torch_dtypes(unit.dtype)          # parameters, activations (``master``: fp32 parameters, bf16 activations)
+    compute = getattr(torch, unit.compute) if unit.compute else None
+    sink: list = []
+    install_recorder(sink)
+    # A ShapeEnv, so a data-dependent shape becomes an unbacked symint instead of an exception.
+    # Without one, `aten.nonzero` raises DynamicOutputShapeException and takes the WHOLE module
+    # down: SWA packs its varlen batch with a nonzero over the valid mask, so every swa unit died
+    # there and `rmsnorm_bwd_triton`, which SWA's QK-norm backward launches, looked like a kernel
+    # no module reaches. It was two lines from being reached.
+    with _pin(unit.option) as p_drop, FakeTensorMode(allow_non_fake_inputs=True,
+                                                    shape_env=ShapeEnv()):
+        try:
+            module = case.factory(dims, p_drop, unit.impl, dtype)
+            module.train(unit.mode == "train")
+            args = case.inputs(unit.augmentation, unit.length, dims, act, unit.stream)
+            kw = {"compute_dtype": compute} if compute is not None else {}
+            if unit.mode == "train":
+                args = tuple(
+                    a.detach().clone().requires_grad_(True)
+                    if torch.is_tensor(a) and a.is_floating_point() else a
+                    for a in args)
+                out = module(*args, **kw)
+                out = out[0] if isinstance(out, tuple) else out
+                out.float().sum().backward()
+            else:
+                with torch.no_grad():
+                    module(*args, **kw)
+        except Exception as exc:
+            return sink, f"{type(exc).__name__}: {exc}"
+    return sink, None
+
+
+def require_environment() -> None:
+    """Fail loudly on the two things that make the derivation silently record nothing."""
+    if os.environ.get("MINIWORLD_COMPILE_WRAP") != "disable":
+        msg = ("derive needs MINIWORLD_COMPILE_WRAP=disable. With the default 'custom_op' every "
+               "kernel entry point is a torch.library op with a fake implementation, so under "
+               "FakeTensorMode torch dispatches to the fake one: shapes come out right, the "
+               "launcher is never entered, and every unit records zero kernels.")
+        raise RuntimeError(msg)
+    if not torch.cuda.is_available():
+        msg = ("derive needs a CUDA device to exist (it runs no kernel and allocates no memory). "
+               "Dispatch reads the compute capability, .cuda() initialises a context, and the "
+               "autograd engine will not start a device thread without one.")
+        raise RuntimeError(msg)
+
+
+def install_no_calibration() -> None:
+    """Stop the runtime dispatch calibrators from persisting anything during a derivation.
+
+    ``layernorm/dispatch.py`` and ``bias_only_attention/dispatch.py`` time both paths on first use
+    and write the winner to ``autotune/data/<name>_dispatch/<gpu>.json``, in-repo. Under a
+    derivation both of those inputs are wrong: the launches are stubbed, so every "timing" is the
+    cost of returning None, and ``target_arch`` moves the file name -- a first run wrote
+    ``NVIDIA_RTX_A6000_sm860``, ``_sm900``, ``_sm1000`` and ``_sm100`` and, worse, overwrote the
+    REAL ``_sm86`` files with times measured off stubs.
+    """
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.bias_only_attention import dispatch as bias_dispatch
+    from miniworld_engine.kernels.layernorm import dispatch as ln_dispatch
+
+    # Fake launches cannot provide timing evidence, including in-memory choices.
+    # Explicit backend pins still exercise each declared alternative.
+    settings.configure(layernorm_dispatch="off", biasonly_dispatch="off")
+
+    # Both names: layernorm's persister is `store`, bias_only's is `_store`, and patching only
+    # the public one let the bias_only calibrator keep writing -- an `_sm100` file appeared on the
+    # very next run after this guard was added.
+    for mod in (ln_dispatch, bias_dispatch):
+        for name in ("store", "_store"):
+            if hasattr(mod, name):
+                setattr(mod, name, lambda *a, **k: None)
+
+
+#: Module prefixes whose opaque hand-CUDA launches return their fakes during a derivation (see `install_native_recorders`).
+_FAKED_NATIVE_FAMILIES = tuple(
+    f"miniworld_engine.kernels.{family}"
+    for family in (
+        "layernorm.cuda.general", "layernorm.cuda.pipe", "rmsnorm.cuda", "adaln.cuda", "conditioned_transition.cuda",
+        "dit_variants.cuda", "augmented_attention.cuda", "trimul_inproj.cuda.", "triangle_attention.cuda.h100_triattn",
+        # the H100 Transition launches (fused / wide / generic sm90a) carry fakes; without them the inference path of every
+        # transition and pairformer unit launched on FakeTensors (job 41876: illegal address, then every later unit of the worker)
+        "transition.cuda.",
+        # the SWA atom block: its launches (swa_dit_block_fwd / bwd, the native H100 modulation and casts) carry fakes and record no selector
+        "swa_dit.",
+    )
+) + ("miniworld_engine.kernels.integrations.",
+     # ProteinMPNN's feature op (`mpnn_features_radial_dw_v1`: a torch.compile'd backward-only region behind an opaque fake) launched its
+     # inductor kernel on FakeTensors and failed every MPNN training unit with an illegal address
+     "miniworld_engine.modules.mpnn.")
+
+
+@functools.cache
+def _records_selector(module: str) -> bool:
+    """A module of a faked family whose ops record a native selector (``choose_config``) and answer FakeTensors themselves
+    (``transition.cuda.fused_sm90a``): faking its ops skipped the selector, and ``transition_{fwd,bwd}_residual_sm90_cuda`` fell out of the
+    plan. Its ops run; the others of the family stay faked."""
+    import inspect
+
+    try:
+        return "choose_config(" in inspect.getsource(sys.modules[module])
+    except (KeyError, OSError, TypeError):
+        return False
+
+
+class _FakeGuard:
+    """A loaded extension as the derivation sees it: a call with a FakeTensor argument raises instead of launching.
+
+    A pybind launch on FakeTensors reads a null pointer, and the illegal address is sticky: it failed every later unit of the worker
+    (job 41876: 96 units, most of them innocent). A launch with no fake contract (``kernels/_compile.opaque(fake=...)``) now fails its own
+    unit with the extension and function named, and the worker goes on."""
+
+    def __init__(self, ext, name: str) -> None:
+        self._ext, self._name = ext, name
+
+    def __getattr__(self, attr: str):
+        fn = getattr(self._ext, attr)
+        if not callable(fn):
+            return fn
+
+        def call(*args, **kwargs):
+            from torch._subclasses.fake_tensor import is_fake
+
+            flat = [t for a in (*args, *kwargs.values()) for t in (a if isinstance(a, (list, tuple)) else (a,))]
+            if any(torch.is_tensor(t) and is_fake(t) for t in flat):
+                raise RuntimeError(f"derive: {self._name}.{attr} was called on FakeTensors and has no fake contract "
+                                   "(kernels/_compile.opaque fake=...): not launched")
+            return fn(*args, **kwargs)
+        return call
+
+
+def install_extension_guard() -> None:
+    """Every extension ``_nvcc`` loads from here on is wrapped in :class:`_FakeGuard`."""
+    from miniworld_engine.kernels import _nvcc
+
+    if getattr(_nvcc._load, "_derive_guard", False):
+        return
+    original = _nvcc._load
+
+    def guarded(kind_label, name, kwargs, sources=None, inline=False):
+        ext = original(kind_label, name, kwargs, sources=sources, inline=inline)
+        return _FakeGuard(ext, name) if ext is not None else ext
+    guarded._derive_guard = True
+    _nvcc._load = guarded
+
+
+def install_native_recorders() -> None:
+    """Record native selectors and model outputs without compiling or launching CUDA.
+
+    Keep the Python dispatch intact so the other declared pins still trace the Triton
+    alternatives. Calling a pybind extension on FakeTensors can fail into a different
+    dispatch branch, or wait on a compiler lock, neither of which is valid evidence.
+    """
+    from miniworld_engine.kernels.layernorm import cuda as ln_cuda
+    from miniworld_engine.kernels.transition import cuda as transition_cuda
+
+    # Some pure tensor helpers carry @torch.compile. Their eager bodies are what
+    # the recorder needs; Dynamo would create another, incompatible FakeTensorMode.
+    torch._dynamo.config.disable = True
+
+    def require_fake(x):
+        from torch._subclasses.fake_tensor import is_fake
+        if not is_fake(x):
+            raise RuntimeError("native derivation recorder received a real tensor")
+
+    if torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0):
+        # B200 TriMul (integrations.trimul_b200): its opaque ops run eagerly here, so each
+        # one is replaced by its fake -- same contract as the H100 composites below, no launches.
+        def b200_contract(fake):
+            def run(*args, **kwargs):
+                require_fake(args[0][0])
+                return fake(*args, **kwargs)
+            return run
+
+        from miniworld_engine.kernels.trimul_inproj.cuda import b200_infer
+
+        b200_infer.inference = b200_contract(b200_infer._inference_fake)
+        from miniworld_engine.kernels.trimul_inproj.cuda import b200_train
+
+        b200_train.forward = b200_contract(b200_train._forward_fake)
+        b200_train.backward = b200_contract(b200_train._backward_fake)
+        b200_train.forward_small = b200_contract(b200_train._forward_small_fake)
+        b200_train.backward_small = b200_contract(b200_train._backward_small_fake)
+
+    # Every hand-CUDA launch is an opaque op with a fake (``kernels/_compile.opaque``). With ``compile_wrap=disable`` its body would
+    # run: on a Hopper / Blackwell card the extension loads and launches on FakeTensors (a null pointer: "data is not allocated yet",
+    # then a sticky illegal-address error that fails every later unit), and on another card it builds for nothing. The fake is the
+    # contract this derivation needs (shapes and dtypes; the Triton launches the module makes around it are still recorded).
+    # Only the families listed in ``_FAKED_NATIVE_FAMILIES``: an op whose body records a native selector (``native.choose_config``) or launches
+    # a tuned Triton kernel of its own must run, and the sm90 composites below keep their explicit contracts.
+    from miniworld_engine.kernels import _compile
+
+    def native_fake(fn, args, kwargs) -> bool:
+        from torch._subclasses.fake_tensor import is_fake
+
+        module = getattr(fn, "__module__", "") or ""
+        if not module.startswith(_FAKED_NATIVE_FAMILIES) or _records_selector(module):
+            return False
+        flat = [t for a in (*args, *kwargs.values()) for t in (a if isinstance(a, (list, tuple)) else (a,))]
+        return any(is_fake(t) for t in flat if torch.is_tensor(t))
+
+    _compile.FAKE_WHEN = native_fake
+    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9:
+        # Packaged composites need explicit fake contracts; tunable ones also record selectors.
+        # Keep their module dispatch and saved-tensor/autograd contracts during
+        # derivation, while preventing driver/C++ launches on fake data.
+        import importlib
+        contracts = (
+            ("kernels.integrations.opm_train", (("_forward_op", "_forward_fake"), ("_backward_op", "_backward_fake"),
+                                         ("_inference_op", "_inference_fake"))),
+            ("kernels.integrations.pwa_train", (("_forward_op", "_forward_fake"), ("_backward_op", "_backward_fake"),
+                                         ("_inference_op", "_infer_fake"))),
+            ("kernels.integrations.token_dit", (("_infer", "_fake"),)),
+            ("kernels.trimul_inproj.cuda.h100_training", (("forward", "_forward_fake"), ("backward", "_backward_fake"))),
+            ("kernels.trimul_inproj.cuda.h100_single", (("forward", "_forward_fake"), ("backward", "_backward_fake"))),
+            ("kernels.trimul_inproj.cuda.h100_inference", (("inference", "_inference_fake"),)),
+            ("kernels.trimul_inproj.cuda.h100_d64_b200gate", (("forward", "_forward_fake"), ("backward", "_backward_fake"),
+                                                              ("forward_nograd", "_forward_nograd_fake"))),
+            ("kernels.trimul_inproj.cuda.h100_wide_inference", (("wide_inference", "_wide_inference_fake"),)),
+            ("kernels.trimul_inproj.cuda.h100_uni_wide_inference", (("uni_wide_inference", "_uni_wide_inference_fake"),)),
+            # TriangleAttention's prebuilt extensions (their opaque wrappers run eagerly here).
+            ("kernels.triangle_attention.cuda", (("_dgrad", "_dgrad_fake"),)),
+            ("kernels.triangle_attention.cuda.ln_backward", (("_backward", "_backward_fake"),)),
+            ("kernels.triangle_attention.cuda.gate_backward", (("gate_backward", "_gate_backward_fake"),)),
+        )
+
+        def native_contract(fake, selector=None):
+            def run(*args, **kwargs):
+                first = args[0][0] if isinstance(args[0], list) else args[0]
+                require_fake(first)
+                if selector is not None:
+                    selector(*args, **kwargs)
+                return fake(*args, **kwargs)
+            return run
+
+        for module_name, functions in contracts:
+            module = importlib.import_module("miniworld_engine." + module_name)
+            for entry, fake in functions:
+                selector = getattr(module, "_select_config", None) if module_name.endswith("h100_inference") else None
+                setattr(module, entry, native_contract(getattr(module, fake), selector))
+
+        # The fused / generic weight packs launch an extension on the parameters; their torch-statement forms give the same shapes.
+        from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90, h100_sm90_generic
+
+        h100_sm90._pack_params = h100_sm90._pack_params_torch  # ty: ignore[invalid-assignment]
+        h100_sm90_generic.pack_weights = h100_sm90_generic.pack_weights_torch  # ty: ignore[invalid-assignment]
+
+        # Hand-CUDA wrappers that are plain functions (no opaque op, so no fake of their own): the shapes and dtypes their callers read.
+        from miniworld_engine.kernels.outer_product_mean import cuda as opm_cuda
+        from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+
+        bf, f32 = torch.bfloat16, torch.float32
+
+        def fake_first(fn):
+            def run(first, *args, **kwargs):
+                require_fake(first)
+                return fn(first, *args, **kwargs)
+            return run
+
+        # The Boltz-2 / RoseTTAFold3 / Chai-1 / AF3 DiT stacks (``kernels.dit_variants.interface``): the native inference composes row
+        # kernels, cubins launched through the driver and extensions with no fakes of their own (a cubin launch on FakeTensors was a sticky
+        # illegal address that failed every later unit of its worker). The stack's contract is its output: the shape of ``single``.
+        from miniworld_engine.kernels.dit_variants import interface as dit_variants
+
+        def stack_contract(stack, single, *args, **kwargs):
+            require_fake(single)
+            return single.new_empty(single.shape)
+        dit_variants.inference = stack_contract  # ty: ignore[invalid-assignment]
+        dit_variants.atom_inference = stack_contract  # ty: ignore[invalid-assignment]
+
+        opm_cuda.gather = fake_first(  # ty: ignore[invalid-assignment]
+            lambda prod, groups, k, *a, **kw: prod.new_empty(
+                (prod.shape[0] // groups * (prod.shape[1] // k) ** 2, groups * k * k)))
+        opm_cuda.split_groups = fake_first(  # ty: ignore[invalid-assignment]
+            lambda x, b, s, n, groups, k: x.new_empty((b * groups, s, n * k)))
+        opm_cuda.bias_finish = fake_first(lambda out, *a, **kw: None)  # ty: ignore[invalid-assignment]
+        opm_cuda.chai_proj = fake_first(  # ty: ignore[invalid-assignment]
+            lambda x, mask, gamma, beta, w, eps=1e-5, save=False: (
+                x.new_empty((8, x.shape[0], 8), dtype=bf), x.new_empty((8, x.shape[0], 8), dtype=bf),
+                x.new_empty((x.shape[0], 2) if save else (0,), dtype=f32)))
+        opm_cuda.chai_epilogue = fake_first(  # ty: ignore[invalid-assignment]
+            lambda o, wfold, bias, residual=None, save=False, eps=0.1: (
+                o.new_empty((1, o.shape[1] // 8, o.shape[1] // 8, wfold.shape[0]), dtype=bf),
+                o.new_empty(((o.shape[1] // 8) ** 2, 512) if save else (0,), dtype=bf),
+                o.new_empty(((o.shape[1] // 8) ** 2, 2) if save else (0,), dtype=f32)))
+        opm_cuda.chai_bwd = fake_first(  # ty: ignore[invalid-assignment]
+            lambda dy, y, stats, n: dy.new_empty((8, n * 8, n * 8), dtype=bf))
+        opm_cuda.chai_projbwd = fake_first(  # ty: ignore[invalid-assignment]
+            lambda x, mask, da, db, gamma, beta, stats, wlr: (
+                x.new_empty((x.shape[0], 128), dtype=bf), x.new_empty((x.shape[0], 64), dtype=bf),
+                x.new_empty((x.shape[0], 64), dtype=bf), x.new_empty((x.shape[0] // 64, 128), dtype=f32)))
+        # The dual-head TriangleAttention forward (extension front, attention and projections): the module's pair out.
+        h100_dh.forward = lambda module, pair, mask=None: (  # ty: ignore[invalid-assignment]
+            require_fake(pair), torch.empty_like(pair))[1]
+
+        # TriangleAttention leaf extension calls without a fake of their own. Shapes and dtypes
+        # mirror bias_fusion.cu / dq.cu: BF16 [1,L,L,128] buffers viewed
+        # as (1,4,L,L,32) projection layout, FP32 logsumexp, BF16 bias gradient.
+        from miniworld_engine.kernels.triangle_attention.cuda import (
+            bias_backward as tri_bias,
+        )
+        from miniworld_engine.kernels.triangle_attention.cuda import (
+            dq_backward as tri_dq,
+        )
+
+        def projection_like(q):
+            require_fake(q)
+            L = q.shape[2]
+            return q.new_empty((1, L, L, 128)).view(1, L, L, 4, 32).permute(0, 3, 1, 2, 4)
+
+        # Shape-only fakes replace the leaf extension wrappers (monkeypatch; see ln_cuda below).
+        tri_bias.native_backward = lambda q, k, v, b, m, delta, dy: (  # ty: ignore[invalid-assignment]
+            projection_like(q), projection_like(q), torch.empty_like(b))
+        tri_dq.backward = lambda q, k, v, b, m, delta, dy: projection_like(q)  # ty: ignore[invalid-assignment]
+
+    class TransitionExtension:
+        def transition_b2b_fwd(self, x, rstd, c1, g, beta, wa, wb, ws, residual=True):
+            require_fake(x)
+            return x.new_empty((x.shape[0], ws.shape[0]))
+
+        def transition_expand_gate_fwd(self, x, rstd, c1, g, beta, wa, wb):
+            require_fake(x)
+            return x.new_empty((x.shape[0], wa.shape[0]))
+
+        def transition_expand_gatebwd_wgmma(self, x, rstd, c1, g, beta, wa, wb, grad):
+            require_fake(x)
+            m, k = x.shape
+            nd = wa.shape[0]
+            return x.new_empty((m, nd)), x.new_empty((m, 2 * nd)), x.new_empty((m, k))
+
+    def transition_extension(name: str, width, config):
+        if name not in ("b2b", "expand_gate", "gatebwd"):
+            raise ValueError(f"no native derivation contract for {name}")
+        return TransitionExtension()
+
+    # Fake extension supplies shape functions instead of a pybind module.
+    transition_cuda._ext = transition_extension  # ty: ignore[invalid-assignment]
+
+    # FlashAttention is an external kernel, with no MiniWorld autotune grid.
+    # Retain its Q/K/V gradient connections so the surrounding RMSNorm/rope
+    # backwards are recorded, without importing/launching architecture-specific FA.
+    from miniworld_engine.modules.swa_atom_attention import module as swa
+
+    class FlashShape(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, q, k, v):
+            require_fake(q)
+            if q.shape != k.shape or q.shape != v.shape:
+                raise ValueError("SWA flash shape recorder requires equal Q/K/V shapes")
+            return torch.empty_like(q)
+
+        @staticmethod
+        def backward(ctx, grad):
+            return torch.empty_like(grad), torch.empty_like(grad), torch.empty_like(grad)
+
+    def flash_shape(q, k, v, *args, **kwargs):
+        return FlashShape.apply(q, k, v)
+
+    # The generic fake autograd function intentionally replaces the native signature.
+    swa._flash_window_core = flash_shape  # ty: ignore[invalid-assignment]
+    # Shape-only external backend contracts must be reachable when deriving a
+    # different architecture without its optional FlashAttention package.
+    # The core above accepts FakeTensors only; production probes are untouched.
+    swa._FA2_SPEC = swa._FA4_SPEC = True
+
+    def ln_backward(dy, x, weight, mean, rstd, row_scale=None):
+        from torch._subclasses.fake_tensor import is_fake
+        if not is_fake(x):
+            raise RuntimeError("native derivation recorder received a real tensor")
+        if dy.dtype != x.dtype or weight.dtype != x.dtype:
+            raise RuntimeError("CUDA LayerNorm requires matching input/weight dtypes")
+        if not 1 <= x.shape[-1] <= 1024:
+            raise RuntimeError("CUDA LayerNorm supports 1 <= N <= 1024")
+        return (torch.empty_like(dy.contiguous()), torch.empty_like(weight.contiguous()),
+                torch.empty_like(weight.contiguous()))
+
+    # Shape-only outputs replace a native extension wrapper during derivation.
+    ln_cuda.layer_norm_bwd_cuda = ln_backward  # ty: ignore[invalid-assignment]
+
+
+def target_arch(sm: str) -> None:
+    """Derive FOR ``sm`` instead of for the card this runs on.
+
+    Dispatch reads the compute capability at almost every branch that picks between kernels
+    (``is_sm90``, ``is_sm86``, ``get_device_capability(x.device)[0] == 10``), so the kernel set a
+    module row yields is a function of the arch. Nothing here runs a kernel, so the card only has
+    to EXIST -- which means one A6000 can derive the sm_90 and sm_100 lists too, and a kernel that
+    appears on no arch at all is a kernel nothing can reach rather than one this card missed.
+
+    Patching ``torch.cuda.get_device_capability`` rather than ``dispatch.capability``: 14 call
+    sites across the kernel layer read the torch function directly, and half a patch would give a
+    module the target arch at the module layer and the real one inside the launcher.
+    """
+    digits = sm.removeprefix("sm_").removeprefix("sm")
+    if not digits.isdigit() or len(digits) < 2:
+        msg = f"arch {sm!r} is not an sm tag; expected sm86 / sm_86 / sm90 / sm100"
+        raise ValueError(msg)
+    # The LAST digit is the minor: sm_86 is (8, 6), sm_90 is (9, 0), sm_100 is (10, 0). Splitting
+    # on a "." instead read "86" as major 86, which is >= 10 and therefore sm100 to every
+    # `is_sm100` gate -- so all three arch runs derived the same list and the mistake looked like
+    # "the arch does not matter".
+    cap = (int(digits[:-1]), int(digits[-1]))
+    def capability(device: torch.device | str | int | None = None) -> tuple[int, int]:
+        return cap
+
+    from unittest.mock import patch
+
+    patch.object(torch.cuda, "get_device_capability", capability).start()
+
+
+# --------------------------------------------------------------------------- #
+# the whole traversal, and its output file
+# --------------------------------------------------------------------------- #
+KERNEL_HEADER = ("kernel", "arch", "dtype", "bucket", "modules", "streams", "lengths", "units", "shapes")
+
+
+def _unit_record(launches: list, files: list[str]) -> dict:
+    """What is kept of one unit: its keys (sorted, as ``units.json`` has always held them), how many launches made each, its files."""
+    counts = collections.Counter(f"{op}|{dt}|{b}" for op, dt, b in launches)
+    keys = sorted(counts)
+    return {"keys": keys, "counts": [counts[k] for k in keys], "files": files}
+
+
+def _launches_of(record_: dict) -> list:
+    out = []
+    for key, n in zip(record_["keys"], record_["counts"], strict=True):
+        op, dtype, bucket = key.split("|", 2)
+        out.extend([(op, dtype, bucket)] * n)
+    return out
+
+
+def _accumulate(entries: dict, unit: DeriveUnit, launches: list) -> None:
+    for op, dtype, bucket in launches:
+        ev = entries.setdefault((op, dtype, bucket), {
+            "modules": set(), "streams": set(), "lengths": set(), "units": 0})
+        ev["modules"].add(unit.module)
+        ev["streams"].add(unit.stream)
+        ev["lengths"].add(unit.length)
+        ev.setdefault("shapes", {}).setdefault(unit.stream, set()).add(unit.length)
+        ev["units"] += 1
+
+
+def _collect(rows, on_unit, arch, reuse) -> tuple[dict, list, dict]:
+    """Run (or take from ``reuse``) every unit of ``rows``: ``(entries, errors, records)``. ``reuse`` maps a unit label to the
+    record of a prior derivation whose files still match (``plan.reusable_units``); those units are not run."""
+    from miniworld_engine.autotune import identity
+    from miniworld_engine.autotune.builder import cases
+
+    rows = module_rows() if rows is None else rows
+    work = units(rows, arch=arch or sm_tag())
+    todo = [u for u in work if u.label not in reuse]
+    case_by_name: dict = {}
+    before = identity.snapshot() if todo else {}
+    if todo:
+        require_environment()
+        if arch:
+            target_arch(arch)
+        # The derivation asks which kernels the modules launch, not whether this card is allowed to launch them: route as if the
+        # card were recorded (a patched arch above carries a real card's name, which no manifest knows).
+        from miniworld_engine.modules import dispatch
+
+        dispatch.assume_every_card_recorded()
+        install_no_calibration()
+        install_module_apply()
+        install_native_recorders()
+        install_extension_guard()
+        case_by_name = {c.name: c for c in cases()}
+    entries: dict = {}
+    skipped: list = []
+    records: dict = {}
+    for i, unit in enumerate(work, 1):
+        prior = reuse.get(unit.label)
+        if prior is not None:
+            launches, error, files = _launches_of(prior), None, list(prior["files"])
+        else:
+            if unit.module not in case_by_name:
+                skipped.append((unit, f"no case builds {unit.module!r}"))
+                continue
+            with trace_unit() as seen:
+                launches, error = record(unit, case_by_name)
+            code, opened = seen.package_files()
+            files = identity.unit_files(code, seen.modules, opened, [op for op, _, _ in launches if not op.startswith("<")])
+            tokens = identity.tokens(files)
+            moved = identity.changed_since(before, files)
+            if moved:
+                raise ValueError(f"sources changed while {unit.label!r} was derived ({moved[0]}); repeat the derivation")
+        unresolved = [x for x in launches if x[0].startswith("<untracked:")
+                      or str(x[2]).startswith("<")]
+        if unresolved and not error:
+            error = f"unresolved cache launches: {unresolved}"
+        if error:
+            skipped.append((unit, error))
+            if on_unit is not None:
+                on_unit(i, len(work), unit, launches, error)
+            continue
+        _accumulate(entries, unit, launches)
+        records[unit.label] = prior if prior is not None else {**_unit_record(launches, files), "tokens": tokens}
+        if on_unit is not None:
+            on_unit(i, len(work), unit, launches, error)
+    return entries, skipped, records
+
+
+def evidence_document(arch: str, records: dict, skipped: list) -> dict:
+    """The ``units.json`` body (schema 2): keys per unit, launch counts, and the file table with one digest per file."""
+    from miniworld_engine.autotune import identity, plan
+
+    records = dict(sorted(records.items()))                 # a parallel run files its units in completion order: publish them in label order
+    for label, r in records.items():
+        moved = sorted(p for p, token in r.get("tokens", {}).items() if identity.file_token(p) != token)
+        if moved:
+            raise ValueError(f"sources changed while {label!r} was derived ({moved[0]}); repeat the derivation")
+    return {"schema": plan.SCHEMA, "arch": normalise_arch(arch), "complete": not skipped,
+            "units": {label: r["keys"] for label, r in records.items()},
+            "launch_counts": {label: r["counts"] for label, r in records.items()},
+            **plan.pack_files({label: r["files"] for label, r in records.items()}),
+            "errors": [{"unit": u.label, "reason": e} for u, e in skipped]}
+
+
+def derive_all(rows: list[ModuleRow] | None = None, *, on_unit=None,
+               arch: str | None = None, per_unit: Path | None = None,
+               workers: int = 1, reuse: dict | None = None) -> tuple[dict, list]:
+    """Run every unit and collect ``(kernel, dtype, bucket) -> evidence``.
+
+    Returns ``(entries, errors)``. Any failed declared invocation prevents publication of a
+    complete registry. GPU support exclusions belong in the shared unit enumeration.
+
+    ``reuse`` (``plan.reusable_units`` of a prior derivation): the units whose recorded files all still match are taken from it,
+    not run. The entries come out the same either way: they are rebuilt from each unit's keys, launch counts and fields.
+    """
+    reuse = reuse or {}
+    if workers > 1:
+        return _parallel_derive(rows, arch, per_unit, workers, reuse)
+    entries, skipped, records = _collect(rows, on_unit, arch, reuse)
+    if per_unit is not None:
+        from miniworld_engine.utils.atomic import write_json
+        write_json(per_unit, evidence_document(arch or sm_tag(), records, skipped))
+    return entries, skipped
+
+
+def _derive_chunk(args):
+    torch.set_num_threads(1)
+    rows, arch, reuse = args
+    return _collect(rows, None, arch, reuse)
+
+
+def _parallel_derive(rows, arch, per_unit, workers, reuse):
+    """Separate processes isolate monkeypatches and share only the CUDA context requirement."""
+    import multiprocessing
+
+    from miniworld_engine.utils.atomic import write_json
+
+    rows = module_rows() if rows is None else rows
+    arch_tag = arch or sm_tag()
+    by_row = {id(r): units([r], arch=arch_tag) for r in rows}
+    todo = {id(r): [u for u in by_row[id(r)] if u.label not in reuse] for r in rows}
+    if not any(todo.values()):
+        entries, errors, records = _collect(rows, None, arch, reuse)       # nothing to run: no worker, no CUDA context
+    else:
+        require_environment()
+        # Balance by invocation still to run, not CSV row count.
+        chunks = [[] for _ in range(min(workers, len([r for r in rows if todo[id(r)]]) or 1))]
+        sizes = [0] * len(chunks)
+        for row in sorted((r for r in rows if todo[id(r)] or by_row[id(r)]), key=lambda r: len(todo[id(r)]), reverse=True):
+            i = min(range(len(chunks)), key=lambda n: sizes[n])
+            chunks[i].append(row)
+            sizes[i] += len(todo[id(row)])
+        entries, errors, records = {}, [], {}
+        tasks = []
+        for chunk in chunks:
+            labels = {u.label for r in chunk for u in by_row[id(r)]}
+            tasks.append((chunk, arch, {k: v for k, v in reuse.items() if k in labels}))
+        with multiprocessing.get_context("spawn").Pool(len(chunks)) as pool:
+            for found, failed, recorded in pool.imap_unordered(_derive_chunk, tasks):
+                errors.extend(failed)
+                if set(recorded) & set(records):
+                    raise ValueError("duplicate derivation unit identities")
+                records.update(recorded)
+                for key, ev in found.items():
+                    if key not in entries:
+                        entries[key] = ev
+                        continue
+                    target = entries[key]
+                    for name in ("modules", "streams", "lengths"):
+                        target[name].update(ev[name])
+                    target["units"] += ev["units"]
+                    for stream, lengths in ev.get("shapes", {}).items():
+                        target.setdefault("shapes", {}).setdefault(stream, set()).update(lengths)
+                print(f"derive: {len(records)} invocations recorded, {len(errors)} errors", flush=True)
+    if per_unit is not None:
+        write_json(per_unit, evidence_document(arch_tag, records, errors))
+    return entries, errors
+
+
+def sm_tag() -> str:
+    """The arch this derivation is FOR. Part of every row: dispatch reads it, so the kernel set
+    a module row yields is not the same on sm_86 and sm_90."""
+    from miniworld_engine import build as build_matrix
+
+    if not torch.cuda.is_available():
+        return "unknown"
+    return build_matrix.sm_tag(torch.cuda.get_device_capability())
+
+
+def write_kernel_registry(entries: dict, arch: str, path: Path = REGISTRY_KERNEL) -> int:
+    """Write ``registry_kernel.csv``: one row per ``(kernel, arch, dtype, bucket)`` to build.
+
+    Rows carry the evidence that produced them -- which module rows reached this bucket, on which
+    stream, at which lengths -- so a bucket that looks wrong can be traced back to the line of
+    ``registry_module.csv`` that asked for it without re-running anything.
+    """
+    import json
+    rows = []
+    for (op, dtype, bucket), ev in sorted(entries.items()):
+        if str(bucket).startswith("<"):
+            raise ValueError(f"unresolved cache key for {op}: {bucket}")
+        if op.startswith("<"):        # no autotuner
+            continue
+        rows.append({
+            "kernel": op, "arch": arch, "dtype": dtype, "bucket": bucket,
+            "modules": "|".join(sorted(ev["modules"])),
+            "streams": "|".join(sorted(ev["streams"])),
+            "lengths": "|".join(str(n) for n in sorted(ev["lengths"])),
+            "units": ev["units"],
+            "shapes": json.dumps({s: sorted(lengths) for s, lengths in
+                                  sorted(ev.get("shapes", {}).items())}),
+        })
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", newline="", dir=path.parent,
+                                     prefix=path.name, suffix=".tmp", delete=False) as fh:
+        temporary = Path(fh.name)
+        try:
+            w = csv.DictWriter(fh, fieldnames=list(KERNEL_HEADER), lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return len(rows)
+
+
+def normalise_arch(sm: str) -> str:
+    """``sm_86`` and ``sm86`` are the same architecture spelled by two callers.
+
+    ``build_matrix.sm_tag`` underscores ("sm_86" names a policy file in gpu_to_kernels/) and
+    ``cache.gpu_key`` does not ("NVIDIA RTX A6000 (sm86)" names a device). registry.csv's `arch`
+    column and registry_kernel.csv both use the bare form. Passing the underscored one through
+    made `uncovered_kernels` raise -- and would have made `kernel_rows` return NOTHING, which
+    reads as "no module reaches any kernel" and would have put all 61 into the driver sweep.
+    """
+    return sm.replace("_", "")
+
+
+def registry_path(arch: str) -> Path:
+    """Prefer the plan for this exact source revision; retain the shipped-plan fallback."""
+    from miniworld_engine.autotune import plan
+    for path in plan.registry_candidates(arch):
+        if plan.is_verified(arch, path):
+            return path
+    return REGISTRY_KERNEL
+
+
+def kernel_rows(arch: str, path: Path | None = None) -> list[dict]:
+    """The derived work list for one arch. Empty is an error, not an answer."""
+    want = normalise_arch(arch)
+    path = path if path is not None else registry_path(arch)
+    with path.open(newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    mine = [r for r in rows if normalise_arch(r["arch"]) == want]
+    if not mine:
+        have = sorted({r["arch"] for r in rows})
+        msg = (f"registry_kernel.csv has no rows for arch {arch!r} (it holds {have}). "
+               f"Run `miniworld-engine dev derive` on that card, or with --arch {want}.")
+        raise KeyError(msg)
+    return mine
+
+
+def coverage(arch: str, gpu_key_name: str, data_dir: Path | None = None) -> dict:
+    """Compare a built cache against ``registry_kernel.csv`` -- offline, on any machine.
+
+    This is what ``dev audit --replay`` was for, without the card and the half hour. Replay drove
+    the modules on a GPU and reported the keys the cache could not answer; the derivation drove
+    the SAME dispatch on fake tensors and wrote down every key that will be asked for, so the
+    comparison is now two file reads. It is also strictly better than replay was: replay could
+    only report what it happened to reach in one run, and its misses had to be re-classified by
+    hand every time (31 of 146 turned out to be aborted cases that asked for nothing).
+
+    ``missing`` names required keys without a usable current entry. ``extra`` is outside this
+    declared module plan; driver or alternate-shape measurements remain preserved.
+    """
+    import json
+
+    from miniworld_engine.autotune import cache, cache_status
+    from miniworld_engine.autotune.configs import configs_for
+
+    root = data_dir or (Path(__file__).resolve().parents[1] / "autotune" / "data")
+    want = {(r["kernel"], f'{r["dtype"]}|{r["bucket"]}') for r in kernel_rows(arch)}
+    have = set()
+    usable = set()
+    invalid = {}
+    wanted_ops = {op for op, _key in want}
+    for op_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        f = op_dir / f"{gpu_key_name}.json"
+        if not f.exists():
+            continue
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            invalid[op_dir.name] = "unreadable cache"
+            continue
+        for key in data.get("entries", {}):
+            have.add((op_dir.name, key))
+        if op_dir.name not in wanted_ops:
+            continue
+        try:
+            from miniworld_engine.autotune import native
+            if op_dir.name in native.BUILD_OPS:
+                reason = cache.measurement_mismatch(op_dir.name, data, native.op_identity(op_dir.name))
+                if reason:
+                    invalid[op_dir.name] = reason
+                    continue
+                for op, key in want:
+                    if op != op_dir.name:
+                        continue
+                    _, bucket = key.split("|", 1)
+                    grid = native.candidates_for(op, bucket)
+                    live = {tuple(sorted(c.items())) for c in grid}
+                    ranked = cache.runtime_candidates(data, key)
+                    if ranked and any(tuple(sorted(c.get("kwargs", {}).items())) in live for c in ranked):
+                        usable.add((op, key))
+                continue
+            configs = configs_for(op_dir.name)
+            identity = cache_status._current_op_identity(op_dir.name)
+            reason = ("cannot resolve kernel identity" if identity is None else
+                      cache.measurement_mismatch(op_dir.name, data, identity))
+            if not reason and data.get("config_space_hash") != cache.config_space_hash(configs):
+                reason = "config grid changed"
+            if reason:
+                invalid[op_dir.name] = reason
+                continue
+            live = {cache._sig(c) for c in configs}
+            implementation = cache_status._current_implementation_identity(op_dir.name)
+            keys = set(data.get("entries", {})) | set(data.get("measurements", {}))
+            for key in keys:
+                ranked = cache.runtime_candidates(data, key, implementation)
+                if isinstance(ranked, list) and any(
+                        isinstance(c, dict) and "kwargs" in c
+                        and cache._sig_from_dict(c) in live for c in ranked):
+                    usable.add((op_dir.name, key))
+        except (KeyError, TypeError, ValueError) as exc:
+            invalid[op_dir.name] = f"invalid cache: {exc}"
+    return {
+        "arch": arch, "gpu": gpu_key_name,
+        "want": len(want), "have": len(have),
+        "missing": sorted(want - usable), "extra": sorted(have - want),
+        "usable": len(want & usable), "invalid": invalid,
+    }
+
+
+#: sm tag -> the arch tags whose kernels this card can also run. A kernel declared sm80 runs on
+#: sm86; one declared sm90 does not.
+_ARCH_ORDER = ("sm80", "sm86", "sm90", "sm100")
+
+
+def uncovered_kernels(arch: str, registry: Path | None = None) -> set[str]:
+    """Buildable kernels on ``arch`` that NO module row reaches.
+
+    These are the alternative implementations kept for A/B -- the atomic attention backward, the
+    m-major layernorm backward, the recompute variants -- plus anything a module stopped calling.
+    They register with the cache all the same, so an unbuilt one is a full-grid stall the day
+    something starts reaching it, and no module sweep can ever produce them.
+
+    They each have a DRIVER, which is the only way to reach them, so `build all` runs the module
+    sweep and then the driver sweep narrowed to exactly this set. Narrowed to it, and not run
+    whole: the driver sweep's own width ladders are hand-written, and running them for a kernel
+    the modules already cover is how the build ended up with two disagreeing statements of the
+    same shapes in the first place.
+    """
+    reg = registry or (Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv")
+    from miniworld_engine.autotune.native import build_ops_for_arch
+    native = build_ops_for_arch(normalise_arch(arch))
+    ceiling = _ARCH_ORDER.index(normalise_arch(arch))
+    with reg.open(newline="") as fh:
+        buildable = {
+            r["kernel"] for r in csv.DictReader(fh)
+            if (r["backend"] == "triton" or r["kernel"] in native)
+            and (r.get("driver") or "").strip()
+            and ((r.get("developed") or "").strip() == "yes" or r["kernel"] in native)
+            and _ARCH_ORDER.index(normalise_arch((r.get("arch") or "sm80").strip()
+                                                 or "sm80")) <= ceiling
+        }
+    reached = {r["kernel"] for r in kernel_rows(arch)}
+    # Triton derivation does not certify native config coverage. Their drivers
+    # must run even when a module happens to call a native default.
+    return (buildable - reached) | (buildable & native)

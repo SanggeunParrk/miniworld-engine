@@ -39,7 +39,7 @@ from typing import cast
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels import _capture, _sm120
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import build_failed
 
@@ -420,7 +420,8 @@ def _fwd(
     flat = params[
         10:
     ]  # the flat q / k LayerNorm's (weight, bias) x 2 (4 tensors), the per-head RMSNorm's weights q, k (2 tensors), or none
-    qkvg_native = gated and not flat and not save and batch == 1 and a == 5 and length in (2048, 4096)
+    # the resident projection takes 128 KB of shared memory per block: A100 only (the RTX 5090 has 99 KB; its sm_120a build takes cuBLAS)
+    qkvg_native = gated and not flat and not save and batch == 1 and a == 5 and length in (2048, 4096) and not _sm120.is_sm120(xs.device)
     tiled_qkvg = (
         gated
         and not flat

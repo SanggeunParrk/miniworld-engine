@@ -11,7 +11,13 @@
 #include <algorithm>
 #include <vector>
 
-__global__ void __launch_bounds__(256)
+#ifdef MWE_SM120
+#define TPI_FWD_WARPS 16   // the sm90 source's NWARP of this build (one CTA per SM on the RTX 5090: the 72 KB table)
+#else
+#define TPI_FWD_WARPS 8
+#endif
+
+__global__ void __launch_bounds__(32 * TPI_FWD_WARPS)
 tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ tbl, const int* __restrict__ ids,
         const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax, int R);
 
@@ -20,8 +26,9 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
 #include "../sm90/token_pair_init.cu"
 #undef volatile
 #undef tpi_fwd
+static_assert(TPI_FWD_WARPS == NWARP, "the forward launch is 32 * NWARP threads");
 
-__global__ void __launch_bounds__(256)
+__global__ void __launch_bounds__(32 * TPI_FWD_WARPS)
 tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ tbl, const int* __restrict__ ids,
         const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax, int R) {
   extern __shared__ __align__(128) float sm[];
@@ -44,7 +51,7 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
   __syncthreads();
   const float4* T = (const float4*)sm;
   float4* obase = (float4*)(out + ((size_t)b * L + i0) * L * P);
-  for (int j0 = warp * UNR; j0 < L; j0 += 8 * UNR) {
+  for (int j0 = warp * UNR; j0 < L; j0 += TPI_FWD_WARPS * UNR) {
     float4 rt[UNR];
 #pragma unroll
     for (int u = 0; u < UNR; u++) rt[u] = ((const float4*)(right + ((size_t)b * L + min(j0 + u, L - 1)) * P))[lane];

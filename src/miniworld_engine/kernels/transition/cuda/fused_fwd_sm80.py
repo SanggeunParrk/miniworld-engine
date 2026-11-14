@@ -13,6 +13,7 @@ import torch
 
 from ... import _capture
 from ..._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
+from ..._sm120_builds import per_arch
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -21,22 +22,26 @@ SHAPES = ((64, 128), (64, 256), (128, 256), (128, 512))
 CH = 32
 
 
-@functools.lru_cache(maxsize=1)
-def _ext():
+def _build(suffix: str, gencode: str):
     ensure_cuda_home()
     return load_extension(
-        name="transition_fwd_sm80",
+        name=f"transition_fwd_{suffix}",
         sources=[str(_dir / "transition_fwd_sm80.cu")],
         extra_cuda_cflags=[
             *host_flags(),
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
+            gencode,
             f"-I{_dir}",
+            *(["-DMWE_SM120"] if suffix == "sm120" else []),  # the RTX 5090's ring depth (99 KB a block): tr_fwd_sm80.cuh
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )
+
+
+#: the A100 build (``transition_fwd_sm80``) and the GeForce RTX 5090 one (``transition_fwd_sm120``: the same source for sm_120a, a shallower weight ring)
+_ext, _ext_sm80, _ext_sm120 = per_arch(_build)
 
 
 @torch.compiler.assume_constant_result

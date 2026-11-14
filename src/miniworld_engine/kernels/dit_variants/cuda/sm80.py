@@ -20,6 +20,8 @@ from types import SimpleNamespace
 
 import torch
 
+from miniworld_engine.kernels import _sm120
+
 _dir = Path(__file__).parent
 _LOCAL_DIR = _dir.parents[1] / "augmented_attention" / "cuda" / "sm100_atom_local"
 NH, DP, WQ, WK = 4, 16, 32, 128
@@ -27,7 +29,11 @@ _PDL = ('asm volatile("griddepcontrol.wait;" ::: "memory");', 'asm volatile("gri
 
 
 def _extension(name: str, source: str | Path, arch: str = "80"):
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags
+    from miniworld_engine.kernels._nvcc import load_extension as _load_native
+    from miniworld_engine.kernels._sm120 import sm80_load_extension  # sm_120a: the same sm_80 sources (kernels/_sm120.py)
+
+    load_extension = sm80_load_extension if arch == "80" else _load_native
 
     ensure_cuda_home()
     return load_extension(
@@ -84,8 +90,10 @@ def cubin(stem: str) -> str:
         raise RuntimeError(f"{stem}.cu: no dependent-launch statement found (the sm_80 build empties them)")
     for stmt in _PDL:
         text = text.replace(stmt, "")
-    flags = ("-std=c++17", "-O3", "-arch=sm_80", "-cubin", "-lineinfo", f"-I{_LOCAL_DIR}")
-    return str(_nvcc.cubin(f"atom_local_mma_sm80/{stem}", flags, text=text))
+    from miniworld_engine.kernels._sm120 import sm80_cubin_flags
+
+    suffix, flags = sm80_cubin_flags(["-std=c++17", "-O3", "-arch=sm_80", "-cubin", "-lineinfo", f"-I{_LOCAL_DIR}"])  # sm_120a on an RTX 5090
+    return str(_nvcc.cubin(f"atom_local_mma_sm80{suffix}/{stem}", tuple(flags), text=text))
 
 
 #: name -> (stem, function, dynamic shared memory): the lattn90*.cu kernels of the H100 wrappers (``sm100_atom_local._MMA_KERNELS*``)
@@ -106,6 +114,8 @@ def _load(name: str, device_index: int):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     stem, func, smem = _KERNELS[name]
+    if name == "h_dkv32" and _sm120.building_sm120():
+        smem -= 4 * 16 * 132 * 4  # the sm_120a build reads the bias band from global memory (lattn90_tf32.cu, MWE_SM120): 99 KB per block
     with torch.cuda.device(device_index):
         return driver.Kernel(cubin(stem), func, smem)
 

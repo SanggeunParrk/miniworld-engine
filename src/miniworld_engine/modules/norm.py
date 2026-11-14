@@ -42,6 +42,12 @@ def a100(t: torch.Tensor) -> bool:
     return t.device.type == "cuda" and torch.cuda.get_device_capability(t.device) == (8, 0)
 
 
+def sm120(t: torch.Tensor) -> bool:
+    """A CUDA tensor on a GeForce RTX 5090 (capability 12.0, card key ``5090_sm120``): the ``"cuda"`` backends of the classes that have sm_120a
+    builds route there to them (the H100 and A100 paths are unchanged). Device only: capture-safe."""
+    return t.device.type == "cuda" and torch.cuda.get_device_capability(t.device) == (12, 0)
+
+
 def triton_unsupported(*tensors: torch.Tensor) -> str | None:
     """Why the engine's ``"triton"`` backends cannot take these tensors (not CUDA), or ``None``."""
     if tensors[0].device.type != "cuda":
@@ -110,7 +116,8 @@ def _fastln():
         return hit
     import hashlib
 
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags
+    from miniworld_engine.kernels._sm120 import sm80_load_extension
     from miniworld_engine.modules import _anthropic
 
     base = _anthropic.root() / _FASTLN_SRC
@@ -129,7 +136,8 @@ def _fastln():
         for p in ((Path(home) / "include", Path(home) / "targets" / "x86_64-linux" / "include") if home else ())
         if (p / "cuda_runtime.h").is_file()
     ]
-    ext = load_extension(
+    # sm_80 / sm_90 builds; on the RTX 5090 the same sources as ``..._sm120`` (sm_120a), whose card the sm_80 / sm_90 images do not run on
+    ext = sm80_load_extension(
         name="anthropic_protenix_fast_layer_norm_v1",
         sources=[str(base / "layer_norm_cuda.cpp"), str(base / "layer_norm_cuda_kernel.cu")],
         extra_include_paths=[str(base), *cuda_inc],
@@ -218,7 +226,9 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         "anthropic": 2,
         "cuda:h100_sm90": 2,
         "cuda:a100_sm80": 2,
-    }  # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward
+        "cuda:5090_sm120": 2,
+    }  # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward;
+    # 2026-11-13: RTX 5090 (cuda:5090_sm120 2): the staged odd-width forward from 16 rows on, fp32 d 768 rows with early parameters and two row groups a warp
 
     def __init__(
         self,
@@ -331,7 +341,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         return None
 
     def _supports_cuda(self, input: torch.Tensor) -> str | None:
-        if a100(input):  # A100: the sm_80 row kernels (kernels/layernorm/cuda/sm80.py)
+        if a100(input) or sm120(input):  # A100 / RTX 5090: the row kernels (kernels/layernorm/cuda/sm80.py)
             from miniworld_engine.kernels.layernorm.cuda import sm80
 
             return self._supports_engine(input) or sm80.refusal(input, self.weight, self.bias)
@@ -345,7 +355,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         return None
 
     def _forward_cuda(self, input: torch.Tensor) -> torch.Tensor:
-        if a100(input):
+        if a100(input) or sm120(input):
             from miniworld_engine.kernels.layernorm.cuda import sm80
 
             return sm80.layernorm(input, self.weight, self.bias, self.eps)
@@ -408,7 +418,7 @@ class RMSNorm(BackendModule, nn.RMSNorm):
         return None
 
     def _supports_cuda(self, x: torch.Tensor) -> str | None:
-        if a100(x):  # A100: the RMS mode of the sm_80 row kernels (kernels/rmsnorm/cuda/sm80.py)
+        if a100(x) or sm120(x):  # A100 / RTX 5090: the RMS mode of the row kernels (kernels/rmsnorm/cuda/sm80.py)
             from miniworld_engine.kernels.rmsnorm.cuda import sm80
 
             return self._supports_engine(x) or sm80.refusal(x, self.weight)
@@ -422,7 +432,7 @@ class RMSNorm(BackendModule, nn.RMSNorm):
         return None
 
     def _forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        if a100(x):
+        if a100(x) or sm120(x):
             from miniworld_engine.kernels.rmsnorm.cuda import sm80
 
             return sm80.rmsnorm(x, self.weight, self.effective_eps(x.dtype))

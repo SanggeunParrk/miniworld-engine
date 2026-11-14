@@ -12,7 +12,8 @@ from pathlib import Path
 
 import torch
 
-from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+from ..._nvcc import ensure_cuda_home, host_flags
+from ..._sm120 import sm80_load_extension as load_extension
 
 _dir = Path(__file__).parent / "sm80"
 
@@ -69,7 +70,9 @@ def backward(
     small kernel: no atomics, bit-reproducible); db is the fixed-order sum of the CTAs' partial rows.  ``fused=False`` selects the older two-step form for A/B runs: the
     kernel of ``msg_bwd_sm80.cuh`` writes dP, a and dproj and dW is one cuBLAS GEMM per chunk of rows."""
     if fused is None:
-        fused = True
+        from miniworld_engine.kernels._sm120 import is_sm120
+
+        fused = not is_sm120(p.device)  # the RTX 5090: the fused kernel's 162 KB of tiles exceed its 99 KB a block (sm_120a has the split form only)
     if fused:
         return _backward_fused(p, weight, bias, mask, grad_reduced, scale)
     return _backward_split(p, weight, bias, mask, grad_reduced, scale)

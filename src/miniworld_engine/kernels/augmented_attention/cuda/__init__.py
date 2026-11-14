@@ -442,7 +442,7 @@ def prebuild(target, rows):
 
     from miniworld_engine.kernels._prebuild import _kv
 
-    if target.arch == "sm80":  # the A100 builds: prebuild_sm80.py (token / atom DiT attention) and _sm80_apb (AttentionPairBias rows)
+    if target.arch in ("sm80", "sm120"):  # the A100 builds (sm120: the same ones compiled for sm_120a, kernels/_sm120.py): prebuild_sm80.py (token / atom DiT attention) and _sm80_apb (AttentionPairBias rows)
         from .prebuild_sm80 import prebuild_sm80
 
         yield from prebuild_sm80(rows)

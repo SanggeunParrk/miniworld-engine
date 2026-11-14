@@ -35,6 +35,9 @@ struct Plan {
 };
 
 inline const Entry* find(int op, int B, int L, int N) {
+#ifdef MWE_SM120  // RTX 5090 build: the table was searched on the A100; the caller keeps its cuBLAS path there
+  return nullptr;
+#endif
   for (const Entry& e : kTable)
     if (e.op == op && e.B == B && e.L == L && e.N == N) return &e;
   return nullptr;
@@ -60,7 +63,9 @@ inline Plan make_plan(const Entry& e, int64_t arows, int64_t acols, int64_t brow
   if (cublasLtMatrixLayoutCreate(&p.lc, ct, N, M, N) != CUBLAS_STATUS_SUCCESS) return p;
   auto batch = [&](cublasLtMatrixLayout_t l, long stride) {
     int32_t bc = e.B; int64_t st = stride;
+#ifndef MWE_SM120   // (never reached there: no table; the toolkit of that build may predate the pointer-array batch mode)
     if (ptrmode) { uint32_t mode = CUBLASLT_BATCH_MODE_POINTER_ARRAY; cublasLtMatrixLayoutSetAttribute(l, CUBLASLT_MATRIX_LAYOUT_BATCH_MODE, &mode, sizeof(mode)); }
+#endif
     cublasLtMatrixLayoutSetAttribute(l, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc));
     if (!ptrmode) cublasLtMatrixLayoutSetAttribute(l, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &st, sizeof(st));
   };

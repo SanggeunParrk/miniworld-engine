@@ -106,8 +106,14 @@ def _h100(t: torch.Tensor) -> bool:
 
 
 def _a100(t: torch.Tensor) -> bool:
-    """A CUDA tensor on an A100 (sm_80): the card of the ``"cuda"`` backends' sm_80 paths (``kernels/integrations/*_sm80.py``)."""
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (8, 0)
+    """A CUDA tensor on an A100 (sm_80) or an RTX 5090 (sm_120a builds of the same sources, ``kernels/_sm120.py``): the cards of the
+    ``"cuda"`` backends' sm_80 paths (``kernels/integrations/*_sm80.py``)."""
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0))
+
+
+def _sm120(t: torch.Tensor) -> bool:
+    """A CUDA tensor on an RTX 5090 (sm_120a): where an sm_80 path cannot take its fused kernels (99 KB of shared memory per block)."""
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (12, 0)
 
 
 class _A100View:
@@ -1241,10 +1247,13 @@ class AtomDiTMiniWorld(BackendModule):
     # 2026-11-10: kits; sm_80 paths; H100 inference (cached weight forms, slim modulation, fp32 global on the fp32 stages, PDL)
     # cuda:a100_sm80 6 (2026-11-12): bf16 training: the weight forms in one launch (train_forms), row-count launch shapes and K splits, the
     # few-row modulation backward on cuBLAS (sm80.train_cfg)
+    # cuda:5090_sm120 2 (2026-11-13): window inference on the fused stages re-tiled into 99 KB (sm80.block_infer_sm120 from 2049 rows bf16; the TF32 row kernels with
+    # two-deep weight rings for fp32, composed._infer_fp32 sm120) in place of the composed row stages
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cuda:a100_sm80": 7,
         "cuda:h100_sm90": 2,
+        "cuda:5090_sm120": 2,
     }  # cuda:a100_sm80 7 (2026-11-13): the sm_80 window attention exits on a tile past seqused (zero rows, the same bits)
 
     def __init__(
@@ -1448,7 +1457,7 @@ class AtomDiTMiniWorld(BackendModule):
         weights = [m.weight for m in self._a100_linears()]
         if _needs_grad(self, x, cond):
             return composed.SWABlockA100.apply(x, cond, cos, sin, seqused.contiguous(), hw, *weights)
-        if x.dtype != _BF or hw != HALF_WINDOW:
+        if x.dtype != _BF or hw != HALF_WINDOW or _sm120(x):  # the RTX 5090: the composed row stages (composed.block)
             return composed.block(x, cond, cos, sin, seqused.contiguous(), hw, weights)
         from miniworld_engine.kernels.swa_dit.dispatch import eval_form
 
@@ -1637,11 +1646,13 @@ class SWAAtomTransformer(BackendModule):
     # triton 2 (2026-11-12): global attention (half_window >= 65536 or negative) served, on the window kernels with every key in reach
     # cuda:h100_sm90 3 (2026-11-12): bf16 / master global attention on the composed bf16 stages around FlashAttention-4 (dispatch._h100_global_composed;
     # was the native stages): master train L 1024 S 48 2.19 -> 1.24 ms
+    # cuda:5090_sm120 2 (2026-11-13): window inference on the fused stages within 99 KB (as AtomDiTMiniWorld)
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cuda:a100_sm80": 7,
         "cuda:h100_sm90": 3,
         "triton": 2,
+        "cuda:5090_sm120": 2,
     }  # cuda:a100_sm80 7 (2026-11-13): as AtomDiTMiniWorld
 
     class Config(BaseModel):
@@ -1874,6 +1885,7 @@ class AtomDiTESMFold2Pair(BackendModule):
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     backends = ("pytorch", "triton", "cuda")
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:5090_sm120": 1}  # 2026-11-12: the sm_80 paths built for sm_120a (bias tile / band read from global memory)
 
     def __init__(
         self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *, backend: str = "pytorch"

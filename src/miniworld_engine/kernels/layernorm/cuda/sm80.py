@@ -36,49 +36,78 @@ _dir = Path(__file__).parent / "sm80"
 MAX_N = 4096
 
 
-@functools.lru_cache(maxsize=1)
-def ext():
-    """The row-kernel extension (``norm_rows_sm80``), built on first use (or taken from the prebuilt / JIT cache)."""
+def _build(name: str, gencode: str, extra: tuple = ()):
     ensure_cuda_home()
     return load_extension(
-        name="norm_rows_sm80",
+        name=name,
         sources=[str(_dir / "norm_rows.cu")],
         extra_cuda_cflags=[
             *host_flags(),
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
+            gencode,
             f"-I{_dir}",
+            *extra,
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )
 
 
+@functools.lru_cache(maxsize=1)
+def ext_sm80():
+    """The A100 row-kernel extension (``norm_rows_sm80``), built on first use (or taken from the prebuilt / JIT cache)."""
+    return _build("norm_rows_sm80", "-gencode=arch=compute_80,code=sm_80")
+
+
+@functools.lru_cache(maxsize=1)
+def ext_sm120():
+    """The GeForce RTX 5090 build of the same sources (``norm_rows_sm120``, sm_120a): nothing in them is A100-specific (cp.async, shuffles,
+    at most 64 KB of dynamic shared memory, under the 5090's 99 KB a block)."""
+    return _build("norm_rows_sm120", "-gencode=arch=compute_120a,code=sm_120a", ("-DMWE_SM120",))
+
+
+@device_constant
+@functools.lru_cache(maxsize=8)
+def _cc(index: int) -> tuple[int, int]:
+    return tuple(torch.cuda.get_device_capability(index))
+
+
+def _index(device: torch.device | None) -> int:
+    return torch.cuda.current_device() if device is None or device.index is None else device.index
+
+
+def ext(device: torch.device | None = None):
+    """The row-kernel extension of the card of ``device`` (default: the current one): ``norm_rows_sm120`` on a GeForce RTX 5090
+    (capability 12.0), ``norm_rows_sm80`` otherwise (the A100 build; :func:`refusal` admits no other card)."""
+    return ext_sm120() if _cc(_index(device)) == (12, 0) else ext_sm80()
+
+
 @torch.compiler.assume_constant_result
 def loads() -> bool:
-    """Builds (first call) or loads the extension; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
+    """Builds (first call) or loads the extension of the current card; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback).
 
     A process-level constant, so ``torch.compile`` evaluates it once at trace time instead of tracing the nvcc lookup / JIT build into the graph."""
     try:
         ext()
     except Exception as exc:  # a build / load failure is an error, never a fallback
-        build_failed("sm_80 norm", exc)
+        build_failed("sm_80 / sm_120a norm", exc)
         return False  # reached only while planning (build_failed returns there)
     return True
 
 
-@device_constant
-@functools.lru_cache(maxsize=8)
-def _is_a100(index: int) -> bool:
-    return torch.cuda.get_device_capability(index) == (8, 0)
-
-
 def enabled(device: torch.device) -> bool:
-    """Capability exactly 8.0 (the card every norm kernel of this file is built for)."""
+    """Capability exactly 8.0 (the A100: what the rope / adamod kernels beside this file are built for)."""
     if device.type != "cuda":
         return False
-    return _is_a100(device.index if device.index is not None else torch.cuda.current_device())
+    return _cc(_index(device)) == (8, 0)
+
+
+def enabled_rows(device: torch.device) -> bool:
+    """A card the row kernels of this file have a build for: the A100 (8.0) or the GeForce RTX 5090 (12.0)."""
+    if device.type != "cuda":
+        return False
+    return _cc(_index(device)) in ((8, 0), (12, 0))
 
 
 def _params_ok(n: int, *params: Tensor | None) -> bool:
@@ -94,8 +123,8 @@ def refusal(x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Te
     extension built.  Shapes, dtypes and the device only (capture-safe)."""
     if not x.is_cuda:
         return "the sm_80 norm kernels run on CUDA tensors only"
-    if not enabled(x.device):
-        return "the sm_80 norm kernels are the A100 (capability 8.0) builds"
+    if not enabled_rows(x.device):
+        return "the row norm kernels are built for the A100 (capability 8.0) and the GeForce RTX 5090 (12.0) only"
     if x.dtype not in (torch.bfloat16, torch.float32):
         return f"dtype {x.dtype}: the sm_80 norm kernels take bfloat16 / float32 activations"
     if x.ndim < 1 or not 1 <= x.shape[-1] <= MAX_N or x.numel() == 0:
@@ -136,7 +165,7 @@ def _layernorm_fwd(
 ) -> Tensor:
     """Inference forward over the rows of x [M, N] (contiguous): ``y = LN(x) w + b`` (times ``row_scale`` [M] in x's dtype when given), no statistics saved."""
     y = torch.empty_like(x)
-    ext().norm_fwd(x, weight, bias, row_scale, y, None, None, eps, False)
+    ext(x.device).norm_fwd(x, weight, bias, row_scale, y, None, None, eps, False)
     return y
 
 
@@ -169,7 +198,7 @@ def _layernorm_train_fwd(
     y = torch.empty_like(x)
     mean = x.new_empty((m,), dtype=torch.float32)
     rstd = x.new_empty((m,), dtype=torch.float32)
-    ext().norm_fwd(x, weight, bias, row_scale, y, mean, rstd, eps, False)
+    ext(x.device).norm_fwd(x, weight, bias, row_scale, y, mean, rstd, eps, False)
     return y, mean, rstd
 
 
@@ -209,7 +238,7 @@ def _layernorm_train_bwd(
     dx = torch.empty_like(x)
     dw = weight.new_empty((n,)) if need_dw and weight is not None else x.new_empty((0,))
     db = bias.new_empty((n,)) if need_db and bias is not None else x.new_empty((0,))
-    ext().norm_bwd(
+    ext(x.device).norm_bwd(
         dy,
         x,
         weight,

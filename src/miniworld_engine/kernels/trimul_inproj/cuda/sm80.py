@@ -43,27 +43,60 @@ _B7J_RINGS = 8
 _CUSTOM_CONTRACT_MAX_L = 512
 
 
-@functools.lru_cache(maxsize=1)
-def _ext():
+#: the arch-specific flags of one build of these sources: the A100 build (unchanged) and the RTX 5090 build (sm_120a, ``MWE_SM120``: the
+#: compile-time switch the sources use for the 99 KB shared-memory budget and the 170-SM grids; nothing else differs)
+ARCH_FLAGS = {80: ["-gencode=arch=compute_80,code=sm_80"], 120: ["-gencode=arch=compute_120a,code=sm_120a", "-DMWE_SM120=1"]}
+
+
+def _build(name: str, source: str, arch: int, extra: tuple[str, ...] = (), cextra: tuple[str, ...] = ()):
+    """One build of ``sm80/<source>`` for ``arch`` (80: ``name``; 120: ``name_sm120``)."""
     ensure_cuda_home()
     return load_extension(
-        name="trimul_sm80",
-        sources=[str(_dir / "ops.cu")],
+        name=name if arch == 80 else f"{name}_sm120",
+        sources=[str(_dir / source)],
         extra_cuda_cflags=[
             *host_flags(),
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_80,code=sm_80",
+            *ARCH_FLAGS[arch],
             f"-I{_dir}",
+            *extra,
         ],
-        extra_cflags=["-std=c++17", "-O3"],
+        extra_cflags=["-std=c++17", "-O3", *cextra],
         verbose=False,
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _ext():
+    return _build("trimul_sm80", "ops.cu", 80)
+
+
+@functools.lru_cache(maxsize=1)
+def _ext120():
+    """The same sources for the GeForce RTX 5090 (sm_120a)."""
+    return _build("trimul_sm80", "ops.cu", 120)
+
+
+@functools.lru_cache(maxsize=8)
+def _cap(index: int) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(index)
+
+
+def on_sm120() -> bool:
+    """The current device is a GeForce RTX 5090 (sm_120): the launchers take the sm_120a builds."""
+    return _cap(torch.cuda.current_device()) == (12, 0)
+
+
+def _lib():
+    """The build for the current device: sm_80 (A100) or sm_120a (RTX 5090)."""
+    return _ext120() if on_sm120() else _ext()
+
+
 @functools.lru_cache(maxsize=8)
 def _is_ampere(index: int) -> bool:
-    return torch.cuda.get_device_capability(index) == (8, 0)
+    """An A100 (sm_80) or a GeForce RTX 5090 (sm_120, the same sources built for sm_120a): the cards these kernels serve."""
+    return _cap(index) in ((8, 0), (12, 0))
 
 
 def supports(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None) -> bool:
@@ -78,7 +111,9 @@ def supports(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None
         return False
     if mask is not None and (mask.shape != (pair.shape[0], n) or mask.dtype is not torch.bool):
         return False
-    return _is_ampere(pair.device.index if pair.device.index is not None else torch.cuda.current_device())
+    # the fused set is A100-only: its K3 / B1 / B7 tiles are sized for 164 KB of shared memory (the RTX 5090 has 99 KB per block); D128 on the 5090
+    # takes the wide set (sm80_wide) instead
+    return _cap(pair.device.index if pair.device.index is not None else torch.cuda.current_device()) == (8, 0)
 
 
 def available(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None) -> bool:
@@ -88,7 +123,7 @@ def available(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = Non
     if torch.compiler.is_compiling() or _is_fake(pair):
         return True
     try:
-        _ext()
+        _lib()
     except Exception as exc:  # a build / load failure is an error, never a fallback
         build_failed("sm80 TriMul", exc)
         return False  # reached only while planning (build_failed returns there)
@@ -154,7 +189,7 @@ def _pack(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool) -> dict:
     vec = torch.empty((8, D), dtype=torch.float32, device=dev)
     wdx = torch.empty((4 * ch + D, D) if train else (0,), dtype=torch.bfloat16, device=dev)
     wob1 = torch.empty((D, ch) if train else (0,), dtype=torch.bfloat16, device=dev)
-    _ext().pack(*ws, *ln, w1, wg3, wo3, vec, wdx, wob1)
+    _lib().pack(*ws, *ln, w1, wg3, wo3, vec, wdx, wob1)
     so, bo_, sg, bg, so1, bo1, sg1, bg1 = vec.unbind(0)
     pk = dict(
         ch=ch,
@@ -241,7 +276,7 @@ def _front(ext, zf, mk, pk, n):
 
 
 def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
-    ext = _ext()
+    ext = _lib()
     z = leaves[0]
     n = z.shape[1]
     T = n * n
@@ -361,6 +396,10 @@ def _mm32(a, b):
 def _gemm_tk(a, b):
     """a [T, M], b [T, N] (or a transposed view) -> a^T b in fp32 with K = T split into chunks (a batched GEMM + a sum): cuBLAS picks a
     non-split-K kernel for these 128 x 256 x L^2 shapes (0.99 ms instead of ~0.3 at L = 768)."""
+    if on_sm120():
+        # RTX 5090: cuBLAS runs the unsplit long-K GEMM well here (split-K inside), while the chunked bmm with an fp32 output takes 32 x 32 WMMA kernels
+        # (2-3x slower); b^T a then a transposed copy measured best of the layouts (bench_tk, 2026-11-12); fp32 accumulation either way
+        return torch.mm(b.t(), a, out_dtype=torch.float32).t().contiguous()
     T = a.shape[0]
     S = next((s for s in (32, 16, 8, 4, 2) if T % s == 0 and T // s >= 256), 1)
     if S == 1:
@@ -375,7 +414,7 @@ def _gemm_tk(a, b):
 
 
 def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
-    ext = _ext()
+    ext = _lib()
     z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo = leaves
     ab, x, stats, xn = saved
     n = z.shape[1]

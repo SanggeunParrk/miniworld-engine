@@ -31,6 +31,14 @@ namespace {
 constexpr int KEYS = 192, HALF = 64, SPAN = 160;   // subset, rank window, positions a window can see (32 + 2 x 64)
 constexpr int WSPAN = 144;                         // positions a 16-query warp can see (16 + 2 x 64)
 constexpr int BS = 168;    // fp32 row stride of the bias tile (160 + 8: conflict-free float2 reads)
+#ifdef MWE_SM120
+// RTX 5090 (sm_120a build, 99 KB of shared memory a block): the forward and dQ kernels read the CTA's bias rows straight from global memory
+// (the 40 KB [64][160] tile of its two windows, L1 / L2 resident; row stride SPAN) and the TF32 dK / dV kernel its band entries, instead of a
+// shared copy; the rest of each layout is unchanged.
+constexpr int BSR = SPAN;
+#else
+constexpr int BSR = BS;    // row stride of the bias rows the kernels read (the shared tile's)
+#endif
 constexpr int ST = 40;     // bf16 row stride of the staged tiles (80 B: conflict-free ldmatrix)
 constexpr int ST32 = 36;   // fp32 row stride of the TF32 kernel's tiles
 constexpr float SCALE = 0.17677669529663687f;
@@ -189,7 +197,11 @@ extern "C" __global__ __launch_bounds__(256) void h_pair_bias_esm(const void* __
 
 // ------------------------------------------------------------------------------------------------------------------ bf16
 // dynamic smem: bias [64][BS] f32, then 2 stages of { Q [64][ST], K [192][ST], V [192][ST] } bf16
+#ifdef MWE_SM120
+constexpr int E_BIAS = 0;
+#else
 constexpr int E_BIAS = 64 * BS * 4;
+#endif
 constexpr int E_STAGE = (64 + 192 + 192) * ST * 2;
 constexpr int E_SMEM = E_BIAS + 2 * E_STAGE;
 
@@ -202,7 +214,12 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm(const bf16* __restr
   const int q0 = 64 * blockIdx.x, h = blockIdx.y, a0 = blockIdx.z * spc, a1 = min(A, a0 + spc), nwin = N / 32, w0 = q0 / 32;
   // the warp's 144 positions start 16 warp rows into the staged K / V (which start at q0 - 64), at column 16 (warp & 1) of its window's bias
   const int kr0 = 16 * warp, bc0 = 16 * (warp & 1);
+#ifdef MWE_SM120
+  const float* bt = bias + (size_t)(h * nwin + w0) * 32 * SPAN;
+#else
   load_bias(sb, bias, h, nwin, w0, tid);
+  const float* bt = sb;
+#endif
   auto stage = [&](int s) { return su(sm + E_BIAS + (s & 1) * E_STAGE); };
   auto load = [&](int s, int a) {
     const uint32_t b = stage(s);
@@ -232,10 +249,10 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm(const bf16* __restr
       mma(sc[jt], aq[1], b[2], b[3]);
     }
     float m0 = -INFINITY, m1 = -INFINITY;
-    const float* br = sb + (16 * warp + g) * BS + bc0 + 2 * t;
+    const float* br = bt + (16 * warp + g) * BSR + bc0 + 2 * t;
 #pragma unroll
     for (int jt = 0; jt < WSPAN / 8; ++jt) {
-      const float2 b0 = *reinterpret_cast<const float2*>(br + 8 * jt), b1 = *reinterpret_cast<const float2*>(br + 8 * BS + 8 * jt);
+      const float2 b0 = *reinterpret_cast<const float2*>(br + 8 * jt), b1 = *reinterpret_cast<const float2*>(br + 8 * BSR + 8 * jt);
       sc[jt][0] = fmaf(sc[jt][0], C1, b0.x);
       sc[jt][1] = fmaf(sc[jt][1], C1, b0.y);
       sc[jt][2] = fmaf(sc[jt][2], C1, b1.x);
@@ -288,7 +305,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm(const bf16* __restr
 
 // ------------------------------------------------------------------------------------------------------------------ TF32
 // dynamic smem: bias [64][BS] f32, Q [64][ST32], K [192][ST32], V [192][ST32] f32
-constexpr int E_SMEM32 = 64 * BS * 4 + (64 + 192 + 192) * ST32 * 4;
+constexpr int E_SMEM32 = E_BIAS + (64 + 192 + 192) * ST32 * 4;
 
 extern "C" __global__ __launch_bounds__(128) void h_attn_esm_tf32(const float* __restrict__ q, const float* __restrict__ k,
                                                                    const float* __restrict__ v, const float* __restrict__ bias,
@@ -296,13 +313,18 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_tf32(const float* _
   pdl_wait();
   extern __shared__ __align__(16) uint8_t sm[];
   float* sb = reinterpret_cast<float*>(sm);
-  float* sQ = sb + 64 * BS;
+  float* sQ = reinterpret_cast<float*>(sm + E_BIAS);
   float* sK = sQ + 64 * ST32;
   float* sV = sK + 192 * ST32;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   const int q0 = 64 * blockIdx.x, h = blockIdx.y, a0 = blockIdx.z * spc, a1 = min(A, a0 + spc), nwin = N / 32, w0 = q0 / 32;
   const int kr0 = 16 * warp, bc0 = 16 * (warp & 1);
+#ifdef MWE_SM120
+  const float* bt = bias + (size_t)(h * nwin + w0) * 32 * SPAN;
+#else
   load_bias(sb, bias, h, nwin, w0, tid);
+  const float* bt = sb;
+#endif
   for (int a = a0; a < a1; ++a) {
     load_rows(su(sQ), q, a, h, q0, 64, N, ST32, tid);
     load_rows(su(sK), k, a, h, q0 - HALF, 192, N, ST32, tid);
@@ -328,10 +350,10 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_tf32(const float* _
       for (int kt = 0; kt < 4; ++kt) mma_tf32(sc[nt], aq[kt], __float_as_uint(kr[8 * kt]), __float_as_uint(kr[8 * kt + 4]));
     }
     float m0 = -INFINITY, m1 = -INFINITY;
-    const float* br = sb + (16 * warp + g) * BS + bc0 + 2 * t;
+    const float* br = bt + (16 * warp + g) * BSR + bc0 + 2 * t;
 #pragma unroll
     for (int nt = 0; nt < WSPAN / 8; ++nt) {
-      const float2 b0 = *reinterpret_cast<const float2*>(br + 8 * nt), b1 = *reinterpret_cast<const float2*>(br + 8 * BS + 8 * nt);
+      const float2 b0 = *reinterpret_cast<const float2*>(br + 8 * nt), b1 = *reinterpret_cast<const float2*>(br + 8 * BSR + 8 * nt);
       sc[nt][0] = fmaf(sc[nt][0], C1, b0.x);
       sc[nt][1] = fmaf(sc[nt][1], C1, b0.y);
       sc[nt][2] = fmaf(sc[nt][2], C1, b1.x);
@@ -389,7 +411,12 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dq(const bf16* __re
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   const int q0 = 64 * blockIdx.x, h = blockIdx.y, a0 = blockIdx.z * spc, a1 = min(A, a0 + spc), nwin = N / 32, w0 = q0 / 32;
   const int kr0 = 16 * warp, bc0 = 16 * (warp & 1);
+#ifdef MWE_SM120
+  const float* bt = bias + (size_t)(h * nwin + w0) * 32 * SPAN;
+#else
   load_bias(sb, bias, h, nwin, w0, tid);
+  const float* bt = sb;
+#endif
   uint8_t* st = sm + E_BIAS;
   const uint32_t sQ = su(st), sD = sQ + 64 * ST * 2, sK = sD + 64 * ST * 2, sV = sK + 192 * ST * 2;
   float* sl = reinterpret_cast<float*>(st + (64 * 2 + 192 * 2) * ST * 2);
@@ -417,7 +444,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dq(const bf16* __re
     float dq[4][4];
 #pragma unroll
     for (int n = 0; n < 4; ++n) dq[n][0] = dq[n][1] = dq[n][2] = dq[n][3] = 0.f;
-    const float* br = sb + (16 * warp + g) * BS + bc0 + 2 * t;
+    const float* br = bt + (16 * warp + g) * BSR + bc0 + 2 * t;
 #pragma unroll
     for (int grp = 0; grp < 3; ++grp) {
       float sc[6][4], dp[6][4];
@@ -438,7 +465,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dq(const bf16* __re
 #pragma unroll
       for (int i = 0; i < 6; ++i) {
         const int jt = 6 * grp + i;
-        const float2 b0 = *reinterpret_cast<const float2*>(br + 8 * jt), b1 = *reinterpret_cast<const float2*>(br + 8 * BS + 8 * jt);
+        const float2 b0 = *reinterpret_cast<const float2*>(br + 8 * jt), b1 = *reinterpret_cast<const float2*>(br + 8 * BSR + 8 * jt);
         const float p0 = ex2(fmaf(sc[i][0], C1, b0.x) - lse0), p1 = ex2(fmaf(sc[i][1], C1, b0.y) - lse0);
         const float p2 = ex2(fmaf(sc[i][2], C1, b1.x) - lse1), p3 = ex2(fmaf(sc[i][3], C1, b1.y) - lse1);
         const float s0 = p0 * (dp[i][0] - d0), s1 = p1 * (dp[i][1] - d0), s2 = p2 * (dp[i][2] - d1), s3 = p3 * (dp[i][3] - d1);
@@ -585,7 +612,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dkv(const bf16* __r
 // shared rows of stride ST32. A P / dS accumulator becomes the A operand with its k slots permuted (slot t <-> key 2 t, slot t + 4 <->
 // key 2 t + 1), the B operand read with the same permutation (as h_attn_esm_tf32 does for P V).
 // dQ: smem bias [64][BS], Q, dO [64][ST32], K, V [192][ST32], LSE, D [64]
-constexpr int Q_SMEM32 = 64 * BS * 4 + (64 * 2 + 192 * 2) * ST32 * 4 + 2 * 64 * 4;
+constexpr int Q_SMEM32 = E_BIAS + (64 * 2 + 192 * 2) * ST32 * 4 + 2 * 64 * 4;
 
 extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dq_tf32(const float* __restrict__ q, const float* __restrict__ k,
     const float* __restrict__ v, const float* __restrict__ dout, const float* __restrict__ bias, const float* __restrict__ lse,
@@ -593,7 +620,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dq_tf32(const float
   pdl_wait();
   extern __shared__ __align__(16) uint8_t sm[];
   float* sb = reinterpret_cast<float*>(sm);
-  float* sQ = sb + 64 * BS;
+  float* sQ = reinterpret_cast<float*>(sm + E_BIAS);
   float* sD = sQ + 64 * ST32;
   float* sK = sD + 64 * ST32;
   float* sV = sK + 192 * ST32;
@@ -601,7 +628,12 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dq_tf32(const float
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   const int q0 = 64 * blockIdx.x, h = blockIdx.y, a0 = blockIdx.z * spc, a1 = min(A, a0 + spc), nwin = N / 32, w0 = q0 / 32;
   const int kr0 = 16 * warp, bc0 = 16 * (warp & 1);
+#ifdef MWE_SM120
+  const float* bt = bias + (size_t)(h * nwin + w0) * 32 * SPAN;
+#else
   load_bias(sb, bias, h, nwin, w0, tid);
+  const float* bt = sb;
+#endif
   float dba[WSPAN / 8][4];
 #pragma unroll
   for (int i = 0; i < WSPAN / 8; ++i) dba[i][0] = dba[i][1] = dba[i][2] = dba[i][3] = 0.f;
@@ -627,7 +659,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dq_tf32(const float
     float dq[4][4];
 #pragma unroll
     for (int d = 0; d < 4; ++d) dq[d][0] = dq[d][1] = dq[d][2] = dq[d][3] = 0.f;
-    const float* br = sb + (16 * warp + g) * BS + bc0 + 2 * t;
+    const float* br = bt + (16 * warp + g) * BSR + bc0 + 2 * t;
 #pragma unroll 2
     for (int nt = 0; nt < WSPAN / 8; ++nt) {
       float sc[4] = {0.f, 0.f, 0.f, 0.f}, dp[4] = {0.f, 0.f, 0.f, 0.f};
@@ -638,7 +670,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dq_tf32(const float
         mma_tf32(sc, aq[kt], tf(kr[8 * kt]), tf(kr[8 * kt + 4]));
         mma_tf32(dp, ad[kt], tf(vr[8 * kt]), tf(vr[8 * kt + 4]));
       }
-      const float2 b0 = *reinterpret_cast<const float2*>(br + 8 * nt), b1 = *reinterpret_cast<const float2*>(br + 8 * BS + 8 * nt);
+      const float2 b0 = *reinterpret_cast<const float2*>(br + 8 * nt), b1 = *reinterpret_cast<const float2*>(br + 8 * BSR + 8 * nt);
       const float p0 = ex2(fmaf(sc[0], C1, b0.x) - lse0), p1 = ex2(fmaf(sc[1], C1, b0.y) - lse0);
       const float p2 = ex2(fmaf(sc[2], C1, b1.x) - lse1), p3 = ex2(fmaf(sc[3], C1, b1.y) - lse1);
       const float s0 = p0 * (dp[0] - dl0), s1 = p1 * (dp[1] - dl0), s2 = p2 * (dp[2] - dl1), s3 = p3 * (dp[3] - dl1);
@@ -668,7 +700,12 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dq_tf32(const float
 }
 
 // dK, dV: smem bias band [4][16 keys][BSW], Q, dO [192][ST32], K, V [64][ST32], LSE, D [192]
-constexpr int K_SMEM32 = K_BIAS + (192 * 2 + 64 * 2) * ST32 * 4 + 2 * 192 * 4;
+#ifdef MWE_SM120
+constexpr int K_BIAS32 = 0;   // RTX 5090: no band in shared memory, each lane reads its entries from the bias (see BSR)
+#else
+constexpr int K_BIAS32 = K_BIAS;
+#endif
+constexpr int K_SMEM32 = K_BIAS32 + (192 * 2 + 64 * 2) * ST32 * 4 + 2 * 192 * 4;
 
 extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dkv_tf32(const float* __restrict__ q, const float* __restrict__ k,
     const float* __restrict__ v, const float* __restrict__ dout, const float* __restrict__ bias, const float* __restrict__ lse,
@@ -676,7 +713,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dkv_tf32(const floa
   pdl_wait();
   extern __shared__ __align__(16) uint8_t sm[];
   float* sb = reinterpret_cast<float*>(sm);
-  float* sQ = reinterpret_cast<float*>(sm + K_BIAS);
+  float* sQ = reinterpret_cast<float*>(sm + K_BIAS32);
   float* sD = sQ + 192 * ST32;
   float* sK = sD + 192 * ST32;
   float* sV = sK + 64 * ST32;
@@ -684,6 +721,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dkv_tf32(const floa
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   const int k0 = 64 * blockIdx.x, qs = k0 - 64, h = blockIdx.y, a0 = blockIdx.z * spc, a1 = min(A, a0 + spc), nwin = N / 32;
   const int kr = 16 * warp;
+#ifndef MWE_SM120
   for (int i = tid; i < 4 * 16 * BSW; i += 128) sb[i] = -INFINITY;
   __syncthreads();
   for (int i = tid; i < 64 * WSPAN; i += 128) {
@@ -693,6 +731,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dkv_tf32(const floa
     const int win = qq >> 5;
     sb[(w * 16 + (kk & 15)) * BSW + qc] = bias[((size_t)(h * nwin + win) * 32 + (qq & 31)) * SPAN + (key - (32 * win - HALF))];
   }
+#endif
   for (int a = a0; a < a1; ++a) {
     load_rows(su(sQ), q, a, h, qs, 192, N, ST32, tid);
     load_rows(su(sD), dout, a, h, qs, 192, N, ST32, tid);
@@ -727,8 +766,19 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_esm_dkv_tf32(const floa
       }
       const int c0 = qr + 2 * t;              // query columns c0, c0 + 1 of rows g (keys kr + g) and g + 8
       const float2 lq = *reinterpret_cast<const float2*>(sl + c0), dq2 = *reinterpret_cast<const float2*>(sl + 192 + c0);
+#ifdef MWE_SM120
+      // the band entry (key kr + g [+ 8], query qs + c0 [+ 1]) straight from the bias, -inf outside the rank window or the atoms, as the band fill would
+      auto band = [&](int key, int qq) -> float {
+        if (qq < 0 || qq >= N || abs(qq - key) > HALF) return -INFINITY;
+        const int win = qq >> 5;
+        return __ldg(bias + ((size_t)(h * nwin + win) * 32 + (qq & 31)) * SPAN + (key - (32 * win - HALF)));
+      };
+      const int key0 = k0 + kr + g;
+      const float bk0[2] = {band(key0, qs + c0), band(key0, qs + c0 + 1)}, bk1[2] = {band(key0 + 8, qs + c0), band(key0 + 8, qs + c0 + 1)};
+#else
       const float* bk0 = sb + (warp * 16 + g) * BSW + (c0 - kr);
       const float* bk1 = bk0 + 8 * BSW;
+#endif
       const float p0 = ex2(fmaf(sc[0], C1, bk0[0]) - lq.x), p1 = ex2(fmaf(sc[1], C1, bk0[1]) - lq.y);
       const float p2 = ex2(fmaf(sc[2], C1, bk1[0]) - lq.x), p3 = ex2(fmaf(sc[3], C1, bk1[1]) - lq.y);
       const float s0 = p0 * (dp[0] - dq2.x), s1 = p1 * (dp[1] - dq2.y), s2 = p2 * (dp[2] - dq2.x), s3 = p3 * (dp[3] - dq2.y);
@@ -848,3 +898,8 @@ extern "C" __global__ __launch_bounds__(256) void h_pair_bias_esm_bwd(const void
     part[(size_t)blockIdx.x * 64 + threadIdx.x] = s;
   }
 }
+
+#ifdef MWE_SM120
+static_assert(E_SMEM <= 101376 && E_SMEM32 <= 101376 && Q_SMEM <= 101376 && Q_SMEM32 <= 101376 && K_SMEM <= 101376 && K_SMEM32 <= 101376,
+              "the RTX 5090 gives a block at most 99 KB (101376 B) of shared memory");
+#endif

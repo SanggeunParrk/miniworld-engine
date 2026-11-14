@@ -119,6 +119,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "cueq": 2,
         "cuda:a100_sm80": 5,  # 5 (2026-11-13): the register-resident inference core (attn_rf_fwd_sm80.cuh) at L >= 512, plain and gated
         "cuda:h100_sm90": 7,
+        "cuda:5090_sm120": 3,  # 2: the bias-only one-direction path on sm_120a; 3 (2026-11-13): main's row-blocked / padded inference on the sm_120a build
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
     # (2026-11-12): row-blocked inference past a whole-pair budget (FoldForge OpenDDE refiner, 2976 / 3968 tokens at d_pair 384; A100: also
@@ -420,10 +421,10 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
             why = bidir_triattn_h100.single_refusal(self, pair, mask)
             return (None, why) if why is not None else ("bias_only", None)
         cap = torch.cuda.get_device_capability(pair.device)
-        if cap == (8, 0):
+        if cap in ((8, 0), (12, 0)):  # A100, or the RTX 5090: the same sm_80 sources built for sm_120a
             return self._cuda_route_sm80(pair, mask)
         if cap != (9, 0):
-            return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) kernels"
+            return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) / RTX 5090 (sm_120a) kernels"
         why = self._core_refusal(pair, mask)
         if why is not None:
             return None, why
@@ -1032,7 +1033,7 @@ class BidirectionalTriangleAttention(BackendModule, MasterWeights):
     """
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2}  # 2026-11-10: the sm_80 build of the H100 path
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: the sm_80 build of the H100 path; 2026-11-12: its sm_120a build
 
     backends = ("pytorch", "cuda")
 
@@ -1182,10 +1183,10 @@ def _trimul_cuda_route(module, pair, mask, dropout_p, *, bidirectional: bool) ->
     if not pair.is_cuda:
         return None, "the kernels run on CUDA tensors only"
     cap = torch.cuda.get_device_capability(pair.device)
-    if cap == (8, 0):
+    if cap in ((8, 0), (12, 0)):  # A100 and RTX 5090: the sm_80 sources (built for sm_120a on the 5090)
         return _trimul_cuda_route_sm80(module, pair, mask)
     if cap != (9, 0):
-        return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) kernels"
+        return None, "the cuda backend is the H100 (sm_90a) / A100 (sm_80) / RTX 5090 (sm_120a) kernels"
     if pair.dtype != torch.bfloat16:
         return None, f"dtype {pair.dtype}: the H100 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
     if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:
@@ -1212,7 +1213,7 @@ def _trimul_cuda_route_sm80(module, pair, mask) -> tuple[str | None, str | None]
     """``("sm80", None)``: the A100 TriMul (``kernels/integrations/trimul_sm80``: the D128 fused set, the wide set for D 64 / 256 / 384 / 512,
     inference and training, one plane per launch), else ``(None, reason)``. bf16 only (no fp32 TriMul, by policy)."""
     if pair.dtype != torch.bfloat16:
-        return None, f"dtype {pair.dtype}: the A100 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
+        return None, f"dtype {pair.dtype}: the A100 / RTX 5090 TriMul kernels are bf16 only (no fp32 TriMul, by policy)"
     if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:
         return None, f"pair must be [B, L, L, d_pair], got {tuple(pair.shape)}"
     if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(pair.shape[:2])):
@@ -1407,6 +1408,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         "cueq": 2,
         "cuda:a100_sm80": 8,  # 8 (2026-11-14): inference fronts: D256 k1tw (statistics in-kernel), outgoing planes written transposed (A^T B contraction), D64 hidden 64 k1t from L 640; 7: inference contraction bounded by the mask's live extents on the measured L2048 cells (bitwise the same); 6: D64 hidden 128 k1t; 5: k3s; 4: k1w64 / k3w
         "cuda:h100_sm90": 7,
+        "cuda:5090_sm120": 2,  # the sm_80 sources built for sm_120a (2026-11-12); 2 (2026-11-13): sm_120 k1w / k3w launch choices, backward GEMM calls per shape
     }  # 2026-11-10: rewired to the model kits; 2026-11-11: A100 inference pack read by captures; 3: A100 D64 persistent front (k1w64);
     # cuda:h100_sm90 2 (2026-11-12): inference planes past 8 GiB (OpenDDE refiner, d_pair 384 at 2976 / 3968) run K1 + the contraction in two
     # halves of the hidden channels; cuda:h100_sm90 3 (2026-11-12): the training row-dropout scale by the H100 Philox kernel in one launch (the
@@ -1628,12 +1630,13 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
         "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: trimul_native's sm_80 row native)
         "cuda:a100_sm80": 8,  # 8 (2026-11-14): as TriangleMultiplication's 8 (D64: transposed planes, k1t); 7: as its 7 (the bounded contraction); 6, 5: as its 6 / 5, 4
         "cuda:h100_sm90": 3,
+        "cuda:5090_sm120": 2,  # the sm_80 sources built for sm_120a (2026-11-12); 2 (2026-11-13): sm_120 k1w / k3w launch choices, backward GEMM calls per shape
     }  # 2026-11-10: sm_80 paths; 3: the inference pack read by captures; 4: A100 D64 persistent front (k1w64); cuda:h100_sm90 2
     # (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
-        if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0)):
-            return "the RF3 length factor is wired to the H100 (sm_90a) / A100 (sm_80) TriMul kernels only"
+        if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0), (12, 0)):
+            return "the RF3 length factor is wired to the H100 (sm_90a) / A100 (sm_80) / RTX 5090 (sm_120a) TriMul kernels only"
         one = pair[:1] if mask is not None and pair.shape[0] > 1 else pair  # per-sample launches: one sample's contract
         return _trimul_cuda_route(self, one, None if mask is None else mask[: one.shape[0]], dropout_p, bidirectional=False)[1]
 
@@ -1793,6 +1796,7 @@ class BidirectionalTriangleMultiplication(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 4,  # 4 (2026-11-14): D64 inference k3s (bit-identical); 3: k1w64 / k3w
         "cuda:h100_sm90": 4,
+        "cuda:5090_sm120": 2,  # the sm_80 sources built for sm_120a (2026-11-12); 2 (2026-11-13): sm_120 k1w / k3w launch choices, backward GEMM calls per shape
     }  # 2026-11-10: sm_80 k1w64 front (D64); cuda:h100_sm90 2 (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the
     # small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version;
     # cuda:h100_sm90 4 (2026-11-13): deterministic training backward at D256-512 (W_o column sums and the wide LayerNorm dgamma / dbeta by

@@ -36,8 +36,14 @@ struct Dkv32Cfg {
   static constexpr int ROWT_BYTES = 2 * BN * 4;               // lse | delta of a query tile
   static constexpr int BT_BYTES = BM * BN * 4;                // the transposed bias tile [128 k][BN q]
   static constexpr int STAGE = 2 * QD_BYTES + ROWT_BYTES + BT_BYTES;
+#ifdef MWE_SM120
+  // RTX 5090 (99 KB a block): K | V are read into registers once, before the ring starts -- the ring reuses their space (head dim 48 / 64 fit)
+  static constexpr int OFF_K = 0, OFF_V = KV_BYTES, OFF_STAGE = 0;
+  static constexpr int SMEM = 2 * KV_BYTES > NST * STAGE ? 2 * KV_BYTES : NST * STAGE;
+#else
   static constexpr int OFF_K = 0, OFF_V = KV_BYTES, OFF_STAGE = 2 * KV_BYTES;
   static constexpr int SMEM = OFF_STAGE + NST * STAGE;
+#endif
 };
 
 // the cp.async work of one pipeline stage of the key side (query tile s: Q, dO, lse | delta, the transposed bias tile)
@@ -108,8 +114,10 @@ __global__ void __launch_bounds__(256, G::MINB) attn_bwd_dkv_tf32_kernel(const D
     cp_async16(sbase + G::OFF_K + T::off(token, g), p.k + t * p.ldk + h * HD + g * 4);
     cp_async16(sbase + G::OFF_V + T::off(token, g), p.v + t * p.ldv + h * HD + g * 4);
   }
+#ifndef MWE_SM120
 #pragma unroll
   for (int s = 0; s < NST - 1; ++s) loader.issue(sbase, s, NJ);
+#endif
 
   float dkacc[NO][4], dvacc[NO][4];
 #pragma unroll
@@ -118,6 +126,19 @@ __global__ void __launch_bounds__(256, G::MINB) attn_bwd_dkv_tf32_kernel(const D
   const int krow = warp * 16 + (lane & 7) + 8 * ((lane >> 3) & 1);       // ldmatrix row of this lane in the K / V tile (A fragments)
   const int qrow = (lane & 7) + 8 * (lane >> 4);                         // ldmatrix row of this lane in a pair of query n-tiles (B fragments)
   uint32_t kf[KS][4], vf[KS][4];
+#ifdef MWE_SM120
+  cp_async_commit();                                           // K | V alone, into registers; then the ring takes their space
+  cp_async_wait<0>();
+  __syncthreads();
+#pragma unroll
+  for (int ks = 0; ks < KS; ++ks) {
+    ldsm_x4(kf[ks], sbase + G::OFF_K + T::off(krow, 2 * ks + (lane >> 4)));
+    ldsm_x4(vf[ks], sbase + G::OFF_V + T::off(krow, 2 * ks + (lane >> 4)));
+  }
+  __syncthreads();                                             // every warp holds its K / V fragments
+#pragma unroll
+  for (int s = 0; s < NST - 1; ++s) loader.issue(sbase, s, NJ);
+#else
   cp_async_wait<NST - 2>();                                    // group 0 (K | V and the first query tile) landed
   __syncthreads();
 #pragma unroll
@@ -125,6 +146,7 @@ __global__ void __launch_bounds__(256, G::MINB) attn_bwd_dkv_tf32_kernel(const D
     ldsm_x4(kf[ks], sbase + G::OFF_K + T::off(krow, 2 * ks + (lane >> 4)));
     ldsm_x4(vf[ks], sbase + G::OFF_V + T::off(krow, 2 * ks + (lane >> 4)));
   }
+#endif
 
   for (int s = 0; s < NJ; ++s) {
     cp_async_wait<NST - 2>();

@@ -44,6 +44,7 @@ using Cfg8 = a100::DualCfg<256, 64, 4, 2, 4>;       // Cfg5 with a 4-slice ring
 using Cfg9 = a100::DualCfg<128, 64, 2, 2, 5>;       // Cfg0 with a 5-slice ring (80 KB: still two CTAs per SM)
 using Cfg10 = a100::DualCfg<64, 64, 2, 2, 5>;       // Cfg2 with a 5-slice ring
 using Cfg11 = a100::DualCfg<128, 32, 4, 1, 5>;      // Cfg4 with a 5-slice ring
+using Cfg13 = a100::DualCfg<64, 32, 2, 2, 4>;       // 4 warps of 32 x (16 a + 16 b): few rows (the RTX 5090: twice the CTAs of Cfg2)
 
 template <class C>
 void launch_dual(const a100::DualParams& p, bool gate, int epi, cudaStream_t st) {
@@ -81,6 +82,7 @@ void dispatch_dual(int cfg, const a100::DualParams& p, bool gate, int epi, cudaS
     case 9: launch_dual<Cfg9>(p, gate, epi, st); break;
     case 10: launch_dual<Cfg10>(p, gate, epi, st); break;
     case 11: launch_dual<Cfg11>(p, gate, epi, st); break;
+    case 13: launch_dual<Cfg13>(p, gate, epi, st); break;
     default: TORCH_CHECK(false, "dual tile config ", cfg);
   }
 }
@@ -98,6 +100,7 @@ int hidden_per_cta(int cfg) {
     case 9: return Cfg9::HPW * Cfg9::WN;
     case 10: return Cfg10::HPW * Cfg10::WN;
     case 11: return Cfg11::HPW * Cfg11::WN;
+    case 13: return Cfg13::HPW * Cfg13::WN;
   }
   return 64;
 }
@@ -150,6 +153,7 @@ using RCfg7 = a100::GCfg<256, 128, 32, 4, 2, 4>;    // RCfg4 with a 4-slice ring
 using RCfg8 = a100::GCfg<128, 64, 32, 4, 1, 5>;     // RCfg3 with a 5-slice ring
 using RCfg9 = a100::GCfg<128, 256, 64, 2, 4, 3>;    // the shape of cuBLAS's 128x256_64x3 kernel (147 KB, one CTA per SM)
 using RCfg10 = a100::GCfg<256, 128, 64, 4, 2, 3>;
+using RCfg12 = a100::GCfg<64, 64, 32, 2, 2, 4>;      // 4 warps of 32 x 32: few rows (the RTX 5090; the fp32 bindings' RCfg11)
 
 template <class C>
 void launch_res(const a100::ResParams& p, cudaStream_t st) {
@@ -162,7 +166,7 @@ void launch_res(const a100::ResParams& p, cudaStream_t st) {
 int bn_of_res(int cfg) {
   switch (cfg) {
     case 0: return RCfg0::BN; case 1: return RCfg1::BN; case 2: return RCfg2::BN; case 3: return RCfg3::BN; case 4: return RCfg4::BN;
-    case 5: return RCfg5::BN; case 6: return RCfg6::BN; case 7: return RCfg7::BN; case 8: return RCfg8::BN; case 9: return RCfg9::BN; case 10: return RCfg10::BN;
+    case 5: return RCfg5::BN; case 6: return RCfg6::BN; case 7: return RCfg7::BN; case 8: return RCfg8::BN; case 9: return RCfg9::BN; case 10: return RCfg10::BN; case 12: return RCfg12::BN;
   }
   return 128;
 }
@@ -365,6 +369,7 @@ torch::Tensor gemm_res(torch::Tensor a, torch::Tensor w, torch::Tensor res, int6
     case 8: launch_res<RCfg8>(p, st); break;
     case 9: launch_res<RCfg9>(p, st); break;
     case 10: launch_res<RCfg10>(p, st); break;
+    case 12: launch_res<RCfg12>(p, st); break;
     default: TORCH_CHECK(false, "res tile config ", cfg);
   }
   return out;
