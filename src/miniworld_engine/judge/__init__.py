@@ -265,7 +265,7 @@ def issue(paths: list[str], now: Now) -> int:
                 if (rec.get("gpu") or card_of(meta.get("env") or {})) != now.gpu:
                     counts[f"record of another card (not {now.gpu})"] += 1
                     continue
-                if cfgmod.kit_stack(now.gpu, rec["backend"]) != cfgmod.on_kit_stack(meta.get("env") or {}):
+                if cfgmod.kit_stack(now.gpu, rec["backend"]) != cfgmod.on_kit_stack(meta.get("env") or {}, now.gpu):
                     counts["record not from its backend's stack (kit stack: KIT_STACK_BACKENDS)"] += 1
                     continue
                 key = case_key(kind, rec)

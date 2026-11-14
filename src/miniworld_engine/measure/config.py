@@ -79,11 +79,16 @@ def kit_stack_env(gpu: str) -> dict:
     return KIT_STACK_ENVS.get(gpu, {})
 
 
-def on_kit_stack(env: dict) -> bool:
+def on_kit_stack(env: dict, gpu: str | None = None) -> bool:
     """Whether a record's environment is a kits' CUDA-13 stack: its torch is a CUDA-13 build (the H100 container) or its process ran on a
-    CUDA-13 driver library (``cuda_driver``, ``cuDriverGetVersion``: the forward-compatible libcuda of the A100 wrapper)."""
+    CUDA-13 driver library (``cuda_driver``, ``cuDriverGetVersion``: the forward-compatible libcuda of the A100 wrapper).
+    A card with no kit stack (``gpu`` not in ``KIT_STACK_ENVS``: the RTX 5090, whose own driver is CUDA 13 natively) is never judged by its driver."""
     major = lambda v: str(v or "").split(".")[0]
-    return major(env.get("cuda")) == "13" or major(env.get("cuda_driver")) == "13"
+    if major(env.get("cuda")) == "13":
+        return True
+    if gpu is not None and gpu not in KIT_STACK_ENVS:
+        return False
+    return major(env.get("cuda_driver")) == "13"
 
 
 #: Backends measured with TF32 products allowed in float32 PyTorch matmuls: every backend (user decisions 2026-11-10: first the
