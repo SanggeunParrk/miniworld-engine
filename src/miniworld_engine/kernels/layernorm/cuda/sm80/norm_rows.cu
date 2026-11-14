@@ -14,7 +14,11 @@
 //             M pays for).  Large M: the persistent warps take chunks of row groups from a work counter (static assignment left 10-30 % on the table at wide rows: the CTAs
 //             finish at different times), which makes the order of the rows inside the partial rows -- dw / db, not dx -- vary from run to run (fp32 rounding); small M: static
 //             assignment, bit-reproducible.
-// Scalar path (any other width / alignment): a warp per row, lane l on columns l, l + 32, ...; with the row cached in registers up to 32 * VS columns.
+// Scalar path (any other width / alignment): a warp per row, lane l on columns l, l + 32, ...; with the row cached in registers up to 32 * VS columns.  Every load of a row and of its weight / bias is a volatile
+//             read-only load issued up front (the compiler left to itself issued them in groups of six and waited for each group).  The weight / bias dtype is a template constant of every
+//             forward kernel (a runtime flag put each parameter load behind a predicated convert that waited for it: a DRAM round trip per chunk).
+// Row-per-CTA path (RTX 5090 only: odd widths up to 1024, at most 2048 rows): a CTA of 128 threads a row (a third of the loads and arithmetic a thread issues; a call of a few hundred rows is
+//             latency bound), the two row sums a shuffle and a fixed-order sum of the four warp partials.
 // Staged path (odd widths, many rows): tiles of rows copied to shared memory with cp.async by 4-warp CTAs, normalised there (the affine in registers), copied back out.
 #include "norm_common.cuh"
 
@@ -23,8 +27,6 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <algorithm>
-#include <cstdio>
-#include <cstdlib>
 #include <map>
 #include <type_traits>
 #include <utility>
@@ -982,18 +984,10 @@ FwdCfg fwd_cfg_bf16(int N, long M, int G0) {
 // (lane group, chunks per lane, row groups per warp) the bf16 configurations above add to the default pairs
 #define NORMS_TRIPLES_FWD_BF(X) X(2, 1, 2) X(2, 1, 4) X(8, 1, 2) X(4, 2, 1) X(4, 2, 2) X(16, 1, 2) X(32, 1, 2) X(16, 3, 2) X(32, 2, 2) X(32, 3, 2)
 
-// DEV (probe only): MWE_LN_FWD="early,stage,un" overrides the parameter-load mode (V > 4), the staged forward's minimum rows and the row groups a warp
-struct FwdDev { int early = -1, stage = -1, un = 0, rc = 0; };
-inline const FwdDev& fwd_dev() {
-  static const FwdDev d = [] {
-    FwdDev r;
-    if (const char* s = std::getenv("MWE_LN_FWD")) std::sscanf(s, "%d,%d,%d,%d", &r.early, &r.stage, &r.un, &r.rc);
-    return r;
-  }();
-  return d;
-}
-// weight / bias loaded up front: always for V <= 4; wider rows by this default
-template <typename XT, int V> constexpr bool early_default() { return V <= 6; }   // wider rows (d 2560 bf16: V 10) only while the problem is small (below)
+// Weight / bias loaded up front (every load of the row and of its parameters in flight together: one DRAM round trip instead of two): the rows of up to 6 chunks a lane always (fp32 d 768,
+// bf16 d 768 / 512 / ...), the wider ones (bf16 d 2560: 10 chunks, 160 parameter registers) while the call is small enough (a few hundred rows: occupancy is not the limit);
+// a large call keeps the per-chunk parameter loads behind the statistics.  A100 d 2560 L 768: 1.35x -> 0.84x of the Triton kernel; fp32 d 768: 1.3-1.5x -> 0.9x.
+template <typename XT, int V> constexpr bool early_default() { return V <= 6; }
 constexpr long EARLY_MAX_ROWS = 2048;
 
 template <typename XT, bool RMS, int G, int V, int UN, bool E>
@@ -1008,12 +1002,12 @@ void run_fwd_vec_cfg(const XT* X, XT* Y, const void* W, const void* B, bool w_bf
 
 template <typename XT, bool RMS, int G, int V, int UN>
 void run_fwd_vec(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
-  if constexpr (V <= 4) {
+  if constexpr (early_default<XT, V>()) {
+    run_fwd_vec_cfg<XT, RMS, G, V, UN, true>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
+  } else if (M <= EARLY_MAX_ROWS) {
     run_fwd_vec_cfg<XT, RMS, G, V, UN, true>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   } else {
-    const int e = fwd_dev().early;
-    if (e < 0 ? (early_default<XT, V>() || M <= EARLY_MAX_ROWS) : e != 0) run_fwd_vec_cfg<XT, RMS, G, V, UN, true>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
-    else run_fwd_vec_cfg<XT, RMS, G, V, UN, false>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
+    run_fwd_vec_cfg<XT, RMS, G, V, UN, false>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
   }
 }
 
@@ -1054,14 +1048,17 @@ void run_fwd_rowcta(const XT* X, XT* Y, const void* W, const void* B, bool w_bf,
   else fwd_rowcta<XT, VK, RMS, false><<<(unsigned)M, NTR, 0, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps);
 }
 
-// rows served by the row-per-CTA kernel instead of the warp-per-row one (odd widths up to 1024): DEV override MWE_LN_FWD 4th field (-1: never)
-constexpr long ROWCTA_MAX_ROWS = 2048;
+// rows served by the row-per-CTA kernel instead of the warp-per-row one (odd widths up to 1024):
+#if defined(MWE_SM120)
+constexpr long ROWCTA_MAX_ROWS = 2048;    // RTX 5090: 833 x 128 .. 2048 rows 1.0-1.3 of the Triton kernel -> 0.85-1.0 (kernel durations, L2 flushed)
+#else
+constexpr long ROWCTA_MAX_ROWS = -1;      // A100: the warp-per-row kernel is 8 % faster there (probe), the row-per-CTA one is not used
+#endif
 
 template <typename XT, bool RMS>
 void launch_fwd_scalar(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
   {
-    const long lim = fwd_dev().rc != 0 ? (long)fwd_dev().rc : ROWCTA_MAX_ROWS;
-    if (N <= 1024 && N > 128 && M <= lim) {
+    if (N <= 1024 && N > 128 && M <= ROWCTA_MAX_ROWS) {
       const int vk = (N + NTR - 1) / NTR;
       switch (vk) {
 #define RC(v) case v: run_fwd_rowcta<XT, RMS, v>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return;
@@ -1085,8 +1082,6 @@ void launch_fwd_scalar(const XT* X, XT* Y, const void* W, const void* B, bool w_
 int gcd_i(int a, int b) { while (b) { const int t = a % b; a = b; b = t; } return a; }
 constexpr int STAGE_MAX_N = 1024;                     // widest odd row of the staged path (the scalar path beyond)
 constexpr long STAGE_MIN_ROWS = 4096;                 // fewer rows: the scalar kernels (a CTA per tile is not worth it)
-// (the scalar forward issues every load of a row up front: it beats the staged one below STAGE_MIN_ROWS on both cards, bf16 and fp32 -- RTX 5090 833 x 128 bf16 5.9 -> 4.2 us)
-template <typename XT> constexpr long STAGE_MIN_ROWS_FWD = STAGE_MIN_ROWS;
 constexpr size_t STAGE_TILE_BYTES = 10 * 1024;        // target bytes of one tensor of a tile
 
 struct StageGeom { int U, R; long rowb; };
@@ -1118,7 +1113,7 @@ void run_fwd_stage(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, 
 
 template <typename XT, bool RMS>
 bool launch_fwd_stage(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
-  if (N > STAGE_MAX_N || M < (fwd_dev().stage >= 0 ? (long)fwd_dev().stage : STAGE_MIN_ROWS_FWD<XT>) || !aligned16(X) || !aligned16(Y)) return false;
+  if (N > STAGE_MAX_N || M < STAGE_MIN_ROWS || !aligned16(X) || !aligned16(Y)) return false;
   const long rowb = (long)N * (long)sizeof(XT);
   const int U = 16 / gcd_i(16, (int)(rowb % 16 == 0 ? 16 : rowb % 16));
   const int R = (int)(std::max<long>(1, STAGE_FWD_TILE / ((long)U * rowb)) * U);
