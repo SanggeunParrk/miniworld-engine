@@ -23,8 +23,6 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <algorithm>
-#include <cstdio>
-#include <cstdlib>
 #include <map>
 #include <type_traits>
 #include <utility>
@@ -33,7 +31,7 @@ using namespace norms;
 
 namespace {
 
-constexpr int NTF = 128;      // threads per CTA, vector backward forward-kernel default (the forward picks 32 / 64 / 128 by size)
+constexpr int NTF = 128;      // threads per CTA, forward kernels
 constexpr int NTB = 256;      // threads per CTA, vector backward
 constexpr int CHUNK_GROUPS = 4;   // row groups a persistent backward warp takes from the work counter at a time
 
@@ -48,15 +46,22 @@ __device__ __forceinline__ const void* param_ptr(const void* p, bool is_bf16, lo
 // ------------------------------------------------------------------------------------------------------------------ forward, vector path
 // UN row groups per warp (a warp's 32 / G rows each, UN groups `wstride` apart): the loads of all of them are issued before any is computed and the weight / bias are loaded once for all
 // of them -- a warp moves UN V 512 bytes at a time instead of V 512, which is what a mid-sized problem (a few waves of one-shot CTAs) needs to keep its bytes in flight.
-template <typename XT, int G, int V, int UN, bool RMS, int NW, bool WEARLY>
-__global__ void __launch_bounds__(NW * 32) fwd_vec(const XT* __restrict__ X, XT* __restrict__ Y, const void* __restrict__ W, const void* __restrict__ B, bool w_bf,
+template <typename XT, int G, int V, int UN, bool RMS, bool WBF>
+__global__ void __launch_bounds__(NTF) fwd_vec(const XT* __restrict__ X, XT* __restrict__ Y, const void* __restrict__ W, const void* __restrict__ B, bool,
                                                const XT* __restrict__ RS, float* __restrict__ MEAN, float* __restrict__ RSTD, long M, int N, float eps) {
+  constexpr bool w_bf = WBF;   // the parameter dtype is a compile-time constant: a runtime flag put every parameter load behind a predicated convert that waited for it (a DRAM round trip per chunk)
   constexpr int CE = Chunk<XT>::CE, RPW = 32 / G;
+#if defined(MWE_SM120)
+  // RTX 5090: fp32 rows of up to 6 chunks a lane (d 768) also load their weight / bias up front (lnbench.py, L2 flushed: 768 x 2560 fp32 18.1 -> 11.8 us)
+  constexpr bool WEARLY = V <= (sizeof(XT) == 4 ? 6 : 4);
+#else
+  constexpr bool WEARLY = V <= 4;        // weight / bias loaded up front (wide rows load them per chunk to stay inside the register budget)
+#endif
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int g = lane & (G - 1), sub = lane / G;
-  const long rg0 = (long)blockIdx.x * NW + warp;
+  const long rg0 = (long)blockIdx.x * (NTF / 32) + warp;
   if (rg0 * RPW >= M) return;
-  const long wstride = (long)gridDim.x * NW;
+  const long wstride = (long)gridDim.x * (NTF / 32);
 
   uint4 xr[UN][V];
   long row[UN];
@@ -420,11 +425,12 @@ __device__ __forceinline__ void norm_row_scalar(const XT* x, XT* y, int N, int l
   rstd_out = rstd;
 }
 
-template <typename XT, int VS, bool RMS, int NW>
-__global__ void __launch_bounds__(NW * 32) fwd_scalar(const XT* __restrict__ X, XT* __restrict__ Y, const void* __restrict__ W, const void* __restrict__ B, bool w_bf,
+template <typename XT, int VS, bool RMS, bool WBF>
+__global__ void __launch_bounds__(NTF) fwd_scalar(const XT* __restrict__ X, XT* __restrict__ Y, const void* __restrict__ W, const void* __restrict__ B, bool,
                                                   const XT* __restrict__ RS, float* __restrict__ MEAN, float* __restrict__ RSTD, long M, int N, float eps) {
+  constexpr bool w_bf = WBF;
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-  const long row = (long)blockIdx.x * NW + warp;
+  const long row = (long)blockIdx.x * (NTF / 32) + warp;
   if (row >= M) return;
   float mean, rstd;
   norm_row_scalar<XT, VS, RMS>(X + row * N, Y + row * N, N, lane, W, B, w_bf, RS ? to_f(RS[row]) : 1.f, eps, mean, rstd);
@@ -443,11 +449,12 @@ __global__ void __launch_bounds__(NW * 32) fwd_scalar(const XT* __restrict__ X, 
 // staged forward, general/ln_rows.cu, is the same scheme).  VS = ceil(N / 32) rounded up to a built value (an exact fit for the requirement widths: idle slots are issue).
 constexpr int NTG = 256, NWG = NTG / 32;   // the staged backward's CTA
 
-template <typename XT, int VS, bool RMS, int NW>
-__global__ void __launch_bounds__(NW * 32) fwd_stage(const XT* __restrict__ X, XT* __restrict__ Y, const void* __restrict__ W, const void* __restrict__ B, bool w_bf,
+template <typename XT, int VS, bool RMS, int NW, bool WBF>
+__global__ void __launch_bounds__(NW * 32) fwd_stage(const XT* __restrict__ X, XT* __restrict__ Y, const void* __restrict__ W, const void* __restrict__ B, bool,
                                                      const XT* __restrict__ RS, float* __restrict__ MEAN, float* __restrict__ RSTD, long Mfull, int N, int R, float eps) {
   extern __shared__ __align__(16) unsigned char smem[];
   constexpr int NT = NW * 32;
+  constexpr bool w_bf = WBF;
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const long rowb = (long)N * sizeof(XT);
   const long row0 = (long)blockIdx.x * R;
@@ -887,63 +894,15 @@ FwdCfg fwd_cfg_bf16(int N, long M, int G0) {
 }
 // (lane group, chunks per lane, row groups per warp) the bf16 configurations above add to the default pairs
 #define NORMS_TRIPLES_FWD_BF(X) X(2, 1, 2) X(2, 1, 4) X(8, 1, 2) X(4, 2, 1) X(4, 2, 2) X(16, 1, 2) X(32, 1, 2) X(16, 3, 2) X(32, 2, 2) X(32, 3, 2)
-#define NORMS_TRIPLES_FWD_F32(X) X(32, 6, 2) X(32, 4, 2) X(32, 3, 2) X(32, 8, 2)
-
-// ---- CTA size of the one-shot forward kernels: a CTA of NW warps.  A small problem (fewer warps than 4 per SM) spreads over all the SMs with one-warp CTAs: the bytes of a few
-// CTAs all cross one SM's L2 port, and a row per warp is what the lane group already is.  DEV: MWE_LN_FWD="nw[,early[,k]]" (probe only).
-struct FwdDev { int nw = 0, early = -1, k = 10, stage = -1, un = 0; };
-inline const FwdDev& fwd_dev() {
-  static const FwdDev d = [] {
-    FwdDev r;
-    if (const char* s = std::getenv("MWE_LN_FWD")) std::sscanf(s, "%d,%d,%d,%d,%d", &r.nw, &r.early, &r.k, &r.stage, &r.un);
-    return r;
-  }();
-  return d;
-}
-inline int pick_nw(long warps) {
-  const FwdDev& d = fwd_dev();
-  if (d.nw > 0) return d.nw;
-  const long sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount * (long)d.k / 10;
-  return warps >= 4 * sm ? 4 : (warps >= 2 * sm ? 2 : 1);
-}
-// weight / bias loaded up front: always for V <= 4; wider rows only where the registers allow (and the call is small enough that occupancy is not the limit)
-template <typename XT, int V> constexpr bool early_default() {
-#if defined(MWE_SM120)
-  return V <= (sizeof(XT) == 4 ? 6 : 4);
-#else
-  return V <= 4;
-#endif
-}
-
-template <typename XT, bool RMS, int G, int V, int UN, int NW, bool E>
-void run_fwd_vec_cfg(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
-  constexpr int RPW = 32 / G;
-  const long groups = (M + RPW - 1) / RPW;
-  const long warps = (groups + UN - 1) / UN;
-  const long grid = (warps + NW - 1) / NW;
-  fwd_vec<XT, G, V, UN, RMS, NW, E><<<(unsigned)grid, NW * 32, 0, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps);
-}
-
-template <typename XT, bool RMS, int G, int V, int UN, bool E>
-void run_fwd_vec_nw(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
-  constexpr int RPW = 32 / G;
-  const long warps = (((M + RPW - 1) / RPW) + UN - 1) / UN;
-  const int nw = UN == 1 ? pick_nw(warps) : 4;
-  if (nw == 1) run_fwd_vec_cfg<XT, RMS, G, V, UN, 1, E>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
-  else if (nw == 2) run_fwd_vec_cfg<XT, RMS, G, V, UN, 2, E>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
-  else run_fwd_vec_cfg<XT, RMS, G, V, UN, 4, E>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
-}
 
 template <typename XT, bool RMS, int G, int V, int UN>
 void run_fwd_vec(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
-  constexpr bool E0 = V <= 4 || early_default<XT, V>();
-  if constexpr (V <= 4) {
-    run_fwd_vec_nw<XT, RMS, G, V, UN, E0>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
-  } else {
-    const int e = fwd_dev().early;
-    if (e < 0 ? E0 : e != 0) run_fwd_vec_nw<XT, RMS, G, V, UN, true>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
-    else run_fwd_vec_nw<XT, RMS, G, V, UN, false>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
-  }
+  constexpr int RPW = 32 / G;
+  const long groups = (M + RPW - 1) / RPW;
+  const long warps = (groups + UN - 1) / UN;
+  const long grid = (warps + NTF / 32 - 1) / (NTF / 32);
+  if (w_bf) fwd_vec<XT, G, V, UN, RMS, true><<<(unsigned)grid, NTF, 0, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps);
+  else fwd_vec<XT, G, V, UN, RMS, false><<<(unsigned)grid, NTF, 0, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps);
 }
 
 template <typename XT, bool RMS>
@@ -958,12 +917,11 @@ bool launch_fwd_vec(int NV, const XT* X, XT* Y, const void* W, const void* B, bo
       un = c.UN;
     }
   }
-  if (fwd_dev().un > 0 && G > 0) un = fwd_dev().un;
 
 #if defined(MWE_SM120)
   // RTX 5090: fp32 rows of 6 chunks a lane (d 768) take two row groups a warp (more bytes in flight: 768 x 2560 fp32 11.8 -> 10.6 us with the early parameters)
   if constexpr (std::is_same_v<XT, float>) {
-    if (G == 32 && V == 6 && fwd_dev().un != 1) { run_fwd_vec<XT, RMS, 32, 6, 2>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
+    if (G == 32 && V == 6) { run_fwd_vec<XT, RMS, 32, 6, 2>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
   }
 #endif
 #define TRY(g, v) if (G == g && V == v && un == 1) { run_fwd_vec<XT, RMS, g, v, 1>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
@@ -974,26 +932,14 @@ bool launch_fwd_vec(int NV, const XT* X, XT* Y, const void* W, const void* B, bo
     NORMS_TRIPLES_FWD_BF(TRY3)
 #undef TRY3
   }
-  if constexpr (std::is_same_v<XT, float>) {
-#define TRY3(g, v, u) if (G == g && V == v && un == u) { run_fwd_vec<XT, RMS, g, v, u>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
-    NORMS_TRIPLES_FWD_F32(TRY3)
-#undef TRY3
-  }
   return false;
-}
-
-template <typename XT, bool RMS, int VS, int NW>
-void run_fwd_scalar_nw(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
-  const long grid = (M + NW - 1) / NW;
-  fwd_scalar<XT, VS, RMS, NW><<<(unsigned)grid, NW * 32, 0, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps);
 }
 
 template <typename XT, bool RMS, int VS>
 void run_fwd_scalar(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
-  const int nw = pick_nw(M);
-  if (nw == 1) run_fwd_scalar_nw<XT, RMS, VS, 1>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
-  else if (nw == 2) run_fwd_scalar_nw<XT, RMS, VS, 2>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
-  else run_fwd_scalar_nw<XT, RMS, VS, 4>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st);
+  const long grid = (M + NTF / 32 - 1) / (NTF / 32);
+  if (w_bf) fwd_scalar<XT, VS, RMS, true><<<(unsigned)grid, NTF, 0, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps);
+  else fwd_scalar<XT, VS, RMS, false><<<(unsigned)grid, NTF, 0, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps);
 }
 
 template <typename XT, bool RMS>
@@ -1043,7 +989,7 @@ constexpr long STAGE_FWD_TILE = 16384;
 template <typename XT, bool RMS, int VS>
 void run_fwd_stage(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long Mfull, int N, int R, long rowb, float eps, cudaStream_t st) {
   const size_t smem = (size_t)R * rowb;
-  auto k = fwd_stage<XT, VS, RMS, STAGE_FWD_NW>;
+  auto k = w_bf ? fwd_stage<XT, VS, RMS, STAGE_FWD_NW, true> : fwd_stage<XT, VS, RMS, STAGE_FWD_NW, false>;
   if (smem > 48 * 1024) cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   const long grid = (Mfull + R - 1) / R;
   k<<<(unsigned)grid, STAGE_FWD_NW * 32, smem, st>>>(X, Y, W, B, w_bf, RS, MEAN, RSTD, Mfull, N, R, eps);
@@ -1051,7 +997,7 @@ void run_fwd_stage(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, 
 
 template <typename XT, bool RMS>
 bool launch_fwd_stage(const XT* X, XT* Y, const void* W, const void* B, bool w_bf, const XT* RS, float* MEAN, float* RSTD, long M, int N, float eps, cudaStream_t st) {
-  if (N > STAGE_MAX_N || M < (fwd_dev().stage >= 0 ? (long)fwd_dev().stage : STAGE_MIN_ROWS_FWD<XT>) || !aligned16(X) || !aligned16(Y)) return false;
+  if (N > STAGE_MAX_N || M < STAGE_MIN_ROWS_FWD<XT> || !aligned16(X) || !aligned16(Y)) return false;
   const long rowb = (long)N * (long)sizeof(XT);
   const int U = 16 / gcd_i(16, (int)(rowb % 16 == 0 ? 16 : rowb % 16));
   const int R = (int)(std::max<long>(1, STAGE_FWD_TILE / ((long)U * rowb)) * U);
