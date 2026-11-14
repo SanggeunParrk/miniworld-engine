@@ -503,7 +503,8 @@ def _forward(
         and tuple(wcat.shape) == (4 * HD + _hp(H), C)
     )
     if FRONT_Y16_SHORT and FRONT_Y16 and fused and head_dim == D and (C, HD) in _FRONT_Y16_KEYS and L > 256 and _core_mod.INFERENCE_FP16:
-        fused = False  # LABELED (default off): the fp16-route front also below ``_FRONT_L`` (the bf16 front's bits change; see FRONT_Y16_SHORT)
+        # LABELED (default off): the fp16-route front also below ``_FRONT_L`` (the bf16 front's bits change; see FRONT_Y16_SHORT)
+        fused = False
     # inference on the fp16 core (h100_sm90.INFERENCE_FP16): q / k / v and the bias in fp16, from the fused front or (L > 256) fp16 GEMMs
     h16 = (not need) and _core_mod.INFERENCE_FP16 and (fused or L > 256)
     # heads of 16 channels on the fused front + fp16 core: q / k / v / g / u stay compact (16 channels a head; the core's loads zero-pad
@@ -513,7 +514,13 @@ def _forward(
     wo_use = _compact_out(wo_p, H) if compact else wo_p
     btr = False  # the bias tiles the core reads transposed (set by the fused front for AF3's ending node)
     y16 = (
-        FRONT_Y16 and h16 and not fused and (not need) and head_dim == D and (C, HD) in _FRONT_Y16_KEYS and L > 256
+        FRONT_Y16
+        and h16
+        and not fused
+        and (not need)
+        and head_dim == D
+        and (C, HD) in _FRONT_Y16_KEYS
+        and L > 256
         and tuple(wcat.shape) == (4 * HD + _hp(H), C)
     )  # the fp16-exact fused front where the unfused route would run LN + cuBLAS fp16 GEMMs + bias kernel
     if fused or y16:  # LN + projection + head-major scaled bias: one kernel (and the flip of AF3's ending node in its bias store)
