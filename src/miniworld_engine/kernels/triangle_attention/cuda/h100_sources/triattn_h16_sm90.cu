@@ -145,6 +145,9 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
 #ifndef TA_N24
 #define TA_N24 1          // 16-channel heads: [O | l] += P [V | 1] as m64n24 (16 value channels + one 8-column ones block, V and ones in 32-byte-swizzle MN-major atoms) instead of n40 (32 zero-padded channels + ones).  Bit-identical (the extra columns were exact zeros)
 #endif
+#ifndef TA_K16
+#define TA_K16 1          // 16-channel heads with TA_N24: K read as the 16 channels only (32-byte swizzle, 4 KiB instead of 8 KiB per stage); the k16 step reads the same values (bit-identical)
+#endif
 #ifndef TA_ABL
 #define TA_ABL 0         // ablation bit mask (time only, WRONG results): 1 no QK wgmma, 2 no PV wgmma (the probabilities stay live), 4 no exp, 8 no scale/offset HFMA2, 16 no max machinery, 32 no bias ldmatrix, 128 no X phase
 #endif
@@ -214,6 +217,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
                                                          // counted by the producer warpgroup once per CTA (no glue kernels before the launch)
   constexpr bool VOTE = SPEC && TA_SPEC == 2;    // TA_SPEC 2: no fix list (see X)
   constexpr bool N24 = (DH != D) && TA_N24;       // PV as m64n24 (see TA_N24); the V tile is then 16 channels in the 32-byte swizzle
+  constexpr bool K16 = N24 && TA_K16;
   constexpr int OW = (DH == D || !N24) ? 20 : 12;     // accumulator registers per row: [O | l] columns, the row sums in the last two pairs
   constexpr int LS = OW - 4;                       // o[r][LS] = row g sum, o[r][LS + 2] = row g + 8
   constexpr bool SWM = (TA_SW == 2) ? (DH != D) : (TA_SW == 1);   // the software-pipelined sub-step (step_sw): TA_SW 2 = the 16-channel heads only
@@ -287,7 +291,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       for (int r = 0; r < R; ++r) {
         wait(kve(st), kph ^ 1);
         const bool skip = (TA_ABL & 256) && r == 1;
-        expect_tx(kvf(st), skip ? 0 : (N24 ? KVT * 2 + KVT : 2 * KVT * 2));
+        expect_tx(kvf(st), skip ? 0 : (N24 ? (K16 ? KVT * 2 : KVT * 2 + KVT) : 2 * KVT * 2));
         const int rw = row0(b, g * R + r) + j * BN;
         if (CL) {   // rank 0: the K tile, rank 1: the V tile, each to both CTAs of the pair (both expect all 16 KiB on their own barrier)
           if (crank == 0) load_2d_mc(&kmap, sKV + st * STG * 2, kvf(st), h * D, rw, 3);
@@ -378,7 +382,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // BTR (the bias tile stored [key][query]: AF3's ending node, the pair-as-stored bias): query half w, key row 8 (lane / 16) + lane % 8 of a
   // 16-key block, the 16-byte chunk of queries 16 wi + 8 ((lane / 8) % 2) (128-byte swizzle: chunk ^ row % 8)
   const uint32_t tlane = sB + w * BM * 128 + (8 * lcol8 + x7) * 128 + (((2 * wi + ((lane >> 3) & 1)) ^ x7) << 4);
-  const uint64_t kd0 = desc_k64(sKV), vd0 = N24 ? gdesc(sKV + KVT * 2, KVT * 2, 256, SW32) : desc_mn64(sKV + KVT * 2, KVT * 2);   // built once: a wgmma operand costs one 32-bit add
+  const uint64_t kd0 = K16 ? gdesc(sKV, 16, 256, SW32) : desc_k64(sKV), vd0 = N24 ? gdesc(sKV + KVT * 2, KVT * 2, 256, SW32) : desc_mn64(sKV + KVT * 2, KVT * 2);   // built once: a wgmma operand costs one 32-bit add
   const uint32_t scl2 = hdup(scl);
   // cursors: the K | V stage and bias stage the next G phase reads; the stage whose PV was issued last (released once it retired)
   int gst = 0, gph = 0, bs = 0, bph = 0, xst = 0, bad = 0, ovf = 0;
@@ -702,6 +706,9 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
     return make_map<2>(t.data_ptr(), {(uint64_t)(H * D), rows}, {(uint64_t)ld}, {32, 128}, CU_TENSOR_MAP_SWIZZLE_64B, what,
                        CU_TENSOR_MAP_DATA_TYPE_FLOAT16); };
   CUtensorMap qm = m2(q, "q"), km = m2(k, "k"), vm = m2(v, "v");
+  if (dh != D && TA_N24 && TA_K16)   // K likewise: the 16 channels, 32-byte swizzle (K-major atoms of 8 keys x 32 bytes)
+    km = make_map<3>(k.data_ptr(), {(uint64_t)dh, (uint64_t)H, rows}, {(uint64_t)dh, (uint64_t)ld}, {16, 1, 128}, CU_TENSOR_MAP_SWIZZLE_32B, "k",
+                     CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
   if (dh != D && TA_N24)   // PV as n24: V read as the 16 channels only, in the 32-byte swizzle (MN-major atoms of 8 keys x 16 channels)
     vm = make_map<3>(v.data_ptr(), {(uint64_t)dh, (uint64_t)H, rows}, {(uint64_t)dh, (uint64_t)ld}, {16, 1, 128}, CU_TENSOR_MAP_SWIZZLE_32B, "v",
                      CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
