@@ -35,6 +35,9 @@ using XE=cutlass::bfloat16_t;   // the pair x is bf16 in both
 #ifndef MW_F3_PF
 #define MW_F3_PF 4   // Y16 LayerNorm: rows per thread whose global loads are issued together
 #endif
+#ifndef MW_F3_PF2
+#define MW_F3_PF2 2   // bf16 LayerNorm: rows per thread whose global loads are issued together
+#endif
 #ifndef MW_F3_STAGES
 #define MW_F3_STAGES 4
 #endif
@@ -160,17 +163,27 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
   {
     constexpr int T=C<256?4:8,RP=256/T,CH=C/8,PER=CH/T;
     int sub=tid%T,rg=tid/T;
+    // the rows' global loads are issued MW_F3_PF2 rows at a time (a thread had 2 loads in flight per row; the HBM latency then dominated)
+    constexpr int RPT=128/RP,G=RPT<MW_F3_PF2?RPT:MW_F3_PF2;
 #ifdef MW_F3_ABL_NOLN
-    for(int r=rg;r<0;r+=RP) {
+    for(int r0=0;r0<0;r0+=G) {
 #else
-    for(int r=rg;r<128;r+=RP) {
+    for(int r0=0;r0<RPT;r0+=G) {
 #endif
-      int64_t row=base+r;float vals[PER*8],mean=0.f,var=0.f;
+    uint4 pre[G][PER];
+    #pragma unroll
+    for(int gi=0;gi<G;++gi) {
+      int64_t row=base+rg+RP*(r0+gi),prow=row;
+      if(tr&1){int64_t ll=int64_t(L)*L,bb=row/ll,rem=row-bb*ll,ii=rem/L,jj=rem-ii*L;prow=bb*ll+jj*L+ii;}   // ending node: physical row (b, j, i)
+      #pragma unroll
+      for(int i=0;i<PER;++i) pre[gi][i]=*reinterpret_cast<uint4 const*>(x+prow*C+(sub+T*i)*8);
+    }
+    #pragma unroll
+    for(int gi=0;gi<G;++gi) {
+      const int r=rg+RP*(r0+gi);int64_t row=base+r;float vals[PER*8],mean=0.f,var=0.f;
       #pragma unroll
       for(int i=0;i<PER;++i) {
-        int64_t prow=row;
-        if(tr&1){int64_t ll=int64_t(L)*L,bb=row/ll,rem=row-bb*ll,ii=rem/L,jj=rem-ii*L;prow=bb*ll+jj*L+ii;}   // ending node: physical row (b, j, i)
-        uint4 vv=*reinterpret_cast<uint4 const*>(x+prow*C+(sub+T*i)*8);
+        uint4 vv=pre[gi][i];
         auto const* v=reinterpret_cast<Element const*>(&vv);
         #pragma unroll
         for(int e=0;e<8;++e){vals[i*8+e]=float(v[e]);mean+=vals[i*8+e];}
@@ -192,6 +205,7 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
         for(int e=0;e<8;++e) o[e]=Element((vals[i*8+e]-mean)*inv*__ldg(lnw+col+e)+__ldg(lnb+col+e));
         *reinterpret_cast<uint4*>(s.z.data()+(rw*NK+col/64)*4096+al(make_coord(rr,col%64)))=vec;
       }
+    }
     }
   }
 #endif

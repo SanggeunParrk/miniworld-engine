@@ -224,19 +224,19 @@ def _lt():
     )
 
 
-@functools.lru_cache(maxsize=1)
-def _front():
+@functools.lru_cache(maxsize=None)
+def _front(defs: tuple[str, ...] = ()):
     """LN + [Wq; Wk; Wv; Wg; Wb] + head-major scaled / masked bias in one kernel (d_pair 256 inference at short L). Prebuilt or cached: no
     CUTLASS headers needed; a build without them raises (``_nvcc.CutlassMissing``) -- never a silent switch to the unfused front, whose
     numerics differ."""
     from miniworld_engine.kernels._nvcc import cutlass_include
 
-    return _front_ext(cutlass_include())
+    return _front_ext(cutlass_include(), defs)
 
 
-def _front_ext(cutlass_inc):
+def _front_ext(cutlass_inc, defs: tuple[str, ...] = ()):
     return load_extension(
-        name="triattn_h100_front3_sm90_v2",
+        name="triattn_h100_front3" + "".join(f"_{d.replace(chr(61), chr(95)).lower()}" for d in defs) + "_sm90_v2",
         sources=[str(_SRC / "front_fused3_sm90.cu")],
         extra_include_paths=[str(_SRC), str(_SRC.parent), str(cutlass_inc)],
         extra_cflags=["-O3"],
@@ -248,6 +248,7 @@ def _front_ext(cutlass_inc):
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
             "-lineinfo",
+            *(f"-D{d}" for d in defs),
         ],
         verbose=False,
     )
