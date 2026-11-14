@@ -85,3 +85,55 @@ def test_no_points_is_exit_1(tmp_path):
     empty = tmp_path / "empty.jsonl"
     empty.write_text("")
     assert plot.main(["--source", str(empty), "--out", str(tmp_path / "o")]) == 1
+
+
+def test_tokens_source_draws_only_required_cases(tmp_path, monkeypatch):
+    """A token of a case the requirements no longer ask for (kept by the judge, reported unused) is neither drawn nor summarized."""
+    from miniworld_engine import judge
+
+    required = {**_rec("cuda", 128, 1.0), "gpu": None}
+    stale = {**_rec("cuda", 128, 1.0), "length": 4096}
+
+    def token(rec: dict) -> dict:
+        case = {
+            k: rec[k]
+            for k in ("row", "module", "model", "stream", "kwargs", "length", "depth", "samples", "dtype", "mode", "backend", "timing")
+        }
+        return {
+            "kind": "speed",
+            "case": case,
+            "case_key": judge.case_key("speed", case),
+            "result": {"status": "ok", "median_ms": rec["median_ms"]},
+        }
+
+    card = tmp_path / "h100_sm90"
+    card.mkdir()
+    (card / "LayerNorm.jsonl").write_text("".join(json.dumps(token(r)) + "\n" for r in (required, stale)))
+    monkeypatch.setattr(plot, "TOKENS", tmp_path)
+    monkeypatch.setattr(
+        judge,
+        "required",
+        lambda kind: iter(
+            [
+                {
+                    k: required[k]
+                    for k in (
+                        "row",
+                        "module",
+                        "model",
+                        "stream",
+                        "kwargs",
+                        "length",
+                        "depth",
+                        "samples",
+                        "dtype",
+                        "mode",
+                        "backend",
+                        "timing",
+                    )
+                }
+            ]
+        ),
+    )
+    points, _ = plot.load(["tokens"], "h100_sm90")
+    assert [p["length"] for p in points] == [128]
