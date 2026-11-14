@@ -961,7 +961,7 @@ bool launch_fwd_vec(int NV, const XT* X, XT* Y, const void* W, const void* B, bo
 #if defined(MWE_SM120)
   // RTX 5090: fp32 rows of 6 chunks a lane (d 768) take two row groups a warp (more bytes in flight: 768 x 2560 fp32 11.8 -> 10.6 us with the early parameters)
   if constexpr (std::is_same_v<XT, float>) {
-    if (G == 32 && V == 6 && fwd_dev().un != 1) { run_fwd_vec<XT, RMS, 32, 6, 2>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
+    if (G == 32 && V == 6 && (fwd_dev().un == 2 || (fwd_dev().un == 0 && M >= 1536))) { run_fwd_vec<XT, RMS, 32, 6, 2>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
   }
 #endif
 #define TRY(g, v) if (G == g && V == v && un == 1) { run_fwd_vec<XT, RMS, g, v, 1>(X, Y, W, B, w_bf, RS, MEAN, RSTD, M, N, eps, st); return true; }
@@ -1004,13 +1004,8 @@ void launch_fwd_scalar(const XT* X, XT* Y, const void* W, const void* B, bool w_
 int gcd_i(int a, int b) { while (b) { const int t = a % b; a = b; b = t; } return a; }
 constexpr int STAGE_MAX_N = 1024;                     // widest odd row of the staged path (the scalar path beyond)
 constexpr long STAGE_MIN_ROWS = 4096;                 // fewer rows: the scalar kernels (a CTA per tile is not worth it)
-#if defined(MWE_SM120)
-// RTX 5090: bf16 rows take the staged forward from one 16-row unit on (the scalar kernel left most of its SMs idle at 128 .. 768 rows: 833 x 128 bf16
-// 8.9 -> 6.2 us, lnbench.py); fp32 rows keep the scalar kernel below STAGE_MIN_ROWS (the staged one was 15-20 % slower at 768 .. 2048 rows of 451 / 831 / 833)
-template <typename XT> constexpr long STAGE_MIN_ROWS_FWD = sizeof(XT) == 2 ? 16 : STAGE_MIN_ROWS;
-#else
+// (the scalar forward issues every load of a row up front: it beats the staged one below STAGE_MIN_ROWS on both cards, bf16 and fp32 -- RTX 5090 833 x 128 bf16 5.9 -> 4.2 us)
 template <typename XT> constexpr long STAGE_MIN_ROWS_FWD = STAGE_MIN_ROWS;
-#endif
 constexpr size_t STAGE_TILE_BYTES = 10 * 1024;        // target bytes of one tensor of a tile
 
 struct StageGeom { int U, R; long rowb; };
