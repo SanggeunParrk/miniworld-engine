@@ -22,7 +22,11 @@ def _device_is_sm120() -> bool | None:
 
 
 def sm120_build() -> bool:
-    """The build targets the 5090: the current device is one, or (no GPU: a prebuild) ``TORCH_CUDA_ARCH_LIST`` names 12.0 only."""
+    """The build targets the 5090: ``MINIWORLD_ENGINE_BUILD_ARCH`` says so (the shared switch of every sm_80 builder, ``kernels/_sm120.py``; a
+    GPU-less prebuild of ``_prebuild --arch sm120`` sets it), else the current device is one, or (no GPU) ``TORCH_CUDA_ARCH_LIST`` names 12.0 only."""
+    forced = os.environ.get("MINIWORLD_ENGINE_BUILD_ARCH", "").lower().removeprefix("sm").removeprefix("_").rstrip("a")
+    if forced:
+        return forced == "120"
     dev = _device_is_sm120()
     if dev is not None:
         return dev
