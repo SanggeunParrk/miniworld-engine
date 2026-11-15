@@ -434,10 +434,40 @@ torch::Tensor tail(torch::Tensor g, torch::Tensor o, torch::Tensor wo, torch::Te
   return out;
 }
 
+// The module's fp32 masters -> the path's bf16 weights in one launch: w = [Wv; Wg; Wb] (rows concatenated) and wo, each rounded to nearest
+// even (the bits of ``.to(torch.bfloat16)`` and ``torch.cat``: five small launches there).
+__global__ void __launch_bounds__(256) cast_w_k(const float* __restrict__ a, const float* __restrict__ b, const float* __restrict__ c, const float* __restrict__ d,
+                                                bf16* __restrict__ w, bf16* __restrict__ wo, long na, long nb, long nc, long nd) {
+  const long total = na + nb + nc + nd;
+  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < total; i += (long)gridDim.x * 256) {
+    if (i < na) w[i] = __float2bfloat16_rn(a[i]);
+    else if (i < na + nb) w[i] = __float2bfloat16_rn(b[i - na]);
+    else if (i < na + nb + nc) w[i] = __float2bfloat16_rn(c[i - na - nb]);
+    else wo[i - na - nb - nc] = __float2bfloat16_rn(d[i - na - nb - nc]);
+  }
+}
+
+// wv, wg, wb, wo: fp32 contiguous; returns (w [rows(wv) + rows(wg) + rows(wb), C] bf16, wo bf16)
+std::vector<torch::Tensor> cast_weights(torch::Tensor wv, torch::Tensor wg, torch::Tensor wb, torch::Tensor wo) {
+  for (const auto* t : {&wv, &wg, &wb, &wo}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kFloat32 && t->is_contiguous() && t->dim() == 2, "cast_weights: fp32 contiguous 2-D");
+  TORCH_CHECK(wv.size(1) == wg.size(1) && wv.size(1) == wb.size(1), "cast_weights: widths");
+  c10::cuda::CUDAGuard guard(wv.device());
+  auto w = torch::empty({wv.size(0) + wg.size(0) + wb.size(0), wv.size(1)}, wv.options().dtype(torch::kBFloat16));
+  auto wo16 = torch::empty(wo.sizes(), wo.options().dtype(torch::kBFloat16));
+  const long total = wv.numel() + wg.numel() + wb.numel() + wo.numel();
+  const int grid = (int)std::min<long>((total + 255) / 256, 132L * 8);
+  cast_w_k<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(wv.data_ptr<float>(), wg.data_ptr<float>(), wb.data_ptr<float>(), wo.data_ptr<float>(),
+                                                               reinterpret_cast<bf16*>(w.data_ptr()), reinterpret_cast<bf16*>(wo16.data_ptr()), wv.numel(),
+                                                               wg.numel(), wb.numel(), wo.numel());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {w, wo16};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_bwd", &gate_bwd);
   m.def("logits", &logits);
   m.def("out_proj", &out_proj);
   m.def("cgemm", &cgemm);
   m.def("tail", &tail);
+  m.def("cast_weights", &cast_weights);
 }

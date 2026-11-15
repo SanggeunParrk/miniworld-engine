@@ -226,6 +226,11 @@ def _backward(dy, pair, lnw, w, wo, saved, H, Dh):
 
 
 def _weights(wv, wb, wg, wo):
+    """[Wv; Wg; Wb] and Wo as bf16 (one launch from fp32 masters on the H100 path)."""
+    e = _planes_ext("cast")
+    if e is not None and all(t.dtype == torch.float32 and t.is_contiguous() and t.is_cuda for t in (wv, wb, wg, wo)):
+        w, wo16 = e.cast_weights(wv, wg, wb, wo)
+        return w, wo16
     bf = torch.bfloat16
     return torch.cat([wv.to(bf), wg.to(bf), wb.to(bf)]).contiguous(), wo.to(bf).contiguous()
 
@@ -395,8 +400,7 @@ def _backward1(dy, pair, drop, lnw, w, wo, saved, H, Dh, starting):
 
 
 def _weights1(wv, wb, wg, wo):
-    bf = torch.bfloat16
-    return torch.cat([wv.to(bf), wg.to(bf), wb.to(bf)]).contiguous(), wo.to(bf).contiguous()
+    return _weights(wv, wb, wg, wo)
 
 
 class _SingleFn(torch.autograd.Function):
