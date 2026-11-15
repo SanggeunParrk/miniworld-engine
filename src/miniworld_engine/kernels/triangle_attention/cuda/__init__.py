@@ -46,7 +46,7 @@ def prebuild(target, rows):
         if needs(like="triangle_attention_generic_"):
             yield h100_sm90_generic._glue
             yield h100_sm90_generic._lt
-        if needs("triangle_attention_bidir_gate_bwd_sm90"):
+        if needs("triangle_attention_bidir_gate_bwd_sm90", "triangle_attention_bidir_logits_sm90", "triangle_attention_bidir_tail_sm90"):
             from . import h100_bidir
 
             yield h100_bidir.ext

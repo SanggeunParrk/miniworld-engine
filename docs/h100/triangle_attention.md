@@ -68,6 +68,8 @@ Names from `requirements/requirements_kernel.csv` (family `triangle_attention`);
 | `triangle_attention_fwd`, `..._bwd_pre`, `..._bwd_dkdv`, `..._bwd_dq` | forward / backward | Triton core (`triton/main.py`): flash-style forward with fp32 LSE, FA2-split backward (delta, key-side dK / dV / per-row dbias, query-side dQ) |
 | `triangle_attention_generic_gate_u_sm90` | forward | glue `gate_u` (`triattn_generic_sm90.cu`): `u = sigmoid(g) o O`; used by the bidirectional path |
 | `triangle_attention_bidir_gate_bwd_sm90` | backward | `triattn_bidir_sm90.cu` `gate_bwd` (`cuda/h100_bidir.py`): do, dg of the bidirectional gate on channel planes |
+| `triangle_attention_bidir_logits_sm90` | forward | `triattn_bidir_sm90.cu` `logits` (`cuda/h100_bidir.py`): the bias planes -> fp32 softmax logits in one pass (widen, ending half transposed, masked keys -inf); `torch.softmax` follows |
+| `triangle_attention_bidir_tail_sm90` | forward_infer | `triattn_bidir_sm90.cu` `tail`: `out = x + (sigmoid(G) o O)^T Wo^T` in one mma.sync kernel (u formed in shared memory, product rounded to bf16 then x added: the bits of gate_u + torch.addmm); d_pair 128, no grad |
 | `triangle_attention_drop_scale_sm90`, `triangle_attention_graph_rng_write_sm90` | forward_train | `pack.cu` (`h100_triattn.extension("pack")`): Philox keep-mask; used by `integrations/pwa_train.py` (MSA row dropout), not by the triangle modules |
 
 ## Fused path: d_pair = d_hidden = 128, 4 heads x 32
@@ -192,6 +194,13 @@ width-generic glue `ln_fwd` -> `[Wv; Wg; Wb] y^T` (one GEMM) -> fp32 softmax (st
 bf16 P -> per-head GEMMs -> glue `gate_u` -> `pair + U^T Wo^T` (residual in the GEMM's C). Backward: `gate_bwd`
 (`cuda/h100_bidir.py`, `triattn_bidir_sm90.cu`) -> softmax gradients -> `dW`, `dy_ln` (fp32) -> glue `ln_bwd`. Refusals
 (`refusal`): bf16 pair, `use_self_attention=False`, d_pair % 8 == 0 and <= 512, L % 8 == 0, head width % 8 == 0, fp32 LN affine.
+
+Notes (2026-11-16, `fp8/bidir-ta`; the TriAttn q.k core work of the single-direction paths (Y16 front, TA_SW / N24 / K16, FR, FP8 PV) has no counterpart here: this path has no flash core, its contractions are cuBLAS GEMMs over channel planes).
+
+- Users: no model of the engine's registry or of FoldForge / MiniWorld builds the class (registry: engine-own, d_pair 128, 4 heads, L 128-768, eval and train; the single-direction bias-only `TriangleAttention` rows share the path). Protenix / Boltz / OpenFold3 / AF3 / RF3 / ESMFold2 / OpenDDE run `TriangleAttention*` with q.k attention, not this route.
+- Default route, inference (outputs bit-identical to 2.5.9, `tests/gpu/test_bidir_triattn_h100.py`): `logits` (one pass in place of float / cat / transpose copy / masked_fill), the planes GEMM `[Wv; Wg; Wb] y^T` through the fastest bit-equal cublasLt algorithm (calibrated once per shape against `torch.mm`, outside a graph capture; none equal or not calibrated: `torch.mm`), the fused tail (`tail`: no u planes, no gate_u pass, no residual copy), `dyln` written in place in the backward. Switches: `BIDIR_FUSED_TAIL=0` (tail off). Graph replay L = 128 / 256 / 384 / 512 / 640 / 768: 64.3 / 181.6 / 387.7 / 655.2 / 1025.7 / 1507.6 us (2.5.9) -> 59.7 / 147.6 / 299.2 / 491.2 / 767.0 / 1141.2 us.
+- Opt-in `BIDIR_RESIDUAL_LT=1` (default off; only matters where the fused tail does not apply: training, other d_pair): the out-projection through cublasLt with D != C, no copy of x. Not the same bits (one rounding of x + product where torch.addmm rounds the product to bf16 first; no cublasLt algorithm of the heuristic's 64 reproduces the double rounding).
+- FP8 PV (e4m3 P and V) for the starting contraction: no-go. 4 x `torch._scaled_mm` at L = 768 131 us against 171 us bf16, plus the V quantization pass (>= 74 us at the byte floor, 190 us as two torch ops), and a relative error of 3.8e-2 (single-direction route: hi ~2 %); the ending contraction (`P V`, V contracted along its row axis) would need a transposed V plane as well.
 
 ## Batching and chunking
 
