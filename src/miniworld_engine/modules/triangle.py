@@ -118,7 +118,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "anthropic:a100_sm80": 4,  # anthropic:a100_sm80 (2026-11-13): measured on the A100 kit stack (CUDA-13 compat driver library: triattn_native's sm_80 core instead of the k2b step-aside)
         "cueq": 2,
         "cuda:a100_sm80": 5,  # 5 (2026-11-13): the register-resident inference core (attn_rf_fwd_sm80.cuh) at L >= 512, plain and gated
-        "cuda:h100_sm90": 8,  # 8 (2026-11-14): d_pair 64 x 32-channel heads beyond L 768: the fp16-exact fused front (one kernel for LN + GEMMs + bias; outputs bitwise unchanged); also the dh16 core (software-pipelined sub-step, PV as m64n24, K in 16 channels: bitwise unchanged)
+        "cuda:h100_sm90": 9,  # 8 (2026-11-14): d_pair 64 x 32-channel heads beyond L 768: the fp16-exact fused front (one kernel for LN + GEMMs + bias; outputs bitwise unchanged); 9 (2026-11-15): the unfused fp16 front (d_pair 384 x 12 heads) makes the pair bias in its LayerNorm kernel (mma.sync = the cuBLAS bias GEMM bits; outputs bitwise unchanged); also the dh16 core (software-pipelined sub-step, PV as m64n24, K in 16 channels: bitwise unchanged)
         "cuda:5090_sm120": 3,  # 2: the bias-only one-direction path on sm_120a; 3 (2026-11-13): main's row-blocked / padded inference on the sm_120a build
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
@@ -808,7 +808,7 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
     version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged); 3: the
     #: training dropout scale by the H100 Philox kernel (as the base class)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 8}  # 6, 7, 8: as the base
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 9}  # 6, 7, 8, 9: as the base
 
     transposed_bias = False
     _anthropic_block = True
@@ -855,8 +855,8 @@ class _TriangleAttentionFp32Softmax(_TriangleAttentionBase):
     #: the base class (the fp16 core counts the live key tiles from the mask)
     backend_versions: ClassVar[dict[str, int]] = {
         **_TriangleAttentionBase.backend_versions,
-        "cuda:h100_sm90": 10,
-    }  # 10: as the base class (8)
+        "cuda:h100_sm90": 11,
+    }  # 11: as the base class (9)
     #: RoseTTAFold3: the gate and the out-projection carry a bias.
     _projection_biases: bool = False
 

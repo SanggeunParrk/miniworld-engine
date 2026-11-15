@@ -141,6 +141,106 @@ __global__ void __launch_bounds__(256) front_bias_k(const T* __restrict__ qkvb, 
   }
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// fp16 inference front of the unfused route, two of its three kernels in one: y = LN(x) (fp16, ln_fwd_k's arithmetic for C > 128: a warp a
+// row) and the head-major scaled / masked fp16 bias sbias = front_bias_k<__half>(y Wb^T).  y Wb^T runs on mma.sync m16n8k16 (fp16 in, fp32
+// accumulate, k ascending: the bits of the cuBLAS fp16 bias GEMM, checked against it on 75 M outputs per shape) from the y tile kept in shared
+// memory, so the bias GEMM's re-read of y (and its launch) go away.  A block = 128 consecutive j of one (b, i); L % 128 == 0.
+__global__ void __launch_bounds__(256, 2) ln_bias_fwd_k(const bf16* __restrict__ x, const float* __restrict__ w, const float* __restrict__ bs,
+                                                        __half* __restrict__ y, const __half* __restrict__ wb, const bool* __restrict__ mask,
+                                                        __half* __restrict__ sbias, int C, float eps, int L, int tr, int H, int Hp, float inv_scale) {
+  extern __shared__ __align__(16) unsigned char smem_raw[];
+  const int SW = C + 8;                                  // padded row (elements): the A / B fragment loads are bank-conflict free
+  __half* ys = reinterpret_cast<__half*>(smem_raw);      // [128][SW]
+  __half* wbs = ys + 128 * SW;                           // [Hp][SW]
+  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nv = C >> 3;
+  const long row0 = (long)blockIdx.x * 128;
+  for (int i = threadIdx.x; i < Hp * nv; i += 256) {
+    const int n = i / nv, c = i - n * nv;
+    *reinterpret_cast<uint4*>(wbs + n * SW + c * 8) = *reinterpret_cast<const uint4*>(wb + (long)n * C + c * 8);
+  }
+  constexpr int NA = MAXV, G = 4;
+  for (int it0 = 0; it0 < 16; it0 += G) {
+    float v[G][NA][8];
+#pragma unroll
+    for (int g = 0; g < G; ++g) {
+      const long row = row0 + warp + 8 * (it0 + g);
+#pragma unroll
+      for (int a = 0; a < NA; ++a) {
+        const int idx = lane + 32 * a;
+        if (idx < nv) unpack8(*reinterpret_cast<const uint4*>(x + phys_row(row, L, tr) * C + idx * 8), v[g][a]);
+      }
+    }
+#pragma unroll
+    for (int g = 0; g < G; ++g) {
+      const int rl = warp + 8 * (it0 + g);
+      const long row = row0 + rl;
+      float s = 0.f;
+#pragma unroll
+      for (int a = 0; a < NA; ++a) {
+        const int idx = lane + 32 * a;
+        if (idx < nv) {
+#pragma unroll
+          for (int e = 0; e < 8; ++e) s += v[g][a][e];
+        }
+      }
+      const float mean = grp_sum<32>(s) / C;
+      float q = 0.f;
+#pragma unroll
+      for (int a = 0; a < NA; ++a) {
+        const int idx = lane + 32 * a;
+        if (idx < nv) {
+#pragma unroll
+          for (int e = 0; e < 8; ++e) { const float d = v[g][a][e] - mean; q = fmaf(d, d, q); }
+        }
+      }
+      const float rstd = rsqrtf(grp_sum<32>(q) / C + eps);
+#pragma unroll
+      for (int a = 0; a < NA; ++a) {
+        const int idx = lane + 32 * a;
+        if (idx < nv) {
+          const float4 w0 = *reinterpret_cast<const float4*>(w + idx * 8), w1 = *reinterpret_cast<const float4*>(w + idx * 8 + 4);
+          const float4 b0 = *reinterpret_cast<const float4*>(bs + idx * 8), b1 = *reinterpret_cast<const float4*>(bs + idx * 8 + 4);
+          const float ww[8] = {w0.x, w0.y, w0.z, w0.w, w1.x, w1.y, w1.z, w1.w}, bb[8] = {b0.x, b0.y, b0.z, b0.w, b1.x, b1.y, b1.z, b1.w};
+          float o[8];
+#pragma unroll
+          for (int e = 0; e < 8; ++e) o[e] = fmaf((v[g][a][e] - mean) * rstd, ww[e], bb[e]);
+          const uint4 pv = pack8h(o);
+          *reinterpret_cast<uint4*>(y + row * C + idx * 8) = pv;
+          *reinterpret_cast<uint4*>(ys + rl * SW + idx * 8) = pv;
+        }
+      }
+    }
+  }
+  __syncthreads();
+  const int g8 = lane >> 2, t = lane & 3;
+  const long bi = row0 / L;
+  const int j0 = (int)(row0 - bi * L), b = (int)(bi / L), i = (int)(bi - (long)b * L);
+  for (int n0 = 0; n0 < Hp; n0 += 8) {
+    float c[4] = {0.f, 0.f, 0.f, 0.f};
+    const __half* ap = ys + (16 * warp + g8) * SW + 2 * t;
+    const __half* bp = wbs + (n0 + g8) * SW + 2 * t;
+    for (int k0 = 0; k0 < C; k0 += 16) {
+      const uint32_t a0 = *reinterpret_cast<const uint32_t*>(ap + k0), a1 = *reinterpret_cast<const uint32_t*>(ap + 8 * SW + k0);
+      const uint32_t a2 = *reinterpret_cast<const uint32_t*>(ap + k0 + 8), a3 = *reinterpret_cast<const uint32_t*>(ap + 8 * SW + k0 + 8);
+      const uint32_t b0 = *reinterpret_cast<const uint32_t*>(bp + k0), b1 = *reinterpret_cast<const uint32_t*>(bp + k0 + 8);
+      asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                   : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                   : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+    }
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {
+      const int h = n0 + 2 * t + (q & 1), r = 16 * warp + g8 + 8 * (q >> 1);
+      if (h < H) {
+        const bool keep = mask == nullptr || mask[(long)b * L + j0 + r];
+        const float f = __half2float(__float2half_rn(c[q]));      // the GEMM's fp16 output, as front_bias_k reads it
+        const float val = keep ? f * inv_scale : -INFINITY;
+        sbias[(((long)b * H + h) * L + i) * L + j0 + r] = __float2half_rn(keep ? fmaxf(fminf(val, 6.0e4f), -6.0e4f) : val);
+      }
+    }
+  }
+}
 // u = sigmoid(g) o o (g: the qkvb column block, o contiguous [M, HD]); u [M, HD]
 __global__ void __launch_bounds__(256) gate_u_k(const bf16* __restrict__ qkvb, const bf16* __restrict__ o, bf16* __restrict__ u, long M,
                                                 int HD, long ld, int g_col) {
@@ -379,6 +479,29 @@ torch::Tensor g_front_bias(torch::Tensor qkvb, torch::Tensor mask, int64_t B, in
   return sbias;
 }
 
+// x [M, C] bf16, wb [Hp, C] fp16 (the packed bias rows of the fp16 weights) -> (y fp16 [M, C], sbias fp16 [B, H, L, L]); C in (128, 512], C % 16 == 0
+std::vector<torch::Tensor> g_ln_bias_fwd(torch::Tensor x, torch::Tensor w, torch::Tensor b, torch::Tensor wb, torch::Tensor mask, double eps, int64_t L,
+                                         bool trans, int64_t H, double scale) {
+  TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous() && x.scalar_type() == torch::kBFloat16, "x [M, C] bf16 contiguous");
+  const long M = x.size(0);
+  const int C = (int)x.size(1), Hp = (int)wb.size(0);
+  TORCH_CHECK(C > 128 && C <= 512 && C % 16 == 0 && L % 128 == 0 && M % ((long)L * L) == 0, "C in (128, 512], C % 16 == 0, L % 128 == 0");
+  TORCH_CHECK(wb.scalar_type() == torch::kHalf && wb.is_contiguous() && wb.size(1) == C && Hp % 8 == 0 && H <= Hp, "wb [Hp, C] fp16");
+  const long B = M / ((long)L * L);
+  auto y = torch::empty_like(x, x.options().dtype(torch::kHalf));
+  auto sbias = torch::empty({B, H, L, L}, x.options().dtype(torch::kHalf));
+  torch::Tensor mk;
+  const bool* mp = nullptr;
+  if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * L, "mask [B, L]"); mp = mk.data_ptr<bool>(); }
+  const size_t smem = (size_t)(128 + Hp) * (C + 8) * sizeof(__half);
+  C10_CUDA_CHECK(cudaFuncSetAttribute(ln_bias_fwd_k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+  ln_bias_fwd_k<<<(unsigned)(M / 128), 256, smem, stream()>>>(cbp(x), w.data_ptr<float>(), b.data_ptr<float>(), reinterpret_cast<__half*>(y.data_ptr()),
+                                                              reinterpret_cast<const __half*>(wb.data_ptr()), mp, reinterpret_cast<__half*>(sbias.data_ptr()),
+                                                              C, (float)eps, (int)L, (int)trans, (int)H, Hp, (float)(1.0 / scale));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {y, sbias};
+}
+
 torch::Tensor g_gate_u(torch::Tensor qkvb, torch::Tensor o, int64_t g_col) {
   const long M = o.size(0);
   const int HD = (int)o.size(1);
@@ -507,6 +630,7 @@ std::vector<torch::Tensor> g_pack(torch::Tensor wq, torch::Tensor wk, torch::Ten
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_fwd", &g_ln_fwd, py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("L"), py::arg("trans"), py::arg("h16") = false);
   m.def("front_bias", &g_front_bias);
+  m.def("ln_bias_fwd", &g_ln_bias_fwd);
   m.def("gate_u", &g_gate_u);
   m.def("residual", &g_residual);
   m.def("gate_bwd_in", &g_gate_bwd_in);

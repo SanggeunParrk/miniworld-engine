@@ -301,6 +301,9 @@ def _front_y16(defs: tuple[str, ...] = ()):
 #: (d_pair, 32 x heads) served by the fp16-exact fused front beyond ``_FRONT_L`` (fp16 inference, 32-channel heads): bit-identical to
 #: LN + cuBLAS fp16 GEMMs + bias kernel, which it replaces there.  ``FRONT_Y16`` False: the unfused route as before.
 FRONT_Y16 = True
+#: the unfused fp16 inference route (LayerNorm + cuBLAS q | k | v | g GEMM + bias GEMM + bias kernel): the LayerNorm kernel also makes the bias
+#: (mma.sync, bit-identical to the cuBLAS GEMM), which removes the bias GEMM and its re-read of y.  False: the three kernels as before.
+FRONT_LNB = True
 #: LABELED, default OFF: also take the fp16-exact front at the lengths where the bf16 one-kernel front is the default (d_pair 64, 32-channel heads,
 #: L 384..768): the q / k / v / g / bias bits then equal the unfused fp16 route's (the L > 768 default), not the bf16 front's (rounding of y and W
 #: in bf16 instead of fp16; numeric difference measured in the 2026-11-14 report)
@@ -523,6 +526,20 @@ def _forward(
         and L > 256
         and tuple(wcat.shape) == (4 * HD + _hp(H), C)
     )  # the fp16-exact fused front where the unfused route would run LN + cuBLAS fp16 GEMMs + bias kernel
+    lnbias = (
+        FRONT_LNB
+        and h16
+        and not need
+        and not dh
+        and not fused
+        and not y16
+        and head_dim == D
+        and L > 256
+        and L % 128 == 0
+        and 128 < C <= 512
+        and C % 16 == 0
+        and tuple(wcat.shape) == (4 * HD + _hp(H), C)
+    )  # fp16 inference on the unfused route: LayerNorm + bias GEMM + bias kernel in one kernel (bit-identical; the GEMM of q | k | v | g stays cuBLAS)
     if fused or y16:  # LN + projection + head-major scaled bias: one kernel (and the flip of AF3's ending node in its bias store)
         y = mean = rstd = None
         proj, sbias, _ = (_front_y16() if y16 else _front(FRONT_DEFS)).front(
@@ -544,6 +561,9 @@ def _forward(
         flip = False
         qkvg = None
         q, k, v, gt = ((proj[i].view(torch.float16) if h16 and (i < 3 or y16) else proj[i]).view(B, L, L, H, dq) for i in range(4))
+    elif lnbias:  # fp16 inference: LN + the bias GEMM + the bias kernel in two kernels (the GEMM of q | k | v | g stays cuBLAS), bit for bit
+        y, sbias = g.ln_bias_fwd(x, lnw.float().contiguous(), lnb.float().contiguous(), _half(wcat)[4 * HD :], front_mask, eps, L, trans, H, scale)
+        mean = rstd = None
     else:
         y, mean, rstd = g.ln_fwd(
             x,
@@ -565,9 +585,10 @@ def _forward(
             qkvg = torch.addmm(bvec, y, ww[: 4 * HD].t())
         else:
             qkvg = torch.matmul(y, ww[: 4 * HD].t())  # [M, 4 HD]: q | k | v | g (fp16 with h16, the gate too)
-        bias = torch.matmul(y, ww[4 * HD :].t())  # [M, Hp]
-        # the dh core takes the bias in natural units, the wgmma core pre-divided by the scale
-        sbias = g.front_bias(bias, front_mask, B, L, H, 0, 1.0 if dh else scale)
+        if not lnbias:  # (lnbias: the bias came out of the LayerNorm kernel)
+            bias = torch.matmul(y, ww[4 * HD :].t())  # [M, Hp]
+            # the dh core takes the bias in natural units, the wgmma core pre-divided by the scale
+            sbias = g.front_bias(bias, front_mask, B, L, H, 0, 1.0 if dh else scale)
     else:
         # short inference calls: one GEMM for q | k | v | g | bias (a launch less); beyond L 256 the extra tile column costs more
         qkvg = _lt().lt_mm(y, wcat, None, 0, False, None, None)  # [M, 4 HD + Hp]
