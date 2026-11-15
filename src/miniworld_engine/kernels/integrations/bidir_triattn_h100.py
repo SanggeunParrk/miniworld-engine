@@ -93,6 +93,17 @@ OFF: set = set()
 RESIDUAL_LT = os.environ.get("BIDIR_RESIDUAL_LT", "0") == "1"
 
 
+#: Inference (no grad), d_pair 128, K = 2 d_hidden or d_hidden in (128, 256), L L % 128 == 0: the gate and the out-projection with its
+#: residual in one kernel (``tail`` of triattn_bidir_sm90.cu: no u planes). The same arithmetic as gate_u + torch.addmm (u rounded to
+#: bf16, k16 steps in order, the product rounded to bf16 and then x added): the outputs equal the unfused tail's bits
+#: (tests/gpu/test_bidir_triattn_h100.py). BIDIR_FUSED_TAIL=0 switches it off.
+FUSED_TAIL = os.environ.get("BIDIR_FUSED_TAIL", "1") != "0"
+
+
+def _fused_tail(save: bool, C: int, K: int, LL: int) -> bool:
+    return FUSED_TAIL and not save and C == 128 and K in (128, 256) and LL % 128 == 0 and _planes_ext("tail") is not None
+
+
 def _planes_ext(part: str = ""):
     """The H100 extension with the logits pass and the residual out-projection, or None (legacy switch, or the sm_80 / sm_120 build)."""
     if LEGACY or part in OFF or _a100():
@@ -157,8 +168,12 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
         for h in range(H):
             ch = slice(Dh + h * dh, Dh + (h + 1) * dh)
             torch.bmm(pe[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
-        u = g.gate_u(c[2 * Dh : 4 * Dh], o, 0)
-        _out_proj(x[rows], u, wo, out[rows])
+        if _fused_tail(save, C, 2 * Dh, LL):
+            _planes_ext().tail(c[2 * Dh : 4 * Dh], o, wo, x[rows], out[rows])
+            u = None
+        else:
+            u = g.gate_u(c[2 * Dh : 4 * Dh], o, 0)
+            _out_proj(x[rows], u, wo, out[rows])
         if save:
             planes.append(c)
             probs.append((ps, pe))
@@ -319,12 +334,16 @@ def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
             for h in range(H):
                 ch = slice(h * dh, (h + 1) * dh)
                 torch.bmm(p[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
-        u = g.gate_u(c[Dh : 2 * Dh], o, 0)
-        if drop is None:
-            _out_proj(x[rows], u, wo, out[rows])
+        if drop is None and _fused_tail(save, C, Dh, LL):
+            _planes_ext().tail(c[Dh : 2 * Dh], o, wo, x[rows], out[rows])
+            u = None
         else:
-            t = torch.mm(u.t(), wo.t()).view(L, L, C)
-            out[rows] = (x[rows].view(L, L, C) + t * drop[b]).view(LL, C)
+            u = g.gate_u(c[Dh : 2 * Dh], o, 0)
+            if drop is None:
+                _out_proj(x[rows], u, wo, out[rows])
+            else:
+                t = torch.mm(u.t(), wo.t()).view(L, L, C)
+                out[rows] = (x[rows].view(L, L, C) + t * drop[b]).view(LL, C)
         if save:
             planes.append(c)
             probs.append(p)

@@ -290,9 +290,154 @@ torch::Tensor cgemm(torch::Tensor w, torch::Tensor y, torch::Tensor out) {
   return out;
 }
 
+// ===================================================================================== fused tail (OPT-IN, inference only)
+// out = x + bf16(bf16(sigmoid(G) o O)^T Wo^T) in one pass over the planes: the gate (gate_u_k's arithmetic, u rounded to bf16) is formed in
+// shared memory and feeds mma.sync m16n8k16 straight away, so u (K x L L bf16: written by gate_u, read by the out-projection) never exists.
+// The product is rounded to bf16 and then x is added (the double rounding of torch.addmm's nvjet kernel, so the epilogue is the same); the
+// fp32 accumulation runs over the K = 2 Dh channels of one thread's k16 steps in order, which is not guaranteed to be cuBLAS' order: the
+// output is NOT bit-identical to the unfused tail (rare 1-ulp differences of the accumulation order), hence opt-in.
+// One CTA = 128 tokens x all 128 pair channels, 8 warps x 16 tokens; Wo resident in smem, the planes streamed 32 channels at a time
+// through a 2-stage cp.async ring. Needs d_pair == 128, K in {128, 256}, L L % 128 == 0.
+namespace tl {
+constexpr int TM = 128, KC = 32, SP = 136;
+__device__ __forceinline__ void cp16(void* s, const void* g) {
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned)__cvta_generic_to_shared(s)), "l"(g));
+}
+__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
+template <int N>
+__device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+__device__ __forceinline__ void ldsm4(unsigned (&r)[4], const void* p) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n" : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"((unsigned)__cvta_generic_to_shared(p)));
+}
+__device__ __forceinline__ void ldsm4t(unsigned (&r)[4], const void* p) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n" : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"((unsigned)__cvta_generic_to_shared(p)));
+}
+__device__ __forceinline__ void mma16816(float (&c)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
+  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+}  // namespace tl
+
+template <int K>
+__global__ void __launch_bounds__(256, 2) tail_k(const bf16* __restrict__ G, const bf16* __restrict__ O, const bf16* __restrict__ Wo, const bf16* __restrict__ X,
+                                                 bf16* __restrict__ out, long LL, long ldg, long ldo) {
+  using namespace tl;
+  constexpr int WS = K + 8, NK = K / KC, STG = 2 * KC * SP;
+  extern __shared__ __align__(16) unsigned char smraw[];
+  bf16* sWo = reinterpret_cast<bf16*>(smraw);  // [128][WS]
+  bf16* sT = sWo + 128 * WS;                   // 2 stages x { G [KC][SP], O [KC][SP] }; reused as the epilogue tile [TM][SP]
+  const int tid = threadIdx.x, lane = tid & 31, w = tid >> 5;
+  for (int i = tid; i < 128 * (K / 8); i += 256) {
+    const int n = i / (K / 8), c = i % (K / 8);
+    cp16(sWo + n * WS + c * 8, Wo + (long)n * K + c * 8);
+  }
+  cp_commit();
+  const long ntiles = LL / TM;
+  for (long tile = blockIdx.x; tile < ntiles; tile += gridDim.x) {
+    const long tok0 = tile * TM;
+    float acc[16][4];
+#pragma unroll
+    for (int j = 0; j < 16; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.f;
+    auto issue = [&](int kc, int s) {
+      bf16* g = sT + s * STG;
+      bf16* o = g + KC * SP;
+      for (int i = tid; i < KC * 16; i += 256) {
+        const int r = i >> 4, ch = i & 15;
+        cp16(g + r * SP + ch * 8, G + (long)(kc * KC + r) * ldg + tok0 + ch * 8);
+        cp16(o + r * SP + ch * 8, O + (long)(kc * KC + r) * ldo + tok0 + ch * 8);
+      }
+      cp_commit();
+    };
+    issue(0, 0);
+    for (int kc = 0; kc < NK; ++kc) {
+      if (kc + 1 < NK) issue(kc + 1, (kc + 1) & 1);
+      else cp_commit();
+      cp_wait<1>();
+      __syncthreads();
+      bf16* g = sT + (kc & 1) * STG;
+      bf16* o = g + KC * SP;
+      for (int i = tid; i < KC * 16; i += 256) {  // u = bf16(sigmoid(g) o), in place of o
+        const int r = i >> 4, ch = i & 15;
+        float gv[8], ov[8], rv[8];
+        unpack8(*reinterpret_cast<const uint4*>(g + r * SP + ch * 8), gv);
+        unpack8(*reinterpret_cast<const uint4*>(o + r * SP + ch * 8), ov);
+#pragma unroll
+        for (int e = 0; e < 8; ++e) rv[e] = (1.f / (1.f + __expf(-gv[e]))) * ov[e];
+        *reinterpret_cast<uint4*>(o + r * SP + ch * 8) = pack8(rv);
+      }
+      __syncthreads();
+#pragma unroll
+      for (int ks = 0; ks < KC / 16; ++ks) {
+        unsigned a[4];
+        {
+          const int mi = lane >> 3;
+          ldsm4t(a, o + (ks * 16 + (mi >> 1) * 8 + (lane & 7)) * SP + w * 16 + (mi & 1) * 8);
+        }
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          unsigned b[4];
+          const int mi = lane >> 3;
+          ldsm4(b, sWo + (j * 16 + (mi >> 1) * 8 + (lane & 7)) * WS + kc * KC + ks * 16 + (mi & 1) * 8);
+          mma16816(acc[2 * j], a, b[0], b[1]);
+          mma16816(acc[2 * j + 1], a, b[2], b[3]);
+        }
+      }
+      __syncthreads();
+    }
+    // epilogue: bf16(acc) into smem, then x added in fp32 and rounded again (coalesced 16-byte rows)
+#pragma unroll
+    for (int j = 0; j < 16; ++j) {
+      const int c = j * 8 + 2 * (lane & 3), r0 = w * 16 + (lane >> 2);
+      *reinterpret_cast<__nv_bfloat162*>(sT + r0 * SP + c) = __floats2bfloat162_rn(acc[j][0], acc[j][1]);
+      *reinterpret_cast<__nv_bfloat162*>(sT + (r0 + 8) * SP + c) = __floats2bfloat162_rn(acc[j][2], acc[j][3]);
+    }
+    __syncthreads();
+    for (int i = tid; i < TM * 16; i += 256) {
+      const int r = i >> 4, ch = i & 15;
+      float p[8], xf[8], q[8];
+      unpack8(*reinterpret_cast<const uint4*>(sT + r * SP + ch * 8), p);
+      unpack8(*reinterpret_cast<const uint4*>(X + (tok0 + r) * 128 + ch * 8), xf);
+#pragma unroll
+      for (int e = 0; e < 8; ++e) q[e] = p[e] + xf[e];
+      *reinterpret_cast<uint4*>(out + (tok0 + r) * 128 + ch * 8) = pack8(q);
+    }
+    __syncthreads();
+  }
+}
+
+// g: [K, LL] gate planes (row stride ldg), o: [K, LL] (row stride ldo), wo [128, K], x / out [LL, 128]
+torch::Tensor tail(torch::Tensor g, torch::Tensor o, torch::Tensor wo, torch::Tensor x, torch::Tensor out) {
+  const long K = wo.size(1), LL = g.size(1);
+  TORCH_CHECK(g.is_cuda() && g.scalar_type() == torch::kBFloat16 && o.scalar_type() == torch::kBFloat16 && wo.scalar_type() == torch::kBFloat16 &&
+                  x.scalar_type() == torch::kBFloat16 && out.scalar_type() == torch::kBFloat16 && (K == 128 || K == 256) && wo.size(0) == 128 &&
+                  wo.is_contiguous() && g.size(0) == K && o.size(0) == K && o.size(1) == LL && g.stride(1) == 1 && o.stride(1) == 1 &&
+                  g.stride(0) % 8 == 0 && o.stride(0) % 8 == 0 && LL % 128 == 0 && x.is_contiguous() && out.is_contiguous() && x.size(0) == LL &&
+                  x.size(1) == 128 && out.sizes() == x.sizes() && reinterpret_cast<uintptr_t>(g.data_ptr()) % 16 == 0 &&
+                  reinterpret_cast<uintptr_t>(o.data_ptr()) % 16 == 0,
+              "tail: bf16 planes [K, LL], wo [128, K], x / out [LL, 128], K in {128, 256}, LL % 128 == 0, 16-byte aligned");
+  c10::cuda::CUDAGuard guard(g.device());
+  static int sms = 0;
+  if (sms == 0) sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const long ntiles = LL / 128;
+  const int grid = (int)std::min<long>(ntiles, 2L * sms);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  auto go = [&](auto kern, size_t smem) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+    kern<<<grid, 256, smem, stream>>>(reinterpret_cast<const bf16*>(g.data_ptr()), reinterpret_cast<const bf16*>(o.data_ptr()),
+                                      reinterpret_cast<const bf16*>(wo.data_ptr()), reinterpret_cast<const bf16*>(x.data_ptr()),
+                                      reinterpret_cast<bf16*>(out.data_ptr()), LL, g.stride(0), o.stride(0));
+  };
+  if (K == 256) go(tail_k<256>, (size_t)(128 * 264 + 2 * 2 * 32 * 136) * 2);
+  else go(tail_k<128>, (size_t)(128 * 136 + 2 * 2 * 32 * 136) * 2);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_bwd", &gate_bwd);
   m.def("logits", &logits);
   m.def("out_proj", &out_proj);
   m.def("cgemm", &cgemm);
+  m.def("tail", &tail);
 }
