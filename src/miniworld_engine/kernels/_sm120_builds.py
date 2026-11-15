@@ -28,7 +28,8 @@ SM120_SMEM = 101376
 @device_constant
 @functools.lru_cache(maxsize=8)
 def _cc(index: int) -> tuple[int, int]:
-    return tuple(torch.cuda.get_device_capability(index))
+    major, minor = torch.cuda.get_device_capability(index)
+    return major, minor
 
 
 def _index(device: torch.device | None) -> int:

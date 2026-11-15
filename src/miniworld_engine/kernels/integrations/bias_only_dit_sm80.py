@@ -29,7 +29,8 @@ ConditionedTransition sm_80 paths serving their parts.
 
 from __future__ import annotations
 
-from typing import cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import torch
 
@@ -208,7 +209,8 @@ def _fwd(
             g2: torch.Tensor | None = _mm120(cond, ws, bs)
             main.wait_stream(side)
             for t in (P, Pt) if save else (P,):
-                t.record_stream(main)
+                if t is not None:
+                    t.record_stream(main)
             pair.record_stream(side)
             wcm.record_stream(side)
             if mask is not None:
@@ -519,7 +521,7 @@ class _CT120(torch.autograd.Function):
 
         ctx.fp32_grads = master((params[1],), x.dtype)
         leaves = [params[0], *cast_params(tuple(params[1:]), x.dtype, False)]
-        y, *saved = _ct_fwd120(x, cond, *leaves, eps_x, eps_c, residual)
+        y, *saved = cast(Callable[..., list[torch.Tensor]], _ct_fwd120)(x, cond, *leaves, eps_x, eps_c, residual)
         ctx.save_for_backward(x, cond, *leaves, *saved)
         ctx.residual = residual
         return y
@@ -527,7 +529,7 @@ class _CT120(torch.autograd.Function):
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, dy):
-        grads = _ct_bwd120(dy.contiguous(), *ctx.saved_tensors, ctx.residual, ctx.fp32_grads)
+        grads = cast(Callable[..., Any], _ct_bwd120)(dy.contiguous(), *ctx.saved_tensors, ctx.residual, ctx.fp32_grads)
         return (None, None, None, *grads)
 
 
@@ -786,7 +788,7 @@ def _f32_packs(module):
               at.ln_pair.weight, at.to_bias.weight)  # fmt: skip
 
     def build():
-        ws, wb, ws1, wb1, wsg, wsc, bs, bsc, wv, wg, wa, wbb, lnw, wbias = (p.detach() for p in params)
+        ws, wb, ws1, wb1, wsg, wsc, _bs, _bsc, wv, wg, wa, wbb, lnw, wbias = (p.detach() for p in params)
         return (
             torch.stack([torch.cat([ws, wb]), torch.cat([ws1, wb1]), torch.cat([wsg, wsc])]).contiguous(),  # [3, 1536, dc]
             torch.cat([wv, wg]).contiguous(),  # [1536, 768]

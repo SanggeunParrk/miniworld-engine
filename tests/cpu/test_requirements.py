@@ -152,7 +152,7 @@ def test_class_versions_are_human(module: str):
         name, _, card = backend.partition(":")
         # a subclass inherits its parent's entries, so a name may be a backend the subclass dropped; it must be a backend name
         assert name in KNOWN_BACKENDS, f"backend_versions names {backend!r}: no such backend"
-        assert not card or card in ("h100_sm90", "a100_sm80", "b200_sm100"), backend
+        assert not card or card in ("h100_sm90", "a100_sm80", "b200_sm100", "5090_sm120"), backend
         assert isinstance(v, int) and v >= 1, (backend, v)
 
 

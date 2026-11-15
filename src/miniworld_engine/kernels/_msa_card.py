@@ -81,8 +81,8 @@ def prebuild_sm120(rows_opm: bool = True, rows_pwa: bool = True, rows_chai: bool
 
     from miniworld_engine.kernels.outer_product_mean.cuda import chai_sm80, mask_count_ballot_sm80, mask_epilogue_sm80, ogemm_sm80
     from miniworld_engine.kernels.outer_product_mean.cuda import sm80 as opm
-    from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80 as pwa
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120, wide_sm80
+    from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80 as pwa
 
     loaders = []
     if rows_opm:

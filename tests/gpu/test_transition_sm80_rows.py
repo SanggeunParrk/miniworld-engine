@@ -91,7 +91,7 @@ def test_transition_sm80_train_overlap_backward_bits(d_hidden: int, n: int) -> N
     h = d_hidden * n
     wa16, wb16 = wab16[:h], wab16[h:]
     _, xn, stats, hid, ab = fw._fwd_launch(flat, m.ln_in.weight, m.ln_in.bias, wa16, wb16, ws16, m.ln_in.eps, True, True)
-    ext = fw._ext()
+    ext: typing.Any = fw._ext()
     dyf = dy.reshape(-1, d_hidden).contiguous()
     dab = ext.gate_dh(dyf, ws16.t().contiguous(), ab, fw._dh_cfg(flat.shape[0], d_hidden, h))
     dws = fw._mm_f32(dyf.t(), hid)

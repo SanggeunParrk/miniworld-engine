@@ -45,7 +45,7 @@ def _glue():
     return sm80_bidir.glue()
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _glue_sm120():
     """The same TriangleAttention glue source (``sm80_bidir.glue``: LayerNorm forward / backward, plain CUDA-core kernels) compiled for the
     RTX 5090 (sm_120a): the sm_80 cubin does not run there."""
