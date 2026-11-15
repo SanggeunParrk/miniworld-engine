@@ -100,6 +100,12 @@ the B200 folding identities and recomputes the front preactivations in a wgmma K
 directions, `_h100_bmm.contract` (measured cuBLASLt configuration) for one direction. Saved: planes `[2h, rows, n]`, t, LN
 statistics, LN-affine folds, and per-token tensors (plus one more at D512).
 
+Row-padded K3 (inference, one direction, any L; D64 / D128 from `ROWPAD_FROM`, D256 / D384 where L % 128 != 0): built with the k3.cu pipeline macros
+`K3_XSPF` (weight / operand prefetch across tiles), `K3_XEARLY` (residual read early), `K3_DESC` (TMA descriptor prefetch) and `K3_EPI2` (two-stage
+epilogue) at D64 / D128 (`h100_b200style.K3_EXTRA`; D256 / D384 build the plain K3, slower with them). Each macro keeps the instruction order of every
+accumulation: the output is bit-identical to the plain K3 (`tests/gpu/test_trimul_h100_k3_pipe.py`, real Protenix / Boltz-2 / AF3 dumps). Measured on the
+module (warm, CUDA events, 2026-11-15): D64 L1024-2048 +2.4..3.3 %, D128 L768-1024 +2.5..2.9 %, D128 L1536-2048 within noise (K3 alone 1.04-1.13x). `backend_versions["cuda:h100_sm90"]` +1 on the three TriMul classes.
+
 ### Wide inference (`h100_wide_inference.py`, `h100_uni_wide_inference.py`)
 
 Bidirectional: K1 (the native K1 extended to H = 2D) writes the packed planes and per-token LN_in statistics (at D512 a separate

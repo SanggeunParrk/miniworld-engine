@@ -149,6 +149,11 @@ residual kernels and cuBLAS GEMMs (bf16 in, fp32 accumulate).
   rows have it (whole masked rows) and the core reads those tiles with `ldmatrix.trans` (`bias_transposed`, the `BTR` template) instead
   of 16-bit stores at stride L (1.3 us at L128, 10 us at L512). Measurer 4 (graph, cold L2) ms before -> after, anthropic: L128 0.045-0.047
   -> 0.033-0.035 (0.035); L256 0.111-0.118 -> 0.093-0.098 (0.101-0.102); L512 0.449-0.465 -> 0.416-0.422 (0.458-0.464).
+- fp16 inference with the unfused front at d_pair 128 < C <= 512 (AF3 / Protenix d_pair 384 x 12 heads x 32; `FRONT_LNB`, default on; 2026-11-15): the
+  pair bias comes out of the LayerNorm kernel (`ln_bias_fwd`: LN rows in shared memory, the bias GEMM on `mma.sync` m16n8k16 -- the bits of the cuBLAS
+  fp16 bias GEMM -- stored head-major, scaled and masked), no `y` / `[L^2, Hp]` round trip and no `front_bias` kernel. Starting node only (`not trans`);
+  the row-blocked path (L >= 2048) calls `ln_bias_blocks` per block (no `y` written, the q | k | v | g GEMM re-reads the pair). Module output
+  bit-identical (`tests/gpu/test_triattn_h100_front_lnb.py`). Measured on the module (warm): +0.5..1.7 % at L256-1536, within noise at L2048.
 - backward: `gate_bwd_in` -> `du = ddrop Wo`, `dWo = ddrop^T u` (fp32 result) -> `gate_bwd_out` -> `triattn_bwd_kv` /
   `triattn_bwd_q` write dk / dv / dq into their columns of `dall [M, 4 HD + Hp]` -> `assemble` -> `dyln = dall Wcat` (bf16),
   `dW = dall^T y` (fp32 result) -> `ln_bwd` (dx = dy + LN backward; gamma / beta partials summed by torch).
