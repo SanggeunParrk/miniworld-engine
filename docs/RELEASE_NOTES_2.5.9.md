@@ -1,8 +1,7 @@
-# miniworld-engine 2.5.x release candidate (draft, local branch `rc/2.5.x-tri`)
+# miniworld-engine 2.5.9
 
-Base: 2.5.8 (`origin/main` d3e071883). H100 only, TriangleAttention and TriangleMultiplication inference. Every change below is
-**bit-identical** to the previous default route (module outputs compared with `torch.equal`); no FP8 route, no accuracy change. Module
-`version` is not bumped anywhere; only `backend_versions["cuda:h100_sm90"]` (so A100 / RTX 5090 / anthropic / cueq / triton / pytorch tokens stay valid).
+Base: 2.5.8. Two parts: (1) H100 TriangleAttention and TriangleMultiplication inference, **bit-identical** to the previous default route (module outputs compared with `torch.equal`); no FP8 route, no accuracy change; (2) the A100 / RTX 5090 LayerNorm row kernels (`ln-speed`: no serialized parameter loads, scalar and row-per-CTA odd widths). Module `version` is not bumped anywhere; only `backend_versions` (`cuda:h100_sm90` for part 1, `cuda:a100_sm80` / `cuda:5090_sm120` of InputFeatureEmbedder for part 2) and the LayerNorm sm_80 kernel versions, so anthropic / cueq / triton / pytorch tokens stay valid.
+
 
 ## Changes
 
@@ -26,15 +25,20 @@ Base: 2.5.8 (`origin/main` d3e071883). H100 only, TriangleAttention and Triangle
 
 * H100: 668 cases owed after the bumps (cuda 7->8: 178, 8->9: 310, 10->11: 60, 3->4: 60, 4->5: 60); remeasured with `tools/slurm/cycle.sh`
   (2 cycles, 2712 tokens issued), **owed 0**.
-* A100 and RTX 5090: owed 0 (unchanged; only `cuda:h100_sm90` versions moved).
+* A100, RTX 5090 and H100 (after the merge, `judge owed` on all three cards): accuracy and speed owed 0, pending 0.
 
-## Known pre-existing failures (identical on `origin/main` d3e071883)
+## LayerNorm sm_80 row kernels (A100, RTX 5090)
 
-* `tests/cpu/test_requirements.py::test_class_versions_are_human[...]`: 30 cases (cuda:5090_sm120 versions from the RTX 5090 port).
-* `ruff check`: 4 errors; `pyright`: 9 errors (bias_only_dit_sm80.py, _sm120_builds.py, tests/gpu/test_transition_sm80_rows.py). Not touched here.
+Row forward kernels of `LayerNorm` for sm_80 / sm_120 (`layernorm_rows_fwd_*`, incl. the row-per-CTA kernel): kernel versions vec 2, scalar 3, stage 3;
+`InputFeatureEmbedder` `backend_versions` `cuda:a100_sm80` 8, `cuda:5090_sm120` 2 (its LayerNorm children run the changed kernels). Tokens for A100 and RTX 5090
+re-measured; benchmark pages regenerated (new `benchmarks/5090_sm120`).
 
-## Open
+## Gate fixes carried by this release (from the 2.5.8 RTX 5090 port)
 
-* The experimental commit history on this branch includes the interrupted front2 agent's uncommitted `ln_bias_blocks` work, now verified.
-* `origin/ln-speed-1.05` (LayerNorm row kernel, A100 / 5090 tokens) merges cleanly into this branch (see session report); no file is touched by both
-  (checked with `git merge-tree`, no conflicts).
+* `tests/cpu/test_requirements.py::test_class_versions_are_human`: the card whitelist now includes `5090_sm120` (30 cases failed on 2.5.8).
+* `ruff check`: 4 errors fixed (import order in `_msa_card.py`, `functools.cache`, two unused unpack names). `pyright`: 9 errors fixed (`_cc` tuple type,
+  optional `Pt`, `cast` of the positional-only star calls, `Any` for the extension handle in `tests/gpu/test_transition_sm80_rows.py`). No kernel output changed.
+
+## Packaging
+
+Kernel wheels `miniworld-engine-kernels-sm90-cu129`, `-sm80-cu129`, `-sm120-cu129`, all `==2.5.9`; the engine pins all three.
