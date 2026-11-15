@@ -100,6 +100,14 @@ def _planes_ext(part: str = ""):
     return _ext()
 
 
+def _planes_gemm(w, y):
+    """C = [Wv; Wg; Wb] y^T, the channel planes [N, rows of y]: ``torch.mm(w, y.t())``'s bits (the fastest bit-equal cublasLt algorithm)."""
+    e = _planes_ext("gemm")
+    if e is None:
+        return torch.mm(w, y.t())
+    return e.cgemm(w, y, torch.empty(w.shape[0], y.shape[0], device=y.device, dtype=y.dtype))
+
+
 def _mm_f32_into(out, a, b):
     """out (a [rows, N] fp32 slice) = a @ b, the same GEMM as ``_mm_f32`` without its result tensor and the copy into ``out``."""
     if LEGACY or "mm" in OFF or _a100():
@@ -142,7 +150,7 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
     planes, probs, os_, us = [], [], [], []
     for b in range(B):
         rows = slice(b * LL, (b + 1) * LL)
-        c = torch.mm(w, y[rows].t())  # [4 Dh + 2 H, L L]
+        c = _planes_gemm(w, y[rows])  # [4 Dh + 2 H, L L]
         ps, pe = _probs(c[4 * Dh :], None if mask is None else mask[b], H, L)
         o = torch.empty(2 * Dh, LL, device=x.device, dtype=torch.bfloat16)
         torch.bmm(c[:Dh].view(H, dh * L, L), ps.transpose(1, 2), out=o[:Dh].view(H, dh * L, L))
@@ -293,7 +301,7 @@ def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
     planes, probs, os_, us = [], [], [], []
     for b in range(B):
         rows = slice(b * LL, (b + 1) * LL)
-        c = torch.mm(w, y[rows].t())  # [2 Dh + H, L L]
+        c = _planes_gemm(w, y[rows])  # [2 Dh + H, L L]
         e = _planes_ext("logits")
         if e is not None:
             logits = e.logits(c[2 * Dh :], None if mask is None else mask[b], H if starting else 0, L)

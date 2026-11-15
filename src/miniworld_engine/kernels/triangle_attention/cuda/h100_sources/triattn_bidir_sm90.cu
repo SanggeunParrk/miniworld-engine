@@ -193,8 +193,106 @@ torch::Tensor out_proj(torch::Tensor u, torch::Tensor wo, torch::Tensor x, torch
   return out;
 }
 
+// The planes GEMM C[N, M] = w[N, K] y[M, K]^T (the module's [Wv; Wg; Wb] y^T, channel planes out) through cublasLt. torch.mm's choice is
+// not the fastest algorithm of the heuristic's list for this shape (its output is byte-bound: 4 x 2 H rows of L L tokens), and every
+// algorithm of the list that does not split K has the same arithmetic (fp32 accumulation over the one K loop, one rounding): the bits are
+// the same. The plan of a shape is calibrated once, outside a graph capture, on the call's own operands: every candidate (up to 32) is timed
+// and compared bit for bit with torch.mm, the fastest equal one is kept; none equal, or a shape not calibrated while a graph is being
+// captured: torch.mm. The choice of algorithm may vary with timing noise; the output bits cannot (they equal torch.mm's).
+namespace {
+struct CPlan { cublasLtMatmulDesc_t op; cublasLtMatrixLayout_t la, lb, lc; std::vector<cublasLtMatmulHeuristicResult_t> cands; int chosen; };
+}  // namespace
+
+torch::Tensor cgemm(torch::Tensor w, torch::Tensor y, torch::Tensor out) {
+  TORCH_CHECK(w.is_cuda() && w.scalar_type() == torch::kBFloat16 && y.scalar_type() == torch::kBFloat16 && out.scalar_type() == torch::kBFloat16 &&
+                  w.dim() == 2 && y.dim() == 2 && out.dim() == 2 && w.is_contiguous() && y.is_contiguous() && out.is_contiguous() && w.size(1) == y.size(1) &&
+                  out.size(0) == w.size(0) && out.size(1) == y.size(0),
+              "cgemm: bf16 w [N, K], y [M, K], out [N, M], contiguous");
+  c10::cuda::CUDAGuard guard(w.device());
+  const int64_t N = w.size(0), K = w.size(1), M = y.size(0);
+  static std::map<std::tuple<int, int64_t, int64_t, int64_t>, CPlan> plans;
+  static std::mutex mu;
+  auto lt = reinterpret_cast<cublasLtHandle_t>(at::cuda::getCurrentCUDABlasLtHandle());
+  auto stream = at::cuda::getCurrentCUDAStream();
+  cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+  C10_CUDA_CHECK(cudaStreamIsCapturing(stream, &cap));
+  std::lock_guard<std::mutex> lk(mu);
+  const auto key = std::make_tuple((int)w.get_device(), N, K, M);
+  auto it = plans.find(key);
+  if (it == plans.end()) {
+    CPlan q;
+    LT_CHECK(cublasLtMatmulDescCreate(&q.op, CUBLAS_COMPUTE_32F, CUDA_R_32F));
+    cublasOperation_t tt = CUBLAS_OP_T, nn = CUBLAS_OP_N;
+    LT_CHECK(cublasLtMatmulDescSetAttribute(q.op, CUBLASLT_MATMUL_DESC_TRANSA, &tt, sizeof(tt)));  // A = y^T: col-major [K, M] -> [M, K]
+    LT_CHECK(cublasLtMatmulDescSetAttribute(q.op, CUBLASLT_MATMUL_DESC_TRANSB, &nn, sizeof(nn)));  // B = w: col-major [K, N]
+    LT_CHECK(cublasLtMatrixLayoutCreate(&q.la, CUDA_R_16BF, K, M, K));
+    LT_CHECK(cublasLtMatrixLayoutCreate(&q.lb, CUDA_R_16BF, K, N, K));
+    LT_CHECK(cublasLtMatrixLayoutCreate(&q.lc, CUDA_R_16BF, M, N, M));  // out row-major [N, M] = column-major [M, N]
+    cublasLtMatmulPreference_t pref;
+    LT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
+    size_t wsmax = 32u << 20;
+    LT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsmax, sizeof(wsmax)));
+    q.cands.resize(32);
+    int n = 0;
+    LT_CHECK(cublasLtMatmulAlgoGetHeuristic(lt, q.op, q.la, q.lb, q.lc, q.lc, pref, 32, q.cands.data(), &n));
+    cublasLtMatmulPreferenceDestroy(pref);
+    q.cands.resize(n);
+    q.chosen = -2;  // not calibrated yet
+    it = plans.emplace(key, q).first;
+  }
+  CPlan& p = it->second;
+  const float alpha = 1.f, beta = 0.f;
+  auto run = [&](const cublasLtMatmulHeuristicResult_t& c, torch::Tensor& dst, torch::Tensor& ws) {
+    return cublasLtMatmul(lt, p.op, &alpha, y.data_ptr(), p.la, w.data_ptr(), p.lb, &beta, dst.data_ptr(), p.lc, dst.data_ptr(), p.lc, &c.algo, ws.data_ptr(),
+                          c.workspaceSize, stream);
+  };
+  if (p.chosen == -2) {
+    if (cap != cudaStreamCaptureStatusNone) {
+      torch::mm_out(out, w, y.t());
+      return out;
+    }
+    auto ref = torch::mm(w, y.t());
+    auto tmp = torch::empty_like(out);
+    auto ws = torch::empty({(int64_t)(32u << 20)}, w.options().dtype(torch::kByte));
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
+    p.chosen = -1;
+    float best = 1e30f;
+    for (int c = 0; c < (int)p.cands.size(); ++c) {
+      if (p.cands[c].state != CUBLAS_STATUS_SUCCESS || run(p.cands[c], tmp, ws) != CUBLAS_STATUS_SUCCESS) continue;
+      if (!at::equal(tmp, ref)) continue;
+      cudaEventRecord(e0, stream);
+      for (int r = 0; r < 6; ++r) run(p.cands[c], tmp, ws);
+      cudaEventRecord(e1, stream);
+      cudaEventSynchronize(e1);
+      float ms = 0.f;
+      cudaEventElapsedTime(&ms, e0, e1);
+      if (ms < best) { best = ms; p.chosen = c; }
+    }
+    // torch.mm's own time: keep it when no candidate is faster
+    cudaEventRecord(e0, stream);
+    for (int r = 0; r < 6; ++r) torch::mm_out(tmp, w, y.t());
+    cudaEventRecord(e1, stream);
+    cudaEventSynchronize(e1);
+    float ms = 0.f;
+    cudaEventElapsedTime(&ms, e0, e1);
+    if (ms <= best) p.chosen = -1;
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
+  }
+  if (p.chosen < 0) {
+    torch::mm_out(out, w, y.t());
+    return out;
+  }
+  auto ws = torch::empty({(int64_t)p.cands[p.chosen].workspaceSize + 16}, w.options().dtype(torch::kByte));
+  LT_CHECK(run(p.cands[p.chosen], out, ws));
+  return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_bwd", &gate_bwd);
   m.def("logits", &logits);
   m.def("out_proj", &out_proj);
+  m.def("cgemm", &cgemm);
 }
