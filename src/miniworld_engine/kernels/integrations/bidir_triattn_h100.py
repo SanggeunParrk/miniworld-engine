@@ -21,6 +21,8 @@ dO_e V_e^T (fp32) -> the softmax gradients -> dW = dC y, dy_ln = dC^T W (fp32) -
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 #: pair widths the glue LayerNorm takes (C % 8 == 0, C <= 512)
@@ -81,14 +83,52 @@ def _mm_f32(a, b):
     return torch.mm(a, b, out_dtype=torch.float32)
 
 
+#: the H100 path's host-side tails: False = the torch ops the engine 2.5.9 ran (cat / masked_fill / addmm / copies); both give the same
+#: bits (tests/gpu/test_bidir_triattn_h100.py). The A100 / RTX 5090 builds always run the torch ops.
+LEGACY = False
+#: parts switched back to the torch ops one by one (tests): "logits", "out", "mm"
+OFF: set = set()
+#: OPT-IN, default off: the residual out-projection through cublasLt with D != C (no copy of x into the output; one rounding of x + product where
+#: torch.addmm rounds the product to bf16 first: NOT the same bits, the more accurate value). Set BIDIR_RESIDUAL_LT=1.
+RESIDUAL_LT = os.environ.get("BIDIR_RESIDUAL_LT", "0") == "1"
+
+
+def _planes_ext(part: str = ""):
+    """The H100 extension with the logits pass and the residual out-projection, or None (legacy switch, or the sm_80 / sm_120 build)."""
+    if LEGACY or part in OFF or _a100():
+        return None
+    return _ext()
+
+
+def _mm_f32_into(out, a, b):
+    """out (a [rows, N] fp32 slice) = a @ b, the same GEMM as ``_mm_f32`` without its result tensor and the copy into ``out``."""
+    if LEGACY or "mm" in OFF or _a100():
+        out.copy_(_mm_f32(a, b))
+    else:
+        torch.mm(a, b, out_dtype=torch.float32, out=out)
+
+
 def _probs(bias: torch.Tensor, keep: torch.Tensor | None, H: int, L: int) -> tuple[torch.Tensor, torch.Tensor]:
     """The bias planes [2 H, L L] of one sample -> (P_s [H, L, L], P_e [H, L, L]), each a softmax over its last axis k (masked keys -inf)."""
-    b = bias.view(2 * H, L, L).float()
-    logits = torch.cat([b[:H], b[H:].transpose(1, 2)])  # starting [h, j, k]; ending [h, i, k] = bias_e[h, k, i]
-    if keep is not None:
-        logits = logits.masked_fill(~keep[None, None, :], float("-inf"))
+    e = _planes_ext("logits")
+    if e is not None:  # one pass: widen, transpose the ending half, mask
+        logits = e.logits(bias, keep, H, L)
+    else:
+        b = bias.view(2 * H, L, L).float()
+        logits = torch.cat([b[:H], b[H:].transpose(1, 2)])  # starting [h, j, k]; ending [h, i, k] = bias_e[h, k, i]
+        if keep is not None:
+            logits = logits.masked_fill(~keep[None, None, :], float("-inf"))
     p = torch.softmax(logits, -1).to(torch.bfloat16)
     return p[:H], p[H:]
+
+
+def _out_proj(x, u, wo, out):
+    """out = x + u^T wo^T (x, out: [L L, C] rows of one sample; u [K, L L] planes; wo [C, K])."""
+    e = _planes_ext("out") if RESIDUAL_LT else None
+    if e is not None:  # cublasLt with D != C: no copy of x into out
+        e.out_proj(u, wo, x, out)
+    else:
+        torch.addmm(x, u.t(), wo.t(), out=out)
 
 
 def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
@@ -110,7 +150,7 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
             ch = slice(Dh + h * dh, Dh + (h + 1) * dh)
             torch.bmm(pe[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
         u = g.gate_u(c[2 * Dh : 4 * Dh], o, 0)
-        torch.addmm(x[rows], u.t(), wo.t(), out=out[rows])
+        _out_proj(x[rows], u, wo, out[rows])
         if save:
             planes.append(c)
             probs.append((ps, pe))
@@ -156,7 +196,7 @@ def _backward(dy, pair, lnw, w, wo, saved, H, Dh):
         db[:H] = dl[:H]
         db[H:] = dl[H:].transpose(1, 2)  # back to the bias plane's [k, i]
         dW += _mm_f32(dc, y[rows])
-        dyln[rows] = _mm_f32(dc.t(), w)
+        _mm_f32_into(dyln[rows], dc.t(), w)
     dx, part = g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)  # + the residual's dy
     dgb = part.sum(0)
     return dx.view(B, L, L, C), dgb[0], dgb[1], dW, dWo
@@ -254,11 +294,15 @@ def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
     for b in range(B):
         rows = slice(b * LL, (b + 1) * LL)
         c = torch.mm(w, y[rows].t())  # [2 Dh + H, L L]
-        logits = c[2 * Dh :].view(H, L, L).float()
-        if not starting:
-            logits = logits.transpose(1, 2)  # [h, i, k] = bias[h, k, i]
-        if mask is not None:
-            logits = logits.masked_fill(~mask[b][None, None, :], float("-inf"))
+        e = _planes_ext("logits")
+        if e is not None:
+            logits = e.logits(c[2 * Dh :], None if mask is None else mask[b], H if starting else 0, L)
+        else:
+            logits = c[2 * Dh :].view(H, L, L).float()
+            if not starting:
+                logits = logits.transpose(1, 2)  # [h, i, k] = bias[h, k, i]
+            if mask is not None:
+                logits = logits.masked_fill(~mask[b][None, None, :], float("-inf"))
         p = torch.softmax(logits, -1).to(torch.bfloat16)
         o = torch.empty(Dh, LL, device=x.device, dtype=torch.bfloat16)
         if starting:
@@ -269,7 +313,7 @@ def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
                 torch.bmm(p[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
         u = g.gate_u(c[Dh : 2 * Dh], o, 0)
         if drop is None:
-            torch.addmm(x[rows], u.t(), wo.t(), out=out[rows])
+            _out_proj(x[rows], u, wo, out[rows])
         else:
             t = torch.mm(u.t(), wo.t()).view(L, L, C)
             out[rows] = (x[rows].view(L, L, C) + t * drop[b]).view(LL, C)
@@ -317,7 +361,7 @@ def _backward1(dy, pair, drop, lnw, w, wo, saved, H, Dh, starting):
         dl = pf * (dp - (pf * dp).sum(-1, keepdim=True))  # d logits [H, ., k]
         dc[2 * Dh :].view(H, L, L).copy_(dl if starting else dl.transpose(1, 2))  # back to the bias plane's layout
         dW += _mm_f32(dc, y[rows])
-        dyln[rows] = _mm_f32(dc.t(), w)
+        _mm_f32_into(dyln[rows], dc.t(), w)
     dx, part = g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)  # + the residual's dy
     dgb = part.sum(0)
     return dx.view(B, L, L, C), dgb[0], dgb[1], dW, dWo
