@@ -227,7 +227,7 @@ def _h100(cells):
         if c.ch in _ROWPAD.get(c.d, ()):
             for n in sorted(m.lengths):
                 yield _call(h100_b200style_direct._kernel, c.d, c.ch, BS._config(c.d, n=n, direct=True))
-            yield _call(h100_b200style_static.output_kernel, c.d, c.ch, BS._inference_output_config(c.d), True, BS.K3_XBUF.get(c.d, 1))
+            yield _call(h100_b200style_static.output_kernel, c.d, c.ch, BS._inference_output_config(c.d), True, BS.K3_XBUF.get(c.d, 1), BS.K3_EXTRA.get(c.d, ()))
 
     # wide inference: bidirectional (wide_forward/selection.json, with / without a mask) and single direction D512
     wide = json.loads((T.SOURCES / "wide_forward/selection.json").read_text())

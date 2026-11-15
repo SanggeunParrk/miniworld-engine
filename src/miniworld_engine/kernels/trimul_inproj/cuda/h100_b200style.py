@@ -116,6 +116,11 @@ K3_STAGES_64 = 4
 #: residual / output tiles per K3 warpgroup (k3.cu XBUF) by width; the D256 / D384 tiles (BN 256 / 192) leave no shared memory for a
 #: second one
 K3_XBUF = {64: 2, 128: 2}
+#: extra nvcc flags of the any-L inference K3 by width (k3.cu pipeline macros: weight / operand prefetch across tiles, early residual
+#: read, TMA descriptor prefetch, two-stage epilogue; each bit-identical to the plain K3). D64 / D128: K3 1.00-1.13x, module 1.00-1.035x
+#: (H100, L256-2048); D256 / D384 take the token-flat K3 where it applies and measured slower with them, so they build the plain K3.
+K3_PIPE = ("-DK3_XSPF=1", "-DK3_XEARLY=1", "-DK3_DESC=1", "-DK3_EPI2=1")
+K3_EXTRA: dict = {64: K3_PIPE, 128: K3_PIPE}
 
 
 @T.device_cache
@@ -398,7 +403,7 @@ def _run_rowpad(leaves, mask, direction, out=None):
         cfg = _inference_output_config(d)
         from .h100_b200style_static import output_kernel
 
-        kernel, smem = output_kernel(d, h, cfg, rowpad=True, xbuf=K3_XBUF.get(d, 1))
+        kernel, smem = output_kernel(d, h, cfg, rowpad=True, xbuf=K3_XBUF.get(d, 1), extra=K3_EXTRA.get(d, ()))
         bn = cfg[0]
         cj = -(-n // 64)
         tiles = -(-(rows * cj) // 2)
