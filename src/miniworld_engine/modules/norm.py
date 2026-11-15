@@ -225,10 +225,13 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cuda:h100_sm90": 2,
-        "cuda:a100_sm80": 2,
-        "cuda:5090_sm120": 2,
+        "cuda:a100_sm80": 3,
+        "cuda:5090_sm120": 3,
     }  # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward;
-    # 2026-11-13: RTX 5090 (cuda:5090_sm120 2): the staged odd-width forward from 16 rows on, fp32 d 768 rows with early parameters and two row groups a warp
+    # 2026-11-13: RTX 5090 (cuda:5090_sm120 2): the staged odd-width forward from 16 rows on, fp32 d 768 rows with early parameters and two row groups a warp;
+    # 2026-11-14: A100 (cuda:a100_sm80 3) and RTX 5090 (cuda:5090_sm120 3): the forward kernels take the weight / bias dtype at compile time and issue every load of a row and of its
+    # parameters up front (a predicated convert had made each parameter load wait for the one before); fp32 d 768 and bf16 d 2560 load their parameters early on both cards; the 5090 takes the
+    # scalar kernel below 4096 rows (not the staged one), a row-per-CTA kernel for odd widths up to 2048 rows, and one row group a warp for bf16 d 384 / 768 (outputs equal up to fp32 rounding)
 
     def __init__(
         self,
