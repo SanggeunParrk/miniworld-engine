@@ -21,7 +21,7 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | AttentionPairBias | 5.00x (n=160) | 1.64x (n=160) | 0.94x (n=138) | 3.39x (n=108) |  | 0.99x (n=108) |
 | AugmentNoise | 8.19x (n=20) |  |  |  |  |  |
 | BidirectionalTriangleAttention | 2.96x (n=6) |  |  | 2.47x (n=6) |  |  |
-| BidirectionalTriangleMultiplication | 9.19x (n=30) |  |  | 6.53x (n=30) |  |  |
+| BidirectionalTriangleMultiplication | 9.15x (n=30) |  |  | 6.52x (n=30) |  |  |
 | InputFeatureEmbedder | 9.52x (n=72) | 6.49x (n=72) |  | 7.07x (n=72) |  |  |
 | LayerNorm | 3.42x (n=386) | 2.77x (n=386) | 2.80x (n=386) | 2.66x (n=270) |  | 1.29x (n=270) |
 | MSAPairWeightedAveraging | 5.92x (n=56) | 1.72x (n=56) |  | 3.33x (n=42) |  |  |
@@ -42,13 +42,13 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | TokenDiTRoseTTAFold3 | 5.14x (n=36) | 1.17x (n=36) | 1.43x (n=36) | 2.34x (n=12) |  | 1.45x (n=12) |
 | TokenPairInit | 12.61x (n=6) |  |  | 3.81x (n=6) |  |  |
 | Transition | 4.75x (n=180) | 3.05x (n=117) |  | 3.13x (n=126) |  |  |
-| TriangleAttention | 10.73x (n=90) | 7.27x (n=77) | 3.19x (n=76) | 5.60x (n=82) |  | 2.07x (n=68) |
-| TriangleAttentionAF3 | 11.18x (n=52) | 10.64x (n=40) | 3.10x (n=50) | 5.51x (n=48) |  | 2.00x (n=46) |
+| TriangleAttention | 10.81x (n=88) | 7.34x (n=75) | 3.17x (n=74) | 5.60x (n=82) |  | 2.07x (n=68) |
+| TriangleAttentionAF3 | 11.23x (n=52) | 10.66x (n=40) | 3.10x (n=50) | 5.53x (n=48) |  | 2.00x (n=46) |
 | TriangleAttentionChai1 | 15.25x (n=27) | 5.30x (n=27) | 4.46x (n=27) | 8.03x (n=24) |  | 3.10x (n=24) |
 | TriangleAttentionChai1Confidence | 7.88x (n=13) | 3.77x (n=13) | 3.40x (n=13) | 5.09x (n=12) |  | 2.52x (n=12) |
-| TriangleAttentionRF3 | 16.85x (n=28) | 9.44x (n=28) | 4.61x (n=28) | 7.44x (n=24) |  | 3.10x (n=24) |
-| TriangleMultiplication | 11.07x (n=104) | 8.27x (n=92) | 3.92x (n=102) | 8.66x (n=72) |  | 3.13x (n=70) |
-| TriangleMultiplicationRF3 | 12.35x (n=36) | 9.89x (n=36) |  | 10.42x (n=24) |  |  |
+| TriangleAttentionRF3 | 16.85x (n=28) | 9.46x (n=28) | 4.62x (n=28) | 7.44x (n=24) |  | 3.11x (n=24) |
+| TriangleMultiplication | 11.18x (n=104) | 8.32x (n=92) | 3.94x (n=102) | 8.74x (n=72) |  | 3.16x (n=70) |
+| TriangleMultiplicationRF3 | 12.55x (n=36) | 9.89x (n=36) |  | 10.46x (n=24) |  |  |
 
 ## Summary: af3 only
 
@@ -65,8 +65,8 @@ The same over the requirement rows whose `source` names af3 (56 rows).
 | OuterProductMean | 3.02x (n=18) | 2.35x (n=18) |  | 2.32x (n=12) |  |  |
 | TokenDiTProtenix | 5.19x (n=36) | 1.38x (n=36) | 1.37x (n=36) | 2.57x (n=24) |  | 1.26x (n=24) |
 | Transition | 5.94x (n=74) | 3.79x (n=56) |  | 3.89x (n=48) |  |  |
-| TriangleAttentionAF3 | 14.96x (n=28) | 11.35x (n=28) | 3.53x (n=26) | 6.60x (n=24) |  | 2.19x (n=22) |
-| TriangleMultiplication | 13.73x (n=36) | 11.40x (n=36) | 6.75x (n=36) | 10.84x (n=24) |  | 4.00x (n=24) |
+| TriangleAttentionAF3 | 15.09x (n=28) | 11.35x (n=28) | 3.53x (n=26) | 6.61x (n=24) |  | 2.19x (n=22) |
+| TriangleMultiplication | 13.96x (n=36) | 11.46x (n=36) | 6.78x (n=36) | 10.96x (n=24) |  | 4.03x (n=24) |
 
 ## Classes
 
