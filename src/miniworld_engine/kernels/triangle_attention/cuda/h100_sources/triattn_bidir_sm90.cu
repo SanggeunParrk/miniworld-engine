@@ -210,6 +210,10 @@ torch::Tensor cgemm(torch::Tensor w, torch::Tensor y, torch::Tensor out) {
               "cgemm: bf16 w [N, K], y [M, K], out [N, M], contiguous");
   c10::cuda::CUDAGuard guard(w.device());
   const int64_t N = w.size(0), K = w.size(1), M = y.size(0);
+  if (M > (1L << 20)) {  // the calibration holds two more copies of the planes: above L = 1024 the plain torch.mm
+    torch::mm_out(out, w, y.t());
+    return out;
+  }
   static std::map<std::tuple<int, int64_t, int64_t, int64_t>, CPlan> plans;
   static std::mutex mu;
   auto lt = reinterpret_cast<cublasLtHandle_t>(at::cuda::getCurrentCUDABlasLtHandle());

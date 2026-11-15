@@ -65,7 +65,10 @@ KINDS = [("bi", True), ("tri", True), ("tri", False)]
 
 
 @pytest.mark.parametrize(("kind", "starting"), KINDS)
-@pytest.mark.parametrize(("length", "batch", "train"), [(128, 1, False), (128, 2, True), (200, 1, True), (256, 2, False), (256, 1, True), (512, 1, False), (768, 1, False)])
+@pytest.mark.parametrize(
+    ("length", "batch", "train"),
+    [(128, 1, False), (128, 2, True), (200, 1, True), (256, 2, False), (256, 1, True), (512, 1, False), (768, 1, False)],
+)
 @pytest.mark.parametrize("masked", [False, True])
 def test_host_tails_equal_the_torch_ops(monkeypatch, kind, starting, length, batch, train, masked):
     from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
