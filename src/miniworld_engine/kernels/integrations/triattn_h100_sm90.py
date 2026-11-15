@@ -270,16 +270,23 @@ def _generic_rows(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans
 
         # the bias of every token, block by block over the pair's own rows (no copies), then into the logical order (ending node:
         # the small [L, L, Hp] transposed)
-        bias = torch.empty(L * L, wb.shape[0], device=pair.device, dtype=ww.dtype)
-        for i0, i1 in blocks_of:
-            y = g.ln_fwd(pair[b, i0:i1].reshape(-1, C), lw, lb, eps, L, False, h16)[0]
-            torch.matmul(y, wb.t(), out=bias[i0 * L : i1 * L])
-        if trans:
-            bias = bias.view(L, L, -1).transpose(0, 1).reshape(L * L, -1)
         m = None if mask is None else mask[b : b + 1]
         front_mask = m if m is not None and not flip else pair.new_empty(0, dtype=torch.bool)
-        sbias = g.front_bias(bias, front_mask, 1, L, H, 0, scale)
-        del bias
+        if gen.FRONT_LNB and h16 and not trans and 128 < C <= 512 and C % 16 == 0 and L % 128 == 0:
+            # fp16: the bias pass is one read of the pair per block: LayerNorm + the bias on mma.sync (the cuBLAS bias GEMM bits) straight
+            # into the head-major scaled / masked bias; no y, no [L^2, Hp] round trip, no bias kernel
+            sbias = torch.empty(1, H, L, L, device=pair.device, dtype=torch.float16)
+            for i0, i1 in blocks_of:
+                g.ln_bias_blocks(pair[b, i0:i1].reshape(-1, C), lw, lb, wb, front_mask.to(torch.bool).contiguous(), sbias, i0, eps, L, H, scale)
+        else:
+            bias = torch.empty(L * L, wb.shape[0], device=pair.device, dtype=ww.dtype)
+            for i0, i1 in blocks_of:
+                y = g.ln_fwd(pair[b, i0:i1].reshape(-1, C), lw, lb, eps, L, False, h16)[0]
+                torch.matmul(y, wb.t(), out=bias[i0 * L : i1 * L])
+            if trans:
+                bias = bias.view(L, L, -1).transpose(0, 1).reshape(L * L, -1)
+            sbias = g.front_bias(bias, front_mask, 1, L, H, 0, scale)
+            del bias
         if flip:
             sbias = core_mod.flip_bias(sbias, m)
         for i0, i1 in blocks_of:

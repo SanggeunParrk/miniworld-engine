@@ -149,7 +149,7 @@ __global__ void __launch_bounds__(256) front_bias_k(const T* __restrict__ qkvb, 
 // memory, so the bias GEMM's re-read of y (and its launch) go away.  A block = 128 consecutive j of one (b, i); L % 128 == 0.
 __global__ void __launch_bounds__(256, 2) ln_bias_fwd_k(const bf16* __restrict__ x, const float* __restrict__ w, const float* __restrict__ bs,
                                                         __half* __restrict__ y, const __half* __restrict__ wb, const bool* __restrict__ mask,
-                                                        __half* __restrict__ sbias, int C, float eps, int L, int tr, int H, int Hp, float inv_scale) {
+                                                        __half* __restrict__ sbias, int C, float eps, int L, int tr, int H, int Hp, float inv_scale, int i_off, int write_y) {
   extern __shared__ __align__(16) unsigned char smem_raw[];
   const int SW = C + 8;                                  // padded row (elements): the A / B fragment loads are bank-conflict free
   __half* ys = reinterpret_cast<__half*>(smem_raw);      // [128][SW]
@@ -160,12 +160,13 @@ __global__ void __launch_bounds__(256, 2) ln_bias_fwd_k(const bf16* __restrict__
     const int n = i / nv, c = i - n * nv;
     *reinterpret_cast<uint4*>(wbs + n * SW + c * 8) = *reinterpret_cast<const uint4*>(wb + (long)n * C + c * 8);
   }
+  __syncthreads();
   constexpr int NA = MAXV, G = 4;
   for (int it0 = 0; it0 < 16; it0 += G) {
     float v[G][NA][8];
 #pragma unroll
     for (int g = 0; g < G; ++g) {
-      const long row = row0 + warp + 8 * (it0 + g);
+      const long row = row0 + 16 * warp + it0 + g;
 #pragma unroll
       for (int a = 0; a < NA; ++a) {
         const int idx = lane + 32 * a;
@@ -174,7 +175,7 @@ __global__ void __launch_bounds__(256, 2) ln_bias_fwd_k(const bf16* __restrict__
     }
 #pragma unroll
     for (int g = 0; g < G; ++g) {
-      const int rl = warp + 8 * (it0 + g);
+      const int rl = 16 * warp + it0 + g;
       const long row = row0 + rl;
       float s = 0.f;
 #pragma unroll
@@ -207,16 +208,16 @@ __global__ void __launch_bounds__(256, 2) ln_bias_fwd_k(const bf16* __restrict__
 #pragma unroll
           for (int e = 0; e < 8; ++e) o[e] = fmaf((v[g][a][e] - mean) * rstd, ww[e], bb[e]);
           const uint4 pv = pack8h(o);
-          *reinterpret_cast<uint4*>(y + row * C + idx * 8) = pv;
+          if (write_y) *reinterpret_cast<uint4*>(y + row * C + idx * 8) = pv;
           *reinterpret_cast<uint4*>(ys + rl * SW + idx * 8) = pv;
         }
       }
     }
   }
-  __syncthreads();
+  __syncwarp();   // a warp owns its 16 rows from the LayerNorm through the MMA: no block barrier, the warps drift apart and overlap their phases
   const int g8 = lane >> 2, t = lane & 3;
   const long bi = row0 / L;
-  const int j0 = (int)(row0 - bi * L), b = (int)(bi / L), i = (int)(bi - (long)b * L);
+  const int j0 = (int)(row0 - bi * L), b = (int)(bi / L), i = (int)(bi - (long)b * L) + i_off;
   for (int n0 = 0; n0 < Hp; n0 += 8) {
     float c[4] = {0.f, 0.f, 0.f, 0.f};
     const __half* ap = ys + (16 * warp + g8) * SW + 2 * t;
@@ -497,9 +498,28 @@ std::vector<torch::Tensor> g_ln_bias_fwd(torch::Tensor x, torch::Tensor w, torch
   C10_CUDA_CHECK(cudaFuncSetAttribute(ln_bias_fwd_k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
   ln_bias_fwd_k<<<(unsigned)(M / 128), 256, smem, stream()>>>(cbp(x), w.data_ptr<float>(), b.data_ptr<float>(), reinterpret_cast<__half*>(y.data_ptr()),
                                                               reinterpret_cast<const __half*>(wb.data_ptr()), mp, reinterpret_cast<__half*>(sbias.data_ptr()),
-                                                              C, (float)eps, (int)L, (int)trans, (int)H, Hp, (float)(1.0 / scale));
+                                                              C, (float)eps, (int)L, (int)trans, (int)H, Hp, (float)(1.0 / scale), 0, 1);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {y, sbias};
+}
+
+// the row-blocked inference's bias pass: rows i0 .. i0 + M / L of ONE sample (x [M, C], M % L == 0) -> their heads of sbias [1, H, L, L] fp16
+// (preallocated, whole sample); y itself is not written (the blocks' LayerNorm comes again with the q | k | v | g GEMM)
+void g_ln_bias_blocks(torch::Tensor x, torch::Tensor w, torch::Tensor b, torch::Tensor wb, torch::Tensor mask, torch::Tensor sbias, int64_t i0, double eps,
+                      int64_t L, int64_t H, double scale) {
+  TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous() && x.scalar_type() == torch::kBFloat16, "x [M, C] bf16 contiguous");
+  const long M = x.size(0);
+  const int C = (int)x.size(1), Hp = (int)wb.size(0);
+  TORCH_CHECK(C > 128 && C <= 512 && C % 16 == 0 && L % 128 == 0 && M % L == 0, "C in (128, 512], C % 16 == 0, L % 128 == 0");
+  TORCH_CHECK(wb.scalar_type() == torch::kHalf && wb.is_contiguous() && wb.size(1) == C && Hp % 8 == 0 && H <= Hp, "wb [Hp, C] fp16");
+  TORCH_CHECK(sbias.scalar_type() == torch::kHalf && sbias.is_contiguous() && sbias.numel() == H * L * L && i0 + M / L <= L, "sbias [1, H, L, L] fp16");
+  const bool* mp = nullptr;
+  if (mask.numel() > 0) { TORCH_CHECK(mask.scalar_type() == torch::kBool && mask.is_contiguous() && mask.numel() == L, "mask [1, L] bool"); mp = mask.data_ptr<bool>(); }
+  const size_t smem = (size_t)(128 + Hp) * (C + 8) * sizeof(__half);
+  C10_CUDA_CHECK(cudaFuncSetAttribute(ln_bias_fwd_k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+  ln_bias_fwd_k<<<(unsigned)(M / 128), 256, smem, stream()>>>(cbp(x), w.data_ptr<float>(), b.data_ptr<float>(), nullptr, reinterpret_cast<const __half*>(wb.data_ptr()), mp,
+                                                              reinterpret_cast<__half*>(sbias.data_ptr()), C, (float)eps, (int)L, 0, (int)H, Hp, (float)(1.0 / scale), (int)i0, 0);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 torch::Tensor g_gate_u(torch::Tensor qkvb, torch::Tensor o, int64_t g_col) {
@@ -631,6 +651,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_fwd", &g_ln_fwd, py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("L"), py::arg("trans"), py::arg("h16") = false);
   m.def("front_bias", &g_front_bias);
   m.def("ln_bias_fwd", &g_ln_bias_fwd);
+  m.def("ln_bias_blocks", &g_ln_bias_blocks);
   m.def("gate_u", &g_gate_u);
   m.def("residual", &g_residual);
   m.def("gate_bwd_in", &g_gate_bwd_in);
