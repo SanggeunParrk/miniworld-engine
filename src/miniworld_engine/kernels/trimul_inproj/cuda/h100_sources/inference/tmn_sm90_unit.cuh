@@ -137,6 +137,7 @@ TMN_K1_SET_BF16(128, 256, 1, 128, 8, 2)
 TMN_K1_SET_BF16(128, 256, 2, 64, 4, 2)          // shorter ring (4 x 32 KB k-chunks)
 // save-statistics l2 (reference-order LN, token mask) of the tiles the bidirectional D128 table serves: K1 hands its LN_in (mean, rstd) to the port K3 (MINIWORLD_TRIMUL_BIDIR_PORT_K3, default off)
 TMN_K1(128, 256, false, b, 3, 64, 8, 2, 1, 2, 1) TMN_K1(128, 256, false, b, 6, 32, 8, 2, 1, 2, 1) TMN_K1(128, 256, false, b, 2, 64, 8, 2, 1, 2, 1) TMN_K1(128, 256, false, b, 1, 128, 8, 2, 1, 2, 1) TMN_K1(128, 256, false, b, 2, 64, 4, 2, 1, 2, 1)
+TMN_K1(128, 256, false, b, 3, 64, 8, 2, 0, 2, 1) TMN_K1(128, 256, false, b, 6, 32, 8, 2, 0, 2, 1) TMN_K1(128, 256, false, b, 2, 64, 8, 2, 0, 2, 1) TMN_K1(128, 256, false, b, 1, 128, 8, 2, 0, 2, 1) TMN_K1(128, 256, false, b, 2, 64, 4, 2, 0, 2, 1)   // ... and without a mask
 TMN_K3_SET_BF16(128, 256, 2, 64, 6, 1)          // longer weight ring
 TMN_K3_SET_BF16(128, 256, 2, 64, 4, 2)          // two accumulator sets
 TMN_K3_SET_BF16(128, 256, 1, 128, 4, 1)
