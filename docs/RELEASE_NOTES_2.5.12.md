@@ -1,6 +1,6 @@
-# miniworld-engine 2.5.12 (draft, release candidate `rc/bidir-2.5.12`)
+# miniworld-engine 2.5.12
 
-Base: 2.5.11 (fe5dbb5a4). H100 only, the bidirectional modules: (1) `BidirectionalTriangleAttention` (and the single-direction bias-only
+Base: 2.5.11 (fe5dbb5a4), release candidate `rc/bidir-2.5.12`. H100 only, the bidirectional modules: (1) `BidirectionalTriangleAttention` (and the single-direction bias-only
 `TriangleAttention(use_self_attention=False)`, which runs on the same kernels): host tails fused into kernels, **bit-identical**; (2)
 `BidirectionalTriangleMultiplication` D64 / D128 inference: measured cuBLASLt contraction table (**bit-identical**), the port K3 at D128
 (**not bit-identical, inside the engine accuracy standard**), and the launch-table cells of calls without a mask (**bit-identical**). Module
