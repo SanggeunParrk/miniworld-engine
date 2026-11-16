@@ -2586,7 +2586,10 @@ constexpr int RING_OFF = 0, OP_OFF = STAGES * STAGE_BYTES, W_OFF = OP_OFF + OP_B
 constexpr int SMEM = BAR_OFF + 2048 + 1024;   // barriers + counts, and the slack that aligns the base to 1 KiB
 static_assert(SMEM <= 227 * 1024, "shared memory");
 constexpr int PAIRS = 128;
-constexpr int RASTER = 8;                    // m blocks per raster group (A / B panels stay in L2)
+#ifndef OPM_FUSED_RASTER
+#define OPM_FUSED_RASTER 8
+#endif
+constexpr int RASTER = OPM_FUSED_RASTER;                    // m blocks per raster group (A / B panels stay in L2)
 
 __device__ __forceinline__ uint64_t desc_sw64(const void* p) {
   const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));

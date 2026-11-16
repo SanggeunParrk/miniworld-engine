@@ -1,0 +1,10 @@
+fused DBG=0: 15.005 ms  659 TF-equiv
+fused DBG=1: 14.828 ms  667 TF-equiv
+fused DBG=2: 14.903 ms  664 TF-equiv
+fused DBG=3: 15.334 ms  645 TF-equiv
+cuBLAS product only: 15.661 ms 632 TF
+fused DBG=0: 31.375 ms  631 TF-equiv
+fused DBG=1: 31.036 ms  638 TF-equiv
+fused DBG=2: 33.940 ms  583 TF-equiv
+fused DBG=3: 31.282 ms  633 TF-equiv
+cuBLAS product only: 27.733 ms 714 TF
