@@ -2591,6 +2591,26 @@ constexpr int PAIRS = 128;
 #endif
 constexpr int RASTER = OPM_FUSED_RASTER;                    // m blocks per raster group (A / B panels stay in L2)
 
+// 2-CTA clusters (CL 2): the two CTAs of a cluster take the work items (2 mc, n) and (2 mc + 1, n), which read the same B tile in every
+// stage; each CTA loads half of it (128 of the 256 rows) and multicasts it into both CTAs' rings, so the L2 -> SM traffic per stage is
+// A 128 + B 128 rows instead of 128 + 256. A stage slot is free when the consumers of BOTH CTAs released it (empty count 8 x CL).
+__device__ __forceinline__ uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(r)); return r; }
+__device__ __forceinline__ void cluster_sync_all() {
+  asm volatile("barrier.cluster.arrive.release;\nbarrier.cluster.wait.acquire;\n" ::: "memory");
+}
+__device__ __forceinline__ void arrive_rank(uint64_t* bar, uint32_t rank) {   // mbarrier arrive on the CTA `rank` of the cluster
+  uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(bar)), r;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(rank));
+  asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" ::"r"(r) : "memory");   // as CUTLASS ClusterBarrier::arrive(cta_id): no .release.cluster fence
+}
+__device__ __forceinline__ void ld2_mc(const void* map, void* dst, uint64_t* b, int x, int y, uint16_t mask) {
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
+      ::"r"(static_cast<uint32_t>(__cvta_generic_to_shared(dst))), "l"(map), "r"(static_cast<uint32_t>(__cvta_generic_to_shared(b))),
+        "r"(x), "r"(y), "h"(mask)
+      : "memory");
+}
+
 __device__ __forceinline__ uint64_t desc_sw64(const void* p) {
   const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));
   return uint64_t((a >> 4) & 0x3fff) | (uint64_t(1) << 16) | (uint64_t(32) << 32) | (uint64_t(2) << 62);
@@ -2641,6 +2661,19 @@ __device__ __forceinline__ void mma_m64n256k16_ss(uint64_t da, uint64_t db, floa
       : "memory");
 }
 
+__device__ __forceinline__ void ld3_mc(const void* map, void* dst, uint64_t* b, int x, int y, int z, uint16_t mask) {
+  asm volatile(
+      "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4, %5}], [%2], %6;"
+      ::"r"(static_cast<uint32_t>(__cvta_generic_to_shared(dst))), "l"(map), "r"(static_cast<uint32_t>(__cvta_generic_to_shared(b))),
+        "r"(x), "r"(y), "r"(z), "h"(mask)
+      : "memory");
+}
+
+// Clusters of CLM x CLN CTAs (1-D launch of CL = CLM * CLN, rank = rm + CLM rn): the CTA (rm, rn) of cluster tile (mc, nc) takes the work
+// item (CLM mc + rm, CLN nc + rn). The CLM CTAs of one column rn read the same B tile: each loads BN / CLM of its rows and multicasts them
+// to the column; the CLN CTAs of one row rm read the same A tile: each loads 16 / CLN of its i and multicasts them to the row. A stage
+// slot is free when the consumers of every CTA of the cluster released it (empty count 8 x CL).
+template <int CLM, int CLN>
 __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
     const __grid_constant__ CUtensorMap AMAP, const __grid_constant__ CUtensorMap BMAP, const __grid_constant__ CUtensorMap WMAP,
     const unsigned* __restrict__ BITS, int BW, const float* __restrict__ BIAS, const __nv_bfloat16* __restrict__ RESIDUAL,
@@ -2655,27 +2688,38 @@ __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
   uint64_t* wempty = wfull + WSTAGES;
   float* sInvAll = reinterpret_cast<float*>(smem + BAR_OFF + 512);   // [2][PAIRS]
   const int tid = threadIdx.x, wgi = tid >> 7, warp = tid >> 5, lane = tid & 31;
-  const int gm = L / 16, gn = L / 8, ntiles = gm * gn;
+  constexpr int CL = CLM * CLN;
+  // cluster tiles (mc, nc) over gm / CLM x gn / CLN (the host takes a cluster shape only when it divides the grid)
+  const int gm = L / 16, gn = L / 8, gmc = gm / CLM, gnc = gn / CLN, ntiles = gmc * gnc;
+  const int rank = CL > 1 ? int(cluster_rank()) : 0, rm = rank % CLM, rn = rank / CLM;
+  const int cid = blockIdx.x / CL, ncl = gridDim.x / CL;
+  uint16_t amask = 0, bmask = 0;   // the CTAs of this one's row (same A) / column (same B)
+#pragma unroll
+  for (int k = 0; k < CLN; ++k) amask |= uint16_t(1u << (rm + CLM * k));
+#pragma unroll
+  for (int k = 0; k < CLM; ++k) bmask |= uint16_t(1u << (k + CLM * rn));
 
   if (tid == 0) {
-    for (int s = 0; s < STAGES; ++s) { init(full + s, 1); init(empty + s, 8); }
+    for (int s = 0; s < STAGES; ++s) { init(full + s, 1); init(empty + s, 8 * CL); }
     for (int s = 0; s < WSTAGES; ++s) { init(wfull + s, 1); init(wempty + s, 8); }
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
   __syncthreads();
+  if (CL > 1) cluster_sync_all();   // the peer's barriers are initialised before any multicast signals them
 
   auto tile_mn = [&](int t, int& m, int& n) {
-    const int per = RASTER * gn, grp = t / per, first = grp * RASTER;
-    const int gsz = min(RASTER, gm - first), r = t - grp * per;
-    m = first + r % gsz;
-    n = r / gsz;
+    constexpr int RC = RASTER / CLM > 0 ? RASTER / CLM : 1;
+    const int per = RC * gnc, grp = t / per, first = grp * RC;
+    const int gsz = min(RC, gmc - first), r = t - grp * per;
+    m = (first + r % gsz) * CLM + rm;
+    n = (r / gsz) * CLN + rn;
   };
 
   if (wgi == 0) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
     if (warp == 0 && lane == 0) {          // A / B producer
       int it = 0;
-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
+      for (int t = cid; t < ntiles; t += ncl) {
         int m, n; tile_mn(t, m, n);
         for (int q = 0; q < 4; ++q) {
           for (int kb = 0; kb < nk; ++kb, ++it) {
@@ -2683,14 +2727,21 @@ __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
             wait(empty + slot, ((it / STAGES) & 1) ^ 1);
             expect(full + slot, STAGE_BYTES);
             char* base = smem + RING_OFF + slot * STAGE_BYTES;
-            ld3(&AMAP, base, full + slot, kb * BK, q * 8, m * 16);
-            ld2(&BMAP, base + A_BYTES, full + slot, kb * BK, n * BN);
+            // this CTA's part of the A / B tile, into every CTA that reads it (same offsets; each one's full barrier counts the bytes)
+            if (CLN == 1)
+              ld3(&AMAP, base, full + slot, kb * BK, q * 8, m * 16);
+            else
+              ld3_mc(&AMAP, base + rn * (A_BYTES / CLN), full + slot, kb * BK, q * 8, m * 16 + rn * (16 / CLN), amask);
+            if (CLM == 1)
+              ld2(&BMAP, base + A_BYTES, full + slot, kb * BK, n * BN);
+            else
+              ld2_mc(&BMAP, base + A_BYTES + rm * (B_BYTES / CLM), full + slot, kb * BK, n * BN + rm * (BN / CLM), bmask);
           }
         }
       }
     } else if (warp == 1 && lane == 0) {   // projection weight producer: a pass's 64 KiB slice, 4 stages
       int wit = 0;
-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
+      for (int t = cid; t < ntiles; t += ncl) {
         for (int q = 0; q < 4; ++q) {
           for (int kc = 0; kc < 4; ++kc, ++wit) {
             if (DBG && DBG != 3) continue;
@@ -2702,6 +2753,7 @@ __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
         }
       }
     }
+    if (CL > 1) { __syncwarp(); cluster_sync_all(); }   // no CTA exits while its peer may still signal its barriers
     return;
   }
 
@@ -2715,7 +2767,13 @@ __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
   int it = 0, wit = 0, ti = 0;
   float acc[128];
   float acc2[64];
-  for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++ti) {
+  auto release = [&](int s) {   // this warp is done reading stage slot s: free it in every CTA whose producer writes it
+    if (CL == 1) arrive(empty + s);
+    else
+#pragma unroll
+      for (int r = 0; r < CL; ++r) arrive_rank(empty + s, uint32_t(r));
+  };
+  for (int t = cid; t < ntiles; t += ncl, ++ti) {
     int m, n; tile_mn(t, m, n);
     float* sInv = sInvAll + (ti & 1) * PAIRS;
     if (ctid < 128) {                      // the 128 mask counts of the tile (loads in flight while the pipeline fills)
@@ -2747,13 +2805,13 @@ __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
         asm volatile("wgmma.wait_group.sync.aligned 1;\n" ::: "memory");
         if (prev >= 0) {
           __syncwarp();
-          if (lane == 0) arrive(empty + prev);
+          if (lane == 0) release(prev);
         }
         prev = slot;
       }
       wg::wait();
       __syncwarp();
-      if (lane == 0) arrive(empty + prev);
+      if (lane == 0) release(prev);
       if (DBG == 2) continue;
       // ---- the accumulator tile -> Opair[kc = e / 8][pair = 8 i + j][c, e % 8] (bf16, rows of 128 B, 16 B chunks XOR j)
       {
@@ -2829,11 +2887,14 @@ __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
       *reinterpret_cast<uint4*>(Z + zi) = val;
     }
   }
+  if (CL > 1) cluster_sync_all();   // the producer warpgroup waits here too
 }
 }  // namespace opm_fused
 
+static int opm_fused_max_clusters_g[5] = {0, 0, 0, 0, 0};   // per cluster code: co-resident clusters (cudaOccupancyMaxActiveClusters)
+std::vector<int64_t> opm_fused_max_clusters() { return std::vector<int64_t>(opm_fused_max_clusters_g, opm_fused_max_clusters_g + 5); }
 torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor bits, torch::Tensor wperm, torch::Tensor bias,
-                              c10::optional<torch::Tensor> residual, int64_t after, double dmin = 1.0, double doff = 0.0) {
+                              c10::optional<torch::Tensor> residual, int64_t after, double dmin = 1.0, double doff = 0.0, int64_t cluster = 0) {
   using namespace opm_fused;
   TORCH_CHECK(CZ == 128 && CM_MSA == 64, "the fused kernel is written for the MiniWorld widths (c_z 128)");
   TORCH_CHECK(a2.is_cuda() && a2.scalar_type() == torch::kBFloat16 && a2.is_contiguous() && a2.dim() == 2 && bt.sizes() == a2.sizes() && bt.is_contiguous(),
@@ -2854,14 +2915,21 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
     TORCH_CHECK(rc == CUDA_SUCCESS, "fused OPM TMA encode: ", int(rc));
   };
   alignas(64) CUtensorMap amap{}, bmap{}, wmap{};
-  {   // A2 as [i][c][s]: a box of BK k x 8 c x 16 i is the 128 rows (i, c) of one pass
+  // cluster: 0 = by rule, 1 = none, 2 = 2 x 1 (B multicast), 3 = 1 x 2 (A multicast), 4 = 2 x 2 (both)
+  const int gm = (int)(N / 16), gn = (int)(N / 8);
+  int code = (int)cluster;
+  if (code == 0) code = gm % 2 == 0 ? 2 : 1;
+  TORCH_CHECK(code >= 1 && code <= 4, "fused OPM: cluster code 0..4");
+  const int CLM = (code == 2 || code == 4) ? 2 : 1, CLN = (code == 3 || code == 4) ? 2 : 1;
+  TORCH_CHECK(gm % CLM == 0 && gn % CLN == 0, "fused OPM: the cluster shape must divide the tile grid (2 x 1 needs N % 32)");
+  {   // A2 as [i][c][s]: a box of BK k x 8 c x 16 i is the 128 rows (i, c) of one pass (16 / CLN i per CTA under A multicast)
     uint64_t dims[3] = {(uint64_t)S, 32, (uint64_t)N}, strides[2] = {(uint64_t)S * 2, (uint64_t)S * 64};
-    uint32_t box[3] = {(uint32_t)BK, 8, 16};
+    uint32_t box[3] = {(uint32_t)BK, 8, (uint32_t)(16 / CLN)};
     enc(&amap, a2.data_ptr(), 3, dims, strides, box, kswz);
   }
-  {
+  {   // BN / CLM rows per CTA under B multicast
     uint64_t dims[2] = {(uint64_t)S, (uint64_t)rows}, strides[1] = {(uint64_t)S * 2};
-    uint32_t box[2] = {(uint32_t)BK, (uint32_t)BN};
+    uint32_t box[2] = {(uint32_t)BK, (uint32_t)(BN / CLM)};
     enc(&bmap, bt.data_ptr(), 2, dims, strides, box, kswz);
   }
   {
@@ -2869,14 +2937,40 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
     uint32_t box[2] = {(uint32_t)WK, 128};
     enc(&wmap, wperm.data_ptr(), 2, dims, strides, box, CU_TENSOR_MAP_SWIZZLE_128B);
   }
-  static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_fused_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+  int* max_clusters = opm_fused_max_clusters_g;
   const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-  const int ntiles = (int)(N / 16) * (int)(N / 8);
-  opm_fused_kernel<<<std::min(sms, ntiles), 384, SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      amap, bmap, wmap, reinterpret_cast<const unsigned*>(bits.data_ptr<int>()), (int)bits.size(1), bias.data_ptr<float>(),
-      residual.has_value() ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
-      reinterpret_cast<__nv_bfloat16*>(z.data_ptr<at::BFloat16>()), (int)N, (int)(S / BK), (int)after, (float)dmin, (float)doff);
+  const unsigned* bitsp = reinterpret_cast<const unsigned*>(bits.data_ptr<int>());
+  const __nv_bfloat16* resp = residual.has_value() ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr;
+  __nv_bfloat16* zp = reinterpret_cast<__nv_bfloat16*>(z.data_ptr<at::BFloat16>());
+  auto launch = [&](auto kernel, int CL) {
+    cudaLaunchConfig_t cfg = {};
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = CL; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+    cfg.blockDim = dim3(384, 1, 1);
+    cfg.dynamicSmemBytes = SMEM;
+    cfg.stream = at::cuda::getCurrentCUDAStream();
+    cfg.attrs = at; cfg.numAttrs = 1;
+    if (max_clusters[code] == 0) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
+      if (CL > 1) C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 0));
+      cfg.gridDim = dim3(sms / CL * CL, 1, 1);
+      C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&max_clusters[code], kernel, &cfg));   // GPCs hold whole clusters only
+      TORCH_CHECK(max_clusters[code] > 0, "fused OPM: no cluster of ", CL, " CTAs fits");
+    }
+    const int ntc = (gm / CLM) * (gn / CLN);
+    cfg.gridDim = dim3(CL * std::min(max_clusters[code], ntc), 1, 1);
+    C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kernel, amap, bmap, wmap, bitsp, (int)bits.size(1), bias.data_ptr<float>(), resp, zp,
+                                      (int)N, (int)(S / BK), (int)after, (float)dmin, (float)doff));
+  };
+  if (code == 1) {
+    if (max_clusters[1] == 0) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_fused_kernel<1, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); max_clusters[1] = sms; }
+    opm_fused_kernel<1, 1><<<std::min(sms, gm * gn), 384, SMEM, at::cuda::getCurrentCUDAStream()>>>(amap, bmap, wmap, bitsp, (int)bits.size(1),
+        bias.data_ptr<float>(), resp, zp, (int)N, (int)(S / BK), (int)after, (float)dmin, (float)doff);
+  }
+  else if (code == 2) launch(opm_fused_kernel<2, 1>, 2);
+  else if (code == 3) launch(opm_fused_kernel<1, 2>, 2);
+  else launch(opm_fused_kernel<2, 2>, 4);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return z;
 }
@@ -2899,6 +2993,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_native_prologue",&opm_native_prologue,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true,py::arg("dmin")=1.0,py::arg("doff")=0.0);
   m.def("opm_native_prologue_tma",&opm_native_prologue_tma,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true,py::arg("dmin")=1.0,py::arg("doff")=0.0);
 #if defined(MINIWORLD_OPM_FUSED)
-  m.def("opm_fused_infer", &opm_fused_infer, "fused outer product + projection (inference)", py::arg("a2"), py::arg("bt"), py::arg("bits"), py::arg("wperm"), py::arg("bias"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("dmin") = 1.0, py::arg("doff") = 0.0);
+  m.def("opm_fused_max_clusters", &opm_fused_max_clusters, "co-resident clusters per cluster code (after a launch)");
+  m.def("opm_fused_infer", &opm_fused_infer, "fused outer product + projection (inference)", py::arg("a2"), py::arg("bt"), py::arg("bits"), py::arg("wperm"), py::arg("bias"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("dmin") = 1.0, py::arg("doff") = 0.0, py::arg("cluster") = 0);
 #endif
 }
