@@ -169,7 +169,7 @@ def _lt_ext():
     from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, load_inline_extension
 
-    cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN   # the toolkit's headers are needed only to build
+    cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN  # the toolkit's headers are needed only to build
 
     return load_inline_extension(
         name="miniworld_opm_lt_mm",
@@ -747,7 +747,13 @@ class _OpmMath(torch.autograd.Function):
     ):
         cm, cz = msa.shape[3], wo.shape[0]
         path = _h100_path(msa.shape[1], msa.shape[2], training=save_stats)
-        if (cm, cz) != (CM, CZ) or after or pbias is not None or (path == "legacy" and _CUDA_PROLOGUE_FOR_LEGACY) or _wide_prologue_deep(msa.shape[1], save_stats):
+        if (
+            (cm, cz) != (CM, CZ)
+            or after
+            or pbias is not None
+            or (path == "legacy" and _CUDA_PROLOGUE_FOR_LEGACY)
+            or _wide_prologue_deep(msa.shape[1], save_stats)
+        ):
             return _forward_wide(
                 ctx,
                 msa,

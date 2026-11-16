@@ -409,7 +409,9 @@ class OuterProductMean(BackendModule, MasterWeights):
         why = self._common_refusal(msa, mask, residual)
         if why is not None:
             return None, why
-        if a100(msa) or sm120(msa):  # A100 / RTX 5090 (the sm_120a build of the sm_80 sources): kernels.integrations.opm_sm80 (forward + backward)
+        if a100(msa) or sm120(
+            msa
+        ):  # A100 / RTX 5090 (the sm_120a build of the sm_80 sources): kernels.integrations.opm_sm80 (forward + backward)
             if self.groups > 1:  # Chai-1: kernels.outer_product_mean.chai on its sm_80 passes (cuda/chai_sm80)
                 from miniworld_engine.kernels.outer_product_mean import chai
 
@@ -885,7 +887,9 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         why = self._common_refusal(msa, pair, mask)
         if why is not None:
             return why
-        if a100(msa) or sm120(msa):  # A100 / RTX 5090 (the sm_120a build of the sm_80 sources): kernels.integrations.pwa_sm80 (forward + backward)
+        if a100(msa) or sm120(
+            msa
+        ):  # A100 / RTX 5090 (the sm_120a build of the sm_80 sources): kernels.integrations.pwa_sm80 (forward + backward)
             from miniworld_engine.kernels.integrations import pwa_sm80
 
             why = pwa_sm80.refusal(self, msa, pair, mask)

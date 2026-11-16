@@ -86,7 +86,7 @@ def prebuild(target, _rows):
         from miniworld_engine.kernels.conditioned_transition.cuda import train as _ct_train
 
         yield _ct_train.owned_gemm_ext
-        yield opm_train._lt_ext   # the product route's cuBLASLt heuristic-index product (opm_train._LT_ALGO)
+        yield opm_train._lt_ext  # the product route's cuBLASLt heuristic-index product (opm_train._LT_ALGO)
 
     base = (pwa_train.D, pwa_train.DZ, pwa_train.H, pwa_train.C)
     natives, pair, value = set(), set(), set()

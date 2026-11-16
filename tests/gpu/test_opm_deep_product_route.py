@@ -16,11 +16,11 @@ from miniworld_engine.modules import OuterProductMean
 pytestmark = [pytest.mark.gpu]
 
 FORMS = {  # requirements rows 55 / 57 / 56 / 58 / 63
-    "af3": dict(normalize_before_proj=False),
-    "boltz": dict(normalize_before_proj=True),
-    "rf3_after": dict(normalize_before_proj=False, projection_bias=True),
-    "rf3_before": dict(normalize_before_proj=True, projection_bias=True),
-    "af3_offset": dict(normalize_before_proj=False, count_offset=1e-3),
+    "af3": {"normalize_before_proj": False},
+    "boltz": {"normalize_before_proj": True},
+    "rf3_after": {"normalize_before_proj": False, "projection_bias": True},
+    "rf3_before": {"normalize_before_proj": True, "projection_bias": True},
+    "af3_offset": {"normalize_before_proj": False, "count_offset": 1e-3},
 }
 
 
