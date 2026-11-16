@@ -169,7 +169,8 @@ def _h100(cells):
             yield _call(h100_native.kernel, "k1", 128, tuple(cfg["k1"]), True, True, 128)
             yield _call(h100_single_output.k3_build, tuple(cfg["k3"]))
             for master in sorted(m.masters):
-                yield functools.partial(h100_single_b7.Plan, {"master_weights": master}, None, None, None, None, None, **cfg["b7"])
+                b7 = cfg["b7"]  # the planned build is the per-process one (``h100_single_b7._build``), undecorated like every device-cached loader
+                yield _call(h100_single_b7._build, master, False, 2, 0, b7["rings"], b7["consumers"], b7.get("mode", 52), b7["clusters"])
         for master in sorted(m.masters):
             yield _call(h100_single_output.build, False, master)
 
