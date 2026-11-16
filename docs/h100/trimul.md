@@ -96,6 +96,11 @@ move two adjacent columns per 32-bit shared access and per dropout-scale load (`
 held in registers (the kernel already spills at 255 registers: 1.16x slower), LN gamma / beta in registers (no change), four interleaved rows (0.725x vs 0.714x
 for two). `single_b7` builds, loads and checks the cooperative-launch occupancy once per process (`_build`): the repeated `T.compile` source / header hashing
 and occupancy query cost ~0.7 ms of host time per backward in eager training.
+Also bit-identical (2.5.10): `B1_PK` (default on) rounds the gate / projection pairs with one `cvt.rn.bf16x2` and multiplies dy by the dropout scale as
+bf16x2 (the product of two bf16 is exact in fp32, so one rounding as before; `single_b1` 0.95x at L768); `single_b7` frees the plane staging buffers once
+the bulk stores have read them (`B7_EARLY_FREE`, as the bidirectional B7) and stages the dx tile in the dg buffer, releasing it before the dx store.
+Module forward + backward vs 2.5.9 (eager, interleaved in one process, master weights, B1): L256 / 384 1.00x (host-bound), L512 0.98 / 0.99x, L768 0.91x
+(outgoing / incoming).
 
 ### D64 (`h100_d64_b200gate.py`, `h100_uni_d64_b200gate.py`)
 
@@ -134,6 +139,9 @@ LN_in + gated projections, saves x_n and channel-major preactivations) -> contra
 projection and gate GEMMs -> `output_dense.cu` (gate, dropout, residual). Backward: `gate.cu` -> dn GEMM -> `output_ln_*.cu` ->
 `contract_gp_*.cu` (`GP_DIR`; dl / dr never materialised, the epilogue writes the preactivation gradients) -> weight GEMMs -> dX
 GEMM -> `input_ln_*.cu` (input LN + residual). Each call owns its buffers (no cached activations or weight packs).
+Single D512 (2.5.10): the output-LN backward runs `output_ln_uni_pf.cu` (`_LN_PF`): the same grid and per-CTA row order as `output_ln_d512_l384.cu`, with
+the next row tile's TMA loads in flight in a second shared-memory set; bit-identical y, dx and all gradients
+(`tests/gpu/test_trimul_uni_wide_ln_prefetch.py`). Module forward + backward vs 2.5.9 (eager, interleaved, B1): L384 0.99 / 1.00x, L768 0.98x.
 
 ### Batching, lengths, chunking
 

@@ -144,7 +144,12 @@ residual kernels and cuBLAS GEMMs (bf16 in, fp32 accumulate).
 - inference at d_pair 64 x 4 heads x 16 (2026-11-14; 3 launches: front, fp16 core, cublasLt out-projection): the fp16 core takes the key
   mask itself (`h100_sm90.key_args`: its producer warpgroup counts each batch element's live 128-key tiles once per CTA, after requesting
   the first task's Q and first key tile -- the seven `key_tiles` glue launches were ~9 us of a 46 us L128 call); 16-channel heads issue one
-  k16 score step (the padded half adds exact zeros) and run every exponential on the MUFU (no `TA_POLY` polynomial: -4 to -6 % at L256-1536);
+  k16 score step (the padded half adds exact zeros) and, since 2.5.10, run every other exponential pair on the FMA polynomial (`TA_POLY16` = 8 of 16
+  pairs; before: all on the MUFU). Not bit-identical (P changes within its fp16 rounding): over 42 served cases (TriangleAttention 64:4:16 and AF3 d_pair
+  64, both nodes, L128-2048, B1 / 2, masks none / tail / random) the update's error vs a float64 PyTorch reference is 1.002x the previous core's on
+  average (max 1.61e-2 vs 1.57e-2 of the update's max; module output error max 3.37e-3 both); 32-channel heads unchanged (66 / 66 cases bit-identical).
+  Module time, CUDA-graph replay, previous core vs this one interleaved in one process (L512 / 768 / 1024 / 1536 / 2048, B1): 0.97 / 0.95 / 0.93 /
+  0.91 / 0.89x (TriangleAttention both nodes and AF3's starting node; AF3 ending node 0.95 / 0.93 / 0.92 / 0.91 / 0.91x);
   the front runs on two weight stages at d_pair 64 and stores no LayerNorm statistics; AF3's ending node stores its bias as the front's
   rows have it (whole masked rows) and the core reads those tiles with `ldmatrix.trans` (`bias_transposed`, the `BTR` template) instead
   of 16-bit stores at stride L (1.3 us at L128, 10 us at L512). Measurer 4 (graph, cold L2) ms before -> after, anthropic: L128 0.045-0.047
