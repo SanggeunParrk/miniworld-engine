@@ -1195,7 +1195,7 @@ __device__ __forceinline__ void ld4(const void* map,void* dst,uint64_t* b,int x,
 __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     const __nv_bfloat16* __restrict__ O,      // [N*CH, N*CH] grouped GEMM output
     const float* __restrict__ NORM,           // [N, N]  mask counts in fp32, already clamped >= 1 (unused when BITS is set)
-    const unsigned* __restrict__ BITS, int BW, // inference: the mask bit rows [N, BW words]; the count is taken in the kernel
+    const unsigned* __restrict__ BITS, int BW, int BI0, // inference: the mask bit rows [N, BW words] (the i rows from BI0: a row chunk); the count is taken in the kernel
     const __nv_bfloat16* __restrict__ BF,     // [K/16][CZ/8][32][4] pre-swizzled projection weight
     const float* __restrict__ BIAS,           // [CZ]  bf16-rounded bias, held in fp32
     const __nv_bfloat16* __restrict__ RESIDUAL, // optional [1, NI, NJ, CZ]
@@ -1243,7 +1243,7 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     if (BITS != nullptr) {
       // inference: the mask count is the popcount of the two tokens' mask bit rows, taken here instead of by a separate
       // kernel that wrote an [N, N] fp32 table (exact integer count, clamped at 1, the same 1 / n as the table gave)
-      const uint4* bi = reinterpret_cast<const uint4*>(BITS + (size_t)(i0 + il) * BW);
+      const uint4* bi = reinterpret_cast<const uint4*>(BITS + (size_t)(BI0 + i0 + il) * BW);
       const uint4* bj = reinterpret_cast<const uint4*>(BITS + (size_t)(j0 + jl) * BW);
       int cnt = 0;
 #pragma unroll 4
@@ -2311,10 +2311,11 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor norm, torch
 
 torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf, torch::Tensor bias,
                            int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after, c10::optional<torch::Tensor> out_,
-                           double dmin = 1.0, double doff = 0.0) {
+                           double dmin = 1.0, double doff = 0.0, int64_t i0 = 0) {   // i0: the first i of a row chunk (mask bit rows)
   TORCH_CHECK(O.is_cuda() && O.scalar_type() == torch::kBFloat16 && O.is_contiguous(), "O: contiguous cuda bf16");
   const bool from_bits = norm.scalar_type() == torch::kInt32;   // inference: the prologue's mask bit rows [N, S/32] instead of the fp32 count
   TORCH_CHECK((from_bits && norm.dim() == 2 && norm.size(1) % 4 == 0) || norm.scalar_type() == torch::kFloat32, "norm: fp32 count [N, N] or int32 mask bits [N, S/32]");
+  TORCH_CHECK(i0 == 0 || (from_bits && i0 >= 0 && i0 + ni <= norm.size(0)), "i0: a row chunk of the mask bit rows (inference)");
   TORCH_CHECK(norm.is_contiguous(), "norm: contiguous");
   TORCH_CHECK(bf.scalar_type() == torch::kBFloat16 && bf.is_contiguous() && bf.numel() == CH * CH * CZ, "bf: Wo [CZ, CH*CH] bf16, contiguous");
   TORCH_CHECK(bias.scalar_type() == torch::kFloat32 && bias.numel() == CZ, "bias: fp32 [CZ]");
@@ -2371,7 +2372,7 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
   opm_epilogue_kernel<<<grid, THREADS, SMEM_BYTES + 1024, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(O.data_ptr<at::BFloat16>()),
       from_bits ? nullptr : norm.data_ptr<float>(),
-      from_bits ? reinterpret_cast<const unsigned*>(norm.data_ptr<int>()) : nullptr, from_bits ? (int)norm.size(1) : 0,
+      from_bits ? reinterpret_cast<const unsigned*>(norm.data_ptr<int>()) : nullptr, from_bits ? (int)norm.size(1) : 0, (int)i0,
       reinterpret_cast<const __nv_bfloat16*>(bf.data_ptr<at::BFloat16>()),
       bias.data_ptr<float>(),
       residual.has_value() ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
@@ -2577,7 +2578,11 @@ namespace opm_fused {
 #ifndef OPM_FUSED_WST
 #define OPM_FUSED_WST 2
 #endif
-constexpr int BM = 128, BN = 256, BK = OPM_FUSED_BK, STAGES = OPM_FUSED_STAGES;
+#ifndef OPM_FUSED_GROUP
+#define OPM_FUSED_GROUP 1
+#endif
+constexpr int BM = 128, BN = 256, BK = OPM_FUSED_BK, STAGES = OPM_FUSED_STAGES, GROUP = OPM_FUSED_GROUP;
+static_assert(STAGES >= 2 * GROUP + 1, "two commit groups in flight and one stage loading");
 static_assert(BK == 64 || BK == 32, "stage K is one 128 B or one 64 B swizzle row");
 constexpr int A_BYTES = BM * BK * 2, B_BYTES = BN * BK * 2, STAGE_BYTES = A_BYTES + B_BYTES;
 constexpr int WSTAGES = OPM_FUSED_WST, WK = 64, W_BYTES = 128 * WK * 2;   // weight stages: [128 o][64 k], SW128
@@ -2791,27 +2796,35 @@ __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
 #pragma unroll 1
     for (int q = 0; q < 4; ++q) {
       // ---- the outer product of pass q over S
+      // GROUP stages per wgmma commit group (GROUP x BK / 16 MMAs between waits); the previous group's stages are freed after its wait
       int prev = -1;
 #pragma unroll 1
-      for (int kb = 0; kb < nk; ++kb, ++it) {
-        const int slot = it % STAGES;
-        wait(full + slot, (it / STAGES) & 1);
-        const char* base = smem + RING_OFF + slot * STAGE_BYTES;
+      for (int kb = 0; kb < nk; kb += GROUP, it += GROUP) {
+#pragma unroll
+        for (int g = 0; g < GROUP; ++g) wait(full + (it + g) % STAGES, ((it + g) / STAGES) & 1);
         wg::fence();
 #pragma unroll
-        for (int ks = 0; ks < BK / 16; ++ks)
-          mma_m64n256k16_ss(desc_k(base + cw * (64 * BK * 2) + ks * 32), desc_k(base + A_BYTES + ks * 32), acc, (kb | ks) != 0);
+        for (int g = 0; g < GROUP; ++g) {
+          const char* base = smem + RING_OFF + ((it + g) % STAGES) * STAGE_BYTES;
+#pragma unroll
+          for (int ks = 0; ks < BK / 16; ++ks)
+            mma_m64n256k16_ss(desc_k(base + cw * (64 * BK * 2) + ks * 32), desc_k(base + A_BYTES + ks * 32), acc, (kb | g | ks) != 0);
+        }
         wg::commit();
         asm volatile("wgmma.wait_group.sync.aligned 1;\n" ::: "memory");
         if (prev >= 0) {
           __syncwarp();
-          if (lane == 0) release(prev);
+          if (lane == 0)
+#pragma unroll
+            for (int g = 0; g < GROUP; ++g) release((prev + g) % STAGES);
         }
-        prev = slot;
+        prev = it;
       }
       wg::wait();
       __syncwarp();
-      if (lane == 0) release(prev);
+      if (lane == 0)
+#pragma unroll
+        for (int g = 0; g < GROUP; ++g) release((prev + g) % STAGES);
       if (DBG == 2) continue;
       // ---- the accumulator tile -> Opair[kc = e / 8][pair = 8 i + j][c, e % 8] (bf16, rows of 128 B, 16 B chunks XOR j)
       {
@@ -2900,7 +2913,7 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
   TORCH_CHECK(a2.is_cuda() && a2.scalar_type() == torch::kBFloat16 && a2.is_contiguous() && a2.dim() == 2 && bt.sizes() == a2.sizes() && bt.is_contiguous(),
               "a2 / bt: contiguous bf16 [N * 32, S]");
   const long rows = a2.size(0), S = a2.size(1), N = rows / CH;
-  TORCH_CHECK(rows % CH == 0 && N % 16 == 0 && S % BK == 0 && S >= BK, "fused OPM: N % 16, S % 64");
+  TORCH_CHECK(rows % CH == 0 && N % 16 == 0 && S % (BK * GROUP) == 0 && S >= BK * GROUP, "fused OPM: N % 16, S % (BK x GROUP)");
   TORCH_CHECK(bits.scalar_type() == torch::kInt32 && bits.is_contiguous() && bits.dim() == 2 && bits.size(0) == N && bits.size(1) % 4 == 0, "bits: int32 [N, S / 32]");
   TORCH_CHECK(wperm.scalar_type() == torch::kBFloat16 && wperm.is_contiguous() && wperm.numel() == 128 * 1024, "wperm: bf16 [128, 1024] (k-permuted)");
   TORCH_CHECK(bias.scalar_type() == torch::kFloat32 && bias.numel() == 128, "bias: fp32 [128]");
@@ -2918,7 +2931,7 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
   // cluster: 0 = by rule, 1 = none, 2 = 2 x 1 (B multicast), 3 = 1 x 2 (A multicast), 4 = 2 x 2 (both)
   const int gm = (int)(N / 16), gn = (int)(N / 8);
   int code = (int)cluster;
-  if (code == 0) code = gm % 2 == 0 ? 2 : 1;
+  if (code == 0) code = 1;   // the rule: no cluster (2 x 1 is 6-10 % faster cool at S 2048 but 0.5-2 % slower sustained there and at S 4096; benchmarks/opm_win)
   TORCH_CHECK(code >= 1 && code <= 4, "fused OPM: cluster code 0..4");
   const int CLM = (code == 2 || code == 4) ? 2 : 1, CLN = (code == 3 || code == 4) ? 2 : 1;
   TORCH_CHECK(gm % CLM == 0 && gn % CLN == 0, "fused OPM: the cluster shape must divide the tile grid (2 x 1 needs N % 32)");
@@ -2978,7 +2991,7 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_epilogue", &opm_epilogue, "fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
-        py::arg("O"), py::arg("norm"), py::arg("bf"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("out") = py::none(), py::arg("dmin") = 1.0, py::arg("doff") = 0.0);
+        py::arg("O"), py::arg("norm"), py::arg("bf"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("out") = py::none(), py::arg("dmin") = 1.0, py::arg("doff") = 0.0, py::arg("i0") = 0);
   m.def("opm_dgrad", &opm_dgrad, "fused OPM dO: (dz @ Wo) / n straight into the grouped layout",
         py::arg("dz"), py::arg("norm"), py::arg("bw"), py::arg("ni"), py::arg("nj"), py::arg("after") = 0);
   m.def("opm_dwo", &opm_dwo, "dWo straight off the grouped outer product, no permute");

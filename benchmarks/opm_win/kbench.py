@@ -26,10 +26,17 @@ res = torch.randn(1, L, L, 128, device=dev, dtype=bf) if a.residual else None
 V = {f"cl{c}": (lambda c=c: ext.opm_fused_infer(a2, bt, norm, wp, ob, res, 1, cluster=c)) for c in (1, 2, 3, 4)}   # 1 none, 2 2x1, 3 1x2, 4 2x2
 V["cublas"] = lambda: torch.mm(a2, bt.t())
 V["unfused"] = lambda: ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo, ob, L, L, res, 1)   # cuBLAS product + the CUDA epilogue kernel
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+from builds import build   # noqa: E402
+for k in a.variants.split(","):
+    if "." in k:   # "<build>.cl<code>": a macro variant of the extension (builds.py)
+        bname, cl = k.split(".")
+        bext = build(bname)
+        V[k] = (lambda bext=bext, c=int(cl[2:]): bext.opm_fused_infer(a2, bt, norm, wp, ob, res, 1, cluster=c))
 V = {k: V[k] for k in a.variants.split(",")}
 ref = V["cl1"]() if "cl1" in V else None
 for k in V:
-    if (k.startswith("cl") or k == "unfused") and ref is not None:
+    if (k != "cublas") and ref is not None:
         o = V[k](); o2 = V[k]()
         print(k, "bitwise vs cl1", bool(torch.equal(o, ref)), "run-twice", bool(torch.equal(o, o2)), "max|d|", float((o.float() - ref.float()).abs().max()), flush=True)
 print("max clusters per code", ext.opm_fused_max_clusters(), flush=True)

@@ -87,6 +87,35 @@ def _wide_prologue_deep(s: int, training: bool) -> bool:
     return not training and s > 4096
 
 
+def _product_route_deep(s: int, training: bool) -> bool:
+    """Inference past depth 4096: cuBLAS for the grouped product + the CUDA epilogue (`_product_epilogue`) instead of the fused kernel.
+    The product is power-bound there (700 W cap): cuBLAS runs at ~99 % of the tensor peak per cycle, the fused main loop at ~82-88 %, and
+    the O round trip + epilogue costs ~0.6 ms of 25 at S 16384 / L 768. Kernel A/B (benchmarks/opm_win, L 256-768): the composition is
+    2-6 % faster cool and 3-11 % sustained at S 8192 / 16384; about even at S 4096 and slower at S <= 2048, where the fused kernel stays."""
+    return not training and s > 4096
+
+
+#: the O workspace of the product route per row chunk (bytes): L 768 is one chunk (1.2 GB), L 2048 runs in chunks of 512 rows
+_O_CHUNK_BYTES = 2 << 30
+
+
+def _product_epilogue(ext, a2, bt, norm, wo16, ob, n, residual, after, dkw):
+    """Inference: z = epilogue(A2 . BT^T) per chunk of i rows (cuBLAS NT product into a bounded O workspace, the epilogue counts the
+    pair masks from the bit rows at the chunk's offset)."""
+    rows = max(16, min(n, _O_CHUNK_BYTES // (n * CH * CH * 2) // 16 * 16))
+    if rows >= n:
+        return ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo16, ob, n, n, residual, int(after), **dkw)
+    z = torch.empty((1, n, n, wo16.shape[0]), device=a2.device, dtype=torch.bfloat16)
+    o = torch.empty((rows * CH, n * CH), device=a2.device, dtype=torch.bfloat16)
+    for r0 in range(0, n, rows):
+        nr = min(rows, n - r0)
+        oc = o[: nr * CH]
+        torch.mm(a2[r0 * CH : (r0 + nr) * CH], bt.t(), out=oc)
+        res = residual[:, r0 : r0 + nr] if residual is not None else None
+        ext.opm_epilogue(oc, norm, wo16, ob, nr, n, res, int(after), out=z[:, r0 : r0 + nr], i0=r0, **dkw)
+    return z
+
+
 def refusal(
     msa: torch.Tensor,
     d_msa: int,
@@ -469,6 +498,8 @@ def _forward_wide(ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residua
     cm, cz = m.shape[2], wo.shape[0]
     n = m.shape[1]
     fused = _fused_enabled(m.shape[0], n, training=save_stats, cm=cm, cz=cz) and torch.cuda.get_device_capability(msa.device) == (9, 0)
+    product_route = fused and _product_route_deep(m.shape[0], save_stats) and not save_o
+    fused = fused and not product_route
     ext = _ext(msa.device, native=True, tma=False, cm=cm, cz=cz, fused=fused)
     mk = mask[0].contiguous()
     if mk.dtype != torch.bool:
@@ -501,6 +532,9 @@ def _forward_wide(ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residua
     ctx.has_bias = pbias is not None
     if fused:  # inference: the products stay in shared memory (norm is the mask bit table here)
         z = ext.opm_fused_infer(a2, bt, norm, _fused_weight(wo), ob, residual, int(after), **dkw)
+        o = None
+    elif product_route:  # inference past depth 4096: cuBLAS product per row chunk + the epilogue (norm: the mask bit table)
+        z = _product_epilogue(ext, a2, bt, norm, wo16, ob, n, residual, after, dkw)
         o = None
     else:
         o = torch.mm(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
