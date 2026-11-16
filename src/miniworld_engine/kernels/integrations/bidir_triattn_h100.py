@@ -200,7 +200,7 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
             torch.bmm(pe[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
         if _fused_tail(save, C, 2 * Dh, LL):
             u = torch.empty(2 * Dh, LL, device=x.device, dtype=torch.bfloat16) if save else None
-            _planes_ext().tail(c[2 * Dh : 4 * Dh], o, wo, x[rows], out[rows], u)
+            _ext().tail(c[2 * Dh : 4 * Dh], o, wo, x[rows], out[rows], u)
         else:
             u = g.gate_u(c[2 * Dh : 4 * Dh], o, 0)
             _out_proj(x[rows], u, wo, out[rows])
@@ -370,7 +370,7 @@ def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
                 torch.bmm(p[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
         if drop is None and _fused_tail(save, C, Dh, LL):
             u = torch.empty(Dh, LL, device=x.device, dtype=torch.bfloat16) if save else None
-            _planes_ext().tail(c[Dh : 2 * Dh], o, wo, x[rows], out[rows], u)
+            _ext().tail(c[Dh : 2 * Dh], o, wo, x[rows], out[rows], u)
         else:
             u = g.gate_u(c[Dh : 2 * Dh], o, 0)
             if drop is None:

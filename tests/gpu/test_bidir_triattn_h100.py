@@ -52,9 +52,10 @@ def _run(m, x, mask, train):
         p.grad = None
     with torch.enable_grad() if train else torch.no_grad():
         y = m(xx, mask) if mask is not None else m(xx)
-        grads = None
+        grads: list[torch.Tensor] = []
         if train:
             y.backward(torch.linspace(-1, 1, y.numel(), device=y.device).view_as(y).to(y.dtype))
+            assert xx.grad is not None
             grads = [xx.grad] + [p.grad for p in m.parameters() if p.grad is not None]
     return y.detach(), grads
 
