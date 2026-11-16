@@ -885,6 +885,12 @@ __global__ __launch_bounds__(512,1) void opm_prologue_tma_hopper(
 // [Wa; Wb] projection on wgmma and store the grouped layouts by TMA.  Width CMT only changes the x tile (CMT / 64
 // swizzled [128 s][64] blocks), the LayerNorm lane work (CMT / 2 values per lane) and the projection depth (CMT / 16
 // wgmma steps over CMT / 64 weight blocks).
+#ifndef OPM_PRO_REG
+#define OPM_PRO_REG 1
+#endif
+#ifndef OPM_PRO_G
+#define OPM_PRO_G 64
+#endif
 namespace opm_pro_wide {
 template <int CMT>
 struct Cfg {
@@ -913,13 +919,22 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
   uint64_t* bars = reinterpret_cast<uint64_t*>(sl + 2 * CMT);
   uint64_t* xf = bars; uint64_t* yf = xf + NST; uint64_t* xe = yf + NST; uint64_t* wf = xe + NST;
   const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32, nsb = S / C::BS;
+  // tile t -> (token i, MSA rows s0..s0+127): groups of OPM_PRO_G tokens, the token fastest inside a group, so the CTAs running at once
+  // read OPM_PRO_G adjacent 128 B rows of every MSA row (one 8 KiB run at G 64, not 128 B at a stride of N x 128 B) and still write
+  // runs of (#CTAs / G) x 256 B of each A2 / BT row
+  auto tile_is = [&](int t, int& i, int& s0) {
+    constexpr int G = OPM_PRO_G;
+    const int per = G * nsb, grp = t / per, r = t - grp * per, i0 = grp * G, gs = min(G, N - i0);
+    i = i0 + r % gs; s0 = (r / gs) * C::BS;
+  };
   if (tid == 0) {
     for (int k = 0; k < NST; ++k) { init(xf + k, 1); init(yf + k, 8); init(xe + k, 1); }
     init(wf, 1); asm volatile("fence.mbarrier_init.release.cluster;":::"memory");
   }
   for (int c = tid; c < CMT; c += 512) { sl[c] = gamma[c]; sl[CMT + c] = beta[c]; }
   __syncthreads();
-  if (warp < 4) {
+  if (warp < 4) {   // OPM_PRO_REG: the TMA warpgroup gives registers to the LayerNorm / projection warpgroups (128 -> 40 / 152)
+    if (OPM_PRO_REG) asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
     if (tid == 0) {
       expect(wf, KB * 8192);
       for (int kb = 0; kb < KB; ++kb) {
@@ -928,7 +943,7 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
       }
       int g = 0;
       for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++g) {
-        int slot = g % NST, i = t / nsb, s0 = (t % nsb) * C::BS;
+        int slot = g % NST, i, s0; tile_is(t, i, s0);
         if (g >= NST) wait(xe + slot, (g / NST - 1) & 1);
         expect(xf + slot, XT * 2 + MT);
         for (int kb = 0; kb < KB; ++kb) ld3(&xm, sx + slot * XT + kb * 8192, xf + slot, kb * 64, i, s0);
@@ -936,10 +951,11 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
       }
     }
   } else if (warp < 12) {
+    if (OPM_PRO_REG) asm volatile("setmaxnreg.inc.sync.aligned.u32 152;\n" ::: "memory");
     const int r = (warp - 4) * 16 + (lane & 15), hf = lane >> 4;
     int g = 0;
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++g) {
-      int slot = g % NST, i = t / nsb, s0 = (t % nsb) * C::BS;
+      int slot = g % NST, i, s0; tile_is(t, i, s0);
       wait(xf + slot, (g / NST) & 1);
       __nv_bfloat16* row = sx + slot * XT + r * 64;                        // + kb * 8192: the kb-th 64-column block
       float mean, rs;
@@ -1047,9 +1063,10 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
       wg::proxy_fence(); __syncwarp(); if (lane == 0) arrive(yf + slot);
     }
   } else {
+    if (OPM_PRO_REG) asm volatile("setmaxnreg.inc.sync.aligned.u32 152;\n" ::: "memory");
     wait(wf, 0); const int cw = warp - 12; int g = 0;
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++g) {
-      int slot = g % NST, b = g % 2, i = t / nsb, s0 = (t % nsb) * C::BS;
+      int slot = g % NST, b = g % 2, i, s0; tile_is(t, i, s0);
       wait(yf + slot, (g / NST) & 1);
       // RoseTTAFold3's projection biases are masked like the projections: this thread's 32 columns (MSA rows) of the accumulator keep
       // their mask bits in one register, read from the tile's mask bytes before the slot is released (the biases used to be masked by

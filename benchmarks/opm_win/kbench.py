@@ -20,23 +20,34 @@ wo = (torch.randn(128, 1024, device=dev) * 0.02).to(bf); ob = torch.randn(128, d
 ext = ot._ext(dev, native=True, tma=False, cm=64, cz=128, fused=True)
 print("ext ready", round(time.time() - T0, 1), flush=True)
 a2, bt, stats, mask16, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False)
-del m, stats
+del stats
 wp = ot._fused_weight(wo)
 res = torch.randn(1, L, L, 128, device=dev, dtype=bf) if a.residual else None
 V = {f"cl{c}": (lambda c=c: ext.opm_fused_infer(a2, bt, norm, wp, ob, res, 1, cluster=c)) for c in (1, 2, 3, 4)}   # 1 none, 2 2x1, 3 1x2, 4 2x2
 V["cublas"] = lambda: torch.mm(a2, bt.t())
 V["unfused"] = lambda: ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo, ob, L, L, res, 1)   # cuBLAS product + the CUDA epilogue kernel
+if any(v in a.variants for v in ("pro", "epi")):
+    O0 = torch.mm(a2, bt.t())
+    V["pro"] = lambda: ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False)   # the TMA prologue alone
+    V["epi"] = lambda: ext.opm_epilogue(O0, norm, wo, ob, L, L, res, 1)   # the epilogue alone on a kept O
+    for nm, kw in (("epi_tma", dict(epi_tma=True)), ("epi_half", dict(epi_tma=True, epi_half=True))):
+        if nm in a.variants.split(","):
+            e2 = ot._ext(dev, native=True, tma=True, **kw)
+            V[nm] = (lambda e2=e2: e2.opm_epilogue(O0, norm, wo, ob, L, L, res, 1))
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 from builds import build   # noqa: E402
 for k in a.variants.split(","):
     if "." in k:   # "<build>.cl<code>": a macro variant of the extension (builds.py)
         bname, cl = k.split(".")
         bext = build(bname)
-        V[k] = (lambda bext=bext, c=int(cl[2:]): bext.opm_fused_infer(a2, bt, norm, wp, ob, res, 1, cluster=c))
+        if cl == "pro":   # "<build>.pro": that build's wide prologue alone
+            V[k] = (lambda bext=bext: bext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False))
+        else:
+            V[k] = (lambda bext=bext, c=int(cl[2:]): bext.opm_fused_infer(a2, bt, norm, wp, ob, res, 1, cluster=c))
 V = {k: V[k] for k in a.variants.split(",")}
 ref = V["cl1"]() if "cl1" in V else None
 for k in V:
-    if (k != "cublas") and ref is not None:
+    if k not in ("cublas", "pro") and not k.endswith(".pro") and ref is not None:
         o = V[k](); o2 = V[k]()
         print(k, "bitwise vs cl1", bool(torch.equal(o, ref)), "run-twice", bool(torch.equal(o, o2)), "max|d|", float((o.float() - ref.float()).abs().max()), flush=True)
 print("max clusters per code", ext.opm_fused_max_clusters(), flush=True)
