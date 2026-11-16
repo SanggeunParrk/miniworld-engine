@@ -189,7 +189,8 @@ class OuterProductMean(BackendModule, MasterWeights):
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 3,
-        "cuda:h100_sm90": 2,  # 2026-11-16: AF3-order inference at depth > 4096 takes the wide TMA prologue (the native one streamed at 0.35 TB/s)
+        "cuda:h100_sm90": 3,  # 2 (2026-11-16): AF3-order inference at depth > 4096 takes the wide TMA prologue (the native one streamed at 0.35 TB/s);
+        # 3 (2026-11-16): inference at depth > 4096 takes cuBLAS + the epilogue on the count table instead of the fused kernel (opm_train._product_route_deep)
         "triton": 2,
         "cuda:5090_sm120": 3,
     }  # 2026-11-10: sm_80 paths; 2026-11-11: count_offset in the triton / sm_80 kernels (FoldForge R2); 2026-11-12: their sm_120a build (RTX 5090)

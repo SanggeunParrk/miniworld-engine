@@ -121,7 +121,10 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
     gam, bet, wa16, wb16, wo_epi, bo_epi, pbias = _capture.param_forms("opm_biased_wide", params, forms)
     # the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table): no count kernel
     dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": dmin, "doff": doff}  # the pair divisor max(count, dmin) + doff
-    a2, bt, _, _, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa16, wb16, float(getattr(module.ln_msa, "eps", 1e-5)), False, pbias, False)
+    # the product route takes the count kernel's fp32 divisor table (dmin / doff applied there), the fused kernel the mask bit rows
+    a2, bt, _, _, norm = ext.opm_prologue_wide(
+        m, mk, gam, bet, wa16, wb16, float(getattr(module.ln_msa, "eps", 1e-5)), False, pbias, product_route, **(dkw if product_route else {})
+    )
     interchain = module.mask_interchain and token_asym_id is not None
     res = None if interchain else residual
     if fused:  # the products stay in shared memory (norm is the mask bit table here)

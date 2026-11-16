@@ -179,11 +179,14 @@ __global__ void __launch_bounds__(256) opm_count_tiled(const unsigned* __restric
 static void opm_count_launch(const unsigned* bits, float* norm, int S, int N, float dmin = 1.0f, float doff = 0.0f) {
   const int W=S/32;
   TORCH_CHECK(N%OPM_COUNT_TILE==0 && S%32==0,"OPM count tile contract");
+  const size_t smem = size_t(2 * OPM_COUNT_TILE * (W + 1)) * sizeof(unsigned);   // past 48 KiB from depth 12288 on (65.7 KiB at 16384)
+  TORCH_CHECK(smem <= 227 * 1024, "OPM count: depth ", S, " past the shared-memory tile (S <= 58080)");
+  if (smem > 48 * 1024) C10_CUDA_CHECK(cudaFuncSetAttribute(opm_count_tiled, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
   cudaKernel_t kernel; C10_CUDA_CHECK(cudaGetKernel(&kernel, opm_count_tiled));
   const unsigned* bp=bits; float* np=norm; int w=W, n=N;
   void* argv[]={&bp,&np,&w,&n,&dmin,&doff};
   C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(N/OPM_COUNT_TILE,N/OPM_COUNT_TILE),
-      dim3(OPM_COUNT_TILE,OPM_COUNT_TILE),argv,size_t(2*OPM_COUNT_TILE*(W+1))*sizeof(unsigned),at::cuda::getCurrentCUDAStream()));
+      dim3(OPM_COUNT_TILE,OPM_COUNT_TILE),argv,smem,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 __global__ void opm_finish_native(const float* red,const float* gamma,const float* beta,

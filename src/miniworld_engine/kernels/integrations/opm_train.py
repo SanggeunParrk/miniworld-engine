@@ -100,11 +100,12 @@ _O_CHUNK_BYTES = 2 << 30
 
 
 def _product_epilogue(ext, a2, bt, norm, wo16, ob, n, residual, after, dkw):
-    """Inference: z = epilogue(A2 . BT^T) per chunk of i rows (cuBLAS NT product into a bounded O workspace, the epilogue counts the
-    pair masks from the bit rows at the chunk's offset)."""
+    """Inference: z = epilogue(A2 . BT^T) per chunk of i rows (cuBLAS NT product into a bounded O workspace). ``norm``: the fp32 [N, N]
+    divisor table of the count kernel (its chunk's rows), or the int32 mask bit rows (the epilogue counts at the chunk's offset)."""
     rows = max(16, min(n, _O_CHUNK_BYTES // (n * CH * CH * 2) // 16 * 16))
     if rows >= n:
         return ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo16, ob, n, n, residual, int(after), **dkw)
+    table = norm.dtype == torch.float32
     z = torch.empty((1, n, n, wo16.shape[0]), device=a2.device, dtype=torch.bfloat16)
     o = torch.empty((rows * CH, n * CH), device=a2.device, dtype=torch.bfloat16)
     for r0 in range(0, n, rows):
@@ -112,7 +113,10 @@ def _product_epilogue(ext, a2, bt, norm, wo16, ob, n, residual, after, dkw):
         oc = o[: nr * CH]
         torch.mm(a2[r0 * CH : (r0 + nr) * CH], bt.t(), out=oc)
         res = residual[:, r0 : r0 + nr] if residual is not None else None
-        ext.opm_epilogue(oc, norm, wo16, ob, nr, n, res, int(after), out=z[:, r0 : r0 + nr], i0=r0, **dkw)
+        if table:
+            ext.opm_epilogue(oc, norm[r0 : r0 + nr], wo16, ob, nr, n, res, int(after), out=z[:, r0 : r0 + nr], **dkw)
+        else:
+            ext.opm_epilogue(oc, norm, wo16, ob, nr, n, res, int(after), out=z[:, r0 : r0 + nr], i0=r0, **dkw)
     return z
 
 
@@ -524,10 +528,12 @@ def _forward_wide(ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residua
         gam, bet, wa16, wb16, wo16, ob, pb = _capture.param_forms(
             "opm_wide_infer", [t for t in (lnw, lnb, wa, wb, wo, bo, pbias) if t is not None], forms
         )
-    # inference: the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table), no separate count kernel
+    # inference: the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table), no separate count kernel;
+    # the product route (depth > 4096) takes the fp32 [N, N] table of the count kernel instead: the per-CTA popcount of two 4 x S / 8 byte
+    # bit rows costs the epilogue 0.17 ms at S 8192 and ~0.4 ms at S 16384 (L 768), the count kernel ~0.05 / ~0.1 ms
     dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": float(dmin), "doff": float(doff)}  # the pair divisor max(count, dmin) + doff
     a2, bt, stats, mask16, norm = ext.opm_prologue_wide(
-        m, mk, gam, bet, wa16, wb16, float(eps), bool(save_stats), pb, bool(save_stats), **dkw
+        m, mk, gam, bet, wa16, wb16, float(eps), bool(save_stats), pb, bool(save_stats) or product_route, **dkw
     )
     ctx.has_bias = pbias is not None
     if fused:  # inference: the products stay in shared memory (norm is the mask bit table here)

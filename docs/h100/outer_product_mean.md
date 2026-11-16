@@ -80,6 +80,16 @@ Triton `fused_prologue` kept in `opm_train.py` is not reached: every former Trit
   so the fragment stores are conflict-free), then `z^T += W_q Opair^T` (`m64n128k16`, the pass's 64 KiB weight slice, k-permuted once
   per parameter version by `_fused_weight`) with the 128 x 128 fp32 result kept in registers across passes. The epilogue divides by the
   popcount of the two tokens' mask rows (or after the bias), stages a [pair][o] tile and writes rows (+ residual).
+  `cluster` (host argument, rule: none) runs the same work items in CLM x CLN thread-block clusters that multicast the shared A / B tile
+  parts by TMA (bitwise the same outputs; 2 x 1 is 6-10 % faster cool at S 2048 / L 768 but 0.5-2 % slower sustained, 2 x 2 slower).
+- Inference past depth 4096 (`_product_route_deep`, also `composed.biased_wide`): the fused kernel is replaced by cuBLAS + the epilogue
+  (`_product_epilogue`, per chunk of i rows when O would pass `_O_CHUNK_BYTES` = 2 GiB), the divisor from the count kernel's fp32 table
+  (the epilogue's per-CTA popcount of S / 8-byte bit rows grows with S). The product is power-bound there (700 W cap; clocks fall
+  15-18 % after ~50-80 ms of load): cuBLAS (`nvjet` 192x192 2x1-cluster at L 768) runs at ~99 % of the tensor peak per cycle, the fused
+  main loop at ~82-88 %; 2-CTA clusters with B multicast, 2-stage commit groups and S groups did not close it. Kernel A/B
+  (benchmarks/opm_win, L 256-768): the composition is 2-6 % faster cool and 3-11 % sustained at S 8192 / 16384.
+- The wide prologue rebalances registers by `setmaxnreg` (TMA warpgroup 40, LayerNorm / projection warpgroups 152: at 128 everywhere
+  the kernel had a 112-byte stack frame) and walks tiles in groups of 64 tokens: 1.53 -> 1.33 ms at S 16384 / L 768.
 - Training keeps O for dWo (`save_o = True`).
 - Two exact shapes use graph-owned cuBLAS workspaces (`_owned_blas_for`: training S1024/L768, inference S4096/L128). The gathered-TMA
   epilogue variants serve inference at (1024, 384) and (2048, 384) (written for the d_msa 64 / d_pair 128 width only).
