@@ -93,15 +93,16 @@ OFF: set = set()
 RESIDUAL_LT = os.environ.get("BIDIR_RESIDUAL_LT", "0") == "1"
 
 
-#: Inference (no grad), d_pair 128, K = 2 d_hidden or d_hidden in (128, 256), L L % 128 == 0: the gate and the out-projection with its
-#: residual in one kernel (``tail`` of triattn_bidir_sm90.cu: no u planes). The same arithmetic as gate_u + torch.addmm (u rounded to
-#: bf16, k16 steps in order, the product rounded to bf16 and then x added): the outputs equal the unfused tail's bits
-#: (tests/gpu/test_bidir_triattn_h100.py). BIDIR_FUSED_TAIL=0 switches it off.
+#: d_pair 128, K = 2 d_hidden or d_hidden in (128, 256), L L % 128 == 0: the gate and the out-projection with its residual in one kernel
+#: (``tail`` of triattn_bidir_sm90.cu). Inference: no u planes; training (u saved for the backward): the kernel also writes u. The same
+#: arithmetic as gate_u + torch.addmm (u rounded to bf16, k16 steps in order, the product rounded to bf16 and then x added): the outputs and
+#: u equal the unfused tail's bits (tests/gpu/test_bidir_triattn_h100.py). BIDIR_FUSED_TAIL=0 switches it off; BIDIR_FUSED_TAIL_SAVE=0 only the training use.
 FUSED_TAIL = os.environ.get("BIDIR_FUSED_TAIL", "1") != "0"
+FUSED_TAIL_SAVE = os.environ.get("BIDIR_FUSED_TAIL_SAVE", "1") != "0"
 
 
 def _fused_tail(save: bool, C: int, K: int, LL: int) -> bool:
-    return FUSED_TAIL and not save and C == 128 and K in (128, 256) and LL % 128 == 0 and _planes_ext("tail") is not None
+    return FUSED_TAIL and (FUSED_TAIL_SAVE or not save) and C == 128 and K in (128, 256) and LL % 128 == 0 and _planes_ext("tail") is not None
 
 
 def _planes_ext(part: str = ""):
@@ -169,8 +170,8 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
             ch = slice(Dh + h * dh, Dh + (h + 1) * dh)
             torch.bmm(pe[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
         if _fused_tail(save, C, 2 * Dh, LL):
-            _planes_ext().tail(c[2 * Dh : 4 * Dh], o, wo, x[rows], out[rows])
-            u = None
+            u = torch.empty(2 * Dh, LL, device=x.device, dtype=torch.bfloat16) if save else None
+            _planes_ext().tail(c[2 * Dh : 4 * Dh], o, wo, x[rows], out[rows], u)
         else:
             u = g.gate_u(c[2 * Dh : 4 * Dh], o, 0)
             _out_proj(x[rows], u, wo, out[rows])
@@ -340,8 +341,8 @@ def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
                 ch = slice(h * dh, (h + 1) * dh)
                 torch.bmm(p[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
         if drop is None and _fused_tail(save, C, Dh, LL):
-            _planes_ext().tail(c[Dh : 2 * Dh], o, wo, x[rows], out[rows])
-            u = None
+            u = torch.empty(Dh, LL, device=x.device, dtype=torch.bfloat16) if save else None
+            _planes_ext().tail(c[Dh : 2 * Dh], o, wo, x[rows], out[rows], u)
         else:
             u = g.gate_u(c[Dh : 2 * Dh], o, 0)
             if drop is None:

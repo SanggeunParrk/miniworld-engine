@@ -294,12 +294,12 @@ torch::Tensor cgemm(torch::Tensor w, torch::Tensor y, torch::Tensor out) {
   return out;
 }
 
-// ===================================================================================== fused tail (OPT-IN, inference only)
+// ===================================================================================== fused tail (default on: inference, and training with u saved)
 // out = x + bf16(bf16(sigmoid(G) o O)^T Wo^T) in one pass over the planes: the gate (gate_u_k's arithmetic, u rounded to bf16) is formed in
 // shared memory and feeds mma.sync m16n8k16 straight away, so u (K x L L bf16: written by gate_u, read by the out-projection) never exists.
 // The product is rounded to bf16 and then x is added (the double rounding of torch.addmm's nvjet kernel, so the epilogue is the same); the
-// fp32 accumulation runs over the K = 2 Dh channels of one thread's k16 steps in order, which is not guaranteed to be cuBLAS' order: the
-// output is NOT bit-identical to the unfused tail (rare 1-ulp differences of the accumulation order), hence opt-in.
+// fp32 accumulation runs over the K = 2 Dh channels of one thread's k16 steps in order; the outputs equal the unfused tail's bits (tests/gpu/test_bidir_triattn_h100.py).
+// With U given (training) the kernel also writes u = bf16(sigmoid(G) o O) [K, L L] (what gate_u wrote), saved for the backward.
 // One CTA = 128 tokens x all 128 pair channels, 8 warps x 16 tokens; Wo resident in smem, the planes streamed 32 channels at a time
 // through a 2-stage cp.async ring. Needs d_pair == 128, K in {128, 256}, L L % 128 == 0.
 namespace tl {
@@ -323,9 +323,9 @@ __device__ __forceinline__ void mma16816(float (&c)[4], const unsigned (&a)[4], 
 }
 }  // namespace tl
 
-template <int K>
+template <int K, bool SU>
 __global__ void __launch_bounds__(256, 2) tail_k(const bf16* __restrict__ G, const bf16* __restrict__ O, const bf16* __restrict__ Wo, const bf16* __restrict__ X,
-                                                 bf16* __restrict__ out, long LL, long ldg, long ldo) {
+                                                 bf16* __restrict__ out, bf16* __restrict__ U, long LL, long ldg, long ldo) {
   using namespace tl;
   constexpr int WS = K + 8, NK = K / KC, STG = 2 * KC * SP;
   extern __shared__ __align__(16) unsigned char smraw[];
@@ -368,7 +368,9 @@ __global__ void __launch_bounds__(256, 2) tail_k(const bf16* __restrict__ G, con
         unpack8(*reinterpret_cast<const uint4*>(o + r * SP + ch * 8), ov);
 #pragma unroll
         for (int e = 0; e < 8; ++e) rv[e] = (1.f / (1.f + __expf(-gv[e]))) * ov[e];
-        *reinterpret_cast<uint4*>(o + r * SP + ch * 8) = pack8(rv);
+        const uint4 pu = pack8(rv);
+        *reinterpret_cast<uint4*>(o + r * SP + ch * 8) = pu;
+        if (SU) *reinterpret_cast<uint4*>(U + (long)(kc * KC + r) * LL + tok0 + ch * 8) = pu;  // training: u is saved for the backward
       }
       __syncthreads();
 #pragma unroll
@@ -411,7 +413,7 @@ __global__ void __launch_bounds__(256, 2) tail_k(const bf16* __restrict__ G, con
 }
 
 // g: [K, LL] gate planes (row stride ldg), o: [K, LL] (row stride ldo), wo [128, K], x / out [LL, 128]
-torch::Tensor tail(torch::Tensor g, torch::Tensor o, torch::Tensor wo, torch::Tensor x, torch::Tensor out) {
+torch::Tensor tail(torch::Tensor g, torch::Tensor o, torch::Tensor wo, torch::Tensor x, torch::Tensor out, c10::optional<torch::Tensor> u) {
   const long K = wo.size(1), LL = g.size(1);
   TORCH_CHECK(g.is_cuda() && g.scalar_type() == torch::kBFloat16 && o.scalar_type() == torch::kBFloat16 && wo.scalar_type() == torch::kBFloat16 &&
                   x.scalar_type() == torch::kBFloat16 && out.scalar_type() == torch::kBFloat16 && (K == 128 || K == 256) && wo.size(0) == 128 &&
@@ -426,14 +428,27 @@ torch::Tensor tail(torch::Tensor g, torch::Tensor o, torch::Tensor wo, torch::Te
   const long ntiles = LL / 128;
   const int grid = (int)std::min<long>(ntiles, 2L * sms);
   auto stream = at::cuda::getCurrentCUDAStream();
+  bf16* up = nullptr;
+  if (u.has_value()) {
+    TORCH_CHECK(u->is_cuda() && u->scalar_type() == torch::kBFloat16 && u->dim() == 2 && u->size(0) == K && u->size(1) == LL && u->is_contiguous() &&
+                    reinterpret_cast<uintptr_t>(u->data_ptr()) % 16 == 0,
+                "tail: u must be a contiguous bf16 [K, LL], 16-byte aligned");
+    up = reinterpret_cast<bf16*>(u->data_ptr());
+  }
   auto go = [&](auto kern, size_t smem) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
     kern<<<grid, 256, smem, stream>>>(reinterpret_cast<const bf16*>(g.data_ptr()), reinterpret_cast<const bf16*>(o.data_ptr()),
                                       reinterpret_cast<const bf16*>(wo.data_ptr()), reinterpret_cast<const bf16*>(x.data_ptr()),
-                                      reinterpret_cast<bf16*>(out.data_ptr()), LL, g.stride(0), o.stride(0));
+                                      reinterpret_cast<bf16*>(out.data_ptr()), up, LL, g.stride(0), o.stride(0));
   };
-  if (K == 256) go(tail_k<256>, (size_t)(128 * 264 + 2 * 2 * 32 * 136) * 2);
-  else go(tail_k<128>, (size_t)(128 * 136 + 2 * 2 * 32 * 136) * 2);
+  const size_t sm256 = (size_t)(128 * 264 + 2 * 2 * 32 * 136) * 2, sm128 = (size_t)(128 * 136 + 2 * 2 * 32 * 136) * 2;
+  if (K == 256) {
+    if (up) go(tail_k<256, true>, sm256);
+    else go(tail_k<256, false>, sm256);
+  } else {
+    if (up) go(tail_k<128, true>, sm128);
+    else go(tail_k<128, false>, sm128);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }

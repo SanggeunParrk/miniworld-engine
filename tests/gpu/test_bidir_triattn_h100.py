@@ -106,7 +106,7 @@ def test_fused_tail_is_the_default_and_refuses_what_it_cannot_take():
 
     assert I.FUSED_TAIL is True and I.RESIDUAL_LT is False and I.LEGACY is False
     assert I._fused_tail(False, 128, 256, 128 * 128)
-    assert not I._fused_tail(True, 128, 256, 128 * 128)  # training saves u
+    assert I._fused_tail(True, 128, 256, 128 * 128)  # training: the kernel also writes the saved u
     assert not I._fused_tail(False, 256, 256, 128 * 128)  # d_pair 256
     assert not I._fused_tail(False, 128, 256, 200 * 200)  # L L % 128 != 0
 
@@ -125,3 +125,22 @@ def test_residual_lt_is_the_more_accurate_rounding(monkeypatch, length):
     assert (ya != yb).any()  # not the same bits
     # the two roundings differ by at most the bf16 grid of the product and of the sum: |x| + |out| bounds both
     assert (d <= 2 ** (-7) * (x.float().abs() + ya.float().abs()) + 1e-6).all()
+
+
+@pytest.mark.parametrize(("kind", "starting"), KINDS)
+@pytest.mark.parametrize("length", [128, 144, 256, 384, 512])
+@pytest.mark.parametrize(("batch", "masked", "w_std", "x_scale"), [(1, False, 0.1, 2.0), (1, True, 0.5, 0.5), (2, True, 0.1, 4.0)])
+def test_fused_tail_with_saved_u_equals_the_unfused_training(monkeypatch, kind, starting, length, batch, masked, w_std, x_scale):
+    """Training: the fused tail also writes u; output, dx and every parameter gradient equal the gate_u + addmm route's bits."""
+    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+
+    if length >= 384 and batch > 1:
+        pytest.skip("memory")
+    m = _module(kind, starting, seed=length, w_std=w_std)
+    x, mask = _inputs(batch, length, masked, x_scale)
+    monkeypatch.setattr(I, "FUSED_TAIL_SAVE", False)
+    ya, ga = _run(m, x, mask, True)
+    monkeypatch.setattr(I, "FUSED_TAIL_SAVE", True)
+    yb, gb = _run(m, x, mask, True)
+    assert torch.equal(ya, yb)
+    assert len(ga) == len(gb) and all(torch.equal(a, b) for a, b in zip(ga, gb, strict=True))
