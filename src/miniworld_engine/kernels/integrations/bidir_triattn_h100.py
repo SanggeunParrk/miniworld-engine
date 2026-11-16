@@ -86,11 +86,8 @@ def _mm_f32(a, b):
 #: the H100 path's host-side tails: False = the torch ops the engine 2.5.9 ran (cat / masked_fill / addmm / copies); both give the same
 #: bits (tests/gpu/test_bidir_triattn_h100.py). The A100 / RTX 5090 builds always run the torch ops.
 LEGACY = False
-#: parts switched back to the torch ops one by one (tests): "logits", "out", "mm"
+#: parts switched back to the torch ops one by one (tests): "logits", "gemm", "tail", "gbwd", "smbwd", "cast", "mm"
 OFF: set = set()
-#: OPT-IN, default off: the residual out-projection through cublasLt with D != C (no copy of x into the output; one rounding of x + product where
-#: torch.addmm rounds the product to bf16 first: NOT the same bits, the more accurate value). Set BIDIR_RESIDUAL_LT=1.
-RESIDUAL_LT = os.environ.get("BIDIR_RESIDUAL_LT", "0") == "1"
 
 
 #: d_pair 128, K = 2 d_hidden or d_hidden in (128, 256), L L % 128 == 0: the gate and the out-projection with its residual in one kernel
@@ -179,11 +176,7 @@ def _probs(bias: torch.Tensor, keep: torch.Tensor | None, H: int, L: int) -> tor
 
 def _out_proj(x, u, wo, out):
     """out = x + u^T wo^T (x, out: [L L, C] rows of one sample; u [K, L L] planes; wo [C, K])."""
-    e = _planes_ext("out") if RESIDUAL_LT else None
-    if e is not None:  # cublasLt with D != C: no copy of x into out
-        e.out_proj(u, wo, x, out)
-    else:
-        torch.addmm(x, u.t(), wo.t(), out=out)
+    torch.addmm(x, u.t(), wo.t(), out=out)
 
 
 def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):

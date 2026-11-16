@@ -125,7 +125,6 @@ __global__ void __launch_bounds__(256) smbwd_k(const bf16* __restrict__ p, const
 }
 
 #define LT_CHECK(x) do { auto st_ = (x); TORCH_CHECK(st_ == CUBLAS_STATUS_SUCCESS, "cublasLt status ", int(st_), " at " #x); } while (0)
-struct LtPlan { cublasLtMatmulDesc_t op; cublasLtMatrixLayout_t la, lb, lc; std::vector<cublasLtMatmulHeuristicResult_t> cands; };
 
 void check_rows(const torch::Tensor& t, const char* name) {
   TORCH_CHECK(t.is_cuda() && t.dim() == 2 && t.scalar_type() == torch::kBFloat16 && t.stride(1) == 1 && t.stride(0) % 8 == 0 &&
@@ -185,59 +184,6 @@ torch::Tensor logits(torch::Tensor bias, c10::optional<torch::Tensor> keep, int6
   logits_k<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const bf16*>(bias.data_ptr()), kp, out.data_ptr<float>(), (int)nstart,
                                                                (int)L, bias.stride(0));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return out;
-}
-
-// OPT-IN (BIDIR_RESIDUAL_LT, default off): out = x + u^T wo^T through cublasLt with D != C, without torch.addmm's copy of x into its output (a
-// full read + write of the pair). NOT the bits of torch.addmm: its kernel (cuBLAS' nvjet "badd") rounds the product to bf16 and then adds x
-// (two roundings), no cublasLt algorithm of the heuristic's list (up to 64 were compared) does that, and the epilogue rounds once
-// (x + product in fp32) -- the more accurate value, but a different output. u: [K, M] channel planes (row stride ld, unit column
-// stride), wo [C, K] row-major, x / out [M, C] contiguous. The algorithm is the heuristic's first (a plan per shape, never timed).
-torch::Tensor out_proj(torch::Tensor u, torch::Tensor wo, torch::Tensor x, torch::Tensor out) {
-  TORCH_CHECK(u.is_cuda() && u.scalar_type() == torch::kBFloat16 && wo.scalar_type() == torch::kBFloat16 && x.scalar_type() == torch::kBFloat16 &&
-                  out.scalar_type() == torch::kBFloat16,
-              "out_proj: bf16 cuda");
-  TORCH_CHECK(u.dim() == 2 && u.stride(1) == 1 && wo.dim() == 2 && wo.is_contiguous() && wo.size(1) == u.size(0) && x.is_contiguous() &&
-                  out.is_contiguous() && x.size(1) == wo.size(0) && x.size(0) == u.size(1) && out.sizes() == x.sizes(),
-              "out_proj: shapes");
-  c10::cuda::CUDAGuard guard(u.device());
-  const int64_t K = u.size(0), M = u.size(1), C = wo.size(0), ld = u.stride(0);
-  static std::map<std::tuple<int, int64_t, int64_t, int64_t, int64_t>, LtPlan> plans;
-  static std::mutex mu;
-  auto lt = reinterpret_cast<cublasLtHandle_t>(at::cuda::getCurrentCUDABlasLtHandle());
-  auto stream = at::cuda::getCurrentCUDAStream();
-  LtPlan p;
-  {
-    std::lock_guard<std::mutex> lk(mu);
-    const auto key = std::make_tuple((int)u.get_device(), M, K, C, ld);
-    auto it = plans.find(key);
-    if (it == plans.end()) {
-      LtPlan q;
-      LT_CHECK(cublasLtMatmulDescCreate(&q.op, CUBLAS_COMPUTE_32F, CUDA_R_32F));
-      cublasOperation_t t = CUBLAS_OP_T;
-      LT_CHECK(cublasLtMatmulDescSetAttribute(q.op, CUBLASLT_MATMUL_DESC_TRANSA, &t, sizeof(t)));
-      LT_CHECK(cublasLtMatmulDescSetAttribute(q.op, CUBLASLT_MATMUL_DESC_TRANSB, &t, sizeof(t)));
-      LT_CHECK(cublasLtMatrixLayoutCreate(&q.la, CUDA_R_16BF, K, C, K));   // wo row-major [C, K] = column-major [K, C]
-      LT_CHECK(cublasLtMatrixLayoutCreate(&q.lb, CUDA_R_16BF, M, K, ld));  // u row-major [K, M] = column-major [M, K]
-      LT_CHECK(cublasLtMatrixLayoutCreate(&q.lc, CUDA_R_16BF, C, M, C));   // out row-major [M, C] = column-major [C, M]
-      cublasLtMatmulPreference_t pref;
-      LT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
-      size_t wsmax = 32u << 20;
-      LT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsmax, sizeof(wsmax)));
-      cublasLtMatmulHeuristicResult_t h;
-      int n = 0;
-      LT_CHECK(cublasLtMatmulAlgoGetHeuristic(lt, q.op, q.la, q.lb, q.lc, q.lc, pref, 1, &h, &n));
-      cublasLtMatmulPreferenceDestroy(pref);
-      TORCH_CHECK(n > 0, "out_proj: no cublasLt algorithm");
-      q.cands = {h};
-      it = plans.emplace(key, q).first;
-    }
-    p = it->second;
-  }
-  auto ws = torch::empty({(int64_t)p.cands[0].workspaceSize + 16}, u.options().dtype(torch::kByte));
-  const float alpha = 1.f, beta = 1.f;
-  LT_CHECK(cublasLtMatmul(lt, p.op, &alpha, wo.data_ptr(), p.la, u.data_ptr(), p.lb, &beta, x.data_ptr(), p.lc, out.data_ptr(), p.lc, &p.cands[0].algo,
-                          ws.data_ptr(), p.cands[0].workspaceSize, stream));
   return out;
 }
 
@@ -661,7 +607,6 @@ std::vector<torch::Tensor> cast_weights(torch::Tensor wv, torch::Tensor wg, torc
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_bwd", &gate_bwd);
   m.def("logits", &logits);
-  m.def("out_proj", &out_proj);
   m.def("cgemm", &cgemm);
   m.def("tail", &tail);
   m.def("softmax_bwd_planes", &softmax_bwd_planes);

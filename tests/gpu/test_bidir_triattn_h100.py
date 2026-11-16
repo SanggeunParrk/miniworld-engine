@@ -5,9 +5,7 @@ Default route = the engine 2.5.9 outputs, bit for bit:
 
 - the host-side tails (one-pass softmax-logits kernel, the fp32 dyln GEMM written in place, the planes GEMM through the fastest bit-equal
   cublasLt algorithm) against the torch ops they replaced (``LEGACY``), output and every gradient;
-- the fused inference tail (gate + out-projection + residual in one kernel) against the unfused gate_u + torch.addmm;
-- the opt-in cublasLt residual out-projection (``RESIDUAL_LT``) is NOT the same bits (one rounding where torch.addmm rounds twice): its error
-  against an fp64 reference is not larger than the default's.
+- the fused inference tail (gate + out-projection + residual in one kernel) against the unfused gate_u + torch.addmm.
 """
 
 from __future__ import annotations
@@ -104,27 +102,11 @@ def test_fused_tail_equals_the_unfused_tail(monkeypatch, kind, starting, length,
 def test_fused_tail_is_the_default_and_refuses_what_it_cannot_take():
     from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
 
-    assert I.FUSED_TAIL is True and I.RESIDUAL_LT is False and I.LEGACY is False
+    assert I.FUSED_TAIL is True and I.LEGACY is False
     assert I._fused_tail(False, 128, 256, 128 * 128)
     assert I._fused_tail(True, 128, 256, 128 * 128)  # training: the kernel also writes the saved u
     assert not I._fused_tail(False, 256, 256, 128 * 128)  # d_pair 256
     assert not I._fused_tail(False, 128, 256, 200 * 200)  # L L % 128 != 0
-
-
-@pytest.mark.parametrize("length", [128, 256, 512])
-def test_residual_lt_is_the_more_accurate_rounding(monkeypatch, length):
-    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
-
-    m = _module("bi", True)
-    x, mask = _inputs(1, length, True)
-    monkeypatch.setattr(I, "FUSED_TAIL", False)
-    ya, _ = _run(m, x, mask, False)  # torch.addmm: bf16(bf16(product) + x)
-    monkeypatch.setattr(I, "RESIDUAL_LT", True)
-    yb, _ = _run(m, x, mask, False)  # cublasLt: bf16(product + x)
-    d = (ya.float() - yb.float()).abs()
-    assert (ya != yb).any()  # not the same bits
-    # the two roundings differ by at most the bf16 grid of the product and of the sum: |x| + |out| bounds both
-    assert (d <= 2 ** (-7) * (x.float().abs() + ya.float().abs()) + 1e-6).all()
 
 
 @pytest.mark.parametrize(("kind", "starting"), KINDS)
