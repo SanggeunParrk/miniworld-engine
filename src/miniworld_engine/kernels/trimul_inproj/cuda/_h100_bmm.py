@@ -161,9 +161,6 @@ LT_CONFIGS: dict = {
     (1536, False, 256): (201, 2, 5),  # 0.94
     (2560, False, 256): (29, 1, 3),  # 0.94
 }
-from miniworld_engine.kernels.trimul_inproj.cuda._h100_bmm_lt_bidir import LT_BIDIR  # noqa: E402  (bidirectional D64 / D128 contractions: 64 / 128 planes per launch)
-
-LT_CONFIGS.update(LT_BIDIR)
 
 _LT_ALGO = 66
 _lt_state = None
@@ -242,13 +239,14 @@ def _square_planes(t):
     return None
 
 
-def contract(a, b, out):
+def contract(a, b, out, table=None):
     """``bmm(a, b, out)`` for the TriMul contraction (a, b: [P, n, n] views of contiguous bf16 planes, one of them may be transposed;
-    out contiguous [P, n, n]), through the measured cuBLASLt configuration for (n, a transposed, P) when ``LT_CONFIGS`` has one and
-    the heuristic offers it; the same products and fp32 accumulation either way."""
+    out contiguous [P, n, n]), through the measured cuBLASLt configuration for (n, a transposed, P) when ``table`` (default
+    ``LT_CONFIGS``; the bidirectional D64 / D128 route passes ``_h100_bmm_lt_bidir.LT_BIDIR``) has one and the heuristic offers it;
+    the same products and fp32 accumulation either way."""
     ta, tb = _square_planes(a), _square_planes(b)
     key = (a.shape[-1], ta, a.shape[0])
-    want = LT_CONFIGS.get(key)
+    want = (LT_CONFIGS if table is None else table).get(key)
     state = _lt() if want is not None and ta is not None and tb is not None and out.is_contiguous() and a.is_cuda else None
     if state is None:
         return bmm(a, b, out)
@@ -260,7 +258,7 @@ def contract(a, b, out):
         if lib.cublasLtCreate(ctypes.byref(handle)):
             return bmm(a, b, out)
         handles[dev] = handle
-    pkey = (dev, *key, tb)
+    pkey = (dev, *key, tb, want)
     if pkey not in plans:
         # row-major out = a @ b <=> column-major out^T = b^T a^T: cuBLAS's first operand is b's memory (op T when b is the transposed
         # view), the second a's memory (op T when a is)

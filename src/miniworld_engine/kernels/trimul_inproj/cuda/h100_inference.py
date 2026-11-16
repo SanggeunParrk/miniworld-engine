@@ -7,6 +7,7 @@ from itertools import product
 
 import torch
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
+from miniworld_engine.kernels.trimul_inproj.cuda._h100_bmm_lt_bidir import LT_BIDIR
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._launch_config import choose
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
@@ -255,8 +256,8 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
         left, right = ab[:ch], ab[ch:]
         if direction == 0:
             h = ch // 2
-            _H100_BMM.contract(fold(left[:h]), fold(right[:h]).transpose(-1, -2), out=fold(tri[:h]))
-            _H100_BMM.contract(fold(left[h:]).transpose(-1, -2), fold(right[h:]), out=fold(tri[h:]))
+            _H100_BMM.contract(fold(left[:h]), fold(right[:h]).transpose(-1, -2), out=fold(tri[:h]), table=LT_BIDIR)
+            _H100_BMM.contract(fold(left[h:]).transpose(-1, -2), fold(right[h:]), out=fold(tri[h:]), table=LT_BIDIR)
         elif direction == 1:
             _H100_BMM.contract(fold(left), fold(right).transpose(-1, -2), out=fold(tri))
         else:

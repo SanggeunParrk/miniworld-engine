@@ -32,7 +32,8 @@ def _module(d: int) -> BT:
 def test_table_entries_are_bidirectional_keys() -> None:
     assert T.LT_BIDIR
     assert {k[2] for k in T.LT_BIDIR} <= {64, 128}
-    assert all(H.LT_CONFIGS[k] == v for k, v in T.LT_BIDIR.items())
+    assert HI.LT_BIDIR is T.LT_BIDIR
+    assert not set(T.LT_BIDIR) & set(H.LT_CONFIGS)  # the single-direction contractions never take a bidirectional entry
 
 
 @pytest.mark.parametrize("d", [64, 128])
@@ -44,8 +45,7 @@ def test_table_is_bit_identical_to_default_pick(d: int, batch: int, length: int,
     mask = torch.rand(batch, length, device="cuda", generator=g) > 0.1
     with torch.no_grad():
         tabled = m(x, mask)
-        for key in [k for k in H.LT_CONFIGS if k[2] == d]:
-            monkeypatch.delitem(H.LT_CONFIGS, key)
+        monkeypatch.setattr(HI, "LT_BIDIR", {})
         plain = m(x, mask)
     assert torch.equal(tabled, plain)
 
