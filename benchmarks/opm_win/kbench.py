@@ -50,6 +50,12 @@ for k in V:
     if k not in ("cublas", "pro") and not k.endswith(".pro") and ref is not None:
         o = V[k](); o2 = V[k]()
         print(k, "bitwise vs cl1", bool(torch.equal(o, ref)), "run-twice", bool(torch.equal(o, o2)), "max|d|", float((o.float() - ref.float()).abs().max()), flush=True)
+if "pro" in V:   # the prologue variants: bitwise the same A2 / BT / mask bits as this build's
+    rp = [t for t in V["pro"]() if t is not None]
+    for k in V:
+        if k.endswith(".pro"):
+            op = [t for t in V[k]() if t is not None]
+            print(k, "prologue bitwise vs pro", all(torch.equal(x, y) for x, y in zip(op, rp)), [tuple(t.shape) for t in op], flush=True)
 print("max clusters per code", ext.opm_fused_max_clusters(), flush=True)
 flush = torch.empty(256 << 20, dtype=torch.int8, device=dev)
 fl = 2 * S * L * L * 1024
