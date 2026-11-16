@@ -232,6 +232,7 @@ def _gate(proj, gate, dy, ds, dp, prefix):
 
 #: Output-LN backward per H: (source family, rows per tile, min blocks per SM). The "d256" source
 #: single-buffers its tiles, the "d384" source double-buffers them.
+_LN_PF = True  # D512 output-LN backward: the prefetching tile loop (output_ln_uni_pf.cu), bit-identical to the single-buffered source
 OUT_LN = {256: ("d256", 32, 3), 384: ("d384", 16, 2), 512: ("d512", 16, 2)}
 
 
@@ -253,6 +254,14 @@ def _output_ln(tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
     maps.append(W._map(dn, [64, rows, H // 64], [64, M, H // 64], [H * 2, 128]))
     k = W._kernel(source, "mw_independent_output_ln", "upstream", defines, smem)
     grid = W._resident_grid(source, "mw_independent_output_ln", "upstream", defines, 128, smem)
+    if _LN_PF and family == "d512":
+        # prefetching tile loop (output_ln_uni_pf.cu): the same grid (so the per-CTA row assignment and the partials' order stay
+        # those of the single-buffered source above), two tile sets of shared memory per CTA
+        set_size = 2 * sb + (rows * 8 + 1023) // 1024 * 1024
+        smem = 2 * set_size + 128 + 4 * H + 640
+        defines = W._defines(**defines_) + W._defines(MW_LN_PARTIALS=1)
+        source = "output_ln_uni_pf.cu"
+        k = W._kernel(source, "mw_independent_output_ln", "upstream", defines, smem)
     pg, pb = [torch.empty((grid, H), device=tri.device, dtype=torch.float32) for _ in range(2)]
     W._launch(k, grid, 128, smem, W._params(f"uni_{source}", [*maps, dn, mu, rs, go, pg, pb, M]))
     if defer:
@@ -488,6 +497,9 @@ def prebuild_units(D, n, bidirectional):
             extra = W._defines(MW_LN_PARTIALS=1) if native else ()
             units.append((f"output_ln_{family}_l384.cu", up, out_ln + extra, None))
             units.append(("input_ln_d384_l384.cu" if D == 384 else "input_ln_l384.cu", up, in_ln + extra, None))
+        if D == 512 and _LN_PF:  # the prefetching output-LN loop of the partials build (``_output_ln``)
+            pf = W._defines(MW_MINB=1, MW_K1_STREAM=0, WIDTH=D // 2, LN_ROWS=rows, LN_DN_TMA=1, LN_FENCE=0, LN_MINBLOCKS=minblocks)
+            units.append(("output_ln_uni_pf.cu", up, pf + W._defines(MW_LN_PARTIALS=1), None))
         for outgoing in (True, False):
             units.append(
                 (
