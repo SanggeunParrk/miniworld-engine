@@ -752,7 +752,7 @@ class TriangleAttention(_TriangleAttentionBase):
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2: (2026-11-13) the H100 d_pair 128 x 4 heads inference gate in fp32 inside the tail (backend_versions cuda:h100_sm90 4)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:a100_sm80": 6}
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:a100_sm80": 6, "cuda:h100_sm90": 10}  # h100_sm90 10 (2026-11-16): heads of 16 channels (d_pair 64 x 4 heads): half of the exponential pairs of the fp16 core on the FMA polynomial (outputs change within the fp16 rounding of P)
     # cuda:a100_sm80 6 (2026-11-14): the A100 row-blocked inference (sm80_wide.forward_rows: OpenDDE's refiner 2976 / 3968, L % 128 != 0) runs
     # the whole-pair call's core at the padded L (the rf core at L >= 512, keys up to the last live one): each row's bits equal the whole-pair
     # call's (was the 64-key AttnCfg core: within a bf16 ulp). Cases at multiples of 128 up to L2048 keep their path and bits.
@@ -808,7 +808,7 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
     version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 2026-11-12: the H100 inference core of 64-channel heads (h100_dh) on a 128-query tile from L 384 (outputs bitwise unchanged); 3: the
     #: training dropout scale by the H100 Philox kernel (as the base class)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 9}  # 6, 7, 8, 9: as the base
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 10}  # 6, 7, 8, 9: as the base; 10 (2026-11-16): d_pair 64 x 4 heads of 16 channels: half of the exponential pairs of the fp16 core on the FMA polynomial (outputs change within the fp16 rounding of P)
 
     transposed_bias = False
     _anthropic_block = True

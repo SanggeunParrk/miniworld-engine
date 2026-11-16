@@ -159,9 +159,14 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
                           // MUFU.  8 (every other pair; sustained, power-capped, c256 / 8 heads): L512 level, 768 / 1024 -0.5 %, 1536 -2.7 %,
                           // 2048 -3.3 %, accuracy level; 2 / 4: level or +1.5 %; 16 (all): +12 %
 #endif
-template <bool POLY> __device__ __forceinline__ uint32_t hexp(uint32_t a, int i) {
+#ifndef TA_POLY16
+#define TA_POLY16 8       // as TA_POLY for the heads of 16 channels (d_pair 64 x 4 heads): every other pair on the polynomial (0 = all on the MUFU).
+                          // Their score step is short, but half the pairs on the FMA pipes is -7 .. -12 % of the core at H4 L2048 (2026-11-16);
+                          // 4 / 16: level or slower
+#endif
+template <int NP> __device__ __forceinline__ uint32_t hexp(uint32_t a, int i) {   // NP of every 16 pairs on the polynomial (1, 2, 4, 8 or 16; 0: none)
   if (TA_ABL & 4) return a;
-  if (POLY && TA_POLY > 0 && i % (16 / (TA_POLY > 0 ? TA_POLY : 1)) == (16 / (TA_POLY > 0 ? TA_POLY : 1)) - 1) return hex2_poly(a);
+  if (NP > 0 && i % (16 / (NP > 0 ? NP : 1)) == (16 / (NP > 0 ? NP : 1)) - 1) return hex2_poly(a);
   return hex2(a);
 }
 __device__ __forceinline__ float hlo(uint32_t a) { return __half2float(__ushort_as_half((unsigned short)(a & 0xffffu))); }
@@ -199,7 +204,7 @@ __device__ __forceinline__ void load_2d_mc(const void* map, uint32_t dst, uint32
 // SPEC: the speculative offset (fix list written to FIX); else the exact form, which with FIX set runs the tasks of that list (static schedule).
 // ORD1: task order query tile, head in its group of hg, row group, head group (the CTAs running together share the bias of hg heads; hg = 1:
 // one head), else query tile, head, row group.
-template <bool SPEC, bool ORD1, int DH, bool POLY, bool BTR, bool CL = false>   // CL: see TA_CL.  BTR: the bias stored [B, H, key, query] (AF3's ending node from the one-kernel front), read transposed; POLY: TA_POLY of the exponentials on the FMA pipes (32-channel heads); DH: channels per head in q / k / v / gate / out / U: 32, or 16 (compact; the core pads to 32)
+template <bool SPEC, bool ORD1, int DH, bool POLY, bool BTR, bool CL = false>   // CL: see TA_CL.  BTR: the bias stored [B, H, key, query] (AF3's ending node from the one-kernel front), read transposed; POLY: TA_POLY (32-channel heads) / TA_POLY16 (16-channel heads) of every 16 exponential pairs on the FMA pipes; DH: channels per head in q / k / v / gate / out / U: 32, or 16 (compact; the core pads to 32)
 __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     int N, int H, int S, int ntasks, float scl,          // scl = scale * log2(e)
     int hg,                                              // ORD1: heads per group (a divisor of H)
@@ -487,7 +492,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   auto Xexp = [&](int r, int lo, int hi) {
     if (TA_ABL & 128) return;
 #pragma unroll
-    for (int i = lo; i < hi; ++i) { sc[r][2 * i] = hexp<POLY>((TA_ABL & 8) ? sc[r][2 * i] : hfma2(sc[r][2 * i], scl2, nmr0), i); sc[r][2 * i + 1] = hexp<POLY>((TA_ABL & 8) ? sc[r][2 * i + 1] : hfma2(sc[r][2 * i + 1], scl2, nmr1), i); }
+    for (int i = lo; i < hi; ++i) { sc[r][2 * i] = hexp<POLY ? (DH == D ? TA_POLY : TA_POLY16) : 0>((TA_ABL & 8) ? sc[r][2 * i] : hfma2(sc[r][2 * i], scl2, nmr0), i); sc[r][2 * i + 1] = hexp<POLY ? (DH == D ? TA_POLY : TA_POLY16) : 0>((TA_ABL & 8) ? sc[r][2 * i + 1] : hfma2(sc[r][2 * i + 1], scl2, nmr1), i); }
   };
   auto X = [&](int r) { Xpre(r); Xexp(r, 0, 16); };
   // after the PV of a tile of row rr retired: its row-sum increment is at least its largest probability; past 2^TA_TS the offset rises by the
@@ -782,9 +787,8 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
   auto run = [&](auto dhc, auto btc) {
     constexpr int DH = decltype(dhc)::value;
     constexpr bool BT = decltype(btc)::value;
-    // the polynomial exponentials only on the 32-channel heads (tuned there, 2026-10); heads of 16 channels run every exponential on the MUFU
-    // (their score step is half as long: the polynomial's extra instructions cost more than they relieve -- d_pair 64 module, L128-1536)
-    constexpr bool POLY = DH == D;
+    // the polynomial exponentials: TA_POLY of every 16 pairs on the 32-channel heads, TA_POLY16 on the heads of 16 channels
+    constexpr bool POLY = true;
     if constexpr (TA_ONE) {   // compile experiments only: one kernel (VOTE, ORD1, 32-channel heads, bias as stored)
       if constexpr (DH == D && !BT) {
         cudaFuncSetAttribute(triattn_h16_sm90<true, true, DH, POLY, BT>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
