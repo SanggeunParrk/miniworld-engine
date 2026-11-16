@@ -1,0 +1,58 @@
+WARNING: Device-side CUDA Event completion trace is currently enabled.
+         This may increase runtime overhead and the likelihood of false
+         dependencies across CUDA Streams. If you wish to avoid this, please
+         disable the feature with --cuda-event-trace=false.
+case 55 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} 768 8192
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-0586.qdstrm'
+[1/1] [0%                          ] nsys_r55_L768_S8192.nsys-repProcessing events...
+[1/1] [0%                          ] nsys_r55_L768_S8192.nsys-rep[1/1] [===========50%              ] nsys_r55_L768_S8192.nsys-rep[1/1] [=======================96%  ] nsys_r55_L768_S8192.nsys-rep[1/1] [========================97% ] nsys_r55_L768_S8192.nsys-rep[1/1] [========================98% ] nsys_r55_L768_S8192.nsys-rep[1/1] [========================99% ] nsys_r55_L768_S8192.nsys-rep[1/1] [========================100%] nsys_r55_L768_S8192.nsys-rep[1/1] [========================100%] nsys_r55_L768_S8192.nsys-rep[1/1] [========================100%] nsys_r55_L768_S8192.nsys-rep
+done
+Generated:
+	/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r55_L768_S8192.nsys-rep
+Generating SQLite file /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r55_L768_S8192.sqlite from /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r55_L768_S8192.nsys-rep
+Processing [/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r55_L768_S8192.sqlite] with [/opt/nvidia/nsight-systems/2025.1.3/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+95.1,41163699,3,13721233.0,13718385.0,13698161,13747153,24619.9,"opm_fused::opm_fused_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const unsigned int *, int, const float *, const __nv_bfloat16 *, __nv_bfloat16 *, int, int, int, float, float)"
+4.9,2133161,3,711053.7,712259.0,704611,716291,5932.6,"void <unnamed>::opm_prologue_tma_wide<(int)64>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, __nv_bfloat16 *, float *, unsigned int *, const float *, int, int, int, float)"
+
+WARNING: Device-side CUDA Event completion trace is currently enabled.
+         This may increase runtime overhead and the likelihood of false
+         dependencies across CUDA Streams. If you wish to avoid this, please
+         disable the feature with --cuda-event-trace=false.
+case 57 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} 768 16384
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-82d7.qdstrm'
+[1/1] [0%                          ] nsys_r57_L768_S16384.nsys-repProcessing events...
+[1/1] [0%                          ] nsys_r57_L768_S16384.nsys-rep[1/1] [5%                          ] nsys_r57_L768_S16384.nsys-rep[1/1] [===========50%              ] nsys_r57_L768_S16384.nsys-rep[1/1] [=======================96%  ] nsys_r57_L768_S16384.nsys-rep[1/1] [========================97% ] nsys_r57_L768_S16384.nsys-rep[1/1] [========================98% ] nsys_r57_L768_S16384.nsys-rep[1/1] [========================99% ] nsys_r57_L768_S16384.nsys-rep[1/1] [========================100%] nsys_r57_L768_S16384.nsys-rep[1/1] [========================100%] nsys_r57_L768_S16384.nsys-rep[1/1] [========================100%] nsys_r57_L768_S16384.nsys-rep
+done
+Generated:
+	/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r57_L768_S16384.nsys-rep
+Generating SQLite file /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r57_L768_S16384.sqlite from /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r57_L768_S16384.nsys-rep
+Processing [/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r57_L768_S16384.sqlite] with [/opt/nvidia/nsight-systems/2025.1.3/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+74.2,90844985,3,30281661.7,30329107.0,30086162,30429716,176622.9,"opm_fused::opm_fused_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const unsigned int *, int, const float *, const __nv_bfloat16 *, __nv_bfloat16 *, int, int, int, float, float)"
+25.6,31283287,3,10427762.3,9471108.0,9471076,12341103,1657001.6,"<unnamed>::opm_prologue_wgmma_native(const __nv_bfloat16 *, const bool *, const float *, const float *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, float *, int, int, float)"
+0.2,268864,3,89621.3,88160.0,88128,92576,2558.9,"<unnamed>::opm_mask_bits_native(const bool *, unsigned int *, int, int)"
+
+WARNING: Device-side CUDA Event completion trace is currently enabled.
+         This may increase runtime overhead and the likelihood of false
+         dependencies across CUDA Streams. If you wish to avoid this, please
+         disable the feature with --cuda-event-trace=false.
+case 55 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} 768 2048
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-ed31.qdstrm'
+[1/1] [0%                          ] nsys_r55_L768_S2048.nsys-repProcessing events...
+[1/1] [0%                          ] nsys_r55_L768_S2048.nsys-rep[1/1] [===========51%              ] nsys_r55_L768_S2048.nsys-rep[1/1] [========================97% ] nsys_r55_L768_S2048.nsys-rep[1/1] [========================98% ] nsys_r55_L768_S2048.nsys-rep[1/1] [========================99% ] nsys_r55_L768_S2048.nsys-rep[1/1] [========================100%] nsys_r55_L768_S2048.nsys-rep[1/1] [========================100%] nsys_r55_L768_S2048.nsys-rep[1/1] [========================100%] nsys_r55_L768_S2048.nsys-rep
+done
+Generated:
+	/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r55_L768_S2048.nsys-rep
+Generating SQLite file /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r55_L768_S2048.sqlite from /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r55_L768_S2048.nsys-rep
+Processing [/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/nsys_r55_L768_S2048.sqlite] with [/opt/nvidia/nsight-systems/2025.1.3/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+95.4,10466753,3,3488917.7,3488555.0,3487627,3490571,1505.1,"opm_fused::opm_fused_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const unsigned int *, int, const float *, const __nv_bfloat16 *, __nv_bfloat16 *, int, int, int, float, float)"
+4.6,509313,3,169771.0,169057.0,168896,171360,1378.5,"void <unnamed>::opm_prologue_tma_wide<(int)64>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, __nv_bfloat16 *, float *, unsigned int *, const float *, int, int, int, float)"
+

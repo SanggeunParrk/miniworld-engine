@@ -1,0 +1,14 @@
+[bench] {'gpu': 'NVIDIA H100 80GB HBM3', 'torch': '2.13.0+cu129', 'cuda': '12.9', 'host': 'node01', 'tf32_matmul': False, 'tf32_cudnn': True, 'warmup': 5, 'iterations': 30, 'flush_l2': True, 'timing': 'graph', 'speed_version': '4', 'config_version': '1'}
+OuterProductMean row55 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 29.2478 ms p10 28.9326 p90 29.9583 peak 4.79 GB err nan
+OuterProductMean row55 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 15.5586 ms p10 15.4720 p90 16.1111 peak 1.94 GB err 0.00195
+OuterProductMean row55 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 14.5630 ms p10 14.2887 p90 15.0036 peak 3.11 GB err 0.00195
+OuterProductMean row55 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 59.6288 ms p10 56.6212 p90 62.4737 peak 7.92 GB err nan
+OuterProductMean row55 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 34.0607 ms p10 32.5784 p90 38.2261 peak 3.46 GB err 0.00195
+OuterProductMean row55 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 29.6682 ms p10 29.2263 p90 30.8488 peak 4.64 GB err 0.00195
+OuterProductMean row57 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 30.7872 ms p10 30.6513 p90 31.5119 peak 4.96 GB err nan
+OuterProductMean row57 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 20.0095 ms p10 19.8157 p90 20.7981 peak 1.94 GB err 0.00391
+OuterProductMean row57 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 15.0598 ms p10 14.7310 p90 15.3582 peak 3.11 GB err 0.00391
+OuterProductMean row57 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 60.2029 ms p10 59.5879 p90 61.9301 peak 7.92 GB err nan
+OuterProductMean row57 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 42.7377 ms p10 40.8313 p90 44.4625 peak 3.46 GB err 0.00391
+OuterProductMean row57 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 29.7968 ms p10 29.4104 p90 31.0105 peak 4.64 GB err 0.00391
+[bench] DONE

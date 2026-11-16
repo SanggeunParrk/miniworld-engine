@@ -1,0 +1,68 @@
+case 55 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} 768 8192
+==WARNING== Note: Running with unmodified GPU clocks. If not controlled otherwise, profiling results may be inconsistent.
+==PROF== Connected to process 815471 (/home/psk6950/miniworld-engine/.pixi/envs/default/bin/python3.12)
+done
+==PROF== Disconnected from process 815471
+==PROF== Report: /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/ncu_r55_L768_S8192.ncu-rep
+Traceback (most recent call last):
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap>", line 1176, in exec_module
+  File "<frozen site>", line 635, in <module>
+  File "<frozen site>", line 621, in main
+  File "<frozen site>", line 364, in addusersitepackages
+  File "<frozen site>", line 247, in addsitedir
+  File "<frozen site>", line 190, in addpackage
+LookupError: unknown encoding: utf-8-sig
+case 55 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} 768 16384
+==WARNING== Note: Running with unmodified GPU clocks. If not controlled otherwise, profiling results may be inconsistent.
+==PROF== Connected to process 815624 (/home/psk6950/miniworld-engine/.pixi/envs/default/bin/python3.12)
+done
+==PROF== Disconnected from process 815624
+==PROF== Report: /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/ncu_r55_L768_S16384.ncu-rep
+Traceback (most recent call last):
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap>", line 1176, in exec_module
+  File "<frozen site>", line 635, in <module>
+  File "<frozen site>", line 621, in main
+  File "<frozen site>", line 364, in addusersitepackages
+  File "<frozen site>", line 247, in addsitedir
+  File "<frozen site>", line 190, in addpackage
+LookupError: unknown encoding: utf-8-sig
+case 57 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} 768 16384
+==WARNING== Note: Running with unmodified GPU clocks. If not controlled otherwise, profiling results may be inconsistent.
+==PROF== Connected to process 815773 (/home/psk6950/miniworld-engine/.pixi/envs/default/bin/python3.12)
+done
+==PROF== Disconnected from process 815773
+==PROF== Report: /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/ncu_r57_L768_S16384.ncu-rep
+Traceback (most recent call last):
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap>", line 1176, in exec_module
+  File "<frozen site>", line 635, in <module>
+  File "<frozen site>", line 621, in main
+  File "<frozen site>", line 364, in addusersitepackages
+  File "<frozen site>", line 247, in addsitedir
+  File "<frozen site>", line 190, in addpackage
+LookupError: unknown encoding: utf-8-sig
+case 55 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} 256 16384
+==WARNING== Note: Running with unmodified GPU clocks. If not controlled otherwise, profiling results may be inconsistent.
+==PROF== Connected to process 815894 (/home/psk6950/miniworld-engine/.pixi/envs/default/bin/python3.12)
+done
+==PROF== Disconnected from process 815894
+==PROF== Report: /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/logs/ncu_r55_L256_S16384.ncu-rep
+Traceback (most recent call last):
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap>", line 1176, in exec_module
+  File "<frozen site>", line 635, in <module>
+  File "<frozen site>", line 621, in main
+  File "<frozen site>", line 364, in addusersitepackages
+  File "<frozen site>", line 247, in addsitedir
+  File "<frozen site>", line 190, in addpackage
+LookupError: unknown encoding: utf-8-sig
