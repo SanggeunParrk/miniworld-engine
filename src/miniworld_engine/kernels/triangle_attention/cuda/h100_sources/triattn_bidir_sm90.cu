@@ -348,8 +348,9 @@ torch::Tensor cgemm(torch::Tensor w, torch::Tensor y, torch::Tensor out) {
 // The product is rounded to bf16 and then x is added (the double rounding of torch.addmm's nvjet kernel, so the epilogue is the same); the
 // fp32 accumulation runs over the K = 2 Dh channels of one thread's k16 steps in order; the outputs equal the unfused tail's bits (tests/gpu/test_bidir_triattn_h100.py).
 // With U given (training) the kernel also writes u = bf16(sigmoid(G) o O) [K, L L] (what gate_u wrote), saved for the backward.
-// One CTA = 128 tokens x all 128 pair channels, 8 warps x 16 tokens; Wo resident in smem, the planes streamed 32 channels at a time
-// through a 2-stage cp.async ring. Needs d_pair == 128, K in {128, 256}, L L % 128 == 0.
+// One CTA = 128 tokens x all 128 pair channels, 8 warps x 16 tokens; Wo resident in smem, the planes streamed 16 channels at a time
+// through a 4-deep cp.async ring: every thread forms u for the unit it loaded itself (no barrier for the data to arrive), one barrier per chunk
+// (before the MMAs read u), the slot refilled is the one consumed one chunk ago. Needs d_pair == 128, K in {128, 256}, L L % 128 == 0.
 namespace tl {
 constexpr int TM = 128, KC = 32, SP = 136;
 __device__ __forceinline__ void cp16(void* s, const void* g) {
@@ -373,13 +374,13 @@ __device__ __forceinline__ void mma16816(float (&c)[4], const unsigned (&a)[4], 
 
 template <int K, bool SU>
 __global__ void __launch_bounds__(256, 2) tail_k(const bf16* __restrict__ G, const bf16* __restrict__ O, const bf16* __restrict__ Wo, const bf16* __restrict__ X,
-                                                 bf16* __restrict__ out, bf16* __restrict__ U, long LL, long ldg, long ldo) {
+                                                  bf16* __restrict__ out, bf16* __restrict__ U, long LL, long ldg, long ldo) {
   using namespace tl;
-  constexpr int WS = K + 8, NK = K / KC, STG = 2 * KC * SP;
+  constexpr int WS = K + 8, NK = K / 16, NS = 4, STG = 2 * 16 * SP;
   extern __shared__ __align__(16) unsigned char smraw[];
   bf16* sWo = reinterpret_cast<bf16*>(smraw);  // [128][WS]
-  bf16* sT = sWo + 128 * WS;                   // 2 stages x { G [KC][SP], O [KC][SP] }; reused as the epilogue tile [TM][SP]
-  const int tid = threadIdx.x, lane = tid & 31, w = tid >> 5;
+  bf16* sT = sWo + 128 * WS;                   // NS stages x { G [16][SP], O [16][SP] }; reused as the epilogue tile [TM][SP]
+  const int tid = threadIdx.x, lane = tid & 31, w = tid >> 5, ur = tid >> 4, uc = tid & 15;
   for (int i = tid; i < 128 * (K / 8); i += 256) {
     const int n = i / (K / 8), c = i % (K / 8);
     cp16(sWo + n * WS + c * 8, Wo + (long)n * K + c * 8);
@@ -391,54 +392,49 @@ __global__ void __launch_bounds__(256, 2) tail_k(const bf16* __restrict__ G, con
     float acc[16][4];
 #pragma unroll
     for (int j = 0; j < 16; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.f;
-    auto issue = [&](int kc, int s) {
-      bf16* g = sT + s * STG;
-      bf16* o = g + KC * SP;
-      for (int i = tid; i < KC * 16; i += 256) {
-        const int r = i >> 4, ch = i & 15;
-        cp16(g + r * SP + ch * 8, G + (long)(kc * KC + r) * ldg + tok0 + ch * 8);
-        cp16(o + r * SP + ch * 8, O + (long)(kc * KC + r) * ldo + tok0 + ch * 8);
+    auto issue = [&](int kc) {
+      if (kc < NK) {
+        bf16* g = sT + (kc % NS) * STG;
+        cp16(g + ur * SP + uc * 8, G + (long)(kc * 16 + ur) * ldg + tok0 + uc * 8);
+        cp16(g + 16 * SP + ur * SP + uc * 8, O + (long)(kc * 16 + ur) * ldo + tok0 + uc * 8);
       }
       cp_commit();
     };
-    issue(0, 0);
+    issue(0);
+    issue(1);
+    issue(2);
     for (int kc = 0; kc < NK; ++kc) {
-      if (kc + 1 < NK) issue(kc + 1, (kc + 1) & 1);
-      else cp_commit();
-      cp_wait<1>();
-      __syncthreads();
-      bf16* g = sT + (kc & 1) * STG;
-      bf16* o = g + KC * SP;
-      for (int i = tid; i < KC * 16; i += 256) {  // u = bf16(sigmoid(g) o), in place of o
-        const int r = i >> 4, ch = i & 15;
+      cp_wait<NS - 2>();
+      bf16* g = sT + (kc % NS) * STG;
+      bf16* o = g + 16 * SP;
+      {  // u = bf16(sigmoid(g) o), in place of o, for this thread's own unit
         float gv[8], ov[8], rv[8];
-        unpack8(*reinterpret_cast<const uint4*>(g + r * SP + ch * 8), gv);
-        unpack8(*reinterpret_cast<const uint4*>(o + r * SP + ch * 8), ov);
+        unpack8(*reinterpret_cast<const uint4*>(g + ur * SP + uc * 8), gv);
+        unpack8(*reinterpret_cast<const uint4*>(o + ur * SP + uc * 8), ov);
 #pragma unroll
         for (int e = 0; e < 8; ++e) rv[e] = (1.f / (1.f + __expf(-gv[e]))) * ov[e];
         const uint4 pu = pack8(rv);
-        *reinterpret_cast<uint4*>(o + r * SP + ch * 8) = pu;
-        if (SU) *reinterpret_cast<uint4*>(U + (long)(kc * KC + r) * LL + tok0 + ch * 8) = pu;  // training: u is saved for the backward
+        *reinterpret_cast<uint4*>(o + ur * SP + uc * 8) = pu;
+        if (SU) *reinterpret_cast<uint4*>(U + (long)(kc * 16 + ur) * LL + tok0 + uc * 8) = pu;
       }
       __syncthreads();
-#pragma unroll
-      for (int ks = 0; ks < KC / 16; ++ks) {
-        unsigned a[4];
-        {
-          const int mi = lane >> 3;
-          ldsm4t(a, o + (ks * 16 + (mi >> 1) * 8 + (lane & 7)) * SP + w * 16 + (mi & 1) * 8);
-        }
-#pragma unroll
-        for (int j = 0; j < 8; ++j) {
-          unsigned b[4];
-          const int mi = lane >> 3;
-          ldsm4(b, sWo + (j * 16 + (mi >> 1) * 8 + (lane & 7)) * WS + kc * KC + ks * 16 + (mi & 1) * 8);
-          mma16816(acc[2 * j], a, b[0], b[1]);
-          mma16816(acc[2 * j + 1], a, b[2], b[3]);
-        }
+      issue(kc + NS - 1);
+      unsigned a[4];
+      {
+        const int mi = lane >> 3;
+        ldsm4t(a, o + ((mi >> 1) * 8 + (lane & 7)) * SP + w * 16 + (mi & 1) * 8);
       }
-      __syncthreads();
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        unsigned b[4];
+        const int mi = lane >> 3;
+        ldsm4(b, sWo + (j * 16 + (mi >> 1) * 8 + (lane & 7)) * WS + kc * 16 + (mi & 1) * 8);
+        mma16816(acc[2 * j], a, b[0], b[1]);
+        mma16816(acc[2 * j + 1], a, b[2], b[3]);
+      }
     }
+    cp_wait<0>();
+    __syncthreads();
     // epilogue: bf16(acc) into smem, then x added in fp32 and rounded again (coalesced 16-byte rows)
 #pragma unroll
     for (int j = 0; j < 16; ++j) {
@@ -489,7 +485,7 @@ torch::Tensor tail(torch::Tensor g, torch::Tensor o, torch::Tensor wo, torch::Te
                                       reinterpret_cast<const bf16*>(wo.data_ptr()), reinterpret_cast<const bf16*>(x.data_ptr()),
                                       reinterpret_cast<bf16*>(out.data_ptr()), up, LL, g.stride(0), o.stride(0));
   };
-  const size_t sm256 = (size_t)(128 * 264 + 2 * 2 * 32 * 136) * 2, sm128 = (size_t)(128 * 136 + 2 * 2 * 32 * 136) * 2;
+  const size_t sm256 = (size_t)(128 * 264 + 4 * 2 * 16 * 136) * 2, sm128 = (size_t)(128 * 136 + 4 * 2 * 16 * 136) * 2;
   if (K == 256) {
     if (up) go(tail_k<256, true>, sm256);
     else go(tail_k<256, false>, sm256);
