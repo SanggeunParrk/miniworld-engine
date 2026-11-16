@@ -45,3 +45,30 @@ def test_b1_vector_epilogue_and_interleaved_ln_are_bit_identical(
     scalar = _run(m, x, mask, dy)
     for a, b in zip(served, scalar, strict=True):
         assert torch.equal(a, b)
+
+
+@pytest.mark.parametrize("master", [True, False])
+@pytest.mark.parametrize("batch", [1, 2])
+@pytest.mark.parametrize("outgoing", [True, False])
+def test_b1_packed_gate_epilogue_is_bit_identical(outgoing: bool, batch: int, master: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``B1_PK`` (default on): one cvt.rn.bf16x2 per pair of roundings and one bf16x2 multiply for dy * dropout scale, equal to the per-element path."""
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("needs an H100 (sm_90)")
+    length = 256
+    torch.manual_seed(0)
+    m = TriangleMultiplication(128, outgoing=outgoing, master_weights=master, backend="cuda").cuda().train()
+    with torch.no_grad():
+        for p in m.parameters():
+            p.normal_(0, 128**-0.5) if p.dim() > 1 else p.normal_(1.0, 0.1)
+    g = torch.Generator(device="cuda").manual_seed(1)
+    x = torch.randn(batch, length, length, 128, device="cuda", generator=g).bfloat16().requires_grad_()
+    mask = torch.rand(batch, length, device="cuda", generator=g) > 0.08
+    dy = torch.randn(batch, length, length, 128, device="cuda", generator=g).bfloat16()
+    torch.manual_seed(3)
+    served = _run(m, x, mask, dy)
+    original_build = SO.build
+    monkeypatch.setattr(SO, "build", lambda debug=False, master=False: original_build(debug, master, ("-DB1_PK=0",)))
+    torch.manual_seed(3)
+    scalar = _run(m, x, mask, dy)
+    for a, b in zip(served, scalar, strict=True):
+        assert torch.equal(a, b)

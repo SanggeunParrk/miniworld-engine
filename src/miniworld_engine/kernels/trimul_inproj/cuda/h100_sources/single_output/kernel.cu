@@ -12,6 +12,9 @@ constexpr int XN=0,TRI=16384,NORM=32768,DY=49152,DP=65536,DG=81920,DN=98304,WP=1
 #ifndef B1_VEC
 #define B1_VEC 1
 #endif
+#ifndef B1_PK
+#define B1_PK 1
+#endif
 constexpr int XN2=181248,TRI2=XN2+16384,DY2=TRI2+16384;
 constexpr int SMEM=DY2+16384;
 #if MASTER_FP32
@@ -114,10 +117,20 @@ template<bool FWD> TMN_DEVI void body(const Params& p,uint8_t* sm,uint64_t* bar)
    // the same per-element arithmetic, two adjacent columns per shared access and per dropout-scale load
    #pragma unroll
    for(int j=0;j<32;j+=2){int r=rr(j),c=wi*64+cc(j);
+#if B1_PK
+    // packed: one cvt.rn.bf16x2 per pair of roundings, one bf16x2 multiply for dy * dropout scale (the product of two bf16 is exact in fp32: one rounding, as before)
+    const __nv_bfloat162 gb=__floats2bfloat162_rn(gate[j],gate[j+1]),vb=__floats2bfloat162_rn(proj[j],proj[j+1]);
+    float g0=math::sigmoid(__bfloat162float(gb.x)),g1=math::sigmoid(__bfloat162float(gb.y));
+    float v0=__bfloat162float(vb.x),v1=__bfloat162float(vb.y);
+    __nv_bfloat162 dd=*reinterpret_cast<const __nv_bfloat162*>(ds_rows+r*128+c);const uint32_t yy=val2(sDY,r,c);
+    const __nv_bfloat162 dyp=__hmul2(*reinterpret_cast<const __nv_bfloat162*>(&yy),dd);
+    float dy0=__bfloat162float(dyp.x),dy1=__bfloat162float(dyp.y);
+#else
     float g0=math::sigmoid(math::round_bf16(gate[j])),v0=math::round_bf16(proj[j]),g1=math::sigmoid(math::round_bf16(gate[j+1])),v1=math::round_bf16(proj[j+1]);
     const __nv_bfloat162 dd=*reinterpret_cast<const __nv_bfloat162*>(ds_rows+r*128+c);const uint32_t yy=val2(sDY,r,c);
     float dy0=math::round_bf16(__bfloat162float(__ushort_as_bfloat16(yy&0xffffu))*__bfloat162float(dd.x));
     float dy1=math::round_bf16(__bfloat162float(__ushort_as_bfloat16(yy>>16))*__bfloat162float(dd.y));
+#endif
     set2(sm+DP,r,c,dy0*g0,dy1*g1);set2(sm+DG,r,c,((dy0*v0)*g0)*(1-g0),((dy1*v1)*g1)*(1-g1));
    }
   } else
