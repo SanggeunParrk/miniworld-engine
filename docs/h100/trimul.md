@@ -143,6 +143,24 @@ Single D512 (2.5.10): the output-LN backward runs `output_ln_uni_pf.cu` (`_LN_PF
 the next row tile's TMA loads in flight in a second shared-memory set; bit-identical y, dx and all gradients
 (`tests/gpu/test_trimul_uni_wide_ln_prefetch.py`). Module forward + backward vs 2.5.9 (eager, interleaved, B1): L384 0.99 / 1.00x, L768 0.98x.
 
+#### CUDA-graph device time of the bidirectional route (2026-11-16, branch `bidir-k3gap`)
+
+One floor method: per stage max(byte floor at 3.05 TB/s over every HBM read and write of the stage, tensor floor at 748 TF). Per pair token (M = L^2), hidden channels h (bidirectional D128: h = 256, hidden-twice single direction: 256, single direction hidden 128: 128): K1 reads 2 D B and writes 4 h B (planes), flops 8 M D h; the contractions read 4 h B and write 2 h B per token (two bmm of h / 2 channels) at 2 L M h flops; K3 reads 2 h B (tri) + 2 D B (z) and writes 2 D B, flops 2 M h D + 2 M D D. Single-shot graph replay, D128, h = 256 (same bytes in all three rows):
+
+| L | route | K1 / floor | contractions | K3 | module / floor-sum |
+|---|---|---|---|---|---|
+| 1024 | bidirectional packaged (default) | 0.556 / 0.440 = 79 % | 0.779 / 0.735 = 94 % (two 256x128 launches) | 0.409 / 0.352 = 86 % | 1.756 -> 87 % |
+| 1024 | single direction, hidden 256, packaged K1 / K3 | 0.556 = 79 % | 0.743 = 99 % (one 128x128 launch) | 0.411 = 86 % | 1.727 -> 88 % |
+| 1024 | port K1 + port K3 at h = 256 | 0.588 = 75 % | (single) | 0.375 = 94 % | |
+| 2048 | bidirectional packaged | 2.350 = 75 % | 5.755 = 102 % | 1.763 = 80 % | 87 % |
+| 2048 | port K1 + port K3 at h = 256 | 2.448 = 72 % | | 1.530 = 92 % | |
+
+The gap to the single-direction 88 % K3 is real and is the K3 itself: the packaged `tmn_k3_z128_h256` (LN_out and LN_in as register passes, 32-channel output blocks) runs 80-86 % of its floor at the bidirectional byte volume, the B200-style port K3 at the same volume (LayerNorms folded into the weights, LN_in statistics from K1) 92-94 %. K1 is the same ~75-79 % in both routes (packaged and port). Kernel-to-kernel gaps are zero or negative (PDL overlap -0.1 .. -0.5 us per boundary) at every length measured: no launch-tail gap exists to remove. Two streams for the two contractions inside the graph: 0.98-1.005 of serial (control +-0.5 %), 1.5-2 % only at D64 / D128 L <= 512 and lost again by the K3 PDL overlap: not shipped.
+
+Shipped, bitwise equal to ec11768fc (212 module cases D64..D512, L17..2048, masks, B = 1 / 2, real activation dumps): the bidirectional contractions go through `_h100_bmm.contract` and the measured cuBLASLt table `_h100_bmm_lt_bidir.LT_BIDIR` (algorithm 66, no split-K, output equal to the default pick on every entry; 178 entries, lengths multiples of 16 from 144 to 2048 where the in-graph module replay showed <= 0.995 of the default in two processes). Module graph replay, D128 / D64, mean over L = 128..2048 step 32: 0.983 / 0.987 of the default (control 1.002), best lengths 0.88-0.95 (D128 L832 / 1408 / 1600), and the single-direction D64 / D128 `contract` calls at the same plane counts take the same entries.
+
+Candidate, default off (`MINIWORLD_TRIMUL_BIDIR_PORT_K3=1`, `h100_inference.PORT_K3`, D128, L >= 160): the packaged K1 in its save-statistics l2 form (planes unchanged), the contractions, the port K3 (`h100_b200style.rowpad_k3`). Not bit-identical (bf16 ulps). Error against an fp64 reference (same bf16 weights): rms 3.82e-3 against 4.12e-3 of the packaged K3 (-7.4 %) on random inputs at every length / mask / B = 2 case measured (36 cases), max error lower in 32 of 36 (L160 tail, L384 none, L300 tail, B1 L1024... see the check script's log), real activation inputs equal (output rounding bound: 6.83e-2 / 6.84e-2, 7.14e-2 / 7.14e-2, 1.289e-1 / 1.289e-1). Module graph replay on top of the table: K3 stage -8 % (L1024) .. -15 % (L2048), module 0.963 of the default (mean over L = 128..2048 step 32; 0.977 / 0.985 / 0.976 / 0.977 at L256 / 512 / 1024 / 2048 against the table-less route in a separate run). D64 measured no gain (its K3 is already the port's) and is not served; L < 160 loses the fold launch (2 us).
+
 ### Batching, lengths, chunking
 
 Every width takes B samples per launch (`MAX_BATCH_BY_WIDTH` = 48 at D64-D512): tokens b-major, K1 stacks the samples along its

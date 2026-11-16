@@ -13,14 +13,15 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
 
 
-#: Candidate (default off, MINIWORLD_TRIMUL_BIDIR_PORT_K3=1): the bidirectional D64 / D128 call runs the packaged K1 in its save-statistics l2 form (planes unchanged),
+#: Candidate (default off, MINIWORLD_TRIMUL_BIDIR_PORT_K3=1): the bidirectional D128 call (L >= 160) runs the packaged K1 in its save-statistics l2 form (planes unchanged),
 #: the contractions, and the B200-style port's any-L K3 (LayerNorms folded into the weights, LN_in statistics from K1) instead of the packaged K3.
 #: The output is NOT bit-identical to the packaged K3 (different rounding of the folded affine); see docs/h100/trimul.md for its error against an fp64 reference.
 PORT_K3 = os.environ.get("MINIWORLD_TRIMUL_BIDIR_PORT_K3", "0") == "1"
 #: below this length the fold launch (2 us) eats the K3 gain (D128 L128: 1.007 of the packaged route, L160: 0.977)
 PORT_K3_MIN_LENGTH = 160
 #: K1 tiles (BI, BJ, NSLOT, SKCH) with a save-statistics l2 instantiation in the (128, 256) unit (tmn_sm90_unit.cuh)
-_STATS_TILES = {128: {(3, 64, 8, 2), (6, 32, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)}}  # D64 measured no gain (K3 of the port = the packaged K3 there, the fold launch costs 4 % at L128-192)
+# (D64: no gain, the port K3 equals the packaged K3 there and the fold launch costs 4 % at L128-192)
+_STATS_TILES = {128: {(3, 64, 8, 2), (6, 32, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)}}
 
 
 #: Weight sets whose K1 / K3 launch plans and tensor maps are kept (one per TriMul layer of a model; least recently used dropped).
