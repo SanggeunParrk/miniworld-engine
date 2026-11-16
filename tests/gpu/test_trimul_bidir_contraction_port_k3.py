@@ -2,7 +2,7 @@
 
 * the contractions run through ``_h100_bmm.contract`` and the measured cuBLASLt table (``_h100_bmm_lt_bidir.LT_BIDIR``): the module output is BIT-IDENTICAL
   to the same call with the table removed (the default heuristic pick), over listed and unlisted lengths, masks, B = 1 / 2;
-* ``h100_inference.PORT_K3`` (default off, MINIWORLD_TRIMUL_BIDIR_PORT_K3): off is byte-identical to the packaged route; on (D128, L >= 160) the output
+* ``h100_inference.PORT_K3`` (default on since 2.5.12, MINIWORLD_TRIMUL_BIDIR_PORT_K3=0 off): off is byte-identical to the packaged route; on (D128, L >= 160) the output
   differs in bf16 ulps but its error against an fp64 reference is not above the packaged K3's (random inputs, ragged L, masks, B = 2).
 """
 
@@ -48,6 +48,10 @@ def test_table_is_bit_identical_to_default_pick(d: int, batch: int, length: int,
         monkeypatch.setattr(HI, "LT_BIDIR", {})
         plain = m(x, mask)
     assert torch.equal(tabled, plain)
+
+
+def test_port_k3_is_the_default() -> None:
+    assert HI.PORT_K3 is True and HI.PORT_K3_MIN_LENGTH == 160
 
 
 @pytest.mark.parametrize("length", [160, 300, 1000])

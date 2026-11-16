@@ -1805,7 +1805,7 @@ class BidirectionalTriangleMultiplication(BackendModule, MasterWeights):
     backends = ("pytorch", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 4,  # 4 (2026-11-14): D64 inference k3s (bit-identical); 3: k1w64 / k3w
-        "cuda:h100_sm90": 5,  # 5 (2026-11-15): as TriangleMultiplication 8 (K3 pipeline macros, bitwise unchanged)
+        "cuda:h100_sm90": 6,  # 6 (2026-11-16): D128 inference L >= 160 through the port K3 (h100_inference.PORT_K3; not bit-identical, within the standard)
         "cuda:5090_sm120": 2,  # the sm_80 sources built for sm_120a (2026-11-12); 2 (2026-11-13): sm_120 k1w / k3w launch choices, backward GEMM calls per shape
     }  # 2026-11-10: sm_80 k1w64 front (D64); cuda:h100_sm90 2 (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the
     # small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version;
