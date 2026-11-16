@@ -54,6 +54,8 @@ def prebuild(target, _rows):
         # projection biases
         wide = (cm, cz) != base or o.get("normalize_before_proj", "True") == "False" or o.get("projection_bias") == "True"
         training = r["mode"] == "train"
+        if not training and (cm, cz) == base:  # inference past depth 4096 (beyond the rows' depths): the product route's epilogue build
+            add(native=True, tma=False, cm=cm, cz=cz, fused=False)
         for s in r["depths"]:
             for n in r["lengths"]:
                 path = opm_train._h100_path(s, n, training=training)
@@ -80,6 +82,11 @@ def prebuild(target, _rows):
                         )
     for kw in opm.values():
         yield functools.partial(ext, **kw)
+    if any(r["mode"] == "eval" for r in family_rows("outer_product_mean")):  # the product route's pair-count GEMM (opm_train._count_table)
+        from miniworld_engine.kernels.conditioned_transition.cuda import train as _ct_train
+
+        yield _ct_train.owned_gemm_ext
+        yield opm_train._lt_ext   # the product route's cuBLASLt heuristic-index product (opm_train._LT_ALGO)
 
     base = (pwa_train.D, pwa_train.DZ, pwa_train.H, pwa_train.C)
     natives, pair, value = set(), set(), set()

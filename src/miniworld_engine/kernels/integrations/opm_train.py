@@ -29,6 +29,7 @@ bf16 on sm_90a, normalize_before_proj, no interchain mask. Fuses the optional pa
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 from typing import Any, cast
 
@@ -79,6 +80,138 @@ def _h100_path(s: int, n: int, *, training: bool, wide: bool = False) -> str:
     if s in (1024, 2048, 4096) and n in (128, 256, 384, 512, 640, 768):
         return "legacy"
     return "native"
+
+
+def _wide_prologue_deep(s: int, training: bool) -> bool:
+    """Inference beyond the measured prologue cells (S > 4096): the non-TMA native prologue streams the MSA at ~0.35 TB/s (9.5 ms at
+    S 16384, N 768; the wide TMA prologue takes ~1.4 ms), so the AF3-order cells take the wide composition the other orders already use."""
+    return not training and s > 4096
+
+
+def _product_route_deep(s: int, training: bool) -> bool:
+    """Inference past depth 4096: cuBLAS for the grouped product + the CUDA epilogue (`_product_epilogue`) instead of the fused kernel.
+    The product is power-bound there (700 W cap): cuBLAS runs at ~99 % of the tensor peak per cycle, the fused main loop at ~82-88 %, and
+    the O round trip + epilogue costs ~0.6 ms of 25 at S 16384 / L 768. Kernel A/B (benchmarks/opm_win, L 256-768): the composition is
+    2-6 % faster cool and 3-11 % sustained at S 8192 / 16384; about even at S 4096 and slower at S <= 2048, where the fused kernel stays."""
+    return not training and s > 4096
+
+
+def _count_table(mask16, dmin: float, doff: float):
+    """The pair divisor table max(n_ij, dmin) + doff, n = mask^T mask from the prologue's bf16 0 / 1 mask [S, N]: one cuBLAS GEMM with
+    fp32 accumulation and fp32 output (exact integer counts below 2^24), bitwise the count kernel's table (opm_count_tiled took
+    0.14 ms at S 16384 / L 768, this 44 us)."""
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+
+    t = owned_gemm_ext().owned_mm(mask16.t(), mask16, False, True).clamp_min_(float(dmin))
+    return t.add_(float(doff)) if doff else t
+
+
+#: the O workspace of the product route per row chunk (bytes): L 768 is one chunk (1.2 GB), L 2048 runs in chunks of 512 rows
+_O_CHUNK_BYTES = 2 << 30
+
+
+_LT_CPP = r"""#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cublasLt.h>
+#include <map>
+#include <tuple>
+// O[(i,c),(j,e)] = A2 . BT^T (bf16, fp32 accumulate) with the k-th algorithm of cublasLt's heuristic list for this shape: the list is
+// queried once per (M, N, K, ld) and kept; every algorithm of it gives the same bits as torch.mm here (benchmarks/opm_win/ltbench.py).
+struct LtPlan { cublasLtMatmulDesc_t op; cublasLtMatrixLayout_t a, b, c; cublasLtMatmulAlgo_t algo; size_t ws; };
+void opm_lt_mm(torch::Tensor a2, torch::Tensor bt, torch::Tensor out, int64_t index) {
+  TORCH_CHECK(a2.scalar_type() == torch::kBFloat16 && bt.scalar_type() == torch::kBFloat16 && out.scalar_type() == torch::kBFloat16
+              && a2.stride(1) == 1 && bt.stride(1) == 1 && out.stride(1) == 1 && a2.size(1) == bt.size(1)
+              && out.size(0) == a2.size(0) && out.size(1) == bt.size(0), "opm_lt_mm: bf16 row-major A2 [M, K], BT [N, K], out [M, N]");
+  auto ck = [](cublasStatus_t s, const char* w) { TORCH_CHECK(s == CUBLAS_STATUS_SUCCESS, "opm_lt_mm ", w, ": status ", int(s)); };
+  const int64_t M = a2.size(0), K = a2.size(1), N = bt.size(0);
+  static std::map<std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int>, LtPlan> plans;
+  const auto key = std::make_tuple(M, N, K, a2.stride(0), bt.stride(0), out.stride(0), index, a2.get_device());
+  auto it = plans.find(key);
+  if (it == plans.end()) {
+    LtPlan p{};
+    ck(cublasLtMatmulDescCreate(&p.op, CUBLAS_COMPUTE_32F, CUDA_R_32F), "desc");
+    cublasOperation_t ta = CUBLAS_OP_T, tb = CUBLAS_OP_N;
+    ck(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof(ta)), "transa");
+    ck(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof(tb)), "transb");
+    ck(cublasLtMatrixLayoutCreate(&p.a, CUDA_R_16BF, K, N, bt.stride(0)), "layout BT");    // col-major K x N, op T
+    ck(cublasLtMatrixLayoutCreate(&p.b, CUDA_R_16BF, K, M, a2.stride(0)), "layout A2");    // col-major K x M
+    ck(cublasLtMatrixLayoutCreate(&p.c, CUDA_R_16BF, N, M, out.stride(0)), "layout O");    // O^T col-major == O row-major
+    cublasLtMatmulPreference_t pref;
+    ck(cublasLtMatmulPreferenceCreate(&pref), "pref");
+    size_t ws = at::cuda::getCUDABlasLtWorkspaceSize();
+    ck(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws, sizeof(ws)), "pref ws");
+    cublasLtMatmulHeuristicResult_t res[16];
+    int found = 0;
+    ck(cublasLtMatmulAlgoGetHeuristic(at::cuda::getCurrentCUDABlasLtHandle(), p.op, p.a, p.b, p.c, p.c, pref, 16, res, &found), "heuristic");
+    cublasLtMatmulPreferenceDestroy(pref);
+    TORCH_CHECK(found > 0, "opm_lt_mm: no algorithm");
+    const int k = index < found ? (int)index : 0;
+    p.algo = res[k].algo;
+    p.ws = res[k].workspaceSize;
+    it = plans.emplace(key, p).first;
+  }
+  auto& p = it->second;
+  auto ws = torch::empty({(int64_t)std::max<size_t>(p.ws, 1)}, a2.options().dtype(torch::kByte));
+  float alpha = 1.f, beta = 0.f;
+  ck(cublasLtMatmul(at::cuda::getCurrentCUDABlasLtHandle(), p.op, &alpha, bt.data_ptr(), p.a, a2.data_ptr(), p.b, &beta, out.data_ptr(), p.c,
+                    out.data_ptr(), p.c, &p.algo, ws.data_ptr(), p.ws, at::cuda::getCurrentCUDAStream()), "matmul");
+}
+"""
+
+#: the product route's cuBLASLt heuristic index by padded N (else torch.mm, whose choice is index 0). In-graph A/B, fair protocol
+#: (benchmarks/opm_win/ltab.py, row 55): N 256 index 1 is 1.9-2.0 % faster cool and 1-4 % sustained at S 8192 / 16384, N 384 0.7 % cool;
+#: at N 512 / 768 index 0 is the fastest (ltbench.py). Every index gives the same bits.
+_LT_ALGO: dict[int, int] = {256: 1, 384: 1}
+
+
+@functools.lru_cache(maxsize=1)
+def _lt_ext():
+    from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, load_inline_extension
+
+    cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN   # the toolkit's headers are needed only to build
+
+    return load_inline_extension(
+        name="miniworld_opm_lt_mm",
+        cpp_sources=_LT_CPP,
+        functions=["opm_lt_mm"],
+        with_cuda=True,
+        extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
+        extra_cflags=["-O3"],
+        extra_ldflags=["-lcublasLt"],
+        verbose=False,
+    )
+
+
+def _product(a2, bt, n, out=None):
+    """O = A2 . BT^T: torch.mm, or the cuBLASLt heuristic algorithm `_LT_ALGO[n]` (bitwise the same product)."""
+    if n not in _LT_ALGO:
+        return torch.mm(a2, bt.t()) if out is None else torch.mm(a2, bt.t(), out=out)
+    if out is None:
+        out = torch.empty((a2.shape[0], bt.shape[0]), device=a2.device, dtype=torch.bfloat16)
+    _lt_ext().opm_lt_mm(a2, bt, out, _LT_ALGO[n])
+    return out
+
+
+def _product_epilogue(ext, a2, bt, norm, wo16, ob, n, residual, after, dkw):
+    """Inference: z = epilogue(A2 . BT^T) per chunk of i rows (cuBLAS NT product into a bounded O workspace). ``norm``: the fp32 [N, N]
+    divisor table of the count kernel (its chunk's rows), or the int32 mask bit rows (the epilogue counts at the chunk's offset)."""
+    rows = max(16, min(n, _O_CHUNK_BYTES // (n * CH * CH * 2) // 16 * 16))
+    if rows >= n:
+        return ext.opm_epilogue(_product(a2, bt, n), norm, wo16, ob, n, n, residual, int(after), **dkw)
+    table = norm.dtype == torch.float32
+    z = torch.empty((1, n, n, wo16.shape[0]), device=a2.device, dtype=torch.bfloat16)
+    o = torch.empty((rows * CH, n * CH), device=a2.device, dtype=torch.bfloat16)
+    for r0 in range(0, n, rows):
+        nr = min(rows, n - r0)
+        oc = o[: nr * CH]
+        _product(a2[r0 * CH : (r0 + nr) * CH], bt, n, out=oc)
+        res = residual[:, r0 : r0 + nr] if residual is not None else None
+        if table:
+            ext.opm_epilogue(oc, norm[r0 : r0 + nr], wo16, ob, nr, n, res, int(after), out=z[:, r0 : r0 + nr], **dkw)
+        else:
+            ext.opm_epilogue(oc, norm, wo16, ob, nr, n, res, int(after), out=z[:, r0 : r0 + nr], i0=r0, **dkw)
+    return z
 
 
 def refusal(
@@ -463,6 +596,8 @@ def _forward_wide(ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residua
     cm, cz = m.shape[2], wo.shape[0]
     n = m.shape[1]
     fused = _fused_enabled(m.shape[0], n, training=save_stats, cm=cm, cz=cz) and torch.cuda.get_device_capability(msa.device) == (9, 0)
+    product_route = fused and _product_route_deep(m.shape[0], save_stats) and not save_o
+    fused = fused and not product_route
     ext = _ext(msa.device, native=True, tma=False, cm=cm, cz=cz, fused=fused)
     mk = mask[0].contiguous()
     if mk.dtype != torch.bool:
@@ -487,7 +622,9 @@ def _forward_wide(ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residua
         gam, bet, wa16, wb16, wo16, ob, pb = _capture.param_forms(
             "opm_wide_infer", [t for t in (lnw, lnb, wa, wb, wo, bo, pbias) if t is not None], forms
         )
-    # inference: the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table), no separate count kernel
+    # inference: the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table), no separate count kernel;
+    # the product route (depth > 4096) takes an fp32 [N, N] pair-count table (`_count_table`): the per-CTA popcount of two S / 8-byte bit
+    # rows cost the epilogue 0.17 ms at S 8192 and ~0.4 ms at S 16384 (L 768); the table is a 44 us GEMM there
     dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": float(dmin), "doff": float(doff)}  # the pair divisor max(count, dmin) + doff
     a2, bt, stats, mask16, norm = ext.opm_prologue_wide(
         m, mk, gam, bet, wa16, wb16, float(eps), bool(save_stats), pb, bool(save_stats), **dkw
@@ -495,6 +632,9 @@ def _forward_wide(ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residua
     ctx.has_bias = pbias is not None
     if fused:  # inference: the products stay in shared memory (norm is the mask bit table here)
         z = ext.opm_fused_infer(a2, bt, norm, _fused_weight(wo), ob, residual, int(after), **dkw)
+        o = None
+    elif product_route:  # inference past depth 4096: cuBLAS product per row chunk + the epilogue on the pair-count table
+        z = _product_epilogue(ext, a2, bt, _count_table(mask16, dmin, doff), wo16, ob, n, residual, after, dkw)
         o = None
     else:
         o = torch.mm(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
@@ -607,7 +747,7 @@ class _OpmMath(torch.autograd.Function):
     ):
         cm, cz = msa.shape[3], wo.shape[0]
         path = _h100_path(msa.shape[1], msa.shape[2], training=save_stats)
-        if (cm, cz) != (CM, CZ) or after or pbias is not None or (path == "legacy" and _CUDA_PROLOGUE_FOR_LEGACY):
+        if (cm, cz) != (CM, CZ) or after or pbias is not None or (path == "legacy" and _CUDA_PROLOGUE_FOR_LEGACY) or _wide_prologue_deep(msa.shape[1], save_stats):
             return _forward_wide(
                 ctx,
                 msa,

@@ -1,0 +1,246 @@
+[bench] {'gpu': 'NVIDIA H100 80GB HBM3', 'torch': '2.13.0+cu129', 'cuda': '12.9', 'host': 'node01', 'tf32_matmul': False, 'tf32_cudnn': True, 'warmup': 5, 'iterations': 30, 'flush_l2': True, 'timing': 'graph', 'speed_version': '4', 'config_version': '1'}
+OuterProductMean row55 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 6.2953 ms p10 6.2692 p90 6.3003 peak 1.55 GB err nan
+[miniworld-engine build] compiling miniworld_opm_epilogue_native_fused [79e6753e] (torch extension) ...
+[miniworld-engine build] built miniworld_opm_epilogue_native_fused [79e6753e] in 87.6 s; 1 built in this process
+OuterProductMean row55 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 1.7048 ms p10 1.6959 p90 1.8149 peak 0.80 GB err 0.00195
+OuterProductMean row55 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 1.6670 ms p10 1.6651 p90 1.6694 peak 0.97 GB err 0.00195
+OuterProductMean row55 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 12.3086 ms p10 12.2580 p90 12.3230 peak 2.85 GB err nan
+OuterProductMean row55 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 3.5552 ms p10 3.5238 p90 3.7732 peak 1.31 GB err 0.00195
+OuterProductMean row55 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 3.5319 ms p10 3.2368 p90 3.7051 peak 1.48 GB err 0.00195
+OuterProductMean row55 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 1.1221 ms p10 1.1033 p90 1.1588 peak 0.66 GB err nan
+OuterProductMean row55 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 0.2718 ms p10 0.2707 p90 0.2736 peak 0.36 GB err 0.00195
+OuterProductMean row55 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 0.3089 ms p10 0.3078 p90 0.3101 peak 0.52 GB err 0.00195
+OuterProductMean row55 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 1.8437 ms p10 1.8413 p90 1.8459 peak 0.75 GB err nan
+OuterProductMean row55 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 0.4724 ms p10 0.4716 p90 0.4871 peak 0.43 GB err 0.00195
+OuterProductMean row55 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 0.5049 ms p10 0.5033 p90 0.5083 peak 0.58 GB err 0.00195
+OuterProductMean row55 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 10.6020 ms p10 10.5984 p90 10.6421 peak 2.22 GB err nan
+OuterProductMean row55 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 4.1590 ms p10 4.0042 p90 4.1638 peak 1.08 GB err 0.00195
+OuterProductMean row55 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 3.8546 ms p10 3.8196 p90 4.0119 peak 1.40 GB err 0.00195
+OuterProductMean row55 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 20.5693 ms p10 20.5621 p90 20.6402 peak 4.12 GB err nan
+OuterProductMean row55 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 8.3330 ms p10 8.2473 p90 8.4497 peak 1.84 GB err 0.00195
+OuterProductMean row55 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 7.3737 ms p10 7.3545 p90 7.5410 peak 2.16 GB err 0.00195
+OuterProductMean row55 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 1.9512 ms p10 1.9379 p90 2.1593 peak 1.02 GB err nan
+OuterProductMean row55 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 0.5561 ms p10 0.5550 p90 0.5585 peak 0.41 GB err 0.00195
+OuterProductMean row55 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 0.6314 ms p10 0.6286 p90 0.6331 peak 0.73 GB err 0.00195
+OuterProductMean row55 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 3.1778 ms p10 3.1745 p90 3.1819 peak 1.16 GB err nan
+OuterProductMean row55 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 0.9926 ms p10 0.9886 p90 1.0106 peak 0.51 GB err 0.00195
+OuterProductMean row55 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 1.0514 ms p10 1.0480 p90 1.0612 peak 0.82 GB err 0.00195
+OuterProductMean row55 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 15.8549 ms p10 15.8468 p90 15.8683 peak 2.85 GB err nan
+OuterProductMean row55 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 7.2778 ms p10 7.2624 p90 7.4968 peak 1.36 GB err 0.00195
+OuterProductMean row55 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 6.7391 ms p10 6.6070 p90 6.8639 peak 1.90 GB err 0.00195
+OuterProductMean row55 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 31.1063 ms p10 30.8380 p90 31.6575 peak 5.38 GB err nan
+OuterProductMean row55 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 14.7068 ms p10 14.3076 p90 14.7443 peak 2.37 GB err 0.00195
+OuterProductMean row55 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 13.6647 ms p10 13.4570 p90 14.1177 peak 2.92 GB err 0.00195
+OuterProductMean row55 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 3.0298 ms p10 3.0030 p90 3.0421 peak 1.50 GB err nan
+OuterProductMean row55 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 0.9589 ms p10 0.9566 p90 0.9604 peak 0.47 GB err 0.00195
+OuterProductMean row55 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 1.0733 ms p10 1.0696 p90 1.1115 peak 1.01 GB err 0.00195
+OuterProductMean row55 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 4.8519 ms p10 4.8472 p90 4.8576 peak 1.69 GB err nan
+OuterProductMean row55 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 1.7524 ms p10 1.7311 p90 1.7745 peak 0.60 GB err 0.00195
+OuterProductMean row55 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 1.8903 ms p10 1.7907 p90 1.9760 peak 1.13 GB err 0.00195
+OuterProductMean row55 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 29.2669 ms p10 28.9946 p90 29.6973 peak 4.82 GB err nan
+OuterProductMean row55 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 16.0384 ms p10 15.9746 p90 16.0608 peak 1.94 GB err 0.00195
+OuterProductMean row55 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 14.8202 ms p10 14.4540 p90 15.2050 peak 3.11 GB err 0.00195
+OuterProductMean row55 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 59.8545 ms p10 57.2211 p90 61.0736 peak 7.92 GB err nan
+OuterProductMean row55 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 31.8579 ms p10 31.5238 p90 33.8786 peak 3.46 GB err 0.00195
+OuterProductMean row55 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 30.0088 ms p10 29.2363 p90 30.1966 peak 4.64 GB err 0.00195
+OuterProductMean row55 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 5.8285 ms p10 5.8228 p90 5.8373 peak 2.85 GB err nan
+OuterProductMean row55 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 2.0379 ms p10 2.0334 p90 2.2624 peak 0.61 GB err 0.00195
+OuterProductMean row55 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 2.4956 ms p10 2.2887 p90 2.5316 peak 1.77 GB err 0.00195
+OuterProductMean row55 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | pytorch   | 9.0293 ms p10 9.0240 p90 9.0371 peak 3.13 GB err nan
+OuterProductMean row55 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | cuda      | 4.1565 ms p10 3.7289 p90 4.1883 peak 0.80 GB err 0.00195
+OuterProductMean row55 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False} | triton    | 4.0440 ms p10 3.9999 p90 4.4029 peak 1.96 GB err 0.00195
+OuterProductMean row56 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 6.3352 ms p10 6.3327 p90 6.3374 peak 1.58 GB err nan
+OuterProductMean row56 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 1.8033 ms p10 1.7060 p90 1.9364 peak 0.80 GB err 0.00391
+OuterProductMean row56 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 1.7549 ms p10 1.7044 p90 1.8348 peak 0.97 GB err 0.00391
+OuterProductMean row56 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 12.3148 ms p10 12.2643 p90 12.3211 peak 2.85 GB err nan
+OuterProductMean row56 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 3.8974 ms p10 3.3812 p90 3.9221 peak 1.31 GB err 0.00391
+OuterProductMean row56 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 3.6727 ms p10 3.4769 p90 3.7360 peak 1.48 GB err 0.00391
+OuterProductMean row56 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 1.0999 ms p10 1.0869 p90 1.1028 peak 0.66 GB err nan
+OuterProductMean row56 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 0.2653 ms p10 0.2643 p90 0.2666 peak 0.36 GB err 0.00391
+OuterProductMean row56 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 0.3060 ms p10 0.3053 p90 0.3078 peak 0.52 GB err 0.00391
+OuterProductMean row56 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 1.8167 ms p10 1.8146 p90 1.8181 peak 0.75 GB err nan
+OuterProductMean row56 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 0.4714 ms p10 0.4680 p90 0.4830 peak 0.43 GB err 0.00391
+OuterProductMean row56 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 0.5089 ms p10 0.5070 p90 0.5104 peak 0.58 GB err 0.00391
+OuterProductMean row56 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 10.6092 ms p10 10.6028 p90 10.6149 peak 2.22 GB err nan
+OuterProductMean row56 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 4.2903 ms p10 3.7969 p90 4.3000 peak 1.08 GB err 0.00391
+OuterProductMean row56 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 4.0325 ms p10 3.8431 p90 4.0382 peak 1.40 GB err 0.00391
+OuterProductMean row56 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 20.5685 ms p10 20.5632 p90 20.6368 peak 4.12 GB err nan
+OuterProductMean row56 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 8.5310 ms p10 8.1751 p90 8.7209 peak 1.84 GB err 0.00391
+OuterProductMean row56 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 7.7879 ms p10 7.4144 p90 8.0295 peak 2.16 GB err 0.00391
+OuterProductMean row56 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 1.9651 ms p10 1.9543 p90 1.9743 peak 1.02 GB err nan
+OuterProductMean row56 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 0.5540 ms p10 0.5530 p90 0.5551 peak 0.41 GB err 0.00391
+OuterProductMean row56 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 0.6354 ms p10 0.6327 p90 0.6375 peak 0.73 GB err 0.00391
+OuterProductMean row56 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 3.1907 ms p10 3.1873 p90 3.1954 peak 1.16 GB err nan
+OuterProductMean row56 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 1.0008 ms p10 0.9958 p90 1.0063 peak 0.51 GB err 0.00391
+OuterProductMean row56 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 1.0565 ms p10 1.0517 p90 1.0717 peak 0.82 GB err 0.00391
+OuterProductMean row56 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 15.8578 ms p10 15.8503 p90 15.9422 peak 2.85 GB err nan
+OuterProductMean row56 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 7.4500 ms p10 6.8199 p90 7.4562 peak 1.36 GB err 0.00391
+OuterProductMean row56 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 6.6420 ms p10 6.6271 p90 6.9180 peak 1.90 GB err 0.00391
+OuterProductMean row56 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 31.0009 ms p10 30.7869 p90 31.6375 peak 5.38 GB err nan
+OuterProductMean row56 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 14.8763 ms p10 14.5162 p90 14.9852 peak 2.37 GB err 0.00391
+OuterProductMean row56 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 13.8001 ms p10 13.3637 p90 14.5429 peak 2.92 GB err 0.00391
+OuterProductMean row56 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 3.0379 ms p10 3.0094 p90 3.0798 peak 1.50 GB err nan
+OuterProductMean row56 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 0.9568 ms p10 0.9558 p90 0.9588 peak 0.47 GB err 0.00391
+OuterProductMean row56 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 1.0798 ms p10 1.0768 p90 1.0979 peak 1.01 GB err 0.00391
+OuterProductMean row56 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 4.8575 ms p10 4.8546 p90 4.8640 peak 1.69 GB err nan
+OuterProductMean row56 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 1.8714 ms p10 1.7420 p90 1.9469 peak 0.60 GB err 0.00391
+OuterProductMean row56 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 1.8405 ms p10 1.7959 p90 1.9629 peak 1.13 GB err 0.00391
+OuterProductMean row56 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 29.2544 ms p10 28.9999 p90 29.8375 peak 4.82 GB err nan
+OuterProductMean row56 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 16.1868 ms p10 15.7152 p90 16.2142 peak 1.94 GB err 0.00391
+OuterProductMean row56 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 15.2798 ms p10 14.7946 p90 15.6139 peak 3.11 GB err 0.00391
+OuterProductMean row56 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 58.3432 ms p10 56.3495 p90 60.5365 peak 7.92 GB err nan
+OuterProductMean row56 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 32.1829 ms p10 31.8833 p90 33.4546 peak 3.46 GB err 0.00391
+OuterProductMean row56 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 29.9456 ms p10 29.0000 p90 31.1199 peak 4.64 GB err 0.00391
+OuterProductMean row56 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 5.8317 ms p10 5.7968 p90 5.8389 peak 2.85 GB err nan
+OuterProductMean row56 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 2.0383 ms p10 2.0349 p90 2.2770 peak 0.61 GB err 0.00391
+OuterProductMean row56 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 2.4610 ms p10 2.3475 p90 2.5236 peak 1.77 GB err 0.00391
+OuterProductMean row56 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | pytorch   | 9.0285 ms p10 9.0218 p90 9.0406 peak 3.13 GB err nan
+OuterProductMean row56 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | cuda      | 4.2182 ms p10 3.9574 p90 4.3078 peak 0.80 GB err 0.00391
+OuterProductMean row56 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'projection_bias': True} | triton    | 4.2453 ms p10 3.8508 p90 4.5613 peak 1.96 GB err 0.00391
+OuterProductMean row57 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 6.5000 ms p10 6.4972 p90 6.5032 peak 1.58 GB err nan
+OuterProductMean row57 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 1.7154 ms p10 1.7096 p90 1.7215 peak 0.80 GB err 0.00391
+OuterProductMean row57 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 1.6900 ms p10 1.6772 p90 1.7711 peak 0.97 GB err 0.00391
+OuterProductMean row57 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 12.4632 ms p10 12.4346 p90 12.4964 peak 2.85 GB err nan
+OuterProductMean row57 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 3.8416 ms p10 3.5711 p90 3.8516 peak 1.31 GB err 0.00391
+OuterProductMean row57 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 3.6634 ms p10 3.2647 p90 3.7499 peak 1.48 GB err 0.00391
+OuterProductMean row57 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 1.2512 ms p10 1.2394 p90 1.2729 peak 0.67 GB err nan
+[miniworld-engine build] compiling miniworld_opm_epilogue_native_tma_static_fused [a2543e7f] (torch extension) ...
+[miniworld-engine build] built miniworld_opm_epilogue_native_tma_static_fused [a2543e7f] in 93.8 s; 2 built in this process
+OuterProductMean row57 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 0.2642 ms p10 0.2634 p90 0.2653 peak 0.36 GB err 0.00391
+OuterProductMean row57 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 0.3061 ms p10 0.3050 p90 0.3071 peak 0.52 GB err 0.00391
+OuterProductMean row57 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 1.9907 ms p10 1.9750 p90 1.9931 peak 0.77 GB err nan
+OuterProductMean row57 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 0.4667 ms p10 0.4620 p90 0.4792 peak 0.43 GB err 0.00391
+OuterProductMean row57 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 0.5050 ms p10 0.5036 p90 0.5073 peak 0.58 GB err 0.00391
+OuterProductMean row57 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 10.9481 ms p10 10.9398 p90 10.9848 peak 2.22 GB err nan
+OuterProductMean row57 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 4.1131 ms p10 3.6755 p90 4.2024 peak 1.08 GB err 0.00391
+OuterProductMean row57 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 4.0110 ms p10 3.8927 p90 4.0135 peak 1.40 GB err 0.00391
+OuterProductMean row57 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 20.9209 ms p10 20.9140 p90 20.9868 peak 4.12 GB err nan
+OuterProductMean row57 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 8.2836 ms p10 8.0953 p90 8.3199 peak 1.84 GB err 0.00391
+OuterProductMean row57 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 7.3791 ms p10 7.3734 p90 7.7457 peak 2.16 GB err 0.00391
+OuterProductMean row57 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 2.3026 ms p10 2.2899 p90 2.3225 peak 1.05 GB err nan
+OuterProductMean row57 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 0.5498 ms p10 0.5484 p90 0.5510 peak 0.41 GB err 0.00391
+OuterProductMean row57 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 0.6318 ms p10 0.6298 p90 0.6339 peak 0.73 GB err 0.00391
+OuterProductMean row57 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 3.5313 ms p10 3.5273 p90 3.5354 peak 1.19 GB err nan
+OuterProductMean row57 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 0.9852 ms p10 0.9822 p90 1.0335 peak 0.51 GB err 0.00391
+OuterProductMean row57 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 1.0453 ms p10 1.0432 p90 1.0510 peak 0.82 GB err 0.00391
+OuterProductMean row57 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 16.4851 ms p10 16.4794 p90 16.5164 peak 2.88 GB err nan
+OuterProductMean row57 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 7.2262 ms p10 6.7055 p90 7.4023 peak 1.36 GB err 0.00391
+OuterProductMean row57 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 6.6107 ms p10 6.4779 p90 6.7371 peak 1.90 GB err 0.00391
+OuterProductMean row57 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 31.7829 ms p10 31.5013 p90 32.3314 peak 5.38 GB err nan
+OuterProductMean row57 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 14.6308 ms p10 14.1194 p90 14.7327 peak 2.37 GB err 0.00391
+OuterProductMean row57 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 13.8679 ms p10 13.4555 p90 14.1959 peak 2.92 GB err 0.00391
+OuterProductMean row57 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 3.6639 ms p10 3.6610 p90 3.6989 peak 1.57 GB err nan
+OuterProductMean row57 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 0.9550 ms p10 0.9534 p90 0.9570 peak 0.47 GB err 0.00391
+OuterProductMean row57 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 1.0803 ms p10 1.0742 p90 1.0863 peak 1.01 GB err 0.00391
+OuterProductMean row57 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 5.4836 ms p10 5.4793 p90 5.4887 peak 1.75 GB err nan
+OuterProductMean row57 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 1.7935 ms p10 1.7295 p90 1.8103 peak 0.60 GB err 0.00391
+OuterProductMean row57 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 1.7978 ms p10 1.7867 p90 1.9718 peak 1.13 GB err 0.00391
+OuterProductMean row57 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 30.6861 ms p10 30.4924 p90 31.0984 peak 4.96 GB err nan
+OuterProductMean row57 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 16.0293 ms p10 15.9948 p90 16.0565 peak 1.94 GB err 0.00391
+OuterProductMean row57 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 14.9045 ms p10 14.8312 p90 14.9122 peak 3.11 GB err 0.00391
+OuterProductMean row57 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 59.7234 ms p10 58.3071 p90 60.7469 peak 7.92 GB err nan
+OuterProductMean row57 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 31.8437 ms p10 31.5323 p90 33.7556 peak 3.46 GB err 0.00391
+OuterProductMean row57 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 30.1211 ms p10 28.7678 p90 30.5625 peak 4.64 GB err 0.00391
+OuterProductMean row57 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 7.2438 ms p10 7.2391 p90 7.2475 peak 2.99 GB err nan
+OuterProductMean row57 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 2.0496 ms p10 2.0449 p90 2.2230 peak 0.61 GB err 0.00391
+OuterProductMean row57 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 2.5155 ms p10 2.2943 p90 2.5420 peak 1.77 GB err 0.00391
+OuterProductMean row57 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | pytorch   | 10.4452 ms p10 10.4155 p90 10.4531 peak 3.27 GB err nan
+OuterProductMean row57 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | cuda      | 3.9885 ms p10 3.8848 p90 4.1348 peak 0.80 GB err 0.00391
+OuterProductMean row57 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True} | triton    | 4.4111 ms p10 3.9003 p90 4.4222 peak 1.96 GB err 0.00391
+OuterProductMean row58 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 6.4977 ms p10 6.4918 p90 6.5103 peak 1.58 GB err nan
+OuterProductMean row58 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 1.7133 ms p10 1.7091 p90 1.9364 peak 0.80 GB err 0.00391
+OuterProductMean row58 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 1.7552 ms p10 1.7095 p90 1.8170 peak 0.97 GB err 0.00391
+OuterProductMean row58 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 12.4527 ms p10 12.4232 p90 12.4811 peak 2.85 GB err nan
+OuterProductMean row58 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 3.7771 ms p10 3.3606 p90 3.9117 peak 1.31 GB err 0.00391
+OuterProductMean row58 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 3.3282 ms p10 3.3154 p90 3.7372 peak 1.48 GB err 0.00391
+OuterProductMean row58 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 1.2591 ms p10 1.2439 p90 1.2996 peak 0.67 GB err nan
+OuterProductMean row58 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 0.2652 ms p10 0.2648 p90 0.2664 peak 0.36 GB err 0.00391
+OuterProductMean row58 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 0.3084 ms p10 0.3075 p90 0.3093 peak 0.52 GB err 0.00391
+OuterProductMean row58 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 2.0129 ms p10 2.0114 p90 2.0148 peak 0.77 GB err nan
+OuterProductMean row58 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 0.4730 ms p10 0.4717 p90 0.4796 peak 0.43 GB err 0.00391
+OuterProductMean row58 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 0.5100 ms p10 0.5078 p90 0.5120 peak 0.58 GB err 0.00391
+OuterProductMean row58 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 10.9595 ms p10 10.9575 p90 10.9643 peak 2.22 GB err nan
+OuterProductMean row58 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 4.0390 ms p10 4.0320 p90 4.3117 peak 1.08 GB err 0.00391
+OuterProductMean row58 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 3.8040 ms p10 3.6693 p90 4.0352 peak 1.40 GB err 0.00391
+OuterProductMean row58 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 20.9323 ms p10 20.9213 p90 21.0050 peak 4.12 GB err nan
+OuterProductMean row58 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 8.4876 ms p10 8.4627 p90 8.6864 peak 1.84 GB err 0.00391
+OuterProductMean row58 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 7.5604 ms p10 7.4094 p90 7.8050 peak 2.16 GB err 0.00391
+OuterProductMean row58 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 2.3134 ms p10 2.2895 p90 2.3189 peak 1.05 GB err nan
+OuterProductMean row58 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 0.5536 ms p10 0.5523 p90 0.5557 peak 0.41 GB err 0.00391
+OuterProductMean row58 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 0.6365 ms p10 0.6331 p90 0.6389 peak 0.73 GB err 0.00391
+OuterProductMean row58 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 3.5451 ms p10 3.5418 p90 3.5482 peak 1.19 GB err nan
+OuterProductMean row58 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 0.9988 ms p10 0.9963 p90 1.0294 peak 0.51 GB err 0.00391
+OuterProductMean row58 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 1.0588 ms p10 1.0550 p90 1.0645 peak 0.82 GB err 0.00391
+OuterProductMean row58 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 16.4917 ms p10 16.4809 p90 16.5462 peak 2.88 GB err nan
+OuterProductMean row58 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 7.0206 ms p10 6.9009 p90 7.6149 peak 1.36 GB err 0.00391
+OuterProductMean row58 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 6.6393 ms p10 6.6293 p90 7.4233 peak 1.90 GB err 0.00391
+OuterProductMean row58 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 31.7454 ms p10 31.5447 p90 32.1795 peak 5.38 GB err nan
+OuterProductMean row58 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 14.7847 ms p10 14.3890 p90 14.8947 peak 2.37 GB err 0.00391
+OuterProductMean row58 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 13.9485 ms p10 13.3933 p90 14.2664 peak 2.92 GB err 0.00391
+OuterProductMean row58 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 3.6653 ms p10 3.6462 p90 3.6725 peak 1.57 GB err nan
+OuterProductMean row58 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 0.9596 ms p10 0.9572 p90 0.9611 peak 0.47 GB err 0.00391
+OuterProductMean row58 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 1.0772 ms p10 1.0732 p90 1.0852 peak 1.01 GB err 0.00391
+OuterProductMean row58 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 5.4908 ms p10 5.4845 p90 5.4942 peak 1.75 GB err nan
+OuterProductMean row58 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 1.7586 ms p10 1.7253 p90 1.7709 peak 0.60 GB err 0.00391
+OuterProductMean row58 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 1.8809 ms p10 1.8062 p90 1.9459 peak 1.13 GB err 0.00391
+OuterProductMean row58 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 30.5741 ms p10 30.4681 p90 31.0685 peak 4.96 GB err nan
+OuterProductMean row58 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 16.0389 ms p10 16.0071 p90 16.1680 peak 1.94 GB err 0.00391
+OuterProductMean row58 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 14.9089 ms p10 14.6616 p90 15.2717 peak 3.11 GB err 0.00391
+OuterProductMean row58 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 59.8427 ms p10 58.0597 p90 61.3669 peak 7.92 GB err nan
+OuterProductMean row58 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 32.3072 ms p10 32.0312 p90 33.7310 peak 3.46 GB err 0.00391
+OuterProductMean row58 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 29.9466 ms p10 28.6558 p90 31.0551 peak 4.64 GB err 0.00391
+OuterProductMean row58 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 7.2582 ms p10 7.2404 p90 7.2613 peak 2.99 GB err nan
+OuterProductMean row58 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 2.0753 ms p10 2.0371 p90 2.2543 peak 0.61 GB err 0.00391
+OuterProductMean row58 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 2.3240 ms p10 2.3176 p90 2.4497 peak 1.77 GB err 0.00391
+OuterProductMean row58 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | pytorch   | 10.4541 ms p10 10.4347 p90 10.4622 peak 3.27 GB err nan
+OuterProductMean row58 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | cuda      | 4.2117 ms p10 4.1575 p90 4.2180 peak 0.80 GB err 0.00391
+OuterProductMean row58 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': True, 'projection_bias': True} | triton    | 4.0710 ms p10 4.0372 p90 4.5719 peak 1.96 GB err 0.00391
+OuterProductMean row63 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 6.3411 ms p10 6.3386 p90 6.3440 peak 1.58 GB err nan
+OuterProductMean row63 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 1.7182 ms p10 1.7106 p90 1.7245 peak 0.80 GB err 0.00195
+OuterProductMean row63 L256 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 1.7058 ms p10 1.6819 p90 1.8122 peak 0.97 GB err 0.00195
+OuterProductMean row63 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 12.3074 ms p10 12.2763 p90 12.3370 peak 2.85 GB err nan
+OuterProductMean row63 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 3.8423 ms p10 3.3903 p90 3.8511 peak 1.31 GB err 0.00195
+OuterProductMean row63 L256 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 3.6309 ms p10 3.3484 p90 3.6337 peak 1.48 GB err 0.00195
+OuterProductMean row63 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 1.0859 ms p10 1.0829 p90 1.1057 peak 0.66 GB err nan
+OuterProductMean row63 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 0.2696 ms p10 0.2688 p90 0.2714 peak 0.36 GB err 0.00195
+OuterProductMean row63 L256 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 0.3045 ms p10 0.3031 p90 0.3055 peak 0.52 GB err 0.00195
+OuterProductMean row63 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 1.8112 ms p10 1.8085 p90 1.8124 peak 0.75 GB err nan
+OuterProductMean row63 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 0.4714 ms p10 0.4689 p90 0.4911 peak 0.43 GB err 0.00195
+OuterProductMean row63 L256 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 0.5048 ms p10 0.5035 p90 0.5072 peak 0.58 GB err 0.00195
+OuterProductMean row63 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 10.6271 ms p10 10.6211 p90 10.6622 peak 2.22 GB err nan
+OuterProductMean row63 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 4.2189 ms p10 3.9111 p90 4.2902 peak 1.08 GB err 0.00195
+OuterProductMean row63 L384 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 3.9718 ms p10 3.8177 p90 4.0915 peak 1.40 GB err 0.00195
+OuterProductMean row63 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 20.5730 ms p10 20.5681 p90 20.6453 peak 4.12 GB err nan
+OuterProductMean row63 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 8.4233 ms p10 8.2480 p90 8.4689 peak 1.84 GB err 0.00195
+OuterProductMean row63 L384 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 7.7878 ms p10 7.3562 p90 8.0756 peak 2.16 GB err 0.00195
+OuterProductMean row63 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 1.9470 ms p10 1.9238 p90 1.9548 peak 1.02 GB err nan
+OuterProductMean row63 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 0.5561 ms p10 0.5551 p90 0.5573 peak 0.41 GB err 0.00195
+OuterProductMean row63 L384 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 0.6323 ms p10 0.6302 p90 0.6346 peak 0.73 GB err 0.00195
+OuterProductMean row63 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 3.1802 ms p10 3.1767 p90 3.1841 peak 1.16 GB err nan
+OuterProductMean row63 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 0.9946 ms p10 0.9922 p90 1.0016 peak 0.51 GB err 0.00195
+OuterProductMean row63 L384 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 1.0488 ms p10 1.0437 p90 1.0612 peak 0.82 GB err 0.00195
+OuterProductMean row63 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 15.8888 ms p10 15.8509 p90 15.9572 peak 2.85 GB err nan
+OuterProductMean row63 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 7.3650 ms p10 7.1307 p90 7.3690 peak 1.36 GB err 0.00195
+OuterProductMean row63 L512 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 6.6121 ms p10 6.4776 p90 7.0719 peak 1.90 GB err 0.00195
+OuterProductMean row63 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 31.0814 ms p10 30.8335 p90 31.6625 peak 5.38 GB err nan
+OuterProductMean row63 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 14.6890 ms p10 14.4864 p90 14.8084 peak 2.37 GB err 0.00195
+OuterProductMean row63 L512 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 13.7533 ms p10 13.3211 p90 14.1136 peak 2.92 GB err 0.00195
+OuterProductMean row63 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 3.0117 ms p10 3.0072 p90 3.0298 peak 1.50 GB err nan
+OuterProductMean row63 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 0.9603 ms p10 0.9571 p90 0.9915 peak 0.47 GB err 0.00195
+OuterProductMean row63 L512 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 1.0783 ms p10 1.0748 p90 1.1107 peak 1.01 GB err 0.00195
+OuterProductMean row63 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 4.8542 ms p10 4.8495 p90 4.8612 peak 1.69 GB err nan
+OuterProductMean row63 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 1.7455 ms p10 1.7135 p90 1.8852 peak 0.60 GB err 0.00195
+OuterProductMean row63 L512 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 1.8805 ms p10 1.7811 p90 1.9414 peak 1.13 GB err 0.00195
+OuterProductMean row63 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 29.1871 ms p10 28.9783 p90 29.6484 peak 4.82 GB err nan
+OuterProductMean row63 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 16.0210 ms p10 15.8650 p90 16.0305 peak 1.94 GB err 0.00195
+OuterProductMean row63 L768 S8192 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 15.0827 ms p10 14.7498 p90 15.3803 peak 3.11 GB err 0.00195
+OuterProductMean row63 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 59.8360 ms p10 58.2106 p90 60.6748 peak 7.92 GB err nan
+OuterProductMean row63 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 31.8648 ms p10 31.7333 p90 33.0885 peak 3.46 GB err 0.00195
+OuterProductMean row63 L768 S16384 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 29.8406 ms p10 28.1470 p90 31.2777 peak 4.64 GB err 0.00195
+OuterProductMean row63 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 5.8250 ms p10 5.8198 p90 5.8298 peak 2.85 GB err nan
+OuterProductMean row63 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 2.1597 ms p10 2.0890 p90 2.2535 peak 0.61 GB err 0.00195
+OuterProductMean row63 L768 S1024 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 2.4724 ms p10 2.2879 p90 2.5281 peak 1.77 GB err 0.00195
+OuterProductMean row63 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | pytorch   | 9.0240 ms p10 9.0144 p90 9.0340 peak 3.13 GB err nan
+OuterProductMean row63 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | cuda      | 4.1119 ms p10 4.0361 p90 4.1930 peak 0.80 GB err 0.00195
+OuterProductMean row63 L768 S2048 {'d_msa': 64, 'd_pair': 128, 'd_hidden': 32, 'normalize_before_proj': False, 'count_offset': 0.001} | triton    | 4.2335 ms p10 3.8276 p90 4.4719 peak 1.96 GB err 0.00195
+[bench] DONE

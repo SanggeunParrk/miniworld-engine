@@ -54,7 +54,10 @@ constexpr int BI = 2;              // one warpgroup shares each gathered TMA sta
 #else
 constexpr int BI = 4;              // i tokens per CTA
 #endif
-constexpr int BJ = 32;             // j tokens per CTA  (BJ*CH = 512 contiguous columns of O per read)
+#ifndef OPM_EPI_BJ
+#define OPM_EPI_BJ 32
+#endif
+constexpr int BJ = OPM_EPI_BJ;     // j tokens per CTA  (BJ*CH = 1024 / 2048 contiguous bytes of O per read)
 constexpr int NP = BI * BJ;        // 64 (i,j) pairs per CTA
 constexpr int KC = 64;             // K chunk = 2 c values
 // The staged tile is XOR-swizzled instead of padded.  A padded row stride cannot satisfy both
@@ -176,11 +179,14 @@ __global__ void __launch_bounds__(256) opm_count_tiled(const unsigned* __restric
 static void opm_count_launch(const unsigned* bits, float* norm, int S, int N, float dmin = 1.0f, float doff = 0.0f) {
   const int W=S/32;
   TORCH_CHECK(N%OPM_COUNT_TILE==0 && S%32==0,"OPM count tile contract");
+  const size_t smem = size_t(2 * OPM_COUNT_TILE * (W + 1)) * sizeof(unsigned);   // past 48 KiB from depth 12288 on (65.7 KiB at 16384)
+  TORCH_CHECK(smem <= 227 * 1024, "OPM count: depth ", S, " past the shared-memory tile (S <= 58080)");
+  if (smem > 48 * 1024) C10_CUDA_CHECK(cudaFuncSetAttribute(opm_count_tiled, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
   cudaKernel_t kernel; C10_CUDA_CHECK(cudaGetKernel(&kernel, opm_count_tiled));
   const unsigned* bp=bits; float* np=norm; int w=W, n=N;
   void* argv[]={&bp,&np,&w,&n,&dmin,&doff};
   C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(N/OPM_COUNT_TILE,N/OPM_COUNT_TILE),
-      dim3(OPM_COUNT_TILE,OPM_COUNT_TILE),argv,size_t(2*OPM_COUNT_TILE*(W+1))*sizeof(unsigned),at::cuda::getCurrentCUDAStream()));
+      dim3(OPM_COUNT_TILE,OPM_COUNT_TILE),argv,smem,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 __global__ void opm_finish_native(const float* red,const float* gamma,const float* beta,
@@ -885,6 +891,12 @@ __global__ __launch_bounds__(512,1) void opm_prologue_tma_hopper(
 // [Wa; Wb] projection on wgmma and store the grouped layouts by TMA.  Width CMT only changes the x tile (CMT / 64
 // swizzled [128 s][64] blocks), the LayerNorm lane work (CMT / 2 values per lane) and the projection depth (CMT / 16
 // wgmma steps over CMT / 64 weight blocks).
+#ifndef OPM_PRO_REG
+#define OPM_PRO_REG 1
+#endif
+#ifndef OPM_PRO_G
+#define OPM_PRO_G 64
+#endif
 namespace opm_pro_wide {
 template <int CMT>
 struct Cfg {
@@ -913,13 +925,22 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
   uint64_t* bars = reinterpret_cast<uint64_t*>(sl + 2 * CMT);
   uint64_t* xf = bars; uint64_t* yf = xf + NST; uint64_t* xe = yf + NST; uint64_t* wf = xe + NST;
   const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32, nsb = S / C::BS;
+  // tile t -> (token i, MSA rows s0..s0+127): groups of OPM_PRO_G tokens, the token fastest inside a group, so the CTAs running at once
+  // read OPM_PRO_G adjacent 128 B rows of every MSA row (one 8 KiB run at G 64, not 128 B at a stride of N x 128 B) and still write
+  // runs of (#CTAs / G) x 256 B of each A2 / BT row
+  auto tile_is = [&](int t, int& i, int& s0) {
+    constexpr int G = OPM_PRO_G;
+    const int per = G * nsb, grp = t / per, r = t - grp * per, i0 = grp * G, gs = min(G, N - i0);
+    i = i0 + r % gs; s0 = (r / gs) * C::BS;
+  };
   if (tid == 0) {
     for (int k = 0; k < NST; ++k) { init(xf + k, 1); init(yf + k, 8); init(xe + k, 1); }
     init(wf, 1); asm volatile("fence.mbarrier_init.release.cluster;":::"memory");
   }
   for (int c = tid; c < CMT; c += 512) { sl[c] = gamma[c]; sl[CMT + c] = beta[c]; }
   __syncthreads();
-  if (warp < 4) {
+  if (warp < 4) {   // OPM_PRO_REG: the TMA warpgroup gives registers to the LayerNorm / projection warpgroups (128 -> 40 / 152)
+    if (OPM_PRO_REG) asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
     if (tid == 0) {
       expect(wf, KB * 8192);
       for (int kb = 0; kb < KB; ++kb) {
@@ -928,7 +949,7 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
       }
       int g = 0;
       for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++g) {
-        int slot = g % NST, i = t / nsb, s0 = (t % nsb) * C::BS;
+        int slot = g % NST, i, s0; tile_is(t, i, s0);
         if (g >= NST) wait(xe + slot, (g / NST - 1) & 1);
         expect(xf + slot, XT * 2 + MT);
         for (int kb = 0; kb < KB; ++kb) ld3(&xm, sx + slot * XT + kb * 8192, xf + slot, kb * 64, i, s0);
@@ -936,10 +957,11 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
       }
     }
   } else if (warp < 12) {
+    if (OPM_PRO_REG) asm volatile("setmaxnreg.inc.sync.aligned.u32 152;\n" ::: "memory");
     const int r = (warp - 4) * 16 + (lane & 15), hf = lane >> 4;
     int g = 0;
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++g) {
-      int slot = g % NST, i = t / nsb, s0 = (t % nsb) * C::BS;
+      int slot = g % NST, i, s0; tile_is(t, i, s0);
       wait(xf + slot, (g / NST) & 1);
       __nv_bfloat16* row = sx + slot * XT + r * 64;                        // + kb * 8192: the kb-th 64-column block
       float mean, rs;
@@ -1047,9 +1069,10 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
       wg::proxy_fence(); __syncwarp(); if (lane == 0) arrive(yf + slot);
     }
   } else {
+    if (OPM_PRO_REG) asm volatile("setmaxnreg.inc.sync.aligned.u32 152;\n" ::: "memory");
     wait(wf, 0); const int cw = warp - 12; int g = 0;
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++g) {
-      int slot = g % NST, b = g % 2, i = t / nsb, s0 = (t % nsb) * C::BS;
+      int slot = g % NST, b = g % 2, i, s0; tile_is(t, i, s0);
       wait(yf + slot, (g / NST) & 1);
       // RoseTTAFold3's projection biases are masked like the projections: this thread's 32 columns (MSA rows) of the accumulator keep
       // their mask bits in one register, read from the tile's mask bytes before the slot is released (the biases used to be masked by
@@ -1137,7 +1160,7 @@ __device__ __forceinline__ void stmatrix_x4(uint32_t dst, uint32_t r0, uint32_t 
 #if defined(MINIWORLD_OPM_EPILOGUE_TMA_HALF)
 constexpr int WARPS = 4;
 #else
-constexpr int WARPS = 8;            // two warpgroups of 64 rows each
+constexpr int WARPS = NP / 16;      // one warpgroup per 64 rows (pairs) of the tile
 #endif
 constexpr int THREADS = WARPS * 32;
 constexpr int ROWT = NP / 16;      // 4 mma row tiles
@@ -1155,7 +1178,10 @@ constexpr int WSL = ZW * KC;                 // one chunk of Wo, [ZW rows][KC], 
 // third stage costs nothing in occupancy.  What it buys is one __syncthreads per chunk instead of two
 // -- at depth two the buffer a chunk just read is refilled by the very next chunk, so the wgmma needs
 // a barrier behind it as well as in front -- and barrier was 39% of this kernel's stall samples.
-constexpr int NSTAGE = 3;
+#ifndef OPM_EPI_NSTAGE
+#define OPM_EPI_NSTAGE 3
+#endif
+constexpr int NSTAGE = OPM_EPI_NSTAGE;
 constexpr int SMEM_STAGE = NSTAGE * NP * KCP * 2 + NSTAGE * WSL * 2;
 // The accumulator tile is padded for the same reason as KCP: an unpadded 128-float row is exactly
 // 32 banks, so every row of it started on bank 0.
@@ -1195,7 +1221,7 @@ __device__ __forceinline__ void ld4(const void* map,void* dst,uint64_t* b,int x,
 __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     const __nv_bfloat16* __restrict__ O,      // [N*CH, N*CH] grouped GEMM output
     const float* __restrict__ NORM,           // [N, N]  mask counts in fp32, already clamped >= 1 (unused when BITS is set)
-    const unsigned* __restrict__ BITS, int BW, // inference: the mask bit rows [N, BW words]; the count is taken in the kernel
+    const unsigned* __restrict__ BITS, int BW, int BI0, // inference: the mask bit rows [N, BW words] (the i rows from BI0: a row chunk); the count is taken in the kernel
     const __nv_bfloat16* __restrict__ BF,     // [K/16][CZ/8][32][4] pre-swizzled projection weight
     const float* __restrict__ BIAS,           // [CZ]  bf16-rounded bias, held in fp32
     const __nv_bfloat16* __restrict__ RESIDUAL, // optional [1, NI, NJ, CZ]
@@ -1243,7 +1269,7 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     if (BITS != nullptr) {
       // inference: the mask count is the popcount of the two tokens' mask bit rows, taken here instead of by a separate
       // kernel that wrote an [N, N] fp32 table (exact integer count, clamped at 1, the same 1 / n as the table gave)
-      const uint4* bi = reinterpret_cast<const uint4*>(BITS + (size_t)(i0 + il) * BW);
+      const uint4* bi = reinterpret_cast<const uint4*>(BITS + (size_t)(BI0 + i0 + il) * BW);
       const uint4* bj = reinterpret_cast<const uint4*>(BITS + (size_t)(j0 + jl) * BW);
       int cnt = 0;
 #pragma unroll 4
@@ -1275,7 +1301,7 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     opm_pro_tma::ld2(&W_MAP,sW+slot*WSL,epi_full+slot,c*KC,0);
 #else
   // this thread's fixed slot in the tile, and the two streams walked forward one chunk at a time
-  const int k8 = tid & 3, jl = (tid >> 2) & (BJ - 1), cl = (tid >> 7) & (KC / CH - 1);
+  const int k8 = tid & 3, jl = (tid >> 2) & (BJ - 1), cl = (tid / (4 * BJ)) & (KC / CH - 1);
   const int chunk0 = cl * (CH / 8) + k8;
   const __nv_bfloat16* osrc = O + (size_t)(i0 * CH + cl) * M + (size_t)(j0 + jl) * CH + k8 * 8;
   const __nv_bfloat16* wsrc = BF + (size_t)z0 * (CH * CH);
@@ -2311,10 +2337,11 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor norm, torch
 
 torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf, torch::Tensor bias,
                            int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after, c10::optional<torch::Tensor> out_,
-                           double dmin = 1.0, double doff = 0.0) {
+                           double dmin = 1.0, double doff = 0.0, int64_t i0 = 0) {   // i0: the first i of a row chunk (mask bit rows)
   TORCH_CHECK(O.is_cuda() && O.scalar_type() == torch::kBFloat16 && O.is_contiguous(), "O: contiguous cuda bf16");
   const bool from_bits = norm.scalar_type() == torch::kInt32;   // inference: the prologue's mask bit rows [N, S/32] instead of the fp32 count
   TORCH_CHECK((from_bits && norm.dim() == 2 && norm.size(1) % 4 == 0) || norm.scalar_type() == torch::kFloat32, "norm: fp32 count [N, N] or int32 mask bits [N, S/32]");
+  TORCH_CHECK(i0 == 0 || (from_bits && i0 >= 0 && i0 + ni <= norm.size(0)), "i0: a row chunk of the mask bit rows (inference)");
   TORCH_CHECK(norm.is_contiguous(), "norm: contiguous");
   TORCH_CHECK(bf.scalar_type() == torch::kBFloat16 && bf.is_contiguous() && bf.numel() == CH * CH * CZ, "bf: Wo [CZ, CH*CH] bf16, contiguous");
   TORCH_CHECK(bias.scalar_type() == torch::kFloat32 && bias.numel() == CZ, "bias: fp32 [CZ]");
@@ -2332,7 +2359,7 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
   auto stream = at::cuda::getCurrentCUDAStream();
   static bool ep_attr = false;                 // the staged weight pushes the tiles past 48 KiB
   if (!ep_attr) {
-    cudaFuncSetAttribute(opm_epilogue_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 128 * 1024);
+    cudaFuncSetAttribute(opm_epilogue_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES + 1024);
     ep_attr = true;
   }
   // z[i, j, z] as TMA sees it, innermost first: 64 z, then j, then the z half, then i
@@ -2371,7 +2398,7 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
   opm_epilogue_kernel<<<grid, THREADS, SMEM_BYTES + 1024, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(O.data_ptr<at::BFloat16>()),
       from_bits ? nullptr : norm.data_ptr<float>(),
-      from_bits ? reinterpret_cast<const unsigned*>(norm.data_ptr<int>()) : nullptr, from_bits ? (int)norm.size(1) : 0,
+      from_bits ? reinterpret_cast<const unsigned*>(norm.data_ptr<int>()) : nullptr, from_bits ? (int)norm.size(1) : 0, (int)i0,
       reinterpret_cast<const __nv_bfloat16*>(bf.data_ptr<at::BFloat16>()),
       bias.data_ptr<float>(),
       residual.has_value() ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
@@ -2572,10 +2599,10 @@ namespace opm_fused {
 #define OPM_FUSED_BK 32
 #endif
 #ifndef OPM_FUSED_STAGES
-#define OPM_FUSED_STAGES 4
+#define OPM_FUSED_STAGES 5
 #endif
 #ifndef OPM_FUSED_WST
-#define OPM_FUSED_WST 4
+#define OPM_FUSED_WST 2
 #endif
 constexpr int BM = 128, BN = 256, BK = OPM_FUSED_BK, STAGES = OPM_FUSED_STAGES;
 static_assert(BK == 64 || BK == 32, "stage K is one 128 B or one 64 B swizzle row");
@@ -2586,7 +2613,10 @@ constexpr int RING_OFF = 0, OP_OFF = STAGES * STAGE_BYTES, W_OFF = OP_OFF + OP_B
 constexpr int SMEM = BAR_OFF + 2048 + 1024;   // barriers + counts, and the slack that aligns the base to 1 KiB
 static_assert(SMEM <= 227 * 1024, "shared memory");
 constexpr int PAIRS = 128;
-constexpr int RASTER = 8;                    // m blocks per raster group (A / B panels stay in L2)
+#ifndef OPM_FUSED_RASTER
+#define OPM_FUSED_RASTER 16
+#endif
+constexpr int RASTER = OPM_FUSED_RASTER;                    // m blocks per raster group (A / B panels stay in L2)
 
 __device__ __forceinline__ uint64_t desc_sw64(const void* p) {
   const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));
@@ -2881,7 +2911,7 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_epilogue", &opm_epilogue, "fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
-        py::arg("O"), py::arg("norm"), py::arg("bf"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("out") = py::none(), py::arg("dmin") = 1.0, py::arg("doff") = 0.0);
+        py::arg("O"), py::arg("norm"), py::arg("bf"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("out") = py::none(), py::arg("dmin") = 1.0, py::arg("doff") = 0.0, py::arg("i0") = 0);
   m.def("opm_dgrad", &opm_dgrad, "fused OPM dO: (dz @ Wo) / n straight into the grouped layout",
         py::arg("dz"), py::arg("norm"), py::arg("bw"), py::arg("ni"), py::arg("nj"), py::arg("after") = 0);
   m.def("opm_dwo", &opm_dwo, "dWo straight off the grouped outer product, no permute");

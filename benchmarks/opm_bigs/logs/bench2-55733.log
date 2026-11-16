@@ -1,0 +1,2 @@
+[bench] {'gpu': 'NVIDIA H100 80GB HBM3', 'torch': '2.13.0+cu129', 'cuda': '12.9', 'host': 'node01', 'tf32_matmul': False, 'tf32_cudnn': True, 'warmup': 5, 'iterations': 30, 'flush_l2': True, 'timing': 'graph', 'speed_version': '4', 'config_version': '1'}
+[bench] DONE

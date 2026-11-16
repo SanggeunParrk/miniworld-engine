@@ -1,0 +1,16 @@
+{"L": 768, "S": 16384, "variant": "cublas", "round": 0, "cool_ms": 24.283647537231445, "sus_ms": 26.402080535888672, "sus_ghz": 1.425, "sus_w": 693.927, "residual": false}
+{"L": 384, "S": 16384, "variant": "cublas", "round": 0, "cool_ms": 5.93071985244751, "sus_ms": 6.919680118560791, "sus_ghz": 1.335, "sus_w": 689.952, "residual": false}
+{"L": 768, "S": 16384, "variant": "cublas_nt", "round": 0, "cool_ms": 24.694287300109863, "sus_ms": 28.31980800628662, "sus_ghz": 1.305, "sus_w": 692.283, "residual": false}
+{"L": 384, "S": 16384, "variant": "cublas_nt", "round": 0, "cool_ms": 5.947167873382568, "sus_ms": 7.011951923370361, "sus_ghz": 1.335, "sus_w": 698.963, "residual": false}
+{"L": 768, "S": 16384, "variant": "cublas_nt", "round": 1, "cool_ms": 24.18995189666748, "sus_ms": 27.041568756103516, "sus_ghz": 1.425, "sus_w": 692.905, "residual": false}
+{"L": 384, "S": 16384, "variant": "cublas_nt", "round": 1, "cool_ms": 5.9451518058776855, "sus_ms": 6.741024017333984, "sus_ghz": 1.455, "sus_w": 687.617, "residual": false}
+{"L": 768, "S": 16384, "variant": "cublas", "round": 1, "cool_ms": 24.21230411529541, "sus_ms": 26.121631622314453, "sus_ghz": 1.425, "sus_w": 695.85, "residual": false}
+{"L": 384, "S": 16384, "variant": "cublas", "round": 1, "cool_ms": 5.954304218292236, "sus_ms": 7.22871994972229, "sus_ghz": 1.395, "sus_w": 690.281, "residual": false}
+{"L": 768, "S": 16384, "variant": "cublas", "round": 2, "cool_ms": 24.43494415283203, "sus_ms": 26.4005126953125, "sus_ghz": 1.425, "sus_w": 691.696, "residual": false}
+{"L": 384, "S": 16384, "variant": "cublas", "round": 2, "cool_ms": 5.958591938018799, "sus_ms": 6.993072032928467, "sus_ghz": 1.29, "sus_w": 697.249, "residual": false}
+{"L": 768, "S": 16384, "variant": "cublas_nt", "round": 2, "cool_ms": 24.54539203643799, "sus_ms": 28.067520141601562, "sus_ghz": 1.395, "sus_w": 697.402, "residual": false}
+{"L": 384, "S": 16384, "variant": "cublas_nt", "round": 2, "cool_ms": 5.967360019683838, "sus_ms": 6.944000005722046, "sus_ghz": 1.35, "sus_w": 687.843, "residual": false}
+{"L": 768, "S": 16384, "variant": "cublas_nt", "round": 3, "cool_ms": 24.29219150543213, "sus_ms": 27.869215965270996, "sus_ghz": 1.425, "sus_w": 699.457, "residual": false}
+{"L": 384, "S": 16384, "variant": "cublas_nt", "round": 3, "cool_ms": 5.963071823120117, "sus_ms": 7.161279916763306, "sus_ghz": 1.38, "sus_w": 694.828, "residual": false}
+{"L": 768, "S": 16384, "variant": "cublas", "round": 3, "cool_ms": 24.37760066986084, "sus_ms": 26.401792526245117, "sus_ghz": 1.425, "sus_w": 696.888, "residual": false}
+{"L": 384, "S": 16384, "variant": "cublas", "round": 3, "cool_ms": 5.9516801834106445, "sus_ms": 6.992751836776733, "sus_ghz": 1.32, "sus_w": 689.461, "residual": false}

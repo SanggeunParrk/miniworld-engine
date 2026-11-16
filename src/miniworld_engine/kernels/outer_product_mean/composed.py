@@ -77,7 +77,9 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
     _, n, cm = m.shape
     cz = module.to_out.weight.shape[0]
     fused = opm_train._fused_enabled(m.shape[0], n, training=False, cm=cm, cz=cz) and torch.cuda.get_device_capability(msa.device) == (9, 0)
-    ext = opm_train._ext(msa.device, native=True, tma=False, cm=cm, cz=cz, fused=fused)
+    product_route = fused and opm_train._product_route_deep(m.shape[0], False)  # past depth 4096: cuBLAS product per row chunk + epilogue
+    fused = fused and not product_route
+    ext =opm_train._ext(msa.device, native=True, tma=False, cm=cm, cz=cz, fused=fused)
     dmin, doff = opm_train.divisor_params(module, msa.shape[1])
     mk = (mask[0] if mask is not None else torch.ones(m.shape[:2], dtype=torch.bool, device=msa.device)).contiguous()
     if mk.dtype != torch.bool:
@@ -119,13 +121,16 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
     gam, bet, wa16, wb16, wo_epi, bo_epi, pbias = _capture.param_forms("opm_biased_wide", params, forms)
     # the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table): no count kernel
     dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": dmin, "doff": doff}  # the pair divisor max(count, dmin) + doff
-    a2, bt, _, _, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa16, wb16, float(getattr(module.ln_msa, "eps", 1e-5)), False, pbias, False)
+    a2, bt, _, mask16, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa16, wb16, float(getattr(module.ln_msa, "eps", 1e-5)), False, pbias, False)
     interchain = module.mask_interchain and token_asym_id is not None
     res = None if interchain else residual
     if fused:  # the products stay in shared memory (norm is the mask bit table here)
         z = ext.opm_fused_infer(
             a2, bt, norm, opm_train._fused_weight(module.to_out.weight), bo_epi, res, int(not module.normalize_before_proj), **dkw
         )
+    elif product_route:
+        table = opm_train._count_table(mask16, dmin, doff)   # the pair divisor table (dmin / doff applied there)
+        z = opm_train._product_epilogue(ext, a2, bt, table, wo_epi, bo_epi, n, res, int(not module.normalize_before_proj), dkw)
     else:
         z = ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo_epi, bo_epi, n, n, res, int(not module.normalize_before_proj), **dkw)
     z = z.view(1, n, n, cz)

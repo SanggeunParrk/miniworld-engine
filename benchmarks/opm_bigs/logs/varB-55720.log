@@ -1,0 +1,12 @@
+VARIANT -DOPM_FUSED_RASTER=4
+[miniworld-engine build] compiling miniworld_opm_fused_var_DOPMFUSEDRASTER4 [8ebb8409] (torch extension) ...
+[miniworld-engine build] built miniworld_opm_fused_var_DOPMFUSEDRASTER4 [8ebb8409] in 90.8 s; 1 built in this process
+fused DBG=0: 32.168 ms  615 TF-equiv
+VARIANT -DOPM_FUSED_RASTER=16
+[miniworld-engine build] compiling miniworld_opm_fused_var_DOPMFUSEDRASTER16 [e1e2af4a] (torch extension) ...
+[miniworld-engine build] built miniworld_opm_fused_var_DOPMFUSEDRASTER16 [e1e2af4a] in 88.6 s; 1 built in this process
+fused DBG=0: 29.470 ms  672 TF-equiv
+VARIANT -DOPM_FUSED_RASTER=24
+[miniworld-engine build] compiling miniworld_opm_fused_var_DOPMFUSEDRASTER24 [2a7c191a] (torch extension) ...
+[miniworld-engine build] built miniworld_opm_fused_var_DOPMFUSEDRASTER24 [2a7c191a] in 87.7 s; 1 built in this process
+fused DBG=0: 29.893 ms  662 TF-equiv
