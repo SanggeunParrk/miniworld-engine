@@ -3,7 +3,7 @@
 Per (row, L, S) case every backend of this stack is captured once into a CUDA graph (the requirements construction of measure.config,
 bf16 autocast "master" dtype, unpadded masks), then for each of --reps repetitions, the backends in a rotated order:
   cool       idle --idle s (GPU asleep), then a burst of K timed calls (K * t <= ~40 ms; 256 MB L2 flush before each, as the measurer)
-  sustained  back-to-back replays for --sustain s (the clock settles at the cap), then K2 timed calls in the same stream
+  sustained  idle --idle s, then back-to-back replays for --sustain s (the clock settles at the cap), then K2 timed calls in the same stream
 The PyTorch backend runs in both stacks as the drift reference: compare backend/PyTorch ratios across the engine and the kit stack.
 One JSONL line per (case, backend) with every rep's cool / sustained medians, the SM clock (NVML) and power after the sustained phase.
 Resumable: finished (row, L, S, backend) are skipped.
@@ -35,6 +35,16 @@ def _nvml():
         return None, None
 
 
+def _energy():
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        return pynvml.nvmlDeviceGetTotalEnergyConsumption(pynvml.nvmlDeviceGetHandleByIndex(torch.cuda.current_device())) / 1000.0
+    except Exception:
+        return None
+
+
 def _done(path):
     keys = set()
     if os.path.exists(path):
@@ -55,7 +65,7 @@ def main() -> int:
     p.add_argument("--backends", nargs="+", required=True)
     p.add_argument("--reps", type=int, default=4)
     p.add_argument("--idle", type=float, default=2.0)
-    p.add_argument("--sustain", type=float, default=0.6)
+    p.add_argument("--sustain", type=float, default=1.0)
     p.add_argument("--deadline", type=float, default=500.0)
     p.add_argument("--out", required=True)
     a = p.parse_args()
@@ -101,7 +111,7 @@ def main() -> int:
                         g.replay()
                         torch.cuda.synchronize(dev)
                         graphs[b] = (g, module, inputs, step)
-                        rec.update(status="ok", cool=[], sus=[], sus_ghz=[], sus_w=[])
+                        rec.update(status="ok", cool=[], sus=[], sus_ghz=[], sus_w=[], sus_J=[])
                     except BackendUnsupported as exc:
                         rec.update(status="unsupported", reason=str(exc)[:300])
                     except Exception as exc:
@@ -124,11 +134,24 @@ def main() -> int:
                             recs[b]["cool"].append(statistics.median(timer.run(g.replay, k)))
                         for b in rot:
                             g = graphs[b][0]
+                            # every backend starts its sustained phase from the same idle state: in a cyclic rotation the backend after
+                            # PyTorch (60 ms calls, the hottest) always inherited its heat (cuda in the engine stack, Anthropic in half the
+                            # kit reps), a 3-5 % handicap in the first version of this protocol
+                            torch.cuda.synchronize(dev)
+                            time.sleep(a.idle)
                             n_warm = max(2, int(a.sustain * 1000.0 / est[b]))
                             k2 = max(3, min(10, int(100.0 / est[b])))
-                            for _ in range(n_warm):  # back-to-back: the CPU runs ahead of the GPU
+                            for _ in range(n_warm // 2):  # back-to-back: the CPU runs ahead of the GPU
                                 timer.flush.zero_()
                                 g.replay()
+                            torch.cuda.synchronize(dev)
+                            e0, t0e = _energy(), n_warm - n_warm // 2  # NVML energy over the second half: J per call (flush included)
+                            for _ in range(t0e):
+                                timer.flush.zero_()
+                                g.replay()
+                            torch.cuda.synchronize(dev)
+                            e1 = _energy()
+                            jcall = (e1 - e0) / t0e if e0 is not None and e1 is not None else None
                             starts = [torch.cuda.Event(enable_timing=True) for _ in range(k2)]
                             ends = [torch.cuda.Event(enable_timing=True) for _ in range(k2)]
                             for s_, e_ in zip(starts, ends):
@@ -143,6 +166,7 @@ def main() -> int:
                             recs[b]["sus"].append(statistics.median(s_.elapsed_time(e_) for s_, e_ in zip(starts, ends)))
                             recs[b]["sus_ghz"].append(ghz)
                             recs[b]["sus_w"].append(w)
+                            recs[b]["sus_J"].append(jcall)
                 for b in todo:
                     rec = recs[b]
                     if rec["status"] == "ok":

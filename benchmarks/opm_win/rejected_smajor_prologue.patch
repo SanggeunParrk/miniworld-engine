@@ -1,0 +1,100 @@
+diff --git a/src/miniworld_engine/kernels/integrations/csrc/opm_epilogue.cu b/src/miniworld_engine/kernels/integrations/csrc/opm_epilogue.cu
+index 3b3d36f8f..e09c7164b 100644
+--- a/src/miniworld_engine/kernels/integrations/csrc/opm_epilogue.cu
++++ b/src/miniworld_engine/kernels/integrations/csrc/opm_epilogue.cu
+@@ -911,7 +911,7 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
+     const __grid_constant__ CUtensorMap wam, const __grid_constant__ CUtensorMap wbm,
+     const __grid_constant__ CUtensorMap am, const __grid_constant__ CUtensorMap bm,
+     const float* gamma, const float* beta, __nv_bfloat16* mask16, float* stats, unsigned* bits, const float* pbias,
+-    int S, int N, int tiles, float eps) {
++    int S, int N, int tiles, float eps, int SMAJ) {   // SMAJ: A / B written s-major [S, N*32] (else [(i, c), S])
+   using namespace opm_pro_tma;
+   using C = opm_pro_wide::Cfg<CMT>;
+   constexpr int KB = C::KB, NST = C::NST, XT = C::XT, TT = C::TT, MT = C::MT;
+@@ -1106,14 +1106,25 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
+           acc[k * 4] += pb_lo * k0; acc[k * 4 + 1] += pb_lo * k1;
+           acc[k * 4 + 2] += pb_hi * k0; acc[k * 4 + 3] += pb_hi * k1;
+         }
+-        *reinterpret_cast<__nv_bfloat162*>(out + wg::off_n(64, 0, ch, cc / 8) + cc % 8) = __floats2bfloat162_rn(acc[k * 4], acc[k * 4 + 1]);
+-        *reinterpret_cast<__nv_bfloat162*>(out + wg::off_n(64, 0, ch + 8, cc / 8) + cc % 8) = __floats2bfloat162_rn(acc[k * 4 + 2], acc[k * 4 + 3]);
++        if (SMAJ) {   // s-major A / B ([S, N*32], the operands of an NT product): the tile as [128 s][32 c] per side, dense 64 B rows
++          __nv_bfloat16* t0 = st + b * TT + (ch >> 5) * 4096 + (ch & 31), *t1 = st + b * TT + ((ch + 8) >> 5) * 4096 + ((ch + 8) & 31);
++          t0[col * 32] = __float2bfloat16_rn(acc[k * 4]); t0[(col + 1) * 32] = __float2bfloat16_rn(acc[k * 4 + 1]);
++          t1[col * 32] = __float2bfloat16_rn(acc[k * 4 + 2]); t1[(col + 1) * 32] = __float2bfloat16_rn(acc[k * 4 + 3]);
++        } else {
++          *reinterpret_cast<__nv_bfloat162*>(out + wg::off_n(64, 0, ch, cc / 8) + cc % 8) = __floats2bfloat162_rn(acc[k * 4], acc[k * 4 + 1]);
++          *reinterpret_cast<__nv_bfloat162*>(out + wg::off_n(64, 0, ch + 8, cc / 8) + cc % 8) = __floats2bfloat162_rn(acc[k * 4 + 2], acc[k * 4 + 3]);
++        }
+       }
+       wg::proxy_fence(); sync();
+       if (lane == 0 && cw == 0) {
+-        for (int h = 0; h < 2; ++h) {
+-          st2(&am, st + b * TT + h * 4096, s0 + h * 64, i * 32);
+-          st2(&bm, st + b * TT + h * 4096 + 2048, s0 + h * 64, i * 32);
++        if (SMAJ) {
++          st2(&am, st + b * TT, i * 32, s0);
++          st2(&bm, st + b * TT + 4096, i * 32, s0);
++        } else {
++          for (int h = 0; h < 2; ++h) {
++            st2(&am, st + b * TT + h * 4096, s0 + h * 64, i * 32);
++            st2(&bm, st + b * TT + h * 4096 + 2048, s0 + h * 64, i * 32);
++          }
+         }
+         asm volatile("cp.async.bulk.commit_group;":::"memory");
+       }
+@@ -2519,7 +2530,8 @@ std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mas
+ // the bit mask the prologue wrote).  Parameters arrive already as gamma / beta fp32 [CM] and Wa / Wb bf16 [32, CM].
+ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask, torch::Tensor gamma, torch::Tensor beta,
+                                              torch::Tensor wa, torch::Tensor wb, double eps, bool save_stats,
+-                                             c10::optional<torch::Tensor> pbias, bool with_norm, double dmin = 1.0, double doff = 0.0) {
++                                             c10::optional<torch::Tensor> pbias, bool with_norm, double dmin = 1.0, double doff = 0.0,
++                                             bool smajor = false) {   // smajor: A / B as [S, N*32] (the NT product of the deep route)
+   using Cf = opm_pro_wide::Cfg<CM_MSA>;
+   TORCH_CHECK(m.is_cuda() && m.is_contiguous() && m.scalar_type() == torch::kBFloat16 && m.dim() == 3 && m.size(2) == CM_MSA,
+               "wide OPM prologue: m is contiguous bf16 [S, N, ", CM_MSA, "]");
+@@ -2531,7 +2543,8 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
+   TORCH_CHECK(wa.scalar_type() == torch::kBFloat16 && wb.scalar_type() == torch::kBFloat16 && wa.is_contiguous() && wb.is_contiguous()
+               && wa.numel() == CH * CM_MSA && wb.numel() == CH * CM_MSA, "wide OPM prologue: Wa / Wb bf16 [32, CM]");
+   auto fo = m.options().dtype(torch::kFloat32);
+-  auto a = torch::empty({(long)N * CH, S}, m.options()), b = torch::empty_like(a), mk = torch::empty({S, N}, m.options());
++  auto a = smajor ? torch::empty({(long)S, (long)N * CH}, m.options()) : torch::empty({(long)N * CH, S}, m.options());
++  auto b = torch::empty_like(a), mk = torch::empty({S, N}, m.options());
+   auto norm = torch::empty({N, N}, fo);
+   auto stats = torch::empty(save_stats ? std::vector<int64_t>{S, N, 2} : std::vector<int64_t>{0}, fo);
+   auto bits = torch::empty({N, S / 32}, m.options().dtype(torch::kInt32));
+@@ -2555,8 +2568,15 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
+   enc(&wbm, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, wb.data_ptr(), wd, ws, wbx, CU_TENSOR_MAP_SWIZZLE_128B);
+   uint64_t od[2] = {(uint64_t)S, (uint64_t)N * CH}, os[1] = {(uint64_t)S * 2};
+   uint32_t obx[2] = {64, 32};
++  uint64_t odT[2] = {(uint64_t)N * CH, (uint64_t)S}, osT[1] = {(uint64_t)N * CH * 2};
++  uint32_t obxT[2] = {32, 128};
++  if (smajor) {
++    enc(&am, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, a.data_ptr(), odT, osT, obxT, CU_TENSOR_MAP_SWIZZLE_NONE);
++    enc(&bm, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, b.data_ptr(), odT, osT, obxT, CU_TENSOR_MAP_SWIZZLE_NONE);
++  } else {
+   enc(&am, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, a.data_ptr(), od, os, obx, CU_TENSOR_MAP_SWIZZLE_128B);
+   enc(&bm, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, b.data_ptr(), od, os, obx, CU_TENSOR_MAP_SWIZZLE_128B);
++  }
+   C10_CUDA_CHECK(cudaFuncSetAttribute(opm_prologue_tma_wide<CM_MSA>, cudaFuncAttributeMaxDynamicSharedMemorySize, Cf::SMEM));
+   cudaKernel_t kernel;
+   C10_CUDA_CHECK(cudaGetKernel(&kernel, opm_prologue_tma_wide<CM_MSA>));
+@@ -2567,8 +2587,8 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
+   TORCH_CHECK(!pbias || (pbias->is_cuda() && pbias->scalar_type() == torch::kFloat32 && pbias->is_contiguous() && pbias->numel() == 2 * CH),
+               "wide OPM prologue: pbias fp32 [2 x 32] (the left | right projection biases)");
+   const float* pbp = pbias ? pbias->data_ptr<float>() : nullptr;
+-  int tiles = N * (S / 128), s_arg = S, n_arg = N; float ep = float(eps);
+-  void* args[] = {&xm, &mm, &wam, &wbm, &am, &bm, &gp, &bp, &mp, &sp, &bitp, &pbp, &s_arg, &n_arg, &tiles, &ep};
++  int tiles = N * (S / 128), s_arg = S, n_arg = N, smaj = smajor ? 1 : 0; float ep = float(eps);
++  void* args[] = {&xm, &mm, &wam, &wbm, &am, &bm, &gp, &bp, &mp, &sp, &bitp, &pbp, &s_arg, &n_arg, &tiles, &ep, &smaj};
+   int grid = std::min(tiles, at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
+   C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel), dim3(grid), dim3(512), args, Cf::SMEM,
+                                   at::cuda::getCurrentCUDAStream()));
+@@ -3027,7 +3047,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+         py::arg("raw_weights")=std::vector<torch::Tensor>{});
+   m.def("opm_prologue_wide", &opm_prologue_wide, "persistent TMA OPM prologue at this build's d_msa (64 / 128 / 256) + exact mask count",
+         py::arg("m"), py::arg("mask"), py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("eps"), py::arg("save_stats"),
+-        py::arg("pbias") = py::none(), py::arg("with_norm") = true, py::arg("dmin") = 1.0, py::arg("doff") = 0.0);
++        py::arg("pbias") = py::none(), py::arg("with_norm") = true, py::arg("dmin") = 1.0, py::arg("doff") = 0.0, py::arg("smajor") = false);
+   m.def("opm_native_pack",&opm_native_pack,py::arg("p"),py::arg("infer")=false,py::arg("pbl")=py::none(),py::arg("pbr")=py::none());
+   m.def("opm_native_prologue",&opm_native_prologue,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true,py::arg("dmin")=1.0,py::arg("doff")=0.0);
+   m.def("opm_native_prologue_tma",&opm_native_prologue_tma,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true,py::arg("dmin")=1.0,py::arg("doff")=0.0);

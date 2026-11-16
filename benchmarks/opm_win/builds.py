@@ -13,6 +13,9 @@ BUILDS = {
     "e32s4": ["-DOPM_EPI_NSTAGE=4"],
     "g4": ["-DOPM_PRO_G=4"],
     "g64": ["-DOPM_PRO_G=64"],
+    "g128": ["-DOPM_PRO_G=128"],
+    "g256": ["-DOPM_PRO_G=256"],
+    "g768": ["-DOPM_PRO_G=768"],
     # (BK 64 needs 3 x 48 KiB stages + 2 weight stages: 240 KiB > 227; one weight stage deadlocks the projection loop)
 }
 

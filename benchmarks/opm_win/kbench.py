@@ -25,11 +25,47 @@ wp = ot._fused_weight(wo)
 res = torch.randn(1, L, L, 128, device=dev, dtype=bf) if a.residual else None
 V = {f"cl{c}": (lambda c=c: ext.opm_fused_infer(a2, bt, norm, wp, ob, res, 1, cluster=c)) for c in (1, 2, 3, 4)}   # 1 none, 2 2x1, 3 1x2, 4 2x2
 V["cublas"] = lambda: torch.mm(a2, bt.t())
+if any(v in a.variants for v in ("pro_s", "nt_unfused", "cnt")):   # the s-major prologue, the NT product + epilogue on it, the mask counts
+    pro_s = ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False, smajor=True)
+    a_s, b_s, mask16s = pro_s[0], pro_s[1], pro_s[3]
+    print("s-major prologue bitwise == transposed", bool(torch.equal(a_s, a2.t())), bool(torch.equal(b_s, bt.t())), flush=True)
+    V["pro_s"] = lambda: ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False, smajor=True)
+    V["nt_mm"] = lambda: torch.mm(a_s.t(), b_s)
+    V["nt_unfused"] = lambda: ext.opm_epilogue(torch.mm(a_s.t(), b_s), norm, wo, ob, L, L, res, 1)
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+    og = owned_gemm_ext()
+    V["cnt"] = lambda: ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, True)   # (prologue + count kernel; minus pro_s)
+    V["cnt_mm"] = lambda: og.owned_mm(mask16s.t(), mask16s, False, True)
+    cm_ = og.owned_mm(mask16s.t(), mask16s, False, True).clamp_min(1.0)
+    print("count by mm == count kernel table", bool(torch.equal(cm_, ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, True)[4])), flush=True)
+if any(v.startswith("chain") or v == "triton" for v in a.variants.split(",")):   # whole inference chains (eager), as the routes run them
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext as _og
+    from miniworld_engine.kernels.outer_product_mean.triton.main import triton_outer_product_mean
+    og2 = _og()
+    def _chain(nt):
+        p = ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False, smajor=nt)
+        nrm = og2.owned_mm(p[3].t(), p[3], False, True).clamp_min_(1.0)
+        o = torch.mm(p[0].t(), p[1]) if nt else torch.mm(p[0], p[1].t())
+        return ext.opm_epilogue(o, nrm, wo, ob, L, L, res, 1)
+    V["chain_tn"] = lambda: _chain(False)
+    V["chain_nt"] = lambda: _chain(True)
+    msa4 = m[None]; mask4 = mk[None]
+    lnw = torch.ones(64, device=dev); lnb = torch.zeros(64, device=dev)
+    V["triton"] = lambda: triton_outer_product_mean(msa4, mask4, lnw, lnb, wa, wb, wo, ob, None, eps=1e-5, normalize_before_proj=False)
+    _x, _y = V["chain_tn"](), V["chain_nt"]()
+    _t = V["triton"]()
+    print("chain nt == tn", bool(torch.equal(_x, _y)), "max|tn - triton|", float((_x.float() - _t.float()).abs().max()), "max|ref|", float(_t.float().abs().max()), flush=True)
+if "cublas_nt" in a.variants:   # the same product from s-major operands [S, N*32] (the Triton / Anthropic layout): cuBLAS NT
+    a2s, bts = a2.t().contiguous(), bt.t().contiguous()
+    V["cublas_nt"] = lambda: torch.mm(a2s.t(), bts)
 V["unfused"] = lambda: ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo, ob, L, L, res, 1)   # cuBLAS product + the CUDA epilogue kernel
 if any(v in a.variants for v in ("pro", "epi")):   # (also "<build>.epi" / "<build>.pro")
     O0 = torch.mm(a2, bt.t())
     V["pro"] = lambda: ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False)   # the TMA prologue alone
     V["epi"] = lambda: ext.opm_epilogue(O0, norm, wo, ob, L, L, res, 1)   # the epilogue alone on a kept O
+    normf = ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, True)[4]   # the fp32 [N, N] count table (count kernel)
+    V["epin"] = lambda: ext.opm_epilogue(O0, normf, wo, ob, L, L, res, 1)   # the epilogue on the count table instead of the bit rows
+    V["pron"] = lambda: ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, True)   # the prologue + count kernel
     for nm, kw in (("epi_tma", dict(epi_tma=True)), ("epi_half", dict(epi_tma=True, epi_half=True))):
         if nm in a.variants.split(","):
             e2 = ot._ext(dev, native=True, tma=True, **kw)
@@ -49,7 +85,7 @@ for k in a.variants.split(","):
 V = {k: V[k] for k in a.variants.split(",")}
 ref = V["cl1"]() if "cl1" in V else None
 for k in V:
-    if k not in ("cublas", "pro") and not k.endswith(".pro") and ref is not None:  # ("epi" variants vs the fused kernel: the bf16 O rounding differs)
+    if k not in ("cublas", "pro", "pro_s", "nt_mm", "cnt", "cnt_mm", "chain_tn", "chain_nt", "triton") and not k.endswith(".pro") and ref is not None:  # ("epi" variants vs the fused kernel: the bf16 O rounding differs)
         o = V[k](); o2 = V[k]()
         print(k, "bitwise vs cl1", bool(torch.equal(o, ref)), "run-twice", bool(torch.equal(o, o2)), "max|d|", float((o.float() - ref.float()).abs().max()), flush=True)
 if "pro" in V:   # the prologue variants: bitwise the same A2 / BT / mask bits as this build's

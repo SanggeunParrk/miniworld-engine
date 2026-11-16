@@ -82,6 +82,10 @@ def prebuild(target, _rows):
                         )
     for kw in opm.values():
         yield functools.partial(ext, **kw)
+    if any(r["mode"] == "eval" for r in family_rows("outer_product_mean")):  # the product route's pair-count GEMM (opm_train._count_table)
+        from miniworld_engine.kernels.conditioned_transition.cuda import train as _ct_train
+
+        yield _ct_train.owned_gemm_ext
 
     base = (pwa_train.D, pwa_train.DZ, pwa_train.H, pwa_train.C)
     natives, pair, value = set(), set(), set()

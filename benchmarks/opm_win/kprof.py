@@ -9,6 +9,7 @@ from miniworld_engine.modules.primitives import unpadded_masks
 ap = argparse.ArgumentParser()
 ap.add_argument("row", type=int); ap.add_argument("L", type=int); ap.add_argument("S", type=int); ap.add_argument("backends", nargs="+")
 ap.add_argument("--iters", type=int, default=5)
+ap.add_argument("--sustain", type=float, default=0.0)   # > 0: back-to-back for this many seconds before and no idle between the profiled calls
 a = ap.parse_args()
 dev = torch.device("cuda")
 cfg = config.Config(modules=("OuterProductMean",), rows=(a.row,), lengths=(a.L,), depths="min", modes=("eval",), samples="min")
@@ -22,9 +23,14 @@ for b in a.backends:
     for _ in range(3):
         step()
     torch.cuda.synchronize()
+    if a.sustain > 0:
+        t_end = time.time() + a.sustain
+        while time.time() < t_end:
+            step()
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
         for _ in range(a.iters):
-            time.sleep(0.3)
+            if a.sustain <= 0:
+                time.sleep(0.3)
             step()
             torch.cuda.synchronize()
     agg = defaultdict(lambda: [0, 0.0])

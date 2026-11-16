@@ -95,6 +95,16 @@ def _product_route_deep(s: int, training: bool) -> bool:
     return not training and s > 4096
 
 
+def _count_table(mask16, dmin: float, doff: float):
+    """The pair divisor table max(n_ij, dmin) + doff, n = mask^T mask from the prologue's bf16 0 / 1 mask [S, N]: one cuBLAS GEMM with
+    fp32 accumulation and fp32 output (exact integer counts below 2^24), bitwise the count kernel's table (opm_count_tiled took
+    0.14 ms at S 16384 / L 768, this 44 us)."""
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+
+    t = owned_gemm_ext().owned_mm(mask16.t(), mask16, False, True).clamp_min_(float(dmin))
+    return t.add_(float(doff)) if doff else t
+
+
 #: the O workspace of the product route per row chunk (bytes): L 768 is one chunk (1.2 GB), L 2048 runs in chunks of 512 rows
 _O_CHUNK_BYTES = 2 << 30
 
@@ -529,18 +539,18 @@ def _forward_wide(ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residua
             "opm_wide_infer", [t for t in (lnw, lnb, wa, wb, wo, bo, pbias) if t is not None], forms
         )
     # inference: the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table), no separate count kernel;
-    # the product route (depth > 4096) takes the fp32 [N, N] table of the count kernel instead: the per-CTA popcount of two 4 x S / 8 byte
-    # bit rows costs the epilogue 0.17 ms at S 8192 and ~0.4 ms at S 16384 (L 768), the count kernel ~0.05 / ~0.1 ms
+    # the product route (depth > 4096) takes an fp32 [N, N] pair-count table (`_count_table`): the per-CTA popcount of two S / 8-byte bit
+    # rows cost the epilogue 0.17 ms at S 8192 and ~0.4 ms at S 16384 (L 768); the table is a 44 us GEMM there
     dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": float(dmin), "doff": float(doff)}  # the pair divisor max(count, dmin) + doff
     a2, bt, stats, mask16, norm = ext.opm_prologue_wide(
-        m, mk, gam, bet, wa16, wb16, float(eps), bool(save_stats), pb, bool(save_stats) or product_route, **dkw
+        m, mk, gam, bet, wa16, wb16, float(eps), bool(save_stats), pb, bool(save_stats), **dkw
     )
     ctx.has_bias = pbias is not None
     if fused:  # inference: the products stay in shared memory (norm is the mask bit table here)
         z = ext.opm_fused_infer(a2, bt, norm, _fused_weight(wo), ob, residual, int(after), **dkw)
         o = None
-    elif product_route:  # inference past depth 4096: cuBLAS product per row chunk + the epilogue (norm: the mask bit table)
-        z = _product_epilogue(ext, a2, bt, norm, wo16, ob, n, residual, after, dkw)
+    elif product_route:  # inference past depth 4096: cuBLAS product per row chunk + the epilogue on the pair-count table
+        z = _product_epilogue(ext, a2, bt, _count_table(mask16, dmin, doff), wo16, ob, n, residual, after, dkw)
         o = None
     else:
         o = torch.mm(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
