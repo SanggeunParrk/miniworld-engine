@@ -143,3 +143,17 @@ the RC cache):
 * **sm80** (`-sm80-cu129`): `triattn_bidir_sm80` re-keyed (`triattn_bidir_sm90.cu` is compiled for sm_80 too; its new kernels are not
   launched there: the A100 path keeps the torch ops, so outputs and tokens are unchanged). Built (nvcc, CPU node): OK.
 * **sm120** (`-sm120-cu129`): `triattn_bidir_sm120` re-keyed, same reason. Built: OK.
+
+## Release build (2.5.12)
+
+* Incremental prebuild from the 2.5.11 release cache (GCC 12.4 host compiler): sm90 8 built (`triattn_h100_bidir2` + the 7 re-keyed
+  `trimul_h100/generated/unit` cubins), sm80 1 (`triattn_bidir_sm80`), sm120 1 (`triattn_bidir_sm120`); 0 failed, 0 absent. Artifacts:
+  sm90 513, sm80 72, sm120 64 (as 2.5.11).
+* Manifest names vs the 2.5.11 upload: sm90 `triattn_h100_bidir` -> `triattn_h100_bidir2` (the only name change); sm80 / sm120 names
+  unchanged (re-keys only). Carried byte-for-byte as before: `triattn_h100_core_h16_v2` (sm90, from 2.5.5).
+* Installed-wheel check (the four artifacts unpacked, no repo / CUTLASS / nvcc, empty JIT cache): 513 / 513 sm90 artifacts resolved, 0
+  compiled (also with the system libstdc++ preloaded); capture API and init presets OK; `test_trimul_bidir_contraction_port_k3.py` 23
+  passed, `test_bidir_triattn_h100.py` 254 passed / 24 skipped, `test_restored_triton_backends.py` 63 passed, 0 builds; accuracy smoke
+  (TriangleAttention, TriangleMultiplication, BidirectionalTriangleAttention, BidirectionalTriangleMultiplication) RED 0, 0 builds.
+* PyPI sha256 (= `dist/SHA256SUMS`): engine wheel `8db14a95...`, sdist `aa3fcbf6...`, sm90 `67a6dd29...`, sm80 `597957b1...`, sm120
+  `44fc8688...`.
