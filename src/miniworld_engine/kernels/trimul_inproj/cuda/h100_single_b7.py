@@ -87,7 +87,9 @@ class Plan:
         self.consumers = consumers
         self.reuse_dp = 1
         self.count = clusters * (8 + self.consumers)
-        self.k = _build(bool(d.get("master_weights", False)), debug is not None, self.hwcluster, self.multicast, rings, consumers, mode, clusters)
+        self.k = _build(
+            bool(d.get("master_weights", False)), debug is not None, self.hwcluster, self.multicast, rings, consumers, mode, clusters
+        )
         x = d["x"]
         m = x.numel() // 128  # batched samples: B n n tokens, b-major (the pair mask is [B n, n])
         self.dx = T.take_input_grad(x).view(m, 128)

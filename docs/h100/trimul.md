@@ -85,6 +85,18 @@ other training paths read a bf16 pair mask built once per call.
 Saved: x_n, left / right, t, packed weights. The projections / gates and the output LN are recomputed on chip in the backward:
 K3 + B1 derivatives (`single_output`), then a producer-consumer B7 port (`single_b7`). Per-length tiles in `single_output/selection.json`.
 
+B1 (`single_output/kernel.cu`, kernel `single_b1`): a CTA owns 64-token tiles (132 CTAs, 1 per SM) and runs six phases per tile one after the other (input LN recompute,
+gate / projection `wgmma`, gate epilogue, dW and dn `wgmma`, output-LN backward, TMA stores). Removal ablation (L768, B1; all other phases kept; times
+are the whole kernel, baseline 0.862 ms): no loads after the first tile 0.884x, no LN recompute 0.860x, no gate epilogue 0.730x, no `wgmma` 0.769x, no
+LN backward 0.810x, no stores 0.934x: the phases add up (sum of the removals 104 %), so the kernel is serialisation, not one resource. Changes that keep
+every per-element operation and every accumulation order (bit-identical on y, dx and all parameter gradients, `tests/gpu/test_trimul_single_train_b1.py`):
+the next tile's xn / tri / dy are TMA-prefetched into a second shared-memory set (smem 181248 -> 230400 B; 0.93x), the gate epilogue and the dn stores
+move two adjacent columns per 32-bit shared access and per dropout-scale load (`B1_VEC`; 0.79x with the prefetch), and each warp takes two LN rows
+(r, r + 8) per pass with the shuffle reductions interleaved (`B1_LNI` = 2, accumulation order of dgamma / dbeta unchanged; 0.71x). Rejected: dropout scales
+held in registers (the kernel already spills at 255 registers: 1.16x slower), LN gamma / beta in registers (no change), four interleaved rows (0.725x vs 0.714x
+for two). `single_b7` builds, loads and checks the cooperative-launch occupancy once per process (`_build`): the repeated `T.compile` source / header hashing
+and occupancy query cost ~0.7 ms of host time per backward in eager training.
+
 ### D64 (`h100_d64_b200gate.py`, `h100_uni_d64_b200gate.py`)
 
 B200-style gate-gradient placement: B1 stores bf16 dGout, B7 accumulates `dGout Wg` with the input-projection gradient in fp32.

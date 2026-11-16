@@ -9,7 +9,7 @@ SMEM = 230400  # 181248 + the second (prefetched) input set 49152
 
 
 @T.device_cache
-def build(debug=False, master=False):
+def build(debug=False, master=False, extra=()):
     flags = [
         "-std=c++17",
         "-O3",
@@ -19,6 +19,7 @@ def build(debug=False, master=False):
         "-Xptxas=-v",
         "-DSINGLE_DEBUG=" + str(int(debug)),
         "-DMASTER_FP32=" + str(int(master)),
+        *extra,  # test / ablation macros of kernel.cu (B1_VEC, B1_LNI, ...): empty in every served build
         "-I" + str(T._upstream() / "csrc"),
         "-I" + str(T.ANTHROPIC_V5),
         "-I" + str(T.SOURCES / "common"),
