@@ -83,3 +83,12 @@ Artifacts whose keys change (sm90 wheel; rebuild and diff the manifest against 2
 * `trimul_h100/wide_train/output_ln_uni_pf.cu` (cubin, new artifact) -- key `ff1575b0`
 
 No change to `tmn_kernels.cuh`, the packaged TriMul inference unit, or any sm80 / sm120 source: the sm80 and sm120 kernel wheels can stay at 2.5.9 content.
+
+## Release build (2.5.10)
+
+* The engine pins all three kernel wheels `==2.5.10` (`miniworld-engine-kernels-sm90-cu129`, `-sm80-cu129`, `-sm120-cu129`).
+* Prebuild from the 2.5.9 release cache (content-keyed): sm90 512 artifacts (2.5.9: 511), 4 built (the four keys above); sm80 72 and sm120 64,
+  0 built. The sm80 / sm120 wheels carry the 2.5.9 payload unchanged, under version 2.5.10.
+* Manifest names vs the 2.5.9 upload: no name missing in any wheel; sm90 adds `trimul_h100/wide_train/output_ln_uni_pf.cu`; the only changed
+  sm90 paths are the three re-keyed artifacts (`triattn_h100_core_h16_v3`, `single_output/kernel.cu`, `single_b7/joint.cu`); sm80 / sm120 paths
+  identical. `triattn_h100_core_h16_v2` stays carried byte-for-byte from 2.5.5 (as in 2.5.9).
