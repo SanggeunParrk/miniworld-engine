@@ -8,6 +8,9 @@ BUILDS = {
     "g2": ["-DOPM_FUSED_GROUP=2"],
     "g1": ["-DOPM_PRO_G=1"],   # the wide prologue in the token-major tile order (before 2026-11-16)
     "noreg": ["-DOPM_PRO_REG=0"],   # the wide prologue without the setmaxnreg rebalance (128 regs everywhere: 112 B stack)
+    "e64s3": ["-DOPM_EPI_BJ=64"],   # epilogue: 256 pairs per CTA (4 warpgroups), 3 stages
+    "e64s4": ["-DOPM_EPI_BJ=64", "-DOPM_EPI_NSTAGE=4"],
+    "e32s4": ["-DOPM_EPI_NSTAGE=4"],
     "g4": ["-DOPM_PRO_G=4"],
     "g64": ["-DOPM_PRO_G=64"],
     # (BK 64 needs 3 x 48 KiB stages + 2 weight stages: 240 KiB > 227; one weight stage deadlocks the projection loop)

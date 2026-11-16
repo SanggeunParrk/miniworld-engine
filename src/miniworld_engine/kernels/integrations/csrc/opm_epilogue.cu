@@ -54,7 +54,10 @@ constexpr int BI = 2;              // one warpgroup shares each gathered TMA sta
 #else
 constexpr int BI = 4;              // i tokens per CTA
 #endif
-constexpr int BJ = 32;             // j tokens per CTA  (BJ*CH = 512 contiguous columns of O per read)
+#ifndef OPM_EPI_BJ
+#define OPM_EPI_BJ 32
+#endif
+constexpr int BJ = OPM_EPI_BJ;     // j tokens per CTA  (BJ*CH = 1024 / 2048 contiguous bytes of O per read)
 constexpr int NP = BI * BJ;        // 64 (i,j) pairs per CTA
 constexpr int KC = 64;             // K chunk = 2 c values
 // The staged tile is XOR-swizzled instead of padded.  A padded row stride cannot satisfy both
@@ -1154,7 +1157,7 @@ __device__ __forceinline__ void stmatrix_x4(uint32_t dst, uint32_t r0, uint32_t 
 #if defined(MINIWORLD_OPM_EPILOGUE_TMA_HALF)
 constexpr int WARPS = 4;
 #else
-constexpr int WARPS = 8;            // two warpgroups of 64 rows each
+constexpr int WARPS = NP / 16;      // one warpgroup per 64 rows (pairs) of the tile
 #endif
 constexpr int THREADS = WARPS * 32;
 constexpr int ROWT = NP / 16;      // 4 mma row tiles
@@ -1172,7 +1175,10 @@ constexpr int WSL = ZW * KC;                 // one chunk of Wo, [ZW rows][KC], 
 // third stage costs nothing in occupancy.  What it buys is one __syncthreads per chunk instead of two
 // -- at depth two the buffer a chunk just read is refilled by the very next chunk, so the wgmma needs
 // a barrier behind it as well as in front -- and barrier was 39% of this kernel's stall samples.
-constexpr int NSTAGE = 3;
+#ifndef OPM_EPI_NSTAGE
+#define OPM_EPI_NSTAGE 3
+#endif
+constexpr int NSTAGE = OPM_EPI_NSTAGE;
 constexpr int SMEM_STAGE = NSTAGE * NP * KCP * 2 + NSTAGE * WSL * 2;
 // The accumulator tile is padded for the same reason as KCP: an unpadded 128-float row is exactly
 // 32 banks, so every row of it started on bank 0.
@@ -1292,7 +1298,7 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     opm_pro_tma::ld2(&W_MAP,sW+slot*WSL,epi_full+slot,c*KC,0);
 #else
   // this thread's fixed slot in the tile, and the two streams walked forward one chunk at a time
-  const int k8 = tid & 3, jl = (tid >> 2) & (BJ - 1), cl = (tid >> 7) & (KC / CH - 1);
+  const int k8 = tid & 3, jl = (tid >> 2) & (BJ - 1), cl = (tid / (4 * BJ)) & (KC / CH - 1);
   const int chunk0 = cl * (CH / 8) + k8;
   const __nv_bfloat16* osrc = O + (size_t)(i0 * CH + cl) * M + (size_t)(j0 + jl) * CH + k8 * 8;
   const __nv_bfloat16* wsrc = BF + (size_t)z0 * (CH * CH);
@@ -2350,7 +2356,7 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
   auto stream = at::cuda::getCurrentCUDAStream();
   static bool ep_attr = false;                 // the staged weight pushes the tiles past 48 KiB
   if (!ep_attr) {
-    cudaFuncSetAttribute(opm_epilogue_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 128 * 1024);
+    cudaFuncSetAttribute(opm_epilogue_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES + 1024);
     ep_attr = true;
   }
   // z[i, j, z] as TMA sees it, innermost first: 64 z, then j, then the z half, then i
