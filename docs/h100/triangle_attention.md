@@ -286,3 +286,11 @@ no other width.
 ## History
 
 The previous, longer notes were deleted; see git history.
+
+Notes (2026-11-16, `bidir-ta2`, training and the tail; all bit-identical to 2.5.9: outputs and every gradient hashed against the 2.5.9 tree on 114 cases, `tests/gpu/test_bidir_triattn_h100.py`, and 420 kernel-level random trials of 6.3e9 elements with Gaussian / heavy-tailed / outlier data without a mismatching bit).
+
+- The fused tail also serves training (it writes the saved u): gate_u + residual copy + the badd out-projection become one kernel (L = 768 train 4146 -> 3953 us). The tail itself runs 16-channel chunks in a 4-deep cp.async ring (each thread forms u for the units it loaded, one barrier per chunk): L = 768 338 -> 323 us.
+- `gate_bwd_fused`: du = Wo^T dy^T (mma.sync, k16 steps in order = the cuBLAS bits) fused into the gate backward, no du planes: 173 + 523 us -> 586 us. Ablation of the fused kernel at L = 768: GEMM alone 154 us, memory traffic alone 527 us, both 545 us (the GEMM hides under the traffic; the 1.36 GB of the four planes at 3.35 TB/s is 406 us). 128-token tiles with 256-byte row segments (594 us) and an early prefetch of the g / o units (565 us) were slower than 64-token tiles with 128-byte segments through a per-warp smem staging (545-586 us).
+- `softmax_bwd_planes`: d logits = p (dp - s) written into the (transposed) bias-gradient planes in one pass (s = the torch sum, so the reduction order is torch's): about -60 us at L = 768.
+- Training L = 768 (fwd + bwd, CUDA-graph replay, same harness): 4428 -> 3775 us (-14.7 %); inference 1508 -> 1122 us (-25.6 %, of which this branch's 2.5.9-relative gains before the tail ring are the 2.5.10 candidate's own).
+- Tried, no gain: the ending contraction as one `cublasGemmBatchedEx` (pointer arrays, 128 batches): bit-equal, but 177 us with prebuilt pointers against 190 us for the 4 strided bmm launches (event timing), 209-212 us with the pointer arrays built per call: no pay-off once the build is counted, and the bit-equality of other cuBLAS algorithm choices (other L) would have to be proven per shape. Tail with the epilogue in registers and a ring that runs across tiles: 352 us against 323 us (slower). Fusing dyln = dc^T W with `ln_bwd`: not bit-identical possible (the gamma / beta partials of `ln_bwd` are accumulated in a grid-stride row order of its own).

@@ -182,3 +182,43 @@ def test_fused_softmax_backward_equals_the_torch_ops(monkeypatch, kind, starting
     yb, gb = _run(m, x, mask, True)
     assert torch.equal(ya, yb)
     assert len(ga) == len(gb) and all(torch.equal(a, b) for a, b in zip(ga, gb, strict=True))
+
+
+@pytest.mark.parametrize("trial", range(28))
+def test_fused_kernels_equal_the_unfused_bits_on_random_planes(trial):
+    """Kernel level, random planes of several scales and tails (Gaussian, heavy-tailed, sparse with outliers): the fused tail (with and without
+    the saved u) and the fused du + gate backward equal gate_u + torch.addmm and torch.mm + gate_bwd, bit for bit."""
+    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+
+    e, glue = I._ext(), I._glue()
+    gen = torch.Generator(device="cuda")
+    gen.manual_seed(1000 + trial)
+    bf = torch.bfloat16
+
+    def rnd(shape, scale, kind):
+        t = torch.randn(shape, device="cuda", generator=gen)
+        if kind == 1:
+            t = t / torch.rand(shape, device="cuda", generator=gen).clamp_min(1e-3)
+        elif kind == 2:
+            t = t * (torch.rand(shape, device="cuda", generator=gen) < 0.1) + 20 * torch.randn(shape, device="cuda", generator=gen) * (
+                torch.rand(shape, device="cuda", generator=gen) < 0.001
+            )
+        return (t * scale).to(bf)
+
+    K = (128, 256)[trial % 2]
+    LL = (128, 640, 4608, 16384, 65536, 147456, 589824)[trial % 7]
+    kind = (trial // 7) % 3
+    sg, so, sw, sx = [(0.1, 1, 0.1, 2), (1, 1, 0.1, 2), (4, 30, 1, 50), (10, 0.01, 0.01, 0.1), (0.5, 3, 0.3, 8)][(trial // 3) % 5]
+    gp, op, x = rnd((K, LL), sg, kind), rnd((K, LL), so, kind), rnd((LL, 128), sx, kind)
+    wo = rnd((128, K), sw, 0).contiguous()
+    u_ref = glue.gate_u(gp, op, 0)
+    out_ref = torch.addmm(x, u_ref.t(), wo.t())
+    out, out2, u = torch.empty_like(x), torch.empty_like(x), torch.empty(K, LL, device="cuda", dtype=bf)
+    e.tail(gp, op, wo, x, out, u)
+    e.tail(gp, op, wo, x, out2, None)
+    assert torch.equal(out, out_ref) and torch.equal(out2, out_ref) and torch.equal(u, u_ref)
+    dy = rnd((LL, 128), sx, kind)
+    dg_ref, dg_new = torch.empty(K, LL, device="cuda", dtype=bf), torch.empty(K, LL, device="cuda", dtype=bf)
+    do_ref = e.gate_bwd(torch.mm(wo.t(), dy.t()), gp, op, dg_ref)
+    do_new = e.gate_bwd_fused(dy, wo, gp, op, dg_new)
+    assert torch.equal(do_ref, do_new) and torch.equal(dg_ref, dg_new)
