@@ -6,6 +6,63 @@ import torch
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
 
+@T.device_cache
+def _build(master, debug, hwcluster, multicast, rings, consumers, mode, clusters):
+    """The cubin of the joint B7 kernel for one configuration, its kernel handle (smem opt-in done) and the cooperative-launch occupancy
+    check: once per process and configuration (the flags, the source and header hashing of ``T.compile`` and the occupancy query cost
+    ~1 ms of host time per backward when repeated)."""
+    R = T.SOURCES / "single_b7"
+    count = clusters * (8 + consumers)
+    inc = T._upstream() / "csrc"
+    flags = [
+        "-DMASTER_FP32=" + str(int(master)),
+        "-DB7_DEBUG_DXN=" + str(int(debug)),
+        "-DB7_HW_CLUSTER=" + str(hwcluster),
+        "-DB7_MULTICAST=" + str(multicast),
+        "-DB7_RING_DEPTH=" + str(rings),
+        "-DB7_TRANSPOSE_PART=" + str(bool(mode & 16) * 1),
+        "-DB7_REDUCE_NATIVE=" + str(bool(mode & 32) * 1),
+        "-DB7_PRODUCER_REGS=" + ("32"),
+        "-DB7_RING_CHUNK=" + str(8192 if mode & 8 else 16384 if mode & 4 else 32768),
+        "-DB7_GATEFIRST=" + str(bool(mode & 2) * 1),
+        "-DB7_RING_TENSOR=" + str(mode & 1),
+        "-DB7_ROLLING=" + str(bool(mode & 4) * 1),
+        "-DB7_LNPREFETCH=" + str(bool(mode & 8) * 1),
+        "-DB7_PREFETCH=" + str(mode & 3),
+        "-DB7_CONSUMERS=" + str(consumers),
+        "-DB7_REUSE_DP=" + str(1),
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_90a",
+        "--cubin",
+        "-lineinfo",
+        "-Xptxas=-v",
+        "-I" + str(inc),
+        "-I" + str(T.ANTHROPIC_V5),
+        "-I" + str(T.SOURCES / "common"),
+        "-I" + str(T.SOURCES / "common_b7"),
+        "-I" + str(T.SOURCES / "b7_384"),
+    ]
+    out = T.compile(R / "joint.cu", flags)
+    unit = T.load_unit(str(out), "joint")
+    k = unit.kernel("b7_joint")
+    k.set_max_dynamic_smem(114688)
+    assert clusters > 0 and (8 + consumers) % hwcluster == 0
+    dd = unit.drv.d
+    cfg = dd.CUlaunchConfig()
+    cfg.gridDimX = count
+    cfg.gridDimY = 1
+    cfg.gridDimZ = 1
+    cfg.blockDimX = 256
+    cfg.blockDimY = 1
+    cfg.blockDimZ = 1
+    cfg.sharedMemBytes = 114688
+    cfg.hStream = dd.CUstream(int(torch.cuda.current_stream().cuda_stream))
+    occ = dd.cuOccupancyMaxActiveClusters(dd.CUfunction(int(k.handle)), cfg)
+    assert int(occ[0]) == 0 and count <= int(occ[1]) * hwcluster
+    return k
+
+
 class Plan:
     def __init__(
         self,
@@ -21,7 +78,6 @@ class Plan:
         consumers=10,
         rings=12,
     ):
-        R = T.SOURCES / "single_b7"
         self.d = d
         self.xn = xn
         self.hwcluster = 2
@@ -31,55 +87,7 @@ class Plan:
         self.consumers = consumers
         self.reuse_dp = 1
         self.count = clusters * (8 + self.consumers)
-        inc = T._upstream() / "csrc"
-        flags = [
-            "-DMASTER_FP32=" + str(int(d.get("master_weights", False))),
-            "-DB7_DEBUG_DXN=" + str(int(debug is not None)),
-            "-DB7_HW_CLUSTER=" + str(self.hwcluster),
-            "-DB7_MULTICAST=" + str(self.multicast),
-            "-DB7_RING_DEPTH=" + str(self.rings),
-            "-DB7_TRANSPOSE_PART=" + str(bool(mode & 16) * 1),
-            "-DB7_REDUCE_NATIVE=" + str(bool(mode & 32) * 1),
-            "-DB7_PRODUCER_REGS=" + ("32"),
-            "-DB7_RING_CHUNK=" + str(8192 if mode & 8 else 16384 if mode & 4 else 32768),
-            "-DB7_GATEFIRST=" + str(bool(mode & 2) * 1),
-            "-DB7_RING_TENSOR=" + str(mode & 1),
-            "-DB7_ROLLING=" + str(bool(mode & 4) * 1),
-            "-DB7_LNPREFETCH=" + str(bool(mode & 8) * 1),
-            "-DB7_PREFETCH=" + str(mode & 3),
-            "-DB7_CONSUMERS=" + str(self.consumers),
-            "-DB7_REUSE_DP=" + str(self.reuse_dp),
-            "-std=c++17",
-            "-O3",
-            "-arch=sm_90a",
-            "--cubin",
-            "-lineinfo",
-            "-Xptxas=-v",
-            "-I" + str(inc),
-            "-I" + str(T.ANTHROPIC_V5),
-            "-I" + str(T.SOURCES / "common"),
-            "-I" + str(T.SOURCES / "common_b7"),
-            "-I" + str(T.SOURCES / "b7_384"),
-        ]
-        out = T.compile(R / "joint.cu", flags)
-        L = T._launch_module()
-        unit = T.load_unit(str(out), "joint")
-        drv = unit
-        self.k = unit.kernel("b7_joint")
-        self.k.set_max_dynamic_smem(114688)
-        assert self.clusters > 0 and (8 + self.consumers) % self.hwcluster == 0
-        dd = drv.drv.d
-        cfg = dd.CUlaunchConfig()
-        cfg.gridDimX = self.count
-        cfg.gridDimY = 1
-        cfg.gridDimZ = 1
-        cfg.blockDimX = 256
-        cfg.blockDimY = 1
-        cfg.blockDimZ = 1
-        cfg.sharedMemBytes = 114688
-        cfg.hStream = dd.CUstream(int(torch.cuda.current_stream().cuda_stream))
-        occ = dd.cuOccupancyMaxActiveClusters(dd.CUfunction(int(self.k.handle)), cfg)
-        assert int(occ[0]) == 0 and self.count <= int(occ[1]) * self.hwcluster
+        self.k = _build(bool(d.get("master_weights", False)), debug is not None, self.hwcluster, self.multicast, rings, consumers, mode, clusters)
         x = d["x"]
         m = x.numel() // 128  # batched samples: B n n tokens, b-major (the pair mask is [B n, n])
         self.dx = T.take_input_grad(x).view(m, 128)
