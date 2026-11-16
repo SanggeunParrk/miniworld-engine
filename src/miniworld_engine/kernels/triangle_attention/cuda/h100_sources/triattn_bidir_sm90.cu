@@ -450,7 +450,7 @@ torch::Tensor tail(torch::Tensor g, torch::Tensor o, torch::Tensor wo, torch::Te
 // the planes g, o, do, dg are read / written in 128-byte row segments (16-byte units). Wo resident in smem, the dy
 // tile double-buffered by cp.async. Needs d_pair == 128, K in {128, 256}, L L % 64 == 0.
 template <int K>
-__global__ void __launch_bounds__(256, 2) gbwd_k(const bf16* __restrict__ DY, const bf16* __restrict__ Wo, const bf16* __restrict__ G, const bf16* __restrict__ O,
+__global__ void __launch_bounds__(256, 2) gate_bwd_fused_k(const bf16* __restrict__ DY, const bf16* __restrict__ Wo, const bf16* __restrict__ G, const bf16* __restrict__ O,
                                                  bf16* __restrict__ dout, bf16* __restrict__ dg, long LL, long ldg, long ldo, long lddg) {
   using namespace tl;
   constexpr int TMB = 64, SD = 136, WS = K + 8, MT = K / 128, WR = K / 8, BUF = 9216;  // BUF: one dy buffer (elements) >= 64 x 136, 8 x 16 x 72
@@ -569,8 +569,8 @@ torch::Tensor gate_bwd_fused(torch::Tensor dy, torch::Tensor wo, torch::Tensor g
                                       reinterpret_cast<bf16*>(dout.data_ptr()), reinterpret_cast<bf16*>(dg.data_ptr()), LL, g.stride(0), o.stride(0),
                                       dg.stride(0));
   };
-  if (K == 256) go(gbwd_k<256>, (size_t)(128 * 264 + 2 * 9216) * 2);
-  else go(gbwd_k<128>, (size_t)(128 * 136 + 2 * 9216) * 2);
+  if (K == 256) go(gate_bwd_fused_k<256>, (size_t)(128 * 264 + 2 * 9216) * 2);
+  else go(gate_bwd_fused_k<128>, (size_t)(128 * 136 + 2 * 9216) * 2);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return dout;
 }
