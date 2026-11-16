@@ -366,36 +366,14 @@ def rowpad_serves(x, direction):
     )
 
 
-def _run_rowpad(leaves, mask, direction, out=None):
-    """Any L: K1 writes planes padded to the next multiple of 16 (zero pad rows / columns, as the packaged K1; B samples need no pad
-    and stack b-major), the contraction runs on the planes, K3 walks 64-token chunks of one pair row (k3.cu ROWPAD) and reads /
-    writes x / y through 3-D maps that clip the ragged row end. Same arithmetic per token as the token-flat path (pad terms are
-    exact zeros)."""
-    x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
-    bsz, n, d, h = x.shape[0], x.shape[1], x.shape[-1], wp.shape[1]
+def rowpad_k3(x, tri, xs, vec, wp, wg, go, bo, gi, bi, h, out=None):
+    """The any-L inference K3 of one sample (or B samples stacked b-major, L % 16 == 0): tri [h, (B) np, np] planes of the contraction, xs the
+    LN_in (mean, rstd) per pair row [B n n, 2] (the port K1's, or the packaged K1's save-statistics variant), the LayerNorm affines folded
+    into the projection / gate weights (fold launch, ``vec`` [4, d] fp32 receives up, vp, ug, vg). Returns y [B, n, n, d]."""
+    bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
     rows = bsz * n
     npad = -(-n // 16) * 16
-    if bsz > 1 and npad != n:
-        raise ValueError("B samples need L % 16 == 0")
     with T.native_context(x.device):
-        xs = x.new_empty((rows * n, 2), dtype=torch.float32)
-        vec = x.new_empty((4, d), dtype=torch.float32)
-        weights = [w.contiguous() for w in (wl, wlg, wr, wrg)]  # bf16 already (trimul casts the matrices: cast_training_weights)
-        token = (
-            torch.ones(rows, device=x.device, dtype=torch.bool)
-            if mask is None or mask.numel() == 0
-            else mask.reshape(rows).to(torch.bool).contiguous()
-        )
-        from .h100_b200style_direct import front
-
-        prow_ = rows if bsz > 1 else npad
-        if _split_planes(h, prow_, npad, direction, False):
-            tri = _front_contract_halves(front, x, weights, token, gi, bi, xs, h, prow_, npad, direction)
-        else:
-            ab = x.new_empty((2 * h, prow_, npad))
-            front(x, weights, token, gi, bi, ab, xs)
-            tri = _contract(ab, d, direction)  # [h, (B,) np, np]
-            del ab  # the planes are dead once contracted: freed before y, so the peak is x + planes + tri, not + y (FoldForge 5I28 OpenDDE)
         prow = rows if bsz > 1 else npad  # pair rows of the planes / tri
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
         _aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
@@ -428,7 +406,40 @@ def _run_rowpad(leaves, mask, direction, out=None):
             cj,
         ]
         kernel.launch((min(tiles, num_sms(x.device.index)), 1, 1), (384, 1, 1), [T._launch_module().Struct(fields)], smem)
-        return [y]
+        return y
+
+
+def _run_rowpad(leaves, mask, direction, out=None):
+    """Any L: K1 writes planes padded to the next multiple of 16 (zero pad rows / columns, as the packaged K1; B samples need no pad
+    and stack b-major), the contraction runs on the planes, K3 walks 64-token chunks of one pair row (k3.cu ROWPAD) and reads /
+    writes x / y through 3-D maps that clip the ragged row end. Same arithmetic per token as the token-flat path (pad terms are
+    exact zeros)."""
+    x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
+    bsz, n, d, h = x.shape[0], x.shape[1], x.shape[-1], wp.shape[1]
+    rows = bsz * n
+    npad = -(-n // 16) * 16
+    if bsz > 1 and npad != n:
+        raise ValueError("B samples need L % 16 == 0")
+    with T.native_context(x.device):
+        xs = x.new_empty((rows * n, 2), dtype=torch.float32)
+        vec = x.new_empty((4, d), dtype=torch.float32)
+        weights = [w.contiguous() for w in (wl, wlg, wr, wrg)]  # bf16 already (trimul casts the matrices: cast_training_weights)
+        token = (
+            torch.ones(rows, device=x.device, dtype=torch.bool)
+            if mask is None or mask.numel() == 0
+            else mask.reshape(rows).to(torch.bool).contiguous()
+        )
+        from .h100_b200style_direct import front
+
+        prow_ = rows if bsz > 1 else npad
+        if _split_planes(h, prow_, npad, direction, False):
+            tri = _front_contract_halves(front, x, weights, token, gi, bi, xs, h, prow_, npad, direction)
+        else:
+            ab = x.new_empty((2 * h, prow_, npad))
+            front(x, weights, token, gi, bi, ab, xs)
+            tri = _contract(ab, d, direction)  # [h, (B,) np, np]
+            del ab  # the planes are dead once contracted: freed before y, so the peak is x + planes + tri, not + y (FoldForge 5I28 OpenDDE)
+        return [rowpad_k3(x, tri, xs, vec, wp, wg, go, bo, gi, bi, h, out)]
 
 
 def _run_forward(leaves, mask, ds, direction, save, out=None):

@@ -135,6 +135,8 @@ TMN_K1_SET_BF16(128, 256, 6, 32, 8, 2)          // 192-token tiles (three consum
 TMN_K1_SET_BF16(128, 256, 3, 64, 8, 2)
 TMN_K1_SET_BF16(128, 256, 1, 128, 8, 2)
 TMN_K1_SET_BF16(128, 256, 2, 64, 4, 2)          // shorter ring (4 x 32 KB k-chunks)
+// save-statistics l2 (reference-order LN, token mask) of the tiles the bidirectional table serves: K1 hands its LN_in (mean, rstd) to the port K3 (MINIWORLD_TRIMUL_BIDIR_PORT_K3, default off)
+TMN_K1(128, 256, false, b, 3, 64, 8, 2, 1, 2, 1) TMN_K1(128, 256, false, b, 6, 32, 8, 2, 1, 2, 1) TMN_K1(128, 256, false, b, 2, 64, 8, 2, 1, 2, 1)
 TMN_K3_SET_BF16(128, 256, 2, 64, 6, 1)          // longer weight ring
 TMN_K3_SET_BF16(128, 256, 2, 64, 4, 2)          // two accumulator sets
 TMN_K3_SET_BF16(128, 256, 1, 128, 4, 1)
@@ -181,6 +183,7 @@ TMN_K3(64, 64, false, b, 2, 64, 4, 2, 1) TMN_K3U(64, 64, false, b, 2, 64, 4, 2, 
 TMN_K1_SET_BF16(64, 128, 3, 64, 8, 1)           // 192-token tile = three consumer warpgroups; 8 blocks x 1 slot: resident
 TMN_K1_SET_BF16(64, 128, 2, 64, 8, 1)
 TMN_K1_SET_BF16(64, 128, 1, 128, 8, 1)
+TMN_K1(64, 128, false, b, 3, 64, 8, 1, 1, 2, 1) TMN_K1(64, 128, false, b, 6, 32, 8, 1, 1, 2, 1) TMN_K1(64, 128, false, b, 2, 64, 8, 1, 1, 2, 1)   // save-statistics l2 (port K3 candidate, default off)
 TMN_K1(64, 128, false, b, 1, 192, 8, 1, 0, 2, 0) TMN_K1(64, 128, false, b, 1, 192, 8, 1, 1, 2, 0)   // tile-table data (incoming-leaning variant)
 TMN_K1(64, 128, false, b, 6, 32, 8, 1, 0, 2, 0) TMN_K1(64, 128, false, b, 6, 32, 8, 1, 1, 2, 0)     // tile-table data: 192 tokens as 6 rows x 32
 TMN_K1_SET_F32(64, 128, 3, 64, 8, 1)

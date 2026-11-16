@@ -1,6 +1,7 @@
 """Native K1/K3 inference, packaged with its measured tile table and CUDA sources."""
 
 import json
+import os
 from collections import OrderedDict
 from itertools import product
 
@@ -10,6 +11,14 @@ from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._launch_config import choose
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
+
+
+#: Candidate (default off, MINIWORLD_TRIMUL_BIDIR_PORT_K3=1): the bidirectional D64 / D128 call runs the packaged K1 in its save-statistics l2 form (planes unchanged),
+#: the contractions, and the B200-style port's any-L K3 (LayerNorms folded into the weights, LN_in statistics from K1) instead of the packaged K3.
+#: The output is NOT bit-identical to the packaged K3 (different rounding of the folded affine); see docs/h100/trimul.md for its error against an fp64 reference.
+PORT_K3 = os.environ.get("MINIWORLD_TRIMUL_BIDIR_PORT_K3", "0") == "1"
+#: K1 tiles (BI, BJ, NSLOT, SKCH) with a save-statistics l2 instantiation in the (cz, 2 cz) units (tmn_sm90_unit.cuh)
+_STATS_TILES = {128: {(3, 64, 8, 2), (6, 32, 8, 2), (2, 64, 8, 2)}, 64: {(3, 64, 8, 1), (6, 32, 8, 1), (2, 64, 8, 1)}}
 
 
 #: Weight sets whose K1 / K3 launch plans and tensor maps are kept (one per TriMul layer of a model; least recently used dropped).
@@ -211,6 +220,14 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
         tri = x.new_empty((ch, rows, npad))
         out = torch.empty_like(z) if dest is None else dest.view(z.shape)  # dest: a caller-owned buffer like x (chunked batches)
         cache = kk.plans(w)
+        port_k3 = (
+            PORT_K3
+            and direction == 0
+            and ch == 2 * cz
+            and tuple(cfg["k1"]) in _STATS_TILES.get(cz, ())
+            and (mask is None or mask.ndim == 1)
+        )
+        xs = x.new_empty((bsz * n * n, 2), dtype=torch.float32) if port_k3 else None
         kk.k1(
             z,
             mask if mask is None or mask.ndim == 1 else mask.reshape(n, n).float(),
@@ -225,6 +242,7 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
             eps=eps,
             cache=cache,
             token_mask=mask is not None and mask.ndim == 1,
+            stats=xs,
             rows=None if bsz == 1 else rows,  # one sample: N rows, planes padded to Np
         )
         # [c, B N, N] -> [c B, N, N]: the samples join the channel planes in cuBLAS's batch dim (a view; B = 1 is the same shape as before)
@@ -232,12 +250,17 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
         left, right = ab[:ch], ab[ch:]
         if direction == 0:
             h = ch // 2
-            _H100_BMM.bmm(fold(left[:h]), fold(right[:h]).transpose(-1, -2), out=fold(tri[:h]))
-            _H100_BMM.bmm(fold(left[h:]).transpose(-1, -2), fold(right[h:]), out=fold(tri[h:]))
+            _H100_BMM.contract(fold(left[:h]), fold(right[:h]).transpose(-1, -2), out=fold(tri[:h]))
+            _H100_BMM.contract(fold(left[h:]).transpose(-1, -2), fold(right[h:]), out=fold(tri[h:]))
         elif direction == 1:
             _H100_BMM.contract(fold(left), fold(right).transpose(-1, -2), out=fold(tri))
         else:
             _H100_BMM.contract(fold(left).transpose(-1, -2), fold(right), out=fold(tri))
+        if port_k3:
+            from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as _port
+
+            vec = x.new_empty((4, cz), dtype=torch.float32)
+            return _port.rowpad_k3(x, tri, xs, vec, wp, wg, go, bo, gi, bi, ch, None if dest is None else dest.view(x.shape))
         kk.k3(
             tri,
             z,
