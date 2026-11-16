@@ -161,6 +161,9 @@ LT_CONFIGS: dict = {
     (1536, False, 256): (201, 2, 5),  # 0.94
     (2560, False, 256): (29, 1, 3),  # 0.94
 }
+from miniworld_engine.kernels.trimul_inproj.cuda._h100_bmm_lt_bidir import LT_BIDIR  # noqa: E402  (bidirectional D64 / D128 contractions: 64 / 128 planes per launch)
+
+LT_CONFIGS.update(LT_BIDIR)
 
 _LT_ALGO = 66
 _lt_state = None
