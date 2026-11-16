@@ -2,6 +2,9 @@
 // Training extension using Anthropic-derived Hopper WGMMA/TMA primitives.
 #include <cooperative_groups.h>
 #include "common_recompute.cuh"
+#ifndef B7_EARLY_FREE
+#define B7_EARLY_FREE 1
+#endif
 #ifndef B7_PREFETCH
 #define B7_PREFETCH 0
 #endif
@@ -73,10 +76,15 @@ TMN_DEVI void source_producer(const Params& p,uint8_t* sm,uint64_t* bar){
   for(int round=0;round<rounds;round+=2){bool second=round+1<rounds;mbar_wait(bar+19,(round/2)&1);
    publish_tile(p,sm+98304,cid,round%RINGS,rank);
    if(second)publish_tile(p,sm+106496,cid,(round+1)%RINGS,rank);
+#if B7_EARLY_FREE
+   // The staging tiles are free once the bulk stores have read them; the flag still waits for the writes to complete.
+   tma_store_commit();tma_store_wait_read<0>();mbar_arrive(bar+20);tma_store_wait_all();
+   publish(p.flags+(cid*RINGS+round%RINGS)*(SOURCES+2)+1+rank,round+1);
+#else
    tma_store_commit();tma_store_wait_all();
    publish(p.flags+(cid*RINGS+round%RINGS)*(SOURCES+2)+1+rank,round+1);
-   
    mbar_arrive(bar+20);
+#endif
   }return;
  }if(threadIdx.x)return;
  for(int round=0,tile=cid;tile<p.tiles;tile+=groups,++round){int slot=round%4,rs=round%RINGS;
@@ -161,8 +169,8 @@ TMN_DEVI void consumer_producer(const Params& p,uint8_t* sm,uint64_t* bar){
  }
  if(threadIdx.x)return;
  for(int tile=cid+rank*groups;tile<p.tiles;tile+=CONSUMERS*groups,++round){int row=tile*64;
-  mbar_arrive_expect_tx(bar+19,16384);for(int k=0;k<2;++k)tma_load_2d(sm+98304+k*8192,&p.dg,bar+19,k*64,row);
   for(int batch=0;batch<4;++batch){int ws=batch%2;
+   if(batch==2){if(round>0)mbar_wait(bar+13,(round-1)&1);mbar_arrive_expect_tx(bar+19,16384);for(int k=0;k<2;++k)tma_load_2d(sm+98304+k*8192,&p.dg,bar+19,k*64,row);}
    if(batch>=2)mbar_wait(bar+6+ws,((batch/2)-1)&1);
    mbar_arrive_expect_tx(bar+2+ws,32768);
    for(int sub=0;sub<2;++sub){int stage=batch*2+sub;tma_load_2d(sm+32768+ws*32768+sub*16384,p.wt+stage/2,bar+2+ws,(stage%2)*64,0);}
@@ -239,7 +247,7 @@ TMN_DEVI void consumer_compute(const Params& p,uint8_t* sm,uint64_t* bar,const f
     float da=acc[q*8+pair*4],db=acc[q*8+pair*4+1],dc=acc[q*8+pair*4+2],dd=acc[q*8+pair*4+3],ga=gamma[c],gb=gamma[c+1];
     uint32_t oa=pack_bf16((__fmul_rn(da,ga)-fmaf(xaa,c1[0],c2[0]))*rs[0],(__fmul_rn(db,gb)-fmaf(xab,c1[0],c2[0]))*rs[0]);
     uint32_t ob=pack_bf16((__fmul_rn(dc,ga)-fmaf(xba,c1[1],c2[1]))*rs[1],(__fmul_rn(dd,gb)-fmaf(xbb,c1[1],c2[1]))*rs[1]);
-    uint8_t* out=lnsm+(q/4)*8192;uint8_t* res=lnsm+16384+(q/4)*8192;
+    uint8_t* out=sm+98304+(q/4)*8192;uint8_t* res=lnsm+16384+(q/4)*8192;
     uint32_t resa=pair_get(res,ra,c%64),resb=pair_get(res,rb,c%64);
     *reinterpret_cast<uint32_t*>(out+swz128(ra,(c%64)*2))=pack_bf16(bf16lo(oa)+bf16lo(resa),bf16hi(oa)+bf16hi(resa));
     *reinterpret_cast<uint32_t*>(out+swz128(rb,(c%64)*2))=pack_bf16(bf16lo(ob)+bf16lo(resb),bf16hi(ob)+bf16hi(resb));
@@ -251,10 +259,7 @@ TMN_DEVI void consumer_compute(const Params& p,uint8_t* sm,uint64_t* bar,const f
   run_g+=(tmp[tid]+tmp[256+tid])+(tmp[512+tid]+tmp[768+tid]);
   run_b+=(tmp[128+tid]+tmp[384+tid])+(tmp[640+tid]+tmp[896+tid]);
   fence_proxy_async();allsync();
-  if(tid==0){store2d(&p.dx,lnsm,0,row);store2d(&p.dx,lnsm+8192,64,row);tma_store_commit();}
-   if(tid==0)tma_store_wait_all();allsync();
-  
-  allsync();if(tid==0)mbar_arrive(bar+17);
+  if(tid==0){mbar_arrive(bar+17);store2d(&p.dx,sm+98304,0,row);store2d(&p.dx,sm+98304+8192,64,row);tma_store_commit();tma_store_wait_read<0>();mbar_arrive(bar+13);}
  }
  p.partln[(cid*CONSUMERS+rank)*256+tid]=run_g;p.partln[(cid*CONSUMERS+rank)*256+128+tid]=run_b;
 }
