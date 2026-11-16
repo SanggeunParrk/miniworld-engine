@@ -5,7 +5,7 @@ import torch
 from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
-SMEM = 181248
+SMEM = 230400  # 181248 + the second (prefetched) input set 49152
 
 
 @T.device_cache
