@@ -91,6 +91,39 @@ __global__ void __launch_bounds__(256) logits_k(const bf16* __restrict__ b, cons
   }
 }
 
+// The softmax gradient's last step on the planes: dl = p (dp - s) with s = (p dp).sum(-1) (fp32, torch's order: s is an input) -> the bias
+// gradient planes db (bf16, row stride ld, plane r = [L, L]): planes r < nstart as they are, the others transposed (dl[i, k] -> db[k, i]).
+// The values are those of torch's ``dl = p * (dp - s)`` followed by the copies into the (transposed) planes: one pass in place of
+// cat / float / sub / mul / copy passes.
+__global__ void __launch_bounds__(256) smbwd_k(const bf16* __restrict__ p, const float* __restrict__ dp, const float* __restrict__ s, bf16* __restrict__ db, int nstart, int L,
+                                              long ld) {
+  __shared__ float tile[32][33];
+  const int r = blockIdx.z;
+  const int a0 = blockIdx.y * 32, c0 = blockIdx.x * 32;  // a = i (row of p / dp), c = k
+  const long base = (long)r * L * L;
+  bf16* dst = db + (long)r * ld;
+  const int tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
+#pragma unroll
+  for (int t = 0; t < 4; ++t) {
+    const int i = a0 + ty + 8 * t, k = c0 + tx;
+    float v = 0.f;
+    if (i < L && k < L) v = __bfloat162float(p[base + (long)i * L + k]) * (dp[base + (long)i * L + k] - s[(long)r * L + i]);
+    if (r < nstart) {
+      if (i < L && k < L) dst[(long)i * L + k] = __float2bfloat16_rn(v);
+    } else {
+      tile[ty + 8 * t][tx] = v;
+    }
+  }
+  if (r >= nstart) {
+    __syncthreads();
+#pragma unroll
+    for (int t = 0; t < 4; ++t) {
+      const int k = c0 + ty + 8 * t, i = a0 + tx;
+      if (k < L && i < L) dst[(long)k * L + i] = __float2bfloat16_rn(tile[tx][ty + 8 * t]);
+    }
+  }
+}
+
 #define LT_CHECK(x) do { auto st_ = (x); TORCH_CHECK(st_ == CUBLAS_STATUS_SUCCESS, "cublasLt status ", int(st_), " at " #x); } while (0)
 struct LtPlan { cublasLtMatmulDesc_t op; cublasLtMatrixLayout_t la, lb, lc; std::vector<cublasLtMatmulHeuristicResult_t> cands; };
 
@@ -100,6 +133,21 @@ void check_rows(const torch::Tensor& t, const char* name) {
               name, ": bf16 [R, N] rows, unit column stride, 16-byte aligned rows");
 }
 }  // namespace
+
+// p [P, L, L] bf16 (P = nplanes), dp [P, L, L] fp32, s [P, L] fp32 -> db planes [P, L L] (rows of a bf16 matrix, row stride ld); the first nstart not transposed
+void softmax_bwd_planes(torch::Tensor p, torch::Tensor dp, torch::Tensor s, torch::Tensor db, int64_t nstart) {
+  TORCH_CHECK(p.is_cuda() && p.scalar_type() == torch::kBFloat16 && p.is_contiguous() && p.dim() == 3 && p.size(1) == p.size(2) &&
+                  dp.scalar_type() == torch::kFloat32 && dp.is_contiguous() && dp.sizes() == p.sizes() && s.scalar_type() == torch::kFloat32 && s.is_contiguous() &&
+                  s.numel() == p.size(0) * p.size(1) && db.scalar_type() == torch::kBFloat16 && db.dim() == 2 && db.size(0) == p.size(0) &&
+                  db.size(1) == p.size(1) * p.size(2) && db.stride(1) == 1,
+              "softmax_bwd_planes: p, dp [P, L, L], s [P, L, 1], db [P, L L]");
+  const long P = p.size(0), L = p.size(1);
+  c10::cuda::CUDAGuard guard(p.device());
+  const dim3 grid((unsigned)((L + 31) / 32), (unsigned)((L + 31) / 32), (unsigned)P);
+  smbwd_k<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const bf16*>(p.data_ptr()), dp.data_ptr<float>(), s.data_ptr<float>(),
+                                                              reinterpret_cast<bf16*>(db.data_ptr()), (int)nstart, (int)L, db.stride(0));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 // du, g, o: [R, N] -> do [R, N]; dg (preallocated [R, N] view, e.g. rows of the path's gradient planes) is written
 torch::Tensor gate_bwd(torch::Tensor du, torch::Tensor g, torch::Tensor o, torch::Tensor dg) {
@@ -453,6 +501,138 @@ torch::Tensor tail(torch::Tensor g, torch::Tensor o, torch::Tensor wo, torch::Te
   return out;
 }
 
+// ===================================================================================== fused du GEMM + gate backward (training)
+// du = Wo^T dy^T ([K, L L], rounded to bf16: torch.mm(wo.t(), dy.t())) and gate_bwd_k's elementwise pass in one kernel: du never goes to memory.
+// One CTA = 64 tokens x all K gate channels: the GEMM runs on mma.sync (k16 steps over the 128 pair channels in order, the arithmetic of the
+// fused tail, which equals the cuBLAS bits), each warp owns K / 8 channels; the bf16 du goes through a per-warp smem staging so that
+// the planes g, o, do, dg are read / written in 128-byte row segments (16-byte units). Wo resident in smem, the dy
+// tile double-buffered by cp.async. Needs d_pair == 128, K in {128, 256}, L L % 64 == 0.
+template <int K>
+__global__ void __launch_bounds__(256, 2) gbwd_k(const bf16* __restrict__ DY, const bf16* __restrict__ Wo, const bf16* __restrict__ G, const bf16* __restrict__ O,
+                                                 bf16* __restrict__ dout, bf16* __restrict__ dg, long LL, long ldg, long ldo, long lddg) {
+  using namespace tl;
+  constexpr int TMB = 64, SD = 136, WS = K + 8, MT = K / 128, WR = K / 8, BUF = 9216;  // BUF: one dy buffer (elements) >= 64 x 136, 8 x 16 x 72
+  extern __shared__ __align__(16) unsigned char smraw[];
+  bf16* sWo = reinterpret_cast<bf16*>(smraw);  // [128 c][WS]
+  bf16* sDy = sWo + 128 * WS;                  // 2 x BUF: [TMB tokens][SD] each
+  const int tid = threadIdx.x, lane = tid & 31, w = tid >> 5, q4 = lane & 3, g8 = lane >> 2, mi = lane >> 3;
+  for (int i = tid; i < 128 * (K / 8); i += 256) {
+    const int n = i / (K / 8), c = i % (K / 8);
+    cp16(sWo + n * WS + c * 8, Wo + (long)n * K + c * 8);
+  }
+  cp_commit();
+  const long ntiles = LL / TMB;
+  auto issue = [&](long tile, int s) {
+    for (int i = tid; i < TMB * 16; i += 256) {
+      const int r = i >> 4, ch = i & 15;
+      cp16(sDy + s * BUF + r * SD + ch * 8, DY + (tile * TMB + r) * 128 + ch * 8);
+    }
+    cp_commit();
+  };
+  if ((long)blockIdx.x < ntiles) issue(blockIdx.x, 0);
+  else cp_commit();
+  int it = 0;
+  for (long tile = blockIdx.x; tile < ntiles; tile += gridDim.x, ++it) {
+    if (tile + gridDim.x < ntiles) issue(tile + gridDim.x, (it + 1) & 1);
+    else cp_commit();
+    cp_wait<1>();
+    __syncthreads();
+    const bf16* dy = sDy + (it & 1) * BUF;
+    float acc[MT][8][4];
+#pragma unroll
+    for (int m = 0; m < MT; ++m)
+#pragma unroll
+      for (int j = 0; j < 8; ++j) acc[m][j][0] = acc[m][j][1] = acc[m][j][2] = acc[m][j][3] = 0.f;
+#pragma unroll
+    for (int ks = 0; ks < 8; ++ks) {
+      unsigned a[MT][4];
+#pragma unroll
+      for (int m = 0; m < MT; ++m) ldsm4t(a[m], sWo + (ks * 16 + (mi >> 1) * 8 + (lane & 7)) * WS + w * WR + m * 16 + (mi & 1) * 8);
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        unsigned b[4];
+        ldsm4(b, dy + (j * 16 + (mi >> 1) * 8 + (lane & 7)) * SD + ks * 16 + (mi & 1) * 8);
+#pragma unroll
+        for (int m = 0; m < MT; ++m) {
+          mma16816(acc[m][2 * j], a[m], b[0], b[1]);
+          mma16816(acc[m][2 * j + 1], a[m], b[2], b[3]);
+        }
+      }
+    }
+    const long tok0 = tile * TMB;
+    __syncthreads();  // every warp is done reading the dy tile: its buffer becomes the per-warp staging of du
+    bf16* stg = sDy + (it & 1) * BUF + w * 16 * 72;  // [16 rows][72]: this warp's 16 channels
+#pragma unroll
+    for (int m = 0; m < MT; ++m) {
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const int c = j * 8 + 2 * q4;
+        *reinterpret_cast<__nv_bfloat162*>(stg + g8 * 72 + c) = __floats2bfloat162_rn(acc[m][j][0], acc[m][j][1]);
+        *reinterpret_cast<__nv_bfloat162*>(stg + (g8 + 8) * 72 + c) = __floats2bfloat162_rn(acc[m][j][2], acc[m][j][3]);
+      }
+      __syncwarp();
+      // 4 rows x 8 lanes x 16 B per instruction: 128-byte row segments
+      uint4 du[4], gg[4], oo[4];
+      const long tk = tok0 + (lane & 7) * 8;
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const int rl = i * 4 + (lane >> 3);
+        const long row = w * WR + m * 16 + rl;
+        gg[i] = *reinterpret_cast<const uint4*>(G + row * ldg + tk);
+        oo[i] = *reinterpret_cast<const uint4*>(O + row * ldo + tk);
+        du[i] = *reinterpret_cast<const uint4*>(stg + rl * 72 + (lane & 7) * 8);
+      }
+      __syncwarp();
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        float a[8], gv[8], ovv[8], r[8], q[8];
+        unpack8(du[i], a);
+        unpack8(gg[i], gv);
+        unpack8(oo[i], ovv);
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          const float s = 1.f / (1.f + __expf(-gv[e]));
+          r[e] = a[e] * s;
+          q[e] = a[e] * ovv[e] * s * (1.f - s);
+        }
+        const long row = w * WR + m * 16 + i * 4 + (lane >> 3);
+        *reinterpret_cast<uint4*>(dout + row * LL + tk) = pack8(r);
+        *reinterpret_cast<uint4*>(dg + row * lddg + tk) = pack8(q);
+      }
+    }
+    __syncthreads();
+  }
+}
+
+// dy [L L, 128], wo [128, K], g / o [K, L L] gate planes -> do [K, L L]; dg (preallocated [K, L L] view) is written
+torch::Tensor gate_bwd_fused(torch::Tensor dy, torch::Tensor wo, torch::Tensor g, torch::Tensor o, torch::Tensor dg) {
+  const long K = wo.size(1), LL = dy.size(0);
+  check_rows(g, "g");
+  check_rows(o, "o");
+  check_rows(dg, "dg");
+  TORCH_CHECK(dy.is_cuda() && dy.scalar_type() == torch::kBFloat16 && dy.is_contiguous() && dy.dim() == 2 && dy.size(1) == 128 && wo.scalar_type() == torch::kBFloat16 &&
+                  wo.is_contiguous() && wo.dim() == 2 && wo.size(0) == 128 && (K == 128 || K == 256) && LL % 64 == 0 && g.size(0) == K && g.size(1) == LL &&
+                  o.size(0) == K && o.size(1) == LL && dg.size(0) == K && dg.size(1) == LL && reinterpret_cast<uintptr_t>(dy.data_ptr()) % 16 == 0,
+              "gate_bwd_fused: dy [LL, 128], wo [128, K], K in {128, 256}, LL % 64 == 0, planes [K, LL]");
+  c10::cuda::CUDAGuard guard(dy.device());
+  static int sms = 0;
+  if (sms == 0) sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  auto dout = torch::empty({K, LL}, dy.options());
+  const int grid = (int)std::min<long>(LL / 64, 2L * sms);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  auto go = [&](auto kern, size_t smem) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+    kern<<<grid, 256, smem, stream>>>(reinterpret_cast<const bf16*>(dy.data_ptr()), reinterpret_cast<const bf16*>(wo.data_ptr()),
+                                      reinterpret_cast<const bf16*>(g.data_ptr()), reinterpret_cast<const bf16*>(o.data_ptr()),
+                                      reinterpret_cast<bf16*>(dout.data_ptr()), reinterpret_cast<bf16*>(dg.data_ptr()), LL, g.stride(0), o.stride(0),
+                                      dg.stride(0));
+  };
+  if (K == 256) go(gbwd_k<256>, (size_t)(128 * 264 + 2 * 9216) * 2);
+  else go(gbwd_k<128>, (size_t)(128 * 136 + 2 * 9216) * 2);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return dout;
+}
+
 // The module's fp32 masters -> the path's bf16 weights in one launch: w = [Wv; Wg; Wb] (rows concatenated) and wo, each rounded to nearest
 // even (the bits of ``.to(torch.bfloat16)`` and ``torch.cat``: five small launches there).
 __global__ void __launch_bounds__(256) cast_w_k(const float* __restrict__ a, const float* __restrict__ b, const float* __restrict__ c, const float* __restrict__ d,
@@ -488,5 +668,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("out_proj", &out_proj);
   m.def("cgemm", &cgemm);
   m.def("tail", &tail);
+  m.def("softmax_bwd_planes", &softmax_bwd_planes);
+  m.def("gate_bwd_fused", &gate_bwd_fused);
   m.def("cast_weights", &cast_weights);
 }

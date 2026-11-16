@@ -102,7 +102,9 @@ FUSED_TAIL_SAVE = os.environ.get("BIDIR_FUSED_TAIL_SAVE", "1") != "0"
 
 
 def _fused_tail(save: bool, C: int, K: int, LL: int) -> bool:
-    return FUSED_TAIL and (FUSED_TAIL_SAVE or not save) and C == 128 and K in (128, 256) and LL % 128 == 0 and _planes_ext("tail") is not None
+    return (
+        FUSED_TAIL and (FUSED_TAIL_SAVE or not save) and C == 128 and K in (128, 256) and LL % 128 == 0 and _planes_ext("tail") is not None
+    )
 
 
 def _planes_ext(part: str = ""):
@@ -120,6 +122,40 @@ def _planes_gemm(w, y):
     return e.cgemm(w, y, torch.empty(w.shape[0], y.shape[0], device=y.device, dtype=y.dtype))
 
 
+#: Training backward, d_pair 128, K in (128, 256), L L % 64 == 0: du = Wo^T dy^T and the gate's backward in one kernel (``gate_bwd_fused`` of
+#: triattn_bidir_sm90.cu: no du planes). The same arithmetic as torch.mm + gate_bwd (du rounded to bf16, k16 steps in order): equal bits
+#: (tests/gpu/test_bidir_triattn_h100.py). BIDIR_FUSED_GBWD=0 switches it off.
+FUSED_GBWD = os.environ.get("BIDIR_FUSED_GBWD", "1") != "0"
+
+
+def _gate_bwd(dy, wo, g, o, dg):
+    """-> dO [K, L L] (dG written into ``dg``): ``gate_bwd(torch.mm(wo.t(), dy.t()), g, o, dg)``; dy [L L, C] rows of one sample, wo [C, K]."""
+    K = wo.shape[1]
+    if FUSED_GBWD and wo.shape[0] == 128 and K in (128, 256) and dy.shape[0] % 64 == 0 and _planes_ext("gbwd") is not None:
+        return _ext().gate_bwd_fused(dy.contiguous(), wo, g, o, dg)
+    return _ext().gate_bwd(torch.mm(wo.t(), dy.t()), g, o, dg)
+
+
+#: The softmax gradient's last step in one kernel (``softmax_bwd_planes`` of triattn_bidir_sm90.cu): the same fp32 ops as the torch
+#: expression, one pass in place of the cat / float / sub / mul / transpose-copy passes. BIDIR_FUSED_SMBWD=0 switches it off.
+FUSED_SMBWD = os.environ.get("BIDIR_FUSED_SMBWD", "1") != "0"
+
+
+def _softmax_bwd(p, dp, db, nstart):
+    """db [P, L L] (rows of the gradient planes) = d logits of the softmax P (p [P, L, L] bf16, dp [P, L, L] fp32): planes < nstart as they are, the
+    others transposed ([i, k] -> [k, i]); d logits = p (dp - (p dp).sum(-1))."""
+    s = torch.mul(p, dp).sum(-1, keepdim=True)
+    e = _planes_ext("smbwd") if FUSED_SMBWD else None
+    if e is not None:
+        e.softmax_bwd_planes(p, dp, s, db, nstart)
+        return
+    pf = p.float()
+    dl = pf * (dp - s)
+    out = db.view(p.shape)
+    out[:nstart] = dl[:nstart]
+    out[nstart:] = dl[nstart:].transpose(1, 2)
+
+
 def _mm_f32_into(out, a, b):
     """out (a [rows, N] fp32 slice) = a @ b, the same GEMM as ``_mm_f32`` without its result tensor and the copy into ``out``."""
     if LEGACY or "mm" in OFF or _a100():
@@ -128,8 +164,8 @@ def _mm_f32_into(out, a, b):
         torch.mm(a, b, out_dtype=torch.float32, out=out)
 
 
-def _probs(bias: torch.Tensor, keep: torch.Tensor | None, H: int, L: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """The bias planes [2 H, L L] of one sample -> (P_s [H, L, L], P_e [H, L, L]), each a softmax over its last axis k (masked keys -inf)."""
+def _probs(bias: torch.Tensor, keep: torch.Tensor | None, H: int, L: int) -> torch.Tensor:
+    """The bias planes [2 H, L L] of one sample -> [2 H, L, L] bf16: P_s (rows :H) and P_e (rows H:), each a softmax over its last axis k (masked keys -inf)."""
     e = _planes_ext("logits")
     if e is not None:  # one pass: widen, transpose the ending half, mask
         logits = e.logits(bias, keep, H, L)
@@ -138,8 +174,7 @@ def _probs(bias: torch.Tensor, keep: torch.Tensor | None, H: int, L: int) -> tup
         logits = torch.cat([b[:H], b[H:].transpose(1, 2)])  # starting [h, j, k]; ending [h, i, k] = bias_e[h, k, i]
         if keep is not None:
             logits = logits.masked_fill(~keep[None, None, :], float("-inf"))
-    p = torch.softmax(logits, -1).to(torch.bfloat16)
-    return p[:H], p[H:]
+    return torch.softmax(logits, -1).to(torch.bfloat16)
 
 
 def _out_proj(x, u, wo, out):
@@ -163,7 +198,8 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
     for b in range(B):
         rows = slice(b * LL, (b + 1) * LL)
         c = _planes_gemm(w, y[rows])  # [4 Dh + 2 H, L L]
-        ps, pe = _probs(c[4 * Dh :], None if mask is None else mask[b], H, L)
+        p16 = _probs(c[4 * Dh :], None if mask is None else mask[b], H, L)
+        ps, pe = p16[:H], p16[H:]
         o = torch.empty(2 * Dh, LL, device=x.device, dtype=torch.bfloat16)
         torch.bmm(c[:Dh].view(H, dh * L, L), ps.transpose(1, 2), out=o[:Dh].view(H, dh * L, L))
         for h in range(H):
@@ -177,7 +213,7 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
             _out_proj(x[rows], u, wo, out[rows])
         if save:
             planes.append(c)
-            probs.append((ps, pe))
+            probs.append(p16)
             os_.append(o)
             us.append(u)
     saved = (y, mean, rstd, planes, probs, os_, us) if save else None
@@ -185,7 +221,7 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
 
 
 def _backward(dy, pair, lnw, w, wo, saved, H, Dh):
-    g, e = _glue(), _ext()
+    g = _glue()
     y, mean, rstd, planes, probs, os_, us = saved
     B, L, _, C = pair.shape
     LL, dh = L * L, Dh // H
@@ -197,28 +233,23 @@ def _backward(dy, pair, lnw, w, wo, saved, H, Dh):
     dc = torch.empty(w.shape[0], LL, device=x.device, dtype=torch.bfloat16)
     for b in range(B):
         rows = slice(b * LL, (b + 1) * LL)
-        c, (ps, pe), o, u = planes[b], probs[b], os_[b], us[b]
+        c, p16, o, u = planes[b], probs[b], os_[b], us[b]
+        ps, pe = p16[:H], p16[H:]
         dWo += _mm_f32(dy[rows].t(), u.t())
-        du = torch.mm(wo.t(), dy[rows].t())  # [2 Dh, L L]
-        do = e.gate_bwd(du, c[2 * Dh : 4 * Dh], o, dc[2 * Dh : 4 * Dh])  # dO; dG into dc
-        del du
+        do = _gate_bwd(dy[rows], wo, c[2 * Dh : 4 * Dh], o, dc[2 * Dh : 4 * Dh])  # dO; dG into dc
         # starting: O_s[h] = V_s[h] P_s[h]^T
         dos = do[:Dh].view(H, dh * L, L)
         torch.bmm(dos, ps, out=dc[:Dh].view(H, dh * L, L))
         dps = torch.bmm(dos.transpose(1, 2), c[:Dh].view(H, dh * L, L), out_dtype=torch.float32)  # [H, j, k]
         # ending: O_e[c] = P_e[h] V_e[c]
-        dpe = []
+        dp = torch.empty(2 * H, L, L, device=x.device, dtype=torch.float32)  # d P: starting [H, j, k], ending [H, i, k]
+        dp[:H] = dps
         for h in range(H):
             ch = slice(Dh + h * dh, Dh + (h + 1) * dh)
             doe = do[ch].view(dh, L, L)
             torch.bmm(pe[h].t().expand(dh, L, L), doe, out=dc[ch].view(dh, L, L))
-            dpe.append(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32).sum(0))  # [i, k]
-        dp = torch.cat([dps, torch.stack(dpe)])
-        p = torch.cat([ps, pe]).float()
-        dl = p * (dp - (p * dp).sum(-1, keepdim=True))  # d logits [2 H, ., k]
-        db = dc[4 * Dh :].view(2 * H, L, L)
-        db[:H] = dl[:H]
-        db[H:] = dl[H:].transpose(1, 2)  # back to the bias plane's [k, i]
+            torch.sum(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32), 0, out=dp[H + h])  # [i, k]
+        _softmax_bwd(p16, dp, dc[4 * Dh :], H)  # d logits -> the bias planes' gradient (the ending half back to [k, i])
         dW += _mm_f32(dc, y[rows])
         _mm_f32_into(dyln[rows], dc.t(), w)
     dx, part = g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)  # + the residual's dy
@@ -286,7 +317,11 @@ def single_refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str
     """Why the single-direction bias-only path does not serve this call (None: it does)."""
     if not pair.is_cuda:
         return "the kernels run on CUDA tensors only"
-    if torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0), (12, 0)):  # 12.0: the sm_80 glue built for sm_120a (sm80_bidir)
+    if torch.cuda.get_device_capability(pair.device) not in (
+        (9, 0),
+        (8, 0),
+        (12, 0),
+    ):  # 12.0: the sm_80 glue built for sm_120a (sm80_bidir)
         return "the bias-only TriangleAttention cuda path is the H100 (sm_90a), A100 (sm_80) and RTX 5090 (sm_120a) one"
     if pair.dtype != torch.bfloat16:
         return f"dtype {pair.dtype}: bf16 activations only (the bias-only path's glue kernels)"
@@ -360,7 +395,7 @@ def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
 
 
 def _backward1(dy, pair, drop, lnw, w, wo, saved, H, Dh, starting):
-    g, e = _glue(), _ext()
+    g = _glue()
     y, mean, rstd, planes, probs, os_, us = saved
     B, L, _, C = pair.shape
     LL, dh = L * L, Dh // H
@@ -375,24 +410,19 @@ def _backward1(dy, pair, drop, lnw, w, wo, saved, H, Dh, starting):
         c, p, o, u = planes[b], probs[b], os_[b], us[b]
         dt = dy[rows] if drop is None else (dy[rows].view(L, L, C) * drop[b]).view(LL, C)  # the update's gradient
         dWo += _mm_f32(dt.t(), u.t())
-        du = torch.mm(wo.t(), dt.t())  # [Dh, L L]
-        do = e.gate_bwd(du, c[Dh : 2 * Dh], o, dc[Dh : 2 * Dh])  # dO; dG into dc
-        del du
+        do = _gate_bwd(dt, wo, c[Dh : 2 * Dh], o, dc[Dh : 2 * Dh])  # dO; dG into dc
         if starting:  # O[h] = V[h] P[h]^T
             dos = do.view(H, dh * L, L)
             torch.bmm(dos, p, out=dc[:Dh].view(H, dh * L, L))
             dp = torch.bmm(dos.transpose(1, 2), c[:Dh].view(H, dh * L, L), out_dtype=torch.float32)  # [H, j, k]
         else:  # O[c] = P[h] V[c]
-            dps = []
+            dp = torch.empty(H, L, L, device=x.device, dtype=torch.float32)
             for h in range(H):
                 ch = slice(h * dh, (h + 1) * dh)
                 doe = do[ch].view(dh, L, L)
                 torch.bmm(p[h].t().expand(dh, L, L), doe, out=dc[ch].view(dh, L, L))
-                dps.append(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32).sum(0))  # [i, k]
-            dp = torch.stack(dps)
-        pf = p.float()
-        dl = pf * (dp - (pf * dp).sum(-1, keepdim=True))  # d logits [H, ., k]
-        dc[2 * Dh :].view(H, L, L).copy_(dl if starting else dl.transpose(1, 2))  # back to the bias plane's layout
+                torch.sum(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32), 0, out=dp[h])  # [i, k]
+        _softmax_bwd(p, dp, dc[2 * Dh :], H if starting else 0)  # d logits -> the bias plane's layout
         dW += _mm_f32(dc, y[rows])
         _mm_f32_into(dyln[rows], dc.t(), w)
     dx, part = g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)  # + the residual's dy

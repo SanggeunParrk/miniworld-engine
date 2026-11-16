@@ -69,7 +69,8 @@ Names from `requirements/requirements_kernel.csv` (family `triangle_attention`);
 | `triangle_attention_generic_gate_u_sm90` | forward | glue `gate_u` (`triattn_generic_sm90.cu`): `u = sigmoid(g) o O`; used by the bidirectional path |
 | `triangle_attention_bidir_gate_bwd_sm90` | backward | `triattn_bidir_sm90.cu` `gate_bwd` (`cuda/h100_bidir.py`): do, dg of the bidirectional gate on channel planes |
 | `triangle_attention_bidir_logits_sm90` | forward | `triattn_bidir_sm90.cu` `logits` (`cuda/h100_bidir.py`): the bias planes -> fp32 softmax logits in one pass (widen, ending half transposed, masked keys -inf); `torch.softmax` follows |
-| `triangle_attention_bidir_tail_sm90` | forward_infer | `triattn_bidir_sm90.cu` `tail`: `out = x + (sigmoid(G) o O)^T Wo^T` in one mma.sync kernel (u formed in shared memory, product rounded to bf16 then x added: the bits of gate_u + torch.addmm); d_pair 128, no grad |
+| `triangle_attention_bidir_tail_sm90` | forward | `triattn_bidir_sm90.cu` `tail`: `out = x + (sigmoid(G) o O)^T Wo^T` in one mma.sync kernel (u formed in shared memory, product rounded to bf16 then x added: the bits of gate_u + torch.addmm); d_pair 128; in training (u saved) the kernel also writes u |
+| `triangle_attention_bidir_gate_bwd_fused_sm90` | backward | `triattn_bidir_sm90.cu` `gate_bwd_fused`: du = Wo^T dy^T (mma.sync, k16 steps in order, bits of torch.mm) and the gate backward in one kernel, no du planes; d_pair 128, K in (128, 256) |
 | `triangle_attention_drop_scale_sm90`, `triangle_attention_graph_rng_write_sm90` | forward_train | `pack.cu` (`h100_triattn.extension("pack")`): Philox keep-mask; used by `integrations/pwa_train.py` (MSA row dropout), not by the triangle modules |
 
 ## Fused path: d_pair = d_hidden = 128, 4 heads x 32

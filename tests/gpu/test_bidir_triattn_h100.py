@@ -144,3 +144,41 @@ def test_fused_tail_with_saved_u_equals_the_unfused_training(monkeypatch, kind, 
     yb, gb = _run(m, x, mask, True)
     assert torch.equal(ya, yb)
     assert len(ga) == len(gb) and all(torch.equal(a, b) for a, b in zip(ga, gb, strict=True))
+
+
+@pytest.mark.parametrize(("kind", "starting"), KINDS)
+@pytest.mark.parametrize("length", [128, 144, 256, 384, 512])
+@pytest.mark.parametrize(("batch", "masked", "w_std", "x_scale"), [(1, False, 0.1, 2.0), (1, True, 0.5, 0.5), (2, True, 0.1, 4.0)])
+def test_fused_gate_backward_equals_the_unfused_one(monkeypatch, kind, starting, length, batch, masked, w_std, x_scale):
+    """Training backward: du = Wo^T dy^T fused into the gate's backward; dx and every parameter gradient equal the torch.mm + gate_bwd bits."""
+    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+
+    if length >= 384 and batch > 1:
+        pytest.skip("memory")
+    m = _module(kind, starting, seed=length, w_std=w_std)
+    x, mask = _inputs(batch, length, masked, x_scale)
+    monkeypatch.setattr(I, "FUSED_GBWD", False)
+    ya, ga = _run(m, x, mask, True)
+    monkeypatch.setattr(I, "FUSED_GBWD", True)
+    yb, gb = _run(m, x, mask, True)
+    assert torch.equal(ya, yb)
+    assert len(ga) == len(gb) and all(torch.equal(a, b) for a, b in zip(ga, gb, strict=True))
+
+
+@pytest.mark.parametrize(("kind", "starting"), KINDS)
+@pytest.mark.parametrize("length", [128, 144, 200, 256, 384, 512])
+@pytest.mark.parametrize(("batch", "masked", "w_std", "x_scale"), [(1, False, 0.1, 2.0), (1, True, 0.5, 0.5), (2, True, 0.1, 4.0)])
+def test_fused_softmax_backward_equals_the_torch_ops(monkeypatch, kind, starting, length, batch, masked, w_std, x_scale):
+    """Training backward: the softmax gradient's last step in one kernel; dx and every parameter gradient equal the torch ops' bits."""
+    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+
+    if length >= 384 and batch > 1:
+        pytest.skip("memory")
+    m = _module(kind, starting, seed=length, w_std=w_std)
+    x, mask = _inputs(batch, length, masked, x_scale)
+    monkeypatch.setattr(I, "FUSED_SMBWD", False)
+    ya, ga = _run(m, x, mask, True)
+    monkeypatch.setattr(I, "FUSED_SMBWD", True)
+    yb, gb = _run(m, x, mask, True)
+    assert torch.equal(ya, yb)
+    assert len(ga) == len(gb) and all(torch.equal(a, b) for a, b in zip(ga, gb, strict=True))
