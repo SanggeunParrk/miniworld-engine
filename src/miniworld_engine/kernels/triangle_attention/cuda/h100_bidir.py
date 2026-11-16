@@ -1,6 +1,7 @@
 """H100 (sm_90a) glue of the bidirectional bias-only TriangleAttention (``kernels/integrations/bidir_triattn_h100``):
-``h100_sources/triattn_bidir_sm90.cu`` (the gate's backward on channel planes, the softmax-logits pass, the residual out-projection through
-cublasLt with D != C). The path's LayerNorm / gate forward are the width-generic kernels of ``h100_sm90_generic._glue``."""
+``h100_sources/triattn_bidir_sm90.cu`` (the gate's backward on channel planes, plain and fused with the du GEMM; the softmax-logits
+pass; the softmax gradient's last step; the fused gate + out-projection tail; the planes GEMM through a bit-equal cublasLt algorithm;
+the weight cast). The path's LayerNorm / gate forward are the width-generic kernels of ``h100_sm90_generic._glue``."""
 
 from __future__ import annotations
 
