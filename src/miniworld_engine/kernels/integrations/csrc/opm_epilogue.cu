@@ -2572,10 +2572,10 @@ namespace opm_fused {
 #define OPM_FUSED_BK 32
 #endif
 #ifndef OPM_FUSED_STAGES
-#define OPM_FUSED_STAGES 4
+#define OPM_FUSED_STAGES 5
 #endif
 #ifndef OPM_FUSED_WST
-#define OPM_FUSED_WST 4
+#define OPM_FUSED_WST 2
 #endif
 constexpr int BM = 128, BN = 256, BK = OPM_FUSED_BK, STAGES = OPM_FUSED_STAGES;
 static_assert(BK == 64 || BK == 32, "stage K is one 128 B or one 64 B swizzle row");
@@ -2587,7 +2587,7 @@ constexpr int SMEM = BAR_OFF + 2048 + 1024;   // barriers + counts, and the slac
 static_assert(SMEM <= 227 * 1024, "shared memory");
 constexpr int PAIRS = 128;
 #ifndef OPM_FUSED_RASTER
-#define OPM_FUSED_RASTER 8
+#define OPM_FUSED_RASTER 16
 #endif
 constexpr int RASTER = OPM_FUSED_RASTER;                    // m blocks per raster group (A / B panels stay in L2)
 

@@ -1,1 +1,57 @@
 VARIANT
+[miniworld-engine build] compiling miniworld_opm_fused_var_ [9814080c] (torch extension) ...
+[miniworld-engine build] built miniworld_opm_fused_var_ [9814080c] in 92.7 s; 1 built in this process
+fused DBG=0: 30.984 ms  639 TF-equiv
+VARIANT -DOPM_FUSED_STAGES=5 -DOPM_FUSED_WST=2
+[miniworld-engine build] compiling miniworld_opm_fused_var_DOPMFUSEDSTAGES5DOPMFUSEDWST2 [3ac83871] (torch extension) ...
+[miniworld-engine build] built miniworld_opm_fused_var_DOPMFUSEDSTAGES5DOPMFUSEDWST2 [3ac83871] in 93.3 s; 1 built in this process
+fused DBG=0: 29.117 ms  680 TF-equiv
+VARIANT -DOPM_FUSED_STAGES=6 -DOPM_FUSED_WST=2
+[miniworld-engine build] compiling miniworld_opm_fused_var_DOPMFUSEDSTAGES6DOPMFUSEDWST2 [33c4bb9b] (torch extension) ...
+[miniworld-engine build] failed to build miniworld_opm_fused_var_DOPMFUSEDSTAGES6DOPMFUSEDWST2 [33c4bb9b] after 34.2 s
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2893, in _run_ninja_build
+    subprocess.run(
+  File "/home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['ninja', '-v']' returned non-zero exit status 2.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/ablate2.py", line 14, in <module>
+    ext = load(name="miniworld_opm_fused_var_" + "".join(c for c in "".join(flags) if c.isalnum()), sources=[str(csrc / "opm_epilogue.cu")], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-DMINIWORLD_OPM_FUSED=1"] + flags, extra_cflags=["-O3"])
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/src/miniworld_engine/kernels/_nvcc.py", line 1014, in load_extension
+    return _load("torch extension", name, kwargs, sources=[str(s) for s in sources])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/src/miniworld_engine/kernels/_nvcc.py", line 909, in _load
+    hit = _build_ext(kind_label, name, kwargs, sources, inline, key, material, graph)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/src/miniworld_engine/kernels/_nvcc.py", line 980, in _build_ext
+    load(name=name, sources=sources or [], **call_kwargs)
+  File "/home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 1927, in load
+    return _jit_compile(
+           ^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2382, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "/home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2543, in _write_ninja_file_and_build_library
+    _run_ninja_build(
+  File "/home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2910, in _run_ninja_build
+    raise RuntimeError(message) from e
+RuntimeError: Error building extension 'miniworld_opm_fused_var_DOPMFUSEDSTAGES6DOPMFUSEDWST2': [1/2] /home/psk6950/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF opm_epilogue.cuda.o.d -DTORCH_EXTENSION_NAME=miniworld_opm_fused_var_DOPMFUSEDSTAGES6DOPMFUSEDWST2 -DTORCH_API_INCLUDE_EXTENSION_H -isystem /home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -gencode=arch=compute_90a,code=sm_90a -DMINIWORLD_OPM_FUSED=1 -DOPM_FUSED_STAGES=6 -DOPM_FUSED_WST=2 -std=c++20 -c /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/src/miniworld_engine/kernels/integrations/csrc/opm_epilogue.cu -o opm_epilogue.cuda.o 
+FAILED: [code=2] opm_epilogue.cuda.o 
+/home/psk6950/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF opm_epilogue.cuda.o.d -DTORCH_EXTENSION_NAME=miniworld_opm_fused_var_DOPMFUSEDSTAGES6DOPMFUSEDWST2 -DTORCH_API_INCLUDE_EXTENSION_H -isystem /home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -gencode=arch=compute_90a,code=sm_90a -DMINIWORLD_OPM_FUSED=1 -DOPM_FUSED_STAGES=6 -DOPM_FUSED_WST=2 -std=c++20 -c /home/psk6950/miniworld-engine-scratch/wt-opm-bigs/src/miniworld_engine/kernels/integrations/csrc/opm_epilogue.cu -o opm_epilogue.cuda.o 
+/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/src/miniworld_engine/kernels/integrations/csrc/opm_epilogue.cu(1774): warning #607-D: this pragma must immediately precede a statement
+  #pragma unroll
+          ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/src/miniworld_engine/kernels/integrations/csrc/opm_epilogue.cu(2587): error: static assertion failed with "shared memory"
+  static_assert(SMEM <= 227 * 1024, "shared memory");
+  ^
+
+1 error detected in the compilation of "/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/src/miniworld_engine/kernels/integrations/csrc/opm_epilogue.cu".
+ninja: build stopped: subcommand failed.
+
