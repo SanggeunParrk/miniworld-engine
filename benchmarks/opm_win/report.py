@@ -34,8 +34,8 @@ def sp(d, k, b, m):  # speed-up over the stack's own PyTorch
 lines = []
 for m, name in ((0, "cool"), (1, "sustained")):
     lines.append(f"\n### {name} (ms; x = speed-up over PyTorch of the same stack; lead = CUDA after vs Anthropic, > 1 faster)\n")
-    lines.append("| row | L | S | PyTorch | Anthropic | Triton | CUDA before | CUDA after | lead before | lead after |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| row | L | S | PyTorch | Anthropic | Triton | CUDA before | CUDA after | lead before | lead after | after vs Triton |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for k in keys:
         a, b, e = kit.get(k, {}), before.get(k, {}), after[k]
 
@@ -47,8 +47,10 @@ for m, name in ((0, "cool"), (1, "sustained")):
         pa, pb, pe = sp(kit, k, "anthropic", m), sp(before, k, "cuda", m), sp(after, k, "cuda", m)
         lb = f"{pb / pa:.3f}" if pa and pb else "-"
         la = f"{pe / pa:.3f}" if pa and pe else "-"
+        pt = sp(after, k, "triton", m)
+        lt = f"{pe / pt:.3f}" if pt and pe else "-"
         lines.append(f"| {k[0]} | {k[1]} | {k[2]} | {e['pytorch'][m]:.3f} | {cell(kit, 'anthropic')} | {cell(after, 'triton')} | "
-                     f"{cell(before, 'cuda')} | {cell(after, 'cuda')} | {lb} | {la} |")
+                     f"{cell(before, 'cuda')} | {cell(after, 'cuda')} | {lb} | {la} | {lt} |")
 (out / "table.md").write_text("\n".join(lines) + "\n")
 print("\n".join(lines))
 

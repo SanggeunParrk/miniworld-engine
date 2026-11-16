@@ -29,6 +29,7 @@ bf16 on sm_90a, normalize_before_proj, no interchain mask. Fuses the optional pa
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 from typing import Any, cast
 
@@ -109,19 +110,102 @@ def _count_table(mask16, dmin: float, doff: float):
 _O_CHUNK_BYTES = 2 << 30
 
 
+_LT_CPP = r"""#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cublasLt.h>
+#include <map>
+#include <tuple>
+// O[(i,c),(j,e)] = A2 . BT^T (bf16, fp32 accumulate) with the k-th algorithm of cublasLt's heuristic list for this shape: the list is
+// queried once per (M, N, K, ld) and kept; every algorithm of it gives the same bits as torch.mm here (benchmarks/opm_win/ltbench.py).
+struct LtPlan { cublasLtMatmulDesc_t op; cublasLtMatrixLayout_t a, b, c; cublasLtMatmulAlgo_t algo; size_t ws; };
+void opm_lt_mm(torch::Tensor a2, torch::Tensor bt, torch::Tensor out, int64_t index) {
+  TORCH_CHECK(a2.scalar_type() == torch::kBFloat16 && bt.scalar_type() == torch::kBFloat16 && out.scalar_type() == torch::kBFloat16
+              && a2.stride(1) == 1 && bt.stride(1) == 1 && out.stride(1) == 1 && a2.size(1) == bt.size(1)
+              && out.size(0) == a2.size(0) && out.size(1) == bt.size(0), "opm_lt_mm: bf16 row-major A2 [M, K], BT [N, K], out [M, N]");
+  auto ck = [](cublasStatus_t s, const char* w) { TORCH_CHECK(s == CUBLAS_STATUS_SUCCESS, "opm_lt_mm ", w, ": status ", int(s)); };
+  const int64_t M = a2.size(0), K = a2.size(1), N = bt.size(0);
+  static std::map<std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int>, LtPlan> plans;
+  const auto key = std::make_tuple(M, N, K, a2.stride(0), bt.stride(0), out.stride(0), index, a2.get_device());
+  auto it = plans.find(key);
+  if (it == plans.end()) {
+    LtPlan p{};
+    ck(cublasLtMatmulDescCreate(&p.op, CUBLAS_COMPUTE_32F, CUDA_R_32F), "desc");
+    cublasOperation_t ta = CUBLAS_OP_T, tb = CUBLAS_OP_N;
+    ck(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof(ta)), "transa");
+    ck(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof(tb)), "transb");
+    ck(cublasLtMatrixLayoutCreate(&p.a, CUDA_R_16BF, K, N, bt.stride(0)), "layout BT");    // col-major K x N, op T
+    ck(cublasLtMatrixLayoutCreate(&p.b, CUDA_R_16BF, K, M, a2.stride(0)), "layout A2");    // col-major K x M
+    ck(cublasLtMatrixLayoutCreate(&p.c, CUDA_R_16BF, N, M, out.stride(0)), "layout O");    // O^T col-major == O row-major
+    cublasLtMatmulPreference_t pref;
+    ck(cublasLtMatmulPreferenceCreate(&pref), "pref");
+    size_t ws = at::cuda::getCUDABlasLtWorkspaceSize();
+    ck(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws, sizeof(ws)), "pref ws");
+    cublasLtMatmulHeuristicResult_t res[16];
+    int found = 0;
+    ck(cublasLtMatmulAlgoGetHeuristic(at::cuda::getCurrentCUDABlasLtHandle(), p.op, p.a, p.b, p.c, p.c, pref, 16, res, &found), "heuristic");
+    cublasLtMatmulPreferenceDestroy(pref);
+    TORCH_CHECK(found > 0, "opm_lt_mm: no algorithm");
+    const int k = index < found ? (int)index : 0;
+    p.algo = res[k].algo;
+    p.ws = res[k].workspaceSize;
+    it = plans.emplace(key, p).first;
+  }
+  auto& p = it->second;
+  auto ws = torch::empty({(int64_t)std::max<size_t>(p.ws, 1)}, a2.options().dtype(torch::kByte));
+  float alpha = 1.f, beta = 0.f;
+  ck(cublasLtMatmul(at::cuda::getCurrentCUDABlasLtHandle(), p.op, &alpha, bt.data_ptr(), p.a, a2.data_ptr(), p.b, &beta, out.data_ptr(), p.c,
+                    out.data_ptr(), p.c, &p.algo, ws.data_ptr(), p.ws, at::cuda::getCurrentCUDAStream()), "matmul");
+}
+"""
+
+#: the product route's cuBLASLt heuristic index by padded N (else torch.mm, whose choice is index 0). In-graph A/B, fair protocol
+#: (benchmarks/opm_win/ltab.py, row 55): N 256 index 1 is 1.9-2.0 % faster cool and 1-4 % sustained at S 8192 / 16384, N 384 0.7 % cool;
+#: at N 512 / 768 index 0 is the fastest (ltbench.py). Every index gives the same bits.
+_LT_ALGO: dict[int, int] = {256: 1, 384: 1}
+
+
+@functools.lru_cache(maxsize=1)
+def _lt_ext():
+    from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, load_inline_extension
+
+    cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN   # the toolkit's headers are needed only to build
+
+    return load_inline_extension(
+        name="miniworld_opm_lt_mm",
+        cpp_sources=_LT_CPP,
+        functions=["opm_lt_mm"],
+        with_cuda=True,
+        extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
+        extra_cflags=["-O3"],
+        extra_ldflags=["-lcublasLt"],
+        verbose=False,
+    )
+
+
+def _product(a2, bt, n, out=None):
+    """O = A2 . BT^T: torch.mm, or the cuBLASLt heuristic algorithm `_LT_ALGO[n]` (bitwise the same product)."""
+    if n not in _LT_ALGO:
+        return torch.mm(a2, bt.t()) if out is None else torch.mm(a2, bt.t(), out=out)
+    if out is None:
+        out = torch.empty((a2.shape[0], bt.shape[0]), device=a2.device, dtype=torch.bfloat16)
+    _lt_ext().opm_lt_mm(a2, bt, out, _LT_ALGO[n])
+    return out
+
+
 def _product_epilogue(ext, a2, bt, norm, wo16, ob, n, residual, after, dkw):
     """Inference: z = epilogue(A2 . BT^T) per chunk of i rows (cuBLAS NT product into a bounded O workspace). ``norm``: the fp32 [N, N]
     divisor table of the count kernel (its chunk's rows), or the int32 mask bit rows (the epilogue counts at the chunk's offset)."""
     rows = max(16, min(n, _O_CHUNK_BYTES // (n * CH * CH * 2) // 16 * 16))
     if rows >= n:
-        return ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo16, ob, n, n, residual, int(after), **dkw)
+        return ext.opm_epilogue(_product(a2, bt, n), norm, wo16, ob, n, n, residual, int(after), **dkw)
     table = norm.dtype == torch.float32
     z = torch.empty((1, n, n, wo16.shape[0]), device=a2.device, dtype=torch.bfloat16)
     o = torch.empty((rows * CH, n * CH), device=a2.device, dtype=torch.bfloat16)
     for r0 in range(0, n, rows):
         nr = min(rows, n - r0)
         oc = o[: nr * CH]
-        torch.mm(a2[r0 * CH : (r0 + nr) * CH], bt.t(), out=oc)
+        _product(a2[r0 * CH : (r0 + nr) * CH], bt, n, out=oc)
         res = residual[:, r0 : r0 + nr] if residual is not None else None
         if table:
             ext.opm_epilogue(oc, norm[r0 : r0 + nr], wo16, ob, nr, n, res, int(after), out=z[:, r0 : r0 + nr], **dkw)
