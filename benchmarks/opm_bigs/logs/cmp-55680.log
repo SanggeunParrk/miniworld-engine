@@ -1,0 +1,8 @@
+57 256 8192 DIFF maxabs 0.00390625 ref_max 0.69921875
+57 384 6144 DIFF maxabs 0.00390625 ref_max 0.69921875
+57 768 16384 DIFF maxabs 0.00390625 ref_max 0.6875
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/wt-opm-bigs/benchmarks/opm_bigs/cmp_prologue.py", line 9, in <module>
+    case = dataclasses.replace(next(iter(config.cases(cfg))), depth=S)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+StopIteration

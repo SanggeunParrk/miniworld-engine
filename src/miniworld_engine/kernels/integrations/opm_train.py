@@ -81,6 +81,12 @@ def _h100_path(s: int, n: int, *, training: bool, wide: bool = False) -> str:
     return "native"
 
 
+def _wide_prologue_deep(s: int, training: bool) -> bool:
+    """Inference beyond the measured prologue cells (S > 4096): the non-TMA native prologue streams the MSA at ~0.35 TB/s (9.5 ms at
+    S 16384, N 768; the wide TMA prologue takes ~1.4 ms), so the AF3-order cells take the wide composition the other orders already use."""
+    return not training and s > 4096
+
+
 def refusal(
     msa: torch.Tensor,
     d_msa: int,
@@ -607,7 +613,7 @@ class _OpmMath(torch.autograd.Function):
     ):
         cm, cz = msa.shape[3], wo.shape[0]
         path = _h100_path(msa.shape[1], msa.shape[2], training=save_stats)
-        if (cm, cz) != (CM, CZ) or after or pbias is not None or (path == "legacy" and _CUDA_PROLOGUE_FOR_LEGACY):
+        if (cm, cz) != (CM, CZ) or after or pbias is not None or (path == "legacy" and _CUDA_PROLOGUE_FOR_LEGACY) or _wide_prologue_deep(msa.shape[1], save_stats):
             return _forward_wide(
                 ctx,
                 msa,
