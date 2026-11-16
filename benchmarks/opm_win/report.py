@@ -40,8 +40,8 @@ for m, name in ((0, "cool"), (1, "sustained")):
         a, b, e = kit.get(k, {}), before.get(k, {}), after[k]
 
         def cell(d, bk):
-            v = d.get(bk)
-            s = sp(d if d is not a else a, k, bk, m) if v else None
+            v = d.get(k, {}).get(bk)
+            s = sp(d, k, bk, m) if v else None
             return f"{v[m]:.3f} ({s:.2f}x)" if v and s else (f"{v[m]:.3f}" if v else "-")
 
         pa, pb, pe = sp(kit, k, "anthropic", m), sp(before, k, "cuda", m), sp(after, k, "cuda", m)

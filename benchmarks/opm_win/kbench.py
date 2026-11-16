@@ -23,7 +23,7 @@ a2, bt, stats, mask16, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-
 del stats
 wp = ot._fused_weight(wo)
 res = torch.randn(1, L, L, 128, device=dev, dtype=bf) if a.residual else None
-V = {f"cl{c}": (lambda c=c: ext.opm_fused_infer(a2, bt, norm, wp, ob, res, 1, cluster=c)) for c in (1, 2, 3, 4)}   # 1 none, 2 2x1, 3 1x2, 4 2x2
+V = {"cl1": lambda: ext.opm_fused_infer(a2, bt, norm, wp, ob, res, 1)}   # (the cluster codes 2-4 were removed with the cluster experiment)
 V["cublas"] = lambda: torch.mm(a2, bt.t())
 if any(v in a.variants for v in ("pro_s", "nt_unfused", "cnt")):   # the s-major prologue, the NT product + epilogue on it, the mask counts
     pro_s = ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False, smajor=True)
@@ -82,10 +82,15 @@ for k in a.variants.split(","):
             V[k] = (lambda bext=bext: bext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False))
         else:
             V[k] = (lambda bext=bext, c=int(cl[2:]): bext.opm_fused_infer(a2, bt, norm, wp, ob, res, 1, cluster=c))
+if "old" in a.variants.split(",") or "oldpro" in a.variants.split(","):   # the opm-bigs fused kernel (before this branch), same operands
+    from builds import build_old
+    oext = build_old()
+    V["old"] = lambda: oext.opm_fused_infer(a2, bt, norm, wp, ob, res, 1)
+    V["oldpro"] = lambda: oext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False)
 V = {k: V[k] for k in a.variants.split(",")}
 ref = V["cl1"]() if "cl1" in V else None
 for k in V:
-    if k not in ("cublas", "pro", "pro_s", "nt_mm", "cnt", "cnt_mm", "chain_tn", "chain_nt", "triton") and not k.endswith(".pro") and ref is not None:  # ("epi" variants vs the fused kernel: the bf16 O rounding differs)
+    if k not in ("cublas", "pro", "oldpro", "pro_s", "nt_mm", "cnt", "cnt_mm", "chain_tn", "chain_nt", "triton") and not k.endswith(".pro") and ref is not None:  # ("epi" variants vs the fused kernel: the bf16 O rounding differs)
         o = V[k](); o2 = V[k]()
         print(k, "bitwise vs cl1", bool(torch.equal(o, ref)), "run-twice", bool(torch.equal(o, o2)), "max|d|", float((o.float() - ref.float()).abs().max()), flush=True)
 if "pro" in V:   # the prologue variants: bitwise the same A2 / BT / mask bits as this build's
@@ -99,7 +104,7 @@ if "epi" in V:   # the epilogue variants: bitwise the same z as this build's epi
     for k in V:
         if k.endswith(".epi"):
             print(k, "epilogue bitwise vs epi", bool(torch.equal(V[k](), re)), flush=True)
-print("max clusters per code", ext.opm_fused_max_clusters(), flush=True)
+
 flush = torch.empty(256 << 20, dtype=torch.int8, device=dev)
 fl = 2 * S * L * L * 1024
 
