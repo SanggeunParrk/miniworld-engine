@@ -609,6 +609,114 @@ max error 3.5-5.6 % at depth 8192-16384 (not recommended).
 - Not worth it: fast accumulation (accuracy), FP8 at depth <= 512 (slower), e4m3 O / W_o (<= 2 %).
 - Open: an e4m3 version of the fused kernel for S <= 2048 (removes the O round trip; the remaining gain there is the epilogue's share, 15-25 %).
 
+## PWA forward: e4m3 key contraction (`kernels/integrations/pwa_fp8.py`, branch `fp8x/pwa`, 2026-11-17)
+
+Scope: `MSAPairWeightedAveraging`, H100 `pwa_train` inference (d_msa 64, 8 heads x 32: Boltz-2 / RF3 / MiniWorld at d_pair 128, Chai-1 at d_pair 256),
+one sample. Not served: the `pwa_wide` widths (8 x 8 / 8 x 16, d_msa 128; BIG 256 x 8 x 32), training, B200. Off by default; with it off the
+module output is the 2.5.12 bytes (below).
+
+Route: `pair_fwd3` (default pair kernel, w bf16) -> `w_quant` (e4m3 of 256 w) -> `ln_vt8` (y = `ln_vg`'s bytes, v as e4m3 **K-major** `vT [H][S*C][N]`)
+-> cuBLASLt e4m3 batched GEMM (`o^T = vT^T w^T`, bf16 o head-major, fp32 promotion) -> `pwa_gateout` (default gate / out pass, unchanged).
+Hopper's e4m3 MMA takes K-major operands only and the contraction runs over the key index j, so v must be written j-contiguous: `ln_vt8`
+(`csrc/pwa_vt8.cu`, new) is `ln_vg` with the projection turned around (`vT tile = Wv . y^T`, one m64n64k16 wgmma per 64 hc, the [8 h][32 c][64 n]
+e4m3 tile out by one TMA store) -- no transpose pass. Scales: w is a probability, fixed scale 2^8 (no calibration, cannot saturate); v takes a
+static power-of-two scale (`vscale_from_amax` of the TriAttn route, 16 x headroom over the first eager call's absmax, keyed by the value weight,
+weakref-dropped). Both scales are device scalars passed as cuBLASLt's A / B scale pointers (no rescale pass; `rescale_all` updates them in
+place, captured graphs follow). Guard: `ln_vt8` records max |v / scale|; same contract as TriAttn / TriMul (`take_overflow()` -> `rescale_all()`
+-> redo; `GUARD=sync` does it per call, `lazy` for CUDA graphs).
+
+| env | effect |
+|---|---|
+| `MINIWORLD_PWA_FP8=1` (or `pwa_fp8.ENABLED = True`) | the route above |
+| `MINIWORLD_PWA_FP8_GUARD` | `sync` (default: one host sync per call, redo on saturation), `lazy` (graphs; the caller checks), `off` |
+| `MINIWORLD_PWA_FP8_MIN_N` / `_MIN_S` | gates (default N >= 384, and S >= 1024 below N 512); 0 = no gate |
+| `MINIWORLD_PWA_FP8_HEADROOM` | v scale headroom (16) |
+| `MINIWORLD_PWA_FP8_FASTACC=1` | cuBLASLt fast accumulation (module 1-3 % faster at N >= 768) |
+
+### Where FP8 can go: stages of the 2.5.12 H100 inference route (S1024 N768, d_pair 128)
+
+Times: CUDA graph per stage, median (`fp8x-pwa/scripts/stageprof.py`, `res/prof.jsonl`); counters: ncu (`res/ncu_1024:768_v1.csv`, base clocks).
+Module 1.064 ms; N >= 512 runs the split route (cuBLAS contraction + `pwa_gateout`), N < 512 the fused `pwa_fwd3`.
+
+| stage | GEMM / work | GFLOP | DRAM R / W (MB) | time ms | DRAM % / tensor % | bound | e4m3 placement | upper bound | measured |
+|---|---|---|---|---|---|---|---|---|---|
+| `pair_fwd3` | LN_z, [N^2, 128] x [128, 8], softmax | 1.2 | 152 / 8.5 | 0.066 (6 %) | 70 / 4 | memory (z read) | z is the module input (bf16 from the pair stack); w out as e4m3 = `w_quant`'s 7 us | ~1 % | - |
+| `ln_vg` | LN_m, [S N, 64] x [64, 256] | 25.8 | 101 / 484 | 0.226 (21 %) | 80 / 16 | memory (v write = 83 % of bytes) | v stored e4m3 (and K-major) | 0.65x of the stage (bytes) | `ln_vt8` 0.157 (0.70x), R/W 101 / 281 |
+| contraction | per head [N, N] x [N, S C] (cuBLAS bf16, 645 TFLOP/s) | 309 | 413 / 387 | 0.479 (45 %) | 46 / 81 | tensor | w and v e4m3 | 0.5x (2x MMA rate; bytes floor 0.18 ms) | 0.304 (0.63x), fast acc 0.282 |
+| `pwa_gateout` | [S N, 64] x [64, 256] gate, [S N, 256] x [256, 64] out | 51.5 | 604 / 95 | 0.322 (30 %) | 61 / 20 (SM 43) | neither (latency) | o as e4m3 (halves the o read) | o read is 2/3 of the bytes, but not bandwidth-bound | tried: no gain (below) |
+
+Sum of the upper bounds: ~0.73x of the module; measured 0.795x (cool) at this shape. What is left after FP8 is mostly `pwa_gateout` (37 % of the FP8 route).
+
+### Module time against the 2.5.12 default (H100 80GB HBM3, 700 W cap)
+
+Protocol as the TriAttn / TriMul tables above (`fp8x-pwa/scripts/speed.py`, raw rows `res/v1.jsonl`): one process per group, module (`master_weights=True`,
+one sample, all-ones mask) captured in three CUDA graphs -- 2.5.12 default, default again (same-cubin control), FP8 (lazy guard, every gate removed,
+static scale from two eager calls; no saturation in any case). Cells `cool / sustained`, FP8 / default. Same-cubin control over all rows 0.987 .. 1.007.
+
+| S \ N | 128 | 256 | 384 | 512 | 640 | 768 | 1024 | 1536 | 2048 |
+|---|---|---|---|---|---|---|---|---|---|
+| 128 | | | 1.084 / 1.082 | | | 0.927 / 0.929 | | | 0.861 / 0.866 |
+| 256 | | | 1.084 / 1.087 | | | 0.837 / 0.839 | 0.844 / 0.848 | | |
+| 512 | | | 1.006 / 1.001 | 0.855 / 0.858 | | 0.811 / 0.814 | | | |
+| 1024 | 1.207 / 1.205 | 1.082 / 1.085 | 0.950 / 0.957 | 0.815 / 0.814 | 0.810 / 0.833 | 0.795 / 0.779 | 0.779 / 0.768 | 0.747 / 0.727 | 0.714 / 0.707 |
+| 2048 | | | 0.924 / 0.931 | | | 0.780 / 0.768 | | | |
+| 4096 | | | 0.911 / 0.920 | | | 0.778 / 0.769 | 0.764 / 0.741 | | |
+| 16384 | | | 0.902 / 0.893 | | | 0.782 / 0.784 | | | |
+
+Default ms (cool / sustained): S1024: N128 0.116 / 0.114, N256 0.237 / 0.237, N384 0.402 / 0.401, N512 0.631 / 0.633, N768 1.046 / 1.107, N1024 1.557 / 1.654,
+N2048 4.643 / 5.001; S4096 N768 3.928 / 4.098; S16384 N768 15.52 / 16.16. d_pair 256 (Chai-1), S1024 N768: 0.808 / 0.804 (default 1.103 / 1.145 ms).
+Fast accumulation (`res/fast.jsonl`): S1024 N768 0.781 / 0.790, N2048 0.692 / 0.693, S4096 N768 0.755 / 0.746.
+
+Gates (default `MIN_N` 384, `MIN_S` 1024 below N 512): N <= 256 loses at every depth (the fused `pwa_fwd3` default beats split + FP8: N128 +21 %, N256 +8 %);
+N384 gains only from S1024 (S256 +8 %, S512 0 %, S1024 -5 %); from N512 every measured depth gains (S128 N768 -7 %).
+
+### Error against fp64 PyTorch (`fp8x-pwa/scripts/err.py`, raw rows `res/err_*.jsonl`)
+
+Module in float64 on the PyTorch backend, same inputs; random weights (fan-in^-0.5), LayerNorm weights 1 +- 0.1, biases +- 0.1, key mask with 3 masked
+tokens; FP8 with every gate removed. upd = rms / max of (y - y64) relative to rms / max of the update y64 - x; judge = max |y - y64| / max |y64|
+(engine metric, tol = max(err_pytorch, 8e-3)). Cells `upd rms / upd max / judge`.
+
+| case (S:N[:d_pair]) | PyTorch bf16 | default 2.5.12 | FP8 | FP8 o-e4m3 (tried, not kept) |
+|---|---|---|---|---|
+| 1024:256 | 2.06 / 3.42 / 0.29 % | 2.04 / 3.42 / 0.29 % | 3.18 / 4.29 / 0.37 % | |
+| 1024:384 | 2.20 / 4.05 / 0.29 % | 2.18 / 3.97 / 0.28 % | 3.06 / 4.60 / 0.33 % | 4.06 / 5.84 / 0.41 % |
+| 1024:512 | 2.28 / 3.79 / 0.29 % | 2.27 / 3.74 / 0.29 % | 2.99 / 4.60 / 0.35 % | |
+| 1024:768 | 2.38 / 4.36 / 0.28 % | 2.37 / 4.36 / 0.28 % | 2.89 / 5.00 / 0.32 % | 3.93 / 6.03 / 0.38 % |
+| 1024:1024 | 2.43 / 4.47 / 0.28 % | 2.42 / 4.47 / 0.28 % | 2.84 / 4.95 / 0.31 % | |
+| 4096:768 | 2.38 / 4.26 / 0.28 % | 2.37 / 4.21 / 0.28 % | 2.90 / 5.03 / 0.33 % | 3.93 / 5.70 / 0.38 % |
+| 1024:768:256 | 2.37 / 4.63 / 0.27 % | 2.36 / 4.66 / 0.27 % | 2.92 / 5.35 / 0.31 % | |
+| 1024:2048 | 2.53 / 4.67 / 0.28 % | 2.52 / 4.59 / 0.28 % | 2.75 / 4.91 / 0.30 % | |
+| 2048:384 | 2.20 / 3.88 / 0.28 % | 2.18 / 3.88 / 0.28 % | 3.06 / 4.35 / 0.31 % | |
+
+Fast accumulation (`res/err_fast.jsonl`): 1024:768 2.90 / 5.00 / 0.32 %, 1024:2048 2.79 / 5.03 / 0.30 % (no-fast 2.89 / 5.00 / 0.32, 2.75 / 4.91 / 0.30).
+
+The update error of the bf16 routes (~2.4 %) is mostly the bf16 rounding of y = msa + update (the update is small next to the residual); the FP8
+route adds ~1.6 % rms in quadrature. At the contraction itself (head 0, against an fp32 product of the same bf16 w, v): bf16 0.17 % rms, e4m3
+3.8 % rms (5-8 % max), fast accumulation the same to three digits. The judge metric of the FP8 route (0.30-0.37 %) is inside the engine tolerance
+(8e-3) at every measured case -- unlike TriMul's FP8 planes. No NaN / inf, no saturation (peak |v / scale| 22-24 of 448). Random weights only:
+the end-level effect (real MSA, trained weights) is not measured.
+
+### Tried, no gain
+
+- **o as e4m3 too** (cuBLASLt e4m3 D with D scale = 1 / v scale -- |o| <= max |v|, so v's scale serves o; `pwa_gateout` built with
+  `-DPWA_O8=1` reading e4m3 tiles; commit df188a291, removed after): module 0.793 / 0.803 at S1024 N768 (main route 0.795 / 0.779), N2048
+  0.705 / 0.742 (0.714 / 0.707), N384 0.925 / 0.948 (0.950 / 0.957), error +1 % rms (table). ncu at S1024 N768: the contraction 354 vs 343 us
+  (DRAM 33 %: not write-bound), the gate pass 359 vs 342 us although it reads 403 instead of 604 MB (it is not bandwidth-bound; the e4m3
+  unpack and the unswizzled tile reads cost more than the bytes save). The removal also keeps `pwa_gateout.cu` byte-identical to 2.5.12 (no re-key).
+- **`ln_vt8` occupancy**: 3 blocks / SM is 20-24 % slower than 2 (0.193 vs 0.157 ms at S1024 N768); stages 2 / 3 / 4 within 2 %.
+- Not attempted: gate / out projections in e4m3 (51 GFLOP in a kernel at 20 % tensor use: no MMA-bound part to speed up), y as e4m3 (100 of the
+  604 MB the gate pass reads, and it feeds the gate's sigmoid), z (the module's input), the backward (dv = w^T do, dw = do v^T are the same
+  contraction shapes and could take the same placement; training forward was not measured to pay first).
+
+Verification: default route bit-identical to the 2.5.12 base tree (sha1 of the outputs, separate processes; `res/bit_wt.jsonl` = `res/bit_base.jsonl`):
+10 cases -- inference d_pair 128 at N256 (fused) / 384 / 512 / 768 / 2048, d_pair 256 N768, the wide widths 128:256:8 / 128:256:16, and the
+native training forward + backward at S1024 N384 / N768 (y, dmsa, dpair, every parameter gradient). Tests: `tests/gpu/test_pwa_fp8.py` (new: `ln_vt8`
+vs `ln_vg`, `w_quant`, route accuracy against fp64 within the engine tolerance at d_pair 128 / 256, default unchanged after the route ran, graph
+replay = eager, the guard fires on a forced saturation and `rescale_all` clears it), `test_pwa_long_inference.py`,
+`test_i64_offsets.py::test_pwa_train_pair_past_2_31`: 18 passed; after the gate change `test_pwa_fp8.py` again (with `test_gates`): 6 passed, and the bit-identity check repeated on the final tree. CPU: `test_capture_api` (the new module dicts listed; the remaining failure is the
+base branch's TriAttn / TriMul FP8 dicts, unchanged), `test_init`, `test_requirements`, `test_prebuild_plan`: 1444 passed. `ruff check` / `format`,
+`pyright` clean on the touched Python files. The new extension `miniworld_pwa_vt8` is JIT-built on first use (not in the prebuild plan).
+
 ## Known limits
 
 - Boltz-2 9c90 is bistable under any numerical noise of 0.1-2 % on the TriAttn output; V on e4m3 flips it (hi + lo too: 2 of 4 trunk seeds). In the current environment its own bf16 trunk seeds fall into 5 modes (24 seeds, 15.3 A, ipTM 0.40-0.85) and FP8 changes the mode of 9 of 24 same trunk seeds while the mode population stays equal (see the widened end-level section). Hence whitelist only, and Boltz-2 is not on it (open decision).
