@@ -8,9 +8,10 @@ the modules that select it (every other module, and every module by default, run
 
 ``engine-fp8`` is not a class's ``backends`` entry (the judge, the registry and the measurers never see it): ``set_backend`` resolves it to
 ``cuda`` (``module.backend == "cuda"``, ``module.engine_fp8 is True``, ``module.backend_name == "engine-fp8"``) on every class that has a
-``cuda`` backend; ``engine_fp8`` (:data:`BACKEND_ID`) is accepted too, for places where ``-`` cannot stand. The module's ``forward`` runs
+``cuda`` backend; ``engine_fp8`` (:data:`BACKEND_ID`) is accepted too, for places where ``-`` cannot stand. The module's ``_forward_cuda``
+(an instance attribute ``set_backend`` installs, so ``forward`` and a runtime that calls ``_forward_<backend>`` directly both reach it) runs
 inside :class:`BackendScope`, which turns the routes on for the call and restores the switches after it (a module on another backend called
-inside it runs with the switches as they were before). Its range is ``cuda``'s; calls the FP8 routes do not take (fp32, cards other than
+through its ``forward`` inside it runs with the switches as they were before). Its range is ``cuda``'s; calls the FP8 routes do not take (fp32, cards other than
 H100) run the default kernels.
 
 ``engine-fp8`` accelerates inference; training under ``engine-fp8`` runs the default bf16 path: every FP8 route is a forward (inference)
@@ -197,8 +198,8 @@ _BASE: list[tuple] = []  # the switches before the outermost scope
 class BackendScope:
     """``with BackendScope(on):`` the route switches of one module call: ``on`` = the ``engine-fp8`` preset (``safe`` + :func:`backend_model`'s
     TriAttn part); off (inside an ``engine-fp8`` call) = the switches as they were before the outermost scope. The switches are restored on
-    exit. ``BackendModule.forward`` opens it for an ``engine-fp8`` module, and for a module on another (non-reference) backend only while an
-    ``engine-fp8`` call is running, so the default route never enters it."""
+    exit. An ``engine-fp8`` module's ``_forward_cuda`` opens it (``modules.primitives._EngineFP8Forward``); ``BackendModule.forward`` opens
+    it off for a module on another (non-reference) backend only while an ``engine-fp8`` call is running, so the default route never enters it."""
 
     __slots__ = ("on", "pushed", "snap")
 

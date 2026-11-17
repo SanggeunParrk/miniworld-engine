@@ -253,7 +253,16 @@ seen.clear()
 torch.set_grad_enabled(False)
 Leaf(backend="cuda").eval()(x); Leaf().eval()(x)
 Outer(backend="engine-fp8").eval()(x)
-out["seen"] = seen
+out["seen"] = seen[:]
+seen.clear()
+import copy
+leaf = Leaf(backend="engine-fp8").eval()
+leaf._forward_cuda(x)  # a runtime that calls _forward_<backend> directly (FoldForge's guard)
+c = copy.deepcopy(leaf)
+out["copy_ok"] = c._forward_cuda.module is c and leaf._forward_cuda.module is leaf
+c.set_backend("cuda")
+out["plain_again"] = "_forward_cuda" not in c.__dict__ and not c.engine_fp8
+out["direct"] = seen[:]
 out["after"] = routes()
 out["scopes"] = list(fp8.SCOPES)
 try:
@@ -286,5 +295,8 @@ def test_engine_fp8_scope(env, model):
     # default Leaf / Leaf: the process's switches; outer + a (engine-fp8): on; b on plain cuda: the process's; c (pytorch): untouched = on;
     # b again engine-fp8: on
     assert routes == [base, base, on, on, base, on, on]
+    assert (
+        out["direct"] == [["cuda", on]] and out["copy_ok"] and out["plain_again"]
+    )  # direct _forward_cuda call; copies follow their module
     # training calls (train mode, or grad on): every part with the process's switches, as on cuda
     assert [r for _, r in out["train"]] == [base] * 15 and len(out["train"]) == 15

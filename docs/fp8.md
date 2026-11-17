@@ -17,8 +17,9 @@ with torch.inference_mode():
 
 - `engine-fp8` = the engine `cuda` backend with the `safe` preset's routes on for the calls of the modules that select it (plus the TriAttn part of
   the model `fp8.set_model()` / `MINIWORLD_FP8_MODEL` names, per `fp8.TRIATTN_MODELS`). Every other module, and every module by default, runs the
-  bf16 / fp16 engine. `BackendModule.forward` opens `fp8.BackendScope` around an `engine-fp8` call (switches on, restored after the call); a module on
-  another backend called inside it runs with the process's own switches. The default route never enters the scope.
+  bf16 / fp16 engine. `set_backend("engine-fp8")` installs the instance's `_forward_cuda` as `fp8.BackendScope` around the class's
+  `_forward_cuda` (switches on, restored after the call), so `forward` and a runtime that calls `_forward_<backend>` directly (FoldForge's guard) both
+  get it; a module on another backend called through its `forward` inside it runs with the process's own switches. The default route never enters the scope.
 - Names: the public name is `engine-fp8`; where `-` cannot stand (Python identifiers, config keys) it is `engine_fp8` (`fp8.BACKEND_ID`), which
   `set_backend` also takes. It is **not** an entry of any class's `backends` tuple and has no `_forward_engine_fp8` / `_supports_engine_fp8`:
   `set_backend("engine-fp8")` resolves to `cuda` (`fp8.resolve_backend`) on every class with a `cuda` backend and leaves `module.backend == "cuda"`,
