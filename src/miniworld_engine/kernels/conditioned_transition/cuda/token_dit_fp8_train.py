@@ -7,7 +7,7 @@ Enable (environment, read at import; or set :data:`PLACES` / :data:`GRAD_E5M2` a
     MINIWORLD_TOKEN_DIT_FP8_TRAIN=transition     # explicit placements, a comma list of
                                                  #   forward  expand, squeeze, qkvg, out
                                                  #   dgrad    dexpand (dxt = dab Wab), dsqueeze (dh = dz Wsq), dqkvg (dxa = dqkvg Wqkvg), dout (dog = dy Wo)
-                                                 # or a preset: transition, attention, all ("" / 0 / off: none)
+                                                 # or a preset: fast (= expand,squeeze), transition, attention, all ("" / 0 / off: none)
     MINIWORLD_TOKEN_DIT_FP8_TRAIN_GRAD=e4m3      # the 8-bit format of the incoming gradients (dgrad A operands): e4m3 (default) or e5m2
 
 Scales: every activation / gradient operand gets a DYNAMIC per-row (per-token) scale, row max / FMAX, made by the row pass that writes
@@ -38,10 +38,12 @@ PRESETS = {
     "transition": frozenset(("expand", "squeeze", "dexpand", "dsqueeze")),
     "attention": frozenset(("qkvg", "out", "dqkvg", "dout")),
     "all": frozenset(_ALL),
+    # the placements that pay at every measured size (docs/fp8_training.md): the forward transition GEMMs
+    "fast": frozenset(("expand", "squeeze")),
 }
 #: what ``MINIWORLD_FP8_TRAIN=1`` turns on for this block (the attention-side projections stay bf16: the inference q|k|v|g placement
 #: moved AF3 FoldBench; docs/fp8_training.md)
-RECOMMENDED = PRESETS["transition"]
+RECOMMENDED = PRESETS["fast"]
 
 
 def parse(v: str) -> frozenset[str]:
@@ -72,6 +74,8 @@ def _from_env() -> frozenset[str]:
 PLACES: frozenset[str] = _from_env()
 #: incoming gradients (the dgrad A operands) as e5m2 instead of e4m3
 GRAD_E5M2: bool = os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_GRAD", "e4m3").strip().lower() == "e5m2"
+#: the fewest block rows M = A L (after padding) that take the placements (smaller calls keep bf16; ``MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS``)
+MIN_ROWS: int = int(os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS", "0"))
 
 
 @functools.lru_cache(maxsize=None)
@@ -91,7 +95,7 @@ def ext():
 def active(M: int, D: int, fp32: bool, plain: bool, h100: bool) -> frozenset[str]:
     """The placements this block call takes: bf16 default-option blocks on H100 at width 768 (M = A L is a multiple of 128 after the
     block's padding)."""
-    if not PLACES or fp32 or not plain or not h100 or D != 768 or M % 16:
+    if not PLACES or fp32 or not plain or not h100 or D != 768 or M % 16 or M < MIN_ROWS:
         return frozenset()
     return PLACES
 
