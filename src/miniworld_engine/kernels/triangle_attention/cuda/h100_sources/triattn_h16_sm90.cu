@@ -164,6 +164,10 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
                           // Their score step is short, but half the pairs on the FMA pipes is -7 .. -12 % of the core at H4 L2048 (2026-11-16);
                           // 4 / 16: level or slower
 #endif
+#ifndef TA_RC
+#define TA_RC 1           // 1 (2.5.13): the last key tile peeled out of the consumer loop, the gate prefetch after the loop (see the loop).  Same
+                          // operations in the same order: bit-identical to 0 (the 2.5.12 loop).  Sustained core 64:4:16 +7-11 %, 32-channel heads 0-+5 %
+#endif
 template <int NP> __device__ __forceinline__ uint32_t hexp(uint32_t a, int i) {   // NP of every 16 pairs on the polynomial (1, 2, 4, 8 or 16; 0: none)
   if (TA_ABL & 4) return a;
   if (NP > 0 && i % (16 / (NP > 0 ? NP : 1)) == (16 / (NP > 0 ? NP : 1)) - 1) return hex2_poly(a);
@@ -591,8 +595,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     if (!SWM) X(0);
     uint4 gpre[R][2];                               // the gate's values of this lane's output columns, loaded under the last key tile
     if (SWM) step_sw(std::true_type{}, std::false_type{}, 0);
-    for (int j = 0; j < nk; ++j) {
-      if (GATE != nullptr && j == nk - 1) {
+    auto gate_pre = [&]() {
+      if (GATE != nullptr) {
 #pragma unroll
         for (int r = 0; r < R; ++r) {
           const int n = min(g * R + r, N - 1);
@@ -601,6 +605,22 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
             gpre[r][half] = 8 * t4 < DH ? __ldg(reinterpret_cast<const uint4*>(GATE + ((size_t)row0(b, n) + qt * BM + qrow + g8 + 8 * half) * ldg + h * DH + 8 * t4)) : make_uint4(0, 0, 0, 0);
         }
       }
+    };
+    if (TA_RC) {
+      // TA_RC: the last key tile peeled.  The loop below has no path from the end of one row's sub-step to a read of the other row's
+      // probabilities other than through their redefinition (the j + 1 < nk test inside the loop gave ptxas such a path: the row whose PV
+      // had retired stayed live through the exponentials of the other, 32 registers), and the gate prefetch is defined after the loop
+      // (it was loop-carried: 16 registers live through every sub-step).  Same operations in the same order (bit-identical).  nk >= 1.
+      for (int j = 0; j + 1 < nk; ++j) {
+        if (SWM) { step_sw(std::false_type{}, std::false_type{}, 1); step_sw(std::false_type{}, std::false_type{}, 0); }
+        else { step(1); step(0); }
+      }
+      gate_pre();
+      if (SWM) step_sw(std::false_type{}, std::true_type{}, 1);
+      else step(1);
+    } else
+    for (int j = 0; j < nk; ++j) {
+      if (j == nk - 1) gate_pre();
       if (SWM) {
         if (j + 1 < nk) { step_sw(std::false_type{}, std::false_type{}, 1); step_sw(std::false_type{}, std::false_type{}, 0); }
         else step_sw(std::false_type{}, std::true_type{}, 1);

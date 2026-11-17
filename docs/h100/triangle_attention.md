@@ -262,6 +262,35 @@ bf16 packing on the integer pipes, a single-pass backward with dQ in shared
 memory (dbias partials too large). A wgmma left in flight across a loop back edge makes ptxas serialize every wgmma (C7514);
 stages read with ldmatrix and released to TMA need `fence.proxy.async` before the release.
 
+## Register / concurrency experiments (2026-11)
+
+fp16 inference core `triattn_h16_sm90.cu`, measured from 2.5.12 (core only, B = 1, N = L rows, CUDA graph, interleaved, sustained +
+cool, against a separately built identical cubin as the noise control: 0.96-1.03 sustained, 0.99-1.04 cool). The experiment macros
+live on branch `exp/ta-regs` only; the release keeps `TA_RC` (default 1 from 2.5.13).
+
+**Where the consumer registers went (2.5.12, 32-channel kernel, 232 allotted, peak 178 live, 0 spills).** 48 of the 178 were an
+artefact of the loop shape: the other row's probabilities (32: its PV had retired, but the loop's `j + 1 < nk` test gave ptxas a path to
+a later read) and the gate prefetch `gpre` (16: defined under `j == nk - 1`, so loop-carried through every sub-step).
+
+**Kept: `TA_RC=1`** (2.5.13 default) -- the last key tile peeled out of the consumer loop, the gate prefetch after the loop. Same
+operations in the same order: bit-identical. ptxas spends the freed registers hoisting the next sub-step's bias ldmatrix over the
+exponentials (peak 188, 0 spill). Core ratio 2.5.12 / `TA_RC` over 128:4:32, 64:4:16, 256:8:32 x L 512 / 1024 / 2048: sustained
+1.00-1.11 (64:4:16 1.07-1.11), cool 1.03-1.16. ncu (128:4:32, base clocks): L1024 2.18 -> 2.11 ms, L2048 15.70 -> 15.31 ms; issue busy
++0.5-0.9 pt, eligible warps / scheduler 0.76 -> 0.80, instructions -1.8 %.
+
+**Tried, no gain** (ratio vs 2.5.12, sustained):
+
+* lower `setmaxnreg` with `TA_RC` (160 / 176 / 192): 0.92-0.98 / 1.03-1.09 / 0.98-1.08 (all below 232);
+* 3 consumer warpgroups (192-query tiles, 160 registers, 108-168 B spill): 0.89-1.04, also with Q from shared memory;
+* QK^T as an SS wgmma (Q read from shared memory, double-buffered, -16 registers): 0.97-1.05;
+* 2 CTAs per SM (producer + one consumer warpgroup each, 64-query tiles, 216 registers, K / V streamed twice): 0.92-1.07, a win only
+  at 64:4:16 L <= 1024;
+* 64-key sub-steps (peak 155 registers): 0.88-0.99, and not bit-identical (the offset may rise every 64 keys);
+* `TA_FR=1` / `TA_SW=0` on top of `TA_RC`: below `TA_RC` alone.
+
+The core is not starved for warps: more warpgroups lose to the register cap or the doubled K / V stream, and 64-key steps double the
+wgmma issue / fence work. The one win is the loop shape.
+
 ## Historical numbers
 
 Historical (from the 2026-10-15 note and its bench script, since removed; H100 80GB, CUDA graph, B = 1, starting node, no mask, fp32 masters; not
