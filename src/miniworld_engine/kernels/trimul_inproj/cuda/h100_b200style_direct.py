@@ -188,11 +188,7 @@ def front(x, weights, token_mask, gi, bi, ab, xs, diag=(), qinv=None, transposed
     np_ = ab.shape[-1]
     if np_ != n and rows != n:
         raise ValueError("padded planes take one sample")
-    cfg = (
-        (f8c is not None and F8C_CFG.get(d))
-        or (qinv is not None and F8_CFG.get(d))
-        or K._config(d, n=n, direct=True)
-    )
+    cfg = (f8c is not None and F8C_CFG.get(d)) or (qinv is not None and F8_CFG.get(d)) or K._config(d, n=n, direct=True)
     a, b, _, _, mb = cfg[:5]
     cpb = _block(cfg) // 2  # plane channels per weight block: the weight maps' row box and the plane store's channel box
     if cpb != 32 and (np_ % 8 or b % 64):

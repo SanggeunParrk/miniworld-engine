@@ -154,6 +154,11 @@ def rescale_all(factor: float = 4.0) -> None:
         t.copy_(_VS_AUTO[key].repeat(batch))
 
 
+#: the shortest S at which the fused d_pair-128 route (the front writes the V^T planes) replaces the fp16 core (hi plane; x 2 with hi + lo, as the other gates).
+#: Measured on 2.5.12 (module, CUDA-graph replay, same process): L128 +10 % (cool and sustained, control within 1 %), L256 -6 %; 0 = no gate.
+FP8_PV_FUSED_MIN_S = 256
+
+
 def _fused_vt(dev) -> bool:
     return FP8_PV and FP8_PV_FUSED and (FP8_VSCALE is not None or FP8_VSCALE_AUTO) and INFERENCE_FP16 and INFERENCE_TAIL_GATE
 
@@ -429,7 +434,7 @@ def inference(
     x = pair.contiguous().view(-1, C)
     m = _mod()
     empty = torch.empty(0, device=pair.device)
-    fused_vt = _fused_vt(pair.device)
+    fused_vt = _fused_vt(pair.device) and L >= FP8_PV_FUSED_MIN_S * (2 if FP8_PV_HL else 1)
     if fused_vt:
         ovf = _OVF.setdefault(pair.device, torch.zeros(1, dtype=torch.int32, device=pair.device))
         vscale = FP8_VSCALE if FP8_VSCALE is not None else _VS_AUTO.get(w4.data_ptr())

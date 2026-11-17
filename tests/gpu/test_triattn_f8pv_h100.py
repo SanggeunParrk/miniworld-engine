@@ -327,10 +327,40 @@ def test_static_scale_of_a_zero_head_does_not_saturate_later():
         ovf.zero_()
         v2 = v.clone()
         v2[..., 2, :] = torch.randn_like(v2[..., 2, :]) * 3
-        vt, vs = hs.quantize_v_static(v2, site)
+        _vt, vs = hs.quantize_v_static(v2, site)
         torch.cuda.synchronize()
         assert int(ovf.item()) == 0
         assert float(vs.view(-1)[2]) == 1.0
     finally:
         hs._VS_AUTO.pop(("vq", site, 4, 32), None)
         hs._drop_derived(("vq", site, 4, 32))
+
+
+def test_fused_route_s_gate():
+    """The fused d_pair-128 route (whitelist kind "fused") below FP8_PV_FUSED_MIN_S runs the fp16 core (output bytes of the default route); at the gate it is the FP8 route."""
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from miniworld_engine.modules.triangle import TriangleAttention
+
+    torch.manual_seed(0)
+    m = TriangleAttention(128, 4, master_weights=True, backend="cuda").cuda().eval()
+    with torch.no_grad():
+        for p in m.parameters():
+            if p.dim() > 1:
+                p.normal_(0, 0.09)
+    try:
+        for length, same in ((hs.FP8_PV_FUSED_MIN_S - 128, True), (hs.FP8_PV_FUSED_MIN_S, False)):
+            x = torch.randn(1, length, length, 128, device="cuda").bfloat16()
+            mask = torch.ones(1, length, dtype=torch.bool, device="cuda")
+            with torch.no_grad():
+                hs.disable_fp8_pv()
+                ref = m(x, mask)
+                assert hs.enable_fp8_pv_for("protenix1")
+                m(x, mask)  # calibration call
+                got = m(x, mask)
+            assert hs.take_overflow() is False
+            assert torch.equal(ref.view(torch.int16), got.view(torch.int16)) is same, length
+    finally:
+        hs.disable_fp8_pv()
+        hs._VS_AUTO.clear()
+        hs._VINV.clear()
+        hs._VSB.clear()
