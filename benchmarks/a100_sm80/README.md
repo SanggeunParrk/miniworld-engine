@@ -43,11 +43,11 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | TokenDiTRoseTTAFold3 | 2.84x (n=36) | 1.19x (n=36) | 1.42x (n=36) | 1.98x (n=12) |  | 1.41x (n=12) |
 | TokenPairInit | 15.51x (n=6) |  |  | 3.44x (n=6) |  |  |
 | Transition | 3.64x (n=180) | 2.76x (n=119) |  | 2.56x (n=126) |  |  |
-| TriangleAttention | 9.06x (n=90) | 6.22x (n=78) | 3.26x (n=76) | 4.80x (n=69) |  | 2.20x (n=67) |
-| TriangleAttentionAF3 | 9.16x (n=52) | 9.24x (n=40) | 3.12x (n=50) | 4.62x (n=40) |  | 2.09x (n=44) |
-| TriangleAttentionChai1 | 11.72x (n=28) | 5.28x (n=28) | 4.58x (n=28) | 7.09x (n=24) |  | 3.25x (n=24) |
-| TriangleAttentionChai1Confidence | 6.64x (n=14) | 3.73x (n=14) | 3.42x (n=14) | 4.43x (n=12) |  | 2.54x (n=12) |
-| TriangleAttentionRF3 | 10.55x (n=28) | 8.36x (n=28) | 4.61x (n=28) | 6.71x (n=24) |  | 3.25x (n=24) |
+| TriangleAttention | 9.06x (n=90) | 6.25x (n=78) | 3.27x (n=76) | 4.77x (n=69) |  | 2.22x (n=67) |
+| TriangleAttentionAF3 | 9.20x (n=52) | 9.34x (n=40) | 3.15x (n=50) | 4.51x (n=40) |  | 2.10x (n=44) |
+| TriangleAttentionChai1 | 11.71x (n=28) | 5.28x (n=28) | 4.58x (n=28) | 6.90x (n=24) |  | 3.22x (n=24) |
+| TriangleAttentionChai1Confidence | 6.79x (n=14) | 3.79x (n=14) | 3.48x (n=14) | 4.39x (n=12) |  | 2.55x (n=12) |
+| TriangleAttentionRF3 | 10.84x (n=28) | 8.44x (n=28) | 4.66x (n=28) | 6.59x (n=24) |  | 3.28x (n=24) |
 | TriangleMultiplication | 7.69x (n=104) | 6.13x (n=104) | 3.93x (n=102) | 6.18x (n=72) |  | 3.36x (n=70) |
 | TriangleMultiplicationRF3 | 9.70x (n=36) | 8.13x (n=36) |  | 7.46x (n=24) |  |  |
 
@@ -66,7 +66,7 @@ The same over the requirement rows whose `source` names af3 (56 rows).
 | OuterProductMean | 1.97x (n=18) | 1.86x (n=18) |  | 1.83x (n=12) |  |  |
 | TokenDiTProtenix | 3.31x (n=36) | 1.36x (n=36) | 1.36x (n=36) | 2.08x (n=24) |  | 1.22x (n=24) |
 | Transition | 5.01x (n=74) | 3.74x (n=56) |  | 3.18x (n=48) |  |  |
-| TriangleAttentionAF3 | 14.02x (n=28) | 10.78x (n=28) | 3.66x (n=26) | 6.01x (n=18) |  | 2.35x (n=22) |
+| TriangleAttentionAF3 | 14.15x (n=28) | 10.89x (n=28) | 3.71x (n=26) | 5.91x (n=18) |  | 2.36x (n=22) |
 | TriangleMultiplication | 10.16x (n=36) | 9.25x (n=36) | 6.35x (n=36) | 7.51x (n=24) |  | 4.28x (n=24) |
 
 ## Classes
