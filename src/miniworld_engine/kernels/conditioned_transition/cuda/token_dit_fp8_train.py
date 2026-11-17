@@ -74,8 +74,10 @@ def _from_env() -> frozenset[str]:
 PLACES: frozenset[str] = _from_env()
 #: incoming gradients (the dgrad A operands) as e5m2 instead of e4m3
 GRAD_E5M2: bool = os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_GRAD", "e4m3").strip().lower() == "e5m2"
-#: the fewest block rows M = A L (after padding) that take the placements (smaller calls keep bf16; ``MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS``)
-MIN_ROWS: int = int(os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS", "0"))
+#: the fewest block rows M = A L (after padding) that take the placements; smaller calls keep bf16 (``MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS``).
+#: H100, CUDA graph fwd + bwd, 2026-11-18: `fast` won at M 18432 / 36864 (-2.2 / -1.1 % cool), was within the same-cubin control at
+#: 3072 .. 12288
+MIN_ROWS: int = int(os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS", "16384"))
 
 
 @functools.lru_cache(maxsize=None)

@@ -34,8 +34,8 @@ def _master(seed: int = 0) -> typing.Any:
 
 def _grads(m, A: int, L: int, places: str, e5: bool = False) -> list[torch.Tensor]:
     F = _F()
-    old = F.PLACES, F.GRAD_E5M2
-    F.PLACES, F.GRAD_E5M2 = F.parse(places), e5
+    old = F.PLACES, F.GRAD_E5M2, F.MIN_ROWS
+    F.PLACES, F.GRAD_E5M2, F.MIN_ROWS = F.parse(places), e5, 0
     try:
         g = torch.Generator(device="cuda").manual_seed(1)
         inp = m.make_inputs(
@@ -53,7 +53,7 @@ def _grads(m, A: int, L: int, places: str, e5: bool = False) -> list[torch.Tenso
             typing.cast(torch.Tensor, q.grad) for q in m.parameters() if q.requires_grad
         ]
     finally:
-        F.PLACES, F.GRAD_E5M2 = old
+        F.PLACES, F.GRAD_E5M2, F.MIN_ROWS = old
 
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
