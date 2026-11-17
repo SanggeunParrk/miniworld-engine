@@ -161,3 +161,17 @@ none added), `--check` findings identical on every arch, 0 not built in the RC c
 * **sm90**: `triattn_h100_core_h16_v3` re-keyed (a980ab15 -> dc615aed; change 1) and `triattn_h100_d64` re-keyed (caa5e7aa -> a67fd776;
   change 2), same names. Nothing else changed (the TriMul tables are Python / JSON, not compiled).
 * **sm80 / sm120**: no change.
+
+## Release build (2.5.13)
+
+* Incremental prebuild from the 2.5.12 release cache (GCC 12.4 host compiler): sm90 2 built (`triattn_h100_core_h16_v3` [dc615aed],
+  `triattn_h100_d64` [a67fd776]), sm80 0, sm120 0; 0 failed, 0 absent. Artifacts: sm90 513, sm80 72, sm120 64 (as 2.5.12).
+* Manifest names vs the 2.5.12 upload: identical on sm90 / sm80 / sm120 (no name dropped or added); wheel file lists differ only by the
+  two re-keyed sm90 directories. Carried byte-for-byte as before: `triattn_h100_core_h16_v2` (sm90, from 2.5.5).
+* Installed-wheel check (the four artifacts unpacked, no repo / CUTLASS / nvcc, empty JIT cache): 513 / 513 sm90 artifacts resolved, 0
+  compiled (also with the system libstdc++ preloaded); capture API and init presets OK; `test_triattn_d64_fp16_core.py` 11 passed,
+  `test_triattn_h16_core_dh16.py` 2 passed, `test_trimul_uni_tables.py` 113 passed, `test_restored_triton_backends.py` 63 passed, 0
+  builds; accuracy smoke (TriangleAttention, TriangleAttentionAF3, TriangleAttentionRF3, TriangleMultiplication, Transition) RED 0, 0
+  builds.
+* PyPI sha256 (= `dist/SHA256SUMS`): engine wheel `1a51a9e9...`, sdist `4a955474...`, sm90 `b2ff12ec...`, sm80 `e1d83309...`, sm120
+  `b4c91628...`.
