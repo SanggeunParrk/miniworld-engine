@@ -119,7 +119,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "cueq": 2,
         "cuda:a100_sm80": 6,  # 6 (2026-11-17): core2 runs the register-resident core from L 128 (64-channel heads) / L 256 (32- and 16-channel heads); 5 (2026-11-13): the register-resident inference core (attn_rf_fwd_sm80.cuh) at L >= 512, plain and gated
         "cuda:h100_sm90": 9,  # 8 (2026-11-14): d_pair 64 x 32-channel heads beyond L 768: the fp16-exact fused front (one kernel for LN + GEMMs + bias; outputs bitwise unchanged); 9 (2026-11-15): the unfused fp16 front (d_pair 384 x 12 heads) makes the pair bias in its LayerNorm kernel (mma.sync = the cuBLAS bias GEMM bits; outputs bitwise unchanged); also the dh16 core (software-pipelined sub-step, PV as m64n24, K in 16 channels: bitwise unchanged)
-        "cuda:5090_sm120": 3,  # 2: the bias-only one-direction path on sm_120a; 3 (2026-11-13): main's row-blocked / padded inference on the sm_120a build
+        "cuda:5090_sm120": 4,  # 2: the bias-only one-direction path on sm_120a; 3 (2026-11-13): main's row-blocked / padded inference on the sm_120a build; 4 (2026-11-17, re-measure only): the 2.5.14 register-resident core keeps 2 ring slots for 32- / 64-channel heads on sm_120a (two CTAs an SM; bitwise the same outputs, 1.04-1.09x module)
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
     # (2026-11-12): row-blocked inference past a whole-pair budget (FoldForge OpenDDE refiner, 2976 / 3968 tokens at d_pair 384; A100: also
