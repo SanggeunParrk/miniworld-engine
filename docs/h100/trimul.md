@@ -178,7 +178,9 @@ Single direction, the same two treatments (2.5.13 candidate, branch `cand/trimul
   no-mask single-direction call reads these cells at its exact (B, L) only (`h100_inference._select_config`, `near=()`): the nearest
   cell's tiles measured up to 1.20x the module time of the length's own kernel default between the grid lengths (41 of 172 off-grid
   shapes > 1.01x, e.g. D64 / D128 L144 1.08-1.20x, D64 hidden 128 L1104 / 1296 1.10x), so every other no-mask call (other L, B > 2)
-  keeps the kernel default as in rc/2.5.13. Table version 6 -> 7.
+  keeps the kernel default as in rc/2.5.13. The bidirectional DIR 0 MASK=0 cells (2.5.12) are read the same way since 2.5.13 (the nearest
+  cell measured 1.08 - 1.09x at D64 L912 / 1104, 1.06 - 1.07x at D128 L144 / 176; every cell is bitwise equal to the default, so the
+  outputs are unchanged). Table version 6 -> 7.
 
 Bitwise equal to rc/2.5.13 in separate processes (sha1, 237 cases: single direction D64..D512 inference L17..2048, masks, B = 1 / 2, hidden
 D / 2 D; training D64..D512 y, dx and every parameter gradient; bidirectional D64..D256 inference). Module graph replay against rc/2.5.13 in one
@@ -238,8 +240,7 @@ any L >= 16; B > 1 at L % 16 != 0 is padded on the host to 16 (D256+: 128) with 
   L128-2048; 2.5.12) and the single-direction D64 / D128 cells (64 / 64 L128-768, 128 / 128 L128-640, 64 / 128 and 128 / 256
   L128-2048, DIR 1 / 2; 2.5.13 candidate), ranked by a CUDA-graph A/B of the module forward, every entry bitwise equal to the kernel
   default; a missing key takes the nearest entry over (B, L) with the same CZ / CH / DIR / MASK, else the kernel default, except a
-  single-direction call without a mask, which takes its exact (B, L) key or the kernel default (the bidirectional MASK=0 cells still take
-  the nearest entry).
+  call without a mask (single direction or bidirectional), which takes its exact (B, L) key or the kernel default.
 - Triton: `trimul_outproj_layernorm_gemm_gate_triton`, `trimul_output_f567_train_triton`, `trimul_bwd_gate_packed_triton`,
   `trimul_input_ln_residual_bwd_triton`, `gated_projection_gate_dropres_triton`, `gated_projection_bwd_gate_dropres_triton`,
   `trimul_gemm_gate_mmajor_triton`, `trimul_input_dual_bwd_triton` (exact key lookup). `trimul_bwd_gate_packed_recompute_triton`

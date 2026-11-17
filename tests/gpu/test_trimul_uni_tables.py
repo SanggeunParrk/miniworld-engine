@@ -82,3 +82,42 @@ def test_no_mask_cells_are_bit_identical_to_default(
         monkeypatch.setattr(HI, "_select_config", lambda *a: default)
         plain = m(x, None)
     assert torch.equal(tabled, plain)
+
+
+@pytest.mark.parametrize(("d", "hidden"), [(64, 128), (128, 256)])
+@pytest.mark.parametrize(("batch", "length"), [(1, 144), (1, 176), (1, 912), (1, 1104), (3, 256)])
+def test_bidirectional_no_mask_off_grid_takes_the_kernel_default(d: int, hidden: int, batch: int, length: int) -> None:
+    """The bidirectional DIR 0 MASK=0 cells are read at their exact (B, L) too: between the grid lengths (and B > 2) the kernel default."""
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("needs an H100 (sm_90)")
+    x = torch.empty(batch, length, length, d, device="cuda", dtype=torch.bfloat16)
+    w = [torch.empty(hidden, d, device="cuda", dtype=torch.bfloat16)]
+    assert HI._select_config(x, w, None, 0, 1e-5) == HI.trimul_candidates(d, hidden, length, 0)[0]
+
+
+@pytest.mark.parametrize("d", [64, 128])
+@pytest.mark.parametrize(("batch", "length"), [(1, 144), (1, 176), (1, 912), (1, 1104), (2, 300)])
+def test_bidirectional_no_mask_off_grid_is_bit_identical_to_nearest_cell(
+    d: int, batch: int, length: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The output at an off-grid length is the same with the kernel default (now) as with the nearest cell's tiles (2.5.12)."""
+    from miniworld_engine.kernels import _launch_config as LC
+    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication as BTM
+
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("needs an H100 (sm_90)")
+    torch.manual_seed(0)
+    m = BTM(d, d_hidden=d, master_weights=True, backend="cuda").cuda().eval()
+    x = torch.randn(batch, length, length, d, device="cuda").bfloat16()
+    picked = []
+    select = HI._select_config
+    monkeypatch.setattr(HI, "_select_config", lambda *a: picked.append(select(*a)) or picked[-1])
+    with torch.no_grad():
+        now = m(x, None)
+        if not picked:
+            pytest.skip("not the packaged route")
+        choose = LC.choose
+        monkeypatch.setattr(HI, "choose", lambda *a, **k: choose(*a, **{**k, "near": ("B", "L")}))
+        picked.clear()
+        before = m(x, None)
+    assert torch.equal(now, before)

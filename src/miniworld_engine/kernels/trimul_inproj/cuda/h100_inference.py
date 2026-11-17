@@ -164,10 +164,11 @@ def _select_config(x, weights, mask, direction, eps):
         "DIR": direction,
         "MASK": 0 if mask is None else mask.ndim,
     }
-    # One direction without a mask (the MASK=0 cells of 2.5.13): the table only at its own (B, L). The nearest cell's tiles measured up to
-    # 1.2x the module time of the length's own kernel default between the grid lengths (L144 / 176 / 304 / 1104, 2026-11-17), so every
-    # other no-mask call keeps the kernel default, as before the cells existed.
-    near = () if mask is None and direction in (1, 2) else ("B", "L")
+    # Without a mask (the MASK=0 cells: single direction 2.5.13, bidirectional DIR 0 2.5.12) the table only at its own (B, L). The nearest
+    # cell's tiles measured up to 1.2x the module time of the length's own kernel default between the grid lengths (single direction L144 /
+    # 176 / 304 / 1104; bidirectional D64 L912 / 1104 1.08 - 1.09x, D128 L144 / 176 1.06 - 1.07x; 2026-11-17), so every other no-mask call
+    # keeps the kernel default (every cell is bitwise equal to it: the same bits either way).
+    near = () if mask is None else ("B", "L")
     return choose("trimul_inproj", "trimul_fwd_sm90_cuda", dims, x.dtype, grid, device=x.device, near=near, run=run)
 
 
