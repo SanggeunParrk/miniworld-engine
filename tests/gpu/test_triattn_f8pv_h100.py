@@ -364,3 +364,41 @@ def test_fused_route_s_gate():
         hs._VS_AUTO.clear()
         hs._VINV.clear()
         hs._VSB.clear()
+
+
+@pytest.mark.parametrize(("dp", "heads", "dh"), [(128, 4, 32), (64, 4, 32), (384, 12, 32)])
+def test_static_scales_follow_the_module_lifetime(dp, heads, dh):
+    """The static V scales are keyed by a tensor's address (the fused front's weight pack, an unfused site's V weight): kept while the module lives, dropped
+    when the tensor is freed (a later module at the same address calibrates its own scale instead of reading a stale one)."""
+    import gc
+
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from miniworld_engine.modules.triangle import TriangleAttention
+
+    length = 1024
+    torch.manual_seed(1)
+    m = TriangleAttention(dp, heads, d_hidden=heads * dh, master_weights=True, backend="cuda").cuda().eval()
+    with torch.no_grad():
+        for p in m.parameters():
+            if p.dim() > 1:
+                p.normal_(0, 0.08)
+    x = torch.randn(1, length, length, dp, device="cuda").bfloat16()
+    mask = torch.ones(1, length, dtype=torch.bool, device="cuda")
+    hs._VS_AUTO.clear()
+    try:
+        assert hs.enable_fp8_pv_for("protenix1" if dp == 128 else "opendde")
+        with torch.no_grad():
+            m(x, mask)
+            keys = set(hs._VS_AUTO)
+            assert keys
+            m(x, mask)
+        assert set(hs._VS_AUTO) == keys
+        del m
+        gc.collect()
+        if dp != 128:  # (the fused key is the weight pack, which the pack cache frees lazily: its address is not reused while it lives)
+            assert not set(hs._VS_AUTO) & keys
+    finally:
+        hs.disable_fp8_pv()
+        hs._VS_AUTO.clear()
+        hs._VINV.clear()
+        hs._VSB.clear()

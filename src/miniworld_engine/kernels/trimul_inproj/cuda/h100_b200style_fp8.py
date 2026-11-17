@@ -213,6 +213,7 @@ def run(leaves, mask, direction, scales=None, record=None, cache=None, margin=1.
 # ---------------------------------------------------------------------------------------------------------------------- module-level opt-in
 import math
 import os as _os
+import weakref
 
 from miniworld_engine.kernels._compile import opaque
 
@@ -233,7 +234,7 @@ HEADROOM = float(_os.environ.get("MINIWORLD_TRIMUL_FP8_HEADROOM", "16"))
 MIN_L = {(128, 1): 144, (128, 2): 192, (256, 1): 224, (256, 2): 144, (128, 0): 256, (256, 0): 1024}
 _MINL_ENV = _os.environ.get("MINIWORLD_TRIMUL_FP8_MINL")
 GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0}
-_CACHES: dict = {}  # calibration state per module (key: data_ptr of its to_left weight): static device tensors, so a captured graph reads them at replay
+_CACHES: dict = {}  # calibration state per module (key: data_ptr of its to_left weight; dropped when that tensor is freed): static device tensors, so a captured graph reads them at replay
 _LAZY: dict = {}
 
 
@@ -381,6 +382,9 @@ def inference(
             GUARD_STATS["capture_fallbacks"] += 1
             return _default(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction)
         cache = _CACHES[key] = {}
+        # keyed by the address of to_left's weight: drop the state when that tensor is freed, so another module whose weight later sits at the
+        # same address calibrates its own scales (a stale entry served another module's prescaled weights and K3 operands: wrong output, NaN)
+        weakref.finalize(wl, _CACHES.pop, key, None)
     lazy = GUARD == "lazy" or capturing or GUARD == "off"
     if GUARD == "lazy" or capturing:
         cache["amax"] = _lazy_buffer(pair.device)

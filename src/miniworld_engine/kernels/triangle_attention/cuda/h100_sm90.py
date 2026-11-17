@@ -6,6 +6,7 @@ matching backward.
 """
 
 import functools
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +144,18 @@ def _drop_derived(key) -> None:
         del _VSB[k2]
 
 
+def _forget(key) -> None:
+    _VS_AUTO.pop(key, None)
+    _drop_derived(key)
+
+
+def _forget_on_free(t, key) -> None:
+    """The static scales are keyed by a tensor's address (the fused front's packed weights, the V weight of an unfused site): drop the entry when that tensor
+    is freed, so another module whose tensor later sits at the same address calibrates its own scale instead of reading a stale one."""
+    if t is not None:
+        weakref.finalize(t, _forget, key)
+
+
 def rescale_all(factor: float = 4.0) -> None:
     for key in _VS_AUTO:
         _VS_AUTO[key].mul_(
@@ -222,6 +235,8 @@ FP8_PV_UNFUSED = False
 #: the call site of the next standalone-V^T core call (the weight pointer, set by the integration): with ``FP8_VSCALE_AUTO`` its V scale is calibrated once and
 #: then static (one pass over V, no amax pass), with the same overflow flag / :func:`take_overflow` / :func:`rescale_all` contract as the fused front
 _SITE: Any = None
+#: the tensor whose address ``_SITE`` is (set with it by the integration): its release drops the site's static scale (:func:`_forget_on_free`)
+_SITE_T: Any = None
 
 
 def quantize_v_static(v, site):
@@ -232,6 +247,7 @@ def quantize_v_static(v, site):
     if vscale is None:
         vt, vs = quantize_v(v)
         _VS_AUTO[key] = vscale_from_amax(vs.amax(dim=0) * 448.0, 4.0)
+        _forget_on_free(_SITE_T if _SITE_T is not None and _SITE_T.data_ptr() == site else None, key)
         _drop_derived(key)
         return vt, vs
     if (
@@ -441,6 +457,7 @@ def inference(
         if vscale is None:  # calibration: the V absmax per head of this call
             v0 = m.tri_front(x, lnw, lnb, eps, w4, wb16, empty.bool(), B, L, D**-0.5, trans, True, False)[2]
             vscale = _VS_AUTO[w4.data_ptr()] = vscale_from_amax(v0.view(-1, H, D).abs().amax(dim=(0, 2)), 4.0)
+            _forget_on_free(w4, w4.data_ptr())
         vscale = vscale.to(pair.device, torch.float32)
         q, k, v, g, sbias, vt = m.tri_front_vt(
             x,

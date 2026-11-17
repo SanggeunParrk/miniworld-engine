@@ -176,11 +176,11 @@ def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False, varia
 
     if not _hs.FP8_PV:
         return _infer_body(kind, args, eps, n_head, head_dim, trans, out, flip, variant)
-    _hs._SITE = args[5].data_ptr()
+    _hs._SITE, _hs._SITE_T = args[5].data_ptr(), args[5]
     try:
         return _infer_body(kind, args, eps, n_head, head_dim, trans, out, flip, variant)
     finally:
-        _hs._SITE = None
+        _hs._SITE = _hs._SITE_T = None
 
 
 def _infer_body(kind, args, eps, n_head, head_dim, trans, out=None, flip=False, variant=0):

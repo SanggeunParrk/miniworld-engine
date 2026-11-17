@@ -86,3 +86,61 @@ def test_fp8_route_k3_pipe_and_fast_accum(d: int, outgoing: bool) -> None:
             F.FAST_ACCUM = old[1]
     assert torch.equal(y_plain, y_pipe)
     assert _rel(y_fast - x, y_plain - x) < 0.01
+
+
+def test_calibration_state_follows_the_module_lifetime() -> None:
+    """The calibration state is keyed by the address of to_left's weight: it stays for the module's lifetime (no recalibration between calls)
+    and is dropped when the weight is freed, so a later module whose weight lands at the same address (another direction, other weights)
+    calibrates its own scales. Before, such a module read the stale state: 137 % update error (incoming after outgoing), NaN (bidirectional)."""
+    _needs_h100()
+    import gc
+
+    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
+
+    def make(kind, seed):
+        torch.manual_seed(seed)
+        m = (
+            BidirectionalTriangleMultiplication(128, d_hidden=128, master_weights=True, backend="cuda")
+            if kind == 0
+            else TriangleMultiplication(128, outgoing=kind == 1, master_weights=True, backend="cuda")
+        )
+        m = m.cuda().eval()
+        with torch.no_grad():
+            for p in m.parameters():
+                if p.dim() > 1:
+                    p.normal_(0, 128**-0.5)
+        return m
+
+    n = 256
+    torch.manual_seed(9)
+    x = torch.randn(1, n, n, 128, device="cuda").bfloat16()
+    mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+    old = (F8.POLICY, F8.GUARD, F8._MINL_ENV)
+    F8.POLICY, F8.GUARD, F8._MINL_ENV = "calib", "lazy", "0"
+    try:
+        fresh = {}
+        for kind in (1, 2, 0):  # each module alone (an empty state): the reference bytes
+            F8._CACHES.clear()
+            m = make(kind, 10 + kind)
+            with torch.no_grad():
+                m(x, mask)
+                fresh[kind] = m(x, mask)
+            del m
+            gc.collect()
+        F8._CACHES.clear()
+        for kind in (1, 2, 0):  # one after the other in one process: the freed weight's address is reused by the next module
+            m = make(kind, 10 + kind)
+            with torch.no_grad():
+                m(x, mask)
+                key = m.to_left.weight.data_ptr()
+                state = F8._CACHES[key]
+                y = m(x, mask)
+            assert F8._CACHES[key] is state  # no recalibration while the module lives
+            assert torch.equal(y.view(torch.int16), fresh[kind].view(torch.int16)), kind
+            del m, state
+            gc.collect()
+            assert key not in F8._CACHES
+    finally:
+        F8.POLICY, F8.GUARD, F8._MINL_ENV = old
+        F8._CACHES.clear()
