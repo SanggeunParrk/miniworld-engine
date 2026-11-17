@@ -42,6 +42,15 @@ using namespace sm90;
 #ifndef TA_HG
 #define TA_HG 0               // experiments: a fixed head group (a divisor of H) instead
 #endif
+#ifndef TA_F8PV
+#define TA_F8PV 0         // opt-in FP8 variant (2026-11-14): P and V on the e4m3 tensor-core path (see the F8PV notes below); the extension is built with -DTA_F8PV=1
+#endif
+#ifndef TA_F8HL
+#define TA_F8HL 0         // F8PV only: V as two e4m3 planes (hi + lo/16: the rounding of the first, again in e4m3), PV on m64n72k32 -- V error ~2^-8 instead of 2^-4
+#endif
+#if TA_F8PV
+#define TA_TAU 0.5f       // F8PV: p = 2^(logit - m + 8): the largest probability is 2^8; p = 2^(x + 8) must stay below 448 (2^8.8): the offset rises as soon as a logit exceeds it by 0.5 log2 units
+#endif
 #ifndef TA_TAU
 #define TA_TAU 8.f        // exact form: a tile raises a row's offset only when its maximum exceeds it by more than this many log2 units
 #endif
@@ -71,6 +80,9 @@ constexpr int KVT = BN * D;                                // K or V tile [128 k
 constexpr int STG = 3 * KVT;                               // a K | V stage: K, V, ones (24 KiB)
 constexpr int BT = BM * BN;                                // bias tile: fp16 [2 key halves][128 q][64], 128B swizzle (32 KiB)
 constexpr int THREADS = 384;
+constexpr int NO = TA_F8HL ? 36 : 20;                       // accumulator floats per row: [O | l] (n40), or [O_hi | O_lo | l] (n72)
+constexpr int LC = TA_F8HL ? 32 : 16;                       // the row sums' index (row g; row g + 8: LC + 2)
+constexpr int VROWS = TA_F8HL ? 64 : 32;                    // V^T rows per (row n, head) in global memory
 constexpr int SMEM = 1024 + (NB * BT + R * QT + NKV * STG) * 2 + 256;
 static_assert(SMEM <= 232448, "one CTA per SM");
 
@@ -104,6 +116,30 @@ __device__ __forceinline__ void mma_h16_n32(float (&d)[20], const uint32_t (&a)[
                "wgmma.mma_async.sync.aligned.m64n32k16.f32.f16.f16 " SM90_L16 ", {%16, %17, %18, %19}, %20, p, 1, 1, 1;\n}\n"
                : SM90_D16(0) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
 }
+// F8PV: [O | l] += P [V | 1] on e4m3: m64n40k32, fp32 accumulation, A = P from registers (4 x 4 e4m3), B = [V^T; ones] K-major from shared (40 rows of 128 keys).
+__device__ __forceinline__ void mma_f8_n40(float (&d)[20], const uint32_t (&a)[4], uint64_t b) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n40k32.f32.e4m3.e4m3 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, "
+               "%15, %16, %17, %18, %19}, {%20, %21, %22, %23}, %24, p, 1, 1;\n}\n"
+               : SM90_D16(0), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19])
+               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+}
+// F8PV, heads of 16 channels (TA_F8N24): [O | l] += P [V | 1] as m64n24k32 (16 value channels + one 8-column ones block), fp32 accumulation
+__device__ __forceinline__ void mma_f8_n24(float (&d)[12], const uint32_t (&a)[4], uint64_t b) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n24k32.f32.e4m3.e4m3 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11}, {%12, %13, %14, %15}, %16, p, 1, 1;\n}\n"
+               : SM90_D8(0), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11])
+               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+}
+#if TA_F8HL
+__device__ __forceinline__ void mma_f8_n72(float (&d)[36], const uint32_t (&a)[4], uint64_t b) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n72k32.f32.e4m3.e4m3 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, "
+               "%16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32, %33, %34, %35}, {%36, %37, %38, %39}, %40, p, 1, 1;\n}\n"
+               : SM90_D32(0), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35])
+               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+}
+#endif
 __device__ __forceinline__ uint32_t hmax2(uint32_t a, uint32_t b) { uint32_t r; asm("max.f16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 __device__ __forceinline__ uint32_t hfma2(uint32_t a, uint32_t b, uint32_t c) { uint32_t r; asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r; }
 __device__ __forceinline__ uint32_t hex2(uint32_t a) { uint32_t r; asm("ex2.approx.f16x2 %0, %1;" : "=r"(r) : "r"(a)); return r; }
@@ -147,6 +183,9 @@ __device__ __forceinline__ uint32_t hex2_poly(uint32_t x) {
 #endif
 #ifndef TA_K16
 #define TA_K16 1          // 16-channel heads with TA_N24: K read as the 16 channels only (32-byte swizzle, 4 KiB instead of 8 KiB per stage); the k16 step reads the same values (bit-identical)
+#endif
+#ifndef TA_F8N24
+#define TA_F8N24 1        // F8PV, heads of 16 channels: PV as m64n24k32 (the 16 zero-padded channels and their MMA columns dropped: bit-identical)
 #endif
 #ifndef TA_PVH
 #define TA_PVH 0          // TA_SW: the first TA_PVH of the 8 k16 steps of a row's PV are issued as soon as their probabilities are done (under the exponentials of the rest and the next QK^T), the others at the next sub-step. Same accumulation order (bit-identical)
@@ -221,14 +260,24 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     int* __restrict__ SCHED,                             // zeroed task counter (dynamic schedule), or nullptr: static
     int* __restrict__ FIX,                               // fix list: FIX[0] = count (zeroed), FIX[1..] = task ids (written by SPEC, read by the exact form)
     const int* __restrict__ KT,                          // live key tiles of each batch element [B] (every key past them is masked in every row), or nullptr: all
-    const unsigned char* __restrict__ KM) {              // or the key mask itself (bool [B][S], 16-byte aligned, B <= KM_MAXB): the live key tiles
+    const unsigned char* __restrict__ KM
+#if TA_F8PV
+    , const __grid_constant__ CUtensorMap vtmap,        // V^T e4m3 [B*N*H*32 rows][S keys] (keys permuted inside each group of 32: see vt_perm), box (128, 32), 128B swizzle
+    const float* __restrict__ VS                         // per (batch, head) scale of V^T: V = V^T-values * VS [B*H]
+#endif
+  ) {              // or the key mask itself (bool [B][S], 16-byte aligned, B <= KM_MAXB): the live key tiles
                                                          // counted by the producer warpgroup once per CTA (no glue kernels before the launch)
   constexpr bool VOTE = SPEC && TA_SPEC == 2;    // TA_SPEC 2: no fix list (see X)
-  constexpr bool N24 = (DH != D) && TA_N24;       // PV as m64n24 (see TA_N24); the V tile is then 16 channels in the 32-byte swizzle
-  constexpr bool K16 = N24 && TA_K16;
-  constexpr int OW = (DH == D || !N24) ? 20 : 12;     // accumulator registers per row: [O | l] columns, the row sums in the last two pairs
-  constexpr int LS = OW - 4;                       // o[r][LS] = row g sum, o[r][LS + 2] = row g + 8
+  constexpr bool N24 = (DH != D) && TA_N24 && !TA_F8PV;       // PV as m64n24 (see TA_N24); the V tile is then 16 channels in the 32-byte swizzle
+  constexpr bool K16 = N24 && TA_K16;   // (F8PV: dh 16 keeps the zero-padded 32-channel K and the 3-D V^T box)
+  constexpr bool F8N24 = TA_F8PV && !TA_F8HL && TA_F8N24 && DH != D;   // F8PV, heads of 16: PV as m64n24 (V^T rows 0-15, ones at rows 16-23)
+  constexpr int OW = TA_F8PV ? (F8N24 ? 12 : NO) : ((DH == D || !N24) ? 20 : 12);     // accumulator registers per row: [O | l] columns, the row sums in the last two pairs
+  constexpr int LS = TA_F8PV ? (F8N24 ? 8 : LC) : OW - 4;                       // o[r][LS] = row g sum, o[r][LS + 2] = row g + 8
+#if TA_F8PV
+  constexpr bool SWM = false;   // F8PV: no software-pipelined sub-step (tried, level or worse: docs/fp8.md); TA_SW does not apply
+#else
   constexpr bool SWM = (TA_SW == 2) ? (DH != D) : (TA_SW == 1);   // the software-pipelined sub-step (step_sw): TA_SW 2 = the 16-channel heads only
+#endif
   constexpr bool LIST = SPEC && !VOTE;
   const bool LISTM = !SPEC && FIX != nullptr;
   const int nt = LISTM ? *reinterpret_cast<volatile int*>(FIX) : ntasks;
@@ -244,14 +293,21 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   auto bfu = [&](int s) { return bar0 + 16 + 8 * (2 * NKV + s); };            // [NB]
   auto bem = [&](int s) { return bar0 + 16 + 8 * (2 * NKV + NB + s); };       // count 8: every consumer warp read its bias fragments
   const int tid = threadIdx.x, wg = tid >> 7, lane = tid & 31;
-  if (TA_ABL & 768) {   // traffic ablation: the bytes the skipped loads would have written stay zero
+  if (TA_ABL & (768 | 65536)) {   // traffic ablation: the bytes the skipped loads would have written stay zero
     for (int i = tid; i < (NB * BT + R * QT + NKV * STG) / 2; i += THREADS) reinterpret_cast<uint32_t*>(smb)[i] = 0u;
     __syncthreads();
   }
+#if TA_F8PV
+  for (int i = tid; i < NKV * 256; i += THREADS) {          // F8PV: the 8 ones rows (e4m3 1.0 = 0x38) behind each stage's 32 V^T rows (1 KiB)
+    const int s = i / 256, e = i % 256;
+    reinterpret_cast<uint32_t*>(smb + (sKV - sB) + (s * STG + KVT) * 2 + 128 * (F8N24 ? 16 : VROWS))[e] = 0x38383838u;
+  }
+#else
   for (int i = tid; i < NKV * KVT / 2; i += THREADS) {     // the ones blocks: fp16 pairs (1, 1)
     const int s = i / (KVT / 2), e = i % (KVT / 2);
     reinterpret_cast<uint32_t*>(smb + (sKV - sB) + (s * STG + 2 * KVT) * 2)[e] = 0x3C003C00u;
   }
+#endif
   if (tid == 0) {
     uint64_t* bars = reinterpret_cast<uint64_t*>(smb + (bar0 - sB));
     bar_init(bars, 1); bar_init(bars + 1, 8);
@@ -284,6 +340,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     else asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];\n"
                       :: "r"(dst), "l"(map), "r"(bar), "r"(0), "r"(h), "r"(row) : "memory");
   };
+#if TA_F8PV
+#define BIGV vtmap
+#else
+#define BIGV vmap
+#endif
   __shared__ int kts[KM_MAXB];                       // KM: 1 + the last attended key of each batch element (0: none)
   if (wg == 0) {
     reg_dealloc<40>();
@@ -299,8 +360,22 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       for (int r = 0; r < R; ++r) {
         wait(kve(st), kph ^ 1);
         const bool skip = (TA_ABL & 256) && r == 1;
+#if TA_F8PV
+        expect_tx(kvf(st), ((TA_ABL & 65536) ? 0 : KVT * 2) + ((TA_ABL & 256) ? 0 : (F8N24 ? 16 : VROWS) * BN));   // (ablation only: 65536 no K loads, 256 no V^T loads, 512 half the bias)
+#else
         expect_tx(kvf(st), skip ? 0 : (N24 ? (K16 ? KVT * 2 : KVT * 2 + KVT) : 2 * KVT * 2));
+#endif
         const int rw = row0(b, g * R + r) + j * BN;
+#if TA_F8PV   // (F8PV: no cluster pair, no ablation skips)
+        if (!(TA_ABL & 65536)) load_head(&kmap, sKV + st * STG * 2, kvf(st), h, rw);
+#pragma unroll
+        for (int pl = 0; pl < (TA_ABL & 256 ? 0 : VROWS / 32); ++pl) {   // the V^T planes (F8HL: hi, lo) of the row: 32 rows each
+          const int bnh = (b * N + min(g * R + r, N - 1)) * H + h;
+          if (DH == D) load_2d(&vtmap, sKV + (st * STG + KVT) * 2 + pl * 4096, kvf(st), j * BN, (bnh * (VROWS / 32) + pl) * 32);
+          else asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];\n"   // (heads of 16: the box's rows 16 - 31 read as zeros)
+                            :: "r"(sKV + (st * STG + KVT) * 2 + pl * 4096), "l"(&vtmap), "r"(kvf(st)), "r"(j * BN), "r"(0), "r"(bnh * (VROWS / 32) + pl) : "memory");
+        }
+#else
         if (CL) {   // rank 0: the K tile, rank 1: the V tile, each to both CTAs of the pair (both expect all 16 KiB on their own barrier)
           if (crank == 0) load_2d_mc(&kmap, sKV + st * STG * 2, kvf(st), h * D, rw, 3);
           else            load_2d_mc(&vmap, sKV + (st * STG + KVT) * 2, kvf(st), h * D, rw, 3);
@@ -308,13 +383,14 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
           load_head(&kmap, sKV + st * STG * 2, kvf(st), h, rw);
           load_head(&vmap, sKV + (st * STG + KVT) * 2, kvf(st), h, rw);
         }
+#endif
         if (++st == NKV) { st = 0; kph ^= 1; }
       }
     };
     // KM: the first task's Q tiles and first key tile (needed whatever the count) are requested before the mask is read; its Q barrier
     // takes the bytes now and its arrival once the count is handed over (below), so the scan's load latency overlaps theirs
     const bool pre = KM != nullptr && (int)blockIdx.x < nt;
-    if (tid == 0) prefetch_map(&qmap), prefetch_map(&kmap), prefetch_map(&vmap), prefetch_map(&bmap);
+    if (tid == 0) prefetch_map(&qmap), prefetch_map(&kmap), prefetch_map(&BIGV), prefetch_map(&bmap);
     if (pre && tid == 0) {
       int b, h, qt, g; decode(LISTM ? FIX[1 + blockIdx.x] : (int)blockIdx.x, b, h, qt, g);
       asm volatile("mbarrier.expect_tx.relaxed.cta.shared::cta.b64 [%0], %1;\n" :: "r"(qf), "r"(R * QT * 2) : "memory");
@@ -390,7 +466,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // BTR (the bias tile stored [key][query]: AF3's ending node, the pair-as-stored bias): query half w, key row 8 (lane / 16) + lane % 8 of a
   // 16-key block, the 16-byte chunk of queries 16 wi + 8 ((lane / 8) % 2) (128-byte swizzle: chunk ^ row % 8)
   const uint32_t tlane = sB + w * BM * 128 + (8 * lcol8 + x7) * 128 + (((2 * wi + ((lane >> 3) & 1)) ^ x7) << 4);
-  const uint64_t kd0 = K16 ? gdesc(sKV, 16, 256, SW32) : desc_k64(sKV), vd0 = N24 ? gdesc(sKV + KVT * 2, KVT * 2, 256, SW32) : desc_mn64(sKV + KVT * 2, KVT * 2);   // built once: a wgmma operand costs one 32-bit add
+  const uint64_t kd0 = K16 ? gdesc(sKV, 16, 256, SW32) : desc_k64(sKV), vd0 = TA_F8PV ? desc_k128(sKV + KVT * 2) : (N24 ? gdesc(sKV + KVT * 2, KVT * 2, 256, SW32) : desc_mn64(sKV + KVT * 2, KVT * 2));   // built once: a wgmma operand costs one 32-bit add
   const uint32_t scl2 = hdup(scl);
   // cursors: the K | V stage and bias stage the next G phase reads; the stage whose PV was issued last (released once it retired)
   int gst = 0, gph = 0, bs = 0, bph = 0, xst = 0, bad = 0, ovf = 0;
@@ -433,12 +509,26 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // PV of the previous sub-step (row r, stage xst): [O_r | l_r] += P_r [V | 1], issued and committed
   auto PV = [&](int r, int lo = 0, int hi = BN / 16) {
     if (SWM && TA_SWF) wg_fence();                          // TA_SW: the probabilities (A) were written after the last fence, with the next QK^T in flight
+#if TA_F8PV
+    // P is already e4m3 bytes (X): the A fragment of a k32 step is sc[r][4 kk .. 4 kk + 3]; V^T rows are K-major, a k32 step = +32 bytes in the 128-byte row
+#pragma unroll
+    for (int kk = 0; kk < BN / 32; ++kk) {
+      const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
+      if (TA_ABL & 2) { asm volatile("" :: "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3])); continue; }   // PV ablated (time only)
+#if TA_F8HL
+      mma_f8_n72(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 32));
+#else
+      if constexpr (F8N24) mma_f8_n24(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 32)); else mma_f8_n40(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 32));
+#endif
+    }
+#else
 #pragma unroll
     for (int kk = lo; kk < hi; ++kk) {
       const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
       if (TA_ABL & 2) asm volatile("" :: "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]));   // PV ablated: the probabilities stay live (else ptxas drops the exponentials too)
       if (!(TA_ABL & 2)) { if constexpr (N24) mma_h16_n24(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 512)); else if ((TA_ABL & 1024) != 0) mma_h16_n32(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024)); else mma_h16_n40(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024)); }
     }
+#endif
     wg_commit();
   };
   auto release = [&]() {
@@ -449,6 +539,32 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // X phase of row r on sc[r] (its QK^T retired; o[r] idle: the PV in flight is the other row's): the offsets, the exponentials in place.
   // Exact form, and a row without a finite logit yet: the tile's row maximum (a tree of HMNMX2) raises the offset lazily.
   uint32_t nmr0 = 0, nmr1 = 0;                       // the offsets of the row in X (set by Xpre, used by Xexp)
+  uint32_t nbr0 = 0, nbr1 = 0;                       // F8PV: the same, shifted by +8 (8 - m)
+#if TA_F8PV
+  // F8PV: the probabilities of the k32 groups [k0, k1) of row r (4 pairs = 8 registers each) as e4m3 bytes, in place: the A fragment of that group's PV step ends up in sc[r][4 kk .. 4 kk + 3]
+  // (groups in increasing order: a group writes registers below the inputs of every later group).  p = 2^(x + 8) from the logit: see Xpre.
+  // (ablation only, TA_ABL: 4 the whole conversion, 8 the scale / offset HFMA2, 4096 the clamp, 8192 the 8 x + 56 HFMA2, 2048 the PRMT pack; the probabilities stay live)
+  auto F8conv = [&](int r, int k0, int k1) {
+    if (TA_ABL & (4 | 128)) return;
+#pragma unroll
+    for (int kk = k0; kk < k1; ++kk) {
+#pragma unroll
+      for (int i = 4 * kk; i < 4 * kk + 4; ++i) {
+        uint32_t x0 = (TA_ABL & 8) ? sc[r][2 * i] : hfma2(sc[r][2 * i], scl2, nbr0), x1 = (TA_ABL & 8) ? sc[r][2 * i + 1] : hfma2(sc[r][2 * i + 1], scl2, nbr1);
+        if (!(TA_ABL & 4096)) { x0 = hmax2(x0, 0xC700C700u); x1 = hmax2(x1, 0xC700C700u); }   // x >= -7
+        if (!(TA_ABL & 8192)) { x0 = hfma2(x0, 0x48004800u, 0x64386438u); x1 = hfma2(x1, 0x48004800u, 0x64386438u); }                           // 8 x + 56 + 1024
+        sc[r][2 * i] = x0; sc[r][2 * i + 1] = x1;
+      }
+      if (!(TA_ABL & 2048)) {
+        uint32_t pk[4];   // k32 step kk: a0 = row g keys (blocks 4 kk, 4 kk + 1), a1 = row g + 8, a2 / a3 = blocks 4 kk + 2, 4 kk + 3
+#pragma unroll
+        for (int j = 0; j < 4; ++j) asm("prmt.b32 %0, %1, %2, 0x6420;" : "=r"(pk[j]) : "r"(sc[r][8 * kk + (j & 1) + 4 * (j >> 1)]), "r"(sc[r][8 * kk + (j & 1) + 4 * (j >> 1) + 2]));
+#pragma unroll
+        for (int j = 0; j < 4; ++j) sc[r][4 * kk + j] = pk[j];
+      }
+    }
+  };
+#endif
   auto Xpre = [&](int r) {
     if (TA_ABL & 128) return;
     uint32_t t0[8], t1[8];
@@ -465,14 +581,18 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     else if (!SPEC) { tree(); exact = true; }
     else if (VOTE) {                               // the exact path only when a lane of the warp sees a logit past its row's offset + TA_TAU (or a row has none yet)
       tree();
+      if (TA_ABL & 131072) { asm volatile("" :: "r"(t0[0]), "r"(t1[0])); exact = false; } else {   // ablation only: the tree alone
       const float p0 = fmaxf(hlo(t0[0]), hhi(t0[0])) * scl, p1 = fmaxf(hlo(t1[0]), hhi(t1[0])) * scl;
       exact = __any_sync(0xffffffffu, !(m[r][0] > -INFINITY) | !(m[r][1] > -INFINITY) | (p0 > m[r][0] + TA_TAU) | (p1 > m[r][1] + TA_TAU));
+      if (TA_ABL & 32768) { asm volatile("" :: "r"((int)exact)); exact = false; }   // ablation only: the vote runs, the exact body never
+      }
     } else {
       exact = __any_sync(0xffffffffu, !(m[r][0] > -INFINITY) | !(m[r][1] > -INFINITY));
       if (exact) tree();
     }
     if (exact) {
-      float m0 = fmaxf(hlo(t0[0]), hhi(t0[0])), m1 = fmaxf(hlo(t1[0]), hhi(t1[0]));
+      float m0, m1;
+      m0 = fmaxf(hlo(t0[0]), hhi(t0[0])); m1 = fmaxf(hlo(t1[0]), hhi(t1[0]));
       m0 = fmaxf(m0, __shfl_xor_sync(0xffffffffu, m0, 1)); m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, 1));
       m0 = fmaxf(m0, __shfl_xor_sync(0xffffffffu, m0, 2)); m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, 2));
       m0 *= scl; m1 *= scl;                         // -inf when the tile's 128 keys are all masked
@@ -487,9 +607,20 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       }
     }
     nmr0 = hdup(m[r][0] > -INFINITY ? -m[r][0] : 0.f); nmr1 = hdup(m[r][1] > -INFINITY ? -m[r][1] : 0.f);
+#if TA_F8PV
+    // p = 2^(x + 8) directly as e4m3 bits: byte = round(8 (x + 8) + 56) - 64 ... = round(8 x + 56) with x already shifted by +8 (nm = 8 - m): the exponent field is the integer part
+    // of the logit, the 3 mantissa bits the fraction (2^f ~ 1 + f, at most 6 % high mid-octave -- a smooth shape error the quantization noise already exceeds); logits below -7 give 0.
+    // The magic add leaves the integer in the low byte of each half of the fp16 pair (1024 + y): two HFMA2 and one PRMT per four probabilities, no MUFU
+    // (F8PV does the whole row here; Xexp is empty)
+    nbr0 = hdup(m[r][0] > -INFINITY ? 8.f - m[r][0] : 0.f); nbr1 = hdup(m[r][1] > -INFINITY ? 8.f - m[r][1] : 0.f);
+#endif
   };
   // the exponentials of the pairs [lo, hi) of row r (in place), with the offsets Xpre left
   auto Xexp = [&](int r, int lo, int hi) {
+#if TA_F8PV
+    F8conv(r, lo / 4, hi / 4);                       // F8PV: the e4m3 probabilities of the k32 groups [lo / 4, hi / 4) (the pairs are counted in 16ths of the row)
+    return;
+#endif
     if (TA_ABL & 128) return;
 #pragma unroll
     for (int i = lo; i < hi; ++i) { sc[r][2 * i] = hexp<POLY ? (DH == D ? TA_POLY : TA_POLY16) : 0>((TA_ABL & 8) ? sc[r][2 * i] : hfma2(sc[r][2 * i], scl2, nmr0), i); sc[r][2 * i + 1] = hexp<POLY ? (DH == D ? TA_POLY : TA_POLY16) : 0>((TA_ABL & 8) ? sc[r][2 * i + 1] : hfma2(sc[r][2 * i + 1], scl2, nmr1), i); }
@@ -536,9 +667,10 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     constexpr bool last = decltype(LAST)::value;
     constexpr bool first = decltype(FIRST)::value;
     constexpr int PVH = (SWM && TA_PVH > 0 && TA_PVH < BN / 16) ? TA_PVH : 0;
+    constexpr int SWNP = TA_SWN;
     if (!first) PV(1 - r, PVH);
     Xpre(r);
-    Xexp(r, 0, TA_SWN);
+    Xexp(r, 0, SWNP);
     if (!first) {
       wg_wait<0>();
       fence_regs(o[0]); fence_regs(o[1]);
@@ -547,12 +679,12 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     }
     if (!last) G(1 - r);
     if (PVH > 0 && !last) {
-      Xexp(r, TA_SWN, 2 * PVH);
+      Xexp(r, SWNP, 2 * PVH);
       PV(r, 0, PVH);                                    // the first part of this row's PV, queued behind the QK^T
       Xexp(r, 2 * PVH, 16);
       wg_wait<1>(); fence_regs(sc[1 - r]);               // the QK^T retired (groups retire in order)
     } else {
-      Xexp(r, TA_SWN, 16);
+      Xexp(r, SWNP, 16);
       if (!last) { wg_wait<0>(); fence_regs(sc[1 - r]); }
     }
   };
@@ -624,7 +756,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
       const float l0 = o[r][LS], l1 = o[r][LS + 2];
       bad |= !(l0 > 0.f) || !(l0 < 3.0e38f) || !(l1 > 0.f) || !(l1 < 3.0e38f);
       ovf |= !(l0 < 3.0e38f) || !(l1 < 3.0e38f);
+      #if TA_F8PV
+      const float vsc = VS[b * H + h], inv0 = vsc / l0, inv1 = vsc / l1;   // the row sum is of the e4m3 probabilities (ones rows of the PV): P V8 / l is normalised, times the V scale
+#else
       const float inv0 = 1.f / l0, inv1 = 1.f / l1;
+#endif
       const int q0 = qt * BM + qrow + g8;
       if (LSE != nullptr && t4 == 0) {
         float* lp = LSE + ((size_t)(b * N + n) * H + h) * S + q0;
@@ -636,7 +772,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         const float inv = half ? inv1 : inv0;
         uint32_t in[4], outw[4];
 #pragma unroll
+#if TA_F8HL
+        for (int i = 0; i < 4; ++i) in[i] = pack2((o[r][4 * i + 2 * half] + o[r][16 + 4 * i + 2 * half] * (1.f / 16.f)) * inv, (o[r][4 * i + 2 * half + 1] + o[r][16 + 4 * i + 2 * half + 1] * (1.f / 16.f)) * inv);
+#else
         for (int i = 0; i < 4; ++i) in[i] = 4 * i < LS ? pack2(o[r][4 * i + 2 * half] * inv, o[r][4 * i + 2 * half + 1] * inv) : 0u;   // (channels past the head are zero: pack2(+0, +0))
+#endif
         // lane t4 holds channels 8i + 2 t4 (i = 0..3); after the transpose it holds channels 8 t4 .. 8 t4 + 7
 #pragma unroll
         for (int k = 0; k < 4; ++k) {
@@ -649,7 +789,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
           for (int i = 0; i < 4; ++i) if (didx == i) outw[i] = recv;
         }
         const size_t orow = (size_t)row0(b, n) + q0 + 8 * half;
-        if (OUT != nullptr && 8 * t4 < DH) *reinterpret_cast<uint4*>(OUT + orow * (H * DH) + h * DH + 8 * t4) = make_uint4(outw[0], outw[1], outw[2], outw[3]);
+        if (OUT != nullptr && 8 * t4 < DH && !((TA_ABL & 16384) && S > 0)) *reinterpret_cast<uint4*>(OUT + orow * (H * DH) + h * DH + 8 * t4) = make_uint4(outw[0], outw[1], outw[2], outw[3]);
         if (GATE != nullptr && 8 * t4 < DH) {
           const uint4 gv = gpre[r][half];
           const uint32_t gw[4] = {gv.x, gv.y, gv.z, gv.w};
@@ -701,7 +841,11 @@ torch::Tensor& flags_for(const torch::Device& dev) {
 std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor sbias, double scale, bool want_lse,
                                            c10::optional<torch::Tensor> gate, bool want_out,
                                            c10::optional<torch::Tensor> key_tiles, c10::optional<torch::Tensor> key_mask,
-                                           bool bias_transposed) {
+                                           bool bias_transposed
+#if TA_F8PV
+                                           , torch::Tensor vt, torch::Tensor vscale
+#endif
+                                           ) {
   TORCH_CHECK(q.is_cuda() && q.dim() == 5 && (q.size(4) == D || q.size(4) == 16), "q [B, N, S, H, 32 | 16]");
   const long dh = q.size(4);   // 16: heads of 16 channels stored compact (zero-padded to 32 by the loads)
   const long B = q.size(0), N = q.size(1), S = q.size(2), H = q.size(3);
@@ -721,6 +865,16 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
                          what, CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
     return make_map<2>(t.data_ptr(), {(uint64_t)(H * D), rows}, {(uint64_t)ld}, {32, 128}, CU_TENSOR_MAP_SWIZZLE_64B, what,
                        CU_TENSOR_MAP_DATA_TYPE_FLOAT16); };
+#if TA_F8PV
+  TORCH_CHECK(vt.is_cuda() && vt.scalar_type() == torch::kFloat8_e4m3fn && vt.is_contiguous() && vt.numel() == B * N * H * VROWS / 32 * dh * S,
+              "vt: float8_e4m3fn [B, N, H, dh, S] contiguous (keys permuted inside each group of 32)");
+  TORCH_CHECK(vscale.is_cuda() && vscale.scalar_type() == torch::kFloat32 && vscale.is_contiguous() && vscale.numel() == B * H, "vscale: fp32 [B, H]");
+  CUtensorMap qm = m2(q, "q"), km = m2(k, "k"), vm = km;   // (v is not read: the fp16 operand of the shape contract)
+  CUtensorMap vtm = dh == D ? make_map<2>(vt.data_ptr(), {(uint64_t)S, (uint64_t)(B * N * H * VROWS)}, {(uint64_t)S}, {128, 32}, CU_TENSOR_MAP_SWIZZLE_128B, "vt",
+                                          CU_TENSOR_MAP_DATA_TYPE_UINT8, 1)
+                           : make_map<3>(vt.data_ptr(), {(uint64_t)S, 16, (uint64_t)(B * N * H * (VROWS / 32))}, {(uint64_t)S, 16 * (uint64_t)S}, {128, (TA_F8N24 && !TA_F8HL) ? 16u : 32u, 1}, CU_TENSOR_MAP_SWIZZLE_128B, "vt",
+                                         CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+#else
   CUtensorMap qm = m2(q, "q"), km = m2(k, "k"), vm = m2(v, "v");
   if (dh != D && TA_N24 && TA_K16)   // K likewise: the 16 channels, 32-byte swizzle (K-major atoms of 8 keys x 32 bytes)
     km = make_map<3>(k.data_ptr(), {(uint64_t)dh, (uint64_t)H, rows}, {(uint64_t)dh, (uint64_t)ld}, {16, 1, 128}, CU_TENSOR_MAP_SWIZZLE_32B, "k",
@@ -728,6 +882,7 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
   if (dh != D && TA_N24)   // PV as n24: V read as the 16 channels only, in the 32-byte swizzle (MN-major atoms of 8 keys x 16 channels)
     vm = make_map<3>(v.data_ptr(), {(uint64_t)dh, (uint64_t)H, rows}, {(uint64_t)dh, (uint64_t)ld}, {16, 1, 128}, CU_TENSOR_MAP_SWIZZLE_32B, "v",
                      CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
+#endif
   CUtensorMap bm = make_map<2>(sbias.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B,
                                "sbias", CU_TENSOR_MAP_DATA_TYPE_FLOAT16);
   TORCH_CHECK(!key_tiles.has_value() || (key_tiles->is_cuda() && key_tiles->scalar_type() == torch::kInt32 && key_tiles->is_contiguous() &&
@@ -767,7 +922,11 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
       (int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), hg, qm, km, vm, bm,
       store_out ? reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()) : nullptr, want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>(),
       has_gate ? reinterpret_cast<const __nv_bfloat16*>(gate->data_ptr()) : nullptr, (int)(has_gate && gate->scalar_type() == torch::kHalf),
-      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, fx, kt, km_ptr);
+      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, fx, kt, km_ptr
+#if TA_F8PV
+      , vtm, vscale.data_ptr<float>()
+#endif
+    );
   };
   // CL: the same launch as a cluster of two CTAs (adjacent query tiles share the K / V loads)
   auto launch_cl = [&](auto kernel, int* sch) {
@@ -835,10 +994,131 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
   return {out, lse, flags, u};
 }
 
+
+#if TA_F8PV
+// ---- V^T e4m3 for the F8PV core (a standalone pass until the fronts write it directly) ----
+// v [B, N, S, H, 32] fp16 (rows at stride ld) -> vt [B, N, H, 32, S] e4m3 (v / vscale), the keys of each group of 32 permuted so a lane's accumulator columns
+// 2 t4 + {0, 1} of the 8-column blocks 4 s .. 4 s + 3 land on the k32 A fragment's positions 4 t4 + {0 .. 3} / 16 + 4 t4 + {0 .. 3}; vscale [B, H] = amax / 448
+// (amax over N, S and the head's 32 channels: vt_amax; or `fixed` > 0: that amax for every head, no first pass).
+#include <cuda_fp8.h>
+namespace {
+__device__ __forceinline__ int vt_pos(int k) {   // position (inside a group of 32) of the key k
+  const int blk = k >> 3, rem = k & 7;
+  return 16 * (blk >> 1) + 4 * (rem >> 1) + 2 * (blk & 1) + (rem & 1);
+}
+constexpr int VQ_TILE = 128;
+// grid (S / 128, N, B), blockDim = a multiple of C / 8 (<= 256: a thread's c8, hence its head, is fixed across idx); amax: fp32 [B * H] bit patterns (non-negative floats order as integers), zeroed
+__global__ void __launch_bounds__(256) vt_amax_k(const __half* __restrict__ v, long ld, int N, int S, int H, int dh, unsigned* __restrict__ amax) {
+  const int C = H * dh, jt = blockIdx.x, n = blockIdx.y, b = blockIdx.z;
+  const __half* base = v + ((size_t)(b * N + n) * S + jt * VQ_TILE) * ld;
+  float mx = 0.f;
+  const int nth = blockDim.x;
+  for (int idx = threadIdx.x; idx < VQ_TILE * C / 8; idx += nth) {
+    const int key = idx / (C / 8), c8 = idx % (C / 8);
+    const uint4 x = *reinterpret_cast<const uint4*>(base + (size_t)key * ld + c8 * 8);
+    const __half2* h2 = reinterpret_cast<const __half2*>(&x);
+    float a = 0.f;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) { const float2 f = __half22float2(h2[i]); a = fmaxf(a, fmaxf(fabsf(f.x), fabsf(f.y))); }
+    mx = fmaxf(mx, a);
+  }
+  __shared__ unsigned sm[16];
+  if (threadIdx.x < 16) sm[threadIdx.x] = 0u;
+  __syncthreads();
+  atomicMax(&sm[((threadIdx.x % (C / 8)) * 8) / dh], __float_as_uint(mx));
+  __syncthreads();
+  if (threadIdx.x < H) atomicMax(amax + b * H + threadIdx.x, sm[threadIdx.x]);
+}
+__global__ void __launch_bounds__(256) vt_quant_k(const __half* __restrict__ v, long ld, int N, int S, int H, int dh, const unsigned* __restrict__ amax, float fixed, const float* __restrict__ vinv, int* __restrict__ ovf,
+                                                  __nv_fp8_storage_t* __restrict__ vt, float* __restrict__ vscale) {
+  extern __shared__ __align__(16) unsigned char sh[];   // [PLANES][C][VQ_TILE + 4] e4m3 (PLANES 2: hi, lo)
+  constexpr int PLANES = TA_F8HL ? 2 : 1;
+  const int C = H * dh, LDS = VQ_TILE + 4, jt = blockIdx.x, n = blockIdx.y, b = blockIdx.z;
+  const __half* base = v + ((size_t)(b * N + n) * S + jt * VQ_TILE) * ld;
+  bool bad = false;
+  for (int idx = threadIdx.x; idx < VQ_TILE * C / 8; idx += 256) {
+    const int key = idx / (C / 8), c8 = idx % (C / 8), h = (c8 * 8) / dh;
+    const float inv = vinv != nullptr ? vinv[h] : 448.f / fmaxf(fixed > 0.f ? fixed : __uint_as_float(amax[b * H + h]), 1e-30f);
+    const uint4 x = *reinterpret_cast<const uint4*>(base + (size_t)key * ld + c8 * 8);
+    const __half2* h2 = reinterpret_cast<const __half2*>(&x);
+    const int p = (key & ~31) + vt_pos(key & 31);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const float2 f = __half22float2(h2[i]);
+      bad |= (fabsf(f.x * inv) > 448.f) | (fabsf(f.y * inv) > 448.f);
+      const __nv_fp8x2_storage_t q = __nv_cvt_float2_to_fp8x2(make_float2(f.x * inv, f.y * inv), __NV_SATFINITE, __NV_E4M3);
+      sh[(c8 * 8 + 2 * i) * LDS + p] = (unsigned char)(q & 0xFF);
+      sh[(c8 * 8 + 2 * i + 1) * LDS + p] = (unsigned char)(q >> 8);
+#if TA_F8HL   // the residual of the first rounding (x16: |residual| <= 16 at the largest values), rounded again to e4m3
+      {
+        const __half2_raw hr = __nv_cvt_fp8x2_to_halfraw2(q, __NV_E4M3);
+        const uint32_t hu = (uint32_t)hr.x | ((uint32_t)hr.y << 16);
+        const float2 hq = make_float2(hlo(hu), hhi(hu));
+        const __nv_fp8x2_storage_t r2 = __nv_cvt_float2_to_fp8x2(make_float2((f.x * inv - hq.x) * 16.f, (f.y * inv - hq.y) * 16.f), __NV_SATFINITE, __NV_E4M3);
+        sh[C * LDS + (c8 * 8 + 2 * i) * LDS + p] = (unsigned char)(r2 & 0xFF);
+        sh[C * LDS + (c8 * 8 + 2 * i + 1) * LDS + p] = (unsigned char)(r2 >> 8);
+      }
+#endif
+    }
+  }
+  if (ovf != nullptr && __any_sync(0xffffffffu, bad) && (threadIdx.x & 31) == 0) atomicOr(ovf, 1);
+  __syncthreads();
+  for (int idx = threadIdx.x; idx < PLANES * C * (VQ_TILE / 16); idx += 256) {
+    const int pl = idx / (C * (VQ_TILE / 16)), idx0 = idx % (C * (VQ_TILE / 16));
+    const int ch = idx0 / (VQ_TILE / 16), c16 = idx0 % (VQ_TILE / 16);
+    uint32_t w[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const unsigned char* s = sh + (pl * C + ch) * LDS + c16 * 16 + 4 * i;
+      w[i] = (uint32_t)s[0] | ((uint32_t)s[1] << 8) | ((uint32_t)s[2] << 16) | ((uint32_t)s[3] << 24);
+    }
+    const int h = ch / dh, d = ch % dh;
+    *reinterpret_cast<uint4*>(reinterpret_cast<unsigned char*>(vt) + ((size_t)(((b * N + n) * H + h) * PLANES + pl) * dh + d) * S + jt * VQ_TILE + c16 * 16) = make_uint4(w[0], w[1], w[2], w[3]);
+  }
+  if (jt == 0 && n == 0 && threadIdx.x < H) vscale[b * H + threadIdx.x] = vinv != nullptr ? 1.f / vinv[threadIdx.x] : (fixed > 0.f ? fixed : __uint_as_float(amax[b * H + threadIdx.x])) / 448.f;
+}
+}  // namespace
+
+// v: fp16 [B, N, S, H, 32] (rows at one stride), S % 128 == 0, H <= 16; fixed_amax > 0: no amax pass (every head's amax taken as that value)
+std::vector<torch::Tensor> vt_quant(torch::Tensor v, double fixed_amax, c10::optional<torch::Tensor> vinv, c10::optional<torch::Tensor> ovf) {
+  TORCH_CHECK(v.is_cuda() && v.dim() == 5 && (v.size(4) == 32 || v.size(4) == 16) && v.scalar_type() == torch::kHalf && v.stride(4) == 1 && v.stride(3) == v.size(4) && v.size(3) <= 16 &&
+              v.size(2) % VQ_TILE == 0 && v.stride(2) % 8 == 0 && v.stride(1) == v.size(2) * v.stride(2) && v.stride(0) == v.size(1) * v.stride(1), "v: [B, N, S, H<=16, 32 | 16] fp16");
+  const int B = v.size(0), N = v.size(1), S = v.size(2), H = v.size(3), dh = v.size(4);
+#if TA_F8HL
+  auto vt = torch::empty({B, N, H, 2, dh, S}, v.options().dtype(torch::kFloat8_e4m3fn));
+#else
+  auto vt = torch::empty({B, N, H, dh, S}, v.options().dtype(torch::kFloat8_e4m3fn));
+#endif
+  auto vscale = torch::empty({B, H}, v.options().dtype(torch::kFloat32));
+  // vinv: fp32 [H] = 1 / scale per head (static scale: no amax pass; values past 448 saturate and set the int32 flag `ovf`)
+  TORCH_CHECK(!vinv.has_value() || (vinv->is_cuda() && vinv->scalar_type() == torch::kFloat32 && vinv->is_contiguous() && vinv->numel() == H), "vinv: fp32 [H]");
+  TORCH_CHECK(!ovf.has_value() || (ovf->is_cuda() && ovf->scalar_type() == torch::kInt32 && ovf->numel() >= 1), "ovf: int32 flag");
+  const bool stat = vinv.has_value();
+  auto amax = torch::zeros({stat ? 0 : B * H}, v.options().dtype(torch::kInt32));
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const dim3 grid(S / VQ_TILE, N, B);
+  if (fixed_amax <= 0 && !stat) vt_amax_k<<<grid, (256 / (H * dh / 8)) * (H * dh / 8), 0, stream>>>(reinterpret_cast<const __half*>(v.data_ptr()), (long)v.stride(2), N, S, H, dh, reinterpret_cast<unsigned*>(amax.data_ptr<int>()));
+  const int sm = (TA_F8HL ? 2 : 1) * H * dh * (VQ_TILE + 4);
+  if (sm > 48 * 1024) C10_CUDA_CHECK(cudaFuncSetAttribute(vt_quant_k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+  vt_quant_k<<<grid, 256, sm, stream>>>(reinterpret_cast<const __half*>(v.data_ptr()), (long)v.stride(2), N, S, H, dh, reinterpret_cast<const unsigned*>(amax.data_ptr<int>()),
+                                       (float)fixed_amax, stat ? vinv->data_ptr<float>() : nullptr, stat && ovf.has_value() ? ovf->data_ptr<int>() : nullptr,
+                                       reinterpret_cast<__nv_fp8_storage_t*>(vt.data_ptr()), vscale.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {vt, vscale};
+}
+#endif
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("triattn_fwd_h16", &triattn_fwd_h16, "sm90 triangle-attention forward, inference, fp16 operands (D = 32): q/k/v [B, N, S, H, 32] fp16, "
         "sbias = bias / scale fp16 [B, H, S, S] -> out bf16, optional base-2 LSE; with `gate` also u = sigmoid(gate) o out",
         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("sbias"), py::arg("scale"), py::arg("want_lse"), py::arg("gate") = py::none(),
         py::arg("want_out") = true, py::arg("key_tiles") = py::none(), py::arg("key_mask") = py::none(),
-        py::arg("bias_transposed") = false);
+        py::arg("bias_transposed") = false
+#if TA_F8PV
+        , py::arg("vt"), py::arg("vscale")
+#endif
+        );
+#if TA_F8PV
+  m.def("vt_quant", &vt_quant, "V^T e4m3 (keys permuted inside each group of 32) and the per-(batch, head) scale of v [B, N, S, H, 32] fp16", py::arg("v"), py::arg("fixed_amax") = 0.0, py::arg("vinv") = py::none(), py::arg("ovf") = py::none());
+#endif
 }

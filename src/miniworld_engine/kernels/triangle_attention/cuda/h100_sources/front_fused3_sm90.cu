@@ -16,6 +16,16 @@
 #include <cutlass/arch/barrier.h>
 #include "fa3_utils.h"
 #include <cuda_fp16.h>
+#ifdef MW_F3_VTW
+#include <cuda_fp8.h>
+// MW_F3_VTW (1 = hi plane, 2 = hi + lo; opt-in FP8 PV route, default builds do not define it): V leaves the front as the FP8 core's e4m3 planes of V^T
+// ([B, N, H, planes, dh, S], the keys of each group of 32 permuted by vt_pos), made from the fp16-rounded V by vt_quant_k's arithmetic (static per-head
+// scale: f * vinv, cvt.rn.satfinite; the lo plane is the x16 residual).  Values past 448 saturate and set the int flag `ovf`.  The V plane of `p` is not written.
+__device__ __forceinline__ int vt_pos(int k) {   // position (inside a group of 32) of the key k: the PV wgmma's k32 A-fragment order
+  const int blk = k >> 3, rem = k & 7;
+  return 16 * (blk >> 1) + 4 * (rem >> 1) + 2 * (blk & 1) + (rem & 1);
+}
+#endif
 using namespace cute;
 #ifdef MW_F3_Y16
 // Y16: the fp16 inference route of the width-generic path, bit for bit: LN as ln_fwd_k (lanes per row, fmaf), fp16 y and weights,
@@ -74,7 +84,11 @@ template<int C,int HD> __global__ __launch_bounds__(256,minb_for(C))
 void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
               XE const* x,float const* lnw,float const* lnb,bool const* mask,
               Element* bias,float* stats,int rows,int L,int H,float eps,float inv_scale,int tr,
-              int h16,int crt) {      // h16: q / k / v and the bias leave as fp16 bits (the fp16 inference core; the TMA store moves bytes), g as bf16
+              int h16,int crt
+#ifdef MW_F3_VTW
+              ,unsigned char* vt,float const* vinv,int* ovf,int dh
+#endif
+              ) {      // h16: q / k / v and the bias leave as fp16 bits (the fp16 inference core; the TMA store moves bytes), g as bf16
   constexpr int NK=C/64,COLS=4*HD+64,NB=(COLS+BN-1)/BN,STAGES=stages_for(C),total=NB*NK;
   extern __shared__ char memory[]; auto& s=*reinterpret_cast<Shared<C,HD>*>(memory);
   int tid=threadIdx.x,wgi=tid/128,wt=tid%128,base=blockIdx.x*128;
@@ -251,10 +265,57 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
 #else
     if(col0<4*HD) {
 #endif
+#ifdef MW_F3_VTW
+      unsigned char* vs8=reinterpret_cast<unsigned char*>(stg);   // V^T staging [plane][channel][64 keys], 64-byte rows, words XOR-swizzled by 4 * ((channel / 2) mod 4)
+      bool vovf=false;
+      const bool vblk=(col0/HD)==2;   // this block holds the V columns (they start the block: 2 HD is a multiple of 128)
+      if(vblk) {
+        // The accumulator holds rows (16 wi + g8, + 8) x columns 8 i + 2 t4 + {0, 1}.  Key position p = 16 wi + 4 (g8 / 2) + 2 hf + (g8 & 1): the 4 keys of word 4 wi + g8 / 2
+        // are the rows of the lane pair (g8 even, odd) at both halves; the pair swaps bytes (one shuffle) so each lane holds one whole word of one channel (lane parity picks
+        // channel 2 t4 + parity), a single 32-bit store.
+        const int lane=wt&31,wi=wt>>5,g8=lane>>2,t4=lane&3,odd=g8&1,pw=4*wi+(g8>>1);
+        const uint32_t sel=odd?0x3715u:0x6240u;
+        #pragma unroll
+        for(int i=0;i<HD/8;++i) {
+          const int chA=8*i+2*t4;
+          const float inv=__ldg(vinv+(dh==32?chA>>5:chA>>4));
+          uint32_t S=0,S2=0;
+          float xs[2][2];
+          #pragma unroll
+          for(int hf=0;hf<2;++hf) {
+            const float2 f=__half22float2(__halves2half2(__float2half_rn(acc(4*i+2*hf)),__float2half_rn(acc(4*i+2*hf+1))));
+            xs[hf][0]=f.x*inv;xs[hf][1]=f.y*inv;
+            vovf|=(fabsf(xs[hf][0])>448.f)|(fabsf(xs[hf][1])>448.f);
+            const __nv_fp8x2_storage_t qv=__nv_cvt_float2_to_fp8x2(make_float2(xs[hf][0],xs[hf][1]),__NV_SATFINITE,__NV_E4M3);
+            S|=uint32_t(qv)<<(16*hf);
+          }
+          if(MW_F3_VTW==2) {
+            #pragma unroll
+            for(int hf=0;hf<2;++hf) {
+              const unsigned short q16=(unsigned short)((S>>(16*hf))&0xffffu);
+              uint32_t hu;asm("cvt.rn.f16x2.e4m3x2 %0, %1;":"=r"(hu):"h"(q16));
+              const float h0=__half2float(__ushort_as_half((unsigned short)(hu&0xffffu))),h1=__half2float(__ushort_as_half((unsigned short)(hu>>16)));
+              unsigned short r2;asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;":"=h"(r2):"f"((xs[hf][1]-h1)*16.f),"f"((xs[hf][0]-h0)*16.f));
+              S2|=uint32_t(r2)<<(16*hf);
+            }
+          }
+          const int ch=chA+odd,sw=4*t4;
+          const uint32_t P=__shfl_xor_sync(0xffffffffu,S,4);
+          *reinterpret_cast<uint32_t*>(vs8+ch*64+(((pw)^sw)<<2))=__byte_perm(S,P,sel);
+          if(MW_F3_VTW==2) {
+            const uint32_t P2=__shfl_xor_sync(0xffffffffu,S2,4);
+            *reinterpret_cast<uint32_t*>(vs8+HD*64+ch*64+(((pw)^sw)<<2))=__byte_perm(S2,P2,sel);
+          }
+        }
+      }
+#endif
       #pragma unroll
       for(int j=0;j<size(acc);j+=2) {
         int rr=get<0>(coord(j)),cc=get<1>(coord(j));
         uint32_t word;
+#ifdef MW_F3_VTW
+        if((col0+cc)/HD==2) continue;   // V: made below as V^T planes
+#endif
 #ifdef MW_F3_Y16
         if(true) word=uint32_t(__half_as_ushort(__float2half_rn(acc(j))))|(uint32_t(__half_as_ushort(__float2half_rn(acc(j+1))))<<16);
 #else
@@ -265,10 +326,26 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
       }
       cutlass::arch::fence_view_async_shared();
       cutlass::arch::NamedBarrier::sync(128,1+wgi);
+#ifdef MW_F3_VTW
+      if(vblk) {
+        // this warpgroup's 64 keys of V^T: 16-byte chunks, 64 contiguous keys per (head, plane, channel)
+        if(__any_sync(0xffffffffu,vovf) && (wt&31)==0) atomicOr(ovf,1);
+        const int64_t row0=base+wgi*64,ll=int64_t(L)*L,bq=row0/ll,iq=(row0/L)%L,j0=row0%L;
+        for(int u=wt;u<HD*4*MW_F3_VTW;u+=128) {
+          const int pl=u/(HD*4),ch=(u>>2)%HD,c16=u&3;
+          const uint4 val=*reinterpret_cast<const uint4*>(vs8+pl*HD*64+ch*64+(((4*c16)^(4*((ch>>1)&3)))<<2));
+          const int64_t orow=(((((bq*L+iq)*H+ch/dh)*MW_F3_VTW+pl)*dh+ch%dh)*L)+j0+16*c16;
+          *reinterpret_cast<uint4*>(vt+orow)=val;
+        }
+      }
+#endif
       if(leader) {
         #pragma unroll
         for(int chunk=0;chunk<BN/64;++chunk) {
           int col=col0+chunk*64;
+#ifdef MW_F3_VTW
+          if(col/HD==2) continue;   // V left as V^T planes
+#endif
           auto dst=local_tile(og(_,_,col/HD),Shape<_64,_64>{},make_coord(base/64+wgi,(col%HD)/64));
           auto src=make_tensor(make_smem_ptr(stg+chunk*4096),TileLayout{});
           copy(to,tile.partition_S(src),tile.partition_D(dst));
@@ -326,6 +403,10 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
   if(leader) tma_store_wait<0>();
 }
 
+#ifdef MW_F3_VTW
+struct VtArgs{unsigned char* vt;float const* vinv;int* ovf;int dh;};
+static VtArgs g_vt;
+#endif
 template<int C,int HD> void launch(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,
                             torch::Tensor p,torch::Tensor bias,torch::Tensor stats,int L,int H,float eps,float inv_scale,int tr,int h16) {
   int rows=x.size(0);
@@ -336,11 +417,19 @@ template<int C,int HD> void launch(torch::Tensor x,torch::Tensor lnw,torch::Tens
   size_t smem=sizeof(Shared<C,HD>);
   C10_CUDA_CHECK(cudaFuncSetAttribute(front_v3<C,HD>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
   front_v3<C,HD><<<rows/128,256,smem,at::cuda::getCurrentCUDAStream()>>>(tw,to,(XE*)x.data_ptr(),lnw.data_ptr<float>(),lnb.data_ptr<float>(),
-    mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)bias.data_ptr(),stats.numel()?stats.data_ptr<float>():nullptr,rows,L,H,eps,inv_scale,tr,h16,C);
+    mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)bias.data_ptr(),stats.numel()?stats.data_ptr<float>():nullptr,rows,L,H,eps,inv_scale,tr,h16,C
+#ifdef MW_F3_VTW
+    ,g_vt.vt,g_vt.vinv,g_vt.ovf,g_vt.dh
+#endif
+    );
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,int L,int H,int HD,double eps,double inv_scale,bool trans,bool h16,bool flip) {
+std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,int L,int H,int HD,double eps,double inv_scale,bool trans,bool h16,bool flip
+#ifdef MW_F3_VTW
+    ,c10::optional<torch::Tensor> vinv,c10::optional<torch::Tensor> ovf
+#endif
+    ) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type()==torch::kBFloat16 && x.is_contiguous() && x.dim()==2,"contiguous BF16 matrix required");
   c10::cuda::CUDAGuard guard(x.device());int C=x.size(1),rows=x.size(0),B=rows/(L*L);
   TORCH_CHECK(L>0 && L%128==0 && rows==B*L*L && (HD==32*H || HD==16*H) && H<=16 && HD%64==0,"invalid pair/head dimensions");
@@ -350,6 +439,11 @@ std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch
   // h16: planes 0-2 of p and the bias hold fp16 bits (the caller views them as fp16), plane 3 (g) bf16
   auto p=torch::empty({4,rows,HD},x.options()),bias=torch::empty({B,H,L,L},h16?x.options().dtype(torch::kHalf):x.options());
   auto stats=torch::empty({0,2},x.options().dtype(torch::kFloat32));
+#ifdef MW_F3_VTW
+  TORCH_CHECK(h16 && vinv.has_value() && ovf.has_value() && vinv->is_cuda() && vinv->scalar_type()==torch::kFloat32 && vinv->numel()==H && ovf->is_cuda() && ovf->scalar_type()==torch::kInt32,"VT planes: h16, vinv fp32 [H], ovf int32 flag");
+  auto vt=torch::empty({B,L,H,MW_F3_VTW,HD/H,L},x.options().dtype(torch::kFloat8_e4m3fn));
+  g_vt={reinterpret_cast<unsigned char*>(vt.data_ptr()),vinv->data_ptr<float>(),ovf->data_ptr<int>(),HD/H};
+#endif
   const int key=C*1000+HD;
   switch(key){
     case 64064: launch<64,64>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans)|(int(flip)<<1),int(h16));break;
@@ -361,9 +455,17 @@ std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch
     case 512512: launch<512,512>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans)|(int(flip)<<1),int(h16));break;
     default: TORCH_CHECK(false,"unsupported (d_pair, heads x 32) pair");
   }
+#ifdef MW_F3_VTW
+  return {p,bias,stats,vt};
+#else
   return {p,bias,stats};
+#endif
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
   m.def("front",&front_forward,py::arg("x"),py::arg("lnw"),py::arg("lnb"),py::arg("weights"),py::arg("mask"),py::arg("L"),py::arg("H"),py::arg("HD"),
-        py::arg("eps"),py::arg("inv_scale"),py::arg("trans"),py::arg("h16")=false,py::arg("flip")=false);
+        py::arg("eps"),py::arg("inv_scale"),py::arg("trans"),py::arg("h16")=false,py::arg("flip")=false
+#ifdef MW_F3_VTW
+        ,py::arg("vinv")=py::none(),py::arg("ovf")=py::none()
+#endif
+        );
 }
