@@ -1,4 +1,4 @@
-"""OPT-IN FP8 (e4m3) inference forward of the D128 Transition on H100 (engine 3.0.0 line; ``docs/fp8.md``, section Transition).
+"""OPT-IN FP8 (e4m3) inference forward of the Transition on H100, D 128 / 384 / 512 (engine 3.0.0 line; ``docs/fp8.md``, section Transition).
 
 Off by default: with ``MINIWORLD_TRANSITION_FP8`` unset nothing here runs and every Transition call takes the 2.5.12 route.
 
@@ -8,17 +8,22 @@ saturate), the weights are pre-quantized once per parameter version (per-tensor 
 order), h = silu(a) b is quantized in the first GEMM's epilogue with a static calibrated scale (``HEADROOM``) and guarded like the TriMul
 FP8 planes (``overflow_peak`` / ``rescale_all``, see ``trimul_inproj/cuda/h100_b200style_fp8.py``).
 
+D 384 / 512 (``wide/fp8_bind.cu``): the 2.5.12 two-kernel chain (``ln_swiglu_gemm`` + ``squeeze_gemm``) as e4m3 twins: the LayerNorm writes
+e4m3 xn in place over the resident x tile (G1), the expand epilogue writes h as e4m3 (half the bytes of the h round trip), the squeeze reads
+it with e4m3 wgmma (K order of the stored h, the Ws operand packed to match) and adds the residual. The squeeze is always e4m3 here.
+
 Environment (read at import):
 
 =========================================  ==========================================================================================
-``MINIWORLD_TRANSITION_FP8=calib``         route D128 bf16 inference calls (n 2 / 4, rows a multiple of 128) through the FP8 kernel
+``MINIWORLD_TRANSITION_FP8=calib``         route bf16 inference calls at D 128 / 384 / 512 (n 2 / 4, rows a multiple of 128) through the FP8 kernels
 ``MINIWORLD_TRANSITION_FP8_GUARD``         ``sync`` (default, eager: redo an overflowing call) | ``lazy`` (no host sync; CUDA graphs) | ``off``
 ``MINIWORLD_TRANSITION_FP8_HEADROOM``      h scale headroom over the calibration amax (16)
 ``MINIWORLD_TRANSITION_FP8_G1``            1 (default): the expand GEMM in e4m3 (xn, Wa, Wb); 0: the bf16 expand
-``MINIWORLD_TRANSITION_FP8_G2``            1 (default): the squeeze GEMM in e4m3 (h, Ws); 0: the bf16 squeeze
+``MINIWORLD_TRANSITION_FP8_G2``            1 (default): the squeeze GEMM in e4m3 (h, Ws); 0: the bf16 squeeze (D 128 only)
+``MINIWORLD_TRANSITION_FP8_WIDTHS``        widths routed (``128,384,512``)
 ``MINIWORLD_TRANSITION_FP8_SIGT``          1 (default): sigmoid by one tanh.approx; 0: the 2.5.12 ex2 + rcp form
 ``MINIWORLD_TRANSITION_FP8_SLOTS``         weight-ring slots (4)
-``MINIWORLD_TRANSITION_FP8_MINROWS``       smallest row count routed (below it the default runs)
+``MINIWORLD_TRANSITION_FP8_MINROWS``       smallest row count routed, every width (default ``ROW_GATE``: 16384 at D 128, 65536 at D 384 / 512)
 =========================================  ==========================================================================================
 """
 
@@ -45,8 +50,14 @@ G1 = int(os.environ.get("MINIWORLD_TRANSITION_FP8_G1", "1"))
 G2 = int(os.environ.get("MINIWORLD_TRANSITION_FP8_G2", "1"))
 SIGT = int(os.environ.get("MINIWORLD_TRANSITION_FP8_SIGT", "1"))
 SLOTS = int(os.environ.get("MINIWORLD_TRANSITION_FP8_SLOTS", "4"))
-MIN_ROWS = int(os.environ.get("MINIWORLD_TRANSITION_FP8_MINROWS", "0"))
+_MINROWS_ENV = os.environ.get("MINIWORLD_TRANSITION_FP8_MINROWS")
+MIN_ROWS: int | None = int(_MINROWS_ENV) if _MINROWS_ENV else None  # replaces ROW_GATE for every width when set (0 = no gate)
+#: smallest row count routed per width (below it the 2.5.12 route runs): the smallest pair size measured (D 128: L128 = 16384 rows, 0.66-0.71 of
+#: the default; D 384 / 512: L256 = 65536 rows, 0.59-0.74); fewer rows (token streams, small pair) were not measured
+ROW_GATE = {128: 16384, 384: 65536, 512: 65536}
 ABL = int(os.environ.get("MINIWORLD_TRANSITION_FP8_ABL", "0"))  # timing ablation only (wrong output): 3 no chunk loop, 4 no swiglu math
+#: widths with an FP8 build: 128 (both GEMMs e4m3 by default), 384 / 512 (h e4m3 + e4m3 squeeze; the expand stays bf16)
+WIDTHS = tuple(int(w) for w in os.environ.get("MINIWORLD_TRANSITION_FP8_WIDTHS", "128,384,512").split(",") if w)
 
 E4M3_MAX = 448.0
 GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0, "calibrations": 0}
@@ -83,20 +94,52 @@ def _build(ctas: int, n: int, g1: int, g2: int, sigt: int, slots: int, abl: int)
     )
 
 
+@functools.lru_cache(maxsize=8)
+def _build_wide(width: int, n: int, ctas: int, g1: int = 0):
+    """The e4m3-h wide forward (D 384 / 512): ln_swiglu_gemm_f8 + squeeze_gemm_f8 (``wide/``), one extension per (width, n)."""
+    ensure_cuda_home()
+    wd = _dir / "wide"
+    return load_extension(
+        name=f"transition_fp8_wide_sm90a_d{width}_n{n}_c{ctas}_f{g1}_v1",
+        sources=[str(wd / "fp8_bind.cu"), str(wd / "lnsg_f8.cu"), str(wd / "squeeze_f8.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            *gencodes("90a"),
+            f"-I{_dir / 'anthropic_v5'}",
+            f"-I{wd}",
+            f"-I{wd / 'kernels'}",
+            f"-DWIDE_D={width}",
+            f"-DWIDE_N={n}",
+            f"-DWIDE_SMS={ctas}",
+            f"-DF8G1={g1}",
+            "--expt-relaxed-constexpr",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
 def _cfg():
     return (G1, G2, SIGT, SLOTS, ABL)
 
 
 def serves(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """Does the FP8 route take this (inference) call? bf16 x [..., 128], hidden 256 / 512, rows a whole number of 128-row tiles, sm_90."""
-    if POLICY is None or not x.is_cuda or x.dtype is not torch.bfloat16 or x.shape[-1] != 128:
+    """Does the FP8 route take this (inference) call? bf16 x [..., D], D 128 (n 2 / 4: the e4m3 fused kernel) or D 384 / 512 (n 2 / 4: the wide
+    chain with h in e4m3 and an e4m3 squeeze), rows a whole number of 128-row tiles, sm_90."""
+    d = x.shape[-1]
+    if POLICY is None or not x.is_cuda or x.dtype is not torch.bfloat16 or d not in WIDTHS:
         return False
-    if wa.shape[1] != 128 or wa.shape[0] not in (256, 512) or ws.shape != (128, wa.shape[0]):
+    if wa.shape[1] != d or wa.shape[0] not in (2 * d, 4 * d) or ws.shape != (d, wa.shape[0]):
         return False
     if torch.cuda.get_device_capability(x.device) != (9, 0):
         return False
-    rows = x.numel() // 128
-    return rows % 128 == 0 and rows >= max(MIN_ROWS, 128)
+    rows = x.numel() // d
+    return rows % 128 == 0 and rows >= max(ROW_GATE[d] if MIN_ROWS is None else MIN_ROWS, 128)
 
 
 def _perm_k(k: int, device) -> torch.Tensor:
@@ -126,6 +169,9 @@ def _pack(cache, wa, wb, ws, gamma, beta):
     key = (*((t.data_ptr(), t._version) for t in (wa, wb, ws, gamma, beta)), _cfg())
     if cache.get("key") == key:
         return
+    if wa.shape[1] != 128:
+        _pack_wide(cache, wa, wb, ws, gamma, beta, key)
+        return
     cache["cfg"] = _cfg()
     h = wa.shape[0]
     nch = h // 64
@@ -142,6 +188,31 @@ def _pack(cache, wa, wb, ws, gamma, beta):
     bound = math.sqrt(127.0) * gamma.float().abs().amax() + beta.float().abs().amax()
     cache["sx"] = _pow2_floor(E4M3_MAX / bound.clamp_min(1e-30)) if G1 else torch.ones((), device=wa.device)
     cache["s1"], cache["s2"] = s1, s2
+    cache["gamma"], cache["beta"] = gamma.float().contiguous(), beta.float().contiguous()
+    if "scales" not in cache:
+        cache["scales"] = torch.zeros(8, device=wa.device, dtype=torch.float32)
+        cache["sh"] = torch.ones((), device=wa.device, dtype=torch.float32)
+        cache["calibrated"] = False
+    cache["key"] = key
+    refresh(cache)
+
+
+def _pack_wide(cache, wa, wb, ws, gamma, beta, key):
+    """D 384 / 512: bf16 [Wa 64 | Wb 64] row blocks for the bf16 expand, e4m3 Ws (K in the stored h8 column order), h scale as for D 128."""
+    d, h = wa.shape[1], wa.shape[0]
+    nch = h // 64
+    g1 = G1
+    cache["cfg"] = (g1, 1, 1, 0, 0)  # (G1, G2, SIGT, SLOTS, ABL): e4m3 h + squeeze always, the expand in e4m3 with G1, tanh sigmoid
+    cache["wide"] = h // d
+    w1 = torch.stack([wa.float().reshape(nch, 64, d), wb.float().reshape(nch, 64, d)], 1).reshape(2 * h, d)
+    if g1:  # K in natural order: both expand operands come from shared memory
+        cache["w1"], cache["s1"] = _quant(w1)
+        bound = math.sqrt(d - 1.0) * gamma.float().abs().amax() + beta.float().abs().amax()
+        cache["sx"] = _pow2_floor(E4M3_MAX / bound.clamp_min(1e-30))
+    else:
+        cache["w1"] = w1.to(torch.bfloat16).contiguous()
+        cache["sx"] = cache["s1"] = torch.ones((), device=wa.device)
+    cache["w2"], cache["s2"] = _quant(ws.float()[:, _perm_k(h, ws.device)])
     cache["gamma"], cache["beta"] = gamma.float().contiguous(), beta.float().contiguous()
     if "scales" not in cache:
         cache["scales"] = torch.zeros(8, device=wa.device, dtype=torch.float32)
@@ -189,14 +260,18 @@ def rescale_all(peak: float) -> float:
 
 
 def _launch(x2, cache, peak, eps):
+    if "wide" in cache:
+        ext = _build_wide(x2.shape[1], cache["wide"], num_sms(x2.device), cache["cfg"][0])
+        return ext.fwd_f8h(x2, cache["gamma"], cache["beta"], cache["w1"], cache["w2"], cache["scales"], peak, float(eps))
     ext = _build(num_sms(x2.device), cache["w1"].shape[0] // 256, *cache["cfg"])
     return ext.transition_fp8_fwd(x2, cache["gamma"], cache["beta"], cache["w1"], cache["w2"], cache["scales"], peak, float(eps))
 
 
 def _default(x, gamma, beta, wa, wb, ws, eps):
-    from . import fused_sm90a
+    """The 2.5.12 route of the call (the guard's and the capture's fallback)."""
+    from . import transition_sm90a
 
-    return fused_sm90a.transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps)
+    return transition_sm90a(x, gamma, beta, wa, wb, ws, eps, wa.shape[0] // wa.shape[1], fp8=False)
 
 
 def _fake(x, gamma, beta, wa, wb, ws, eps):
@@ -219,7 +294,7 @@ def inference(
         cache = _CACHES[key] = {}
         weakref.finalize(wa, _CACHES.pop, key, None)
     _pack(cache, wa, wb, ws, gamma, beta)
-    x2 = x.reshape(-1, 128).contiguous()
+    x2 = x.reshape(-1, x.shape[-1]).contiguous()
     lazy = GUARD in ("lazy", "off") or capturing
     if not cache["calibrated"]:
         if capturing:

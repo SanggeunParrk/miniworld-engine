@@ -3,7 +3,7 @@
 import torch
 
 
-def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
+def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n, fp8=True):
     """The sm_90a (H100) Transition dispatch that ``modules.Transition`` and ``ops.transition`` share. Returns ``x + transition(x)``
     from the first hand-CUDA build that takes the call, or ``None`` when none does (the caller, Transition's ``cuda`` backend, then raises
     ``BackendUnsupported``: there is no fallback).
@@ -15,7 +15,7 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
     from . import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
     training = torch.is_grad_enabled() and any(t.requires_grad for t in (x, ln_weight, wa, wb, ws))
-    if not training:  # opt-in FP8 (MINIWORLD_TRANSITION_FP8; off by default: the check below is all the default route sees)
+    if fp8 and not training:  # opt-in FP8 (MINIWORLD_TRANSITION_FP8; off by default: the check below is all the default route sees)
         from . import fp8_sm90a
 
         if fp8_sm90a.POLICY is not None and fp8_sm90a.serves(x, wa, ws):

@@ -1,4 +1,4 @@
-"""H100: the experimental e4m3 D128 Transition forward (``kernels/transition/cuda/fp8_sm90a``, opt-in, docs/fp8.md): the FP8 route stays inside
+"""H100: the experimental e4m3 D128 Transition forward (``kernels/transition/cuda/fp8_sm90a``, opt-in, docs/fp8.md): the FP8 route (D 128, and D 384 / 512) stays inside
 the e4m3 storage error of the fp64 reference (about 3.5 % of the output, 8 % at most), the bf16-expand / bf16-squeeze build with the 2.5.12
 sigmoid reproduces the 2.5.12 default bytes (the same kernel structure), the guard catches a saturated h scale, and the default route is
 untouched while the switch is off (POLICY None)."""
@@ -18,10 +18,10 @@ def _needs_h100() -> None:
         pytest.skip("needs an H100 (sm_90)")
 
 
-def _module(n: int):
+def _module(n: int, d: int = 128):
     from miniworld_engine.modules.transition import Transition
 
-    m = Transition(128, n, master_weights=True, backend="cuda").cuda().eval()
+    m = Transition(d, n, master_weights=True, backend="cuda").cuda().eval()
     g = torch.Generator(device="cpu").manual_seed(n)
     with torch.no_grad():
         for name, p in m.named_parameters():
@@ -76,6 +76,32 @@ def test_fp8_error_vs_fp64(n: int, rows: int, cfg) -> None:
     rms = ((y.double() - y64).pow(2).mean().sqrt() / y64.pow(2).mean().sqrt()).item()
     assert err < 0.08 and rms < 0.05, (err, rms)
     assert F.GUARD_STATS["fallbacks"] == 0
+
+
+@pytest.mark.parametrize("d", [384, 512])
+@pytest.mark.parametrize("n", [4, 2])
+@pytest.mark.parametrize("g1", [1, 0])
+def test_wide_fp8_error_vs_fp64(d: int, n: int, g1: int) -> None:
+    """D 384 / 512: e4m3 h + e4m3 squeeze (and the e4m3 expand with G1): inside the e4m3 storage error, finite, no guard fallback."""
+    _needs_h100()
+    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+
+    m = _module(n, d)
+    x = torch.randn(1, 300 * 128, d, device="cuda").bfloat16()
+    ref = copy.deepcopy(m).double()
+    ref.set_backend("pytorch")
+    try:
+        _variant(F, g1)
+        with torch.no_grad():
+            y = m(x)
+            y64 = ref(x.double())
+    finally:
+        F.POLICY = None
+    assert torch.isfinite(y.float()).all()
+    err = ((y.double() - y64).abs().max() / y64.abs().max()).item()
+    rms = ((y.double() - y64).pow(2).mean().sqrt() / y64.pow(2).mean().sqrt()).item()
+    assert err < 0.08 and rms < 0.05, (err, rms)
+    assert F._CACHES[m.expand_a.weight.data_ptr()]["wide"] == n
 
 
 @pytest.mark.parametrize("n", [4, 2])
