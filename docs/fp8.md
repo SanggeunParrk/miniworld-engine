@@ -952,18 +952,18 @@ prebuild plan); the 8 x 32 build keeps its extension name (its cache key changes
 
 ## Transition forward: e4m3 GEMMs (`kernels/transition/cuda/fp8_sm90a.py`, branch `fp8x/transition`, 2026-11-17)
 
-Scope: bf16 inference, one H100, D 128 (n 2 / 4: the fused one-kernel forward) and D 384 / 512 (n 2 / 4: the two-kernel wide chain). Training, D 64,
-D 256, D 768 and fp32 activations stay on the 2.5.12 route. Off by default; with `MINIWORLD_TRANSITION_FP8` unset the dispatcher sees one `POLICY is None`
+Scope: bf16 inference, one H100, D 128 / 256 (n 2 / 4: fused one-kernel forwards; D 256 added on branch `fp8x/transition-d256`, section
+"D 256" below) and D 384 / 512 (n 2 / 4: the two-kernel wide chain). Training, D 64, D 768 and fp32 activations stay on the 2.5.12 route. Off by default; with `MINIWORLD_TRANSITION_FP8` unset the dispatcher sees one `POLICY is None`
 check and the outputs are the 2.5.12 bytes (below). Scripts and raw rows: `~/miniworld-engine-scratch/fp8x-transition/{scripts,res}` (`res/...` below).
 
 | env (read at import) | effect |
 |---|---|
 | `MINIWORLD_TRANSITION_FP8=calib` | route the served calls through the e4m3 kernels; h scale calibrated on the first eager call of a module |
 | `MINIWORLD_TRANSITION_FP8_GUARD` | `sync` (default, eager: redo an overflowing call) / `lazy` (no host sync; CUDA graphs: `overflow_peak()` + `rescale_all(peak)` + redo, the TriMul contract) / `off` |
-| `MINIWORLD_TRANSITION_FP8_G1`, `_G2` | 1 / 1 (default): expand and squeeze in e4m3; `G1=0`: bf16 expand (D 128 and wide); `G2=0`: bf16 squeeze (D 128 only) |
+| `MINIWORLD_TRANSITION_FP8_G1`, `_G2` | 1 / 1 (default): expand and squeeze in e4m3; `G1=0`: bf16 expand (D 128, D 256 and wide); `G2=0`: bf16 squeeze (D 128 only) |
 | `MINIWORLD_TRANSITION_FP8_HEADROOM` | h scale headroom over the calibration amax (16) |
-| `MINIWORLD_TRANSITION_FP8_MINROWS` | replaces the row gate `ROW_GATE` (D 128: 16384 rows = pair L128; D 384 / 512: 65536 = L256; smaller calls were not measured) |
-| `MINIWORLD_TRANSITION_FP8_WIDTHS`, `_SIGT`, `_SLOTS`, `_ABL` | widths routed (128,384,512); sigmoid form (1 = one tanh.approx); weight-ring slots (4); timing ablations (never a route) |
+| `MINIWORLD_TRANSITION_FP8_MINROWS` | replaces the row gate `ROW_GATE` (D 128: 16384 rows = pair L128; D 256: 8192 rows; D 384 / 512: 65536 = L256; see "D 256" for the small-row and token-count measurements) |
+| `MINIWORLD_TRANSITION_FP8_WIDTHS`, `_SIGT`, `_SLOTS`, `_ABL` | widths routed (128,256,384,512); sigmoid form (1 = one tanh.approx); weight-ring slots (4, D 128 / 256); timing ablations (never a route) |
 
 ### Where the time goes (2.5.12 default) and where e4m3 can go
 
@@ -1104,11 +1104,118 @@ activations, the TriMul route quantizes one plane pair. End-level effect (struct
 ### Not done, and why
 
 - D 64 (`wide_d64_fwd_small_f3`, 282-385 TFLOP/s): x / y traffic is half of the time at n 2 (1.5 TB/s of x + y alone) and the LayerNorm / SwiGLU
-  share is the largest of all widths; e4m3 GEMMs bound below 1.3x. Not built.
-- D 256 (`wide_d256_fwd`, 568-651 TFLOP/s, Chai-1 / ESMFold2 / Protenix-v2 pair): the same placements as D 128 apply (xn tile e4m3, h in registers ->
-  e4m3 k32 fragment, Ws K-major with the 16-block permutation); expected like D 128 (0.7x). Not built for time.
+  share is the largest of all widths; e4m3 GEMMs bound below 1.3x. Not built (measured bound: section "D 64" below).
+- D 256: built afterwards (section "D 256" below).
 - Per-channel weight scales, e4m3 x / y storage (the interface is bf16), e5m2: not tried. Training: not ported (forward first, as briefed).
 - The 2.5.12 D128 bf16 default with the tanh sigmoid alone: slower (above), so no non-FP8 spin-off.
+
+### D 256 (`transition_fp8_d256_sm90a.cu`, branch `fp8x/transition-d256`, base ffcd465f7, 2026-11-17)
+
+Chai-1 / ESMFold2 / Protenix-v2 pair transition. Scripts and raw rows: `~/miniworld-engine-scratch/fp8x-transition-d256/{scripts,res}`.
+
+Design: the 2.5.12 D256 forward (`wide/kernels/transition_fwd_d256.cu`: a producer warpgroup + two ping-pong consumer warpgroups, a 128-row tile,
+the 64 x 256 fp32 output accumulator of each warpgroup held across the 32-unit hidden chunks), not the wide chain: the D 128 placements carry over
+because the chunk's [a | b] C fragment holds exactly one 32-wide h block, i.e. one k32 e4m3 A fragment after the D 128 K permutation.
+
+- LayerNorm (the 2.5.12 code) writes e4m3 xn (LayerNorm-bound scale, cannot saturate) into its own 32 KB buffer, so x stays resident for the
+  residual: the 2.5.12 kernel's second x load per tile (and its `xn_free` / `x_res` hand-off) is gone.
+- per chunk: expand = 8 x `wgmma m64n64k32 .e4m3` SS (xn8, [Wa8_j; Wb8_j] K-major 128B swizzle, 16 KB); h8 = e4m3(silu(a) b sh) in registers
+  (tanh silu, max |h sh| to the guard); squeeze = ONE `wgmma m64n256k32 .e4m3` RS over Ws8_j ([256 d][32 hs] K-major, 32B swizzle, 8 KB, K
+  permuted on the host). The slot is 24 KB (48 KB in 2.5.12): 4 slots + x 64 KB + xn8 32 KB = 192 KB.
+- `G1=0` ("h + squeeze"): the 2.5.12 bf16 expand over the in-place bf16 xn (the 2.5.12 x reload kept), h and the squeeze e4m3 (40 KB slots).
+- scales / guard / calibration / packing per parameter version: the D 128 code (`_pack_d256`); `ROW_GATE[256]` = 8192 rows (below).
+
+Module time against the 2.5.12 default (`scripts/bench.py speed`, the protocol above: one process, CUDA graph of one call each, interleaved, the
+default captured twice as the same-cubin control; cells `cool / sustained`; `res/sp1.jsonl`). full = expand + squeeze e4m3, h8 = h + squeeze only
+(`G1=0`). Lazy guard, no overflow in any case (peak 15-26 of 448):
+
+| n | L (rows L^2) | 2.5.12 ms | full / default | h8 / default | control |
+|---|---|---|---|---|---|
+| 4 | 256 | 0.175 / 0.190 | 0.733 / 0.741 | 0.915 / 0.902 | 0.999 / 0.993 |
+| | 384 | 0.375 / 0.417 | 0.719 / 0.741 | 0.915 / 0.915 | 1.002 / 1.002 |
+| | 512 | 0.657 / 0.724 | 0.708 / 0.735 | 0.912 / 0.937 | 0.996 / 0.999 |
+| | 768 | 1.416 / 1.698 | 0.701 / 0.716 | 0.917 / 0.896 | 0.997 / 0.987 |
+| | 1024 | 2.516 / 2.929 | 0.695 / 0.723 | 0.922 / 0.922 | 0.999 / 0.995 |
+| | 1536 | 5.594 / 6.550 | 0.690 / 0.717 | 0.921 / 0.909 | 0.999 / 0.993 |
+| | 2048 | 9.958 / 11.94 | 0.691 / 0.712 | 0.918 / 0.908 | 0.997 / 0.984 |
+| 2 | 256 | 0.109 / 0.113 | 0.762 / 0.768 | 0.913 / 0.907 | 1.000 / 0.997 |
+| | 384 | 0.224 / 0.244 | 0.756 / 0.760 | 0.923 / 0.913 | 1.002 / 1.001 |
+| | 512 | 0.385 / 0.428 | 0.747 / 0.749 | 0.923 / 0.909 | 0.999 / 0.994 |
+| | 768 | 0.818 / 0.942 | 0.746 / 0.752 | 0.923 / 0.926 | 0.998 / 1.008 |
+| | 1024 | 1.452 / 1.630 | 0.750 / 0.751 | 0.929 / 0.924 | 0.999 / 0.999 |
+| | 1536 | 3.198 / 3.672 | 0.742 / 0.757 | 0.927 / 0.935 | 0.998 / 1.004 |
+| | 2048 | 5.670 / 6.667 | 0.740 / 0.740 | 0.929 / 0.917 | 0.999 / 0.989 |
+
+Weight-ring depth (`res/sp4.jsonl`, L256 / 512 / 1024): 3 slots within +-1 % of 4, 5 slots 1-2 % faster at n 4 (sustained), equal at n 2: the
+default stays 4 (shared with D 128).
+
+Small row counts (`res/sp3.jsonl`, `MINROWS=0`; full / default, cool): n 4: 2048 rows 1.91, 4096 1.39, 6144 1.09, 8192 0.70, 16384 0.70,
+32768 0.69; n 2: 2048 1.63, 4096 1.24, 6144 0.99, 8192 0.69, 16384 0.71, 32768 0.73. Below 8192 rows the default runs the generic kernels
+(`_PREFER_GENERIC_ROWS[256]` = 6144) and the fused FP8 kernel has 48 or fewer 128-row tiles for 132 SMs, so `ROW_GATE[256]` = 8192.
+
+Error against fp64 (`scripts/bench.py err`, `res/err1.jsonl` / `res/err2.jsonl`; rows 128, 16384, 38400, 65536, 262144, n 4 / 2; tolerance
+max(err_pytorch, 8e-3) = 8e-3 on every row). No NaN / inf, no guard retry or fallback:
+
+| route | judge | rms | update rms |
+|---|---|---|---|
+| PyTorch bf16 (tolerance reference) | 0.0044-0.0056 | 0.0036-0.0037 | 0.0070-0.0071 |
+| 2.5.12 default | 0.0035-0.0040 | 0.0027-0.0028 | 0.0052 |
+| D256 full e4m3 | 0.035-0.040 | 0.034-0.035 | 0.066 |
+| D256 h8 (h + squeeze, `G1=0`) | 0.021-0.029 | 0.019-0.020 | 0.038 |
+
+The same as D 128 / wide (4.4-5x the tolerance for full, 2.7-3.7x for h8): the e4m3 storage of the two GEMM inputs, not the kernel.
+
+Verification: default bytes, sha1 in separate processes against the base tree ffcd465f7: 18 / 18 identical (D 64 n 4 / 2; D 128 n 4 / 2 incl.
+12800 rows and L2048; D 256 n 4 / 2 at 2048, 8192, 16384, 2^20, 2^22 rows; D 384 n 4 / 2 incl. 2048 rows; D 512 n 4; D 768 n 2 at 512 / 16384;
+`res/sha_base.json`, `res/sha_fp8.json`). No 2.5.12 source changed (the kernel and its wgmma header are new files; `fp8_sm90a.py` gained the
+D 256 build / pack / launch and the gate entry). Tests: `tests/gpu/test_transition_fp8_d256_h100.py` (17: error vs fp64 for n x G1 x rows,
+CUDA-graph replay = eager bytes, sync and lazy guard, row gate, default untouched) and `tests/gpu/test_transition_fp8_h100.py` (37) pass on H100;
+`tests/cpu/test_capture_api.py` (13) passes; ruff check / format and pyright clean on the touched Python files. The extension JIT-builds on first
+use (about 85 s per (n, G1, slots)).
+
+### Single-representation transition at token counts (AF3 single D 384 n 4; D 768 n 2), `res/sp2.jsonl`, `res/ub1.jsonl`
+
+Question (b): does a token-count-sized single transition (rows = tokens, 256-4096) gain from e4m3 at all? The 65536-row gate kept it on the
+2.5.12 route (the generic kernels at these rows). Measured with the gate off (`MINROWS=0`), full / default (cool; sustained within 1 %):
+
+| D 384 n 4 rows | 256 | 512 | 768 | 1024 | 1536 | 2048 | 3072 | 4096 |
+|---|---|---|---|---|---|---|---|---|
+| 2.5.12 ms | 0.0140 | 0.0143 | 0.0174 | 0.0180 | 0.0214 | 0.0220 | 0.0303 | 0.0343 |
+| wide FP8 full / default | 3.44 | 3.34 | 2.79 | 2.72 | 2.30 | 2.29 | 1.70 | 1.51 |
+| wide FP8 h8 / default | 4.82 | 4.69 | 3.91 | 3.80 | 3.20 | 3.17 | 2.33 | 2.07 |
+
+The wide chain (128-row tiles, 2 to 32 CTAs, h through HBM) is 1.5-3.4x slower. Upper bound of any e4m3 kernel: cuBLAS(Lt) e4m3 against bf16
+at the two GEMM shapes (`scripts/ub2.py`, CUDA graph, ms):
+
+| D, n, rows | 2.5.12 module | expand bf16 / e4m3 | squeeze bf16 / e4m3 | GEMM time e4m3 saves (share of the module) |
+|---|---|---|---|---|
+| 384, 4, 256 | 0.0146 | 0.0048 / 0.0052 | 0.0058 / 0.0050 | 0.0004 (3 %) |
+| 384, 4, 1024 | 0.0183 | 0.0078 / 0.0077 | 0.0071 / 0.0067 | 0.0005 (3 %) |
+| 384, 4, 4096 | 0.0345 | 0.0215 / 0.0184 | 0.0105 / 0.0078 | 0.0058 (17 %) |
+| 768, 2, 256 | 0.0165 | 0.0060 / 0.0057 | 0.0061 / 0.0051 | 0.0013 (8 %) |
+| 768, 2, 512 | 0.0172 | 0.0073 / 0.0064 | 0.0076 / 0.0061 | 0.0024 (14 %) |
+| 768, 2, 1024 | 0.0474 | 0.0105 / 0.0092 | 0.0080 / 0.0069 | 0.0024 (5 %) |
+| 768, 2, 2048 | 0.0624 | 0.0174 / 0.0151 | 0.0107 / 0.0079 | 0.0051 (8 %) |
+| 768, 2, 4096 | 0.0794 | 0.0331 / 0.0236 | 0.0162 / 0.0120 | 0.0137 (17 %) |
+
+At token counts the GEMMs are latency-bound (a few waves of small tiles): e4m3 saves 0-17 % of the module even with perfect fusion, before the
+quantization work, and the existing FP8 kernels lose 1.5-3.4x. The gate stays (D 384 / 512: 65536 rows); no token-count FP8 kernel was built.
+(Side finding, bf16 not FP8: the 2.5.12 D 768 module at 1024-4096 rows takes 1.6-2.6x the time of its two bf16 cuBLAS GEMMs.)
+
+### D 64: bound from data (`scripts/d64.py`, `res/d64a.jsonl`; not built)
+
+Model: module time = HBM floor (a CUDA-graph `y.copy_(x)` of the same bytes) + the rest, and e4m3 GEMMs shrink only the rest. Calibrated on
+D 128, where the FP8 kernel exists: (fp8 - floor) / (default - floor) = 0.58-0.61 at n 4 and 0.34-0.48 at n 2 (rows 2^18 / 2^20 / 2^22).
+
+| D 64 | rows | 2.5.12 ms | floor ms | floor share | module bound with the D 128 factor |
+|---|---|---|---|---|---|
+| n 4 | 262144 / 1048576 / 4194304 | 0.081 / 0.270 / 1.062 | 0.025 / 0.093 / 0.448 | 32-42 % | 0.73 / 0.74 / 0.76 |
+| n 2 | 262144 / 1048576 / 4194304 | 0.051 / 0.185 / 0.703 | 0.025 / 0.092 / 0.446 | 50-63 % | 0.74 / 0.72 / 0.76 |
+
+So an e4m3 D 64 kernel (the D 128 recipe on `wide_d64_fwd_small_f3`: LayerNorm fragments quantized in registers, K = 64 = two k32 fragments,
+h -> k32 fragment, m64n64k32 squeeze) could reach about 0.72-0.76 of the default by this model, i.e. the >= 10 % bar is met on paper. The model
+assumes the D 128 overlap carries over to 64-row tiles with 3 CTAs per SM; it is an estimate, not a measurement. Not built on this branch
+(optional item; next candidate).
 
 ## TriAttn: where else FP8 can go (2026-11-17, branch `fp8x/triattn`, base `fp8/3.0.0-on-2512` 91a9241fb)
 
