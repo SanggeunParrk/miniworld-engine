@@ -196,6 +196,7 @@ class _Site:
         self.scale = torch.ones(1, device=dev)  # dequant factor of the last call (persistent: CUDA-graph replays update it in place)
         self.ovf = _OVF.setdefault(dev, torch.zeros(1, device=dev))
         self.calls = 0
+        self.reseed = False  # the seeding call saw an all-zero tensor (e.g. a zero-initialised output projection): seed again next call
 
     def next_scale(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Push the last call's amax into the history; this call's (scale, 1 / scale) as fresh fp32 [1] tensors."""
@@ -215,9 +216,13 @@ class _Site:
         return scale, 1.0 / scale  # fresh tensors: the backward of this call reads its own scale
 
     def seed(self, amax_true: torch.Tensor) -> None:
-        """First call: the history is this tensor's own amax (eager)."""
+        """First call: the history is this tensor's own amax (eager; one host sync)."""
         self.hist.fill_(0.0)
         self.hist[0] = amax_true.reshape(())
+        self.reseed = float(amax_true) == 0.0
+
+    def needs_seed(self) -> bool:
+        return self.calls == 0 or (self.reseed and not torch.cuda.is_current_stream_capturing())
 
 
 def _site(kind: str, key_tensor: torch.Tensor, fmt: str) -> _Site:
@@ -324,7 +329,7 @@ def forward_values(
         return None, v, v, y, None
     site = _site("v", wv, "e4m3")
     fused_ = fused()
-    if site.calls == 0:  # seed the history from this call's |v| (eager)
+    if site.needs_seed():  # seed the history from this call's |v| (eager)
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("PWA FP8 training: the first call of a module must be eager (it seeds the v scale)")
         if fused_:
@@ -361,7 +366,7 @@ def backward_glue(k, o, y, dres0, wg16, wot, dgv, dmask, dscale, wo, ohm):
         return d_o, None, None, None, dWo
     site = _site("do", wo, DO_FMT)
     fused_ = fused() and ohm
-    if site.calls == 0:
+    if site.needs_seed():
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("PWA FP8 training: the first backward of a module must be eager (it seeds the do scale)")
         if fused_:

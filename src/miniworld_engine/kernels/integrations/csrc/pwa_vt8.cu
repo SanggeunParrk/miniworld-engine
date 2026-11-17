@@ -238,34 +238,19 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
         if (SY || n0 + col < N) amax = fmaxf(amax, fmaxf(fmaxf(fabsf(a0), fabsf(a1)), fmaxf(fabsf(a2), fabsf(a3))));
         sV[(row * BN + col) >> 1] = e4m3x2(a0, a1);
         sV[((row + 8) * BN + col) >> 1] = e4m3x2(a2, a3);
-      }
-    }
 #if VT_NAT
-    // v natural = y . Wv^T: the same two K-major tiles with the roles swapped (rows n, columns hc), so a thread's two consecutive-hc
-    // values pack into one e4m3x2 halfword of the [H][BN][C] staging (the accumulators are reused; the kernel is memory-bound)
-    wg::fence();
-    #pragma unroll
-    for (int mb = 0; mb < MB; ++mb) {
-      #pragma unroll
-      for (int ks = 0; ks < D / 16; ++ks)
-        wg::mma_m64n64k16_kk(wg::desc(sx + (ks >> 2) * BN * 64 + wg::off(0, (ks & 3) * 2)),
-                             wg::desc(sWv + (ks >> 2) * HC * 64 + mb * 64 * 64 + wg::off(0, (ks & 3) * 2)), acc[mb], ks == 0 ? 0 : 1);
-    }
-    wg::commit();
-    wg::wait();
-    {
-      unsigned char* sN = reinterpret_cast<unsigned char*>(sV) + HC * BN;   // [H][BN][C]
-      #pragma unroll
-      for (int mb = 0; mb < MB; ++mb) {
-        #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-          const int hc = mb * 64 + i * 8 + cc, h = hc / C, c = hc % C;
-          *reinterpret_cast<uint16_t*>(sN + (h * BN + rr) * C + c) = e4m3x2(acc[mb][i * 4 + 0] * vinv, acc[mb][i * 4 + 1] * vinv);
-          *reinterpret_cast<uint16_t*>(sN + (h * BN + rr + 8) * C + c) = e4m3x2(acc[mb][i * 4 + 2] * vinv, acc[mb][i * 4 + 3] * vinv);
+        {
+          unsigned char* sN = reinterpret_cast<unsigned char*>(sV) + HC * BN;   // [H][BN][C]
+          const uint16_t p0 = e4m3x2(a0, a1), p1 = e4m3x2(a2, a3);
+          const int h0 = row / C, c0 = row % C, h1 = (row + 8) / C, c1 = (row + 8) % C;
+          sN[(h0 * BN + col) * C + c0] = (unsigned char)(p0 & 0xff);
+          sN[(h0 * BN + col + 1) * C + c0] = (unsigned char)(p0 >> 8);
+          sN[(h1 * BN + col) * C + c1] = (unsigned char)(p1 & 0xff);
+          sN[(h1 * BN + col + 1) * C + c1] = (unsigned char)(p1 >> 8);
         }
+#endif
       }
     }
-#endif
     wg::proxy_fence();
     __syncthreads();
 #if VT_NAT
