@@ -9,12 +9,6 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include "sm90_ptx.cuh"
-#ifndef PWA_O8   // EXPERIMENTAL opt-in build (pwa_fp8.py): o arrives as e4m3 tiles (o / oscale, from the e4m3 contraction); 0 = the bf16 kernel
-#define PWA_O8 0
-#endif
-#if PWA_O8
-#include <cuda_fp8.h>
-#endif
 
 namespace {
 constexpr int H = 8, C = 32, D = 64, HC = H * C;
@@ -106,9 +100,6 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_gateout_kernel(int N, int S, i
     const __nv_bfloat16* __restrict__ Yg,        // y   [S*N][D]        (read as RS fragments)
     const __nv_bfloat16* __restrict__ DMASK,     // drop_msa keep-mask [N][D] (0/1, shared over s) or nullptr
     float dscale,                                // 1 / (1 - p)
-#if PWA_O8
-    const float* __restrict__ oscale_p,          // dequant factor of the e4m3 o
-#endif
     const __grid_constant__ CUtensorMap otmap,   // o   [H*N][S*C]      box (64 (s,c), 64 i)
     const __grid_constant__ CUtensorMap rmap,    // msa [S*N][D]        box (64, 64)
     const __grid_constant__ CUtensorMap gmap,    // wg  [HC][D]         box (64, 32)
@@ -159,11 +150,7 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_gateout_kernel(int N, int S, i
           tma::load_2d(&omap_w, tma::sa(sWOb + hb * 64 * 32), fullW + hb, h * C, 0);
           const int st = gs % NST;
           if (gs >= NST) tma::wait(empty + st, ((gs / NST) - 1) & 1);
-#if PWA_O8
-          tma::expect_tx(full + st, 2 * TILE);                     // e4m3 tiles: one byte per element (in the bf16 tile's slot)
-#else
           tma::expect_tx(full + st, 2 * TILE * 2);
-#endif
           for (int cc = 0; cc < 2; ++cc)
             tma::load_2d(&otmap, tma::sa(sRing + (st * 2 + cc) * TILE), full + st, sp * NB, h * N + i0 + cc * 64);
         }
@@ -231,25 +218,12 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_gateout_kernel(int N, int S, i
       const int st = gs % NST;
       tma::wait(full + st, (gs / NST) & 1);
       const __nv_bfloat16* so_t = sRing + (st * 2 + c) * TILE;
-#if PWA_O8
-      {
-        const __nv_fp8x2_storage_t* so8 = reinterpret_cast<const __nv_fp8x2_storage_t*>(so_t);   // [64 rows][64 B], no swizzle
-        const float osc = *oscale_p;
-#pragma unroll
-        for (int nt = 0; nt < 8; ++nt) {
-          const float2 lo = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(so8[(r_acc * 64 + nt * 8 + cq) >> 1], __NV_E4M3)));
-          const float2 hi = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(so8[((r_acc + 8) * 64 + nt * 8 + cq) >> 1], __NV_E4M3)));
-          ov[nt * 4 + 0] = lo.x * osc; ov[nt * 4 + 1] = lo.y * osc; ov[nt * 4 + 2] = hi.x * osc; ov[nt * 4 + 3] = hi.y * osc;
-        }
-      }
-#else
 #pragma unroll
       for (int nt = 0; nt < 8; ++nt) {
         const float2 lo = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(so_t + tma::sw128(r_acc, nt * 8 + cq)));
         const float2 hi = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(so_t + tma::sw128(r_acc + 8, nt * 8 + cq)));
         ov[nt * 4 + 0] = lo.x; ov[nt * 4 + 1] = lo.y; ov[nt * 4 + 2] = hi.x; ov[nt * 4 + 3] = hi.y;
       }
-#endif
       __syncwarp();
       if (lane == 0) tma::arrive(empty + st);
       wg::wait<0>();                                               // the gate accumulators are complete
@@ -364,7 +338,6 @@ CUtensorMap map_nat(void* base, long row_stride, int N, int S, int bi) {   // na
 }
 }  // namespace
 
-#if !PWA_O8
 template <int NST>
 void launch_gateout(int N, int S, int ntile, int grid, const __nv_bfloat16* ymap, const __nv_bfloat16* dmask, float dscale, const CUtensorMap& otmap, const CUtensorMap& rmap,
                     const CUtensorMap& gmap, const CUtensorMap& omap_w, const CUtensorMap& outmap) {
@@ -420,55 +393,3 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
   mod.def("pwa_gateout", &pwa_gateout, "PWA gate / out pass over a head-major o (the cuBLAS contraction)", py::arg("o"), py::arg("y"), py::arg("wg"), py::arg("wo"), py::arg("msa"),
           py::arg("blocks_per_sm") = 1, py::arg("nst") = 4, py::arg("dmask") = py::none(), py::arg("dscale") = 1.0);
 }
-#else  // PWA_O8: the e4m3-o build (its own extension, pwa_fp8.py)
-torch::Tensor pwa_gateout8(torch::Tensor o8, torch::Tensor oscale, torch::Tensor y, torch::Tensor wgw, torch::Tensor wow, torch::Tensor msa, int64_t blocks_per_sm,
-                           int64_t nst) {
-  TORCH_CHECK(o8.is_cuda() && o8.scalar_type() == torch::kFloat8_e4m3fn && o8.is_contiguous() && o8.dim() == 3 && o8.size(0) == H, "o: [H, N, S*C] e4m3");
-  TORCH_CHECK(oscale.scalar_type() == torch::kFloat && oscale.numel() == 1, "oscale: fp32[1]");
-  const int N = (int)o8.size(1);
-  TORCH_CHECK(o8.size(2) % C == 0, "o: [H, N, S*C]");
-  const int S = (int)(o8.size(2) / C);
-  TORCH_CHECK(N % 128 == 0 && S % BS == 0, "N must be a multiple of 128 and S even");
-  TORCH_CHECK(y.is_contiguous() && y.sizes() == torch::IntArrayRef({S, N, D}), "y: [S, N, D]");
-  TORCH_CHECK(msa.is_contiguous() && msa.sizes() == torch::IntArrayRef({S, N, D}), "msa: [S, N, D]");
-  TORCH_CHECK(wgw.is_contiguous() && wgw.sizes() == torch::IntArrayRef({HC, D}), "wg: [HC, D]");
-  TORCH_CHECK(wow.is_contiguous() && wow.sizes() == torch::IntArrayRef({D, HC}), "wo: [D, HC]");
-  auto out = torch::empty({S, N, D}, y.options());
-  alignas(64) CUtensorMap otmap{};
-  {
-    uint64_t gdim[2] = {(uint64_t)S * C, (uint64_t)H * N};
-    uint64_t gstride[1] = {(uint64_t)S * C};
-    uint32_t bdim[2] = {64, 64};
-    uint32_t estride[2] = {1, 1};
-    CUresult r = tma_encode()(&otmap, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, o8.data_ptr(), gdim, gstride, bdim, estride, CU_TENSOR_MAP_INTERLEAVE_NONE,
-                              CU_TENSOR_MAP_SWIZZLE_NONE, CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-    TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled(o8) failed: ", (int)r);
-  }
-  const __nv_bfloat16* ymap = reinterpret_cast<const __nv_bfloat16*>(y.data_ptr<at::BFloat16>());
-  CUtensorMap rmap = map2d(msa.data_ptr(), (long)S * N, D, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B, "msa");
-  CUtensorMap gmap = map2d(wgw.data_ptr(), HC, D, 64, 32, CU_TENSOR_MAP_SWIZZLE_128B, "wg");
-  CUtensorMap omap_w = map2d(wow.data_ptr(), D, HC, 32, 64, CU_TENSOR_MAP_SWIZZLE_64B, "wo");
-  CUtensorMap outmap = map2d(out.data_ptr(), (long)S * N, D, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B, "out");
-  static int sms = 0;
-  if (sms == 0) cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, y.device().index());
-  const int ntile = (S / BS) * (N / 128);
-  const int grid = (int)std::min<long>(ntile, (long)sms * blocks_per_sm);
-  auto go = [&](auto kernel, int bytes) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
-    kernel<<<grid, THREADS, bytes, at::cuda::getCurrentCUDAStream()>>>(N, S, ntile, ymap, nullptr, 1.f, oscale.data_ptr<float>(), otmap, rmap, gmap, omap_w, outmap);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-  };
-  switch (nst) {
-    case 4: go(pwa_gateout_kernel<4>, SMG<4>::BYTES); break;
-    case 6: go(pwa_gateout_kernel<6>, SMG<6>::BYTES); break;
-    case 8: go(pwa_gateout_kernel<8>, SMG<8>::BYTES); break;
-    default: TORCH_CHECK(false, "nst must be 4, 6 or 8");
-  }
-  return out;
-}
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
-  mod.def("pwa_gateout8", &pwa_gateout8, "PWA gate / out pass over an e4m3 head-major o (o = oscale * o8)", py::arg("o8"), py::arg("oscale"), py::arg("y"),
-          py::arg("wg"), py::arg("wo"), py::arg("msa"), py::arg("blocks_per_sm") = 1, py::arg("nst") = 4);
-}
-#endif

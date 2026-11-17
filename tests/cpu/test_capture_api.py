@@ -52,6 +52,15 @@ NOT_WEIGHT_DERIVED = {
     "kernels/integrations/pwa_wide.py:_EXT": "extensions",
     "kernels/integrations/opm_train.py:_EXT": "extensions",
     "kernels/integrations/pwa_train.py:_EXT": "extensions",
+    # the opt-in PWA FP8 route: v scales are calibrated from the first call's activations (keyed by the value weight's address, dropped
+    # when it is freed), not derived from weight values; the rest are per-device scalars / workspaces and cuBLASLt algorithm picks
+    "kernels/integrations/pwa_fp8.py:_EXT": "extensions",
+    "kernels/integrations/pwa_fp8.py:_VS": "FP8 v scales calibrated from activations",
+    "kernels/integrations/pwa_fp8.py:_VINV": "1 / the FP8 v scales",
+    "kernels/integrations/pwa_fp8.py:_AMAX": "FP8 saturation peak per device",
+    "kernels/integrations/pwa_fp8.py:_WS": "constant w scale per device",
+    "kernels/integrations/pwa_fp8.py:_WORK": "cuBLASLt workspace per device",
+    "kernels/integrations/pwa_fp8.py:ALGO_INDEX": "cuBLASLt algorithm overrides",
     "kernels/swa_dit/cuda/loader.py:_EXT": "extensions",
     "kernels/swa_dit/cuda/loader.py:ERRORS": "extension build errors",
     "kernels/integrations/adaln_sm80.py:_SIDE": "side streams",

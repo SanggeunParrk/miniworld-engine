@@ -19,10 +19,10 @@ _H100 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 
 def f8():
     from miniworld_engine.kernels.integrations import pwa_fp8 as F8
 
-    saved = (F8.ENABLED, F8.GUARD, F8.O8, F8.MIN_N, F8.MIN_S)
+    saved = (F8.ENABLED, F8.GUARD, F8.MIN_N, F8.MIN_S)
     F8.GUARD, F8.MIN_N, F8.MIN_S = "lazy", 0, 0
     yield F8
-    F8.ENABLED, F8.GUARD, F8.O8, F8.MIN_N, F8.MIN_S = saved
+    F8.ENABLED, F8.GUARD, F8.MIN_N, F8.MIN_S = saved
     F8.take_overflow()
 
 
@@ -56,9 +56,8 @@ def test_ln_vt8_matches_ln_vg(f8) -> None:
 
 
 @pytest.mark.skipif(not _H100, reason="H100")
-@pytest.mark.parametrize("o8", [False, True])
 @pytest.mark.parametrize(("d_pair", "n", "s"), [(128, 512, 64), (128, 256, 32), (256, 384, 32)])
-def test_route_accuracy_and_default_unchanged(f8, o8: bool, d_pair: int, n: int, s: int) -> None:
+def test_route_accuracy_and_default_unchanged(f8, d_pair: int, n: int, s: int) -> None:
     base, inp = _case(d_pair, n, s)
     kern = copy.deepcopy(base).set_backend("cuda")
     with torch.no_grad():
@@ -66,7 +65,7 @@ def test_route_accuracy_and_default_unchanged(f8, o8: bool, d_pair: int, n: int,
         with torch.autocast("cuda", dtype=torch.bfloat16):
             ref = base(**inp).double()
         before = kern(**inp)
-        f8.ENABLED, f8.O8 = True, o8
+        f8.ENABLED = True
         got = kern(**inp)
         again = kern(**inp)
         f8.ENABLED = False
@@ -107,3 +106,19 @@ def test_graph_replay_and_guard(f8) -> None:
         torch.cuda.synchronize()
         assert not f8.take_overflow()
         assert torch.equal(out, eager)
+
+
+def test_gates() -> None:
+    from miniworld_engine.kernels.integrations import pwa_fp8 as F8
+
+    saved = (F8.ENABLED, F8.MIN_N, F8.MIN_S)
+    try:
+        F8.ENABLED, F8.MIN_N, F8.MIN_S = True, 384, 1024
+        assert not F8.serves(4096, 256)  # N <= 256: the fused bf16 kernel wins
+        assert not F8.serves(512, 384) and F8.serves(1024, 384)  # N384 from S1024
+        assert F8.serves(128, 512) and F8.serves(2, 768)  # from N512 at any depth
+        assert not F8.serves(1024, 448)  # N % 128 (the gate / out pass)
+        F8.ENABLED = False
+        assert not F8.serves(4096, 768)
+    finally:
+        F8.ENABLED, F8.MIN_N, F8.MIN_S = saved
