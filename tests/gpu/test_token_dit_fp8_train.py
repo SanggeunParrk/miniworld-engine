@@ -38,7 +38,9 @@ def _grads(m, A: int, L: int, places: str, e5: bool = False) -> list[torch.Tenso
     F.PLACES, F.GRAD_E5M2 = F.parse(places), e5
     try:
         g = torch.Generator(device="cuda").manual_seed(1)
-        inp = m.make_inputs(length=L, samples=A, depth=None, dtype=torch.bfloat16, device="cuda", generator=g, stream="token_single_shared_cond")
+        inp = m.make_inputs(
+            length=L, samples=A, depth=None, dtype=torch.bfloat16, device="cuda", generator=g, stream="token_single_shared_cond"
+        )
         s = inp["single"].detach().clone().requires_grad_(True)
         c = inp["cond"].detach()[:1].clone().requires_grad_(True)
         p = inp["pair"].detach().clone().requires_grad_(True)
@@ -72,7 +74,6 @@ def test_q8_rows_matches_torch(C_: int, e5: bool) -> None:
     half, sub = (2.0**-3, 2.0**-17) if e5 else (2.0**-4, 2.0**-10)
     assert bool(((x8.float() - v).abs() <= torch.maximum(v.abs() * half, torch.full_like(v, sub)) * 1.001).all())
     assert float(x8.float().abs().max()) <= fmax
-
 
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")

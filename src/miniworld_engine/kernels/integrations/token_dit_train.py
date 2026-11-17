@@ -740,10 +740,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
     )  # reads the input, writes x on the way (the parallel block: xt as well)
     f8, f8p, f8w = _fp8_train(W, M, D, fp32, plain, h100, ("qkvg", "out", "expand", "squeeze"))
     Wqkvg, bqkvg = W["Wqkvg"], W["bqkvg"]
-    if "qkvg" in f8p:
-        qkvg = f8.mm(*f8.q8(xa), f8w["qkvg"], bias=bqkvg)
-    else:
-        qkvg = addmm(bqkvg, xa, Wqkvg.t())
+    qkvg = f8.mm(*f8.q8(xa), f8w["qkvg"], bias=bqkvg) if "qkvg" in f8p else addmm(bqkvg, xa, Wqkvg.t())
     rqk = torch.empty(M, 2 * H, device=dev)
     nq, nk = W["nq"], W["nk"]
     if copies:  # B200 fp32: v is not copied, the core reads it as a column view of qkvg
@@ -1163,8 +1160,10 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     direct = fp32 and mm is torch.mm
     if "dexpand" in f8p:
         dxt = f8.mm(dab8, sdab, f8w["dexpand"])
+    elif direct:
+        dxt = torch.mm(dab, Wab, out=dG[:, 3 * D :])
     else:
-        dxt = torch.mm(dab, Wab, out=dG[:, 3 * D :]) if direct else mm(dab, Wab)
+        dxt = mm(dab, Wab)
     dWab = mm32(dab.t(), xt)
     dx1 = torch.empty(M, D, device=dev)
     dy = torch.empty(M, D, device=dev, dtype=at)

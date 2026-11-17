@@ -162,4 +162,19 @@ def mm(a8: torch.Tensor, sa: torch.Tensor, w: tuple[torch.Tensor, torch.Tensor],
     return torch._scaled_mm(a8, w8, sa, sw, bias=bias, out_dtype=torch.bfloat16)
 
 
-__all__ = ["DGRAD", "FWD", "GRAD_E5M2", "PLACES", "PRESETS", "RECOMMENDED", "active", "ext", "mm", "parse", "q8", "swiglu_bwd_q8", "swiglu_q8", "weights"]
+__all__ = [
+    "DGRAD",
+    "FWD",
+    "GRAD_E5M2",
+    "PLACES",
+    "PRESETS",
+    "RECOMMENDED",
+    "active",
+    "ext",
+    "mm",
+    "parse",
+    "q8",
+    "swiglu_bwd_q8",
+    "swiglu_q8",
+    "weights",
+]
