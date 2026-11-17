@@ -24,6 +24,28 @@
 #pragma once
 #include "attn_fwd_sm80.cuh"
 
+// Ring slots of the dispatched geometries (RF_ST16 / 32 / 64: the 16- / 32- / 64-channel heads).  The A100 (163 KB of shared memory a block)
+// runs 4 slots, two CTAs an SM.  The RTX 5090 has 99 KB a block and 100 KB an SM: 4 slots of the 32- / 64-channel geometries (64 / 80 KiB)
+// leave it ONE CTA (4 warps) an SM, so its build takes 2 slots there (32 / 40 KiB: two CTAs an SM; the same arithmetic in the same order, the
+// same output bits).  Core alone, CUDA graph, interleaved, 2 slots / 4 slots: 32-channel 1.12-1.15x (128:4:32, L 512-1536), 64-channel
+// 1.15-1.17x (256:4:64, 512:8:64, L 512-1024; 3 slots, still one CTA, 0.99x); the 16-channel geometry (48 KiB: two CTAs already) keeps 4
+// (2 slots +2-3 %, 3 slots -4 %).
+#ifdef TRIATTN_SM120
+#ifndef RF_ST16
+#define RF_ST16 4
+#endif
+#ifndef RF_ST32
+#define RF_ST32 2
+#endif
+#ifndef RF_ST64
+#define RF_ST64 2
+#endif
+#else
+#define RF_ST16 4
+#define RF_ST32 4
+#define RF_ST64 4
+#endif
+
 namespace a100 {
 
 template <int WR_, int RW_, int QG_, int ST_, bool GATE_ = false, int HD_ = 32, bool BCVT_ = false>

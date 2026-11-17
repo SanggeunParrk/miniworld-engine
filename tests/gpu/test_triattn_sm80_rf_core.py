@@ -1,4 +1,4 @@
-"""A100 (sm_80) register-resident triangle-attention inference core (``kernels/triangle_attention/cuda/sm80/attn_rf_fwd_sm80.cuh``): against a
+"""A100 (sm_80) and RTX 5090 (sm_120a) register-resident triangle-attention inference core (``kernels/triangle_attention/cuda/sm80/attn_rf_fwd_sm80.cuh``): against a
 float32 reference on sampled pair rows, the plain and the gated (``bf16(sigmoid(g) bf16(o))``) forms at 32-channel heads, the 16-channel form of
 the generalised core, masked keys, a query whose keys are all masked (zero output) and logits large enough that the unshifted pass cannot
 finish its tiles (the fix-list recomputation with the running maximum); bitwise equal run to run; the same values as the tuned AttnCfg core
@@ -10,14 +10,15 @@ import math
 import pytest
 import torch
 
-pytestmark = [pytest.mark.gpu, pytest.mark.a100]
+pytestmark = [pytest.mark.gpu]
 
 L2E = 1.4426950408889634
 BF16_MIN = -3.3895313892515355e38
 
 
 def _a100() -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
+    """A card the sm_80 sources serve: the A100, or the RTX 5090 (the same sources built for sm_120a, with fewer ring slots there)."""
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() in ((8, 0), (12, 0))
 
 
 def _inputs(L: int, H: int, d: int, kind: str, seed: int = 0):
@@ -121,23 +122,30 @@ def _run16(mode: int, q, k, v, bias, key_mask: torch.Tensor | None = None, hd: i
 
 
 KINDS = ["plain", "big", "masked", "allmasked", "overflow"]
-#: the generalised core's default rule on sm_80 (attn2_ops.cu): the rf core from this L (16-channel heads: the fixed-shift callers)
-RF_FLOOR = {64: 128, 32: 256, 16: 256}
+#: the generalised core's default rule (attn2_ops.cu): the rf core from this L (16-channel heads: the fixed-shift callers); the sm_80
+#: build (A100) and the sm_120a build (RTX 5090: the earlier floors, under TRIATTN_SM120)
+RF_FLOOR_SM80 = {64: 128, 32: 256, 16: 256}
+RF_FLOOR_SM120 = {64: 512, 32: 512, 16: 1024}
 
 
-@pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+def _rf_floor() -> dict[int, int]:
+    return RF_FLOOR_SM120 if torch.cuda.get_device_capability() == (12, 0) else RF_FLOOR_SM80
+
+
+@pytest.mark.skipif(not _a100(), reason="sm_80 sources (A100 / RTX 5090)")
 @pytest.mark.parametrize("hd", [16, 32, 64])
 def test_rf_floor_default_rule(hd: int) -> None:
-    """The default rule (-1) runs the rf core (1) from ``RF_FLOOR[hd]`` and the attn2 core (0) below it: bitwise the forced form."""
-    H = 4
-    for L, mode in ((RF_FLOOR[hd], 1), (RF_FLOOR[hd] - 128, 0)):
+    """The default rule (-1) runs the rf core (1) from the floor of the head dim (``_rf_floor``) and the attn2 core (0) below it: bitwise
+    the forced form."""
+    H, floor = 4, _rf_floor()[hd]
+    for L, mode in ((floor, 1), (floor - 128, 0)):
         if L < 128:
             continue
         q, k, v, _, bias = _inputs(L, H, hd, "plain", seed=2)
         assert torch.equal(_run16(-1, q, k, v, bias, hd=hd), _run16(mode, q, k, v, bias, hd=hd)), f"L {L}: the default is not mode {mode}"
 
 
-@pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+@pytest.mark.skipif(not _a100(), reason="sm_80 sources (A100 / RTX 5090)")
 @pytest.mark.parametrize("gate", [False, True])
 @pytest.mark.parametrize("kind", KINDS)
 def test_rf_core_32(kind: str, gate: bool) -> None:
@@ -156,14 +164,14 @@ def test_rf_core_32(kind: str, gate: bool) -> None:
         assert rf[0, :, 5:9].abs().max() == 0, "a query with every key masked gives zero"
 
 
-@pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+@pytest.mark.skipif(not _a100(), reason="sm_80 sources (A100 / RTX 5090)")
 @pytest.mark.parametrize("L", [None, 512])
 @pytest.mark.parametrize("hd", [16, 32, 64])
 @pytest.mark.parametrize("kind", KINDS)
 def test_rf_core_attn2(kind: str, hd: int, L: int | None) -> None:
     """The generalised core's entry: 16-channel heads (fixed-shift callers), 32 / 64 (the RoseTTAFold3 / Chai-1 variants, online softmax callers);
-    at L 512 and at the rf floor of the head dim (None: ``RF_FLOOR``)."""
-    L, H = L or RF_FLOOR[hd], 4
+    at L 512 and at the rf floor of the head dim (None: ``_rf_floor``)."""
+    L, H = L or _rf_floor()[hd], 4
     q, k, v, g, bias = _inputs(L, H, hd, kind, seed=1)
     rows = [0, 3, L // 2 + 1, L - 1]
     ref = _reference(q, k, v, g, bias, rows, hd, False)
@@ -178,7 +186,7 @@ def test_rf_core_attn2(kind: str, hd: int, L: int | None) -> None:
         assert rf[0, :, 5:9].abs().max() == 0
 
 
-@pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+@pytest.mark.skipif(not _a100(), reason="sm_80 sources (A100 / RTX 5090)")
 @pytest.mark.parametrize("d", [32, 16])
 @pytest.mark.parametrize("mode", [2, 0])
 def test_dead_tail_keys_skipped_bitwise(d: int, mode: int) -> None:

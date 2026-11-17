@@ -128,9 +128,9 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
     a100::AttnParams r{};
     r.q = p.q; r.k = p.k; r.v = p.v; r.bias = p.bias; r.out = p.out; r.lse = nullptr;
     r.ldq = Lq.tok; r.ldk = Lk.tok; r.ldv = Lv.tok; r.ldo = Lo.tok; r.L = (int)L; r.H = (int)H; r.scl = (float)scl; r.key_tiles = p.key_tiles;
-    if (hd == 16) launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 16, true>>(r, Z, scl, q);   // 2 rows x 128 queries, the bias operand converted in registers
-    else if (hd == 32) launch_rf16<a100::AttnRCfg<1, 2, 4, 4, false, 32>>(r, Z, scl, q);              // as the d_pair-128 core
-    else launch_rf16<a100::AttnRCfg<2, 1, 2, 4, false, 64, true>>(r, Z, scl, q);                  // 2 x 2 warps, 2 rows x 64 queries, one row per warp
+    if (hd == 16) launch_rf16<a100::AttnRCfg<1, 2, 4, RF_ST16, false, 16, true>>(r, Z, scl, q);   // 2 rows x 128 queries, the bias operand converted in registers
+    else if (hd == 32) launch_rf16<a100::AttnRCfg<1, 2, 4, RF_ST32, false, 32>>(r, Z, scl, q);              // as the d_pair-128 core
+    else launch_rf16<a100::AttnRCfg<2, 1, 2, RF_ST64, false, 64, true>>(r, Z, scl, q);                  // 2 x 2 warps, 2 rows x 64 queries, one row per warp
     return;
   }
   const int64_t eff = sched != 0 ? sched : (L >= 256 ? 4 : 0);

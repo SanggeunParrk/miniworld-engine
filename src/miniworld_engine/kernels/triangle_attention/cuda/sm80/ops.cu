@@ -99,8 +99,8 @@ bool try_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorO
       if (rows % a100::AttnRCfg<2, 2, 2, 4, GATE>::R) return false;
       launch_attn_rf<a100::AttnRCfg<2, 2, 2, 4, GATE>>(p, z, scl, opts, rows); return true;
     case 2:                                                                                   // 4 warps, 2 rows x 128 queries, 4 slots
-      if (rows % a100::AttnRCfg<1, 2, 4, 4, GATE>::R) return false;
-      launch_attn_rf<a100::AttnRCfg<1, 2, 4, 4, GATE>>(p, z, scl, opts, rows); return true;
+      if (rows % a100::AttnRCfg<1, 2, 4, RF_ST32, GATE>::R) return false;
+      launch_attn_rf<a100::AttnRCfg<1, 2, 4, RF_ST32, GATE>>(p, z, scl, opts, rows); return true;
     default: return false;
   }
 }
