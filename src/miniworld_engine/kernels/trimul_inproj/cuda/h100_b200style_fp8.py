@@ -82,7 +82,7 @@ def _planes(x, weights, token, gi, bi, xs, d, transposed, sub, scales, margin, a
     return abq, csc
 
 
-def run(leaves, mask, direction, scales=None, record=None, cache=None, margin=1.0, zero=True):
+def run(leaves, mask, direction, scales=None, record=None, cache=None, margin=1.0, zero=True, out=None):
     """leaves as ``h100_b200style.trimul`` (bf16 weights); direction 1 outgoing / 2 incoming / 0 both (the bidirectional block: first d hidden
     channels outgoing, second d incoming, one K3 over the 2 d channels); scales = (sa, sb) [h] fp32 powers of two or None (dynamic). Returns y.
     Bidirectional: the two directions are two single-direction K1 + e4m3 contraction launches on the matrix halves (the incoming one on the
@@ -145,11 +145,12 @@ def run(leaves, mask, direction, scales=None, record=None, cache=None, margin=1.
             wpf = (wpf.float() * csc[None, :]).to(wpf.dtype)
             if cache is not None:
                 cache["k3"] = (wpf, wgf, vec)
-        y = torch.empty_like(x)
+        y = torch.empty_like(x) if out is None else out
         cfg = K._inference_output_config(d)
         from .h100_b200style_static import output_kernel
 
-        flat = d == 256 and n % 128 == 0  # the token-flat K3 (the shipped D256 inference tile) where it applies, else the any-L row form
+        # the token-flat K3 (the shipped D256 / D384 inference tile) where it applies, else the any-L row form
+        flat = d in (256, 384) and n % 128 == 0
         kernel, smem = output_kernel(d, h, cfg, rowpad=not flat, xbuf=K.K3_XBUF.get(d, 1), extra=k3_flags(d, flat, direction == 0))
         bn = cfg[0]
         if flat:
@@ -231,7 +232,14 @@ HEADROOM = float(_os.environ.get("MINIWORLD_TRIMUL_FP8_HEADROOM", "16"))
 #: L224 outgoing (+-3 %, and +15-20 us of host launch work against the default in eager mode; -6 % from L224), incoming from L144 (flat up to L128, -10 % at L144-176 where the default incoming is slower than its
 #: outgoing, flat at L192, -7 % from L224). ``MINIWORLD_TRIMUL_FP8_MINL=<n>`` replaces every gate (0 = none).
 #: direction 0 = bidirectional: D128 graph replay 0.95 at L256, 1.00-1.04 at L144-224; D256 1.01-1.04 up to L768, 0.975 at L1024
+#: D64 / D384 (n64 K1 blocks, 3.0.0 exploration): D64 +13.5 % at L128, -2 % at L256 (control 1.00: not clear), -10 % from L512; D384 -4 .. -8 % from L128 (graph replay, cool);
+#: bidirectional D64 +4 % at L512, L1024 -7 % cool but +8 % sustained, -22 % at L2048; bidirectional D384 -3 % at L512 (not clear), -8 % at L1024
 MIN_L = {(128, 1): 144, (128, 2): 192, (256, 1): 224, (256, 2): 144, (128, 0): 256, (256, 0): 1024}
+MIN_L.update({(64, 1): 512, (64, 2): 512, (384, 1): 128, (384, 2): 128, (64, 0): 2048, (384, 0): 1024})
+#: widths the route serves: D128 / D256 (n128 K1 blocks) and, from the 3.0.0 exploration (branch fp8x/trimul), D64 / D384 (n64 K1 blocks)
+WIDTHS = (64, 128, 256, 384)
+#: samples per call the route takes (B > 1 runs the one-sample route per sample into one output; exploration, branch fp8x/trimul)
+MAX_SAMPLES = 16
 _MINL_ENV = _os.environ.get("MINIWORLD_TRIMUL_FP8_MINL")
 GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0}
 _CACHES: dict = {}  # calibration state per module (key: data_ptr of its to_left weight; dropped when that tensor is freed): static device tensors, so a captured graph reads them at replay
@@ -273,8 +281,7 @@ def refresh(cache) -> None:
     elif "w" in cache:
         from .h100_b200style_direct import prescale
 
-        src, h, cpb, ring = cache["w_args"]
-        for old, new in zip(cache["w"], prescale(src, cache["qinv"], h, cpb, ring), strict=True):
+        for old, new in zip(cache["w"], prescale(cache["w_args"][0], cache["qinv"], *cache["w_args"][1:]), strict=True):
             old.copy_(new)
     if "k3" in cache:
         wpf = cache["k3"][0]
@@ -297,17 +304,32 @@ def _scale_up(cache, f) -> None:
 
 
 def serves(module, pair, mask, bidirectional) -> bool:
-    """Python-level (Dynamo-traceable) test: does the FP8-plane route take this call? Single direction, one sample, hidden = pair 128 / 256, bf16."""
-    if POLICY is None or pair.ndim != 4 or pair.shape[0] != 1 or pair.shape[1] != pair.shape[2]:
+    """Python-level (Dynamo-traceable) test: does the FP8-plane route take this call? hidden = pair (``WIDTHS``), bf16,
+    1 .. ``MAX_SAMPLES`` samples (B > 1: the one-sample route per sample)."""
+    if POLICY is None or pair.ndim != 4 or not 1 <= pair.shape[0] <= MAX_SAMPLES or pair.shape[1] != pair.shape[2]:
         return False
     d = pair.shape[-1]
-    if d not in (128, 256) or module.d_hidden != d or pair.dtype != torch.bfloat16 or pair.shape[1] < 16:
+    if d not in WIDTHS or module.d_hidden != d or pair.dtype != torch.bfloat16 or pair.shape[1] < 16:
         return False
     if module.ln_pair.eps != 1e-5 or module.ln_out.eps != 1e-5:
         return False
-    if pair.shape[1] < (int(_MINL_ENV) if _MINL_ENV is not None else MIN_L[(d, 0 if bidirectional else 1 if module.outgoing else 2)]):
+    gate = MIN_L.get((d, 0 if bidirectional else 1 if module.outgoing else 2), 256)
+    if pair.shape[1] < (int(_MINL_ENV) if _MINL_ENV is not None else gate):
         return False  # below the gate the bf16 default route is as fast or faster (see MIN_L)
-    return mask is None or (mask.dtype == torch.bool and mask.numel() == pair.shape[1])
+    return mask is None or (mask.dtype == torch.bool and mask.numel() == pair.shape[0] * pair.shape[1])
+
+
+def run_samples(leaves, mask, direction, cache=None, margin=1.0, zero=True):
+    """B samples (one direction): the one-sample route per sample, each writing its rows of one output (shared static scales; the guard
+    buffer is zeroed before the first sample only, so it reads the peak of the whole call). One sample: ``run``."""
+    x = leaves[0]
+    if x.shape[0] == 1:
+        return run(leaves, mask, direction, cache=cache, margin=margin, zero=zero)
+    y = torch.empty_like(x)
+    for b in range(x.shape[0]):
+        mb = None if mask is None else mask.reshape(x.shape[0], -1)[b : b + 1]
+        run([x[b : b + 1], *leaves[1:]], mb, direction, cache=cache, margin=margin, zero=zero and b == 0, out=y[b : b + 1])
+    return y
 
 
 def _default(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction):
@@ -374,7 +396,7 @@ def inference(
     token = mask if mask.numel() else None
     capturing = torch.cuda.is_current_stream_capturing()
     if POLICY != "calib":
-        return run(leaves, token, direction)
+        return run_samples(leaves, token, direction)
     key = wl.data_ptr()
     cache = _CACHES.get(key)
     if cache is None:
@@ -389,7 +411,7 @@ def inference(
     if GUARD == "lazy" or capturing:
         cache["amax"] = _lazy_buffer(pair.device)
     for _ in range(4):
-        y = run(leaves, token, direction, cache=cache, margin=HEADROOM, zero=not (GUARD == "lazy" or capturing))
+        y = run_samples(leaves, token, direction, cache=cache, margin=HEADROOM, zero=not (GUARD == "lazy" or capturing))
         GUARD_STATS["calls"] += 1
         if lazy:
             return y

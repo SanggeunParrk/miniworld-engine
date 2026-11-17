@@ -300,3 +300,16 @@ default heuristic pick (1.29 PFLOPs = 65 % of the dense e4m3 peak), so the contr
 - Prebuild: the FP8 K1 tile(s) and the `K3_CSCALE` K3 (row form; D256 also the token-flat form) are in the sm90 plan (`kernels/trimul_inproj/cuda/__init__.py`); an FP8 forward against a prebuilt bundle and an empty JIT cache compiles nothing.
 - Measured (graph replay, module, vs the 2.5.9 default): D128 -9 .. -25 % (L256 .. L2048), D256 -4 .. -16 %. The contraction is a serial stage (removing the cuBLAS call removes exactly its time); the K1 overflow guard costs < 1 % (K1 with the amax pointer removed);
   D256 is capped by Amdahl (contraction 30 % of the module, e4m3 1.47x of it) and its FP8 K1 is 2-6 % slower than the bf16 K1.
+
+### FP8 planes at D64 / D384, bidirectional D64 / D384, B > 1 (3.0.0 exploration, branch `fp8x/trimul`, 2026-11-17; numbers in `docs/fp8.md`)
+
+- K1 (`tmn_kernels.cuh`, `TMN_K1_F8` builds only): an e4m3 plane store for the n64 weight blocks (32 plane channels per block, accumulator groups
+  q < 4 gate / q + 4 projection): the n128 form's byte exchange on four column groups, staged `[32 ch][64 tok]` (64-byte rows, 64B swizzle), one TMA
+  store per block. `h100_b200style_direct.F8_CFG`: D64 takes the long D64 direct tile `(3, 64, 4, 1, 1)` (BJ 64: TMA stores), D384 the D384 direct
+  tile of the bf16 route `(2, 64, 2, 6, 1)` (an n128 D384 ring does not fit shared memory). The n64 blocks take unhalved prescaled weights
+  (`prescale(..., half=False)`: no `TMN_K1_FOLD`).
+- K3: the route's existing `K3_CSCALE` K3; D384 at L % 128 == 0 takes the token-flat K3 (the D384 default tile), else the row form.
+- `serves`: widths `WIDTHS = (64, 128, 256, 384)`, 1-16 samples (`MAX_SAMPLES`; B > 1 runs `run_samples`, the one-sample route per sample into one
+  output); gates in `MIN_L` (D64 512, D384 128, bidirectional D64 2048, bidirectional D384 1024).
+- D512 is not served: its inference K1 is the packed `_front` and its K3 `k3reorder.cu` has no `K3_CSCALE`.
+- Default route: unchanged (the header code is under `TMN_K1_F8`; sha1 of the outputs against the base tree in `docs/fp8.md`).
