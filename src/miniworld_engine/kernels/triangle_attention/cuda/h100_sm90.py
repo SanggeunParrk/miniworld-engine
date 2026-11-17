@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 
+from miniworld_engine import fp8 as _fp8_switch
 from miniworld_engine.kernels._nvcc import (
     ensure_cuda_home,
     gencodes,
@@ -368,8 +369,9 @@ def core_h16() -> Any:
 #: with the call sites checked: "fused" = the d_pair-128 front that writes V^T itself, "unfused" = the other fronts through the standalone V^T pass (gated by S).
 #: NOT a general route: Boltz-2 9c90 is bistable and flips under V rounding, so "boltz2" is deliberately absent.  Extend only after an end-level check.
 #: "af3" (3.0.0): fused + unfused, end level on 4 targets x 4 trunk seeds (docs/fp8.md "widened scope") and FoldBench 27 targets with every route
-#: of the ``miniworld_engine.fp8`` "safe" preset (0 flagged, lDDT +0.0000)
-FP8_PV_WHITELIST: dict = {"protenix1": frozenset({"fused"}), "opendde": frozenset({"unfused"}), "af3": frozenset({"fused", "unfused"})}
+#: of the ``miniworld_engine.fp8`` "safe" preset (0 flagged, lDDT +0.0000).  One table: derived from ``miniworld_engine.fp8.TRIATTN_MODELS``
+#: (which also says where e4m3 q / k was validated: af3 only); this function family sets the PV route alone.
+FP8_PV_WHITELIST: dict = {m: kinds for m, (kinds, _qk) in _fp8_switch.TRIATTN_MODELS.items()}
 
 #: the S gate of the unfused sites that :func:`enable_fp8_pv_for` sets (head channels -> shortest S, hi plane; measured 2026-11-15, docs/fp8.md)
 FP8_PV_UNFUSED_MIN_S = {32: 1024, 16: 512}
@@ -399,12 +401,10 @@ def disable_fp8_pv() -> None:
 
 
 def _fp8_preset_at_import() -> None:
-    """``MINIWORLD_FP8=<preset>`` (miniworld_engine.fp8): the preset's TriAttn part (call-site kinds, e4m3 q / k) from the start."""
-    from miniworld_engine import fp8
-
-    name = fp8.preset()
-    if name is not None:
-        fp8.enable_triattn(*fp8.TRIATTN[name])
+    """``MINIWORLD_FP8=<preset>`` with ``MINIWORLD_FP8_MODEL=<model>`` (miniworld_engine.fp8): the TriAttn FP8 routes validated for that model
+    (call-site kinds, e4m3 q / k) from the start; no model or an unlisted one: the default fp16 core."""
+    if _fp8_switch.preset() is not None:
+        _fp8_switch.enable_triattn(*_fp8_switch.triattn_for(_fp8_switch.model()))
 
 
 _fp8_preset_at_import()

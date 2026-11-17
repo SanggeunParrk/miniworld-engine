@@ -1,15 +1,28 @@
 """One switch for the engine's FP8 (e4m3) inference routes on H100 (engine 3.0.0; every route is opt-in and off by default).
 
-    MINIWORLD_FP8=safe python run.py           # environment: before the first import of the engine's kernels
-    miniworld_engine.fp8.enable("safe")        # API: at run time (after import), before the first forward
+    MINIWORLD_FP8=safe python run.py                          # environment: before the first import of the engine's kernels
+    MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=af3 python run.py   # + the TriAttn FP8 routes validated for that model
+    miniworld_engine.fp8.enable("safe")                       # API: at run time (after import), before the first forward
+    miniworld_engine.fp8.enable("safe", model="af3")          # + the TriAttn FP8 routes validated for that model
 
 ``"safe"`` is the set validated end to end on AF3 (FoldBench, 27 targets, 0 flagged, lDDT +0.0000 against bf16, whole forward 0.97-0.80x;
-docs/fp8.md "fp8safe2"): TriAttn FP8 PV (fused d_pair-128 front + the unfused / front-made sites) with e4m3 q / k on the fused route,
-TriMul e4m3 planes (static scales, calibrated), OuterProductMean e4m3 product (weight-bound scales), PWA e4m3 key contraction,
-Transition e4m3 GEMMs (calibrated), token DiT e4m3 expand + SwiGLU (not ``qkvg``), atom DiT e4m3 row kernels (``pre`` + ``post``).
+docs/fp8.md "fp8safe2"): TriMul e4m3 planes (static scales, calibrated), OuterProductMean e4m3 product (weight-bound scales), PWA e4m3 key
+contraction, Transition e4m3 GEMMs (calibrated), token DiT e4m3 expand + SwiGLU (not ``qkvg``), atom DiT e4m3 row kernels (``pre`` + ``post``):
+these routes do not depend on the model.
+
+TriAttn FP8 runs **only for a validated model** (:data:`TRIATTN_MODELS`; decision 2026-11-17): the FP8 PV route on the call-site kinds checked
+end to end for that model, and e4m3 q / k on the fused d_pair-128 route only where that was checked too. The model is named once, either
+``MINIWORLD_FP8_MODEL=<model>`` next to ``MINIWORLD_FP8`` (read at import of the TriAttn kernels) or ``enable(preset, model=<model>)`` (run
+time; :func:`enable` does not read ``MINIWORLD_FP8_MODEL``). No model, or a model not in :data:`TRIATTN_MODELS` (e.g. Boltz-2, OpenFold3):
+TriAttn keeps the default fp16 core, bit-identical to FP8 off. q / k e4m3 is in ``safe`` for af3 although its module error (judge form) is
+above the module tolerance: the end-level AF3 FoldBench run with it on flagged 0 / 27 targets.
+
 Each route keeps its own switch (``MINIWORLD_TRIMUL_FP8``, ``MINIWORLD_OPM_FP8``, ``MINIWORLD_PWA_FP8``, ``MINIWORLD_TRANSITION_FP8``,
 ``MINIWORLD_TOKEN_DIT_FP8``, ``MINIWORLD_ATOMDIT_FP8`` and their ``_GUARD`` / gate variables; TriAttn: ``h100_sm90.enable_fp8_pv_for``):
 with ``MINIWORLD_FP8`` set, a per-route variable that is set explicitly (also to the empty string = off) wins over the preset.
+
+FP8 is outside the judge: no registry row, tolerance or ``backend_versions`` entry exists for it (registry dtypes ``float32|master``), and the
+judge tokens cover the default route only. Do not run the judge / measure tools with any FP8 switch set.
 
 Guard contract (static scales: TriAttn V / q k, TriMul planes, Transition h, PWA v). The scales are taken on a process's first eager call
 of each site (calibration) and kept for the process. A value past the e4m3 range saturates; in eager mode TriMul / PWA / Transition (guard
@@ -42,8 +55,18 @@ PRESETS = MappingProxyType(
         ),
     }
 )
-#: the TriAttn part of each preset: (call-site kinds of the FP8 PV route, e4m3 q / k on the fused route)
-TRIATTN = MappingProxyType({"safe": (frozenset({"fused", "unfused"}), True)})
+#: TriAttn FP8 per validated model: model -> (call-site kinds of the FP8 PV route, e4m3 q / k on the fused route). Only end-level evidence for
+#: exactly these routes puts a model here (docs/fp8.md): af3 = FoldBench 27 targets with the whole ``safe`` set incl. q / k (0 flagged) and 4
+#: targets x 4 trunk seeds with PV; protenix1 / opendde = PV on the listed kinds, 4 trunk seeds per target (no q / k run: PV only). Boltz-2 is out
+#: on purpose (9c90 bistable); OpenFold3 is not added. ``h100_sm90.FP8_PV_WHITELIST`` is derived from this table. Extend only after an end-level check.
+TRIATTN_MODELS = MappingProxyType(
+    {
+        "af3": (frozenset({"fused", "unfused"}), True),
+        "protenix1": (frozenset({"fused"}), False),
+        "opendde": (frozenset({"unfused"}), False),
+    }
+)
+_NO_TRIATTN: tuple[frozenset[str], bool] = (frozenset(), False)
 
 
 def preset() -> str | None:
@@ -54,6 +77,19 @@ def preset() -> str | None:
     if v not in PRESETS:
         raise ValueError(f"MINIWORLD_FP8={v!r}: unknown preset (use one of {', '.join(PRESETS)}, or off)")
     return v
+
+
+def model() -> str | None:
+    """The model ``MINIWORLD_FP8_MODEL`` names (lower case; None: unset or empty). Only read with ``MINIWORLD_FP8`` set, for the TriAttn part."""
+    v = os.environ.get("MINIWORLD_FP8_MODEL", "").strip().lower()
+    return v or None
+
+
+def triattn_for(model_name: str | None) -> tuple[frozenset[str], bool]:
+    """The TriAttn FP8 part for ``model_name``: (call-site kinds, e4m3 q / k); nothing for None or a model not in :data:`TRIATTN_MODELS`."""
+    if model_name is None:
+        return _NO_TRIATTN
+    return TRIATTN_MODELS.get(model_name.strip().lower(), _NO_TRIATTN)
 
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -96,12 +132,12 @@ def enable_triattn(kinds, qk: bool) -> None:
 
 
 def enable(name: str = "safe", *, model: str | None = None, guard: str | None = None) -> None:
-    """Switch every route of preset ``name`` on (run time; replaces the routes' current switches). ``model``: the TriAttn part only on the
-    call-site kinds ``h100_sm90.FP8_PV_WHITELIST`` lists for that model (a model it does not list keeps the fp16 TriAttn core; the other
-    routes are on regardless); None: the preset's kinds. ``guard``: ``"sync"`` / ``"lazy"`` for TriMul / OPM / PWA / Transition (None: as they are)."""
+    """Switch every route of preset ``name`` on (run time; replaces the routes' current switches). ``model``: the TriAttn FP8 routes
+    :data:`TRIATTN_MODELS` lists for that model; None (default) or an unlisted model: TriAttn stays on the default fp16 core (the other routes
+    are on regardless of ``model``). ``guard``: ``"sync"`` / ``"lazy"`` for TriMul / OPM / PWA / Transition (None: as they are)."""
     if name not in PRESETS:
         raise ValueError(f"unknown FP8 preset {name!r} (use one of {', '.join(PRESETS)})")
-    ta, tm, opm, pwa, tr, td, ad = _modules()
+    _ta, tm, opm, pwa, tr, td, ad = _modules()
     env_of = PRESETS[name]
     tm.POLICY = env_of.get("MINIWORLD_TRIMUL_FP8") or None
     opm.POLICY = env_of.get("MINIWORLD_OPM_FP8") or None
@@ -109,10 +145,7 @@ def enable(name: str = "safe", *, model: str | None = None, guard: str | None = 
     tr.POLICY = env_of.get("MINIWORLD_TRANSITION_FP8") or None
     td.PLACES = td._parse(env_of.get("MINIWORLD_TOKEN_DIT_FP8", ""))
     ad.enable_fp8(ad._fp8_parts(env_of.get("MINIWORLD_ATOMDIT_FP8", "")))
-    kinds, qk = TRIATTN[name]
-    if model is not None:
-        kinds = ta.FP8_PV_WHITELIST.get(model, frozenset())
-    enable_triattn(kinds, qk)
+    enable_triattn(*triattn_for(model))
     if guard is not None:
         if guard not in ("sync", "lazy", "off"):
             raise ValueError(f"guard must be sync, lazy or off, got {guard!r}")

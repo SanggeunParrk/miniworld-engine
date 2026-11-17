@@ -5,20 +5,45 @@ Everything here is opt-in and off by default. Base: engine 2.5.14 (branch `rel/3
 ## The one switch (`miniworld_engine.fp8`, 3.0.0)
 
 ```
-MINIWORLD_FP8=safe                                   # environment, before the engine's kernels are imported
+MINIWORLD_FP8=safe                                   # environment, before the engine's kernels are imported: every route but TriAttn
+MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=af3           # + the TriAttn FP8 routes validated for that model
 miniworld_engine.fp8.enable("safe")                  # or at run time; fp8.disable(), fp8.status()
-miniworld_engine.fp8.enable("safe", model="af3")     # TriAttn part only on the kinds h100_sm90.FP8_PV_WHITELIST lists for the model
+miniworld_engine.fp8.enable("safe", model="af3")     # + the TriAttn FP8 routes validated for that model
 ```
 
-`safe` is the set validated end to end ("fp8safe2", AF3 FoldBench below): TriAttn FP8 PV on the fused and the unfused / front-made sites with e4m3 q / k
-on the fused d_pair-128 route, `MINIWORLD_TRIMUL_FP8=calib`, `MINIWORLD_OPM_FP8=bound`, `MINIWORLD_PWA_FP8=1`, `MINIWORLD_TRANSITION_FP8=calib`,
-`MINIWORLD_TOKEN_DIT_FP8=expand` (not `qkvg`: the one placement that moved FoldBench), `MINIWORLD_ATOMDIT_FP8=1`. The per-route variables keep working;
-with `MINIWORLD_FP8` set, a per-route variable set explicitly (also to "") wins over the preset. Guard contract: after every forward, outside any graph,
-`if miniworld_engine.fp8.check(): redo the forward` (at most 3 times): one host sync per static-scale route (TriAttn V / q k, TriMul, Transition, PWA);
-the routes' eager `sync` guards (default) already redo an overflowing call themselves, under graph capture they record it for `check()`. Calibration:
-the static scales are taken on each site's first eager call in a process and kept (two runs with a different first target are not byte-identical).
-No registry row, tolerance or `backend_versions` entry exists for FP8: the registry dtype vocabulary is `float32|master` only, and the FP8 planes / e4m3 V are internal
-intermediates of the `master` route. The numerics harness (ours vs PyTorch) would flag the ~3.8 % update error; that decision belongs to the owner (see "Open decisions").
+`safe` is the set validated end to end ("fp8safe2", AF3 FoldBench below): `MINIWORLD_TRIMUL_FP8=calib`, `MINIWORLD_OPM_FP8=bound`, `MINIWORLD_PWA_FP8=1`,
+`MINIWORLD_TRANSITION_FP8=calib`, `MINIWORLD_TOKEN_DIT_FP8=expand` (not `qkvg`: the one placement that moved FoldBench), `MINIWORLD_ATOMDIT_FP8=1` for every
+model, and TriAttn FP8 (PV on the fused and the unfused / front-made sites, e4m3 q / k on the fused d_pair-128 route) **only for a validated model**.
+The per-route variables keep working; with `MINIWORLD_FP8` set, a per-route variable set explicitly (also to "") wins over the preset. Guard contract: after
+every forward, outside any graph, `if miniworld_engine.fp8.check(): redo the forward` (at most 3 times): one host sync per static-scale route (TriAttn V / q k,
+TriMul, Transition, PWA); the routes' eager `sync` guards (default) already redo an overflowing call themselves, under graph capture they record it for
+`check()`. Calibration: the static scales are taken on each site's first eager call in a process and kept (two runs with a different first target are not
+byte-identical).
+
+### Decisions for the 3.0.0 release (owner, 2026-11-17)
+
+1. **TriAttn FP8 only for validated models.** The model is named once: `MINIWORLD_FP8_MODEL=<model>` next to `MINIWORLD_FP8` (read when the TriAttn kernels
+   are imported) or `fp8.enable(preset, model=<model>)` (run time; `enable()` does not read `MINIWORLD_FP8_MODEL`, and `enable("safe")` without `model=`
+   turns the TriAttn part off). Without a model, or for a model not in the table, TriAttn runs the default fp16 core (bit-identical to FP8 off) while the
+   other `safe` routes are on. The table is `miniworld_engine.fp8.TRIATTN_MODELS` (`h100_sm90.FP8_PV_WHITELIST` is derived from it):
+
+   | model | TriAttn FP8 PV call sites | e4m3 q / k | end-level evidence |
+   |---|---|---|---|
+   | `af3` | fused + unfused | yes | FoldBench 27 targets with the whole `safe` set incl. q / k (0 flagged, lDDT +0.0000); PV: 4 targets x 4 trunk seeds |
+   | `protenix1` | fused | no | PV, 9 + 3 targets x 4 trunk seeds (no q / k run) |
+   | `opendde` | unfused | no | PV, 16 + 3 targets x 4 trunk seeds (no q / k run) |
+
+   Not listed: Boltz-2 (9c90 bistable, below), OpenFold3 (PV 4 / 4 inside, not added), every other model.
+2. **e4m3 q / k stays in `safe`** (af3 only): its module error in the judge form is above the module tolerance (0.95 / 0.85 % at L512 / 1024 against
+   tol 8e-3), but the end-level AF3 FoldBench run with it on flagged 0 / 27 targets.
+3. **No FP8 registry rows / tolerances.** FP8 is an opt-in path outside the judge: the registry dtype vocabulary is `float32|master` only, the FP8 planes /
+   e4m3 V are internal intermediates of the `master` route, no `backend_versions` entry exists, and the judge tokens cover the default bf16 route only
+   (`tests/cpu/test_fp8_switch.py::test_fp8_is_outside_the_judge` keeps the judge / measure / requirements code free of FP8). Do not run the judge or
+   `miniworld_engine.measure` with an FP8 switch set. Several routes are outside the module tolerance; the recommendation rests on the end-level evidence.
+4. **Experiment harnesses are not in the release tree.** `benchmarks/fp8_e2e/` (end-level FoldForge runs: `probe.py`, `e2e2.py`, `an3.py`, `bz.py`,
+   `scales.py`, `results.txt`) and `benchmarks/opm_fp8/` (OPM FP8 `stages.py`, `speed.py`, `err.py`, `lead.py`, `bit.py`, raw rows) were removed from
+   `rel/3.0.0`; they live on branch `fp8/3.0.0-all` (e5ce31d0c; added in bd6fe26ef / 5c3db813a) and in the `rel/3.0.0` history up to 80ecfe71f
+   (`git show 80ecfe71f:benchmarks/fp8_e2e/results.txt`). No shipped test imported them. The paths below that name them refer to that commit.
 
 ## Release line 3.0.0: module time and error against the 2.5.14 default (base 2.5.14, 2026-11-17)
 
@@ -632,6 +657,14 @@ judge = max|y - y64| / max|y64|, tol = max(err_pytorch, 8e-3), rms_rel = ||y - y
 - Prebuild (`_prebuild --check --list`): sm90a 513 -> 560 artifacts (29 new names + 18 TriMul FP8 cubins under existing names; 101 default
   artifacts re-key through FP8 `#if` text in shared sources, bitwise unchanged; no name dropped), every one built (0 failed); sm80 72 / sm120 64:
   same names and keys as 2.5.14; no new `--check` finding (the FP8 loaders and sources are now reached / compiled).
+- After decisions 1-4 (TriAttn only for a model in `fp8.TRIATTN_MODELS`; harnesses out): default route 64 / 64 bit-identical to 2.5.14 again
+  (`res/bit_rc3.jsonl`). Module level (`rel300/scripts/tri_safe.py`, raw `res/tri_safe.jsonl`; TriAttn AF3 128:4:32 L768, AF3 64:4:16 L512,
+  128:4:32 L384, 384:12:32 L1024): `MINIWORLD_FP8=safe` and `fp8.enable("safe")` give the FP8-off bytes with 0 FP8 core calls; with
+  `MINIWORLD_FP8_MODEL=af3` / `enable(model="af3")` the FP8 core runs (1-2 calls per case, other bytes). AF3 end to end (`fb_run.py` arms
+  `engine_safe_env_af3`, `engine_safe_env_nomodel`): with af3 **10 / 10 CIFs byte-identical** to the `MINIWORLD_FP8=safe` run before the decision
+  (same route calls); without a model TriAttn PV / q k 0 calls, TriMul 704, OPM 24, PWA 24, Transition 356, token DiT 9600, atom DiT 4800 (8e4h
+  CIFs differ, 8gzl's equal: no TriAttn FP8 site fires on 28 tokens). GPU: the 13 FP8 files + `test_fp8_switch` 222 passed (one 3-GPU queue
+  job). `_prebuild --check --list` sm90a / sm80 / sm120: identical to the release-tree lists (560 / 72 / 64).
 
 ## TriMul forward: e4m3 planes (`h100_b200style_fp8`, details in `docs/h100/trimul.md`)
 
@@ -806,13 +839,16 @@ Not a general route. Use the whitelist API:
 
 ```python
 from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
-if hs.enable_fp8_pv_for("protenix1"):   # True only for whitelisted models; sets FP8_PV, FP8_PV_FUSED, FP8_VSCALE_AUTO (+ FP8_PV_UNFUSED / the S gate for "unfused" models)
-    ...                                 # d_pair 128 inference: the front writes V^T planes (tri_front_vt); other fronts: standalone V^T pass, single pass, static scale
+
+# True only for whitelisted models; sets FP8_PV, FP8_PV_FUSED, FP8_VSCALE_AUTO (+ FP8_PV_UNFUSED / the S gate for "unfused" models)
+if hs.enable_fp8_pv_for("protenix1"):
+    # d_pair 128 inference: the front writes V^T planes (tri_front_vt); other fronts: standalone V^T pass, single pass, static scale
+    ...
 # after every forward: if hs.take_overflow(): hs.rescale_all(); redo
 hs.disable_fp8_pv()
 ```
 
-`FP8_PV_WHITELIST` maps a model to the call-site kinds whose end-level accuracy was checked: `{"protenix1": {"fused"}, "opendde": {"unfused"}}`; Boltz-2 is absent on purpose (9c90, see limits).
+`FP8_PV_WHITELIST` maps a model to the call-site kinds whose end-level accuracy was checked: `{"protenix1": {"fused"}, "opendde": {"unfused"}, "af3": {"fused", "unfused"}}` (3.0.0: derived from `miniworld_engine.fp8.TRIATTN_MODELS`, which the one switch uses); Boltz-2 is absent on purpose (9c90, see limits).
 `enable_fp8_pv_for(model, hl=False)`: `hl=True` writes the hi + lo planes (output error about half, see below). Default (non-FP8) route: bit-identical to 2.5.9 (10 shapes / orientations / head counts compared as bytes; branch `fp8/vt`, whose default builds of `front_fused3_sm90.cu` and `triattn_mod_sm90.cu` changed in source (the V^T code is `#ifdef` / a template instance): 14 more shapes d_pair 64 / 128 / 256 / 384, start / end, flip, masked, L256..1536, as bytes against main ec11768fc). The FP8 route with front-made planes equals the standalone-pass FP8 route as bytes (hi: 64:4:32 / 64:2:32 / 64:4:16 L256..1536 with a padded key mask, trans; hi + lo L256..1024; 256:8:32 L256..2048, trans).
 
 Three kinds of call sites (branch `fp8/vt`: the first two make the planes in the front, the pass only remains where the front is cuBLAS):
@@ -1126,7 +1162,7 @@ acceptance rule fails there, so Boltz-2 is not whitelisted. Not applicable: Chai
 
 ### End level, widened scope (2026-11-15, branch `fp8/e2e`; shipped route through `enable_fp8_pv_for`, S gates as shipped)
 
-Harness: `benchmarks/fp8_e2e/` (`probe.py` call sites, `e2e2.py` runs, `an3.py` / `bz.py` tables, `results.txt` raw tables). Same protocol as above (FoldForge `miniworld` backend, 200 steps, diffusion_seed 0, 1 sample, TRUNK seeds, acceptance = max same-trunk-seed RMSD
+Harness: `benchmarks/fp8_e2e/` (not in the release tree: branch `fp8/3.0.0-all` e5ce31d0c; `probe.py` call sites, `e2e2.py` runs, `an3.py` / `bz.py` tables, `results.txt` raw tables). Same protocol as above (FoldForge `miniworld` backend, 200 steps, diffusion_seed 0, 1 sample, TRUNK seeds, acceptance = max same-trunk-seed RMSD
 of FP8 vs bf16 <= max(1.1 x the largest bf16 trunk-seed-pair RMSD, 0.5 A)). Two differences to the tables above, both on purpose:
 
 - **The bf16 baselines of this section were re-run in the current environment** (FoldForge 52a5877 + this engine). bf16 is bit-deterministic here (9c90 trunk seeds 0-3 rerun in a second job: 4 / 4 bytes equal), but it is NOT the bf16 of the earlier
@@ -1211,7 +1247,7 @@ Scope: inference of the `opm_train` forms (groups 1, d_hidden 32, (d_msa, d_pair
 
 ### Where the time goes and where e4m3 can go (default 2.5.12 route, measured)
 
-Stage times: `benchmarks/opm_fp8/stages.py` (raw `benchmarks/opm_fp8/raw/st1.jsonl`): each stage alone on the same operands, captured in a CUDA graph, interleaved,
+Stage times (the `benchmarks/opm_fp8/` scripts and raw rows are not in the release tree: branch `fp8/3.0.0-all` e5ce31d0c): `benchmarks/opm_fp8/stages.py` (raw `benchmarks/opm_fp8/raw/st1.jsonl`): each stage alone on the same operands, captured in a CUDA graph, interleaved,
 cool = 2 s / 1 s idle then a ~40 ms burst (median of 3), sustained = after 1 s of back-to-back replays (mean of 3). Bound classes are from
 the counters of benchmarks/opm_win (ncu: prologue DRAM 76 % of peak; cuBLAS product ~99 % of the tensor peak per cycle, power-capped) and
 from the achieved rates below; the e4m3 product was not put under ncu (cuBLAS).
@@ -2289,10 +2325,12 @@ byte-identical to 2.5.12 end to end (8gzl / 7sxp, 10 / 10 CIFs); the moving ff_2
 
 ## Open decisions (owner)
 
-- FP8 tolerance / registry row: none exists (the registry dtype vocabulary is `float32|master`); the TriMul FP8 route is 2.3-3.1 % in the engine-standard
-  form (tolerance 8e-3), TriAttn FP8 0.3-0.75 %. Adding a row, a tolerance or a `backend_versions` entry is the owner's call; nothing is owed today
-  because the default route is unchanged.
-- Boltz-2 on the TriAttn whitelist (9c90 is bistable under any 0.1-2 % noise; see "Boltz-2 9c90").
+Decided for 3.0.0 (see "Decisions for the 3.0.0 release" at the top): no FP8 tolerance / registry row (FP8 stays outside the judge); Boltz-2 stays
+off the TriAttn table; TriAttn FP8 only for models in `fp8.TRIATTN_MODELS`; e4m3 q / k in `safe` for af3; experiment harnesses out of the release tree.
+Still open:
+
+- Gate re-measure: two candidates (256:8:32 front gate 768 -> 512, 32-channel standalone-pass gate 1024 -> 768), not changed.
 - TriMul FP8 in the shipped prebuild: rel/3.0.0 plans and builds every FP8 variant the `safe` preset reaches on sm90a (no first-call JIT); dropping any is the owner's call.
 - The experimental FP8-compute K1 (`MINIWORLD_TRIMUL_FP8_K1`, `TMN_K1_F8C`: 6.9 % update error, failed the Protenix pLDDT criterion) is still in the
   code and the shared header; removing it would simplify `tmn_kernels.cuh`.
+- FoldForge: wire `fp8.check()` (and `MINIWORLD_FP8_MODEL` / `enable(model=)`) into its forward loop before offering `MINIWORLD_FP8=safe` there.

@@ -14,20 +14,23 @@ fp32. Training, fp32 modules and other GPUs take the default route. Full spec, p
 ## One switch
 
 ```
-MINIWORLD_FP8=safe                                 # environment, before the engine's kernels are imported
+MINIWORLD_FP8=safe                                 # environment, before the engine's kernels are imported (TriAttn stays bf16 / fp16)
+MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=af3         # + the TriAttn FP8 routes validated for that model
 import miniworld_engine.fp8 as fp8
-fp8.enable("safe")                                 # run time; fp8.disable(); fp8.status()
-fp8.enable("safe", model="af3")                    # TriAttn part only on the call-site kinds whitelisted for the model
+fp8.enable("safe")                                 # run time (TriAttn stays bf16 / fp16); fp8.disable(); fp8.status()
+fp8.enable("safe", model="af3")                    # + the TriAttn FP8 routes validated for that model
 ...
 out = model(x)
 if fp8.check():                                    # once per forward, outside any CUDA graph (one host sync per route)
     out = model(x)                                 # some route saturated and was rescaled: redo (at most 3 times)
 ```
 
-`safe` = the recommended set ("fp8safe2"): TriAttn FP8 PV (fused d_pair-128 front + unfused / front-made sites) with e4m3 q / k on the fused
-route; TriMul e4m3 planes (`calib`); OuterProductMean e4m3 product (`bound`); PWA e4m3 key contraction (8 x 32 and the wide 64:8 / 128:8 /
-128:16 widths); Transition e4m3 GEMMs (`calib`, D128 / D256 / D384 / D512); token DiT e4m3 `expand` + SwiGLU; atom DiT e4m3 row kernels
-(`pre` + `post`). The per-route switches of the 3.0.0 line (`MINIWORLD_TRIMUL_FP8`, `MINIWORLD_OPM_FP8`, `MINIWORLD_PWA_FP8`,
+`safe` = the recommended set ("fp8safe2"): TriMul e4m3 planes (`calib`); OuterProductMean e4m3 product (`bound`); PWA e4m3 key contraction
+(8 x 32 and the wide 64:8 / 128:8 / 128:16 widths); Transition e4m3 GEMMs (`calib`, D128 / D256 / D384 / D512); token DiT e4m3 `expand` +
+SwiGLU; atom DiT e4m3 row kernels (`pre` + `post`): on for every model. **TriAttn FP8 only for a validated model**
+(`fp8.TRIATTN_MODELS`, named by `MINIWORLD_FP8_MODEL` or `enable(model=)`): `af3` = FP8 PV on the fused d_pair-128 front + the unfused /
+front-made sites with e4m3 q / k on the fused route; `protenix1` = PV on the fused front; `opendde` = PV on the unfused sites; any other model
+(Boltz-2, OpenFold3, ...) or no model: the default fp16 TriAttn core. The per-route switches of the 3.0.0 line (`MINIWORLD_TRIMUL_FP8`, `MINIWORLD_OPM_FP8`, `MINIWORLD_PWA_FP8`,
 `MINIWORLD_TRANSITION_FP8`, `MINIWORLD_TOKEN_DIT_FP8`, `MINIWORLD_ATOMDIT_FP8`, their `_GUARD` / gate variables, `h100_sm90.enable_fp8_pv_for`)
 keep working; with `MINIWORLD_FP8` set, a per-route variable set explicitly (also to "") wins.
 
@@ -66,7 +69,9 @@ tables the errors are identical to the printed digit; 2.5.13's faster default (T
 32-channel standalone-pass gate 1024 -> 768).
 
 Several routes are outside the engine's per-module accuracy tolerance at module level (TriMul, Transition, token DiT `expand`, atom DiT, TriAttn
-q / k): the recommendation rests on the end-level evidence below, not on the module tolerance. No registry row / tolerance exists for FP8.
+q / k): the recommendation rests on the end-level evidence below, not on the module tolerance. **FP8 is outside the judge:** no registry
+row, tolerance or `backend_versions` entry exists for it (registry dtypes `float32|master`); the judge tokens (owed 0 on all three cards) cover
+the default bf16 route only. Do not run the judge or `miniworld_engine.measure` with an FP8 switch set.
 
 ## End-level evidence (AF3, FoldBench, H100)
 
@@ -94,8 +99,8 @@ spread; RoseTTAFold3 3 / 4 (one failed prediction); Boltz-2 6 / 7 (9c90, below).
 ## Limits
 
 - Validated end to end on **AF3 only** (FoldBench 27 targets with the full `safe` set). Every other model has at most the TriAttn PV route checked
-  end to end; `fp8.enable("safe")` without `model=` applies the TriAttn part to every model, `model=` restricts it to `h100_sm90.FP8_PV_WHITELIST`
-  (protenix1: fused; opendde: unfused; af3: fused + unfused, added in 3.0.0).
+  end to end. TriAttn FP8 runs only for a model named in `fp8.TRIATTN_MODELS` (af3: PV fused + unfused and e4m3 q / k; protenix1: PV fused;
+  opendde: PV unfused; `h100_sm90.FP8_PV_WHITELIST` is derived from it); the non-TriAttn routes of `safe` are on for every model.
 - **Boltz-2 is not whitelisted**: 9c90 is bistable under any 0.1-2 % numerical noise (its own bf16 trunk seeds fall into 5 modes, 15.3 A apart);
   FP8 V moves 9 of 24 same trunk seeds to another mode while the mode population stays equal.
 - Calibration / first-target dependence (above); a caller that never calls `fp8.check()` runs graph replays unguarded (no saturation seen in any
@@ -127,26 +132,45 @@ cache: 0 failed).
   D64-D768 incl. the FP8 row-gate sizes; token DiT, atom DiT) plus direct TriMul calls at L300 / 1104 with and without a mask (the 2.5.13 LT_UNI
   table and exact-key launch cells).
 - AF3 end to end (FoldForge 399d0b4, 8gzl + 7sxp, 5 samples each): every switch off, **10 / 10 CIFs byte-identical** to 2.5.14.
-- `MINIWORLD_FP8=safe` alone through FoldForge (AF3 8gzl + 8e4h, `fp8.check()` after every forward): every route fires, 0 redos, and the 10 CIFs
-  are byte-identical to the fp8safe2 FoldBench run on the 2.5.12 base: the FoldBench evidence carries over to 3.0.0.
+- `MINIWORLD_FP8=safe` through FoldForge (AF3 8gzl + 8e4h, `fp8.check()` after every forward), before the decisions: every route fires, 0
+  redos, and the 10 CIFs are byte-identical to the fp8safe2 FoldBench run on the 2.5.12 base: the FoldBench evidence carries over to 3.0.0.
+- After decisions 1-4: `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=af3`: **10 / 10 CIFs byte-identical** to that run (same route calls: TriAttn PV
+  208 / q k 592, TriMul 704, OPM 24, PWA 24, Transition 356, token DiT 9600, atom DiT 4800; 0 redos). `MINIWORLD_FP8=safe` without a model:
+  TriAttn PV / q k 0 calls, every other route the same calls; module level (4 TriAttn configs: fused 128:4:32, front-made 64:4:16, AF3 / 384:12:32
+  pass) the TriAttn output bytes equal FP8 off with 0 FP8 core calls, by environment and by `fp8.enable("safe")`; with af3 (environment or
+  `enable(model="af3")`) the FP8 core runs. Default route again 64 / 64 bit-identical to 2.5.14; the 13 FP8 GPU files + `test_fp8_switch`
+  (12 cases, whitelist rule) 222 passed; `_prebuild --check` sm90a 560 / sm80 72 / sm120 64 unchanged; judge owed 0 on the three cards.
 - GPU tests (one queue job, 3 H100): the 13 FP8 files 210 passed (TriAttn PV 31, PV + QK 6, TriMul planes 25 / bidir 16 / widths 18 / K1 6, OPM
   16, PWA 6 / wide 10, Transition 37 / D256 17, token DiT 11, atom DiT 11) and the default-route files the merge touches 471 passed, 24 skipped
   (TriAttn h16 core / tail gate / key tiles / fronts / variants / bidir, TriMul LT_UNI tables / K3 pipe / workspace).
 - CPU: 3218 passed, 2 skipped (`test_fp8_switch` (new), `test_capture_api`, `test_init`, `test_imports`, `test_supports_signature`,
-  `test_prebuild_plan`, `test_judge`, `test_requirements`, `test_modules_cpu`); `ruff check` and `pyright` clean on every changed `src` / `tests`
-  file (`ruff format` flags 5 files only on lines that predate this branch); `_prebuild --check` sm90a / sm80 / sm120: no new finding (the FP8
+  `test_prebuild_plan`, `test_judge`, `test_requirements`, `test_modules_cpu`; 3226 passed after decisions 1-4); `pyright` clean on every
+  changed `src` / `tests` file; whole-tree `ruff check` / `ruff format --check`: the same findings as the 2.5.14 tree (all in pre-existing
+  `benchmarks/` / older files), nothing from 3.0.0 after the experiment harnesses left the tree; `_prebuild --check` sm90a / sm80 / sm120: no new finding (the FP8
   loaders / sources that were "not reached" / "not compiled" are now planned).
 - Judge: owed 0 (accuracy and speed) on h100_sm90, a100_sm80, 5090_sm120: no `version` / `backend_versions` changed by the merge.
 
-## Decisions open (owner)
+## Decisions (owner, 2026-11-17)
+
+Decided:
+
+1. **TriAttn FP8 only for validated models.** `MINIWORLD_FP8=safe` / `fp8.enable("safe")` without a model leave TriAttn on the default fp16
+   core; the TriAttn FP8 routes come on only for a model in `fp8.TRIATTN_MODELS`, named once by `MINIWORLD_FP8_MODEL=<model>` (environment, with
+   `MINIWORLD_FP8`) or `fp8.enable(preset, model=<model>)` (run time; `enable()` does not read the environment variable). Table: af3 (PV fused +
+   unfused, e4m3 q / k), protenix1 (PV fused), opendde (PV unfused): the routes each model's end-level runs used. Boltz-2 stays out (9c90);
+   OpenFold3 is not added. The other `safe` routes are unchanged (on for every model).
+2. **e4m3 q / k stays in `safe`** for af3: module judge-form error above tolerance (0.95 / 0.85 % at L512 / 1024), end-level AF3 FoldBench 0 / 27
+   flagged with it on.
+3. **No FP8 registry rows / tolerances.** FP8 is an opt-in path outside the judge; judge tokens cover the default bf16 route only. No judge /
+   measure / requirements code names an FP8 route (`test_fp8_switch::test_fp8_is_outside_the_judge`).
+4. **Experiment harnesses out of the release tree.** `benchmarks/fp8_e2e/` and `benchmarks/opm_fp8/` (scripts + raw rows; no shipped test
+   imported them) were removed; they stay on branch `fp8/3.0.0-all` (e5ce31d0c) and in the `rel/3.0.0` history at 80ecfe71f (`docs/fp8.md` says
+   where). Whole-tree `ruff check` / `ruff format --check` now report exactly the 2.5.14 tree's findings (173 `ruff check` findings, 162 files `ruff format` would change; all pre-existing).
+
+Open:
 
 1. Version bump to 3.0.0, push, tag, upload (not done).
-2. `safe` scope: AF3-validated set applied to every model when `model=` is omitted (current), or TriAttn restricted to the whitelist by default.
-   "af3" was added to `FP8_PV_WHITELIST` (fused + unfused); OpenFold3 (4 / 4 inside) is a candidate; Boltz-2 stays out (9c90).
-3. e4m3 q / k is in `safe` (validated end to end in fp8safe2) although its module judge-form error is outside tolerance: keep, or `safe` without q / k.
-4. FP8 registry rows / tolerance: none (dtype vocabulary `float32|master`); TriMul / Transition / DiT FP8 are outside the module tolerance.
-5. The experiment harnesses merged with the FP8 branch (`benchmarks/fp8_e2e`, `benchmarks/opm_fp8`: scripts + raw rows, ~90 ruff findings like
-   the other `benchmarks/` dirs): ship, lint or drop.
-6. Two gate candidates for a repeat measurement (not changed): 256:8:32 front 768 -> 512, 32-channel standalone pass 1024 -> 768.
-7. The experimental FP8-compute TriMul K1 (`TMN_K1_F8C`) is still in the shared header.
-8. FoldForge: wire `fp8.check()` into its forward loop (the earlier patch file covers TriMul only) before offering `MINIWORLD_FP8=safe` there.
+2. Gate re-measure: two candidates (not changed): 256:8:32 front 768 -> 512, 32-channel standalone pass 1024 -> 768.
+3. The experimental FP8-compute TriMul K1 (`TMN_K1_F8C`, `MINIWORLD_TRIMUL_FP8_K1`) is still in the code and the shared header: remove or keep.
+4. FoldForge: wire `fp8.check()` and the model name (`MINIWORLD_FP8_MODEL` / `enable(model=)`) into its forward loop (the earlier patch file
+   covers TriMul only) before offering `MINIWORLD_FP8=safe` there.
