@@ -121,6 +121,20 @@ def _run16(mode: int, q, k, v, bias, key_mask: torch.Tensor | None = None, hd: i
 
 
 KINDS = ["plain", "big", "masked", "allmasked", "overflow"]
+#: the generalised core's default rule on sm_80 (attn2_ops.cu): the rf core from this L (16-channel heads: the fixed-shift callers)
+RF_FLOOR = {64: 128, 32: 256, 16: 256}
+
+
+@pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+@pytest.mark.parametrize("hd", [16, 32, 64])
+def test_rf_floor_default_rule(hd: int) -> None:
+    """The default rule (-1) runs the rf core (1) from ``RF_FLOOR[hd]`` and the attn2 core (0) below it: bitwise the forced form."""
+    H = 4
+    for L, mode in ((RF_FLOOR[hd], 1), (RF_FLOOR[hd] - 128, 0)):
+        if L < 128:
+            continue
+        q, k, v, _, bias = _inputs(L, H, hd, "plain", seed=2)
+        assert torch.equal(_run16(-1, q, k, v, bias, hd=hd), _run16(mode, q, k, v, bias, hd=hd)), f"L {L}: the default is not mode {mode}"
 
 
 @pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
@@ -143,11 +157,13 @@ def test_rf_core_32(kind: str, gate: bool) -> None:
 
 
 @pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+@pytest.mark.parametrize("L", [None, 512])
 @pytest.mark.parametrize("hd", [16, 32, 64])
 @pytest.mark.parametrize("kind", KINDS)
-def test_rf_core_attn2(kind: str, hd: int) -> None:
-    """The generalised core's entry: 16-channel heads (fixed-shift callers), 32 / 64 (the RoseTTAFold3 / Chai-1 variants, online softmax callers)."""
-    L, H = 512, 4
+def test_rf_core_attn2(kind: str, hd: int, L: int | None) -> None:
+    """The generalised core's entry: 16-channel heads (fixed-shift callers), 32 / 64 (the RoseTTAFold3 / Chai-1 variants, online softmax callers);
+    at L 512 and at the rf floor of the head dim (None: ``RF_FLOOR``)."""
+    L, H = L or RF_FLOOR[hd], 4
     q, k, v, g, bias = _inputs(L, H, hd, kind, seed=1)
     rows = [0, 3, L // 2 + 1, L - 1]
     ref = _reference(q, k, v, g, bias, rows, hd, False)

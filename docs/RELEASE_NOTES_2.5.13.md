@@ -112,3 +112,43 @@ finding on any arch):
 
 * **sm90**: `triattn_h100_core_h16_v3` re-keyed (a980ab15 -> dc615aed), same name. Nothing else changed.
 * **sm80 / sm120**: no change (`triattn_h16_sm90.cu` is compiled only for sm90a).
+
+## A100 (cand/a100-port): the register-resident TriAttn core below L 512
+
+Port check of this week's H100 items to the A100 (sm_80):
+
+* **TA_RC (peeled last key tile)**: the cause does not exist on sm_80. No A100 core has a last-tile branch in its key loop or a
+  loop-carried gate prefetch (the gated cores read g after the loop); the rf cores have no spills (`cuobjdump -res-usage`: 199 / 224 /
+  166 registers at 64 / 32 / 16-channel heads, stack 0) and their occupancy is bound by shared memory (2 CTAs / SM) as much as by
+  registers. Not ported.
+* **64-channel fp16 core (H100 cand/ta-d64)**: the A100 rf core already has the main ideas (bias as the score accumulator's C operand,
+  no softmax shift, gate after the loop) and runs at parity with SDPA flash *without* bias (L 512-2048, 8 heads: 152-169 TFLOP/s,
+  0.95-1.01x flash, 3x SDPA efficient / cuDNN with the bias; ncu at L 1024: tensor pipe 60 %, FMA 31 %, XU 28 %). sm_80 has no
+  bf16x2 exponential and its fp16-accumulate mma is not faster than fp32-accumulate; an fp16 front would be the whole H100 rewrite
+  for little room. Not ported. **What paid instead**: the generalised core (`attn2_ops.cu`) used the rf core only from L 512; below
+  that its attn2 core was 1.4-1.6x slower at 64-channel heads (79 TFLOP/s at L 256 vs 152+ for rf).
+* **Transition D 768**: the A100 route has no such entry. D 768 inference runs `fused_wide_sm80` without saves (a / b / h not kept,
+  weights cast and cached once): 1.13-1.25x the bare cuBLAS GEMM sum (xn [Wa; Wb]^T + h Ws^T, no LayerNorm / SwiGLU / residual) at
+  256-8192 rows, 1.4-1.5x faster than eager torch. Not ported.
+
+Change (sm_80 build only; the sm_120a build of the same source keeps its floors behind `TRIATTN_SM120`): the rf core from L 128
+(64-channel heads), L 256 (32-channel heads; 0.92-1.00x at L 128) and L 256 for 16-channel fixed-shift heads (was 1024; 0.88-0.91x at
+L 128). Outputs change at those L (within the rf core's error, which the 512+ cases already carry).
+
+* Core alone (A100 80GB PCIe, CUDA graph, interleaved, rf vs attn2 in one process): 64-ch 1.39-1.62x (L 128-384), 32-ch 1.27-1.44x
+  (L 256 / 384), 16-ch 1.04-1.12x (L 256-768).
+* Module (eval, bf16 pair, master weights, 1/8 masked keys; new rule vs the rc rule in one process, same-graph control 0.99-1.01x):
+  AF3 512 x 8 1.05-1.12x, RF3 64 x 4 x 64 1.06-1.19x, RF3 128 x 4 1.03-1.10x (L >= 256), Chai-1 256 x 4 1.05-1.14x, Chai-1
+  confidence 1.04-1.12x, Chai-1 64 x 4 x 32 ending node 1.04-1.10x (L >= 256), d_pair 64 x 4 x 16 (TriangleAttention / AF3)
+  1.02-1.06x (L 256-768). Unchanged (bitwise): d_pair 64 x 2, 64 x 4 x 32 (starting), 128 x 4, 256 x 8, 384 x 12, AF3 128 / 256.
+  Error of the update vs the fp64 module unchanged (rms within 1 %).
+* Accuracy (`measure/accuracy.py`, rows 71-85, eval, L 128-768, both trees): 180 / 180 cases same light; the 15 whose judge
+  error moved are GREEN (new / old 0.90-1.18, worst err / tol 0.53). r76 L 768: no record in either tree.
+* H100: no sm_90 source changed; 66 TriangleAttention outputs (11 configs x L 128 / 256 / 512 x 2 nodes) sha1-identical between
+  the rc tree and this one (separate processes).
+* Versions: `cuda:a100_sm80` `_TriangleAttentionBase` 5 -> 6 (AF3, RF3, Chai-1, Chai-1 confidence), `TriangleAttention` 6 -> 7.
+  Judge owed: a100_sm80 460 accuracy + 460 speed (not re-measured); h100_sm90 0; 5090_sm120 0.
+* Prebuilt keys: sm80 `triattn_sm80_core2` (df48da52 -> 4a919b15), sm120 `triattn_sm120_core2` (170a3638 -> e824be37; the same
+  behavior); sm90a none. `_prebuild --check` findings unchanged (same as the base tree).
+* Tests (A100): `test_triattn_sm80_rf_core.py` (new `test_rf_floor_default_rule`, `test_rf_core_attn2` also at the floor L) and
+  `test_determinism.py -k riangle`: 47 passed, 8 skipped (H100-only). CPU: `test_requirements` 1167 passed, ruff / pyright clean.
