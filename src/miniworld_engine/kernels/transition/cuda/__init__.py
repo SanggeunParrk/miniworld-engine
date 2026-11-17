@@ -170,6 +170,17 @@ def prebuild(target, rows):
                         exts[(args, tuple(sorted(kwargs.items())))] = (args, kwargs)
         for args, kwargs in exts.values():
             yield ft.partial(fused_wide_sm90a._ext, *args, **kwargs)
+        # the opt-in FP8 route (docs/fp8.md, fp8_sm90a: inference on bf16 x, n 2 / 4, the default switches, ctas = the SM count): D128 the
+        # fused build, D256 its own build, D384 / D512 the wide chain
+        from . import fp8_sm90a as f8
+
+        for d, n in sorted(k for k, v in half.items() if "eval" in v and k[0] in f8.WIDTHS and k[1] in (2, 4)):
+            if d == 128:
+                yield ft.partial(f8._build, target.sms, n, *f8._cfg())
+            elif d == 256:
+                yield ft.partial(f8._build_d256, n, target.sms, f8.G1, f8.SLOTS)
+            else:
+                yield ft.partial(f8._build_wide, d, n, target.sms, f8.G1)
 
         # the generic build: float32 (TF32) rows, shapes the fused / wide builds do not take, and the row counts
         # ``prefers_generic`` hands it

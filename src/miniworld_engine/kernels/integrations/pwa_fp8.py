@@ -32,13 +32,14 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.fp8 import env as _fp8_env
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_fp8 as _F
 
 E4M3_MAX = _F.E4M3_MAX
 W_SCALE = 2.0**-8  # dequant factor of w (w stored as w * 256)
 
 #: opt-in switch (environment read at import, or set the attribute)
-ENABLED = os.environ.get("MINIWORLD_PWA_FP8") == "1"
+ENABLED = _fp8_env("MINIWORLD_PWA_FP8") == "1"
 #: "sync" (default): a saturating call raises the scale (x RESCALE) and redoes itself (one host sync per call); "lazy": no host sync
 #: (required with CUDA graphs) -- the caller runs ``take_overflow()`` / ``rescale_all()`` / redo once per forward, outside the graph
 GUARD = os.environ.get("MINIWORLD_PWA_FP8_GUARD", "sync")

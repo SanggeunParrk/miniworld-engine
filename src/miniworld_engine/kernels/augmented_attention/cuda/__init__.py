@@ -565,6 +565,21 @@ def prebuild(target, rows):
                 }
                 for opts in sorted(optsets):
                     calls.append(ft.partial(sm90_atom.kernel_cubin, kind, tf32, opts))
+        # the opt-in FP8 route (docs/fp8.md, sm90_atom.f8: bf16 inference, the options inside f8.OPTIONS): pre90_f8 / post90_f8 at each
+        # minb f8._minb can pick (1, 3)
+        from .sm90_atom import f8 as atom_f8
+
+        for kind, kernel in (("pre_f8", "atom_pre_fwd"), ("post_f8", "atom_post_fwd")):
+            optsets = {
+                opts
+                for r in rows
+                if r["mode"] == "eval" and need_row(r, [kernel]) and act(r) == "bf16"
+                for opts in [_ATOM_OPTIONS.get(r["module"], ())]
+                if set(opts) <= atom_f8.OPTIONS
+            }
+            for opts in sorted(optsets):
+                for minb in (1, 3):
+                    calls.append(ft.partial(atom_f8.kernel_cubin, kind, opts, minb))
         # AtomDiTESMFold2Pair (integrations/local_dit_esm): its inference rows on the sm90_atom row kernels built with RMS, the q / k RMSNorm +
         # rotary (qknorm_local.cu) and the 192-key rank-window attention (lattn90_esm.cu; its pair-bias backward finishes on lbias.cu)
         for tf32 in (False, True):

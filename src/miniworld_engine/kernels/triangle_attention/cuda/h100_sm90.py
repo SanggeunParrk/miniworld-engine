@@ -367,7 +367,9 @@ def core_h16() -> Any:
 #: Models whose end-level accuracy was checked with the FP8 PV route (FoldForge, 200 steps, trunk seeds 0-3: same-seed RMSD inside the bf16 trunk-seed spread),
 #: with the call sites checked: "fused" = the d_pair-128 front that writes V^T itself, "unfused" = the other fronts through the standalone V^T pass (gated by S).
 #: NOT a general route: Boltz-2 9c90 is bistable and flips under V rounding, so "boltz2" is deliberately absent.  Extend only after an end-level check.
-FP8_PV_WHITELIST: dict = {"protenix1": frozenset({"fused"}), "opendde": frozenset({"unfused"})}
+#: "af3" (3.0.0): fused + unfused, end level on 4 targets x 4 trunk seeds (docs/fp8.md "widened scope") and FoldBench 27 targets with every route
+#: of the ``miniworld_engine.fp8`` "safe" preset (0 flagged, lDDT +0.0000)
+FP8_PV_WHITELIST: dict = {"protenix1": frozenset({"fused"}), "opendde": frozenset({"unfused"}), "af3": frozenset({"fused", "unfused"})}
 
 #: the S gate of the unfused sites that :func:`enable_fp8_pv_for` sets (head channels -> shortest S, hi plane; measured 2026-11-15, docs/fp8.md)
 FP8_PV_UNFUSED_MIN_S = {32: 1024, 16: 512}
@@ -394,6 +396,18 @@ def disable_fp8_pv() -> None:
     FP8_PV = FP8_PV_FUSED = FP8_VSCALE_AUTO = FP8_PV_HL = FP8_PV_UNFUSED = False
     FP8_PV_MIN_S = {}
     FP8_PV_FRONT_MIN_S = {}
+
+
+def _fp8_preset_at_import() -> None:
+    """``MINIWORLD_FP8=<preset>`` (miniworld_engine.fp8): the preset's TriAttn part (call-site kinds, e4m3 q / k) from the start."""
+    from miniworld_engine import fp8
+
+    name = fp8.preset()
+    if name is not None:
+        fp8.enable_triattn(*fp8.TRIATTN[name])
+
+
+_fp8_preset_at_import()
 
 
 # inference(): the front writes q / k / v and the bias in fp16 for the fp16 core (faster, and closer to fp32: see triattn_h16_sm90.cu)

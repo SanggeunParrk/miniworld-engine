@@ -14,13 +14,13 @@ run the TF32 kernels; operands are rounded to nearest tf32, the residual stream,
 from __future__ import annotations
 
 import contextlib
-import os
 from collections.abc import Iterable
 from typing import cast
 
 import torch
 from torch.autograd.function import once_differentiable
 
+from miniworld_engine.fp8 import env as _fp8_env
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tf32 import tf32_matmul
@@ -44,7 +44,7 @@ def _fp8_parts(value: bool | str | Iterable[str] | None) -> frozenset:
     return parts
 
 
-FP8_ROWS: frozenset = _fp8_parts(os.environ.get("MINIWORLD_ATOMDIT_FP8", ""))
+FP8_ROWS: frozenset = _fp8_parts(_fp8_env("MINIWORLD_ATOMDIT_FP8", ""))
 
 
 def enable_fp8(on: bool | str | Iterable[str] = True) -> frozenset:

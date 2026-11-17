@@ -41,13 +41,15 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.fp8 import env as _fp8_env
+
 from ..._compile import opaque
 from ..._device import num_sms
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent
 
-POLICY = os.environ.get("MINIWORLD_TRANSITION_FP8") or None  # None = off; "calib" = static h scale calibrated on the first eager call
+POLICY = _fp8_env("MINIWORLD_TRANSITION_FP8") or None  # None = off; "calib" = static h scale calibrated on the first eager call
 GUARD = os.environ.get("MINIWORLD_TRANSITION_FP8_GUARD", "sync")
 HEADROOM = float(os.environ.get("MINIWORLD_TRANSITION_FP8_HEADROOM", "16"))
 G1 = int(os.environ.get("MINIWORLD_TRANSITION_FP8_G1", "1"))

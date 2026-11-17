@@ -216,10 +216,11 @@ import math
 import os as _os
 import weakref
 
+from miniworld_engine.fp8 import env as _fp8_env
 from miniworld_engine.kernels._compile import opaque
 
 POLICY = (
-    _os.environ.get("MINIWORLD_TRIMUL_FP8") or None
+    _fp8_env("MINIWORLD_TRIMUL_FP8") or None
 )  # None = off (every route is the bf16 one); "dynamic" = exact amax of the bf16 planes each call (numerics only); "calib" = static scales
 STATS: list = []  # (sa, sb, n, direction) per call when ``RECORD``
 RECORD = bool(_os.environ.get("MINIWORLD_TRIMUL_FP8_RECORD"))

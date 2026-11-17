@@ -20,6 +20,7 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.fp8 import env as _fp8_env
 from miniworld_engine.kernels import _capture
 
 _dir = Path(__file__).parent
@@ -43,7 +44,7 @@ def _parse(v: str) -> frozenset[str]:
 
 
 #: the e4m3 placements in force (empty: the default bf16 route)
-PLACES: frozenset[str] = _parse(os.environ.get("MINIWORLD_TOKEN_DIT_FP8", ""))
+PLACES: frozenset[str] = _parse(_fp8_env("MINIWORLD_TOKEN_DIT_FP8", "") or "")
 #: per placement, the fewest step rows M = A B L that take it (H100, CUDA graph, 2026-11-17, docs/fp8.md): the e4m3 expand + SwiGLU won at
 #: every M measured (768 .. 10240); the row-wise cuBLAS e4m3 qkvg GEMM lost at M = 768 / 1536 / 1920 (+1 .. +2 %), won from 2560 on;
 #: out / squeeze (a separate quantizing row pass) lost or tied everywhere -- their gate only bounds the loss

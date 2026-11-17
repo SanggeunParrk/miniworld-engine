@@ -31,6 +31,8 @@ def prebuild(target, rows):
             # the opt-in FP8 PV route (docs/fp8.md): the same core with the e4m3 P / V^T hi plane (TA_F8PV) or the hi + lo planes (+ TA_F8HL)
             yield ft.partial(h100_sm90._core_h16, ("TA_F8PV=1",))
             yield ft.partial(h100_sm90._core_h16, ("TA_F8PV=1", "TA_F8HL=1"))
+            # its e4m3 q / k form (TA_F8QK, the fused d_pair-128 route; the front's QK8 instances are in ``_mod``)
+            yield h100_sm90._core_f8qk
         if needs(
             "triangle_attention_front_sm90",
             "triangle_attention_tail_sm90",

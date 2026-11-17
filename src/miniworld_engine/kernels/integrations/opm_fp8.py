@@ -32,9 +32,11 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.fp8 import env as _fp8_env
+
 E4M3_MAX = 448.0
 
-POLICY = os.environ.get("MINIWORLD_OPM_FP8") or None
+POLICY = _fp8_env("MINIWORLD_OPM_FP8") or None
 GUARD = os.environ.get("MINIWORLD_OPM_FP8_GUARD", "sync")
 HEADROOM = float(os.environ.get("MINIWORLD_OPM_FP8_HEADROOM", "16"))
 FAST_ACCUM = os.environ.get("MINIWORLD_OPM_FP8_FASTACC") == "1"

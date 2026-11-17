@@ -892,6 +892,15 @@ def prebuild(target, rows):
         yield functools.partial(_arch_ext, "90a")
     if holds("cond_transition_gemm_swiglu"):
         yield functools.partial(GemmSwigluSm90, 0)
+    # the opt-in FP8 route (docs/fp8.md, token_dit_fp8.active: bf16 inference at width 768): its e4m3 rows + expand / SwiGLU build
+    if any(
+        r["mode"] == "eval"
+        and r["dtype"] != "float32"
+        and _kv(r["dims"]).get("d_single") == "768"
+        and any(k.startswith("cond_transition_token_") for k in r["kernels"])
+        for r in rows
+    ):
+        yield _fp8.ext
     if train_rows:
         yield train.owned_gemm_ext
         yield functools.partial(train.rows_ext, hopper=True)

@@ -43,6 +43,7 @@ def prebuild(target, _rows):
         opm[tuple(sorted(kw.items()))] = kw
 
     base = (opm_train.CM, opm_train.CZ)
+    opm_f8 = False
     for r in family_rows("outer_product_mean"):
         d, o = _kv(r["dims"]), _kv(r["options"])
         cm, cz = int(d["d_msa"]), int(d["d_pair"])
@@ -56,6 +57,9 @@ def prebuild(target, _rows):
         training = r["mode"] == "train"
         if not training and (cm, cz) == base:  # inference past depth 4096 (beyond the rows' depths): the product route's epilogue build
             add(native=True, tma=False, cm=cm, cz=cz, fused=False)
+        if not training and r["dtype"] != "float32":  # the opt-in FP8 route (docs/fp8.md, opm_fp8: bf16 msa): the e4m3 prologue build
+            add(native=True, tma=False, cm=cm, cz=cz, fp8=True)
+            opm_f8 = True
         for s in r["depths"]:
             for n in r["lengths"]:
                 path = opm_train._h100_path(s, n, training=training)
@@ -87,9 +91,15 @@ def prebuild(target, _rows):
 
         yield _ct_train.owned_gemm_ext
         yield opm_train._lt_ext  # the product route's cuBLASLt heuristic-index product (opm_train._LT_ALGO)
+    if opm_f8:  # the opt-in FP8 route (docs/fp8.md): the cuBLASLt e4m3 product (opm_fp8.product)
+        from miniworld_engine.kernels.integrations import opm_fp8
+
+        yield opm_fp8._lt_ext
 
     base = (pwa_train.D, pwa_train.DZ, pwa_train.H, pwa_train.C)
-    natives, pair, value = set(), set(), set()
+    from miniworld_engine.kernels.integrations import pwa_fp8
+
+    natives, pair, value, f8 = set(), set(), set(), set()
     for r in family_rows("pair_weighted_averaging"):
         d = _kv(r["dims"])
         shape = (int(d["d_msa"]), int(d["d_pair"]), int(d["n_head"]), int(d["d_hidden"]))
@@ -98,17 +108,22 @@ def prebuild(target, _rows):
                 pair.add(shape[1])
             if r["mode"] == "eval":
                 natives.add(True)  # inference runs the native kernels on H100
+                f8.add((pwa_train.D, pwa_train.C))  # the opt-in FP8 route (docs/fp8.md, pwa_fp8.forward): ln_vt8 at the 8 x 32 width
             else:
                 natives.update(pwa_train._training_default_shape(s, n) for s in r["depths"] for n in r["lengths"])
         elif pwa_wide.supported(*shape):
             pair.add(shape[1])
             value.add((shape[0], shape[3]))
+            if r["mode"] == "eval" and (shape[0], shape[3]) in pwa_fp8.WIDE:  # the opt-in FP8 route (docs/fp8.md, pwa_fp8.forward_wide)
+                f8.add((shape[0], shape[3]))
     for native in sorted(natives):
         yield functools.partial(pwa_train._k, native)
     for dz in sorted(pair):
         yield functools.partial(pwa_wide._pair, dz)
     for dm, dh in sorted(value):
         yield functools.partial(pwa_wide._value, dm, dh)
+    for dm, c in sorted(f8):
+        yield functools.partial(pwa_fp8._ext, dm, c)
 
 
 def _prebuild_sm80():

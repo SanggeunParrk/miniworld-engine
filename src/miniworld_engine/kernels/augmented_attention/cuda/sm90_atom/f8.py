@@ -38,14 +38,19 @@ def _minb(kind: str, ctas: int) -> int:
     return 3 if 2 * sms < ctas <= 3 * sms else 1
 
 
+def kernel_cubin(kind: str, options: tuple = (), minb: int = 1) -> str:
+    """The cubin of ``kind`` under the model ``options`` and ``minb`` (the build :func:`kernel` loads; also the prebuild recipe's call)."""
+    defs = tuple(f"-D{o}=1" for o in sorted(options) if kind == "post_f8" and o in ("PARS", "NOOUT"))
+    return cubin(_KERNELS[kind][0], False, NWARP, minb, defs)
+
+
 @functools.lru_cache(maxsize=None)
 def kernel(kind: str, device_index: int, options: tuple = (), minb: int = 1):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     stem, smem = _KERNELS[kind]
-    defs = tuple(f"-D{o}=1" for o in sorted(options) if kind == "post_f8" and o in ("PARS", "NOOUT"))
     with torch.cuda.device(device_index):
-        return driver.Kernel(cubin(stem, False, NWARP, minb, defs), stem, smem, pdl=True)
+        return driver.Kernel(kernel_cubin(kind, options, minb), stem, smem, pdl=True)
 
 
 def _kperm32(t: torch.Tensor) -> torch.Tensor:
