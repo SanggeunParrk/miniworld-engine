@@ -9,8 +9,8 @@ the native (``-DMW_PWA_CUDA_AUX``) kernels at every such shape (the bf16 default
 The three key contractions of the step, each ``2 H N^2 S C`` FLOPs, run as cuBLASLt FP8 batched GEMMs (fp32 accumulation, bf16 out)::
 
     fwd  o[h]  [N_i, S*C] = w[h]  [N_i, N_j] . vT[h] [S*C, N_j]^T      w e4m3 (fixed 2^8), v e4m3
-    dv   dv[h] [N_j, S*C] = wT[h] [N_j, N_i] . doT[h][S*C, N_i]^T      w e4m3, do e5m2 (or e4m3)
-    dw   dw[h] [N_i, N_j] = do[h] [N_i, S*C] . v[h]  [N_j, S*C]^T      do e5m2 (or e4m3), v e4m3
+    dv   dv[h] [N_j, S*C] = wT[h] [N_j, N_i] . doT[h][S*C, N_i]^T      w e4m3, do e4m3 (or e5m2)
+    dw   dw[h] [N_i, N_j] = do[h] [N_i, S*C] . v[h]  [N_j, S*C]^T      do e4m3 (or e5m2), v e4m3
 
 Hopper's FP8 MMA takes K-major operands only, so each operand exists in the layout its GEMM contracts over: v as vT (fwd) and natural (dw),
 do as natural (dw) and doT (dv), w as w (fwd) and wT (dv). ``IMPL``:
@@ -55,8 +55,9 @@ def _places(v: str | None) -> frozenset[str]:
 
 #: FP8 placements in the training step ({"fwd", "dv", "dw"}); empty = off (the default route)
 PLACES: frozenset[str] = _places(os.environ.get("MINIWORLD_PWA_FP8_TRAIN", "all" if os.environ.get("MINIWORLD_FP8_TRAIN") == "1" else ""))
-#: incoming-gradient format: "e5m2" (default) or "e4m3"
-DO_FMT = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_DO", "e5m2")
+#: incoming-gradient (do) format: "e4m3" (default: 1.5-2x smaller gradient error than e5m2 at the same speed; the delayed scale keeps it in
+#: range, overflow 0 in every measured run) or "e5m2"
+DO_FMT = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_DO", "e4m3")
 #: "fused" (producers write the FP8 operands) or "proto" (PyTorch quantize passes)
 IMPL = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_IMPL", "fused")
 HISTORY = int(os.environ.get("MINIWORLD_PWA_FP8_TRAIN_HISTORY", "16"))
