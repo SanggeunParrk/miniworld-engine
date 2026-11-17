@@ -36,6 +36,7 @@ import triton.language as tl
 
 from miniworld_engine.kernels import _cast_cuda
 from miniworld_engine.kernels._wide import needs_wide, wide
+from miniworld_engine.kernels.integrations import pwa_fp8_train as _f8t
 from miniworld_engine.kernels.integrations import pwa_wide as _wide
 
 H, C, D, DZ = 8, 32, 64, 128
@@ -98,6 +99,11 @@ def _h100_training_default(msa: torch.Tensor) -> bool:
         and msa.shape[3] == D
         and _training_default_shape(msa.shape[1], msa.shape[2])
     )
+
+
+def _native_scope(msa: torch.Tensor) -> bool:
+    """The native kernels for this training call: the six qualified shapes, or the opt-in FP8 training route (pwa_fp8_train)."""
+    return _h100_training_default(msa) or _f8t.serves(msa)
 
 
 def native_aux_enabled(msa: torch.Tensor | None = None) -> bool:
@@ -547,8 +553,12 @@ class _PwaMath(torch.autograd.Function):
             w16 = k["pair3"].pair_fwd3(z, pm, zw, eps_z, wb16)
         else:
             w16 = pair_fwd(z, pm, lnz_w.detach().float().contiguous(), eps_z, wb.detach(), H, BJ=64)
+        f8 = not sm100 and _f8t.serves(msa)  # the opt-in FP8 training route (pwa_fp8_train); off: never
+        o8 = vs8 = v_bf = None
         if sm100:
             v, y = k["pwa"].ln_vg(m, lnm_w.detach().contiguous(), lnm_b.detach().contiguous(), wv16, eps_m)
+        elif f8:
+            o8, v_bf, v, y, vs8 = _f8t.forward_values(k, m, lnm_w, lnm_b, wv, wv16, eps_m, w16)
         else:
             mw, mb = _h100_float(lnm_w.detach(), lnm_b.detach())
             v, y = k["lnvg"].ln_vg(m, mw, mb, wv16, eps_m, 2, 3, 1)
@@ -578,12 +588,16 @@ class _PwaMath(torch.autograd.Function):
                 dmask,
                 dscale,
             )  # split: contraction, then gate / out (y recomputed; ln_vg's y kept for the backward)
+        elif o8 is not None:  # FP8 contraction (head-major o), then the default gate / out pass
+            o = o8
+            out = k["gateout"].pwa_gateout(o, y, wg16, wo16, m, 1, 4, dmask, dscale)
         else:
+            vc = v_bf if f8 else v  # FP8 with "dw" alone: the bf16 contraction on the bf16 v (v, e4m3, goes to the backward)
             if native_aux_enabled() and k.get("gateout") is not None and k["glue3"] is not None and _split_contraction(N):
-                o = torch.bmm(w16, v)  # head-major o, kept for the backward (glue3 reads it as such)
+                o = torch.bmm(w16, vc)  # head-major o, kept for the backward (glue3 reads it as such)
                 out = k["gateout"].pwa_gateout(o, y, wg16, wo16, m, 1, 4, dmask, dscale)
             else:
-                out, o = k["forward"](w16, v, y, wg16, wo16, m, dmask, dscale)  # residual fused; o kept for the backward
+                out, o = k["forward"](w16, vc, y, wg16, wo16, m, dmask, dscale)  # residual fused; o kept for the backward
         ctx.save_for_backward(
             m,
             z,
@@ -602,6 +616,7 @@ class _PwaMath(torch.autograd.Function):
         )
         ctx.eps = (eps_m, eps_z)
         ctx.dscale = dscale
+        ctx.f8_vs = vs8  # the FP8 training route: v's dequant factor (None otherwise)
         return out[None]
 
     @staticmethod
@@ -666,7 +681,12 @@ class _PwaMath(torch.autograd.Function):
         native = native_aux_enabled()
         wot = k["pair3"].transpose(wo16) if native else wo16.t().contiguous()
         dgv = torch.empty((S, N, 2 * HC), dtype=bf, device=m.device)  # dgp | dv: one [S,N,512] buffer
-        if k["glue3"] is not None:  # dWo partials fused: go never touches memory
+        f8 = _f8t.serves(m[None])  # the opt-in FP8 training route (pwa_fp8_train); off: never
+        do8 = doT8 = ds8 = None
+        if f8:
+            ohm = "fwd" in _f8t.PLACES or bool(native and k.get("gateout") is not None and _split_contraction(N))
+            d_o, do8, doT8, ds8, dWo = _f8t.backward_glue(k, o, y, dres0, wg16, wot, dgv, dmask, ctx.dscale, wo, ohm)
+        elif k["glue3"] is not None:  # dWo partials fused: go never touches memory
             d_o, _, dWo = k["glue3"].pwa_glue3(
                 o,
                 y,
@@ -686,11 +706,17 @@ class _PwaMath(torch.autograd.Function):
             dWo = dout.view(S * N, D).t() @ go.view(S * N, HC)  # [D][HC]
         # dv = w^T . d_o. On the native path cuBLAS runs it (~2x faster than pwa_plain2 for the same FLOPs) and dgv_bwd reads its head-major
         # result tile by tile; otherwise pwa_plain2 writes dv into dgv[..., HC:].
-        dv_hm = torch.bmm(w16.transpose(1, 2), d_o) if native and N % 64 == 0 else None
+        if f8:
+            dv_hm = _f8t.backward_dv(w16, d_o, doT8, ds8)
+        else:
+            dv_hm = torch.bmm(w16.transpose(1, 2), d_o) if native and N % 64 == 0 else None
         if dv_hm is None:
             wt = k["pair3"].transpose(w16) if native else w16.transpose(1, 2).contiguous()
             k["fwd"].pwa_plain2(wt, d_o, 4, dgv)  # dv -> dgv[..., HC:]
-        dw = torch.bmm(d_o, v.transpose(1, 2))  # [H][N][N], K = S*C
+        if f8:
+            dw = _f8t.backward_dw(d_o, do8, ds8, v, ctx.f8_vs)
+        else:
+            dw = torch.bmm(d_o, v.transpose(1, 2))  # [H][N][N], K = S*C
         dw16 = dw  # pwa_wide's pair backward (pair_only_wide) takes it in bf16
         dw, mw, zw = _h100_float(dw, lnm_w, lnz_w)
         wgvT = k["pair3"].wgv(wg16, wv16) if native else torch.cat([wg16, wv16], 0).t().contiguous()
@@ -876,7 +902,7 @@ def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask:
         0,
     ):  # sm_100a: the [N] key mask itself
         pm = torch.ones(n, dtype=torch.bool, device=msa.device) if mask is None else mask[0].to(torch.bool).contiguous()
-    elif native_aux_enabled(msa):
+    elif _native_scope(msa):
         # Keep the CUDA launch inside the opaque forward so torch.compile can
         # trace the module without following a pybind extension call.
         pm = mask if mask is not None else torch.empty((0,), device=msa.device, dtype=torch.bool)
@@ -931,13 +957,18 @@ def _forward_fake(args, eps_m, eps_z, p_drop):
         if (torch.cuda.get_device_capability(m.device) == (10, 0) or (native_aux_enabled(m) and _split_contraction(n)))
         else (s, n, HC)
     )
+    f8 = _f8t.serves(m) and torch.cuda.get_device_capability(m.device) == (9, 0)  # the opt-in FP8 training route
+    if f8 and ("fwd" in _f8t.PLACES or (native_aux_enabled(m) and _split_contraction(n))):
+        o_shape = (H, n, s * C)
+    v_dtype = torch.float8_e4m3fn if f8 and "dw" in _f8t.PLACES else torch.bfloat16
     return [
         torch.empty_like(m),
         torch.empty((H, n, n), device=m.device, dtype=torch.bfloat16),
-        torch.empty((H, n, s * C), device=m.device, dtype=torch.bfloat16),
+        torch.empty((H, n, s * C), device=m.device, dtype=v_dtype),
         torch.empty((s, n, D), device=m.device, dtype=torch.bfloat16),
         torch.empty(o_shape, device=m.device, dtype=torch.bfloat16),
         torch.empty((n, D) if p_drop else (0,), device=m.device, dtype=torch.bfloat16),
+        *([torch.empty((1,), device=m.device, dtype=torch.float32)] if f8 and _f8t.PLACES & {"fwd", "dw"} else []),
     ]
 
 
@@ -946,12 +977,13 @@ from miniworld_engine.kernels._compile import opaque
 
 @opaque(fake=_forward_fake, name="pwa_h100_fwd")
 def _forward_op(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float) -> list[torch.Tensor]:
-    scope = _NATIVE_TRAINING_SCOPE.set(_h100_training_default(args[0]))
+    scope = _NATIVE_TRAINING_SCOPE.set(_native_scope(args[0]))
     try:
         ctx = _SavedContext()
         out = _PwaMath.forward(ctx, *args, eps_m, eps_z, p_drop)  # pyright: ignore[reportCallIssue]  -- args: the ten inputs in forward's order
         sv = ctx.saved_tensors
-        return [out, *sv[2:6], sv[13] if p_drop else args[0].new_empty((0,))]
+        f8 = [ctx.f8_vs] if getattr(ctx, "f8_vs", None) is not None else []  # the FP8 training route: v's scale for the backward
+        return [out, *sv[2:6], sv[13] if p_drop else args[0].new_empty((0,)), *f8]
     finally:
         _NATIVE_TRAINING_SCOPE.reset(scope)
 
@@ -969,7 +1001,7 @@ def _backward_op(
     eps_z: float,
     p_drop: float,
 ) -> list[torch.Tensor]:
-    scope = _NATIVE_TRAINING_SCOPE.set(_h100_training_default(args[0]))
+    scope = _NATIVE_TRAINING_SCOPE.set(_native_scope(args[0]))
     try:
         return _backward_math(args, kept, dy, eps_m, eps_z, p_drop)
     finally:
@@ -981,6 +1013,7 @@ def _backward_math(args, kept, dy, eps_m, eps_z, p_drop):
     ctx.eps = (eps_m, eps_z)
     ctx.dscale = 1 / (1 - p_drop) if p_drop else 1.0
     ctx.key_mask = args[2]
+    ctx.f8_vs = kept[5] if len(kept) > 5 else None
     ctx.saved_tensors = (
         args[0][0],
         args[1][0],
