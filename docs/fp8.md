@@ -717,6 +717,166 @@ replay = eager, the guard fires on a forced saturation and `rescale_all` clears 
 base branch's TriAttn / TriMul FP8 dicts, unchanged), `test_init`, `test_requirements`, `test_prebuild_plan`: 1444 passed. `ruff check` / `format`,
 `pyright` clean on the touched Python files. The new extension `miniworld_pwa_vt8` is JIT-built on first use (not in the prebuild plan).
 
+## Transition forward: e4m3 GEMMs (`kernels/transition/cuda/fp8_sm90a.py`, branch `fp8x/transition`, 2026-11-17)
+
+Scope: bf16 inference, one H100, D 128 (n 2 / 4: the fused one-kernel forward) and D 384 / 512 (n 2 / 4: the two-kernel wide chain). Training, D 64,
+D 256, D 768 and fp32 activations stay on the 2.5.12 route. Off by default; with `MINIWORLD_TRANSITION_FP8` unset the dispatcher sees one `POLICY is None`
+check and the outputs are the 2.5.12 bytes (below). Scripts and raw rows: `~/miniworld-engine-scratch/fp8x-transition/{scripts,res}` (`res/...` below).
+
+| env (read at import) | effect |
+|---|---|
+| `MINIWORLD_TRANSITION_FP8=calib` | route the served calls through the e4m3 kernels; h scale calibrated on the first eager call of a module |
+| `MINIWORLD_TRANSITION_FP8_GUARD` | `sync` (default, eager: redo an overflowing call) / `lazy` (no host sync; CUDA graphs: `overflow_peak()` + `rescale_all(peak)` + redo, the TriMul contract) / `off` |
+| `MINIWORLD_TRANSITION_FP8_G1`, `_G2` | 1 / 1 (default): expand and squeeze in e4m3; `G1=0`: bf16 expand (D 128 and wide); `G2=0`: bf16 squeeze (D 128 only) |
+| `MINIWORLD_TRANSITION_FP8_HEADROOM` | h scale headroom over the calibration amax (16) |
+| `MINIWORLD_TRANSITION_FP8_MINROWS` | replaces the row gate `ROW_GATE` (D 128: 16384 rows = pair L128; D 384 / 512: 65536 = L256; smaller calls were not measured) |
+| `MINIWORLD_TRANSITION_FP8_WIDTHS`, `_SIGT`, `_SLOTS`, `_ABL` | widths routed (128,384,512); sigmoid form (1 = one tanh.approx); weight-ring slots (4); timing ablations (never a route) |
+
+### Where the time goes (2.5.12 default) and where e4m3 can go
+
+Module time, CUDA graph, cool, master weights, one sample (`res/an1.jsonl`; FLOPs = 2 rows (2 D H + H D), H = n D):
+
+| D, n | kernels of the route | L1024 ms | TFLOP/s | L2048 ms |
+|---|---|---|---|---|
+| 64, 4 / 2 | `wide_d64_fwd_small_f3` (one fused kernel) | 0.268 / 0.183 | 385 / 282 | 1.05 / 0.70 |
+| 128, 4 / 2 | `transition_fwd_fused` (one fused kernel) | 0.680 / 0.430 | 607 / 479 | 2.61 / 1.68 |
+| 256, 4 / 2 | `wide_d256_fwd` (one fused kernel) | 2.53 / 1.45 | 651 / 568 | 10.0 / 5.69 |
+| 384, 4 / 2 | `wide_lnsg` (LN + expand + SwiGLU, h to HBM) + `wide_squeeze` (+ residual) | 3.80 + 2.04 / 2.12 + 1.29 | 633 / 542 | 16.7 + 8.4 / 9.0 + 5.4 |
+| 512, 4 / 2 (L768) | the same two kernels | 3.63 + 1.91 / 1.90 + 1.10 | 665 / 618 | (L768 is the largest row) |
+
+Counters of the D128 kernel at L1024 (ncu, fixed clocks, `res/ncu_n1.csv`): n 4: tensor pipe active 67 % of peak, MUFU (xu) 45 %, FMA 16 %, DRAM 19 %,
+issue 33 %; n 2: tensor 54 %, MUFU 36 %, DRAM 31 %. The default is tensor-pipe-dominated with MUFU (ex2 + rcp per sigmoid) second; DRAM is not the limit.
+Stage ablation on the same kernel structure (`ABL` builds, `res/abl1.jsonl`, D128 n4 L1024, cool): LayerNorm + x in / y out only (no chunk loop) 0.194 ms
+(the HBM floor of x + y: 2.8 TB/s), GEMMs without the SwiGLU math 0.636 ms, full 0.705 ms (the bf16 twin; the 2.5.12 kernel 0.681).
+
+| stage | operand that can be e4m3 | share | honest upper bound |
+|---|---|---|---|
+| expand GEMM (2/3 of the FLOPs) | xn (A, in registers / the resident tile), [Wa; Wb] (B) | D128: 0.64 - 0.19 ms of 0.68 is GEMM + SwiGLU; wide: `lnsg` 65 % of the module | GEMM part x2 (tensor rate); MUFU / LN / HBM unchanged |
+| SwiGLU h (the squeeze's A) | h quantized in the expand epilogue | D128: registers only (no bytes); wide: h is an HBM round trip of 2 rows H bytes | wide: h bytes / 2 (D384 n4 L2048: 12.9 GB -> 6.4 GB each way) |
+| squeeze GEMM (1/3) | h (A), Ws (B) | wide `squeeze` 35 % of the module | x2 tensor rate + half the h read |
+| LayerNorm, residual, x / y | none (bf16 in / out is the interface) | D128 n4: 0.19 ms floor of 0.68 | none |
+
+cuBLAS(Lt) bf16 vs e4m3 at the same GEMM shapes (`res/ub1.jsonl`, L1024): squeeze 1.46-1.68x faster in e4m3 at every width, expand 1.37-1.50x at D 384 /
+512, 1.06-1.14x at D 64-256 (bf16 output bound). The engine's fused kernels beat these cuBLAS GEMMs already; the ratios bound what e4m3 can do per GEMM.
+
+### What was built
+
+- **D 128** (`transition_fp8_fwd_sm90a.cu`): the 2.5.12 D128 inference build (LNFRAG, XFIRST, DECOUPLE, SKEW, unrolled chunk loop) with both GEMMs on
+  `wgmma m64n128k32 .e4m3` (fp32 accumulation). xn is quantized in registers from the fp32 LayerNorm (no bf16 rounding first) with the power-of-two scale
+  of the LayerNorm bound (|xn| <= sqrt(D - 1) max|gamma| + max|beta|: never saturates, no calibration). The fp32 C fragment of the expand IS the e4m3
+  k32 A fragment of the squeeze after a fixed K permutation (columns {2t, 2t+1, 8+2t, 9+2t} of each 16-block in the logical order 4t..4t+3), so the
+  packed weights carry K in that order (`_perm_k`) and no shuffle runs. h = silu(a) b sh with silu(a) = (a/2)(1 + tanh(a/2)) (one MUFU op), cast with
+  `cvt.rn.satfinite.e4m3x2`, max |h sh| per CTA to the guard buffer. Weights: per-tensor power-of-two scales, packed once per parameter version
+  (no per-call prepare kernel). 24 KB weight slots (4 in the ring instead of 2). Switches `F8G1` / `F8G2` give the partial placements; `F8G1 = F8G2 = 0`
+  with the 2.5.12 sigmoid reproduces the 2.5.12 output bytes (test `test_bf16_build_reproduces_default`), so the kernel is the default's structure.
+- **D 384 / 512** (`wide/fp8_bind.cu`, `wide/kernels/ln_swiglu_gemm_f8.cu`, `wide/kernels/squeeze_gemm_f8.cu`: e4m3 twins of the 2.5.12 files, which
+  are untouched): the LayerNorm writes e4m3 xn in place over the resident x tile (G1; 128-byte K slabs, `wgmma m64n128k32` SS), the expand epilogue
+  writes h as e4m3 (stmatrix of e4m3 pairs into a 64B-swizzled 4 KB staging tile, TMA store; the stored columns carry the same 16-block permutation,
+  the e4m3 Ws is packed to match), the squeeze runs `wgmma m64n{192,256}k32` SS over 128-byte K slabs and adds the residual (`co = 1 / (sh s2)`).
+- Scale / guard: the TriMul conventions (static power-of-two scales, 16x headroom, `overflow_peak()` / `rescale_all()` / redo, weakref-finalized caches
+  keyed by the expand_a weight); calibration runs one probe call with sh = 1 (the pre-cast peak is exact even when the probe saturates).
+
+### Module time against the 2.5.12 default
+
+Protocol as in "Base 2.5.12" (`scripts/f8bench.py speed`): one process per group, module (`master_weights=True`, one sample) captured in CUDA graphs of one
+call each: the 2.5.12 default, the default again (same-cubin control), each FP8 variant (calibrated on two eager calls, lazy guard, no overflow in any
+case: peak 15-28 of 448). cool = 2 s idle then one interleaved burst, 3 reps, median; sustained = 1 s of back-to-back replays, then 3 interleaved blocks,
+mean. Cells `cool / sustained` (`res/sp3.jsonl`, `res/spw2.jsonl`).
+
+D 128, n 4 (rows = L^2). full = both GEMMs e4m3; G1 = expand only; G2 = squeeze only; twin = the FP8 kernel built as bf16 (`F8G1=F8G2=0`, 2.5.12 sigmoid):
+
+| L | 2.5.12 ms | full / default | G1 only | G2 only | bf16 twin | control |
+|---|---|---|---|---|---|---|
+| 128 | 0.0174 / 0.0170 | 0.659 / 0.664 | 0.738 / 0.733 | 0.765 / 0.768 | 0.876 / 0.877 | 0.989 / 0.993 |
+| 256 | 0.0483 / 0.0509 | 0.745 / 0.749 | 0.843 / 0.847 | 0.889 / 0.875 | 1.043 / 1.023 | 1.010 / 1.013 |
+| 384 | 0.108 / 0.114 | 0.714 / 0.728 | 0.823 / 0.838 | 0.845 / 0.868 | 1.043 / 1.048 | 0.998 / 0.996 |
+| 512 | 0.185 / 0.192 | 0.702 / 0.733 | 0.816 / 0.852 | 0.844 / 0.888 | 1.044 / 1.124 | 0.993 / 1.008 |
+| 768 | 0.390 / 0.427 | 0.698 / 0.730 | 0.820 / 0.842 | 0.856 / 0.862 | 1.030 / 1.069 | 0.994 / 0.988 |
+| 1024 | 0.687 / 0.745 | 0.693 / 0.735 | 0.817 / 0.861 | 0.861 / 0.862 | 1.040 / 1.077 | 1.000 / 0.997 |
+| 1536 | 1.487 / 1.659 | 0.713 / 0.736 | 0.836 / 0.862 | 0.884 / 0.888 | 1.062 / 1.082 | 0.987 / 0.984 |
+| 2048 | 2.607 / 2.934 | 0.721 / 0.739 | 0.843 / 0.856 | 0.900 / 0.891 | 1.075 / 1.103 | 1.000 / 0.994 |
+
+D 128, n 2:
+
+| L | 2.5.12 ms | full / default | G1 only | G2 only | bf16 twin | control |
+|---|---|---|---|---|---|---|
+| 128 | 0.0130 / 0.0127 | 0.710 / 0.707 | 0.717 / 0.708 | 0.761 / 0.758 | 0.832 / 0.822 | 0.987 / 0.991 |
+| 256 | 0.0335 / 0.0334 | 0.756 / 0.754 | 0.818 / 0.812 | 0.856 / 0.843 | 0.989 / 0.976 | 0.996 / 0.997 |
+| 384 | 0.0738 / 0.0760 | 0.699 / 0.704 | 0.766 / 0.772 | 0.800 / 0.806 | 0.979 / 0.971 | 1.005 / 1.002 |
+| 512 | 0.123 / 0.129 | 0.684 / 0.696 | 0.756 / 0.767 | 0.796 / 0.798 | 0.982 / 0.988 | 1.003 / 0.992 |
+| 768 | 0.245 / 0.266 | 0.696 / 0.731 | 0.783 / 0.807 | 0.825 / 0.838 | 1.034 / 1.030 | 1.000 / 0.993 |
+| 1024 | 0.435 / 0.457 | 0.690 / 0.732 | 0.777 / 0.820 | 0.821 / 0.860 | 0.984 / 1.041 | 0.990 / 0.998 |
+| 1536 | 0.956 / 1.028 | 0.683 / 0.731 | 0.780 / 0.819 | 0.828 / 0.840 | 0.996 / 1.016 | 0.979 / 0.989 |
+| 2048 | 1.701 / 1.816 | 0.682 / 0.754 | 0.773 / 0.842 | 0.826 / 0.873 | 0.978 / 1.046 | 0.965 / 1.008 |
+
+The bf16 twin is 2-12 % slower than 2.5.12 at n 4, L >= 256, and within -3 .. +5 % at n 2 (the scale multiplies; at L128 it is faster because the
+FP8 route caches its packed weights and launches no per-call prepare kernel), so the e4m3 gain over the same kernel structure is 1.4-1.5x. The sigmoid form alone does not pay in bf16:
+the bf16 twin with the tanh sigmoid was 1.03-1.12x the default at n 4, L >= 256 (`res/sp2.jsonl`; MUFU drops to 20 % but the tensor pipe stays the limit).
+With e4m3 GEMMs the tanh sigmoid pays: `SIGT=0` (ex2 + rcp) 0.86-0.94 (n 4) / 0.78-0.82 (n 2) of the default against 0.68-0.80 with tanh
+(`res/sp1.jsonl`, before the silu fold of the final build). FP8 kernel
+counters (D128 n4 L1024, first build): tensor 43 %, MUFU 29 %, FMA 28 %, DRAM 24 %, issue 47 %: no unit is saturated, the per-warpgroup chain
+(expand -> SwiGLU -> squeeze, two warpgroups) is the limit. Ablation of the e4m3 kernel: no SwiGLU math 0.398 ms, full 0.478 ms, HBM floor 0.195 ms.
+
+D 384 / 512 (wide chain; `h8` = h + squeeze e4m3, expand bf16 (`G1=0`); `full` = expand e4m3 too):
+
+| D, n | L | 2.5.12 ms | h8 / default | full / default | control |
+|---|---|---|---|---|---|
+| 384, 4 | 256 | 0.403 / 0.444 | 0.845 / 0.859 | 0.642 / 0.649 | 0.996 / 1.002 |
+| | 512 | 1.520 / 1.711 | 0.863 / 0.886 | 0.662 / 0.651 | 0.996 / 0.997 |
+| | 1024 | 5.887 / 6.582 | 0.869 / 0.905 | 0.644 / 0.671 | 0.996 / 1.002 |
+| | 2048 | 24.11 / 26.41 | 0.846 / 0.884 | 0.686 / 0.654 | 1.008 / 0.976 |
+| 384, 2 | 256 | 0.249 / 0.257 | 0.876 / 0.907 | 0.715 / 0.737 | 0.995 / 1.018 |
+| | 512 | 0.895 / 0.981 | 0.897 / 0.903 | 0.719 / 0.722 | 0.997 / 0.982 |
+| | 1024 | 3.442 / 3.738 | 0.903 / 0.927 | 0.717 / 0.750 | 0.997 / 0.987 |
+| | 2048 | 13.61 / 16.10 | 0.901 / 0.917 | 0.713 / 0.720 | 0.998 / 0.994 |
+| 512, 4 | 256 | 0.653 / 0.702 | 0.801 / 0.846 | 0.586 / 0.617 | 0.998 / 1.010 |
+| | 512 | 2.552 / 2.879 | 0.799 / 0.788 | 0.575 / 0.559 | 0.997 / 0.999 |
+| | 768 | 5.604 / 6.502 | 0.796 / 0.803 | 0.570 / 0.568 | 0.994 / 0.995 |
+| 512, 2 | 256 | 0.367 / 0.396 | 0.831 / 0.841 | 0.641 / 0.659 | 0.994 / 0.992 |
+| | 512 | 1.388 / 1.531 | 0.843 / 0.859 | 0.635 / 0.650 | 0.999 / 1.006 |
+| | 768 | 3.016 / 3.470 | 0.844 / 0.836 | 0.632 / 0.623 | 0.999 / 0.992 |
+
+### Error against fp64
+
+`scripts/f8bench.py err` (`res/err2.jsonl`, `res/errw2.jsonl`): the module in float64 on the PyTorch backend (fp32 masters -> float64), same inputs;
+weights N(0, 1/fan_in), LayerNorm weight 1 +- 0.1, bias +- 0.1, x ~ N(0, 1). judge = max|y - y64| / max|y64| (`measure/accuracy.py`; tolerance
+max(err_pytorch, 8e-3) = 8e-3 on every row); rms = rms(y - y64) / rms(y64); update = rms(y - y64) / rms(y64 - x). Ranges over L128 / 512 / 1024
+(D128) and L256 / 512 (wide). No NaN / inf in any case; no saturation (peak 15-28 against 448), no guard retry or fallback.
+
+| route | judge | rms | update rms |
+|---|---|---|---|
+| PyTorch bf16 (tolerance reference) | 0.0050-0.0068 | 0.0036-0.0038 | |
+| 2.5.12 default (D128 / wide) | 0.0035-0.0042 | 0.0027-0.0028 | 0.0052-0.0053 |
+| D128 full e4m3 | 0.041-0.045 | 0.034-0.035 | 0.066 |
+| D128 expand only (G1) | 0.033-0.045 | 0.028-0.029 | 0.055 |
+| D128 squeeze only (G2) | 0.026-0.037 | 0.0195-0.020 | 0.038 |
+| D384 / 512 h8 (h + squeeze) | 0.020-0.029 | 0.0195-0.0197 | 0.038 |
+| D384 / 512 full | 0.035-0.042 | 0.034 | 0.066 |
+
+Every FP8 variant is outside the 8e-3 tolerance (3-5x), as expected for e4m3 activations (3 mantissa bits; the error is per-element storage, the
+scales only keep it out of the subnormal range). The update error (6.6 %) is above the TriMul planes' (3.8 %): both Transition GEMM inputs are
+activations, the TriMul route quantizes one plane pair. End-level effect (structures) was not measured.
+
+### Default route, verification
+
+- Default bytes: sha1 of the default output, separate processes, this branch against the base tree (91a9241fb): 14 / 14 identical (D 64 n 4 / 2,
+  D 128 n 4 / 2 incl. 12800 rows and L2048, D 256 n 4 / 2, D 384 n 4 / 2 (2048 rows: the generic path), D 512 n 4, D 768 n 2; `res/sha_base.json`,
+  `res/sha_fp8b.json`). No 2.5.12 source changed: the FP8 kernels are new files; the dispatcher gained a `fp8=True` parameter and one branch behind
+  `POLICY`.
+- Tests: `tests/gpu/test_transition_fp8_h100.py` (fragment permutation, error vs fp64 for D128 4 placements x n x rows and D384 / 512 x n x G1, bf16 twin
+  = 2.5.12 bytes, guard sync retry and lazy `overflow_peak` / `rescale_all`, default untouched when off). ruff check / pyright clean on the touched
+  Python files (`ruff format` reports one 2.5.12 line in `cuda/__init__.py` that this branch leaves as it is).
+- Not in the prebuild plan: the FP8 extensions JIT-build on first use (about 90 s each).
+
+### Not done, and why
+
+- D 64 (`wide_d64_fwd_small_f3`, 282-385 TFLOP/s): x / y traffic is half of the time at n 2 (1.5 TB/s of x + y alone) and the LayerNorm / SwiGLU
+  share is the largest of all widths; e4m3 GEMMs bound below 1.3x. Not built.
+- D 256 (`wide_d256_fwd`, 568-651 TFLOP/s, Chai-1 / ESMFold2 / Protenix-v2 pair): the same placements as D 128 apply (xn tile e4m3, h in registers ->
+  e4m3 k32 fragment, Ws K-major with the 16-block permutation); expected like D 128 (0.7x). Not built for time.
+- Per-channel weight scales, e4m3 x / y storage (the interface is bf16), e5m2: not tried. Training: not ported (forward first, as briefed).
+- The 2.5.12 D128 bf16 default with the tanh sigmoid alone: slower (above), so no non-FP8 spin-off.
+
 ## Known limits
 
 - Boltz-2 9c90 is bistable under any numerical noise of 0.1-2 % on the TriAttn output; V on e4m3 flips it (hi + lo too: 2 of 4 trunk seeds). In the current environment its own bf16 trunk seeds fall into 5 modes (24 seeds, 15.3 A, ipTM 0.40-0.85) and FP8 changes the mode of 9 of 24 same trunk seeds while the mode population stays equal (see the widened end-level section). Hence whitelist only, and Boltz-2 is not on it (open decision).
