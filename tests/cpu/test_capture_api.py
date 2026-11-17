@@ -54,6 +54,7 @@ NOT_WEIGHT_DERIVED = {
     "kernels/integrations/opm_fp8.py:LT_ALGO": "cuBLASLt heuristic index per padded N",
     "kernels/integrations/opm_fp8.py:_CACHES": "FP8 scale state per module (weakref-finalized; scales, not weight forms)",
     "kernels/integrations/opm_fp8.py:_LAZY": "FP8 overflow guard buffers per device",
+    "kernels/integrations/opm_fp8_train.py:_PEAK": "FP8 training max |scaled value| diagnostics per device",
     "kernels/integrations/pwa_train.py:_EXT": "extensions",
     # the opt-in PWA FP8 route: v scales are calibrated from the first call's activations (keyed by the value weight's address, dropped
     # when it is freed), not derived from weight values; the rest are per-device scalars / workspaces and cuBLASLt algorithm picks
