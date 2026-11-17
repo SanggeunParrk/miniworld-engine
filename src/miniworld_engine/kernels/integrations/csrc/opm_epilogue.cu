@@ -1523,7 +1523,8 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
     // atomically into dgamax[0]) instead of the bf16 TMA box, and blockIdx.z == 1 writes dO^T[(j,e),(i,c)] into DOT8 from the same
     // formula with i <-> j: dz read transposed, WOT + NCH * KZ = Wo^T with (c, e) swapped (the count table is symmetric); that plane
     // writes neither dz/n nor the dbo partials.  f8fmt 0 = e4m3, 1 = e5m2.
-    , unsigned char* __restrict__ DO8, unsigned char* __restrict__ DOT8, const float* __restrict__ dgq, float* __restrict__ dgamax, int f8fmt
+    , const __grid_constant__ CUtensorMap DOT_MAP, const unsigned char* __restrict__ DO8, const float* __restrict__ dgq, float* __restrict__ dgamax,
+    int f8fmt
 #endif
     ) {
   extern __shared__ char smem[];
@@ -1643,6 +1644,9 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
     }
     __pipeline_commit();
   };
+#if defined(MINIWORLD_OPM_FP8)
+  float f8am = 0.f;   // max |scaled dO| of this thread over every chunk: one atomic per warp at the end
+#endif
   if (WBUF == 2) load_w(0, sW);
 #pragma unroll 1
   for (int ck = 0; ck < NCH / CHUNK; ++ck) {
@@ -1669,12 +1673,12 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
     wg::wait();
 #if defined(MINIWORLD_OPM_FP8)
     if (DO8 != nullptr) {
-      // FP8: stage the chunk as 16 rows (i, c) of DG_BJ * 32 bytes (j, e) -- in the grouped layout these are contiguous runs -- then
-      // 16-byte stores.  The barrier first: the previous chunk's copy-out has read the staging tile.
+      // FP8: the chunk staged as [i 8][c 2][(j, e) 512 bytes] -- in the grouped layout 16 contiguous runs of DG_BJ * 32 bytes -- and
+      // written by one TMA box per chunk (map: 256-byte blocks x c x i), like the bf16 path; the store overlaps the next chunk's math.
+      if (tid == 0) tma::wait_read();
       __syncthreads();
       unsigned char* s8 = reinterpret_cast<unsigned char*>(sO);
       const float q = dgq[0];
-      float am = 0.f;
 #pragma unroll
       for (int nt = 0; nt < CHUNK / 8; ++nt) {
         const int n = nt * 8 + (lane & 3) * 2, p = wgi * 64 + wl * 16 + (lane >> 2);
@@ -1682,20 +1686,17 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
         for (int h = 0; h < 2; ++h) {
           const int pp = p + h * 8, il = pp / DG_BJ, jl = pp % DG_BJ;
           const float2 v = make_float2(acc[nt * 4 + 2 * h] * q, acc[nt * 4 + 2 * h + 1] * q);
-          am = fmaxf(am, fmaxf(fabsf(v.x), fabsf(v.y)));
+          f8am = fmaxf(f8am, fmaxf(fabsf(v.x), fabsf(v.y)));
           *reinterpret_cast<__nv_fp8x2_storage_t*>(s8 + (il * 2 + (n >> 5)) * (DG_BJ * CH) + jl * CH + (n & 31)) =
               __nv_cvt_float2_to_fp8x2(v, __NV_SATFINITE, f8fmt ? __NV_E5M2 : __NV_E4M3);
         }
       }
-      for (int o = 16; o > 0; o >>= 1) am = fmaxf(am, __shfl_xor_sync(0xffffffff, am, o));
-      if (lane == 0) atomicMax(reinterpret_cast<int*>(dgamax), __float_as_int(am));   // (non-negative floats order as ints)
+      wg::proxy_fence();
       __syncthreads();
-      unsigned char* dst = f8tr ? DOT8 : DO8;
-      constexpr int VPR = DG_BJ * CH / 16;   // 16-byte vectors per staged row
-      for (int v = tid; v < DG_BI * 2 * VPR; v += DG_THREADS) {
-        const int row = v / VPR, c16 = v % VPR, il = row >> 1;
-        const size_t g = (size_t)((i0 + il) * CH + ck * (CHUNK / CH) + (row & 1)) * M + (size_t)j0 * CH + c16 * 16;
-        *reinterpret_cast<uint4*>(dst + g) = *reinterpret_cast<const uint4*>(s8 + row * (DG_BJ * CH) + c16 * 16);
+      if (tid == 0) {
+        tma::store_4d(f8tr ? &DOT_MAP : &DO_MAP, static_cast<uint32_t>(__cvta_generic_to_shared(sO)), 0, j0 * CH / 256,
+                      ck * (CHUNK / CH), i0);
+        tma::commit();
       }
       continue;
     }
@@ -1729,6 +1730,12 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
     }
   }
   if (tid == 0) tma::wait_all();     // the last stores must land before the kernel retires
+#if defined(MINIWORLD_OPM_FP8)
+  if (DO8 != nullptr) {
+    for (int o = 16; o > 0; o >>= 1) f8am = fmaxf(f8am, __shfl_xor_sync(0xffffffff, f8am, o));
+    if (lane == 0) atomicMax(reinterpret_cast<int*>(dgamax), __float_as_int(f8am));   // (non-negative floats order as ints)
+  }
+#endif
 }
 }  // namespace
 
@@ -2434,7 +2441,7 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor norm, torch
       reinterpret_cast<__nv_bfloat16*>(dzp.data_ptr<at::BFloat16>()), dbo_part.data_ptr<float>(),
       (int)ni, (int)nj, M, (int)after, dO_map
 #if defined(MINIWORLD_OPM_FP8)
-      , nullptr, nullptr, nullptr, nullptr, 0
+      , dO_map, nullptr, nullptr, nullptr, 0
 #endif
       );
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -2459,17 +2466,137 @@ std::vector<torch::Tensor> opm_dgrad_f8(torch::Tensor dz, torch::Tensor norm, to
   auto dbo_part = torch::empty({(ni / DG_BI) * (nj / DG_BJ), (long)CZ}, dz.options().dtype(torch::kFloat32));
   const int smem = 1024 + ((KZ / 64) * DG_NP * 64 + ((KZ >= 384 && KZ < 512) ? 2 : 1) * (KZ / 64) * CHUNK * 64 + DG_NP * CHUNK) * 2;
   C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dgrad_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 227 * 1024));
-  alignas(64) CUtensorMap unused{};
+  // each plane [N*CH, N*CH] bytes as a 4-D tensor (256-byte blocks of a row) x (row / 256) x c x i; the box = one chunk of a CTA:
+  // 2 blocks (16 j x 32 e) x 2 c x DG_BI i, staged [i][c][512 bytes]
+  const long M = nj * CH;
+  TORCH_CHECK(M % 256 == 0, "N * 32 must be a multiple of 256 bytes");
+  alignas(64) CUtensorMap maps[2];
+  for (int k = 0; k < 2; ++k) {
+    uint64_t gdim[4] = {256, (uint64_t)(M / 256), (uint64_t)CH, (uint64_t)ni};
+    uint64_t gstride[3] = {256, (uint64_t)M, (uint64_t)CH * M};
+    uint32_t bdim[4] = {256, DG_BJ * CH / 256, CHUNK / CH, DG_BI};
+    uint32_t estride[4] = {1, 1, 1, 1};
+    CUresult r = tma_encode()(&maps[k], CU_TENSOR_MAP_DATA_TYPE_UINT8, 4, (k ? dOT : dO).data_ptr(), gdim, gstride, bdim, estride,
+                              CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE, CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                              CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled (FP8 dO) failed: ", (int)r);
+  }
   dim3 grid(nj / DG_BJ, ni / DG_BI, 2);
   opm_dgrad_kernel<<<grid, DG_THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(dz.data_ptr<at::BFloat16>()), norm.data_ptr<float>(),
       reinterpret_cast<const __nv_bfloat16*>(bw2.data_ptr<at::BFloat16>()),
       reinterpret_cast<__nv_bfloat16*>(dzp.data_ptr<at::BFloat16>()), dbo_part.data_ptr<float>(),
-      (int)ni, (int)nj, (long)(nj * CH), (int)after, unused,
-      reinterpret_cast<unsigned char*>(dO.data_ptr()), reinterpret_cast<unsigned char*>(dOT.data_ptr()), dgq.data_ptr<float>(),
+      (int)ni, (int)nj, M, (int)after, maps[0], maps[1], reinterpret_cast<const unsigned char*>(dO.data_ptr()), dgq.data_ptr<float>(),
       dgamax.data_ptr<float>(), (int)fmt);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dO, dOT, dzp, reduce_partials(dbo_part)};
+}
+
+namespace {
+__device__ __forceinline__ float f8_pow2_over(float b, float fmax) {   // smallest 2^e >= b / fmax, in [2^-60, ...]
+  return fmaxf(exp2f(ceilf(log2f(fmaxf(b, 1e-30f) / fmax))), 0x1p-60f);
+}
+// max over pairs of |dz_ij|_2 / n_ij: one warp per pair (grid-stride), one atomic per block
+__global__ __launch_bounds__(256) void opm_f8_rownorm_kernel(const __nv_bfloat16* __restrict__ dz, const float* __restrict__ norm, long P,
+                                                             float* __restrict__ out) {
+  __shared__ float red[8];
+  const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
+  float best = 0.f;
+  for (long p = (long)blockIdx.x * 8 + w; p < P; p += (long)gridDim.x * 8) {
+    float ss = 0.f;
+    for (int v = lane; v < CZ / 8; v += 32) {
+      const uint4 raw = *reinterpret_cast<const uint4*>(dz + p * CZ + v * 8);
+      const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&raw);
+#pragma unroll
+      for (int t = 0; t < 4; ++t) { const float2 f = __bfloat1622float2(h[t]); ss += f.x * f.x + f.y * f.y; }
+    }
+    for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffff, ss, o);
+    best = fmaxf(best, sqrtf(ss) / norm[p]);
+  }
+  if (lane == 0) red[w] = best;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float m = red[0];
+    for (int k = 1; k < 8; ++k) m = fmaxf(m, red[k]);
+    atomicMax(reinterpret_cast<int*>(out), __float_as_int(m));
+  }
+}
+// sd = pow2(rmax * max_r |bw_r|_2 * (1 + 2^-6) / fmax): out = {sd, 1 / sd}
+__global__ __launch_bounds__(1024) void opm_f8_dscale_kernel(const float* __restrict__ rmax, const __nv_bfloat16* __restrict__ bw, float fmax,
+                                                             float* __restrict__ out) {
+  __shared__ float red[32];
+  float best = 0.f;
+  for (int r = threadIdx.x; r < NCH; r += blockDim.x) {
+    float ss = 0.f;
+    for (int z = 0; z < CZ; ++z) { const float f = __bfloat162float(bw[(long)r * CZ + z]); ss += f * f; }
+    best = fmaxf(best, sqrtf(ss));
+  }
+  for (int o = 16; o > 0; o >>= 1) best = fmaxf(best, __shfl_xor_sync(0xffffffff, best, o));
+  if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = best;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float m = 0.f;
+    for (int k = 0; k < (int)(blockDim.x >> 5); ++k) m = fmaxf(m, red[k]);
+    const float s = f8_pow2_over(rmax[0] * m * (1.f + 0x1p-6f), fmax);
+    out[0] = s; out[1] = 1.f / s;
+  }
+}
+// opm_fp8.bound_scales on device: per operand max_c sum_k |W16_ck| (sqrt(cm - 1) |gamma_k| + |beta_k|) (+ |pbias_c|), x (1 + 2^-6),
+// pow2 over 448 (floor 2^-30, 1 for an all-zero bound); out = {s_a, s_b, 1 / s_a, 1 / s_b}
+__global__ __launch_bounds__(64) void opm_f8_wscale_kernel(const float* __restrict__ g, const float* __restrict__ b,
+                                                           const __nv_bfloat16* __restrict__ wa, const __nv_bfloat16* __restrict__ wb,
+                                                           const float* __restrict__ pbias, float* __restrict__ out) {
+  __shared__ double red[64];
+  const int c = threadIdx.x & 31, op = threadIdx.x >> 5;
+  const __nv_bfloat16* w = op ? wb : wa;
+  const double sq = sqrt((double)(CM_MSA - 1));
+  double acc = 0.0;
+  for (int k = 0; k < CM_MSA; ++k)
+    acc += fabs((double)__bfloat162float(w[c * CM_MSA + k])) * (sq * fabs((double)g[k]) + fabs((double)b[k]));
+  if (pbias != nullptr) acc += fabs((double)pbias[op * 32 + c]);
+  red[threadIdx.x] = acc;
+  __syncthreads();
+  if (c == 0) {
+    double m = 0.0;
+    for (int k = 0; k < 32; ++k) m = fmax(m, red[op * 32 + k]);
+    const float a = (float)(m * (1.0 + 0x1p-6));
+    float s = a > 0.f ? fmaxf(exp2f(ceilf(log2f(fmaxf(a, 1e-30f) / 448.f))), 0x1p-30f) : 1.f;
+    out[op] = s; out[2 + op] = 1.f / s;
+  }
+}
+}  // namespace
+
+// [2] = {sd, 1 / sd}: the dO scale from the Cauchy-Schwarz bound (no host sync)
+torch::Tensor opm_f8_dscale(torch::Tensor dz, torch::Tensor norm, torch::Tensor bw, double fmax) {
+  TORCH_CHECK(dz.is_contiguous() && dz.scalar_type() == torch::kBFloat16 && dz.size(-1) == CZ && norm.is_contiguous()
+              && norm.scalar_type() == torch::kFloat32 && norm.numel() * CZ == dz.numel() && bw.is_contiguous()
+              && bw.scalar_type() == torch::kBFloat16 && bw.numel() == (long)NCH * CZ, "opm_f8_dscale: dz [N, N, CZ] bf16, norm [N, N], bw [NCH, CZ]");
+  auto rmax = torch::zeros({1}, norm.options());
+  auto out = torch::empty({2}, norm.options());
+  const long P = norm.numel();
+  const int blocks = (int)std::min<long>((P + 7) / 8, 8L * at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
+  auto st = at::cuda::getCurrentCUDAStream();
+  opm_f8_rownorm_kernel<<<blocks, 256, 0, st>>>(reinterpret_cast<const __nv_bfloat16*>(dz.data_ptr()), norm.data_ptr<float>(), P,
+                                                 rmax.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  opm_f8_dscale_kernel<<<1, 1024, 0, st>>>(rmax.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(bw.data_ptr()), (float)fmax,
+                                           out.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
+// [4] = {s_a, s_b, 1 / s_a, 1 / s_b}: opm_fp8.bound_scales in one launch
+torch::Tensor opm_f8_wscale(torch::Tensor gamma, torch::Tensor beta, torch::Tensor wa, torch::Tensor wb, c10::optional<torch::Tensor> pbias) {
+  TORCH_CHECK(gamma.scalar_type() == torch::kFloat32 && beta.scalar_type() == torch::kFloat32 && gamma.numel() == CM_MSA && beta.numel() == CM_MSA
+              && wa.scalar_type() == torch::kBFloat16 && wb.scalar_type() == torch::kBFloat16 && wa.numel() == 32 * CM_MSA && wb.numel() == 32 * CM_MSA
+              && gamma.is_contiguous() && beta.is_contiguous() && wa.is_contiguous() && wb.is_contiguous(), "opm_f8_wscale: fp32 gamma / beta, bf16 Wa / Wb");
+  TORCH_CHECK(!pbias || (pbias->scalar_type() == torch::kFloat32 && pbias->numel() == 64 && pbias->is_contiguous()), "pbias fp32 [64]");
+  auto out = torch::empty({4}, gamma.options());
+  opm_f8_wscale_kernel<<<1, 64, 0, at::cuda::getCurrentCUDAStream()>>>(
+      gamma.data_ptr<float>(), beta.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wa.data_ptr()),
+      reinterpret_cast<const __nv_bfloat16*>(wb.data_ptr()), pbias ? pbias->data_ptr<float>() : nullptr, out.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
 }
 
 namespace {
@@ -3125,6 +3252,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_dgrad_f8", &opm_dgrad_f8, "FP8 training: dO and dO^T as e4m3 / e5m2 bytes (+ dz/n, dbo)", py::arg("dz"), py::arg("norm"),
         py::arg("bw2"), py::arg("ni"), py::arg("nj"), py::arg("after"), py::arg("dgq"), py::arg("dgamax"), py::arg("fmt"));
   m.def("opm_t8", &opm_t8, "[R, C] -> [C, R] for 1-byte tensors");
+  m.def("opm_f8_dscale", &opm_f8_dscale, "FP8 training: {sd, 1 / sd} of dO from a bound", py::arg("dz"), py::arg("norm"), py::arg("bw"), py::arg("fmax"));
+  m.def("opm_f8_wscale", &opm_f8_wscale, "FP8: {s_a, s_b, 1 / s_a, 1 / s_b} from the weights", py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("pbias") = py::none());
 #endif
   m.def("opm_native_pack",&opm_native_pack,py::arg("p"),py::arg("infer")=false,py::arg("pbl")=py::none(),py::arg("pbr")=py::none());
   m.def("opm_native_prologue",&opm_native_prologue,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true,py::arg("dmin")=1.0,py::arg("doff")=0.0);

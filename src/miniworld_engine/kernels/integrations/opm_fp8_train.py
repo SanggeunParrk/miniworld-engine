@@ -4,7 +4,7 @@ GEMMs of the module -- the grouped product and its two backward products, ~98 % 
 Forward   the FP8 wide prologue (``opm_train._ext(fp8=True)``: LN + both projections + mask, e4m3 A2 / BT [(i,c), s], weight-bound scales
           ``opm_fp8.bound_scales``, recomputed every call from the live weights), the LayerNorm statistics, the bf16 mask and the exact
           count table -> O = A2 . BT^T on cuBLASLt e4m3 (``opm_fp8.product``, bf16 O, kept for dWo) -> the default epilogue.
-Backward  ``opm_dgrad_f8``: dO = (dz / n) . Wo as e5m2 (default) or e4m3 bytes in BOTH layouts [(i,c),(j,e)] and [(j,e),(i,c)] from one
+Backward  ``opm_dgrad_f8``: dO = (dz / n) . Wo as e4m3 (default) or e5m2 bytes in BOTH layouts [(i,c),(j,e)] and [(j,e),(i,c)] from one
           launch (the K-major operands cuBLASLt's TN FP8 form needs), dz/n and dbo as the default dgrad;
           ``opm_t8``: e4m3 A2 / BT -> [s, (i,c)] (byte transposes);
           dA = BT^T . dO^T and dB = A2^T . dO on cuBLASLt (e4m3 x e5m2 / e4m3, fp32 accumulation, bf16 out);
@@ -14,8 +14,8 @@ Scales    per tensor, powers of two, from bounds (nothing can saturate, no calib
           (Cauchy-Schwarz), x (1 + 2^-6) for the bf16 rounding of dz / n, to the next power of two over the format's max (448 / 57344).
           The mean normalisation by the pair count stays exact: the count table is the default's fp32 integer table, divided in fp32.
 
-Switch: ``MINIWORLD_OPM_FP8_TRAIN`` = ``e5m2`` (dO e5m2) | ``e4m3`` (dO e4m3) | unset / empty / ``0`` (off); ``MINIWORLD_FP8_TRAIN=1`` turns it on
-as ``e5m2`` unless the per-module variable is set.  ``MINIWORLD_OPM_FP8_TRAIN_MINS=<s>``: the padded-depth gate (default 1024; 0 = none).
+Switch: ``MINIWORLD_OPM_FP8_TRAIN`` = ``e4m3`` (dO e4m3, measured more accurate) | ``e5m2`` (dO e5m2) | unset / empty / ``0`` (off); ``MINIWORLD_FP8_TRAIN=1`` turns it on
+as ``e4m3`` unless the per-module variable is set.  ``MINIWORLD_OPM_FP8_TRAIN_MINS=<s>``: the padded-depth gate (default 1024; 0 = none).
 Eager autograd only (not under torch.compile); H100 sm_90a, bf16 activations, batch 1, the ``opm_train`` widths; everything else, and the
 switch off, runs the default ``opm_train`` path unchanged.
 """
@@ -33,7 +33,7 @@ E5M2_MAX = 57344.0
 def _mode() -> str | None:
     v = os.environ.get("MINIWORLD_OPM_FP8_TRAIN")
     if v is None and os.environ.get("MINIWORLD_FP8_TRAIN", "").strip().lower() in ("1", "on", "true"):
-        v = "e5m2"
+        v = "e4m3"
     v = (v or "").strip().lower()
     if v in ("", "0", "off", "none"):
         return None
@@ -79,17 +79,6 @@ def serves(msa: torch.Tensor, d_msa: int, d_pair: int, *, interchain: bool = Fal
     return msa.shape[1] + (-msa.shape[1] % 256) >= MIN_S
 
 
-def _pow2(b: torch.Tensor, fmax: float) -> torch.Tensor:
-    return torch.exp2(torch.ceil(torch.log2(b.clamp_min(1e-30) / fmax))).clamp_min(2.0**-60)
-
-
-def _dgrad_scale(dz: torch.Tensor, norm: torch.Tensor, bw: torch.Tensor, fmax: float) -> torch.Tensor:
-    """[1] dequantisation scale of dO from the Cauchy-Schwarz bound (device ops, no sync)."""
-    r = (torch.linalg.vector_norm(dz, dim=-1, dtype=torch.float32) / norm).amax()
-    w = torch.linalg.vector_norm(bw, dim=1, dtype=torch.float32).amax()
-    return _pow2(r * w * (1.0 + 2.0**-6), fmax).reshape(1)
-
-
 class OpmFp8TrainFn(torch.autograd.Function):
     """(msa [1, S, N, cm] padded, mask, lnw, lnb, wa, wb, wo, bo, residual (empty: none), pbias (empty: none), eps, after, dmin, doff) -> z."""
 
@@ -108,25 +97,28 @@ class OpmFp8TrainFn(torch.autograd.Function):
         ext = ot._ext(msa.device, native=True, tma=False, cm=cm, cz=cz, fp8=True)
         pb = pbias.detach().float().contiguous() if pbias.numel() else None
         res = residual if residual.numel() else None
-        s = opm_fp8.bound_scales(lnw, lnb, wa, wb, pb).to(m.device)  # [2] A2 / BT dequantisation scales (weights change every step)
         dkw = {} if (dmin, doff) == (1.0, 0.0) else {"dmin": float(dmin), "doff": float(doff)}
         peak = _peak_buffer(m.device)
+        gam, bet = lnw.detach().float().contiguous(), lnb.detach().float().contiguous()
+        wa16, wb16 = wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous()
+        # {s_a, s_b, 1 / s_a, 1 / s_b}: opm_fp8.bound_scales, every call (the weights move)
+        sc = ext.opm_f8_wscale(gam, bet, wa16, wb16, pb)
         a8, b8, stats, mask16, norm = ext.opm_prologue_wide(
             m,
             mk,
-            lnw.detach().float().contiguous(),
-            lnb.detach().float().contiguous(),
-            wa.detach().to(bf).contiguous(),
-            wb.detach().to(bf).contiguous(),
+            gam,
+            bet,
+            wa16,
+            wb16,
             float(eps),
             True,
             pb,
             True,
-            f8q=(1.0 / s).contiguous(),
+            f8q=sc[2:4],
             f8amax=peak,
             **dkw,
         )
-        sa, sb = s[0:1].clone(), s[1:2].clone()
+        sa, sb = sc[0:1], sc[1:2]
         o = opm_fp8.product(a8, b8, (sa, sb), n)
         z = ext.opm_epilogue(
             o, norm, wo.detach().to(bf).contiguous(), bo.detach().to(bf).float().contiguous(), n, n, res, int(after), **dkw
@@ -151,9 +143,10 @@ class OpmFp8TrainFn(torch.autograd.Function):
         bw2 = torch.cat([bw, bw.view(ch, ch, cz).transpose(0, 1).reshape(ch * ch, cz)]).contiguous()  # + rows (e, c): the dO^T plane
         fmt = 1 if MODE == "e5m2" else 0
         dz0 = dz[0].contiguous()
-        sd = _dgrad_scale(dz0, norm, bw, E5M2_MAX if fmt else E4M3_MAX)
+        sdq = ext.opm_f8_dscale(dz0, norm, bw, E5M2_MAX if fmt else E4M3_MAX)  # {sd, 1 / sd}
+        sd = sdq[0:1]
         peak = _peak_buffer(dz.device)
-        d8, d8t, dzp, dbo = ext.opm_dgrad_f8(dz0, norm, bw2, n, n, int(ctx.after), (1.0 / sd).contiguous(), peak[2:3], fmt)
+        d8, d8t, dzp, dbo = ext.opm_dgrad_f8(dz0, norm, bw2, n, n, int(ctx.after), sdq[1:2], peak[2:3], fmt)
         a8t, b8t = ext.opm_t8(a8), ext.opm_t8(b8)  # [s, (i,c)]: K = (i,c) contiguous
         dA = opm_fp8.product(b8t, d8, (sb, sd), n)  # [s, (i,c)] = sum_(j,e) BT[(j,e), s] dO[(i,c), (j,e)]
         dB = opm_fp8.product(a8t, d8t, (sa, sd), n)  # [s, (j,e)] = sum_(i,c) A2[(i,c), s] dO[(i,c), (j,e)]

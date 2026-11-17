@@ -139,3 +139,20 @@ def test_gradients_against_fp64(mode, length, depth, cm, cz, after, fmt) -> None
         assert rms < 0.06 and mx < 0.12, (k, rms, mx)
     g2 = _grads(mod, msa, mask, gz)
     assert all(torch.equal(g[k], g2[k]) for k in g)
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90a)")
+@pytest.mark.parametrize("cm,bias", [(64, False), (128, True)])
+def test_weight_scales_match_bound_scales(cm, bias) -> None:
+    from miniworld_engine.kernels.integrations import opm_fp8
+
+    cz = 128 if cm == 64 else 256
+    ext = opm_train._ext(torch.device("cuda"), native=True, tma=False, cm=cm, cz=cz, fp8=True)
+    gen = torch.Generator(device="cuda").manual_seed(cm)
+    lnw = 1 + 0.1 * torch.randn(cm, device="cuda", generator=gen)
+    lnb = 0.2 * torch.randn(cm, device="cuda", generator=gen)
+    wa, wb = (torch.randn((32, cm), device="cuda", generator=gen) / cm**0.5 for _ in range(2))
+    pb = 0.1 * torch.randn(64, device="cuda", generator=gen) if bias else None
+    sc = ext.opm_f8_wscale(lnw, lnb, wa.to(torch.bfloat16), wb.to(torch.bfloat16), pb)
+    ref = opm_fp8.bound_scales(lnw, lnb, wa, wb, pb)
+    assert torch.equal(sc[:2], ref) and torch.equal(sc[2:], 1.0 / ref)
