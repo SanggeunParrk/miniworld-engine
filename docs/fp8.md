@@ -1400,6 +1400,34 @@ Prebuild: the two FP8 cubins are not in the prebuild plan (first FP8 call JIT-co
 - CPU tests `tests/cpu/test_prebuild_plan.py`, `test_requirements.py`, `test_judge.py`: 1188 passed. GPU tests `tests/gpu/test_trimul_fp8_planes.py`, `test_trimul_fp8_k1.py`: 30 passed (one job, 1 GPU).
 - Prebuild: see "Known limits" (0 compiled with a prebuilt bundle and an empty JIT cache).
 
+## End level, AF3 FoldBench, all routes (2026-11-17, this tree ffcd465f7)
+
+AF3 on the 27 FoldBench targets of the paper run (3 additional trunk passes, 200 steps, 5 samples, trunk_seed = diffusion_seed = 0, mode
+exact, bf16, FoldBench's evaluator), control bf16 2.5.12 (this tree with every switch off is byte-identical to it end to end). Full tables:
+`paper/data/foldbench_runs_fp8all/RESULTS.md`, `paper/data/foldbench_runs_fp8safe/RESULTS.md`; speed: `paper/data/fp8all_speed/RESULTS.md`,
+`paper/data/fp8safe_speed/RESULTS.md` (FoldForge benchmark mode, compile + CUDA graph, warm forward, interleaved arms, same node per target).
+Flag = mean of 5 worse than the control by more than max(2 x the larger sample sd, floor 0.02 lDDT / 0.05 DockQ, lDDT-PLI).
+
+| arm | routes | flagged targets | lDDT mean5 - bf16 2.5.12 (22 targets) | same-sample RMSD median | mean signed dpLDDT | whole forward / 2.5.12 (128 .. 2008 tokens) |
+|---|---|---|---|---|---|---|
+| all-FP8 | TriAttn PV + q / k, TriMul, OPM bound, PWA, Transition, token DiT qkvg + expand, atom DiT | 3 (8j62 -0.045, 7uyn -0.023, 8xgu -0.021) | -0.0148 | 0.83 A | +0.120 | 0.974 .. 0.791 |
+| token DiT qkvg only (+ every other route) | as all-FP8, `MINIWORLD_TOKEN_DIT_FP8=qkvg` | 2 (8j62 -0.053, 8xgu -0.027) | -0.0086 | 0.70 A | -0.145 | - |
+| **fp8safe** | every route except token DiT | **0** | -0.0019 (top-1 +0.0021) | 0.60 A | +0.012 | 0.988 .. 0.806 |
+| FP8 earlier | TriAttn PV + TriMul planes (2.5.9 tree) | 0 | - | 0.25 A (vs its 2.5.9 control) | +0.078 | 1.000 .. 0.851 |
+
+References: bf16 2.5.12 vs PyTorch 0.38 A, different samples of bf16 2.5.12 1.71 A.
+
+- The loss is the token DiT **qkvg** placement. Split on the 3 flagged + 2 control targets (every other route on): `td=qkvg` reproduces the
+  drop (8j62 -0.056 / -0.053 in two runs), `td=expand` stays at -0.007 .. +0.001 (like token DiT off). This is the reverse of the module-level
+  ranking in "Token DiT forward" (qkvg 0.9-1.3 % update error, inside the judge tolerance; expand 5.4 %): random-weight module error did not
+  predict the end-level effect. qkvg fires only at M = 5 L >= 2560 rows (the 12 targets >= 392 tokens), where the drop is.
+- PWA FP8 never fires on AF3 (8 heads x 8 channels go to `pwa_wide`); the single-representation Transition (D384) never passes its row gate.
+- fp8safe keeps the full trunk gain (trunk 0.974 .. 0.736 of 2.5.12, equal to all-FP8 within 0.003) and gives up 1.3-3.9 % of the whole
+  forward against all-FP8 (token DiT FP8 was 15-60 % of the diffusion gain; atom DiT FP8 stays).
+- Not done: `td=expand` alone over all 27 targets (clean on the 5 split targets; it would recover part of the diffusion gain).
+- Two runs with the same switches are not byte-identical when the first target of the process differs: the process-wide static scales
+  (TriAttn, TriMul, Transition calib) are taken on the first calls (same-sample RMSD 0.23 A between the two qkvg runs).
+
 ## Open decisions (owner)
 
 - FP8 tolerance / registry row: none exists (the registry dtype vocabulary is `float32|master`); the TriMul FP8 route is 2.3-3.1 % in the engine-standard
