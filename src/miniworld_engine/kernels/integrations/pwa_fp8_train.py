@@ -62,6 +62,8 @@ IMPL = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_IMPL", "fused")
 HISTORY = int(os.environ.get("MINIWORLD_PWA_FP8_TRAIN_HISTORY", "16"))
 MARGIN = float(os.environ.get("MINIWORLD_PWA_FP8_TRAIN_MARGIN", "2"))
 FAST_ACCUM = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_FASTACC") == "1"
+#: ln_vt8n (blocks per SM, TMA stages): measured best of {1, 2} x {2, 3, 4} (S1024 N768: 245 us at (1, 4), 310 at (2, 3))
+VT8N_CFG = (1, 4)
 
 E4M3_MAX, E5M2_MAX = 448.0, 57344.0
 W_SCALE = 2.0**-8
@@ -334,7 +336,7 @@ def forward_values(
             raise RuntimeError("PWA FP8 training: the first call of a module must be eager (it seeds the v scale)")
         if fused_:
             probe = torch.zeros(1, device=m.device)
-            _vt8_nat().ln_vt8n(m, mw, mb, wv16, eps_m, torch.ones(1, device=m.device), probe, 2, 3)
+            _vt8_nat().ln_vt8n(m, mw, mb, wv16, eps_m, torch.ones(1, device=m.device), probe, *VT8N_CFG)
             site.seed(probe)
         else:
             v, _ = k["lnvg"].ln_vg(m, mw, mb, wv16, eps_m, 2, 3, 1)
@@ -342,7 +344,7 @@ def forward_values(
     vs, vinv = site.next_scale()
     v_bf = None
     if fused_:
-        vt8, v8, y = _vt8_nat().ln_vt8n(m, mw, mb, wv16, eps_m, vinv, site.amax, 2, 3)
+        vt8, v8, y = _vt8_nat().ln_vt8n(m, mw, mb, wv16, eps_m, vinv, site.amax, *VT8N_CFG)
     else:
         v_bf, y = k["lnvg"].ln_vg(m, mw, mb, wv16, eps_m, 2, 3, 1)
         site.amax.copy_((v_bf.abs().amax().float() * vinv).reshape(1))
