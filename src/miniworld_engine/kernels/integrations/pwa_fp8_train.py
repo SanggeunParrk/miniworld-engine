@@ -70,13 +70,18 @@ _TORCH = {"e4m3": torch.float8_e4m3fn, "e5m2": torch.float8_e5m2}
 _FMAX = {"e4m3": E4M3_MAX, "e5m2": E5M2_MAX}
 
 
+#: measurement only: route the call through this path with no FP8 placement (the native bf16 kernels at a shape the default serves with
+#: the plain builds), to separate the native-kernel part of a gain from the FP8 part
+NATIVE_ONLY = False
+
+
 def active() -> bool:
     return bool(PLACES)
 
 
 def serves(msa: torch.Tensor) -> bool:
     """True when the FP8 training route takes this grad-enabled pwa_train call (8 x 32 widths checked by the caller)."""
-    if not PLACES or not msa.is_cuda or msa.ndim != 4 or msa.shape[0] != 1 or msa.shape[3] != 64:
+    if not (PLACES or NATIVE_ONLY) or not msa.is_cuda or msa.ndim != 4 or msa.shape[0] != 1 or msa.shape[3] != 64:
         return False
     s, n = msa.shape[1], msa.shape[2]
     return torch.cuda.get_device_capability(msa.device) == (9, 0) and n % 128 == 0 and 0 < n <= 1024 and s % 2 == 0 and s > 0
