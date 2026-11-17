@@ -3,8 +3,8 @@
 - Chai-1's output layouts (the ending node's untransposed update, the confidence head's second out-projection) with heads of 32
   channels take the width-generic kernels (``triattn_h100_sm90``, fp16 core): the result matches the fp32 reference as the
   standard layouts do.
-- Heads of 64 channels (the ``h100_dh`` core): the 64-key tiles past each sample's last attended key are not computed
-  (``h100_sm90.key_tiles(mask, L, 64)``): bitwise the same output as with every tile.
+- Heads of 64 channels (the ``h100_dh`` cores): the key tiles past each sample's last attended key are not computed
+  (``h100_sm90.key_tiles(mask, L, 64)``, the fp16 wgmma core ``KEY_TILE``): bitwise the same output as with every tile.
 - Both deterministic (two calls, the same bits).
 """
 
@@ -95,8 +95,9 @@ def test_dh_skip_is_bitwise(cls, d: int, kw: dict, starting: bool, monkeypatch: 
 
 @pytest.mark.parametrize("L", [128, 384, 512])
 def test_d64_wgmma_core_matches_the_mma_sync_core(L: int) -> None:
-    """The wgmma core of 64-channel heads (``h100_dh.ext_d64``) against the mma.sync core on the same operands: two samples (one with a
-    hole and half its keys padded), a gate bias; both cores round P to bf16, so they agree to a few bf16 ulps of u."""
+    """The fp16 wgmma core of 64-channel heads (``h100_dh.ext_d64``) against the mma.sync core on the same values (the bf16 operands are
+    exact in fp16; the bias / scale is a power-of-two scaling): two samples (one with a hole and half its keys padded), a gate bias; they
+    differ by the rounding of the scores (fp16) and of P (fp16 against bf16), a few bf16 ulps of u."""
     _needs_h100()
     from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
 
@@ -111,9 +112,11 @@ def test_d64_wgmma_core_matches_the_mma_sync_core(L: int) -> None:
     kt = hs.key_tiles(mask, L, 64)
     assert h100_dh.wgmma_d64(L, D)
     ref = h100_dh.ext().triattn_dh_forward(proj, bias, gb, H, D, D**-0.5, h100_dh.query_tile(L, D), kt).float()
-    u = h100_dh.ext_d64().triattn_d64_forward(proj, bias, gb, H, D**-0.5, kt)
-    assert torch.equal(u, h100_dh.ext_d64().triattn_d64_forward(proj, bias, gb, H, D**-0.5, kt))  # deterministic
-    assert torch.equal(u, h100_dh.ext_d64().triattn_d64_forward(proj, bias, gb, H, D**-0.5))  # the skipped tiles change nothing
+    core = h100_dh.ext_d64()
+    p16, sb16, kt16 = proj.half(), (bias.float() / D**-0.5).half(), hs.key_tiles(mask, L, core.KEY_TILE)
+    u = core.triattn_d64_forward(p16, sb16, gb, H, D**-0.5, kt16)
+    assert torch.equal(u, core.triattn_d64_forward(p16, sb16, gb, H, D**-0.5, kt16))  # deterministic
+    assert torch.equal(u, core.triattn_d64_forward(p16, sb16, gb, H, D**-0.5))  # the skipped tiles change nothing
     d = (u.float() - ref).abs()
     assert torch.isfinite(u).all()
     assert d.max() < 0.05 and d.mean() < 5e-4, (d.max(), d.mean())

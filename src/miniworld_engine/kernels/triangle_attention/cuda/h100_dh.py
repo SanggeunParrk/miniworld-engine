@@ -3,10 +3,11 @@ standard output) do not take: heads of 64 channels (Chai-1's trunk, RoseTTAFold3
 
     y = LN(pair) (the generic glue kernel; the ending node reads the pair transposed)  ->  q | k | v | g = y W^T and the pair bias
     (cuBLAS; the bias from the transposed pair or, ``transposed_bias=False``, from the pair as it is; masked keys -inf)  ->  the core
-    (u = sigmoid(g [+ gate bias]) softmax(q k^T / sqrt(d) + bias) v; the 64-key tiles past each sample's last attended key skipped):
-    64-channel heads at L a multiple of 128 on the wgmma core ``h100_sources/triattn_d64_sm90.cu`` (``ext_d64``: two pair rows per CTA
-    share the bias tile, TMA ring, fp32 softmax), else the mma.sync core ``h100_sources/triattn_dh_sm90.cu``  ->  u Wo^T
-    [+ out bias] (cuBLAS), back into the pair's layout:
+    (u = sigmoid(g [+ gate bias]) softmax(q k^T / sqrt(d) + bias) v; the key tiles past each sample's last attended key skipped):
+    64-channel heads at L a multiple of 128 on the fp16 wgmma core ``h100_sources/triattn_d64_sm90.cu`` (``ext_d64``: y, q | k | v | g and
+    bias / scale in fp16 from the glue's fp16 LayerNorm / bias kernels and fp16 GEMMs (``_front_fp16``); two pair rows per CTA share the
+    bias tile, fp16 score accumulator initialised with the bias, f16x2 exponentials), else the mma.sync core
+    ``h100_sources/triattn_dh_sm90.cu`` (bf16 operands)  ->  u Wo^T [+ out bias] (cuBLAS), back into the pair's layout:
 
     standard           the ending node's update transposed back
     untransposed       Chai-1's ending node: the update as the transposed pair has it (``untransposed_output``)
@@ -51,19 +52,48 @@ def ext():
 QUERY_TILE_128_MIN = 384
 
 
-#: inference of 64-channel heads on the wgmma core (h100_sources/triattn_d64_sm90.cu: two pair rows per CTA share the bias tile, TMA, fp32
-#: softmax) for L a multiple of 128 from this length on, else the mma.sync core (H100, core alone, padded mask: 0.94 / 0.84 / 0.78 / 0.78 /
-#: 0.74 / 0.69 / 0.68 / 0.65 / 0.60 of the mma.sync time at L 128 / 256 / 384 / 512 / 640 / 768 / 1024 / 1536 / 2048)
+#: inference of 64-channel heads on the wgmma core (h100_sources/triattn_d64_sm90.cu: fp16 operands and scores, two pair rows per CTA share
+#: the bias tile, TMA) for L a multiple of 128 from this length on, else the mma.sync core.  2.5.13 candidate (cand/ta-d64): the fp16 core
+#: replaced the bf16-operand / fp32-softmax wgmma core (2.5.12), core alone 1.18-1.44x faster (L 512-2048; see docs/h100/triangle_attention.md)
 D64_WGMMA_MIN = 128
 
 
 @functools.lru_cache(maxsize=None)
 def ext_d64():
-    """The wgmma inference core of 64-channel heads."""
+    """The wgmma inference core of 64-channel heads (fp16 operands: ``_front_fp16`` makes them)."""
     from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import _flags
 
     ensure_cuda_home()
     return load_extension(name="triattn_h100_d64", sources=[str(_SRC / "triattn_d64_sm90.cu")], extra_cuda_cflags=_flags(), verbose=False)
+
+
+@torch.autocast("cuda", enabled=False)  # the fp16 GEMMs as made: an enclosing bf16 autocast (master weights) would turn them bf16
+def _front_fp16(module, pack, x, lnw, lnb, mask, B: int, L: int, H: int, trans: bool):
+    """The fp16 core's operands: proj = y [Wq; Wk; Wv; Wg]^T fp16 (y = LN(x) in fp16, the attention's row layout) and the head-major
+    sbias = bias / scale fp16 (masked keys -inf) from the rows the attention reads or (an ending node on ``transposed_bias=False``) the
+    pair as it is -- the width-generic glue's fp16 LayerNorm / bias kernels, cuBLAS fp16 GEMMs."""
+    from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _glue
+
+    g = _glue()
+    C = x.shape[1]
+    eps = module.ln_pair.eps
+    scale = head_dim(module) ** -0.5
+    flip = trans and not module.transposed_bias
+    m = mask if mask is not None else x.new_empty(0, dtype=torch.bool)
+    wide = 128 < C <= 512 and C % 16 == 0  # the LayerNorm kernel that also makes the bias (ln_bias_fwd / ln_bias_blocks)
+    if wide and not flip:
+        y, sbias = g.ln_bias_fwd(x, lnw, lnb, pack["wb16"], m, eps, L, trans, H, scale)
+    else:
+        y = g.ln_fwd(x, lnw, lnb, eps, L, trans, True)[0]
+        if wide:  # the flipped bias from the pair as it is, sample by sample (no y of those rows written)
+            sbias = x.new_empty(B, H, L, L, dtype=torch.float16)
+            for b in range(B):
+                mb = m[b : b + 1] if m.numel() else m
+                g.ln_bias_blocks(x[b * L * L : (b + 1) * L * L], lnw, lnb, pack["wb16"], mb, sbias[b : b + 1], 0, eps, L, H, scale)
+        else:
+            yb = g.ln_fwd(x, lnw, lnb, eps, L, False, True)[0] if flip else y
+            sbias = g.front_bias(torch.mm(yb, pack["wb16"].t()), m, B, L, H, 0, scale)
+    return torch.mm(y, pack["wcat16"].t()), sbias
 
 
 def wgmma_d64(length: int, d: int) -> bool:
@@ -140,6 +170,10 @@ def _pack(module):
     }
     if getattr(module, "dual_output", False):
         out["wo_t"] = module.to_out_t.weight.to(bf).contiguous()
+    if head_dim(module) == 64:  # the fp16 core's front: the weights rounded to fp16 from the module's own (fp32 master) values
+        wb = module.to_bias.weight
+        out["wcat16"] = torch.cat([t.half() for t in w]).contiguous()
+        out["wb16"] = F.pad(wb.half(), (0, 0, 0, -wb.shape[0] % 8)).contiguous()  # the bias rows, zero-padded to a multiple of 8
     return out
 
 
@@ -162,6 +196,12 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> tor
     trans = not module.starting
     x = pair_p.contiguous().view(-1, C)
     lnw, lnb = module.ln_pair.weight.float().contiguous(), module.ln_pair.bias.float().contiguous()
+    gb = pack["gb"] if pack["gb"] is not None else x.new_empty(0, dtype=torch.float32)
+    if wgmma_d64(L, D):  # the fp16 front and core; the KEY_TILE-key tiles past each sample's last attended key skipped (the same bits)
+        proj16, sbias = _front_fp16(module, pack, x, lnw, lnb, mask, B, L, H, trans)
+        core = ext_d64()
+        u = core.triattn_d64_forward(proj16, sbias, gb, H, D**-0.5, key_tiles(mask, L, core.KEY_TILE))
+        return _tail(module, pack, u, pair_p, B, L, L0, C, trans)
     y = _glue().ln_fwd(x, lnw, lnb, module.ln_pair.eps, L, trans)[0]  # the attention's row layout
     proj = torch.mm(y, pack["wcat"].t())
     # the pair bias [B, H, L, L]: from the rows the attention reads, or (an ending node on ``transposed_bias=False``) the pair as it is
@@ -169,13 +209,14 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> tor
     bias = torch.mm(yb, pack["wb"].t()).view(B, L, L, H).permute(0, 3, 1, 2)
     if mask is not None:
         bias = bias.masked_fill(~mask[:, None, None, :], float("-inf"))
-    gb = pack["gb"] if pack["gb"] is not None else proj.new_empty(0, dtype=torch.float32)
     # the 64-key tiles past each sample's last attended key (masked in every row, the padding included) skipped: the same bits
     kt = key_tiles(mask, L, 64)
-    if wgmma_d64(L, D):
-        u = ext_d64().triattn_d64_forward(proj, bias.contiguous(), gb, H, D**-0.5, kt)
-    else:
-        u = ext().triattn_dh_forward(proj, bias.contiguous(), gb, H, D, D**-0.5, query_tile(L, D), kt)
+    u = ext().triattn_dh_forward(proj, bias.contiguous(), gb, H, D, D**-0.5, query_tile(L, D), kt)
+    return _tail(module, pack, u, pair_p, B, L, L0, C, trans)
+
+
+def _tail(module, pack, u, pair_p, B: int, L: int, L0: int, C: int, trans: bool) -> torch.Tensor:
+    """u Wo^T [+ out bias] (cuBLAS), back into the pair's layout (standard / untransposed / dual), + the pair."""
 
     def project(w):
         t = torch.mm(u, w.t())
