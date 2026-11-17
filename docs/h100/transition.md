@@ -72,8 +72,11 @@ cuBLAS (`torch.mm` / `addmm`), not engine kernels.
 0. fp32 with TF32 allowed at the f32io shapes (`F32_SHAPES` inference, `F32_TRAIN_SHAPES` training): `fused_wide_sm90a.transition_f32_sm90a`
    (below).
 1. `fused_generic_sm90a`, if `prefers_generic` (bf16 only; at few rows the row-tile-per-CTA builds leave SMs idle). Row limits per D,
-   (inference, training): D64 (3072, 3072), D128 (6144, 3072), D256 (6144, 12288), D384 (16384, 16384), D512 (16384, 12288), D768 (768, 768). D64
+   (inference, training): D64 (3072, 3072), D128 (6144, 3072), D256 (6144, 12288), D384 (16384, 16384), D512 (16384, 12288), D768 (16384, 768). D64
    inference never prefers it; D128 inference prefers it up to 512 rows (n 2) / 4096 rows (n 4).
+   D768 inference: the wide D768 build is the training structure (it writes a / b and packs [Wa; Wb] per call) and measured 1.6 - 2.1x
+   the generic kernels at 1024 - 8192 rows (H100, CUDA graph: 1024 rows 47.9 / 23.4 us, 2048 63.2 / 33.9, 4096 79.7 / 53.9), so no
+   requirement row reaches it at inference; training (rows up to 768 in the requirements) stays generic up to 768 rows.
 2. `fused_sm90a`: D128, hidden 256 or 512, bf16, rows a multiple of 128.
 3. `fused_wide_sm90a`: D 64 / 256 / 384 / 512 (n 2, 4) and D768 (n 2), bf16, rows a multiple of 128.
 4. `fused_generic_sm90a`: D a multiple of 64 up to 1024, hidden a multiple of 128, any row count, bf16, or fp32 when TF32 is allowed.
@@ -108,7 +111,7 @@ hidden axis and reduce-scattered d_xn through DSMEM was 2.5x slower and was drop
 | 64 | one fused kernel (2 CTAs / SM); inference at a multiple of 64 rows: 64-row tile builds, LN in fragment layout, 3 or 2 CTAs / SM (`_d64_variant`) | fused two-role kernel + partial reduction (26 weight replicas at n 2, 16 at n 4) |
 | 256 | one fused kernel | `gate` -> fp32-output cuBLAS dW GEMMs -> `dxln_partials` (d_xn + LN backward) -> `reduce_affine` |
 | 384, 512 | `ln_swiglu_gemm` (LN inside the expand GEMM, xn tile resident per 128-row block) + `squeeze_gemm` | `gate` -> cuBLAS dW -> cuBLAS d_xn -> `ln_bwd` (compact build at the D512 saved row counts) |
-| 768 (n 2) | `ln_fwd` + split expand that saves h, a, b + `squeeze` | `gate_saved` (dh GEMM only) -> cuBLAS dW -> cuBLAS d_xn -> `ln_bwd` |
+| 768 (n 2) | training only (above 768 rows): `ln_fwd` + split expand that saves h, a, b + `squeeze` | `gate_saved` (dh GEMM only) -> cuBLAS dW -> cuBLAS d_xn -> `ln_bwd` |
 
 At D >= 256 a single fused backward does not fit (the dW accumulators exceed the register file), so h and [dA|dB] round-trip HBM.
 D384 keeps the forward's h for the backward (`save_h_enabled`); D512 keeps a / b only at 384^2 and 768^2 rows (`save_ab_enabled`).
@@ -117,8 +120,8 @@ D384 keeps the forward's h for the backward (`save_h_enabled`); D512 keeps a / b
 
 fp32 activations take the bf16 builds' structure; every kernel is bound by `wide/f32io.cu` (one extension per (D, n)). Shapes:
 `F32_SHAPES` (inference: D 64 / 128 with n 2 / 4, D 256 / 512 with n 2) and `F32_TRAIN_SHAPES` (training: D 128 / 256 / 512, n 2 -- the
-float32 train requirement rows, the diffusion head's conditioning pair Transitions). The token-stream fp32 rows (D 384 / 768, n 2, at most
-768 rows) stay on the generic build, as the bf16 rows of those shapes do (`prefers_generic`).
+float32 train requirement rows, the diffusion head's conditioning pair Transitions). The token-stream fp32 rows (D 384 / 768, n 2, up to
+2048 rows) stay on the generic build, as the bf16 inference rows of those shapes do (`prefers_generic`).
 
 | D | forward (inference and the saving training build) | backward (training) |
 |---|---|---|
