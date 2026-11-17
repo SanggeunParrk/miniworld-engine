@@ -754,8 +754,10 @@ class TriangleAttention(_TriangleAttentionBase):
     #: 2: (2026-11-13) the H100 d_pair 128 x 4 heads inference gate in fp32 inside the tail (backend_versions cuda:h100_sm90 4)
     # cuda:h100_sm90 10 (2026-11-16): heads of 16 channels (d_pair 64 x 4 heads): half of the exponential pairs of the fp16 core on the FMA
     # polynomial (outputs change within the fp16 rounding of P)
+    # cuda:h100_sm90 11 (2026-11-17, 2.5.15): re-measure only: the 2.5.13 fp16 core loop TA_RC (bit-identical, faster on 16 / 32-channel
+    # heads) reached this class without a bump, so its H100 speed tokens predated it
     # cuda:a100_sm80 7 (2026-11-17): as the base class (6): 16-channel heads on the register-resident core from L 256
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:a100_sm80": 7, "cuda:h100_sm90": 10}
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:a100_sm80": 7, "cuda:h100_sm90": 11}
     # cuda:a100_sm80 6 (2026-11-14): the A100 row-blocked inference (sm80_wide.forward_rows: OpenDDE's refiner 2976 / 3968, L % 128 != 0) runs
     # the whole-pair call's core at the padded L (the rf core at L >= 512, keys up to the last live one): each row's bits equal the whole-pair
     # call's (was the 64-key AttnCfg core: within a bf16 ulp). Cases at multiples of 128 up to L2048 keep their path and bits.
