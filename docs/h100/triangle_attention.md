@@ -65,6 +65,7 @@ Names from `requirements/requirements_kernel.csv` (family `triangle_attention`);
 | `triangle_attention_dh_fwd_sm90` | forward_infer | `triattn_dh_sm90.cu`: mma.sync core for head widths 32 / 64 with the gate fused (`u = sigmoid(g [+ gb]) o softmax(...) v`) |
 | `triangle_attention_dh_fwd_train_sm90` | forward_train | the same kernel with `TRAIN`: also writes O (bf16) and the base-2 LSE for the backward (64-channel heads in training) |
 | `triangle_attention_dh_bwd_kv_sm90`, `triangle_attention_dh_bwd_q_sm90` | backward | `triattn_dh_sm90.cu`: mma.sync FlashAttention-2 backward, P recomputed from the LSE; key side dK / dV, query side dQ and dbias into per-slab fp32 partials (deterministic) |
+| `triangle_attention_d64_fwd_sm90` | forward_infer | `triattn_d64_sm90.cu` (`h100_dh.ext_d64`): the inference core of 64-channel heads at L % 128 == 0 on wgmma, fp16 operands and fp16 scores (bias as the score accumulator's initial value, f16x2 exponentials, [O \| l] += P [V \| 1]), the gate fused |
 | `triangle_attention_fwd`, `..._bwd_pre`, `..._bwd_dkdv`, `..._bwd_dq` | forward / backward | Triton core (`triton/main.py`): flash-style forward with fp32 LSE, FA2-split backward (delta, key-side dK / dV / per-row dbias, query-side dQ) |
 | `triangle_attention_generic_gate_u_sm90` | forward | glue `gate_u` (`triattn_generic_sm90.cu`): `u = sigmoid(g) o O`; used by the bidirectional path |
 | `triangle_attention_bidir_gate_bwd_sm90` | backward | `triattn_bidir_sm90.cu` `gate_bwd` (`cuda/h100_bidir.py`): do, dg of the bidirectional gate on channel planes |
@@ -187,6 +188,69 @@ queries, 64-key tiles through a two-stage cp.async ring, P rounded to bf16 in re
 cuBLAS, laid back as the class requires (standard: ending node transposed back; Chai-1: untransposed; confidence head: `W_o u +
 (W_t u)^T` / `(W_o u)^T + W_t u`). L is padded to a multiple of 64 with masked keys, so any L is taken.
 
+### 64-channel heads: the fp16 wgmma core (2.5.13 candidate, `cand/ta-d64`, 2026-11-17)
+
+At L % 128 == 0 the 64-channel heads (AF3 d_pair 512 x 8, RF3 d_pair 64 x 4 x 64, Chai-1 / confidence d_pair 256 x 4) take
+`triattn_d64_sm90.cu` (`ext_d64`), rebuilt on the design of the 32-channel fp16 core (`triattn_h16_sm90.cu`); it replaced the
+bf16-operand / fp32-softmax wgmma core of 2.5.12 (same file, same kernel name `triangle_attention_d64_fwd_sm90`).
+
+- Front (`h100_dh._front_fp16`, outside any autocast): the glue's LayerNorm in fp16 (`ln_fwd(h16)`; for d_pair in (128, 512]
+  `ln_bias_fwd`, which also writes the head-major `fp16(bias / scale)`; the AF3-orientation ending node's bias from the pair as it is by
+  `ln_bias_blocks`), `q | k | v | g = y W^T` as one cuBLAS fp16 GEMM (weights rounded to fp16 from the fp32 masters); d_pair <= 128:
+  `ln_fwd` + fp16 bias GEMM + `front_bias`. Tail unchanged.
+- Core: CTA task = (b, h, 128 queries) x 2 pair rows; warpgroup 0 = TMA producer, warpgroups 1 / 2 = 64 queries each; 128-key tiles;
+  the bias fragment (ldmatrix of the fp16 tile, shared by the two rows) IS the initial value of the fp16 score accumulator
+  (`m64n128k16.f16`, 4 k16 steps); `x = s scale log2e - m` (HFMA2), `p = 2^x` on f16x2 pairs (MUFU.EX2.F16x2, every other pair on the
+  FMA-pipe polynomial), the lazy row offset with a warp vote (TAU 8); P is the A fragment of `[O | l] += P [V | 1]` (`m64n72k16`,
+  fp32), the ones block is ONE 2 KiB block reached through each V descriptor's leading-byte offset (`desc_mv`), and the Q tiles travel
+  through the K | V ring (the stage also carries the task id and its live key tiles: no separate Q buffer, room for 4 stages of 32 KiB);
+  the epilogue's gate rows are prefetched into L1 before the last sub-step; dynamic task counter; head groups
+  whose bias fits 20 MB of L2 run together.
+- Profile of the 2.5.12 core (ncu, 512:8:64 L1024, locked clocks): tensor pipe 33 % active, issue 38 %; stall samples: the bias
+  bf16 -> fp32 unpack (IMAD.U32) 23 %, MUFU.EX2 19 %, FMNMX 11 %, mbarrier spin 9 %; FA4 (no bias) 51 % tensor. The fp16 design removes
+  the unpack, 3/4 of the MUFU work and the per-logit max.
+- Variants measured (each one's speed relative to the default, -D knobs of the source): 64-key tiles 0.87-0.96x; FA3 pingpong of the two
+  consumer warpgroups 0.91-1.01x; 4 / 0 of 16 pairs on the polynomial 0.93-1.01x / 0.86-0.95x; no gate prefetch 0.92-0.98x (sustained); all within the same accuracy.
+
+Core alone (one process, CUDA-graph replay, interleaved, H100 SXM 700 W cap; B = 1, N = L pair rows; us sustained / cool; the 2.5.12
+core built from 6bb7d21fb's source; FA4 4.0.0b32 / cuDNN 9.2 SDPA in fp16, without the pair bias unless noted):
+
+| cfg | L | 2.5.12 core | fp16 core | speed-up | FA4 (no bias) | cuDNN (no bias) | cuDNN + bias |
+|---|---|---|---|---|---|---|---|
+| 512:8:64 | 512 | 1315 / 1213 | 964 / 927 | 1.36 / 1.31 | 896 / 797 | 695 / 656 | 1414 / 1235 |
+| 512:8:64 | 768 | 3800 / 3452 | 2653 / 2532 | 1.43 / 1.36 | 2334 / 2084 | 2281 / 2076 | 4321 / 3886 |
+| 512:8:64 | 1024 | 8216 / 7540 | 6442 / 6019 | 1.28 / 1.25 | 5736 / 5065 | 5215 / 4750 | 9944 / 8883 |
+| 512:8:64 | 1536 | 24867 / 24056 | 18529 / 16342 | 1.34 / 1.47 | 15433 / 14394 | 17989 / 15552 | 36432 / 33682 |
+| 256:4:64 | 512 | 670 / 618 | 515 / 484 | 1.30 / 1.28 | 449 / 403 | 348 / 334 | 695 / 626 |
+| 256:4:64 | 768 | 1845 / 1692 | 1331 / 1244 | 1.39 / 1.36 | 1164 / 1046 | 1143 / 1040 | 2194 / 1949 |
+| 256:4:64 | 1024 | 4081 / 3671 | 2838 / 2659 | 1.44 / 1.38 | 2920 / 2544 | 2655 / 2380 | 4941 / 4401 |
+| 256:4:64 | 1536 | 12352 / 11124 | 8690 / 8240 | 1.42 / 1.35 | 8006 / 7122 | 8852 / 7766 | 17310 / 14797 |
+| 256:4:64 | 2048 | 27945 / 25851 | 18688 / 18031 | 1.50 / 1.43 | 18837 / 17570 | 21857 / 18192 | 39788 / 36093 |
+
+With the pair bias the fp16 core is 1.35-2.13x faster than cuDNN SDPA with the bias as `attn_mask` (sustained); it runs at 0.83-1.03x
+of the bias-free FA4's speed (0.87-0.93x at L <= 768, where a task has only 4-6 key tiles and its prologue / epilogue are not overlapped).
+Error vs fp64 of the
+core (random q / k / v, bias std 2, gate 1): rms 6.3e-4 / 7.2e-4 against 1.7e-3 / 2.0e-3 of the 2.5.12 core, max 1.1-1.9e-2 against
+3.0-3.8e-2 -- about 0.37x (fp16 operands carry 3 more bits; the bf16 P was the 2.5.12 core's largest rounding).
+
+Whole module (`h100_dh.forward`, CUDA graph, interleaved, mask with the last L / 8 keys padded, us sustained; speed-up sustained / cool):
+
+| class (d_pair, heads x 64) | L 512 | 768 | 1024 | 1536 | 2048 |
+|---|---|---|---|---|---|
+| AF3 512, 8, starting | 2983 -> 2683 (1.11 / 1.10) | 7343 -> 6533 (1.12 / 1.12) | 14491 -> 12337 (1.17 / 1.16) | 38127 -> 31380 (1.22 / 1.19) | 75141 -> 64088 (1.17 / 1.27) |
+| AF3 512, 8, ending | 3311 -> 3010 (1.10 / 1.10) | 8160 -> 7183 (1.14 / 1.13) | 15444 -> 13268 (1.16 / 1.17) | 41048 -> 35214 (1.17 / 1.21) | 81248 -> 69240 (1.17 / 1.26) |
+| RF3 64 (d_hidden 256), 4, starting | 1047 -> 948 (1.11 / 1.11) | 2674 -> 2270 (1.18 / 1.17) | 5246 -> 4185 (1.25 / 1.24) | 14481 -> 12093 (1.20 / 1.17) | 31276 -> 24251 (1.29 / 1.28) |
+| RF3 64 (d_hidden 256), 4, ending | 1100 -> 991 (1.11 / 1.12) | 2734 -> 2364 (1.16 / 1.16) | 5413 -> 4373 (1.24 / 1.23) | 15042 -> 12359 (1.22 / 1.16) | 30814 -> 24447 (1.26 / 1.28) |
+| Chai-1 256, 4, starting | 1319 -> 1164 (1.13 / 1.13) | 3276 -> 2750 (1.19 / 1.18) | 6423 -> 5046 (1.27 / 1.23) | 17425 -> 14230 (1.22 / 1.22) | 35391 -> 28223 (1.25 / 1.32) |
+| Chai-1 256, 4, ending | 1440 -> 1257 (1.15 / 1.14) | 3567 -> 2986 (1.19 / 1.18) | 6821 -> 5426 (1.26 / 1.23) | 18247 -> 14891 (1.23 / 1.21) | 36741 -> 29128 (1.26 / 1.27) |
+| Chai-1 confidence 256, 4, starting | 1621 -> 1493 (1.09 / 1.10) | 3963 -> 3452 (1.15 / 1.14) | 7550 -> 6293 (1.20 / 1.19) | 19697 -> 16130 (1.22 / 1.18) | 39934 -> 32886 (1.21 / 1.25) |
+| Chai-1 confidence 256, 4, ending | 1788 -> 1616 (1.11 / 1.11) | 4340 -> 3812 (1.14 / 1.14) | 8273 -> 6892 (1.20 / 1.18) | 21332 -> 18027 (1.18 / 1.18) | 42356 -> 35801 (1.18 / 1.23) |
+
+Accuracy (`measure/accuracy.py`, the eval cases of requirement rows 80 / 81 / 84 / 85, pytorch + cuda): all 48 measurable cases
+(L 128-768; L >= 1024 the fp64 gold does not fit one H100 for either core) GREEN with both cores; `max|y - y64| / max|y64|` of the
+fp16 core / the 2.5.12 core 0.84-1.32 (mean 0.98: the module output's bf16 rounding dominates that metric), worst err / tol 0.63
+(Chai-1 confidence L640 starting, 5.04e-3 against tol 8e-3).
+
 ## Bidirectional path: `BidirectionalTriangleAttention`, bias-only
 
 `kernels/integrations/bidir_triattn_h100.py` (forward, inference and training, and backward). Bias-only weights do not depend on
@@ -232,7 +296,10 @@ layout. The per-row dbias buffer is `[B, H*L, L, L]` in the bias dtype, reduced 
   parameter is fp32).
 - Inference (`INFERENCE_FP16 = True`): q / k / v / sbias in fp16 (3 more mantissa bits than bf16), the score sum rounded to fp16
   once per k16 step; range `|q.k + bias/scale| < 65504`.
-- dh core: bf16 operands, fp32 accumulation, P rounded to bf16; bias in natural units.
+- dh mma.sync core (L % 128 != 0, and training): bf16 operands, fp32 accumulation, P rounded to bf16; bias in natural units.
+- dh wgmma core (64-channel heads, L % 128 == 0, inference): y, q / k / v / g and bias / scale in fp16 (fp32 GEMM accumulators rounded once),
+  the score sum rounded to fp16 once per k16 step, P in fp16, O and the row sums in fp32; range `|q.k + bias/scale| < 65504` (the bias
+  is clamped at +-6e4 by the glue).
 - The generic path's cublasLt plan picks its algorithm by timing the heuristic's top candidates once per shape (outside a capture);
   `dyln` is bf16 (the reference's own precision there).
 - Determinism: parameter gradients come from fixed-order partial sums (no float atomics); dbias is accumulated in slabs in a fixed
