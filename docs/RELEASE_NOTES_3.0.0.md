@@ -1,6 +1,7 @@
-# miniworld-engine 3.0.0 (DRAFT, not released)
+# miniworld-engine 3.0.0
 
-Base: 2.5.14 (9dd18e507). Release branch `rel/3.0.0` = 2.5.14 + `fp8/3.0.0-all` (the FP8 routes, built on 2.5.12) + the release work below.
+Base: 2.5.14 (9dd18e507) + origin/main 8ef575aba (TriAttn re-measure tokens cuda:h100_sm90 11 / cuda:5090_sm120 4, benchmark pages). Release
+branch `rel/3.0.0` = that + `fp8/3.0.0-all` (the FP8 routes, built on 2.5.12) + the release work below. Released 2026-11-18 (PyPI, tag `v3.0.0`).
 **3.0.0 adds opt-in FP8 (e4m3) inference routes on H100 (sm_90a), selected as the backend `engine-fp8`; the default remains the bf16/fp16
 engine.** Nothing changes unless `engine-fp8` or a switch is set: with every switch off the outputs
 are the 2.5.14 bytes (registry modules eval + train, AF3 end to end), no module `version` / `backend_versions` changed, judge owed 0 on all
@@ -162,6 +163,27 @@ cache: 0 failed).
   loaders / sources that were "not reached" / "not compiled" are now planned).
 - Judge: owed 0 (accuracy and speed) on h100_sm90, a100_sm80, 5090_sm120: no `version` / `backend_versions` changed by the merge.
 
+## Verification of the release (3.0.0, after the `engine-fp8` backend; 2026-11-18)
+
+- Default route (every module on `cuda`, no switch) bit-identical to 2.5.14 / origin/main 8ef575aba (whose `src` differs from 2.5.14 only in
+  `backend_versions` numbers): **64 / 64 cases, 209 tensors** (separate processes, sha1; eval + train incl. input / parameter gradients).
+- `engine-fp8` in training (train mode / autograd on) = `cuda`: the 10 train cases of that set selected as `engine-fp8`, **10 / 10, 139 tensors
+  (output + gradients) identical** to the default; GPU test `test_engine_fp8_training_runs_the_default_path` (TriMul / Transition, train mode and
+  eval with autograd on): sha1 equal, 0 FP8 route calls.
+- `engine-fp8` through FoldForge (399d0b4, AF3 8gzl + 8e4h; no `MINIWORLD_FP8*` variable; every engine module FoldForge put on `cuda` (443:
+  TriMul 116, TriAttnAF3 116, Transition 118, AttentionPairBias 52, TokenDiT 24, AtomDiT 9, OPM 4, PWA 4) switched by `set_backend("engine-fp8")`,
+  `fp8.set_model("af3")`, `fp8.check()` after every forward): **10 / 10 CIFs byte-identical** to the fp8safe2 FoldBench run, same route calls as
+  `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=af3` (8e4h: TriAttn PV 208 / q k 592, TriMul 704, OPM 24, PWA 24, Transition 356, token DiT 9600, atom
+  DiT 4800), 0 redos. FoldForge's guard calls `_forward_cuda` itself (not `forward`): the backend therefore lives on the instance's `_forward_cuda`.
+- GPU tests (one queue job, 3 H100): the 13 FP8 files 210 passed; `test_engine_fp8_backend.py` 7 passed (route call counts, default bytes before /
+  after an engine-fp8 call, composite Pairformer block, training sha1). CPU: `test_fp8_switch` 19 passed (name resolution, composite parts, scope
+  incl. training and direct `_forward_cuda` calls, not a judged backend); 3214 passed, 2 skipped in the other CPU files; ruff / pyright clean on the
+  touched files. Judge owed 0 (accuracy and speed) on h100_sm90, a100_sm80, 5090_sm120.
+- Kernels: incremental prebuild from the 2.5.14 release cache: sm90a 148 built (101 re-keyed default + 47 FP8), 0 failed, **560**; sm80 **72** and
+  sm120 **64** nothing to build. Names vs the 2.5.14 upload: sm90 +29 names, 0 dropped; sm80 / sm120 identical (stage lists and wheel payloads
+  CRC-identical to 2.5.14). Installed wheels, empty JIT cache, no nvcc / CUTLASS: every sm90 artifact loads, **560 / 560** in three parts (TriMul
+  223, augmented attention 181, the rest 156 incl. the system libstdc++ check), 0 compiled, JIT cache 0 files.
+
 ## Decisions (owner, 2026-11-17)
 
 Decided:
@@ -181,8 +203,9 @@ Decided:
 
 Open:
 
-1. Version bump to 3.0.0, push, tag, upload (not done).
+1. ~~Version bump to 3.0.0, push, tag, upload~~: done 2026-11-18 (FP8 named `engine-fp8`).
 2. Gate re-measure: two candidates (not changed): 256:8:32 front 768 -> 512, 32-channel standalone pass 1024 -> 768.
 3. The experimental FP8-compute TriMul K1 (`TMN_K1_F8C`, `MINIWORLD_TRIMUL_FP8_K1`) is still in the code and the shared header: remove or keep.
-4. FoldForge: wire `fp8.check()` and the model name (`MINIWORLD_FP8_MODEL` / `enable(model=)`) into its forward loop (the earlier patch file
-   covers TriMul only) before offering `MINIWORLD_FP8=safe` there.
+4. FoldForge: accept the backend name `engine-fp8` (its `BACKENDS` / `Config.backend` / `engine.ops` table), pass it to `set_backend` of the
+   engine modules it would put on `cuda`, call `fp8.set_model(<model>)` once and `fp8.check()` after every forward (redo when True). Until then
+   `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=<model>` gives the same routes process wide (byte-identical AF3 CIFs above).
