@@ -249,8 +249,13 @@ def overflow_count() -> float:
     return sum(float(t.item()) for t in _OVF.values()) + pending
 
 
+_RETIRED: list = []  # sites dropped by reset(): a captured CUDA graph may still read / write their tensors, so they stay allocated
+
+
 def reset() -> None:
-    """Forget every site's history (the next call of each site re-seeds) and the overflow count."""
+    """Forget every site's history (the next call of each site re-seeds) and the overflow count. The old sites' buffers stay
+    allocated (graphs captured before keep using them)."""
+    _RETIRED.extend(_SITES.values())
     _SITES.clear()
     for t in _OVF.values():
         t.zero_()
