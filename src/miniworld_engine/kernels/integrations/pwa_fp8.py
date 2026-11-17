@@ -7,6 +7,11 @@ Route (MiniWorld MSA widths: d_msa 64, 8 heads x 32, any d_pair ``pwa_train`` se
     pair_fwd3 (the default pair kernel, w bf16) -> w_quant (e4m3 of 256 w) -> ln_vt8 (y bf16 = ln_vg's bytes, v as e4m3 K-major)
       -> cuBLASLt e4m3 batched GEMM (o bf16, head-major) -> pwa_gateout (the default gate / out pass, unchanged)
 
+Wide route (``pwa_wide`` widths, 8 heads x 8 / 16: AF3 / OpenFold3 / Protenix-v1, Protenix-v2, OpenDDE, ESMFold2; ``forward_wide``)::
+
+    pair_fwd3 (pwa_wide's pair kernel) -> w_quant -> ln_vt8 built at the width (v as e4m3 K-major, no y; N a multiple of 16)
+      -> the same cuBLASLt e4m3 contraction (M = S*C per head) -> gate_out_w (pwa_wide's default inference gate / out pass, unchanged)
+
 Layout. Hopper's e4m3 tensor cores take K-major operands only. The contraction is over the key index j, so
   w  [H, N_i, N_j]        e4m3, row-major (K = j contiguous: the softmax output as it is)
   vT [H, S*C, N_j]        e4m3, j contiguous (v transposed: ``ln_vt8`` writes it so)
@@ -57,17 +62,20 @@ _WS: dict = {}  # device -> W_SCALE fp32 [1]
 _WORK: dict = {}  # device -> cuBLASLt workspace
 
 
-def _ext():
-    if "vt8" not in _EXT:
+def _ext(d_msa: int = 64, c: int = 32):
+    """``pwa_vt8.cu`` built at (d_msa, channels per head): the MiniWorld widths 64 / 32 (the default build), or a ``pwa_wide`` width."""
+    key = "vt8" if (d_msa, c) == (64, 32) else f"vt8_{d_msa}_{c}"
+    if key not in _EXT:
         from miniworld_engine.kernels._nvcc import load_extension as load
 
-        _EXT["vt8"] = load(
-            name="miniworld_pwa_vt8",
+        width = [] if key == "vt8" else [f"-DVT_D={d_msa}", f"-DVT_C={c}"]
+        _EXT[key] = load(
+            name="miniworld_pwa_" + key,
             sources=[str(Path(__file__).with_name("csrc") / "pwa_vt8.cu")],
-            extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math", "-Xcompiler=-fvisibility=hidden"],
+            extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math", "-Xcompiler=-fvisibility=hidden", *width],
             extra_cflags=["-O3", "-fvisibility=hidden"],
         )
-    return _EXT["vt8"]
+    return _EXT[key]
 
 
 # ---------------------------------------------------------------------------------------------------------------- cuBLASLt e4m3
@@ -188,10 +196,8 @@ def rescale_all(factor: float = RESCALE) -> None:
         _VINV[key].copy_(1.0 / t)
 
 
-def forward(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16):
-    """The msa output (residual included) [S, N, 64] of one inference call from the pair kernel's w [H, N, N] bf16; ``key_tensor``
-    (the module's value weight) keys the static v scale."""
-    k = _ext()
+def _scales(k, m, key_tensor, lnm_w, lnm_b, wv16, eps_m, cfg, store_y):
+    """(amax, w scale, v-scale key) of this call; the first call of a module calibrates its static v scale (eager)."""
     dev = m.device
     amax = _AMAX.get(dev)
     if amax is None:
@@ -200,27 +206,76 @@ def forward(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16):
     if ws is None:
         ws = _WS[dev] = torch.full((1,), W_SCALE, device=dev)
     key = key_tensor.data_ptr()
-    wq = k.w_quant(w16)
     if key not in _VS:  # calibration (eager): scale 1, read max |v|, then the static power of two with HEADROOM
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("PWA FP8: the first call of a module must be eager (it calibrates the v scale)")
         from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import vscale_from_amax
 
         probe = torch.zeros(1, device=dev)
-        k.ln_vt8(m, lnm_w, lnm_b, wv16, eps_m, torch.ones(1, device=dev), probe, *LNVT8_CFG)
+        k.ln_vt8(m, lnm_w, lnm_b, wv16, eps_m, torch.ones(1, device=dev), probe, *cfg, store_y)
         _VS[key] = vscale_from_amax(probe, HEADROOM).float().contiguous()
         _VINV[key] = (1.0 / _VS[key]).contiguous()
         weakref.finalize(key_tensor, _forget, key)
+    return amax, ws, key
+
+
+def forward(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16):
+    """The msa output (residual included) [S, N, 64] of one inference call from the pair kernel's w [H, N, N] bf16; ``key_tensor``
+    (the module's value weight) keys the static v scale."""
+    k = _ext()
+    amax, ws, key = _scales(k, m, key_tensor, lnm_w, lnm_b, wv16, eps_m, LNVT8_CFG, True)
+    wq = k.w_quant(w16)
     from miniworld_engine.kernels.integrations import pwa_train as P
 
     gate = P._k(True)["gateout"]
     out = m
     for _attempt in range(4):
         vt, y = k.ln_vt8(m, lnm_w, lnm_b, wv16, eps_m, _VINV[key], amax, *LNVT8_CFG)
-        o = torch.empty((8, m.shape[1], m.shape[0] * 32), dtype=torch.bfloat16, device=dev)
+        o = torch.empty((8, m.shape[1], m.shape[0] * 32), dtype=torch.bfloat16, device=m.device)
         contract(wq, vt, o, _VS[key], ws)
         del vt
         out = gate.pwa_gateout(o, y, wg16, wo16, m, 1, 4, None, 1.0)
+        if GUARD != "sync" or not take_overflow():
+            break
+        rescale_all()
+    return out
+
+
+# ------------------------------------------------------------------------------------------------- the wide widths (pwa_wide)
+#: the pwa_wide widths served, (d_msa, channels per head) with 8 heads: AF3 / OpenFold3 / Protenix-v1 (64, 8), Protenix-v2 / OpenDDE (128, 8),
+#: ESMFold2 (128, 16).  The BIG build (256 x 8 x 32) is not served.
+WIDE = ((64, 8), (128, 8), (128, 16))
+#: shortest N served on the wide widths (AF3 64 x 8, module FP8 / default: N128 1.04 and N192 1.01 at S1024; N256 0.97); 0 = no gate
+WIDE_MIN_N = int(os.environ.get("MINIWORLD_PWA_FP8_WIDE_MIN_N", "256"))
+#: smallest S * N served on the wide widths (S512 N256 1.03, S256 N384 1.01, S128 N768 1.02; S1024 N256, S512 N384, S256 N768 0.96-0.97);
+#: 0 = no gate
+WIDE_MIN_SN = int(os.environ.get("MINIWORLD_PWA_FP8_WIDE_MIN_SN", str(3 << 16)))
+
+
+def wide_cfg(d_msa: int, c: int) -> tuple[int, int]:
+    """ln_vt8 (blocks per SM, TMA stages) at a wide width: measured best of {1, 2, 3, 4, 6, 8} x {2, 3, 4} (S1024 N768; 64 x 8 also S4096 N1536)."""
+    return {64: (3, 3), 128: (3, 2) if c == 8 else (2, 3)}[d_msa]
+
+
+def serves_wide(d_msa: int, c: int, s: int, n: int) -> bool:
+    """True when the opt-in route takes this pwa_wide inference call (N padded to a multiple of 16 by the caller)."""
+    return ENABLED and (d_msa, c) in WIDE and n % 16 == 0 and n >= WIDE_MIN_N and s * n >= WIDE_MIN_SN
+
+
+def forward_wide(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16, kv):
+    """pwa_wide's inference output (residual included) [S, N, d_msa] from its pair kernel's w [H, N, N] bf16: ln_vt8 (no y) -> e4m3
+    contraction -> ``kv.gate_out_w`` in its LayerNorm mode (the default inference gate pass, unchanged). ``kv``: the pwa_wide build."""
+    d, c = m.shape[2], wv16.shape[0] // 8
+    k, cfg = _ext(d, c), wide_cfg(d, c)
+    amax, ws, key = _scales(k, m, key_tensor, lnm_w, lnm_b, wv16, eps_m, cfg, False)
+    wq = k.w_quant(w16)
+    out = m
+    for _attempt in range(4):
+        vt, _ = k.ln_vt8(m, lnm_w, lnm_b, wv16, eps_m, _VINV[key], amax, *cfg, False)
+        o = torch.empty((8, m.shape[1], m.shape[0] * c), dtype=torch.bfloat16, device=m.device)
+        contract(wq, vt, o, _VS[key], ws)
+        del vt
+        out = kv.gate_out_w(o, m, m, wg16, wo16, None, 1.0, lnm_w, lnm_b, eps_m)
         if GUARD != "sync" or not take_overflow():
             break
         rescale_all()
