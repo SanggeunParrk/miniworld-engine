@@ -1014,6 +1014,105 @@ activations, the TriMul route quantizes one plane pair. End-level effect (struct
 - Per-channel weight scales, e4m3 x / y storage (the interface is bf16), e5m2: not tried. Training: not ported (forward first, as briefed).
 - The 2.5.12 D128 bf16 default with the tanh sigmoid alone: slower (above), so no non-FP8 spin-off.
 
+## TriAttn: where else FP8 can go (2026-11-17, branch `fp8x/triattn`, base `fp8/3.0.0-on-2512` 91a9241fb)
+
+Question: beyond the shipped e4m3 P / V (FP8 PV route), which operand of the H100 inference route can go to e4m3, what can it gain at most, and what does it cost in
+accuracy? No algorithm change. Scripts and raw rows: `~/miniworld-engine-scratch/fp8x-triattn/scripts`, `res/` (prof2, emu1, real1, qk1, sp1, cb1).
+
+### Stage times at 2.5.12 (ms per launch, torch profiler, B1, no mask; module = CUDA-graph replay; "def" = 2.5.12 default, "f8" = FP8 PV hi route with every gate removed)
+
+| config, L | module def / f8 | core def / f8 | front def / f8 | tail or out-proj def / f8 | other |
+|---|---|---|---|---|---|
+| 128:4:32, 1024 | 2.434 / 2.111 | 1.750 / 1.449 (69 %) | 0.405 / 0.361 (17 %) | tail 0.274 / 0.277 (13 %) | |
+| 128:4:32, 2048 | 15.35 / 13.00 | 13.51 / 10.87 (81 %) | 1.595 / 1.414 (11 %) | tail 1.076 / 1.085 (8 %) | |
+| 256:8:32, 1024 | 5.434 / 5.069 | 3.582 / 3.122 (61 %) | wide 1.254 / 1.497 (29 %) | cuBLASLt 0.524 / 0.525 (10 %) | |
+| 256:8:32, 2048 | 33.62 / 31.44 | 28.45 / 23.13 | wide 5.53 / 6.17 | 2.09 / 2.09 | |
+| 384:12:32, 1024 | 9.087 / 8.707 | 5.960 / 4.811 (55 %) | ln_bias 0.78 + cuBLAS q\|k\|v\|g 1.99 (23 %) | 0.79 / 0.79 (9 %) | vt_quant - / 0.54 (6 %) |
+| 384:12:32, 2048 | 57.87 / 53.40 | 22.88 / 19.04 per launch (row blocks) | ln 1.3-1.4 + cuBLAS 2.0-2.1 | 1.60 / 1.62 | vt_quant - / 1.13 |
+| 64:4:16, 1024 | 2.263 / 1.915 | 1.769 / 1.434 (76 %) | front_v3 0.322 / 0.325 (17 %) | 0.128 / 0.128 (7 %) | |
+| 64:4:16, 2048 | 14.27 / 11.86 | 12.29 / 9.87 | 1.248 / 1.275 | 0.532 / 0.533 | |
+| 64:4:32, 1024 | 2.434 / 2.148 | 1.796 / 1.490 | 0.458 / 0.457 | 0.172 / 0.172 | |
+
+Shapes, FLOPs and bound (L1024, M = L^2 = 1.05 M rows; bound from bytes / FLOPs over the measured time):
+- d128 front (`tri_front_sm90`): LN + [Wq; Wk; Wv] and the bias, K = 128, N = 384 + 16: 107 GFLOP; reads x 256 B / row, writes q, k fp16 512 B, v 256 B (FP8 route: e4m3 V^T 128 B), bias 8 B
+  = 1032 (904) B / row: 2.6-2.7 TB/s, HBM-bound (as documented). The e4m3 MMA rate buys nothing here; only fewer bytes do.
+- core: QK^T and PV 2 L^3 H 32 each = 275 + 275 GFLOP (4 heads, L1024), not bandwidth-bound. Removal ablation of the F8 core's QK^T wgmma (`TA_ABL=1`, time only,
+  random inputs, module level): 128:4:32 -6.0 % (L1024) / -8.3 % (L2048), 256:8:32 -5.0 % (L1024), 64:4:16 0 %; on real activations the QK^T share of the F8 core is
+  2.5-7.4 % (fourth-round ablation). With the 2x e4m3 rate the core can gain at most about half of that.
+- d128 tail (`tri_tail_sm90<true>`): gate GEMM LN(x) Wg^T + u Wo^T, 69 GFLOP; o 256 + x 256 + out 256 = 768 B / row: 2.9 TB/s, HBM-bound.
+- wide front (256:8:32, `tri_front_wide_sm90`): 4 projections + bias, K = 256: 554 GFLOP, 443 TFLOP/s: tensor-bound (GEMM-only ablation 1.07 of 1.25 ms, see
+  docs/h100/triangle_attention.md). Its FP8 variant (group-2 CTA writes the V^T plane) is 0.24 ms slower than the plain front at L1024 in this profile.
+- 384:12:32 front: `ln_bias_fwd` + cuBLAS fp16 [M, 384] x [384, 1536] = 1.24 TFLOP at 625 TFLOP/s: tensor-bound.
+- out-projection (cuBLASLt `lt_mm`, residual in the epilogue; 256 / 384 / 64): 137 / 309 / 34 GFLOP, 3.05-3.07 TB/s: HBM-bound.
+
+### Candidates (upper bound = the stage share that the e4m3 change can remove, at L1024 / L2048 of the FP8 PV route)
+
+| stage | e4m3 operand | share of the stage | upper bound (module) | error cost (real activations, attention output) | done |
+|---|---|---|---|---|---|
+| core QK^T (all configs) | q, k (m64n128k32 e4m3, fp16 accumulator) | ablation 0-8 % of the module | 0-4 % | rel L2 2.2-3.1 % mean, max-norm up to 22 % (q, k alone, emulated) | yes |
+| d128 front stores | q, k written as e4m3 | 256 of 904 B / row (-28 %) of 17 % / 11 % | 4.8 % / 3.1 % | (same operand as the row above) | yes (with the core) |
+| d128 tail | o (core epilogue writes e4m3, tail reads it) | 128 of 768 B / row (-17 %) of 13 % / 8 % | 2.2 % / 1.4 % | +2.65 % rel L2 on o (e4m3 floor; v+p+o 3.1-3.3 % vs v+p 1.8-2.2 %) | no: gain below 2.5 %, error +50 % |
+| wide front (256:8:32) GEMM | x (per-row scale), W (per-column) | GEMM 1.07 of 1.25 ms, 29 % | ~10 % (L1024) | projection from e4m3 operands 3.8 % rel L2 (stored e4m3: 2.65 %): q / k / bias worse than q, k e4m3 storage | no: q / k / bias need >= fp16; v / g alone do not shorten the 4-CTA lockstep group (one projection per CTA) |
+| 384 cuBLAS q\|k\|v\|g | y, W of the v \| g half only | <= 25 % of the GEMM, 23 % / ~7 % | <= 5.7 % / 2 % | v: 3.8 % before its own V^T quantization | no: needs an extra e4m3 copy of y (+384 B / row, ~0.13 ms at L1024) and a split GEMM; net <= 4 %, worse V |
+| out-projection (256 / 384 / 64) | u (core epilogue), Wo | 1/6 of the bytes of an HBM-bound GEMM, 7-10 % | <= 1.5 % | +2.65 % on u | no |
+| bias projection | Wb x | 8-24 B of >= 900 B / row | ~0 | logits | no |
+| bidirectional bias-only | P, V planes for `torch._scaled_mm` | 4 x scaled_mm 131 vs 171 us bf16 (L768, per direction) | 80 us for both directions, against >= 110 us for the V planes (+ transposed plane for the ending contraction) | 3.8 % | no: still no-go; a fused quant would need e4m3 output from the bf16 planes GEMM (cuBLASLt has none) or a hand GEMM (the fused LN + planes GEMM was already slower) |
+| training forward / backward | - | - | - | - | no: inference gain is small, the e4m3 backward had no speed gain (Known limits) |
+
+### Implemented: FP8 QK (EXPERIMENTAL, `h100_sm90.FP8_QK`, default off)
+
+- Core `triattn_h16_sm90.cu` `-DTA_F8QK=1` (with `TA_F8PV`): q / k arrive as e4m3 rows (32 bytes a head); the Q tile and the K tiles are 32-byte rows in the 32-byte
+  swizzle (the TMA box and wgmma descriptor of the 16-channel K16 path); the Q fragment of one k32 step is one `ldmatrix.x4` of the same bytes as the fp16 k16 layout;
+  `S += Q K^T` is one `wgmma m64n128k32.f16.e4m3.e4m3` (fp16 accumulator, so the bias-initialised accumulator and the f16x2 softmax are unchanged). 32-channel heads only.
+- Scale: per head a power of two `sq` with q8 = q / sq and k8 = k * sq: the product is 1, so the bias tile and the softmax scale are untouched; `sq` = 2^round(log2(amax_q / amax_k) / 2),
+  refused (fp16 score GEMM kept) when amax_q * amax_k > (448 / 2)^2. Real activations: amax_q <= 13.8, amax_k <= 17.1, product <= 186 (limit 50 176).
+  Calibrated on the site's first eager call (the V calibration call); saturation sets the shared overflow flag; `rescale_all` turns the q / k e4m3 off for the site
+  (a product-1 scale cannot widen).
+- Front `tri_front_sm90<3, VTW, true>` (d128 fused route only): the q / k chunks leave as e4m3 rows (16-bit stores of e4m3 pairs into the 128B-swizzled stage, one
+  uint8 TMA store per 64 rows). `FP8_QK_FRONT = False`: a torch pass instead (measurement only: +130-180 % module time). Other configs (wide / cuBLAS / d64 fronts) are
+  unchanged; their core gain alone was measured with pre-made e4m3 q / k (below).
+- Test: `tests/gpu/test_triattn_f8qk_h100.py`.
+
+Module time, 128:4:32, one sample, CUDA graph, interleaved with a same-cubin control (cool / sustained, protocol of "Base 2.5.12"; random weights 0.08, no overflow):
+
+| L | 128 | 256 | 512 | 768 | 1024 | 1536 | 2048 |
+|---|---|---|---|---|---|---|---|
+| 2.5.12 default ms | 0.031 / 0.030 | 0.103 / 0.101 | 0.435 / 0.468 | 1.159 / 1.228 | 2.415 / 2.561 | 7.051 / 8.152 | 15.38 / 17.10 |
+| FP8 PV / default | 1.086 / 1.089 | 0.934 / 0.934 | 0.909 / 0.881 | 0.878 / 0.886 | 0.865 / 0.868 | 0.844 / 0.837 | 0.845 / 0.849 |
+| FP8 PV + QK / default | 1.059 / 1.060 | 0.930 / 0.931 | 0.848 / 0.822 | 0.819 / 0.837 | 0.804 / 0.822 | 0.794 / 0.801 | 0.795 / 0.812 |
+| FP8 PV + QK / FP8 PV | 0.975 / 0.973 | 0.995 / 0.996 | 0.932 / 0.932 | 0.933 / 0.944 | 0.929 / 0.946 | 0.940 / 0.957 | 0.940 / 0.955 |
+| same-cubin control | 0.980 / 0.984 | 0.997 / 0.999 | 1.002 / 0.991 | 0.999 / 0.995 | 0.997 / 1.000 | 0.998 / 0.993 | 0.998 / 1.000 |
+
+Per kernel (profiler, FP8 PV -> + QK): L1024 core 1.443 -> 1.366 ms (-5.3 %), front 0.372 -> 0.301 ms (-19 %); L2048 core 11.07 -> 9.90 (-10.6 %), front 1.407 -> 1.164 (-17 %); tail unchanged.
+Core alone, pre-made e4m3 q / k (random, cool, control within 0.7 % except 12:2048 2.3 %): 4 heads L1024 / 2048 0.949 / 0.942, 8 heads 0.952 / 0.986, 12 heads 0.950 / 1.003:
+without a front that writes e4m3 q / k the wide / cuBLAS sites would gain at most ~3 % of the module at L1024 and nothing at L2048, before paying a quantization pass.
+
+Error (vs fp64):
+
+| case | 2.5.12 default | FP8 PV | FP8 PV + QK |
+|---|---|---|---|
+| real activations, kernels on the dumps (5I28 x2, L256, 6 layers x 2 nodes), attention output rel L2 mean (max), Protenix v1 | 0.18 % (0.19) | 2.23 % (2.67) | 3.96 % (5.93) |
+| same, Boltz-2 | 0.18 % (0.19) | 2.07 % (2.73) | 3.16 % (4.68) |
+| same, AF3 | 0.17 % (0.20) | 2.17 % (2.57) | 3.21 % (4.51) |
+| same, OpenDDE (12 heads) | 0.17 % (0.19) | 2.40 % (2.57) | 3.12 % (3.97) |
+| same, max-norm (max\|o - o64\| / max\|o64\|), worst over all | 0.52 % | 6.2 % | 23.6 % |
+| module 128:4:32 L512, update rms / update max | 1.86 % / 2.07 % | 3.31 % / 4.67 % | 4.39 % / 6.78 % |
+| module 128:4:32 L1024, update rms / update max | 2.07 % / 2.15 % | 3.09 % / 3.36 % | 4.06 % / 6.61 % |
+| judge form max\|y - y64\| / max\|y64\|, L512 / L1024 (err_pytorch = the PyTorch backend, bf16 autocast: 0.32 % / 0.30 %, so tol = 8e-3) | 0.29 % / 0.28 % | 0.66 % / 0.43 % (inside) | 0.95 % / 0.85 % (outside) |
+
+No NaN / inf, no saturation in any run. The emulation (float64, e4m3 rounding of the named operand only, the same dumps) agrees: q / k alone 1.9-3.1 % mean rel L2, q / k + V + P
+2.9-3.7 % against 1.8-2.2 % for V + P; q / k feed the logits, so the error concentrates on the rows with a few dominant keys (max-norm).
+
+Verdict: FP8 QK pays 5-7 % of the module on the fused d128 route from L512 (on top of the FP8 PV route's 9-16 %; 0.80-0.82 of 2.5.12 together), but it is the
+first placement whose judge-form error crosses 8e-3, and its worst element error is 4x the FP8 PV route's. Not whitelisted; end-level (FoldForge) not checked.
+Default route: bit-identical to the base (see the verification line below).
+
+Verification (2026-11-17): default route (no switch) against the base tree 91a9241fb, separate processes, sha1 of every output (`bit.py ta`: the 25 module shapes of
+"Verification on the 2.5.12 base" + 6 module-level calls incl. training with every gradient): 31 / 31 identical. GPU tests: `test_triattn_f8qk_h100.py` 6 (new),
+`test_triattn_f8pv_h100.py` 31, `test_triattn_h100_tail_gate.py` 15, `..._key_tiles.py` 15, `test_triattn_h16_core_dh16.py` 2, `..._front_lnb.py` 6, `..._front_y16.py` 14,
+`..._variants_infer.py` 17, `test_cuda_refuses_not_raises.py` 8 passed. CPU: `test_prebuild_plan`, `test_requirements`, `test_judge`, `test_plot` 1196 passed; ruff / pyright clean on
+the touched Python files. The F8QK core and the QK8 front instance are not in the prebuild plan (JIT on first use; experimental).
+
 ## Known limits
 
 - Boltz-2 9c90 is bistable under any numerical noise of 0.1-2 % on the TriAttn output; V on e4m3 flips it (hi + lo too: 2 of 4 trunk seeds). In the current environment its own bf16 trunk seeds fall into 5 modes (24 seeds, 15.3 A, ipTM 0.40-0.85) and FP8 changes the mode of 9 of 24 same trunk seeds while the mode population stays equal (see the widened end-level section). Hence whitelist only, and Boltz-2 is not on it (open decision).

@@ -402,3 +402,10 @@ Module time (before -> after, hi, percent vs the 2.5.9 default): 64:4:32 L256 / 
   Level or worse (kept as macros, default off, all bit-identical except K / TAU): `TA_F8SW` (software pipelined sub-step; -3.4 .. +7.8 %), `TA_F8SWN`, `TA_F8QM=1 / 2` (fp16-domain quad max: hv -4 %, real +2 .. +10 %).
 - Module against the 2.5.9 default (hi, static scale): 128:4:32 fused -6.2 / -9.7 / -13.9 / -17.0 %, unfused +5.3 / +1.3 / -6.6 / -12.8 %, 256:8:32 +8.5 / +2.5 / -5.4 / -11.4 %, 384:12:32 +0.5 / +2.4 / -4.9 / -11.3 %, 64:4:16 +3.8 / -8.6 / -18.4 / -21.4 % (L256 / 512 / 1024 / 2048).
 - Default route bit-identical to main ec11768fc (ten module shapes, bytes); FP8 module output bit-identical to `fp8/triattn` (ten shapes). The F8 tests were not re-run on this branch (the output is unchanged; run through the code graph before merging).
+
+### FP8 QK (EXPERIMENTAL, 2026-11-17, branch `fp8x/triattn`; `h100_sm90.FP8_QK`, default off)
+
+On top of the FP8 PV route, d_pair 128 fused route only: the front writes q / k as e4m3 (per-head product-1 power-of-two scales) and the F8 core runs `S += Q K^T` as
+one `m64n128k32.f16.e4m3.e4m3` wgmma (`-DTA_F8QK=1`). Module 0.93-0.95x of the FP8 PV route from L512 (0.80-0.82x of 2.5.12), attention-output error on real
+activations 3.1-4.0 % against 2.1-2.4 % (max-norm up to 24 % against 6 %), judge form 0.85-0.95 % (> 8e-3). The stage analysis of every other e4m3 placement
+(tail o, front GEMM operands, cuBLAS projections, out-projection, bidirectional) and why they were not built: `docs/fp8.md`, "TriAttn: where else FP8 can go".

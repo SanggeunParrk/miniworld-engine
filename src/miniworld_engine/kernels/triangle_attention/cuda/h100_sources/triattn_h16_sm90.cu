@@ -45,6 +45,9 @@ using namespace sm90;
 #ifndef TA_F8PV
 #define TA_F8PV 0         // opt-in FP8 variant (2026-11-14): P and V on the e4m3 tensor-core path (see the F8PV notes below); the extension is built with -DTA_F8PV=1
 #endif
+#ifndef TA_F8QK
+#define TA_F8QK 0         // F8PV only (experimental, 2026-11-17): q and k arrive as e4m3 (per-head power-of-two scales sq, 1 / sq: their product is 1, so the bias and the softmax scale are unchanged); S += Q K^T is one m64n128k32 e4m3 wgmma with the fp16 accumulator (K tile 32-byte rows, 32-byte swizzle)
+#endif
 #ifndef TA_F8HL
 #define TA_F8HL 0         // F8PV only: V as two e4m3 planes (hi + lo/16: the rounding of the first, again in e4m3), PV on m64n72k32 -- V error ~2^-8 instead of 2^-4
 #endif
@@ -83,6 +86,7 @@ constexpr int THREADS = 384;
 constexpr int NO = TA_F8HL ? 36 : 20;                       // accumulator floats per row: [O | l] (n40), or [O_hi | O_lo | l] (n72)
 constexpr int LC = TA_F8HL ? 32 : 16;                       // the row sums' index (row g; row g + 8: LC + 2)
 constexpr int VROWS = TA_F8HL ? 64 : 32;                    // V^T rows per (row n, head) in global memory
+constexpr int QB = TA_F8QK ? 1 : 2;                          // bytes per q / k element (F8QK: e4m3)
 constexpr int SMEM = 1024 + (NB * BT + R * QT + NKV * STG) * 2 + 256;
 static_assert(SMEM <= 232448, "one CTA per SM");
 
@@ -93,6 +97,13 @@ __device__ __forceinline__ void mma_h16_n128(uint32_t (&d)[32], const uint32_t (
   asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
                "wgmma.mma_async.sync.aligned.m64n128k16.f16.f16.f16 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, "
                "%16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31}, {%32, %33, %34, %35}, %36, p, 1, 1, 0;\n}\n"
+               : H16_U8(0), H16_U8(8), H16_U8(16), H16_U8(24) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+}
+// F8QK: S += Q . K^T on e4m3, fp16 accumulator: m64n128k32, A = Q from registers (4 x 4 e4m3: the k16 fp16 fragment layout of the same bytes), B = K from shared (K-major, 32-byte rows)
+__device__ __forceinline__ void mma_f8qk_n128(uint32_t (&d)[32], const uint32_t (&a)[4], uint64_t b) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n128k32.f16.e4m3.e4m3 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, "
+               "%16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31}, {%32, %33, %34, %35}, %36, p, 1, 1;\n}\n"
                : H16_U8(0), H16_U8(8), H16_U8(16), H16_U8(24) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
 }
 // [O | l] += P [V | 1]: m64n40k16, fp16 x fp16 -> fp32, A = P from registers, B = [V | ones] from shared (MN-major).
@@ -361,7 +372,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         wait(kve(st), kph ^ 1);
         const bool skip = (TA_ABL & 256) && r == 1;
 #if TA_F8PV
-        expect_tx(kvf(st), ((TA_ABL & 65536) ? 0 : KVT * 2) + ((TA_ABL & 256) ? 0 : (F8N24 ? 16 : VROWS) * BN));   // (ablation only: 65536 no K loads, 256 no V^T loads, 512 half the bias)
+        expect_tx(kvf(st), ((TA_ABL & 65536) ? 0 : KVT * QB) + ((TA_ABL & 256) ? 0 : (F8N24 ? 16 : VROWS) * BN));   // (ablation only: 65536 no K loads, 256 no V^T loads, 512 half the bias)
 #else
         expect_tx(kvf(st), skip ? 0 : (N24 ? (K16 ? KVT * 2 : KVT * 2 + KVT) : 2 * KVT * 2));
 #endif
@@ -393,7 +404,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     if (tid == 0) prefetch_map(&qmap), prefetch_map(&kmap), prefetch_map(&BIGV), prefetch_map(&bmap);
     if (pre && tid == 0) {
       int b, h, qt, g; decode(LISTM ? FIX[1 + blockIdx.x] : (int)blockIdx.x, b, h, qt, g);
-      asm volatile("mbarrier.expect_tx.relaxed.cta.shared::cta.b64 [%0], %1;\n" :: "r"(qf), "r"(R * QT * 2) : "memory");
+      asm volatile("mbarrier.expect_tx.relaxed.cta.shared::cta.b64 [%0], %1;\n" :: "r"(qf), "r"(R * QT * QB) : "memory");
       for (int r = 0; r < R; ++r) load_head(&qmap, sQ + r * QT * 2, qf, h, row0(b, g * R + r) + qt * BM);
       issue_tile(b, h, qt, g, 0);
     }
@@ -441,7 +452,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
         if (first) {
           arrive(qf);                                    // (the bytes were expected before the scan)
         } else {
-          expect_tx(qf, R * QT * 2);
+          expect_tx(qf, R * QT * QB);
           for (int r = 0; r < R; ++r) load_head(&qmap, sQ + r * QT * 2, qf, h, row0(b, g * R + r) + qt * BM);
         }
         for (int j = first ? 1 : 0; j < nk; ++j) issue_tile(b, h, qt, g, j);
@@ -462,11 +473,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   const int qrow = 64 * w + 16 * wi;               // this warp's first query row in the tile
   // ldmatrix lane geometry: matrices (rows +0 / +8) x (columns +0 / +8) of a 16 x 16 block
   const int lrow = qrow + (lane & 7) + 8 * ((lane >> 3) & 1), lcol8 = lane >> 4, x7 = lane & 7;
-  const uint32_t qlane = sQ + lrow * D * 2, blane = sB + lrow * 128;
+  const uint32_t qlane = sQ + lrow * D * QB, blane = sB + lrow * 128;
   // BTR (the bias tile stored [key][query]: AF3's ending node, the pair-as-stored bias): query half w, key row 8 (lane / 16) + lane % 8 of a
   // 16-key block, the 16-byte chunk of queries 16 wi + 8 ((lane / 8) % 2) (128-byte swizzle: chunk ^ row % 8)
   const uint32_t tlane = sB + w * BM * 128 + (8 * lcol8 + x7) * 128 + (((2 * wi + ((lane >> 3) & 1)) ^ x7) << 4);
-  const uint64_t kd0 = K16 ? gdesc(sKV, 16, 256, SW32) : desc_k64(sKV), vd0 = TA_F8PV ? desc_k128(sKV + KVT * 2) : (N24 ? gdesc(sKV + KVT * 2, KVT * 2, 256, SW32) : desc_mn64(sKV + KVT * 2, KVT * 2));   // built once: a wgmma operand costs one 32-bit add
+  const uint64_t kd0 = (K16 || TA_F8QK) ? gdesc(sKV, 16, 256, SW32) : desc_k64(sKV), vd0 = TA_F8PV ? desc_k128(sKV + KVT * 2) : (N24 ? gdesc(sKV + KVT * 2, KVT * 2, 256, SW32) : desc_mn64(sKV + KVT * 2, KVT * 2));   // built once: a wgmma operand costs one 32-bit add
   const uint32_t scl2 = hdup(scl);
   // cursors: the K | V stage and bias stage the next G phase reads; the stage whose PV was issued last (released once it retired)
   int gst = 0, gph = 0, bs = 0, bph = 0, xst = 0, bad = 0, ovf = 0;
@@ -500,8 +511,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     wait(kvf(gst), gph);
     if (TA_PP) named_sync(2 + w, 256);              // pingpong: my turn on the tensor core
     wg_fence();
-    if (!(TA_ABL & 1)) mma_h16_n128(sc[r], qa[r][0], desc_off(kd0, gst * STG * 2));
-    if (DH == D && !(TA_ABL & 1)) mma_h16_n128(sc[r], qa[r][1], desc_off(kd0, gst * STG * 2 + 32));   // (heads of 16: channels 16-31 are zeros, their k16 step adds exact zeros)
+    if (TA_F8QK && !(TA_ABL & 1)) mma_f8qk_n128(sc[r], qa[r][0], desc_off(kd0, gst * STG * 2));
+    if (!TA_F8QK && !(TA_ABL & 1)) mma_h16_n128(sc[r], qa[r][0], desc_off(kd0, gst * STG * 2));
+    if (!TA_F8QK && DH == D && !(TA_ABL & 1)) mma_h16_n128(sc[r], qa[r][1], desc_off(kd0, gst * STG * 2 + 32));   // (heads of 16: channels 16-31 are zeros, their k16 step adds exact zeros)
     wg_commit();
     if (r == R - 1 && TA_FR) relb();                // TA_FR: the stage is released after the wgmma issue (the ldmatrix results were consumed by it)
     if (++gst == NKV) { gst = 0; gph ^= 1; }
@@ -702,7 +714,12 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
 #pragma unroll
     for (int r = 0; r < R; ++r)
 #pragma unroll
-      for (int ks = 0; ks < 2; ++ks) ldsm_x4(qlane + r * QT * 2 + (((2 * ks + lcol8) ^ ((lrow >> 1) & 3)) << 4), qa[r][ks]);
+      for (int ks = 0; ks < 2; ++ks) {
+        if (TA_F8QK) {   // e4m3 Q: [128 q][32 bytes], 32-byte swizzle (chunk ^ (row / 4) % 2); one k32 fragment
+          if (ks == 0) ldsm_x4(qlane + r * QT * 2 + ((lcol8 ^ ((lrow >> 2) & 1)) << 4), qa[r][0]);
+          else qa[r][1][0] = qa[r][1][1] = qa[r][1][2] = qa[r][1][3] = 0u;
+        } else ldsm_x4(qlane + r * QT * 2 + (((2 * ks + lcol8) ^ ((lrow >> 1) & 3)) << 4), qa[r][ks]);
+      }
 #pragma unroll
     for (int r = 0; r < R; ++r) { fence_regs(qa[r][0]); fence_regs(qa[r][1]); }   // loaded before sQ is released
     fence_proxy_async();
@@ -851,8 +868,9 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
   const long B = q.size(0), N = q.size(1), S = q.size(2), H = q.size(3);
   TORCH_CHECK(S % BM == 0 && S > 0, "S % 128 == 0");
   const long ld = q.stride(2);
+  TORCH_CHECK(!TA_F8QK || (dh == D && q.scalar_type() == torch::kFloat8_e4m3fn && k.scalar_type() == torch::kFloat8_e4m3fn), "F8QK: q / k float8_e4m3fn, 32-channel heads");
   for (const auto* t : {&q, &k, &v}) {
-    TORCH_CHECK(t->scalar_type() == torch::kHalf && t->sizes() == q.sizes() && t->stride(4) == 1 && t->stride(3) == dh &&
+    TORCH_CHECK(t->scalar_type() == (TA_F8QK ? torch::kFloat8_e4m3fn : torch::kHalf) && t->sizes() == q.sizes() && t->stride(4) == 1 && t->stride(3) == dh &&
                 t->stride(2) == ld && t->stride(1) == S * ld && t->stride(0) == N * S * ld && ld % 8 == 0 && ld >= H * dh,
                 "q / k / v: [B, N, S, H, 32 | 16] fp16 rows at one common stride");
   }
@@ -870,6 +888,11 @@ std::vector<torch::Tensor> triattn_fwd_h16(torch::Tensor q, torch::Tensor k, tor
               "vt: float8_e4m3fn [B, N, H, dh, S] contiguous (keys permuted inside each group of 32)");
   TORCH_CHECK(vscale.is_cuda() && vscale.scalar_type() == torch::kFloat32 && vscale.is_contiguous() && vscale.numel() == B * H, "vscale: fp32 [B, H]");
   CUtensorMap qm = m2(q, "q"), km = m2(k, "k"), vm = km;   // (v is not read: the fp16 operand of the shape contract)
+  if (TA_F8QK) {   // e4m3 q / k: [rows][H * 32 bytes], box (32 bytes, 128 rows), 32-byte swizzle
+    qm = make_map<2>(q.data_ptr(), {(uint64_t)(H * D), rows}, {(uint64_t)ld}, {32, 128}, CU_TENSOR_MAP_SWIZZLE_32B, "q8", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+    km = make_map<2>(k.data_ptr(), {(uint64_t)(H * D), rows}, {(uint64_t)ld}, {32, 128}, CU_TENSOR_MAP_SWIZZLE_32B, "k8", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+    vm = km;
+  }
   CUtensorMap vtm = dh == D ? make_map<2>(vt.data_ptr(), {(uint64_t)S, (uint64_t)(B * N * H * VROWS)}, {(uint64_t)S}, {128, 32}, CU_TENSOR_MAP_SWIZZLE_128B, "vt",
                                           CU_TENSOR_MAP_DATA_TYPE_UINT8, 1)
                            : make_map<3>(vt.data_ptr(), {(uint64_t)S, 16, (uint64_t)(B * N * H * (VROWS / 32))}, {(uint64_t)S, 16 * (uint64_t)S}, {128, (TA_F8N24 && !TA_F8HL) ? 16u : 32u, 1}, CU_TENSOR_MAP_SWIZZLE_128B, "vt",
