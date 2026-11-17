@@ -556,7 +556,39 @@ torch::Tensor w_quant_t(torch::Tensor w) {
   return q;
 }
 
+// the delayed scale of one FP8 site in one launch (pwa_fp8_train._Site.next_scale): if push, count an overflow of the last call
+// (amax > fmax), push amax * scale into the history (newest first), zero amax; then scale = 2^ceil(log2(margin * max(hist) / fmax)),
+// written to scale (persistent), out[0] = scale, out[1] = 1 / scale
+__global__ void scale_update_kernel(float* hist, int nh, float* amax, float* scale, float* ovf, float* out, float fmax, float margin, int push) {
+  if (threadIdx.x != 0) return;
+  if (push) {
+    const float a = *amax;
+    if (a > fmax) *ovf += 1.f;
+    for (int i = nh - 1; i > 0; --i) hist[i] = hist[i - 1];
+    hist[0] = a * *scale;
+    *amax = 0.f;
+  }
+  float peak = 0.f;
+  for (int i = 0; i < nh; ++i) peak = fmaxf(peak, hist[i]);
+  peak = fmaxf(peak, 8.6736174e-19f);   // 2^-60
+  int e;
+  const float mt = frexpf(peak * (margin / fmax), &e);   // exact ceil(log2(x)): x = mt 2^e, mt in [0.5, 1)
+  const float s = ldexpf(1.f, mt == 0.5f ? e - 1 : e);
+  *scale = s;
+  out[0] = s;
+  out[1] = 1.f / s;
+}
+
+torch::Tensor scale_update(torch::Tensor hist, torch::Tensor amax, torch::Tensor scale, torch::Tensor ovf, double fmax, double margin, bool push) {
+  auto out = torch::empty({2}, hist.options());
+  scale_update_kernel<<<1, 32, 0, at::cuda::getCurrentCUDAStream()>>>(hist.data_ptr<float>(), (int)hist.numel(), amax.data_ptr<float>(), scale.data_ptr<float>(),
+                                                                  ovf.data_ptr<float>(), out.data_ptr<float>(), (float)fmax, (float)margin, push ? 1 : 0);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
+  mod.def("scale_update", &scale_update, "delayed power-of-two scale of one FP8 site: [scale, 1 / scale]");
   mod.def("pwa_glue3_f8", &pwa_glue3_f8, "pwa_glue3 with an FP8 do epilogue: (do8 head-major, doT8, dgp, dWo fp32 [64][256])", py::arg("o"), py::arg("y"),
           py::arg("dout"), py::arg("wg"), py::arg("wot"), py::arg("dgv"), py::arg("nst") = 2, py::arg("blocks_per_sm") = 1, py::arg("drop_mask") = py::none(),
           py::arg("drop_scale") = 1.0, py::arg("dinv"), py::arg("amax"), py::arg("e5m2") = true);

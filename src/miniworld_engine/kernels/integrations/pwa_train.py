@@ -592,7 +592,9 @@ class _PwaMath(torch.autograd.Function):
             o = o8
             out = k["gateout"].pwa_gateout(o, y, wg16, wo16, m, 1, 4, dmask, dscale)
         else:
-            vc = v_bf if f8 else v  # FP8 with "dw" alone: the bf16 contraction on the bf16 v (v, e4m3, goes to the backward)
+            vc = cast(
+                torch.Tensor, v_bf if f8 else v
+            )  # FP8 with "dw" alone: the bf16 contraction on the bf16 v (v, e4m3, goes to the backward)
             if native_aux_enabled() and k.get("gateout") is not None and k["glue3"] is not None and _split_contraction(N):
                 o = torch.bmm(w16, vc)  # head-major o, kept for the backward (glue3 reads it as such)
                 out = k["gateout"].pwa_gateout(o, y, wg16, wo16, m, 1, 4, dmask, dscale)
@@ -709,14 +711,14 @@ class _PwaMath(torch.autograd.Function):
         if f8:
             dv_hm = _f8t.backward_dv(w16, d_o, doT8, ds8)
         else:
+            d_o = cast(torch.Tensor, d_o)
             dv_hm = torch.bmm(w16.transpose(1, 2), d_o) if native and N % 64 == 0 else None
         if dv_hm is None:
             wt = k["pair3"].transpose(w16) if native else w16.transpose(1, 2).contiguous()
             k["fwd"].pwa_plain2(wt, d_o, 4, dgv)  # dv -> dgv[..., HC:]
-        if f8:
-            dw = _f8t.backward_dw(d_o, do8, ds8, v, ctx.f8_vs)
-        else:
-            dw = torch.bmm(d_o, v.transpose(1, 2))  # [H][N][N], K = S*C
+        dw = (
+            _f8t.backward_dw(d_o, do8, ds8, v, ctx.f8_vs) if f8 else torch.bmm(cast(torch.Tensor, d_o), v.transpose(1, 2))
+        )  # [H][N][N], K = S*C
         dw16 = dw  # pwa_wide's pair backward (pair_only_wide) takes it in bf16
         dw, mw, zw = _h100_float(dw, lnm_w, lnz_w)
         wgvT = k["pair3"].wgv(wg16, wv16) if native else torch.cat([wg16, wv16], 0).t().contiguous()
@@ -941,6 +943,7 @@ def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask:
 
 class _SavedContext:
     eps: tuple[float, float]
+    f8_vs: torch.Tensor | None = None
     dscale: float
     key_mask: torch.Tensor
 
@@ -982,7 +985,7 @@ def _forward_op(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: fl
         ctx = _SavedContext()
         out = _PwaMath.forward(ctx, *args, eps_m, eps_z, p_drop)  # pyright: ignore[reportCallIssue]  -- args: the ten inputs in forward's order
         sv = ctx.saved_tensors
-        f8 = [ctx.f8_vs] if getattr(ctx, "f8_vs", None) is not None else []  # the FP8 training route: v's scale for the backward
+        f8 = [] if ctx.f8_vs is None else [ctx.f8_vs]  # the FP8 training route: v's scale for the backward
         return [out, *sv[2:6], sv[13] if p_drop else args[0].new_empty((0,)), *f8]
     finally:
         _NATIVE_TRAINING_SCOPE.reset(scope)

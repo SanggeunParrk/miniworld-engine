@@ -33,6 +33,7 @@ import ctypes
 import os
 import weakref
 from pathlib import Path
+from typing import cast
 
 import torch
 
@@ -194,6 +195,10 @@ class _Site:
     def next_scale(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Push the last call's amax into the history; this call's (scale, 1 / scale) as fresh fp32 [1] tensors."""
         fmax = _FMAX[self.fmt]
+        if fused():  # one launch
+            out = _glue8().scale_update(self.hist, self.amax, self.scale, self.ovf, fmax, MARGIN, self.calls > 0)
+            self.calls += 1
+            return out[0:1], out[1:2]
         if self.calls:
             self.ovf.add_((self.amax > fmax).float())
             self.hist.copy_(torch.cat([(self.amax * self.scale), self.hist[:-1]]))
@@ -250,7 +255,13 @@ def _vt8_nat():
         _EXT["vt8n"] = load(
             name="miniworld_pwa_vt8_nat",
             sources=[str(Path(__file__).with_name("csrc") / "pwa_vt8.cu")],
-            extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math", "-Xcompiler=-fvisibility=hidden", "-DVT_NAT=1"],
+            extra_cuda_cflags=[
+                "-O3",
+                "-gencode=arch=compute_90a,code=sm_90a",
+                "--use_fast_math",
+                "-Xcompiler=-fvisibility=hidden",
+                "-DVT_NAT=1",
+            ],
             extra_cflags=["-O3", "-fvisibility=hidden"],
         )
     return _EXT["vt8n"]
@@ -263,7 +274,13 @@ def _glue8():
         _EXT["glue8"] = load(
             name="miniworld_pwa_glue3_f8",
             sources=[str(Path(__file__).with_name("csrc") / "pwa_glue3_f8.cu")],
-            extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math", "-Xcompiler=-fvisibility=hidden", "-DMW_PWA_CUDA_AUX=1"],
+            extra_cuda_cflags=[
+                "-O3",
+                "-gencode=arch=compute_90a,code=sm_90a",
+                "--use_fast_math",
+                "-Xcompiler=-fvisibility=hidden",
+                "-DMW_PWA_CUDA_AUX=1",
+            ],
             extra_cflags=["-O3", "-fvisibility=hidden"],
         )
     return _EXT["glue8"]
@@ -289,7 +306,9 @@ def fused() -> bool:
     return IMPL == "fused" and PLACES == ALL
 
 
-def forward_values(k, m, lnm_w, lnm_b, wv, wv16, eps_m, w16):
+def forward_values(
+    k, m, lnm_w, lnm_b, wv, wv16, eps_m, w16
+) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """(o, v_bf, v_keep, y, v scale): o = the FP8 contraction (head-major bf16) when "fwd" is on, else None and the caller contracts
     the bf16 ``v_bf``; ``v_keep`` = v for the backward (e4m3 natural when "dw" is on, else bf16); the v scale fp32 [1] (None: no FP8 v)."""
     from miniworld_engine.kernels.integrations.pwa_train import _h100_float
@@ -326,7 +345,7 @@ def forward_values(k, m, lnm_w, lnm_b, wv, wv16, eps_m, w16):
         assert vt8 is not None
         o = mm8(_inf._ext().w_quant(w16), vt8, _wscale(m.device), vs)
         del vt8
-    return o, v_bf, (v8 if "dw" in PLACES else v_bf), y, vs
+    return o, v_bf, cast(torch.Tensor, v8 if "dw" in PLACES else v_bf), y, vs
 
 
 # ------------------------------------------------------------------------------------------------------------------ backward
@@ -364,10 +383,7 @@ def backward_dv(w16, d_o, doT8, ds):
         return torch.bmm(w16.transpose(1, 2), d_o)
     from miniworld_engine.kernels.integrations import pwa_fp8 as _inf
 
-    if fused():
-        wT8 = _glue8().w_quant_t(w16)
-    else:
-        wT8 = _t8(_inf._ext().w_quant(w16))
+    wT8 = _glue8().w_quant_t(w16) if fused() else _t8(_inf._ext().w_quant(w16))
     return mm8(wT8, doT8, _wscale(w16.device), ds)
 
 
