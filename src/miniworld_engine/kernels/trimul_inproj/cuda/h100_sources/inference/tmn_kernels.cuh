@@ -55,6 +55,12 @@
 #ifndef TMN_K3_STATS
 #define TMN_K3_STATS 0          // experiment: 1 = K3 uses K1-saved LN_in statistics when the host passes them (p.stats)
 #endif
+#ifndef TMN_K1_F8
+#define TMN_K1_F8 0             // EXPERIMENTAL opt-in FP8 planes: n128 K1 blocks quantise the gated planes to e4m3 (x p.qinv[plane channel], saturating) and store
+#endif                          //   them as bytes ([64 tok] 64-byte rows, 64B-swizzled TMA box); requires K1ParamsF8, BW == 128 (TMAST)
+#ifndef TMN_K1_F8C
+#define TMN_K1_F8C 0            // EXPERIMENTAL (needs TMN_K1_F8, TMN_K1_FOLD, schedule 6): the projections compute in e4m3 (wgmma m64n128k32, A = the LayerNorm output cast in
+#endif                          //   registers with a K permutation, B = packed e4m3 weights, one per-tensor scale per matrix applied in the epilogue as p.kscale)
 #ifndef TMN_K1_STORE32
 #define TMN_K1_STORE32 0        // experiment: 1 = TMA plane store for BJ == 32 tiles (host supplies the [32][2][32] box)
 #endif
@@ -99,6 +105,9 @@ struct K1Params {
   // MiniWorld batched samples: rows of the slow token axis, B N for B samples stacked b-major ([B N][N] tokens, planes [2 C_H][B N][N],
   // Np == N); 0 = N (one sample).  Sits in the struct's alignment padding (sizeof stays 512), so callers that never set it read 0.
   int rows;
+  // TMN_K1_F8 builds only: 1 = the LN_in statistics are stored at the swapped pair token (j N + i) (the transposed-read K1 of the incoming direction writes
+  // the stats the K3 reads by pair token directly, no host transpose).  In the alignment padding after rows (sizeof stays 512), 0 for callers that never set it.
+  int stats_t;
 };
 // Rows of the slow token axis and the first token of row i's sample (the token mask's j index is sample-relative).
 TMN_DEVI int k_rows(int rows, int n) { return rows > 0 ? rows : n; }
@@ -109,8 +118,15 @@ TMN_DEVI int k_rows(int rows, int n) { return rows > 0 ? rows : n; }
 struct K1ParamsQ : K1Params {
   CUtensorMap tm_wq[4];
 };
+// FP8 planes (TMN_K1_F8): per plane channel inverse scale (a power of two, [2 C_H] fp32); tm_ab then maps uint8 planes with a 64-byte swizzle.
+struct K1ParamsF8 : K1ParamsQ {
+  const float* qinv; float* amax;
+  const float* kscale;   // TMN_K1_F8C: [Kg_left, Kp_left, Kg_right, Kp_right] fp32 (gate argument / projection factors of the epilogue)
+  const void* pad2[5];
+};
 template <class P> struct k1_has_wq { static constexpr bool value = false; };
 template <> struct k1_has_wq<K1ParamsQ> { static constexpr bool value = true; };
+template <> struct k1_has_wq<K1ParamsF8> { static constexpr bool value = true; };
 
 struct K3Params {
   CUtensorMap tm_z;      // 3D z [C_Z][N (j)][N (i)] (z dtype), box [128/esz][BJ][BI], SW128: the gate operand tile
@@ -159,17 +175,17 @@ struct K1Cfg {
   static constexpr int CPB = BW / 2;                    // plane channels per weight block
   static constexpr int WCHUNK = BW * 128;               // one weight k chunk [BW n][64 k] bf16
   static constexpr int STG = CPB * 128;                 // one staging buffer [CPB ch][64 tok] bf16
-  static constexpr int SLOT_BYTES = SKCH * WCHUNK;      // ring slot = SKCH consecutive k chunks of one block
-  static constexpr int SPB = NKC / SKCH;                // ring slots per weight block
+  static constexpr int SLOT_BYTES = (SCHED_ == 6 && CHUNK_BYTES > SKCH * WCHUNK) ? CHUNK_BYTES : SKCH * WCHUNK;   // ring slot = SKCH consecutive k chunks of one block (schedule 6: also a z chunk)
+  static constexpr int SPB = TMN_K1_F8C ? CZ / 128 : NKC / SKCH;   // ring slots per weight block (F8C: one e4m3 slot = 128 k bytes of 128 rows)
   static constexpr int NBLK = 4 * CH / BW;              // weight blocks (n64: C_H / 16 blocks of 32 gate rows | 32 proj rows -> 32 plane channels)
   static_assert(BW == 64 || BW == 128, "K1 weight blocks of n64 or n128");
-  static constexpr bool W_RESIDENT = NSLOT >= NBLK * SPB;   // the whole weight stream fits the ring: loaded once per CTA, never released
+  static constexpr bool W_RESIDENT = SCHED_ != 6 && NSLOT >= NBLK * SPB;   // the whole weight stream fits the ring: loaded once per CTA, never released (schedule 6 shares the ring with z: always streamed)
 #ifdef TMN_K1_FORCE_SCHED   // experiment: force the K1 weight-ring / MMA schedule for every instantiation
   static constexpr int SCHED = TMN_K1_FORCE_SCHED;
 #else
   static constexpr int SCHED = SCHED_ >= 0 ? SCHED_ : ((W_RESIDENT || NSLOT >= 3 * SPB) ? 0 : 1);
 #endif
-  static_assert(SCHED == 0 || SCHED == 1 || (SCHED == 6 && BW == 128 && SKCH == 1 && !ZF32 && CHUNK_BYTES == WCHUNK),
+  static_assert(SCHED == 0 || SCHED == 1 || (SCHED == 6 && BW == 128 && SKCH == 1 && !ZF32 && CHUNK_BYTES >= WCHUNK),
                 "K1 schedules: 0 (two blocks in flight) | 1 (one block, per-slot waits) | 6 (n128: 1 with the z tile through the ring)");
   // schedule 6: no z tile buffer -- the tile's NKCA z chunks travel through the weight ring ahead of its weight chunks (same 16 KB slots)
   static constexpr int SMEM_A = SCHED == 6 ? 0 : NKCA * CHUNK_BYTES;
@@ -605,6 +621,50 @@ TMN_DEVI void mma_group128(float (&acc)[64], const uint32_t (&f)[KS][4], uint32_
   static_assert(4 * SKCH * (J + 1) <= KS, "group inside the K chain");
   mma_group128_<SKCH, KS, J>(acc, f, dlo, dhi, std::make_integer_sequence<int, 4 * SKCH>{});
 }
+template <int OFF_BYTES>
+TMN_DEVI void wgmma_m64n128k32_e4m3_rs_off(float (&d)[64], const uint32_t (&a)[4], uint32_t desc_lo, uint32_t desc_hi, int scale_d) {
+  asm volatile(
+    "{\n"
+    ".reg .pred p;\n"
+    ".reg .b32 lo;\n"
+    ".reg .b64 dsc;\n"
+    "setp.ne.b32 p, %70, 0;\n"
+    "add.u32 lo, %68, %71;\n"
+    "mov.b64 dsc, {lo, %69};\n"
+    "wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3 "
+    "{%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, "
+    " %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, "
+    " %32, %33, %34, %35, %36, %37, %38, %39, %40, %41, %42, %43, %44, %45, %46, %47, "
+    " %48, %49, %50, %51, %52, %53, %54, %55, %56, %57, %58, %59, %60, %61, %62, %63},"
+    "{%64, %65, %66, %67}, dsc, p, 1, 1;\n"
+    "}\n"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]),
+      "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]),
+      "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]),
+      "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]),
+      "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]),
+      "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]),
+      "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]),
+      "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(desc_lo), "r"(desc_hi), "r"(scale_d), "n"(OFF_BYTES >> 4));
+}
+// Two packed bf16 pairs -> four e4m3 bytes (saturating, round to nearest even): byte 0..3 = lo(x01), hi(x01), lo(x23), hi(x23)
+TMN_DEVI uint32_t cvt_e4m3x4(uint32_t x01, uint32_t x23) {
+  unsigned short u0, u1;
+  asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(u0) : "f"(__uint_as_float(x01 & 0xffff0000u)), "f"(__uint_as_float(x01 << 16)));
+  asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(u1) : "f"(__uint_as_float(x23 & 0xffff0000u)), "f"(__uint_as_float(x23 << 16)));
+  return (uint32_t)u0 | ((uint32_t)u1 << 16);
+}
+// FP8 compute K1 (TMN_K1_F8C): the ring slot J of one n128 block holds 128 k (bytes) of [64 gate | 64 proj] rows: four k32 steps, 32 B apart. f[4 J + Is] are the e4m3 A fragments
+template <int KS8, int J, int... Is>
+TMN_DEVI void mma_group128_f8_(float (&acc)[64], const uint32_t (&f)[KS8][4], uint32_t dlo, uint32_t dhi, std::integer_sequence<int, Is...>) {
+  (wgmma_m64n128k32_e4m3_rs_off<(Is * 32)>(acc, f[4 * J + Is], dlo, dhi, (4 * J + Is) > 0 ? 1 : 0), ...);
+}
+template <int KS8, int J>
+TMN_DEVI void mma_group128_f8(float (&acc)[64], const uint32_t (&f)[KS8][4], uint32_t dlo, uint32_t dhi) {
+  static_assert(4 * (J + 1) <= KS8, "group inside the K chain");
+  mma_group128_f8_<KS8, J>(acc, f, dlo, dhi, std::make_integer_sequence<int, 4>{});
+}
 // K1 weight ring slot: weight block b, k-slot h = SKCH 8 KB k-chunks of [32 gate | 32 proj] rows x 64 k. Host-packed tm_w, or
 // (K1ParamsQ, pad0 != 0) the four row-major weights read in place: block b = rows [32 b, 32 b + 32) of cat(left, right).
 // n128 blocks (TMN_K1_BN, in place only): 16 KB k-chunks, block b = rows [64 b, 64 b + 64), maps with 64-row boxes.
@@ -725,26 +785,41 @@ TMN_DEVI void k1_body(const P& p) {
       // waited by parity: a thread running two uses ahead would pass it early). The issue of a TMA load is the producer's cost: two loads
       // per 16 KB slot from the four in-place weights kept this thread, and with it the whole kernel, at the stream's rate.
       if constexpr (G::SCHED == 6 && k1_has_wq<P>::value) {
-        static_assert(G::NKCA == SPB && NSLOT % SPB == 0, "ring groups of SPB contiguous slots");
+        static_assert((TMN_K1_F8C || G::NKCA == SPB) && NSLOT % SPB == 0 && NSLOT % G::NKCA == 0, "ring groups of SPB (weights) / NKCA (z) contiguous slots");
         pdl_wait();
         const uint32_t groups = (uint32_t)(1 + NBLK);
+        const uint32_t per_tile_slots = (uint32_t)(G::NKCA + NBLK * SPB);
         const uint32_t n_g = (uint32_t)n_iter * groups;
         for (uint32_t g = 0; g < n_g; ++g) {
           const uint32_t r = g % groups;
-          const uint32_t w0 = g * (uint32_t)SPB;
+          const uint32_t w0 = (g / groups) * per_tile_slots + (r == 0 ? 0u : (uint32_t)G::NKCA + (r - 1) * (uint32_t)SPB);
           const int s0 = (int)(w0 % NSLOT); const uint32_t u = w0 / NSLOT;
           if (u > 0) {
-#pragma unroll
-            for (int j = 0; j < SPB; ++j) mbar_wait(barW_empty + s0 + j, (u - 1) & 1);
+            const int ng = r == 0 ? G::NKCA : SPB;
+            for (int j = 0; j < ng; ++j) mbar_wait(barW_empty + s0 + j, (u - 1) & 1);
           }
           if (r == 0) {
             const int tile = (int)blockIdx.x + (int)(g / groups) * (int)gridDim.x;
             const int i0 = (tile / p.tiles_j) * BI, j0 = (tile % p.tiles_j) * BJ;
 #pragma unroll
             for (int kc = 0; kc < G::NKCA; ++kc) {
-              mbar_arrive_expect_tx(barW_full + s0 + kc, SLOT_BYTES);
+              mbar_arrive_expect_tx(barW_full + s0 + kc, G::CHUNK_BYTES);
               tma_load_3d(sW + (s0 + kc) * SLOT_BYTES, &p.tm_z, barW_full + s0 + kc, kc * G::CHUNK_CH, j0, i0);
             }
+          } else if constexpr (TMN_K1_F8C) {
+            // e4m3 weights: block r - 1 is SPB slots of [128 rows (64 gate | 64 proj)][128 k bytes], one 2-D load of [128 B][128 SPB rows]
+            mbar_arrive_expect_tx(barW_full + s0, SPB * G::WCHUNK);
+#pragma unroll
+            for (int j = 0; j < SPB; ++j) tma_load_2d(sW + (s0 + j) * SLOT_BYTES, &p.tm_wq[0], barW_full + s0, 0, ((int)(r - 1) * SPB + j) * 128);
+#pragma unroll
+            for (int j = 1; j < SPB; ++j) mbar_arrive(barW_full + s0 + j);
+          } else if constexpr (G::CHUNK_BYTES > G::WCHUNK) {
+            // bf16 weights in z-chunk-sized slots (three warpgroups, 24 KB): one 2-D load of [64 k][BW rows] per slot (box rows = BW), all on the first slot's barrier
+            mbar_arrive_expect_tx(barW_full + s0, SPB * G::WCHUNK);
+#pragma unroll
+            for (int j = 0; j < SPB; ++j) tma_load_2d(sW + (s0 + j) * SLOT_BYTES, &p.tm_wq[0], barW_full + s0, 0, ((int)(r - 1) * SPB + j) * G::BW);
+#pragma unroll
+            for (int j = 1; j < SPB; ++j) mbar_arrive(barW_full + s0 + j);
           } else {
             // two 2-D loads of [64 k][256 rows] (two chunks = two slots each: the largest box), all on the first slot's barrier
             mbar_arrive_expect_tx(barW_full + s0, SPB * SLOT_BYTES);
@@ -794,6 +869,12 @@ TMN_DEVI void k1_body(const P& p) {
   const uint32_t ld_off1 = (uint32_t)(st_ch0 + 4) * 128 + (uint32_t)((st_g ^ ((st_ch0 + 4) & SWM)) * 16);
   const int bar_id = 1 + cw;                            // named barrier of this warpgroup
   uint32_t w_iter = 0;
+#if TMN_K1_F8C
+  const float kg0 = __ldg(p.kscale), kp0 = __ldg(p.kscale + 1), kg1 = __ldg(p.kscale + 2), kp1 = __ldg(p.kscale + 3);   // gate argument / projection factors of the left and right planes
+#endif
+#if TMN_K1_F8
+  float f8max = 0.f;                                     // max |scaled value| of this thread (> 448: the e4m3 cast saturated), flushed to p.amax at the end
+#endif
   // TMA plane store (BJ % 64 == 0: this warpgroup's 64 tokens are one plane row segment): the elected thread stores the whole [32 ch][64 tok] staging
   // buffer of a block with one bulk-tensor store; the buffer written two blocks later is the same one, so the elected thread drains the previous
   // store's smem READ before each block's warpgroup barrier (issued a block earlier: normally complete already).
@@ -883,6 +964,19 @@ TMN_DEVI void k1_body(const P& p) {
         if (mB == 0.f) { fa[ks][1] = 0u; fa[ks][3] = 0u; }
       }
     }
+#if TMN_K1_F8C
+    // e4m3 A fragments (m64k32): reg0 = row A, reg1 = row B, reg2 = row A, reg3 = row B; this thread holds, per k32 group s, the natural k columns
+    // {2q, 2q+1, 8+2q, 9+2q} (reg0/1) and {16+2q, 17+2q, 24+2q, 25+2q} (reg2/3) of the bf16 fragments of k16 steps 2s / 2s+1 (q = lane & 3). The instruction reads them as
+    // virtual columns 4q + i / 16 + 4q + i, so the packed weights carry that K permutation (host); the LN affine already carries the e4m3 input scale.
+    uint32_t fa8[KS / 2][4];
+#pragma unroll
+    for (int s = 0; s < KS / 2; ++s) {
+      fa8[s][0] = cvt_e4m3x4(fa[2 * s][0], fa[2 * s][2]);
+      fa8[s][1] = cvt_e4m3x4(fa[2 * s][1], fa[2 * s][3]);
+      fa8[s][2] = cvt_e4m3x4(fa[2 * s + 1][0], fa[2 * s + 1][2]);
+      fa8[s][3] = cvt_e4m3x4(fa[2 * s + 1][1], fa[2 * s + 1][3]);
+    }
+#endif
     if (EMITX) {                                          // the normalised rows as bf16 for K3's gate operand: 4-byte stores, 4 lanes cover 32 contiguous bytes
       const int q = lane & 3;
       __nv_bfloat16* xa = p.xz + ((size_t)iA * (size_t)p.xs_i + (size_t)jA * (size_t)p.xs_j) + 2 * q;
@@ -895,8 +989,16 @@ TMN_DEVI void k1_body(const P& p) {
     }
     if (SAVE) {                                           // dormant save-intermediates: LN_in statistics per pair row (row owner lane of each quad)
       if (p.stats != nullptr && (lane & 3) == 0) {
-        if (vA) { p.stats[2 * ((size_t)iA * p.N + jA)] = st.mA; p.stats[2 * ((size_t)iA * p.N + jA) + 1] = st.rA; }
-        if (vB) { p.stats[2 * ((size_t)iB * p.N + jB)] = st.mB; p.stats[2 * ((size_t)iB * p.N + jB) + 1] = st.rB; }
+#if TMN_K1_F8
+        if (p.stats_t != 0) {
+          if (vA) { p.stats[2 * ((size_t)jA * p.N + iA)] = st.mA; p.stats[2 * ((size_t)jA * p.N + iA) + 1] = st.rA; }
+          if (vB) { p.stats[2 * ((size_t)jB * p.N + iB)] = st.mB; p.stats[2 * ((size_t)jB * p.N + iB) + 1] = st.rB; }
+        } else
+#endif
+        {
+          if (vA) { p.stats[2 * ((size_t)iA * p.N + jA)] = st.mA; p.stats[2 * ((size_t)iA * p.N + jA) + 1] = st.rA; }
+          if (vB) { p.stats[2 * ((size_t)iB * p.N + jB)] = st.mB; p.stats[2 * ((size_t)iB * p.N + jB) + 1] = st.rB; }
+        }
       }
     }
 
@@ -918,7 +1020,7 @@ TMN_DEVI void k1_body(const P& p) {
       for (int i = 0; i < (TMN_K1_FOLD ? 0 : G::BW / 2); ++i) ac[i] = 0.f;   // (TMN_K1_FOLD: the first MMA of the chain does not read the accumulator)
       fence_regs(ac);
       wgmma_fence();
-      if constexpr ((TMN_K1_DIAG & 4) != 0) {
+      if constexpr ((TMN_K1_DIAG & 4) != 0 || TMN_K1_F8C != 0) {   // (F8C: schedule 6 only, the chains live in the slot groups)
       } else if constexpr (G::BW == 128) {
         mma_chain128<SKCH>(ac, fa, dlo, dhi);
       } else {
@@ -941,6 +1043,67 @@ TMN_DEVI void k1_body(const P& p) {
         // channel. Staged [64 ch][64 tok] (four stmatrix x4 of 16 channels) and stored by one TMA store (TMAST tiles, 16-byte plane rows).
         static_assert(TMAST, "n128 K1 blocks store the planes by TMA");
         const uint32_t sbuf = stage_u + (uint32_t)((b & 1) * G::STG);
+#if TMN_K1_F8
+        {
+          // FP8 planes (the host scaled each plane channel's projection weights by a power of two, so the values are already in the e4m3 range): value =
+          // sigmoid(g) p m rounded to e4m3 (saturating). Accumulator layout: this thread holds tokens rowA / rowB = rowA + 8 and, per column group q, channels
+          // 8 q + 2 (lane & 3) + {0, 1}. Lanes lane / lane ^ 4 hold the adjacent tokens (2 k, 2 k + 1): one exchange of bytes (4 shuffles per block) gives each
+          // of them one channel of both tokens, i.e. a byte pair of that channel's [64 tok] staging row (64-byte rows, 64B swizzle).
+          const bool odd = (lane & 4) != 0;
+          const int cq = lane & 3;
+          const int tpl = 16 * wiw + 2 * (lane >> 3);                    // warpgroup-relative first token of this lane's byte pairs (A rows; B rows + 8)
+          uint32_t px[8];                                                  // per q: byte0 = A e0, byte1 = A e1, byte2 = B e0, byte3 = B e1
+#pragma unroll
+          for (int q = 0; q < 8; ++q) {
+#if TMN_K1_F8C
+            // e4m3 compute: ac = (input scale x weight scale) x projection of the e4m3 operands; Kg turns the gate rows into g / 2, Kp the projection rows into (qinv / 2) p
+            const float kg = (G::CPB * b >= G::CH) ? kg1 : kg0, kp = (G::CPB * b >= G::CH) ? kp1 : kp0;
+            const float pA0 = ac[4 * (q + 8) + 0] * kp, pA1 = ac[4 * (q + 8) + 1] * kp, pB0 = ac[4 * (q + 8) + 2] * kp, pB1 = ac[4 * (q + 8) + 3] * kp;
+            const float vA0 = ((TMN_K1_DIAG & 2) != 0) ? ac[4 * q + 0] : __fmaf_rn(math::tanh_approx(ac[4 * q + 0] * kg), pA0, pA0);
+            const float vA1 = ((TMN_K1_DIAG & 2) != 0) ? ac[4 * q + 1] : __fmaf_rn(math::tanh_approx(ac[4 * q + 1] * kg), pA1, pA1);
+            const float vB0 = ((TMN_K1_DIAG & 2) != 0) ? ac[4 * q + 2] : __fmaf_rn(math::tanh_approx(ac[4 * q + 2] * kg), pB0, pB0);
+            const float vB1 = ((TMN_K1_DIAG & 2) != 0) ? ac[4 * q + 3] : __fmaf_rn(math::tanh_approx(ac[4 * q + 3] * kg), pB1, pB1);
+#elif TMN_K1_FOLD
+            const float vA0 = ((TMN_K1_DIAG & 2) != 0) ? ac[4 * q + 0] : __fmaf_rn(math::tanh_approx(ac[4 * q + 0]), ac[4 * (q + 8) + 0], ac[4 * (q + 8) + 0]);
+            const float vA1 = ((TMN_K1_DIAG & 2) != 0) ? ac[4 * q + 1] : __fmaf_rn(math::tanh_approx(ac[4 * q + 1]), ac[4 * (q + 8) + 1], ac[4 * (q + 8) + 1]);
+            const float vB0 = ((TMN_K1_DIAG & 2) != 0) ? ac[4 * q + 2] : __fmaf_rn(math::tanh_approx(ac[4 * q + 2]), ac[4 * (q + 8) + 2], ac[4 * (q + 8) + 2]);
+            const float vB1 = ((TMN_K1_DIAG & 2) != 0) ? ac[4 * q + 3] : __fmaf_rn(math::tanh_approx(ac[4 * q + 3]), ac[4 * (q + 8) + 3], ac[4 * (q + 8) + 3]);
+#else
+            float vA0 = math::gate(ac[4 * q + 0], ac[4 * (q + 8) + 0], mA), vA1 = math::gate(ac[4 * q + 1], ac[4 * (q + 8) + 1], mA);
+            float vB0 = math::gate(ac[4 * q + 2], ac[4 * (q + 8) + 2], mB), vB1 = math::gate(ac[4 * q + 3], ac[4 * (q + 8) + 3], mB);
+            if (!vA) { vA0 = 0.f; vA1 = 0.f; }
+            if (!vB) { vB0 = 0.f; vB1 = 0.f; }
+#endif
+            f8max = fmaxf(f8max, fmaxf(fmaxf(fabsf(vA0), fabsf(vA1)), fmaxf(fabsf(vB0), fabsf(vB1))));
+            unsigned short uA, uB;
+            asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(uA) : "f"(vA1), "f"(vA0));   // byte0 = e0, byte1 = e1
+            asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(uB) : "f"(vB1), "f"(vB0));
+            px[q] = (uint32_t)uA | ((uint32_t)uB << 16);
+          }
+          // lane sends the byte of the channel its partner owns (an even lane owns e0 and sends e1, an odd lane owns e1 and sends e0) and keeps its own
+          const uint32_t selsend = odd ? 0x6420u : 0x7531u, selkeep = odd ? 0x7531u : 0x6420u;
+          const uint32_t selfin0 = odd ? 0x1504u : 0x5140u, selfin1 = odd ? 0x3726u : 0x7362u;   // (own, received) -> [A pair | B pair] of q = 2 k / 2 k + 1
+#pragma unroll
+          for (int k = 0; k < 4; ++k) {
+            const uint32_t snd = __byte_perm(px[2 * k], px[2 * k + 1], selsend);
+            const uint32_t own = __byte_perm(px[2 * k], px[2 * k + 1], selkeep);
+            const uint32_t rcv = __shfl_xor_sync(0xffffffffu, snd, 4);
+            const uint32_t f0 = __byte_perm(own, rcv, selfin0), f1 = __byte_perm(own, rcv, selfin1);
+            const int c0 = 8 * (2 * k) + 2 * cq + (odd ? 1 : 0), c1 = c0 + 8;
+            const uint32_t r0 = sbuf + (uint32_t)(c0 * 64 + ((wiw ^ ((c0 >> 1) & 3)) << 4) + (tpl & 15));
+            const uint32_t r1 = sbuf + (uint32_t)(c1 * 64 + ((wiw ^ ((c1 >> 1) & 3)) << 4) + (tpl & 15));
+            asm volatile("st.shared.b16 [%0], %1;" :: "r"(r0), "h"((unsigned short)(f0 & 0xffffu)) : "memory");
+            asm volatile("st.shared.b16 [%0], %1;" :: "r"(r0 + 8), "h"((unsigned short)(f0 >> 16)) : "memory");
+            asm volatile("st.shared.b16 [%0], %1;" :: "r"(r1), "h"((unsigned short)(f1 & 0xffffu)) : "memory");
+            asm volatile("st.shared.b16 [%0], %1;" :: "r"(r1 + 8), "h"((unsigned short)(f1 >> 16)) : "memory");
+          }
+          fence_proxy_async();
+          if (st_elect) tma_store_wait_read<0>();
+          named_bar_sync(bar_id, 128);
+          if (st_elect) { tma_store_3d(&p.tm_ab, sStage + cw * (2 * G::STG) + (b & 1) * G::STG, jw, iw, G::CPB * b); tma_store_commit(); }
+          return;
+        }
+#endif
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
           uint32_t pk2[2][2];
@@ -1031,8 +1194,12 @@ TMN_DEVI void k1_body(const P& p) {
             fence_regs(acc0);
           }
           wgmma_fence();
+#if TMN_K1_F8C
+          mma_group128_f8<KS / 2, J>(acc0, fa8, (uint32_t)d, (uint32_t)(d >> 32));
+#else
           if constexpr (G::BW == 128) mma_group128<SKCH, KS, J>(acc0, fa, (uint32_t)d, (uint32_t)(d >> 32));
           else mma_group<SKCH, KS, J>(acc0, fa, (uint32_t)d, (uint32_t)(d >> 32));
+#endif
           wgmma_commit();                                // a group per slot: the wait for the next slot never sits inside an open (uncommitted) MMA group
           PF(4);
         });
@@ -1057,9 +1224,17 @@ TMN_DEVI void k1_body(const P& p) {
     }
     }
     // the A fragments are read ASYNCHRONOUSLY by every block's wgmma: keep their registers allocated until the last group of this tile has retired
+#if TMN_K1_F8C
+#pragma unroll
+    for (int s = 0; s < KS / 2; ++s) fence_regs(fa8[s]);
+#else
 #pragma unroll
     for (int ks = 0; ks < KS; ++ks) fence_regs(fa[ks]);
+#endif
   }
+#if TMN_K1_F8
+  { const uint32_t mx = __reduce_max_sync(0xffffffffu, __float_as_uint(f8max)); if (lane == 0 && p.amax != nullptr) atomicMax(reinterpret_cast<unsigned int*>(p.amax), mx); }
+#endif
   if (TMAST && st_elect) tma_store_wait_all();           // every bulk store of this CTA complete before its shared memory is released
   if (TMN_K1_PROF && p.stats != nullptr && tid == 128 + TMN_K1_PROF - 1 && blockIdx.x == 5) for (int i = 0; i < 8; ++i) reinterpret_cast<unsigned long long*>(p.stats)[i] = pf[i];
   if (tid == 128) { TMN_TS(p.stats, 3, clock64()); TMN_TS(p.stats, 5, tmn_globaltimer()); }

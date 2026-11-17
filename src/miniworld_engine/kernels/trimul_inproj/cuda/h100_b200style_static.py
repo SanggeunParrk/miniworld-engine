@@ -52,6 +52,8 @@ def output_kernel(d, h, cfg, rowpad=False, xbuf=1, extra=()):
         smem = stages * 128 * 128 + (d // 64 + h // 64) * bn * 128 + xbuf * 2 * 64 * bn * 2 + 16 * d + 4096 + 3 * 512 + 16 * (stages + xbuf + 1)
     else:
         smem = BI._k3_smem(d, bn, stages) + (xbuf - 1) * (2 * 64 * bn * 2 + 16)
+    if any("K3_CSCALE=1" in e for e in extra):  # the channel-scale vector [h] fp32 (k3.cu K3_CSCALE)
+        smem += 4 * h
     if smem > 232448:
         raise ValueError("K3 resources")
     kernel.set_max_dynamic_smem(smem)

@@ -289,6 +289,14 @@ def _output_kernel(d, h, cfg, save=False):
 def _contract(ab, d, direction, out=None):
     """B200's contraction (``b200_infer._contract``) for both directions; one direction through ``_h100_bmm.contract`` (the measured
     cuBLASLt configuration where one is listed)."""
+    from . import _h100_fp8
+
+    if _h100_fp8.CONFIG is not None and out is None and direction != 0:  # experimental opt-in FP8 planes; unset = the bf16 route
+        return _h100_fp8.contract(ab, d, direction, lambda planes, hd, dr: _contract_bf16(planes, hd, dr))
+    return _contract_bf16(ab, d, direction, out)
+
+
+def _contract_bf16(ab, d, direction, out=None):
     from .b200_infer import _contract as contract, _fold
 
     if direction == 0:
