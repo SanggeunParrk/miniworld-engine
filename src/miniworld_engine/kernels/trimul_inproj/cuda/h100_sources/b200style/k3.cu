@@ -40,6 +40,9 @@ using bf = __nv_bfloat16;
 #ifndef WSTAGES
 #define WSTAGES 0
 #endif
+#ifndef K3_CSCALE
+#define K3_CSCALE 0   // EXPERIMENTAL FP8 planes: tri holds the raw e4m3 contraction (bf16); channel c of the true t is csc[c] x tri (power of two): the LN_out statistics
+#endif                // weight the loaded values; the host folds csc into Wpf (the projection operand), so the MMA is unchanged
 #ifndef K3_DIAG
 #define K3_DIAG 0
 #endif
@@ -79,7 +82,11 @@ static_assert(D % BN == 0 && (BN == 64 || BN == 128 || BN == 192 || BN == 256), 
 // uv: fp32 [4][D] = up, vp, ug, vg; xs: fp32 [M][2] = (mean, rstd) of LN_in (GFOLD)
 struct Params {
   CUtensorMap tri, xa, wp, wg, xm, ym;
-  const float* uv; const float* xs; int M; int tiles;
+  const float* uv; const float* xs;
+#if K3_CSCALE
+  const float* csc;
+#endif
+  int M; int tiles;
   const bf* ds; bf* pv; bf* gv; float* mu; float* rs; int L;
 #if ROWPAD
   int Np, CJ;
@@ -106,7 +113,12 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
   uint8_t* xbuf = wring + (K3_WRES ? (KG + KP) : NW) * WBYTES;                             // [2 wg][XB][BN/64 chunks][64 tok][128 B]
   float* su = reinterpret_cast<float*>(xbuf + 2 * XB * XBYTES);  // [4][D]
   const float* sv = su + D; const float* sug = su + 2 * D; const float* svg = su + 3 * D;
+#if K3_CSCALE == 1
+  float* ssc = su + 4 * D;                                       // [H] channel scales
+  float* red = ssc + H;
+#else
   float* red = su + 4 * D;                                       // [2 wg][4 grp][64 tok][2]  partial sums
+#endif
   float* sk = red + 2 * 4 * 64 * 2;                              // [2 wg][64 tok] shift
   float* smu = sk + 2 * 64;                                      // [2 wg][64 tok] -rs*mu
   float* srs = smu + 2 * 64;                                     // [2 wg][64 tok] rs
@@ -118,6 +130,9 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int wg = __shfl_sync(0xffffffffu, tid >> 7, 0);
   for (int i = tid; i < (GFOLD ? 4 : 2) * D; i += 384) su[i] = p.uv[i];
+#if K3_CSCALE == 1
+  for (int i = tid; i < H; i += 384) ssc[i] = p.csc[i];
+#endif
   if (tid == 0) {
     for (int s = 0; s < NS; ++s) { mbar_init(full + s, 1); mbar_init(empty + s, 8); }
     for (int b = 0; b < 2 * XB; ++b) mbar_init(xfull + b, 1);
@@ -322,11 +337,20 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
 #endif
         wgmma_commit();
         if (cb == 0) {                                   // warp wiw: channels 16 wiw .. +15 of the chunk, tokens 2 lane, 2 lane + 1
+#if K3_CSCALE == 1
+          if (kc == 0) { const uint32_t v0 = lds32(a + swz128(0, 4 * lane)); const float s0 = ssc[0]; ka = bf16lo(v0) * s0; kb = bf16hi(v0) * s0; }
+#else
           if (kc == 0) { const uint32_t v0 = lds32(a + swz128(0, 4 * lane)); ka = bf16lo(v0); kb = bf16hi(v0); }
+#endif
 #pragma unroll
           for (int c = 0; c < 16; ++c) {
             const uint32_t v = lds32(a + swz128(16 * wiw + c, 4 * lane));
+#if K3_CSCALE == 1
+            const float sc = ssc[kc * 64 + 16 * wiw + c];
+            const float da = fmaf(bf16lo(v), sc, -ka), db = fmaf(bf16hi(v), sc, -kb);
+#else
             const float da = bf16lo(v) - ka, db = bf16hi(v) - kb;
+#endif
             s1a += da; s2a = fmaf(da, da, s2a); s1b += db; s2b = fmaf(db, db, s2b);
           }
         }
@@ -343,8 +367,17 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3(__grid_cons
           float S1 = 0.f, S2 = 0.f;
 #pragma unroll
           for (int g = 0; g < 4; ++g) { S1 += red[((w * 4 + g) * 64 + t) * 2]; S2 += red[((w * 4 + g) * 64 + t) * 2 + 1]; }
+#if K3_CSCALE == 2                                        // one scalar scale: the statistics ran on the raw values
+          const float cs = __ldg(p.csc);
+          const float m1 = S1 * (1.f / H) * cs, var = fmaxf(S2 * (1.f / H) * cs * cs - m1 * m1, 0.f);
+#else
           const float m1 = S1 * (1.f / H), var = fmaxf(S2 * (1.f / H) - m1 * m1, 0.f);
+#endif
+#if K3_CSCALE == 2
+          const float rs = rsqrtf(var + 1e-5f), mu = sk[w * 64 + t] * cs + m1;
+#else
           const float rs = rsqrtf(var + 1e-5f), mu = sk[w * 64 + t] + m1;
+#endif
           srs[w * 64 + t] = rs; smu[w * 64 + t] = -rs * mu;
           if (p.mu) { p.mu[tok0 + t] = mu; p.rs[tok0 + t] = rs; }
         }

@@ -672,7 +672,11 @@ def update_inference(module, pair, mask, *, bidirectional):
 def _update_inference_one(module, pair, mask, *, bidirectional, out=None):
     """One launch. out (chunked batches): the caller's rows of the output; the port and the packaged K1 / K3 write them in place,
     the other paths are copied in."""
-    y = _update_inference_body(module, pair, mask, bidirectional, out)
+    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as _fp8  # EXPERIMENTAL opt-in (POLICY None = off)
+
+    y = _fp8.module_route(module, pair, mask, bidirectional) if _fp8.POLICY is not None else None
+    if y is None:
+        y = _update_inference_body(module, pair, mask, bidirectional, out)
     if out is not None and y is not out:
         out.copy_(y)
         return out

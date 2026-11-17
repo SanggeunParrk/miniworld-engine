@@ -106,6 +106,7 @@ def _h100(cells):
         h100_b200style_aux,
         h100_b200style_d384_tmasave,
         h100_b200style_direct,
+        h100_b200style_fp8,
         h100_b200style_reorder,
         h100_b200style_scalar_tmasave,
         h100_b200style_ss,
@@ -237,6 +238,39 @@ def _h100(cells):
                 BS.K3_XBUF.get(c.d, 1),
                 BS.K3_EXTRA.get(c.d, ()),
             )
+
+    # the opt-in FP8-plane route (docs/fp8.md, h100_b200style_fp8; one direction, hidden = pair 128 / 256, bf16): the FP8-plane K1 (TMN_K1_F8, its own
+    # tile) and the K3 with the folded channel scale (K3_CSCALE; the any-L row form, and for D256 also the token-flat form), planned next to their
+    # default-route twins. The cuBLASLt e4m3 contraction is a library call (nothing to build).
+    fp8_k1 = h100_b200style_direct
+    for d in sorted({c.d for c, _ in infer if c.d in (128, 256) and c.ch == c.d and not c.bidir}):
+        lengths = sorted({n for c, m in infer if c.d == d and c.ch == d and not c.bidir for n in m.lengths})
+        # K1 tile: D128 the fixed FP8 tile, D256 the direct K1's tile of the length (``front`` takes F8_CFG, else the length's config)
+        cfgs = [fp8_k1.F8_CFG[d]] if d in fp8_k1.F8_CFG else list(dict.fromkeys(BS._config(d, n=n, direct=True) for n in lengths))
+        for cfg in cfgs:
+            yield _call(fp8_k1._kernel, d, d, cfg, f8=True)
+        for flat in (False, True) if d == 256 else (False,):
+            yield _call(
+                h100_b200style_static.output_kernel,
+                d,
+                d,
+                BS._inference_output_config(d),
+                not flat,
+                BS.K3_XBUF.get(d, 1),
+                h100_b200style_fp8.k3_flags(d, flat),
+            )
+    # the bidirectional FP8-plane route: the same K1 per direction (hidden = d: the entries above), one K3 over the 2 d channels with the
+    # per-channel scale form (K3_CSCALE=1): the any-L row form at D128, the token-flat form at D256 (L % 128 == 0)
+    for d in sorted({c.d for c, _ in infer if c.d in (128, 256) and c.ch == 2 * c.d and c.bidir}):
+        yield _call(
+            h100_b200style_static.output_kernel,
+            d,
+            2 * d,
+            BS._inference_output_config(d),
+            d != 256,
+            BS.K3_XBUF.get(d, 1),
+            h100_b200style_fp8.k3_flags(d, d == 256, True),
+        )
 
     # wide inference: bidirectional (wide_forward/selection.json, with / without a mask) and single direction D512
     wide = json.loads((T.SOURCES / "wide_forward/selection.json").read_text())

@@ -170,6 +170,20 @@ def _infer_op(
 
 
 def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False, variant=0):
+    """The inference kernels (see :func:`_infer_body`); with the opt-in FP8 route on, the call site of the standalone V^T pass (its static V scale is per weight pack)
+    is set around the call (and cleared: a stale site would apply another module's scale)."""
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as _hs
+
+    if not _hs.FP8_PV:
+        return _infer_body(kind, args, eps, n_head, head_dim, trans, out, flip, variant)
+    _hs._SITE, _hs._SITE_T = args[5].data_ptr(), args[5]
+    try:
+        return _infer_body(kind, args, eps, n_head, head_dim, trans, out, flip, variant)
+    finally:
+        _hs._SITE = _hs._SITE_T = None
+
+
+def _infer_body(kind, args, eps, n_head, head_dim, trans, out=None, flip=False, variant=0):
     """The inference kernels; `out`: a contiguous tensor like the pair to write the result into (a chunk's rows of a batch's output,
     eager only: an op output may not alias an input; the standard output only).  ``variant``: ``_variant``'s bits -- UNTRANSPOSED / DUAL
     (Chai-1's layouts; args[13] the second out-projection) on the width-generic kernels in one block."""
@@ -258,7 +272,7 @@ def _generic_rows(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans
     if gate_bias is not None:
         hd = gate_bias.numel() // H
         gb = F.pad(gate_bias.view(H, hd), (0, D - hd))
-    core = core_mod._core_h16().triattn_fwd_h16 if h16 else core_mod._core().triattn_fwd
+    core = core_mod.core_h16().triattn_fwd_h16 if h16 else core_mod._core().triattn_fwd
     lt = gen._lt()
     bounds = [L * i // blocks for i in range(blocks + 1)]
     blocks_of = list(itertools.pairwise(bounds))

@@ -28,6 +28,9 @@ def prebuild(target, rows):
             yield h100_sm90._core
         if needs("triangle_attention_fwd_fp16_sm90"):
             yield h100_sm90._core_h16
+            # the opt-in FP8 PV route (docs/fp8.md): the same core with the e4m3 P / V^T hi plane (TA_F8PV) or the hi + lo planes (+ TA_F8HL)
+            yield ft.partial(h100_sm90._core_h16, ("TA_F8PV=1",))
+            yield ft.partial(h100_sm90._core_h16, ("TA_F8PV=1", "TA_F8HL=1"))
         if needs(
             "triangle_attention_front_sm90",
             "triangle_attention_tail_sm90",
@@ -58,6 +61,10 @@ def prebuild(target, rows):
         if needs("triangle_attention_front_fused_sm90"):
             yield lambda: h100_sm90_generic._front_ext(cutlass_include())
             yield h100_sm90_generic._front_y16  # the fp16-exact variant (same source, MW_F3_Y16)
+            # the opt-in FP8 PV route (docs/fp8.md): the fronts that write the e4m3 V^T planes (hi: MW_F3_VTW=1, hi + lo: 2), bf16 and fp16-exact
+            for vtw in (1, 2):
+                yield ft.partial(h100_sm90_generic._front, (*h100_sm90_generic.FRONT_DEFS, f"MW_F3_VTW={vtw}"))
+                yield ft.partial(h100_sm90_generic._front_y16, (f"MW_F3_VTW={vtw}",))
         # the MSA row dropout's Philox keep-mask (pwa_train: ``extension("pack").drop_keep``)
         if needs("triangle_attention_drop_scale_sm90", "triangle_attention_graph_rng_write_sm90"):
             yield ft.partial(h100_triattn.extension, "pack")

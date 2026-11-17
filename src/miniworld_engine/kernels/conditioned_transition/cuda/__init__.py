@@ -18,6 +18,8 @@ from torch.multiprocessing.reductions import StorageWeakRef
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._key_len import kernel_mask
 
+from . import token_dit_fp8 as _fp8
+
 _dir = Path(__file__).parent
 STAT_W = 128  # kept for the runner's buffer layout (the Triton module's statistics width)
 
@@ -141,6 +143,18 @@ def _bf16_wab64(wab, up=False):
         lambda: (build(), wab),
         limit=_capture.BLOCK_CACHE_LIMIT,
     )[0]
+
+
+def _f8_wab(wab, M: int, H: int, device_index):
+    """The bf16 SwiGLU operand in the tiling the e4m3 expand GEMM takes for M rows (the bf16 kernel's ``_swiglu_ht`` rule) and that ht."""
+    ht = _swiglu_ht(M, H, _fp8_nsm(device_index), bf16=True)
+    return (wab if ht == 128 else _bf16_wab64(wab)), ht
+
+
+def _fp8_nsm(device_index) -> int:
+    from miniworld_engine.kernels._device import num_sms
+
+    return num_sms(device_index if device_index is not None else torch.cuda.current_device())
 
 
 def _tf32_wab(wab, ht=128):
@@ -602,7 +616,16 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     xa = single.new_empty((M, D))
     # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
     fused_expand = fp32 and _FP32_SWIGLU_GEMM and not up and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
-    if fold:
+    # EXPERIMENTAL e4m3 placements (opt-in, default off: ``token_dit_fp8.PLACES`` empty -> f8 empty, the bf16 route below unchanged)
+    f8 = _fp8.active(M, D, fp32, plain and fold) if _fp8.PLACES else frozenset()
+    if f8:
+        f8w = _fp8.weight_pack(key, wqkvg, wo, ws, _f8_wab(wab, M, ws.shape[1], single.device.index), bqkvg)
+    if f8 and "qkvg" in f8:
+        xt = xa
+        xa8 = torch.empty((M, D), device=single.device, dtype=_fp8.E4M3)
+        sxa = torch.empty((M, 1), device=single.device, dtype=torch.float32)
+        _fp8.ext().adaln_in_rows_cf_q8(xin, G, r1, b1f, b2f, c, stats, xa8, sxa, ada_eps, 1e-5, _PDL)
+    elif fold:
         xt = torch.empty_like(xa) if parallel else xa
         _ext().adaln_in_rows_cf_cuda(xin, G, r1, b1f, b2f, c, stats, xa, ada_eps, 1e-5, xt if parallel else None, _PDL, sig)
     elif parallel:
@@ -614,7 +637,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, ada_eps, sig)
     if matrix_ready is not None:
         torch.cuda.current_stream(single.device).wait_event(matrix_ready)
-    if gated or not fp32:  # bf16 without a gating query: the pack's gate bias is +1e4 (above)
+    if f8 and "qkvg" in f8:
+        qkvg = _fp8.mm(xa8, sxa, f8w["qkvg"], bias=f8w["bqkvg"])
+    elif gated or not fp32:  # bf16 without a gating query: the pack's gate bias is +1e4 (above)
         qkvg = torch.addmm(bqkvg[: 3 * D], xa, wqkvg[: 3 * D].t()) if fp32 else torch.addmm(bqkvg, xa, wqkvg.t())
     else:
         # fp32, no gating query: the core's gate columns hold +1e4 (sigmoid = 1); the TF32 GEMM writes the q | k columns only
@@ -636,13 +661,23 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads, kmask=kmask)
     else:
         attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B, kmask=kmask)
-    ya = torch.mm(qkvg[:, :D], wo.t())
-    if not parallel and fold:
+    if f8 and "out" in f8:
+        ya = _fp8.mm(*_fp8.rows_q8(qkvg[:, :D]), f8w["out"])
+    else:
+        ya = torch.mm(qkvg[:, :D], wo.t())
+    if f8 and "expand" in f8:
+        xt8 = torch.empty((M, D), device=single.device, dtype=_fp8.E4M3)
+        sxt = torch.empty((M, 1), device=single.device, dtype=torch.float32)
+        _fp8.ext().resgate_adaln_cf_q8(xin, ya, G, r1, b1f, b2f, stats, xt8, sxt, ada_eps, _PDL)
+    elif not parallel and fold:
         _ext().resgate_adaln_cf_cuda(xin, ya, G, r1, b1f, b2f, stats, xa, ada_eps, _PDL)
     elif not parallel:
         resgate_adaln_rows(x, ya, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, ada_eps, tf32_round=fused_expand, sig=sig)
     h = single.new_empty((M, ws.shape[1]))
-    if up and not fp32:
+    if f8 and "expand" in f8:
+        a8, sa8, ht = f8w["expand"]
+        _fp8.ext().gemm_swiglu_f8(xt8, a8, h, sxt, sa8, _fp8_nsm(single.device.index), ht, _PDL)
+    elif up and not fp32:
         # silu(a) b u in the SwiGLU GEMM's epilogue (128 x 192 tiles, [Wa 64 | Wb 64 | Wu 64]): [a | b | u] never reaches HBM.
         # H100 graph replay, K 768, H 1536: M = 640 8.3 against 12.1 us for cuBLAS + the row pass, 1920 20.6 / 30.0, 5120 55.6 / 87.8
         op = _token_swiglu(single.device.index)
@@ -663,7 +698,10 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         op = _token_swiglu(single.device.index)
         ht = _swiglu_ht(M, ws.shape[1], op.nsm, bf16=True)
         op.ext.gemm_swiglu(xt, wab if ht == 128 else _bf16_wab64(wab), h, op.nsm, ht, False, _PDL)
-    y = torch.mm(h, ws.t())
+    if f8 and "squeeze" in f8:
+        y = _fp8.mm(*_fp8.rows_q8(h), f8w["squeeze"])
+    else:
+        y = torch.mm(h, ws.t())
     out = torch.empty_like(xa)
     if fold:  # out = (xin + sigmoid(gA) ya) + sigmoid(gT) y: both schedules' output
         _ext().resgate_out_cf_cuda(xin, ya, y, G, b2f, out, _PDL)

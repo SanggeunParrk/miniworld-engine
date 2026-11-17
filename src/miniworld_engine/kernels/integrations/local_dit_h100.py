@@ -14,6 +14,8 @@ run the TF32 kernels; operands are rounded to nearest tf32, the residual stream,
 from __future__ import annotations
 
 import contextlib
+import os
+from collections.abc import Iterable
 from typing import cast
 
 import torch
@@ -23,6 +25,34 @@ from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tf32 import tf32_matmul
 from miniworld_engine.kernels.integrations import local_dit as _ld
+
+#: EXPERIMENTAL, opt-in (default off): the bf16 inference forward runs row-kernel GEMMs on e4m3 wgmma (``sm90_atom.f8``). The kernels it covers:
+#: ``"pre"`` (q | gate | k | v projections, pre90_f8) and / or ``"post"`` (out-projection, SwiGLU, squeeze, post90_f8). Set by
+#: ``MINIWORLD_ATOMDIT_FP8`` at import (``1`` / ``all``: both; ``pre``; ``post``) or ``enable_fp8()``. Training, fp32 and the options outside
+#: ``sm90_atom.f8.OPTIONS`` keep the bf16 / TF32 kernels. docs/fp8.md, "Atom DiT".
+_FP8_PARTS = ("pre", "post")
+
+
+def _fp8_parts(value: bool | str | Iterable[str] | None) -> frozenset:
+    if value is True or value in ("1", "all"):
+        return frozenset(_FP8_PARTS)
+    if not value or value == "0":
+        return frozenset()
+    parts = frozenset(str(value).split(",")) if isinstance(value, str) else frozenset(value)
+    if not parts <= set(_FP8_PARTS):
+        raise ValueError(f"FP8 parts must be among {_FP8_PARTS}, got {sorted(parts)}")
+    return parts
+
+
+FP8_ROWS: frozenset = _fp8_parts(os.environ.get("MINIWORLD_ATOMDIT_FP8", ""))
+
+
+def enable_fp8(on: bool | str | Iterable[str] = True) -> frozenset:
+    """Switch the e4m3 row-kernel route: True / "all" (both kernels), "pre", "post", an iterable of those, or False; returns the previous parts."""
+    global FP8_ROWS
+    prev, FP8_ROWS = FP8_ROWS, _fp8_parts(on)
+    return prev
+
 
 DS, DC, DP, NH = 128, 128, 16, 4
 _NW = 27  # the canonical leaves (local_dit.WEIGHTS + CROSS_WEIGHTS); a model's option leaves follow them (KQLN: wq bq wk bk)
@@ -322,6 +352,12 @@ def _fwd(
     weights = weights[:_NW]
     with torch.cuda.device(single.device):
         p = k90.pack([*weights, wup] if up else weights, tf32)  # UP: + W_u chunks beside [Wa_j; Wb_j]
+        from miniworld_engine.kernels.augmented_attention.cuda.sm90_atom import f8 as f8mod
+
+        # the opt-in e4m3 row kernels (FP8_ROWS): bf16 inference, options inside f8.OPTIONS only, a conditioning shared by the samples (the
+        # sampler step; with per-sample tables the route measured slower: A = 1, 4096 atoms 1.09x)
+        f8 = FP8_ROWS if (FP8_ROWS and not save and not tf32 and set(opts) <= f8mod.OPTIONS and _shared(cond)) else frozenset()
+        p8 = f8mod.pack8(weights) if f8 else None
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
         nmod = groups * n if shared else m  # shared: one conditioning per (group, atom), read modulo G N (rows are [A][G][N])
@@ -365,6 +401,8 @@ def _fwd(
                 ),
             )
             qkr = rest[0] if kqln else s2.new_empty(0, 2 * DS)
+        elif "pre" in f8:
+            q, sg, k, v = f8mod.pre_fwd8(s2, mod, mkv, p8, eps=eps, nmod=nmod, parallel_kv=parallel_kv, options=opts)
         else:
             q, sg, k, v = cast(
                 "tuple[torch.Tensor, ...]",
@@ -386,6 +424,9 @@ def _fwd(
             _slid_edges(o, q, k, v, edge_tables, a, groups, n)
             _slid_tail(o, q, k, v, tail, a, n)
         o = o.view(m, DS)
+        if "post" in f8:
+            out8 = f8mod.post_fwd8(s2, o, sg, mod, p8, eps=eps, nmod=nmod, options=opts)
+            return [_ld._unpadded(out8.view(a // groups, groups, n, DS), single.shape)]
         if not save:
             return [
                 _ld._unpadded(

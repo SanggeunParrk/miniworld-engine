@@ -194,6 +194,34 @@ Port K3, the default since 2.5.12 (`h100_inference.PORT_K3`, `MINIWORLD_TRIMUL_B
 
 Engine accuracy standard (measure/accuracy.py, registry row 95 = D128, every length, eval + train, port K3 on vs off; 2026-11-16): no light changes (eval L128-768 GREEN with it on and off; training is not on the route: its records are the same, 10 GREEN and the 2 YELLOW gradients of before). Eval max error / tol 8e-3 off -> on: L256 4.65e-3 -> 4.28e-3, L384 4.83e-3 -> 4.94e-3, L512 4.65e-3 -> 4.94e-3, L640 4.94e-3 -> 4.58e-3, L768 5.03e-3 -> 4.76e-3 (L128: below the minimum length, same route). Rows of the other widths do not reach it (D128 only). `BidirectionalTriangleMultiplication.backend_versions["cuda:h100_sm90"]` 6.
 
+### Bidirectional inference: route per width, what applies, %SOL (2026-11-16, branch `fp8/bidir-tm`; measured, default bf16 route)
+
+Which kernels run (one sample, `BidirectionalTriangleMultiplication`, d_hidden = d_pair, eval, no dropout; kernel names from the profiler):
+
+| d_pair | inference route | which of the single-direction improvements apply |
+|---|---|---|
+| 64 | packaged K1 `tmn_k1_z64_h128` -> two cuBLAS bmm (`nvjet_tst`, TNT / NTT on transposed views) -> packaged K3 `tmn_k3_z64_h128`, any L >= 16 | `K3_EXTRA` (2.5.9 K3 pipe flags): no, they exist only in `b200style/k3.cu`, which the one-direction row-padded form uses; the packaged K3 is a different kernel. Host transpose / stats / min-L / FP8 prebuild entries: no (FP8-only items; the bf16 bidirectional route has no host transpose: the second contraction is a transposed view) |
+| 128 | packaged K1 `tmn_k1_z128_h256` -> two bmm -> packaged K3 `tmn_k3_z128_h256`, any L >= 16 | same; FP8 planes (new, opt-in): L >= 256 |
+| 256 | B200-style port, direction 0: `mw_b200style_k1_direct` -> two bmm -> `mw_b200style_fold` -> `mw_b200style_k3_static` (token-flat), L % 128 == 0 (B = 1 at other L: the `cuda` backend refuses; B > 1: padded to 128) | `K3_EXTRA`: not applied by design (D256 / D384 build the plain K3, slower with the flags). FP8 planes (new, opt-in): L >= 1024 |
+| 384 | the port at every L % 128 == 0 except (D384, L768): `h100_wide_inference` | none (no FP8 route) |
+| 512 | the port except (D512, L384): `h100_wide_inference` (D512: separate input LN, `k1ss`, `k3reorder`) | none |
+
+Training: D64 `h100_d64_b200gate`, D128 `h100_training`, D256 / D384 / D512 the port (B = 1 at L384 / 768: `h100_wide_training`); none of the FP8 / K3-pipe items applies (inference only).
+
+Candidate "bidirectional D64 / D128 through the port's row-padded form (direction 0: direct K1 at h = 2 D, `K3_EXTRA` K3 over 2 D channels)": measured against the packaged route and REJECTED: 25-40 % of the output elements differ (max 3-6e-2, a few bf16 ulp: the folded LN_out of k3.cu is a different rounding order than the packaged K3's), so it is not bit-identical, and the module is slower except at D128 L1024 (graph replay, candidate / default): D64 L256 / 512 / 1024 / 2048 1.10 / 1.08 / 1.06 / 1.03, D128 1.04 / 1.01 / 0.97 / 1.00. The pipe flags are bit-identical to the plain K3 inside that candidate (0 differing elements at D64 / D128, 4 lengths) and give it 0.3-3 %. The packaged unit's own K3 experiment macro `TMN_K3_EARLYP=1` (identical bytes, 0 differing elements) measured (graph replay, EARLYP / default) D64 L256..2048 1.000 / 1.001 / 0.997 / 1.029, D128 0.996 / 0.998 / 1.000 / 1.012: no gain, not enabled.
+
+%SOL of the default bf16 route (CUDA-graph replay of the module, profiler device time per kernel, same-callable control within 0.5 %; SOL = max(bytes / 3.05 TB/s, FLOPs / 748 TF cuBLAS bf16): K1 reads z, writes 8 D n^2 B of planes and 8 n^2 B of stats, 16 n^2 D^2 FLOPs; the two contractions 4 D n^3 FLOPs; K3 reads the tri planes 4 D n^2 B and z, stats, writes y, 6 n^2 D^2 FLOPs):
+
+| D | L | K1 ms (%SOL) | contraction ms (%SOL) | K3 ms (%SOL) | graph ms | module %SOL |
+|---|---|---|---|---|---|---|
+| 64 | 512 / 1024 / 2048 | 0.069 (81) / 0.269 (83) / 1.224 (73) | 0.077 (85) / 0.409 (90) / 3.086 (95) | 0.056 (79) / 0.205 (87) / 0.809 (88) | 0.198 / 0.889 / 5.031 | 84 / 86 / 90 |
+| 128 | 512 / 1024 / 2048 | 0.162 (69) / 0.624 (71) / 2.463 (72) | 0.150 (88) / 0.833 (88) / 6.043 (97) | 0.120 (74) / 0.460 (77) / 1.832 (77) | 0.413 / 2.011 / 11.02 | 80 / 76 / 82 |
+| 256 | 512 / 1024 / 2048 | 0.411 (89) / 1.775 (83) / 6.779 (87) | 0.293 (90) / 1.779 (83) / 12.64 (93) | 0.252 (70) / 1.090 (65) / 4.202 (67) | 0.963 / 4.674 / 24.11 | 84 / 78 / 85 |
+| 384 | 512 / 1024 / 2048 | 1.056 (78) / 4.227 (78) / 13.21 (100) | 0.429 (92) / 2.393 (92) / 18.22 (97) | 0.512 (61) / 2.027 (61) / 8.284 (60) | 2.041 / 8.991 / 44.75 | 75 / 75 / 80 |
+| 512 | 512 / 1024 / 2048 | 1.989 (74) / 8.139 (72) / 33.80 (70) | 0.565 (94) / 3.271 (90) / 24.44 (96) | 0.897 (61) / 3.596 (61) / 14.52 (61) | 3.572 / 15.34 / 73.07 | 71 / 72 / 76 |
+
+(L256 and L768, 1536 in `~/miniworld-engine-scratch/fp8/bidir/res/brk_base_*.jsonl`. The D384 L2048 K1 row at 100 % is 13.2 ms against a 13.2 ms tensor floor at 748 TF: the K1 of that cell runs at the cuBLAS-measured peak; the L1024 K1 78 %.) Removal ablations (graph replay with one stage launch removed, outputs wrong, `res/abld_*.jsonl`, marginal = base - ablated): D128 L1024 K1 0.55 / contraction 0.76 / K3 0.46 ms (kernel times 0.62 / 0.83 / 0.46); D256 L1024 1.75 / 1.90 / 1.31 (1.78 / 1.78 / 1.09); D64 L1024 0.31 / 0.39 / 0.23 (0.27 / 0.41 / 0.21). The stages are serial (marginals add up to the module time within 10 %); at L2048 the removal of K1 or of the contraction lets the other stage run on empty / stale planes and the power-bound GEMM runs faster (D128 L2048 marginal of the contraction 7.4 ms vs 6.0 ms kernel time): the L1024 marginals are the ones to read. These ablations establish the stage times, not what bounds a stage: no removal ablation of K1's or K3's internals (loads / stores / LN / gate) was run for the bidirectional kernels, so no bound is claimed for the sub-90 % rows.
+
 ### Batching, lengths, chunking
 
 Every width takes B samples per launch (`MAX_BATCH_BY_WIDTH` = 48 at D64-D512): tokens b-major, K1 stacks the samples along its
@@ -269,3 +297,54 @@ B 1 / 4, L 128-768.
 
 The previous, longer notes (H100 TriMul, trimul_inproj, tm1 / tm2, the module, the Anthropic payload) were deleted; see git
 history.
+
+## Experimental: e4m3 planes between K1 and the contraction (opt-in, off by default)
+
+`kernels/trimul_inproj/cuda/h100_b200style_fp8.py`, `_h100_fp8.py` (2026-11-14, branch `fp8-trimul-fwd`). Single direction, one sample, D128 / D256
+(hidden = pair), bf16 inference, capability (9, 0). Nothing runs unless `h100_b200style_fp8.POLICY` (env `MINIWORLD_TRIMUL_FP8`) is set, so every
+default route (and every token / judge result) is unchanged.
+
+- K1 (`h100_b200style_direct.front(qinv=...)`, `tmn_kernels.cuh` `TMN_K1_F8`): the n128 blocks (D128 takes the `(2, 64, 6, 1, 1, 6, 128)` tile in this mode),
+  the projection weights prescaled per plane channel by a power of two, planes written as e4m3 bytes (saturating `cvt.rn.satfinite.e4m3x2`, byte
+  exchange between neighbouring lanes, 64-byte rows, 64B-swizzled TMA store). Incoming: K1 reads the pair through a transposed tensor map, so the planes come out
+  transposed (K-major) and the LN statistics are transposed afterwards.
+- Contraction: cuBLASLt batched e4m3 GEMM (TN, bf16 out, no FAST_ACCUM: the tensor-core accumulator is promoted to fp32 periodically). Per-channel scales
+  factor out of the contraction exactly (`t = sa sb sum_k qa qb`); scales are powers of two, so the rescale is exact in bf16.
+- K3 (`k3.cu` `K3_CSCALE`): the scale `sa sb` is folded into the projection operand `Wpf` (host, exact) and weights the LN_out statistics.
+- Scales: `dynamic` (exact amax of the bf16 planes, a bf16 K1 pre-pass: numerics only) or `calib` (first call of a module, 4x headroom, static afterwards).
+
+### Selecting the FP8 routes (opt-in; every default route is bit-identical, 24 configs D64/D128/D256 checked against origin/main ac7b5f5d7)
+
+| env (read at import) | effect |
+|---|---|
+| `MINIWORLD_TRIMUL_FP8=calib` + `MINIWORLD_TRIMUL_FP8_GUARD=lazy` | e4m3 planes (bf16-compute K1), cuBLASLt e4m3 contraction, static calibrated scales, lazy overflow guard (graph-capturable) |
+| `MINIWORLD_TRIMUL_FP8_FASTACC=1` | cuBLASLt fast accumulation of the e4m3 contraction: 1.07-1.08x of the contraction at L>=1024, module output moves by < 0.1 % of the update (the error of the route is unchanged to 4 digits on real Protenix dumps) |
+| `MINIWORLD_TRIMUL_FP8_K1=1` | the K1 projections themselves in e4m3 (EXPERIMENTAL: update error 6.9 % vs 3.8 % for planes only; FAILED the Protenix n=12 trunk-seed pLDDT criterion: never a default) |
+
+D128 FP8 planes now use the three-warpgroup K1 tile `(3, 64, 6, 1, 1, 6, 128)` (24 KB ring slots; bf16 weights in z-chunk-sized slots, one `[64 k][128 rows]` TMA load per slot):
+K1 0.84-0.90x of the two-warpgroup tile, planes bit-identical. D256 cannot take it (the ring would need 8 slots x 24 KB). D64 is not covered (the n128 ring K1 does not run at D64).
+cuBLASLt heuristic candidates (8) and a neighbourhood sweep of tile / stages / cluster / swizzle around the top candidate (168 valid configs at D128 L2048) found nothing faster than the
+default heuristic pick (1.29 PFLOPs = 65 % of the dense e4m3 peak), so the contraction algorithm is not a lever.
+
+### FP8 planes: what changed on 2026-11-15 (`fp8/tm2`; numbers and the per-stage table in `docs/fp8.md`)
+
+- Incoming: K1 reads the pair through the transposed map and now stores the LN_in statistics at the swapped pair token itself (`K1Params.stats_t`, a field in the padding after `rows`, read only in `TMN_K1_F8` builds), so K3 reads them directly: the host transpose of `xs` (4 host ops + one elementwise kernel, 3-14 us) is gone.
+  The amax buffer is allocated once per module (it was a `torch.zeros(1)` per call through `setdefault`). Output bytes unchanged.
+- Min-L gates (`MIN_L`, `MINIWORLD_TRIMUL_FP8_MINL`): D128 out 144, D128 in 192, D256 out 224, D256 in 144, bidirectional D128 256, bidirectional D256 1024; below them the bf16 route runs unchanged.
+- Bidirectional block (2026-11-16, `fp8/bidir-tm`): `h100_b200style_fp8.run(direction=0)` runs the two directions as two single-direction FP8 K1 + e4m3 contractions into one `tri` and one K3 over 2 d channels (`K3_CSCALE=1`); numbers and the audit of the default bidirectional routes in `docs/fp8.md` and "Bidirectional inference" above.
+- Prebuild: the FP8 K1 tile(s) and the `K3_CSCALE` K3 (row form; D256 also the token-flat form) are in the sm90 plan (`kernels/trimul_inproj/cuda/__init__.py`); an FP8 forward against a prebuilt bundle and an empty JIT cache compiles nothing.
+- Measured (graph replay, module, vs the 2.5.9 default): D128 -9 .. -25 % (L256 .. L2048), D256 -4 .. -16 %. The contraction is a serial stage (removing the cuBLAS call removes exactly its time); the K1 overflow guard costs < 1 % (K1 with the amax pointer removed);
+  D256 is capped by Amdahl (contraction 30 % of the module, e4m3 1.47x of it) and its FP8 K1 is 2-6 % slower than the bf16 K1.
+
+### FP8 planes at D64 / D384, bidirectional D64 / D384, B > 1 (3.0.0 exploration, branch `fp8x/trimul`, 2026-11-17; numbers in `docs/fp8.md`)
+
+- K1 (`tmn_kernels.cuh`, `TMN_K1_F8` builds only): an e4m3 plane store for the n64 weight blocks (32 plane channels per block, accumulator groups
+  q < 4 gate / q + 4 projection): the n128 form's byte exchange on four column groups, staged `[32 ch][64 tok]` (64-byte rows, 64B swizzle), one TMA
+  store per block. `h100_b200style_direct.F8_CFG`: D64 takes the long D64 direct tile `(3, 64, 4, 1, 1)` (BJ 64: TMA stores), D384 the D384 direct
+  tile of the bf16 route `(2, 64, 2, 6, 1)` (an n128 D384 ring does not fit shared memory). The n64 blocks take unhalved prescaled weights
+  (`prescale(..., half=False)`: no `TMN_K1_FOLD`).
+- K3: the route's existing `K3_CSCALE` K3; D384 at L % 128 == 0 takes the token-flat K3 (the D384 default tile), else the row form.
+- `serves`: widths `WIDTHS = (64, 128, 256, 384)`, 1-16 samples (`MAX_SAMPLES`; B > 1 runs `run_samples`, the one-sample route per sample into one
+  output); gates in `MIN_L` (D64 512, D384 128, bidirectional D64 2048, bidirectional D384 1024).
+- D512 is not served: its inference K1 is the packed `_front` and its K3 `k3reorder.cu` has no `K3_CSCALE`.
+- Default route: unchanged (the header code is under `TMN_K1_F8`; sha1 of the outputs against the base tree in `docs/fp8.md`).

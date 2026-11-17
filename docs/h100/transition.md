@@ -244,6 +244,14 @@ node of a sample-expanded (stride 0) input of the H100 fused Transition, OPM, PW
 per parameter per backward cost ~50 ms of host time per training micro step of a 24-block token DiT).
 `kernels/conditioned_transition/configs/h100_sm90.json` holds the Triton ops of that family.
 
+## Opt-in FP8 (engine 3.0.0 line)
+
+`kernels/transition/cuda/fp8_sm90a.py` (`MINIWORLD_TRANSITION_FP8=calib`, off by default): bf16 inference at D 128 (the fused forward above with
+both GEMMs on e4m3 wgmma, `transition_fp8_fwd_sm90a.cu`) and D 384 / 512 (e4m3 twins of `ln_swiglu_gemm` / `squeeze_gemm`: e4m3 xn, h and squeeze).
+0.66-0.75x of the default module time at D 128, 0.57-0.72x at D 384 / 512, at 3.4 % rms output error against fp64 (the default: 0.28 %). Placement
+analysis, speed and error tables, the scale / guard contract: [FP8 routes](../fp8.md), section "Transition forward". The 2.5.12 kernels above are
+unchanged.
+
 ## History
 
 The previous, longer note was deleted; see git history (per-shape timings against anthropic / PyTorch, the D128 forward

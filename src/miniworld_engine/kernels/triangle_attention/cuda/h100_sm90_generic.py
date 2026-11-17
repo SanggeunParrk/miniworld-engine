@@ -516,6 +516,7 @@ def _forward(
     dq = COMPACT if compact else dc  # channels a head in q / k / v / g / u
     wo_use = _compact_out(wo_p, H) if compact else wo_p
     btr = False  # the bias tiles the core reads transposed (set by the fused front for AF3's ending node)
+    vt = vs = None  # the FP8 route's V^T planes from the front (see vtargs)
     y16 = (
         FRONT_Y16
         and h16
@@ -542,7 +543,20 @@ def _forward(
     )  # fp16 inference on the unfused route: LayerNorm + bias GEMM + bias kernel in one kernel (bit-identical; the GEMM of q | k | v | g stays cuBLAS)
     if fused or y16:  # LN + projection + head-major scaled bias: one kernel (and the flip of AF3's ending node in its bias store)
         y = mean = rstd = None
-        proj, sbias, _ = (_front_y16() if y16 else _front(FRONT_DEFS)).front(
+        # opt-in FP8 PV route (h100_sm90.FP8_PV, unfused sites): the front makes the e4m3 V^T planes itself (MW_F3_VTW build) instead of the standalone pass
+        vtargs = _core_mod.front_vt_args(pair.device, L, H, dq, B, C) if h16 and not need and head_dim in (D, COMPACT) else None
+        calib = (
+            vtargs == _core_mod.CALIBRATE
+        )  # the site's static V scale is not taken yet: the front runs as it is, the scale comes from this call's V
+        if calib:
+            vtargs = None
+        if vtargs is not None:
+            vdefs = (f"MW_F3_VTW={vtargs[2]}",)
+            front_ext = _front_y16(vdefs) if y16 else _front((*FRONT_DEFS, *vdefs))
+        else:
+            front_ext = _front_y16() if y16 else _front(FRONT_DEFS)
+        fkw = {"vinv": vtargs[0], "ovf": vtargs[1]} if vtargs is not None else {}
+        res = front_ext.front(
             x,
             lnw.float().contiguous(),
             lnb.float().contiguous(),
@@ -556,11 +570,17 @@ def _forward(
             trans,
             h16,
             flip,
+            **fkw,
         )
+        proj, sbias = res[0], res[1]
+        vt = res[3] if vtargs is not None else None
+        vs = vtargs[3] if vtargs is not None else None
         btr = flip  # AF3's ending node: the front stored the bias as its rows have it; the core reads its tiles transposed
         flip = False
         qkvg = None
         q, k, v, gt = ((proj[i].view(torch.float16) if h16 and (i < 3 or y16) else proj[i]).view(B, L, L, H, dq) for i in range(4))
+        if calib:
+            vt, vs = _core_mod.quantize_v_static(v, _core_mod._SITE)
     elif lnbias:  # fp16 inference: LN + the bias GEMM + the bias kernel in two kernels (the GEMM of q | k | v | g stays cuBLAS), bit for bit
         y, sbias = g.ln_bias_fwd(x, lnw.float().contiguous(), lnb.float().contiguous(), _half(wcat)[4 * HD :], front_mask, eps, L, trans, H, scale)
         mean = rstd = None
@@ -606,8 +626,12 @@ def _forward(
 
         o, lse, u = h100_dh.train_core(qkvg, sbias, H, dc, scale)
     else:
-        if h16:  # inference: the dead trailing key tiles skipped
-            o, lse, _, u = _core_mod._core_h16().triattn_fwd_h16(
+        if vt is not None:  # the FP8 core on the front's V^T planes (the V plane of the front's output is not written)
+            o, lse, _, u = _core_mod._core_f8pv().triattn_fwd_h16(
+                q, k, k, sbias, scale, need, gt, need, **_core_mod.key_args(mask, L), bias_transposed=btr, vt=vt, vscale=vs
+            )
+        elif h16:  # inference: the dead trailing key tiles skipped
+            o, lse, _, u = _core_mod.core_h16().triattn_fwd_h16(
                 q, k, v, sbias, scale, need, gt, need, **_core_mod.key_args(mask, L), bias_transposed=btr
             )
         else:

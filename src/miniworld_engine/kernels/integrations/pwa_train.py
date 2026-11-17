@@ -825,6 +825,10 @@ def _inference_math(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.T
     else:
         w16 = pair_fwd(z, pm, lnz_w, eps_z, module.to_bias.weight.detach(), H, BJ=64)
     if native:
+        from miniworld_engine.kernels.integrations import pwa_fp8 as _f8
+
+        if _f8.serves(m.shape[0], n):  # EXPERIMENTAL opt-in (off by default): e4m3 w / v in the key contraction
+            return _f8.forward(m, module.to_value.weight, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16)[None]
         v, y = k["lnvg"].ln_vg(m, lnm_w, lnm_b, wv16, eps_m, 2, 3, 1)
     else:
         v, y = k["lnvg"].ln_vg(

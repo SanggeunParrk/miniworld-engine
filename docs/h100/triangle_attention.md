@@ -389,3 +389,119 @@ Notes (2026-11-16, `bidir-ta2`, training and the tail; all bit-identical to 2.5.
 - `softmax_bwd_planes`: d logits = p (dp - s) written into the (transposed) bias-gradient planes in one pass (s = the torch sum, so the reduction order is torch's): about -60 us at L = 768.
 - Training L = 768 (fwd + bwd, CUDA-graph replay, same harness): 4428 -> 3775 us (-14.7 %); inference 1508 -> 1122 us (-25.6 %, of which this branch's 2.5.9-relative gains before the tail ring are the 2.5.10 candidate's own).
 - Tried, no gain: the ending contraction as one `cublasGemmBatchedEx` (pointer arrays, 128 batches): bit-equal, but 177 us with prebuilt pointers against 190 us for the 4 strided bmm launches (event timing), 209-212 us with the pointer arrays built per call: no pay-off once the build is counted, and the bit-equality of other cuBLAS algorithm choices (other L) would have to be proven per shape. Tail with the epilogue in registers and a ring that runs across tiles: 352 us against 323 us (slower). Fusing dyln = dc^T W with `ln_bwd`: not bit-identical possible (the gamma / beta partials of `ln_bwd` are accumulated in a grid-stride row order of its own).
+
+## Opt-in FP8 PV route (inference, head width 32 / 16; `h100_sm90.FP8_PV`, default off)
+
+`triattn_h16_sm90.cu` built with `-DTA_F8PV=1` (`h100_sm90._core_f8pv`); the default build is unchanged bit for bit (checked against the previous
+source on five shapes, with / without gate and key mask). `FP8_PV = True` makes every fp16-core call site (`core_h16()`: the fused d128 path,
+the wide d256 path, the width-generic path) run the variant; the LSE and anything else it does not take run the fp16 core.
+
+- Score GEMM unchanged: q, k, the bias and S stay fp16 (FP8 Q / K made the output error 1.4-5 % on the real dumps and, with an fp32 score
+  accumulator instead of the fp16 pairs, would give up the f16x2 softmax: measured slower at 4 heads, <= 9 % faster at 8).
+- P and V on e4m3: `[O | l] += P [V | 1]` is four `wgmma m64n40k32 e4m3` per 128 keys (eight k16 before). V is stored transposed `[B, N, H, dh, S]`
+  (K-major B operand), the keys of each group of 32 permuted (`vt_perm`) so the accumulator layout of S is already the k32 A fragment of P (no
+  shuffles); 8 rows of e4m3 ones behind the 32 V^T rows give the row sums from the quantized P. Heads of 16 channels: the TMA box's rows 16-31 are
+  zero fill (3-D map).
+- P as e4m3 bits straight from the logits, no MUFU, no `cvt` (a `cvt.e4m3x2.f16x2` per pair costs as much as the exponential: the F2F rate): with
+  `x` = the logit in log2 units minus (offset - 8), `byte = round(8 max(x, -7) + 56)` by one magic add (1024 + y in fp16) and one PRMT per four
+  probabilities. That is the piecewise-linear 2^x (up to 6 % high mid-octave) in e4m3 bits, the largest probability 2^8..2^8.5, so the lazy offset
+  uses `TA_TAU 0.5` here (8 in the fp16 core).
+- V scale per (batch, head): amax / 448, by `vt_quant` (`vt_amax_k` + `vt_quant_k`, one extra read of v), or a fixed amax (`FP8_PV_AMAX`, no
+  pass; larger values saturate). The epilogue multiplies by scale / l.
+- Where it stands: V^T is made by a standalone pass (the fronts still write fp16 v), so the module gain at L <= 1024 is about nothing
+  (d128 L1024: 2.42 -> 2.37 / 2.33 ms dynamic / static scale); the core alone is 14-34 % faster. Writing V^T from the fronts is the remaining step.
+- Accuracy (2026-11-14, real dumps of Protenix v1 / Boltz-2 / AF3 / OpenDDE, 6 layers of 5I28 and 8c3l): output error against fp32 1.1-2.7 % per call
+  (fp16 core 0.18 %, bf16 rounding 0.17 %); V on e4m3 is the larger part (1.0-2.3 %), the bit-mapped P 0.65-1.4 % (exact e4m3 P 0.4-0.75 %), Q / K on e4m3 would be 1.4-5 %.
+  End to end (FoldForge, 200 steps, trunk seeds 0-3, same protocol as the bf16 baseline): Protenix v1, 18 FoldBench picks: the change at the same trunk seed is
+  inside the bf16 trunk-seed spread on 17 (mean RMSD 0.06-0.9 A against 0.13-6.1 A); 8taa (DNA) has one seed 7.0 A from its bf16 twin (bf16 seed pairs up to 2.6 A).
+  Boltz-2, 11 picks: 10 inside, 9c90 outside (3 of 4 seeds flip to ipTM ~0.41, RMSD 12.6 A; bf16 seeds agree to 0.2 A); V rounded through e4m3 on the fp16 core
+  (`FP8_PV_MODE = "v_only"`) flips it too.  (2026-11-14, later: 9c90 is bistable, see the hi / lo section below -- the flip does not isolate V.)  Not for default use.
+
+### FP8 PV, second round (2026-11-14): where the module time goes, V as hi / lo planes, V^T written by the front
+
+Per-kernel time of the real inference module (d_pair 128, 4 x 32, torch profiler, ms per sample, starting node, no mask; compiled cubins of the default route):
+
+| L | front | core | tail | module | front GB/s | tail GB/s |
+|---|---|---|---|---|---|---|
+| 256 | 0.028 | 0.048 | 0.020 | 0.100 | | |
+| 512 | 0.103 | 0.249 | 0.070 | 0.428 | | |
+| 1024 | 0.403 | 1.711 | 0.275 | 2.407 | 2.66 TB/s | 2.92 TB/s |
+| 2048 | 1.598 | 13.98 | 1.061 | 17.06 | 2.69 TB/s | 3.04 TB/s |
+
+Bound type: the front (reads the pair once, writes q, k, v fp16 + the bias: 1032 B per pair element) and the tail (o, x in, out) run at 88-100 % of the 3.0 TB/s a
+torch copy reaches on this card (`bw.py`): HBM-bound, only fewer bytes help. The core is 70-82 % of the module from L 512 up and is not bandwidth-bound (0.5 TB/s):
+the 2026-11-14 ablation of its pieces (`TA_ABL`, since removed) at L 1024 / 2048, 4 x 32: no QK^T wgmma -1.4 % / -7.9 %, no exponentials -23 % / -1 %, no PV wgmma
+(its exponentials become dead code) -39 % / -43 % (8 x 32 at L 2048: -17 % / -23 % / -46 %): MUFU + conversion, the PV wgmma and the softmax bookkeeping, not the score GEMM.
+Bytes: e4m3 q / k / v writes would cut the front by up to a third (6 % of the module at L 1024) but Q / K on e4m3 is 1.4-5 % output error (no-go); V as hi + lo
+e4m3 planes is the same bytes as fp16; the tail's out-projection GEMM is not what bounds it, an e4m3 `o` would be the 2.65 % mantissa floor again.
+
+Opt-in additions (default route bit-identical to origin/main ac7b5f5d7: the whole inference module, six shapes / orientations / masks, compared as bytes):
+- `FP8_PV_HL = True` (`-DTA_F8HL=1`): V on two e4m3 planes (hi, and the rounding residual x 16 rounded again; `vt` is `[B, N, H, 2, dh, S]`), PV on `m64n72k32`
+  ([O_hi | O_lo | l], the epilogue adds O_lo / 16).  V error ~2^-8 instead of 2^-4.  Real dumps (Protenix v1 / Boltz-2, 5I28 + 8c3l, all layers): output error against fp32
+  0.5-1.5 % (hi only 1.7-2.8 %, fp16 core 0.18 %); what is left is the e4m3 probabilities.
+- `FP8_PV_FUSED = True` + `FP8_VSCALE` (fp32 [4], powers of two) or `FP8_VSCALE_AUTO = True` (calibrated per weight pack on its first call: the power of two above 4 x the V
+  absmax): the d_pair-128 front (`tri_front_vt`) writes V^T planes itself with the static scale, the standalone `vt_quant` pass is gone; values past 448 x scale saturate and
+  set a device flag (`take_overflow()`; `rescale_all()` then redo).  With `FP8_PV_FUSED` only this route feeds the FP8 core (the wide / generic call sites stay fp16:
+  the standalone pass costs more than the core gains there).  `FP8_PV_HL = False` writes the hi plane alone.
+- Module time (ms per sample, median of 9 interleaved rounds, same-cubin control = default measured twice; the control differs by <= 1.6 %):
+
+| d128 4 x 32 | L256 | L512 | L1024 | L2048 |
+|---|---|---|---|---|
+| default | 0.0974 | 0.4391 | 2.604 | 17.80 |
+| default, control | 0.0974 | 0.4394 | 2.604 | 17.51 |
+| hi + lo fused (`FP8_PV_HL`, fused) | 0.0987 (+1 %) | 0.4305 (-2 %) | 2.434 (-6.5 %) | 16.22 (-9 %) |
+| hi fused | 0.0902 (-7 %) | 0.3979 (-9 %) | 2.236 (-14 %) | 14.56 (-18 %) |
+| hi + lo, standalone V^T pass | 0.1153 (+18 %) | 0.503 (+15 %) | 2.713 (+4 %) | 16.99 (-4 %) |
+| hi, standalone V^T pass | 0.1071 (+10 %) | 0.4654 (+6 %) | 2.528 (-3 %) | 15.11 (-15 %) |
+
+  (d256 8 x 32, standalone pass only: hi +14 % / +9 % / -1 % / -10 % at L256 / 512 / 1024 / 2048, hi + lo +26 % / +19 % / +7 % / 0 %: no gain below L2048.)
+  (d64 4 x 16, standalone pass, generic front: hi +5 % / -4 % / -15 % / -19 %, hi + lo +12 % / +3 % / -7.5 % / -12 % at L256 / 512 / 1024 / 2048; control <= 0.3 %.)
+- Accuracy at the end level (FoldForge, 200 steps, trunk seeds 0-3, bf16 baselines from the same protocol): hi + lo and hi, standalone and fused (calibrated scales, no overflow
+  in any run): Protenix v1, 9-18 FoldBench picks, Boltz-2 10 picks: same-seed RMSD inside the bf16 trunk-seed spread everywhere except Boltz-2 9c90 (see below).
+  9c90 is bistable under numerical noise: relative noise of 0.1 / 0.2 / 0.5 / 1 / 2 % on the fp16 core's output (independent per element, four to six draws each) flips it in
+  1/6, 3/6, 2/4, 1/4, 4/4 draws (to ipTM ~0.42, RMSD 12.6 A, bf16 ipTM 0.71-0.79); the bf16 seeds only agree to 0.2 A because the bf16 path is deterministic.  hi + lo (output
+  error 0.5-1.5 %) flips 3 of 4 trunk seeds standalone and 2 of 4 fused, hi (fused) 4 of 4 deviate; no e4m3 P path is expected to hold it.  Protenix v1 on 9c90 does not flip.
+
+### FP8 PV, third round (2026-11-15, branch `fp8/triattn`): all configs, the standalone pass made cheap, 12 heads, whitelist per call site
+
+Measured against the 2.5.9 default (which keeps its N24 / K16 / software-pipelined 16-channel variants; F8PV still forces them off). Tables and the end-level protocol: `docs/fp8.md`.
+- `vt_quant` served 8 heads at most and fell to `quantize_v_torch` (the 12-head d_pair 384 module was 1.4-2.4x slower than the default at L512..2048); it now serves 16 heads (`vt_amax_k` has one running max per thread: the block size is a multiple of C / 8, so a thread's head is fixed).
+  `_F8Core` falls back to the fp16 core past 16 heads.
+- Static per-site scale (`FP8_VSCALE_AUTO`, `quantize_v_static`): the first eager call of a site (weight pack, set by the integration around `_infer`) takes the dynamic scales and keeps the power of two above 4 x their absmax per head; later calls run
+  one pass (`vt_quant(v, 0, vinv, ovf)`: no amax pass, no amax allocation, saturation sets the `_OVF` flag read by `take_overflow()`). Hi-plane module time, dynamic -> static: d128 L512 / 1024 / 2048 -5 % / -3.6 % / -1.1 %.
+  `rescale_all` now scales in place, so a captured graph (which reads `1 / scale` inside the capture) follows a rescale.
+- S gate for the unfused sites (`FP8_PV_MIN_S`, set by `enable_fp8_pv_for` for models whitelisted for "unfused"): 32-channel heads 1024, 16-channel heads 512 (hi), twice that for hi + lo. Below it the fp16 core runs (bit-identical).
+- Real activations, core only (tiled to L1024 / L2048): the FP8 core is 24-28 % faster than the 2.5.9 core on Protenix v1 / Boltz-2 / AF3 / OpenDDE dumps, hi + lo 17-22 %; the dynamic V^T pass takes 0.23 / 0.88 ms (4 x 32) and 0.81 / 3.2 ms (12 x 32) of that.
+- Not done, measured as the remaining ceiling: a fused V^T front for d_pair 256 / 384 / 64 (the fused d128 route vs the same route unfused: 9 % of the module at L1024, 3 % at L2048); (the N24 variant is now on the F8 core, see the fourth round below; K16 and SW do not help there).
+- Default route: bit-identical to main ec11768fc on ten shapes (d128 start / end / flip / masked, d256 x 8, d384 x 12, d64 x 4 x 16, d64 x 4 / 2 x 32, L256..1536), compared as bytes.
+
+### FP8 PV, fourth round (2026-11-15, branch `fp8/vt`): the V^T pass removed where the front is ours
+
+The standalone `vt_quant` pass (one read of fp16 V, one write of e4m3 planes) ate 40-55 % of the FP8 core's gain at module level (it runs 52-95 % of the byte floor: launch bound below L512, near the floor for d_pair 64 from L1024); the extra read of V is the avoidable part. Now:
+- `front_fused3_sm90.cu` `-DMW_F3_VTW=1|2` (bf16 front, d_pair 64, and the fp16-exact `MW_F3_Y16` front): the V block of the projection leaves as e4m3 hi (/ lo) V^T planes, quantized from the fp16-rounded accumulator with the static per-head scale (same cvt as `vt_quant_k`).
+  The accumulator holds rows (16 wi + g8, + 8) x columns (8 i + 2 t4, +1); the key position of row `r` is `16 wi + 4 (g8 / 2) + 2 hf + (g8 & 1)`, so the four keys of one 32-bit word are the rows of a lane pair (g8 even / odd) at both halves:
+  one `shfl.xor 4` and two `prmt` give each lane the whole word of one channel (lane parity picks channel 2 t4 + parity), one 32-bit store into a [channel][64 keys] stage (words XOR-swizzled by 4 x ((channel / 2) mod 4): conflict free),
+  then 16-byte global stores of 64 contiguous keys per (head, plane, channel). The first version (byte stores per element) made the front 25 us slower than the pass it replaced; the word version costs about nothing (front with planes 0.125 vs plain 0.141 ms at 64:4:32 L512).
+- `triattn_mod_sm90.cu` `tri_front_wide_sm90<CW, VTW>`: the group-2 CTA of the d_pair-256 wide front writes the hi plane the same way (4 channels a lane, 8 KiB stage past the kernel's smem per warpgroup; the default instance is unchanged).
+- Gated per config (`FP8_PV_UNFUSED_FRONT_MIN_S`), with the first eager call of a site taking its static scale through the old pass; scale-derived tensors cached (`_VINV` / `_VSB`, updated in place by `rescale_all`).
+- Tests: `tests/gpu/test_triattn_f8pv_h100.py::test_front_made_v_planes_equal_the_standalone_pass` (module output as bytes, hi / hi + lo, padded mask).
+Module time (before -> after, hi, percent vs the 2.5.9 default): 64:4:32 L256 / 512 / 1024 / 2048 -0.3 / +0.5 / -4.6 / -13.9 -> -9.7 / -10.4 / -9.7 / -17.1; 64:2:32 +0.1 / 0.0 / -2.8 / -12.4 -> -4.7 / -6.4 / -5.6 / -15.9; 64:4:16 +0.2 / -7.9 / -17.0 / -17.6 -> -4.2 / -12.6 / -19.4 / -19.6;
+256:8:32 (gate 768) -0.7 / +2.7 / -3.2 / -12.9 -> -0.3 / fp16 core / -7.3 / -13.6; the cuBLAS-front site (384:12:32) and the fused d128 site are unchanged. Full tables, the pass's share of the byte floor and the removal ablation: `docs/fp8.md`.
+
+### FP8 PV core, fourth round (2026-11-15, branch `fp8/core`): ablation of the F8 core, the 16-channel PV as n24
+
+- The F8 core has no MUFU: P is two HFMA2 + HMNMX2 (+ one HFMA2) per pair and a PRMT per four probabilities, so there is no exp share and `TA_POLY` does not apply. Removal ablation (`TA_ABL`, time only; the F8 bits are the PV wgmma 2, QK^T 1, the whole conversion 4,
+  its parts 8 / 4096 / 8192 / 2048, the whole X phase 128, the offset machinery 16 / 32768 / 131072, bias ldmatrix 32, K / V^T loads 65536 / 256, epilogue stores 16384): PV 21-30 % of the core time, QK^T 3-20 % (real activations 3-8 %),
+  conversion 3-12 %, whole X phase 7-28 %; loads and epilogue stores are not limiting (+-6 %). The offset machinery's 10-30 % ablation is an upper bound (it also zeroes the data and with it the power draw): halving the exact-path firing rate
+  with the data kept (`TA_F8K=7 TA_F8TAU10=15`, not bit-identical) gains 0-9 % on synthetic logits and nothing on real activations. Full table: `docs/fp8.md`.
+- Ported / tried on the F8 core: `TA_F8N24` (16-channel heads: PV as m64n24k32 over V^T rows 0-15 + an 8-row ones block, the V^T box 16 rows instead of 32 zero-filled): bit-identical, core -3.2 .. -4.9 % on 4 x 16, module 64:4:16 unfused hi -1.7 .. -2.8 %; default on.
+  Level or worse (kept as macros, default off, all bit-identical except K / TAU): `TA_F8SW` (software pipelined sub-step; -3.4 .. +7.8 %), `TA_F8SWN`, `TA_F8QM=1 / 2` (fp16-domain quad max: hv -4 %, real +2 .. +10 %).
+- Module against the 2.5.9 default (hi, static scale): 128:4:32 fused -6.2 / -9.7 / -13.9 / -17.0 %, unfused +5.3 / +1.3 / -6.6 / -12.8 %, 256:8:32 +8.5 / +2.5 / -5.4 / -11.4 %, 384:12:32 +0.5 / +2.4 / -4.9 / -11.3 %, 64:4:16 +3.8 / -8.6 / -18.4 / -21.4 % (L256 / 512 / 1024 / 2048).
+- Default route bit-identical to main ec11768fc (ten module shapes, bytes); FP8 module output bit-identical to `fp8/triattn` (ten shapes). The F8 tests were not re-run on this branch (the output is unchanged; run through the code graph before merging).
+
+### FP8 QK (EXPERIMENTAL, 2026-11-17, branch `fp8x/triattn`; `h100_sm90.FP8_QK`, default off)
+
+On top of the FP8 PV route, d_pair 128 fused route only: the front writes q / k as e4m3 (per-head product-1 power-of-two scales) and the F8 core runs `S += Q K^T` as
+one `m64n128k32.f16.e4m3.e4m3` wgmma (`-DTA_F8QK=1`). Module 0.93-0.95x of the FP8 PV route from L512 (0.80-0.82x of 2.5.12), attention-output error on real
+activations 3.1-4.0 % against 2.1-2.4 % (max-norm up to 24 % against 6 %), judge form 0.85-0.95 % (> 8e-3). The stage analysis of every other e4m3 placement
+(tail o, front GEMM operands, cuBLAS projections, out-projection, bidirectional) and why they were not built: `docs/fp8.md`, "TriAttn: where else FP8 can go".

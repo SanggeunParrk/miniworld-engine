@@ -17,6 +17,23 @@ __device__ __forceinline__ uint32_t pack2h(float a, float b) {       // fp16 pai
   return r;
 }
 constexpr int NH = 4;                                     // heads (bias outputs)
+// VTW (opt-in FP8 PV route, h100_sm90.FP8_PV_FUSED): V leaves the front as two e4m3 planes of V^T (hi, and the rounding residual x16 rounded again), the
+// layout the FP8 core reads (triattn_h16_sm90.cu, TA_F8HL): [B, N, 4 heads, 2 planes, 32 channels, S keys], the keys of each group of 32 permuted by
+// vt_pos; the scale is static (VINV [4] = 1 / the per-head power of two), values past 448 saturate and set OVF.
+__device__ __forceinline__ unsigned short cvt_e4m3x2(float hi_elem, float lo_elem) {   // lo_elem -> the low byte
+  unsigned short r;
+  asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(r) : "f"(hi_elem), "f"(lo_elem));
+  return r;
+}
+__device__ __forceinline__ float2 dec_e4m3x2(unsigned short v) {
+  uint32_t u;
+  asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(u) : "h"(v));
+  return make_float2(__half2float(__ushort_as_half((unsigned short)(u & 0xffffu))), __half2float(__ushort_as_half((unsigned short)(u >> 16))));
+}
+__device__ __forceinline__ int vt_pos(int k) {   // position (inside a group of 32) of the key k: the PV wgmma's k32 A-fragment order
+  const int blk = k >> 3, rem = k & 7;
+  return 16 * (blk >> 1) + 4 * (rem >> 1) + 2 * (blk & 1) + (rem & 1);
+}
 }  // namespace
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -38,7 +55,7 @@ static_assert(SMEM <= 232448, "smem");
 }  // namespace fr
 
 // NOUT: 4 (q, k, v, g), or 3 (q, k, v: the inference tail tri_tail_sm90<true> projects the gate itself from x)
-template <int NOUT>
+template <int NOUT, int VTW = 0, bool QK8 = false>   // VTW: 0 off, 1 = V^T hi plane, 2 = hi + lo planes; QK8 (EXPERIMENTAL, with VTW): q / k leave as e4m3 (q / sq, k * sq per head: QKINV [8] = 1 / sq | sq)
 __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
     int L, int ntiles, float eps, float inv_scale, int tr,
     int h16,                                              // q / k / v and the bias in fp16 (the operands of the fp16 core, triattn_h16_sm90.cu); g stays bf16
@@ -51,7 +68,9 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
     const __grid_constant__ CUtensorMap kmap,
     const __grid_constant__ CUtensorMap vmap,
     const __grid_constant__ CUtensorMap gmap,
-    void* __restrict__ BIAS) {                            // [B][4][L][L] bf16, or fp16 (h16)
+    void* __restrict__ BIAS,                              // [B][4][L][L] bf16, or fp16 (h16)
+    unsigned char* __restrict__ VT, const float* __restrict__ VINV, int* __restrict__ OVF,   // VTW: V^T planes, 1 / scale per head, overflow flag
+    const float* __restrict__ QKINV = nullptr) {
   using namespace fr;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -152,6 +171,83 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
       if (c > 0) {
         if (T == 0) bulk_wait_read<0>();
         named_sync(3 + w, 128);
+      }
+      if (QK8 && c < 2) {
+        // EXPERIMENTAL (QK8): q (c 0) / k (c 1) as e4m3 rows of 128 bytes, staged over this warpgroup's rows of the x stage's first half (128B swizzle: chunk ^ row % 8),
+        // then one TMA store of [64 rows][128 bytes] (the host made omaps[c] a uint8 map)
+        unsigned char* st8 = smb + (xs - sW) + w * 8192;
+        float inv[4];
+#pragma unroll
+        for (int h = 0; h < 4; ++h) inv[h] = QKINV[4 * c + h];
+        bool ovf = false;
+#pragma unroll
+        for (int hf = 0; hf < 2; ++hf) {
+          const int rr = 16 * wi + g8 + 8 * hf;
+#pragma unroll
+          for (int i = 0; i < 16; ++i) {
+            const float x0 = acc[4 * i + 2 * hf] * inv[i >> 2], x1 = acc[4 * i + 2 * hf + 1] * inv[i >> 2];
+            ovf |= (fabsf(x0) > 448.f) | (fabsf(x1) > 448.f);
+            const int col = 8 * i + 2 * t4;
+            *reinterpret_cast<unsigned short*>(st8 + rr * 128 + ((((col >> 4) ^ (rr & 7))) << 4) + (col & 15)) = cvt_e4m3x2(x1, x0);
+          }
+        }
+        if (__any_sync(0xffffffffu, ovf) && lane == 0) atomicOr(OVF, 1);
+        fence_proxy_async();
+        named_sync(3 + w, 128);
+        if (T == 0) {
+          store_2d(omaps[c], xs + 64 * w * 128, 0, t * BM + 64 * w);
+          bulk_commit();
+        }
+        continue;
+      }
+      if (VTW && c == 2) {
+        // V as e4m3 hi / lo planes of V^T: this warpgroup's 64 keys, staged transposed [plane][channel][64 keys] in the two 8 KiB pieces of the x stage
+        // it owns (plane p at p * 16 KiB + w * 8 KiB; the previous chunk's TMA store has finished reading them), 64-byte rows with the words
+        // XOR-swizzled by 4 (channel / 2 mod 4) (conflict-free byte stores), then stored as 16-byte chunks: 64 contiguous keys per (head, plane, channel)
+        unsigned char* st8 = smb + (xs - sW) + w * 8192;
+        float inv[4];
+#pragma unroll
+        for (int h = 0; h < 4; ++h) inv[h] = VINV[h];
+        bool ovf = false;
+        const int ja = 16 * wi + g8;                           // this lane's rows inside the warpgroup: ja, ja + 8
+#pragma unroll
+        for (int hf = 0; hf < 2; ++hf) {
+          const int j = ja + 8 * hf;
+          const int pos = 32 * (j >> 5) + vt_pos(j & 31);
+#pragma unroll
+          for (int i = 0; i < 16; ++i) {
+            const float x0 = acc[4 * i + 2 * hf] * inv[i >> 2], x1 = acc[4 * i + 2 * hf + 1] * inv[i >> 2];
+            ovf |= (fabsf(x0) > 448.f) | (fabsf(x1) > 448.f);
+            const unsigned short hi = cvt_e4m3x2(x1, x0);
+            const float2 hq = dec_e4m3x2(hi);
+            unsigned short lo = 0;
+            if (VTW == 2) lo = cvt_e4m3x2((x1 - hq.y) * 16.f, (x0 - hq.x) * 16.f);
+            const int ch0 = 8 * i + 2 * t4;                    // channels ch0, ch0 + 1 (the same swizzle: (ch >> 1) & 3 = t4)
+            const int sw = 4 * t4;
+            const int off = (((pos >> 2) ^ sw) << 2) | (pos & 3);
+            st8[ch0 * 64 + off] = (unsigned char)(hi & 0xFF);
+            st8[(ch0 + 1) * 64 + off] = (unsigned char)(hi >> 8);
+            if (VTW == 2) {
+              st8[16384 + ch0 * 64 + off] = (unsigned char)(lo & 0xFF);
+              st8[16384 + (ch0 + 1) * 64 + off] = (unsigned char)(lo >> 8);
+            }
+          }
+        }
+        if (__any_sync(0xffffffffu, ovf) && lane == 0) atomicOr(OVF, 1);
+        fence_proxy_async();
+        named_sync(3 + w, 128);
+        const long r0 = (long)t * BM, bi = r0 / L;
+        const long j0 = r0 - bi * L;
+#pragma unroll
+        for (int rr = 0; rr < 4 * VTW; ++rr) {
+          const int u = T + 128 * rr, pl = u >> 9, ch = (u >> 2) & 127, c16 = u & 3;
+          const uint4 val = *reinterpret_cast<const uint4*>(st8 + pl * 16384 + ch * 64 + ((((4 * c16) ^ (4 * ((ch >> 1) & 3))) << 2)));
+          const long row = (((bi * 4 + (ch >> 5)) * VTW + pl) * 32 + (ch & 31)) * (long)L + j0 + 64 * w + 16 * c16;
+          *reinterpret_cast<uint4*>(VT + row) = val;
+        }
+        fence_proxy_async();
+        named_sync(3 + w, 128);
+        continue;
       }
 #pragma unroll
       if (h16 && c < 3) {
@@ -1162,7 +1258,7 @@ template <int CW> struct Cfg {
 struct Outs { void* p[4]; long ldo; };                    // q, k, v, g and their row stride (elements)
 }  // namespace fw
 
-template <int CW>
+template <int CW, int VTW = 0>   // VTW: 1 = V leaves the group-2 CTA as the FP8 core's e4m3 V^T hi plane (static scale VINV [8]; overflow flag OVF), no fp16 V
 __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
     int L, int ntiles, float eps, float inv_scale, int tr, int h16, int nh,
     const __grid_constant__ CUtensorMap xmap,             // x [R][CW] bf16, box (64, 64), 128B swizzle (tr: the 4-D transposed pair map)
@@ -1173,7 +1269,8 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
     const float* __restrict__ GBIAS,                      // [CW] fp32 gate bias (RoseTTAFold3) or nullptr
     fw::Outs outs,                                        // q / k / v ([R][CW], fp16 when h16, else bf16), g ([R][CW] bf16)
     void* __restrict__ BIAS,                              // [B][nh][L][L] bf16, or fp16 (h16)
-    int* __restrict__ SYNC) {                             // [groups] zeroed tile counters (FW_LAG), or nullptr
+    int* __restrict__ SYNC,                               // [groups] zeroed tile counters (FW_LAG), or nullptr
+    unsigned char* __restrict__ VT, const float* __restrict__ VINV, int* __restrict__ OVF) {   // VTW: V^T planes [B][L][nh][1][32][L], 1 / scale per head, overflow flag
   using namespace fw;
   using Q = Cfg<CW>;
   constexpr int KB = Q::KB, XT = Q::XT, WT = Q::WT, WBT = Q::WBT;
@@ -1337,6 +1434,60 @@ __global__ void __launch_bounds__(fw::THREADS, 1) tri_front_wide_sm90(
           }
         }
       }
+      if (VTW && grp == 2) {
+        // V as the e4m3 hi plane of V^T (static per-head scale, from the fp16-rounded V as `vt_quant` takes it).  This warpgroup's 64 keys x 128 channels of the half, staged transposed
+        // [channel][64 keys] (64-byte rows, words XOR-swizzled by 4 * ((channel / 2) mod 4)) in the 8 KiB past the kernel's smem; the lane pair (g8 even / odd) swaps
+        // bytes (one shuffle per 4 channels and half) so each lane holds the whole word of 4 channels: keys 16 wi + 4 (g8 / 2) + 2 hf + (g8 & 1) are the word's bytes.
+        unsigned char* st8 = smb + (Q::SMEM - 1024) + w * 8192;
+        const int pw = 4 * wi + (g8 >> 1), odd = g8 & 1;
+        bool vovf = false;
+#pragma unroll
+        for (int m = 0; m < 4; ++m) {
+          const int col = c * 128 + 32 * m + 8 * t4;
+          const float inv = VINV[4 * c + m];
+          float k1[8], k0[8];
+#pragma unroll
+          for (int e = 0; e < 8; ++e) { k1[e] = gb[col + e]; k0[e] = gb[CW + col + e]; }
+          uint32_t S[2][2] = {{0u, 0u}, {0u, 0u}};
+#pragma unroll
+          for (int hf = 0; hf < 2; ++hf) {
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              const float a = fmaf(rs[hf], acc[16 * m + 4 * q + 2 * hf], fmaf(nm[hf], k1[2 * q], k0[2 * q]));
+              const float b = fmaf(rs[hf], acc[16 * m + 4 * q + 2 * hf + 1], fmaf(nm[hf], k1[2 * q + 1], k0[2 * q + 1]));
+              const float xa = __half2float(__float2half_rn(a)) * inv, xb = __half2float(__float2half_rn(b)) * inv;
+              vovf |= (fabsf(xa) > 448.f) | (fabsf(xb) > 448.f);
+              S[hf][q >> 1] |= (uint32_t)cvt_e4m3x2(xb, xa) << (16 * (q & 1));
+            }
+          }
+          // lane pair: even takes channels 0..3 of the 8, odd 4..7; each sends the half its partner keeps
+          uint32_t keep[2], recv[2];
+#pragma unroll
+          for (int hf = 0; hf < 2; ++hf) {
+            keep[hf] = odd ? S[hf][1] : S[hf][0];
+            recv[hf] = __shfl_xor_sync(0xffffffffu, odd ? S[hf][0] : S[hf][1], 4);
+          }
+          const uint32_t E0 = odd ? recv[0] : keep[0], O0 = odd ? keep[0] : recv[0], E1 = odd ? recv[1] : keep[1], O1 = odd ? keep[1] : recv[1];
+          const uint32_t T0 = __byte_perm(E0, O0, 0x5140u), T1 = __byte_perm(E0, O0, 0x7362u), U0 = __byte_perm(E1, O1, 0x5140u), U1 = __byte_perm(E1, O1, 0x7362u);
+          const uint32_t wd[4] = {__byte_perm(T0, U0, 0x5410u), __byte_perm(T0, U0, 0x7632u), __byte_perm(T1, U1, 0x5410u), __byte_perm(T1, U1, 0x7632u)};
+#pragma unroll
+          for (int jj = 0; jj < 4; ++jj) {
+            const int ch = 32 * m + 8 * t4 + 4 * odd + jj;
+            *reinterpret_cast<uint32_t*>(st8 + ch * 64 + (((pw) ^ (4 * ((ch >> 1) & 3))) << 2)) = wd[jj];
+          }
+        }
+        if (__any_sync(0xffffffffu, vovf) && lane == 0) atomicOr(OVF, 1);
+        named_sync(3 + w, 128);
+        const long r0 = (long)t * BM, bi = r0 / L, bq = bi / L, iq = bi - bq * L, j0 = r0 - bi * L;
+#pragma unroll
+        for (int rr = 0; rr < 4; ++rr) {
+          const int u = T + 128 * rr, ch = u >> 2, c16 = u & 3;
+          const uint4 val = *reinterpret_cast<const uint4*>(st8 + ch * 64 + ((((4 * c16) ^ (4 * ((ch >> 1) & 3)))) << 2));
+          *reinterpret_cast<uint4*>(VT + ((((bq * L + iq) * 8 + 4 * c + (ch >> 5)) * 32 + (ch & 31)) * (long)L + j0 + 16 * c16)) = val;
+        }
+        named_sync(3 + w, 128);   // the next half restages over the same bytes
+        continue;
+      }
       // accumulator column 8 i + 2 t4 + e holds output column 32 (i / 4) + 8 t4 + 2 (i % 4) + e of this half (tri_pack_wide's order):
       // the lane's words of 32-column group m are 8 consecutive columns
       __nv_bfloat16* out = reinterpret_cast<__nv_bfloat16*>(outs.p[grp]);
@@ -1376,8 +1527,16 @@ auto bf16c(const torch::Tensor& t) { return reinterpret_cast<const __nv_bfloat16
 // x [R, 128] bf16 (R = B * L * L rows (b, i, j)); lnw / lnb fp32 [128]; w4 = [Wq; Wk; Wv; Wg] [512, 128] bf16; wb16 [16, 128] bf16 (Wb
 // in rows 0..3, zeros below); mask [B, L] bool or empty -> (q, k, v, g [R, 128] bf16, sbias [B, 4, L, L] bf16 = bias / scale, masked
 // keys -inf)
-std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor w4, torch::Tensor wb16,
-                                     torch::Tensor mask, int64_t B, int64_t L, double scale, bool trans, bool h16, bool gate) {
+namespace {
+std::vector<torch::Tensor> tri_front_impl(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor w4, torch::Tensor wb16,
+                                          torch::Tensor mask, int64_t B, int64_t L, double scale, bool trans, bool h16, bool gate,
+                                          c10::optional<torch::Tensor> vinv, c10::optional<torch::Tensor> ovf, int vtp = 2,
+                                          c10::optional<torch::Tensor> qkinv = c10::nullopt) {
+  const bool vtw = vinv.has_value();
+  const bool qk8 = qkinv.has_value();   // EXPERIMENTAL: q / k as e4m3 (qkinv fp32 [8] = 1 / sq | sq per head)
+  TORCH_CHECK(!qk8 || (vtw && qkinv->is_cuda() && qkinv->scalar_type() == torch::kFloat32 && qkinv->is_contiguous() && qkinv->numel() == 2 * NH), "qkinv: fp32 [8] with the V^T planes");
+  TORCH_CHECK(!vtw || (ovf.has_value() && ovf->is_cuda() && ovf->scalar_type() == torch::kInt32 && ovf->numel() == 1), "ovf: int32 [1] on the device");
+  TORCH_CHECK(!vtw || (h16 && !gate && vinv->is_cuda() && vinv->scalar_type() == torch::kFloat32 && vinv->numel() == NH), "VT planes: h16, no gate, vinv fp32 [4]");
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.size(-1) == C, "x: [R, 128] bf16");
   const long R = x.numel() / C;
   TORCH_CHECK(R == B * L * L && L % fr::BM == 0, "rows = B * L * L, L % 128 == 0");
@@ -1385,7 +1544,9 @@ std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::
   TORCH_CHECK(wb16.scalar_type() == torch::kBFloat16 && wb16.is_contiguous() && wb16.size(0) == 16 && wb16.size(1) == C, "wb16 [16, 128] bf16");
   auto opt = x.options();
   const auto hopt = h16 ? opt.dtype(torch::kHalf) : opt;
-  auto q = torch::empty({R, C}, hopt), k = torch::empty({R, C}, hopt), v = torch::empty({R, C}, hopt), g = torch::empty({gate ? R : 0, C}, opt);
+  const auto qkopt = qk8 ? opt.dtype(torch::kFloat8_e4m3fn) : hopt;
+  auto q = torch::empty({R, C}, qkopt), k = torch::empty({R, C}, qkopt), v = torch::empty({vtw ? 0 : R, C}, hopt), g = torch::empty({gate ? R : 0, C}, opt);
+  auto vt = torch::empty({vtw ? B : 0, L, NH, vtp, 32, L}, opt.dtype(torch::kFloat8_e4m3fn));   // the V^T planes
   auto bias = torch::empty({B, NH, L, L}, hopt);
   auto lw = lnw.to(torch::kFloat32).contiguous(), lb = lnb.to(torch::kFloat32).contiguous();
   const bool* mp = nullptr;
@@ -1398,19 +1559,47 @@ std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::
     return make_map<4>(t.data_ptr(), {(uint64_t)C, (uint64_t)L, (uint64_t)L, (uint64_t)(rows / ((uint64_t)L * L))},
                        {(uint64_t)L * C, (uint64_t)C, (uint64_t)L * L * C}, {64, br, 1, 1}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
   CUtensorMap xm = pm(x, R, 128, "x"), wm = m2(w4, 4 * C, 256, "w4"), wbm = m2(wb16, 16, 16, "wb16");
-  CUtensorMap qm = m2(q, R, 64, "q"), km = m2(k, R, 64, "k"), vm = m2(v, R, 64, "v"), gm = m2(gate ? g : q, R, 64, "g");
+  CUtensorMap qm = m2(q, R, 64, "q"), km = m2(k, R, 64, "k"), vm = m2(vtw ? k : v, R, 64, "v"), gm = m2(gate ? g : q, R, 64, "g");
+  if (qk8) {   // [R][128] e4m3, box (128 bytes, 64 rows), 128B swizzle
+    qm = make_map<2>(q.data_ptr(), {(uint64_t)C, (uint64_t)R}, {(uint64_t)C}, {128, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "q8", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+    km = make_map<2>(k.data_ptr(), {(uint64_t)C, (uint64_t)R}, {(uint64_t)C}, {128, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "k8", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+    vm = km;
+    gm = qm;
+  }
   static bool attr = false;
   if (!attr) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
     C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<3>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<3, 2>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<3, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<3, 2, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<3, 1, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
     attr = true;
   }
   const int ntiles = (int)(R / fr::BM);
-  (gate ? tri_front_sm90<4> : tri_front_sm90<3>)<<<std::min(ntiles, num_sms(x.device().index())), fr::THREADS, fr::SMEM, at::cuda::getCurrentCUDAStream()>>>(
+  auto kern = qk8 ? (vtp == 2 ? tri_front_sm90<3, 2, true> : tri_front_sm90<3, 1, true>)
+             : vtw ? (vtp == 2 ? tri_front_sm90<3, 2> : tri_front_sm90<3, 1>) : gate ? tri_front_sm90<4> : tri_front_sm90<3>;
+  kern<<<std::min(ntiles, num_sms(x.device().index())), fr::THREADS, fr::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, xm, wm, wbm, lw.data_ptr<float>(), lb.data_ptr<float>(), mp,
-      qm, km, vm, gm, bias.data_ptr());
+      qm, km, vm, gm, bias.data_ptr(), vtw ? reinterpret_cast<unsigned char*>(vt.data_ptr()) : nullptr, vtw ? vinv->data_ptr<float>() : nullptr,
+      vtw ? ovf->data_ptr<int>() : nullptr, qk8 ? qkinv->data_ptr<float>() : nullptr);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {q, k, v, g, bias};
+  return {q, k, v, g, bias, vt};
+}
+}  // namespace
+std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor w4, torch::Tensor wb16,
+                                     torch::Tensor mask, int64_t B, int64_t L, double scale, bool trans, bool h16, bool gate) {
+  auto r = tri_front_impl(x, lnw, lnb, eps, w4, wb16, mask, B, L, scale, trans, h16, gate, c10::nullopt, c10::nullopt);
+  r.resize(5);
+  return r;
+}
+// The front with V written as the FP8 core's two e4m3 planes of V^T (static scale: vinv fp32 [4] = 1 / per-head power of two): -> q, k, v (empty), g (empty), bias, vt
+// (ovf: a persistent int32 [1], set to 1 when a value passed 448 after scaling and saturated).  Inference, gate in the tail (h16, three projections).
+std::vector<torch::Tensor> tri_front_vt(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor w4, torch::Tensor wb16,
+                                        torch::Tensor mask, int64_t B, int64_t L, double scale, bool trans, torch::Tensor vinv, torch::Tensor ovf, int64_t planes,
+                                        c10::optional<torch::Tensor> qkinv) {
+  TORCH_CHECK(planes == 1 || planes == 2, "planes: 1 (hi) or 2 (hi, lo)");
+  return tri_front_impl(x, lnw, lnb, eps, w4, wb16, mask, B, L, scale, trans, true, false, vinv, ovf, (int)planes, qkinv);
 }
 // out = x + drop o ((sigmoid(g [+ gb]) o o) . Wo^T [+ bo]); g, o, x [R, 128] bf16, wo [128, 128] bf16; drop [B, L, 128] bf16 or empty;
 // `out`: a contiguous bf16 [R, 128] to write into (a chunk's rows of a batch's output), else a new tensor; bo / gb: fp32 [128] or none
@@ -1625,7 +1814,9 @@ std::vector<torch::Tensor> tri_pack(torch::Tensor wq, torch::Tensor wk, torch::T
 // -> (q, k, v [R, 256] fp16 when h16 else bf16, g [R, 256] bf16, sbias [B, nh, L, L] fp16 / bf16 = bias / scale, masked keys -inf)
 std::vector<torch::Tensor> tri_front_wide(torch::Tensor x, torch::Tensor fold, double eps, torch::Tensor wpk,
                                           torch::Tensor wb8, torch::Tensor mask, int64_t B, int64_t L, int64_t nh, double scale, bool trans,
-                                          bool h16, c10::optional<torch::Tensor> gbias, bool packed) {
+                                          bool h16, c10::optional<torch::Tensor> gbias, bool packed, c10::optional<torch::Tensor> vinv = c10::nullopt, c10::optional<torch::Tensor> ovf = c10::nullopt) {
+  const bool vtw = vinv.has_value();
+  TORCH_CHECK(!vtw || (!FW_MC && h16 && nh == 8 && ovf.has_value() && vinv->is_cuda() && vinv->scalar_type() == torch::kFloat32 && vinv->numel() == 8 && ovf->is_cuda() && ovf->scalar_type() == torch::kInt32 && ovf->numel() == 1), "V^T plane: fp16 route, 8 heads, vinv fp32 [8], ovf int32 flag");
   constexpr int CW = 256;
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.size(-1) == CW, "x: [R, 256] bf16");
   const long R = x.numel() / CW;
@@ -1662,7 +1853,10 @@ std::vector<torch::Tensor> tri_front_wide(torch::Tensor x, torch::Tensor fold, d
   CUtensorMap wm = m2(wpk, 4 * fw::NG, fw::NG, "wpk"), wbm = m2(wb8, fw::HB, fw::HB, "wb8");
   using Q = fw::Cfg<CW>;
   static bool attr = false;
+  static bool attr1 = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_wide_sm90<CW>, cudaFuncAttributeMaxDynamicSharedMemorySize, Q::SMEM)); attr = true; }
+  if (!attr1) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_wide_sm90<CW, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, Q::SMEM + 16384)); attr1 = true; }
+  auto vt = torch::empty({vtw ? B : 0, L, nh, 1, 32, L}, opt.dtype(torch::kFloat8_e4m3fn));   // the V^T hi plane
   const int ntiles = (int)(R / fw::BM);
   // groups of four CTAs (q, k, v, g), at most one CTA per SM, each consumer warpgroup with a tile
   const int groups = std::max(1, std::min(num_sms(x.device().index()) / 4, (ntiles + 1) / 2));
@@ -1676,14 +1870,22 @@ std::vector<torch::Tensor> tri_front_wide(torch::Tensor x, torch::Tensor fold, d
   cfg.attrs = at; cfg.numAttrs = 1;
   C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, tri_front_wide_sm90<CW>,
       (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, (int)nh, xm, wm, wbm, fold.data_ptr<float>(),
-      mp, gbias.has_value() ? gbias->data_ptr<float>() : nullptr, outs, bias.data_ptr(), nullptr));
+      mp, gbias.has_value() ? gbias->data_ptr<float>() : nullptr, outs, bias.data_ptr(), nullptr, nullptr, nullptr, nullptr));
 #else
-  tri_front_wide_sm90<CW><<<4 * groups, fw::THREADS, Q::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, (int)nh, xm, wm, wbm, fold.data_ptr<float>(),
-      mp, gbias.has_value() ? gbias->data_ptr<float>() : nullptr, outs, bias.data_ptr(), FW_LAG > 0 ? sync.data_ptr<int>() : nullptr);
+  if (vtw) {
+    tri_front_wide_sm90<CW, 1><<<4 * groups, fw::THREADS, Q::SMEM + 16384, at::cuda::getCurrentCUDAStream()>>>(
+        (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, (int)nh, xm, wm, wbm, fold.data_ptr<float>(),
+        mp, gbias.has_value() ? gbias->data_ptr<float>() : nullptr, outs, bias.data_ptr(), FW_LAG > 0 ? sync.data_ptr<int>() : nullptr,
+        reinterpret_cast<unsigned char*>(vt.data_ptr()), vinv->data_ptr<float>(), ovf->data_ptr<int>());
+  } else {
+    tri_front_wide_sm90<CW><<<4 * groups, fw::THREADS, Q::SMEM, at::cuda::getCurrentCUDAStream()>>>(
+        (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, (int)nh, xm, wm, wbm, fold.data_ptr<float>(),
+        mp, gbias.has_value() ? gbias->data_ptr<float>() : nullptr, outs, bias.data_ptr(), FW_LAG > 0 ? sync.data_ptr<int>() : nullptr, nullptr, nullptr, nullptr);
+  }
 #endif
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {q, k, v, g, bias};
+  if (!vtw) return {q, k, v, g, bias};
+  return {q, k, v, g, bias, vt};
 }
 
 // the wide pack, LayerNorm folded in (y = (x - mu) r gamma + beta, so y . W^T = r (x . Wf^T - mu S1) + S0 with Wf = W diag(gamma),
@@ -1773,7 +1975,7 @@ std::vector<torch::Tensor> tri_pack_wide(torch::Tensor wq, torch::Tensor wk, tor
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tri_front_wide", &tri_front_wide, "sm90 TriangleAttention front at d_pair 256 / 8 heads x 32 (inference): LN + q|k|v|g + head-major bias / scale",
         py::arg("x"), py::arg("fold"), py::arg("eps"), py::arg("wpk"), py::arg("wb8"), py::arg("mask"), py::arg("B"),
-        py::arg("L"), py::arg("nh"), py::arg("scale"), py::arg("trans") = false, py::arg("h16") = true, py::arg("gb") = py::none(), py::arg("packed") = false);
+        py::arg("L"), py::arg("nh"), py::arg("scale"), py::arg("trans") = false, py::arg("h16") = true, py::arg("gb") = py::none(), py::arg("packed") = false, py::arg("vinv") = py::none(), py::arg("ovf") = py::none());
   m.def("tri_pack_wide", &tri_pack_wide, "sm90 TriangleAttention wide weight pack, LayerNorm folded: (wpk [4C, C], wb8 [8, C], wo16 [C, C] bf16, fold [2, 4C + 8] fp32)");
   m.def("tri_wgrad", &tri_wgrad, "sm90 TriangleAttention parameter gradients: (dWq, dWk, dWv, dWg [128,128], dgamma, dbeta [128], dWb [4,128], dWo [128,128])");
   m.def("tri_pack", &tri_pack, "sm90 TriangleAttention weight pack: (w4 [512,128] bf16, wb16 [16,128] bf16, wo16 [128,128] bf16) in one launch");
@@ -1783,6 +1985,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("o"), py::arg("x"), py::arg("wo"), py::arg("drop"), py::arg("L"), py::arg("trans") = false, py::arg("out") = py::none(),
         py::arg("bo") = py::none(), py::arg("gb") = py::none(), py::arg("wg") = py::none(), py::arg("lnw") = py::none(),
         py::arg("lnb") = py::none(), py::arg("eps") = 1e-5);
+  m.def("tri_front_vt", &tri_front_vt, "sm90 TriangleAttention front with V as e4m3 hi / lo V^T planes (static per-head scale)",
+        py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("w4"), py::arg("wb16"), py::arg("mask"), py::arg("B"), py::arg("L"), py::arg("scale"),
+        py::arg("trans"), py::arg("vinv"), py::arg("ovf"), py::arg("planes") = 2, py::arg("qkinv") = py::none());
   m.def("tri_front", &tri_front, "sm90 TriangleAttention front: LN + q|k|v|g projections + head-major (masked) bias / scale",
         py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("w4"), py::arg("wb16"), py::arg("mask"), py::arg("B"),
         py::arg("L"), py::arg("scale"), py::arg("trans") = false, py::arg("h16") = false, py::arg("gate") = true);

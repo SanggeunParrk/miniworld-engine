@@ -6,7 +6,9 @@ matching backward.
 """
 
 import functools
+import weakref
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -62,6 +64,336 @@ def _core_h16(defs: tuple[str, ...] = ()):
         extra_cuda_cflags=[*_flags(), *(f"-D{d}" for d in defs)],
         verbose=True,
     )
+
+
+# ---- opt-in FP8 PV route (inference, head width 32 / 16): P and V on the e4m3 tensor-core path (triattn_h16_sm90.cu, -DTA_F8PV=1) ----
+#: False: the fp16 core (default; bit-identical to before).  True: the fp16 core's call sites run the FP8 variant: V is quantized to e4m3 per
+#: (batch, head) and stored transposed [B, N, H, 32, S] with the keys of each group of 32 permuted (:func:`vt_perm`); P is formed as e4m3 bytes
+#: directly from the logits (piecewise-linear 2^x, no MUFU) and the row sums come from the quantized P.  q, k, the bias and the score GEMM stay fp16.
+#: The LSE and anything else the variant does not take run the fp16 core (heads of 16 channels are served: V^T rows 16 - 31 are TMA zero fill).
+FP8_PV = False
+
+
+#: True: V on two e4m3 planes (hi, and the rounding residual x16 rounded again): V^T [B, N, H, 2, 32, S], PV on m64n72k32; the V rounding error falls
+#: from ~2^-4 to ~2^-8 of V (cost: one wider PV).  Read at the call, not cached with the core.
+FP8_PV_HL = False
+
+
+def _core_f8pv():
+    return _core_h16((("TA_F8PV=1", "TA_F8HL=1") if FP8_PV_HL else ("TA_F8PV=1",)))
+
+
+# ---- EXPERIMENTAL (2026-11-17, branch fp8x/triattn): q and k on e4m3 as well (S += Q K^T as one m64n128k32 e4m3 wgmma, fp16 accumulator) ----
+#: False (default): nothing changes.  True, with the FP8 PV route on: the d_pair-128 fused route (``FP8_PV_FUSED``) also stores q / k as e4m3 (made by the
+#: front itself with ``FP8_QK_FRONT``, else by a torch pass after it) and runs the F8QK core (``-DTA_F8QK=1``); every other call site is unchanged.
+#: Scales: per head a power of two ``sq`` with q8 = q / sq, k8 = k * sq (product 1: the bias and the softmax scale stay as they are), calibrated on the
+#: site's first (eager) call; a site whose q / k absmax product does not fit (448 / FP8_QK_HEADROOM)^2 keeps the fp16 score GEMM.  Saturation sets the
+#: overflow flag of :func:`take_overflow`; :func:`rescale_all` then turns the q / k e4m3 off for every calibrated site (the product-1 scale cannot widen).
+#: Output error on real activations about doubles against the FP8 PV route (docs/fp8.md, "TriAttn: where else FP8 can go").  Not for default use.
+FP8_QK = False
+FP8_QK_FRONT = True
+FP8_QK_HEADROOM = 2.0
+_QK_AUTO: dict = {}  # site -> per-head sq fp32 [H] (None: infeasible, the fp16 score GEMM)
+_QK_INV: dict = {}  # site -> [1 / sq | sq] fp32 [2 H] (the front's multipliers)
+
+
+def _core_f8qk():
+    return _core_h16(("TA_F8PV=1", "TA_F8QK=1"))
+
+
+def qk_scale_from_amax(aq, ak, headroom: float | None = None):
+    """Per-head power-of-two ``sq`` (q8 = q / sq, k8 = k * sq) from the heads' q / k absmax (fp32 [H]): the balanced choice
+    2^round(log2(aq / ak) / 2); None when some head's ``aq * ak`` leaves no room for both under 448 / headroom."""
+    hr = FP8_QK_HEADROOM if headroom is None else headroom
+    aq, ak = aq.float().clamp_min(2.0**-20), ak.float().clamp_min(2.0**-20)
+    sq = torch.exp2(torch.round(0.5 * torch.log2(aq / ak)))
+    ok = bool(((aq / sq * hr <= 448.0) & (ak * sq * hr <= 448.0)).all())
+    return sq if ok else None
+
+
+def quantize_qk_torch(q, k, sq):
+    """q, k [..., H, 32] (fp16) -> e4m3 q / sq and k * sq (saturating; a value past 448 sets the overflow flag)."""
+    s = sq.view(*([1] * (q.dim() - 2)), -1, 1)
+    q8, k8 = q.float() / s, k.float() * s
+    ovf = _OVF.setdefault(q.device, torch.zeros(1, dtype=torch.int32, device=q.device))
+    ovf.copy_(torch.maximum(ovf, ((q8.abs().amax() > 448.0) | (k8.abs().amax() > 448.0)).int().view(1)))
+    return q8.clamp(-448.0, 448.0).to(torch.float8_e4m3fn), k8.clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+
+
+def qk_site(site, q, k, heads: int, d: int = 32):
+    """The site's per-head ``sq`` (calibrated from this call's q / k when the site is new: eager), or None (the fp16 score GEMM)."""
+    if site not in _QK_AUTO:
+        aq = q.reshape(-1, heads, d).abs().amax(dim=(0, 2)).float()
+        ak = k.reshape(-1, heads, d).abs().amax(dim=(0, 2)).float()
+        sq = qk_scale_from_amax(aq, ak)
+        _QK_AUTO[site] = sq
+        if sq is not None:
+            _QK_INV[site] = torch.cat([1.0 / sq, sq]).contiguous()
+        return None  # the calibration call runs the fp16 score GEMM
+    return _QK_AUTO[site]
+
+
+#: opt-in, d_pair 128 inference only (needs FP8_PV; FP8_PV_HL picks the hi + lo planes, else the hi plane alone): the front writes V as the core's e4m3 planes of V^T itself (``tri_front_vt``), with
+#: the static per-head scale ``FP8_VSCALE`` (fp32 [4], powers of two; see :func:`vscale_from_amax`); the standalone ``vt_quant`` pass is gone.  Values past 448 x scale
+#: saturate and set a device flag: :func:`take_overflow` reads (and clears) it -- the caller re-scales and redoes the forward when it is set.
+FP8_PV_FUSED = False
+FP8_VSCALE: Any = None
+_OVF: dict = {}
+
+
+#: the smallest static V scale (as the TriMul planes' ``_h100_fp8.SCALE_FLOOR``).  A head whose calibration absmax is ~0 (all zero, or the 1e-30 clamp of the
+#: dynamic pass's scale) got 2^-99 .. 2^-107 before, which saturates the e4m3 cast on any later V of that head; such a head now takes scale 1 (V up to 448 fits,
+#: a later saturation still sets the overflow flag).
+VSCALE_FLOOR = 2.0**-30
+
+
+def vscale_from_amax(amax, headroom: float = 2.0):
+    """Per-head power-of-two V scale from the heads' V absmax (fp32 [H]): the smallest 2^k >= headroom x amax / 448; 1 where that would be at or below
+    ``VSCALE_FLOOR`` (a head that was ~0 at calibration), so no scale is ever below the floor."""
+    t = amax.float() * headroom / 448.0
+    s = torch.exp2(torch.ceil(torch.log2(t.clamp_min(VSCALE_FLOOR))))
+    return torch.where(t > VSCALE_FLOOR, s, torch.ones_like(s))
+
+
+def take_overflow() -> bool:
+    """True when a fused-front forward saturated a V value since the last call (clears the flags; synchronizes)."""
+    hit = False
+    for f in _OVF.values():
+        hit |= bool(f.item())
+        f.zero_()
+    return hit
+
+
+#: True: the scale of each weight pack is calibrated on its first fused call (eager; one extra front launch): the per-head power of two above 4 x the V absmax of
+#: that call; :func:`rescale_all` raises every calibrated scale (after :func:`take_overflow` reported a saturation, then redo the forward).
+FP8_VSCALE_AUTO = False
+_VS_AUTO: dict = {}
+#: derived, per static-scale key: 1 / scale fp32 [H] (the planes' pass / front takes it) and the scale repeated per sample [B * H] (the core takes it).  Kept in memory that
+#: :func:`rescale_all` updates in place (a captured graph follows), so a call launches no torch glue kernel for them.
+_VINV: dict = {}
+_VSB: dict = {}
+
+
+def _vinv_of(key, vscale):
+    t = _VINV.get(key)
+    if t is None:
+        t = _VINV[key] = (1.0 / vscale).contiguous()
+    return t
+
+
+def _vsb_of(key, vscale, batch):
+    t = _VSB.get((key, batch))
+    if t is None:
+        t = _VSB[key, batch] = vscale.repeat(batch).contiguous()
+    return t
+
+
+def _drop_derived(key) -> None:
+    _VINV.pop(key, None)
+    for k2 in [k for k in _VSB if k[0] == key]:
+        del _VSB[k2]
+
+
+def _forget(key) -> None:
+    _VS_AUTO.pop(key, None)
+    _drop_derived(key)
+
+
+def _forget_on_free(t, key) -> None:
+    """The static scales are keyed by a tensor's address (the fused front's packed weights, the V weight of an unfused site): drop the entry when that tensor
+    is freed, so another module whose tensor later sits at the same address calibrates its own scale instead of reading a stale one."""
+    if t is not None:
+        weakref.finalize(t, _forget, key)
+
+
+def rescale_all(factor: float = 4.0) -> None:
+    for key in _VS_AUTO:
+        _VS_AUTO[key].mul_(
+            factor
+        )  # in place: a captured graph reads the scale from this memory (the fused front takes 1 / scale inside the capture), so a replay follows
+    for key, t in _VINV.items():
+        t.copy_(1.0 / _VS_AUTO[key])
+    for (key, batch), t in _VSB.items():
+        t.copy_(_VS_AUTO[key].repeat(batch))
+    for key in _QK_AUTO:  # (experimental FP8_QK) the product-1 q / k scale cannot widen: the site goes back to the fp16 score GEMM
+        _QK_AUTO[key] = None
+
+
+#: the shortest S at which the fused d_pair-128 route (the front writes the V^T planes) replaces the fp16 core (hi plane; x 2 with hi + lo, as the other gates).
+#: Measured on 2.5.12 (module, CUDA-graph replay, same process): L128 +10 % (cool and sustained, control within 1 %), L256 -6 %; 0 = no gate.
+FP8_PV_FUSED_MIN_S = 256
+
+
+def _fused_vt(dev) -> bool:
+    return FP8_PV and FP8_PV_FUSED and (FP8_VSCALE is not None or FP8_VSCALE_AUTO) and INFERENCE_FP16 and INFERENCE_TAIL_GATE
+
+
+@functools.lru_cache(maxsize=None)
+def vt_perm(device):
+    """src[p] = the key (inside a group of 32) whose e4m3 probability sits at position p of the PV wgmma's k32 A fragment: lane quad t4 holds the
+    accumulator columns 2 t4 + {0, 1} of the 8-column blocks 4 s .. 4 s + 3, which the k32 fragment reads as positions 4 t4 + {0 .. 3} (blocks
+    0 / 1) and 16 + 4 t4 + {0 .. 3} (blocks 2 / 3)."""
+    p = torch.arange(32)
+    half, t4, rem = p // 16, (p % 16) // 4, p % 4
+    return (8 * (2 * half + rem // 2) + 2 * t4 + rem % 2).to(device)
+
+
+def quantize_v_torch(v):
+    """Reference of :func:`quantize_v` in torch (several passes: slow).  v [B, N, S, H, 32] fp16 (rows at any common stride) -> (vt [B, N, H, 32, S] float8_e4m3fn with permuted keys, scale fp32 [B, H]):
+    v = vt * scale, scale = amax over (N, S, channels) of the head / 448."""
+    B, N, S, Hh, Dh = v.shape
+    amax = v.abs().amax(dim=(1, 2, 4)).float()
+    scale = (amax / 448.0).clamp_min(1e-30)
+    x = v.float() / scale[:, None, None, :, None]
+    planes = [x.to(torch.float8_e4m3fn)]
+    if FP8_PV_HL:
+        planes.append(((x - planes[0].float()) * 16.0).to(torch.float8_e4m3fn))
+    out = []
+    for vt in planes:  # [B, N, S, H, 32]
+        vt = vt.reshape(B, N, S // 32, 32, Hh, Dh)[:, :, :, vt_perm(v.device)]  # keys permuted inside each group of 32
+        out.append(vt.permute(0, 1, 4, 5, 2, 3).reshape(B, N, Hh, Dh, S))
+    vt = torch.stack(out, dim=3) if FP8_PV_HL else out[0]
+    return vt.contiguous(), scale.contiguous()
+
+
+#: None: V is scaled per (batch, head) by its amax (one extra read of v); a float: that amax for every head (no pass; v beyond it saturates at e4m3 max)
+FP8_PV_AMAX = None
+
+
+def quantize_v(v):
+    """V^T e4m3 + scale by the CUDA pass (`vt_quant`) when v is [B, N, S, H<=8, 32] fp16 with S % 128 == 0, else the torch reference."""
+    B, N, S, Hh, Dh = v.shape
+    if (
+        S % 128 == 0
+        and Hh <= 16
+        and Dh in (16, 32)
+        and v.stride(4) == 1
+        and v.stride(3) == Dh
+        and v.stride(2) % 8 == 0
+        and v.stride(1) == S * v.stride(2)
+        and v.stride(0) == N * v.stride(1)
+    ):
+        return tuple(_core_f8pv().vt_quant(v, 0.0 if FP8_PV_AMAX is None else float(FP8_PV_AMAX)))
+    return quantize_v_torch(v)
+
+
+#: head channels -> the shortest S at which the standalone-V^T FP8 core (hi plane; x 2 for hi + lo) replaces the fp16 core (below it the V^T pass costs more than the core gains: measured per config);
+#: empty = no gate (direct use of ``FP8_PV``).  Set by :func:`enable_fp8_pv_for`.
+FP8_PV_MIN_S: dict = {}
+#: with ``FP8_PV_FUSED``: also serve the call sites that have no fused front (d_pair 64 / 256 / 384 and the like) by the standalone V^T pass, gated by ``FP8_PV_MIN_S``
+FP8_PV_UNFUSED = False
+
+
+#: the call site of the next standalone-V^T core call (the weight pointer, set by the integration): with ``FP8_VSCALE_AUTO`` its V scale is calibrated once and
+#: then static (one pass over V, no amax pass), with the same overflow flag / :func:`take_overflow` / :func:`rescale_all` contract as the fused front
+_SITE: Any = None
+#: the tensor whose address ``_SITE`` is (set with it by the integration): its release drops the site's static scale (:func:`_forget_on_free`)
+_SITE_T: Any = None
+
+
+def quantize_v_static(v, site):
+    """:func:`quantize_v` with a per-site static scale: the first call of a site (eager) takes the dynamic scales and keeps, per head, the power of two above
+    4 x their absmax; the later calls run the single quantize pass with it (saturation sets the :func:`take_overflow` flag)."""
+    key = ("vq", site, v.shape[3], v.shape[4])
+    vscale = _VS_AUTO.get(key)
+    if vscale is None:
+        vt, vs = quantize_v(v)
+        _VS_AUTO[key] = vscale_from_amax(vs.amax(dim=0) * 448.0, 4.0)
+        _forget_on_free(_SITE_T if _SITE_T is not None and _SITE_T.data_ptr() == site else None, key)
+        _drop_derived(key)
+        return vt, vs
+    if (
+        v.size(2) % 128 == 0
+        and v.size(3) <= 16
+        and v.size(4) in (16, 32)
+        and v.stride(4) == 1
+        and v.stride(3) == v.size(4)
+        and v.stride(2) % 8 == 0
+        and v.stride(1) == v.size(2) * v.stride(2)
+        and v.stride(0) == v.size(1) * v.stride(1)
+    ):
+        ovf = _OVF.setdefault(v.device, torch.zeros(1, dtype=torch.int32, device=v.device))
+        return tuple(_core_f8pv().vt_quant(v, 0.0, _vinv_of(key, vscale), ovf))
+    return quantize_v(v)
+
+
+#: the width-generic fronts that make the V^T planes themselves (``front_fused3_sm90.cu`` with ``MW_F3_VTW``: d_pair 64, the bf16 / Y16 one-kernel fronts) instead of the standalone
+#: ``vt_quant`` pass; the planes are bit for bit the pass's (same fp16-rounded V, same static scale, same cvt).  False: the standalone pass.
+FP8_FRONT_VT = True
+
+
+#: (d_pair, heads, channels) -> the shortest S at which the call takes the V^T planes from the front (hi plane; x 2 with hi + lo): the front's planes cost ~nothing (the pass is gone),
+#: so the gate is lower than ``FP8_PV_MIN_S`` of the standalone pass.  Measured per config (module time against the 2.5.9 default, interleaved, same-cubin control): see docs/fp8.md.
+#: A config not listed uses the standalone pass's gate.  Set by :func:`enable_fp8_pv_for`; empty = no gate.
+FP8_PV_FRONT_MIN_S: dict = {}
+FP8_PV_UNFUSED_FRONT_MIN_S = {(64, 4, 32): 256, (64, 2, 32): 256, (64, 4, 16): 256, (256, 8, 32): 768}
+CALIBRATE = "calibrate"
+
+
+def front_vt_args(device, length: int, heads: int, channels: int, batch: int = 1, dpair: int = 0):
+    """None (the call takes the standalone pass / the fp16 core), ``CALIBRATE`` (the call site is eligible but its static scale is not taken yet: the caller runs the front as
+    it is and takes the scale with :func:`quantize_v_static`, eager), or (1 / per-head scale fp32 [H], overflow flag, planes, the scale per sample [batch * H]): the front makes the
+    e4m3 V^T planes itself.  Eligible: the FP8 PV route is on for the unfused sites, the site key (``_SITE``) is set, and ``length`` is past the front's S gate."""
+    if not (FP8_PV and FP8_FRONT_VT and (not FP8_PV_FUSED or FP8_PV_UNFUSED) and FP8_VSCALE_AUTO and _SITE is not None and INFERENCE_FP16):
+        return None
+    gate = FP8_PV_FRONT_MIN_S.get((dpair, heads, channels), FP8_PV_MIN_S.get(channels, 0))
+    if channels not in (D, 16) or heads > 16 or length < gate * (2 if FP8_PV_HL else 1):
+        return None
+    key = ("vq", _SITE, heads, channels)
+    vscale = _VS_AUTO.get(key)
+    if vscale is None:
+        return CALIBRATE
+    ovf = _OVF.setdefault(device, torch.zeros(1, dtype=torch.int32, device=device))
+    return _vinv_of(key, vscale), ovf, 2 if FP8_PV_HL else 1, _vsb_of(key, vscale, batch)
+
+
+class _F8Core:
+    """Stands in for the loaded fp16-core extension while ``FP8_PV`` is on (same ``triattn_fwd_h16`` signature)."""
+
+    @staticmethod
+    def triattn_fwd_h16(q, k, v, sbias, scale, want_lse, gate=None, want_out=True, key_tiles=None, key_mask=None, bias_transposed=False):
+        if q.size(4) not in (D, 16) or want_lse or q.size(3) > 16 or q.size(2) < FP8_PV_MIN_S.get(q.size(4), 0) * (2 if FP8_PV_HL else 1):
+            return _core_h16().triattn_fwd_h16(q, k, v, sbias, scale, want_lse, gate, want_out, key_tiles, key_mask, bias_transposed)
+        vt, vs = quantize_v_static(v, _SITE) if FP8_VSCALE_AUTO and _SITE is not None else quantize_v(v)
+        return _core_f8pv().triattn_fwd_h16(q, k, k, sbias, scale, False, gate, want_out, key_tiles, key_mask, bias_transposed, vt, vs)
+
+
+def core_h16() -> Any:
+    """The loaded fp16 core (default), or its FP8-PV stand-in when ``FP8_PV`` is set (not with ``FP8_PV_FUSED``: then only the fused d_pair-128 front
+    feeds the FP8 core -- the other call sites would need the standalone ``vt_quant`` pass, which costs more than the core gains there)."""
+    return _F8Core if FP8_PV and (not FP8_PV_FUSED or FP8_PV_UNFUSED) else _core_h16()
+
+
+#: Models whose end-level accuracy was checked with the FP8 PV route (FoldForge, 200 steps, trunk seeds 0-3: same-seed RMSD inside the bf16 trunk-seed spread),
+#: with the call sites checked: "fused" = the d_pair-128 front that writes V^T itself, "unfused" = the other fronts through the standalone V^T pass (gated by S).
+#: NOT a general route: Boltz-2 9c90 is bistable and flips under V rounding, so "boltz2" is deliberately absent.  Extend only after an end-level check.
+FP8_PV_WHITELIST: dict = {"protenix1": frozenset({"fused"}), "opendde": frozenset({"unfused"})}
+
+#: the S gate of the unfused sites that :func:`enable_fp8_pv_for` sets (head channels -> shortest S, hi plane; measured 2026-11-15, docs/fp8.md)
+FP8_PV_UNFUSED_MIN_S = {32: 1024, 16: 512}
+
+
+def enable_fp8_pv_for(model: str, *, hl: bool = False) -> bool:
+    """Per-model opt-in of the FP8 PV route (inference): sets ``FP8_PV`` / ``FP8_VSCALE_AUTO`` and ``FP8_PV_FUSED`` (the d_pair-128 front writes V^T; and ``FP8_PV_HL``
+    when ``hl``), plus ``FP8_PV_UNFUSED`` with the S gate when ``model`` is whitelisted for the unfused sites; returns True.  Any other model gets the default fp16 core
+    (returns False, nothing changed).  The caller must read :func:`take_overflow` after a forward and, when set, call :func:`rescale_all` and redo it.  Undo with
+    :func:`disable_fp8_pv`."""
+    global FP8_PV, FP8_PV_FUSED, FP8_VSCALE_AUTO, FP8_PV_HL, FP8_PV_UNFUSED, FP8_PV_MIN_S, FP8_PV_FRONT_MIN_S
+    routes = FP8_PV_WHITELIST.get(model)
+    if routes is None:
+        return False
+    FP8_PV, FP8_PV_FUSED, FP8_VSCALE_AUTO, FP8_PV_HL = True, "fused" in routes, True, bool(hl)
+    FP8_PV_UNFUSED = "unfused" in routes
+    FP8_PV_MIN_S = dict(FP8_PV_UNFUSED_MIN_S) if FP8_PV_UNFUSED else {}
+    FP8_PV_FRONT_MIN_S = dict(FP8_PV_UNFUSED_FRONT_MIN_S) if FP8_PV_UNFUSED else {}
+    return True
+
+
+def disable_fp8_pv() -> None:
+    global FP8_PV, FP8_PV_FUSED, FP8_VSCALE_AUTO, FP8_PV_HL, FP8_PV_UNFUSED, FP8_PV_MIN_S, FP8_PV_FRONT_MIN_S
+    FP8_PV = FP8_PV_FUSED = FP8_VSCALE_AUTO = FP8_PV_HL = FP8_PV_UNFUSED = False
+    FP8_PV_MIN_S = {}
+    FP8_PV_FRONT_MIN_S = {}
 
 
 # inference(): the front writes q / k / v and the bias in fp16 for the fp16 core (faster, and closer to fp32: see triattn_h16_sm90.cu)
@@ -170,26 +502,85 @@ def inference(
     x = pair.contiguous().view(-1, C)
     m = _mod()
     empty = torch.empty(0, device=pair.device)
-    q, k, v, g, sbias = m.tri_front(
-        x,
-        lnw,
-        lnb,
-        eps,
-        w4,
-        wb16,
-        mask if mask is not None and not flip else empty.bool(),
-        B,
-        L,
-        D**-0.5,
-        trans,
-        INFERENCE_FP16,
-        not INFERENCE_TAIL_GATE,
-    )
+    fused_vt = _fused_vt(pair.device) and L >= FP8_PV_FUSED_MIN_S * (2 if FP8_PV_HL else 1)
+    if fused_vt:
+        ovf = _OVF.setdefault(pair.device, torch.zeros(1, dtype=torch.int32, device=pair.device))
+        vscale = FP8_VSCALE if FP8_VSCALE is not None else _VS_AUTO.get(w4.data_ptr())
+        if vscale is None:  # calibration: the V absmax per head of this call
+            v0 = m.tri_front(x, lnw, lnb, eps, w4, wb16, empty.bool(), B, L, D**-0.5, trans, True, False)[2]
+            vscale = _VS_AUTO[w4.data_ptr()] = vscale_from_amax(v0.view(-1, H, D).abs().amax(dim=(0, 2)), 4.0)
+            _forget_on_free(w4, w4.data_ptr())
+        vscale = vscale.to(pair.device, torch.float32)
+        qkey = ("qk", w4.data_ptr())
+        qk_front = FP8_QK and FP8_QK_FRONT and _QK_AUTO.get(qkey) is not None  # EXPERIMENTAL: the front writes e4m3 q / k
+        q, k, v, g, sbias, vt = m.tri_front_vt(
+            x,
+            lnw,
+            lnb,
+            eps,
+            w4,
+            wb16,
+            mask if mask is not None and not flip else empty.bool(),
+            B,
+            L,
+            D**-0.5,
+            trans,
+            (1.0 / vscale).contiguous(),
+            ovf,
+            2 if FP8_PV_HL else 1,
+            **({"qkinv": _QK_INV[qkey]} if qk_front else {}),
+        )
+    else:
+        q, k, v, g, sbias = m.tri_front(
+            x,
+            lnw,
+            lnb,
+            eps,
+            w4,
+            wb16,
+            mask if mask is not None and not flip else empty.bool(),
+            B,
+            L,
+            D**-0.5,
+            trans,
+            INFERENCE_FP16,
+            not INFERENCE_TAIL_GATE,
+        )
     if flip:
         sbias = flip_bias(sbias, mask)
     shp = (B, L, L, H, D)
-    if INFERENCE_FP16:  # the dead trailing key tiles skipped
-        o = _core_h16().triattn_fwd_h16(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, **key_args(mask, L))[0]
+    qk8 = None
+    if fused_vt and FP8_QK and qk_front:
+        qk8 = (q, k)
+    elif fused_vt and FP8_QK:  # EXPERIMENTAL: q / k on e4m3 too (see FP8_QK); calibration call, or the torch pass (FP8_QK_FRONT off)
+        key = qkey
+        new = key not in _QK_AUTO
+        sq = qk_site(key, q, k, H)
+        if new:
+            weakref.finalize(w4, _QK_AUTO.pop, key, None)
+            weakref.finalize(w4, _QK_INV.pop, key, None)
+        if sq is not None:
+            qk8 = quantize_qk_torch(q.view(-1, H, D), k.view(-1, H, D), sq)
+    if qk8 is not None:
+        o = _core_f8qk().triattn_fwd_h16(
+            qk8[0].view(shp),
+            qk8[1].view(shp),
+            qk8[1].view(shp),
+            sbias,
+            D**-0.5,
+            False,
+            None,
+            True,
+            vt=vt,
+            vscale=vscale.repeat(B),
+            **key_args(mask, L),
+        )[0]
+    elif fused_vt:
+        o = _core_f8pv().triattn_fwd_h16(
+            q.view(shp), k.view(shp), k.view(shp), sbias, D**-0.5, False, None, True, vt=vt, vscale=vscale.repeat(B), **key_args(mask, L)
+        )[0]
+    elif INFERENCE_FP16:  # the dead trailing key tiles skipped
+        o = core_h16().triattn_fwd_h16(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, **key_args(mask, L))[0]
     else:
         o = _core().triattn_fwd(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False)[0]
     # the biases in fp32 inside the tail, before its one rounding: added to the bf16 gate / sum afterwards they were a second
@@ -217,7 +608,14 @@ def inference_wide(pair, fold, wpk, wb8, wo16, mask=None, eps=1e-5, trans=False,
     x = pair.contiguous().view(M, cw)
     empty = torch.empty(0, device=pair.device)
     gb = None if gate_bias is None else gate_bias.float().contiguous()
-    q, k, v, g, sbias = _mod().tri_front_wide(
+    # opt-in FP8 PV route: the group-2 CTA of the wide front writes the e4m3 V^T hi plane itself (static scale; the hi + lo planes stay on the standalone pass)
+    vtargs = front_vt_args(pair.device, L, nh, D, B, cw) if INFERENCE_FP16 and nh == 8 and L % 128 == 0 else None
+    calib = vtargs == CALIBRATE  # the site's static V scale is not taken yet (the front runs as it is; the scale comes from this call's V)
+    if calib:
+        vtargs = None
+    if vtargs is not None and vtargs[2] != 1:
+        vtargs = None
+    res = _mod().tri_front_wide(
         x,
         fold,
         eps,
@@ -232,12 +630,31 @@ def inference_wide(pair, fold, wpk, wb8, wo16, mask=None, eps=1e-5, trans=False,
         INFERENCE_FP16,
         gb,
         WIDE_PACKED,
+        *((vtargs[0], vtargs[1]) if vtargs is not None else ()),
     )
+    q, k, v, g, sbias = res[:5]
+    vt, vs = (res[5], vtargs[3]) if vtargs is not None else (None, None)
+    if calib:
+        vt, vs = quantize_v_static(v.view(B, L, L, nh, D), _SITE)
     if flip:
         sbias = flip_bias(sbias, mask)
     shp = (B, L, L, nh, D)
-    if INFERENCE_FP16:  # the dead trailing key tiles skipped
-        u = _core_h16().triattn_fwd_h16(
+    if vt is not None:  # the FP8 core on the front's V^T plane
+        u = _core_f8pv().triattn_fwd_h16(
+            q.view(shp),
+            k.view(shp),
+            k.view(shp),
+            sbias,
+            D**-0.5,
+            False,
+            g.view(shp),
+            False,
+            **key_args(mask, L),
+            vt=vt,
+            vscale=vs,
+        )[3]
+    elif INFERENCE_FP16:  # the dead trailing key tiles skipped
+        u = core_h16().triattn_fwd_h16(
             q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False, g.view(shp), False, **key_args(mask, L)
         )[3]
     else:
