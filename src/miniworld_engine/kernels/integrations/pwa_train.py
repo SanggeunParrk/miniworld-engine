@@ -818,6 +818,17 @@ def _inference_math(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.T
     else:
         lnz_w = module.ln_pair.weight.detach().float().contiguous()
         wb16 = module.to_bias.weight.detach()
+    if native:
+        from miniworld_engine.kernels.integrations import pwa_fp8 as _f8
+
+        if _f8.serves(m.shape[0], n, z.shape[-1]) and (z.shape[-1] != DZ or n <= NMAX_INFER):  # EXPERIMENTAL opt-in e4m3 contraction
+            pair_fn = (
+                (lambda: _wide_pair_fwd(z, pm, module.ln_pair.weight, eps_z, module.to_bias.weight))
+                if z.shape[-1] != DZ
+                else (lambda: k["pair3"].pair_fwd3(z, pm, lnz_w, eps_z, wb16))
+            )
+            out = _f8.forward(m, z, pm, module.to_value.weight, lnz_w, lnm_w, lnm_b, wb16, wv16, wg16, wo16, eps_m, eps_z, pair_fn)
+            return out[None]
     if z.shape[-1] != DZ:  # pair_only_wide: the pair side at this d_pair is pwa_wide's
         w16 = _wide_pair_fwd(z, pm, module.ln_pair.weight, eps_z, module.to_bias.weight)
     elif k["pair3"] is not None and n % 16 == 0 and n <= NMAX_INFER:
