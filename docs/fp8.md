@@ -749,7 +749,7 @@ max error 3.5-5.6 % at depth 8192-16384 (not recommended).
 ## PWA forward: e4m3 key contraction (`kernels/integrations/pwa_fp8.py`, branch `fp8x/pwa`, 2026-11-17)
 
 Scope: `MSAPairWeightedAveraging`, H100 `pwa_train` inference (d_msa 64, 8 heads x 32: Boltz-2 / RF3 / MiniWorld at d_pair 128, Chai-1 at d_pair 256),
-one sample. Not served: the `pwa_wide` widths (8 x 8 / 8 x 16, d_msa 128; BIG 256 x 8 x 32), training, B200. Off by default; with it off the
+one sample. The `pwa_wide` widths (8 x 8 / 8 x 16: AF3 family) have their own route, below; not served: BIG 256 x 8 x 32, training, B200. Off by default; with it off the
 module output is the 2.5.12 bytes (below).
 
 Route: `pair_fwd3` (default pair kernel, w bf16) -> `w_quant` (e4m3 of 256 w) -> `ln_vt8` (y = `ln_vg`'s bytes, v as e4m3 **K-major** `vT [H][S*C][N]`)
@@ -853,6 +853,102 @@ replay = eager, the guard fires on a forced saturation and `rescale_all` clears 
 `test_i64_offsets.py::test_pwa_train_pair_past_2_31`: 18 passed; after the gate change `test_pwa_fp8.py` again (with `test_gates`): 6 passed, and the bit-identity check repeated on the final tree. CPU: `test_capture_api` (the new module dicts listed; the remaining failure is the
 base branch's TriAttn / TriMul FP8 dicts, unchanged), `test_init`, `test_requirements`, `test_prebuild_plan`: 1444 passed. `ruff check` / `format`,
 `pyright` clean on the touched Python files. The new extension `miniworld_pwa_vt8` is JIT-built on first use (not in the prebuild plan).
+
+### The wide widths: AF3 family (`pwa_fp8.forward_wide`, branch `fp8x/pwa-wide`, 2026-11-17)
+
+Scope: `pwa_wide` inference on H100, 8 heads x 8 / 16 -- (d_msa, C) = (64, 8) AF3 / OpenFold3 / Protenix-v1 (d_pair 128), (128, 8) Protenix-v2
+(d_pair 256) / OpenDDE (384), (128, 16) ESMFold2 (256): every non-BIG wide row of `requirements_module.csv`. Not served: the BIG build
+(256 x 8 x 32, IntelliFold2), training, B200. Why it did not fire before: AF3's 64 x 8 is not `pwa_train`'s width, so the module runs `pwa_wide`,
+which had no FP8 hook (and the 8 x 32 route also asks N % 128; FoldBench lengths are arbitrary). Same switch `MINIWORLD_PWA_FP8=1`, same v scale
+(static power of two, `HEADROOM` 16, keyed by the value weight), w scale (2^8), guard (`take_overflow` / `rescale_all`, `GUARD` sync / lazy) and
+cuBLASLt contraction as the 8 x 32 route.
+
+Route: `pair_fwd3` (pwa_wide's pair kernel, w bf16) -> `w_quant` -> `ln_vt8` built at the width (`pwa_vt8.cu` with `-DVT_D` / `-DVT_C`:
+d_msa 128 as two 64-column swizzled blocks per tile and Wv, HC / 64 m64 blocks; v as e4m3 K-major `vT [H][S*C][N]`, **no y** -- the wide gate
+pass normalises m again in inference) -> the cuBLASLt e4m3 batched contraction (per head M = S*C, N = N_i, K = N_j: the heads are the batch, the
+MSA rows x channels the long M, so C = 8 still gives a full-size GEMM) -> `gate_out_w` in its LayerNorm mode (pwa_wide's default inference gate /
+out pass, unchanged). N need only be a multiple of 16 (pwa_wide pads to 16): the last token block of a row is computed from the next row's
+(or TMA zero-filled) tokens, clipped by the vT store and left out of amax. `ln_vt8` launch (blocks / SM, stages), measured best of
+{1, 2, 3, 4, 6, 8} x {2, 3, 4} (`res/tune.jsonl`): 64 x 8 (3, 3), 128 x 8 (3, 2), 128 x 16 (2, 3); the 8 x 32 build keeps (2, 4).
+
+| env | effect |
+|---|---|
+| `MINIWORLD_PWA_FP8_WIDE_MIN_N` | shortest N served on the wide widths (256); 0 = no gate |
+| `MINIWORLD_PWA_FP8_WIDE_MIN_SN` | smallest S * N served (3 * 2^16 = 196608); 0 = no gate |
+
+Scripts and raw rows: `~/miniworld-engine-scratch/fp8x-pwa-wide/{scripts,res}`.
+
+Stages of the 2.5.12 wide route at AF3 width (64 x 8, d_pair 128), CUDA graph per stage, median (`res/prof.jsonl`); removal = module chain minus
+that stage. e4m3 contraction = the cuBLASLt route on PyTorch-built vT (prototype, before the kernel).
+
+| S:N | module ms | `pair_fwd3` | `ln_vg_w` | contraction (cuBLAS bf16) | `gate_out_w` (LN mode) | e4m3 contraction | `ln_vt8` (no y) |
+|---|---|---|---|---|---|---|---|
+| 1024:768 | 0.405 | 0.065 (16 %) | 0.084 (21 %) | 0.122 (30 %) | 0.127 (31 %) | 0.079 (0.65x) | 0.057 (0.68x, `res/tune.jsonl`) |
+| 1024:384 | 0.185 | 0.018 | 0.043 | 0.044 | 0.067 | 0.035 | |
+| 4096:768 | 1.336 | 0.065 | 0.313 | 0.453 | 0.503 | 0.300 | |
+| 1024:1536 | 1.076 | 0.232 | 0.164 | 0.411 | 0.253 | 0.253 | |
+| 16384:512 | 3.086 | 0.033 | 0.803 | 0.923 | 1.296 | 0.627 | |
+| 128x8 1024:768 (d_pair 256) | 0.631 | 0.122 | 0.115 | 0.122 | 0.257 | 0.080 | 0.091 |
+| 128x16 1024:768 (d_pair 256) | 0.891 | 0.122 | 0.154 | 0.232 | 0.374 | 0.153 | 0.134 |
+
+The contraction is 77 GFLOP at S1024 N768 (a quarter of the 8 x 32 one) and the e4m3 GEMM is 0.65x, not 0.5x: its o write (bf16, 100 MB) is
+the larger part of its bytes. What is left after FP8 is mostly `gate_out_w` (~37 % of the FP8 route), which reads o, m twice and writes the
+output. Not attempted here: o as e4m3 into the gate pass (a new gate kernel next to `pwa_wide.cu`, whose bytes stay the 2.5.12 ones; the 8 x 32
+attempt gained nothing, below).
+
+Module time, FP8 / default, `cool / sustained` (`scripts/speed.py`, `res/v2.jsonl`; protocol as the 8 x 32 table: one process, three CUDA graphs
+-- default, default again = same-cubin control, FP8 lazy guard with gates removed -- interleaved). Control over all 48 rows 0.982 .. 1.006; no
+saturation in any row; the route fired in every row. AF3 width (64 x 8, d_pair 128):
+
+| S \ N | 128 | 192 | 256 | 384 | 512 | 768 | 1024 | 1536 | 2048 |
+|---|---|---|---|---|---|---|---|---|---|
+| 128 | | | | | | 1.016 / 1.018 | | | |
+| 256 | | | | 1.008 / 1.013 | | 0.967 / 0.968 | | 0.939 / 0.944 | |
+| 512 | | | 1.033 / 1.033 | 0.974 / 0.967 | 0.949 / 0.952 | 0.926 / 0.927 | | 0.886 / 0.896 | 0.857 / 0.864 |
+| 1024 | 1.052 / 1.057 | 1.015 / 1.013 | 0.963 / 0.967 | 0.919 / 0.922 | 0.915 / 0.912 | 0.865 / 0.866 | 0.858 / 0.864 | 0.826 / 0.831 | 0.794 / 0.806 |
+| 2048 | | | 0.914 / 0.915 | 0.887 / 0.890 | | 0.840 / 0.859 | | | |
+| 4096 | 0.903 / 0.904 | | 0.886 / 0.889 | 0.861 / 0.874 | | 0.826 / 0.843 | | 0.772 / 0.786 | 0.739 / 0.759 |
+| 16384 | 0.876 / 0.879 | | 0.870 / 0.877 | | 0.827 / 0.851 | 0.811 / 0.821 | 0.791 / 0.812 | | |
+
+N not a multiple of 128 (S1024): N400 0.910 / 0.909, N784 0.905 / 0.911. Default ms (cool): S1024 N256 0.123, N768 0.404, N2048 1.661; S4096 N768
+1.315; S16384 N1024 7.243. Other widths at d_pair 256 (S1024): 128 x 8 N256 0.972, N384 0.945, N768 0.910, N1536 0.882; S512 N768 0.952, S4096
+N768 0.880; 128 x 16 N256 0.957, N384 0.933, N768 0.894, N1536 0.849; S512 N768 0.917, S4096 N768 0.872; 128 x 8 at d_pair 384 (OpenDDE)
+S1024 N768 0.918.
+
+Gates (default `WIDE_MIN_N` 256, `WIDE_MIN_SN` 3 * 2^16): every loss measured is below them -- N128 / N192 at S1024 (+5 / +2 %), S512 N256 (+3 %),
+S256 N384 (+1 %), S128 N768 (+2 %); every served cell measured gains (worst: 128 x 8 S1024 N256 0.97). Not served although measured to gain:
+N128 at S >= 4096 (0.88-0.90).
+
+Error against fp64 PyTorch (`scripts/err.py`, `res/err_v2.jsonl`; method as the 8 x 32 table: random weights, 3 masked keys, gates removed).
+Cells `upd rms / upd max / judge` in %:
+
+| case (D:C:d_pair:S:N) | PyTorch bf16 | default 2.5.12 | FP8 |
+|---|---|---|---|
+| 64:8:128:1024:256 | 2.17 / 3.39 / 0.29 | 2.16 / 3.36 / 0.29 | 3.46 / 4.39 / 0.38 |
+| 64:8:128:1024:384 | 2.36 / 3.61 / 0.29 | 2.35 / 3.61 / 0.29 | 3.39 / 4.18 / 0.34 |
+| 64:8:128:1024:400 | 2.38 / 3.66 / 0.30 | 2.37 / 3.66 / 0.30 | 3.38 / 4.27 / 0.35 |
+| 64:8:128:1024:768 | 2.62 / 4.66 / 0.28 | 2.62 / 4.66 / 0.28 | 3.26 / 5.65 / 0.34 |
+| 64:8:128:1024:1536 | 2.81 / 5.00 / 0.28 | 2.80 / 4.93 / 0.28 | 3.17 / 5.43 / 0.31 |
+| 64:8:128:512:2048 | 2.86 / 5.93 / 0.29 | 2.86 / 5.82 / 0.28 | 3.14 / 6.14 / 0.30 |
+| 64:8:128:4096:768 | 2.63 / 4.33 / 0.28 | 2.62 / 4.37 / 0.28 | 3.27 / 5.39 / 0.35 |
+| 64:8:128:16384:512 | 2.48 / 3.58 / 0.30 | 2.47 / 3.42 / 0.28 | 3.33 / 4.18 / 0.35 |
+| 128:8:256:1024:768 | 2.45 / 4.27 / 0.28 | 2.44 / 4.21 / 0.28 | 3.01 / 4.78 / 0.31 |
+| 128:16:256:1024:768 | 2.64 / 4.52 / 0.28 | 2.63 / 4.52 / 0.28 | 3.22 / 5.24 / 0.32 |
+| 128:8:384:1024:768 | 2.47 / 4.27 / 0.28 | 2.47 / 4.27 / 0.28 | 3.04 / 4.96 / 0.33 |
+
+Judge metric of the FP8 route 0.30-0.38 % at every case, inside the engine tolerance (8e-3); no NaN / inf, no saturation (peak |v / scale|
+21.5-25.5 of 448). Contraction alone (head 0 vs fp32 of the same bf16 w, v): bf16 0.17 % rms, e4m3 3.8 % rms (`res/prof.jsonl`). Random weights
+only: the end-level effect (real MSA, trained weights, FoldBench) is not measured.
+
+Verification: default route (FP8 off) bit-identical to ffcd465f7 (sha1 of the outputs, separate processes, `res/bit_wt.jsonl` = `res/bit_base.jsonl`),
+15 cases: wide inference 64:128:8 at N256 / 768 / 777 (padded) / 2048, 128:256:8, 128:256:16, 128:384:8 N400; wide training forward + backward
+64:128:8 N384 S1024, 128:256:16 N256 (y, dmsa, dpair, every parameter gradient); `pwa_train` inference / training 8 x 32; and the **8 x 32 FP8
+route** itself at S1024 N768, S2048 N384, d_pair 256 N512 (the generalised `pwa_vt8.cu` gives its bytes unchanged). `pwa_wide.py` gains one
+`if not save` branch before `ln_vg_w`; `pwa_wide.cu` / `pair_wide.cu` are untouched. Tests: `tests/gpu/test_pwa_fp8_wide.py` (new: `ln_vt8` at each
+wide width vs `ln_vg_w` with S 70 / N 208 -- the clipped token tail --, route accuracy against fp64 within the engine tolerance at the four
+widths incl. N 777 padded, the route fired, default unchanged after it ran, graph replay = eager, guard fires and `rescale_all` clears it, gates),
+`test_pwa_fp8.py`, `test_pwa_long_inference.py`: 28 passed (final tree). CPU: `test_capture_api`, `test_init`: 274 passed; `ruff check` / `format`, `pyright` clean on the touched Python files. The wide `ln_vt8` builds (`miniworld_pwa_vt8_{d}_{c}`) are JIT-built on first use (not in the
+prebuild plan); the 8 x 32 build keeps its extension name (its cache key changes with the source).
 
 ## Transition forward: e4m3 GEMMs (`kernels/transition/cuda/fp8_sm90a.py`, branch `fp8x/transition`, 2026-11-17)
 

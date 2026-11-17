@@ -118,6 +118,13 @@ def _forward_math(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: 
     )
     lnw, lnb = lnm_w.detach().float().contiguous(), lnm_b.detach().float().contiguous()
     big = is_big(d_msa, hc // H)
+    if not save:
+        from miniworld_engine.kernels.integrations import pwa_fp8 as _f8
+
+        # EXPERIMENTAL opt-in (off by default): e4m3 w / v in the key contraction
+        if _f8.serves_wide(d_msa, hc // H, m.shape[0], m.shape[1]):
+            wv16, wg16, wo16 = (t.detach().to(bf).contiguous() for t in (wv, wg, wo))
+            return _f8.forward_wide(m, wv, lnw, lnb, wv16, wg16, wo16, eps_m, w16, kv)
     v, y, stats = kv.ln_vg_w(
         m, lnw, lnb, wv.detach().to(bf).contiguous(), eps_m, save or (big and BIG_INFER_Y)
     )  # inference keeps no y: gate_out_w normalises m again (the BIG build: BIG_INFER_Y)
