@@ -111,10 +111,19 @@ void attn2_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor 
     if (fixed == 2) { using G = a100::Attn2Cfg<16, R_, NKV_, BN_, MINB_, false, 2>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); } \
     else { using G = a100::Attn2Cfg<16, R_, NKV_, BN_, MINB_, false, 1>; launch<G>(a100::attn2_fwd_kernel<G>, G::SMEM, g, p); } }
   // schedules of the 16-channel fixed-shift core (R rows, NKV stages, BN keys, CTAs / SM); 0 = automatic: 4 rows x 4 stages from L = 256 (measured -5..-8 % at L384-768, +4 % at L128), else the base 2 x 4
-  // the register-resident core (attn_rf_fwd_sm80.cuh) for unmasked token-major inference: 16-channel heads (the fixed-shift callers) from L 1024, 32 / 64-channel
-  // heads (the RoseTTAFold3 / Chai-1 variants: its own running-max recomputation replaces their online softmax) from L 512
-  const int rf = g_rf16 >= 0 ? g_rf16 : (hd == 16 ? (L >= 1024 && fixed) : L >= 512);
-  if (!mask && !lse.numel() && rf > 0 && L >= 512 && token_major_hd(Lq, L, Z, hd) && token_major_hd(Lk, L, Z, hd) && token_major_hd(Lv, L, Z, hd) &&
+  // the register-resident core (attn_rf_fwd_sm80.cuh) for unmasked token-major inference: 16-channel heads (the fixed-shift callers), 32 / 64-channel heads (the
+  // RoseTTAFold3 / Chai-1 variants: its own running-max recomputation replaces their online softmax) from L rf_min.  A100 (2026-11-17, core alone, CUDA graph, interleaved,
+  // the rf build vs this attn2 core at the same L): 64-channel heads 1.39-1.62x at L 128-384, 32-channel 1.27-1.44x at L 256 / 384 (0.92-1.00x at L 128), 16-channel
+  // 1.04-1.12x at L 256-768 (0.88-0.91x at L 128); error vs fp64 within the rf core's own at L 512 (rms 6.5e-4 / 7.8e-4 max 8.5e-3).  The RTX 5090 build keeps
+  // the earlier floors (not measured there).
+#ifdef TRIATTN_SM120
+  constexpr int RF_MIN64 = 512, RF_MIN32 = 512, RF_MIN16 = 512, RF_AUTO16 = 1024;
+#else
+  constexpr int RF_MIN64 = 128, RF_MIN32 = 256, RF_MIN16 = 256, RF_AUTO16 = 256;
+#endif
+  const int rf_min = hd == 64 ? RF_MIN64 : hd == 32 ? RF_MIN32 : RF_MIN16;
+  const int rf = g_rf16 >= 0 ? g_rf16 : (hd == 16 ? (L >= RF_AUTO16 && fixed) : 1);
+  if (!mask && !lse.numel() && rf > 0 && L >= rf_min && token_major_hd(Lq, L, Z, hd) && token_major_hd(Lk, L, Z, hd) && token_major_hd(Lv, L, Z, hd) &&
       token_major_hd(Lo, L, Z, hd)) {
     a100::AttnParams r{};
     r.q = p.q; r.k = p.k; r.v = p.v; r.bias = p.bias; r.out = p.out; r.lse = nullptr;
