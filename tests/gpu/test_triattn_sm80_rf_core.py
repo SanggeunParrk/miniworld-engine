@@ -1,4 +1,4 @@
-"""A100 (sm_80) register-resident triangle-attention inference core (``kernels/triangle_attention/cuda/sm80/attn_rf_fwd_sm80.cuh``): against a
+"""A100 (sm_80) and RTX 5090 (sm_120a) register-resident triangle-attention inference core (``kernels/triangle_attention/cuda/sm80/attn_rf_fwd_sm80.cuh``): against a
 float32 reference on sampled pair rows, the plain and the gated (``bf16(sigmoid(g) bf16(o))``) forms at 32-channel heads, the 16-channel form of
 the generalised core, masked keys, a query whose keys are all masked (zero output) and logits large enough that the unshifted pass cannot
 finish its tiles (the fix-list recomputation with the running maximum); bitwise equal run to run; the same values as the tuned AttnCfg core
@@ -10,14 +10,15 @@ import math
 import pytest
 import torch
 
-pytestmark = [pytest.mark.gpu, pytest.mark.a100]
+pytestmark = [pytest.mark.gpu]
 
 L2E = 1.4426950408889634
 BF16_MIN = -3.3895313892515355e38
 
 
 def _a100() -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
+    """A card the sm_80 sources serve: the A100, or the RTX 5090 (the same sources built for sm_120a, with fewer ring slots there)."""
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() in ((8, 0), (12, 0))
 
 
 def _inputs(L: int, H: int, d: int, kind: str, seed: int = 0):
@@ -123,7 +124,7 @@ def _run16(mode: int, q, k, v, bias, key_mask: torch.Tensor | None = None, hd: i
 KINDS = ["plain", "big", "masked", "allmasked", "overflow"]
 
 
-@pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+@pytest.mark.skipif(not _a100(), reason="sm_80 sources (A100 / RTX 5090)")
 @pytest.mark.parametrize("gate", [False, True])
 @pytest.mark.parametrize("kind", KINDS)
 def test_rf_core_32(kind: str, gate: bool) -> None:
@@ -142,7 +143,7 @@ def test_rf_core_32(kind: str, gate: bool) -> None:
         assert rf[0, :, 5:9].abs().max() == 0, "a query with every key masked gives zero"
 
 
-@pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+@pytest.mark.skipif(not _a100(), reason="sm_80 sources (A100 / RTX 5090)")
 @pytest.mark.parametrize("hd", [16, 32, 64])
 @pytest.mark.parametrize("kind", KINDS)
 def test_rf_core_attn2(kind: str, hd: int) -> None:
@@ -162,7 +163,7 @@ def test_rf_core_attn2(kind: str, hd: int) -> None:
         assert rf[0, :, 5:9].abs().max() == 0
 
 
-@pytest.mark.skipif(not _a100(), reason="sm_80 kernels")
+@pytest.mark.skipif(not _a100(), reason="sm_80 sources (A100 / RTX 5090)")
 @pytest.mark.parametrize("d", [32, 16])
 @pytest.mark.parametrize("mode", [2, 0])
 def test_dead_tail_keys_skipped_bitwise(d: int, mode: int) -> None:
