@@ -1113,6 +1113,115 @@ Verification (2026-11-17): default route (no switch) against the base tree 91a92
 `..._variants_infer.py` 17, `test_cuda_refuses_not_raises.py` 8 passed. CPU: `test_prebuild_plan`, `test_requirements`, `test_judge`, `test_plot` 1196 passed; ruff / pyright clean on
 the touched Python files. The F8QK core and the QK8 front instance are not in the prebuild plan (JIT on first use; experimental).
 
+## Token DiT forward: e4m3 GEMM operands (EXPERIMENTAL, `conditioned_transition.cuda.token_dit_fp8`, branch `fp8x/token-dit`)
+
+Scope: the H100 bf16 inference block of `TokenDiTProtenix` / `TokenDiTMiniWorld` with the default model options (the CondFold route of
+`docs/h100/token_dit.md`), width 768. Off by default; with no switch the route is bit-identical to 2.5.12 (below). The block runs
+24 x per diffusion step x 200 steps, so on small targets it is a large share of the sampler; the trunk FP8 routes do not reach it.
+
+```
+MINIWORLD_TOKEN_DIT_FP8=qkvg,expand        # placements: qkvg, expand, out, squeeze ("1" = qkvg,expand; "all")
+MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS=<n>       # one row gate for all (default per placement: qkvg 2560, expand 640, out / squeeze 2560 rows M = A B L)
+```
+
+Scales: **dynamic per row** for every activation operand (row max / 448, computed by the pass that makes the row), static per output
+channel for the weights (made once per weight pack, `_capture.lookup` like every pack). Nothing can saturate, whatever a step's noise
+level, so there is no calibration and no guard: the TriMul / TriAttn static-scale + `take_overflow` contract is not needed and not
+duplicated. The cost is one more block reduction in the row pass (below).
+
+### Where the time goes (A = 5 samples, shared conditioning, 16 x 48, pair 128; torch profiler kernel time, eager after warm-up)
+
+| stage | work (M = A L) | L768 us | L1536 us | counters (ncu, L768 / L1536) | e4m3 placement | upper bound |
+|---|---|---|---|---|---|---|
+| conditioning GEMM `[L, 384] x [384, 6 x 768]` fp32 out | 2.7 / 5.4 GF | 9.8 | 15.3 | (cuBLAS, not profiled) | none: per-token AdaLN / gate tables, small, fp32 by design | - |
+| `adaln_in_cf` rows | 5.9 MB in, 5.9 MB out (bf16) | 12.6 | 23.6 | issue / latency bound: SM 60-69 %, DRAM 11 / 26 MB, XU 31-34 % | write xa as e4m3 + row scale (`adaln_in_rows_cf_q8`) | -1.5 us (half the write) |
+| q\|k\|v\|g GEMM `[M, 768] x [768, 3072]` | 18.1 / 36.2 GF | 31.0 | 56.8 | cuBLAS 582 / 635 TFLOP/s | xa e4m3 (row) x W e4m3 (channel), `torch._scaled_mm` row-wise, bf16 out + bias | GEMM alone 31.1 -> 24.0 / 58.8 -> 44.8 us (micro-bench, row-wise) |
+| attention core `attn_fwd` (gated) | QK + PV 9.1 / 36.2 GF | 46.4 | 145.7 | tensor pipe 24 / 29 %, issue active 50 / 57 %, eligible warps 0.97 / 1.15 per scheduler, XU 36 / 42 %, ALU 37 / 43 %, L2 47 %, DRAM 25 % | P.V on e4m3 (TriAttn-style V^T planes) | small: the core is latency bound, not tensor bound; PV is about half of a 24-29 % tensor pipe -- not built (see below) |
+| out GEMM `[M, 768] x [768, 768]` | 4.5 / 9.1 GF | 11.0 | 16.9 | cuBLAS | og e4m3 needs its own row pass (heads of a row are written by 16 CTAs: no per-row scale in the core's epilogue) | measured loss (below) |
+| `resgate_adaln_cf` rows | | 14.0 | 26.7 | as adaln_in | write the expand input as e4m3 + row scale | -1.5 us |
+| expand + SwiGLU (`gemm_swiglu_sm90`) `[M, 768] x [768, 2 x 1536]` | 18.1 / 36.2 GF | 29.2 | 57.8 | wgmma, `sm__throughput` 64-73 % | e4m3 x e4m3 wgmma k32 (`gemm_swiglu_f8_sm90.cu`, same tiles / ring / epilogue + scales) | measured 20.8 / 42.8 us |
+| squeeze GEMM `[M, 1536] x [1536, 768]` | 9.1 / 18.1 GF | 15.9 | 29.7 | cuBLAS | h e4m3 needs a row pass (h's row spans 12 / 24 tiles) or a static scale + guard | measured loss with the row pass |
+| `resgate_out_cf` rows | | 13.0 | 23.8 | | none (bf16 output) | - |
+| total | | 183.3 | 398.7 | | | |
+
+Not placed: the pair bias is already hoisted (built once per pair / mask / weights, `_capture.lookup_inputs`; not per step). Storing it as
+e4m3 was rejected without building: it is a log2-unit logit, and e4m3 spacing at |bias| 2-8 is 0.125-0.5, i.e. a 9-41 % probability
+error per key. FP8 P.V in the attention core: not built -- at head dim 48 the core issues on half the cycles with ~1 eligible warp and the
+tensor pipe at 24-29 %, so halving the PV tensor time does not shorten the critical path (the exp / max / bias / ex2 work does), and it
+would need e4m3 V^T planes written by the q|k|v|g GEMM plus a P re-layout (an algorithm change, out of scope).
+
+### Kernel time per placement (A5, profiler, us; bf16 -> e4m3)
+
+| | L768 | L1536 |
+|---|---|---|
+| q\|k\|v\|g GEMM | 31.0 -> 25.9 | 56.8 -> 45.3 |
+| `adaln_in` rows (+ e4m3 + row max) | 12.6 -> 14.0 | 23.6 -> 25.7 |
+| expand + SwiGLU | 29.2 -> 20.8 | 57.8 -> 42.8 |
+| `resgate_adaln` rows (+ e4m3 + row max) | 14.0 -> 15.4 | 26.7 -> 28.4 |
+| out GEMM (+ og row pass) | 11.0 -> 10.4 + 5.3 | 16.9 -> 13.6 + 9.3 |
+| squeeze GEMM (+ h row pass) | 15.9 -> 13.8 + 7.0 | 29.7 -> 19.5 + 15.1 |
+
+The row passes get slower although they write half the bytes: the third block reduction (the row max) costs more than the bytes save
+(one block per row, latency bound).
+
+### Module time against the 2.5.12 default (one block call, CUDA graph, same process, interleaved; `cool / sustained`)
+
+Protocol as the TriAttn / TriMul tables above (cool = 2 s idle + one ~10 ms interleaved burst, 3 reps, median; sustained = 2 s idle, 1 s
+back-to-back, 3 timed blocks, mean); master weights (fp32 parameters, bf16 activations), shared conditioning, all-ones mask, every
+row gate removed. Raw rows: `~/miniworld-engine-scratch/fp8x-tokendit/res/speed2.jsonl` (`speed1.jsonl`: first build of the row passes,
+plus out / squeeze alone).
+
+| A:L (M) | 2.5.12 default ms | same-cubin control | qkvg | expand | qkvg + expand | all four |
+|---|---|---|---|---|---|---|
+| 5:256 (1280) | 0.0742 / 0.0721 | 0.995 / 0.999 | 0.967 / 0.971 | 0.974 / 0.977 | **0.940 / 0.941** | 1.006 / 1.005 |
+| 5:384 (1920) | 0.0968 / 0.0940 | 0.998 / 1.001 | 1.008 / 1.012 | 0.962 / 0.961 | 0.970 / 0.971 | 1.025 / 1.028 |
+| 5:512 (2560) | 0.1264 / 0.1249 | 0.999 / 1.006 | 0.985 / 0.990 | 0.960 / 0.967 | **0.945 / 0.948** | 0.979 / 0.979 |
+| 5:768 (3840) | 0.1816 / 0.1832 | 0.998 / 1.003 | 0.980 / 0.986 | 0.957 / 0.970 | **0.934 / 0.950** | 0.976 / 0.992 |
+| 5:1024 (5120) | 0.2433 / 0.2519 | 0.995 / 0.998 | 0.969 / 0.973 | 0.957 / 0.949 | **0.935 / 0.927** | 0.956 / 0.960 |
+| 5:1536 (7680) | 0.4004 / 0.4203 | 0.994 / 1.010 | 0.970 / 0.977 | 0.960 / 0.970 | **0.938 / 0.949** | 0.978 / 0.981 |
+| 5:2048 (10240) | 0.5686 / 0.6030 | 0.995 / 0.995 | 0.971 / 0.975 | 0.964 / 0.973 | **0.944 / 0.939** | 0.991 / 0.969 |
+| 1:768 (768) | 0.0746 / 0.0728 | 0.995 / 0.998 | 1.017 / 1.020 | 0.972 / 0.976 | 0.989 / 0.992 | 1.059 / 1.059 |
+| 1:1536 (1536) | 0.1343 / 0.1318 | 0.995 / 0.997 | 1.007 / 1.011 | 0.966 / 0.966 | 0.981 / 0.982 | 1.009 / 1.009 |
+
+out alone and squeeze alone (first run, `speed1.jsonl`): 1.02-1.05 at every shape (the extra row pass outweighs the e4m3 GEMM). The
+default row gates follow this table: expand from 640 rows, qkvg from 2560 (it lost at 768 / 1536 / 1920 rows).
+
+### Error against fp64 PyTorch (same module and inputs; random weights, LN weights 1 +- 0.1, biases +- 0.1, 3 masked keys)
+
+`~/miniworld-engine-scratch/fp8x-tokendit/scripts/err.py`, raw rows `res/err1.jsonl`, `res/err2.jsonl`. Update error = rms / max of (y - y64)
+relative to rms / max of (y64 - x); judge = max|y - y64| / max|y64| (`measure/accuracy._rel`), tolerance max(err of PyTorch bf16, 8e-3).
+Every gate removed; no NaN / inf in any case (no saturation is possible with row scales).
+
+| case | default 2.5.12 | PyTorch bf16 | qkvg | out | expand | squeeze | qkvg + expand | all four |
+|---|---|---|---|---|---|---|---|---|
+| A5 L384 | 0.66 / 0.65 % (3.6e-3) | 0.94 / 1.07 % (6.0e-3) | 1.25 / 1.16 % (**6.4e-3**) | 0.86 / 0.80 % (4.4e-3) | 5.35 / 5.64 % (3.1e-2) | 3.71 / 4.17 % (2.3e-2) | 5.45 / 5.19 % (2.9e-2) | 6.58 / 7.83 % (4.4e-2) |
+| A5 L768 | 0.66 / 0.67 % (4.1e-3) | 0.94 / 1.05 % (6.4e-3) | 1.07 / 1.10 % (**6.7e-3**) | 0.79 / 0.77 % (4.7e-3) | 5.36 / 5.61 % (3.4e-2) | 3.73 / 3.86 % (2.4e-2) | 5.43 / 5.36 % (3.3e-2) | 6.56 / 7.20 % (4.4e-2) |
+| A5 L1536 | 0.66 / 0.73 % (3.7e-3) | 0.94 / 1.14 % (5.8e-3) | 0.94 / 1.04 % (**5.3e-3**) | 0.74 / 0.76 % (3.9e-3) | 5.39 / 5.51 % (2.8e-2) | 3.73 / 4.19 % (2.1e-2) | 5.44 / 5.74 % (2.9e-2) | 6.57 / 6.39 % (3.2e-2) |
+| A1 L768 | 0.65 / 0.58 % (4.0e-3) | 0.94 / 0.97 % (6.8e-3) | 1.06 / 1.00 % (**7.0e-3**) | 0.79 / 0.66 % (4.6e-3) | 5.38 / 4.57 % (3.2e-2) | 3.73 / 3.36 % (2.3e-2) | 5.44 / 4.57 % (3.2e-2) | 6.57 / 5.85 % (4.1e-2) |
+| A5 L768, input x 0.05 | 0.64 / 0.69 % (7.0e-3) | 0.97 / 1.13 % (1.2e-2) | 3.54 / 3.86 % (3.9e-2) | 1.91 / 2.04 % (2.1e-2) | 5.36 / 6.03 % (6.1e-2) | 3.72 / 4.74 % (4.8e-2) | 6.39 / 6.42 % (6.5e-2) | 7.58 / 8.33 % (8.5e-2) |
+| A5 L768, input x 20 | 7.71 / 7.65 % (2.5e-3) | 9.69 / 13.7 % (4.5e-3) | 7.76 / 7.87 % (2.6e-3) | 7.72 / 7.73 % (2.5e-3) | 9.37 / 10.7 % (3.5e-3) | 8.54 / 8.94 % (2.9e-3) | 9.41 / 10.7 % (3.5e-3) | 10.1 / 10.7 % (3.5e-3) |
+
+Cells: update rms / update max (judge). Reading: every e4m3 GEMM whose both operands are e4m3 has ~3.7 % relative error (the e4m3
+rounding of two operands: the squeeze row is exactly that); the expand puts it on both a and b of the SwiGLU (5.4 %). The transition
+carries most of the block's update, so expand / squeeze show almost fully, while the attention placements (qkvg, out) are diluted by the
+residual: at input scale 1 qkvg stays inside the judge tolerance (5.3-7.0e-3 < 8e-3), out too; expand and squeeze fail it 3-4x (as the
+TriMul FP8 planes do). The dilution depends on the regime: with a small block input (x 0.05: the attention update dominates the
+transition's AdaLN input) qkvg rises to 3.5 % / 3.9e-2. Random weights only: the real models' activation statistics along a 200-step
+trajectory are not measured here (the per-row scales make the route independent of a step's overall scale, not of its row shape).
+
+### Verification
+
+- Default route (no switch) against the base tree (91a9241fb = `fp8/3.0.0-on-2512`), separate processes, sha1 of the output: 18 / 18
+  identical (`TokenDiTProtenix`, `TokenDiTMiniWorld`, `TokenDiTRoseTTAFold3` x A5 L384, A5 L768, A1 L256 x bf16 / fp32; the
+  Boltz-2 / Chai-1 calls of the script were refused identically by both trees). With `MINIWORLD_TOKEN_DIT_FP8=qkvg` only the four
+  bf16 A5 Protenix / MiniWorld cases change (fp32, A1 L256 below the gate and the RoseTTAFold3 option block keep the default bytes).
+- No existing source changed in a way that reaches a compiler: the FP8 kernels are two new files of a new extension
+  (`token_dit_fp8_sm90`: `gemm_swiglu_f8_sm90.cu`, `token_dit_fp8_rows.cu`); `token_dit_rows.cu`, `gemm_swiglu_sm90.cu`, the shared
+  `tmn_kernels.cuh` are untouched. Not in the prebuild plan (opt-in: JIT, ~90 s on first use).
+- Tests: `tests/gpu/test_token_dit_fp8.py` (the e4m3 SwiGLU GEMM against a torch reference on the same e4m3 operands at ht 64 / 128,
+  the row quantizer's scales and rounding bound, each placement's error against the bf16 route, switch-off and below-gate calls bit-equal
+  to the default).
+
 ## Known limits
 
 - Boltz-2 9c90 is bistable under any numerical noise of 0.1-2 % on the TriAttn output; V on e4m3 flips it (hi + lo too: 2 of 4 trunk seeds). In the current environment its own bf16 trunk seeds fall into 5 modes (24 seeds, 15.3 A, ipTM 0.40-0.85) and FP8 changes the mode of 9 of 24 same trunk seeds while the mode population stays equal (see the widened end-level section). Hence whitelist only, and Boltz-2 is not on it (open decision).
