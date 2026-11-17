@@ -1222,6 +1222,137 @@ trajectory are not measured here (the per-row scales make the route independent 
   the row quantizer's scales and rounding bound, each placement's error against the bf16 route, switch-off and below-gate calls bit-equal
   to the default).
 
+## Atom DiT forward: e4m3 row-kernel GEMMs (`local_dit_h100.FP8_ROWS`, EXPERIMENTAL, opt-in; branch `fp8x/atomdit`, 2026-11-17)
+
+Scope: the H100 `"cuda"` backend of the local atom DiT block (`modules/atom_dit.py`, AF3 32 x 128 windows; `kernels/integrations/local_dit_h100.py`),
+bf16 (`master`) inference with a conditioning shared by the samples (the sampler step: `cond` an expanded view over A > 1), the AdaLN classes
+(Protenix / OpenDDE, AF3 / OpenFold3 / IntelliFold2) and Chai-1 (`IDENT` / `PARS` / `NOOUT`). Boltz-2 (`UP`), RoseTTAFold3 (`KQLN`), ESMFold2
+(`RMS`), per-sample conditioning tables, fp32 and training keep the bf16 / TF32 kernels. Default off; with it off the route is the 2.5.12 one.
+
+| switch | effect |
+|---|---|
+| `MINIWORLD_ATOMDIT_FP8=1` (or `all`) at import, `local_dit_h100.enable_fp8(True)` | both row kernels on e4m3 wgmma (`pre90_f8`, `post90_f8`) |
+| `MINIWORLD_ATOMDIT_FP8=pre` / `enable_fp8("pre")` | only the q / gate / k / v projections (`pre90_f8`): a quarter of the output error of `all` (table below) |
+| `MINIWORLD_ATOMDIT_FP8=post` / `enable_fp8("post")` | only the out-projection, SwiGLU and squeeze (`post90_f8`) |
+| `sm90_atom.f8.MINB` | override of the register target per kernel (default: by grid size, see `f8.py`) |
+
+### Where FP8 can go: stages of the 2.5.12 inference step (AF3 block, 4096 atoms, A = 5 shared cond, bf16)
+
+Per sampler step the block runs 5 kernels; the conditioning tables (`cond90`), the pair bias (`h_pair_bias`) and the slid-edge tables are made once
+per fold (hoisted, `static_inputs()`), so they are not per-step work and FP8 there buys nothing over the 200 steps. Kernel times: torch profiler,
+eager, warm (the graph replay of the step is 100-102 us). Counters: `ncu` (one call, same shape; `ncu` durations are inflated, ratios only).
+
+| stage (kernel) | GEMMs per row (M = A N rows) | FLOP / row | HBM bytes / row | step time us (share) | ncu: tensor pipe / DRAM / occupancy / issue | e4m3 operand candidates |
+|---|---|---|---|---|---|---|
+| `pre90_fwd` | [128] x [128, 512] (q, gate, k, v) | 131 k | read 256 (x; mod / mkv shared: L2), write 1024 (q, sg, k, v); weights 128 KB per 64-row CTA from L2 | 21.4 (21 %) | 15.6 % / 12.7 % / 15 % / 40 % | A = x1, xkv (per row), B = Wq/g/k/v; stored q / k / v |
+| `h_attn_fwd` | per head 32 x 128 QK^T (k = 32), 32 x 128 PV (k = 128) | 66 k | read q / k / v ~768 (k / v re-read from L2), write o 256 + lse 16 | 18.5 (18 %) | 13.4 % / 33.8 % / 12 % / 37 % | Q / K (k32 = head dim), P, V (needs V^T) |
+| `edge_attn_fwd` (slide) | 5 windows, fp32 | - | ~0 | 16.2 (16 %, fixed: 100 CTAs) | 0.1 % / 1.8 % / 6 % / 17 % | none (latency bound, fp32 by design) |
+| `post90_fwd` | [128] x [128, 128] (Wo), [128] x [128, 512] ([a, b]), [256] x [256, 128] (squeeze) | 229 k | read 768 (a, o, sg), write 256; weights 224 KB per CTA from L2 | 44.9 (44 %) | 16.3 % / 12.1 % / 11 % / 34 % | A = gated o, x2, h (per row), B = Wo, Wa / Wb, Wd |
+| `tail_attn_fwd` | padding windows | - | ~0 | 2.3 (2 %) | - | none |
+
+No stage is near a roofline: tensor pipe <= 16 %, DRAM <= 46 % (`h_attn_fwd` at 16384 atoms), 1 warpgroup x 2-3 CTAs per SM: the row kernels are
+latency bound on the serial chain `cp.async weights -> wgmma (commit + wait) -> epilogue`. The head dimension (32) is exactly one e4m3 k32 step and
+K = 128 / 256 of the row GEMMs is 4 / 8 steps, so the FP8 shapes fit; what pays is decided by the ablations.
+
+**Removal ablations (honest upper bounds; module = the captured step, static weights + inputs, same process, interleaved, 5 x 100 replays, median;
+scratch copies of the kernels with the ablation defines, outputs garbage, time only; `~/miniworld-engine-scratch/fp8x-atomdit/scripts/abl.py`):**
+
+| ablation (what FP8 would remove) | 1024 | 4096 | 8192 | 16384 atoms (A = 5) |
+|---|---|---|---|---|
+| step time, us (same-source control) | 50.4 | 102.0 | 166.1 | 296.7 |
+| row kernels: half of the wgmma k steps (e4m3 products) | 0.913 | 0.873 | 0.887 | 0.869 |
+| row kernels: half of the weight bytes (e4m3 weights in shared memory) | 1.064 | 1.050 | 1.043 | 1.033 |
+| both | 0.964 | 0.918 | 0.909 | 0.900 |
+| attention: half of the q / k / v bytes (e4m3 storage) | 0.989 | 0.992 | 0.992 | 0.987 |
+| attention: half of the mma.sync (e4m3 QK^T / PV) | 0.996 | 0.987 | 0.993 | 0.987 |
+| attention: both | 0.993 | 0.998 | 1.003 | 0.985 |
+
+So the only placement with a real upper bound is the e4m3 product of the row kernels (9-13 % of the step); weight bytes are not the limit, and the
+window attention (softmax / latency bound with 32-wide heads) has at most 1-1.5 %: e4m3 q / k / v storage and an e4m3 attention core were not built.
+
+### What is built
+
+- `sm90_atom/f8w90.cuh`, `pre90_f8.cu`, `post90_f8.cu`, `sm90_atom/f8.py` (new files; the bf16 / TF32 sources are byte-identical to 2.5.12, so
+  no prebuilt artifact re-keys). Same pipeline and math as `pre90_fwd` / `pre90_split` / `post90_fwd`, products on
+  `wgmma.m64n{64,128}k32.f32.e4m3.e4m3` with the A operand from registers.
+- A operand: the activation tile (x1, xkv, gated o, x2, h_j) scaled per row by a power of two from the row's exact amax (`2^floor(log2(448 / amax))`,
+  exponent arithmetic), cast `cvt.rn.satfinite.e4m3x2` once into 16 registers (instead of the 64 fp32 of the tile) and reused by every product
+  that reads it. Dynamic and exact: no calibration, no static scale, no overflow guard (a cast cannot saturate), so the noise-level dependence
+  of the activations over the 200 steps does not matter (every A operand except h and the gated o is a LayerNorm output; o is a convex
+  combination of v rows).
+- B operand: the bf16 pack's weights scaled by a power of two per 64-row unit / matrix (q lo / hi, gate, k, v; Wo units; Wa_j / Wb_j halves; Wd),
+  e4m3, once per weight version (`f8.pack8`, cached like the bf16 pack). The k32 slot order is the accumulator order of the previous product
+  (slot `16 h + 4 t + 2 a + b` holds logical column `16 h + 8 a + 2 t + b`), baked into the weights' K axis, so the accumulator pairs are the A
+  fragment with no shuffle. 128-byte swizzle, K-major, as the bf16 tiles (the Wd chunk's 64-byte rows padded to 128).
+- Epilogue: `acc * (1 / row scale) * (1 / weight scale)` (powers of two: exact). The squeeze over the 4 hidden chunks (each chunk its own row
+  scale) is accumulated in fp32 registers after dequantization; a first version that rescaled the wgmma accumulator between chunks gave wrong
+  results (95 % of the update) whenever the x2 operand was kept quantized across the chunks -- not understood (ptxas register handling around
+  register-A wgmma suspected); the fp32 sum avoids writing a wgmma accumulator between products.
+- Registers: `pre90_f8` 236, `post90_f8` 253 at 1 CTA minimum (2 per SM); capped at 168 (3 per SM, ~130-270 B spill) they win where a third
+  CTA per SM makes the grid one wave less: `pre90_f8` 3 up to 800 CTAs, `post90_f8` 3 only between 2 x and 3 x the SM count (`f8._minb`, measured
+  26.1 -> 19.5 us / 42.7 -> 36.9 us at 320 CTAs; 79.2 -> 85.8 / 120.6 -> 131.5 us at 1280, so 1 there).
+
+### Module time against the 2.5.12 default (H100 80GB HBM3, 700 W cap)
+
+Protocol (`~/miniworld-engine-scratch/fp8x-atomdit/scripts/speed.py`, raw `res/speed2.jsonl`): registry cases (`master`, eval, A = 5, shared cond = `atom_single_shared_cond`),
+the module captured in CUDA graphs of one call under `static_weights()` + `static_inputs()` (the sampler step: tables hoisted) -- the default route,
+the default again (same-cubin control), FP8 pre + post, pre only, post only -- in one process; cool = 2 s idle then one interleaved burst
+(~10 ms per route), 3 reps, median; sustained = 2 s idle, 1 s of back-to-back interleaved replays, then 3 interleaved blocks (~20 ms per route), mean.
+Cells `cool / sustained`, ratio to the default.
+
+| case (class: stream: atoms: A) | 2.5.12 default us | FP8 pre + post | FP8 pre only | FP8 post only | same-cubin control |
+|---|---|---|---|---|---|
+| AtomDiTOpenFold3: shared: 1024: 5 | 50.6 / 49.0 | 0.915 / 0.916 | 0.942 / 0.940 | 0.974 / 0.973 | 0.999 / 0.999 |
+| AtomDiTOpenFold3: shared: 2048: 5 | 65.4 / 63.5 | 0.937 / 0.944 | 0.946 / 0.952 | 0.957 / 0.958 | 0.974 / 0.974 |
+| AtomDiTOpenFold3: shared: 4096: 5 | 101.8 / 99.6 | 0.912 / 0.915 | 0.986 / 0.988 | 0.935 / 0.934 | 1.000 / 1.002 |
+| AtomDiTOpenFold3: shared: 8192: 5 | 166.9 / 163.6 | 0.970 / 0.974 | 0.987 / 0.993 | 0.968 / 0.979 | 0.991 / 0.997 |
+| AtomDiTOpenFold3: shared: 12288: 5 | 234.0 / 230.1 | 0.959 / 0.961 | 0.975 / 0.977 | 0.982 / 0.985 | 1.001 / 1.003 |
+| AtomDiTOpenFold3: shared: 16384: 5 | 298.9 / 295.6 | 0.950 / 0.949 | 0.965 / 0.963 | 0.983 / 0.982 | 0.999 / 0.997 |
+| AtomDiTProtenix: shared: 4096: 5 | 82.7 / 81.0 | 0.902 / 0.905 | 0.987 / 0.989 | 0.912 / 0.915 | 0.998 / 0.999 |
+| AtomDiTProtenix: shared: 16384: 5 | 276.1 / 272.1 | 0.954 / 0.956 | 0.971 / 0.972 | 0.978 / 0.983 | 0.999 / 1.000 |
+| AtomDiTChai1: shared: 4096: 5 (slide) | 91.8 / 89.6 | 0.949 / 0.955 | 0.990 / 0.993 | 0.946 / 0.957 | 0.998 / 0.998 |
+| AtomDiTOpenFold3: per-sample cond: 4096: 1 (before the shared-cond gate) | 51.6 / 50.1 | 1.087 / 1.091 | 1.116 / 1.119 | 0.996 / 1.006 | 0.984 / 0.984 |
+| AtomDiTOpenFold3: per-sample cond: 16384: 1 (before the gate) | 100.5 / 98.2 | 1.019 / 1.022 | 1.016 / 1.022 | 0.990 / 1.001 | 0.996 / 1.000 |
+
+The per-sample rows were measured before the route was gated to a shared conditioning (they are why it is); with the gate they run the default.
+Gain: 3-10 % of the block step (pre + post), about half to two thirds of the ablation bound; the rest goes to the quantization (row amax,
+casts, dequantizing epilogues) and the register / occupancy trade. The atom DiT is 3-12 % of a FoldForge warm forward (`activations.md`, 5I28
+n = 2 / 4 / 8), so the end-to-end upper bound is about 0.3-1.2 %.
+
+### Error against fp64 (registry inputs, `~/miniworld-engine-scratch/fp8x-atomdit/scripts/err.py`, raw `res/err3.jsonl`)
+
+judge = max|y - y64| / max|y64| (the engine metric, `measure/accuracy.py`), tol = max(err_pytorch, 8e-3); rms_rel = ||y - y64|| / ||y64||.
+
+| case | tol | PyTorch master judge | bf16 cuda (default) judge / rms_rel | FP8 pre + post judge / rms_rel / max abs | FP8 pre only judge / rms_rel | FP8 post only judge / rms_rel |
+|---|---|---|---|---|---|---|
+| AtomDiTOpenFold3: shared: 1024: 5 | 8.0e-3 | 5.79e-3 | 5.79e-3 / 3.85e-3 | 5.73e-2 / 2.87e-2 / 0.364 | 1.25e-2 / 7.86e-3 | 5.24e-2 / 2.78e-2 |
+| AtomDiTOpenFold3: shared: 4096: 5 | 8.0e-3 | 7.66e-3 | 6.37e-3 / 3.84e-3 | 4.83e-2 / 2.86e-2 / 0.282 | 2.14e-2 / 7.99e-3 | 4.60e-2 / 2.77e-2 |
+| AtomDiTOpenFold3: shared: 16384: 5 | 8.0e-3 | 7.23e-3 | 7.50e-3 / 3.85e-3 | 5.51e-2 / 2.86e-2 / 0.357 | 1.65e-2 / 7.86e-3 | 5.35e-2 / 2.78e-2 |
+| AtomDiTOpenFold3: shared: 4096: 5 (slide_qblock) | 8.0e-3 | 7.66e-3 | 6.37e-3 / 3.84e-3 | 4.83e-2 / 2.86e-2 / 0.282 | 2.14e-2 / 7.99e-3 | 4.60e-2 / 2.77e-2 |
+| AtomDiTProtenix: shared: 4096: 5 | 8.0e-3 | 7.74e-3 | 6.90e-3 / 3.85e-3 | 4.78e-2 / 2.86e-2 / 0.273 | 1.65e-2 / 8.10e-3 | 5.05e-2 / 2.77e-2 |
+| AtomDiTChai1: shared: 4096: 5 (slide) | 9.6e-3 | 9.63e-3 | 9.07e-3 / 6.08e-3 | 9.77e-2 / 5.64e-2 / 1.200 | 9.71e-2 / 3.53e-2 | 6.80e-2 / 4.45e-2 |
+
+Every FP8 output finite; no saturation is possible (dynamic per-row scales). FP8 pre + post is 6-11x the tolerance (rms 2.9 %, 7x the bf16
+route); FP8 pre only is 1.6-2.7x (rms 0.8 %, 2x bf16) for the AdaLN models: its error passes through the softmax average and the gates, while
+`post90`'s products feed the residual output directly. Chai-1 (identity AdaLN: raw c in the tables) is about twice as large in both.
+
+### Tried, no gain / not built
+
+- e4m3 q / k / v storage and an e4m3 window-attention core: upper bound 0.4-1.5 % of the step (ablations above); not built.
+- e4m3 weights alone (bytes): the ablation is slower (1.03-1.06), the row kernels are not limited by the weight stream.
+- First `pre90_f8` (fragments re-made per product from the scaled fp32 tile, per-row weight scales read in the epilogue): 1.09-1.32x SLOWER than
+  the default (230-255 registers, 2 CTAs per SM, epilogue loads); quantizing the A operand once + scalar weight scales + the grid-size register
+  target made it 0.90-0.97.
+- Training: not ported (the forward gain is small; the backward kernels are the same register-A wgmma design).
+- SWA atom transformer (MiniWorld `SWAAtomTransformer`, `kernels/swa_dit`) and the `edge.cu` slid-window kernels: not covered (the former is not a
+  FoldForge inference path, the latter fp32 and latency bound).
+
+Verification: default route bit-identical to 2.5.12 (sha1 of every output and, in train, every gradient: 69 / 69 tensors over 9 cases --
+AF3 shared 1024 / 4096, AF3 per-sample 4096, Protenix, Chai-1 slide, Boltz-2, RF3 eval; AF3 A1 and Protenix A48 training -- branch tree vs the base
+tree 91a9241fb, separate processes, `~/miniworld-engine-scratch/fp8x-atomdit/scripts/bit2.sh`). Tests: `tests/gpu/test_atom_dit_fp8_rows.py` (error bounds per part, finite,
+off = default bitwise, Boltz-2 / per-sample / training fall back bitwise, switch parsing): 11 passed. CPU: `ruff check` / `ruff format` / `pyright` clean on the touched Python files; `test_capture_api.py`, `test_supports_signature.py`, `test_init.py`, `test_measure_shared_cond.py`: 621 passed, 1 failed -- `test_every_module_level_dict_is_registered_or_listed`, the same failure on the base tree (the TriAttn / TriMul FP8 module dicts; nothing of this branch). No registry row, tolerance or `backend_versions` change.
+Prebuild: the two FP8 cubins are not in the prebuild plan (first FP8 call JIT-compiles them, ~3 s).
+
 ## Known limits
 
 - Boltz-2 9c90 is bistable under any numerical noise of 0.1-2 % on the TriAttn output; V on e4m3 flips it (hi + lo too: 2 of 4 trunk seeds). In the current environment its own bf16 trunk seeds fall into 5 modes (24 seeds, 15.3 A, ipTM 0.40-0.85) and FP8 changes the mode of 9 of 24 same trunk seeds while the mode population stays equal (see the widened end-level section). Hence whitelist only, and Boltz-2 is not on it (open decision).
