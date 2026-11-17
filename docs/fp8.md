@@ -1,8 +1,40 @@
 # FP8 routes (H100, opt-in, engine 3.0.0 line)
 
-Everything here is opt-in and off by default. Base: engine 2.5.14 (branch `rel/3.0.0` = 2.5.14 + `fp8/3.0.0-all`; the routes were built on 2.5.12, branch `fp8/3.0.0-on-2512`). With no switch set, every route is bit-identical to 2.5.14 (see "Release line 3.0.0"; before: 169 / 169 against 2.5.12, "Verification on the 2.5.12 base").
+Everything here is opt-in and off by default: FP8 is the backend `engine-fp8`; the default remains the bf16 / fp16 engine. Base: engine 2.5.14 (branch `rel/3.0.0` = 2.5.14 + `fp8/3.0.0-all`; the routes were built on 2.5.12, branch `fp8/3.0.0-on-2512`). With no switch set, every route is bit-identical to 2.5.14 (see "Release line 3.0.0"; before: 169 / 169 against 2.5.12, "Verification on the 2.5.12 base").
 
-## The one switch (`miniworld_engine.fp8`, 3.0.0)
+## The `engine-fp8` backend (user-facing name, 3.0.0)
+
+FP8 is the opt-in backend **`engine-fp8`**; the default remains the bf16 / fp16 engine (`cuda`), bit-identical to 2.5.14.
+
+```
+TriangleMultiplication(128, backend="engine-fp8")    # or module.set_backend("engine-fp8"); a composite passes it to its parts
+miniworld_engine.fp8.set_model("af3")                 # the TriAttn FP8 routes validated for that model (or MINIWORLD_FP8_MODEL=af3)
+with torch.inference_mode():
+    out = model(x)
+    if miniworld_engine.fp8.check():                  # guard contract as below
+        out = model(x)
+```
+
+- `engine-fp8` = the engine `cuda` backend with the `safe` preset's routes on for the calls of the modules that select it (plus the TriAttn part of
+  the model `fp8.set_model()` / `MINIWORLD_FP8_MODEL` names, per `fp8.TRIATTN_MODELS`). Every other module, and every module by default, runs the
+  bf16 / fp16 engine. `BackendModule.forward` opens `fp8.BackendScope` around an `engine-fp8` call (switches on, restored after the call); a module on
+  another backend called inside it runs with the process's own switches. The default route never enters the scope.
+- Names: the public name is `engine-fp8`; where `-` cannot stand (Python identifiers, config keys) it is `engine_fp8` (`fp8.BACKEND_ID`), which
+  `set_backend` also takes. It is **not** an entry of any class's `backends` tuple and has no `_forward_engine_fp8` / `_supports_engine_fp8`:
+  `set_backend("engine-fp8")` resolves to `cuda` (`fp8.resolve_backend`) on every class with a `cuda` backend and leaves `module.backend == "cuda"`,
+  `module.engine_fp8 is True`, `module.backend_name == "engine-fp8"` (also in `repr`). `Class.has_backend("engine-fp8")` says whether a class takes it.
+  Its range is `cuda`'s (`_supports_cuda`); calls the FP8 routes do not take (fp32 modules, cards other than H100) run the default kernels.
+- **Inference only.** `engine-fp8` accelerates inference; training under `engine-fp8` runs the default bf16 path: every FP8 route is a forward path with
+  no FP8 backward, so a call in train mode (`module.training`, dropout live) or with autograd on (`torch.is_grad_enabled()`) runs exactly the `cuda`
+  backend (same bytes: output, input and parameter gradients; `tests/gpu/test_engine_fp8_backend.py`). Run inference in `eval()` under
+  `torch.no_grad()` / `torch.inference_mode()`.
+- Outside the judge: no class lists it, no registry row / tolerance / `backend_versions` entry, the measurers and the judge cycles never select it
+  (`tests/cpu/test_fp8_switch.py::test_engine_fp8_is_not_a_judged_backend`).
+- A runtime that picks backends by name (FoldForge's `Config.backend` / `engine.ops`) selects it by passing `"engine-fp8"` to `set_backend` of the
+  engine modules it would put on `cuda`, calling `fp8.set_model(<model>)` once, and `fp8.check()` after every forward. Until a runtime knows the name,
+  the lower-level switch below does the same process wide.
+
+## The lower-level switch (`miniworld_engine.fp8`, process wide)
 
 ```
 MINIWORLD_FP8=safe                                   # environment, before the engine's kernels are imported: every route but TriAttn

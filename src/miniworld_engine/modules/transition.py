@@ -558,7 +558,7 @@ class ConditionedTransition(BackendModule):
         super().set_backend(backend)
         ada = getattr(self, "ada_ln_in", None)  # absent while nn.Module.__init__ runs the first set_backend
         if isinstance(ada, BackendModule):
-            ada.set_backend(backend if backend in ada.backends else "pytorch")
+            ada.set_backend(backend if ada.has_backend(backend) else "pytorch")
         return self
 
     def _supports_triton(self, x: torch.Tensor, cond: torch.Tensor) -> str | None:

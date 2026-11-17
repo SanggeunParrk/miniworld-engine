@@ -1,7 +1,8 @@
 # miniworld-engine 3.0.0 (DRAFT, not released)
 
 Base: 2.5.14 (9dd18e507). Release branch `rel/3.0.0` = 2.5.14 + `fp8/3.0.0-all` (the FP8 routes, built on 2.5.12) + the release work below.
-**3.0.0 adds opt-in FP8 (e4m3) inference routes on H100 (sm_90a).** Nothing changes unless a switch is set: with every switch off the outputs
+**3.0.0 adds opt-in FP8 (e4m3) inference routes on H100 (sm_90a), selected as the backend `engine-fp8`; the default remains the bf16/fp16
+engine.** Nothing changes unless `engine-fp8` or a switch is set: with every switch off the outputs
 are the 2.5.14 bytes (registry modules eval + train, AF3 end to end), no module `version` / `backend_versions` changed, judge owed 0 on all
 three cards. A100 / RTX 5090 / B200 builds and plans are unchanged.
 
@@ -11,7 +12,18 @@ Inference only, bf16 (`master`) modules, H100. Operands of the large GEMMs / att
 and multiplied on the e4m3 tensor cores (fp32 / fp16 accumulation); inputs, outputs, LayerNorms, softmax statistics and residuals stay bf16 /
 fp32. Training, fp32 modules and other GPUs take the default route. Full spec, per-route design and every measurement: `docs/fp8.md`.
 
-## One switch
+## The backend `engine-fp8`
+
+**FP8 is the opt-in backend `engine-fp8`; the default remains the bf16/fp16 engine.** `module.set_backend("engine-fp8")` (or
+`backend="engine-fp8"`; identifier `engine_fp8` where `-` cannot stand) on any class with a `cuda` backend runs that module's `cuda` forward with
+the `safe` routes on (a composite passes it to its parts); `fp8.set_model("af3")` (or `MINIWORLD_FP8_MODEL`) adds that model's validated TriAttn
+FP8 routes. It is not in any class's `backends` tuple: `module.backend` stays `"cuda"`, `module.engine_fp8` is True, `module.backend_name` is
+`"engine-fp8"`; the judge, the registry and the measurers never see it. **engine-fp8 accelerates inference; training under engine-fp8 runs the
+default bf16 path** (train mode or autograd on: exactly the `cuda` bytes, gradients included). The environment / `fp8.enable` switch below stays as
+the lower-level, process-wide API. FoldForge does not know the name yet: until it does, run it with `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=<model>`
+(same routes process wide) or let it call `set_backend("engine-fp8")` on the engine modules it puts on `cuda` (+ `fp8.set_model`, `fp8.check()`).
+
+## The lower-level switch (process wide)
 
 ```
 MINIWORLD_FP8=safe                                 # environment, before the engine's kernels are imported (TriAttn stays bf16 / fp16)

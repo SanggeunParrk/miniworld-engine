@@ -878,7 +878,7 @@ class BiasOnlyAttention(BackendModule):
         super().set_backend(backend)
         ada = getattr(self, "ada_ln_in", None)  # absent while nn.Module.__init__ runs the first set_backend
         if isinstance(ada, BackendModule):
-            ada.set_backend(backend if backend in ada.backends else "pytorch")
+            ada.set_backend(backend if ada.has_backend(backend) else "pytorch")
         return self
 
     def _triton_core_t(self, single: torch.Tensor, src: torch.Tensor | None) -> bool:

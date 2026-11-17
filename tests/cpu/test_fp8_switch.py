@@ -1,4 +1,5 @@
-"""The one FP8 switch (``miniworld_engine.fp8``): ``MINIWORLD_FP8=<preset>`` / ``fp8.enable(preset)`` map to the per-route switches;
+"""The FP8 backend ``engine-fp8`` (name resolution, its scope per module call, outside the judge) and the lower-level switch
+(``miniworld_engine.fp8``): ``MINIWORLD_FP8=<preset>`` / ``fp8.enable(preset)`` map to the per-route switches;
 an explicitly set per-route variable wins; unset = every route off (the default route). TriAttn FP8 only for a model in
 ``fp8.TRIATTN_MODELS`` (``MINIWORLD_FP8_MODEL`` / ``enable(model=)``); FP8 is outside the judge (no registry dtype, no judge / measure path)."""
 
@@ -140,3 +141,150 @@ def test_fp8_is_outside_the_judge():
             if f.suffix in (".py", ".csv", ".json", ".yaml", ".yml", ".toml"):
                 text = f.read_text(errors="replace").lower()
                 assert "fp8" not in text and "e4m3" not in text and "float8" not in text, f
+
+
+# ------------------------------------------------------------------------------------------------------------- the engine-fp8 backend
+def _backend_classes() -> list[type]:
+    import miniworld_engine.modules as mods
+    from miniworld_engine.modules.primitives import BackendModule
+
+    for info in __import__("pkgutil").walk_packages(mods.__path__, "miniworld_engine.modules."):
+        __import__("importlib").import_module(info.name)
+    out, todo = [], [BackendModule]
+    while todo:
+        cls = todo.pop()
+        out.append(cls)
+        todo.extend(cls.__subclasses__())
+    return out
+
+
+def test_engine_fp8_name_resolution():
+    from miniworld_engine.modules.primitives import BackendModule
+    from miniworld_engine.modules.triangle import TriangleMultiplication
+
+    assert (fp8.BACKEND, fp8.BACKEND_ID, fp8.BASE_BACKEND) == ("engine-fp8", "engine_fp8", "cuda")
+    assert fp8.resolve_backend("engine-fp8") == ("cuda", True) == fp8.resolve_backend("engine_fp8")
+    for name in ("pytorch", "cuda", "triton", "anthropic", "cueq"):
+        assert fp8.resolve_backend(name) == (name, False)
+    m = TriangleMultiplication(32, backend="engine-fp8")
+    assert (m.backend, m.engine_fp8, m.backend_name) == ("cuda", True, "engine-fp8") and "backend=engine-fp8" in repr(m)
+    m.set_backend("cuda")
+    assert (m.backend, m.engine_fp8, m.backend_name) == ("cuda", False, "cuda")
+    m.set_backend("engine_fp8")
+    assert m.engine_fp8 and m.backend == "cuda"
+    m.set_backend("pytorch")
+    assert not m.engine_fp8 and TriangleMultiplication(32).engine_fp8 is False  # the default: no FP8
+    assert TriangleMultiplication.has_backend("engine-fp8") and TriangleMultiplication.has_backend("cuda")
+    no_cuda = [c for c in _backend_classes() if "cuda" not in c.backends]
+    assert BackendModule in no_cuda and not BackendModule.has_backend("engine-fp8")
+    with pytest.raises(ValueError, match="engine-fp8"):
+        BackendModule().set_backend("engine-fp8")
+
+
+def test_engine_fp8_reaches_a_composite_s_parts():
+    from miniworld_engine.modules.pairformer import PairformerBlock, PairformerConfig
+
+    block = PairformerBlock(
+        PairformerConfig(d_pair=32, d_hidden_tri_multi=32, d_hidden_tri_attention=8, n_head_tri_attention=4), backend="engine-fp8"
+    )
+    parts = block._backend_children()
+    assert parts and all(child.engine_fp8 and child.backend == "cuda" for _, child in parts if "cuda" in child.backends)
+    block.set_backend("cuda")
+    assert not any(child.engine_fp8 for _, child in parts)
+
+
+def test_engine_fp8_is_not_a_judged_backend():
+    """``engine-fp8`` is in no class's ``backends`` (the measurers and the judge enumerate those), and nothing the judge reads names it."""
+    for cls in _backend_classes():
+        assert fp8.BACKEND not in cls.backends and fp8.BACKEND_ID not in cls.backends, cls
+        assert not any(k.split(":")[0] in (fp8.BACKEND, fp8.BACKEND_ID) for k in cls.backend_versions), cls
+    for sub in ("judge", "measure", "requirements"):
+        for f in (_PKG / sub).rglob("*"):
+            if f.suffix in (".py", ".csv", ".json", ".jsonl", ".yaml", ".yml", ".toml"):
+                text = f.read_text(errors="replace")
+                assert "engine-fp8" not in text and "engine_fp8" not in text, f
+
+
+_SCOPE = """
+import json, torch
+from miniworld_engine import fp8
+from miniworld_engine.modules.primitives import BackendModule, BackendUnsupported
+from miniworld_engine.modules.triangle import TriangleMultiplication
+
+seen = []
+def routes():
+    return {k: v for k, v in fp8.status().items() if k != "guard"}
+
+class Leaf(BackendModule):
+    backends = ("pytorch", "cuda")
+    def __init__(self, backend="pytorch"):
+        super().__init__(); self.set_backend(backend)
+    def _forward_pytorch(self, x):
+        seen.append(("pytorch", routes())); return x
+    def _forward_cuda(self, x):
+        seen.append(("cuda", routes())); return x
+
+class Outer(BackendModule):
+    backends = ("pytorch", "cuda")
+    def __init__(self, backend="pytorch"):
+        super().__init__(); self.a = Leaf(); self.b = Leaf(); self.c = Leaf(); self.set_backend(backend)
+    def set_backend(self, backend="pytorch"):
+        super().set_backend(backend)
+        for leaf in (getattr(self, "a", None), getattr(self, "b", None)):
+            if leaf is not None:
+                leaf.set_backend(backend)
+        return self
+    def _forward_pytorch(self, x):
+        return x
+    def _forward_cuda(self, x):
+        seen.append(("outer", routes())); x = self.a(x); self.b.set_backend("cuda"); x = self.b(x); x = self.c(x)
+        self.b.set_backend("engine-fp8"); return self.b(x)
+
+x = torch.zeros(1)
+out = {"before": routes()}
+fp8.set_model(MODEL)
+# training: train mode, or autograd on -> the default path (no scope), exactly as cuda
+Outer(backend="engine-fp8")(x)
+with torch.no_grad():
+    Outer(backend="engine-fp8").train()(x)
+Outer(backend="engine-fp8").eval()(x)
+out["train"] = seen[:]
+seen.clear()
+torch.set_grad_enabled(False)
+Leaf(backend="cuda").eval()(x); Leaf().eval()(x)
+Outer(backend="engine-fp8").eval()(x)
+out["seen"] = seen
+out["after"] = routes()
+out["scopes"] = list(fp8.SCOPES)
+try:
+    TriangleMultiplication(32, backend="engine-fp8")(torch.zeros(1, 8, 8, 32), torch.ones(1, 8, dtype=torch.bool))
+except BackendUnsupported:
+    out["refused"] = True
+out["after_refusal"] = routes()
+out["scopes2"] = list(fp8.SCOPES)
+print(json.dumps(out))
+"""
+
+
+@pytest.mark.parametrize(
+    ("env", "model"), [({}, "af3"), ({}, None), ({"MINIWORLD_FP8_MODEL": "protenix1"}, None), ({"MINIWORLD_FP8": "safe"}, "boltz2")]
+)
+def test_engine_fp8_scope(env, model):
+    """An engine-fp8 module's call runs with the ``safe`` routes (+ the TriAttn part of its model); a module on another backend called inside
+    it runs with the process's own switches; everything is restored after the call (also after a refusal); the default path never opens it."""
+    code = _SCOPE.replace("MODEL", repr(model))
+    proc = subprocess.run([sys.executable, "-c", code], env={**_clean_env(), **env}, capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    base = SAFE if env.get("MINIWORLD_FP8") else OFF  # the process preset without MINIWORLD_FP8_MODEL: no TriAttn part
+    on = {**SAFE, "triattn": TRIATTN_OF.get(model or env.get("MINIWORLD_FP8_MODEL"), NO_TRIATTN)}
+    assert out["before"] == base and out["after"] == base and out["after_refusal"] == base
+    assert out["scopes"] == [] and out["scopes2"] == [] and out.get("refused")
+    kinds = [k for k, _ in out["seen"]]
+    assert kinds == ["cuda", "pytorch", "outer", "cuda", "cuda", "pytorch", "cuda"]
+    routes = [r for _, r in out["seen"]]
+    # default Leaf / Leaf: the process's switches; outer + a (engine-fp8): on; b on plain cuda: the process's; c (pytorch): untouched = on;
+    # b again engine-fp8: on
+    assert routes == [base, base, on, on, base, on, on]
+    # training calls (train mode, or grad on): every part with the process's switches, as on cuda
+    assert [r for _, r in out["train"]] == [base] * 15 and len(out["train"]) == 15

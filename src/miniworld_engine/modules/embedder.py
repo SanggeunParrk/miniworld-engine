@@ -177,14 +177,14 @@ class InputFeatureEmbedder(BackendModule):
 
     def set_backend(self, backend: str = "pytorch"):
         super().set_backend(backend)
-        if backend in self._ENGINE_BACKENDS:
+        if self.backend in self._ENGINE_BACKENDS:  # engine-fp8 resolved to cuda by super().set_backend
             # a child without this backend stays as it is; _supports_<backend> refuses the call when the atom transformer is one of them
-            if backend in self.atom_transformer.backends:
+            if self.atom_transformer.has_backend(backend):
                 self.atom_transformer.set_backend(backend)
             else:
                 self.atom_transformer.set_backend("pytorch")
             for child in self._engine_children():
-                child.set_backend(backend if backend in child.backends else "pytorch")
+                child.set_backend(backend if child.has_backend(backend) else "pytorch")
         else:
             self.atom_transformer.set_backend(backend)
             for child in self._engine_children():

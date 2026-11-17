@@ -267,7 +267,7 @@ class PairformerBlock(BackendModule, MasterWeights):
     def set_backend(self, backend: str = "pytorch"):
         super().set_backend(backend)
         for _, child in self._backend_children():
-            child.set_backend(backend if backend in child.backends else "pytorch")
+            child.set_backend(backend if child.has_backend(backend) else "pytorch")
         return self
 
     def unsupported(self, pair, mask=None, single=None, extra_pair_bias=None) -> str | None:

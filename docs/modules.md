@@ -41,6 +41,7 @@ class Transition(BackendModule, MasterWeights):
 | `triton` | the engine's Triton kernels (no TMA, any CUDA card), launch configs from `kernels/<family>/configs/<card>.json` | yes |
 | `anthropic` | Anthropic's uplifting-biomolecular-modeling release in `third_party/anthropic/upstream`, loaded by `modules/_anthropic.py` (revision and file checksums checked against `third_party/anthropic/UPSTREAM.json`; the release itself is not in git; `MINIWORLD_ANTHROPIC_ROOT` overrides the root) | no: informational |
 | `cueq` | NVIDIA cuEquivariance 0.12 (`cuequivariance_torch`), loaded by `modules/_cueq.py`; `_supports_cueq` refuses exactly the calls the library would run in its own PyTorch formula | no: informational |
+| `engine-fp8` (opt-in, 3.0.0) | the `cuda` backend with the FP8 (e4m3) `safe` routes on for this module's inference calls (H100); public name `engine-fp8`, identifier `engine_fp8`; not in any `backends` tuple: `set_backend("engine-fp8")` resolves to `cuda` and sets `engine_fp8 = True` ([fp8.md](fp8.md)). Training calls (train mode / autograd on) run the default bf16 path | no: outside the judge (no rows, never measured) |
 
 External backends are connected as they are: they state in `_supports_<name>` what they run and are not changed to pass anything.
 

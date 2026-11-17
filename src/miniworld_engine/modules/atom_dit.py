@@ -1279,7 +1279,7 @@ class AtomDiTMiniWorld(BackendModule):
 
     def set_backend(self, backend: str = "pytorch"):
         super().set_backend(backend)
-        self.attn.set_backend(backend if backend in self.attn.backends else "pytorch")
+        self.attn.set_backend(backend if self.attn.has_backend(backend) else "pytorch")
         return self
 
     # "anthropic": eval -> ESMFold2's fused SWAAtomBlock (esmfold2/opt/forward/fast_inference/driver/ef2_atom.py ``_fused_block``, the kit's
