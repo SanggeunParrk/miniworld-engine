@@ -1517,7 +1517,15 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
     int NI, int NJ, long M, int AFTER,       // AFTER: dbo sums dz / n (the bias was divided too)
     // dO[(i,c),(j,e)] as a 4-D box: (64 columns = two whole j) x (j/2) x c x i.  The kernel never
     // computes an address into it; it hands TMA the four coordinates of the tile.
-    const __grid_constant__ CUtensorMap DO_MAP) {
+    const __grid_constant__ CUtensorMap DO_MAP
+#if defined(MINIWORLD_OPM_FP8)
+    // FP8 training build (`opm_fp8_train.py`): with DO8 set the kernel writes dO as e4m3 / e5m2 bytes (x dgq[0], saturating; max |scaled|
+    // atomically into dgamax[0]) instead of the bf16 TMA box, and blockIdx.z == 1 writes dO^T[(j,e),(i,c)] into DOT8 from the same
+    // formula with i <-> j: dz read transposed, WOT + NCH * KZ = Wo^T with (c, e) swapped (the count table is symmetric); that plane
+    // writes neither dz/n nor the dbo partials.  f8fmt 0 = e4m3, 1 = e5m2.
+    , unsigned char* __restrict__ DO8, unsigned char* __restrict__ DOT8, const float* __restrict__ dgq, float* __restrict__ dgamax, int f8fmt
+#endif
+    ) {
   extern __shared__ char smem[];
   // wgmma's swizzle is a function of the absolute shared address, so the operand tiles start on a
   // 1 KiB boundary; the launch allocates one extra KiB for the alignment.
@@ -1537,6 +1545,10 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
 
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int i0 = blockIdx.y * DG_BI, j0 = blockIdx.x * DG_BJ;
+#if defined(MINIWORLD_OPM_FP8)
+  const bool f8tr = DO8 != nullptr && blockIdx.z == 1;
+  if (f8tr) WOT += (size_t)NCH * KZ;
+#endif
   // dbias_o = sum over every (i, j) of dz.  Folding it in here costs eight registers; torch's own
   // reduce over the two outer dims of a [N, N, c_z] bf16 tensor took 146 us to read 38 MB.
   // A thread's z slot never changes: the staging walks RPP rows per pass with SLOTS threads a row (for
@@ -1561,7 +1573,11 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
         if (p < DG_NP) {
           const int il = p / DG_BJ, jl = p - il * DG_BJ;
           invs[u] = 1.0f / NORM[(i0 + il) * NJ + (j0 + jl)];
+#if defined(MINIWORLD_OPM_FP8)
+          raw[u] = *reinterpret_cast<const uint4*>(DZ + (size_t)(f8tr ? (j0 + jl) * NI + (i0 + il) : (i0 + il) * NJ + (j0 + jl)) * CZ + z8);
+#else
           raw[u] = *reinterpret_cast<const uint4*>(DZ + (size_t)((i0 + il) * NJ + (j0 + jl)) * CZ + z8);
+#endif
         }
       }
 #pragma unroll
@@ -1583,6 +1599,9 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
           *reinterpret_cast<uint4*>(sA + wg::off(z8 >> 6, p, (z8 >> 3) & 7)) = val;
           // dWo wants the same dz/n.  Recomputing it in torch cost an fp32 round trip of the whole
           // tensor -- 150 MB -- to redo a division this loop has already done.
+#if defined(MINIWORLD_OPM_FP8)
+          if (!f8tr)
+#endif
           *reinterpret_cast<uint4*>(DZP + (size_t)((i0 + il) * NJ + (j0 + jl)) * CZ + z8) = val;
         }
       }
@@ -1606,6 +1625,9 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
       float s = 0.f;
 #pragma unroll
       for (int g = 0; g < GRP; ++g) s += sbo[g * CZ + z];
+#if defined(MINIWORLD_OPM_FP8)
+      if (!f8tr)
+#endif
       DBO[(size_t)(blockIdx.y * gridDim.x + blockIdx.x) * CZ + z] = s;
     }
   }
@@ -1645,6 +1667,39 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
     }
     wg::commit();
     wg::wait();
+#if defined(MINIWORLD_OPM_FP8)
+    if (DO8 != nullptr) {
+      // FP8: stage the chunk as 16 rows (i, c) of DG_BJ * 32 bytes (j, e) -- in the grouped layout these are contiguous runs -- then
+      // 16-byte stores.  The barrier first: the previous chunk's copy-out has read the staging tile.
+      __syncthreads();
+      unsigned char* s8 = reinterpret_cast<unsigned char*>(sO);
+      const float q = dgq[0];
+      float am = 0.f;
+#pragma unroll
+      for (int nt = 0; nt < CHUNK / 8; ++nt) {
+        const int n = nt * 8 + (lane & 3) * 2, p = wgi * 64 + wl * 16 + (lane >> 2);
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+          const int pp = p + h * 8, il = pp / DG_BJ, jl = pp % DG_BJ;
+          const float2 v = make_float2(acc[nt * 4 + 2 * h] * q, acc[nt * 4 + 2 * h + 1] * q);
+          am = fmaxf(am, fmaxf(fabsf(v.x), fabsf(v.y)));
+          *reinterpret_cast<__nv_fp8x2_storage_t*>(s8 + (il * 2 + (n >> 5)) * (DG_BJ * CH) + jl * CH + (n & 31)) =
+              __nv_cvt_float2_to_fp8x2(v, __NV_SATFINITE, f8fmt ? __NV_E5M2 : __NV_E4M3);
+        }
+      }
+      for (int o = 16; o > 0; o >>= 1) am = fmaxf(am, __shfl_xor_sync(0xffffffff, am, o));
+      if (lane == 0) atomicMax(reinterpret_cast<int*>(dgamax), __float_as_int(am));   // (non-negative floats order as ints)
+      __syncthreads();
+      unsigned char* dst = f8tr ? DOT8 : DO8;
+      constexpr int VPR = DG_BJ * CH / 16;   // 16-byte vectors per staged row
+      for (int v = tid; v < DG_BI * 2 * VPR; v += DG_THREADS) {
+        const int row = v / VPR, c16 = v % VPR, il = row >> 1;
+        const size_t g = (size_t)((i0 + il) * CH + ck * (CHUNK / CH) + (row & 1)) * M + (size_t)j0 * CH + c16 * 16;
+        *reinterpret_cast<uint4*>(dst + g) = *reinterpret_cast<const uint4*>(s8 + row * (DG_BJ * CH) + c16 * 16);
+      }
+      continue;
+    }
+#endif
     // The wait belongs HERE, not at the top of the loop: the previous tile's TMA store has to be done
     // READING sO before this one refills it, and leaving it until after the wgmma is what lets the
     // store overlap the math.  Hoisting it up to share the staging barrier saves a __syncthreads per
@@ -2377,11 +2432,81 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor norm, torch
       reinterpret_cast<const __nv_bfloat16*>(dz.data_ptr<at::BFloat16>()), norm.data_ptr<float>(),
       reinterpret_cast<const __nv_bfloat16*>(bw.data_ptr<at::BFloat16>()),
       reinterpret_cast<__nv_bfloat16*>(dzp.data_ptr<at::BFloat16>()), dbo_part.data_ptr<float>(),
-      (int)ni, (int)nj, M, (int)after, dO_map);
+      (int)ni, (int)nj, M, (int)after, dO_map
+#if defined(MINIWORLD_OPM_FP8)
+      , nullptr, nullptr, nullptr, nullptr, 0
+#endif
+      );
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dO, dzp, reduce_partials(dbo_part)};
 }
 
+#if defined(MINIWORLD_OPM_FP8)
+// FP8 training (`opm_fp8_train.py`): dO[(i,c),(j,e)] and dO^T[(j,e),(i,c)] as e4m3 / e5m2 bytes (x dgq[0]) in one launch (gridDim.z = 2),
+// the K-major operands of the two backward products dA = BT^T . dO^T and dB = A2^T . dO on cuBLASLt's TN FP8 form; dz/n and dbo as opm_dgrad.
+// bw2: [2 NCH, CZ] bf16 = Wo^T rows (c, e), then rows (e, c).
+std::vector<torch::Tensor> opm_dgrad_f8(torch::Tensor dz, torch::Tensor norm, torch::Tensor bw2, int64_t ni, int64_t nj, int64_t after,
+                                        torch::Tensor dgq, torch::Tensor dgamax, int64_t fmt) {
+  TORCH_CHECK(dz.is_cuda() && dz.scalar_type() == torch::kBFloat16 && dz.is_contiguous(), "dz: contiguous cuda bf16");
+  TORCH_CHECK(norm.scalar_type() == torch::kFloat32 && norm.is_contiguous(), "norm: contiguous fp32");
+  TORCH_CHECK(bw2.numel() == 2 * CZ * NCH && bw2.scalar_type() == torch::kBFloat16 && bw2.is_contiguous(), "bw2: [2 NCH, CZ] bf16");
+  TORCH_CHECK(ni == nj && ni % DG_BI == 0 && nj % DG_BJ == 0, "square, the kernel tiles ", DG_BI, "x", DG_BJ, " tokens");
+  TORCH_CHECK(dgq.scalar_type() == torch::kFloat32 && dgamax.scalar_type() == torch::kFloat32 && dgq.is_cuda() && dgamax.is_cuda(),
+              "dgq / dgamax: fp32 device scalars");
+  const auto dt = fmt ? at::kFloat8_e5m2 : at::kFloat8_e4m3fn;
+  auto dO = torch::empty({ni * CH, nj * CH}, dz.options().dtype(dt)), dOT = torch::empty({nj * CH, ni * CH}, dz.options().dtype(dt));
+  auto dzp = torch::empty({ni, nj, (long)CZ}, dz.options());
+  auto dbo_part = torch::empty({(ni / DG_BI) * (nj / DG_BJ), (long)CZ}, dz.options().dtype(torch::kFloat32));
+  const int smem = 1024 + ((KZ / 64) * DG_NP * 64 + ((KZ >= 384 && KZ < 512) ? 2 : 1) * (KZ / 64) * CHUNK * 64 + DG_NP * CHUNK) * 2;
+  C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dgrad_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 227 * 1024));
+  alignas(64) CUtensorMap unused{};
+  dim3 grid(nj / DG_BJ, ni / DG_BI, 2);
+  opm_dgrad_kernel<<<grid, DG_THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<const __nv_bfloat16*>(dz.data_ptr<at::BFloat16>()), norm.data_ptr<float>(),
+      reinterpret_cast<const __nv_bfloat16*>(bw2.data_ptr<at::BFloat16>()),
+      reinterpret_cast<__nv_bfloat16*>(dzp.data_ptr<at::BFloat16>()), dbo_part.data_ptr<float>(),
+      (int)ni, (int)nj, (long)(nj * CH), (int)after, unused,
+      reinterpret_cast<unsigned char*>(dO.data_ptr()), reinterpret_cast<unsigned char*>(dOT.data_ptr()), dgq.data_ptr<float>(),
+      dgamax.data_ptr<float>(), (int)fmt);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dO, dOT, dzp, reduce_partials(dbo_part)};
+}
+
+namespace {
+// [R, C] bytes -> [C, R] bytes, 64 x 64 tiles through shared memory (R, C % 64)
+__global__ __launch_bounds__(256) void opm_t8_kernel(const unsigned char* __restrict__ x, unsigned char* __restrict__ y, int R, int C) {
+  __shared__ unsigned char t[64][64 + 4];
+  const int r0 = blockIdx.y * 64, c0 = blockIdx.x * 64, tid = threadIdx.x;
+  {
+    const int r = tid >> 2, c = (tid & 3) * 16;
+    const uint4 v = *reinterpret_cast<const uint4*>(x + (size_t)(r0 + r) * C + c0 + c);
+    const unsigned char* b = reinterpret_cast<const unsigned char*>(&v);
+#pragma unroll
+    for (int k = 0; k < 16; ++k) t[r][c + k] = b[k];
+  }
+  __syncthreads();
+  {
+    const int c = tid >> 2, r = (tid & 3) * 16;
+    uint4 v;
+    unsigned char* b = reinterpret_cast<unsigned char*>(&v);
+#pragma unroll
+    for (int k = 0; k < 16; ++k) b[k] = t[r + k][c];
+    *reinterpret_cast<uint4*>(y + (size_t)(c0 + c) * R + r0 + r) = v;
+  }
+}
+}  // namespace
+
+torch::Tensor opm_t8(torch::Tensor x) {
+  TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous() && x.element_size() == 1 && x.size(0) % 64 == 0 && x.size(1) % 64 == 0,
+              "opm_t8: contiguous 1-byte [R, C], R and C multiples of 64");
+  auto y = torch::empty({x.size(1), x.size(0)}, x.options());
+  dim3 grid(x.size(1) / 64, x.size(0) / 64);
+  opm_t8_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const unsigned char*>(x.data_ptr()),
+                                                                     reinterpret_cast<unsigned char*>(y.data_ptr()), (int)x.size(0), (int)x.size(1));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return y;
+}
+#endif
 torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf, torch::Tensor bias,
                            int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after, c10::optional<torch::Tensor> out_,
                            double dmin = 1.0, double doff = 0.0, int64_t i0 = 0) {   // i0: the first i of a row chunk (mask bit rows)
@@ -2996,6 +3121,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         , py::arg("f8q") = py::none(), py::arg("f8amax") = py::none()
 #endif
         );
+#if defined(MINIWORLD_OPM_FP8)
+  m.def("opm_dgrad_f8", &opm_dgrad_f8, "FP8 training: dO and dO^T as e4m3 / e5m2 bytes (+ dz/n, dbo)", py::arg("dz"), py::arg("norm"),
+        py::arg("bw2"), py::arg("ni"), py::arg("nj"), py::arg("after"), py::arg("dgq"), py::arg("dgamax"), py::arg("fmt"));
+  m.def("opm_t8", &opm_t8, "[R, C] -> [C, R] for 1-byte tensors");
+#endif
   m.def("opm_native_pack",&opm_native_pack,py::arg("p"),py::arg("infer")=false,py::arg("pbl")=py::none(),py::arg("pbr")=py::none());
   m.def("opm_native_prologue",&opm_native_prologue,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true,py::arg("dmin")=1.0,py::arg("doff")=0.0);
   m.def("opm_native_prologue_tma",&opm_native_prologue_tma,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true,py::arg("dmin")=1.0,py::arg("doff")=0.0);

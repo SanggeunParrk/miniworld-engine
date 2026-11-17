@@ -120,14 +120,16 @@ _LT_F8_CPP = r"""#include <torch/extension.h>
 // sa / sb: device fp32 scalars (the dequantisation scales; read at run time, so a captured graph follows an in-place rescale).
 struct LtPlan { cublasLtMatmulDesc_t op; cublasLtMatrixLayout_t a, b, c; cublasLtMatmulHeuristicResult_t res[16]; int found, k; };
 void opm_lt_f8(torch::Tensor a2, torch::Tensor bt, torch::Tensor out, torch::Tensor sa, torch::Tensor sb, int64_t index, bool fast) {
-  TORCH_CHECK(a2.scalar_type() == at::kFloat8_e4m3fn && bt.scalar_type() == at::kFloat8_e4m3fn && out.scalar_type() == torch::kBFloat16
+  auto f8t = [](const torch::Tensor& t) { return t.scalar_type() == at::kFloat8_e5m2 ? CUDA_R_8F_E5M2 : CUDA_R_8F_E4M3; };
+  auto isf8 = [](const torch::Tensor& t) { return t.scalar_type() == at::kFloat8_e4m3fn || t.scalar_type() == at::kFloat8_e5m2; };
+  TORCH_CHECK(isf8(a2) && isf8(bt) && !(f8t(a2) == CUDA_R_8F_E5M2 && f8t(bt) == CUDA_R_8F_E5M2) && out.scalar_type() == torch::kBFloat16
               && a2.stride(1) == 1 && bt.stride(1) == 1 && out.stride(1) == 1 && a2.size(1) == bt.size(1) && a2.size(1) % 16 == 0
               && out.size(0) == a2.size(0) && out.size(1) == bt.size(0) && sa.scalar_type() == torch::kFloat32
-              && sb.scalar_type() == torch::kFloat32, "opm_lt_f8: e4m3 A2 [M, K], BT [N, K] (K % 16), bf16 out [M, N], fp32 scales");
+              && sb.scalar_type() == torch::kFloat32, "opm_lt_f8: e4m3 / e5m2 (not both e5m2) A2 [M, K], BT [N, K] (K % 16), bf16 out [M, N], fp32 scales");
   auto ck = [](cublasStatus_t s, const char* w) { TORCH_CHECK(s == CUBLAS_STATUS_SUCCESS, "opm_lt_f8 ", w, ": status ", int(s)); };
   const int64_t M = a2.size(0), K = a2.size(1), N = bt.size(0);
-  static std::map<std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int, int>, LtPlan> plans;
-  const auto key = std::make_tuple(M, N, K, a2.stride(0), bt.stride(0), out.stride(0), index, int(fast), a2.get_device());
+  static std::map<std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int, int, int>, LtPlan> plans;
+  const auto key = std::make_tuple(M, N, K, a2.stride(0), bt.stride(0), out.stride(0), index, int(fast), a2.get_device(), int(f8t(a2)) * 64 + int(f8t(bt)));
   auto it = plans.find(key);
   if (it == plans.end()) {
     LtPlan p{};
@@ -140,8 +142,8 @@ void opm_lt_f8(torch::Tensor a2, torch::Tensor bt, torch::Tensor out, torch::Ten
     const void* pa0 = sb.data_ptr(); const void* pb0 = sa.data_ptr();   // (the scale pointers are part of the description the heuristic sees)
     ck(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &pa0, sizeof(pa0)), "a scale");
     ck(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &pb0, sizeof(pb0)), "b scale");
-    ck(cublasLtMatrixLayoutCreate(&p.a, CUDA_R_8F_E4M3, K, N, bt.stride(0)), "layout BT");    // col-major K x N, op T
-    ck(cublasLtMatrixLayoutCreate(&p.b, CUDA_R_8F_E4M3, K, M, a2.stride(0)), "layout A2");    // col-major K x M
+    ck(cublasLtMatrixLayoutCreate(&p.a, f8t(bt), K, N, bt.stride(0)), "layout BT");    // col-major K x N, op T
+    ck(cublasLtMatrixLayoutCreate(&p.b, f8t(a2), K, M, a2.stride(0)), "layout A2");    // col-major K x M
     ck(cublasLtMatrixLayoutCreate(&p.c, CUDA_R_16BF, N, M, out.stride(0)), "layout O");       // O^T col-major == O row-major
     cublasLtMatmulPreference_t pref;
     ck(cublasLtMatmulPreferenceCreate(&pref), "pref");
