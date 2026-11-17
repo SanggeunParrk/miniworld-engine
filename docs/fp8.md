@@ -1631,6 +1631,33 @@ References: bf16 2.5.12 vs PyTorch 0.38 A, different samples of bf16 2.5.12 1.71
 - Two runs with the same switches are not byte-identical when the first target of the process differs: the process-wide static scales
   (TriAttn, TriMul, Transition calib) are taken on the first calls (same-sample RMSD 0.23 A between the two qkvg runs).
 
+### fp8safe2: + PWA wide + token DiT `expand` (2026-11-17, this tree c6a1e10ff = the merges of `fp8x/pwa-wide` and `fp8x/transition-d256`)
+
+Full tables: `paper/data/foldbench_runs_fp8safe2/RESULTS.md`, speed `paper/data/fp8safe2_speed/RESULTS.md` (4 interleaved rounds per target).
+Same protocol and flag rule as above; all 27 targets in one process (static scales calibrated on 8gzl, as fp8safe; PWA v scales on 8e4h, the
+first target where PWA fires). FoldForge pinned to 399d0b4 (the commit of every earlier run): with it the tree with every switch off is again
+byte-identical to 2.5.12 end to end (8gzl / 7sxp, 10 / 10 CIFs); the moving ff_2512 checkout (da381a5, engine LayerNorm everywhere) is not.
+
+| arm | routes | flagged targets | lDDT mean5 - bf16 2.5.12 (22 targets) | same-sample RMSD median | mean signed dpLDDT | whole forward / 2.5.12 (128 .. 2008 tokens) |
+|---|---|---|---|---|---|---|
+| **fp8safe2** | every route incl. PWA wide (`MINIWORLD_PWA_FP8=1`, AF3 8 x 8 now served), token DiT `expand` only | **0** | **+0.0000** (top-1 -0.0021) | 0.54 A | +0.030 | **0.973 .. 0.795** |
+| fp8safe (same jobs) | every route, token DiT off, PWA wide gated off | 0 | -0.0019 | 0.60 A | +0.012 | 0.985 .. 0.804 |
+
+- PWA FP8 now fires on AF3: 21 / 27 targets (bucket >= 256 tokens), 0 overflow / rescale, peak |v / scale| 21 of 448. It costs nothing in
+  accuracy and gives nothing measurable in time: AF3's trunk has 4 MSA blocks at S 1024, so the PWA module is ~0.1-1.7 ms of a 0.1-9.5 s trunk
+  (fp8safe2 / fp8safe trunk 0.998-1.005).
+- Token DiT `expand` (without qkvg) is clean over all 27 (8j62 -0.010, limit -0.029; 8xgu / 7uyn / 8b3w within +-0.006) and gives the
+  diffusion gain: fp8safe2 / fp8safe diffusion + heads 0.958-0.987, whole 0.974-0.989 (1-2.6 % faster); its whole-forward ratios are 0.000-0.012 above
+  all-FP8's (earlier run: 0.974 .. 0.791) without its flags.
+- fp8safe1 (PWA wide, token DiT off) was not run: fp8safe2 has no flag and no drop, so PWA's own effect needed no isolation.
+- Transition D256 (`MINIWORLD_TRANSITION_FP8`, merged here) is not reached by AF3 (pair D128, single D384 below its row gate).
+- Merge verification: default route bit-identical to 2.5.12 (`wt-2512-base`, separate processes) on 44 cases: the registry rows of every FP8
+  module (eval + train) plus PWA wide inference at 64:8 / 128:8 / 128:16 (N 256 / 768 / 777 / 2048 / 400 / 512 / 384), PWA wide training
+  (64:8 N384, 128:16 N256: y, dmsa, dpair, parameter grads), the 8 x 32 PWA route, Transition D64 / 128 / 256 / 384 / 512 / 768 incl. the D256
+  row-gate sizes 2048 / 8192 / 16384 / 2^20. GPU: `test_pwa_fp8_wide`, `test_pwa_fp8`, `test_pwa_long_inference`, `test_transition_fp8_d256_h100`,
+  `test_transition_fp8_h100`: 82 passed. CPU: ruff / format / pyright clean on the merged Python files, `test_capture_api` + `test_init` 274
+  passed, 2 skipped (no new module-level dict needed registering).
+
 ## Open decisions (owner)
 
 - FP8 tolerance / registry row: none exists (the registry dtype vocabulary is `float32|master`); the TriMul FP8 route is 2.3-3.1 % in the engine-standard
