@@ -242,7 +242,8 @@ def _square_planes(t):
 def contract(a, b, out, table=None):
     """``bmm(a, b, out)`` for the TriMul contraction (a, b: [P, n, n] views of contiguous bf16 planes, one of them may be transposed;
     out contiguous [P, n, n]), through the measured cuBLASLt configuration for (n, a transposed, P) when ``table`` (default
-    ``LT_CONFIGS``; the bidirectional D64 / D128 route passes ``_h100_bmm_lt_bidir.LT_BIDIR``) has one and the heuristic offers it;
+    ``LT_CONFIGS``; the bidirectional D64 / D128 route passes ``_h100_bmm_lt_bidir.LT_BIDIR``, the single-direction D64 / D128 route
+    ``_h100_bmm_lt_uni.LT_UNI``) has one and the heuristic offers it;
     the same products and fp32 accumulation either way."""
     ta, tb = _square_planes(a), _square_planes(b)
     key = (a.shape[-1], ta, a.shape[0])

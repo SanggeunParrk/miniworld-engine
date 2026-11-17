@@ -8,6 +8,7 @@ from itertools import product
 import torch
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 from miniworld_engine.kernels.trimul_inproj.cuda._h100_bmm_lt_bidir import LT_BIDIR
+from miniworld_engine.kernels.trimul_inproj.cuda._h100_bmm_lt_uni import LT_UNI
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._launch_config import choose
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
@@ -163,7 +164,11 @@ def _select_config(x, weights, mask, direction, eps):
         "DIR": direction,
         "MASK": 0 if mask is None else mask.ndim,
     }
-    return choose("trimul_inproj", "trimul_fwd_sm90_cuda", dims, x.dtype, grid, device=x.device, near=("B", "L"), run=run)
+    # One direction without a mask (the MASK=0 cells of 2.5.13): the table only at its own (B, L). The nearest cell's tiles measured up to
+    # 1.2x the module time of the length's own kernel default between the grid lengths (L144 / 176 / 304 / 1104, 2026-11-17), so every
+    # other no-mask call keeps the kernel default, as before the cells existed.
+    near = () if mask is None and direction in (1, 2) else ("B", "L")
+    return choose("trimul_inproj", "trimul_fwd_sm90_cuda", dims, x.dtype, grid, device=x.device, near=near, run=run)
 
 
 def _run_inference(x, weights, mask, direction, eps, config, dest=None):
@@ -258,10 +263,13 @@ def _run_inference(x, weights, mask, direction, eps, config, dest=None):
             h = ch // 2
             _H100_BMM.contract(fold(left[:h]), fold(right[:h]).transpose(-1, -2), out=fold(tri[:h]), table=LT_BIDIR)
             _H100_BMM.contract(fold(left[h:]).transpose(-1, -2), fold(right[h:]), out=fold(tri[h:]), table=LT_BIDIR)
-        elif direction == 1:
-            _H100_BMM.contract(fold(left), fold(right).transpose(-1, -2), out=fold(tri))
         else:
-            _H100_BMM.contract(fold(left).transpose(-1, -2), fold(right), out=fold(tri))
+            # one direction, hidden = D at D64 / D128: the measured single-direction table (LT_UNI); other widths LT_CONFIGS
+            uni = LT_UNI if ch == cz and cz in (64, 128) else None
+            if direction == 1:
+                _H100_BMM.contract(fold(left), fold(right).transpose(-1, -2), out=fold(tri), table=uni)
+            else:
+                _H100_BMM.contract(fold(left).transpose(-1, -2), fold(right), out=fold(tri), table=uni)
         if port_k3:
             from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as _port
 

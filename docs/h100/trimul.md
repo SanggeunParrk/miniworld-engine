@@ -157,7 +157,36 @@ One floor method: per stage max(byte floor at 3.05 TB/s over every HBM read and 
 
 The gap to the single-direction 88 % K3 is real and is the K3 itself: the packaged `tmn_k3_z128_h256` (LN_out and LN_in as register passes, 32-channel output blocks) runs 80-86 % of its floor at the bidirectional byte volume, the B200-style port K3 at the same volume (LayerNorms folded into the weights, LN_in statistics from K1) 92-94 %. K1 is the same ~75-79 % in both routes (packaged and port). Kernel-to-kernel gaps are zero or negative (PDL overlap -0.1 .. -0.5 us per boundary) at every length measured: no launch-tail gap exists to remove. Two streams for the two contractions inside the graph: 0.98-1.005 of serial (control +-0.5 %), 1.5-2 % only at D64 / D128 L <= 512 and lost again by the K3 PDL overlap: not shipped.
 
-Shipped, bitwise equal to ec11768fc (212 module cases D64..D512, L17..2048, masks, B = 1 / 2, real activation dumps): the bidirectional contractions go through `_h100_bmm.contract` and the measured cuBLASLt table `_h100_bmm_lt_bidir.LT_BIDIR` (algorithm 66, no split-K, output equal to the default pick on every entry; 178 entries, lengths multiples of 16 from 144 to 2048 where the in-graph module replay showed <= 0.995 of the default in two processes). Module graph replay, D128 / D64, mean over L = 128..2048 step 32: 0.983 / 0.987 of the default (control 1.002), best lengths 0.88-0.95 (D128 L832 / 1408 / 1600). The table is passed by the bidirectional call only (`contract(..., table=LT_BIDIR)`): the single-direction D64 / D128 contractions (same plane counts) keep `LT_CONFIGS` and the default pick, unchanged (not measured with these entries; a follow-up).
+Shipped, bitwise equal to ec11768fc (212 module cases D64..D512, L17..2048, masks, B = 1 / 2, real activation dumps): the bidirectional contractions go through `_h100_bmm.contract` and the measured cuBLASLt table `_h100_bmm_lt_bidir.LT_BIDIR` (algorithm 66, no split-K, output equal to the default pick on every entry; 178 entries, lengths multiples of 16 from 144 to 2048 where the in-graph module replay showed <= 0.995 of the default in two processes). Module graph replay, D128 / D64, mean over L = 128..2048 step 32: 0.983 / 0.987 of the default (control 1.002), best lengths 0.88-0.95 (D128 L832 / 1408 / 1600). The table is passed by the bidirectional call only (`contract(..., table=LT_BIDIR)`): the single-direction D64 / D128 contractions (same plane counts) keep `LT_CONFIGS` and the default pick, unchanged (not measured with these entries; done for 2.5.13, below).
+
+Single direction, the same two treatments (2.5.13 candidate, branch `cand/trimul-uni-tables`; bit-identical):
+
+- Contraction table `_h100_bmm_lt_uni.LT_UNI`, passed by the single-direction D64 / D128 calls with hidden = D (`h100_inference` DIR 1 / 2, and
+  the port's row-padded form from `ROWPAD_FROM` on: `h100_b200style._run_rowpad`; the halves of `_front_contract_halves` and the hidden-2D calls
+  keep `LT_CONFIGS`). Keys (L, a transposed, planes = D B) for planes 64 (D64 B1), 128 (D128 B1, D64 B2) and 256 (D128 B2), L 128..2048 step
+  16. Candidates: algorithm 66 configurations bitwise equal to the default `bmm` pick, the smallest worst-run ratio of two separate-process
+  sweeps (planes 64 / 128: the 2.5.12 sweeps, same GEMM shapes; 256: new), <= 0.98 of the rc/2.5.13 pick; kept where the in-graph module
+  replay (TriangleMultiplication, no mask, off / control / on interleaved, 15 rounds, two processes) measured <= 0.995 of the rc/2.5.13 pick
+  for the key's own shape and <= 1.002 for D64 B2 on the shared planes-128 keys: 270 entries (planes 64: 101 of 162 candidates, 128: 92 of
+  144, 256: 77 of 119; worst-run module ratio mean 0.968 / 0.962 / 0.965, best 0.80 / 0.79 / 0.75) plus the 14 planes-256 `LT_CONFIGS` entries
+  (measured on D256) that no candidate beat, so a length not listed runs what rc/2.5.13 ran.
+- Launch table: the 116 single-direction `trimul_fwd_sm90_cuda` cells without a mask (D64 / D128, hidden D and 2 D, DIR 1 / 2, B = 1 / 2;
+  hidden D only at the lengths the packaged K1 / K3 serves) pretuned (`kernels/_pretune.py`), then re-ranked like the bidirectional cells
+  (candidates: the pretuner's top 4, the kernel default, the MASK=1 entry; interleaved CUDA-graph A/B of the module forward, 9 rounds): every
+  candidate bitwise equal to the default; best / default mean 0.985, L128 0.84-0.97 (the default's wide CTAs leave SMs idle), elsewhere
+  0.98-1.00. A cell whose best was not >= 1 % faster than the default lists the default first (88 of 116; 28 cells change the tiles). A
+  no-mask single-direction call reads these cells at its exact (B, L) only (`h100_inference._select_config`, `near=()`): the nearest
+  cell's tiles measured up to 1.20x the module time of the length's own kernel default between the grid lengths (41 of 172 off-grid
+  shapes > 1.01x, e.g. D64 / D128 L144 1.08-1.20x, D64 hidden 128 L1104 / 1296 1.10x), so every other no-mask call (other L, B > 2)
+  keeps the kernel default as in rc/2.5.13. Table version 6 -> 7.
+
+Bitwise equal to rc/2.5.13 in separate processes (sha1, 237 cases: single direction D64..D512 inference L17..2048, masks, B = 1 / 2, hidden
+D / 2 D; training D64..D512 y, dx and every parameter gradient; bidirectional D64..D256 inference). Module graph replay against rc/2.5.13 in one
+process (61 inference cases, D64 / D128, hidden D / 2 D, both directions, L128..2048, B = 1 / 2, masks; rc/2.5.13 route by switching both
+tables back; same-route control captured separately; cool = median of 6 rounds after 0.5 s idle, sustained = mean after a 1 s burn): mean
+0.991 cool / 0.993 sustained (control 1.001 / 1.000); D128 L128 0.90-0.92, D64 L768 / 1024 0.97-0.98 (B = 2 L768 incoming 0.96), D128
+incoming L768 0.97, D64 / D128 L1024-1536 0.98, D64 hidden 128 L2048 0.98; worst ui D64 L256 1.014 (control 1.011) and ui D64 L1536 1.015
+cool / 0.986 sustained.
 
 Port K3, the default since 2.5.12 (`h100_inference.PORT_K3`, `MINIWORLD_TRIMUL_BIDIR_PORT_K3=0` switches it off; D128 inference, L >= 160): the packaged K1 in its save-statistics l2 form (planes unchanged), the contractions, the port K3 (`h100_b200style.rowpad_k3`). Not bit-identical (bf16 ulps). Error against an fp64 reference (same bf16 weights): rms 3.82e-3 against 4.12e-3 of the packaged K3 (-7.4 %) on random inputs at every length / mask / B = 2 case measured (36 cases), max error lower in 32 of 36 and higher in 4 (L160 tail, L300 tail, L384 none and ones: +3 .. +14 %), real activation inputs equal (output rounding bound: 6.83e-2 / 6.84e-2, 7.14e-2 / 7.14e-2, 1.289e-1 / 1.289e-1). Module graph replay on top of the table: K3 stage -8 % (L1024) .. -15 % (L2048), module 0.963 of the default (mean over L = 128..2048 step 32; 0.977 / 0.985 / 0.976 / 0.977 at L256 / 512 / 1024 / 2048 against the table-less route in a separate run). D64 measured no gain (its K3 is already the port's) and is not served; L < 160 loses the fold launch (2 us).
 
@@ -205,7 +234,12 @@ any L >= 16; B > 1 at L % 16 != 0 is padded on the host to 16 (D256+: 128) with 
 
 - `trimul_fwd_sm90_cuda` (the packaged K1 / K3 tiles, read by `h100_inference._select_config` through `choose`): keys
   `bfloat16|B=1,CH,CZ,DIR,L,MASK=1` for (CZ, CH) = (64, 64), (64, 128), (128, 128), (128, 256), (256, 256), (384, 384), DIR 0 / 1 / 2,
-  L 128-768; a missing key takes the nearest entry over (B, L).
+  L 128-768; calls without a mask (`MASK=0`, B = 1 / 2): the bidirectional D64 / D128 cells (CZ / CH 64 / 128, 128 / 256, DIR 0,
+  L128-2048; 2.5.12) and the single-direction D64 / D128 cells (64 / 64 L128-768, 128 / 128 L128-640, 64 / 128 and 128 / 256
+  L128-2048, DIR 1 / 2; 2.5.13 candidate), ranked by a CUDA-graph A/B of the module forward, every entry bitwise equal to the kernel
+  default; a missing key takes the nearest entry over (B, L) with the same CZ / CH / DIR / MASK, else the kernel default, except a
+  single-direction call without a mask, which takes its exact (B, L) key or the kernel default (the bidirectional MASK=0 cells still take
+  the nearest entry).
 - Triton: `trimul_outproj_layernorm_gemm_gate_triton`, `trimul_output_f567_train_triton`, `trimul_bwd_gate_packed_triton`,
   `trimul_input_ln_residual_bwd_triton`, `gated_projection_gate_dropres_triton`, `gated_projection_bwd_gate_dropres_triton`,
   `trimul_gemm_gate_mmajor_triton`, `trimul_input_dual_bwd_triton` (exact key lookup). `trimul_bwd_gate_packed_recompute_triton`
