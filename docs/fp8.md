@@ -1,6 +1,6 @@
 # FP8 routes (H100, opt-in, engine 3.0.0 line)
 
-Everything here is opt-in and off by default. With no switch set, every route is bit-identical to 2.5.9 (checked, see "Verification" in the release notes of the stage).
+Everything here is opt-in and off by default. Base: engine 2.5.12 (branch `fp8/3.0.0-on-2512`). With no switch set, every route is bit-identical to 2.5.12 (169 / 169 cases, see "Verification on the 2.5.12 base"; the stages before were checked against 2.5.9).
 No registry row, tolerance or `backend_versions` entry exists for FP8: the registry dtype vocabulary is `float32|master` only, and the FP8 planes / e4m3 V are internal
 intermediates of the `master` route. The numerics harness (ours vs PyTorch) would flag the ~3.8 % update error; that decision belongs to the owner (see "Open decisions").
 
@@ -57,10 +57,126 @@ Three kinds of call sites (branch `fp8/vt`: the first two make the planes in the
   (same fp16 V, same static scale, same cvt): the module output equals the standalone route as bytes. The first eager call of a site still runs the pass (it takes the static scale).
 - **unfused with cuBLAS front** (d_pair 384 x 12 x 32, and any shape without a one-kernel front): fp16 V from the cuBLAS q | k | v | g GEMM, one `vt_quant` pass makes the planes. With `FP8_VSCALE_AUTO` the pass uses a per-site static scale
   (calibrated on the first eager call; single pass, no amax pass, same `take_overflow` / `rescale_all` contract). `vt_quant` serves up to 16 heads (12-head d_pair 384 had silently run the slow torch reference).
-S gates: standalone pass `FP8_PV_UNFUSED_MIN_S` (32-channel heads 1024, 16-channel heads 512; x 2 with hi + lo); front-made planes `FP8_PV_UNFUSED_FRONT_MIN_S` per (d_pair, heads, channels): 64:4:32, 64:2:32, 64:4:16 from L256, 256:8:32 from L768
+S gates: fused route (d_pair 128) `FP8_PV_FUSED_MIN_S` 256 (2.5.12 base; x 2 with hi + lo); standalone pass `FP8_PV_UNFUSED_MIN_S` (32-channel heads 1024, 16-channel heads 512; x 2 with hi + lo); front-made planes `FP8_PV_UNFUSED_FRONT_MIN_S` per (d_pair, heads, channels): 64:4:32, 64:2:32, 64:4:16 from L256, 256:8:32 from L768
 (x 2 with hi + lo). Below the gate the fp16 core runs (bit-identical to the default). The scale tensors derived from the static scale (1 / scale, scale per sample) are cached and updated in place by `rescale_all`: a call launches no torch glue kernel for them.
 
-### Module time of the merged state (branch `fp8/main`) against the 2.5.9 default
+### Base 2.5.12 (branch `fp8/3.0.0-on-2512`, 2026-11-17): module time, error and gates against the 2.5.12 default
+
+The FP8 routes sit on the 2.5.12 kernels (TriAttn h16 core with `TA_POLY16` = 8, bidirectional TriAttn fused tails, TriMul launch table v6, bidirectional
+TriMul port K3 / `LT_BIDIR`, OPM). The 2.5.12 default got faster than 2.5.9 (TriAttn d_pair 64 x 4 x 16 by 3-11 %, bidirectional TriMul D128 by 1-5 %),
+so every FP8 ratio below is against that faster default.
+
+Protocol (H100 80GB HBM3, 700 W cap; `~/miniworld-engine-scratch/fp8/w300/scripts/speed.py`, raw rows `res/speed.jsonl`, `res/speed2.jsonl`): one process per group, the module (`master_weights=True`, one sample, all-ones mask)
+captured in three CUDA graphs of one call each -- the 2.5.12 default route, the default again (same-cubin control), the FP8 route (hi plane, every S /
+min-L gate removed, static scales calibrated on two eager calls, lazy guard; no overflow in any case). **cool** = 2 s idle, then one interleaved burst
+(~10 ms per route), 3 reps, median; **sustained** = 2 s idle, 1 s of back-to-back interleaved replays, then 3 interleaved timed blocks (~20 ms per route),
+mean (sustained load throttles the SM clock 15-18 %). Cells: `cool / sustained`. Control = range of the same-cubin control's ratios over the row (noise).
+
+TriAttn (`d_pair:heads:channels`, starting node), FP8 PV hi plane with no gate:
+
+| config | | L128 | L256 | L512 | L768 | L1024 | L1536 | L2048 | same-cubin control |
+|---|---|---|---|---|---|---|---|---|---|
+| 128:4:32 | 2.5.12 default ms | 0.031 / 0.031 | 0.104 / 0.103 | 0.441 / 0.468 | 1.168 / 1.245 | 2.441 / 2.61 | 7.116 / 8.652 | 15.522 / 17.774 | |
+| | FP8 / default | 1.104 / 1.104 | 0.936 / 0.942 | 0.902 / 0.9 | 0.88 / 0.871 | 0.86 / 0.87 | 0.847 / 0.845 | 0.845 / 0.842 | 0.99 .. 1.003 |
+| 256:8:32 | 2.5.12 default ms |  | 0.232 / 0.242 | 1.009 / 1.128 | 2.64 / 2.939 | 5.407 / 6.498 | 15.533 / 18.258 | 33.739 / 38.441 | |
+| | FP8 / default |  | 0.994 / 0.991 | 0.976 / 0.962 | 0.954 / 0.955 | 0.938 / 0.94 | 0.911 / 0.921 | 0.967 / 0.873 | 0.968 .. 1.057 |
+| 384:12:32 | 2.5.12 default ms |  | 0.403 / 0.443 | 1.73 / 2.021 | 4.483 / 5.142 | 9.051 / 10.413 | 25.474 / 28.41 | 56.625 / 62.114 | |
+| | FP8 / default |  | 0.999 / 0.987 | 1.014 / 0.964 | 0.982 / 0.988 | 0.958 / 0.95 | 0.957 / 0.912 | 0.955 / 0.886 | 0.964 .. 1.082 |
+| 64:4:16 | 2.5.12 default ms | 0.028 / 0.027 | 0.09 / 0.087 | 0.41 / 0.397 | 1.088 / 1.1 | 2.24 / 2.332 | 6.6 / 7.067 | 14.214 / 16.001 | |
+| | FP8 / default | 1.052 / 1.053 | 0.948 / 0.945 | 0.899 / 0.902 | 0.856 / 0.85 | 0.85 / 0.852 | 0.834 / 0.839 | 0.834 / 0.823 | 0.993 .. 1.005 |
+| 64:4:32 | 2.5.12 default ms | 0.033 / 0.032 | 0.107 / 0.106 | 0.469 / 0.496 | 1.222 / 1.314 | 2.436 / 2.688 | 7.127 / 8.345 | 15.604 / 17.787 | |
+| | FP8 / default | 1.049 / 1.048 | 0.907 / 0.905 | 0.877 / 0.878 | 0.869 / 0.866 | 0.878 / 0.895 | 0.857 / 0.864 | 0.856 / 0.846 | 0.982 .. 1.009 |
+| 64:2:32 | 2.5.12 default ms | 0.024 / 0.023 | 0.066 / 0.064 | 0.278 / 0.278 | 0.682 / 0.723 | 1.323 / 1.426 | 3.759 / 4.165 | 8.174 / 9.494 | |
+| | FP8 / default | 1.058 / 1.057 | 0.94 / 0.94 | 0.917 / 0.914 | 0.909 / 0.911 | 0.922 / 0.917 | 0.895 / 0.9 | 0.875 / 0.885 | 0.994 .. 1.006 |
+
+TriMul (one direction / the bidirectional block), FP8 planes with no gate (L >= 256; the gate region below):
+
+| config | | L256 | L512 | L768 | L1024 | L1536 | L2048 | same-cubin control |
+|---|---|---|---|---|---|---|---|---|
+| D128 out | 2.5.12 default ms | 0.07 / 0.068 | 0.244 / 0.256 | 0.52 / 0.595 | 0.981 / 1.119 | 2.549 / 2.983 | 5.181 / 5.928 | |
+| | FP8 / default | 0.903 / 0.903 | 0.848 / 0.839 | 0.857 / 0.833 | 0.813 / 0.792 | 0.774 / 0.751 | 0.739 / 0.739 | 0.971 .. 1.017 |
+| D128 in | 2.5.12 default ms | 0.069 / 0.069 | 0.244 / 0.263 | 0.535 / 0.602 | 0.982 / 1.136 | 2.575 / 3.105 | 5.174 / 6.091 | |
+| | FP8 / default | 0.877 / 0.875 | 0.853 / 0.831 | 0.833 / 0.83 | 0.816 / 0.813 | 0.771 / 0.733 | 0.744 / 0.721 | 0.956 .. 1.001 |
+| D128 bidir | 2.5.12 default ms | 0.115 / 0.115 | 0.396 / 0.441 | 0.88 / 1.003 | 1.643 / 1.966 | 4.37 / 5.086 | 9.116 / 11.385 | |
+| | FP8 / default | 0.963 / 0.965 | 0.924 / 0.909 | 0.887 / 0.922 | 0.863 / 0.879 | 0.809 / 0.782 | 0.757 / 0.744 | 0.973 .. 1.003 |
+| D256 out | 2.5.12 default ms | 0.154 / 0.16 | 0.552 / 0.596 | 1.22 / 1.365 | 2.239 / 2.587 | 5.677 / 6.849 | 11.556 / 13.56 | |
+| | FP8 / default | 0.954 / 0.969 | 0.937 / 0.985 | 0.917 / 0.991 | 0.917 / 0.966 | 0.875 / 0.859 | 0.814 / 0.822 | 0.979 .. 1.001 |
+| D256 in | 2.5.12 default ms | 0.155 / 0.16 | 0.555 / 0.599 | 1.212 / 1.35 | 2.244 / 2.575 | 5.824 / 7.154 | 11.515 / 13.866 | |
+| | FP8 / default | 0.95 / 0.954 | 0.935 / 0.977 | 0.924 / 0.994 | 0.914 / 0.968 | 0.853 / 0.839 | 0.826 / 0.805 | 0.992 .. 1.003 |
+| D256 bidir | 2.5.12 default ms | 0.258 / 0.269 | 0.94 / 1.022 | 2.122 / 2.413 | 4.007 / 4.549 | 10.245 / 12.813 | 20.534 / 23.533 | |
+| | FP8 / default | 1.009 / 1.036 | 0.979 / 1.026 | 0.946 / 1.01 | 0.925 / 0.949 | 0.88 / 0.873 | 0.878 / 0.824 | 0.992 .. 1.01 |
+
+TriMul below L256 (the min-L gates):
+
+| config | | L128 | L144 | L160 | L176 | L192 | L224 | L256 | same-cubin control |
+|---|---|---|---|---|---|---|---|---|---|
+| D128 out | 2.5.12 default ms | 0.024 / 0.023 | 0.039 / 0.038 | 0.041 / 0.04 | 0.043 / 0.041 | 0.049 / 0.047 | 0.064 / 0.062 | 0.07 / 0.068 | |
+| | FP8 / default | 1.003 / 0.983 | 0.919 / 0.92 | 0.887 / 0.883 | 0.864 / 0.859 | 0.899 / 0.895 | 0.924 / 0.922 | 0.903 / 0.903 | 0.995 .. 1.011 |
+| D128 in | 2.5.12 default ms | 0.024 / 0.023 | 0.034 / 0.033 | 0.036 / 0.035 | 0.038 / 0.037 | 0.049 / 0.047 | 0.064 / 0.062 | 0.069 / 0.069 | |
+| | FP8 / default | 0.998 / 0.999 | 1.059 / 1.053 | 1.015 / 1.009 | 0.98 / 0.976 | 0.893 / 0.887 | 0.921 / 0.917 | 0.877 / 0.875 | 0.993 .. 1.001 |
+| D128 bidir | 2.5.12 default ms |  |  | 0.066 / 0.064 |  | 0.075 / 0.073 | 0.104 / 0.102 | 0.115 / 0.115 | |
+| | FP8 / default |  |  | 0.939 / 0.933 |  | 1.063 / 1.057 | 0.995 / 0.998 | 0.963 / 0.965 | 0.994 .. 1.003 |
+| D256 out | 2.5.12 default ms | 0.044 / 0.043 | 0.074 / 0.072 |  | 0.08 / 0.082 | 0.108 / 0.108 | 0.148 / 0.151 | 0.154 / 0.16 | |
+| | FP8 / default | 0.939 / 0.937 | 1.002 / 1.006 |  | 1.018 / 1.008 | 1.016 / 1.013 | 0.947 / 0.948 | 0.954 / 0.969 | 0.988 .. 1.006 |
+| D256 in | 2.5.12 default ms | 0.044 / 0.043 | 0.084 / 0.081 |  | 0.09 / 0.091 | 0.109 / 0.109 | 0.148 / 0.152 | 0.155 / 0.16 | |
+| | FP8 / default | 0.941 / 0.943 | 0.891 / 0.893 |  | 0.909 / 0.905 | 0.994 / 0.992 | 0.931 / 0.929 | 0.95 / 0.954 | 0.992 .. 1.005 |
+
+Gates against the 2.5.12 default (applied only where the data is clear):
+
+- **New: TriAttn fused route (128:4:32, whitelist kind "fused") `FP8_PV_FUSED_MIN_S = 256`** (x 2 with hi + lo, as the other gates). It had no gate: at L128
+  the FP8 route is 10.4 % slower cool and sustained (control 0.99), at L256 6 % faster. Below the gate the fp16 core runs (bit-identical to the default; test
+  `test_fused_route_s_gate`).
+- Unchanged, confirmed: TriAttn front-made planes d_pair 64 from L256 (L128 +5 %, L256 -5 .. -9 %); 256:8:32 front-made from L768 (L512 -2.4 % cool /
+  -3.8 % sustained with a sustained control of 0.968: not clear, gate stays); 384:12:32 standalone pass from L1024 (L768 -1.8 / -1.2 %: not clear).
+  384:12:32 at L256 is not served by the FP8 core at all (FP8 bytes = default bytes; the same on the 2.5.9-based branch).
+- Unchanged, confirmed: TriMul D128 out 144 (L128 1.00, L144 -8 %), D128 in 192 (L176 -2 %, L192 -11 %), D256 out 224 (L144-192 +0 .. +2 %, L224 -5 %;
+  L128 is -6 % but not the L above it), D256 in 144 (L128 -6 %: lowering the gate needs L < 128 data), bidirectional D128 256 (L160 -6 %, L192 +6 %, L224
+  0 %: not monotone), bidirectional D256 1024 (L768 -5 % cool but +1 % sustained, L1024 -7.5 / -5 %). The faster 2.5.12 default moved no gate up.
+
+Error against fp64 PyTorch (`~/miniworld-engine-scratch/fp8/w300/scripts/err.py`, raw rows `res/err2_*.jsonl`; the module in float64 on the PyTorch backend, same inputs; random weights, LayerNorm weights
+1 +- 0.1, biases +- 0.1, key mask with 3 masked tokens; FP8 with every gate removed; rms / max of (y - y64) relative to rms / max of the update y64 - x).
+"2.5.9-based" = the same script on `fp8/bidir-tm` (8bef4e1ab), whose default route is 2.5.9:
+
+| case | default 2.5.12 | FP8 hi, 2.5.12 base | FP8 hi, 2.5.9-based | FP8 hi + lo, 2.5.12 base | FP8 hi + lo, 2.5.9-based | default 2.5.9 |
+|---|---|---|---|---|---|---|
+| TriAttn 128:4:32 L256 | 1.6% / 1.5% | 3.6% / 2.9% | 3.6% / 2.9% | 2.9% / 2.3% | 2.9% / 2.6% | 1.6% / 1.5% |
+| TriAttn 128:4:32 L512 | 1.9% / 2.1% | 3.3% / 4.7% | 3.3% / 4.7% | 2.8% / 2.7% | 2.8% / 2.7% | 1.9% / 2.1% |
+| TriAttn 256:8:32 L256 | 1.7% / 2.1% | 3.7% / 3.6% | 3.7% / 3.6% | 3% / 2.6% | 3% / 2.6% | 1.7% / 2.1% |
+| TriAttn 256:8:32 L512 | 1.9% / 2.2% | 3.4% / 3.5% | 3.4% / 3.5% | 2.9% / 2.9% | 2.9% / 2.9% | 1.9% / 2.2% |
+| TriAttn 384:12:32 L256 | 1.7% / 2.3% | 1.7% / 2.3% | 1.7% / 2.3% | 1.7% / 2.3% | 1.7% / 2.3% | 1.7% / 2.3% |
+| TriAttn 384:12:32 L512 | 1.9% / 2.3% | 3.4% / 3.8% | 3.4% / 3.8% | 2.9% / 3.1% | 2.9% / 3.1% | 1.9% / 2.3% |
+| TriAttn 64:2:32 L256 | 1.6% / 1.7% | 3.3% / 4% | 3.3% / 4% | 2.7% / 2.3% | 2.7% / 2.3% | 1.6% / 1.7% |
+| TriAttn 64:2:32 L512 | 1.8% / 1.9% | 3% / 3.8% | 3% / 3.8% | 2.5% / 2.7% | 2.5% / 2.7% | 1.8% / 1.9% |
+| TriAttn 64:4:16 L256 | 1.6% / 1.7% | 3.3% / 3.4% | 3.3% / 3.4% | 2.7% / 2.6% | 2.7% / 2.6% | 1.6% / 1.7% |
+| TriAttn 64:4:16 L512 | 1.8% / 1.6% | 3% / 3.1% | 3% / 3.1% | 2.5% / 1.9% | 2.5% / 1.9% | 1.8% / 1.6% |
+| TriAttn 64:4:32 L256 | 1.2% / 1.3% | 3.1% / 2.7% | 3.1% / 2.7% | 2.5% / 2.1% | 2.5% / 2.1% | 1.2% / 1.3% |
+| TriAttn 64:4:32 L512 | 1.3% / 1.5% | 2.7% / 3.2% | 2.7% / 3.2% | 2.2% / 2.2% | 2.2% / 2.2% | 1.3% / 1.5% |
+| TriMul D128 bidir L1024 | 0.6% / 0.7% | 3.7% / 3.9% | 3.7% / 3.9% | - | - | 0.7% / 0.7% |
+| TriMul D128 bidir L256 | 0.6% / 0.8% | 3.7% / 3.8% | 3.7% / 3.8% | - | - | 0.7% / 0.8% |
+| TriMul D128 bidir L512 | 0.6% / 0.8% | 3.7% / 4.2% | 3.7% / 4.2% | - | - | 0.7% / 0.9% |
+| TriMul D128 out L1024 | 0.6% / 0.7% | 3.7% / 4.4% | 3.7% / 4.4% | - | - | 0.6% / 0.7% |
+| TriMul D128 out L256 | 0.7% / 0.7% | 3.8% / 4.2% | 3.8% / 4.2% | - | - | 0.7% / 0.7% |
+| TriMul D128 out L512 | 0.7% / 0.7% | 3.7% / 4.2% | 3.7% / 4.2% | - | - | 0.7% / 0.7% |
+| TriMul D128 in L1024 | 0.6% / 0.8% | 3.7% / 4% | 3.7% / 4% | - | - | 0.6% / 0.8% |
+| TriMul D128 in L256 | 0.7% / 0.7% | 3.8% / 3.9% | 3.8% / 3.9% | - | - | 0.7% / 0.7% |
+| TriMul D128 in L512 | 0.7% / 0.8% | 3.7% / 3.9% | 3.7% / 3.9% | - | - | 0.7% / 0.8% |
+| TriMul D256 bidir L1024 | 0.6% / 0.7% | 3.7% / 3.6% | 3.7% / 3.6% | - | - | 0.6% / 0.7% |
+| TriMul D256 bidir L256 | 0.6% / 0.7% | 3.7% / 3.6% | 3.7% / 3.6% | - | - | 0.6% / 0.7% |
+| TriMul D256 bidir L512 | 0.6% / 0.8% | 3.7% / 3.5% | 3.7% / 3.5% | - | - | 0.6% / 0.8% |
+| TriMul D256 out L1024 | 0.6% / 0.8% | 3.7% / 4% | 3.7% / 4% | - | - | 0.6% / 0.8% |
+| TriMul D256 out L256 | 0.6% / 0.8% | 3.8% / 4% | 3.8% / 4% | - | - | 0.6% / 0.8% |
+| TriMul D256 out L512 | 0.6% / 0.8% | 3.7% / 4.3% | 3.7% / 4.3% | - | - | 0.6% / 0.8% |
+| TriMul D256 in L1024 | 0.6% / 0.7% | 3.6% / 4% | 3.6% / 4% | - | - | 0.6% / 0.7% |
+| TriMul D256 in L256 | 0.7% / 0.8% | 3.7% / 4.1% | 3.7% / 4.1% | - | - | 0.7% / 0.8% |
+| TriMul D256 in L512 | 0.6% / 0.8% | 3.7% / 4% | 3.7% / 4% | - | - | 0.6% / 0.8% |
+
+The FP8 errors are the 2.5.9-based ones to the printed digit (TriMul identical bytes of the error; TriAttn 128:4:32 L256 hi + lo max 2.3 % vs 2.6 %:
+below the new fused gate x 2 the call takes the standalone-pass FP8 core with a per-site scale instead of the fused front's). The defaults differ where
+2.5.10-2.5.12 changed them (64:4:16 `TA_POLY16`, bidirectional TriMul D128 port K3: 0.7 -> 0.6 %). In the engine-standard form (max |y - y64| / max |y64|):
+TriAttn FP8 0.32-0.75 %, TriMul FP8 2.3-3.1 % (tolerance 8e-3: the TriMul FP8 route would fail a registry accuracy row; no row exists, see "Open
+decisions"), defaults 0.27-0.54 %.
+
+### Module time of the merged state (branch `fp8/main`) against the 2.5.9 default (base 2.5.9, history; the 2.5.12 numbers are above)
 
 ms per sample; percent change of the FP8 route against the 2.5.9 default (negative = FP8 faster); interleaved, 9 rounds (median of 8 calls per round), one H100 per job, random weights, flat logits, 2.5.9 default measured twice per round as the
 same-cubin control (control column: the control against the default, i.e. the noise of that row; differences below ~3 % are noise). Routes exactly as `enable_fp8_pv_for` sets them: `fused` = whitelist kind "fused" (d_pair 128: the front writes the e4m3 V^T planes),
@@ -92,7 +208,7 @@ would gain about 2.5 % of the module and is a second numerics path: not done). T
 History in one line each: round 2 (V as hi / lo planes, fused d_pair 128 front), round 3 (static per-site scale, `vt_quant` for 16 heads, S gate, whitelist per call-site kind), round 4 (front-made planes for d_pair 64 / 256 x 8; `TA_F8N24` for 16-channel heads: PV as m64n24, bit-identical).
 hi + lo costs more (128:4:32 fused +2 .. -10 %, unfused +16 .. -5 % depending on config and L): hence the gate is twice as high for it.
 
-### TriMul FP8 planes, module time against the 2.5.9 default (2026-11-15, branch `fp8/tm2`; D128 / D256, one direction, one sample, bf16 inference; `MINIWORLD_TRIMUL_FP8=calib`, lazy guard)
+### TriMul FP8 planes, module time against the 2.5.9 default (base 2.5.9, history; 2026-11-15, branch `fp8/tm2`; D128 / D256, one direction, one sample, bf16 inference; `MINIWORLD_TRIMUL_FP8=calib`, lazy guard)
 
 Protocol: the module (`TriangleMultiplication`, `master_weights=True`), 9 interleaved rounds (default, default control, FP8), median; primary column = CUDA-graph replay of 8 calls (what FoldForge runs; GPU time), second block = eager (8 calls back to back). Same-cubin control within +-1 % (graph). H100 SXM, power-capped at ~690 W under sustained load.
 
@@ -158,7 +274,7 @@ Min-L gates (below them the bf16 default route runs unchanged; `MIN_L` in `h100_
 
 Gates: D128 outgoing L >= 144, D128 incoming L >= 192, D256 outgoing L >= 224, D256 incoming L >= 144. D256 outgoing below L224 is within +-3 % on the GPU (20 us more host launch work than the default in eager mode); D256 incoming gains 10 % at L144-176 because the default incoming route is 14 % slower than its outgoing there (FP8 in = out), is flat at L192 and below L144. At L300 (row-padded K1 / K3) D256 is flat (+0.3 / -0.7 %), inside the gated range: no further gate. Two-sample cells (L128, 192) agree to 1 %; the gate lines sit between measured L, not at an interpolated threshold (L between 176 and 192 for D128 incoming, 128 and 144 for D128 outgoing: untested).
 
-### TriMul FP8 planes, bidirectional block (2026-11-16, branch `fp8/bidir-tm`, on `fp8/main` + `fp8/tm2`; D128 / D256, one sample, bf16 inference, `MINIWORLD_TRIMUL_FP8=calib`, lazy guard)
+### TriMul FP8 planes, bidirectional block (base 2.5.9, history; 2026-11-16, branch `fp8/bidir-tm`, on `fp8/main` + `fp8/tm2`; D128 / D256, one sample, bf16 inference, `MINIWORLD_TRIMUL_FP8=calib`, lazy guard)
 
 Route (`h100_b200style_fp8.run(..., direction=0)`): the block's two directions are two of the single-direction FP8 routes on the matrix halves (rows `[:d]` outgoing, `[d:]` incoming of `to_left`, `to_left_gate`, `to_right`, `to_right_gate`): K1 (the single-direction FP8 tile, the incoming one on the transposed pair with the LN statistics stored at the swapped token) -> cuBLASLt e4m3 batched contraction of `d` channels, each writing its channels of one bf16 `tri [2 d, n, n]` -> one K3 over the 2 d channels (LN_out is joint over them, as in the default) with the per-channel scale product folded into the projection operand (`K3_CSCALE=1`: the two directions have different scales; the single-direction route keeps the scalar `K3_CSCALE=2`). Scales: per direction and per tensor (a, b), calibrated on the first eager call (16x headroom) into `cache["bd"][1 | 2]`; `refresh` / `rescale_all` / the lazy guard (`overflow_peak`, one amax buffer shared by the two K1) follow the same contract as the single direction. A capture with no calibration, and the guard's retry-exhausted fallback, run the bf16 default route of the block (`_update_inference_body`, not the single-direction port). The K1 planes of the two directions are two launches (the default has one K1 over 2 d hidden channels), which is why D256 gains less than D128: the FP8 K1 is tensor-bound and recomputes LN_in and re-reads z for the second direction.
 
@@ -176,7 +292,7 @@ Same error and peak as the single direction (3.8 %, scale peak far below 448); e
 
 Where the FP8 module time goes (graph replay, per-kernel profiler time, D128 L1024 / L2048, D256 L1024 / L2048): K1 (two launches) 0.64 / 2.42, 1.93 / 8.11 ms; e4m3 contraction (two launches) 0.54 / 3.52, 1.04 / 7.30 ms; K3 (2 d channels) the rest. Removal ablation of the contraction (`res/abl_*.jsonl`): D128 L1024 1.60 -> 1.06 ms, L2048 7.77 -> 4.30; D256 L1024 4.21 -> 3.22, L2048 19.95 -> 12.30 (the contraction is serial: its removal removes its time; removing the amax output of K1 changes nothing within noise: 1.5 % at D128 L1024). Against the e4m3 tensor floor the contraction runs at 85-87 % of 1431 TF (D128 L2048 3.52 ms vs 3.07, D256 L2048 7.30 vs 6.15): nothing left to gain there, the cuBLASLt algorithm sweep of the single direction found no faster pick. K1 runs at 61 % (D128 L2048) .. 73 % (D256 L2048) of its bf16 tensor floor at 748 TF (two launches recompute LN_in).
 
-Scale floor: `pow2_scale` (calibration scale of a channel from its amax) returned a scale from `amax.clamp_min(1e-30)`, i.e. 2^-99 .. 2^-107 for a channel whose amax is a denormal-sized ~0 (exactly 0 already gave 1): such a scale saturates the e4m3 cast on any later input (seen in the OpenDDE end-level runs). It is now floored at 2^-30 (amax 4e-7); channels above are unchanged (the single-direction route's outputs are bit-identical: 20 / 20 FP8 cases against `fp8/tm2`). The TriAttn per-head V scale (`vscale_from_amax`, `h100_sm90.py`, 2^-99 for a head with amax 0) is the same pattern; it belongs to the TriAttn branch and was not touched here.
+Scale floor: `pow2_scale` (calibration scale of a channel from its amax) returned a scale from `amax.clamp_min(1e-30)`, i.e. 2^-99 .. 2^-107 for a channel whose amax is a denormal-sized ~0 (exactly 0 already gave 1): such a scale saturates the e4m3 cast on any later input (seen in the OpenDDE end-level runs). It is now floored at 2^-30 (amax 4e-7); channels above are unchanged (the single-direction route's outputs are bit-identical: 20 / 20 FP8 cases against `fp8/tm2`). The TriAttn per-head V scale (`vscale_from_amax`, `h100_sm90.py`, 2^-99 for a head with amax 0) is the same pattern: on the 2.5.12 base it has the same 2^-30 floor, and a head whose calibration absmax is ~0 takes scale 1 (`VSCALE_FLOOR`; tests `test_vscale_floor_and_zero_heads`, `test_static_scale_of_a_zero_head_does_not_saturate_later`).
 
 ### The F8 core alone on real activations
 
@@ -325,7 +441,7 @@ a head calibrated at exactly zero saturates on any later non-zero V, and `rescal
 ## Known limits
 
 - Boltz-2 9c90 is bistable under any numerical noise of 0.1-2 % on the TriAttn output; V on e4m3 flips it (hi + lo too: 2 of 4 trunk seeds). In the current environment its own bf16 trunk seeds fall into 5 modes (24 seeds, 15.3 A, ipTM 0.40-0.85) and FP8 changes the mode of 9 of 24 same trunk seeds while the mode population stays equal (see the widened end-level section). Hence whitelist only, and Boltz-2 is not on it (open decision).
-- Scales are per tensor (TriMul) or per head (TriAttn), powers of two. The calibration caches are keyed by weight pointer; `weights_changed()` does not invalidate it (inference only today: after an in-place weight update the cache is stale).
+- Scales are per tensor (TriMul) or per head (TriAttn), powers of two. The calibration caches are keyed by a tensor address (TriMul: to_left's weight; TriAttn: the fused weight pack, an unfused site's V weight); on the 2.5.12 base an entry is dropped when that tensor is freed (before, a later module whose weight landed at the same address read the stale state: 137 % update error for an incoming module after an outgoing one, NaN for a bidirectional one; tests `test_calibration_state_follows_the_module_lifetime`, `test_static_scales_follow_the_module_lifetime`). `weights_changed()` does not invalidate it (inference only today: after an in-place weight update the cache is stale).
 - A saturation on an out-of-distribution input is caught only after the forward (lazy guard); a caller that does not read `overflow_peak()` runs unguarded.
 - Prebuild: the TriAttn FP8 variants (F8 core hi / hi + lo, the V^T-plane fronts VTW 1 / 2, bf16 and fp16-exact: 6 artifacts) are in the prebuild plan (`kernels/triangle_attention/cuda/__init__.py`), so they ship in the wheel. The TriMul FP8 variants (the FP8-plane K1 tile(s) and the K3 with `K3_CSCALE`, any-L row form and for D256 also the token-flat form; D256 K1 per length of the requirements row) are in the plan too (`kernels/trimul_inproj/cuda/__init__.py`); `_h100_fp8` builds nothing (cuBLASLt e4m3 is a library call). Verified: a prebuilt bundle (`_prebuild --only trimul_inproj cast`) + an EMPTY local JIT cache + an FP8 forward (eager calibration, 3 calls, then a graph capture and replay) at L256 / 300 / 512 / 1024, D128 / D256, both directions: 0 compiled, 5 (D128) / 6 (D256) artifacts resolved from the packaged root, none from the local cache.
 - cuBLASLt e4m3 heuristics and `cvt.satfinite` depend on the CUDA 12 toolchain.
@@ -333,6 +449,29 @@ a head calibrated at exactly zero saturates on any later non-zero V, and `rescal
 - End to end gain is small: TriMul FP8 1.5-4.5 % (compile + graph warm forward; measured before the 2026-11-15 `fp8/tm2` fixes and gates, not re-measured).
 - TriAttn unfused sites: the static V scale is calibrated on the first eager call of a site (as the fused front's); after `take_overflow()` the caller must `rescale_all()` and redo. A site not reached through `_infer` has no site key and runs the dynamic pass.
 - TriAttn FP8 below the S gate (standalone-pass sites: 1024 tokens, 512 for 16-channel heads; front-made sites: see above, from L256 for d_pair 64) runs the fp16 core: short targets see no change at all.
+
+## Verification on the 2.5.12 base (branch `fp8/3.0.0-on-2512`, 2026-11-17)
+
+- Default (no FP8 switch) route against the 2.5.12 tree (origin/main 7c544cf2f), separate processes, sha1 of every output tensor (training: output, input
+  gradient, every parameter gradient): **169 / 169 identical**, on the merged tree and again on the final head. Cases: TriAttn the 25 module shapes of the
+  verification below (64:4:32 / 64:2:32 / 64:4:16 / 128:4:32 / 256:8:32 / 384:12:32, L256-1536 rotating start / end / flip / masked, plus 128:4:32 L2048)
+  and 6 module-level calls (eval both nodes, training with every gradient); bidirectional TriAttn 6 (L128-768, B1 / 2, mask / none, eval + training);
+  TriMul one direction D64 / 128 / 256 / 384 / 512, outgoing / incoming, L256 / 300 / 512 / 1024 / 1536 (D384 / 512: L256 / 512 / 1024), B1 / 2: 68 inference
+  + 16 training (D64 / 128 / 256 / 512, L256 / 384); bidirectional TriMul D64 / D128 L128-2048 (port K3 range included), D256 L256-1024, mask / none, B2,
+  training: 44; OuterProductMean S512 / 1024 / 4096 / 8192 (the S > 4096 route included): 4.
+- FP8 routes: error identical to the 2.5.9-based branch (table in "Base 2.5.12"); the speed / gate re-measure is in the same section.
+- `tmn_kernels.cuh` carries the FP8 K1 code (under `TMN_K1_F8` / `TMN_K1_F8C`) and the schedule-6 ring generalisation, so every TriMul artifact that
+  includes it re-keys (output bytes unchanged, above): the 3.0.0 sm90 wheel needs a rebuild of those (107 artifacts of trimul_inproj / triangle_attention
+  in the plan were not in the 2.5.12 cache). The anchor-patch chains of the families that patch the header by anchor strings
+  apply: every planned artifact built, `test_prebuild_plan.py` passes.
+- Tests. GPU: the code-graph CLI (`dev code-graph --diff --tests`) is not in the tree since 2.5.0 (65f37dc3c), so the files were chosen by import reach of
+  the changed modules / sources (32 files; the 3 sm80-only files left out): one 4-GPU work-queue job, 28 / 29 files pass;
+  `test_trimul_big_plane.py::test_triton_training_past_2_31_elements[False-14]` (Triton backend, L4200 training) runs out of memory, the same on the 2.5.12
+  tree alone (not touched here). The FP8 files again after the last code change: `test_triattn_f8pv_h100.py` 31, `test_trimul_fp8_planes.py` 25,
+  `test_trimul_fp8_bidir.py` 16, `test_trimul_fp8_k1.py` 6 passed. CPU: `test_requirements`, `test_prebuild_plan`, `test_judge`, `test_modules_cpu`,
+  `test_imports`, `test_supports_signature`: 2926 passed. `ruff check` and `pyright` clean on the touched Python files (`ruff format` reports three
+  2.5.12 lines that this branch leaves as they are). `_prebuild --check` sm90a / sm80 / sm120: the same findings as the 2.5.12 tree (sm90a plans 526
+  artifacts against 513: the FP8 variants). `judge owed` H100 / A100 / RTX 5090: accuracy and speed 0 (no `version` / `backend_versions` change).
 
 ## Verification of the merged branch (`fp8/main`, 2026-11-15)
 
@@ -345,3 +484,14 @@ a head calibrated at exactly zero saturates on any later non-zero V, and `rescal
 - Output bytes: TriMul FP8 planes (D128 / D256, both directions, L256 / 300 / 512 / 1024 / 1536) 20 / 20 identical to `fp8/main`; TriMul default (D64 / 128 / 256 / 384, both directions, same L) 40 / 40 identical (the header edit is under `TMN_K1_F8`; the default K1 builds re-key through the header text, their SASS is unchanged).
 - CPU tests `tests/cpu/test_prebuild_plan.py`, `test_requirements.py`, `test_judge.py`: 1188 passed. GPU tests `tests/gpu/test_trimul_fp8_planes.py`, `test_trimul_fp8_k1.py`: 30 passed (one job, 1 GPU).
 - Prebuild: see "Known limits" (0 compiled with a prebuilt bundle and an empty JIT cache).
+
+## Open decisions (owner)
+
+- FP8 tolerance / registry row: none exists (the registry dtype vocabulary is `float32|master`); the TriMul FP8 route is 2.3-3.1 % in the engine-standard
+  form (tolerance 8e-3), TriAttn FP8 0.3-0.75 %. Adding a row, a tolerance or a `backend_versions` entry is the owner's call; nothing is owed today
+  because the default route is unchanged.
+- Boltz-2 on the TriAttn whitelist (9c90 is bistable under any 0.1-2 % noise; see "Boltz-2 9c90").
+- TriMul FP8 in the shipped prebuild: the FP8 K1 / K3 variants are planned in the sm90 plan (13 more artifacts on sm90a than 2.5.12); whether the 3.0.0
+  wheel ships them is open.
+- The experimental FP8-compute K1 (`MINIWORLD_TRIMUL_FP8_K1`, `TMN_K1_F8C`: 6.9 % update error, failed the Protenix pLDDT criterion) is still in the
+  code and the shared header; removing it would simplify `tmn_kernels.cuh`.
