@@ -343,11 +343,13 @@ def _ext(
     cz: int = CZ,
     fused: bool = False,
     arch: str | None = None,
+    fp8: bool = False,
 ):
     """This repo's fused OPM kernels for the current card: `csrc/opm_epilogue.cu` (sm_90a) or
     `csrc/sm100/opm_sm100.cu` (sm_100a, the same kernels and signatures on tcgen05 / TMEM).
     (cm, cz) other than MiniWorld's build the same source with -DOPM_CM / -DOPM_CZ (one extension per width). ``arch`` (``sm90`` / ``sm100``) names the card
-    instead of asking ``device``'s."""
+    instead of asking ``device``'s.  ``fp8``: the EXPERIMENTAL opt-in build (-DMINIWORLD_OPM_FP8, `opm_fp8.py`) whose wide prologue writes
+    e4m3 A2 / BT; never built by the default routes."""
     sm100 = arch == "sm100" if arch else torch.cuda.get_device_capability(device) == (10, 0)
     wide = (cm, cz) != (CM, CZ)
     native = True if native is None else native
@@ -361,6 +363,8 @@ def _ext(
         key += "_half"
     if fused and not sm100 and not wide:  # the fused outer product + projection kernel (csrc/opm_epilogue.cu, MINIWORLD_OPM_FUSED)
         key += "_fused"
+    if fp8 and not sm100:
+        key += "_fp8"
     if wide and not sm100:
         key += f"_{cm}_{cz}"
     if key in _EXT:
@@ -384,6 +388,8 @@ def _ext(
             suffix += "_half"
         if fused and not wide:
             suffix += "_fused"
+        if fp8:
+            suffix += "_fp8"
         if wide:
             suffix += f"_{cm}_{cz}"
         _EXT[key] = load(
@@ -393,7 +399,8 @@ def _ext(
             + ([f"-DOPM_CM={cm}", f"-DOPM_CZ={cz}"] if wide else [])
             + (["-DMINIWORLD_OPM_EPILOGUE_TMA_OVERLAP=1"] if epi_tma else [])
             + (["-DMINIWORLD_OPM_EPILOGUE_TMA_HALF=1"] if epi_half else [])
-            + (["-DMINIWORLD_OPM_FUSED=1"] if fused and not wide else []),
+            + (["-DMINIWORLD_OPM_FUSED=1"] if fused and not wide else [])
+            + (["-DMINIWORLD_OPM_FP8=1"] if fp8 else []),
             extra_cflags=["-O3"],
         )
     return _EXT[key]
@@ -1239,6 +1246,13 @@ def _inference_op(args: list[torch.Tensor], eps: float, after: bool, dmin: float
             residual=args[8] if args[8].numel() else None,
             save_stats=False,
         )[0]
+    # EXPERIMENTAL opt-in (MINIWORLD_OPM_FP8): e4m3 grouped product; off by default
+    from miniworld_engine.kernels.integrations import opm_fp8
+
+    if opm_fp8.serves(args):
+        z = opm_fp8.inference(args, eps, after, dmin, doff)
+        if z is not None:
+            return z
     msa, mask, lnw, lnb, wa, wb, wo, bo = args[:8]
     return _OpmMath.forward(
         _SavedContext(),

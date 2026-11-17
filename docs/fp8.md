@@ -438,6 +438,177 @@ Findings for the contract: (1) the 4 x headroom held in every run, but two sites
 have saturated and needed the redo. (2) In the OpenDDE runs at L >= 768 some sites calibrate at **log2(scale) = -99** (35 of 1380 heads of the 12-head sites; probably the 3 extra 12-head sites that appear only at ~1.67 x L, whose V is then zero at the calibration call (not isolated); `vscale_from_amax` clamps amax at 1e-30). No flag, so V stays zero there, but
 a head calibrated at exactly zero saturates on any later non-zero V, and `rescale_all(4)` x 3 (the redo limit) cannot recover from 2^-99: a floor on the scale (or re-calibrating a head with amax == 0) is the guard to add; not changed here.
 
+## OuterProductMean forward: e4m3 grouped product (`kernels/integrations/opm_fp8.py`, branch `fp8x/opm`, 2026-11-17)
+
+Scope: inference of the `opm_train` forms (groups 1, d_hidden 32, (d_msa, d_pair) in `opm_train.SHAPES`, batch 1, either normalisation order,
+`count_offset`, the pair residual), H100. Training, Chai-1 groups and the RoseTTAFold3 biased inference (`composed.biased_wide`) stay bf16.
+
+### Where the time goes and where e4m3 can go (default 2.5.12 route, measured)
+
+Stage times: `benchmarks/opm_fp8/stages.py` (raw `benchmarks/opm_fp8/raw/st1.jsonl`): each stage alone on the same operands, captured in a CUDA graph, interleaved,
+cool = 2 s / 1 s idle then a ~40 ms burst (median of 3), sustained = after 1 s of back-to-back replays (mean of 3). Bound classes are from
+the counters of benchmarks/opm_win (ncu: prologue DRAM 76 % of peak; cuBLAS product ~99 % of the tensor peak per cycle, power-capped) and
+from the achieved rates below; the e4m3 product was not put under ncu (cuBLAS).
+
+L 768, S 16384, d_msa 64 / d_pair 128 (AF3 / Boltz widths; default route past depth 4096 = wide prologue + cuBLAS product + count table + epilogue):
+
+| stage | GEMM / work | FLOP share | bytes (bf16 default) | default ms cool / sus | e4m3 operand | upper bound | FP8 ms cool / sus |
+|---|---|---|---|---|---|---|---|
+| prologue (LN + W_l, W_r on wgmma + mask) | [S N, 64] x [64, 64] | 0.5 % | in 1.6 GB, out A2 + BT 1.6 GB | 1.33 / 1.33 (DRAM-bound) | A2 / BT **stored** as e4m3 (out 0.8 GB) | x 0.75 (bytes) | 0.93 / 0.99 |
+| pair counts | fp32-output GEMM of the 0 / 1 mask | - | 25 MB | 0.04 | none (must stay exact) | - | 0.04 |
+| grouped product O = A2 BT^T | M = N = 32 L = 24576, K = S = 16384 | 98.7 % | in 1.6 GB, O 1.2 GB | 24.46 / 27.40 (810 TF, tensor / power-bound) | **both operands e4m3**, fp32 accumulation, bf16 O | x 0.5 (e4m3 peak = 2 x bf16) | 13.93 / 15.46 (1420 TF) |
+| epilogue (permute, / n, W_o 1024 -> 128, bias) | [L^2, 1024] x [1024, 128] | 0.8 % | O 1.2 GB in, z 151 MB out | 0.46 / 0.48 | O as e4m3 (cuBLASLt D e4m3): -0.6 GB read + write; W_o e4m3: no gain (not tensor-bound) | ~ -0.3 ms (2 %) | not done |
+| whole module (speed.py) | | | | 25.97 / 28.83 | | | 15.06 / 15.85 |
+
+Other shapes (cool ms, default -> FP8 piece): L 384 S 4096 product 1.53 -> 0.88, prologue 0.160 -> 0.121, epilogue 0.126 (fused default kernel 1.74);
+L 256 S 1024 product 0.190 -> 0.125, prologue 0.031 -> 0.027, epilogue 0.058 (fused 0.228); L 768 S 2048 product 3.12 -> 1.89, epilogue 0.455 (fused 3.68);
+d_msa 128 / d_pair 256 L 768 S 4096 product 6.09 -> 3.55, prologue 0.454 -> 0.350, epilogue 0.651; d_msa 256 / d_pair 512 L 384 S 4096 product
+1.53 -> 0.87, prologue 0.354 -> 0.342 (its LayerNorm is the cost, not the store), epilogue 0.322.
+
+Placements:
+
+1. **Implemented: the grouped product on e4m3 operands** (the only stage that matters: 99 % of the FLOPs, 94 % of the time at depth 16384,
+   and the share grows with S). The FP8 build of the wide prologue (`-DMINIWORLD_OPM_FP8`, `opm_train._ext(fp8=True)`; `#if`-guarded in
+   `csrc/opm_epilogue.cu`, so the default builds compile the same code) multiplies the fp32 projection accumulator by a static power-of-two
+   `1 / scale` per operand, casts with `__nv_cvt_float2_to_fp8x2(..., __NV_SATFINITE, __NV_E4M3)` into a 128 B-swizzled byte tile and stores it
+   with one TMA store per operand (half the default's A2 / BT bytes); it keeps the max |scaled value| of each operand (one `atomicMax` per warp
+   per CTA) for the guard. The product is a cuBLASLt e4m3 TN GEMM (`opm_lt_f8`, fp32 accumulation with cuBLAS's periodic promotion, A / B
+   scale pointers = the dequantisation scales, so a captured graph follows an in-place rescale), bf16 O exactly where the default product route
+   writes it; the count table (exact) and the epilogue are the default's. Below depth 4096 the FP8 route replaces the fused bf16 kernel by
+   this composition (an e4m3 product + O round trip beats the fused bf16 kernel from S 1024 / L 256, see the gate).
+2. Not done: O as e4m3 (a third quantisation for <= 2 % of the call at depth 16384, more at S 1024-2048 where the epilogue is 15-25 % of the FP8
+   route), W_o in e4m3 (the epilogue is not tensor-bound), the fused kernel on e4m3 wgmma (k32; would remove the O round trip at S <= 4096: upper
+   bound = the epilogue + O write, 0.06-0.46 ms of 0.24-2.5 ms; operand layouts, TMA boxes and the k-permuted Opair all change -- a kernel
+   rewrite, out of this task's scope), the prologue's projections in e4m3 (0.5 % of the FLOPs, DRAM-bound).
+
+### Enable
+
+| env (read at import; the module globals can be set at run time) | effect |
+|---|---|
+| `MINIWORLD_OPM_FP8=bound` | scales from the weights alone: \|LN(x)_k\| <= sqrt(d_msa - 1) \|gamma_k\| + \|beta_k\| for every input, so max_c sum_k \|W_ck\| (sqrt(d_msa - 1) \|gamma_k\| + \|beta_k\|) (+ \|projection bias\|), x (1 + 2^-6), to the next power of two, bounds every scaled value by 448: the cast cannot saturate, no calibration call, no guard needed. **Recommended.** |
+| `MINIWORLD_OPM_FP8=calib` | the docs/fp8.md convention: the first eager call of a module measures max \|A2\|, max \|BT\| (one extra FP8 prologue at scale 1), scale = next power of two x `HEADROOM` (16); weakref-finalized cache keyed by `to_left.weight`; a capture with no calibration takes the default route |
+| `MINIWORLD_OPM_FP8_GUARD` | `sync` (default, eager: an overflowing call rescales and redoes itself), `lazy` (no host sync; capturable): `opm_fp8.overflow_peak()` once per forward, if > 448 `opm_fp8.rescale_all(peak)` and redo (same contract as TriMul) |
+| `MINIWORLD_OPM_FP8_MINS=<s>` | one depth gate instead of the measured shape rule (`_gate`: padded S >= 2048, or S >= 1024 at padded L >= 256); 0 = no gate |
+| `MINIWORLD_OPM_FP8_FASTACC=1` | cuBLASLt fast accumulation: product 4-7 % faster, but max error 3.5-4.5 % at depth 16384 (K = 16384 without promotion): **not recommended** |
+
+With the random-weight modules here `bound` and `calib` chose the same scales (2^-2 at d_msa 64, 2^-1 at 128, 2^0 at 256; scaled amax 21-26,
+11, 5-6 of 448) and give identical outputs; `bound` needs no calibration call and no guard. No saturation in any run (peak <= 26).
+
+### Module time vs the 2.5.12 default (H100, CUDA graph, same process, interleaved, same-cubin control)
+
+`benchmarks/opm_fp8/speed.py` (raw `benchmarks/opm_fp8/raw/sp1.jsonl`, `sp2.jsonl`, `sp3.jsonl`): the module (`master_weights=True`, ragged MSA: the last S / 8 rows
+cover half the tokens), graphs of def / ctl (default again) / f8b (bound) / f8bf (bound + fast accumulation), every gate removed. cool = 2 s idle,
+burst of ~40 ms per route, 3 reps median; sustained = 1 s back-to-back interleaved, then 3 blocks of ~60 ms per route, mean. Cells: FP8 / default,
+`cool / sustained`; the same-cubin control's cool ratios are 0.99-1.10 (single-call bursts at the 26-190 ms shapes), sustained 0.93-1.03.
+
+d_msa 64 / d_pair 128, Boltz order (2.5.12 default ms cool in brackets):
+
+| L \ S | 256 | 512 | 1024 | 2048 | 4096 | 8192 | 16384 |
+|---|---|---|---|---|---|---|---|
+| 128 | 0.93 / 0.94 (0.061) | 1.34 / 1.35 (0.050) | 1.05 / 1.04 (0.080) | 0.93 / 0.87 (0.137) | 0.76 / 0.71 (0.259) | | 0.66 / 0.64 (0.928) |
+| 256 | 0.98 / 0.98 (0.153) | 1.12 / 1.06 (0.156) | 0.93 / 0.85 (0.256) | 0.75 / 0.70 (0.464) | 0.65 / 0.62 (0.870) | 0.63 / 0.61 (1.64) | 0.61 / 0.57 (3.21) |
+| 384 | | 1.10 / 1.01 (0.316) | 0.85 / 0.80 (0.539) | 0.69 / 0.66 (0.991) | 0.62 / 0.58 (1.87) | 0.62 / 0.58 (3.44) | 0.60 / 0.56 (6.79) |
+| 768 | | 1.04 / 0.97 (1.17) | 0.82 / 0.74 (2.00) | 0.68 / 0.62 (3.67) | 0.61 / 0.56 (6.92) | 0.59 / 0.54 (13.1) | 0.58 / 0.55 (26.0) |
+| 1024 | | | | | 0.49 / 0.48 (15.1) | | 0.57 / 0.53 (47.9) |
+| 2048 | | | | | 0.54 / 0.49 (53.8) | | 0.58 / 0.55 (191.8) |
+
+(L 192 S 1024, padded to 256: 0.48 / 0.48 against a 0.317 ms default -- the padded default is slower than L 256's; L 1024 S 4096: the fused
+default kernel takes 15.1 ms, 2.2x L 768's, so the FP8 composition is 0.49.)
+
+AF3 order and the wide widths:
+
+| width, order | L | S 1024 | S 2048 | S 4096 | S 16384 |
+|---|---|---|---|---|---|
+| 64 / 128, AF3 | 384 | | 0.70 / 0.70 | | |
+| 64 / 128, AF3 | 768 | | | | 0.59 / 0.55 |
+| 128 / 256, AF3 (Protenix-v2) | 384 | 0.82 / 0.78 | | 0.67 / 0.63 | 0.60 / 0.59 |
+| 128 / 256, AF3 | 768 | 0.79 / 0.73 | | | 0.58 / 0.51 |
+| 128 / 384, AF3 (ESMFold2) | 384 | 0.84 / 0.79 | | | 0.60 / 0.59 |
+| 128 / 384, AF3 | 768 | | | 0.65 / 0.59 | |
+| 256 / 512, Boltz order (IntelliFold2) | 384 | 0.86 / 0.83 | | | 0.65 / 0.62 |
+| 256 / 512 | 768 | | | 0.69 / 0.62 | |
+
+Gate (`_gate`): FP8 from padded S 2048 at every L, from S 1024 at padded L >= 256; below, the default runs (L 128 S 1024 +5 %, S 512 +0..34 %).
+
+### Against Anthropic at large depth (benchmarks/opm_win fair protocol)
+
+`fair.py` (opm_win) run with `MINIWORLD_OPM_FP8=bound` (raw `benchmarks/opm_fp8/raw/fair_fp8.jsonl`); Anthropic and the default from opm_win `raw/v3_kit*` /
+`raw/v3_after*` (2.5.11 = 2.5.12 OPM); lead = (PyTorch_engine / CUDA) / (PyTorch_kit / Anthropic), > 1: the engine is faster (`benchmarks/opm_fp8/lead.py`):
+
+| row | L | S | Anthropic ms | default ms | FP8 ms | lead default cool / sus | lead FP8 cool / sus |
+|---|---|---|---|---|---|---|---|
+| 55 (AF3) | 256 | 8192 | 1.73 | 1.69 | 1.03 | 1.016 / 1.052 | 1.680 / 1.657 |
+| 55 | 256 | 16384 | 3.32 | 3.29 | 1.99 | 1.004 / 1.050 | 1.675 / 1.687 |
+| 55 | 384 | 8192 | 3.67 | 3.52 | 2.12 | 1.033 / 1.093 | 1.721 / 1.711 |
+| 55 | 384 | 16384 | 7.08 | 6.90 | 4.14 | 1.021 / 1.040 | 1.708 / 1.797 |
+| 55 | 512 | 8192 | 6.46 | 6.14 | 3.66 | 1.048 / 1.086 | 1.765 / 1.885 |
+| 55 | 512 | 16384 | 12.51 | 12.09 | 7.13 | 1.027 / 1.035 | 1.749 / 1.802 |
+| 55 | 768 | 8192 | 13.93 | 13.26 | 7.93 | 1.044 / 1.046 | 1.754 / 1.760 |
+| 55 | 768 | 16384 | 27.14 | 26.30 | 15.54 | 1.024 / 1.119 | 1.746 / 1.866 |
+| 57 (Boltz) | 256 | 8192 | 2.01 | 1.67 | 1.03 | 1.195 / 1.179 | 1.956 / 1.867 |
+| 57 | 256 | 16384 | 3.65 | 3.25 | 1.99 | 1.120 / 1.150 | 1.841 / 1.818 |
+| 57 | 384 | 8192 | 4.14 | 3.47 | 2.12 | 1.181 / 1.244 | 1.946 / 1.938 |
+| 57 | 384 | 16384 | 7.59 | 6.82 | 4.14 | 1.103 / 1.170 | 1.835 / 1.925 |
+| 57 | 512 | 8192 | 7.13 | 6.06 | 3.66 | 1.170 / 1.220 | 1.953 / 2.008 |
+| 57 | 512 | 16384 | 13.16 | 11.94 | 7.15 | 1.094 / 1.139 | 1.842 / 1.926 |
+| 57 | 768 | 8192 | 15.50 | 13.17 | 7.92 | 1.170 / 1.242 | 1.965 / 2.107 |
+| 57 | 768 | 16384 | 28.49 | 26.16 | 15.53 | 1.087 / 1.176 | 1.838 / 1.942 |
+
+(The Anthropic kits' products are bf16 cuBLAS: this is FP8 against bf16, not a like-for-like kernel comparison.)
+
+### Error against fp64 PyTorch
+
+`benchmarks/opm_fp8/err.py` (raw `benchmarks/opm_fp8/raw/er1.jsonl`): the module in float64 on the PyTorch backend, same inputs; rms = rms(y - y64) / rms(y64),
+max = max|y - y64| / max|y64| (the engine judge metric; tol = max(err_pytorch, 8e-3)). `row:R` = the requirements row's construction
+(`measure.config`); the others random weights (W ~ N(0, 1/fan_in), LN weight 1 +- 0.1, biases +- 0.1) with a ragged MSA. All outputs finite,
+no saturation.
+
+| case | PyTorch bf16 max | default rms / max | FP8 bound rms / max (/ tol) | FP8 calib | FP8 bound + fast acc. max (/ tol) |
+|---|---|---|---|---|---|
+| row 55, L 384, S 1024 | 4.4e-3 | 2.4e-3 / 4.4e-3 | 9.9e-3 / 1.37e-2 (1.72) | = bound | 1.37e-2 (1.72) |
+| row 57, L 384, S 1024 | 5.8e-3 | 2.4e-3 / 5.8e-3 | 5.7e-3 / 1.05e-2 (1.32) | = bound | 1.05e-2 (1.32) |
+| row 63 (count_offset), L 384, S 1024 | 3.1e-3 | 2.4e-3 / 3.1e-3 | 2.4e-3 / 3.1e-3 (0.38) | = bound | (0.38) |
+| 64 / 128 Boltz, L 384, S 1024 | 5.2e-3 | 2.6e-3 / 5.2e-3 | 1.11e-2 / 1.15e-2 (1.44) | = bound | (1.44) |
+| 64 / 128 AF3, L 384, S 4096 | 5.5e-3 | 4.7e-3 / 4.4e-3 | 3.01e-2 / 8.2e-3 (1.03) | = bound | 1.34e-2 (1.68) |
+| 64 / 128 Boltz, L 768, S 2048 | 6.2e-3 | 2.4e-3 / 5.9e-3 | 8.1e-3 / 9.5e-3 (1.18) | = bound | 9.8e-3 (1.23) |
+| 64 / 128 Boltz, L 256, S 16384 | 6.2e-3 | 2.3e-3 / 5.8e-3 | 3.6e-3 / 6.2e-3 (0.78) | = bound | 3.46e-2 (4.32) |
+| 64 / 128 Boltz, L 768, S 16384 | 6.2e-3 | 2.3e-3 / 5.7e-3 | 3.6e-3 / 6.9e-3 (0.86) | = bound | 3.68e-2 (4.59) |
+| 64 / 128 AF3, L 768, S 16384 | 6.3e-3 | 4.4e-3 / 4.7e-3 | 2.22e-2 / 6.3e-3 (0.79) | = bound | 4.46e-2 (5.58) |
+| 64 / 128 AF3, L 1024, S 8192 | 5.4e-3 | 4.6e-3 / 4.9e-3 | 2.73e-2 / 7.2e-3 (0.90) | = bound | 2.21e-2 (2.76) |
+| 128 / 256 AF3, L 384, S 4096 | 6.1e-3 | 4.8e-3 / 4.2e-3 | 3.48e-2 / 1.01e-2 (1.26) | = bound | 1.19e-2 (1.49) |
+| 128 / 384 AF3, L 384, S 4096 | 7.1e-3 | 4.8e-3 / 4.7e-3 | 3.49e-2 / 1.01e-2 (1.26) | = bound | 1.17e-2 (1.46) |
+| 256 / 512 Boltz, L 384, S 2048 | 5.5e-3 | 2.6e-3 / 5.1e-3 | 9.1e-3 / 1.33e-2 (1.66) | = bound | 1.31e-2 (1.64) |
+
+Reading: e4m3 rounds each A2 / BT value with 2.7 % rms (measured; one e4m3 rounding: the same rms as torch's cast of the bf16 A2 / BT, the kernel casting the fp32 accumulator directly, no
+double rounding), O with 3.4 % rms per element; the projection and the mean over the depth average it down. Judge metric 0.6-1.4 %:
+inside tol at depth >= 8192 (the depth averaging wins), 1.03-1.72 x tol at depth 1024-4096. The AF3-order rms is 2-3.5 % because there the
+bias is divided by n too, so y64's rms is small (the max metric stays 0.6-1 %). Row 63: the FP8 route ran (scales cached, 9 calls) but its
+output equals the default's to 1e-8 rms: in that row's construction the product term is negligible against the bias / n. Fast accumulation:
+max error 3.5-5.6 % at depth 8192-16384 (not recommended).
+
+### Bit-identity of the default and tests
+
+- Default route (FP8 off) bit-identical to the base (91a9241fb = 2.5.12 + the FP8 routes): `benchmarks/opm_fp8/bit.py` (sha1 of the output, and
+  in training of y and every gradient), base tree and this tree in separate processes, 13 / 13 cases identical: d_msa 64 / d_pair 128 at
+  (L, S) = (256, 1024) fused + TMA prologue, (384, 2048), (768, 4096), (256, 8192) product route, (200, 3000) padded + pair residual, (384, 1024)
+  AF3 order + count_offset, (128, 512), (256, 8192) AF3 + residual; 128 / 256 (256, 1024), 128 / 384 (256, 2048), 256 / 512 (128, 1024);
+  training forward + backward at 64 / 128 (256, 1024) and 128 / 256 (128, 512). The FP8 kernel code is `#if defined(MINIWORLD_OPM_FP8)`
+  only (the default builds get the same code; their cache keys change with the source text).
+- `tests/gpu/test_opm_fp8.py` (new, 16 cases: off by default, operands = one e4m3 rounding of the default A2 / BT, module error budget for both
+  policies / both orders / the row-chunked product / the residual / three widths, sync and lazy guard + `rescale_all`, graph replay = eager):
+  16 / 16 pass. `tests/gpu/test_opm_deep_product_route.py`: pass. `tests/cpu/test_capture_api.py`: the three `opm_fp8` dicts listed; the
+  test still fails on the TriAttn / TriMul FP8 dicts already unlisted on the base branch (not touched here). ruff check / format, pyright: clean
+  on the touched Python files. (The `dev code-graph` CLI is not in this tree; the test files were chosen by import of `opm_train` / `opm_fp8`.)
+
+### Recommendation
+
+- `MINIWORLD_OPM_FP8=bound` is the OPM FP8 route to offer: 1.7-2.0x faster than 2.5.12 at depth 4096-16384 on every width (FP8 / default
+  0.49-0.65), 1.07-1.6x at depth 1024-2048 from L 256 (L 128 from S 2048); against Anthropic at depth 8192 / 16384 the lead goes from 1.00-1.24 to 1.66-2.11.
+  No calibration, no guard, graph-safe. Error: judge metric 0.6-1.4 % (default 0.3-0.6 %), inside the engine tol at depth >= 8192, up to
+  1.72 x tol at depth 1024-4096: the owner's call (end-level check on a deep-MSA model before any default).
+- Not worth it: fast accumulation (accuracy), FP8 at depth <= 512 (slower), e4m3 O / W_o (<= 2 %).
+- Open: an e4m3 version of the fused kernel for S <= 2048 (removes the O round trip; the remaining gain there is the epilogue's share, 15-25 %).
+
 ## Known limits
 
 - Boltz-2 9c90 is bistable under any numerical noise of 0.1-2 % on the TriAttn output; V on e4m3 flips it (hi + lo too: 2 of 4 trunk seeds). In the current environment its own bf16 trunk seeds fall into 5 modes (24 seeds, 15.3 A, ipTM 0.40-0.85) and FP8 changes the mode of 9 of 24 same trunk seeds while the mode population stays equal (see the widened end-level section). Hence whitelist only, and Boltz-2 is not on it (open decision).
