@@ -118,7 +118,7 @@ class OpmFp8TrainFn(torch.autograd.Function):
             f8amax=peak,
             **dkw,
         )
-        sa, sb = sc[0:1], sc[1:2]
+        sa, sb = sc[0:1].clone(), sc[1:2].clone()  # (separate allocations: cuBLASLt refuses a scale pointer off its alignment)
         o = opm_fp8.product(a8, b8, (sa, sb), n)
         z = ext.opm_epilogue(
             o, norm, wo.detach().to(bf).contiguous(), bo.detach().to(bf).float().contiguous(), n, n, res, int(after), **dkw
@@ -144,7 +144,7 @@ class OpmFp8TrainFn(torch.autograd.Function):
         fmt = 1 if MODE == "e5m2" else 0
         dz0 = dz[0].contiguous()
         sdq = ext.opm_f8_dscale(dz0, norm, bw, E5M2_MAX if fmt else E4M3_MAX)  # {sd, 1 / sd}
-        sd = sdq[0:1]
+        sd = sdq[0:1].clone()
         peak = _peak_buffer(dz.device)
         d8, d8t, dzp, dbo = ext.opm_dgrad_f8(dz0, norm, bw2, n, n, int(ctx.after), sdq[1:2], peak[2:3], fmt)
         a8t, b8t = ext.opm_t8(a8), ext.opm_t8(b8)  # [s, (i,c)]: K = (i,c) contiguous

@@ -136,7 +136,9 @@ def test_gradients_against_fp64(mode, length, depth, cm, cz, after, fmt) -> None
     for k, v in g.items():
         assert torch.isfinite(v).all(), k
         rms, mx = _err(v, gold[k])
-        assert rms < 0.06 and mx < 0.12, (k, rms, mx)
+        # measured (docs/fp8_training.md): e4m3 dO ~3.5 % rms, e5m2 ~6 % (one rounding of a 3- / 2-bit mantissa); the bf16 default ~0.5 %
+        rb, mb = (0.05, 0.10) if fmt == "e4m3" else (0.09, 0.15)
+        assert rms < rb and mx < mb, (k, rms, mx)
     g2 = _grads(mod, msa, mask, gz)
     assert all(torch.equal(g[k], g2[k]) for k in g)
 
