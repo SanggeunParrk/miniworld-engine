@@ -64,7 +64,7 @@ class Transition(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 3,
         "anthropic:a100_sm80": 4,  # 2026-11-13: the A100 kit stack; the pair_c256_n4 exclusion is capability 9.0 only (A100: the provider cell serves)
-        "cuda:h100_sm90": 5,
+        "cuda:h100_sm90": 6,
         "cuda:a100_sm80": 6,
         "triton:a100_sm80": 2,
         "cuda:5090_sm120": 4,
@@ -75,6 +75,8 @@ class Transition(BackendModule, MasterWeights):
     # 2026-11-13 (RTX 5090): cuda:5090_sm120 2 = the one-kernel D 64 / 128 backward on sm_120a (32-row PW stages), half tiles of the fused forward at few rows;
     # 3 = the main merge (the A100 changes 5 / 6 run on the sm_120a build too)
     # 2026-11-13 (H100): cuda 5 = the inference forward casts fp32-master weights once per parameter version (param_forms), not per call
+    # 2026-11-17 (H100): cuda 6 = D 768 (n 2) inference above 768 rows runs the generic kernels, not the wide D768 training structure (1.4 - 1.9x
+    # faster at 1024 - 8192 rows; ~2.3 % of the outputs differ, the error against float64 is the same: judge max 3.50e-3, rms 4.37e-3)
     # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train; A100 capture forms + fp32 (TF32) build.
     # 2026-11-11 (A100): cuda 3 = the fused D 64 / 128 builds again + the fused fp32 eval forward; triton 2 = TF32-tuned fp32 d768 keys
     # 2026-11-12 (A100): cuda 5 = a call split past one launch's rows (OpenDDE refiner pair rows) runs balanced blocks written into one output (no join copy); the same bits

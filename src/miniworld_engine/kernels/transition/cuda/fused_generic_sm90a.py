@@ -93,9 +93,11 @@ _PREFER_GENERIC_ROWS = {
     256: (6144, 12288),
     384: (16384, 16384),
     512: (16384, 12288),
-    # D 768 (n = 2: Boltz-2 / ESMFold2 token single, at most 768 rows): the wide build runs one 128-row tile per CTA (1 .. 6 CTAs, ~63 us
-    # flat); the generic kernels take 34 - 40 us inference / 59 - 84 us training at 128 - 768 rows (H100 2026-11-10, below triton at each)
-    768: (768, 768),
+    # D 768 (n = 2: Boltz-2 / ESMFold2 token single, 128 .. 2048 rows): the wide D768 build is the training structure (LayerNorm kernel,
+    # an expand that also writes a / b, the [Wa; Wb] row-block pack per call, squeeze); at inference it took 1.6 - 2.1x the generic
+    # kernels at every row count (H100 2026-11-17, CUDA graph: 1024 rows 47.9 / 23.4 us, 2048 63.2 / 33.9, 4096 79.7 / 53.9, 8192
+    # 145.9 / 103.9), so inference stays generic; training at 128 - 768 rows (the train rows) 59 - 84 us generic (2026-11-10)
+    768: (16384, 768),
 }
 
 
