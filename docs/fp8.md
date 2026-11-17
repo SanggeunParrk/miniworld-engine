@@ -6,7 +6,8 @@ intermediates of the `master` route. The numerics harness (ours vs PyTorch) woul
 
 ## TriMul forward: e4m3 planes (`h100_b200style_fp8`, details in `docs/h100/trimul.md`)
 
-Scope: one sample, bf16 inference, D128 / D256 (hidden = pair), one direction or the bidirectional block (`BidirectionalTriangleMultiplication`, from 2026-11-16, branch `fp8/bidir-tm`). B > 1, D64 / D384 / D512, training stay bf16.
+Scope: bf16 inference, D64 / D128 / D256 / D384 (hidden = pair), one direction or the bidirectional block (`BidirectionalTriangleMultiplication`, from 2026-11-16, branch `fp8/bidir-tm`), 1-16 samples per call.
+D64 / D384 and B > 1 are from the 3.0.0 exploration (branch `fp8x/trimul`, see "TriMul: where else e4m3 can go"); D512 and training stay bf16.
 
 Enable (environment, read at import, set before `import miniworld_engine`):
 
@@ -17,7 +18,7 @@ Enable (environment, read at import, set before `import miniworld_engine`):
 | `MINIWORLD_TRIMUL_FP8_FASTACC=1` | cuBLASLt fast accumulation (1.07-1.08x of the contraction at L >= 1024) |
 | `MINIWORLD_TRIMUL_FP8_HEADROOM`, `_SCALE` | scale headroom (16) / `tensor` (default) or `channel` scales |
 | `MINIWORLD_TRIMUL_FP8_K1=1` | EXPERIMENTAL e4m3 K1 compute (6.9 % update error): never a default |
-| `MINIWORLD_TRIMUL_FP8_MINL=<n>` | replaces the per-width / direction min-L gates (below them the bf16 default route runs): D128 out 144, D128 in 192, D256 out 224, D256 in 144, bidirectional D128 256, bidirectional D256 1024; 0 = no gate |
+| `MINIWORLD_TRIMUL_FP8_MINL=<n>` | replaces the per-width / direction min-L gates (below them the bf16 default route runs): D128 out 144, D128 in 192, D256 out 224, D256 in 144, bidirectional D128 256, bidirectional D256 1024; D64 512 (both directions), D384 128, bidirectional D64 2048, bidirectional D384 1024; 0 = no gate |
 
 The K3 pipeline flags are the 2.5.9 bf16 ones (`h100_b200style.K3_EXTRA`); the FP8 route uses that single hook (no private copy).
 The experiments `K3_MC` (2-CTA multicast, D256), the K1 `WTMA` / `PIPE` variants and the TriAttn core macros `TA_F8SW` / `SWN` / `QM` / `K` / `TAU10` were removed from the code (no gain): see "Tried, no gain".
@@ -32,6 +33,142 @@ With `GUARD=lazy` the caller must, once per forward and outside any graph:
 
 The patch that wires this into FoldForge is a file only, not applied: `~/miniworld-engine-scratch/fp8/trimul/foldforge_patch/trimul-fp8-guard.patch` (README beside it).
 A capture with no calibration takes the bf16 route (the first two eager warm-up calls of FoldForge's `_Graph` calibrate).
+
+## TriMul: where else e4m3 can go (3.0.0 exploration, branch `fp8x/trimul`, 2026-11-17, base `fp8/3.0.0-on-2512` 91a9241fb)
+
+Question: the kernels stay as they are; which further operands / intermediates of the TriMul forward can be e4m3, and what does each pay? Raw rows:
+`~/miniworld-engine-scratch/fp8x-trimul/res/` (`stg1.jsonl` stage times, `spd1.jsonl` / `spd2.jsonl` / `spd_tri8.jsonl` module times, `err2_x.jsonl` / `err3_*.jsonl`
+errors, `tri8ub.jsonl` upper bounds, `emul.jsonl` accuracy map), scripts beside them (`scripts/`).
+
+### Stages of the 2.5.12 default and of the FP8-plane route (one direction, outgoing, B = 1)
+
+Per-kernel device time from the profiler on CUDA-graph replay (3 replays; the kernel sum equals the graph replay time within 1-2 %), ms. Floors per
+pair token (M = L^2, h = D): K1 reads z (2 D B) and writes the planes (4 D B bf16, 2 D B e4m3) and LN_in statistics (8 B), 8 D^2 FLOPs; the
+contraction 2 D L FLOPs (reads the planes, writes t 2 D B); K3 reads t (2 D B) and z (2 D B), writes y (2 D B), 4 D^2 FLOPs. %SOL = max(byte floor at
+3.05 TB/s, tensor floor at 748 TF bf16 / 1431 TF e4m3, the cuBLAS-measured peaks) / measured.
+
+| D | L | default K1 / contraction / K3 (graph) | %SOL K1 / contr / K3 | FP8 planes K1 / contraction / K3 (graph) | FP8-compute K1 (`MINIWORLD_TRIMUL_FP8_K1`) |
+|---|---|---|---|---|---|
+| 64 | 1024 | 0.169 / 0.196 / 0.146 (0.515) | 80 / 94 / 92 | 0.166 / 0.124 / 0.147 (0.444) | - |
+| 64 | 2048 | 0.666 / 1.407 / 0.559 (2.69) | 81 / 105 / 96 | 0.625 / 0.833 / 0.569 (2.13) | - |
+| 128 | 1024 | 0.325 / 0.386 / 0.277 (1.035) | 82 / 95 / 96 | 0.278 / 0.246 / 0.280 (0.841) | K1 0.250 (module 0.805) |
+| 128 | 2048 | 1.378 / 2.826 / 1.107 (5.28) | 77 / 104 / 96 | 1.081 / 1.682 / 1.090 (3.90) | K1 0.947 (module 3.91) |
+| 256 | 1024 | 0.841 / 0.725 / 0.694 (2.41) | 87 / 101 / 76 | 0.877 / 0.494 / 0.695 (2.20) | K1 0.656 (module 1.876) |
+| 256 | 2048 | 3.81 / 6.36 / 3.13 (12.19) | 77 / 92 / 68 | 4.08 / 3.64 / 3.16 (9.79) | K1 2.62 (module 8.75) |
+| 384 | 1024 | 2.08 / 1.14 / 1.33 (4.60) | 79 / 97 / 62 | 2.08 / 0.750 / 1.35 (4.37) | - |
+| 384 | 2048 | 9.36 / 9.17 / 5.71 (22.49) | 71 / 96 / 58 | 9.24 / 5.15 / 5.66 (18.18) | - |
+| 512 | 1024 | 3.93 / 1.53 / 2.28 (7.75) | 75 / 96 / 64 | (not served) | - |
+| 512 | 2048 | 17.54 / 11.78 / 9.98 (37.59) | 67 / 100 / 59 | (not served) | - |
+
+(%SOL above 100: the bf16 contraction at D64 / D128 L2048 runs above the 748 TF cuBLAS-measured reference.) Bound, from the floors: K1 is byte-bound at
+D64 / D128 (byte floor 2-2.6x its tensor floor) and tensor-bound from D256 (D256 tensor 2.94 ms vs bytes 2.12 ms at L2048; D384 6.6 vs 3.2); K3 is
+byte-bound at D64 / D128 (96 % of the byte floor) and at D256-D512 runs at 58-76 % of max(byte floor, tensor floor) with neither floor reached (no removal
+ablation of K3's internals was run, so no bound is claimed there); the contraction is tensor-bound everywhere (92-105 % of 748 TF).
+
+### Where e4m3 can go: placements, share, upper bound, result
+
+| stage | e4m3 operand / tensor | share of the default module (L2048, D64 / 128 / 256 / 384 / 512) | upper bound | result |
+|---|---|---|---|---|
+| contraction | a, b (the planes, K1 output) | 52 / 54 / 52 / 41 / 31 % | e4m3 tensor rate 1.91x: -25 / -26 / -25 / -20 / -15 % of the module | shipped opt-in at D128 / D256; **this branch: D64 and D384** (n64 K1 blocks), bidirectional D64 / D384, B > 1 (tables below). D512: not served (its K1 is the packed `_front`, its K3 `k3reorder.cu` has no `K3_CSCALE`; an n128 F8 K1 does not fit shared memory at D384 / D512) |
+| K1 store | the planes as e4m3 bytes (comes with the row above) | K1 25 / 26 / 31 / 42 / 47 % | byte-bound K1 only (D64 / D128): planes are 2/3 of K1's bytes, e4m3 halves them: K1 -33 % = -8 % of the module | measured K1 -6 % (D64 L2048) / -22 % (D128 L2048); D256 / D384 K1 are tensor-bound: no change (D256 +7 %, the n128 F8 tile) |
+| K1 compute | LN_in(z) and W_ag, W_a, W_bg, W_b (wgmma e4m3) | K1 tensor-bound from D256: 31 / 42 / 47 % | e4m3 MMA rate: K1 up to -50 % at D256+ | the existing experiment (`TMN_K1_F8C`): K1 -12 % (D128) / -36 % (D256 L2048), module a further -11 % at D256 L2048 (8.75 vs 9.79 ms); error 6.9 % of the update (failed the Protenix pLDDT criterion before). Accuracy map below: the projection operands are the expensive part |
+| contraction output | t as e4m3 (cuBLASLt e4m3 D with D scale + amax) | contraction write 2 D B per token | (a) contraction: none measurable: bf16-out 0.254 / 1.701 ms vs e4m3-out 0.259 / 1.704 ms (D128 L1024 / L2048), the GEMM is tensor-bound; (b) K3 reads half the t bytes: bounded by K3 at h / 2 hidden channels (half the t bytes AND half its projection / LN work): -0.044 / -0.14 ms (D128 L1024 / 2048), -0.12 / -0.62 ms (D256) = -3.6 .. -6.3 % of the FP8 module | **implemented and measured, no gain, removed from the code**: K3 widening the e4m3 chunk in shared memory (in place, two warpgroup barriers per chunk) + the guard (two small kernels): module / default 0.736-0.940 against the FP8 planes' 0.739-0.926 cool, 0.780-1.019 against 0.744-0.988 sustained (slower in 15 of 16 cells: D64-D384, L512-2048); update error 3.7 -> 4.4-4.6 % (patch: `res/tri8_experiment.patch`) |
+| K3 projection | LN_out(t) and W_o | K3 21 / 21 / 26 / 25 / 27 % | K3 at D64 / D128 is byte-bound: 0; at D256+ the tensor floor (1.5 / 3.3 / 5.9 ms at L2048) is below the measured K3 (3.1 / 5.7 / 10.0): at most the MMA share of an unbounded K3 | not implemented: e4m3 wgmma takes K-major operands only, t is channel-major (MN-major A): a transpose in shared memory per chunk; accuracy map below |
+| K3 gate | z (raw, LN folded) and W_g | inside K3 | as above | not implemented: the folded LN_in (`rs (z . Wgf - mu ug) + vg`) cancels mu against an e4m3-rounded z . Wgf |
+| training | forward planes / backward gradients | - | - | not re-opened (no new idea; e5m2 no-go and e4m3 backward no gain before) |
+
+### Accuracy map (float64 emulation, e4m3 rounding inserted per placement)
+
+`scripts/emul.py`: the module in float64 (the PyTorch statement, checked against the module's own float64 output to 6e-15), with e4m3 rounding
+(power-of-two per-tensor scale, saturating; planes 16x headroom, t 4x, weights and LayerNorm outputs at their own amax) inserted at the named
+operands; random weights as in the error tables, 3 masked tokens; update error rms (y - y64) / rms (y64 - z) and the engine form max |y - y64| / max |y64|.
+The rows are the same to 0.1 % at D64 L384, D128 L256 (both directions), D256 L256, D384 L192; D128 outgoing shown, the range over the five cases in brackets.
+The emulation reproduces the kernels: planes 3.7 % (kernel route 3.6-3.7 %), planes + t 4.5 % (the built e4m3-t route 4.4-4.6 %), planes + all K1
+projection operands 6.8 % (the FP8-compute K1, 6.9 %). The bf16 default route is 0.63-0.66 %.
+
+| e4m3 at | update rms | max / max |y64| | alone (without the planes): update rms |
+|---|---|---|---|
+| planes a, b (shipped opt-in) | 3.72 % (3.63-3.72) | 3.0 % (2.6-3.3) | - |
+| planes + K1 gate projections (LN_in(z), W_ag, W_bg) | 4.25 % (4.16-4.25) | 3.3 % (2.8-3.3) | 2.06 % |
+| planes + all K1 projections (the FP8-compute K1) | 6.80 % (6.70-6.80) | 4.9 % (4.6-5.3) | K1 value projections alone (LN_in(z), W_a, W_b): 5.3 % |
+| planes + t (K3 operand) | 4.54 % (4.43-4.54) | 3.5 % (2.9-3.7) | 2.61 % |
+| planes + K3 gate (LN_in(z), W_g) | 4.00 % (3.90-4.00) | 3.0 % (2.6-3.3) | 1.47 % |
+| planes + K3 projection (LN_out(t), W_o) | 5.27 % (5.20-5.27) | 3.7 % (3.5-4.0) | 3.74 % |
+
+Reading: the gate operands (K1 gate projections, K3 gate) are the cheap e4m3 placements (the sigmoid's slope damps their rounding: +0.3-0.5 % on top of the
+planes); the value paths (K1 projections, t, K3 projection) cost 0.8-3.1 % each. A K1 with the gate projections in e4m3 and the value projections in bf16 would sit
+at 4.2 % (FP8-compute K1: 6.8 %), and at D256-D512 (K1 tensor-bound, 31-47 % of the module) halve the MMA time of half of K1: from the FP8-compute K1's K1
+-36 % at D256 L2048, about -18 % of K1 = -7 % of the module (upper bound, not built: it needs two MMA chains with different operand types per K1 weight block).
+
+
+### New coverage: module time (CUDA-graph replay, cool / sustained, interleaved with a same-cubin control; FP8 / default)
+
+One direction, B = 1 (`spd1.jsonl`; outgoing / incoming):
+
+| D | dir | | L128 | L256 | L512 | L768 | L1024 | L1536 | L2048 | control |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 64 | out | default ms | 0.016 / 0.015 | 0.036 / 0.035 | 0.132 / 0.132 | 0.290 / 0.295 | 0.513 / 0.555 | 1.315 / 1.430 | 2.639 / 2.987 | |
+| 64 | out | FP8 / default | 1.135 / 1.144 | 0.980 / 0.977 | 0.903 / 0.905 | 0.872 / 0.905 | 0.863 / 0.890 | 0.808 / 0.845 | 0.766 / 0.773 | 0.964 .. 1.004 |
+| 64 | in | FP8 / default | | 0.976 / 0.976 | 0.894 / 0.896 | | 0.873 / 0.900 | | 0.773 / 0.788 | 0.990 .. 1.009 |
+| 384 | out | default ms | 0.075 / 0.076 | 0.288 / 0.309 | 1.104 / 1.199 | 2.419 / 2.743 | 4.571 / 5.081 | 11.26 / 13.03 | 22.09 / 24.67 | |
+| 384 | out | FP8 / default | 0.963 / 0.963 | 0.930 / 0.921 | 0.916 / 0.933 | 0.921 / 0.924 | 0.893 / 0.896 | 0.863 / 0.865 | 0.823 / 0.819 | 0.985 .. 1.008 |
+| 384 | in | FP8 / default | | 0.925 / 0.902 | 0.916 / 0.937 | | 0.903 / 0.911 | | 0.869 / 0.801 | 0.972 .. 1.004 |
+
+Bidirectional, B > 1, fast accumulation (`spd2.jsonl`; `FP8` / `FP8 + FASTACC` against the default):
+
+| case | default ms (cool / sus) | FP8 / default | FP8 + FASTACC / default | control |
+|---|---|---|---|---|
+| bidirectional D64 L512 / 1024 / 2048 | 0.201 / 0.203, 0.838 / 0.852, 4.64 / 5.20 | 1.036 / 1.051, 0.927 / 1.076, 0.780 / 0.816 | 1.017 / 1.033, 0.910 / 1.040, 0.754 / 0.785 | 0.956 .. 1.006 |
+| bidirectional D384 L512 / 1024 / 2048 | 1.90 / 2.10, 8.04 / 9.24, 39.0 / 43.2 | 0.966 / 0.988, 0.920 / 0.926, 0.932 / 0.858 | 0.969 / 0.982, 0.906 / 0.906, 0.890 / 0.839 | 0.991 .. 1.085 (L2048 cool: noisy) |
+| D64 out B4 L512 / L1024 | 0.501 / 0.498, 1.950 / 2.136 | 0.954 / 0.982, 0.907 / 0.955 | 0.940 / 0.961, 0.893 / 0.923 | 0.987 .. 0.999 |
+| D128 out B2 L512 / L1024 | 0.462 / 0.491, 1.895 / 2.252 | 0.898 / 0.909, 0.845 / 0.847 | 0.900 / 0.904, 0.830 / 0.811 | 0.983 .. 0.998 |
+| D64 out L2048 / D384 out L2048 (repeat) | 2.618 / 2.921, 21.97 / 24.44 | 0.772 / 0.799, 0.831 / 0.836 | 0.745 / 0.774, 0.909 / 0.819 | 0.996 .. 1.005 |
+
+Gates (`MIN_L`): D64 512 both directions (L128 +13.5 %, L256 -2 % against a control of 1.00-1.01: not clear), D384 128 (every measured L gains, L128 -3.7 %),
+bidirectional D64 2048 (L512 +4 %, L1024 -7 % cool but +8 % sustained: not clear; L1536 not measured), bidirectional D384 1024 (L512 -3 % / -1 %: not clear).
+B > 1 runs the one-sample route per sample (`run_samples`, one output, shared static scales): the batched default launches once for B samples, so
+the per-sample loop gains less at small L (D64 B4 L512 -5 / -2 %).
+
+### Error of the new coverage (`err2_x.jsonl`, `err3_x2.jsonl`; same protocol as the table in "Base 2.5.12": random weights, 3 masked tokens, every gate removed)
+
+| case | default rms / max (update) | default std_max | FP8 rms / max (update) | FP8 std_max | peak scaled plane value |
+|---|---|---|---|---|---|
+| D64 out L256 / L1024 | 0.65 / 0.94 %, 0.63 / 0.73 % | 0.63 %, 0.50 % | 3.7 / 5.2 %, 3.5 / 4.1 % | 3.5 %, 2.8 % | (no overflow) |
+| D64 in L300 / L1024 | 0.66 / 0.83 %, 0.64 / 0.79 % | 0.51 %, 0.53 % | 3.7 / 4.9 %, 3.6 / 4.1 % | 3.0 %, 2.7 % | (no overflow) |
+| D384 out L256 / L300 / L1024 | 0.65 / 0.74 %, 0.65 / 0.72 %, 0.64 / 0.75 % | 0.44 %, 0.51 %, 0.54 % | 3.7 / 4.0 %, 3.7 / 3.4 %, 3.7 / 3.6 % | 2.4 %, 2.4 %, 2.6 % | (no overflow) |
+| D384 in L384 | 0.65 / 0.61 % | 0.42 % | 3.7 / 3.3 % | 2.2 % | (no overflow) |
+| bidirectional D64 / D384 L512 | 0.65 / 0.72 %, 0.65 / 0.78 % | 0.53 %, 0.46 % | 3.7 / 3.7 %, 3.7 / 3.9 % | 2.7 %, 2.3 % | 18.4, 19.1 |
+| D64 out L512 B3 / D384 in L256 B2 | 0.65 / 0.77 %, 0.65 / 0.70 % | 0.54 %, 0.49 % | 3.6 / 4.3 %, 3.7 / 3.5 % | 3.0 %, 2.5 % | 18.9, 18.2 |
+| (reference) D128 out L512, D256 in L512 | 0.66 / 0.69 %, 0.65 / 0.77 % | 0.44 %, 0.51 % | 3.7 / 4.2 %, 3.7 / 4.0 % | 2.7 %, 2.6 % | |
+
+Engine standard form (max |y - y64| / max |y64|, tolerance max(err_pytorch, 8e-3)): the FP8 route of every new width is 2.2-3.5 % (fails 8e-3, as the
+shipped D128 / D256 route does); the bf16 default 0.42-0.63 %. No NaN, inf or saturation (peak scaled plane value 18-19 of 448 at 16x headroom).
+
+### What it means
+
+- The contraction operands remain the one placement that pays: the new widths gain what D128 / D256 gain (D64 -23 % / D384 -18 % at L2048, -10 % / -8 %
+  at L512), at the same 3.6-3.7 % update error.
+- The next lever by size is the K1 projection compute at D256-D512 (K1 31-47 % of the module, tensor-bound): the existing FP8-compute K1 takes a further
+  -11 % at D256 L2048, but its value-projection operands are the most accuracy-expensive e4m3 placement (6.8 %, accuracy map). A gate-projection-only
+  variant (LN_in(z), W_ag / W_bg in e4m3, value projections bf16) emulates at 4.2 % (planes alone 3.7 %) with an upper bound of about -7 % of the module at
+  D256 L2048 (more at D384 / D512, where K1 is 42-47 % of the module); it needs two MMA chains with different operand types per K1 weight block (a K1
+  change, not built here). It is the next candidate.
+
+### Verification (branch `fp8x/trimul`)
+
+- Default route (no FP8 switch) against the base tree 91a9241fb, separate processes, sha1 of every output (training: output, input gradient, every
+  parameter gradient): **181 / 181 identical** -- TriMul one direction D64-D512 both directions L256-1536 B1 / 2 (68), training (16), bidirectional
+  D64 / D128 / D256 incl. training (44), TriAttn module shapes (31, the header is shared) and the shipped FP8 route at D128 / D256 one direction and
+  bidirectional, L256-1024 (22: the n128 F8 K1 is untouched). The header change is under `TMN_K1_F8` (`if constexpr (G::BW == 64)`), so the
+  anchor-patched families build from the same text as before except for that block.
+- Tests: `tests/gpu/test_trimul_fp8_widths.py` (new: D64 / D384 both directions L100 / 256 / 300, bidirectional D64 / D384, B = 3 equal to
+  per-sample calls), `test_trimul_fp8_planes.py`, `test_trimul_fp8_bidir.py`, `test_trimul_fp8_k1.py`: 65 passed (18 new), one job, 1 GPU. CPU: `ruff check`, `ruff format`,
+  `pyright` clean on the touched files; `tests/cpu/test_prebuild_plan.py`, `test_imports.py`: 930 passed. The D64 / D384 FP8 K1 builds are not in the
+  prebuild plan (exploration; they JIT-compile on first use).
+- e4m3 t (K3 operand) was built and measured: the contraction does not get faster (tensor-bound) and K3's byte saving (<= 3.6-6.3 % of the module,
+  measured upper bound) is eaten by the widening; removed.
+- K3's own MMAs (projection, gate): K3 is byte-bound where it is fast (D64 / D128) and not floor-bound at D256+; e4m3 there needs K-major t
+  (a shared-memory transpose) and costs accuracy (map). Not done.
 
 ## TriAttn forward: FP8 PV, per-model whitelist (`h100_sm90`)
 

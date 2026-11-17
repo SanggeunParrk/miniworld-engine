@@ -1139,6 +1139,51 @@ TMN_DEVI void k1_body(const P& p) {
         PF(7);
         return;
       }
+#if TMN_K1_F8
+      if constexpr (G::BW == 64) {
+        // FP8 planes, n64 blocks (the D64 / D384 tiles: 32 plane channels per block, accumulator groups q < 4 gate, q + 4 projection): the n128 form's
+        // byte exchange on four column groups, staged [32 ch][64 tok] (64-byte rows, 64B swizzle) and stored by one TMA store (TMAST tiles only).
+        static_assert(TMAST, "FP8 planes store by TMA");
+        const uint32_t sbuf = stage_u + (uint32_t)((b & 1) * G::STG);
+        const bool odd = (lane & 4) != 0;
+        const int cq = lane & 3;
+        const int tpl = 16 * wiw + 2 * (lane >> 3);
+        uint32_t px[4];
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          float vA0 = math::gate(ac[4 * q + 0], ac[4 * (q + 4) + 0], mA), vA1 = math::gate(ac[4 * q + 1], ac[4 * (q + 4) + 1], mA);
+          float vB0 = math::gate(ac[4 * q + 2], ac[4 * (q + 4) + 2], mB), vB1 = math::gate(ac[4 * q + 3], ac[4 * (q + 4) + 3], mB);
+          if (!vA) { vA0 = 0.f; vA1 = 0.f; }
+          if (!vB) { vB0 = 0.f; vB1 = 0.f; }
+          f8max = fmaxf(f8max, fmaxf(fmaxf(fabsf(vA0), fabsf(vA1)), fmaxf(fabsf(vB0), fabsf(vB1))));
+          unsigned short uA, uB;
+          asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(uA) : "f"(vA1), "f"(vA0));
+          asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(uB) : "f"(vB1), "f"(vB0));
+          px[q] = (uint32_t)uA | ((uint32_t)uB << 16);
+        }
+        const uint32_t selsend = odd ? 0x6420u : 0x7531u, selkeep = odd ? 0x7531u : 0x6420u;
+        const uint32_t selfin0 = odd ? 0x1504u : 0x5140u, selfin1 = odd ? 0x3726u : 0x7362u;
+#pragma unroll
+        for (int k = 0; k < 2; ++k) {
+          const uint32_t snd = __byte_perm(px[2 * k], px[2 * k + 1], selsend);
+          const uint32_t own = __byte_perm(px[2 * k], px[2 * k + 1], selkeep);
+          const uint32_t rcv = __shfl_xor_sync(0xffffffffu, snd, 4);
+          const uint32_t f0 = __byte_perm(own, rcv, selfin0), f1 = __byte_perm(own, rcv, selfin1);
+          const int c0 = 8 * (2 * k) + 2 * cq + (odd ? 1 : 0), c1 = c0 + 8;
+          const uint32_t r0 = sbuf + (uint32_t)(c0 * 64 + ((wiw ^ ((c0 >> 1) & 3)) << 4) + (tpl & 15));
+          const uint32_t r1 = sbuf + (uint32_t)(c1 * 64 + ((wiw ^ ((c1 >> 1) & 3)) << 4) + (tpl & 15));
+          asm volatile("st.shared.b16 [%0], %1;" :: "r"(r0), "h"((unsigned short)(f0 & 0xffffu)) : "memory");
+          asm volatile("st.shared.b16 [%0], %1;" :: "r"(r0 + 8), "h"((unsigned short)(f0 >> 16)) : "memory");
+          asm volatile("st.shared.b16 [%0], %1;" :: "r"(r1), "h"((unsigned short)(f1 & 0xffffu)) : "memory");
+          asm volatile("st.shared.b16 [%0], %1;" :: "r"(r1 + 8), "h"((unsigned short)(f1 >> 16)) : "memory");
+        }
+        fence_proxy_async();
+        if (st_elect) tma_store_wait_read<0>();
+        named_bar_sync(bar_id, 128);
+        if (st_elect) { tma_store_3d(&p.tm_ab, sStage + cw * (2 * G::STG) + (b & 1) * G::STG, jw, iw, G::CPB * b); tma_store_commit(); }
+        return;
+      }
+#endif
       uint32_t pk[4][2];
 #pragma unroll
       for (int q = 0; q < 4; ++q) {

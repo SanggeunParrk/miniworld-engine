@@ -8,7 +8,9 @@ from . import _h100_runtime as T
 
 #: FP8-plane K1 tiles (the n128 blocks the e4m3 store needs; D256 is the shipped direct tile)
 F8_CFG: dict = {
-    128: (3, 64, 6, 1, 1, 6, 128)
+    128: (3, 64, 6, 1, 1, 6, 128),
+    64: (3, 64, 4, 1, 1),  # n64 blocks (tmn_kernels.cuh TMN_K1_F8 n64 store): the long D64 direct tile (BJ 64: TMA plane stores)
+    384: (2, 64, 2, 6, 1),  # n64 blocks: the D384 direct tile of the bf16 route (an n128 D384 ring does not fit shared memory)
 }  # FP8 planes with the bf16-compute K1: three warpgroups, 24 KB ring slots (K1 0.84-0.90x of the earlier 2-warpgroup (2, 64, 4) tile, planes bit-identical); (2, 64, 4, 1, 1, 6, 128) is the two-warpgroup form
 #: FP8-compute K1 tiles: D128 runs three consumer warpgroups (192-token tiles, 24 KB z chunks in the ring slots)
 F8C_CFG: dict = {128: (3, 64, 6, 1, 1, 6, 128), 256: (3, 64, 4, 1, 1, 6, 128)}
@@ -103,11 +105,13 @@ def _packed(weights, cpb):
     return torch.cat((g, p), dim=2).contiguous().view(-1, 2 * cpb, 64)
 
 
-def prescale(weights, qinv, h, cpb, ring):
-    """FP8 planes: the projection rows of plane channel c scaled by qinv[c] (a power of two: exact), all four halved as the fold does."""
+def prescale(weights, qinv, h, cpb, ring, half=True):
+    """FP8 planes: the projection rows of plane channel c scaled by qinv[c] (a power of two: exact), all four halved as the fold does (half; the
+    n64 blocks take the unhalved weights)."""
     wl_, wlg_, wr_, wrg_ = (w.float() for w in weights)
     dt = weights[0].dtype
-    mats = [(wl_ * (0.5 * qinv[:h, None])).to(dt), (wlg_ * 0.5).to(dt), (wr_ * (0.5 * qinv[h:, None])).to(dt), (wrg_ * 0.5).to(dt)]
+    f = 0.5 if half else 1.0
+    mats = [(wl_ * (f * qinv[:h, None])).to(dt), (wlg_ * f).to(dt), (wr_ * (f * qinv[h:, None])).to(dt), (wrg_ * f).to(dt)]
     return [_packed(mats, cpb)] if ring else mats
 
 
@@ -194,8 +198,8 @@ def front(x, weights, token_mask, gi, bi, ab, xs, diag=(), qinv=None, transposed
     if cpb != 32 and (np_ % 8 or b % 64):
         raise ValueError("the n128 K1 stores planes by TMA: 64-token plane row segments, 16-byte plane rows")
     f8 = qinv is not None  # EXPERIMENTAL FP8 planes: ab is a float8_e4m3fn / uint8 tensor, qinv [2 h] fp32 = 1 / (plane channel scale)
-    if f8 and (_block(cfg) != 128 or np_ % 16):
-        raise ValueError("FP8 planes need the n128 K1 blocks and planes padded to 16")
+    if f8 and (np_ % 16 or b % 64):
+        raise ValueError("FP8 planes need 64-token plane row segments (TMA stores) and planes padded to 16")
     if f8c is not None and (not f8 or _ring(cfg) is False or d % 128):
         raise ValueError("FP8 compute K1 needs the FP8 planes, the ring schedule and a width that is a multiple of 128")
     kernel, smem = _kernel(d, h, cfg, *diag, f8=f8, f8c=f8c is not None)
@@ -206,10 +210,10 @@ def front(x, weights, token_mask, gi, bi, ab, xs, diag=(), qinv=None, transposed
         weights = wcache["w"]
     elif f8:  # per call unless wcache (static scales)
         src = weights
-        weights = prescale(src, qinv, h, cpb, _ring(cfg))
+        weights = prescale(src, qinv, h, cpb, _ring(cfg), _fold(cfg))
         if wcache is not None:
             wcache["w"] = weights
-            wcache["w_args"] = (src, h, cpb, _ring(cfg))
+            wcache["w_args"] = (src, h, cpb, _ring(cfg), _fold(cfg))
     elif _fold(cfg):  # halved once per parameter version (exact in bf16)
         import torch
         from miniworld_engine.kernels import _capture
