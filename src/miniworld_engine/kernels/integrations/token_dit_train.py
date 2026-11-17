@@ -242,6 +242,18 @@ def _owned_gemms90(single):
     return mm, mm32, addmm
 
 
+def _fp8_train(W, M, D, fp32, plain, h100, names):
+    """The EXPERIMENTAL FP8 training placements (``conditioned_transition.cuda.token_dit_fp8_train``; default off) of this call:
+    (the module, the placements in force, their e4m3 weight operands). Off: (module, empty, {}) and the bf16 route unchanged (the
+    module's import builds nothing)."""
+    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_train as f8
+
+    places = f8.active(M, D, fp32, plain, h100)
+    if not places:
+        return f8, frozenset(), {}
+    return f8, places, f8.weights(W, places & frozenset(names))
+
+
 _NATIVE_CALLER_TASKS: set[int] = set()
 
 
@@ -726,8 +738,12 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
     T.adaln_a(
         single.reshape(M, D).contiguous(), G, bs1, xa, xst, ada_eps, x, opt, xt if par else None, bs2 if par else None
     )  # reads the input, writes x on the way (the parallel block: xt as well)
+    f8, f8p, f8w = _fp8_train(W, M, D, fp32, plain, h100, ("qkvg", "out", "expand", "squeeze"))
     Wqkvg, bqkvg = W["Wqkvg"], W["bqkvg"]
-    qkvg = addmm(bqkvg, xa, Wqkvg.t())
+    if "qkvg" in f8p:
+        qkvg = f8.mm(*f8.q8(xa), f8w["qkvg"], bias=bqkvg)
+    else:
+        qkvg = addmm(bqkvg, xa, Wqkvg.t())
     rqk = torch.empty(M, 2 * H, device=dev)
     nq, nk = W["nq"], W["nk"]
     if copies:  # B200 fp32: v is not copied, the core reads it as a column view of qkvg
@@ -811,21 +827,24 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         og = torch.empty(M, D, device=dev, dtype=at)
         T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
-    y = mm(og, Wo.t())
+    y = f8.mm(*f8.q8(og), f8w["out"]) if "out" in f8p else mm(og, Wo.t())
     x1 = torch.empty_like(x)
     x1st = torch.empty(M, 2, device=dev)
     T.res_adaln_b(x, y, Gg, bg1, G, bs2, x1, xt, x1st, ada_eps, opt)  # the parallel block: x1 only (xt is adaln_a's)
     Wab = W["Wab"]
     h = torch.empty(M, nexp * D, device=dev, dtype=at)
-    gsw = None if up else _swiglu_gemm(xt, Wab)
+    gsw = None if (up or f8p) else _swiglu_gemm(xt, Wab)
     if gsw is not None:  # expand GEMM + SwiGLU, a | b saved on the way
         ab = torch.empty(M, 2 * nexp * D, device=dev, dtype=at)
         gsw(xt, Wab, h, ab)
+    elif "squeeze" in f8p:  # FP8 squeeze: h made straight as e4m3 + row scales (no bf16 h)
+        ab = f8.mm(*f8.q8(xt), f8w["expand"]) if "expand" in f8p else mm(xt, Wab.t())
+        h8, sh = f8.swiglu_q8(ab)
     else:
-        ab = mm(xt, Wab.t())  # [M, 2 * n D] a | b ([M, 3 n D] a | b | u up-gated)
+        ab = f8.mm(*f8.q8(xt), f8w["expand"]) if "expand" in f8p else mm(xt, Wab.t())  # [M, 2 * n D] a | b ([M, 3 n D] a | b | u up-gated)
         rows.swiglu_rows(ab, h, up=up)
     Wsq = W["Wsq"]
-    z = mm(h, Wsq.t())
+    z = f8.mm(h8, sh, f8w["squeeze"]) if "squeeze" in f8p else mm(h, Wsq.t())
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
     T.res_c(x1, z, Gg, bg2, out)
     # custom-op outputs may not alias each other: without QK-norm q / k / v are views of qkvg -- not outputs, recovered in _bwd
@@ -1115,6 +1134,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     M, R, dev = A * L, L * L, single.device
     sdt, cdt, pdtype = single.dtype, cond.dtype, pair.dtype
     native = _native90(dev)
+    f8, f8p, f8w = _fp8_train(W, M, D, fp32, plain, h100, ("dqkvg", "dout", "dexpand", "dsqueeze"))
+    e5 = bool(f8p) and f8.GRAD_E5M2
     c2, p2 = (
         (None if native else cond.reshape(M, cond.shape[-1]).contiguous()),
         pair.reshape(R, dpw),
@@ -1129,22 +1150,28 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dGg = torch.empty(M, 2 * D, device=dev, dtype=at)
     dz = torch.empty(M, D, device=dev, dtype=at)
     T.res_c_bwd(dout, z, Gg, bg2, dz, dGg, part[0])
-    dh = mm(dz, Wsq)  # [M, n D]
+    dh = f8.mm(*f8.q8(dz, e5), f8w["dsqueeze"]) if "dsqueeze" in f8p else mm(dz, Wsq)  # [M, n D]
     dab = torch.empty_like(ab)
     h = torch.empty_like(dh)
-    T.swiglu_bwd(dh, ab, dab, h, up)
+    if "dexpand" in f8p:  # swiglu_bwd + dab as 8-bit with row scales, for the dxt dgrad
+        dab8, sdab = f8.swiglu_bwd_q8(dh, ab, dab, h, e5)
+    else:
+        T.swiglu_bwd(dh, ab, dab, h, up)
     dWsq = mm32(dz.t(), h)
     # fp32: the dxt / dxa GEMMs write straight into their column blocks of dG (the row kernels then copy nothing); the H100 owned
     # GEMMs return a fresh tensor, which the row kernels copy as before
     direct = fp32 and mm is torch.mm
-    dxt = torch.mm(dab, Wab, out=dG[:, 3 * D :]) if direct else mm(dab, Wab)
+    if "dexpand" in f8p:
+        dxt = f8.mm(dab8, sdab, f8w["dexpand"])
+    else:
+        dxt = torch.mm(dab, Wab, out=dG[:, 3 * D :]) if direct else mm(dab, Wab)
     dWab = mm32(dab.t(), xt)
     dx1 = torch.empty(M, D, device=dev)
     dy = torch.empty(M, D, device=dev, dtype=at)
     T.res_adaln_b_bwd(
         dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2], opt
     )  # the parallel block: no AdaLN of x1 (dxt goes to adaln_a_bwd)
-    dog = mm(dy, Wo)
+    dog = f8.mm(*f8.q8(dy, e5), f8w["dout"]) if "dout" in f8p else mm(dy, Wo)
     dWo = mm32(dy.t(), og)
     dob = torch.empty(M, D, device=dev, dtype=at)
     dd = torch.empty(A, H, L, device=dev)
@@ -1179,7 +1206,10 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
             else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH)
         )
     T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qkm)
-    dxa = torch.mm(dqkvg, Wqkvg, out=dG[:, D : 2 * D]) if direct else mm(dqkvg, Wqkvg)
+    if "dqkvg" in f8p:
+        dxa = f8.mm(*f8.q8(dqkvg, e5), f8w["dqkvg"])
+    else:
+        dxa = torch.mm(dqkvg, Wqkvg, out=dG[:, D : 2 * D]) if direct else mm(dqkvg, Wqkvg)
     dWqkvg = mm32(dqkvg.t(), xa)
     dx = torch.empty(M, D, device=dev, dtype=sdt)
     if par:  # both AdaLNs of the block input: dxa and dxt into one LN backward (bs2's partials into part[1])
