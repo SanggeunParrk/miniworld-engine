@@ -55,7 +55,7 @@ static_assert(SMEM <= 232448, "smem");
 }  // namespace fr
 
 // NOUT: 4 (q, k, v, g), or 3 (q, k, v: the inference tail tri_tail_sm90<true> projects the gate itself from x)
-template <int NOUT, int VTW = 0>   // VTW: 0 off, 1 = V^T hi plane, 2 = hi + lo planes
+template <int NOUT, int VTW = 0, bool QK8 = false>   // VTW: 0 off, 1 = V^T hi plane, 2 = hi + lo planes; QK8 (EXPERIMENTAL, with VTW): q / k leave as e4m3 (q / sq, k * sq per head: QKINV [8] = 1 / sq | sq)
 __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
     int L, int ntiles, float eps, float inv_scale, int tr,
     int h16,                                              // q / k / v and the bias in fp16 (the operands of the fp16 core, triattn_h16_sm90.cu); g stays bf16
@@ -69,7 +69,8 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
     const __grid_constant__ CUtensorMap vmap,
     const __grid_constant__ CUtensorMap gmap,
     void* __restrict__ BIAS,                              // [B][4][L][L] bf16, or fp16 (h16)
-    unsigned char* __restrict__ VT, const float* __restrict__ VINV, int* __restrict__ OVF) {   // VTW: V^T planes, 1 / scale per head, overflow flag
+    unsigned char* __restrict__ VT, const float* __restrict__ VINV, int* __restrict__ OVF,   // VTW: V^T planes, 1 / scale per head, overflow flag
+    const float* __restrict__ QKINV = nullptr) {
   using namespace fr;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -170,6 +171,34 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
       if (c > 0) {
         if (T == 0) bulk_wait_read<0>();
         named_sync(3 + w, 128);
+      }
+      if (QK8 && c < 2) {
+        // EXPERIMENTAL (QK8): q (c 0) / k (c 1) as e4m3 rows of 128 bytes, staged over this warpgroup's rows of the x stage's first half (128B swizzle: chunk ^ row % 8),
+        // then one TMA store of [64 rows][128 bytes] (the host made omaps[c] a uint8 map)
+        unsigned char* st8 = smb + (xs - sW) + w * 8192;
+        float inv[4];
+#pragma unroll
+        for (int h = 0; h < 4; ++h) inv[h] = QKINV[4 * c + h];
+        bool ovf = false;
+#pragma unroll
+        for (int hf = 0; hf < 2; ++hf) {
+          const int rr = 16 * wi + g8 + 8 * hf;
+#pragma unroll
+          for (int i = 0; i < 16; ++i) {
+            const float x0 = acc[4 * i + 2 * hf] * inv[i >> 2], x1 = acc[4 * i + 2 * hf + 1] * inv[i >> 2];
+            ovf |= (fabsf(x0) > 448.f) | (fabsf(x1) > 448.f);
+            const int col = 8 * i + 2 * t4;
+            *reinterpret_cast<unsigned short*>(st8 + rr * 128 + ((((col >> 4) ^ (rr & 7))) << 4) + (col & 15)) = cvt_e4m3x2(x1, x0);
+          }
+        }
+        if (__any_sync(0xffffffffu, ovf) && lane == 0) atomicOr(OVF, 1);
+        fence_proxy_async();
+        named_sync(3 + w, 128);
+        if (T == 0) {
+          store_2d(omaps[c], xs + 64 * w * 128, 0, t * BM + 64 * w);
+          bulk_commit();
+        }
+        continue;
       }
       if (VTW && c == 2) {
         // V as e4m3 hi / lo planes of V^T: this warpgroup's 64 keys, staged transposed [plane][channel][64 keys] in the two 8 KiB pieces of the x stage
@@ -1501,8 +1530,11 @@ auto bf16c(const torch::Tensor& t) { return reinterpret_cast<const __nv_bfloat16
 namespace {
 std::vector<torch::Tensor> tri_front_impl(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor w4, torch::Tensor wb16,
                                           torch::Tensor mask, int64_t B, int64_t L, double scale, bool trans, bool h16, bool gate,
-                                          c10::optional<torch::Tensor> vinv, c10::optional<torch::Tensor> ovf, int vtp = 2) {
+                                          c10::optional<torch::Tensor> vinv, c10::optional<torch::Tensor> ovf, int vtp = 2,
+                                          c10::optional<torch::Tensor> qkinv = c10::nullopt) {
   const bool vtw = vinv.has_value();
+  const bool qk8 = qkinv.has_value();   // EXPERIMENTAL: q / k as e4m3 (qkinv fp32 [8] = 1 / sq | sq per head)
+  TORCH_CHECK(!qk8 || (vtw && qkinv->is_cuda() && qkinv->scalar_type() == torch::kFloat32 && qkinv->is_contiguous() && qkinv->numel() == 2 * NH), "qkinv: fp32 [8] with the V^T planes");
   TORCH_CHECK(!vtw || (ovf.has_value() && ovf->is_cuda() && ovf->scalar_type() == torch::kInt32 && ovf->numel() == 1), "ovf: int32 [1] on the device");
   TORCH_CHECK(!vtw || (h16 && !gate && vinv->is_cuda() && vinv->scalar_type() == torch::kFloat32 && vinv->numel() == NH), "VT planes: h16, no gate, vinv fp32 [4]");
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.size(-1) == C, "x: [R, 128] bf16");
@@ -1512,7 +1544,8 @@ std::vector<torch::Tensor> tri_front_impl(torch::Tensor x, torch::Tensor lnw, to
   TORCH_CHECK(wb16.scalar_type() == torch::kBFloat16 && wb16.is_contiguous() && wb16.size(0) == 16 && wb16.size(1) == C, "wb16 [16, 128] bf16");
   auto opt = x.options();
   const auto hopt = h16 ? opt.dtype(torch::kHalf) : opt;
-  auto q = torch::empty({R, C}, hopt), k = torch::empty({R, C}, hopt), v = torch::empty({vtw ? 0 : R, C}, hopt), g = torch::empty({gate ? R : 0, C}, opt);
+  const auto qkopt = qk8 ? opt.dtype(torch::kFloat8_e4m3fn) : hopt;
+  auto q = torch::empty({R, C}, qkopt), k = torch::empty({R, C}, qkopt), v = torch::empty({vtw ? 0 : R, C}, hopt), g = torch::empty({gate ? R : 0, C}, opt);
   auto vt = torch::empty({vtw ? B : 0, L, NH, vtp, 32, L}, opt.dtype(torch::kFloat8_e4m3fn));   // the V^T planes
   auto bias = torch::empty({B, NH, L, L}, hopt);
   auto lw = lnw.to(torch::kFloat32).contiguous(), lb = lnb.to(torch::kFloat32).contiguous();
@@ -1527,20 +1560,29 @@ std::vector<torch::Tensor> tri_front_impl(torch::Tensor x, torch::Tensor lnw, to
                        {(uint64_t)L * C, (uint64_t)C, (uint64_t)L * L * C}, {64, br, 1, 1}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
   CUtensorMap xm = pm(x, R, 128, "x"), wm = m2(w4, 4 * C, 256, "w4"), wbm = m2(wb16, 16, 16, "wb16");
   CUtensorMap qm = m2(q, R, 64, "q"), km = m2(k, R, 64, "k"), vm = m2(vtw ? k : v, R, 64, "v"), gm = m2(gate ? g : q, R, 64, "g");
+  if (qk8) {   // [R][128] e4m3, box (128 bytes, 64 rows), 128B swizzle
+    qm = make_map<2>(q.data_ptr(), {(uint64_t)C, (uint64_t)R}, {(uint64_t)C}, {128, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "q8", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+    km = make_map<2>(k.data_ptr(), {(uint64_t)C, (uint64_t)R}, {(uint64_t)C}, {128, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "k8", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+    vm = km;
+    gm = qm;
+  }
   static bool attr = false;
   if (!attr) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
     C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<3>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
     C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<3, 2>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
     C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<3, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<3, 2, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90<3, 1, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM));
     attr = true;
   }
   const int ntiles = (int)(R / fr::BM);
-  auto kern = vtw ? (vtp == 2 ? tri_front_sm90<3, 2> : tri_front_sm90<3, 1>) : gate ? tri_front_sm90<4> : tri_front_sm90<3>;
+  auto kern = qk8 ? (vtp == 2 ? tri_front_sm90<3, 2, true> : tri_front_sm90<3, 1, true>)
+             : vtw ? (vtp == 2 ? tri_front_sm90<3, 2> : tri_front_sm90<3, 1>) : gate ? tri_front_sm90<4> : tri_front_sm90<3>;
   kern<<<std::min(ntiles, num_sms(x.device().index())), fr::THREADS, fr::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, xm, wm, wbm, lw.data_ptr<float>(), lb.data_ptr<float>(), mp,
       qm, km, vm, gm, bias.data_ptr(), vtw ? reinterpret_cast<unsigned char*>(vt.data_ptr()) : nullptr, vtw ? vinv->data_ptr<float>() : nullptr,
-      vtw ? ovf->data_ptr<int>() : nullptr);
+      vtw ? ovf->data_ptr<int>() : nullptr, qk8 ? qkinv->data_ptr<float>() : nullptr);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {q, k, v, g, bias, vt};
 }
@@ -1554,9 +1596,10 @@ std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::
 // The front with V written as the FP8 core's two e4m3 planes of V^T (static scale: vinv fp32 [4] = 1 / per-head power of two): -> q, k, v (empty), g (empty), bias, vt
 // (ovf: a persistent int32 [1], set to 1 when a value passed 448 after scaling and saturated).  Inference, gate in the tail (h16, three projections).
 std::vector<torch::Tensor> tri_front_vt(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor w4, torch::Tensor wb16,
-                                        torch::Tensor mask, int64_t B, int64_t L, double scale, bool trans, torch::Tensor vinv, torch::Tensor ovf, int64_t planes) {
+                                        torch::Tensor mask, int64_t B, int64_t L, double scale, bool trans, torch::Tensor vinv, torch::Tensor ovf, int64_t planes,
+                                        c10::optional<torch::Tensor> qkinv) {
   TORCH_CHECK(planes == 1 || planes == 2, "planes: 1 (hi) or 2 (hi, lo)");
-  return tri_front_impl(x, lnw, lnb, eps, w4, wb16, mask, B, L, scale, trans, true, false, vinv, ovf, (int)planes);
+  return tri_front_impl(x, lnw, lnb, eps, w4, wb16, mask, B, L, scale, trans, true, false, vinv, ovf, (int)planes, qkinv);
 }
 // out = x + drop o ((sigmoid(g [+ gb]) o o) . Wo^T [+ bo]); g, o, x [R, 128] bf16, wo [128, 128] bf16; drop [B, L, 128] bf16 or empty;
 // `out`: a contiguous bf16 [R, 128] to write into (a chunk's rows of a batch's output), else a new tensor; bo / gb: fp32 [128] or none
@@ -1944,7 +1987,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("lnb") = py::none(), py::arg("eps") = 1e-5);
   m.def("tri_front_vt", &tri_front_vt, "sm90 TriangleAttention front with V as e4m3 hi / lo V^T planes (static per-head scale)",
         py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("w4"), py::arg("wb16"), py::arg("mask"), py::arg("B"), py::arg("L"), py::arg("scale"),
-        py::arg("trans"), py::arg("vinv"), py::arg("ovf"), py::arg("planes") = 2);
+        py::arg("trans"), py::arg("vinv"), py::arg("ovf"), py::arg("planes") = 2, py::arg("qkinv") = py::none());
   m.def("tri_front", &tri_front, "sm90 TriangleAttention front: LN + q|k|v|g projections + head-major (masked) bias / scale",
         py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("w4"), py::arg("wb16"), py::arg("mask"), py::arg("B"),
         py::arg("L"), py::arg("scale"), py::arg("trans") = false, py::arg("h16") = false, py::arg("gate") = true);
