@@ -17,6 +17,7 @@ from miniworld_engine.kernels._compile import opaque
 from . import _h100_runtime as T
 from . import h100_uni_wide_inference as I
 from . import h100_wide_inference as BI
+from ._h100_bmm_lt_uni import LT_UNI
 from ._h100_pack import owned_bf16_mask, pack_into_cuda, cast_training_weights
 
 R = T.SOURCES / "b200style"
@@ -286,9 +287,9 @@ def _output_kernel(d, h, cfg, save=False):
     return _output_kernel_standard(d, h, cfg)
 
 
-def _contract(ab, d, direction, out=None):
+def _contract(ab, d, direction, out=None, table=None):
     """B200's contraction (``b200_infer._contract``) for both directions; one direction through ``_h100_bmm.contract`` (the measured
-    cuBLASLt configuration where one is listed)."""
+    cuBLASLt configuration where ``table``, default ``LT_CONFIGS``, lists one)."""
     from .b200_infer import _contract as contract, _fold
 
     if direction == 0:
@@ -301,9 +302,9 @@ def _contract(ab, d, direction, out=None):
     t = ab.new_empty((d * samples, n, n)) if out is None else out.view(d * samples, n, n)
     left, right = _fold(ab[:d]), _fold(ab[d : 2 * d])
     if direction == 1:
-        lt_contract(left, right.transpose(1, 2), t)
+        lt_contract(left, right.transpose(1, 2), t, table=table)
     else:
-        lt_contract(left.transpose(1, 2), right, t)
+        lt_contract(left.transpose(1, 2), right, t, table=table)
     return t.view(d, *ab.shape[1:])
 
 
@@ -437,7 +438,8 @@ def _run_rowpad(leaves, mask, direction, out=None):
         else:
             ab = x.new_empty((2 * h, prow_, npad))
             front(x, weights, token, gi, bi, ab, xs)
-            tri = _contract(ab, d, direction)  # [h, (B,) np, np]
+            # D64 / D128 (hidden = D, integrations.trimul_h100.ROWPAD_FROM on): the measured single-direction table
+            tri = _contract(ab, d, direction, table=LT_UNI if d in (64, 128) else None)  # [h, (B,) np, np]
             del ab  # the planes are dead once contracted: freed before y, so the peak is x + planes + tri, not + y (FoldForge 5I28 OpenDDE)
         return [rowpad_k3(x, tri, xs, vec, wp, wg, go, bo, gi, bi, h, out)]
 
