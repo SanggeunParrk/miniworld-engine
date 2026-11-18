@@ -35,5 +35,5 @@ def test_d768_training_generic_accuracy(rows: int) -> None:
     got = _step(m, x, dy, torch.bfloat16)
     pt = _step(ref, x, dy, torch.bfloat16)
     ex = _step(ref64, x.double(), dy.double(), torch.float64)
-    for g, p, e in zip(got, pt, ex, strict=True):
-        assert _rms_rel(g, e) <= max(_rms_rel(p, e), 8e-3)
+    for i, (g, p, e) in enumerate(zip(got, pt, ex, strict=True)):
+        assert _rms_rel(g, e) <= max(_rms_rel(p, e), 8e-3), f"output {i}: engine {_rms_rel(g, e):.3e} pytorch {_rms_rel(p, e):.3e}"
