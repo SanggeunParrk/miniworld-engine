@@ -574,6 +574,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 2,
         "cuda:5090_sm120": 3,
+        "cuda:h100_sm90": 2,  # 2 (2026-11-18, 3.0.1): wide-width training backward fuses the dropout mask + BIG dv permute (bit-identical); native builds at every served training shape
     }  # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80); 2026-11-12: the sm_120a build of the sm_80 paths (RTX 5090);
     # 5090 2: inference up to the longest bf16 logit row of 99 KB (L 4080 at d_pair 128; sm80._sm120_infer_len)
     # 5090 3 (2026-11-13): CUTLASS batched GEMMs for the key contraction / dv / dw (gemm_sm120), the BIG width's projections (v head-major from the epilogue), 3-warp gate_out
