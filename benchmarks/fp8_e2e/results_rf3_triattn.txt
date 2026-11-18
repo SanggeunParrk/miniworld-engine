@@ -1,0 +1,43 @@
+# RoseTTAFold3 TriAttn FP8 end-level (an3.py tables; FoldForge a9e1549, base fp8c/rf3if2 (engine 3.0.1), 200 steps, trunk seeds, diffusion_seed 0; H100). 2026-11-18
+## 12 targets x trunk seeds 0..3; modes bf16 / f8 (PV fused) / f8qk (PV + q / k) / safe (whole preset + the table's TriAttn part) / safenota (whole preset, TriAttn on the default core)
+target | bf16 seeds n, pair RMSD max/mean (A), ipTM range | per mode: n, same-seed RMSD max/mean, per-seed list, max|d ipTM|, inside
+7y37 | bf16 n=4 4.96/2.93 ipTM [0.096,0.100] | f8: n=4 4.88/1.52 [4.88 0.22 0.31 0.70] dip 0.002 in | f8qk: n=4 4.84/1.68 [4.84 0.93 0.64 0.32] dip 0.002 in | safe: n=4 5.00/1.59 [5.00 0.51 0.39 0.47] dip 0.003 in | safenota: n=4 4.85/1.51 [4.85 0.28 0.47 0.45] dip 0.004 in
+7zau | bf16 n=4 18.62/12.89 ipTM [0.289,0.322] | f8: n=4 1.17/0.49 [0.15 1.17 0.19 0.45] dip 0.001 in | f8qk: n=4 1.89/0.77 [0.57 1.89 0.26 0.39] dip 0.004 in | safe: n=4 17.80/5.86 [0.53 17.80 0.94 4.15] dip 0.024 in | safenota: n=4 1.91/1.07 [0.68 1.08 0.59 1.91] dip 0.009 in
+8ad9 | bf16 n=4 1.72/1.32 ipTM [0.554,0.561] | f8: n=4 1.85/1.25 [0.74 1.85 0.68 1.74] dip 0.001 in | f8qk: n=4 1.74/1.07 [0.68 1.68 0.19 1.74] dip 0.001 in | safe: n=4 1.09/0.64 [0.91 1.09 0.34 0.22] dip 0.008 in | safenota: n=4 1.84/1.11 [1.66 1.84 0.72 0.24] dip 0.008 in
+8ee9 | bf16 n=4 1.86/1.18 ipTM [0.878,0.880] | f8: n=4 1.78/1.03 [1.56 1.78 0.54 0.26] dip 0.001 in | f8qk: n=4 1.92/1.09 [1.59 1.92 0.47 0.39] dip 0.001 in | safe: n=4 1.82/0.88 [1.02 1.82 0.27 0.41] dip 0.001 in | safenota: n=4 1.55/0.74 [0.88 1.55 0.19 0.34] dip 0.002 in
+8fxv | bf16 n=4 9.32/7.58 ipTM [0.496,0.552] | f8: n=4 9.22/3.16 [1.11 9.22 1.12 1.18] dip 0.037 in | f8qk: n=4 3.92/2.69 [3.92 3.24 1.58 1.99] dip 0.009 in | safe: n=4 3.58/2.69 [3.58 1.98 3.09 2.13] dip 0.022 in | safenota: n=4 8.88/4.28 [4.32 8.88 1.72 2.18] dip 0.025 in
+8gn4 | bf16 n=4 2.23/1.23 ipTM [0.803,0.806] | f8: n=4 0.00/0.00 [0.00 0.00 0.00 0.00] dip 0.000 in | f8qk: n=4 0.00/0.00 [0.00 0.00 0.00 0.00] dip 0.000 in | safe: n=4 2.10/0.79 [0.51 2.10 0.12 0.41] dip 0.003 in | safenota: n=4 1.27/0.60 [0.33 1.27 0.35 0.43] dip 0.002 in
+8id0 | bf16 n=4 4.13/2.26 ipTM [0.917,0.921] | f8: n=4 0.48/0.40 [0.45 0.35 0.48 0.32] dip 0.000 in | f8qk: n=4 1.17/0.55 [0.51 0.27 1.17 0.25] dip 0.001 in | safe: n=4 0.63/0.42 [0.63 0.39 0.23 0.44] dip 0.003 in | safenota: n=4 0.61/0.46 [0.61 0.48 0.31 0.43] dip 0.001 in
+8ifx | bf16 n=4 3.23/2.06 ipTM [0.594,0.668] | f8: n=4 2.61/0.99 [0.54 2.61 0.70 0.13] dip 0.117 in | f8qk: n=4 2.65/0.96 [0.29 2.65 0.71 0.21] dip 0.106 in | safe: n=4 3.02/1.38 [3.02 1.34 0.84 0.30] dip 0.090 in | safenota: n=4 3.05/1.34 [3.05 1.17 0.87 0.28] dip 0.091 in
+8j2w | bf16 n=4 2.00/1.61 ipTM [0.872,0.879] | f8: n=4 0.76/0.50 [0.45 0.76 0.07 0.70] dip 0.001 in | f8qk: n=4 0.84/0.62 [0.42 0.74 0.84 0.47] dip 0.002 in | safe: n=4 1.21/0.63 [1.21 0.44 0.36 0.52] dip 0.003 in | safenota: n=4 1.17/0.81 [1.17 0.83 0.71 0.53] dip 0.003 in
+8p7u | bf16 n=4 0.56/0.38 ipTM [0.889,0.891] | f8: n=4 0.06/0.04 [0.06 0.03 0.03 0.04] dip 0.001 in | f8qk: n=4 0.53/0.19 [0.53 0.03 0.10 0.09] dip 0.001 in | safe: n=4 1.06/0.62 [0.53 1.06 0.10 0.81] dip 0.001 OUT | safenota: n=4 1.06/0.68 [0.54 1.06 1.05 0.09] dip 0.002 OUT
+8vdn | bf16 n=4 0.24/0.20 ipTM [0.932,0.933] | f8: n=4 0.11/0.08 [0.07 0.07 0.09 0.11] dip 0.000 in | f8qk: n=4 0.10/0.09 [0.10 0.06 0.09 0.09] dip 0.000 in | safe: n=4 0.12/0.11 [0.10 0.12 0.09 0.12] dip 0.000 in | safenota: n=4 0.11/0.09 [0.08 0.09 0.09 0.11] dip 0.000 in
+8x3q | bf16 n=4 0.35/0.26 ipTM [0.887,0.888] | f8: n=4 0.15/0.12 [0.14 0.08 0.15 0.10] dip 0.001 in | f8qk: n=4 0.13/0.09 [0.11 0.08 0.13 0.04] dip 0.000 in | safe: n=4 0.26/0.17 [0.16 0.26 0.20 0.08] dip 0.002 in | safenota: n=4 0.20/0.14 [0.18 0.08 0.20 0.11] dip 0.003 in
+inside / targets: {'f8': '12/12', 'f8qk': '12/12', 'safe': '11/12', 'safenota': '11/12'}
+overflow [f8]: cases 48, cases with a saturation flag 0, redo 0, log2(scale) range over sites [-4.0, -2.0]
+overflow [f8qk]: cases 48, cases with a saturation flag 0, redo 0, log2(scale) range over sites [-4.0, -2.0]
+overflow [safe]: cases 48, cases with a saturation flag 0, redo 0, log2(scale) range over sites [-4.0, -2.0]
+overflow [safenota]: cases 48, cases with a saturation flag 0, redo 0, log2(scale) range over sites [99, -99]
+## 7y37, 12 trunk seeds
+target | bf16 seeds n, pair RMSD max/mean (A), ipTM range | per mode: n, same-seed RMSD max/mean, per-seed list, max|d ipTM|, inside
+7y37 | bf16 n=12 6.12/3.92 ipTM [0.096,0.104] | bf16: n=12 0.00/0.00 [0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00] dip 0.000 in | f8: n=12 5.61/2.05 [4.88 0.22 0.28 5.19 0.31 0.70 0.78 2.15 0.20 0.11 5.61 4.19] dip 0.003 in | f8qk: n=12 5.62/2.15 [4.84 0.93 4.08 2.09 0.64 0.32 0.75 0.51 0.25 5.25 5.62 0.51] dip 0.002 in | safe: n=12 5.73/3.10 [5.00 0.51 4.10 1.93 0.39 0.47 0.92 3.54 4.77 5.73 5.62 4.27] dip 0.004 in
+inside / targets: {'bf16': '1/1', 'f8': '1/1', 'f8qk': '1/1', 'safe': '1/1'}
+overflow [bf16]: cases 12, cases with a saturation flag 0, redo 0, log2(scale) range over sites [99, -99]
+overflow [f8]: cases 12, cases with a saturation flag 0, redo 0, log2(scale) range over sites [-4.0, -2.0]
+overflow [f8qk]: cases 12, cases with a saturation flag 0, redo 0, log2(scale) range over sites [-4.0, -2.0]
+overflow [safe]: cases 12, cases with a saturation flag 0, redo 0, log2(scale) range over sites [-4.0, -2.0]
+## V^T peak statistics (an3.py)
+   peak [f8] fused:L1024H4D32: calls 4192, calibration/sat (frac=1) 0, max peak frac of range 0.357, max p99 0.286, nan 0
+   peak [f8] fused:L1152H4D32: calls 4192, calibration/sat (frac=1) 0, max peak frac of range 0.464, max p99 0.393, nan 0
+   peak [f8] fused:L1280H4D32: calls 4192, calibration/sat (frac=1) 0, max peak frac of range 0.321, max p99 0.321, nan 0
+   peak [f8] fused:L256H4D32: calls 8384, calibration/sat (frac=1) 0, max peak frac of range 0.464, max p99 0.393, nan 0
+   peak [f8] fused:L384H4D32: calls 4192, calibration/sat (frac=1) 0, max peak frac of range 0.536, max p99 0.483, nan 0
+   peak [f8] fused:L768H4D32: calls 12576, calibration/sat (frac=1) 0, max peak frac of range 0.357, max p99 0.357, nan 0
+   peak [f8] fused:L896H4D32: calls 8384, calibration/sat (frac=1) 0, max peak frac of range 0.321, max p99 0.286, nan 0
+   peak [f8qk] fused:L1024H4D32: calls 106, calibration/sat (frac=1) 0, max peak frac of range 0.268, max p99 0.250, nan 0
+   peak [f8qk] fused:L1152H4D32: calls 106, calibration/sat (frac=1) 0, max peak frac of range 0.286, max p99 0.267, nan 0
+   peak [f8qk] fused:L1280H4D32: calls 106, calibration/sat (frac=1) 0, max peak frac of range 0.250, max p99 0.250, nan 0
+   peak [f8qk] fused:L256H4D32: calls 106, calibration/sat (frac=1) 0, max peak frac of range 0.250, max p99 0.250, nan 0
+   peak [f8qk] fused:L768H4D32: calls 106, calibration/sat (frac=1) 0, max peak frac of range 0.250, max p99 0.250, nan 0
+   peak [f8qk] fused:L896H4D32: calls 212, calibration/sat (frac=1) 0, max peak frac of range 0.250, max p99 0.250, nan 0
+   peak [safe] fused:L768H4D32: calls 106, calibration/sat (frac=1) 0, max peak frac of range 0.250, max p99 0.250, nan 0

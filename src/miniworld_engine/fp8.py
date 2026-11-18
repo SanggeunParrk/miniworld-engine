@@ -94,6 +94,7 @@ TRIATTN_MODELS = MappingProxyType(
         "af3": (frozenset({"fused", "unfused"}), True),
         "protenix1": (frozenset({"fused"}), False),
         "opendde": (frozenset({"unfused"}), False),
+        "rosettafold3": (frozenset({"fused"}), True),
     }
 )
 _NO_TRIATTN: tuple[frozenset[str], bool] = (frozenset(), False)
