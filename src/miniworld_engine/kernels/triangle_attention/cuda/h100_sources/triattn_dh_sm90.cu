@@ -398,168 +398,172 @@ __global__ void __launch_bounds__(THREADS) triattn_dh_bwd_kv(const bf16* __restr
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// backward, query side: dQ of 64 queries of one (b, h) for the pair rows of a slab, and the slab's dbias partial
-template <int D> struct SmemQ {
+// backward, query side: dQ of 64 queries of one (b, h) for NR consecutive pair rows (one warpgroup of 4 warps each), and the dbias plane of the
+// group
+template <int D, int NR> struct SmemQ {
   static constexpr int LD = D + 8, LB = BN + 8;
-  bf16 q[BM * LD];
-  bf16 d[BM * LD];          // dO
-  bf16 k[2][BN * LD];
-  bf16 v[2][BN * LD];
-  bf16 b[2][BM * LB];
-  bf16 ds[BM * LB];         // ROWS: the tile's bf16 dS, each warp its own 16 rows, stored out as 16-byte rows
+  bf16 q[NR][BM * LD];
+  bf16 d[NR][BM * LD];      // dO
+  bf16 k[NR][2][BN * LD];
+  bf16 v[NR][2][BN * LD];
+  bf16 b[2][BM * LB];       // the bias tile: shared by the rows
+  bf16 ds[BM * LB];         // the tile's bf16 dS (the group's sum), each warp its own 16 rows, stored out as 16-byte rows
+  float st[NR > 1 ? NR - 1 : 1][BM * BN];   // rows 1.. of the group: their fp32 dS fragments, for row 0's warps to add
 };
 
-// ROWS (the launched build): one pair row per slab (NSLAB = S), the row's dS written once as a bf16 plane (DB is then bf16 [S, B, H, S, S]:
-// no read-modify-write, a grid of B S (S / 64) H short CTAs) and dQ += dS K on the bf16 dS alone -- the data flow and the operand of the
-// Triton backward; the caller sums the planes in fp32. ROWS false: fp32 slab partials read-modified-written row by row, dS as hi + lo.
-template <int D, bool ROWS = false>
-__global__ void __launch_bounds__(THREADS) triattn_dh_bwd_q(const bf16* __restrict__ P, const bf16* __restrict__ BIAS, const bf16* __restrict__ DO,
-    const float* __restrict__ LSE, const float* __restrict__ DELTA, bf16* __restrict__ DQ, float* __restrict__ DB, long ldd, int B, int S, int H,
+// One pair row (the row's dS written once as a bf16 plane, DB bf16 [S / NR, B, H, S, S]: no read-modify-write, a short CTA per (query tile,
+// head, group)) and dQ += dS K on the bf16 dS of the row alone -- the data flow and the operand of the Triton backward; the caller sums the
+// planes in fp32.  NR rows per CTA (warpgroup r takes row NR p + r, all share the bias tile): the rows' fp32 dS fragments are added in fixed
+// order (row 0 + row 1 + ...) through shared memory before the plane is rounded and stored, so the planes are NR times fewer (written and
+// read back by the sum: 2 B S^3 H / NR each way) and each plane element is the rounding of a sum, not a sum of roundings.
+template <int D, int NR>
+__global__ void __launch_bounds__(THREADS* NR) triattn_dh_bwd_q(const bf16* __restrict__ P, const bf16* __restrict__ BIAS, const bf16* __restrict__ DO,
+    const float* __restrict__ LSE, const float* __restrict__ DELTA, bf16* __restrict__ DQ, bf16* __restrict__ DB, long ldd, int B, int S, int H,
     int NSLAB, float scale) {
-  constexpr int LD = SmemQ<D>::LD, LB = SmemQ<D>::LB, KD = D / 16, ND = D / 8;
+  constexpr int LD = SmemQ<D, NR>::LD, LB = SmemQ<D, NR>::LB, KD = D / 16, ND = D / 8;
   extern __shared__ __align__(16) unsigned char smem_raw[];
-  SmemQ<D>& sm = *reinterpret_cast<SmemQ<D>*>(smem_raw);
-  const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32, g = lane / 4, t = lane % 4;
+  SmemQ<D, NR>& sm = *reinterpret_cast<SmemQ<D, NR>*>(smem_raw);
+  const int tid = threadIdx.x, wgi = tid / THREADS, tl = tid % THREADS, warp = tl / 32, lane = tid % 32, g = lane / 4, t = lane % 4;
   const int q0 = blockIdx.x * BM, h = blockIdx.y;
   const int b = (int)(blockIdx.z / NSLAB), p = (int)(blockIdx.z % NSLAB);
-  const int n0 = (int)((long)p * S / NSLAB), n1 = (int)((long)(p + 1) * S / NSLAB);
+  const int n = p * NR + wgi;
   const int HD = H * D, ld = 4 * HD;
   const bf16* bias = BIAS + ((long)b * H + h) * S * S;
-  float* dbias = DB + (((long)p * B + b) * H + h) * S * S;
   const float sc = scale * LOG2E;
   const int ntiles = S / BN;
   const int r0 = warp * 16 + g;
   constexpr int QC = BM * D / 8;
-  for (int n = n0; n < n1; ++n) {
-    const long bn = (long)b * S + n;
-    const bf16* rows = P + bn * S * ld;
-    const bf16* drows = DO + bn * S * HD;
-    for (int c = tid; c < QC; c += THREADS) {
+  const long bn = (long)b * S + n;
+  const bf16* rows = P + bn * S * ld;
+  const bf16* drows = DO + bn * S * HD;
+  for (int c = tl; c < QC; c += THREADS) {
+    const int r = c / (D / 8), col = (c % (D / 8)) * 8;
+    cp16(su(&sm.q[wgi][r * LD + col]), rows + (long)(q0 + r) * ld + h * D + col);
+    cp16(su(&sm.d[wgi][r * LD + col]), drows + (long)(q0 + r) * HD + h * D + col);
+  }
+  auto stage = [&](int j, int s) {
+    const int kk0 = j * BN;
+    for (int c = tl; c < QC; c += THREADS) {
       const int r = c / (D / 8), col = (c % (D / 8)) * 8;
-      cp16(su(&sm.q[r * LD + col]), rows + (long)(q0 + r) * ld + h * D + col);
-      cp16(su(&sm.d[r * LD + col]), drows + (long)(q0 + r) * HD + h * D + col);
+      cp16(su(&sm.k[wgi][s][r * LD + col]), rows + (long)(kk0 + r) * ld + HD + h * D + col);
+      cp16(su(&sm.v[wgi][s][r * LD + col]), rows + (long)(kk0 + r) * ld + 2 * HD + h * D + col);
     }
-    auto stage = [&](int j, int s) {
-      const int kk0 = j * BN;
-      for (int c = tid; c < QC; c += THREADS) {
-        const int r = c / (D / 8), col = (c % (D / 8)) * 8;
-        cp16(su(&sm.k[s][r * LD + col]), rows + (long)(kk0 + r) * ld + HD + h * D + col);
-        cp16(su(&sm.v[s][r * LD + col]), rows + (long)(kk0 + r) * ld + 2 * HD + h * D + col);
-      }
-      for (int c = tid; c < BM * BN / 8; c += THREADS) {
-        const int r = c / (BN / 8), col = (c % (BN / 8)) * 8;
-        cp16(su(&sm.b[s][r * LB + col]), bias + (long)(q0 + r) * S + kk0 + col);
-      }
-    };
-    stage(0, 0);
+    for (int c = tid; c < BM * BN / 8; c += THREADS * NR) {
+      const int r = c / (BN / 8), col = (c % (BN / 8)) * 8;
+      cp16(su(&sm.b[s][r * LB + col]), bias + (long)(q0 + r) * S + kk0 + col);
+    }
+  };
+  stage(0, 0);
+  cp_commit();
+  const float* lse = LSE + (bn * H + h) * S + q0;
+  const float* delta = DELTA + (bn * H + h) * S + q0;
+  const float la = lse[r0], lb = lse[r0 + 8], da = delta[r0], dd = delta[r0 + 8];
+  uint32_t qa[KD][4], doa[KD][4];
+  float dq[ND][4];
+#pragma unroll
+  for (int nn = 0; nn < ND; ++nn)
+#pragma unroll
+    for (int e = 0; e < 4; ++e) dq[nn][e] = 0.f;
+  for (int j = 0; j < ntiles; ++j) {
+    const int s = j & 1;
+    if (j + 1 < ntiles) stage(j + 1, s ^ 1);
     cp_commit();
-    const float* lse = LSE + (bn * H + h) * S + q0;
-    const float* delta = DELTA + (bn * H + h) * S + q0;
-    const float la = lse[r0], lb = lse[r0 + 8], da = delta[r0], dd = delta[r0 + 8];
-    uint32_t qa[KD][4], doa[KD][4];
-    float dq[ND][4];
-#pragma unroll
-    for (int nn = 0; nn < ND; ++nn)
-#pragma unroll
-      for (int e = 0; e < 4; ++e) dq[nn][e] = 0.f;
-    for (int j = 0; j < ntiles; ++j) {
-      const int s = j & 1;
-      if (j + 1 < ntiles) stage(j + 1, s ^ 1);
-      cp_commit();
-      cp_wait<1>();
-      __syncthreads();
-      if (j == 0) {
-#pragma unroll
-        for (int kk = 0; kk < KD; ++kk) {
-          ldsm4(qa[kk], su(&sm.q[(warp * 16 + lane % 16) * LD + kk * 16 + (lane / 16) * 8]));
-          ldsm4(doa[kk], su(&sm.d[(warp * 16 + lane % 16) * LD + kk * 16 + (lane / 16) * 8]));
-        }
-      }
-      // the slab's partial so far (the first row of the slab writes it)
-      float* dbt = dbias + (long)(q0 + r0) * S + j * BN + 2 * t;
-      float2 old[ROWS ? 1 : BN / 8][2];
-#pragma unroll
-      for (int nn = 0; nn < (ROWS ? 0 : BN / 8); ++nn) {
-        if (n == n0) { old[nn][0] = make_float2(0.f, 0.f); old[nn][1] = make_float2(0.f, 0.f); }
-        else {
-          old[nn][0] = *reinterpret_cast<const float2*>(dbt + nn * 8);
-          old[nn][1] = *reinterpret_cast<const float2*>(dbt + 8L * S + nn * 8);
-        }
-      }
-      float sacc[BN / 8][4], dp[BN / 8][4];
-#pragma unroll
-      for (int nn = 0; nn < BN / 8; ++nn)
-#pragma unroll
-        for (int e = 0; e < 4; ++e) sacc[nn][e] = dp[nn][e] = 0.f;
+    cp_wait<1>();
+    __syncthreads();
+    if (j == 0) {
 #pragma unroll
       for (int kk = 0; kk < KD; ++kk) {
-#pragma unroll
-        for (int nn = 0; nn < BN / 8; nn += 2) {
-          uint32_t kb[4], vb[4];
-          const int off = (nn * 8 + (lane % 8) + (lane / 16) * 8) * LD + kk * 16 + ((lane / 8) % 2) * 8;
-          ldsm4(kb, su(&sm.k[s][off]));
-          ldsm4(vb, su(&sm.v[s][off]));
-          mma(sacc[nn], qa[kk], kb[0], kb[1]);
-          mma(sacc[nn + 1], qa[kk], kb[2], kb[3]);
-          mma(dp[nn], doa[kk], vb[0], vb[1]);
-          mma(dp[nn + 1], doa[kk], vb[2], vb[3]);
-        }
+        ldsm4(qa[kk], su(&sm.q[wgi][(warp * 16 + lane % 16) * LD + kk * 16 + (lane / 16) * 8]));
+        ldsm4(doa[kk], su(&sm.d[wgi][(warp * 16 + lane % 16) * LD + kk * 16 + (lane / 16) * 8]));
       }
-      uint32_t sa[BN / 16][4], sl[BN / 16][4];
+    }
+    float sacc[BN / 8][4], dp[BN / 8][4];
+#pragma unroll
+    for (int nn = 0; nn < BN / 8; ++nn)
+#pragma unroll
+      for (int e = 0; e < 4; ++e) sacc[nn][e] = dp[nn][e] = 0.f;
+#pragma unroll
+    for (int kk = 0; kk < KD; ++kk) {
+#pragma unroll
+      for (int nn = 0; nn < BN / 8; nn += 2) {
+        uint32_t kb[4], vb[4];
+        const int off = (nn * 8 + (lane % 8) + (lane / 16) * 8) * LD + kk * 16 + ((lane / 8) % 2) * 8;
+        ldsm4(kb, su(&sm.k[wgi][s][off]));
+        ldsm4(vb, su(&sm.v[wgi][s][off]));
+        mma(sacc[nn], qa[kk], kb[0], kb[1]);
+        mma(sacc[nn + 1], qa[kk], kb[2], kb[3]);
+        mma(dp[nn], doa[kk], vb[0], vb[1]);
+        mma(dp[nn + 1], doa[kk], vb[2], vb[3]);
+      }
+    }
+    uint32_t sa[BN / 16][4];
+    float sv[BN / 8][4];                 // the row's fp32 dS fragments
+#pragma unroll
+    for (int nn = 0; nn < BN / 8; ++nn) {
+      const int col = nn * 8 + 2 * t;
+      const __nv_bfloat162 b0 = *reinterpret_cast<const __nv_bfloat162*>(&sm.b[s][r0 * LB + col]);
+      const __nv_bfloat162 b1 = *reinterpret_cast<const __nv_bfloat162*>(&sm.b[s][(r0 + 8) * LB + col]);
+      const float p0 = ex2(sacc[nn][0] * sc + __low2float(b0) * LOG2E - la), p1 = ex2(sacc[nn][1] * sc + __high2float(b0) * LOG2E - la);
+      const float p2 = ex2(sacc[nn][2] * sc + __low2float(b1) * LOG2E - lb), p3 = ex2(sacc[nn][3] * sc + __high2float(b1) * LOG2E - lb);
+      sv[nn][0] = p0 * (dp[nn][0] - da);
+      sv[nn][1] = p1 * (dp[nn][1] - da);
+      sv[nn][2] = p2 * (dp[nn][2] - dd);
+      sv[nn][3] = p3 * (dp[nn][3] - dd);
+      sa[nn / 2][(nn % 2) * 2] = pk(sv[nn][0], sv[nn][1]);
+      sa[nn / 2][(nn % 2) * 2 + 1] = pk(sv[nn][2], sv[nn][3]);
+    }
+    if constexpr (NR > 1) {   // rows 1.. hand their fragments to row 0's warp of the same index (a 32 NR-thread barrier per warp index)
+      if (wgi > 0) {
+#pragma unroll
+        for (int nn = 0; nn < BN / 8; ++nn)
+#pragma unroll
+          for (int e = 0; e < 4; ++e) sm.st[wgi - 1][((warp * 8 + nn) * 4 + e) * 32 + lane] = sv[nn][e];
+        asm volatile("bar.arrive %0, %1;" ::"r"(1 + warp), "r"(32 * NR) : "memory");
+      } else {
+        asm volatile("bar.sync %0, %1;" ::"r"(1 + warp), "r"(32 * NR) : "memory");
+#pragma unroll
+        for (int r = 1; r < NR; ++r)
+#pragma unroll
+          for (int nn = 0; nn < BN / 8; ++nn)
+#pragma unroll
+            for (int e = 0; e < 4; ++e) sv[nn][e] += sm.st[r - 1][((warp * 8 + nn) * 4 + e) * 32 + lane];
+      }
+    }
+    if (wgi == 0) {   // the group's 16 dS rows of this key tile (64 bf16 = 128 bytes each), 16 bytes per lane, streaming (read once by the sum)
 #pragma unroll
       for (int nn = 0; nn < BN / 8; ++nn) {
         const int col = nn * 8 + 2 * t;
-        const __nv_bfloat162 b0 = *reinterpret_cast<const __nv_bfloat162*>(&sm.b[s][r0 * LB + col]);
-        const __nv_bfloat162 b1 = *reinterpret_cast<const __nv_bfloat162*>(&sm.b[s][(r0 + 8) * LB + col]);
-        const float p0 = ex2(sacc[nn][0] * sc + __low2float(b0) * LOG2E - la), p1 = ex2(sacc[nn][1] * sc + __high2float(b0) * LOG2E - la);
-        const float p2 = ex2(sacc[nn][2] * sc + __low2float(b1) * LOG2E - lb), p3 = ex2(sacc[nn][3] * sc + __high2float(b1) * LOG2E - lb);
-        const float s0 = p0 * (dp[nn][0] - da), s1 = p1 * (dp[nn][1] - da), s2 = p2 * (dp[nn][2] - dd), s3 = p3 * (dp[nn][3] - dd);
-        sa[nn / 2][(nn % 2) * 2] = pk(s0, s1);
-        sa[nn / 2][(nn % 2) * 2 + 1] = pk(s2, s3);
-        sl[nn / 2][(nn % 2) * 2] = pk_lo(s0, s1, sa[nn / 2][(nn % 2) * 2]);
-        sl[nn / 2][(nn % 2) * 2 + 1] = pk_lo(s2, s3, sa[nn / 2][(nn % 2) * 2 + 1]);
-        if constexpr (ROWS) {   // staged: 4-byte fragment stores scattered over 8 rows per warp instruction cost more than the 16-byte rows below
-          *reinterpret_cast<uint32_t*>(&sm.ds[r0 * LB + col]) = sa[nn / 2][(nn % 2) * 2];
-          *reinterpret_cast<uint32_t*>(&sm.ds[(r0 + 8) * LB + col]) = sa[nn / 2][(nn % 2) * 2 + 1];
-        } else {
-          *reinterpret_cast<float2*>(dbt + nn * 8) = make_float2(old[nn][0].x + s0, old[nn][0].y + s1);
-          *reinterpret_cast<float2*>(dbt + 8L * S + nn * 8) = make_float2(old[nn][1].x + s2, old[nn][1].y + s3);
-        }
+        *reinterpret_cast<uint32_t*>(&sm.ds[r0 * LB + col]) = pk(sv[nn][0], sv[nn][1]);   // staged: 4-byte stores scattered over 8 rows per warp cost more
+        *reinterpret_cast<uint32_t*>(&sm.ds[(r0 + 8) * LB + col]) = pk(sv[nn][2], sv[nn][3]);
       }
-      if constexpr (ROWS) {   // the warp's 16 dS rows of this key tile (64 bf16 = 128 bytes each), 16 bytes per lane, streaming (read once by the sum)
-        __syncwarp();
-        bf16* dbh = reinterpret_cast<bf16*>(DB) + ((((long)p * B + b) * H + h) * S + q0 + warp * 16) * S + j * BN;
+      __syncwarp();
+      bf16* dbh = DB + ((((long)p * B + b) * H + h) * S + q0 + warp * 16) * S + j * BN;
 #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-          const int c = i * 32 + lane, r = c / 8, col = (c % 8) * 8;
-          __stcs(reinterpret_cast<int4*>(dbh + (long)r * S + col), *reinterpret_cast<const int4*>(&sm.ds[(warp * 16 + r) * LB + col]));
-        }
-        __syncwarp();
+      for (int i = 0; i < 4; ++i) {
+        const int c = i * 32 + lane, r = c / 8, col = (c % 8) * 8;
+        __stcs(reinterpret_cast<int4*>(dbh + (long)r * S + col), *reinterpret_cast<const int4*>(&sm.ds[(warp * 16 + r) * LB + col]));
       }
-      // dQ += dS K: k = 64 keys (4 steps of 16), n = D dims
-#pragma unroll
-      for (int kk = 0; kk < BN / 16; ++kk) {
-#pragma unroll
-        for (int nn = 0; nn < ND; nn += 2) {
-          uint32_t kb[4];
-          ldsm4t(kb, su(&sm.k[s][(kk * 16 + (lane % 8) + ((lane / 8) % 2) * 8) * LD + nn * 8 + (lane / 16) * 8]));
-          mma(dq[nn], sa[kk], kb[0], kb[1]);
-          mma(dq[nn + 1], sa[kk], kb[2], kb[3]);
-          if constexpr (!ROWS) {
-            mma(dq[nn], sl[kk], kb[0], kb[1]);
-            mma(dq[nn + 1], sl[kk], kb[2], kb[3]);
-          }
-        }
-      }
-      __syncthreads();
+      __syncwarp();
     }
-    const long qrow = bn * S + q0 + r0;
+    // dQ += dS K: k = 64 keys (4 steps of 16), n = D dims
 #pragma unroll
-    for (int nn = 0; nn < ND; ++nn) {
-      const int col = h * D + nn * 8 + 2 * t;
-      *reinterpret_cast<uint32_t*>(DQ + qrow * ldd + col) = pk(dq[nn][0] * scale, dq[nn][1] * scale);
-      *reinterpret_cast<uint32_t*>(DQ + (qrow + 8) * ldd + col) = pk(dq[nn][2] * scale, dq[nn][3] * scale);
+    for (int kk = 0; kk < BN / 16; ++kk) {
+#pragma unroll
+      for (int nn = 0; nn < ND; nn += 2) {
+        uint32_t kb[4];
+        ldsm4t(kb, su(&sm.k[wgi][s][(kk * 16 + (lane % 8) + ((lane / 8) % 2) * 8) * LD + nn * 8 + (lane / 16) * 8]));
+        mma(dq[nn], sa[kk], kb[0], kb[1]);
+        mma(dq[nn + 1], sa[kk], kb[2], kb[3]);
+      }
     }
+    __syncthreads();
+  }
+  const long qrow = bn * S + q0 + r0;
+#pragma unroll
+  for (int nn = 0; nn < ND; ++nn) {
+    const int col = h * D + nn * 8 + 2 * t;
+    *reinterpret_cast<uint32_t*>(DQ + qrow * ldd + col) = pk(dq[nn][0] * scale, dq[nn][1] * scale);
+    *reinterpret_cast<uint32_t*>(DQ + (qrow + 8) * ldd + col) = pk(dq[nn][2] * scale, dq[nn][3] * scale);
   }
 }
 
@@ -586,7 +590,7 @@ void launch(const at::Tensor& proj, const at::Tensor& bias, at::Tensor& u, const
 
 template <int D>
 void launch_bwd(const at::Tensor& proj, const at::Tensor& bias, const at::Tensor& dout, const at::Tensor& lse, const at::Tensor& delta,
-                at::Tensor& dall, int64_t dqcol, int64_t dkcol, int64_t dvcol, at::Tensor& dbias, int B, int S, int H, int nslab, double scale, bool rows) {
+                at::Tensor& dall, int64_t dqcol, int64_t dkcol, int64_t dvcol, at::Tensor& dbias, int B, int S, int H, int nr, double scale) {
   auto stream = at::cuda::getCurrentCUDAStream();
   const bf16* P = reinterpret_cast<const bf16*>(proj.data_ptr());
   const bf16* BI = reinterpret_cast<const bf16*>(bias.data_ptr());
@@ -602,11 +606,12 @@ void launch_bwd(const at::Tensor& proj, const at::Tensor& bias, const at::Tensor
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   {
-    auto f = rows ? triattn_dh_bwd_q<D, true> : triattn_dh_bwd_q<D, false>;
-    const int smem = (int)sizeof(SmemQ<D>);
+    auto f = nr == 2 ? triattn_dh_bwd_q<D, 2> : triattn_dh_bwd_q<D, 1>;
+    const int smem = nr == 2 ? (int)sizeof(SmemQ<D, 2>) : (int)sizeof(SmemQ<D, 1>);
+    const int nslab = S / nr;
     cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
     dim3 grid(S / BM, H, (unsigned)B * nslab);
-    f<<<grid, THREADS, smem, stream>>>(P, BI, DOp, lse.data_ptr<float>(), delta.data_ptr<float>(), DA + dqcol, reinterpret_cast<float*>(dbias.data_ptr()), ldd, B, S,
+    f<<<grid, THREADS * nr, smem, stream>>>(P, BI, DOp, lse.data_ptr<float>(), delta.data_ptr<float>(), DA + dqcol, reinterpret_cast<bf16*>(dbias.data_ptr()), ldd, B, S,
                                        H, nslab, (float)scale);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
@@ -659,9 +664,9 @@ std::vector<at::Tensor> triattn_dh_forward_train(at::Tensor proj, at::Tensor bia
 }
 
 // backward: dout [B S S, H D] bf16, lse / delta fp32 [B, S, H, S]; dq / dk / dv are written into columns dqcol / dkcol / dvcol (+ h D) of
-// dall [B S S, *] bf16 (row stride dall.stride(0)) -> dbias slabs fp32 [nslab, B, H, S, S] (the caller sums them over the first axis)
+// dall [B S S, *] bf16 (row stride dall.stride(0)) -> dbias planes bf16 [S / nr, B, H, S, S] (the sums over nr pair rows; the caller sums them over the first axis)
 at::Tensor triattn_dh_backward(at::Tensor proj, at::Tensor bias, at::Tensor dout, at::Tensor lse, at::Tensor delta, at::Tensor dall, int64_t dqcol,
-                               int64_t dkcol, int64_t dvcol, int64_t H, int64_t D, double scale, int64_t nslab, bool rows) {
+                               int64_t dkcol, int64_t dvcol, int64_t H, int64_t D, double scale, int64_t nr) {
   check_core(proj, bias, H, D);
   const int B = (int)bias.size(0), S = (int)bias.size(2);
   TORCH_CHECK(dout.scalar_type() == at::kBFloat16 && dout.is_contiguous() && dout.size(0) == proj.size(0) && dout.size(1) == H * D, "dout [B S S, H D]");
@@ -669,12 +674,11 @@ at::Tensor triattn_dh_backward(at::Tensor proj, at::Tensor bias, at::Tensor dout
   TORCH_CHECK(delta.scalar_type() == at::kFloat && delta.is_contiguous() && delta.numel() == (int64_t)B * S * H * S, "delta fp32 [B, S, H, S]");
   TORCH_CHECK(dall.scalar_type() == at::kBFloat16 && dall.dim() == 2 && dall.stride(1) == 1 && dall.size(0) == proj.size(0) &&
               dall.stride(0) % 8 == 0 && dqcol % 8 == 0 && dkcol % 8 == 0 && dvcol % 8 == 0, "dall bf16 [B S S, *], 16-byte aligned columns");
-  TORCH_CHECK(nslab >= 1 && nslab <= S, "1 <= nslab <= S");
+  TORCH_CHECK((nr == 1 || nr == 2) && S % nr == 0, "nr (pair rows a CTA takes) 1 or 2, dividing S");
   const at::cuda::OptionalCUDAGuard guard(proj.device());
-  TORCH_CHECK(!rows || nslab == S, "rows: one slab per pair row");
-  auto dbias = at::empty({nslab, B, H, S, S}, proj.options().dtype(rows ? at::kBFloat16 : at::kFloat));
-  if (D == 64) launch_bwd<64>(proj, bias, dout, lse, delta, dall, dqcol, dkcol, dvcol, dbias, B, S, (int)H, (int)nslab, scale, rows);
-  else launch_bwd<32>(proj, bias, dout, lse, delta, dall, dqcol, dkcol, dvcol, dbias, B, S, (int)H, (int)nslab, scale, rows);
+  auto dbias = at::empty({S / nr, B, H, S, S}, proj.options());
+  if (D == 64) launch_bwd<64>(proj, bias, dout, lse, delta, dall, dqcol, dkcol, dvcol, dbias, B, S, (int)H, (int)nr, scale);
+  else launch_bwd<32>(proj, bias, dout, lse, delta, dall, dqcol, dkcol, dvcol, dbias, B, S, (int)H, (int)nr, scale);
   return dbias;
 }
 

@@ -542,7 +542,7 @@ INFERENCE_WORKSET_FRACTION = 0.25
 def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, dc: int = 32) -> tuple[int, int, int]:
     """(inference working set, training saved tensors, training backward working set) in bytes per pair token of one sample, on top
     of the caller's tensors (pair and output; in training also dy and dx).  ``dc``: channels per head of the core (64: the h100_dh
-    core of 64-channel heads, training; its query-side backward also holds up to ``h100_dh.MAX_SLABS`` fp32 dbias slabs)."""
+    core of 64-channel heads, training; its query-side backward also holds the bf16 dbias planes, S / ``h100_dh.BWD_Q_ROWS`` of them)."""
     c, h = d_pair, n_head
     # a length padded to 128: the padded copy of the pair (saved in training) and of dy, the padded output / dx before the cut
     pad = 4 * c if padded else 0
