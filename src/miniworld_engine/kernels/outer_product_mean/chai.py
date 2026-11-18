@@ -13,6 +13,7 @@ dA = b dO^T, dB = a dO (two batched GEMMs); the projection / LayerNorm backward 
 from __future__ import annotations
 
 import functools
+import os
 from pathlib import Path
 
 import torch
@@ -103,7 +104,7 @@ def _front(msa, mask, forms, eps, save):
         if f8_wanted(a, s, n):
             opm_fp8.GUARD_STATS["calls"] += 1
             return a, b, st1, f8_products(a, b, s, n, forms)
-        if opm_fp8.POLICY is not None:
+        if opm_fp8.POLICY is not None and s >= F8_MIN_S:  # (below the depth gate the bf16 route is the intended one: not a fallback)
             opm_fp8.GUARD_STATS["fallbacks"] += 1
     o = (
         products(a, b, mk, s, n) if products is not None else torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))
@@ -272,7 +273,8 @@ def forward(module, msa, mask, token_asym_id=None, residual=None):
 
 # ---- EXPERIMENTAL e4m3 grouped product (opt-in with ``MINIWORLD_OPM_FP8=bound``, H100 inference; docs/fp8.md "Chai-1 grouped OPM") ----
 #: the shortest MSA depth S (padded rows of the call) that takes the e4m3 product; below it the bf16 batched GEMM runs unchanged
-F8_MIN_S = 0
+# default: never (measured a net loss at every S, docs/fp8.md); 0 = every depth
+F8_MIN_S = int(os.environ.get("MINIWORLD_OPM_FP8_CHAI_MINS", str(1 << 40)))
 
 
 @functools.cache
@@ -299,7 +301,8 @@ def _f8_forms(forms):
 
     def build():
         s = opm_fp8.bound_scales(lnw, lnb, w[: G * K], w[G * K :])
-        return s[0:1].contiguous(), s[1:2].contiguous(), (1.0 / s[0:1]).contiguous(), (1.0 / s[1:2]).contiguous()
+        # own allocations: cuBLASLt wants aligned scale pointers
+        return s[0:1].clone(), s[1:2].clone(), (1.0 / s[0:1]).clone(), (1.0 / s[1:2]).clone()
 
     return _capture.param_forms("chai_f8_scales", [lnw, lnb, w], build, capture_reads_eager=True)
 
@@ -322,5 +325,5 @@ def f8_products(a: torch.Tensor, b: torch.Tensor, s: int, n: int, forms) -> torc
     o = torch.empty((G, n * K, n * K), device=a.device, dtype=torch.bfloat16)
     s0, s1 = sa.view(()), sb.view(())
     for g in range(G):
-        o[g] = torch._scaled_mm(a8[g], b8[g].t(), s0, s1, out_dtype=torch.bfloat16)
+        o[g] = torch._scaled_mm(a8[g], b8[g].t(), s0, s1, out_dtype=torch.bfloat16)  # pyright: ignore[reportPrivateImportUsage]
     return o
