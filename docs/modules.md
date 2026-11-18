@@ -129,7 +129,14 @@ rows (graph timing, L2 flushed; L 768, ms):
 | pair [1, 768, 768, 256], 2 branches | eval | 4.015 | 0.407 | 0.393 | 7.074 | 0.750 | 0.722 |
 | | train | 7.321 | 1.016 | 1.942 | 12.980 | 1.851 | 3.494 |
 
-`PairformerBlock(parallel=True)` keeps its own statements for its parallel schedule.
+`PairformerBlock(parallel=True)` (Chai-1's trunk and confidence blocks) on the `"cuda"` backend sums its updates with this kernel: the five
+pair updates (two triangle multiplications, two triangle attentions, the transition) run on the block input, then ONE pass computes
+`pair_in + sum_i (y_i - pair_in)` (fp32 sum, one rounding; the CUDA kernel takes 1 to 5 branches, the Triton kernel and the module class 1 to
+4); the single track's two updates go through the same call. The reference statements (a bf16 subtraction per update, the sum's additions
+and the final addition: 10 full-pair elementwise passes per block, 19-22 % of the Chai-1 forward at 512 to 2048 tokens) stay the
+`"pytorch"` path and the fallback outside the kernel's range (a dtype or device mismatch between the block input and an update's output).
+The five outputs are live together (two more pair-sized tensors than the statement sequence's peak). Its rows: `PairformerBlock` `chai1`
+(trunk, eval and train) and `chai1_confidence` (eval, 1 or 5 samples) in `requirements_module.csv`.
 
 ## FoldForge 5I28 sizes (1024-2048 tokens, 12-16 k atoms)
 
