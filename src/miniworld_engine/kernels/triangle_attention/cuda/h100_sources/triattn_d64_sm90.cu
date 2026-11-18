@@ -121,6 +121,7 @@ __device__ __forceinline__ uint64_t desc_mv(uint64_t d, uint32_t bytes) {
   return r;
 }
 __device__ __forceinline__ uint32_t hmax2(uint32_t a, uint32_t b) { uint32_t r; asm("max.f16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
+__device__ __forceinline__ uint32_t hmin2(uint32_t a, uint32_t b) { uint32_t r; asm("min.f16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 __device__ __forceinline__ uint32_t hfma2(uint32_t a, uint32_t b, uint32_t c) { uint32_t r; asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r; }
 __device__ __forceinline__ uint32_t hex2(uint32_t a) { uint32_t r; asm("ex2.approx.f16x2 %0, %1;" : "=r"(r) : "r"(a)); return r; }
 // 2^x on f16x2 pairs on the FMA / ALU pipes (triattn_h16_sm90.cu's hex2_poly): x clamped at -15 (2^-15 flushes to 0), j = round(x),
@@ -354,6 +355,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
       for (int i = 4 * kk; i < 4 * kk + 4; ++i) {
         uint32_t x0 = hfma2(sc[r][2 * i], scl2, nb0), x1 = hfma2(sc[r][2 * i + 1], scl2, nb1);
         x0 = hmax2(x0, 0xC700C700u); x1 = hmax2(x1, 0xC700C700u);                       // x >= -7
+        x0 = hmin2(x0, 0x48604860u); x1 = hmin2(x1, 0x48604860u);                       // x <= 8.75: byte <= 126 = 448 (127 is the e4m3 NaN; with large fp16 logits the offset's rounding can put x past 8.875)
         x0 = hfma2(x0, 0x48004800u, 0x64386438u); x1 = hfma2(x1, 0x48004800u, 0x64386438u);   // 8 x + 56 + 1024
         sc[r][2 * i] = x0; sc[r][2 * i + 1] = x1;
       }

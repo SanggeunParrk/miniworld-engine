@@ -6,6 +6,7 @@ matching backward.
 """
 
 import functools
+import os
 import weakref
 from pathlib import Path
 from typing import Any
@@ -84,8 +85,9 @@ STATS = {"d128_calls": 0, "pv_fused": 0, "qk": 0, "pv_front": 0, "pv_pass": 0, "
 #: True: the 64-channel-head wgmma core (``h100_dh``: Chai-1 trunk / confidence, RoseTTAFold3 templates) runs its FP8 PV variant (``triattn_d64_sm90.cu`` -DTE_F8PV=1): V on e4m3 V^T planes
 #: (the standalone ``vt_quant`` pass, static per-site scale, the same overflow flag), p as e4m3 bytes.  Call-site kind "d64" of :data:`miniworld_engine.fp8.TRIATTN_MODELS`.
 FP8_PV_D64 = False
-#: the shortest padded S the d64 FP8 core takes (below it the V^T pass costs more than the core gains; measured: docs/fp8.md)
-FP8_PV_D64_MIN_S = 128
+#: the shortest padded S the d64 FP8 core takes: below it the V^T pass costs more than the core gains (module time, CUDA graph, Chai-1 trunk node: FP8 / fp16 core 1.12 at L128,
+#: 1.04-1.06 at L256-512, 1.01 at L768, 0.986 at L1024, 0.944 at L1536, 0.930 at L2048; docs/fp8.md).  ``MINIWORLD_TRIATTN_D64_MINS=<s>`` overrides it (0 = no gate)
+FP8_PV_D64_MIN_S = int(os.environ.get("MINIWORLD_TRIATTN_D64_MINS", "1024"))
 
 
 #: True: V on two e4m3 planes (hi, and the rounding residual x16 rounded again): V^T [B, N, H, 2, 32, S], PV on m64n72k32; the V rounding error falls
