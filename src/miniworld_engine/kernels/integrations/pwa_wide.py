@@ -88,6 +88,15 @@ def _pair(d_pair: int):
     )
 
 
+#: 3.0.1: the backward's dropout-mask application and the BIG build's dv permute-copy run in `csrc/pwa_wide_aux.cu` (one build, shape-independent);
+#: False = the 3.0.0 PyTorch elementwise / strided copy (bit-identical results; the A/B switch of the speed measurements)
+FUSED_BWD_AUX = True
+
+
+def _aux():
+    return _load("miniworld_pwa_wide_aux", "pwa_wide_aux.cu", [])
+
+
 def _value(d_msa: int, d_hidden: int):
     return _load(
         f"miniworld_pwa_wide_{d_msa}_{d_hidden}",
@@ -218,7 +227,12 @@ def _backward_op(
     )
     dres = dres.contiguous()
     # the residual's gradient is dres itself; the update's is dres * mask / (1 - p) (what autograd of x * mask / (1-p) gives)
-    dout = dres if not p_drop else (dres * dmask[None] * (1.0 / (1.0 - p_drop))).contiguous()
+    if not p_drop:
+        dout = dres
+    elif FUSED_BWD_AUX:
+        dout = _aux().drop_bwd_w(dres, dmask, 1.0 / (1.0 - p_drop))  # one pass: bf16(bf16(dres * keep) * scale), the two PyTorch ops' arithmetic
+    else:
+        dout = (dres * dmask[None] * (1.0 / (1.0 - p_drop))).contiguous()
     dgv = torch.empty((s, n, 2 * hc), device=m.device, dtype=bf)  # [dgp | dv], natural layout
     big = is_big(d_msa, hc // H)
     if big:  # the gate is the forward's g (no Wg on chip)
@@ -232,7 +246,10 @@ def _backward_op(
         # dv into the natural [dgp | dv] buffer, dy = [dgp | dv] [Wg; Wv] on cuBLAS in fp32 (a 256 KiB weight: no room on chip next to
         # the tiles), then the LayerNorm backward + the residual gradient
         c = hc // H
-        dgv[..., hc:].view(s, n, H, c).copy_(dv.view(H, n, s, c).permute(2, 1, 0, 3))
+        if FUSED_BWD_AUX:
+            _aux().perm_dv_w(dv, dgv, hc)
+        else:
+            dgv[..., hc:].view(s, n, H, c).copy_(dv.view(H, n, s, c).permute(2, 1, 0, 3))
         dy = torch.mm(dgv.view(s * n, 2 * hc), torch.cat([wg16, wv16], 0), out_dtype=torch.float32)
         dm, dlw, dlb = kv.ln_bwd_w(dy, m, stats, dres, lnm_w.detach().float().contiguous())
     else:

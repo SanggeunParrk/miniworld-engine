@@ -133,7 +133,15 @@ epilogue `x + bf16(P) sigmoid(g)`. Schedules: `wide_forward/selection.json`, `un
 
 ### Wide training (`h100_wide_training.py`, `h100_uni_wide_training.py`)
 
-Frozen sources under `wide_train/`; dense GEMMs on cuBLASLt with explicit algorithms (`lt_selection.json`). Single direction:
+Frozen sources under `wide_train/`; dense GEMMs on cuBLASLt with explicit algorithms (`lt_selection.json`; an entry is one
+`[heuristic index, algo words]` or a list of them, one per cuBLASLt generation: the words recorded with 12.8.4 first, then 12.9.1; word 4 is
+runtime metadata and is not compared; the first candidate the runtime offers wins, else the first heuristic with a one-time warning). With
+cuBLASLt 12.9.1 the 12.8.4 words of the `dwg` / `dwp` entries of cells 256-384, 256-768, 384-768 and 512-384 were no longer offered (word 6
+changed), so 3.0.0 ran the first heuristic there (warning). The 12.9.1 candidates are the fastest offered heuristics whose gradient is
+BIT-EQUAL to the first heuristic's, checked in situ on the module's gradients (a GEMM-level equality on stale operands is not enough: split
+orders differ): 256-384 dwg the first heuristic itself (no bit-equal alternative: idx 1-7 differ in fp32 summation order), 256-768 dwg idx 5
+208.7 vs 234.2 us, 256-768 dwp idx 4 298.7 vs 395.9 us, 384-768 dwg idx 1 307.6 vs 322.5 us, 512-384 dwg the first heuristic itself. All
+gradients stay bit-identical to 3.0.0; step time D256 L768 11.20 -> about 11.1 ms, D256 L384 / D384 / D512 unchanged. Single direction:
 weight pack -> front (`front_pre_d384.cu`, or at D512 `ln_in_d512.cu` + `front_pre_ss.cu` with wgmma A / B from shared memory;
 LN_in + gated projections, saves x_n and channel-major preactivations) -> contraction -> `forward_norm_d384.cu` (LN_out) ->
 projection and gate GEMMs -> `output_dense.cu` (gate, dropout, residual). Backward: `gate.cu` -> dn GEMM -> `output_ln_*.cu` ->

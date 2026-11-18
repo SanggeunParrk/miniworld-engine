@@ -328,6 +328,12 @@ class AttentionPairBias(BackendModule, MasterWeights):
 
         return extra_pair_bias is not None or sm80._step_refusal(self, single, pair, mask, False) is not None
 
+    @staticmethod
+    def _reads_ragged(single) -> bool:
+        """H100 bf16 inference takes a ragged L (L % 128 != 0) as it is: the pair pass writes the real block of the padded bias planes
+        (``kernels.augmented_attention.cuda.apb.pair_bias_padded``), so the call pads only single / mask -- never the [L, L, d_pair] pair."""
+        return single.dtype != torch.float32 and torch.cuda.get_device_capability(single.device) == (9, 0)
+
     def _cuda_grad(self, single, pair, extra_pair_bias=None) -> bool:
         return torch.is_grad_enabled() and (
             single.requires_grad
@@ -342,7 +348,12 @@ class AttentionPairBias(BackendModule, MasterWeights):
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return single
         L = single.shape[1]
-        if L % 128 and not self._cuda_grad(single, pair, extra_pair_bias) and self._pads(single, pair, mask, extra_pair_bias):
+        if (
+            L % 128
+            and not self._cuda_grad(single, pair, extra_pair_bias)
+            and self._pads(single, pair, mask, extra_pair_bias)
+            and not self._reads_ragged(single)
+        ):
             # inference at L % 128 != 0 (FoldForge OpenDDE n = 12: 2976 structural tokens): the kernels take whole 128-token tiles, so the
             # call runs at the next multiple of 128 -- zero single rows and pair entries, the pad keys masked (-inf: no weight), the pad
             # query rows dropped. Every real row attends over the same keys with the same logits as unpadded.
@@ -878,7 +889,7 @@ class BiasOnlyAttention(BackendModule):
         super().set_backend(backend)
         ada = getattr(self, "ada_ln_in", None)  # absent while nn.Module.__init__ runs the first set_backend
         if isinstance(ada, BackendModule):
-            ada.set_backend(backend if backend in ada.backends else "pytorch")
+            ada.set_backend(backend if ada.has_backend(backend) else "pytorch")
         return self
 
     def _triton_core_t(self, single: torch.Tensor, src: torch.Tensor | None) -> bool:

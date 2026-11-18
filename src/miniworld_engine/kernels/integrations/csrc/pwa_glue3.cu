@@ -140,7 +140,7 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
     const __grid_constant__ CUtensorMap wotmap,   // wo^T [HC][D]               box (64, 32)
     const __grid_constant__ CUtensorMap domap,    // do   head-major [H*N][S*C] box (64, 64) (store)
     const __grid_constant__ CUtensorMap dgpmap,
-    const __nv_bfloat16* __restrict__ drop_mask, float drop_scale) { // dgp  natural, row stride rs, 3-D box (32 c, 64 tok, 2 s), 64B swizzle (store)
+    const __nv_bfloat16* __restrict__ drop_mask, float drop_scale, int maskpf) { // dgp  natural, row stride rs, 3-D box (32 c, 64 tok, 2 s), 64B swizzle (store)
   extern __shared__ __align__(1024) unsigned char smem_raw[];
   const uint32_t sbase = static_cast<uint32_t>(__cvta_generic_to_shared(smem_raw));
   unsigned char* smb = smem_raw + ((1024u - (sbase & 1023u)) & 1023u);
@@ -251,6 +251,19 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
       }
     }
   };
+  // The row-dropout keep mask of this tile's i rows (the same for both s): 16 bf16 pairs per thread, loaded one tile ahead so the masking
+  // of the dout tiles does not wait on global-memory latency (maskpf; 0 = the loads inside the masking loop).
+  uint32_t mk[16];
+  auto load_mask = [&](int T) {
+    const int t = blockIdx.x + T * gridDim.x;
+    if (drop_mask == nullptr || !maskpf || t >= ntile) return;
+    const int i0 = tile_ip(t) * 128 + c * 64;
+#pragma unroll
+    for (int k = 0; k < 16; ++k) {
+      const int rc = ((k * 128 + wtid) % (TILE / 2)) * 2;
+      mk[k] = __ldg(reinterpret_cast<const uint32_t*>(drop_mask + (i0 + rc / D) * D + rc % D));
+    }
+  };
   float gacc[2][16], duacc[2][16];
   // dWo partials: this warpgroup owns channels [16c, 16c+16) of every head (named arrays selected by a switch, never indexed)
   float wa0[8], wa1[8], wa2[8], wa3[8], wa4[8], wa5[8], wa6[8], wa7[8];
@@ -278,6 +291,7 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
   };
   int gs = 0;
   load_y(0);
+  load_mask(0);
   for (int T = 0;; ++T) {
     const int t = blockIdx.x + T * gridDim.x;
     if (t >= ntile) break;
@@ -290,12 +304,14 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
       // both du and dWo consume them; no [S,N,D] masked gradient goes through HBM.
       auto* tile = const_cast<__nv_bfloat16*>(sDOc);
 #pragma unroll
-      for (int v = wtid; v < BS * TILE / 2; v += 128) {
+      for (int kk = 0; kk < BS * TILE / 2 / 128; ++kk) {
+        const int v = wtid + 128 * kk;
         const int si = v / (TILE / 2), rc = (v % (TILE / 2)) * 2;
         const int row = rc / D, col = rc % D;
         auto* ptr = reinterpret_cast<__nv_bfloat162*>(tile + si * TILE + tma::sw128(row, col));
         const float2 value = __bfloat1622float2(*ptr);
-        const float2 keep = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(drop_mask + (i0 + row) * D + col));
+        const float2 keep = maskpf ? __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&mk[kk & 15]))
+                                   : __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(drop_mask + (i0 + row) * D + col));
         *ptr = __float22bfloat162_rn(make_float2((value.x * keep.x) * drop_scale, (value.y * keep.y) * drop_scale));
       }
       wg::proxy_fence();
@@ -363,6 +379,7 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_kernel(int N, int S, int
     wg::wait<0>();
     if (wtid == 0) tma::arrive(doneT + b);                             // this tile's dout tiles are free (both consumers arrive)
     load_y(T + 1);
+    load_mask(T + 1);
   }
   if (wtid == 0) tma::wait_all();
   // ---- this block's dWo partial slab [64 d][HC]: head 2q + c, rows d = r_acc / r_acc + 8, cols i*8 + cq + j ----
@@ -421,7 +438,7 @@ CUtensorMap map_nat(void* base, long row_stride, int N, int S, int bi) {   // na
 
 template <int NST>
 void launch_glue3(int N, int S, int ntile, int ohm, int grid, float* dWo, const CUtensorMap& omap, const CUtensorMap& dmap, const __nv_bfloat16* yp,
-                  const CUtensorMap& gmap, const CUtensorMap& wotmap, const CUtensorMap& domap, const CUtensorMap& dgpmap, const __nv_bfloat16* drop_mask, float drop_scale) {
+                  const CUtensorMap& gmap, const CUtensorMap& wotmap, const CUtensorMap& domap, const CUtensorMap& dgpmap, const __nv_bfloat16* drop_mask, float drop_scale, int maskpf) {
   constexpr int BYTES = SMX<NST>::BYTES;
   static bool attr = false;                                        // one per instantiation
   if (!attr) {
@@ -431,7 +448,7 @@ void launch_glue3(int N, int S, int ntile, int ohm, int grid, float* dWo, const 
     TORCH_WARN("pwa_glue3_kernel<", NST, ">: ", BYTES, " B smem -> ", nb, " blocks/SM");
     attr = true;
   }
-  pwa_glue3_kernel<NST><<<grid, THREADS, BYTES, at::cuda::getCurrentCUDAStream()>>>(N, S, ntile, ohm, dWo, omap, dmap, yp, gmap, wotmap, domap, dgpmap, drop_mask, drop_scale);
+  pwa_glue3_kernel<NST><<<grid, THREADS, BYTES, at::cuda::getCurrentCUDAStream()>>>(N, S, ntile, ohm, dWo, omap, dmap, yp, gmap, wotmap, domap, dgpmap, drop_mask, drop_scale, maskpf);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -442,7 +459,7 @@ __global__ void pwa_glue_reduce(const float* src,float* dst,int rows) {
   if(col<D*HC){float v=0;for(int r=0;r<rows;++r)v+=src[(long)r*D*HC+col];dst[col]=v;}
 }
 #endif
-std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Tensor dout, torch::Tensor wgw, torch::Tensor wot, c10::optional<torch::Tensor> dgv, int64_t nst, int64_t blocks_per_sm, c10::optional<torch::Tensor> drop_mask, double drop_scale, bool o_head_major) {
+std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Tensor dout, torch::Tensor wgw, torch::Tensor wot, c10::optional<torch::Tensor> dgv, int64_t nst, int64_t blocks_per_sm, c10::optional<torch::Tensor> drop_mask, double drop_scale, bool o_head_major, bool mask_prefetch) {
 #if MW_PWA_CUDA_AUX
   C10_CUDA_CHECK(cudaSetDevice(o.get_device()));
 #endif
@@ -478,8 +495,8 @@ std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Te
               domap = map2d(d_o.data_ptr(), (long)H * N, (long)S * C, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B, "do"), dgpmap = map_nat(dgp.data_ptr(), rs, N, S, 64);
   const __nv_bfloat16* yp = reinterpret_cast<const __nv_bfloat16*>(y.data_ptr<at::BFloat16>());
   const int so_unused = 0; (void)so_unused;
-  if (nst == 3) launch_glue3<3>(N, S, ntile, o_head_major ? 1 : 0, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale);
-  else if (nst == 2) launch_glue3<2>(N, S, ntile, o_head_major ? 1 : 0, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale);
+  if (nst == 3) launch_glue3<3>(N, S, ntile, o_head_major ? 1 : 0, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale, mask_prefetch ? 1 : 0);
+  else if (nst == 2) launch_glue3<2>(N, S, ntile, o_head_major ? 1 : 0, grid, dWo.data_ptr<float>(), omap, dmap, yp, gmap, wotmap, domap, dgpmap, mask_ptr, (float)drop_scale, mask_prefetch ? 1 : 0);
   else TORCH_CHECK(false, "nst must be 2 or 3 (the double-buffered staging leaves room for at most three o-stage slots)");
 #if MW_PWA_CUDA_AUX
   auto result=torch::empty({D,HC},dWo.options());
@@ -492,5 +509,5 @@ std::vector<torch::Tensor> pwa_glue3(torch::Tensor o, torch::Tensor y, torch::Te
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
   mod.def("pwa_glue3", &pwa_glue3, "PWA backward glue from the saved o with the dWo partial folded in: (do head-major, dgp, dWo fp32 [64][256])",
-          py::arg("o"), py::arg("y"), py::arg("dout"), py::arg("wg"), py::arg("wot"), py::arg("dgv") = py::none(), py::arg("nst") = 2, py::arg("blocks_per_sm") = 1, py::arg("drop_mask") = py::none(), py::arg("drop_scale") = 1.0, py::arg("o_head_major") = false);
+          py::arg("o"), py::arg("y"), py::arg("dout"), py::arg("wg"), py::arg("wot"), py::arg("dgv") = py::none(), py::arg("nst") = 2, py::arg("blocks_per_sm") = 1, py::arg("drop_mask") = py::none(), py::arg("drop_scale") = 1.0, py::arg("o_head_major") = false, py::arg("mask_prefetch") = false);
 }

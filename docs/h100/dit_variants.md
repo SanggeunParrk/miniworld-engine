@@ -67,6 +67,8 @@ operands, fp32 inside:
 | `dit_variants_edge_bwd_apply_sm90` | backward | after it: the side buffers added into dq / dk / dv (one CTA per (sample, head, 8 columns), windows in order, deterministic) |
 | `dit_variants_edge_bias_bwd_sm90` | backward | the edge windows' pair LayerNorm / projection backward into dz, d gamma_pair, d Wb |
 
+The five windows' indices, key positions and key validity (conformer mask included) come from one small launch (`edge_index`, a helper of the forward tables: no row of its own; 3.0.0 ran about 20 torch int64 launches for them, which a graph that remakes the tables at every replay paid every time).
+
 **The tail.** On a padded atom count every query window past the last real one (`w >= t0 = max(last + 1, 2)`, padding queries only)
 also differs: in the reference they all read the same slid keys `[R_rule - 128, R_rule)` (`R_rule`: the real count, or rounded up to a
 whole query window for `slide_qblock`; keys past the real atoms masked; a padding query is spared Chai-1's conformer mask). How many there
@@ -108,3 +110,14 @@ The H100 `kernels/dit_variants` row kernels (`interface.py` bf16 inference, `cud
 and parallel-Pairformer rows are not DiT modules). Historical (from the 2026-10-22 note, not re-measured under the current measurer;
 measured on the deleted dit_variants path): token stacks 2.8-4.1x and atom stacks 1.6x against compiled torch (CUDA graph, L 384 / 768 and
 8192 atoms).
+
+## Chai-1 mixed layout: the bf16 entry form is cached (3.0.1)
+
+`MasterEntryCast` (Chai-1 token / atom blocks, FoldForge's bf16 `single` with fp32 `cond` / `pair`) rounds `cond` and `pair` to bf16 at the entry.
+3.0.0 converted them at every call (`aten::to` of the fp32 `[1, 2048, 2048, 256]` pair: 42 % of a `token_single_fp32_cond` call at L 2048, S 5).
+`dit_variant_cuda._round_bf16` now makes the bf16 form once per input tensor (`kernels._capture.lookup_inputs`, store `_ENTRY_BF16` registered as
+`dit_variant_cuda.entry_bf16`, 4 entries): the key is storage (weak reference), address, layout and in-place version, so a sampler's steps (a
+fresh alias of the same pair each call) are served the same bf16 tensor, an in-place write makes a new form, and a tensor the autograd records or
+an inference tensor is cast as before. The kernels' own hoisted tables (pair bias, grouped conditioning) key on that stable tensor too. The
+output is bitwise 3.0.0's. A registry replay (CUDA graph without `static_inputs()`) records the cast in the graph as before (4.94 ms, unchanged);
+under `static_inputs()` (a sampler graph) the replay is 0.68 ms at L 2048 (0.31 ms L 1024, 0.17 ms L 512).

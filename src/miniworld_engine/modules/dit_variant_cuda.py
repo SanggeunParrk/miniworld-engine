@@ -27,11 +27,19 @@ from typing import Any, cast
 
 import torch
 import torch.nn as nn
+from torch.multiprocessing.reductions import StorageWeakRef
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.modules.norm import IdentityAdaptiveLayerNorm
 from miniworld_engine.modules.transition import ConditionedTransition
 
 _BF, _F32 = torch.bfloat16, torch.float32
+
+#: the bf16 forms of the fp32 conditioning / pair a ``MasterEntryCast`` call rounds at its entry, per input tensor (``kernels._capture.hoisted_table``:
+#: keyed on the tensor's address / version / layout with a weak reference to it, scoped to a CUDA-graph capture like every per-item table): a sampler's
+#: steps read the same pair and conditioning, which were converted again at every call (Chai-1 L 2048: 42 % of the block call)
+_ENTRY_BF16: dict = _capture.weight_cache("dit_variant_cuda.entry_bf16")
+_ENTRY_LIMIT = 4  # forms (a pair is 2 GB at L 2048 x 256): the pair / conditioning of the item in flight
 
 
 class _AdaLN:
@@ -219,6 +227,29 @@ def _run(fn, stack, single, cond, call, *, wants_grad: bool, keep_autocast: bool
     return out.unsqueeze(1)
 
 
+def _round_bf16(t: torch.Tensor) -> torch.Tensor:
+    """``t`` rounded to bf16: for the per-item conditioning / pair of a sampler, once per tensor (``_ENTRY_BF16``) -- the later steps are served the
+    same bf16 tensor (also the key of the kernels' own hoisted tables: the pair bias, the grouped conditioning). The entry names the input by its
+    storage (weakly: a sampler passes a fresh alias of the caller's tensor at every call, and the entry must not keep the 2 GB pair alive),
+    address, layout and in-place version. A tensor the autograd records or an inference tensor (no version counter) is cast as it comes."""
+    if t.dtype == _BF:
+        return t
+    if t.is_inference() or (torch.is_grad_enabled() and t.requires_grad):
+        return t.to(_BF)
+    ref = StorageWeakRef(t.untyped_storage())
+    layout = (t.data_ptr(), tuple(t.shape), t.stride(), t.dtype, t.device)
+    return _capture.lookup_inputs(
+        _ENTRY_BF16,
+        (*layout, t._version),
+        lambda: (t.to(_BF), ref),
+        limit=_ENTRY_LIMIT,
+        valid=lambda e: not e[1].expired() and e[1].cdata == ref.cdata,
+        alive=lambda e: not e[1].expired(),
+        inputs=(t,),
+        lineage=layout,  # an input written in place (a new version) replaces its old form instead of keeping both
+    )[0]
+
+
 def _master_entry(module, single, cond, pair) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
     """``(single, cond, pair)`` rounded to bf16 when the call is the master layout with some fp32 activations, else None.
 
@@ -238,7 +269,7 @@ def _master_entry(module, single, cond, pair) -> tuple[torch.Tensor, torch.Tenso
             return None
     elif not (single.dtype == _BF and any(p.dtype == _F32 for p in module.parameters() if p.ndim >= 2)):
         return None
-    return single.to(_BF), cond.to(_BF), pair.to(_BF)
+    return single.to(_BF), _round_bf16(cond), _round_bf16(pair)
 
 
 #: requirements streams of the Chai-1 DiT rows whose inputs are FoldForge's mixed layout (FoldForge R7): ``*_fp32_cond``: the case dtype's

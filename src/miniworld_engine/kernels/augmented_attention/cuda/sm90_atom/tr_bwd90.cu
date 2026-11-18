@@ -7,6 +7,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "row90.cuh"
 using namespace r90;
+#ifndef GRP_ALIAS
+#define GRP_ALIAS 0
+#endif
 #ifndef UP
 #define UP 0   // 1: Boltz-2's up-gate transition (h = silu(a) b u; dab = [da | db | du], Wu_j streamed with each chunk)
 #endif
@@ -42,12 +45,18 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void tr_bwd90(const T* __restri
   const size_t row0 = shared ? (size_t)(sg4 * 4 + (warp & 3)) * natoms + (size_t)(acg * (NWARP / 4) + (warp >> 2)) * 16 : atom0;
   const size_t mrow = row0 % (size_t)nmod;   // rows of the modulation tables (nmod = M: per sample; = N: shared)
   const size_t prow = (size_t)sg4 * natoms + (size_t)acg * (NWARP / 4) * 16;   // partial row of this CTA's first atom block
+#if GRP_ALIAS   // the dmod-gradient slabs are used only in the prologue: they live in the second weight buffer, whose chunk is issued after them
+  static_assert(GRP_BYTES <= BUF, "slabs must fit one weight buffer");
+  T* const gred = reinterpret_cast<T*>(sm_raw + (base - su(sm_raw)) + BUF);
+#else
   T* const gred = reinterpret_cast<T*>(sm_raw + (base - su(sm_raw)) + 2 * BUF + 1 * NWARP * 128 * 4);
+#endif
   int gpar = 0;
 #define GFLUSH(DST, LD, COL) if (shared) { grp_flush(reinterpret_cast<T*>(DST), prow, LD, COL, gred + (size_t)gpar * FBUF, tid); gpar ^= GNB - 1; }
   const int ncs = (int)gridDim.y, cy = (int)blockIdx.y, jper = NCH / ncs, j0 = cy * jper;   // hidden chunks of this CTA (small row counts: grid.y > 1)
   issue(j0);
-  if (jper > 1) issue(j0 + 1); else cp_commit();
+  const bool late1 = GRP_ALIAS && shared;   // the second weight buffer holds the slabs: its chunk is issued after them
+  if (!late1) { if (jper > 1) issue(j0 + 1); else cp_commit(); }
   Tile dtt, xt;
   {
     Tile y, tt, st;
@@ -70,6 +79,10 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void tr_bwd90(const T* __restri
       GFLUSH(dmod_acc, 768, 640);
       col_partial(ds, red, warp, lane, t);  // d bias of the st gate
     }
+  }
+  if (late1) {
+    __syncthreads();   // the slabs are read
+    if (jper > 1) issue(j0 + 1); else cp_commit();
   }
   ld_tile(xt, x2 + row0 * 128, 128, 0, g, t);
   rna(xt);

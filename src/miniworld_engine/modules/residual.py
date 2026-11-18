@@ -9,15 +9,18 @@ MSA transition on the MSA, the two triangle multiplications and the pair transit
 :func:`parallel_residual` / :class:`ParallelResidual` compute it. ``"pytorch"`` (the reference) runs the statement with the differences and
 the sum in at least fp32 (``wide``) and one rounding to ``x``'s dtype; ``"triton"`` is the same in one pass over the tensors
 (``kernels/parallel_residual/triton``: reads ``x`` and the branches once, writes once) for CUDA tensors of one dtype (bf16 / fp16 / fp32),
-1 to 4 branches; its backward is torch statements. ``"cuda"`` is the same arithmetic in a hand-written kernel
+1 to 4 branches (the function and the CUDA kernel: 1 to 5); its backward is torch statements. ``"cuda"`` is the same arithmetic in a hand-written kernel
 (``kernels/parallel_residual/cuda``: one source, the H100 sm_90a and A100 sm_80 builds; 16-byte vector accesses, several vectors in
 flight per thread, streaming cache hints) over the same range, with its backward's ``(1 - n) g`` in one small kernel too. The backward
 is ``d out / d y_i = g`` (no kernel), ``d out / d x = (1 - n) g`` (fp32 product, one rounding). Ladder exception (user decision
 2026-11-11, docs/ladder.md): at the bandwidth wall ``"cuda"`` may be slower than ``"triton"`` in eval (1-5 % at L >= 384); it beats
 ``"pytorch"`` everywhere and ``"triton"`` in training.
 
-``PairformerBlock(parallel=True)`` keeps its own statements for its parallel schedule (its records are unchanged); a caller composing a
-parallel stage from engine parts uses this op.
+``PairformerBlock(parallel=True)`` on the ``"cuda"`` backend sums its updates' deltas with the CUDA kernel (:func:`fused_parallel_residual`,
+up to 5 branches: Chai-1's two triangle multiplications, two triangle attentions and the transition; the single track's two): one pass,
+fp32 sum, one rounding, in place of a subtraction per update, the sum's additions and the final addition. Every other backend, and a
+call outside the kernel's range, keeps the block's own statements (the reference). A caller composing a parallel stage from engine parts
+uses this op.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ import torch
 from miniworld_engine.modules.primitives import BackendModule, random_input, stream_shape, wide
 
 MAX_BRANCHES = 4  # kernels/parallel_residual/triton/main.py MAX_BRANCHES
+MAX_BRANCHES_CUDA = 5  # kernels/parallel_residual/cuda/parallel_residual.cu kMaxBranches (the module class takes MAX_BRANCHES: y0 .. y3)
 
 
 def _reference(x: torch.Tensor, branches: list[torch.Tensor]) -> torch.Tensor:
@@ -60,26 +64,36 @@ class _ParallelResidualCudaFn(torch.autograd.Function):
         from miniworld_engine.kernels.parallel_residual import cuda as K
 
         ctx.n = len(branches)
+        # the branches that are leaves of the autograd graph (a parameter, or an input a caller differentiates): their gradient ends in AccumulateGrad,
+        # which takes a FRESH tensor as the leaf's `.grad` but copies a shared one (one full-tensor copy a leaf, each reading g again)
+        ctx.leaves = tuple(y if y.requires_grad and y.is_leaf else None for y in branches)
         return K.forward(x.contiguous(), [y.contiguous() for y in branches])
 
     @staticmethod
     def backward(ctx, g):
         from miniworld_engine.kernels.parallel_residual import cuda as K
 
-        return (K.backward(g, ctx.n), *([g] * ctx.n))
+        # d out / d y_i = g: shared for every branch an upstream node reads (no copy), but written as a fresh tensor, in the one pass of the
+        # gradient of x, for a leaf branch with no `.grad` yet (AccumulateGrad then steals it; with a `.grad` it adds the shared g)
+        fresh = [i for i, y in enumerate(ctx.leaves) if y is not None and y.grad is None and ctx.needs_input_grad[i + 1]]
+        gx, *copies = K.backward(g, ctx.n, len(fresh))
+        gys = [g] * ctx.n
+        for i, c in zip(fresh, copies, strict=True):
+            gys[i] = c
+        return (gx, *gys)
 
 
 def _cuda_reason(x: torch.Tensor, branches: list[torch.Tensor]) -> str | None:
     """The Triton range (the kernels read the same tensors) on the cards the CUDA kernel is built for (H100 sm_90a, A100 sm_80, RTX 5090 sm_120a)."""
     from miniworld_engine.modules.pair_embed import _cuda_arch
 
-    why = _triton_reason(x, branches) or _cuda_arch(x.device)
+    why = _triton_reason(x, branches, MAX_BRANCHES_CUDA) or _cuda_arch(x.device)
     return None if why is None else why.replace("the Triton kernel", "the CUDA kernel")
 
 
-def _triton_reason(x: torch.Tensor, branches: list[torch.Tensor]) -> str | None:
-    if not 1 <= len(branches) <= MAX_BRANCHES:
-        return f"{len(branches)} branches (the Triton kernel reads 1 to {MAX_BRANCHES})"
+def _triton_reason(x: torch.Tensor, branches: list[torch.Tensor], limit: int = MAX_BRANCHES) -> str | None:
+    if not 1 <= len(branches) <= limit:
+        return f"{len(branches)} branches (the Triton kernel reads 1 to {limit})"
     if not x.is_cuda:
         return "CUDA tensors only"
     if x.dtype not in (torch.bfloat16, torch.float16, torch.float32):
@@ -88,6 +102,14 @@ def _triton_reason(x: torch.Tensor, branches: list[torch.Tensor]) -> str | None:
         if y.shape != x.shape or y.dtype != x.dtype or y.device != x.device:
             return f"every branch must have x's shape / dtype / device: {tuple(x.shape)} {x.dtype}, got {tuple(y.shape)} {y.dtype}"
     return None
+
+
+def fused_parallel_residual(x: torch.Tensor, branches: list[torch.Tensor]) -> torch.Tensor | None:
+    """``x + sum_i (y_i - x)`` on the CUDA kernel (1 to :data:`MAX_BRANCHES_CUDA` branches), or ``None`` when the call is outside its range
+    (the caller then runs its own statements): the hook of :class:`~miniworld_engine.modules.pairformer.PairformerBlock`'s parallel schedule."""
+    if _cuda_reason(x, branches) is not None:
+        return None
+    return _ParallelResidualCudaFn.apply(x, *branches)
 
 
 def parallel_residual(x: torch.Tensor, *branches: torch.Tensor, backend: str = "pytorch") -> torch.Tensor:

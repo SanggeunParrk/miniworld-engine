@@ -505,3 +505,38 @@ On top of the FP8 PV route, d_pair 128 fused route only: the front writes q / k 
 one `m64n128k32.f16.e4m3.e4m3` wgmma (`-DTA_F8QK=1`). Module 0.93-0.95x of the FP8 PV route from L512 (0.80-0.82x of 2.5.12), attention-output error on real
 activations 3.1-4.0 % against 2.1-2.4 % (max-norm up to 24 % against 6 %), judge form 0.85-0.95 % (> 8e-3). The stage analysis of every other e4m3 placement
 (tail o, front GEMM operands, cuBLAS projections, out-projection, bidirectional) and why they were not built: `docs/fp8.md`, "TriAttn: where else FP8 can go".
+
+## Training backward, query side: row-split kernel (3.0.1 candidate, branch `bf16/triattn-bwd`, 2026-11-18)
+
+The query-side kernel `triattn_bwd_q` is bound by the fp32 dbias TMA reduce-adds (removal ablation, 4 heads, L768: 2.43 ms -> 1.43 ms; every
+second flush removed 1.59 ms, three of four 1.49 ms; L512 0.716 -> 0.465 ms; L384 0.314 -> 0.234 ms; L128-256 not bound).  `TB_Q8` (default 1,
+used from S = 512; 0 = the old kernel, 2 = always) restructures it: a task is a 64-query tile x 8 pair rows, warpgroup 1 / 2 own rows 0-3 / 4-7
+of all 64 queries; per key step warpgroup 2 stages its 64 x 64 fp32 dbias partial in shared memory, warpgroup 1 adds its own in place and the
+storer issues ONE reduce-add pair: S / 8 partials per element instead of S / 4.  ncu (4 heads, L768, default slab count): L2 reduce sectors
+84.9 M -> 42.5 M (halved), DRAM 5.07 -> 2.94 GB, kernel time 2.39 -> 2.42 ms: the gain comes with the slab count.  Slabs: the count (<= 8)
+whose tiles x slabs tasks fill whole SM waves best (48 tiles: 5 slabs = 1.82 waves, against 4 (1.45) and 6 (2.18)): kernel L768 2.43 -> 2.01 ms
+(-17 %), 8 heads 5.06 -> 4.03, 12 heads 7.70 -> 6.1, L512 0.72 -> 0.61 (4 slabs); at L384 and below it is not faster, so S < 512 keeps the old
+kernel.  Determinism: fixed order (warpgroup 2's tile, then warpgroup 1's added; slabs summed in order); dq bitwise unchanged, dbias differs in
+fp32 summation order (rms 1e-7 relative).
+Module training step (fwd + bwd, CUDA graph, interleaved with a same-cubin control, 3.0.0 kernel = `TB_Q8=0`), sustained, ms:
+128:4:768 6.116 -> 5.768 (0.943), 128:4:512 2.139 -> 2.030 (0.949), 256:8:768 13.72 -> 12.78 (0.931), 384:12:768 21.38 -> 20.07 (0.939),
+64:4:768 6.391 -> 5.970 (0.934), 64:2:768 3.489 -> 3.341 (0.958); control ratios 0.999-1.022.  All nine gradients vs the old kernel: rms <= 4e-5
+relative, both runs bitwise equal.  Test: `tests/gpu/test_triattn_h100_bwd_q_rowsplit.py`.  Not repeated from the lists above: more slabs, ping-pong.
+
+## Training, 64-channel heads: wgmma bf16 forward + two-row query-side backward (3.0.1 candidate, branch `bf16s/triattn-train`, 2026-11-18)
+
+Profile (H100, L1024, B1, one training step, kernel time): d_pair 64 x 4 heads (16 or 32 channels) 12.3 ms, d_pair 128 fused 11.7 ms, d_pair 64 x 2 heads 6.7 ms. The
+core (`triattn_fwd` 2.05 + `bwd_kv` 2.73 + `bwd_q8` 4.29 ms) is 9.1 ms of the 12.3 and does not depend on d_pair: the generic path's glue (3.2 ms) is
+bound by the bytes of the head-width tensors (q | k | v | g, dall: 4 x 128 columns), the same bytes the fused d128 kernels move (2.7 ms). d_pair 64 x 4 x
+16-channel heads are padded to 32 channels, so they cost the same as 32-channel heads. Extending the fused front / tail / head_bwd / wgrad to d_pair 64 would
+save at most ~0.5 ms (4 %); not done. The open lever for 16-channel heads is a compact (unpadded) layout through the three core kernels (~10 %, est.).
+RF3 / Chai-1 (64-channel heads, L1024): 33.5 / 36.8 ms, of which mma.sync `dh_bwd_kv` 9.6, `dh_bwd_q` 8.9, `dh_fwd` 6.3 and the sum of the bf16 dbias planes 3.3 ms.
+
+Changes (outputs change within rounding; `backend_versions["cuda:h100_sm90"]`: AF3 13, RF3 14, Chai1 / Chai1Confidence 9):
+- `triattn_d64t_sm90.cu` (`h100_dh.ext_d64t`, kernel row `triangle_attention_d64_fwd_train_sm90`): the 2.5.12 bf16 wgmma core of 64-channel heads (git 68d6be5cf)
+  with the training outputs O (bf16) and the base-2 LSE; `h100_dh.train_core` uses it for S % 128 == 0 (training always pads to 128; `TRAIN_WGMMA`).
+- `triattn_dh_bwd_q` (kernel version 4): `BWD_Q_ROWS` = 2 pair rows a CTA (two warpgroups, shared bias tile); the rows' fp32 dS fragments are added in
+  shared memory (fixed order) before one bf16 plane is stored: half the planes (and half the plane sum's read), each plane element the rounding of a sum.
+  The fp32 slab variant was removed (one implementation). `plan` counts the planes by length.
+- Tests: `tests/gpu/test_triattn_h100_d64_train.py`.
+Measured (graph replay, interleaved, same-cubin control base2 within 1 %; sustained / cool; step = forward + backward, live dropout): RF3 64x4x64 L384 / 512 / 768 / 1024: 2.70 -> 2.59, 5.47 -> 5.14, 15.9 -> 14.2, 35.2 -> 31.2 ms (sustained; cool -4 / -4.5 / -8 / -9 %); Chai-1 256x4x64 L384 / 512 / 768 / 1024: 3.08 -> 2.94, 6.17 -> 5.71, 17.5 -> 15.9, 38.5 -> 34.6 ms; Triton (same process) 3.28 / 6.30 / 16.4 / 34.7 ms (RF3), 4.47 / 8.35 / 21.3 / 43.6 ms (Chai-1): the loss to Triton is gone. Forward core alone (L256 / 512 / 1024): 0.82 / 0.74 / 0.63 of the mma.sync core. Tried, no gain: TA_POLY 4 / 8 on the bf16 32-channel forward core (1.33 / 1.29x slower, L1024 H4). Gradient error vs fp64 (RF3 L256, Chai-1 ending L256, AF3 512x8 L128): per tensor rms 2e-3 .. 8e-3, equal to the mma.sync path within 1e-4; two runs bitwise equal. L1536 training OOMs with three graphs resident (not measured alone).
