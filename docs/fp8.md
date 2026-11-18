@@ -60,7 +60,7 @@ routes did this model take" is read directly instead of from a profiler kernel c
 
 | key | counters |
 |---|---|
-| `triattn` | `pv_fused` (d_pair-128 front-made V^T), `pv_front` (unfused / generic / wide fronts), `pv_pass` (standalone V^T pass), `qk` (e4m3 q / k core), `d128_calls`, `calibrations` |
+| `triattn` | `pv_fused` (d_pair-128 front-made V^T), `pv_front` (unfused / generic / wide fronts), `pv_pass` (standalone V^T pass), `qk` (e4m3 q / k core), `d128_calls` (also counted with FP8 off), `calibrations` |
 | `trimul`, `opm`, `transition` | `calls`, `retries`, `fallbacks`, `capture_fallbacks` (`transition` also `calibrations`) -- the existing `GUARD_STATS` |
 | `pwa` | `calls` (8 x 32 native width), `wide_calls`, `retries`, `declined` (route on, shape gate said no) |
 | `token_dit` | `calls`, `expand` / `qkvg` / `out` / `squeeze` (per placement), `declined` |

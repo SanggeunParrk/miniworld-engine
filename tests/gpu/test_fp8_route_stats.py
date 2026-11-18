@@ -18,7 +18,8 @@ def _needs_h100() -> None:
 
 
 def _total(stats: dict) -> int:
-    return sum(sum(d.values()) for d in stats.values())
+    # d128_calls counts entries of the TriAttn d_pair-128 inference path with FP8 off as well (shows the route was reachable)
+    return sum(v for d in stats.values() for k, v in d.items() if k != "d128_calls")
 
 
 def test_route_stats_shape_and_reset() -> None:
