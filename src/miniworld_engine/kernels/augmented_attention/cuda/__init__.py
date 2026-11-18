@@ -586,6 +586,11 @@ def prebuild(target, rows):
             if need(["atom_rms_rows_fwd"], "f32" if tf32 else "bf16"):
                 for kind in ("cond", "cond_split", "pre", "pre_split", "post"):
                     calls.append(ft.partial(sm90_atom.kernel_cubin, kind, tf32, ("RMS",)))
+        # the opt-in FP8 route of those rows (f8.OPTIONS has RMS): pre90_f8 / post90_f8 at minb 1 and 3
+        if need(["atom_rms_rows_fwd"], "bf16"):
+            for kind in ("pre_f8", "post_f8"):
+                for minb in (1, 3):
+                    calls.append(ft.partial(atom_f8.kernel_cubin, kind, ("RMS",), minb))
         if need(["atom_rms_rows_fwd"]):
             calls.append(ft.partial(sm90_atom.kernel_cubin, "pack", False, ()))
         if need(["qknorm_rope_fwd", "qknorm_rope_bwd"]):

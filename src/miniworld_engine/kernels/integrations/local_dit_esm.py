@@ -201,6 +201,15 @@ def _infer_h100(
         p = k90.pack(weights, tf32)
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
+        # the opt-in e4m3 row kernels (local_dit_h100.FP8_ROWS, docs/fp8.md "Atom DiT"): bf16 inference with a conditioning shared by the
+        # samples (the sampler step), as for the AF3-form blocks; the tables, q / k norm + rotary, pair bias and window attention stay bf16
+        from miniworld_engine.kernels.integrations import local_dit_h100 as _h8
+
+        f8 = _h8.FP8_ROWS if (_h8.FP8_ROWS and not tf32 and shared) else frozenset()
+        if f8:
+            from miniworld_engine.kernels.augmented_attention.cuda.sm90_atom import f8 as f8mod
+
+            p8 = f8mod.pack8(weights)
         nmod = n if shared else m
         wkey = (tuple((w.data_ptr(), w._version) for w in weights), "esm")
 
@@ -220,15 +229,21 @@ def _infer_h100(
 
         mk = (n0, None if mask is None else _ld._tkey(mask))
         bias2 = _ld._hoisted(_HOIST_BIAS, pair, (wkey, n, mk), pair_bias, () if mask is None else (mask,))
-        qraw, sg, kraw, v = cast(
-            "tuple[torch.Tensor, ...]", k90.pre_fwd(s2, mod, mkv, p, tf32, eps=RMS_EPS, nmod=nmod, parallel_kv=1, options=opts)
-        )
+        if "pre" in f8:
+            qraw, sg, kraw, v = f8mod.pre_fwd8(s2, mod, mkv, p8, eps=RMS_EPS, nmod=nmod, parallel_kv=1, options=opts)
+        else:
+            qraw, sg, kraw, v = cast(
+                "tuple[torch.Tensor, ...]", k90.pre_fwd(s2, mod, mkv, p, tf32, eps=RMS_EPS, nmod=nmod, parallel_kv=1, options=opts)
+            )
         q, k = torch.empty_like(qraw), torch.empty_like(kraw)
         one = _const(single.device, 1.0, DS // NH)
         _qk_kernels(single.device).qknorm_rope_fwd(qraw, kraw, one, one, RMS_EPS, RMS_EPS, cos, sin, q, k)
         del qraw, kraw
         o = local.attn_esm(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2, tf32).view(m, DS)
-        out = cast(torch.Tensor, k90.post_fwd(s2, o, sg, mod, p, tf32, eps=RMS_EPS, nmod=nmod, options=opts))
+        if "post" in f8:
+            out = f8mod.post_fwd8(s2, o, sg, mod, p8, eps=RMS_EPS, nmod=nmod, options=opts)
+        else:
+            out = cast(torch.Tensor, k90.post_fwd(s2, o, sg, mod, p, tf32, eps=RMS_EPS, nmod=nmod, options=opts))
     return _ld._unpadded(out.view(a, 1, n, DS), single.shape)
 
 
