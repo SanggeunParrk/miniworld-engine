@@ -20,10 +20,10 @@ _H100 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 
 def f8():
     from miniworld_engine.kernels.integrations import pwa_fp8 as F8
 
-    saved = (F8.ENABLED, F8.GUARD, F8.WIDE_MIN_N, F8.WIDE_MIN_SN)
-    F8.GUARD, F8.WIDE_MIN_N, F8.WIDE_MIN_SN = "lazy", 0, 0
+    saved = (F8.ENABLED, F8.GUARD, F8.WIDE_MIN_N, F8.WIDE_MIN_SN, F8.BIG_N_MULT, F8.BIG_MIN_SN)
+    F8.GUARD, F8.WIDE_MIN_N, F8.WIDE_MIN_SN, F8.BIG_N_MULT, F8.BIG_MIN_SN = "lazy", 0, 0, 16, 0
     yield F8
-    F8.ENABLED, F8.GUARD, F8.WIDE_MIN_N, F8.WIDE_MIN_SN = saved
+    F8.ENABLED, F8.GUARD, F8.WIDE_MIN_N, F8.WIDE_MIN_SN, F8.BIG_N_MULT, F8.BIG_MIN_SN = saved
     F8.take_overflow()
 
 
@@ -125,19 +125,20 @@ def test_graph_replay_and_guard(f8) -> None:
 def test_gates_wide() -> None:
     from miniworld_engine.kernels.integrations import pwa_fp8 as F8
 
-    saved = (F8.ENABLED, F8.WIDE_MIN_N, F8.WIDE_MIN_SN)
+    saved = (F8.ENABLED, F8.WIDE_MIN_N, F8.WIDE_MIN_SN, F8.BIG_N_MULT, F8.BIG_MIN_SN)
     try:
-        F8.ENABLED, F8.WIDE_MIN_N, F8.WIDE_MIN_SN = True, 256, 3 << 16
+        F8.ENABLED, F8.WIDE_MIN_N, F8.WIDE_MIN_SN, F8.BIG_N_MULT, F8.BIG_MIN_SN = True, 256, 3 << 16, 64, 1 << 14
         assert F8.serves_wide(64, 8, 512, 384) and F8.serves_wide(64, 8, 1024, 256) and F8.serves_wide(128, 16, 1024, 784)
         assert F8.serves_wide(64, 8, 256, 768) and not F8.serves_wide(64, 8, 128, 768)  # S * N >= 3 * 2^16
         assert not F8.serves_wide(64, 8, 512, 256) and not F8.serves_wide(64, 8, 256, 384)
         assert not F8.serves_wide(64, 8, 4096, 192)  # short
         assert not F8.serves_wide(64, 8, 1024, 392)  # N % 16 (the caller pads)
-        assert F8.serves_wide(256, 32, 1024, 768)  # the BIG build (IntelliFold2)
+        assert F8.serves_wide(256, 32, 1024, 768) and F8.serves_wide(256, 32, 64, 256)  # the BIG build (IntelliFold2): own gates
+        assert not F8.serves_wide(256, 32, 1024, 400) and not F8.serves_wide(256, 32, 32, 256)  # N % 64, S * N >= 2^14
         F8.ENABLED = False
         assert not F8.serves_wide(64, 8, 4096, 768)
     finally:
-        F8.ENABLED, F8.WIDE_MIN_N, F8.WIDE_MIN_SN = saved
+        F8.ENABLED, F8.WIDE_MIN_N, F8.WIDE_MIN_SN, F8.BIG_N_MULT, F8.BIG_MIN_SN = saved
 
 
 @pytest.mark.skipif(not _H100, reason="H100")
