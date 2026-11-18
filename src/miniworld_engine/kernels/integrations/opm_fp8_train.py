@@ -49,6 +49,8 @@ MIN_S = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MINS", "1024"))
 #: round 2: shape gate. Round 1 lost at L128 (1.15x) and d_pair 384 / 512 (1.09-1.14x); with the scale pass and the transposes gone L128 is 0.91x, d_pair 384 0.98x, d_pair 512 still 1.03x -> d_pair <= 384 served, 0 = no gate
 MIN_L = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MINL", "0"))
 MAX_CZ = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MAXCZ", "384"))
+#: round 3: per-d_pair minimum padded-free length (measured, vs the 3.0.1 default step: d128 wins from L128 (0.90-0.96x), d256 from L256 (0.96x; L128 0.985x = noise), d384 from L384 (0.97x; L256 0.987x, L128 1.04x); d512 never (1.025x)). Ignored when MAX_CZ = 0 (gate off, benchmarks)
+MIN_L_BY_CZ = {128: 0, 256: 256, 384: 384}
 #: round 2: delayed dO scale (amax history, no pass over dz; first call of a module seeds from the bound); False = round 1's bound every call
 DELAYED = os.environ.get("MINIWORLD_OPM_FP8_TRAIN_DELAYED", "1") != "0"
 #: round 2: one dgrad pass writes both dO planes (d_pair 128; the transposed plane is staged in shared memory); False = round 1: two launches
@@ -124,6 +126,8 @@ def serves(msa: torch.Tensor, d_msa: int, d_pair: int, *, interchain: bool = Fal
     if torch.cuda.get_device_capability(msa.device) != (9, 0):
         return False
     if (MIN_L and msa.shape[2] < MIN_L) or (MAX_CZ and d_pair > MAX_CZ):  # round 2: the shapes where round 1 lost to the default
+        return False
+    if MAX_CZ and msa.shape[2] < MIN_L_BY_CZ.get(d_pair, 0):
         return False
     return msa.shape[1] + (-msa.shape[1] % 256) >= MIN_S
 

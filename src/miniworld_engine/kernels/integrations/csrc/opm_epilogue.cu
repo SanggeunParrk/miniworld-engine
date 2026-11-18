@@ -1511,8 +1511,11 @@ static_assert((DG_ROWT / DG_MW) * ((CHUNK / 8) / DG_NW) == DG_WARPS, "the warp g
 
 #if defined(MINIWORLD_OPM_FP8)
 #define DG_K(SPV) opm_dgrad_kernel<SPV>
+// FP8 build: weight chunks double buffered for KZ 256..511 (round-2 measurement: 256 gains vs one buffer) and always for the single-pass variant
+constexpr int dg_wbuf(int kz, bool sp) { return (sp || (kz >= 256 && kz < 512)) ? 2 : 1; }
 #else
 #define DG_K(SPV) opm_dgrad_kernel
+constexpr int dg_wbuf(int kz, bool) { return (kz >= 384 && kz < 512) ? 2 : 1; }
 #endif
 #if defined(MINIWORLD_OPM_FP8)
 // round 2: single-pass dual-plane dO (KZ = 128): the transposed plane dO^T [(j,e),(i,c)] is staged for the whole tile in shared memory
@@ -1565,9 +1568,9 @@ __global__ __launch_bounds__(DG_THREADS) void opm_dgrad_kernel(
   // KZ = 384 (one CTA per SM either way): the Wo^T chunk is double buffered, so the next chunk's weights stream in under this one's wgmma.
   // KZ = 512 single-buffers it: the dz tile is 128 KiB and two 64 KiB weight chunks would not fit next to it.
 #if defined(MINIWORLD_OPM_FP8)
-  constexpr int WBUF = SP ? 2 : ((KZ >= 384 && KZ < 512) ? 2 : 1);   // SP: double-buffered (the single-pass variant runs one CTA per SM)
+  constexpr int WBUF = dg_wbuf(KZ, SP);
 #else
-  constexpr int WBUF = (KZ >= 384 && KZ < 512) ? 2 : 1;
+  constexpr int WBUF = dg_wbuf(KZ, false);
 #endif
   constexpr int WSZ = (KZ / 64) * CHUNK * 64;
   __nv_bfloat16* sW = sA + (KZ / 64) * DG_NP * 64;                     // dz/n then Wo^T, both swizzled
@@ -2481,7 +2484,7 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor norm, torch
   auto dO = torch::empty({ni * CH, nj * CH}, dz.options());
   auto dzp = torch::empty({ni, nj, (long)CZ}, dz.options());
   auto dbo_part = torch::empty({(ni / DG_BI) * (nj / DG_BJ), (long)CZ}, dz.options().dtype(torch::kFloat32));
-  const int smem = 1024 + ((KZ / 64) * DG_NP * 64 + ((KZ >= 384 && KZ < 512) ? 2 : 1) * (KZ / 64) * CHUNK * 64 + DG_NP * CHUNK) * 2;
+  const int smem = 1024 + ((KZ / 64) * DG_NP * 64 + dg_wbuf(KZ, false) * (KZ / 64) * CHUNK * 64 + DG_NP * CHUNK) * 2;
   static bool attr = false;                      // 256-wide chunks push past the 48 KiB static limit
   if (!attr) {
     cudaFuncSetAttribute(DG_K(false), cudaFuncAttributeMaxDynamicSharedMemorySize, 227 * 1024);
@@ -2535,7 +2538,7 @@ std::vector<torch::Tensor> opm_dgrad_f8(torch::Tensor dz, torch::Tensor norm, to
   auto dO = torch::empty({ni * CH, nj * CH}, dz.options().dtype(dt)), dOT = torch::empty({nj * CH, ni * CH}, dz.options().dtype(dt));
   auto dzp = torch::empty({ni, nj, (long)CZ}, dz.options());
   auto dbo_part = torch::empty({(ni / DG_BI) * (nj / DG_BJ), (long)CZ}, dz.options().dtype(torch::kFloat32));
-  const int smem = 1024 + ((KZ / 64) * DG_NP * 64 + (single ? 2 : ((KZ >= 384 && KZ < 512) ? 2 : 1)) * (KZ / 64) * CHUNK * 64 + DG_NP * CHUNK) * 2 + (single ? DG_T_BYTES : 0);
+  const int smem = 1024 + ((KZ / 64) * DG_NP * 64 + dg_wbuf(KZ, single) * (KZ / 64) * CHUNK * 64 + DG_NP * CHUNK) * 2 + (single ? DG_T_BYTES : 0);
   C10_CUDA_CHECK(cudaFuncSetAttribute(DG_K(false), cudaFuncAttributeMaxDynamicSharedMemorySize, 227 * 1024));
   C10_CUDA_CHECK(cudaFuncSetAttribute(DG_K(true), cudaFuncAttributeMaxDynamicSharedMemorySize, 227 * 1024));
   // each plane [N*CH, N*CH] bytes as a 4-D tensor (256-byte blocks of a row) x (row / 256) x c x i; the box = one chunk of a CTA:
