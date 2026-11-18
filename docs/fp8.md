@@ -72,10 +72,81 @@ Routes that never fire, and why:
 
 ### 5I28 (FoldForge a9e1549 harness, warm forward median of 6, H100 node02, n = 1 .. 16): bf16 3.0.1 / FP8 3.0.1 / FP8 `fp8c/all`
 
-Raw cells `bench5i28_ff/run_1119_fp8all/<model>/cells/`, table generator `run_1119_fp8all/make_table.sh`, commits benchmarked in `run_1119_fp8all/README.md`. Status: jobs submitted
-2026-11-19 ~00:53, results land in `run_1119_fp8all` (table below filled from the cells when the lanes finished).
 
-<!-- 5I28-TABLE -->
+Raw cells `bench5i28_ff/run_1119_fp8all/<model>/cells/`, generator `run_1119_fp8all/make_table.sh`, benchmarked commit 7123ccb7d (`run_1119_fp8all/README.md`); two lanes on node02, 6 warm repeats, median of the
+warm forwards (s), all 66 cells ok, `fp8.check()` False (no saturation) in all 11 runs. `bf16 3.0.1` = `run_1118_301_steady`, `FP8 3.0.1` = `run_1118_301_fp8` (earlier node02 runs). `MINIWORLD_FP8=safe`,
+`MINIWORLD_FP8_MODEL` set for af3 protenix1 opendde protenix2 openfold3 rosettafold3 chai1. Whole-run `route_stats` of Chai-1 (n = 1 .. 16): TriAttn pv_d64 9464, pv_front 1628, token DiT expand 576,
+OPM 0 (gate closed), atom DiT 216 (126 bf16 fallbacks, per-sample conditioning); Boltz-2: token DiT expand 288 (144 below the 2560-row gate), atom DiT 90 (144 bf16 fallbacks: per-sample conditioning),
+TriAttn 0 (not whitelisted).
+
+| model | n | bf16 3.0.1 | FP8 3.0.1 | FP8 fp8c/all | all / bf16 | all / FP8 3.0.1 |
+|---|---|---|---|---|---|---|
+| af3 | 1 | 0.390 | 0.378 | 0.377 | 0.967 | 0.998 |
+| af3 | 2 | 0.598 | 0.572 | 0.574 | 0.959 | 1.004 |
+| af3 | 4 | 1.269 | 1.153 | 1.151 | 0.907 | 0.999 |
+| af3 | 8 | 3.797 | 3.240 | 3.238 | 0.853 | 0.999 |
+| af3 | 12 | 8.999 | 7.306 | 7.303 | 0.812 | 0.999 |
+| af3 | 16 | 16.969 | 13.194 | 13.174 | 0.776 | 0.998 |
+| protenix1 | 1 | 0.348 | 0.341 | 0.340 | 0.975 | 0.996 |
+| protenix1 | 2 | 0.553 | 0.530 | 0.526 | 0.952 | 0.992 |
+| protenix1 | 4 | 1.202 | 1.116 | 1.105 | 0.919 | 0.990 |
+| protenix1 | 8 | 3.649 | 3.217 | 3.143 | 0.861 | 0.977 |
+| protenix1 | 12 | 8.631 | 7.317 | 7.132 | 0.826 | 0.975 |
+| protenix1 | 16 | 16.291 | 13.516 | 13.048 | 0.801 | 0.965 |
+| opendde | 1 | 0.589 | 0.574 | 0.572 | 0.972 | 0.997 |
+| opendde | 2 | 1.222 | 1.144 | 1.144 | 0.936 | 1.000 |
+| opendde | 4 | 3.485 | 3.187 | 3.184 | 0.914 | 0.999 |
+| opendde | 8 | 12.965 | 11.435 | 11.479 | 0.885 | 1.004 |
+| opendde | 12 | 31.871 | 27.697 | 27.403 | 0.860 | 0.989 |
+| opendde | 16 | 63.193 | 53.570 | 53.284 | 0.843 | 0.995 |
+| protenix2 | 1 | 0.388 | 0.378 | 0.378 | 0.974 | 0.999 |
+| protenix2 | 2 | 0.690 | 0.660 | 0.659 | 0.955 | 0.998 |
+| protenix2 | 4 | 1.781 | 1.659 | 1.656 | 0.930 | 0.999 |
+| protenix2 | 8 | 6.264 | 5.843 | 5.515 | 0.880 | 0.944 |
+| protenix2 | 12 | 15.313 | 14.170 | 13.119 | 0.857 | 0.926 |
+| protenix2 | 16 | 30.965 | 28.763 | 25.854 | 0.835 | 0.899 |
+| openfold3 | 1 | 0.389 | 0.377 | 0.377 | 0.967 | 0.999 |
+| openfold3 | 2 | 0.598 | 0.574 | 0.571 | 0.954 | 0.994 |
+| openfold3 | 4 | 1.263 | 1.198 | 1.149 | 0.910 | 0.959 |
+| openfold3 | 8 | 3.794 | 3.563 | 3.221 | 0.849 | 0.904 |
+| openfold3 | 12 | 8.947 | 8.359 | 7.269 | 0.812 | 0.870 |
+| openfold3 | 16 | 16.940 | 15.705 | 13.172 | 0.778 | 0.839 |
+| boltz2 | 1 | 0.394 | 0.393 | 0.394 | 1.000 | 1.002 |
+| boltz2 | 2 | 0.662 | 0.654 | 0.630 | 0.952 | 0.964 |
+| boltz2 | 4 | 1.477 | 1.432 | 1.376 | 0.931 | 0.961 |
+| boltz2 | 8 | 4.667 | 4.461 | 4.353 | 0.933 | 0.976 |
+| boltz2 | 12 | 11.211 | 10.593 | 10.384 | 0.926 | 0.980 |
+| boltz2 | 16 | 21.584 | 20.268 | 19.968 | 0.925 | 0.985 |
+| chai1 | 1 | 0.339 | 0.332 | 0.328 | 0.965 | 0.986 |
+| chai1 | 2 | 0.630 | 0.617 | 0.608 | 0.965 | 0.985 |
+| chai1 | 4 | 1.692 | 1.630 | 1.611 | 0.952 | 0.988 |
+| chai1 | 8 | 6.120 | 5.848 | 5.661 | 0.925 | 0.968 |
+| chai1 | 12 | 14.997 | 14.286 | 13.496 | 0.900 | 0.945 |
+| chai1 | 16 | 29.322 | 27.873 | 25.851 | 0.882 | 0.927 |
+| rosettafold3 | 1 | 0.419 | 0.420 | 0.421 | 1.004 | 1.003 |
+| rosettafold3 | 2 | 0.635 | 0.633 | 0.626 | 0.986 | 0.990 |
+| rosettafold3 | 4 | 1.336 | 1.323 | 1.243 | 0.930 | 0.939 |
+| rosettafold3 | 8 | 3.848 | 4.180 | 3.326 | 0.864 | 0.796 |
+| rosettafold3 | 12 | 9.283 | 9.842 | 7.753 | 0.835 | 0.788 |
+| rosettafold3 | 16 | 17.108 | 17.806 | 13.635 | 0.797 | 0.766 |
+| esmfold2 | 1 | 0.238 | 0.231 | 0.227 | 0.950 | 0.981 |
+| esmfold2 | 2 | 0.422 | 0.397 | 0.389 | 0.922 | 0.979 |
+| esmfold2 | 4 | 1.006 | 0.910 | 0.895 | 0.889 | 0.983 |
+| esmfold2 | 8 | 3.169 | 2.717 | 2.694 | 0.850 | 0.992 |
+| esmfold2 | 12 | 7.172 | 6.016 | 5.972 | 0.833 | 0.993 |
+| esmfold2 | 16 | 13.342 | 10.755 | 10.748 | 0.806 | 0.999 |
+| esmfold2-fast | 1 | 0.217 | 0.213 | 0.208 | 0.957 | 0.977 |
+| esmfold2-fast | 2 | 0.353 | 0.340 | 0.332 | 0.942 | 0.978 |
+| esmfold2-fast | 4 | 0.751 | 0.701 | 0.690 | 0.919 | 0.984 |
+| esmfold2-fast | 8 | 2.121 | 1.860 | 1.858 | 0.876 | 0.999 |
+| esmfold2-fast | 12 | 4.682 | 4.069 | 4.049 | 0.865 | 0.995 |
+| esmfold2-fast | 16 | 8.609 | 7.317 | 7.300 | 0.848 | 0.998 |
+| intellifold2 | 1 | 0.593 | 0.583 | 0.570 | 0.962 | 0.978 |
+| intellifold2 | 2 | 1.304 | 1.213 | 1.190 | 0.913 | 0.981 |
+| intellifold2 | 4 | 4.040 | 3.688 | 3.640 | 0.901 | 0.987 |
+| intellifold2 | 8 | 15.728 | 14.449 | 14.142 | 0.899 | 0.979 |
+| intellifold2 | 12 | 38.388 | 35.697 | 34.489 | 0.898 | 0.966 |
+| intellifold2 | 16 | 71.742 | 67.039 | 63.783 | 0.889 | 0.951 |
 
 ## The `engine-fp8` backend (user-facing name, 3.0.0)
 
