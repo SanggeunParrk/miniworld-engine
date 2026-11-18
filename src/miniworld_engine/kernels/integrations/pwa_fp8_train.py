@@ -70,6 +70,7 @@ VT8N_CFG = (1, 4)
 #: smallest MSA depth S the FP8 route serves (measured wins: S 1024 .. 4096); below it the default route runs
 MIN_S = int(os.environ.get("MINIWORLD_PWA_FP8_TRAIN_MIN_S", "1024"))
 #: pwa_glue3_f8 tile order: sp (the s pair) fastest, so concurrent CTAs store adjacent row pieces of do / doT
+G3_SWZ = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_G3SWZ", "0") == "1"
 G3_MAP = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_G3MAP", "0") == "1"
 
 E4M3_MAX, E5M2_MAX = 448.0, 57344.0
@@ -334,6 +335,7 @@ def _glue8():
                 "-Xcompiler=-fvisibility=hidden",
                 "-DMW_PWA_CUDA_AUX=1",
                 f"-DG3_MAP={int(G3_MAP)}",
+                f"-DG3_SWZ={int(G3_SWZ)}",
             ],
             extra_cflags=["-O3", "-fvisibility=hidden"],
         )

@@ -745,7 +745,9 @@ class _PwaMath(torch.autograd.Function):
             wt = k["pair3"].transpose(w16) if native else w16.transpose(1, 2).contiguous()
             k["fwd"].pwa_plain2(wt, d_o, 4, dgv)  # dv -> dgv[..., HC:]
         dw = (
-            _f8t.backward_dw(d_o, do8, ds8, v, None if ctx.f8_vs is None else ctx.f8_vs[0:1]) if f8 else torch.bmm(cast(torch.Tensor, d_o), v.transpose(1, 2))
+            _f8t.backward_dw(d_o, do8, ds8, v, None if ctx.f8_vs is None else ctx.f8_vs[0:1])
+            if f8
+            else torch.bmm(cast(torch.Tensor, d_o), v.transpose(1, 2))
         )  # [H][N][N], K = S*C
         do8 = None  # round 4: free do (e4m3) after the dw GEMM
         dw16 = dw  # pwa_wide's pair backward (pair_only_wide) takes it in bf16

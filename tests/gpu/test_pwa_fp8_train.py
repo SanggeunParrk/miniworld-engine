@@ -275,8 +275,8 @@ def test_saved_o_e4m3_mode(f8t) -> None:
     c = _grads(mod, x, z, gy, mask)
     c2 = _grads(mod, x, z, gy, mask)
     assert torch.equal(c[0], b[0])  # forward untouched
-    assert all(torch.equal(p, q_) for p, q_ in zip(c, c2)), "O8 step not deterministic"
-    for i, (gc, gb, gr) in enumerate(zip(c, b, g64)):
+    assert all(torch.equal(p, q_) for p, q_ in zip(c, c2, strict=True)), "O8 step not deterministic"
+    for i, (gc, gb, gr) in enumerate(zip(c, b, g64, strict=True)):
         assert torch.isfinite(gc.float()).all()
         assert _rel(gc, gr) <= max(0.08, 3 * _rel(gb, gr)), (i, _rel(gc, gr), _rel(gb, gr))
     assert f8t.overflow_count() == 0

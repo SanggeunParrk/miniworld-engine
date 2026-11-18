@@ -27,7 +27,7 @@ from miniworld_engine.kernels.integrations import pwa_fp8_train as F  # noqa: E4
 from miniworld_engine.modules.msa import MSAPairWeightedAveraging  # noqa: E402
 
 VARIANTS = []
-for item in os.environ.get("VARIANTS", "bwd=dv,dw/fused/e4m3;f8e4=fwd,dv,dw/fused/e4m3").split(";"):
+for item in os.environ.get("VARIANTS", "bwd=dv,dw/fused/e4m3;bwdo8=dv,dw/fused/e4m3+o8;f8e4=fwd,dv,dw/fused/e4m3").split(";"):
     name, rest = item.split("=")
     places, impl, fmt = rest.split("/")
     VARIANTS.append((name, frozenset(places.split(",")), impl, fmt))
@@ -98,6 +98,8 @@ for spec in specs:
     graphs["ctl"] = graph_of(step)
     for name, places, impl, fmt in VARIANTS:
         F.NATIVE_ONLY = places == frozenset({"native"})  # bf16 through the native kernels (attribution)
+        F.O8 = fmt.endswith("+o8")
+        fmt = fmt.removesuffix("+o8")
         F.PLACES, F.IMPL, F.DO_FMT = (frozenset() if F.NATIVE_ONLY else places), impl, fmt
         F.reset()
         step()  # eager: seeds the scales

@@ -20,6 +20,9 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include "sm90_ptx.cuh"
+#ifndef G3_SWZ
+#define G3_SWZ 0   // 64B-swizzled do / doT staging tiles (conflict-free byte stores)
+#endif
 #ifndef G3_MAP
 #define G3_MAP 0
 #endif
@@ -367,9 +370,16 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_f8_kernel(int N, int S, 
               const uint16_t p = f8x2(q0, q1, E5);
               unsigned char* s8 = reinterpret_cast<unsigned char*>(sDOUT);
               const int x = si * C + cc;                                                                                         // (s, c) column of the head-major tile
+#if G3_SWZ
+#define SW64(b) ((b) ^ ((((b) >> 7) & 3) << 4))
+              *reinterpret_cast<uint16_t*>(s8 + SW64(rr * 64 + x)) = p;                                                         // do8  [64 i][64 x], 64B swizzle
+              s8[4096 + SW64(x * 64 + rr)] = (unsigned char)(p & 0xff);                                                         // doT8 [64 x][64 i], 64B swizzle
+              s8[4096 + SW64((x + 1) * 64 + rr)] = (unsigned char)(p >> 8);
+#else
               *reinterpret_cast<uint16_t*>(s8 + rr * 64 + x) = p;                                                                // do8  [64 i][64 x]
               s8[4096 + x * 64 + rr] = (unsigned char)(p & 0xff);                                                                // doT8 [64 x][64 i]
               s8[4096 + (x + 1) * 64 + rr] = (unsigned char)(p >> 8);
+#endif
             }
             (void)at;
             *reinterpret_cast<uint32_t*>(sDGP + bt) = pack2(d0 * ov.x * g0 * (1.f - g0), d1 * ov.y * g1 * (1.f - g1));           // dgp
@@ -450,14 +460,14 @@ CUtensorMap map_nat(void* base, long row_stride, int N, int S, int bi) {   // na
   TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled (natural) failed: ", (int)r);
   return m;
 }
-CUtensorMap map2d_u8(void* base, long rows, long cols, const char* what) {   // bytes [rows][cols], box (64, 64), no swizzle
+CUtensorMap map2d_u8(void* base, long rows, long cols, const char* what) {   // bytes [rows][cols], box (64, 64); G3_SWZ: 64B swizzle
   alignas(64) CUtensorMap m{};
   uint64_t gdim[2] = {(uint64_t)cols, (uint64_t)rows};
   uint64_t gstride[1] = {(uint64_t)cols};
   uint32_t bdim[2] = {64, 64};
   uint32_t estride[2] = {1, 1};
   CUresult r = tma_encode()(&m, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, base, gdim, gstride, bdim, estride, CU_TENSOR_MAP_INTERLEAVE_NONE,
-                            CU_TENSOR_MAP_SWIZZLE_NONE, CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+                            (G3_SWZ ? CU_TENSOR_MAP_SWIZZLE_64B : CU_TENSOR_MAP_SWIZZLE_NONE), CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled(", what, ") failed: ", (int)r);
   return m;
 }

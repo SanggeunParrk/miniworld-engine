@@ -303,3 +303,96 @@ ruff format / check, pyright clean.
 - 2026-11-18 18:33 branch fp8t3/pwa = fp8t2/pwa + 3.0.1; 18:36 baseline: `bwd` 0.994 of default (producer 443 us); 18:52 producer micro-benchmark:
   smem scatter / swizzle irrelevant, stores dominate; 23:47 s-fastest item order 460 -> 335 us; 00:10 gradient error, training curve; 00:22 tests, bit-identity;
   00:23 `bench_final` (step table above); S gate (MIN_S 1024) added after.
+
+## Round 4: saved-activation bytes, memory, finer scales (branch `fp8t4/pwa` = `fp8t3/pwa` 1269b85c6 + round 4)
+
+Scripts / raw rows: `~/miniworld-engine-scratch/fp8t4-pwa/{scripts,res}` (`mem.py`, `errstudy.py`, `speed.py`, `err.py`, `train.py`). Baseline = the 3.0.1 default.
+
+### 1. Saved activation bytes and peak memory (`mem.py`; eager fwd + bwd, MiB above the inputs + parameters; `saved` = allocated after the forward minus before, output excluded)
+
+Saved by the module for the backward (S1024 N768, default): w 9 + v 384 + o 384 + y 96 = 873 MiB; the inputs (m 96, z 144) are the caller's. v and o are each S x N x 256 x 2 B and are 88 % of it.
+
+| S:N[:d_pair] | default saved / peak | `bwd` saved / peak | `bwd` + O8 saved / peak | peak vs default (`bwd` / `bwd`+O8) |
+|---|---|---|---|---|
+| 1024:768 | 873 / 2776 | 681 / **2318** | 489 / **2130** | -16.5 % / -23.3 % |
+| 4096:768 | 3465 / 10552 | 2697 / 9230 | 1929 / 8466 | -12.5 % / -19.8 % |
+| 1024:512 | 580 / 1813 | 452 / 1542 | 324 / 1421 | -14.9 % / -21.6 % |
+| 1024:384, 2048:384 (`bwd` not served; full route) | 434 / 1343, 866 / 2639 | full: 338 / 1247, 674 / 2447 | | -7 % |
+| 1024:1024, 1024:768:256 | 1168 / 3785, 873 / 2924 | 912 / 3529, 681 / 2732 (before the frees below) | | |
+
+What moved the peak: (a) FP8 v (round 1-3): saved -192 MiB (-22 %), peak -7 %; (b) **new, free**: the FP8 backward drops `doT8` right after the
+dv GEMM and `do8` right after the dw GEMM (they were held until the function returned): peak -266 MiB (2584 -> 2318 at S1024 N768), no time
+cost; (c) **O8** (below): saved o as e4m3, a further -192 MiB saved and -190 MiB peak. DRAM bytes per step (ncu, round 2 on the 2.5.14 base, S1024 N768,
+read / write MB): default 4425 / 2376; `bwd` 3859 / 2579; full 3662 / 2375 -- the bytes drop only by the half-size v re-read (dw) and
+the smaller dv / dw operand reads; the write side does not shrink (v bf16 + e4m3 are both written).
+
+**Largest S that fits one H100 80 GB** (training step, `mem.py` OOM sweep, step 2048; N > 1024 is not served by the cuda training backend
+(`BackendUnsupported`: pair backward holds N <= 1024), so there is no N sweep):
+
+| N | default | `bwd` (frees + FP8 v) | `bwd` + O8 |
+|---|---|---|---|
+| 768 | 26624 (28672 OOM) | 30720 (32768 OOM) = +15 % | 32768 (34816 OOM) = +23 % |
+| 1024 | 20480 (22528 OOM) | 22528 (24576 OOM) = +10 % | 24576 (26624 OOM) = +20 % |
+
+### 2. FP8 storage of o (`O8`, `MINIWORLD_PWA_FP8_TRAIN_O8=1`, needs `bwd` or `1`; `csrc/pwa_o8.cu`)
+
+o ([H, N, S*C], head-major) is quantised to e4m3 (delayed per-tensor pow2 scale, amax recorded by the kernel, same site machinery as v / do)
+right before `save_for_backward`, and dequantised to bf16 in the backward just before `pwa_glue3_f8` (freed right after it). **A memory mode, not a speed
+mode**: two memory-bound passes (403 MB read + 201 MB write each) cost ~420 us at S1024 N768 (step 1.07-1.11x of the default, i.e. +12-16 points over `bwd`).
+Fusing the quantisation into `pwa_gateout` (which reads o anyway) and the dequantisation into `pwa_glue3_f8` (o arrives by TMA into swizzled smem
+tiles that the consumers read as bf16) would remove most of it but means new copies of two persistent TMA kernels; not done (default `pwa_gateout`
+cannot be re-keyed). Error (below) and curve: gate / out gradients go from 0.4 / 0.3 % to 2.6 / 2.5 % rms (same level as the other FP8 gradients).
+
+### 3. Finer-grained scales: no-go (`errstudy.py`, `res/errstudy.json`)
+
+Quantise-dequantise emulation, exact fp64 products, w = softmax(N(0, 1.5)), v with outlier channels (every 97th x8), do with lognormal row scales; rms relative error of the
+contraction (S*C = 4096, N = 768, 8 heads), e4m3 both operands:
+
+| contraction | per-tensor scale | per-row scale | per-128-block scale (not one GEMM) |
+|---|---|---|---|
+| dw = do v^T | 3.748 % | 3.748 % | 3.748 % |
+| dv = w^T do | 3.713 % | 3.713 % | 3.713 % |
+| o = w v | 3.730 % | 3.730 % | 3.730 % |
+
+The error is the **mantissa rounding**, independent of the scale grain: one e4m3 rounding of a Gaussian vector is 2.65 % relative rms, two operands give sqrt(2) x 2.65 = 3.75 %.
+An exact v alone: 2.65 % (the rounding of do remains); v as e4m3 hi + lo (2 GEMMs): 2.65 %; both operands hi + lo (4 GEMMs): 0.09 %. DeepSeek-V3's fine-grained
+scales fix outliers / dynamic range and keep the loss within 0.25 %; they do not change the 3 mantissa bits, and the module's own error (3.8 % on d pair) is that floor.
+Reaching <= 1.5 % rms needs >= 3 FP8 GEMMs per contraction (hi*hi + hi*lo + lo*hi) = more than the bf16 GEMM time saved. Per-row scales are also
+more traffic (scale vectors) for no gain. No-go; the delayed per-tensor scale stays.
+
+### 4. The remaining producer gaps
+
+- `ln_vt8` (VT_BF) 335 us: its bytes are x 100 + y 100 + v bf16 403 + v e4m3 201 = 804 MB... plus y: 1006 MB / 335 us = 3.0 TB/s -- **at the H100 memory floor** (round 3's "~290 us" ignored x and y). Nothing left.
+- `pwa_glue3_f8` +46 us over `pwa_glue3`: the byte scatter of do / doT into smem has 4-way bank conflicts; 64B-swizzled staging tiles (TMA SWIZZLE_64B, `MINIWORLD_PWA_FP8_TRAIN_G3SWZ=1`)
+  gave 664 us against 659: not the cost (the kernel is latency-bound on its o / dout stream); left off. Tile order (round 3): no effect.
+
+### 5. Step time against the 3.0.1 default (`bench_final4.jsonl`, `tools/fp8_train/pwa_step_bench.py`; same-process interleaved CUDA graphs, ctl = same-cubin control)
+
+Cells = variant / default, `cool / sustained`; round 3 in brackets for `bwd`.
+
+| S:N[:d_pair] | default ms (cool) | ctl cool / sus | `bwd` (round 4 [round 3]) | `bwd` + O8 | full (`1`) |
+|---|---|---|---|---|---|
+| 1024:768 | 3.231 | 0.991 / 1.003 | **0.951 / 0.962** [0.954 / 0.964] | 1.081 / 1.088 | 0.890 / 0.897 |
+| 2048:768 | 6.059 | 0.990 / 1.002 | **0.947 / 0.961** [0.951 / 0.958] | 1.083 / 1.098 | 0.875 / 0.889 |
+| 4096:768 | 11.668 | 0.992 / 0.993 | **0.949 / 0.959** [0.958 / 0.968] | 1.093 / 1.106 | 0.878 / 0.895 |
+| 1024:768:256 | 3.455 | 0.990 / 0.996 | **0.952 / 0.962** [0.956 / 0.971] | 1.071 / 1.081 | 0.888 / 0.902 |
+| 1024:512 | 1.950 | 0.992 / 0.997 | **0.962 / 0.978** [0.972 / 0.982] | 1.106 / 1.117 | 0.906 / 0.912 |
+| 1024:384 | 1.419 | 0.998 / 0.995 | default (N < 512) | default | 0.927 / 0.930 |
+| 2048:384 | 2.716 | 0.990 / 0.995 | default (N < 512) | default | 0.900 / 0.902 |
+
+`bwd` is 0.4-1 point better than round 3 (fewer live buffers); full unchanged.
+
+### 6. Accuracy and curve of O8 (`err5.jsonl`, `tr5.jsonl`)
+
+rms % against fp64 (S1024 N768): `bwd`+O8: update 2.37, d msa 0.22, d pair 3.80, d to_value 2.75, d ln_msa.w 2.71, d to_gate 2.63, d to_out 2.50 (the `bwd` route without O8: 0.40 / 0.32 on the last two;
+full + O8: update 2.89, to_gate 3.12, to_out 2.90). 2048:768 and 1024:512 the same (to_gate 2.7, to_out 2.5-2.6).
+Distillation curve (S1024 N512, 1000 steps, window means): default 0.6270 / 0.3329 / 0.2364 / 0.1950 / 0.1666; `bwd` + O8 0.6271 / 0.3361 / 0.2379 / 0.1965 / 0.1678 (+0.7 % in the last window,
+`bwd` alone +0.1 %, full +0.3 %; seed spread ~0.3 %).
+
+### 7. Verdict (round 4)
+
+- Ship (opt-in) the `bwd` route as is, now with the free peak-memory gain (-12 .. -17 % peak, +10-15 % max S) at 0.947-0.962 of the default step.
+- O8 = a memory mode (peak -20 .. -23 %, max S +20-23 %) at +8-11 % step time over the default and +0.7 % loss; useful only when S is the limit.
+- Finer scales: no-go (rounding floor); <= 1.5 % rms is not reachable with e4m3 x e4m3 in one GEMM.
+- Producers are at the memory floor (`ln_vt8`) or latency-bound (`pwa_glue3_f8`, swizzle tried): no further cheap gain.
+- Default route bit-identical with the switch off: `bit.py` sha1 of all 7 cases equal to the 3.0.1 worktree (`bit_wt6` vs `bit_base5`).
