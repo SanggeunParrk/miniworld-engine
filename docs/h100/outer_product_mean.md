@@ -69,12 +69,19 @@ Forward boundaries: prologue (LN + projections + mask -> A2, BT, and in training
 `O = A2 BT^T` in the grouped layout -> epilogue (permute, / n, Wo, bias, residual). The prologue is chosen by `_h100_path` (the
 Triton `fused_prologue` kept in `opm_train.py` is not reached: every former Triton-prologue cell takes the wide CUDA prologue):
 
-- d_msa 64 / d_pair 128, AF3 order, no bias: training at S 1024 / 2048 / 4096 uses the persistent TMA prologue, other S the non-TMA
-  wgmma prologue; inference uses the TMA prologue at S 512 and at seven measured (S, N) cells and otherwise the wide prologue (the former
-  Triton prologue cells and, since backend version 4 of 2026-11-18, every other cell: N >= 1024, depths outside the table). The non-TMA
-  prologue is no longer reachable in inference: it took 825 us at L 1024 / S 1024 against 105 us for the wide one (the wide prologue is bitwise
-  the TMA one; against the non-TMA one the output differs by at most one bf16 ulp). Measured H100, graph, same process, interleaved with a
-  same-cubin control: L 1024 / S 1024 4.54 -> 3.83 ms, L 2048 / S 1024 16.7 -> 15.5, L 1024 / S 2048 8.56 -> 7.55, L 128 / S 4096 0.58 -> 0.26.
+- d_msa 64 / d_pair 128, `normalize_before_proj=True` (Boltz order, registry rows 58 / 59 style), no bias: training at S 1024 / 2048 / 4096
+  uses the persistent TMA prologue, other S the non-TMA wgmma prologue; inference uses the TMA prologue at S 512 and at seven measured (S, N)
+  cells and otherwise the wide prologue (the former Triton prologue cells and, since backend version 4 of 2026-11-18, every other cell:
+  N >= 1024, depths outside the table). The non-TMA prologue is no longer reachable in inference: it took 825 us at L 1024 / S 1024 against
+  105 us for the wide one (the wide prologue is bitwise the TMA one; against the non-TMA one the output differs by at most one bf16 ulp).
+  Re-measured 2026-11-18 on one node, one job, interleaved base / branch / integrated twice, CUDA graph, 256 MB L2 flush, row 58 construction
+  at depth 1024 / 2048 (cool / sustained, ms, 3.0.0 -> 3.0.1): L 1024 / S 1024 4.27 / 4.43 -> 3.59 / 3.86-3.93; L 1024 / S 2048 7.92 / 8.66 ->
+  6.53 / 7.26-7.40; L 1536 / S 1024 8.94 / 9.8-10.4 -> 7.90 / 8.8-8.9; L 1536 / S 2048 16.6 / 19.0-19.7 -> 14.4 / 16.7-16.8 (the integrated
+  tree equals the branch tip). The earlier figures of this note (4.54 -> 3.83, 16.7 -> 15.5, 8.56 -> 7.55, L 128 / S 4096 0.58 -> 0.26) were
+  not reproduced in this protocol and are not claimed.
+- `normalize_before_proj=False` (AF3 order, registry rows 55 / 57 / 63 style): `after` is set, so `_forward` always takes `_forward_wide`
+  (the wide TMA prologue) at every cell, before and after backend version 4: the routing change does not touch it (3.0.0 vs 3.0.1 at the same
+  four cells: cool 3.61-3.63, 6.58-6.60, 7.95-7.98, 14.48-14.55 ms, equal to 0.3 %; sustained within the +-3 % noise).
 - Every other width, the after-projection order or projection biases: `_forward_wide` (`opm_prologue_tma_wide<CM>` + cuBLAS + the
   c_z-sliced epilogue).
 - Inference at d_msa 64 / d_pair 128, N % 16, S % 64 (`_fused_enabled`): `opm_fused_infer` replaces the cuBLAS product and the epilogue.
@@ -170,11 +177,12 @@ the B200 comparison).
 
 ## Audit notes (2026-11-18, bf16 trunk / token audits)
 
-- **Inference at N >= 1024 (Q1)**: fixed as above; both normalisation orders now cost the same at the same shape (L 1024 / S 1024: 3.83 ms
-  normalize-before, 3.88-3.94 ms after; SOL 3.55).
+- **Inference at N >= 1024 (Q1)**: fixed for `normalize_before_proj=True` (see above; it used the 825 us non-TMA prologue, the AF3 order never
+  did). Both orders now cost the same at the same shape (L 1024 / S 1024 cool 3.59 normalize-before, 3.62 after; sustained 3.86-3.93 / 3.89-3.97;
+  SOL 3.55).
 - **"normalize_before_proj=False is 1.6-1.9x slower" is a depth artefact**: the registry has the AF3 order at depth 1024 only and the Boltz
   order at depths 384 / 512 / 1024 / 2048; the token audit compared the AF3 cell (D1024) with the Boltz cell at the median depth (D512).
-  Same depth, same L: eval L 1024 / D 1024 3.94 vs 3.83 ms (after the fix; 4.63 before it), train L 768 / D 1024 7.32 vs 7.29 ms. Both orders run
+  Same depth, same L: eval L 1024 / D 1024 cool 3.62 (after order) vs 3.59 ms (before order, after the fix; 4.27 before it), train L 768 / D 1024 7.32 vs 7.29 ms (not re-measured 2026-11-18). Both orders run
   the same kernels (`opm_prologue_tma_wide`, `opm_fused_kernel`; the order is a flag of the fused epilogue).
 - **Training at d_pair >= 256 (G6)**, L 768 / S 1024, graph ms (kernel us): (128, 256) 8.36 total = three cuBLAS products 1672 / 1576 / 1560
   (792 TFLOP/s each, 80 % of the dense bf16 peak; this is the floor of the composition) + `opm_epilogue_kernel` 654 + `opm_dgrad_kernel` 995 +

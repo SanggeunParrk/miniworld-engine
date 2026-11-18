@@ -18,7 +18,7 @@ as stated in each doc); they were NOT re-measured on the integrated tree except 
 | TokenDiTProtenix / TokenDiTMiniWorld | 3 | 5 | shared conditioning (4), bf16 pair bias on the AttentionPairBias kernels (5) |
 | TokenDiTBoltz2 / RF3 / Chai1 | 6 | 7 | bf16 pair bias |
 | Transition | 6 | 7 | D768 / D384 / D512 training on the generic kernels, chunked wide inference in place |
-| OuterProductMean | 3 | 4 | wide TMA prologue outside the TMA table (outputs differ by at most 1 bf16 ulp) |
+| OuterProductMean | 3 | 4 | wide TMA prologue outside the TMA table, `normalize_before_proj=True` cells only (outputs differ by at most 1 bf16 ulp; the AF3 order is unchanged) |
 | MSAPairWeightedAveraging | 1 | 2 | wide backward aux kernels (bit-identical), native builds at every served training shape |
 | AtomDiTMiniWorld | 2 | 3 | bf16 modulation table (training) |
 | SWAAtomTransformer / InputFeatureEmbedder | 3 | 4 | as AtomDiTMiniWorld |
@@ -40,7 +40,7 @@ list the TokenDiT classes; `parallel_residual_{fwd,bwd}_sm90` list `PairformerBl
 | PWA training (wide) | fused dropout-mask / dv-permute aux kernels, native builds at every served shape, glue3 mask prefetch | 8x32 d_msa 64: N512 S8192 0.90x of 3.0.0 (16.09 -> 14.50 ms); bit-identical (pair side stays Triton beyond the six shapes) |
 | Transition training | generic kernels from 16384 rows (D384 / D512) and every row count (D768 n2) | D768 step 1.2-1.85x vs the wide build; D512 8-17 %; D384 tie (5-14 % at 24576-65536 rows) |
 | Transition chunked inference (D384 / D512) | blocks write into the output rows (no DtoD copy) | 3456 / 3968 tokens 45.8 / 60.5 -> 40.1 / 53.2 ms; bitwise |
-| OPM inference | wide TMA prologue outside the TMA table | L1024 / S1024 4.54 -> 3.83 ms, L1024 / S2048 8.56 -> 7.55, L128 / S4096 0.58 -> 0.26 (same-cubin control) |
+| OPM inference, `normalize_before_proj=True` (Boltz order) | wide TMA prologue outside the TMA table | re-measured on the integrated tree (one node, interleaved, graph, L2 flush; cool / sustained): L1024 / S1024 4.27 / 4.43 -> 3.59 / 3.9 ms, L1024 / S2048 7.92 / 8.66 -> 6.53 / 7.3, L1536 / S1024 8.94 / 9.8-10.4 -> 7.90 / 8.8, L1536 / S2048 16.6 / 19.0-19.7 -> 14.4 / 16.8; the AF3 order (`normalize_before_proj=False`) is unchanged (always the wide prologue); the earlier branch-doc figures (4.54 -> 3.83 etc.) did not reproduce in this protocol and are not claimed |
 | AttentionPairBias ragged L | pair read unpadded; Chai-1 entry bf16 form cached per tensor | removes the `F.pad` of the pair (81 % of a 13.2 ms call at L2976); bitwise; entry cache: cast 4.94 ms -> 0.68 ms replay at L2048 under `static_inputs()` |
 | glue | edge_index kernel (one launch), ParallelResidual cuda backward writes leaf gradients in one pass | see docs (`docs/h100/dit_variants.md`, `local_atom_dit.md`) |
 | PairformerBlock(parallel=True) cuda | fused 5-branch ParallelResidual for the pair and 2-branch for the single deltas; fuses when the updates run cuda | docs: parallel pairformer fused residual (Chai-1 pairformer block ~1.2x claimed by the branch; see the integrated-tree check in the final report) |
