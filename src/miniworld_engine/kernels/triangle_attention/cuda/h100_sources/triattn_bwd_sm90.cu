@@ -55,9 +55,6 @@ __global__ void __launch_bounds__(256) triattn_delta_kernel(const __nv_bfloat16*
 #ifndef TB_Q8
 #define TB_Q8 1           // query side: 0 = off, 1 = the row-split kernel from S = 512 on, 2 = always (two warpgroups sum their dbias partials in shared memory: S / 8 reduce-adds per element)
 #endif
-#ifndef TB_POLY
-#define TB_POLY 0         // exponentials of every 16 on the FMA pipe (ex2_poly) instead of the MUFU (the recomputed P of all three kernels)
-#endif
 #ifndef TB_ABL
 #define TB_ABL 0          // experiments (time only, wrong results): bit 8 drops the dbias TMA reduce-adds, bit 32 every other one, bit 64 three of four
 #endif
@@ -224,8 +221,7 @@ __global__ void __launch_bounds__(kv::THREADS, 1) triattn_bwd_kv_sm90(
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const float l_ = (e & 1) ? ls.y : ls.x, d_ = (e & 1) ? dl.y : dl.x;
-        const float xx = fmaf(st_[4 * i + e], scl, -l_);
-        const float p = ((4 * i + e) % 16) < TB_POLY ? ex2_poly(xx) : ex2f(xx);
+        const float p = ex2f(fmaf(st_[4 * i + e], scl, -l_));
         st_[4 * i + e] = p;
         dp[4 * i + e] = p * (dp[4 * i + e] - d_);
       }
@@ -482,8 +478,7 @@ __global__ void __launch_bounds__(qk::THREADS, 1) triattn_bwd_q_sm90(
 #pragma unroll
     for (int i = 0; i < 32; ++i) {
       const int hf = (i >> 1) & 1;                        // accumulator rows g (words 0, 1 of a block) / g + 8 (words 2, 3)
-      const float xx = fmaf(s_[i], scl, -lse[r][hf]);
-      const float p = (i % 16) < TB_POLY ? ex2_poly(xx) : ex2f(xx);
+      const float p = ex2f(fmaf(s_[i], scl, -lse[r][hf]));
       const float d = p * (dp[i] - dlt[r][hf]);
       dp[i] = d;
       db[i] = fmaf(d, live, db[i]);
@@ -753,8 +748,7 @@ __global__ void __launch_bounds__(q8::THREADS, 1) triattn_bwd_q8_sm90(
 #pragma unroll
     for (int i = 0; i < 32; ++i) {
       const int hf = (i >> 1) & 1;
-      const float xx = fmaf(s_[i], scl, -lse[r][hf]);
-      const float p = (i % 16) < TB_POLY ? ex2_poly(xx) : ex2f(xx);
+      const float p = ex2f(fmaf(s_[i], scl, -lse[r][hf]));
       const float d = p * (dp[i] - dlt[r][hf]);
       dp[i] = d;
       db[i] = fmaf(d, live, db[i]);
