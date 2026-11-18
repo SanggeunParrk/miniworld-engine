@@ -101,8 +101,8 @@ def test_bytes_preset_and_gate() -> None:
     old = F.PLACES, F.MIN_ROWS
     F.PLACES, F.MIN_ROWS = F.parse("fast,nox"), 16384
     try:
-        assert F.active(1024, 768, False, True, True) == frozenset(("nox",))  # below the row gate: only the byte reduction
-        assert F.active(32768, 768, False, True, True) == F.PLACES
+        assert F.active(1024, 768, False, True, True) == frozenset(("nox", "hsave"))  # below the row gate: only the byte reductions (nox asked, hsave by default)
+        assert F.active(32768, 768, False, True, True) == F.PLACES | F.DEFAULT_BYTES
         assert F.active(32768, 768, True, True, True) == frozenset()  # fp32: none
     finally:
         F.PLACES, F.MIN_ROWS = old
