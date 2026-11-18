@@ -233,7 +233,7 @@ class PairformerBlock(BackendModule, MasterWeights):
         logits_pair = pair_in if self.config.parallel else pair
         if self.config.parallel:
             single = self._parallel_sum(
-                single, [self.single_attention(single, logits_pair, mask, extra_pair_bias), self.single_transition(single)]
+                cast(torch.Tensor, single), [self.single_attention(single, logits_pair, mask, extra_pair_bias), self.single_transition(single)]
             )
         else:
             single = self.single_transition(self.single_attention(single, logits_pair, mask, extra_pair_bias))

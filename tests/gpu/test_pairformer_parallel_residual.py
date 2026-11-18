@@ -103,7 +103,8 @@ def test_fused_train_gradients(monkeypatch):
         monkeypatch.setattr(pf, "fused_parallel_residual", real if fuse else (lambda x, b: None))
         m.zero_grad(set_to_none=True)
         pair, mask, s = _inputs(True, requires_grad=True)
-        out_p, out_s = _run(m, pair, mask, s)
+        out = _run(m, pair, mask, s)
+        out_p, out_s = out[0], out[1]
         g = torch.Generator(device="cuda").manual_seed(2)
         (out_p.float() * torch.randn(out_p.shape, device="cuda", generator=g)).sum().add_(
             (out_s.float() * torch.randn(out_s.shape, device="cuda", generator=g)).sum()
