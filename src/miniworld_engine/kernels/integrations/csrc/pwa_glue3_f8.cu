@@ -20,6 +20,9 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include "sm90_ptx.cuh"
+#ifndef G3_MAP
+#define G3_MAP 0
+#endif
 
 namespace {
 constexpr int H = 8, C = 32, D = 64, HC = H * C;
@@ -177,8 +180,8 @@ __global__ void __launch_bounds__(THREADS, 1) pwa_glue3_f8_kernel(int N, int S, 
   uint64_t* goready = wfree + 2;         // [2] head parity, count 2: both consumers' go tiles of a head are in shared memory
   const int tid = threadIdx.x, lane = tid & 31;
   const int NI2 = N / 128;
-  auto tile_sp = [&](int t) { return t / NI2; };
-  auto tile_ip = [&](int t) { return t % NI2; };
+  auto tile_sp = [&](int t) { return G3_MAP ? t % (ntile / NI2) : t / NI2; };   // G3_MAP: sp fastest (concurrent CTAs store adjacent row pieces)
+  auto tile_ip = [&](int t) { return G3_MAP ? t / (ntile / NI2) : t % NI2; };
 
   if (tid == 0) {
     for (int i = 0; i < NST; ++i) { tma::bar_init(full + i, 1); tma::bar_init(empty + i, 8); }

@@ -67,6 +67,8 @@ MARGIN = float(os.environ.get("MINIWORLD_PWA_FP8_TRAIN_MARGIN", "2"))
 FAST_ACCUM = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_FASTACC") == "1"
 #: ln_vt8n (blocks per SM, TMA stages): measured best of {1, 2} x {2, 3, 4} (S1024 N768: 245 us at (1, 4), 310 at (2, 3))
 VT8N_CFG = (1, 4)
+#: pwa_glue3_f8 tile order: sp (the s pair) fastest, so concurrent CTAs store adjacent row pieces of do / doT
+G3_MAP = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_G3MAP", "0") == "1"
 
 E4M3_MAX, E5M2_MAX = 448.0, 57344.0
 W_SCALE = 2.0**-8
@@ -304,6 +306,8 @@ def _vt8_nat_bf():
                 "-Xcompiler=-fvisibility=hidden",
                 "-DVT_NAT=1",
                 "-DVT_BF=1",
+                "-DVT_SWZ=1",
+                "-DVT_MAP=1",
             ],
             extra_cflags=["-O3", "-fvisibility=hidden"],
         )
@@ -323,6 +327,7 @@ def _glue8():
                 "--use_fast_math",
                 "-Xcompiler=-fvisibility=hidden",
                 "-DMW_PWA_CUDA_AUX=1",
+                f"-DG3_MAP={int(G3_MAP)}",
             ],
             extra_cflags=["-O3", "-fvisibility=hidden"],
         )

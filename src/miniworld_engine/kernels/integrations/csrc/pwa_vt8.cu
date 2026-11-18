@@ -105,6 +105,15 @@ __device__ __forceinline__ uint16_t e4m3x2(float lo, float hi) {   // lo -> low 
 #ifndef VT_BF
 #define VT_BF 0
 #endif
+#ifndef VT_SWZ
+#define VT_SWZ 0
+#endif
+#ifndef VT_MAP
+#define VT_MAP 0
+#endif
+#ifndef VT_EXP
+#define VT_EXP 0   // timing experiments only (1: no staging stores; 2: no v TMA stores)
+#endif
 template <int NST> struct SMQ {
   static constexpr int SX = 0, SW = SX + NST * TILE * 2, SV = SW + HC * D * 2, SEND = SV + (VT_BF ? HC * BN * 3 : HC * BN * (1 + VT_NAT));   // VT_BF: e4m3 natural at SV, bf16 natural at SV + HC * BN
   static constexpr int BYTES = SEND + 1024 + 64;
@@ -138,7 +147,7 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
     const int t = item_of(it);
     if (t >= nitem) return;
     const int st = it % NST;
-    const int n0 = (t % nblk) * BN, s = t / nblk;
+    const int n0 = VT_MAP ? (t / (nitem / nblk)) * BN : (t % nblk) * BN, s = VT_MAP ? t % (nitem / nblk) : t / nblk;   // VT_MAP: s fastest (concurrent blocks write adjacent row pieces)
     tma::expect_tx(bars + st, TILE * 2);
     #pragma unroll
     for (int kb = 0; kb < KB; ++kb) tma::load_2d(&xmap, tma::sa(sX + st * TILE + kb * BN * 64), bars + st, kb * 64, s * N + n0);
@@ -170,7 +179,7 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
     const int t = item_of(it);
     if (t >= nitem) break;
     const int st = it % NST;
-    const int n0 = (t % nblk) * BN, s = t / nblk;
+    const int n0 = VT_MAP ? (t / (nitem / nblk)) * BN : (t % nblk) * BN, s = VT_MAP ? t % (nitem / nblk) : t / nblk;   // VT_MAP: s fastest (concurrent blocks write adjacent row pieces)
     // SY: groups of thread 0, in order: y(it-1), v(it-1). <=1 pending -> y(it-1) has read its stage: refill it.  Without y the stage
     // of item it-1 was last read by its wgmma (waited on before the barrier that precedes this point)
     if (tid == 0) { if (SY && it >= 1) tma::wait_read<1>(); issue(it + NST - 1); }
@@ -254,8 +263,16 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
             const float a0 = r0 * vinv, a1 = r1 * vinv;
             amax = fmaxf(amax, fmaxf(fabsf(a0), fabsf(a1)));
             const int off = (h * BN + rr + hf * 8) * C + c;
+#if VT_EXP == 1   // timing experiment only: no staging stores
+            if (r0 == 123.f) *reinterpret_cast<uint32_t*>(sB + off) = pack2(r0, r1);
+#elif VT_SWZ   // the TMA stores swizzle (64B for the bf16 rows, 32B for the e4m3 rows): the 8 rows of a quad-group no longer share banks
+            const int ob = off * 2, o8 = off;
+            *reinterpret_cast<uint32_t*>(reinterpret_cast<unsigned char*>(sB) + (ob ^ (((ob >> 7) & 3) << 4))) = pack2(r0, r1);
+            *reinterpret_cast<uint16_t*>(sN8 + (o8 ^ (((o8 >> 7) & 1) << 4))) = e4m3x2(a0, a1);
+#else
             *reinterpret_cast<uint32_t*>(sB + off) = pack2(r0, r1);       // bf16 natural: ln_vg's bytes
             *reinterpret_cast<uint16_t*>(sN8 + off) = e4m3x2(a0, a1);     // e4m3 natural (the dw operand)
+#endif
           }
         }
       }
@@ -292,8 +309,10 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
       tma::store_3d(&vmap, tma::sa(sV), n0, s * C, 0);
       tma::store_3d(&nmap, tma::sa(reinterpret_cast<unsigned char*>(sV) + HC * BN), s * C, n0, 0);
 #else   // vmap: the bf16 natural v (staged at +HC*BN), nmap: the e4m3 natural v (at +0)
+#if VT_EXP != 2
       tma::store_3d(&vmap, tma::sa(reinterpret_cast<unsigned char*>(sV) + HC * BN), s * C, n0, 0);
       tma::store_3d(&nmap, tma::sa(sV), s * C, n0, 0);
+#endif
 #endif
       tma::commit();
     }
@@ -478,11 +497,11 @@ std::vector<torch::Tensor> ln_vt8n(torch::Tensor m, torch::Tensor lnw, torch::Te
   uint32_t bn[3] = {C, BN, H};
 #if VT_BF
   uint64_t snb[2] = {(uint64_t)S * C * 2, (uint64_t)N * S * C * 2};
-  CUtensorMap vmap = enc(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 3, vt.data_ptr(), gn, snb, bn, CU_TENSOR_MAP_SWIZZLE_NONE, "v bf16 natural");
+  CUtensorMap vmap = enc(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 3, vt.data_ptr(), gn, snb, bn, VT_SWZ ? CU_TENSOR_MAP_SWIZZLE_64B : CU_TENSOR_MAP_SWIZZLE_NONE, "v bf16 natural");
 #else
   CUtensorMap vmap = enc(CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, vt.data_ptr(), gv, sv, bv, CU_TENSOR_MAP_SWIZZLE_NONE, "vT");
 #endif
-  CUtensorMap nmap = enc(CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, vn.data_ptr(), gn, sn, bn, CU_TENSOR_MAP_SWIZZLE_NONE, "v natural");
+  CUtensorMap nmap = enc(CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, vn.data_ptr(), gn, sn, bn, (VT_SWZ && VT_BF) ? CU_TENSOR_MAP_SWIZZLE_32B : CU_TENSOR_MAP_SWIZZLE_NONE, "v natural");
   const int nitem = (N / BN) * S;
   switch (nst) {
     case 2: launch_nat<2>(lnw, lnb, eps, N, nitem, blocks_per_sm, vinv, amax, xmap, ymap, wmap, vmap, nmap); break;
