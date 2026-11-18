@@ -59,10 +59,10 @@ def _err(x: torch.Tensor, gold: torch.Tensor) -> float:
     return d / s if s > 0 else d
 
 
-def _run(m: PairformerBlock, pair, mask, s):
+def _run(m: PairformerBlock, pair, mask, s) -> tuple[torch.Tensor, ...]:
     with torch.autocast("cuda", dtype=torch.bfloat16):
         out = m(pair, mask, s) if s is not None else m(pair, mask)
-    return out if isinstance(out, tuple) else (out,)
+    return tuple(out) if isinstance(out, tuple) else (out,)
 
 
 def _gold(m: PairformerBlock, pair, mask, s):
