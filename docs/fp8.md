@@ -857,7 +857,7 @@ Arms (one process, per case `fp8.disable()` + `FP8_QK = False` first, so an arm 
 
 The one OUT (8p7u, a target whose bf16 seeds agree to 0.56 A) is identical with TriAttn on the default core: it belongs to the other `safe` routes (TriMul / OPM / DiT, which the `fp8c/rf3if2` branch made reachable for RF3), not to the
 TriAttn part; with TriAttn alone (PV, PV + q / k) 8p7u is inside (0.06 / 0.53 A). 7zau and 8fxv (bf16 pair max 18.6 / 9.3 A, ipTM spread 0.03 / 0.06) are unstable probes; 7zau `safe` seed 1 flips to the other bf16 mode (17.8 A), `safenota` does not (1.9 A): flips are chaotic, not a systematic bias.
-Raw tables: `benchmarks/fp8_e2e/results_rf3_triattn.txt`, harness `benchmarks/fp8_e2e/e2e3_rf3_triattn.py`.
+Raw tables: `benchmarks/fp8_e2e/results_rf3_triattn.txt`; harness `~/miniworld-engine-scratch/fp8c-rf3-triattn/e2e3.py` (`an3.py` tables, `diag.py` RMSD matrix).
 
 ### 5I28 benchmark (FoldForge a9e1549 + this branch with the route counters of `fp8c/counters`, H100, `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=rosettafold3`, protocol of `run_1118_301_fp8`, 6 warm repeats, median of the warm forwards, seconds)
 

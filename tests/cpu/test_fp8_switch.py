@@ -81,7 +81,10 @@ def test_env_preset(monkeypatch):
 def test_triattn_whitelist():
     assert set(fp8.TRIATTN_MODELS) == {"af3", "protenix1", "opendde", "rosettafold3"}  # extend only after an end-level check
     assert "boltz2" not in fp8.TRIATTN_MODELS and "openfold3" not in fp8.TRIATTN_MODELS
-    assert [m for m, (_k, qk) in fp8.TRIATTN_MODELS.items() if qk] == ["af3", "rosettafold3"]  # e4m3 q / k validated end to end on AF3 and RoseTTAFold3 only
+    assert [m for m, (_k, qk) in fp8.TRIATTN_MODELS.items() if qk] == [
+        "af3",
+        "rosettafold3",
+    ]  # e4m3 q / k validated end to end on AF3 and RoseTTAFold3 only
     assert fp8.triattn_for(None) == (frozenset(), False) and fp8.triattn_for("boltz2") == (frozenset(), False)
     assert fp8.triattn_for("AF3") == fp8.TRIATTN_MODELS["af3"]
 
@@ -107,7 +110,7 @@ def test_enable_disable_api():
     code = (
         "import json; from miniworld_engine import fp8; out = []\n"
         "fp8.enable('safe', guard='lazy'); out.append(fp8.status())\n"
-        "for m in ('af3', 'protenix1', 'opendde', 'boltz2', 'openfold3'):\n"
+        "for m in ('af3', 'protenix1', 'opendde', 'rosettafold3', 'boltz2', 'openfold3'):\n"
         "    fp8.enable('safe', model=m); out.append(fp8.status())\n"
         "fp8.enable('safe'); out.append(fp8.status())\n"
         "fp8.disable(); out.append(fp8.status()); print(json.dumps(out))"
