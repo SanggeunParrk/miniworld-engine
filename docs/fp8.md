@@ -1540,7 +1540,7 @@ max error 3.5-5.6 % at depth 8192-16384 (not recommended).
 ## PWA forward: e4m3 key contraction (`kernels/integrations/pwa_fp8.py`, branch `fp8x/pwa`, 2026-11-17)
 
 Scope: `MSAPairWeightedAveraging`, H100 `pwa_train` inference (d_msa 64, 8 heads x 32: Boltz-2 / RF3 / MiniWorld at d_pair 128, Chai-1 at d_pair 256),
-one sample. The `pwa_wide` widths (8 x 8 / 8 x 16: AF3 family) have their own route, below; not served: BIG 256 x 8 x 32, training, B200. Off by default; with it off the
+one sample. The `pwa_wide` widths (8 x 8 / 8 x 16: AF3 family) have their own route, below (the BIG build 256 x 8 x 32 of IntelliFold2 too, last subsection); not served: training, B200. Off by default; with it off the
 module output is the 2.5.12 bytes (below).
 
 Route: `pair_fwd3` (default pair kernel, w bf16) -> `w_quant` (e4m3 of 256 w) -> `ln_vt8` (y = `ln_vg`'s bytes, v as e4m3 **K-major** `vT [H][S*C][N]`)
@@ -1648,8 +1648,8 @@ base branch's TriAttn / TriMul FP8 dicts, unchanged), `test_init`, `test_require
 ### The wide widths: AF3 family (`pwa_fp8.forward_wide`, branch `fp8x/pwa-wide`, 2026-11-17)
 
 Scope: `pwa_wide` inference on H100, 8 heads x 8 / 16 -- (d_msa, C) = (64, 8) AF3 / OpenFold3 / Protenix-v1 (d_pair 128), (128, 8) Protenix-v2
-(d_pair 256) / OpenDDE (384), (128, 16) ESMFold2 (256): every non-BIG wide row of `requirements_module.csv`. Not served: the BIG build
-(256 x 8 x 32, IntelliFold2), training, B200. Why it did not fire before: AF3's 64 x 8 is not `pwa_train`'s width, so the module runs `pwa_wide`,
+(d_pair 256) / OpenDDE (384), (128, 16) ESMFold2 (256): every non-BIG wide row of `requirements_module.csv` (the BIG build, 256 x 8 x 32 of
+IntelliFold2, is served from branch `fp8c/if2-pwa`: "The BIG build" below). Not served: training, B200. Why it did not fire before: AF3's 64 x 8 is not `pwa_train`'s width, so the module runs `pwa_wide`,
 which had no FP8 hook (and the 8 x 32 route also asks N % 128; FoldBench lengths are arbitrary). Same switch `MINIWORLD_PWA_FP8=1`, same v scale
 (static power of two, `HEADROOM` 16, keyed by the value weight), w scale (2^8), guard (`take_overflow` / `rescale_all`, `GUARD` sync / lazy) and
 cuBLASLt contraction as the 8 x 32 route.
@@ -1740,6 +1740,109 @@ wide width vs `ln_vg_w` with S 70 / N 208 -- the clipped token tail --, route ac
 widths incl. N 777 padded, the route fired, default unchanged after it ran, graph replay = eager, guard fires and `rescale_all` clears it, gates),
 `test_pwa_fp8.py`, `test_pwa_long_inference.py`: 28 passed (final tree). CPU: `test_capture_api`, `test_init`: 274 passed; `ruff check` / `format`, `pyright` clean on the touched Python files. The wide `ln_vt8` builds (`miniworld_pwa_vt8_{d}_{c}`) are JIT-built on first use (not in the
 prebuild plan); the 8 x 32 build keeps its extension name (its cache key changes with the source).
+
+### The BIG build: IntelliFold2 (`pwa_fp8.forward_wide` at 256 x 8 x 32, branch `fp8c/if2-pwa`, 2026-11-18, base 3.0.1 + `fp8c/rf3if2`)
+
+Scope: `pwa_wide`'s BIG build (d_msa 256, d_pair 512, 8 heads x 32 channels = IntelliFold2), inference on H100. Why it did not fire: `WIDE` had no `(256, 32)`,
+so `serves_wide` was always False (`fp8.route_stats()` of the 5I28 benchmark at n = 4: `pwa` calls 0, declined 27). Now `WIDE` holds `(256, 32)`; same switch
+`MINIWORLD_PWA_FP8=1` (inside `safe`), same static v scale (`HEADROOM` 16, keyed by the value weight, eager calibration), w scale 2^8, guard contract
+(`take_overflow` / `rescale_all`, lazy under graphs) and cuBLASLt e4m3 contraction (H = 8, M = S * 32, N = N_i, K = N_j) as the other widths.
+
+Route: `pair_fwd3` (d_pair 512) -> `w_quant` -> `ln_vt8` built at d_msa 256 (`pwa_vt8.cu -DVT_D=256 -DVT_C=32`: **the kernel source is unchanged**, d_msa as four 64-column
+swizzled blocks per tile and Wv, HC = 256 as four m64 blocks; 209 KiB of shared memory = Wv 128 KiB + two 32 KiB tile stages + 16 KiB v staging, so one block per SM and two
+TMA stages: `wide_cfg(256, 32) = (1, 2)`; no tuning grid exists) -> the e4m3 contraction -> `gate_w` -> `out_w` (the default BIG inference gate / out passes, unchanged). The default
+BIG route keeps y from `ln_vg_w` (`BIG_INFER_Y`); `ln_vt8` stores y too (`store_y`, the bytes of `ln_vg_w`'s y, verified by `test_ln_vt8_big_keeps_y`) when N % 64 == 0 and
+`gate_w` reads it. Other multiples of 16 would take the LayerNorm-again `gate_w` mode, which is slower (below), so the route is not offered there.
+
+| env / attribute | effect |
+|---|---|
+| `MINIWORLD_PWA_FP8_BIG_N_MULT` | the BIG build is served from N % this == 0 (64); 16 admits the other multiples of 16 (loses at N400) |
+| `MINIWORLD_PWA_FP8_BIG_MIN_SN` | smallest S * N served on the BIG build (2^14 = the smallest measured shape, S64 N256); 0 = no gate |
+| `MINIWORLD_PWA_FP8_BIG_Y` | `0`: always the LayerNorm-again `gate_w` mode (measurement switch) |
+
+The wide gates `WIDE_MIN_N` / `WIDE_MIN_SN` do not apply to the BIG build (every measured shape from N128 / S64 N256 gains). IntelliFold2's shapes (bucketed, from the end-level
+runs): S 1024, N 256 / 384 / 640 / 768 / 1024 (and 2048 at n = 16), all multiples of 128.
+
+Module time, FP8 / default (`fp8c_if2pwa/scripts/speed.py`: CUDA graph per module call, the three routes interleaved, cool = 2 s idle + one burst, sus = sustained; default and FP8 on the
+same tree, ctl = the default captured a second time, the same-cubin control; gates off, lazy guard; fired in every row, overflow in none). d_pair 512, default ms (cool):
+
+| S:N | default ms | FP8 / default cool / sus | ctl |
+|---|---|---|---|
+| 1024:128 | 0.475 | 0.890 / 0.895 | 0.996 |
+| 1024:256 | 0.909 | 0.891 / 0.893 | 1.000 |
+| 1024:384 | 1.375 | 0.884 / 0.884 | 1.003 |
+| 1024:512 | 1.874 | 0.882 / 0.881 | 0.997 |
+| 1024:768 | 2.974 | 0.873 / 0.875 | 0.994 |
+| 1024:1024 | 4.210 | 0.870 / 0.871 | 0.998 |
+| 1024:1536 | 7.136 | 0.855 / 0.855 | 1.000 |
+| 1024:2048 | 10.673 | 0.837 / 0.837 | 0.997 |
+| 512:640 | 1.346 | 0.880 / 0.883 | 0.998 |
+| 256:256 / 384 / 768 / 1536 | 0.294 / 0.444 / 1.001 / 2.610 | 0.909 / 0.907 / 0.906 / 0.906 | 1.000 / 0.998 / 1.003 / 0.997 |
+| 64:256 / 384 / 768 / 1536 | 0.133 / 0.200 / 0.496 / 1.498 | 0.960 / 0.970 / 0.950 / 0.961 | 1.004 / 1.002 / 0.999 / 0.997 |
+| 4096:256 / 384 / 768 / 1536 | 3.397 / 5.172 / 10.94 / 25.13 | 0.889 / 0.876 / 0.863 / 0.833 | 0.999 / 0.994 / 0.997 / 0.999 |
+| 1024:400 (N % 64 != 0: no y) | 1.462 | **1.031** / 1.034 | 0.997 |
+
+Every N % 64 row gains 3-17 % (the gain grows with N and S, as for the other widths); the N400 row loses, hence the N % 64 gate. y or LayerNorm-again `gate_w` (`BIG_Y=0`, S1024): N384 0.982
+(y: 0.884), N768 0.972 (0.873), S4096 N768 0.975 (0.863): keeping y is worth about 10 %. Raw rows: `~/miniworld-engine-scratch/bench5i28_ff/fp8c_if2pwa/res/pwabig_{v1,noy}.jsonl`.
+
+Error against fp64 (`pwabig_err_v1.jsonl`, random weights, 3 masked tokens, `upd rms / upd max / judge` in % as the tables above; overflow: False in every row, peak |v / scale| 23.5-23.8 of 448):
+
+| case (S:N, d_pair 512) | PyTorch bf16 | default | FP8 |
+|---|---|---|---|
+| 1024:384 | 2.55 / 4.20 / 0.28 | 2.55 / 4.20 / 0.28 | 3.61 / 5.18 / 0.35 |
+| 1024:768 | 2.88 / 4.85 / 0.28 | 2.88 / 4.85 / 0.28 | 3.54 / 5.97 / 0.35 |
+| 1024:1536 | 3.11 / 5.38 / 0.27 | 3.11 / 5.38 / 0.27 | 3.48 / 6.04 / 0.31 |
+| 4096:384 | 2.55 / 4.06 / 0.28 | 2.55 / 4.06 / 0.28 | 3.60 / 5.00 / 0.34 |
+| 256:400 (N % 16 route, ungated) | 2.57 / 4.27 / 0.29 | 2.57 / 4.27 / 0.29 | 3.60 / 4.98 / 0.34 |
+
+The same pattern as AF3's 64 x 8 (FP8 +1 % of the update rms over the bf16 floor, judge metric 0.34 % against the engine tolerance `max(err_pytorch, 8e-3)`).
+
+End level (`fp8c_if2pwa/e2e.py`, FoldForge ff_301 + this tree, IntelliFold2, 10 FoldBench targets of 138-622 residues with their templates, 3 trunk_seeds each (6 for 8upi / 8avq), 5 samples, 200 steps,
+bf16, eager, **only `MINIWORLD_PWA_FP8=1` on** (sync guard; the route fired: every call of S1024 N256 .. 1024 served, 0 saturation), same trunk / diffusion seed in both arms). Ca RMSD (Angstrom) after
+superposition: FP8 against bf16 on the same seed and sample, next to the spread of bf16 itself (same sample, trunk_seed i against j):
+
+| target (residues) | bf16 trunk-seed spread median / max | FP8 vs bf16 same seed median / max | dpLDDT (mean over seeds) |
+|---|---|---|---|
+| 8e4h (138) | 1.37 / 1.80 | 0.13 / 0.65 | 0.000 |
+| 8dhj (249) | 1.45 / 2.00 | 0.05 / 0.30 | 0.000 |
+| 8avq (286) | 1.60 / 2.26 | 0.34 / 1.70 | +0.004 |
+| 8vfj (366) | 0.63 / 0.85 | 0.04 / 0.44 | 0.000 |
+| 9gsq (402) | 3.34 / 25.2 | 0.39 / 2.61 | 0.000 |
+| 8upi (525) | 0.69 / 1.38 | 0.24 / **2.22** | -0.004 |
+| 7uyn (564) | 1.73 / 2.36 | 0.08 / 0.70 | 0.000 |
+| 8i89 (578) | 22.0 / 27.9 | 0.07 / 5.15 | 0.000 |
+| 8ts0 (622) | 4.80 / 7.53 | 0.56 / 4.97 | 0.000 |
+| 8hxq (358, bistable) | 16.5 / 20.6 | 15.2 / 19.5 | -0.033 |
+
+FP8 stays inside the bf16 trunk-seed spread for 9 of 10 targets (median 0.04-0.56 A against 0.6-22 A). Two exceptions to read: 8upi seed 1 sits 1.4-2.2 A from its bf16 sample (the other five
+seeds 0.03-0.63; the bf16 spread of that target is at most 1.38, its samples of one seed at most 1.21), and 8hxq (an antibody - antigen complex whose bf16 trunk seeds already differ by 16 A) flips two of
+three seeds to the other mode, FP8 as well as any other numerics change would. No mean-pLDDT shift above 0.004 except 8hxq (-0.033, that flip). This is a one-route arm: the other IntelliFold2 FP8 routes
+are not in it (their end-level evidence is the `fp8safe` runs of the earlier sections, TriAttn / D512 TriMul planes are not served for IntelliFold2).
+
+5I28 benchmark (FoldForge a9e1549 + this tree with the route counters, node02, `MINIWORLD_FP8=safe`, protocol of `run_1118_301_fp8`, 6 warm repeats, median of the warm forwards, seconds):
+
+| n | bf16 (3.0.1 steady) | FP8 before (3.0.1) | FP8 before (`fp8c/rf3if2`) | FP8 after (this branch) | after / bf16 | after / before (3.0.1) |
+|---|---|---|---|---|---|---|
+| 1 | 0.593 | 0.583 | 0.572 | 0.585 | 0.988 | 1.004 |
+| 2 | 1.304 | 1.213 | 1.215 | 1.210 | 0.928 | 0.997 |
+| 4 | 4.040 | 3.688 | 3.704 | 3.690 | 0.913 | 1.001 |
+| 8 | 15.728 | 14.449 | 14.404 | 14.335 | 0.911 | 0.992 |
+| 12 | 38.388 | 35.697 | 35.429 | 35.293 | 0.919 | 0.989 |
+| 16 | 71.742 | 67.039 | 66.827 | 66.421 | 0.926 | 0.991 |
+
+The PWA module is a small part of IntelliFold2's forward: 30 PWA calls per prediction (eager end-level runs) of S1024 at N 256-2048 take about 0.03 s of 0.59 s at n = 1 (~5 %), 0.06 s of 3.7 s at n = 4 (~1.6 %),
+0.3 s of 66.8 s at n = 16 (~0.5 %); at 0.84-0.96 of the module the route is worth 0.05-0.6 % of the forward, below the run-to-run noise of the benchmark (the two earlier FP8 columns, the same code, differ by 0.3-2 %).
+The n >= 8 rows move by -0.4 .. -0.9 % against both earlier FP8 columns, in the direction of the estimate; no row is slower beyond the noise.
+
+Route counters (`fp8.route_stats()`, branch `fp8c/counters` merged in, one process over n = 1 .. 16): before (n = 4): `pwa` calls 0, **declined 27**; after: `pwa` `wide_calls` **333**, `declined` **0**, `retries` 0 (no
+saturation redo), `fp8.check()` False. Other routes unchanged (OPM 408 calls, 0 fallbacks; Transition 7241; TriMul 1632; token DiT expand 1296; atom DiT pre / post 324).
+
+Verification: default route (FP8 off) unchanged: `pwa_wide.py` / `pwa_wide.cu` / `pair_wide.cu` / `pwa_vt8.cu` are not touched (the diff against `fp8c/rf3if2` is `pwa_fp8.py` and the test); in-process, `test_route_accuracy_and_default_unchanged`
+asserts that the output after a FP8 call with the switch off again is the bit-for-bit output of before it, for the two BIG cases. GPU (one job): `tests/gpu/test_pwa_fp8_wide.py` (new: BIG `ln_vt8` against `ln_vg_w` at S 70 / N 208 -- the clipped
+token tail --, `ln_vt8` keeps y byte-identical to `ln_vg_w`'s, route accuracy against fp64 at 256:512:32 N384 / S64 and N400 / S33, the route fired, graph replay = eager, guard fires / `rescale_all` clears, BIG gates) together with
+`test_pwa_fp8.py`, `test_pwa_long_inference.py`: 32 passed. CPU: `test_prebuild_plan`, `test_capture_api`, `test_init`, `test_requirements`, `test_judge`: 1469 passed, 2 skipped; `ruff check` / `format` clean on the touched files.
+Prebuild: the sm90a plan lists `miniworld_pwa_vt8_256_32` (one new artifact next to `vt8`, `vt8_64_8`, `vt8_128_8`, `vt8_128_16`) from the `pair_weighted_averaging` eval row of the BIG width, `pwa_fp8.WIDE` driving
+`kernels/integrations/__init__.py`; `plan` reports no problem. Limits: N % 64 only (N400 loses); training and B200 not served; IntelliFold2 end level is one route on 10 targets, not the 27-target FoldBench protocol.
 
 ## Transition forward: e4m3 GEMMs (`kernels/transition/cuda/fp8_sm90a.py`, branch `fp8x/transition`, 2026-11-17)
 
