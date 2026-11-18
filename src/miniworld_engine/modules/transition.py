@@ -77,7 +77,7 @@ class Transition(BackendModule, MasterWeights):
     # 2026-11-13 (H100): cuda 5 = the inference forward casts fp32-master weights once per parameter version (param_forms), not per call
     # 2026-11-18 (H100): cuda 7 = TRAINING runs the generic kernels at D 768 (n 2) above 768 rows, D 384 above 16384, D 512 above 12288 rows (they save xn / a / b
     # for the backward): D 768 step 1.2 - 1.85x, D 512 8 - 17 %, D 384 up to 12 % faster; the D 384 / 512 chunked inference writes in place (same bits)
-    # faster than the wide build; the arithmetic differs from the wide build (judge standard: engine rms vs float64 3.6 - 4.9e-3, PyTorch 5.0 - 6.9e-3)
+    # (the training arithmetic differs from the wide build; judge standard: engine rms vs float64 3.6 - 4.9e-3, PyTorch 5.0 - 6.9e-3)
     # 2026-11-17 (H100): cuda 6 = D 768 (n 2) inference above 768 rows runs the generic kernels, not the wide D768 training structure (1.4 - 1.9x
     # faster at 1024 - 8192 rows; ~2.3 % of the outputs differ, the error against float64 is the same: judge max 3.50e-3, rms 4.37e-3)
     # 2026-11-10: kits; H100 d384 cuBLAS; fp32 eval f32io; fp32 fused fwd d256 / d512 + train; A100 capture forms + fp32 (TF32) build.
