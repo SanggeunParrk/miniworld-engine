@@ -44,10 +44,11 @@ PRESETS = {
     "all": frozenset(_ALL),
     # the placements that pay at every measured size (docs/fp8_training.md): the forward transition GEMMs
     "fast": frozenset(("expand", "squeeze")),
+    "recommended": frozenset(("expand", "nox", "hsave")),
 }
 #: what ``MINIWORLD_FP8_TRAIN=1`` turns on for this block (the attention-side projections stay bf16: the inference q|k|v|g placement
 #: moved AF3 FoldBench; docs/fp8_training.md)
-RECOMMENDED = PRESETS["fast"]
+RECOMMENDED = frozenset(("expand",)) | frozenset(BYTES)  # round 3: e4m3 expand + the bit-identical byte reductions; squeeze adds ~0.1 % for 5 % dW error
 
 
 def parse(v: str) -> frozenset[str]:

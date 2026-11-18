@@ -186,3 +186,71 @@ clear them for real models.
   wgrad (transposed 8-bit copies cost more than the GEMM saves), attention core (latency bound).
 - The ceiling is low because 60 % of the step is not GEMM (attention core 20-29 %, row kernels ~40 %). The larger lever for this block
   is the shared-conditioning GEMMs on L instead of A L rows (~10 % of the step, no FP8).
+
+## Token DiT round 3 (branch `fp8t3/tokendit`): against the 3.0.1 default
+
+Base: `fp8t2/tokendit` (round 2: `nox` / `hsave` byte reductions, behind `MINIWORLD_TOKEN_DIT_FP8_TRAIN`) merged with origin/main 3.0.1 (shared
+conditioning on L rows, pair bias on the APB kernels). The baseline is now the 3.0.1 default (A48 L384 3.03 ms; it was 3.43 ms on 2.5.14).
+Training placements live in `token_dit_fp8_train.py`, separate from the inference gate `token_dit_fp8.active()`.
+Scripts: `tools/fp8_train_bench/` (`speed.py`, `run.sh`); raw rows `~/miniworld-engine-scratch/fp8t3-tokendit/res/`.
+
+Placements: `nox` (no fp32 residual copy: the backward reads the block input) and `hsave` (the forward keeps h; swiglu_bwd does not rewrite it)
+are byte reductions, bit-identical (no FP8; the fp64 error table below shows identical numbers); `expand` / `squeeze` are the e4m3 forward GEMMs.
+`RECOMMENDED` (= `MINIWORLD_FP8_TRAIN=1`, preset `recommended`) is now `expand + nox + hsave`; `squeeze` is dropped (see below). Gate: the byte reductions apply at
+every M; the FP8 GEMM at M = A L >= 16384.
+
+### Step time (fwd + bwd, one CUDA graph per variant, same process, interleaved; H100 node02, job 58892 `res/speed3.jsonl`)
+
+Cells `cool / sustained`, ratio to the 3.0.1 default; control = the default captured again (same cubin); shipped gate (MIN_ROWS 16384), so at
+M < 16384 `rec` = `bytes`.
+
+| A:L (M) | 3.0.1 default ms (cool / sust.) | control / control2 | bytes only (nox, hsave) | rec (expand + bytes) |
+|---|---|---|---|---|
+| 48:384 (18432) | 3.028 / 3.012 | 0.989 / 0.999, 0.990 / 0.999 | 0.979 / 0.989 | **0.974 / 0.984** |
+| 48:768 (36864) | 6.787 / 6.850 | 0.998 / 1.001, 0.998 / 1.000 | 0.985 / 0.989 | **0.981 / 0.986** |
+| 48:256 (12288) | 1.979 / 1.957 | 0.989 / 1.001, 0.988 / 1.001 | 0.976 / 0.988 | 0.974 / 0.988 (gated: = bytes) |
+| 48:128 (6144) | 1.060 / 1.031 | 0.968 / 0.994, 0.966 / 0.993 | 0.955 / 0.981 | 0.956 / 0.982 (gated) |
+| 8:384 (3072) | 0.785 / 0.757 | 0.962 / 0.996, 0.950 / 0.983 | 0.945 / 0.978 | 0.948 / 0.981 (gated) |
+
+Earlier runs (jobs 58581, 58592, same variants) agree within 0.3 %. Ungated ablation at M 18432 / 36864 (cool / sustained):
+`bytes` 0.979 / 0.989 and 0.984 / 0.991; `expand + bytes` 0.974 / 0.984 and 0.981 / 0.987; `expand + squeeze + bytes` 0.973 / 0.983 and 0.979 / 0.986.
+Reading: against the same-cubin control (cool control sits 1 % below the default because of capture order; sustained control = 1.000) the
+route saves about 1.5-1.6 % sustained at M 18432 / 36864; the byte reductions are 1.0 % of that, the e4m3 expand GEMM 0.5 %, squeeze +0.1 %
+(not worth 5 % dW squeeze error). At M < 16384 only the byte reductions are on: 1.0-1.5 % sustained against control 0.4-0.6 %: smaller than the cool-vs-sustained spread.
+Upper bound left for FP8 on this block: expand + squeeze GEMMs ~50 us of 3028 (1.7 %), minus the 15.5 us q8 pass; fusing it into
+`res_adaln_b` would give ~0.3 % more (not built).
+
+### Gradient error vs fp64 (A48 L128, MIN_ROWS 0; `res/err2.jsonl`), rel rms %
+
+| variant | out | d single | d cond | d pair | dW expand | dW squeeze | dW query |
+|---|---|---|---|---|---|---|---|
+| 3.0.1 default (unit) | 0.31 | 0.25 | 0.68 | 0.91 | 0.65 | 0.62 | 1.01 |
+| bytes (nox, hsave) | 0.31 | 0.25 | 0.68 | 0.91 | 0.65 | 0.62 | 1.01 |
+| expand (= rec) | 2.16 | 1.22 | 4.21 | 1.49 | 4.51 | 5.40 | 1.56 |
+| expand + squeeze + bytes | 2.60 | 1.22 | 4.33 | 1.49 | 4.51 | 5.40 | 1.56 |
+| default (sigma spread) | 0.19 | 0.17 | 0.68 | 0.89 | 0.64 | 0.62 | 1.01 |
+| expand (sigma) | 0.70 | 0.24 | 4.25 | 0.91 | 4.50 | 5.41 | 1.02 |
+| expand + squeeze + bytes (sigma) | 0.84 | 0.24 | 4.37 | 0.91 | 4.50 | 5.41 | 1.02 |
+
+### Training curves (3-block distillation, per step fresh A48 L128, MIN_ROWS 0; `res/curve2.jsonl`, `res/curve3.jsonl`)
+
+Mean loss of the last 50 steps. 500 steps, AdamW 3e-4: default 0.361798, fp32 (TF32) 0.361768, bytes 0.361798 (identical), expand + bytes 0.361789,
+expand + squeeze + bytes 0.361804 (gaps within 0.003 %). 2000 steps, lr 1e-3: default 0.333832, expand + bytes 0.333780 (-0.016 %),
+expand + squeeze + bytes 0.333761 (-0.021 %). No NaN. This is a synthetic distillation, not an end-level result (same caveat as before, and the
+qkvg FoldBench precedent: module error did not predict end-level effect). No end-level run (real-model finetune loss curve / FoldBench) was done in this
+round; the e4m3 `expand` is the placement that the inference `safe` preset already ships (FoldBench-checked in inference), `squeeze` has no such precedent.
+
+### Verification
+
+- Switch off = origin/main 3.0.1: sha1 of the output and all 27 gradients, six cases (A48 L384, A8 L384, A48 L128, A6 L200, A5 L384, fp32 A4 L256),
+  this tree against `git archive origin/main`, separate processes: 6 / 6 identical (`res/bit_new.json` = `res/bit_base.json`). The `nox` / `hsave` bits change nothing in
+  the gradients (the error table above, equal numbers).
+
+### Verdict (round 3)
+
+- The route (`expand + nox + hsave`) beats the 3.0.1 default by ~1.5 % (sustained; 2.0-2.6 % cool) at M >= 18432 and ~1.2 % below; but 2/3 of the win comes from
+  the bit-identical byte reductions, not from FP8. FP8 alone: ~0.5 % for 4-5 % rms gradient error on the transition parameters and the cond gradient (default 0.65 %).
+  The honest ledger: FP8 training for the token DiT is a marginal win (inside the 1 % control spread), so recommended = byte reductions as the main change; `expand`
+  stays opt-in (`MINIWORLD_TOKEN_DIT_FP8_TRAIN=expand`, gate 16384) until an end-level training curve exists. Candidates for the main line: `nox` + `hsave` (bit-identical, 1.0-1.5 %) as default-route changes with a
+  `backend_versions` bump (cuda only) — a decision for the release owner, not done here.
+- Does not pay (unchanged): dgrad placements, attention-side projections, wgrad, attention core.
