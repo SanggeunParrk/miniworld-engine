@@ -50,10 +50,10 @@ SAFE = {
     "token_dit": ["expand"],
     "atom_dit": ["post", "pre"],
 }
-#: the TriAttn part per validated model (af3 / openfold3: PV fused + unfused and q / k; the others: PV only, on their checked kinds)
+#: the TriAttn part per validated model (af3 / openfold3: PV fused + unfused and q / k; protenix1: PV fused + q / k; the others: PV only, on their checked kinds)
 TRIATTN_OF = {
     "af3": {"pv": ["fused", "unfused"], "qk": True},
-    "protenix1": {"pv": ["fused"], "qk": False},
+    "protenix1": {"pv": ["fused"], "qk": True},
     "opendde": {"pv": ["unfused"], "qk": False},
     "protenix2": {"pv": ["unfused"], "qk": False},
     "openfold3": {"pv": ["fused", "unfused"], "qk": True},
@@ -85,7 +85,7 @@ def test_triattn_whitelist():
     assert "boltz2" not in fp8.TRIATTN_MODELS  # 9c90 bistable
     assert "intellifold2" not in fp8.TRIATTN_MODELS  # end-level 10 / 12 (two large targets flip), trunk heads are 64-channel
     # e4m3 q / k: the fused d_pair-128 route only, validated end to end on AF3 and OpenFold3
-    assert [m for m, (_k, qk) in fp8.TRIATTN_MODELS.items() if qk] == ["af3", "openfold3"]
+    assert [m for m, (_k, qk) in fp8.TRIATTN_MODELS.items() if qk] == ["af3", "protenix1", "openfold3"]
     assert fp8.triattn_for(None) == (frozenset(), False) and fp8.triattn_for("boltz2") == (frozenset(), False)
     assert fp8.triattn_for("AF3") == fp8.TRIATTN_MODELS["af3"]
 

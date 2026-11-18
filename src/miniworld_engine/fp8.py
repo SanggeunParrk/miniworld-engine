@@ -87,7 +87,7 @@ PRESETS = MappingProxyType(
 )
 #: TriAttn FP8 per validated model: model -> (call-site kinds of the FP8 PV route, e4m3 q / k on the fused route). Only end-level evidence for
 #: exactly these routes puts a model here (docs/fp8.md): af3 = FoldBench 27 targets with the whole ``safe`` set incl. q / k (0 flagged) and 4
-#: targets x 4 trunk seeds with PV; protenix1 / opendde = PV on the listed kinds, 4 trunk seeds per target (no q / k run: PV only); protenix2 =
+#: targets x 4 trunk seeds with PV; protenix1 (PV + q / k, 25 targets x 4 trunk seeds) / opendde (PV only: no d_pair-128 site) = the listed kinds; protenix2 =
 #: PV on its d_pair-256 front-made sites ("unfused"; no d_pair-128 site, so no q / k) and openfold3 = PV on both kinds + q / k (docs/fp8.md
 #: "TriAttn whitelist: Protenix v2, OpenFold3 (IntelliFold2 not added)": 4 trunk seeds per target, 3.0.1 environment). Boltz-2 is out on purpose
 #: (9c90 bistable); Chai-1 (call-site kind "d64", fp8c/chai1) has the kernel but no end-level evidence yet: not listed. IntelliFold2 stays out (end-level 10 / 12, its trunk heads are 64-channel). ``h100_sm90.FP8_PV_WHITELIST`` is derived from
@@ -95,7 +95,7 @@ PRESETS = MappingProxyType(
 TRIATTN_MODELS = MappingProxyType(
     {
         "af3": (frozenset({"fused", "unfused"}), True),
-        "protenix1": (frozenset({"fused"}), False),
+        "protenix1": (frozenset({"fused"}), True),  # q / k: its only TriAttn site kind is the d_pair-128 fused route (docs/fp8.md)
         "opendde": (frozenset({"unfused"}), False),
         "protenix2": (frozenset({"unfused"}), False),
         "openfold3": (frozenset({"fused", "unfused"}), True),

@@ -81,13 +81,13 @@ atom DiT `declined` / `fallbacks` tells which). Test: `tests/gpu/test_fp8_route_
    | model | TriAttn FP8 PV call sites | e4m3 q / k | end-level evidence |
    |---|---|---|---|
    | `af3` | fused + unfused | yes | FoldBench 27 targets with the whole `safe` set incl. q / k (0 flagged, lDDT +0.0000); PV: 4 targets x 4 trunk seeds |
-   | `protenix1` | fused | no | PV, 9 + 3 targets x 4 trunk seeds (no q / k run) |
-   | `opendde` | unfused | no | PV, 16 + 3 targets x 4 trunk seeds (no q / k run) |
+   | `protenix1` | fused | yes (2026-11-18) | PV: 9 + 3 targets x 4 trunk seeds; q / k + PV re-run on 25 targets x 4 trunk seeds (3.0.1; "Protenix v1 / OpenDDE TriAttn parity with AF3", below) |
+   | `opendde` | unfused | no (no d_pair-128 site: q / k exists only on the fused route) | PV, 16 + 3 targets x 4 trunk seeds |
    | `protenix2` | unfused (256:8:32 front-made trunk sites from L768, 64:2:32 template sites from L256) | no (no d_pair-128 site) | PV, 11 targets x 4 trunk seeds, 10 / 11 inside (7y37: bf16 bimodal, see "TriAttn whitelist: Protenix v2, ...") |
    | `openfold3` | fused + unfused | yes | PV and PV + q / k, 12 targets x 4 trunk seeds, 11 / 12 inside each (7zau: bf16 spread 10.2 A, ipTM 0.15-0.38) |
 
    Not listed: Boltz-2 (9c90 bistable, below), IntelliFold2 (10 / 12 inside, two large targets flip; below), every other model. (After 3.0.1, branch `fp8c/triattn`: the `protenix2` and `openfold3` rows were added after the end-level section "TriAttn whitelist: Protenix v2, OpenFold3, IntelliFold2 (not added)"; decision 1 had left OpenFold3 out.)
-2. **e4m3 q / k stays in `safe`** (af3 only): its module error in the judge form is above the module tolerance (0.95 / 0.85 % at L512 / 1024 against
+2. **e4m3 q / k stays in `safe`** (af3, protenix1, openfold3): its module error in the judge form is above the module tolerance (0.95 / 0.85 % at L512 / 1024 against
    tol 8e-3), but the end-level AF3 FoldBench run with it on flagged 0 / 27 targets.
 3. **No FP8 registry rows / tolerances.** FP8 is an opt-in path outside the judge: the registry dtype vocabulary is `float32|master` only, the FP8 planes /
    e4m3 V are internal intermediates of the `master` route, no `backend_versions` entry exists, and the judge tokens cover the default bf16 route only
@@ -2874,3 +2874,40 @@ Still open:
 - The experimental FP8-compute K1 (`MINIWORLD_TRIMUL_FP8_K1`, `TMN_K1_F8C`: 6.9 % update error, failed the Protenix pLDDT criterion) is still in the
   code and the shared header; removing it would simplify `tmn_kernels.cuh`.
 - FoldForge: wire `fp8.check()` (and `MINIWORLD_FP8_MODEL` / `enable(model=)`) into its forward loop before offering `MINIWORLD_FP8=safe` there.
+
+## Protenix v1 / OpenDDE TriAttn parity with AF3 (2026-11-18, engine 3.0.1, branch `fp8c/protenix1-opendde-triattn`)
+
+Goal: FP8 inference on the same TriAttn placements as AF3 (PV on the fused d_pair-128 front and on the unfused / front-made sites, e4m3 q / k on the
+fused route) wherever the model has such sites. Site kinds per model (counters `fp8.route_stats()` of branch `fp8c/counters`, 5I28 n = 4 / 12 and the
+peak tables of the FoldForge end-level runs):
+
+| model | TriAttn sites | PV kind | e4m3 q / k |
+|---|---|---|---|
+| Protenix v1 | d_pair 128, 4 x 32, L >= 256 only: 936 d128 calls at n = 4, 1248 at n = 12, every one `fused`; PV forced on `unfused` too gave 0 `pass` / front calls on 3 targets and in all 25 end-level targets (peaks list `fused:L..H4D32` only) | fused (already on) | **added** |
+| OpenDDE | 64:2:32 (front-made planes) and 384:12:32 (standalone pass): n = 4 140 front + 24 pass, n = 12 188 front + 1605 pass; 0 d128 calls | unfused (already on) | not possible: no d_pair-128 site |
+
+- Protenix v1 has no unfused TriAttn site, so there is no unfused PV placement to add (the `fused` table entry already covers every site; forcing
+  `fused,unfused` in the end-level runs changed nothing: no `pass` kind appears in any peak table).
+- OpenDDE has no fused (d_pair-128) site, so there is no fused PV placement to add. e4m3 q / k exists only on the fused route (`tri_front_vt` with the
+  `qkinv` multipliers, `TA_F8QK` core with 32-channel heads); on the 64:2:32 and 384:12:32 sites it would need e4m3 q / k front kernels at those widths
+  (new kernel work, not done) or a separate quantisation pass per call (extra memory traffic on the largest sites; not built). OpenDDE therefore stays
+  `(unfused, no q / k)`; its end-level evidence is the 16 + 3 target PV table above.
+- Protenix v1 q / k: every one of the 104 d128 sites of a trunk pass is feasible (calibration check on 8ad9, 7zau, 7g1v: q / k absmax product per head 40 ..
+  223 against the limit (448 / 2)^2 = 50176), so the e4m3 score GEMM runs at all sites past the calibration call.
+
+End level (FoldForge `miniworld` backend, installed engine 3.0.1, 200 steps, 1 sample, diffusion_seed 0, trunk seeds 0-3, FP8 = shipped route with
+the S gates as shipped, each FP8 case against the bf16 case with the same trunk seed; "inside" = max same-seed RMSD <= max(1.1 x the largest bf16
+trunk-seed pair RMSD, 0.5 A)); targets that are below the S gate (L < 256: 8d78, 8ey7, 8fb3) run no FP8 TriAttn call and are identical to bf16:
+
+| model | route | targets | trunk seeds | result |
+|---|---|---|---|---|
+| Protenix v1 | PV only (`f8`) | 12 + 13 | 4 | inside 24 / 25 (8id0: one seed 4.19 A against bf16 pair max 0.56 A; its f8qk case is 0.36 A) |
+| Protenix v1 | PV + e4m3 q / k (`f8qk`, the table entry) | 12 + 13 | 4 | inside 25 / 25; max |d ipTM| <= 0.221 (8vvl, bf16 ipTM range 0.534-0.837), <= 0.105 elsewhere on chaotic targets, <= 0.012 on the rest; 0 saturation flags, 0 redo in 100 cases |
+
+q / k alone (f8qk vs f8, same trunk seed): 0.00-0.9 A on the stable targets; the large values (8bf4, 8dn7, 8vvl, 8auz, 7zau, 8fxv, 9jf5, 8id0) are the
+targets whose bf16 trunk seeds already differ by 5-36 A (bf16 seed-pair max 35.7 / 23.3 / 18.4 / 13.9 / 27.6 / 13.0 (8 seeds) / 9.4 A), i.e. a trunk-seed
+flip, not a q / k effect (PV only flips on the same targets). Raw rows: `~/miniworld-engine-scratch/fp8c-px1odde/res/{p1,p1x}` (`.json` / `.pt` per case,
+tables `p1.an3.txt`, `p1x.an3.txt`, `*.qkdiff.txt`), harness `e2e2.py` / `an3.py` of branch `fp8c/triattn` (copy in the same directory). Harness note: in
+`e2e2.py` `HS.disable_fp8_pv()` does not reset `FP8_QK`; the copy resets it at every case (a `f8` case that follows a `f8qk` case in the same process
+otherwise runs q / k as well; the first run of this section had that and was repeated).
+Whole-model speed: see the 5I28 FP8 rows below when present.
