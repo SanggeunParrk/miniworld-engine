@@ -758,7 +758,7 @@ Route census, 5I28 n = 4 (512 tokens), FoldForge a9e1549 + engine 3.0.1, `MINIWO
 | RoseTTAFold3 | TriMul planes (D128 x 96 modules + D64 template) | 728 calls, **364 capture fallbacks**, 0 cached modules (every eager call calibrated again) | `TriangleMultiplicationRF3` hands the kernels `to_left.weight * (1 / n)` (`_LeftScaled`): a **new tensor in every call**. The calibration key (`to_left.weight.data_ptr()`) never repeats, so each eager call calibrates a throw-away state and a capture (whose product is a new tensor, never calibrated) takes the bf16 route | 1092 calls, 0 fallbacks, 110 calibrated modules (one each) |
 | RoseTTAFold3 | OPM | 0 calls | RF3's OPM has projection biases: inference runs `composed.biased_wide`, which never reaches `opm_train._inference_op` where the FP8 route is | 36 calls (`composed._biased_fp8`) |
 | RoseTTAFold3 | token DiT | 0 | `token_dit_fp8.active` took only the default variant (`plain`); RF3's block is the parallel schedule with flat q / k LayerNorm | `expand` placement from the parallel schedule |
-| RoseTTAFold3 | atom DiT | 0 | `local_dit_h100.FP8_ROWS` serves the options `IDENT / PARS / NOOUT` only; RF3's block has `KQLN` (flat q / k LayerNorm) | unchanged: needs the FP8 pre / post row kernels extended by KQLN (new kernel work) |
+| RoseTTAFold3 | atom DiT | 0 | `local_dit_h100.FP8_ROWS` serves the options `IDENT / PARS / NOOUT` only; RF3's block has `KQLN` (flat q / k LayerNorm) | 18 calls per run (`pre` + `post`) after branch `fp8c/rf3-kqln` (`KQLN` in `pre90_f8`, section "RoseTTAFold3 atom block") |
 | RoseTTAFold3 | Transition | 534 calls | - | unchanged |
 | IntelliFold2 | TriMul planes | 144 calls only | the trunk pairformer is **D512** (960 of 1104 TriMul calls); `h100_b200style_fp8.WIDTHS` = 64 / 128 / 256 / 384 (D512: its K1 is the packed `_front`, its K3 `k3reorder.cu` has no `K3_CSCALE`); the 144 calls are the D256 modules | unchanged: D512 planes = a new K1 + K3 kernel variant |
 | IntelliFold2 | OPM / Transition / token DiT `expand` / atom DiT | 36 / 585 / yes / yes | - | unchanged (all fire, 0 fallbacks) |
@@ -818,7 +818,7 @@ IntelliFold2 is the same code as before (no route changed for it): the two FP8 c
 ### Not done here (new kernels / FoldForge)
 
 * IntelliFold2 D512 TriMul planes: a K1 variant of the packed `_front` writing e4m3 planes with `qinv`, and `k3reorder.cu` with `K3_CSCALE` (the contraction is 31 % of the D512 module, e4m3 removes about 15 % of it, docs above).
-* RoseTTAFold3 atom DiT: the FP8 pre / post row kernels with the `KQLN` option (flat q / k LayerNorm).
+* RoseTTAFold3 atom DiT: done on branch `fp8c/rf3-kqln` (section "RoseTTAFold3 atom block").
 * TriAttn FP8 for RF3 / IF2: needs a model entry in `fp8.TRIATTN_MODELS` after an end-level (FoldBench) validation.
 * FoldForge: nothing is needed for the TriMul / OPM / token DiT fixes (the engine-side calibration now sees the parameter); the `_Graph` warm-up already calibrates every site.
 
@@ -2221,7 +2221,7 @@ trajectory are not measured here (the per-row scales make the route independent 
 Scope: the H100 `"cuda"` backend of the local atom DiT block (`modules/atom_dit.py`, AF3 32 x 128 windows; `kernels/integrations/local_dit_h100.py`),
 bf16 (`master`) inference with a conditioning shared by the samples (the sampler step: `cond` an expanded view over A > 1), the AdaLN classes
 (Protenix / OpenDDE, AF3 / OpenFold3 / IntelliFold2), Chai-1 (`IDENT` / `PARS` / `NOOUT`) and, after 3.0.1 (branch `fp8c/esm-opendde`), ESMFold2's
-atom block `AtomDiTESMFold2Pair` (`RMS`, `local_dit_esm._infer_h100`; section "ESMFold2 atom block" below). Boltz-2 (`UP`), RoseTTAFold3 (`KQLN`),
+atom block `AtomDiTESMFold2Pair` (`RMS`, `local_dit_esm._infer_h100`; section "ESMFold2 atom block" below) and RoseTTAFold3 (`KQLN`, branch `fp8c/rf3-kqln`; section "RoseTTAFold3 atom block" below). Boltz-2 (`UP`),
 per-sample conditioning tables, fp32 and training keep the bf16 / TF32 kernels. Default off; with it off the route is the 3.0.1 one.
 
 | switch | effect |
@@ -2386,6 +2386,78 @@ The gain is 0.5-2.8 points at n <= 12 and inside the run-to-run noise at n = 16 
 Scripts / raw: `~/miniworld-engine-scratch/wt-fp8c-esm-opendde-run/{modacc.py,e2e3.py,an4.py,e2e/esm}`. Templates are removed from the FoldBench specs
 (`specs_nt/`: ESMFold2 has no template path).
 
+### RoseTTAFold3 atom block (`KQLN`; branch `fp8c/rf3-kqln`, 2026-11-18)
+
+RoseTTAFold3's atom block (`AtomDiTRoseTTAFold3`: options `KQLN` + `PARS`, one AdaLN for q and k / v, no query bias) took the bf16 kernels with FP8 on
+(`why_opts`). `pre90_f8.cu` now has the `KQLN` build (`-DKQLN=1`, `f8.OPTIONS` has `KQLN`, `f8.kernel_cubin("pre_f8", opts)`): the affine LayerNorm of the flat
+q / k over all 128 columns, as `pre90.cu`'s `kq_ln_unit` (`kq_ln_unit8`: the two 64-column units of q, then of k, are held in a register tile; at the second the
+row statistics are taken and `LN(.) w + b` is stored for both halves; the e4m3 GEMM output is the fp32 accumulator after dequantization, so the LayerNorm
+sees the same kind of values as the bf16 kernel). KQLN needs both units of q (and of k) in one CTA: `pre_fwd8` limits the unit split to 1 / 2 / 4 CTAs per
+tile (`_split_for(tiles, (1, 2, 4))`, as `sm90_atom.pre_fwd`). `post90_f8` is unchanged (KQLN is a `pre` option only; PARS is built into it as before).
+`local_dit_h100._fwd` passes `kq` / `kq_eps` to `pre_fwd8`; the gate `set(opts) <= f8.OPTIONS` now holds for RF3 (Boltz-2 `UP` is the only model option left
+outside). The bf16 sources (`pre90.cu`, `post90.cu`, ...) are untouched, so the default route and every prebuilt bf16 cubin are unchanged. Prebuild plan:
+`pre_f8` / `post_f8` for `("KQLN", "PARS")` at minb 1 and 3 (from the RF3 eval rows, `augmented_attention/cuda/__init__.py`, no code change there: the rule
+`set(opts) <= f8.OPTIONS` picks them up).
+
+Module error against fp64 (registry cases `AtomDiTRoseTTAFold3:atom_single_shared_cond:N:5`, master, A = 5; `fp8x-atomdit/scripts/err.py`;
+raw `~/miniworld-engine-scratch/fp8c-rf3-kqln/res/kqln_err.jsonl`); judge = max|y - y64| / max|y64|, rms_rel = ||y - y64|| / ||y64||:
+
+| N | PyTorch judge | bf16 judge / rms_rel | FP8 pre+post judge / rms_rel | FP8 pre only judge | FP8 post only judge |
+|---|---|---|---|---|---|
+| 1024 | 7.10e-03 | 6.34e-03 / 3.71e-03 | 5.86e-02 / 2.72e-02 | 8.94e-03 | 5.81e-02 |
+| 4096 | 6.91e-03 | 6.63e-03 / 3.72e-03 | 4.84e-02 / 2.73e-02 | 1.06e-02 | 4.84e-02 |
+| 16384 | 6.88e-03 | 7.73e-03 / 3.72e-03 | 4.92e-02 / 2.73e-02 | 8.84e-03 | 4.92e-02 |
+
+FP8 rms_rel is 7.3x the bf16 one, the AF3-type ratio (OpenFold3 / Protenix 2.86e-2 against 3.85e-3); the flat q / k LayerNorm does not add error
+(pre only: 8.8e-3 .. 1.1e-2, AF3 1.3e-2 .. 2.1e-2). Module time, CUDA graph of one call, static weights + inputs, same process, cells cool / sustained, ratio
+to the bf16 default (`fp8x-atomdit/scripts/speed.py`; raw `res/kqln_speed.jsonl`):
+
+| case | default us (cool / sus) | FP8 pre+post | pre only | post only | same-cubin control |
+|---|---|---|---|---|---|
+| AtomDiTRoseTTAFold3:shared:1024:5 | 35.9 / 35.1 | 0.944 / 0.943 | 0.982 / 0.983 | 0.954 / 0.951 | 0.992 / 0.993 |
+| AtomDiTRoseTTAFold3:shared:4096:5 | 97.4 / 95.8 | 0.815 / 0.819 | 0.896 / 0.900 | 0.919 / 0.922 | 1.002 / 1.003 |
+| AtomDiTRoseTTAFold3:shared:16384:5 | 286.3 / 282.3 | 0.939 / 0.946 | 0.974 / 0.978 | 0.966 / 0.968 | 0.995 / 1.000 |
+
+Tests (`tests/gpu/test_atom_dit_fp8_rows.py`): the error test has an `rf3` case (N 200 / 1024 / 4096, bounds as the AF3 block, the e4m3 route really ran,
+off = bf16 bitwise); `test_fp8_rows_rf3_kqln_served` checks `fp8.route_stats()`-style counters (`atom_dit`: calls / pre / post +1, `why_opts` unchanged) for A = 5 /
+N = 200, A = 2 / N = 64 (the split grid) and A = 5 / N = 1024.
+
+`fp8.route_stats()` of RoseTTAFold3, `MINIWORLD_FP8=safe`, 5I28 (FoldForge a9e1549, `bench5i28_ff/fp8c_counters_wrap.py`, 2 repeats; per run = cold + 2 warm forwards):
+
+| route | before (`fp8c/counters`, branch base) | after |
+|---|---|---|
+| atom DiT n = 4 and 12 | `calls 0`, `fallbacks 27`, `why_opts 27` | `calls 18`, `pre 18`, `post 18`, `fallbacks 9`, `why_opts 0`, `why_cond 9` |
+
+(The 9 `why_cond` fallbacks per run are the blocks with a per-sample conditioning; every model has them, AF3 too.)
+
+End level (FoldForge a9e1549 `miniworld` backend, `fp8.enable("safe", model="rosettafold3")`, 200 steps, diffusion_seed 0, **5 samples** (the atom DiT route needs A > 1: with one
+sample every call is `why_cond`), trunk seeds 0-3, 4 targets; per target the FP8 route counters show `atom_dit` 1200 calls / 0 `why_opts`; RMSD: Kabsch, all atoms,
+same sample index; "pair" = bf16 trunk seed pairs, "FP8" = same trunk seed FP8 vs bf16; acceptance = max FP8 <= max(1.1 x max bf16 pair, 0.5 A); no TriAttn FP8 for RF3: `fp8.TRIATTN_MODELS`):
+
+| target | bf16 pair RMSD max / mean (A) | FP8 same-seed max / mean (A) | max abs d ipTM | inside |
+|---|---|---|---|---|
+| 8ad9 | 5.46 / 2.42 | 4.15 / 1.50 | 0.009 | yes |
+| 8ee9 | 1.95 / 0.76 | 1.93 / 0.53 | 0.002 | yes |
+| 7y37 | 28.29 / 5.87 (ipTM 0.09-0.10: a failed prediction, bad probe; one trunk seed 27.8 A for FP8 as well) | 27.77 / 2.83 | 0.004 | yes (vacuous) |
+| 8gn4 | 2.29 / 1.07 | 1.35 / 0.33 | 0.003 | yes |
+
+4 / 4 inside (the earlier RF3 end level, TriAttn only, had 3 / 4 with the same 7y37 as the failed case). Scripts / raw: `~/miniworld-engine-scratch/fp8c-rf3-kqln/{e2e4.py,an4.py,res/e2e5}` (`e2e4.py` = `fp8c-rf3-triattn/e2e3.py` with `E2E_SAMPLES`).
+
+5I28 benchmark (FoldForge a9e1549 + this branch, H100 node02, `MINIWORLD_FP8=safe`, protocol of `run_1118_301_fp8`, 6 warm repeats, median of the warm forwards, seconds; bf16 =
+`run_1118_301_steady`, FP8 before = `run_1118_301_fp8`, branch `fp8c/rf3if2` = TriMul / OPM / token DiT fixes, this branch = + atom DiT rows with KQLN):
+
+| rosettafold3 n | bf16 (3.0.1) | FP8 3.0.1 | FP8 rf3if2 | FP8 this branch | this / bf16 |
+|---|---|---|---|---|---|
+| 1 | 0.419 | 0.420 | 0.424 | 0.423 | 1.009 |
+| 2 | 0.635 | 0.633 | 0.635 | 0.630 | 0.992 |
+| 4 | 1.336 | 1.323 | 1.308 | 1.276 | 0.955 |
+| 8 | 3.848 | 4.180 | 3.662 | 3.636 | 0.945 |
+| 12 | 9.283 | 9.842 | 8.815 | 8.766 | 0.944 |
+| 16 | 17.108 | 17.806 | 15.978 | 15.973 | 0.934 |
+
+Gain over the rf3if2 branch: n <= 2 inside the run-to-run noise, n = 4 2.4 % (1.308 -> 1.276), n >= 8 inside the noise (the forward is dominated by the trunk). Raw: `~/miniworld-engine-scratch/fp8c-rf3-kqln/res/bench/`.
+
+
 ### Model coverage census (engine 3.0.1 + this branch, MINIWORLD_FP8=safe, n = 4 = 512 tokens, one warm forward profiled)
 
 A window census, not a whole-run profile (`census2.py` wraps the last of `measured_forward`'s forwards in `torch.profiler`; the whole-run wrapper of the
@@ -2415,7 +2487,7 @@ Verification: default route bit-identical to 2.5.12 (sha1 of every output and, i
 AF3 shared 1024 / 4096, AF3 per-sample 4096, Protenix, Chai-1 slide, Boltz-2, RF3 eval; AF3 A1 and Protenix A48 training -- branch tree vs the base
 tree 91a9241fb, separate processes, `~/miniworld-engine-scratch/fp8x-atomdit/scripts/bit2.sh`). Tests: `tests/gpu/test_atom_dit_fp8_rows.py` (error bounds per part, finite,
 off = default bitwise, Boltz-2 / per-sample / training fall back bitwise, switch parsing): 11 passed. CPU: `ruff check` / `ruff format` / `pyright` clean on the touched Python files; `test_capture_api.py`, `test_supports_signature.py`, `test_init.py`, `test_measure_shared_cond.py`: 621 passed, 1 failed -- `test_every_module_level_dict_is_registered_or_listed`, the same failure on the base tree (the TriAttn / TriMul FP8 module dicts; nothing of this branch). No registry row, tolerance or `backend_versions` change.
-Prebuild: the two FP8 cubins are not in the prebuild plan (first FP8 call JIT-compiles them, ~3 s).
+Prebuild: the FP8 cubins are in the prebuild plan (`augmented_attention/cuda/__init__.py`: `pre_f8` / `post_f8` per option set of the eval rows inside `f8.OPTIONS`, minb 1 and 3).
 
 ## Known limits
 
