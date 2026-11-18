@@ -183,3 +183,92 @@ default.
 - 01:00 first route (FP8 dgrad planes, transposes, mixed cuBLASLt): correct, deterministic; 0.92x at L384 S1024 -- dgrad 2.6x slower.
 - 01:35 TMA stores + one atomic per warp, device scale kernels: 0.89x / 0.84x / 0.65x (L384 / L768 S1024 / L768 S4096).
 - 02:00-05:10 session stopped (API limit). 08:00 tests, bit-identity, error, training curve, speed sweep, this doc.
+
+## OuterProductMean rounds 2 + 3 (branch `fp8t3/opm`, base 3.0.1 = origin/main f5be1df46, 2026-11-19)
+
+Everything below is opt-in (`MINIWORLD_OPM_FP8_TRAIN=e4m3`), default OFF; with the switch off the training step is bit-identical to 3.0.1
+(`scratch fp8t3/scripts_opm/bit.py`, 9 / 9 cases: this tree vs a 3.0.1 worktree, separate processes, identical sha1 of y and every gradient).
+
+### What changed against round 1
+
+- delayed dO scale (amax history of the previous steps, first call seeds from the Cauchy-Schwarz bound): no pass over dz (-0.1..0.18 ms).
+- the FP8 prologue writes A2 / BT in both layouts: no byte-transpose pass.
+- d_pair 128: single-pass dual-plane dgrad (`opm_dgrad_kernel<SP=true>`): one GEMM + one dz read, the transposed dO plane is staged in shared
+  memory (DG_T_BYTES) and flushed with coalesced stores; weights double buffered, one CTA per SM. d_pair 256 / 384: two plane launches
+  (round 1), weights double buffered for KZ 256..511 (`dg_wbuf`; a refactor in the WIP had dropped the 256 case, which put d256 back at 1.02-1.04x;
+  restored in round 3).
+- shape gate `MIN_L_BY_CZ` (served only where the step is faster, see below): d128 from L128, d256 from L256, d384 from L384, d512 never.
+  `MAX_CZ = 0` turns the gate off (benchmarks / tests).
+- `tools/bench_opm_fp8_train.py` (ready to run, see its docstring).
+
+### Step time vs the 3.0.1 default (CUDA graph fwd + bwd, same process, interleaved, same-cubin control, S 1024 unless noted)
+
+`tools/bench_opm_fp8_train.py`, raw `scratch fp8t3/res/bench_final.jsonl`. Cells = e4m3 / default, `cool / sustained`; ctl = default again (same cubin),
+its sustained ratio shows the run-to-run + thermal order bias (1.00-1.04): read the sustained column against ctl.
+
+| d_msa/d_pair | order | L | default ms (cool) | ctl cool / sus | e4m3 cool / sus | served by gate |
+|---|---|---|---|---|---|---|
+| 64/128 | AF3 | 128 | 0.332 | 0.996 / 0.996 | 0.907 / 0.900 | yes |
+| 64/128 | AF3 | 256 | 0.902 | 0.999 / 1.027 | 0.854 / 0.874 | yes |
+| 64/128 | AF3 | 384 | 1.777 | 1.001 / 1.031 | 0.843 / 0.853 | yes |
+| 64/128 | AF3 | 512 | 3.052 | 1.000 / 1.045 | 0.826 / 0.833 | yes |
+| 64/128 | AF3 | 768 | 6.483 | 1.000 / 1.013 | 0.830 / 0.798 | yes |
+| 64/128 | Boltz | 128 | 0.308 | 1.008 / 1.007 | 0.976 / 0.975 | yes |
+| 64/128 | Boltz | 256 | 0.880 | 1.000 / 1.026 | 0.872 / 0.888 | yes |
+| 64/128 | Boltz | 384 | 1.761 | 1.003 / 1.023 | 0.852 / 0.849 | yes |
+| 64/128 | Boltz | 768 | 6.472 | 1.002 / 0.994 | 0.829 / 0.777 | yes |
+| 64/128 | Boltz, S 2048 | 768 | 11.22 | 0.999 / 1.013 | 0.711 / 0.688 | yes |
+| 64/128 | AF3, S 4096 | 384 / 768 | 5.51 / 20.9 | 1.000 / 0.995, 1.000 / 0.982 | 0.668 / 0.636, 0.643 / 0.602 | yes |
+| 64/128 | AF3, S 16384 | 384 | 20.46 | 0.999 / 0.982 | 0.625 / 0.566 | yes |
+| 128/256 | AF3 | 128 | 0.382 | 1.003 / 1.004 | 0.990 / 0.991 | no (noise-level) |
+| 128/256 | AF3 | 256 | 1.014 | 0.997 / 1.029 | 0.961 / 1.000 | yes (marginal) |
+| 128/256 | AF3 | 384 | 2.098 | 0.997 / 1.022 | 0.938 / 0.961 | yes |
+| 128/256 | AF3 | 512 | 3.459 | 1.001 / 1.038 | 0.926 / 0.943 | yes |
+| 128/256 | AF3 | 768 | 7.405 | 1.001 / 1.033 | 0.935 / 0.959 | yes |
+| 128/256 | Boltz | 384 | 2.099 | 0.997 / 1.017 | 0.936 / 0.951 | yes |
+| 128/384 | AF3 | 128 | 0.413 | 1.000 / 0.998 | 1.040 / 1.039 | no (loses) |
+| 128/384 | AF3 | 256 | 1.144 | 1.000 / 1.025 | 0.985 / 1.017 | no (parity) |
+| 128/384 | AF3 | 384 | 2.367 | 0.999 / 1.021 | 0.977 / 0.988 | yes (marginal) |
+| 128/384 | AF3 | 512 | 3.964 | 1.002 / 1.018 | 0.963 / 0.974 | yes |
+| 128/384 | AF3 | 768 | 8.496 | 0.998 / 1.019 | 0.968 / 0.960 | yes |
+| 128/384 | Boltz | 384 | 2.370 | 1.000 / 1.038 | 0.979 / 1.004 | yes (marginal, sustained at parity) |
+| 256/512 | AF3 | 384 | 2.947 | 0.998 / 1.018 | 1.025 / 1.060 | no: NO-GO |
+
+d_pair 128 wins 2-22 % everywhere (0.57-0.98x), d256 4-7 %, d384 2-4 % (marginal: at parity in the sustained column of one cell). d_pair 512 is a
+no-go: dgrad is a K = 512 contraction written twice (no staging room for a single pass: dz tile 128 KiB), products save less than the second plane
+costs (1.025x cool / 1.06x sustained). d_pair 256 / 384 at L128-256 are at or above parity: gated off.
+The 3.0.1 default is the baseline (3.0.1 sped the Boltz-order default up; the FP8 route still wins 0.85x at L384 there).
+
+### Gradient error against float64 PyTorch (rms / max relative, %), current tree (`res/err_r3.jsonl`)
+
+e4m3 dO (delayed scale; peaks of dO 149-208 of 448, no saturation, all finite and deterministic, run-to-run identical bits). Default = bf16 route.
+
+| case | y default / e4m3 | d msa | d ln gamma | d W_left | d W_out |
+|---|---|---|---|---|---|
+| 64/128 AF3 L384 | 0.42 / 2.64 | 0.52 / 3.77 | 0.40 / 3.33 | 0.42 / 3.40 | 0.40 / 2.79 |
+| 64/128 Boltz L384 | 0.25 / 0.61 | 0.52 / 3.77 | 0.44 / 3.33 | 0.42 / 3.40 | 0.40 / 2.79 |
+| 64/128 AF3 L768 | 0.46 / 2.39 | 0.52 / 3.77 | 0.56 / 4.04 | 0.40 / 3.14 | 0.39 / 2.28 |
+| 64/128 AF3 L768 S4096 | 0.44 / 1.82 | 0.52 / 3.78 | 0.46 / 3.59 | 0.29 / 2.52 | 0.34 / 1.57 |
+| 128/256 AF3 L256 | 0.44 / 2.36 | 0.52 / 3.79 | 0.48 / 3.95 | 0.45 / 3.71 | 0.39 / 2.35 |
+| 64/128 AF3 L128 | 0.43 / 2.32 | 0.52 / 3.79 | 0.43 / 3.12 | 0.41 / 3.66 | 0.37 / 2.26 |
+
+Same picture as round 1: e4m3 rounding of A2 / BT / dO gives 3-4 % rms on the input / projection gradients (7-10x the bf16 default's 0.3-0.5 %).
+The delayed scale did not change the error. This is the FP8 price; the user decides.
+
+### Training curve (`res/train_r3.jsonl`, distillation, 300 steps, same seeds / data)
+
+| case | loss step 0 default / e4m3 | mean steps 140-159 default / e4m3 | mean last 50 default / e4m3 |
+|---|---|---|---|
+| 64/128 AF3 L256 S1024 | 1.8061 / 1.8044 | 0.3676 / 0.3677 | 0.1444 / 0.1447 (+0.22 %) |
+| 64/128 Boltz L384 S2048 | 2.0531 / 2.0530 | 0.0181 / 0.0181 | 0.02199 / 0.02199 |
+
+### Tests
+
+`tests/gpu/test_opm_fp8_train.py` 14 / 14 pass on this tree (gate table, delayed scale, both planes, gradients vs fp64, determinism).
+ruff / pyright were not re-run in round 3 (no login-node python): run them before any release.
+
+### Open
+
+- d_pair 384 gain is 2-4 %: marginal; d_pair 512 and d256/384 at short L: no-go (numbers above).
+- Not done: O kept as e4m3, prologue writing [s,(i,c)] directly; end-level training run (error is 7-10x bf16); single-pass dual-plane for d_pair 256+ (staging does not fit).
+- The 3 widths served need prebuilt FP8 variants (`opm_train._ext(fp8=True ...)`: 4 modules, ~100 s each when built); prebuilding into the wheel is not done on this branch.
