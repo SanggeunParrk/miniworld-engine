@@ -96,6 +96,44 @@ the backward uses `gate_bwd_big_w` with the saved gate and `ln_bwd_w` after a cu
   accumulator layout so the gated product is the next GEMM's A operand from registers. The pair-side block reductions run warp by warp
   in a fixed order (no float atomics).
 
+### 3.0.1: backward aux kernels and native routing (training)
+
+- `csrc/pwa_wide_aux.cu` (`pwa_wide._aux`, one shape-independent build; switch `pwa_wide.FUSED_BWD_AUX`): `drop_bwd_w` applies the row-dropout
+  keep-mask of the wide widths' backward in one pass (bf16(bf16(dres * keep) * scale), the arithmetic of the two PyTorch elementwise ops it replaces;
+  130 + 66 us = 11 % of the AF3-width step at S 1024 N 768), and `perm_dv_w` writes the BIG build's head-major dv into the natural `[dgp | dv]`
+  buffer (596 us strided copy -> 408 us). Bit-identical to 3.0.0.
+- `pwa_train.NATIVE_ANY_SHAPE`: the native builds (fixed-order partial sums, cuBLAS dv, no float atomics: deterministic dgamma / dbeta of ln_msa)
+  serve every training shape the refusal admits (N % 128 == 0, N <= 1024, S even), not only the six. The CUDA pair backward (`pair_bwd3`) stays
+  on the six shapes (`NATIVE_PAIR_ANY_SHAPE = False`): its dgamma_z / dWb moved ln_pair.weight / to_bias.weight by a few 1e-3 of the gold
+  and turned two GREEN rows (S 384, N 512 / 768) YELLOW; the Triton pair backward keeps them GREEN.
+- Step (fwd + bwd, CUDA graph, cool) vs 3.0.0: wide widths 0.88-0.94; 8 x 32 N 512 0.89-0.92, N 1024 0.75-0.79, N 256 0.96-1.0, N 768 unchanged.
+  `backend_versions["cuda:h100_sm90"]` = 2.
+
+### 3.0.1: why `pwa_glue3` and `dgv_bwd` are not at the HBM floor (8 x 32, d_msa 64; ncu, N 768 S 1024, H100)
+
+Byte ledger (`dram__bytes_read/write.sum`) against what each kernel must move; no byte is wasted, so the gaps are rates:
+
+| kernel | us (ncu) | DRAM read / write | of it | TB/s | floor at 3.0 TB/s (a 1:1 read / write copy measures 3.0) |
+|---|---|---|---|---|---|
+| `pwa_glue3_kernel<2>` | 642 | 608 / 794 MB | o 403 + y 100 + dout 100 / do 403 + dgp 403 | 2.19 | 470 us |
+| `dgv_bwd_kernel<8, 1>` | 424 | 1108 / 102 MB | dgp 402 + dv (head-major) 402 + y, x, dout 300 / dm 100 | 2.85 | 400 us (95 % of the floor: nothing to fix) |
+| `pwa_gateout_kernel<4>` (forward) | 320 | 605 / 95 MB | | 2.19 | |
+
+`dgv_bwd` already runs at 85 % of the memory pipe (read-dominated, barrier stalls only in its LayerNorm tail) -- inherent.
+`pwa_glue3` (one 384-thread CTA per SM, 168 registers, 200 KB shared memory: 15 % warps active, issue 36 %) is bound by its own chain,
+not by bytes in flight: three diagnostic builds in one process (CUDA graph, interleaved; step time): a third o-stage slot (`GLUE3_NST` 3, fits in
+223 KB) 1.00; no dWo wgmma 0.99; no TMA stores of do / dgp (writes vanish too) 0.95 of the step (about 200 of the kernel's 640 us); neither 0.92.
+Without stores the kernel still takes about 470 us -- the elementwise chain of the 8 heads (sigmoid, three products, three packs, three shared-memory
+stores per element; both consumer warpgroups in lock step through `goready`) equals the DRAM floor, so the two overlap but do not hide each other
+(641 us instead of 470). What was a latency issue: the row-dropout keep mask was read from global memory inside the masking loop (16 dependent
+`__ldg` per thread per tile, long-scoreboard stalls); `GLUE3_MASK_PF` loads it one tile ahead into registers (bit-identical, -1 % of the step at every
+shape). The rest needs a different structure (two CTAs per SM would need the 200 KB of staging halved; moving the elementwise work to the idle producer
+warpgroup or a ping-pong of the two consumers) and is recorded, not done.
+
+Step (fwd + bwd, CUDA graph, one process, interleaved, sustained) of the 8 x 32 / d_msa 64 module, 3.0.0 routing (switches off) : `bf16/pwa` : with the mask prefetch,
+N 256 S 512 .. 8192 0.553 : 0.532 : 0.526 .. 6.82 : 6.95 : 6.75 ms; N 512 S 512 .. 8192 1.211 : 1.100 : 1.094 .. 16.09 : 14.69 : 14.50 (0.90 of 3.0.0);
+N 768 S 1024 .. 4096 3.454 : 3.455 : 3.426 .. 12.86 : 12.80 : 12.66; N 1024 S 512 .. 4096 3.515 : 2.813 : 2.796 .. 24.28 : 19.17 : 19.17 (0.78 - 0.79).
+
 ## Triton backend
 
 Forward: `layernorm_gemm_softmax` (per row i: LN_z -> Wb -> mask -> two-pass softmax), `layernorm_gemm` (LN_m -> Wv head-major), cuBLAS

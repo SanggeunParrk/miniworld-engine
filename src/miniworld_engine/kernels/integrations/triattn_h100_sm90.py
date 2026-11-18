@@ -539,10 +539,16 @@ _SLACK = 1 << 30
 INFERENCE_WORKSET_FRACTION = 0.25
 
 
-def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, dc: int = 32) -> tuple[int, int, int]:
+def _dh_rows(length: int) -> int:
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+
+    return h100_dh.BWD_Q_ROWS if length % h100_dh.BWD_Q_ROWS == 0 else 1
+
+
+def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, dc: int = 32, length: int = 0) -> tuple[int, int, int]:
     """(inference working set, training saved tensors, training backward working set) in bytes per pair token of one sample, on top
     of the caller's tensors (pair and output; in training also dy and dx).  ``dc``: channels per head of the core (64: the h100_dh
-    core of 64-channel heads, training; its query-side backward also holds up to ``h100_dh.MAX_SLABS`` fp32 dbias slabs)."""
+    core of 64-channel heads, training; its query-side backward also holds the bf16 dbias planes, S / ``h100_dh.BWD_Q_ROWS`` of them)."""
     c, h = d_pair, n_head
     # a length padded to 128: the padded copy of the pair (saved in training) and of dy, the padded output / dx before the cut
     pad = 4 * c if padded else 0
@@ -554,7 +560,7 @@ def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, dc: int 
         return 12 * c + 2 * h + pad + wide, 10 * c + 6 * h + pad // 2, 10 * c + 12 * h + pad
     # heads padded to 32 channels, the bias columns to 8
     hd, hp = dc * h, (h + 7) // 8 * 8
-    slabs = 4 * h * 8 if dc != 32 else 0
+    slabs = 2 * h * (length // _dh_rows(length)) if dc != 32 else 0  # the bf16 dbias planes of the 64-channel backward: one per ``h100_dh.BWD_Q_ROWS`` pair rows
     # inference: y, the LN statistics, q | k | v | g | bias, sbias, u = sigmoid(g) o O, the output and cublasLt's tuning copy of it
     # saved: y, statistics, q | k | v | g, sbias, o, lse, u
     # backward: ddrop, dyln; du, do; dall = [dq | dk | dv | dg | dbias]; delta, dbias, its slab sum (fp32)
@@ -581,7 +587,7 @@ def plan(
     limit = max_batch(kind, length)
     lp = _padded(length)
     tokens = lp * lp
-    work_inf, held, work_bwd = _bytes_per_token(kind, d_pair, n_head, lp != length, dc)
+    work_inf, held, work_bwd = _bytes_per_token(kind, d_pair, n_head, lp != length, dc, lp)
     budget = CHUNK_MEMORY_FRACTION * total_memory - _SLACK
     c = d_pair
 

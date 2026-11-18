@@ -135,6 +135,20 @@ def pair_bias_batch(pair: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | N
     return out
 
 
+def pair_bias_padded(pair: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, eps: float, neg: float, lo: int) -> torch.Tensor:
+    """``pair_bias`` / ``pair_bias_batch`` (H100 / B200 builds) of a ragged length: pair [NB, L, L, dp] bf16 contiguous, mask [NB, L] bool or
+    None -> bias [H, NB, lo, lo] bf16 with ``lo`` >= L (a multiple of 8). The pair is read as it is (no padded copy): the kernel writes the
+    real [L, L] block of every plane (the same bits as ``pair_bias`` at length L), the rest is filled here: ``neg`` on every key >= L, 0 on
+    the real keys of the pad query rows (finite rows: the caller drops them)."""
+    nb, L = pair.shape[0], pair.shape[1]
+    out = torch.empty(wf.shape[0], nb, lo, lo, device=pair.device, dtype=torch.bfloat16)
+    ext().pair_bias_fwd_batch_ld(pair.view(nb * L * L, wf.shape[1]), wf, mask, out, int(nb), int(L), int(lo), float(eps), float(neg))
+    if lo > L:
+        out[:, :, L:, :L] = 0
+        out[..., L:] = neg
+    return out
+
+
 def pair_bias_raw(
     pair2d: torch.Tensor,
     wb: torch.Tensor,
@@ -198,6 +212,7 @@ __all__ = [
     "pair_bias",
     "pair_bias_batch",
     "pair_bias_bwd",
+    "pair_bias_padded",
     "pair_bias_raw",
     "width",
 ]

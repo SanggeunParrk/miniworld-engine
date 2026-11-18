@@ -102,7 +102,7 @@ class InputFeatureEmbedder(BackendModule):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cuda:a100_sm80": 8,
-        "cuda:h100_sm90": 3,
+        "cuda:h100_sm90": 4,
         "triton": 2,
         "cuda:5090_sm120": 2,
     }  # cuda:a100_sm80 8 / cuda:5090_sm120 2 (2026-11-15): its atom_norm LayerNorm runs the changed forward row kernels (sm_80 / sm_120a; LayerNorm cuda 3 on both cards); no kernel row bump: one would also owe every triton case that lists it
@@ -177,14 +177,14 @@ class InputFeatureEmbedder(BackendModule):
 
     def set_backend(self, backend: str = "pytorch"):
         super().set_backend(backend)
-        if backend in self._ENGINE_BACKENDS:
+        if self.backend in self._ENGINE_BACKENDS:  # engine-fp8 resolved to cuda by super().set_backend
             # a child without this backend stays as it is; _supports_<backend> refuses the call when the atom transformer is one of them
-            if backend in self.atom_transformer.backends:
+            if self.atom_transformer.has_backend(backend):
                 self.atom_transformer.set_backend(backend)
             else:
                 self.atom_transformer.set_backend("pytorch")
             for child in self._engine_children():
-                child.set_backend(backend if backend in child.backends else "pytorch")
+                child.set_backend(backend if child.has_backend(backend) else "pytorch")
         else:
             self.atom_transformer.set_backend(backend)
             for child in self._engine_children():

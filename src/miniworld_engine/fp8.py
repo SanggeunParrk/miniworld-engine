@@ -1,4 +1,25 @@
-"""One switch for the engine's FP8 (e4m3) inference routes on H100 (engine 3.0.0; every route is opt-in and off by default).
+"""The engine's FP8 (e4m3) inference routes on H100 (engine 3.0.0; opt-in, off by default: the default stays the bf16 / fp16 engine).
+
+The user-facing name is the backend **``engine-fp8``**: the engine ``cuda`` backend with the ``safe`` preset's FP8 routes on for the calls of
+the modules that select it (every other module, and every module by default, runs the bf16 / fp16 engine, bit-identical to 2.5.14)::
+
+    TriangleMultiplication(128, backend="engine-fp8")         # or module.set_backend("engine-fp8"); a composite passes it to its parts
+    miniworld_engine.fp8.set_model("af3")                     # + the TriAttn FP8 routes validated for that model (or MINIWORLD_FP8_MODEL=af3)
+
+``engine-fp8`` is not a class's ``backends`` entry (the judge, the registry and the measurers never see it): ``set_backend`` resolves it to
+``cuda`` (``module.backend == "cuda"``, ``module.engine_fp8 is True``, ``module.backend_name == "engine-fp8"``) on every class that has a
+``cuda`` backend; ``engine_fp8`` (:data:`BACKEND_ID`) is accepted too, for places where ``-`` cannot stand. The module's ``_forward_cuda``
+(an instance attribute ``set_backend`` installs, so ``forward`` and a runtime that calls ``_forward_<backend>`` directly both reach it) runs
+inside :class:`BackendScope`, which turns the routes on for the call and restores the switches after it (a module on another backend called
+through its ``forward`` inside it runs with the switches as they were before). Its range is ``cuda``'s; calls the FP8 routes do not take (fp32, cards other than
+H100) run the default kernels.
+
+``engine-fp8`` accelerates inference; training under ``engine-fp8`` runs the default bf16 path: every FP8 route is a forward (inference)
+path with no FP8 backward, so a call in train mode (``module.training``, dropout live) or with autograd on (``torch.is_grad_enabled()``)
+does not open the FP8 scope and runs exactly the ``cuda`` backend (same bytes, outputs and gradients). Run inference under
+``torch.no_grad()`` / ``torch.inference_mode()`` with the model in ``eval()`` to get the FP8 routes.
+
+The lower-level switch (process wide, every ``cuda`` module) stays::
 
     MINIWORLD_FP8=safe python run.py                          # environment: before the first import of the engine's kernels
     MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=af3 python run.py   # + the TriAttn FP8 routes validated for that model
@@ -21,8 +42,9 @@ Each route keeps its own switch (``MINIWORLD_TRIMUL_FP8``, ``MINIWORLD_OPM_FP8``
 ``MINIWORLD_TOKEN_DIT_FP8``, ``MINIWORLD_ATOMDIT_FP8`` and their ``_GUARD`` / gate variables; TriAttn: ``h100_sm90.enable_fp8_pv_for``):
 with ``MINIWORLD_FP8`` set, a per-route variable that is set explicitly (also to the empty string = off) wins over the preset.
 
-FP8 is outside the judge: no registry row, tolerance or ``backend_versions`` entry exists for it (registry dtypes ``float32|master``), and the
-judge tokens cover the default route only. Do not run the judge / measure tools with any FP8 switch set.
+FP8 is outside the judge: no registry row, tolerance or ``backend_versions`` entry exists for it (registry dtypes ``float32|master``), no
+class lists ``engine-fp8`` in its ``backends``, and the judge tokens cover the default route only. Do not run the judge / measure tools with
+any FP8 switch set.
 
 Guard contract (static scales: TriAttn V / q k, TriMul planes, Transition h, PWA v). The scales are taken on a process's first eager call
 of each site (calibration) and kept for the process. A value past the e4m3 range saturates; in eager mode TriMul / PWA / Transition (guard
@@ -39,6 +61,14 @@ from __future__ import annotations
 import os
 from types import MappingProxyType
 from typing import Any
+
+#: The FP8 backend's public name (engine 3.0.0): what ``backend=`` / ``set_backend`` and a runtime's backend option take.
+BACKEND = "engine-fp8"
+#: Its identifier where ``-`` cannot stand (Python names, config keys); ``set_backend`` takes it as well.
+BACKEND_ID = "engine_fp8"
+#: The engine backend whose forward ``engine-fp8`` runs, and the preset it switches on.
+BASE_BACKEND = "cuda"
+BACKEND_PRESET = "safe"
 
 #: the per-route environment variables of each preset (what ``MINIWORLD_FP8=<preset>`` makes the default of each route module)
 PRESETS = MappingProxyType(
@@ -102,7 +132,12 @@ def env(name: str, default: str | None = None) -> str | None:
     return default
 
 
+_MODULES: list[tuple[Any, ...]] = []
+
+
 def _modules() -> tuple[Any, ...]:
+    if _MODULES:
+        return _MODULES[0]
     from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as td
     from miniworld_engine.kernels.integrations import local_dit_h100 as ad
     from miniworld_engine.kernels.integrations import opm_fp8 as opm
@@ -111,7 +146,92 @@ def _modules() -> tuple[Any, ...]:
     from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as ta
     from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as tm
 
-    return ta, tm, opm, pwa, tr, td, ad
+    _MODULES.append((ta, tm, opm, pwa, tr, td, ad))
+    return _MODULES[0]
+
+
+# ------------------------------------------------------------------------------------------------------------- the engine-fp8 backend
+def resolve_backend(name: str) -> tuple[str, bool]:
+    """``(the backend whose forward runs, FP8 on)`` of a backend name: ``engine-fp8`` / ``engine_fp8`` -> ``("cuda", True)``; any other name
+    -> ``(name, False)`` (checked against the class's ``backends`` by ``set_backend``)."""
+    if name in (BACKEND, BACKEND_ID):
+        return BASE_BACKEND, True
+    return name, False
+
+
+_MODEL: list[str | None] = [None]
+
+
+def set_model(name: str | None) -> None:
+    """The model ``engine-fp8`` modules run for (its TriAttn FP8 routes, :data:`TRIATTN_MODELS`); None: ``MINIWORLD_FP8_MODEL`` (read at each
+    scope entry). A model outside :data:`TRIATTN_MODELS` keeps TriAttn on the default fp16 core. Process wide."""
+    _MODEL[0] = name.strip().lower() if name else None
+
+
+def backend_model() -> str | None:
+    """The model of the ``engine-fp8`` backend: :func:`set_model`'s, else ``MINIWORLD_FP8_MODEL``."""
+    return _MODEL[0] or model()
+
+
+_TA_SWITCHES = ("FP8_PV", "FP8_PV_FUSED", "FP8_PV_UNFUSED", "FP8_VSCALE_AUTO", "FP8_PV_HL", "FP8_PV_MIN_S", "FP8_PV_FRONT_MIN_S", "FP8_QK")
+
+
+def _snapshot() -> tuple:
+    """The route switches as they are (what :func:`enable` / :func:`disable` set; calibrated scales and guards are not switches)."""
+    ta, tm, opm, pwa, tr, td, ad = _modules()
+    return tuple(getattr(ta, a) for a in _TA_SWITCHES), tm.POLICY, opm.POLICY, pwa.ENABLED, tr.POLICY, td.PLACES, ad.FP8_ROWS
+
+
+def _restore(snap: tuple) -> None:
+    ta, tm, opm, pwa, tr, td, ad = _modules()
+    for a, v in zip(_TA_SWITCHES, snap[0], strict=True):
+        setattr(ta, a, v)
+    tm.POLICY, opm.POLICY, pwa.ENABLED, tr.POLICY, td.PLACES, ad.FP8_ROWS = snap[1:]
+
+
+#: The ``engine-fp8`` scopes open now, innermost last (True: an ``engine-fp8`` module's call; False: a module on another backend called
+#: inside one). Empty = no ``engine-fp8`` call is running: the switches are the process's own (default: every route off).
+SCOPES: list[bool] = []
+_BASE: list[tuple] = []  # the switches before the outermost scope
+
+
+class BackendScope:
+    """``with BackendScope(on):`` the route switches of one module call: ``on`` = the ``engine-fp8`` preset (``safe`` + :func:`backend_model`'s
+    TriAttn part); off (inside an ``engine-fp8`` call) = the switches as they were before the outermost scope. The switches are restored on
+    exit. An ``engine-fp8`` module's ``_forward_cuda`` opens it (``modules.primitives._EngineFP8Forward``); ``BackendModule.forward`` opens
+    it off for a module on another (non-reference) backend only while an ``engine-fp8`` call is running, so the default route never enters it."""
+
+    __slots__ = ("on", "pushed", "snap")
+
+    def __init__(self, on: bool) -> None:
+        self.on = bool(on)
+        self.pushed = False
+        self.snap: tuple | None = None
+
+    def __enter__(self) -> BackendScope:
+        self.snap = None
+        self.pushed = bool(SCOPES) or self.on
+        if not self.pushed:  # off with no engine-fp8 call running: the switches are already the process's own
+            return self
+        if not SCOPES or SCOPES[-1] != self.on:  # else the enclosing scope already has this state
+            self.snap = _snapshot()
+            if not SCOPES:
+                _BASE.append(self.snap)
+            if self.on:
+                enable(BACKEND_PRESET, model=backend_model())
+            else:
+                _restore(_BASE[-1])
+        SCOPES.append(self.on)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if not self.pushed:
+            return
+        SCOPES.pop()
+        if self.snap is not None:
+            _restore(self.snap)
+            if not SCOPES:
+                _BASE.pop()
 
 
 def enable_triattn(kinds, qk: bool) -> None:

@@ -83,9 +83,30 @@ def _split_contraction(n: int) -> bool:
     return n >= _SPLIT_MIN_N
 
 
+#: 3.0.1: every training call this path serves (N a multiple of 128 up to 1024, S even) runs the native builds -- fixed-order partial sums
+#: (no float atomics: deterministic dgamma / dbeta of ln_msa, dWo, dWgv, dWb), the cuBLAS dv and the CUDA pair backward -- not only the six
+#: shapes below. False = the 3.0.0 rule (the A/B switch of the speed measurements).
+NATIVE_ANY_SHAPE = True
+
+
 def _training_default_shape(s: int, n: int) -> bool:
-    """The six required training shapes (MSA depth s, length n) with full native accuracy qualification."""
-    return s in (1024, 2048, 4096) and n in (384, 768)
+    """The training shapes (MSA depth s, length n) that run the native builds: the six required ones (full accuracy qualification), and, with
+    NATIVE_ANY_SHAPE, every shape the refusal admits (N % 128 == 0, N <= 1024, S even)."""
+    if s in (1024, 2048, 4096) and n in (384, 768):
+        return True
+    return NATIVE_ANY_SHAPE and s > 0 and s % 2 == 0 and 0 < n <= 1024 and n % 128 == 0
+
+
+#: The CUDA pair backward (`pair_bwd3`) only at the six qualified shapes: its dgamma_z / dWb differ from the Triton kernel's by a few 1e-3 of
+#: the fp64 gold, which at d_pair 128 turned two GREEN rows of the accuracy run YELLOW (MSAPairWeightedAveraging 8 x 32, S 384, N 512 / 768:
+#: ln_pair.weight 0.96 -> 1.03, to_bias.weight 0.89 -> 1.02 of tol). NATIVE_PAIR_ANY_SHAPE = True routes every native shape through it.
+NATIVE_PAIR_ANY_SHAPE = False
+GLUE3_NST = 2  # o-stage slots of pwa_glue3 (2 or 3; 3 fits the 227 KB shared memory)
+GLUE3_MASK_PF = True  # pwa_glue3 loads the dropout keep mask one tile ahead (bit-identical to the loads inside the masking loop)
+
+
+def _native_pair_shape(s: int, n: int) -> bool:
+    return NATIVE_PAIR_ANY_SHAPE or (s in (1024, 2048, 4096) and n in (384, 768))
 
 
 def _h100_training_default(msa: torch.Tensor) -> bool:
@@ -674,11 +695,12 @@ class _PwaMath(torch.autograd.Function):
                 wg16,
                 wot,
                 dgv,
-                2,
+                GLUE3_NST,
                 1,
                 dmask,
                 ctx.dscale,
                 bool(native and k.get("gateout") is not None and _split_contraction(N)),
+                GLUE3_MASK_PF,
             )
         else:
             dout = dres0 if dmask is None else (dres0 * dmask[None] * ctx.dscale).contiguous()
@@ -712,11 +734,13 @@ class _PwaMath(torch.autograd.Function):
         if native:
             if wide_pair:
                 dz, dWb, dzw = _wide_pair_bwd(z, w16, dw16, lnz_w, eps_z, wb)
-            else:
+            elif _native_pair_shape(S, N):
                 (wb16,) = _cast_h100_matrices(wb)
                 key = getattr(ctx, "key_mask", None)
                 key = key if key is not None and key.numel() else None
                 dz, dWb, dzw = k["pair3"].pair_bwd3(z, w16, dw, zw, eps_z, wb16, key)
+            else:  # the shapes beyond the six: the MSA side is native, the pair side stays the Triton kernel (accuracy of dgamma_z / dWb: see _native_pair_shape)
+                dz, dWb, dzw = pair_bwd(z, w16, dw, zw, eps_z, wb, BJ=32)
             leaves = _cast_cuda.cast(
                 [dlw, dlb, dWv, dWg, dzw, dWb, dWo],
                 [torch.float32 if w.dtype == torch.float32 else torch.bfloat16 for w in (lnm_w, lnm_b, wv, wg, lnz_w, wb, wo)],

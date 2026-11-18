@@ -77,24 +77,11 @@ def _edge_tables(z, gamma, wb, n, kmask, n0, qblock=False, uid=None):
     [5, 128] and their pair bias [5, h, 32, 128] (fp32, natural units, -inf off the valid keys: ``edge_bias_fwd``, the pair LayerNorm and
     projection of those windows only). It depends on the real atom count, the pair and the block's LN / bias weights, so inference builds it
     once per pair (``_HOIST_EDGES``) and reads it at every step."""
-    idx, keys, valid = _edge_index(z, n, kmask, n0, qblock)
-    valid = _edge_valid(valid, idx, keys, kmask, uid).expand(5, 32, DS).to(torch.uint8).contiguous()
+    # one small kernel (edge.cu ``edge_index``): the indices, key positions and key validity (conformer mask included) of the five windows --
+    # not the ~20 torch int64 launches of the same arithmetic, which a graph that remakes the tables at every replay paid every time
+    idx, keys, valid = _edge_ext().edge_index(kmask, uid, n, n0, qblock, z)
     ebias = _edge_ext().edge_bias_fwd(z[idx].contiguous(), gamma.float().contiguous(), wb.float().contiguous(), valid, _ld.EPS)
     return idx, keys.contiguous(), ebias
-
-
-def _edge_index(z, n, kmask, n0, qblock=False):
-    """The five slid edge windows of ``_edge_tables``: their indices [5], key positions [5, 128] and key validity [5, 128]."""
-    nwin = n // 32
-    n_real = kmask.sum() if kmask is not None else torch.full((), n0, device=z.device, dtype=torch.int64)
-    # IntelliFold2's "slide_qblock": the slid rule against the real count rounded up to a whole query window
-    # (``atom_dit._window_positions``); the keys past the real atoms stay masked (``valid``)
-    n_rule = (n_real + 31) // 32 * 32 if qblock else n_real
-    last = (n_real - 1) // 32
-    idx = torch.stack([last * 0, last * 0 + 1, last - 2, last - 1, last]).clamp(0, nwin - 1)  # [5]
-    starts = torch.minimum((32 * idx - 48).clamp(min=0), (n_rule - DS).clamp(min=0))
-    keys = starts[:, None] + torch.arange(DS, device=z.device)  # [5, 128]
-    return idx, keys, keys < n_real  # a system under 128 real atoms has keys past them
 
 
 def tail_info(kmask, n0: int, qblock: bool, like: torch.Tensor) -> torch.Tensor:
@@ -165,18 +152,6 @@ def _slid_tail_add(tails, tail, dp, dz, z, gamma, wb, a, n):
     part = ext.tail_bias_bwd(z, gamma.float().contiguous(), wb.float().contiguous(), dtbp, info, dz, _ld.EPS)
     tot = part.sum(0)
     return tot[:DP], tot[DP:].view(NH, DP)
-
-
-def _edge_valid(valid, idx, keys, kmask, uid):
-    """The edge windows' key validity [5, 1, 128] (``valid`` [5, 128]), or with the conformer mask [5, 32, 128] (``uid`` [n]: a real query
-    sees only its conformer's keys, a padding query every valid key)."""
-    if uid is None:
-        return valid[:, None, :]
-    rows = 32 * idx[:, None] + torch.arange(32, device=idx.device)  # [5, 32]
-    same = uid[rows][:, :, None] == uid[keys][:, None, :]
-    if kmask is not None:
-        same = same | ~kmask[rows][:, :, None]
-    return valid[:, None, :] & same
 
 
 def _slid_edges(o, q, k, v, tables, a, groups, n):

@@ -456,6 +456,73 @@ def native_h100_mod_fwd(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor,
         return _native_mm(a, w32.t()), a, w32
 
 
+# A/B switch of the bf16 table (tests, the speed comparison): false = the fp32 table of 3.0.0
+_BF16_TABLE = [True]
+
+
+def bf16_table(q: torch.Tensor, c: torch.Tensor, half_window: int) -> bool:
+    """Whether the hoisted modulation of this training block is a bf16 table: a bf16 block (and conditioning) whose stages are the composed
+    ones, the slab kernels that read the table and write its gradient in bf16 (``native_h100_stages`` / ``_h100_global`` false: the
+    native stages take fp32)."""
+    return (
+        _BF16_TABLE[0]
+        and q.dtype == torch.bfloat16
+        and c.dtype == torch.bfloat16
+        and not _PORTABLE[0]
+        and not native_h100_stages(q)
+        and not _h100_global(q, half_window)
+    )
+
+
+def _native_h100_mod_fwd_bf16_fake(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """[R, 768] bf16 modulation, silu(c) bf16, w as bf16."""
+    return (
+        c.new_empty((c.shape[0], 768), dtype=torch.bfloat16),
+        c.new_empty(c.shape, dtype=torch.bfloat16),
+        w.new_empty(w.shape, dtype=torch.bfloat16),
+    )
+
+
+@opaque(fake=_native_h100_mod_fwd_bf16_fake, name="swa_dit_h100_native_mod_fwd_bf16")
+def native_h100_mod_fwd_bf16(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The training modulation of a bf16 block with a bf16 table: (rn_bf16(silu(c) W^T) [R, 768], silu(c), W) all bf16, c bf16.
+
+    The block kernels read the table in bf16 and write its gradient in bf16 (the slab kernels, ``swa_slab.cu``), so the table is
+    half the bytes of :func:`native_h100_mod_fwd`'s fp32 one on its way out of the GEMM, into six kernels, out of them again as
+    ``dmod`` and into the two GEMMs of the hoist's backward (A 48 x 4096 atoms, 3 blocks: 1.7 GB -> 0.9 GB written, 3.6 -> 1.8 GB
+    read by the dgrad / wgrad). The reference rounds the same product to bf16 (a bf16 Linear under autocast); the engine used to keep
+    it in fp32 only because its kernels did. The fp32 master weight is rounded to bf16 here, as the block's other projections are."""
+    ext = _native_h100_extension()
+    wb = w if w.dtype == torch.bfloat16 else torch.empty_like(w, dtype=torch.bfloat16)
+    if wb is not w:
+        ext.native_copy([w], [wb], 0)
+    a = torch.empty_like(c)
+    ext.native_copy([c], [a], 1)
+    with torch.autocast("cuda", enabled=False):
+        return torch.mm(a, wb.t()), a, wb
+
+
+def _native_h100_mod_bwd_bf16_fake(
+    dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wb: torch.Tensor, w: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(c), torch.empty_like(w)
+
+
+@opaque(fake=_native_h100_mod_bwd_bf16_fake, name="swa_dit_h100_native_mod_bwd_bf16")
+def native_h100_mod_bwd_bf16(
+    dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wb: torch.Tensor, w: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(dc, dweight) of :func:`native_h100_mod_fwd_bf16` from the bf16 gradient of the table: both GEMMs on bf16 operands with fp32
+    accumulation and output (the gradient of the silu input is formed in fp32), dc and dweight cast to c's and w's dtype."""
+    ext = _native_h100_extension()
+    with torch.autocast("cuda", enabled=False):
+        da, dw = _native_mm(dy, wb), _native_mm(dy.t(), a)
+    dc, dweight = torch.empty_like(c), torch.empty_like(w)
+    ext.native_rows([c, da], [dc], 14, 1, 1, c.shape[0], True, FP32_EPS)
+    ext.native_copy([dw], [dweight], 0)
+    return dc, dweight
+
+
 def eval_form(tag, params, build, save: bool = False):
     """``build()`` -- a kernel form of some weights (a cast, a stack, a pack) -- made once per weight version for an inference call
     (``save`` false) -- with grad off read by a CUDA-graph capture as its warm-up made it (``_capture.param_forms(capture_reads_eager=True)``,
@@ -766,10 +833,13 @@ def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_
     served = C == D_ATOM and H == N_HEAD and NHID == N_HIDDEN and q.dtype == torch.bfloat16
     impl_q = _rows_cuda("qkvg", served, M, N // B, q.device)
     impl_f = _rows_cuda("fwd", served, M, N // B, q.device)
+    # a bf16 modulation (the training hoist) is read by the slab kernels as it is; the other stages take fp32
+    mod_q = mod if mod.dtype == torch.float32 or impl_q[0] == "slab" else mod.float()
+    mod_f = mod if mod.dtype == torch.float32 or impl_f[0] == "slab" else mod.float()
     if impl_q[0] == "slab":
-        Qh, Kh, Vh, G, Xs, PQs, PKs = impl_q[1].qkvg_fwd(qf, mod, cos, sin, wqkv, wg, N, B, S, eps, FP32_EPS, save)
+        Qh, Kh, Vh, G, Xs, PQs, PKs = impl_q[1].qkvg_fwd(qf, mod_q, cos, sin, wqkv, wg, N, B, S, eps, FP32_EPS, save)
     elif impl_q[0] == "wgmma":
-        Qh, Kh, Vh, G, Xs, PQs, PKs = impl_q[1].qkvg_fwd(qf, mod, cos, sin, torch.cat([wqkv, wg]), N // B, B, S, eps, FP32_EPS, save)
+        Qh, Kh, Vh, G, Xs, PQs, PKs = impl_q[1].qkvg_fwd(qf, mod_q, cos, sin, torch.cat([wqkv, wg]), N // B, B, S, eps, FP32_EPS, save)
     else:
         Qh = torch.empty(N, H, S, D, device=q.device, dtype=q.dtype)
         Kh = torch.empty_like(Qh)
@@ -784,7 +854,7 @@ def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_
             Xs = PQs = PKs = G
         _swa_qkvg_fwd_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             qf,
-            mod,
+            mod_q,
             cos,
             sin,
             wqkv,
@@ -825,10 +895,10 @@ def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_
             Qh, Kh, Vh, seqused, O, lse, S, D**-0.5, shape_key=atom_key(S, A=A, C=C), C=C, H=H, D=D, HW=half_window
         )
     if impl_f[0] == "slab":
-        q1, Att = impl_f[1].oproj_fwd(qf, G, O, mod, wo, N, B, S, save)
-        q2, Ys, FFs = impl_f[1].ffn_fwd(q1, mod, wu, wd, N, B, S, eps, save)
+        q1, Att = impl_f[1].oproj_fwd(qf, G, O, mod_f, wo, N, B, S, save)
+        q2, Ys, FFs = impl_f[1].ffn_fwd(q1, mod_f, wu, wd, N, B, S, eps, save)
     elif impl_f[0] == "wgmma":
-        q2, q1, Att, Ys, FFs = impl_f[1].ffn_fwd(qf, G, O, mod, wo, _ffn_packs(wu, wd)[0], wd, N // B, B, S, eps, save)
+        q2, q1, Att, Ys, FFs = impl_f[1].ffn_fwd(qf, G, O, mod_f, wo, _ffn_packs(wu, wd)[0], wd, N // B, B, S, eps, save)
     else:
         q2 = torch.empty_like(qf)
         q1 = torch.empty_like(qf) if save else q2
@@ -844,7 +914,7 @@ def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_
             qf,
             O,
             G,
-            mod,
+            mod_f,
             wo,
             wu,
             wd,
@@ -1079,9 +1149,11 @@ def swa_dit_block_bwd(
     (the parameters may be an fp32 master; ``autograd.SWADiTBlockFunction`` hands them back in the parameters' dtype). ``portable``:
     the Triton stages (``_PORTABLE``), as the forward that saved the tensors."""
     with _portable(portable):
-        return _swa_dit_block_bwd(
+        grads = list(_swa_dit_block_bwd(
             dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps
-        )
+        ))
+        grads[1] = grads[1].to(mod.dtype)  # dmod like mod: the stages that widened a bf16 modulation return fp32
+        return grads
 
 
 def _swa_dit_block_bwd(
@@ -1254,7 +1326,12 @@ def _swa_dit_block_bwd(
     # dmod: the slab kernels own its column blocks and store (no accumulation) when one slab holds every augment (A in 1, 2, 4, 8,
     # 16: swa_slab.cu pick_sp), so only the other paths need it zeroed
     plain = A in (1, 2, 4, 8, 16) and impl_f[0] == "slab" and ext_o is not None and ext_q is not None
-    dmod = (torch.empty if plain else torch.zeros)(B * S, 6 * C, device=dev, dtype=torch.float32)
+    # a bf16 modulation (the training hoist) stays bf16 -- and so does its gradient -- only where every stage is a slab kernel that
+    # stores it plain; anything else widens it (the public wrapper casts the gradient back to the modulation's dtype)
+    bf_mod = mod.dtype != torch.float32 and plain
+    if mod.dtype != torch.float32 and not plain:
+        mod = mod.float()
+    dmod = (torch.empty if plain else torch.zeros)(B * S, 6 * C, device=dev, dtype=torch.bfloat16 if bf_mod else torch.float32)
     if impl_f[0] == "slab":
         dq1, dffn, hh, dab = impl_f[1].ffn_bwd(dy2, q1, y, ffn, mod, dmod, wu, wd, A, B, S, eps)
     elif impl_f[0] == "wgmma":

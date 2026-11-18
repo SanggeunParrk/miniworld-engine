@@ -791,6 +791,48 @@ __global__ void __launch_bounds__(1024) tail_info_k(const bool* __restrict__ KM,
   }
 }
 
+// The five slid edge windows of ``_edge_tables`` (local_dit_h100._edge_index / _edge_valid) in ONE small kernel instead of the ~20 torch int64
+// launches of the same arithmetic (a graph that remakes the tables at every replay paid them every time): the window indices IDX [5], the key
+// positions KEYS [5, 128] (int64) and the key validity VALID [5, 32, 128] (uint8: the key is a real atom; with the conformer ids UID [n] a real
+// query also sees only its own conformer's keys, a padding query every valid key). One CTA of 1024 threads: the real count (the valid-key
+// bytes KM [n], real atoms first; nullptr: n0), then the 20480 flags.
+template <typename IT>
+__global__ void __launch_bounds__(1024) edge_index_k(const bool* __restrict__ KM, const IT* __restrict__ UID, long n, long n0, int qblock, long nwin,
+                                                     int64_t* __restrict__ IDX, int64_t* __restrict__ KEYS, uint8_t* __restrict__ VALID) {
+  __shared__ unsigned int tot;
+  if (threadIdx.x == 0) tot = 0u;
+  __syncthreads();
+  unsigned int c = 0u;
+  if (KM != nullptr)
+    for (long i = threadIdx.x; i < n; i += blockDim.x) c += KM[i] ? 1u : 0u;
+#pragma unroll
+  for (int o = 16; o; o >>= 1) c += __shfl_xor_sync(0xffffffffu, c, o);
+  if (threadIdx.x % 32 == 0) atomicAdd(&tot, c);
+  __syncthreads();
+  const long nreal = KM != nullptr ? (long)tot : n0;
+  const long last = nreal >= 1 ? (nreal - 1) / WQ : -1;  // floor((n_real - 1) / 32)
+  const long rule = qblock ? (nreal + WQ - 1) / WQ * WQ : nreal;
+  const long cap = rule - WK > 0 ? rule - WK : 0;
+  for (int i = threadIdx.x; i < 5 * WQ * WK; i += blockDim.x) {
+    const int e = i / (WQ * WK), q = (i / WK) % WQ, k = i % WK;
+    long w = e == 0 ? 0 : e == 1 ? 1 : last - (4 - e);  // [0, 1, last - 2, last - 1, last]
+    w = w < 0 ? 0 : (w > nwin - 1 ? nwin - 1 : w);
+    long start = 32 * w - 48;
+    start = start < 0 ? 0 : start;
+    start = start < cap ? start : cap;
+    const long key = start + k, row = WQ * w + q;
+    bool ok = key < nreal;
+    if (UID != nullptr) {
+      bool same = UID[row] == UID[key];
+      if (KM != nullptr) same = same || !KM[row];
+      ok = ok && same;
+    }
+    VALID[i] = ok ? 1 : 0;
+    if (q == 0) KEYS[e * WK + k] = key;
+    if (q == 0 && k == 0) IDX[e] = w;
+  }
+}
+
 __global__ void tail_dbias_sum_k(const float* __restrict__ DTBP, int SC, const int64_t* __restrict__ INFO, float* __restrict__ DTB, int nloop) {
   const long per = (long)NH * WQ * WK, slab = (long)nloop * per;
   for (long r = INFO[0] * per + (long)blockIdx.x * blockDim.x + threadIdx.x; r < slab; r += (long)gridDim.x * blockDim.x) {
@@ -886,6 +928,33 @@ at::Tensor tail_info(c10::optional<at::Tensor> kmask, int64_t n0, bool qblock, a
   tail_info_k<<<1, 1024, 0, S_()>>>(has ? CP<bool>(*kmask) : nullptr, has ? kmask->numel() : 0, n0, qblock ? 1 : 0, P<int64_t>(info));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return info;
+}
+
+std::vector<at::Tensor> edge_index(c10::optional<at::Tensor> kmask, c10::optional<at::Tensor> uid, int64_t n, int64_t n0, bool qblock, at::Tensor like) {
+  // (idx [5] int64, keys [5, 128] int64, valid [5, 32, 128] uint8) of the five slid edge windows (local_dit_h100._edge_tables); kmask: bool [n]
+  // valid keys, real atoms first (None: n0 real atoms); uid: int32 / int64 conformer ids [n] (None: no conformer mask)
+  const c10::cuda::CUDAGuard guard(like.device());
+  const auto lo = like.options();
+  auto idx = at::empty({5}, lo.dtype(at::kLong));
+  auto keys = at::empty({5, WK}, lo.dtype(at::kLong));
+  auto valid = at::empty({5, WQ, WK}, lo.dtype(at::kByte));
+  const bool hk = kmask.has_value() && kmask->defined(), hu = uid.has_value() && uid->defined();
+  if (hk) TORCH_CHECK(kmask->scalar_type() == at::kBool && kmask->is_contiguous() && kmask->device() == like.device() && kmask->numel() == n, "edge_index: kmask bool [n], contiguous");
+  const bool* km = hk ? CP<bool>(*kmask) : nullptr;
+  const int64_t nwin = n / WQ;
+  if (!hu) {
+    edge_index_k<int><<<1, 1024, 0, S_()>>>(km, nullptr, n, n0, qblock ? 1 : 0, nwin, P<int64_t>(idx), P<int64_t>(keys), P<uint8_t>(valid));
+  } else {
+    TORCH_CHECK(uid->is_contiguous() && uid->device() == like.device() && uid->numel() == n && n >= WK, "edge_index: uid [n >= 128], contiguous");
+    if (uid->scalar_type() == at::kInt)
+      edge_index_k<int><<<1, 1024, 0, S_()>>>(km, CP<int>(*uid), n, n0, qblock ? 1 : 0, nwin, P<int64_t>(idx), P<int64_t>(keys), P<uint8_t>(valid));
+    else {
+      TORCH_CHECK(uid->scalar_type() == at::kLong, "edge_index: uid int32 / int64");
+      edge_index_k<int64_t><<<1, 1024, 0, S_()>>>(km, CP<int64_t>(*uid), n, n0, qblock ? 1 : 0, nwin, P<int64_t>(idx), P<int64_t>(keys), P<uint8_t>(valid));
+    }
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {idx, keys, valid};
 }
 
 at::Tensor tail_bias_fwd(at::Tensor z, at::Tensor gamma, at::Tensor wb, at::Tensor info, double eps, at::Tensor tb) {
@@ -998,4 +1067,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tail_bias_bwd", &tail_bias_bwd);
   m.def("tail_dbias_sum", &tail_dbias_sum);
   m.def("tail_info", &tail_info);
+  m.def("edge_index", &edge_index);
 }

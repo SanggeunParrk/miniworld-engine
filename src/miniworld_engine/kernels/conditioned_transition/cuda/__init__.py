@@ -177,10 +177,14 @@ def _tf32_wab(wab, ht=128):
     )[0]
 
 
+#: The hoisted pair bias of a 256 / 512-wide pair on the AttentionPairBias kernel (``make_bias``); False: LN rows + cuBLAS (the tests' and the benchmarks' A / B switch)
+WIDE_APB = True
+
+
 def _pair_bias_wide(z2d, wf, mask, L):
-    """``apb.pair_bias`` for a pair wider than its 128-wide ring at the token DiT's 12 / 16 / 24 heads (256: Protenix-v2's diffusion
-    pair; 512: IntelliFold2's): the CUDA LayerNorm rows, one cuBLAS GEMM, the masked keys at -1e30. Built once per trajectory (the hoisted bias), so the
-    two passes and the mask fill cost nothing a solver step."""
+    """The pair bias of a pair wider than 128 channels at a head count ``apb.pair_bias`` is not built for (it serves 256 with 8 / 16 heads and
+    512 with 16, the registry's rows): the CUDA LayerNorm rows, one cuBLAS GEMM, the masked keys at -1e30. Built once per trajectory (the
+    hoisted bias), so the two passes and the mask fill cost nothing a solver step."""
     zh = torch.empty_like(z2d)
     layernorm_rows(z2d, zh)
     bias = torch.mm(wf, zh.t()).view(wf.shape[0], L, L)
@@ -527,7 +531,13 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 bias += (extra.float() * 1.4426950408889634)[:, key_perm(L, single.device)]
         else:
             dp = pair.shape[-1]
-            one = (lambda z: apb.pair_bias(z, wf, mask, L, 1e-5, -1e30)) if dp == 128 else (lambda z: _pair_bias_wide(z, wf, mask, L))
+            # one pass over the pair for every width / head count the AttentionPairBias kernel is built for (128; 256 with 8 / 16 heads;
+            # 512 with 16: Protenix-v2, ESMFold2, Chai-1, IntelliFold2); the LN rows + GEMM pair serves the rest
+            one = (
+                (lambda z: apb.pair_bias(z, wf, mask, L, 1e-5, -1e30))
+                if dp == 128 or (WIDE_APB and L % 16 == 0 and heads in apb.PAIR_WIDTHS.get(dp, ()))
+                else (lambda z: _pair_bias_wide(z, wf, mask, L))
+            )
             if B == 1:
                 bias = one(pair.view(L * L, dp))
             else:

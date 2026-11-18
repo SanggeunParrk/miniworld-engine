@@ -231,6 +231,27 @@ std::vector<torch::Tensor> fwd(torch::Tensor x, torch::Tensor gamma, torch::Tens
   return {out, xn, rstd, c1, h};
 #endif
 }
+#if WIDE_D <= 512 && !MW_SAVE_AB
+// Inference forward (save = false) of one row block, written into `out` [M,D] (a contiguous row block of a larger output: a call split past the
+// h budget joins its blocks without a copy). The same two kernels as fwd; only the squeeze's destination differs.
+void fwd_into(torch::Tensor x, torch::Tensor gamma, torch::Tensor beta, torch::Tensor w1p, torch::Tensor ws, double eps, torch::Tensor out) {
+  const int64_t M = x.size(0);
+  bf16_2d(x, M, D, "x must be contiguous bf16 [M, D]");
+  bf16_2d(out, M, D, "out must be contiguous bf16 [M, D]");
+  expect(M % ROWS == 0, "row count must be a whole number of 128-row tiles");
+  f32_1d(gamma, D, "gamma must be fp32 [D]"); f32_1d(beta, D, "beta must be fp32 [D]");
+  bf16_2d(w1p, 2 * H, D, "w1p must be [2H, D]"); bf16_2d(ws, D, H, "ws must be [D, H]");
+  auto h = torch::empty({M, H}, x.options());
+  auto f32 = x.options().dtype(torch::kFloat32);
+  auto xn = torch::empty({1, D}, x.options());
+  auto rstd = torch::empty({1}, f32), c1 = torch::empty({1}, f32);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  wide_lnsg_launch(rm(x, 64, 64), rm(w1p, 64, 128), rm(h, 64, 64), fp(gamma), fp(beta), bp(xn), fp(rstd), fp(c1), (int)M, (int)H,
+                   (float)eps, 0, WIDE_SMS, stream);
+  const int bn = wide_squeeze_bn();
+  wide_squeeze_launch(rm(h, 64, 64), rm(ws, 64, bn), rm(x, 64, 64), rm(out, 64, 64), (int)M, (int)H, (int)D, WIDE_SMS, stream);
+}
+#endif
 #if MW_SAVE_AB
 torch::Tensor gate_saved(torch::Tensor dy,torch::Tensor wst,torch::Tensor a,torch::Tensor b){
   const int64_t M=dy.size(0);
@@ -371,6 +392,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
 #if WIDE_D >= 256
   m.def("gate", &gate, "backward gate stage: h, [dA|dB]");
+#endif
+#if WIDE_D >= 384 && WIDE_D <= 512 && !MW_SAVE_AB
+  m.def("fwd_into", &fwd_into, "inference forward of a row block written into out");
 #endif
 #if MW_SAVE_AB
   m.def("gate_saved",&gate_saved,"dh GEMM and SwiGLU backward from saved activations");

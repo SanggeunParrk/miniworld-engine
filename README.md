@@ -61,6 +61,7 @@ FoldForge, and MiniWorld. `engine-own` rows are shapes the engine keeps although
 | `triton` | the engine's Triton kernels (no TMA), any CUDA card | binding |
 | `anthropic` | Anthropic's [uplifting-biomolecular-modeling](https://github.com/anthropics/uplifting-biomolecular-modeling) release, connected as it ships | informational (baseline) |
 | `cueq` | NVIDIA cuEquivariance 0.12 (`cuequivariance_torch`), connected as it ships | informational (baseline) |
+| `engine-fp8` | opt-in (3.0.0): the `cuda` backend with the FP8 (e4m3) inference routes on, H100; the default stays bf16 / fp16 ([docs/fp8.md](docs/fp8.md)) | none: outside the judge |
 
 A call outside a backend's range raises `BackendUnsupported` with the reason; it is never run by another backend. A kernel that fails
 to build raises `KernelBuildError`; there is no silent fallback anywhere. Which classes have which backends: the `backends` tuple of
@@ -176,7 +177,7 @@ A paper describing the engine is in preparation. Until then, please cite the rep
   author  = {Park, Sanggeun},
   title   = {miniworld-engine: GPU kernels for AlphaFold 3-style modules},
   year    = {2026},
-  version = {2.5.14},
+  version = {3.0.1},
   note    = {TODO: replace with the paper reference}
 }
 ```

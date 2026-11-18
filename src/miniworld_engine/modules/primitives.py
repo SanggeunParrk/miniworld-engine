@@ -25,6 +25,10 @@ added later as another backend of the same module and is checked against ``"pyto
 A non-reference backend declares what it covers in ``_supports_<name>(*args, **kwargs) -> str | None`` (None = runs; a string = why not).
 ``forward`` raises :class:`BackendUnsupported` with that reason instead of falling back: a backend never silently becomes another one.
 
+``"engine-fp8"`` (engine 3.0.0, opt-in; :mod:`miniworld_engine.fp8`) is the ``cuda`` backend with the FP8 ``safe`` routes on for this
+module's calls. It is not in any ``backends`` tuple (the judge never sees it): ``set_backend("engine-fp8")`` (or ``"engine_fp8"``) works on
+every class with a ``cuda`` backend and leaves ``backend == "cuda"``, ``engine_fp8 = True`` (``backend_name`` gives ``"engine-fp8"``).
+
 Every class keeps the public name and the parameter / buffer names of the engine's earlier modules, so their state dicts load unchanged.
 """
 
@@ -40,6 +44,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from miniworld_engine import fp8 as _fp8
 from miniworld_engine.kernels import _capture
 
 
@@ -110,6 +115,31 @@ class BackendUnsupported(RuntimeError):
     """A backend was asked for a call outside its stated range. Raised, never silently replaced by another backend."""
 
 
+class _EngineFP8Forward:
+    """An ``engine-fp8`` module's ``_forward_cuda`` (instance attribute set by ``set_backend``): the class's ``_forward_cuda`` inside
+    ``fp8.BackendScope(True)`` for an inference call; a training call (train mode, or autograd on) runs it as on ``cuda`` (FP8 is inference
+    only). Copies (``copy.deepcopy``) and pickles follow their module."""
+
+    __slots__ = ("module",)
+
+    def __init__(self, module: "BackendModule") -> None:
+        self.module = module
+
+    def __call__(self, *args, **kwargs):
+        m = self.module
+        inner = getattr(type(m), f"_forward_{_fp8.BASE_BACKEND}").__get__(m)
+        on = not m.training and not torch.is_grad_enabled()
+        if not on and not _fp8.SCOPES:
+            return inner(*args, **kwargs)
+        with _fp8.BackendScope(on):
+            return inner(*args, **kwargs)
+
+    def __deepcopy__(self, memo):
+        import copy
+
+        return _EngineFP8Forward(copy.deepcopy(self.module, memo))
+
+
 class BackendModule(nn.Module):
     """A module with one forward per backend (see the module docstring): ``forward`` calls ``self._forward_<self.backend>``.
 
@@ -136,12 +166,33 @@ class BackendModule(nn.Module):
         if missing:
             raise TypeError(f"{cls.__name__}: no _forward_{missing[0]} (backends {cls.backends}; 'pytorch' is required)")
 
+    #: True when the module was selected as ``"engine-fp8"`` (``backend`` is then ``"cuda"``; its ``_forward_cuda`` is an ``_EngineFP8Forward``).
+    engine_fp8: bool = False
+
+    @classmethod
+    def has_backend(cls, name: str) -> bool:
+        """Whether ``set_backend(name)`` takes ``name``: one of ``backends``, or ``"engine-fp8"`` / ``"engine_fp8"`` on a class with ``cuda``."""
+        return _fp8.resolve_backend(name)[0] in cls.backends
+
     def set_backend(self, backend: str = "pytorch"):
-        """Select the backend ``forward`` runs; ``ValueError`` if this class has no such backend. Returns ``self``."""
-        if backend not in self.backends:
-            raise ValueError(f"{type(self).__name__} has no backend {backend!r}; available: {', '.join(self.backends)}")
-        self.backend = backend
+        """Select the backend ``forward`` runs; ``ValueError`` if this class has no such backend. ``"engine-fp8"`` selects ``cuda`` with the
+        FP8 routes on (:mod:`miniworld_engine.fp8`). Returns ``self``."""
+        base, fp8_on = _fp8.resolve_backend(backend)
+        if base not in self.backends:
+            via = f" ({backend!r} runs the {base!r} backend with the FP8 routes on)" if fp8_on else ""
+            raise ValueError(f"{type(self).__name__} has no backend {backend!r}{via}; available: {', '.join(self.backends)}")
+        self.backend = base
+        self.engine_fp8 = fp8_on
+        # engine-fp8 lives on the instance's _forward_cuda, so a runtime that calls `_forward_<backend>` directly (FoldForge's guard) gets it too
+        self.__dict__.pop(f"_forward_{_fp8.BASE_BACKEND}", None)
+        if fp8_on:
+            self.__dict__[f"_forward_{_fp8.BASE_BACKEND}"] = _EngineFP8Forward(self)
         return self
+
+    @property
+    def backend_name(self) -> str:
+        """The selected backend's public name: ``backend``, or ``"engine-fp8"``."""
+        return _fp8.BACKEND if self.engine_fp8 else self.backend
 
     def unsupported(self, *args, **kwargs) -> str | None:
         """Why the selected backend cannot run this call (a short reason), or ``None`` if it can.
@@ -152,6 +203,14 @@ class BackendModule(nn.Module):
         return None if check is None else check(*args, **kwargs)
 
     def forward(self, *args, **kwargs):
+        # inside an engine-fp8 call, a module on another (non-reference) backend runs with the process's own switches; never entered on the
+        # default route (no engine-fp8 call running). An engine-fp8 module's own scope is opened by its _forward_cuda (_EngineFP8Forward).
+        if _fp8.SCOPES and not self.engine_fp8 and self.backend != "pytorch":
+            with _fp8.BackendScope(False):
+                return self._forward_selected(*args, **kwargs)
+        return self._forward_selected(*args, **kwargs)
+
+    def _forward_selected(self, *args, **kwargs):
         reason = self.unsupported(*args, **kwargs) if self.backend != "pytorch" else None
         if reason is not None:
             raise BackendUnsupported(f"{type(self).__name__} backend {self.backend!r}: {reason}")
@@ -167,7 +226,7 @@ class BackendModule(nn.Module):
 
     def extra_repr(self) -> str:
         inner = super().extra_repr()
-        return f"{inner}, backend={self.backend}" if inner else f"backend={self.backend}"
+        return f"{inner}, backend={self.backend_name}" if inner else f"backend={self.backend_name}"
 
     def make_inputs(
         self,

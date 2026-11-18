@@ -60,6 +60,8 @@ D, DC, DP, H, DH = 768, 384, 128, 16, 48  # the default layout; serves() takes L
 H100_DC = 768  # the other conditioning width the H100 training block serves (row kernels built per cond width)
 #: (heads, d_single): 16 x 48, 24 x 32, 12 x 64 and 16 x 64 (d 1024), bf16 and fp32 (the TF32 cores are built per layout too)
 LAYOUTS = ((16, 768), (24, 768), (12, 768), (16, 1024))
+SHARED_COND = True  # a conditioning shared by the samples runs its GEMMs on L rows (``_shared_cond``); False: per sample (the A / B switch of the tests)
+PAIR_APB = True  # the H100 bf16 pair bias on the AttentionPairBias tensor-core kernels (``_pair_apb``); False: the TF32 row kernels (the A / B switch of the tests)
 QM = 128  # the attention kernels' query / key tile: L is padded to a multiple of it
 EPS = 1e-5
 BF = torch.bfloat16
@@ -581,6 +583,14 @@ def _opt_bits(opts):
     return bits, (2 if opts[5] else 0)
 
 
+def _shared_cond(single, cond) -> bool:
+    """The conditioning is shared by the samples: ``block`` hands the H100 default-options block ONE [1, 1, L, dc] conditioning for A > 1
+    samples (the caller's stride-0 expand, sliced). Every conditioning GEMM -- G, Gg forward; dchat, dcg and the dWn, dWg weight
+    gradients backward -- then runs on L rows instead of A L, the row kernels read row r % L of G / Gg, and the backward sums dG / dGg
+    over the samples first (``sample_sum2``: fp32, sample order, deterministic)."""
+    return single.shape[0] > 1 and cond.shape[0] == 1
+
+
 def _own_cond(cond, fp32) -> bool:
     """fp32 path with an fp32 cond: the gate GEMM (and its weight gradient) reads cond itself, no operand copy is made. Not on
     the H100 native path, whose cond may be sample-expanded (stride 0): it reads cond through ``cond_prep90`` and keeps cbf."""
@@ -600,16 +610,18 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False, no
     v^T is built from v) and no O slot (the cores write og), and fp32 keeps LN(pair) (the dWf / dpair GEMMs read it)."""
     A, _, L, D = single.shape
     M, R, e = A * L, L * L, single.new_empty
+    Mc = L if _shared_cond(single, cond) else M  # rows of the conditioning products
     f32, at = torch.float32, (torch.float32 if fp32 else BF)
     h100 = _sm90(single.device)
     copies = qk or h100
+    apb = _pair_apb(h100, fp32, dp, H, pair.dtype)
     return [
         e((0 if nox else M, D), dtype=f32),  # the fp32 residual (nox: not kept, the input is read instead)
-        e((M, cond.shape[-1]), dtype=at),
-        e((0 if _own_cond(cond, fp32) else M, cond.shape[-1]), dtype=at),
-        e((M, 2), dtype=f32),
-        e((M, 4 * D), dtype=at),
-        e((M, 2 * D), dtype=at),
+        e((Mc, cond.shape[-1]), dtype=at),
+        e((0 if _own_cond(cond, fp32) else Mc, cond.shape[-1]), dtype=at),
+        e((Mc, 2), dtype=f32),
+        e((Mc, 4 * D), dtype=at),
+        e((Mc, 2 * D), dtype=at),
         e((M, 2), dtype=f32),
         e((M, D), dtype=at),
         e((M, 4 * D), dtype=at),
@@ -634,9 +646,21 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False, no
         e((M, (3 if up else 2) * n * D), dtype=at),  # a | b of the SwiGLU: two [M, n D] halves (a | b | u up-gated)
         e((M, D), dtype=at),
         e((0 if ((fp32 and not h100) or _pair_fused(h100, fp32, dp)) else R, dp), dtype=at),
-        e((R, 2), dtype=f32),
+        e((0 if (apb and dp == DP) else R, 2), dtype=f32),  # (mean, rstd) of the pair rows (the 128-wide APB backward recomputes them)
+        e((H * R if (apb and dp != DP) else 0,), dtype=f32),  # the wide APB forward's unmasked fp32 bias (its backward's S2)
         e((M, n * D) if hsave else (0, n * D), dtype=at),  # hsave: h = SwiGLU(a, b) as the squeeze GEMM read it (the backward does not rewrite it)
     ]
+
+
+def _pair_apb(h100, fp32, dp, heads, pdt) -> bool:
+    """The H100 bf16 block's pair bias on the AttentionPairBias tensor-core kernels (``augmented_attention.cuda.apb``): one pass over the pair
+    each way at the HBM rate -- the forward is Wf . LN(pair) on bf16 mma with the row statistics from the tensor cores (no per-element float
+    work), the backward gives dpair and the per-block dWf partials in one more pass; a pair width wider than 128 (256: Protenix-v2 / Chai-1 /
+    ESMFold2, 512: IntelliFold2; 16 heads) saves its row statistics and its fp32 unmasked bias for the backward (``pair_bias_fwd_train``).
+    The TF32 row kernels of ``_pair_fused`` serve the other head counts. Needs a bf16 pair (the kernels read bf16 words)."""
+    return bool(
+        PAIR_APB and h100 and not fp32 and pdt is BF and ((dp == 128 and heads in (8, 12, 16, 24)) or (dp in (256, 512) and heads == 16))
+    )
 
 
 def _pair_fused(h100, fp32, dp) -> bool:
@@ -720,12 +744,14 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
     at = torch.float32 if fp32 else BF
     h100 = _sm90(dev)
     native = _native90(dev)
+    Mc = L if _shared_cond(single, cond) else M  # rows of the conditioning products (L: shared by the samples)
+    assert Mc == M or (native and plain)
     copies = qk or h100  # q / k / v copies: QK-norm, or the sm_90a cores' pre-scaled q (see _saved_like)
     c2 = None if native else cond.reshape(M, cond.shape[-1]).contiguous()  # native: cond_prep90 reads cond as given
     own_c = _own_cond(cond, fp32)
-    chat = torch.empty(M, cond.shape[-1], device=dev, dtype=at)
+    chat = torch.empty(Mc, cond.shape[-1], device=dev, dtype=at)
     cbf = None if own_c else torch.empty_like(chat)
-    cst = torch.empty(M, 2, device=dev)
+    cst = torch.empty(Mc, 2, device=dev)
     if native:
         T.cond_prep90(cond, chat, cbf, cst, EPS)
     else:
@@ -768,8 +794,21 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         qn, kn, vc = (qkvg[:, i * D : (i + 1) * D] for i in range(3))
     O = None
     p2 = pair.reshape(R, dpw)
-    pst = torch.empty(R, 2, device=dev)
-    if _pair_fused(h100, fp32, dpw):
+    apb_pair = _pair_apb(h100, fp32, dpw, H, pair.dtype)
+    pst = torch.empty(0 if apb_pair else R, 2, device=dev)
+    bu = torch.empty(0, device=dev)
+    if apb_pair:  # the AttentionPairBias tensor-core pass: bf16 bias in log2 units (Wf_l2), no key mask (train_bias90 applies it)
+        from miniworld_engine.kernels.augmented_attention.cuda import apb
+
+        ph = pair.new_empty(0, dpw, dtype=at)
+        if dpw == apb.DP:
+            bias = cast(torch.Tensor, apb.pair_bias(p2, W["Wf_l2"], None, L, EPS, 0.0))  # the backward recomputes the row statistics
+        else:  # + (mean, rstd) and the unmasked fp32 bias
+            bias, pst, bu_ = cast(tuple, apb.pair_bias(p2, W["Wf_l2"], None, L, EPS, 0.0, saved=True))
+            bu = bu_.view(-1)
+        if extra is not None:  # an [L, L] logit term for every head, in the bias's log2 units
+            bias.add_(extra.view(1, L, L), alpha=LOG2E)
+    elif _pair_fused(h100, fp32, dpw):
         ph = pair.new_empty(0, dpw, dtype=at)
         bias = torch.empty(H, L, L, device=dev, dtype=at)
         T.pair_bias(
@@ -885,6 +924,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         z,
         ph,
         pst,
+        bu,
         h if hsave else h.new_empty(0, nexp * D),
     ]
 
@@ -931,7 +971,8 @@ def _tf32_attn_bwd(T, qs, k, v, dob, bias_p, mask, lse, dd, A, L):
     return dq, dk, dv, db_p[..., inv]
 
 
-def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
+def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32, dbf32=False):
+    """... `dbf32`: the pair-bias backward reads dbias in fp32 and in the log2-unit bias's scale (the natural-unit dbias / LOG2E): fp32, scaled, unrounded."""
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
 
     H = bias.shape[0]  # this layout's heads (the module-level H is the default 16)
@@ -964,13 +1005,13 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
         sm90._ext("attn_dqb", (*bf_defs, *empty_defs)).attn_dqb(qs, k, v, dob, bias, km, lse, dd, dq, dbc)
         dbn = dbc.sum(0)  # the chunk buffers summed in order: bitwise repeatable
         sm90._ext("attn_dkv", ("DBIAS=0", *bf_defs, *empty_defs)).attn_dkv(qs, k, v, dob, bias, km, lse, dd, dk, dv, dbn)
-        return dq, dk, dv, dbn.to(torch.bfloat16)
+        return dq, dk, dv, (dbn.mul_(1.0 / LOG2E) if dbf32 else dbn.to(torch.bfloat16))
     else:
         sm90._ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *sm90.dq_defs(H, DH), *empty_defs)).attn_dq(
             qs, k, v, dob, bias, km, lse, dd, dq
         )
         sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1", *bf_defs, *empty_defs)).attn_dkv(qs, k, v, dob, bias, km, lse, dd, dk, dv, db)
-    return dq, dk, dv, T.train_db_reduce90(db, fp32)
+    return dq, dk, dv, T.train_db_reduce90(db, fp32, 1.0 / LOG2E if dbf32 else 1.0, dbf32)
 
 
 def _native_final90(T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk):
@@ -1056,12 +1097,27 @@ def _bwd(
         return _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, extra, variant)
 
 
-def _xgrad(DB, extra, H, L):
+def _xgrad(DB, extra, H, L, scale=1.0):
     """d extra [L, L] (the extra term enters every head's logits once, in natural units: the sum of dbias over the heads) as a
-    one-element list, or none when the caller does not differentiate it."""
+    one-element list, or none when the caller does not differentiate it. ``scale``: DB's scale to natural units (the APB route's
+    fp32 dbias is the natural one / LOG2E)."""
     if extra is None:
         return []
-    return [DB.reshape(H, L, L).sum(0, dtype=torch.float32).to(extra.dtype)]
+    s = DB.reshape(H, L, L).sum(0, dtype=torch.float32)
+    return [(s * scale if scale != 1.0 else s).to(extra.dtype)]
+
+
+def _apb_pair_bwd(p2, DB, wf_l2, pst, bu, L, H, dp, dpair):
+    """dpair (written into ``dpair``) and dWf [H, dp] fp32 of the APB pair-bias backward. ``DB``: [H, L, L] fp32, the log2-unit bias's
+    gradient (natural dbias / LOG2E: ``_native_attn_bwd90(.., dbf32)``), ``wf_l2`` the forward's bf16 weights (log2 units) -- so
+    dxh = sum_h dbias_h Wf_h, its row means and S2 = sum_h dbias_h bias_h are the natural ones, and dWf = dbias^T LN(pair) comes out
+    divided by LOG2E. The per-block dWf partials (one row per block, no atomics) are summed in block order: deterministic."""
+    from miniworld_engine.kernels.augmented_attention.cuda import apb
+
+    acc = torch.empty(apb.ext().pair_bwd_blocks(p2, H, L), apb.acc_n(H, 384, dp), device=p2.device)
+    apb.pair_bias_bwd(p2, DB, wf_l2, L, EPS, acc=acc, d=384, saved=None if dp == apb.DP else (pst, bu.view(H, L, L)), out=dpair)
+    o = 2 * 384 + apb.width(H, 384)
+    return acc[:, o : o + H * dp].sum(0).view(H, dp) * LOG2E
 
 
 def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H, extra=None, variant=None):
@@ -1121,6 +1177,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         z,
         ph,
         pst,
+        bu,
         hs,
     ) = saved
     if vc.numel() == 0:  # B200 fp32 + QK-norm: v as the forward's core read it, a column view of qkvg
@@ -1142,6 +1199,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     A, _, L, _ = single.shape
     M, R, dev = A * L, L * L, single.device
     sdt, cdt, pdtype = single.dtype, cond.dtype, pair.dtype
+    apb_pair = _pair_apb(h100, fp32, dpw, H, pdtype)  # the forward's route (its saved row statistics / unmasked bias are this backward's)
     native = _native90(dev)
     f8, f8p, f8w = _fp8_train(W, M, D, fp32, plain, h100, ("dqkvg", "dout", "dexpand", "dsqueeze"))
     e5 = bool(f8p) and f8.GRAD_E5M2
@@ -1189,7 +1247,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
     T.gate_o_bwd(dog, og if h100 else O, qkvg, dob, dd, dqkvg, L, h100)  # H100: D and dg from og (dO o = dog og)
     if native:
-        DQ, DK, DV, DB = _native_attn_bwd90(T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L, fp32)
+        DQ, DK, DV, DB = _native_attn_bwd90(T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L, fp32, apb_pair)
     elif h100 and fp32:
         DQ, DK, DV, DB = _tf32_attn_bwd(T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L)
     elif h100:  # dq for the unscaled q, dbias natural units
@@ -1232,14 +1290,34 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         sums = allp.sum(0) if qkm else allp[:, : 5 * D].sum(0)
         pb = sums[: 5 * D].view(5, D)
         dwqk = sums[5 * D :].view(2, H, DH).sum(1).reshape(-1) if qkm == 1 else torch.zeros(2 * DH, device=dev)
-    dchat = mm(dG, Wn)
-    dWn = mm32(dG.t(), chat)
-    dcg = mm(dGg, Wg)
-    dWg = mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf)
-    dc = torch.empty(M, cond.shape[-1], device=dev, dtype=cdt)
+    Mc = L if _shared_cond(single, cond) else M
+    if Mc != M:  # the conditioning is shared by the samples: the sum over the samples first, every product below on L rows
+        assert native and plain
+        # the sum as two operands hi + lo ([2 L, n]: the sample sum rounded once to the operand type would add an error of the size of the
+        # per-row roundings it replaces); the GEMMs run on 2 L rows and their fp32 halves are added
+        dGs = torch.empty(2 * L, 4 * D, device=dev, dtype=at)
+        dGgs = torch.empty(2 * L, 2 * D, device=dev, dtype=at)
+        T.sample_sum2(dG.view(A, L, 4 * D), dGs, dGg.view(A, L, 2 * D), dGgs)
+
+        def halves(y):  # fp32: cond_bwd reads them as they are (no operand rounding between the GEMM and the LayerNorm backward)
+            return y[:L] + y[L:]
+
+        dchat = halves(mm32(dGs, Wn))
+        dcg = halves(mm32(dGgs, Wg))
+        dWn = mm32(dGs.t(), torch.cat((chat, chat)))
+        dWg = mm32(dGgs.t(), torch.cat((cbf, cbf)))
+    else:
+        dchat = mm(dG, Wn)
+        dWn = mm32(dG.t(), chat)
+        dcg = mm(dGg, Wg)
+        dWg = mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf)
+    dc = torch.empty(Mc, cond.shape[-1], device=dev, dtype=cdt)
     if native and plain:
         T.cond_bwd90(dchat, dcg, cond, cst, dc)
-        if _pair_fused(h100, fp32, dpw):
+        if apb_pair:
+            dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
+            dWf = _apb_pair_bwd(p2, DB, W["Wf_l2"], pst, bu, L, H, dpw, dpair)
+        elif _pair_fused(h100, fp32, dpw):
             dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
             part = torch.empty(T.pair_grid(R), H * dpw, device=dev)
             T.pair_bias_bwd(
@@ -1258,7 +1336,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
             dc.view(cond.shape),
             dpair.view(1, L, L, dpw),
             *outs,
-            *_xgrad(DB, extra, H, L),
+            *_xgrad(DB, extra, H, L, LOG2E if apb_pair else 1.0),
         ]
     dw12 = torch.zeros(2, cond.shape[-1], device=dev)
     if opt & 1:
@@ -1278,6 +1356,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         pwf = torch.empty(T.pair_grid(R), H * dpw, device=dev)
         T.pair_bias_bwd(DB.view(H, R), p2, pst, Wf, dpair, pwf)
         dWf = pwf.sum(0).view(H, dpw)
+    elif apb_pair:
+        dWf = _apb_pair_bwd(p2, DB, W["Wf_l2"], pst, bu, L, H, dpw, dpair)
     elif _pair_fused(h100, fp32, dpw):
         part = torch.empty(T.pair_grid(R), H * dpw, device=dev)
         T.pair_bias_bwd(DB.reshape(H, R).contiguous(), p2, pst, Wf, dpair, part)
@@ -1326,7 +1406,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     torch._foreach_copy_(  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
         outs, [grads[n].reshape(p.shape) for n, p in zip(names, params, strict=False)]
     )
-    return [dx.view(A, 1, L, D), dc.view(cond.shape), dpair.view(1, L, L, dpw), *outs, *_xgrad(DB, extra, H, L)]
+    return [dx.view(A, 1, L, D), dc.view(cond.shape), dpair.view(1, L, L, dpw), *outs, *_xgrad(DB, extra, H, L, LOG2E if apb_pair else 1.0)]
 
 
 class _Block(torch.autograd.Function):
@@ -1385,11 +1465,12 @@ def _pad(single, cond, pair, mask, Ap, Lp):
     F = torch.nn.functional
     A, _, L, _ = single.shape
     rows = (0, 0, 0, Lp - L, 0, 0, 0, Ap - A)
+    crows = rows if cond.shape[0] == A else (0, 0, 0, Lp - L, 0, 0, 0, 0)  # a shared [1, 1, L, dc] conditioning has no samples to pad
     if mask is None:
         mask = torch.ones(1, L, device=single.device, dtype=torch.bool)
     return (
         F.pad(single, rows),
-        F.pad(cond, rows),
+        F.pad(cond, crows),
         F.pad(pair, (0, 0, 0, Lp - L, 0, Lp - L)),
         F.pad(mask.to(torch.bool), (0, Lp - L), value=False),
     )
@@ -1409,19 +1490,23 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None, extra=None)
     Ap = A if _sm90(single.device) else A + A % 2
     Lp = -(-L // QM) * QM
     padded = (Ap, Lp) != (A, L)
+    from miniworld_engine.kernels.conditioned_transition.cuda import VARIANT_DEFAULT
+    from miniworld_engine.kernels.integrations import token_dit
+
+    opts = token_dit.options(module)
+    assert opts is not None  # serves() refused a block outside the algorithm
+    cond0 = cond  # the caller's tensor: the native hooks attach to its autograd edge
+    if SHARED_COND and _sm90(single.device) and A > 1 and cond.shape[0] == A and cond.stride(0) == 0 and opts == VARIANT_DEFAULT:
+        cond = cond[:1]  # the conditioning shared by the samples (a stride-0 expand): every conditioning GEMM on L rows (_shared_cond)
     caller = (
         single,
-        cond,
+        cond0,
         pair,
     )  # the caller's tensors: the native hooks attach to their autograd edges, not the pads'
     if padded:
         single, cond, pair, mask = _pad(single, cond, pair, mask, Ap, Lp)
         if extra is not None:
             extra = torch.nn.functional.pad(extra, (0, Lp - L, 0, Lp - L))
-    from miniworld_engine.kernels.integrations import token_dit
-
-    opts = token_dit.options(module)
-    assert opts is not None  # serves() refused a block outside the algorithm
     params = _leaves(module, _names_for(qk, opts))
     out = _Block.apply(
         single,
