@@ -57,6 +57,7 @@ TRIATTN_OF = {
     "opendde": {"pv": ["unfused"], "qk": False},
     "protenix2": {"pv": ["unfused"], "qk": False},
     "openfold3": {"pv": ["fused", "unfused"], "qk": True},
+    "rosettafold3": {"pv": ["fused"], "qk": True},
 }
 
 
@@ -81,11 +82,11 @@ def test_env_preset(monkeypatch):
 
 def test_triattn_whitelist():
     # extend only after an end-level check
-    assert set(fp8.TRIATTN_MODELS) == {"af3", "protenix1", "opendde", "protenix2", "openfold3"}
+    assert set(fp8.TRIATTN_MODELS) == {"af3", "protenix1", "opendde", "protenix2", "openfold3", "rosettafold3"}
     assert "boltz2" not in fp8.TRIATTN_MODELS  # 9c90 bistable
     assert "intellifold2" not in fp8.TRIATTN_MODELS  # end-level 10 / 12 (two large targets flip), trunk heads are 64-channel
     # e4m3 q / k: the fused d_pair-128 route only, validated end to end on AF3 and OpenFold3
-    assert [m for m, (_k, qk) in fp8.TRIATTN_MODELS.items() if qk] == ["af3", "protenix1", "openfold3"]
+    assert [m for m, (_k, qk) in fp8.TRIATTN_MODELS.items() if qk] == ["af3", "protenix1", "openfold3", "rosettafold3"]
     assert fp8.triattn_for(None) == (frozenset(), False) and fp8.triattn_for("boltz2") == (frozenset(), False)
     assert fp8.triattn_for("AF3") == fp8.TRIATTN_MODELS["af3"]
 
@@ -101,7 +102,7 @@ def test_env_safe_without_model_keeps_triattn_off():
     assert _routes(st) == {**SAFE, "token_dit": []} and st["guard"]["pwa"] == "lazy"
 
 
-@pytest.mark.parametrize("model", ["af3", "protenix1", "opendde", "protenix2", "openfold3", "intellifold2", "boltz2"])
+@pytest.mark.parametrize("model", ["af3", "protenix1", "opendde", "protenix2", "openfold3", "rosettafold3", "intellifold2", "boltz2"])
 def test_env_safe_with_model(model):
     st = _status_in_process(MINIWORLD_FP8="safe", MINIWORLD_FP8_MODEL=model)
     assert _routes(st) == {**SAFE, "triattn": TRIATTN_OF.get(model, NO_TRIATTN)}
@@ -122,7 +123,7 @@ def test_enable_disable_api():
     )
     a, *per_model, again, off = json.loads(out.stdout.strip().splitlines()[-1])
     assert _routes(a) == SAFE and set(a["guard"].values()) == {"lazy"}
-    for m, st in zip(("af3", "protenix1", "opendde", "protenix2", "openfold3", "intellifold2", "boltz2"), per_model, strict=True):
+    for m, st in zip(("af3", "protenix1", "opendde", "protenix2", "openfold3", "rosettafold3", "intellifold2", "boltz2"), per_model, strict=True):
         assert _routes(st) == {**SAFE, "triattn": TRIATTN_OF.get(m, NO_TRIATTN)}, m
     assert _routes(again) == SAFE  # enable() without model= turns the TriAttn part off again
     assert _routes(off) == OFF

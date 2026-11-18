@@ -85,9 +85,10 @@ atom DiT `declined` / `fallbacks` tells which). Test: `tests/gpu/test_fp8_route_
    | `opendde` | unfused | no (no d_pair-128 site: q / k exists only on the fused route) | PV, 16 + 3 targets x 4 trunk seeds |
    | `protenix2` | unfused (256:8:32 front-made trunk sites from L768, 64:2:32 template sites from L256) | no (no d_pair-128 site) | PV, 11 targets x 4 trunk seeds, 10 / 11 inside (7y37: bf16 bimodal, see "TriAttn whitelist: Protenix v2, ...") |
    | `openfold3` | fused + unfused | yes | PV and PV + q / k, 12 targets x 4 trunk seeds, 11 / 12 inside each (7zau: bf16 spread 10.2 A, ipTM 0.15-0.38) |
+   | `rosettafold3` | fused | yes | PV, q / k and the whole `safe` set: 12 targets x 4 trunk seeds, 12 / 12 inside for PV and PV + q / k ("RoseTTAFold3 TriAttn FP8" below) |
 
    Not listed: Boltz-2 (9c90 bistable, below), IntelliFold2 (10 / 12 inside, two large targets flip; below), every other model. (After 3.0.1, branch `fp8c/triattn`: the `protenix2` and `openfold3` rows were added after the end-level section "TriAttn whitelist: Protenix v2, OpenFold3, IntelliFold2 (not added)"; decision 1 had left OpenFold3 out.)
-2. **e4m3 q / k stays in `safe`** (af3, protenix1, openfold3): its module error in the judge form is above the module tolerance (0.95 / 0.85 % at L512 / 1024 against
+2. **e4m3 q / k stays in `safe`** (af3, protenix1, openfold3, rosettafold3): its module error in the judge form is above the module tolerance (0.95 / 0.85 % at L512 / 1024 against
    tol 8e-3), but the end-level AF3 FoldBench run with it on flagged 0 / 27 targets.
 3. **No FP8 registry rows / tolerances.** FP8 is an opt-in path outside the judge: the registry dtype vocabulary is `float32|master` only, the FP8 planes /
    e4m3 V are internal intermediates of the `master` route, no `backend_versions` entry exists, and the judge tokens cover the default bf16 route only
@@ -822,7 +823,7 @@ IntelliFold2 is the same code as before (no route changed for it): the two FP8 c
 
 * RoseTTAFold3 atom DiT: done on branch `fp8c/rf3-kqln` (section "RoseTTAFold3 atom block").
 * (done on `fp8c/if2-d512`) IntelliFold2 D512 TriMul planes: a K1 variant of the packed `_front` writing e4m3 planes with `qinv`, and `k3reorder.cu` with `K3_CSCALE` (the contraction is 31 % of the D512 module, e4m3 removes about 15 % of it, docs above).
-* TriAttn FP8 for RF3 / IF2: needs a model entry in `fp8.TRIATTN_MODELS` after an end-level (FoldBench) validation.
+* TriAttn FP8 for RF3: done on branch `fp8c/rf3-triattn` ("RoseTTAFold3 TriAttn FP8"); for IF2: needs a model entry in `fp8.TRIATTN_MODELS` after an end-level (FoldBench) validation (not added: 10 / 12 inside).
 * FoldForge: nothing is needed for the TriMul / OPM / token DiT fixes (the engine-side calibration now sees the parameter); the `_Graph` warm-up already calibrates every site.
 
 ## IntelliFold2 D512: TriMul planes (2026-11-18, branch `fp8c/if2-d512`, base `fp8c/rf3if2` d39e8770d)
@@ -925,6 +926,58 @@ Rule of docs/fp8.md: inside = max same-trunk-seed RMSD (FP8 vs bf16, Kabsch, per
 12 / 12 inside with the larger seed sets; with four trunk seeds 11 / 12 (8vfj: 0.68 A against the 0.50 A floor while its four bf16 seeds agree to 0.42 A; its same-seed mean is 0.19 A, and 8 bf16 seeds already span 0.66 A). The arm without the D512 planes
 (base tree) is inside everywhere but 8ts0 at four seeds (5.85 A against 5.36 A, a target whose bf16 seeds reach 16.2 A over eight): the marginal verdicts alternate between the two FP8 arms and sit on the noise of targets whose bf16 trunk seeds are
 bimodal or nearly converged, so they are not attributed to the D512 route. No saturation redo in any of the 88 FP8 runs (56 after, 32 before; `fp8.check()`), no failures. (The end-level runs are eager with the `sync` guard; the lazy guard + CUDA-graph path is the one of the 5I28 benchmark and the tests above.)
+## RoseTTAFold3 TriAttn FP8 (2026-11-18, branch `fp8c/rf3-triattn`, base `fp8c/rf3if2`)
+
+`fp8.TRIATTN_MODELS["rosettafold3"] = ({"fused"}, True)`: the FP8 PV route on the fused d_pair-128 front (the only TriAttn site kind RF3 reaches: 128:4:32, 1048 calls per trunk) and e4m3 q / k.
+No unfused kind: RF3 has no other TriAttn site (census above; the 5I28 run below: `pv_front` = `pv_pass` = 0). Default route (FP8 off) untouched.
+
+### The one failed prediction of the earlier RF3 PV table (7y37)
+
+The earlier row ("3 / 4 inside; 7y37: 2.24 against 1.49 x 1.1; its ipTM is 0.10, a failed prediction") is not an FP8 fault:
+
+| check | result |
+|---|---|
+| ipTM / pTM / pLDDT / Rg of the 7y37 prediction (4 trunk seeds, bf16 vs PV vs PV + q / k vs `safe`) | ipTM 0.096-0.102 in every mode, pLDDT 0.69-0.70, Rg 24.4-24.6 A, 0 NaN (the model fails on this target in bf16 too) |
+| bf16 trunk seeds alone | bimodal: seed 0 sits 4.8 A from seeds 1-3 (pair max 4.96 A, 4 seeds; **6.12 A over 12 seeds**); the 1.49 A of the old row came from an environment whose bf16 seeds did not show the second mode (the bf16 rows here reproduce bit for bit between two jobs) |
+| same-seed FP8 vs bf16, 12 trunk seeds | PV 5.61 A, PV + q / k 5.62 A, `safe` 5.73 A max, against 1.1 x 6.12 = 6.73 A: inside; the large entries are seeds that land in the other bf16 mode (bf16_t0 is in the minor mode, f8_t0 in the major one) |
+| calibration / scale | 0 heads with log2 scale <= -20 (no zero-amax head), log2 scale -4 .. -2 on every site, V^T peak <= 0.54 of the e4m3 range (0.25 for the q / k route), 0 saturation flags, 0 redos, q / k infeasible sites 0 of 106 |
+| route | `fp8.route_stats()` per case: d128_calls 1048, pv_fused 1048, qk 1048 (942 in the very first case: the first call of each of the 106 sites calibrates), pv_front / pv_pass 0 |
+
+Conclusion: a low-confidence target whose bf16 trunk seeds are already two modes 5-6 A apart is a bad probe for the 1.1 x rule (as Protenix v2 7y37); FP8 does not move it.
+
+### End level: 12 targets x 4 trunk seeds (rule: same-seed bf16-vs-FP8 RMSD max <= max(1.1 x bf16 trunk-seed pair max, 0.5 A))
+
+Targets 7y37 7zau 8ad9 8ee9 8fxv 8gn4 8id0 8ifx 8j2w 8p7u 8vdn 8x3q (FoldBench specs, bucket 256-1280 tokens), FoldForge a9e1549 + this branch, 200 diffusion steps, 1 sample, diffusion_seed 0.
+Arms (one process, per case `fp8.disable()` + `FP8_QK = False` first, so an arm never inherits the previous one's q / k): `f8` PV on the fused front; `f8qk` + e4m3 q / k; `safe` = `fp8.enable("safe", model="rosettafold3")`
+(every `safe` route incl. the TriMul / OPM / token DiT fixes of `fp8c/rf3if2`, + the table's TriAttn part); `safenota` = `fp8.enable("safe")` without a model (attribution: everything but TriAttn).
+
+| arm | inside | max same-seed RMSD (A) | max abs d ipTM | saturation flags / redos |
+|---|---|---|---|---|
+| PV (`f8`) | 12 / 12 | 0.00-9.22 (8fxv: bf16 pair max 9.32) | 0.117 (8ifx, bf16 ipTM range 0.594-0.668) | 0 / 0 |
+| PV + q / k (`f8qk`) | 12 / 12 | 0.00-3.92 | 0.106 (8ifx) | 0 / 0 |
+| whole `safe` + TriAttn | 11 / 12 | 8p7u 1.06 against 0.62 (bf16 pair max 0.56): OUT | 0.090 (8ifx) | 0 / 0 |
+| whole `safe`, TriAttn off (`safenota`) | 11 / 12 | 8p7u 1.06 against 0.62: OUT, the same value | 0.091 (8ifx) | 0 / 0 |
+
+The one OUT (8p7u, a target whose bf16 seeds agree to 0.56 A) is identical with TriAttn on the default core: it belongs to the other `safe` routes (TriMul / OPM / DiT, which the `fp8c/rf3if2` branch made reachable for RF3), not to the
+TriAttn part; with TriAttn alone (PV, PV + q / k) 8p7u is inside (0.06 / 0.53 A). 7zau and 8fxv (bf16 pair max 18.6 / 9.3 A, ipTM spread 0.03 / 0.06) are unstable probes; 7zau `safe` seed 1 flips to the other bf16 mode (17.8 A), `safenota` does not (1.9 A): flips are chaotic, not a systematic bias.
+Raw tables: `benchmarks/fp8_e2e/results_rf3_triattn.txt`, harness `benchmarks/fp8_e2e/e2e3_rf3_triattn.py`.
+
+### 5I28 benchmark (FoldForge a9e1549 + this branch with the route counters of `fp8c/counters`, H100, `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=rosettafold3`, protocol of `run_1118_301_fp8`, 6 warm repeats, median of the warm forwards, seconds)
+
+bf16 and FP8 "after" were run on the same node (node01) with this tree; the 3.0.1 columns are the earlier node02 runs (docs above).
+
+| n | bf16 (node01, this tree) | FP8 3.0.1 / bf16 | FP8 `fp8c/rf3if2` (no TriAttn) / bf16 | FP8 now | FP8 now / bf16 |
+|---|---|---|---|---|---|
+| 1 | 0.4235 | 1.001 | 1.012 | 0.4246 | 1.003 |
+| 2 | 0.6417 | 0.997 | 1.000 | 0.6340 | 0.988 |
+| 4 | 1.3456 | 0.991 | 0.979 | 1.2744 | 0.947 |
+| 8 | 3.868 | 1.086 | 0.951 | 3.380 | 0.874 |
+| 12 | 9.344 | 1.060 | 0.950 | 7.844 | 0.839 |
+| 16 | 17.205 | 1.041 | 0.934 | 13.778 | 0.801 |
+
+`fp8.route_stats()` after the whole run (n = 1 .. 16, the counters are bumped at Python / capture time, a CUDA-graph replay does not count): `triattn` d128_calls 12744, **pv_fused 11688, qk 11582** (= pv_fused - 106 first-call calibrations of the q / k scales), pv_front 0, pv_pass 0, calibrations 0;
+the 1056 d128 calls without PV are the n = 1 (128 tokens) runs below `FP8_PV_FUSED_MIN_S` (default fp16 core by design, not a fallback). Other routes: TriMul calls 7812 (0 fallbacks, 0 capture fallbacks), OPM 264 (0), Transition 4368 (0),
+PWA 228 (72 declined by its gate), token DiT expand 432, atom DiT 0 (`KQLN` rows not served: "Not done"). `fp8.check()` after the run: False (no saturation).
 
 ## TriMul: where else e4m3 can go (3.0.0 exploration, branch `fp8x/trimul`, 2026-11-17, base `fp8/3.0.0-on-2512` 91a9241fb)
 
@@ -1411,7 +1464,7 @@ of FP8 vs bf16 <= max(1.1 x the largest bf16 trunk-seed-pair RMSD, 0.5 A)). Two 
 | OpenDDE | 384:12:32 cuBLAS front + standalone pass (trunk; gate L1024); 64:2:32 front-made (templates); 12-head sites at ~1.67 x L (8 calls at 1280 for L768) | 1040; 160; 8 | "unfused" |
 | Boltz-2 | 128:4:32 fused; 64:4:32 front-made (templates) | 1360; 160 | not whitelisted |
 | OpenFold3, AF3 | 128:4:32 fused; 64:4:16 front-made (templates, gate L256) | 1040; 160 | not whitelisted (candidates below) |
-| RoseTTAFold3 | 128:4:32 fused only | 1040 | not whitelisted |
+| RoseTTAFold3 | 128:4:32 fused only | 1040 | whitelist "fused" + q / k (branch `fp8c/rf3-triattn`) |
 | IntelliFold2 | 256:8:32 front-made, 4 sites only (160 calls; no trunk site on this path) | 160 | not whitelisted |
 | Chai-1 | 64:4:32 front-made, 160 calls only (trunk not on this path) | 160 | not applicable |
 | ESMFold2 | no template path, no TriAttn site | 0 | not applicable |
