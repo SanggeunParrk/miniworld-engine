@@ -106,7 +106,7 @@ __device__ __forceinline__ uint16_t e4m3x2(float lo, float hi) {   // lo -> low 
 #define VT_BF 0
 #endif
 template <int NST> struct SMQ {
-  static constexpr int SX = 0, SW = SX + NST * TILE * 2, SV = SW + HC * D * 2, SEND = SV + HC * BN * (1 + VT_NAT) + VT_BF * HC * BN * 2;
+  static constexpr int SX = 0, SW = SX + NST * TILE * 2, SV = SW + HC * D * 2, SEND = SV + (VT_BF ? HC * BN * 3 : HC * BN * (1 + VT_NAT));   // VT_BF: e4m3 natural at SV, bf16 natural at SV + HC * BN
   static constexpr int BYTES = SEND + 1024 + 64;
 };
 
@@ -225,8 +225,13 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
     for (int mb = 0; mb < MB; ++mb) {
       #pragma unroll
       for (int ks = 0; ks < D / 16; ++ks)
+#if VT_BF   // swapped roles: v [64 n][hc block] = y . Wv^T (rows n, columns hc: consecutive channels pack into one word)
+        wg::mma_m64n64k16_kk(wg::desc(sx + (ks >> 2) * BN * 64 + wg::off(0, (ks & 3) * 2)),
+                             wg::desc(sWv + (ks >> 2) * HC * 64 + mb * 64 * 64 + wg::off(0, (ks & 3) * 2)), acc[mb], ks == 0 ? 0 : 1);
+#else
         wg::mma_m64n64k16_kk(wg::desc(sWv + (ks >> 2) * HC * 64 + mb * 64 * 64 + wg::off(0, (ks & 3) * 2)),
                              wg::desc(sx + (ks >> 2) * BN * 64 + wg::off(0, (ks & 3) * 2)), acc[mb], ks == 0 ? 0 : 1);
+#endif
     }
     wg::commit();
     wg::wait();
@@ -234,6 +239,28 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
     if (tid == 0) { if (SY) tma::wait_read<1>(); else tma::wait_read<0>(); }
     __syncthreads();
     const int rr = warp * 16 + (lane >> 2), cc = (lane & 3) * 2;
+#if VT_BF
+    {
+      unsigned char* sN8 = reinterpret_cast<unsigned char*>(sV);
+      __nv_bfloat16* sB = reinterpret_cast<__nv_bfloat16*>(reinterpret_cast<unsigned char*>(sV) + HC * BN);
+      #pragma unroll
+      for (int mb = 0; mb < MB; ++mb) {
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          const int hc = mb * 64 + i * 8 + cc, h = hc / C, c = hc % C;
+          #pragma unroll
+          for (int hf = 0; hf < 2; ++hf) {
+            const float r0 = acc[mb][i * 4 + 2 * hf], r1 = acc[mb][i * 4 + 2 * hf + 1];
+            const float a0 = r0 * vinv, a1 = r1 * vinv;
+            amax = fmaxf(amax, fmaxf(fabsf(a0), fabsf(a1)));
+            const int off = (h * BN + rr + hf * 8) * C + c;
+            *reinterpret_cast<uint32_t*>(sB + off) = pack2(r0, r1);       // bf16 natural: ln_vg's bytes
+            *reinterpret_cast<uint16_t*>(sN8 + off) = e4m3x2(a0, a1);     // e4m3 natural (the dw operand)
+          }
+        }
+      }
+    }
+#else
     #pragma unroll
     for (int mb = 0; mb < MB; ++mb) {
       #pragma unroll
@@ -241,20 +268,8 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
         const float a0 = acc[mb][i * 4 + 0] * vinv, a1 = acc[mb][i * 4 + 1] * vinv, a2 = acc[mb][i * 4 + 2] * vinv, a3 = acc[mb][i * 4 + 3] * vinv;
         const int row = mb * 64 + rr, col = i * 8 + cc;
         if (SY || n0 + col < N) amax = fmaxf(amax, fmaxf(fmaxf(fabsf(a0), fabsf(a1)), fmaxf(fabsf(a2), fabsf(a3))));
-#if !VT_BF
         sV[(row * BN + col) >> 1] = e4m3x2(a0, a1);
         sV[((row + 8) * BN + col) >> 1] = e4m3x2(a2, a3);
-#endif
-#if VT_BF
-        {   // bf16 natural v (unscaled accumulator, rounded like ln_vg's): [H][BN][C] behind the e4m3 tile
-          __nv_bfloat16* sB = reinterpret_cast<__nv_bfloat16*>(reinterpret_cast<unsigned char*>(sV) + HC * BN * 2);
-          const int h0 = row / C, c0 = row % C, h1 = (row + 8) / C, c1 = (row + 8) % C;
-          sB[(h0 * BN + col) * C + c0] = __float2bfloat16_rn(acc[mb][i * 4 + 0]);
-          sB[(h0 * BN + col + 1) * C + c0] = __float2bfloat16_rn(acc[mb][i * 4 + 1]);
-          sB[(h1 * BN + col) * C + c1] = __float2bfloat16_rn(acc[mb][i * 4 + 2]);
-          sB[(h1 * BN + col + 1) * C + c1] = __float2bfloat16_rn(acc[mb][i * 4 + 3]);
-        }
-#endif
 #if VT_NAT
         {
           unsigned char* sN = reinterpret_cast<unsigned char*>(sV) + HC * BN;   // [H][BN][C]
@@ -268,16 +283,18 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
 #endif
       }
     }
+#endif   // VT_BF
     wg::proxy_fence();
     __syncthreads();
 #if VT_NAT
     if (tid == 0) {
 #if !VT_BF
       tma::store_3d(&vmap, tma::sa(sV), n0, s * C, 0);
-#else
-      tma::store_3d(&vmap, tma::sa(reinterpret_cast<unsigned char*>(sV) + HC * BN * 2), s * C, n0, 0);
-#endif
       tma::store_3d(&nmap, tma::sa(reinterpret_cast<unsigned char*>(sV) + HC * BN), s * C, n0, 0);
+#else   // vmap: the bf16 natural v (staged at +HC*BN), nmap: the e4m3 natural v (at +0)
+      tma::store_3d(&vmap, tma::sa(reinterpret_cast<unsigned char*>(sV) + HC * BN), s * C, n0, 0);
+      tma::store_3d(&nmap, tma::sa(sV), s * C, n0, 0);
+#endif
       tma::commit();
     }
 #else
