@@ -170,7 +170,9 @@ def test_boltz2_expand_route_runs_and_is_close() -> None:
         y64 = ref64(**{k: (v.double() if torch.is_tensor(v) and v.is_floating_point() else v) for k, v in inputs.items()})
     e0 = (y0.double() - y64).pow(2).mean().sqrt()
     e8 = (y8.double() - y64).pow(2).mean().sqrt()
-    print(f"boltz2 token DiT vs fp64 (rms, update rms {upd.item():.4f}): bf16 {e0.item():.5f} ({e0.item() / upd.item():.2%}), expand e4m3 {e8.item():.5f} ({e8.item() / upd.item():.2%})")
+    print(
+        f"boltz2 token DiT vs fp64 (rms, update rms {upd.item():.4f}): bf16 {e0.item():.5f} ({e0.item() / upd.item():.2%}), expand e4m3 {e8.item():.5f} ({e8.item() / upd.item():.2%})"
+    )
     assert e0 < 0.015 * upd.double() and e8 < 0.10 * upd.double(), (e0.item(), e8.item())
 
 

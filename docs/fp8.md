@@ -2017,7 +2017,7 @@ the touched Python files. The F8QK core and the QK8 front instance are not in th
 ## Token DiT forward: e4m3 GEMM operands (EXPERIMENTAL, `conditioned_transition.cuda.token_dit_fp8`, branch `fp8x/token-dit`)
 
 Scope: the H100 bf16 inference block of `TokenDiTProtenix` / `TokenDiTMiniWorld` with the default model options (the CondFold route of
-`docs/h100/token_dit.md`), width 768. Off by default; with no switch the route is bit-identical to 2.5.12 (below). The block runs
+`docs/h100/token_dit.md`), width 768; Boltz-2's up-gate block (`TokenDiTBoltz2`) takes the `expand` placement from 2560 rows (section "Boltz-2: token DiT and atom DiT FP8 routes", below). Off by default; with no switch the route is bit-identical to 2.5.12 (below). The block runs
 24 x per diffusion step x 200 steps, so on small targets it is a large share of the sampler; the trunk FP8 routes do not reach it.
 
 ```
@@ -2127,7 +2127,7 @@ trajectory are not measured here (the per-row scales make the route independent 
 
 Scope: the H100 `"cuda"` backend of the local atom DiT block (`modules/atom_dit.py`, AF3 32 x 128 windows; `kernels/integrations/local_dit_h100.py`),
 bf16 (`master`) inference with a conditioning shared by the samples (the sampler step: `cond` an expanded view over A > 1), the AdaLN classes
-(Protenix / OpenDDE, AF3 / OpenFold3 / IntelliFold2) and Chai-1 (`IDENT` / `PARS` / `NOOUT`). Boltz-2 (`UP`), RoseTTAFold3 (`KQLN`), ESMFold2
+(Protenix / OpenDDE, AF3 / OpenFold3 / IntelliFold2), Chai-1 (`IDENT` / `PARS` / `NOOUT`) and, from 2048 atoms, Boltz-2 (`UP`, `post90_f8up`: section "Boltz-2: token DiT and atom DiT FP8 routes"). RoseTTAFold3 (`KQLN`), ESMFold2
 (`RMS`), per-sample conditioning tables, fp32 and training keep the bf16 / TF32 kernels. Default off; with it off the route is the 2.5.12 one.
 
 | switch | effect |
@@ -2254,6 +2254,131 @@ tree 91a9241fb, separate processes, `~/miniworld-engine-scratch/fp8x-atomdit/scr
 off = default bitwise, Boltz-2 / per-sample / training fall back bitwise, switch parsing): 11 passed. CPU: `ruff check` / `ruff format` / `pyright` clean on the touched Python files; `test_capture_api.py`, `test_supports_signature.py`, `test_init.py`, `test_measure_shared_cond.py`: 621 passed, 1 failed -- `test_every_module_level_dict_is_registered_or_listed`, the same failure on the base tree (the TriAttn / TriMul FP8 module dicts; nothing of this branch). No registry row, tolerance or `backend_versions` change.
 Prebuild: the two FP8 cubins are not in the prebuild plan (first FP8 call JIT-compiles them, ~3 s).
 
+## Boltz-2: token DiT and atom DiT FP8 routes for the up-gate block (branch `fp8c/boltz2`, 2026-11-18)
+
+Boltz-2's diffusion blocks carry the up-gate transition (`UpGatedConditionedTransition`: `h = silu(x Wa^T) (x Wb^T) (x Wu^T)`, three GEMMs instead of two).
+Both FP8 routes above were written for the two-GEMM SwiGLU and refused it, so under `MINIWORLD_FP8=safe` Boltz-2 ran TriMul / OPM / PWA / Transition on e4m3 and its
+two DiTs on bf16 (profiler census, 5I28 n = 4: 0 `gemm_swiglu_f8_sm90`, 0 `resgate_adaln_cf_q8`, 0 `pre90_f8` / `post90_f8`).
+
+### Root causes (`fp8.route_stats()`, `why_*` counters)
+
+| route | gate that refused Boltz-2 | not the cause |
+|---|---|---|
+| token DiT `expand` | `token_dit_fp8.active(..., plain)`: `plain = (variant == VARIANT_DEFAULT)` is False for the up-gate block (`VARIANT_UP`: the default with `up`, `rna`); the e4m3 kernel `gemm_swiglu_f8` has no third operand | width (768), bf16, `M % 128`, the AdaLN row kernels (the same sigmoid AdaLN as AF3) |
+| atom DiT `pre` + `post` | `local_dit_h100._fwd`: `set(opts) <= f8.OPTIONS` fails (`UP`, `why_opts`); `post90_f8` has no W_u chunk | shared conditioning (it is shared in the sampler step), bf16, `pre90_f8` (does not depend on the transition) |
+
+### What changed
+
+- `gemm_swiglu_f8_sm90.cu`: `gemm_swiglu_f8(..., up)`: a `Cfg<64, UP>` instantiation with n192 tiles (`wgmma m64n192k32 e4m3`, `[Wa 64 | Wb 64 | Wu 64]` per tile, the bf16 up-gate kernel's tiling), epilogue `silu(a) b u` with the three per-channel weight scales; `VARIANT_UP` + `up` in `token_dit_fp8.active`; the weight pack re-uses `_bf16_wab64(wab3, up=True)`. The default (two-GEMM) kernels are the same source instantiations: bit-identical.
+- `sm90_atom/post90_f8up.cu` (new file; `post90_f8.cu` is untouched, so the AF3-family artifacts keep their key): the post kernel with a `Wu_j` chunk (e4m3, one power-of-two scale per chunk, `wsi[11 + j]`) streamed beside each `[Wa_j; Wb_j]`, `h = round(silu(a) b u)` as `post90` UP; `f8.OPTIONS` gains `UP`, `pack8` quantizes `W_u`, `post_fwd8` selects the kernel by option, minb 1 (the 255-register form). `pre90_f8` is unchanged.
+- Gates measured in a CUDA graph (below): token DiT expand for the up-gate block from `MIN_ROWS_UP = 2560` rows (M = A L), atom DiT UP from `FP8_UP_MIN_N = 2048` atoms. Below them Boltz-2 keeps the bf16 route (counted as `declined` / `fallbacks`).
+- `qkvg` / `out` / `squeeze` placements: unchanged (the same GEMMs as the default block's; `safe` does not use them).
+- Not in `safe`'s switch set: nothing new. FP8 stays outside the judge: no registry row, tolerance or `backend_versions` entry; default route (FP8 off) bit-identical (the new branches sit behind `PLACES` / `FP8_ROWS`).
+
+### Module error and speed (H100 node01/02, random weights, A = 5 samples sharing the conditioning, CUDA-graph replay of 20 blocks, median of 30)
+
+Error against the PyTorch fp64 / fp32 reference (rms of the difference, token DiT as % of the block update `y - x`, atom DiT as % of the output):
+
+| module | bf16 route | e4m3 route | AF3-family e4m3 for comparison |
+|---|---|---|---|
+| token DiT block, expand only | 0.69 % | 6.5 % (L 128-1024: 6.45-6.55) | 5.4 % (this section, "Token DiT") |
+| atom DiT, pre | 0.59 % | 1.6-1.7 % | 1.5-1.7 % |
+| atom DiT, post | 0.59 % | 5.0-5.1 % | 3.9 % |
+| atom DiT, pre + post | 0.59 % | 5.3 % | 4.2 % |
+
+Token DiT block (width 768, 16 heads, `TokenDiTBoltz2`): kernel time of the expand + SwiGLU (profiler, eager) 11.4 -> 8.4 us at M = 1920, 14.2 -> 10.5 us at 2560, 26.6 -> 19.1 us at 5120 (-26 .. -28 %, as the AF3 kernel); whole block in a graph, e4m3 / bf16:
+
+| L | M = 5 L | bf16 us | e4m3 expand us | ratio |
+|---|---|---|---|---|
+| 128 | 640 | 60.2 | 63.6 | 1.056 |
+| 256 | 1280 | 95.0 | 98.1 | 1.032 |
+| 384 | 1920 | 128.5 | 131.9 | 1.027 |
+| 512 | 2560 | 176.4 | 176.0 | 0.998 |
+| 768 | 3840 | 256.8 | 254.6 | 0.991 |
+| 1024 | 5120 | 347.6 | 335.4 | 0.965 |
+| 1536 | 7680 | 561.4 | 535.6 | 0.954 |
+| 2048 | 10240 | 786.9 | 755.6 | 0.960 |
+
+The row passes (`resgate_adaln_cf_q8`) cost what the bf16 ones cost; below 2560 rows the block is slower in a graph although the kernel is faster, hence `MIN_ROWS_UP = 2560` (the two-GEMM expand keeps its 640).
+Atom DiT block (AtomDiTBoltz2, A = 5, bf16 / pre / post / pre + post us): 512 atoms 33.8 / 38.3 / 36.4 / 35.2 (1.042), 1024 36.8 / 40.6 / 39.6 / 38.1 (1.037), 2048 64.2 / 68.2 / 50.3 / 49.0 (0.763), 4096 99.9 / 105.4 / 84.3 / 83.9 (0.840), 8192 175.1 / 186.8 / 140.6 / 143.0 (0.817): `pre` alone never wins, `post` carries the gain; gate 2048 atoms (pre + post as AF3).
+
+### End level (FoldForge a9e1549, miniworld backend, eager, 200 steps, TRUNK seeds, `MINIWORLD_FP8=safe`; routes forced on at every size: gates 0)
+
+Arms: `bf16` (FP8 off), `old` (`safe` without the two DiT routes = engine 3.0.1's route set for Boltz-2), `new` (`safe` + both DiT routes, the same FP8 trunk object as `old`, only the diffusion differs). 12 targets x 4 trunk seeds x 2 diffusion seeds x 5 samples (10 draws per group); the routes fired in every case (token DiT 4800 expand calls per sample group, atom DiT 1200 pre + post calls, 0 fallbacks).
+`inside` = max same-draw RMSD to bf16 <= max(1.1 x the largest bf16 draw-pair RMSD, 0.5 A) (the docs' form; the floor is the diffusion spread of bf16 itself, mean 6.1 A):
+
+| | groups inside | mean RMSD to bf16 | mean RMSD new vs old | max |d ipTM| (new - bf16) |
+|---|---|---|---|---|
+| old (3.0.1) | - | 0.88 A | | |
+| new | 47 / 48 (7y37 trunk seed 3: one draw 6.26 A against 6.23 A; `old`: 4.86 A) | 0.98 A | 0.57 A | 0.126 (7yey), others <= 0.11 |
+
+Per-group numbers: `~/miniworld-engine-scratch/bench5i28_ff/fp8c_boltz2/an_main_s5.txt` (scripts `e2e_dit.py`, `an_dit.py` there).
+
+Boltz-2 9c90 (bistable), mode population over 16 trunk seeds x 2 diffusion seeds x 5 samples = 160 draws per arm, modes = 3 A clusters of the pooled bf16 draws:
+
+| arm | ipTM < 0.6 | largest modes (draws) | same-draw flips (> 3 A) vs bf16 |
+|---|---|---|---|
+| bf16 | 116 / 160 | 73 / 50 / 19 / 8 (+ 9 singletons) | |
+| old | 121 / 160 | 80 / 49 / 19 / 2 | 18 / 160 |
+| new | 114 / 160 | 79 / 49 / 18 / 3 | 22 / 160 (new vs old: 12 / 160) |
+
+The mode population is preserved by both FP8 arms; the DiT routes add no shift (114 vs 121 vs 116 of 160) and 4 more same-draw flips than `old`, within the draw-to-draw noise of the target.
+
+Same 9c90, 1 sample, diffusion seed 0, 32 trunk seeds (`an_c90s1.txt`), the stream of the TriAttn runs: low-ipTM (< 0.6) trunk seeds bf16 5 / 32, `old` 14 / 32, `new` 15 / 32; same-seed flips (> 3 A) vs bf16 19 / 32 for both FP8 arms, new vs old 11 / 32 (median RMSD 0.34 A). The FP8 route sets of 3.0.1 and of this branch move this stream's population alike (the DiT routes add 1 of 32); with 160 draws above they do not. Not a result of the DiT routes, but a property of 9c90 under the existing FP8 trunk.
+
+
+### Route parity with AF3 (`fp8.route_stats()`, 5I28 n = 4, `MINIWORLD_FP8=safe`, `MINIWORLD_FP8_MODEL=af3` to switch TriAttn on for the probe)
+
+| route | Boltz-2 | AF3 |
+|---|---|---|
+| TriAttn | pv_fused 1272, qk 1120, pv_front 140 | 1056 / 944 / 140 |
+| TriMul / OPM / Transition | 1416 / 36 / 640 calls, 0 fallbacks | 1200 / 36 / 532, 0 fallbacks |
+| PWA | native width 36 calls, 0 declined | wide 36 calls |
+| token DiT | expand 72, 0 declined | 72, 0 |
+| atom DiT | pre 18, post 18, `why_cond` 6 | the same (18 / 18 / 6: the eager first call with per-sample conditioning) |
+
+Over the 5I28 sizes n = 1 .. 16 of the benchmark (one process, cumulative): token DiT 288 calls, 144 declined (the row gate at n = 1, 2: M = 640 / 1280), atom DiT 90 calls / 144 fallbacks (n = 1 below 2048 atoms and the eager per-sample call), PWA 72 declined (the small-n shape gate, as for AF3). TriAttn is off for Boltz-2 (not whitelisted).
+
+### 5I28, Boltz-2, warm model forward (FoldForge a9e1549, one job on node01, protocol of `run_1118_301_fp8`: repeats 6, warm median, compile + CUDA graph, `MINIWORLD_FP8=safe` + lazy guards)
+
+| n (tokens) | bf16 s | `old` s (3.0.1 route set) | `new` s (this branch) | old / bf16 | new / bf16 | new / old |
+|---|---|---|---|---|---|---|
+| 1 (128) | 0.3984 | 0.3966 | 0.3971 | 0.995 | 0.997 | 1.001 |
+| 2 (256) | 0.6651 | 0.6570 | 0.6310 | 0.988 | 0.949 | 0.960 |
+| 4 (512) | 1.4846 | 1.4394 | 1.3788 | 0.970 | 0.929 | 0.958 |
+| 8 (1024) | 4.6932 | 4.4767 | 4.3490 | 0.954 | 0.927 | 0.971 |
+| 12 (1536) | 11.2537 | 10.6364 | 10.3981 | 0.945 | 0.924 | 0.978 |
+| 16 (2048) | 21.6934 | 20.2633 | 20.0052 | 0.934 | 0.922 | 0.987 |
+
+`old` and `new` are the same code with `MINIWORLD_TOKEN_DIT_FP8=` / `MINIWORLD_ATOMDIT_FP8=` empty for `old` (= engine 3.0.1's route set: the earlier run `run_1118_301_fp8` read 0.3935 / 0.6537 / 1.4316 / 4.4614 / 10.5926 / 20.2680 s on another day). Where the gain comes from at n = 4: the token DiT expand (M = 2560 rows, 72 calls per graph, 0 declined) and the atom DiT pre + post (about 4100 atoms); at n = 1 both stay below their gates (M = 640, 1000 atoms) and nothing changes; n = 2: the atom DiT only (M = 1280 is below the token gate). The upper bound from the kernel-time profile of the 3.0.1 route set (share of the forward in the replaced kernels x the module gain): n = 4 about 2.8 % (token expand 7.9 % of kernel time x 0.28, atom pre + post 6.0 % x 0.1-0.2), n = 8 about 2 %, n = 16 about 1 %; measured new / old: -4.2 % / -2.9 % / -1.3 %.
+
+
+### TriAttn FP8 for Boltz-2: evidence (NOT whitelisted; the decision stays with the owner)
+
+`enable("safe")` + `enable_triattn({fused, unfused}, qk=...)` on the shipped S gates, 12 FoldBench targets x 4 trunk seeds, 1 sample, diffusion seed 0, same-trunk-seed RMSD to bf16 against the largest bf16 trunk-seed pair RMSD (`inside` as above); `safe` = the current Boltz-2 route set (+ this branch's token DiT route); `pv` = + TriAttn PV, `pvqk` = + e4m3 q / k (AF3's whole TriAttn set); 0 saturation flags, 0 redos in 144 FP8 cases:
+
+| target | engaged | bf16 pair max / mean (A) | `safe` vs bf16 max / mean | `pv` vs bf16 | `pvqk` vs bf16 | `pvqk` vs `safe` | max \|d ipTM\| (pvqk - bf16) | inside: safe / pv / pvqk |
+|---|---|---|---|---|---|---|---|---|
+| 7y37 | yes | 4.83 / 2.92 | 0.72 / 0.47 | 1.05 / 0.45 | 0.54 / 0.36 | 0.40 / 0.35 | 0.008 | in / in / in |
+| 7yey | yes | 0.71 / 0.56 | 0.33 / 0.23 | 0.41 / 0.27 | 0.37 / 0.23 | 0.29 / 0.23 | 0.006 | in / in / in |
+| 8ad9 | yes | 2.33 / 1.97 | 2.96 / 2.28 | 2.67 / 1.46 | 1.66 / 1.18 | 3.55 / 2.43 | 0.069 | OUT / OUT / in |
+| 8c3l | yes | 3.65 / 2.49 | 1.78 / 1.07 | 1.74 / 1.23 | 1.76 / 1.15 | 2.35 / 1.57 | 0.011 | in / in / in |
+| 8chi | yes | 0.53 / 0.32 | 0.13 / 0.10 | 0.14 / 0.12 | 0.16 / 0.13 | 0.12 / 0.08 | 0.004 | in / in / in |
+| 8ee9 | yes | 4.48 / 2.31 | 2.15 / 0.82 | 3.59 / 1.01 | 0.35 / 0.20 | 2.01 / 0.83 | 0.006 | in / in / in |
+| 8s6o | yes | 4.55 / 2.42 | 0.57 / 0.42 | 0.97 / 0.54 | 1.27 / 0.85 | 1.46 / 0.75 | 0.002 | in / in / in |
+| 8weo | yes | 1.98 / 1.51 | 1.84 / 0.67 | 1.78 / 0.69 | 1.76 / 0.88 | 1.15 / 0.57 | 0.024 | in / in / in |
+| 8ey7 8gn4 8hxs 8wae | no (S gate) | 0.51-3.15 | = `safe` | = `safe` | = `safe` | 0.00 | <= 0.010 | in / in / in |
+
+
+Where TriAttn FP8 engaged (pv_fused > 0): 7y37 7yey 8ad9 8c3l 8chi 8ee9 8s6o 8weo; on 8ey7 8gn4 8hxs 8wae and **9c90** the shipped S gates keep the bf16 core (no TriAttn effect measured there; the earlier 9c90 flips were taken with the gates off). Reading: AF3's whole TriAttn set (PV + q / k) is inside on every engaged target and its same-seed RMSD to `safe` is 0.12-3.55 A against bf16 trunk-seed pair maxima of 0.53-4.83 A; `pv` and `safe` itself fail 8ad9 by the same margin (a bf16 pair max of 2.33 A over four seeds is a tight bar). 9c90: the shipped S gates keep the bf16 TriAttn core there (pv_fused 0 in all 128 cases: `pv` and `pvqk` are bitwise the `safe` outputs except 1 of 32 `pvqk` cases), so these runs say nothing about TriAttn FP8 on 9c90; the old 9c90 flips were measured with the gates removed. What the runs do show is the current Boltz-2 route set itself on 9c90 (1 sample, diffusion seed 0, 32 trunk seeds): the share of trunk seeds in the low-ipTM mode (ipTM < 0.6) is 5 / 32 for bf16 and 14 / 32 (`old`) .. 20 / 32 (`safe` of this table, with the token DiT route on) for the FP8 route sets, i.e. the 3.0.1 `safe` trunk (TriMul / OPM / PWA / Transition on e4m3) shifts this noise stream's mode population on 9c90 and the shift depends on the process history (static-scale calibration order); the DiT routes themselves add nothing to it (`old` 14 / 32, `new` 15 / 32). With 5 samples x 2 diffusion seeds (160 draws) the population is unchanged (116 / 121 / 114 of 160), so the 1-sample shift is a property of that noise stream; both facts belong in the owner's decision on 9c90.
+
+
+### Not done / limits
+
+- The qkvg / out / squeeze placements stay off for Boltz-2 as for AF3 (`safe` takes `expand` only).
+- Boltz-2 TriAttn FP8 is not enabled (`TRIATTN_MODELS` unchanged).
+- `post90_f8up.cu` is a copy of `post90_f8.cu` plus the Wu chunk (the AF3-family artifacts keep their key); a later merge of the two (`UP` macro) changes every `post90_f8` artifact key.
+- Prebuild: the new post kernel is reached by the existing FP8 atom DiT loop (Boltz-2 rows, option `UP`, minb 1); `token_dit_fp8_sm90` (`_fp8.ext`) changes content (the plan entry is unchanged), so a release needs its prebuilt artifacts refreshed.
 ## Known limits
 
 - Boltz-2 9c90 is bistable under any numerical noise of 0.1-2 % on the TriAttn output; V on e4m3 flips it (hi + lo too: 2 of 4 trunk seeds). In the current environment its own bf16 trunk seeds fall into 5 modes (24 seeds, 15.3 A, ipTM 0.40-0.85) and FP8 changes the mode of 9 of 24 same trunk seeds while the mode population stays equal (see the widened end-level section). Hence whitelist only, and Boltz-2 is not on it (open decision).

@@ -28,7 +28,7 @@ The lower-level switch (process wide, every ``cuda`` module) stays::
 
 ``"safe"`` is the set validated end to end on AF3 (FoldBench, 27 targets, 0 flagged, lDDT +0.0000 against bf16, whole forward 0.97-0.80x;
 docs/fp8.md "fp8safe2"): TriMul e4m3 planes (static scales, calibrated), OuterProductMean e4m3 product (weight-bound scales), PWA e4m3 key
-contraction, Transition e4m3 GEMMs (calibrated), token DiT e4m3 expand + SwiGLU (not ``qkvg``), atom DiT e4m3 row kernels (``pre`` + ``post``):
+contraction, Transition e4m3 GEMMs (calibrated), token DiT e4m3 expand + SwiGLU (not ``qkvg``; Boltz-2's up-gate block too, from 2560 rows), atom DiT e4m3 row kernels (``pre`` + ``post``; Boltz-2 from 2048 atoms):
 these routes do not depend on the model.
 
 TriAttn FP8 runs **only for a validated model** (:data:`TRIATTN_MODELS`; decision 2026-11-17): the FP8 PV route on the call-site kinds checked
