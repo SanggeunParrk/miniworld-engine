@@ -249,10 +249,10 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
         {   // bf16 natural v (unscaled accumulator, rounded like ln_vg's): [H][BN][C] behind the e4m3 tile
           __nv_bfloat16* sB = reinterpret_cast<__nv_bfloat16*>(reinterpret_cast<unsigned char*>(sV) + HC * BN * 2);
           const int h0 = row / C, c0 = row % C, h1 = (row + 8) / C, c1 = (row + 8) % C;
-          sB[(h0 * BN + col) * C + c0] = __float2bfloat16_rn(a0 * (1.f / vinv));
-          sB[(h0 * BN + col + 1) * C + c0] = __float2bfloat16_rn(a1 * (1.f / vinv));
-          sB[(h1 * BN + col) * C + c1] = __float2bfloat16_rn(a2 * (1.f / vinv));
-          sB[(h1 * BN + col + 1) * C + c1] = __float2bfloat16_rn(a3 * (1.f / vinv));
+          sB[(h0 * BN + col) * C + c0] = __float2bfloat16_rn(acc[mb][i * 4 + 0]);
+          sB[(h0 * BN + col + 1) * C + c0] = __float2bfloat16_rn(acc[mb][i * 4 + 1]);
+          sB[(h1 * BN + col) * C + c1] = __float2bfloat16_rn(acc[mb][i * 4 + 2]);
+          sB[(h1 * BN + col + 1) * C + c1] = __float2bfloat16_rn(acc[mb][i * 4 + 3]);
         }
 #endif
 #if VT_NAT

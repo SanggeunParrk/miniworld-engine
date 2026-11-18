@@ -164,3 +164,67 @@ def test_graph_replay_equals_eager_and_deterministic(f8t) -> None:
     torch.cuda.synchronize()
     for a, b in zip(e1, out, strict=True):
         assert torch.equal(a, b)
+
+
+@pytest.mark.skipif(not _H100, reason="H100")
+def test_bwd_only_producer_and_route(f8t) -> None:
+    """Round 2 (backward-only FP8: bf16 forward, FP8 dv / dw): the VT_BF producer's bf16 v is ln_vg's v (bit for bit), its e4m3 v the
+    same bytes as the full route's; the forward output equals the bf16 native default's; gradients stay inside the FP8 budget; the
+    step is deterministic and graph replay equals eager."""
+    from miniworld_engine.kernels.integrations import pwa_train as P
+
+    torch.manual_seed(0)
+    s, n = 64, 256
+    m = torch.randn(s, n, 64, device="cuda").bfloat16()
+    lw, lb = 1 + 0.1 * torch.randn(64, device="cuda"), 0.1 * torch.randn(64, device="cuda")
+    wv = (torch.randn(256, 64, device="cuda") / 8).bfloat16()
+    v, y = P._k(True)["lnvg"].ln_vg(m, lw, lb, wv, 1e-5, 2, 3, 1)
+    inv = torch.full((1,), 8.0, device="cuda")
+    amax0, amax1 = torch.zeros(1, device="cuda"), torch.zeros(1, device="cuda")
+    _, v8, _ = f8t._vt8_nat().ln_vt8n(m, lw, lb, wv, 1e-5, inv, amax0, 2, 3)
+    vb, v8b, yb = f8t._vt8_nat_bf().ln_vt8n(m, lw, lb, wv, 1e-5, inv, amax1, 2, 3)
+    assert torch.equal(yb, y)
+    assert torch.equal(v8b.view(torch.uint8), v8.view(torch.uint8))
+    assert torch.equal(vb, v) and float(amax0) == float(amax1)
+
+    mod = _module(128)
+    x, z, gy, mask = _inputs(32, 768)
+    ref = copy.deepcopy(mod).double()
+    ref.set_backend("pytorch")
+    g64 = _grads(ref, x.double(), z.double(), gy.double(), mask)
+    f8t.PLACES = frozenset()
+    f8t.NATIVE_ONLY = True  # the native bf16 route at the same shape (the bwd-only route runs it too)
+    d0 = _grads(mod, x, z, gy, mask)
+    f8t.NATIVE_ONLY = False
+    f8t.PLACES = f8t.BWD
+    f8t.reset()
+    _grads(mod, x, z, gy, mask)  # seeds the scales
+    b = _grads(mod, x, z, gy, mask)
+    b2 = _grads(mod, x, z, gy, mask)
+    assert torch.equal(b[0], d0[0])  # bf16 forward: the output is the bf16 native default's
+    for i, (gd, gf, gr) in enumerate(zip(d0, b, g64, strict=True)):
+        assert torch.isfinite(gf).all(), i
+        assert _rel(gf, gr) < max(0.08, 6 * _rel(gd, gr)), i
+    for p, q in zip(b, b2, strict=True):
+        assert torch.equal(p, q)
+    assert f8t.overflow_count() == 0
+    ps = list(mod.parameters())
+    xg = x.detach().clone().requires_grad_()
+
+    def step():
+        yy = mod(xg, z, mask)
+        return torch.autograd.grad(yy, [xg, *ps], gy)
+
+    e1 = step()
+    st = torch.cuda.Stream()
+    st.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(st):
+        step()
+    torch.cuda.current_stream().wait_stream(st)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = step()
+    g.replay()
+    torch.cuda.synchronize()
+    for a, c in zip(e1, out, strict=True):
+        assert torch.equal(a, c)
