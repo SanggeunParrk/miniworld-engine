@@ -68,6 +68,20 @@ def _planes(x, weights, token, gi, bi, xs, d, transposed, sub, scales, margin, a
     if record is not None:
         record.append((sa.cpu(), sb.cpu()))
     abq = torch.empty((2 * d, npad, npad), dtype=torch.float8_e4m3fn, device=x.device)
+    if (
+        d == 512
+    ):  # the packed shared-resident K1 (the bf16 route's D512 front) with the e4m3 plane store: weights pre-scaled and packed once per calibration
+        from ._h100_pack import owned_bf16_mask
+        from .h100_b200style_ss_regtune import front_f8, prescale_pack
+
+        if sub is not None and "w512" in sub:
+            w1 = sub["w512"]
+        else:
+            w1 = prescale_pack(weights, qinv)
+            if sub is not None:
+                sub["w512"], sub["w512_src"] = w1, weights
+        front_f8(x, w1, owned_bf16_mask(token, x.shape[1], x.device), gi, bi, abq, xs, amax, transposed)
+        return abq, csc
     f8c = None
     if K1_F8C and not bidirectional:  # (the FP8-compute K1 is a single-direction experiment)
         from .h100_b200style_direct import f8c_prepare
@@ -159,7 +173,7 @@ def run(leaves, mask, direction, scales=None, record=None, cache=None, margin=1.
         from .h100_b200style_static import output_kernel
 
         # the token-flat K3 (the shipped D256 / D384 inference tile) where it applies, else the any-L row form
-        flat = d in (256, 384) and n % 128 == 0
+        flat = d in (256, 384, 512) and n % 128 == 0  # D512: the token-flat form only (k3reorder.cu has no row form)
         kernel, smem = output_kernel(d, h, cfg, rowpad=not flat, xbuf=K.K3_XBUF.get(d, 1), extra=k3_flags(d, flat, direction == 0))
         bn = cfg[0]
         if flat:
@@ -246,8 +260,10 @@ HEADROOM = float(_os.environ.get("MINIWORLD_TRIMUL_FP8_HEADROOM", "16"))
 #: bidirectional D64 +4 % at L512, L1024 -7 % cool but +8 % sustained, -22 % at L2048; bidirectional D384 -3 % at L512 (not clear), -8 % at L1024
 MIN_L = {(128, 1): 144, (128, 2): 192, (256, 1): 224, (256, 2): 144, (128, 0): 256, (256, 0): 1024}
 MIN_L.update({(64, 1): 512, (64, 2): 512, (384, 1): 128, (384, 2): 128, (64, 0): 2048, (384, 0): 1024})
-#: widths the route serves: D128 / D256 (n128 K1 blocks) and, from the 3.0.0 exploration (branch fp8x/trimul), D64 / D384 (n64 K1 blocks)
-WIDTHS = (64, 128, 256, 384)
+#: D512 (IntelliFold2 trunk; one direction, L % 128 == 0, packed shared-resident K1 with the e4m3 plane store + k3reorder K3_CSCALE=2): every length gains (graph replay, FP8 / default 0.76 at L128, 0.87 at L256, 0.89-0.94 at L384-L2048, control 1.00): no gate
+MIN_L.update({(512, 1): 0, (512, 2): 0})
+#: widths the route serves: D128 / D256 (n128 K1 blocks) and, from the 3.0.0 exploration (branch fp8x/trimul), D64 / D384 (n64 K1 blocks), D512 (the packed K1)
+WIDTHS = (64, 128, 256, 384, 512)
 #: samples per call the route takes (B > 1 runs the one-sample route per sample into one output; exploration, branch fp8x/trimul)
 MAX_SAMPLES = 16
 _MINL_ENV = _os.environ.get("MINIWORLD_TRIMUL_FP8_MINL")
@@ -284,7 +300,12 @@ def refresh(cache) -> None:
         return
     cache["qinv"].copy_(1.0 / torch.cat([cache["sa"], cache["sb"]]))
     cache["csc"].copy_(cache["sa"] * cache["sb"])
-    if "f8c" in cache:
+    if "w512" in cache:
+        from .h100_b200style_ss_regtune import prescale_pack
+
+        with T.native_context(cache["w512"].device):
+            prescale_pack(cache["w512_src"], cache["qinv"], out=cache["w512"])
+    elif "f8c" in cache:
         from .h100_b200style_direct import f8c_kscale
 
         f8c_kscale(cache["f8c"], cache["qinv"])
@@ -322,6 +343,8 @@ def serves(module, pair, mask, bidirectional) -> bool:
     if d not in WIDTHS or module.d_hidden != d or pair.dtype != torch.bfloat16 or pair.shape[1] < 16:
         return False
     if module.ln_pair.eps != 1e-5 or module.ln_out.eps != 1e-5:
+        return False
+    if d == 512 and (bidirectional or pair.shape[1] % 128):  # D512: one direction, token-flat K3 (k3reorder.cu K3_CSCALE=2) at L % 128 == 0
         return False
     gate = MIN_L.get((d, 0 if bidirectional else 1 if module.outgoing else 2), 256)
     if pair.shape[1] < (int(_MINL_ENV) if _MINL_ENV is not None else gate):
