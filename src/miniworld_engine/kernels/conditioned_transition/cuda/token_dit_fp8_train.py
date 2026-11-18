@@ -35,7 +35,7 @@ FWD = ("expand", "squeeze", "qkvg", "out")
 DGRAD = ("dexpand", "dsqueeze", "dqkvg", "dout")
 #: round 2: byte reductions that need no 8-bit GEMM (bit-identical outputs and gradients): nox = the block input is the residual, the
 #: saved fp32 copy of it is dropped (docs/fp8_training.md "Token DiT round 2")
-BYTES = ("nox",)
+BYTES = ("nox", "hsave")
 _ALL = FWD + DGRAD + BYTES
 PRESETS = {
     "bytes": frozenset(BYTES),

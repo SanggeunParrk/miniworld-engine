@@ -57,14 +57,15 @@ def _run(m, A: int, L: int, places: str) -> list[torch.Tensor]:
 
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+@pytest.mark.parametrize("places", ["nox", "hsave", "bytes"])
 @pytest.mark.parametrize("A,L", [(8, 128), (6, 200), (48, 128)])
-def test_nox_is_bit_identical(A: int, L: int) -> None:
+def test_bytes_are_bit_identical(A: int, L: int, places: str) -> None:
     m = _master()
     ref = _run(m, A, L, "")
-    got = _run(m, A, L, "nox")
+    got = _run(m, A, L, places)
     assert len(ref) == len(got) == 4 + sum(q.requires_grad for q in m.parameters())
     for i, (a, b) in enumerate(zip(ref, got, strict=True)):
-        assert torch.equal(a, b), f"tensor {i}: nox differs from the default route"
+        assert torch.equal(a, b), f"tensor {i}: nox differs from the default route ({places})"
 
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
@@ -96,7 +97,7 @@ def test_nox_keeps_no_fp32_residual() -> None:
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
 def test_bytes_preset_and_gate() -> None:
     F = _F()
-    assert F.parse("bytes") == frozenset(("nox",))
+    assert F.parse("bytes") == frozenset(("nox", "hsave"))
     old = F.PLACES, F.MIN_ROWS
     F.PLACES, F.MIN_ROWS = F.parse("fast,nox"), 16384
     try:

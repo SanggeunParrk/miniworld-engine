@@ -283,10 +283,10 @@ __global__ void __launch_bounds__(384) swiglu_bwd_k(const AT* __restrict__ DH, c
     if constexpr (UP) {
       const float4 u = V4<AT>::load(AB + r * K * N + 2 * N + c);
       V4<AT>::store(DAB + r * K * N + 2 * N + c, mul4(dh, mul4(as, b)));
-      V4<AT>::store(Hh + r * N + c, mul4(mul4(as, b), u));
+      if (Hh) V4<AT>::store(Hh + r * N + c, mul4(mul4(as, b), u));
       dh = mul4(dh, u);   // the SwiGLU part's gradient: dh u
     } else {
-      V4<AT>::store(Hh + r * N + c, mul4(as, b));
+      if (Hh) V4<AT>::store(Hh + r * N + c, mul4(as, b));   // Hh null: the forward kept h (hsave)
     }
     V4<AT>::store(DAB + r * K * N + c, make_float4(dh.x * b.x * s.x * (1.f + a.x * (1.f - s.x)), dh.y * b.y * s.y * (1.f + a.y * (1.f - s.y)),
                                                    dh.z * b.z * s.z * (1.f + a.z * (1.f - s.z)), dh.w * b.w * s.w * (1.f + a.w * (1.f - s.w))));
@@ -928,15 +928,15 @@ void res_c_bwd(at::Tensor dout, at::Tensor z, at::Tensor Gg, at::Tensor bg2, at:
 }
 
 // up: ab / dab = [a | b | u] (Boltz-2's up-gate transition)
-void swiglu_bwd(at::Tensor dh, at::Tensor ab, at::Tensor dab, at::Tensor h, bool up) {
+void swiglu_bwd(at::Tensor dh, at::Tensor ab, at::Tensor dab, c10::optional<at::Tensor> h, bool up) {
   const int64_t M = dh.size(0), N = dh.size(1);
   TORCH_CHECK(N % 4 == 0 && ab.size(1) == (up ? 3 : 2) * N && dh.is_contiguous() && ab.is_contiguous() && dab.is_contiguous(),
               "swiglu_bwd");
-  actc(ab, dh, "ab"); actc(dab, dh, "dab"); actc(h, dh, "h");
+  actc(ab, dh, "ab"); actc(dab, dh, "dab"); if (h) actc(*h, dh, "h");
   const at::cuda::CUDAGuard g(dh.device());
   TDT_DISPATCH(dh.scalar_type(), AT, [&] {
-    if (up) swiglu_bwd_k<AT, true><<<(unsigned)M, 384, 0, S()>>>(CP<AT>(dh), CP<AT>(ab), P<AT>(dab), P<AT>(h), (int)M, (int)N);
-    else swiglu_bwd_k<AT, false><<<(unsigned)M, 384, 0, S()>>>(CP<AT>(dh), CP<AT>(ab), P<AT>(dab), P<AT>(h), (int)M, (int)N);
+    if (up) swiglu_bwd_k<AT, true><<<(unsigned)M, 384, 0, S()>>>(CP<AT>(dh), CP<AT>(ab), P<AT>(dab), OP<AT>(h), (int)M, (int)N);
+    else swiglu_bwd_k<AT, false><<<(unsigned)M, 384, 0, S()>>>(CP<AT>(dh), CP<AT>(ab), P<AT>(dab), OP<AT>(h), (int)M, (int)N);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

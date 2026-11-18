@@ -593,7 +593,7 @@ def _nd(params, qk, D):
     return P["transition.expand_a.weight"].shape[0] // D, P["attention.ln_pair.weight"].shape[0]
 
 
-def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False, nox=False):
+def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False, nox=False, hsave=False):
     """Shapes / dtypes of the forward's saved activations (the fake implementation and the contract of _fwd). The fp32 path
     saves no copy of cond (_own_cond), no copy of v (QK-norm: the core reads it from qkvg) and no LN(pair) (pair_bias_bwd
     recomputes it): those slots are empty [0, n] tensors. H100: q / k / v are always copies (the q pass scales q; the TF32 core's
@@ -635,6 +635,7 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False, no
         e((M, D), dtype=at),
         e((0 if ((fp32 and not h100) or _pair_fused(h100, fp32, dp)) else R, dp), dtype=at),
         e((R, 2), dtype=f32),
+        e((M, n * D) if hsave else (0, n * D), dtype=at),  # hsave: h = SwiGLU(a, b) as the squeeze GEMM read it (the backward does not rewrite it)
     ]
 
 
@@ -650,10 +651,11 @@ def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, extra=N
     _, plain = _variant(variant)
     from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_train as f8
 
-    nox = "nox" in f8.active(single.shape[0] * single.shape[2], single.shape[-1], fp32, plain, _sm90(single.device))
+    act = f8.active(single.shape[0] * single.shape[2], single.shape[-1], fp32, plain, _sm90(single.device))
+    nox, hsave = "nox" in act, "hsave" in act and "squeeze" not in act and "dexpand" not in act
     return [
         torch.empty_like(single),
-        *_saved_like(single, cond, pair, fp32, qk, heads, n, dp, bool(variant and variant[4]), nox),
+        *_saved_like(single, cond, pair, fp32, qk, heads, n, dp, bool(variant and variant[4]), nox, hsave),
     ]
 
 
@@ -739,6 +741,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
     xst = torch.empty(M, 2, device=dev)
     xt = torch.empty(M, D, device=dev, dtype=at)
     f8, f8p, f8w = _fp8_train(W, M, D, fp32, plain, h100, ("qkvg", "out", "expand", "squeeze"))
+    hsave = "hsave" in f8p and "squeeze" not in f8p and "dexpand" not in f8p  # keep h for the backward (swiglu_bwd then writes no h)
     sin = single.reshape(M, D).contiguous()
     # "nox" (docs/fp8_training.md, round 2): the fp32 residual x is float(input) exactly, so the saved fp32 copy (written 2 u, read 2 u by
     # res_adaln_b and 2 u by adaln_a_bwd; u = M D bf16 bytes) is dropped: both kernels read the input itself (1 u each); bit-identical
@@ -882,6 +885,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         z,
         ph,
         pst,
+        h if hsave else h.new_empty(0, nexp * D),
     ]
 
 
@@ -1117,6 +1121,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         z,
         ph,
         pst,
+        hs,
     ) = saved
     if vc.numel() == 0:  # B200 fp32 + QK-norm: v as the forward's core read it, a column view of qkvg
         vc = qkvg[:, 2 * D : 3 * D]
@@ -1156,11 +1161,11 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     T.res_c_bwd(dout, z, Gg, bg2, dz, dGg, part[0])
     dh = f8.mm(*f8.q8(dz, e5), f8w["dsqueeze"]) if "dsqueeze" in f8p else mm(dz, Wsq)  # [M, n D]
     dab = torch.empty_like(ab)
-    h = torch.empty_like(dh)
+    h = hs if hs.numel() else torch.empty_like(dh)  # hsave: the forward's h
     if "dexpand" in f8p:  # swiglu_bwd + dab as 8-bit with row scales, for the dxt dgrad
         dab8, sdab = f8.swiglu_bwd_q8(dh, ab, dab, h, e5)
     else:
-        T.swiglu_bwd(dh, ab, dab, h, up)
+        T.swiglu_bwd(dh, ab, dab, None if hs.numel() else h, up)
     dWsq = mm32(dz.t(), h)
     # fp32: the dxt / dxa GEMMs write straight into their column blocks of dG (the row kernels then copy nothing); the H100 owned
     # GEMMs return a fresh tensor, which the row kernels copy as before
