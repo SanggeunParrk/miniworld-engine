@@ -2,6 +2,81 @@
 
 Everything here is opt-in and off by default: FP8 is the backend `engine-fp8`; the default remains the bf16 / fp16 engine. Base: engine 2.5.14 (branch `rel/3.0.0` = 2.5.14 + `fp8/3.0.0-all`; the routes were built on 2.5.12, branch `fp8/3.0.0-on-2512`). With no switch set, every route is bit-identical to 2.5.14 (see "Release line 3.0.0"; before: 169 / 169 against 2.5.12, "Verification on the 2.5.12 base").
 
+
+## Combined tree `fp8c/all` (2026-11-19, base engine 3.0.1 = origin/main f5be1df46): branches, route matrix, 5I28
+
+One tree with every FP8 connection branch of the 2026-11-18 round (details in the sections below, one per branch): `fp8c/counters` (`fp8.route_stats()`),
+`fp8c/esm-opendde` (ESMFold2 atom block), `fp8c/rf3if2` + `fp8c/rf3-kqln` (RoseTTAFold3 TriMul / OPM / token DiT / atom DiT), `fp8c/chai1` (Chai-1 token DiT identity block,
+TriAttn d64 PV, grouped OPM e4m3 kernel, off by default), `fp8c/boltz2` (up-gate token DiT / atom DiT), `fp8c/if2-d512` (IntelliFold2 D512 TriMul planes), `fp8c/if2-pwa`
+(PWA BIG 256 x 8 x 32), `fp8c/triattn` + `fp8c/protenix1-opendde-triattn` + `fp8c/rf3-triattn` (TriAttn whitelist lines), `fp8c/h16-clamp` (e4m3 NaN-byte clamp of the
+16 / 32-channel core). `token_dit_fp8.active(M, D, fp32, plain, identity, parallel, up)`: plain -> all placements; `identity` (Chai-1) -> expand / out / squeeze with the fused
+`adaln_in_rows_cf_par_q8` pass; other parallel blocks (RoseTTAFold3) -> expand only (`rows_q8`); `up` (Boltz-2) -> expand with its own row gate `MIN_ROWS_UP`.
+Not in this tree: `fp8c/triattn-if2d64` (IntelliFold2 d64 attempt, non-finite output), the helper branches `if2-d512-rs`, `if2-pwa-stats`, `boltz2-eval`, `rf3-triattn-meas`
+(duplicates of merged commits). No TriAttn line for Boltz-2 (owner decision pending) and IntelliFold2 (10 / 12 inside).
+
+Verification of the combined tree (H100, one job per file, `bench5i28_ff/fp8all/slurm-fp8c-all-verifyF-*.log`): `tests/cpu/test_fp8_switch.py`, `test_prebuild_plan.py`, `test_capture_api.py`
+and every `tests/gpu/test_*fp8*.py`, `test_triattn_f8*.py`, `test_triattn_h16_fp8_extreme.py`: all pass. Default route with FP8 off against the origin/main f5be1df46 source tree, separate
+processes, outputs of 4 token DiT classes (L 384 / 640), PWA d128, OPM (plain / biased), TriMul D128 / 256 / 512 (default / rf3), TriAttn d128 / d64, five atom DiT classes (1024 / 2560 atoms):
+**all bit-identical** (`bench5i28_ff/fp8all/default_identity.py`; the PWA 256 x 8 x 32 case is not served by the cuda backend with FP8 off in either tree). The prebuild plan holds
+`triattn_h100_d64_f8pv`, `opm_chai_f8`, `post90_f8up`, the pre / post row kernels with RMS / KQLN, the e4m3 TriMul / PWA / Transition builds (`_prebuild --check` passes).
+
+### Model x route matrix: call counts (`fp8.route_stats()`, 5I28, `MINIWORLD_FP8=safe`, one process per model and n, counters bump at Python / capture time, a CUDA-graph replay does not count)
+
+Columns: TriMul calls | OPM calls | PWA calls (narrow + wide) | Transition calls | token DiT expand (out / qkvg: 0 everywhere, not in `safe`) | atom DiT calls (of which bf16 fallbacks:
+per-sample conditioning, 9 per run) | TriAttn pv_fused | pv_front | pv_pass | pv_d64 | qk | d128 calls (also counted with FP8 off) | route fallbacks (TriMul / OPM / PWA declined / Transition,
+eager + capture) . Census commit 7123ccb7d, log `bench5i28_ff/fp8all/slurm-fp8c-all-census-58933.log`. `MINIWORLD_FP8_MODEL` was set for af3 protenix1 opendde protenix2 openfold3 rosettafold3
+(not for chai1 in this census: its TriAttn counters are in the benchmark logs of `run_1119_fp8all`; not for the models outside `TRIATTN_MODELS`).
+
+| model | n | TriMul | OPM | PWA | Transition | token DiT expand | atom DiT | pv_fused | pv_front | pv_pass | pv_d64 | qk | d128 | fallbacks |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| af3 | 4 | 1200 | 36 | 36 | 534 | 72 |  18  (9) | 1056 | 140 | 0 | 0 | 944 | 1056 | 0 |
+| af3 | 12 | 1560 | 48 | 48 | 690 | 72 |  18  (9) | 1368 | 188 | 0 | 0 | 1256 | 1368 | 0 |
+| boltz2 | 4 | 1416 | 36 | 36 | 642 | 72 |  18  (9) | 0 | 0 | 0 | 0 | 0 | 1272 | 0 |
+| boltz2 | 12 | 2064 | 48 | 48 | 942 | 72 |  18  (9) | 0 | 0 | 0 | 0 | 0 | 1872 | 0 |
+| chai1 | 4 | 1104 | 0 | 27 | 486 | 48 |  18  (9) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| chai1 | 12 | 1560 | 0 | 36 | 690 | 48 |  18  (9) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| esmfold2 | 4 | 1044 | 36 | 27 | 555 | 36 |  0  (0) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| esmfold2 | 12 | 1476 | 48 | 36 | 780 | 108 |  0  (0) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| esmfold2-fast | 4 | 540 | 0 | 0 | 276 | 36 |  0  (0) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| esmfold2-fast | 12 | 804 | 0 | 0 | 408 | 108 |  0  (0) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| intellifold2 | 4 | 1104 | 36 | 27 | 585 | 72 |  18  (9) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| intellifold2 | 12 | 1560 | 48 | 36 | 846 | 216 |  54  (9) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| opendde | 4 | 1125 | 36 | 36 | 534 | 72 |  18  (9) | 0 | 140 | 24 | 0 | 0 | 0 | 0 |
+| opendde | 12 | 1569 | 48 | 48 | 822 | 216 |  54  (9) | 0 | 188 | 1605 | 0 | 0 | 0 | 0 |
+| openfold3 | 4 | 1200 | 36 | 27 | 534 | 72 |  18  (9) | 1056 | 140 | 0 | 0 | 944 | 1056 | 0 |
+| openfold3 | 12 | 1560 | 48 | 36 | 690 | 72 |  18  (9) | 1368 | 188 | 0 | 0 | 1256 | 1368 | 0 |
+| protenix1 | 4 | 1026 | 36 | 27 | 519 | 72 |  18  (9) | 936 | 0 | 0 | 0 | 832 | 936 | 0 |
+| protenix1 | 12 | 1338 | 48 | 36 | 675 | 72 |  18  (9) | 1248 | 0 | 0 | 0 | 1144 | 1248 | 0 |
+| protenix2 | 4 | 1098 | 36 | 27 | 510 | 72 |  18  (9) | 0 | 140 | 0 | 0 | 0 | 0 | 0 |
+| protenix2 | 12 | 1530 | 48 | 36 | 711 | 72 |  18  (9) | 0 | 1346 | 0 | 0 | 0 | 0 | 0 |
+| rosettafold3 | 4 | 1092 | 36 | 36 | 534 | 72 |  18  (9) | 1056 | 0 | 0 | 0 | 950 | 1056 | 0 |
+| rosettafold3 | 12 | 1416 | 48 | 48 | 690 | 72 |  18  (9) | 1368 | 0 | 0 | 0 | 1262 | 1368 | 0 |
+
+(The `out` / `qkvg` / `squeeze` columns of the raw table are 0 in every row and left out; the atom DiT cell reads `calls (fallbacks)`.)
+
+Routes that never fire, and why:
+
+| model | route | reason |
+|---|---|---|
+| all | token DiT `qkvg`, `out`, `squeeze` | not in `safe` (expand only; Chai-1: `out` / `squeeze` exist but are not in `safe`) |
+| af3 protenix1 opendde protenix2 openfold3 boltz2 chai1 rosettafold3 intellifold2 | atom DiT, 9 of 27 calls per run | per-sample conditioning tables (documented design of the route) |
+| Chai-1 | OPM (grouped e4m3 product) | built, off by default: net loss at every S (`MINIWORLD_OPM_FP8_CHAI_MINS`) |
+| Chai-1 | TriAttn d64 below 1024 tokens | gate `FP8_PV_D64_MIN_S` = 1024 (n >= 8 takes it) |
+| Boltz-2 | TriAttn PV / q / k | not whitelisted (9c90 bistable; owner decision pending): fp16 core |
+| IntelliFold2 | TriAttn PV | not whitelisted (end level 10 / 12, 64-channel trunk heads) |
+| IntelliFold2 | PWA BIG at small N | gates N % 64, S x N >= 2^14 (see "FP8 PWA BIG") |
+| Protenix v2 | TriAttn q / k | no d_pair-128 site (unfused only) |
+| OpenDDE | TriAttn q / k | no d_pair-128 site |
+| ESMFold2, ESMFold2-fast | TriAttn | the model has no TriAttn |
+| ESMFold2, ESMFold2-fast | atom DiT rows | 5I28 path does not reach `AtomDiTESMFold2Pair` (0 calls); ESMFold2-fast also has no OPM / PWA |
+
+### 5I28 (FoldForge a9e1549 harness, warm forward median of 6, H100 node02, n = 1 .. 16): bf16 3.0.1 / FP8 3.0.1 / FP8 `fp8c/all`
+
+Raw cells `bench5i28_ff/run_1119_fp8all/<model>/cells/`, table generator `run_1119_fp8all/make_table.sh`, commits benchmarked in `run_1119_fp8all/README.md`. Status: jobs submitted
+2026-11-19 ~00:53, results land in `run_1119_fp8all` (table below filled from the cells when the lanes finished).
+
+<!-- 5I28-TABLE -->
+
 ## The `engine-fp8` backend (user-facing name, 3.0.0)
 
 FP8 is the opt-in backend **`engine-fp8`**; the default remains the bf16 / fp16 engine (`cuda`), bit-identical to 2.5.14.
