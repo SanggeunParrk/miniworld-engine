@@ -74,6 +74,13 @@ def _core_h16(defs: tuple[str, ...] = ()):
 #: The LSE and anything else the variant does not take run the fp16 core (heads of 16 channels are served: V^T rows 16 - 31 are TMA zero fill).
 FP8_PV = False
 
+#: Route call counters (observability, ``miniworld_engine.fp8.route_stats()``; plain ints bumped at Python call time, i.e. eager / capture time,
+#: never inside a kernel or a graph replay): ``d128_calls`` = entries of the fused d_pair-128 :func:`inference`; ``pv_fused`` = of those, the
+#: calls that took the front-made e4m3 V^T route; ``qk`` = of those, the calls on the e4m3 q / k core; ``pv_front`` = unfused / generic / wide
+#: calls whose front made the V^T planes; ``pv_pass`` = calls through the standalone V^T pass (:class:`_F8Core`); ``calibrations`` = first
+#: (eager) calls of a site that took its static scale instead.  PV calls = ``pv_fused + pv_front + pv_pass``.
+STATS = {"d128_calls": 0, "pv_fused": 0, "qk": 0, "pv_front": 0, "pv_pass": 0, "calibrations": 0}
+
 
 #: True: V on two e4m3 planes (hi, and the rounding residual x16 rounded again): V^T [B, N, H, 2, 32, S], PV on m64n72k32; the V rounding error falls
 #: from ~2^-4 to ~2^-8 of V (cost: one wider PV).  Read at the call, not cached with the core.
@@ -343,7 +350,9 @@ def front_vt_args(device, length: int, heads: int, channels: int, batch: int = 1
     key = ("vq", _SITE, heads, channels)
     vscale = _VS_AUTO.get(key)
     if vscale is None:
+        STATS["calibrations"] += 1
         return CALIBRATE
+    STATS["pv_front"] += 1
     ovf = _OVF.setdefault(device, torch.zeros(1, dtype=torch.int32, device=device))
     return _vinv_of(key, vscale), ovf, 2 if FP8_PV_HL else 1, _vsb_of(key, vscale, batch)
 
@@ -355,6 +364,7 @@ class _F8Core:
     def triattn_fwd_h16(q, k, v, sbias, scale, want_lse, gate=None, want_out=True, key_tiles=None, key_mask=None, bias_transposed=False):
         if q.size(4) not in (D, 16) or want_lse or q.size(3) > 16 or q.size(2) < FP8_PV_MIN_S.get(q.size(4), 0) * (2 if FP8_PV_HL else 1):
             return _core_h16().triattn_fwd_h16(q, k, v, sbias, scale, want_lse, gate, want_out, key_tiles, key_mask, bias_transposed)
+        STATS["pv_pass"] += 1
         vt, vs = quantize_v_static(v, _SITE) if FP8_VSCALE_AUTO and _SITE is not None else quantize_v(v)
         return _core_f8pv().triattn_fwd_h16(q, k, k, sbias, scale, False, gate, want_out, key_tiles, key_mask, bias_transposed, vt, vs)
 
@@ -517,7 +527,9 @@ def inference(
     m = _mod()
     empty = torch.empty(0, device=pair.device)
     fused_vt = _fused_vt(pair.device) and L >= FP8_PV_FUSED_MIN_S * (2 if FP8_PV_HL else 1)
+    STATS["d128_calls"] += 1
     if fused_vt:
+        STATS["pv_fused"] += 1
         ovf = _OVF.setdefault(pair.device, torch.zeros(1, dtype=torch.int32, device=pair.device))
         vscale = FP8_VSCALE if FP8_VSCALE is not None else _VS_AUTO.get(w4.data_ptr())
         if vscale is None:  # calibration: the V absmax per head of this call
@@ -576,6 +588,7 @@ def inference(
         if sq is not None:
             qk8 = quantize_qk_torch(q.view(-1, H, D), k.view(-1, H, D), sq)
     if qk8 is not None:
+        STATS["qk"] += 1
         o = _core_f8qk().triattn_fwd_h16(
             qk8[0].view(shp),
             qk8[1].view(shp),

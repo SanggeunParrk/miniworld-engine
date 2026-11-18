@@ -628,6 +628,13 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     fused_expand = fp32 and _FP32_SWIGLU_GEMM and not up and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
     # EXPERIMENTAL e4m3 placements (opt-in, default off: ``token_dit_fp8.PLACES`` empty -> f8 empty, the bf16 route below unchanged)
     f8 = _fp8.active(M, D, fp32, plain and fold) if _fp8.PLACES else frozenset()
+    if _fp8.PLACES:  # observability only (fp8.route_stats()): plain int bumps at call time
+        if f8:
+            _fp8.STATS["calls"] += 1
+            for _p in f8:
+                _fp8.STATS[_p] += 1
+        else:
+            _fp8.STATS["declined"] += 1
     if f8:
         f8w = _fp8.weight_pack(key, wqkvg, wo, ws, _f8_wab(wab, M, ws.shape[1], single.device.index), bqkvg)
     if f8 and "qkvg" in f8:

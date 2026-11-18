@@ -45,6 +45,10 @@ def _parse(v: str) -> frozenset[str]:
 
 #: the e4m3 placements in force (empty: the default bf16 route)
 PLACES: frozenset[str] = _parse(_fp8_env("MINIWORLD_TOKEN_DIT_FP8", "") or "")
+#: Route call counters (``miniworld_engine.fp8.route_stats()``; plain ints at Python call time, never inside a kernel or graph replay):
+#: ``calls`` = block calls that took at least one placement, one counter per placement (``expand`` / ``qkvg`` / ``out`` / ``squeeze``),
+#: ``declined`` = block calls the route is on for (``PLACES`` set) that :func:`active` sent to the bf16 route (width / rows / fp32 / options).
+STATS = {"calls": 0, "declined": 0, "expand": 0, "qkvg": 0, "out": 0, "squeeze": 0}
 #: per placement, the fewest step rows M = A B L that take it (H100, CUDA graph, 2026-11-17, docs/fp8.md): the e4m3 expand + SwiGLU won at
 #: every M measured (768 .. 10240); the row-wise cuBLAS e4m3 qkvg GEMM lost at M = 768 / 1536 / 1920 (+1 .. +2 %), won from 2560 on;
 #: out / squeeze (a separate quantizing row pass) lost or tied everywhere -- their gate only bounds the loss
