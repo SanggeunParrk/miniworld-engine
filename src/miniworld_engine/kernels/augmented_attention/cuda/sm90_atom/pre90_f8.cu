@@ -1,5 +1,5 @@
 // pre90_f8.cu — EXPERIMENTAL (opt-in, inference only, bf16): pre90.cu's forward with the q | gate | k | v projections on e4m3 wgmma
-// (f8w90.cuh). Same math and outputs as pre90_fwd / pre90_split without SAVE and KQLN:
+// (f8w90.cuh). Same math and outputs as pre90_fwd / pre90_split without SAVE (KQLN: -DKQLN=1, the flat q / k LayerNorm of RoseTTAFold3):
 //
 //   x1  = LN(x) * s1 + bi1                 q = x1 Wq^T + bq      sg = sigmoid(x1 Wg^T)
 //   xkv = LN(x1 | x) * sigmoid(mkv[:, 0:128] + bs) + mkv[:, 128:256]  (par 0 / 1; par 2: xkv = x1)      k = xkv Wk^T     v = xkv Wv^T
@@ -30,8 +30,42 @@ DEVI void adaln_half8(Tile& c, const T* p, int ld, int scol, int bcol, const flo
   }
 }
 
+#ifndef KQLN
+#define KQLN 0   // 1: RoseTTAFold3's affine LayerNorm of the flat q / k (over all 128 columns), after their projections (as pre90.cu)
+#endif
+
+// KQLN (same math as pre90.cu's kq_ln_unit): the two 64-column units of q (mat 0) or k (mat 2) are held in registers; at the second,
+// LN(.) w + b of the whole row is stored for both halves (kq = [wq | bq | wk | bk] fp32 [4][128]). -> true: the unit is done. The grid splits
+// the units over at most 4 CTAs per tile, so both units of q (and of k) sit in one CTA.
+DEVI bool kq_ln_unit8(Tile& hold, float (*v)[4], int mat, int h, const float* kq, float kq_eps, T* dst, size_t row0, int g, int t) {
+  if (mat != 0 && mat != 2) return false;
+#pragma unroll
+  for (int nt = 0; nt < 8; ++nt)
+#pragma unroll
+    for (int e = 0; e < 4; ++e) hold.f[8 * h + nt][e] = v[nt][e];
+  if (h == 0) return true;
+  float m0, r0, m1, r1;
+  ln_stats(hold, kq_eps, m0, r0, m1, r1);
+  const float* w = kq + (mat == 2 ? 256 : 0);
+  const float* b = w + 128;
+#pragma unroll
+  for (int hh = 0; hh < 2; ++hh) {
+    float o[8][4];
+#pragma unroll
+    for (int nt = 0; nt < 8; ++nt) {
+      const float2 ww = colv(w + 64 * hh, nt, t), bb = colv(b + 64 * hh, nt, t);
+#pragma unroll
+      for (int e = 0; e < 4; ++e)
+        o[nt][e] = (hold.f[8 * hh + nt][e] - (e < 2 ? m0 : m1)) * (e < 2 ? r0 : r1) * ((e & 1) ? ww.y : ww.x) + ((e & 1) ? bb.y : bb.x);
+    }
+    st_nt<8, true>(o, dst + row0 * 128, 128, 64 * hh, g, t);
+  }
+  return true;
+}
+
 // the 64 output columns of unit u (0 .. 7: q lo / hi, g lo / hi, k lo / hi, v lo / hi); f0 / f1: the rows' dequantization factors
-DEVI void unit_out8(const float* acc, int u, float f0, float f1, const float* bq, T* q, T* sg, T* k, T* v, size_t row0, int g, int t) {
+DEVI void unit_out8(const float* acc, int u, float f0, float f1, const float* bq, T* q, T* sg, T* k, T* v, size_t row0, int g, int t, Tile& hold,
+                    const float* kq, float kq_eps) {
   const int mat = u >> 1, col = 64 * (u & 1);
   T* dst = mat == 0 ? q : mat == 1 ? sg : mat == 2 ? k : v;
   float o[8][4];
@@ -49,6 +83,7 @@ DEVI void unit_out8(const float* acc, int u, float f0, float f1, const float* bq
       for (int e = 0; e < 4; ++e) o[nt][e] = sigm(o[nt][e]);
     }
   }
+  if (KQLN && kq_ln_unit8(hold, o, mat, u & 1, kq, kq_eps, dst, row0, g, t)) return;
   if (mat == 1) st_nt<8, false>(o, dst + row0 * 128, 128, col, g, t);
   else st_nt<8, true>(o, dst + row0 * 128, 128, col, g, t);
 }
@@ -59,7 +94,7 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre90_f8(const T* __res
                                                                  const uint8_t* __restrict__ w8, const float* __restrict__ wsi,
                                                                  const float* __restrict__ bq, const float* __restrict__ bs, T* __restrict__ q,
                                                                  T* __restrict__ sg, T* __restrict__ k, T* __restrict__ v, int M, int nmod,
-                                                                 float eps, int par) {
+                                                                 float eps, int par, const float* __restrict__ kq, float kq_eps) {
   pdl_wait();
   extern __shared__ uint8_t sm_raw[];
   constexpr int UNIT = 64 * 128;  // e4m3 bytes of one 64-row unit
@@ -75,6 +110,8 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre90_f8(const T* __res
   const int uq = par == 2 ? u0 + upc : max(u0, min(4, u0 + upc));
   uint32_t aq[KSTEPS8][4], akv[KSTEPS8][4];
   float iq0 = 1.f, iq1 = 1.f, ik0 = 1.f, ik1 = 1.f;
+  Tile hold;  // KQLN: the q / k row of the two 64-column units
+  (void)hold;
   {
     Tile c;
     ld_tile(c, x + row0 * 128, 128, 0, g, t);
@@ -113,7 +150,7 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre90_f8(const T* __res
     __syncthreads();
     if (ul + 2 < upc) issue(ul + 2); else cp_commit();
     const float ws = __ldg(wsi + u);
-    unit_out8(acc, u, iq0 * ws, iq1 * ws, bq, q, sg, k, v, row0, g, t);
+    unit_out8(acc, u, iq0 * ws, iq1 * ws, bq, q, sg, k, v, row0, g, t, hold, kq, kq_eps);
   }
 #pragma unroll 1
   for (int u = uq; u < u0 + upc; ++u) {
@@ -126,6 +163,6 @@ extern "C" __global__ __launch_bounds__(NTHR, MINB) void pre90_f8(const T* __res
     __syncthreads();
     if (ul + 2 < upc) issue(ul + 2); else cp_commit();
     const float ws = __ldg(wsi + u);
-    unit_out8(acc, u, ik0 * ws, ik1 * ws, bq, q, sg, k, v, row0, g, t);
+    unit_out8(acc, u, ik0 * ws, ik1 * ws, bq, q, sg, k, v, row0, g, t, hold, kq, kq_eps);
   }
 }

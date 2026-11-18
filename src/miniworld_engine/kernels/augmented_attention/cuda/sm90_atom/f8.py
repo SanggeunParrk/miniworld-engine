@@ -20,8 +20,8 @@ from . import DS, NWARP, ROWS, _dev, cubin, pack
 E4M3 = torch.float8_e4m3fn
 _KERNELS = {"pre_f8": ("pre90_f8", 2 * 64 * 128 + 1024), "post_f8": ("post90_f8", 2 * (128 * 128 + 128 * 128) + 1024)}
 #: model options this route serves (``local_dit_h100.options`` plus RMS of ``local_dit_esm``: ESMFold2's RMSNorm AdaLNs and raw gates, built with
-#: -DRMS=1 into both kernels); UP (Boltz-2) and KQLN (RF3) keep the bf16 kernels
-OPTIONS = frozenset({"IDENT", "PARS", "NOOUT", "RMS"})
+#: -DRMS=1 into both kernels; RF3's KQLN, the flat q / k LayerNorm, built into pre90_f8 with -DKQLN=1); UP (Boltz-2) keeps the bf16 kernels
+OPTIONS = frozenset({"IDENT", "PARS", "NOOUT", "RMS", "KQLN"})
 #: CTAs per SM each kernel's register allocation targets (__launch_bounds__ minimum blocks), by grid size: 1 gives 236 / 253 registers
 #: (2 CTAs per SM), 3 caps them at 168 with a small spill. Measured (H100, AF3 block, A = 5, kernel times): pre90_f8 at 320 / 640 CTAs
 #: 26.1 -> 19.5 / 43.0 -> 40.1 us with 3, at 1280 79.2 -> 85.8 us (so 1); post90_f8 3 only where it makes one wave of a grid that
@@ -41,7 +41,11 @@ def _minb(kind: str, ctas: int) -> int:
 
 def kernel_cubin(kind: str, options: tuple = (), minb: int = 1) -> str:
     """The cubin of ``kind`` under the model ``options`` and ``minb`` (the build :func:`kernel` loads; also the prebuild recipe's call)."""
-    defs = tuple(f"-D{o}=1" for o in sorted(options) if o == "RMS" or (kind == "post_f8" and o in ("PARS", "NOOUT")))
+    defs = tuple(
+        f"-D{o}=1"
+        for o in sorted(options)
+        if o == "RMS" or (kind == "pre_f8" and o == "KQLN") or (kind == "post_f8" and o in ("PARS", "NOOUT"))
+    )
     return cubin(_KERNELS[kind][0], False, NWARP, minb, defs)
 
 
@@ -98,19 +102,20 @@ def pack8(weights) -> dict:
     return _capture.param_forms("sm90_atom_pack_f8", list(weights), build)
 
 
-def _split_for(tiles: int) -> int:
+def _split_for(tiles: int, choices: tuple = (1, 2, 4, 8)) -> int:
     from . import _split_for as split
 
-    return split(tiles, (1, 2, 4, 8))
+    return split(tiles, choices)
 
 
-def pre_fwd8(x, mod, mkv, p8, eps: float = 1e-5, nmod: int = 0, parallel_kv: int = 0, options: tuple = ()):
-    """bf16 x [M, 128] -> q, sg, k, v [M, 128] bf16 (``sm90_atom.pre_fwd`` without save / KQLN)."""
+def pre_fwd8(x, mod, mkv, p8, eps: float = 1e-5, nmod: int = 0, parallel_kv: int = 0, options: tuple = (), kq=None, kq_eps: float = 1e-5):
+    """bf16 x [M, 128] -> q, sg, k, v [M, 128] bf16 (``sm90_atom.pre_fwd`` without save). KQLN: ``kq`` = [wq | bq | wk | bk] fp32 [4, 128]."""
     M = x.shape[0]
     new = lambda: torch.empty(M, DS, device=x.device, dtype=x.dtype)  # noqa: E731
     q, sg, k, v = new(), new(), new(), new()
     tiles = M // ROWS
-    ns = _split_for(tiles)
+    kqln = "KQLN" in options
+    ns = _split_for(tiles, (1, 2, 4) if kqln else (1, 2, 4, 8))  # KQLN: a CTA holds both 64-column units of q (and of k)
     kernel("pre_f8", _dev(x), tuple(options), _minb("pre_f8", tiles * ns))(
         (tiles, ns, 1),
         (NWARP * 32, 1, 1),
@@ -129,6 +134,8 @@ def pre_fwd8(x, mod, mkv, p8, eps: float = 1e-5, nmod: int = 0, parallel_kv: int
         int(nmod or M),
         float(eps),
         int(parallel_kv),
+        kq,
+        float(kq_eps),
     )
     return q, sg, k, v
 

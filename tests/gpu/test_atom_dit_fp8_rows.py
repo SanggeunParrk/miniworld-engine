@@ -48,12 +48,12 @@ def _run(m, inputs, fp8):
 
 
 @pytest.mark.parametrize("n", [200, 1024, 4096])
-@pytest.mark.parametrize("model", ["openfold3", "protenix", "chai1"])
+@pytest.mark.parametrize("model", ["openfold3", "protenix", "chai1", "rf3"])
 def test_fp8_rows_error(model: str, n: int) -> None:
     _needs_h100()
     from miniworld_engine.modules import atom_dit as A
 
-    cls = {"openfold3": A.AtomDiTOpenFold3, "protenix": A.AtomDiTProtenix, "chai1": A.AtomDiTChai1}[model]
+    cls = {"openfold3": A.AtomDiTOpenFold3, "protenix": A.AtomDiTProtenix, "chai1": A.AtomDiTChai1, "rf3": A.AtomDiTRoseTTAFold3}[model]
     m, inputs = _block(cls, n, 5, kw={"adaln_eps": 1e-5} if model == "chai1" else None)
     ref = m.set_backend("pytorch")
     with torch.no_grad():
@@ -174,3 +174,19 @@ def test_fp8_rows_esmfold2_pair_fallbacks() -> None:
     m, inputs, rope = _esm_block(1024, 5, shared=False)
     m.float()
     assert torch.equal(_run_esm(m, inputs, rope, True), _run_esm(m, inputs, rope, False))
+
+
+def test_fp8_rows_rf3_kqln_served() -> None:
+    """RoseTTAFold3's atom block (KQLN, the flat q / k LayerNorm) is served by the e4m3 rows: ``why_opts`` stays 0, ``calls`` / ``pre`` /
+    ``post`` count it, and the split grid of small row counts keeps both 64-column units of q and of k in one CTA."""
+    _needs_h100()
+    from miniworld_engine.kernels.integrations import local_dit_h100 as H
+    from miniworld_engine.modules import atom_dit as A
+
+    for a, n in ((5, 200), (2, 64), (5, 1024)):
+        m, inputs = _block(A.AtomDiTRoseTTAFold3, n, a)
+        before = dict(H.STATS)
+        y8 = _run(m, inputs, True)
+        assert torch.isfinite(y8.float()).all()
+        assert H.STATS["fallbacks"] == before["fallbacks"] and H.STATS["why_opts"] == before["why_opts"]
+        assert H.STATS["calls"] == before["calls"] + 1 and H.STATS["pre"] == before["pre"] + 1 and H.STATS["post"] == before["post"] + 1

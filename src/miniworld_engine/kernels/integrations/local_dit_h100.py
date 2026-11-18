@@ -389,7 +389,7 @@ def _fwd(
             )
             qkr = rest[0] if kqln else s2.new_empty(0, 2 * DS)
         elif "pre" in f8:
-            q, sg, k, v = f8mod.pre_fwd8(s2, mod, mkv, p8, eps=eps, nmod=nmod, parallel_kv=parallel_kv, options=opts)
+            q, sg, k, v = f8mod.pre_fwd8(s2, mod, mkv, p8, eps=eps, nmod=nmod, parallel_kv=parallel_kv, options=opts, kq=kq, kq_eps=kq_eps)
         else:
             q, sg, k, v = cast(
                 "tuple[torch.Tensor, ...]",
