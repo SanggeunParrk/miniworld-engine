@@ -67,7 +67,7 @@ def _copy_kernels(fn) -> int:
     with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU]) as p:
         fn()
         torch.cuda.synchronize()
-    return sum(1 for e in p.events() if e.name == "aten::copy_")
+    return sum(1 for e in p.events() or [] if e.name == "aten::copy_")
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])

@@ -115,7 +115,7 @@ rounding. `"triton"` (`kernels/parallel_residual/triton`) is one pass over the t
 is torch (`d/dy_i = g`, `d/dx = (1 - n) g`). `"cuda"` (`kernels/parallel_residual/cuda/parallel_residual.cu`: one source, built as
 `parallel_residual_sm90` for H100 sm_90a and `parallel_residual_sm80` for A100 sm_80) is the same arithmetic in the same order (bitwise
 equal to `"pytorch"` and `"triton"`) with 16-byte vector accesses and streaming cache hints, and its backward's `(1 - n) g` in one small
-kernel (the Triton path's torch statements take three passes for bf16). Both forward passes stream near the memory bandwidth (H100, bf16,
+kernel (the Triton path's torch statements take three passes for bf16). The same kernel writes, in the same pass, a FRESH gradient tensor for every branch that is a leaf of the autograd graph and has no `.grad` yet (a differentiated input; the measurement step): AccumulateGrad takes it as `.grad` instead of copying the one shared `g` once per leaf (three full-tensor copies at three branches, 46 % of a pair-stream training call at L 768 before 3.0.1); a branch an upstream node reads keeps the shared `g` (no copy). Both forward passes stream near the memory bandwidth (H100, bf16,
 pair 768 x 768 x 256 with three branches: 1.5 GB read + written in 0.49 ms, about 3.1 TB/s against the card's 3.35): in eval `"cuda"` is
 within 0.94-1.05x of `"triton"` (2-5 % slower at L >= 384), in train 1.5-1.9x faster (the backward kernel). Measured on the requirement
 rows (graph timing, L2 flushed; L 768, ms):
