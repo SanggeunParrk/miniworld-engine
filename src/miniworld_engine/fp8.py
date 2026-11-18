@@ -294,7 +294,7 @@ def disable() -> None:
 def status() -> dict:
     """The switches in force, per route."""
     ta, tm, opm, pwa, tr, td, ad = _modules()
-    kinds = sorted(k for k, on in (("fused", ta.FP8_PV_FUSED), ("unfused", ta.FP8_PV_UNFUSED)) if on) if ta.FP8_PV else []
+    kinds = sorted(k for k, on in (("d64", ta.FP8_PV_D64), ("fused", ta.FP8_PV_FUSED), ("unfused", ta.FP8_PV_UNFUSED)) if on) if ta.FP8_PV else []
     return {
         "triattn": {"pv": kinds, "qk": bool(ta.FP8_QK and ta.FP8_PV)},
         "trimul": tm.POLICY,
