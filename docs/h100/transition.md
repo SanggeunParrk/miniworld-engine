@@ -79,6 +79,13 @@ cuBLAS (`torch.mm` / `addmm`), not engine kernels.
    requirement row reaches it at inference. D768 training: the generic forward saves xn / a / b for its backward, so it serves the whole
    training step at every row count; the step (forward + backward, CUDA graph, 2026-11-18) is 1.2 - 1.85x faster than the wide build at
    1024 - 32768 rows (1024 rows 89 / 166 us, 2048 130 / 211, 4096 202 / 275, 8192 363 / 457, 16384 665 / 786, 32768 1274 / 1446).
+   D384 / D512 training (2026-11-18, same measurement; rows 16384 .. 589824): the generic step ties the wide build at D384 (within 3 %; 5 - 14 %
+   faster at 24576 - 65536 rows) and is 8 - 17 % faster at D512 (n 2: 16384 rows 362 / 425 us, 65536 1248 / 1398, 147456 2727 / 3000, 589824
+   10708 / 11626; n 4 similar), so both have no training limit. Left as is: D256 (the wide build is 14 % faster above 16384 rows), D64 / D128
+   n 4 (limit 3072 holds); D64 n 2 would gain 5 - 16 % at 4096 - 8192 rows (not a requirement row size).
+   Chunked inference at D384 / D512 (a call whose hidden h exceeds 16 GiB, e.g. OpenDDE's 3968^2 structural pair): each block's squeeze writes
+   into its rows of the one output (`fwd_into` in `wide/bind.cu`, `_fwd_into_launch`), no copy of the block (was 12 DtoD copies, 12.5 % of the
+   call): 3456 / 3968 tokens 45.8 / 60.5 ms -> 40.1 / 53.2 ms, output bits identical.
 2. `fused_sm90a`: D128, hidden 256 or 512, bf16, rows a multiple of 128.
 3. `fused_wide_sm90a`: D 64 / 256 / 384 / 512 (n 2, 4) and D768 (n 2), bf16, rows a multiple of 128.
 4. `fused_generic_sm90a`: D a multiple of 64 up to 1024, hidden a multiple of 128, any row count, bf16, or fp32 when TF32 is allowed.
