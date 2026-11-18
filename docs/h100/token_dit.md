@@ -58,7 +58,8 @@ Names from `requirements_kernel.csv`; the `cond_transition_*` rows belong to the
 | `cond_transition_token_resgate_out_rows_sm90` | forward_infer | the last residual, written in the output dtype |
 | `cond_transition_token_layernorm_rows_sm90` | forward_infer | pair LayerNorm rows (no affine; optional key permutation) |
 | `cond_transition_gemm_swiglu_sm90` | forward_infer | `gemm_swiglu_sm90.cu`: expand GEMM with SwiGLU in the epilogue, `[a \| b]` never stored |
-| `augmented_attention_apb_pair_bias_fwd_sm90` | forward | bf16 pair bias: LN(pair) . Wf on mma.sync, head-major, masked keys -inf (shared with AttentionPairBias) |
+| `augmented_attention_apb_pair_bias_fwd_sm90` | forward | bf16 pair bias: LN(pair) . Wf on mma.sync, head-major, masked keys -inf (shared with AttentionPairBias); the inference hoist at 128 / 256 / 512 channels (16 heads) and the bf16 training forward (a wide pair also writes its row statistics and the unmasked fp32 bias for the backward: `pair_bias_fwd_train`) |
+| `augmented_attention_apb_pair_bias_bwd_sm90`, `augmented_attention_apb_pair_bias_bwd_wide_sm90` | backward | the bf16 training backward of that bias: dpair and the per-block dWf partial rows in one pass over the pair (TMA tiles of 128 keys, dx^ and dWf on mma, the row statistics of the 128-wide pair recomputed on the tensor cores; the wide pair takes (mean, rstd) and the unmasked bias from the forward and runs one launch per 128-channel chunk) |
 | `bias_only_dit_f32_pair_bias_tc` | forward | fp32 pair bias at d_pair 128 (`pair_bias_tok`): LN + projection + key permutation + mask in one pass |
 | `augmented_attention_pair_bias_fwd_fp32_sm90` | forward_infer | `pair_rows.cu` `bias32_k`: the same for the 256-wide fp32 pair at 16 heads |
 | `augmented_attention_fwd_sm90` | forward | `attn_fwd.cu`: bf16 wgmma core (gated inference `attn_inf`; training `attn_fwd_og`) |
@@ -77,7 +78,8 @@ No autograd, one opaque op per block call (`token_dit_h100_infer`), autocast off
    records the pack once; each replay re-packs the weights as they are then.
 2. **Pair bias**, hoisted: `bias [H, L, L]` in log2 units, masked keys -1e30, built once per (pair, mask, Wf) and cached through
    `_capture.lookup_inputs` (the pair is held by a weak storage reference, so a freed pair evicts its entry). bf16: the APB pair kernel
-   (d_pair 128) or CUDA LayerNorm rows + one cuBLAS GEMM (d_pair 256 / 512). fp32: written in the TF32 core's key order (below), by
+   at d_pair 128, 256 and 512 (one pass over the pair, `cuda:h100_sm90` 5 -- 256 / 512 were CUDA LayerNorm rows + cuBLAS GEMMs, 2.2-3x
+   slower, 3.1x the pair's bytes; the rows route stays for a head count the kernel is not built for, and as the `WIDE_APB` switch). fp32: written in the TF32 core's key order (below), by
    `pair_bias_tok` (128) or `pair_bias_rows32` (256, 16 heads), else LayerNorm rows + GEMM + a torch masked fill of the keys in the core's order. An `extra_pair_bias`
    [L, L] is added once here (times log2 e; key-permuted in fp32).
 3. **Conditioning**: `cond_rows` (d_cond 384 or 768; the weight pack is built for the weights' width), then two GEMMs: `g1 [P, 4, D]` (AdaLN scale / shift of both halves) and `g2 [P, 2, D]` (the two
@@ -100,8 +102,15 @@ L is padded to a multiple of 128 inside (zero rows, padded keys masked) and the 
 - Forward: cond LN + two GEMMs (every in-block LayerNorm of cond shares its statistics, so its weight folds into the projection) ->
   `adaln_a` -> q\|k\|v\|g GEMM -> QK-norm rows -> pair bias -> core (writes `og = sigmoid(g) o`; O is not kept) -> out GEMM ->
   `res_adaln_b` -> expand GEMM + `swiglu_rows` (`a | b` saved) -> squeeze GEMM -> `res_c`.
-- Pair bias: bf16 uses the one-pass pair kernel (LN(pair) Wf^T, `extra` added in the same pass, LN(pair) not saved) and its one-pass
-  backward; fp32 uses `pair_ln` + GEMM in log2 units, key-permuted for the TF32 core.
+- Pair bias: bf16 (`cuda:h100_sm90` 5, pair bf16, `_pair_apb`: 128 channels at 8 / 12 / 16 / 24 heads, 256 / 512 at 16) runs the APB
+  kernels one pass over the pair each way (`apb.pair_bias`, wide: `saved=True`; `apb.pair_bias_bwd` / `_bwd_wide`; `extra` is added to
+  the bf16 bias afterwards, `bias.add_(extra, alpha=log2 e)`); no LN(pair) is saved, a wide pair saves its row statistics and the
+  unmasked fp32 bias (`bu`, the backward's S2). The attention backward hands the kernel an fp32 dbias in the log2 bias's scale
+  (`train_db_reduce90(db, fp32, scale = 1 / log2 e, f32out)` / the `A % 3` path's in-place scale: no bf16 rounding of the gradient, no
+  conversion pass) and it is given the forward's `Wf_l2`, so dx^, its row means and S2 are the natural-unit ones; the per-block dWf
+  partial rows (no atomics) are summed in block order and times log2 e: deterministic. Switch `PAIR_APB` (False: the TF32 row kernels
+  `pair_bias_k` / `pair_bias_bwd_k` of `token_dit_train_rows.cu`, kept for the other head counts, a non-bf16 pair, and as the A / B
+  reference). fp32 uses `pair_ln` + GEMM in log2 units, key-permuted for the TF32 core.
 - bf16 attention backward: with A a multiple of 3, `attn_dqb` (the CTA's three warpgroups are three samples of one query tile; their dS
   tiles are summed in shared memory and added with one TMA bulk reduce) into `C` chunk buffers (C = largest divisor of A / 3 up to 4)
   summed in order, then `attn_dkv -DDBIAS=0`; otherwise `attn_dq` + `attn_dkv -DDB_PER_SAMPLE=1` and a fixed-order reduce. The
@@ -117,6 +126,63 @@ L is padded to a multiple of 128 inside (zero rows, padded keys masked) and the 
   conditioning, variant options (Boltz-2 / RF3 / Chai-1) and A = 1 keep the per-sample route. Not bit-identical to 3.0.0 (summation order).
   A48 training step, graph, interleaved with a same-cubin control, cool / sustained vs 3.0.0: L128 0.88 / 0.90, L384 0.89 / 0.90,
   L768 0.91 / 0.92, L1536 0.94 / 0.94; A8 0.92-0.96; A5 0.92-0.98; A1 unchanged (1.00).
+
+## Pair-bias producers (`cuda:h100_sm90` 5, 2026-11-18)
+
+Why the training pair bias was slow: `pair_bias_k` / `pair_bias_bwd_k` (TF32 row kernels: a warp per row for LN, TF32 `mma.sync` for the
+projections, `cvt.rna.tf32` on every operand) ran at 40-50 % of HBM, and ncu shows them **instruction-issue bound, not latency bound**:
+smsp issue active 65-67 % (L768, d_pair 128), 39-48 registers, about 100 warp-instructions per pair row (shuffle reductions of the LN,
+float math per element, TF32 conversions). They were 42 % of the block step at L768 A = 1 (57 % at d_pair 256). The AttentionPairBias
+kernels have no per-element float work (raw bf16 words as mma operands, LN folded into the projection `rstd (Wf x - mean sum Wf)`, the
+row statistics from the tensor cores, TMA tiles), so the same pass sits at 2.3-2.7 TB/s. The hoisted inference bias of a 256 / 512-wide
+pair (LN rows + 4 cuBLAS GEMMs: 3.1x the pair's bytes) is the same kernel now.
+
+Kernel level (H100 80GB HBM3, CUDA graph of 5 calls, interleaved with a same-cubin control; us, cool / sustained; `scratch mb.py`; the
+old column reads an fp32 dbias like the new one -- the block's old route read bf16 -- so the old backward is a little pessimistic). HBM
+floor = bytes / 3 TB/s.
+
+| L, d_pair | fwd old -> new (floor) | bwd old -> new (floor) |
+|---|---|---|
+| 384, 128 | 41 / 34 -> 17.7 / 17.3 | 67 / 62 -> 36 / 36 |
+| 768, 128 | 135 / 127 -> 63 / 63 (57) | 233 / 226 -> 130 / 128 (113) |
+| 384, 256 | 61 / 54 -> 39 / 38 | 114 / 107 -> 93 / 92 |
+| 768, 256 | 207 / 200 -> 130 / 128 (107) | 405 / 395 -> 287 / 285 (214) |
+| 384, 512 | 121 / 115 -> 64 / 64 | 202 / 196 -> 207 / 205 (the 4 chunk launches; fwd + bwd still -14 %) |
+| 768, 512 | 441 / 432 -> 228 / 227 (208) | 740 / 730 -> 600 / 597 (415) |
+
+ncu (cache control all), L768 d_pair 128: forward 156 -> 65 us (DRAM 151 MB read + 21 -> 13 MB written, issue 67 % -> 36 %), backward 270 -> 121 us
+(193 + 139 MB -> 189 + 131 MB = 2.65 TB/s). The wide backward is one launch per 128-channel chunk (each re-reads dbias and the unmasked
+bias, 231 MB + 132 MB at L768): d_pair 256 2 x 150 us, 512 4 x 156 us = 2.3-2.4 TB/s.
+
+Inference hoist (the bias a block builds once per forward, bf16, one run of the kernel; us): d_pair 256 L768 / 1536 / 2048: 343 / 1345 /
+2376 -> 116 / 438 / 775 (3.07x; floor at L2048 760); d_pair 512 L768 / 1536: 643 / 2542 -> 218 / 842. Per forward of 24 blocks: -5.4 ms
+(L768) / -38 ms (L2048) at d_pair 256, -10 ms at L768 d_pair 512; a 200-step sampler builds it once, so against the steps of a sampling run
+(about 3 s at L2048, A = 5: the block's non-bias 0.63 ms x 24 x 200) it is ~1 %: the inference gain is a per-forward cost, small next to the sampler. Block forward including the bias
+build (graph, A = 5): d_pair 256 L384 / 768 / 1536 / 2048 0.76 / 0.62 / 0.50 / 0.45 of the 3.0.1-candidate HEAD, d_pair 512 L768 / 1536
+0.51 / 0.42, ESMFold2 (d_cond 768) L768 / 1536 0.64 / 0.51. Training pays the bias every step and every block (forward and backward):
+24 blocks x (0.745 - 0.575 ms) = -4.1 ms of a 17.9 ms step at A = 1 L768 d_pair 128, but only -3.8 ms of 167 ms at A = 48 (the bias is
+shared by the samples).
+
+Training block step (fwd + bwd, graph, same process and cubins, interleaved; `new / head` = this route over the TF32 row kernels on the
+same tree, `new / 3.0.0` = also without the shared conditioning; sustained, cool within 1 %; the control = head captured twice stays
+0.997-1.009):
+
+| d_pair, A : L | 1 : 128 | 1 : 384 | 1 : 768 | 1 : 1536 | 5 : 384 | 5 : 768 | 5 : 1536 | 8 : 768 | 48 : 384 | 48 : 768 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 128 new / head | 0.963 | 0.886 | **0.774** | **0.685** | 0.934 | 0.880 | 0.824 | 0.907 | 0.993 | 0.974 |
+| 128 new / 3.0.0 | 0.958 | 0.887 | 0.774 | 0.683 | 0.920 | 0.858 | 0.806 | 0.864 | 0.893 | 0.890 |
+| 256 new / head | | 0.928 | 0.818 | 0.748 | | 0.886 | | | 0.997 | 0.972 |
+| 512 new / head | | 0.937 | 0.792 | | | 0.845 | | | | |
+
+TokenDiTMiniWorld (d_pair 128, QK-norm) L768: A1 0.779, A5 0.878, A48 0.979. Absolute (ms, sustained): d_pair 128 A1 L768 0.734 -> 0.568,
+L1536 2.077 -> 1.422; A5 L768 1.365 -> 1.201.
+
+Accuracy (judge metric against the float64 gold, one process, the same gold / reference / upstream for both routes): the pair tensors
+are unchanged within bf16 noise (grad:pair, ln_pair.weight, to_bias.weight 6e-3 .. 2e-2, always below the PyTorch bf16 reference's own
+error; the bias against fp64 2.4e-3 rms against 1.7e-3 for TF32: Wf is bf16, as at inference). 39 training cases (every TokenDiT training
+row at L 128 / 384 / 768, `master`): mean error / tol 0.742 -> 0.749, tensors over tol 22 -> 24 of 1041; lights GREEN -> YELLOW 8 /
+YELLOW -> GREEN 6 (every flip within 12 % of tol, on tensors the pair route reaches only through bf16 rounding of the probabilities),
+no RED. 24 eval cases (the 256 / 512-wide rows, shared-cond streams, L 128 / 768): all GREEN -> GREEN, mean 0.538 -> 0.518.
 
 ## Attention core design
 
@@ -137,6 +203,10 @@ L is padded to a multiple of 128 inside (zero rows, padded keys masked) and the 
   residual fp32, output in the input dtype.
 - fp32: GEMMs on TF32 tensor cores (forced, whatever `allow_tf32`); the TF32 cores truncate their TMA-fed operands to TF32, which is
   the largest error term of the core; softmax, statistics and residual fp32.
+- bf16 pair bias (APB kernels, inference and training): `Wf = to_bias.weight * ln_pair.weight * log2 e` rounded to bf16, the pair's raw bf16
+  words as mma operands, fp32 accumulation, `rstd (Wf x - mean sum Wf)` for the LayerNorm; the bias is rounded once to bf16 (2.4e-3 rms
+  against the float64 bias, TF32 route 1.7e-3). Training: dbias fp32 (the attention backward's sum over the samples unrounded), dx^ on
+  bf16 mma, dpair rounded to the pair's dtype, dWf in fp32 partial rows summed in block order.
 - Masked keys: -1e30 / -inf in the bias. A fully masked key row is outside the `"anthropic"` range; the reference gives 0 there.
 - Every attention kernel writes each output element from one writer or reduces in a fixed order: bitwise repeatable run to run.
 
