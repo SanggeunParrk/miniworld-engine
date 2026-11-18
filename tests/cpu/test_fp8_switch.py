@@ -112,7 +112,7 @@ def test_enable_disable_api():
     code = (
         "import json; from miniworld_engine import fp8; out = []\n"
         "fp8.enable('safe', guard='lazy'); out.append(fp8.status())\n"
-        "for m in ('af3', 'protenix1', 'opendde', 'protenix2', 'openfold3', 'intellifold2', 'boltz2'):\n"
+        "for m in ('af3', 'protenix1', 'opendde', 'protenix2', 'openfold3', 'rosettafold3', 'intellifold2', 'boltz2'):\n"
         "    fp8.enable('safe', model=m); out.append(fp8.status())\n"
         "fp8.enable('safe'); out.append(fp8.status())\n"
         "fp8.disable(); out.append(fp8.status()); print(json.dumps(out))"
