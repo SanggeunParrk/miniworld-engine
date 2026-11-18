@@ -72,7 +72,7 @@ def test_backward_two_rows(L, H):
     proj, bias = _inputs(L, H)
     scale = D**-0.5
     HD = H * D
-    o, lse, u = dh.ext_d64t().triattn_d64_forward_train(proj, bias, H, scale)
+    o, lse, _ = dh.ext_d64t().triattn_d64_forward_train(proj, bias, H, scale)
     do = torch.randn(L * L, HD, device="cuda").bfloat16()
     delta = (do.float().view(L * L, H, D) * o.float().view(L * L, H, D)).sum(-1).view(1, L, L, H).permute(0, 1, 3, 2).contiguous()
     out = {}
