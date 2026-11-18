@@ -10,6 +10,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._compile import opaque
+
 _dir = Path(__file__).parent
 _ARCH = {"sm90": "90a", "sm80": "80", "sm120": "120a"}  # sm120: the GeForce RTX 5090 (sm_120a), the same source
 
@@ -33,11 +35,22 @@ def _device_ext(device: torch.device):
     return ext({(8, 0): "sm80", (12, 0): "sm120"}.get(torch.cuda.get_device_capability(device), "sm90"))
 
 
+def _forward_fake(x: torch.Tensor, branches: list[torch.Tensor]) -> torch.Tensor:
+    return torch.empty_like(x, memory_format=torch.contiguous_format)
+
+
+def _backward_fake(g: torch.Tensor, n: int, copies: int = 0) -> list[torch.Tensor]:
+    return [torch.empty_like(g, memory_format=torch.contiguous_format) for _ in range(1 + copies)]
+
+
+# opaque to torch.compile (kernels/_compile.py): a PairformerBlock(parallel=True) calls the forward inside its (compiled) block
+@opaque(fake=_forward_fake, name="parallel_residual_cuda_forward")
 def forward(x: torch.Tensor, branches: list[torch.Tensor]) -> torch.Tensor:
-    """``x + sum_i (y_i - x)`` for 1 .. 4 contiguous tensors of ``x``'s shape, dtype and device (the module checks)."""
+    """``x + sum_i (y_i - x)`` for 1 .. 5 contiguous tensors of ``x``'s shape, dtype and device (the module checks)."""
     return _device_ext(x.device).forward(x, branches)
 
 
+@opaque(fake=_backward_fake, name="parallel_residual_cuda_backward")
 def backward(g: torch.Tensor, n: int, copies: int = 0) -> list[torch.Tensor]:
     """``[(1 - n) g, g, ..., g]`` in one pass: the gradient of ``x`` (fp32 product, one rounding to ``g``'s dtype) and ``copies`` fresh tensors
     equal to ``g`` (the gradients of the branches that are autograd leaves: ``modules/residual.py``)."""
