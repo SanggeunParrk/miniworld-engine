@@ -362,7 +362,7 @@ more traffic (scale vectors) for no gain. No-go; the delayed per-tensor scale st
 
 ### 4. The remaining producer gaps
 
-- `ln_vt8` (VT_BF) 335 us: its bytes are x 100 + y 100 + v bf16 403 + v e4m3 201 = 804 MB... plus y: 1006 MB / 335 us = 3.0 TB/s -- **at the H100 memory floor** (round 3's "~290 us" ignored x and y). Nothing left.
+- `ln_vt8` (VT_BF) 335 us: bytes x 100 + y 100 + v bf16 403 + v e4m3 201 = 804 MB = 2.4 TB/s, against `ln_vg`'s 603 MB in 218 us = 2.77 TB/s: ~290 us at the same rate, i.e. ~45 us (1.4 % of the step) left. The stores are 64 B / 32 B row pieces (item = 64 tokens x one s); an item of 2 s would double the pieces (128 B / 64 B) but the smem staging then grows to 96 KiB: not tried, <= 1 % of the step.
 - `pwa_glue3_f8` +46 us over `pwa_glue3`: the byte scatter of do / doT into smem has 4-way bank conflicts; 64B-swizzled staging tiles (TMA SWIZZLE_64B, `MINIWORLD_PWA_FP8_TRAIN_G3SWZ=1`)
   gave 664 us against 659: not the cost (the kernel is latency-bound on its o / dout stream); left off. Tile order (round 3): no effect.
 
@@ -394,5 +394,5 @@ Distillation curve (S1024 N512, 1000 steps, window means): default 0.6270 / 0.33
 - Ship (opt-in) the `bwd` route as is, now with the free peak-memory gain (-12 .. -17 % peak, +10-15 % max S) at 0.947-0.962 of the default step.
 - O8 = a memory mode (peak -20 .. -23 %, max S +20-23 %) at +8-11 % step time over the default and +0.7 % loss; useful only when S is the limit.
 - Finer scales: no-go (rounding floor); <= 1.5 % rms is not reachable with e4m3 x e4m3 in one GEMM.
-- Producers are at the memory floor (`ln_vt8`) or latency-bound (`pwa_glue3_f8`, swizzle tried): no further cheap gain.
+- Producers: `ln_vt8` is ~45 us (1.4 %) above its memory rate, `pwa_glue3_f8` latency-bound (swizzle tried): no further cheap gain.
 - Default route bit-identical with the switch off: `bit.py` sha1 of all 7 cases equal to the 3.0.1 worktree (`bit_wt6` vs `bit_base5`).
