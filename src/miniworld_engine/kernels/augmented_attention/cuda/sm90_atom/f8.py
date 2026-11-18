@@ -46,7 +46,9 @@ def _minb(kind: str, ctas: int) -> int:
 
 def kernel_cubin(kind: str, options: tuple = (), minb: int = 1) -> str:
     """The cubin of ``kind`` under the model ``options`` and ``minb`` (the build :func:`kernel` loads; also the prebuild recipe's call)."""
-    if kind == "post_f8" and "UP" in options:  # the up-gate post kernel (own source; one register target: its tile of accumulators needs all 255)
+    if (
+        kind == "post_f8" and "UP" in options
+    ):  # the up-gate post kernel (own source; one register target: its tile of accumulators needs all 255)
         kind, minb = "post_f8up", 1
     defs = tuple(
         f"-D{o}=1"

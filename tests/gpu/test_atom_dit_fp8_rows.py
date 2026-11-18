@@ -56,7 +56,13 @@ def test_fp8_rows_error(model: str, n: int, monkeypatch) -> None:
     monkeypatch.setattr(H, "FP8_UP_MIN_N", 0)  # Boltz-2: the shipped gate (2048 atoms) would keep the small cases on bf16
     from miniworld_engine.modules import atom_dit as A
 
-    cls = {"openfold3": A.AtomDiTOpenFold3, "protenix": A.AtomDiTProtenix, "chai1": A.AtomDiTChai1, "rf3": A.AtomDiTRoseTTAFold3, "boltz2": A.AtomDiTBoltz2}[model]
+    cls = {
+        "openfold3": A.AtomDiTOpenFold3,
+        "protenix": A.AtomDiTProtenix,
+        "chai1": A.AtomDiTChai1,
+        "rf3": A.AtomDiTRoseTTAFold3,
+        "boltz2": A.AtomDiTBoltz2,
+    }[model]
     m, inputs = _block(cls, n, 5, kw={"adaln_eps": 1e-5} if model == "chai1" else None)
     ref = m.set_backend("pytorch")
     with torch.no_grad():

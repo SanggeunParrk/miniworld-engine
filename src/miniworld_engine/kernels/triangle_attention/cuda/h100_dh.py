@@ -74,7 +74,10 @@ def ext_d64_f8():
 
     ensure_cuda_home()
     return load_extension(
-        name="triattn_h100_d64_f8pv", sources=[str(_SRC / "triattn_d64_sm90.cu")], extra_cuda_cflags=[*_flags(), "-DTE_F8PV=1"], verbose=False
+        name="triattn_h100_d64_f8pv",
+        sources=[str(_SRC / "triattn_d64_sm90.cu")],
+        extra_cuda_cflags=[*_flags(), "-DTE_F8PV=1"],
+        verbose=False,
     )
 
 

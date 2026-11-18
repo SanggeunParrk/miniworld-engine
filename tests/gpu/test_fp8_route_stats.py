@@ -49,7 +49,11 @@ def test_route_stats_follow_engine_fp8_calls() -> None:
     g = torch.Generator(device="cpu").manual_seed(3)
     with torch.no_grad():
         for name, p in a.named_parameters():
-            p.copy_(torch.randn(p.shape, generator=g) * p.shape[-1] ** -0.5 if p.dim() > 1 else (0.1 if name.endswith("bias") else 1.0) * torch.ones(p.shape))
+            p.copy_(
+                torch.randn(p.shape, generator=g) * p.shape[-1] ** -0.5
+                if p.dim() > 1
+                else (0.1 if name.endswith("bias") else 1.0) * torch.ones(p.shape)
+            )
     a = a.cuda().eval()
     b = PairformerBlock(cfg, master_weights=True, backend="engine-fp8").cuda().eval()
     b.load_state_dict(a.state_dict())

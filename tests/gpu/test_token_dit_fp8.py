@@ -119,7 +119,6 @@ def test_below_min_rows_is_default_route() -> None:
     assert torch.equal(y0, y1)
 
 
-
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
 def test_parallel_schedule_takes_expand_only() -> None:
     """RoseTTAFold3's block (parallel schedule, flat q / k LayerNorm: ``plain`` False) takes the e4m3 ``expand`` placement (the transition's
@@ -139,6 +138,7 @@ def test_parallel_schedule_takes_expand_only() -> None:
     x = inputs["single"].float()
     rel = (ye.float() - y0.float()).pow(2).mean().sqrt() / (y0.float() - x).pow(2).mean().sqrt()
     assert 0 < rel < 0.12, rel
+
 
 # --- Chai-1's option block (parallel attention / transition, identity AdaLN, no gating query): expand / out / squeeze, never qkvg ----------------
 
@@ -236,8 +236,6 @@ def test_chai1_parallel_rows_kernel_matches_reference() -> None:
     assert ((deq - ref2.float()).abs() <= 0.07 * ref2.float().abs() + amax * 2**-8).all()
 
 
-
-
 # ---------------------------------------------------------------------------------------------------------- Boltz-2 (up-gate transition)
 def _master_boltz2(seed: int = 0) -> typing.Any:
     from miniworld_engine.modules.token_dit import TokenDiTBoltz2
@@ -289,7 +287,9 @@ def test_boltz2_expand_route_runs_and_is_close() -> None:
         y64 = ref64(**{k: (v.double() if torch.is_tensor(v) and v.is_floating_point() else v) for k, v in inputs.items()})
     e0 = (y0.double() - y64).pow(2).mean().sqrt()
     e8 = (y8.double() - y64).pow(2).mean().sqrt()
-    print(f"boltz2 token DiT vs fp64 (rms, update rms {upd.item():.4f}): bf16 {e0.item():.5f} ({e0.item() / upd.item():.2%}), expand e4m3 {e8.item():.5f} ({e8.item() / upd.item():.2%})")
+    print(
+        f"boltz2 token DiT vs fp64 (rms, update rms {upd.item():.4f}): bf16 {e0.item():.5f} ({e0.item() / upd.item():.2%}), expand e4m3 {e8.item():.5f} ({e8.item() / upd.item():.2%})"
+    )
     assert e0 < 0.015 * upd.double() and e8 < 0.10 * upd.double(), (e0.item(), e8.item())
 
 

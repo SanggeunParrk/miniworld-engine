@@ -757,7 +757,11 @@ class TriangleAttention(_TriangleAttentionBase):
     # cuda:h100_sm90 11 (2026-11-17, 2.5.15): re-measure only: the 2.5.13 fp16 core loop TA_RC (bit-identical, faster on 16 / 32-channel
     # heads) reached this class without a bump, so its H100 speed tokens predated it
     # cuda:a100_sm80 7 (2026-11-17): as the base class (6): 16-channel heads on the register-resident core from L 256
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:a100_sm80": 7, "cuda:h100_sm90": 12}  # 12 (2026-11-18, 3.0.1): training backward, query side from L 512: two warpgroups sum their dbias partials in shared memory (half the TMA reduce-adds; dq bitwise unchanged, dbias within fp32 summation order)
+    backend_versions: ClassVar[dict[str, int]] = {
+        **_TriangleAttentionBase.backend_versions,
+        "cuda:a100_sm80": 7,
+        "cuda:h100_sm90": 12,
+    }  # 12 (2026-11-18, 3.0.1): training backward, query side from L 512: two warpgroups sum their dbias partials in shared memory (half the TMA reduce-adds; dq bitwise unchanged, dbias within fp32 summation order)
     # cuda:a100_sm80 6 (2026-11-14): the A100 row-blocked inference (sm80_wide.forward_rows: OpenDDE's refiner 2976 / 3968, L % 128 != 0) runs
     # the whole-pair call's core at the padded L (the rf core at L >= 512, keys up to the last live one): each row's bits equal the whole-pair
     # call's (was the 64-key AttnCfg core: within a bf16 ulp). Cases at multiples of 128 up to L2048 keep their path and bits.
@@ -996,7 +1000,10 @@ class TriangleAttentionChai1(_TriangleAttentionFp32Softmax):
     #: untransposed output in their out-projection; outputs change within rounding), 64-channel heads skip the dead key tiles; 5: the
     #: d_pair 256 heads (64 channels) on the wgmma core (L a multiple of 128) (as the parent class 8)
     #: 7 (2026-11-17): the fp16 wgmma core of 64-channel heads (as the parent class 12)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 9}  # 9 (2026-11-18, 3.0.1): as the parent class 14 (training core of 64-channel heads)
+    backend_versions: ClassVar[dict[str, int]] = {
+        **_TriangleAttentionFp32Softmax.backend_versions,
+        "cuda:h100_sm90": 9,
+    }  # 9 (2026-11-18, 3.0.1): as the parent class 14 (training core of 64-channel heads)
 
     untransposed_output = True
 
@@ -1012,7 +1019,10 @@ class TriangleAttentionChai1Confidence(_TriangleAttentionFp32Softmax):
     #: cuda:h100_sm90 stays 3 (as TriangleAttentionChai1); 4 (2026-11-13): the dead key tiles skipped on the h100_dh core (bitwise); 5:
     #: the wgmma core of 64-channel heads (as TriangleAttentionChai1 5)
     #: 7 (2026-11-17): the fp16 wgmma core of 64-channel heads (as TriangleAttentionChai1 7)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:h100_sm90": 9}  # 9 (2026-11-18, 3.0.1): as the parent class 14 (training core of 64-channel heads)
+    backend_versions: ClassVar[dict[str, int]] = {
+        **_TriangleAttentionFp32Softmax.backend_versions,
+        "cuda:h100_sm90": 9,
+    }  # 9 (2026-11-18, 3.0.1): as the parent class 14 (training core of 64-channel heads)
 
     dual_output = True
 

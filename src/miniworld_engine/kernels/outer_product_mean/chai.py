@@ -28,7 +28,9 @@ def serves_dims(
     if not msa.is_cuda or msa.dtype != torch.bfloat16 or msa.ndim != 4 or msa.shape[0] != 1:
         return False
     cap = torch.cuda.get_device_capability(msa.device)
-    if cap not in ((9, 0), (8, 0), (12, 0)) or (cap != (9, 0) and d_pair % 256):  # A100 / RTX 5090 (cuda/chai_sm80): d_pair a multiple of 256
+    if cap not in ((9, 0), (8, 0), (12, 0)) or (
+        cap != (9, 0) and d_pair % 256
+    ):  # A100 / RTX 5090 (cuda/chai_sm80): d_pair a multiple of 256
         return False
     _, s, n, cm = msa.shape
     return (
@@ -273,7 +275,7 @@ def forward(module, msa, mask, token_asym_id=None, residual=None):
 F8_MIN_S = 0
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _f8_ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 

@@ -707,7 +707,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         ya = torch.mm(qkvg[:, :D], wo.t())
     if f8 and "expand" in f8 and parallel:
         if not identity:
-            xt8, sxt = _fp8.rows_q8(xt)  # the parallel schedule's transition input is the block input's AdaLN rows (one quantising row pass)
+            xt8, sxt = _fp8.rows_q8(
+                xt
+            )  # the parallel schedule's transition input is the block input's AdaLN rows (one quantising row pass)
         # identity: xt8 / sxt came out of the attention's LN pass (above)
     elif f8 and "expand" in f8:
         xt8 = torch.empty((M, D), device=single.device, dtype=_fp8.E4M3)
