@@ -1205,14 +1205,24 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     Mc = L if _shared_cond(single, cond) else M
     if Mc != M:  # the conditioning is shared by the samples: the sum over the samples first, every product below on L rows
         assert native and plain
-        dGs = torch.empty(L, 4 * D, device=dev, dtype=at)
-        dGgs = torch.empty(L, 2 * D, device=dev, dtype=at)
+        # the sum as two operands hi + lo ([2 L, n]: the sample sum rounded once to the operand type would add an error of the size of the
+        # per-row roundings it replaces); the GEMMs run on 2 L rows and their fp32 halves are added
+        dGs = torch.empty(2 * L, 4 * D, device=dev, dtype=at)
+        dGgs = torch.empty(2 * L, 2 * D, device=dev, dtype=at)
         T.sample_sum2(dG.view(A, L, 4 * D), dGs, dGg.view(A, L, 2 * D), dGgs)
-        dG, dGg = dGs, dGgs
-    dchat = mm(dG, Wn)
-    dWn = mm32(dG.t(), chat)
-    dcg = mm(dGg, Wg)
-    dWg = mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf)
+
+        def halves(y):
+            return (y[:L] + y[L:]).to(at)
+
+        dchat = halves(mm32(dGs, Wn))
+        dcg = halves(mm32(dGgs, Wg))
+        dWn = mm32(dGs.t(), torch.cat((chat, chat)))
+        dWg = mm32(dGgs.t(), torch.cat((cbf, cbf)))
+    else:
+        dchat = mm(dG, Wn)
+        dWn = mm32(dG.t(), chat)
+        dcg = mm(dGg, Wg)
+        dWg = mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf)
     dc = torch.empty(Mc, cond.shape[-1], device=dev, dtype=cdt)
     if native and plain:
         T.cond_bwd90(dchat, dcg, cond, cst, dc)

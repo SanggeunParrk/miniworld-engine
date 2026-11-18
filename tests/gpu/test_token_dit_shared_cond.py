@@ -103,10 +103,14 @@ def test_sample_sum2_is_the_fixed_order_sum(dtype, A, n1, n2) -> None:
     g = torch.Generator(device="cuda").manual_seed(0)
     x1 = torch.randn(A, n1, device="cuda", generator=g).to(dtype)
     x2 = torch.randn(A, n2, device="cuda", generator=g).to(dtype)
-    o1, o2 = torch.empty(n1, device="cuda", dtype=dtype), torch.empty(n2, device="cuda", dtype=dtype)
+    o1, o2 = torch.empty(2, n1, device="cuda", dtype=dtype), torch.empty(2, n2, device="cuda", dtype=dtype)
     T.sample_sum2(x1, o1, x2, o2)
     for x, o in ((x1, o1), (x2, o2)):
         acc = torch.zeros(x.shape[1], device="cuda")
         for a in range(A):  # the kernel's order: fp32, sample 0, 1, ..
             acc += x[a].float()
-        assert torch.equal(o, acc.to(dtype))
+        hi, lo = o[0].float(), o[1].float()
+        if dtype is torch.bfloat16:
+            assert torch.equal(o[0], acc.to(dtype))  # hi = the sum rounded to bf16
+        bound = (2.0**-15 if dtype is torch.bfloat16 else 2.0**-20) * acc.abs()  # hi + lo = the sum, to the second operand's rounding
+        assert bool(((hi + lo - acc).abs() <= bound).all())

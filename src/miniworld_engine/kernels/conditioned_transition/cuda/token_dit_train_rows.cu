@@ -1389,8 +1389,19 @@ void caller_add90_launch(at::Tensor dst_tensor, at::Tensor src_tensor) {
       dim3(std::min<int64_t>(512,(n+255)/256)),dim3(256),args,0,S()));
 }
 // Shared conditioning, backward: the per-sample gradients of the conditioning projections' outputs ([A L, n1] and [A L, n2] rows, A
-// samples of L rows) summed over the samples into [L, n1] / [L, n2] -- one pass, 16-byte vectors, fp32 accumulation in sample order
-// (deterministic), the result rounded once to T. n1 / n2: elements of one sample's block (L n1, L n2), multiples of the vector width.
+// samples of L rows) summed over the samples in fp32, in sample order (deterministic), and written as TWO operands hi + lo = the sum
+// ([2, L, n1] / [2, L, n2]: hi = the sum rounded to the GEMM operand type -- bf16, or the TF32 chop for fp32 -- lo = the rest in the same
+// type), so the GEMMs that follow see the sum to ~2^-16 (bf16) / 2^-21 (fp32) instead of one operand rounding of it. n1 / n2: elements of
+// one sample's block (L n1, L n2), multiples of the vector width.
+template <typename T>
+__device__ __forceinline__ void split_hi_lo(float x, T& hi, T& lo);
+template <>
+__device__ __forceinline__ void split_hi_lo<bf>(float x, bf& hi, bf& lo) { hi = bf(x); lo = bf(x - float(hi)); }
+template <>
+__device__ __forceinline__ void split_hi_lo<float>(float x, float& hi, float& lo) {
+  hi = __uint_as_float(__float_as_uint(x) & 0xFFFFE000u);   // TF32: 10 mantissa bits kept
+  lo = x - hi;
+}
 template <typename T>
 __global__ void __launch_bounds__(256) sample_sum2_k(const T* __restrict__ in1, T* __restrict__ out1, int64_t p1, const T* __restrict__ in2,
                                                      T* __restrict__ out2, int64_t p2, int samples) {
@@ -1418,18 +1429,20 @@ __global__ void __launch_bounds__(256) sample_sum2_k(const T* __restrict__ in1, 
       }
     }
   }
-  uint4 o;
-  T* oe = reinterpret_cast<T*>(&o);
+  uint4 oh, ol;
+  T* he = reinterpret_cast<T*>(&oh);
+  T* le = reinterpret_cast<T*>(&ol);
 #pragma unroll
-  for (int j = 0; j < VEC; ++j) oe[j] = T(acc[j]);
-  *reinterpret_cast<uint4*>(dst) = o;
+  for (int j = 0; j < VEC; ++j) split_hi_lo<T>(acc[j], he[j], le[j]);
+  *reinterpret_cast<uint4*>(dst) = oh;
+  *reinterpret_cast<uint4*>(dst + period) = ol;
 }
-// in1 [A, L, n1], in2 [A, L, n2] (contiguous, bf16 or fp32) -> out1 [L, n1], out2 [L, n2]
+// in1 [A, L, n1], in2 [A, L, n2] (contiguous, bf16 or fp32) -> out1 [2, L, n1], out2 [2, L, n2] (hi, lo)
 void sample_sum2(at::Tensor in1, at::Tensor out1, at::Tensor in2, at::Tensor out2) {
   TORCH_CHECK(in1.is_contiguous() && in2.is_contiguous() && out1.is_contiguous() && out2.is_contiguous(), "sample_sum2: contiguous");
   TORCH_CHECK(in1.scalar_type() == in2.scalar_type() && in1.scalar_type() == out1.scalar_type() && in1.scalar_type() == out2.scalar_type(),
               "sample_sum2: one dtype");
-  const int64_t samples = in1.numel() / out1.numel(), p1 = out1.numel(), p2 = out2.numel();
+  const int64_t p1 = out1.numel() / 2, p2 = out2.numel() / 2, samples = in1.numel() / p1;
   TORCH_CHECK(samples >= 1 && in1.numel() == samples * p1 && in2.numel() == samples * p2, "sample_sum2: [A, ...] / [...] shapes");
   const at::cuda::CUDAGuard g(in1.device());
   const bool f32 = in1.scalar_type() == at::kFloat;
