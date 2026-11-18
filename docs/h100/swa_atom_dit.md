@@ -142,3 +142,15 @@ the H100 dispatch does not reach them (every H100 stage is hand CUDA or native).
 ## History
 
 Old page: `git show 65f37dc3c^:docs/gpus/h100/swa_atom_dit/swa_atom_dit.md`.
+
+## Global-window cost steps (audit 2026-11-18, no table change)
+
+`InputFeatureEmbedder` (global window, 4 heads x 32) runs the composed bf16 stages around FlashAttention-4 (`attn_global_fwd`, `_flash_attn_fwd`
+with its default tile). The cost per atom steps up inside FA4, not in an engine table: at one sample, 7168 -> 7296 atoms the module goes 449 -> 640
+us (FA4 61 -> 128 us per block; seqused is 7/8 of the atom count in the registry inputs, FA4's default tile doubles in cost once the real atoms
+pass ~6300). Standalone, tile (128, 128) is 14 - 20 % faster than the default between the step and ~9600 atoms (module: 7296 - 9600 atoms 565 vs
+638 .. 721 vs 812 us) and slower elsewhere (default is 18 % better below the step and above ~9700); the step depends on the real atom count
+(seqused), a device tensor, so a gate on the padded count alone cannot select it. Not changed. The `key_window="slide"` AtomDiT rows (3 - 3.8x vs
+PyTorch against 9 - 13x for the clipped window) are not a routing gate either: the slid window runs the clipped kernels plus the five edge
+windows and the tail kernels, 58 launches against 19 at 1024 atoms (128 us against 60; ~70 us of torch index / elementwise glue building the
+edge tables per call inside the graph, 12 us the edge attention); a fix is a fused edge-table kernel, not a table.
