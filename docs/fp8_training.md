@@ -208,3 +208,98 @@ widths are not worth an FP8 route (<= 4-7 % bound); their dropout passes are the
 - 2026-11-18 00:20 branch `fp8t/pwa` from 1a2bbe42e; 01:05 stage profile + GEMM bench; 01:10 first fused route (0.886 / 0.882 at S1024 N768);
   01:25 swapped-role natural-v store (slower, reverted); 01:33 launch tuning (1 x 4); 01:35 sp2 / training curves / bit-identity; 08:00
   (after an API outage 02:00-05:10) tests fixed (fused-vs-proto against fp64; default bytes checked at a qualified shape), docs.
+
+## Rounds 2 and 3: backward-only variant, baseline = the 3.0.1 default (branch `fp8t3/pwa` = `fp8t2/pwa` + origin/main f5be1df46)
+
+Everything below is measured against the **3.0.1 default** (the branch was merged with origin/main 3.0.1 first; the plain-build shapes are
+a little faster there than in 2.5.14: S1024 N512 1.94 ms against 2.14). Scripts / raw rows: `~/miniworld-engine-scratch/fp8t3-pwa/{scripts,res}`;
+the step-time benchmark is `tools/fp8_train/pwa_step_bench.py` (+ `run_pwa_step_bench.sbatch`).
+
+### Enable (added)
+
+| env / attribute | effect |
+|---|---|
+| `MINIWORLD_PWA_FP8_TRAIN=bwd` | **backward-only**: bf16 forward (default numerics), FP8 dv / dw (producers `ln_vt8n -DVT_BF` + `pwa_glue3_f8` + `w_quant_t`) |
+| `MINIWORLD_PWA_FP8_TRAIN_MIN_S` / `pwa_fp8_train.MIN_S` | smallest MSA depth served (default 1024: measured S 1024 .. 4096; below it the default route runs) |
+
+Gates (`serves`): H100, N % 128 == 0, N <= 1024, S >= 1024, S even; `bwd` additionally N >= 512 (its forward needs the split head-major
+contraction, N >= 512). Everything else runs the default route (bit-identical, see below).
+
+### What was wrong with the round-2 producer, and the fix
+
+Round 2's `bwd` variant (bf16 v for the forward + e4m3 natural v for dw from one swapped-role wgmma) gave only 0.994 of the default
+(S1024 N768, cool): GEMMs saved 151 (dv 447 -> 297) + 153 (dw 388 -> 235) us, but `ln_vt8` (VT_BF) took 443 us against `ln_vg`'s 218.
+Micro-benchmark of the producer alone (`mb.py`, S1024 N768, us): base 460-470; **no smem staging stores 468** (the bank conflicts of the
+scatter are NOT the cost); **no v TMA stores 225** (the global stores are); swizzled staging (TMA 64B / 32B swizzle) 468 (no change).
+The stores are 64 B (bf16) / 32 B (e4m3) row pieces at a stride of S*C bytes, and items were ordered n-block fastest, so the 132 concurrent CTAs
+wrote 12 distant rows. Ordering the items **s fastest** (`VT_MAP=1`: concurrent CTAs write adjacent pieces of the same rows, which the L2
+merges) takes the producer to **335 us** (swizzled staging 335, plain 337; cfg (1,4) best), bytes identical. Applying the same order to the
+FP8 forward's `ln_vt8n` made it slower (the full route's step 0.904 against 0.887): left off there. The same order in `pwa_glue3_f8`
+(`G3_MAP`): 662 against 659 us, no effect, off. 335 us against the memory-bound ideal ~290 (806 MB of v at ~2.8 TB/s): ~45 us left.
+
+### Step time, fwd + bwd of one module call, against the 3.0.1 default (`bench_final.jsonl`, job 58927)
+
+One process; `autograd.grad` of the output w.r.t. msa, pair and every parameter, master weights, p_drop 0.15, each variant one CUDA graph,
+def / ctl (same-cubin control) / variants interleaved; cool = 2 s idle + short burst, median of 3; sustained = after 1 s of back-to-back replays,
+mean of 3. Cells = variant / default, `cool / sustained` (ctl = control, 1.00 means the measurement is clean; 1.019 once at 2048:384).
+
+| S:N[:d_pair] | default ms (cool) | ctl cool / sus | `bwd` (bf16 fwd, FP8 dv + dw) | full (`1`, FP8 o + dv + dw, do e4m3) |
+|---|---|---|---|---|
+| 1024:768 | 3.256 | 0.993 / 1.003 | **0.954 / 0.964** | 0.886 / 0.899 |
+| 2048:768 | 6.075 | 0.993 / 0.997 | **0.951 / 0.958** | 0.881 / 0.892 |
+| 4096:768 | 11.732 | 0.993 / 1.002 | **0.958 / 0.968** | 0.889 / 0.914 |
+| 1024:768:256 (Chai-1) | 3.467 | 0.996 / 1.006 | **0.956 / 0.971** | 0.894 / 0.911 |
+| 1024:512 | 1.942 | 0.998 / 1.005 | **0.972 / 0.982** | 0.914 / 0.925 |
+| 1024:384 | 1.398 | 0.992 / 0.998 | not served (N < 512): default | 0.940 / 0.949 |
+| 2048:384 | 2.620 | 1.019 / 1.004 | not served (N < 512): default | 0.922 / 0.927 |
+
+Per stage at S1024 N768 (profiler, us; default -> `bwd`): `ln_vg` 219 -> `ln_vt8` (VT_BF, mapped) 329; contraction dv 447 -> 297; dw 388 -> 235;
+`pwa_glue3` 612 -> `pwa_glue3_f8` 658; `w_quant_t` +16; `scale_update` 2 x 3. Gain 304 us of GEMM, cost 110 + 46 + 16 + 6 = 178 us of producers
+(net ~126 us = 3.9 %; the measured 4.6 % cool also includes the smaller v bytes the dw GEMM reads).
+
+### Gradient error against fp64 (`err3.jsonl`, rms relative error in %, same protocol as above; default / PyTorch / `bwd` / full e4m3)
+
+| S:N | tensor | PyTorch bf16 | default 3.0.1 | `bwd` | full |
+|---|---|---|---|---|---|
+| 1024:768 | update (fwd) | 2.38 | 2.37 | 2.37 | 2.89 |
+| | d msa | 0.17 | 0.17 | 0.21 | 0.21 |
+| | d pair | 0.71 | 0.58 | 3.80 | 3.80 |
+| | d to_value | 0.43 | 0.28 | 2.75 | 2.75 |
+| | d ln_msa.weight | 0.46 | 0.36 | 2.30 | 2.50 |
+| | d to_gate / to_out | 0.59 / 0.45 | 0.40 / 0.32 | 0.40 / 0.32 | 1.69 / 1.56 |
+| 2048:768 | d pair / d to_value / d ln_msa.w | 0.71 / 0.45 / 0.62 | 0.58 / 0.31 / 0.44 | 3.79 / 3.01 / 2.41 | 3.79 / 3.01 / 2.66 |
+| 1024:512 | d pair / d to_value / d ln_msa.w | 0.71 / 0.44 / 0.52 | 0.58 / 0.29 / 0.39 | 3.79 / 2.71 / 2.78 | 3.79 / 2.71 / 3.22 |
+
+The `bwd` variant's forward (update, to_gate, to_out) equals the default's; the dv / dw gradients (pair, to_bias, ln_pair, to_value, ln_msa) carry
+the e4m3 rounding (2.3-4.1 % rms, max 2-3 %), 4-8x the default's error; the full route adds the forward contraction (update 2.89, to_gate / to_out 1.6-2.0 %).
+
+### Training curve (`tr3.jsonl`, `train.py`: 2-layer PWA stack distilled to an fp32 PyTorch teacher, S1024 N512, p_drop 0.15, Adam 1e-3, 1000 steps, mean loss per 200 steps)
+
+| variant | 1-200 | 201-400 | 401-600 | 601-800 | 801-1000 |
+|---|---|---|---|---|---|
+| default | 0.6270 | 0.3329 | 0.2364 | 0.1950 | 0.1666 |
+| `bwd` (FP8 dv + dw) | 0.6271 | 0.3333 | 0.2365 | 0.1952 | 0.1668 |
+| full (FP8 o + dv + dw, e4m3) | 0.6273 | 0.3326 | 0.2374 | 0.1955 | 0.1671 |
+
+Final window: `bwd` +0.1 %, full +0.3 % (one dropout seed; the default's own seed spread is ~0.3 %); no divergence, overflow 0. (The 3.0.0-line runs
+above saw +1 % for the full route at S1024 N384; same direction, `bwd` indistinguishable from the default in both.) Synthetic task: not an end-level check.
+
+### Default route bit-identical with the switch off
+
+`bit.py` (sha1 of output + all gradients, training p_drop 0.15 + inference, 7 cases: native, d_pair 256, plain builds, wide): this branch against a
+detached origin/main 3.0.1 worktree: `cmp` of the two result files equal (`bit_wt5` / `bit_base5`). Tests (job 58922): `test_pwa_fp8_train.py`
++ `test_pwa_fp8.py` + `test_pwa_fp8_wide.py` + `test_i64_offsets.py::test_pwa_train_pair_past_2_31` + CPU `test_capture_api.py`, `test_fp8_switch.py`: 57 passed;
+ruff format / check, pyright clean.
+
+### Verdict
+
+- `bwd`: wins 2.8-4.9 % (cool; 1.8-4.2 % sustained) at S >= 1024, N 512-1024, d_pair 128 / 256, forward numerics unchanged, training curve = default;
+  gradient error 2.3-4 % rms on the dv / dw side. Gated off for N < 512 (no win there: 0.99-1.00) and S < 1024.
+- full: wins 6-12 % at every gated shape incl. N 384; forward error and +0.3-1 % loss.
+- Remaining producer headroom: `ln_vt8` (VT_BF) 335 us vs ~290 ideal, `pwa_glue3_f8` +46 us over `pwa_glue3` (its do / doT stores are 64 B pieces,
+  tile order did not help); worth ~1.5 % more at most. Not a default: opt-in, off. FP8 projection GEMMs, wide widths: unchanged no-go (above).
+
+### Progress log (rounds 2-3)
+- 2026-11-18 18:33 branch fp8t3/pwa = fp8t2/pwa + 3.0.1; 18:36 baseline: `bwd` 0.994 of default (producer 443 us); 18:52 producer micro-benchmark:
+  smem scatter / swizzle irrelevant, stores dominate; 23:47 s-fastest item order 460 -> 335 us; 00:10 gradient error, training curve; 00:22 tests, bit-identity;
+  00:23 `bench_final` (step table above); S gate (MIN_S 1024) added after.

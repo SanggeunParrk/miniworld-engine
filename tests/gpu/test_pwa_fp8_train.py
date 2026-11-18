@@ -19,10 +19,11 @@ _H100 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 
 def f8t():
     from miniworld_engine.kernels.integrations import pwa_fp8_train as F
 
-    saved = (F.PLACES, F.IMPL, F.DO_FMT)
+    saved = (F.PLACES, F.IMPL, F.DO_FMT, F.MIN_S)
+    F.MIN_S = 0  # the tests run small S
     F.reset()
     yield F
-    F.PLACES, F.IMPL, F.DO_FMT = saved
+    F.PLACES, F.IMPL, F.DO_FMT, F.MIN_S = saved
     F.reset()
 
 
@@ -228,3 +229,16 @@ def test_bwd_only_producer_and_route(f8t) -> None:
     torch.cuda.synchronize()
     for a, c in zip(e1, out, strict=True):
         assert torch.equal(a, c)
+
+
+@pytest.mark.skipif(not _H100, reason="H100")
+def test_serving_gate(f8t) -> None:
+    """The route serves S >= MIN_S (1024), N % 128 == 0, N <= 1024, and for the backward-only variant N >= 512; nothing when off."""
+    f8t.MIN_S = 1024
+    x = torch.empty(1, 1024, 768, 64, device="cuda", dtype=torch.bfloat16)
+    f8t.PLACES = frozenset()
+    assert not f8t.serves(x)
+    f8t.PLACES = f8t.ALL
+    assert f8t.serves(x) and not f8t.serves(x[:, :512])
+    f8t.PLACES = f8t.BWD
+    assert f8t.serves(x) and not f8t.serves(torch.empty(1, 1024, 384, 64, device="cuda", dtype=torch.bfloat16))

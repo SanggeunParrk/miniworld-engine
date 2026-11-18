@@ -67,6 +67,8 @@ MARGIN = float(os.environ.get("MINIWORLD_PWA_FP8_TRAIN_MARGIN", "2"))
 FAST_ACCUM = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_FASTACC") == "1"
 #: ln_vt8n (blocks per SM, TMA stages): measured best of {1, 2} x {2, 3, 4} (S1024 N768: 245 us at (1, 4), 310 at (2, 3))
 VT8N_CFG = (1, 4)
+#: smallest MSA depth S the FP8 route serves (measured wins: S 1024 .. 4096); below it the default route runs
+MIN_S = int(os.environ.get("MINIWORLD_PWA_FP8_TRAIN_MIN_S", "1024"))
 #: pwa_glue3_f8 tile order: sp (the s pair) fastest, so concurrent CTAs store adjacent row pieces of do / doT
 G3_MAP = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_G3MAP", "0") == "1"
 
@@ -91,6 +93,8 @@ def serves(msa: torch.Tensor) -> bool:
     if not (PLACES or NATIVE_ONLY) or not msa.is_cuda or msa.ndim != 4 or msa.shape[0] != 1 or msa.shape[3] != 64:
         return False
     s, n = msa.shape[1], msa.shape[2]
+    if PLACES and s < MIN_S:  # gated off where it was not measured to win (docs/fp8_training.md)
+        return False
     if (
         PLACES and "fwd" not in PLACES and n < 512
     ):  # backward-only FP8 needs the split (head-major o) forward: N >= 512 (pwa_train._SPLIT_MIN_N)
