@@ -89,6 +89,16 @@ are folded into the weights (`W' = W diag(gamma)`); `dgamma` is recovered in `fi
 with programmatic dependent launch (`griddepcontrol.wait` before reading a predecessor's output). Register targets: bf16 `cond`,
 `cond_bwd` ask for 3 CTAs per SM (`_MINB`).
 
+**Occupancy of the backward row kernels (bf16, 3.0.1).** `tr_bwd90`'s grouped build (shared conditioning: Protenix / OpenDDE training)
+used 136 KB shared memory = one CTA per SM (ncu warps active 6.2 %): the 2 x 48 KB weight ring plus 34 KB of staging slabs for the
+four samples' modulation gradients. The slabs are used only in the prologue, so they now live in the second ring buffer (`-DGRP_ALIAS=1`;
+that chunk's cp.async is issued after the slabs are read): 101 KB, two CTAs per SM, same math order (bit-identical output and all
+gradients vs 3.0.0). `tr_bwd90` 400 -> 275 us at A48 x 4096; block training step 0.966x (A48 x 4096), 0.970x (2048), 0.978x (1024),
+0.978x (A8 x 4096); per-sample-conditioning classes (AF3, Boltz-2, Chai-1) run the non-grouped build, unchanged. Tried and dropped
+(bit-identical, no gain beyond noise): a 3-6 slot weight ring for `post_bwd90` / `pre_bwd90` (they are register-bound at 239-255
+registers = two CTAs per SM, not shared-memory-bound; 6 slots lose the second CTA: 1.6x slower). A third CTA would need <= 168 registers
+(spills, see `_MINB`).
+
 **Small row counts.** When `A * N` gives few 64-row tiles, `_split_for` splits a tile's work over `grid.y` to reach about 264 CTAs:
 `cond90_split` / `pre90_split` by weight unit, `tr_bwd90` by hidden chunk (disjoint outputs), `post_bwd90` / `cond_bwd90` as separate
 `-DSPLITK=1` builds with fp32 partials and a last-CTA finish in fixed order (run-to-run identical). `post90` forward and `pre_bwd90`
