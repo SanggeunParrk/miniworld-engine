@@ -109,6 +109,14 @@ L is padded to a multiple of 128 inside (zero rows, padded keys masked) and the 
 - fp32 attention backward: `attn_tf32_dqb` (per-sample dbias buffer) + `attn_tf32_dkv`; q, k, dO are transposed by a tiled CUDA
   transpose for the products that contract over tokens; bias / LSE / D are passed in the permuted orders.
 - Weight gradients: cuBLAS with fp32 accumulation, reduced by the `final` kernel in fixed order.
+- Shared conditioning (`cuda:h100_sm90` 4): when the caller's conditioning is one [1, 1, L, dc] row block expanded (stride 0) over the A
+  samples and the block has the default options, `block` slices it to its L rows (`_shared_cond`; switch `SHARED_COND`). The cond
+  LayerNorm and both conditioning GEMMs (G, Gg) run on L rows, the row kernels read row `r % L` of G / Gg (`Lg`). Backward: `sample_sum2`
+  sums dG / dGg over the samples (fp32, sample order, deterministic) into hi + lo operands (the sum rounded once would add an error of
+  the size of the per-row roundings it replaces); dchat, dcg, dWn, dWg are then 2 L-row GEMMs whose halves are added. A dense per-sample
+  conditioning, variant options (Boltz-2 / RF3 / Chai-1) and A = 1 keep the per-sample route. Not bit-identical to 3.0.0 (summation order).
+  A48 training step, graph, interleaved with a same-cubin control, cool / sustained vs 3.0.0: L128 0.88 / 0.90, L384 0.89 / 0.90,
+  L768 0.91 / 0.92, L1536 0.94 / 0.94; A8 0.92-0.96; A5 0.92-0.98; A1 unchanged (1.00).
 
 ## Attention core design
 
