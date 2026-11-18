@@ -3338,3 +3338,15 @@ otherwise runs q / k as well; the first run of this section had that and was rep
 | 16 | 16.291 | 13.516 | 13.020 | 0.830 | 0.799 | 0.963 |
 
 OpenDDE: no TriAttn placement added, its route (and therefore its 5I28 FP8 row, FP8 / bf16 0.974 .. 0.848 at n = 1 .. 16) is unchanged, not re-run.
+
+## TriAttn 16 / 32-channel FP8 PV core: e4m3 NaN-byte clamp (2026-11-19, branch `fp8c/h16-clamp`)
+
+The 32-channel core (`triattn_h16_sm90.cu -DTA_F8PV=1`, also the `TA_F8QK` variant: same `F8conv`) formed `byte = round(8 x + 56)` with `x = logit - m + 8` and no upper bound. `x` stays below
+8.5 + the roundings of `m` (fp16), of `8 - m` and of the fp16 `logit * scale + (8 - m)`: about 0.09 at |m| < 128, but 0.5 and more at logits in the hundreds / thousands, past 8.875 where the byte is 127 (e4m3 NaN)
+or 128+ (a negative probability). Reproduced on the pre-fix core (`tests/gpu/test_triattn_h16_fp8_extreme.py`, H100): non-finite outputs from q.k logit std 300 up and from biases of 3000 (logits ~500) up, 4-32 channels,
+L 256 / 512 (the fixed core passes all 39 cases; the +-65504 bias case overflows the fp16 accumulator of the default core too: finite output only). Normal inputs (|offset| < 128) never reach the edge, which is why the end-level runs were clean.
+
+Fix (`TA_CLAMPV`, default 3): the same clamp as the d64 core (x <= 8.75, byte <= 126 = 448), at no extra instruction: x' = x + 7 enters the first HFMA2 as `.relu` (the old `x >= -7` clamp), one `min` (x' <= 15.75),
+then `8 x' + 1024` (= `8 x + 56 + 1024`). Same-input comparison against the unclamped core (L 256 .. 1024, 4 / 8 heads, 16 / 32 channels): rms difference 0.55 % of the output (the fp16 rounding of x' vs x flips ~5 % of the bytes by
+one e4m3 step; not bit-identical), error against fp64 unchanged (3.63 / 3.61 / 3.51 / 3.56 % vs 3.63 / 3.61 / 3.51 / 3.56 %); module time 0.99 - 1.02 x (same-cubin control 0.995 - 1.004 x). `TA_CLAMPV=2` keeps the old
+byte-exact code for rows with |offset| < 128 and clamps only above (bit-identical on normal inputs, 2 - 4.5 % slower: two code copies), `1` clamps always (+4 - 6.5 %), `0` is the old core.

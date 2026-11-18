@@ -24,6 +24,7 @@
 // (bit-identical results) at half the bytes through the front's stores, these loads and the out-projection.
 #include <torch/extension.h>
 #include <cuda_fp16.h>
+#include <type_traits>
 #include "sm90.cuh"
 using namespace sm90;
 
@@ -47,6 +48,9 @@ using namespace sm90;
 #endif
 #ifndef TA_F8QK
 #define TA_F8QK 0         // F8PV only (experimental, 2026-11-17): q and k arrive as e4m3 (per-head power-of-two scales sq, 1 / sq: their product is 1, so the bias and the softmax scale are unchanged); S += Q K^T is one m64n128k32 e4m3 wgmma with the fp16 accumulator (K tile 32-byte rows, 32-byte swizzle)
+#endif
+#ifndef TA_CLAMPV
+#define TA_CLAMPV 3       // F8PV: the x <= 8.75 clamp of the e4m3 probabilities (e4m3 NaN byte guard).  3: lower clamp = RELU of the first HFMA2 (x shifted by +7) + one min: same instruction count as 0, rounding ties of the bytes differ (rms 0.5 % of the output, fp64 error unchanged); 2: clamp only for rows with |offset| >= 128 (warp vote; bit-identical on normal inputs, 2-4 % slower); 1: always (+4-6 %); 0: never (see F8conv)
 #endif
 #ifndef TA_F8HL
 #define TA_F8HL 0         // F8PV only: V as two e4m3 planes (hi + lo/16: the rounding of the first, again in e4m3), PV on m64n72k32 -- V error ~2^-8 instead of 2^-4
@@ -152,7 +156,9 @@ __device__ __forceinline__ void mma_f8_n72(float (&d)[36], const uint32_t (&a)[4
 }
 #endif
 __device__ __forceinline__ uint32_t hmax2(uint32_t a, uint32_t b) { uint32_t r; asm("max.f16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
+__device__ __forceinline__ uint32_t hmin2(uint32_t a, uint32_t b) { uint32_t r; asm("min.f16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 __device__ __forceinline__ uint32_t hfma2(uint32_t a, uint32_t b, uint32_t c) { uint32_t r; asm("fma.rn.f16x2 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r; }
+__device__ __forceinline__ uint32_t hfma2r(uint32_t a, uint32_t b, uint32_t c) { uint32_t r; asm("fma.rn.relu.f16x2 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(b), "r"(c)); return r; }
 __device__ __forceinline__ uint32_t hex2(uint32_t a) { uint32_t r; asm("ex2.approx.f16x2 %0, %1;" : "=r"(r) : "r"(a)); return r; }
 // 2^x on f16x2 pairs without the MUFU (FMA / ALU pipes): x clamped at -15 (results below 2^-14.5 flush to 0), j = round(x) by the 1551 shift,
 // f = x - j in [-0.5, 0.5], 2^f by a degree-3 polynomial (Chebyshev-economised Taylor, ~1.2e-4 relative before the fp16 roundings), times 2^j
@@ -556,18 +562,32 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
   // Exact form, and a row without a finite logit yet: the tile's row maximum (a tree of HMNMX2) raises the offset lazily.
   uint32_t nmr0 = 0, nmr1 = 0;                       // the offsets of the row in X (set by Xpre, used by Xexp)
   uint32_t nbr0 = 0, nbr1 = 0;                       // F8PV: the same, shifted by +8 (8 - m)
+  bool bigr = false;                                // F8PV, TA_CLAMPV 2: some row of the warp has |offset| >= 128: the conversion clamps x (see F8conv)
 #if TA_F8PV
   // F8PV: the probabilities of the k32 groups [k0, k1) of row r (4 pairs = 8 registers each) as e4m3 bytes, in place: the A fragment of that group's PV step ends up in sc[r][4 kk .. 4 kk + 3]
   // (groups in increasing order: a group writes registers below the inputs of every later group).  p = 2^(x + 8) from the logit: see Xpre.
   // (ablation only, TA_ABL: 4 the whole conversion, 8 the scale / offset HFMA2, 4096 the clamp, 8192 the 8 x + 56 HFMA2, 2048 the PRMT pack; the probabilities stay live)
-  auto F8conv = [&](int r, int k0, int k1) {
+  // x <= 8.75 (the clamp, TA_CLAMPV): byte = 8 x + 56 <= 126 = 448; 127 is the e4m3 NaN and 128+ a negative number.  A row's x = logit - m + 8 stays below 8.5 + the roundings of m (fp16),
+  // of 8 - m and of the fp16 logit * scale + (8 - m): 3 half-ulps of |m|, 0.09 at |m| < 128 (inside the 0.375 of room up to 8.875) but 0.5 .. 1 and more at logits in the thousands.
+  // TA_CLAMPV 2: the clamp runs only for a row whose |offset| >= 128 (a warp vote in Xpre: the code is the unclamped one otherwise, so normal inputs keep their exact bytes and speed);
+  // 3 (default): x' = x + 7 in the first HFMA2 (.relu = the x >= -7 clamp), min x' <= 15.75, then 8 x' + 1024: no instruction more than 0 (module time level), the fp16 roundings of x' differ from those of x so ~5 % of the bytes flip by one step; 1: always; 0: never (the pre-2026-11-19 core: non-finite outputs at logits in the hundreds)
+  auto F8conv = [&](int r, int k0, int k1, auto clampc) {
+    constexpr bool CL = decltype(clampc)::value;
     if (TA_ABL & (4 | 128)) return;
 #pragma unroll
     for (int kk = k0; kk < k1; ++kk) {
 #pragma unroll
       for (int i = 4 * kk; i < 4 * kk + 4; ++i) {
+        if (TA_CLAMPV == 3) {   // x' = x + 7 (nbr carries the +7): the lower clamp is the RELU of the first HFMA2, the upper one a min; 8 x' + 1024 = 8 x + 56 + 1024
+          uint32_t x0 = hfma2r(sc[r][2 * i], scl2, nbr0), x1 = hfma2r(sc[r][2 * i + 1], scl2, nbr1);
+          x0 = hmin2(x0, 0x4BE04BE0u); x1 = hmin2(x1, 0x4BE04BE0u);                                   // x' <= 15.75 (x <= 8.75)
+          x0 = hfma2(x0, 0x48004800u, 0x64006400u); x1 = hfma2(x1, 0x48004800u, 0x64006400u);
+          sc[r][2 * i] = x0; sc[r][2 * i + 1] = x1;
+          continue;
+        }
         uint32_t x0 = (TA_ABL & 8) ? sc[r][2 * i] : hfma2(sc[r][2 * i], scl2, nbr0), x1 = (TA_ABL & 8) ? sc[r][2 * i + 1] : hfma2(sc[r][2 * i + 1], scl2, nbr1);
         if (!(TA_ABL & 4096)) { x0 = hmax2(x0, 0xC700C700u); x1 = hmax2(x1, 0xC700C700u); }   // x >= -7
+        if (CL && !(TA_ABL & 4096)) { x0 = hmin2(x0, 0x48604860u); x1 = hmin2(x1, 0x48604860u); }   // x <= 8.75
         if (!(TA_ABL & 8192)) { x0 = hfma2(x0, 0x48004800u, 0x64386438u); x1 = hfma2(x1, 0x48004800u, 0x64386438u); }                           // 8 x + 56 + 1024
         sc[r][2 * i] = x0; sc[r][2 * i + 1] = x1;
       }
@@ -629,12 +649,15 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_h16_sm90(
     // The magic add leaves the integer in the low byte of each half of the fp16 pair (1024 + y): two HFMA2 and one PRMT per four probabilities, no MUFU
     // (F8PV does the whole row here; Xexp is empty)
     nbr0 = hdup(m[r][0] > -INFINITY ? 8.f - m[r][0] : 0.f); nbr1 = hdup(m[r][1] > -INFINITY ? 8.f - m[r][1] : 0.f);
+    if (TA_CLAMPV == 3) { nbr0 = hdup(m[r][0] > -INFINITY ? 15.f - m[r][0] : 7.f); nbr1 = hdup(m[r][1] > -INFINITY ? 15.f - m[r][1] : 7.f); }
+    if (TA_CLAMPV == 2) bigr = __any_sync(0xffffffffu, (m[r][0] > -INFINITY && fabsf(m[r][0]) >= 128.f) | (m[r][1] > -INFINITY && fabsf(m[r][1]) >= 128.f));
 #endif
   };
   // the exponentials of the pairs [lo, hi) of row r (in place), with the offsets Xpre left
   auto Xexp = [&](int r, int lo, int hi) {
 #if TA_F8PV
-    F8conv(r, lo / 4, hi / 4);                       // F8PV: the e4m3 probabilities of the k32 groups [lo / 4, hi / 4) (the pairs are counted in 16ths of the row)
+    if constexpr (TA_CLAMPV == 2) { if (bigr) { F8conv(r, lo / 4, hi / 4, std::true_type{}); return; } }
+    F8conv(r, lo / 4, hi / 4, std::bool_constant<TA_CLAMPV == 1>{});   // F8PV: the e4m3 probabilities of the k32 groups [lo / 4, hi / 4) (the pairs are counted in 16ths of the row)
     return;
 #endif
     if (TA_ABL & 128) return;
