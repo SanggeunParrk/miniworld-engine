@@ -21,7 +21,9 @@ def _step(m: Transition, x: torch.Tensor, dy: torch.Tensor, dtype: torch.dtype):
     return (y, *torch.autograd.grad(y, [x, *params], dy.to(dtype)))
 
 
-@pytest.mark.parametrize(("d", "n", "rows"), [(768, 2, 1024), (768, 2, 2048), (768, 2, 8192), (384, 2, 36864), (512, 2, 16384), (512, 4, 36864)])
+@pytest.mark.parametrize(
+    ("d", "n", "rows"), [(768, 2, 1024), (768, 2, 2048), (768, 2, 8192), (384, 2, 36864), (512, 2, 16384), (512, 4, 36864)]
+)
 def test_training_generic_accuracy(d: int, n: int, rows: int) -> None:
     torch.manual_seed(0)
     assert G.prefers_generic(torch.empty(rows, d, dtype=torch.bfloat16), training=True, n=n)
@@ -39,6 +41,8 @@ def test_training_generic_accuracy(d: int, n: int, rows: int) -> None:
     pt = _step(ref, x, dy, torch.bfloat16)
     ex = _step(ref64, x.double(), dy.double(), torch.float64)
     for i, (g, p, e) in enumerate(zip(got, pt, ex, strict=True)):
-        print(f"ACC d{d} n{n} rows{rows} out{i}: engine rms {_rms_rel(g, e):.3e} max {(g.double() - e).abs().max().item():.3e}; pytorch rms {_rms_rel(p, e):.3e}")
+        print(
+            f"ACC d{d} n{n} rows{rows} out{i}: engine rms {_rms_rel(g, e):.3e} max {(g.double() - e).abs().max().item():.3e}; pytorch rms {_rms_rel(p, e):.3e}"
+        )
         assert e.abs().max() > 0
         assert _rms_rel(g, e) <= max(_rms_rel(p, e), 8e-3), f"output {i}: engine {_rms_rel(g, e):.3e} pytorch {_rms_rel(p, e):.3e}"
