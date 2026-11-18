@@ -153,13 +153,13 @@ def test_parallel_residual_cuda(dtype, branches, shape):
     xo = torch.empty(x.numel() + 1, device="cuda", dtype=dtype)[1:].view(shape).copy_(x)
     assert torch.equal(parallel_residual(xo, *ys, backend="cuda"), ref)
     # train: the module path and the reference's gradients
-    m = ParallelResidual(d=shape[-1], branches=branches, backend="cuda")
+    m = ParallelResidual(d=shape[-1], branches=min(branches, 4), backend="cuda")  # the module class takes 4 (y0 .. y3); 5 runs through the function
     up = torch.randn(x.shape, device="cuda", generator=g).to(dtype)
     grads = []
     for backend in ("cuda", "pytorch"):
         xs = x.detach().requires_grad_(True)
         yg = [y.detach().requires_grad_(True) for y in ys]
-        out = m(xs, *yg) if backend == "cuda" else parallel_residual(xs, *yg, backend="pytorch")
+        out = m(xs, *yg) if backend == "cuda" and branches <= 4 else parallel_residual(xs, *yg, backend=backend)
         out.backward(up)
         grads.append([xs.grad, *(y.grad for y in yg)])
     for a, b in zip(*grads, strict=True):
