@@ -14,12 +14,12 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_
 def test_chunked_inference_bitwise_one_launch(d: int, rows: int, monkeypatch: pytest.MonkeyPatch) -> None:
     torch.manual_seed(0)
     x = (torch.randn(rows, d, device="cuda") * 2).bfloat16()
-    ws = [(torch.randn(*s, device="cuda") * s[-1] ** -0.5).bfloat16() for s in ((2 * d, d), (2 * d, d), (d, 2 * d))]
+    wa, wb, wd = ((torch.randn(*s, device="cuda") * s[-1] ** -0.5).bfloat16() for s in ((2 * d, d), (2 * d, d), (d, 2 * d)))
     g, b = torch.ones(d, device="cuda"), torch.zeros(d, device="cuda")
     with torch.no_grad():
-        ref = W.transition_wide_sm90a(x, g, b, *ws, 1e-5)
+        ref = W.transition_wide_sm90a(x, g, b, wa, wb, wd, 1e-5)
         monkeypatch.setattr(W, "_H_ONE_LAUNCH_BYTES", 1 << 20)
         monkeypatch.setattr(W, "_H_CHUNK_BYTES", 1 << 20)
         assert W._inference_chunk_rows(rows, d, 2 * d) < rows
-        got = W.transition_wide_sm90a(x, g, b, *ws, 1e-5)
+        got = W.transition_wide_sm90a(x, g, b, wa, wb, wd, 1e-5)
     assert torch.equal(got, ref)
