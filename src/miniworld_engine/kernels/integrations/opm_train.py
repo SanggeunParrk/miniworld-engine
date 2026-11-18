@@ -77,9 +77,10 @@ def _h100_path(s: int, n: int, *, training: bool, wide: bool = False) -> str:
         (4096, 128),
     ):
         return "tma"
-    if s in (1024, 2048, 4096) and n in (128, 256, 384, 512, 640, 768):
-        return "legacy"
-    return "native"
+    # every other inference cell (S 1024 / 2048 / 4096 at N 512 and up, any N >= 1024, depths outside the table): the persistent TMA wide prologue
+    # ("legacy" = `_forward_wide`). The non-TMA native prologue took 825 us at L 1024 against 105 us for this one (H100, 2026-11-18); the
+    # wide prologue is bitwise the TMA one (opm_prologue_tma_hopper) at every cell measured.
+    return "legacy"
 
 
 def _wide_prologue_deep(s: int, training: bool) -> bool:

@@ -471,8 +471,8 @@ class TokenDiTProtenix(BackendModule):
         "cuda:a100_sm80": 4,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
-        "cuda:h100_sm90": 3,
-    }  # cuda:h100_sm90 3 / cuda:a100_sm80 4 (2026-11-13): inference skips the core's key tiles past the last attended key of a padded mask (the
+        "cuda:h100_sm90": 5,
+    }  # cuda:h100_sm90 5 (2026-11-18): the bf16 pair bias on the AttentionPairBias tensor-core kernels -- training at 128 / 256 / 512 pair channels (fwd + bwd one pass, bf16 mma, fp32 dbias) and the hoisted bias of a 256 / 512-wide pair at inference (outputs change at bf16 rounding; every subclass); cuda:h100_sm90 4 (2026-11-18): training with the conditioning shared by the samples (stride-0 expand, default options): the conditioning GEMMs on L rows, dG / dGg summed over the samples first (outputs change in summation order; TokenDiTMiniWorld inherits it, the variant classes keep their own entries); cuda:h100_sm90 3 / cuda:a100_sm80 4 (2026-11-13): inference skips the core's key tiles past the last attended key of a padded mask (the
     # klen held with the hoisted pair bias; bitwise the same outputs; every subclass)
     # cuda:h100_sm90 2 (2026-11-12): bf16 inference folds the conditioning into one grouped GEMM (CondFold), 128 x 128 SwiGLU tiles at small M, PDL row passes (outputs change: fp32 tables; every subclass); 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton attention core returns its bias gradient head-major on the A100 / H100 (every subclass)
 
@@ -787,8 +787,8 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
     #: transition in the SwiGLU GEMM's epilogue
     backend_versions: ClassVar[dict[str, int]] = {
         **TokenDiTProtenix.backend_versions,
-        "cuda:h100_sm90": 6,
-    }  # 6 (2026-11-13): as the base class (the key-tile skip)
+        "cuda:h100_sm90": 7,
+    }  # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
 
     backends = (
         "pytorch",
@@ -889,8 +889,8 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
     #: transition in the SwiGLU GEMM's epilogue
     backend_versions: ClassVar[dict[str, int]] = {
         **TokenDiTProtenix.backend_versions,
-        "cuda:h100_sm90": 6,
-    }  # 6 (2026-11-13): as the base class (the key-tile skip)
+        "cuda:h100_sm90": 7,
+    }  # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
 
     backends = (
         "pytorch",
@@ -938,8 +938,8 @@ class TokenDiTChai1(MasterEntryCast, VariantTokenCuda, TokenDiTProtenix):
     #: transition in the SwiGLU GEMM's epilogue
     backend_versions: ClassVar[dict[str, int]] = {
         **TokenDiTProtenix.backend_versions,
-        "cuda:h100_sm90": 6,
-    }  # 6 (2026-11-13): as the base class (the key-tile skip)
+        "cuda:h100_sm90": 7,
+    }  # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
 
     backends = (
         "pytorch",

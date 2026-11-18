@@ -13,7 +13,7 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | AlignEuler | 26.65x (n=10) | 4.49x (n=10) |  |  |  |  |
 | AtomDiTBoltz2 | 9.82x (n=80) | 1.27x (n=40) |  | 4.23x (n=32) |  |  |
 | AtomDiTChai1 | 8.26x (n=120) |  |  | 3.80x (n=32) |  |  |
-| AtomDiTESMFold2 | 23.47x (n=20) | 17.68x (n=20) |  | 11.59x (n=16) |  |  |
+| AtomDiTESMFold2 | 23.44x (n=20) | 17.70x (n=20) |  | 12.29x (n=16) |  |  |
 | AtomDiTESMFold2Pair | 17.21x (n=40) |  |  | 6.41x (n=16) |  |  |
 | AtomDiTOpenFold3 | 8.33x (n=76) | 1.36x (n=76) |  | 3.58x (n=34) |  |  |
 | AtomDiTProtenix | 11.09x (n=84) | 1.26x (n=84) |  | 4.74x (n=48) |  |  |
@@ -21,34 +21,34 @@ Per class and mode: the geometric mean over its cases of the speedup vs PyTorch 
 | AttentionPairBias | 5.00x (n=160) | 1.64x (n=160) | 0.94x (n=138) | 3.39x (n=108) |  | 0.99x (n=108) |
 | AugmentNoise | 8.19x (n=20) |  |  |  |  |  |
 | BidirectionalTriangleAttention | 2.96x (n=6) |  |  | 2.47x (n=6) |  |  |
-| BidirectionalTriangleMultiplication | 9.15x (n=30) |  |  | 6.52x (n=30) |  |  |
-| InputFeatureEmbedder | 9.52x (n=72) | 6.49x (n=72) |  | 7.07x (n=72) |  |  |
+| BidirectionalTriangleMultiplication | 9.17x (n=30) |  |  | 6.51x (n=30) |  |  |
+| InputFeatureEmbedder | 9.51x (n=72) | 6.51x (n=72) |  | 7.44x (n=72) |  |  |
 | LayerNorm | 3.42x (n=386) | 2.77x (n=386) | 2.80x (n=386) | 2.66x (n=270) |  | 1.29x (n=270) |
-| MSAPairWeightedAveraging | 5.92x (n=56) | 1.72x (n=56) |  | 3.33x (n=42) |  |  |
-| OuterProductMean | 3.21x (n=126) | 1.86x (n=51) |  | 2.43x (n=96) |  |  |
+| MSAPairWeightedAveraging | 5.92x (n=56) | 1.73x (n=56) |  | 3.60x (n=42) |  |  |
+| OuterProductMean | 3.20x (n=126) | 1.87x (n=51) |  | 2.43x (n=96) |  |  |
 | PairEmbedAdaLN | 14.45x (n=6) |  |  | 3.62x (n=6) |  |  |
 | PairEmbedCA | 14.48x (n=12) |  |  | 8.14x (n=12) |  |  |
 | PairEmbedGeom | 16.40x (n=12) |  |  | 9.16x (n=12) |  |  |
-| PairformerBlock | 13.63x (n=13) | 8.86x (n=13) |  | 7.90x (n=6) |  |  |
+| PairformerBlock | 11.27x (n=27) | 6.13x (n=27) |  | 6.90x (n=12) |  |  |
 | ParallelResidual | 9.72x (n=27) |  |  | 6.96x (n=18) |  |  |
 | PoolAtoms | 5.98x (n=10) | 1.90x (n=10) |  | 1.91x (n=8) |  |  |
-| SWAAtomTransformer | 18.41x (n=48) | 11.44x (n=48) |  | 10.81x (n=44) |  |  |
+| SWAAtomTransformer | 18.39x (n=48) | 11.49x (n=48) |  | 11.43x (n=44) |  |  |
 | SmoothLddtLoss | 477.23x (n=16) |  |  | 456.34x (n=16) |  |  |
-| TokenDiTBoltz2 | 5.21x (n=36) | 1.32x (n=36) | 1.35x (n=36) | 2.25x (n=12) |  | 1.42x (n=12) |
-| TokenDiTChai1 | 3.38x (n=90) | 1.20x (n=90) | 1.18x (n=90) | 2.19x (n=24) |  | 1.36x (n=24) |
-| TokenDiTMiniWorld | 3.81x (n=12) |  |  | 2.59x (n=12) |  |  |
+| TokenDiTBoltz2 | 5.21x (n=36) | 1.32x (n=36) | 1.35x (n=36) | 2.39x (n=12) |  | 1.42x (n=12) |
+| TokenDiTChai1 | 4.13x (n=90) | 1.20x (n=90) | 1.18x (n=90) | 2.28x (n=24) |  | 1.35x (n=24) |
+| TokenDiTMiniWorld | 3.80x (n=12) |  |  | 2.60x (n=12) |  |  |
 | TokenDiTMiniWorldBiasOnly | 2.38x (n=48) |  |  | 2.27x (n=48) |  |  |
-| TokenDiTProtenix | 3.79x (n=172) | 1.28x (n=172) | 0.99x (n=172) | 2.50x (n=96) |  | 1.05x (n=96) |
-| TokenDiTRoseTTAFold3 | 5.14x (n=36) | 1.17x (n=36) | 1.43x (n=36) | 2.34x (n=12) |  | 1.45x (n=12) |
+| TokenDiTProtenix | 4.23x (n=172) | 1.27x (n=172) | 0.99x (n=172) | 2.65x (n=96) |  | 1.05x (n=96) |
+| TokenDiTRoseTTAFold3 | 5.15x (n=36) | 1.17x (n=36) | 1.42x (n=36) | 2.48x (n=12) |  | 1.45x (n=12) |
 | TokenPairInit | 12.61x (n=6) |  |  | 3.81x (n=6) |  |  |
-| Transition | 4.75x (n=180) | 3.05x (n=117) |  | 3.13x (n=126) |  |  |
-| TriangleAttention | 10.81x (n=88) | 7.34x (n=75) | 3.17x (n=74) | 5.60x (n=82) |  | 2.07x (n=68) |
-| TriangleAttentionAF3 | 11.23x (n=52) | 10.66x (n=40) | 3.10x (n=50) | 5.53x (n=48) |  | 2.00x (n=46) |
-| TriangleAttentionChai1 | 15.25x (n=27) | 5.30x (n=27) | 4.46x (n=27) | 8.03x (n=24) |  | 3.10x (n=24) |
-| TriangleAttentionChai1Confidence | 7.88x (n=13) | 3.77x (n=13) | 3.40x (n=13) | 5.09x (n=12) |  | 2.52x (n=12) |
-| TriangleAttentionRF3 | 16.85x (n=28) | 9.46x (n=28) | 4.62x (n=28) | 7.44x (n=24) |  | 3.11x (n=24) |
-| TriangleMultiplication | 11.18x (n=104) | 8.32x (n=92) | 3.94x (n=102) | 8.74x (n=72) |  | 3.16x (n=70) |
-| TriangleMultiplicationRF3 | 12.55x (n=36) | 9.89x (n=36) |  | 10.46x (n=24) |  |  |
+| Transition | 4.79x (n=180) | 3.05x (n=117) |  | 3.17x (n=126) |  |  |
+| TriangleAttention | 11.42x (n=88) | 7.35x (n=75) | 3.18x (n=74) | 5.82x (n=82) |  | 2.08x (n=68) |
+| TriangleAttentionAF3 | 11.76x (n=52) | 10.64x (n=40) | 3.10x (n=50) | 5.71x (n=48) |  | 2.00x (n=46) |
+| TriangleAttentionChai1 | 16.29x (n=27) | 5.30x (n=27) | 4.46x (n=27) | 8.39x (n=24) |  | 3.10x (n=24) |
+| TriangleAttentionChai1Confidence | 8.56x (n=13) | 3.75x (n=13) | 3.38x (n=13) | 5.31x (n=12) |  | 2.52x (n=12) |
+| TriangleAttentionRF3 | 18.04x (n=28) | 9.43x (n=28) | 4.61x (n=28) | 7.75x (n=24) |  | 3.10x (n=24) |
+| TriangleMultiplication | 11.15x (n=104) | 8.27x (n=92) | 3.91x (n=102) | 8.81x (n=72) |  | 3.14x (n=70) |
+| TriangleMultiplicationRF3 | 12.45x (n=36) | 9.91x (n=36) |  | 10.93x (n=24) |  |  |
 
 ## Summary: af3 only
 
@@ -58,15 +58,16 @@ The same over the requirement rows whose `source` names af3 (56 rows).
 
 | class | eval Engine (CUDA) | eval Anthropic | eval cuEquivariance | train Engine (CUDA) | train Anthropic | train cuEquivariance |
 |---|---|---|---|---|---|---|
-| AtomDiTOpenFold3 | 8.38x (n=44) | 1.36x (n=44) |  | 3.45x (n=18) |  |  |
-| AttentionPairBias | 5.99x (n=18) | 3.62x (n=18) | 0.94x (n=18) | 3.58x (n=12) |  | 0.99x (n=12) |
-| LayerNorm | 3.98x (n=166) | 2.97x (n=166) | 3.29x (n=166) | 2.92x (n=114) |  | 1.38x (n=114) |
-| MSAPairWeightedAveraging | 8.49x (n=8) | 2.98x (n=8) |  | 3.98x (n=6) |  |  |
-| OuterProductMean | 3.02x (n=18) | 2.35x (n=18) |  | 2.32x (n=12) |  |  |
-| TokenDiTProtenix | 5.19x (n=36) | 1.38x (n=36) | 1.37x (n=36) | 2.57x (n=24) |  | 1.26x (n=24) |
-| Transition | 5.94x (n=74) | 3.79x (n=56) |  | 3.89x (n=48) |  |  |
-| TriangleAttentionAF3 | 15.09x (n=28) | 11.35x (n=28) | 3.53x (n=26) | 6.61x (n=24) |  | 2.19x (n=22) |
-| TriangleMultiplication | 13.96x (n=36) | 11.46x (n=36) | 6.78x (n=36) | 10.96x (n=24) |  | 4.03x (n=24) |
+| AtomDiTBoltz2 | 8.84x (n=20) |  |  | 4.90x (n=16) |  |  |
+| AtomDiTOpenFold3 | 7.13x (n=24) | 1.22x (n=24) |  | 1.68x (n=2) |  |  |
+| AttentionPairBias | 5.99x (n=18) | 3.62x (n=18) | 0.94x (n=18) | 3.40x (n=24) |  | 0.99x (n=24) |
+| LayerNorm | 3.98x (n=166) | 2.97x (n=166) | 3.29x (n=166) | 2.36x (n=98) |  | 1.19x (n=98) |
+| MSAPairWeightedAveraging | 8.49x (n=8) | 2.99x (n=8) |  | 4.27x (n=6) |  |  |
+| OuterProductMean | 2.94x (n=18) | 2.35x (n=18) |  | 2.32x (n=12) |  |  |
+| TokenDiTProtenix | 5.19x (n=36) | 1.39x (n=18) | 1.37x (n=18) | 2.77x (n=24) |  |  |
+| Transition | 5.94x (n=74) | 3.79x (n=56) |  | 3.88x (n=48) |  |  |
+| TriangleAttentionAF3 | 15.92x (n=28) | 11.35x (n=28) | 3.52x (n=26) | 6.80x (n=24) |  |  |
+| TriangleMultiplication | 13.99x (n=36) | 11.38x (n=36) | 6.74x (n=36) | 7.71x (n=24) |  | 3.01x (n=24) |
 
 ## Classes
 
@@ -91,7 +92,7 @@ The same over the requirement rows whose `source` names af3 (56 rows).
 | [PairEmbedAdaLN](PairEmbedAdaLN/README.md) | 12 | 1 | 0 |
 | [PairEmbedCA](PairEmbedCA/README.md) | 24 | 2 | 0 |
 | [PairEmbedGeom](PairEmbedGeom/README.md) | 24 | 2 | 0 |
-| [PairformerBlock](PairformerBlock/README.md) | 21 | 2 | 0 |
+| [PairformerBlock](PairformerBlock/README.md) | 45 | 4 | 0 |
 | [ParallelResidual](ParallelResidual/README.md) | 45 | 3 | 0 |
 | [PoolAtoms](PoolAtoms/README.md) | 18 | 1 | 0 |
 | [ProteinMPNN](ProteinMPNN/README.md) | 8 | 1 | 0 |

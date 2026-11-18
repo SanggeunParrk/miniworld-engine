@@ -67,6 +67,15 @@ def ext_d64():
     return load_extension(name="triattn_h100_d64", sources=[str(_SRC / "triattn_d64_sm90.cu")], extra_cuda_cflags=_flags(), verbose=False)
 
 
+@functools.lru_cache(maxsize=None)
+def ext_d64t():
+    """The wgmma training forward of 64-channel heads (bf16 operands; o, lse and u)."""
+    from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import _flags
+
+    ensure_cuda_home()
+    return load_extension(name="triattn_h100_d64t", sources=[str(_SRC / "triattn_d64t_sm90.cu")], extra_cuda_cflags=_flags(), verbose=False)
+
+
 @torch.autocast("cuda", enabled=False)  # the fp16 GEMMs as made: an enclosing bf16 autocast (master weights) would turn them bf16
 def _front_fp16(module, pack, x, lnw, lnb, mask, B: int, L: int, H: int, trans: bool):
     """The fp16 core's operands: proj = y [Wq; Wk; Wv; Wg]^T fp16 (y = LN(x) in fp16, the attention's row layout) and the head-major
@@ -108,32 +117,28 @@ def query_tile(length: int, d: int) -> int:
 
 def train_core(proj, bias, n_head, d, scale):
     """The training forward of the core (``h100_sm90_generic`` at 64-channel heads): proj [M, 4 H d] (q | k | v | g, the gate as it
-    is), bias [B, H, S, S] bf16 natural units (masked keys -inf) -> (o [M, H d], lse fp32 [B, S, H, S] base 2, u = sigmoid(g) o)."""
+    is), bias [B, H, S, S] bf16 natural units (masked keys -inf) -> (o [M, H d], lse fp32 [B, S, H, S] base 2, u = sigmoid(g) o).
+    S % 128 == 0 on the wgmma core (``TRAIN_WGMMA``), else the mma.sync core."""
+    if TRAIN_WGMMA and d == 64 and bias.shape[-1] % 128 == 0:
+        return ext_d64t().triattn_d64_forward_train(proj, bias, n_head, scale)
     return ext().triattn_dh_forward_train(proj, bias, n_head, d, scale)
 
 
-#: query-side backward: True (default) one bf16 dS plane per pair row, summed here in fp32 (the Triton backward's data flow; RoseTTAFold3 L 640 /
-#: 768 training 10.4 / 17.0 ms, the fp32 slab read-modify-write 12.5 / 19.8 ms); False the fp32 slab partials of `slabs`
-ROWS = True
-
-#: dbias slabs of the query-side backward: enough (b, h, query tile, slab) CTAs for ~3 waves of 132 SMs, at most this many slabs
-MAX_SLABS = 8
+#: the training forward of 64-channel heads on the wgmma core (``triattn_d64t_sm90.cu``) at S % 128 == 0; False: the mma.sync core
+TRAIN_WGMMA = True
 
 
-def slabs(batch: int, length: int, n_head: int) -> int:
-    """Slabs of pair rows the query-side backward splits into (each sums its rows' dbias into its own slab): a pure function of shapes."""
-    ctas = batch * n_head * (length // 64)
-    return max(1, min(MAX_SLABS, length, -(-3 * 132 // ctas)))
+#: pair rows one CTA of the query-side backward takes (1 or 2): the rows' dS tiles are summed in shared memory before the bf16 dbias plane is
+#: written, so the planes (written, then read back by the sum) are 1 / BWD_Q_ROWS of one plane per pair row
+BWD_Q_ROWS = 2
 
 
 def backward(proj, bias, do, lse, delta, dall, n_head, d, scale):
-    """The core backward: dq / dk / dv into columns 0 / H d / 2 H d of ``dall``; -> dbias fp32 [B, H, S, S] (natural units), the slabs (``ROWS``:
-    the per-row bf16 planes) summed in fp32 in order."""
-    B, _, S, _ = bias.shape
-    slabs_ = ext().triattn_dh_backward(
-        proj, bias, do, lse, delta, dall, 0, n_head * d, 2 * n_head * d, n_head, d, scale, S if ROWS else slabs(B, S, n_head), ROWS
-    )
-    return slabs_.sum(0, dtype=torch.float32) if slabs_.shape[0] > 1 else slabs_[0].float()
+    """The core backward: dq / dk / dv into columns 0 / H d / 2 H d of ``dall``; -> dbias fp32 [B, H, S, S] (natural units): the bf16 planes
+    (the dS sums of ``BWD_Q_ROWS`` pair rows each, the Triton backward's data flow) summed in fp32 in order."""
+    nr = BWD_Q_ROWS if bias.shape[-1] % BWD_Q_ROWS == 0 else 1
+    planes = ext().triattn_dh_backward(proj, bias, do, lse, delta, dall, 0, n_head * d, 2 * n_head * d, n_head, d, scale, nr)
+    return planes.sum(0, dtype=torch.float32) if planes.shape[0] > 1 else planes[0].float()
 
 
 def head_dim(module) -> int:

@@ -41,6 +41,7 @@ class Transition(BackendModule, MasterWeights):
 | `triton` | the engine's Triton kernels (no TMA, any CUDA card), launch configs from `kernels/<family>/configs/<card>.json` | yes |
 | `anthropic` | Anthropic's uplifting-biomolecular-modeling release in `third_party/anthropic/upstream`, loaded by `modules/_anthropic.py` (revision and file checksums checked against `third_party/anthropic/UPSTREAM.json`; the release itself is not in git; `MINIWORLD_ANTHROPIC_ROOT` overrides the root) | no: informational |
 | `cueq` | NVIDIA cuEquivariance 0.12 (`cuequivariance_torch`), loaded by `modules/_cueq.py`; `_supports_cueq` refuses exactly the calls the library would run in its own PyTorch formula | no: informational |
+| `engine-fp8` (opt-in, 3.0.0) | the `cuda` backend with the FP8 (e4m3) `safe` routes on for this module's inference calls (H100); public name `engine-fp8`, identifier `engine_fp8`; not in any `backends` tuple: `set_backend("engine-fp8")` resolves to `cuda` and sets `engine_fp8 = True` ([fp8.md](fp8.md)). Training calls (train mode / autograd on) run the default bf16 path | no: outside the judge (no rows, never measured) |
 
 External backends are connected as they are: they state in `_supports_<name>` what they run and are not changed to pass anything.
 
@@ -114,7 +115,7 @@ rounding. `"triton"` (`kernels/parallel_residual/triton`) is one pass over the t
 is torch (`d/dy_i = g`, `d/dx = (1 - n) g`). `"cuda"` (`kernels/parallel_residual/cuda/parallel_residual.cu`: one source, built as
 `parallel_residual_sm90` for H100 sm_90a and `parallel_residual_sm80` for A100 sm_80) is the same arithmetic in the same order (bitwise
 equal to `"pytorch"` and `"triton"`) with 16-byte vector accesses and streaming cache hints, and its backward's `(1 - n) g` in one small
-kernel (the Triton path's torch statements take three passes for bf16). Both forward passes stream near the memory bandwidth (H100, bf16,
+kernel (the Triton path's torch statements take three passes for bf16). The same kernel writes, in the same pass, a FRESH gradient tensor for every branch that is a leaf of the autograd graph and has no `.grad` yet (a differentiated input; the measurement step): AccumulateGrad takes it as `.grad` instead of copying the one shared `g` once per leaf (three full-tensor copies at three branches, 46 % of a pair-stream training call at L 768 before 3.0.1); a branch an upstream node reads keeps the shared `g` (no copy). Both forward passes stream near the memory bandwidth (H100, bf16,
 pair 768 x 768 x 256 with three branches: 1.5 GB read + written in 0.49 ms, about 3.1 TB/s against the card's 3.35): in eval `"cuda"` is
 within 0.94-1.05x of `"triton"` (2-5 % slower at L >= 384), in train 1.5-1.9x faster (the backward kernel). Measured on the requirement
 rows (graph timing, L2 flushed; L 768, ms):
@@ -128,7 +129,28 @@ rows (graph timing, L2 flushed; L 768, ms):
 | pair [1, 768, 768, 256], 2 branches | eval | 4.015 | 0.407 | 0.393 | 7.074 | 0.750 | 0.722 |
 | | train | 7.321 | 1.016 | 1.942 | 12.980 | 1.851 | 3.494 |
 
-`PairformerBlock(parallel=True)` keeps its own statements for its parallel schedule.
+`PairformerBlock(parallel=True)` (Chai-1's trunk and confidence blocks) on the `"cuda"` backend sums its updates with this kernel: the five
+pair updates (two triangle multiplications, two triangle attentions, the transition) run on the block input, then ONE pass computes
+`pair_in + sum_i (y_i - pair_in)` (fp32 sum, one rounding; the CUDA kernel takes 1 to 5 branches, the Triton kernel and the module class 1 to
+4); the single track's two updates go through the same call. The reference statements (a bf16 subtraction per update, the sum's additions
+and the final addition: 10 full-pair elementwise passes per block, 19-22 % of the Chai-1 forward at 512 to 2048 tokens) stay the
+`"pytorch"` path and the fallback outside the kernel's range (a dtype or device mismatch between the block input and an update's output).
+The five outputs are live together (two more pair-sized tensors than the statement sequence's peak; the FoldForge Chai-1 forward's peak
+memory is unchanged at 512 / 1024 / 2048 tokens: 14.6 / 21.0 / 50.9 GB). The fused sum runs when the updates run on `cuda`: the block set
+to `"cuda"`, or a caller that picks the backend per sub-module (FoldForge) with the block itself left on `"pytorch"`. Measured on the H100
+(CUDA graph, bf16, Chai-1 trunk block with the single track, same process, interleaved; ms, 3.0.0 statements -> fused):
+
+| L | 128 | 256 | 384 | 512 | 768 | 1024 | 1536 | 2048 |
+|---|---|---|---|---|---|---|---|---|
+| 3.0.0 | 0.454 | 1.453 | 3.044 | 5.323 | 12.18 | 22.23 | 59.23 | 111.6 |
+| fused | 0.392 | 1.179 | 2.469 | 4.431 | 10.46 | 18.50 | 49.31 | 96.28 |
+
+FoldForge Chai-1 5I28 x n warm forward (compile + CUDA graph, scope trunk, seeds 0, 200 steps, 5 samples; median of the warm forwards,
+two interleaved rounds): 512 tokens 1.919 -> 1.705 s (-11 %), 1024 tokens 6.97 / 7.06 -> 6.21 / 6.28 s (-11 %), 2048 tokens 32.64 / 32.60 ->
+29.34 / 29.35 s (-10 %). At 1024 tokens the trunk's bf16 `add` kernels went from 3788 calls / 1376 ms to 780 calls / 337 ms plus 224 fused
+calls / 246 ms. Accuracy against the fp64 reference (rows above, lengths 128 / 256 / 512, eval and train): no light is worse than with the
+statements, and the output errors are equal or smaller (the sum is one fp32 pass, one rounding). Its rows: `PairformerBlock` `chai1`
+(trunk, eval and train) and `chai1_confidence` (eval, 1 or 5 samples) in `requirements_module.csv`.
 
 ## FoldForge 5I28 sizes (1024-2048 tokens, 12-16 k atoms)
 

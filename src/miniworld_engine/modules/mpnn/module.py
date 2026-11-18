@@ -289,7 +289,7 @@ class ProteinMPNN(BackendModule):
         super().set_backend(backend)
         for sub in self.modules():
             if sub is not self and isinstance(sub, BackendModule):
-                sub.set_backend(backend if backend in sub.backends else "pytorch")
+                sub.set_backend(backend if sub.has_backend(backend) else "pytorch")
         return self
 
     def _supports_triton(self, backbone: torch.Tensor, *args, **kwargs) -> str | None:

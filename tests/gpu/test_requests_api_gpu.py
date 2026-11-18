@@ -137,7 +137,7 @@ def test_parallel_residual_triton(dtype, branches):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
-@pytest.mark.parametrize("branches", [1, 2, 3, 4])
+@pytest.mark.parametrize("branches", [1, 2, 3, 4, 5])
 @pytest.mark.parametrize("shape", [(1, 129, 130, 64), (3, 5, 7)])  # whole 16-byte vectors / an odd size (the tail elements)
 def test_parallel_residual_cuda(dtype, branches, shape):
     """The hand-written kernel (H100 sm_90a / A100 sm_80) is the reference's arithmetic in the same order: bitwise equal to ``pytorch``
@@ -147,18 +147,21 @@ def test_parallel_residual_cuda(dtype, branches, shape):
     ys = [(x.float() + 0.1 * torch.randn(x.shape, device="cuda", generator=g)).to(dtype) for _ in range(branches)]
     ref = parallel_residual(x, *ys, backend="pytorch")
     assert torch.equal(parallel_residual(x, *ys, backend="cuda"), ref)
-    assert torch.equal(parallel_residual(x, *ys, backend="triton"), ref)
+    if branches <= 4:  # the Triton kernel reads 1 to 4
+        assert torch.equal(parallel_residual(x, *ys, backend="triton"), ref)
     # not 16-byte aligned (an offset view): the scalar kernel, same values
     xo = torch.empty(x.numel() + 1, device="cuda", dtype=dtype)[1:].view(shape).copy_(x)
     assert torch.equal(parallel_residual(xo, *ys, backend="cuda"), ref)
     # train: the module path and the reference's gradients
-    m = ParallelResidual(d=shape[-1], branches=branches, backend="cuda")
+    m = ParallelResidual(
+        d=shape[-1], branches=min(branches, 4), backend="cuda"
+    )  # the module class takes 4 (y0 .. y3); 5 runs through the function
     up = torch.randn(x.shape, device="cuda", generator=g).to(dtype)
     grads = []
     for backend in ("cuda", "pytorch"):
         xs = x.detach().requires_grad_(True)
         yg = [y.detach().requires_grad_(True) for y in ys]
-        out = m(xs, *yg) if backend == "cuda" else parallel_residual(xs, *yg, backend="pytorch")
+        out = m(xs, *yg) if backend == "cuda" and branches <= 4 else parallel_residual(xs, *yg, backend=backend)
         out.backward(up)
         grads.append([xs.grad, *(y.grad for y in yg)])
     for a, b in zip(*grads, strict=True):
@@ -168,7 +171,7 @@ def test_parallel_residual_cuda(dtype, branches, shape):
 def test_parallel_residual_cuda_refuses_outside_its_range():
     x = torch.randn(4, 8, device="cuda")
     with pytest.raises(BackendUnsupported, match="branches"):
-        parallel_residual(x, *[x] * 5, backend="cuda")
+        parallel_residual(x, *[x] * 6, backend="cuda")
     with pytest.raises(BackendUnsupported, match="dtype"):
         parallel_residual(x.double(), x.double(), backend="cuda")
     with pytest.raises(BackendUnsupported, match="CUDA tensors"):
