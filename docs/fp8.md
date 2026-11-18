@@ -2458,6 +2458,63 @@ same sample index; "pair" = bf16 trunk seed pairs, "FP8" = same trunk seed FP8 v
 Gain over the rf3if2 branch: n <= 2 inside the run-to-run noise, n = 4 2.4 % (1.308 -> 1.276), n >= 8 inside the noise (the forward is dominated by the trunk). Raw: `~/miniworld-engine-scratch/fp8c-rf3-kqln/res/bench/`.
 
 
+### RoseTTAFold3 FoldBench 8p7u under `safe`: per-route arms (branch `fp8c/rf3-8p7u`, 2026-11-19)
+
+Question: the end-level run of `fp8c/rf3-triattn` (12 FoldBench targets x trunk seeds 0-3, FoldForge a9e1549, 200 steps, diffusion_seed 0) has TriAttn
+inside on 12 / 12 but the whole `safe` set 11 / 12: **8p7u** (18 chains, 5110 atoms) is outside (same-seed RMSD 1.06 A against the limit
+max(1.1 x bf16 pair max, 0.5 A) = 0.62 A) and stays at 1.06 A with TriAttn off. Which route?
+
+Harness `~/miniworld-engine-scratch/fp8c-rf3-8p7u/{e2e4.py,mat.py,trdiag.py}` (`e2e4.py` = `e2e3.py` with per-route arms `only_<r>` / `minus_<r>`; bf16 vs FP8
+on the same trunk seed, eager, sync guard; raw results `res/`), criterion as before. bf16 reference: 16 trunk seeds (0-15), pair RMSD max 0.58 A
+(0.56 A on seeds 0-3), so the threshold is 0.64 A. All cases: |d ipTM| <= 0.003, pLDDT unchanged, no NaN, no saturation redo.
+
+Reference noise of 8p7u itself: bf16 is deterministic (a repeat of seeds 0-3 is bit-identical, RMSD 0.00) and sits in a small set of states (pair RMSD
+0.05-0.28 inside a group, 0.52-0.58 between the groups). Other bf16 kernel routes stay in that set: backend `triton`, seeds 0-3, same-seed RMSD against
+the cuda bf16 0.53 / 0.03 / 0.04 / 0.11; backend `pytorch` 0.53 / 0.07 / 0.06 / 0.12 (max 0.53 A, inside). So the 1.06 A is not the bf16-vs-bf16
+variance of a kernel change.
+
+| arm (route on) | route calls | seeds | same-seed RMSD max / mean (A) | per seed (A) | inside (0.64) |
+|---|---|---|---|---|---|
+| TriMul `calib` | 1088 | 0-3 | 0.09 / 0.05 | 0.09 0.03 0.04 0.04 | in |
+| OPM `bound` | 40 | 0-11 | 0.80 / 0.21 | 1 seed 0.80, 2 seeds 0.52, rest <= 0.21 | OUT (1 / 12) |
+| PWA | 40 | 0-3 | 0.53 / 0.17 | 0.53 0.03 0.03 0.07 | in |
+| Transition `calib` (G1 e4m3 expand + G2 e4m3 squeeze) | 526 | 0-11 | 1.05 / 0.40 | 4 / 12 shifted: 0.72 0.72 1.05 0.71 | OUT |
+| Transition, G1 = 0 (bf16 expand, e4m3 squeeze) | 526 | 0-11 | 0.53 / 0.14 | all <= 0.53 | in (0 / 12 shifted) |
+| Transition, G2 = 0 (e4m3 expand, bf16 squeeze) | 526 | 0-11 | 1.07 / 0.54 | 6 / 12 shifted: 0.72 x3, 1.05 x2, 1.07 | OUT |
+| token DiT `expand` | 4800 | 0-3 | 0.52 / 0.16 | 0.52 0.03 0.03 0.08 | in |
+| atom DiT pre / post / both (KQLN) | 0 (not served on this target) | 0-3 | 0.00 | bit-identical to bf16 | in |
+| `safe`, TriAttn fp16 (`safenota`) | | 0-11 | 1.37 / 0.53 | 5 / 12 shifted: 1.06 1.05 0.72 1.07 1.37 | OUT |
+| `safe` | | 0-11 | 1.37 / 0.57 | 6 / 12 shifted: 1.06 x3, 1.05, 1.07, 1.37 (0.72 once) | OUT |
+| `safe` minus TriMul | | 0-3 | 0.80 / 0.53 | 0.52 0.80 0.72 0.09 | OUT |
+| `safe` minus OPM | | 0-3 | 1.05 / 0.31 | 0.07 0.04 1.05 0.10 | OUT |
+| `safe` minus PWA | | 0-3 | 0.72 / 0.51 | 0.53 0.72 0.72 0.09 | OUT |
+| `safe` minus Transition | | 0-3 | 0.71 / 0.33 | 0.53 0.04 0.71 0.05 | OUT |
+| `safe` minus token DiT | | 0-3 | 0.72 / 0.35 | 0.52 0.72 0.05 0.09 | OUT |
+| `safe` minus atom DiT | | 0-3 | 0.72 / 0.35 | 0.52 0.72 0.05 0.10 | OUT |
+
+(Seeds 0-3 are the first arm table; Transition, OPM, `safe`, `safenota` and the two Transition variants were extended to 12 trunk seeds.)
+The shifted outputs are a few discrete states (about 0.52, 0.72, 1.05, 1.37 A from the bf16 same-seed result); none of the 16 bf16 seeds or the triton /
+pytorch runs reached the 0.72 / 1.05 states (nearest bf16 seed 0.70 A or more).
+
+Context targets, same arms (seeds 0-3, all inside; the bf16 seed spread there is wide, 1.7-2.2 A, so a 1 A shift stays inside it):
+
+| target | bf16 pair max | TriMul | OPM | PWA | Transition | token DiT | `safe` |
+|---|---|---|---|---|---|---|---|
+| 8ad9 | 1.72 | 1.84 | 1.84 | 1.76 | 0.91 | 0.00 | 1.09 |
+| 8ee9 | 1.86 | 1.69 | 1.89 | 0.00 | 1.73 | 0.00 | 1.82 |
+| 8gn4 | 2.23 | 0.00 | 0.00 | 0.00 | 0.44 | 0.00 | 2.10 |
+
+Cause: no single route and no scale bug. (1) Removing any one route from `safe` does not bring 8p7u inside (every `minus` arm is out). Alone, only OPM
+and Transition leave the bf16 set; TriMul, PWA and token DiT stay inside (<= 0.53 A), atom DiT is bit-identical (not served). (2) The largest single
+contribution is the Transition e4m3 **expand** GEMM (G1, 5.5 % update error in the Transition section): with G1 off (only the 3.8 % squeeze in e4m3)
+12 / 12 are inside; with G2 off (expand in e4m3) it is as bad as the whole route. (3) The Transition scales are not the cause: `trdiag.py` over the 49
+RF3 Transition modules (D 128, 589824 rows, 8p7u trunk seed 0) gives gamma max 0.49-1.61, xn scale 16-64, median |xn s| 2.1-2.6, max 27-64 (of 448),
+0.3-0.4 % of the entries below the e4m3 normal range (2^-6): ordinary 3-mantissa-bit quantisation, nothing saturated, no calibration problem.
+(4) 8p7u is a multi-state target (bf16 itself shows groups 0.5 A apart); a trunk perturbation larger than bf16 rounding reaches states the bf16 seeds do
+not, at unchanged ipTM / pLDDT, and several routes add up (every minus arm still has shifted seeds). The other 11 targets are inside under the same routes.
+Verdict: FP8 noise on a multi-state target, not a bug; no code change on this branch. If 8p7u-type targets matter more than the Transition speed on RF3,
+`MINIWORLD_TRANSITION_FP8_G1=0` already gives the bf16 expand (8p7u 12 / 12 inside); its end level on the other targets and its speed cost were not measured.
+
 ### Model coverage census (engine 3.0.1 + this branch, MINIWORLD_FP8=safe, n = 4 = 512 tokens, one warm forward profiled)
 
 A window census, not a whole-run profile (`census2.py` wraps the last of `measured_forward`'s forwards in `torch.profiler`; the whole-run wrapper of the
