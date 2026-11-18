@@ -728,6 +728,81 @@ With `GUARD=lazy` the caller must, once per forward and outside any graph:
 
 The patch that wires this into FoldForge is a file only, not applied: `~/miniworld-engine-scratch/fp8/trimul/foldforge_patch/trimul-fp8-guard.patch` (README beside it).
 A capture with no calibration takes the bf16 route (the first two eager warm-up calls of FoldForge's `_Graph` calibrate).
+RoseTTAFold3 (`TriangleMultiplicationRF3`) calibrates on the parameter as the others do on branch `fp8c/rf3if2` (before: a per-call product `W_a / n` as key, so half of its calls fell back inside the captures): see "RoseTTAFold3 and IntelliFold2".
+
+## RoseTTAFold3 and IntelliFold2: which FP8 routes the family reaches (2026-11-18, branch `fp8c/rf3if2`, base 3.0.1)
+
+Route census, 5I28 n = 4 (512 tokens), FoldForge a9e1549 + engine 3.0.1, `MINIWORLD_FP8=safe`, guards lazy, counters from the route modules (`GUARD_STATS`) and a forward pre-hook on the call sites
+(`~/miniworld-engine-scratch/bench5i28_ff/fp8c/fp8c_diag.py`; eager + capture calls, a graph replay runs no Python).
+
+| model | route | 3.0.1 | cause | this branch |
+|---|---|---|---|---|
+| RoseTTAFold3 | TriMul planes (D128 x 96 modules + D64 template) | 728 calls, **364 capture fallbacks**, 0 cached modules (every eager call calibrated again) | `TriangleMultiplicationRF3` hands the kernels `to_left.weight * (1 / n)` (`_LeftScaled`): a **new tensor in every call**. The calibration key (`to_left.weight.data_ptr()`) never repeats, so each eager call calibrates a throw-away state and a capture (whose product is a new tensor, never calibrated) takes the bf16 route | 1092 calls, 0 fallbacks, 110 calibrated modules (one each) |
+| RoseTTAFold3 | OPM | 0 calls | RF3's OPM has projection biases: inference runs `composed.biased_wide`, which never reaches `opm_train._inference_op` where the FP8 route is | 36 calls (`composed._biased_fp8`) |
+| RoseTTAFold3 | token DiT | 0 | `token_dit_fp8.active` took only the default variant (`plain`); RF3's block is the parallel schedule with flat q / k LayerNorm | `expand` placement from the parallel schedule |
+| RoseTTAFold3 | atom DiT | 0 | `local_dit_h100.FP8_ROWS` serves the options `IDENT / PARS / NOOUT` only; RF3's block has `KQLN` (flat q / k LayerNorm) | unchanged: needs the FP8 pre / post row kernels extended by KQLN (new kernel work) |
+| RoseTTAFold3 | Transition | 534 calls | - | unchanged |
+| IntelliFold2 | TriMul planes | 144 calls only | the trunk pairformer is **D512** (960 of 1104 TriMul calls); `h100_b200style_fp8.WIDTHS` = 64 / 128 / 256 / 384 (D512: its K1 is the packed `_front`, its K3 `k3reorder.cu` has no `K3_CSCALE`); the 144 calls are the D256 modules | unchanged: D512 planes = a new K1 + K3 kernel variant |
+| IntelliFold2 | OPM / Transition / token DiT `expand` / atom DiT | 36 / 585 / yes / yes | - | unchanged (all fire, 0 fallbacks) |
+| IntelliFold2 | TriAttn FP8 | off | the model is not in `fp8.TRIATTN_MODELS` (no end-level validation) | unchanged |
+
+### RF3 TriMul: calibration on the parameter, the length factor on the channel scale
+
+`TriangleMultiplicationRF3._forward_cuda` multiplies the contraction by `1 / n` (n = real length of the sample, a device value) before `ln_out`. `_LeftScaled` now also carries the factor and
+the parameter (`left_length_factor`, `left_base_weight`); `h100_b200style_fp8.module_route` hands the **parameter** to `inference` (calibration key, cached weight forms stay stable) and the factor as `lfac`:
+`run(..., lfac=)` multiplies the K3 channel scale `csc` (K3 reads `csc` at run time for the LN_out statistics, `K3_CSCALE`) and rebuilds the folded projection operand `wpf = wpf0 * csc` (one
+elementwise op on a `[h, d]` matrix per call, in the graph). The planes, the calibrated scales and the prescaled weights are those of the plain module: **one calibration whatever the length
+factor**, a captured graph reads the factor from the mask at replay, and the LN_out statistics (eps 1e-5) see the same scaled values as the reference. The bf16 fallback (`_default`) multiplies
+`to_left.weight` by the factor as the module does. Default route (FP8 off): untouched (`_LeftScaled` builds the same product as before).
+
+Tests: `tests/gpu/test_trimul_fp8_rf3.py` (D128 / D256, both directions, with and without a mask: one calibration for the module, error against the float64 `TriangleMultiplicationRF3` < 6 % of the update;
+a capture after the eager warm-up takes the FP8 route, and its replay after the mask's real length changed is accurate without recalibration).
+
+### RF3 OPM and token DiT
+
+* `composed.biased_wide` tries `_biased_fp8` first when `MINIWORLD_OPM_FP8` is on: `opm_fp8.inference(..., bias_src=(to_left.bias, to_right.bias))` (the FP8 wide prologue already takes the biases; the
+  weight forms are keyed on the module's parameters, not on the per-call `cat`). Gates as for every OPM (`opm_fp8.serves`: S >= 1024 with N >= 256, S % 256, N % 64, bf16, one sample).
+  Test: `tests/gpu/test_opm_fp8.py::test_projection_bias_module_takes_the_fp8_route` (rms < 4 %, max < 8 % against float64, graph replay = eager).
+* `token_dit_fp8.active(..., parallel=True)`: the parallel schedule's transition input is the AdaLN rows of the block input (`xt`, bf16); one `rows_q8` pass quantises it for `gemm_swiglu_f8`
+  (the default schedule gets its e4m3 rows from `resgate_adaln_cf_q8`). Only `expand` (the one placement `safe` takes); `qkvg / out / squeeze` stay bf16 for these blocks (bit for bit).
+  Chai-1 (also parallel) takes it too. Test: `tests/gpu/test_token_dit_fp8.py::test_parallel_schedule_takes_expand_only`.
+
+### Module error against float64 (random weights, 3 / 37 masked tokens; `bench5i28_ff/fp8c/acc_rf3.py`; rms / max of the update relative to the update's rms / max)
+
+| module | FP8 rms / max | bf16 default rms / max |
+|---|---|---|
+| TriMul RF3 D128 out / in, L256 / 512 | 0.038 / 0.040 .. 0.041 | 0.0066 / 0.007 .. 0.010 |
+| TriMul RF3 D64 out / in, L256 / 512 | 0.038 / 0.043 .. 0.049 | 0.0066 / 0.007 .. 0.009 |
+| OPM RF3 (biased, S 1024, N 256), divide before / after the projection | 0.011 / 0.025, 0.019 / 0.029 | 0.009 / 0.023, 0.016 / 0.026 |
+| token DiT RF3, `expand`, 5 samples, L384 | 0.054 / 0.050 | 0.0065 / 0.0063 |
+
+The TriMul error is the plain module's (docs above: about 4 % of the update); the OPM error is the e4m3 grouped product's (bf16 floor + 0.2-0.3 %).
+
+### 5I28 benchmark (FoldForge a9e1549 + engine 3.0.1 / this branch, H100 node02, `MINIWORLD_FP8=safe`, protocol of `run_1118_301_fp8`, 6 warm repeats, median of the warm forwards, seconds)
+
+| model | n | bf16 (3.0.1) | FP8 before | FP8 after | FP8 / bf16 before | after |
+|---|---|---|---|---|---|---|
+| rosettafold3 | 1 | 0.419 | 0.420 | 0.424 | 1.001 | 1.012 |
+| | 2 | 0.635 | 0.633 | 0.635 | 0.997 | 1.000 |
+| | 4 | 1.336 | 1.323 | 1.308 | 0.991 | 0.979 |
+| | 8 | 3.848 | 4.180 | 3.662 | 1.086 | 0.951 |
+| | 12 | 9.283 | 9.842 | 8.815 | 1.060 | 0.950 |
+| | 16 | 17.108 | 17.806 | 15.978 | 1.041 | 0.934 |
+| intellifold2 | 1 | 0.593 | 0.583 | 0.572 | 0.983 | 0.965 |
+| | 2 | 1.304 | 1.213 | 1.215 | 0.931 | 0.932 |
+| | 4 | 4.040 | 3.688 | 3.704 | 0.913 | 0.917 |
+| | 8 | 15.728 | 14.449 | 14.404 | 0.919 | 0.916 |
+| | 12 | 38.388 | 35.697 | 35.429 | 0.930 | 0.923 |
+| | 16 | 71.742 | 67.039 | 66.827 | 0.934 | 0.931 |
+
+IntelliFold2 is the same code as before (no route changed for it): the two FP8 columns agree within the run-to-run noise. Its gain is limited because most of its TriMul calls (D512) have no FP8 plane route.
+
+### Not done here (new kernels / FoldForge)
+
+* IntelliFold2 D512 TriMul planes: a K1 variant of the packed `_front` writing e4m3 planes with `qinv`, and `k3reorder.cu` with `K3_CSCALE` (the contraction is 31 % of the D512 module, e4m3 removes about 15 % of it, docs above).
+* RoseTTAFold3 atom DiT: the FP8 pre / post row kernels with the `KQLN` option (flat q / k LayerNorm).
+* TriAttn FP8 for RF3 / IF2: needs a model entry in `fp8.TRIATTN_MODELS` after an end-level (FoldBench) validation.
+* FoldForge: nothing is needed for the TriMul / OPM / token DiT fixes (the engine-side calibration now sees the parameter); the `_Graph` warm-up already calibrates every site.
 
 ## TriMul: where else e4m3 can go (3.0.0 exploration, branch `fp8x/trimul`, 2026-11-17, base `fp8/3.0.0-on-2512` 91a9241fb)
 

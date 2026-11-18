@@ -231,10 +231,18 @@ def _forms(lnw, lnb, wa, wb, wo, bo, pbias, bias_src=None):
             wb.detach().to(bf).contiguous(),
             wo.detach().to(bf).contiguous(),
             bo.detach().to(bf).float().contiguous(),
-            (torch.cat([b.detach().float() for b in bias_src]).contiguous() if bias_src is not None else pbias.detach().float().contiguous() if pbias is not None else None),
+            (
+                torch.cat([b.detach().float() for b in bias_src]).contiguous()
+                if bias_src is not None
+                else pbias.detach().float().contiguous()
+                if pbias is not None
+                else None
+            ),
         )
 
-    keys = [t for t in (lnw, lnb, wa, wb, wo, bo, *(bias_src or (pbias,))) if t is not None]  # bias_src: the module parameters (a stable key), not the fresh cat
+    keys = [
+        t for t in (lnw, lnb, wa, wb, wo, bo, *(bias_src or (pbias,))) if t is not None
+    ]  # bias_src: the module parameters (a stable key), not the fresh cat
     return _capture.param_forms("opm_fp8_infer", keys, build)
 
 

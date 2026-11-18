@@ -97,8 +97,7 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
     """RoseTTAFold3's biased projections in the wide H100 composition: its persistent TMA prologue adds the left | right biases in
     the projection epilogue (masked like the projections), then cuBLAS for the outer product and the fused epilogue (out-projection,
     bias, count normalisation before or after it, residual)."""
-    from miniworld_engine.kernels.integrations import opm_train
-    from miniworld_engine.kernels.integrations import opm_fp8
+    from miniworld_engine.kernels.integrations import opm_fp8, opm_train
 
     if opm_fp8.POLICY is not None and (z := _biased_fp8(module, msa, mask, token_asym_id, residual)) is not None:
         return z
