@@ -60,7 +60,7 @@ routes did this model take" is read directly instead of from a profiler kernel c
 
 | key | counters |
 |---|---|
-| `triattn` | `pv_fused` (d_pair-128 front-made V^T), `pv_front` (unfused / generic / wide fronts), `pv_pass` (standalone V^T pass), `qk` (e4m3 q / k core), `d128_calls` (also counted with FP8 off), `calibrations` |
+| `triattn` | `pv_fused` (d_pair-128 front-made V^T), `pv_front` (unfused / generic / wide fronts), `pv_d64` (64-channel-head wgmma core, Chai-1), `pv_pass` (standalone V^T pass), `qk` (e4m3 q / k core), `d128_calls` (also counted with FP8 off), `calibrations` |
 | `trimul`, `opm`, `transition` | `calls`, `retries`, `fallbacks`, `capture_fallbacks` (`transition` also `calibrations`) -- the existing `GUARD_STATS` |
 | `pwa` | `calls` (8 x 32 native width), `wide_calls`, `retries`, `declined` (route on, shape gate said no) |
 | `token_dit` | `calls`, `expand` / `qkvg` / `out` / `squeeze` (per placement), `declined` |
@@ -83,6 +83,7 @@ atom DiT `declined` / `fallbacks` tells which). Test: `tests/gpu/test_fp8_route_
    | `af3` | fused + unfused | yes | FoldBench 27 targets with the whole `safe` set incl. q / k (0 flagged, lDDT +0.0000); PV: 4 targets x 4 trunk seeds |
    | `protenix1` | fused | no | PV, 9 + 3 targets x 4 trunk seeds (no q / k run) |
    | `opendde` | unfused | no | PV, 16 + 3 targets x 4 trunk seeds (no q / k run) |
+   | `chai1` | d64 (trunk + confidence, 64-channel heads) + unfused (template stack) | no | PV, 12 targets x 4 trunk seeds with every gate removed, 12 / 12 inside (docs "Chai-1: parity extension"); the d64 route is gated from S 1024 by default (`MINIWORLD_TRIATTN_D64_MINS`) |
 
    Not listed: Boltz-2 (9c90 bistable, below), OpenFold3 (PV 4 / 4 inside, not added), every other model.
 2. **e4m3 q / k stays in `safe`** (af3 only): its module error in the judge form is above the module tolerance (0.95 / 0.85 % at L512 / 1024 against
@@ -2205,17 +2206,93 @@ three arms of the new job (`fp8c-chai1/bench`) ran back to back in one job, bf16
 fp8new against the recorded bf16: 0.965 / 0.968 / 0.962 / 0.960 / 0.956 / 0.942. The token DiT route gains 0.1-1.2 % of the forward (the whole gain of the expand is 0.6 % of the profiled kernel time);
 the n = 1 cell is noise-dominated (bf16 repeats 0.318-0.560 s in the job; the recorded and the job bf16 differ by 6 %). Chai-1 is the weakest FP8 model because its trunk is dominated by
 what FP8 does not serve (TriAttn d64: 14 % of the kernel time, no Chai-1 whitelist; the sampler's attention core; elementwise adds 6 %; 7 % host-to-device copies), not because a route is closed.
+#### Parity extension (2026-11-19): TriAttn d64 PV and the grouped OPM
 
-OuterProductMean (the second gap): not closed, on purpose. Chai-1's OPM is the grouped form (8 groups x 8, product LayerNorm, no count division; `kernels.outer_product_mean.chai`); `opm_fp8` serves groups = 1
-(`opm_train.SHAPES`) only, so `OuterProductMean._cuda_route` returns `chai` for all 72 calls of the probe (msa [1, 1024, 512, 64], d_pair 256), and the OPM FP8 counter stays 0 whatever the S gate says
-(S = 1024 at L = 512 would pass it). A grouped e4m3 product would be a new kernel family (the product is a batched cuBLAS GEMM over 8 groups with K = S = 1024, then the LayerNorm epilogue); the
-whole grouped OPM is 0.7 % of the profiled kernel time (product `nvjet_tst_256x128` 26.6 ms, `chai_epilogue_kernel` 19.2 ms of 6949 ms over three forwards, plus the projection prologue), so an
+Goal: every Chai-1 module of a kind AF3 serves in FP8 takes its route (`fp8.route_stats()` of branch `fp8c/counters`, 5I28 n = 4, `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=chai1`, TriAttn / OPM gates removed:
+`MINIWORLD_TRIATTN_D64_MINS=0 MINIWORLD_OPM_FP8_CHAI_MINS=0`; counters bumped at call / capture time): TriAttn `pv_d64` 848 + `pv_front` 140 (template stack, 116 calibrations), TriMul 1104, OPM 36, PWA 27,
+Transition 486 (58 calibrations), token DiT expand 48 (declined 0), atom DiT pre / post 18 each, **fallbacks 0 everywhere except the atom DiT: 9 of 27 calls run bf16 (`why_cond`: per-sample conditioning, a documented
+design choice of that route)**. Not built: e4m3 q / k (Chai-1 has no d_pair-128 fused route; the d64 core's q / k stay fp16).
+
+**TriAttn, 64-channel heads (Chai-1 trunk + confidence head).** These sites run `h100_dh.forward` on the fp16 wgmma core `triattn_d64_sm90.cu` (2008 launches, 14.3 % of the n = 4 kernel time), a path the 16 / 32-channel FP8 PV core
+(`triattn_h16_sm90.cu`) does not serve. New build flag `-DTE_F8PV=1` of the same source (`h100_dh.ext_d64_f8`): V arrives as e4m3 V^T planes (`vt_quant`, now also for 64 channels; static per-site scale from the first
+eager call, the same overflow flag and `rescale_all` contract as the other TriAttn sites), P is formed as e4m3 bytes (`p = 2^(x + 8)`, `F8conv` of the 32-channel core, offset margin 0.5), the row sums come from 8 ones rows of
+the PV (`m64n72k32`, e4m3, fp32 accumulation); q, k, the bias and the score GEMM stay fp16. Two things the port needed: (1) the d64 core carries its Q tiles through the K | V ring, which overwrites the ones rows of a
+stage -- the producer rewrites them before the stage's next K / V^T load (without it the core read garbage: err rms 3000 %); (2) `x` is clamped at 8.75 before the byte conversion (byte 127 is the e4m3 NaN: with
+large fp16 logits the rounding of the offset can push `x` past 8.875; a helper branch reported non-finite output with this kind on IntelliFold2, which this edge would explain; not verified there. The 32-channel core has the same latent edge -- not touched here).
+Kind `d64` (and `unfused` for the template stack) of `fp8.TRIATTN_MODELS["chai1"]`; the PV route only runs for models named by `MINIWORLD_FP8_MODEL=chai1`.
+
+Core against the fp16 core (random q / k / v / bias, S 256, 4 x 64): err rms 4.2 % of the output (random), 0.2 % (V = 1), 2.5 % (V = channel ramp), 2.5 % (uniform attention); at large logits (q, k x 8 and bias x 60, or x 20 / x 400:
+logits to thousands) the output stays finite, rms error 2.7 % / 2.7 % (`chai_core.py`). Module (`TriangleAttentionChai1` / `Chai1Confidence`, starting + ending, L 256 / 512, 2 seeds; update rms against fp64 PyTorch;
+tolerance of the judge 8e-3 on max|y - y64| / max|y64|):
+
+| | default fp16 core | FP8 PV (static scale) |
+|---|---|---|
+| update rms | 1.1 - 1.8 % | 3.3 - 3.7 % |
+| update max | 1.4 - 2.1 % | 3.0 - 4.3 % |
+| judge | 2.8 - 3.2e-3 | 4.8 - 7.8e-3 |
+
+Module time (CUDA graph, interleaved, Chai-1 trunk node d_pair 256 x 4 x 64): FP8 / default **1.122 (L128), 1.042 (256), 1.059 (384), 1.047 (512), 1.009 (768), 0.986 (1024), 0.944 (1536), 0.930 (2048)**: the
+V^T pass costs more than the core gains below ~1000 tokens. Default gate `h100_sm90.FP8_PV_D64_MIN_S = 1024` (`MINIWORLD_TRIATTN_D64_MINS=<s>` overrides, 0 = none): at 5I28 n = 4 (512 tokens) the route is declined by the gate,
+from n = 8 it runs. The end-level runs below removed the gate (every size takes the route: the stress case).
+
+**Grouped OPM (8 x 8, product LayerNorm).** Why 0 calls in 3.0.1: `opm_fp8` serves groups = 1 only, `OuterProductMean._cuda_route` returns `chai` for all 72 probe calls (msa [1, 1024, 512, 64], d_pair 256), and the whole grouped OPM is 0.7 % of the n = 4 kernel time (product `nvjet_tst_256x128` 26.6 ms, `chai_epilogue_kernel` 19.2 ms of 6949 ms over three forwards). Route now: `kernels.outer_product_mean.chai.f8_products`: the prologue's bf16 `a`, `b` [8, S, N 8] are cast to e4m3 and transposed to [8, N 8, S] by one pass
+(`cuda/chai_f8.cu`, static weight-bound power-of-two scales: `opm_fp8.bound_scales`, no calibration, cannot saturate), the batched product is 8 `torch._scaled_mm` calls (bf16 out, fp32 accumulation, scale pointers
+must be separately allocated: a slice of a [2] tensor made cuBLASLt answer NOT_SUPPORTED), the product LayerNorm epilogue is unchanged. Fires with `MINIWORLD_OPM_FP8=bound` and the depth gate open
+(`MINIWORLD_OPM_FP8_CHAI_MINS=0`): 36 calls at n = 4, 0 fallbacks. **Measured a net loss, so the gate is closed by default (`chai.F8_MIN_S`, never):** module time (CUDA graph) default / FP8 0.721 / 0.927 ms
+(S 1024, N 512), 0.225 / 0.310 (S 1024, N 256), 1.164 / 1.346 (S 2048, N 512), 2.014 / 2.132 (S 4096, N 512), and the error against fp64 is 8x the default's (rms 3.6e-2 against 4.6e-3 at S 1024: the e4m3 rounding of both
+operands enters the product LayerNorm, whose epsilon 0.1 does not hide it). No end-level run was made for it. With the gate closed the bf16 route runs unchanged (bit-equal, tested) and the OPM counters stay 0
+(not counted as fallbacks).
+
+End level (the same protocol as above; 12 FoldBench picks 107-658 tokens: 8dhj 8hxq 8vfj 8avq 9gsq 8ts0 7fxw 7udj 8gjg 8i89 8upi 7yew, trunk seeds 0-3, 5 samples; arm `fp8ta` = `MINIWORLD_FP8=safe` +
+`MINIWORLD_FP8_MODEL=chai1` + TriAttn gate removed (every call of the d64 core and the template stack's unfused PV; token DiT expand as before); `fp8new` = the token DiT expand state of the section above;
+`fp8old` = 3.0.1): **12 / 12 inside for every arm.** Largest same-seed RMSD (A) next to the bf16 trunk-seed-pair maximum:
+
+| target | bf16 pair | fp8old | fp8new | fp8ta | same-seed mean old / new / ta |
+|---|---|---|---|---|---|
+| 8vfj | 0.85 | 0.71 | 0.71 | 0.46 | 0.43 / 0.44 / 0.22 |
+| 8gjg | 1.56 | 1.07 | 1.12 | 0.91 | 0.51 / 0.48 / 0.43 |
+| 8dhj | 2.04 | 1.75 | 1.73 | 1.64 | 0.66 / 0.67 / 0.67 |
+| 8upi | 2.41 | 1.43 | 1.43 | 1.10 | 0.61 / 0.62 / 0.50 |
+| 7fxw | 2.44 | 2.42 | 2.39 | 1.78 | 0.62 / 0.64 / 0.31 |
+| 8avq | 2.68 | 1.82 | 1.83 | 2.51 | 1.00 / 1.02 / 1.20 |
+| 7yew | 3.06 | 2.29 | 2.27 | 1.98 | 1.04 / 1.05 / 0.97 |
+| 8ts0 | 18.27 | 13.61 | 13.73 | 14.69 | 6.17 / 6.07 / 6.73 |
+| 8hxq | 20.85 | 19.94 | 19.90 | 20.74 | 5.59 / 5.71 / 11.06 |
+| 7udj | 23.36 | 19.77 | 19.79 | 19.84 | 2.06 / 1.88 / 1.86 |
+| 8i89 | 24.23 | 20.36 | 20.42 | 20.54 | 2.04 / 2.17 / 2.42 |
+| 9gsq | 24.17 | 9.32 | 9.35 | 13.72 | 3.66 / 3.72 / 4.72 |
+
+The tight probes (bf16 pair <= 3.1 A: 8vfj 8gjg 8dhj 8upi 7fxw 8avq 7yew) stay inside with the TriAttn route on; 8avq is the closest (2.51 A against a limit of 2.95 A). The six targets with a bf16 pair
+spread above 18 A are weak probes (the 1.1 x rule accepts almost anything there); 8hxq's mean same-seed RMSD doubles (5.7 -> 11.1 A) inside its 20.9 A bf16 spread. No non-finite output in any of the 192 runs. ipTM
+differences to bf16 <= 0.068. Raw files `~/miniworld-engine-scratch/fp8c-chai1/e2e`, `e2e_chai1.py`, `an_e2e.py`. This is 12 targets, not the 27 of the AF3 FoldBench; no lDDT / DockQ evaluator run.
+
 e4m3 product (at best -40 % of the product's share) is worth ~0.2 % of the forward. Not built (Chai-1's MSA in the 5I28 benchmark is 1024 rows; a deeper MSA would change that share).
+
+5I28 after the parity extension (FoldForge a9e1549, warm forward median of 6, CUDA graph + compile, node02, one job, four processes back to back; `fp8new` = token DiT expand only, `fp8ta` = + TriAttn d64 /
+unfused PV at the shipped gates (d64 from S 1024), `fp8ta0` = gates removed; the grouped OPM gate stays closed in all of them). FP8 / bf16 of the same job; the "3.0.1" column is the recorded run `run_1118_301_fp8` / `run_1118_301_steady`:
+
+| n (tokens) | bf16 s | fp8new s | fp8ta s | fp8ta0 s | fp8new / bf16 | **fp8ta / bf16** | fp8ta0 / bf16 | 3.0.1 FP8 / bf16 |
+|---|---|---|---|---|---|---|---|---|
+| 1 (128) | 0.3374 | 0.3274 | 0.3276 | 0.3334 | 0.970 | 0.971 | 0.988 | 0.979 |
+| 2 (256) | 0.6289 | 0.6100 | 0.6084 | 0.6046 | 0.970 | 0.967 | 0.961 | 0.979 |
+| 4 (512) | 1.6877 | 1.6185 | 1.6103 | 1.6211 | 0.959 | 0.954 | 0.961 | 0.963 |
+| 8 (1024) | 6.110 | 5.797 | 5.664 | 5.650 | 0.949 | 0.927 | 0.925 | 0.956 |
+| 12 (1536) | 14.918 | 14.104 | 13.482 | 13.468 | 0.945 | 0.904 | 0.903 | 0.953 |
+| 16 (2048) | 29.318 | 27.451 | 25.901 | 25.896 | 0.936 | **0.883** | 0.883 | 0.951 |
+
+(fp8ta and fp8ta0 are the same executable from n = 8 on; their difference there is run-to-run: 0.2 %.) The TriAttn route is what moves the large cells: 0.951 -> 0.883 at n = 16. At n <= 4 the gate keeps the
+loss-making V^T pass out (fp8ta0, gate removed, is 0.7 % slower than fp8ta at n = 4 and 1.7 % at n = 1).
 
 Verification: `tests/gpu/test_token_dit_fp8.py` +4 tests (placements `active()` logic; every placement of the identity block against the bf16 route; `qkvg` / switch off = default route bytes; the parallel row kernel:
 bf16 output bit-equal to the bf16 pass, e4m3 image and row scale of the transition AdaLN) -- 46 passed with `test_token_dit_cond_fold.py` and `test_token_dit_shared_cond.py` (default-route regressions, 11 min
 including the JIT build); `tests/cpu/test_capture_api.py`, `test_token_swiglu_tiles.py` 15 passed; ruff and pyright clean on the touched files. The FP8-off default route is untouched by construction (new kernels are in the FP8
 extension only; the Python side adds one `identity` boolean that is computed but unused while `PLACES` is empty). The `dev code-graph` CLI is not in the tree, so the test files were chosen by import reach of `token_dit_fp8` / the token DiT cuda route.
+
+Verification of the parity extension: `tests/gpu/test_triattn_d64_fp8.py` (the d64 FP8 core against the fp16 core on random / constant-V / uniform inputs; the module route of `chai1` / `chai1_confidence`, starting and ending, against the
+fp16 route; switch off = default bytes; the `chai1` table entry) and `tests/gpu/test_opm_chai_fp8.py` (the transpose-quantize pass byte for byte against torch; the route's error against the bf16 route; the shipped depth gate "never" = default
+bytes, 0 route calls) -- 30 passed together with `test_token_dit_fp8.py` and `test_fp8_route_stats.py`; CPU `test_capture_api` / `test_token_swiglu_tiles` 15 passed; ruff check clean, pyright 0 errors on the touched files (one pre-existing
+`ruff format` difference in `chai.py` line 32 left as it is). The default route (no FP8 switch) is untouched: the d64 FP8 build is a separate extension (`-DTE_F8PV=1`), the fp16 core's source is guarded by `#if TE_F8PV`, `vt_quant` only
+relaxed its channel check, and the new Python branches are behind `FP8_PV_D64` / `opm_fp8.POLICY`.
 
 ## Atom DiT forward: e4m3 row-kernel GEMMs (`local_dit_h100.FP8_ROWS`, EXPERIMENTAL, opt-in; branch `fp8x/atomdit`, 2026-11-17)
 
