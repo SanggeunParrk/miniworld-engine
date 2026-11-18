@@ -701,8 +701,8 @@ judge = max|y - y64| / max|y64|, tol = max(err_pytorch, 8e-3), rms_rel = ||y - y
 
 ## TriMul forward: e4m3 planes (`h100_b200style_fp8`, details in `docs/h100/trimul.md`)
 
-Scope: bf16 inference, D64 / D128 / D256 / D384 (hidden = pair), one direction or the bidirectional block (`BidirectionalTriangleMultiplication`, from 2026-11-16, branch `fp8/bidir-tm`), 1-16 samples per call.
-D64 / D384 and B > 1 are from the 3.0.0 exploration (branch `fp8x/trimul`, see "TriMul: where else e4m3 can go"); D512 and training stay bf16.
+Scope: bf16 inference, D64 / D128 / D256 / D384 / D512 (hidden = pair), one direction or (D64 - D384) the bidirectional block (`BidirectionalTriangleMultiplication`, from 2026-11-16, branch `fp8/bidir-tm`), 1-16 samples per call.
+D64 / D384 and B > 1 are from the 3.0.0 exploration (branch `fp8x/trimul`, see "TriMul: where else e4m3 can go"); D512 (IntelliFold2 trunk; one direction, L % 128 == 0) is from branch `fp8c/if2-d512` ("IntelliFold2 D512: TriMul planes" below); training stays bf16.
 
 Enable (environment, read at import, set before `import miniworld_engine`):
 
@@ -713,7 +713,7 @@ Enable (environment, read at import, set before `import miniworld_engine`):
 | `MINIWORLD_TRIMUL_FP8_FASTACC=1` | cuBLASLt fast accumulation (1.07-1.08x of the contraction at L >= 1024) |
 | `MINIWORLD_TRIMUL_FP8_HEADROOM`, `_SCALE` | scale headroom (16) / `tensor` (default) or `channel` scales |
 | `MINIWORLD_TRIMUL_FP8_K1=1` | EXPERIMENTAL e4m3 K1 compute (6.9 % update error): never a default |
-| `MINIWORLD_TRIMUL_FP8_MINL=<n>` | replaces the per-width / direction min-L gates (below them the bf16 default route runs): D128 out 144, D128 in 192, D256 out 224, D256 in 144, bidirectional D128 256, bidirectional D256 1024; D64 512 (both directions), D384 128, bidirectional D64 2048, bidirectional D384 1024; 0 = no gate |
+| `MINIWORLD_TRIMUL_FP8_MINL=<n>` | replaces the per-width / direction min-L gates (below them the bf16 default route runs): D128 out 144, D128 in 192, D256 out 224, D256 in 144, bidirectional D128 256, bidirectional D256 1024; D64 512 (both directions), D384 128, bidirectional D64 2048, bidirectional D384 1024; D512 none (every L % 128 == 0); 0 = no gate |
 
 The K3 pipeline flags are the 2.5.9 bf16 ones (`h100_b200style.K3_EXTRA`); the FP8 route uses that single hook (no private copy).
 The experiments `K3_MC` (2-CTA multicast, D256), the K1 `WTMA` / `PIPE` variants and the TriAttn core macros `TA_F8SW` / `SWN` / `QM` / `K` / `TAU10` were removed from the code (no gain): see "Tried, no gain".
@@ -742,7 +742,7 @@ Route census, 5I28 n = 4 (512 tokens), FoldForge a9e1549 + engine 3.0.1, `MINIWO
 | RoseTTAFold3 | token DiT | 0 | `token_dit_fp8.active` took only the default variant (`plain`); RF3's block is the parallel schedule with flat q / k LayerNorm | `expand` placement from the parallel schedule |
 | RoseTTAFold3 | atom DiT | 0 | `local_dit_h100.FP8_ROWS` serves the options `IDENT / PARS / NOOUT` only; RF3's block has `KQLN` (flat q / k LayerNorm) | unchanged: needs the FP8 pre / post row kernels extended by KQLN (new kernel work) |
 | RoseTTAFold3 | Transition | 534 calls | - | unchanged |
-| IntelliFold2 | TriMul planes | 144 calls only | the trunk pairformer is **D512** (960 of 1104 TriMul calls); `h100_b200style_fp8.WIDTHS` = 64 / 128 / 256 / 384 (D512: its K1 is the packed `_front`, its K3 `k3reorder.cu` has no `K3_CSCALE`); the 144 calls are the D256 modules | unchanged: D512 planes = a new K1 + K3 kernel variant |
+| IntelliFold2 | TriMul planes | 144 calls only | the trunk pairformer is **D512** (960 of 1104 TriMul calls); `h100_b200style_fp8.WIDTHS` = 64 / 128 / 256 / 384 (D512: its K1 is the packed `_front`, its K3 `k3reorder.cu` has no `K3_CSCALE`); the 144 calls are the D256 modules | fixed on branch `fp8c/if2-d512`: D512 planes ("IntelliFold2 D512: TriMul planes" below); `fp8.route_stats()` trimul calls 144 -> 1104, 0 fallbacks |
 | IntelliFold2 | OPM / Transition / token DiT `expand` / atom DiT | 36 / 585 / yes / yes | - | unchanged (all fire, 0 fallbacks) |
 | IntelliFold2 | TriAttn FP8 | off | the model is not in `fp8.TRIATTN_MODELS` (no end-level validation) | unchanged |
 
@@ -795,14 +795,115 @@ The TriMul error is the plain module's (docs above: about 4 % of the update); th
 | | 12 | 38.388 | 35.697 | 35.429 | 0.930 | 0.923 |
 | | 16 | 71.742 | 67.039 | 66.827 | 0.934 | 0.931 |
 
-IntelliFold2 is the same code as before (no route changed for it): the two FP8 columns agree within the run-to-run noise. Its gain is limited because most of its TriMul calls (D512) have no FP8 plane route.
+IntelliFold2 is the same code as before (no route changed for it): the two FP8 columns agree within the run-to-run noise. Its gain is limited because most of its TriMul calls (D512) have no FP8 plane route. (Superseded on branch `fp8c/if2-d512`: the D512 plane route, see below.)
 
 ### Not done here (new kernels / FoldForge)
 
-* IntelliFold2 D512 TriMul planes: a K1 variant of the packed `_front` writing e4m3 planes with `qinv`, and `k3reorder.cu` with `K3_CSCALE` (the contraction is 31 % of the D512 module, e4m3 removes about 15 % of it, docs above).
+* (done on `fp8c/if2-d512`) IntelliFold2 D512 TriMul planes: a K1 variant of the packed `_front` writing e4m3 planes with `qinv`, and `k3reorder.cu` with `K3_CSCALE` (the contraction is 31 % of the D512 module, e4m3 removes about 15 % of it, docs above).
 * RoseTTAFold3 atom DiT: the FP8 pre / post row kernels with the `KQLN` option (flat q / k LayerNorm).
 * TriAttn FP8 for RF3 / IF2: needs a model entry in `fp8.TRIATTN_MODELS` after an end-level (FoldBench) validation.
 * FoldForge: nothing is needed for the TriMul / OPM / token DiT fixes (the engine-side calibration now sees the parameter); the `_Graph` warm-up already calibrates every site.
+
+## IntelliFold2 D512: TriMul planes (2026-11-18, branch `fp8c/if2-d512`, base `fp8c/rf3if2` d39e8770d)
+
+IntelliFold2's trunk pairformer is D512 (456 of its 520 TriMul calls per forward at n = 4; the other 64 are D256). The D64 / D128 / D256 / D384 plane routes did not reach it: its inference
+front is the packed shared-resident K1 (`k1ssregtune.cu`, n128 blocks, 128-token tiles) and its K3 is `k3reorder.cu`. The route now serves D512 for **one direction, one sample (or B per-sample), L % 128 == 0**
+(the token-flat K3 only, as the bf16 D512 route); bidirectional D512 and other lengths keep the bf16 default route (`serves`).
+
+### What was built
+
+* K1 (`k1ssregtune.cu`, `-DF8PLANES=1`; kernel `..._f8`): the gate epilogue value is already the scaled plane value (the packed weights are pre-scaled per plane channel by `1 / scale`, a power of two, once per calibration:
+  `h100_b200style_ss_regtune.prescale_pack`, refreshed in place by `refresh`). It is cast saturating to e4m3 (`cvt.rn.satfinite.e4m3x2`), exchanged between the lane pair (lane, lane ^ 4) so each lane holds four consecutive
+  tokens of two channels (the byte exchange of the n64 `TMN_K1_F8` store: a 128-column block is two of its 32-channel halves, accumulator groups 0..3 gate / 4..7 projection and 8..11 / 12..15), staged
+  `[32 ch][64 tok]` with 64-byte swizzle and stored by TMA as uint8 planes. The max scaled value goes to `amax` (the guard). The incoming direction reads the pair transposed: one 3-D TMA box `[64 ch][128 c][1 r]` per z chunk
+  (L % 128 == 0: a 128-token tile lies in one row) and stores the LN_in statistics at the swapped token, exactly what the n64 K1 does (`stats_t`); the planes come out K-major for the e4m3 contraction.
+* K3 (`k3reorder.cu`, `K3_CSCALE=2`): the same contract as `k3.cu`: `tri` holds the raw e4m3 contraction; the LN_out statistics run on the raw values and are scaled in the epilogue of the statistics (mean x cs, variance x cs^2); the host folds `cs`
+  (= `sa sb`, one power-of-two scalar in `tensor` scale mode) into the projection operand. `Params` gains `csc` only under `K3_CSCALE`: the default D512 K3 is the same text path as before.
+* Route: `h100_b200style_fp8.WIDTHS` + 512, `serves` (one direction, L % 128 == 0), `_planes` (the D512 front), `refresh`; prebuild plan (`trimul_inproj/cuda/__init__.py`: the `_f8` front, the bf16 direct front of the calibration pre-pass, the token-flat K3 with `K3_CSCALE=2`).
+  The contraction is the cuBLASLt e4m3 batched GEMM as at the other widths (bf16 out). `MIN_L[(512, dir)] = 0`: every L % 128 == 0 gains.
+
+A first version used the direct n64 F8 K1 (`F8_CFG[512] = (2, 64, 4, 2, 1)`: z tile 128 KB + 4 x 16 KB ring slots fits): correct (3.73 % update error) but K1 was 1.38-1.36x the packed K1 (L512 1.37 vs 0.99 ms, L1024 5.34 vs 3.83, L2048 23.6 vs 17.4) and the module lost
+(FP8 / default 1.107 at L512); removed in favour of the packed K1 with the e4m3 store (K1 -4 % at L1024: half the plane bytes).
+
+### Module time, FP8 / default (CUDA-graph replay, one direction, B = 1, same process, interleaved with a same-cubin control; cool / sustained; `res/spd1.jsonl`)
+
+| L | default ms (cool) | outgoing cool / sustained | incoming cool / sustained | control |
+|---|---|---|---|---|
+| 128 | 0.157 | 0.763 / 0.768 | 0.769 / 0.770 | 0.996 / 0.999 |
+| 256 | 0.520 | 0.870 / 0.873 | 0.876 / 0.869 | 0.997 / 0.997 |
+| 384 | 1.098 | 0.892 / 0.903 | 0.911 / 0.900 | 0.998 / 0.995 |
+| 512 | 1.915 | 0.898 / 0.920 | 0.906 / 0.935 | 1.002 / 0.997 |
+| 768 | 4.161 | 0.915 / 0.923 | 0.912 / 0.925 | 0.995 / 0.996 |
+| 1024 | 7.654 | 0.908 / 0.902 | 0.908 / 0.937 | 0.998 / 0.986 |
+| 1536 | 18.53 | 0.920 / 0.889 | 0.940 / 0.887 | 1.006 / 0.994 |
+| 2048 | 36.00 | 0.910 / 0.843 | 0.942 / 0.872 | 0.998 / 0.968 |
+
+Stages at L1024 (profiler on graph replay, ms; default / FP8 planes): K1 3.83 / 3.66, contraction 1.555 / 1.006, K3 2.28 / 2.27, module 7.78 / 6.97 (outgoing), 7.28 (incoming).
+Every L gains, hence no gate. (The contraction is 20 % of the D512 module at L1024 and the e4m3 GEMM is 1.55x of the bf16 one there: the module gain is 9-10 %, not the 15 % of the 2.0x upper bound.)
+
+### Error against float64 (`res/err3_err.jsonl`, random weights, 3 masked tokens, FP8 with every gate removed, static scales calibrated on two eager calls; rms / max of the update, and the engine standard form max |y - y64| / max |y64|)
+
+| case | default rms / max (update) | default std max | FP8 rms / max (update) | FP8 std max | peak scaled plane value (of 448) |
+|---|---|---|---|---|---|
+| out L128 / L256 / L512 / L768 / L1024 | 0.65 / 0.66 %, 0.65 / 0.80 %, 0.64 / 0.68 %, 0.64 / 0.68 %, 0.64 / 0.83 % | 0.47 .. 0.55 % | 3.76 / 3.6 %, 3.73 / 3.8 %, 3.69 / 3.1 %, 3.65 / 3.5 %, 3.61 / 3.9 % | 2.2 .. 2.6 % | 18.8, 18.8, 18.8, 19.5, 21.1 |
+| in L128 / L256 / L512 / L768 / L1024 | 0.65 / 0.72 %, 0.65 / 0.72 %, 0.65 / 0.73 %, 0.64 / 0.82 %, 0.64 / 0.71 % | 0.47 .. 0.56 % | 3.75 / 4.8 %, 3.74 / 3.8 %, 3.71 / 3.6 %, 3.67 / 3.8 %, 3.64 / 3.6 % | 2.4 .. 3.1 % | 17.6, 18.3, 20.9, 20.9, 23.0 |
+
+The same 3.6-3.8 % of the update (bf16 floor 0.65 %) as every other width; no NaN, no saturation (headroom 16x). Like the other widths it fails the engine's module form (8e-3, 2-3 % max) and rests on the end-level evidence below.
+
+### Verification
+
+* Default route (FP8 off) of the D512 TriMul against the base tree d39e8770d, separate processes, sha1 of every output: **42 / 42 identical** (outgoing / incoming / bidirectional, L128-1024, masks, B = 1 / 2; `res/bit_base.jsonl`, `res/bit_mine.jsonl`).
+* Tests: `tests/gpu/test_trimul_fp8_d512.py` (new: accuracy < 6 % of the update against the float64 module, both directions, L128 / 256 / 384, no overflow, FP8 route ran; gates; default untouched after a route call; graph replay equals eager with no capture fallback),
+  `test_trimul_fp8_widths / planes / bidir / k1 / rf3`, `test_engine_fp8_backend`, CPU `test_prebuild_plan` (alone), `test_capture_api`: all passed (one job each). `test_prebuild_plan::test_plan_is_reentrant` fails when it runs in the same process after the GPU files, and passes alone in the base tree and in this tree (4 / 4): order dependence of that test, not of this change.
+
+### IntelliFold2 5I28 benchmark (FoldForge a9e1549 + engine 3.0.1 / this branch, H100 node02, `MINIWORLD_FP8=safe`, protocol of `run_1118_301_fp8`, 6 warm repeats, median of the warm forwards, seconds; `fp8c-if2-d512/bench/`)
+
+| n (tokens) | bf16 (3.0.1 steady) | FP8 before (3.0.1) | FP8 after (this branch) | FP8 / bf16 before | after |
+|---|---|---|---|---|---|
+| 1 (128) | 0.593 | 0.583 | 0.569 | 0.983 | 0.960 |
+| 2 (256) | 1.304 | 1.213 | 1.191 | 0.931 | 0.913 |
+| 4 (512) | 4.040 | 3.688 | 3.641 | 0.913 | 0.901 |
+| 8 (1024) | 15.728 | 14.449 | 14.096 | 0.919 | 0.896 |
+| 12 (1536) | 38.388 | 35.697 | 34.533 | 0.930 | 0.900 |
+| 16 (2048) | 71.742 | 67.039 | 64.342 | 0.934 | 0.897 |
+
+(The "before" of the rf3if2 branch, same code for IntelliFold2: 0.572 / 1.215 / 3.704 / 14.404 / 35.429 / 66.827 s.) The gain is the D512 TriMul share of the forward: a kernel census of one warm n = 4 forward
+(`fp8c-if2-d512/scripts/census.sbatch`, kernel ms: bf16 3977, FP8 before 3653, FP8 after 3585; 456 D512 TriMul calls per forward): D512 K1 497 -> 489 ms (e4m3 store), D512 contraction 133 ms (bf16, 0.292 ms per call) -> 87 ms (e4m3, 0.191 ms), K3 294 -> 293 ms; the D512 TriMul is about a quarter of the n = 4 forward, the FP8 route takes about
+2 % of the forward off it at n = 4 and 3-4 % at n >= 8 (the module gain grows with L).
+
+### Route census (`fp8.route_stats()` of branch `fp8c/counters`, merged with this branch in a throw-away worktree `wt-fp8c-if2-d512-rs`, 5I28 n = 4, `MINIWORLD_FP8=safe`, guards lazy)
+
+| | before (docs above, 3.0.1 / rf3if2) | this branch |
+|---|---|---|
+| `trimul` calls (eager + capture, 4 recycles) | 144 | **1104** |
+| fallbacks / capture fallbacks / retries | 0 / 0 / 0 | 0 / 0 / 0 |
+| saturation (`fp8.check()`) | False | False |
+
+(1104 = 960 D512 + 144 D256 calls of the eager warm-up and the captures; a graph replay runs no Python.) Every IntelliFold2 TriMul call takes the plane route; the other counters of the run: `opm` 36, `transition` 585, `token_dit` expand 72, atom DiT 18 (9 declined by `cond`), TriAttn and PWA not on for this model.
+
+### End level (FoldForge a9e1549 + this branch, `miniworld` backend, IntelliFold2, `MINIWORLD_FP8=safe` = every FP8 route of the model incl. the D512 TriMul planes; 200 steps, diffusion_seed 0, 5 samples, TRUNK seeds 0-3, bucketing; harness `fp8c-if2-d512/scripts/e2e_if2.py`, `an_e2e.py`; raw `fp8c-if2-d512/e2e/`)
+
+Rule of docs/fp8.md: inside = max same-trunk-seed RMSD (FP8 vs bf16, Kabsch, per sample) <= max(1.1 x the largest bf16 trunk-seed-pair RMSD, 0.5 A). "FP8 before" = the same arm on the base tree d39e8770d (every route but the D512 TriMul planes), run on the first six targets.
+12 FoldBench targets (the six of the Chai-1 end-level run, and 7zau 8cjd 8j2w 8auz 8id0 8bf4 of the 768 / 896 token buckets); the two targets whose first verdict was marginal were repeated with trunk seeds 0-7 (rows marked 8 seeds).
+
+| target | bf16 pair max (A) | FP8 after: same-seed max / mean (A) | max abs d ipTM | inside | FP8 before: same-seed max (A) | inside |
+|---|---|---|---|---|---|---|
+| 8dhj | 2.47 | 2.09 / 0.54 | 0.059 | yes | 2.54 | yes |
+| 8hxq | 22.11 | 19.98 / 14.72 | 0.137 | yes | 21.05 | yes |
+| 8vfj | 0.42 (4 seeds), 0.66 (8 seeds) | 0.68 / 0.19 | 0.001 | 4 seeds: **no** (floor 0.50 A), 8 seeds: yes | 0.29 (4 seeds), 0.59 (8 seeds) | yes |
+| 8avq | 5.27 | 5.36 / 2.64 | 0.033 | yes | 5.31 | yes |
+| 9gsq | 2.96 | 3.18 / 1.99 | 0.018 | yes | 2.85 | yes |
+| 8ts0 | 4.87 (4 seeds), 16.24 (8 seeds) | 4.94 (4 seeds), 6.70 (8 seeds) / 1.89 | 0.074 | yes | 5.85 (4 seeds: **no**, limit 5.36), 15.64 (8 seeds: yes) | 8 seeds: yes |
+| 7zau | 25.33 | 23.75 / 2.62 | 0.103 | yes | - | - |
+| 8cjd | 18.52 | 9.49 / 4.65 | 0.010 | yes | - | - |
+| 8j2w | 1.92 | 1.36 / 0.46 | 0.008 | yes | - | - |
+| 8auz | 29.88 | 21.93 / 2.61 | 0.073 | yes | - | - |
+| 8id0 | 2.24 | 0.93 / 0.27 | 0.082 | yes | - | - |
+| 8bf4 | 26.04 | 19.46 / 4.07 | 0.041 | yes | - | - |
+
+12 / 12 inside with the larger seed sets; with four trunk seeds 11 / 12 (8vfj: 0.68 A against the 0.50 A floor while its four bf16 seeds agree to 0.42 A; its same-seed mean is 0.19 A, and 8 bf16 seeds already span 0.66 A). The arm without the D512 planes
+(base tree) is inside everywhere but 8ts0 at four seeds (5.85 A against 5.36 A, a target whose bf16 seeds reach 16.2 A over eight): the marginal verdicts alternate between the two FP8 arms and sit on the noise of targets whose bf16 trunk seeds are
+bimodal or nearly converged, so they are not attributed to the D512 route. No saturation redo in any of the 88 FP8 runs (56 after, 32 before; `fp8.check()`), no failures. (The end-level runs are eager with the `sync` guard; the lazy guard + CUDA-graph path is the one of the 5I28 benchmark and the tests above.)
 
 ## TriMul: where else e4m3 can go (3.0.0 exploration, branch `fp8x/trimul`, 2026-11-17, base `fp8/3.0.0-on-2512` 91a9241fb)
 

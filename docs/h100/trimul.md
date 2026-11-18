@@ -352,7 +352,7 @@ default heuristic pick (1.29 PFLOPs = 65 % of the dense e4m3 peak), so the contr
   tile of the bf16 route `(2, 64, 2, 6, 1)` (an n128 D384 ring does not fit shared memory). The n64 blocks take unhalved prescaled weights
   (`prescale(..., half=False)`: no `TMN_K1_FOLD`).
 - K3: the route's existing `K3_CSCALE` K3; D384 at L % 128 == 0 takes the token-flat K3 (the D384 default tile), else the row form.
-- `serves`: widths `WIDTHS = (64, 128, 256, 384)`, 1-16 samples (`MAX_SAMPLES`; B > 1 runs `run_samples`, the one-sample route per sample into one
+- `serves`: widths `WIDTHS = (64, 128, 256, 384, 512)`, 1-16 samples (`MAX_SAMPLES`; B > 1 runs `run_samples`, the one-sample route per sample into one
   output); gates in `MIN_L` (D64 512, D384 128, bidirectional D64 2048, bidirectional D384 1024).
-- D512 is not served: its inference K1 is the packed `_front` and its K3 `k3reorder.cu` has no `K3_CSCALE`.
+- D512: served (branch `fp8c/if2-d512`, docs/fp8.md "IntelliFold2 D512: TriMul planes"): one direction, L % 128 == 0; K1 = the packed shared-resident `k1ssregtune.cu` built with `F8PLANES` (e4m3 plane store, transposed read for the incoming direction), K3 = `k3reorder.cu` with `K3_CSCALE=2`. Bidirectional D512 is not served.
 - Default route: unchanged (the header code is under `TMN_K1_F8`; sha1 of the outputs against the base tree in `docs/fp8.md`).
