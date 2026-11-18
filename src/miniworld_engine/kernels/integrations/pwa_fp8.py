@@ -45,6 +45,10 @@ W_SCALE = 2.0**-8  # dequant factor of w (w stored as w * 256)
 
 #: opt-in switch (environment read at import, or set the attribute)
 ENABLED = _fp8_env("MINIWORLD_PWA_FP8") == "1"
+#: Route call counters (``miniworld_engine.fp8.route_stats()``; plain ints at Python call time, never inside a kernel or graph replay):
+#: ``calls`` = :func:`forward` (the 8 x 32 native width), ``wide_calls`` = :func:`forward_wide`, ``retries`` = eager saturation redos,
+#: ``declined`` = calls the route is on for but whose shape gate (:func:`serves` / :func:`serves_wide`) sent to the bf16 route.
+STATS = {"calls": 0, "wide_calls": 0, "retries": 0, "declined": 0}
 #: "sync" (default): a saturating call raises the scale (x RESCALE) and redoes itself (one host sync per call); "lazy": no host sync
 #: (required with CUDA graphs) -- the caller runs ``take_overflow()`` / ``rescale_all()`` / redo once per forward, outside the graph
 GUARD = os.environ.get("MINIWORLD_PWA_FP8_GUARD", "sync")
@@ -173,7 +177,10 @@ def contract(wq: torch.Tensor, vt: torch.Tensor, out: torch.Tensor, vscale: torc
 # ------------------------------------------------------------------------------------------------------------------ the route
 def serves(s: int, n: int) -> bool:
     """True when the opt-in route takes this call (MiniWorld MSA widths; the caller checks the width and the pair kernel's range)."""
-    return ENABLED and n % 128 == 0 and s % 2 == 0 and n >= MIN_N and (n >= 512 or s >= MIN_S)
+    ok = ENABLED and n % 128 == 0 and s % 2 == 0 and n >= MIN_N and (n >= 512 or s >= MIN_S)
+    if ENABLED and not ok:
+        STATS["declined"] += 1
+    return ok
 
 
 def _forget(key) -> None:
@@ -229,6 +236,7 @@ def forward(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16):
     """The msa output (residual included) [S, N, 64] of one inference call from the pair kernel's w [H, N, N] bf16; ``key_tensor``
     (the module's value weight) keys the static v scale."""
     k = _ext()
+    STATS["calls"] += 1
     amax, ws, key = _scales(k, m, key_tensor, lnm_w, lnm_b, wv16, eps_m, LNVT8_CFG, True)
     wq = k.w_quant(w16)
     from miniworld_engine.kernels.integrations import pwa_train as P
@@ -243,6 +251,7 @@ def forward(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16):
         out = gate.pwa_gateout(o, y, wg16, wo16, m, 1, 4, None, 1.0)
         if GUARD != "sync" or not take_overflow():
             break
+        STATS["retries"] += 1
         rescale_all()
     return out
 
@@ -278,8 +287,12 @@ def serves_wide(d_msa: int, c: int, s: int, n: int) -> bool:
     if not (ENABLED and (d_msa, c) in WIDE):
         return False
     if d_msa == 256:  # BIG: its own gates (no N floor: S1024 N128 0.89)
-        return n % BIG_N_MULT == 0 and n % 16 == 0 and s * n >= BIG_MIN_SN
-    return n % 16 == 0 and n >= WIDE_MIN_N and s * n >= WIDE_MIN_SN
+        ok = n % BIG_N_MULT == 0 and n % 16 == 0 and s * n >= BIG_MIN_SN
+    else:
+        ok = n % 16 == 0 and n >= WIDE_MIN_N and s * n >= WIDE_MIN_SN
+    if not ok:
+        STATS["declined"] += 1
+    return ok
 
 
 def forward_wide(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16, kv):
@@ -287,6 +300,7 @@ def forward_wide(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16, kv):
     contraction -> ``kv.gate_out_w`` in its LayerNorm mode (the default inference gate pass, unchanged). ``kv``: the pwa_wide build."""
     d, c = m.shape[2], wv16.shape[0] // 8
     k, cfg = _ext(d, c), wide_cfg(d, c)
+    STATS["wide_calls"] += 1
     big = d == 256  # the BIG build: gate_w + out_w instead of gate_out_w
     keep_y = big and BIG_Y and m.shape[1] % 64 == 0
     amax, ws, key = _scales(k, m, key_tensor, lnm_w, lnm_b, wv16, eps_m, cfg, keep_y)
@@ -304,5 +318,6 @@ def forward_wide(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16, kv):
             out = kv.gate_out_w(o, m, m, wg16, wo16, None, 1.0, lnm_w, lnm_b, eps_m)
         if GUARD != "sync" or not take_overflow():
             break
+        STATS["retries"] += 1
         rescale_all()
     return out
