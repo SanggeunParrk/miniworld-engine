@@ -1252,9 +1252,10 @@ class AtomDiTMiniWorld(BackendModule):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cuda:a100_sm80": 7,
-        "cuda:h100_sm90": 2,
+        "cuda:h100_sm90": 3,
         "cuda:5090_sm120": 2,
     }  # cuda:a100_sm80 7 (2026-11-13): the sm_80 window attention exits on a tile past seqused (zero rows, the same bits)
+    # cuda:h100_sm90 3 (3.0.1): bf16 training: the modulation table is bf16 (hoist GEMMs on bf16 operands, slab kernels read it and write dmod in bf16); A 48 x 4096 atoms, 3 blocks 11.09 -> 9.80 ms
 
     def __init__(
         self,
@@ -1473,7 +1474,7 @@ class AtomDiTMiniWorld(BackendModule):
         if _a100(x):
             return self._forward_a100(x, cond, attention_params)
         from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction, SWADiTModulationH100
-        from miniworld_engine.kernels.swa_dit.dispatch import native_h100_silu
+        from miniworld_engine.kernels.swa_dit.dispatch import bf16_table, native_h100_silu
 
         n, _s = x.shape[:2]
         cos, sin, seqused = attention_params[:3]
@@ -1494,7 +1495,7 @@ class AtomDiTMiniWorld(BackendModule):
         if torch.is_grad_enabled() and any(t.requires_grad for t in (q, c, wmod, *weights)):
             from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_output
 
-            mod = _native_caller_output(SWADiTModulationH100.apply(c, wmod), cond, wmod, force=True)
+            mod = _native_caller_output(SWADiTModulationH100.apply(c, wmod, bf16_table(q, c, self.attn.half_window)), cond, wmod, force=True)
             # one modulation row per sequence row: B = N (no augment structure is known here)
             return SWADiTBlockFunction.apply(q, mod, cos, sin, seqused, *weights, n, self.attn.half_window)
         return self._h100_eval(q, native_h100_silu(c), cos, sin, seqused)
@@ -1650,10 +1651,11 @@ class SWAAtomTransformer(BackendModule):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cuda:a100_sm80": 7,
-        "cuda:h100_sm90": 3,
+        "cuda:h100_sm90": 4,
         "triton": 2,
         "cuda:5090_sm120": 2,
     }  # cuda:a100_sm80 7 (2026-11-13): as AtomDiTMiniWorld
+    # cuda:h100_sm90 4 (3.0.1): as AtomDiTMiniWorld (bf16 training modulation table)
 
     class Config(BaseModel):
         """Configuration for the SWA atom transformer."""
