@@ -34,7 +34,7 @@ these routes do not depend on the model.
 TriAttn FP8 runs **only for a validated model** (:data:`TRIATTN_MODELS`; decision 2026-11-17): the FP8 PV route on the call-site kinds checked
 end to end for that model, and e4m3 q / k on the fused d_pair-128 route only where that was checked too. The model is named once, either
 ``MINIWORLD_FP8_MODEL=<model>`` next to ``MINIWORLD_FP8`` (read at import of the TriAttn kernels) or ``enable(preset, model=<model>)`` (run
-time; :func:`enable` does not read ``MINIWORLD_FP8_MODEL``). No model, or a model not in :data:`TRIATTN_MODELS` (e.g. Boltz-2, OpenFold3):
+time; :func:`enable` does not read ``MINIWORLD_FP8_MODEL``). No model, or a model not in :data:`TRIATTN_MODELS` (e.g. Boltz-2):
 TriAttn keeps the default fp16 core, bit-identical to FP8 off. q / k e4m3 is in ``safe`` for af3 although its module error (judge form) is
 above the module tolerance: the end-level AF3 FoldBench run with it on flagged 0 / 27 targets.
 
@@ -87,13 +87,18 @@ PRESETS = MappingProxyType(
 )
 #: TriAttn FP8 per validated model: model -> (call-site kinds of the FP8 PV route, e4m3 q / k on the fused route). Only end-level evidence for
 #: exactly these routes puts a model here (docs/fp8.md): af3 = FoldBench 27 targets with the whole ``safe`` set incl. q / k (0 flagged) and 4
-#: targets x 4 trunk seeds with PV; protenix1 / opendde = PV on the listed kinds, 4 trunk seeds per target (no q / k run: PV only). Boltz-2 is out
-#: on purpose (9c90 bistable); OpenFold3 is not added; Chai-1 (call-site kind "d64", fp8c/chai1) has the kernel but no end-level evidence yet: not listed. ``h100_sm90.FP8_PV_WHITELIST`` is derived from this table. Extend only after an end-level check.
+#: targets x 4 trunk seeds with PV; protenix1 / opendde = PV on the listed kinds, 4 trunk seeds per target (no q / k run: PV only); protenix2 =
+#: PV on its d_pair-256 front-made sites ("unfused"; no d_pair-128 site, so no q / k) and openfold3 = PV on both kinds + q / k (docs/fp8.md
+#: "TriAttn whitelist: Protenix v2, OpenFold3 (IntelliFold2 not added)": 4 trunk seeds per target, 3.0.1 environment). Boltz-2 is out on purpose
+#: (9c90 bistable); Chai-1 (call-site kind "d64", fp8c/chai1) has the kernel but no end-level evidence yet: not listed. IntelliFold2 stays out (end-level 10 / 12, its trunk heads are 64-channel). ``h100_sm90.FP8_PV_WHITELIST`` is derived from
+#: this table. Extend only after an end-level check.
 TRIATTN_MODELS = MappingProxyType(
     {
         "af3": (frozenset({"fused", "unfused"}), True),
         "protenix1": (frozenset({"fused"}), False),
         "opendde": (frozenset({"unfused"}), False),
+        "protenix2": (frozenset({"unfused"}), False),
+        "openfold3": (frozenset({"fused", "unfused"}), True),
     }
 )
 _NO_TRIATTN: tuple[frozenset[str], bool] = (frozenset(), False)
