@@ -96,6 +96,19 @@ the backward uses `gate_bwd_big_w` with the saved gate and `ln_bwd_w` after a cu
   accumulator layout so the gated product is the next GEMM's A operand from registers. The pair-side block reductions run warp by warp
   in a fixed order (no float atomics).
 
+### 3.0.1: backward aux kernels and native routing (training)
+
+- `csrc/pwa_wide_aux.cu` (`pwa_wide._aux`, one shape-independent build; switch `pwa_wide.FUSED_BWD_AUX`): `drop_bwd_w` applies the row-dropout
+  keep-mask of the wide widths' backward in one pass (bf16(bf16(dres * keep) * scale), the arithmetic of the two PyTorch elementwise ops it replaces;
+  130 + 66 us = 11 % of the AF3-width step at S 1024 N 768), and `perm_dv_w` writes the BIG build's head-major dv into the natural `[dgp | dv]`
+  buffer (596 us strided copy -> 408 us). Bit-identical to 3.0.0.
+- `pwa_train.NATIVE_ANY_SHAPE`: the native builds (fixed-order partial sums, cuBLAS dv, no float atomics: deterministic dgamma / dbeta of ln_msa)
+  serve every training shape the refusal admits (N % 128 == 0, N <= 1024, S even), not only the six. The CUDA pair backward (`pair_bwd3`) stays
+  on the six shapes (`NATIVE_PAIR_ANY_SHAPE = False`): its dgamma_z / dWb moved ln_pair.weight / to_bias.weight by a few 1e-3 of the gold
+  and turned two GREEN rows (S 384, N 512 / 768) YELLOW; the Triton pair backward keeps them GREEN.
+- Step (fwd + bwd, CUDA graph, cool) vs 3.0.0: wide widths 0.88-0.94; 8 x 32 N 512 0.89-0.92, N 1024 0.75-0.79, N 256 0.96-1.0, N 768 unchanged.
+  `backend_versions["cuda:h100_sm90"]` = 2.
+
 ## Triton backend
 
 Forward: `layernorm_gemm_softmax` (per row i: LN_z -> Wb -> mask -> two-pass softmax), `layernorm_gemm` (LN_m -> Wv head-major), cuBLAS
