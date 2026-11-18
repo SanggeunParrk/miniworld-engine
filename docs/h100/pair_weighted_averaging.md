@@ -130,6 +130,10 @@ stores per element; both consumer warpgroups in lock step through `goready`) equ
 shape). The rest needs a different structure (two CTAs per SM would need the 200 KB of staging halved; moving the elementwise work to the idle producer
 warpgroup or a ping-pong of the two consumers) and is recorded, not done.
 
+Step (fwd + bwd, CUDA graph, one process, interleaved, sustained) of the 8 x 32 / d_msa 64 module, 3.0.0 routing (switches off) : `bf16/pwa` : with the mask prefetch,
+N 256 S 512 .. 8192 0.553 : 0.532 : 0.526 .. 6.82 : 6.95 : 6.75 ms; N 512 S 512 .. 8192 1.211 : 1.100 : 1.094 .. 16.09 : 14.69 : 14.50 (0.90 of 3.0.0);
+N 768 S 1024 .. 4096 3.454 : 3.455 : 3.426 .. 12.86 : 12.80 : 12.66; N 1024 S 512 .. 4096 3.515 : 2.813 : 2.796 .. 24.28 : 19.17 : 19.17 (0.78 - 0.79).
+
 ## Triton backend
 
 Forward: `layernorm_gemm_softmax` (per row i: LN_z -> Wb -> mask -> two-pass softmax), `layernorm_gemm` (LN_m -> Wv head-major), cuBLAS
