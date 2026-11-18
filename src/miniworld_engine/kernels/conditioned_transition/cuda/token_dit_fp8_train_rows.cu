@@ -75,7 +75,7 @@ __global__ void __launch_bounds__(32 * WPB) q8_rows_k(const __nv_bfloat16* __res
     for (int j = 0; j < 8; ++j) am = fmaxf(am, fabsf(v[8 * i + j]));
   }
   am = wmax(am);
-  const float sc = am > 0.f ? am / fmax_of<E5>() : 1.f, inv = 1.f / sc;
+  const float sc = fmaxf(am / fmax_of<E5>(), 1e-30f), inv = 1.f / sc;  // floor: a channel with amax ~ 1e-37 (real weights) made inv = inf -> NaN
 #pragma unroll
   for (int i = 0; i < IT; ++i) stq8<E5>(OUT + r * D + i * 256 + lane * 8, v + 8 * i, inv);
   if (lane == 0) S[r] = sc;
@@ -104,7 +104,7 @@ __global__ void __launch_bounds__(32 * WPB) swiglu_q8_k(const __nv_bfloat16* __r
     }
   }
   am = wmax(am);
-  const float sc = am > 0.f ? am / 448.f : 1.f, inv = 1.f / sc;
+  const float sc = fmaxf(am / 448.f, 1e-30f), inv = 1.f / sc;
 #pragma unroll
   for (int i = 0; i < IT; ++i) stq8<false>(H8 + r * N + i * 256 + lane * 8, h + 8 * i, inv);
   if (lane == 0) S[r] = sc;
@@ -148,7 +148,7 @@ __global__ void __launch_bounds__(32 * WPB) swiglu_bwd_q8_k(const __nv_bfloat16*
     }
   }
   am = wmax(am);
-  const float sc = am > 0.f ? am / fmax_of<E5>() : 1.f, inv = 1.f / sc;
+  const float sc = fmaxf(am / fmax_of<E5>(), 1e-30f), inv = 1.f / sc;  // floor: a channel with amax ~ 1e-37 (real weights) made inv = inf -> NaN
 #pragma unroll
   for (int i = 0; i < IT; ++i) {
     const int c = i * 256 + lane * 8;

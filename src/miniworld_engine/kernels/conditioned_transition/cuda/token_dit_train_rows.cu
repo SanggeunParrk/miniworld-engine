@@ -249,7 +249,7 @@ __global__ void __launch_bounds__(NT) res_adaln_b_q8_k(const XI* __restrict__ X,
     const float v[4] = {__bfloat162float(__float2bfloat16_rn(t.x)), __bfloat162float(__float2bfloat16_rn(t.y)),
                         __bfloat162float(__float2bfloat16_rn(t.z)), __bfloat162float(__float2bfloat16_rn(t.w))};
     const float am = block_max_f<NT>(fmaxf(fmaxf(fabsf(v[0]), fabsf(v[1])), fmaxf(fabsf(v[2]), fabsf(v[3]))), red);
-    const float sc = am > 0.f ? am / 448.f : 1.f, inv = 1.f / sc;
+    const float sc = fmaxf(am / 448.f, 1e-30f), inv = 1.f / sc;
     const __nv_fp8x2_storage_t lo = __nv_cvt_float2_to_fp8x2(make_float2(v[0] * inv, v[1] * inv), __NV_SATFINITE, __NV_E4M3);
     const __nv_fp8x2_storage_t hi = __nv_cvt_float2_to_fp8x2(make_float2(v[2] * inv, v[3] * inv), __NV_SATFINITE, __NV_E4M3);
     *reinterpret_cast<uint32_t*>(XT8 + r * D + col) = (uint32_t)lo | ((uint32_t)hi << 16);

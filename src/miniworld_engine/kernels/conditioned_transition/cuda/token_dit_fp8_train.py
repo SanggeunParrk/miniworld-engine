@@ -174,7 +174,23 @@ def weights(W: dict, places: frozenset[str]) -> dict:
 def mm(a8: torch.Tensor, sa: torch.Tensor, w: tuple[torch.Tensor, torch.Tensor], bias: torch.Tensor | None = None) -> torch.Tensor:
     """bf16 [M, N] = (sa a8) (w8 sw) [+ bias] on the FP8 tensor cores (row-wise scales, fp32 accumulation)."""
     w8, sw = w
-    return torch._scaled_mm(a8, w8, sa, sw, bias=bias, out_dtype=torch.bfloat16)
+    out = torch._scaled_mm(a8, w8, sa, sw, bias=bias, out_dtype=torch.bfloat16)
+    if _DEBUG:  # eager only (no CUDA graph): the first non-finite product, with its scales
+        _check(a8, sa, w8, sw, out)
+    return out
+
+
+_DEBUG = os.environ.get("MINIWORLD_FP8_TRAIN_DEBUG", "") == "1"
+_SEEN = [0]
+
+
+def _check(a8, sa, w8, sw, out) -> None:
+    bad = int((~torch.isfinite(out)).sum())
+    if bad and _SEEN[0] < 8:
+        _SEEN[0] += 1
+        print(f"FP8_DEBUG non-finite product: out {tuple(out.shape)} bad={bad} sa[min,max,nonfinite]=[{float(sa.min()):.3g},{float(sa.max()):.3g},"
+              f"{int((~torch.isfinite(sa)).sum())}] sw[min,max,nonfinite]=[{float(sw.min()):.3g},{float(sw.max()):.3g},{int((~torch.isfinite(sw)).sum())}] "
+              f"a8_nan={int(torch.isnan(a8.float()).sum())}", flush=True)
 
 
 __all__ = [
