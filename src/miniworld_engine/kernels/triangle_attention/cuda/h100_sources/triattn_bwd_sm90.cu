@@ -52,6 +52,12 @@ __global__ void __launch_bounds__(256) triattn_delta_kernel(const __nv_bfloat16*
 #ifndef TB_PPQ
 #define TB_PPQ 0
 #endif
+#ifndef TB_Q8
+#define TB_Q8 1           // query side: 0 = off, 1 = the row-split kernel from S = 512 on, 2 = always (two warpgroups sum their dbias partials in shared memory: S / 8 reduce-adds per element)
+#endif
+#ifndef TB_ABL
+#define TB_ABL 0          // experiments (time only, wrong results): bit 8 drops the dbias TMA reduce-adds, bit 32 every other one, bit 64 three of four
+#endif
 #ifndef TB_TRACE
 #define TB_TRACE 0        // experiments: phase timestamps of CTA 0, warp 0 of each consumer warpgroup (key-side kernel)
 #endif
@@ -413,6 +419,7 @@ __global__ void __launch_bounds__(qk::THREADS, 1) triattn_bwd_q_sm90(
             wait(dbf(w_, k), (u >> 1) & 1);
             const uint32_t buf = sDB + (w_ * 2 + k) * DBT;
             for (int half = 0; half < 2; ++half)
+              if (!(TB_ABL & 8) && !((TB_ABL & 32) && (j & 1)) && !((TB_ABL & 64) && (j & 3)))
               reduce_add_2d(&dbmap, buf + half * 64 * 128, j * BK + half * 32, (long)p * slabrows + (b * H + h) * S + qt * BQ + 64 * w_);
           }
           bulk_commit();
@@ -588,6 +595,264 @@ __global__ void __launch_bounds__(qk::THREADS, 1) triattn_bwd_q_sm90(
   }
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// dQ and dbias, row-split variant (TB_Q8): task = (b, h, 64-query tile) x 8 pair rows; warpgroup 1 / 2 own rows 0-3 / 4-7 (all 64 queries).
+// Per step the two warpgroups' 64 x 64 dbias partials are summed through shared memory (warpgroup 2 stages its tile, warpgroup 1 adds its
+// own to it in place) and ONE TMA reduce-add leaves per step: S / 8 partials per element instead of S / 4.  The sum order is fixed
+// (rows 4-7, then rows 0-3 added), the slabs as before: deterministic.
+namespace q8 {
+constexpr int BQ = 64, BK = 64, RW = 4, QR = 8, NS = 2;
+constexpr int QT = BQ * D;                                // Q / dO row tile [64 q][32] (4 KiB), 64B swizzle
+constexpr int KT = BK * D;                                // K / V step tile [64 k][32] (4 KiB)
+constexpr int BT = BQ * BK;                               // bias step tile [64 q][64 k], 128B swizzle (8 KiB)
+constexpr int STG = BT * 2 + QR * 2 * KT * 2;             // bias | per row (K | V)
+constexpr int DBT = 64 * 64 * 4;                          // fp32 staging tile [2 halves][64 q][32 k] (16 KiB)
+constexpr int THREADS = 384;
+constexpr int SMEM = 1024 + QR * 2 * QT * 2 + NS * STG + DBT + 256;
+static_assert(SMEM <= 232448, "smem");
+}  // namespace q8
+
+__global__ void __launch_bounds__(q8::THREADS, 1) triattn_bwd_q8_sm90(
+    int N, int H, int S, int ntasks, int P, long slabrows, float scl, float scale,
+    const __grid_constant__ CUtensorMap qmap,             // q / dO [B*N*S][H*32] bf16, box (32, 64), 64B swizzle
+    const __grid_constant__ CUtensorMap dmap,
+    const __grid_constant__ CUtensorMap kmap,             // k / v, box (32, 64), 64B swizzle
+    const __grid_constant__ CUtensorMap vmap,
+    const __grid_constant__ CUtensorMap bmap,             // sbias [B*H*S][S] bf16, box (64, 64), 128B swizzle
+    const __grid_constant__ CUtensorMap dbmap,            // dbias slabs [P*B*H*S][S] fp32, box (32, 64), 128B swizzle (TMA reduce-add)
+    const float* __restrict__ LSE, const float* __restrict__ DELTA,
+    __nv_bfloat16* __restrict__ DQ, long ldo) {
+  using namespace q8;
+  const int QTILES = S / BQ, KS = S / BK, NG = (N + QR - 1) / QR;
+  extern __shared__ __align__(1024) unsigned char raw[];
+  unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
+  const uint32_t sQD = sa(smb), sS = sQD + QR * 2 * QT * 2, sDB = sS + NS * STG, bar0 = sDB + DBT;
+  auto sQ = [&](int r) { return sQD + r * 2 * QT * 2; };
+  auto sD = [&](int r) { return sQ(r) + QT * 2; };
+  auto sBias = [&](int s) { return sS + s * STG; };
+  auto sKr = [&](int s, int r) { return sS + s * STG + BT * 2 + r * 2 * KT * 2; };
+  auto sVr = [&](int s, int r) { return sKr(s, r) + KT * 2; };
+  const uint32_t qf = bar0, qe = bar0 + 8;
+  auto sf = [&](int s) { return bar0 + 16 + 8 * s; };
+  auto se = [&](int s) { return bar0 + 16 + 8 * (NS + s); };                    // count 8
+  const uint32_t dbx = bar0 + 16 + 8 * 2 * NS;          // warpgroup 2's partial staged (count 4)
+  const uint32_t dbf = dbx + 8;                          // the sum is complete (count 4: warpgroup 1's warps)
+  const uint32_t dbe = dbx + 16;                         // the reduce has read the buffer (count 1: the storer)
+  const int tid = threadIdx.x, wg = tid >> 7, lane = tid & 31;
+  if (tid == 0) {
+    uint64_t* bars = reinterpret_cast<uint64_t*>(smb + (bar0 - sQD));
+    bar_init(bars, 1); bar_init(bars + 1, 8);
+    for (int k = 0; k < NS; ++k) { bar_init(bars + 2 + k, 1); bar_init(bars + 2 + NS + k, 8); }
+    bar_init(bars + 2 + 2 * NS, 4); bar_init(bars + 3 + 2 * NS, 4); bar_init(bars + 4 + 2 * NS, 1);
+    bar_init_fence();
+  }
+  __syncthreads();
+  auto decode = [&](int c, int& b, int& h, int& qt, int& g0, int& g1, int& p) {
+    const int tile = c / P; p = c % P;
+    qt = tile % QTILES; int r = tile / QTILES; h = r % H; b = r / H;
+    g0 = (int)((long)p * NG / P); g1 = (int)((long)(p + 1) * NG / P);
+  };
+  auto row0 = [&](int b, int n) -> int { n = min(n, N - 1); return (b * N + n) * S; };
+
+  if (wg == 0) {
+    reg_dealloc<40>();
+    if (tid == 0) {
+      prefetch_map(&qmap); prefetch_map(&dmap); prefetch_map(&kmap); prefetch_map(&vmap); prefetch_map(&bmap); prefetch_map(&dbmap);
+      int lt = 0, st = 0, ph = 0;
+      for (int t = blockIdx.x; t < ntasks; t += gridDim.x) {
+       int b, h, qt, g0, g1, p; decode(t, b, h, qt, g0, g1, p);
+       for (int g = g0; g < g1; ++g, ++lt) {
+        wait(qe, (lt & 1) ^ 1);
+        expect_tx(qf, QR * 2 * QT * 2);
+        for (int r = 0; r < QR; ++r) {
+          load_2d(&qmap, sQ(r), qf, h * D, row0(b, g * QR + r) + qt * BQ);
+          load_2d(&dmap, sD(r), qf, h * D, row0(b, g * QR + r) + qt * BQ);
+        }
+        for (int j = 0; j < KS; ++j) {
+          wait(se(st), ph ^ 1);
+          expect_tx(sf(st), STG);
+          load_2d(&bmap, sBias(st), sf(st), j * BK, (b * H + h) * S + qt * BQ);
+          for (int r = 0; r < QR; ++r) {
+            load_2d(&kmap, sKr(st, r), sf(st), h * D, row0(b, g * QR + r) + j * BK);
+            load_2d(&vmap, sVr(st, r), sf(st), h * D, row0(b, g * QR + r) + j * BK);
+          }
+          if (++st == NS) { st = 0; ph ^= 1; }
+        }
+       }
+      }
+    } else if (tid == 32) {                               // the storer: each step's summed dbias -> TMA reduce-adds
+      int u = 0;
+      for (int t = blockIdx.x; t < ntasks; t += gridDim.x) {
+       int b, h, qt, g0, g1, p; decode(t, b, h, qt, g0, g1, p);
+       for (int g = g0; g < g1; ++g) {
+        for (int j = 0; j < KS; ++j, ++u) {
+          wait(dbf, u & 1);
+          for (int half = 0; half < 2; ++half)
+            if (!(TB_ABL & 8)) reduce_add_2d(&dbmap, sDB + half * 64 * 128, j * BK + half * 32, (long)p * slabrows + (b * H + h) * S + qt * BQ);
+          bulk_commit();
+          bulk_wait_read<0>();
+          arrive(dbe);
+        }
+        bulk_wait<0>();                                   // this task's reduces have landed before the next task's reach the same elements
+       }
+      }
+      bulk_wait<0>();
+    }
+    return;
+  }
+
+  reg_alloc<232>();
+  const int w = wg - 1, T = tid - 128 * wg, wi = T >> 5, g8 = lane >> 2, t4 = lane & 3;
+  const int lrow = 16 * wi + (lane & 7) + 8 * ((lane >> 3) & 1), lcol8 = lane >> 4, x7 = lane & 7;
+  int dbu = 0;
+  const uint32_t qoff = lrow * D * 2;
+  float dq[RW][16], lse[RW][2], dlt[RW][2];
+  float rlive[RW];
+  float s_[32], dp[32], db[32];
+  uint32_t da[16];
+  int st = 0, ph = 0, mst = 0;
+  auto frag = [&](uint32_t tile, int ks, uint32_t (&a)[4]) { ldsm_x4(tile + qoff + (((2 * ks + lcol8) ^ ((lrow >> 1) & 3)) << 4), a); };
+  auto G = [&](int r) {                                   // r: this warpgroup's row 0..3 (stage row 4 w + r)
+    if (r == 0) wait(sf(st), ph);
+    const int rr = RW * w + r;
+    const uint32_t bt = sBias(st) + lrow * 128;
+#pragma unroll
+    for (int i2 = 0; i2 < 4; ++i2) {
+      uint32_t r4[4];
+      ldsm_x4(bt + ((((2 * i2 + lcol8) & 7) ^ x7) << 4), r4);
+      const float2 a0 = bf2f(r4[0]), a1 = bf2f(r4[1]), a2 = bf2f(r4[2]), a3 = bf2f(r4[3]);
+      s_[8 * i2 + 0] = a0.x; s_[8 * i2 + 1] = a0.y; s_[8 * i2 + 2] = a1.x; s_[8 * i2 + 3] = a1.y;
+      s_[8 * i2 + 4] = a2.x; s_[8 * i2 + 5] = a2.y; s_[8 * i2 + 6] = a3.x; s_[8 * i2 + 7] = a3.y;
+    }
+    uint32_t qa[2][4], oa[2][4];
+    frag(sQ(rr), 0, qa[0]); frag(sQ(rr), 1, qa[1]); frag(sD(rr), 0, oa[0]); frag(sD(rr), 1, oa[1]);
+    wg_fence();
+    mma_rs_n64<0>(s_, qa[0], desc_k64(sKr(st, rr)), 1u);
+    mma_rs_n64<0>(s_, qa[1], desc_k64(sKr(st, rr) + 32), 1u);
+    mma_rs_n64<0>(dp, oa[0], desc_k64(sVr(st, rr)), 0u);
+    mma_rs_n64<0>(dp, oa[1], desc_k64(sVr(st, rr) + 32), 1u);
+    wg_commit();
+  };
+  auto M = [&](int r) {
+    const int rr = RW * w + r;
+#pragma unroll
+    for (int kk = 0; kk < BK / 16; ++kk) {
+      const uint32_t a[4] = {da[4 * kk], da[4 * kk + 1], da[4 * kk + 2], da[4 * kk + 3]};
+      mma_rs_n32<1>(dq[r], a, desc_mn64(sKr(mst, rr) + kk * 1024, KT * 2), 1u);
+    }
+    wg_commit();
+  };
+  auto X = [&](int r) {
+    const float live = rlive[r];
+#pragma unroll
+    for (int i = 0; i < 32; ++i) {
+      const int hf = (i >> 1) & 1;
+      const float p = ex2f(fmaf(s_[i], scl, -lse[r][hf]));
+      const float d = p * (dp[i] - dlt[r][hf]);
+      dp[i] = d;
+      db[i] = fmaf(d, live, db[i]);
+    }
+  };
+  auto pack = [&]() {
+#pragma unroll
+    for (int i = 0; i < 16; ++i) da[i] = PACKP(dp[2 * i], dp[2 * i + 1]);
+  };
+  // the step's partial: warpgroup 2 writes its tile to the staging buffer (128B swizzle: 16-byte chunk c of a row at c ^ (row & 7)),
+  // warpgroup 1 adds its own to it in place and hands the sum to the storer (one TMA reduce-add per half)
+  auto flush = [&]() {
+    if (w == 1) wait(dbe, (dbu & 1) ^ 1);
+    else wait(dbx, dbu & 1);
+#pragma unroll
+    for (int i = 0; i < 8; ++i)
+#pragma unroll
+      for (int hf = 0; hf < 2; ++hf) {
+        const int row = 16 * wi + g8 + 8 * hf, col = 8 * i + 2 * t4, half = col >> 5, c = (col & 31) >> 2;
+        const uint32_t addr = sDB + half * 64 * 128 + row * 128 + ((c ^ (row & 7)) << 4) + (col & 3) * 4;
+        float x = 0.f, y = 0.f;                          // warpgroup 2 stores its tile (x = y = 0), warpgroup 1 adds its own to it
+        asm volatile("{ .reg .pred p; setp.eq.s32 p, %3, 0; @p ld.shared.v2.f32 {%0, %1}, [%2]; }\n" : "+f"(x), "+f"(y) : "r"(addr), "r"(w) : "memory");
+        asm volatile("st.shared.v2.f32 [%0], {%1, %2};\n" :: "r"(addr), "f"(x + db[4 * i + 2 * hf]), "f"(y + db[4 * i + 2 * hf + 1]) : "memory");
+      }
+    if (w == 0) fence_proxy_async();
+    __syncwarp();
+    if (lane == 0) arrive(w == 1 ? dbx : dbf);
+    ++dbu;
+#pragma unroll
+    for (int i = 0; i < 32; ++i) db[i] = 0.f;
+  };
+  auto release = [&]() { __syncwarp(); if (lane == 0) arrive(se(mst)); if (++mst == NS) mst = 0; };
+  int lt = 0;
+  for (int t = blockIdx.x; t < ntasks; t += gridDim.x) {
+   int b, h, qt, g0, g1, p; decode(t, b, h, qt, g0, g1, p);
+   for (int g = g0; g < g1; ++g, ++lt) {
+#pragma unroll
+    for (int r = 0; r < RW; ++r) {
+      const int n = g * QR + RW * w + r;
+      const long li = ((long)(b * N + min(n, N - 1)) * H + h) * S + qt * BQ + 16 * wi + g8;
+      lse[r][0] = LSE[li]; lse[r][1] = LSE[li + 8]; dlt[r][0] = DELTA[li]; dlt[r][1] = DELTA[li + 8];
+      rlive[r] = n < N ? 1.f : 0.f;
+#pragma unroll
+      for (int i = 0; i < 16; ++i) dq[r][i] = 0.f;
+    }
+#pragma unroll
+    for (int i = 0; i < 32; ++i) db[i] = 0.f;
+    wait(qf, lt & 1);
+    G(0);
+    wg_wait<0>();
+    fence_regs(s_); fence_regs(dp);
+    X(0);
+    pack();
+    for (int j = 0; j < KS; ++j) {
+#pragma unroll
+      for (int r = 1; r < RW; ++r) {
+        G(r);
+        M(r - 1);
+        wg_wait<1>();
+        fence_regs(s_); fence_regs(dp);
+        X(r);
+        wg_wait<0>();
+        fence_regs(dq[r - 1]);
+        pack();
+      }
+      flush();
+      if (++st == NS) { st = 0; ph ^= 1; }
+      if (j + 1 < KS) {
+        G(0);
+        M(RW - 1);
+        wg_wait<1>();
+        fence_regs(s_); fence_regs(dp);
+        X(0);
+        wg_wait<0>();
+        fence_regs(dq[RW - 1]);
+        release();
+        pack();
+      }
+    }
+    M(RW - 1);
+    wg_wait<0>();
+#pragma unroll
+    for (int r = 0; r < RW; ++r) fence_regs(dq[r]);
+    release();
+    __syncwarp();
+    if (lane == 0) arrive(qe);
+#pragma unroll
+    for (int r = 0; r < RW; ++r) {
+      const int n = g * QR + RW * w + r;
+      if (n >= N) continue;
+      const long rbase = (long)row0(b, n) + qt * BQ + 16 * wi + g8;
+#pragma unroll
+      for (int hf = 0; hf < 2; ++hf) {
+        uint32_t in[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) in[i] = pack2(dq[r][4 * i + 2 * hf] * scale, dq[r][4 * i + 2 * hf + 1] * scale);
+        const uint4 v = quad_transpose(in, lane);
+        *reinterpret_cast<uint4*>(DQ + (rbase + 8 * hf) * ldo + h * D + 8 * t4) = v;
+      }
+    }
+   }
+  }
+}
+
 namespace {
 auto bf16p(const torch::Tensor& t) { return reinterpret_cast<__nv_bfloat16*>(t.data_ptr<at::BFloat16>()); }
 void check_proj(const torch::Tensor& t, const torch::Tensor& q, const char* what) {
@@ -653,6 +918,38 @@ torch::Tensor triattn_bwd_q(torch::Tensor q, torch::Tensor k, torch::Tensor v, t
     TORCH_CHECK(t->scalar_type() == torch::kFloat32 && t->is_contiguous() && t->numel() == B * N * H * S, "lse / delta fp32 [B, N, H, S]");
   auto dq = dq_dst.has_value() ? *dq_dst : torch::empty({B, N, S, H, D}, q.options());
   check_proj(dq, q, "dq");
+  if (TB_Q8 >= 2 || (TB_Q8 == 1 && S >= 512)) {
+    CUtensorMap qm8 = proj_map(q, q8::BQ, "q"), dm8 = proj_map(dout, q8::BQ, "dout"), km8 = proj_map(k, q8::BK, "k"), vm8 = proj_map(v, q8::BK, "v");
+    CUtensorMap bm8 = make_map<2>(sbias.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "sbias");
+    const long tiles8 = B * H * (S / q8::BQ), NG8 = (N + q8::QR - 1) / q8::QR;
+    const long sms = num_sms(q.device().index());
+    long want = slabs;
+    if (want <= 0 && getenv("TB_SLABS")) want = atol(getenv("TB_SLABS"));
+    // slabs: the count (<= 8) whose chunks fill whole waves of the SMs best (tiles x P tasks against ceil(tasks / SMs) waves); measured
+    // L512-768, 4-12 heads: the wave fit decides, 5 slabs at 48 tiles beat 4 (1.45 waves) and 6 (2.18 waves) by 15-20 %
+    long P8 = 1;
+    if (want > 0) P8 = std::min<long>(want, NG8);
+    else {
+      double best = -1;
+      for (long pc = 1; pc <= std::min<long>(8, NG8); ++pc) {
+        const long nt = tiles8 * pc, waves = (nt + sms - 1) / sms;
+        const double util = (double)nt / (double)(waves * sms);
+        if (util > best + 1e-9) { best = util; P8 = pc; }
+      }
+    }
+    torch::Tensor slab8 = P8 > 1 ? torch::zeros({P8, B, H, S, S}, dbias.options()) : dbias;
+    CUtensorMap dbm8 = make_map<2>(slab8.data_ptr(), {(uint64_t)S, (uint64_t)(P8 * B * H * S)}, {(uint64_t)S}, {32, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "dbias",
+                                   CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
+    static bool attr8 = false;
+    if (!attr8) { C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_bwd_q8_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, q8::SMEM)); attr8 = true; }
+    const long nt8 = tiles8 * P8;
+    triattn_bwd_q8_sm90<<<(int)std::min<long>(nt8, sms), q8::THREADS, q8::SMEM, at::cuda::getCurrentCUDAStream()>>>(
+        (int)N, (int)H, (int)S, (int)nt8, (int)P8, (long)(B * H * S), (float)(scale * 1.4426950408889634), (float)scale, qm8, dm8, km8, vm8, bm8, dbm8,
+        lse.data_ptr<float>(), delta.data_ptr<float>(), bf16p(dq), (long)dq.stride(2));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    if (P8 > 1) dbias.add_(slab8.sum(0));
+    return dq;
+  }
   CUtensorMap qm = proj_map(q, qk::BQ, "q"), dm = proj_map(dout, qk::BQ, "dout"), km = proj_map(k, qk::BK, "k"), vm = proj_map(v, qk::BK, "v");
   CUtensorMap bm = make_map<2>(sbias.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "sbias");
   const long tiles = B * H * (S / qk::BQ), NG = (N + qk::QR - 1) / qk::QR;
