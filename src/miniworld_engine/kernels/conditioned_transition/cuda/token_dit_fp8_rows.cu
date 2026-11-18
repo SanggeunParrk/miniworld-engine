@@ -80,16 +80,22 @@ __device__ __forceinline__ float block_max(float v, float* red) {
 }
 
 // o = AdaLN of this thread's 4 columns (the bf16 pass's adaln_out<CF = true, SIG = true> before its store), then the row's e4m3 image
-template <int NT>
+// The AdaLN scale of the model: sigmoid (SIG) or, Chai-1's identity AdaLN, the table itself (its "+ 1" is in the bias table)
+template <bool SIG>
+__device__ __forceinline__ float scl(float v) {
+  if constexpr (SIG) return sigm(v); else return v;
+}
+
+template <int NT, bool SIG = true>
 __device__ __forceinline__ void adaln_q8(float a, float b, float c, float d, float rstd, const float* ms, const float* mb,
                                          uint8_t* out8, float* srow, const CondFold& cf, int js, float2 s, float* red) {
   const int col = threadIdx.x * 4;
   float4 m = V4<float>::load(ms + col), h = V4<float>::load(mb + col), o;
   cond_fix<NT>(m, h, cf, js, s);
-  o.x = a * rstd * sigm(m.x) + h.x;
-  o.y = b * rstd * sigm(m.y) + h.y;
-  o.z = c * rstd * sigm(m.z) + h.z;
-  o.w = d * rstd * sigm(m.w) + h.w;
+  o.x = a * rstd * scl<SIG>(m.x) + h.x;
+  o.y = b * rstd * scl<SIG>(m.y) + h.y;
+  o.z = c * rstd * scl<SIG>(m.z) + h.z;
+  o.w = d * rstd * scl<SIG>(m.w) + h.w;
   const float amax = block_max<NT>(fmaxf(fmaxf(fabsf(o.x), fabsf(o.y)), fmaxf(fabsf(o.z), fabsf(o.w))), red);
   const float sc = amax > 0.f ? amax / 448.f : 1.f, inv = 1.f / sc;
   const __nv_fp8x2_storage_t lo = __nv_cvt_float2_to_fp8x2(make_float2(o.x * inv, o.y * inv), __NV_SATFINITE, __NV_E4M3);
@@ -120,6 +126,40 @@ __global__ void __launch_bounds__(NT) adaln_in_cf_q8_kernel(const __nv_bfloat16*
   if (row < P && threadIdx.x == 0) cf.st[tok] = s;
   const float* Gt = G + (long)tok * sg;
   adaln_q8<NT>(a, b, c, d, rstd, Gt, Gt + D, OUT + row * D, SROW + row, cf, 0, s, redm);
+}
+
+// The parallel block (Chai-1: identity AdaLN, SIG = false; the transition's AdaLN reads the same LN(xin)): out = AdaLN_{tables 0, 1}(xin) as
+// bf16 (the attention's q|k|v|g GEMM stays bf16) and out2 = e4m3(AdaLN_{tables 2, 3}(xin) / s2), s2[row] = its row max / 448 (the expand +
+// SwiGLU GEMM's operand). The values are the bf16 pass's (adaln_in_cf_kernel<NT, true, SIG>) before its store: out is bit-identical to it.
+template <int NT, bool SIG>
+__global__ void __launch_bounds__(NT) adaln_in_cf_par_q8_kernel(const __nv_bfloat16* __restrict__ XIN, const float* __restrict__ G,
+    __nv_bfloat16* __restrict__ OUT, uint8_t* __restrict__ OUT8, float* __restrict__ SROW, int P, long sxin, long sg, float eps, CondFold cf) {
+  constexpr int D = NT * 4;
+  __shared__ float2 red[NT / 32];
+  __shared__ float redm[NT / 32];
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  const long row = blockIdx.x;
+  const int tok = row % P, col = threadIdx.x * 4;
+  const float4 x = V4<__nv_bfloat16>::load(XIN + row * sxin + col);
+  const bool on = SIG && col < cf.dc;
+  const float4 v = on ? V4<__nv_bfloat16>::load(cf.c + (long)tok * cf.sc + col) : make_float4(0.f, 0.f, 0.f, 0.f);
+  const float2 m = block_sum2<NT>(make_float2(x.x + x.y + x.z + x.w, v.x + v.y + v.z + v.w), red);
+  const float mean = m.x / D, cmean = m.y / (float)cf.dc;
+  const float a = x.x - mean, b = x.y - mean, c = x.z - mean, d = x.w - mean;
+  const float ca = v.x - cmean, cb = v.y - cmean, cc = v.z - cmean, cd = v.w - cmean;
+  const float2 q = block_sum2<NT>(make_float2(a * a + b * b + c * c + d * d, on ? ca * ca + cb * cb + cc * cc + cd * cd : 0.f), red);
+  const float rstd = rsqrtf(q.x / D + eps);
+  const float2 s = SIG ? make_float2(cmean, rsqrtf(q.y / (float)cf.dc + cf.eps)) : make_float2(0.f, 1.f);
+  if (SIG && row < P && threadIdx.x == 0) cf.st[tok] = s;
+  const float* Gt = G + (long)tok * sg;
+  {  // tables 0, 1 -> bf16 (the bf16 route's adaln_out<NT, float, bf16, false, SIG, true>)
+    float4 mm = V4<float>::load(Gt + col), hh = V4<float>::load(Gt + D + col), o;
+    cond_fix<NT>(mm, hh, cf, 0, s);
+    o.x = a * rstd * scl<SIG>(mm.x) + hh.x; o.y = b * rstd * scl<SIG>(mm.y) + hh.y;
+    o.z = c * rstd * scl<SIG>(mm.z) + hh.z; o.w = d * rstd * scl<SIG>(mm.w) + hh.w;
+    V4<__nv_bfloat16>::store(OUT + row * D + col, o);
+  }
+  adaln_q8<NT, SIG>(a, b, c, d, rstd, Gt + 2 * D, Gt + 3 * D, OUT8 + row * D, SROW + row, cf, 2, s, redm);
 }
 
 template <int NT>
@@ -212,6 +252,20 @@ void adaln_in_rows_cf_q8(at::Tensor xin, at::Tensor g, at::Tensor r, at::Tensor 
   const CondFold f = make_fold(r, b, b2, stats, c, ceps, 0);
   const at::cuda::CUDAGuard gd(xin.device());
   launch_rows(adaln_in_cf_q8_kernel<192>, M, 192, pdl, ptr<const __nv_bfloat16>(xin), ptr<const float>(g), ptr<uint8_t>(out8),
+              ptr<float>(srow), (int)P, (long)xin.stride(0), (long)g.stride(0), (float)eps, f);
+}
+
+// The parallel block (Chai-1): out = bf16 AdaLN(xin) with tables 0, 1; out8 / srow = e4m3 AdaLN(xin) with tables 2, 3 and its row scale.
+void adaln_in_rows_cf_par_q8(at::Tensor xin, at::Tensor g, at::Tensor r, at::Tensor b, at::Tensor b2, at::Tensor c, at::Tensor stats,
+                             at::Tensor out, at::Tensor out8, at::Tensor srow, double eps, double ceps, bool pdl, bool sig) {
+  check_q8(xin, g, out8, srow);
+  const int64_t M = xin.size(0), P = g.size(0);
+  TORCH_CHECK(out.scalar_type() == at::kBFloat16 && out.is_contiguous() && out.size(0) == M && out.size(1) == 768, "adaln_in_rows_cf_par_q8: bf16 out [M, 768]");
+  TORCH_CHECK(M % P == 0 && c.scalar_type() == at::kBFloat16 && c.stride(1) == 1 && c.size(1) <= 768, "adaln_in_rows_cf_par_q8: shapes");
+  const CondFold f = make_fold(r, b, b2, stats, c, ceps, 0);
+  const at::cuda::CUDAGuard gd(xin.device());
+  auto kern = sig ? adaln_in_cf_par_q8_kernel<192, true> : adaln_in_cf_par_q8_kernel<192, false>;
+  launch_rows(kern, M, 192, pdl, ptr<const __nv_bfloat16>(xin), ptr<const float>(g), ptr<__nv_bfloat16>(out), ptr<uint8_t>(out8),
               ptr<float>(srow), (int)P, (long)xin.stride(0), (long)g.stride(0), (float)eps, f);
 }
 

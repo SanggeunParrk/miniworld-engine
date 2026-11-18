@@ -627,7 +627,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
     fused_expand = fp32 and _FP32_SWIGLU_GEMM and not up and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
     # EXPERIMENTAL e4m3 placements (opt-in, default off: ``token_dit_fp8.PLACES`` empty -> f8 empty, the bf16 route below unchanged)
-    f8 = _fp8.active(M, D, fp32, plain and fold) if _fp8.PLACES else frozenset()
+    # (``identity``: Chai-1's form, the parallel block with the identity AdaLN, no up-gate / k-q LayerNorm / per-head q-k norm: expand, out, squeeze only)
+    identity = parallel and not sig and not up and not kq_ln and not qk
+    f8 = _fp8.active(M, D, fp32, plain and fold, identity and fold) if _fp8.PLACES else frozenset()
     if f8:
         f8w = _fp8.weight_pack(key, wqkvg, wo, ws, _f8_wab(wab, M, ws.shape[1], single.device.index), bqkvg)
     if f8 and "qkvg" in f8:
@@ -635,6 +637,12 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         xa8 = torch.empty((M, D), device=single.device, dtype=_fp8.E4M3)
         sxa = torch.empty((M, 1), device=single.device, dtype=torch.float32)
         _fp8.ext().adaln_in_rows_cf_q8(xin, G, r1, b1f, b2f, c, stats, xa8, sxa, ada_eps, 1e-5, _PDL)
+    elif f8 and "expand" in f8 and parallel:
+        # the parallel block (Chai-1): the transition's AdaLN comes out of the attention's LN pass as e4m3 + a row scale (xt8 / sxt)
+        xt = None
+        xt8 = torch.empty((M, D), device=single.device, dtype=_fp8.E4M3)
+        sxt = torch.empty((M, 1), device=single.device, dtype=torch.float32)
+        _fp8.ext().adaln_in_rows_cf_par_q8(xin, G, r1, b1f, b2f, c, stats, xa, xt8, sxt, ada_eps, 1e-5, _PDL, sig)
     elif fold:
         xt = torch.empty_like(xa) if parallel else xa
         _ext().adaln_in_rows_cf_cuda(xin, G, r1, b1f, b2f, c, stats, xa, ada_eps, 1e-5, xt if parallel else None, _PDL, sig)
@@ -675,7 +683,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         ya = _fp8.mm(*_fp8.rows_q8(qkvg[:, :D]), f8w["out"])
     else:
         ya = torch.mm(qkvg[:, :D], wo.t())
-    if f8 and "expand" in f8:
+    if f8 and "expand" in f8 and parallel:
+        pass  # xt8 / sxt came out of the attention's LN pass (above)
+    elif f8 and "expand" in f8:
         xt8 = torch.empty((M, D), device=single.device, dtype=_fp8.E4M3)
         sxt = torch.empty((M, 1), device=single.device, dtype=torch.float32)
         _fp8.ext().resgate_adaln_cf_q8(xin, ya, G, r1, b1f, b2f, stats, xt8, sxt, ada_eps, _PDL)

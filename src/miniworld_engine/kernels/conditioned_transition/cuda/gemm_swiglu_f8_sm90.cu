@@ -204,6 +204,8 @@ void gemm_swiglu_f8(torch::Tensor x, torch::Tensor wab, torch::Tensor h, torch::
 
 void adaln_in_rows_cf_q8(at::Tensor xin, at::Tensor g, at::Tensor r, at::Tensor b, at::Tensor b2, at::Tensor c, at::Tensor stats,
                          at::Tensor out8, at::Tensor srow, double eps, double ceps, bool pdl);
+void adaln_in_rows_cf_par_q8(at::Tensor xin, at::Tensor g, at::Tensor r, at::Tensor b, at::Tensor b2, at::Tensor c, at::Tensor stats,
+                             at::Tensor out, at::Tensor out8, at::Tensor srow, double eps, double ceps, bool pdl, bool sig);
 void resgate_adaln_cf_q8(at::Tensor xin, at::Tensor ya, at::Tensor g, at::Tensor r, at::Tensor b, at::Tensor b2, at::Tensor stats,
                          at::Tensor out8, at::Tensor srow, double eps, bool pdl);
 void quant_rows(at::Tensor x, at::Tensor out8, at::Tensor srow, bool pdl);
@@ -211,6 +213,7 @@ void quant_rows(at::Tensor x, at::Tensor out8, at::Tensor srow, bool pdl);
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gemm_swiglu_f8", &gemm_swiglu_f8);
   m.def("adaln_in_rows_cf_q8", &adaln_in_rows_cf_q8);
+  m.def("adaln_in_rows_cf_par_q8", &adaln_in_rows_cf_par_q8);
   m.def("resgate_adaln_cf_q8", &resgate_adaln_cf_q8);
   m.def("quant_rows", &quant_rows);
 }

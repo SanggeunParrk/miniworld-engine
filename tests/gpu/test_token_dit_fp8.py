@@ -117,3 +117,97 @@ def test_below_min_rows_is_default_route() -> None:
     finally:
         F.PLACES, F.MIN_ROWS = old, old_min
     assert torch.equal(y0, y1)
+
+
+# --- Chai-1's option block (parallel attention / transition, identity AdaLN, no gating query): expand / out / squeeze, never qkvg ----------------
+
+
+def test_active_placements_of_the_chai1_block() -> None:
+    """Pure logic (no GPU): ``identity`` takes every placement but qkvg; a non-default block that is not Chai-1's takes none."""
+    F = _F()
+    old, old_min = F.PLACES, F.MIN_ROWS
+    F.PLACES, F.MIN_ROWS = frozenset(("qkvg", "expand", "out", "squeeze")), None
+    try:
+        assert F.active(2560, 768, False, False, True) == frozenset(("expand", "out", "squeeze"))
+        assert F.active(1280, 768, False, False, True) == frozenset(("expand",))  # out / squeeze rows gate 2560
+        assert "qkvg" not in F.active(5120, 768, False, False, True)
+        assert F.active(5120, 768, False, True) == frozenset(("qkvg", "expand", "out", "squeeze"))
+        assert F.active(5120, 768, False, False, False) == frozenset()  # an option block that is neither the default nor Chai-1's
+        assert F.active(5120, 768, True, False, True) == frozenset()  # fp32
+        assert F.active(5120, 1024, False, False, True) == frozenset()  # width
+        assert F.active(2560 + 64, 768, False, False, True) == frozenset()  # M % 128
+        assert F.active(512, 768, False, False, True) == frozenset()  # below every row gate
+    finally:
+        F.PLACES, F.MIN_ROWS = old, old_min
+
+
+def _chai1(seed: int = 0) -> typing.Any:
+    from miniworld_engine.modules.token_dit import TokenDiTChai1
+
+    module = TokenDiTChai1(d_single=768, d_cond=384, d_pair=256, n_head=16, n=2).cuda().float()
+    C.randomize(module, torch.Generator(device="cuda").manual_seed(seed))
+    out: typing.Any = C.cast(module, "master")
+    return out.eval().set_backend("cuda")
+
+
+def _chai1_inputs(m, length: int, samples: int, seed: int = 1) -> dict:
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    inputs = m.make_inputs(length=length, samples=samples, depth=None, dtype=torch.bfloat16, device="cuda", generator=g)
+    inputs["cond"] = inputs["cond"].to(torch.bfloat16)  # the sampler's bf16 conditioning: the CondFold route (fp32 conditioning takes the unfolded one)
+    return inputs
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+@pytest.mark.parametrize("places", [("expand",), ("out",), ("squeeze",), ("expand", "out", "squeeze")])
+def test_chai1_fp8_route_close_to_bf16(places) -> None:
+    m = _chai1()
+    inputs = _chai1_inputs(m, 512, 5)
+    y0 = _run(m, inputs, ())
+    y8 = _run(m, inputs, places)
+    assert torch.isfinite(y8).all()
+    x = inputs["single"].float()
+    upd = (y0.float() - x).pow(2).mean().sqrt()
+    rel = (y8.float() - y0.float()).pow(2).mean().sqrt() / upd
+    assert 0 < rel < 0.12, rel  # 0 would mean the route did not run
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+def test_chai1_qkvg_and_off_are_default_route() -> None:
+    m = _chai1(2)
+    inputs = _chai1_inputs(m, 512, 5, seed=3)
+    y0 = _run(m, inputs, ())
+    assert torch.equal(_run(m, inputs, ("qkvg",)), y0)  # qkvg is not offered to the identity AdaLN block
+    _run(m, inputs, ("expand", "out", "squeeze"))
+    assert torch.equal(_run(m, inputs, ()), y0)
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+def test_chai1_parallel_rows_kernel_matches_reference() -> None:
+    """``adaln_in_rows_cf_par_q8``: out = the bf16 pass's AdaLN (tables 0, 1) bit for bit; out8 / srow = the e4m3 image of the transition's
+    AdaLN (tables 2, 3) with its row max / 448 scale."""
+    from miniworld_engine.kernels.conditioned_transition import cuda as T
+
+    F = _F()
+    g = torch.Generator(device="cuda").manual_seed(11)
+    M, P, D, DC = 1280, 256, 768, 384
+    xin = torch.randn(M, D, device="cuda", generator=g).bfloat16()
+    c = torch.randn(P, DC, device="cuda", generator=g).bfloat16()
+    G = torch.randn(P, 6 * D, device="cuda", generator=g)
+    r1 = torch.randn(4 * D, device="cuda", generator=g)
+    b1 = torch.randn(4 * D, device="cuda", generator=g)
+    b2 = torch.randn(2 * D, device="cuda", generator=g)
+    stats = torch.empty(P, 2, device="cuda")
+    ref1 = torch.empty(M, D, device="cuda", dtype=torch.bfloat16)
+    ref2 = torch.empty_like(ref1)
+    T._ext().adaln_in_rows_cf_cuda(xin, G, r1, b1, b2, c, stats, ref1, 0.1, 1e-5, ref2, False, False)
+    out = torch.empty_like(ref1)
+    out8 = torch.empty(M, D, device="cuda", dtype=F.E4M3)
+    s = torch.empty(M, 1, device="cuda")
+    F.ext().adaln_in_rows_cf_par_q8(xin, G, r1, b1, b2, c, stats, out, out8, s, 0.1, 1e-5, False, False)
+    assert torch.equal(out, ref1)
+    amax = None
+    # the e4m3 image of the fp32 AdaLN row: within one e4m3 rounding of the bf16 row (itself within one bf16 rounding), scale = row max / 448
+    deq = out8.float() * s
+    amax = ref2.float().abs().amax(1, keepdim=True)
+    torch.testing.assert_close(s, amax / 448.0, rtol=1e-2, atol=0)
+    assert ((deq - ref2.float()).abs() <= 0.07 * ref2.float().abs() + amax * 2**-8).all()
