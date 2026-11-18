@@ -49,8 +49,11 @@ def _run(m, inputs, fp8):
 
 @pytest.mark.parametrize("n", [200, 1024, 4096])
 @pytest.mark.parametrize("model", ["openfold3", "protenix", "chai1", "boltz2"])
-def test_fp8_rows_error(model: str, n: int) -> None:
+def test_fp8_rows_error(model: str, n: int, monkeypatch) -> None:
     _needs_h100()
+    from miniworld_engine.kernels.integrations import local_dit_h100 as H
+
+    monkeypatch.setattr(H, "FP8_UP_MIN_N", 0)  # Boltz-2: the shipped gate (2048 atoms) would keep the small cases on bf16
     from miniworld_engine.modules import atom_dit as A
 
     cls = {"openfold3": A.AtomDiTOpenFold3, "protenix": A.AtomDiTProtenix, "chai1": A.AtomDiTChai1, "boltz2": A.AtomDiTBoltz2}[model]
@@ -119,3 +122,16 @@ def test_fp8_parts_switch() -> None:
             H.enable_fp8("attn")
     finally:
         H.enable_fp8(prev)
+
+
+def test_boltz2_up_gate_on_atoms() -> None:
+    """Boltz-2 (UP) takes the e4m3 route from ``FP8_UP_MIN_N`` atoms per sample: below it the output is the bf16 route's, bitwise."""
+    _needs_h100()
+    from miniworld_engine.kernels.integrations import local_dit_h100 as H
+    from miniworld_engine.modules import atom_dit as A
+
+    m, inputs = _block(A.AtomDiTBoltz2, 1024, 5)
+    assert H.FP8_UP_MIN_N > 1024
+    assert torch.equal(_run(m, inputs, True), _run(m, inputs, False))
+    m, inputs = _block(A.AtomDiTBoltz2, 2048, 5)
+    assert not torch.equal(_run(m, inputs, True), _run(m, inputs, False))

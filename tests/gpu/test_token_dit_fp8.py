@@ -183,3 +183,18 @@ def test_boltz2_switch_off_is_default_route() -> None:
     _run(m, inputs, ("expand",))
     y1 = _run(m, inputs, ())
     assert torch.equal(y0, y1)
+
+
+def test_expand_up_row_gate() -> None:
+    """The up-gate (Boltz-2) expand has its own row gate (``MIN_ROWS_UP``); the default block keeps ``MIN_ROWS_PER['expand']``."""
+    F = _F()
+    old, old_min = F.PLACES, F.MIN_ROWS
+    F.PLACES, F.MIN_ROWS = frozenset(("expand",)), None
+    try:
+        assert F.active(1920, 768, False, True, True) == frozenset()
+        assert F.active(F.MIN_ROWS_UP, 768, False, True, True) == frozenset(("expand",))
+        assert F.active(1920, 768, False, True, False) == frozenset(("expand",))
+        assert F.active(2560, 1024, False, True, True) == frozenset()  # width 768 only
+        assert F.active(2560, 768, False, False, True) == frozenset()  # a block outside the route
+    finally:
+        F.PLACES, F.MIN_ROWS = old, old_min
