@@ -150,6 +150,8 @@ floor = bytes / 3 TB/s.
 | 384, 512 | 121 / 115 -> 64 / 64 | 202 / 196 -> 207 / 205 (the 4 chunk launches; fwd + bwd still -14 %) |
 | 768, 512 | 441 / 432 -> 228 / 227 (208) | 740 / 730 -> 600 / 597 (415) |
 
+In the block (profile of one graph replay, A = 1 L768 d_pair 128): the two pair kernels 354 us of 745 (47 %) -> 187 us of 572; d_pair 256: 606 of 992 -> 417 of 803; eval A = 5 L768 d_pair 256: `layernorm_rows` 196 + cuBLAS 115 + masked-fill / copies ~40 us of 555 -> one kernel 118 us of 328.
+
 ncu (cache control all), L768 d_pair 128: forward 156 -> 65 us (DRAM 151 MB read + 21 -> 13 MB written, issue 67 % -> 36 %), backward 270 -> 121 us
 (193 + 139 MB -> 189 + 131 MB = 2.65 TB/s). The wide backward is one launch per 128-channel chunk (each re-reads dbias and the unmasked
 bias, 231 MB + 132 MB at L768): d_pair 256 2 x 150 us, 512 4 x 156 us = 2.3-2.4 TB/s.
