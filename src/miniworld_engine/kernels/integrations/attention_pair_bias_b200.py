@@ -288,6 +288,11 @@ def inference(
     row, each row written into its slice of the one output."""
     B, L = single.shape[:2]
     rows, dev = _rows(), single.device
+    hopper = torch.cuda.get_device_capability(dev) == (9, 0)
+    # H100, L % 128 != 0 (FoldForge OpenDDE n = 12: 2976 tokens): the core takes whole 128-token tiles, so it runs at ``lq`` (single rows zero, the
+    # pad keys masked, the pad query rows dropped); the PAIR is read as it is -- the pair pass writes the real [L, L] block of the [lq, lq]
+    # bias planes (``pair_bias_padded``), so the call costs the unpadded pair read, not a padded copy of the whole pair
+    lq = -(-L // 128) * 128 if (L % 128 and hopper) else L
     params = leaves
     leaves = _capture.param_forms("apb_leaves", params, lambda: tuple(_kernel_leaves(params)))
     lnw, lnb = leaves[0], leaves[1]
@@ -295,41 +300,53 @@ def inference(
     with torch.cuda.device(dev):
         wpack, bvec, wf, wop, _ = _inference_packs(params, leaves, gate_bias)
         wo = leaves[7] if wop is None else wop
-        neg = -math.inf if torch.cuda.get_device_capability(dev) == (9, 0) else NEG
-        # H100: each row's key blocks past its last attended key are skipped by the core (``kernels._key_len``; the same bits)
-        km = kernel_mask(mask, L) if neg == -math.inf else None
+        neg = -math.inf if hopper else NEG
+        if lq != L:
+            single = torch.nn.functional.pad(single, (0, 0, 0, lq - L))
+            keys = torch.zeros((B, lq), dtype=torch.bool, device=dev)
+            keys[:, :L] = True if mask is None else mask
+            km = kernel_mask(keys, lq)
+        else:
+            # H100: each row's key blocks past its last attended key are skipped by the core (``kernels._key_len``; the same bits)
+            km = kernel_mask(mask, L) if neg == -math.inf else None
         core = _cores.get((dev.index, H, D))
         if core is None:
             core = _cores[(dev.index, H, D)] = _inference_core(dev, H, D)
         out = torch.empty_like(single)  # each row: the residual seed ln_rows writes; to_out accumulates onto it
-        if B > 1 and torch.cuda.get_device_capability(dev) == (9, 0):
+        if B > 1 and hopper:
             # H100, B > 1: the batch rows in one launch per stage (LN rows and the GEMMs over the chunk's rows, the pair pass and the
             # core with the batch in the grid) -- per-row results identical to the per-row step, 5 launches per chunk instead of 5 B
-            cb = _batch_chunk(B, H, L)
+            cb = _batch_chunk(B, H, lq)
             for b0 in range(0, B, cb):
                 b1 = min(B, b0 + cb)
-                n = (b1 - b0) * L
+                n = (b1 - b0) * lq
                 x, y = single[b0:b1].view(n, D), out[b0:b1].view(n, D)
                 xa = single.new_empty((n, D))
                 rows.ext().ln_rows(x, lnw, lnb, xa, None, eps_s, y)
                 qkvg = torch.addmm(bvec, xa, wpack.t())
-                bias = rows.pair_bias_batch(pair[b0:b1], wf, None if mask is None else mask[b0:b1], eps_p, neg)  # [H, b1 - b0, L, L]
+                if lq != L:
+                    bias = rows.pair_bias_padded(pair[b0:b1], wf, None if mask is None else mask[b0:b1], eps_p, neg, lq)
+                else:
+                    bias = rows.pair_bias_batch(pair[b0:b1], wf, None if mask is None else mask[b0:b1], eps_p, neg)  # [H, b1 - b0, L, L]
                 if extra is not None:
-                    bias.add_(extra[b0:b1].transpose(0, 1).to(bias.dtype), alpha=LOG2E)
+                    bias[:, :, :L, :L].add_(extra[b0:b1].transpose(0, 1).to(bias.dtype), alpha=LOG2E)
                 core.batch(qkvg, bias, None if km is None else km[b0:b1])
                 y.addmm_(qkvg[:, :W], wo.t())
-            return out
-        xa = single.new_empty((L, D))  # one row's LN(single), rewritten row after row (stream order)
+            return out if lq == L else out[:, :L].contiguous()
+        xa = single.new_empty((lq, D))  # one row's LN(single), rewritten row after row (stream order)
         for b in range(B):
             x, y = single[b], out[b]
             rows.ext().ln_rows(x, lnw, lnb, xa, None, eps_s, y)
             qkvg = torch.addmm(bvec, xa, wpack.t())
-            bias = rows.pair_bias(pair[b].view(L * L, wf.shape[1]), wf, _row(mask, b), L, eps_p, neg)
+            if lq != L:
+                bias = rows.pair_bias_padded(pair[b : b + 1], wf, None if mask is None else mask[b : b + 1], eps_p, neg, lq)[:, 0]
+            else:
+                bias = rows.pair_bias(pair[b].view(L * L, wf.shape[1]), wf, _row(mask, b), L, eps_p, neg)
             if extra is not None:  # a masked key stays at -inf (H100) / NEG + extra (B200: finite, still far below every real logit)
-                bias.add_(extra[b].to(bias.dtype), alpha=LOG2E)
+                bias[:, :L, :L].add_(extra[b].to(bias.dtype), alpha=LOG2E)
             core(qkvg, bias, None if km is None else km[b : b + 1])
             y.addmm_(qkvg[:, :W], wo.t())
-        return out
+        return out if lq == L else out[:, :L].contiguous()
 
 
 def update_inference(
