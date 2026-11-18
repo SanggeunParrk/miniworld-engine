@@ -36,7 +36,8 @@ needs_h100 = pytest.mark.skipif(not _h100(), reason="H100 (sm_90)")
 def _built(module: torch.nn.Module, dtype: str = "master") -> typing.Any:
     module = module.cuda().float()
     C.randomize(module, torch.Generator(device="cuda").manual_seed(0))
-    return C.cast(module, dtype).eval().set_backend("cuda")
+    built: typing.Any = C.cast(module, dtype)
+    return built.eval().set_backend("cuda")
 
 
 def _run(m, inp: dict, old: bool) -> torch.Tensor:

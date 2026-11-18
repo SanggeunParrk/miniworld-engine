@@ -47,6 +47,16 @@ vector once per pack, so the core's `sigmoid(g)` reads `g + c`. At d_pair 256 / 
 256 / 384, 16 at 512) `prep` packs everything but Wf, which is made from the full d_pair columns in torch per parameter version, and
 the pair kernel runs at that width.
 
+**Ragged L at inference (3.0.1).** The cores take whole 128-token tiles, so a bf16 inference call at `L % 128 != 0` (OpenDDE's structural
+tokens: L 2976; every `token_single_extra_bias` length that is not a multiple of 128) runs the core at `Lq = ceil(L / 128) * 128` with
+`single` rows and key mask padded (pad keys masked, pad query rows dropped). The PAIR is not padded: `pair_bias_fwd_ld` /
+`pair_bias_fwd_batch_ld` read the `[L, L, d_pair]` pair as it is and write the real `[L, L]` block of the `[H, Lq, Lq]` bias planes (the
+kernel's `LO` argument: the plane row length), and `apb.pair_bias_padded` fills the rest (pad keys -inf, the real keys of the pad query rows
+0, so every row stays finite). 3.0.0 `F.pad`-ed the whole pair (`aten::pad` of `[1, 2976, 2976, 384]`: 8.3 ms copy + 2.2 ms fill, 81 % of the
+13.2 ms call). Every real element goes through the same arithmetic, so the output is bitwise the padded flow's; `extra_pair_bias` is added to
+the `[:L, :L]` block of the planes (no padded copy of it either). Not changed: fp32 activations (TF32 path), B200, A100 (own paths), training
+(L % 128 refused).
+
 ## Training (autograd Function, opaque forward / backward)
 
 Forward: `prep` (natural units) -> `ln_rows` -> q\|k\|v\|g GEMM -> `pair_bias` -> `attn_fwd_o_og` (gate in the epilogue: O fp32 for the
@@ -101,7 +111,7 @@ by default.
 | (heads, d_single) not in 8 x 384, 12 x 384, 16 x 384, 24 x 384, 16 x 512, or `n_head * d_hidden != d_single` | refused |
 | d_pair not in 128 / 256 / 384 / 512; heads other than 8 / 16 at d_pair 256 / 384, other than 16 at 512 (`PAIR_WIDTHS`) | refused |
 | affine-free single or pair LayerNorm | refused |
-| L not a multiple of 128; pair not contiguous `[1, L, L, d_pair]`; mask not bool `[1, L]` | refused |
+| L not a multiple of 128 in training (inference: served, bf16 on H100: the pair is read unpadded, see "Ragged L"); pair not contiguous `[B, L, L, d_pair]`; mask not bool `[B, L]` | refused |
 | `extra_pair_bias` | refused (the bias is made inside the pass) |
 | `"anthropic"`: a gradient; `"cueq"`: QK-norm, `extra_pair_bias`, different single / pair LayerNorm eps | refused |
 | `"triton"`: head dim > 64 | refused |
