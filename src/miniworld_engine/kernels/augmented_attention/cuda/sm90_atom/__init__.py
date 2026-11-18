@@ -64,7 +64,12 @@ def _smem(kind: str, tf32: bool, options: tuple = ()) -> int:
     if kind in ("post_bwd", "pre_bwd"):
         return 2 * 64 * 128 * es + 1024 + 3 * NWARP * 128 * 4 + (_grp_bytes(NWARP, tf32) if grp else 0)
     if kind == "tr_bwd":
-        return 2 * 3 * 128 * 128 + up + 1024 + nwarp(kind, tf32) * 128 * 4 + (_grp_bytes(nwarp(kind, tf32), tf32) if grp else 0)
+        alias = (
+            grp and not tf32
+        )  # bf16: the dmod slabs live in the second weight buffer (tr_bwd90.cu GRP_ALIAS): 136 KB -> 101 KB, 2 CTAs per SM
+        return (
+            2 * 3 * 128 * 128 + up + 1024 + nwarp(kind, tf32) * 128 * 4 + (_grp_bytes(nwarp(kind, tf32), tf32) if grp and not alias else 0)
+        )
     return 2 * (2 * (128 // es) * 128 * es + 128 * 128) + 1024 + up  # post (UP: + a Wu chunk per buffer)
 
 
@@ -140,7 +145,8 @@ def kernel_cubin(kind: str, tf32: bool, options: tuple = ()) -> str:
     base = kind.removesuffix("_g")
     build = base.removesuffix("_par").removesuffix("_one")  # an entry point of another kind's cubin: built as that kind
     stem, _, *rest = _KERNELS[base]
-    defs = (*(rest[0] if rest else ()), *_defs_for(kind, options))
+    alias = ("-DGRP_ALIAS=1",) if (base == "tr_bwd" and not tf32) else ()
+    defs = (*(rest[0] if rest else ()), *_defs_for(kind, options), *alias)
     return cubin(stem, tf32, nwarp(build, tf32), _MINB.get((build, tf32), 1), defs)
 
 
