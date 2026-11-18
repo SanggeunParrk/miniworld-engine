@@ -132,3 +132,22 @@ def test_switch_off_is_the_default_route() -> None:
     again = _grads(m, 6, 256, "")
     for x, y in zip(ref, again, strict=True):
         assert torch.equal(x, y)
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+def test_tiny_and_zero_rows_stay_finite() -> None:
+    """Real weights have output channels whose amax is ~1e-37 (a denormal scale made 1 / scale = inf and the product NaN): every
+    quantizer floors the scale, so rows / channels of amax 0, 1e-37, 1e-20 and 1 all give finite products."""
+    F = _F()
+    M, K, N = 256, 768, 256
+    g = torch.Generator(device="cuda").manual_seed(0)
+    x = torch.randn(M, K, device="cuda", generator=g).bfloat16()
+    w = torch.randn(N, K, device="cuda", generator=g).bfloat16()
+    for i, amp in enumerate((0.0, 1e-37, 1e-20, 1.0)):
+        w[i * 8 : (i + 1) * 8] = (w[i * 8 : (i + 1) * 8].float() * amp).bfloat16()
+        x[i * 8 : (i + 1) * 8] = (x[i * 8 : (i + 1) * 8].float() * amp).bfloat16()
+    out = F.mm(*F.q8(x), F._wq(w))
+    assert bool(torch.isfinite(out).all())
+    ref = x.float() @ w.float().t()
+    big = (ref.abs() > 1e-3 * ref.abs().max()).float()
+    assert float(((out.float() - ref).abs() * big).max() / ref.abs().max()) < 0.15
