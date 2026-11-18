@@ -117,3 +117,23 @@ def test_native_any_shape_deterministic_and_close(switches, n: int, s: int) -> N
         if name in ("ln_pair.weight", "to_bias.weight"):
             den = float(y.float().abs().max()) or 1.0
             assert float((x.float() - y.float()).abs().max()) / den < 2e-3, name
+
+
+@pytest.mark.skipif(not _H100, reason="H100")
+@pytest.mark.parametrize(("n", "s"), [(256, 128), (768, 256)])
+def test_glue3_mask_prefetch_bit_identical(switches, n: int, s: int) -> None:
+    """3.0.1: ``pwa_glue3`` loads the dropout keep mask one tile ahead (``GLUE3_MASK_PF``): the same bytes as the loads inside the masking loop,
+    with a second o-stage slot count (``GLUE3_NST`` 3) too; two calls of the same configuration agree (no float atomics)."""
+    saved = (PT.GLUE3_NST, PT.GLUE3_MASK_PF)
+    try:
+        m = _module(64, 128, 32, 0.15)
+        PT.GLUE3_NST, PT.GLUE3_MASK_PF = 2, 0
+        ref = _step(m, s, n, 64, 128)
+        for nst, pf in ((2, 1), (3, 1)):
+            PT.GLUE3_NST, PT.GLUE3_MASK_PF = nst, pf
+            a, b = _step(m, s, n, 64, 128), _step(m, s, n, 64, 128)
+            for x, y, r in zip(a, b, ref, strict=True):
+                assert torch.equal(x.float(), y.float())
+                assert torch.equal(x.float(), r.float())
+    finally:
+        PT.GLUE3_NST, PT.GLUE3_MASK_PF = saved

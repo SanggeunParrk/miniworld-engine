@@ -101,6 +101,8 @@ def _training_default_shape(s: int, n: int) -> bool:
 #: the fp64 gold, which at d_pair 128 turned two GREEN rows of the accuracy run YELLOW (MSAPairWeightedAveraging 8 x 32, S 384, N 512 / 768:
 #: ln_pair.weight 0.96 -> 1.03, to_bias.weight 0.89 -> 1.02 of tol). NATIVE_PAIR_ANY_SHAPE = True routes every native shape through it.
 NATIVE_PAIR_ANY_SHAPE = False
+GLUE3_NST = 2  # o-stage slots of pwa_glue3 (2 or 3; 3 fits the 227 KB shared memory)
+GLUE3_MASK_PF = True  # pwa_glue3 loads the dropout keep mask one tile ahead (bit-identical to the loads inside the masking loop)
 
 
 def _native_pair_shape(s: int, n: int) -> bool:
@@ -693,11 +695,12 @@ class _PwaMath(torch.autograd.Function):
                 wg16,
                 wot,
                 dgv,
-                2,
+                GLUE3_NST,
                 1,
                 dmask,
                 ctx.dscale,
                 bool(native and k.get("gateout") is not None and _split_contraction(N)),
+                GLUE3_MASK_PF,
             )
         else:
             dout = dres0 if dmask is None else (dres0 * dmask[None] * ctx.dscale).contiguous()

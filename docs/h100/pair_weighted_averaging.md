@@ -109,6 +109,27 @@ the backward uses `gate_bwd_big_w` with the saved gate and `ln_bwd_w` after a cu
 - Step (fwd + bwd, CUDA graph, cool) vs 3.0.0: wide widths 0.88-0.94; 8 x 32 N 512 0.89-0.92, N 1024 0.75-0.79, N 256 0.96-1.0, N 768 unchanged.
   `backend_versions["cuda:h100_sm90"]` = 2.
 
+### 3.0.1: why `pwa_glue3` and `dgv_bwd` are not at the HBM floor (8 x 32, d_msa 64; ncu, N 768 S 1024, H100)
+
+Byte ledger (`dram__bytes_read/write.sum`) against what each kernel must move; no byte is wasted, so the gaps are rates:
+
+| kernel | us (ncu) | DRAM read / write | of it | TB/s | floor at 3.0 TB/s (a 1:1 read / write copy measures 3.0) |
+|---|---|---|---|---|---|
+| `pwa_glue3_kernel<2>` | 642 | 608 / 794 MB | o 403 + y 100 + dout 100 / do 403 + dgp 403 | 2.19 | 470 us |
+| `dgv_bwd_kernel<8, 1>` | 424 | 1108 / 102 MB | dgp 402 + dv (head-major) 402 + y, x, dout 300 / dm 100 | 2.85 | 400 us (95 % of the floor: nothing to fix) |
+| `pwa_gateout_kernel<4>` (forward) | 320 | 605 / 95 MB | | 2.19 | |
+
+`dgv_bwd` already runs at 85 % of the memory pipe (read-dominated, barrier stalls only in its LayerNorm tail) -- inherent.
+`pwa_glue3` (one 384-thread CTA per SM, 168 registers, 200 KB shared memory: 15 % warps active, issue 36 %) is bound by its own chain,
+not by bytes in flight: three diagnostic builds in one process (CUDA graph, interleaved; step time): a third o-stage slot (`GLUE3_NST` 3, fits in
+223 KB) 1.00; no dWo wgmma 0.99; no TMA stores of do / dgp (writes vanish too) 0.95 of the step (about 200 of the kernel's 640 us); neither 0.92.
+Without stores the kernel still takes about 470 us -- the elementwise chain of the 8 heads (sigmoid, three products, three packs, three shared-memory
+stores per element; both consumer warpgroups in lock step through `goready`) equals the DRAM floor, so the two overlap but do not hide each other
+(641 us instead of 470). What was a latency issue: the row-dropout keep mask was read from global memory inside the masking loop (16 dependent
+`__ldg` per thread per tile, long-scoreboard stalls); `GLUE3_MASK_PF` loads it one tile ahead into registers (bit-identical, -1 % of the step at every
+shape). The rest needs a different structure (two CTAs per SM would need the 200 KB of staging halved; moving the elementwise work to the idle producer
+warpgroup or a ping-pong of the two consumers) and is recorded, not done.
+
 ## Triton backend
 
 Forward: `layernorm_gemm_softmax` (per row i: LN_z -> Wb -> mask -> two-pass softmax), `layernorm_gemm` (LN_m -> Wv head-major), cuBLAS
