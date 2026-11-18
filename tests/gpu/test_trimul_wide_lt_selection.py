@@ -1,6 +1,6 @@
 """H100 bidirectional wide TriMul training (``h100_wide_training``): every frozen cuBLASLt entry of ``lt_selection.json`` is well formed and the
 dwg / dwp weight-gradient GEMMs of the served cells find their frozen algorithm in this runtime (no "not offered by this cuBLASLt" warning), with
-the gradients inside the engine standard (fp32 summation-order noise against the first heuristic: <= 1e-3 of the tensor's max)."""
+every gradient bit-equal to the first heuristic's (the 3.0.0 behaviour on this cuBLASLt: only bit-equal candidates are frozen)."""
 
 import json
 import warnings
@@ -56,6 +56,4 @@ def test_frozen_algorithms_are_offered_and_accurate(cell: tuple[int, int], monke
     assert all(torch.equal(a, b) for a, b in zip(served, again, strict=True)), "two runs must be bitwise equal"
     monkeypatch.setattr(W, "LT_SELECTION", "heuristic")
     first = _run(m, x, mask, dy)
-    for a, b in zip(served, first, strict=True):
-        scale = b.double().abs().max().item()
-        assert (a.double() - b.double()).abs().max().item() <= 1e-3 * scale
+    assert all(torch.equal(a, b) for a, b in zip(served, first, strict=True)), "frozen algorithms are bit-equal to the first heuristic"
