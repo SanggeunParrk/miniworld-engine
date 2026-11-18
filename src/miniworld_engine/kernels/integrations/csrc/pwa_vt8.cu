@@ -100,8 +100,13 @@ __device__ __forceinline__ uint16_t e4m3x2(float lo, float hi) {   // lo -> low 
 #endif
 // VT_NAT (the FP8 TRAINING route, pwa_fp8_train.py): also v as e4m3 in the natural head-major layout [H][N][S*C] (the dw GEMM's K-major
 // operand), staged [H][BN][C] behind the vT staging and stored by a second TMA box
+// VT_BF (round 2, backward-only FP8: pwa_fp8_train.py "dv,dw"): with VT_NAT, ALSO v as bf16 natural [H][N][S*C] (the forward contraction on
+// cuBLAS stays bf16) and no vT (the forward is not FP8): staged [H][BN][C] bf16 behind the e4m3 natural tile, one more TMA box
+#ifndef VT_BF
+#define VT_BF 0
+#endif
 template <int NST> struct SMQ {
-  static constexpr int SX = 0, SW = SX + NST * TILE * 2, SV = SW + HC * D * 2, SEND = SV + HC * BN * (1 + VT_NAT);
+  static constexpr int SX = 0, SW = SX + NST * TILE * 2, SV = SW + HC * D * 2, SEND = SV + HC * BN * (1 + VT_NAT) + VT_BF * HC * BN * 2;
   static constexpr int BYTES = SEND + 1024 + 64;
 };
 
@@ -114,7 +119,7 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
 #if VT_NAT
                                                      , const __grid_constant__ CUtensorMap nmap
 #endif
-                                                     ) {
+                                                     ) {   // (VT_BF: vmap is the bf16 natural v's map, there is no vT)
   extern __shared__ __align__(1024) unsigned char smem_raw[];
   const uint32_t sbase = static_cast<uint32_t>(__cvta_generic_to_shared(smem_raw));
   unsigned char* sm = smem_raw + ((1024u - (sbase & 1023u)) & 1023u);
@@ -236,8 +241,20 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
         const float a0 = acc[mb][i * 4 + 0] * vinv, a1 = acc[mb][i * 4 + 1] * vinv, a2 = acc[mb][i * 4 + 2] * vinv, a3 = acc[mb][i * 4 + 3] * vinv;
         const int row = mb * 64 + rr, col = i * 8 + cc;
         if (SY || n0 + col < N) amax = fmaxf(amax, fmaxf(fmaxf(fabsf(a0), fabsf(a1)), fmaxf(fabsf(a2), fabsf(a3))));
+#if !VT_BF
         sV[(row * BN + col) >> 1] = e4m3x2(a0, a1);
         sV[((row + 8) * BN + col) >> 1] = e4m3x2(a2, a3);
+#endif
+#if VT_BF
+        {   // bf16 natural v (unscaled accumulator, rounded like ln_vg's): [H][BN][C] behind the e4m3 tile
+          __nv_bfloat16* sB = reinterpret_cast<__nv_bfloat16*>(reinterpret_cast<unsigned char*>(sV) + HC * BN * 2);
+          const int h0 = row / C, c0 = row % C, h1 = (row + 8) / C, c1 = (row + 8) % C;
+          sB[(h0 * BN + col) * C + c0] = __float2bfloat16_rn(a0 * (1.f / vinv));
+          sB[(h0 * BN + col + 1) * C + c0] = __float2bfloat16_rn(a1 * (1.f / vinv));
+          sB[(h1 * BN + col) * C + c1] = __float2bfloat16_rn(a2 * (1.f / vinv));
+          sB[(h1 * BN + col + 1) * C + c1] = __float2bfloat16_rn(a3 * (1.f / vinv));
+        }
+#endif
 #if VT_NAT
         {
           unsigned char* sN = reinterpret_cast<unsigned char*>(sV) + HC * BN;   // [H][BN][C]
@@ -255,7 +272,11 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
     __syncthreads();
 #if VT_NAT
     if (tid == 0) {
+#if !VT_BF
       tma::store_3d(&vmap, tma::sa(sV), n0, s * C, 0);
+#else
+      tma::store_3d(&vmap, tma::sa(reinterpret_cast<unsigned char*>(sV) + HC * BN * 2), s * C, n0, 0);
+#endif
       tma::store_3d(&nmap, tma::sa(reinterpret_cast<unsigned char*>(sV) + HC * BN), s * C, n0, 0);
       tma::commit();
     }
@@ -421,7 +442,11 @@ std::vector<torch::Tensor> ln_vt8n(torch::Tensor m, torch::Tensor lnw, torch::Te
   const int S = (int)m.size(0), N = (int)m.size(1);
   TORCH_CHECK(N % BN == 0, "N must be a multiple of 64");
   auto y = torch::empty_like(m);
+#if VT_BF   // round 2: slot "vT" = v bf16 natural [H, N, S*C]
+  auto vt = torch::empty({H, N, (long)S * C}, m.options());
+#else
   auto vt = torch::empty({H, (long)S * C, N}, m.options().dtype(torch::kFloat8_e4m3fn));
+#endif
   auto vn = torch::empty({H, N, (long)S * C}, m.options().dtype(torch::kFloat8_e4m3fn));
   uint64_t gx[2] = {(uint64_t)D, (uint64_t)S * N}, sx[1] = {(uint64_t)D * 2};
   uint32_t bx[2] = {64, BN};
@@ -432,9 +457,14 @@ std::vector<torch::Tensor> ln_vt8n(torch::Tensor m, torch::Tensor lnw, torch::Te
   CUtensorMap wmap = enc(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, wv.data_ptr(), gw, sw, bw, CU_TENSOR_MAP_SWIZZLE_128B, "wv");
   uint64_t gv[3] = {(uint64_t)N, (uint64_t)S * C, (uint64_t)H}, sv[2] = {(uint64_t)N, (uint64_t)S * C * N};
   uint32_t bv[3] = {BN, C, H};
-  CUtensorMap vmap = enc(CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, vt.data_ptr(), gv, sv, bv, CU_TENSOR_MAP_SWIZZLE_NONE, "vT");
   uint64_t gn[3] = {(uint64_t)S * C, (uint64_t)N, (uint64_t)H}, sn[2] = {(uint64_t)S * C, (uint64_t)N * S * C};
   uint32_t bn[3] = {C, BN, H};
+#if VT_BF
+  uint64_t snb[2] = {(uint64_t)S * C * 2, (uint64_t)N * S * C * 2};
+  CUtensorMap vmap = enc(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 3, vt.data_ptr(), gn, snb, bn, CU_TENSOR_MAP_SWIZZLE_NONE, "v bf16 natural");
+#else
+  CUtensorMap vmap = enc(CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, vt.data_ptr(), gv, sv, bv, CU_TENSOR_MAP_SWIZZLE_NONE, "vT");
+#endif
   CUtensorMap nmap = enc(CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, vn.data_ptr(), gn, sn, bn, CU_TENSOR_MAP_SWIZZLE_NONE, "v natural");
   const int nitem = (N / BN) * S;
   switch (nst) {

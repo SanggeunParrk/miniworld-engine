@@ -46,6 +46,8 @@ def _places(v: str | None) -> frozenset[str]:
         return frozenset()
     if v in ("1", "all", "on"):
         return frozenset({"fwd", "dv", "dw"})
+    if v in ("bwd", "backward"):  # round 2: bf16 forward, FP8 dv / dw (fused producers)
+        return frozenset({"dv", "dw"})
     out = frozenset(p.strip() for p in v.split(",") if p.strip())
     bad = out - {"fwd", "dv", "dw"}
     if bad:
@@ -87,6 +89,8 @@ def serves(msa: torch.Tensor) -> bool:
     if not (PLACES or NATIVE_ONLY) or not msa.is_cuda or msa.ndim != 4 or msa.shape[0] != 1 or msa.shape[3] != 64:
         return False
     s, n = msa.shape[1], msa.shape[2]
+    if PLACES and "fwd" not in PLACES and n < 512:  # backward-only FP8 needs the split (head-major o) forward: N >= 512 (pwa_train._SPLIT_MIN_N)
+        return False
     return torch.cuda.get_device_capability(msa.device) == (9, 0) and n % 128 == 0 and 0 < n <= 1024 and s % 2 == 0 and s > 0
 
 
@@ -285,6 +289,27 @@ def _vt8_nat():
     return _EXT["vt8n"]
 
 
+def _vt8_nat_bf():
+    """Round 2 (backward-only FP8): ``ln_vt8n`` built with -DVT_BF=1: (v bf16 natural, v e4m3 natural, y), no vT."""
+    if "vt8nb" not in _EXT:
+        from miniworld_engine.kernels._nvcc import load_extension as load
+
+        _EXT["vt8nb"] = load(
+            name="miniworld_pwa_vt8_nat_bf",
+            sources=[str(Path(__file__).with_name("csrc") / "pwa_vt8.cu")],
+            extra_cuda_cflags=[
+                "-O3",
+                "-gencode=arch=compute_90a,code=sm_90a",
+                "--use_fast_math",
+                "-Xcompiler=-fvisibility=hidden",
+                "-DVT_NAT=1",
+                "-DVT_BF=1",
+            ],
+            extra_cflags=["-O3", "-fvisibility=hidden"],
+        )
+    return _EXT["vt8nb"]
+
+
 def _glue8():
     if "glue8" not in _EXT:
         from miniworld_engine.kernels._nvcc import load_extension as load
@@ -317,11 +342,17 @@ def _t8(x: torch.Tensor) -> torch.Tensor:
 
 # ------------------------------------------------------------------------------------------------------------------ forward
 ALL = frozenset({"fwd", "dv", "dw"})
+BWD = frozenset({"dv", "dw"})
 
 
 def fused() -> bool:
     """The fused producers serve the full placement set only; a partial set (ablation) runs the PyTorch quantize passes."""
-    return IMPL == "fused" and PLACES == ALL
+    return IMPL == "fused" and PLACES in (ALL, BWD)
+
+
+def bwd_only() -> bool:
+    """Round 2: the backward-only variant (bf16 forward, FP8 dv / dw), fused producers."""
+    return fused() and PLACES == BWD
 
 
 def forward_values(
@@ -342,7 +373,7 @@ def forward_values(
             raise RuntimeError("PWA FP8 training: the first call of a module must be eager (it seeds the v scale)")
         if fused_:
             probe = torch.zeros(1, device=m.device)
-            _vt8_nat().ln_vt8n(m, mw, mb, wv16, eps_m, torch.ones(1, device=m.device), probe, *VT8N_CFG)
+            (_vt8_nat_bf() if bwd_only() else _vt8_nat()).ln_vt8n(m, mw, mb, wv16, eps_m, torch.ones(1, device=m.device), probe, *VT8N_CFG)
             site.seed(probe)
         else:
             v, _ = k["lnvg"].ln_vg(m, mw, mb, wv16, eps_m, 2, 3, 1)
@@ -350,7 +381,11 @@ def forward_values(
     vs, vinv = site.next_scale()
     v_bf = None
     if fused_:
-        vt8, v8, y = _vt8_nat().ln_vt8n(m, mw, mb, wv16, eps_m, vinv, site.amax, *VT8N_CFG)
+        if bwd_only():  # bf16 natural v for the (bf16) forward contraction + e4m3 natural v for dw; no vT
+            v_bf, v8, y = _vt8_nat_bf().ln_vt8n(m, mw, mb, wv16, eps_m, vinv, site.amax, *VT8N_CFG)
+            vt8 = None
+        else:
+            vt8, v8, y = _vt8_nat().ln_vt8n(m, mw, mb, wv16, eps_m, vinv, site.amax, *VT8N_CFG)
     else:
         v_bf, y = k["lnvg"].ln_vg(m, mw, mb, wv16, eps_m, 2, 3, 1)
         site.amax.copy_((v_bf.abs().amax().float() * vinv).reshape(1))
