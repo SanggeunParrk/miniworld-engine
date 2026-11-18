@@ -50,6 +50,9 @@ FP8_ROWS: frozenset = _fp8_parts(_fp8_env("MINIWORLD_ATOMDIT_FP8", ""))
 #: (``FP8_ROWS`` set) that ran bf16 instead, with the first failing gate counted in ``why_save`` (training forward) / ``why_tf32`` / ``why_opts``
 #: (options outside ``f8.OPTIONS``) / ``why_cond`` (per-sample conditioning).
 STATS = {"calls": 0, "pre": 0, "post": 0, "fallbacks": 0, "why_save": 0, "why_tf32": 0, "why_opts": 0, "why_cond": 0}
+#: Boltz-2 (UP, ``post90_f8up``): the route needs at least this many (padded) atoms per sample. H100, CUDA graph, A = 5 (2026-11-18): the e4m3 block is
+#: 4 % slower at 512 / 1024 atoms (35.2 / 38.1 against 33.8 / 36.8 us), 24 / 16 / 18 % faster at 2048 / 4096 / 8192 (49.0 / 83.9 / 143.0 against 64.2 / 99.9 / 175.1 us)
+FP8_UP_MIN_N = 2048
 
 
 def enable_fp8(on: bool | str | Iterable[str] = True) -> frozenset:
@@ -336,7 +339,11 @@ def _fwd(
 
         # the opt-in e4m3 row kernels (FP8_ROWS): bf16 inference, options inside f8.OPTIONS only, a conditioning shared by the samples (the
         # sampler step; with per-sample tables the route measured slower: A = 1, 4096 atoms 1.09x)
-        f8 = FP8_ROWS if (FP8_ROWS and not save and not tf32 and set(opts) <= f8mod.OPTIONS and _shared(cond)) else frozenset()
+        f8 = (
+            FP8_ROWS
+            if (FP8_ROWS and not save and not tf32 and set(opts) <= f8mod.OPTIONS and _shared(cond) and (not up or n >= FP8_UP_MIN_N))
+            else frozenset()
+        )
         if f8:  # observability only (fp8.route_stats())
             STATS["calls"] += 1
             for _p in f8:
@@ -344,7 +351,7 @@ def _fwd(
         elif FP8_ROWS:
             STATS["fallbacks"] += 1
             STATS["why_save" if save else "why_tf32" if tf32 else "why_opts" if not set(opts) <= f8mod.OPTIONS else "why_cond"] += 1
-        p8 = f8mod.pack8(weights) if f8 else None
+        p8 = f8mod.pack8([*weights, wup] if up else weights) if f8 else None
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
         nmod = groups * n if shared else m  # shared: one conditioning per (group, atom), read modulo G N (rows are [A][G][N])

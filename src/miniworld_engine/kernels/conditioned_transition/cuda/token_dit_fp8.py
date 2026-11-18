@@ -53,6 +53,10 @@ STATS = {"calls": 0, "declined": 0, "expand": 0, "qkvg": 0, "out": 0, "squeeze":
 #: every M measured (768 .. 10240); the row-wise cuBLAS e4m3 qkvg GEMM lost at M = 768 / 1536 / 1920 (+1 .. +2 %), won from 2560 on;
 #: out / squeeze (a separate quantizing row pass) lost or tied everywhere -- their gate only bounds the loss
 MIN_ROWS_PER: dict[str, int] = {"qkvg": 2560, "expand": 640, "out": 2560, "squeeze": 2560}
+#: the expand of Boltz-2's up-gate block (n192 tiles, three e4m3 operands per tile): the kernel is 26-28 % faster than the bf16 up-gate kernel at every M
+#: (11.4 -> 8.4 us at M = 1920, 26.6 -> 19.1 us at 5120), but the block in a CUDA graph (H100, 2026-11-18, A = 5) is slower below M = 2560 (1920: +2.7 %,
+#: 1280: +3.2 %, 640: +5.6 %), level at 2560 (0.998), faster above (3840 0.991, 5120 0.965, 7680 0.954): gate 2560
+MIN_ROWS_UP = 2560
 #: one override for every placement (``MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS``; 0 = no gate), None: ``MIN_ROWS_PER``
 MIN_ROWS: int | None = int(os.environ["MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS"]) if os.environ.get("MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS") else None
 
@@ -85,17 +89,23 @@ def ext():
     )
 
 
-def active(M: int, D: int, fp32: bool, plain: bool, identity: bool = False, parallel: bool = False) -> frozenset[str]:
+def active(
+    M: int, D: int, fp32: bool, plain: bool, identity: bool = False, parallel: bool = False, up: bool = False
+) -> frozenset[str]:
     """The placements this block call takes: bf16 default-option blocks (the CondFold route) at width 768, M % 128 == 0, each placement
     from its row gate (``MIN_ROWS`` or ``MIN_ROWS_PER``). ``identity``: Chai-1's option block (parallel attention / transition, identity
     AdaLN, no gating query; the CondFold route) takes ``expand`` (the transition's AdaLN comes out of the attention's LN pass as e4m3),
     ``out`` and ``squeeze``; not ``qkvg`` (its AdaLN scale is unbounded: no bound on the e4m3 error was measured, docs/fp8.md).
     ``parallel`` (any other CondFold block of the parallel schedule, RoseTTAFold3 with its k-q LayerNorm: ``plain`` False): the ``expand``
-    placement only -- the transition reads the block input's AdaLN rows (quantised in one row pass), which does not depend on the attention part."""
+    placement only -- the transition reads the block input's AdaLN rows (quantised in one row pass), which does not depend on the attention part.
+    ``up`` (Boltz-2's up-gate transition, ``plain`` then says the block is the default or Boltz-2's): the ``expand`` placement reads its
+    own row gate ``MIN_ROWS_UP`` (its e4m3 kernel has the 192-wide tile); qkvg / out / squeeze keep the default block's gates."""
     if not PLACES or fp32 or D != 768 or M % 128 or not (plain or identity or parallel):
         return frozenset()
     places = PLACES if plain else (PLACES - {"qkvg"} if identity else PLACES & {"expand"})
-    return frozenset(p for p in places if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_PER[p]))
+    return frozenset(
+        p for p in places if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_UP if up and p == "expand" else MIN_ROWS_PER[p])
+    )
 
 
 def quant_weight(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -142,4 +152,4 @@ def mm(x8, sx, w, bias=None):
     return torch._scaled_mm(x8, w8, sx, sw, bias=bias, out_dtype=torch.bfloat16)
 
 
-__all__ = ["E4M3", "MIN_ROWS", "MIN_ROWS_PER", "PLACES", "active", "ext", "mm", "quant_weight", "rows_q8", "weight_pack"]
+__all__ = ["E4M3", "MIN_ROWS", "MIN_ROWS_PER", "MIN_ROWS_UP", "PLACES", "active", "ext", "mm", "quant_weight", "rows_q8", "weight_pack"]
