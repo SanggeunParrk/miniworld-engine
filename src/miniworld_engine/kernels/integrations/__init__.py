@@ -122,6 +122,8 @@ def prebuild(target, _rows):
         yield functools.partial(pwa_wide._pair, dz)
     for dm, dh in sorted(value):
         yield functools.partial(pwa_wide._value, dm, dh)
+    if value:  # the backward aux kernels of the wide widths (dropout-mask pass, BIG dv permute-copy): one shape-independent build
+        yield pwa_wide._aux
     for dm, c in sorted(f8):
         yield functools.partial(pwa_fp8._ext, dm, c)
 
