@@ -27,7 +27,20 @@ Accuracy / speed judging: [../measure.md](../measure.md); backends: [../modules.
 
 The module flattens `cond` to rows and computes the modulation `mod = W silu(c)` [rows, 768] fp32 itself
 (`dispatch.native_h100_mod_fwd`: a silu + cast copy kernel, then a GEMM -- bf16 operands with fp32 output for a bf16 block, cuBLAS
-fp32 for an fp32 block); with a gradient through `SWADiTModulationH100`. It then calls the block with `B = N` (one modulation row per
+fp32 for an fp32 block); with a gradient through `SWADiTModulationH100`.
+
+Training, bf16 block under the composed stages (`dispatch.bf16_table`: bf16 `x` and `cond`, not the native stages): the table is **bf16**
+(`native_h100_mod_fwd_bf16`: `rn_bf16(silu(c) W^T)` on bf16 operands, bf16 output). The slab kernels read it as it is (`ldm8` / `ldm16` /
+`ldm2` in `swa_slab.cu` widen in registers) and write its gradient `dmod` in bf16 (plain stores, A in 1, 2, 4, 8, 16: `presum`), and the hoist's
+backward (`native_h100_mod_bwd_bf16`) runs both GEMMs on bf16 operands with fp32 accumulation and output. At A 48 x 4096 atoms, 3 blocks that
+is 1.74 -> 0.87 GB written by the GEMM, 3.6 -> 1.8 GB read by dgrad + wgrad, and the six kernels read half the table. The reference rounds the same
+product to bf16 (a bf16 Linear under autocast), so the table is closer to it than the fp32 one was. Anything else (fp32 blocks, the native stages,
+the wgmma row kernels at A % 8 == 0 with many rows, the Triton fallbacks, a non-plain dmod) widens the table (`mod.float()`) or keeps the fp32 one;
+`dispatch._BF16_TABLE[0] = False` restores 3.0.0's fp32 table (A/B switch). Inference keeps its fp32 table.
+Measured (CUDA graph, one process, interleaved, same cubin; fp32 table / bf16 table of the same step): SWAAtomTransformer training rows 130 (3 blocks,
+window 128) A 48 x 1024 .. 8192 atoms 1.13 - 1.145x (4096 atoms 11.09 -> 9.78 ms), A 1 1.14x, row 131 (1 block) 1.13 - 1.147x, row 132 (global
+attention, FlashAttention-4 in the step) 1.045 - 1.113x. Accuracy: the canonical rows (130 S 1, 131 / 132 S 48) are as before within the run-to-run
+noise of the PyTorch reference's own tolerance (the table's rounding is the reference's). It then calls the block with `B = N` (one modulation row per
 sequence row), so the augment count the kernels see is 1. Inference calls `swa_dit_block_fwd` directly; training goes through
 `autograd.SWADiTBlockFunction` (forward with `save=True`, 13 saved intermediates, `swa_dit_block_bwd`).
 
@@ -106,13 +119,15 @@ writes. Also under CUDA-graph capture.
 ## Numerics
 
 - bf16 composed: bf16 operands, fp32 accumulation, the rounding points of the Triton kernels (each kernel header lists them); the
-  modulation is fp32 `[rows, 768]`.
+  modulation: fp32 `[rows, 768]` for inference, bf16 for training (above).
 - fp32 composed (`swa_fp32.cu`): residual stream, norms, modulation, gates, RoPE, SwiGLU and every saved tensor fp32; projection
   GEMMs one tf32 pass (round to nearest, ties away); the SwiGLU FFN GEMMs split the weights into tf32 hi + lo (two passes); the window
   attention on bf16 q / k / v / P / dO / dS with fp32 softmax. Served only while TF32 is allowed.
 - fp32 weight gradients: bf16 hi / lo planes, `hi*hi + hi*lo + lo*hi` (~2^-16 relative) up to 65536 rows (`swa_wgrad_wg_f32.cu`);
   above, torch GEMMs at the process's matmul precision.
 - Native under `highest`: exact fp32 cuBLAS projections, bf16 attention operands.
+- The bf16 training table: the rows of `dmod` are rounded once to bf16 where the slab kernels store them; the weight gradient of the modulation sums them in fp32
+  (K = rows), so the rounding averages out; the gradient of `cond` is `dmod W` in fp32 accumulation.
 - Determinism: output, dq and the block-weight gradients are bitwise repeatable; `dmod` accumulated with `red.add` (A not in
   1, 2, 4, 8, 16) is not.
 

@@ -19,7 +19,9 @@ from miniworld_engine.kernels.swa_dit.dispatch import (
     _h100_global,
     native_h100_cast,
     native_h100_mod_bwd,
+    native_h100_mod_bwd_bf16,
     native_h100_mod_fwd,
+    native_h100_mod_fwd_bf16,
     native_h100_stages,
     swa_dit_block_bwd,
     swa_dit_block_fwd,
@@ -39,8 +41,10 @@ class SWADiTBlockFunction(torch.autograd.Function):
         # The kernels take an fp32 modulation; a bf16 one (a conditioning shared by the samples, projected under autocast) is
         # widened here and its gradient handed back in its own dtype.
         ctx.mod_dtype = mod.dtype
-        mod = mod.contiguous() if mod.dtype is torch.float32 else mod.float().contiguous()
         ctx.native_h100 = not portable and (native_h100_stages(q) or _h100_global(q, half_window))
+        # ... except a bf16 table under the composed H100 stages, whose slab kernels read it (and write its gradient) in bf16
+        keep_bf16 = mod.dtype is torch.bfloat16 and q.dtype is torch.bfloat16 and not portable and not ctx.native_h100 and is_h100(q.device)
+        mod = mod.contiguous() if mod.dtype is torch.float32 or keep_bf16 else mod.float().contiguous()
         if ctx.native_h100:
             wqkv, wg, wo, wu, wd = native_h100_cast(list(raw_weights), [torch.empty_like(w, dtype=q.dtype) for w in raw_weights])
         elif not portable and q.dtype == torch.bfloat16 and any(w.dtype == torch.float32 for w in raw_weights) and is_h100(q.device):
@@ -65,14 +69,21 @@ class SWADiTBlockFunction(torch.autograd.Function):
 
 
 class SWADiTModulationH100(torch.autograd.Function):
-    """Native SiLU and dtype boundaries around the FP32 cuBLAS modulation."""
+    """Native SiLU and dtype boundaries around the cuBLAS modulation: fp32 table (``bf16_table`` false), or a bf16 one -- of a bf16
+    block whose composed stages read it as it is (``native_h100_mod_fwd_bf16``)."""
 
     @staticmethod
-    def forward(ctx, c, w):
+    def forward(ctx, c, w, bf16_table=False):
+        ctx.bf16_table = bf16_table
+        if bf16_table:
+            out, a, wb = native_h100_mod_fwd_bf16(c, w)
+            ctx.save_for_backward(c, a, wb, w)
+            return out
         out, a, w32 = native_h100_mod_fwd(c, w)
         ctx.save_for_backward(c, a, w32, w)
         return out
 
     @staticmethod
     def backward(ctx, dy):
-        return native_h100_mod_bwd(dy.contiguous(), *ctx.saved_tensors)  # e.g. the expanded gradient of a sum
+        bwd = native_h100_mod_bwd_bf16 if ctx.bf16_table else native_h100_mod_bwd
+        return (*bwd(dy.contiguous(), *ctx.saved_tensors), None)  # e.g. the expanded gradient of a sum

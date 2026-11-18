@@ -128,6 +128,40 @@ __device__ __forceinline__ void ld_f16(float (&f)[16], const float* p) {
     f[4 * q] = v.x; f[4 * q + 1] = v.y; f[4 * q + 2] = v.z; f[4 * q + 3] = v.w;
   }
 }
+// The modulation table [B*S, 768]: fp32, or bf16 (the training hoist's GEMM writes bf16: half the bytes of the table the six kernels read);
+// the same values either way up to the table's rounding -- every use widens to fp32 here.
+struct Mod {
+  const void* p;
+  int bf;
+};
+__device__ __forceinline__ void ldm8(float (&f)[8], const Mod& m, long off) {
+  if (m.bf) {
+    const uint4 v = __ldg(reinterpret_cast<const uint4*>(static_cast<const bf16*>(m.p) + off));
+    const uint32_t u[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) { const float2 w = unpack(u[i]); f[2 * i] = w.x; f[2 * i + 1] = w.y; }
+  } else {
+    ld_f8(f, static_cast<const float*>(m.p) + off);
+  }
+}
+__device__ __forceinline__ void ldm16(float (&f)[16], const Mod& m, long off) {
+  if (m.bf) {
+    const uint4* s = reinterpret_cast<const uint4*>(static_cast<const bf16*>(m.p) + off);
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+      const uint4 v = __ldg(s + q);
+      const uint32_t u[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+      for (int i = 0; i < 4; ++i) { const float2 w = unpack(u[i]); f[8 * q + 2 * i] = w.x; f[8 * q + 2 * i + 1] = w.y; }
+    }
+  } else {
+    ld_f16(f, static_cast<const float*>(m.p) + off);
+  }
+}
+__device__ __forceinline__ float2 ldm2(const Mod& m, long off) {
+  if (m.bf) return unpack(__ldg(reinterpret_cast<const uint32_t*>(static_cast<const bf16*>(m.p) + off)));
+  return __ldg(reinterpret_cast<const float2*>(static_cast<const float*>(m.p) + off));
+}
 template <int N> __device__ __forceinline__ void zero(float (&acc)[N][4]) {
 #pragma unroll
   for (int j = 0; j < N; ++j)
@@ -215,7 +249,7 @@ __device__ __forceinline__ void gemm_n(float (&acc)[2 * NP][4], AF afn, const un
 // ---- slab geometry --------------------------------------------------------------------------------------------------------------------
 struct Geo {
   int S, A, B, nat, nag, nslab;
-  int atomic;
+  int atomic, dbf;   // dbf: dmod is bf16 (never with atomic accumulation)
 };
 template <int SP> struct Slab {
   static constexpr int AT = 16 / SP;
@@ -252,6 +286,16 @@ __device__ __forceinline__ void presum(float* dmod, const Geo& geo, const Slab<S
     if (s >= geo.S) continue;
     float* p = dmod + ((long)sl.b * geo.S + s) * MODW + col;
     const float* v = r ? v1 : v0;
+    if (geo.dbf) {                                          // bf16 dmod: plain stores only (one writer per element)
+      bf16* pb = reinterpret_cast<bf16*>(dmod) + ((long)sl.b * geo.S + s) * MODW + col;
+      if (PAIRS) {
+#pragma unroll
+        for (int i = 0; i < 4; ++i) *reinterpret_cast<uint32_t*>(pb + 8 * i) = pack(v[2 * i], v[2 * i + 1]);
+      } else {
+        *reinterpret_cast<uint4*>(pb) = make_uint4(pack(v[0], v[1]), pack(v[2], v[3]), pack(v[4], v[5]), pack(v[6], v[7]));
+      }
+      continue;
+    }
     if (PAIRS) {
 #pragma unroll
       for (int i = 0; i < 4; ++i) {
@@ -277,7 +321,8 @@ struct FRow {
 // qkvg forward: warp qc computes projection qc (q, k, v, g) of the slab, output lane = head (the head RMSNorm / RoPE lane-local).
 struct QFArgs {
   const bf16 *q, *wqkv, *wg;
-  const float *mod, *cs, *sn;
+  Mod mod;
+  const float *cs, *sn;
   bf16 *Q, *K, *V, *G, *X, *PQ, *PK;
   long M;
   int S, B, save, nslab;
@@ -304,8 +349,8 @@ __global__ void __launch_bounds__(256) qkvg_fwd_kernel(QFArgs a) {
       B16 qv, xv;
       ld_b16(qv, a.q + rb.R * C + 16 * bc, rb.ok);
       float sh[16], sc[16];
-      ld_f16(sh, a.mod + rb.m * MODW + 16 * bc);
-      ld_f16(sc, a.mod + rb.m * MODW + C + 16 * bc);
+      ldm16(sh, a.mod, rb.m * MODW + 16 * bc);
+      ldm16(sc, a.mod, rb.m * MODW + C + 16 * bc);
       float ss = 0.f;
 #pragma unroll
       for (int i = 0; i < 8; ++i) { const float2 v = unpack(qv.u[i]); ss += v.x * v.x + v.y * v.y; }
@@ -367,7 +412,7 @@ __global__ void __launch_bounds__(256) qkvg_fwd_kernel(QFArgs a) {
 // out-projection forward: warp qc computes att's head qc (warp = head).
 struct OFArgs {
   const bf16 *q, *G, *O, *wo;
-  const float* mod;
+  Mod mod;
   bf16 *q1, *att;
   long M;
   int S, B, save, nslab;
@@ -403,7 +448,7 @@ __global__ void __launch_bounds__(256) oproj_fwd_kernel(OFArgs a) {
     Qtr qs0, qs1;
     ld_q(qs0, a.q + r0.R * C + sc, r0.ok); ld_q(qs1, a.q + r1.R * C + sc, r1.ok);
     float ga0[8], ga1[8];
-    ld_f8(ga0, a.mod + r0.m * MODW + 2 * C + sc); ld_f8(ga1, a.mod + r1.m * MODW + 2 * C + sc);
+    ldm8(ga0, a.mod, r0.m * MODW + 2 * C + sc); ldm8(ga1, a.mod, r1.m * MODW + 2 * C + sc);
     if (first) { cp_wait_all(); __syncthreads(); first = false; }
     else group_sync(grp);
     float acc[4][4];
@@ -433,7 +478,7 @@ __global__ void __launch_bounds__(256) oproj_fwd_kernel(OFArgs a) {
 // computes the output's head qc (warp = head) over all 256 hidden units.
 struct FFArgs {
   const bf16 *q1, *wu, *wd;
-  const float* mod;
+  Mod mod;
   bf16 *out, *y, *ffn;
   long M;
   int S, B, save, nslab;
@@ -462,8 +507,8 @@ __global__ void __launch_bounds__(256) ffn_fwd_kernel(FFArgs a) {
       B16 qv, yv;
       ld_b16(qv, a.q1 + rb.R * C + 16 * bc, rb.ok);
       float sh[16], scf[16];
-      ld_f16(sh, a.mod + rb.m * MODW + 3 * C + 16 * bc);
-      ld_f16(scf, a.mod + rb.m * MODW + 4 * C + 16 * bc);
+      ldm16(sh, a.mod, rb.m * MODW + 3 * C + 16 * bc);
+      ldm16(scf, a.mod, rb.m * MODW + 4 * C + 16 * bc);
       float ss = 0.f;
 #pragma unroll
       for (int i = 0; i < 8; ++i) { const float2 v = unpack(qv.u[i]); ss += v.x * v.x + v.y * v.y; }
@@ -480,7 +525,7 @@ __global__ void __launch_bounds__(256) ffn_fwd_kernel(FFArgs a) {
     Qtr qs0, qs1;
     ld_q(qs0, a.q1 + r0.R * C + sc, r0.ok); ld_q(qs1, a.q1 + r1.R * C + sc, r1.ok);
     float gf0[8], gf1[8];
-    ld_f8(gf0, a.mod + r0.m * MODW + 5 * C + sc); ld_f8(gf1, a.mod + r1.m * MODW + 5 * C + sc);
+    ldm8(gf0, a.mod, r0.m * MODW + 5 * C + sc); ldm8(gf1, a.mod, r1.m * MODW + 5 * C + sc);
     if (first) { cp_wait_all(); __syncthreads(); first = false; }
     else group_sync(grp);
     {
@@ -528,7 +573,7 @@ __global__ void __launch_bounds__(256) ffn_fwd_kernel(FFArgs a) {
 // dq1 leaves through a staging tile.
 struct FBArgs {
   const bf16 *dq2, *q1, *y, *ffn, *wu, *wd;
-  const float* mod;
+  Mod mod;
   float* dmod;
   bf16 *dq1, *dffn, *h, *dab;
   float eps;
@@ -568,7 +613,7 @@ __global__ void __launch_bounds__(256) ffn_bwd_kernel(FBArgs a) {
       ld_b16(yv, a.y + R * C + 16 * bc, ok);
       ld_b16(qv, a.q1 + R * C + 16 * bc, ok);
       float gf[16];
-      ld_f16(gf, a.mod + m * MODW + 5 * C + 16 * bc);
+      ldm16(gf, a.mod, m * MODW + 5 * C + 16 * bc);
 #pragma unroll
       for (int i = 0; i < 8; ++i) { const float2 v = unpack(dv.u[i]); dv.u[i] = pack(v.x * rnb(gf[2 * i]), v.y * rnb(gf[2 * i + 1])); }
       tile_put(dtile, rho, bc, dv);
@@ -644,7 +689,7 @@ __global__ void __launch_bounds__(256) ffn_bwd_kernel(FBArgs a) {
       for (int i = 0; i < 4; ++i) {
         const uint32_t qv = ok ? __ldg(reinterpret_cast<const uint32_t*>(a.q1 + R * C + nc + 8 * i)) : 0u;
         const uint32_t dv = ok ? __ldg(reinterpret_cast<const uint32_t*>(a.dq2 + R * C + nc + 8 * i)) : 0u;
-        const float2 sv = __ldg(reinterpret_cast<const float2*>(a.mod + m * MODW + 4 * C + nc + 8 * i));
+        const float2 sv = ldm2(a.mod, m * MODW + 4 * C + nc + 8 * i);
         const float2 qf = unpack(qv), df = unpack(dv);
         xh[r][2 * i] = qf.x * rs[r]; xh[r][2 * i + 1] = qf.y * rs[r];
         d2[r][2 * i] = df.x; d2[r][2 * i + 1] = df.y;
@@ -709,7 +754,7 @@ __global__ void __launch_bounds__(256) ffn_bwd_kernel(FBArgs a) {
 // layout: lane t, channels 32qc + 8i + 2t + e); dO and dG leave through staging tiles.
 struct OArgs {
   const bf16 *dq1, *g, *o, *att, *wo;
-  const float* mod;
+  Mod mod;
   float *dmod, *Dv;
   bf16 *dO, *dG, *datt, *gated;
   int ldg;                                                  // row stride of dG (a column block of the dP buffer)
@@ -744,7 +789,7 @@ __global__ void __launch_bounds__(256) oproj_bwd_kernel(OArgs a) {
       ld_b16(gv, a.g + R * C + 16 * bc, ok);
       ld_b16(ov, a.o + R * C + 16 * bc, ok);
       float ga[16];
-      ld_f16(ga, a.mod + m * MODW + 2 * C + 16 * bc);
+      ldm16(ga, a.mod, m * MODW + 2 * C + 16 * bc);
 #pragma unroll
       for (int i = 0; i < 8; ++i) {
         const float2 d = unpack(dv.u[i]), u = unpack(gv.u[i]), v = unpack(ov.u[i]);
@@ -826,7 +871,8 @@ __global__ void __launch_bounds__(256) oproj_bwd_kernel(OArgs a) {
 // (lane t: channels 32qc + 8i + 2t + e); dq leaves through the warp's tile.
 struct QArgs {
   const bf16 *q, *pq, *pk, *dq1, *wqkv, *wg;
-  const float *mod, *cs, *sn;
+  Mod mod;
+  const float *cs, *sn;
   bf16* dP;                                                 // [M, 4C]: dq | dk | dv | dG in, dp_q | dp_k | dv | dG out
   bf16* dq;
   float* dmod;
@@ -903,7 +949,7 @@ __global__ void __launch_bounds__(256) qkvg_bwd_kernel(QArgs a) {
         const bool ok = r ? ok1 : ok0;
         qp[r][i] = ok ? __ldg(reinterpret_cast<const uint32_t*>(a.q + R * C + nc + 8 * i)) : 0u;
         dp1[r][i] = ok ? __ldg(reinterpret_cast<const uint32_t*>(a.dq1 + R * C + nc + 8 * i)) : 0u;
-        scp[r][i] = __ldg(reinterpret_cast<const float2*>(a.mod + (r ? m1 : m0) * MODW + C + nc + 8 * i));
+        scp[r][i] = ldm2(a.mod, (r ? m1 : m0) * MODW + C + nc + 8 * i);
       }
     if (qc < 2) {                                          // RoPE and the per-head RMSNorm, backwards
       const bf16* pp = qc == 0 ? a.pq : a.pk;
@@ -1027,14 +1073,14 @@ int pick_sp(long A) { return A % 16 == 0 ? 16 : A % 8 == 0 ? 8 : A % 4 == 0 ? 4 
 Geo make_geo(long A, long B, long S, int sp) {
   Geo g; g.S = (int)S; g.A = (int)A; g.B = (int)B;
   g.nat = (int)((S + 16 / sp - 1) / (16 / sp)); g.nag = (int)((A + sp - 1) / sp); g.nslab = g.nat * g.nag * (int)B;
-  g.atomic = A != sp;
+  g.atomic = A != sp; g.dbf = 0;
   return g;
 }
 void check_rows(const torch::Tensor& t, long M, const char* name) {
   TORCH_CHECK(t.is_cuda() && t.scalar_type() == torch::kBFloat16 && t.is_contiguous() && t.numel() == M * C, name, ": [M, 128] bf16 contiguous");
 }
 void check_mod(const torch::Tensor& t, long rows, const char* name) {
-  TORCH_CHECK(t.is_cuda() && t.scalar_type() == torch::kFloat && t.is_contiguous() && t.numel() == rows * MODW, name, ": [B*S, 768] fp32");
+  TORCH_CHECK(t.is_cuda() && (t.scalar_type() == torch::kFloat || t.scalar_type() == torch::kBFloat16) && t.is_contiguous() && t.numel() == rows * MODW, name, ": [B*S, 768] fp32 or bf16");
 }
 void check_w(const torch::Tensor& t, long rows, long cols, const char* name) {
   TORCH_CHECK(t.is_cuda() && t.scalar_type() == torch::kBFloat16 && t.is_contiguous() && t.size(0) == rows && t.size(1) == cols, name,
@@ -1075,7 +1121,7 @@ std::vector<torch::Tensor> qkvg_fwd(torch::Tensor q, torch::Tensor mod, torch::T
   auto X = torch::empty({Ms, C}, opt), PQ = torch::empty({Ms, C}, opt), PK = torch::empty({Ms, C}, opt);
   if (M == 0) return {Q, K, V, G, X, PQ, PK};
   QFArgs a;
-  a.q = bp(q); a.wqkv = bp(wqkv); a.wg = bp(wg); a.mod = mod.data_ptr<float>(); a.cs = cs.data_ptr<float>(); a.sn = sn.data_ptr<float>();
+  a.q = bp(q); a.wqkv = bp(wqkv); a.wg = bp(wg); a.mod = {mod.data_ptr(), mod.scalar_type() == torch::kBFloat16}; a.cs = cs.data_ptr<float>(); a.sn = sn.data_ptr<float>();
   a.Q = bpm(Q); a.K = bpm(K); a.V = bpm(V); a.G = bpm(G); a.X = bpm(X); a.PQ = bpm(PQ); a.PK = bpm(PK);
   a.M = M; a.S = (int)S; a.B = (int)B; a.save = save ? 1 : 0; a.nslab = (int)((M + 15) / 16); a.eps = (float)eps; a.qk_eps = (float)qk_eps;
   static int res = 0;
@@ -1093,7 +1139,7 @@ std::vector<torch::Tensor> oproj_fwd(torch::Tensor q, torch::Tensor G, torch::Te
   auto q1 = torch::empty({M, C}, q.options()), att = torch::empty({save ? M : 1, C}, q.options());
   if (M == 0) return {q1, att};
   OFArgs a;
-  a.q = bp(q); a.G = bp(G); a.O = bp(O); a.wo = bp(wo); a.mod = mod.data_ptr<float>(); a.q1 = bpm(q1); a.att = bpm(att);
+  a.q = bp(q); a.G = bp(G); a.O = bp(O); a.wo = bp(wo); a.mod = {mod.data_ptr(), mod.scalar_type() == torch::kBFloat16}; a.q1 = bpm(q1); a.att = bpm(att);
   a.M = M; a.S = (int)S; a.B = (int)B; a.save = save ? 1 : 0; a.nslab = (int)((M + 15) / 16);
   static int res = 0;
   if (res == 0) res = resident(oproj_fwd_kernel, OF_SMEM, num_sms(q.device().index()));
@@ -1110,7 +1156,7 @@ std::vector<torch::Tensor> ffn_fwd(torch::Tensor q1, torch::Tensor mod, torch::T
   auto out = torch::empty({M, C}, q1.options()), y = torch::empty({save ? M : 1, C}, q1.options()), ffn = torch::empty({save ? M : 1, C}, q1.options());
   if (M == 0) return {out, y, ffn};
   FFArgs a;
-  a.q1 = bp(q1); a.wu = bp(wu); a.wd = bp(wd); a.mod = mod.data_ptr<float>(); a.out = bpm(out); a.y = bpm(y); a.ffn = bpm(ffn);
+  a.q1 = bp(q1); a.wu = bp(wu); a.wd = bp(wd); a.mod = {mod.data_ptr(), mod.scalar_type() == torch::kBFloat16}; a.out = bpm(out); a.y = bpm(y); a.ffn = bpm(ffn);
   a.M = M; a.S = (int)S; a.B = (int)B; a.save = save ? 1 : 0; a.nslab = (int)((M + 15) / 16); a.eps = (float)eps;
   static int res = 0;
   if (res == 0) res = resident(ffn_fwd_kernel, FF_SMEM, num_sms(q1.device().index()));
@@ -1130,10 +1176,11 @@ std::vector<torch::Tensor> ffn_bwd(torch::Tensor dq2, torch::Tensor q1, torch::T
   auto dq1 = torch::empty({M, C}, opt), dffn = torch::empty({M, C}, opt), h = torch::empty({M, NH}, opt), dab = torch::empty({M, 2 * NH}, opt);
   if (M == 0) return {dq1, dffn, h, dab};
   FBArgs a;
-  a.dq2 = bp(dq2); a.q1 = bp(q1); a.y = bp(y); a.ffn = bp(ffn); a.wu = bp(wu); a.wd = bp(wd); a.mod = mod.data_ptr<float>();
-  a.dmod = dmod.data_ptr<float>(); a.dq1 = bpm(dq1); a.dffn = bpm(dffn); a.h = bpm(h); a.dab = bpm(dab); a.eps = (float)eps;
+  a.dq2 = bp(dq2); a.q1 = bp(q1); a.y = bp(y); a.ffn = bp(ffn); a.wu = bp(wu); a.wd = bp(wd); a.mod = {mod.data_ptr(), mod.scalar_type() == torch::kBFloat16};
+  a.dmod = reinterpret_cast<float*>(dmod.data_ptr()); a.dq1 = bpm(dq1); a.dffn = bpm(dffn); a.h = bpm(h); a.dab = bpm(dab); a.eps = (float)eps;
   const int sp = pick_sp(A);
   a.geo = make_geo(A, B, S, sp);
+  a.geo.dbf = dmod.scalar_type() == torch::kBFloat16; TORCH_CHECK(!a.geo.dbf || !a.geo.atomic, "a bf16 dmod needs one slab per augment set (A in 1, 2, 4, 8, 16)");
   const int sms = num_sms(dq2.device().index());
   by_sp(sp, [&](auto spc) {
     constexpr int SP = decltype(spc)::value;
@@ -1158,11 +1205,12 @@ std::vector<torch::Tensor> oproj_bwd(torch::Tensor dq1, torch::Tensor g, torch::
   auto Dv = torch::empty({A * B, H, S}, opt.dtype(torch::kFloat));
   if (M == 0) return {dO, datt, gated, Dv};
   OArgs a;
-  a.dq1 = bp(dq1); a.g = bp(g); a.o = bp(o); a.att = bp(att); a.wo = bp(wo); a.mod = mod.data_ptr<float>(); a.dmod = dmod.data_ptr<float>();
+  a.dq1 = bp(dq1); a.g = bp(g); a.o = bp(o); a.att = bp(att); a.wo = bp(wo); a.mod = {mod.data_ptr(), mod.scalar_type() == torch::kBFloat16}; a.dmod = reinterpret_cast<float*>(dmod.data_ptr());
   a.Dv = Dv.data_ptr<float>(); a.dO = bpm(dO); a.datt = bpm(datt); a.gated = bpm(gated);
   a.dG = bpm(dP) + 3 * C; a.ldg = 4 * C;
   const int sp = pick_sp(A);
   a.geo = make_geo(A, B, S, sp);
+  a.geo.dbf = dmod.scalar_type() == torch::kBFloat16; TORCH_CHECK(!a.geo.dbf || !a.geo.atomic, "a bf16 dmod needs one slab per augment set (A in 1, 2, 4, 8, 16)");
   const int sms = num_sms(dq1.device().index());
   by_sp(sp, [&](auto spc) {
     constexpr int SP = decltype(spc)::value;
@@ -1188,10 +1236,11 @@ torch::Tensor qkvg_bwd(torch::Tensor q, torch::Tensor pq, torch::Tensor pk, torc
   if (M == 0) return dq;
   QArgs a;
   a.q = bp(q); a.pq = bp(pq); a.pk = bp(pk); a.dq1 = bp(dq1); a.wqkv = bp(wqkv); a.wg = bp(wg);
-  a.mod = mod.data_ptr<float>(); a.cs = cs.data_ptr<float>(); a.sn = sn.data_ptr<float>();
-  a.dP = bpm(dP); a.dq = bpm(dq); a.dmod = dmod.data_ptr<float>(); a.eps = (float)eps; a.qk_eps = (float)qk_eps;
+  a.mod = {mod.data_ptr(), mod.scalar_type() == torch::kBFloat16}; a.cs = cs.data_ptr<float>(); a.sn = sn.data_ptr<float>();
+  a.dP = bpm(dP); a.dq = bpm(dq); a.dmod = reinterpret_cast<float*>(dmod.data_ptr()); a.eps = (float)eps; a.qk_eps = (float)qk_eps;
   const int sp = pick_sp(A);
   a.geo = make_geo(A, B, S, sp);
+  a.geo.dbf = dmod.scalar_type() == torch::kBFloat16; TORCH_CHECK(!a.geo.dbf || !a.geo.atomic, "a bf16 dmod needs one slab per augment set (A in 1, 2, 4, 8, 16)");
   const int sms = num_sms(q.device().index());
   by_sp(sp, [&](auto spc) {
     constexpr int SP = decltype(spc)::value;
