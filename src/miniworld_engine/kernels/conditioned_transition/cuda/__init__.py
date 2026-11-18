@@ -206,6 +206,8 @@ def _pair_bias_wide(z2d, wf, mask, L):
 #: A bias-free query (RoseTTAFold3) is a zero to_query.bias leaf, the identity AdaLN a ones ln_cond / to_scale.bias leaf, no gating
 #: query a zero to_gate leaf: the caller's leaf list (``kernels/integrations/token_dit.leaves``).
 VARIANT_DEFAULT = (0.0, 1.0, 1e-5, 1.0, 0.0, 0.0, 1e-5, 0.0)
+#: Boltz-2's block (``kernels/integrations/token_dit.options``): the default plus the up-gate transition (rna set by ``up``); the one other variant the e4m3 expand serves
+VARIANT_UP = (0.0, 1.0, 1e-5, 1.0, 1.0, 0.0, 1e-5, 1.0)
 _COND_FOLD: dict = _capture.weight_cache("conditioned_transition.cond_fold")  # [W1; W2], W1 1, b1, b2 per weight pack (``_cond_fold_pack``)
 
 
@@ -627,9 +629,17 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
     fused_expand = fp32 and _FP32_SWIGLU_GEMM and not up and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
     # EXPERIMENTAL e4m3 placements (opt-in, default off: ``token_dit_fp8.PLACES`` empty -> f8 empty, the bf16 route below unchanged)
-    f8 = _fp8.active(M, D, fp32, plain and fold) if _fp8.PLACES else frozenset()
+    # the default-option block and Boltz-2's (the default plus the up-gate transition: its expand reads [Wa 64 | Wb 64 | Wu 64] tiles, ht 64)
+    f8 = _fp8.active(M, D, fp32, (plain or v == VARIANT_UP) and fold, up) if _fp8.PLACES else frozenset()
     if f8:
-        f8w = _fp8.weight_pack(key, wqkvg, wo, ws, _f8_wab(wab, M, ws.shape[1], single.device.index), bqkvg)
+        f8w = _fp8.weight_pack(
+            key,
+            wqkvg,
+            wo,
+            ws,
+            (_bf16_wab64(vpack["wab3"], up=True), 64) if up else _f8_wab(wab, M, ws.shape[1], single.device.index),
+            bqkvg,
+        )
     if f8 and "qkvg" in f8:
         xt = xa
         xa8 = torch.empty((M, D), device=single.device, dtype=_fp8.E4M3)
@@ -686,7 +696,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     h = single.new_empty((M, ws.shape[1]))
     if f8 and "expand" in f8:
         a8, sa8, ht = f8w["expand"]
-        _fp8.ext().gemm_swiglu_f8(xt8, a8, h, sxt, sa8, _fp8_nsm(single.device.index), ht, _PDL)
+        _fp8.ext().gemm_swiglu_f8(xt8, a8, h, sxt, sa8, _fp8_nsm(single.device.index), ht, _PDL, up)
     elif up and not fp32:
         # silu(a) b u in the SwiGLU GEMM's epilogue (128 x 192 tiles, [Wa 64 | Wb 64 | Wu 64]): [a | b | u] never reaches HBM.
         # H100 graph replay, K 768, H 1536: M = 640 8.3 against 12.1 us for cuBLAS + the row pass, 1920 20.6 / 30.0, 5120 55.6 / 87.8

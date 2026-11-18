@@ -81,9 +81,11 @@ def ext():
     )
 
 
-def active(M: int, D: int, fp32: bool, plain: bool) -> frozenset[str]:
-    """The placements this block call takes: bf16 default-option blocks (the CondFold route) at width 768, M % 128 == 0, each placement
-    from its row gate (``MIN_ROWS`` or ``MIN_ROWS_PER``)."""
+def active(M: int, D: int, fp32: bool, plain: bool, up: bool = False) -> frozenset[str]:
+    """The placements this block call takes: bf16 default-option blocks (the CondFold route; ``plain``) at width 768, M % 128 == 0, each
+    placement from its row gate (``MIN_ROWS`` or ``MIN_ROWS_PER``). ``up`` (Boltz-2's up-gate transition, ``plain`` then says the block is
+    the default or Boltz-2's): the expand + SwiGLU placement only (its e4m3 kernel has the 192-wide tile); qkvg / out / squeeze are the same
+    GEMMs as the default block's and keep their gates."""
     if not PLACES or fp32 or not plain or D != 768 or M % 128:
         return frozenset()
     return frozenset(p for p in PLACES if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_PER[p]))

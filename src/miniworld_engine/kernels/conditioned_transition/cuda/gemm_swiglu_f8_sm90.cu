@@ -21,11 +21,17 @@ TMN_DEVI void mma_f8_n128(float (&d)[64], uint64_t a, uint64_t b) {
                : "l"(a), "l"(b));
 }
 
+TMN_DEVI void mma_f8_n192(float (&d)[96], uint64_t a, uint64_t b) {
+  asm volatile("wgmma.mma_async.sync.aligned.m64n192k32.f32.e4m3.e4m3 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63,%64,%65,%66,%67,%68,%69,%70,%71,%72,%73,%74,%75,%76,%77,%78,%79,%80,%81,%82,%83,%84,%85,%86,%87,%88,%89,%90,%91,%92,%93,%94,%95}, %96, %97, 1, 1, 1;\n"
+               : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]), "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]), "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]), "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63]), "+f"(d[64]), "+f"(d[65]), "+f"(d[66]), "+f"(d[67]), "+f"(d[68]), "+f"(d[69]), "+f"(d[70]), "+f"(d[71]), "+f"(d[72]), "+f"(d[73]), "+f"(d[74]), "+f"(d[75]), "+f"(d[76]), "+f"(d[77]), "+f"(d[78]), "+f"(d[79]), "+f"(d[80]), "+f"(d[81]), "+f"(d[82]), "+f"(d[83]), "+f"(d[84]), "+f"(d[85]), "+f"(d[86]), "+f"(d[87]), "+f"(d[88]), "+f"(d[89]), "+f"(d[90]), "+f"(d[91]), "+f"(d[92]), "+f"(d[93]), "+f"(d[94]), "+f"(d[95]) 
+               : "l"(a), "l"(b));
+}
+
 constexpr int TBM = 128;
-template <int HTW> struct Cfg {
+template <int HTW, bool UP = false> struct Cfg {
   static constexpr int TBK = 128;                                         // K elements (bytes) a 128-B slab row
   static constexpr int NST = 4;
-  static constexpr int HT = HTW, TBN = 2 * HTW;
+  static constexpr int HT = HTW, TBN = (UP ? 3 : 2) * HTW;   // UP: [Wa | Wb | Wu] HT rows each (HT = 64: n192)
   static constexpr int F_SA = TBM * 128, F_SB = TBN * 128, F_ST = F_SA + F_SB;
   static constexpr int STGW = 64 * HT * 2;
   static constexpr int STG = NST * F_ST, BAR = STG + 2 * STGW, SMEM = BAR + 256;
@@ -39,11 +45,11 @@ TMN_DEVI void tma_store_2d(const CUtensorMap* map, const void* src, int c0, int 
                :: "l"(map), "r"(smem_u32(src)), "r"(c0), "r"(c1) : "memory");
 }
 
-template <int HTW>
+template <int HTW, bool UP = false>
 __global__ void __launch_bounds__(384, 1)
 gemm_swiglu_f8_sm90(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUtensorMap mB,
                     const __grid_constant__ CUtensorMap mH, const float* __restrict__ sx, const float* __restrict__ sw, int M, int K, int H) {
-  using C = Cfg<HTW>;
+  using C = Cfg<HTW, UP>;
   constexpr int NSTAGE = C::NST, TBK = C::TBK, HT = C::HT, TBN = C::TBN, F_SA = C::F_SA, F_ST = C::F_ST;
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
@@ -93,7 +99,8 @@ gemm_swiglu_f8_sm90(const __grid_constant__ CUtensorMap mA, const __grid_constan
       fence_regs(acc); wgmma_fence();
 #pragma unroll
       for (int ks = 0; ks < 4; ++ks) {
-        if constexpr (HTW == 128) mma_f8_n256(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
+        if constexpr (UP) mma_f8_n192(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
+        else if constexpr (HTW == 128) mma_f8_n256(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
         else mma_f8_n128(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
       }
       wgmma_commit();
@@ -118,8 +125,11 @@ gemm_swiglu_f8_sm90(const __grid_constant__ CUtensorMap mA, const __grid_constan
         const int c = 8 * g + 2 * (lane & 3);
         const float sr = rb ? s1 : s0;
         const float2 wa = *reinterpret_cast<const float2*>(swt + c), wb = *reinterpret_cast<const float2*>(swt + HT + c);
+        float2 wu = make_float2(1.f, 1.f);
+        if constexpr (UP) wu = *reinterpret_cast<const float2*>(swt + 2 * HT + c);
         const float x0 = acc[ia] * (sr * wa.x), x1 = acc[ia + 1] * (sr * wa.y);
-        const float h0 = x0 * sigmoid_(x0) * (acc[ib] * (sr * wb.x)), h1 = x1 * sigmoid_(x1) * (acc[ib + 1] * (sr * wb.y));
+        float h0 = x0 * sigmoid_(x0) * (acc[ib] * (sr * wb.x)), h1 = x1 * sigmoid_(x1) * (acc[ib + 1] * (sr * wb.y));
+        if constexpr (UP) { const int iu = 4 * (g + HT / 4) + 2 * rb; h0 *= acc[iu] * (sr * wu.x); h1 *= acc[iu + 1] * (sr * wu.y); }   // Boltz-2: silu(a) b u
         hp[q] = pack_bf16(h0, h1);
       }
       const int col = 8 * (2 * (gp & 3) + (mi >> 1));
@@ -163,15 +173,15 @@ CUtensorMap map2d(void* p, int esize, uint64_t rows, uint64_t cols, uint64_t rs,
                         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) == CUDA_SUCCESS, "tensor map encode failed");
   return map;
 }
-template <int HTW>
+template <int HTW, bool UP = false>
 void run(torch::Tensor& x, torch::Tensor& wab, torch::Tensor& h, torch::Tensor& sx, torch::Tensor& sw, int64_t sms, bool pdl) {
-  using C = Cfg<HTW>;
+  using C = Cfg<HTW, UP>;
   const int64_t M = x.size(0), K = x.size(1), H = h.size(1);
   TORCH_CHECK(M % TBM == 0 && K % C::TBK == 0 && H % C::HT == 0, "shapes: M % 128, K % 128, H % HT");
-  const auto mA = map2d(x.data_ptr(), 1, M, K, x.stride(0), C::TBK, TBM), mB = map2d(wab.data_ptr(), 1, 2 * H, K, K, C::TBK, C::TBN),
+  const auto mA = map2d(x.data_ptr(), 1, M, K, x.stride(0), C::TBK, TBM), mB = map2d(wab.data_ptr(), 1, (UP ? 3 : 2) * H, K, K, C::TBK, C::TBN),
              mH = map2d(h.data_ptr(), 2, M, H, H, 64, 64);
   const int tiles = (int)((M / TBM) * (H / C::HT));
-  cudaFuncSetAttribute(gemm_swiglu_f8_sm90<HTW>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM + 1024);
+  cudaFuncSetAttribute(gemm_swiglu_f8_sm90<HTW, UP>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM + 1024);
   cudaLaunchConfig_t cfg{};
   cfg.gridDim = dim3((unsigned)std::min<int64_t>(tiles, sms));
   cfg.blockDim = dim3(384);
@@ -182,23 +192,25 @@ void run(torch::Tensor& x, torch::Tensor& wab, torch::Tensor& h, torch::Tensor& 
   at[0].val.programmaticStreamSerializationAllowed = 1;
   cfg.attrs = at;
   cfg.numAttrs = pdl ? 1 : 0;
-  const cudaError_t err = cudaLaunchKernelEx(&cfg, gemm_swiglu_f8_sm90<HTW>, mA, mB, mH, (const float*)sx.data_ptr(), (const float*)sw.data_ptr(),
+  const cudaError_t err = cudaLaunchKernelEx(&cfg, gemm_swiglu_f8_sm90<HTW, UP>, mA, mB, mH, (const float*)sx.data_ptr(), (const float*)sw.data_ptr(),
                                              (int)M, (int)K, (int)H);
   TORCH_CHECK(err == cudaSuccess, "gemm_swiglu_f8 launch: ", cudaGetErrorString(err));
 }
 }  // namespace
 
 // x8 [M, K] e4m3 (row stride may exceed K), sx [M] fp32, wab8 [2H, K] e4m3 packed per 2 ht rows, sw [2H] fp32 in the same order,
-// h [M, H] bf16. M % 128, K % 128, H % ht.
-void gemm_swiglu_f8(torch::Tensor x, torch::Tensor wab, torch::Tensor h, torch::Tensor sx, torch::Tensor sw, int64_t sms, int64_t ht, bool pdl) {
+// h [M, H] bf16. M % 128, K % 128, H % ht. up (Boltz-2): wab8 [3H, K] packed per 192 rows [Wa 64 | Wb 64 | Wu 64], sw [3H], h = silu(a) b u (ht 64).
+void gemm_swiglu_f8(torch::Tensor x, torch::Tensor wab, torch::Tensor h, torch::Tensor sx, torch::Tensor sw, int64_t sms, int64_t ht, bool pdl, bool up) {
   TORCH_CHECK(x.scalar_type() == torch::kFloat8_e4m3fn && wab.scalar_type() == torch::kFloat8_e4m3fn && h.scalar_type() == torch::kBFloat16,
               "e4m3 x / wab, bf16 h");
   TORCH_CHECK(sx.scalar_type() == torch::kFloat && sw.scalar_type() == torch::kFloat && sx.is_contiguous() && sw.is_contiguous()
-              && sx.numel() == x.size(0) && sw.numel() == wab.size(0), "fp32 scales sx [M], sw [2H]");
-  TORCH_CHECK(x.stride(1) == 1 && wab.is_contiguous() && h.is_contiguous() && wab.size(0) == 2 * h.size(1) && wab.size(1) == x.size(1)
+              && sx.numel() == x.size(0) && sw.numel() == wab.size(0), "fp32 scales sx [M], sw [2H] ([3H] up)");
+  TORCH_CHECK(x.stride(1) == 1 && wab.is_contiguous() && h.is_contiguous() && wab.size(0) == (up ? 3 : 2) * h.size(1) && wab.size(1) == x.size(1)
               && h.size(0) == x.size(0), "shapes");
   const at::cuda::CUDAGuard guard(x.device());
-  if (ht == 64) run<64>(x, wab, h, sx, sw, sms, pdl);
+  TORCH_CHECK(!up || ht == 64, "up: ht 64 (n192 tiles)");
+  if (up) run<64, true>(x, wab, h, sx, sw, sms, pdl);
+  else if (ht == 64) run<64>(x, wab, h, sx, sw, sms, pdl);
   else { TORCH_CHECK(ht == 128, "ht 64 or 128"); run<128>(x, wab, h, sx, sw, sms, pdl); }
 }
 
@@ -209,7 +221,8 @@ void resgate_adaln_cf_q8(at::Tensor xin, at::Tensor ya, at::Tensor g, at::Tensor
 void quant_rows(at::Tensor x, at::Tensor out8, at::Tensor srow, bool pdl);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("gemm_swiglu_f8", &gemm_swiglu_f8);
+  m.def("gemm_swiglu_f8", &gemm_swiglu_f8, pybind11::arg("x"), pybind11::arg("wab"), pybind11::arg("h"), pybind11::arg("sx"), pybind11::arg("sw"),
+        pybind11::arg("sms"), pybind11::arg("ht"), pybind11::arg("pdl"), pybind11::arg("up") = false);
   m.def("adaln_in_rows_cf_q8", &adaln_in_rows_cf_q8);
   m.def("resgate_adaln_cf_q8", &resgate_adaln_cf_q8);
   m.def("quant_rows", &quant_rows);
