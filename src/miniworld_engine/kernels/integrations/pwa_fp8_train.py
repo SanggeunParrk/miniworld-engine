@@ -91,7 +91,9 @@ def serves(msa: torch.Tensor) -> bool:
     if not (PLACES or NATIVE_ONLY) or not msa.is_cuda or msa.ndim != 4 or msa.shape[0] != 1 or msa.shape[3] != 64:
         return False
     s, n = msa.shape[1], msa.shape[2]
-    if PLACES and "fwd" not in PLACES and n < 512:  # backward-only FP8 needs the split (head-major o) forward: N >= 512 (pwa_train._SPLIT_MIN_N)
+    if (
+        PLACES and "fwd" not in PLACES and n < 512
+    ):  # backward-only FP8 needs the split (head-major o) forward: N >= 512 (pwa_train._SPLIT_MIN_N)
         return False
     return torch.cuda.get_device_capability(msa.device) == (9, 0) and n % 128 == 0 and 0 < n <= 1024 and s % 2 == 0 and s > 0
 
