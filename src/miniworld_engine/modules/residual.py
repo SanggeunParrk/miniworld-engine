@@ -60,13 +60,23 @@ class _ParallelResidualCudaFn(torch.autograd.Function):
         from miniworld_engine.kernels.parallel_residual import cuda as K
 
         ctx.n = len(branches)
+        # the branches that are leaves of the autograd graph (a parameter, or an input a caller differentiates): their gradient ends in AccumulateGrad,
+        # which takes a FRESH tensor as the leaf's `.grad` but copies a shared one (one full-tensor copy a leaf, each reading g again)
+        ctx.leaves = tuple(y if y.requires_grad and y.is_leaf else None for y in branches)
         return K.forward(x.contiguous(), [y.contiguous() for y in branches])
 
     @staticmethod
     def backward(ctx, g):
         from miniworld_engine.kernels.parallel_residual import cuda as K
 
-        return (K.backward(g, ctx.n), *([g] * ctx.n))
+        # d out / d y_i = g: shared for every branch an upstream node reads (no copy), but written as a fresh tensor, in the one pass of the
+        # gradient of x, for a leaf branch with no `.grad` yet (AccumulateGrad then steals it; with a `.grad` it adds the shared g)
+        fresh = [i for i, y in enumerate(ctx.leaves) if y is not None and y.grad is None and ctx.needs_input_grad[i + 1]]
+        gx, *copies = K.backward(g, ctx.n, len(fresh))
+        gys = [g] * ctx.n
+        for i, c in zip(fresh, copies, strict=True):
+            gys[i] = c
+        return (gx, *gys)
 
 
 def _cuda_reason(x: torch.Tensor, branches: list[torch.Tensor]) -> str | None:

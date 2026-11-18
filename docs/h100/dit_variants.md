@@ -67,6 +67,8 @@ operands, fp32 inside:
 | `dit_variants_edge_bwd_apply_sm90` | backward | after it: the side buffers added into dq / dk / dv (one CTA per (sample, head, 8 columns), windows in order, deterministic) |
 | `dit_variants_edge_bias_bwd_sm90` | backward | the edge windows' pair LayerNorm / projection backward into dz, d gamma_pair, d Wb |
 
+The five windows' indices, key positions and key validity (conformer mask included) come from one small launch (`edge_index`, a helper of the forward tables: no row of its own; 3.0.0 ran about 20 torch int64 launches for them, which a graph that remakes the tables at every replay paid every time).
+
 **The tail.** On a padded atom count every query window past the last real one (`w >= t0 = max(last + 1, 2)`, padding queries only)
 also differs: in the reference they all read the same slid keys `[R_rule - 128, R_rule)` (`R_rule`: the real count, or rounded up to a
 whole query window for `slide_qblock`; keys past the real atoms masked; a padding query is spared Chai-1's conformer mask). How many there

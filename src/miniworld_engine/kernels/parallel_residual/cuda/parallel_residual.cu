@@ -2,7 +2,7 @@
 // (sm_90a, `parallel_residual_sm90`) and A100 (sm_80, `parallel_residual_sm80`) by kernels/parallel_residual/cuda/__init__.py.
 //
 //   forward   out = x + sum_i (y_i - x)      1 to 4 branches; the differences and the sum in fp32, ONE rounding to the dtype at the end
-//   backward  gx  = (1 - n) g                (d out / d y_i = g needs no kernel); fp32 product, one rounding
+//   backward  gx  = (1 - n) g                (d out / d y_i = g needs no kernel; the leaf branches' fresh copies of g ride the same pass); fp32 product, one rounding
 //
 // The same arithmetic in the same order as the Triton kernel (kernels/parallel_residual/triton/main.py) and the pytorch reference: acc =
 // (y0 - x) + (y1 - x) + ..., out = x + acc. A pure streaming pass (n + 2 tensor passes), so the kernel is shaped for the HBM bandwidth:
@@ -101,8 +101,9 @@ __global__ void __launch_bounds__(kThreads) parallel_residual_fwd_scalar_k(const
   }
 }
 
+// the gradients of the leaf branches (``d out / d y_i = g``) as fresh tensors written in the same pass (``Branches``: the first ``nc`` pointers)
 template <typename T>
-__global__ void __launch_bounds__(kThreads) parallel_residual_bwd_k(const T* __restrict__ g, T* __restrict__ gx, float scale, int64_t n, int vec) {
+__global__ void __launch_bounds__(kThreads) parallel_residual_bwd_k(const T* __restrict__ g, T* __restrict__ gx, Branches cp, int nc, float scale, int64_t n, int vec) {
   constexpr int V = 16 / sizeof(T);
   if (vec) {
     const int64_t nvec = n / V;
@@ -123,13 +124,20 @@ __global__ void __launch_bounds__(kThreads) parallel_residual_bwd_k(const T* __r
 #pragma unroll
         for (int e = 0; e < V; ++e) re[e] = from_f<T>(to_f(ge[e]) * scale);
         __stcs(reinterpret_cast<uint4*>(gx) + q, r);
+        for (int i = 0; i < nc; ++i) __stcs(reinterpret_cast<uint4*>(const_cast<void*>(cp.p[i])) + q, a[u]);
       }
     }
     if (blockIdx.x == gridDim.x - 1)
-      for (int64_t k = nvec * V + threadIdx.x; k < n; k += kThreads) gx[k] = from_f<T>(to_f(g[k]) * scale);
+      for (int64_t k = nvec * V + threadIdx.x; k < n; k += kThreads) {
+        gx[k] = from_f<T>(to_f(g[k]) * scale);
+        for (int i = 0; i < nc; ++i) static_cast<T*>(const_cast<void*>(cp.p[i]))[k] = g[k];
+      }
   } else {
     for (int64_t k = (int64_t)blockIdx.x * kThreads + threadIdx.x; k < n; k += (int64_t)gridDim.x * kThreads)
+    {
       gx[k] = from_f<T>(to_f(g[k]) * scale);
+      for (int i = 0; i < nc; ++i) static_cast<T*>(const_cast<void*>(cp.p[i]))[k] = g[k];
+    }
   }
 }
 
@@ -198,23 +206,34 @@ at::Tensor forward(at::Tensor x, std::vector<at::Tensor> ys) {
   return out;
 }
 
-// gx = (1 - n) g: the gradient of x (fp32 product, one rounding to g's dtype)
-at::Tensor backward(at::Tensor g, int64_t nb) {
+// [gx = (1 - n) g (the gradient of x: fp32 product, one rounding to g's dtype), then `copies` fresh tensors equal to g]: one pass. The copies are the
+// gradients of the branches that are leaves of the autograd graph: AccumulateGrad takes a fresh gradient as the leaf's `.grad` (no copy kernel),
+// where a shared g costs it one full-tensor copy a branch (each reads g again).
+std::vector<at::Tensor> backward(at::Tensor g, int64_t nb, int64_t copies) {
+  TORCH_CHECK(copies >= 0 && copies <= kMaxBranches, "parallel_residual backward: 0 to 4 copies");
   TORCH_CHECK(g.is_cuda(), "parallel_residual backward: a CUDA gradient");
   check_dtype(g);
   g = g.contiguous();
-  at::Tensor gx = at::empty_like(g, g.options().memory_format(at::MemoryFormat::Contiguous));
+  std::vector<at::Tensor> outs;
+  for (int64_t i = 0; i <= copies; ++i) outs.push_back(at::empty_like(g, g.options().memory_format(at::MemoryFormat::Contiguous)));
+  at::Tensor gx = outs[0];
   const int64_t n = g.numel();
-  if (n == 0) return gx;
+  if (n == 0) return outs;
+  Branches cp{};
+  bool vec0 = aligned16(g.data_ptr()) && aligned16(gx.data_ptr());
+  for (int64_t i = 0; i < copies; ++i) {
+    cp.p[i] = outs[i + 1].data_ptr();
+    vec0 = vec0 && aligned16(cp.p[i]);
+  }
   const at::cuda::CUDAGuard guard(g.device());
   const auto stream = at::cuda::getCurrentCUDAStream();
   const float scale = (float)(1 - nb);
-  const bool vec = aligned16(g.data_ptr()) && aligned16(gx.data_ptr());
+  const bool vec = vec0;
   auto go = [&](auto tag) {
     using T = decltype(tag);
     const unsigned blocks = (unsigned)(vec ? vec_blocks(n, sizeof(T), kUnroll) : scalar_blocks(n));
     parallel_residual_bwd_k<T><<<blocks, kThreads, 0, stream>>>(reinterpret_cast<const T*>(g.data_ptr()), reinterpret_cast<T*>(gx.data_ptr()),
-                                                               scale, n, vec ? 1 : 0);
+                                                               cp, (int)copies, scale, n, vec ? 1 : 0);
   };
   switch (g.scalar_type()) {
     case at::kBFloat16: go(__nv_bfloat16{}); break;
@@ -222,10 +241,10 @@ at::Tensor backward(at::Tensor g, int64_t nb) {
     default: go(float{}); break;
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return gx;
+  return outs;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &forward, "out = x + sum_i (y_i - x), 1 to 4 branches, fp32 accumulation, one rounding", py::arg("x"), py::arg("ys"));
-  m.def("backward", &backward, "gx = (1 - n) g", py::arg("g"), py::arg("n"));
+  m.def("backward", &backward, "[gx = (1 - n) g, copies of g], one pass", py::arg("g"), py::arg("n"), py::arg("copies") = 0);
 }
