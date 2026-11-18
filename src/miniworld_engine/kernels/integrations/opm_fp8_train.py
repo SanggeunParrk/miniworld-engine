@@ -56,6 +56,10 @@ DELAYED = os.environ.get("MINIWORLD_OPM_FP8_TRAIN_DELAYED", "1") != "0"
 #: round 2: one dgrad pass writes both dO planes (d_pair 128; the transposed plane is staged in shared memory); False = round 1: two launches
 SINGLE = os.environ.get("MINIWORLD_OPM_FP8_TRAIN_SINGLE", "1") != "0"
 HISTORY = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_HISTORY", "16"))
+#: round 4: how the product O (the dominant saved tensor: 32N x 32N bf16, ~85 % of the saved bytes at S 1024) is kept for dW_o:
+#: "bf16" (rounds 1-3), "fp8" (e4m3 x a power-of-two scale, dequantised in backward), "recompute" (the FP8 product is redone in backward)
+OSTORE = os.environ.get("MINIWORLD_OPM_FP8_TRAIN_OSTORE", "bf16")
+_OCHUNK = 2048  # rows of O per conversion chunk (O is [32N, 32N])
 MARGIN = float(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MARGIN", "2"))
 STATS = {"calls": 0}
 _SITES: dict = {}  # (device, wo data_ptr) -> _DSite
@@ -177,7 +181,23 @@ class OpmFp8TrainFn(torch.autograd.Function):
         z = ext.opm_epilogue(
             o, norm, wo.detach().to(bf).contiguous(), bo.detach().to(bf).float().contiguous(), n, n, res, int(after), **dkw
         )
-        ctx.save_for_backward(m, mask16, norm, a8t, b8t, stats, lnw, lnb, wa, wb, wo, bo, o, sa, sb)
+        extra: list[torch.Tensor] = []
+        if OSTORE == "fp8":  # O kept as e4m3 x 2^k; amax on the device (no host sync, graph safe)
+            mn, mx = torch.aminmax(o)
+            amax = torch.maximum(mn.abs(), mx).float().clamp_min(1e-30)
+            so = torch.exp2(torch.ceil(torch.log2(amax / E4M3_MAX))).reshape(1)
+            o8 = torch.empty(o.shape, device=o.device, dtype=torch.float8_e4m3fn)
+            sob = so.to(bf)
+            for r0 in range(0, o.shape[0], _OCHUNK):  # chunked: no full-size temporaries
+                o8[r0 : r0 + _OCHUNK] = (o[r0 : r0 + _OCHUNK] / sob).to(torch.float8_e4m3fn)
+            extra = [o8, so]
+        elif OSTORE == "recompute":
+            extra = [a8, b8]
+        else:
+            extra = [o]
+        ctx.ostore = OSTORE
+        del o
+        ctx.save_for_backward(m, mask16, norm, a8t, b8t, stats, lnw, lnb, wa, wb, wo, bo, sa, sb, *extra)
         ctx.eps, ctx.after, ctx.has_bias, ctx.has_residual = eps, bool(after), pb is not None, res is not None
         STATS["calls"] += 1
         return z
@@ -189,9 +209,18 @@ class OpmFp8TrainFn(torch.autograd.Function):
         from miniworld_engine.kernels.integrations import opm_train as ot
 
         bf = torch.bfloat16
-        m, mask16, norm, a8t, b8t, stats, lnw, lnb, wa, wb, wo, bo, o, sa, sb = ctx.saved_tensors
+        m, mask16, norm, a8t, b8t, stats, lnw, lnb, wa, wb, wo, bo, sa, sb, *kept = ctx.saved_tensors
         s, n, cm, cz = m.shape[0], m.shape[1], m.shape[2], wo.shape[0]
         ch = ot.CH
+        if ctx.ostore == "fp8":
+            o = torch.empty(kept[0].shape, device=kept[0].device, dtype=bf)
+            sob = kept[1].to(bf)  # power-of-two scale: exact in bf16
+            for r0 in range(0, o.shape[0], _OCHUNK):
+                o[r0 : r0 + _OCHUNK] = kept[0][r0 : r0 + _OCHUNK].to(bf) * sob
+        elif ctx.ostore == "recompute":
+            o = opm_fp8.product(kept[0], kept[1], (sa, sb), n)
+        else:
+            o = kept[0]
         ext = ot._ext(dz.device, native=True, tma=False, cm=cm, cz=cz, fp8=True)
         bw = wo.detach().t().to(bf).contiguous()  # Wo^T [(c,e), z]
         bw2 = torch.cat([bw, bw.view(ch, ch, cz).transpose(0, 1).reshape(ch * ch, cz)]).contiguous()  # + rows (e, c): the dO^T plane

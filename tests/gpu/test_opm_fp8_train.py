@@ -216,3 +216,25 @@ def test_gate_and_delayed_scale(mode, monkeypatch) -> None:
     peak = float(site.amax)
     assert 0 < peak <= 448
     assert float(site.sd) <= sd0  # the measured amax is below the bound's (4-6x loose), so the scale never grows
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90a)")
+@pytest.mark.parametrize("ostore", ["recompute", "fp8"])
+def test_o_storage_modes(mode, monkeypatch, ostore) -> None:
+    """Round 4: O kept for dW_o as 'recompute' (the FP8 product redone: gradients bit-identical to keeping bf16 O, far fewer saved bytes)
+    or 'fp8' (e4m3 x 2^k: only dW_out moves, within 2x of the bf16-O error)."""
+    base, msa, mask, gz = _case(192, 1024, after=True)
+    mod = copy.deepcopy(base).set_backend("cuda")
+    gold = _gold(base, msa, mask, gz)
+    mode("e4m3")
+    monkeypatch.setattr(F8, "OSTORE", "bf16")
+    _grads(mod, msa, mask, gz)  # seeds the delayed scale
+    ref = _grads(mod, msa, mask, gz)
+    monkeypatch.setattr(F8, "OSTORE", ostore)
+    got = _grads(mod, msa, mask, gz)
+    for k, v in got.items():
+        assert torch.isfinite(v).all()
+        if ostore == "recompute" or k != "to_out.weight":
+            assert torch.equal(v, ref[k]), k
+        else:
+            assert _err(v, gold[k])[0] < 2 * _err(ref[k], gold[k])[0] + 1e-3

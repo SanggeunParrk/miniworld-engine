@@ -31,6 +31,9 @@ def case(L, S, cm, cz, after, seed=0):
 
 
 def make_graph(mod, msa, mask, gz, mode):
+    mode, _, ostore = (mode or "").partition(":")  # route "e4m3:fp8" = e4m3 with O kept in fp8 ("e4m3:recompute": recomputed)
+    mode = mode or None
+    F8.OSTORE = ostore or "bf16"
     F8.MODE = mode
     F8.MIN_S = 0
     F8.MIN_L = 0
@@ -55,6 +58,7 @@ def make_graph(mod, msa, mask, gz, mode):
         out = step()
     torch.cuda.synchronize()
     F8.MODE = None
+    F8.OSTORE = "bf16"
     return g, out
 
 
@@ -68,7 +72,7 @@ def burst(g, n):
     return e0.elapsed_time(e1) / n
 
 
-def run(L, S, cm, cz, after, routes=("def", "ctl", "e4m3", "e5m2")):
+def run(L, S, cm, cz, after, routes=("def", "ctl", "e4m3", "e4m3:fp8", "e4m3:recompute")):
     base, msa, mask, gz = case(L, S, cm, cz, after)
     mod = copy.deepcopy(base).set_backend("cuda")
     gs = {r: make_graph(mod, msa, mask, gz, None if r in ("def", "ctl") else r)[0] for r in routes}
