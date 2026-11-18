@@ -91,8 +91,10 @@ _PREFER_GENERIC_ROWS = {
     64: (3072, 3072),
     128: (6144, 3072),
     256: (6144, 12288),
-    384: (16384, 16384),
-    512: (16384, 12288),
+    # D 384 / 512 training: the generic step ties the wide build (D 384: within 3 %) or beats it by 8 - 17 % (D 512, n 2 / 4: 16384 rows 362 / 425 us,
+    # 65536 1248 / 1398, 147456 2727 / 3000, 589824 10708 / 11626 us) at every row count from 16384 up (H100 2026-11-18, step, CUDA graph): no limit
+    384: (16384, 1 << 30),
+    512: (16384, 1 << 30),
     # D 768 (n = 2: Boltz-2 / ESMFold2 token single, 128 .. 2048 rows): the wide D768 build is the training structure (LayerNorm kernel,
     # an expand that also writes a / b, the [Wa; Wb] row-block pack per call, squeeze); at inference it took 1.6 - 2.1x the generic
     # kernels at every row count (H100 2026-11-17, CUDA graph: 1024 rows 47.9 / 23.4 us, 2048 63.2 / 33.9, 4096 79.7 / 53.9, 8192

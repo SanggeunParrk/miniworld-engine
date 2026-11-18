@@ -16,3 +16,9 @@ def test_d768_inference_prefers_generic(rows: int) -> None:
 @pytest.mark.parametrize("rows", [128, 768, 1000, 1024, 1536, 2048, 4096, 8192, 16384, 32768])
 def test_d768_training_prefers_generic(rows: int) -> None:
     assert G.prefers_generic(torch.empty(rows, 768, dtype=torch.bfloat16), training=True, n=2)
+
+
+@pytest.mark.parametrize("d", [384, 512])
+@pytest.mark.parametrize("rows", [16384, 36864, 65536, 147456, 589824])
+def test_d384_d512_training_prefers_generic_from_16384(d: int, rows: int) -> None:
+    assert G.prefers_generic(torch.empty(rows, d, dtype=torch.bfloat16), training=True, n=2)

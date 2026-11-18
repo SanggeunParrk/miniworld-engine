@@ -72,7 +72,7 @@ cuBLAS (`torch.mm` / `addmm`), not engine kernels.
 0. fp32 with TF32 allowed at the f32io shapes (`F32_SHAPES` inference, `F32_TRAIN_SHAPES` training): `fused_wide_sm90a.transition_f32_sm90a`
    (below).
 1. `fused_generic_sm90a`, if `prefers_generic` (bf16 only; at few rows the row-tile-per-CTA builds leave SMs idle). Row limits per D,
-   (inference, training): D64 (3072, 3072), D128 (6144, 3072), D256 (6144, 12288), D384 (16384, 16384), D512 (16384, 12288), D768 (16384, no limit). D64
+   (inference, training): D64 (3072, 3072), D128 (6144, 3072), D256 (6144, 12288), D384 (16384, no limit), D512 (16384, no limit), D768 (16384, no limit); D384 and D512 training also have no limit (the generic step ties or beats the wide one from 16384 rows up). D64
    inference never prefers it; D128 inference prefers it up to 512 rows (n 2) / 4096 rows (n 4).
    D768 inference: the wide D768 build is the training structure (it writes a / b and packs [Wa; Wb] per call) and measured 1.6 - 2.1x
    the generic kernels at 1024 - 8192 rows (H100, CUDA graph: 1024 rows 47.9 / 23.4 us, 2048 63.2 / 33.9, 4096 79.7 / 53.9), so no
