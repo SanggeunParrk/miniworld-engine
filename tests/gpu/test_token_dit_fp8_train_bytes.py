@@ -57,7 +57,7 @@ def _run(m, A: int, L: int, places: str) -> list[torch.Tensor]:
 
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
-@pytest.mark.parametrize("places", ["nox", "hsave", "bytes"])
+@pytest.mark.parametrize("places", ["nox", "hsave", "rx1", "nox,hsave,rx1", "bytes"])
 @pytest.mark.parametrize("A,L", [(8, 128), (6, 200), (48, 128)])
 def test_bytes_are_bit_identical(A: int, L: int, places: str) -> None:
     m = _master()
@@ -97,7 +97,7 @@ def test_nox_keeps_no_fp32_residual() -> None:
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
 def test_bytes_preset_and_gate() -> None:
     F = _F()
-    assert F.parse("bytes") == frozenset(("nox", "hsave"))
+    assert F.parse("bytes") == frozenset(("nox", "hsave", "rx1"))
     old = F.PLACES, F.MIN_ROWS
     F.PLACES, F.MIN_ROWS = F.parse("fast,nox"), 16384
     try:
@@ -106,3 +106,45 @@ def test_bytes_preset_and_gate() -> None:
         assert F.active(32768, 768, True, True, True) == frozenset()  # fp32: none
     finally:
         F.PLACES, F.MIN_ROWS = old
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+@pytest.mark.parametrize("A,L", [(8, 128), (6, 200)])
+def test_fused_q8_and_rx1_with_expand_are_bit_identical(A: int, L: int) -> None:
+    """Round 4: res_adaln_b writes the e4m3 xt itself (FUSE_Q8) and rx1 recomputes x1: the expand route's output and gradients are
+    bit-identical to the unfused / stored versions."""
+    F = _F()
+    m = _master()
+    old_fuse = F.FUSE_Q8
+    try:
+        F.FUSE_Q8 = False
+        ref = _run(m, A, L, "expand,nox,hsave")
+        F.FUSE_Q8 = True
+        for places in ("expand,nox,hsave", "expand,nox,hsave,rx1"):
+            got = _run(m, A, L, places)
+            for i, (a, b) in enumerate(zip(ref, got, strict=True)):
+                assert torch.equal(a, b), f"tensor {i}: {places} differs from the unfused route"
+    finally:
+        F.FUSE_Q8 = old_fuse
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+def test_rx1_keeps_no_fp32_x1() -> None:
+    F = _F()
+    m = _master()
+    n_f32 = {}
+    for places in ("nox", "nox,rx1"):
+        old = F.PLACES, F.MIN_ROWS
+        F.PLACES, F.MIN_ROWS = F.parse(places), 0
+        try:
+            inp = m.make_inputs(length=128, samples=8, depth=None, dtype=torch.bfloat16, device="cuda", stream="token_single_shared_cond", generator=torch.Generator(device="cuda").manual_seed(1))
+            s = inp["single"].detach().clone().requires_grad_(True)
+            c = inp["cond"].detach()[:1].clone()
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                y = m(s, c.expand(8, -1, -1, -1), inp["pair"], inp["mask"])
+            fn = y.grad_fn
+            saved = [t for t in getattr(fn, "saved_tensors", ())] if fn is not None else []
+            n_f32[places] = sum(t.numel() * t.element_size() for t in saved if t is not None and t.dtype == torch.float32 and t.shape[-1:] == (768,))
+        finally:
+            F.PLACES, F.MIN_ROWS = old
+    assert n_f32["nox,rx1"] < n_f32["nox"]
