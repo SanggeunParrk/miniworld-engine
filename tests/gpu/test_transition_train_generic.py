@@ -26,6 +26,9 @@ def test_training_generic_accuracy(d: int, n: int, rows: int) -> None:
     torch.manual_seed(0)
     assert G.prefers_generic(torch.empty(rows, d, dtype=torch.bfloat16), training=True, n=n)
     m = Transition(d, n, master_weights=True, backend="cuda").cuda()
+    with torch.no_grad():  # the squeeze starts at zero: random parameters, so every gradient is non-trivial
+        for p in m.parameters():
+            p.copy_(torch.randn_like(p) * p.shape[-1] ** -0.5 if p.dim() > 1 else 1 + 0.1 * torch.randn_like(p))
     ref = Transition(d, n, master_weights=True, backend="pytorch").cuda()
     ref.load_state_dict(m.state_dict())
     ref64 = Transition(d, n, backend="pytorch").cuda().double()
@@ -37,4 +40,5 @@ def test_training_generic_accuracy(d: int, n: int, rows: int) -> None:
     ex = _step(ref64, x.double(), dy.double(), torch.float64)
     for i, (g, p, e) in enumerate(zip(got, pt, ex, strict=True)):
         print(f"ACC d{d} n{n} rows{rows} out{i}: engine rms {_rms_rel(g, e):.3e} max {(g.double() - e).abs().max().item():.3e}; pytorch rms {_rms_rel(p, e):.3e}")
+        assert e.abs().max() > 0
         assert _rms_rel(g, e) <= max(_rms_rel(p, e), 8e-3), f"output {i}: engine {_rms_rel(g, e):.3e} pytorch {_rms_rel(p, e):.3e}"
