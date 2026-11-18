@@ -414,7 +414,7 @@ class _LtProblem:
 
     def algorithm(self, name, frozen, donor=None):
         """Selected algorithm: frozen configuration, validated for this runtime."""
-        key = (LT_SELECTION, name, None if frozen is None else tuple(frozen[1]), None if donor is None else tuple(donor.data))
+        key = (LT_SELECTION, name, None if frozen is None else json.dumps(frozen), None if donor is None else tuple(donor.data))
         if key not in self.chosen:
             self.chosen[key] = self._select(name, frozen, donor)
         return self.chosen[key]
@@ -431,13 +431,16 @@ class _LtProblem:
             return first
         if frozen is None or LT_SELECTION == "heuristic":
             return first
-        index, words = frozen
+        # An entry is one [index, words] or a list of them (one per cuBLASLt generation that offers different algorithms; first match wins).
+        candidates = [frozen] if isinstance(frozen[0], int) else frozen
         if LT_SELECTION == "index":
+            index = candidates[0][0]
             return self.heuristics[index].algo if index in self.indices else first
-        for i in self.indices:
-            data = list(self.heuristics[i].algo.data)
-            if data[:4] == words[:4] and data[5:] == words[5:]:
-                return self.heuristics[i].algo
+        for _, words in candidates:
+            for i in self.indices:
+                data = list(self.heuristics[i].algo.data)
+                if data[:4] == words[:4] and data[5:] == words[5:]:
+                    return self.heuristics[i].algo
         _warn_once(name, "frozen configuration not offered by this cuBLASLt; using its first heuristic")
         return first
 
