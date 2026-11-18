@@ -36,7 +36,7 @@ def _case(d_msa: int, d_pair: int, c: int, n: int, s: int):
 
 
 @pytest.mark.skipif(not _H100, reason="H100")
-@pytest.mark.parametrize(("d_msa", "c"), [(64, 8), (128, 8), (128, 16)])
+@pytest.mark.parametrize(("d_msa", "c"), [(64, 8), (128, 8), (128, 16), (256, 32)])
 def test_ln_vt8_wide_matches_ln_vg_w(f8, d_msa: int, c: int) -> None:
     from miniworld_engine.kernels.integrations import pwa_wide as PW
 
@@ -58,7 +58,15 @@ def test_ln_vt8_wide_matches_ln_vg_w(f8, d_msa: int, c: int) -> None:
 @pytest.mark.skipif(not _H100, reason="H100")
 @pytest.mark.parametrize(
     ("d_msa", "d_pair", "c", "n", "s"),
-    [(64, 128, 8, 400, 96), (64, 128, 8, 777, 33), (128, 256, 8, 384, 64), (128, 256, 16, 272, 64), (128, 384, 8, 256, 32)],
+    [
+        (64, 128, 8, 400, 96),
+        (64, 128, 8, 777, 33),
+        (128, 256, 8, 384, 64),
+        (128, 256, 16, 272, 64),
+        (128, 384, 8, 256, 32),
+        (256, 512, 32, 384, 64),  # BIG, N % 64 == 0: y kept by ln_vt8
+        (256, 512, 32, 400, 33),  # BIG, N % 16 only: gate_w normalises m again
+    ],
 )
 def test_route_accuracy_and_default_unchanged(f8, d_msa: int, d_pair: int, c: int, n: int, s: int) -> None:
     base, inp = _case(d_msa, d_pair, c, n, s)
@@ -125,8 +133,27 @@ def test_gates_wide() -> None:
         assert not F8.serves_wide(64, 8, 512, 256) and not F8.serves_wide(64, 8, 256, 384)
         assert not F8.serves_wide(64, 8, 4096, 192)  # short
         assert not F8.serves_wide(64, 8, 1024, 392)  # N % 16 (the caller pads)
-        assert not F8.serves_wide(256, 32, 1024, 768)  # the BIG build is not served
+        assert F8.serves_wide(256, 32, 1024, 768)  # the BIG build (IntelliFold2)
         F8.ENABLED = False
         assert not F8.serves_wide(64, 8, 4096, 768)
     finally:
         F8.ENABLED, F8.WIDE_MIN_N, F8.WIDE_MIN_SN = saved
+
+
+@pytest.mark.skipif(not _H100, reason="H100")
+def test_ln_vt8_big_keeps_y(f8) -> None:
+    """BIG (256 x 8 x 32): with store_y the y bytes are ``ln_vg_w``'s y, and v matches its v."""
+    from miniworld_engine.kernels.integrations import pwa_wide as PW
+
+    torch.manual_seed(0)
+    s, n, d, c = 70, 192, 256, 32
+    m = torch.randn(s, n, d, device="cuda").bfloat16()
+    lw, lb = 1 + 0.1 * torch.randn(d, device="cuda"), 0.1 * torch.randn(d, device="cuda")
+    wv = (torch.randn(8 * c, d, device="cuda") * d**-0.5).bfloat16()
+    v, y_ref, _ = PW._value(d, c).ln_vg_w(m, lw, lb, wv, 1e-5, True)
+    amax = torch.zeros(1, device="cuda")
+    vt, y = f8._ext(d, c).ln_vt8(m, lw, lb, wv, 1e-5, torch.full((1,), 8.0, device="cuda"), amax, *f8.wide_cfg(d, c), True)
+    assert torch.equal(y, y_ref)
+    vd = vt.float().transpose(1, 2) / 8.0
+    ref = v.float()
+    assert float((vd - ref).pow(2).mean().sqrt() / ref.pow(2).mean().sqrt()) < 0.04

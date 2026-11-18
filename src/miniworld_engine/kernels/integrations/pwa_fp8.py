@@ -244,8 +244,11 @@ def forward(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16):
 
 # ------------------------------------------------------------------------------------------------- the wide widths (pwa_wide)
 #: the pwa_wide widths served, (d_msa, channels per head) with 8 heads: AF3 / OpenFold3 / Protenix-v1 (64, 8), Protenix-v2 / OpenDDE (128, 8),
-#: ESMFold2 (128, 16).  The BIG build (256 x 8 x 32) is not served.
-WIDE = ((64, 8), (128, 8), (128, 16))
+#: ESMFold2 (128, 16), and the BIG build (256, 32) of IntelliFold2 (d_pair 512; its gate / out pass is ``gate_w`` + ``out_w``).
+WIDE = ((64, 8), (128, 8), (128, 16), (256, 32))
+#: BIG build: ``ln_vt8`` also stores y (the bytes of ``ln_vg_w``'s y) and ``gate_w`` reads it, like the default route's ``BIG_INFER_Y``; needs
+#: N % 64 == 0, other lengths (N a multiple of 16) take the LayerNorm-again ``gate_w`` mode.  False: always the LayerNorm-again mode
+BIG_Y = True
 #: shortest N served on the wide widths (AF3 64 x 8, module FP8 / default: N128 1.04 and N192 1.01 at S1024; N256 0.97); 0 = no gate
 WIDE_MIN_N = int(os.environ.get("MINIWORLD_PWA_FP8_WIDE_MIN_N", "256"))
 #: smallest S * N served on the wide widths (S512 N256 1.03, S256 N384 1.01, S128 N768 1.02; S1024 N256, S512 N384, S256 N768 0.96-0.97);
@@ -255,6 +258,8 @@ WIDE_MIN_SN = int(os.environ.get("MINIWORLD_PWA_FP8_WIDE_MIN_SN", str(3 << 16)))
 
 def wide_cfg(d_msa: int, c: int) -> tuple[int, int]:
     """ln_vt8 (blocks per SM, TMA stages) at a wide width: measured best of {1, 2, 3, 4, 6, 8} x {2, 3, 4} (S1024 N768; 64 x 8 also S4096 N1536)."""
+    if d_msa == 256:  # BIG: Wv (128 KiB) + two 32 KiB tiles + the 16 KiB v staging = 209 KiB of shared memory: one block per SM, two stages
+        return (1, 2)
     return {64: (3, 3), 128: (3, 2) if c == 8 else (2, 3)}[d_msa]
 
 
@@ -268,15 +273,21 @@ def forward_wide(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16, kv):
     contraction -> ``kv.gate_out_w`` in its LayerNorm mode (the default inference gate pass, unchanged). ``kv``: the pwa_wide build."""
     d, c = m.shape[2], wv16.shape[0] // 8
     k, cfg = _ext(d, c), wide_cfg(d, c)
-    amax, ws, key = _scales(k, m, key_tensor, lnm_w, lnm_b, wv16, eps_m, cfg, False)
+    big = d == 256  # the BIG build: gate_w + out_w instead of gate_out_w
+    keep_y = big and BIG_Y and m.shape[1] % 64 == 0
+    amax, ws, key = _scales(k, m, key_tensor, lnm_w, lnm_b, wv16, eps_m, cfg, keep_y)
     wq = k.w_quant(w16)
     out = m
     for _attempt in range(4):
-        vt, _ = k.ln_vt8(m, lnm_w, lnm_b, wv16, eps_m, _VINV[key], amax, *cfg, False)
+        vt, y = k.ln_vt8(m, lnm_w, lnm_b, wv16, eps_m, _VINV[key], amax, *cfg, keep_y)
         o = torch.empty((8, m.shape[1], m.shape[0] * c), dtype=torch.bfloat16, device=m.device)
         contract(wq, vt, o, _VS[key], ws)
         del vt
-        out = kv.gate_out_w(o, m, m, wg16, wo16, None, 1.0, lnm_w, lnm_b, eps_m)
+        if big:
+            a, _ = kv.gate_w(o, y, wg16, False) if keep_y else kv.gate_w(o, m, wg16, False, lnm_w, lnm_b, eps_m)
+            out = kv.out_w(a, m, wo16, None, 1.0)
+        else:
+            out = kv.gate_out_w(o, m, m, wg16, wo16, None, 1.0, lnm_w, lnm_b, eps_m)
         if GUARD != "sync" or not take_overflow():
             break
         rescale_all()
