@@ -83,6 +83,9 @@ GRAD_E5M2: bool = os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_GRAD", "e4m3").s
 #: H100, CUDA graph fwd + bwd, 2026-11-18: `fast` won at M 18432 / 36864 (-2.2 / -1.1 % cool), was within the same-cubin control at
 #: 3072 .. 12288
 MIN_ROWS: int = int(os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS", "16384"))
+#: release candidate: the bit-identical byte reductions (no FP8) are part of the DEFAULT H100 bf16 training block ("nox": no fp32 copy of the input, "hsave":
+#: the forward keeps h); MINIWORLD_TOKEN_DIT_TRAIN_BYTES=0 restores the 3.0.1 route (bit-identical outputs and gradients either way)
+DEFAULT_BYTES: frozenset[str] = frozenset() if os.environ.get("MINIWORLD_TOKEN_DIT_TRAIN_BYTES", "1") == "0" else frozenset(("nox", "hsave"))
 #: round 4: ``res_adaln_b`` writes the e4m3 xt itself (``res_adaln_b_q8``) instead of a q8 pass over xt (the same 8-bit operands)
 FUSE_Q8: bool = os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_FUSE_Q8", "1") != "0"
 
@@ -104,11 +107,12 @@ def ext():
 def active(M: int, D: int, fp32: bool, plain: bool, h100: bool) -> frozenset[str]:
     """The placements this block call takes: bf16 default-option blocks on H100 at width 768 (M = A L is a multiple of 128 after the
     block's padding)."""
-    if not PLACES or fp32 or not plain or not h100 or D != 768:
+    if fp32 or not plain or not h100 or D != 768:
         return frozenset()
+    places = PLACES | DEFAULT_BYTES
     if M % 16 or M < MIN_ROWS:  # the byte reductions (no GEMM) apply at every size
-        return PLACES & frozenset(BYTES)
-    return PLACES
+        return places & frozenset(BYTES)
+    return places
 
 
 def q8(x: torch.Tensor, e5: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
