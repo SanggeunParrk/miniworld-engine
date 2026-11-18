@@ -627,7 +627,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
     fused_expand = fp32 and _FP32_SWIGLU_GEMM and not up and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
     # EXPERIMENTAL e4m3 placements (opt-in, default off: ``token_dit_fp8.PLACES`` empty -> f8 empty, the bf16 route below unchanged)
-    f8 = _fp8.active(M, D, fp32, plain and fold) if _fp8.PLACES else frozenset()
+    f8 = _fp8.active(M, D, fp32, plain and fold, parallel and fold and not up) if _fp8.PLACES else frozenset()
     if f8:
         f8w = _fp8.weight_pack(key, wqkvg, wo, ws, _f8_wab(wab, M, ws.shape[1], single.device.index), bqkvg)
     if f8 and "qkvg" in f8:
@@ -675,7 +675,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         ya = _fp8.mm(*_fp8.rows_q8(qkvg[:, :D]), f8w["out"])
     else:
         ya = torch.mm(qkvg[:, :D], wo.t())
-    if f8 and "expand" in f8:
+    if f8 and "expand" in f8 and parallel:
+        xt8, sxt = _fp8.rows_q8(xt)  # the parallel schedule's transition input is the block input's AdaLN rows (one quantising row pass)
+    elif f8 and "expand" in f8:
         xt8 = torch.empty((M, D), device=single.device, dtype=_fp8.E4M3)
         sxt = torch.empty((M, 1), device=single.device, dtype=torch.float32)
         _fp8.ext().resgate_adaln_cf_q8(xin, ya, G, r1, b1f, b2f, stats, xt8, sxt, ada_eps, _PDL)

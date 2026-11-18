@@ -117,3 +117,24 @@ def test_below_min_rows_is_default_route() -> None:
     finally:
         F.PLACES, F.MIN_ROWS = old, old_min
     assert torch.equal(y0, y1)
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+def test_parallel_schedule_takes_expand_only() -> None:
+    """RoseTTAFold3's block (parallel schedule, flat q / k LayerNorm: ``plain`` False) takes the e4m3 ``expand`` placement (the transition's
+    AdaLN rows quantised in one row pass); the attention-side placements stay bf16 (the output is the bf16 route's bit for bit)."""
+    from miniworld_engine.modules.token_dit import TokenDiTRoseTTAFold3
+
+    module = TokenDiTRoseTTAFold3(d_single=768, d_cond=384, d_pair=128, n_head=16, n=2).cuda().float()
+    C.randomize(module, torch.Generator(device="cuda").manual_seed(7))
+    m: typing.Any = C.cast(module, "master")
+    m = m.eval().set_backend("cuda")
+    g = torch.Generator(device="cuda").manual_seed(1)
+    inputs = m.make_inputs(length=384, samples=5, depth=None, dtype=torch.bfloat16, device="cuda", generator=g)
+    y0 = _run(m, inputs, ())
+    ye = _run(m, inputs, ("expand",))
+    yq = _run(m, inputs, ("qkvg", "out", "squeeze"))
+    assert torch.equal(y0, yq)
+    x = inputs["single"].float()
+    rel = (ye.float() - y0.float()).pow(2).mean().sqrt() / (y0.float() - x).pow(2).mean().sqrt()
+    assert 0 < rel < 0.12, rel

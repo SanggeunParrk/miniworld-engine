@@ -218,7 +218,7 @@ def serves(args: list[torch.Tensor]) -> bool:
     return _gate(s, n) and s % 256 == 0 and n % 64 == 0
 
 
-def _forms(lnw, lnb, wa, wb, wo, bo, pbias):
+def _forms(lnw, lnb, wa, wb, wo, bo, pbias, bias_src=None):
     from miniworld_engine.kernels import _capture
 
     bf = torch.bfloat16
@@ -231,10 +231,11 @@ def _forms(lnw, lnb, wa, wb, wo, bo, pbias):
             wb.detach().to(bf).contiguous(),
             wo.detach().to(bf).contiguous(),
             bo.detach().to(bf).float().contiguous(),
-            pbias.detach().float().contiguous() if pbias is not None else None,
+            (torch.cat([b.detach().float() for b in bias_src]).contiguous() if bias_src is not None else pbias.detach().float().contiguous() if pbias is not None else None),
         )
 
-    return _capture.param_forms("opm_fp8_infer", [t for t in (lnw, lnb, wa, wb, wo, bo, pbias) if t is not None], build)
+    keys = [t for t in (lnw, lnb, wa, wb, wo, bo, *(bias_src or (pbias,))) if t is not None]  # bias_src: the module parameters (a stable key), not the fresh cat
+    return _capture.param_forms("opm_fp8_infer", keys, build)
 
 
 def _cache_for(ext, m, mk, gam, bet, wa16, wb16, eps, pb, lnw, lnb, wa, wb, pbias):
@@ -257,21 +258,21 @@ def _cache_for(ext, m, mk, gam, bet, wa16, wb16, eps, pb, lnw, lnb, wa, wb, pbia
     return cache
 
 
-def inference(args: list[torch.Tensor], eps: float, after: bool, dmin: float, doff: float):
+def inference(args: list[torch.Tensor], eps: float, after: bool, dmin: float, doff: float, bias_src=None):
     """z of the FP8 route for ``opm_train._inference_op``'s arguments, or None (no calibration under a capture: the caller runs the default)."""
     from miniworld_engine.kernels.integrations import opm_train as ot
 
     msa, mask, lnw, lnb, wa, wb, wo, bo = args[:8]
     residual = args[8] if args[8].numel() else None
-    pbias = args[9] if args[9].numel() else None
+    pbias = args[9] if args[9].numel() and bias_src is None else None
     m = msa[0].contiguous()
     mk = mask[0].contiguous()
     if mk.dtype != torch.bool:
         mk = mk != 0
     n, cm, cz = m.shape[1], m.shape[2], wo.shape[0]
     ext = ot._ext(msa.device, native=True, tma=False, cm=cm, cz=cz, fp8=True)
-    gam, bet, wa16, wb16, wo16, ob, pb = _forms(lnw, lnb, wa, wb, wo, bo, pbias)
-    cache = _cache_for(ext, m, mk, gam, bet, wa16, wb16, eps, pb, lnw, lnb, wa, wb, pbias)
+    gam, bet, wa16, wb16, wo16, ob, pb = _forms(lnw, lnb, wa, wb, wo, bo, pbias, bias_src)
+    cache = _cache_for(ext, m, mk, gam, bet, wa16, wb16, eps, pb, lnw, lnb, wa, wb, pb if bias_src is not None else pbias)
     if cache is None:
         return None
     capturing = torch.cuda.is_current_stream_capturing()

@@ -180,3 +180,44 @@ def test_graph_replay(fp8, policy) -> None:
     torch.cuda.synchronize()
     assert torch.equal(out, eager)
     assert F.overflow_peak() <= F.E4M3_MAX
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90a)")
+@pytest.mark.parametrize("policy", ["bound", "calib"])
+@pytest.mark.parametrize("after", [False, True])
+def test_projection_bias_module_takes_the_fp8_route(fp8, policy, after) -> None:
+    """RoseTTAFold3's OPM (left | right projection biases, inference: ``composed.biased_wide``) runs the e4m3 product; error inside the FP8
+    budget against float64, a graph replay of the calibrated module is the eager output, the default (POLICY None) is unchanged."""
+    length, depth = 256, 1024
+    gen = torch.Generator(device="cuda").manual_seed(5)
+    base = OuterProductMean(64, 128, 32, projection_bias=True, normalize_before_proj=not after).cuda()
+    C.randomize(base, gen)
+    inp = base.make_inputs(length=length, samples=1, depth=depth, dtype=torch.bfloat16, device="cuda", generator=gen)
+    msa, mask = inp["msa"], inp["mask"]
+    mask[:, depth // 3 : depth // 3 + 37] = False
+    res = torch.randn((1, length, length, 128), device="cuda").to(torch.bfloat16)
+    gold = _gold(base, msa, mask, res)
+    fp8(None)
+    y_def = _run(copy.deepcopy(base).set_backend("cuda"), msa, mask, res)
+    fp8(policy, guard="lazy")
+    mod = copy.deepcopy(base).set_backend("cuda")
+    F.GUARD_STATS.update(calls=0, capture_fallbacks=0)
+    y = _run(mod, msa, mask, res)
+    y = _run(mod, msa, mask, res)
+    assert F.GUARD_STATS["calls"] == 2, "the biased OPM did not reach the FP8 route"
+    upd = gold - res.double()
+    rms, mx = _err(y.double() - res.double(), upd)
+    rms_d, _ = _err(y_def.double() - res.double(), upd)
+    assert rms < 0.04 and mx < 0.08 and rms > rms_d, (rms, mx, rms_d)
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        _run(mod, msa, mask, res)
+    torch.cuda.current_stream().wait_stream(s)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = _run(mod, msa, mask, res)
+    g.replay()
+    torch.cuda.synchronize()
+    assert F.GUARD_STATS["capture_fallbacks"] == 0
+    assert torch.equal(out, y)

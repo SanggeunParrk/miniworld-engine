@@ -66,11 +66,42 @@ def biased_wide_serves(module, msa, mask) -> bool:
     return s % 256 == 0 and n % 64 == 0 and cm in (64, 128) and module.to_out.weight.shape[0] in (128, 256, 384)
 
 
+def _biased_fp8(module, msa, mask, token_asym_id, residual):
+    """The opt-in e4m3 route (``opm_fp8``, ``MINIWORLD_OPM_FP8``) for the biased projections: its FP8 wide prologue takes the left | right biases
+    as the bf16 one does, so RoseTTAFold3's OPM runs the same grouped e4m3 product as every other family. None: not served (the default
+    composition below runs, unchanged)."""
+    from miniworld_engine.kernels.integrations import opm_fp8, opm_train
+
+    mk = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+    none = msa.new_empty((0,))
+    args = [msa.contiguous(), mk, module.ln_msa.weight, module.ln_msa.bias, module.to_left.weight, module.to_right.weight]
+    args += [module.to_out.weight, module.to_out.bias, none, none]
+    if not opm_fp8.serves(args):
+        return None
+    interchain = module.mask_interchain and token_asym_id is not None
+    res = None if interchain else residual
+    if res is not None:
+        args[8] = res
+    dmin, doff = opm_train.divisor_params(module, msa.shape[1])
+    eps = float(getattr(module.ln_msa, "eps", 1e-5))
+    z = opm_fp8.inference(args, eps, not module.normalize_before_proj, dmin, doff, bias_src=(module.to_left.bias, module.to_right.bias))
+    if z is None:
+        return None
+    if interchain and token_asym_id is not None:
+        z = z * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(z.dtype)
+        return residual + z if residual is not None else z
+    return z
+
+
 def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
     """RoseTTAFold3's biased projections in the wide H100 composition: its persistent TMA prologue adds the left | right biases in
     the projection epilogue (masked like the projections), then cuBLAS for the outer product and the fused epilogue (out-projection,
     bias, count normalisation before or after it, residual)."""
     from miniworld_engine.kernels.integrations import opm_train
+    from miniworld_engine.kernels.integrations import opm_fp8
+
+    if opm_fp8.POLICY is not None and (z := _biased_fp8(module, msa, mask, token_asym_id, residual)) is not None:
+        return z
 
     bf = torch.bfloat16
     m = msa[0].contiguous()

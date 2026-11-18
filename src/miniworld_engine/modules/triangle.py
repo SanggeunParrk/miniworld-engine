@@ -1783,6 +1783,10 @@ class _LeftScaled:
 
         self._module = module
         self.to_left = SimpleNamespace(weight=module.to_left.weight * scale.to(module.to_left.weight.dtype))
+        # the factor and the parameter it multiplies, for the FP8 plane route (``h100_b200style_fp8.module_route``): it keys its calibration
+        # on the parameter and applies the factor to the contraction (the product above is a new tensor in every call)
+        self.left_length_factor = scale
+        self.left_base_weight = module.to_left.weight
 
     def __getattr__(self, name):
         return getattr(self._module, name)

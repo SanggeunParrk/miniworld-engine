@@ -82,11 +82,14 @@ def _planes(x, weights, token, gi, bi, xs, d, transposed, sub, scales, margin, a
     return abq, csc
 
 
-def run(leaves, mask, direction, scales=None, record=None, cache=None, margin=1.0, zero=True, out=None):
+def run(leaves, mask, direction, scales=None, record=None, cache=None, margin=1.0, zero=True, out=None, lfac=None):
     """leaves as ``h100_b200style.trimul`` (bf16 weights); direction 1 outgoing / 2 incoming / 0 both (the bidirectional block: first d hidden
     channels outgoing, second d incoming, one K3 over the 2 d channels); scales = (sa, sb) [h] fp32 powers of two or None (dynamic). Returns y.
     Bidirectional: the two directions are two single-direction K1 + e4m3 contraction launches on the matrix halves (the incoming one on the
-    transposed pair), both writing their channels of one ``tri``; ``cache`` holds one calibration state per direction (``cache["bd"]``)."""
+    transposed pair), both writing their channels of one ``tri``; ``cache`` holds one calibration state per direction (``cache["bd"]``).
+    lfac: a device fp32 scalar [1] (RoseTTAFold3's ``1 / n``) that multiplies the contraction before ``ln_out``: it is folded into the channel scale
+    ``csc`` (K3 reads ``csc`` for the LN_out statistics and the host folds it into the projection operand), so the planes, the calibrated
+    scales and the cached prescaled weights are those of the plain module (one calibration whatever the length factor)."""
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     bsz, n, d, h = x.shape[0], x.shape[1], x.shape[-1], wp.shape[1]
     assert bsz == 1 and direction in (0, 1, 2) and h == d * (2 if direction == 0 else 1)
@@ -135,16 +138,22 @@ def run(leaves, mask, direction, scales=None, record=None, cache=None, margin=1.
                     cache["csc"] = csc
         else:
             csc = cscs[0]
+        wpf0 = None
         if cache is not None and "k3" in cache:
             wpf, wgf, vec = cache["k3"]
+            wpf0 = cache["wpf0"]
         else:
             wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
             K._aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
+            wpf0 = wpf.clone() if cache is not None or lfac is not None else None
             if cache is not None:
-                cache["wpf0"] = wpf.clone()
+                cache["wpf0"] = wpf0
             wpf = (wpf.float() * csc[None, :]).to(wpf.dtype)
             if cache is not None:
                 cache["k3"] = (wpf, wgf, vec)
+        if lfac is not None:  # the length factor rides on the channel scale (never into the cached, calibrated state)
+            csc = csc * lfac.reshape(1)
+            wpf = (wpf0.float() * csc[None, :]).to(wpf.dtype)
         y = torch.empty_like(x) if out is None else out
         cfg = K._inference_output_config(d)
         from .h100_b200style_static import output_kernel
@@ -320,22 +329,24 @@ def serves(module, pair, mask, bidirectional) -> bool:
     return mask is None or (mask.dtype == torch.bool and mask.numel() == pair.shape[0] * pair.shape[1])
 
 
-def run_samples(leaves, mask, direction, cache=None, margin=1.0, zero=True):
+def run_samples(leaves, mask, direction, cache=None, margin=1.0, zero=True, lfac=None):
     """B samples (one direction): the one-sample route per sample, each writing its rows of one output (shared static scales; the guard
     buffer is zeroed before the first sample only, so it reads the peak of the whole call). One sample: ``run``."""
     x = leaves[0]
     if x.shape[0] == 1:
-        return run(leaves, mask, direction, cache=cache, margin=margin, zero=zero)
+        return run(leaves, mask, direction, cache=cache, margin=margin, zero=zero, lfac=lfac)
     y = torch.empty_like(x)
     for b in range(x.shape[0]):
         mb = None if mask is None else mask.reshape(x.shape[0], -1)[b : b + 1]
-        run([x[b : b + 1], *leaves[1:]], mb, direction, cache=cache, margin=margin, zero=zero and b == 0, out=y[b : b + 1])
+        run([x[b : b + 1], *leaves[1:]], mb, direction, cache=cache, margin=margin, zero=zero and b == 0, out=y[b : b + 1], lfac=lfac)
     return y
 
 
-def _default(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction):
+def _default(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction, lfac=None):
     """The bf16 default route of the call (the guard's and the capture's fallback). Single direction: the port; bidirectional: the integration's
     inference body (the packaged K1 / K3 at D128, the port at D256), through a shim holding the module's tensors."""
+    if lfac is not None:  # RoseTTAFold3: the default route sees the left weight times the length factor, as its module builds it
+        wl = wl * lfac.reshape(()).to(wl.dtype)
     token = mask if mask.numel() else None
     if direction != 0:
         return K.trimul(
@@ -363,7 +374,7 @@ def _default(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction):
     return _update_inference_body(shim, pair, token, True, None)
 
 
-def _fake(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction):
+def _fake(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction, lfac=None):
     return torch.empty_like(pair)
 
 
@@ -382,6 +393,7 @@ def inference(
     go: torch.Tensor,
     bo: torch.Tensor,
     direction: int,
+    lfac: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """y of the FP8-plane TriMul for one direction (1 outgoing / 2 incoming), fp32-master or bf16 weights; mask: bool [1, L] or empty. Eager or under CUDA-graph capture
     (calibrate eagerly first: a capture with no calibration takes the bf16 route)."""
@@ -397,13 +409,13 @@ def inference(
     token = mask if mask.numel() else None
     capturing = torch.cuda.is_current_stream_capturing()
     if POLICY != "calib":
-        return run_samples(leaves, token, direction)
+        return run_samples(leaves, token, direction, lfac=lfac)
     key = wl.data_ptr()
     cache = _CACHES.get(key)
     if cache is None:
         if capturing:  # no static calibration yet: never calibrate inside a graph
             GUARD_STATS["capture_fallbacks"] += 1
-            return _default(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction)
+            return _default(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction, lfac)
         cache = _CACHES[key] = {}
         # keyed by the address of to_left's weight: drop the state when that tensor is freed, so another module whose weight later sits at the
         # same address calibrates its own scales (a stale entry served another module's prescaled weights and K3 operands: wrong output, NaN)
@@ -412,7 +424,7 @@ def inference(
     if GUARD == "lazy" or capturing:
         cache["amax"] = _lazy_buffer(pair.device)
     for _ in range(4):
-        y = run_samples(leaves, token, direction, cache=cache, margin=HEADROOM, zero=not (GUARD == "lazy" or capturing))
+        y = run_samples(leaves, token, direction, cache=cache, margin=HEADROOM, zero=not (GUARD == "lazy" or capturing), lfac=lfac)
         GUARD_STATS["calls"] += 1
         if lazy:
             return y
@@ -424,7 +436,7 @@ def inference(
         _scale_up(cache, f)
         refresh(cache)
     GUARD_STATS["fallbacks"] += 1
-    return _default(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction)
+    return _default(pair, mask, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, direction, lfac)
 
 
 def module_route(module, pair, mask, bidirectional):
@@ -432,10 +444,14 @@ def module_route(module, pair, mask, bidirectional):
     if not serves(module, pair, mask, bidirectional):
         return None
     m = mask.reshape(1, -1) if mask is not None else torch.empty(0, device=pair.device, dtype=torch.bool)
+    # RoseTTAFold3 (``_LeftScaled``): the module's ``to_left.weight`` is a fresh product ``W_a * (1 / n)`` per call -- no stable address to key
+    # the calibration on and a new tensor inside every capture. The route takes the parameter itself and the factor beside it.
+    lf = getattr(module, "left_length_factor", None)
+    wl = module.left_base_weight if lf is not None else module.to_left.weight
     return inference(
         pair.contiguous(),
         m,
-        module.to_left.weight,
+        wl,
         module.to_left_gate.weight,
         module.to_right.weight,
         module.to_right_gate.weight,
@@ -446,4 +462,5 @@ def module_route(module, pair, mask, bidirectional):
         module.ln_out.weight,
         module.ln_out.bias,
         0 if bidirectional else 1 if module.outgoing else 2,
+        None if lf is None else lf.float().reshape(1),
     )
