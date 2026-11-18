@@ -23,6 +23,7 @@ switch off, runs the default ``opm_train`` path unchanged.
 from __future__ import annotations
 
 import os
+import weakref
 
 import torch
 
@@ -45,7 +46,49 @@ def _mode() -> str | None:
 #: dO format (None: the route is off). Module globals: may be set at run time before a forward.
 MODE: str | None = _mode()
 MIN_S = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MINS", "1024"))
+#: round 2: shape gate (the route loses below these: L128 1.15x, d_pair 384 / 512 1.09-1.14x in round 1); 0 = no gate
+MIN_L = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MINL", "256"))
+MAX_CZ = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MAXCZ", "256"))
+#: round 2: delayed dO scale (amax history, no pass over dz; first call of a module seeds from the bound); False = round 1's bound every call
+DELAYED = os.environ.get("MINIWORLD_OPM_FP8_TRAIN_DELAYED", "1") != "0"
+HISTORY = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_HISTORY", "16"))
+MARGIN = float(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MARGIN", "2"))
 STATS = {"calls": 0}
+_SITES: dict = {}  # (device, wo data_ptr) -> _DSite
+_RETIRED: list = []
+
+
+class _DSite:
+    """Delayed dO scale of one module (keyed by its W_o): persistent device state, so CUDA-graph replays update it in place."""
+
+    def __init__(self, device):
+        self.hist = torch.zeros(HISTORY, device=device)
+        self.st = torch.zeros(5, device=device)  # {sd, 1 / sd (unused), last scaled amax, calls, overflow count}
+        self.sd = torch.ones(1, device=device)  # cuBLASLt scale (own allocation)
+        self.q = torch.ones(1, device=device)  # dgrad multiplier 1 / sd (own allocation)
+        self.amax = torch.zeros(1, device=device)  # max |dO q| of this call (the dgrad's atomic)
+        self.seeded = False
+
+
+def _site(wo: torch.Tensor) -> _DSite:
+    key = (wo.device, wo.data_ptr())
+    s = _SITES.get(key)
+    if s is None:
+        s = _SITES[key] = _DSite(wo.device)
+        weakref.finalize(wo, lambda k=key: _RETIRED.append(_SITES.pop(k, None)))
+    return s
+
+
+def reset() -> None:
+    """Forget every site's history (the next call of each site re-seeds from the bound). Old buffers stay alive (captured graphs)."""
+    _RETIRED.extend(_SITES.values())
+    _SITES.clear()
+
+
+def overflow_count() -> float:
+    """Calls (all delayed sites) whose dO passed the format max at its scale since the last reset (one host sync)."""
+    fmax = E5M2_MAX if MODE == "e5m2" else E4M3_MAX
+    return sum(float(s.st[4].item()) + float((s.amax > fmax).item()) for s in _SITES.values())
 #: largest |scaled value| seen since the last :func:`peaks` read: [A2, BT, dO] (diagnostics; bounds keep them <= the format max)
 _PEAK: dict = {}
 
@@ -57,6 +100,8 @@ def peaks(reset: bool = True) -> list[float]:
         out = [max(a, float(b)) for a, b in zip(out, buf.tolist(), strict=True)]
         if reset:
             buf.zero_()
+    for s in _SITES.values():  # delayed sites: the dO peak of the latest call
+        out[2] = max(out[2], float(s.amax))
     return out
 
 
@@ -75,6 +120,8 @@ def serves(msa: torch.Tensor, d_msa: int, d_pair: int, *, interchain: bool = Fal
     if (d_msa, d_pair) not in ot.SHAPES or msa.dim() != 4 or msa.shape[0] != 1 or msa.dtype != torch.bfloat16 or not msa.is_cuda:
         return False
     if torch.cuda.get_device_capability(msa.device) != (9, 0):
+        return False
+    if (MIN_L and msa.shape[2] < MIN_L) or (MAX_CZ and d_pair > MAX_CZ):  # round 2: the shapes where round 1 lost to the default
         return False
     return msa.shape[1] + (-msa.shape[1] % 256) >= MIN_S
 
@@ -143,10 +190,26 @@ class OpmFp8TrainFn(torch.autograd.Function):
         bw2 = torch.cat([bw, bw.view(ch, ch, cz).transpose(0, 1).reshape(ch * ch, cz)]).contiguous()  # + rows (e, c): the dO^T plane
         fmt = 1 if MODE == "e5m2" else 0
         dz0 = dz[0].contiguous()
-        sdq = ext.opm_f8_dscale(dz0, norm, bw, E5M2_MAX if fmt else E4M3_MAX)  # {sd, 1 / sd}
-        sd = sdq[0:1].clone()
+        fmax = E5M2_MAX if fmt else E4M3_MAX
         peak = _peak_buffer(dz.device)
-        d8, d8t, dzp, dbo = ext.opm_dgrad_f8(dz0, norm, bw2, n, n, int(ctx.after), sdq[1:2], peak[2:3], fmt)
+        if DELAYED:
+            site = _site(wo)
+            if not site.seeded:  # first call of this module: the bound (one pass over dz), then the amax history takes over
+                if torch.cuda.is_current_stream_capturing():
+                    sdq = ext.opm_f8_dscale(dz0, norm, bw, fmax)  # captured first call: stays on the bound pass
+                    sd, q, amax = sdq[0:1].clone(), sdq[1:2], peak[2:3]
+                else:
+                    sdq = ext.opm_f8_dscale(dz0, norm, bw, fmax)
+                    ext.opm_f8_dscale_seed(sdq[0:1], site.hist, site.st, site.sd, site.q, site.amax)
+                    site.seeded = True
+                    sd, q, amax = site.sd, site.q, site.amax
+            else:
+                ext.opm_f8_dscale_update(site.amax, site.hist, site.st, site.sd, site.q, fmax, MARGIN)
+                sd, q, amax = site.sd, site.q, site.amax
+        else:
+            sdq = ext.opm_f8_dscale(dz0, norm, bw, fmax)  # {sd, 1 / sd}
+            sd, q, amax = sdq[0:1].clone(), sdq[1:2], peak[2:3]
+        d8, d8t, dzp, dbo = ext.opm_dgrad_f8(dz0, norm, bw2, n, n, int(ctx.after), q, amax, fmt)
         a8t, b8t = ext.opm_t8(a8), ext.opm_t8(b8)  # [s, (i,c)]: K = (i,c) contiguous
         dA = opm_fp8.product(b8t, d8, (sb, sd), n)  # [s, (i,c)] = sum_(j,e) BT[(j,e), s] dO[(i,c), (j,e)]
         dB = opm_fp8.product(a8t, d8t, (sa, sd), n)  # [s, (j,e)] = sum_(i,c) A2[(i,c), s] dO[(i,c), (j,e)]

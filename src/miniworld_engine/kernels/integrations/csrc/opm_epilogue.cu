@@ -2541,6 +2541,36 @@ __global__ __launch_bounds__(1024) void opm_f8_dscale_kernel(const float* __rest
     out[0] = s; out[1] = 1.f / s;
   }
 }
+// DELAYED dO scale (round 2): no pass over dz.  st = {sd, q = 1 / sd, last scaled amax, calls pushed, overflow count}, hist [HN] true amax (unscaled).
+// The previous call's dgrad wrote max |dO * q| into amax: true = amax * sd; the next scale covers margin x max(hist) (power of two over fmax).
+// amax is zeroed here (the dgrad atomically maxes into it again).  CUDA-graph safe (all device).  seed != 0: hist is set to {seed_true, 0, ...}
+__global__ void opm_f8_dscale_update_kernel(float* __restrict__ amax, float* __restrict__ hist, float* __restrict__ st, float* __restrict__ sd_out,
+                                            float* __restrict__ q_out, int hn, float fmax, float margin) {
+  if (threadIdx.x != 0) return;
+  const float a = amax[0];
+  const float prev_sd = st[0];
+  float pk = 0.f;
+  if (st[3] > 0.f) {   // a previous call exists
+    for (int k = hn - 1; k > 0; --k) hist[k] = hist[k - 1];
+    hist[0] = a * prev_sd;
+    if (a > fmax) st[4] += 1.f;
+  }
+  for (int k = 0; k < hn; ++k) pk = fmaxf(pk, hist[k]);
+  st[2] = a;
+  st[3] += 1.f;
+  const float s = f8_pow2_over(pk * margin, fmax);
+  st[0] = s; sd_out[0] = s; q_out[0] = 1.f / s;
+  amax[0] = 0.f;
+}
+// seed (first call, eager): scale s from the bound, history empty
+__global__ void opm_f8_dscale_seed_kernel(const float* __restrict__ sd_in, float* __restrict__ hist, float* __restrict__ st, float* __restrict__ sd_out,
+                                          float* __restrict__ q_out, float* __restrict__ amax, int hn) {
+  if (threadIdx.x != 0) return;
+  for (int k = 0; k < hn; ++k) hist[k] = 0.f;
+  st[0] = sd_in[0]; st[1] = 0.f; st[2] = 0.f; st[3] = 1.f; st[4] = 0.f;
+  sd_out[0] = sd_in[0]; q_out[0] = 1.f / sd_in[0];
+  amax[0] = 0.f;
+}
 // opm_fp8.bound_scales on device: per operand max_c sum_k |W16_ck| (sqrt(cm - 1) |gamma_k| + |beta_k|) (+ |pbias_c|), x (1 + 2^-6),
 // pow2 over 448 (floor 2^-30, 1 for an all-zero bound); out = {s_a, s_b, 1 / s_a, 1 / s_b}
 __global__ __launch_bounds__(64) void opm_f8_wscale_kernel(const float* __restrict__ g, const float* __restrict__ b,
@@ -2583,6 +2613,21 @@ torch::Tensor opm_f8_dscale(torch::Tensor dz, torch::Tensor norm, torch::Tensor 
                                            out.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
+}
+
+// delayed dO scale (see opm_f8_dscale_update_kernel): sd_out / q_out fp32 [1] (separate allocations), st fp32 [5], hist fp32 [hn], amax fp32 [1]
+void opm_f8_dscale_update(torch::Tensor amax, torch::Tensor hist, torch::Tensor st, torch::Tensor sd_out, torch::Tensor q_out, double fmax, double margin) {
+  TORCH_CHECK(amax.numel() == 1 && st.numel() == 5 && sd_out.numel() == 1 && q_out.numel() == 1 && hist.is_cuda(), "opm_f8_dscale_update: fp32 device state");
+  opm_f8_dscale_update_kernel<<<1, 32, 0, at::cuda::getCurrentCUDAStream()>>>(amax.data_ptr<float>(), hist.data_ptr<float>(), st.data_ptr<float>(),
+                                                                          sd_out.data_ptr<float>(), q_out.data_ptr<float>(), (int)hist.numel(),
+                                                                          (float)fmax, (float)margin);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+void opm_f8_dscale_seed(torch::Tensor sd_in, torch::Tensor hist, torch::Tensor st, torch::Tensor sd_out, torch::Tensor q_out, torch::Tensor amax) {
+  opm_f8_dscale_seed_kernel<<<1, 32, 0, at::cuda::getCurrentCUDAStream()>>>(sd_in.data_ptr<float>(), hist.data_ptr<float>(), st.data_ptr<float>(),
+                                                                         sd_out.data_ptr<float>(), q_out.data_ptr<float>(), amax.data_ptr<float>(),
+                                                                         (int)hist.numel());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // [4] = {s_a, s_b, 1 / s_a, 1 / s_b}: opm_fp8.bound_scales in one launch
@@ -3253,6 +3298,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("bw2"), py::arg("ni"), py::arg("nj"), py::arg("after"), py::arg("dgq"), py::arg("dgamax"), py::arg("fmt"));
   m.def("opm_t8", &opm_t8, "[R, C] -> [C, R] for 1-byte tensors");
   m.def("opm_f8_dscale", &opm_f8_dscale, "FP8 training: {sd, 1 / sd} of dO from a bound", py::arg("dz"), py::arg("norm"), py::arg("bw"), py::arg("fmax"));
+  m.def("opm_f8_dscale_update", &opm_f8_dscale_update, "FP8 training: delayed dO scale update (one launch)");
+  m.def("opm_f8_dscale_seed", &opm_f8_dscale_seed, "FP8 training: seed the delayed dO scale from a bound");
   m.def("opm_f8_wscale", &opm_f8_wscale, "FP8: {s_a, s_b, 1 / s_a, 1 / s_b} from the weights", py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("pbias") = py::none());
 #endif
   m.def("opm_native_pack",&opm_native_pack,py::arg("p"),py::arg("infer")=false,py::arg("pbl")=py::none(),py::arg("pbr")=py::none());
