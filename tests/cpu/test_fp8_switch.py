@@ -50,10 +50,10 @@ SAFE = {
     "token_dit": ["expand"],
     "atom_dit": ["post", "pre"],
 }
-#: the TriAttn part per validated model (af3: PV fused + unfused and q / k; protenix1 / opendde: PV only, on their checked kinds)
+#: the TriAttn part per model (af3: PV fused + unfused, q / k; protenix1: PV fused, q / k; opendde: PV unfused, no q / k)
 TRIATTN_OF = {
     "af3": {"pv": ["fused", "unfused"], "qk": True},
-    "protenix1": {"pv": ["fused"], "qk": False},
+    "protenix1": {"pv": ["fused"], "qk": True},
     "opendde": {"pv": ["unfused"], "qk": False},
 }
 
@@ -80,7 +80,7 @@ def test_env_preset(monkeypatch):
 def test_triattn_whitelist():
     assert set(fp8.TRIATTN_MODELS) == {"af3", "protenix1", "opendde"}  # extend only after an end-level check
     assert "boltz2" not in fp8.TRIATTN_MODELS and "openfold3" not in fp8.TRIATTN_MODELS
-    assert [m for m, (_k, qk) in fp8.TRIATTN_MODELS.items() if qk] == ["af3"]  # e4m3 q / k validated end to end on AF3 only
+    assert [m for m, (_k, qk) in fp8.TRIATTN_MODELS.items() if qk] == ["af3", "protenix1"]  # q / k: d_pair-128 fused route only
     assert fp8.triattn_for(None) == (frozenset(), False) and fp8.triattn_for("boltz2") == (frozenset(), False)
     assert fp8.triattn_for("AF3") == fp8.TRIATTN_MODELS["af3"]
 

@@ -87,12 +87,12 @@ PRESETS = MappingProxyType(
 )
 #: TriAttn FP8 per validated model: model -> (call-site kinds of the FP8 PV route, e4m3 q / k on the fused route). Only end-level evidence for
 #: exactly these routes puts a model here (docs/fp8.md): af3 = FoldBench 27 targets with the whole ``safe`` set incl. q / k (0 flagged) and 4
-#: targets x 4 trunk seeds with PV; protenix1 / opendde = PV on the listed kinds, 4 trunk seeds per target (no q / k run: PV only). Boltz-2 is out
+#: targets x 4 trunk seeds with PV; protenix1 (PV + q / k) / opendde (PV only: no d_pair-128 site) = the listed kinds, 4 trunk seeds per target. Boltz-2 is out
 #: on purpose (9c90 bistable); OpenFold3 is not added. ``h100_sm90.FP8_PV_WHITELIST`` is derived from this table. Extend only after an end-level check.
 TRIATTN_MODELS = MappingProxyType(
     {
         "af3": (frozenset({"fused", "unfused"}), True),
-        "protenix1": (frozenset({"fused"}), False),
+        "protenix1": (frozenset({"fused"}), True),  # q / k: its only TriAttn site kind is the d_pair-128 fused route (docs/fp8.md)
         "opendde": (frozenset({"unfused"}), False),
     }
 )
