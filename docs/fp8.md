@@ -65,8 +65,10 @@ byte-identical).
    | `af3` | fused + unfused | yes | FoldBench 27 targets with the whole `safe` set incl. q / k (0 flagged, lDDT +0.0000); PV: 4 targets x 4 trunk seeds |
    | `protenix1` | fused | no | PV, 9 + 3 targets x 4 trunk seeds (no q / k run) |
    | `opendde` | unfused | no | PV, 16 + 3 targets x 4 trunk seeds (no q / k run) |
+   | `protenix2` | unfused (256:8:32 front-made trunk sites from L768, 64:2:32 template sites from L256) | no (no d_pair-128 site) | PV, 11 targets x 4 trunk seeds, 10 / 11 inside (7y37: bf16 bimodal, see "TriAttn whitelist: Protenix v2, ...") |
+   | `openfold3` | fused + unfused | yes | PV and PV + q / k, 12 targets x 4 trunk seeds, 11 / 12 inside each (7zau: bf16 spread 10.2 A, ipTM 0.15-0.38) |
 
-   Not listed: Boltz-2 (9c90 bistable, below), OpenFold3 (PV 4 / 4 inside, not added), every other model.
+   Not listed: Boltz-2 (9c90 bistable, below), IntelliFold2 (10 / 12 inside, two large targets flip; below), every other model. (After 3.0.1, branch `fp8c/triattn`: the `protenix2` and `openfold3` rows were added after the end-level section "TriAttn whitelist: Protenix v2, OpenFold3, IntelliFold2 (not added)"; decision 1 had left OpenFold3 out.)
 2. **e4m3 q / k stays in `safe`** (af3 only): its module error in the judge form is above the module tolerance (0.95 / 0.85 % at L512 / 1024 against
    tol 8e-3), but the end-level AF3 FoldBench run with it on flagged 0 / 27 targets.
 3. **No FP8 registry rows / tolerances.** FP8 is an opt-in path outside the judge: the registry dtype vocabulary is `float32|master` only, the FP8 planes /
@@ -881,7 +883,7 @@ if hs.enable_fp8_pv_for("protenix1"):
 hs.disable_fp8_pv()
 ```
 
-`FP8_PV_WHITELIST` maps a model to the call-site kinds whose end-level accuracy was checked: `{"protenix1": {"fused"}, "opendde": {"unfused"}, "af3": {"fused", "unfused"}}` (3.0.0: derived from `miniworld_engine.fp8.TRIATTN_MODELS`, which the one switch uses); Boltz-2 is absent on purpose (9c90, see limits).
+`FP8_PV_WHITELIST` maps a model to the call-site kinds whose end-level accuracy was checked: `{"protenix1": {"fused"}, "opendde": {"unfused"}, "af3": {"fused", "unfused"}, "protenix2": {"unfused"}, "openfold3": {"fused", "unfused"}}` (3.0.0: derived from `miniworld_engine.fp8.TRIATTN_MODELS`, which the one switch uses); Boltz-2 is absent on purpose (9c90, see limits).
 `enable_fp8_pv_for(model, hl=False)`: `hl=True` writes the hi + lo planes (output error about half, see below). Default (non-FP8) route: bit-identical to 2.5.9 (10 shapes / orientations / head counts compared as bytes; branch `fp8/vt`, whose default builds of `front_fused3_sm90.cu` and `triattn_mod_sm90.cu` changed in source (the V^T code is `#ifdef` / a template instance): 14 more shapes d_pair 64 / 128 / 256 / 384, start / end, flip, masked, L256..1536, as bytes against main ec11768fc). The FP8 route with front-made planes equals the standalone-pass FP8 route as bytes (hi: 64:4:32 / 64:2:32 / 64:4:16 L256..1536 with a padded key mask, trans; hi + lo L256..1024; 256:8:32 L256..2048, trans).
 
 Three kinds of call sites (branch `fp8/vt`: the first two make the planes in the front, the pass only remains where the front is cuBLAS):
@@ -1272,6 +1274,97 @@ as a fraction of the e4m3 range (448; a calibration call is exactly 1.0, exclude
 Findings for the contract: (1) the 4 x headroom held in every run, but two sites reach 0.86-0.93 of the range at a later call of a process-wide scale taken on another target (no flag: the planes are 8-14 % below the cap); a target with a 10 % larger V peak would
 have saturated and needed the redo. (2) In the OpenDDE runs at L >= 768 some sites calibrate at **log2(scale) = -99** (35 of 1380 heads of the 12-head sites; probably the 3 extra 12-head sites that appear only at ~1.67 x L, whose V is then zero at the calibration call (not isolated); `vscale_from_amax` clamps amax at 1e-30). No flag, so V stays zero there, but
 a head calibrated at exactly zero saturates on any later non-zero V, and `rescale_all(4)` x 3 (the redo limit) cannot recover from 2^-99: a floor on the scale (or re-calibrating a head with amax == 0) is the guard to add; not changed here.
+
+## TriAttn whitelist: Protenix v2, OpenFold3, IntelliFold2 (not added) (branch `fp8c/triattn`, base 3.0.1, 2026-11-18)
+
+Goal: TriAttn FP8 at the same places as AF3 for the models whose end-level check passes. Table change in `fp8.TRIATTN_MODELS` (`FP8_PV_WHITELIST` follows):
+`protenix2` = PV on the "unfused" kind (no q / k), `openfold3` = PV on "fused" + "unfused" and e4m3 q / k (as `af3`). IntelliFold2 stays out. No kernel, no registry
+row, no `backend_versions` change; the default route is untouched (`fp8.py` holds the table only, FP8 off = bit-identical to 3.0.1).
+
+### Call sites per model (probe above; 5I28 route census with `fp8.route_stats()`: Protenix v2 / IntelliFold2 never enter the d_pair-128 `inference()`)
+
+| model | trunk TriAttn | template TriAttn | kinds | q / k |
+|---|---|---|---|---|
+| Protenix v2 | d_pair 256, 8 x 32, front-made V^T planes from the `tri_front_wide` group-2 CTA (gate L768, i.e. n >= 6 of the 5I28 chain) | 64:2:32 front-made (gate L256) | unfused | no: the e4m3 q / k core exists on the fused d_pair-128 route only |
+| OpenFold3 | 128:4:32 fused (gate L256) | 64:4:16 front-made (gate L256) | fused + unfused | yes (fused route) |
+| IntelliFold2 | d_pair 512, 8 x 64 heads: the 64-channel wgmma core (`h100_dh`), no FP8 route in 3.0.1 | 256:8:32 front-made, 4 sites | unfused (templates only) | no |
+
+Module error against fp64 PyTorch for these shapes, from the 2.5.14-base tables above (judge form max|y - y64| / max|y64|, tolerance 8e-3, PyTorch backend 0.3 %):
+FP8 PV hi 0.43-0.50 % (256:8:32), 0.57-0.66 % (128:4:32), 0.55 % (64:4:16), 0.58-0.75 % (64:2:32); update rms 2.7-3.7 % against 1.2-1.9 % for the default route.
+With e4m3 q / k at 128:4:32: 0.95 % / 0.85 % at L512 / L1024 (outside 8e-3: the AF3 precedent, decision 2); that is what the end-level q / k run below is for.
+
+### End level (FoldForge a9e1549 + engine 3.0.1 H100, `miniworld` backend, bf16, 200 steps, diffusion_seed 0, 1 sample, TRUNK seeds 0-3, same rule as above)
+
+Routes: PV through the whitelist API with the model's kinds (`enable_fp8_pv_for` with `E2E_FORCE` = the kinds), q / k with `FP8_QK = True` on top (mode `f8qk`), shipped S gates, scales
+calibrated on the first eager call of each site and shared by all targets and seeds of the job (the stress case of the contract). bf16 and FP8 in the same process per target. Raw files:
+`~/miniworld-engine-scratch/fp8c-triattn/res/{p2,of3,rf3,if2}` (`.json` + `.pt` per case, tables `res/*.an3.txt` by `an3.py`). A target whose bf16 seeds differ by > 5 A is a weak probe.
+
+| model, route | targets | bf16 pair max (A) | FP8 same-seed max (A) | inside | max abs d ipTM | saturation / redo | max V^T peak (of 448) |
+|---|---|---|---|---|---|---|---|
+| Protenix v2, PV unfused | 7y37 8ad9 8ee9 8fxv 8gn4 8id0 8ifx 8j2w 8p7u 8vdn 8x3q (11) | 0.21-15.19 | 0.00-13.61 | 10 / 11 | 0.211 (8fxv, bf16 spread 15.2 A) | 0 / 0 (44 cases) | 0.643 |
+| OpenFold3, PV fused + unfused | 7y37 7zau 8ad9 8ee9 8fxv 8gn4 8id0 8ifx 8j2w 8p7u 8vdn 8x3q (12) | 0.42-18.41 | 0.00-17.46 | 11 / 12 | 0.209 (8ifx, bf16 ipTM 0.41-0.80) | 0 / 0 (48 cases) | 0.500 |
+| OpenFold3, PV + e4m3 q / k | same 12 | same | 0.00-17.49 | 11 / 12 | 0.209 | 0 / 0 (48 cases) | 0.357 |
+| IntelliFold2, PV unfused (template sites) | 7y37 7zau 8ad9 8ee9 8fxv 8gn4 8id0 8ifx 8j2w 8p7u 8vdn 8x3q (12) | 0.11-35.09 | 0.00-34.25 | 10 / 12 | 0.121 (8ifx) | 0 / 0 (48 cases) | - |
+| RoseTTAFold3, PV fused (data for the RF3 decision, not whitelisted here) | the same 12 | 0.24-18.62 | 0.00-9.33 | 12 / 12 (+ q / k 12 / 12) | 0.064 | 0 / 0 | 0.464 |
+
+Per target (bf16 pair max / FP8 same-seed max in A; "in" / "OUT" by the rule; targets that show 0.00 had no engaged site, their token bucket stays under every gate):
+
+| target | Protenix v2 PV | OpenFold3 PV | OpenFold3 PV + q / k | IntelliFold2 PV |
+|---|---|---|---|---|
+| 7y37 | 0.21 / 4.27 OUT (below) | 0.42 / 0.41 in | 0.42 / 0.41 in | 0.11 / 0.00 in |
+| 7zau | not run in this environment | 10.24 / 13.08 OUT (weak probe, ipTM 0.15-0.38) | 10.24 / 13.08 OUT | 16.51 / 21.57 OUT (weak probe) |
+| 8ad9 | 4.23 / 1.14 in | 0.56 / 0.37 in | 0.56 / 0.37 in | 4.66 / 0.00 in |
+| 8ee9 | 2.43 / 0.16 in | 0.57 / 0.55 in | 0.57 / 0.55 in | 1.26 / 0.00 in |
+| 8fxv | 15.19 / 13.61 in (weak probe) | 18.41 / 17.46 in (weak probe) | 18.41 / 17.49 in | 6.21 / 27.36 OUT |
+| 8gn4 | 2.43 / 0.00 in | 2.31 / 0.00 in | 2.31 / 0.00 in | 1.28 / 0.00 in |
+| 8id0 | 1.17 / 0.59 in | 0.52 / 0.12 in | 0.52 / 0.12 in | 0.59 / 0.52 in |
+| 8ifx | 3.86 / 3.83 in | 7.17 / 6.05 in | 7.17 / 6.05 in | 35.09 / 34.25 in (weak probe) |
+| 8j2w | 2.12 / 0.41 in | 0.95 / 0.92 in | 0.95 / 0.17 in | 1.06 / 0.82 in |
+| 8p7u | 2.50 / 1.36 in | 2.22 / 0.62 in | 2.22 / 1.06 in | 2.68 / 1.74 in |
+| 8vdn | 0.25 / 0.06 in | 0.57 / 0.23 in | 0.57 / 0.16 in | 1.60 / 0.30 in |
+| 8x3q | 2.03 / 0.16 in | 1.16 / 0.91 in | 1.16 / 0.91 in | 0.94 / 0.15 in |
+
+Reading, per model:
+- **Protenix v2 (added, PV unfused).** 10 / 11 inside; the one OUT is 7y37 at seed 1 (4.27 A), the known second mode of that target: its bf16 trunk seeds flip too (pair maximum 4.31 A over 12 seeds, 0.21 A over the
+  4 seeds of this run), so the 4-seed rule is the unstable part (the 12-seed run of the 3.0.0 evidence: inside; the FP8 flip rate 1 / 12 is reproduced, same seed). Together with the 11 targets of the widened-scope table above (11 / 11, 12 seeds on 7y37) this is the evidence for the row.
+  Sites reach 0.64 of the e4m3 range at most (L1152, 8 x 32), no saturation, 0 redo.
+- **OpenFold3 (added, PV fused + unfused, q / k on).** 11 / 12 for PV and for PV + q / k; the OUT is 7zau (bf16 trunk seeds 10.2 A apart, ipTM 0.15-0.38: a weak probe; FP8 13.1 A against the 11.3 A threshold), identical with and without q / k.
+  q / k changes the output on the targets that reach the d_pair-128 route (8j2w, 8p7u, 8vdn, 7y37 at L >= 256) and stays inside there (8p7u 1.06 A against bf16 2.22 A). 3.0.0's four-target OpenFold3 evidence (4 / 4) stands next to these.
+  Consistent with the 3.0.0 OpenFold3 row (4 targets, bf16 pair max 0.30-2.18 A, FP8 0.33-0.55 A): the same four targets read 0.42-2.31 A (bf16) and 0.00-0.55 A (FP8) here; the new rows add eight more targets.
+- **IntelliFold2 (not added).** Only the 4 template sites (256:8:32) are on a FP8 route; the trunk (512:8:64) is not. 10 / 12 inside and the two OUT are the largest targets: 8fxv (one seed, 27.4 A against a bf16 spread of 6.2 A, d ipTM 0.013) and 7zau
+  (21.6 A against a bf16 spread of 16.5 A). The measured gain is small (5I28 n = 16: 0.934 -> 0.918 of bf16, below), so the row is not worth the flips. Left out.
+  The 3.0.0 widened-scope evidence (6 / 6, four engaged targets) is not contradicted: both new flips are on targets that run was not given.
+- **64-channel heads.** The IntelliFold2 trunk needs the 64-channel-head FP8 PV core (`h100_dh`, the `d64` kind of branch `fp8c/chai1`, `triattn_d64_sm90.cu -DTE_F8PV=1`). Tried with that branch's commit 5e6e647a0 plus one table line
+  (`"intellifold2": {"d64", "unfused"}`, helper branch `fp8c/triattn-if2d64`, harness `e2e3.py`): the d64 route engaged (`pv_d64` 1048 calls per trunk) and **returned non-finite coordinates on 5 of the 6 targets that ran**
+  (7y37, 8ad9, 8gn4, 8id0, 8vdn: `FloatingPointError: non-finite AF3 coordinates` at every seed that ran; only 8ee9 was finite, 0.16 A against bf16), so no IntelliFold2 whitelist on that route until the d64 core is
+  fixed; the finding is handed to the chai1 branch.
+- **RoseTTAFold3 (data, not in the table).** 12 / 12 inside with PV fused and with q / k (the 3.0.0 widened-scope 7y37 OUT, a failed prediction with ipTM 0.10, is inside here: 4.88 A against a bf16 spread of 4.96 A). The RF3 whitelist line is for
+  the branch that owns RoseTTAFold3.
+
+### 5I28 benchmark (FoldForge a9e1549, FP8 `safe`, REPEATS 6, node02 H100, warm model seconds; bf16 = run_1118_301_steady; before = run_1118_301_fp8, TriAttn on the default core; after = this table)
+
+| model | n | bf16 s | FP8 before s | FP8 after s | before / bf16 | after / bf16 |
+|---|---|---|---|---|---|---|
+| protenix2 | 1 | 0.388 | 0.378 | 0.378 | 0.975 | 0.976 |
+| | 2 | 0.690 | 0.660 | 0.659 | 0.957 | 0.956 |
+| | 4 | 1.781 | 1.659 | 1.653 | 0.931 | 0.928 |
+| | 8 | 6.264 | 5.843 | 5.508 | 0.933 | 0.879 |
+| | 12 | 15.313 | 14.170 | 13.060 | 0.925 | 0.853 |
+| | 16 | 30.965 | 28.763 | 25.842 | 0.929 | 0.835 |
+| openfold3 | 1 | 0.389 | 0.377 | 0.378 | 0.967 | 0.972 |
+| | 2 | 0.598 | 0.574 | 0.574 | 0.959 | 0.959 |
+| | 4 | 1.263 | 1.198 | 1.146 | 0.948 | 0.907 |
+| | 8 | 3.794 | 3.563 | 3.220 | 0.939 | 0.849 |
+| | 12 | 8.947 | 8.359 | 7.270 | 0.934 | 0.813 |
+| | 16 | 16.940 | 15.705 | 13.157 | 0.927 | 0.777 |
+| intellifold2 (route not whitelisted; the numbers are `unfused` forced through the table, for the record) | 16 | 71.742 | 67.039 | 65.887 | 0.934 | 0.918 |
+
+(The n >= 6 rows of Protenix v2 are where the 256:8:32 gate (L768) opens; at n = 1 / 2 / 4 the model runs the default core on its trunk, the small differences there are timing noise.)
+Engine used for the after rows: the installed 3.0.1 package with only `fp8.py` of this branch (the whitelist table) overlaid, kernels, prebuilt cubins and the warm cache unchanged; `fp8.status()` at exit: `triattn: {pv: [unfused], qk: False}` (Protenix v2),
+`{pv: [fused, unfused], qk: True}` (OpenFold3); `fp8.check()` False (no saturation).
+
+Not done: e4m3 q / k at d_pair 256 (Protenix v2 / IntelliFold2: the q / k front exists for d_pair 128 only; a d_pair-256 kernel is new CUDA work), TriAttn FP8 for 64-channel heads on a release path (the `d64` core of `fp8c/chai1` is JIT-built and,
+as run here, not finite on IntelliFold2), IntelliFold2 trunk coverage, the RoseTTAFold3 line.
 
 ## OuterProductMean forward: e4m3 grouped product (`kernels/integrations/opm_fp8.py`, branch `fp8x/opm`, 2026-11-17)
 
