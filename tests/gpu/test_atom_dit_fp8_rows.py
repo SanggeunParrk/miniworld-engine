@@ -115,3 +115,62 @@ def test_fp8_parts_switch() -> None:
             H.enable_fp8("attn")
     finally:
         H.enable_fp8(prev)
+
+
+# ------------------------------------------------------------------------------------------------------------ ESMFold2 (RMS option)
+def _esm_block(n: int, a: int, shared: bool = True):
+    from miniworld_engine.modules import AtomDiTESMFold2Pair
+
+    torch.manual_seed(0)
+    m = AtomDiTESMFold2Pair(backend="cuda").cuda().eval()
+    with torch.no_grad():
+        for p in m.parameters():
+            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else 1 + torch.randn_like(p) * 0.1)
+    g = torch.Generator(device="cuda").manual_seed(1)
+    single = torch.randn(a, 1, n, 128, device="cuda", generator=g).bfloat16()
+    cond = torch.randn(1 if shared else a, 1, n, 128, device="cuda", generator=g).bfloat16().expand(a, 1, n, 128)
+    pair = torch.randn(1, (n + 31) // 32, 32, 192, 16, device="cuda", generator=g).bfloat16()
+    mask = torch.zeros(1, n, dtype=torch.bool, device="cuda")
+    mask[:, : n - 40] = True
+    angle = 3 * torch.randn(1, n, 16, device="cuda", generator=g)
+    return m, (single, cond, pair, mask), (angle.cos(), angle.sin())
+
+
+def _run_esm(m, inputs, rope, fp8):
+    from miniworld_engine.kernels.integrations import local_dit_h100 as H
+
+    prev = H.enable_fp8(fp8)
+    try:
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            return m(*inputs, rope=rope)
+    finally:
+        H.enable_fp8(prev)
+
+
+@pytest.mark.parametrize("n", [256, 1024, 2048])
+@pytest.mark.parametrize("parts", [True, "pre", "post"])
+def test_fp8_rows_esmfold2_pair_error(n: int, parts) -> None:
+    """ESMFold2's RMS atom block (``AtomDiTESMFold2Pair``) on the e4m3 rows: finite, inside the e4m3 error of the fp64 module, the e4m3 route
+    really ran (differs from bf16); switched off again the default route comes back bitwise."""
+    _needs_h100()
+    m, inputs, rope = _esm_block(n, 5)
+    ref = m.set_backend("pytorch").double()
+    with torch.no_grad():
+        y64 = ref(*(t.double() if t.is_floating_point() else t for t in inputs), rope=tuple(t.double() for t in rope))
+    m.float().set_backend("cuda")
+    ybf = _run_esm(m, inputs, rope, False)
+    y8 = _run_esm(m, inputs, rope, parts)
+    real = n - 40
+    e_bf, e8 = _rms_rel(ybf[:, :, :real], y64[:, :, :real]), _rms_rel(y8[:, :, :real], y64[:, :, :real])
+    assert torch.isfinite(y8.float()).all()
+    assert e8 < 0.06, (parts, e8, e_bf)
+    assert e8 > e_bf  # the e4m3 route really ran
+    assert torch.equal(_run_esm(m, inputs, rope, False), ybf)
+
+
+def test_fp8_rows_esmfold2_pair_fallbacks() -> None:
+    """A per-sample conditioning and a training forward keep the bf16 kernels (bitwise)."""
+    _needs_h100()
+    m, inputs, rope = _esm_block(1024, 5, shared=False)
+    m.float()
+    assert torch.equal(_run_esm(m, inputs, rope, True), _run_esm(m, inputs, rope, False))

@@ -298,6 +298,37 @@ def status() -> dict:
     }
 
 
+def _stat_dicts() -> dict[str, dict]:
+    ta, tm, opm, pwa, tr, td, ad = _modules()
+    return {
+        "triattn": ta.STATS,
+        "trimul": tm.GUARD_STATS,
+        "opm": opm.GUARD_STATS,
+        "pwa": pwa.STATS,
+        "transition": tr.GUARD_STATS,
+        "token_dit": td.STATS,
+        "atom_dit": ad.STATS,
+    }
+
+
+def route_stats() -> dict[str, dict[str, int]]:
+    """The call counters of every FP8 route, a copy: which routes fired since the process began (or the last :func:`reset_route_stats`).
+
+    Keys: ``triattn`` (``pv_fused`` / ``pv_front`` / ``pv_pass`` = the PV route per call-site kind, ``qk``, ``d128_calls``, ``calibrations``),
+    ``trimul`` / ``opm`` / ``transition`` (``calls``, ``retries``, ``fallbacks``, ``capture_fallbacks``), ``pwa`` (``calls`` native width,
+    ``wide_calls``, ``retries``, ``declined``), ``token_dit`` (``calls``, per placement, ``declined``), ``atom_dit`` (``calls``, ``pre`` /
+    ``post``, ``fallbacks`` + ``why_*``). A route that never fired has all zeros. The counters are plain ints bumped at Python call time
+    (eager or CUDA-graph capture time, outside every kernel): a replayed graph does not count again. Nothing here changes any output."""
+    return {name: dict(d) for name, d in _stat_dicts().items()}
+
+
+def reset_route_stats() -> None:
+    """Zero every route's counters (:func:`route_stats`)."""
+    for d in _stat_dicts().values():
+        for k in d:
+            d[k] = 0
+
+
 def check() -> bool:
     """The lazy guard of every static-scale route, once per forward, outside any graph (one host sync per route that ran): True when some
     call saturated the e4m3 range since the last check; the saturated routes' scales were raised in place (captured graphs follow), so the

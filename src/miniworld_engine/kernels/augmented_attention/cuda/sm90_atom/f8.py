@@ -19,8 +19,9 @@ from . import DS, NWARP, ROWS, _dev, cubin, pack
 
 E4M3 = torch.float8_e4m3fn
 _KERNELS = {"pre_f8": ("pre90_f8", 2 * 64 * 128 + 1024), "post_f8": ("post90_f8", 2 * (128 * 128 + 128 * 128) + 1024)}
-#: model options (``local_dit_h100.options``) this route serves; UP (Boltz-2), KQLN (RF3) and RMS (ESMFold2) keep the bf16 kernels
-OPTIONS = frozenset({"IDENT", "PARS", "NOOUT"})
+#: model options this route serves (``local_dit_h100.options`` plus RMS of ``local_dit_esm``: ESMFold2's RMSNorm AdaLNs and raw gates, built with
+#: -DRMS=1 into both kernels); UP (Boltz-2) and KQLN (RF3) keep the bf16 kernels
+OPTIONS = frozenset({"IDENT", "PARS", "NOOUT", "RMS"})
 #: CTAs per SM each kernel's register allocation targets (__launch_bounds__ minimum blocks), by grid size: 1 gives 236 / 253 registers
 #: (2 CTAs per SM), 3 caps them at 168 with a small spill. Measured (H100, AF3 block, A = 5, kernel times): pre90_f8 at 320 / 640 CTAs
 #: 26.1 -> 19.5 / 43.0 -> 40.1 us with 3, at 1280 79.2 -> 85.8 us (so 1); post90_f8 3 only where it makes one wave of a grid that
@@ -40,7 +41,7 @@ def _minb(kind: str, ctas: int) -> int:
 
 def kernel_cubin(kind: str, options: tuple = (), minb: int = 1) -> str:
     """The cubin of ``kind`` under the model ``options`` and ``minb`` (the build :func:`kernel` loads; also the prebuild recipe's call)."""
-    defs = tuple(f"-D{o}=1" for o in sorted(options) if kind == "post_f8" and o in ("PARS", "NOOUT"))
+    defs = tuple(f"-D{o}=1" for o in sorted(options) if o == "RMS" or (kind == "post_f8" and o in ("PARS", "NOOUT")))
     return cubin(_KERNELS[kind][0], False, NWARP, minb, defs)
 
 
