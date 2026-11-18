@@ -779,9 +779,9 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
 
         ph = pair.new_empty(0, dpw, dtype=at)
         if dpw == apb.DP:
-            bias = apb.pair_bias(p2, W["Wf_l2"], None, L, EPS, 0.0)  # the backward recomputes the row statistics
-        else:
-            bias, pst, bu_ = apb.pair_bias(p2, W["Wf_l2"], None, L, EPS, 0.0, saved=True)  # + (mean, rstd) and the unmasked fp32 bias
+            bias = cast(torch.Tensor, apb.pair_bias(p2, W["Wf_l2"], None, L, EPS, 0.0))  # the backward recomputes the row statistics
+        else:  # + (mean, rstd) and the unmasked fp32 bias
+            bias, pst, bu_ = cast(tuple, apb.pair_bias(p2, W["Wf_l2"], None, L, EPS, 0.0, saved=True))
             bu = bu_.view(-1)
         if extra is not None:  # an [L, L] logit term for every head, in the bias's log2 units
             bias.add_(extra.view(1, L, L), alpha=LOG2E)

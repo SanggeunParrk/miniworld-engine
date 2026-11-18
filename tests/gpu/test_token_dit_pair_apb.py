@@ -31,6 +31,11 @@ def _block(dp: int) -> typing.Any:
     return module
 
 
+def _cuda_block(module) -> typing.Any:
+    m: typing.Any = C.cast(module, "master")
+    return m.train().set_backend("cuda")
+
+
 def _inputs(m, A: int, L: int):
     g = torch.Generator(device="cuda").manual_seed(1)
     inp = m.make_inputs(
@@ -76,7 +81,7 @@ def _rel_rms(x: torch.Tensor, ref: torch.Tensor) -> float:
 @pytest.mark.parametrize("dp,A,L", [(128, 2, 256), (128, 5, 384), (256, 2, 256), (512, 2, 256)])
 def test_apb_pair_bias_matches_reference(dp, A, L) -> None:
     module = _block(dp)
-    m: typing.Any = C.cast(module, "master").train().set_backend("cuda")
+    m = _cuda_block(module)
     inp, ex = _inputs(m, A, L)
     ref = TokenDiTProtenix(d_single=768, d_cond=384, d_pair=dp, n_head=16, n=2).cuda().float()
     ref.load_state_dict(module.state_dict())
@@ -98,7 +103,7 @@ def test_apb_pair_bias_matches_reference(dp, A, L) -> None:
 @pytest.mark.parametrize("dp", [128, 256])
 def test_apb_pair_bias_is_deterministic(dp) -> None:
     module = _block(dp)
-    m: typing.Any = C.cast(module, "master").train().set_backend("cuda")
+    m = _cuda_block(module)
     inp, ex = _inputs(m, 2, 256)
     out_a, ga = _step(m, inp, ex, 2, 256, apb=True)
     out_b, gb = _step(m, inp, ex, 2, 256, apb=True)
@@ -120,7 +125,7 @@ def test_wide_inference_bias_matches_the_ln_rows_route(dp) -> None:
     wf = (torch.randn(16, dp, device="cuda", generator=g) * 0.1).bfloat16()
     mask = torch.ones(L, dtype=torch.bool, device="cuda")
     mask[L - 5 :] = False
-    new = apb.pair_bias(z, wf, mask, L, 1e-5, -1e30)
+    new = typing.cast(torch.Tensor, apb.pair_bias(z, wf, mask, L, 1e-5, -1e30))
     old = _pair_bias_wide(z, wf, mask, L)
     assert bool((new[:, :, L - 5 :] == -1e30).all()) and bool((old[:, :, L - 5 :] == -1e30).all())
     keep = mask.view(1, 1, L).expand(16, L, L)
