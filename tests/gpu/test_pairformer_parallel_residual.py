@@ -127,3 +127,23 @@ def test_other_backends_keep_the_reference_statements(monkeypatch):
     pair, mask, _ = _inputs(False)
     with torch.no_grad():
         _run(m.set_backend("pytorch"), pair, mask, None)
+
+
+def test_per_sub_module_backends_fuse_too(monkeypatch):
+    """FoldForge picks the backend per op: the block stays on ``"pytorch"``, its sub-modules run ``cuda``; the fused sum runs as for a block set
+    to ``cuda`` (bitwise the same output)."""
+    m = _block(True).set_backend("cuda").eval()
+    pair, mask, s = _inputs(True)
+    with torch.no_grad():
+        want = _run(m, pair, mask, s)
+    mixed = _block(True).set_backend("pytorch").eval()
+    for _, child in mixed._backend_children():
+        child.set_backend("cuda")
+    calls = []
+    real = pf.fused_parallel_residual
+    monkeypatch.setattr(pf, "fused_parallel_residual", lambda x, b: calls.append(len(b)) or real(x, b))
+    with torch.no_grad():
+        got = _run(mixed, pair, mask, s)
+    assert calls == [5, 2], calls
+    for a, b in zip(got, want, strict=True):
+        assert torch.equal(a, b)

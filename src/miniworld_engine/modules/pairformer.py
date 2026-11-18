@@ -233,7 +233,10 @@ class PairformerBlock(BackendModule, MasterWeights):
         logits_pair = pair_in if self.config.parallel else pair
         if self.config.parallel:
             single = self._parallel_sum(
-                cast(torch.Tensor, single), [self.single_attention(single, logits_pair, mask, extra_pair_bias), self.single_transition(single)]
+                cast(torch.Tensor, single),
+                [self.single_attention(single, logits_pair, mask, extra_pair_bias), self.single_transition(single)],
+                False,
+                self._updates_on_cuda([self.single_attention, self.single_transition]),
             )
         else:
             single = self.single_transition(self.single_attention(single, logits_pair, mask, extra_pair_bias))
@@ -325,8 +328,8 @@ class PairformerBlock(BackendModule, MasterWeights):
         def update(module: Any) -> torch.Tensor:
             return module(pair_in, mask) if module is not self.transition_pair else module(pair_in)
 
-        if self.backend == "cuda":
-            return self._parallel_sum(pair_in, [update(module) for module in modules], deltas_first=True)
+        if self._updates_on_cuda(modules):
+            return self._parallel_sum(pair_in, [update(module) for module in modules], True, True)
         total = None
         for module in modules:
             delta = update(module) - pair_in
@@ -334,11 +337,18 @@ class PairformerBlock(BackendModule, MasterWeights):
         assert total is not None  # modules always holds transition_pair
         return pair_in + total
 
-    def _parallel_sum(self, x: torch.Tensor, outputs: list[torch.Tensor], *, deltas_first: bool = False) -> torch.Tensor:
-        """``x + sum_i (y_i - x)`` over the updates' outputs ``y_i``: the fused kernel on ``"cuda"`` (when the call is in its range), else
-        the reference statements. (``deltas_first``, the pair track's reference statement: ``x + sum_i (y_i - x)`` with the deltas summed
-        first; the single track's is ``x + (y_0 - x) + (y_1 - x)``, left to right: the fallback keeps each as it was.)"""
-        if self.backend == "cuda":
+    @staticmethod
+    def _updates_on_cuda(modules: list[Any]) -> bool:
+        """Whether every update runs on its ``cuda`` backend. The block's own ``backend`` is not the test: a caller that picks the backend
+        per sub-module (FoldForge's per-op policy: the block itself stays on ``"pytorch"``) gets the fused sum as the block set to ``"cuda"``
+        does; a block whose updates run the reference (``set_backend("pytorch")``) keeps the reference statements."""
+        return all(getattr(module, "backend", "pytorch") == "cuda" for module in modules)
+
+    def _parallel_sum(self, x: torch.Tensor, outputs: list[torch.Tensor], deltas_first: bool, fuse: bool) -> torch.Tensor:
+        """``x + sum_i (y_i - x)`` over the updates' outputs ``y_i``: the fused kernel when ``fuse`` (the updates ran on ``cuda``) and the
+        call is in its range, else the reference statements. (``deltas_first``, the pair track's reference statement: ``x + sum_i (y_i - x)``
+        with the deltas summed first; the single track's is ``x + (y_0 - x) + (y_1 - x)``, left to right: the fallback keeps each as it was.)"""
+        if fuse:
             fused = fused_parallel_residual(x, outputs)
             if fused is not None:
                 return fused
