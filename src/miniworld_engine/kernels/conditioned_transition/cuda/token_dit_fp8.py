@@ -88,9 +88,7 @@ def active(M: int, D: int, fp32: bool, plain: bool, identity: bool = False) -> f
     ``out`` and ``squeeze``; not ``qkvg`` (its AdaLN scale is unbounded: no bound on the e4m3 error was measured, docs/fp8.md)."""
     if not PLACES or fp32 or not (plain or identity) or D != 768 or M % 128:
         return frozenset()
-    return frozenset(
-        p for p in PLACES if (plain or p != "qkvg") and M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_PER[p])
-    )
+    return frozenset(p for p in PLACES if (plain or p != "qkvg") and M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_PER[p]))
 
 
 def quant_weight(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

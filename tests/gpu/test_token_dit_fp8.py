@@ -153,7 +153,8 @@ def _chai1(seed: int = 0) -> typing.Any:
 def _chai1_inputs(m, length: int, samples: int, seed: int = 1) -> dict:
     g = torch.Generator(device="cuda").manual_seed(seed)
     inputs = m.make_inputs(length=length, samples=samples, depth=None, dtype=torch.bfloat16, device="cuda", generator=g)
-    inputs["cond"] = inputs["cond"].to(torch.bfloat16)  # the sampler's bf16 conditioning: the CondFold route (fp32 conditioning takes the unfolded one)
+    # the sampler's bf16 conditioning: the CondFold route (fp32 conditioning takes the unfolded one)
+    inputs["cond"] = inputs["cond"].to(torch.bfloat16)
     return inputs
 
 
