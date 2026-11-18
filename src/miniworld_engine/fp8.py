@@ -90,7 +90,7 @@ PRESETS = MappingProxyType(
 #: targets x 4 trunk seeds with PV; protenix1 (PV + q / k, 25 targets x 4 trunk seeds) / opendde (PV only: no d_pair-128 site) = the listed kinds; protenix2 =
 #: PV on its d_pair-256 front-made sites ("unfused"; no d_pair-128 site, so no q / k) and openfold3 = PV on both kinds + q / k (docs/fp8.md
 #: "TriAttn whitelist: Protenix v2, OpenFold3 (IntelliFold2 not added)": 4 trunk seeds per target, 3.0.1 environment). Boltz-2 is out on purpose
-#: (9c90 bistable); Chai-1 (call-site kind "d64", fp8c/chai1) has the kernel but no end-level evidence yet: not listed. IntelliFold2 stays out (end-level 10 / 12, its trunk heads are 64-channel). ``h100_sm90.FP8_PV_WHITELIST`` is derived from
+#: (9c90 bistable); chai1 = PV on the 64-channel-head core ("d64") + the template stack ("unfused"), 12 targets x 4 trunk seeds inside, gates removed (docs/fp8.md "Chai-1"). IntelliFold2 stays out (end-level 10 / 12, its trunk heads are 64-channel). ``h100_sm90.FP8_PV_WHITELIST`` is derived from
 #: this table. Extend only after an end-level check.
 TRIATTN_MODELS = MappingProxyType(
     {
@@ -100,6 +100,7 @@ TRIATTN_MODELS = MappingProxyType(
         "protenix2": (frozenset({"unfused"}), False),
         "openfold3": (frozenset({"fused", "unfused"}), True),
         "rosettafold3": (frozenset({"fused"}), True),
+        "chai1": (frozenset({"d64", "unfused"}), False),  # d64: the 64-channel-head core (trunk + confidence; shipped gate S >= 1024), unfused: the template stack
     }
 )
 _NO_TRIATTN: tuple[frozenset[str], bool] = (frozenset(), False)

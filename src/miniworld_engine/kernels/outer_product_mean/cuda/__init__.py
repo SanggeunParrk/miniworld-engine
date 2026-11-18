@@ -87,3 +87,6 @@ def prebuild(target, rows):
         yield ext
     if any("groups" in _kv(r["options"]) and any("_chai_" in k for k in r["kernels"]) for r in rows):
         yield chai_ext
+        from miniworld_engine.kernels.outer_product_mean import chai as _chai
+
+        yield _chai._f8_ext  # the opt-in e4m3 grouped product (MINIWORLD_OPM_FP8=bound + the depth gate; docs/fp8.md)

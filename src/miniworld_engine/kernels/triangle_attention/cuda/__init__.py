@@ -79,6 +79,7 @@ def prebuild(target, rows):
             yield h100_dh.ext
         if needs("triangle_attention_d64_fwd_sm90"):
             yield h100_dh.ext_d64
+            yield h100_dh.ext_d64_f8  # the opt-in FP8 PV variant (-DTE_F8PV=1, docs/fp8.md; Chai-1 trunk / confidence)
         if needs("triangle_attention_d64_fwd_train_sm90"):
             yield h100_dh.ext_d64t
     elif target.arch == "sm100":
