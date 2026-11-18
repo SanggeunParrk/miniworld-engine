@@ -39,6 +39,12 @@ using namespace sm90;
 #ifndef TE_NB
 #define TE_NB (TE_BN == 128 ? 2 : 3)      // bias ring stages (one per key tile)
 #endif
+#ifndef TE_F8PV
+#define TE_F8PV 0         // opt-in FP8 variant: P and V on the e4m3 tensor-core path (the 32-channel core's F8PV design, triattn_h16_sm90.cu): V arrives as e4m3 V^T planes (vt_quant), p = 2^(x + 8) as e4m3 bytes; built with -DTE_F8PV=1
+#endif
+#if TE_F8PV
+#define TE_TAU 0.5f       // F8PV: p = 2^(logit - m + 8) must stay below 448: the offset rises as soon as a logit exceeds it by 0.5 log2 units
+#endif
 #ifndef TE_TAU
 #define TE_TAU 8.f        // a tile raises a row's offset only when its maximum exceeds it by more than this many log2 units
 #endif
@@ -97,6 +103,16 @@ __device__ __forceinline__ void mma_pv(float (&d)[36], const uint32_t (&a)[4], u
                : SM90_D32(0), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35])
                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
 }
+#if TE_F8PV
+// F8PV: [O | l] += P [V | 1] on e4m3: m64n72k32, fp32 accumulation, A = P from registers (4 x 4 e4m3), B = [V^T (64 rows); ones (8 rows)] K-major from shared (72 rows of 128 keys)
+__device__ __forceinline__ void mma_f8_n72(float (&d)[36], const uint32_t (&a)[4], uint64_t b) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n72k32.f32.e4m3.e4m3 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, "
+               "%16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32, %33, %34, %35}, {%36, %37, %38, %39}, %40, p, 1, 1;\n}\n"
+               : SM90_D32(0), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35])
+               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+}
+#endif
 // a descriptor moved by `bytes` with its leading-byte offset shortened by as much: the block at start + LBO (the ones) stays put
 __device__ __forceinline__ uint64_t desc_mv(uint64_t d, uint32_t bytes) {
   uint64_t r;
@@ -139,6 +155,10 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
     const __grid_constant__ CUtensorMap qmap,            // proj [B N S][4 H 64] fp16, box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap kvmap,           // the same tensor, box (64, BN)
     const __grid_constant__ CUtensorMap bmap,            // sbias [B H S][S] fp16, box (64, 128), 128B swizzle
+#if TE_F8PV
+    const __grid_constant__ CUtensorMap vtmap,           // V^T e4m3 [B N H 64 rows][S keys] (keys permuted inside each group of 32: vt_quant), box (128, 64), 128B swizzle
+    const float* __restrict__ VS,                        // per (b, h) V scale fp32 [B H]
+#endif
     const __half* __restrict__ P, long ld,               // proj (the gate's columns), its row stride
     const float* __restrict__ GB,                        // gate bias fp32 [H 64], or nullptr
     bf16* __restrict__ U,                                // [B N S][H 64]
@@ -156,6 +176,12 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
   volatile int2* info = reinterpret_cast<volatile int2*>(smb + (bar0 - sB) + 8 * (2 * NKV + 2 * NB));   // [NKV]: (task, key tiles) of a Q stage
   const int tid = threadIdx.x, wg = tid >> 7, lane = tid & 31;
   for (int i = tid; i < ONES / 2; i += THREADS) reinterpret_cast<uint32_t*>(smb + (sOnes - sB))[i] = 0x3C003C00u;   // fp16 pairs (1, 1)
+#if TE_F8PV
+  for (int i = tid; i < NKV * 256; i += THREADS) {          // F8PV: the 8 ones rows (e4m3 1.0 = 0x38) behind each stage's 64 V^T rows (1 KiB)
+    const int s = i / 256, e = i % 256;
+    reinterpret_cast<uint32_t*>(smb + (sKV - sB) + (s * STG + KVT) * 2 + 128 * 64)[e] = 0x38383838u;
+  }
+#endif
   if (tid == 0) {
     uint64_t* bars = reinterpret_cast<uint64_t*>(smb + (bar0 - sB));
     for (int k = 0; k < NKV; ++k) { bar_init(bars + k, 1); bar_init(bars + NKV + k, 8); }
@@ -176,6 +202,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
     if (tid == 0) {
       prefetch_map(&qmap); prefetch_map(&kvmap); prefetch_map(&bmap);
       int st = 0, kph = 0, bs = 0, bph = 0;
+#if TE_F8PV
+      bool qdirty[NKV];   // F8PV: a stage that carried Q tiles lost its ones rows (the Q tiles fill the whole stage): rewritten before its next K / V^T load
+#pragma unroll
+      for (int s = 0; s < NKV; ++s) qdirty[s] = false;
+#endif
       auto adv = [&]() { if (++st == NKV) { st = 0; kph ^= 1; } };
       for (int t = blockIdx.x; t < ntasks; t = SCHED ? (int)gridDim.x + atomicAdd(SCHED, 1) : t + (int)gridDim.x) {
         int b, h, qt, g; decode(t, b, h, qt, g);
@@ -185,6 +216,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
           info[st].x = t; info[st].y = nk;
           expect_tx(kvf(st), RPS * QT * 2);
           for (int rr = 0; rr < RPS; ++rr) load_2d(&qmap, sKV + (st * STG + rr * QT) * 2, kvf(st), h * D, row0(b, g * R + qs * RPS + rr) + qt * BM);
+#if TE_F8PV
+          qdirty[st] = true;
+#endif
           adv();
         }
         for (int j = 0; j < nk; ++j) {
@@ -194,10 +228,23 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
           if (++bs == NB) { bs = 0; bph ^= 1; }
           for (int r = 0; r < R; ++r) {
             wait(kve(st), kph ^ 1);
+#if TE_F8PV
+            if (qdirty[st]) {
+              uint32_t* ones = reinterpret_cast<uint32_t*>(smb + (sKV - sB) + (st * STG + KVT) * 2 + 128 * 64);
+              for (int e = 0; e < 256; ++e) ones[e] = 0x38383838u;
+              fence_proxy_async();
+              qdirty[st] = false;
+            }
+            expect_tx(kvf(st), KVT * 2 + 64 * BN);                 // K (fp16) + the V^T tile (64 rows x BN keys, e4m3)
+            const int rw = row0(b, g * R + r) + j * BN;
+            load_2d(&kvmap, sKV + st * STG * 2, kvf(st), HD + h * D, rw);
+            load_2d(&vtmap, sKV + (st * STG + KVT) * 2, kvf(st), j * BN, ((b * N + min(g * R + r, N - 1)) * H + h) * 64);
+#else
             expect_tx(kvf(st), STG * 2);
             const int rw = row0(b, g * R + r) + j * BN;
             load_2d(&kvmap, sKV + st * STG * 2, kvf(st), HD + h * D, rw);
             load_2d(&kvmap, sKV + (st * STG + KVT) * 2, kvf(st), 2 * HD + h * D, rw);
+#endif
             adv();
           }
         }
@@ -216,7 +263,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
   const int lrow = qrow + (lane & 7) + 8 * ((lane >> 3) & 1), lcol8 = lane >> 4, x7 = lane & 7;
   const uint32_t blane = sB + lrow * 128, qlane = sKV + lrow * 128;
   const uint64_t kd0 = desc_k128(sKV);
-  const uint64_t vd0 = gdesc(sKV + KVT * 2, sOnes - (sKV + KVT * 2), 1024, SW128);   // V of stage 0, its columns 64..71 the ones block
+  #if TE_F8PV
+  const uint64_t vd0 = desc_k128(sKV + KVT * 2);         // F8PV: V^T rows K-major (128 keys = 128 bytes per row), the ones rows right behind the 64 V^T rows
+#else
+  const uint64_t vd0 = gdesc(sKV + KVT * 2, sOnes - (sKV + KVT * 2), 1024, SW128);
+#endif   // V of stage 0, its columns 64..71 the ones block
   const uint32_t scl2 = hdup(scl);
   int gst = 0, gph = 0, bs = 0, bph = 0, xst = 0;
   uint32_t qa[R][4][4];
@@ -248,11 +299,20 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
     if (++gst == NKV) { gst = 0; gph ^= 1; }
   };
   auto PV = [&](int r) {
+#if TE_F8PV
+    // P is already e4m3 bytes (X): the A fragment of a k32 step is sc[r][4 kk .. 4 kk + 3]; a k32 step = +32 bytes in the 128-byte V^T row
+#pragma unroll
+    for (int kk = 0; kk < BN / 32; ++kk) {
+      const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
+      mma_f8_n72(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 32));
+    }
+#else
 #pragma unroll
     for (int kk = 0; kk < BN / 16; ++kk) {
       const uint32_t a[4] = {sc[r][4 * kk], sc[r][4 * kk + 1], sc[r][4 * kk + 2], sc[r][4 * kk + 3]};
       mma_pv(o[r], a, desc_mv(vd0, xst * STG * 2 + kk * 2048));
     }
+#endif
     wg_commit();
   };
   auto release = [&]() {
@@ -285,12 +345,32 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
         m[r][0] = n0; m[r][1] = n1;
       }
     }
+#if TE_F8PV
+    // p = 2^(x + 8) directly as e4m3 bits (triattn_h16_sm90.cu F8conv): x = logit - m + 8, clamped at -7, byte = round(8 x + 56); written in place as the PV steps' A fragments
+    const uint32_t nb0 = hdup(m[r][0] > -INFINITY ? 8.f - m[r][0] : 0.f), nb1 = hdup(m[r][1] > -INFINITY ? 8.f - m[r][1] : 0.f);
+#pragma unroll
+    for (int kk = 0; kk < BN / 32; ++kk) {
+#pragma unroll
+      for (int i = 4 * kk; i < 4 * kk + 4; ++i) {
+        uint32_t x0 = hfma2(sc[r][2 * i], scl2, nb0), x1 = hfma2(sc[r][2 * i + 1], scl2, nb1);
+        x0 = hmax2(x0, 0xC700C700u); x1 = hmax2(x1, 0xC700C700u);                       // x >= -7
+        x0 = hfma2(x0, 0x48004800u, 0x64386438u); x1 = hfma2(x1, 0x48004800u, 0x64386438u);   // 8 x + 56 + 1024
+        sc[r][2 * i] = x0; sc[r][2 * i + 1] = x1;
+      }
+      uint32_t pk[4];   // k32 step kk: a0 = row g keys (blocks 4 kk, 4 kk + 1), a1 = row g + 8, a2 / a3 = blocks 4 kk + 2, 4 kk + 3
+#pragma unroll
+      for (int j = 0; j < 4; ++j) asm("prmt.b32 %0, %1, %2, 0x6420;" : "=r"(pk[j]) : "r"(sc[r][8 * kk + (j & 1) + 4 * (j >> 1)]), "r"(sc[r][8 * kk + (j & 1) + 4 * (j >> 1) + 2]));
+#pragma unroll
+      for (int j = 0; j < 4; ++j) sc[r][4 * kk + j] = pk[j];
+    }
+#else
     const uint32_t nm0 = hdup(m[r][0] > -INFINITY ? -m[r][0] : 0.f), nm1 = hdup(m[r][1] > -INFINITY ? -m[r][1] : 0.f);
 #pragma unroll
     for (int i = 0; i < BN / 8; ++i) {
       sc[r][2 * i] = hexp<TE_POLY>(hfma2(sc[r][2 * i], scl2, nm0), i);
       sc[r][2 * i + 1] = hexp<TE_POLY>(hfma2(sc[r][2 * i + 1], scl2, nm1), i);
     }
+#endif
   };
   auto step = [&](int r) {
     G(r);
@@ -357,7 +437,12 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
       const int n = g * R + r;
       if (n >= N) continue;                      // a padding row: computed on row N - 1, not stored
       const float l0 = o[r][32], l1 = o[r][34];  // accumulator columns 64..71 = P 1: the row sums
+#if TE_F8PV
+      const float vsc = VS[b * H + h];   // the row sum is of the e4m3 probabilities (the ones rows of the PV): P V8 / l is normalised, times the V scale
+      const float inv0 = l0 > 0.f ? vsc / l0 : 0.f, inv1 = l1 > 0.f ? vsc / l1 : 0.f;
+#else
       const float inv0 = l0 > 0.f ? 1.f / l0 : 0.f, inv1 = l1 > 0.f ? 1.f / l1 : 0.f;
+#endif
 #pragma unroll
       for (int half = 0; half < 2; ++half) {
         const float inv = half ? inv1 : inv0;
@@ -384,7 +469,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_d64_sm90(
 // proj [B S S, 4 H 64] fp16 contiguous (q | k | v | g), sbias [B, H, S, S] fp16 contiguous (= bias / scale, masked keys -inf), S % 128 == 0;
 // gate_bias fp32 [H 64] or empty; key_tiles int32 [B] (BN-key tiles, h100_sm90.key_tiles(mask, S, BN)) or None -> u [B S S, H 64] bf16
 at::Tensor triattn_d64_forward(at::Tensor proj, at::Tensor sbias, at::Tensor gate_bias, int64_t H, double scale,
-                                std::optional<at::Tensor> key_tiles) {
+                                std::optional<at::Tensor> key_tiles
+#if TE_F8PV
+                                , at::Tensor vt, at::Tensor vscale
+#endif
+                                ) {
   TORCH_CHECK(proj.is_cuda() && proj.scalar_type() == at::kHalf && proj.is_contiguous() && proj.dim() == 2 && proj.size(1) == 4 * H * D,
               "proj: contiguous fp16 [B S S, 4 H 64]");
   TORCH_CHECK(sbias.scalar_type() == at::kHalf && sbias.is_contiguous() && sbias.dim() == 4 && sbias.size(1) == H && sbias.size(2) == sbias.size(3),
@@ -407,6 +496,11 @@ at::Tensor triattn_d64_forward(at::Tensor proj, at::Tensor sbias, at::Tensor gat
   CUtensorMap qm = make_map<2>(proj.data_ptr(), {(uint64_t)ld, rows}, {(uint64_t)ld}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "q", f16);
   CUtensorMap kvm = make_map<2>(proj.data_ptr(), {(uint64_t)ld, rows}, {(uint64_t)ld}, {64, (uint32_t)BN}, CU_TENSOR_MAP_SWIZZLE_128B, "k | v", f16);
   CUtensorMap bm = make_map<2>(sbias.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "sbias", f16);
+#if TE_F8PV
+  TORCH_CHECK(vt.is_cuda() && vt.scalar_type() == at::kFloat8_e4m3fn && vt.is_contiguous() && vt.numel() == B * N * H * D * S, "vt: float8_e4m3fn [B, N, H, 64, S] contiguous (keys permuted inside each group of 32)");
+  TORCH_CHECK(vscale.is_cuda() && vscale.scalar_type() == at::kFloat && vscale.is_contiguous() && vscale.numel() == B * H, "vscale: fp32 [B, H]");
+  CUtensorMap vtm = make_map<2>(vt.data_ptr(), {(uint64_t)S, (uint64_t)(B * N * H * D)}, {(uint64_t)S}, {128, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "vt", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+#endif
   auto u = at::empty({proj.size(0), H * D}, proj.options().dtype(at::kBFloat16));
   static bool attr = false;
   if (!attr) {
@@ -425,6 +519,9 @@ at::Tensor triattn_d64_forward(at::Tensor proj, at::Tensor sbias, at::Tensor gat
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   auto kernel = hg < H ? triattn_d64_sm90<true> : triattn_d64_sm90<false>;
   kernel<<<grid, THREADS, SMEM, stream>>>((int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), hg, qm, kvm, bm,
+#if TE_F8PV
+                                          vtm, vscale.data_ptr<float>(),
+#endif
                                           reinterpret_cast<const __half*>(proj.data_ptr()), ld,
                                           gate_bias.numel() ? gate_bias.data_ptr<float>() : nullptr, reinterpret_cast<bf16*>(u.data_ptr()), kt,
                                           dyn ? sched.data_ptr<int>() : nullptr);
@@ -436,6 +533,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("triattn_d64_forward", &triattn_d64_forward, "sm90 triangle-attention inference core for heads of 64 channels (wgmma, fp16 operands "
         "and scores): proj [B S S, 4 H 64] fp16 (q | k | v | g), sbias = bias / scale [B, H, S, S] fp16 -> u = sigmoid(g (+ gate_bias)) o "
         "[B S S, H 64] bf16", py::arg("proj"), py::arg("sbias"), py::arg("gate_bias"), py::arg("H"), py::arg("scale"),
+#if TE_F8PV
+        py::arg("key_tiles"), py::arg("vt"), py::arg("vscale"));
+#else
         py::arg("key_tiles") = py::none());
+#endif
   m.attr("KEY_TILE") = BN;
 }

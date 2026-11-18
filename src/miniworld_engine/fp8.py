@@ -94,6 +94,7 @@ TRIATTN_MODELS = MappingProxyType(
         "af3": (frozenset({"fused", "unfused"}), True),
         "protenix1": (frozenset({"fused"}), False),
         "opendde": (frozenset({"unfused"}), False),
+        "chai1": (frozenset({"d64", "unfused"}), False),
     }
 )
 _NO_TRIATTN: tuple[frozenset[str], bool] = (frozenset(), False)
@@ -244,7 +245,8 @@ def enable_triattn(kinds, qk: bool) -> None:
     if not kinds:
         return
     ta.FP8_PV, ta.FP8_VSCALE_AUTO, ta.FP8_PV_HL = True, True, False
-    ta.FP8_PV_FUSED = "fused" in kinds
+    ta.FP8_PV_D64 = "d64" in kinds
+    ta.FP8_PV_FUSED = "fused" in kinds or not (kinds - {"d64"})   # (d64 alone: no fused site, and the h16 core must stay the fp16 one)
     ta.FP8_PV_UNFUSED = "unfused" in kinds
     ta.FP8_PV_MIN_S = dict(ta.FP8_PV_UNFUSED_MIN_S) if ta.FP8_PV_UNFUSED else {}
     ta.FP8_PV_FRONT_MIN_S = dict(ta.FP8_PV_UNFUSED_FRONT_MIN_S) if ta.FP8_PV_UNFUSED else {}
