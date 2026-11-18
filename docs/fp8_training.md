@@ -313,7 +313,7 @@ the transient O: all routes fit L 4096 (OOM at 4224); depth: all routes stop at 
 | 128/256 L768 S1024 | 0.928 / 0.947 | 1.88 / 1.84 | 1.066 / 1.027 |
 | 128/384 L768 S1024 | 0.963 / 0.977 | 1.80 / 1.77 | 1.087 / 1.042 |
 
-- `fp8` (amax + cast in forward, dequant in backward, separate passes, no fused kernel): 2-2.5 s of extra elementwise traffic per step erases the FP8 win (1.8-1.9x of the default at S 1024),
+- `fp8` (amax + cast in forward, dequant in backward, separate passes, no fused kernel): about 1-7 ms of extra elementwise passes per step (L256-768) erases the FP8 win (1.8-1.9x of the default at S 1024),
   and dW_out error rises 2.8 -> 3.9 % rms (3.4 % max; every other gradient unchanged). A fused version (cast inside the epilogue, dequant inside `opm_dwo`) is the only way it could pay;
   not built (the epilogue kernel's O load path is the wgmma / TMA one; ideal gain ~0.4 ms of 5.4 at L768 for +0.4 % y error). No-go at this level.
 - `recompute` (redo the FP8 product in backward from the saved A2 / BT, bit-identical gradients to round 3): saved bytes -70 to -85 % at S 1024 (L768: 1.42 -> 0.21 GB), -59 % at S 4096;
