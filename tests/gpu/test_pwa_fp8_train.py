@@ -19,11 +19,11 @@ _H100 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 
 def f8t():
     from miniworld_engine.kernels.integrations import pwa_fp8_train as F
 
-    saved = (F.PLACES, F.IMPL, F.DO_FMT, F.MIN_S)
+    saved = (F.PLACES, F.IMPL, F.DO_FMT, F.MIN_S, F.O8)
     F.MIN_S = 0  # the tests run small S
     F.reset()
     yield F
-    F.PLACES, F.IMPL, F.DO_FMT, F.MIN_S = saved
+    F.PLACES, F.IMPL, F.DO_FMT, F.MIN_S, F.O8 = saved
     F.reset()
 
 
@@ -242,3 +242,41 @@ def test_serving_gate(f8t) -> None:
     assert f8t.serves(x) and not f8t.serves(x[:, :512])
     f8t.PLACES = f8t.BWD
     assert f8t.serves(x) and not f8t.serves(torch.empty(1, 1024, 384, 64, device="cuda", dtype=torch.bfloat16))
+
+
+@pytest.mark.skipif(not _H100, reason="H100")
+def test_saved_o_e4m3_mode(f8t) -> None:
+    """Round 4 (O8: the saved attention output o stored as e4m3 + a delayed scale, dequantised in the backward): quantize / dequantize
+    match PyTorch's rounding, the forward output is the bwd route's, the saved bytes shrink, gradients stay inside the FP8 budget (0.4 -> ~2.6 %
+    on the gate / out gradients), the step is deterministic."""
+    torch.manual_seed(1)
+    o = (torch.randn(8, 128, 2048, device="cuda") * 3).bfloat16()
+    inv = torch.full((1,), 0.25, device="cuda")
+    amax = torch.zeros(1, device="cuda")
+    q = f8t._o8_ext().o8_quant(o, inv, amax)
+    ref = (o.float() * 0.25).clamp(-448, 448).to(torch.float8_e4m3fn)
+    assert torch.equal(q.view(torch.uint8), ref.view(torch.uint8))
+    assert float(amax) == float((o.float() * 0.25).abs().max())
+    d = f8t._o8_ext().o8_dequant(q, torch.full((1,), 4.0, device="cuda"))
+    assert torch.equal(d, (q.float() * 4.0).to(torch.bfloat16))
+
+    mod = _module(128)
+    x, z, gy, mask = _inputs(32, 768)
+    ref64 = copy.deepcopy(mod).double()
+    ref64.set_backend("pytorch")
+    g64 = _grads(ref64, x.double(), z.double(), gy.double(), mask)
+    f8t.PLACES = f8t.BWD
+    f8t.reset()
+    _grads(mod, x, z, gy, mask)
+    b = _grads(mod, x, z, gy, mask)
+    f8t.O8 = True
+    f8t.reset()
+    _grads(mod, x, z, gy, mask)
+    c = _grads(mod, x, z, gy, mask)
+    c2 = _grads(mod, x, z, gy, mask)
+    assert torch.equal(c[0], b[0])  # forward untouched
+    assert all(torch.equal(p, q_) for p, q_ in zip(c, c2)), "O8 step not deterministic"
+    for i, (gc, gb, gr) in enumerate(zip(c, b, g64)):
+        assert torch.isfinite(gc.float()).all()
+        assert _rel(gc, gr) <= max(0.08, 3 * _rel(gb, gr)), (i, _rel(gc, gr), _rel(gb, gr))
+    assert f8t.overflow_count() == 0

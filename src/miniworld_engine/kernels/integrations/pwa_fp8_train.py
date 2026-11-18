@@ -456,3 +456,38 @@ def backward_dw(d_o, do8, ds, v, vs):
     if "dw" not in PLACES:
         return torch.bmm(d_o, v.transpose(1, 2))
     return mm8(do8, v, ds, vs)
+
+
+# ------------------------------------------------------------------------------------------------------- round 4: o saved as e4m3
+#: save the attention-weighted values ``o`` ([H, N, S*C], with v the largest saved tensor) as e4m3 + a delayed per-tensor power-of-two scale
+#: (``csrc/pwa_o8.cu``: one quantize pass in the forward, one dequantize pass in the backward). A MEMORY mode: -192 MiB of saved bytes at
+#: S1024 N768 (-22 %), peak -8 % more; costs two memory-bound passes (see docs/fp8_training.md)
+O8 = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_O8") == "1"
+
+
+def _o8_ext():
+    if "o8" not in _EXT:
+        from miniworld_engine.kernels._nvcc import load_extension as load
+
+        _EXT["o8"] = load(
+            name="miniworld_pwa_o8",
+            sources=[str(Path(__file__).with_name("csrc") / "pwa_o8.cu")],
+            extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math", "-Xcompiler=-fvisibility=hidden"],
+            extra_cflags=["-O3", "-fvisibility=hidden"],
+        )
+    return _EXT["o8"]
+
+
+def quantize_saved_o(o: torch.Tensor, vs: torch.Tensor, key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(o e4m3, f8_vs = [v dequant factor, o dequant factor]); ``key``: a parameter tensor identifying the module (the delayed-scale site)."""
+    site = _site("o", key, "e4m3")
+    if site.needs_seed():
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("PWA FP8 training: the first call of a module must be eager (it seeds the o scale)")
+        site.seed(o.abs().amax().float())
+    sc, inv = site.next_scale()
+    return _o8_ext().o8_quant(o, inv, site.amax), torch.cat([vs.reshape(1), sc])
+
+
+def dequantize_saved_o(o8: torch.Tensor, f8_vs: torch.Tensor) -> torch.Tensor:
+    return _o8_ext().o8_dequant(o8, f8_vs[1:2])

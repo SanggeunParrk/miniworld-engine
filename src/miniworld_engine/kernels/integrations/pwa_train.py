@@ -621,6 +621,8 @@ class _PwaMath(torch.autograd.Function):
                 out = k["gateout"].pwa_gateout(o, y, wg16, wo16, m, 1, 4, dmask, dscale)
             else:
                 out, o = k["forward"](w16, vc, y, wg16, wo16, m, dmask, dscale)  # residual fused; o kept for the backward
+        if f8 and vs8 is not None and _f8t.O8 and o.dtype == torch.bfloat16 and o.dim() == 3 and o.shape[0] == H:
+            o, vs8 = _f8t.quantize_saved_o(o, vs8, wv)  # round 4: o saved as e4m3 (+ scale), dequantised in the backward
         ctx.save_for_backward(
             m,
             z,
@@ -648,6 +650,8 @@ class _PwaMath(torch.autograd.Function):
         k = None if torch.cuda.get_device_capability(dres.device) == (10, 0) else _k()
         saved = ctx.saved_tensors
         m, z, w16, v, y, o, lnm_w, lnm_b, wv, wg, lnz_w, wb, wo = saved[:13]
+        if o.dtype == torch.float8_e4m3fn:  # round 4: dequantise the saved e4m3 o (scale = f8_vs[1])
+            o = _f8t.dequantize_saved_o(o, ctx.f8_vs)
         dmask = saved[13] if len(saved) > 13 else None
         eps_m, eps_z = ctx.eps
         S, N = m.shape[0], m.shape[1]
@@ -709,6 +713,7 @@ class _PwaMath(torch.autograd.Function):
         if f8:
             ohm = "fwd" in _f8t.PLACES or bool(native and k.get("gateout") is not None and _split_contraction(N))
             d_o, do8, doT8, ds8, dWo = _f8t.backward_glue(k, o, y, dres0, wg16, wot, dgv, dmask, ctx.dscale, wo, ohm)
+            del o  # round 4: the dequantised bf16 o (if any) is dead after glue; the saved e4m3 stays in `saved`
         elif k["glue3"] is not None:  # dWo partials fused: go never touches memory
             d_o, _, dWo = k["glue3"].pwa_glue3(
                 o,
@@ -732,6 +737,7 @@ class _PwaMath(torch.autograd.Function):
         # result tile by tile; otherwise pwa_plain2 writes dv into dgv[..., HC:].
         if f8:
             dv_hm = _f8t.backward_dv(w16, d_o, doT8, ds8)
+            doT8 = None  # round 4: free the transposed do (dead after the dv GEMM) before dgv_bwd
         else:
             d_o = cast(torch.Tensor, d_o)
             dv_hm = torch.bmm(w16.transpose(1, 2), d_o) if native and N % 64 == 0 else None
@@ -739,8 +745,9 @@ class _PwaMath(torch.autograd.Function):
             wt = k["pair3"].transpose(w16) if native else w16.transpose(1, 2).contiguous()
             k["fwd"].pwa_plain2(wt, d_o, 4, dgv)  # dv -> dgv[..., HC:]
         dw = (
-            _f8t.backward_dw(d_o, do8, ds8, v, ctx.f8_vs) if f8 else torch.bmm(cast(torch.Tensor, d_o), v.transpose(1, 2))
+            _f8t.backward_dw(d_o, do8, ds8, v, None if ctx.f8_vs is None else ctx.f8_vs[0:1]) if f8 else torch.bmm(cast(torch.Tensor, d_o), v.transpose(1, 2))
         )  # [H][N][N], K = S*C
+        do8 = None  # round 4: free do (e4m3) after the dw GEMM
         dw16 = dw  # pwa_wide's pair backward (pair_only_wide) takes it in bf16
         dw, mw, zw = _h100_float(dw, lnm_w, lnz_w)
         wgvT = k["pair3"].wgv(wg16, wv16) if native else torch.cat([wg16, wv16], 0).t().contiguous()
@@ -988,14 +995,15 @@ def _forward_fake(args, eps_m, eps_z, p_drop):
     if f8 and ("fwd" in _f8t.PLACES or (native_aux_enabled(m) and _split_contraction(n))):
         o_shape = (H, n, s * C)
     v_dtype = torch.float8_e4m3fn if f8 and "dw" in _f8t.PLACES else torch.bfloat16
+    o8 = f8 and _f8t.O8 and bool(_f8t.PLACES & {"fwd", "dw"}) and len(o_shape) == 3 and o_shape[0] == H  # round 4: o saved as e4m3
     return [
         torch.empty_like(m),
         torch.empty((H, n, n), device=m.device, dtype=torch.bfloat16),
         torch.empty((H, n, s * C), device=m.device, dtype=v_dtype),
         torch.empty((s, n, D), device=m.device, dtype=torch.bfloat16),
-        torch.empty(o_shape, device=m.device, dtype=torch.bfloat16),
+        torch.empty(o_shape, device=m.device, dtype=torch.float8_e4m3fn if o8 else torch.bfloat16),
         torch.empty((n, D) if p_drop else (0,), device=m.device, dtype=torch.bfloat16),
-        *([torch.empty((1,), device=m.device, dtype=torch.float32)] if f8 and _f8t.PLACES & {"fwd", "dw"} else []),
+        *([torch.empty((2 if o8 else 1,), device=m.device, dtype=torch.float32)] if f8 and _f8t.PLACES & {"fwd", "dw"} else []),
     ]
 
 
