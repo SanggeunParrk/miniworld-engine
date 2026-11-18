@@ -272,3 +272,79 @@ ruff / pyright were not re-run in round 3 (no login-node python): run them befor
 - d_pair 384 gain is 2-4 %: marginal; d_pair 512 and d256/384 at short L: no-go (numbers above).
 - Not done: O kept as e4m3, prologue writing [s,(i,c)] directly; end-level training run (error is 7-10x bf16); single-pass dual-plane for d_pair 256+ (staging does not fit).
 - The 3 widths served need prebuilt FP8 variants (`opm_train._ext(fp8=True ...)`: 4 modules, ~100 s each when built); prebuilding into the wheel is not done on this branch.
+
+## OuterProductMean round 4: saved-activation bytes, finer scales (branch `fp8t4/opm`, 2026-11-19)
+
+Scripts / raw rows: scratch `~/miniworld-engine-scratch/fp8t4/` (`scripts_opm/memprof.py`, `emu.py`; `res/mem4b.jsonl`, `fit4.jsonl`, `emu.jsonl`, `bench4.jsonl`, `err_r4b.jsonl`).
+Default route unchanged and bit-identical to 3.0.1 with the switches off (9 / 9 sha1 cases, `res/bit4_tree.jsonl`); tests 16 / 16.
+
+### (1) What the OPM block saves for backward (eager step, `torch.autograd.graph.saved_tensors_hooks`, GB = 10^9 B)
+
+Saved bytes per block, 64/128 unless noted. The product O ([32N, 32N] bf16) is 85 % of the default's saved bytes at S 1024 (L768: 1.21 of 1.42 GB):
+the A2 / BT operands (bf16 or e4m3) and `m` are small next to it, so "FP8 saved activations" of the operands alone buys nothing (round 3's e4m3 A2 / BT: -0.05 GB at L768).
+
+| shape | default saved | round 3 (e4m3 A2/BT, bf16 O) | O as e4m3 (`fp8`) | O recomputed (`recompute`) | peak of the step: default / r3 / fp8 / recompute |
+|---|---|---|---|---|---|
+| 64/128 L256 S1024 | 0.205 | 0.188 | 0.121 | 0.071 | 0.372 / 0.356 / 0.423 / 0.373 |
+| 64/128 L384 S1024 | 0.408 | 0.383 | 0.232 | 0.106 | 0.786 / 0.760 / 0.911 / 0.785 |
+| 64/128 L768 S1024 | 1.421 | 1.370 | 0.766 | 0.212 | 2.930 / 2.880 / 3.484 / 2.930 |
+| 64/128 L384 S4096 | 0.723 | 0.621 | 0.470 | 0.420 | 1.099 / 0.999 / 1.150 / 1.099 |
+| 64/128 L768 S4096 | 2.051 | 1.846 | 1.242 | 0.840 | 3.557 / 3.356 / 3.960 / 3.558 |
+| 128/256 L768 S1024 | 1.522 | 1.471 | 0.867 | 0.313 | 3.232 / 3.183 / 3.787 / 3.233 |
+| 128/384 L768 S1024 | 1.523 | 1.471 | 0.867 | 0.314 | 3.534 / 3.485 / 4.089 / 3.536 |
+
+The peak inside one block's step is set by backward's transients (bf16 O, dO planes): `recompute` keeps it at the default's, `fp8` adds the conversion temporaries. What
+shrinks is what stays resident between forward and backward, i.e. what a stack of blocks keeps. Four OPM blocks run forward, one backward (64/128, S 1024, H100 80 GB, `memprof.py fit4`,
+largest L that fits, step 128): default **2560**, round 3 (`e4m3`) 2688, `e4m3` + `recompute` **3584** (1.96x the pair tokens). A single block (one forward + backward) is limited by
+the transient O: all routes fit L 4096 (OOM at 4224); depth: all routes stop at S 58080 (the prologue's shared-memory tile), not by memory.
+
+### (2) FP8 storage of O: measured, no-go as a Python-level cast; recompute is the memory lever
+
+`MINIWORLD_OPM_FP8_TRAIN_OSTORE=fp8|recompute|bf16` (default `bf16` = round 3). Step time vs the 3.0.1 default (CUDA graph, same-cubin control, cool / sustained; ctl 1.00 / 1.01-1.04):
+
+| shape | round 3 (`e4m3`) | `fp8` (e4m3 O, chunked torch casts) | `recompute` |
+|---|---|---|---|
+| 64/128 L256 S1024 | 0.853 / 0.864 | 1.79 / 1.76 | 0.988 / 0.965 |
+| 64/128 L384 S1024 | 0.838 / 0.859 | 1.87 / 1.84 | 0.987 / 0.946 |
+| 64/128 L768 S1024 | 0.822 / 0.817 | 1.91 / 1.85 | 0.984 / 0.926 |
+| 64/128 L384 S4096 | 0.664 / 0.629 | 0.994 / 0.918 | 0.819 / 0.747 |
+| 64/128 L768 S4096 | 0.645 / 0.607 | 0.982 / 0.966 | 0.809 / 0.764 |
+| 128/256 L384 S1024 | 0.931 / 0.963 | 1.80 / 1.78 | 1.059 / 1.024 |
+| 128/256 L768 S1024 | 0.928 / 0.947 | 1.88 / 1.84 | 1.066 / 1.027 |
+| 128/384 L768 S1024 | 0.963 / 0.977 | 1.80 / 1.77 | 1.087 / 1.042 |
+
+- `fp8` (amax + cast in forward, dequant in backward, separate passes, no fused kernel): 2-2.5 s of extra elementwise traffic per step erases the FP8 win (1.8-1.9x of the default at S 1024),
+  and dW_out error rises 2.8 -> 3.9 % rms (3.4 % max; every other gradient unchanged). A fused version (cast inside the epilogue, dequant inside `opm_dwo`) is the only way it could pay;
+  not built (the epilogue kernel's O load path is the wgmma / TMA one; ideal gain ~0.4 ms of 5.4 at L768 for +0.4 % y error). No-go at this level.
+- `recompute` (redo the FP8 product in backward from the saved A2 / BT, bit-identical gradients to round 3): saved bytes -70 to -85 % at S 1024 (L768: 1.42 -> 0.21 GB), -59 % at S 4096;
+  step time at parity to 7 % faster than the 3.0.1 default for 64/128 at S 1024 (0.93-0.99), 18-25 % faster at S 4096, but 3-9 % SLOWER than the default for d_pair 256 / 384 (gate it to d_pair 128).
+  It trades the speedup for memory: the FP8 route's step time at S 1024 goes from 0.82-0.86x to 0.93-0.99x of the default while the resident saved bytes drop 85 %.
+  Recommendation: `OSTORE=recompute` when the OPM blocks are stacked and memory bound (crop / batch headroom: +40 % L on four blocks), `bf16` when step time is what counts.
+
+### (3) Finer-grained scales: no-go (emulation, `scripts_opm/emu.py`)
+
+Float32 emulation of the product chain with fake-quantised e4m3 operands, each GEMM operand quantised along its own contraction axis (both layouts from the source, as the prologue does), gradient
+rms / max error vs a float64 reference, 64/128 L192 S512 and 128/256 L128 S512 (`res/emu.jsonl`):
+
+| scheme | y | d msa | d W_left | d W_out | cost |
+|---|---|---|---|---|---|
+| per tensor (pow2) | 2.59 / 1.49 | 3.75 / 3.26 | 3.43 / 3.71 | 2.85 / 1.73 | 1x e4m3 |
+| per row / column (one pow2 scale per non-contracted index) | identical to the digit | identical | identical | identical | epilogue scale vectors |
+| 1 x 128 blocks along K (DeepSeek-style) | identical | identical | identical | identical | block rescale in the accumulation |
+| hi + lo e4m3 residual on all operands (3 products) | 0.06 / 0.03 | 0.09 / 0.08 | 0.09 / 0.08 | 0.07 / 0.05 | 3 FP8 GEMMs = 1.7x bf16 time |
+
+Reason: with power-of-two scales the e4m3 rounding error (3 mantissa bits, ~2.7 % rms per element) does not depend on the scale; scaling granularity only helps when a tensor has outliers that make the
+small values underflow, and these activations do not (peaks 11-24 of 448, no subnormals). A K-sum of independently rounded terms keeps the per-element relative error (random signs), so the target <= 1.5 %
+rms is not reachable with single e4m3 products at any scale granularity; a hi + lo split reaches 0.1 % (below bf16's 0.4 %) but needs three FP8 GEMMs per product (slower than bf16). The error stays
+3-4 % rms (round 3). The DeepSeek-V3 numbers come from fp32 accumulation promotion + fine scales on activations with outliers, and from a loss-level (not per-gradient) error.
+
+### (4) Cross-check of the numbers
+
+- Gradient error of the three O modes (L384 AF3, 64/128, `res/err_r4b.jsonl`): `e4m3` and `recompute` identical (y 2.64 / 1.46, d msa 3.77 / 3.44, d W_out 2.79 / 1.52 %); `fp8` identical except d W_out 3.94 / 3.36.
+- Training curve: `recompute` gradients are bit-identical to round 3, so round 3's curve (+0.22 % at the last 50 steps) applies; `fp8` was not run (no-go on time).
+
+### Open
+
+- Fused O quantisation (epilogue writes e4m3 O + scale, `opm_dwo` dequantises) is the one lever that could cut both bytes and time; ~0.4 ms of 5.4 at L768; not built.
+- C (fused cast + transpose from the high-precision source) is already in the route since round 2 (prologue writes both layouts; dgrad writes both dO planes).
+- To make crop headroom usable, `recompute` has to be chosen by the caller (env or `opm_fp8_train.OSTORE`); default stays `bf16`.
