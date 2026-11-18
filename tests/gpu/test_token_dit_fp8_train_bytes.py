@@ -79,14 +79,14 @@ def test_nox_keeps_no_fp32_residual() -> None:
         old = F.PLACES, F.MIN_ROWS
         F.PLACES, F.MIN_ROWS = F.parse(places), 0
         try:
-            inp = m.make_inputs(length=128, samples=8, depth=None, dtype=torch.bfloat16, device="cuda", stream="token_single_shared_cond")
+            inp = m.make_inputs(length=128, samples=8, depth=None, dtype=torch.bfloat16, device="cuda", stream="token_single_shared_cond", generator=torch.Generator(device="cuda").manual_seed(1))
             s = inp["single"].detach().clone().requires_grad_(True)
             c = inp["cond"].detach()[:1].clone()
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 y = m(s, c.expand(8, -1, -1, -1), inp["pair"], inp["mask"])
             fn = y.grad_fn
             saved = [t for t in getattr(fn, "saved_tensors", ())] if fn is not None else []
-            n_f32[places] = sum(t.numel() * t.element_size() for t in saved if t.dtype == torch.float32 and t.shape[-1:] == (768,))
+            n_f32[places] = sum(t.numel() * t.element_size() for t in saved if t is not None and t.dtype == torch.float32 and t.shape[-1:] == (768,))
         finally:
             F.PLACES, F.MIN_ROWS = old
     assert TT is not None
