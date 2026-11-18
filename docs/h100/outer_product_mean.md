@@ -70,8 +70,11 @@ Forward boundaries: prologue (LN + projections + mask -> A2, BT, and in training
 Triton `fused_prologue` kept in `opm_train.py` is not reached: every former Triton-prologue cell takes the wide CUDA prologue):
 
 - d_msa 64 / d_pair 128, AF3 order, no bias: training at S 1024 / 2048 / 4096 uses the persistent TMA prologue, other S the non-TMA
-  wgmma prologue; inference uses the TMA prologue at seven measured (S, N) cells and otherwise the wide prologue (the former Triton
-  prologue cells; `_CUDA_PROLOGUE_FOR_LEGACY = True`) or the non-TMA one.
+  wgmma prologue; inference uses the TMA prologue at S 512 and at seven measured (S, N) cells and otherwise the wide prologue (the former
+  Triton prologue cells and, since backend version 4 of 2026-11-18, every other cell: N >= 1024, depths outside the table). The non-TMA
+  prologue is no longer reachable in inference: it took 825 us at L 1024 / S 1024 against 105 us for the wide one (the wide prologue is bitwise
+  the TMA one; against the non-TMA one the output differs by at most one bf16 ulp). Measured H100, graph, same process, interleaved with a
+  same-cubin control: L 1024 / S 1024 4.54 -> 3.83 ms, L 2048 / S 1024 16.7 -> 15.5, L 1024 / S 2048 8.56 -> 7.55, L 128 / S 4096 0.58 -> 0.26.
 - Every other width, the after-projection order or projection biases: `_forward_wide` (`opm_prologue_tma_wide<CM>` + cuBLAS + the
   c_z-sliced epilogue).
 - Inference at d_msa 64 / d_pair 128, N % 16, S % 64 (`_fused_enabled`): `opm_fused_infer` replaces the cuBLAS product and the epilogue.
@@ -164,3 +167,22 @@ fused inference kernel took 212 us against 190 us (cuBLAS product) + 59 us (epil
 
 The previous, longer note was deleted; see git history (per-cell timings, speed-of-light tables, comparisons with anthropic and PyTorch,
 the B200 comparison).
+
+## Audit notes (2026-11-18, bf16 trunk / token audits)
+
+- **Inference at N >= 1024 (Q1)**: fixed as above; both normalisation orders now cost the same at the same shape (L 1024 / S 1024: 3.83 ms
+  normalize-before, 3.88-3.94 ms after; SOL 3.55).
+- **"normalize_before_proj=False is 1.6-1.9x slower" is a depth artefact**: the registry has the AF3 order at depth 1024 only and the Boltz
+  order at depths 384 / 512 / 1024 / 2048; the token audit compared the AF3 cell (D1024) with the Boltz cell at the median depth (D512).
+  Same depth, same L: eval L 1024 / D 1024 3.94 vs 3.83 ms (after the fix; 4.63 before it), train L 768 / D 1024 7.32 vs 7.29 ms. Both orders run
+  the same kernels (`opm_prologue_tma_wide`, `opm_fused_kernel`; the order is a flag of the fused epilogue).
+- **Training at d_pair >= 256 (G6)**, L 768 / S 1024, graph ms (kernel us): (128, 256) 8.36 total = three cuBLAS products 1672 / 1576 / 1560
+  (792 TFLOP/s each, 80 % of the dense bf16 peak; this is the floor of the composition) + `opm_epilogue_kernel` 654 + `opm_dgrad_kernel` 995 +
+  `opm_dwo_kernel` 679 + `opm_prologue_bwd_kernel` 241 + prologue 120; (256, 512) 11.24 total, the same three products, epilogue 1251,
+  `opm_dgrad_kernel` 2352, `opm_dwo_kernel` 1253, prologue backward 661. The dominant custom stage is `opm_dgrad_kernel`: per CTA it
+  streams the whole Wo^T (1024 x d_pair) through L2 (4.8 GB of L2 reads at d_pair 512, 2.4 GB at 256) with a single-buffered weight chunk at
+  d_pair 512 (the 128-pair dz tile is 128 KiB, a second chunk does not fit: load, wait, wgmma per chunk) and m64n64 wgmmas; against its work
+  (0.62 TFLOP, 1.2 GB of dO) it is ~2.6x off at d_pair 512 and ~2x at 256. The tile / chunk / occupancy knobs of the kernel header comments were
+  measured by their authors (BI 8 -> halving the CTAs was slower, 256 pairs per CTA slower, chunk 128 does not fit); a fix is a different
+  kernel (a persistent weight-stationary schedule or a TMA ring over K), not a config change. Upper bound if all four CUDA kernels reached
+  their own SOL: -1.2 ms of 8.4 (14 %) at d_pair 256, -3.0 ms of 11.2 at 512.
