@@ -645,7 +645,9 @@ def _pair_apb(h100, fp32, dp, heads, pdt) -> bool:
     work), the backward gives dpair and the per-block dWf partials in one more pass; a pair width wider than 128 (256: Protenix-v2 / Chai-1 /
     ESMFold2, 512: IntelliFold2; 16 heads) saves its row statistics and its fp32 unmasked bias for the backward (``pair_bias_fwd_train``).
     The TF32 row kernels of ``_pair_fused`` serve the other head counts. Needs a bf16 pair (the kernels read bf16 words)."""
-    return bool(PAIR_APB and h100 and not fp32 and pdt is BF and ((dp == 128 and heads in (8, 12, 16, 24)) or (dp in (256, 512) and heads == 16)))
+    return bool(
+        PAIR_APB and h100 and not fp32 and pdt is BF and ((dp == 128 and heads in (8, 12, 16, 24)) or (dp in (256, 512) and heads == 16))
+    )
 
 
 def _pair_fused(h100, fp32, dp) -> bool:

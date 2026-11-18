@@ -33,7 +33,9 @@ def _block(dp: int) -> typing.Any:
 
 def _inputs(m, A: int, L: int):
     g = torch.Generator(device="cuda").manual_seed(1)
-    inp = m.make_inputs(length=L, samples=A, depth=None, dtype=torch.bfloat16, device="cuda", generator=g, stream="token_single_shared_cond")
+    inp = m.make_inputs(
+        length=L, samples=A, depth=None, dtype=torch.bfloat16, device="cuda", generator=g, stream="token_single_shared_cond"
+    )
     ex = torch.randn(L, L, device="cuda", generator=torch.Generator(device="cuda").manual_seed(11)) * 0.5
     return inp, ex
 
