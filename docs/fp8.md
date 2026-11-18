@@ -821,7 +821,7 @@ front is the packed shared-resident K1 (`k1ssregtune.cu`, n128 blocks, 128-token
 * K3 (`k3reorder.cu`, `K3_CSCALE=2`): the same contract as `k3.cu`: `tri` holds the raw e4m3 contraction; the LN_out statistics run on the raw values and are scaled in the epilogue of the statistics (mean x cs, variance x cs^2); the host folds `cs`
   (= `sa sb`, one power-of-two scalar in `tensor` scale mode) into the projection operand. `Params` gains `csc` only under `K3_CSCALE`: the default D512 K3 is the same text path as before.
 * Route: `h100_b200style_fp8.WIDTHS` + 512, `serves` (one direction, L % 128 == 0), `_planes` (the D512 front), `refresh`; prebuild plan (`trimul_inproj/cuda/__init__.py`: the `_f8` front, the bf16 direct front of the calibration pre-pass, the token-flat K3 with `K3_CSCALE=2`).
-  The contraction is the cuBLASLt e4m3 batched GEMM as at the other widths (bf16 out). `MIN_L[(512, dir)] = 0`: every L % 128 == 0 gains.
+  The contraction is the cuBLASLt e4m3 batched GEMM as at the other widths (bf16 out). `MIN_L[(512, dir)] = 0`: every L % 128 == 0 gains. D512 is served only inside what was measured: B = 1 (B > 1 keeps the batched bf16 route), L <= 2048 (`MAX_L_512`), one direction; `MINIWORLD_TRIMUL_FP8_D512=0` switches the D512 route off (every other width unchanged).
 
 A first version used the direct n64 F8 K1 (`F8_CFG[512] = (2, 64, 4, 2, 1)`: z tile 128 KB + 4 x 16 KB ring slots fits): correct (3.73 % update error) but K1 was 1.38-1.36x the packed K1 (L512 1.37 vs 0.99 ms, L1024 5.34 vs 3.83, L2048 23.6 vs 17.4) and the module lost
 (FP8 / default 1.107 at L512); removed in favour of the packed K1 with the e4m3 store (K1 -4 % at L1024: half the plane bytes).
