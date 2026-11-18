@@ -91,7 +91,8 @@ def test_off_by_default_and_no_leak(mode) -> None:
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90a)")
 @pytest.mark.parametrize("fmt", [0, 1])
-def test_dgrad_planes(fmt) -> None:
+@pytest.mark.parametrize("single", [False, True])
+def test_dgrad_planes(fmt, single) -> None:
     n, cz = 128, 128
     ext = opm_train._ext(torch.device("cuda"), native=True, tma=False, cm=64, cz=cz, fp8=True)
     ext0 = opm_train._ext(torch.device("cuda"), native=True, tma=False, cm=64, cz=cz)
@@ -104,7 +105,7 @@ def test_dgrad_planes(fmt) -> None:
     bw2 = torch.cat([bw, bw.view(32, 32, cz).transpose(0, 1).reshape(1024, cz)]).contiguous()
     s = torch.tensor([2.0**-8], device="cuda")
     amax = torch.zeros(1, device="cuda")
-    d8, d8t, dzp, dbo = ext.opm_dgrad_f8(dz, norm, bw2, n, n, 0, 1.0 / s, amax, fmt)
+    d8, d8t, dzp, dbo = ext.opm_dgrad_f8(dz, norm, bw2, n, n, 0, 1.0 / s, amax, fmt, single)
     dO, dzp0, dbo0 = ext0.opm_dgrad(dz, norm, bw, n, n, 0)
     assert torch.equal(d8t.view(torch.uint8), d8.view(torch.uint8).t())
     assert torch.equal(dzp, dzp0) and torch.equal(dbo, dbo0)
@@ -188,14 +189,14 @@ def test_prologue_transposed_planes() -> None:
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90a)")
 def test_gate_and_delayed_scale(mode, monkeypatch) -> None:
-    """Round 2: the shape gate declines L < 256 and d_pair > 256; the delayed dO scale seeds from the bound, then tracks the amax."""
+    """Round 2: the shape gate (MIN_L opt-in, d_pair <= 384 by default); the delayed dO scale seeds from the bound, then tracks the amax."""
     msa = torch.zeros((1, 1024, 128, 64), device="cuda", dtype=torch.bfloat16)
     mode("e4m3")
-    monkeypatch.setattr(F8, "MIN_L", 256)
+    monkeypatch.setattr(F8, "MIN_L", 256)  # (opt-in gate: the default is 0; round 2 serves L 128)
     monkeypatch.setattr(F8, "MAX_CZ", 256)
     assert not F8.serves(msa, 64, 128)  # L 128
     assert F8.serves(torch.zeros((1, 1024, 256, 64), device="cuda", dtype=torch.bfloat16), 64, 128)
-    assert not F8.serves(torch.zeros((1, 1024, 256, 128), device="cuda", dtype=torch.bfloat16), 128, 384)
+    assert not F8.serves(torch.zeros((1, 1024, 256, 256), device="cuda", dtype=torch.bfloat16), 256, 512)  # d_pair 512: 1.03x in round 2
     base, msa, mask, gz = _case(128, 1024)
     mod = copy.deepcopy(base).set_backend("cuda")
     monkeypatch.setattr(F8, "MIN_L", 0)

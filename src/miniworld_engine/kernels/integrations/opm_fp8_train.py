@@ -46,11 +46,13 @@ def _mode() -> str | None:
 #: dO format (None: the route is off). Module globals: may be set at run time before a forward.
 MODE: str | None = _mode()
 MIN_S = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MINS", "1024"))
-#: round 2: shape gate (the route loses below these: L128 1.15x, d_pair 384 / 512 1.09-1.14x in round 1); 0 = no gate
-MIN_L = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MINL", "256"))
-MAX_CZ = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MAXCZ", "256"))
+#: round 2: shape gate. Round 1 lost at L128 (1.15x) and d_pair 384 / 512 (1.09-1.14x); with the scale pass and the transposes gone L128 is 0.91x, d_pair 384 0.98x, d_pair 512 still 1.03x -> d_pair <= 384 served, 0 = no gate
+MIN_L = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MINL", "0"))
+MAX_CZ = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MAXCZ", "384"))
 #: round 2: delayed dO scale (amax history, no pass over dz; first call of a module seeds from the bound); False = round 1's bound every call
 DELAYED = os.environ.get("MINIWORLD_OPM_FP8_TRAIN_DELAYED", "1") != "0"
+#: round 2: one dgrad pass writes both dO planes (d_pair 128; the transposed plane is staged in shared memory); False = round 1: two launches
+SINGLE = os.environ.get("MINIWORLD_OPM_FP8_TRAIN_SINGLE", "1") != "0"
 HISTORY = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_HISTORY", "16"))
 MARGIN = float(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MARGIN", "2"))
 STATS = {"calls": 0}
@@ -210,7 +212,7 @@ class OpmFp8TrainFn(torch.autograd.Function):
         else:
             sdq = ext.opm_f8_dscale(dz0, norm, bw, fmax)  # {sd, 1 / sd}
             sd, q, amax = sdq[0:1].clone(), sdq[1:2], peak[2:3]
-        d8, d8t, dzp, dbo = ext.opm_dgrad_f8(dz0, norm, bw2, n, n, int(ctx.after), q, amax, fmt)
+        d8, d8t, dzp, dbo = ext.opm_dgrad_f8(dz0, norm, bw2, n, n, int(ctx.after), q, amax, fmt, SINGLE and cz == 128)
         dA = opm_fp8.product(b8t, d8, (sb, sd), n)  # [s, (i,c)] = sum_(j,e) BT[(j,e), s] dO[(i,c), (j,e)]
         dB = opm_fp8.product(a8t, d8t, (sa, sd), n)  # [s, (j,e)] = sum_(i,c) A2[(i,c), s] dO[(i,c), (j,e)]
         del d8, d8t, a8t, b8t
