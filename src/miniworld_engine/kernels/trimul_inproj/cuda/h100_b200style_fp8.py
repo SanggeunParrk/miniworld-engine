@@ -262,6 +262,9 @@ MIN_L = {(128, 1): 144, (128, 2): 192, (256, 1): 224, (256, 2): 144, (128, 0): 2
 MIN_L.update({(64, 1): 512, (64, 2): 512, (384, 1): 128, (384, 2): 128, (64, 0): 2048, (384, 0): 1024})
 #: D512 (IntelliFold2 trunk; one direction, L % 128 == 0, packed shared-resident K1 with the e4m3 plane store + k3reorder K3_CSCALE=2): every length gains (graph replay, FP8 / default 0.76 at L128, 0.87 at L256, 0.89-0.94 at L384-L2048, control 1.00): no gate
 MIN_L.update({(512, 1): 0, (512, 2): 0})
+#: D512 (IntelliFold2 trunk) is served only inside what was measured: B = 1, L <= MAX_L_512; MINIWORLD_TRIMUL_FP8_D512=0 switches the D512 route off (every other width unchanged)
+MAX_L_512 = 2048
+D512 = _os.environ.get("MINIWORLD_TRIMUL_FP8_D512", "1") != "0"
 #: widths the route serves: D128 / D256 (n128 K1 blocks) and, from the 3.0.0 exploration (branch fp8x/trimul), D64 / D384 (n64 K1 blocks), D512 (the packed K1)
 WIDTHS = (64, 128, 256, 384, 512)
 #: samples per call the route takes (B > 1 runs the one-sample route per sample into one output; exploration, branch fp8x/trimul)
@@ -344,8 +347,8 @@ def serves(module, pair, mask, bidirectional) -> bool:
         return False
     if module.ln_pair.eps != 1e-5 or module.ln_out.eps != 1e-5:
         return False
-    if d == 512 and (bidirectional or pair.shape[1] % 128):  # D512: one direction, token-flat K3 (k3reorder.cu K3_CSCALE=2) at L % 128 == 0
-        return False
+    if d == 512 and (bidirectional or pair.shape[0] != 1 or pair.shape[1] % 128 or pair.shape[1] > MAX_L_512 or not D512):
+        return False  # D512 (measured: one direction, one sample, L % 128 == 0, L <= 2048; token-flat K3 k3reorder.cu K3_CSCALE=2): everything else keeps the bf16 route
     gate = MIN_L.get((d, 0 if bidirectional else 1 if module.outgoing else 2), 256)
     if pair.shape[1] < (int(_MINL_ENV) if _MINL_ENV is not None else gate):
         return False  # below the gate the bf16 default route is as fast or faster (see MIN_L)

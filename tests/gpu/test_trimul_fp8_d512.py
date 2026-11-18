@@ -81,8 +81,16 @@ def test_d512_gates() -> None:
         assert F8.serves(m, x, None, False)
         assert not F8.serves(m, x, None, True)
         assert not F8.serves(m, torch.zeros(1, 200, 200, 512, device="cuda", dtype=torch.bfloat16), None, False)
+        meta = lambda b, n: torch.empty(b, n, n, 512, device="meta", dtype=torch.bfloat16)  # (only the shape is read)
+        assert F8.serves(m, meta(1, 2048), None, False)
+        assert not F8.serves(m, meta(2, 256), None, False)  # B > 1: not measured
+        assert not F8.serves(m, meta(1, 2304), None, False)  # beyond the measured L <= 2048
+        F8.D512 = False
+        assert not F8.serves(m, x, None, False)
+        F8.D512 = True
     finally:
         F8.POLICY, F8._MINL_ENV = old
+        F8.D512 = True
 
 
 def test_d512_default_untouched_when_off() -> None:
