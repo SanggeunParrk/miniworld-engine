@@ -18,9 +18,14 @@ from miniworld_engine.kernels._device import num_sms
 from . import DS, NWARP, ROWS, _dev, cubin, pack
 
 E4M3 = torch.float8_e4m3fn
-_KERNELS = {"pre_f8": ("pre90_f8", 2 * 64 * 128 + 1024), "post_f8": ("post90_f8", 2 * (128 * 128 + 128 * 128) + 1024)}
-#: model options (``local_dit_h100.options``) this route serves; UP (Boltz-2), KQLN (RF3) and RMS (ESMFold2) keep the bf16 kernels
-OPTIONS = frozenset({"IDENT", "PARS", "NOOUT"})
+_KERNELS = {
+    "pre_f8": ("pre90_f8", 2 * 64 * 128 + 1024),
+    "post_f8": ("post90_f8", 2 * (128 * 128 + 128 * 128) + 1024),
+    "post_f8up": ("post90_f8up", 2 * (128 * 128 + 64 * 128 + 128 * 128) + 1024),  # + a Wu_j chunk (64 rows) per buffer
+}
+#: model options (``local_dit_h100.options``) this route serves; KQLN (RF3) and RMS (ESMFold2) keep the bf16 kernels. UP (Boltz-2's up-gate transition) is
+#: served by ``post90_f8up.cu`` (``post_f8up``): the post kernel with a Wu_j chunk beside each [Wa_j; Wb_j]; ``pre90_f8`` does not depend on it
+OPTIONS = frozenset({"IDENT", "PARS", "NOOUT", "UP"})
 #: CTAs per SM each kernel's register allocation targets (__launch_bounds__ minimum blocks), by grid size: 1 gives 236 / 253 registers
 #: (2 CTAs per SM), 3 caps them at 168 with a small spill. Measured (H100, AF3 block, A = 5, kernel times): pre90_f8 at 320 / 640 CTAs
 #: 26.1 -> 19.5 / 43.0 -> 40.1 us with 3, at 1280 79.2 -> 85.8 us (so 1); post90_f8 3 only where it makes one wave of a grid that
@@ -40,7 +45,9 @@ def _minb(kind: str, ctas: int) -> int:
 
 def kernel_cubin(kind: str, options: tuple = (), minb: int = 1) -> str:
     """The cubin of ``kind`` under the model ``options`` and ``minb`` (the build :func:`kernel` loads; also the prebuild recipe's call)."""
-    defs = tuple(f"-D{o}=1" for o in sorted(options) if kind == "post_f8" and o in ("PARS", "NOOUT"))
+    if kind == "post_f8" and "UP" in options:  # the up-gate post kernel (own source; one register target: its tile of accumulators needs all 255)
+        kind, minb = "post_f8up", 1
+    defs = tuple(f"-D{o}=1" for o in sorted(options) if kind in ("post_f8", "post_f8up") and o in ("PARS", "NOOUT"))
     return cubin(_KERNELS[kind][0], False, NWARP, minb, defs)
 
 
@@ -48,7 +55,7 @@ def kernel_cubin(kind: str, options: tuple = (), minb: int = 1) -> str:
 def kernel(kind: str, device_index: int, options: tuple = (), minb: int = 1):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
-    stem, smem = _KERNELS[kind]
+    stem, smem = _KERNELS["post_f8up" if kind == "post_f8" and "UP" in options else kind]
     with torch.cuda.device(device_index):
         return driver.Kernel(kernel_cubin(kind, options, minb), stem, smem, pdl=True)
 
@@ -76,6 +83,7 @@ def pack8(weights) -> dict:
     gate, k, v: 8 scales), post90_f8 per Wo unit (2), per [Wa_j | Wb_j] half (8) and one for Wd; the inverse scales fp32 (``wsi_pre`` [8],
     ``wsi_post`` [11]). Cached per weight version / capture scope."""
     p = pack(weights, False)
+    up = len(weights) > 27  # Boltz-2: the 28th leaf is W_u; p["wu"] [4][64][128]: chunk j of it beside [Wa_j; Wb_j]
 
     def build():
         pre, wo, wab, wd = p["pre"].float(), p["wo"].float(), p["wab"].float(), p["wd"].float()
@@ -83,13 +91,15 @@ def pack8(weights) -> dict:
         s_wo = _pow2(wo.view(2, 64 * 128).abs().amax(-1))  # [2]
         s_ab = _pow2(wab.view(4, 2, 64 * 128).abs().amax(-1))  # [4, 2]: chunk j, Wa_j / Wb_j
         s_d = _pow2(wd.abs().amax().reshape(1))  # [1]
+        s_u = _pow2(p["wu"].float().view(4, 64 * 128).abs().amax(-1)) if up else None  # [4]: one scale per Wu_j chunk
         return {
             "pre8": _q(pre, s_pre.repeat_interleave(64)[:, None]),
             "wsi_pre": (1.0 / s_pre).contiguous(),
             "wo8": _q(wo, s_wo.repeat_interleave(64)[:, None]),
             "wab8": _q(wab, s_ab.repeat_interleave(64, dim=1)[:, :, None]),
             "wd8": _q(wd, s_d),
-            "wsi_post": (1.0 / torch.cat([s_wo, s_ab.reshape(-1), s_d])).contiguous(),
+            "wsi_post": (1.0 / torch.cat([s_wo, s_ab.reshape(-1), s_d] + ([s_u] if up else []))).contiguous(),
+            **({"wu8": _q(p["wu"].float(), s_u[:, None, None])} if up else {}),
             "bq": p["bq"],
             "bs": p["bs"],
         }
@@ -133,7 +143,7 @@ def pre_fwd8(x, mod, mkv, p8, eps: float = 1e-5, nmod: int = 0, parallel_kv: int
 
 
 def post_fwd8(a, o, sg, mod, p8, eps: float = 1e-5, nmod: int = 0, options: tuple = ()):
-    """-> out [M, 128] bf16 (``sm90_atom.post_fwd`` without save / UP)."""
+    """-> out [M, 128] bf16 (``sm90_atom.post_fwd`` without save). UP (Boltz-2): ``post90_f8up`` with the chunks of W_u (``p8["wu8"]``)."""
     M = a.shape[0]
     out = torch.empty(M, DS, device=a.device, dtype=a.dtype)
     kernel("post_f8", _dev(a), tuple(options), _minb("post_f8", M // ROWS))(
@@ -146,6 +156,7 @@ def post_fwd8(a, o, sg, mod, p8, eps: float = 1e-5, nmod: int = 0, options: tupl
         p8["wo8"],
         p8["wab8"],
         p8["wd8"],
+        *((p8["wu8"],) if "UP" in options else ()),  # post90_f8up: wu8 between wd8 and the scales
         p8["wsi_post"],
         out,
         int(M),

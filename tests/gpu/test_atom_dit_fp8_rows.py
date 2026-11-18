@@ -1,7 +1,7 @@
 """H100: the experimental e4m3 row kernels of the atom DiT (``local_dit_h100.FP8_ROWS``, opt-in): the bf16 inference forward with pre90_f8 /
 post90_f8 stays inside the e4m3 error of the fp32 reference (about 3 % rms of the output, 7x the bf16 route), every value finite; switched off,
-the default route is untouched; options outside ``sm90_atom.f8.OPTIONS`` (Boltz-2's up-gate), per-sample conditioning and training keep the bf16
-kernels."""
+the default route is untouched; options outside ``sm90_atom.f8.OPTIONS`` (RoseTTAFold3's KQLN, ESMFold2's RMS), per-sample conditioning and training keep the bf16
+kernels. Boltz-2's up-gate (UP: ``post90_f8up``) is on the route."""
 
 from __future__ import annotations
 
@@ -48,12 +48,12 @@ def _run(m, inputs, fp8):
 
 
 @pytest.mark.parametrize("n", [200, 1024, 4096])
-@pytest.mark.parametrize("model", ["openfold3", "protenix", "chai1"])
+@pytest.mark.parametrize("model", ["openfold3", "protenix", "chai1", "boltz2"])
 def test_fp8_rows_error(model: str, n: int) -> None:
     _needs_h100()
     from miniworld_engine.modules import atom_dit as A
 
-    cls = {"openfold3": A.AtomDiTOpenFold3, "protenix": A.AtomDiTProtenix, "chai1": A.AtomDiTChai1}[model]
+    cls = {"openfold3": A.AtomDiTOpenFold3, "protenix": A.AtomDiTProtenix, "chai1": A.AtomDiTChai1, "boltz2": A.AtomDiTBoltz2}[model]
     m, inputs = _block(cls, n, 5, kw={"adaln_eps": 1e-5} if model == "chai1" else None)
     ref = m.set_backend("pytorch")
     with torch.no_grad():
@@ -62,11 +62,15 @@ def test_fp8_rows_error(model: str, n: int) -> None:
     ybf = _run(m, inputs, False)
     e_bf = _rms_rel(ybf, y32)
     # Chai-1 (identity AdaLN, raw c in the tables, no out projection): about twice the e4m3 error of the AdaLN models
-    bounds = ((True, 0.09), ("pre", 0.09), ("post", 0.07)) if model == "chai1" else ((True, 0.06), ("pre", 0.04), ("post", 0.05))
+    # Boltz-2 (up-gate: silu(a) b u, a product of three e4m3 GEMM outputs): post a little above the other AdaLN models
+    bounds = {"chai1": ((True, 0.09), ("pre", 0.09), ("post", 0.07)), "boltz2": ((True, 0.07), ("pre", 0.04), ("post", 0.06))}.get(
+        model, ((True, 0.06), ("pre", 0.04), ("post", 0.05))
+    )
     for parts, bound in bounds:
         y8 = _run(m, inputs, parts)
         assert torch.isfinite(y8.float()).all()
         e8 = _rms_rel(y8, y32)
+        print(f"atom DiT {model} n={n} parts={parts}: rms rel vs fp32 {e8:.4f} (bf16 route {e_bf:.4f})")
         assert e8 < bound, (parts, e8, e_bf)
         assert e8 > e_bf  # the e4m3 route really ran
     # off again: the default route, bitwise
@@ -74,12 +78,12 @@ def test_fp8_rows_error(model: str, n: int) -> None:
 
 
 def test_fp8_rows_fallbacks() -> None:
-    """Boltz-2 (UP) and a per-sample conditioning are outside the route: FP8 on gives the bf16 output bitwise; a training forward ignores
-    the switch."""
+    """A per-sample conditioning is outside the route: FP8 on gives the bf16 output bitwise; a training forward ignores the switch (Boltz-2
+    included)."""
     _needs_h100()
     from miniworld_engine.modules import atom_dit as A
 
-    m, inputs = _block(A.AtomDiTBoltz2, 1024, 5)
+    m, inputs = _block(A.AtomDiTBoltz2, 1024, 5, shared=False)
     assert torch.equal(_run(m, inputs, True), _run(m, inputs, False))
     m, inputs = _block(A.AtomDiTOpenFold3, 1024, 5, shared=False)  # per-sample conditioning tables: outside the route
     assert torch.equal(_run(m, inputs, True), _run(m, inputs, False))

@@ -332,7 +332,7 @@ def _fwd(
         # the opt-in e4m3 row kernels (FP8_ROWS): bf16 inference, options inside f8.OPTIONS only, a conditioning shared by the samples (the
         # sampler step; with per-sample tables the route measured slower: A = 1, 4096 atoms 1.09x)
         f8 = FP8_ROWS if (FP8_ROWS and not save and not tf32 and set(opts) <= f8mod.OPTIONS and _shared(cond)) else frozenset()
-        p8 = f8mod.pack8(weights) if f8 else None
+        p8 = f8mod.pack8([*weights, wup] if up else weights) if f8 else None
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
         nmod = groups * n if shared else m  # shared: one conditioning per (group, atom), read modulo G N (rows are [A][G][N])
