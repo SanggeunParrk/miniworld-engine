@@ -35,7 +35,7 @@ FWD = ("expand", "squeeze", "qkvg", "out")
 DGRAD = ("dexpand", "dsqueeze", "dqkvg", "dout")
 #: round 2: byte reductions that need no 8-bit GEMM (bit-identical outputs and gradients): nox = the block input is the residual, the
 #: saved fp32 copy of it is dropped (docs/fp8_training.md "Token DiT round 2")
-BYTES = ("nox", "hsave")
+BYTES = ("nox", "hsave", "rx1")
 _ALL = FWD + DGRAD + BYTES
 PRESETS = {
     "bytes": frozenset(BYTES),
@@ -83,6 +83,8 @@ GRAD_E5M2: bool = os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_GRAD", "e4m3").s
 #: H100, CUDA graph fwd + bwd, 2026-11-18: `fast` won at M 18432 / 36864 (-2.2 / -1.1 % cool), was within the same-cubin control at
 #: 3072 .. 12288
 MIN_ROWS: int = int(os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS", "16384"))
+#: round 4: ``res_adaln_b`` writes the e4m3 xt itself (``res_adaln_b_q8``) instead of a q8 pass over xt (the same 8-bit operands)
+FUSE_Q8: bool = os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_FUSE_Q8", "1") != "0"
 
 
 @functools.lru_cache(maxsize=None)
