@@ -53,6 +53,24 @@ TriMul, Transition, PWA); the routes' eager `sync` guards (default) already redo
 `check()`. Calibration: the static scales are taken on each site's first eager call in a process and kept (two runs with a different first target are not
 byte-identical).
 
+### Which routes fired: `fp8.route_stats()`
+
+`miniworld_engine.fp8.route_stats()` returns a copy of the call counters of every FP8 route (`fp8.reset_route_stats()` zeroes them), so "which FP8
+routes did this model take" is read directly instead of from a profiler kernel census:
+
+| key | counters |
+|---|---|
+| `triattn` | `pv_fused` (d_pair-128 front-made V^T), `pv_front` (unfused / generic / wide fronts), `pv_pass` (standalone V^T pass), `qk` (e4m3 q / k core), `d128_calls`, `calibrations` |
+| `trimul`, `opm`, `transition` | `calls`, `retries`, `fallbacks`, `capture_fallbacks` (`transition` also `calibrations`) -- the existing `GUARD_STATS` |
+| `pwa` | `calls` (8 x 32 native width), `wide_calls`, `retries`, `declined` (route on, shape gate said no) |
+| `token_dit` | `calls`, `expand` / `qkvg` / `out` / `squeeze` (per placement), `declined` |
+| `atom_dit` | `calls`, `pre` / `post`, `fallbacks` with the first failing gate in `why_save` / `why_tf32` / `why_opts` / `why_cond` |
+
+The counters are plain Python ints bumped at call time -- eager or CUDA-graph capture time, never inside a kernel or a graph replay (a replayed
+graph does not count again; "did the route get selected" is what they answer, not how often a graph ran). They change no output byte and no switch.
+All zeros for a route = it never fired for that run (route off, model not in `TRIATTN_MODELS` for TriAttn, or every call gated out: for PWA / token DiT /
+atom DiT `declined` / `fallbacks` tells which). Test: `tests/gpu/test_fp8_route_stats.py`.
+
 ### Decisions for the 3.0.0 release (owner, 2026-11-17)
 
 1. **TriAttn FP8 only for validated models.** The model is named once: `MINIWORLD_FP8_MODEL=<model>` next to `MINIWORLD_FP8` (read when the TriAttn kernels

@@ -45,6 +45,11 @@ def _fp8_parts(value: bool | str | Iterable[str] | None) -> frozenset:
 
 
 FP8_ROWS: frozenset = _fp8_parts(_fp8_env("MINIWORLD_ATOMDIT_FP8", ""))
+#: Route call counters (``miniworld_engine.fp8.route_stats()``; plain ints at Python call time, never inside a kernel or graph replay):
+#: ``calls`` = forward calls that took the e4m3 row kernels, ``pre`` / ``post`` = of those, per part; ``fallbacks`` = calls the route is on for
+#: (``FP8_ROWS`` set) that ran bf16 instead, with the first failing gate counted in ``why_save`` (training forward) / ``why_tf32`` / ``why_opts``
+#: (options outside ``f8.OPTIONS``) / ``why_cond`` (per-sample conditioning).
+STATS = {"calls": 0, "pre": 0, "post": 0, "fallbacks": 0, "why_save": 0, "why_tf32": 0, "why_opts": 0, "why_cond": 0}
 
 
 def enable_fp8(on: bool | str | Iterable[str] = True) -> frozenset:
@@ -332,6 +337,13 @@ def _fwd(
         # the opt-in e4m3 row kernels (FP8_ROWS): bf16 inference, options inside f8.OPTIONS only, a conditioning shared by the samples (the
         # sampler step; with per-sample tables the route measured slower: A = 1, 4096 atoms 1.09x)
         f8 = FP8_ROWS if (FP8_ROWS and not save and not tf32 and set(opts) <= f8mod.OPTIONS and _shared(cond)) else frozenset()
+        if f8:  # observability only (fp8.route_stats())
+            STATS["calls"] += 1
+            for _p in f8:
+                STATS[_p] += 1
+        elif FP8_ROWS:
+            STATS["fallbacks"] += 1
+            STATS["why_save" if save else "why_tf32" if tf32 else "why_opts" if not set(opts) <= f8mod.OPTIONS else "why_cond"] += 1
         p8 = f8mod.pack8(weights) if f8 else None
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)

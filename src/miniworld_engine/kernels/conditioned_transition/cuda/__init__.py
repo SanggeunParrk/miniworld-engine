@@ -630,6 +630,13 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     # (``identity``: Chai-1's form, the parallel block with the identity AdaLN, no up-gate / k-q LayerNorm / per-head q-k norm: expand, out, squeeze only)
     identity = parallel and not sig and not up and not kq_ln and not qk
     f8 = _fp8.active(M, D, fp32, plain and fold, identity and fold) if _fp8.PLACES else frozenset()
+    if _fp8.PLACES:  # observability only (fp8.route_stats()): plain int bumps at call time
+        if f8:
+            _fp8.STATS["calls"] += 1
+            for _p in f8:
+                _fp8.STATS[_p] += 1
+        else:
+            _fp8.STATS["declined"] += 1
     if f8:
         f8w = _fp8.weight_pack(key, wqkvg, wo, ws, _f8_wab(wab, M, ws.shape[1], single.device.index), bqkvg)
     if f8 and "qkvg" in f8:
