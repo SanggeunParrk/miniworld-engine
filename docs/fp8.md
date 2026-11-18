@@ -2127,8 +2127,9 @@ trajectory are not measured here (the per-row scales make the route independent 
 
 Scope: the H100 `"cuda"` backend of the local atom DiT block (`modules/atom_dit.py`, AF3 32 x 128 windows; `kernels/integrations/local_dit_h100.py`),
 bf16 (`master`) inference with a conditioning shared by the samples (the sampler step: `cond` an expanded view over A > 1), the AdaLN classes
-(Protenix / OpenDDE, AF3 / OpenFold3 / IntelliFold2) and Chai-1 (`IDENT` / `PARS` / `NOOUT`). Boltz-2 (`UP`), RoseTTAFold3 (`KQLN`), ESMFold2
-(`RMS`), per-sample conditioning tables, fp32 and training keep the bf16 / TF32 kernels. Default off; with it off the route is the 2.5.12 one.
+(Protenix / OpenDDE, AF3 / OpenFold3 / IntelliFold2), Chai-1 (`IDENT` / `PARS` / `NOOUT`) and, after 3.0.1 (branch `fp8c/esm-opendde`), ESMFold2's
+atom block `AtomDiTESMFold2Pair` (`RMS`, `local_dit_esm._infer_h100`; section "ESMFold2 atom block" below). Boltz-2 (`UP`), RoseTTAFold3 (`KQLN`),
+per-sample conditioning tables, fp32 and training keep the bf16 / TF32 kernels. Default off; with it off the route is the 3.0.1 one.
 
 | switch | effect |
 |---|---|
@@ -2236,6 +2237,75 @@ judge = max|y - y64| / max|y64| (the engine metric, `measure/accuracy.py`), tol 
 Every FP8 output finite; no saturation is possible (dynamic per-row scales). FP8 pre + post is 6-11x the tolerance (rms 2.9 %, 7x the bf16
 route); FP8 pre only is 1.6-2.7x (rms 0.8 %, 2x bf16) for the AdaLN models: its error passes through the softmax average and the gates, while
 `post90`'s products feed the residual output directly. Chai-1 (identity AdaLN: raw c in the tables) is about twice as large in both.
+
+### ESMFold2 atom block (`RMS`; branch `fp8c/esm-opendde`, 2026-11-18)
+
+`AtomDiTESMFold2Pair` (`AtomDiT(model="esmfold2_pair")`: ESMFold2 and ESMFold2-fast) runs the same `pre90` / `post90` row kernels as the AF3-form block,
+built with `-DRMS=1` (RMSNorm AdaLNs, tables of silu(c), raw gates; `sm90_atom/rms90.cuh`). `pre90_f8` / `post90_f8` take their normalisation
+statistics and the K / V scale through the same `norm_stats` / `cond_act` helpers, so the RMS build needed no kernel change: `f8.OPTIONS` now
+holds `RMS` (`f8.kernel_cubin` passes `-DRMS=1` to both kernels), `local_dit_esm._infer_h100` takes the e4m3 rows under the same gate as
+`local_dit_h100._fwd` (`FP8_ROWS`, bf16 inference, a conditioning shared by the samples), and the prebuild plan builds `pre_f8` / `post_f8` with `RMS`
+(minb 1 and 3) for the `atom_rms_rows_fwd` rows. The q / k RMSNorm + rotary, the pair bias, the window attention and the tables stay bf16.
+Default off: with `FP8_ROWS` empty the route is the 3.0.1 one (`test_fp8_rows_esmfold2_pair_error` checks the bytes after a switch on / off).
+The `safe` preset turns it on (`MINIWORLD_ATOMDIT_FP8=1` for every model), so `engine-fp8` / `MINIWORLD_FP8=safe` now reaches it.
+
+Why the 3.0.1 census showed 0 `pre90_f8` / `post90_f8` for ESMFold2: `f8.OPTIONS` excluded `RMS` and `_infer_h100` had no FP8 branch (it never read
+`FP8_ROWS`). FoldForge does build the engine block (`ModelKeys(None, "esmfold2", "esmfold2_pair")`, engine 3.0.1 has the key): one forward at n = 4
+ran 1200 bf16 `pre90_fwd` + 1203 `post90_fwd`.
+
+Module (H100, graph of 20 calls, one process, `scripts modacc.py`; bf16 master weights vs the fp64 module, `A` samples with a shared conditioning;
+`A = 1` has no shared conditioning, so it runs bf16 in every column):
+
+| case | bf16 default rms / max | FP8 pre + post rms / max | FP8 pre only rms | time FP8 / default (pre + post, pre, post) |
+|---|---|---|---|---|
+| 4096 atoms, A = 5 | 5.4e-3 / 8.1e-3 | 3.8e-2 / 6.4e-2 | 8.0e-3 | 0.940 (1.020, 0.969) |
+| 8192 atoms, A = 5 | 5.4e-3 / 6.9e-3 | 3.8e-2 / 5.3e-2 | 8.1e-3 | 0.964 (0.994, 1.011) |
+
+The error is the AF3-form block's (7x the bf16 route, rms 2.9-3.8 %: tables above). The gain is 4-6 % of the block, the block is 8 % of the
+profiled kernel time of an ESMFold2 forward at n = 4 (75 of 894 ms: `pre90_fwd` 23.5 + `post90_fwd` 51.5; with e4m3 rows 20.2 + 43.5 ms), a 1.3 % cut of the kernel time at n = 4; the share is larger at n = 1-2
+(5I28 table below).
+
+End level (FoldForge a9e1549 + this branch, ESMFold2, 5 FoldBench targets x 4 trunk seeds, 200 steps, 5 diffusion samples, `fp8.enable("safe")` vs bf16;
+RMSD between the bf16 and the FP8 prediction of the same trunk seed, mean over the samples, against the bf16 trunk-seed pair spread; inside =
+max same-seed RMSD <= max(1.1 x max bf16 pair RMSD, 0.5 A)): 5 / 5 inside (`safe`), 4 / 5 for `safe` without the atom rows (the one outside is 8ee9, 1.23
+against 1.05 A: the end-level noise of the whole `safe` set, not the atom rows), max |d ipTM| 0.018.
+
+| target | bf16 pair RMSD max / mean | `safe` same-seed max / mean | `safe` without atom rows max / mean |
+|---|---|---|---|
+| 7y37 | 2.10 / 1.61 | 1.85 / 1.47 | 1.84 / 1.44 |
+| 8ad9 | 3.13 / 2.34 | 2.65 / 1.60 | 2.58 / 1.60 |
+| 8ee9 | 1.05 / 0.66 | 1.03 / 0.89 | 1.23 / 0.82 |
+| 8gn4 | 0.31 / 0.23 | 0.27 / 0.26 | 0.37 / 0.27 |
+| 8id0 | 0.77 / 0.62 | 0.75 / 0.55 | 0.78 / 0.56 |
+
+5I28 benchmark (FoldForge a9e1549, `MINIWORLD_FP8=safe`, protocol of `run_1118_301_fp8`: warm median of 6, one process per model, H100 node02), FP8 / bf16
+warm forward, engine 3.0.1 (before) and this branch (after; census at n = 4: 1200 `pre90_f8` + 1200 `post90_f8` launches for both models):
+
+| model | n = 1 | 2 | 4 | 8 | 12 | 16 |
+|---|---|---|---|---|---|---|
+| esmfold2 before | 0.969 | 0.942 | 0.904 | 0.857 | 0.839 | 0.806 |
+| esmfold2 after | 0.954 | 0.924 | 0.889 | 0.848 | 0.830 | 0.810 |
+| esmfold2-fast before | 0.980 | 0.963 | 0.934 | 0.877 | 0.869 | 0.850 |
+| esmfold2-fast after | 0.955 | 0.935 | 0.913 | 0.873 | 0.860 | 0.837 |
+
+The gain is 0.5-2.8 points at n <= 12 and inside the run-to-run noise at n = 16 (esmfold2 0.806 -> 0.810). Raw: `~/miniworld-engine-scratch/bench5i28_ff/fp8c_esm_after/`.
+
+Scripts / raw: `~/miniworld-engine-scratch/wt-fp8c-esm-opendde-run/{modacc.py,e2e3.py,an4.py,e2e/esm}`. Templates are removed from the FoldBench specs
+(`specs_nt/`: ESMFold2 has no template path).
+
+### Model coverage census (engine 3.0.1 + this branch, MINIWORLD_FP8=safe, n = 4 = 512 tokens, one warm forward profiled)
+
+A window census, not a whole-run profile (`census2.py` wraps the last of `measured_forward`'s forwards in `torch.profiler`; the whole-run wrapper of the
+first census died on OpenDDE with no output: cold compile + 3 forwards produce too many CUPTI events). Routes that fired:
+
+| model | TriMul | Transition | OPM | PWA | token DiT `expand` | atom DiT rows | TriAttn PV | note |
+|---|---|---|---|---|---|---|---|---|
+| esmfold2 | yes (1044 calls) | yes (555) | yes (36) | not reached (no PWA kernel launched) | yes | 3.0.1: no; now yes | n/a | |
+| esmfold2-fast | yes (540) | yes (276) | **no OPM in the model** | not reached | yes | 3.0.1: no; now yes | n/a | `msa_layers=0` (no MSA encoder: the outer product mean lives in the MSA block only) |
+| opendde | yes (1125) | yes (534) | yes (36) | yes | yes (4800 `gemm_swiglu_f8`) | yes (1200 `pre90_f8` + 1200 `post90_f8`) | unfused (whitelist) | no gap |
+
+OpenDDE forward at n = 4 (kernel time 3155 ms profiled): TriAttn cores 435 ms (14 %, PV on e4m3 for the unfused sites), `attn_fwd` token DiT 343 ms,
+TriMul 452 ms (K1 / K3 bf16 kernels 277 + 176; the FP8 planes sit in `nvjet_qq*`), FP8 kernels 621 ms in all (20 %).
 
 ### Tried, no gain / not built
 
