@@ -1124,7 +1124,7 @@ __global__ void __launch_bounds__(256) vt_quant_k(const __half* __restrict__ v, 
 
 // v: fp16 [B, N, S, H, 32] (rows at one stride), S % 128 == 0, H <= 16; fixed_amax > 0: no amax pass (every head's amax taken as that value)
 std::vector<torch::Tensor> vt_quant(torch::Tensor v, double fixed_amax, c10::optional<torch::Tensor> vinv, c10::optional<torch::Tensor> ovf) {
-  TORCH_CHECK(v.is_cuda() && v.dim() == 5 && (v.size(4) == 32 || v.size(4) == 16) && v.scalar_type() == torch::kHalf && v.stride(4) == 1 && v.stride(3) == v.size(4) && v.size(3) <= 16 &&
+  TORCH_CHECK(v.is_cuda() && v.dim() == 5 && (v.size(4) == 32 || v.size(4) == 16 || v.size(4) == 64) && v.scalar_type() == torch::kHalf && v.stride(4) == 1 && v.stride(3) == v.size(4) && v.size(3) <= 16 &&
               v.size(2) % VQ_TILE == 0 && v.stride(2) % 8 == 0 && v.stride(1) == v.size(2) * v.stride(2) && v.stride(0) == v.size(1) * v.stride(1), "v: [B, N, S, H<=16, 32 | 16] fp16");
   const int B = v.size(0), N = v.size(1), S = v.size(2), H = v.size(3), dh = v.size(4);
 #if TA_F8HL

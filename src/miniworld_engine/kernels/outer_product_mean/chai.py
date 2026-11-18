@@ -12,6 +12,9 @@ dA = b dO^T, dB = a dO (two batched GEMMs); the projection / LayerNorm backward 
 
 from __future__ import annotations
 
+import functools
+from pathlib import Path
+
 import torch
 
 from miniworld_engine.kernels._compile import opaque
@@ -92,6 +95,14 @@ def _front(msa, mask, forms, eps, save):
     lnw32, lnb32, w, _, _ = forms
     a, b, st1 = cuda.chai_proj(x, mk, lnw32, lnb32, w, eps, save)
     products = getattr(cuda, "chai_products", None)  # A100: the masked product skips the dead tokens
+    if not save and products is None:
+        from miniworld_engine.kernels.integrations import opm_fp8
+
+        if f8_wanted(a, s, n):
+            opm_fp8.GUARD_STATS["calls"] += 1
+            return a, b, st1, f8_products(a, b, s, n, forms)
+        if opm_fp8.POLICY is not None:
+            opm_fp8.GUARD_STATS["fallbacks"] += 1
     o = (
         products(a, b, mk, s, n) if products is not None else torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))
     )  # [8, N K, N K]
@@ -255,3 +266,59 @@ def forward(module, msa, mask, token_asym_id=None, residual=None):
     if interchain and token_asym_id is not None:
         z = z * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(z.dtype)
     return residual + z if residual is not None and not fuse else z
+
+
+# ---- EXPERIMENTAL e4m3 grouped product (opt-in with ``MINIWORLD_OPM_FP8=bound``, H100 inference; docs/fp8.md "Chai-1 grouped OPM") ----
+#: the shortest MSA depth S (padded rows of the call) that takes the e4m3 product; below it the bf16 batched GEMM runs unchanged
+F8_MIN_S = 0
+
+
+@functools.lru_cache(maxsize=None)
+def _f8_ext():
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="opm_chai_f8",
+        sources=[str(Path(__file__).parent / "cuda" / "chai_f8.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a")],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
+def _f8_forms(forms):
+    """(sa, sb, 1 / sa, 1 / sb): the weight-bound power-of-two dequantisation scales of a and b (``opm_fp8.bound_scales``: |LN(x)_k| <= sqrt(63) |gamma_k| + |beta_k|
+    for every input bounds every a / b value, so the cast cannot saturate), fp32 [1] device tensors, made once per weight pack."""
+    from miniworld_engine.kernels import _capture
+    from miniworld_engine.kernels.integrations import opm_fp8
+
+    lnw, lnb, w, _, _ = forms
+
+    def build():
+        s = opm_fp8.bound_scales(lnw, lnb, w[: G * K], w[G * K :])
+        return s[0:1].contiguous(), s[1:2].contiguous(), (1.0 / s[0:1]).contiguous(), (1.0 / s[1:2]).contiguous()
+
+    return _capture.param_forms("chai_f8_scales", [lnw, lnb, w], build, capture_reads_eager=True)
+
+
+def f8_wanted(a: torch.Tensor, s: int, n: int) -> bool:
+    """Whether the call takes the e4m3 product: the switch is on (``opm_fp8.POLICY == "bound"``: the weight-bound scales need no calibration or guard), H100, inference, the shape fits cuBLASLt's e4m3 TN form."""
+    from miniworld_engine.kernels.integrations import opm_fp8
+
+    if opm_fp8.POLICY != "bound" or torch.cuda.get_device_capability(a.device) != (9, 0) or s < F8_MIN_S:
+        return False
+    return s % 16 == 0 and (n * K) % 16 == 0
+
+
+def f8_products(a: torch.Tensor, b: torch.Tensor, s: int, n: int, forms) -> torch.Tensor:
+    """O [8, N K, N K] bf16 = the e4m3 batched product of a, b [8, S N, 8] (the same value the bf16 ``bmm`` forms, up to the e4m3 rounding of its operands)."""
+    ext = _f8_ext()
+    sa, sb, ia, ib = _f8_forms(forms)
+    a8 = ext.chai_quant_t(a.view(G, s, n * K), ia)
+    b8 = ext.chai_quant_t(b.view(G, s, n * K), ib)
+    o = torch.empty((G, n * K, n * K), device=a.device, dtype=torch.bfloat16)
+    s0, s1 = sa.view(()), sb.view(())
+    for g in range(G):
+        o[g] = torch._scaled_mm(a8[g], b8[g].t(), s0, s1, out_dtype=torch.bfloat16)
+    return o

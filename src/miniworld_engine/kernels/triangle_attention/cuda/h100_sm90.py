@@ -79,7 +79,13 @@ FP8_PV = False
 #: calls that took the front-made e4m3 V^T route; ``qk`` = of those, the calls on the e4m3 q / k core; ``pv_front`` = unfused / generic / wide
 #: calls whose front made the V^T planes; ``pv_pass`` = calls through the standalone V^T pass (:class:`_F8Core`); ``calibrations`` = first
 #: (eager) calls of a site that took its static scale instead.  PV calls = ``pv_fused + pv_front + pv_pass``.
-STATS = {"d128_calls": 0, "pv_fused": 0, "qk": 0, "pv_front": 0, "pv_pass": 0, "calibrations": 0}
+STATS = {"d128_calls": 0, "pv_fused": 0, "qk": 0, "pv_front": 0, "pv_pass": 0, "calibrations": 0, "pv_d64": 0}
+
+#: True: the 64-channel-head wgmma core (``h100_dh``: Chai-1 trunk / confidence, RoseTTAFold3 templates) runs its FP8 PV variant (``triattn_d64_sm90.cu`` -DTE_F8PV=1): V on e4m3 V^T planes
+#: (the standalone ``vt_quant`` pass, static per-site scale, the same overflow flag), p as e4m3 bytes.  Call-site kind "d64" of :data:`miniworld_engine.fp8.TRIATTN_MODELS`.
+FP8_PV_D64 = False
+#: the shortest padded S the d64 FP8 core takes (below it the V^T pass costs more than the core gains; measured: docs/fp8.md)
+FP8_PV_D64_MIN_S = 128
 
 
 #: True: V on two e4m3 planes (hi, and the rounding residual x16 rounded again): V^T [B, N, H, 2, 32, S], PV on m64n72k32; the V rounding error falls
@@ -274,7 +280,7 @@ def quantize_v(v):
     if (
         S % 128 == 0
         and Hh <= 16
-        and Dh in (16, 32)
+        and Dh in (16, 32, 64)
         and v.stride(4) == 1
         and v.stride(3) == Dh
         and v.stride(2) % 8 == 0
@@ -313,7 +319,7 @@ def quantize_v_static(v, site):
     if (
         v.size(2) % 128 == 0
         and v.size(3) <= 16
-        and v.size(4) in (16, 32)
+        and v.size(4) in (16, 32, 64)
         and v.stride(4) == 1
         and v.stride(3) == v.size(4)
         and v.stride(2) % 8 == 0
@@ -406,6 +412,8 @@ def enable_fp8_pv_for(model: str, *, hl: bool = False) -> bool:
 def disable_fp8_pv() -> None:
     global FP8_PV, FP8_PV_FUSED, FP8_VSCALE_AUTO, FP8_PV_HL, FP8_PV_UNFUSED, FP8_PV_MIN_S, FP8_PV_FRONT_MIN_S
     FP8_PV = FP8_PV_FUSED = FP8_VSCALE_AUTO = FP8_PV_HL = FP8_PV_UNFUSED = False
+    global FP8_PV_D64
+    FP8_PV_D64 = False
     FP8_PV_MIN_S = {}
     FP8_PV_FRONT_MIN_S = {}
 

@@ -85,14 +85,16 @@ def ext():
     )
 
 
-def active(M: int, D: int, fp32: bool, plain: bool, parallel: bool = False) -> frozenset[str]:
+def active(M: int, D: int, fp32: bool, plain: bool, identity: bool = False, parallel: bool = False) -> frozenset[str]:
     """The placements this block call takes: bf16 default-option blocks (the CondFold route) at width 768, M % 128 == 0, each placement
-    from its row gate (``MIN_ROWS`` or ``MIN_ROWS_PER``). ``parallel`` (a CondFold block of the parallel schedule, RoseTTAFold3 / Chai-1,
-    whose attention options keep ``plain`` False): the ``expand`` placement only -- the transition reads the block input's AdaLN rows
-    (quantised in one row pass), which does not depend on the attention part."""
-    if not PLACES or fp32 or D != 768 or M % 128 or not (plain or parallel):
+    from its row gate (``MIN_ROWS`` or ``MIN_ROWS_PER``). ``identity``: Chai-1's option block (parallel attention / transition, identity
+    AdaLN, no gating query; the CondFold route) takes ``expand`` (the transition's AdaLN comes out of the attention's LN pass as e4m3),
+    ``out`` and ``squeeze``; not ``qkvg`` (its AdaLN scale is unbounded: no bound on the e4m3 error was measured, docs/fp8.md).
+    ``parallel`` (any other CondFold block of the parallel schedule, RoseTTAFold3 with its k-q LayerNorm: ``plain`` False): the ``expand``
+    placement only -- the transition reads the block input's AdaLN rows (quantised in one row pass), which does not depend on the attention part."""
+    if not PLACES or fp32 or D != 768 or M % 128 or not (plain or identity or parallel):
         return frozenset()
-    places = PLACES if plain else PLACES & {"expand"}
+    places = PLACES if plain else (PLACES - {"qkvg"} if identity else PLACES & {"expand"})
     return frozenset(p for p in places if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_PER[p]))
 
 

@@ -1369,7 +1369,7 @@ a head calibrated at exactly zero saturates on any later non-zero V, and `rescal
 ## OuterProductMean forward: e4m3 grouped product (`kernels/integrations/opm_fp8.py`, branch `fp8x/opm`, 2026-11-17)
 
 Scope: inference of the `opm_train` forms (groups 1, d_hidden 32, (d_msa, d_pair) in `opm_train.SHAPES`, batch 1, either normalisation order,
-`count_offset`, the pair residual), H100. Training, Chai-1 groups and the RoseTTAFold3 biased inference (`composed.biased_wide`) stay bf16.
+`count_offset`, the pair residual), H100. Training, Chai-1 groups (measured 0.7 % of Chai-1's kernel time at S 1024: see "Chai-1's option block" under Token DiT) and the RoseTTAFold3 biased inference (`composed.biased_wide`) stay bf16.
 
 ### Where the time goes and where e4m3 can go (default 2.5.12 route, measured)
 
@@ -2110,7 +2110,7 @@ the touched Python files. The F8QK core and the QK8 front instance are not in th
 ## Token DiT forward: e4m3 GEMM operands (EXPERIMENTAL, `conditioned_transition.cuda.token_dit_fp8`, branch `fp8x/token-dit`)
 
 Scope: the H100 bf16 inference block of `TokenDiTProtenix` / `TokenDiTMiniWorld` with the default model options (the CondFold route of
-`docs/h100/token_dit.md`), width 768. Off by default; with no switch the route is bit-identical to 2.5.12 (below). The block runs
+`docs/h100/token_dit.md`) and Chai-1's option block (parallel, identity AdaLN; expand / out / squeeze, see "Chai-1's option block" below), width 768. Off by default; with no switch the route is bit-identical to 2.5.12 (below). The block runs
 24 x per diffusion step x 200 steps, so on small targets it is a large share of the sampler; the trunk FP8 routes do not reach it.
 
 ```
@@ -2215,6 +2215,82 @@ trajectory are not measured here (the per-row scales make the route independent 
 - Tests: `tests/gpu/test_token_dit_fp8.py` (the e4m3 SwiGLU GEMM against a torch reference on the same e4m3 operands at ht 64 / 128,
   the row quantizer's scales and rounding bound, each placement's error against the bf16 route, switch-off and below-gate calls bit-equal
   to the default).
+
+### Chai-1's option block (branch `fp8c/chai1`, 2026-11-18)
+
+Why Chai-1 got nothing from `MINIWORLD_TOKEN_DIT_FP8=expand` in 3.0.1 (probe: FoldForge a9e1549 + engine 3.0.1, 5I28 n = 4 = 512 tokens, `MINIWORLD_FP8=safe`):
+`token_dit_fp8.active(M, D, fp32, plain)` was asked with `plain = False` on all 48 token DiT calls of the probe (M = 2560 = 5 x 512, D = 768, bf16,
+conditioning bf16 [5, 1, 512, 384], CondFold on): `plain` is `variant == VARIANT_DEFAULT`, and Chai-1's variant is `(parallel 1, sig 0, eps 0.1, gated 0,
+up 0, kq_ln 0, ..)`. The AF3 / Protenix / OpenDDE blocks are plain; Chai-1 (identity AdaLN, parallel attention / transition, no gating query), RoseTTAFold3
+(parallel, k-q LayerNorm) and Boltz-2 (up-gate) are not. Width, dtype, row count and conditioning were all fine.
+
+Route now: the identity block (`parallel and not sig and not up and not kq_ln and not qk`) takes `expand`, `out`, `squeeze`; **not `qkvg`**. The
+parallel block's transition input is the second AdaLN of the attention input's LayerNorm pass, so the new row kernel `adaln_in_rows_cf_par_q8`
+(`token_dit_fp8_rows.cu`, the same extension) writes the attention input as bf16 (bit-identical to `adaln_in_cf_kernel<192, true, false>`'s output,
+tested) and the transition input as e4m3 with a dynamic per-row scale; the e4m3 SwiGLU GEMM of the plain route is reused unchanged (same weight pack
+key, which holds the variant). The sequential block's `resgate_adaln_cf_q8` is skipped for the parallel schedule. RoseTTAFold3 and Boltz-2 are not
+opened by this change (they stay `active() == {}`).
+
+Kernel time of 5I28 n = 4 (profiler, three forwards: 9632 token DiT blocks, 200 steps x 16 blocks per forward + warm-up): `gemm_swiglu_sm90` 198.7 ms -> `gemm_swiglu_f8_sm90` 145.3 ms,
+`adaln_in_cf_kernel` 113.8 ms -> `adaln_in_cf_par_q8_kernel` 123.2 ms (the e4m3 image + row max): net -44 ms of 6949 ms profiled kernel time (0.6 %; per warm forward
+~15 ms of 1.63 s).
+
+Module error against fp64 PyTorch (`TokenDiTChai1`, random weights, master weights, bf16 activations / conditioning, 3 seeds each; update rms = rms(y - y64) / rms(y64 - x)):
+
+| case | default | PyTorch bf16 | expand | out | squeeze | expand + out + squeeze |
+|---|---|---|---|---|---|---|
+| A5 L512 | 0.62 % (judge 5.4-6.4e-3) | 0.96 % (8.2-9.2e-3) | 5.0 % (4.7-5.1e-2) | 1.5 % | 3.5 % | 6.2 % |
+| A5 L512, input x 0.05 | 0.55 % | 0.74 % | 5.3 % (judge 4.7-6.4e-2) | 0.98 % | 3.6 % | 6.4 % |
+| A5 L512, input x 20 | 2.97 % (judge 2.5-2.8e-3) | 4.2 % (4.7-5.0e-3) | 5.8 % (judge 4.8-5.5e-3) | 3.3 % | 4.5 % | 6.8 % |
+| A1 L512 | 0.62 % | 0.96 % | 5.0 % (4.3-5.3e-2) | - | - | - |
+| A5 L1024 | 0.61 % | 0.96 % | 5.1 % (4.1-5.0e-2) | 1.4 % | 3.5 % | 6.3 % |
+
+Same character as the plain block's expand (5.4 %, above): two e4m3 operands in the SwiGLU, well above the module tolerance (judge 8e-3) at input scale 1 -- the expand does not pass the
+module rule, exactly as for AF3, where the end-level FoldBench (27 targets, 0 flagged) is the evidence. Raw rows `~/miniworld-engine-scratch/fp8c-chai1/res/err1.jsonl`.
+
+End level (FoldForge a9e1549 `miniworld`, bf16, mode exact, 4 recycles, 200 steps, 5 samples, diffusion_seed 0, **trunk seeds 0-3**, six FoldBench picks 268-658 tokens;
+arms: bf16; `fp8old` = `MINIWORLD_FP8=safe` with the token DiT route off = what 3.0.1 does for Chai-1; `fp8new` = `safe` with this branch). RMSD in A (Kabsch, all atoms present in both, per sample;
+"bf16 pair" = largest same-sample RMSD between two bf16 trunk seeds; inside = max same-seed RMSD <= max(1.1 x bf16 pair, 0.5 A)):
+
+| target (tokens) | bf16 pair max | fp8old same-seed max / mean | fp8new same-seed max / mean | max abs d ipTM old / new | inside (new) |
+|---|---|---|---|---|---|
+| 8dhj (268) | 2.04 | 1.75 / 0.66 | 1.73 / 0.67 | 0.009 / 0.010 | yes |
+| 8hxq (358) | 20.85 | 19.94 / 5.59 | 19.90 / 5.71 | 0.029 / 0.028 | yes (weak probe: bf16 trunk seeds already differ by 20.9 A) |
+| 8vfj (392) | 0.85 | 0.71 / 0.43 | 0.71 / 0.44 | 0.001 / 0.001 | yes |
+| 8avq (400) | 2.68 | 1.82 / 1.00 | 1.83 / 1.02 | 0.004 / 0.005 | yes |
+| 9gsq (450) | 24.17 | 9.32 / 3.66 | 9.35 / 3.72 | 0.051 / 0.052 | yes (weak probe) |
+| 8ts0 (658) | 18.27 | 13.61 / 6.17 | 13.73 / 6.07 | 0.027 / 0.027 | yes (weak probe) |
+
+6 / 6 inside; the tight targets (8vfj, 8dhj, 8avq: bf16 pair 0.85-2.7 A) show the token DiT route adding nothing measurable to the FP8 `safe` set's deviation that Chai-1 already had
+(same-seed mean +0.00 .. +0.02 A). Files (6 targets x 4 trunk seeds x 3 arms = 72 runs) in `~/miniworld-engine-scratch/fp8c-chai1/e2e`, script `e2e_chai1.py`, table `an_e2e.py`.
+This is six targets, not the 27 of the AF3 FoldBench: the lDDT / DockQ evaluator was not run for Chai-1.
+
+5I28 (FoldForge a9e1549, warm forward, median of 6, CUDA graph + compile, node02; `run_1118_301_fp8` = the recorded 3.0.1 FP8 run, `bf16` = `run_1118_301_steady`; the
+three arms of the new job (`fp8c-chai1/bench`) ran back to back in one job, bf16 control = engine default of this branch):
+
+| n (tokens) | bf16 recorded s | FP8 3.0.1 recorded s | ratio | job: bf16 s | job: fp8old s | job: fp8new s | fp8old / bf16 | fp8new / bf16 | fp8new / fp8old |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 (128) | 0.3394 | 0.3324 | 0.979 | 0.3181 | 0.3313 | 0.3277 | 1.041 | 1.030 | 0.989 |
+| 2 (256) | 0.6303 | 0.6174 | 0.979 | 0.6286 | 0.6171 | 0.6099 | 0.982 | 0.970 | 0.988 |
+| 4 (512) | 1.6922 | 1.6297 | 0.963 | 1.6926 | 1.6348 | 1.6283 | 0.966 | 0.962 | 0.996 |
+| 8 (1024) | 6.1203 | 5.8481 | 0.956 | 6.1211 | 5.8951 | 5.8757 | 0.963 | 0.960 | 0.997 |
+| 12 (1536) | 14.997 | 14.286 | 0.953 | 15.140 | 14.340 | 14.330 | 0.947 | 0.947 | 0.999 |
+| 16 (2048) | 29.322 | 27.873 | 0.951 | 29.632 | 27.729 | 27.622 | 0.936 | 0.932 | 0.996 |
+
+fp8new against the recorded bf16: 0.965 / 0.968 / 0.962 / 0.960 / 0.956 / 0.942. The token DiT route gains 0.1-1.2 % of the forward (the whole gain of the expand is 0.6 % of the profiled kernel time);
+the n = 1 cell is noise-dominated (bf16 repeats 0.318-0.560 s in the job; the recorded and the job bf16 differ by 6 %). Chai-1 is the weakest FP8 model because its trunk is dominated by
+what FP8 does not serve (TriAttn d64: 14 % of the kernel time, no Chai-1 whitelist; the sampler's attention core; elementwise adds 6 %; 7 % host-to-device copies), not because a route is closed.
+
+OuterProductMean (the second gap): not closed, on purpose. Chai-1's OPM is the grouped form (8 groups x 8, product LayerNorm, no count division; `kernels.outer_product_mean.chai`); `opm_fp8` serves groups = 1
+(`opm_train.SHAPES`) only, so `OuterProductMean._cuda_route` returns `chai` for all 72 calls of the probe (msa [1, 1024, 512, 64], d_pair 256), and the OPM FP8 counter stays 0 whatever the S gate says
+(S = 1024 at L = 512 would pass it). A grouped e4m3 product would be a new kernel family (the product is a batched cuBLAS GEMM over 8 groups with K = S = 1024, then the LayerNorm epilogue); the
+whole grouped OPM is 0.7 % of the profiled kernel time (product `nvjet_tst_256x128` 26.6 ms, `chai_epilogue_kernel` 19.2 ms of 6949 ms over three forwards, plus the projection prologue), so an
+e4m3 product (at best -40 % of the product's share) is worth ~0.2 % of the forward. Not built (Chai-1's MSA in the 5I28 benchmark is 1024 rows; a deeper MSA would change that share).
+
+Verification: `tests/gpu/test_token_dit_fp8.py` +4 tests (placements `active()` logic; every placement of the identity block against the bf16 route; `qkvg` / switch off = default route bytes; the parallel row kernel:
+bf16 output bit-equal to the bf16 pass, e4m3 image and row scale of the transition AdaLN) -- 46 passed with `test_token_dit_cond_fold.py` and `test_token_dit_shared_cond.py` (default-route regressions, 11 min
+including the JIT build); `tests/cpu/test_capture_api.py`, `test_token_swiglu_tiles.py` 15 passed; ruff and pyright clean on the touched files. The FP8-off default route is untouched by construction (new kernels are in the FP8
+extension only; the Python side adds one `identity` boolean that is computed but unused while `PLACES` is empty). The `dev code-graph` CLI is not in the tree, so the test files were chosen by import reach of `token_dit_fp8` / the token DiT cuda route.
 
 ## Atom DiT forward: e4m3 row-kernel GEMMs (`local_dit_h100.FP8_ROWS`, EXPERIMENTAL, opt-in; branch `fp8x/atomdit`, 2026-11-17)
 

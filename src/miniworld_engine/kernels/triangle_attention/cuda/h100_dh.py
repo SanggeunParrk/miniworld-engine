@@ -68,6 +68,17 @@ def ext_d64():
 
 
 @functools.lru_cache(maxsize=None)
+def ext_d64_f8():
+    """The FP8 PV variant of the 64-channel-head wgmma core (-DTE_F8PV=1: V on e4m3 V^T planes, p as e4m3 bytes; docs/fp8.md)."""
+    from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import _flags
+
+    ensure_cuda_home()
+    return load_extension(
+        name="triattn_h100_d64_f8pv", sources=[str(_SRC / "triattn_d64_sm90.cu")], extra_cuda_cflags=[*_flags(), "-DTE_F8PV=1"], verbose=False
+    )
+
+
+@functools.lru_cache(maxsize=None)
 def ext_d64t():
     """The wgmma training forward of 64-channel heads (bf16 operands; o, lse and u)."""
     from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import _flags
@@ -103,6 +114,29 @@ def _front_fp16(module, pack, x, lnw, lnb, mask, B: int, L: int, H: int, trans: 
             yb = g.ln_fwd(x, lnw, lnb, eps, L, False, True)[0] if flip else y
             sbias = g.front_bias(torch.mm(yb, pack["wb16"].t()), m, B, L, H, 0, scale)
     return torch.mm(y, pack["wcat16"].t()), sbias
+
+
+def _f8_planes(module, proj16: torch.Tensor, B: int, L: int, H: int, D: int):
+    """(vt, vscale) of the FP8 PV core, or None (the fp16 core): the route is on (``h100_sm90.FP8_PV_D64``), ``L`` is past its gate, and the call is not a CUDA-graph
+    capture of a site whose static V scale is not taken yet (the first, eager, call of a site takes it: ``quantize_v_static``)."""
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+
+    if not (hs.FP8_PV and hs.FP8_PV_D64 and hs.FP8_VSCALE_AUTO and D == 64 and L >= hs.FP8_PV_D64_MIN_S):
+        return None
+    w = module.to_value.weight
+    key = ("vq", w.data_ptr(), H, D)
+    if key not in hs._VS_AUTO and torch.cuda.is_current_stream_capturing():
+        return None
+    v = proj16.view(B, L, L, 4, H, D)[:, :, :, 2]  # [B, N, S, H, D] fp16 at the proj row stride
+    hs._SITE, hs._SITE_T = w.data_ptr(), w
+    try:
+        if key not in hs._VS_AUTO:
+            hs.STATS["calibrations"] += 1
+        else:
+            hs.STATS["pv_d64"] += 1
+        return hs.quantize_v_static(v, w.data_ptr())
+    finally:
+        hs._SITE = hs._SITE_T = None
 
 
 def wgmma_d64(length: int, d: int) -> bool:
@@ -205,7 +239,12 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> tor
     if wgmma_d64(L, D):  # the fp16 front and core; the KEY_TILE-key tiles past each sample's last attended key skipped (the same bits)
         proj16, sbias = _front_fp16(module, pack, x, lnw, lnb, mask, B, L, H, trans)
         core = ext_d64()
-        u = core.triattn_d64_forward(proj16, sbias, gb, H, D**-0.5, key_tiles(mask, L, core.KEY_TILE))
+        kt = key_tiles(mask, L, core.KEY_TILE)
+        f8 = _f8_planes(module, proj16, B, L, H, D)
+        if f8 is not None:  # the opt-in FP8 PV core (h100_sm90.FP8_PV_D64): V as e4m3 V^T planes with the site's static scale
+            u = ext_d64_f8().triattn_d64_forward(proj16, sbias, gb, H, D**-0.5, kt, *f8)
+        else:
+            u = core.triattn_d64_forward(proj16, sbias, gb, H, D**-0.5, kt)
         return _tail(module, pack, u, pair_p, B, L, L0, C, trans)
     y = _glue().ln_fwd(x, lnw, lnb, module.ln_pair.eps, L, trans)[0]  # the attention's row layout
     proj = torch.mm(y, pack["wcat"].t())
