@@ -1211,8 +1211,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         dGgs = torch.empty(2 * L, 2 * D, device=dev, dtype=at)
         T.sample_sum2(dG.view(A, L, 4 * D), dGs, dGg.view(A, L, 2 * D), dGgs)
 
-        def halves(y):
-            return (y[:L] + y[L:]).to(at)
+        def halves(y):  # fp32: cond_bwd reads them as they are (no operand rounding between the GEMM and the LayerNorm backward)
+            return y[:L] + y[L:]
 
         dchat = halves(mm32(dGs, Wn))
         dcg = halves(mm32(dGgs, Wg))

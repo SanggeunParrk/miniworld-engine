@@ -471,8 +471,8 @@ class TokenDiTProtenix(BackendModule):
         "cuda:a100_sm80": 4,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
-        "cuda:h100_sm90": 3,
-    }  # cuda:h100_sm90 3 / cuda:a100_sm80 4 (2026-11-13): inference skips the core's key tiles past the last attended key of a padded mask (the
+        "cuda:h100_sm90": 4,
+    }  # cuda:h100_sm90 4 (2026-11-18): training with the conditioning shared by the samples (stride-0 expand, default options): the conditioning GEMMs on L rows, dG / dGg summed over the samples first (outputs change in summation order; TokenDiTMiniWorld inherits it, the variant classes keep their own entries); cuda:h100_sm90 3 / cuda:a100_sm80 4 (2026-11-13): inference skips the core's key tiles past the last attended key of a padded mask (the
     # klen held with the hoisted pair bias; bitwise the same outputs; every subclass)
     # cuda:h100_sm90 2 (2026-11-12): bf16 inference folds the conditioning into one grouped GEMM (CondFold), 128 x 128 SwiGLU tiles at small M, PDL row passes (outputs change: fp32 tables; every subclass); 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton attention core returns its bias gradient head-major on the A100 / H100 (every subclass)
 
