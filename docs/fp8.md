@@ -711,6 +711,7 @@ Enable (environment, read at import, set before `import miniworld_engine`):
 | `MINIWORLD_TRIMUL_FP8=calib` | e4m3 a / b planes between K1 and the contraction (cuBLASLt e4m3 batched GEMM, bf16 out), static per-module scales calibrated on the first eager call (16x headroom) |
 | `MINIWORLD_TRIMUL_FP8_GUARD=lazy` | no host sync (required with CUDA graphs); `sync` (default) redoes an overflowing call itself; `off` |
 | `MINIWORLD_TRIMUL_FP8_FASTACC=1` | cuBLASLt fast accumulation (1.07-1.08x of the contraction at L >= 1024) |
+| `MINIWORLD_TRIMUL_FP8_D512=0` | switches the D512 route (IntelliFold2 trunk; B = 1, L <= 2048, one direction, L % 128 == 0) off; default on with the TriMul route |
 | `MINIWORLD_TRIMUL_FP8_HEADROOM`, `_SCALE` | scale headroom (16) / `tensor` (default) or `channel` scales |
 | `MINIWORLD_TRIMUL_FP8_K1=1` | EXPERIMENTAL e4m3 K1 compute (6.9 % update error): never a default |
 | `MINIWORLD_TRIMUL_FP8_MINL=<n>` | replaces the per-width / direction min-L gates (below them the bf16 default route runs): D128 out 144, D128 in 192, D256 out 224, D256 in 144, bidirectional D128 256, bidirectional D256 1024; D64 512 (both directions), D384 128, bidirectional D64 2048, bidirectional D384 1024; D512 none (every L % 128 == 0); 0 = no gate |
