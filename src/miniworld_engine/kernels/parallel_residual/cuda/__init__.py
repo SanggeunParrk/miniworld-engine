@@ -38,9 +38,10 @@ def forward(x: torch.Tensor, branches: list[torch.Tensor]) -> torch.Tensor:
     return _device_ext(x.device).forward(x, branches)
 
 
-def backward(g: torch.Tensor, n: int) -> torch.Tensor:
-    """``(1 - n) g`` (fp32 product, one rounding to ``g``'s dtype): the gradient of ``x``."""
-    return _device_ext(g.device).backward(g, int(n))
+def backward(g: torch.Tensor, n: int, copies: int = 0) -> list[torch.Tensor]:
+    """``[(1 - n) g, g, ..., g]`` in one pass: the gradient of ``x`` (fp32 product, one rounding to ``g``'s dtype) and ``copies`` fresh tensors
+    equal to ``g`` (the gradients of the branches that are autograd leaves: ``modules/residual.py``)."""
+    return _device_ext(g.device).backward(g, int(n), int(copies))
 
 
 def prebuild(target, rows):
