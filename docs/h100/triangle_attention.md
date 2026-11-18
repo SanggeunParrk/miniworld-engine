@@ -505,3 +505,20 @@ On top of the FP8 PV route, d_pair 128 fused route only: the front writes q / k 
 one `m64n128k32.f16.e4m3.e4m3` wgmma (`-DTA_F8QK=1`). Module 0.93-0.95x of the FP8 PV route from L512 (0.80-0.82x of 2.5.12), attention-output error on real
 activations 3.1-4.0 % against 2.1-2.4 % (max-norm up to 24 % against 6 %), judge form 0.85-0.95 % (> 8e-3). The stage analysis of every other e4m3 placement
 (tail o, front GEMM operands, cuBLAS projections, out-projection, bidirectional) and why they were not built: `docs/fp8.md`, "TriAttn: where else FP8 can go".
+
+## Training backward, query side: row-split kernel (3.0.1 candidate, branch `bf16/triattn-bwd`, 2026-11-18)
+
+The query-side kernel `triattn_bwd_q` is bound by the fp32 dbias TMA reduce-adds (removal ablation, 4 heads, L768: 2.43 ms -> 1.43 ms; every
+second flush removed 1.59 ms, three of four 1.49 ms; L512 0.716 -> 0.465 ms; L384 0.314 -> 0.234 ms; L128-256 not bound).  `TB_Q8` (default 1,
+used from S = 512; 0 = the old kernel, 2 = always) restructures it: a task is a 64-query tile x 8 pair rows, warpgroup 1 / 2 own rows 0-3 / 4-7
+of all 64 queries; per key step warpgroup 2 stages its 64 x 64 fp32 dbias partial in shared memory, warpgroup 1 adds its own in place and the
+storer issues ONE reduce-add pair: S / 8 partials per element instead of S / 4.  ncu (4 heads, L768, default slab count): L2 reduce sectors
+84.9 M -> 42.5 M (halved), DRAM 5.07 -> 2.94 GB, kernel time 2.39 -> 2.42 ms: the gain comes with the slab count.  Slabs: the count (<= 8)
+whose tiles x slabs tasks fill whole SM waves best (48 tiles: 5 slabs = 1.82 waves, against 4 (1.45) and 6 (2.18)): kernel L768 2.43 -> 2.01 ms
+(-17 %), 8 heads 5.06 -> 4.03, 12 heads 7.70 -> 6.1, L512 0.72 -> 0.61 (4 slabs); at L384 and below it is not faster, so S < 512 keeps the old
+kernel.  Determinism: fixed order (warpgroup 2's tile, then warpgroup 1's added; slabs summed in order); dq bitwise unchanged, dbias differs in
+fp32 summation order (rms 1e-7 relative).
+Module training step (fwd + bwd, CUDA graph, interleaved with a same-cubin control, 3.0.0 kernel = `TB_Q8=0`), sustained, ms:
+128:4:768 6.116 -> 5.768 (0.943), 128:4:512 2.139 -> 2.030 (0.949), 256:8:768 13.72 -> 12.78 (0.931), 384:12:768 21.38 -> 20.07 (0.939),
+64:4:768 6.391 -> 5.970 (0.934), 64:2:768 3.489 -> 3.341 (0.958); control ratios 0.999-1.022.  All nine gradients vs the old kernel: rms <= 4e-5
+relative, both runs bitwise equal.  Test: `tests/gpu/test_triattn_h100_bwd_q_rowsplit.py`.  Not repeated from the lists above: more slabs, ping-pong.
