@@ -332,6 +332,30 @@ def _fwd_launch(
     return tuple(ext.fwd(x, gamma, beta, _pack(wa, wb, 64), ws, float(eps), bool(save)))
 
 
+def _fwd_into_fake(x, gamma, beta, wa, wb, ws, eps, out):
+    """Writes ``out`` only."""
+    return None
+
+
+@opaque(fake=_fwd_into_fake, name="transition_wide_fwd_into_sm90a", mutates_args=("out",))
+def _fwd_into_launch(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    eps: float,
+    out: torch.Tensor,
+) -> None:
+    """``_fwd_launch``'s inference forward (``save`` off) at D 384 / 512 written into ``out`` (a contiguous row block of a larger output): the
+    same two kernels, the squeeze's destination is ``out`` (no output copy)."""
+    if _is_fake(x, wa):
+        return
+    n = wa.shape[0] // x.shape[-1]
+    _ext_for(x, n=n).fwd_into(x, gamma, beta, _pack(wa, wb, 64), ws, float(eps), out)
+
+
 def _saved_fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps):
     """Output structure only: the forward's five outputs, then the saved activations a and b, each [M, wa.shape[0]]."""
     return (
@@ -582,7 +606,11 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
         # another, each written into its rows of one output: every row is the same tile computation (bitwise the one-launch output).
         out = torch.empty_like(flat)
         for start in range(0, flat.shape[0], rows):
-            part = _fwd_launch(flat[start : start + rows], *args)[0]
+            block = flat[start : start + rows]
+            if shape[-1] in (384, 512):  # the squeeze writes into its rows of ``out`` (no copy of the block)
+                _fwd_into_launch(block, *args[:6], out[start : start + rows])
+                continue
+            part = _fwd_launch(block, *args)[0]
             out[start : start + rows] = part
             del part
         return out.reshape(shape)
