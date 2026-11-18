@@ -183,8 +183,9 @@ __global__ void __launch_bounds__(NT) gate_o_k(const float* __restrict__ O, cons
   }
 }
 
-template <typename AT>
-__global__ void __launch_bounds__(NT) res_adaln_b_k(const float* __restrict__ X, const AT* __restrict__ Y,
+// XI: the type x is read in: float (the saved fp32 copy of the block input) or the block input itself (bf16: x = float(input) exactly)
+template <typename AT, typename XI = float>
+__global__ void __launch_bounds__(NT) res_adaln_b_k(const XI* __restrict__ X, const AT* __restrict__ Y,
     const AT* __restrict__ GG, long sgg, const float* __restrict__ BG1, const AT* __restrict__ G, long sg,
     const float* __restrict__ BS2, float* __restrict__ X1, AT* __restrict__ XT, float2* __restrict__ X1ST, int M, int rpb, float eps,
     int opt = 0) {
@@ -192,7 +193,7 @@ __global__ void __launch_bounds__(NT) res_adaln_b_k(const float* __restrict__ X,
   const int col = threadIdx.x * 4;
   const float4 bg = V4<float>::load(BG1 + col), bs = V4<float>::load(BS2 + col);
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
-    const float4 x1 = add4(V4<float>::load(X + r * D + col),
+    const float4 x1 = add4(V4<XI>::load(X + r * D + col),
                            mul4(sig4(add4(V4<AT>::load(GG + r * sgg + col), bg)), V4<AT>::load(Y + r * D + col)));
     V4<float>::store(X1 + r * D + col, x1);
     if (opt & OPT_PAR) continue;   // the parallel block: x1 = x + g1 y only (the transition's AdaLN read x, in adaln_a)
@@ -404,8 +405,8 @@ __global__ void __launch_bounds__(NT) qknorm_bwd_k(const float* DQ, const float*
 
 // OPT_PAR: the transition's AdaLN of the same LN(x) as well -- DXT (any row stride; dxt_in_dg: dG's column block 3D already), BS2,
 // its scale gradient into dG's column block 2D and PS2
-template <typename OT, typename AT>
-__global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* DXA, long sxa, int dxa_in_dg, const float* __restrict__ X,
+template <typename OT, typename AT, typename XI = float>   // XI: as in res_adaln_b_k
+__global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* DXA, long sxa, int dxa_in_dg, const XI* __restrict__ X,
     const float2* __restrict__ XST, const AT* __restrict__ G, long sg, const float* __restrict__ BS1, const float* __restrict__ DX1,
     OT* __restrict__ DX, AT* DG, long sdg, float* __restrict__ PS1, long sp, int M, int rpb, int opt = 0,
     const AT* DXT = nullptr, long sxt = 0, int dxt_in_dg = 0, const float* __restrict__ BS2 = nullptr, float* __restrict__ PS2 = nullptr) {
@@ -415,7 +416,7 @@ __global__ void __launch_bounds__(NT) adaln_a_bwd_k(const AT* DXA, long sxa, int
   const float4 bs2 = (opt & OPT_PAR) ? V4<float>::load(BS2 + col) : zero4();
   float4 acc = make_float4(0.f, 0.f, 0.f, 0.f), acc2 = acc;
   for (long r = (long)blockIdx.x * rpb, re = min((long)M, r + rpb); r < re; ++r) {
-    const float4 dxa = V4<AT>::load(DXA + r * sxa + col), x = V4<float>::load(X + r * D + col);
+    const float4 dxa = V4<AT>::load(DXA + r * sxa + col), x = V4<XI>::load(X + r * D + col);
     const float2 st = XST[r];
     const float4 xh = make_float4((x.x - st.x) * st.y, (x.y - st.x) * st.y, (x.z - st.x) * st.y, (x.w - st.x) * st.y);
     const float4 s = ascale(add4(V4<AT>::load(G + r * sg + col), bs), opt);
@@ -771,7 +772,7 @@ void adaln_a(at::Tensor x, at::Tensor G, at::Tensor bs, at::Tensor xa, at::Tenso
              int64_t opt, c10::optional<at::Tensor> xt2, c10::optional<at::Tensor> bs2) {
   const int64_t M = x.size(0);
   TORCH_CHECK(x.is_contiguous() && x.size(1) == D, "adaln_a: contiguous x [M, 768]");
-  if (xo) f32c(*xo, "xo"); else f32c(x, "x");
+  if (xo) f32c(*xo, "xo");   // no xo: the caller keeps no fp32 copy (x is read in its own dtype by the later kernels too)
   actc(xa, G, "xa"); f32c(bs, "bs");
   if (opt & OPT_PAR) { TORCH_CHECK(xt2 && bs2, "adaln_a: the parallel block takes xt2 and bs2"); actc(*xt2, G, "xt2"); f32c(*bs2, "bs2"); }
   const at::cuda::CUDAGuard g(x.device());
@@ -822,13 +823,17 @@ void gate_o(at::Tensor o, at::Tensor qkvg, at::Tensor og) {
 void res_adaln_b(at::Tensor x, at::Tensor y, at::Tensor Gg, at::Tensor bg1, at::Tensor G, at::Tensor bs2, at::Tensor x1,
                  at::Tensor xt, at::Tensor x1st, double eps, int64_t opt) {
   const int64_t M = x.size(0);
-  f32c(x, "x"); actc(Gg, y, "Gg"); actc(G, y, "G"); actc(xt, y, "xt");
+  // x: the saved fp32 residual, or the block input itself (a bf16 / fp32 [M, D]: the kernel widens it, which is what the fp32 copy was)
+  TORCH_CHECK(x.is_contiguous() && x.size(1) == D, "res_adaln_b: contiguous x [M, 768]");
+  actc(Gg, y, "Gg"); actc(G, y, "G"); actc(xt, y, "xt");
   const at::cuda::CUDAGuard g(x.device());
   TDT_DISPATCH(y.scalar_type(), AT, [&] {
-    const RowGrid rg = row_grid<AT>(res_adaln_b_k<AT>, NT, M);
-    res_adaln_b_k<AT><<<rg.grid, NT, 0, S()>>>(CP<float>(x), CP<AT>(y), CP<AT>(Gg), Gg.stride(0), CP<float>(bg1), CP<AT>(G), G.stride(0),
-                                               CP<float>(bs2), P<float>(x1), P<AT>(xt), P<float2>(x1st), (int)M, rg.rpb, (float)eps,
-                                               (int)opt);
+    TDT_DISPATCH(x.scalar_type(), XI, [&] {
+      const RowGrid rg = row_grid<AT>(res_adaln_b_k<AT, XI>, NT, M);
+      res_adaln_b_k<AT, XI><<<rg.grid, NT, 0, S()>>>(CP<XI>(x), CP<AT>(y), CP<AT>(Gg), Gg.stride(0), CP<float>(bg1), CP<AT>(G), G.stride(0),
+                                                     CP<float>(bs2), P<float>(x1), P<AT>(xt), P<float2>(x1st), (int)M, rg.rpb, (float)eps,
+                                                     (int)opt);
+    });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -1017,12 +1022,14 @@ void adaln_a_bwd(at::Tensor dxa, at::Tensor x, at::Tensor xst, at::Tensor G, at:
   const at::cuda::CUDAGuard g(x.device());
   TDT_DISPATCH(dxa.scalar_type(), AT, [&] {
     TDT_DISPATCH(dx.scalar_type(), OT, [&] {
-      const RowGrid rg = row_grid<AT>(adaln_a_bwd_k<OT, AT>, NT, M, ps1.size(0));
-      adaln_a_bwd_k<OT, AT><<<rg.grid, NT, 0, S()>>>(CP<AT>(dxa), dxa.stride(0), in_dg, CP<float>(x), CP<float2>(xst), CP<AT>(G), G.stride(0),
-                                                     CP<float>(bs1), CP<float>(dx1), P<OT>(dx), P<AT>(dG), dG.stride(0), P<float>(ps1),
-                                                     ps1.stride(0), (int)M, rg.rpb, (int)opt, par ? CP<AT>(*dxt) : nullptr,
-                                                     par ? dxt->stride(0) : 0, xt_in_dg, par ? CP<float>(*bs2) : nullptr,
-                                                     par ? P<float>(*ps2) : nullptr);
+      TDT_DISPATCH(x.scalar_type(), XI, [&] {
+        const RowGrid rg = row_grid<AT>(adaln_a_bwd_k<OT, AT, XI>, NT, M, ps1.size(0));
+        adaln_a_bwd_k<OT, AT, XI><<<rg.grid, NT, 0, S()>>>(CP<AT>(dxa), dxa.stride(0), in_dg, CP<XI>(x), CP<float2>(xst), CP<AT>(G), G.stride(0),
+                                                           CP<float>(bs1), CP<float>(dx1), P<OT>(dx), P<AT>(dG), dG.stride(0), P<float>(ps1),
+                                                           ps1.stride(0), (int)M, rg.rpb, (int)opt, par ? CP<AT>(*dxt) : nullptr,
+                                                           par ? dxt->stride(0) : 0, xt_in_dg, par ? CP<float>(*bs2) : nullptr,
+                                                           par ? P<float>(*ps2) : nullptr);
+      });
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();

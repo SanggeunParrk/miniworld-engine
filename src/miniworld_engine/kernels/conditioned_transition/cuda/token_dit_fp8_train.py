@@ -33,8 +33,12 @@ E4M3 = torch.float8_e4m3fn
 E5M2 = torch.float8_e5m2
 FWD = ("expand", "squeeze", "qkvg", "out")
 DGRAD = ("dexpand", "dsqueeze", "dqkvg", "dout")
-_ALL = FWD + DGRAD
+#: round 2: byte reductions that need no 8-bit GEMM (bit-identical outputs and gradients): nox = the block input is the residual, the
+#: saved fp32 copy of it is dropped (docs/fp8_training.md "Token DiT round 2")
+BYTES = ("nox",)
+_ALL = FWD + DGRAD + BYTES
 PRESETS = {
+    "bytes": frozenset(BYTES),
     "transition": frozenset(("expand", "squeeze", "dexpand", "dsqueeze")),
     "attention": frozenset(("qkvg", "out", "dqkvg", "dout")),
     "all": frozenset(_ALL),
@@ -97,8 +101,10 @@ def ext():
 def active(M: int, D: int, fp32: bool, plain: bool, h100: bool) -> frozenset[str]:
     """The placements this block call takes: bf16 default-option blocks on H100 at width 768 (M = A L is a multiple of 128 after the
     block's padding)."""
-    if not PLACES or fp32 or not plain or not h100 or D != 768 or M % 16 or M < MIN_ROWS:
+    if not PLACES or fp32 or not plain or not h100 or D != 768:
         return frozenset()
+    if M % 16 or M < MIN_ROWS:  # the byte reductions (no GEMM) apply at every size
+        return PLACES & frozenset(BYTES)
     return PLACES
 
 
