@@ -1290,7 +1290,7 @@ std::vector<at::Tensor> train_tf32_bwd_layout90(at::Tensor bp,at::Tensor lse,at:
  train_tf32_bwd_layout90_k<<<(std::max(bp.numel(),lse.numel())+255)/256,256,0,S()>>>(CP<float>(bp),CP<float>(lse),CP<float>(dd),P<float>(bt),P<float>(lp),P<float>(dp),A,L);
  C10_CUDA_KERNEL_LAUNCH_CHECK();return {bt,lp,dp};
 }
-template<typename AT> __global__ void train_db_reduce90_k(const float* in,AT* out,int A,int L) {
+template<typename AT> __global__ void train_db_reduce90_k(const float* in,AT* out,int A,int L,float scale) {
  __shared__ float tile[32][33];
  const int x=threadIdx.x%32,y=threadIdx.x/32;
  const int q0=blockIdx.x*32,k0=blockIdx.y*32,h=blockIdx.z;
@@ -1300,7 +1300,7 @@ template<typename AT> __global__ void train_db_reduce90_k(const float* in,AT* ou
   tile[j][x]=v;
  }
  __syncthreads();
- for(int j=y;j<32;j+=8)out[((long)h*L+q0+j)*L+k0+x]=(AT)tile[x][j];
+ for(int j=y;j<32;j+=8)out[((long)h*L+q0+j)*L+k0+x]=(AT)(tile[x][j]*scale);
 }
 __global__ void train_db_tf32_reduce90_k(const float* in,float* out,int A,int L) {
  long i=(long)blockIdx.x*256+threadIdx.x,n=(long)NHH*L*L;
@@ -1309,12 +1309,15 @@ __global__ void train_db_tf32_reduce90_k(const float* in,float* out,int A,int L)
  for(int a=0;a<A;++a)v+=in[a*n+j];
  out[i]=v;
 }
-at::Tensor train_db_reduce90(at::Tensor db,bool fp32) {
+// bf16 path: dbias [NHH, L, L] (query-major) summed over the samples in fixed order, times `scale`, rounded to bf16 -- or kept fp32 (`f32out`,
+// what the AttentionPairBias pair-bias backward reads: no rounding of the gradient, no conversion pass); the TF32 path ignores both
+at::Tensor train_db_reduce90(at::Tensor db,bool fp32,double scale,bool f32out) {
  const at::cuda::CUDAGuard guard(db.device());int A=db.size(0),L=db.size(2);
  TORCH_CHECK(db.dim()==4&&db.is_contiguous()&&db.scalar_type()==at::kFloat&&db.size(1)==NHH&&db.size(3)==L&&L%32==0,"native dBias partial layout");
- auto out=at::empty({NHH,L,L},db.options().dtype(fp32?at::kFloat:at::kBFloat16));
+ auto out=at::empty({NHH,L,L},db.options().dtype(fp32||f32out?at::kFloat:at::kBFloat16));
  if(fp32)train_db_tf32_reduce90_k<<<(out.numel()+255)/256,256,0,S()>>>(CP<float>(db),P<float>(out),A,L);
- else train_db_reduce90_k<bf><<<dim3(L/32,L/32,NHH),256,0,S()>>>(CP<float>(db),P<bf>(out),A,L);
+ else if(f32out)train_db_reduce90_k<float><<<dim3(L/32,L/32,NHH),256,0,S()>>>(CP<float>(db),P<float>(out),A,L,(float)scale);
+ else train_db_reduce90_k<bf><<<dim3(L/32,L/32,NHH),256,0,S()>>>(CP<float>(db),P<bf>(out),A,L,(float)scale);
  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
 void cond_prep90(at::Tensor c,at::Tensor chat,at::Tensor cbf,at::Tensor cst,double eps) {
