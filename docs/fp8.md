@@ -2910,4 +2910,17 @@ flip, not a q / k effect (PV only flips on the same targets). Raw rows: `~/miniw
 tables `p1.an3.txt`, `p1x.an3.txt`, `*.qkdiff.txt`), harness `e2e2.py` / `an3.py` of branch `fp8c/triattn` (copy in the same directory). Harness note: in
 `e2e2.py` `HS.disable_fp8_pv()` does not reset `FP8_QK`; the copy resets it at every case (a `f8` case that follows a `f8qk` case in the same process
 otherwise runs q / k as well; the first run of this section had that and was repeated).
-Whole-model speed: see the 5I28 FP8 rows below when present.
+5I28 (FoldForge a9e1549, engine 3.0.1, H100 node02, compile + CUDA graph, warm forward median of 6, n = 1 .. 16 chains of 5I28 with the real MSA + templates;
+`run_1118_301_steady` = bf16, `run_1118_301_fp8` = 3.0.1 `safe` + `protenix1` (PV only), `run_1118_301_fp8_px1qk` = the same with this branch's q / k;
+`~/miniworld-engine-scratch/bench5i28_ff/`), Protenix v1, seconds and FP8 / bf16:
+
+| n | bf16 | FP8 before (PV) | FP8 after (PV + q / k) | before / bf16 | after / bf16 | after / before |
+|---|---|---|---|---|---|---|
+| 1 | 0.348 | 0.341 | 0.340 | 0.978 | 0.975 | 0.997 |
+| 2 | 0.553 | 0.530 | 0.526 | 0.960 | 0.953 | 0.993 |
+| 4 | 1.202 | 1.116 | 1.100 | 0.929 | 0.916 | 0.986 |
+| 8 | 3.649 | 3.217 | 3.124 | 0.882 | 0.856 | 0.971 |
+| 12 | 8.631 | 7.317 | 7.108 | 0.848 | 0.823 | 0.971 |
+| 16 | 16.291 | 13.516 | 13.020 | 0.830 | 0.799 | 0.963 |
+
+OpenDDE: no TriAttn placement added, its route (and therefore its 5I28 FP8 row, FP8 / bf16 0.974 .. 0.848 at n = 1 .. 16) is unchanged, not re-run.
