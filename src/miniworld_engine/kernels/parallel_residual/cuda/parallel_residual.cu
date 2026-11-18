@@ -1,7 +1,7 @@
 // The fused residual add of parallel branches (modules/residual.py, FoldForge R12), hand-written CUDA: ONE source built for H100
 // (sm_90a, `parallel_residual_sm90`) and A100 (sm_80, `parallel_residual_sm80`) by kernels/parallel_residual/cuda/__init__.py.
 //
-//   forward   out = x + sum_i (y_i - x)      1 to 4 branches; the differences and the sum in fp32, ONE rounding to the dtype at the end
+//   forward   out = x + sum_i (y_i - x)      1 to 5 branches; the differences and the sum in fp32, ONE rounding to the dtype at the end
 //   backward  gx  = (1 - n) g                (d out / d y_i = g needs no kernel); fp32 product, one rounding
 //
 // The same arithmetic in the same order as the Triton kernel (kernels/parallel_residual/triton/main.py) and the pytorch reference: acc =
@@ -26,7 +26,7 @@ constexpr int kUnroll = 4;  // 16-byte vectors per thread of the backward (one t
 // 16-byte vectors per thread and tensor of the forward: the loads of (1 + NB) tensors in flight fill the registers (measured H100: 4
 // vectors a tensor at NB = 3 ran 25 % under the bandwidth; one vector a tensor, as the Triton kernel, keeps the occupancy)
 __host__ __device__ constexpr int fwd_unroll(int nb) { return nb == 1 ? 2 : 1; }
-constexpr int kMaxBranches = 4;
+constexpr int kMaxBranches = 5;  // 5: Chai-1's parallel PairformerBlock (two triangle multiplications, two triangle attentions, the transition)
 
 struct Branches {
   const void* p[kMaxBranches];
@@ -161,7 +161,8 @@ void dispatch_nb(const at::Tensor& x, const Branches& ys, int nb, bool vec, at::
     case 1: launch_fwd<T, 1>(x, ys, vec, out); break;
     case 2: launch_fwd<T, 2>(x, ys, vec, out); break;
     case 3: launch_fwd<T, 3>(x, ys, vec, out); break;
-    default: launch_fwd<T, 4>(x, ys, vec, out); break;
+    case 4: launch_fwd<T, 4>(x, ys, vec, out); break;
+    default: launch_fwd<T, 5>(x, ys, vec, out); break;
   }
 }
 
@@ -172,10 +173,10 @@ void check_dtype(const at::Tensor& t) {
 
 }  // namespace
 
-// out = x + sum_i (y_i - x) over 1 .. 4 contiguous CUDA tensors of x's shape, dtype and device
+// out = x + sum_i (y_i - x) over 1 .. 5 contiguous CUDA tensors of x's shape, dtype and device
 at::Tensor forward(at::Tensor x, std::vector<at::Tensor> ys) {
   const int nb = (int)ys.size();
-  TORCH_CHECK(nb >= 1 && nb <= kMaxBranches, "parallel_residual: 1 to 4 branches");
+  TORCH_CHECK(nb >= 1 && nb <= kMaxBranches, "parallel_residual: 1 to 5 branches");
   TORCH_CHECK(x.is_cuda() && x.is_contiguous(), "parallel_residual: a contiguous CUDA x");
   check_dtype(x);
   Branches b{};
@@ -226,6 +227,6 @@ at::Tensor backward(at::Tensor g, int64_t nb) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("forward", &forward, "out = x + sum_i (y_i - x), 1 to 4 branches, fp32 accumulation, one rounding", py::arg("x"), py::arg("ys"));
+  m.def("forward", &forward, "out = x + sum_i (y_i - x), 1 to 5 branches, fp32 accumulation, one rounding", py::arg("x"), py::arg("ys"));
   m.def("backward", &backward, "gx = (1 - n) g", py::arg("g"), py::arg("n"));
 }

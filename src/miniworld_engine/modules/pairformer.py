@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 
 from miniworld_engine.modules.primitives import BackendModule, Dropout, MasterWeights, pair_inputs, random_input
+from miniworld_engine.modules.residual import fused_parallel_residual
 from miniworld_engine.modules.transition import Transition
 from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleAttention, TriangleMultiplication
 
@@ -225,16 +226,14 @@ class PairformerBlock(BackendModule, MasterWeights):
         if extra_pair_bias is not None and not self.config.d_single:
             raise ValueError("extra_pair_bias biases the single attention: the block needs the single track (config.d_single)")
         pair_in = pair
-        pair = pair_in + self._pair_updates(pair_in, mask) if self.config.parallel else self._sequential_pair(pair, mask)
+        pair = self._parallel_pair(pair_in, mask) if self.config.parallel else self._sequential_pair(pair, mask)
         if not self.config.d_single:
             return pair
         # A parallel block's single reads the pair ENTERING it; a sequential one the pair its own track just produced.
         logits_pair = pair_in if self.config.parallel else pair
         if self.config.parallel:
-            single = (
-                single
-                + (self.single_attention(single, logits_pair, mask, extra_pair_bias) - single)
-                + (self.single_transition(single) - single)
+            single = self._parallel_sum(
+                single, [self.single_attention(single, logits_pair, mask, extra_pair_bias), self.single_transition(single)]
             )
         else:
             single = self.single_transition(self.single_attention(single, logits_pair, mask, extra_pair_bias))
@@ -311,19 +310,47 @@ class PairformerBlock(BackendModule, MasterWeights):
             pair = self.tri_atten_ending(pair, mask)
         return self.transition_pair(pair)
 
-    def _pair_updates(self, pair_in: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
-        """The sum of every update's DELTA on ``pair_in`` (the ``parallel`` schedule). The modules own their residual, so a delta is
-        ``module(x) - x`` (exact in fp32; in bf16 it carries one extra rounding of ``x + delta``)."""
+    def _parallel_pair(self, pair_in: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+        """``pair_in`` plus the sum of every update's DELTA (the ``parallel`` schedule). The modules own their residual, so a delta is
+        ``module(x) - x`` (exact in fp32; in bf16 it carries one extra rounding of ``x + delta``).
+
+        ``"cuda"``: every update runs on ``pair_in``, then ONE fused pass computes ``pair_in + sum_i (y_i - pair_in)`` (fp32 sum, one
+        rounding: :func:`~miniworld_engine.modules.residual.fused_parallel_residual`; the five outputs are live together). Other backends
+        (and a call outside the kernel's range) run the statements one update at a time."""
         modules: list[Any] = [self.tri_multi] if self.tri_multi is not None else [self.tri_multi_outgoing, self.tri_multi_incoming]
         if self.tri_atten_starting is not None:
             modules += [self.tri_atten_starting, self.tri_atten_ending]
         modules.append(self.transition_pair)
+
+        def update(module: Any) -> torch.Tensor:
+            return module(pair_in, mask) if module is not self.transition_pair else module(pair_in)
+
+        if self.backend == "cuda":
+            return self._parallel_sum(pair_in, [update(module) for module in modules], deltas_first=True)
         total = None
         for module in modules:
-            delta = (module(pair_in, mask) if module is not self.transition_pair else module(pair_in)) - pair_in
+            delta = update(module) - pair_in
             total = delta if total is None else total + delta
         assert total is not None  # modules always holds transition_pair
-        return total
+        return pair_in + total
+
+    def _parallel_sum(self, x: torch.Tensor, outputs: list[torch.Tensor], *, deltas_first: bool = False) -> torch.Tensor:
+        """``x + sum_i (y_i - x)`` over the updates' outputs ``y_i``: the fused kernel on ``"cuda"`` (when the call is in its range), else
+        the reference statements. (``deltas_first``, the pair track's reference statement: ``x + sum_i (y_i - x)`` with the deltas summed
+        first; the single track's is ``x + (y_0 - x) + (y_1 - x)``, left to right: the fallback keeps each as it was.)"""
+        if self.backend == "cuda":
+            fused = fused_parallel_residual(x, outputs)
+            if fused is not None:
+                return fused
+        if deltas_first:
+            total = outputs[0] - x
+            for y in outputs[1:]:
+                total = total + (y - x)
+            return x + total
+        out = x
+        for y in outputs:  # the single track [B, L, d]
+            out = out + (y - x)
+        return out
 
 
 class Pairformer(BackendModule, MasterWeights):
