@@ -245,16 +245,23 @@ def _h100(cells):
     # folded channel scale (K3_CSCALE; the any-L row form, at D256 / D384 also the token-flat form: L % 128 == 0), bidirectional one K3 over the
     # 2 d channels (per-channel scale form). The cuBLASLt e4m3 contraction is a library call (nothing to build).
     fp8_k1 = h100_b200style_direct
-    fp8 = [(c, m) for c, m in infer if c.d in h100_b200style_fp8.WIDTHS and c.ch == (2 if c.bidir else 1) * c.d]
+    fp8 = [
+        (c, m)
+        for c, m in infer
+        if c.d in h100_b200style_fp8.WIDTHS and c.ch == (2 if c.bidir else 1) * c.d and not (c.d == 512 and c.bidir)
+    ]
     for d in sorted({c.d for c, _ in fp8}):
         lengths = sorted({n for c, m in fp8 if c.d == d for n in m.lengths})
         direct = list(dict.fromkeys(BS._config(d, n=n, direct=True) for n in lengths))
-        for cfg in [fp8_k1.F8_CFG[d]] if d in fp8_k1.F8_CFG else direct:
-            yield _call(fp8_k1._kernel, d, d, cfg, f8=True)
+        if d == 512:  # the packed shared-resident front with the e4m3 plane store (k1ssregtune.cu F8PLANES)
+            yield _call(h100_b200style_ss_regtune._kernel, d, d, False, h100_b200style_ss_regtune._config(d, False), True)
+        else:
+            for cfg in [fp8_k1.F8_CFG[d]] if d in fp8_k1.F8_CFG else direct:
+                yield _call(fp8_k1._kernel, d, d, cfg, f8=True)
         for cfg in direct:
             yield _call(fp8_k1._kernel, d, d, cfg)
         for bidir in sorted({c.bidir for c, _ in fp8 if c.d == d}):
-            for flat in (False, True) if d in (256, 384) else (False,):
+            for flat in (False, True) if d in (256, 384) else (True,) if d == 512 else (False,):
                 yield _call(
                     h100_b200style_static.output_kernel,
                     d,

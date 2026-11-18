@@ -16,6 +16,12 @@ constexpr int AB = MT * 128, A_BYTES = KB * AB, SLOT = BN * 128, W_BYTES = NS * 
 #ifndef PRIVATESTORE
 #define PRIVATESTORE 0
 #endif
+// F8PLANES (inference only): the gated planes leave as e4m3 bytes. The packed weights are pre-scaled per plane channel by 1 / scale (a power of two,
+// host side), so the gate epilogue value is already the scaled plane value; it is cast saturating to e4m3 and stored by TMA as uint8 planes
+// (64B swizzle, [32 ch][64 tok] staging, the n64-block byte exchange of tmn_kernels.cuh TMN_K1_F8: two 32-channel halves per 128-column block).
+#ifndef F8PLANES
+#define F8PLANES 0
+#endif
 #ifndef WAITN
 #define WAITN 1
 #endif
@@ -27,7 +33,13 @@ static_assert(SMEM <= 232448 && MT % 64 == 0, "front shared memory");
 struct Params {
   CUtensorMap x, w, ab, da, dc, xn;
   const bf* mask; const float *gamma, *beta, *xs; float* stats;
+#if F8PLANES
+  float* amax;      // uint32-ordered fp32 max of |scaled plane value| (> 448: the e4m3 cast saturated); nullptr = off
+#endif
   int M, L, tiles, emit_xn;
+#if F8PLANES
+  int transposed;   // 1: token (r, c) reads pair[c][r] (the incoming direction: K-major planes) and stores its LN statistics at the swapped token
+#endif
 };
 TMN_DEVI uint32_t read_word(uint32_t addr) {
   uint32_t v; asm volatile("ld.shared.b32 %0,[%1];" : "=r"(v) : "r"(addr)); return v;
@@ -65,6 +77,12 @@ void KERNEL_NAME(__grid_constant__ const Params p) {
         if (i) mbar_wait(ae, (i - 1) & 1);
         const int tok = (blockIdx.x + i * gridDim.x) * MT;
         mbar_arrive_expect_tx(af, A_BYTES);
+#if F8PLANES
+        if (p.transposed) {   // the tile's 128 tokens (r, c0 .. c0 + 127) read pair[c][r]: one 3-D box [64 ch][128 c][1 r] (L % 128 == 0: one row per tile)
+          const int tr = tok / p.L, tc = tok - tr * p.L;
+          for (int k = 0; k < KB; ++k) tma_load_3d(sa + k * AB, &p.x, af, k * 64, tc, tr);
+        } else
+#endif
         for (int k = 0; k < KB; ++k) tma_load_2d(sa + k * AB, &p.x, af, k * 64, tok);
       }
     } else if (warp == 1 && lane == 0) {
@@ -90,6 +108,9 @@ void KERNEL_NAME(__grid_constant__ const Params p) {
     if (lane == 0) mbar_arrive(we + it % NS);
   };
   int it = 0;
+#if F8PLANES
+  float f8max = 0.f;
+#endif
   for (int ti = 0; ti < ni; ++ti) {
     const int tok0 = (blockIdx.x + ti * gridDim.x) * MT;
     mbar_wait(af, ti & 1);
@@ -137,7 +158,15 @@ void KERNEL_NAME(__grid_constant__ const Params p) {
           }
         }
         rs = rsqrtf(quad_sum(vv) * (1.f / D) + 1e-5f);
+#if F8PLANES
+        if (p.stats && (lane&3)==0) {
+          int si = tok0 + r;
+          if (p.transposed) { const int tr = tok0 / p.L; si = (tok0 - tr * p.L + r) * p.L + tr; }   // the statistics sit at the pair token K3 reads
+          p.stats[2 * si] = mu; p.stats[2 * si + 1] = rs;
+        }
+#else
         if (p.stats && (lane&3)==0) { p.stats[2 * (tok0+r)] = mu; p.stats[2 * (tok0+r)+1] = rs; }
+#endif
       }
       if constexpr(!BACKWARD) {
 #pragma unroll
@@ -241,6 +270,55 @@ void KERNEL_NAME(__grid_constant__ const Params p) {
         }
         }
       } else {
+#if F8PLANES
+        static_assert(BN == 128 && NP == 64, "the e4m3 plane store is written for 128-column blocks (two 32-channel halves)");
+        // accumulator groups q (8 columns): 0..3 gate / 4..7 projection of half 0 (plane channels 0..31 of the block), 8..11 / 12..15 of half 1
+        const bool odd = (lane & 4) != 0;
+        const int cq = lane & 3;
+        const int tpl = 16 * wiw + 2 * (lane >> 3);
+        uint32_t px[2][4];
+#pragma unroll
+        for (int half = 0; half < 2; ++half) {
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const int g = q + 8 * half, pp = g + 4;
+            const float vA0 = math::gate(ac[4*g],ac[4*pp],ma), vA1 = math::gate(ac[4*g+1],ac[4*pp+1],ma);
+            const float vB0 = math::gate(ac[4*g+2],ac[4*pp+2],mb), vB1 = math::gate(ac[4*g+3],ac[4*pp+3],mb);
+            f8max = fmaxf(f8max, fmaxf(fmaxf(fabsf(vA0), fabsf(vA1)), fmaxf(fabsf(vB0), fabsf(vB1))));
+            unsigned short uA, uB;
+            asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(uA) : "f"(vA1), "f"(vA0));
+            asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(uB) : "f"(vB1), "f"(vB0));
+            px[half][q] = (uint32_t)uA | ((uint32_t)uB << 16);
+          }
+        }
+        if (elect) tma_store_wait_read<0>();
+        named_bar_sync(2+cw,128);
+        const uint32_t selsend = odd ? 0x6420u : 0x7531u, selkeep = odd ? 0x7531u : 0x6420u;
+        const uint32_t selfin0 = odd ? 0x1504u : 0x5140u, selfin1 = odd ? 0x3726u : 0x7362u;
+#pragma unroll
+        for (int half = 0; half < 2; ++half) {
+          const uint32_t sbuf = stage_u + half * 2048;   // [32 ch][64 tok] bytes, 64B-swizzled rows
+#pragma unroll
+          for (int k = 0; k < 2; ++k) {   // the byte exchange: the lane pair (lane, lane ^ 4) swaps so each holds 4 consecutive tokens of two channels
+            const uint32_t snd = __byte_perm(px[half][2*k], px[half][2*k+1], selsend);
+            const uint32_t own = __byte_perm(px[half][2*k], px[half][2*k+1], selkeep);
+            const uint32_t rcv = __shfl_xor_sync(0xffffffffu, snd, 4);
+            const uint32_t f0 = __byte_perm(own, rcv, selfin0), f1 = __byte_perm(own, rcv, selfin1);
+            const int c0 = 8 * (2 * k) + 2 * cq + (odd ? 1 : 0), c1 = c0 + 8;
+            const uint32_t r0 = sbuf + (uint32_t)(c0 * 64 + ((wiw ^ ((c0 >> 1) & 3)) << 4) + (tpl & 15));
+            const uint32_t r1 = sbuf + (uint32_t)(c1 * 64 + ((wiw ^ ((c1 >> 1) & 3)) << 4) + (tpl & 15));
+            asm volatile("st.shared.b16 [%0], %1;" :: "r"(r0), "h"((unsigned short)(f0 & 0xffffu)) : "memory");
+            asm volatile("st.shared.b16 [%0], %1;" :: "r"(r0 + 8), "h"((unsigned short)(f0 >> 16)) : "memory");
+            asm volatile("st.shared.b16 [%0], %1;" :: "r"(r1), "h"((unsigned short)(f1 & 0xffffu)) : "memory");
+            asm volatile("st.shared.b16 [%0], %1;" :: "r"(r1 + 8), "h"((unsigned short)(f1 >> 16)) : "memory");
+          }
+        }
+        fence_proxy_async(); named_bar_sync(2+cw,128);
+        if(elect) {
+          for(int half=0;half<2;++half) store2(&p.ab,stage+half*2048,tok0+cw*64,block*NP+half*32);
+          tma_store_commit();
+        }
+#else
         uint32_t pk[NP/8][2];
 #pragma unroll
         for (int q=0;q<NP/8;++q) {
@@ -261,11 +339,15 @@ void KERNEL_NAME(__grid_constant__ const Params p) {
           for(int half=0;half<NP/32;++half) store2(&p.ab,stage+half*4096,tok0+cw*64,block*NP+half*32);
           tma_store_commit();
         }
+#endif
       }
     }
     // All SS operand reads of this tile have retired before the next TMA fill.
     if(BACKWARD && p.emit_xn && tid==128) tma_store_wait_read<0>();
     fence_proxy_async(); __syncwarp(); if(lane==0) mbar_arrive(ae);
   }
+#if F8PLANES
+  { const uint32_t mx = __reduce_max_sync(0xffffffffu, __float_as_uint(f8max)); if (lane == 0 && p.amax != nullptr) atomicMax(reinterpret_cast<unsigned int*>(p.amax), mx); }
+#endif
   if(stelect) tma_store_wait_all();
 }

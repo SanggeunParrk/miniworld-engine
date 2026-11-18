@@ -10,13 +10,14 @@ def _config(d, backward):
 
 
 @T.device_cache
-def _kernel(d, h, backward, cfg):
+def _kernel(d, h, backward, cfg, f8=False):
     tokens, stages, bn = cfg[:3]
     private = cfg[3] if len(cfg) > 3 else 0
     wait = cfg[4] if len(cfg) > 4 else 1
     cache = cfg[5] if len(cfg) > 5 else d // 128
     smem = tokens * d * 2 + stages * bn * 128 + tokens // 64 * (24576 if backward and private else 16384) + 512
     name = f"mw_b200style_k1ssregtune{'wb' if backward else ''}_n{bn}t{tokens}s{stages}p{private}w{wait}c{cache}"
+    name += "f8" if f8 else ""
     flags = [
         "-std=c++17",
         "-O3",
@@ -38,6 +39,7 @@ def _kernel(d, h, backward, cfg):
         "-DTMN_SIGMOID_TANH=1",
         f"-DBLOCKN={bn}",
         f"-DKERNEL_NAME={name}",
+        *(["-DF8PLANES=1"] if f8 else []),
     ]
     kernel = T.load_unit(
         str(T.compile(T.SOURCES / "b200style/k1ssregtune.cu", flags)),
@@ -95,3 +97,63 @@ def front(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
         smem,
     )
     return xn is not None
+
+
+def prescale_pack(weights, qinv, out=None):
+    """The packed weights of the FP8-plane front (``front_f8``): the projection rows of plane channel c scaled by qinv[c] (a power of two: exact),
+    the gate rows as they are, packed in the front's block order. out: an existing [4 h, d] bf16 buffer to write in place (a captured graph keeps
+    reading it)."""
+    from ._h100_pack import pack_into_cuda
+
+    wl, wlg, wr, wrg = weights
+    h = wl.shape[0]
+    dt = wl.dtype
+    wl_ = (wl.float() * qinv[:h, None]).to(dt)
+    wr_ = (wr.float() * qinv[h:, None]).to(dt)
+    if out is None:
+        out = wl.new_empty((4 * h, wl.shape[1]))
+    pack_into_cuda(out, wl_, wlg, wr_, wrg)
+    return out
+
+
+def front_f8(x, w1, pair_mask, gi, bi, ab, xs, amax=None, transposed=False):
+    """FP8 planes of one sample (L % 128 == 0): ab [2 h, L, L] e4m3 (bytes), the planes of the pair (transposed: of its transpose, K-major for
+    the incoming contraction) scaled by 1 / scale through the pre-scaled weights ``w1`` (``prescale_pack``); xs [L L, 2] LN_in (mean, rstd) per
+    pair token (transposed: at the swapped token); pair_mask bf16 [L, L]; amax: fp32 [1] receives the uint32-ordered max |scaled value|."""
+    n, d, h = x.shape[1], x.shape[-1], ab.shape[0] // 2
+    if x.shape[0] != 1 or n % 128 or d != 512:
+        raise ValueError("the FP8-plane packed front takes one sample, L % 128 == 0, D512")
+    m = n * n
+    cfg = _config(d, False)
+    tokens, stages, bn = cfg[:3]
+    kernel, smem = _kernel(d, h, False, cfg, True)
+    am = T._launch_module().tensor_map(ab, [64, 32], dims=[m, 2 * h], strides_bytes=[m], swizzle="64B", l2="128B", dtype="uint8")
+    if transposed:  # token (r, c) reads pair[c][r]: dims [d][c][r], strides (n d, d) elements
+        xm = T._launch_module().tensor_map(x, [64, tokens, 1], dims=[d, n, n], strides_bytes=[n * d * 2, d * 2], swizzle="128B", l2="128B")
+    else:
+        xm = I._map(x, [64, tokens], [d, m], [d * 2])
+    fields = [
+        xm,
+        I._map(w1, [64, bn], [d, 4 * h], [d * 2]),
+        am,
+        am,
+        am,
+        am,
+        pair_mask,
+        gi,
+        bi,
+        None,
+        xs,
+        amax,
+        m,
+        n,
+        m // tokens,
+        0,
+        int(transposed),
+    ]
+    kernel.launch(
+        (min(m // tokens, num_sms(x.device.index)), 1, 1),
+        (128 * (tokens // 64 + 1), 1, 1),
+        [T._launch_module().Struct(fields)],
+        smem,
+    )

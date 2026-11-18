@@ -21,6 +21,11 @@ using bf = __nv_bfloat16;
 #ifndef GFOLD
 #define GFOLD 0
 #endif
+// K3_CSCALE == 2 (EXPERIMENTAL FP8 planes, the same contract as k3.cu): tri holds the raw e4m3 contraction (bf16); the true t is csc[0] x tri (one
+// power-of-two scalar scale). The LN_out statistics run on the raw values and are scaled here (mean x cs, variance x cs^2); the host folds csc into Wpf.
+#ifndef K3_CSCALE
+#define K3_CSCALE 0
+#endif
 // Hopper implementation of the B200 folded K3 algorithm. The saved tensors
 // are projection/gate values and LN statistics, never normalized H rows.
 constexpr int D = WIDTH, H = HIDDEN, BN = BLOCKN, NS = STAGES, MT = 128;
@@ -33,7 +38,11 @@ static_assert(D % BN == 0 && (BN == 128 || BN == 192 || BN == 256), "column bloc
 // uv: fp32 [4][D] = up, vp, ug, vg; xs: fp32 [M][2] = (mean, rstd) of LN_in (GFOLD)
 struct Params {
   CUtensorMap tri, xa, wp, wg, xm, ym;
-  const float* uv; const float* xs; int M; int tiles;
+  const float* uv; const float* xs;
+#if K3_CSCALE
+  const float* csc;
+#endif
+  int M; int tiles;
   const bf* ds; bf* pv; bf* gv; float* mu; float* rs; int L;
 };
 
@@ -166,8 +175,14 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3reorder(__gr
         const float ma=quad_sum(s1a)*(1.f/H),mb=quad_sum(s1b)*(1.f/H);
         const float va=fmaxf(quad_sum(s2a)*(1.f/H)-ma*ma,0.f);
         const float vb=fmaxf(quad_sum(s2b)*(1.f/H)-mb*mb,0.f);
+#if K3_CSCALE == 2
+        const float cs=__ldg(p.csc);
+        const float local_rsA=rsqrtf(va*cs*cs+1e-5f),local_rsB=rsqrtf(vb*cs*cs+1e-5f);
+        const float mua=(ka+ma)*cs,mub=(kb+mb)*cs;
+#else
         const float local_rsA=rsqrtf(va+1e-5f),local_rsB=rsqrtf(vb+1e-5f);
         const float mua=ka+ma,mub=kb+mb;
+#endif
         if((lane&3)==0) {
           srs[w*64+rowA]=local_rsA;srs[w*64+rowB]=local_rsB;
           smu[w*64+rowA]=-local_rsA*mua;smu[w*64+rowB]=-local_rsB*mub;
