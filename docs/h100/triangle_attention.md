@@ -522,3 +522,22 @@ Module training step (fwd + bwd, CUDA graph, interleaved with a same-cubin contr
 128:4:768 6.116 -> 5.768 (0.943), 128:4:512 2.139 -> 2.030 (0.949), 256:8:768 13.72 -> 12.78 (0.931), 384:12:768 21.38 -> 20.07 (0.939),
 64:4:768 6.391 -> 5.970 (0.934), 64:2:768 3.489 -> 3.341 (0.958); control ratios 0.999-1.022.  All nine gradients vs the old kernel: rms <= 4e-5
 relative, both runs bitwise equal.  Test: `tests/gpu/test_triattn_h100_bwd_q_rowsplit.py`.  Not repeated from the lists above: more slabs, ping-pong.
+
+## Training, 64-channel heads: wgmma bf16 forward + two-row query-side backward (3.0.1 candidate, branch `bf16s/triattn-train`, 2026-11-18)
+
+Profile (H100, L1024, B1, one training step, kernel time): d_pair 64 x 4 heads (16 or 32 channels) 12.3 ms, d_pair 128 fused 11.7 ms, d_pair 64 x 2 heads 6.7 ms. The
+core (`triattn_fwd` 2.05 + `bwd_kv` 2.73 + `bwd_q8` 4.29 ms) is 9.1 ms of the 12.3 and does not depend on d_pair: the generic path's glue (3.2 ms) is
+bound by the bytes of the head-width tensors (q | k | v | g, dall: 4 x 128 columns), the same bytes the fused d128 kernels move (2.7 ms). d_pair 64 x 4 x
+16-channel heads are padded to 32 channels, so they cost the same as 32-channel heads. Extending the fused front / tail / head_bwd / wgrad to d_pair 64 would
+save at most ~0.5 ms (4 %); not done. The open lever for 16-channel heads is a compact (unpadded) layout through the three core kernels (~10 %, est.).
+RF3 / Chai-1 (64-channel heads, L1024): 33.5 / 36.8 ms, of which mma.sync `dh_bwd_kv` 9.6, `dh_bwd_q` 8.9, `dh_fwd` 6.3 and the sum of the bf16 dbias planes 3.3 ms.
+
+Changes (outputs change within rounding; `backend_versions["cuda:h100_sm90"]`: AF3 13, RF3 14, Chai1 / Chai1Confidence 9):
+- `triattn_d64t_sm90.cu` (`h100_dh.ext_d64t`, kernel row `triangle_attention_d64_fwd_train_sm90`): the 2.5.12 bf16 wgmma core of 64-channel heads (git 68d6be5cf)
+  with the training outputs O (bf16) and the base-2 LSE; `h100_dh.train_core` uses it for S % 128 == 0 (training always pads to 128; `TRAIN_WGMMA`).
+- `triattn_dh_bwd_q` (kernel version 4): `BWD_Q_ROWS` = 2 pair rows a CTA (two warpgroups, shared bias tile); the rows' fp32 dS fragments are added in
+  shared memory (fixed order) before one bf16 plane is stored: half the planes (and half the plane sum's read), each plane element the rounding of a sum.
+  The fp32 slab variant was removed (one implementation). `plan` counts the planes by length.
+- `TB_POLY` (default 0 = unchanged code): experiment flag, recomputed P of the wgmma backward kernels on the FMA polynomial.
+- Tests: `tests/gpu/test_triattn_h100_d64_train.py`.
+Status of the measurements: see the report of the branch (GPU queue was saturated; numbers are added when the job `all1` ran).
