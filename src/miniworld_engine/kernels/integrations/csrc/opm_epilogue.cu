@@ -31,7 +31,8 @@
 // EXPERIMENTAL, opt-in build (`opm_fp8.py`, never the default): the wide prologue writes A2 / BT as e4m3 bytes (static power-of-two
 // scale per operand, saturating cast, max |scaled value| reported) for a cuBLASLt e4m3 grouped product.
 #include <cuda_fp8.h>
-#define OPM_F8_KPARAMS , const float* __restrict__ f8q, float* __restrict__ f8amax
+// round 2: f8tr != 0 also writes A2 / BT in the [s, (i,c)] layout (maps amt / bmt) from the same accumulator: no byte-transpose pass in the backward
+#define OPM_F8_KPARAMS , const float* __restrict__ f8q, float* __restrict__ f8amax, const __grid_constant__ CUtensorMap amt, const __grid_constant__ CUtensorMap bmt, int f8tr
 #else
 #define OPM_F8_KPARAMS
 #endif
@@ -1130,12 +1131,25 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
               __nv_cvt_float2_to_fp8x2(make_float2(v0, v1), __NV_SATFINITE, __NV_E4M3);
           *reinterpret_cast<__nv_fp8x2_storage_t*>(out8 + r1 * 128 + ((((col >> 4) ^ (r1 & 7)) << 4) | (col & 15))) =
               __nv_cvt_float2_to_fp8x2(make_float2(v2, v3), __NV_SATFINITE, __NV_E4M3);
+          if (f8tr) {   // the [128 s][32 c] transposed tiles (no swizzle, 32-byte rows), behind the two above: A^T at +8192, B^T at +12288
+            unsigned char* t8 = reinterpret_cast<unsigned char*>(st + b * TT) + 8192 + (cw < 2 ? 0 : 4096);
+            const __nv_fp8x2_storage_t p0 = __nv_cvt_float2_to_fp8x2(make_float2(v0, v1), __NV_SATFINITE, __NV_E4M3);
+            const __nv_fp8x2_storage_t p1 = __nv_cvt_float2_to_fp8x2(make_float2(v2, v3), __NV_SATFINITE, __NV_E4M3);
+            t8[col * 32 + r0] = (unsigned char)(p0 & 0xff);
+            t8[(col + 1) * 32 + r0] = (unsigned char)(p0 >> 8);
+            t8[col * 32 + r1] = (unsigned char)(p1 & 0xff);
+            t8[(col + 1) * 32 + r1] = (unsigned char)(p1 >> 8);
+          }
         }
       }
       wg::proxy_fence(); sync();
       if (lane == 0 && cw == 0) {
         st2(&am, st + b * TT, s0, i * 32);
         st2(&bm, reinterpret_cast<unsigned char*>(st + b * TT) + 4096, s0, i * 32);
+        if (f8tr) {
+          st2(&amt, reinterpret_cast<unsigned char*>(st + b * TT) + 8192, i * 32, s0);
+          st2(&bmt, reinterpret_cast<unsigned char*>(st + b * TT) + 12288, i * 32, s0);
+        }
         asm volatile("cp.async.bulk.commit_group;":::"memory");
       }
 #else
@@ -2865,7 +2879,7 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
                                              torch::Tensor wa, torch::Tensor wb, double eps, bool save_stats,
                                              c10::optional<torch::Tensor> pbias, bool with_norm, double dmin = 1.0, double doff = 0.0
 #if defined(MINIWORLD_OPM_FP8)
-                                             , c10::optional<torch::Tensor> f8q = c10::nullopt, c10::optional<torch::Tensor> f8amax = c10::nullopt
+                                             , c10::optional<torch::Tensor> f8q = c10::nullopt, c10::optional<torch::Tensor> f8amax = c10::nullopt, bool f8t = false
 #endif
                                              ) {
   using Cf = opm_pro_wide::Cfg<CM_MSA>;
@@ -2913,6 +2927,16 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
   uint32_t obx[2] = {128, 32};
   enc(&am, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, a.data_ptr(), od, os, obx, CU_TENSOR_MAP_SWIZZLE_128B);
   enc(&bm, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, b.data_ptr(), od, os, obx, CU_TENSOR_MAP_SWIZZLE_128B);
+  alignas(64) CUtensorMap amt = am, bmt = bm;
+  torch::Tensor aT, bT;
+  if (f8t) {   // [S, N * 32] copies: box [32 (i,c) bytes x 128 s]
+    aT = torch::empty({(long)S, (long)N * CH}, a.options()); bT = torch::empty_like(aT);
+    uint64_t td[2] = {(uint64_t)N * CH, (uint64_t)S}, ts[1] = {(uint64_t)N * CH};
+    uint32_t tbx[2] = {32, 128};
+    enc(&amt, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, aT.data_ptr(), td, ts, tbx, CU_TENSOR_MAP_SWIZZLE_NONE);
+    enc(&bmt, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, bT.data_ptr(), td, ts, tbx, CU_TENSOR_MAP_SWIZZLE_NONE);
+  }
+  int f8tr_arg = f8t ? 1 : 0;
 #else
   uint64_t od[2] = {(uint64_t)S, (uint64_t)N * CH}, os[1] = {(uint64_t)S * 2};
   uint32_t obx[2] = {64, 32};
@@ -2932,7 +2956,7 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
   int tiles = N * (S / 128), s_arg = S, n_arg = N; float ep = float(eps);
 #if defined(MINIWORLD_OPM_FP8)
   const float* f8qp = f8q->data_ptr<float>(); float* f8ap = f8amax->data_ptr<float>();
-  void* args[] = {&xm, &mm, &wam, &wbm, &am, &bm, &gp, &bp, &mp, &sp, &bitp, &pbp, &s_arg, &n_arg, &tiles, &ep, &f8qp, &f8ap};
+  void* args[] = {&xm, &mm, &wam, &wbm, &am, &bm, &gp, &bp, &mp, &sp, &bitp, &pbp, &s_arg, &n_arg, &tiles, &ep, &f8qp, &f8ap, &amt, &bmt, &f8tr_arg};
 #else
   void* args[] = {&xm, &mm, &wam, &wbm, &am, &bm, &gp, &bp, &mp, &sp, &bitp, &pbp, &s_arg, &n_arg, &tiles, &ep};
 #endif
@@ -2942,6 +2966,9 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   if (!with_norm) return {a, b, stats, mk, bits};   // inference: the epilogue counts from the mask bits
   opm_count_launch(bitp, norm.data_ptr<float>(), S, N, float(dmin), float(doff));
+#if defined(MINIWORLD_OPM_FP8)
+  if (f8t) return {a, b, stats, mk, norm, aT, bT};
+#endif
   return {a, b, stats, mk, norm};
 }
 
@@ -3290,7 +3317,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("m"), py::arg("mask"), py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("eps"), py::arg("save_stats"),
         py::arg("pbias") = py::none(), py::arg("with_norm") = true, py::arg("dmin") = 1.0, py::arg("doff") = 0.0
 #if defined(MINIWORLD_OPM_FP8)
-        , py::arg("f8q") = py::none(), py::arg("f8amax") = py::none()
+        , py::arg("f8q") = py::none(), py::arg("f8amax") = py::none(), py::arg("f8t") = false
 #endif
         );
 #if defined(MINIWORLD_OPM_FP8)

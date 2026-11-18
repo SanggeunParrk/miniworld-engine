@@ -150,7 +150,7 @@ class OpmFp8TrainFn(torch.autograd.Function):
         wa16, wb16 = wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous()
         # {s_a, s_b, 1 / s_a, 1 / s_b}: opm_fp8.bound_scales, every call (the weights move)
         sc = ext.opm_f8_wscale(gam, bet, wa16, wb16, pb)
-        a8, b8, stats, mask16, norm = ext.opm_prologue_wide(
+        a8, b8, stats, mask16, norm, a8t, b8t = ext.opm_prologue_wide(
             m,
             mk,
             gam,
@@ -163,6 +163,7 @@ class OpmFp8TrainFn(torch.autograd.Function):
             True,
             f8q=sc[2:4],
             f8amax=peak,
+            f8t=True,
             **dkw,
         )
         sa, sb = sc[0:1].clone(), sc[1:2].clone()  # (separate allocations: cuBLASLt refuses a scale pointer off its alignment)
@@ -170,7 +171,7 @@ class OpmFp8TrainFn(torch.autograd.Function):
         z = ext.opm_epilogue(
             o, norm, wo.detach().to(bf).contiguous(), bo.detach().to(bf).float().contiguous(), n, n, res, int(after), **dkw
         )
-        ctx.save_for_backward(m, mask16, norm, a8, b8, stats, lnw, lnb, wa, wb, wo, bo, o, sa, sb)
+        ctx.save_for_backward(m, mask16, norm, a8t, b8t, stats, lnw, lnb, wa, wb, wo, bo, o, sa, sb)
         ctx.eps, ctx.after, ctx.has_bias, ctx.has_residual = eps, bool(after), pb is not None, res is not None
         STATS["calls"] += 1
         return z
@@ -182,7 +183,7 @@ class OpmFp8TrainFn(torch.autograd.Function):
         from miniworld_engine.kernels.integrations import opm_train as ot
 
         bf = torch.bfloat16
-        m, mask16, norm, a8, b8, stats, lnw, lnb, wa, wb, wo, bo, o, sa, sb = ctx.saved_tensors
+        m, mask16, norm, a8t, b8t, stats, lnw, lnb, wa, wb, wo, bo, o, sa, sb = ctx.saved_tensors
         s, n, cm, cz = m.shape[0], m.shape[1], m.shape[2], wo.shape[0]
         ch = ot.CH
         ext = ot._ext(dz.device, native=True, tma=False, cm=cm, cz=cz, fp8=True)
@@ -210,7 +211,6 @@ class OpmFp8TrainFn(torch.autograd.Function):
             sdq = ext.opm_f8_dscale(dz0, norm, bw, fmax)  # {sd, 1 / sd}
             sd, q, amax = sdq[0:1].clone(), sdq[1:2], peak[2:3]
         d8, d8t, dzp, dbo = ext.opm_dgrad_f8(dz0, norm, bw2, n, n, int(ctx.after), q, amax, fmt)
-        a8t, b8t = ext.opm_t8(a8), ext.opm_t8(b8)  # [s, (i,c)]: K = (i,c) contiguous
         dA = opm_fp8.product(b8t, d8, (sb, sd), n)  # [s, (i,c)] = sum_(j,e) BT[(j,e), s] dO[(i,c), (j,e)]
         dB = opm_fp8.product(a8t, d8t, (sa, sd), n)  # [s, (j,e)] = sum_(i,c) A2[(i,c), s] dO[(i,c), (j,e)]
         del d8, d8t, a8t, b8t
