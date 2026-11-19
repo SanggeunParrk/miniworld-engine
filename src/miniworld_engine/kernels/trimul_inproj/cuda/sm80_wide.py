@@ -363,7 +363,7 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     if save:
         ps = torch.empty_like(zf)
         # RTX 5090, bf16: g' is not kept (36 MiB at L 384); the backward recomputes it from x_n (``_run_backward_body``) -- k3w skips its store when gs is empty
-        gs = zf.new_empty((0,)) if _recompute_gate(z) else torch.empty_like(zf)
+        gs = zf.new_empty((0, zf.shape[-1])) if _recompute_gate(z) else torch.empty_like(zf)
     else:
         ps = gs = zf.new_empty((0,))
     k3 = E.k3w if save else E.k3w_tuned
@@ -420,7 +420,7 @@ def _forward_train_fake(leaves, mask, ds, direction, eps_in, eps_out):
         torch.empty((T, 2), dtype=f32, device=z.device),
         torch.empty((T, 2), dtype=f32, device=z.device),
         z.new_empty((T, d)),
-        z.new_empty((0,)) if _recompute_gate(z) else z.new_empty((T, d)),
+        z.new_empty((0, d)) if _recompute_gate(z) else z.new_empty((T, d)),
     ]
 
 
