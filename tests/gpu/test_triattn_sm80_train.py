@@ -84,7 +84,9 @@ def test_pairformer_block_train_cuda_matches_pytorch(masked):
     from miniworld_engine.modules import PairformerBlock, PairformerConfig
 
     torch.manual_seed(0)
-    cfg = PairformerConfig(d_pair=128, d_hidden_tri_multi=128, d_hidden_tri_attention=32, n_head_tri_attention=4, p_drop=0.0, model="protenix", d_single=384)
+    cfg = PairformerConfig(
+        d_pair=128, d_hidden_tri_multi=128, d_hidden_tri_attention=32, n_head_tri_attention=4, p_drop=0.0, model="protenix", d_single=384
+    )
     ref = PairformerBlock(cfg, master_weights=True, backend="pytorch").cuda().train()
     cud = copy.deepcopy(ref)
     cud.set_backend("cuda")
@@ -92,3 +94,33 @@ def test_pairformer_block_train_cuda_matches_pytorch(masked):
     g = torch.Generator(device="cuda").manual_seed(2)
     single = torch.randn(1, L, 384, device="cuda", generator=g).to(torch.bfloat16)
     _compare(ref, cud, (_pair(L, 128, 3), _mask(L, masked), single), tol=3e-2)
+
+
+@skip
+def test_pairformer_block_train_compiles_and_matches_eager():
+    """torch.compile of a Protenix trunk block: the Transition refusal reads the SM count (``fused_fwd_sm80._num_sms``, a lazy module-dict cache); written
+    inside the trace it raised ``AssertionError: Guard failed on the same frame it was created`` (``___dict_contains(0, ..._SMS)``)."""
+    from miniworld_engine.modules import PairformerBlock, PairformerConfig
+
+    torch.manual_seed(0)
+    cfg = PairformerConfig(
+        d_pair=128, d_hidden_tri_multi=128, d_hidden_tri_attention=32, n_head_tri_attention=4, p_drop=0.0, model="protenix", d_single=384
+    )
+    eager = PairformerBlock(cfg, master_weights=True, backend="cuda").cuda().train()
+    comp = copy.deepcopy(eager)
+    L = 128
+    g = torch.Generator(device="cuda").manual_seed(2)
+    single = torch.randn(1, L, 384, device="cuda", generator=g).to(torch.bfloat16)
+    args = (_pair(L, 128, 3), _mask(L, False), single)
+    eo, eg = _train(eager, args)
+    from miniworld_engine.kernels.transition.cuda import fused_fwd_sm80
+
+    fused_fwd_sm80._SMS.clear()  # the cache cold, as in a fresh process whose first call is the compiled one (the eager call above filled it)
+    comp.compile()
+    co, cg = _train(comp, args)
+    for a, b in zip(co, eo, strict=True):
+        assert _rel(a, b) < 1e-2, _rel(a, b)
+    assert eg.keys() == {n.removeprefix("_orig_mod.") for n in cg} and eg
+    cg = {n.removeprefix("_orig_mod."): v for n, v in cg.items()}
+    worst = max((_rel(cg[n], eg[n]), n) for n in eg)
+    assert worst[0] < 2e-2, worst

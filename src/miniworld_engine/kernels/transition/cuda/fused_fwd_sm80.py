@@ -78,6 +78,8 @@ _SMS: dict[int, int] = {}
 
 
 def _num_sms(index: int) -> int:
+    if torch.compiler.is_compiling():  # no lazy dict write inside a trace (dynamo: 'Guard failed on the same frame it was created')
+        return torch.cuda.get_device_properties(index).multi_processor_count
     n = _SMS.get(index)
     if n is None:
         n = _SMS[index] = torch.cuda.get_device_properties(index).multi_processor_count
