@@ -84,6 +84,7 @@ void dispatch_dual(int cfg, const a100::DualParams& p, bool gate, int epi, cudaS
     case 10: launch_dual<Cfg10>(p, gate, epi, st); break;
     case 11: launch_dual<Cfg11>(p, gate, epi, st); break;
     case 13: launch_dual<Cfg13>(p, gate, epi, st); break;
+    case 14: launch_dual<Cfg14>(p, gate, epi, st); break;
     default: TORCH_CHECK(false, "dual tile config ", cfg);
   }
 }

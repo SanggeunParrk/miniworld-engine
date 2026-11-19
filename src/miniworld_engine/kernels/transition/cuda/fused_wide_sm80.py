@@ -206,7 +206,7 @@ _side: dict = {}
 #: d 512 n 4 L 512 1.016 -> 0.990; below the work the 64-row tiles are 1-3 % faster (d 256 n 2 L 512 0.942 vs 0.965).  The accumulation order per output element is the same: the same bits.
 SM120_FOLD_BIG_WORK = 200_000_000
 #: ... or a hidden width of at least this (d 512 n 4: L 256 1.009 -> 0.997 at 65536 rows)
-SM120_FOLD_BIG_H = 2048
+SM120_FOLD_BIG_H = 1536
 
 
 def _fold_tiles(m: int, h: int, dual: int, res: int) -> tuple[int, int]:
@@ -399,6 +399,11 @@ def _fwd_launch(
         dual = SM120_DUAL_OVERRIDE
     if SM120_RES_OVERRIDE is not None and m >= SM120_DUAL_OVERRIDE_ROWS:
         res = SM120_RES_OVERRIDE
+    if save and ln and d >= SM120_FUSED_LN_MIN_D and m >= SM120_FUSED_LN_MIN_ROWS and is_sm120(x.device):
+        dual, res = (
+            14,
+            13,
+        )  # the training forward takes the 128-row tiles as well (interleaved A-B-A-B vs Triton, train D 256 .. 512 at 65 k .. 590 k rows: 18 -> 35 of 42 cells <= 1.00; same bits)
     if ln and not save and _fused_ln(m, d, dual, x):
         dual, res = _fold_tiles(m, wa.shape[0], dual, res)
         hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)

@@ -114,3 +114,22 @@ def test_big_work_tiles_give_the_same_bits(monkeypatch: pytest.MonkeyPatch, d: i
         with torch.no_grad():
             outs.append(kern(x))
     assert torch.equal(outs[0], outs[1])
+
+
+def test_training_forward_with_128_row_tiles_keeps_the_bits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The training forward at D >= 256 takes dual config 14 / squeeze config 13 (``SM120_FUSED_LN_MIN_ROWS`` and up): outputs and gradients of the 64-row tiles' bits."""
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+
+    module = _module(256, 4)
+    x0 = (torch.randn(1, 40000, 256, device="cuda", generator=torch.Generator(device="cuda").manual_seed(8))).to(torch.bfloat16)
+    up = torch.randn(x0.shape, device="cuda", generator=torch.Generator(device="cuda").manual_seed(9)).to(torch.bfloat16)
+    results = []
+    for min_rows in (10**9, 32768):
+        monkeypatch.setattr(fw, "SM120_FUSED_LN_MIN_ROWS", min_rows)
+        kern = copy.deepcopy(module).set_backend("cuda")
+        x = x0.clone().requires_grad_(True)
+        y = kern(x)
+        y.backward(up)
+        results.append([y.detach(), x.grad] + [p.grad for p in kern.parameters() if p.grad is not None])
+    for a, b in zip(*results, strict=True):
+        assert torch.equal(a, b)
