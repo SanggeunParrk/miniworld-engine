@@ -21,6 +21,7 @@
 #include "opm_epilogue_sm80.cuh"
 #include "opm_prologue_bwd_sm80.cuh"
 #include "opm_prologue_sm80.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace {
 
@@ -43,7 +44,7 @@ template <int CM, int NB, bool ST> void launch_prologue(opm80::PrologueParams p,
   raise_smem(opm80::opm_prologue_kernel<CM, NB, ST, NMINB>, C::SMEM);
   p.nti = (L + C::NTOK - 1) / C::NTOK;
   p.ntile = p.S * p.nti;
-  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm = mw::sm_count();
   const int grid = std::min(p.ntile, nsm * NMINB);
   opm80::opm_prologue_kernel<CM, NB, ST, NMINB><<<grid, C::NTHR, C::SMEM, st>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();

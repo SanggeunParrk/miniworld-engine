@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <map>
 #include <utility>
+#include "../../../_sm_count.cuh"
 
 using namespace norms;
 
@@ -131,7 +132,7 @@ __global__ void __launch_bounds__(NT) rope_kernel(const XT* __restrict__ Q, cons
   }
 }
 
-int sm_count() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+int sm_count() { return mw::sm_count(); }
 
 template <typename K> int blocks_per_sm(K kernel) {
   static std::map<const void*, int> cache;

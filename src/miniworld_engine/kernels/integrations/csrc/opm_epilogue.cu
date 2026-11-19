@@ -31,6 +31,7 @@
 // EXPERIMENTAL, opt-in build (`opm_fp8.py`, never the default): the wide prologue writes A2 / BT as e4m3 bytes (static power-of-two
 // scale per operand, saturating cast, max |scaled value| reported) for a cuBLASLt e4m3 grouped product.
 #include <cuda_fp8.h>
+#include "../../_sm_count.cuh"
 // round 2: f8tr != 0 also writes A2 / BT in the [s, (i,c)] layout (maps amt / bmt) from the same accumulator: no byte-transpose pass in the backward
 #define OPM_F8_KPARAMS , const float* __restrict__ f8q, float* __restrict__ f8amax, const __grid_constant__ CUtensorMap amt, const __grid_constant__ CUtensorMap bmt, int f8tr
 #else
@@ -2679,7 +2680,7 @@ torch::Tensor opm_f8_dscale(torch::Tensor dz, torch::Tensor norm, torch::Tensor 
   auto rmax = torch::zeros({1}, norm.options());
   auto out = torch::empty({2}, norm.options());
   const long P = norm.numel();
-  const int blocks = (int)std::min<long>((P + 7) / 8, 8L * at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
+  const int blocks = (int)std::min<long>((P + 7) / 8, 8L * mw::sm_count());
   auto st = at::cuda::getCurrentCUDAStream();
   opm_f8_rownorm_kernel<<<blocks, 256, 0, st>>>(reinterpret_cast<const __nv_bfloat16*>(dz.data_ptr()), norm.data_ptr<float>(), P,
                                                  rmax.data_ptr<float>());
@@ -2900,7 +2901,7 @@ std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor
  __nv_bfloat16* mp=reinterpret_cast<__nv_bfloat16*>(mk.data_ptr());float* sp=save_stats?stats.data_ptr<float>():nullptr;unsigned* bitp=reinterpret_cast<unsigned*>(bits.data_ptr());
  int tiles=N*(S/128);float ep=float(eps);
  void* args[]={&xm,&mm,&wam,&wbm,&am,&bm,&gp,&bp,&mp,&sp,&bitp,&S,&N,&tiles,&ep};
- int grid=std::min(tiles,at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
+ int grid=std::min(tiles,mw::sm_count());
  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(grid),dim3(512),args,opm_pro_tma::SMEM,at::cuda::getCurrentCUDAStream()));
  C10_CUDA_KERNEL_LAUNCH_CHECK();
  if(!with_norm) return {a,b,stats,mk,bits};   // inference: the epilogue counts from the mask bits
@@ -3021,7 +3022,7 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
 #else
   void* args[] = {&xm, &mm, &wam, &wbm, &am, &bm, &gp, &bp, &mp, &sp, &bitp, &pbp, &s_arg, &n_arg, &tiles, &ep};
 #endif
-  int grid = std::min(tiles, at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
+  int grid = std::min(tiles, mw::sm_count());
   C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel), dim3(grid), dim3(512), args, Cf::SMEM,
                                   at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -3353,7 +3354,7 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
   }
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_fused_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   const int ntiles = (int)(N / 16) * (int)(N / 8);
   opm_fused_kernel<<<std::min(sms, ntiles), 384, SMEM, at::cuda::getCurrentCUDAStream()>>>(
       amap, bmap, wmap, reinterpret_cast<const unsigned*>(bits.data_ptr<int>()), (int)bits.size(1), bias.data_ptr<float>(),

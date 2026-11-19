@@ -6,6 +6,7 @@
 #include <mutex>
 #include <vector>
 #include "inference_rt8_ffn_sm80_a100.cuh"
+#include "../../_sm_count.cuh"
 namespace swa_a100_infer_rt8_ffn80 {
 struct Init { int active, set_attribute_calls, occupancy_calls, cold_capture; };
 std::mutex cache_mutex;
@@ -30,7 +31,7 @@ template<class G> int initialize(int cfg) {
 template<class G> void launch(const FfnFwdParams& p,int cfg) {
  const int active=initialize<G>(cfg);
  const int ntile=((p.S+G::ROW_TILE-1)/G::ROW_TILE)*(p.M/p.S);
- const int ctas=std::min(at::cuda::getCurrentDeviceProperties()->multiProcessorCount*active,(ntile+G::NW-1)/G::NW);
+ const int ctas=std::min(mw::sm_count()*active,(ntile+G::NW-1)/G::NW);
  ffn_fwd_kernel<G><<<ctas,G::NTHR,G::SMEM,at::cuda::getCurrentCUDAStream()>>>(p);
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

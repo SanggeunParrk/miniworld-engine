@@ -4,6 +4,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 #include "sm80/glue_sm80.cuh"
+#include "../../_sm_count.cuh"
 namespace token_shared_scale_sm80 {
 template<bool RES>
 __global__ void __launch_bounds__(256) shared_res_gate(
@@ -38,7 +39,7 @@ void launch(torch::Tensor y,torch::Tensor gate,torch::Tensor res,torch::Tensor o
  if(has_res)TORCH_CHECK(res.device()==y.device()&&res.scalar_type()==y.scalar_type()&&res.is_contiguous()&&res.sizes()==y.sizes(),"E874 residual geometry");
  const at::cuda::CUDAGuard guard(y.device());
  const int64_t blocks=(M*(d/8)+255)/256;
- const int64_t cap=(int64_t)at::cuda::getCurrentDeviceProperties()->multiProcessorCount*16;
+ const int64_t cap=(int64_t)mw::sm_count()*16;
  const unsigned grid=(unsigned)std::max<int64_t>(1,std::min(blocks,cap));
  auto stream=at::cuda::getCurrentCUDAStream();
  const auto* yp=reinterpret_cast<const __nv_bfloat16*>(y.data_ptr());

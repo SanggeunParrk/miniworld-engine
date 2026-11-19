@@ -3,6 +3,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "aux_sm80.cuh"
+#include "../../../_sm_count.cuh"
 namespace atom_pair_reduce210 {
 using namespace aa80;
 template <typename T>
@@ -94,7 +95,7 @@ void run(torch::Tensor z,torch::Tensor w,torch::Tensor dbp,torch::Tensor dz,torc
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 template<typename T>std::vector<int64_t> resource() {
- cudaFuncAttributes a;int blocks;C10_CUDA_CHECK(cudaFuncGetAttributes(&a,pair_bias_bwd_from_partials_kernel<T>));C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks,pair_bias_bwd_from_partials_kernel<T>,256,0));const auto*d=at::cuda::getCurrentDeviceProperties();return {a.numRegs,(int64_t)a.localSizeBytes,(int64_t)a.sharedSizeBytes,256,blocks,blocks*8,d->maxThreadsPerMultiProcessor,d->multiProcessorCount,a.binaryVersion,a.ptxVersion};
+ cudaFuncAttributes a;int blocks;C10_CUDA_CHECK(cudaFuncGetAttributes(&a,pair_bias_bwd_from_partials_kernel<T>));C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks,pair_bias_bwd_from_partials_kernel<T>,256,0));return {a.numRegs,(int64_t)a.localSizeBytes,(int64_t)a.sharedSizeBytes,256,blocks,blocks*8,mw::max_threads_per_sm(),mw::sm_count(),a.binaryVersion,a.ptxVersion};
 }
 std::vector<int64_t> resources(bool fp32) {return fp32?resource<float>():resource<__nv_bfloat16>();}
 }

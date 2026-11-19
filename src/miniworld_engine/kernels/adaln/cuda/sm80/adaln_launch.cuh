@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <algorithm>
+#include "../../../_sm_count.cuh"
 
 namespace adl {
 
@@ -12,7 +13,7 @@ namespace adl {
 template <class G, typename K, typename Pm>
 void launch_persistent(K kernel, const Pm& p, int64_t ntile, cudaStream_t st, int minb = -1) {
   C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   const int per_sm = minb > 0 ? minb : G::MINB;
   const unsigned grid = (unsigned)std::max<int64_t>(1, std::min<int64_t>((ntile + G::NW - 1) / G::NW, (int64_t)sms * per_sm));
   kernel<<<grid, G::NTHR, G::SMEM, st>>>(p);

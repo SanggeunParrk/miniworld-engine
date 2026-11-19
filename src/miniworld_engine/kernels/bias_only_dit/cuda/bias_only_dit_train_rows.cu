@@ -24,6 +24,7 @@
 
 #include "bo_rows.cuh"
 #include "bo_ptx.cuh"
+#include "../../_sm_count.cuh"
 
 namespace {
 using namespace tdr;
@@ -939,7 +940,7 @@ void f32c(const at::Tensor& t, const char* n) { TORCH_CHECK(t.scalar_type() == a
 
 // persistent warps: as many blocks of WPB warps as are resident on every SM at once (never more warps than rows); a larger grid
 // would run the persistent blocks in waves
-int nsm() { static int n = at::cuda::getCurrentDeviceProperties()->multiProcessorCount; return n; }
+int nsm() { static int n = mw::sm_count(); return n; }
 template <typename K>
 unsigned grid(K kernel, int64_t M, int rows_per_block = WPB, size_t smem = 0) {
   int per = 1;

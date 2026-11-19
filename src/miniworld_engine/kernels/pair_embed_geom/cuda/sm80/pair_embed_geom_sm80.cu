@@ -33,6 +33,7 @@ void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tenso
 #define forward(...) forward_h100(__VA_ARGS__)
 #endif
 #include "../sm90/pair_embed_geom.cu"
+#include "../../../_sm_count.cuh"
 #undef backward
 #ifdef MWE_SM120
 #undef ln_backward
@@ -154,7 +155,7 @@ void ln_backward(torch::Tensor tbl, torch::Tensor codes, torch::Tensor dh, torch
   if (mode != 0) { ln_backward_h100(tbl, codes, dh, dx, mode, eps); return; }
   const at::cuda::CUDAGuard guard(tbl.device());
   const long long P = (long long)dh.size(0) * dh.size(1) * dh.size(2);
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   pg120_ln_bwd_gt<0, UL_G><<<sms, 16 * 32, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>()), reinterpret_cast<const uint4*>(codes.data_ptr<int>()),
       reinterpret_cast<const __nv_bfloat16*>(dh.data_ptr<at::BFloat16>()), reinterpret_cast<__nv_bfloat16*>(dx.data_ptr<at::BFloat16>()), P, (float)eps);
@@ -482,7 +483,7 @@ void ln_table_grad_sm120(torch::Tensor tbl, torch::Tensor codes, torch::Tensor d
   float4* stats = reinterpret_cast<float4*>(part + (size_t)nb * ntab * C);
   auto* dtbl = reinterpret_cast<__nv_bfloat16*>(part + (size_t)nb * ntab * C + 4 * P);
   auto st = at::cuda::getCurrentCUDAStream();
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   if (mode == 0) pg120_ln_stats<0, 2><<<3 * sms, 256, 0, st>>>(tp, cp, gp, stats, P, (float)eps);
   else pg120_ln_stats<1, 4><<<3 * sms, 256, 0, st>>>(tp, cp, gp, stats, P, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -825,7 +826,7 @@ void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tenso
                   mask.is_contiguous(), "masks: contiguous bool / uint8");
   TORCH_CHECK(idx.scalar_type() == chains.scalar_type() && idx.is_contiguous() && chains.is_contiguous(), "idx / chains: one integer dtype, contiguous");
   const int B = idx.size(0), n = idx.size(1);
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   auto st = at::cuda::getCurrentCUDAStream();
   bool pdl = false;
   const torch::Tensor t = table_of(tbl, NT, st, pdl);

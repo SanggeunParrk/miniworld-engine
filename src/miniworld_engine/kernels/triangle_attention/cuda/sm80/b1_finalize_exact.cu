@@ -4,6 +4,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <set>
 #include "b1_finalize_exact.cuh"
+#include "../../../_sm_count.cuh"
 namespace triattn_b1_finish80 {
 void run(torch::Tensor dd,torch::Tensor db,torch::Tensor x,torch::Tensor stats,torch::Tensor dout,torch::Tensor dpair,torch::Tensor wt,torch::Tensor wbt,torch::Tensor gamma,torch::Tensor partial,torch::Tensor out,int64_t length,bool transposed){
  const c10::cuda::CUDAGuard guard(x.device()); const int64_t T=x.numel()/128;
@@ -12,7 +13,7 @@ void run(torch::Tensor dd,torch::Tensor db,torch::Tensor x,torch::Tensor stats,t
  TORCH_CHECK(stats.scalar_type()==at::kFloat&&stats.is_contiguous()&&stats.numel()==(int64_t)T*2,"stats");
  TORCH_CHECK(wt.is_contiguous()&&wt.scalar_type()==at::kBFloat16&&wt.numel()==4*128*128&&wbt.is_contiguous()&&wbt.scalar_type()==at::kBFloat16&&wbt.numel()==128*4,"packed weights");
  TORCH_CHECK(gamma.scalar_type()==at::kFloat&&gamma.is_contiguous()&&gamma.numel()==128,"gamma32");
- const int grid=at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+ const int grid=mw::sm_count();
  TORCH_CHECK(partial.scalar_type()==at::kFloat&&partial.is_contiguous()&&partial.numel()==grid*8*128,"partial scratch");
  TORCH_CHECK(out.numel()==128&&out.is_contiguous()&&out.scalar_type()==at::kFloat,"FP32 gamma output");
  TORCH_CHECK(dout.sizes()==x.sizes()&&dpair.sizes()==x.sizes()&&dout.is_contiguous()&&dpair.is_contiguous()&&dout.scalar_type()==at::kBFloat16&&dpair.scalar_type()==at::kBFloat16,"input gradient output");
@@ -27,7 +28,7 @@ void finish(torch::Tensor g,std::vector<torch::Tensor> w,std::vector<torch::Tens
  const c10::cuda::CUDAGuard guard(g.device());
  TORCH_CHECK(g.is_cuda()&&g.scalar_type()==at::kFloat&&g.is_contiguous()&&g.numel()==516*136&&w.size()==5&&dw.size()==5,"gradient and weights");
  FinalizeParams p{};p.g=g.data_ptr<float>();p.partial=partial.data_ptr<float>();p.count=partial.numel()/128;
- TORCH_CHECK(partial.is_cuda()&&partial.is_contiguous()&&partial.scalar_type()==at::kFloat&&p.count==at::cuda::getCurrentDeviceProperties()->multiProcessorCount*8,"gamma partial shape");
+ TORCH_CHECK(partial.is_cuda()&&partial.is_contiguous()&&partial.scalar_type()==at::kFloat&&p.count==mw::sm_count()*8,"gamma partial shape");
  for(int i=0;i<5;++i){TORCH_CHECK(w[i].is_contiguous()&&dw[i].is_contiguous()&&w[i].scalar_type()==at::kBFloat16&&dw[i].scalar_type()==at::kBFloat16&&w[i].numel()==(i==4?4:128)*128&&dw[i].sizes()==w[i].sizes(),"BF16 weights");p.w[i]=(const __nv_bfloat16*)w[i].data_ptr();p.dw[i]=(__nv_bfloat16*)dw[i].data_ptr();}
  for(auto *t:{&gamma,&beta,&dgamma,&dbeta})TORCH_CHECK(t->is_cuda()&&t->scalar_type()==at::kFloat&&t->is_contiguous()&&t->numel()==128,"FP32 affine");
  p.gamma=gamma.data_ptr<float>();p.beta=beta.data_ptr<float>();p.dgamma=dgamma.data_ptr<float>();p.dbeta=dbeta.data_ptr<float>();

@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "pe_sm90.cuh"
+#include "../../../_sm_count.cuh"
 
 constexpr int C = 256;
 #ifndef NWF
@@ -258,7 +259,7 @@ void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tenso
   const at::cuda::CUDAGuard guard(tbl.device());
   TORCH_CHECK(dlim.numel() <= 31 && alim.numel() <= 31, "at most 31 bin limits");
   int B = idx.size(0), n = idx.size(1);
-  int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  int sms = mw::sm_count();
   auto* tp = reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>());
   auto* op = reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>());
   uint4* cp = codes.defined() && codes.numel() > 0 ? reinterpret_cast<uint4*>(codes.data_ptr<int>()) : nullptr;
@@ -908,7 +909,7 @@ void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::
   const at::cuda::CUDAGuard guard(tbl.device());
   TORCH_CHECK(dlim.numel() <= 31, "at most 31 bin limits");
   int B = idx.size(0), n = idx.size(1);
-  int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  int sms = mw::sm_count();
   auto* tp = reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>());
   auto* op = reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>());
   uint4* cp = codes.defined() && codes.numel() > 0 ? reinterpret_cast<uint4*>(codes.data_ptr<int>()) : nullptr;
@@ -971,7 +972,7 @@ void ln_backward(torch::Tensor tbl, torch::Tensor codes, torch::Tensor dh, torch
   long long P = (long long)dh.size(0) * dh.size(1) * dh.size(2);
   int ntab = mode == 0 ? NT : NT_CA;
   size_t smem = (size_t)ntab * C * sizeof(__nv_bfloat16);
-  int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  int sms = mw::sm_count();
   auto* tp = reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>());
   auto* hp = reinterpret_cast<const __nv_bfloat16*>(dh.data_ptr<at::BFloat16>());
   auto* xp = reinterpret_cast<__nv_bfloat16*>(dx.data_ptr<at::BFloat16>());

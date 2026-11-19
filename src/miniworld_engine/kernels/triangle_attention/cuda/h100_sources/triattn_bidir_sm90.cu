@@ -15,6 +15,7 @@
 #include <mutex>
 #include <tuple>
 #include <vector>
+#include "../../../_sm_count.cuh"
 
 namespace {
 using bf16 = __nv_bfloat16;
@@ -414,7 +415,7 @@ torch::Tensor tail(torch::Tensor g, torch::Tensor o, torch::Tensor wo, torch::Te
               "tail: bf16 planes [K, LL], wo [128, K], x / out [LL, 128], K in {128, 256}, LL % 128 == 0, 16-byte aligned");
   c10::cuda::CUDAGuard guard(g.device());
   static int sms = 0;
-  if (sms == 0) sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  if (sms == 0) sms = mw::sm_count();
   const long ntiles = LL / 128;
   const int grid = (int)std::min<long>(ntiles, 2L * sms);
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -558,7 +559,7 @@ torch::Tensor gate_bwd_fused(torch::Tensor dy, torch::Tensor wo, torch::Tensor g
               "gate_bwd_fused: dy [LL, 128], wo [128, K], K in {128, 256}, LL % 64 == 0, planes [K, LL]");
   c10::cuda::CUDAGuard guard(dy.device());
   static int sms = 0;
-  if (sms == 0) sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  if (sms == 0) sms = mw::sm_count();
   auto dout = torch::empty({K, LL}, dy.options());
   const int grid = (int)std::min<long>(LL / 64, 2L * sms);
   auto stream = at::cuda::getCurrentCUDAStream();

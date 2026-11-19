@@ -10,6 +10,7 @@
 #include "qkvg_fwd_sm120.cuh"
 #include "ffn_fwd_sm120.cuh"
 #include "fp32_fwd_sm120.cuh"
+#include "../../../_sm_count.cuh"
 
 #define CHECK_CUDA_BF16(x) TORCH_CHECK((x).is_cuda() && (x).scalar_type() == torch::kBFloat16, #x " must be a CUDA bf16 tensor")
 #define CHECK_CUDA_F32(x) TORCH_CHECK((x).is_cuda() && (x).scalar_type() == torch::kFloat32, #x " must be a CUDA fp32 tensor")
@@ -19,7 +20,7 @@ namespace {
 using bf = __nv_bfloat16;
 inline const bf* bptr(const torch::Tensor& t) { return reinterpret_cast<const bf*>(t.data_ptr()); }
 inline bf* bptr_w(torch::Tensor& t) { return reinterpret_cast<bf*>(t.data_ptr()); }
-inline int num_sms() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+inline int num_sms() { return mw::sm_count(); }
 
 template <class G>
 void launch_qkvg_half(const sw80::QkvgFwdParams& p, int64_t max_pairs) {

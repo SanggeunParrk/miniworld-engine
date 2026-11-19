@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <set>
 #include "adaln_mma.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace atom_output80 {
 using namespace adl;
@@ -64,7 +65,7 @@ __global__ void __launch_bounds__(NW*32,MINB) atom_output_fused_kernel(Params p)
 template<int NW,int MINB,bool SAVE,bool RES> void launch(Params p,cudaStream_t stream){
   auto kernel=atom_output_fused_kernel<NW,MINB,SAVE,RES>;static std::set<int> devices;
   if(devices.insert(at::cuda::current_device()).second)C10_CUDA_CHECK(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,65536));
-  const int nsm=at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm=mw::sm_count();
   const int grid=std::min<int64_t>((p.M+16*NW-1)/(16*NW),nsm*MINB);
   kernel<<<grid,NW*32,65536,stream>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

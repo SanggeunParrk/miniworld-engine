@@ -5,6 +5,7 @@
 #include "pipeline_finalize.cuh"
 #include <ATen/ops/mm.h>
 #include "opm_lt_gemm.cuh"
+#include "../../../_sm_count.cuh"
 
 using Tensor=torch::Tensor;
 std::vector<Tensor> kernel_leaves(std::vector<Tensor> leaves){
@@ -53,7 +54,7 @@ std::vector<Tensor> backward_pipeline(Tensor m,Tensor mask,std::vector<Tensor> l
   auto dwo_parts=torch::empty({splits,CZ,1024},f32),dwout=torch::empty({CZ,1024},leaves[4].options());
   dwo(dzn,o,dwo_parts,i_per);reduce_rows(dwo_parts.view({splits,CZ*1024}),dwout.view({CZ*1024}));
   dzn=Tensor();o=Tensor();dwo_parts=Tensor();dbo_parts=Tensor();
-  const int64_t ntile=((S+63)/64)*((L+1)/2),nsm=at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int64_t ntile=((S+63)/64)*((L+1)/2),nsm=mw::sm_count();
   const int64_t nblk=std::min(ntile,nsm*(pb_variant==1?1:2));
   auto dm=torch::empty_like(m),pb_parts=torch::empty({nblk,66*CM},f32),total=torch::empty({66*CM},f32);
   prologue_bwd(da,db,m,stats,mask,p[0],p[1],p[2],p[3],dm,pb_parts,pb_variant);reduce_rows(pb_parts,total);

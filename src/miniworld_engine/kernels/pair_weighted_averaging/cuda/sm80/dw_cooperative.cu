@@ -6,6 +6,7 @@
 #include <set>
 #include <cooperative_groups.h>
 #include "../../../transition/cuda/sm80/sm80_common.cuh"
+#include "../../../_sm_count.cuh"
 namespace pwa_dw_coop80 {
 using namespace a100;
 template<int BM_,int BN_,int BK_,int WM_,int WN_,int ST_>
@@ -133,9 +134,8 @@ template<class C> void launch(torch::Tensor a,torch::Tensor b,torch::Tensor part
  auto stream=at::cuda::getCurrentCUDAStream();
  int active=0;
  C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active,pwa_dw_coop80::pwa_dw_coop_contract_kernel<C>,C::NTHR,C::SMEM));
- const auto* properties=at::cuda::getCurrentDeviceProperties();
  const dim3 grid((L/C::BM)*(L/C::BN),batch,replicas);
- TORCH_CHECK(properties->cooperativeLaunch && (long)grid.x*grid.y*grid.z<=active*properties->multiProcessorCount,"PWA cooperative grid must fit resident capacity");
+ TORCH_CHECK(mw::cooperative_launch() && (long)grid.x*grid.y*grid.z<=(long)active*mw::sm_count(),"PWA cooperative grid must fit resident capacity");
  const auto* ap=(const __nv_bfloat16*)a.data_ptr();const auto* bp=(const __nv_bfloat16*)b.data_ptr();
  float* pp=part.data_ptr<float>();float* op=out.data_ptr<float>();
  int lm=L,km=K,bm=batch,rm=replicas;

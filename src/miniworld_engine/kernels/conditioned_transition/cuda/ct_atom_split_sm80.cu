@@ -4,10 +4,11 @@
 #include <set>
 #include "ct_atom_split_adaln.cuh"
 #include "ct_atom_split_tail.cuh"
+#include "../../_sm_count.cuh"
 namespace ct_atom_split80 {
 template<class G,class P,class K>void launch(K kernel,const P&p,cudaStream_t stream){
  static std::set<int> devices;if(devices.insert(at::cuda::current_device()).second)C10_CUDA_CHECK(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,G::SMEM));
- const int sm=at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+ const int sm=mw::sm_count();
  const int grid=std::min<int64_t>((p.M+16*G::NW-1)/(16*G::NW),sm*G::MINB);
  kernel<<<grid,G::NTHR,G::SMEM,stream>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -15,14 +16,14 @@ template<int NW,int NC>void adaln(AdalnAtomFwdParams p,cudaStream_t s){
  using G=AdalnAtomFwdCfg<NW,(NC==128||NW==8?2:4),NC>;
  auto kernel=adaln_atom_fwd_kernel<G>;static std::set<int> devices;
  if(devices.insert(at::cuda::current_device()).second)C10_CUDA_CHECK(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,G::SMEM));
- const int sm=at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+ const int sm=mw::sm_count();
  const int grid=std::min<int64_t>((p.M+16*NW-1)/(16*NW),sm*G::MINB);
  kernel<<<dim3(grid,128/NC),G::NTHR,G::SMEM,s>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 template<int NW>void tail(CtTailFwdParams p,cudaStream_t s){
  using G=CtTailFwdCfg<NW>;auto kernel=ct_atom_fwd_kernel<G>;static std::set<int> devices;
  if(devices.insert(at::cuda::current_device()).second)C10_CUDA_CHECK(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,G::SMEM));
- const int sm=at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+ const int sm=mw::sm_count();
  const int grid=std::min<int64_t>((p.M+16*NW-1)/(16*NW),sm*G::MINB);
  kernel<<<dim3(grid,2),G::NTHR,G::SMEM,s>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

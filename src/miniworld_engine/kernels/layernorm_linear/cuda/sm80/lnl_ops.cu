@@ -5,12 +5,13 @@
 #include <algorithm>
 
 #include "lnl_sm80.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace {
 
 using bf = __nv_bfloat16;
 
-int nsm() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+int nsm() { return mw::sm_count(); }
 cudaStream_t stream() { return at::cuda::getCurrentCUDAStream(); }
 bool aligned16(const torch::Tensor& t) { return reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0; }
 

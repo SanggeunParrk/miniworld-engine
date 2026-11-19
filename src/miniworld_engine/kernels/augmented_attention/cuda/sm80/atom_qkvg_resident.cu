@@ -6,6 +6,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <set>
 #include "adaln_mma.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace atom_qkvg_resident80 {
 using namespace adl;
@@ -51,7 +52,7 @@ __global__ void __launch_bounds__(NW*32,MINB) atom_qkvg_kernel(Params p){
   }
 }
 template<int NW,int MINB>void launch(Params p,cudaStream_t stream){
-  const int nsm=at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm=mw::sm_count();
   const int grid=std::min<int64_t>((p.M+16*NW-1)/(16*NW),nsm*MINB);
   auto kernel=atom_qkvg_kernel<NW,MINB>;static std::set<int> devices;
   if(devices.insert(at::cuda::current_device()).second)C10_CUDA_CHECK(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,131072));

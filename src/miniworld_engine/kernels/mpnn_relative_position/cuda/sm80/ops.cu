@@ -4,6 +4,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include "relpos_sm80.cuh"
+#include "../../../_sm_count.cuh"
 
 // grad [rows, 16] bf16 or fp32 (contiguous), bucket [rows] int64 -> (grad_table [nbuckets, 16] fp32, grad_bias [16] fp32); nbuckets <= 79
 std::vector<torch::Tensor> relpos_reduce(torch::Tensor grad, torch::Tensor bucket, int64_t nbuckets) {
@@ -17,7 +18,7 @@ std::vector<torch::Tensor> relpos_reduce(torch::Tensor grad, torch::Tensor bucke
   TORCH_CHECK(rows > 0 && grad.numel() == rows * RP_W, "grad must hold 16 channels per bucket index");
   TORCH_CHECK(nbuckets >= 1 && nbuckets <= RP_ROWS - 1, "nbuckets must be in [1, 79]");
   c10::cuda::CUDAGuard guard(grad.device());
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   const int64_t nsteps = (rows + 15) / 16;
   const int nw = RelposCfg<false>::NW;
   const int ctas = (int)std::max<int64_t>(1, std::min<int64_t>((int64_t)sms * RelposCfg<false>::MINB, (nsteps + nw - 1) / nw));

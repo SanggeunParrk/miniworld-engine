@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "affine263.cuh"
+#include "../../_sm_count.cuh"
 namespace triattn_affine_sm80 {
 __global__ void pack_kernel(const __nv_bfloat16* q,const __nv_bfloat16* k,const __nv_bfloat16* v,const __nv_bfloat16* g,const __nv_bfloat16* b,__nv_bfloat16* out,float* zeros){
  int s=blockIdx.x*8+(threadIdx.x>>5),lane=threadIdx.x&31;if(s>=264)return;
@@ -31,7 +32,7 @@ void run(torch::Tensor x,torch::Tensor w,torch::Tensor zeros,torch::Tensor gamma
  TORCH_CHECK(stats.numel()==0||(stats.is_contiguous()&&stats.scalar_type()==at::kFloat&&stats.numel()==(int64_t)T*2));TORCH_CHECK(xh.numel()==0||(xh.is_contiguous()&&xh.scalar_type()==at::kBFloat16&&xh.numel()==(int64_t)T*72));
  c10::cuda::CUDAGuard guard(x.device());for(auto tensor:{w,zeros,gamma,beta,mask,y,bias,stats,xh})TORCH_CHECK(tensor.device()==x.device());
  triattn_affine_sm80::Params p{};p.x=(const __nv_bfloat16*)x.data_ptr();p.w=(const __nv_bfloat16*)w.data_ptr();p.bvec=zeros.data_ptr<float>();p.mask=mask.numel()?mask.data_ptr<uint8_t>():nullptr;p.out=(__nv_bfloat16*)y.data_ptr();p.bias=(__nv_bfloat16*)bias.data_ptr();p.lnst=stats.numel()?stats.data_ptr<float>():nullptr;p.xh=xh.numel()?(__nv_bfloat16*)xh.data_ptr():nullptr;p.ntile=T/32;p.L=L;p.transposed=transposed;p.eps=eps;p.gamma=gamma.data_ptr<float>();p.beta=beta.data_ptr<float>();p.save_affine=direct;
- using G=a100::FusedCfg<64,64,8,1,32>;int grid=(int)std::min<int64_t>(at::cuda::getDeviceProperties(x.device().index())->multiProcessorCount,(int64_t)((p.ntile+G::NW-1)/G::NW));
+ using G=a100::FusedCfg<64,64,8,1,32>;int grid=(int)std::min<int64_t>(mw::sm_count(x.device().index()),(int64_t)((p.ntile+G::NW-1)/G::NW));
  triattn_affine_sm80::native_f1_kernel<G><<<grid,G::NTHR,G::F1_SMEM+2*G::DIN*4,at::cuda::getCurrentCUDAStream()>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void store(torch::Tensor G,std::vector<torch::Tensor> dw){
