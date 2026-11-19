@@ -32,15 +32,17 @@ int sm_count() {
   return n;
 }
 
-struct Plan { int gz; bool small; };
 // The launch shape: a tile (128 x 128 by 256 threads, 64 x 128 or 64 x 64 by 128) and a split-K depth gz (the k range cut in gz slabs summed afterwards in slab order: bitwise
 // repeatable).  Chosen by a cost model fitted to timings of every (tile, gz) over the shapes of a Protenix v1 fp32 training step on the RTX 5090 (170 SMs): the busiest SM's
 // FFMA work (a SM alone with a CTA runs slower per FFMA than with several), a constant per launch, and for gz > 1 the slab round trip.  Depends on the shape and the SM count only.
 struct Plan { int cfg; int gz; };
 struct CfgInfo { int bm, bn; double s1, s2, c0; };  // us per million FFMA of the busiest SM (one CTA a SM / several), constant (us)
-constexpr CfgInfo CFGS[3] = {{128, 128, 4.126, 4.730, 6.501}, {64, 128, 6.470, 5.652, -9.178}, {64, 64, 8.039, 6.069, -12.375}};
+// B stored [K, N] (the backward GEMMs) and B stored [N, K] (the forward weights, transposed through shared memory) fit differently
+constexpr CfgInfo CFGS_KN[3] = {{128, 128, 4.122, 4.504, 9.839}, {64, 128, 6.470, 5.704, -9.680}, {64, 64, 8.051, 6.132, -15.081}};
+constexpr CfgInfo CFGS_NK[3] = {{128, 128, 6.422, 5.992, -11.417}, {64, 128, 9.152, 5.431, -9.661}, {64, 64, 11.966, 5.946, -8.770}};
 
-Plan plan(long M, long N, long K, bool splittable, bool wide_only) {
+Plan plan(long M, long N, long K, bool splittable, bool wide_only, bool kn) {
+  const CfgInfo* CFGS = kn ? CFGS_KN : CFGS_NK;
   const int sms = sm_count();
   static const int gzs[] = {1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 48, 64, 85, 96, 128};
   Plan best{0, 1};
@@ -55,6 +57,7 @@ Plan plan(long M, long N, long K, bool splittable, bool wide_only) {
       const double ks = (double)((K + gz - 1) / gz);
       const double f = (double)per * CFGS[ci].bm * CFGS[ci].bn * ks / 1e6;
       double t = (per == 1 ? CFGS[ci].s1 : CFGS[ci].s2) * f + CFGS[ci].c0;
+      if (ci != 0) t *= 1.08;  // hysteresis: the 128 x 128 tile unless another is clearly faster
       if (gz > 1) t += 2.5 + (gz + 1) * (double)M * N * 4.0 / 1.4e6;
       if (t < best_t) { best_t = t; best = {ci, gz}; }
     }
@@ -138,10 +141,10 @@ at::Tensor mm(at::Tensor a, int64_t lda, int64_t la, at::Tensor b, int64_t ldb, 
     TORCH_CHECK(bias->is_contiguous() && bias->numel() == N, "bias: [N]");
     auto out = into.has_value() ? *into : at::empty({M, N}, a.options());
     p.kper = (int)K; p.c = out.data_ptr<float>(); p.ldc = out.stride(0); p.r = bias->data_ptr<float>(); p.ldr = 0;
-    run_layout<EPI_RES>(p, la, lb, plan(M, N, K, false, false));
+    run_layout<EPI_RES>(p, la, lb, plan(M, N, K, false, false, lb == LB_KN));
     return out;
   }
-  Plan pl = plan(M, N, K, true, false);
+  Plan pl = plan(M, N, K, true, false, lb == LB_KN);
   p.kper = kper_of(K, pl.gz);
   pl.gz = (int)((K + p.kper - 1) / p.kper);
   if (pl.gz == 1) {  // straight into the result (``into``: a caller's buffer, a row stride allowed)
@@ -166,7 +169,7 @@ at::Tensor mm_stacked(at::Tensor a, at::Tensor b0, at::Tensor b1) {
   Args p{};
   p.a = a.data_ptr<float>(); p.lda = K; p.b0 = b0.data_ptr<float>(); p.b1 = b1.data_ptr<float>(); p.ldb = N; p.bsplit = (int)kb;
   p.M = (int)M; p.N = (int)N; p.K = (int)K;
-  Plan pl = plan(M, N, K, true, false);
+  Plan pl = plan(M, N, K, true, false, true);
   p.kper = kper_of(K, pl.gz);
   pl.gz = (int)((K + p.kper - 1) / p.kper);
   auto out = at::empty({pl.gz, M, N}, a.options());
@@ -188,7 +191,7 @@ std::vector<at::Tensor> swiglu_fwd(at::Tensor x, at::Tensor wa, at::Tensor wb, b
   p.a = x.data_ptr<float>(); p.lda = K; p.b0 = wa.data_ptr<float>(); p.b1 = wb.data_ptr<float>(); p.ldb = K; p.bsplit = INT_MAX;
   p.c = h.data_ptr<float>(); p.ldc = H; p.aux = save ? ab.data_ptr<float>() : nullptr; p.ldaux = 2 * H;
   p.M = (int)M; p.N = (int)H; p.K = (int)K; p.kper = (int)K; p.H = (int)H;
-  launch<LA_MK, LB_NK, EPI_SWIGLU>(p, plan(M, 2 * H, K, false, true));
+  launch<LA_MK, LB_NK, EPI_SWIGLU>(p, plan(M, 2 * H, K, false, true, false));
   return {h, ab};
 }
 
@@ -202,7 +205,7 @@ at::Tensor gemm_res(at::Tensor h, at::Tensor ws, at::Tensor x) {
   Args p{};
   p.a = h.data_ptr<float>(); p.lda = K; p.b0 = ws.data_ptr<float>(); p.b1 = p.b0; p.ldb = K; p.bsplit = INT_MAX;
   p.M = (int)M; p.N = (int)N; p.K = (int)K;
-  Plan pl = plan(M, N, K, true, false);
+  Plan pl = plan(M, N, K, true, false, false);
   p.kper = kper_of(K, pl.gz);
   pl.gz = (int)((K + p.kper - 1) / p.kper);
   if (pl.gz == 1) {
@@ -229,7 +232,7 @@ at::Tensor dab_gemm(at::Tensor dy, at::Tensor ws, at::Tensor ab) {
   p.a = dy.data_ptr<float>(); p.lda = K; p.b0 = ws.data_ptr<float>(); p.b1 = p.b0; p.ldb = H; p.bsplit = INT_MAX;
   p.r = ab.data_ptr<float>(); p.ldr = 2 * H; p.aux = dab.data_ptr<float>(); p.ldaux = 2 * H;
   p.M = (int)M; p.N = (int)H; p.K = (int)K; p.kper = (int)K; p.H = (int)H;
-  launch<LA_MK, LB_KN, EPI_DAB>(p, plan(M, H, K, false, false));
+  launch<LA_MK, LB_KN, EPI_DAB>(p, plan(M, H, K, false, false, true));
   return dab;
 }
 
