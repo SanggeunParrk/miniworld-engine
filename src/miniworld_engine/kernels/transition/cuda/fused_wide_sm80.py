@@ -118,8 +118,8 @@ def _tiles_sm120(m: int, d: int, h: int) -> tuple[int, int]:
     shared memory an SM holds one CTA of the A100's 64 KB tiles but two of the 48 KB ones (probe_tiles, every requirement shape, L2 flushed):
     dual config 2 (64 x 64, 48 KB) is 20-30 % faster than config 0 from 16 k rows on (the 8-warp configs 1 / 5 gain at most 2-4 % at the
     largest D 256+ calls); the squeeze takes config 3 (128 x 64) at D 64 / D 128 n 2, config 2 (64 x 128) at D 128 n 4 below 393 k rows and
-    config 8 (its 5-slice twin of config 3) above, and at D >= 256 config 2 below 5e10 multiply-adds and config 7 (256 x 128, 8 warps,
-    96 KB) above (5-8 % over config 0).  At few rows (token-single calls, at most ``SM120_SMALL_ROWS``) the dual GEMM takes config
+    config 8 (its 5-slice twin of config 3) above, and at D >= 256 config 2 at every size (config 7, 256 x 128, 8 warps, was
+    taken above 5e10 multiply-adds: interleaved A-B-A-B, CUDA graph, L2 flushed, D 256 .. 512 at 65 k .. 2 M rows: config 2 is 1-4 % faster).  At few rows (token-single calls, at most ``SM120_SMALL_ROWS``) the dual GEMM takes config
     13 (64 x 32: twice the CTAs of config 2) and the squeeze, the hand GEMM from ``SM120_HAND_SQUEEZE_MIN_ROWS`` on, config 12 (64 x 64): cuBLAS picks
     its slow wmma kernels there on sm_120 (bench.py, CUDA graph, L2 flushed: d 384 .. 768 at 128 .. 2048 rows, 5-20 % faster).
     Past ``_rows64_ok`` (more 64-row tiles than the grid's y extent: L 2048 pair calls, 4 M rows) the 64-row configs take their 128-row
@@ -133,12 +133,14 @@ def _tiles_sm120(m: int, d: int, h: int) -> tuple[int, int]:
     elif d == 128:
         res = 2 if m < 393216 else 8
     else:
-        res = 7 if m * d * h >= 5e10 else 2
+        res = 2 if _rows64_ok(m) else 7  # (config 7, 256 x 128 / 8 warps, was taken from 5e10 multiply-adds on: the interleaved A-B-A-B of 2026-11-19, D 256 .. 512 at 65 k .. 2 M rows, has config 2 1-4 % faster everywhere)
     return (2 if _rows64_ok(m) else 0), res
 
 
 #: the CUDA grid's y extent: the extension's GEMMs put a call's row tiles there
 _GRID_Y = 65535
+#: most rows of an RTX 5090 inference call (``transition_sm80`` splits past it): whole 64-row tiles within the grid
+SM120_INFER_MAX_ROWS = 64 * _GRID_Y
 
 
 def _rows64_ok(m: int) -> bool:
@@ -352,7 +354,7 @@ def forward_into(
     ext = _ext()
     gamma, beta = _f32(gamma, True), _f32(beta, True)
     wa, wb, ws = _kernel_weights(wa, wb, ws, x.dtype, cache=True)
-    dual, res = _tiles(m, d, wa.shape[0])
+    dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(m, d, wa.shape[0])  # the RTX 5090 takes its own tile table (the A100 one is 20-30 % slower there)
     xn, _ = ext.ln_fwd(x, gamma, beta, eps, False)
     hid = ext.dual_swiglu(xn, wa, wb, dual)
     del xn
