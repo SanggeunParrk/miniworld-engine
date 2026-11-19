@@ -194,9 +194,40 @@ def _ln_fold(gamma, beta, wa, wb):
     return _capture.param_forms("transition_sm120_ln_fold", [gamma, beta, wa, wb], build, capture_reads_eager=True)
 
 
+#: rows from which the statistics pass runs on a side stream in ``SM120_STATS_CHUNKS`` row chunks, so the bandwidth-bound statistics of chunk k + 1 overlap the tensor-bound dual GEMM of chunk k
+SM120_STATS_OVERLAP_MIN_ROWS = 131072
+SM120_STATS_CHUNKS = 8
+_side: dict = {}
+
+
 def _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual):
     wa_, wb_, cs, bias = _ln_fold(gamma, beta, wa, wb)
-    return ext.dual_swiglu_ln(x, ext.ln_stats(x, eps), cs, bias, wa_, wb_, dual)
+    m = x.shape[0]
+    if m < SM120_STATS_OVERLAP_MIN_ROWS or SM120_STATS_CHUNKS < 2:
+        return ext.dual_swiglu_ln(x, ext.ln_stats(x, eps), cs, bias, wa_, wb_, dual)
+    cur = torch.cuda.current_stream(x.device)
+    side = _side.get(x.device.index)
+    if side is None:
+        side = _side[x.device.index] = torch.cuda.Stream(x.device)
+    step = -(-m // SM120_STATS_CHUNKS)
+    step = -(-step // 256) * 256
+    bounds = [(r, min(r + step, m)) for r in range(0, m, step)]
+    side.wait_stream(cur)  # x is ready
+    stats, events = [], []
+    with torch.cuda.stream(side):
+        for r0, r1 in bounds:
+            st = ext.ln_stats(x[r0:r1], eps)
+            ev = torch.cuda.Event()
+            ev.record(side)
+            stats.append(st)
+            events.append(ev)
+    hid = torch.empty((m, wa_.shape[0]), dtype=x.dtype, device=x.device)
+    for (r0, r1), st, ev in zip(bounds, stats, events, strict=True):
+        cur.wait_event(ev)
+        _record_stream(st, cur)
+        ext.dual_swiglu_ln(x[r0:r1], st, cs, bias, wa_, wb_, dual, out=hid[r0:r1])
+    _record_stream(x, side)
+    return hid
 
 
 def _gate_tile(m: int, d: int, h: int, sm120: bool) -> int:

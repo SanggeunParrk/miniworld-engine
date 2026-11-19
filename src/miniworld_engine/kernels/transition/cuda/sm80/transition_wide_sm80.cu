@@ -240,14 +240,15 @@ torch::Tensor ln_stats(torch::Tensor x, double eps) {
 }
 
 // h = SwiGLU(LN(x) [Wa; Wb]^T): the dual GEMM on x with wa / wb = bf16(gamma W) (``ln_fold_weights``), the LayerNorm folded into the epilogue (stats from ln_stats, cs / bias [2, H] f32)
-torch::Tensor dual_swiglu_ln(torch::Tensor x, torch::Tensor stats, torch::Tensor cs, torch::Tensor bias, torch::Tensor wa, torch::Tensor wb, int64_t cfg) {
+torch::Tensor dual_swiglu_ln(torch::Tensor x, torch::Tensor stats, torch::Tensor cs, torch::Tensor bias, torch::Tensor wa, torch::Tensor wb, int64_t cfg, c10::optional<torch::Tensor> out_buf = c10::nullopt) {
   TORCH_CHECK(x.is_cuda() && x.is_contiguous() && x.dim() == 2 && x.scalar_type() == at::kBFloat16, "x: [M, K] bf16");
   TORCH_CHECK(wa.is_contiguous() && wb.is_contiguous() && wa.sizes() == wb.sizes() && wa.size(1) == x.size(1), "wa / wb: [H, K]");
   TORCH_CHECK(stats.is_contiguous() && stats.scalar_type() == at::kFloat && stats.size(0) == x.size(0), "stats [M, 2] f32");
   TORCH_CHECK(cs.scalar_type() == at::kFloat && bias.scalar_type() == at::kFloat && cs.is_contiguous() && bias.is_contiguous() && cs.numel() == 2 * wa.size(0) && bias.numel() == 2 * wa.size(0), "cs / bias: [2, H] f32");
   const int64_t M = x.size(0), K = x.size(1), H = wa.size(0);
   TORCH_CHECK(K % bk_of((int)cfg) == 0 && H % hidden_per_cta((int)cfg) == 0, "dual tiling: K % BK, H % hidden per tile");
-  auto h = torch::empty({M, H}, x.options());
+  torch::Tensor h = out_buf.has_value() ? *out_buf : torch::empty({M, H}, x.options());
+  if (out_buf.has_value()) TORCH_CHECK(h.is_cuda() && h.is_contiguous() && h.scalar_type() == at::kBFloat16 && h.size(0) == M && h.size(1) == H, "out: [M, H] bf16");
   if (M == 0) return h;
   a100::DualParams p{};
   p.a = cptr<__nv_bfloat16>(x); p.wa = cptr<__nv_bfloat16>(wa); p.wb = cptr<__nv_bfloat16>(wb); p.h = mptr<__nv_bfloat16>(h);
@@ -714,7 +715,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_fwd", &ln_fwd);
 #ifdef MWE_SM120
   m.def("ln_stats", &ln_stats);
-  m.def("dual_swiglu_ln", &dual_swiglu_ln);
+  m.def("dual_swiglu_ln", &dual_swiglu_ln, pybind11::arg("x"), pybind11::arg("stats"), pybind11::arg("cs"), pybind11::arg("bias"), pybind11::arg("wa"), pybind11::arg("wb"), pybind11::arg("cfg"), pybind11::arg("out") = pybind11::none());
 #endif
   m.def("dual_swiglu", &dual_swiglu, pybind11::arg("a"), pybind11::arg("wa"), pybind11::arg("wb"), pybind11::arg("cfg"), pybind11::arg("epi") = 0);
   m.def("dual_swiglu_save", &dual_swiglu_save);

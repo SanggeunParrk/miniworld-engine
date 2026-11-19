@@ -72,3 +72,27 @@ def test_row_blocks_with_the_fused_layernorm_stay_accurate(monkeypatch: pytest.M
     err_w = (whole.double() - want).abs().pow(2).mean().sqrt()
     err_b = (blocks.double() - want).abs().pow(2).mean().sqrt()
     assert err_b <= err_w * 1.05 + 1e-6
+
+
+def test_statistics_overlap_matches_the_serial_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Above ``SM120_STATS_OVERLAP_MIN_ROWS`` the statistics run on a side stream in row chunks (and under a CUDA graph): the output bits of the serial pass."""
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+
+    module = _module(256, 2)
+    kern = copy.deepcopy(module).set_backend("cuda").eval()
+    x = torch.randn(1, 150000, 256, device="cuda", generator=torch.Generator(device="cuda").manual_seed(4)).to(torch.bfloat16)
+    with torch.no_grad():
+        overlapped = kern(x)
+        graph = torch.cuda.CUDAGraph()
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            kern(x)
+        torch.cuda.synchronize()
+        with torch.cuda.graph(graph, stream=stream):
+            replay = kern(x)
+        graph.replay()
+        torch.cuda.synchronize()
+        monkeypatch.setattr(fw, "SM120_STATS_OVERLAP_MIN_ROWS", 10**9)
+        serial = kern(x)
+    assert torch.equal(overlapped, serial)
+    assert torch.equal(replay, serial)
