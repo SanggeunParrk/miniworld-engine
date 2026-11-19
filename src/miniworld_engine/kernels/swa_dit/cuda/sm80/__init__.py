@@ -572,7 +572,27 @@ def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: floa
     g = torch.empty(m, C, device=q.device, dtype=torch.bfloat16)
     xs, pqs, pks = (torch.empty(m, C, device=q.device, dtype=torch.bfloat16) if save else None for _ in range(3))
     q1s, atts, ys, ffs = (torch.empty(m, C, device=q.device, dtype=torch.bfloat16) if save else None for _ in range(4))
-    ext.swa_qkvg_fwd_half(qf, mod, cos, sin, wqkv, wg, qh, kh, vh, g, s, n, eps, qk_eps, qcfg["cfg"], False, qcfg["nsplit"], qcfg.get("max_pairs", 0), *(xs, pqs, pks))
+    ext.swa_qkvg_fwd_half(
+        qf,
+        mod,
+        cos,
+        sin,
+        wqkv,
+        wg,
+        qh,
+        kh,
+        vh,
+        g,
+        s,
+        n,
+        eps,
+        qk_eps,
+        qcfg["cfg"],
+        False,
+        qcfg["nsplit"],
+        qcfg.get("max_pairs", 0),
+        *(xs, pqs, pks),
+    )
     lse = None
     if glob and not save:  # global attention: every key of the sequence (attn_global_sm120.cuh), the same qkvg / FFN stages around it
         o = torch.empty_like(qf)
@@ -588,3 +608,21 @@ def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: floa
     if save:
         return [out.view(n, s, C), qh, kh, vh, g, o, lse, q1s, xs, pqs, pks, atts, ys, ffs]
     return out.view(n, s, C)
+
+
+def _gate_launch_sm120(m: int, s: int) -> tuple[int, int]:
+    """(cfg, hsplit) of the FFN backward's gate kernel on the RTX 5090: the 8-warp CTAs (72 KB ring: one an SM), the hidden chunks spread over the fewest CTAs per tile group that give at least 80 CTAs (measured: L 5120 hsplit 2 and 4 are 4-5 % faster than 8)."""
+    ngrp = -(-(-(-s // 16) * (m // s)) // 8)
+    return 0, next((hs for hs in (1, 2, 4) if ngrp * hs >= 80), 8)
+
+
+def ffn_bwd_gate_sm120(dy, y, ffn, mod, wu, wdt, dmod, n: int, s: int):
+    """The FFN backward's gate kernel alone (``fused_sm120.cu``): ``(dffn, hh, dab)`` bf16 of ``dy`` / ``y`` / ``ffn`` [M, 128], ``mod`` [M, 768] fp32 (one modulation row per sequence row), ``wu`` [512, 128],
+    ``wdt`` = Wd^T [256, 128]; d gate_f goes into columns 640 .. 767 of ``dmod``. The rest of the FFN backward (dy = dab Wu, the adaLN backward) stays with the caller."""
+    m = dy.shape[0]
+    dffn = torch.empty(m, C, device=dy.device, dtype=torch.bfloat16)
+    hh = torch.empty(m, NHID, device=dy.device, dtype=torch.bfloat16)
+    dab = torch.empty(m, 2 * NHID, device=dy.device, dtype=torch.bfloat16)
+    cfg, hsplit = _gate_launch_sm120(m, s)
+    _ext_sm120().swa_ffn_bwd_gate(dy, y, ffn, mod, wu.contiguous(), wdt, dffn, hh, dab, dmod, s, n, cfg, hsplit)
+    return dffn, hh, dab

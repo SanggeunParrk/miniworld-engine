@@ -1497,7 +1497,9 @@ class AtomDiTMiniWorld(BackendModule):
         if torch.is_grad_enabled() and any(t.requires_grad for t in (q, c, wmod, *weights)):
             from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_output
 
-            mod = _native_caller_output(SWADiTModulationH100.apply(c, wmod, bf16_table(q, c, self.attn.half_window)), cond, wmod, force=True)
+            mod = _native_caller_output(
+                SWADiTModulationH100.apply(c, wmod, bf16_table(q, c, self.attn.half_window)), cond, wmod, force=True
+            )
             # one modulation row per sequence row: B = N (no augment structure is known here)
             return SWADiTBlockFunction.apply(q, mod, cos, sin, seqused, *weights, n, self.attn.half_window)
         return self._h100_eval(q, native_h100_silu(c), cos, sin, seqused)
@@ -1889,7 +1891,9 @@ class AtomDiTESMFold2Pair(BackendModule):
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     backends = ("pytorch", "triton", "cuda")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:5090_sm120": 1}  # 2026-11-12: the sm_80 paths built for sm_120a (bias tile / band read from global memory)
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:5090_sm120": 1
+    }  # 2026-11-12: the sm_80 paths built for sm_120a (bias tile / band read from global memory)
 
     def __init__(
         self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *, backend: str = "pytorch"

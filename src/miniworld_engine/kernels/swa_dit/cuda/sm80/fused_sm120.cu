@@ -11,6 +11,7 @@
 #include "ffn_fwd_sm120.cuh"
 #include "fp32_fwd_sm120.cuh"
 #include "attn_global_sm120.cuh"
+#include "ffn_bwd_sm80.cuh"
 #include "../../../_sm_count.cuh"
 
 #define CHECK_CUDA_BF16(x) TORCH_CHECK((x).is_cuda() && (x).scalar_type() == torch::kBFloat16, #x " must be a CUDA bf16 tensor")
@@ -167,6 +168,41 @@ void swa_ffn_f32(torch::Tensor q, torch::Tensor g, torch::Tensor o, torch::Tenso
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+template <class G>
+void launch_ffn_bwd_gate_sm120(const sw80::FfnBwdGateParams& p) {
+  static bool attr[64] = {};
+  const int dev = at::cuda::current_device() & 63;
+  if (!attr[dev]) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(sw80::ffn_bwd_gate_kernel<G, sw80::MODE_SINGLE>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
+    attr[dev] = true;
+  }
+  const int ntile = ((p.S + 15) / 16) * (p.M / p.S), ngrp = (ntile + G::NW - 1) / G::NW;
+  const unsigned ctas = (unsigned)std::max(1, std::min(num_sms() * G::MINB, ngrp * p.hsplit));
+  sw80::ffn_bwd_gate_kernel<G, sw80::MODE_SINGLE><<<ctas, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// the FFN backward's gate kernel alone (ffn_bwd_sm80.cuh; its 72 KB weight ring fits the 99 KB; the dy kernel keeps 128 KB of Wu^T and does not): dy [M, 128] bf16 (dq2), y, ffn, mod [M, 768] fp32
+// (one modulation row per sequence row: MODE_SINGLE), Wu [512, 128], Wd^T [256, 128] -> dffn [M, 128], hh [M, 256], dab [M, 512] bf16, d gate_f in dmod columns 640 .. 767
+void swa_ffn_bwd_gate(torch::Tensor dy, torch::Tensor y, torch::Tensor ffn, torch::Tensor mod, torch::Tensor wu, torch::Tensor wdt, torch::Tensor dffn, torch::Tensor hh,
+                      torch::Tensor dab, torch::Tensor dmod, int64_t S, int64_t B, int64_t cfg, int64_t hsplit) {
+  TORCH_CHECK(hsplit == 1 || hsplit == 2 || hsplit == 4 || hsplit == 8, "hsplit must be 1, 2, 4 or 8");
+  for (const auto* t : {&dy, &y, &ffn, &wu, &wdt, &dffn, &hh, &dab}) { CHECK_CUDA_BF16(*t); CHECK_CONTIG(*t); }
+  CHECK_CUDA_F32(mod); CHECK_CUDA_F32(dmod); CHECK_CONTIG(mod); CHECK_CONTIG(dmod);
+  const int64_t M = dy.size(0);
+  TORCH_CHECK(dy.size(1) == 128 && M % S == 0 && M / S == B && mod.numel() == B * S * 768 && dmod.numel() == B * S * 768 && wu.size(0) == 512 && wu.size(1) == 128 && wdt.size(0) == 256 &&
+              wdt.size(1) == 128 && hh.numel() == M * 256 && dab.numel() == M * 512 && dffn.numel() == M * 128, "bad operand sizes");
+  if (M == 0) return;
+  c10::cuda::CUDAGuard guard(dy.device());
+  sw80::FfnBwdGateParams p{bptr(dy), bptr(y), bptr(ffn), mod.data_ptr<float>(), bptr(wu), bptr(wdt), bptr_w(dffn), bptr_w(hh), bptr_w(dab), dmod.data_ptr<float>(), (int)M, (int)S, (int)B, (int)hsplit};
+  switch (cfg) {
+    case 0: launch_ffn_bwd_gate_sm120<sw80::FfnBwdGateCfg<8, 1>>(p); break;
+    case 1: launch_ffn_bwd_gate_sm120<sw80::FfnBwdGateCfg<4, 2>>(p); break;
+    case 2: launch_ffn_bwd_gate_sm120<sw80::FfnBwdGateCfg<6, 2>>(p); break;
+    default: TORCH_CHECK(false, "unknown FFN backward (gate) configuration");
+  }
+}
+
 // global-attention forward (attn_global_sm120.cuh): q, k, v head-major [N, 4, S, 32] bf16, seqused [N] int32 -> o [N S, C] bf16 (no lse)
 void swa_attn_global_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor seqused, torch::Tensor o) {
   CHECK_CUDA_BF16(q); CHECK_CUDA_BF16(k); CHECK_CUDA_BF16(v); CHECK_CUDA_BF16(o);
@@ -185,6 +221,7 @@ void swa_attn_global_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torc
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swa_attn_global_fwd", &swa_attn_global_fwd);
+  m.def("swa_ffn_bwd_gate", &swa_ffn_bwd_gate);
   m.def("swa_qkvg_f32", &swa_qkvg_f32);
   m.def("swa_ffn_f32", &swa_ffn_f32);
   m.def("swa_qkvg_fwd_half", &swa_qkvg_fwd_half);
