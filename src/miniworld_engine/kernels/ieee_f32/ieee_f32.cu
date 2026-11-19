@@ -32,14 +32,14 @@ int sm_count() {
   return n;
 }
 
-// The launch shape: a tile (128 x 128 by 256 threads, 64 x 128 or 64 x 64 by 128) and a split-K depth gz (the k range cut in gz slabs summed afterwards in slab order: bitwise
+// The launch shape: a tile (128 x 128 or 128 x 64 by 256 threads, 64 x 128 or 64 x 64 by 128) and a split-K depth gz (the k range cut in gz slabs summed afterwards in slab order: bitwise
 // repeatable).  Chosen by a cost model fitted to timings of every (tile, gz) over the shapes of a Protenix v1 fp32 training step on the RTX 5090 (170 SMs): the busiest SM's
 // FFMA work (a SM alone with a CTA runs slower per FFMA than with several), a constant per launch, and for gz > 1 the slab round trip.  Depends on the shape and the SM count only.
 struct Plan { int cfg; int gz; };
 struct CfgInfo { int bm, bn; double s1, s2, c0; };  // us per million FFMA of the busiest SM (one CTA a SM / several), constant (us)
 // B stored [K, N] (the backward GEMMs) and B stored [N, K] (the forward weights, transposed through shared memory) fit differently
-constexpr CfgInfo CFGS_KN[3] = {{128, 128, 4.122, 4.504, 9.839}, {64, 128, 6.470, 5.704, -9.680}, {64, 64, 8.051, 6.132, -15.081}};
-constexpr CfgInfo CFGS_NK[3] = {{128, 128, 6.422, 5.992, -11.417}, {64, 128, 9.152, 5.431, -9.661}, {64, 64, 11.966, 5.946, -8.770}};
+constexpr CfgInfo CFGS_KN[4] = {{128, 128, 4.677, 5.412, -15.980}, {64, 128, 6.525, 5.765, -4.729}, {64, 64, 8.098, 5.892, -3.514}, {128, 64, 5.330, 5.575, -6.544}};
+constexpr CfgInfo CFGS_NK[4] = {{128, 128, 7.189, 6.045, -8.119}, {64, 128, 10.881, 5.616, -7.480}, {64, 64, 14.737, 6.229, -6.743}, {128, 64, 10.437, 6.102, -8.781}};
 
 Plan plan(long M, long N, long K, bool splittable, bool wide_only, bool kn) {
   const CfgInfo* CFGS = kn ? CFGS_KN : CFGS_NK;
@@ -47,7 +47,7 @@ Plan plan(long M, long N, long K, bool splittable, bool wide_only, bool kn) {
   static const int gzs[] = {1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 48, 64, 85, 96, 128};
   Plan best{0, 1};
   double best_t = 1e30;
-  for (int ci = 0; ci < 3; ++ci) {
+  for (int ci = 0; ci < 4; ++ci) {
     if (wide_only && CFGS[ci].bn != 128) continue;
     const long tiles = ((N + CFGS[ci].bn - 1) / CFGS[ci].bn) * ((M + CFGS[ci].bm - 1) / CFGS[ci].bm);
     for (int gz : gzs) {
@@ -65,6 +65,51 @@ Plan plan(long M, long N, long K, bool splittable, bool wide_only, bool kn) {
   return best;
 }
 
+
+// The best (tile, gz) of the shapes of the real Protenix v1 fp32 training step on the RTX 5090 (timed over every candidate with cold operands: la, lb, M, N, K, cfg, gz); the model
+// above is the rule for every other shape (it lands within 8% of these by weighted time).  An entry is a plain choice of launch shape: any (cfg, gz) is correct for any shape.
+struct Tuned { int la, lb, M, N, K, cfg, gz; };
+constexpr Tuned TUNED[] = {
+    {0, 0, 384, 768, 384, 2, 6},
+    {0, 0, 384, 768, 768, 2, 6},
+    {0, 0, 384, 768, 1536, 1, 12},
+    {0, 0, 384, 1536, 384, 2, 3},
+    {0, 0, 384, 3072, 768, 1, 3},
+    {0, 0, 3072, 768, 384, 3, 1},
+    {0, 0, 3072, 768, 768, 1, 3},
+    {0, 0, 3072, 768, 1536, 1, 3},
+    {0, 0, 3072, 1536, 384, 2, 1},
+    {0, 0, 3072, 3072, 768, 1, 1},
+    {0, 0, 4096, 128, 128, 3, 2},
+    {0, 0, 4096, 128, 256, 2, 3},
+    {0, 0, 4096, 512, 128, 2, 1},
+    {0, 0, 32768, 128, 128, 2, 1},
+    {0, 0, 32768, 512, 128, 1, 1},
+    {0, 1, 3072, 384, 768, 0, 2},
+    {0, 1, 3072, 384, 1536, 0, 2},
+    {0, 1, 3072, 768, 3072, 0, 1},
+    {0, 1, 3072, 1536, 768, 0, 1},
+    {0, 1, 4096, 128, 128, 2, 1},
+    {0, 1, 32768, 128, 256, 0, 1},
+    {0, 1, 32768, 128, 512, 0, 1},
+    {1, 1, 128, 128, 4096, 2, 32},
+    {1, 1, 128, 128, 32768, 0, 128},
+    {1, 1, 256, 128, 32768, 0, 64},
+    {1, 1, 512, 128, 32768, 0, 32},
+    {1, 1, 512, 128, 147456, 0, 85},
+    {1, 1, 768, 384, 3072, 0, 8},
+    {1, 1, 768, 768, 3072, 0, 4},
+    {1, 1, 1536, 384, 3072, 0, 4},
+    {1, 1, 1536, 768, 3072, 0, 2},
+    {1, 1, 3072, 768, 3072, 0, 1},
+};
+
+Plan tuned_plan(int64_t la, int64_t lb, long M, long N, long K) {
+  if (sm_count() != 170) return {-1, 1};  // measured on the 170-SM card
+  for (const Tuned& t : TUNED)
+    if (t.la == la && t.lb == lb && t.M == M && t.N == N && t.K == K) return {t.cfg, t.gz};
+  return {-1, 1};
+}
 template <int LA, int LB, int EPI, int BMT, int BNT, int NT, int MINB>
 void launch_cfg(Args& p, int gz) {
   const unsigned gx = (EPI == EPI_SWIGLU) ? (unsigned)((p.N + 63) / 64) : (unsigned)((p.N + BNT - 1) / BNT);
@@ -77,7 +122,10 @@ template <int LA, int LB, int EPI>
 void launch(Args& p, Plan pl) {
   if (pl.cfg == 0) launch_cfg<LA, LB, EPI, 128, 128, 256, 1>(p, pl.gz);
   else if (pl.cfg == 1) launch_cfg<LA, LB, EPI, 64, 128, 128, 3>(p, pl.gz);
-  else if constexpr (EPI != EPI_SWIGLU) launch_cfg<LA, LB, EPI, 64, 64, 128, 4>(p, pl.gz);  // (the SwiGLU tile is 128 wide: plan() never picks the 64-wide one for it)
+  else if constexpr (EPI != EPI_SWIGLU) {  // (the SwiGLU tile is 128 wide: plan() never picks a 64-wide one for it)
+    if (pl.cfg == 2) launch_cfg<LA, LB, EPI, 64, 64, 128, 4>(p, pl.gz);
+    else launch_cfg<LA, LB, EPI, 128, 64, 256, 2>(p, pl.gz);
+  }
 }
 // out [M, N] = sum of the slabs [gz, M, N] (+ res) in slab order
 __global__ void sum_slabs_k(const float* __restrict__ slabs, const float* __restrict__ res, float* __restrict__ out, int gz, long n4, long slab4, int cols4, long ldo) {
@@ -144,7 +192,8 @@ at::Tensor mm(at::Tensor a, int64_t lda, int64_t la, at::Tensor b, int64_t ldb, 
     run_layout<EPI_RES>(p, la, lb, plan(M, N, K, false, false, lb == LB_KN));
     return out;
   }
-  Plan pl = plan(M, N, K, true, false, lb == LB_KN);
+  Plan pl = tuned_plan(la, lb, M, N, K);
+  if (pl.cfg < 0) pl = plan(M, N, K, true, false, lb == LB_KN);
   p.kper = kper_of(K, pl.gz);
   pl.gz = (int)((K + p.kper - 1) / p.kper);
   if (pl.gz == 1) {  // straight into the result (``into``: a caller's buffer, a row stride allowed)
