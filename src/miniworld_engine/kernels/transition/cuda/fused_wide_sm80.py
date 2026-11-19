@@ -165,6 +165,7 @@ SM120_FUSED_LN_MIN_ROWS = 32768
 SM120_FUSED_LN_CFGS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13)
 SM120_DUAL_OVERRIDE = None  # experiments: the dual config of calls of at least SM120_DUAL_OVERRIDE_ROWS rows
 SM120_DUAL_OVERRIDE_ROWS = 0
+SM120_RES_OVERRIDE = None
 
 
 def _fused_ln(m: int, d: int, dual: int, x: torch.Tensor) -> bool:
@@ -343,6 +344,8 @@ def _fwd_launch(
     dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(m, d, wa.shape[0])
     if SM120_DUAL_OVERRIDE is not None and m >= SM120_DUAL_OVERRIDE_ROWS:
         dual = SM120_DUAL_OVERRIDE
+    if SM120_RES_OVERRIDE is not None:
+        res = SM120_RES_OVERRIDE
     if ln and not save and _fused_ln(m, d, dual, x):
         hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
         return (_squeeze(ext, hid, ws, x, ln, res), x.new_empty((0,)), torch.empty((0, 2), dtype=torch.float32, device=x.device), x.new_empty((0,)), x.new_empty((0,)))
