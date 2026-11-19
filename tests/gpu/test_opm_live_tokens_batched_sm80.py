@@ -89,7 +89,9 @@ def test_chai_products_per_group_route_table_and_values() -> None:
 
     per_group = chai_sm80._per_group
     assert not per_group(1024, 1280) and per_group(1024, 1536) and per_group(1024, 2048)
-    assert not per_group(512, 2048) and not per_group(2048, 640) and per_group(2048, 768) and per_group(4096, 640) and not per_group(4096, 512)
+    assert (
+        not per_group(512, 2048) and not per_group(2048, 640) and per_group(2048, 768) and per_group(4096, 640) and not per_group(4096, 512)
+    )
     s, n = 2048, 768  # the per-group route; all-live and padded masks
     gen = torch.Generator(device="cuda").manual_seed(0)
     a = torch.randn(8, s, 8 * n, device="cuda", dtype=torch.bfloat16, generator=gen)

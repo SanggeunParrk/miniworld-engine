@@ -124,7 +124,9 @@ def attention_fwd(qh, kh, vh, seqused, half_window: int, out_dtype: torch.dtype 
         if out_dtype == _BF:
             return sm80.attn_fwd(qh, kh, vh, seqused)
         n, _, s, _ = qh.shape
-        o = o_out if o_out is not None else torch.empty(n * s, C, device=qh.device, dtype=_F32)  # (o_out / lse_out: rows of a chunked call's buffers)
+        o = (
+            o_out if o_out is not None else torch.empty(n * s, C, device=qh.device, dtype=_F32)
+        )  # (o_out / lse_out: rows of a chunked call's buffers)
         lse = lse_out if lse_out is not None else torch.empty(n, H, s, device=qh.device, dtype=_F32)
         sm80._ext().swa_attn_fwd(qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), seqused, o, lse)
         return o, lse
@@ -255,7 +257,35 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
 
 
 def _bwd_fp32(
-    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, half_window: int, forms=None, dq_out=None, acc=None, dmod_out=None
+    dy,
+    q,
+    mod,
+    cos,
+    sin,
+    seqused,
+    wqkv,
+    wg,
+    wo,
+    wu,
+    wd,
+    qh,
+    kh,
+    vh,
+    g,
+    o,
+    lse,
+    q1,
+    x,
+    pq,
+    pk,
+    att,
+    y,
+    ffn,
+    half_window: int,
+    forms=None,
+    dq_out=None,
+    acc=None,
+    dmod_out=None,
 ) -> list[torch.Tensor]:
     """``[dq, dmod, dWqkv, dWg, dWo, dWu, dWd]`` fp32 of :func:`_fwd_fp32` (``dispatch._native_h100_bwd``'s fp32 branch); for bf16 (the
     RTX 5090) the activation gradients bf16 as the forward's, dmod and the weight gradients fp32."""
@@ -319,6 +349,7 @@ def _bwd_fp32(
     ):  # the five weight gradients in one grouped split-K GEMM + one reduction (cuBLAS runs them at ~40 TFLOPs there)
         dwqkv, dwg, dwo, dwu, dwd = sm80.wgrad5_sm120(dp, x, dab, y, datt, gated, dffn, hh)
         return [dq.view(n, s, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
+
     def wgrad(i: int, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:  # acc: the running sums of a chunked call (beta 1 in the product)
         if acc is None:
             return _mm(a, b)

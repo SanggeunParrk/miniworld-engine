@@ -17,8 +17,12 @@ def _rel(x: torch.Tensor, gold: torch.Tensor) -> float:
     return float((x.double() - gold.double()).abs().max() / gold.double().abs().max().clamp_min(1e-30))
 
 
-@pytest.mark.parametrize("half_window,samples,length,chunk_rows", [(64, 6, 1024, 2048), (64, 5, 1024, 2048), (1000000, 4, 512, 1024)])  # a global window stays on one call
-def test_chunked_fp32_training_equals_the_single_call(half_window: int, samples: int, length: int, chunk_rows: int, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "half_window,samples,length,chunk_rows", [(64, 6, 1024, 2048), (64, 5, 1024, 2048), (1000000, 4, 512, 1024)]
+)  # a global window stays on one call
+def test_chunked_fp32_training_equals_the_single_call(
+    half_window: int, samples: int, length: int, chunk_rows: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (12, 0):
         pytest.skip("the RTX 5090 (sm_120) path")
     from miniworld_engine.kernels.swa_dit.cuda.sm80 import composed
@@ -51,7 +55,9 @@ def test_chunked_fp32_training_equals_the_single_call(half_window: int, samples:
     (o1, dx1, dc1, g1), (o2, dx2, dc2, g2) = results
     assert _rel(o2, o1) < 5e-4  # (cuBLAS picks its kernels by the row count: the fp32 sums can differ in the last bits)
     assert _rel(dx2, dx1) < 5e-4
-    assert _rel(dc2, dc1) < 1e-3  # dmod sums the samples' rows of dc through the modulation product: per-sample rows are the same, the sums are cuBLAS's
+    assert (
+        _rel(dc2, dc1) < 1e-3
+    )  # dmod sums the samples' rows of dc through the modulation product: per-sample rows are the same, the sums are cuBLAS's
     for a, b in zip(g1, g2, strict=True):
         if a is not None:
             assert _rel(b, a) < 1e-3
