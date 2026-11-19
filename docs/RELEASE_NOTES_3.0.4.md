@@ -42,7 +42,7 @@ no H100 `backend_versions` entry and no module `version` changed, and the instal
 
 | | engine cuda (installed 3.0.4 wheels, empty JIT cache) | PyTorch |
 |---|---|---|
-| step time | **2.0 s** (re-run on the final wheels: step 0 loss / gnorm 0.3764 / 1.242 again, 16.93 / 25.34 GiB) | 5.0 s |
+| step time | **2.0 s** (re-run on the final wheels, reserved 25.38 GiB in the last run: step 0 loss / gnorm 0.3764 / 1.242 again, 16.93 / 25.34 GiB) | 5.0 s |
 | loss / gnorm at step 0 | 0.3764 / 1.242 | 0.3768 / 1.261 |
 | peak memory | 16.93 GiB allocated, 25.34 GiB reserved | not measured here |
 | engine modules on Triton | 0 (BackendModule calls: cuda 9021, pytorch 774 = the `PairformerBlock` wrapper, triton 0) | n/a |
@@ -114,4 +114,4 @@ Installed-wheel runs use the five release artifacts extracted without the repo o
 | RTX 5090 installed `test_restored_triton_backends.py` | 59 passed, 4 skipped (the H100 / A100 bias-only path) |
 | RTX 5090 real Protenix v1 step from the installed wheels | see the table above; 0 engine kernels built into the empty JIT cache, no segfault |
 | A100 installed wheels | **not run on an A100**: the A100 partition of cssb3 is full (the job is queued, estimated start 2026-11-22). Stand-in: GPU-less, installed wheels, empty cache, `MINIWORLD_ENGINE_TARGET_ARCH=sm80`: all 74 indexed sm80 artifacts present and resolved by the runtime loaders, 0 compiled. No A100 accuracy, restored-Triton or real-step run exists for 3.0.4 yet |
-| judge owed (versions only) | `h100_sm90` 0 / 0; `5090_sm120` 0 / 0 (RED 0); `a100_sm80` 2140 / 2140 owed (A100 queue) |
+| judge owed (versions only; run on the release tree, the tokens are not packaged) | `h100_sm90` 0 / 0; `5090_sm120` 0 / 0; `a100_sm80` 2140 / 2140 owed (A100 queue) |
