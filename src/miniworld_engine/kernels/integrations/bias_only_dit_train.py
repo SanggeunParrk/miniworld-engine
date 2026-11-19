@@ -58,7 +58,8 @@ import torch
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import build_failed
-from miniworld_engine.kernels.integrations.bias_only_dit_hoist import SINK_ATTR
+from miniworld_engine.kernels.integrations.bias_only_dit_hoist import SINK_ATTR, dbias_dtype, hoist_bwd_exact, is_h100
+from miniworld_engine.kernels.integrations.bias_only_dit_hoist import _split as _hsplit
 
 D, DP = 768, 128
 #: the conditioning widths the compiled row kernels take (chunks of 128 per row, a template parameter): the block's d_cond is read off
@@ -114,7 +115,13 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         return False
     dt = single.dtype
     src = pair if bias is None else bias  # the pair, or the block's hoisted bias
-    if src is None or dt not in (BF, F32) or not all(t.dtype is dt for t in (single, cond, src)):
+    # a hoisted bias is fp32 whatever the activations (pair_bias_all: the logits are exact fp32)
+    if (
+        src is None
+        or dt not in (BF, F32)
+        or not all(t.dtype is dt for t in (single, cond))
+        or not (src.dtype is dt or (bias is not None and src.dtype is F32))
+    ):
         return False
     if dt is F32 and (module.attention.to_value.weight.dtype is not F32 or torch.is_autocast_enabled("cuda")):
         return False  # fp32 = an fp32 block; under autocast the call is refused (the kernels do not apply its casts)
@@ -201,16 +208,6 @@ def _dg_direct() -> bool:
 # Hopper candidates measured and dropped (see git history): the SwiGLU backward in the dh GEMM's epilogue (509 vs 318 us at
 # M = 36864), the pair part / pair LayerNorm backward on a side stream (+30 us: the GEMM CTAs hold every SM's shared memory),
 # dV and dbias as batched cuBLAS GEMMs over the heads (+25 us a step), an exact-cuBLAS gamma shadow.
-
-
-def _fp32_logits(dev) -> bool:
-    """Hopper: the pair bias leaves the projection as fp32 logits (the mma accumulators, unrounded) into the softmax, instead of
-    being rounded to bf16 first. The rounding was the largest single error of the ln_pair / to_bias / pair gradients (ln_pair.weight
-    against fp64: 0.0107 -> 0.0090 at L384 A3 24 x 32, 0.0106 -> 0.0095 at L768 A16 16 x 64; the bf16 PyTorch block's 0.0088 / 0.0094);
-    it costs one fp32 [H, L, L] buffer (written and read once). The sm_100a path is unchanged."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
-
-    return h100_enabled(dev)
 
 
 def _bwd_fused(dev, H, DA):
@@ -585,13 +582,15 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
         P = torch.empty(H, L, L, device=dev, dtype=BF)
         if bias is None:
             p2 = pair.reshape(R, pair.shape[-1])
-            pst = torch.empty(R, 2, device=dev)
-            if _fp32_logits(dev):  # Hopper: fp32 logits beside P (not overwritten)
-                logits = torch.empty(H * L, L, device=dev, dtype=torch.float32)
-                BT.pair_bias_cuda(p2, W["Wf_bf"], logits, pst, EPS)
-            else:
-                BT.pair_bias_cuda(p2, W["Wf_bf"], P, pst, EPS)  # the bias, head-major; Wf = Wb diag(wp); LN(pair) stays on chip
-                logits = P.view(H * L, L)  # the softmax overwrites it with P
+            # EXACT fp32 logits (user rule 2026-11-19; bf16 operands / products here halved FoldBench lDDT and broke peptide bonds):
+            # LN(pair) in fp32 (+ the row statistics the backward's pair_bias_bwd reads), Wf = Wb diag(wp) unrounded fp32, the
+            # products on the FMA pipe (cuBLAS fp32, TF32 off), the softmax in fp32; P is rounded to bf16 for the fused block only
+            from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+            ln32, pst = HK.ln0_fp32(p2, EPS, stats=True)
+            wf32 = W["Wb"].float() * W["wp"].float()[None, :]
+            logits = HK.exact_logits(wf32, ln32).view(H * L, L)  # [H, R] fp32, head-major, not overwritten
+            del ln32
         else:
             pst, logits = (
                 None,
@@ -768,7 +767,7 @@ def _bwd_fake(single, cond, pair, mask, params, saved, dout):
     ]
 
 
-def _bwdh_fake(single, cond, mask, params, saved, dout, dbias):
+def _bwdh_fake(single, cond, mask, params, saved, dout, dbias, logits):
     return [torch.empty_like(single), torch.empty_like(cond), *_grad_bufs_like(params)]
 
 
@@ -799,13 +798,34 @@ def _bwdh(
     saved: list[torch.Tensor],
     dout: torch.Tensor,
     dbias: torch.Tensor,
+    logits: torch.Tensor | None,
 ) -> list[torch.Tensor]:
     """The backward of a block on a hoisted bias: the bias gradient into ``dbias`` [H, L L] (bf16), no pair_bias_bwd; returns
     [d single, d cond, *d params] (the ln_pair / to_bias slots of the small-gradient buffers unused)."""
-    return _bwd_impl(single, cond, None, mask, params, saved, dout, dbias)
+    return _bwd_impl(single, cond, None, mask, params, saved, dout, dbias, logits)
 
 
-def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
+def _dbias_exact(do, v, logits, mask, A, H, L, DA, out):
+    """out [H, L, L] fp32 = P o (dP - D), dP = sum_a do v^T, D = sum_j P dP: the bf16 step's bias gradient on H100 with NO bf16 rounding
+    (user rule 2026-11-19). The ``dpb`` kernel rounds dbias to bf16 and reads the saved bf16 P, which loses the zero row-sum of the softmax
+    gradient: where the logits are 1e3..2e5 (a per-head constant is invisible to the softmax) what is left in the ln_pair / to_bias
+    gradients is rounding noise, 1e-1..1 off. Here P is re-formed in fp32 from the fp32 ``logits`` [H, L, L] (key mask folded in, as the
+    forward's softmax), dP is one batched bf16 GEMM over the heads (do, v are bf16 values: exact products, fp32 accumulation and output),
+    D the exact row sum. do, v [A L, DA] (sample-major rows, head-major columns)."""
+    dh = DA // H
+    lg = logits.view(H, L, L)
+    if mask is not None:
+        lg = lg.masked_fill(~mask.reshape(1, 1, L).to(torch.bool), torch.finfo(F32).min)
+    P = torch.softmax(lg, dim=-1)
+    del lg
+    dof = do.view(A, L, H, dh).permute(2, 1, 0, 3).reshape(H, L, A * dh)
+    vf = v.view(A, L, H, dh).permute(2, 0, 3, 1).reshape(H, A * dh, L)
+    dP = torch.bmm(dof, vf, out_dtype=F32)  # [H, L, L] fp32
+    dP.sub_((dP * P).sum(-1, keepdim=True))
+    torch.mul(dP, P, out=out.view(H, L, L))  # masked keys have P = 0
+
+
+def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, logits=None):
     """``_bwd`` (``dbias_out`` None) or ``_bwdh`` (``pair`` None, the bias gradient written into ``dbias_out``)."""
     DC = cond.shape[-1]
     from miniworld_engine.kernels.bias_only_dit import cuda as C
@@ -883,9 +903,19 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
     do = torch.empty(M, DA, device=dev, dtype=BF)
     dd = torch.empty(A, H, L, device=dev)
     C.gate_bwd_rows(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
-    dbias = torch.empty(H * L, L, device=dev, dtype=BF) if dbias_out is None else dbias_out.view(H * L, L)
+    exact_db = is_h100(single)  # H100: the bias gradient stays fp32 into the pair-bias backward (``dbias_dtype``)
+    dbias = torch.empty(H * L, L, device=dev, dtype=dbias_dtype(single)) if dbias_out is None else dbias_out.view(H * L, L)
     _op("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
-    _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)  # P o (dP - D); masked keys get P = 0
+    if exact_db:
+        if logits is None:  # the pair given: re-form the fp32 logits (LN + exact products), as the forward made them
+            from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+            ln32, _ = HK.ln0_fp32(p2, EPS)
+            logits = HK.exact_logits((Wb.float() * wp.float()[None, :]).contiguous(), ln32)
+            del ln32
+        _dbias_exact(do, vg[:, :DA], logits, mask, A, H, L, DA, dbias)
+    else:
+        _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)  # P o (dP - D); masked keys get P = 0
     dxa = torch.mm(dvg, Wvg, out=dG[:, D : 2 * D]) if dg_direct else torch.mm(dvg, Wvg)  # d shift1 = dxa: straight into dG
     dWvg = wgrad("attention.to_value.weight", dvg, xa)
     dx = torch.empty(M, D, device=dev, dtype=sdt)
@@ -913,9 +943,15 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
         ]
     # the pair LayerNorm backward with d LN(pair) = dbias^T Wf, and dWf = dbias LN(pair), in one kernel (LN(pair) rebuilt on chip)
     assert pair is not None  # _bwd: dbias_out None, the pair given
-    dpair = torch.empty(R, dp, device=dev, dtype=pair.dtype)
     pwf = torch.empty(BT.partial_rows(M), H, dp, device=dev)  # dWf partials, one per block
-    nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
+    if exact_db:  # fp32 dbias, exact products: d LN = dbias^T Wf, the LN backward rows, dWf = dbias LN (the hoist's backward for one block)
+        wf32 = (Wb.float() * wp.float()[None, :]).contiguous()
+        dpair, dwf = hoist_bwd_exact(p2, wf32, dbias.view(H, R), EPS, _hsplit(R))
+        pwf[0] = dwf  # one partial row
+        nwf = 1
+    else:
+        dpair = torch.empty(R, dp, device=dev, dtype=pair.dtype)
+        nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
     # the step's last kernel: bias sums, cond-LN weights, ln_pair / to_bias from their partials, in the parameters' dtype
     BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pwf, nwf, Wb, wp, flat[_U(DC) :], norms)
     return [
@@ -1428,11 +1464,13 @@ def _fwd32_impl(single, cond, pair, bias, mask, params):
             vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
         P = e(H, L, L)
         if bias is None:
-            pst = e(R, 2)
-            F.pair_bias_tc_cuda(
-                pair.reshape(R, pair.shape[-1]).contiguous(), W["Wf"], P, pst, EPS, _pair_terms()
-            )  # the bias, head-major (mma.sync)
-            logits = P.view(H * L, L)
+            # EXACT fp32 logits (user rule 2026-11-19): LN(pair) fp32 + the row statistics, products on the FMA pipe (TF32 off; the TF32
+            # products of ``pair_bias_tc`` left 1e-3..1 absolute error on logits of 1e3..2e5: the attention picked other keys)
+            from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+            ln32, pst = HK.ln0_fp32(pair.reshape(R, pair.shape[-1]).contiguous(), EPS, stats=True)
+            logits = HK.exact_logits(W["Wf"].reshape(H, -1), ln32).view(H * L, L)  # [H, R] fp32, head-major
+            del ln32
         else:
             pst, logits = (
                 None,
@@ -1593,9 +1631,15 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
             dh_ = DA // H
             doP = do.view(H, L, dh_ * A)
             dvt = torch.bmm(doP.transpose(1, 2), P.view(H, L, L)).view(DA, M)  # dV^T [(h, d), (a, l)]
-            dP = torch.bmm(doP, vt.view(H, dh_ * A, L))  # [H, L, L]
-            dP.sub_(dd.sum(0).unsqueeze(-1))  # dd [A, H, L] -> sum over the samples
-            torch.mul(dP, P.view(H, L, L), out=dbias.view(H, L, L))  # P o (dP - D); masked keys get P = 0
+            # EXACT dbias (user rule 2026-11-19: the logits' gradient must not carry TF32 noise where the logits are 1e3..2e5): dP on the
+            # FMA pipe, D the exact row sum P . dP (the softmax gradient sums to zero over the keys)
+            from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+            with HK.exact_fp32_gemms():
+                dP = torch.bmm(doP, vt.view(H, dh_ * A, L))  # [H, L, L]
+            P3 = P.view(H, L, L)
+            dP.sub_((dP * P3).sum(-1, keepdim=True))
+            torch.mul(dP, P3, out=dbias.view(H, L, L))  # P o (dP - D); masked keys get P = 0
         else:
             _op32("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
             _op32("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)  # P o (dP - D); masked keys get P = 0
@@ -1622,7 +1666,12 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
         if dbias_out is None:
             dpair = e(R, dp)
             pwf = e(F.partial_rows(M), H, dp)  # dWf partials, one per block
-            nwf = F.pair_bias_bwd_tc_cuda(dbias, p2, pst, W["Wf"], dpair, pwf, _pair_terms())
+            if hop:  # fp32 dbias into exact products (the hoist's backward for one block), one partial row of dWf
+                dpair, dwf = hoist_bwd_exact(p2, W["Wf"].reshape(H, -1), dbias.view(H, R), EPS, _hsplit(R))
+                pwf[0] = dwf
+                nwf = 1
+            else:
+                nwf = F.pair_bias_bwd_tc_cuda(dbias, p2, pst, W["Wf"], dpair, pwf, _pair_terms())
             BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pwf, nwf, Wb, wp, flat[_U(DC) :], norms)
         else:  # hoisted: the pair's backward is the hoist's
             BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pw, 0, Wb, wp, flat[_U(DC) :], norms)  # no dWf rows: those jobs write zeros
@@ -1675,22 +1724,27 @@ class _BlockH(torch.autograd.Function):
             if h100_enabled(single.device) and cond.stride(0) == 0:  # an expanded shared cond: materialized by the Hopper kernel
                 cond = _repeat_shared(cond, single.shape[0])
         out, *saved = (_fwd32h if f32 else _fwdh)(single, cond, bias, mask, list(params))
-        ctx.save_for_backward(single, cond, *params, *saved)
-        ctx.meta = (mask, len(params), sink, f32, tuple(bias.shape), bias.dtype)
+        # the H100 bf16 backward re-forms P in fp32 from the (fp32) logits: dbias = P o (dP - D) with the unrounded P (a saved bf16 P loses the zero row-sum)
+        ctx.save_for_backward(single, cond, bias if (not f32 and is_h100(single)) else None, *params, *saved)
+        # bdt: the dtype of the bias GRADIENT (``dbias_dtype``: fp32 on H100, else the activations'); the bias itself is fp32 (exact logits)
+        ctx.meta = (mask, len(params), sink, f32, tuple(bias.shape), dbias_dtype(single))
         return out
 
     @staticmethod
     def backward(ctx, dout):
         mask, npar, sink, f32, bshape, bdt = ctx.meta
         vals = ctx.saved_tensors
-        single, cond = vals[:2]
-        params, saved = list(vals[2 : 2 + npar]), list(vals[2 + npar :])
+        single, cond, logits = vals[:3]
+        params, saved = list(vals[3 : 3 + npar]), list(vals[3 + npar :])
         H, L = bshape[1], bshape[2]
         want = ctx.needs_input_grad[2]
         db = sink[0].slot(sink[1], bdt, single.device) if (want and sink is not None) else None
         if db is None:
             db = torch.empty(H, L * L, device=single.device, dtype=bdt)
-        dx, dc, *bufs = (_bwd32h if f32 else _bwdh)(single, cond, mask, params, saved, dout.contiguous(), db)
+        if f32:
+            dx, dc, *bufs = _bwd32h(single, cond, mask, params, saved, dout.contiguous(), db)
+        else:
+            dx, dc, *bufs = _bwdh(single, cond, mask, params, saved, dout.contiguous(), db, logits)
         pg = _split_grads(bufs, params, skip=PAIR_PARAMS)
         return (
             dx,

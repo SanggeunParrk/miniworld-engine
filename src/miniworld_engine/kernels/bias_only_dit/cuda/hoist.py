@@ -11,6 +11,7 @@ Built on first use (``load_extension``), never at import.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 from pathlib import Path
 
@@ -51,6 +52,33 @@ def ln0_rows(x: torch.Tensor, out: torch.Tensor, eps: float = 1e-5) -> None:
         rows._ext().layernorm_rows_cuda(x, out, float(eps))
 
 
+def ln0_fp32(x: torch.Tensor, eps: float = 1e-5, stats: bool = False):
+    """LN(x) without affine in fp32 [R, C] from x bf16 / fp32 [R, C] (C = 128 or 256), for the EXACT fp32 pair-bias logits (user rule
+    2026-11-19). ``stats``: also (mean, rstd) as float [R, 2], what the pair_bias backward kernels read. Returns (y, pst or None)."""
+    y = torch.empty(x.shape[0], x.shape[1], device=x.device, dtype=torch.float32)
+    pst = torch.empty(x.shape[0], 2, device=x.device, dtype=torch.float32) if stats else x.new_empty(0, dtype=torch.float32)
+    ext().ln0_fwd_rows_cuda(x, y, pst, float(eps))
+    return y, (pst if stats else None)
+
+
+@contextlib.contextmanager
+def exact_fp32_gemms():
+    """cuBLAS fp32 GEMMs on the FP32 (FMA) pipe, no TF32: the pair-bias logits (values 1e3..2e5, key spread ~500) need fp32 products
+    (a TF32 / bf16 split leaves 1e-3..1 absolute error: the attention picks other keys)."""
+    old = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = old
+
+
+def exact_logits(wf32: torch.Tensor, ln32: torch.Tensor) -> torch.Tensor:
+    """W' [N, C] fp32 x LN0 [R, C] fp32 -> logits [N, R] fp32 (head-major) on the FMA pipe."""
+    with exact_fp32_gemms(), torch.autocast("cuda", enabled=False):
+        return torch.mm(wf32, ln32.t())
+
+
 def ln0_bwd_rows(x: torch.Tensor, dy: torch.Tensor, dx: torch.Tensor, y: torch.Tensor, eps: float = 1e-5) -> None:
     """dx = the LayerNorm-without-affine backward of dy at x: rstd (dy - mean(dy) - y mean(dy y)), and ``y`` = LN0(x) as the dW'
     GEMM's operand: bf16 [R, 2 C] = [bf16(y) | bf16(y - bf16(y))], or fp32 [R, C]. x / dx bf16 or fp32, dy fp32 [R, C] (C = 128 or
@@ -68,4 +96,4 @@ def kernel_attrs() -> list[tuple[str, int, int]]:
     return [tuple(a) for a in ext().func_attrs()]
 
 
-__all__ = ["ext", "kernel_attrs", "ln0_bwd_rows", "ln0_rows", "operand_cols"]
+__all__ = ["exact_fp32_gemms", "exact_logits", "ext", "kernel_attrs", "ln0_bwd_rows", "ln0_fp32", "ln0_rows", "operand_cols"]

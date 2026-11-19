@@ -994,7 +994,9 @@ def prebuild(target, rows):
     activation dtypes it serves, modes it runs in; ``None`` = any; a ``master`` row computes in bfloat16 activations); the dtypes and
     modes required come from ``rows``. The extensions take no model dims (one build serves every width). The sm_100a cubins of this
     family are launched through ``augmented_attention.cuda.sm100`` (B200 only)."""
-    if target.arch in ("sm80", "sm120"):  # A100 (sm120: the same builds for sm_120a) (integrations/bias_only_dit_sm80.py): the sm_80 cores and the portable row kernels (bf16; fp32 rows32)
+    if (
+        target.arch in ("sm80", "sm120")
+    ):  # A100 (sm120: the same builds for sm_120a) (integrations/bias_only_dit_sm80.py): the sm_80 cores and the portable row kernels (bf16; fp32 rows32)
         from . import sm80, tf32
 
         served = {"bfloat16" if r["dtype"] == "master" else r["dtype"] for r in rows}
@@ -1011,13 +1013,17 @@ def prebuild(target, rows):
 
     bf16, fp32, eval_, train_ = {"bfloat16"}, {"float32"}, {"eval"}, {"train"}
     builds = (
-        # the fused pair-bias hoist's backward rows (integrations/bias_only_dit_hoist.py: ln0_bwd_rows, H100 since 2026-11-12); its
-        # forward LayerNorm is the conditioned_transition rows
-        (hoist.ext, None, train_),
+        # the fused pair-bias hoist rows (integrations/bias_only_dit_hoist.py, runner.hoist): ln0_fwd_rows (fp32 LN0 for the exact logits) and
+        # ln0_bwd_rows
+        (
+            hoist.ext,
+            None,
+            None,
+        ),  # eval too since 2026-11-19: ln0_fwd_rows, the fp32 LN0 of the exact-logits hoist (runner.hoist, every dtype)
         (h100_ext, None, None),  # pv_gate_inf.cu: the attention core (bf16 pv_cta / fp32 pv_cta_tf32), dpb, swiglu pipeline
         (h100_gemm_ext, bf16, eval_),  # one-launch conditioning tables, squeeze + out-projection (the bf16 inference step)
         (functools.partial(_rows_ext, True), bf16, None),
-        # the training rows; inference reads their one-pass pair_bias for a 256-wide pair (runner.hoist)
+        # the training rows (the 256-wide pair_bias of runner.hoist is gone: the logits are exact fp32 now)
         (functools.partial(train._rows_ext, True), bf16, None),
         (tf32.rows32, fp32, None),  # the fp32 row kernels
     )
