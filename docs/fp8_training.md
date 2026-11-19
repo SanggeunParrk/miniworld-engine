@@ -11,7 +11,7 @@ width 768, 16 x 48 heads, cond 384, pair 128). Scripts / raw rows (not in the tr
 L 128-768 (M = A L rows up to 36864).
 
 ```
-MINIWORLD_FP8_TRAIN=1                         # training switch: the token DiT takes RECOMMENDED = "fast" (expand, squeeze)
+MINIWORLD_FP8_TRAIN=1                         # training switch: the token DiT takes RECOMMENDED (round 4: nox + hsave, bit-identical)
 MINIWORLD_TOKEN_DIT_FP8_TRAIN=<places>        # explicit: expand, squeeze, qkvg, out (forward); dexpand, dsqueeze, dqkvg, dout (dgrad);
                                               # presets fast, transition, attention, all; "" / 0 = off (wins over MINIWORLD_FP8_TRAIN)
 MINIWORLD_TOKEN_DIT_FP8_TRAIN_GRAD=e4m3|e5m2  # 8-bit format of the incoming gradients (dgrad A operands); default e4m3
@@ -362,7 +362,7 @@ Diffusion loss per step (mean of the 48 samples, the same samples):
 |---|---|---|
 | A bf16 default (3.0.1 route) | 0.0808 | - |
 | B FP8 `rec` (expand + nox + hsave) | 0.0824 | +1.96 % (every step +1.5 .. +2.7 %, all 12 positive) |
-| C `af3_default` (fp32 diffusion head), 6 steps | 0.0775 (A over the same 6: 0.0817) | -5.1 % |
+| C `af3_default` (fp32 diffusion head), 6 steps | 0.0775 (A over the same 6: 0.0814) | -4.8 % |
 
 Bit-identical byte reductions leave the loss unchanged by construction. The FP8 `expand` in 24 DiT blocks adds a systematic +2 % to the diffusion loss at fixed weights
 (about a third of the penalty of running the diffusion head in bf16 instead of fp32 at all, which the production recipe forbids). The synthetic distillation (<= 0.02 %)
@@ -372,8 +372,7 @@ the per-channel scale 1e-39 and 1 / scale = inf; every quantizer now floors the 
 ### Verdict (round 4)
 
 - FP8 `expand` for training: NO-GO as a recommendation. The step gain is 0.7-0.9 % (inside the 1 % control spread), the gradient error of the transition 4-5 %, and the real
-  fine-tune shows +2 % diffusion loss at fixed weights. Kept opt-in (`MINIWORLD_TOKEN_DIT_FP8_TRAIN=expand`, gate 16384, default off) for the record; `RECOMMENDED` stays `expand + nox + hsave` only as the opt-in preset of
-  the switch `MINIWORLD_FP8_TRAIN=1` (a release owner should drop `expand` from it: see the table, a one-line change).
-- The bit-identical byte reductions `nox` + `hsave` are the whole win: 0.9-1.1 % sustained (1.7-2.2 % cool) at M >= 18432, -0.2 .. -1.1 % below, peak -3 %, largest A at L 384 1536 -> 1792 (+17 %), output and 27 gradients
+  fine-tune shows +2 % diffusion loss at fixed weights. Kept opt-in (`MINIWORLD_TOKEN_DIT_FP8_TRAIN=expand`, gate 16384, default off) for the record; `RECOMMENDED` (`MINIWORLD_FP8_TRAIN=1`) is now `nox + hsave` only.
+- The bit-identical byte reductions `nox` + `hsave` are the whole win: 0.9-1.1 % sustained (1.5-2.1 % cool) at M >= 18432, 0.5-1.1 % sustained below, peak -3 %, largest A at L 384 1536 -> 1792 (+17 %), output and 27 gradients
   bit-identical to 3.0.1. Release candidate: branch `fp8t4/tokendit-bytes-default` (see the report: diff, `TokenDiTProtenix.backend_versions["cuda:h100_sm90"]` 5 -> 6, 292 accuracy + 292 speed cells owed on h100_sm90).
 - Finer scales, 8-bit saved activations (ab), `rx1`: no-go (above). Fused q8: kept (-0.2 / -0.3 %, bit-identical).
