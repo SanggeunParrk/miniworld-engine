@@ -37,7 +37,7 @@ def _reference(q, k, v, sbias, scale):
 
 def _case(name, length, heads, dh, seed):
     g = torch.Generator(device="cuda").manual_seed(seed)
-    r = lambda *s: torch.randn(*s, device="cuda", generator=g)  # noqa: E731
+    r = lambda *s: torch.randn(*s, device="cuda", generator=g)
     shape = (1, length, length, heads, dh)
     scale = dh**-0.5
     keep = None
