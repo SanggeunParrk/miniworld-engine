@@ -950,6 +950,16 @@ def prebuild(target, rows):
     if train_rows:
         yield train.owned_gemm_ext
         yield functools.partial(train.rows_ext, hopper=True)
+    if any(
+        r["mode"] == "train"
+        and r["dtype"] != "float32"
+        and _kv(r["dims"]).get("d_single") == "768"
+        and any(k.startswith(_TOKEN_ROWS_KERNELS) for k in r["kernels"])
+        for r in rows
+    ):  # width-768 bf16 training blocks: the default byte reductions (nox / hsave) and the opt-in FP8 training placements run these row kernels
+        from . import token_dit_fp8_train as _f8train
+
+        yield _f8train.ext
     layouts = set()
     for r in rows:
         dims = _kv(r["dims"])

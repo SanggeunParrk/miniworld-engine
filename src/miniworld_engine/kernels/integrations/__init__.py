@@ -57,7 +57,7 @@ def prebuild(target, _rows):
         training = r["mode"] == "train"
         if not training and (cm, cz) == base:  # inference past depth 4096 (beyond the rows' depths): the product route's epilogue build
             add(native=True, tma=False, cm=cm, cz=cz, fused=False)
-        if not training and r["dtype"] != "float32":  # the opt-in FP8 route (docs/fp8.md, opm_fp8: bf16 msa): the e4m3 prologue build
+        if r["dtype"] != "float32":  # the opt-in FP8 routes (docs/fp8.md, opm_fp8: inference; docs/fp8_training.md, opm_fp8_train: training at the widths of opm_train.SHAPES): the e4m3 prologue build
             add(native=True, tma=False, cm=cm, cz=cz, fp8=True)
             opm_f8 = True
         for s in r["depths"]:
@@ -100,6 +100,7 @@ def prebuild(target, _rows):
     from miniworld_engine.kernels.integrations import pwa_fp8
 
     natives, pair, value, f8 = set(), set(), set(), set()
+    f8_train = False
     for r in family_rows("pair_weighted_averaging"):
         d = _kv(r["dims"])
         shape = (int(d["d_msa"]), int(d["d_pair"]), int(d["n_head"]), int(d["d_hidden"]))
@@ -111,6 +112,7 @@ def prebuild(target, _rows):
                 f8.add((pwa_train.D, pwa_train.C))  # the opt-in FP8 route (docs/fp8.md, pwa_fp8.forward): ln_vt8 at the 8 x 32 width
             else:
                 natives.update(pwa_train._training_default_shape(s, n) for s in r["depths"] for n in r["lengths"])
+                f8_train = True  # the opt-in FP8 training route (docs/fp8_training.md, pwa_fp8_train: 8 x 32 widths, d_msa 64)
         elif pwa_wide.supported(*shape):
             pair.add(shape[1])
             value.add((shape[0], shape[3]))
@@ -126,6 +128,13 @@ def prebuild(target, _rows):
         yield pwa_wide._aux
     for dm, c in sorted(f8):
         yield functools.partial(pwa_fp8._ext, dm, c)
+    if f8_train:  # the opt-in FP8 training route: ln_vt8 natural-layout builds (default / bf16 v), the e4m3 glue and the saved-o quantizer
+        from miniworld_engine.kernels.integrations import pwa_fp8_train
+
+        yield pwa_fp8_train._vt8_nat
+        yield pwa_fp8_train._vt8_nat_bf
+        yield pwa_fp8_train._glue8
+        yield pwa_fp8_train._o8_ext
 
 
 def _prebuild_sm80():
