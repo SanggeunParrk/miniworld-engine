@@ -32,6 +32,12 @@ FUSED_SM120 = True
 TRAIN_FUSED_SM120_MIN_ROWS: int | None = 4096
 #: RTX 5090 bf16 training backward: the FFN backward's gate kernel and the out-projection backward of the sm_80 stages (``sm80.ffn_bwd_gate_sm120`` / ``oproj_bwd``) in place of the composed row stages around cuBLAS products
 BWD_FUSED_SM120 = True
+#: RTX 5090 training backward: the FFN backward's dy kernel and the qkvg backward kernel with their weights STREAMED (``bwd_stream_sm120.cuh``; the sm_80 kernels keep 128 KB resident) in place of
+#: the cuBLAS products and row stages around them; the launch shapes (``sm80.ffn_bwd_dy_sm120`` / ``qkvg_bwd_sm120`` cfg)
+BWD_STREAM_SM120 = True
+#: RTX 5090 training backward: the five weight-gradient GEMMs as one grouped kernel (``sm80.wgrad5_sm120``, ``wgrad5_sm120.cu``) in place of five cuBLAS products; needs the row count a multiple of 256
+WGRAD5_SM120 = True
+BWD_STREAM_CFG_SM120 = (100, 100)
 #: the out-projection backward kernel's launch shape on the RTX 5090 (``sm80.oproj_bwd`` cfg: warps per CTA 8 / 4 / 2 / 1 for 0 / 1 / 2 / 3)
 OPROJ_BWD_CFG_SM120 = 1
 #: RTX 5090: the bf16 modulation backward on cuBLAS products (``_mod_bwd``) at every row count (the A100 table: up to 3072 rows)
@@ -39,6 +45,12 @@ MOD_BWD_GEMM_SM120 = True
 #: RTX 5090 global-attention inference on ``attn_global_sm120.cuh`` (False: FlashAttention-2); one sample from this many rows stays on FlashAttention-2 (measured: 8192 rows 270 vs 254 us)
 GLOBAL_SM120 = True
 GLOBAL_SM120_SINGLE_MAX = 8192
+
+
+def _ks_ok(m: int, s: int) -> bool:
+    """The K-split backward kernels (``bwd_ks_sm120.cuh``) hold one tile group per SM: at most 4 row tiles of 16 per CTA."""
+    sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return -(-(-(-s // 16) * (m // s)) // 4) <= sms
 
 
 def _rows(stage: int, ins: list, outs: list, n: int, s: int, bf: bool) -> None:
@@ -245,9 +257,12 @@ def _bwd_fp32(
         ab, dh = mm(y, wu.t()), mm(dffn, wd)
         dab, hh = empty(m, 4 * C), empty(m, 2 * C)
         _rows(7, [ab, dh], [dab, hh], n, s, bf)
-    d_y = mm(dab, wu)
-    dq1 = empty(m, C)
-    _rows(8, [dy, d_y, q1, mod], [dq1, dmod], n, s, bf)
+    if fused and BWD_STREAM_SM120 and _ks_ok(m, s):  # stage 8 and the product before it: dq1 and d shift_f | d scale_f from dab Wu, the weight streamed
+        dq1 = sm80.ffn_bwd_dy_sm120(dab, q1, dy.reshape(m, C), mod, f["wut"], dmod, n, s, FP32_EPS, BWD_STREAM_CFG_SM120[0])
+    else:
+        d_y = mm(dab, wu)
+        dq1 = empty(m, C)
+        _rows(8, [dy, d_y, q1, mod], [dq1, dmod], n, s, bf)
     if fused:  # stages 9 + 10 and the product between them: the out-projection backward (32 KB of Wo^T)
         d_o, dg, datt, gated, delta = sm80.oproj_bwd(
             dq1, o, g, att, mod, wo, dmod, n, s, sm80.MODE_SINGLE, OPROJ_BWD_CFG_SM120, wot=f["wot"]
@@ -259,12 +274,20 @@ def _bwd_fp32(
         d_o, dg, delta = empty(m, C, dtype=_BF), empty(m, C), empty(n, H, s, dtype=_F32)
         _rows(10, [dgated, o, g], [d_o, dg, delta], n, s, bf)
     dqh, dkh, dvh = attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window)
-    dp = empty(m, 4 * C)
-    _rows(11, [pq, pk, dqh, dkh, dvh, dg, cos, sin], [dp], n, s, bf)
-    wstack = torch.cat([wqkv, wg])
-    dx = mm(dp, wstack)
-    dq = empty(m, C)
-    _rows(12, [dq1, dx, q, mod], [dq, dmod], n, s, bf)
+    if fused and BWD_STREAM_SM120 and "wt" in f and _ks_ok(m, s):  # stages 11 + 12 and the product between them: dP, dx = dP W and the adaLN backward, the weight streamed
+        dq, dp = sm80.qkvg_bwd_sm120(
+            q.reshape(m, C), pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, f["wt"], dmod, n, s, FP32_EPS, FP32_EPS, BWD_STREAM_CFG_SM120[1]
+        )
+    else:
+        dp = empty(m, 4 * C)
+        _rows(11, [pq, pk, dqh, dkh, dvh, dg, cos, sin], [dp], n, s, bf)
+        wstack = torch.cat([wqkv, wg])
+        dx = mm(dp, wstack)
+        dq = empty(m, C)
+        _rows(12, [dq1, dx, q, mod], [dq, dmod], n, s, bf)
+    if fused and WGRAD5_SM120 and sm80.wgrad5_ok_sm120(m):  # the five weight gradients in one grouped split-K GEMM + one reduction (cuBLAS runs them at ~40 TFLOPs there)
+        dwqkv, dwg, dwo, dwu, dwd = sm80.wgrad5_sm120(dp, x, dab, y, datt, gated, dffn, hh)
+        return [dq.view(n, s, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
     return [
         dq.view(n, s, C),
         dmod,
