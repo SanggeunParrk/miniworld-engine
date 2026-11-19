@@ -127,3 +127,24 @@ def test_torch_mm_drop_in() -> None:
     assert _err(ieee_f32.torch_mm(g_.t(), a), g_.double().t() @ a.double()) < 1e-5  # a weight gradient: transposed A, long K
     torch.backends.cuda.matmul.allow_tf32 = True  # TF32 allowed: the call stays torch's (cuBLAS on tensor cores)
     assert not ieee_f32._owned(a, w.t())
+
+
+@skip
+@pytest.mark.parametrize("bias", [True, False])
+def test_linear_autograd(bias: bool) -> None:
+    """``ieee_f32.linear``: forward and the three gradients against float64, IEEE fp32 (TF32 stays off)."""
+    from miniworld_engine.kernels import ieee_f32
+
+    g = torch.Generator(device="cuda").manual_seed(0)
+    x = torch.randn((4096, 128), device="cuda", generator=g, requires_grad=True)
+    w = (torch.randn((384, 128), device="cuda", generator=g) / 128**0.5).requires_grad_(True)
+    b = torch.randn(384, device="cuda", generator=g, requires_grad=True) if bias else None
+    dy = torch.randn((4096, 384), device="cuda", generator=g)
+    y = ieee_f32.linear(x, w, b)
+    y.backward(dy)
+    x64, w64 = x.detach().double().requires_grad_(True), w.detach().double().requires_grad_(True)
+    b64 = None if b is None else b.detach().double().requires_grad_(True)
+    y64 = torch.nn.functional.linear(x64, w64, b64)
+    y64.backward(dy.double())
+    for got, ref in ((y, y64), (x.grad, x64.grad), (w.grad, w64.grad), *(((b.grad, b64.grad),) if bias else ())):
+        assert _err(got, ref.detach()) < 1e-5

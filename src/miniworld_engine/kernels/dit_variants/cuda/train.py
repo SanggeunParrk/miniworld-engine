@@ -265,7 +265,7 @@ def atom_fwd(
         ext.ln_mod_fwd(xq, tab, [cols(A_SC_K)], [cols(A_SH_K)], [xk], buf["stk"], T, eps, sig)
     else:
         ext.ln_mod_fwd(x, tab, [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SH_Q), cols(A_SH_K)], [xq, xk], st1, T, eps, sig)
-    q = torch.addmm(bq.to(at), xq, w_q.t())
+    q = _ieee.torch_addmm(bq.to(at), xq, w_q.t())
     _ieee.torch_mm(xk, w_kv[:D].t(), out=k)
     _ieee.torch_mm(xk, w_kv[D:].t(), out=v)
     g = buf["g"]
@@ -724,17 +724,25 @@ def atom_serves(stack, single, cond, pair, mask, uid, *, need_grad: bool = True)
     )
 
 
+def _lin(linear, x):
+    """``linear(x)`` of an fp32 AdaLN / gate projection: the engine's IEEE GEMM when TF32 is off (``kernels/ieee_f32``), else the module."""
+    w = linear.weight
+    if x.dtype is torch.float32 and w.dtype is torch.float32 and not torch.is_autocast_enabled():
+        return _ieee.linear(x, w, linear.bias)
+    return linear(x)
+
+
 def _atom_tables(blk, c):
     def mod(norm):
         if norm.identity_scale:
-            return norm.to_scale(c) + 1, norm.to_shift(c)
+            return _lin(norm.to_scale, c) + 1, _lin(norm.to_shift, c)
         cn = F.layer_norm(c.float(), c.shape[-1:], weight=norm.cond_norm_weight.float(), eps=1e-5).to(c.dtype)
-        return norm.to_scale(cn), norm.to_shift(cn)
+        return _lin(norm.to_scale, cn), _lin(norm.to_shift, cn)
 
     scq, shq = mod(blk.q_adaln)
     sck, shk = mod(blk.k_adaln)
     sct, sht = mod(blk.trans_adaln)
-    parts = [scq, shq, sck, shk, blk.attn_zero(c), sct, sht, blk.trans_zero(c)]
+    parts = [scq, shq, sck, shk, _lin(blk.attn_zero, c), sct, sht, _lin(blk.trans_zero, c)]
     dt = parts[0].dtype
     return torch.cat([p.to(dt) for p in parts], dim=-1).contiguous()
 

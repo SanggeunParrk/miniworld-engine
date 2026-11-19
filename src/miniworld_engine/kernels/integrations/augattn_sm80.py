@@ -1345,14 +1345,28 @@ def _cached_bias(module, pair, mask):
 
 
 # ================================================================================================================================ entry points
+def _adaln(module, single, cond):
+    """The block's AdaLN: the engine's sm_80 AdaLN kernels (``adaln_sm80``: rows kernels + the GEMM that follows the caller's TF32 setting) where they serve the call, else the module (PyTorch).
+    ``AdaptiveLayerNorm`` has no backend of its own on the sm_80 cards: running ``module.ada_ln_in(...)`` here put an AdaLN of PyTorch ops (LN, two cuBLAS Linears, a sigmoid) in the middle of every CUDA token block."""
+    from miniworld_engine.kernels.integrations import adaln_sm80
+
+    ada = module.ada_ln_in
+    dt = single.dtype
+    if dt in (torch.float32, BF) and not torch.is_autocast_enabled():
+        grad = torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, *ada.parameters()))
+        if adaln_sm80.serves(ada, single, cond, dt, grad):
+            return adaln_sm80.update(ada, single, cond, dt, grad)
+    return ada(single, cond)
+
+
 def delta(module, single, cond, pair, mask):
     """``AugmentedAttentionPairBias.delta`` on the sm_80 path (the update alone); call ``serves`` first."""
-    return _fused_update(module, module.ada_ln_in(single, cond), cond, pair, mask, None)
+    return _fused_update(module, _adaln(module, single, cond), cond, pair, mask, None)
 
 
 def forward(module, single, cond, pair, mask):
     """``AugmentedAttentionPairBias.forward`` on the sm_80 path: ``single + delta`` with the residual inside the last pass; call ``serves`` first."""
-    return _fused_update(module, module.ada_ln_in(single, cond), cond, pair, mask, single.contiguous())
+    return _fused_update(module, _adaln(module, single, cond), cond, pair, mask, single.contiguous())
 
 
 __all__ = [

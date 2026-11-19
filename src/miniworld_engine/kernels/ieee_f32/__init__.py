@@ -265,3 +265,43 @@ def torch_addmm(bias: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.T
     if bias.dim() == 1 and bias.dtype is torch.float32 and not (torch.is_grad_enabled() and bias.requires_grad) and _owned(a, b):
         return mm(a, b, bias=bias)
     return torch.addmm(bias, a, b)
+
+
+class _Linear(torch.autograd.Function):
+    """``x w^T + b`` in IEEE fp32 on the engine's GEMM: forward ``mm`` (bias in the epilogue), backward ``dx = dy w``, ``dw = dy^T x`` (split-K), ``db = sum dy`` (a row GEMM
+    against ones would round differently: the column sum is its own deterministic reduction)."""
+
+    @staticmethod
+    def forward(ctx, x, w, b):
+        ctx.save_for_backward(x, w)
+        ctx.has_bias = b is not None
+        return mm(x, w.t(), bias=b)
+
+    @staticmethod
+    def backward(ctx, dy):
+        x, w = ctx.saved_tensors
+        dy = dy.contiguous()
+        dx = mm(dy, w) if ctx.needs_input_grad[0] else None
+        dw = _wgrad(dy, x) if ctx.needs_input_grad[1] else None
+        db = _reduce(dy.unsqueeze(0)) if ctx.has_bias and ctx.needs_input_grad[2] else None
+        return dx, dw, db
+
+
+def linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+    """``F.linear(x, weight, bias)``: fp32 with TF32 off on the engine's IEEE GEMM (autograd through ``_Linear``), else torch's. ``x`` [..., K], ``weight`` [N, K], ``bias`` [N]."""
+    import torch.nn.functional as F
+
+    flat = x.reshape(-1, x.shape[-1])
+    ok = (
+        x.dtype is torch.float32
+        and weight.dtype is torch.float32
+        and (bias is None or bias.dtype is torch.float32)
+        and not tf32_allowed()
+        and flat.is_contiguous()
+        and weight.is_contiguous()
+        and supported_mm(flat, weight.t())
+    )
+    if not ok:
+        return F.linear(x, weight, bias)
+    y = _Linear.apply(flat, weight, bias) if torch.is_grad_enabled() and (x.requires_grad or weight.requires_grad) else mm(flat, weight.t(), bias=bias)
+    return y.reshape(*x.shape[:-1], weight.shape[0])
