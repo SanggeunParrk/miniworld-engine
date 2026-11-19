@@ -113,6 +113,44 @@ def _hoist_fwd(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torch.Tens
     return HK.exact_logits(wf, ln32)  # [N, dp] x [dp, R] fp32
 
 
+def is_h100(ref: torch.Tensor) -> bool:
+    return ref.is_cuda and torch.cuda.get_device_capability(ref.device) == (9, 0)
+
+
+def dbias_dtype(ref: torch.Tensor) -> torch.dtype:
+    """The dtype of the hoisted blocks' bias gradient: fp32 on H100 (the bf16 block's dbias = P o (dP - D) is formed in fp32 there and
+    stays fp32 into the pair-bias backward: rounding it to bf16 left the constant-channel / ln_pair gradients 1e-1..1 off), else the
+    activations' dtype."""
+    return F32 if is_h100(ref) else ref.dtype
+
+
+def _bwd_exact_fake(pair2d, wf32, dball, eps, split):
+    return [torch.empty_like(pair2d), wf32.new_empty(wf32.shape, dtype=F32)]
+
+
+@opaque(fake=_bwd_exact_fake, name="bias_only_dit_hoist_bwd_exact")
+def hoist_bwd_exact(pair2d: torch.Tensor, wf32: torch.Tensor, dball: torch.Tensor, eps: float, split: int) -> list[torch.Tensor]:
+    """``_hoist_bwd`` with an fp32 dbias_all [N, R] and the unrounded fp32 W': every product exact fp32 (FMA pipe, TF32 off) --
+    [d pair [R, dp] in the pair's dtype, dW'_all [N, dp] fp32]. d LN0 = dbias^T W'; the LN0 backward rows write Y = LN0 in fp32;
+    dW' = dbias Y as a strided batch of ``split`` row chunks."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    N, R = dball.shape
+    dp = pair2d.shape[-1]
+    with HK.exact_fp32_gemms(), torch.autocast("cuda", enabled=False):
+        dln = torch.mm(dball.t(), wf32)  # [R, dp] fp32
+        dpair = torch.empty_like(pair2d)
+        y = torch.empty(R, dp, device=pair2d.device, dtype=F32)
+        HK.ln0_bwd_rows(pair2d, dln, dpair, y, eps)
+        del dln
+        if split > 1:
+            c = R // split
+            dwf = torch.bmm(dball.view(N, split, c).transpose(0, 1), y.view(split, c, dp)).sum(0)
+        else:
+            dwf = torch.mm(dball, y)
+    return [dpair, dwf]
+
+
 def _bwd_fake(pair2d, wf, dball, eps, split):
     return [torch.empty_like(pair2d), wf.new_empty(wf.shape, dtype=F32)]
 
@@ -214,7 +252,10 @@ class _Hoist(torch.autograd.Function):
         L, dp = pair.shape[1], pair.shape[-1]
         R = L * L
         dball = sink.take(grads)
-        dpair, dwf = _hoist_bwd(pair.reshape(R, dp), wf, dball, eps, _split(R))
+        if is_h100(pair):  # fp32 dbias (``dbias_dtype``), exact backward products
+            dpair, dwf = hoist_bwd_exact(pair.reshape(R, dp), (wts * gam[:, None, :]).reshape(-1, dp).contiguous(), dball, eps, _split(R))
+        else:
+            dpair, dwf = _hoist_bwd(pair.reshape(R, dp), wf, dball, eps, _split(R))
         del dball
         dwf = dwf.view(nb, H, dp)
         dW = dwf * gam[:, None, :]  # dW_b = dW'_b diag(g_b)
@@ -236,7 +277,7 @@ def pair_bias_all(attns, pair) -> tuple[torch.Tensor, ...]:
     """Each attention module's bias [1, H, L, L] in FP32 (head-major, contiguous: slices of one [nb H, L L] buffer) from one LN0 pass and one
     GEMM; differentiable in ``pair`` and in every ``ln_pair.weight`` / ``to_bias.weight``. Call ``serves`` first."""
     nb, H, L = len(attns), attns[0].to_bias.weight.shape[0], pair.shape[1]
-    sink = _Sink(nb, H, L * L, pair.dtype, pair.device)
+    sink = _Sink(nb, H, L * L, dbias_dtype(pair), pair.device)
     params = [p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)]
     outs = _Hoist.apply(pair.contiguous(), float(attns[0].ln_pair.eps), nb, sink, *params)
     for i, o in enumerate(outs):

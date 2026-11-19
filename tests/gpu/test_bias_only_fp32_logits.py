@@ -175,15 +175,4 @@ def test_block_fp32_logits(case: str, dtype: torch.dtype, backend: str, mode: st
     if mode == "train":
         errs = [_rel(a, b) for a, b in zip(gr, g64, strict=True)]
         print(case, dtype, backend, mode, hoist, "y", f"{err_y:.2e}", "grads(pair, Wb, gamma)", [f"{e:.2e}" for e in errs])
-        if backend == "cuda" and dtype is torch.bfloat16 and case == "huge":
-            # the bf16 block writes dbias = P o (dP - D) in bf16; "huge" has a 870-wide CONSTANT channel whose gradient is analytically ~0
-            # (a per-head constant cancels in the softmax: sum_j dbias_ij = 0), so the rounding noise of dbias is all that is left there:
-            # d to_bias.weight 0.17, d ln_pair.weight 2.1 (1.0 / 0.7 before this change, 1.7 / 10.8 hoisted). "wide" (no constant
-            # channel) holds all three gradients to GRAD_TOL; the pair gradient is checked here
-            errs = errs[:1]
-        if backend == "cuda" and dtype is torch.float32:
-            # the fp32 step is the TF32 recipe (dP, dbias, dW' on TF32 tensor cores): d gamma = sum_h dW' o W with a 870-wide constant
-            # channel cancels hard, 0.47 here (0.4..0.7 before this change, untouched: the TF32 policy is the user's); pair / to_bias hold
-            errs = errs[:2]
-        tol = 8e-2 if (backend == "cuda" and dtype is torch.bfloat16) else GRAD_TOL  # the bf16 block rounds dbias = P o (dP - D) to bf16
-        assert all(e <= tol for e in errs), f"gradient errors (pair, to_bias.weight, ln_pair.weight) {errs} > {tol}"
+        assert all(e <= GRAD_TOL for e in errs), f"gradient errors (pair, to_bias.weight, ln_pair.weight) {errs} > {GRAD_TOL}"
