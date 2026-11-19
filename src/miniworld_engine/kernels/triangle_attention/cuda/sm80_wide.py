@@ -236,6 +236,19 @@ def _bare_front(x: torch.Tensor, d: int, save: bool, length: int, variant: bool 
     return mode == "1" or variant or length < 256
 
 
+def _fold_gate_bias(wp: torch.Tensor, gb: torch.Tensor, d: int, dhp: int, h: int, hd: int, ch: int) -> torch.Tensor:
+    """RTX 5090 inference of a variant with a gate bias (RoseTTAFold3): the bias joins the folded shift columns of the gate rows (``b_hi`` | ``b_lo``
+    re-split), so the front is one plain ``mm``: cuBLAS runs the biased-epilogue ``addmm`` at K = D + 8 on a 32 x 32 wmma tile (4.1 against 3.0 ms at
+    T = 2^20, D 64, N 1032).  The sum is still rounded once (the shift carries 16 bits)."""
+    g = torch.zeros((wp.shape[0],), dtype=F32, device=wp.device)
+    g[3 * dhp : 4 * dhp] = torch.nn.functional.pad(gb.detach().view(h, hd).float(), (0, ch - hd)).reshape(-1)
+    shift = wp[:, d].float() + wp[:, d + 1].float() + g
+    hi = shift.to(BF)
+    wp[:, d] = hi
+    wp[:, d + 1] = (shift - hi.float()).to(BF)
+    return wp
+
+
 def _pack_bare(
     weights, ln_w: torch.Tensor, ln_b: torch.Tensor, cfg: Cfg, columns: int | None = None, gate_bias: torch.Tensor | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1510,6 +1523,7 @@ def variant_forward_ops(
     x2 = x.view(t, d)
     dev = x.device
     bare = _bare_front(x, d, save, length, True)
+    fold_gb = bool(gb.numel()) and not save and not bare and os.environ.get("MINIWORLD_TRIATTN_BARE", "auto") != "0" and _arch.on_sm120(x)
     if bare:  # RTX 5090 inference at D 256: no constant columns, the shift (and the gate bias) is the GEMM bias
 
         def _gate() -> torch.Tensor | None:
@@ -1525,6 +1539,13 @@ def variant_forward_ops(
             lambda: _pack_bare(_v_weights(weights, vc), ln_w, ln_b, pc, n, _gate()),
             save,
         )
+    elif fold_gb:  # RTX 5090 inference with a gate bias: the bias in the folded shift columns, a plain mm (``_fold_gate_bias``)
+        wp = _core.eval_form(
+            ("triattn_sm80w_variant_gb", vc),
+            (*weights, ln_w, ln_b, gb),
+            lambda: _fold_gate_bias(_pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n), gb, d, dhp, h, hd, ch),
+            save,
+        )
     else:
         wp = _core.eval_form(
             ("triattn_sm80w_variant", vc), (*weights, ln_w, ln_b), lambda: _pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n), save
@@ -1534,6 +1555,8 @@ def variant_forward_ops(
     rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
     if bare:
         y = torch.addmm(bvec, xh, wp.t())
+    elif fold_gb:
+        y = torch.mm(xh, wp.t())
     elif gb.numel():  # RoseTTAFold3's gate bias in the GEMM's epilogue (one rounding, as the reference's biased projection)
         bvec = torch.zeros((n,), dtype=BF, device=dev)
         bvec[3 * dhp : 4 * dhp] = torch.nn.functional.pad(gb.view(h, hd), (0, ch - hd)).reshape(-1)

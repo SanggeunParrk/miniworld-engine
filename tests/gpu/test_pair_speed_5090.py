@@ -54,3 +54,25 @@ def test_token_pair_init_persistent_forward_matches_reference(length: int) -> No
         ours = copy.deepcopy(module).set_backend("cuda")(**inputs)
         ref = copy.deepcopy(module).set_backend("pytorch")(**inputs)
     assert (ours - ref).abs().max().item() <= 1e-5
+
+
+@pytest.mark.parametrize("length", [128, 256])
+def test_rf3_gate_bias_folded_into_the_front_shift(length: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    from miniworld_engine.modules import TriangleAttentionRF3
+
+    module = TriangleAttentionRF3(d_pair=64, d_hidden=256, n_head=4, starting=True, p_drop=0.0, master_weights=True).cuda().float()
+    C.randomize(module, torch.Generator(device="cuda").manual_seed(0))
+    module.set_master_weights()
+    inputs = module.make_inputs(
+        length=length, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=torch.Generator(device="cuda").manual_seed(1)
+    )
+    with monkeypatch.context() as m:
+        m.setenv("MINIWORLD_TRIATTN_BARE", "auto")
+        folded = _run(module, inputs, "cuda")
+    with monkeypatch.context() as m:
+        m.setenv("MINIWORLD_TRIATTN_BARE", "0")
+        epilogue = _run(module, inputs, "cuda")
+    ref = _run(module, inputs, "pytorch")
+    scale = ref.abs().max().item()
+    assert (folded - epilogue).abs().max().item() <= 8e-3 * scale
+    assert (folded - ref).abs().max().item() <= max((epilogue - ref).abs().max().item(), 8e-3 * scale)
