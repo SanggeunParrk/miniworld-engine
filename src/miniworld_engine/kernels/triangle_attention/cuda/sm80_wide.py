@@ -236,6 +236,19 @@ def _bare_front(x: torch.Tensor, d: int, save: bool, length: int, variant: bool 
     return mode == "1" or variant or length < 256
 
 
+def _split_front(x: torch.Tensor, d: int, save: bool, dhp: int, h: int, hd: int) -> bool:
+    """RTX 5090, variant inference at D 128 with four 32-channel heads (RoseTTAFold3): the front as two GEMMs, q | k | v | g ``[T, 512]`` and the bias heads ``[T, 8]``, both
+    reading the first 128 columns of ``ln_rows``' padded rows (lda 136: K = 128 keeps cuBLAS on its fast tile).  The one ``[T, 520]`` GEMM at K = 136 / N = 520 runs the
+    64 x 64 tile at 72 TFLOP/s; N = 512 at K = 128 reaches 125 (L 640: 807 us against 493 + 84 us); the shift and the gate bias are the GEMM biases (bf16, one rounding
+    with the projection)."""
+    return (
+        not save
+        and (d, dhp, h, hd) == (128, 128, 4, 32)
+        and os.environ.get("MINIWORLD_TRIATTN_SPLIT", "auto") != "0"
+        and _arch.on_sm120(x)
+    )
+
+
 def _fold_gate_bias(wp: torch.Tensor, gb: torch.Tensor, d: int, dhp: int, h: int, hd: int, ch: int) -> torch.Tensor:
     """RTX 5090 inference of a variant with a gate bias (RoseTTAFold3): the bias joins the folded shift columns of the gate rows (``b_hi`` | ``b_lo``
     re-split), so the front is one plain ``mm``: cuBLAS runs the biased-epilogue ``addmm`` at K = D + 8 on a 32 x 32 wmma tile (4.1 against 3.0 ms at
@@ -1523,18 +1536,21 @@ def variant_forward_ops(
     x2 = x.view(t, d)
     dev = x.device
     bare = _bare_front(x, d, save, length, True)
-    fold_gb = bool(gb.numel()) and not save and not bare and os.environ.get("MINIWORLD_TRIATTN_BARE", "auto") != "0" and _arch.on_sm120(x)
-    if bare:  # RTX 5090 inference at D 256: no constant columns, the shift (and the gate bias) is the GEMM bias
+    split = _split_front(x, d, save, dhp, h, hd)
+    fold_gb = (
+        bool(gb.numel()) and not save and not bare and not split and os.environ.get("MINIWORLD_TRIATTN_BARE", "auto") != "0" and _arch.on_sm120(x)
+    )
 
-        def _gate() -> torch.Tensor | None:
-            if not gb.numel():
-                return None
-            g = torch.zeros((n,), dtype=F32, device=dev)
-            g[3 * dhp : 4 * dhp] = torch.nn.functional.pad(gb.view(h, hd).float(), (0, ch - hd)).reshape(-1)
-            return g
+    def _gate() -> torch.Tensor | None:
+        if not gb.numel():
+            return None
+        g = torch.zeros((n,), dtype=F32, device=dev)
+        g[3 * dhp : 4 * dhp] = torch.nn.functional.pad(gb.view(h, hd).float(), (0, ch - hd)).reshape(-1)
+        return g
 
+    if bare or split:  # RTX 5090 inference: no constant columns, the shift (and the gate bias) is the GEMM bias
         wp, bvec = _core.eval_form(
-            ("triattn_sm80w_variant_bare", vc),
+            ("triattn_sm80w_variant_split" if split else "triattn_sm80w_variant_bare", vc),
             (*weights, ln_w, ln_b, *((gb,) if gb.numel() else ())),
             lambda: _pack_bare(_v_weights(weights, vc), ln_w, ln_b, pc, n, _gate()),
             save,
@@ -1550,10 +1566,15 @@ def variant_forward_ops(
         wp = _core.eval_form(
             ("triattn_sm80w_variant", vc), (*weights, ln_w, ln_b), lambda: _pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n), save
         )
-    xh = torch.empty((t, d if bare else d + 8), dtype=BF, device=dev)
+    xh = torch.empty((t, d if bare else d + 8), dtype=BF, device=dev)  # split: ln_rows' padded rows, the GEMMs read the first d columns (lda d + 8)
     stats = torch.empty((t, 2), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
-    if bare:
+    pb = None
+    if split:  # q | k | v | g (N 512: cuBLAS' 64 x 64 tile at its rate) and the bias heads (N 8: one read of xh) as two GEMMs
+        xn = xh[:, :d]
+        y = torch.addmm(bvec[: 4 * dhp], xn, wp[: 4 * dhp].t())
+        pb = torch.addmm(bvec[4 * dhp :], xn, wp[4 * dhp :].t())
+    elif bare:
         y = torch.addmm(bvec, xh, wp.t())
     elif fold_gb:
         y = torch.mm(xh, wp.t())
@@ -1566,8 +1587,11 @@ def variant_forward_ops(
     bias = torch.empty((b, h, length, length), dtype=BF, device=dev)
     # flip: the bias planes of the pair as it is, read in the transposed frame -- the kernel writes the planes transposed with the key mask on
     # the transposed axis (bit-identical to the unmasked planes, a transposing copy and a masked_fill, which were three more kernels)
-    rows.bias_planes(y, mask, bias, 4 * dhp, h, length, int(flip))
-    lay_y, lay_o, _ = _v_lays(vc, length, n)
+    if pb is not None:
+        rows.bias_planes(pb, mask, bias, 0, h, length, int(flip))
+    else:
+        rows.bias_planes(y, mask, bias, 4 * dhp, h, length, int(flip))
+    lay_y, lay_o, _ = _v_lays(vc, length, y.shape[1])
     o = torch.empty((t, dhp), dtype=BF, device=dev)
     lse = torch.empty((b, h, length, length), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     q, k, v, g = (y[:, i * dhp : (i + 1) * dhp] for i in range(4))
