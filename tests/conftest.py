@@ -1,6 +1,6 @@
 """Shared pytest setup: GPU / card markers skip cleanly where the hardware is absent.
 
-``gpu``  needs a CUDA device; ``h100`` / ``a100`` additionally need that card (sm_90 / sm_80). A test without a GPU marker must run on a
+``gpu``  needs a CUDA device; ``h100`` / ``a100`` / ``rtx5090`` additionally need that card (sm_90 / sm_80 / sm_120). A test without a GPU marker must run on a
 CPU-only node.
 """
 
@@ -11,7 +11,7 @@ import functools
 import pytest
 
 #: marker -> the CUDA capability it needs
-CARDS = {"h100": (9, 0), "a100": (8, 0)}
+CARDS = {"h100": (9, 0), "a100": (8, 0), "rtx5090": (12, 0)}
 
 
 @functools.cache

@@ -107,6 +107,7 @@ save intermediates, and keeps the eager path byte-identical to what shipped.
 from __future__ import annotations
 
 import contextlib
+import functools
 from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
@@ -136,6 +137,33 @@ def _op_name(fn, name: str | None) -> str:
     return qual.replace(".", "__").replace("<", "").replace(">", "")
 
 
+def _no_autocast(fn):
+    """``fn`` with the caller's CUDA autocast off on non-H100 cards: the sm_80 sources (A100, RTX 5090) launch cuBLAS ``@`` / ``mm`` glue in the
+    operand dtype, and a backward replayed under autocast (activation checkpointing) rounded the fp32 TF32-off chain to bf16 mid-kernel-sequence
+    ("one dtype" errors). The H100 path is left exactly as it was."""
+
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        if torch.is_autocast_enabled() and _not_h100():
+            with torch.autocast("cuda", enabled=False):
+                return fn(*args, **kwargs)
+        return fn(*args, **kwargs)
+
+    try:  # custom_op infers the schema from the annotations: resolve them in fn's own module (``from __future__ import annotations``)
+        import inspect
+
+        run.__signature__ = inspect.signature(fn, eval_str=True)
+        del run.__wrapped__
+    except Exception:  # noqa: BLE001 - an unresolvable hint: register fn itself, unwrapped
+        return fn
+    return run
+
+
+@functools.cache
+def _not_h100() -> bool:
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0)
+
+
 def opaque(fake=None, *, name: str | None = None, mutates_args=()) -> Callable[[_F], _F]:
     """Mark a kernel launch as untraceable by Dynamo, as an opaque ``torch.library`` custom op.
 
@@ -155,7 +183,7 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()) -> Callable[[
         cached = _REGISTERED.get(qualname)
         if cached is not None:
             return cast(_F, cached)
-        op = torch.library.custom_op(qualname, fn, mutates_args=mutates_args)
+        op = torch.library.custom_op(qualname, _no_autocast(fn), mutates_args=mutates_args)
         op.register_fake(fake)
         # Keep the wrapped function reachable. `custom_op` returns a `CustomOpDef` whose
         # `__call__` is `(*args, **kwargs)`, so the launcher's real parameters disappear: nothing

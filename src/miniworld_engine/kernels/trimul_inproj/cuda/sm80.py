@@ -25,6 +25,7 @@ import functools
 from pathlib import Path
 
 import torch
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 from torch.autograd.function import once_differentiable
 
 from ..._compile import opaque
@@ -507,7 +508,7 @@ def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     side.wait_stream(main)
     for t in (red, gpart, ao, x, dgp, xn, wo, go, bo):
         if t is not None:
-            t.record_stream(side)
+            _record_stream(t, side)
     with torch.cuda.stream(side):
         d_wo, d_go, d_bo, d_wg = weight_grads()
     # ---- contraction backward -> dA | dB planes
@@ -563,7 +564,7 @@ def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     ext.finalize(dwp, part, *g_w, g_gi, g_bi)
     main.wait_stream(side)
     for t in (d_wo, d_go, d_bo, d_wg):
-        t.record_stream(main)
+        _record_stream(t, main)
     out = [
         dz.view_as(z),
         *g_w,

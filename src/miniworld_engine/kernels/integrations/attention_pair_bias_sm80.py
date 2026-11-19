@@ -21,6 +21,7 @@ import functools
 import math
 
 import torch
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
@@ -695,7 +696,7 @@ def _bias_split(z: torch.Tensor, wcm: torch.Tensor, mask, L: int, eps: float) ->
         side = _SIDE[z.device] = torch.cuda.Stream(device=z.device)
     side.wait_stream(main)
     for t in (z, w1, out) + (() if mask is None else (mask,)):
-        t.record_stream(side)
+        _record_stream(t, side)
     with torch.cuda.stream(side):
         sm80.pair_bias_generic(z, w1, mask, L, eps, oscale=1.0, rows=1, out=out[half:])
     sm80.pair_bias_generic(z, w0, mask, L, eps, oscale=1.0, rows=1, out=out[:half])

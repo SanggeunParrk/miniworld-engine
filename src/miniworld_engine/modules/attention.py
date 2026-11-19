@@ -126,9 +126,9 @@ class AttentionPairBias(BackendModule, MasterWeights):
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
-        "cuda:a100_sm80": 8,
+        "cuda:a100_sm80": 9,  # 2026-11-19 (9; 5090 4): the fp32 GEMMs of the fused update follow the caller's TF32 setting (IEEE fp32: the engine's own GEMM, kernels/ieee_f32)
         "cuda:h100_sm90": 5,
-        "cuda:5090_sm120": 3,
+        "cuda:5090_sm120": 4,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100; cuda:a100_sm80 4 / cuda:h100_sm90 2 (2026-11-11): B > 1 served (one step per batch row, FoldForge 5I28 confidence head); cuda:a100_sm80 5 (2026-11-12): the composed fp32 path's pair backward is one TF32 tensor-core launch for the batch (pair_bias_gen_bwd_tc); cuda:a100_sm80 6 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd, bf16 pairs) 1.4-2.1x faster, the same values; cuda:5090_sm120 2 (2026-11-12): the pair-bias backwards fit 99 KB on sm_120a (TF32 tensor-core kernel at 2 stages, d_pair 512 x 16 / 24 heads on the one-pass kernel with 8-element tiles)

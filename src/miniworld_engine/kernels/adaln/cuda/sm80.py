@@ -187,10 +187,14 @@ def atom_fwd(
     return y, xst, cst
 
 
+def _tf32_allowed() -> bool:
+    return bool(torch.backends.cuda.matmul.allow_tf32) or torch.get_float32_matmul_precision() != "highest"
+
+
 def atom_tf32_supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
     """The fp32 (TF32) fused forward's contract: fp32 rows, d_hidden = d_cond = 128 (inference only: nothing is saved for a backward).  Not on the
     RTX 5090 (128 KB of fp32 weights in shared memory, beyond its 99 KB a block)."""
-    if is_sm120(x.device):
+    if is_sm120(x.device) or not _tf32_allowed():  # the kernel is TF32 by construction: with TF32 off the IEEE path serves
         return False
     return x.dtype is torch.float32 and cond.dtype is torch.float32 and x.shape[-1] == ATOM_WIDTH and cond.shape[-1] == ATOM_WIDTH
 

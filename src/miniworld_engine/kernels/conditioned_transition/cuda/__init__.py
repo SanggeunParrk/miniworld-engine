@@ -13,6 +13,7 @@ import functools
 from pathlib import Path
 
 import torch
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 from torch.multiprocessing.reductions import StorageWeakRef
 
 from miniworld_engine.kernels import _capture
@@ -314,7 +315,7 @@ def _cond_gemm(c, wc, fkey, made=False):
     if hit is not None and hit[0] == fkey:
         _, G, done, whole = hit
         cur.wait_event(done)
-        whole.record_stream(cur)  # allocated on the side stream, read here: not reused before this stream's readers ran
+        _record_stream(whole, cur)  # allocated on the side stream, read here: not reused before this stream's readers ran
     else:
         if made:
             # the pack's kernels were issued after the previous block's start: fork behind them
@@ -328,7 +329,7 @@ def _cond_gemm(c, wc, fkey, made=False):
             done = torch.cuda.Event()
             done.record(side)
         cur.wait_event(done)
-        G.record_stream(cur)
+        _record_stream(G, cur)
     # look ahead: one GEMM for the next chunk of this pass's learned group, from this block's start
     join = None
     group, nxt = E["group"], pos + 1

@@ -15,6 +15,7 @@ fixed order (no atomics), so a replay is bit-identical.
 from pathlib import Path
 
 import torch
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 from ... import _capture
 from ..._compile import opaque
@@ -460,9 +461,9 @@ def _bwd_saved_overlap(ext, dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, gdt, w
     main.wait_stream(side)
     # the side stream's outputs are used (and freed) on the main stream, its operands were read on the side stream
     for t in (dws, dwab):
-        t.record_stream(main)
+        _record_stream(t, main)
     for t in (dy, hid, dab, xn):
-        t.record_stream(side)
+        _record_stream(t, side)
     return dx, dgam, dbeta, dwab.to(wdt), dws.to(wdt)
 
 
@@ -698,6 +699,13 @@ def f32_supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
 def f32_available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """``f32_supported()`` plus a successful (cached) build of the wide extension."""
     return f32_supported(x, wa, ws) and _loads()
+
+
+def tf32_allowed() -> bool:
+    """torch lets fp32 products run on TF32 tensor cores (``allow_tf32`` or a matmul precision other than "highest"): else fp32 means IEEE."""
+    from .fused_generic_sm90a import _tf32_allowed
+
+    return _tf32_allowed()
 
 
 def _f32_tiles(m: int, d: int, h: int, sm120: bool = False) -> tuple[int, int, int]:

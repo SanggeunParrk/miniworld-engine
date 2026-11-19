@@ -116,6 +116,7 @@ markers = [
   "gpu: needs a CUDA device (skipped without one)",
   "h100: needs an H100 (sm_90); skipped on other cards",
   "a100: needs an A100 (sm_80); skipped on other cards",
+  "rtx5090: needs an RTX 5090 (sm_120); skipped on other cards",
   "slow: takes more than a few seconds (deselect with -m \"not slow\")",
 ]
 

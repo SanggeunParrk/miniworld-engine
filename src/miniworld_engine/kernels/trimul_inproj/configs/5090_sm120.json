@@ -1656,6 +1656,12 @@
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.02048},
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 8}, "num_warps": 4, "num_stages": 2, "ms": 0.022528}
    ],
+   "float32|M=1024,N=384|HAS_ROWSCALE=0": [
+    {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 16}, "num_warps": 2, "num_stages": 3, "ms": 0.014336},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.016384},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 8}, "num_warps": 4, "num_stages": 2, "ms": 0.016736},
+    {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 32}, "num_warps": 2, "num_stages": 3, "ms": 0.0184}
+   ],
    "float32|M=128,N=384|HAS_ROWSCALE=0": [
     {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 16}, "num_warps": 2, "num_stages": 3, "ms": 0.01024},
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.012288},
@@ -1704,6 +1710,12 @@
     {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.111872},
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 2}, "num_warps": 4, "num_stages": 2, "ms": 0.128576}
    ],
+   "float32|M=2048,N=384|HAS_ROWSCALE=0": [
+    {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 16}, "num_warps": 2, "num_stages": 3, "ms": 0.018432},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 8}, "num_warps": 4, "num_stages": 2, "ms": 0.022528},
+    {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 32}, "num_warps": 2, "num_stages": 3, "ms": 0.022528},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 32}, "num_warps": 4, "num_stages": 2, "ms": 0.024576}
+   ],
    "float32|M=256,N=384|HAS_ROWSCALE=0": [
     {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 16}, "num_warps": 2, "num_stages": 3, "ms": 0.012256},
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.012288},
@@ -1745,6 +1757,12 @@
     {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 16}, "num_warps": 2, "num_stages": 3, "ms": 0.018432},
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.02048},
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 2}, "num_warps": 4, "num_stages": 2, "ms": 0.02048}
+   ],
+   "float32|M=4096,N=384|HAS_ROWSCALE=0": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 32}, "num_warps": 4, "num_stages": 2, "ms": 0.026624},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 2, "ms": 0.028672},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 16}, "num_warps": 4, "num_stages": 2, "ms": 0.028672},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.028672}
    ],
    "float32|M=409600,N=128|HAS_ROWSCALE=0": [
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.542688},
@@ -1835,6 +1853,12 @@
     {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 16}, "num_warps": 2, "num_stages": 3, "ms": 0.020448},
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.022528},
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 8}, "num_warps": 4, "num_stages": 2, "ms": 0.024576}
+   ],
+   "float32|M=8192,N=384|HAS_ROWSCALE=0": [
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 2, "ms": 0.049152},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 32}, "num_warps": 4, "num_stages": 2, "ms": 0.049152},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 64}, "num_warps": 8, "num_stages": 3, "ms": 0.049152},
+    {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 16}, "num_warps": 2, "num_stages": 3, "ms": 0.049152}
    ]
   },
   "trimul_outproj_layernorm_gemm_gate_triton": {

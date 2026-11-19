@@ -44,6 +44,15 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
     bf16 or fp32 masters (cast inside, outside autograd, so a master's gradient is fp32). fp32 activations (TF32 allowed): ``fused_wide_sm80.transition_f32_sm80`` (D in ``F32_WIDTHS``, hidden a multiple of 64)."""
     from . import fused_fwd_sm80, fused_sm80, fused_wide_sm80
 
+    if x.dtype is torch.float32 and not fused_wide_sm80.tf32_allowed():  # fp32 with TF32 off: IEEE fp32 products, the engine's own fp32 kernels (kernels/ieee_f32)
+        from miniworld_engine.kernels import ieee_f32
+
+        f = torch.float32
+        w = [t.to(f) for t in (ln_weight, ln_bias, wa, wb, ws)]  # a cast stays in autograd: a bf16 master's gradient comes back in its dtype
+        if not ieee_f32.supported_transition(x, w[2], w[4]):
+            return None
+        return ieee_f32.transition_ieee(x, w[0].contiguous(), w[1].contiguous(), w[2].contiguous(), w[3].contiguous(), w[4].contiguous(), float(eps))
+
     rows = x.numel() // x.shape[-1] if x.dim() else 0
     limit = fused_fwd_sm80.max_rows(x.device, x.dtype)
     grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, ln_weight, ln_bias, wa, wb, ws))
@@ -217,6 +226,11 @@ def prebuild(target, rows):
 
         served = {k: v for k, v in half.items() if v and k[0] in fused_wide_sm80.WIDTHS}
         # the float32 rows (TF32): the wide extension's fp32 bindings (transition_f32_sm80) at D in F32_WIDTHS
+        ieee = any(dt == "float32" for v in shapes.values() for (dt, _m) in v)  # fp32 with TF32 off: the IEEE fp32 chain (kernels/ieee_f32)
+        if ieee:
+            from miniworld_engine.kernels import ieee_f32
+
+            yield ieee_f32._ext_sm80
         f32 = any(dt == "float32" for (d, _n), v in shapes.items() if d in fused_wide_sm80.F32_WIDTHS for (dt, _m) in v)
         if any(dt == "bfloat16" for (dt, _m) in shapes.get((128, 4), {})):  # fused_sm80 takes bf16 weights only (no master row reaches it)
             yield fused_sm80._ext
@@ -234,6 +248,10 @@ def prebuild(target, rows):
         from . import fused_bwd_sm80, fused_fwd_sm80, fused_wide_sm80, parameter_cast_sm80
 
         served = {k: v for k, v in half.items() if v and k[0] in fused_wide_sm80.WIDTHS}
+        if any(dt == "float32" for v in shapes.values() for (dt, _m) in v):  # fp32 with TF32 off: the IEEE fp32 chain (kernels/ieee_f32)
+            from miniworld_engine.kernels import ieee_f32
+
+            yield ieee_f32._ext_sm120
         f32 = any(dt == "float32" for (d, _n), v in shapes.items() if d in fused_wide_sm80.F32_WIDTHS for (dt, _m) in v)
         if served or f32:
             yield fused_wide_sm80._ext_sm120

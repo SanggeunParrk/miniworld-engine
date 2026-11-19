@@ -181,8 +181,15 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
   }
+#ifdef MWE_SM120
+  // RTX 5090: up to L 256 hidden 128 has 128 / 512 token tiles for 170 SMs (one or three 4-warp CTAs an SM) and k1t's one weight walk per tile cannot fill the
+  // card: k1w64's two column groups run the kernel 1.4x faster at L 128 and 1.2x at L 256 (2026-11-19); from L 384 k1t is 1-2 % ahead
+  const bool k1t_small = ROW_MASK && ncol == 512 && L <= 256;   // inference only (k1w_row_mask): the training front is not re-measured
+#else
+  const bool k1t_small = false;
+#endif
   if (fuse && D == 64 && (ncol == 256 || ncol == 512)) {   // D64: the persistent variant (same planes and statistics, bit for bit)
-    if (g_k1t > 0 || (g_k1t < 0 && (tr || ncol == 512 || L >= 640))) {   // one CTA per tile with all packed rows (bit-identical to k1w64; transposed planes always)
+    if (g_k1t > 0 || (g_k1t < 0 && !k1t_small && (tr || ncol == 512 || L >= 640))) {   // one CTA per tile with all packed rows (bit-identical to k1w64; transposed planes always)
       if (ncol == 256) launch_k1t<64>(p); else if (g_k1t == 3 || (g_k1t < 0 && L >= 1536)) launch_k1t<128, 3>(p);   // 3 ring slots from L 1536 (measured -2..-6 % of the kernel at L 2048)
       else launch_k1t<128>(p);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -302,7 +309,14 @@ void k3w(torch::Tensor x, torch::Tensor z, torch::Tensor wo3, torch::Tensor wg3,
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
   }
-  if (TUNED && D == 64 && fuse && !ps.numel() && g_k3s && (Hc == 64 || Hc == 128) && T % 64 == 0) {
+#ifdef MWE_SM120
+  // RTX 5090, hidden 128 at L 128 (16384 tokens): the 128-token ZPRE form of k3w is 1.8 us (16 %) faster than the 64-token k3s (256 CTAs of one stage); equal from L 256;
+  // hidden 64 keeps k3s (the ZPRE form is 2 us slower there; kernel / module, 2026-11-19)
+  const bool k3s_on = g_k3s && !(Hc == 128 && T <= 128 * 128);
+#else
+  const bool k3s_on = g_k3s;
+#endif
+  if (TUNED && D == 64 && fuse && !ps.numel() && k3s_on && (Hc == 64 || Hc == 128) && T % 64 == 0) {
     // D64 inference: the 64-token single-stage form (k3s_kernel; bit-identical to the k3w ZPRE form below)
     if (Hc == 64) launch_k3s<64>(p); else launch_k3s<128>(p);
     return;

@@ -227,6 +227,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         "cuda:h100_sm90": 2,
         "cuda:a100_sm80": 3,
         "cuda:5090_sm120": 3,
+        "triton:5090_sm120": 3,  # 2026-11-19 (3: + 1024-row backward keys, augment chunk 3-5); fp32 training at chunk rows (4096 / 8192 rows: LN forward-saveact, dx / dgamma backward) has table entries; no kernel output changes
     }  # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward;
     # 2026-11-13: RTX 5090 (cuda:5090_sm120 2): the staged odd-width forward from 16 rows on, fp32 d 768 rows with early parameters and two row groups a warp;
     # 2026-11-14: A100 (cuda:a100_sm80 3) and RTX 5090 (cuda:5090_sm120 3): the forward kernels take the weight / bias dtype at compile time and issue every load of a row and of its
