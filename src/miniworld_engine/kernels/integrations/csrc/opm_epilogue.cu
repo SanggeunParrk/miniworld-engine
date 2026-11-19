@@ -27,11 +27,11 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include "sm90_ptx.cuh"
+#include "../../_sm_count.cuh"
 #if defined(MINIWORLD_OPM_FP8)
 // EXPERIMENTAL, opt-in build (`opm_fp8.py`, never the default): the wide prologue writes A2 / BT as e4m3 bytes (static power-of-two
 // scale per operand, saturating cast, max |scaled value| reported) for a cuBLASLt e4m3 grouped product.
 #include <cuda_fp8.h>
-#include "../../_sm_count.cuh"
 // round 2: f8tr != 0 also writes A2 / BT in the [s, (i,c)] layout (maps amt / bmt) from the same accumulator: no byte-transpose pass in the backward
 #define OPM_F8_KPARAMS , const float* __restrict__ f8q, float* __restrict__ f8amax, const __grid_constant__ CUtensorMap amt, const __grid_constant__ CUtensorMap bmt, int f8tr
 #else
