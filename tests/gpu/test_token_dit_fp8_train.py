@@ -67,7 +67,7 @@ def test_q8_rows_matches_torch(C_: int, e5: bool) -> None:
     x8, s = F.q8(x, e5)
     fmax = 57344.0 if e5 else 448.0
     am = x.float().abs().amax(1, keepdim=True)
-    ref_s = torch.where(am > 0, am / fmax, torch.ones_like(am))
+    ref_s = torch.clamp(am / fmax, min=1e-30)  # the scale floor (a zero row: 1e-30, all-zero 8-bit values)
     torch.testing.assert_close(s, ref_s, rtol=1e-6, atol=0)
     # one rounding to the 8-bit grid: half a unit in the last place (e4m3 2^-4, e5m2 2^-3 relative; the subnormal step absolute)
     v = x.float() / s
