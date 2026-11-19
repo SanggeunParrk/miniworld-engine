@@ -54,3 +54,21 @@ def test_few_rows_and_training_keep_the_unfused_chain() -> None:
         assert fw._fused_ln(65536, 256, 2, x)
         assert not fw._fused_ln(65536, 128, 2, x)
     assert not fw._fused_ln(65536, 256, 2, x)  # grad enabled (training): xn is saved for the backward
+
+
+def test_row_blocks_with_the_fused_layernorm_stay_accurate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An inference call past ``SM120_INFER_MAX_ROWS`` (``forward_into`` per row block: two fused blocks and one unfused remainder here) is as accurate as the single call."""
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+
+    module = _module(256, 2)
+    kern = copy.deepcopy(module).set_backend("cuda").eval()
+    ref = copy.deepcopy(module).double().eval()
+    x = (torch.randn(1, 100000, 256, device="cuda", generator=torch.Generator(device="cuda").manual_seed(3)) * 2 + 1).to(torch.bfloat16)
+    with torch.no_grad():
+        want = ref(x.double())
+        whole = kern(x)
+        monkeypatch.setattr(fw, "SM120_INFER_MAX_ROWS", 40000)
+        blocks = kern(x)
+    err_w = (whole.double() - want).abs().pow(2).mean().sqrt()
+    err_b = (blocks.double() - want).abs().pow(2).mean().sqrt()
+    assert err_b <= err_w * 1.05 + 1e-6
