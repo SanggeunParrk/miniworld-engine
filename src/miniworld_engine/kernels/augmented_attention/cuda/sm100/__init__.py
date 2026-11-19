@@ -39,12 +39,14 @@ Everything else keeps the Triton path, and so do fake tensors and torch.compile 
 
 from __future__ import annotations
 
+import collections
 import functools
 import os
 from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels._nvcc import build_failed, engine_jit_root
 
@@ -536,6 +538,36 @@ def augmented_attention_bf16_sm100(q, k, v, bias, *, bias_head_major: bool = Fal
 
 
 # --------------------------------------------------------------------------------------------------- inference core
+class BoundedRuns(collections.OrderedDict):
+    """Bound launches (``GatedInferenceCore.runs``): an LRU of at most ``cap`` entries, keyed by the buffers' addresses and layouts.
+
+    A run holds only its TMA descriptors (they encode addresses, not tensors) and the scratch it owns -- never the caller's tensors -- so an
+    entry costs kilobytes, the address of a freed buffer can be reused by the allocator and hit the same (valid) run, and a sampler that
+    allocates fresh tensors every step cannot grow the cache past ``cap``. A graph that captured a run keeps the run's scratch alive through
+    ``_capture.hold`` (done by the core), so an eviction never frees memory a replay reads."""
+
+    cap = 128
+    #: bytes of scratch the runs own (``run.nbytes``: the key-split partials), at most, beyond the newest run
+    scratch_budget = 256 << 20
+
+    def bind(self, key, make):
+        run = self.get(key)
+        if run is not None:
+            self.move_to_end(key)
+            return run
+        run = make()
+        self[key] = run
+        while len(self) > 1 and (len(self) > self.cap or sum(getattr(r, "nbytes", 0) for r in self.values()) > self.scratch_budget):
+            self.popitem(last=False)
+        return run
+
+
+def _release_maps(maps) -> None:
+    """The maps' ``keep`` pins the tensor a descriptor was encoded from; a cached run must not own the caller's buffers."""
+    for m in maps:
+        m.keep = None
+
+
 class GatedInferenceCore:
     """The fused token DiT step's core on sm_100a: reads the block's head-major hoisted bias ([nb H, L, L] rows) and the
     step's projections (logits pre-scaled into exp2 units), writes sigmoid(g) * o over q.
@@ -545,7 +577,8 @@ class GatedInferenceCore:
       [D, S L] -- a kind::tf32 MMA takes v only K-major. Every 48-wide fp32 q / k / g tile is a 32-column 128-B-swizzled
       box and a 16-column 64-B-swizzled one (32: one 32-column box, 64: two); the v^T tile is dh rows x 32 keys.
 
-    Both at every layout of TDIT_HEADS. Bindings (TMA descriptors) are cached per buffer."""
+    Both at every layout of TDIT_HEADS. Bindings (TMA descriptors) are cached per buffer address and layout, in a bounded LRU
+    (``BoundedRuns``): they do not own the caller's tensors."""
 
     def __init__(
         self,
@@ -573,7 +606,7 @@ class GatedInferenceCore:
             )
         )
         self.nsm = num_sms(device_index)
-        self.runs: dict = {}
+        self.runs = BoundedRuns()
         self.device_index = device_index
 
     def _qpair(self):
@@ -647,14 +680,15 @@ class GatedInferenceCore:
                 pb = _tm(op, [Dm, L, ns], [Dm * 4, L * Dm * 4], [16, 128, 1], swizzle=64, **f32)
                 grid = (min(self.nsm, ((-(-L // 128) + 1) // 2) * Hh * ns), 1, 1)
                 E = _apb_rows.ext()
-                rows = qkvg[:L]
                 dh = self.dh
 
-                def run():
+                def run(qkvg_):
                     ks(grid, (384, 1, 1), *maps, int(L), int(S), pa, pb, lsep, int(ns))
-                    E.ksplit_combine32(op, lsep, rows, 2 * Dm, Hh, dh)
+                    E.ksplit_combine32(op, lsep, qkvg_[:L], 2 * Dm, Hh, dh)
 
-                run.keep = (maps, qkvg, vt, bias, op, lsep, pa, pb)
+                _release_maps(maps)
+                run.keep = (maps, op, lsep, pa, pb)  # its own scratch only
+                run.nbytes = op.nbytes + lsep.nbytes  # ty: ignore[unresolved-attribute]
                 return run
             if S == 1 and L > 128 and _TF32_QPAIR and own:
                 # one sample: ``attn_inf_tf32 -DQPAIR=1`` (two 128-query tiles of a head share its k / v^T blocks; two stages at 48 wide)
@@ -664,7 +698,7 @@ class GatedInferenceCore:
                 )
                 grid = (min(self.nsm, ((-(-L // 128) + 1) // 2) * Hh), 1, 1)
 
-            def run():
+            def run(qkvg_=None):
                 kf(grid, (384, 1, 1), *maps, int(L), int(S))
         else:
             Dm, DH = W // 4, self.dh
@@ -679,10 +713,11 @@ class GatedInferenceCore:
                 k = self._qpair()
                 grid = (min(self.nsm, ((-(-L // 128) + 1) // 2) * Hh), 1, 1)
 
-            def run():
+            def run(qkvg_=None):
                 k(grid, (384, 1, 1), mq, mk, mv, mb, mg, mq, int(L), int(S))
 
-        run.keep = (maps, qkvg, vt, bias)
+        _release_maps(maps)
+        run.keep = (maps,)
         return run
 
     def __call__(self, qkvg, bias, block, S, vt=None, L=None, srow=None, vmn=False):
@@ -701,11 +736,14 @@ class GatedInferenceCore:
             L,
             srow,
             vmn,
+            # the layout the descriptors encode: the address alone no longer pins a tensor (a freed buffer's address is reused)
+            qkvg.shape[1],
+            qkvg.dtype,
+            None if vt is None else vt.stride(0),
         )
-        run = self.runs.get(key)
-        if run is None:
-            run = self.runs[key] = self._bind(qkvg, vt, bias, block, S, L, srow, vmn)
-        run()
+        run = self.runs.bind(key, lambda: self._bind(qkvg, vt, bias, block, S, L, srow, vmn))
+        _capture.hold(run)  # a capture reads the run's scratch (key-split partials) at every replay
+        run(qkvg)
         return qkvg
 
     def folds(self, qkvg, bias, S, NB, L):
@@ -713,9 +751,9 @@ class GatedInferenceCore:
         ``bias`` [heads, NB, L, L] (``apb.pair_bias_batch``); a work item pairs two samples of one fold. 2026-11-17, part 3: the per-fold
         launches were 5 x 7.8 us at L 128 (48 work items each on 148 SMs)."""
         assert not self.fp32
-        key = ("folds", qkvg.data_ptr(), bias.data_ptr(), S, NB, L)
-        run = self.runs.get(key)
-        if run is None:
+        key = ("folds", qkvg.data_ptr(), bias.data_ptr(), S, NB, L, qkvg.shape[1], qkvg.dtype)
+
+        def make():
             k = _sm100_kernel("attn_inf", "augattn_inf_sm100", self.device_index, defs=(*_tdit_defs(self.heads, self.dh), "FOLDARG=1"))
             W = qkvg.shape[1]
             es = qkvg.element_size()
@@ -729,12 +767,16 @@ class GatedInferenceCore:
             maps = (mq, t3(kk, 64), t3(v, 64), mb, t3(g, 128))
             grid = (min(self.nsm, ((S + 1) // 2) * Hh * -(-L // 128) * NB), 1, 1)
 
-            def run():
+            def run(qkvg_=None):
                 k(grid, (384, 1, 1), *maps, mq, int(L), int(S), int(NB))
 
-            run.keep = (maps, qkvg, bias)  # ty: ignore[unresolved-attribute]
-            self.runs[key] = run
-        run()
+            _release_maps(maps)
+            run.keep = (maps,)  # ty: ignore[unresolved-attribute]
+            return run
+
+        run = self.runs.bind(key, make)
+        _capture.hold(run)
+        run(qkvg)
         return qkvg
 
 

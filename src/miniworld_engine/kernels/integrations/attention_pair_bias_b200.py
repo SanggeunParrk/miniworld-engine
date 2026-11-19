@@ -1899,7 +1899,7 @@ def _b200_tf32_core(device_index: int, heads: int, dhp: int):
         core.fp32, core.heads, core.dh = True, heads, dhp
         defs = (f"NHEAD={heads}", f"DHP={dhp}", "KPERM=1")
         core.k = sm._sm100_kernel("attn_inf_tf32", "augattn_inf_tf32_sm100", device_index, defs=defs)
-        core.nsm, core.runs = num_sms(device_index), {}
+        core.nsm, core.runs = num_sms(device_index), sm.BoundedRuns()
         # (2026-11-17, part 6) the attributes the class now reads: its device, and no -DQPAIR TF32 build (that one has no -DKPERM key order)
         core.device_index, core.tf32_qpair = device_index, False  # pyright: ignore[reportAttributeAccessIssue]
         _B200_TF32_CORES[key] = core
