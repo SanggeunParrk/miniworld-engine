@@ -1,6 +1,6 @@
 # miniworld-engine 3.0.4
 
-Base: 3.0.3 (`b63ba5a9c`, tag `v3.0.3` -> `edc8deca4`). Integration branch `rc/3.0.4`, released from `rc/3.0.4-release` (= `rc/3.0.4` + the version bump).
+Base: 3.0.3 (`b63ba5a9c`, tag `v3.0.3` -> `edc8deca4`). Integration branch `rc/3.0.4` (`e02136187`), released from `rc/3.0.4-release` (= `rc/3.0.4` + the version bump).
 
 **What this release is.** A release for the sm_80-family cards (A100 and RTX 5090) plus two infrastructure fixes that affect every card. The H100 numerics are untouched:
 no H100 `backend_versions` entry and no module `version` changed, and the installed H100 inference / training default paths are bitwise identical to the installed 3.0.3 (see
@@ -29,6 +29,7 @@ no H100 `backend_versions` entry and no module `version` changed, and the instal
   a 48-block step graph ran out of memory on 32 GB; pool 15.3 GiB at chunk 8). The H100 path keeps the shipped behaviour (a test of 144 H100 cases failed with the unconditional skip).
 - **5090 training memory.** TriangleAttention `xh` and Transition `xn` are rebuilt in the backward instead of saved (-113 MiB per Pairformer block at L 384; gradients bitwise unchanged); TriMul training saves `p'`
   only (`g'` is recomputed: -36 MiB per TriMul at L 384, max 26 -> 28 Pairformer blocks).
+- **TokenDiTChai1 on the sm_80 family (A100, 5090).** The identity AdaLN (`IdentityAdaptiveLayerNorm`) of the attention part and of the transition used to run as PyTorch ops (and, in fp32, the call no longer reached `ln_cond`, so the gates refused the cuda path). Both now run on the sm_80 row kernels (`adaln_epi` / `adaln_bwd_x` identity form plus cuBLAS), forward and backward, on the sm_80 sources built for sm_120a. Rebuilt artifacts: one sm80 and one sm120 AdaLN extension (the sm90 plan is unchanged: 0 to build).
 - **5090 launch-config keys** for the shapes the real step still missed (sampler conditioning Transition, 8192-row no-grad forward, augment-chunk train rows): previously a missing key fell to the kernel default
   (131072 B shared memory > 101376 B, `OutOfResources`). Pretuned in situ; the table commits only add keys for shapes absent from the requirements rows, so the `triton:5090_sm120` versions stay at the default.
 - **5090 TriMul inference.** D64 hidden-128 small L (k1w64 front up to L 256, k3w ZPRE output stage at L 128: module -10..-19 % at L 128, -6 % at L 256), D64 outgoing at L 256 from 0.965 / 1.00 to 0.89 / 0.92
@@ -60,6 +61,7 @@ No module `version` was bumped. No H100 entry changed.
 | AtomDiT* (same 6 classes) | 5090_sm120 | default (1) | 2 | the same |
 | TokenDiTProtenix, Boltz2, Chai1, RF3 | a100_sm80 | 4 | 5 | AdaLN / SwiGLU GEMMs follow the caller's TF32 setting |
 | TokenDiTMiniWorld | a100_sm80 | 5 | 6 | inherits |
+| TokenDiTChai1 | a100_sm80 / 5090_sm120 | 4 / default (1) | 7 / 4 | identity AdaLN and the transition on the sm_80 row kernels (6 / 3: fp32 gate fix; 7 / 4: the identity form) |
 | TokenDiT* (same classes + MiniWorld) | 5090_sm120 | default (1) | 2 | TF32 no longer forced |
 | AttentionPairBias | a100_sm80 / 5090_sm120 | 8 / 3 | 9 / 4 | fp32 GEMMs of the fused update follow TF32 setting (IEEE fp32) |
 | Transition | a100_sm80 / 5090_sm120 | 6 / 4 | 7 / 6 | IEEE fp32 chain (a100: was refused to Triton / PyTorch); 5090 also does not save `xn` |
@@ -81,8 +83,8 @@ No module `version` was bumped. No H100 entry changed.
 ## Prebuild regeneration (release build)
 
 Kernels wheels (sm90 / sm80 / sm120, cu129, cp312) rebuilt incrementally from the 3.0.3 release cache with GCC 12.4 and the pixi CUDA 12.9 toolkit (torch 2.13+cu129; CUTLASS 4.2, MathDx), GPU-less on the cluster
-(`MINIWORLD_ENGINE_TARGET_ARCH` set): sm90a **40 built** (579 artifacts, 0 absent; the 40 are the artifacts that include `_sm_count.cuh`, re-keyed, outputs unchanged), sm80 **29 built** (74 artifacts),
-sm120a **29 built** (66 artifacts). The carried names (`triattn_h100_core_h16_v2`, `miniworld_pwa_dgv_bwd`, `_glue3`, `_pair3`, byte-for-byte from the 2.5.5 / 3.0.0 wheels) are carried again (8 files).
+(`MINIWORLD_ENGINE_TARGET_ARCH` set): sm90a **40 built** (579 artifacts, 0 absent; the 40 are the artifacts that include `_sm_count.cuh`, re-keyed, outputs unchanged), sm80 **30 built** (29 + 1 AdaLN extension after the Chai1 fixes) (74 artifacts),
+sm120a **30 built** (29 + 1) (66 artifacts). The carried names (`triattn_h100_core_h16_v2`, `miniworld_pwa_dgv_bwd`, `_glue3`, `_pair3`, byte-for-byte from the 2.5.5 / 3.0.0 wheels) are carried again (8 files).
 **No name of 3.0.3 is dropped:** manifest names sm90 364 -> 364 (0 dropped / 0 added), sm80 72 -> 74 (0 / 2: `ieee_f32_sm80`, `sampler_ops_f32_sm80`), sm120 64 -> 66 (0 / 2: `ieee_f32_sm120`, `sampler_ops_f32_sm80_sm120`).
 **`ldd` on every `.so` of every arch (staged tree and installed wheels, 377 distinct files): 0 link a CUDA-13 library, 0 unresolved**; the only CUDA libraries are `libcudart.so.12`, `libcublas.so.12`, `libcublasLt.so.12`.
 Highest symbol versions needed: GLIBC 2.14, GLIBCXX 3.4.21, CXXABI 1.3.11 (manylinux_2_28 safe).
