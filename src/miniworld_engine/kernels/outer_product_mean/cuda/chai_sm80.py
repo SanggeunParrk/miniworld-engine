@@ -50,6 +50,14 @@ def chai_projbwd(x, mask, da, db, gamma, beta, stats, wlr):
     return ext().chai_projbwd(x, mask, da, db, gamma, beta, stats, wlr)
 
 
+def _per_group(s: int, n: int) -> bool:
+    """A100: whether the Chai-1 products run as eight per-group skip-kernel launches (``ogemm_sm80.outer``) instead of cuBLAS's bmm / the batched launch. cuBLAS's
+    bmm falls to a slow kernel when the MSA is deep and the pair long (A-B-A-B, L2 flushed, bmm vs per-group ms: S 1024 L 1280 8.2 vs 8.5, L 1536 12.3 vs 12.1,
+    L 2048 28.2 vs 21.2; S 2048 L 640 3.9 vs 4.0, L 768 5.9 vs 5.75, L 1024 13.0 vs 10.1; S 4096 L 512 4.8 vs 5.1, L 640 8.4 vs 7.8, L 768 13.4 vs 11.3; S 8192 L 768 27.1 vs
+    22.4; S <= 512 cuBLAS leads to L 2048)."""
+    return n >= (1536 if s < 2048 else 768 if s < 4096 else 640) and s >= 1024
+
+
 def chai_products(a, b, mask, s, n):
     """O [8, N K, N K] = a_g^T b_g per group (a, b [8, S N, 8]): with a mask the CUTLASS product that skips the tokens masked in every MSA row
     (``ogemm_sm80``; their blocks are exactly 0), one launch per group, from L 384; else the cuBLAS batched GEMM."""
@@ -69,10 +77,20 @@ def chai_products(a, b, mask, s, n):
     from . import ogemm_sm80
 
     mk = mask.view(s, n)
-    if ogemm_sm80.all_live(mk.view(torch.uint8) if mk.dtype is torch.bool else mk.to(torch.uint8)):  # nothing to skip: the cuBLAS batched GEMM
+    if not _sm120() and _per_group(s, n):  # the eight per-group CUTLASS launches (the previous source's path), live or padded
+        live = ogemm_sm80.live_tokens(mk.view(torch.uint8) if mk.dtype is torch.bool else mk.to(torch.uint8))
+        o = a.new_empty((8, n * 8, n * 8))
+        for g in range(8):
+            ogemm_sm80.outer(a[g].view(s, n * 8), b[g].view(s, n * 8), live, 8, o[g])
+        return o
+    if ogemm_sm80.all_live(
+        mk.view(torch.uint8) if mk.dtype is torch.bool else mk.to(torch.uint8)
+    ):  # nothing to skip: the cuBLAS batched GEMM
         return torch.bmm(a.view(8, s, n * 8).transpose(1, 2), b.view(8, s, n * 8))
     live = ogemm_sm80.live_tokens(mk.view(torch.uint8) if mk.dtype is torch.bool else mk.to(torch.uint8))
-    return ogemm_sm80.outer_batched(a.view(8, s, n * 8), b.view(8, s, n * 8), live, 8)  # one launch for the eight groups (8 launches ran 3 waves each, the last one 0.67 full)
+    return ogemm_sm80.outer_batched(
+        a.view(8, s, n * 8), b.view(8, s, n * 8), live, 8
+    )  # one launch for the eight groups (8 launches ran 3 waves each, the last one 0.67 full)
 
 
 def chai_bwd_products(a, b, do, s, n):

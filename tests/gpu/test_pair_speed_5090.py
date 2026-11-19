@@ -43,7 +43,7 @@ def test_bare_front_matches_padded_front(cls, length: int, monkeypatch: pytest.M
     assert (bare - ref).abs().max().item() <= max((padded - ref).abs().max().item(), 8e-3 * scale)
 
 
-@pytest.mark.parametrize("length", [128, 256, 384])
+@pytest.mark.parametrize("length", [128, 160, 170, 171, 256, 384])  # B L <= 170 SMs: one-row CTAs; beyond: the persistent grid
 def test_token_pair_init_persistent_forward_matches_reference(length: int) -> None:
     module = TokenPairInit().cuda().float()
     C.randomize(module, torch.Generator(device="cuda").manual_seed(0))

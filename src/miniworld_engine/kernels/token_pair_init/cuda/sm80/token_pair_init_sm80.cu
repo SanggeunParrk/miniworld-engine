@@ -24,8 +24,13 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
 #ifdef MWE_SM120
 // RTX 5090: a persistent grid (one CTA per SM, the class-row table fetched once per CTA) over work units of TPI_UNIT_COLS columns of one row of z
 #define TPI_UNIT_COLS 64
+// L <= TPI_WHOLE_ROW_L: one unit is a whole row (L 128 on 170 SMs: 128 one-row CTAs as the previous kernel; 64-column units split each row into two units, a 2 us loss
+// there); longer calls the 64-column units (measured L 256 / 384: 128-column units trail them by 3-8 %).
+#define TPI_WHOLE_ROW_L 128
+static inline int tpi_unit_cols(int L) { return L <= TPI_WHOLE_ROW_L ? TPI_WHOLE_ROW_L : TPI_UNIT_COLS; }
 static inline unsigned tpi_grid_sm120(int B, int L) {
-  const long long units = (long long)B * L * ((L + TPI_UNIT_COLS - 1) / TPI_UNIT_COLS);
+  const int uc = tpi_unit_cols(L);
+  const long long units = (long long)B * L * ((L + uc - 1) / uc);
   return (unsigned)std::min<long long>(units, at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
 }
 #define TPI_GRID(B, tiles, L) tpi_grid_sm120((B), (L))
@@ -40,9 +45,9 @@ static_assert(TPI_FWD_WARPS == NWARP, "the forward launch is 32 * NWARP threads"
 #ifdef MWE_SM120
 // Persistent forward (R = 1 rows per tile, the 5090's setting): each CTA fetches the table once, then walks the work units (row i, 64 columns) of the whole call in a
 // grid-stride loop -- 384 one-row CTAs on 170 SMs are 2.3 waves of 3; units of 64 columns keep every SM busy to the end.  The sum order per element is the one-row kernel's.
-__global__ void __launch_bounds__(32 * TPI_FWD_WARPS)
-tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ tbl, const int* __restrict__ ids,
-        const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax, int R) {
+template <int UC>
+__device__ __forceinline__ void tpi_fwd_persistent(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ tbl, const int* __restrict__ ids,
+        const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax) {
   extern __shared__ __align__(128) float sm[];
   const int nrel = 2 * (2 * rmax + 2) + (2 * smax + 2) + 1, nbin = nrel + 2;
   uint32_t* pk = (uint32_t*)(sm + nbin * P);                        // [L]
@@ -52,12 +57,12 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(d), "l"(tbl + 4 * c));
   }
   asm volatile("cp.async.commit_group;\n" ::);
-  const int chunks = (L + TPI_UNIT_COLS - 1) / TPI_UNIT_COLS;
+  const int chunks = (L + UC - 1) / UC;
   const long long units = (long long)B * L * chunks;
   bool first = true;
   for (long long u = blockIdx.x; u < units; u += gridDim.x) {
-    const int jc = (int)(u % chunks), bi = (int)(u / chunks), b = bi / L, i = bi % L, j0 = jc * TPI_UNIT_COLS;
-    const int nj = min(TPI_UNIT_COLS, L - j0);
+    const int jc = (int)(u % chunks), bi = (int)(u / chunks), b = bi / L, i = bi % L, j0 = jc * UC;
+    const int nj = min(UC, L - j0);
     if (threadIdx.x < nj) {
       const int ri = b * L + i, j = j0 + threadIdx.x;
       pk[threadIdx.x] = pack_pair(load_row(ids, BL, ri), load_row(ids, BL, b * L + j), bond[(size_t)ri * L + j], rmax, smax);
@@ -88,6 +93,12 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
     }
     __syncthreads();                                                // pk is rewritten by the next unit
   }
+}
+__global__ void __launch_bounds__(32 * TPI_FWD_WARPS)
+tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ tbl, const int* __restrict__ ids,
+        const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax, int R) {
+  if (L <= TPI_WHOLE_ROW_L) tpi_fwd_persistent<TPI_WHOLE_ROW_L>(left, right, tbl, ids, bond, out, B, L, rmax, smax);
+  else tpi_fwd_persistent<TPI_UNIT_COLS>(left, right, tbl, ids, bond, out, B, L, rmax, smax);
 }
 #else
 __global__ void __launch_bounds__(32 * TPI_FWD_WARPS)

@@ -78,8 +78,8 @@ class TokenPairInit(BackendModule):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 2,
-        "cuda:5090_sm120": 2,
-    }  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build; 5090 2 (2026-11-19): persistent forward grid, plain stores (bitwise the same z)
+        "cuda:5090_sm120": 3,
+    }  # 5090 3 (2026-11-20): short calls (B L <= SMs, L 128) keep one-row CTAs (the 64-column work units cost 2 us at L 128); bitwise the same z; 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build; 5090 2 (2026-11-19): persistent forward grid, plain stores (bitwise the same z)
 
     backends = ("pytorch", "cuda", "triton")
 

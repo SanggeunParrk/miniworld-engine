@@ -81,3 +81,34 @@ def test_all_live_mask_takes_the_dense_product_and_padding_the_skip_product(monk
             assert torch.equal(on, off)  # padded: the same skip kernel either way
         else:
             assert (on - off).abs().max().item() <= 2e-2 * off.abs().max().item()
+
+
+@pytest.mark.skipif(not _a100(), reason="an A100 (sm_80)")
+def test_chai_products_per_group_route_table_and_values() -> None:
+    from miniworld_engine.kernels.outer_product_mean.cuda import chai_sm80, ogemm_sm80
+
+    per_group = chai_sm80._per_group
+    assert not per_group(1024, 1280) and per_group(1024, 1536) and per_group(1024, 2048)
+    assert (
+        not per_group(512, 2048) and not per_group(2048, 640) and per_group(2048, 768) and per_group(4096, 640) and not per_group(4096, 512)
+    )
+    s, n = 2048, 768  # the per-group route; all-live and padded masks
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    a = torch.randn(8, s, 8 * n, device="cuda", dtype=torch.bfloat16, generator=gen)
+    b = torch.randn(8, s, 8 * n, device="cuda", dtype=torch.bfloat16, generator=gen)
+    for pad in (False, True):
+        mask = torch.ones(s, n, device="cuda", dtype=torch.uint8)
+        if pad:
+            mask[:, n - n // 8 :] = 0
+            dead = (mask.amax(0) == 0).repeat_interleave(8)
+            a[:, :, dead] = 0
+            b[:, :, dead] = 0
+        ogemm_sm80._PROBES.clear()
+        got = chai_sm80.chai_products(a.reshape(8, s * n, 8), b.reshape(8, s * n, 8), mask, s, n)
+        each = torch.empty_like(got)
+        live = ogemm_sm80.live_tokens(mask)
+        for g in range(8):
+            ogemm_sm80.outer(a[g], b[g], live, 8, each[g])
+        assert torch.equal(got, each)
+        dense = torch.bmm(a.transpose(1, 2), b)
+        assert (got.float() - dense.float()).abs().max().item() <= 1e-2 * dense.float().abs().max().item()
