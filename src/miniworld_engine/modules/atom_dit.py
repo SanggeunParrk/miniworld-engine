@@ -1254,9 +1254,10 @@ class AtomDiTMiniWorld(BackendModule):
         "anthropic": 2,
         "cuda:a100_sm80": 7,
         "cuda:h100_sm90": 3,
-        "cuda:5090_sm120": 3,
+        "cuda:5090_sm120": 4,
     }  # cuda:a100_sm80 7 (2026-11-13): the sm_80 window attention exits on a tile past seqused (zero rows, the same bits)
     # cuda:5090_sm120 3 (3.0.5): global attention inference on its own sm_120a kernel (attn_global_sm120.cuh, in place of FlashAttention-2) and on the fused qkvg / FFN stages; bf16 training forward on the fused stages from 4096 rows; modulation backward on cuBLAS at every row count; weight casts in one launch
+    # cuda:5090_sm120 4 (3.0.5): bf16 training backward on the RTX 5090: the FFN backward's dy kernel and the qkvg backward as K-split kernels streaming their weight through a cp.async ring (bwd_ks_sm120.cuh, in place of cuBLAS products + row stages), the five weight gradients as one grouped split-K GEMM (wgrad5_sm120.cu, in place of five cuBLAS products), the FFN gate kernel's launch table (fp32 sums in another order; no change of any other output)
     # cuda:h100_sm90 3 (3.0.1): bf16 training: the modulation table is bf16 (hoist GEMMs on bf16 operands, slab kernels read it and write dmod in bf16); A 48 x 4096 atoms, 3 blocks 11.09 -> 9.80 ms
 
     def __init__(
@@ -1655,8 +1656,9 @@ class SWAAtomTransformer(BackendModule):
         "cuda:a100_sm80": 7,
         "cuda:h100_sm90": 4,
         "triton": 2,
-        "cuda:5090_sm120": 3,
+        "cuda:5090_sm120": 4,
     }  # cuda:a100_sm80 7 (2026-11-13): as AtomDiTMiniWorld
+    # cuda:5090_sm120 4 (3.0.5): as AtomDiTMiniWorld (bf16 training backward kernels)
     # cuda:h100_sm90 4 (3.0.1): as AtomDiTMiniWorld (bf16 training modulation table)
 
     class Config(BaseModel):

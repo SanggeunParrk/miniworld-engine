@@ -256,7 +256,9 @@ def _bwd_fp32(
         ab, dh = mm(y, wu.t()), mm(dffn, wd)
         dab, hh = empty(m, 4 * C), empty(m, 2 * C)
         _rows(7, [ab, dh], [dab, hh], n, s, bf)
-    if fused and BWD_STREAM_SM120 and _ks_ok(m, s):  # stage 8 and the product before it: dq1 and d shift_f | d scale_f from dab Wu, the weight streamed
+    if (
+        fused and BWD_STREAM_SM120 and _ks_ok(m, s)
+    ):  # stage 8 and the product before it: dq1 and d shift_f | d scale_f from dab Wu, the weight streamed
         dq1 = sm80.ffn_bwd_dy_sm120(dab, q1, dy.reshape(m, C), mod, f["wut"], dmod, n, s, FP32_EPS)
     else:
         d_y = mm(dab, wu)
@@ -273,7 +275,9 @@ def _bwd_fp32(
         d_o, dg, delta = empty(m, C, dtype=_BF), empty(m, C), empty(n, H, s, dtype=_F32)
         _rows(10, [dgated, o, g], [d_o, dg, delta], n, s, bf)
     dqh, dkh, dvh = attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window)
-    if fused and BWD_STREAM_SM120 and "wt" in f and _ks_ok(m, s):  # stages 11 + 12 and the product between them: dP, dx = dP W and the adaLN backward, the weight streamed
+    if (
+        fused and BWD_STREAM_SM120 and "wt" in f and _ks_ok(m, s)
+    ):  # stages 11 + 12 and the product between them: dP, dx = dP W and the adaLN backward, the weight streamed
         dq, dp = sm80.qkvg_bwd_sm120(
             q.reshape(m, C), pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, f["wt"], dmod, n, s, FP32_EPS, FP32_EPS
         )
@@ -284,7 +288,9 @@ def _bwd_fp32(
         dx = mm(dp, wstack)
         dq = empty(m, C)
         _rows(12, [dq1, dx, q, mod], [dq, dmod], n, s, bf)
-    if fused and WGRAD5_SM120 and sm80.wgrad5_ok_sm120(m):  # the five weight gradients in one grouped split-K GEMM + one reduction (cuBLAS runs them at ~40 TFLOPs there)
+    if (
+        fused and WGRAD5_SM120 and sm80.wgrad5_ok_sm120(m)
+    ):  # the five weight gradients in one grouped split-K GEMM + one reduction (cuBLAS runs them at ~40 TFLOPs there)
         dwqkv, dwg, dwo, dwu, dwd = sm80.wgrad5_sm120(dp, x, dab, y, datt, gated, dffn, hh)
         return [dq.view(n, s, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
     return [

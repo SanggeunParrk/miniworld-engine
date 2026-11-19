@@ -661,7 +661,15 @@ def _ext_wgrad5_sm120():
     return _load(
         name="swa_wgrad5_sm120",
         sources=[str(_dir / "wgrad5_sm120.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_120a,code=sm_120a", "-DMWE_SM120=1", f"-I{_dir}", "-Xcompiler=-fno-gnu-unique"],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_120a,code=sm_120a",
+            "-DMWE_SM120=1",
+            f"-I{_dir}",
+            "-Xcompiler=-fno-gnu-unique",
+        ],
         extra_cflags=["-std=c++17", "-O3", "-fno-gnu-unique"],
         verbose=False,
     )
@@ -679,5 +687,7 @@ def wgrad5_ok_sm120(m: int, variant: int | None = None) -> bool:
 def wgrad5_sm120(dp, x, dab, y, datt, gated, dffn, hh, variant: int | None = None):
     """The five weight gradients (fp32, unrounded) of the training backward on the RTX 5090: ``(dWqkv [384, 128], dWg [128, 128], dWo [128, 128], dWu [512, 128], dWd [128, 256])`` of
     ``dp^T x`` (split into q k v | g), ``datt^T gated``, ``dab^T y``, ``dffn^T hh`` over the M rows (bf16 [M, .]): one split-K grouped GEMM and one reduction."""
-    dqkv, dg, dwu, dwo, dwd = _ext_wgrad5_sm120().compute(dp, x, dab, y, datt, gated, dffn, hh, WGRAD5_VARIANT_SM120 if variant is None else variant)
+    dqkv, dg, dwu, dwo, dwd = _ext_wgrad5_sm120().compute(
+        dp, x, dab, y, datt, gated, dffn, hh, WGRAD5_VARIANT_SM120 if variant is None else variant
+    )
     return dqkv, dg, dwo, dwu, dwd
