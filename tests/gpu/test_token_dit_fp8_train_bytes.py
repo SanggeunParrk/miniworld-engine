@@ -32,10 +32,11 @@ def _master(seed: int = 0) -> typing.Any:
     return out.train().set_backend("cuda")
 
 
-def _run(m, A: int, L: int, places: str) -> list[torch.Tensor]:
+def _run(m, A: int, L: int, places: str, default_bytes: bool = False) -> list[torch.Tensor]:
     F = _F()
-    old = F.PLACES, F.MIN_ROWS
+    old = F.PLACES, F.MIN_ROWS, F.DEFAULT_BYTES
     F.PLACES, F.MIN_ROWS = F.parse(places), 0
+    F.DEFAULT_BYTES = old[2] if default_bytes else frozenset()  # default_bytes: the route as shipped (nox + hsave on by default)
     try:
         g = torch.Generator(device="cuda").manual_seed(1)
         inp = m.make_inputs(
@@ -53,7 +54,7 @@ def _run(m, A: int, L: int, places: str) -> list[torch.Tensor]:
             typing.cast(torch.Tensor, q.grad) for q in m.parameters() if q.requires_grad
         ]
     finally:
-        F.PLACES, F.MIN_ROWS = old
+        F.PLACES, F.MIN_ROWS, F.DEFAULT_BYTES = old
 
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
@@ -76,8 +77,8 @@ def test_nox_keeps_no_fp32_residual() -> None:
     m = _master()
     n_f32 = {}
     for places in ("", "nox"):
-        old = F.PLACES, F.MIN_ROWS
-        F.PLACES, F.MIN_ROWS = F.parse(places), 0
+        old = F.PLACES, F.MIN_ROWS, F.DEFAULT_BYTES
+        F.PLACES, F.MIN_ROWS, F.DEFAULT_BYTES = F.parse(places), 0, frozenset()
         try:
             inp = m.make_inputs(length=128, samples=8, depth=None, dtype=torch.bfloat16, device="cuda", stream="token_single_shared_cond", generator=torch.Generator(device="cuda").manual_seed(1))
             s = inp["single"].detach().clone().requires_grad_(True)
@@ -88,7 +89,7 @@ def test_nox_keeps_no_fp32_residual() -> None:
             saved = [t for t in getattr(fn, "saved_tensors", ())] if fn is not None else []
             n_f32[places] = sum(t.numel() * t.element_size() for t in saved if t is not None and t.dtype == torch.float32 and t.shape[-1:] == (768,))
         finally:
-            F.PLACES, F.MIN_ROWS = old
+            F.PLACES, F.MIN_ROWS, F.DEFAULT_BYTES = old
     assert TT is not None
     # the saved fp32 [M, 768] residuals: x1 only with nox, x and x1 without
     assert n_f32["nox"] < n_f32[""]
@@ -148,3 +149,25 @@ def test_rx1_keeps_no_fp32_x1() -> None:
         finally:
             F.PLACES, F.MIN_ROWS = old
     assert n_f32["nox,rx1"] < n_f32["nox"]
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+@pytest.mark.parametrize("A,L", [(8, 128), (6, 200), (48, 128)])
+def test_default_route_takes_the_byte_reductions_and_is_unchanged(A: int, L: int) -> None:
+    """Release candidate: with no switch the H100 bf16 block runs nox + hsave and equals the route without them bit for bit."""
+    F = _F()
+    assert F.DEFAULT_BYTES == frozenset(("nox", "hsave"))
+    old = F.PLACES
+    F.PLACES = frozenset()
+    try:
+        assert F.active(32768, 768, False, True, True) == frozenset(("nox", "hsave"))
+        assert F.active(32768, 768, True, True, True) == frozenset()  # fp32: none
+        assert F.active(32768, 768, False, False, True) == frozenset()  # non-default options: none
+        assert F.active(32768, 768, False, True, False) == frozenset()  # not H100: none
+    finally:
+        F.PLACES = old
+    m = _master()
+    ref = _run(m, A, L, "", default_bytes=False)
+    got = _run(m, A, L, "", default_bytes=True)
+    for i, (a, b) in enumerate(zip(ref, got, strict=True)):
+        assert torch.equal(a, b), f"tensor {i}"
