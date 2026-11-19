@@ -100,7 +100,7 @@ def _run(m, single, cond, pair, mask, gy, train: bool, autocast: bool = False):
 @pytest.mark.parametrize("dtype", ["bf16", "master", "fp32"])
 def test_logits_softmax_fp32(case: str, dtype: str):
     m, single, cond, pair, mask, gy = _build(case)
-    act = torch.float32 if dtype in ("fp32",) else torch.bfloat16
+    act = torch.float32 if dtype == "fp32" else torch.bfloat16
     mq: typing.Any = copy.deepcopy(m)
     if dtype == "bf16":
         mq = mq.bfloat16()
