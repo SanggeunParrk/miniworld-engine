@@ -1457,6 +1457,45 @@ void pair_bias32_bwd(at::Tensor z, at::Tensor stats, at::Tensor dbias, at::Tenso
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// The gate / output-gradient glue of the fp32 (TF32) training backward in ONE pass over [L, W = NH dhp] (it was eight elementwise launches
+// and a transposed head sum, 2.7 us each at L 128):
+//   dO[l, c]        = dog[l, c] s[l, c]                          s = sigmoid(g), the g columns (3 W ..) of qkvg [L, 4 W]
+//   dogO            = dog O
+//   dd[h, l]        = sum_{d < dhp} dogO s                       in order d = 0 .. dhp - 1, heads on the leading axis [NH, L]
+//   dcat[l, 3 W + c] = dogO (s (1 - s))                          the gate gradient (the other columns of dcat are the core's)
+// Every product / difference is its own correctly rounded fp32 operation (no contraction), as the statements it replaces.
+__global__ void __launch_bounds__(256) gate32_bwd_k(const float* __restrict__ dog, const float* __restrict__ O, const float* __restrict__ qkvg,
+                                                    float* __restrict__ dO, float* __restrict__ dd, float* __restrict__ dcat, int L, int W, int dhp) {
+  extern __shared__ float prod[];                    // dogO s of the row
+  const int l = blockIdx.x;
+  const long row = (long)l * W, qrow = (long)l * 4 * W;
+  for (int c = threadIdx.x; c < W; c += 256) {
+    const float d = dog[row + c], s = qkvg[qrow + 3 * W + c], o = O[row + c];
+    dO[row + c] = __fmul_rn(d, s);
+    const float dgo = __fmul_rn(d, o);
+    prod[c] = __fmul_rn(dgo, s);
+    dcat[qrow + 3 * W + c] = __fmul_rn(dgo, __fmul_rn(s, __fsub_rn(1.f, s)));
+  }
+  __syncthreads();
+  const int nh = W / dhp;
+  if ((int)threadIdx.x < nh) {
+    float a = 0.f;
+    for (int d = 0; d < dhp; ++d) a = __fadd_rn(a, prod[threadIdx.x * dhp + d]);
+    dd[(long)threadIdx.x * L + l] = a;
+  }
+}
+// dog, O [L, W] fp32 contiguous; qkvg, dcat [L, 4 W]; dO [L, W] out; dd [NH, L] out
+void gate32_bwd(at::Tensor dog, at::Tensor O, at::Tensor qkvg, at::Tensor dO, at::Tensor dd, at::Tensor dcat, int64_t dhp) {
+  chk(dog, at::kFloat, "dog"); chk(O, at::kFloat, "O"); chk(qkvg, at::kFloat, "qkvg"); chk(dO, at::kFloat, "dO"); chk(dd, at::kFloat, "dd"); chk(dcat, at::kFloat, "dcat");
+  const int64_t L = dog.size(0), W = dog.size(1);
+  TORCH_CHECK(W % dhp == 0 && W / dhp <= 256 && O.sizes() == dog.sizes() && dO.sizes() == dog.sizes() && qkvg.size(0) == L && qkvg.size(1) == 4 * W &&
+              dcat.size(0) == L && dcat.size(1) == 4 * W && dd.numel() == (W / dhp) * L, "gate32_bwd shapes");
+  const at::cuda::CUDAGuard gd(dog.device());
+  gate32_bwd_k<<<(unsigned)L, 256, (size_t)W * sizeof(float), S()>>>(CP<float>(dog), CP<float>(O), CP<float>(qkvg), P<float>(dO), P<float>(dd), P<float>(dcat), (int)L,
+                                                                  (int)W, (int)dhp);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // Blocks of pair_bias_bwd's grid at L (the partial rows it writes): the Hopper accumulator's row count for its columns.
 int64_t pair_bwd_blocks(at::Tensor like, int64_t nh, int64_t L) {
   const int bps = nh == 8 ? 2 : 1;
@@ -2446,6 +2485,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pair_bias_bwd_wide", &pair_bias_bwd_wide);
   m.def("pair_bias32_fwd", &pair_bias32_fwd);
   m.def("pair_bias32_bwd", &pair_bias32_bwd);
+  m.def("gate32_bwd", &gate32_bwd);
   m.def("ln_rows", &ln_rows);
   m.def("gate_rows", &gate_rows);
   m.def("gate_bwd", &gate_bwd);
