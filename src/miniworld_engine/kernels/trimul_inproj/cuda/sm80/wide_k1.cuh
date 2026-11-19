@@ -459,7 +459,12 @@ struct K1t {
   static constexpr int W_KT = 64 * 64;                   // bytes of one k-tile of a 64-row weight chunk
   static constexpr int WOFF = 2 * Z_KT, WSLOT = 2 * W_KT; // the weight ring after the input tile
   static constexpr int STOFF = WOFF + ST * WSLOT;         // (mean, rstd) of the tile's 128 tokens
+#ifdef MWE_SM120
+  // RTX 5090: the statistics stay in registers (warp shuffles): hidden 128 is 32768 B, three CTAs an SM in the 100 KB (hidden 64 keeps its 1 KB of padding: two an SM, measured faster)
+  static constexpr int SMEM = STOFF + (HS == 128 ? 0 : 128 * 8);
+#else
   static constexpr int SMEM = STOFF + 128 * 8;
+#endif
 };
 
 template <int HS, int ST = 2>
@@ -491,6 +496,7 @@ __global__ void __launch_bounds__(128, K1t<HS, ST>::MINB) k1t_kernel(const K1wPa
   for (int ch = 0; ch < ST - 1; ++ch) issue_w(ch);
   cp_async_wait<ST - 1>();
   __syncthreads();
+  float st_mean = 0.f, st_rstd = 0.f;
   {   // k1w64's statistics: one thread per token row, two passes, the same order
     float sum = 0.f;
 #pragma unroll
@@ -512,7 +518,11 @@ __global__ void __launch_bounds__(128, K1t<HS, ST>::MINB) k1t_kernel(const K1wPa
         for (int i = 0; i < 4; ++i) { const float a = bf16lo(w[i]) - mean, b = bf16hi(w[i]) - mean; q2 = fmaf(a, a, fmaf(b, b, q2)); }
       }
     const float rstd = rsqrtf(q2 * (1.f / C::D) + p.eps);
+#ifdef MWE_SM120
+    st_mean = mean; st_rstd = rstd;
+#else
     sts64(s0 + C::STOFF + tid * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
+#endif
     p.stw[k1_token(t0 + tid, p.L, p.tr)] = make_float2(mean, rstd);
   }
   // A fragments of all of K (k1w64's RP token permutation)
@@ -532,8 +542,13 @@ __global__ void __launch_bounds__(128, K1t<HS, ST>::MINB) k1t_kernel(const K1wPa
 #pragma unroll
     for (int rh = 0; rh < 2; ++rh) {
       const int lt = 32 * wm + 16 * mt + 2 * g8 + rh, tok = t0 + lt;
+#ifdef MWE_SM120
+      // the warp's 32 rows are the 32 token rows its own lanes computed the statistics of: row lt is lane 16 mt + 2 g8 + rh
+      const float mean = __shfl_sync(0xffffffffu, st_mean, 16 * mt + 2 * g8 + rh), rstd = __shfl_sync(0xffffffffu, st_rstd, 16 * mt + 2 * g8 + rh);
+#else
       const uint2 u = lds64(s0 + C::STOFF + lt * 8);
       const float mean = __uint_as_float(u.x), rstd = __uint_as_float(u.y);
+#endif
       rs[mt][rh] = rstd; mr[mt][rh] = mean * rstd;
       float m = 1.f;
       if (p.mask != nullptr) {
