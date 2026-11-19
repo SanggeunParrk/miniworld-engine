@@ -21,7 +21,9 @@ def ext():
         name=_card.name("opm_ogemm_sm80"),
         sources=[str(_dir / "ogemm_cutlass.cu")],
         extra_include_paths=[str(_dir), str(cutlass_include())],
-        extra_cuda_cflags=_card.cflags([*host_flags(), "-O3", "-std=c++17", "-gencode=arch=compute_80,code=sm_80", "--expt-relaxed-constexpr"]),
+        extra_cuda_cflags=_card.cflags(
+            [*host_flags(), "-O3", "-std=c++17", "-gencode=arch=compute_80,code=sm_80", "--expt-relaxed-constexpr"]
+        ),
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )

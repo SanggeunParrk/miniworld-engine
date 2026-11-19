@@ -381,7 +381,9 @@ def _chunked_inference(x, weights, wo, ln_w, ln_b, mask, eps, transposed, cfg: C
     dhp, h = cfg.dhp, cfg.h
     padding = 32 if d in (256, 384, 512) else 8  # the monolithic inference's padding at these lengths (L >= 512)
     n = -(-cfg.n // 32) * 32 if padding == 32 else cfg.n
-    wp = _core.eval_form(("triattn_sm80w_folded", cfg, padding, n), (*weights, ln_w, ln_b), lambda: _pack_folded(weights, ln_w, ln_b, cfg, padding, n), False)
+    wp = _core.eval_form(
+        ("triattn_sm80w_folded", cfg, padding, n), (*weights, ln_w, ln_b), lambda: _pack_folded(weights, ln_w, ln_b, cfg, padding, n), False
+    )
     wo_p = _core.eval_form(("triattn_sm80w_wo", cfg), (wo,), lambda: _wo_padded(wo, cfg), False)
     wpb = wp[4 * dhp : 4 * dhp + cfg.hpad]  # the bias heads' rows
     scl = _core._L2E / math.sqrt(cfg.hd)
@@ -389,12 +391,18 @@ def _chunked_inference(x, weights, wo, ln_w, ln_b, mask, eps, transposed, cfg: C
     step = max(16, (CHUNK_BYTES // (lp * n * 2)) // 16 * 16)
     neg = torch.finfo(BF).min
     out = torch.empty_like(x)
-    xhp = torch.zeros((min(step, length), lp, d + padding), dtype=BF, device=x.device) if lp != length else None  # the padded rows stay zero
+    xhp = (
+        torch.zeros((min(step, length), lp, d + padding), dtype=BF, device=x.device) if lp != length else None
+    )  # the padded rows stay zero
     for z in range(b):
         xz, oz = x[z], out[z]
         # pass 1: the bias planes; P[h, i, j] = the bias head h of token (i, j) of the module's layout; the frame's plane is P (starting node) or P^T (ending node), and
         # transposed again by AF3's ending-node orientation (flip)
-        bias = torch.empty((1, h, lp, lp), dtype=BF, device=x.device) if lp == length else torch.full((1, h, lp, lp), neg, dtype=BF, device=x.device)
+        bias = (
+            torch.empty((1, h, lp, lp), dtype=BF, device=x.device)
+            if lp == length
+            else torch.full((1, h, lp, lp), neg, dtype=BF, device=x.device)
+        )
         real = bias[0, :, :length, :length]
         plane = real if transposed == flip else real.transpose(1, 2)
         for i0 in range(0, length, step):
@@ -407,7 +415,9 @@ def _chunked_inference(x, weights, wo, ln_w, ln_b, mask, eps, transposed, cfg: C
             plane[:, i0:i1, :] = pb[:, :h].view(i1 - i0, length, h).permute(2, 0, 1)
             del pb
         if mask.numel():
-            real.masked_fill_(mask[z].view(1, 1, length) == 0, neg)  # the key mask on the bias plane's last axis (bias_planes: keep(b), or keep(a) under flip)
+            real.masked_fill_(
+                mask[z].view(1, 1, length) == 0, neg
+            )  # the key mask on the bias plane's last axis (bias_planes: keep(b), or keep(a) under flip)
         # pass 2: chunks of the frame's rows
         for r0 in range(0, length, step):
             r1 = min(length, r0 + step)
@@ -421,7 +431,9 @@ def _chunked_inference(x, weights, wo, ln_w, ln_b, mask, eps, transposed, cfg: C
             y = torch.mm(xh, wp.t())  # q | k | v | g | bias heads of the chunk ([cr, Lp] tokens)
             del xh
             a = torch.empty((cr * lp, dhp), dtype=BF, device=x.device)
-            chunk.attn_fwd_gate_rows(y[:, :dhp], y[:, dhp : 2 * dhp], y[:, 2 * dhp : 3 * dhp], bias, y[:, 3 * dhp : 4 * dhp], a, lp, h, cr, n, n, n, n, dhp, scl)
+            chunk.attn_fwd_gate_rows(
+                y[:, :dhp], y[:, dhp : 2 * dhp], y[:, 2 * dhp : 3 * dhp], bias, y[:, 3 * dhp : 4 * dhp], a, lp, h, cr, n, n, n, n, dhp, scl
+            )
             del y
             if lp != length:
                 a = a.view(cr, lp, dhp)[:, :length].reshape(cr * length, dhp)
@@ -457,7 +469,9 @@ def _original_forward_ops(
     empty, ``ds`` the dropout scale ``[B, L, D]`` (indexed by the token's second index) or empty.  Returns [out] and, with ``save``, [xh, stats, y, bias, o, lse] for the backward
     (``xh`` the normalised input followed by the constant column(s), ``y`` the front's output [T, cfg.n])."""
     cfg = Cfg(x.shape[-1], n_head, hd, fused)
-    if _chunked(x, cfg, ds, save):  # RTX 5090, past CHUNK_TOKENS: chunks of rows (the monolithic transient does not fit 32 GB next to a trunk)
+    if _chunked(
+        x, cfg, ds, save
+    ):  # RTX 5090, past CHUNK_TOKENS: chunks of rows (the monolithic transient does not fit 32 GB next to a trunk)
         return [_chunked_inference(x, weights, wo, ln_w, ln_b, mask, eps, transposed, cfg._replace(fused=False), flip)]
     rows, core = _rows(), (None if cfg.native else _core._ext())
     b, length = x.shape[0], x.shape[1]
@@ -491,9 +505,7 @@ def _original_forward_ops(
     elif _bare_front(x, cfg.d, save, length):
         # RTX 5090 inference: xh [T, D] with no constant columns (K = D = 256 keeps cuBLAS on its fast tile: 100 us against 147 us for K = D + 8 at
         # T = 16384, N = 1032) and the folded LayerNorm shift is the GEMM bias (addmm, bf16: the same rounding as the bf16 projection it joins)
-        wp, bvec = _core.eval_form(
-            ("triattn_sm80w_bare", cfg), (*weights, ln_w, ln_b), lambda: _pack_bare(weights, ln_w, ln_b, cfg), save
-        )
+        wp, bvec = _core.eval_form(("triattn_sm80w_bare", cfg), (*weights, ln_w, ln_b), lambda: _pack_bare(weights, ln_w, ln_b, cfg), save)
         xh = torch.empty((t, d), dtype=BF, device=dev)
         rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
         y = torch.addmm(bvec, xh, wp.t())  # q | k | v | g | bias heads
@@ -1499,6 +1511,7 @@ def variant_forward_ops(
     dev = x.device
     bare = _bare_front(x, d, save, length, True)
     if bare:  # RTX 5090 inference at D 256: no constant columns, the shift (and the gate bias) is the GEMM bias
+
         def _gate() -> torch.Tensor | None:
             if not gb.numel():
                 return None
