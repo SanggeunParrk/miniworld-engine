@@ -96,3 +96,20 @@ def test_statistics_overlap_matches_the_serial_pass(monkeypatch: pytest.MonkeyPa
         serial = kern(x)
     assert torch.equal(overlapped, serial)
     assert torch.equal(replay, serial)
+
+
+@pytest.mark.parametrize(("d", "n", "rows"), [(256, 4, 70001), (384, 2, 66000), (512, 4, 65536)])
+def test_big_work_tiles_give_the_same_bits(monkeypatch: pytest.MonkeyPatch, d: int, n: int, rows: int) -> None:
+    """The 128-row tiles of the fused LayerNorm path (dual config 14, squeeze config 13) accumulate every output element in the order of the 64-row ones: the same bits."""
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+
+    module = _module(d, n)
+    kern = copy.deepcopy(module).set_backend("cuda").eval()
+    x = (torch.randn(1, rows, d, device="cuda", generator=torch.Generator(device="cuda").manual_seed(6)) * 2).to(torch.bfloat16)
+    outs = []
+    for work in (0, 10**18):
+        monkeypatch.setattr(fw, "SM120_FOLD_BIG_WORK", work)
+        assert fw._fold_tiles(rows, n * 2 * d // 2 * 1, 2, 2) == ((14, 13) if work == 0 else (2, 2))
+        with torch.no_grad():
+            outs.append(kern(x))
+    assert torch.equal(outs[0], outs[1])

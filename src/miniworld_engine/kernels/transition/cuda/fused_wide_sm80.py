@@ -164,7 +164,7 @@ SM120_FUSED_LN = True
 SM120_FUSED_LN_MIN_D = 256
 #: fewest rows: below it (L 128 pair, 16384 rows) the statistics pass + the epilogue's per-row loads cost more than the saved xn round trip (new / old 1.01-1.02)
 SM120_FUSED_LN_MIN_ROWS = 32768
-SM120_FUSED_LN_CFGS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13)
+SM120_FUSED_LN_CFGS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14)
 SM120_DUAL_OVERRIDE = None  # experiments: the dual config of calls of at least SM120_DUAL_OVERRIDE_ROWS rows
 SM120_DUAL_OVERRIDE_ROWS = 0
 SM120_RES_OVERRIDE = None
@@ -198,6 +198,17 @@ def _ln_fold(gamma, beta, wa, wb):
 SM120_STATS_OVERLAP_MIN_ROWS = 131072
 SM120_STATS_CHUNKS = 8
 _side: dict = {}
+
+
+#: The fused LayerNorm path's tiles from ``m * H >= SM120_FOLD_BIG_WORK`` (rows x hidden width): dual config 14 (128 x 64, 3 stages, 48 KB: two CTAs per SM, warp tiles of 64 x (32 a + 32 b)) and
+#: squeeze config 13 (128 x 128, 3 stages, 48 KB, warp tiles of 64 x 64) instead of the 64-row tiles (2 / 2).  The GPU runs at its 575 W power limit there, and the larger warp tiles read
+#: shared memory half as often per MMA: interleaved A-B-A-B (CUDA graph, 256 MB L2 flush, vs Triton) d 256 n 4 L 1024 / 1536 1.008 / 1.034 -> 0.967 / 0.965, d 384 n 2 L 1024 0.986 -> 0.946,
+#: d 512 n 4 L 512 1.016 -> 0.990; below the work the 64-row tiles are 1-3 % faster (d 256 n 2 L 512 0.942 vs 0.965).  The accumulation order per output element is the same: the same bits.
+SM120_FOLD_BIG_WORK = 200_000_000
+
+
+def _fold_tiles(m: int, h: int, dual: int, res: int) -> tuple[int, int]:
+    return (14, 13) if m * h >= SM120_FOLD_BIG_WORK else (dual, res)
 
 
 def _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual):
@@ -384,9 +395,10 @@ def _fwd_launch(
     dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(m, d, wa.shape[0])
     if SM120_DUAL_OVERRIDE is not None and m >= SM120_DUAL_OVERRIDE_ROWS:
         dual = SM120_DUAL_OVERRIDE
-    if SM120_RES_OVERRIDE is not None:
+    if SM120_RES_OVERRIDE is not None and m >= SM120_DUAL_OVERRIDE_ROWS:
         res = SM120_RES_OVERRIDE
     if ln and not save and _fused_ln(m, d, dual, x):
+        dual, res = _fold_tiles(m, wa.shape[0], dual, res)
         hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
         return (
             _squeeze(ext, hid, ws, x, ln, res),
@@ -448,6 +460,7 @@ def forward_into(
         m, d, wa.shape[0]
     )  # the RTX 5090 takes its own tile table (the A100 one is 20-30 % slower there)
     if _fused_ln(m, d, dual, x):
+        dual, res = _fold_tiles(m, wa.shape[0], dual, res)
         hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
     else:
         xn, _ = ext.ln_fwd(x, gamma, beta, eps, False)
