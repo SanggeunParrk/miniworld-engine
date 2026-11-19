@@ -146,5 +146,5 @@ def test_linear_autograd(bias: bool) -> None:
     b64 = None if b is None else b.detach().double().requires_grad_(True)
     y64 = torch.nn.functional.linear(x64, w64, b64)
     y64.backward(dy.double())
-    for got, ref in ((y, y64), (x.grad, x64.grad), (w.grad, w64.grad), *(((b.grad, b64.grad),) if bias else ())):
-        assert _err(got, ref.detach()) < 1e-5
+    for got, ref in ((y, y64), (x.grad, x64.grad), (w.grad, w64.grad), *(((b.grad, b64.grad),) if bias else ())):  # pyright: ignore[reportOptionalMemberAccess]
+        assert _err(got, ref.detach()) < 1e-5  # pyright: ignore[reportArgumentType, reportOptionalMemberAccess]

@@ -152,7 +152,7 @@ def _no_autocast(fn):
     try:  # custom_op infers the schema from the annotations: resolve them in fn's own module (``from __future__ import annotations``)
         import inspect
 
-        run.__signature__ = inspect.signature(fn, eval_str=True)
+        run.__signature__ = inspect.signature(fn, eval_str=True)  # pyright: ignore[reportAttributeAccessIssue]
         del run.__wrapped__
     except Exception:
         return fn
