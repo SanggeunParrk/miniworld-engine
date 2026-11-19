@@ -72,11 +72,16 @@ struct K3wParams {
   int T, L, D, Hc;
 };
 
-template <int BN, int ST = 4>
+// the statistics exchange of k3w (XSTATS): 3 KB (sums, squares, (mean, rstd) of 128 tokens); CMP (RTX 5090, BN 64 inference at D 128): 1 KB, the three share one area, so the CTA
+// is 50176 B and two fit an SM
+constexpr int k3w_xstats_bytes(bool cmp) { return cmp ? 1024 : 3072; }
+constexpr int k3w_sq_off(bool cmp) { return cmp ? 0 : 1024; }
+
+template <int BN, int ST = 4, bool CMP = false>
 struct K3wCfg {
   using TP = WTile<128, BN, 4, 2, ST, true, false>;
   using TG = WTile<128, BN, 4, 2, ST, false, false>;
-  static constexpr int NTHR = TP::NTHR, SMEM = TP::SMEM, SMEM_X = TP::SMEM + 3072;     // + the statistics exchange: sums, squares, (mean, rstd) of the 128 tokens
+  static constexpr int NTHR = TP::NTHR, SMEM = TP::SMEM, SMEM_X = TP::SMEM + k3w_xstats_bytes(CMP);     // + the statistics exchange: sums, squares, (mean, rstd) of the 128 tokens
   static_assert(TP::SMEM == TG::SMEM, "one ring for both phases");
   // ZPRE (D = BN = 64, in-kernel statistics): the gate GEMM's ZK = D / 32 k-tiles get their own stages after the statistics exchange, issued before the output
   // projection runs (k3w_kernel) -- two CTAs still fit an SM
@@ -85,9 +90,9 @@ struct K3wCfg {
 
 // XSTATS (Hc <= 128: every k-tile of the X operand is still in its ring slot when the first GEMM ends): the LayerNorm_out statistics come from the tile instead of
 // ln_stats_cm -- thread (token, half) sums its half of the channels from shared memory, two passes, the halves merged through shared memory (exact in fp32)
-template <int BN, bool XSTATS, int ST = 4, bool ZPRE = false>
+template <int BN, bool XSTATS, int ST = 4, bool ZPRE = false, bool CMP = false>
 __global__ void __launch_bounds__(256, BN == 64 ? 2 : 1) k3w_kernel(const K3wParams p) {
-  using Cfg = K3wCfg<BN, ST>;
+  using Cfg = K3wCfg<BN, ST, CMP>;
   using TP = typename Cfg::TP;
   using TG = typename Cfg::TG;
   extern __shared__ __align__(128) uint8_t smem[];
@@ -121,11 +126,19 @@ __global__ void __launch_bounds__(256, BN == 64 ? 2 : 1) k3w_kernel(const K3wPar
     for (int kt = 0; kt < nk1; ++kt)
 #pragma unroll
       for (int kr = 0; kr < 16; ++kr) { const float a = elem(kt, 16 * hf + kr) - mean; q2 = fmaf(a, a, q2); }
-    sts32(xs + 1024 + (hf * 128 + tk) * 4, __float_as_uint(q2));
+  if constexpr (CMP) {
+    __syncthreads();   // every thread has read its sums: the squares take their place
+  }
+    sts32(xs + k3w_sq_off(CMP) + (hf * 128 + tk) * 4, __float_as_uint(q2));
     __syncthreads();
     if (hf == 0) {
-      const float rstd = rsqrtf((__uint_as_float(lds32(xs + 1024 + tk * 4)) + __uint_as_float(lds32(xs + 1024 + (128 + tk) * 4))) * (1.f / p.Hc) + p.eps);
+      const float rstd = rsqrtf((__uint_as_float(lds32(xs + k3w_sq_off(CMP) + tk * 4)) + __uint_as_float(lds32(xs + k3w_sq_off(CMP) + (128 + tk) * 4))) * (1.f / p.Hc) + p.eps);
+    if constexpr (CMP) {
+      sts32(xs + tk * 4, __float_as_uint(mean));          // the thread's own two squares' slots
+      sts32(xs + (128 + tk) * 4, __float_as_uint(rstd));
+    } else {
       sts64(xs + 2048 + tk * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
+    }
       p.stw[t0 + tk] = make_float2(mean, rstd);
     }
     __syncthreads();
@@ -142,7 +155,14 @@ __global__ void __launch_bounds__(256, BN == 64 ? 2 : 1) k3w_kernel(const K3wPar
     for (int rh = 0; rh < 2; ++rh) {
       const int tok = t0 + 32 * wm + 16 * mt + g8 + 8 * rh;
       float2 a;
-      if constexpr (XSTATS) { const uint2 u = lds64(s0 + TP::SMEM + 2048 + (32 * wm + 16 * mt + g8 + 8 * rh) * 8); a = make_float2(__uint_as_float(u.x), __uint_as_float(u.y)); }
+      if constexpr (XSTATS) {
+        if constexpr (CMP) {
+        const int lr = 32 * wm + 16 * mt + g8 + 8 * rh;
+        a = make_float2(__uint_as_float(lds32(s0 + TP::SMEM + lr * 4)), __uint_as_float(lds32(s0 + TP::SMEM + (128 + lr) * 4)));
+        } else {
+        const uint2 u = lds64(s0 + TP::SMEM + 2048 + (32 * wm + 16 * mt + g8 + 8 * rh) * 8); a = make_float2(__uint_as_float(u.x), __uint_as_float(u.y));
+        }
+      }
       else a = __ldg(p.sto + tok);
       const float2 b = __ldg(p.sti + tok);
       ro[mt][rh] = a.y; mro[mt][rh] = a.x * a.y;
@@ -196,7 +216,13 @@ struct K3s {
   using TG = WTile<BM, BN, 4, 1, 3, false, false>;
   static_assert(TP::STAGE == TG::STAGE, "one stage size");
   static constexpr int STAGE = TP::STAGE, ZOFF = NKX * STAGE, XS = ZOFF + NKZ * STAGE;   // X / Wo' stages, z / Wg' stages, the statistics exchange
-  static constexpr int SMEM = XS + 1536;                     // float sum[2][64], sq[2][64], float2 sts[64]
+  // RTX 5090, hidden 128: 1024 B (sums and squares share 512 B): the CTA is 50176 B, two an SM in the 100 KB (50688 B was one an SM); hidden 64 keeps the 1536 B form
+#ifdef MWE_SM120
+  static constexpr bool CMP = HC == 128;
+#else
+  static constexpr bool CMP = false;
+#endif
+  static constexpr int SQ_OFF = CMP ? 0 : 512, STS_OFF = CMP ? 512 : 1024, SMEM = XS + (CMP ? 1024 : 1536);   // float sum[2][64], sq[2][64], float2 sts[64]
   static_assert(BM * (BN * 2 + 16) <= ZOFF, "the output tile is staged over the dead X stages");
 };
 
@@ -231,16 +257,19 @@ __global__ void __launch_bounds__(128, HC == 64 ? 4 : 3) k3s_kernel(const K3wPar
     sts32(xs + (hf * 64 + tk) * 4, __float_as_uint(sum));
     __syncthreads();
     const float mean = (__uint_as_float(lds32(xs + tk * 4)) + __uint_as_float(lds32(xs + (64 + tk) * 4))) * (1.f / HC);
+  if constexpr (C::CMP) {
+    __syncthreads();   // the squares reuse the sums' shared memory
+  }
     float q2 = 0.f;
 #pragma unroll
     for (int kt = 0; kt < C::NKX; ++kt)
 #pragma unroll
       for (int kr = 0; kr < 16; ++kr) { const float a = elem(kt, 16 * hf + kr) - mean; q2 = fmaf(a, a, q2); }
-    sts32(xs + 512 + (hf * 64 + tk) * 4, __float_as_uint(q2));
+    sts32(xs + C::SQ_OFF + (hf * 64 + tk) * 4, __float_as_uint(q2));
     __syncthreads();
     if (hf == 0) {
-      const float rstd = rsqrtf((__uint_as_float(lds32(xs + 512 + tk * 4)) + __uint_as_float(lds32(xs + 512 + (64 + tk) * 4))) * (1.f / HC) + p.eps);
-      sts64(xs + 1024 + tk * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
+      const float rstd = rsqrtf((__uint_as_float(lds32(xs + C::SQ_OFF + tk * 4)) + __uint_as_float(lds32(xs + C::SQ_OFF + (64 + tk) * 4))) * (1.f / HC) + p.eps);
+      sts64(xs + C::STS_OFF + tk * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
       p.stw[t0 + tk] = make_float2(mean, rstd);
     }
   }
@@ -254,7 +283,7 @@ __global__ void __launch_bounds__(128, HC == 64 ? 4 : 3) k3s_kernel(const K3wPar
 #pragma unroll
   for (int rh = 0; rh < 2; ++rh) {
     const int lt = 16 * warp + g8 + 8 * rh;
-    const uint2 u = lds64(xs + 1024 + lt * 8);
+    const uint2 u = lds64(xs + C::STS_OFF + lt * 8);
     const float2 b = __ldg(p.sti + t0 + lt);
     ro[rh] = __uint_as_float(u.y); mro[rh] = __uint_as_float(u.x) * __uint_as_float(u.y);
     ri[rh] = b.y; mri[rh] = b.x * b.y;

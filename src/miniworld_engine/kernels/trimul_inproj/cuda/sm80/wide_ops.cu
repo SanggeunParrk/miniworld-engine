@@ -123,6 +123,10 @@ void wpack(torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tensor 
 
 // --------------------------------------------------------------------------------------------------------------------------------------------- k1w
 // D64 persistent front: grid = the resident CTAs (one occupancy query and smem attribute per HS instantiation)
+static int g_k3w64 = 1;   // A / B knob: 0 = the BN 128 CTA for D 128 (A / B knob)
+void k3w64_set(int64_t v) { g_k3w64 = (int)v; }
+static int g_pad = 0;   // A / B knob: pad the dynamic shared memory of k1t / k3s (1 = the old, fewer-CTAs-per-SM occupancy)
+void pad_set(int64_t v) { g_pad = (int)v; }
 static int g_k1nz = -1;   // k1w64 input buffers: -1 = the rule (RTX 5090: 1, every other card 2), 1 / 2 = forced (A/B knob)
 void k1nz_set(int64_t v) { g_k1nz = (int)v; }
 template <int HS, int NZ>
@@ -157,8 +161,8 @@ template <int HS, int ST = 2>
 void launch_k1t(const a100::K1wParams& p) {
   using C = a100::K1t<HS, ST>;
   static bool set = false;
-  if (!set) { set_smem(a100::k1t_kernel<HS, ST>, C::SMEM); set = true; }
-  a100::k1t_kernel<HS, ST><<<p.T / 128, C::NTHR, C::SMEM, stream()>>>(p);
+  if (!set) { set_smem(a100::k1t_kernel<HS, ST>, C::SMEM + 4096); set = true; }
+  a100::k1t_kernel<HS, ST><<<p.T / 128, C::NTHR, C::SMEM + (g_pad ? 4096 : 0), stream()>>>(p);
 }
 
 // z [T, D], w1 [4 Hs, D], vs / vb [4 Hs], st [T, 2], mask [L] uint8 or empty -> planes [2 Hs, T].  fuse (bf16, D <= 128): st is an OUTPUT, the kernel computes (mean, rstd) of the rows
@@ -274,8 +278,9 @@ template <int HC>
 void launch_k3s(const a100::K3wParams& p) {
   using C = a100::K3s<HC>;
   static bool set = false;
-  if (!set) { set_smem(a100::k3s_kernel<HC>, C::SMEM); set = true; }
-  a100::k3s_kernel<HC><<<p.T / C::BM, C::NTHR, C::SMEM, stream()>>>(p);
+  if (!set) { set_smem(a100::k3s_kernel<HC>, C::SMEM + 4096); set = true; }
+
+  a100::k3s_kernel<HC><<<p.T / C::BM, C::NTHR, C::SMEM + (g_pad ? 4096 : 0), stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -343,6 +348,18 @@ void k3w(torch::Tensor x, torch::Tensor z, torch::Tensor wo3, torch::Tensor wg3,
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
   }
+#ifdef MWE_SM120
+  // RTX 5090, D 128 inference with in-kernel statistics (Hc <= 128): two BN 64 CTAs per token tile (the statistics computed twice, equal bits) instead of one BN 128 CTA: 50176 B
+  // a CTA, two an SM (the BN 128 CTA is 67 KB, one an SM: its prologue and epilogue idled the card)
+  if (TUNED && fuse && D == 128 && !ps.numel() && g_k3w64) {
+    using Cfg = a100::K3wCfg<64, 4, true>;
+    static bool set = false;
+    if (!set) { set_smem(a100::k3w_kernel<64, true, 4, false, true>, Cfg::SMEM_X + 4096); set = true; }
+    a100::k3w_kernel<64, true, 4, false, true><<<(p.T / 128) * 2, Cfg::NTHR, Cfg::SMEM_X + (g_pad ? 4096 : 0), stream()>>>(p);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
+#endif
   if (D % 128 == 0) launch_k3w<128>(p, fuse); else launch_k3w<64>(p, fuse);
 }
 
@@ -513,6 +530,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("k3w", &k3w<false>);
   m.def("k3w_tuned", &k3w<true>);
   m.def("k3s_set", &k3s_set);
+  m.def("pad_set", &pad_set);
+  m.def("k3w64_set", &k3w64_set);
   m.def("gate_bwd_blocks", &gate_bwd_blocks);
   m.def("lnin_bwd_blocks", &lnin_bwd_blocks);
   m.def("gate_bwd", &gate_bwd);
