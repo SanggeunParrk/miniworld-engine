@@ -120,6 +120,55 @@ void adaln_bwd_x(at::Tensor dy, at::Tensor x, at::Tensor xst, at::Tensor sbt, at
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// The identity AdaLN (Chai-1): y [M, d] = (1 + S) LN(x) + B; sbt [P, 2 d] = S | B (no sb); xst [M, 2] fp32 (optional)
+void adaln_epi_id(at::Tensor x, at::Tensor sbt, at::Tensor y, c10::optional<at::Tensor> xst, int64_t period, double eps) {
+  const int64_t M = x.size(0), d = x.size(1);
+  check_rows(x, "adaln_epi_id x", d);
+  check_rows(sbt, "adaln_epi_id sbt", 2 * d);
+  TORCH_CHECK(y.is_cuda() && y.is_contiguous() && y.size(0) == M && y.size(1) == d && y.scalar_type() == x.scalar_type(), "adaln_epi_id: y [M, d] like x");
+  TORCH_CHECK(period > 0 && M % period == 0 && sbt.size(0) == period, "adaln_epi_id: the table has `period` rows and M is a multiple of it");
+  if (xst) TORCH_CHECK(xst->is_cuda() && xst->is_contiguous() && xst->scalar_type() == at::kFloat && xst->numel() == 2 * M, "adaln_epi_id: xst [M, 2] fp32");
+  const at::cuda::CUDAGuard g(x.device());
+  with_width(d, "adaln_epi_id", [&](auto wd) {
+    constexpr int D = decltype(wd)::value;
+    TORCH_CHECK(sbt.scalar_type() == x.scalar_type(), "adaln_epi_id: sbt in x's dtype");
+    with_dtype(x, "adaln_epi_id x", [&](auto xt) {
+      using XT = decltype(xt);
+      adaln_epi_kernel<D, XT, true><<<(unsigned)((M + RW - 1) / RW), RW * 32, 0, S_()>>>(
+          CP_<XT>(x), x.stride(0), CP_<XT>(sbt), sbt.stride(0), nullptr, P_<XT>(y), xst ? P_<float2>(*xst) : nullptr, M, period, (float)eps);
+    });
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// The identity AdaLN's backward rows: dm [M, 2 d] = dscale | dy with dscale = dy xhat, dx [M, d] (+ dres); psb is written (the column sums of dscale) and not used
+void adaln_bwd_x_id(at::Tensor dy, at::Tensor x, at::Tensor xst, at::Tensor sbt, c10::optional<at::Tensor> dres, at::Tensor dm, at::Tensor dx, at::Tensor psb,
+                    int64_t period) {
+  const int64_t M = x.size(0), d = x.size(1);
+  check_rows(dy, "adaln_bwd_x_id dy", d);
+  check_rows(x, "adaln_bwd_x_id x", d);
+  TORCH_CHECK(dy.is_contiguous() && x.is_contiguous() && dy.scalar_type() == x.scalar_type(), "adaln_bwd_x_id: contiguous dy, x of one dtype");
+  check_rows(sbt, "adaln_bwd_x_id sbt", 2 * d);
+  check_rows(dm, "adaln_bwd_x_id dm", 2 * d);
+  TORCH_CHECK(dm.is_contiguous() && dm.size(0) == M, "adaln_bwd_x_id: dm [M, 2 d] contiguous");
+  TORCH_CHECK(dx.is_cuda() && dx.is_contiguous() && dx.size(0) == M && dx.size(1) == d && dx.scalar_type() == x.scalar_type(), "adaln_bwd_x_id: dx like x");
+  if (dres) TORCH_CHECK(dres->is_cuda() && dres->is_contiguous() && dres->scalar_type() == x.scalar_type() && dres->size(0) == M, "adaln_bwd_x_id: dres like x");
+  TORCH_CHECK(xst.is_cuda() && xst.is_contiguous() && xst.scalar_type() == at::kFloat && xst.numel() == 2 * M, "adaln_bwd_x_id: xst [M, 2] fp32");
+  TORCH_CHECK(psb.is_cuda() && psb.is_contiguous() && psb.scalar_type() == at::kFloat && psb.dim() == 2 && psb.size(1) == d, "adaln_bwd_x_id: psb [blocks, d] fp32");
+  TORCH_CHECK(period > 0 && M % period == 0 && sbt.size(0) == period, "adaln_bwd_x_id: the table has `period` rows and M is a multiple of it");
+  const at::cuda::CUDAGuard g(x.device());
+  with_width(d, "adaln_bwd_x_id", [&](auto wd) {
+    constexpr int D = decltype(wd)::value;
+    TORCH_CHECK(sbt.scalar_type() == x.scalar_type() && dm.scalar_type() == x.scalar_type(), "adaln_bwd_x_id: sbt, dm in x's dtype");
+    with_dtype(x, "adaln_bwd_x_id x", [&](auto xt) {
+      using XT = decltype(xt);
+      adaln_bwd_x_kernel<D, XT, true><<<(unsigned)psb.size(0), RW * 32, 0, S_()>>>(
+          CP_<XT>(dy), CP_<XT>(x), CP_<float2>(xst), CP_<XT>(sbt), sbt.stride(0), nullptr, OP_<XT>(dres), P_<XT>(dm), P_<XT>(dx), P_<float>(psb), M, period);
+    });
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // dcond [M, dc] (+ dextra); pw [blocks, dc] fp32 = the column sums of dcond_aff cond_hat, one row per block
 void cond_ln_bwd(at::Tensor dca, at::Tensor cond, at::Tensor cst, at::Tensor w, c10::optional<at::Tensor> dextra, at::Tensor dcond, at::Tensor pw) {
   const int64_t M = cond.size(0), dc = cond.size(1);
@@ -278,5 +327,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cond_ln", &cond_ln);
   m.def("adaln_epi", &adaln_epi);
   m.def("adaln_bwd_x", &adaln_bwd_x);
+  m.def("adaln_epi_id", &adaln_epi_id);
+  m.def("adaln_bwd_x_id", &adaln_bwd_x_id);
   m.def("cond_ln_bwd", &cond_ln_bwd);
 }

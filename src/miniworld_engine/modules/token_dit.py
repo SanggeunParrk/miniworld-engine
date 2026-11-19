@@ -940,6 +940,8 @@ class TokenDiTChai1(MasterEntryCast, VariantTokenCuda, TokenDiTProtenix):
     backend_versions: ClassVar[dict[str, int]] = {
         **TokenDiTProtenix.backend_versions,
         "cuda:h100_sm90": 7,
+        "cuda:a100_sm80": 7,  # 2026-11-19: 6 = the fp32 call no longer reaches ln_cond of the identity AdaLN (gates refused it); 7 = the identity AdaLN (attention part) and the transition with it run on the sm_80 row kernels (adaln_epi / adaln_bwd_x identity form + cuBLAS), forward and backward
+        "cuda:5090_sm120": 4,  # 2026-11-19: 3 = the same as a100 6; 4 = as a100 7 (the identity AdaLN on the sm_80 sources built for sm_120a)
     }  # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
 
     backends = (

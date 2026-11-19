@@ -31,6 +31,7 @@ from miniworld_engine.kernels.integrations.adaln_sm80 import (
     _wgrad,
     cached,
     cast_params,
+    is_identity,
     like,
     master,
     tf32_allowed,
@@ -74,7 +75,12 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
     if x.shape[-1] not in WIDTHS or cond.shape[-1] not in WIDTHS or x.numel() == 0:
         return False
     ada = module.ada_ln_in
-    if ada.ln_cond.weight is None or ada.to_scale.bias is None or ada.to_bias.bias is not None or module.to_scale.bias is None:
+    if is_identity(ada):  # IdentityAdaptiveLayerNorm (Chai-1): (1 + W_s c) LN(x) + W_b c on the raw conditioning, bias-free; the generic row passes + cuBLAS (no d = dc = 128 atom kernels)
+        if ada.to_scale.bias is not None or ada.to_bias.bias is not None or module.to_scale.bias is None:
+            return False
+        if x.shape[-1] == 128 and cond.shape[-1] == 128:
+            return False
+    elif ada.ln_cond.weight is None or ada.to_scale.bias is None or ada.to_bias.bias is not None or module.to_scale.bias is None:
         return False
     if any(w.bias is not None for w in (module.expand_a, module.expand_b, module.squeeze)):
         return False
@@ -88,6 +94,20 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
 def _params(module) -> list[torch.Tensor]:
     """lnw (fp32), Ws1, sb1, Wb1 (the AdaLN), Wa, Wb, Ws (expand, squeeze), Wsc, bsc (the gate): the module's parameters themselves."""
     ada = module.ada_ln_in
+    if is_identity(ada):  # no ln_cond / scale bias: empty placeholders (lnw.numel() == 0 marks the identity AdaLN in the opaque ops below)
+        w = ada.to_scale.weight
+        lnw0, sb0 = w.new_empty(0, dtype=torch.float32), w.new_empty(0)
+        return [
+            lnw0,
+            w,
+            sb0,
+            ada.to_bias.weight,
+            module.expand_a.weight,
+            module.expand_b.weight,
+            module.squeeze.weight,
+            module.to_scale.weight,
+            module.to_scale.bias,
+        ]
     return [
         ada.ln_cond.weight,
         ada.to_scale.weight,
@@ -213,8 +233,11 @@ def inference(
         g = br.run(
             lambda: _gate_logits(cond, wsc, bsc), cond, wsc, bsc
         )  # the gate GEMM beside the chain below: nothing needs it before the last pass
-        aff, _ = ka.cond_ln(cond, lnw, x.dtype, eps_c)
-        xa, _ = ka.epilogue(x, _mm_op(aff, wcat.t()), sb1, eps_x)
+        if lnw.numel() == 0:  # the identity AdaLN: the raw conditioning, (1 + S) LN(x) + B
+            xa = ka.epilogue_identity(x, _mm_op(cond, wcat.t()), eps_x)[0]
+        else:
+            aff, _ = ka.cond_ln(cond, lnw, x.dtype, eps_c)
+            xa, _ = ka.epilogue(x, _mm_op(aff, wcat.t()), sb1, eps_x)
         h = kt.swiglu_fwd(_mm_op(xa, wab.t()))
         z = _mm_op(h, ws.t())
         br.join()
@@ -252,6 +275,20 @@ def _train_fwd_fake(
     m, d = x.shape
     dc, nd = cond.shape[1], wa.shape[0]
     e = x.new_empty
+    if lnw.numel() == 0:  # the identity AdaLN: no LN(cond) (aff, cst empty)
+        return [
+            torch.empty_like(x),
+            e((0,)),
+            e((0,), dtype=torch.float32),
+            e((m, 2 * d)),
+            e((m, 2), dtype=torch.float32),
+            e((m, d)),
+            e((m, 2 * nd)),
+            e((m, d)),
+            e((m, d)),
+            e((2 * d, dc)),
+            e((2 * nd, d)),
+        ]
     if (
         x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and _tail().atom_supported(x, cond, wa) and _adaln().atom_supported(x, cond)
     ):  # the fused atom kernels keep xa, rn(z) and the statistics only
@@ -327,10 +364,15 @@ def train_fwd(
         wcat, wab = _pack(ws1, wb1, wa, wb, False)
         br = Branch(x.device)
         g = br.run(lambda: _gate_logits(cond, wsc, bsc), cond, wsc, bsc)  # the gate GEMM beside the chain below
-        aff, cst = ka.cond_ln(cond, lnw, x.dtype, eps_c, stats=True)
-        sbt = _mm_op(aff, wcat.t())
-        xa, xst = ka.epilogue(x, sbt, sb1, eps_x, stats=True)
-        ab = _mm_op(xa, wab.t())
+        if lnw.numel() == 0:  # the identity AdaLN: no cond LayerNorm (aff / cst empty: the backward reads cond itself)
+            aff, cst = x.new_empty(0), x.new_empty(0, dtype=torch.float32)
+            sbt = _mm_op(cond, wcat.t())
+            xa, xst = ka.epilogue_identity(x, sbt, eps_x, stats=True)
+        else:
+            aff, cst = ka.cond_ln(cond, lnw, x.dtype, eps_c, stats=True)
+            sbt = _mm_op(aff, wcat.t())
+            xa, xst = ka.epilogue(x, sbt, sb1, eps_x, stats=True)
+        ab =_mm_op(xa, wab.t())
         z = _mm_op(kt.swiglu_fwd(ab), ws.t())
         br.join()
         y = kt.gate_res_fwd(x if residual else None, z, g)
@@ -439,6 +481,20 @@ def train_bwd(
             dws = br.run(lambda: _wgrad(dz, h), dz, h)
             dwab = br.run(lambda: _wgrad(dab, xa), dab, xa)
             dxa = _mm_op(dab, wab)  # the AdaLN's dy [M, d]
+            if lnw.numel() == 0:  # the identity AdaLN: dscale = dy xhat, d cond = [dscale | dy] [Ws; Wb] + the gate's, no LN(cond), no scale bias
+                dm, dx = ka.bwd_x_identity(dxa, x, xst, sbt, dy if residual else None, x.dtype)
+                dw1 = br.run(lambda: _wgrad(dm, cond), dm, cond)
+                br.wait(dcond2_ready, dcond2)
+                dcond = torch.addmm(dcond2, dm, wcat) if (dm.dtype is BF or tf32_allowed()) else _mm_op(dm, wcat) + dcond2
+                br.join()
+                dws1, dwb1 = dw1[:d], dw1[d:]
+                dbsc, dws1, dwb1, dwa, dwb, dws, dwsc = ka.finish(
+                    [pbsc],
+                    [like(bsc, fp32_grads)],
+                    [dws1, dwb1, dwab[:nd], dwab[nd:], dws, dwsc],
+                    [like(t, fp32_grads) for t in (ws1, wb1, wa, wb, ws, wsc)],
+                )
+                return [dx, dcond, lnw.new_empty(0), dws1, sb1.new_empty(0), dwb1, dwa, dwb, dws, dwsc, dbsc]
             dm, dx, psb1 = ka.bwd_x(dxa, x, xst, sbt, sb1, dy if residual else None, x.dtype)
             dw1 = br.run(lambda: _wgrad(dm, aff), dm, aff)
             dca = _mm(dm, wcat)
@@ -492,6 +548,7 @@ def update(
     else:
         cs = cond if _period(x, cond, False) == xs.shape[0] else cond[0]  # shared: the first sample's rows are the table
         cs = cs.to(compute_dtype).reshape(-1, dc).contiguous()
-    eps = (float(module.ada_ln_in.ln_in.eps), float(module.ada_ln_in.ln_cond.eps))
+    ada = module.ada_ln_in
+    eps = (float(ada.ln_in.eps), 0.0 if is_identity(ada) else float(ada.ln_cond.eps))
     y = _Training.apply(residual, *eps, xs, cs, *_params(module)) if grad else inference(xs, cs, *_params(module), *eps, residual)  # pyright: ignore[reportCallIssue]  -- *_params(module): the parameters, in inference's order
     return y.reshape(x.shape)
