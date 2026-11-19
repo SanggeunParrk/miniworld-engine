@@ -761,7 +761,6 @@ class TriangleAttention(_TriangleAttentionBase):
         **_TriangleAttentionBase.backend_versions,
         "cuda:a100_sm80": 8,  # 8 (2026-11-19): training (forward_train) passes key_mask=None to the sm_80 attention op: every cuda train call raised before (rows recorded the error); inference unchanged
         "cuda:h100_sm90": 12,
-        "cuda:5090_sm120": 5,  # 5 (2026-11-19): training on the rows engine does not save xh (the front's backward row kernel writes it again before the weight-gradient GEMMs; -38 MiB a TriangleAttention at L 384); outputs and gradients bitwise unchanged, one launch less read, re-measure only
     }  # 12 (2026-11-18, 3.0.1): training backward, query side from L 512: two warpgroups sum their dbias partials in shared memory (half the TMA reduce-adds; dq bitwise unchanged, dbias within fp32 summation order)
     # cuda:a100_sm80 6 (2026-11-14): the A100 row-blocked inference (sm80_wide.forward_rows: OpenDDE's refiner 2976 / 3968, L % 128 != 0) runs
     # the whole-pair call's core at the padded L (the rf core at L >= 512, keys up to the last live one): each row's bits equal the whole-pair
