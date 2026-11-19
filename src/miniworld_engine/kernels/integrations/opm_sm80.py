@@ -235,9 +235,8 @@ def _outer(sm, a, b, mk):
         return sm.lt_mm(a, b, True, False)
     from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
 
-    if ogemm_sm80.all_live(
-        mk
-    ):  # nothing to skip: cuBLAS (the RTX 5090 too, s5090/four: L 384 rows 55 / 63 1.93 -> 1.82 / 1.72 -> 1.69 ms, the skip kernel trailed the dense product on a full mask)
+    # nothing to skip: cuBLAS.  The RTX 5090 from L 384 only (s5090/four: rows 55 / 63 at L 384 1.93 -> 1.82 / 1.72 -> 1.69 ms; at L 128 the skip kernel leads: 0.25 vs 0.27 ms)
+    if (not _card.sm120() or a.shape[1] >= 32 * 384) and ogemm_sm80.all_live(mk):
         return torch.mm(a.t(), b)
     return ogemm_sm80.outer(a, b, ogemm_sm80.live_tokens(mk))
 
