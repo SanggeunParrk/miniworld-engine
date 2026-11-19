@@ -95,8 +95,27 @@ __device__ __forceinline__ uint16_t e4m3x2(float lo, float hi) {   // lo -> low 
 }
 
 // smem: [NST][KB][BN][64] bf16 x/y stages | [KB][HC][64] bf16 Wv (128B swizzle) | [HC][BN] e4m3 vT staging | barriers
+#ifndef VT_NAT
+#define VT_NAT 0
+#endif
+// VT_NAT (the FP8 TRAINING route, pwa_fp8_train.py): also v as e4m3 in the natural head-major layout [H][N][S*C] (the dw GEMM's K-major
+// operand), staged [H][BN][C] behind the vT staging and stored by a second TMA box
+// VT_BF (round 2, backward-only FP8: pwa_fp8_train.py "dv,dw"): with VT_NAT, ALSO v as bf16 natural [H][N][S*C] (the forward contraction on
+// cuBLAS stays bf16) and no vT (the forward is not FP8): staged [H][BN][C] bf16 behind the e4m3 natural tile, one more TMA box
+#ifndef VT_BF
+#define VT_BF 0
+#endif
+#ifndef VT_SWZ
+#define VT_SWZ 0
+#endif
+#ifndef VT_MAP
+#define VT_MAP 0
+#endif
+#ifndef VT_EXP
+#define VT_EXP 0   // timing experiments only (1: no staging stores; 2: no v TMA stores)
+#endif
 template <int NST> struct SMQ {
-  static constexpr int SX = 0, SW = SX + NST * TILE * 2, SV = SW + HC * D * 2, SEND = SV + HC * BN;
+  static constexpr int SX = 0, SW = SX + NST * TILE * 2, SV = SW + HC * D * 2, SEND = SV + (VT_BF ? HC * BN * 3 : HC * BN * (1 + VT_NAT));   // VT_BF: e4m3 natural at SV, bf16 natural at SV + HC * BN
   static constexpr int BYTES = SEND + 1024 + 64;
 };
 
@@ -105,7 +124,11 @@ template <int NST, bool SY>
 __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ lnw, const float* __restrict__ lnb, float eps, int N, int nitem,
                                                      const float* __restrict__ vinv_p, float* __restrict__ amax_p,
                                                      const __grid_constant__ CUtensorMap xmap, const __grid_constant__ CUtensorMap ymap,
-                                                     const __grid_constant__ CUtensorMap wmap, const __grid_constant__ CUtensorMap vmap) {
+                                                     const __grid_constant__ CUtensorMap wmap, const __grid_constant__ CUtensorMap vmap
+#if VT_NAT
+                                                     , const __grid_constant__ CUtensorMap nmap
+#endif
+                                                     ) {   // (VT_BF: vmap is the bf16 natural v's map, there is no vT)
   extern __shared__ __align__(1024) unsigned char smem_raw[];
   const uint32_t sbase = static_cast<uint32_t>(__cvta_generic_to_shared(smem_raw));
   unsigned char* sm = smem_raw + ((1024u - (sbase & 1023u)) & 1023u);
@@ -124,7 +147,7 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
     const int t = item_of(it);
     if (t >= nitem) return;
     const int st = it % NST;
-    const int n0 = (t % nblk) * BN, s = t / nblk;
+    const int n0 = VT_MAP ? (t / (nitem / nblk)) * BN : (t % nblk) * BN, s = VT_MAP ? t % (nitem / nblk) : t / nblk;   // VT_MAP: s fastest (concurrent blocks write adjacent row pieces)
     tma::expect_tx(bars + st, TILE * 2);
     #pragma unroll
     for (int kb = 0; kb < KB; ++kb) tma::load_2d(&xmap, tma::sa(sX + st * TILE + kb * BN * 64), bars + st, kb * 64, s * N + n0);
@@ -156,7 +179,7 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
     const int t = item_of(it);
     if (t >= nitem) break;
     const int st = it % NST;
-    const int n0 = (t % nblk) * BN, s = t / nblk;
+    const int n0 = VT_MAP ? (t / (nitem / nblk)) * BN : (t % nblk) * BN, s = VT_MAP ? t % (nitem / nblk) : t / nblk;   // VT_MAP: s fastest (concurrent blocks write adjacent row pieces)
     // SY: groups of thread 0, in order: y(it-1), v(it-1). <=1 pending -> y(it-1) has read its stage: refill it.  Without y the stage
     // of item it-1 was last read by its wgmma (waited on before the barrier that precedes this point)
     if (tid == 0) { if (SY && it >= 1) tma::wait_read<1>(); issue(it + NST - 1); }
@@ -211,8 +234,13 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
     for (int mb = 0; mb < MB; ++mb) {
       #pragma unroll
       for (int ks = 0; ks < D / 16; ++ks)
+#if VT_BF   // swapped roles: v [64 n][hc block] = y . Wv^T (rows n, columns hc: consecutive channels pack into one word)
+        wg::mma_m64n64k16_kk(wg::desc(sx + (ks >> 2) * BN * 64 + wg::off(0, (ks & 3) * 2)),
+                             wg::desc(sWv + (ks >> 2) * HC * 64 + mb * 64 * 64 + wg::off(0, (ks & 3) * 2)), acc[mb], ks == 0 ? 0 : 1);
+#else
         wg::mma_m64n64k16_kk(wg::desc(sWv + (ks >> 2) * HC * 64 + mb * 64 * 64 + wg::off(0, (ks & 3) * 2)),
                              wg::desc(sx + (ks >> 2) * BN * 64 + wg::off(0, (ks & 3) * 2)), acc[mb], ks == 0 ? 0 : 1);
+#endif
     }
     wg::commit();
     wg::wait();
@@ -220,6 +248,36 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
     if (tid == 0) { if (SY) tma::wait_read<1>(); else tma::wait_read<0>(); }
     __syncthreads();
     const int rr = warp * 16 + (lane >> 2), cc = (lane & 3) * 2;
+#if VT_BF
+    {
+      unsigned char* sN8 = reinterpret_cast<unsigned char*>(sV);
+      __nv_bfloat16* sB = reinterpret_cast<__nv_bfloat16*>(reinterpret_cast<unsigned char*>(sV) + HC * BN);
+      #pragma unroll
+      for (int mb = 0; mb < MB; ++mb) {
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          const int hc = mb * 64 + i * 8 + cc, h = hc / C, c = hc % C;
+          #pragma unroll
+          for (int hf = 0; hf < 2; ++hf) {
+            const float r0 = acc[mb][i * 4 + 2 * hf], r1 = acc[mb][i * 4 + 2 * hf + 1];
+            const float a0 = r0 * vinv, a1 = r1 * vinv;
+            amax = fmaxf(amax, fmaxf(fabsf(a0), fabsf(a1)));
+            const int off = (h * BN + rr + hf * 8) * C + c;
+#if VT_EXP == 1   // timing experiment only: no staging stores
+            if (r0 == 123.f) *reinterpret_cast<uint32_t*>(sB + off) = pack2(r0, r1);
+#elif VT_SWZ   // the TMA stores swizzle (64B for the bf16 rows, 32B for the e4m3 rows): the 8 rows of a quad-group no longer share banks
+            const int ob = off * 2, o8 = off;
+            *reinterpret_cast<uint32_t*>(reinterpret_cast<unsigned char*>(sB) + (ob ^ (((ob >> 7) & 3) << 4))) = pack2(r0, r1);
+            *reinterpret_cast<uint16_t*>(sN8 + (o8 ^ (((o8 >> 7) & 1) << 4))) = e4m3x2(a0, a1);
+#else
+            *reinterpret_cast<uint32_t*>(sB + off) = pack2(r0, r1);       // bf16 natural: ln_vg's bytes
+            *reinterpret_cast<uint16_t*>(sN8 + off) = e4m3x2(a0, a1);     // e4m3 natural (the dw operand)
+#endif
+          }
+        }
+      }
+    }
+#else
     #pragma unroll
     for (int mb = 0; mb < MB; ++mb) {
       #pragma unroll
@@ -229,11 +287,38 @@ __global__ void __launch_bounds__(128) ln_vt8_kernel(const float* __restrict__ l
         if (SY || n0 + col < N) amax = fmaxf(amax, fmaxf(fmaxf(fabsf(a0), fabsf(a1)), fmaxf(fabsf(a2), fabsf(a3))));
         sV[(row * BN + col) >> 1] = e4m3x2(a0, a1);
         sV[((row + 8) * BN + col) >> 1] = e4m3x2(a2, a3);
+#if VT_NAT
+        {
+          unsigned char* sN = reinterpret_cast<unsigned char*>(sV) + HC * BN;   // [H][BN][C]
+          const uint16_t p0 = e4m3x2(a0, a1), p1 = e4m3x2(a2, a3);
+          const int h0 = row / C, c0 = row % C, h1 = (row + 8) / C, c1 = (row + 8) % C;
+          sN[(h0 * BN + col) * C + c0] = (unsigned char)(p0 & 0xff);
+          sN[(h0 * BN + col + 1) * C + c0] = (unsigned char)(p0 >> 8);
+          sN[(h1 * BN + col) * C + c1] = (unsigned char)(p1 & 0xff);
+          sN[(h1 * BN + col + 1) * C + c1] = (unsigned char)(p1 >> 8);
+        }
+#endif
       }
     }
+#endif   // VT_BF
     wg::proxy_fence();
     __syncthreads();
+#if VT_NAT
+    if (tid == 0) {
+#if !VT_BF
+      tma::store_3d(&vmap, tma::sa(sV), n0, s * C, 0);
+      tma::store_3d(&nmap, tma::sa(reinterpret_cast<unsigned char*>(sV) + HC * BN), s * C, n0, 0);
+#else   // vmap: the bf16 natural v (staged at +HC*BN), nmap: the e4m3 natural v (at +0)
+#if VT_EXP != 2
+      tma::store_3d(&vmap, tma::sa(reinterpret_cast<unsigned char*>(sV) + HC * BN), s * C, n0, 0);
+      tma::store_3d(&nmap, tma::sa(sV), s * C, n0, 0);
+#endif
+#endif
+      tma::commit();
+    }
+#else
     if (tid == 0) { tma::store_3d(&vmap, tma::sa(sV), n0, s * C, 0); tma::commit(); }
+#endif
   }
   if (tid == 0) tma::wait_all();
   #pragma unroll
@@ -281,6 +366,7 @@ CUtensorMap enc(CUtensorMapDataType dt, int rank, void* base, const uint64_t* gd
   return m;
 }
 
+#if !VT_NAT
 template <int NST, bool SY>
 void launch(const torch::Tensor& lnw, const torch::Tensor& lnb, double eps, int N, int nitem, int64_t blocks_per_sm, const torch::Tensor& vinv,
             const torch::Tensor& amax, const CUtensorMap& xmap, const CUtensorMap& ymap, const CUtensorMap& wmap, const CUtensorMap& vmap) {
@@ -308,7 +394,10 @@ void launch_nst(int64_t nst, const torch::Tensor& lnw, const torch::Tensor& lnb,
     default: TORCH_CHECK(false, "nst must be 2, 3 or 4");
   }
 }
+#endif
 }  // namespace
+
+#if !VT_NAT
 
 // returns (vT e4m3 [H, S*C, N], y [S, N, D] bf16, or an empty tensor when store_y is false); amax (fp32 [1], NOT zeroed here) takes
 // max |vinv * v| of this call.  store_y: N a multiple of 64; without: of 16
@@ -357,3 +446,74 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
           py::arg("store_y") = true);
   mod.def("w_quant", &w_quant, "w [H, N, N] bf16 -> e4m3 of 256 w");
 }
+#else   // VT_NAT: the FP8 training route's producer (pwa_fp8_train.py)
+namespace {
+template <int NST>
+void launch_nat(const torch::Tensor& lnw, const torch::Tensor& lnb, double eps, int N, int nitem, int64_t blocks_per_sm, const torch::Tensor& vinv,
+                const torch::Tensor& amax, const CUtensorMap& xmap, const CUtensorMap& ymap, const CUtensorMap& wmap, const CUtensorMap& vmap,
+                const CUtensorMap& nmap) {
+  constexpr int BYTES = SMQ<NST>::BYTES;
+  static bool attr = false;
+  static int sms = 0;
+  if (!attr) {
+    cudaFuncSetAttribute(ln_vt8_kernel<NST, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, BYTES);
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, lnw.device().index());
+    attr = true;
+  }
+  const int grid = (int)std::min<long>(nitem, (long)sms * blocks_per_sm);
+  ln_vt8_kernel<NST, true><<<grid, 128, BYTES, at::cuda::getCurrentCUDAStream()>>>(lnw.data_ptr<float>(), lnb.data_ptr<float>(), (float)eps, N, nitem,
+                                                                                    vinv.data_ptr<float>(), amax.data_ptr<float>(), xmap, ymap, wmap, vmap, nmap);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+}  // namespace
+
+// returns (vT e4m3 [H, S*C, N], v e4m3 natural [H, N, S*C], y [S, N, D] bf16); amax (fp32 [1], NOT zeroed) takes max |vinv * v|.  N % 64 == 0.
+std::vector<torch::Tensor> ln_vt8n(torch::Tensor m, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wv, double eps, torch::Tensor vinv, torch::Tensor amax,
+                                   int64_t blocks_per_sm, int64_t nst) {
+  TORCH_CHECK(m.is_cuda() && m.scalar_type() == torch::kBFloat16 && m.is_contiguous() && m.dim() == 3 && m.size(2) == D, "m: [S, N, d_msa] bf16 contiguous");
+  TORCH_CHECK(wv.scalar_type() == torch::kBFloat16 && wv.is_contiguous() && wv.dim() == 2 && wv.size(0) == HC && wv.size(1) == D, "wv: [8 C, d_msa] bf16");
+  TORCH_CHECK(lnw.scalar_type() == torch::kFloat && lnw.is_contiguous() && lnw.numel() == D && lnb.scalar_type() == torch::kFloat && lnb.is_contiguous() &&
+                  lnb.numel() == D, "LN params: fp32[d_msa]");
+  TORCH_CHECK(vinv.scalar_type() == torch::kFloat && vinv.numel() == 1 && amax.scalar_type() == torch::kFloat && amax.numel() == 1, "vinv / amax: fp32[1]");
+  const int S = (int)m.size(0), N = (int)m.size(1);
+  TORCH_CHECK(N % BN == 0, "N must be a multiple of 64");
+  auto y = torch::empty_like(m);
+#if VT_BF   // round 2: slot "vT" = v bf16 natural [H, N, S*C]
+  auto vt = torch::empty({H, N, (long)S * C}, m.options());
+#else
+  auto vt = torch::empty({H, (long)S * C, N}, m.options().dtype(torch::kFloat8_e4m3fn));
+#endif
+  auto vn = torch::empty({H, N, (long)S * C}, m.options().dtype(torch::kFloat8_e4m3fn));
+  uint64_t gx[2] = {(uint64_t)D, (uint64_t)S * N}, sx[1] = {(uint64_t)D * 2};
+  uint32_t bx[2] = {64, BN};
+  CUtensorMap xmap = enc(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, m.data_ptr(), gx, sx, bx, CU_TENSOR_MAP_SWIZZLE_128B, "x");
+  CUtensorMap ymap = enc(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, y.data_ptr(), gx, sx, bx, CU_TENSOR_MAP_SWIZZLE_128B, "y");
+  uint64_t gw[2] = {(uint64_t)D, (uint64_t)HC}, sw[1] = {(uint64_t)D * 2};
+  uint32_t bw[2] = {64, HC};
+  CUtensorMap wmap = enc(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, wv.data_ptr(), gw, sw, bw, CU_TENSOR_MAP_SWIZZLE_128B, "wv");
+  uint64_t gv[3] = {(uint64_t)N, (uint64_t)S * C, (uint64_t)H}, sv[2] = {(uint64_t)N, (uint64_t)S * C * N};
+  uint32_t bv[3] = {BN, C, H};
+  uint64_t gn[3] = {(uint64_t)S * C, (uint64_t)N, (uint64_t)H}, sn[2] = {(uint64_t)S * C, (uint64_t)N * S * C};
+  uint32_t bn[3] = {C, BN, H};
+#if VT_BF
+  uint64_t snb[2] = {(uint64_t)S * C * 2, (uint64_t)N * S * C * 2};
+  CUtensorMap vmap = enc(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 3, vt.data_ptr(), gn, snb, bn, VT_SWZ ? CU_TENSOR_MAP_SWIZZLE_64B : CU_TENSOR_MAP_SWIZZLE_NONE, "v bf16 natural");
+#else
+  CUtensorMap vmap = enc(CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, vt.data_ptr(), gv, sv, bv, CU_TENSOR_MAP_SWIZZLE_NONE, "vT");
+#endif
+  CUtensorMap nmap = enc(CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, vn.data_ptr(), gn, sn, bn, (VT_SWZ && VT_BF) ? CU_TENSOR_MAP_SWIZZLE_32B : CU_TENSOR_MAP_SWIZZLE_NONE, "v natural");
+  const int nitem = (N / BN) * S;
+  switch (nst) {
+    case 2: launch_nat<2>(lnw, lnb, eps, N, nitem, blocks_per_sm, vinv, amax, xmap, ymap, wmap, vmap, nmap); break;
+    case 3: launch_nat<3>(lnw, lnb, eps, N, nitem, blocks_per_sm, vinv, amax, xmap, ymap, wmap, vmap, nmap); break;
+    case 4: launch_nat<4>(lnw, lnb, eps, N, nitem, blocks_per_sm, vinv, amax, xmap, ymap, wmap, vmap, nmap); break;
+    default: TORCH_CHECK(false, "nst must be 2, 3 or 4");
+  }
+  return {vt, vn, y};
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
+  mod.def("ln_vt8n", &ln_vt8n, "LayerNorm + value projection, v as e4m3 twice: (vT [H, S*C, N], v natural [H, N, S*C], y [S, N, d_msa] bf16)", py::arg("m"),
+          py::arg("lnw"), py::arg("lnb"), py::arg("wv"), py::arg("eps"), py::arg("vinv"), py::arg("amax"), py::arg("blocks_per_sm") = 2, py::arg("nst") = 3);
+}
+#endif

@@ -65,6 +65,10 @@ NOT_WEIGHT_DERIVED = {
     "kernels/integrations/pwa_fp8.py:_WS": "constant w scale per device",
     "kernels/integrations/pwa_fp8.py:_WORK": "cuBLASLt workspace per device",
     "kernels/integrations/pwa_fp8.py:ALGO_INDEX": "cuBLASLt algorithm overrides",
+    "kernels/integrations/pwa_fp8_train.py:_SITES": "FP8 training delayed-scale state per module site (activation history)",
+    "kernels/integrations/pwa_fp8_train.py:_WS": "constant w scale per device",
+    "kernels/integrations/pwa_fp8_train.py:_OVF": "FP8 training overflow count per device",
+    "kernels/integrations/pwa_fp8_train.py:_EXT": "extensions",
     # the opt-in FP8 routes of TriAttn / TriMul / Transition: static e4m3 scales calibrated from activations (keyed by a weight's address, dropped
     # when it is freed; rescale_all updates them in place), per-device overflow flags, gate tables and cuBLASLt algorithm picks -- not weight forms
     "kernels/triangle_attention/cuda/h100_sm90.py:_QK_AUTO": "FP8 q / k scales per site calibrated from activations",
