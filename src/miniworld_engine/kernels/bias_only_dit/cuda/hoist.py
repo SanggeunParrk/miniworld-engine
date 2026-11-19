@@ -20,7 +20,18 @@ import torch
 _dir = Path(__file__).parent
 #: switches of the exact-fp32 fusions (A-B tests in one process; all on in a release): "logits" saves the fp32 logits (no re-forming
 #: in the backward), "bwd" the one-pass hoist backward of a block, "fwd" the one-pass logits of a block
-OPT = {"logits": True, "bwd": True, "fwd": True, "rows": True, "bwd_rg": 2, "eval_tc": True, "train_tc": True, "tc_mb": 0}
+OPT = {
+    "logits": True,
+    "bwd": True,
+    "fwd": True,
+    "rows": True,
+    "bwd_rg": 2,
+    "eval_tc": True,
+    "train_tc": True,
+    "bwd_tc": True,
+    "bwd_mb": 0,
+    "tc_mb": 0,
+}
 
 
 @functools.lru_cache(maxsize=None)
@@ -128,17 +139,17 @@ def pair_logits(p2: torch.Tensor, wf32: torch.Tensor, stats: bool = False) -> tu
     statistics float [R, 2]: LN0 in fp32, every product on the FMA pipe. One fused pass (``logits_fused_kernel``: no LN0 in memory) for 16 heads of
     128 channels, else ln0_fp32 + the cuBLAS FMA GEMM."""
     R = p2.shape[0]
+    # 16 heads, 128 / 256 channels: the one-pass tensor-core logits (+ the row statistics)
+    if OPT["train_tc"] and logits_tc_ok(p2, wf32):
+        lg = torch.empty(16, R, device=p2.device, dtype=torch.float32)
+        pst = torch.empty(R, 2, device=p2.device, dtype=torch.float32) if stats else None
+        logits_tc(p2, wf32, lg, pst)
+        return lg, pst
     if OPT["fwd"] and tuple(wf32.shape) == (16, 128) and p2.shape[1] == 128 and R % 32 == 0 and p2.is_contiguous() and wf32.is_contiguous():
         lg = torch.empty(16, R, device=p2.device, dtype=torch.float32)
         pst = torch.empty(R, 2, device=p2.device, dtype=torch.float32) if stats else p2.new_empty(0, dtype=torch.float32)
         ext().logits_fused_cuda(p2, wf32, lg, pst, 1e-5)
         return lg, (pst if stats else None)
-    # the 256-wide pair, 16 heads: the one-pass tensor-core logits (+ the row statistics)
-    if OPT["train_tc"] and p2.shape[1] == 256 and logits_tc_ok(p2, wf32):
-        lg = torch.empty(16, R, device=p2.device, dtype=torch.float32)
-        pst = torch.empty(R, 2, device=p2.device, dtype=torch.float32) if stats else None
-        logits_tc(p2, wf32, lg, pst)
-        return lg, pst
     ln32, pst = ln0_fp32(p2, 1e-5, stats=stats)
     return exact_logits(wf32, ln32), pst
 
@@ -169,6 +180,38 @@ def logits_tc_ok(p2: torch.Tensor, wf32: torch.Tensor) -> bool:
     )
 
 
+def hoist_bwd_tc_ok(x: torch.Tensor, dball: torch.Tensor, wf32: torch.Tensor) -> bool:
+    """``hoist_bwd_tc`` serves one block's 16 heads on an H100: x [R, 128 | 256] bf16 / fp32 contiguous (R a multiple of 16), dbias [16, R] fp32."""
+    return (
+        OPT["bwd_tc"]
+        and tuple(dball.shape[:1]) == (16,)
+        and tuple(wf32.shape) == (16, x.shape[1])
+        and x.shape[1] in (128, 256)
+        and x.shape[0] % 16 == 0
+        and x.is_contiguous()
+        and x.dtype in (torch.bfloat16, torch.float32)
+        and dball.dtype is torch.float32
+        and dball.is_contiguous()
+        and wf32.is_contiguous()
+        and torch.cuda.get_device_capability(x.device) == (9, 0)
+    )
+
+
+def hoist_bwd_tc(x: torch.Tensor, dball: torch.Tensor, wf32: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """The exact-class backward of one block's hoisted pair bias in ONE pass over the rows (``hoist_bwd_tc_k``: d LN0 = dbias^T W', the LN0 backward, dW' = dbias Y on TF32 mma,
+    four-term split operands, fp32 partials in round-to-nearest): -> (d pair [R, C] in x's dtype, dW' [16, C] fp32); the per-warp dW' partials are summed in a fixed order."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+
+    R, cp = x.shape
+    cap = min(3200, -(-(R // 16) // 4) * 8)
+    part = torch.empty(cap, 16, cp // 2, device=x.device, dtype=torch.float32)
+    dx = torch.empty_like(x)
+    # launch bounds (blocks of 8 warps an SM): 1 at 256 channels (2: 208 .. 304 bytes spilled, 745 us against 548 us at L 768), 2 at 128
+    w = tf32.rows32().hoist_bwd_tc_cuda(x, dball, wf32, dx, part, 1e-5, OPT["bwd_mb"] or (1 if cp == 256 else 2))
+    halves = part[:w].view(w // 2, 2, 16, cp // 2).sum(0)  # [half, 16, cp / 2]: the pairs' partials of each channel half, in a fixed order
+    return dx, halves.permute(1, 0, 2).reshape(16, cp)
+
+
 def operand_cols(dtype: torch.dtype, width: int = 128) -> int:
     """Columns of ``ln0_bwd_rows``'s y for a path's dtype and the pair width C: 2 C (bf16, the two-term split) or C (fp32)."""
     return 2 * width if dtype is torch.bfloat16 else width
@@ -188,6 +231,8 @@ __all__ = [
     "exact_logits",
     "ext",
     "hoist_bwd_fused",
+    "hoist_bwd_tc",
+    "hoist_bwd_tc_ok",
     "kernel_attrs",
     "ln0_bwd_rows",
     "ln0_fp32",

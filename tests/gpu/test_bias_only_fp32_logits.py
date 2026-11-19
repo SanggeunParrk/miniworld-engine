@@ -224,3 +224,41 @@ def test_logits_tc_error_class_of_fma(case: str, dtype: torch.dtype, dp: int) ->
     assert pst_ref is not None
     torch.testing.assert_close(pst[:, 1], pst_ref[:, 1], rtol=1e-5, atol=0)
     torch.testing.assert_close(pst[:, 0], pst_ref[:, 0], rtol=1e-5, atol=1e-5)
+
+
+@requires_h100
+@pytest.mark.parametrize("dp", [128, 256])
+@pytest.mark.parametrize("dtype", DTYPES, ids=IDS)
+@pytest.mark.parametrize("off", [0.0, 6.0])
+def test_hoist_bwd_tc_error_class_of_fma(dtype: torch.dtype, dp: int, off: float) -> None:
+    """``hoist.hoist_bwd_tc`` (d LN0, the LN0 backward and dW' of one block in one pass, error-compensated TF32 mma) against fp64: d pair and dW'
+    stay within 2x of the exact fp32 FMA / GEMM path's error (max-abs relative to the max)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+    from miniworld_engine.kernels.integrations.bias_only_dit_hoist import hoist_bwd_exact
+
+    g = torch.Generator(device="cuda").manual_seed(2)
+    n = 256 * 256
+    x = torch.randn(n, dp, device="cuda", generator=g)
+    x[:, 0] += off
+    x = x.to(dtype)
+    gam = 1 + 0.1 * torch.randn(dp, device="cuda", generator=g)
+    wf = ((torch.randn(16, dp, device="cuda", generator=g) * 0.5) * gam).contiguous()
+    db = torch.randn(16, n, device="cuda", generator=g).contiguous()
+    xd = x.double().requires_grad_(True)
+    y = F.layer_norm(xd, (dp,), None, None, EPS)
+    (y @ wf.double().t()).backward(db.double().t())
+    dx_ref, dw_ref = xd.grad, db.double() @ y.detach()
+    assert dx_ref is not None
+    old = HK.OPT["bwd_tc"]
+    try:
+        HK.OPT["bwd_tc"] = False
+        dx0, dw0 = hoist_bwd_exact(x, wf, db, EPS, 64)
+    finally:
+        HK.OPT["bwd_tc"] = old
+    dx1, dw1 = HK.hoist_bwd_tc(x, db, wf)
+
+    def rel(a: torch.Tensor, b: torch.Tensor) -> float:
+        return ((a.double() - b).abs().max() / b.abs().max()).item()
+
+    assert rel(dx1, dx_ref) <= 2.0 * rel(dx0, dx_ref), f"d pair {rel(dx1, dx_ref):.3e} vs FMA path {rel(dx0, dx_ref):.3e}"
+    assert rel(dw1, dw_ref) <= 2.0 * rel(dw0, dw_ref), f"dW' {rel(dw1, dw_ref):.3e} vs FMA path {rel(dw0, dw_ref):.3e}"
