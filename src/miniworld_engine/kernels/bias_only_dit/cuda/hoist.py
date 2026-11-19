@@ -20,7 +20,7 @@ import torch
 _dir = Path(__file__).parent
 #: switches of the exact-fp32 fusions (A-B tests in one process; all on in a release): "logits" saves the fp32 logits (no re-forming
 #: in the backward), "bwd" the one-pass hoist backward of a block, "fwd" the one-pass logits of a block
-OPT = {"logits": True, "bwd": True, "fwd": True, "rows": True, "bwd_rg": 2}
+OPT = {"logits": True, "bwd": True, "fwd": True, "rows": True, "bwd_rg": 2, "eval_tc": True, "tc_mb": 0}
 
 
 @functools.lru_cache(maxsize=None)
@@ -137,6 +137,32 @@ def pair_logits(p2: torch.Tensor, wf32: torch.Tensor, stats: bool = False) -> tu
     return exact_logits(wf32, ln32), pst
 
 
+def logits_tc(p2: torch.Tensor, wf32: torch.Tensor, out: torch.Tensor) -> None:
+    """out [16, R] fp32 <- one block's 16-head logits of the pair rows p2 [R, 128 | 256] (bf16 / fp32) and W' wf32 [16, C] fp32 in ONE pass
+    (``logits_tc_k``): LN0 in fp32 on chip, the products on TF32 tensor cores with the split fp32 operands (all 4 hi / lo products, a fresh
+    partial per k-step added in round-to-nearest fp32), the
+    inference hoist's logits (max-abs error 0.4x the FMA GEMM's against fp64: tests/gpu/test_bias_only_fp32_logits.py)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+
+    # launch bounds (blocks of 8 warps an SM): 2 at 128 channels; 1 at 256 (register file: 2 spilled 360 bytes, 190 us against 295 us at L 768)
+    mb = OPT["tc_mb"] or (1 if p2.shape[1] == 256 else 2)
+    tf32.rows32().logits_tc_cuda(p2, wf32, out, 1e-5, mb)
+
+
+def logits_tc_ok(p2: torch.Tensor, wf32: torch.Tensor) -> bool:
+    """``logits_tc`` serves a 16-head block on an H100 with contiguous bf16 / fp32 pair rows of width 128 or 256, R a multiple of 16."""
+    return (
+        OPT["eval_tc"]
+        and tuple(wf32.shape) == (16, p2.shape[1])
+        and p2.shape[1] in (128, 256)
+        and p2.shape[0] % 16 == 0
+        and p2.is_contiguous()
+        and p2.dtype in (torch.bfloat16, torch.float32)
+        and wf32.is_contiguous()
+        and torch.cuda.get_device_capability(p2.device) == (9, 0)
+    )
+
+
 def operand_cols(dtype: torch.dtype, width: int = 128) -> int:
     """Columns of ``ln0_bwd_rows``'s y for a path's dtype and the pair width C: 2 C (bf16, the two-term split) or C (fp32)."""
     return 2 * width if dtype is torch.bfloat16 else width
@@ -149,6 +175,8 @@ def kernel_attrs() -> list[tuple[str, int, int]]:
 
 __all__ = [
     "dbias_rows",
+    "logits_tc",
+    "logits_tc_ok",
     "pair_logits",
     "exact_fp32_gemms",
     "exact_logits",

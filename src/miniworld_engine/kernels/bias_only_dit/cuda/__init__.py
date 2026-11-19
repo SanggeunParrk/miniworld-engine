@@ -1025,7 +1025,7 @@ def prebuild(target, rows):
         (functools.partial(_rows_ext, True), bf16, None),
         # the training rows (the 256-wide pair_bias of runner.hoist is gone: the logits are exact fp32 now)
         (functools.partial(train._rows_ext, True), bf16, None),
-        (tf32.rows32, fp32, None),  # the fp32 row kernels
+        (tf32.rows32, None, None),  # the fp32 row kernels; every dtype since the exact-logits hoist (``hoist.logits_tc``, bf16 rows too)
     )
     served = {("bfloat16" if r["dtype"] == "master" else r["dtype"], r["mode"]) for r in rows}
     for build, dtypes, modes in builds:

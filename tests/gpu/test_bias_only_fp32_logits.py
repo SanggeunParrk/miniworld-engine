@@ -178,3 +178,42 @@ def test_block_fp32_logits(case: str, dtype: torch.dtype, backend: str, mode: st
         errs = [_rel(a, b) for a, b in zip(gr, g64, strict=True)]
         print(case, dtype, backend, mode, hoist, "y", f"{err_y:.2e}", "grads(pair, Wb, gamma)", [f"{e:.2e}" for e in errs])
         assert all(e <= GRAD_TOL for e in errs), f"gradient errors (pair, to_bias.weight, ln_pair.weight) {errs} > {GRAD_TOL}"
+
+
+@requires_h100
+@pytest.mark.parametrize("dp", [128, 256])
+@pytest.mark.parametrize("dtype", DTYPES, ids=IDS)
+@pytest.mark.parametrize("case", ["huge", "extreme", "wide"])
+def test_logits_tc_error_class_of_fma(case: str, dtype: torch.dtype, dp: int) -> None:
+    """``hoist.logits_tc`` (the inference hoist's one-pass logits: LN0 in fp32 on chip, TF32 mma with the split fp32 operands, all four
+    products, a fresh partial per k-step added in fp32) against fp64: its logits' max-abs error and the max-row TV of softmax stay within
+    the error class of the exact fp32 FMA-pipe GEMM it replaces (max-abs within 2x, TV within 1.5x, plus the floors of the fp32 data)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    sw, w0, off, tv_floor = CASES[case]
+    g = torch.Generator(device="cuda").manual_seed(1)
+    n = 256 * 256
+    pair = torch.randn(n, dp, device="cuda", generator=g)
+    pair[:, 0] += off
+    pair = pair.to(dtype)
+    gam = 1 + 0.1 * torch.randn(dp, device="cuda", generator=g)
+    w = torch.randn(16, dp, device="cuda", generator=g) * sw
+    w[:, 0] = w0
+    wf = (w * gam).contiguous()
+    ref = ((F.layer_norm(pair.double(), (dp,), None, None, EPS) * gam.double()) @ w.double().t()).t().contiguous()
+    ln, _ = HK.ln0_fp32(pair, EPS)
+    with torch.autocast("cuda", enabled=False):
+        fma = HK.exact_logits(wf, ln)
+    tc = torch.empty(16, n, device="cuda")
+    HK.logits_tc(pair, wf, tc)
+
+    def tv(lg: torch.Tensor) -> float:
+        return (
+            0.5
+            * (torch.softmax(lg.double().view(16 * 256, 256), -1) - torch.softmax(ref.view(16 * 256, 256), -1)).abs().sum(-1).max().item()
+        )
+
+    e_fma, e_tc = (fma.double() - ref).abs().max().item(), (tc.double() - ref).abs().max().item()
+    print(case, dtype, dp, f"max-abs fma {e_fma:.2e} tc {e_tc:.2e}; TV fma {tv(fma):.2e} tc {tv(tc):.2e}")
+    assert e_tc <= 2.0 * e_fma, f"logits max-abs error {e_tc:.3e} > 2x the FMA path's {e_fma:.3e}"
+    assert tv(tc) <= max(1.5 * tv(fma), tv_floor), f"max-row TV {tv(tc):.3e} above 1.5x the FMA path's {tv(fma):.3e}"

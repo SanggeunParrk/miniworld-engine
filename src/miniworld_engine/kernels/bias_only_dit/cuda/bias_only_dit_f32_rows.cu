@@ -845,6 +845,130 @@ __global__ void __launch_bounds__(256, 2) pair_bias_tc_k(const float* __restrict
   }
 }
 
+// ---- the EXACT-class fp32 pair-bias LOGITS of the inference hoist (user rule 2026-11-19), one pass, pair rows bf16 or fp32, width 128 / 256 --------------
+// logits[h, r] = sum_c W'[h, c] LN0(x[r])[c] for the 16 heads of one block: the LN0 in fp32 (two exact passes), the products on mma.sync m16n8k8
+// TF32 with the split fp32 operands (all four hi / lo products, a fresh fp32 partial per k-step added in round-to-nearest fp32: error below that of the FMA-pipe
+// GEMM it replaces, measured against fp64; the LN0 rows are never stored). Pair rows of type XT (bf16 / fp32).
+// A thread owns 8 consecutive columns of its row per 32-column chunk j (columns 32 j + 8 q .. + 7: one 16-byte bf16 load, two fp32 ones; the four
+// lanes of a row read 64 / 128 contiguous bytes). k-step (j, s) takes the slots k = q -> column 32 j + 8 q + 2 s and k = q + 4 -> + 1 (the weight
+// fragments use the same map: the reduction order is free), so the 8 values a thread holds feed 4 k-steps and every pair element is read once.
+template <typename XT> struct Chunk8;
+template <> struct Chunk8<__nv_bfloat16> {
+  uint4 w;
+  __device__ __forceinline__ void load(const __nv_bfloat16* p) { w = *reinterpret_cast<const uint4*>(p); }
+  __device__ __forceinline__ void reload(const __nv_bfloat16* p) {
+    asm volatile("ld.global.nc.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(w.x), "=r"(w.y), "=r"(w.z), "=r"(w.w) : "l"(p));
+  }
+  __device__ __forceinline__ void fence() { asm volatile("" : "+r"(w.x), "+r"(w.y), "+r"(w.z), "+r"(w.w)); }
+  __device__ __forceinline__ void get(float (&v)[8]) const {
+    const uint32_t u[4] = {w.x, w.y, w.z, w.w};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) { v[2 * i] = __uint_as_float(u[i] << 16); v[2 * i + 1] = __uint_as_float(u[i] & 0xffff0000u); }
+  }
+};
+template <> struct Chunk8<float> {
+  float4 a, b;
+  __device__ __forceinline__ void load(const float* p) { a = *reinterpret_cast<const float4*>(p); b = *reinterpret_cast<const float4*>(p + 4); }
+  __device__ __forceinline__ void reload(const float* p) { a = reld4(p); b = reld4(p + 4); }
+  __device__ __forceinline__ void fence() { asm volatile("" : "+f"(a.x), "+f"(a.y), "+f"(a.z), "+f"(a.w), "+f"(b.x), "+f"(b.y), "+f"(b.z), "+f"(b.w)); }
+  __device__ __forceinline__ void get(float (&v)[8]) const { v[0] = a.x; v[1] = a.y; v[2] = a.z; v[3] = a.w; v[4] = b.x; v[5] = b.y; v[6] = b.z; v[7] = b.w; }
+};
+template <int CP, typename XT, int MB, bool HD = true>
+__global__ void __launch_bounds__(256, MB) logits_tc_k(const XT* __restrict__ Z, const float* __restrict__ WF, float* __restrict__ LG, long R, float eps) {
+  static_assert(CP == 128 || CP == 256, "pair width 128 or 256");
+  constexpr int NT = 2, KS = CP / 8, NC = CP / 32;
+  constexpr bool HOLD = HD && (sizeof(XT) == 2 || CP == 128);   // the row chunks stay in registers between the passes (fp32 at 256 would need 128 of them)
+  extern __shared__ uint4 pbw_[];
+  uint4 (*bw)[NT][32] = reinterpret_cast<uint4 (*)[NT][32]>(pbw_);
+  const int lane = threadIdx.x % 32, g = lane / 4, q = lane % 4;
+  const long wid = (long)blockIdx.x * WPB + threadIdx.x / 32, nw = (long)gridDim.x * WPB;
+  for (int i = threadIdx.x; i < KS * NT * 32; i += blockDim.x) {
+    const int l = i % 32, t = (i / 32) % NT, kk = i / (32 * NT), h = 8 * t + l / 4;
+    const int c = 32 * (kk / 4) + 8 * (l % 4) + 2 * (kk % 4);
+    bw[kk][t][l] = split2(WF[h * CP + c], WF[h * CP + c + 1]);
+  }
+  __syncthreads();
+  for (long rb = wid * 16; rb < R; rb += nw * 16) {
+    const XT* zr[2] = {Z + (rb + g) * CP + 8 * q, Z + (rb + g + 8) * CP + 8 * q};
+    Chunk8<XT> u[2][HOLD ? NC : 1];
+    float mean[2], rs[2];
+    if constexpr (HOLD) {
+#pragma unroll
+      for (int hr = 0; hr < 2; ++hr)
+#pragma unroll
+        for (int j = 0; j < NC; ++j) u[hr][j].load(zr[hr] + 32 * j);
+    }
+#pragma unroll
+    for (int hr = 0; hr < 2; ++hr) {
+      float s1 = 0.f;
+#pragma unroll
+      for (int j = 0; j < NC; ++j) {
+        Chunk8<XT> c;
+        if constexpr (HOLD) c = u[hr][j]; else c.load(zr[hr] + 32 * j);
+        float v[8]; c.get(v);
+        s1 += ((v[0] + v[1]) + (v[2] + v[3])) + ((v[4] + v[5]) + (v[6] + v[7]));
+      }
+      s1 += __shfl_xor_sync(0xffffffffu, s1, 1); s1 += __shfl_xor_sync(0xffffffffu, s1, 2);
+      mean[hr] = s1 * (1.f / CP);
+      float s2 = 0.f;
+#pragma unroll
+      for (int j = 0; j < NC; ++j) {
+        Chunk8<XT> c;
+        if constexpr (HOLD) c = u[hr][j]; else c.reload(zr[hr] + 32 * j);
+        float v[8]; c.get(v);
+        float d[8];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) { d[i] = v[i] - mean[hr]; d[i] *= d[i]; }
+        s2 += ((d[0] + d[1]) + (d[2] + d[3])) + ((d[4] + d[5]) + (d[6] + d[7]));
+      }
+      s2 += __shfl_xor_sync(0xffffffffu, s2, 1); s2 += __shfl_xor_sync(0xffffffffu, s2, 2);
+      rs[hr] = rsqrtf(s2 * (1.f / CP) + eps);
+    }
+    float acc[NT][4];
+#pragma unroll
+    for (int t = 0; t < NT; ++t) acc[t][0] = acc[t][1] = acc[t][2] = acc[t][3] = 0.f;
+#pragma unroll
+    for (int j = 0; j < NC; ++j) {
+      float v0[8], v1[8];
+      {
+        Chunk8<XT> c0, c1;
+        if constexpr (HOLD) { c0 = u[0][j]; c1 = u[1][j]; } else { c0.reload(zr[0] + 32 * j); c1.reload(zr[1] + 32 * j); }
+        c0.fence(); c1.fence();   // no conversion of a later chunk before the previous chunk's products (hoisted, the 128 converted values spilled)
+        c0.get(v0); c1.get(v1);
+      }
+#pragma unroll
+      for (int s = 0; s < 4; ++s) {
+        const int kk = 4 * j + s;
+        const float v[4] = {(v0[2 * s] - mean[0]) * rs[0], (v1[2 * s] - mean[1]) * rs[1],
+                            (v0[2 * s + 1] - mean[0]) * rs[0], (v1[2 * s + 1] - mean[1]) * rs[1]};
+        uint32_t ah[4], al[4];
+        split_a<3>(v, ah, al);
+#pragma unroll
+        for (int t = 0; t < NT; ++t) {
+          // the four split products of this k-step (smallest first) form a fresh partial d, added to the running sum in IEEE fp32 (round to
+          // nearest): the tensor core's own accumulation truncates, and over 32 k-steps that bias was 2-3x the FMA path's error
+          uint4 b;  // read where it is used (volatile): hoisted, the 64 weight fragments of a row tile spilled at 256 channels
+          asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(b.x), "=r"(b.y), "=r"(b.z), "=r"(b.w) : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&bw[kk][t][lane]))));
+          float d[4] = {0.f, 0.f, 0.f, 0.f};
+          mma_tf32(d, al[0], al[1], al[2], al[3], b.z, b.w);
+          mma_tf32(d, ah[0], ah[1], ah[2], ah[3], b.z, b.w);
+          mma_tf32(d, al[0], al[1], al[2], al[3], b.x, b.y);
+          mma_tf32(d, ah[0], ah[1], ah[2], ah[3], b.x, b.y);
+          acc[t][0] += d[0]; acc[t][1] += d[1]; acc[t][2] += d[2]; acc[t][3] += d[3];
+        }
+      }
+    }
+#pragma unroll
+    for (int t = 0; t < NT; ++t)
+#pragma unroll
+      for (int e = 0; e < 2; ++e) {
+        const int h = 8 * t + 2 * q + e;
+        LG[(long)h * R + rb + g] = acc[t][e];
+        LG[(long)h * R + rb + g + 8] = acc[t][2 + e];
+      }
+  }
+}
+
 // backward: 128 pair rows per block item (16 per warp), streamed into shared memory by cp.async (double buffer: the next item loads
 // while this one is worked on). d LN(pair) = dbias^T Wf on mma (M = the warp's 16 rows, N = 16 channel tiles of 8, K = the heads in
 // NK k-steps of 8), the LayerNorm backward with two row sums over the row's four lanes, d pair out; LN(pair) written back in place
@@ -1414,6 +1538,32 @@ void pair_bias_tc(at::Tensor z, at::Tensor wf, at::Tensor bias, at::Tensor pst, 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// lg [16, R] fp32 <- the 16 heads' exact-class logits of the pair rows z [R, 128 | 256] (bf16 or fp32) and W' [16, width] fp32 (``logits_tc_k``)
+template <int CP, typename XT, int MB, bool HD> void logits_tc_launch(const at::Tensor& z, const at::Tensor& wf, at::Tensor& lg, double eps) {
+  const int64_t R = z.size(0);
+  constexpr size_t smem = (size_t)(CP / 8) * 2 * 32 * 16;
+  static bool attr = cudaFuncSetAttribute(logits_tc_k<CP, XT, MB, HD>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem) == cudaSuccess;
+  TORCH_CHECK(attr, "logits_tc: shared memory attribute");
+  int per = 1;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, logits_tc_k<CP, XT, MB, HD>, 256, smem);
+  const unsigned g = (unsigned)std::max<int64_t>(1, std::min<int64_t>((R / 16 + WPB - 1) / WPB, (int64_t)std::max(per, 1) * nsm()));
+  logits_tc_k<CP, XT, MB, HD><<<g, 256, smem, S()>>>(reinterpret_cast<const XT*>(z.data_ptr()), wf.data_ptr<float>(), lg.data_ptr<float>(), R, (float)eps);
+}
+void logits_tc(at::Tensor z, at::Tensor wf, at::Tensor lg, double eps, int64_t mb) {
+  f32c(wf, "Wf"); f32c(lg, "logits");
+  const int64_t R = z.size(0), cp = z.size(1);
+  TORCH_CHECK(z.is_cuda() && z.is_contiguous() && z.dim() == 2 && (cp == 128 || cp == 256) && R % 16 == 0 &&
+              (z.scalar_type() == at::kFloat || z.scalar_type() == at::kBFloat16) && wf.dim() == 2 && wf.size(0) == 16 && wf.size(1) == cp &&
+              lg.numel() == 16 * R, "logits_tc: pair [R, 128 or 256] bf16 / fp32 (R a multiple of 16), Wf [16, width] fp32, logits [16, R] fp32");
+  const at::cuda::CUDAGuard gd(z.device());
+  const bool b = z.scalar_type() == at::kBFloat16;
+#define LTC(CPV, XTV) if (mb == 1) logits_tc_launch<CPV, XTV, 1, true>(z, wf, lg, eps); else if (mb == 11) logits_tc_launch<CPV, XTV, 1, false>(z, wf, lg, eps); else if (mb == 3) logits_tc_launch<CPV, XTV, 3, true>(z, wf, lg, eps); else if (mb == 13) logits_tc_launch<CPV, XTV, 3, false>(z, wf, lg, eps); else if (mb == 12) logits_tc_launch<CPV, XTV, 2, false>(z, wf, lg, eps); else logits_tc_launch<CPV, XTV, 2, true>(z, wf, lg, eps)
+  if (cp == 128) { if (b) { LTC(128, __nv_bfloat16); } else { LTC(128, float); } }
+  else { if (b) { LTC(256, __nv_bfloat16); } else { LTC(256, float); } }
+#undef LTC
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // the token DiT's pair bias: out [nh, L L] with the key columns permuted (``perm``) and -inf on masked keys, one pass of the pair
 void pair_bias_tok(at::Tensor z, at::Tensor wf, at::Tensor out, c10::optional<at::Tensor> mask, int64_t L, double eps, bool perm, double neg) {
   f32c(z, "pair"); f32c(wf, "Wf"); f32c(out, "bias");
@@ -1511,6 +1661,8 @@ std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
   FA(pair_bias_k<12, 256>); FA(pair_bias_k<16, 256>); FA(pair_bias_k<24, 256>);
   FA(pair_bias_tc_k<12, 1, 256>); FA(pair_bias_tc_k<16, 1, 256>); FA(pair_bias_tc_k<24, 1, 256>); FA(pair_bias_tc_k<12, 3, 256>);
   FA(pair_bias_tc_k<16, 3, 256>); FA(pair_bias_tc_k<24, 3, 256>); FA(pair_bias_bwd_tc_k<12, 1, 256>); FA(pair_bias_bwd_tc_k<16, 1, 256>);
+  FA((logits_tc_k<128, float, 2>)); FA((logits_tc_k<128, __nv_bfloat16, 2>)); FA((logits_tc_k<256, float, 2>)); FA((logits_tc_k<256, __nv_bfloat16, 2>));
+  FA((logits_tc_k<256, __nv_bfloat16, 2, false>)); FA((logits_tc_k<256, __nv_bfloat16, 3>)); FA((logits_tc_k<256, __nv_bfloat16, 3, false>));
   FA(pair_bias_bwd_tc_k<24, 1, 256>); FA(pair_bias_bwd_tc_k<12, 3, 256>); FA(pair_bias_bwd_tc_k<16, 3, 256>); FA(pair_bias_bwd_tc_k<24, 3, 256>);
 #undef FA
   return out;
@@ -1521,6 +1673,7 @@ std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("func_attrs", &func_attrs);
   m.def("pair_bias_tc_cuda", &pair_bias_tc);
+  m.def("logits_tc_cuda", &logits_tc);
   m.def("pair_bias_bwd_tc_cuda", &pair_bias_bwd_tc);
   m.def("pack_cuda", &pack);
   m.def("partial_rows", &partial_rows);

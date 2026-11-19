@@ -1053,7 +1053,10 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # cuda:h100_sm90 6 (2026-11-20, speed of the exact fp32 path, same accuracy standard): the logits LN0(pair) W'^T of one block in one fused pass (fp32 FMA, the dot products in channel order: 2-3 ulp
     # off the cuBLAS summation order, the same distance from fp64), the non-hoisted backward reads the saved fp32 logits (no recompute), the one-pass fp32 hoist backward of a block (d LN0, LN0 backward, dW' without
     # d LN0 / Y in memory) and the one-pass softmax-gradient epilogue (P, D = sum P dP, P (dP - D)); bf16 / fp32 train grads differ from 5 by fp32 rounding noise (1e-4 .. 1e-3 relative)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 5, "cuda:h100_sm90": 6, "cuda:5090_sm120": 6}
+    # cuda:h100_sm90 7 (2026-11-20, speed of the exact fp32 EVAL hoist, same accuracy standard): runner.hoist (inference) and the multi-block / 256-wide pair_bias_all forward take the logits of a block in ONE pass
+    # over the pair rows (hoist.logits_tc, bias_only_dit_f32_rows.cu logits_tc_k: LN0 in fp32 on chip, TF32 mma with the split fp32 operands, all four hi / lo products, a fresh partial per k-step added in fp32;
+    # max-abs logits error 0.34 .. 0.51 x the cuBLAS fp32 GEMM's against fp64 on the huge / extreme / wide repro, max-row TV of P <= 0.95 x) in place of the fp32 LN0 rows in memory + the FMA GEMM; logits bits differ from 6
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 5, "cuda:h100_sm90": 7, "cuda:5090_sm120": 6}
 
     def __init__(
         self,
