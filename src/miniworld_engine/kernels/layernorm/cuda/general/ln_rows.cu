@@ -103,7 +103,9 @@ __global__ void __launch_bounds__(RW_THREADS) ln_rw_bwd_kernel(const T* __restri
                                                               const float* __restrict__ rstd, T* __restrict__ dx,
                                                               float* __restrict__ dw_part, float* __restrict__ db_part, int64_t M,
                                                               int N) {
-  __shared__ float red[RW_WARPS][32 + 1];
+  constexpr bool WIDE_TAIL = EPL > 16;  // rows of 17+ values a lane (651 / 831 / 833 ...): the CTA tail through whole column vectors; narrower rows keep the per-column tail (bit-identical to before)
+  __shared__ float red_wide[RW_WARPS][WIDE_TAIL ? EPL * 32 : 1];
+  __shared__ float red[RW_WARPS][WIDE_TAIL ? 1 : 33];
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   const bool wgrad = dw_part != nullptr;
   const float inv_n = 1.f / float(N);
@@ -163,22 +165,41 @@ __global__ void __launch_bounds__(RW_THREADS) ln_rw_bwd_kernel(const T* __restri
     }
   }
   if (!wgrad) return;
-  // one partial row per CTA: the warps' column partials summed in a fixed order (warp 0, 1, ...)
+  // one partial row per CTA: the warps' column partials summed in a fixed order (warp 0, 1, ...). Each warp stores its whole column vector
+  // to shared memory, ONE barrier pair a pass (the sum over the warps in the same order as before: bit-identical), all CTA threads reduce.
+  if constexpr (WIDE_TAIL) {
+    float* rw = &red_wide[0][0];
 #pragma unroll
-  for (int pass = 0; pass < 2; ++pass) {
-    float* out = (pass == 0 ? dw_part : db_part) + int64_t(blockIdx.x) * N;
+    for (int pass = 0; pass < 2; ++pass) {
+      float* out = (pass == 0 ? dw_part : db_part) + int64_t(blockIdx.x) * N;
 #pragma unroll
-    for (int k = 0; k < EPL; ++k) {
-      red[warp][lane] = pass == 0 ? aw[k] : ab[k];
+      for (int k = 0; k < EPL; ++k) rw[warp * (EPL * 32) + k * 32 + lane] = pass == 0 ? aw[k] : ab[k];
       __syncthreads();
-      if (warp == 0) {
+      for (int col = threadIdx.x; col < N; col += RW_THREADS) {
         float t = 0.f;
 #pragma unroll
-        for (int wi = 0; wi < RW_WARPS; ++wi) t += red[wi][lane];
-        const int col = k * 32 + lane;
-        if (col < N) out[col] = t;
+        for (int wi = 0; wi < RW_WARPS; ++wi) t += rw[wi * (EPL * 32) + col];
+        out[col] = t;
       }
       __syncthreads();
+    }
+  } else {
+#pragma unroll
+    for (int pass = 0; pass < 2; ++pass) {
+      float* out = (pass == 0 ? dw_part : db_part) + int64_t(blockIdx.x) * N;
+#pragma unroll
+      for (int k = 0; k < EPL; ++k) {
+        red[warp][lane] = pass == 0 ? aw[k] : ab[k];
+        __syncthreads();
+        if (warp == 0) {
+          float t = 0.f;
+#pragma unroll
+          for (int wi = 0; wi < RW_WARPS; ++wi) t += red[wi][lane];
+          const int col = k * 32 + lane;
+          if (col < N) out[col] = t;
+        }
+        __syncthreads();
+      }
     }
   }
 }
@@ -308,8 +329,10 @@ __global__ void __launch_bounds__(NW * 32) ln_stage_fwd_kernel(const T* __restri
   for (int c = tid; c < nchunks; c += NW * 32) gy[c] = sy[c];
 }
 
-__global__ void __launch_bounds__(256) ln_rw_bwd_col_reduce(const float* __restrict__ part, int P, int N, float* __restrict__ out) {
+__global__ void __launch_bounds__(256) ln_rw_bwd_col_reduce(const float* __restrict__ part_in, int P, int N, float* __restrict__ out_dw, float* __restrict__ out_db) {
   __shared__ float sm[8][33];
+  const float* part = part_in + int64_t(blockIdx.y) * P * N;  // blockIdx.y 0: dw partials, 1: db partials (one launch)
+  float* out = blockIdx.y == 0 ? out_dw : out_db;
   const int tx = threadIdx.x & 31, sl = threadIdx.x >> 5;
   const int col = blockIdx.x * 32 + tx;
   float s = 0.f;
@@ -515,8 +538,7 @@ std::vector<torch::Tensor> ln_rows_bwd(torch::Tensor dy, torch::Tensor x, torch:
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   if (wgrad) {
     const int blocks = (N + 31) / 32;
-    mwln::ln_rw_bwd_col_reduce<<<blocks, 256, 0, s>>>(part.data_ptr<float>(), grid, N, dw.data_ptr<float>());
-    mwln::ln_rw_bwd_col_reduce<<<blocks, 256, 0, s>>>(part.data_ptr<float>() + int64_t(grid) * N, grid, N, db.data_ptr<float>());
+    mwln::ln_rw_bwd_col_reduce<<<dim3(blocks, 2), 256, 0, s>>>(part.data_ptr<float>(), grid, N, dw.data_ptr<float>(), db.data_ptr<float>());
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return {dx, dw, db};
