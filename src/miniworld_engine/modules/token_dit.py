@@ -42,6 +42,7 @@ from miniworld_engine.modules.attention import (
     BiasOnlyAttention,
     FlatQKNormAugmentedAttention,
     UngatedAugmentedAttention,
+    _ExactFp32Linear,
 )
 from miniworld_engine.modules.dit_variant_cuda import MasterEntryCast, VariantTokenCuda, fp32_conditioning
 from miniworld_engine.modules.functional import sigmoid_gate
@@ -421,9 +422,15 @@ def _a100_dtype(
     without bf16 autocast) or fp32 activations without autocast (TF32 tensor cores)."""
     dt = single.dtype
     if dt not in (torch.bfloat16, torch.float32) or cond.dtype != dt or (pair is not None and pair.dtype != dt):
-        return None, f"{_card(single)}: dtypes {single.dtype} / {cond.dtype} / {None if pair is None else pair.dtype} (all bfloat16 or all float32)"
+        return (
+            None,
+            f"{_card(single)}: dtypes {single.dtype} / {cond.dtype} / {None if pair is None else pair.dtype} (all bfloat16 or all float32)",
+        )
     if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != torch.bfloat16 or dt != torch.bfloat16):
-        return None, f"{_card(single)}: autocast: bfloat16 activations under bfloat16 autocast only (float32 activations run without autocast, on TF32)"
+        return (
+            None,
+            f"{_card(single)}: autocast: bfloat16 activations under bfloat16 autocast only (float32 activations run without autocast, on TF32)",
+        )
     if compute_dtype not in (None, dt):
         return None, f"{_card(single)}: compute_dtype {compute_dtype} (the sm_80 kernels run in the activations' dtype)"
     return dt, None
@@ -1016,7 +1023,7 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     No ``"anthropic"`` backend: no release folder has the bias-only attention.
     """
 
-    version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
+    version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "cuda", "triton")
     # 2026-11-10: sm_80 paths; cuda:h100_sm90 2 (2026-11-12): the inference pair-bias hoist (runner.hoist) in one pass for a 256-wide
@@ -1037,7 +1044,7 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # one gemm120 (dh unrounded), the backward GEMMs on cuBLASLt with measured configurations at the S48 L768 rows, the d_pair 256 pair-bias
     # backward on 8-element tiles; fp32 training too: the measured TF32 GEMM configurations at the S48 L128 rows, dh + SwiGLU backward in one
     # gemm120 (TF32), the attention's bias gradient at L 128 (S >= 8) as one batched GEMM in place of the 16-CTA core
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 4, "cuda:h100_sm90": 4, "cuda:5090_sm120": 5}
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 4, "cuda:h100_sm90": 5, "cuda:5090_sm120": 5}
 
     def __init__(
         self,
@@ -1161,7 +1168,9 @@ def pair_bias_all(blocks, pair: torch.Tensor) -> tuple[torch.Tensor, ...]:
     ``ln_pair`` has no offset, so with LN0 the LayerNorm without affine and the fold W'_b = W_b diag(gamma_b), ``bias_b = LN0(pair) W'_b^T``:
     the normalization is the same for every block, only gamma differs. Pass block b its bias (``block(single, cond, pair, mask,
     bias=biases[b])``) and the block touches neither ``ln_pair`` nor ``to_bias``; the gradients reach them, and the pair, through this op.
-    Same parameters, the same result up to rounding (gamma applied to the weight instead of the activation). Under activation checkpointing
+    Same parameters, the same result up to rounding (gamma applied to the weight instead of the activation). The biases are FP32 whatever
+    the pair's dtype (user rule 2026-11-19: logits of 1e3..2e5 with a key spread of ~500 are exact fp32 in training and inference; a bf16
+    logit broke the peptide bonds); the blocks' softmax is fp32 too and rounds only P. Under activation checkpointing
     call it OUTSIDE the checkpointed blocks.
 
     ``blocks``: :class:`TokenDiTMiniWorldBiasOnly` blocks (or their ``attention`` modules); they must share the LayerNorm eps and the head
@@ -1192,10 +1201,14 @@ def pair_bias_all(blocks, pair: torch.Tensor) -> tuple[torch.Tensor, ...]:
             return bias_only_dit_hoist.pair_bias_all(attns, pair)
     # LN0 in at least fp32 (as the engine's LayerNorm computes), one matmul against W'_all, per-block head-major views [B, H, L, L] of the
     # [B, L, L, N] product
+    # The logits are fp32 whatever the pair dtype (user rule 2026-11-19: 1e3..2e5, key spread ~500; bf16 broke the peptide bonds): LN0 and
+    # the folded weights fp32 (not rounded to the pair dtype), exact fp32 products (TF32 off in the forward and the backward)
     dp = pair.shape[-1]
-    ln0 = F.layer_norm(pair.to(wide(pair)), (dp,), None, None, eps).to(pair.dtype)
-    wf = torch.cat([a.to_bias.weight * a.ln_pair.weight.to(a.to_bias.weight.dtype)[None, :] for a in attns], 0)  # [N, dp]
-    b = torch.matmul(ln0, wf.t().to(ln0.dtype))  # [B, L, L, N]
+    with torch.autocast("cuda", enabled=False):
+        dt = torch.promote_types(pair.dtype, torch.float32)  # at least fp32
+        ln0 = F.layer_norm(pair.to(dt), (dp,), None, None, eps)
+        wf = torch.cat([a.to_bias.weight.to(dt) * a.ln_pair.weight.to(dt)[None, :] for a in attns], 0)  # [N, dp]
+        b = _ExactFp32Linear.apply(ln0, wf)  # [B, L, L, N] fp32
     return tuple(b[..., i * H : (i + 1) * H].permute(0, 3, 1, 2) for i in range(len(attns)))
 
 

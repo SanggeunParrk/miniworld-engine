@@ -70,10 +70,10 @@ def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, shape_key, C: tl.constexp
     mean = tl.sum(x, axis=1) / C
     xc = x - mean[:, None]
     rstd = tl.rsqrt(tl.sum(xc * xc, axis=1) / C + eps)
-    xh = (xc * rstd[:, None]).to(X.dtype.element_ty)
+    xh = xc * rstd[:, None]  # fp32: the logits are exact fp32 (user rule 2026-11-19; a bf16 xh / W lost peptide bonds)
     hh = tl.arange(0, NP)
-    w = tl.load(W + hh[:, None] * C + cols[None, :], mask=(hh < N)[:, None], other=0.0)
-    acc = tf32_dot(w, tl.trans(xh))  # [NP, BR]; fp32: TF32 rounded to nearest
+    w = tl.load(W + hh[:, None] * C + cols[None, :], mask=(hh < N)[:, None], other=0.0).to(tl.float32)
+    acc = tl.dot(w, tl.trans(xh), input_precision="ieee")  # [NP, BR] fp32 FMA products: logits of 1e3..2e5 need them (TF32 / bf16 do not)
     tl.store(OUT + hh.to(tl.int64)[:, None] * R + rows[None, :], acc.to(OUT.dtype.element_ty), mask=(hh < N)[:, None] & rm[None, :])
     tl.store(MEAN + rows, mean, mask=rm)
     tl.store(RSTD + rows, rstd, mask=rm)
@@ -92,7 +92,7 @@ def _ln_bias_bwd_kernel(X, W, DL, MEAN, RSTD, DX, DW, R, shape_key, C: tl.conste
     cols = tl.arange(0, C)
     hh = tl.arange(0, NP)
     hm = hh < N
-    w = tl.load(W + hh[:, None] * C + cols[None, :], mask=hm[:, None], other=0.0)
+    w = tl.load(W + hh[:, None] * C + cols[None, :], mask=hm[:, None], other=0.0).to(tl.float32)
     dw = tl.zeros((NP, C), dtype=tl.float32)
     for b in range(pid, tl.cdiv(R, BR), tl.num_programs(0)):
         rows = b * BR + tl.arange(0, BR)
@@ -101,9 +101,11 @@ def _ln_bias_bwd_kernel(X, W, DL, MEAN, RSTD, DX, DW, R, shape_key, C: tl.conste
         mean = tl.load(MEAN + rows, mask=rm, other=0.0)
         rstd = tl.load(RSTD + rows, mask=rm, other=0.0)
         xh = (x - mean[:, None]) * rstd[:, None]
-        dl = tl.load(DL + hh.to(tl.int64)[:, None] * R + rows[None, :], mask=hm[:, None] & rm[None, :], other=0.0)  # [NP, BR]
+        dl = tl.load(DL + hh.to(tl.int64)[:, None] * R + rows[None, :], mask=hm[:, None] & rm[None, :], other=0.0).to(
+            tl.float32
+        )  # [NP, BR]
         dxh = tf32_dot(tl.trans(dl), w)  # [BR, C]
-        dw = tf32_dot(dl, xh.to(X.dtype.element_ty), dw)
+        dw = tf32_dot(dl, xh, dw)
         c1 = tl.sum(dxh, axis=1) / C
         c2 = tl.sum(dxh * xh, axis=1) / C
         dx = rstd[:, None] * (dxh - c1[:, None] - xh * c2[:, None])
@@ -130,15 +132,19 @@ def supported(pair: torch.Tensor, n_out: int) -> bool:
 
 def _fwd_fake(x, w, eps=1e-5):
     """(logits^T [N, R], mean [R], rstd [R])."""
-    return x.new_empty((w.shape[0], x.shape[0])), x.new_empty(x.shape[0], dtype=torch.float32), x.new_empty(x.shape[0], dtype=torch.float32)
+    return (
+        x.new_empty((w.shape[0], x.shape[0]), dtype=torch.float32),
+        x.new_empty(x.shape[0], dtype=torch.float32),
+        x.new_empty(x.shape[0], dtype=torch.float32),
+    )
 
 
 @opaque(fake=_fwd_fake, name="bias_only_attention_pair_bias_fwd")
 def _fwd(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """x [R, C], w [N, C] (the folded weights, x's dtype) -> (logits^T [N, R], mean [R], rstd [R])."""
+    """x [R, C], w [N, C] (the folded weights, fp32) -> (logits^T [N, R] FP32, mean [R], rstd [R])."""
     r, c = x.shape
     n = w.shape[0]
-    out = torch.empty((n, r), device=x.device, dtype=x.dtype)
+    out = torch.empty((n, r), device=x.device, dtype=torch.float32)
     mean = torch.empty(r, device=x.device, dtype=torch.float32)
     rstd = torch.empty_like(mean)
     _ln_bias_fwd_kernel[lambda meta: (triton.cdiv(r, meta["BR"]),)](
@@ -174,7 +180,7 @@ class PairBiasFn(torch.autograd.Function):
     def forward(ctx, pair, gamma, weight, eps):
         c = pair.shape[-1]
         x = pair.reshape(-1, c)
-        wf = (weight.float() * gamma.float()[None, :]).to(x.dtype)  # the fold; fp32 parameters, rounded once to the activation dtype
+        wf = weight.float() * gamma.float()[None, :]  # the fold, fp32 and NOT rounded to the activation dtype
         out, mean, rstd = _fwd(x, wf, eps)
         ctx.save_for_backward(x, wf, mean, rstd, gamma, weight)
         ctx.shape = pair.shape
@@ -183,7 +189,7 @@ class PairBiasFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dl):
         x, wf, mean, rstd, gamma, weight = ctx.saved_tensors
-        dl = dl.to(x.dtype).contiguous()
+        dl = dl.float().contiguous()
         dx, dwf = _bwd(x, wf, dl, mean, rstd)
         dgamma = (dwf * weight.float()).sum(0).to(gamma.dtype)
         dweight = (dwf * gamma.float()[None, :]).to(weight.dtype)

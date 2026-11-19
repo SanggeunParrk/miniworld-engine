@@ -114,7 +114,13 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         return False
     dt = single.dtype
     src = pair if bias is None else bias  # the pair, or the block's hoisted bias
-    if src is None or dt not in (BF, F32) or not all(t.dtype is dt for t in (single, cond, src)):
+    # a hoisted bias is fp32 whatever the activations (pair_bias_all: the logits are exact fp32)
+    if (
+        src is None
+        or dt not in (BF, F32)
+        or not all(t.dtype is dt for t in (single, cond))
+        or not (src.dtype is dt or (bias is not None and src.dtype is F32))
+    ):
         return False
     if dt is F32 and (module.attention.to_value.weight.dtype is not F32 or torch.is_autocast_enabled("cuda")):
         return False  # fp32 = an fp32 block; under autocast the call is refused (the kernels do not apply its casts)
@@ -201,16 +207,6 @@ def _dg_direct() -> bool:
 # Hopper candidates measured and dropped (see git history): the SwiGLU backward in the dh GEMM's epilogue (509 vs 318 us at
 # M = 36864), the pair part / pair LayerNorm backward on a side stream (+30 us: the GEMM CTAs hold every SM's shared memory),
 # dV and dbias as batched cuBLAS GEMMs over the heads (+25 us a step), an exact-cuBLAS gamma shadow.
-
-
-def _fp32_logits(dev) -> bool:
-    """Hopper: the pair bias leaves the projection as fp32 logits (the mma accumulators, unrounded) into the softmax, instead of
-    being rounded to bf16 first. The rounding was the largest single error of the ln_pair / to_bias / pair gradients (ln_pair.weight
-    against fp64: 0.0107 -> 0.0090 at L384 A3 24 x 32, 0.0106 -> 0.0095 at L768 A16 16 x 64; the bf16 PyTorch block's 0.0088 / 0.0094);
-    it costs one fp32 [H, L, L] buffer (written and read once). The sm_100a path is unchanged."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
-
-    return h100_enabled(dev)
 
 
 def _bwd_fused(dev, H, DA):
@@ -585,13 +581,15 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
         P = torch.empty(H, L, L, device=dev, dtype=BF)
         if bias is None:
             p2 = pair.reshape(R, pair.shape[-1])
-            pst = torch.empty(R, 2, device=dev)
-            if _fp32_logits(dev):  # Hopper: fp32 logits beside P (not overwritten)
-                logits = torch.empty(H * L, L, device=dev, dtype=torch.float32)
-                BT.pair_bias_cuda(p2, W["Wf_bf"], logits, pst, EPS)
-            else:
-                BT.pair_bias_cuda(p2, W["Wf_bf"], P, pst, EPS)  # the bias, head-major; Wf = Wb diag(wp); LN(pair) stays on chip
-                logits = P.view(H * L, L)  # the softmax overwrites it with P
+            # EXACT fp32 logits (user rule 2026-11-19; bf16 operands / products here halved FoldBench lDDT and broke peptide bonds):
+            # LN(pair) in fp32 (+ the row statistics the backward's pair_bias_bwd reads), Wf = Wb diag(wp) unrounded fp32, the
+            # products on the FMA pipe (cuBLAS fp32, TF32 off), the softmax in fp32; P is rounded to bf16 for the fused block only
+            from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+            ln32, pst = HK.ln0_fp32(p2, EPS, stats=True)
+            wf32 = W["Wb"].float() * W["wp"].float()[None, :]
+            logits = HK.exact_logits(wf32, ln32).view(H * L, L)  # [H, R] fp32, head-major, not overwritten
+            del ln32
         else:
             pst, logits = (
                 None,
@@ -1428,11 +1426,13 @@ def _fwd32_impl(single, cond, pair, bias, mask, params):
             vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
         P = e(H, L, L)
         if bias is None:
-            pst = e(R, 2)
-            F.pair_bias_tc_cuda(
-                pair.reshape(R, pair.shape[-1]).contiguous(), W["Wf"], P, pst, EPS, _pair_terms()
-            )  # the bias, head-major (mma.sync)
-            logits = P.view(H * L, L)
+            # EXACT fp32 logits (user rule 2026-11-19): LN(pair) fp32 + the row statistics, products on the FMA pipe (TF32 off; the TF32
+            # products of ``pair_bias_tc`` left 1e-3..1 absolute error on logits of 1e3..2e5: the attention picked other keys)
+            from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+            ln32, pst = HK.ln0_fp32(pair.reshape(R, pair.shape[-1]).contiguous(), EPS, stats=True)
+            logits = HK.exact_logits(W["Wf"].reshape(H, -1), ln32).view(H * L, L)  # [H, R] fp32, head-major
+            del ln32
         else:
             pst, logits = (
                 None,
@@ -1676,7 +1676,8 @@ class _BlockH(torch.autograd.Function):
                 cond = _repeat_shared(cond, single.shape[0])
         out, *saved = (_fwd32h if f32 else _fwdh)(single, cond, bias, mask, list(params))
         ctx.save_for_backward(single, cond, *params, *saved)
-        ctx.meta = (mask, len(params), sink, f32, tuple(bias.shape), bias.dtype)
+        # bdt: the dtype of the bias GRADIENT (the activations'): the bias itself is fp32 (exact logits), autograd casts the gradient back
+        ctx.meta = (mask, len(params), sink, f32, tuple(bias.shape), single.dtype)
         return out
 
     @staticmethod

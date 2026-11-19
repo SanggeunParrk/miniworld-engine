@@ -120,7 +120,47 @@ __global__ void __launch_bounds__(WPB * 32) ln0_bwd_rows_kernel(const XT* __rest
   }
 }
 
-#define HR_DISPATCH(T, NAME, ...)                                                                    \
+// y = LN0(x) in fp32 (no affine) for the EXACT pair-bias logits (user rule 2026-11-19: the bias-only DiT's logits and their softmax are fp32;
+// bf16 / TF32 / split-product operands lost peptide bonds). x bf16 or fp32 [R, C], y fp32 [R, C]; ``PST`` (float2 [R]: mean, rstd; may be
+// null) is what the pair_bias backward kernels read. Same sums in the same order as ln0_bwd_rows_kernel, so the backward's y is this
+// kernel's. One warp per RPW rows, no shared memory, no barrier.
+template <int CW, typename XT>
+__global__ void __launch_bounds__(WPB * 32) ln0_fwd_rows_kernel(const XT* __restrict__ X, float* __restrict__ Y, float2* __restrict__ PST,
+    long R, float eps) {
+  constexpr int K = CW / 128;
+  const long row0 = ((long)blockIdx.x * WPB + threadIdx.x / 32) * RPW;
+  const int lane = threadIdx.x % 32;
+  float4 x[RPW][K];
+#pragma unroll
+  for (int k = 0; k < RPW; ++k)
+#pragma unroll
+    for (int c = 0; c < K; ++c)
+      x[k][c] = row0 + k < R ? V4<XT>::load(X + (row0 + k) * CW + c * 128 + lane * 4) : make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+  for (int k = 0; k < RPW; ++k) {
+    float4 y[K];
+    float s = 0.f;
+#pragma unroll
+    for (int c = 0; c < K; ++c) { y[c] = x[k][c]; s += y[c].x + y[c].y + y[c].z + y[c].w; }
+    const float mean = warp_sum(s) / (float)CW;
+    float q = 0.f;
+#pragma unroll
+    for (int c = 0; c < K; ++c) {
+      y[c].x -= mean; y[c].y -= mean; y[c].z -= mean; y[c].w -= mean;
+      q += y[c].x * y[c].x + y[c].y * y[c].y + y[c].z * y[c].z + y[c].w * y[c].w;
+    }
+    const float rstd = rsqrtf(warp_sum(q) / (float)CW + eps);
+    const long r = row0 + k;
+    if (r < R) {
+#pragma unroll
+      for (int c = 0; c < K; ++c)
+        V4<float>::store(Y + r * CW + c * 128 + lane * 4, make_float4(y[c].x * rstd, y[c].y * rstd, y[c].z * rstd, y[c].w * rstd));
+      if (PST != nullptr && lane == 0) PST[r] = make_float2(mean, rstd);
+    }
+  }
+}
+
+#define HR_DISPATCH(T, NAME, ...)                                                                  \
   [&] {                                                                                              \
     if ((T) == at::kFloat) { using NAME = float; return __VA_ARGS__(); }                             \
     TORCH_CHECK((T) == at::kBFloat16, "bf16 or fp32");                                                 \
@@ -159,6 +199,27 @@ void ln0_bwd_rows(at::Tensor x, at::Tensor dy, at::Tensor dx, at::Tensor y, doub
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// y = LN0(x) fp32 [R, C] from x bf16 / fp32 [R, C] (C = 128 or 256); pst float [R, 2] (mean, rstd) or an empty tensor
+void ln0_fwd_rows(at::Tensor x, at::Tensor y, at::Tensor pst, double eps) {
+  const int64_t R = x.size(0), CW = x.dim() == 2 ? x.size(1) : 0;
+  TORCH_CHECK(CW == 128 || CW == 256, "ln0_fwd_rows: rows of 128 or 256 channels");
+  rows(x, "x", R, CW); rows(y, "y", R, CW);
+  TORCH_CHECK(y.scalar_type() == at::kFloat, "ln0_fwd_rows: y fp32");
+  const bool stats = pst.numel() != 0;
+  TORCH_CHECK(!stats || (pst.is_cuda() && pst.is_contiguous() && pst.scalar_type() == at::kFloat && pst.numel() == 2 * R),
+              "ln0_fwd_rows: pst float [R, 2]");
+  if (R == 0) return;
+  const at::cuda::CUDAGuard g(x.device());
+  const int64_t per = (int64_t)WPB * RPW;
+  HR_DISPATCH(x.scalar_type(), XT, [&] {
+    auto k = CW == 128 ? ln0_fwd_rows_kernel<128, XT> : ln0_fwd_rows_kernel<256, XT>;
+    k<<<(unsigned)((R + per - 1) / per), WPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const XT*>(x.data_ptr()), reinterpret_cast<float*>(y.data_ptr()),
+        stats ? reinterpret_cast<float2*>(pst.data_ptr()) : nullptr, (long)R, (float)eps);
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // (name, registers, local-memory bytes) of every kernel of this extension (the tests hold them to no local memory)
 std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
   std::vector<std::tuple<std::string, int64_t, int64_t>> out;
@@ -172,6 +233,10 @@ std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
   FA(128, bf, bf, float); FA(128, bf, float, float); FA(128, float, bf, float); FA(128, float, float, float);
   FA(256, bf, bf, bf); FA(256, bf, float, bf); FA(256, float, bf, bf); FA(256, float, float, bf);
   FA(256, bf, bf, float); FA(256, bf, float, float); FA(256, float, bf, float); FA(256, float, float, float);
+  add("ln0_fwd_rows_kernel<128, bf>", (const void*)ln0_fwd_rows_kernel<128, bf>);
+  add("ln0_fwd_rows_kernel<128, float>", (const void*)ln0_fwd_rows_kernel<128, float>);
+  add("ln0_fwd_rows_kernel<256, bf>", (const void*)ln0_fwd_rows_kernel<256, bf>);
+  add("ln0_fwd_rows_kernel<256, float>", (const void*)ln0_fwd_rows_kernel<256, float>);
 #undef FA
   return out;
 }
@@ -180,5 +245,6 @@ std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln0_bwd_rows_cuda", &ln0_bwd_rows);
+  m.def("ln0_fwd_rows_cuda", &ln0_fwd_rows);
   m.def("func_attrs", &func_attrs);
 }

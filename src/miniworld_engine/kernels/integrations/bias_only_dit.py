@@ -85,7 +85,13 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         return False
     dt = single.dtype
     src = pair if bias is None else bias  # the pair, or the block's hoisted bias [1, H, L, L]
-    if src is None or not (single.is_cuda and dt in (torch.bfloat16, torch.float32) and cond.dtype is dt and src.dtype is dt):
+    # a hoisted bias is fp32 whatever the activations (the logits are exact fp32: pair_bias_all)
+    if src is None or not (
+        single.is_cuda
+        and dt in (torch.bfloat16, torch.float32)
+        and cond.dtype is dt
+        and (src.dtype is dt or (bias is not None and src.dtype is torch.float32))
+    ):
         return False
     if dt is torch.float32 and (module.attention.to_value.weight.dtype is not torch.float32 or torch.is_autocast_enabled("cuda")):
         return False  # fp32 = an fp32 block; under autocast the call is refused (the kernels do not apply its casts)
@@ -226,7 +232,7 @@ def _infer_bias(
         else:
             from miniworld_engine.kernels.bias_only_dit import cuda as C
 
-            C.softmax_rows(bias.reshape(H * L, L), P.view(H * L, L), m)
+            C.softmax_t(bias.reshape(H * L, L), P.view(H * L, L), None, m)  # bf16 or fp32 logits; softmax in fp32, P rounded to bf16
         return runner.step(single, cond, P, kmask=kernel_mask(m, L))
 
 

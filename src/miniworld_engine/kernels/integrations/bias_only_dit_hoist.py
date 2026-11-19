@@ -26,9 +26,13 @@ to fp32 accumulation; on the fp32 path Y = LN0 (fp32, the TF32 GEMM's operand). 
 Per training step that replaces, per block, the pair LayerNorm + projection (``pair_bias``), its backward (``pair_bias_bwd``) and
 the accumulation of a [L, L, 128] pair gradient, by one pass of each for all blocks.
 
-bf16 (pair bf16; the weights in any dtype, folded in fp32 and rounded to bf16 as the per-block pack rounds Wf): bf16 operands, fp32
-accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtype. fp32 (pair and weights fp32, no autocast): the
-same structure, the GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp32.
+THE BIAS IS fp32 AND EXACT, whatever the pair dtype (user rule 2026-11-19: the logits are 1e3..2e5 with a key spread of ~500; bf16 resolves
+32..1024 there and broke the peptide bonds): the forward is LN0 in fp32 (``hoist.ln0_fp32``), the unrounded fp32 W' (``_fold``'s last value)
+and one cuBLAS fp32 GEMM on the FMA pipe, TF32 off (``hoist.exact_logits``); the consumers (``bias_only_dit.py`` / ``bias_only_dit_train.py``)
+take the fp32 bias into an fp32 softmax and round only P to the block's dtype. Backward (the bias gradient is the activations' dtype, the
+autograd edge casts it to the bias's fp32 and ``_Sink.take`` copies it into its slot): bf16 (pair bf16; the weights in any dtype, folded in
+fp32 and rounded to bf16 for the backward GEMMs): bf16 operands, fp32 accumulation, d LN0 and dW' in fp32, d pair in the pair's dtype.
+fp32 (pair and weights fp32, no autocast): the same structure, the backward GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp32.
 
 ``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, C] bf16 or fp32, C = 128, or 256 on H100); anything
 else (A100 included) takes the PyTorch fold of ``modules.token_dit.pair_bias_all``. H100 (2026-11-12, as engine 2.4.4 served it): the
@@ -96,18 +100,17 @@ def _gemms(dt):
 
 
 def _fwd_fake(pair2d, wf, eps):
-    return pair2d.new_empty((wf.shape[0], pair2d.shape[0]))
+    return pair2d.new_empty((wf.shape[0], pair2d.shape[0]), dtype=F32)
 
 
 @opaque(fake=_fwd_fake, name="bias_only_dit_hoist_fwd")
 def _hoist_fwd(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torch.Tensor:
-    """bias_all^T [N, R] (head-major, every block's) in the pair's dtype, freshly allocated (LN0 is a temporary)."""
+    """bias_all^T [N, R] (head-major, every block's), ALWAYS fp32 and exact (user rule 2026-11-19: the bias-only DiT's logits and softmax
+    are fp32): LN0 in fp32, ``wf`` the unrounded fp32 W' = W diag(gamma), the product on the FMA pipe (TF32 off); freshly allocated."""
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
-    ln0 = torch.empty_like(pair2d)
-    HK.ln0_rows(pair2d, ln0, eps)
-    with _gemms(pair2d.dtype):
-        return torch.mm(wf, ln0.t())  # [N, 128] x [128, R]
+    ln32, _ = HK.ln0_fp32(pair2d, eps)
+    return HK.exact_logits(wf, ln32)  # [N, dp] x [dp, R] fp32
 
 
 def _bwd_fake(pair2d, wf, dball, eps, split):
@@ -182,12 +185,12 @@ class _Sink:
 
 
 def _fold(params, dt):
-    """(g [nb, 128] fp32, W [nb, H, 128] fp32, W'_all = W diag(g) [nb H, 128] in ``dt``): fp32 products rounded once to ``dt``, as
-    the per-block weight pack rounds Wf."""
+    """(g [nb, 128] fp32, W [nb, H, 128] fp32, W'_all = W diag(g) [nb H, 128] in ``dt`` (the backward GEMMs' operand, rounded once as the
+    per-block weight pack rounds Wf), the same unrounded fp32 (the exact logits' operand))."""
     gam = torch.stack([p.detach() for p in params[0::2]]).float()
     wts = torch.stack([p.detach() for p in params[1::2]]).float()
-    wf = (wts * gam[:, None, :]).reshape(-1, gam.shape[-1]).to(dt).contiguous()
-    return gam, wts, wf
+    wf32 = (wts * gam[:, None, :]).reshape(-1, gam.shape[-1]).contiguous()
+    return gam, wts, wf32.to(dt).contiguous(), wf32
 
 
 class _Hoist(torch.autograd.Function):
@@ -195,9 +198,11 @@ class _Hoist(torch.autograd.Function):
     def forward(ctx, pair, eps, nb, sink, *params):  # params: ln_pair.weight, to_bias.weight of each block
         L, dp = pair.shape[1], pair.shape[-1]
         H = params[1].shape[0]
-        gam, wts, wf = _fold(params, pair.dtype)
+        gam, wts, wf, wf32 = _fold(
+            params, pair.dtype
+        )  # wf: the backward GEMMs' operand (rounded to the pair dtype); wf32: the exact logits'
         ctx.set_materialize_grads(False)  # an unused block's bias: None, not a zero tensor
-        ball = _hoist_fwd(pair.reshape(L * L, dp), wf, eps)
+        ball = _hoist_fwd(pair.reshape(L * L, dp), wf32, eps)  # fp32 logits whatever the pair dtype
         ctx.save_for_backward(pair, wf, gam, wts)
         ctx.meta = (eps, nb, H, sink, [p.dtype for p in params])
         return tuple(ball[i * H : (i + 1) * H].view(1, H, L, L) for i in range(nb))
@@ -228,7 +233,7 @@ class _Hoist(torch.autograd.Function):
 
 
 def pair_bias_all(attns, pair) -> tuple[torch.Tensor, ...]:
-    """Each attention module's bias [1, H, L, L] (head-major, contiguous: slices of one [nb H, L L] buffer) from one LN0 pass and one
+    """Each attention module's bias [1, H, L, L] in FP32 (head-major, contiguous: slices of one [nb H, L L] buffer) from one LN0 pass and one
     GEMM; differentiable in ``pair`` and in every ``ln_pair.weight`` / ``to_bias.weight``. Call ``serves`` first."""
     nb, H, L = len(attns), attns[0].to_bias.weight.shape[0], pair.shape[1]
     sink = _Sink(nb, H, L * L, pair.dtype, pair.device)

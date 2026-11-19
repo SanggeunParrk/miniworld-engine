@@ -21,6 +21,53 @@ from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWei
 
 _capture.instance_cache_attr("_anthropic_params")  # the anthropic producer's fp32 parameter copies (clear_weight_caches)
 
+
+# ------------------------------------------------------------------------------------------------------------------- exact fp32 pair bias
+class _ExactFp32Linear(torch.autograd.Function):
+    """``x @ w.T`` in fp32 with TF32 OFF in the forward AND the backward (autograd would run the backward GEMMs under whatever the global
+    flag is then), for the bias-only attention's logits: ``to_bias(ln_pair(pair))`` is 1e3..2e5 with a key spread of ~500, so any
+    TF32 / bf16 product moves which keys the softmax picks."""
+
+    @staticmethod
+    def forward(ctx, x, w):
+        ctx.save_for_backward(x, w)
+        with _exact_matmul():
+            return x @ w.t()
+
+    @staticmethod
+    def backward(ctx, g):
+        x, w = ctx.saved_tensors
+        with _exact_matmul():
+            dx = g @ w if ctx.needs_input_grad[0] else None
+            dw = g.reshape(-1, g.shape[-1]).t() @ x.reshape(-1, x.shape[-1]) if ctx.needs_input_grad[1] else None
+        return dx, dw
+
+
+class _exact_matmul:
+    """fp32 matmuls at full precision (TF32 off, autocast off) inside the block; restores the flags."""
+
+    def __enter__(self):
+        self._tf32 = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = False
+        self._ac = torch.autocast("cuda", enabled=False)
+        self._ac.__enter__()
+
+    def __exit__(self, *exc):
+        self._ac.__exit__(*exc)
+        torch.backends.cuda.matmul.allow_tf32 = self._tf32
+        return False
+
+
+def exact_pair_bias_logits(pair: torch.Tensor, gamma: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """``to_bias(ln_pair(pair))`` as head-major fp32 logits ``[B, H, L, L]`` for ``pair`` ``[B, L, L, C]``: the LayerNorm in fp32, the
+    projection against the fp32 ``weight`` (not rounded to the module dtype) with exact fp32 products, whatever the activation dtype and
+    autocast. User rule 2026-11-19: bf16 logits (resolution 32..1024 at 1e3..2e5) broke the peptide bonds."""
+    with torch.autocast("cuda", enabled=False):
+        dt = torch.promote_types(pair.dtype, torch.float32)  # at least fp32 (an fp64 reference stays fp64)
+        ln = F.layer_norm(pair.to(dt), (pair.shape[-1],), None, None, eps) * gamma.to(dt)
+        return _ExactFp32Linear.apply(ln, weight.to(dt)).permute(0, 3, 1, 2)
+
+
 # ------------------------------------------------------------------------------------------------------------------- "triton" core
 #: the head widths the Triton pair-bias attention core (kernels/augmented_attention/triton/main.py) is built for
 TRITON_MAX_HEAD_DIM = 64
@@ -857,12 +904,19 @@ class BiasOnlyAttention(BackendModule):
         self.set_backend(backend)
 
     def _attention_weights(self, pair, mask, bias, dtype):
-        """softmax over the keys of the pair bias (masked keys at the largest negative finite logit): [B, H, L, L], shared by every sample."""
-        # (B, H, L, L) from the pair, or the hoisted bias (pair_bias_all), head-major already
-        logits = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2) if bias is None else bias.to(dtype)
+        """softmax over the keys of the pair bias (masked keys at the largest negative finite logit): [B, H, L, L], shared by every sample.
+
+        The logits and the softmax are fp32 whatever the module dtype (user rule 2026-11-19: the logits are 1e3..2e5 with a key spread of
+        ~500, bf16 resolves 32..1024 there and broke the peptide bonds); only the attention weights are rounded to ``dtype``, for the
+        product with the values."""
+        # (B, H, L, L) fp32 from the pair, or the hoisted bias (pair_bias_all), head-major already
+        if bias is None:
+            logits = exact_pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
+        else:
+            logits = bias.to(torch.promote_types(bias.dtype, torch.float32))
         if mask is not None:
             logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
-        return torch.softmax(logits, dim=-1)
+        return torch.softmax(logits, dim=-1).to(dtype)
 
     def _forward_pytorch(
         self,
@@ -933,10 +987,12 @@ class BiasOnlyAttention(BackendModule):
                 assert pair is not None, "the pair or its hoisted bias"
                 logits = pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
             else:
-                logits = bias.to(dt)
+                logits = bias.to(torch.promote_types(bias.dtype, torch.float32))
             if mask is not None:
                 logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
-            attention = torch.softmax(logits.float(), dim=-1).to(dt)  # [B, H, L, L], one softmax for every sample
+            attention = torch.softmax(logits, dim=-1).to(
+                dt
+            )  # logits and softmax fp32 (user rule 2026-11-19)  # [B, H, L, L], one softmax for every sample
             if self._triton_core_t(single, pair if bias is None else bias):
                 p = attention[0] if single.shape[1] == 1 else attention
                 out = bias_only_core_t(x.reshape(-1, x.shape[-1]), wv, wg, wo, p).reshape(single.shape)

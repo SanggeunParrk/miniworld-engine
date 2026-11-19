@@ -61,8 +61,6 @@ EPS = 1e-5
 #: Code switches for two measured-slower kernel paths kept for A/B (formerly settings.bias_only_dit_cond / _resln, default off).
 _COND_TABLES = False
 _RESLN_GEMM = False
-#: fp32 hoist of the 256-wide pair (``FusedBiasOnlyDiT.hoist``): products of the TF32 pair-bias kernel (``pair_bias_tc``), 3 = split fp32
-_HOIST_TC_TERMS = 3
 
 
 def _tf32():
@@ -128,7 +126,8 @@ class FusedBiasOnlyDiT:
         self.b1 = torch.cat(b1, 0).to(dtype).contiguous()
         self.w2 = torch.cat(w2, 0).to(dtype).contiguous()  # [nb 2 d, dc]
         self.b2 = torch.cat(b2, 0).to(dtype).contiguous()
-        self.pw = torch.cat(pw, 0).to(dtype).contiguous()  # [nb H, dp]
+        self.pw32 = torch.cat(pw, 0).contiguous()  # [nb H, dp] fp32, W diag(gamma) unrounded: the exact logits' operand (hoist)
+        self.pw = self.pw32.to(dtype).contiguous()  # [nb H, dp]
         # the one-kernel conditioning tables (cond_tables_sm100.cu): [W1; W2], their biases, and the column sums of the bf16 W1
         # rows (LN(c) W1^T = rstd (c W1^T - mu colsum(W1)))
         self.n_g1 = self.w1.shape[0]
@@ -149,65 +148,24 @@ class FusedBiasOnlyDiT:
         L = pair.shape[1]
         z2d = pair.reshape(L * L, self.dp)
         m = None if mask is None else mask.reshape(L).to(torch.bool).contiguous()
-        if self.fp32:
-            # one pass of the pair per block: its LayerNorm and the H biases on the FMA pipe, exact fp32 (no LN(pair) in memory)
-            R32 = _tf32().rows32()
-            P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=torch.float32)
-            z32 = z2d.float().contiguous()
-            # the 256-wide pair: the same LayerNorm + projection with the products on TF32 tensor cores, split fp32 (3 terms, ~exact)
-            # -- on the FMA pipe its 2 x 256 x H FMAs per pair row were the whole step (~1 ms of 1.85 at L768, the block no faster
-            # than PyTorch); 128 keeps the FMA kernel off H100 -- on H100 the FMA kernel was 0.16 of a 0.46 ms step at L 512 (behind the
-            # Triton block), so both widths take the tensor-core kernel there
-            pst = torch.empty(L * L, 2, device=pair.device) if self.dp == 256 or C.h100_enabled(pair.device) else None
-            for b in range(self.nb):
-                if pst is not None:
-                    R32.pair_bias_tc_cuda(
-                        z32,
-                        self.pw[b * self.h : (b + 1) * self.h].contiguous(),
-                        P[b * self.h : (b + 1) * self.h],
-                        pst,
-                        EPS,
-                        _HOIST_TC_TERMS,
-                    )
-                    continue
-                R32.pair_bias_cuda(
-                    z32,
-                    self.pw[b * self.h : (b + 1) * self.h],
-                    P[b * self.h : (b + 1) * self.h],
-                    None,
-                    EPS,
-                )
-            R32.softmax_rows_cuda(P.view(-1, L), P.view(-1, L), m)
-            return P
-        if (
-            self.dp == 256
-            and self.dtype == torch.bfloat16
-            and (L * L) % 128 == 0
-            and self.h in (12, 16, 24)
-            and C.h100_enabled(pair.device)
-        ):
-            # the 256-wide bf16 pair in ONE pass (the training block's pair_bias kernel, bias_only_dit_train_rows.cu: LayerNorm on chip,
-            # the H biases on mma.sync, head-major): the LayerNorm rows below write LN(pair) (as large as the pair) and the GEMM reads it
-            # back -- three passes over a 256-wide pair, 0.31 of a 0.59 ms step at L 768 (H100), slower than the Triton block's one pass
-            from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as train_ext
+        # The logits are EXACT fp32 (user rule 2026-11-19, bias-only DiT, every dtype): LN0(pair) in fp32 (one row pass), the gamma-folded
+        # weights unrounded fp32, the products on the FMA pipe (cuBLAS fp32, TF32 off), the softmax over the keys fp32; only the finished
+        # P is rounded to the runner's dtype. The logits are 1e3..2e5 with a key spread of ~500: bf16 (resolution 32..1024) or a TF32 /
+        # split-product operand changes which keys the attention picks (peptide C-N +0.1 A, FoldBench lDDT halved).
+        from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
-            P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
-            pst = torch.empty(L * L, 2, device=pair.device, dtype=torch.float32)  # the row statistics the kernel writes (unused here)
-            z = z2d.contiguous()
-            for b in range(self.nb):
-                train_ext().pair_bias_cuda(
-                    z, self.pw[b * self.h : (b + 1) * self.h].contiguous(), P[b * self.h : (b + 1) * self.h], pst, EPS
-                )
-            C.softmax_rows(P.view(-1, L), P.view(-1, L), m)
-            return P
-        zh = torch.empty(L * L, self.dp, device=pair.device, dtype=self.dtype)
-        if self.dp == 128:
-            _rows()._ext().layernorm128_rows(z2d, zh, EPS, False)
-        else:  # the same row kernel template at 256 channels (layernorm_rows_kernel<256>)
-            _rows()._ext().layernorm_rows_cuda(z2d, zh, EPS)
+        ln32, _ = HK.ln0_fp32(z2d, EPS)
         P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
-        torch.mm(self.pw, zh.t(), out=P.view(self.nb * self.h, L * L))
-        C.softmax_rows(P.view(-1, L), P.view(-1, L), m)
+        # blocks per chunk: the fp32 logits of a chunk stay <= 256 MiB
+        cb = max(1, min(self.nb, (1 << 28) // (4 * self.h * L * L)))
+        for b0 in range(0, self.nb, cb):
+            sl = slice(b0 * self.h, min(self.nb, b0 + cb) * self.h)
+            lg = HK.exact_logits(self.pw32[sl], ln32)  # [c H, L L] fp32
+            if self.fp32:
+                _tf32().rows32().softmax_rows_cuda(lg.view(-1, L), P[sl].view(-1, L), m)
+            else:
+                C.softmax_t(lg.view(-1, L), P[sl].view(-1, L), None, m)  # fp32 logits -> fp32 softmax -> bf16 P
+            del lg
         return P
 
     def _buffers(self, S, L, dev):
