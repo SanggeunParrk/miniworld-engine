@@ -244,6 +244,18 @@ def _owned_gemms90(single):
     return mm, mm32, addmm
 
 
+def _fp8_train(W, M, D, fp32, plain, h100, names):
+    """The EXPERIMENTAL FP8 training placements (``conditioned_transition.cuda.token_dit_fp8_train``; default off) of this call:
+    (the module, the placements in force, their e4m3 weight operands). Off: (module, empty, {}) and the bf16 route unchanged (the
+    module's import builds nothing)."""
+    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_train as f8
+
+    places = f8.active(M, D, fp32, plain, h100)
+    if not places:
+        return f8, frozenset(), {}
+    return f8, places, f8.weights(W, places & frozenset(names))
+
+
 _NATIVE_CALLER_TASKS: set[int] = set()
 
 
@@ -591,7 +603,7 @@ def _nd(params, qk, D):
     return P["transition.expand_a.weight"].shape[0] // D, P["attention.ln_pair.weight"].shape[0]
 
 
-def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False):
+def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False, nox=False, hsave=False, rx1=False):
     """Shapes / dtypes of the forward's saved activations (the fake implementation and the contract of _fwd). The fp32 path
     saves no copy of cond (_own_cond), no copy of v (QK-norm: the core reads it from qkvg) and no LN(pair) (pair_bias_bwd
     recomputes it): those slots are empty [0, n] tensors. H100: q / k / v are always copies (the q pass scales q; the TF32 core's
@@ -604,7 +616,7 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False):
     copies = qk or h100
     apb = _pair_apb(h100, fp32, dp, H, pair.dtype)
     return [
-        e((M, D), dtype=f32),
+        e((0 if nox else M, D), dtype=f32),  # the fp32 residual (nox: not kept, the input is read instead)
         e((Mc, cond.shape[-1]), dtype=at),
         e((0 if _own_cond(cond, fp32) else Mc, cond.shape[-1]), dtype=at),
         e((Mc, 2), dtype=f32),
@@ -628,7 +640,7 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False):
         e((A, H, L), dtype=f32),
         e((M, D), dtype=at),
         e((M, D), dtype=at),
-        e((M, D), dtype=f32),
+        e((0 if rx1 else M, D), dtype=f32),  # x1 (rx1: not kept, recomputed from the input)
         e((M, 2), dtype=f32),
         e((M, D), dtype=at),
         e((M, (3 if up else 2) * n * D), dtype=at),  # a | b of the SwiGLU: two [M, n D] halves (a | b | u up-gated)
@@ -636,6 +648,9 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False):
         e((0 if ((fp32 and not h100) or _pair_fused(h100, fp32, dp)) else R, dp), dtype=at),
         e((0 if (apb and dp == DP) else R, 2), dtype=f32),  # (mean, rstd) of the pair rows (the 128-wide APB backward recomputes them)
         e((H * R if (apb and dp != DP) else 0,), dtype=f32),  # the wide APB forward's unmasked fp32 bias (its backward's S2)
+        e(
+            (M, n * D) if hsave else (0, n * D), dtype=at
+        ),  # hsave: h = SwiGLU(a, b) as the squeeze GEMM read it (the backward does not rewrite it)
     ]
 
 
@@ -659,9 +674,14 @@ def _pair_fused(h100, fp32, dp) -> bool:
 
 def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, extra=None, variant=None):
     n, dp = _nd(params, qk, single.shape[-1])
+    _, plain = _variant(variant)
+    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_train as f8
+
+    act = f8.active(single.shape[0] * single.shape[2], single.shape[-1], fp32, plain, _sm90(single.device))
+    nox, hsave, rx1 = "nox" in act, "hsave" in act and "squeeze" not in act and "dexpand" not in act, "rx1" in act
     return [
         torch.empty_like(single),
-        *_saved_like(single, cond, pair, fp32, qk, heads, n, dp, bool(variant and variant[4])),
+        *_saved_like(single, cond, pair, fp32, qk, heads, n, dp, bool(variant and variant[4]), nox, hsave, rx1),
     ]
 
 
@@ -729,7 +749,6 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
     Mc = L if _shared_cond(single, cond) else M  # rows of the conditioning products (L: shared by the samples)
     assert Mc == M or (native and plain)
     copies = qk or h100  # q / k / v copies: QK-norm, or the sm_90a cores' pre-scaled q (see _saved_like)
-    x = torch.empty(M, D, device=dev)  # the fp32 residual, written by adaln_a
     c2 = None if native else cond.reshape(M, cond.shape[-1]).contiguous()  # native: cond_prep90 reads cond as given
     own_c = _own_cond(cond, fp32)
     chat = torch.empty(Mc, cond.shape[-1], device=dev, dtype=at)
@@ -749,11 +768,17 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
     xa = torch.empty(M, D, device=dev, dtype=at)
     xst = torch.empty(M, 2, device=dev)
     xt = torch.empty(M, D, device=dev, dtype=at)
+    f8, f8p, f8w = _fp8_train(W, M, D, fp32, plain, h100, ("qkvg", "out", "expand", "squeeze"))
+    hsave = "hsave" in f8p and "squeeze" not in f8p and "dexpand" not in f8p  # keep h for the backward (swiglu_bwd then writes no h)
+    sin = single.reshape(M, D).contiguous()
+    # "nox" (docs/fp8_training.md, round 2): the fp32 residual x is float(input) exactly, so the saved fp32 copy (written 2 u, read 2 u by
+    # res_adaln_b and 2 u by adaln_a_bwd; u = M D bf16 bytes) is dropped: both kernels read the input itself (1 u each); bit-identical
+    x = None if "nox" in f8p else torch.empty(M, D, device=dev)  # else the fp32 residual, written by adaln_a
     T.adaln_a(
-        single.reshape(M, D).contiguous(), G, bs1, xa, xst, ada_eps, x, opt, xt if par else None, bs2 if par else None
+        sin, G, bs1, xa, xst, ada_eps, x, opt, xt if par else None, bs2 if par else None
     )  # reads the input, writes x on the way (the parallel block: xt as well)
     Wqkvg, bqkvg = W["Wqkvg"], W["bqkvg"]
-    qkvg = addmm(bqkvg, xa, Wqkvg.t())
+    qkvg = f8.mm(*f8.q8(xa), f8w["qkvg"], bias=bqkvg) if "qkvg" in f8p else addmm(bqkvg, xa, Wqkvg.t())
     rqk = torch.empty(M, 2 * H, device=dev)
     nq, nk = W["nq"], W["nk"]
     if copies:  # B200 fp32: v is not copied, the core reads it as a column view of qkvg
@@ -850,23 +875,41 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         og = torch.empty(M, D, device=dev, dtype=at)
         T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
-    y = mm(og, Wo.t())
-    x1 = torch.empty_like(x)
+    y = f8.mm(*f8.q8(og), f8w["out"]) if "out" in f8p else mm(og, Wo.t())
+    rx1 = (
+        "rx1" in f8p
+    )  # round 4: x1 (fp32 residual after the attention branch) is not stored; res_c and the backward recompute it from the input
+    x1 = torch.empty(0, D, device=dev) if rx1 else torch.empty(M, D, device=dev)
     x1st = torch.empty(M, 2, device=dev)
-    T.res_adaln_b(x, y, Gg, bg1, G, bs2, x1, xt, x1st, ada_eps, opt)  # the parallel block: x1 only (xt is adaln_a's)
+    xq = None  # the e4m3 copy of xt (+ row scales) made by res_adaln_b itself ("expand"; round 4: no separate q8 pass over xt)
+    if "expand" in f8p and not par and not up and f8.FUSE_Q8 and at is BF:
+        xq = (torch.empty(M, D, device=dev, dtype=f8.E4M3), torch.empty(M, 1, device=dev))
+        T.res_adaln_b_q8(sin if x is None else x, y, Gg, bg1, G, bs2, x1, xt, x1st, xq[0], xq[1].view(-1), ada_eps, opt)
+    else:
+        T.res_adaln_b(
+            sin if x is None else x, y, Gg, bg1, G, bs2, x1, xt, x1st, ada_eps, opt
+        )  # the parallel block: x1 only (xt is adaln_a's)
     Wab = W["Wab"]
     h = torch.empty(M, nexp * D, device=dev, dtype=at)
-    gsw = None if up else _swiglu_gemm(xt, Wab)
+    gsw = None if (up or f8p) else _swiglu_gemm(xt, Wab)
     if gsw is not None:  # expand GEMM + SwiGLU, a | b saved on the way
         ab = torch.empty(M, 2 * nexp * D, device=dev, dtype=at)
         gsw(xt, Wab, h, ab)
+    elif "squeeze" in f8p:  # FP8 squeeze: h made straight as e4m3 + row scales (no bf16 h)
+        ab = f8.mm(*(xq or f8.q8(xt)), f8w["expand"]) if "expand" in f8p else mm(xt, Wab.t())
+        h8, sh = f8.swiglu_q8(ab)
     else:
-        ab = mm(xt, Wab.t())  # [M, 2 * n D] a | b ([M, 3 n D] a | b | u up-gated)
+        ab = (
+            f8.mm(*(xq or f8.q8(xt)), f8w["expand"]) if "expand" in f8p else mm(xt, Wab.t())
+        )  # [M, 2 * n D] a | b ([M, 3 n D] a | b | u up-gated)
         rows.swiglu_rows(ab, h, up=up)
     Wsq = W["Wsq"]
-    z = mm(h, Wsq.t())
+    z = f8.mm(h8, sh, f8w["squeeze"]) if "squeeze" in f8p else mm(h, Wsq.t())
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
-    T.res_c(x1, z, Gg, bg2, out)
+    if rx1:
+        T.res_c(x1, z, Gg, bg2, out, sin if x is None else x, y, bg1)
+    else:
+        T.res_c(x1, z, Gg, bg2, out)
     # custom-op outputs may not alias each other: without QK-norm q / k / v are views of qkvg -- not outputs, recovered in _bwd
     qkv_out = [qn, kn, vsave] if copies else []
     if cbf is None:
@@ -875,7 +918,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
     # the sm_90a cores write og and the backward needs no O: H100 keeps none (not even a placeholder, which AOT mis-strides)
     return [
         out.view(single.shape),
-        x,
+        single.new_empty(0, D, dtype=torch.float32) if x is None else x,
         chat,
         cbf,
         cst,
@@ -899,6 +942,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         ph,
         pst,
         bu,
+        h if hsave else h.new_empty(0, nexp * D),
     ]
 
 
@@ -1151,6 +1195,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         ph,
         pst,
         bu,
+        hs,
     ) = saved
     if vc.numel() == 0:  # B200 fp32 + QK-norm: v as the forward's core read it, a column view of qkvg
         vc = qkvg[:, 2 * D : 3 * D]
@@ -1173,6 +1218,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     sdt, cdt, pdtype = single.dtype, cond.dtype, pair.dtype
     apb_pair = _pair_apb(h100, fp32, dpw, H, pdtype)  # the forward's route (its saved row statistics / unmasked bias are this backward's)
     native = _native90(dev)
+    f8, f8p, f8w = _fp8_train(W, M, D, fp32, plain, h100, ("dqkvg", "dout", "dexpand", "dsqueeze"))
+    e5 = bool(f8p) and f8.GRAD_E5M2
     c2, p2 = (
         (None if native else cond.reshape(M, cond.shape[-1]).contiguous()),
         pair.reshape(R, dpw),
@@ -1187,22 +1234,34 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dGg = torch.empty(M, 2 * D, device=dev, dtype=at)
     dz = torch.empty(M, D, device=dev, dtype=at)
     T.res_c_bwd(dout, z, Gg, bg2, dz, dGg, part[0])
-    dh = mm(dz, Wsq)  # [M, n D]
+    dh = f8.mm(*f8.q8(dz, e5), f8w["dsqueeze"]) if "dsqueeze" in f8p else mm(dz, Wsq)  # [M, n D]
     dab = torch.empty_like(ab)
-    h = torch.empty_like(dh)
-    T.swiglu_bwd(dh, ab, dab, h, up)
+    h = hs if hs.numel() else torch.empty_like(dh)  # hsave: the forward's h
+    if "dexpand" in f8p:  # swiglu_bwd + dab as 8-bit with row scales, for the dxt dgrad
+        dab8, sdab = f8.swiglu_bwd_q8(dh, ab, dab, h, e5)
+    else:
+        T.swiglu_bwd(dh, ab, dab, None if hs.numel() else h, up)
     dWsq = mm32(dz.t(), h)
     # fp32: the dxt / dxa GEMMs write straight into their column blocks of dG (the row kernels then copy nothing); the H100 owned
     # GEMMs return a fresh tensor, which the row kernels copy as before
     direct = fp32 and mm is torch.mm
-    dxt = torch.mm(dab, Wab, out=dG[:, 3 * D :]) if direct else mm(dab, Wab)
+    if "dexpand" in f8p:
+        dxt = f8.mm(dab8, sdab, f8w["dexpand"])
+    elif direct:
+        dxt = torch.mm(dab, Wab, out=dG[:, 3 * D :])
+    else:
+        dxt = mm(dab, Wab)
     dWab = mm32(dab.t(), xt)
     dx1 = torch.empty(M, D, device=dev)
     dy = torch.empty(M, D, device=dev, dtype=at)
-    T.res_adaln_b_bwd(
-        dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2], opt
-    )  # the parallel block: no AdaLN of x1 (dxt goes to adaln_a_bwd)
-    dog = mm(dy, Wo)
+    xin = single.reshape(M, D).contiguous() if x.numel() == 0 else x  # nox: the block input is the residual (see _fwd_body)
+    if x1.numel() == 0:  # rx1: x1 was not kept; the kernel recomputes it from the input
+        T.res_adaln_b_bwd(dout, dxt, xin, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2], opt, True)
+    else:
+        T.res_adaln_b_bwd(
+            dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2], opt
+        )  # the parallel block: no AdaLN of x1 (dxt goes to adaln_a_bwd)
+    dog = f8.mm(*f8.q8(dy, e5), f8w["dout"]) if "dout" in f8p else mm(dy, Wo)
     dWo = mm32(dy.t(), og)
     dob = torch.empty(M, D, device=dev, dtype=at)
     dd = torch.empty(A, H, L, device=dev)
@@ -1237,13 +1296,16 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
             else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH)
         )
     T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qkm)
-    dxa = torch.mm(dqkvg, Wqkvg, out=dG[:, D : 2 * D]) if direct else mm(dqkvg, Wqkvg)
+    if "dqkvg" in f8p:
+        dxa = f8.mm(*f8.q8(dqkvg, e5), f8w["dqkvg"])
+    else:
+        dxa = torch.mm(dqkvg, Wqkvg, out=dG[:, D : 2 * D]) if direct else mm(dqkvg, Wqkvg)
     dWqkvg = mm32(dqkvg.t(), xa)
     dx = torch.empty(M, D, device=dev, dtype=sdt)
     if par:  # both AdaLNs of the block input: dxa and dxt into one LN backward (bs2's partials into part[1])
-        T.adaln_a_bwd(dxa, x, xst, G, bs1, dx1, dx, dG, part[3], opt, dxt, bs2, part[1])
+        T.adaln_a_bwd(dxa, xin, xst, G, bs1, dx1, dx, dG, part[3], opt, dxt, bs2, part[1])
     else:
-        T.adaln_a_bwd(dxa, x, xst, G, bs1, dx1, dx, dG, part[3], opt)
+        T.adaln_a_bwd(dxa, xin, xst, G, bs1, dx1, dx, dG, part[3], opt)
     if not (native and plain):
         sums = allp.sum(0) if qkm else allp[:, : 5 * D].sum(0)
         pb = sums[: 5 * D].view(5, D)
