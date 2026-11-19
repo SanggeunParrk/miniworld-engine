@@ -46,6 +46,10 @@ MOD_BWD_GEMM_SM120 = True
 #: RTX 5090 global-attention inference on ``attn_global_sm120.cuh`` (False: FlashAttention-2); one sample from this many rows stays on FlashAttention-2 (measured: 8192 rows 270 vs 254 us)
 GLOBAL_SM120 = True
 GLOBAL_SM120_SINGLE_MAX = 8192
+#: RTX 5090 global-attention TRAINING on the sm_120a forward with lse and backward of ``attn_global_sm120.cuh`` (False: FlashAttention-2 fwd / bwd)
+GLOBAL_TRAIN_SM120 = True
+#: ... for sequences up to this length (graph replays, S 1024 / 2048 / 4096 / 5120: forward + backward 48 / 95 / 309 / 383 us against FlashAttention-2 69 / 125 / 298 / 371: the backward kernel loses from 4096)
+GLOBAL_TRAIN_SM120_MAX_S = 3072
 
 
 def _ks_ok(m: int, s: int) -> bool:
@@ -101,8 +105,14 @@ def attention_fwd(qh, kh, vh, seqused, half_window: int, out_dtype: torch.dtype 
     ):
         n, _, s, _ = qh.shape
         o = torch.empty(n * s, C, device=qh.device, dtype=_BF)
-        sm80._ext_sm120().swa_attn_global_fwd(qh, kh, vh, seqused.contiguous(), o)
+        sm80._ext_sm120().swa_attn_global_fwd(qh, kh, vh, seqused.contiguous(), o, None)
         return o, None
+    if not inference and is_global(half_window) and out_dtype == _BF and GLOBAL_TRAIN_SM120 and qh.shape[2] <= GLOBAL_TRAIN_SM120_MAX_S and _sm120.is_sm120(qh.device):
+        n, _, s, _ = qh.shape  # training: the sm_120a kernel with its lse ([N, 4, S] natural log) for the backward of the same file
+        o = torch.empty(n * s, C, device=qh.device, dtype=_BF)
+        lse = torch.empty(n, H, s, device=qh.device, dtype=_F32)
+        sm80._ext_sm120().swa_attn_global_fwd(qh, kh, vh, seqused.contiguous(), o, lse)
+        return o, lse
     if not is_global(half_window):
         if out_dtype == _BF:
             return sm80.attn_fwd(qh, kh, vh, seqused)
@@ -126,6 +136,10 @@ def attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window: int):
     if not is_global(half_window):
         return sm80.attn_bwd(qh, kh, vh, d_o, lse, delta, seqused)
     n, _, s, _ = qh.shape
+    if GLOBAL_TRAIN_SM120 and _sm120.is_sm120(qh.device) and lse.dim() == 3:  # the lse of the sm_120a forward ([N, 4, S] fp32)
+        dq, dk, dv = (torch.empty_like(qh) for _ in range(3))
+        sm80._ext_sm120().swa_attn_global_bwd(qh, kh, vh, d_o, lse, delta, seqused.contiguous(), dq, dk, dv)
+        return dq, dk, dv
     cu, _used_k = _varlen(seqused, s)
     q, k, v = (_token_major(t) for t in (qh, kh, vh))
     empty = torch.empty(0, device=qh.device)

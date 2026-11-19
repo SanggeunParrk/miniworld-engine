@@ -234,7 +234,7 @@ void swa_ffn_bwd_gate(torch::Tensor dy, torch::Tensor y, torch::Tensor ffn, torc
 }
 
 // global-attention forward (attn_global_sm120.cuh): q, k, v head-major [N, 4, S, 32] bf16, seqused [N] int32 -> o [N S, C] bf16 (no lse)
-void swa_attn_global_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor seqused, torch::Tensor o) {
+void swa_attn_global_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor seqused, torch::Tensor o, c10::optional<torch::Tensor> lse) {
   CHECK_CUDA_BF16(q); CHECK_CUDA_BF16(k); CHECK_CUDA_BF16(v); CHECK_CUDA_BF16(o);
   for (const auto* t : {&q, &k, &v, &o}) CHECK_CONTIG(*t);
   TORCH_CHECK(q.dim() == 4 && q.size(1) == 4 && q.size(3) == 32 && k.sizes() == q.sizes() && v.sizes() == q.sizes(), "q, k, v must be [N, 4, S, 32]");
@@ -243,9 +243,28 @@ void swa_attn_global_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torc
   TORCH_CHECK(o.numel() == N * S * 128, "bad output size");
   if (N * S == 0) return;
   c10::cuda::CUDAGuard guard(q.device());
-  sw80::AttnGParams p{bptr(q), bptr(k), bptr(v), seqused.data_ptr<int>(), bptr_w(o), (int)S, 0.17677669529663687f * 1.4426950408889634f};
+  if (lse.has_value()) { CHECK_CUDA_F32(*lse); CHECK_CONTIG(*lse); TORCH_CHECK(lse->numel() == N * 4 * S, "bad lse size"); }
+  sw80::AttnGParams p{bptr(q), bptr(k), bptr(v), seqused.data_ptr<int>(), bptr_w(o), (int)S, 0.17677669529663687f * 1.4426950408889634f, lse.has_value() ? lse->data_ptr<float>() : nullptr};
   const dim3 grid((unsigned)((S + sw80::AG_BQ - 1) / sw80::AG_BQ), (unsigned)(N * 4));
   sw80::attn_global_fwd_kernel<<<grid, sw80::AG_NW * 32, sw80::AG_SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// global-attention backward (attn_global_sm120.cuh): q, k, v, dq, dk, dv head-major [N, 4, S, 32] bf16, d_o [N S, C] bf16, lse and D [N, 4, S] fp32, seqused [N] int32
+void swa_attn_global_bwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor d_o, torch::Tensor lse, torch::Tensor dvv, torch::Tensor seqused, torch::Tensor dq, torch::Tensor dk, torch::Tensor dvo) {
+  for (const auto* t : {&q, &k, &v, &d_o, &dq, &dk, &dvo}) { CHECK_CUDA_BF16(*t); CHECK_CONTIG(*t); }
+  CHECK_CUDA_F32(lse); CHECK_CUDA_F32(dvv); CHECK_CONTIG(lse); CHECK_CONTIG(dvv);
+  TORCH_CHECK(q.dim() == 4 && q.size(1) == 4 && q.size(3) == 32 && k.sizes() == q.sizes() && v.sizes() == q.sizes() && dq.sizes() == q.sizes() && dk.sizes() == q.sizes() && dvo.sizes() == q.sizes(), "q, k, v, dq, dk, dv must be [N, 4, S, 32]");
+  TORCH_CHECK(seqused.scalar_type() == torch::kInt32 && seqused.is_cuda() && seqused.numel() == q.size(0), "seqused must be int32 [N]");
+  const int64_t N = q.size(0), S = q.size(2);
+  TORCH_CHECK(d_o.numel() == N * S * 128 && lse.numel() == N * 4 * S && dvv.numel() == N * 4 * S, "bad operand sizes");
+  if (N * S == 0) return;
+  c10::cuda::CUDAGuard guard(q.device());
+  sw80::AttnGBwdParams p{bptr(q), bptr(k), bptr(v), bptr(d_o), lse.data_ptr<float>(), dvv.data_ptr<float>(), seqused.data_ptr<int>(), bptr_w(dq), bptr_w(dk), bptr_w(dvo), (int)S,
+                         0.17677669529663687f, 0.17677669529663687f * 1.4426950408889634f};
+  const dim3 grid((unsigned)((S + sw80::AG_BQ - 1) / sw80::AG_BQ), (unsigned)(N * 4));
+  sw80::attn_global_bwd_dq_kernel<<<grid, sw80::AG_NW * 32, sw80::AG_SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
+  sw80::attn_global_bwd_dkv_kernel<<<grid, sw80::AG_NW * 32, sw80::AGB_SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -280,6 +299,7 @@ void swa_qkvg_bwd_stream(torch::Tensor qi, torch::Tensor pq, torch::Tensor pk, t
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swa_attn_global_fwd", &swa_attn_global_fwd);
+  m.def("swa_attn_global_bwd", &swa_attn_global_bwd);
   m.def("swa_ffn_bwd_gate", &swa_ffn_bwd_gate);
   m.def("swa_ffn_bwd_dy_stream", &swa_ffn_bwd_dy_stream);
   m.def("swa_qkvg_bwd_stream", &swa_qkvg_bwd_stream);

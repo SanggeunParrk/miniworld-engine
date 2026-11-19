@@ -596,7 +596,7 @@ def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: floa
     lse = None
     if glob and not save:  # global attention: every key of the sequence (attn_global_sm120.cuh), the same qkvg / FFN stages around it
         o = torch.empty_like(qf)
-        ext.swa_attn_global_fwd(qh, kh, vh, seqused, o)
+        ext.swa_attn_global_fwd(qh, kh, vh, seqused, o, None)
     elif glob:  # training: FlashAttention-2 with its lse (the backward reads it)
         from miniworld_engine.kernels.swa_dit.cuda.sm80 import composed
 
