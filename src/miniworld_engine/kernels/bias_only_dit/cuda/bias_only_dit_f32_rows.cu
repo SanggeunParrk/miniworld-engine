@@ -845,6 +845,375 @@ __global__ void __launch_bounds__(256, 2) pair_bias_tc_k(const float* __restrict
   }
 }
 
+// ---- the EXACT-class fp32 pair-bias LOGITS of the inference hoist (user rule 2026-11-19), one pass, pair rows bf16 or fp32, width 128 / 256 --------------
+// logits[h, r] = sum_c W'[h, c] LN0(x[r])[c] for the 16 heads of one block: the LN0 in fp32 (two exact passes), the products on mma.sync m16n8k8
+// TF32 with the split fp32 operands (all four hi / lo products, a fresh fp32 partial per k-step added in round-to-nearest fp32: error below that of the FMA-pipe
+// GEMM it replaces, measured against fp64; the LN0 rows are never stored). Pair rows of type XT (bf16 / fp32).
+// A thread owns 8 consecutive columns of its row per 32-column chunk j (columns 32 j + 8 q .. + 7: one 16-byte bf16 load, two fp32 ones; the four
+// lanes of a row read 64 / 128 contiguous bytes). k-step (j, s) takes the slots k = q -> column 32 j + 8 q + 2 s and k = q + 4 -> + 1 (the weight
+// fragments use the same map: the reduction order is free), so the 8 values a thread holds feed 4 k-steps and every pair element is read once.
+template <typename XT> struct Chunk8;
+template <> struct Chunk8<__nv_bfloat16> {
+  uint4 w;
+  __device__ __forceinline__ void load(const __nv_bfloat16* p) { w = *reinterpret_cast<const uint4*>(p); }
+  __device__ __forceinline__ void reload(const __nv_bfloat16* p) {
+    asm volatile("ld.global.nc.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(w.x), "=r"(w.y), "=r"(w.z), "=r"(w.w) : "l"(p));
+  }
+  __device__ __forceinline__ void fence() { asm volatile("" : "+r"(w.x), "+r"(w.y), "+r"(w.z), "+r"(w.w)); }
+  __device__ __forceinline__ void get(float (&v)[8]) const {
+    const uint32_t u[4] = {w.x, w.y, w.z, w.w};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) { v[2 * i] = __uint_as_float(u[i] << 16); v[2 * i + 1] = __uint_as_float(u[i] & 0xffff0000u); }
+  }
+};
+template <> struct Chunk8<float> {
+  float4 a, b;
+  __device__ __forceinline__ void load(const float* p) { a = *reinterpret_cast<const float4*>(p); b = *reinterpret_cast<const float4*>(p + 4); }
+  __device__ __forceinline__ void reload(const float* p) { a = reld4(p); b = reld4(p + 4); }
+  __device__ __forceinline__ void fence() { asm volatile("" : "+f"(a.x), "+f"(a.y), "+f"(a.z), "+f"(a.w), "+f"(b.x), "+f"(b.y), "+f"(b.z), "+f"(b.w)); }
+  __device__ __forceinline__ void get(float (&v)[8]) const { v[0] = a.x; v[1] = a.y; v[2] = a.z; v[3] = a.w; v[4] = b.x; v[5] = b.y; v[6] = b.z; v[7] = b.w; }
+};
+template <int CP, typename XT, int MB, bool HD = true>
+__global__ void __launch_bounds__(256, MB) logits_tc_k(const XT* __restrict__ Z, const float* __restrict__ WF, float* __restrict__ LG, float2* __restrict__ PST, long R, float eps) {
+  static_assert(CP == 128 || CP == 256, "pair width 128 or 256");
+  constexpr int NT = 2, KS = CP / 8, NC = CP / 32;
+  constexpr bool HOLD = HD && (sizeof(XT) == 2 || CP == 128);   // the row chunks stay in registers between the passes (fp32 at 256 would need 128 of them)
+  extern __shared__ uint4 pbw_[];
+  uint4 (*bw)[NT][32] = reinterpret_cast<uint4 (*)[NT][32]>(pbw_);
+  const int lane = threadIdx.x % 32, g = lane / 4, q = lane % 4;
+  const long wid = (long)blockIdx.x * WPB + threadIdx.x / 32, nw = (long)gridDim.x * WPB;
+  for (int i = threadIdx.x; i < KS * NT * 32; i += blockDim.x) {
+    const int l = i % 32, t = (i / 32) % NT, kk = i / (32 * NT), h = 8 * t + l / 4;
+    const int c = 32 * (kk / 4) + 8 * (l % 4) + 2 * (kk % 4);
+    bw[kk][t][l] = split2(WF[h * CP + c], WF[h * CP + c + 1]);
+  }
+  __syncthreads();
+  for (long rb = wid * 16; rb < R; rb += nw * 16) {
+    const XT* zr[2] = {Z + (rb + g) * CP + 8 * q, Z + (rb + g + 8) * CP + 8 * q};
+    Chunk8<XT> u[2][HOLD ? NC : 1];
+    float mean[2], rs[2];
+    if constexpr (HOLD) {
+#pragma unroll
+      for (int hr = 0; hr < 2; ++hr)
+#pragma unroll
+        for (int j = 0; j < NC; ++j) u[hr][j].load(zr[hr] + 32 * j);
+    }
+#pragma unroll
+    for (int hr = 0; hr < 2; ++hr) {
+      float s1 = 0.f;
+#pragma unroll
+      for (int j = 0; j < NC; ++j) {
+        Chunk8<XT> c;
+        if constexpr (HOLD) c = u[hr][j]; else c.load(zr[hr] + 32 * j);
+        float v[8]; c.get(v);
+        s1 += ((v[0] + v[1]) + (v[2] + v[3])) + ((v[4] + v[5]) + (v[6] + v[7]));
+      }
+      s1 += __shfl_xor_sync(0xffffffffu, s1, 1); s1 += __shfl_xor_sync(0xffffffffu, s1, 2);
+      mean[hr] = s1 * (1.f / CP);
+      float s2 = 0.f;
+#pragma unroll
+      for (int j = 0; j < NC; ++j) {
+        Chunk8<XT> c;
+        if constexpr (HOLD) c = u[hr][j]; else c.reload(zr[hr] + 32 * j);
+        float v[8]; c.get(v);
+        float d[8];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) { d[i] = v[i] - mean[hr]; d[i] *= d[i]; }
+        s2 += ((d[0] + d[1]) + (d[2] + d[3])) + ((d[4] + d[5]) + (d[6] + d[7]));
+      }
+      s2 += __shfl_xor_sync(0xffffffffu, s2, 1); s2 += __shfl_xor_sync(0xffffffffu, s2, 2);
+      rs[hr] = rsqrtf(s2 * (1.f / CP) + eps);
+    }
+    float acc[NT][4];
+#pragma unroll
+    for (int t = 0; t < NT; ++t) acc[t][0] = acc[t][1] = acc[t][2] = acc[t][3] = 0.f;
+#pragma unroll
+    for (int j = 0; j < NC; ++j) {
+      float v0[8], v1[8];
+      {
+        Chunk8<XT> c0, c1;
+        if constexpr (HOLD) { c0 = u[0][j]; c1 = u[1][j]; } else { c0.reload(zr[0] + 32 * j); c1.reload(zr[1] + 32 * j); }
+        c0.fence(); c1.fence();   // no conversion of a later chunk before the previous chunk's products (hoisted, the 128 converted values spilled)
+        c0.get(v0); c1.get(v1);
+      }
+#pragma unroll
+      for (int sp = 0; sp < 2; ++sp) {
+        // two k-steps at once: 4 independent product chains (2 head tiles x 2 k-steps) in flight: the mma results are not waited for before the next chain issues
+        uint32_t ah[2][4], al[2][4];
+#pragma unroll
+        for (int u2 = 0; u2 < 2; ++u2) {
+          const int s = 2 * sp + u2;
+          const float v[4] = {(v0[2 * s] - mean[0]) * rs[0], (v1[2 * s] - mean[1]) * rs[1],
+                              (v0[2 * s + 1] - mean[0]) * rs[0], (v1[2 * s + 1] - mean[1]) * rs[1]};
+          split_a<3>(v, ah[u2], al[u2]);
+        }
+        uint4 b[2][NT];
+#pragma unroll
+        for (int u2 = 0; u2 < 2; ++u2)
+#pragma unroll
+          for (int t = 0; t < NT; ++t)   // read where it is used (volatile): hoisted, the weight fragments of a row tile spilled at 256 channels
+            asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(b[u2][t].x), "=r"(b[u2][t].y), "=r"(b[u2][t].z), "=r"(b[u2][t].w)
+                         : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&bw[4 * j + 2 * sp + u2][t][lane]))));
+        // the four split products of a k-step (smallest first) form a fresh partial d, added to the running sum in IEEE fp32 (round to nearest): the tensor
+        // core's own accumulation truncates, and over 32 k-steps that bias was 2-3x the FMA path's error
+        float d[2][NT][4];
+#pragma unroll
+        for (int u2 = 0; u2 < 2; ++u2)
+#pragma unroll
+          for (int t = 0; t < NT; ++t) d[u2][t][0] = d[u2][t][1] = d[u2][t][2] = d[u2][t][3] = 0.f;
+#pragma unroll
+        for (int pr = 0; pr < 4; ++pr)
+#pragma unroll
+          for (int u2 = 0; u2 < 2; ++u2)
+#pragma unroll
+            for (int t = 0; t < NT; ++t) {
+              const uint32_t* a = (pr & 1) ? ah[u2] : al[u2];
+              const uint32_t b0 = (pr >> 1) ? b[u2][t].x : b[u2][t].z, b1 = (pr >> 1) ? b[u2][t].y : b[u2][t].w;
+              mma_tf32(d[u2][t], a[0], a[1], a[2], a[3], b0, b1);
+            }
+#pragma unroll
+        for (int u2 = 0; u2 < 2; ++u2)
+#pragma unroll
+          for (int t = 0; t < NT; ++t) { acc[t][0] += d[u2][t][0]; acc[t][1] += d[u2][t][1]; acc[t][2] += d[u2][t][2]; acc[t][3] += d[u2][t][3]; }
+      }
+    }
+#pragma unroll
+    for (int t = 0; t < NT; ++t)
+#pragma unroll
+      for (int e = 0; e < 2; ++e) {
+        const int h = 8 * t + 2 * q + e;
+        LG[(long)h * R + rb + g] = acc[t][e];
+        LG[(long)h * R + rb + g + 8] = acc[t][2 + e];
+      }
+    if (PST != nullptr && q == 0) { PST[rb + g] = make_float2(mean[0], rs[0]); PST[rb + g + 8] = make_float2(mean[1], rs[1]); }
+  }
+}
+
+// ---- the EXACT-class fp32 hoist BACKWARD of one block (16 heads) on error-compensated TF32 mma, one pass over the pair rows -------------------------------------
+// d LN0 = dbias^T W' (M = 16 rows, K = 16 heads, N = channels), the LN0 backward (dx = rstd (d - mean(d) - y mean(d y))) and dW' = dbias Y (M = 16 heads, K = 16
+// rows, N = channels) for width CP = 128 / 256: replaces dln_bwd_kernel + dwf_kernel (FMA pipe, 2 passes) and, at 256, ln0_bwd_rows + three cuBLAS fp32 FMA GEMMs.
+// Every product is the four-term split (hi / lo of both operands, smallest first) into a fresh fp32 partial per k-step, added in round-to-nearest fp32.
+// A PAIR of warps (adjacent, one named barrier each) takes a tile of 16 rows: warp h of the pair owns the channels [h CP / 2, (h + 1) CP / 2) -- its n-tiles of d LN0, its
+// dW' accumulators (16 x CP / 2) and its shared Y tile -- and the four row sums (mean, variance, sum d, sum d y) are added across the pair through shared memory; the
+// registers of a warp halve, so twice the warps fit an SM. Pairs deal themselves tiles round robin (fixed order, no atomics: bitwise repeatable). PART [warps, 16, CP / 2]:
+// per-warp dW' of its channel half (the caller sums the pairs' partials per half, in a fixed order). The row statistics are recomputed (two exact passes over the row).
+template <int CP, typename XT, typename OT, int MB>
+__global__ void __launch_bounds__(256, MB) hoist_bwd_tc_k(const XT* __restrict__ X, const float* __restrict__ DB, long dbs, const float* __restrict__ WF,
+    OT* __restrict__ DX, float* __restrict__ PART, long R, float eps) {
+  constexpr int CH = CP / 2, NT = CP / 8, NTH = CH / 8, PITCH = CH + 8, PITCHO = CH + 8, DBP = 24;
+  extern __shared__ __align__(16) uint8_t bsm_[];
+  uint4 (*bw)[NT][32] = reinterpret_cast<uint4 (*)[NT][32]>(bsm_);
+  __shared__ float red[4][2][4][2][16];   // [pair][half][quantity][tile parity][row of the tile]
+  const int lane = threadIdx.x % 32, g = lane / 4, q = lane % 4, wb = threadIdx.x / 32, half = wb & 1, pr = wb >> 1;
+  float* ys = reinterpret_cast<float*>(bsm_ + 2 * NT * 32 * 16) + wb * 16 * PITCH;
+  OT* dxs = reinterpret_cast<OT*>(bsm_ + 2 * NT * 32 * 16 + 8 * 16 * PITCH * 4) + wb * 16 * PITCHO;   // the d pair tile, staged for coalesced stores
+  float* dbt = reinterpret_cast<float*>(bsm_ + 2 * NT * 32 * 16 + 8 * 16 * PITCH * 4 + 8 * 16 * PITCHO * (int)sizeof(OT)) + wb * 16 * DBP;   // dbias [16 heads][16 rows] of the tile
+  const long wid = (long)blockIdx.x * WPB + wb, pid = (long)blockIdx.x * 4 + pr, npairs = (long)gridDim.x * 4;
+  const int cb = half * CH;
+  for (int i = threadIdx.x; i < 2 * NT * 32; i += blockDim.x) {
+    const int l = i % 32, nt = (i / 32) % NT, ks = i / (32 * NT), h0 = 8 * ks + l % 4, col = 8 * nt + l / 4;
+    bw[ks][nt][l] = split2(WF[h0 * CP + col], WF[(h0 + 4) * CP + col]);
+  }
+  __syncthreads();
+  auto pbar = [&]() { asm volatile("bar.sync %0, 64;" ::"r"(1 + pr) : "memory"); };
+  // add a row sum (rows g, g + 8 of this lane: quad-reduced) across the pair: write mine, barrier, read the partner's
+  auto xchg2 = [&](float (&v)[2], float (&w)[2], int qa, int par, bool two) {
+    if (q == 0) {
+      red[pr][half][qa][par][g] = v[0]; red[pr][half][qa][par][8 + g] = v[1];
+      if (two) { red[pr][half][qa + 1][par][g] = w[0]; red[pr][half][qa + 1][par][8 + g] = w[1]; }
+    }
+    pbar();
+    v[0] += red[pr][half ^ 1][qa][par][g]; v[1] += red[pr][half ^ 1][qa][par][8 + g];
+    if (two) { w[0] += red[pr][half ^ 1][qa + 1][par][g]; w[1] += red[pr][half ^ 1][qa + 1][par][8 + g]; }
+  };
+  float acc[NTH][4];
+#pragma unroll
+  for (int n = 0; n < NTH; ++n) acc[n][0] = acc[n][1] = acc[n][2] = acc[n][3] = 0.f;
+  int par = 0;
+  for (long tile = pid; tile * 16 < R; tile += npairs, par ^= 1) {
+    const long rb = tile * 16;
+    // the tile's dbias [16 heads, 16 rows] in coalesced 16-byte loads into the warp's shared tile (both A operands read it from there)
+    {
+      const int hd = lane / 4, v4 = lane % 4;
+      *reinterpret_cast<float4*>(dbt + hd * DBP + 4 * v4) = *reinterpret_cast<const float4*>(DB + (long)hd * dbs + rb + 4 * v4);
+      *reinterpret_cast<float4*>(dbt + (hd + 8) * DBP + 4 * v4) = *reinterpret_cast<const float4*>(DB + (long)(hd + 8) * dbs + rb + 4 * v4);
+    }
+    __syncwarp();
+    // dbias^T as the A operand of d LN0 (rows g, g + 8; heads 8 ks + q, + 4)
+    uint32_t ah[2][4], al[2][4];
+#pragma unroll
+    for (int ks = 0; ks < 2; ++ks) {
+      const float v[4] = {dbt[(8 * ks + q) * DBP + g], dbt[(8 * ks + q) * DBP + g + 8], dbt[(8 * ks + q + 4) * DBP + g], dbt[(8 * ks + q + 4) * DBP + g + 8]};
+      split_a<3>(v, ah[ks], al[ks]);
+    }
+    // this warp's channel half of the 16 rows, coalesced 16-byte loads, converted to fp32 into its shared tile (the same tile later holds Y)
+    {
+      constexpr int E = 16 / (int)sizeof(XT), VPR = CH / E;
+#pragma unroll
+      for (int i = lane; i < 16 * VPR; i += 32) {
+        const int row = i / VPR, vc = i % VPR;
+        const XT* src = X + (rb + row) * CP + cb + vc * E;
+        float* dst = ys + row * PITCH + vc * E;
+        if constexpr (sizeof(XT) == 2) {
+          const uint4 u = *reinterpret_cast<const uint4*>(src);
+          const uint32_t w[4] = {u.x, u.y, u.z, u.w};
+          *reinterpret_cast<float4*>(dst) = make_float4(__uint_as_float(w[0] << 16), __uint_as_float(w[0] & 0xffff0000u), __uint_as_float(w[1] << 16), __uint_as_float(w[1] & 0xffff0000u));
+          *reinterpret_cast<float4*>(dst + 4) = make_float4(__uint_as_float(w[2] << 16), __uint_as_float(w[2] & 0xffff0000u), __uint_as_float(w[3] << 16), __uint_as_float(w[3] & 0xffff0000u));
+        } else {
+          *reinterpret_cast<float4*>(dst) = *reinterpret_cast<const float4*>(src);
+        }
+      }
+    }
+    __syncwarp();
+    auto ld2 = [&](int hr, int nt, float& a, float& b) {
+      const float2 f = *reinterpret_cast<const float2*>(ys + (g + 8 * hr) * PITCH + 8 * nt + 2 * q);
+      a = f.x; b = f.y;
+    };
+    float mean[2], rs[2], z[2] = {0.f, 0.f};
+#pragma unroll
+    for (int hr = 0; hr < 2; ++hr) {
+      float s = 0.f;
+#pragma unroll
+      for (int nt = 0; nt < NTH; ++nt) { float a, b; ld2(hr, nt, a, b); s += a + b; }
+      s += __shfl_xor_sync(0xffffffffu, s, 1); s += __shfl_xor_sync(0xffffffffu, s, 2);
+      mean[hr] = s;
+    }
+    xchg2(mean, z, 0, par, false);
+#pragma unroll
+    for (int hr = 0; hr < 2; ++hr) mean[hr] *= 1.f / CP;
+#pragma unroll
+    for (int hr = 0; hr < 2; ++hr) {
+      float s2 = 0.f;
+#pragma unroll
+      for (int nt = 0; nt < NTH; ++nt) { float a, b; ld2(hr, nt, a, b); a -= mean[hr]; b -= mean[hr]; s2 += a * a + b * b; }
+      s2 += __shfl_xor_sync(0xffffffffu, s2, 1); s2 += __shfl_xor_sync(0xffffffffu, s2, 2);
+      rs[hr] = s2;
+    }
+    xchg2(rs, z, 1, par, false);
+#pragma unroll
+    for (int hr = 0; hr < 2; ++hr) rs[hr] = rsqrtf(rs[hr] * (1.f / CP) + eps);
+    // d LN0 of the n-tiles nt0, nt0 + 1 of this half (4 values each: rows g, g + 8, channels 8 nt + 2 q + {0, 1}); 4 independent product chains in flight
+    float cs[NTH][4];
+    float sa[2] = {0.f, 0.f}, sb[2] = {0.f, 0.f};   // sum d, sum d y per row (hr)
+#pragma unroll
+    for (int nt0 = 0; nt0 < NTH; nt0 += 2) {
+      uint4 b[2][2];
+#pragma unroll
+      for (int j = 0; j < 2; ++j)
+#pragma unroll
+        for (int ks = 0; ks < 2; ++ks)
+          asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(b[j][ks].x), "=r"(b[j][ks].y), "=r"(b[j][ks].z), "=r"(b[j][ks].w)
+                       : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&bw[ks][half * NTH + nt0 + j][lane]))));
+      float d[2][2][4];
+#pragma unroll
+      for (int j = 0; j < 2; ++j)
+#pragma unroll
+        for (int ks = 0; ks < 2; ++ks) d[j][ks][0] = d[j][ks][1] = d[j][ks][2] = d[j][ks][3] = 0.f;
+#pragma unroll
+      for (int p4 = 0; p4 < 4; ++p4)
+#pragma unroll
+        for (int ks = 0; ks < 2; ++ks)
+#pragma unroll
+          for (int j = 0; j < 2; ++j) {
+            const uint32_t* a = (p4 & 1) ? ah[ks] : al[ks];
+            mma_tf32(d[j][ks], a[0], a[1], a[2], a[3], (p4 >> 1) ? b[j][ks].x : b[j][ks].z, (p4 >> 1) ? b[j][ks].y : b[j][ks].w);
+          }
+#pragma unroll
+      for (int j = 0; j < 2; ++j)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) cs[nt0 + j][e] = d[j][0][e] + d[j][1][e];
+#pragma unroll
+      for (int j = 0; j < 2; ++j)
+#pragma unroll
+        for (int hr = 0; hr < 2; ++hr) {
+          float a, b2; ld2(hr, nt0 + j, a, b2);
+          const float y0 = (a - mean[hr]) * rs[hr], y1 = (b2 - mean[hr]) * rs[hr];
+          sa[hr] += cs[nt0 + j][2 * hr] + cs[nt0 + j][2 * hr + 1];
+          sb[hr] += cs[nt0 + j][2 * hr] * y0 + cs[nt0 + j][2 * hr + 1] * y1;
+        }
+    }
+#pragma unroll
+    for (int hr = 0; hr < 2; ++hr) {
+      sa[hr] += __shfl_xor_sync(0xffffffffu, sa[hr], 1); sa[hr] += __shfl_xor_sync(0xffffffffu, sa[hr], 2);
+      sb[hr] += __shfl_xor_sync(0xffffffffu, sb[hr], 1); sb[hr] += __shfl_xor_sync(0xffffffffu, sb[hr], 2);
+    }
+    xchg2(sa, sb, 2, par, true);
+#pragma unroll
+    for (int hr = 0; hr < 2; ++hr) { sa[hr] *= 1.f / CP; sb[hr] *= 1.f / CP; }
+#pragma unroll
+    for (int nt = 0; nt < NTH; ++nt)
+#pragma unroll
+      for (int hr = 0; hr < 2; ++hr) {
+        float a, b; ld2(hr, nt, a, b);
+        const float y0 = (a - mean[hr]) * rs[hr], y1 = (b - mean[hr]) * rs[hr];
+        const float o0 = rs[hr] * (cs[nt][2 * hr] - sa[hr] - y0 * sb[hr]), o1 = rs[hr] * (cs[nt][2 * hr + 1] - sa[hr] - y1 * sb[hr]);
+        OT* dp = dxs + (g + 8 * hr) * PITCHO + 8 * nt + 2 * q;
+        if constexpr (sizeof(OT) == 2) {
+          const __nv_bfloat162 p = __floats2bfloat162_rn(o0, o1);
+          *reinterpret_cast<__nv_bfloat162*>(dp) = p;
+        } else {
+          *reinterpret_cast<float2*>(dp) = make_float2(o0, o1);
+        }
+        *reinterpret_cast<float2*>(ys + (g + 8 * hr) * PITCH + 8 * nt + 2 * q) = make_float2(y0, y1);
+      }
+    __syncwarp();
+    // d pair of this half: shared tile -> global in coalesced 16-byte stores
+    {
+      constexpr int EO = 16 / (int)sizeof(OT), VO = CH / EO;
+#pragma unroll
+      for (int i = lane; i < 16 * VO; i += 32) {
+        const int row = i / VO, vc = i % VO;
+        *reinterpret_cast<uint4*>(DX + (rb + row) * CP + cb + vc * EO) = *reinterpret_cast<const uint4*>(dxs + row * PITCHO + vc * EO);
+      }
+    }
+    __syncwarp();
+    // dW' += dbias Y (this half's channels): A = dbias [heads g, g + 8] x [rows 8 ks + q, + 4], B = Y [rows] x [channel 8 nt + g]
+    uint32_t ph[2][4], pl[2][4];
+#pragma unroll
+    for (int ks = 0; ks < 2; ++ks) {
+      const float v[4] = {dbt[g * DBP + 8 * ks + q], dbt[(g + 8) * DBP + 8 * ks + q], dbt[g * DBP + 8 * ks + q + 4], dbt[(g + 8) * DBP + 8 * ks + q + 4]};
+      split_a<3>(v, ph[ks], pl[ks]);
+    }
+#pragma unroll
+    for (int nt0 = 0; nt0 < NTH; nt0 += 2) {
+      uint32_t h0[2][2], h1[2][2], l0[2][2], l1[2][2];   // [n-tile][k-step]
+#pragma unroll
+      for (int j = 0; j < 2; ++j)
+#pragma unroll
+        for (int ks = 0; ks < 2; ++ks) {
+          const float y0 = ys[(8 * ks + q) * PITCH + 8 * (nt0 + j) + g], y1 = ys[(8 * ks + q + 4) * PITCH + 8 * (nt0 + j) + g];
+          h0[j][ks] = tf32r(y0); h1[j][ks] = tf32r(y1); l0[j][ks] = tf32lo(y0, h0[j][ks]); l1[j][ks] = tf32lo(y1, h1[j][ks]);
+        }
+      float d[2][2][4];
+#pragma unroll
+      for (int j = 0; j < 2; ++j)
+#pragma unroll
+        for (int ks = 0; ks < 2; ++ks) d[j][ks][0] = d[j][ks][1] = d[j][ks][2] = d[j][ks][3] = 0.f;
+#pragma unroll
+      for (int p4 = 0; p4 < 4; ++p4)
+#pragma unroll
+        for (int ks = 0; ks < 2; ++ks)
+#pragma unroll
+          for (int j = 0; j < 2; ++j) {
+            const uint32_t* a = (p4 & 1) ? ph[ks] : pl[ks];
+            mma_tf32(d[j][ks], a[0], a[1], a[2], a[3], (p4 >> 1) ? h0[j][ks] : l0[j][ks], (p4 >> 1) ? h1[j][ks] : l1[j][ks]);
+          }
+#pragma unroll
+      for (int j = 0; j < 2; ++j)
+#pragma unroll
+        for (int ks = 0; ks < 2; ++ks) { acc[nt0 + j][0] += d[j][ks][0]; acc[nt0 + j][1] += d[j][ks][1]; acc[nt0 + j][2] += d[j][ks][2]; acc[nt0 + j][3] += d[j][ks][3]; }
+    }
+    __syncwarp();
+  }
+#pragma unroll
+  for (int nt = 0; nt < NTH; ++nt) {
+    float* p0 = PART + ((wid * 16 + g) * CH + 8 * nt + 2 * q);
+    float* p1 = PART + ((wid * 16 + g + 8) * CH + 8 * nt + 2 * q);
+    *reinterpret_cast<float2*>(p0) = make_float2(acc[nt][0], acc[nt][1]);
+    *reinterpret_cast<float2*>(p1) = make_float2(acc[nt][2], acc[nt][3]);
+  }
+}
+
 // backward: 128 pair rows per block item (16 per warp), streamed into shared memory by cp.async (double buffer: the next item loads
 // while this one is worked on). d LN(pair) = dbias^T Wf on mma (M = the warp's 16 rows, N = 16 channel tiles of 8, K = the heads in
 // NK k-steps of 8), the LayerNorm backward with two row sums over the row's four lanes, d pair out; LN(pair) written back in place
@@ -1414,6 +1783,65 @@ void pair_bias_tc(at::Tensor z, at::Tensor wf, at::Tensor bias, at::Tensor pst, 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// lg [16, R] fp32 <- the 16 heads' exact-class logits of the pair rows z [R, 128 | 256] (bf16 or fp32) and W' [16, width] fp32 (``logits_tc_k``)
+template <int CP, typename XT, int MB, bool HD> void logits_tc_launch(const at::Tensor& z, const at::Tensor& wf, at::Tensor& lg, float2* pst, double eps) {
+  const int64_t R = z.size(0);
+  constexpr size_t smem = (size_t)(CP / 8) * 2 * 32 * 16;
+  static bool attr = cudaFuncSetAttribute(logits_tc_k<CP, XT, MB, HD>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem) == cudaSuccess;
+  TORCH_CHECK(attr, "logits_tc: shared memory attribute");
+  int per = 1;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, logits_tc_k<CP, XT, MB, HD>, 256, smem);
+  const unsigned g = (unsigned)std::max<int64_t>(1, std::min<int64_t>((R / 16 + WPB - 1) / WPB, (int64_t)std::max(per, 1) * nsm()));
+  logits_tc_k<CP, XT, MB, HD><<<g, 256, smem, S()>>>(reinterpret_cast<const XT*>(z.data_ptr()), wf.data_ptr<float>(), lg.data_ptr<float>(), pst, R, (float)eps);
+}
+void logits_tc(at::Tensor z, at::Tensor wf, at::Tensor lg, double eps, int64_t mb, at::Tensor pst) {
+  f32c(wf, "Wf"); f32c(lg, "logits");
+  const int64_t R = z.size(0), cp = z.size(1);
+  TORCH_CHECK(z.is_cuda() && z.is_contiguous() && z.dim() == 2 && (cp == 128 || cp == 256) && R % 16 == 0 &&
+              (z.scalar_type() == at::kFloat || z.scalar_type() == at::kBFloat16) && wf.dim() == 2 && wf.size(0) == 16 && wf.size(1) == cp &&
+              lg.numel() == 16 * R, "logits_tc: pair [R, 128 or 256] bf16 / fp32 (R a multiple of 16), Wf [16, width] fp32, logits [16, R] fp32");
+  const at::cuda::CUDAGuard gd(z.device());
+  const bool b = z.scalar_type() == at::kBFloat16;
+  TORCH_CHECK(pst.numel() == 0 || (pst.is_cuda() && pst.is_contiguous() && pst.scalar_type() == at::kFloat && pst.numel() == 2 * R), "logits_tc: pst float [R, 2] or empty");
+  float2* ps = pst.numel() == 0 ? nullptr : reinterpret_cast<float2*>(pst.data_ptr());
+#define LTC(CPV, XTV) if (mb == 1) logits_tc_launch<CPV, XTV, 1, true>(z, wf, lg, ps, eps); else logits_tc_launch<CPV, XTV, 2, true>(z, wf, lg, ps, eps)
+  if (cp == 128) { if (b) { LTC(128, __nv_bfloat16); } else { LTC(128, float); } }
+  else { if (b) { LTC(256, __nv_bfloat16); } else { LTC(256, float); } }
+#undef LTC
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// the TF32-split hoist backward of one block (16 heads), see hoist_bwd_tc_k: x [R, CP] bf16 / fp32, dbias [16, R] (row stride dbs), W' [16, CP] fp32 -> dx (x's dtype), PART [>= warps, 16, CP]; returns the warps used
+template <int CP, typename XT, int MB> int64_t hoist_bwd_tc_launch(const at::Tensor& x, const at::Tensor& db, const at::Tensor& wf, at::Tensor& dx, at::Tensor& part, double eps) {
+  const int64_t R = x.size(0);
+  constexpr size_t smem = (size_t)2 * (CP / 8) * 32 * 16 + (size_t)8 * 16 * (CP / 2 + 8) * 4 + (size_t)8 * 16 * (CP / 2 + 8) * sizeof(XT) + (size_t)8 * 16 * 24 * 4;
+  static bool attr = cudaFuncSetAttribute(hoist_bwd_tc_k<CP, XT, XT, MB>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem) == cudaSuccess;
+  TORCH_CHECK(attr, "hoist_bwd_tc: shared memory attribute");
+  int per = 1;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, hoist_bwd_tc_k<CP, XT, XT, MB>, 256, smem);
+  const int64_t g = std::max<int64_t>(1, std::min<int64_t>((R / 16 + 3) / 4, (int64_t)std::max(per, 1) * nsm()));
+  TORCH_CHECK(part.numel() >= g * WPB * 16 * (CP / 2), "hoist_bwd_tc: partials [warps, 16, width / 2]");
+  hoist_bwd_tc_k<CP, XT, XT, MB><<<(unsigned)g, 256, smem, S()>>>(reinterpret_cast<const XT*>(x.data_ptr()), db.data_ptr<float>(), db.stride(0), wf.data_ptr<float>(),
+      reinterpret_cast<XT*>(dx.data_ptr()), part.data_ptr<float>(), R, (float)eps);
+  return g * WPB;
+}
+int64_t hoist_bwd_tc(at::Tensor x, at::Tensor db, at::Tensor wf, at::Tensor dx, at::Tensor part, double eps, int64_t mb) {
+  f32c(db, "dbias"); f32c(wf, "Wf"); f32c(part, "partials");
+  const int64_t R = x.size(0), cp = x.size(1);
+  TORCH_CHECK(x.is_cuda() && x.is_contiguous() && x.dim() == 2 && (cp == 128 || cp == 256) && R % 16 == 0 && (x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16) &&
+              dx.is_contiguous() && dx.scalar_type() == x.scalar_type() && dx.sizes() == x.sizes() && db.dim() == 2 && db.size(0) == 16 && db.size(1) == R && db.stride(1) == 1 &&
+              wf.dim() == 2 && wf.size(0) == 16 && wf.size(1) == cp, "hoist_bwd_tc: x / dx [R, 128 | 256] bf16 / fp32, dbias [16, R] fp32, Wf [16, width] fp32");
+  const at::cuda::CUDAGuard gd(x.device());
+  const bool b = x.scalar_type() == at::kBFloat16;
+  int64_t w;
+#define HBT(CPV, MBV) (b ? hoist_bwd_tc_launch<CPV, __nv_bfloat16, MBV>(x, db, wf, dx, part, eps) : hoist_bwd_tc_launch<CPV, float, MBV>(x, db, wf, dx, part, eps))
+  if (cp == 128) w = mb == 3 ? HBT(128, 3) : HBT(128, 2);
+  else w = mb == 1 ? HBT(256, 1) : HBT(256, 2);
+#undef HBT
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return w;
+}
+
 // the token DiT's pair bias: out [nh, L L] with the key columns permuted (``perm``) and -inf on masked keys, one pass of the pair
 void pair_bias_tok(at::Tensor z, at::Tensor wf, at::Tensor out, c10::optional<at::Tensor> mask, int64_t L, double eps, bool perm, double neg) {
   f32c(z, "pair"); f32c(wf, "Wf"); f32c(out, "bias");
@@ -1511,6 +1939,9 @@ std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
   FA(pair_bias_k<12, 256>); FA(pair_bias_k<16, 256>); FA(pair_bias_k<24, 256>);
   FA(pair_bias_tc_k<12, 1, 256>); FA(pair_bias_tc_k<16, 1, 256>); FA(pair_bias_tc_k<24, 1, 256>); FA(pair_bias_tc_k<12, 3, 256>);
   FA(pair_bias_tc_k<16, 3, 256>); FA(pair_bias_tc_k<24, 3, 256>); FA(pair_bias_bwd_tc_k<12, 1, 256>); FA(pair_bias_bwd_tc_k<16, 1, 256>);
+  FA((logits_tc_k<128, float, 2>)); FA((logits_tc_k<128, __nv_bfloat16, 2>)); FA((logits_tc_k<256, float, 2>)); FA((logits_tc_k<256, __nv_bfloat16, 2>));
+  FA((logits_tc_k<256, float, 1>)); FA((logits_tc_k<256, __nv_bfloat16, 1>));
+  FA((hoist_bwd_tc_k<128, float, float, 2>)); FA((hoist_bwd_tc_k<128, __nv_bfloat16, __nv_bfloat16, 2>)); FA((hoist_bwd_tc_k<256, float, float, 2>)); FA((hoist_bwd_tc_k<256, __nv_bfloat16, __nv_bfloat16, 2>));
   FA(pair_bias_bwd_tc_k<24, 1, 256>); FA(pair_bias_bwd_tc_k<12, 3, 256>); FA(pair_bias_bwd_tc_k<16, 3, 256>); FA(pair_bias_bwd_tc_k<24, 3, 256>);
 #undef FA
   return out;
@@ -1521,6 +1952,8 @@ std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("func_attrs", &func_attrs);
   m.def("pair_bias_tc_cuda", &pair_bias_tc);
+  m.def("logits_tc_cuda", &logits_tc);
+  m.def("hoist_bwd_tc_cuda", &hoist_bwd_tc);
   m.def("pair_bias_bwd_tc_cuda", &pair_bias_bwd_tc);
   m.def("pack_cuda", &pack);
   m.def("partial_rows", &partial_rows);

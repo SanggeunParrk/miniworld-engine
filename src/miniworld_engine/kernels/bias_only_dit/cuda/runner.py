@@ -154,13 +154,21 @@ class FusedBiasOnlyDiT:
         # split-product operand changes which keys the attention picks (peptide C-N +0.1 A, FoldBench lDDT halved).
         from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
-        ln32, _ = HK.ln0_fp32(z2d, EPS)
+        # H100, 16 heads, pair width 128 / 256: ONE pass over the pair rows per block (``HK.logits_tc``: LN0 in fp32 on chip, the products
+        # on TF32 mma with the split fp32 operands, 3 terms, fp32 accumulate) instead of the fp32 LN0 rows in memory + the FMA GEMM
+        tc = HK.logits_tc_ok(z2d, self.pw32[: self.h])
+        ln32 = None if tc else HK.ln0_fp32(z2d, EPS)[0]
         P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
         # blocks per chunk: the fp32 logits of a chunk stay <= 256 MiB
         cb = max(1, min(self.nb, (1 << 28) // (4 * self.h * L * L)))
         for b0 in range(0, self.nb, cb):
             sl = slice(b0 * self.h, min(self.nb, b0 + cb) * self.h)
-            lg = HK.exact_logits(self.pw32[sl], ln32)  # [c H, L L] fp32
+            if tc:
+                lg = torch.empty(sl.stop - sl.start, L * L, device=pair.device, dtype=torch.float32)
+                for b in range(b0, min(self.nb, b0 + cb)):
+                    HK.logits_tc(z2d, self.pw32[b * self.h : (b + 1) * self.h], lg[(b - b0) * self.h : (b - b0 + 1) * self.h])
+            else:
+                lg = HK.exact_logits(self.pw32[sl], ln32)  # [c H, L L] fp32
             if self.fp32:
                 _tf32().rows32().softmax_rows_cuda(lg.view(-1, L), P[sl].view(-1, L), m)
             else:

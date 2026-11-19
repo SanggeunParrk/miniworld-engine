@@ -113,6 +113,12 @@ def _hoist_fwd(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torch.Tens
     return HK.exact_logits(wf, ln32)  # [N, dp] x [dp, R] fp32
 
 
+def _tc_ok(p2: torch.Tensor, wf16: torch.Tensor) -> bool:
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    return HK.logits_tc_ok(p2, wf16)
+
+
 def is_h100(ref: torch.Tensor) -> bool:
     return ref.is_cuda and torch.cuda.get_device_capability(ref.device) == (9, 0)
 
@@ -139,6 +145,9 @@ def hoist_bwd_exact(
 
     N, R = dball.shape
     dp = pair2d.shape[-1]
+    if N == 16 and eps == 1e-5 and HK.hoist_bwd_tc_ok(pair2d, dball, wf32):
+        # one block's 16 heads, width 128 / 256: d LN0, the LN0 backward and dW' in ONE pass on error-compensated TF32 mma (no row statistics needed)
+        return list(HK.hoist_bwd_tc(pair2d, dball, wf32))
     if (
         HK.OPT["bwd"]
         and pst is not None
@@ -261,6 +270,15 @@ class _Hoist(torch.autograd.Function):
             from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
             ball, pst = HK.pair_logits(pair.reshape(L * L, dp), wf32, stats=True)
+        elif is_h100(pair) and wf32.shape[0] % 16 == 0 and eps == 1e-5 and _tc_ok(pair.reshape(L * L, dp), wf32[:16]):
+            # the 256-wide pair (or several blocks): per block one pass (``hoist.logits_tc``: LN0 on chip, split-fp32 TF32 products, error
+            # below the FMA-pipe GEMM's); the backward needs no row statistics there (it recomputes them)
+            from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+            p2 = pair.reshape(L * L, dp)
+            ball = torch.empty(wf32.shape[0], L * L, device=pair.device, dtype=F32)
+            for b in range(wf32.shape[0] // 16):
+                HK.logits_tc(p2, wf32[16 * b : 16 * b + 16], ball[16 * b : 16 * b + 16])
         else:
             ball = _hoist_fwd(pair.reshape(L * L, dp), wf32, eps)  # fp32 logits whatever the pair dtype
         ctx.save_for_backward(pair, wf, gam, wts, *(() if pst is None else (pst,)))

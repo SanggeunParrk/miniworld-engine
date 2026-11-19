@@ -178,3 +178,87 @@ def test_block_fp32_logits(case: str, dtype: torch.dtype, backend: str, mode: st
         errs = [_rel(a, b) for a, b in zip(gr, g64, strict=True)]
         print(case, dtype, backend, mode, hoist, "y", f"{err_y:.2e}", "grads(pair, Wb, gamma)", [f"{e:.2e}" for e in errs])
         assert all(e <= GRAD_TOL for e in errs), f"gradient errors (pair, to_bias.weight, ln_pair.weight) {errs} > {GRAD_TOL}"
+
+
+@requires_h100
+@pytest.mark.parametrize("dp", [128, 256])
+@pytest.mark.parametrize("dtype", DTYPES, ids=IDS)
+@pytest.mark.parametrize("case", ["huge", "extreme", "wide"])
+def test_logits_tc_error_class_of_fma(case: str, dtype: torch.dtype, dp: int) -> None:
+    """``hoist.logits_tc`` (the inference hoist's one-pass logits: LN0 in fp32 on chip, TF32 mma with the split fp32 operands, all four
+    products, a fresh partial per k-step added in fp32) against fp64: its logits' max-abs error and the max-row TV of softmax stay within
+    the error class of the exact fp32 FMA-pipe GEMM it replaces (max-abs within 2x, TV within 1.5x, plus the floors of the fp32 data)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    sw, w0, off, tv_floor = CASES[case]
+    g = torch.Generator(device="cuda").manual_seed(1)
+    n = 256 * 256
+    pair = torch.randn(n, dp, device="cuda", generator=g)
+    pair[:, 0] += off
+    pair = pair.to(dtype)
+    gam = 1 + 0.1 * torch.randn(dp, device="cuda", generator=g)
+    w = torch.randn(16, dp, device="cuda", generator=g) * sw
+    w[:, 0] = w0
+    wf = (w * gam).contiguous()
+    ref = ((F.layer_norm(pair.double(), (dp,), None, None, EPS) * gam.double()) @ w.double().t()).t().contiguous()
+    ln, _ = HK.ln0_fp32(pair, EPS)
+    with torch.autocast("cuda", enabled=False):
+        fma = HK.exact_logits(wf, ln)
+    tc = torch.empty(16, n, device="cuda")
+    HK.logits_tc(pair, wf, tc)
+
+    def tv(lg: torch.Tensor) -> float:
+        return (
+            0.5
+            * (torch.softmax(lg.double().view(16 * 256, 256), -1) - torch.softmax(ref.view(16 * 256, 256), -1)).abs().sum(-1).max().item()
+        )
+
+    e_fma, e_tc = (fma.double() - ref).abs().max().item(), (tc.double() - ref).abs().max().item()
+    print(case, dtype, dp, f"max-abs fma {e_fma:.2e} tc {e_tc:.2e}; TV fma {tv(fma):.2e} tc {tv(tc):.2e}")
+    assert e_tc <= 2.0 * e_fma, f"logits max-abs error {e_tc:.3e} > 2x the FMA path's {e_fma:.3e}"
+    assert tv(tc) <= max(1.5 * tv(fma), tv_floor), f"max-row TV {tv(tc):.3e} above 1.5x the FMA path's {tv(fma):.3e}"
+    # the row statistics (mean, rstd) the training backward reads: the same fp32 values as the LN0 rows kernel's (different summation order)
+    pst = torch.empty(n, 2, device="cuda")
+    HK.logits_tc(pair, wf, tc, pst)
+    _, pst_ref = HK.ln0_fp32(pair, EPS, stats=True)
+    assert pst_ref is not None
+    torch.testing.assert_close(pst[:, 1], pst_ref[:, 1], rtol=1e-5, atol=0)
+    torch.testing.assert_close(pst[:, 0], pst_ref[:, 0], rtol=1e-5, atol=1e-5)
+
+
+@requires_h100
+@pytest.mark.parametrize("dp", [128, 256])
+@pytest.mark.parametrize("dtype", DTYPES, ids=IDS)
+@pytest.mark.parametrize("off", [0.0, 6.0])
+def test_hoist_bwd_tc_error_class_of_fma(dtype: torch.dtype, dp: int, off: float) -> None:
+    """``hoist.hoist_bwd_tc`` (d LN0, the LN0 backward and dW' of one block in one pass, error-compensated TF32 mma) against fp64: d pair and dW'
+    stay within 2x of the exact fp32 FMA / GEMM path's error (max-abs relative to the max)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+    from miniworld_engine.kernels.integrations.bias_only_dit_hoist import hoist_bwd_exact
+
+    g = torch.Generator(device="cuda").manual_seed(2)
+    n = 256 * 256
+    x = torch.randn(n, dp, device="cuda", generator=g)
+    x[:, 0] += off
+    x = x.to(dtype)
+    gam = 1 + 0.1 * torch.randn(dp, device="cuda", generator=g)
+    wf = ((torch.randn(16, dp, device="cuda", generator=g) * 0.5) * gam).contiguous()
+    db = torch.randn(16, n, device="cuda", generator=g).contiguous()
+    xd = x.double().requires_grad_(True)
+    y = F.layer_norm(xd, (dp,), None, None, EPS)
+    (y @ wf.double().t()).backward(db.double().t())
+    dx_ref, dw_ref = xd.grad, db.double() @ y.detach()
+    assert dx_ref is not None
+    old = HK.OPT["bwd_tc"]
+    try:
+        HK.OPT["bwd_tc"] = False
+        dx0, dw0 = hoist_bwd_exact(x, wf, db, EPS, 64)
+    finally:
+        HK.OPT["bwd_tc"] = old
+    dx1, dw1 = HK.hoist_bwd_tc(x, db, wf)
+
+    def rel(a: torch.Tensor, b: torch.Tensor) -> float:
+        return ((a.double() - b).abs().max() / b.abs().max()).item()
+
+    assert rel(dx1, dx_ref) <= 2.0 * rel(dx0, dx_ref), f"d pair {rel(dx1, dx_ref):.3e} vs FMA path {rel(dx0, dx_ref):.3e}"
+    assert rel(dw1, dw_ref) <= 2.0 * rel(dw0, dw_ref), f"dW' {rel(dw1, dw_ref):.3e} vs FMA path {rel(dw0, dw_ref):.3e}"
