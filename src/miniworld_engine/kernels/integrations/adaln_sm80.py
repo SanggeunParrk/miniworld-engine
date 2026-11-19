@@ -21,6 +21,7 @@ import weakref
 from typing import cast
 
 import torch
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
@@ -142,7 +143,7 @@ class Branch:
         """``fn()`` on the side stream (it may allocate); returns its tensor."""
         self.side.wait_stream(self.main)
         for t in inputs:
-            t.record_stream(self.side)
+            _record_stream(t, self.side)
         with torch.cuda.stream(self.side):
             out = fn()
         self.outs.append(out)
@@ -159,13 +160,13 @@ class Branch:
         if event is not None:
             self.main.wait_event(event)
             for t in outs:
-                t.record_stream(self.main)
+                _record_stream(t, self.main)
 
     def join(self) -> None:
         if self.outs:
             self.main.wait_stream(self.side)
             for t in self.outs:
-                t.record_stream(self.main)
+                _record_stream(t, self.main)
 
 
 def _mm_op(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:

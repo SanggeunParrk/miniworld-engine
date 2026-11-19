@@ -27,6 +27,7 @@ from __future__ import annotations
 import functools
 
 import torch
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 D_MSA, D_PAIR, HEADS, D_HIDDEN = 256, 512, 8, 32
 HC = HEADS * D_HIDDEN
@@ -148,7 +149,7 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
         side.wait_stream(main)
         with torch.cuda.stream(side):
             w = e.softmax_keys(e.pair_logits(zf, lnz_w, lnz_b, wb, eps_z, 3 if _sm120() else 0), key, L)
-        w.record_stream(main)
+        _record_stream(w, main)
     mf = msa[0].reshape(S * L, D_MSA)
     y, mmean, mrstd = g.ln_fwd(mf, lnm_w, lnm_b, eps_m, L, False)
     if _sm120():  # the RTX 5090: one CUTLASS GEMM stores v head-major and g natural ("vg" is then g alone: its gate column 0)

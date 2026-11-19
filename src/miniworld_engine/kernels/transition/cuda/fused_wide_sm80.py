@@ -15,6 +15,7 @@ fixed order (no atomics), so a replay is bit-identical.
 from pathlib import Path
 
 import torch
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 from ... import _capture
 from ..._compile import opaque
@@ -460,9 +461,9 @@ def _bwd_saved_overlap(ext, dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, gdt, w
     main.wait_stream(side)
     # the side stream's outputs are used (and freed) on the main stream, its operands were read on the side stream
     for t in (dws, dwab):
-        t.record_stream(main)
+        _record_stream(t, main)
     for t in (dy, hid, dab, xn):
-        t.record_stream(side)
+        _record_stream(t, side)
     return dx, dgam, dbeta, dwab.to(wdt), dws.to(wdt)
 
 

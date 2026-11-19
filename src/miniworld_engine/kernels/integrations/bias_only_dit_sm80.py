@@ -33,6 +33,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import torch
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
@@ -210,11 +211,11 @@ def _fwd(
             main.wait_stream(side)
             for t in (P, Pt) if save else (P,):
                 if t is not None:
-                    t.record_stream(main)
-            pair.record_stream(side)
-            wcm.record_stream(side)
+                    _record_stream(t, main)
+            _record_stream(pair, side)
+            _record_stream(wcm, side)
             if mask is not None:
-                mask.record_stream(side)
+                _record_stream(mask, side)
         else:
             vg = torch.mm(x, wvg.t())  # [M, 2 da]
             bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0)  # [H, L, L], natural units
@@ -728,11 +729,11 @@ def _block_eval_sm120(module, single, cond, pair, mask) -> torch.Tensor:
             g2, gc, aff2 = cond_work()
         main.wait_stream(side)
         for t in (P, g2, gc, aff2):
-            t.record_stream(main)
+            _record_stream(t, main)
         for t in (pr, cs, wcm, wsg, bs, wsc, bsc):
-            t.record_stream(side)
+            _record_stream(t, side)
         if mask is not None:
-            mask.record_stream(side)
+            _record_stream(mask, side)
         att = torch.empty(m, da, device=single.device, dtype=dt)
         core = _core()
         (core.PvGateTF32 if dt is F32 else core.PvGate)(heads, da // heads)(vg[:, :da], P.view(heads * length, length), att, a_, g=vg[:, da:])
@@ -828,14 +829,14 @@ def _block_eval_sm120_f32(module, single, cond, pair, mask) -> torch.Tensor:
         xa, _ = _adaln_k().epilogue(xs, t3[0], ada.to_scale.bias, float(ada.ln_in.eps))
         vg = _mm32(xa, wvg)
         main.wait_stream(side)
-        P.record_stream(main)
+        _record_stream(P, main)
         if gs is not None:
-            gs.record_stream(main)
-            cs.record_stream(side)
+            _record_stream(gs, main)
+            _record_stream(cs, side)
         for t in (pr, wcm):
-            t.record_stream(side)
+            _record_stream(t, side)
         if mask is not None:
-            mask.record_stream(side)
+            _record_stream(mask, side)
         att = torch.empty(m, da, device=single.device, dtype=F32)
         core.PvGateTF32(heads, da // heads)(vg[:, :da], P.view(heads * length, length), att, a_, g=vg[:, da:])
         y = _mm32(att, at.to_out.weight)
