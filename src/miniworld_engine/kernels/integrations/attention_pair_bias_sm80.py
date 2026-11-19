@@ -21,12 +21,12 @@ import functools
 import math
 
 import torch
-from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._key_len import kernel_mask
 from miniworld_engine.kernels._nvcc import build_failed
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 DP = 128
 #: the inference core's ``bn`` (key tile) launch argument: the A100 port's verified default

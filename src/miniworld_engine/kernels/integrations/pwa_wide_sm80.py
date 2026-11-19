@@ -27,6 +27,7 @@ from __future__ import annotations
 import functools
 
 import torch
+
 from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 D_MSA, D_PAIR, HEADS, D_HIDDEN = 256, 512, 8, 32

@@ -33,10 +33,10 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import torch
-from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 from miniworld_engine.kernels.integrations.adaln_sm80 import _tf32, cached
 from miniworld_engine.kernels.integrations.conditioned_transition_sm80 import _train_bwd_fake as _ct_train_bwd_fake
 from miniworld_engine.kernels.integrations.conditioned_transition_sm80 import _train_fwd_fake as _ct_train_fwd_fake

@@ -154,7 +154,7 @@ def _no_autocast(fn):
 
         run.__signature__ = inspect.signature(fn, eval_str=True)
         del run.__wrapped__
-    except Exception:  # noqa: BLE001 - an unresolvable hint: register fn itself, unwrapped
+    except Exception:
         return fn
     return run
 
