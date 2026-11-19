@@ -254,3 +254,126 @@ round; the e4m3 `expand` is the placement that the inference `safe` preset alrea
   stays opt-in (`MINIWORLD_TOKEN_DIT_FP8_TRAIN=expand`, gate 16384) until an end-level training curve exists. Candidates for the main line: `nox` + `hsave` (bit-identical, 1.0-1.5 %) as default-route changes with a
   `backend_versions` bump (cuda only) — a decision for the release owner, not done here.
 - Does not pay (unchanged): dgrad placements, attention-side projections, wgrad, attention core.
+
+## Token DiT round 4 (branch `fp8t4/tokendit`): bytes, finer scales, fused cast, real end-level check
+
+Base `fp8t3/tokendit` (71d7d86d4). Scripts `~/miniworld-engine-scratch/fp8t4-tokendit/{scripts,res,ft}`; same-process CUDA-graph timing as round 3
+(`tools/fp8_train_bench/`), baseline = the 3.0.1 default. H100 node01 / node02, 2026-11-19.
+
+### (1) Byte ledger (default route, bf16 master, 3.0.1)
+
+Saved activations (what autograd keeps between forward and backward, `memled.py`; u = one [M, 768] bf16 tensor = 1.5 KB per row):
+
+| tensor | KB / row | share | consumer in the backward |
+|---|---|---|---|
+| qkvg (q, k, v, g raw) | 6.1 (4 u) | 19 % | gate g, QK-norm backward |
+| ab = [a, b] of the SwiGLU (expand output) | 6.1 (4 u) | 19 % | swiglu_bwd |
+| q, k, v copies (qn, kn, vc) | 4.6 (3 u) | 14 % | attention core backward |
+| h (hsave: the forward's SwiGLU output) | 3.1 (2 u) | 10 % | dWsq wgrad |
+| x1 (fp32 residual after the attention branch) | 3.1 (2 u) | 10 % | AdaLN-b backward |
+| xa, og, y, xt, z | 7.7 (5 u) | 24 % | wgrads, gate gradients |
+| rest (cond tables, stats, pair, bias) | per call, not per row | | |
+| total (A48 L384) | 31.9 | 587 MB | |
+
+| A:L (M) | saved MB | peak fwd MB | peak fwd + bwd MB (over weights + inputs) | `rec` peak | rx1 saved / peak |
+|---|---|---|---|---|---|
+| 48:128 (6144) | 192 | 220 | 665 | 647 | |
+| 48:256 (12288) | 385 | 442 | 1264 | 1225 | |
+| 48:384 (18432) | 587 | 672 | 1892 | 1836 | 531 / 1780 |
+| 48:768 (36864) | 1167 | 1337 | 3789 | 3675 | 1054 / 3562 |
+| 8:384 (3072) | 104 | 118 | 422 | 413 | |
+
+The backward temporaries (~1.2 GB at M 18432) dominate the single-block peak; for a stack of N blocks the saved column is N times.
+Largest A at L 384 on one H100 (80 GB, fwd + bwd of one block, `res/oom1.jsonl`, `oom2.jsonl`): default A 1536 fits (M 589824, peak 56.0 GB), 1792 OOM;
+`rec` (expand + nox + hsave) 1792 fits (M 688128, peak 77.4 GB), 2048 OOM; `rec` + rx1 1792 (75.3 GB). I.e. +17 % rows from the byte reductions.
+
+Per-kernel DRAM bytes (ncu, A48 L384 default step, `res/ledger_d384.md`): 3274 MB read + 1561 MB written per step = 4.8 GB in 3.38 ms (ncu clocks): 1.4 TB/s on
+average. The step is not DRAM-bound as a whole: GEMMs ~1.1 ms, attention (fwd, dqb, dkv) ~0.8 ms at the tensor / latency limits; the row kernels (~1.1 ms, 33 %) run at
+2.3-2.9 TB/s: res_adaln_b_bwd 350 MB / 150 us, swiglu_bwd 317 MB / 110 us, qknorm_bwd 267 MB / 109 us, adaln_a_bwd 239 MB / 96 us, sample_sum2 173 MB / 62 us.
+A byte only pays where a kernel that has to run anyway stops writing / reading it.
+
+### (2) Saved activations in 8 bit: no-go; the bit-identical ones: yes
+
+An 8-bit copy of a saved tensor costs an extra write in the kernel that makes it (the producers are cuBLAS GEMMs, which cannot write e4m3 with row scales)
+and saves the same bytes at the read: time-neutral at best; the gain is memory only. Measured error of the dominant candidate, `ab` stored as e4m3 with
+a per-row (or per-half-row) scale and dequantized in `swiglu_bwd` (emulation in the real kernel path, `abq_patch.py`, A48 L128, rel rms % vs fp64):
+
+| variant | out | d single | d cond | dW expand | dW squeeze | dW query |
+|---|---|---|---|---|---|---|
+| default | 0.31 | 0.25 | 0.68 | 0.65 | 0.62 | 1.01 |
+| default + ab e4m3 (row scale) | 0.31 | 0.89 | 2.84 | 2.89 | 4.18 | 1.32 |
+| default + ab e4m3 (per half) | 0.31 | 0.89 | 2.85 | 2.89 | 4.18 | 1.32 |
+| default + ab fp16 (same bytes as bf16) | 0.31 | 0.25 | 0.68 | 0.65 | 0.62 | 1.01 |
+| rec (expand) | 2.16 | 1.22 | 4.21 | 4.51 | 5.40 | 1.56 |
+| rec + ab e4m3 | 2.16 | 1.48 | 5.05 | 5.31 | 5.40 | 1.79 |
+
+ab in e4m3 saves 3 KB / row (9.5 % of the saved bytes, 56 MB at M 18432) and moves the gradient error of the transition 4x (0.7 -> 2.9 %). Not built as a kernel.
+qkvg / qn / kn / vc in e4m3 is the placement that moved FoldBench in inference: not tried. x1 as bf16 would change the forward output (the residual stream is fp32).
+Bit-identical byte lever tried: `rx1` (x1 is not stored: `res_c` and the AdaLN-b backward recompute x1 = x + sigmoid(Gg + bg1) y from the block input; same fp32
+expression, output and every gradient bit-identical, tests): saved 589 -> 531 MB (-9.9 %), peak -3 %, but the step is 0.3-0.5 % SLOWER (the recomputation costs more than
+the 2 u write it saves; bytes 0.978 / 0.989 -> 0.983 / 0.992 at M 18432). Memory option only (`MINIWORLD_TOKEN_DIT_FP8_TRAIN=...,rx1`), not in `recommended`.
+
+### (3) Finer-grained scales: no help (the error is the 3-bit mantissa, not the scale)
+
+Error floor of the expand GEMM alone (real block activation xt [3072, 768] x [Wa; Wb]^T, fake quantization, fp32 accumulate, rel rms vs fp64, `gemm_floor.py`):
+
+| quantization | rel rms % |
+|---|---|
+| bf16 cuBLAS | 0.15 |
+| shipped: activation per row, weight per output channel (e4m3) | 3.34 |
+| activation 1x128 tiles, weight 128x128 blocks | 3.31 |
+| activation 1x64, weight 64x64 | 3.26 |
+| activation per row only (weight exact) | 2.36 |
+| weight per channel only (activation exact) | 2.36 |
+| activation hi + lo (2 x e4m3), weight per channel | 2.36 |
+| activation hi + lo and weight hi + lo (4 GEMMs, ~fp16) | 0.08 |
+
+An e4m3 element has a 2.6 % rms rounding error whatever the scale granularity (the data have no dynamic-range problem: per-row amax / median ~ 4); tiles do not move it. Only
+both operands in two e4m3 pieces (4x the GEMM work) reach 0.08 %, which cannot beat bf16. DeepSeek's 0.25 % is a loss-level number with fp32 promotion over 128-element
+tiles on far larger models; the target <= 1.5 % rms gradient error is not reachable with a single e4m3 pass of either operand (each one alone gives 2.4 %).
+
+### (C) Fused cast: `xt` e4m3 made in `res_adaln_b` (`res_adaln_b_q8`)
+
+The row max of the bf16-rounded xt is a block max in the AdaLN-b kernel (one block per row); the e4m3 copy and the row scale are written next to xt. Bit-identical to the
+separate `q8_rows` pass (sha1 of output and 27 gradients, A48 L384, A8 L384, A5, A6 L200, A48 L128). Step (`rec` = expand + nox + hsave, cool / sustained, vs control):
+unfused 0.973 / 0.983 -> fused 0.971 / 0.980 at M 18432 (0.981 / 0.987 -> 0.980 / 0.985 at 36864): -0.2 / -0.3 %, as predicted. `MINIWORLD_TOKEN_DIT_FP8_TRAIN_FUSE_Q8=0` restores the pass.
+
+### (4) Step time against the 3.0.1 default (same process, one CUDA graph per variant, cool / sustained, final tree, job 59085 `res/speed6.jsonl`)
+
+| A:L (M) | 3.0.1 default ms | control / control2 | bytes (nox, hsave) | rec unfused | rec (expand + nox + hsave, fused q8) |
+|---|---|---|---|---|---|
+| 48:384 (18432) | 3.038 / 3.033 | 0.989 / 0.999, 0.990 / 0.999 | 0.979 / 0.988 | 0.973 / 0.983 | **0.971 / 0.980** |
+| 48:768 (36864) | 6.830 / 6.946 | 0.994 / 1.002, 0.996 / 1.001 | 0.985 / 0.993 | 0.981 / 0.987 | **0.980 / 0.985** |
+| 48:256 (12288) | 1.985 / 1.967 | 0.984 / 1.001, 0.987 / 0.999 | 0.973 / 0.989 | gated = bytes | 0.975 / 0.989 (gated) |
+| 48:128 (6144) | 1.061 / 1.032 | 0.971 / 0.997, 0.966 / 0.992 | 0.955 / 0.981 | gated | 0.954 / 0.980 (gated) |
+| 8:384 (3072) | 0.776 / 0.745 | 0.958 / 0.997, 0.960 / 0.997 | 0.953 / 0.991 | gated | 0.952 / 0.990 (gated) |
+
+Against the same-cubin control (sustained 0.999-1.002) `rec` saves 1.7-1.9 % at M >= 18432 and `bytes` alone 0.9-1.1 %; below the gate (M < 16384) only `bytes` is on: 0.2-1.1 % sustained
+(at the noise level for 3072 rows). Earlier job 59002 (rx1 included, `res/speed5.jsonl`) agrees within 0.3 %. The FP8 part of `rec` is therefore ~0.7-0.9 % of the step.
+
+### (5) Real end-level check: Protenix v1 fine-tune, paired A/B (`ft/`, `res/real_ab.md`)
+
+Real recipe (`scripts/train_protenix1.py --recipe protenix`, resumed from the 1400-step engine fine-tune checkpoint, the lr at 7e-4), real PDB data stream (same seed -> the same
+12 batches / noise draws in each run), effective batch 256 on ONE GPU, `--precision bf16` (the whole network, the token DiT included, under the bf16 autocast, so the block
+under test is the bf16 training block at A 48, L 384: M 18432 >= the FP8 gate; the production recipe `af3_default` keeps the diffusion head in fp32, where this route is inactive), `--step-graph`.
+Diffusion loss per step (mean of the 48 samples, the same samples):
+
+| run | steps 1400 .. 1411 mean diffusion loss | paired gap vs bf16 default |
+|---|---|---|
+| A bf16 default (3.0.1 route) | 0.0808 | - |
+| B FP8 `rec` (expand + nox + hsave) | 0.0824 | +1.96 % (every step +1.5 .. +2.7 %, all 12 positive) |
+| C `af3_default` (fp32 diffusion head), 6 steps | 0.0775 (A over the same 6: 0.0817) | -5.1 % |
+
+Bit-identical byte reductions leave the loss unchanged by construction. The FP8 `expand` in 24 DiT blocks adds a systematic +2 % to the diffusion loss at fixed weights
+(about a third of the penalty of running the diffusion head in bf16 instead of fp32 at all, which the production recipe forbids). The synthetic distillation (<= 0.02 %)
+did not predict this: the FoldBench lesson again. Round-trip: the first run (job 59009) gave NaN from step 1400: a real weight output channel with amax ~ 1e-37 made
+the per-channel scale 1e-39 and 1 / scale = inf; every quantizer now floors the scale at 1e-30 (`test_tiny_and_zero_rows_stay_finite`), the unit tests and the random-weight runs had never seen such a channel.
+
+### Verdict (round 4)
+
+- FP8 `expand` for training: NO-GO as a recommendation. The step gain is 0.7-0.9 % (inside the 1 % control spread), the gradient error of the transition 4-5 %, and the real
+  fine-tune shows +2 % diffusion loss at fixed weights. Kept opt-in (`MINIWORLD_TOKEN_DIT_FP8_TRAIN=expand`, gate 16384, default off) for the record; `RECOMMENDED` stays `expand + nox + hsave` only as the opt-in preset of
+  the switch `MINIWORLD_FP8_TRAIN=1` (a release owner should drop `expand` from it: see the table, a one-line change).
+- The bit-identical byte reductions `nox` + `hsave` are the whole win: 0.9-1.1 % sustained (1.7-2.2 % cool) at M >= 18432, -0.2 .. -1.1 % below, peak -3 %, largest A at L 384 1536 -> 1792 (+17 %), output and 27 gradients
+  bit-identical to 3.0.1. Release candidate: branch `fp8t4/tokendit-bytes-default` (see the report: diff, `TokenDiTProtenix.backend_versions["cuda:h100_sm90"]` 5 -> 6, 292 accuracy + 292 speed cells owed on h100_sm90).
+- Finer scales, 8-bit saved activations (ab), `rx1`: no-go (above). Fused q8: kept (-0.2 / -0.3 %, bit-identical).
