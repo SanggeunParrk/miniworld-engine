@@ -323,11 +323,14 @@ struct LnBwdParams {
   const __nv_bfloat16* dout;    // [T][D] the module's layout
   const float* gamma;           // [D] fp32
   __nv_bfloat16* dpair;         // [T][D] the module's layout
+#ifdef TRIATTN_SM120
+  __nv_bfloat16* xh_out;        // RTX 5090 training: [T][D + 8] the forward's normalised input (ln_rows' bits, constant columns 1, 1, 0 ...) rebuilt here, or nullptr
+#endif
   size_t T;
   int L, H, transposed;
 };
 
-template <int D>
+template <int D, bool XH = false>
 __global__ void __launch_bounds__(256) ln_bwd_rows_kernel(const LnBwdParams p) {
   using S = RowShape<D>;
   extern __shared__ __align__(16) unsigned char smem_raw[];
@@ -396,6 +399,13 @@ __global__ void __launch_bounds__(256) ln_bwd_rows_kernel(const LnBwdParams p) {
     for (int i = 0; i < S::CPT; ++i) {
       const int ch = tl + i * S::TPR;
       if (ch >= S::NCH) continue;
+#ifdef TRIATTN_SM120
+      if constexpr (XH) {  // xh = bf16((x - mean) rstd): the arithmetic of ln_rows_kernel (the saved-xh path's bits)
+        __nv_bfloat16* xo = p.xh_out + tt * (D + 8);
+        stg128(xo + ch * 8, make_uint4(pack_bf16(xh[i][0], xh[i][1]), pack_bf16(xh[i][2], xh[i][3]), pack_bf16(xh[i][4], xh[i][5]), pack_bf16(xh[i][6], xh[i][7])));
+        if (tl == 0 && i == 0) stg128(xo + D, make_uint4(0x3f803f80u, 0u, 0u, 0u));  // the constant columns: 1, 1, 0 ...
+      }
+#endif
       const uint4 ou = ldg128(p.dout + row * D + ch * 8);
       const uint32_t ow[4] = {ou.x, ou.y, ou.z, ou.w};
       uint32_t r[4];

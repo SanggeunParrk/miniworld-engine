@@ -559,6 +559,29 @@ def _training_weights(wa, wb, ws, dtype):
     return tuple(w.to(dtype).contiguous() for w in (wa, wb, ws))
 
 
+def _recompute_xn(x: torch.Tensor, ln: bool, h: int) -> bool:
+    """RTX 5090, bf16 training on the one-kernel backward: ``xn`` [M, D] (36 MiB at L 384) is not kept with the other saved tensors; the backward rebuilds it
+    (``_xn_rebuild``).  Off sm_120 (A100) and on the other backward chains the saved set is unchanged."""
+    return ln and x.dtype is torch.bfloat16 and is_sm120(x.device) and _one_kernel_bwd(x.shape[0], x.shape[1], h, x.device)
+
+
+def _xn_rebuild_fake(x, stats, gamma, beta):
+    return torch.empty_like(x)
+
+
+@opaque(fake=_xn_rebuild_fake, name="transition_wide_xn_rebuild_sm80")
+def _xn_rebuild(x: torch.Tensor, stats: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
+    """xn = bf16(fma((x - mean) rstd, gamma, beta)) from the saved (mean, rstd): the forward's arithmetic, by the TriMul build's ``ln_apply`` (no source of this
+    family changes: the A100 cache keys of the Transition builds are untouched)."""
+    if _is_fake(x, stats):
+        return _xn_rebuild_fake(x, stats, gamma, beta)
+    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide as _trimul
+
+    xn = torch.empty_like(x)
+    _trimul._lib().ln_apply(x, stats, _f32(gamma, False), _f32(beta, False), xn)
+    return xn
+
+
 class _WideTransitionSM80(torch.autograd.Function):
     """``y = transition(x) + x`` (``ln``) or the bare FFN ``squeeze(silu(a) b)``; the forward saves xn and (mean, rstd) (the FFN saves x only)."""
 
@@ -571,13 +594,17 @@ class _WideTransitionSM80(torch.autograd.Function):
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         wa, wb, ws = _training_weights(wa, wb, ws, x.dtype)
         out, xn, stats, hid, ab = _fwd_launch(flat, gamma, beta, wa, wb, ws, float(eps), True, ln)
-        ctx.save_for_backward(flat, xn, stats, gamma, wa, wb, ws, hid, ab)
+        if _recompute_xn(flat, ln, wa.shape[0]):
+            xn = flat.new_empty((0,))  # freed here: the backward rebuilds it from (mean, rstd), gamma and beta
+        ctx.save_for_backward(flat, xn, stats, gamma, wa, wb, ws, hid, ab, beta)
         ctx.shape, ctx.ln = shape, ln
         return out.reshape(shape)
 
     @staticmethod
     def backward(ctx, dy):
-        flat, xn, stats, gamma, wa, wb, ws, hid, ab = ctx.saved_tensors
+        flat, xn, stats, gamma, wa, wb, ws, hid, ab, beta = ctx.saved_tensors
+        if ctx.ln and not xn.numel():  # RTX 5090: xn was not saved (_recompute_xn)
+            xn = _xn_rebuild(flat, stats, gamma, beta)
         if not any(ctx.needs_input_grad[1:6]):
             dx = _bwd_dx(
                 dy.reshape(-1, dy.shape[-1]).contiguous(),
