@@ -180,7 +180,7 @@ __global__ void __launch_bounds__(256, BN == 64 ? 2 : 1) k3w_kernel(const K3wPar
     __syncthreads();
     tile_store16<128, BN, 256>(s0, dst + (size_t)t0 * p.D + n0, p.D);
   };
-  if (p.ps != nullptr) { emit(wp, p.ps); emit(wg, p.gs); }
+  if (p.ps != nullptr) { emit(wp, p.ps); if (p.gs != nullptr) emit(wg, p.gs); }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------- k3s (D64 inference)

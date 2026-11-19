@@ -293,6 +293,11 @@ def _grouped_front(k1, zf, pk, st_in, mask, x, hs, n, direction, eps_in, fuse_z)
             _cp.planes(0 if c0 < h else 1, a, b, x[c0 : c0 + GROUP])
 
 
+def _recompute_gate(z: torch.Tensor) -> bool:
+    """RTX 5090 bf16 training: the output gate's pre-activation g' [T, D] is recomputed in the backward (x_n W_g^T, one GEMM) instead of saved with p'."""
+    return z.dtype is torch.bfloat16 and _d128.on_sm120()
+
+
 def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     E = _lib()
     z = leaves[0]
@@ -356,7 +361,9 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
         E.stats_cm(x.view(hs, T), st_out, eps_out)
     out = torch.empty_like(zf)
     if save:
-        ps, gs = torch.empty_like(zf), torch.empty_like(zf)
+        ps = torch.empty_like(zf)
+        # RTX 5090, bf16: g' is not kept (36 MiB at L 384); the backward recomputes it from x_n (``_run_backward_body``) -- k3w skips its store when gs is empty
+        gs = zf.new_empty((0,)) if _recompute_gate(z) else torch.empty_like(zf)
     else:
         ps = gs = zf.new_empty((0,))
     k3 = E.k3w if save else E.k3w_tuned
@@ -413,7 +420,7 @@ def _forward_train_fake(leaves, mask, ds, direction, eps_in, eps_out):
         torch.empty((T, 2), dtype=f32, device=z.device),
         torch.empty((T, 2), dtype=f32, device=z.device),
         z.new_empty((T, d)),
-        z.new_empty((T, d)),
+        z.new_empty((0,)) if _recompute_gate(z) else z.new_empty((T, d)),
     ]
 
 
@@ -521,6 +528,11 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     is32 = z.dtype is torch.float32
     dyf = _aligned(dy.reshape(T, d).to(z.dtype).contiguous())
     xcm = x.view(hs, T)
+    xn = None
+    if gs.numel() == 0:  # g' (0.5-scaled gate pre-activation) was not saved: x_n W_g^T / 2 (0.5 W_g is exact in bf16), x_n = LN_in(z) with its affine
+        xn = torch.empty_like(zf)
+        E.ln_apply(zf, st_in, gi32, bi32, xn)
+        gs = torch.mm(xn, (cw[4] * 0.5).t())
     # ---- output side: gate gradients, LayerNorm_out backward
     nb = E.gate_bwd_blocks(T, d, is32)
     dcat = zf.new_empty((T, 4 * hs + d))  # [dpre (k1w packed order) | dg of the output gate]
@@ -560,8 +572,9 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     # ---- input side: pre-activation gradients (k1wb), weight and input gradients
     E.k1wb(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, dplanes.view(2 * hs, T), dcat, n)
     del dplanes
-    xn = torch.empty_like(zf)
-    E.ln_apply(zf, st_in, gi32, bi32, xn)
+    if xn is None:
+        xn = torch.empty_like(zf)
+        E.ln_apply(zf, st_in, gi32, bi32, xn)
     dw1 = _gemm_tk(dcat, xn)  # [4 Hs + D, D] fp32, k1w packed order then W_g
     del xn
     dxn = _dxn(dcat, pk["wdx"], hs, n)  # [T, D]

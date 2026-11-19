@@ -123,18 +123,30 @@ void wpack(torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tensor 
 
 // --------------------------------------------------------------------------------------------------------------------------------------------- k1w
 // D64 persistent front: grid = the resident CTAs (one occupancy query and smem attribute per HS instantiation)
-template <int HS>
-void launch_k1w64(const a100::K1wParams& p) {
+static int g_k1nz = -1;   // k1w64 input buffers: -1 = the rule (RTX 5090: 1, every other card 2), 1 / 2 = forced (A/B knob)
+void k1nz_set(int64_t v) { g_k1nz = (int)v; }
+template <int HS, int NZ>
+void launch_k1w64_nz(const a100::K1wParams& p) {
   static int grid_cap = 0;
   if (grid_cap == 0) {
-    set_smem(a100::k1w64_kernel<HS>, a100::K1w64<HS>::SMEM);
+    set_smem(a100::k1w64_kernel<HS, NZ>, a100::K1w64<HS, NZ>::SMEM);
     int per_sm = 0;
-    C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, a100::k1w64_kernel<HS>, 256, a100::K1w64<HS>::SMEM));
+    C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, a100::k1w64_kernel<HS, NZ>, 256, a100::K1w64<HS, NZ>::SMEM));
     grid_cap = std::max(1, per_sm) * num_sms();
   }
   // G column groups of CTAs (K1w64): the resident CTAs split evenly between the groups, each group walks every token tile
-  constexpr int G = a100::K1w64<HS>::G;
-  a100::k1w64_kernel<HS><<<G * std::min(p.T / 128, std::max(1, grid_cap / G)), 256, a100::K1w64<HS>::SMEM, stream()>>>(p);
+  constexpr int G = a100::K1w64<HS, NZ>::G;
+  a100::k1w64_kernel<HS, NZ><<<G * std::min(p.T / 128, std::max(1, grid_cap / G)), 256, a100::K1w64<HS, NZ>::SMEM, stream()>>>(p);
+}
+template <int HS>
+void launch_k1w64(const a100::K1wParams& p) {
+#ifdef MWE_SM120
+  // RTX 5090 (100 KB of shared memory an SM): the two-buffer form (66 KB) is one CTA an SM; the one-buffer form (49 KB) is two, so the epilogue of one runs under the other's MMAs
+  const int nz = g_k1nz > 0 ? g_k1nz : 1;
+#else
+  const int nz = g_k1nz > 0 ? g_k1nz : 2;
+#endif
+  if (nz == 1) launch_k1w64_nz<HS, 1>(p); else launch_k1w64_nz<HS, 2>(p);
 }
 
 // D64 front, one CTA per token tile with all packed rows (k1t_kernel): -1 = the measured rule (hidden 128; hidden 64 from L 640 and wherever the planes are
@@ -274,7 +286,7 @@ void k3w(torch::Tensor x, torch::Tensor z, torch::Tensor wo3, torch::Tensor wg3,
          torch::Tensor sto, torch::Tensor sti, torch::Tensor ds, torch::Tensor out, torch::Tensor ps, torch::Tensor gs, int64_t L, double eps, bool fuse) {
   const int T = (int)z.size(0), D = (int)z.size(1), Hc = (int)x.size(0);
   TORCH_CHECK(T % 128 == 0 && D % 64 == 0 && Hc % 32 == 0 && x.size(1) == T && wo3.size(0) == D && wo3.size(1) == Hc, "k3w: shapes");
-  TORCH_CHECK((ps.numel() == 0) == (gs.numel() == 0), "k3w: ps and gs together");
+  TORCH_CHECK(gs.numel() == 0 || ps.numel() != 0, "k3w: gs needs ps");  // ps alone: the RTX 5090 backward recomputes g'
   TORCH_CHECK(!fuse || (!is_f32(z) && Hc <= 128 && D <= 128 && sto.numel() == 2 * T), "k3w: the in-kernel statistics are bf16 with Hc, D <= 128");
   if (is_f32(z)) {
     a100::K3w32Params p;
@@ -496,6 +508,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("k1w", &k1w<false>);
   m.def("k1w_row_mask", &k1w<true>);
   m.def("k1t_set", &k1t_set);
+  m.def("k1nz_set", &k1nz_set);
   m.def("k1tw", &k1tw);
   m.def("k3w", &k3w<false>);
   m.def("k3w_tuned", &k3w<true>);
