@@ -33,3 +33,19 @@ def device_ext():
     from miniworld_engine.kernels.sampler_ops.cuda import ext as h100_ext
 
     return h100_ext()
+
+
+@functools.lru_cache(maxsize=None)
+def f32_ext():
+    """The fp32 PoolAtoms kernels (``sampler_ops_f32_sm80.cu``): A100 (sm_80) and RTX 5090 (sm_120a), one source."""
+    from ..._nvcc import ensure_cuda_home, gencodes, host_flags
+    from ..._sm120 import sm80_load_extension as load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="sampler_ops_f32_sm80",
+        sources=[str(_dir / "sampler_ops_f32_sm80.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80"), f"-I{_dir}"],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )

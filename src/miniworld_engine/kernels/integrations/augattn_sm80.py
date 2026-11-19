@@ -40,6 +40,7 @@ import torch
 import torch.nn.functional as F
 
 from miniworld_engine.kernels import _capture, _sm120
+from miniworld_engine.kernels import ieee_f32 as _ieee
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import build_failed
 
@@ -346,7 +347,7 @@ def _bias_into(
         )
     else:
         z, _, _ = torch.native_layer_norm(pair_b.reshape(length * length, dp), (dp,), None, None, EPS)
-        raw = torch.mm(pack[2] if f32 else pack[3], z.t()).view(heads, length, length)
+        raw = _ieee.torch_mm(pack[2] if f32 else pack[3], z.t()).view(heads, length, length)
         fill = MASKED if f32 else MASKED * math.sqrt(hd)
         out.fill_(fill)
         out[:, :length, :length].copy_(raw)
@@ -447,7 +448,7 @@ def _fwd(
         cfg = 1 if m == 10240 or m >= 393216 else 3 if m >= 20480 else 0
         qkvg = atom_qkvg_resident_sm80.result(xs, wqkvg, bvec, cfg)
     else:
-        qkvg = torch.addmm(bvec, xs, wqkvg.t())  # [M, 4 d]
+        qkvg = _ieee.torch_addmm(bvec, xs, wqkvg.t())  # [M, 4 d]
     qk_saved = None
     if len(flat) == 2:  # the per-head RMSNorm of q and k (one weight [hd] each, shared by the heads), in fp32, written over their columns
         cols = qkvg[:, : 2 * d].view(m, 2, heads, hd)
@@ -635,8 +636,8 @@ def _fwd(
         cfg = 1 if save else (0 if m <= 5120 else 2 if m <= 10240 else 4)
         out, y, g2 = atom_output_fused_sm80.result(og, cs, wo, ws, bs, rs, save, cfg)
     else:
-        y = torch.mm(og, wo.t())
-        g2 = torch.addmm(bs, cs, ws.t())
+        y = _ieee.torch_mm(og, wo.t())
+        g2 = _ieee.torch_addmm(bs, cs, ws.t())
         out = torch.empty(m, d, device=dev, dtype=dt)
         sm80.res_gate(y, g2, rs, out)
     outs = [_unstage(out, a, batch, length, padded, d)]
@@ -649,7 +650,7 @@ def _fwd(
 
 def _mm32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """``a @ b`` with an fp32 result: bf16 operands accumulate in fp32 and round once at the end of the output (``out_dtype``), fp32 operands are the plain GEMM."""
-    return torch.mm(a, b, out_dtype=F32) if a.dtype is BF else torch.mm(a, b)
+    return torch.mm(a, b, out_dtype=F32) if a.dtype is BF else _ieee.torch_mm(a, b)
 
 
 def _bwd_fake(dout, x, cond, pair, kmask, params, saved, a, batch, length, heads, mask_kind):
@@ -777,7 +778,7 @@ def _bwd(
             p2 = pair_b.reshape(length * length, dp)
             zz, mean, rstd = torch.native_layer_norm(p2, (dp,), None, None, EPS)
             dwf_b = _mm32(dbb, zz)  # [H, dp]: the gradient of the natural-unit folded weight
-            dzh = torch.mm(dbb.t(), wf)  # [L L, dp]
+            dzh = _ieee.torch_mm(dbb.t(), wf)  # [L L, dp]
             dzs.append(
                 torch.ops.aten.native_layer_norm_backward(dzh, p2, (dp,), mean, rstd, None, None, [True, False, False])[0].view(
                     length, length, dp
@@ -814,10 +815,10 @@ def _bwd(
             )
             cols.copy_(dxn)
             flat_grads += [dwn, dbn]
-    dx = torch.mm(dqkvg, wqkvg)  # [M, d]
+    dx = _ieee.torch_mm(dqkvg, wqkvg)  # [M, d]
     dwqkvg = _mm32(dqkvg.t(), xs)  # [4 d, d]
     dbq = torch.sum(dqkvg[:, :d], dim=0, dtype=f32)
-    dcond = torch.mm(dg2, ws)  # [M, dc]
+    dcond = _ieee.torch_mm(dg2, ws)  # [M, dc]
     dws = _mm32(dg2.t(), cs)  # [d, dc]
     dbs = torch.sum(dg2, dim=0, dtype=f32)
     # the pair bias's parameter gradients: d wf (the folded weight, natural units) -> d to_bias.weight = d wf x ln_pair.weight, d ln_pair.weight = sum_h d wf x to_bias.weight

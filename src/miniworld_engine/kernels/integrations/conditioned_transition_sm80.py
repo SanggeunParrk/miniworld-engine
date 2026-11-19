@@ -28,12 +28,12 @@ from miniworld_engine.kernels.integrations.adaln_sm80 import (
     _mm,
     _mm_op,
     _period,
-    _tf32,
     _wgrad,
     cached,
     cast_params,
     like,
     master,
+    tf32_allowed,
 )
 
 BF = torch.bfloat16
@@ -225,8 +225,11 @@ def _gate_logits(cond, wsc, bsc):
     """g = cond Wsc^T + bsc in the operand dtype (bf16: the bias joins the GEMM's accumulator: one rounding; fp32: TF32)."""
     if cond.dtype is BF:
         return torch.addmm(bsc, cond, wsc.t())
-    with _tf32(True):  # the bias joins the GEMM here too (one cuBLAS epilogue, no extra pass over g)
-        return torch.addmm(bsc, cond, wsc.t())
+    from miniworld_engine.kernels import ieee_f32
+
+    if not tf32_allowed() and ieee_f32.supported_mm(cond, wsc.t()):  # IEEE fp32: the engine's GEMM with the bias in its epilogue
+        return ieee_f32.mm(cond, wsc.t(), bias=bsc)
+    return torch.addmm(bsc, cond, wsc.t())  # TF32 where torch allows it
 
 
 # -------------------------------------------------------------------------------------------------------------- training

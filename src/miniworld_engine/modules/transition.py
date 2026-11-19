@@ -65,9 +65,9 @@ class Transition(BackendModule, MasterWeights):
         "anthropic": 3,
         "anthropic:a100_sm80": 4,  # 2026-11-13: the A100 kit stack; the pair_c256_n4 exclusion is capability 9.0 only (A100: the provider cell serves)
         "cuda:h100_sm90": 7,
-        "cuda:a100_sm80": 6,
+        "cuda:a100_sm80": 7,  # 2026-11-19 (7): fp32 with TF32 off runs on the engine's IEEE fp32 CUDA chain (kernels/ieee_f32; was refused to Triton / PyTorch); TF32 and bf16 unchanged
         "triton:a100_sm80": 2,
-        "cuda:5090_sm120": 4,
+        "cuda:5090_sm120": 5,  # 2026-11-19 (5): the same IEEE fp32 chain (fp32 TF32-off training at 2048 / 4096 / 8192 rows and the 384-row no-grad calls fell to Triton)
         "triton:5090_sm120": 3,  # 2026-11-19 (3: + the sampler conditioning forward at 7680 rows, no grad, 8192-row no-grad forward, 1024-row train keys for chunk 3-5); fp32 TF32-off training at 2048 / 4096 / 8192 rows (augment chunk 8 / 12 / 24 x 384 tokens, d 384) has table entries (it hit OutOfResources on the default config); no kernel output changes
     }
     # 2026-11-14 (RTX 5090): cuda:5090_sm120 4 = calls past 64 x 65535 rows (L 2048 pair, D >= 256 eval) take 128-row tiles (they failed with a grid y
@@ -417,7 +417,7 @@ class Transition(BackendModule, MasterWeights):
         99 KB of shared memory a block): ``kernels/transition/cuda.transition_sm80`` (``fused_sm80`` at D 128 / n 4 with whole 256-row tiles and enough rows,
         ``fused_wide_sm80`` at D 64 / 128 / 256 / 384 / 512 / 768 with a hidden width a multiple of 64, any row count): bf16 activations,
         bf16 or fp32-master parameters, forward and backward; fp32 activations where torch allows TF32 (``fused_wide_sm80.transition_f32_sm80``:
-        fp16 products at TF32's rounding, a TF32 backward)."""
+        fp16 products at TF32's rounding, a TF32 backward) and, with TF32 off, IEEE fp32 (``kernels/ieee_f32``: the engine's own FFMA GEMMs, forward and backward)."""
         from miniworld_engine.kernels.transition.cuda import fused_fwd_sm80, fused_wide_sm80
 
         why = self._supports_engine(x)
@@ -429,6 +429,17 @@ class Transition(BackendModule, MasterWeights):
         if any(p.dtype not in (torch.bfloat16, torch.float32) for p in matrices) or len({p.dtype for p in matrices}) != 1:
             return "the projections must share one dtype, bfloat16 or float32"
         wa, ws = self.expand_a.weight, self.squeeze.weight
+        if x.dtype is torch.float32 and not fused_wide_sm80.tf32_allowed():
+            # fp32 with TF32 off = IEEE products (the 2026-11-06 rule): the engine's own IEEE fp32 CUDA chain (kernels/ieee_f32: FFMA GEMMs with the SwiGLU /
+            # residual / SwiGLU-backward epilogues, LayerNorm row kernels), any row count, forward and backward
+            from miniworld_engine.kernels import ieee_f32
+
+            if not ieee_f32.supported_transition(x, wa, ws):
+                return (
+                    f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no IEEE fp32 build takes it (D a multiple of 4 up to {ieee_f32.MAX_D}, "
+                    "hidden a multiple of 4)"
+                )
+            return None
         rows, limit = x.numel() // x.shape[-1], fused_fwd_sm80.max_rows(x.device, x.dtype)
         if rows > limit and torch.is_grad_enabled() and (x.requires_grad or any(p.requires_grad for p in self.parameters())):
             return (
@@ -436,10 +447,6 @@ class Transition(BackendModule, MasterWeights):
                 "grid); inference splits the rows, training does not"
             )
         if x.dtype is torch.float32:
-            from miniworld_engine.kernels.transition.cuda.fused_generic_sm90a import _tf32_allowed
-
-            if not _tf32_allowed():
-                return "float32 activations run on TF32 tensor cores only (torch does not allow TF32 here)"
             if not fused_wide_sm80.f32_supported(x, wa, ws):
                 return (
                     f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_80 fp32 build takes it (D in {fused_wide_sm80.F32_WIDTHS}, hidden a "

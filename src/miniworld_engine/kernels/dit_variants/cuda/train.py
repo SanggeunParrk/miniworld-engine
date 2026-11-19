@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from miniworld_engine.kernels import ieee_f32 as _ieee
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._compile import opaque
@@ -27,7 +28,7 @@ def _mm_t(a, b):
     """a^T b (a, b [M, *]) in fp32: bf16 products with fp32 accumulation (never rounded to bf16), TF32 under the caller's allow_tf32."""
     if a.dtype == torch.bfloat16:
         return torch.mm(a.t(), b, out_dtype=torch.float32)
-    return torch.mm(a.t(), b)
+    return _ieee.torch_mm(a.t(), b)
 
 
 # ====================================================================================================================== atom stack
@@ -265,11 +266,11 @@ def atom_fwd(
     else:
         ext.ln_mod_fwd(x, tab, [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SH_Q), cols(A_SH_K)], [xq, xk], st1, T, eps, sig)
     q = torch.addmm(bq.to(at), xq, w_q.t())
-    torch.mm(xk, w_kv[:D].t(), out=k)
-    torch.mm(xk, w_kv[D:].t(), out=v)
+    _ieee.torch_mm(xk, w_kv[:D].t(), out=k)
+    _ieee.torch_mm(xk, w_kv[D:].t(), out=v)
     g = buf["g"]
     if gating:
-        torch.mm(xq, w_gq[:D].t(), out=g)
+        _ieee.torch_mm(xq, w_gq[:D].t(), out=g)
     f32 = at == torch.float32
     if kq:
         qn, kn = buf["qn"], buf["kn"]
@@ -292,19 +293,19 @@ def atom_fwd(
         ext.gate_fwd(o, g, og)
     else:
         og = o
-    ya = torch.mm(og, w_o.t()) if proj else og
+    ya = _ieee.torch_mm(og, w_o.t()) if proj else og
     out, y2 = buf["out"], buf["y2"]
     ab, h = buf["ab"], buf["h"]
     if par:
-        torch.mm(xt, w_exp.t(), out=ab)
+        _ieee.torch_mm(xt, w_exp.t(), out=ab)
         ext.glu_fwd(ab, h, up)
-        torch.mm(h, w_sq.t(), out=y2)
+        _ieee.torch_mm(h, w_sq.t(), out=y2)
         ext.res_out_fwd(x, ya, tab, cols(A_G_A), y2, cols(A_G_T), out, T, False)
     else:
         ext.res_ln_fwd(x, ya, tab, cols(A_G_A), cols(A_SC_T), cols(A_SH_T), buf["xp"], xt, buf["st2"], T, eps, sig)
-        torch.mm(xt, w_exp.t(), out=ab)
+        _ieee.torch_mm(xt, w_exp.t(), out=ab)
         ext.glu_fwd(ab, h, up)
-        torch.mm(h, w_sq.t(), out=y2)
+        _ieee.torch_mm(h, w_sq.t(), out=y2)
         ext.res_out_fwd(buf["xp"], y2, tab, cols(A_G_T), None, 0, out, T, False)
     res = dict(buf, q=q, og=og, lse=lse, ya=ya if proj else ya.new_empty(0), w_gq=w_gq, w_kv=w_kv, w_o=w_o, w_exp=w_exp, w_sq=w_sq)
     return [res[n] for n in _ANAMES]
@@ -421,11 +422,11 @@ def atom_bwd(
         ext.res_bwd(dout, ya, tab, cols(A_G_A), dya, y2, cols(A_G_T), dy2, part, cols(A_G_A), cols(A_G_T), T, S, False)
     else:
         ext.res_bwd(dout, y2, tab, cols(A_G_T), dy2, None, 0, None, part, cols(A_G_T), 0, T, S, False)
-    dh = torch.mm(dy2, w_sq)
+    dh = _ieee.torch_mm(dy2, w_sq)
     dwsq = _mm_t(dy2, h)
     dab = torch.empty_like(ab)
     ext.glu_bwd(ab, dh, dab, up)
-    dt = torch.mm(dab, w_exp)
+    dt = _ieee.torch_mm(dab, w_exp)
     dwexp = _mm_t(dab, xt)
     if not par:
         dxp = torch.empty(M, D, device=dev, dtype=f32)
@@ -448,7 +449,7 @@ def atom_bwd(
             S,
             sig,
         )
-    dog = torch.mm(dya, w_o) if proj else dya
+    dog = _ieee.torch_mm(dya, w_o) if proj else dya
     dwo = _mm_t(dya, og) if proj else wo.new_empty(wo.shape, dtype=f32)
     dO = torch.empty(M, D, device=dev, dtype=at)
     dp = torch.empty(M, 4 * D, device=dev, dtype=at)  # [dg | dq | dk | dv]
@@ -512,14 +513,14 @@ def atom_bwd(
         dbq = qpart.sum(0)
         dwq_ln, dbq_ln, dwk_ln, dbk_ln = (torch.zeros(D, device=dev, dtype=f32) for _ in range(4))
     if gating:
-        dxq = torch.mm(dp[:, : 2 * D], w_gq)
+        dxq = _ieee.torch_mm(dp[:, : 2 * D], w_gq)
         dwgq = _mm_t(dp[:, : 2 * D], xq)
         dwg, dwq = dwgq[:D], dwgq[D:]
     else:
-        dxq = torch.mm(dp[:, D : 2 * D], w_gq)
+        dxq = _ieee.torch_mm(dp[:, D : 2 * D], w_gq)
         dwq = _mm_t(dp[:, D : 2 * D], xq)
         dwg = wg.new_empty(wg.shape, dtype=f32)
-    dxk = torch.mm(dp[:, 2 * D :], w_kv)
+    dxk = _ieee.torch_mm(dp[:, 2 * D :], w_kv)
     dwkv = _mm_t(dp[:, 2 * D :], xk)
     dx = torch.empty_like(x)
     if par:

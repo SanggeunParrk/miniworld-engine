@@ -701,6 +701,13 @@ def f32_available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     return f32_supported(x, wa, ws) and _loads()
 
 
+def tf32_allowed() -> bool:
+    """torch lets fp32 products run on TF32 tensor cores (``allow_tf32`` or a matmul precision other than "highest"): else fp32 means IEEE."""
+    from .fused_generic_sm90a import _tf32_allowed
+
+    return _tf32_allowed()
+
+
 def _f32_tiles(m: int, d: int, h: int, sm120: bool = False) -> tuple[int, int, int]:
     """(dual / gate tile config, squeeze tile config, squeeze K splits) of the fp32 bindings for an M-row call. Few rows: as many K splits (a divisor of the
     squeeze's K tiles, at most 8) as keep the squeeze within two CTAs per SM."""

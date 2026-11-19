@@ -24,6 +24,11 @@ def _cuda_h100(device: torch.device) -> str | None:
     return None
 
 
+def _sm80_class(device: torch.device) -> bool:
+    """A100 / RTX 5090: the cards of the sm_80 sources."""
+    return device.type == "cuda" and torch.cuda.get_device_capability(device) in ((8, 0), (12, 0))
+
+
 def _fp32_cuda(name: str, t: torch.Tensor, ndim: int, shape: tuple | None = None) -> str | None:
     if t.device.type != "cuda":
         return "the kernels run on CUDA tensors only"
@@ -290,7 +295,7 @@ class PoolAtoms(BackendModule):
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     # cuda:h100_sm90 2 (2026-11-12): the wide pooling kernel at 1024+ CTAs takes SUB = 4 (engine 2.4.4's), below SUB = 8 (same bits)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:h100_sm90": 2, "cuda:5090_sm120": 1}  # 2026-11-10: sm_80 paths; 2026-11-12: their sm_120a build
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 2, "cuda:5090_sm120": 2}  # 2026-11-19: fp32 atom features on the sm_80 / sm_120a build (sampler_ops_f32_sm80.cu), forward and backward  # 2026-11-10: sm_80 paths; 2026-11-12: their sm_120a build
 
     #: Channels of ``make_inputs``' atom features (the atom encoder's ``d_single``) and atoms per token (the token-atoms layout's width).
     _C, _A = 128, 24
@@ -314,10 +319,10 @@ class PoolAtoms(BackendModule):
         return {"x": x, "idx": idx, "gather_mask": gather_mask, "atom_mask": atom_mask}
 
     # ------------------------------------------------------------------------------------------------------------- engine kernels
-    def _supports_kernels(self, x, idx, gather_mask, atom_mask) -> str | None:
+    def _supports_kernels(self, x, idx, gather_mask, atom_mask, *, fp32: bool = False) -> str | None:
         if x.device.type != "cuda":
             return "the kernels run on CUDA tensors only"
-        if x.dtype != torch.bfloat16 or x.dim() != 3:
+        if (x.dtype != torch.bfloat16 and not (fp32 and x.dtype is torch.float32)) or x.dim() != 3:
             return f"x must be bf16 [S, Q, C], got {x.dtype} {tuple(x.shape)}"
         if idx.dim() != 2 or idx.dtype not in (torch.int32, torch.int64):
             return f"idx must be int32 / int64 [T, A], got {idx.dtype} {tuple(idx.shape)}"
@@ -333,7 +338,8 @@ class PoolAtoms(BackendModule):
         return None
 
     def _supports_cuda(self, x, idx, gather_mask, atom_mask) -> str | None:
-        why = self._supports_kernels(x, idx, gather_mask, atom_mask)
+        # fp32 atom features (the FoldForge training step runs the atom encoder in fp32): the sm_80 / sm_120a build has fp32 pooling kernels (sampler_ops_f32_sm80.cu)
+        why = self._supports_kernels(x, idx, gather_mask, atom_mask, fp32=_sm80_class(x.device))
         if why is None:
             c = x.shape[-1]
             why = None if c % 4 == 0 and c // 4 <= 1024 else f"the CUDA kernel needs C % 4 == 0 and C <= 4096, got C={c}"

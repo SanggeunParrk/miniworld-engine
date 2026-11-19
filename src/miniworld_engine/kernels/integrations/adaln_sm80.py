@@ -21,11 +21,11 @@ import weakref
 from typing import cast
 
 import torch
-from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import build_failed
+from miniworld_engine.kernels._streams import record_stream as _record_stream
 
 WIDTHS = (128, 384, 768, 1024)
 BF = torch.bfloat16
@@ -93,24 +93,31 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
 
 @contextlib.contextmanager
 def _tf32(on: bool):
-    """cuBLAS on TF32 tensor cores for the fp32 path's GEMMs, whatever the caller's allow_tf32 (restored after): the fp32 path is the TF32 recipe."""
-    if not on:
-        yield
-        return
-    old = torch.backends.cuda.matmul.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = True
-    try:
-        yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = old
+    """The fp32 path's GEMMs follow the CALLER's precision (the 2026-11-06 rule: fp32 with TF32 off is IEEE): nothing is forced here any more (it used to set
+    allow_tf32 for the cuBLAS calls, which ran 's1688' TF32 GEMMs under a caller that had TF32 off).  Kept as a no-op for the callers that still wrap a call in it."""
+    yield
+
+
+def tf32_allowed() -> bool:
+    return bool(torch.backends.cuda.matmul.allow_tf32) or torch.get_float32_matmul_precision() != "highest"
+
+
+def _fp32_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """fp32 ``a @ b`` as the caller's precision says: cuBLAS (TF32 tensor cores) where torch allows TF32, else IEEE fp32 on the engine's own CUDA GEMM
+    (``kernels/ieee_f32``; cuBLAS only for a shape it does not take: a dimension not a multiple of 4)."""
+    if not tf32_allowed():
+        from miniworld_engine.kernels import ieee_f32
+
+        if ieee_f32.supported_mm(a, b):
+            return ieee_f32.mm(a, b)
+    return torch.mm(a, b)
 
 
 def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """``a @ b`` with an fp32 result (the gradients' GEMMs): bf16 operands accumulate into an fp32 output, fp32 operands run on TF32 tensor cores."""
+    """``a @ b`` with an fp32 result (the gradients' GEMMs): bf16 operands accumulate into an fp32 output, fp32 operands follow the caller's TF32 setting."""
     if a.dtype is BF:
         return torch.mm(a, b, out_dtype=torch.float32)
-    with _tf32(True):
-        return torch.mm(a, b)
+    return _fp32_mm(a, b)
 
 
 def _wgrad(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -170,11 +177,10 @@ class Branch:
 
 
 def _mm_op(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """``a @ b`` in the operand dtype (the forward's GEMM: one rounding of the fp32 accumulator): bf16, or fp32 on TF32 tensor cores."""
+    """``a @ b`` in the operand dtype (the forward's GEMM: one rounding of the fp32 accumulator): bf16, or fp32 (TF32 where torch allows it, else IEEE)."""
     if a.dtype is BF:
         return torch.mm(a, b)
-    with _tf32(True):
-        return torch.mm(a, b)
+    return _fp32_mm(a, b)
 
 
 # ------------------------------------------------------------------------------------------------------------ inference

@@ -155,10 +155,14 @@ def atom_bwd_gate(
     return dz, dg, dcond2, hh, dab, pbsc
 
 
+def _tf32_allowed() -> bool:
+    return bool(torch.backends.cuda.matmul.allow_tf32) or torch.get_float32_matmul_precision() != "highest"
+
+
 def atom_tf32_supported(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor) -> bool:
     """The fp32 (TF32) fused tail's contract: fp32 rows, d_hidden = d_cond = 128, expansion 2 (inference only).  Not on the RTX 5090
     (beyond its 99 KB of shared memory a block)."""
-    if is_sm120(x.device):
+    if is_sm120(x.device) or not _tf32_allowed():  # the kernel is TF32 by construction: with TF32 off the IEEE path serves
         return False
     return (
         x.dtype is torch.float32

@@ -248,7 +248,8 @@ class _LocalAtomDiT(BackendModule):
     backends = ("pytorch", "anthropic", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
-        "cuda:a100_sm80": 4,
+        "cuda:a100_sm80": 5,  # 2026-11-19: fp32 with TF32 off is IEEE (the fp32 train GEMMs of dit_variants / augattn: kernels/ieee_f32)
+        "cuda:5090_sm120": 2,
     }  # 2026-11-10: kits; sm_80 paths; cuda:a100_sm80 3 (2026-11-13): a CTA whose keys are all masked writes its zero rows without computing (bitwise the same)
     # cuda:a100_sm80 4 (2026-11-13): "slide" / "slide_qblock": the query windows past the last real one (padding queries only) read the slid
     # keys [R - 128, R) as the reference does (the tail kernels of dit_variants edge.cu); they kept the clipped window. Real rows unchanged.

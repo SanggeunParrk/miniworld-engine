@@ -138,6 +138,43 @@ def pool_atoms_cuda(x, idx, gather_mask, atom_mask):
     """``out[s, t] = sum_a m[t, a] relu(g[t, a] x[s, idx[t, a]]) / max(sum_a m[t, a], 1e-10)`` in bf16 (``x`` ``[S, Q, C]``, the rest ``[T, A]``);
     differentiable in ``x`` when a gradient is recorded."""
     args = (x.contiguous(), idx.contiguous(), gather_mask.contiguous(), atom_mask.contiguous())
+    if x.dtype is torch.float32:  # the sm_80 / sm_120a fp32 kernels
+        if torch.is_grad_enabled() and x.requires_grad:
+            return _PoolAtomsF32.apply(*args)
+        return _pool_atoms_f32_op(*args)
     if torch.is_grad_enabled() and x.requires_grad:
         return _PoolAtomsCuda.apply(*args)
     return _pool_atoms_op(*args)
+
+
+# ---- fp32 atom features (A100 / RTX 5090: ``sampler_ops_f32_sm80.cu``)
+@opaque(fake=_pool_atoms_fake, name="sampler_ops_pool_atoms_f32_sm80")
+def _pool_atoms_f32_op(x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor) -> torch.Tensor:
+    from miniworld_engine.kernels.sampler_ops.cuda.sm80 import f32_ext
+
+    return f32_ext().pool_atoms_f32(x, idx, gather_mask, atom_mask)
+
+
+@opaque(fake=_pool_atoms_bwd_fake, name="sampler_ops_pool_atoms_f32_bwd_sm80")
+def _pool_atoms_f32_bwd_op(
+    gout: torch.Tensor, x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor
+) -> torch.Tensor:
+    """d out / d x in fp32: the slots' rows and weights from the bf16 build's ``pool_atoms_prep`` (the masks only), the stable sort, then the fp32 gather."""
+    from miniworld_engine.kernels.sampler_ops.cuda.sm80 import device_ext, f32_ext
+
+    key, w = device_ext().pool_atoms_prep(idx, gather_mask, atom_mask, x.shape[1])
+    skey, perm = torch.sort(key, stable=True)
+    return f32_ext().pool_atoms_f32_bwd(gout, x, skey, perm, w, idx.shape[1])
+
+
+class _PoolAtomsF32(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, idx, gather_mask, atom_mask):
+        ctx.save_for_backward(x, idx, gather_mask, atom_mask)
+        return _pool_atoms_f32_op(x, idx, gather_mask, atom_mask)
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, gout):
+        x, idx, gather_mask, atom_mask = ctx.saved_tensors
+        return _pool_atoms_f32_bwd_op(gout.contiguous(), x, idx, gather_mask, atom_mask), None, None, None
