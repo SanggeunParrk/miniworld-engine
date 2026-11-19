@@ -18,10 +18,12 @@ import dataclasses
 import functools
 import importlib
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
+import warnings
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -44,7 +46,7 @@ def nvcc_path() -> str | None:
         candidates.append(Path(found))
     candidates += sorted(Path("/usr/local").glob("cuda*/bin/nvcc"), reverse=True)
 
-    fallback = None
+    found_releases: list[tuple[str, str]] = []
     for c in candidates:
         if not c.is_file():
             continue
@@ -52,10 +54,52 @@ def nvcc_path() -> str | None:
             out = subprocess.run([str(c), "--version"], capture_output=True, text=True, timeout=20, check=False).stdout
         except (OSError, subprocess.SubprocessError):
             continue
-        fallback = fallback or str(c)
-        if want and f"release {want[0]}.{want[1]}" in out:
-            return str(c)
-    return fallback
+        found_releases.append((str(c), out))
+    return pick_nvcc(want, found_releases)
+
+
+def _release_of(version_text: str) -> tuple[int, int] | None:
+    m = re.search(r"release (\d+)\.(\d+)", version_text)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def pick_nvcc(want: list[str], found: list[tuple[str, str]]) -> str | None:
+    """The nvcc of ``found`` (``(path, nvcc --version text)``, in preference order) for torch's CUDA ``want`` (``[major, minor]``):
+    the same release; else the same MAJOR (closest minor, ties in list order); else the first one, with a warning.
+
+    The major matters: an extension built by another major links that major's ``libcudart`` / ``libcublasLt`` next to the ones torch
+    loaded, and a cuBLASLt handle made by torch's library then crashes the other's (a call through a NULL function pointer in
+    ``cublasLtMatmulAlgoGetHeuristic``: TriangleAttention ``out_gemm_residual`` on the RTX 5090 with torch cu129 and the machine's
+    default ``/usr/local/cuda`` = 13.1)."""
+    if not found:
+        return None
+    rels = [(path, _release_of(text)) for path, text in found]
+    if len(want) >= 2 and want[0].isdigit() and want[1].isdigit():
+        w = (int(want[0]), int(want[1]))
+        for path, r in rels:
+            if r == w:
+                return path
+        same = [(abs(r[1] - w[1]), i, path) for i, (path, r) in enumerate(rels) if r is not None and r[0] == w[0]]
+        if same:
+            return min(same)[2]
+        warnings.warn(
+            f"no nvcc of CUDA {w[0]}.x found (torch is built for CUDA {w[0]}.{w[1]}); building with {found[0][0]}: extensions that link "
+            "cuBLAS / cuBLASLt may crash. Install the matching toolkit or set CUDA_HOME.",
+            stacklevel=2,
+        )
+    return found[0][0]
+
+
+def nvcc_release_of(path: str | None) -> str | None:
+    """``"12.8"`` for the nvcc at ``path`` (recorded in the artifact of a build), None when it cannot be asked."""
+    if not path:
+        return None
+    try:
+        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    r = _release_of(out)
+    return f"{r[0]}.{r[1]}" if r else None
 
 
 def ensure_cuda_home() -> str | None:
@@ -882,6 +926,23 @@ def _load_built(directory: Path, key: str, python_module: bool) -> Any:
     return ext
 
 
+def _stale_toolkit(directory: Path) -> bool:
+    """A locally built artifact (not a packaged prebuilt one) whose recorded nvcc major is not torch's CUDA major (see :func:`pick_nvcc`).
+    Artifacts without a ``toolkit`` record (older caches, bundles) are taken as they are."""
+    import json
+
+    import torch
+
+    try:
+        if not directory.is_relative_to(engine_jit_root()):
+            return False
+        have = (json.loads((directory / "artifact.json").read_text()).get("toolkit") or "").split(".")[0]
+    except (OSError, ValueError):
+        return False
+    want = (torch.version.cuda or "").split(".")[0]
+    return bool(want and have and want != have)
+
+
 def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = None, inline: bool = False) -> Any:
     # Lists copied: torch's load appends its own link flags to `extra_ldflags` in place, which changed the caller's list
     # after the key was computed.
@@ -905,6 +966,11 @@ def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = 
         hit = _find(_ext_rel(name, p_key), "artifact.json")
         if hit is not None:
             key = p_key
+    if hit is not None and _stale_toolkit(hit):
+        import shutil
+
+        shutil.rmtree(hit, ignore_errors=True)  # a local build by another CUDA major than torch's: rebuilt below
+        hit = None
     if hit is None:
         hit = _build_ext(kind_label, name, kwargs, sources, inline, key, material, graph)
     if _BUILD_ONLY:
@@ -995,6 +1061,7 @@ def _build_ext(
                     "module": so.name[: -len(".so")],
                     "python_module": python_module,
                     "material": material,
+                    "toolkit": nvcc_release_of(nvcc_path()),
                 },
             )
             os.rename(tmp, final)
