@@ -136,7 +136,10 @@ class ParallelResidual(BackendModule):
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     backends = ("pytorch", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:5090_sm120": 1}  # 2026-11-12: the sm_120a build (RTX 5090)
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 2,  # 2 (2026-11-19): plain loads / stores on the A100 (the streaming-hinted ones ran 5-8 % under the Triton kernel); same outputs
+        "cuda:5090_sm120": 1,  # 2026-11-12: the sm_120a build (RTX 5090)
+    }
 
     def __init__(self, d: int = 256, branches: int = 2, *, backend: str = "pytorch") -> None:
         super().__init__()

@@ -21,11 +21,34 @@
 
 namespace {
 
+#ifndef PR_HINT
+#define PR_HINT 0  // 0: streaming hints (ld.global.cs / st.global.cs); 1: plain accesses; 2: ld.global.nc (__ldg) loads, plain stores
+#endif
+template <typename P>
+__device__ __forceinline__ uint4 PR_LD(const P* p) {
+#if PR_HINT == 1
+  return *reinterpret_cast<const uint4*>(p);
+#elif PR_HINT == 2
+  return __ldg(reinterpret_cast<const uint4*>(p));
+#else
+  return __ldcs(reinterpret_cast<const uint4*>(p));
+#endif
+}
+__device__ __forceinline__ void PR_ST(uint4* p, uint4 v) {
+#if PR_HINT == 0
+  __stcs(p, v);
+#else
+  *p = v;
+#endif
+}
 constexpr int kThreads = 256;
 constexpr int kUnroll = 4;  // 16-byte vectors per thread of the backward (one tensor in, one out)
 // 16-byte vectors per thread and tensor of the forward: the loads of (1 + NB) tensors in flight fill the registers (measured H100: 4
 // vectors a tensor at NB = 3 ran 25 % under the bandwidth; one vector a tensor, as the Triton kernel, keeps the occupancy)
-__host__ __device__ constexpr int fwd_unroll(int nb) { return nb == 1 ? 2 : 1; }
+#ifndef PR_UNROLL
+#define PR_UNROLL 0  // 0: the default (2 vectors a thread for one branch, else 1); N > 0: N vectors a thread and tensor (an arch build sets it)
+#endif
+__host__ __device__ constexpr int fwd_unroll(int nb) { return PR_UNROLL > 0 ? PR_UNROLL : (nb == 1 ? 2 : 1); }
 constexpr int kMaxBranches = 5;  // 5: Chai-1's parallel PairformerBlock (two triangle multiplications, two triangle attentions, the transition)
 
 struct Branches {
@@ -55,9 +78,9 @@ __global__ void __launch_bounds__(kThreads) parallel_residual_fwd_k(const T* __r
   for (int u = 0; u < U; ++u) {
     const int64_t q = first + (int64_t)u * kThreads;
     if (q < nvec) {
-      a[u] = __ldcs(xv + q);
+      a[u] = PR_LD(xv + q);
 #pragma unroll
-      for (int i = 0; i < NB; ++i) b[i][u] = __ldcs(reinterpret_cast<const uint4*>(ys.p[i]) + q);
+      for (int i = 0; i < NB; ++i) b[i][u] = PR_LD(reinterpret_cast<const uint4*>(ys.p[i]) + q);
     }
   }
 #pragma unroll
@@ -75,7 +98,7 @@ __global__ void __launch_bounds__(kThreads) parallel_residual_fwd_k(const T* __r
         for (int i = 1; i < NB; ++i) acc += to_f(reinterpret_cast<const T*>(&b[i][u])[e]) - xf;
         re[e] = from_f<T>(xf + acc);
       }
-      __stcs(reinterpret_cast<uint4*>(out) + q, r);
+      PR_ST(reinterpret_cast<uint4*>(out) + q, r);
     }
   }
   if (blockIdx.x == gridDim.x - 1) {  // the < V elements past the last whole vector
@@ -112,7 +135,7 @@ __global__ void __launch_bounds__(kThreads) parallel_residual_bwd_k(const T* __r
 #pragma unroll
     for (int u = 0; u < kUnroll; ++u) {
       const int64_t q = first + (int64_t)u * kThreads;
-      if (q < nvec) a[u] = __ldcs(reinterpret_cast<const uint4*>(g) + q);
+      if (q < nvec) a[u] = PR_LD(reinterpret_cast<const uint4*>(g) + q);
     }
 #pragma unroll
     for (int u = 0; u < kUnroll; ++u) {
@@ -123,8 +146,8 @@ __global__ void __launch_bounds__(kThreads) parallel_residual_bwd_k(const T* __r
         T* re = reinterpret_cast<T*>(&r);
 #pragma unroll
         for (int e = 0; e < V; ++e) re[e] = from_f<T>(to_f(ge[e]) * scale);
-        __stcs(reinterpret_cast<uint4*>(gx) + q, r);
-        for (int i = 0; i < nc; ++i) __stcs(reinterpret_cast<uint4*>(const_cast<void*>(cp.p[i])) + q, a[u]);
+        PR_ST(reinterpret_cast<uint4*>(gx) + q, r);
+        for (int i = 0; i < nc; ++i) PR_ST(reinterpret_cast<uint4*>(const_cast<void*>(cp.p[i])) + q, a[u]);
       }
     }
     if (blockIdx.x == gridDim.x - 1)

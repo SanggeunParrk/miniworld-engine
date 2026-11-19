@@ -29,7 +29,13 @@ def ext():
 
 def live_tokens(mask_u8: torch.Tensor) -> torch.Tensor:
     """[S, L] uint8 mask -> [L] uint8: 1 where some MSA row keeps the token."""
-    return mask_u8.amax(0).contiguous()
+    from miniworld_engine.kernels import _msa_card
+
+    if _msa_card.sm120():  # the RTX 5090 keeps the reduction it shipped with
+        return mask_u8.amax(0).contiguous()
+    if mask_u8.shape[0] > 2048:  # (the one-block-column kernel is latency bound at a deep MSA)
+        return mask_u8.amax(0).contiguous()
+    return ext().live_tokens(mask_u8.contiguous())  # A100: one small kernel (torch's amax over the MSA rows costs 13-21 us at S <= 2048, this 8-10 us)
 
 
 def outer(a: torch.Tensor, b: torch.Tensor, live: torch.Tensor, ch: int = 32, out: torch.Tensor | None = None) -> torch.Tensor:
@@ -39,3 +45,37 @@ def outer(a: torch.Tensor, b: torch.Tensor, live: torch.Tensor, ch: int = 32, ou
     out = a.new_empty((m, m)) if out is None else out
     ext().ogemm_skip(a, b, live, out, int(ch))
     return out
+
+
+def outer_batched(a: torch.Tensor, b: torch.Tensor, live: torch.Tensor, ch: int = 8) -> torch.Tensor:
+    """a, b [G, S, ch L] bf16 -> O [G, ch L, ch L] bf16 = a_g^T b_g (the dead tokens' blocks zeros), ONE launch for the G products (A100, not the RTX 5090)."""
+    g, _, m = a.shape
+    out = a.new_empty((g, m, m))
+    ext().ogemm_skip_batched(a, b, live, out, int(ch))
+    return out
+
+
+_PROBES: dict = {}
+
+
+def all_live(mask_u8: torch.Tensor) -> bool:
+    """Whether no token is masked in every MSA row (the dense product is then the whole answer and cuBLAS runs it 3-25 % faster than the skip kernel).
+
+    A host-side choice of the product only (both are exact): read once per mask tensor (address, version, shape) outside a graph capture -- one small
+    reduction and a sync -- and remembered; during a capture the remembered answer is used (a mask not seen before: the skip kernel). A graph is
+    captured after its eager warm-up calls, which have probed the same static mask. ``MINIWORLD_OPM_PROBE=0`` always takes the skip kernel."""
+    import os
+
+    if os.environ.get("MINIWORLD_OPM_PROBE", "1") == "0":
+        return False
+    key = (mask_u8.data_ptr(), mask_u8._version, tuple(mask_u8.shape), mask_u8.device.index)
+    hit = _PROBES.get(key)
+    if hit is not None:
+        return hit
+    if torch.cuda.is_current_stream_capturing():
+        return False
+    res = bool((mask_u8 != 0).all().item())
+    if len(_PROBES) > 256:
+        _PROBES.clear()
+    _PROBES[key] = res
+    return res
