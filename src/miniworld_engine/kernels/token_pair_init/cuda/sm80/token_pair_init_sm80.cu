@@ -24,9 +24,13 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
 #ifdef MWE_SM120
 // RTX 5090: a persistent grid (one CTA per SM, the class-row table fetched once per CTA) over work units of TPI_UNIT_COLS columns of one row of z
 #define TPI_UNIT_COLS 64
+// Short calls (B L rows <= the SM count: L 128 is 128 CTAs on 170 SMs) keep the one-row CTA of the previous kernel (one unit = a whole row, no second unit and
+// no re-pack per CTA: the 64-column split cost 2 us at L 128); longer ones the persistent grid.
 static inline unsigned tpi_grid_sm120(int B, int L) {
+  const long long sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  if ((long long)B * L <= sms) return (unsigned)((long long)B * L);
   const long long units = (long long)B * L * ((L + TPI_UNIT_COLS - 1) / TPI_UNIT_COLS);
-  return (unsigned)std::min<long long>(units, at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
+  return (unsigned)std::min<long long>(units, sms);
 }
 #define TPI_GRID(B, tiles, L) tpi_grid_sm120((B), (L))
 #endif
@@ -52,12 +56,14 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(d), "l"(tbl + 4 * c));
   }
   asm volatile("cp.async.commit_group;\n" ::);
-  const int chunks = (L + TPI_UNIT_COLS - 1) / TPI_UNIT_COLS;
+  const bool whole = (long long)B * L == (long long)gridDim.x;     // short call: one CTA a row (tpi_grid_sm120)
+  const int ucols = whole ? L : TPI_UNIT_COLS;
+  const int chunks = (L + ucols - 1) / ucols;
   const long long units = (long long)B * L * chunks;
   bool first = true;
   for (long long u = blockIdx.x; u < units; u += gridDim.x) {
-    const int jc = (int)(u % chunks), bi = (int)(u / chunks), b = bi / L, i = bi % L, j0 = jc * TPI_UNIT_COLS;
-    const int nj = min(TPI_UNIT_COLS, L - j0);
+    const int jc = (int)(u % chunks), bi = (int)(u / chunks), b = bi / L, i = bi % L, j0 = jc * ucols;
+    const int nj = min(ucols, L - j0);
     if (threadIdx.x < nj) {
       const int ri = b * L + i, j = j0 + threadIdx.x;
       pk[threadIdx.x] = pack_pair(load_row(ids, BL, ri), load_row(ids, BL, b * L + j), bond[(size_t)ri * L + j], rmax, smax);
