@@ -499,7 +499,15 @@ def _width(params):
     return params[NAMES.index("attention.to_value.weight")].shape[0]
 
 
-def _saved_like(single, pair, H, DA, DC, at=BF):
+def _save_logits(single) -> bool:
+    """H100 non-hoisted bf16 step: the forward saves its fp32 logits (in P's slot, P itself is not needed again) so the backward re-forms P from
+    them instead of recomputing LN(pair) and the exact logits GEMM."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    return is_h100(single) and HK.OPT["logits"]
+
+
+def _saved_like(single, pair, H, DA, DC, at=BF, logits=False):
     """Shapes / dtypes of the forward's saved activations (the fake implementation and the contract of _fwd / _fwd32); H heads,
     DA attention channels, ``at`` the activations' dtype (bf16, or fp32 on the TF32 path)."""
     A, _, L, _ = single.shape
@@ -513,7 +521,7 @@ def _saved_like(single, pair, H, DA, DC, at=BF):
         e((M, 2), dtype=f32),
         e((M, D), dtype=at),
         e((M, 2 * DA), dtype=at),
-        e((H, L, L), dtype=at),
+        e((H, L, L), dtype=f32 if logits else at),  # P (bf16) or, H100 non-hoisted bf16, the fp32 logits the backward re-forms P from
         e((H, L, L), dtype=at),
         e((M, DA), dtype=at),
         e((M, D), dtype=at),
@@ -529,7 +537,7 @@ def _saved_like(single, pair, H, DA, DC, at=BF):
 def _fwd_fake(single, cond, pair, mask, params):
     return [
         torch.empty_like(single),
-        *_saved_like(single, pair, _heads(params), _width(params), _dc(params)),
+        *_saved_like(single, pair, _heads(params), _width(params), _dc(params), logits=_save_logits(single)),
     ]
 
 
@@ -587,10 +595,9 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
             # products on the FMA pipe (cuBLAS fp32, TF32 off), the softmax in fp32; P is rounded to bf16 for the fused block only
             from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
-            ln32, pst = HK.ln0_fp32(p2, EPS, stats=True)
             wf32 = W["Wb"].float() * W["wp"].float()[None, :]
-            logits = HK.exact_logits(wf32, ln32).view(H * L, L)  # [H, R] fp32, head-major, not overwritten
-            del ln32
+            lg32, pst = HK.pair_logits(p2, wf32, stats=True)  # one fused pass for 16 heads (no LN0 in memory), else LN0 + FMA GEMM
+            logits = lg32.view(H * L, L)  # [H, R] fp32, head-major, not overwritten
         else:
             pst, logits = (
                 None,
@@ -603,7 +610,7 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
             Pt.view(H * L, L),
             None if mask is None else mask.reshape(L).contiguous(),
         )
-        return P, Pt, pst
+        return P, Pt, pst, logits
 
     c2 = cond.reshape(M, DC).contiguous()
     chat = torch.empty(M, DC, device=dev, dtype=BF)
@@ -615,7 +622,7 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
     xst = torch.empty(M, 2, device=dev)
     BT.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
     vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
-    P, Pt, pst = pair_part()
+    P, Pt, pst, lgt = pair_part()
     og = torch.empty(M, DA, device=dev, dtype=BF)
     _op("pv", dev, H, DA // H)(vg[:, :DA], P.view(H * L, L), og, A, g=vg[:, DA:])  # a = sigmoid(g) (P v)
     y = torch.mm(og, W["Wo"].t())
@@ -643,7 +650,9 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
         xst,
         xa,
         vg,
-        P,
+        lgt.view(H, L, L)
+        if bias is None and _save_logits(single)
+        else P,  # H100 non-hoisted: the fp32 logits (the backward re-forms P from them)
         Pt,
         og,
         y,
@@ -812,15 +821,23 @@ def _dbias_exact(do, v, logits, mask, A, H, L, DA, out):
     gradients is rounding noise, 1e-1..1 off. Here P is re-formed in fp32 from the fp32 ``logits`` [H, L, L] (key mask folded in, as the
     forward's softmax), dP is one batched bf16 GEMM over the heads (do, v are bf16 values: exact products, fp32 accumulation and output),
     D the exact row sum. do, v [A L, DA] (sample-major rows, head-major columns)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
     dh = DA // H
+    pv = HK.permute_dv(do, v, A, H, L)  # head-major copies of do and v in one kernel
+    if pv is not None:
+        dP = torch.bmm(pv[0], pv[1].transpose(1, 2), out_dtype=F32)  # [H, L, L] fp32, K = (a, d) in both
+    else:
+        dof = do.view(A, L, H, dh).permute(2, 1, 0, 3).reshape(H, L, A * dh)
+        vf = v.view(A, L, H, dh).permute(2, 0, 3, 1).reshape(H, A * dh, L)
+        dP = torch.bmm(dof, vf, out_dtype=F32)  # [H, L, L] fp32
+    if HK.dbias_rows(logits, dP, out, mask):  # one pass: P from the logits, D = sum_j P dP, P o (dP - D) (L = 128 .. 1024)
+        return
     lg = logits.view(H, L, L)
     if mask is not None:
         lg = lg.masked_fill(~mask.reshape(1, 1, L).to(torch.bool), torch.finfo(F32).min)
     P = torch.softmax(lg, dim=-1)
     del lg
-    dof = do.view(A, L, H, dh).permute(2, 1, 0, 3).reshape(H, L, A * dh)
-    vf = v.view(A, L, H, dh).permute(2, 0, 3, 1).reshape(H, A * dh, L)
-    dP = torch.bmm(dof, vf, out_dtype=F32)  # [H, L, L] fp32
     dP.sub_((dP * P).sum(-1, keepdim=True))
     torch.mul(dP, P, out=out.view(H, L, L))  # masked keys have P = 0
 
@@ -907,12 +924,14 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, logits=N
     dbias = torch.empty(H * L, L, device=dev, dtype=dbias_dtype(single)) if dbias_out is None else dbias_out.view(H * L, L)
     _op("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
     if exact_db:
-        if logits is None:  # the pair given: re-form the fp32 logits (LN + exact products), as the forward made them
+        if (
+            logits is None and P.dtype is torch.float32
+        ):  # the pair given: the forward saved its fp32 logits in P's slot (H100 non-hoisted _fwd)
+            logits = P
+        elif logits is None:  # not saved (HK.OPT["logits"] off): re-form them (LN + exact products), as the forward made them
             from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
-            ln32, _ = HK.ln0_fp32(p2, EPS)
-            logits = HK.exact_logits((Wb.float() * wp.float()[None, :]).contiguous(), ln32)
-            del ln32
+            logits, _ = HK.pair_logits(p2, (Wb.float() * wp.float()[None, :]).contiguous())
         _dbias_exact(do, vg[:, :DA], logits, mask, A, H, L, DA, dbias)
     else:
         _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)  # P o (dP - D); masked keys get P = 0
@@ -946,7 +965,7 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, logits=N
     pwf = torch.empty(BT.partial_rows(M), H, dp, device=dev)  # dWf partials, one per block
     if exact_db:  # fp32 dbias, exact products: d LN = dbias^T Wf, the LN backward rows, dWf = dbias LN (the hoist's backward for one block)
         wf32 = (Wb.float() * wp.float()[None, :]).contiguous()
-        dpair, dwf = hoist_bwd_exact(p2, wf32, dbias.view(H, R), EPS, _hsplit(R))
+        dpair, dwf = hoist_bwd_exact(p2, wf32, dbias.view(H, R), EPS, _hsplit(R), pst)
         pwf[0] = dwf  # one partial row
         nwf = 1
     else:
@@ -1468,9 +1487,8 @@ def _fwd32_impl(single, cond, pair, bias, mask, params):
             # products of ``pair_bias_tc`` left 1e-3..1 absolute error on logits of 1e3..2e5: the attention picked other keys)
             from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
-            ln32, pst = HK.ln0_fp32(pair.reshape(R, pair.shape[-1]).contiguous(), EPS, stats=True)
-            logits = HK.exact_logits(W["Wf"].reshape(H, -1), ln32).view(H * L, L)  # [H, R] fp32, head-major
-            del ln32
+            lg32, pst = HK.pair_logits(pair.reshape(R, pair.shape[-1]).contiguous(), W["Wf"].reshape(H, -1).contiguous(), stats=True)
+            logits = lg32.view(H * L, L)  # [H, R] fp32, head-major
         else:
             pst, logits = (
                 None,
@@ -1638,8 +1656,9 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
             with HK.exact_fp32_gemms():
                 dP = torch.bmm(doP, vt.view(H, dh_ * A, L))  # [H, L, L]
             P3 = P.view(H, L, L)
-            dP.sub_((dP * P3).sum(-1, keepdim=True))
-            torch.mul(dP, P3, out=dbias.view(H, L, L))  # P o (dP - D); masked keys get P = 0
+            if not HK.dbias_rows(P3, dP, dbias, None, pin=True):  # one pass over P and dP (fp32 rows, L = 128 .. 1024)
+                dP.sub_((dP * P3).sum(-1, keepdim=True))
+                torch.mul(dP, P3, out=dbias.view(H, L, L))  # P o (dP - D); masked keys get P = 0
         else:
             _op32("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
             _op32("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)  # P o (dP - D); masked keys get P = 0
@@ -1667,7 +1686,7 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
             dpair = e(R, dp)
             pwf = e(F.partial_rows(M), H, dp)  # dWf partials, one per block
             if hop:  # fp32 dbias into exact products (the hoist's backward for one block), one partial row of dWf
-                dpair, dwf = hoist_bwd_exact(p2, W["Wf"].reshape(H, -1), dbias.view(H, R), EPS, _hsplit(R))
+                dpair, dwf = hoist_bwd_exact(p2, W["Wf"].reshape(H, -1), dbias.view(H, R), EPS, _hsplit(R), pst)
                 pwf[0] = dwf
                 nwf = 1
             else:
