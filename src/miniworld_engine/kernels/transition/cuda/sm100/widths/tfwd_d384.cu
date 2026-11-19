@@ -20,6 +20,14 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
+// FOLD 1 (S90, inference): the LayerNorm folded into the expand with a K16 CORRECTION MMA. The A operand is the raw x tile (no apply pass: the expand of a tile starts the moment its x has landed), the B
+// operand Wp = bf16(W gamma) (prep launch, tstat_w.cu). Per row (mean, q = 1 / rstd) and per weight row n (u_n = sum Wp_n, v_n = sum beta W_n) the exact result is
+//   a_n = rstd (x . Wp_n - mean u_n + q v_n),
+// the last two terms rank-1: ONE extra K16 MMA per chunk ([-mean_hi -mean_hi -mean_lo q_hi q_hi q_lo 0 0] x [u_hi u_lo u_hi v_hi v_lo v_hi 0 0], bf16 hi / lo pairs, ~16 bits each) accumulated into [a | b]; the
+// statistics (two passes over the x tile in shared memory, SwiGLU warps) fill the A column block while the first chunk's main K-blocks run, and the SwiGLU epilogue is a = rstd acc. No-swizzle K-major operands.
+#ifndef FOLD
+#define FOLD 0
+#endif
 
 #ifndef HID
 #define HID 768                                                 // hidden units (n x D); n = 2 by default
@@ -35,8 +43,12 @@ constexpr int WS_SLOT = (128 + 64) * 128;                      // this CTA's row
 constexpr int KBT = ROWS * 128;                                // one K-block of a tile: 16 KB
 constexpr int TILE = NKB * KBT;                                // 96 KB
 constexpr int O_WAB = 0, O_WS = NWK * WSTG * WK, O_XN = O_WS + NWS * WS_SLOT, O_H = O_XN + TILE, O_ST = O_H + KBT;
-constexpr int O_GB = O_ST + NST * KBT;
-constexpr int O_EX = O_GB + 2 * D_ * 4;                        // LayerNorm partial sums: [2 passes][3 thirds][128 rows] fp32
+constexpr int O_GB = O_ST + NST * KBT;                          // gamma | beta (FOLD: their room holds the correction operands instead)
+constexpr int O_BP = O_GB;                                      // FOLD: two slots of the B correction plane 0: 64 rows x 16 B (the CTA's 32 units of Wa then Wb of the chunk)
+constexpr int O_AP = O_BP + 2048;                               // FOLD: A correction plane 0: 128 rows x 16 B
+constexpr int O_AZ = O_AP + 2048;                               // FOLD: the zero plane (K 8 .. 15) of both operands
+constexpr int O_RS = O_AZ + 2048;                               // FOLD: rstd of the tile's rows
+constexpr int O_EX = FOLD ? O_RS + 512 : O_GB + 2 * D_ * 4;                        // LayerNorm partial sums: [2 passes][3 thirds][128 rows] fp32
 constexpr int O_BAR = O_EX + 6 * ROWS * 4;
 constexpr int SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
@@ -58,6 +70,13 @@ __device__ __forceinline__ void tmem_ld64(uint32_t taddr, uint32_t (&r)[64]) {
                : "r"(taddr));
 }
 
+// no-swizzle K-major UMMA descriptor: core matrices of 8 rows x 16 B, LBO = distance of the K-adjacent core matrix, SBO = distance of the next 8-row group
+__device__ __forceinline__ uint64_t desc_none(uint32_t saddr, uint32_t lbo, uint32_t sbo) {
+  return (uint64_t)((saddr >> 4) & 0x3FFFu) | ((uint64_t)((lbo >> 4) & 0x3FFFu) << 16) | ((uint64_t)((sbo >> 4) & 0x3FFFu) << 32) | ((uint64_t)1 << 46);
+}
+__device__ __forceinline__ void bulk_g2s(uint32_t dst, const void* src, uint32_t bytes, uint64_t* bar) {
+  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" :: "r"(dst), "l"(src), "r"(bytes), "r"(smem_u32(bar)) : "memory");
+}
 struct Bars {
   // leader-only: weight fulls (both CTAs' transactions), xn_full (2 LN arrivals), ab_free / h_full (8 warps per CTA), out_empty (4)
   uint64_t wab_full[NWK], ws_full[NWS], xn_full, ab_free, h_full, out_empty;
@@ -65,6 +84,7 @@ struct Bars {
   uint64_t wab_empty[NWK], ws_empty[NWS], xn_empty, ex_done, sq_done, out_full;
   // local
   uint64_t xl_full, xn_stored, st_full[NST];
+  uint64_t augb_full[2], augb_all[2], augb_empty[2], aug_full;   // FOLD: the B correction plane landed here / in both CTAs (leader), consumed, the A plane written (leader: both CTAs)
   uint32_t tmem, zero;
 };
 
@@ -75,7 +95,11 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
                           const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mout,
                           const float* __restrict__ gamma, const float* __restrict__ beta,
                           float* __restrict__ rstd, float* __restrict__ c1, __nv_bfloat16* __restrict__ hs,
-                          __nv_bfloat16* __restrict__ as_, __nv_bfloat16* __restrict__ bs, int tiles, float eps, int save) {
+                          __nv_bfloat16* __restrict__ as_, __nv_bfloat16* __restrict__ bs, int tiles, float eps, int save
+#if FOLD
+                          , const uint8_t* __restrict__ aug
+#endif
+                          ) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -94,12 +118,19 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
     mbar_init(&B.ab_free, 16); mbar_init(&B.h_full, 16); mbar_init(&B.ex_done, 1); mbar_init(&B.sq_done, 1);
     mbar_init(&B.xn_full, 2); mbar_init(&B.xn_empty, 1); mbar_init(&B.out_empty, 8); mbar_init(&B.out_full, 1);
     mbar_init(&B.xl_full, 1); mbar_init(&B.xn_stored, 1);
+    for (int s2 = 0; s2 < 2; ++s2) { mbar_init(&B.augb_full[s2], 1); mbar_init(&B.augb_all[s2], 2); mbar_init(&B.augb_empty[s2], 1); }
+    mbar_init(&B.aug_full, 2);
     B.zero = 0;
     for (int s = 0; s < NST; ++s) mbar_init(&B.st_full[s], 1);
     fence_barrier_init();
     prefetch_map(&mx); prefetch_map(&mwa); prefetch_map(&mwb); prefetch_map(&mws); prefetch_map(&mxn); prefetch_map(&mout);
   }
+#if FOLD
+  if (tid < 128) { *reinterpret_cast<uint4*>(sm + O_AZ + tid * 16) = make_uint4(0, 0, 0, 0); }   // the zero plane (also the B operand's second K core matrix)
+  fence_proxy_async();
+#else
   if (tid < D_) { reinterpret_cast<float*>(sm + O_GB)[tid] = gamma[tid]; reinterpret_cast<float*>(sm + O_GB)[D_ + tid] = beta[tid]; }
+#endif
   if (warp == 2) { tmem_alloc2(smem_u32(&B.tmem), 512); tmem_relinquish2(); }
   tc_fence_before();
   __syncthreads();
@@ -136,10 +167,22 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
     // ------------------------------------------------------------------------------------------ expand weight producer: this CTA's
     // half of every chunk (units 32 crank .. + 31 of Wa and Wb, so that each SwiGLU warpgroup finds its a and b in 64 adjacent TMEM
     // columns), three K-blocks per stage, completing on the leader's barriers
+#if FOLD
+    if (lane == 1) {                                               // forwards "this CTA's correction plane has landed" to the leader's barrier
+      for (int c = 0; c < nch; ++c) { mbar_wait(&B.augb_full[c & 1], (c >> 1) & 1); mbar_arrive_remote_cta(&B.augb_all[c & 1], 0); }
+    }
+#endif
     if (lane == 0) {
       int st = 0;
       for (int c = 0; c < nch; ++c) {
         const int j = c % NCH;
+#if FOLD
+        {
+          if (c >= 2) mbar_wait(&B.augb_empty[c & 1], ((c >> 1) - 1) & 1);   // the K16 MMA of chunk c - 2 has read the slot
+          mbar_expect_tx(&B.augb_full[c & 1], 1024);
+          bulk_g2s(su + O_BP + (c & 1) * 1024, aug + (size_t)(j * 2 + crank) * 1024, 1024, &B.augb_full[c & 1]);
+        }
+#endif
 #pragma unroll
         for (int h = 0; h < NWK; ++h, ++st) {
           const int s = st & 1;
@@ -173,6 +216,32 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
             mbar_wait(&B.wab_full[s], (st >> 1) & 1);
             tc_fence_after();
             const uint64_t bd = bd0 + (uint64_t)((s * WSTG * WK) >> 4);
+#if FOLD
+            if (elect_one()) {
+#pragma unroll
+              for (int k = 0; k < WSTG; ++k)
+#pragma unroll
+                for (int ks = 0; ks < 4; ++ks)
+                  umma_ss2(tmem + T_AB, ad0 + (uint64_t)((((h * WSTG + k) * KBT) >> 4) + ks * 2), bd + (uint64_t)(((k * WK) >> 4) + ks * 2),
+                           IDESC_EX, (h > 0 || k > 0 || ks > 0) ? 1u : 0u);
+            }
+            __syncwarp();
+if (h == NWK - 1) {                                    // the K16 correction MMA, after the chunk's main K-blocks (the statistics have had their time)
+              mbar_wait_cl(&B.augb_all[c & 1], (c >> 1) & 1);
+              if (j == 0) mbar_wait_cl(&B.aug_full, i & 1);
+              tc_fence_after();
+              if (elect_one()) umma_ss2(tmem + T_AB, desc_none(su + O_AP, O_AZ - O_AP, 128), desc_none(su + O_BP + (c & 1) * 1024, O_AZ - O_BP - (c & 1) * 1024, 128), IDESC_EX, 1u);
+              __syncwarp();
+            }
+            if (elect_one()) {
+              tc_commit2_mc(&B.wab_empty[s], 3);
+              if (h == NWK - 1) tc_commit2_mc(&B.augb_empty[c & 1], 3);
+              if (h == NWK - 1) {
+                tc_commit2_mc(&B.ex_done, 3);
+                if (j == NCH - 1) tc_commit2_mc(&B.xn_empty, 3);
+              }
+            }
+#else
             if (elect_one()) {
 #pragma unroll
               for (int k = 0; k < WSTG; ++k)
@@ -186,6 +255,7 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
                 if (j == NCH - 1) tc_commit2_mc(&B.xn_empty, 3);
               }
             }
+#endif
             __syncwarp();
           }
         }
@@ -227,6 +297,9 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
       const bool real = i < n_valid;
       const int row0 = tile_of(i) * ROWS;
       mbar_wait(&B.xl_full, i & 1);
+#if FOLD
+      if (tid == 256) mbar_arrive_remote_cta(&B.xn_full, 0);   // the raw x tile is the A operand: the main K-blocks of the expand may start now
+#endif
       f2 s2[2] = {mk2(0.f, 0.f), mk2(0.f, 0.f)};
 #pragma unroll
       for (int kb = 0; kb < HK; ++kb)
@@ -258,6 +331,20 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
       ex[(3 + hf) * ROWS + r] = lo2(vt2) + hi2(vt2);
       named_bar_sync(1, 384);
       const float rs = rsqrtf((ex[3 * ROWS + r] + ex[4 * ROWS + r] + ex[5 * ROWS + r]) * (1.f / D_) + eps), cc = mean * rs;
+#if FOLD
+      if (hf == 0) {                                           // rstd for the SwiGLU, [-mean_hi -mean_hi -mean_lo q_hi q_hi q_lo 0 0] (q = 1 / rstd) for the K16 correction MMA
+        reinterpret_cast<float*>(sm + O_RS)[r] = rs;
+        const float q = 1.f / rs;
+        const __nv_bfloat16 mh = __float2bfloat16(-mean), qh = __float2bfloat16(q);
+        const __nv_bfloat16 ml = __float2bfloat16(-mean - __bfloat162float(mh)), ql = __float2bfloat16(q - __bfloat162float(qh));
+        const uint32_t e0 = *reinterpret_cast<const uint16_t*>(&mh), e2 = *reinterpret_cast<const uint16_t*>(&ml), e3 = *reinterpret_cast<const uint16_t*>(&qh), e5 = *reinterpret_cast<const uint16_t*>(&ql);
+        *reinterpret_cast<uint4*>(sm + O_AP + r * 16) = make_uint4(e0 | (e0 << 16), e2 | (e3 << 16), e3 | (e5 << 16), 0u);
+      }
+      fence_proxy_async();
+      named_bar_sync(1, 384);
+      if (tid == 256) mbar_arrive_remote_cta(&B.aug_full, 0);
+      return;
+#endif
       const f2 rs2 = mk2(rs, rs), ncc2 = mk2(-cc, -cc);
 #pragma unroll
       for (int kb = 0; kb < HK; ++kb)
@@ -313,6 +400,13 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
           tc_fence_before();
           __syncwarp();
           if (lane == 0) mbar_arrive_remote_relaxed(&B.ab_free, 0);
+#if FOLD
+          {
+            const float rsr = reinterpret_cast<const float*>(sm + O_RS)[r];   // a_n = rstd (acc: x . Wp_n - mean u_n + q v_n, the K16 correction is in the accumulator)
+#pragma unroll
+            for (int k = 0; k < 64; ++k) ab[k] = __float_as_uint(__uint_as_float(ab[k]) * rsr);
+          }
+#endif
           const float z = __uint_as_float(ldsv32(smem_u32(&B.zero)));
 #pragma unroll
           for (int k = 0; k < 16; ++k) {

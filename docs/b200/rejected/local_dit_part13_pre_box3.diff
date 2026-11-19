@@ -1,0 +1,288 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+index 055353cb6..68808afa8 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+@@ -235,6 +235,44 @@ def _rows(t, cols=DM):
+     return _map(t, [cols, t.shape[0]], t.stride(0) * 2, [64, 32])
+ 
+ 
++def _rows3(t, cols, nb):
++    """Row-major bf16 [M, cols] as 3-D [64, M, cols / 64] with 32 x 64 x nb boxes (the BOX3 builds: nb 128-B column blocks in one box)."""
++    assert t.stride(-1) == 1
++    return _map(t, [64, t.shape[0], cols // 64], [t.stride(0) * 2, 128], [64, 32, nb])
++
++
++def _pre_box3() -> bool:
++    """pre_fwd's BOX3 builds (round 3 part 13; MW_LD13_PB3=0: the 2-D maps, A / B)."""
++    import os
++
++    return os.environ.get("MW_LD13_PB3", "1") != "0"
++
++
++def _pre_maps(a, W, mod, Q, K, V, G, X, mkv, XK):
++    """The ten tensor maps of the sm_100a pre_fwd builds (2-D, or 3-D for the BOX3 builds)."""
++    if _pre_box3():
++        return (
++            _rows3(a, DM, 2),
++            _map(W, [32, 4 * DM, 4], [DM * 2, 64], [32, 128, 4], swizzle=64),
++            _rows3(mod, 6 * DM, 4),
++            *(_rows3(t, DM, 2) for t in (Q, K, V, G, X)),
++            _rows3(mkv, 2 * DM, 4) if mkv is not None else _rows3(G, DM, 2),
++            _rows3(XK, DM, 2),
++        )
++    return (
++        _rows(a),
++        _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64),
++        _rows(mod, 6 * DM),
++        *(_rows(t) for t in (Q, K, V, G, X)),
++        _rows(mkv, 2 * DM) if mkv is not None else _rows(G),
++        _rows(XK),
++    )
++
++
++def _pre_kernel(name, d):
++    return _box3_kernel(name, d) if _pre_box3() else atom_kernel(name, d)
++
++
+ def _rows16(t, cols=DM):
+     assert t.stride(-1) == 1
+     return _map(t, [cols, t.shape[0]], t.stride(0) * 2, [64, 16])
+@@ -409,18 +447,7 @@ def _pre_fwd(a, mod, W, bq, save, eps, cross, kq, kq_eps, ada1=False, eb=None):
+         )
+         return Q, K, V, G, X, None
+     assert not cross, "cross is the Hopper kernel's mode; sm_100a uses pre_fwd_kv"
+-    maps = (
+-        _rows(a),
+-        _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64),
+-        _rows(mod, 6 * DM),
+-        _rows(Q),
+-        _rows(K),
+-        _rows(V),
+-        _rows(G),
+-        _rows(X),
+-        _rows(G),
+-        _rows(G),
+-    )
++    maps = _pre_maps(a, W, mod, Q, K, V, G, X, None, G)
+     ntile = M // 32
+     d = _dev(a)
+     extra = ()
+@@ -428,7 +455,7 @@ def _pre_fwd(a, mod, W, bq, save, eps, cross, kq, kq_eps, ada1=False, eb=None):
+         qkr = torch.empty(M if save else 0, 2 * DM, device=a.device, dtype=torch.bfloat16)
+         extra = (kq, float(kq_eps), qkr)
+     assert eb is None or ada1, "eb: the ADA1 builds (pre_a1_eb / pre_kq_a1_eb)"
+-    atom_kernel(("pre_kq" if kq is not None else "pre") + ("_a1" if ada1 else "") + ("_eb" if eb is not None else ""), d)(
++    _pre_kernel(("pre_kq" if kq is not None else "pre") + ("_a1" if ada1 else "") + ("_eb" if eb is not None else ""), d)(
+         (min(num_sms(d), ntile), 1, 1),
+         (384, 1, 1),
+         *maps,
+@@ -460,18 +487,7 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False, rms
+     Q, K, V, G = (torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4))
+     X = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
+     XK = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
+-    maps = (
+-        _rows(a),
+-        _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64),
+-        _rows(mod, 6 * DM),
+-        _rows(Q),
+-        _rows(K),
+-        _rows(V),
+-        _rows(G),
+-        _rows(X),
+-        _rows(mkv, 2 * DM),
+-        _rows(XK),
+-    )
++    maps = _pre_maps(a, W, mod, Q, K, V, G, X, mkv, XK)
+     ntile = M // 32
+     d = _dev(a)
+     extra = ()
+@@ -487,7 +503,7 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False, rms
+     if eb is not None:  # (round 3 part 12: the pair bias in this launch -- the prex / prexp builds)
+         assert name in ("prex", "prexp"), "eb: the prex_eb / prexp_eb builds"
+         name += "_eb"
+-    atom_kernel(name, d)(
++    _pre_kernel(name, d)(
+         (min(num_sms(d), ntile), 1, 1),
+         (384, 1, 1),
+         *maps,
+@@ -1366,10 +1382,56 @@ def gemm32(
+         int(rndmask),
+         int(a_grp),
+         int(gate.shape[0]) if gate is not None else int(M),
++        None,
++        0,
+     )
+     return out
+ 
+ 
++GATE_BWD = 3
++
++
++def gemm_gate_bwd32(dyo, woT, g, o, dg, A, n):
++    """dgated = dyo @ woT^T (K = N = 128) with ``gate_bwd32`` as its epilogue (round 3 part 13: dgated never leaves TMEM): -> dO [M, 128]
++    (tf32-rounded), D [A, 4, n]; dg (view, written) = dgated o s (1 - s), s = sigmoid(g). Bit for bit gemm32 + gate_bwd32."""
++    M = dyo.shape[0]
++    d = _dev(dyo)
++    assert M % 128 == 0 and dyo.shape[1] == DM and woT.shape == (DM, DM) and o.is_contiguous() and g.stride(1) == 1 and dg.stride(1) == 1
++    do = _new(o)
++    D = torch.empty(A, NH, n, device=o.device, dtype=F32)
++    tiles = M // 128
++    atom_kernel32("gemm", d)(
++        (min(num_sms(d), tiles), 1, 1),
++        (512, 1, 1),
++        _tm32(dyo, (32, 128)),
++        _tm32(woT, (32, 128)),
++        _tm32(do, (32, 32)),
++        _tm32(dg, (32, 32)),
++        None,
++        o,
++        g,
++        int(M),
++        DM,
++        DM,
++        128,
++        0,
++        0,
++        0,
++        0,
++        0,
++        GATE_BWD,
++        0,
++        int(o.stride(0)),
++        int(g.stride(0)),
++        0,
++        0,
++        int(M),
++        D,
++        int(n),
++    )
++    return do, D
++
++
+ def round_tf32(t):
+     """t (fp32) rounded to tf32, to nearest with ties away from zero (cvt.rna.tf32.f32): add half a tf32 ulp to the magnitude bits, drop
+     the low 13. For the weight operands of gemm32, once per pack (kind::tf32 MMAs truncate)."""
+@@ -2080,6 +2142,6 @@ def conf_mask_(bias, uid, kmask, n, slide):
+ 
+ def _box3_kernel(name: str, device_index: int):
+     """``atom_kernel`` of a ``post_fwd`` build with ``-DBOX3=1`` added (round 3 part 10: 3-D tensor maps, the tile inputs in 4 TMA boxes)."""
+-    stem, func, smem, pdl, *defs = (KERNELS_ESM if name in KERNELS_ESM else KERNELS_VAR if name in KERNELS_VAR else KERNELS)[name]
+-    assert stem == "post_fwd", name
++    stem, func, smem, pdl, *defs = next(t for t in (KERNELS_ESM, KERNELS_ESM_TRAIN, KERNELS_VAR, KERNELS) if name in t)[name]
++    assert stem in ("post_fwd", "pre_fwd"), name
+     return _load_atom_kernel(stem, func, device_index, smem, pdl, (*(defs[0] if defs else ()), "BOX3=1"))
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
+index 786a456f7..21fae6b5c 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
+@@ -217,6 +217,14 @@ using namespace s100;
+                                            // the conditioning tables: CTA b takes rows [ER b / G, ER (b + 1) / G) of EZ [ER, 16] bf16 -> EBIAS
+                                            // [4, ER] fp32. EZ / EWB / EG are complete before the chain's first launch (the caller's contract,
+                                            // as local_bias_fwd_f32_early's); EBIAS is a fresh buffer the dependents read after their wait.
++#ifndef BOX3
++#define BOX3 0                             // round 3 part 13: 3-D tensor maps (post_fwd part 10's lever) -- W in 4 boxes (was 16), a tile's inputs in
++#endif                                     // 2 / 3 boxes (was 6 / 10), its outputs in 4 - 6 (was 8 - 12)
++#if BOX3
++DEVI void tma_store_3d(const CUtensorMap* m, uint32_t src, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.bulk_group [%0, {%2, %3, %4}], [%1];" :: "l"(m), "r"(src), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++#endif
+ #ifndef NI
+ #define NI (CROSS ? 2 : 4)
+ #endif
+@@ -370,7 +378,11 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+     if (lane == 0) {
+       mbar_expect_tx(&B.wfull, 4 * 32768);                                // W_p: K-major SW64 [128][32] atoms, 32 KB per projection
+       for (int p = 0; p < 4; ++p)
++#if BOX3
++        tma_load_3d(su + p * 32768, &mw, &B.wfull, 0, 128 * p, 0);
++#else
+         for (int ka = 0; ka < 4; ++ka) tma_load_2d(su + p * 32768 + ka * 8192, &mw, &B.wfull, 32 * ka, 128 * p);
++#endif
+       mbar_wait(&B.wfree, 0);
+       pdl_wait();                                                          // a / mod come from the previous kernels
+       for (int T = 0; T < ntT; ++T) {
+@@ -381,10 +393,16 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+         mbar_arrive(&B.infull[s]); (void)st; (void)r0;
+ #else
+         mbar_expect_tx(&B.infull[s], (CROSS ? 10 : 6) * KBLK);
++#if BOX3
++        if (CROSS) tma_load_3d(st + 3 * T_, &mMKV, &B.infull[s], 0, r0 % mrows, 0);
++        tma_load_3d(st, &ma, &B.infull[s], 0, r0, 0);
++        tma_load_3d(st + T_, &mmod, &B.infull[s], 0, r0 % mrows, 0);
++#else
+         if (CROSS)
+           for (int kb = 0; kb < 4; ++kb) tma_load_2d(st + 3 * T_ + kb * KBLK, &mMKV, &B.infull[s], 64 * kb, r0 % mrows);   // pre | shift
+         for (int kb = 0; kb < 2; ++kb) tma_load_2d(st + kb * KBLK, &ma, &B.infull[s], 64 * kb, r0);
+         for (int kb = 0; kb < 4; ++kb) tma_load_2d(st + T_ + kb * KBLK, &mmod, &B.infull[s], 64 * kb, r0 % mrows);   // s1 | bi1
++#endif
+ #endif
+       }
+     }
+@@ -428,6 +446,13 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+ #if DIAG == 1
+         mbar_arrive(&B.ofree[ob]); continue;
+ #endif
++#if BOX3
++        for (int p = 0; p < 4; ++p) tma_store_3d(mo[p], su + O_O + ob * OST + p * T_, 0, r0, 0);
++        if (save) {
++          tma_store_3d(&mX, su + O_X + (T % 3) * T_, 0, r0, 0);
++          if (CROSS) tma_store_3d(&mXK, su + O_XK + (T % 3) * T_, 0, r0, 0);
++        }
++#else
+         for (int p = 0; p < 4; ++p)
+           for (int kb = 0; kb < 2; ++kb) tma_store_2d(mo[p], su + O_O + ob * OST + p * T_ + kb * KBLK, 64 * kb, r0);
+         if (save) {
+@@ -435,6 +460,7 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+           if (CROSS)
+             for (int kb = 0; kb < 2; ++kb) tma_store_2d(&mXK, su + O_XK + (T % 3) * T_ + kb * KBLK, 64 * kb, r0);
+         }
++#endif
+         tma_store_commit();
+         tma_store_wait_read0();
+         mbar_arrive(&B.ofree[ob]);
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/prebuild_sm100.py b/src/miniworld_engine/kernels/augmented_attention/cuda/prebuild_sm100.py
+index eeefbc067..5e20bb38c 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/prebuild_sm100.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/prebuild_sm100.py
+@@ -173,11 +173,12 @@ def prebuild_sm100(target, rows):
+             for name in local_dit_b200._ROW_KERNELS:
+                 stem, _, _, _, *defs = b200_atom.KERNELS[name]
+                 calls.append(ft.partial(b200_atom.cubin, stem, *defs))
+-                if stem == "post_fwd":  # (round 3 part 10: post_fwd launches its BOX3 build, b200_atom._box3_kernel)
++                if stem in ("post_fwd", "pre_fwd"):  # (round 3 parts 10 / 13: post_fwd and pre_fwd launch their BOX3 builds, b200_atom._box3_kernel)
+                     calls.append(ft.partial(b200_atom.cubin, stem, (*(defs[0] if defs else ()), "BOX3=1")))
+             for name in ("prex_eb", "prexp_eb"):  # (round 3 part 12: inference, the pair bias inside the projection launch)
+                 stem, _, _, _, *defs = b200_atom.KERNELS[name]
+                 calls.append(ft.partial(b200_atom.cubin, stem, *defs))
++                calls.append(ft.partial(b200_atom.cubin, stem, (*(defs[0] if defs else ()), "BOX3=1")))
+         var_modes = {mode for m, f, mode in atom if m in VARIANT_CORE and f == f32}
+         if var_modes:  # the variant builds (local_dit_b200._run_variant: every build of the tables is loaded, whatever the model)
+             calls.append(ft.partial(b200_atom.cubin, "conf_mask"))
+@@ -190,7 +191,7 @@ def prebuild_sm100(target, rows):
+                 calls.append(ft.partial(b200_atom.cubin, "var_pack"))
+                 for stem, _, _, _, *defs in b200_atom.KERNELS_VAR.values():
+                     calls.append(ft.partial(b200_atom.cubin, stem, *defs))
+-                    if stem == "post_fwd":
++                    if stem in ("post_fwd", "pre_fwd"):
+                         calls.append(ft.partial(b200_atom.cubin, stem, (*(defs[0] if defs else ()), "BOX3=1")))
+                 if "train" in var_modes:
+                     calls.append(ft.partial(b200_atom.cubin, "kqln_bwd"))
+@@ -202,7 +203,7 @@ def prebuild_sm100(target, rows):
+     if False in esm:  # bf16: the RMS row builds, the rank-window attention, the pair bias by position and the q / k norm + rotary
+         for stem, _, _, _, *defs in b200_atom.KERNELS_ESM.values():
+             calls.append(ft.partial(b200_atom.cubin, stem, *defs))
+-            if stem == "post_fwd":
++            if stem in ("post_fwd", "pre_fwd"):
+                 calls.append(ft.partial(b200_atom.cubin, stem, (*(defs[0] if defs else ()), "BOX3=1")))
+         for stem in ("lattn_esm", "lesm"):
+             calls.append(ft.partial(b200_atom_local.cubin, stem))
+@@ -217,6 +218,8 @@ def prebuild_sm100(target, rows):
+     if esm_train:  # training on the tcgen05 block (round 3 part 7, local_dit_esm_b200._esm_train_ready + the packs / d bq launches)
+         for stem, _, _, _, *defs in (*b200_atom.KERNELS_ESM.values(), *b200_atom.KERNELS_ESM_TRAIN.values()):
+             calls.append(ft.partial(b200_atom.cubin, stem, *defs))
++            if stem == "pre_fwd":  # (round 3 part 13: the BOX3 builds)
++                calls.append(ft.partial(b200_atom.cubin, stem, (*(defs[0] if defs else ()), "BOX3=1")))
+         for defs in ((), ("F32=1",)):
+             calls.append(ft.partial(b200_atom.cubin, "esm_pack", defs))
+         calls.append(ft.partial(b200_atom.cubin, "col_jobs"))

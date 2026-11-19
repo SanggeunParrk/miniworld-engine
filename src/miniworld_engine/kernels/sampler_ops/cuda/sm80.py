@@ -27,9 +27,15 @@ def ext():
 
 
 def device_ext():
-    """The build for the current device: this one on an A100 (its sm_120a build on an RTX 5090), else the H100 (sm_90a) build."""
-    if torch.cuda.get_device_capability() in ((8, 0), (12, 0)):
+    """The build for the current device: this one on an A100 (its sm_120a build on an RTX 5090), the sm_100a build of the H100 source on a
+    B200, else the H100 (sm_90a) build."""
+    cc = torch.cuda.get_device_capability()
+    if cc in ((8, 0), (12, 0)):
         return ext()
+    if cc == (10, 0):
+        from miniworld_engine.kernels.sampler_ops.cuda import ext_sm100
+
+        return ext_sm100()
     from miniworld_engine.kernels.sampler_ops.cuda import ext as h100_ext
 
     return h100_ext()

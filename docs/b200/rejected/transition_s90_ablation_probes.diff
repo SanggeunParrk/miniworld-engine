@@ -1,0 +1,135 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 6ae6066ff..2b70f5679 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -81,6 +81,8 @@ BWD_PDL = True
+ #: (training part 5) A/B builds of the two-role backwards (D 64 `widths/tbwd_d64.cu`, D 128 n 2 `tr_bwd_sm100.cu`): None runs "bwd"; a flag
+ #: tuple (e.g. ("-DGOV=0",)) builds and runs cubin "bwdab" with those flags. A module constant (A/B runs edit it).
+ BWD_AB_FLAGS: tuple[str, ...] | None = None
++#: (S90 probes) build flags of a second D 256 backward gate (tgate_w.cu): None runs "gate"; a tuple builds and runs cubin "gatex" (A/B only).
++GATE_X_FLAGS: tuple[str, ...] | None = None
+ #: D >= 384: the expand + SwiGLU deals (tile pair, chunk) items over all SMs up to this many tiles, whole tile pairs above.
+ ITEM_TILES = 1152
+ #: Column width of one squeeze / d_xn GEMM launch at D = 768 (two halves; one launch's accumulator must fit 512 TMEM columns).
+@@ -233,6 +235,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             ("fwd", "widths/tfwd_d256.cu", hid),
+             *((("fwdi", "widths/tfwd_d256.cu", (*hid, *FWD_INFER_FLAGS[(d, n)])),) if (d, n) in FWD_INFER_FLAGS else ()),
+             ("gate", "widths/tgate_w.cu", ("-DDIM=256", *hid)),
++            *((("gatex", "widths/tgate_w.cu", ("-DDIM=256", *hid, *GATE_X_FLAGS)),) if GATE_X_FLAGS else ()),
+             dxn,
+             lnb,
+         )
+@@ -275,11 +278,11 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+ def _load(d: int, n: int):
+     """Build this (width, n)'s cubins and register them with the extension (loaded on the current device: a cubin the driver
+     rejects fails here, inside ``available()``). Returns the extension."""
+-    return _load_cached(d, n, BWD_AB_FLAGS)
++    return _load_cached(d, n, (BWD_AB_FLAGS, GATE_X_FLAGS))
+ 
+ 
+ @functools.lru_cache(maxsize=16)
+-def _load_cached(d: int, n: int, ab: tuple[str, ...] | None):
++def _load_cached(d: int, n: int, ab: tuple | None):
+     ext = _ext()
+     for name, path in build_cubins(f"d{d}n{n}", _specs(d, n)).items():
+         ext.load_cubin(f"d{d}n{n}_{name}", path)
+@@ -794,7 +797,7 @@ def _bwd_launch(
+     if d == 256:
+         hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
+         k.run(
+-            "gate",
++            "gatex" if GATE_X_FLAGS else "gate",
+             "transition_gate_w_sm100",
+             k.grid,
+             (
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tbwd_d64.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tbwd_d64.cu
+index bfd48aae8..51379be57 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tbwd_d64.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tbwd_d64.cu
+@@ -64,6 +64,9 @@ struct BarsX {
+ __device__ constexpr int kRowBlk[8] = {0, 1, 4, 5, 2, 3, 6, 7};
+ // tbwd.cu's fp32x2 gate: h = l b, dA = (g b) fma(l, 1 - s, s), dB = g l, with l = a s and s = sigmoid_tr (sm100.cuh; the forward's s)
+ DEVI void gate_pair16(uint32_t dh0, uint32_t dh1, uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1, uint32_t& hp, uint32_t& dap, uint32_t& dbp) {
++#ifdef NOGATE   // (probe, wrong results) no gate arithmetic
++  hp = dh0 ^ a1; dap = a0 ^ b0; dbp = b1 ^ dh1; return;
++#endif
+   const uint32_t gp = pack_bf16(__uint_as_float(dh0), __uint_as_float(dh1));
+   const f2 G = mk2(bf16lo(gp), bf16hi(gp)), A = mk2u(a0, a1), Bv = mk2u(b0, b1);
+   const f2 S = sigmoid_tr(A);
+@@ -460,10 +463,18 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+             work[2 * e] = lo2(NX); work[2 * e + 1] = hi2(NX);
+           }
+         }
++#ifdef NORS   // (probe, wrong results) no per-tile dgamma / dbeta column reductions
++        accg[g] += work[0] + work[31]; 
++#else
+         accg[g] += reduce_scatter32(work, lane);
++#endif
+ #pragma unroll
+         for (int e = 0; e < 16; ++e) { work[2 * e] = DNLO(g * 16 + e); work[2 * e + 1] = DNHI(g * 16 + e); }
++#ifdef NORS
++        accb[g] += work[1] + work[30];
++#else
+         accb[g] += reduce_scatter32(work, lane);
++#endif
+       }
+       const f2 PA = add2(pa2[0], pa2[1]), PB = add2(pb2[0], pb2[1]);
+       const float ca = (lo2(PA) + hi2(PA)) * (1.f / D_), cbv = (lo2(PB) + hi2(PB)) * (1.f / D_);
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgate_w.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgate_w.cu
+index ed228b671..bd8b5b4ef 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgate_w.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgate_w.cu
+@@ -101,6 +101,10 @@ transition_gate_w_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_co
+         for (int kb = 0; kb < NKB; ++kb, ++st) {
+           const int s = st % NST;
+           if (st >= NST) mbar_wait(&B.empty[s], ((st / NST) - 1) & 1);
++#ifdef NOA   // (probe, wrong results) the A operands are not loaded: the ring carries the B operands only
++          if (leader) mbar_expect_tx(&B.full[s], 2 * (STAGE - 2 * KBT));
++          const uint32_t base = su + O_ST + s * STAGE;
++#else
+           if (leader) mbar_expect_tx(&B.full[s], 2 * STAGE);
+           const uint32_t base = su + O_ST + s * STAGE;
+ #pragma unroll
+@@ -108,6 +112,7 @@ transition_gate_w_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_co
+             tma_load_2d_2sm(base + S_DY + h * 8192, &mdy, &B.full[s], kb * 64, row + h * 64);
+             tma_load_2d_2sm(base + S_XN + h * 8192, &mxn, &B.full[s], kb * 64, row + h * 64);
+           }
++#endif
+           tma_load_2d_2sm(base + S_WAB, mab, &B.full[s], kb * 64, j * HS);
+           tma_load_2d_2sm(base + S_WS, &mwst, &B.full[s], kb * 64, j * HS + crank * 32);
+         }
+@@ -130,8 +135,10 @@ transition_gate_w_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_co
+           if (elect_one()) {
+ #pragma unroll
+             for (int ks = 0; ks < 4; ++ks) {
++#ifndef NOMMA
+               umma_ss2(tmem + T_DH + s * 64, ddy + (uint64_t)(ks * 2), dws + (uint64_t)(ks * 2), IDESC_DH, (kb > 0 || ks > 0) ? 1u : 0u);
+               umma_ss2(tmem + T_AB + s * 128, dxn + (uint64_t)(ks * 2), dab + (uint64_t)(ks * 2), IDESC_AB, (kb > 0 || ks > 0) ? 1u : 0u);
++#endif
+             }
+             tc_commit2_mc(&B.empty[sg], 3);
+             if (kb == NKB - 1) tc_commit2_mc(&B.acc_full[s], 3);
+@@ -166,7 +173,11 @@ transition_gate_w_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_co
+ #pragma unroll
+         for (int kk = 0; kk < 4; ++kk) {
+           const int k = qq * 4 + kk;
++#ifdef NOGATE   // (probe, wrong results) no gate arithmetic: the pipeline's MMA / TMEM / store cost alone
++          hp[kk] = dh[2 * k] ^ av[2 * k + 1]; dap[kk] = av[2 * k] ^ bv[2 * k]; dbp[kk] = bv[2 * k + 1] ^ dh[2 * k + 1];
++#else
+           gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hp[kk], dap[kk], dbp[kk]);
++#endif
+         }
+         const uint32_t off = sw128(r, half * 4 + qq);
+         sts128(ob + off, make_uint4(hp[0], hp[1], hp[2], hp[3]));
+@@ -185,7 +196,11 @@ transition_gate_w_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_co
+         const int sb = q % NSTG;
+         mbar_wait(&B.staged[sb], (q / NSTG) & 1);
+         const uint32_t ob = su + O_OUT + sb * 3 * KBT;
++#ifdef NOST
++        if (false) {
++#else
+         if (i < n_valid) {
++#endif
+           const int row = tile_of(i) * ROWS;
+ #pragma unroll
+           for (int h = 0; h < 2; ++h) {

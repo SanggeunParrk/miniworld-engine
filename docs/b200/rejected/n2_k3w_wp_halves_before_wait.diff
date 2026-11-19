@@ -1,0 +1,47 @@
+--- /tmp/k3w_pre_wpre.cu	2026-11-19 05:07:25.438175059 +0900
++++ /tmp/claude-1002/-home-psk6950-practice-MiniWorld/b70277b8-ff66-5282-bcae-5530314a7edb/scratchpad/n2/trimul_inproj/cuda/b200_sources/k3w.cu	2026-11-19 05:07:25.438175059 +0900
+@@ -51,6 +51,9 @@
+ #ifndef K3W_X2_512
+ #define K3W_X2_512 0
+ #endif
++#ifndef K3W_WPRE
++#define K3W_WPRE 1   // (n2) XF: the Wp' halves of the first item's first t stages are issued before griddepcontrol.wait (they are weights, not the previous kernel's output), only the t boxes after it
++#endif
+ #ifndef K3W_SIG
+ #define K3W_SIG 2   // epilogue sigmoid: 0 ex2 + rcp (two MUFU ops), 2 tanh.approx (one MUFU op; 2026-11-17, k1w / k3g's form)
+ #endif
+@@ -182,15 +185,30 @@
+       for (int k = 0; S.get(k, m0, n0); ++k) {
+         for (int j = 0; j < NKB; ++j) {
+           const int kb = kb_of(j);
+-          if (xf && k == 0 && j == KBX) pdl_wait();
+-          mbar_wait(&B.st_empty[s], ph ^ 1);
++          constexpr int NPRE = (KBT < NST) ? KBT : NST;
++          if (xf && k == 0 && j == KBX) {
++            if (K3W_WPRE) {   // Wp' halves of the first NPRE t stages before the wait: their slots are the ones the x stages leave (the MMA consumes those before any t arrives)
++              int s2 = s; uint32_t ph2 = ph;
++              for (int jj = 0; jj < NPRE; ++jj) {
++                mbar_wait(&B.st_empty[s2], ph2 ^ 1);
++                mbar_expect_tx(&B.st_full[s2], STAGE);
++                tma_load_2d(sm + O_ST + s2 * STAGE + KBB, &mwp, &B.st_full[s2], jj * 64, n0, EVICT_LAST);
++                if (++s2 == NST) { s2 = 0; ph2 ^= 1; }
++              }
++            }
++            pdl_wait();
++          }
++          const bool bpre = K3W_WPRE && xf && k == 0 && j >= KBX && j < KBX + NPRE;   // this stage's B half is already in flight
++          if (!bpre) {
++            mbar_wait(&B.st_empty[s], ph ^ 1);
++            mbar_expect_tx(&B.st_full[s], STAGE);
++          }
+           if (j == 0) K3T2(k, 0)
+-          mbar_expect_tx(&B.st_full[s], STAGE);
+           uint8_t* a = sm + O_ST + s * STAGE;
+           if (kb < KBT) {
+             tma_load_2d(a, &mt, &B.st_full[s], m0, kb * 64, EVICT_NORMAL);             // [64 ch][64 tok], tokens 0-63
+             tma_load_2d(a + KBB / 2, &mt, &B.st_full[s], m0 + 64, kb * 64, EVICT_NORMAL);   // tokens 64-127
+-            tma_load_2d(a + KBB, &mwp, &B.st_full[s], kb * 64, n0, EVICT_LAST);
++            if (!bpre) tma_load_2d(a + KBB, &mwp, &B.st_full[s], kb * 64, n0, EVICT_LAST);
+           } else {
+             const int kx = kb - KBT;
+             tma_load_2d(a, &mx, &B.st_full[s], kx * 64, m0, EVICT_NORMAL);

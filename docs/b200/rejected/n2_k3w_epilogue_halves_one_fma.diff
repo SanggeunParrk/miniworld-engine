@@ -1,0 +1,73 @@
+--- /tmp/k3w_pre_foldh.cu	2026-11-19 04:50:56.117872109 +0900
++++ /tmp/claude-1002/-home-psk6950-practice-MiniWorld/b70277b8-ff66-5282-bcae-5530314a7edb/scratchpad/n2/trimul_inproj/cuda/b200_sources/k3w.cu	2026-11-19 04:51:12.236355389 +0900
+@@ -51,6 +51,9 @@
+ #ifndef K3W_X2_512
+ #define K3W_X2_512 0
+ #endif
++#ifndef K3W_FOLDH
++#define K3W_FOLDH 1   // (n2 2026-11-18) inference epilogue on 0.5 p / 0.5 g: ro, ri, ep, eg pre-halved (powers of two: exact), u = fma(tanh(0.5 g), 0.5 p, 0.5 p): 9 instead of 11 f32x2 / MUFU instructions a channel pair
++#endif
+ #ifndef K3W_SIG
+ #define K3W_SIG 2   // epilogue sigmoid: 0 ex2 + rcp (two MUFU ops), 2 tanh.approx (one MUFU op; 2026-11-17, k1w / k3g's form)
+ #endif
+@@ -137,6 +140,7 @@
+                const __nv_bfloat16* __restrict__ xg, __nv_bfloat16* __restrict__ yg) {
+   constexpr bool GR = K3W_GREG && !SAVE;   // S90: residual from global into registers, y stored from registers (the epilogue off shared memory)
+   constexpr int KBT = H / 64, KBX = D / 64, NKB = KBT + KBX, NTL = D / NTILE;
++  constexpr bool FH = !SAVE && K3W_SIG == 2 && K3W_FOLDH;   // the epilogue arithmetic on halves (see K3W_FOLDH)
+   constexpr int XM = SAVE ? 0 : xm_of(D, H);   // item epilogue pipeline mode (0 off, 1 two residual tiles, 2 one)
+   constexpr bool X2 = XM != 0;
+   constexpr int XB = XM == 1 ? 2 : 1;       // residual / output tiles
+@@ -384,7 +388,7 @@
+     if constexpr (X2) {
+       int fm, fn;
+       S.get(0, fm, fn);
+-      for (int k = et; k < 4 * NTILE; k += 32 * EPW) vs[k] = vec[(k / NTILE) * D + fn + (k % NTILE)];
++      for (int k = et; k < 4 * NTILE; k += 32 * EPW) vs[k] = (FH && ((k / NTILE) & 1)) ? 0.5f * vec[(k / NTILE) * D + fn + (k % NTILE)] : vec[(k / NTILE) * D + fn + (k % NTILE)];
+       named_bar_sync(1, 32 * EPW);
+     }
+     for (int i = 0; S.get(i, m0, n0); ++i) {
+@@ -396,12 +400,12 @@
+         hn = S.get(i + 1, m1, n1);
+         if (hn) {
+ #pragma unroll
+-          for (int q = 0; q < VPT; ++q) { const int k = et + q * 32 * EPW; vnext[q] = vec[(k / NTILE) * D + n1 + (k % NTILE)]; }
++          for (int q = 0; q < VPT; ++q) { const int k = et + q * 32 * EPW; const float vv = vec[(k / NTILE) * D + n1 + (k % NTILE)]; vnext[q] = (FH && ((k / NTILE) & 1)) ? 0.5f * vv : vv; }
+           minx = mu_i[m1 + r]; rinx = rs_i[m1 + r];
+         }
+       } else {
+         named_bar_sync(1, 32 * EPW);                     // the previous item's epilogue has finished with vs
+-        for (int k = et; k < 4 * NTILE; k += 32 * EPW) vs[k] = vec[(k / NTILE) * D + n0 + (k % NTILE)];
++        for (int k = et; k < 4 * NTILE; k += 32 * EPW) vs[k] = (FH && ((k / NTILE) & 1)) ? 0.5f * vec[(k / NTILE) * D + n0 + (k % NTILE)] : vec[(k / NTILE) * D + n0 + (k % NTILE)];
+         named_bar_sync(1, 32 * EPW);
+       }
+       const uint32_t vsb = vsu + (X2 ? (uint32_t)b * (16u * NTILE) : 0u);   // X2: vector buffer b
+@@ -422,7 +426,8 @@
+       float mi, ri;
+       if constexpr (X2) { if (i == 0) { mi = mu_i[tok]; ri = rs_i[tok]; } else { mi = mi_c; ri = ri_c; } }
+       else { mi = mu_i[tok]; ri = rs_i[tok]; }
+-      const float2 ro2 = make_float2(ro, ro), nmo2 = make_float2(-mo, -mo), ri2 = make_float2(ri, ri), nmi2 = make_float2(-mi, -mi);
++      const float rof = FH ? 0.5f * ro : ro, rif = FH ? 0.5f * ri : ri;   // FH: the halves 0.5 ro, 0.5 ri (exact)
++      const float2 ro2 = make_float2(rof, rof), nmo2 = make_float2(-mo, -mo), ri2 = make_float2(rif, rif), nmi2 = make_float2(-mi, -mi);
+       // ds [B L, D]: pair row tok = (s L + i) L + j reads row s L + j (tokens b-major; s = 0 for one sample)
+       const __nv_bfloat16* dsr = ds ? ds + ((size_t)(tok / (L * L)) * L + tok % L) * D + n0 : nullptr;
+       mbar_wait(&B.acc_full[b], (i >> 1) & 1);
+@@ -469,6 +474,18 @@
+ #pragma unroll
+           for (int k = 0; k < 4; ++k) {                 // a channel pair per step on the packed f32x2 pipe
+             const int c = cl + 2 * k, j = q2 * 8 + 2 * k;
++            if constexpr (FH) {   // ph = 0.5 p, hg = 0.5 g (the scaled constants, exact); y update = sigmoid(g) p = tanh(hg) ph + ph: one fma, no gate multiply
++              const float2 ph = __ffma2_rn(ro2, __ffma2_rn(nmo2, VSP(k), make_float2(__uint_as_float(pv[j]), __uint_as_float(pv[j + 1]))), VEP(k));
++              const float2 hg = __ffma2_rn(ri2, __ffma2_rn(nmi2, VSG(k), make_float2(__uint_as_float(gv[j]), __uint_as_float(gv[j + 1]))), VEG(k));
++              float2 th;
++              asm("tanh.approx.f32 %0, %1;" : "=f"(th.x) : "f"(hg.x));
++              asm("tanh.approx.f32 %0, %1;" : "=f"(th.y) : "f"(hg.y));
++              float2 u = __ffma2_rn(th, ph, ph);
++              if constexpr (!NODS) u = __fmul2_rn(u, make_float2(bf16lo(dw[k]), bf16hi(dw[k])));
++              const uint32_t ub = pack_bf16(u.x, u.y);
++              asm("add.rn.bf16x2 %0, %1, %2;" : "=r"(o[k]) : "r"(xw[k]), "r"(ub));
++              continue;
++            }
+             const float2 p = __ffma2_rn(ro2, __ffma2_rn(nmo2, VSP(k), make_float2(__uint_as_float(pv[j]), __uint_as_float(pv[j + 1]))),
+                                         VEP(k));
+             const float2 g = __ffma2_rn(ri2, __ffma2_rn(nmi2, VSG(k),

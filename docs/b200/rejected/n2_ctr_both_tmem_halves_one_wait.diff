@@ -1,0 +1,44 @@
+--- ctr.cu.before
++++ ctr.cu.ld2
+@@ -24,6 +24,9 @@
+ 
+ // S90 part 5: the item is M128 x BN (128, or 256 when L % 256 == 0: A / B operand traffic per output element 25 % lower, the kernel is L2-bandwidth
+ // bound at L >= 384), a stage's boxes (2 + BN / 64, 16 KB each) are issued by that many lanes of warp 0 (one thread issues ~one TMA per 600 clk).
++#ifndef CTR_LD2
++#define CTR_LD2 1   // both TMEM halves of an epilogue box loaded before one wait
++#endif
+ namespace ctr {
+ 
+ constexpr int NTHR = 384, TOK = 128, BOX = TOK * 64 * 2;     // [128][64] bf16 = 16 KB
+@@ -165,6 +168,22 @@
+         const uint32_t ta = tmem + ((uint32_t)(qd * 32) << 16) + hc * 64;
+         if (lane == 0) bulk_wait_read<0>();   // the previous store has left the staging box
+         __syncwarp();
++#if CTR_LD2
++        {   // (n2) both 32-column halves of the warp's 64-column box loaded before the one wait: one TMEM latency instead of two
++          uint32_t v2[2][32];
++          tmem_ld32(ta + bb * bn, v2[0]);
++          tmem_ld32(ta + bb * bn + 32, v2[1]);
++          tmem_wait_ld();
++          if (hh == BN / 128 - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.acc_empty[bb]); }
++#pragma unroll
++          for (int cc = 0; cc < 2; ++cc)
++#pragma unroll
++            for (int k = 0; k < 4; ++k) {
++              auto pk = [&](int e) { return pack_bf16(__uint_as_float(v2[cc][8 * k + 2 * e]), __uint_as_float(v2[cc][8 * k + 2 * e + 1])); };
++              sts128(stg + sw128(lane, cc * 4 + k), pk(0), pk(1), pk(2), pk(3));
++            }
++        }
++#else
+ #pragma unroll
+         for (int cc = 0; cc < 2; ++cc) {      // 32 columns per load: 16-byte chunks 4 cc .. 4 cc + 3 of the box
+           uint32_t v[32];
+@@ -177,7 +196,7 @@
+             sts128(stg + sw128(lane, cc * 4 + k), pk(0), pk(1), pk(2), pk(3));
+           }
+         }
+-
++#endif
+         fence_async_smem();
+         __syncwarp();
+         if (lane == 0) {

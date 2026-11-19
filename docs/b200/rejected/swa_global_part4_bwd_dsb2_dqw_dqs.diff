@@ -1,0 +1,265 @@
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_bwd.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_bwd.cu
+index d4fe5b4d9..b19d84169 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_bwd.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_bwd.cu
+@@ -30,6 +30,11 @@
+ // SPDX-License-Identifier: Apache-2.0
+ #include "sm100.cuh"
+ using namespace s100;
++template <int IMM> DEVI void tmem_ld16x2_8(uint32_t taddr, uint32_t (&r)[8]) {   // threads 0-15: 8 columns from taddr; 16-31: + IMM
++  asm volatile("tcgen05.ld.sync.aligned.16x32bx2.x8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8], %9;"
++               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5]), "=r"(r[6]), "=r"(r[7])
++               : "r"(taddr), "n"(IMM));
++}
+ template <int IMM> DEVI void tmem_ld16x2_16(uint32_t taddr, uint32_t (&r)[16]) {   // threads 0-15: lanes + t, columns from taddr; 16-31: + IMM
+   asm volatile("tcgen05.ld.sync.aligned.16x32bx2.x16.b32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16], %17;"
+                : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5]), "=r"(r[6]), "=r"(r[7]), "=r"(r[8]), "=r"(r[9]),
+@@ -124,10 +129,25 @@ constexpr int IST = 4 * TKV;
+ constexpr int BLS = 2 * TQ + 1024;                                         // q | dO | LSE2 (256 B) | D (256 B) | pad
+ constexpr int O_IT = 0, O_BL = QR * IST, O_DS = O_BL + ST * BLS;          // then dS^T (2 x [128][64] bf16, SW128)
+ constexpr int XS = 128 * 64;
+-constexpr int O_X = O_DS + 2 * 16384, O_QS = O_X + 4 * XS;                 // dK / dV staging (2 tiles x 2, SW64); dQ_b staging (NSTG x [64][32] f32)
++constexpr int O_X = O_DS + 2 * 16384, O_QS = O_X + 4 * XS;   // DSB2: dS^T buffer 1 at O_X (no staging)                 // dK / dV staging (2 tiles x 2, SW64); dQ_b staging (NSTG x [64][32] f32)
+ #ifndef SPLITB
+ #define SPLITB 0                         // 1: split mode (one sample / few items: the (item, query step) sequence cut evenly across the CTAs)
+ #endif
++#ifndef DSB2
++#define DSB2 0                           // 1 (round 3 part 4): dS^T double-buffered in shared memory (freed per buffer by the dK / dQ MMAs), P^T
++                                         // released by the dV MMAs alone (pt_free): the row threads no longer wait for dK / dQ of the block
++                                         // before; dK / dV stored per row from registers (no staging: its 32 KB hold the second dS^T buffer)
++#endif
++#ifndef DQW
++#define DQW 0                            // 1 (round 3 part 4): a fourth warpgroup (warps 12 - 15) reads dQ_b out of TMEM into the staging
++                                         // (was the row threads' job every other block); 512 threads
++#endif
++#ifndef DQS
++#define DQS 0                            // 1 (round 3 part 4): dQ_b read out every block by both tiles' row threads, half the columns each
++                                         // (was all of it every other block by one tile: that tile's p_full came about 600 cycles late)
++#endif
++static_assert(!(DQS && DQW), "one dQ_b reader");
++constexpr int NTHR = DQW ? 512 : 384;
+ constexpr int NMAX = 256, PMAX = 600;                                      // split mode: samples, pieces of one CTA
+ constexpr int O_BAR = O_QS + NSTG * 8192, O_PF = O_BAR + 1024, O_PL = O_PF + 4 * (NMAX + 4), SMEM_BYTES = O_PL + 16 * PMAX;
+ constexpr int WSF = 128 * 64;                                              // split: floats of one partial (dK | dV of 128 keys, unscaled)
+@@ -144,12 +164,12 @@ constexpr float LOG2E = 1.4426950408889634f;
+ 
+ struct Bars {
+   uint64_t it_full[QR], it_empty[QR], bl_full[ST], bl_empty[ST], s_full[2], s_free[2], p_full[2], p_free, acc_full, acc_free[2],
+-      dq_full[2], dq_free[2], stg_full[NSTG], stg_free[NSTG];
++      dq_full[2], dq_free[2], stg_full[NSTG], stg_free[NSTG], pt_free, ds_free[2];
+   uint32_t tmem;
+   int npieces, last[2];
+ };
+ 
+-extern "C" __global__ void __launch_bounds__(384, 1)
++extern "C" __global__ void __launch_bounds__(NTHR, 1)
+ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
+                     const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mlse, const __grid_constant__ CUtensorMap mdd,
+                     const __grid_constant__ CUtensorMap mdk_o, const __grid_constant__ CUtensorMap mdv_o,
+@@ -205,10 +225,11 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+     for (int s = 0; s < ST; ++s) { mbar_init(&B.bl_full[s], 1); mbar_init(&B.bl_empty[s], 1); }
+     for (int w = 0; w < 2; ++w) {
+       mbar_init(&B.s_full[w], 1); mbar_init(&B.s_free[w], 4); mbar_init(&B.p_full[w], 4); mbar_init(&B.acc_free[w], 4);
+-      mbar_init(&B.dq_full[w], 1); mbar_init(&B.dq_free[w], 4);
++      mbar_init(&B.dq_full[w], 1); mbar_init(&B.dq_free[w], DQS ? 8 : 4);
+     }
+     mbar_init(&B.p_free, 1); mbar_init(&B.acc_full, 1);
+-    for (int s = 0; s < NSTG; ++s) { mbar_init(&B.stg_full[s], 4); mbar_init(&B.stg_free[s], 1); }
++    mbar_init(&B.pt_free, 1); mbar_init(&B.ds_free[0], 1); mbar_init(&B.ds_free[1], 1);
++    for (int s = 0; s < NSTG; ++s) { mbar_init(&B.stg_full[s], DQS ? 8 : 4); mbar_init(&B.stg_free[s], 1); }
+     fence_barrier_init();
+   }
+   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
+@@ -315,6 +336,31 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+       if (nx.li < my_items) { issue_s(G + 1, nx); step(nx); }              // S^T / dP^T(G + 1) first
+       if (lane == 0) EVT(G, 9);
+       const uint64_t dq = desc_sw64(su + O_BL + s * BLS), ddo = desc_sw64(su + O_BL + s * BLS + TQ);   // MN-major B
++      const uint32_t dsb = su + (DSB2 && (G & 1) ? O_X : O_DS);         // this block's dS^T buffer
++      if (DSB2) {                                                          // dV of both tiles, P^T released, then dK of both
++#pragma unroll
++        for (int w = 0; w < 2; ++w) {
++          mbar_wait(&B.p_full[w], G & 1);
++          if (lane == 0) EVT(G, 10 + w);
++          if (c.t == 0 && c.ai >= 1) mbar_wait(&B.acc_free[w], (c.ai - 1) & 1);
++          tc_fence_after();
++          if (elect_one()) {
++#pragma unroll
++            for (int ks = 0; ks < 4; ++ks)
++              if (!(PROBE & 32)) umma_ts(tmem + T_ACC + w * 64 + 32, tmem + T_P + w * 64 + ks * 8, ddo + (uint64_t)(ks * 1024 >> 4), I_KV, (c.t > 0 || ks > 0) ? 1u : 0u);
++            if (w == 1) tc_commit(&B.pt_free);                             // P^T of both tiles read
++          }
++          __syncwarp();
++        }
++        if (elect_one()) {
++#pragma unroll
++          for (int w = 0; w < 2; ++w)
++#pragma unroll
++            for (int ks = 0; ks < 4; ++ks)
++              if (!(PROBE & 32)) umma_ss(tmem + T_ACC + w * 64, desc_k128(dsb + w * 16384) + (uint64_t)(ks * 2), dq + (uint64_t)(ks * 1024 >> 4), I_KV, (c.t > 0 || ks > 0) ? 1u : 0u);
++        }
++        __syncwarp();
++      } else {
+ #pragma unroll
+       for (int w = 0; w < 2; ++w) {
+         mbar_wait(&B.p_full[w], G & 1);
+@@ -332,6 +378,7 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+         }
+         __syncwarp();
+       }
++      }
+       const int b = G & 1;
+       if (G >= 2) mbar_wait(&B.dq_free[b], ((G >> 1) - 1) & 1);  // dQ_b of G - 2 has been read out
+       if (lane == 0) EVT(G, 12);
+@@ -340,12 +387,13 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+ #pragma unroll
+         for (int w = 0; w < 2; ++w) {
+           const uint64_t dk = desc_sw64(su + O_IT + is * IST + w * TKV);   // K as MN-major B (16 keys = 1 KB a step)
+-          const uint32_t sds = su + O_DS + w * 16384;
++          const uint32_t sds = dsb + w * 16384;
+ #pragma unroll
+           for (int ks = 0; ks < 8; ++ks)
+             if (!(PROBE & 16)) umma_ss(tmem + T_DQ + b * 64, desc_mn128(sds, 0) + (uint64_t)(ks * 128), dk + (uint64_t)(ks * 64), I_DQ, (w > 0 || ks > 0) ? 1u : 0u);
+         }
+-        tc_commit(&B.p_free);                                              // P^T, dS^T of both tiles read
++        if (DSB2) tc_commit(&B.ds_free[G & 1]);                           // dS^T buffer G & 1 read (dK, dQ)
++        else tc_commit(&B.p_free);                                         // P^T, dS^T of both tiles read
+         tc_commit(&B.dq_full[b]);
+         tc_commit(&B.bl_empty[s]);
+         if (c.t == c.e.len - 1) { tc_commit(&B.acc_full); tc_commit(&B.it_empty[is]); }
+@@ -443,7 +491,7 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+       }
+     }
+     flush();
+-  } else {
++  } else if (warp < 12) {
+     // ------------------------------------------------------------------------------------------------ P^T / dS^T of tile w, one key row per thread
+     const int w = (warp - 4) >> 2;
+     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
+@@ -467,6 +515,22 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+       if (SPL && e.c0 < e.c1) {
+         if (!split_combine(WS, CNT2 + 2 * e.id + w, &B.last[w], kv, vv, (int)r, w, cid, e.c0, e.c1, e.ist, T, G0)) return;
+       }
++      if (DSB2) {                                                          // per row from registers (64 B of dK, 64 B of dV)
++        uint4* gk = reinterpret_cast<uint4*>(DK + ((size_t)(n * H + h) * S + j0 + r) * DH);
++        uint4* gv = reinterpret_cast<uint4*>(DV + ((size_t)(n * H + h) * S + j0 + r) * DH);
++#pragma unroll
++        for (int q = 0; q < 4; ++q) {
++          gk[q] = make_uint4(pack_bf16(__uint_as_float(kv[8 * q]) * scale, __uint_as_float(kv[8 * q + 1]) * scale),
++                             pack_bf16(__uint_as_float(kv[8 * q + 2]) * scale, __uint_as_float(kv[8 * q + 3]) * scale),
++                             pack_bf16(__uint_as_float(kv[8 * q + 4]) * scale, __uint_as_float(kv[8 * q + 5]) * scale),
++                             pack_bf16(__uint_as_float(kv[8 * q + 6]) * scale, __uint_as_float(kv[8 * q + 7]) * scale));
++          gv[q] = make_uint4(pack_bf16(__uint_as_float(vv[8 * q]), __uint_as_float(vv[8 * q + 1])),
++                             pack_bf16(__uint_as_float(vv[8 * q + 2]), __uint_as_float(vv[8 * q + 3])),
++                             pack_bf16(__uint_as_float(vv[8 * q + 4]), __uint_as_float(vv[8 * q + 5])),
++                             pack_bf16(__uint_as_float(vv[8 * q + 6]), __uint_as_float(vv[8 * q + 7])));
++        }
++        return;
++      }
+       const uint32_t xk = su + O_X + (2 * w) * XS, xv = xk + XS;
+       if (r == 0) tma_store_wait_read0();
+       named_bar_sync(1 + w, 128);
+@@ -494,6 +558,29 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+     };
+     // dQ_b of block Gp (this tile's turn: Gp & 1 == w) -> fp32 staging [64][32] for the reducer warp 2 + w
+     const uint32_t qr = 16 * (warp & 3) + (lane & 15), qh = lane >> 4;
++    // DQS: every block, both tiles' row threads, 8 of the 16 columns of a lane's half each (tile w: columns 8 w .. 8 w + 7 of the half)
++    auto dq_out_s = [&](int Gp) {
++      const int bb = Gp & 1;
++      mbar_wait(&B.dq_full[bb], (Gp >> 1) & 1);
++      tc_fence_after();
++      uint32_t qv[8];
++      tmem_ld16x2_8<16>(tmem + (lb << 16) + T_DQ + bb * 64 + w * 8, qv);
++      tmem_wait_ld();
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) mbar_arrive(&B.dq_free[bb]);
++      const int sb = Gp % NSTG;
++      if (Gp >= NSTG) mbar_wait(&B.stg_free[sb], ((Gp / NSTG) - 1) & 1);
++      const uint32_t dst = su + O_QS + sb * 8192 + qr * 128 + qh * 64 + w * 32;
++#pragma unroll
++      for (int c = 0; c < 2; ++c) {
++        const int cc = (c + lane) & 1;
++        sts128(dst + cc * 16, make_uint4(qv[4 * cc], qv[4 * cc + 1], qv[4 * cc + 2], qv[4 * cc + 3]));
++      }
++      fence_proxy_async();
++      __syncwarp();
++      if (lane == 0) mbar_arrive(&B.stg_full[sb]);
++    };
+     auto dq_out = [&](int Gp) {
+       const int bb = Gp & 1;
+       mbar_wait(&B.dq_full[bb], (Gp >> 1) & 1);
+@@ -609,6 +696,18 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+         else math(BoolC<true>{});
+         if (r == 0 && w == 0) EVT(G, 3);
+         if (!SPL && t == 0 && pend >= 0) { epilogue(pend, pli); pend = -1; }
++        if (DSB2) {                                                        // dS^T into its buffer once G - 2's dK / dQ read it; P^T once dV(G - 1) read it
++          const uint32_t sdb = su + ((G & 1) ? O_X : O_DS) + w * 16384;
++          if (G >= 2) mbar_wait(&B.ds_free[G & 1], ((G >> 1) - 1) & 1);
++#pragma unroll
++          for (int c = 0; c < 8; ++c) sts128(sdb + sw128(r, c), make_uint4(ds[4 * c], ds[4 * c + 1], ds[4 * c + 2], ds[4 * c + 3]));
++          fence_proxy_async();
++          if (G >= 1) mbar_wait(&B.pt_free, (G - 1) & 1);
++          if (r == 0 && w == 0) EVT(G, 4);
++          tc_fence_after();
++          tmem_st16(trow + T_P + w * 64, *reinterpret_cast<uint32_t(*)[16]>(pp));
++          tmem_st16(trow + T_P + w * 64 + 16, *reinterpret_cast<uint32_t(*)[16]>(pp + 16));
++        } else {
+         if (G >= 1) mbar_wait(&B.p_free, (G - 1) & 1);                    // the MMAs of G - 1 are done (P^T / dS^T read)
+         if (r == 0 && w == 0) EVT(G, 4);
+         tc_fence_after();
+@@ -619,20 +718,53 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+         for (int c = 0; c < 8; ++c) sts128(sds + sw128(r, c), make_uint4(ds[4 * c], ds[4 * c + 1], ds[4 * c + 2], ds[4 * c + 3]));
+         fence_proxy_async();
+         }
++        }
+         tmem_wait_st();
+         tc_fence_before();
+         __syncwarp();
+         if (lane == 0) mbar_arrive(&B.p_full[w]);
+         if (r == 0) EVT(G, w ? 8 : 5);
+-        if (G >= 1 && ((G - 1) & 1) == w) dq_out(G - 1);
++        if (DQS && G >= 1) dq_out_s(G - 1);
++        else if (!DQW && G >= 1 && ((G - 1) & 1) == w) dq_out(G - 1);
+         if (r == 0 && w == 0) EVT(G, 6);
+       }
+       pend = ai; pli = li;
+       ++ai;
+     }
+     if (pend >= 0) epilogue(pend, pli);
+-    if (G >= 1 && ((G - 1) & 1) == w) dq_out(G - 1);
++    if (DQS && G >= 1) dq_out_s(G - 1);
++    else if (!DQW && G >= 1 && ((G - 1) & 1) == w) dq_out(G - 1);
+     if (r == 0) tma_store_wait0();
++  } else {
++    // ------------------------------------------------------------------------------------------------ DQW: dQ_b of every block -> fp32 staging
++    const uint32_t lb = (uint32_t)(warp & 3) * 32, qr = 16 * (warp & 3) + (lane & 15), qh = lane >> 4;
++    int G = 0;
++    for (int li = 0; li < my_items; ++li) {
++      const It e = item_of(li);
++      if (!e.act) continue;
++      for (int t = 0; t < e.len; ++t, ++G) {
++        const int bb = G & 1;
++        mbar_wait(&B.dq_full[bb], (G >> 1) & 1);
++        tc_fence_after();
++        uint32_t qv[16];
++        tmem_ld16x2_16<16>(tmem + (lb << 16) + T_DQ + bb * 64, qv);
++        tmem_wait_ld();
++        tc_fence_before();
++        __syncwarp();
++        if (lane == 0) mbar_arrive(&B.dq_free[bb]);
++        const int sb = G % NSTG;
++        if (G >= NSTG) mbar_wait(&B.stg_free[sb], ((G / NSTG) - 1) & 1);
++        const uint32_t dst = su + O_QS + sb * 8192 + qr * 128 + qh * 64;
++#pragma unroll
++        for (int c = 0; c < 4; ++c) {
++          const int cc = (c + lane) & 3;
++          sts128(dst + cc * 16, make_uint4(qv[4 * cc], qv[4 * cc + 1], qv[4 * cc + 2], qv[4 * cc + 3]));
++        }
++        fence_proxy_async();
++        __syncwarp();
++        if (lane == 0) mbar_arrive(&B.stg_full[sb]);
++      }
++    }
+   }
+   tc_fence_before();
+   __syncthreads();

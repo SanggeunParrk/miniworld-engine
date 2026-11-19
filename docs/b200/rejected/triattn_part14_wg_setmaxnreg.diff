@@ -1,0 +1,57 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index aa9172c2a..76a611bbd 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -81,7 +81,19 @@ constexpr int QT = BM * D;                                 // Q tile [128 q][32]
+ constexpr int KVT = BN * D;                                // K or V tile [128 k][32], 64B swizzle (8 KiB)
+ constexpr int BT = BM * BN;                                // bias tile [2 key halves][128 q][64], 128B swizzle, bf16 (32 KiB)
+ constexpr int NKV = TA_NKV, NB = 2;
+-constexpr int THREADS = G3 ? 480 : 448 + 32 * TA_SPLIT;   // 0 TMA, 1 MMA (QK^T), 2-5 / 6-9 softmax groups (even / odd rows), 10-13 epilogue (R = 3: the third group), 14 MMA (PV)
++#ifndef TA_WG
++#define TA_WG 0          // (B200 2026-11-18 part 14, R = 3) warpgroup-aligned roles: warpgroup 0 = TMA (warp 0), QK^T (1), PV (2), idle (3) at
++                         // TA_WG_LO registers, warpgroups 1-3 = the three softmax groups at TA_WG_HI (setmaxnreg): room for 32-key chunks
++#endif
++#ifndef TA_WG_LO
++#define TA_WG_LO 40
++#endif
++#ifndef TA_WG_HI
++#define TA_WG_HI 152
++#endif
++static_assert(!TA_WG || TA_R == 3, "TA_WG: the three-group core");
++constexpr int THREADS = TA_WG ? 512 : G3 ? 480 : 448 + 32 * TA_SPLIT;   // 0 TMA, 1 MMA (QK^T), 2-5 / 6-9 softmax groups (even / odd rows), 10-13 epilogue (R = 3: the third group), 14 MMA (PV)
++constexpr int W_PV = TA_WG ? 2 : 14, W_SM0 = TA_WG ? 4 : 2;   // the PV issue warp, the first softmax warp
+ static_assert(!G3 || TA_SPLIT, "R = 3 needs the two issue warps");
+ constexpr int ONT = TA_ONES ? 16 * D : 0;                 // (TA_ONES) the ones tile: B [16 rows][32] K-major 64B-swizzled, all 1.0 (1 KiB)
+ constexpr int SMEM = 1024 + (2 * R * QT + NKV * 2 * KVT + NB * BT + ONT) * 2 + 2 * 2 * R * BM * 4 + 2 * R * BM * 4 + 512;   // + the row sums / offsets for the epilogue
+@@ -325,6 +337,10 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+   auto ldt = [&](const CUtensorMap* m, void* dst, uint64_t* bar, int bh, int rw) {
+     if (TA_D16C) load_3d(m, dst, bar, 0, bh % H, rw); else load_2d(m, dst, bar, hcol(bh), rw);
+   };
++  if constexpr (TA_WG) {                         // registers by warpgroup (every warp of a warpgroup executes it)
++    if (warp < 4) asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" :: "n"(TA_WG_LO));
++    else asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" :: "n"(TA_WG_HI));
++  }
+ 
+   if (warp == 0) {
+     if (lane == 0) {
+@@ -353,7 +369,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+         }
+       }
+     }
+-  } else if (warp == 1 || warp == 14) {
++  } else if (warp == 1 || warp == W_PV) {
+     // flattened sub-steps y (task k = y / SPT, key tile j, row r): QK^T runs up to NS - 1 sub-steps ahead of the PV GEMMs, so a
+     // softmax group finds its next S ready when it hands over P (issued strictly one ahead, each group idled ~1K cycles per sub-step).
+     // B200 2026-11-17 (clock64 buckets of a CTA, L768): one warp issuing both streams was the kernel's critical path -- ~1500 clk of
+@@ -458,9 +474,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+       pv();
+     }
+ #endif
+-  } else if (warp < 2 + 4 * NGR) {
++  } else if (warp >= W_SM0 && warp < W_SM0 + 4 * NGR) {
+     const int q = warp & 3, row = q * 32 + lane;   // TMEM lane = query row of the tile
+-    const int gi = (warp - 2) >> 2;                // this group's rows: gi, gi + NGR, ...
++    const int gi = (warp - W_SM0) >> 2;               // this group's rows: gi, gi + NGR, ...
+     int lt = 0, x = 0, jb = 0;
+     for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
+       int bh, qt, g; decode(t, bh, qt, g);

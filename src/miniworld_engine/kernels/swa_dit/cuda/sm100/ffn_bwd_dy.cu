@@ -10,6 +10,14 @@
 #include "sm100.cuh"
 #include <type_traits>
 using namespace s100;
+#ifndef WPRE
+#define WPRE 0  // 1 (B200 round 3 part 8): the weight forms are complete before this kernel starts -> load them before griddepcontrol.wait
+#endif
+#ifndef TRACE
+#define TRACE 0  // 1: CTA 0 stamps globaltimer (ns) into TRb (timing experiments)
+#endif
+DEVI unsigned long long gtime_() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
+#define EVT(k) do { if (TRACE && blockIdx.x == 0) TRb[k] = gtime_(); } while (0)
 
 constexpr int C = 128, NSMAX = 28, UPT = 14;
 constexpr int SLOT = 8192;                                                 // [64 rows][64] bf16, SW128
@@ -32,7 +40,13 @@ DEVI void sts_bf16(uint32_t a, float x) {
   const unsigned short v = __bfloat16_as_ushort(__float2bfloat16_rn(x));
   asm volatile("st.shared.u16 [%0], %1;" :: "r"(a), "h"(v) : "memory");
 }
-DEVI void red1(float* p, float v) { asm volatile("red.global.add.f32 [%0], %1;" :: "l"(p), "f"(v) : "memory"); }
+#ifndef DMOD_STORE
+#define DMOD_STORE 0  // 1 (B200 2026-11-17): one writer per dmod element (A <= SP: a tile holds every augment of its rows) -> a plain store, no zeroed dmod
+#endif
+DEVI void red1(float* p, float v) {
+  if (DMOD_STORE) *p = v;
+  else asm volatile("red.global.add.f32 [%0], %1;" :: "l"(p), "f"(v) : "memory");
+}
 DEVI void rscatter64(float (&v)[64], int lane, float& o0, float& o1) {
 #pragma unroll
   for (int i = 0; i < 32; ++i) { const bool up = lane & 16; const float k = up ? v[i + 32] : v[i], s = up ? v[i] : v[i + 32]; v[i] = k + __shfl_xor_sync(~0u, s, 16); }
@@ -51,7 +65,8 @@ extern "C" __global__ void __launch_bounds__(384, 1)
 swa_ffn_bwd_dy_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_constant__ CUtensorMap mq1, const __grid_constant__ CUtensorMap mffn,
                      const __grid_constant__ CUtensorMap mdq2, const __grid_constant__ CUtensorMap mmod, const __grid_constant__ CUtensorMap mdq1,
                      int S, int A, int Bn, int SP, int AT, int nab, int nag, int ntile, int NS, float eps,
-                     const __nv_bfloat16* __restrict__ WUT, float* __restrict__ DMOD) {
+                     const __nv_bfloat16* __restrict__ WUT, float* __restrict__ DMOD, unsigned long long* __restrict__ TRb) {
+  if (threadIdx.x == 0) EVT(0);
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   const int AUXST = (AT * 512 + 1023) / 1024 * 1024;
@@ -74,6 +89,10 @@ swa_ffn_bwd_dy_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_cons
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+#if !WPRE
+  pdl_wait();  // programmatic dependent launch (2026-11-17): the setup above overlaps the previous kernel; every global access is below
+  pdl_launch();
+#endif
   const uint32_t tmem = B.tmem;
   if (warp >= 4) {                                                        // Wu^T -> TMEM: warpgroup w writes hidden 256 w ..
     const int wg = (warp - 4) >> 2, lb = (warp & 3) * 32, c = lb + lane;
@@ -90,6 +109,12 @@ swa_ffn_bwd_dy_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_cons
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+  if (threadIdx.x == 0) EVT(1);
+#if WPRE  // B200 round 3 part 8: the weights (made at the head of the forward, wpack_bf16.cu) were read above, before the wait
+  pdl_wait();
+  pdl_launch();
+#endif
+  if (threadIdx.x == 0) EVT(2);
 
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------------ TMA producer
@@ -130,6 +155,8 @@ swa_ffn_bwd_dy_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_cons
                     (kb > 0 || ks > 0) ? 1u : 0u);
           tc_commit(&B.empty[sl]); tc_commit(&B.empty[sl]);              // the MMA is the only reader (count 2)
           if (kb == 7) tc_commit(&B.dxfull[xb]);
+          if (kb == 0) EVT(3);
+          if (kb == 7) EVT(4);
         }
         __syncwarp();
       }
@@ -149,6 +176,7 @@ swa_ffn_bwd_dy_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_cons
         mbar_arrive_cnt(&B.empty[s0l], 2); mbar_arrive_cnt(&B.empty[s1l], 2);
       }
       tma_store_wait0();
+      EVT(9);
     }
   } else if (warp >= 4) {
     // ------------------------------------------------------------------------------------------------ channel threads: channel c, rows 32 wg ..
@@ -177,6 +205,7 @@ swa_ffn_bwd_dy_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_cons
       mbar_wait(&B.auxfull[T & 1], (T >> 1) & 1);
       mbar_wait(&B.full[sQ], pQ);
       mbar_wait(&B.dxfull[xb], (T >> 1) & 1);
+      if (threadIdx.x == 128) EVT(5);
       tc_fence_after();
       const uint32_t tdy = tmem + (lb << 16) + T_DY + xb * 64 + 32 * wg;
       // ---- pass 1: per-row sums of q1^2 and dy (1 + scale) q1 over this warp's 32 channels -> exchange over the 4 warps
@@ -195,6 +224,7 @@ swa_ffn_bwd_dy_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_cons
         for (int j = 0; j < 32; ++j) v[2 * j + 1] *= __uint_as_float(dv[j]);
         float o0, o1;
         rscatter64(v, lane, o0, o1);
+        if (threadIdx.x == 128) EVT(6);
         red[(wg * 4 + qw) * 32 + lane] = make_float2(o0, o1);
       }
       named_bar_sync(1 + wg, 128);
@@ -209,6 +239,7 @@ swa_ffn_bwd_dy_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_cons
       // ---- pass 2: dq1 in place over dq2; shift / scale / gate sums
       mbar_wait(&B.full[sF], pF);
       mbar_wait(&B.full[sD], pD);
+      if (threadIdx.x == 128) EVT(10);
       float ash[8], asc[8], agt[8];
 #pragma unroll
       for (int k = 0; k < 8; ++k) { ash[k] = 0.f; asc[k] = 0.f; agt[k] = 0.f; }
@@ -231,6 +262,7 @@ swa_ffn_bwd_dy_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_cons
           const uint32_t xr = AT8 ? xo[j & 7] : ((cch ^ (uint32_t)(j & 7)) << 4);
           q_[jj] = lds_bf16(qa + j * 128 + xr); d2_[jj] = lds_bf16(da + j * 128 + xr); f_[jj] = lds_bf16(fa + j * 128 + xr);
         }
+        if (threadIdx.x == 128) EVT(11 + 2 * hf);
         tmem_wait_ld();
 #pragma unroll
         for (int jj = 0; jj < 16; ++jj) {
@@ -252,10 +284,13 @@ swa_ffn_bwd_dy_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_cons
             }
           }
         }
+        if (threadIdx.x == 128) EVT(12 + 2 * hf);
       }
+      if (threadIdx.x == 128) EVT(7);
       fence_proxy_async();
       tc_fence_before();
       named_bar_sync(1 + wg, 128);
+      if (threadIdx.x == 128) EVT(8);
       if (qw == 0 && lane == 0) {
         int s2l; uint32_t p2;
         for (int k = 0; k < 2; ++k) {                                      // both channel halves of q1 / ffn / dq2

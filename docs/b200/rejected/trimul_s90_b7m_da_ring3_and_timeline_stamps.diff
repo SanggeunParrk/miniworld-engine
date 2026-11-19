@@ -1,0 +1,183 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu
+index 0ca82dd60..28eab43bc 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu
+@@ -13,6 +13,16 @@
+ 
+ using namespace sm100;
+ 
++#ifdef B7M_TT
++// per-chunk (TA) and per-tile (TBT) %globaltimer stamps of CTA 0 (S90), read by b7m_tt()
++static __device__ unsigned long long g_ta[64][8], g_tb[32][8];
++#define GT_NOW(v) unsigned long long v; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(v));
++#define TA(u, e) { if (blockIdx.x == 0 && (u) < 64) { GT_NOW(t_) g_ta[u][e] = t_; } }
++#define TBT(i, e) { if (blockIdx.x == 0 && (i) < 32) { GT_NOW(t_) g_tb[i][e] = t_; } }
++#else
++#define TA(u, e) {}
++#define TBT(i, e) {}
++#endif
+ namespace b7m {
+ DEV void tma_load_5d(void* dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2, int c3, int c4, uint64_t hint) {
+   asm volatile(
+@@ -37,13 +47,17 @@ constexpr int GT = TOK * 128 * 2;          // 32 KB: dgp tile [128 tok][gate 64
+ #ifndef B7M_NXI
+ #define B7M_NXI 2
+ #endif
++#ifndef B7M_NDA
++#define B7M_NDA 2   // dA chunk ring depth (S90: the dA load -> read -> free cycle, ~3.3 us at D64 L512, is the tile period / 2 with two buffers)
++#endif
+ template <int NCH>
+ struct Geo {
+-  static constexpr int S_W1 = 0, S_WG = S_W1 + NCH * XT, S_X = S_WG + 8192, S_DA = S_X + 2 * XT, S_DGP = S_DA + 2 * DAT,
++  static constexpr int NDAG = (NCH == 2 && B7M_NDA == 3) ? 3 : 2;
++  static constexpr int S_W1 = 0, S_WG = S_W1 + NCH * XT, S_X = S_WG + 8192, S_DA = S_X + 2 * XT, S_DGP = S_DA + NDAG * DAT,
+                        S_GO = S_DGP + GT, S_XI = S_GO + XT;
+   // the epilogue's x / dy tiles are double buffered where shared memory allows (NCH = 2): the next tile's HBM reads run during
+   // this tile's epilogue instead of after its dx store
+-  static constexpr int NXI = (NCH == 2 && B7M_NXI == 2) ? 2 : 1;
++  static constexpr int NXI = (NCH == 2 && B7M_NXI == 2 && NDAG == 2) ? 2 : 1;
+   static constexpr int S_DY = S_XI + NXI * XT, O_BAR = S_DY + NXI * XT, O_GI = O_BAR + 512, SMEM = O_GI + 256;
+   static_assert(SMEM <= 232448, "smem");
+   static constexpr int NPB = NCH == 4 ? 1 : 2;               // pre-activation TMEM buffers
+@@ -55,7 +69,7 @@ constexpr uint32_t ID_DW = idesc_bf16_mj(128, C, 1, 1);
+ constexpr uint32_t ID_DX = idesc_bf16_mj(128, C, 0, 1);
+ 
+ struct Bars {
+-  uint64_t w_full, x_full[2], x_free[2], da_full[2], da_free[2], pre_full[2], pre_free[2], dgp_ready, dgp_free, go_full, go_free,
++  uint64_t w_full, x_full[2], x_free[2], da_full[3], da_free[3], pre_full[2], pre_free[2], dgp_ready, dgp_free, go_full, go_free,
+       acc_full[2], acc_empty[2], xi_full[2], xi_free[2], ln_last;
+   uint32_t tmem;
+ };
+@@ -202,6 +216,7 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+       mbar_init(&B.x_full[b], 1); mbar_init(&B.x_free[b], 1); mbar_init(&B.da_full[b], 1); mbar_init(&B.da_free[b], 8);
+       mbar_init(&B.pre_full[b], 1); mbar_init(&B.pre_free[b], 8); mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], 4);
+     }
++    if (G_::NDAG > 2) { mbar_init(&B.da_full[2], 1); mbar_init(&B.da_free[2], 8); }
+     mbar_init(&B.dgp_ready, 1); mbar_init(&B.dgp_free, 1); mbar_init(&B.go_full, 1); mbar_init(&B.go_free, 1);
+     for (int b = 0; b < 2; ++b) { mbar_init(&B.xi_full[b], 1); mbar_init(&B.xi_free[b], 1); }
+     mbar_init(&B.ln_last, 1);
+@@ -232,6 +247,7 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+     const int xb = i % G_::NXI;
+     const uint32_t sx = su + G_::S_XI + xb * XT, sy = su + G_::S_DY + xb * XT;
+     PW(0, mbar_wait(&B.xi_full[xb], (i / G_::NXI) & 1));
++    if (tid == 384) TBT(i, 4)
+     if (tid == 384 && i == 0) P7(9);
+     // the split: warps 0-3 start once the LN warps have the last tile's x / dy (their barrier waits are then of the current phase)
+     if (H0 == 0 && NH == 1 && tid == 384) mbar_arrive(&B.ln_last);
+@@ -254,6 +270,7 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+     }
+     if (H0 == 1 && tid == 0) P7(17);
+     PW(1, mbar_wait(&B.acc_full[acc], (i >> 1) & 1));
++    if (tid == 384) TBT(i, 5)
+     if (tid == 384 && i == n_local - 1) P7(10);
+     if (H0 == 1 && tid == 0) P7(18);
+     if (!FU && B7M_TRIG == 2 && tid == 384 && i == n_local - 1) pdl_trigger();
+@@ -367,8 +384,8 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+             mbar_expect_tx(&B.x_full[b], XT);
+           }
+           for (int c = c0; c < c0 + 2; ++c) {
+-            const int u = i * NCH + c, db = u & 1;
+-            if (u >= 2) PW(1, mbar_wait(&B.da_free[db], ((u >> 1) - 1) & 1));
++            const int u = i * NCH + c, db = u % G_::NDAG;
++            if (u >= G_::NDAG) PW(1, mbar_wait(&B.da_free[db], ((u / G_::NDAG) - 1) & 1));
+             mbar_expect_tx(&B.da_full[db], DAT);
+           }
+         }
+@@ -376,7 +393,7 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+         if (lane == 4 && c0 == 0) {
+           tma_load_2d(sm + G_::S_X + b * XT, &mxn, &B.x_full[b], 0, row0, EVICT_NORMAL);
+         } else if (lane < 4) {
+-          const int c = c0 + (lane >> 1), hf = lane & 1, u = i * NCH + c, db = u & 1;
++          const int c = c0 + (lane >> 1), hf = lane & 1, u = i * NCH + c, db = u % G_::NDAG;
+           if constexpr (SMJ != 0) {
+             int tq, ts;
+             tok_split(row0, a.n2, tq, ts);
+@@ -412,13 +429,16 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+       for (int i = 0; i < n_local; ++i) {
+         const int row0 = (cta + G * i) * TOK, b = i & 1;
+         if (i >= 2) PW(0, mbar_wait(&B.x_free[b], ((i >> 1) - 1) & 1));
++        TBT(i, 0)
+         if (!B7M_XNE || i > 0) {
+           mbar_expect_tx(&B.x_full[b], XT);
+           tma_load_2d(sm + G_::S_X + b * XT, &mxn, &B.x_full[b], 0, row0, EVICT_NORMAL);
+         }
+         for (int c = 0; c < NCH; ++c) {
+-          const int u = i * NCH + c, db = u & 1;
+-          if (u >= 2) PW(1, mbar_wait(&B.da_free[db], ((u >> 1) - 1) & 1));
++          const int u = i * NCH + c, db = u % G_::NDAG;
++          TA(u, 0)
++          if (u >= G_::NDAG) PW(1, mbar_wait(&B.da_free[db], ((u / G_::NDAG) - 1) & 1));
++          TA(u, 1)
+           mbar_expect_tx(&B.da_full[db], DAT);
+           if constexpr (SMJ != 0) {
+             int tq, ts;
+@@ -439,6 +459,7 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+           }
+         }
+         if (i >= 1) PW(2, mbar_wait(&B.go_free, (i - 1) & 1));
++        TBT(i, 2)
+         mbar_expect_tx(&B.go_full, XT);
+         tma_load_2d(sm + G_::S_GO, &mgo, &B.go_full, 0, row0, EVICT_FIRST);
+       }
+@@ -451,6 +472,7 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+       auto issue_pre = [&](int u) {
+         const int i = u / NCH, c = u % NCH, pb = u % NPB;
+         PW(0, mbar_wait(&B.x_full[i & 1], (i >> 1) & 1));
++        if (c == 0) TBT(i, 1)
+         if (u >= NPB) PW(1, mbar_wait(&B.pre_free[pb], ((u / NPB) - 1) & 1));
+         tc_fence_after();
+         const uint32_t sx = su + G_::S_X + (i & 1) * XT, sw = sw1 + c * XT;
+@@ -467,6 +489,7 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+           const int u = i * NCH + c;
+           if (u + 1 < n_chunks) issue_pre(u + 1);            // runs while the dg / dp warps work on chunk u
+           PW(3, mbar_wait(&B.dgp_ready, u & 1));
++          TA(u, 5)
+           tc_fence_after();
+           const uint32_t sw = sw1 + c * XT;
+           // dxn [128 tok][64] += dgp [tok][128 k] . W1_c [128 k][64]   (A K-major: two 64-column K-blocks; B MN-major)
+@@ -523,14 +546,16 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+     PairIdx pix;
+     pix.init(cta * TOK, G * TOK, a.L);
+     for (int u = 0; u < n_chunks; ++u) {
+-      const int i = u / NCH, pb = u % NPB, db = u & 1;
++      const int i = u / NCH, pb = u % NPB, db = u % G_::NDAG;
+       if (u % NCH == 0) {
+         if (i > 0) pix.advance(a.L);
+         pix.mask2(a.tmask, tok0 + tr, a.L, mA, mB);
+       }
+       PW(0, mbar_wait(&B.pre_full[pb], (u / NPB) & 1));
++      if (tid == 128) TA(u, 3)
+       if (tid == 128) { if (u == 0) P7(4); if (u == n_chunks - 1) P7(7); }
+-      PW(1, mbar_wait(&B.da_full[db], (u >> 1) & 1));
++      PW(1, mbar_wait(&B.da_full[db], (u / G_::NDAG) & 1));
++      if (tid == 128) TA(u, 2)
+       if (tid == 128 && u == 0) P7(5);
+       tc_fence_after();
+       const uint32_t ta = tmem + T_PRE + pb * 128 + ((uint32_t)tok0 << 16);
+@@ -588,7 +613,7 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+       }
+       fence_async_smem();
+       PW(3, named_bar_sync(1, 256));
+-      if (tid == 128) { mbar_arrive(&B.dgp_ready); if (u == 0) P7(6); if (u == n_chunks - 1) P7(8); }
++      if (tid == 128) { TA(u, 4) mbar_arrive(&B.dgp_ready); if (u == 0) P7(6); if (u == n_chunks - 1) P7(8); }
+     }
+     // flush dW1: chunk c rows 128c + row, this warp's 32-column half
+     tc_fence_before();
+@@ -981,6 +1006,17 @@ void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
++torch::Tensor b7m_tt() {
++#ifdef B7M_TT
++  torch::Tensor h = torch::empty({96, 8}, torch::kInt64);
++  cudaMemcpyFromSymbol(h.data_ptr(), g_ta, sizeof(unsigned long long) * 64 * 8);
++  cudaMemcpyFromSymbol(static_cast<char*>(h.data_ptr()) + sizeof(unsigned long long) * 64 * 8, g_tb, sizeof(unsigned long long) * 32 * 8);
++  return h;
++#else
++  return torch::empty({0});
++#endif
++}
++
+ torch::Tensor b7m_prof() {
+ #if defined(PT_TL) && PT_TL   // the phase trace instead of the role probes: [160][16] (see g_pt7)
+   auto h = torch::empty({160, 24}, torch::kInt64);

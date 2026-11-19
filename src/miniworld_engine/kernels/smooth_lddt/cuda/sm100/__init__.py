@@ -21,6 +21,10 @@ FBLK = 512  # threads per CTA of the whole-structure kernels (slddt_*_full) on B
 FULL_SMEM = 110 * 1024  # whole-structure kernels need N * 32 B of shared memory; two CTAs per SM (N <= 3520 atoms) beat the tile kernels
 FULL_SMEM_SM120 = 98 * 1024  # RTX 5090: 99 KB a block at most, static shared memory (the CTA reduction) included (N <= 3136 atoms)
 FORCE_TILE = False  # tests set it to compare the tile kernel with the whole-structure one
+PREP4 = True  # B200: slddt_prep4 (four threads a row) while the prep grid B * NB^2 has at most PREP4_FILL CTAs per SM, else slddt_prep
+#: measured 2026-11-17 (module, A1, graphs + L2 flush; eval / train us, prep vs prep4): N1024 57.2 / 53.1, 83.8 / 79.7; N2048 53.1 / 51.1,
+#: 77.7 / 74.8; N3072 equal; N4096 equal; N6144 96.1 / 104.4; N8192 129.0 / 137.1 (prep outputs bitwise equal)
+PREP4_FILL = 4
 
 
 def _full_smem(index: int) -> int:
@@ -43,15 +47,17 @@ FORCE_SPLIT = 0  # tests / probes: > 0 a fixed KS of the split tile kernels (and
 
 
 def _split(x: torch.Tensor, n_augment_batch: int, nb: int) -> int:
-    """KS, the column-tile parts of the H100 tile kernels (``slddt_*_split``, grid (A * B, NB, KS)): 1 elsewhere. A * B * NB CTAs of 4 warps
+    """KS, the column-tile parts of the H100 / A100 / RTX 5090 / B200 tile kernels (``slddt_*_split``, grid (A * B, NB, KS)): 1 elsewhere. A * B * NB CTAs of 4 warps
     (A1 x N4096: 32 CTAs on 132 SMs) leave most SMs idle; a part of the column tiles per CTA spreads the launch over the GPU."""
     if FORCE_SPLIT:
         return max(1, min(nb, FORCE_SPLIT))
     arch = _arch(_dev(x))
-    if arch not in ("sm_90a", "sm_80", "sm_120a"):
+    if arch not in ("sm_90a", "sm_80", "sm_120a", "sm_100a"):
         return 1
     ctas = n_augment_batch * nb
-    fill = SPLIT_FILL if arch == "sm_90a" else SPLIT_FILL_SM80  # the RTX 5090 (170 SMs) takes the A100's fill
+    # the RTX 5090 (170 SMs) and the B200 (148 SMs) take the A100's fill. B200 2026-11-16 (graph replay, A1 / A5 x N1024 - N8192, eval and
+    # train): the split launches 1.6-3.6x the whole-structure / unsplit tile kernels; this KS is the best measured or within 3 %
+    fill = SPLIT_FILL if arch == "sm_90a" else SPLIT_FILL_SM80
     return max(1, min(nb, -(-fill * num_sms(_dev(x)) // ctas)))
 
 
@@ -97,7 +103,8 @@ def cubin(arch: str = "sm_100a") -> str:
     from miniworld_engine.kernels import _nvcc
 
     flags = ("-std=c++17", "-O3", f"-arch={arch}", "-cubin", "-lineinfo", "-ftz=true", "-prec-sqrt=false", "-prec-div=false")
-    return str(_nvcc.cubin(f"smooth_lddt_{arch[3:]}/smooth_lddt", flags, source=_dir / "smooth_lddt.cu", toolchain="sm100"))
+    src = "smooth_lddt_sm100.cu" if arch == "sm_100a" else "smooth_lddt.cu"  # B200: the shared source + slddt_prep4 (smooth_lddt_sm100.cu)
+    return str(_nvcc.cubin(f"smooth_lddt_{arch[3:]}/smooth_lddt", flags, source=_dir / src, toolchain="sm100"))
 
 
 @functools.lru_cache(maxsize=16)
@@ -114,6 +121,7 @@ def _kernels(index: int):
             "slddt_bwd_split",
             *(f"slddt_fwd_full_{v}" for v in FWD_VARIANTS),
             *(f"slddt_bwd_full_{fb}" for fb in (128, 256, 512)),
+            *(("slddt_prep4",) if _arch(index) == "sm_100a" else ()),  # B200 only (the cubin of the other cards has no slddt_prep4)
         )
         return {name: driver.Kernel(cubin(_arch(index)), name, _full_smem(index) if "_full" in name else 0) for name in names}
 
@@ -127,13 +135,15 @@ def prep(gt, nuc, mask):
     nuc / mask [B, N] int8; N % 128 == 0. tile bit 0: FM has a bit in the tile, bit 1: UM has one."""
     B, N = mask.shape
     nb = N // BLK
-    prep_k = _kernels(_dev(gt))["slddt_prep"]
+    ks = _kernels(_dev(gt))
+    four = PREP4 and "slddt_prep4" in ks and B * nb * nb <= PREP4_FILL * num_sms(_dev(gt))  # B200: four threads a row (small grids)
+    prep_k = ks["slddt_prep4" if four else "slddt_prep"]
     tile = torch.empty(B, nb, nb, device=gt.device, dtype=torch.int8)
     cnt = torch.zeros(B, N, device=gt.device, dtype=torch.int32)  # the kernel adds the per-tile counts with integer atomics
     fm = torch.empty(B, N, N // 32, device=gt.device, dtype=torch.int32)  # every word is written
     um = torch.empty_like(fm)
     with torch.cuda.device(gt.device):
-        prep_k((B, nb, nb), (BLK, 1, 1), gt, nuc, mask, tile, cnt, fm, um, int(B), int(N), int(nb))
+        prep_k((B, nb, nb), ((4 if four else 1) * BLK, 1, 1), gt, nuc, mask, tile, cnt, fm, um, int(B), int(N), int(nb))
     return tile, cnt, fm, um
 
 

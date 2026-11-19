@@ -45,6 +45,11 @@ using namespace s100;
 #ifndef DQPART
 #define DQPART 0                         // 1: each key chunk's dQ partial is STORED to its own slice DQ[chunk][a L + row] (deterministic;
 #endif                                   // the caller adds the L / 128 slices in order) instead of reduce-added into one zeroed dQ
+#ifndef DQDET
+#define DQDET 0                          // 1: a step's two dQ MMA groups in a fixed order (issuer 1's after issuer 0's of the same step, issuer 0's
+#endif                                   // after issuer 1's of the previous step, as attn_dqb_tf32 -DDET): with DQPART the whole dQ is bitwise repeatable.
+                                         // (Each issuer adds four MMAs onto the step's accumulator; unordered, the eight addends interleave: the token
+                                         // DiT at 48 samples, L 384 differed run to run -- 2026-11-17. A name of its own: AttentionPairBias's builds pass DET.)
 #ifndef DHP
 #define DHP 48                           // head width in memory and in the MMAs: 48 (token DiT 16 x 48), 64, 32, 16; 16 x 24: 32 (the
 #endif                                   // projection pads each head's 24 channels with 8 zero ones, so q / k / v / dO pads are exactly 0)
@@ -211,6 +216,10 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         else __nanosleep(20);
       }
       if (g >= NDQ) mbar_wait(&B.dq_free[b], ((g / NDQ) - 1) & 1);         // step g - NDQ's dQ has been read out (and zeroed)
+      if (DQDET) {                                                         // issuer 0 (g) after issuer 1 (g - 1), issuer 1 (g) after issuer 0 (g)
+        if (w == 1) mbar_wait(&B.ds_free[0], g & 1);
+        else if (g >= 1) mbar_wait(&B.ds_free[1], (g - 1) & 1);
+      }
       tc_fence_after();
       const uint64_t dk = desc_mn128(su + O_K + (g % STK) * T128 + w * BN * 128, 8192);
       if (elect_one()) {

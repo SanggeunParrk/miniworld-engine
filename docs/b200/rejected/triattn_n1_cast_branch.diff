@@ -1,0 +1,49 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n1-triattn/bidir_triattn_h100.py.pre5	2026-11-18 16:30:50.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n1-triattn/src/miniworld_engine/kernels/integrations/bidir_triattn_h100.py	2026-11-18 16:30:51.000000000 +0000
+@@ -130,7 +130,7 @@
+ #: with their reduce) off the main chain as branches of the captured graph (they read tensors the chain already has and nothing reads their results before the
+ #: end): the dWo GEMM beside the gate backward / core GEMMs, the dW GEMM beside the dyln GEMM and the LayerNorm backward. One sample (B = 1), B200, graph capture only.
+ #: MINIWORLD_BIDIR_B200_SIDE=0 turns it off.
+-B200_SIDE = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch
++B200_SIDE = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch, bit 3 (8): the weight cast beside the LayerNorm forward
+ B200_SIDE_MAX_L = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE_MAX_L", "256"))   # the dWo branch only up to this length (beyond it the core GEMMs fill the SMs: it slows the chain); the dW branch at every length
+ 
+ 
+@@ -468,13 +468,15 @@
+     return None
+ 
+ 
+-def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
++def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save, wait=None):
+     """One direction -> (out = pair + drop * update [B, L, L, C], saved or None). w = [Wv; Wg; Wb] [2 Dh + H, C], wo [C, Dh] (bf16)."""
+     g = _glue()
+     B, L, _, C = pair.shape
+     LL, dh = L * L, Dh // H
+     x = pair.contiguous().view(-1, C)
+     y, mean, rstd = _ln_fwd(g, x, lnw, lnb, eps, L)
++    if wait is not None:  # (N1) the weight cast ran as a branch beside the LayerNorm: joined before the planes GEMM reads it
++        wait()
+     out = torch.empty_like(x)
+     planes, probs, os_, us = [], [], [], []
+     for b in range(B):
+@@ -606,8 +608,18 @@
+ class _SingleFn(torch.autograd.Function):
+     @staticmethod
+     def forward(ctx, pair, mask, drop, lnw, lnb, wv, wb, wg, wo, eps, H, Dh, starting):
+-        w, wo16 = _weights1(wv, wb, wg, wo)
+-        out, saved = _forward1(pair, mask, drop, lnw, lnb, eps, w, wo16, H, Dh, starting, True)
++        s_c = None
++        if (B200_SIDE & 8) and pair.shape[0] == 1 and pair.shape[1] <= B200_SIDE_MAX_L and _b200():
++            from miniworld_engine.kernels.bias_only_dit.cuda import side
++
++            s_c = side.fork(pair.device)
++        if s_c is not None:  # branch: the fp32 -> bf16 weight cast beside the LayerNorm forward
++            with side.on(s_c):
++                w, wo16 = _weights1(wv, wb, wg, wo)
++            out, saved = _forward1(pair, mask, drop, lnw, lnb, eps, w, wo16, H, Dh, starting, True, lambda: side.join(pair.device, s_c))
++        else:
++            w, wo16 = _weights1(wv, wb, wg, wo)
++            out, saved = _forward1(pair, mask, drop, lnw, lnb, eps, w, wo16, H, Dh, starting, True)
+         ctx.H, ctx.Dh, ctx.starting, ctx.saved, ctx.drop = H, Dh, starting, saved, drop
+         ctx.dtypes = tuple(t.dtype for t in (lnw, lnb, wv, wb, wg, wo))
+         ctx.save_for_backward(pair, lnw, w, wo16)

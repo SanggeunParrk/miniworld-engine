@@ -11,6 +11,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
+#ifndef WPRE
+#define WPRE 0  // 1 (B200 round 3 part 8): the weight forms are complete before this kernel starts -> load them before griddepcontrol.wait
+#endif
 
 constexpr int C = 128, NH = 256, NSMAX = 8, UPT = 2;
 constexpr int SLOT = 8192, KBLK = 4096;                                   // [32 rows][128 ch] tile: 2 x [32][64] SW128
@@ -65,6 +68,10 @@ swa_ffn_bwd_gate_sm100(const __grid_constant__ CUtensorMap my, const __grid_cons
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+#if !WPRE
+  pdl_wait();  // programmatic dependent launch (2026-11-17): the setup above overlaps the previous kernel; every global access is below
+  pdl_launch();
+#endif
   const uint32_t tmem = B.tmem;
   if (warp >= 4) {                                                        // weights -> TMEM: lane l of M-tile t = row 128 t + l
     const int wg = (warp - 4) >> 2, lb = (warp & 3) * 32, l = lb + lane;
@@ -85,6 +92,10 @@ swa_ffn_bwd_gate_sm100(const __grid_constant__ CUtensorMap my, const __grid_cons
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+#if WPRE  // B200 round 3 part 8: the weights (made at the head of the forward, wpack_bf16.cu) were read above, before the wait
+  pdl_wait();
+  pdl_launch();
+#endif
 
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------------ TMA producer: y, dq2, gate_f

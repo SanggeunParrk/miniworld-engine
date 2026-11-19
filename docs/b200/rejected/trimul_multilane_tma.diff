@@ -1,0 +1,436 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/ctr.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/ctr.cu
+index 6dc5c9a74..ce67b1e15 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/ctr.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/ctr.cu
+@@ -60,7 +60,7 @@ DEV Item item_of(int it, int L, int nb, int d, int dir, int bn) {
+ 
+ __global__ void __launch_bounds__(NTHR, 1)
+     ctr_kernel(const __grid_constant__ CUtensorMap mp, const __grid_constant__ CUtensorMap mt, int L, int nb, int d,
+-               int dir, int items, int trig) {
++               int dir, int items, int trig, int ml) {
+   constexpr int bn = 128;
+   extern __shared__ __align__(1024) uint8_t smem_raw[];
+   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
+@@ -87,7 +87,9 @@ __global__ void __launch_bounds__(NTHR, 1)
+   const uint32_t tmem = B.tmem;
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
++    // ml == 1: lane 0 issues a stage's four boxes; ml > 1: lane 0 arms the stage, lanes 0-3 issue one box each (one thread issues
++    // ~1 TMA per 600 clk on the B200)
++    if (ml > 1 || lane == 0) {
+       pdl_wait();   // the planes are the previous kernel's (k1w) output; nothing global is touched before this
+       int q = 0;
+       for (int it = cta; it < items; it += G) {
+@@ -98,17 +100,16 @@ __global__ void __launch_bounds__(NTHR, 1)
+           uint8_t* a = sm + O_ST + slot * STG;
+           uint8_t* b = a + 2 * BOX;
+           const int k0 = ks * TOK;
+-          if (!m.inc) {   // A [128 rows i][64 k] x 2 K halves; B [bn rows j][64 k] x 2
+-            mbar_expect_tx(&B.full[slot], 2 * BOX + 2 * BB);
+-            tma_load_2d(a, &mp, &B.full[slot], k0, m.ra + m.i0, EVICT_NORMAL);
+-            tma_load_2d(a + BOX, &mp, &B.full[slot], k0 + 64, m.ra + m.i0, EVICT_NORMAL);
+-            tma_load_2d(b, &mp, &B.full[slot], k0, m.rb + m.j0, EVICT_NORMAL);
+-            tma_load_2d(b + BB, &mp, &B.full[slot], k0 + 64, m.rb + m.j0, EVICT_NORMAL);
+-          } else {        // A [128 rows k][64 i] x 2 MN halves; B [128 rows k][64 j] x bn / 64
+-            mbar_expect_tx(&B.full[slot], 2 * BOX + (bn / 64) * BOX);
+-            tma_load_2d(a, &mp, &B.full[slot], m.i0, m.ra + k0, EVICT_NORMAL);
+-            tma_load_2d(a + BOX, &mp, &B.full[slot], m.i0 + 64, m.ra + k0, EVICT_NORMAL);
+-            for (int h = 0; h < bn / 64; ++h) tma_load_2d(b + h * BOX, &mp, &B.full[slot], m.j0 + 64 * h, m.rb + k0, EVICT_NORMAL);
++          if (lane == 0) mbar_expect_tx(&B.full[slot], 2 * BOX + 2 * BB);   // both layouts: 4 boxes of 16 KB at bn 128
++          if (ml > 1) __syncwarp();
++          for (int j = ml > 1 ? lane : 0; j < 4; j += ml > 1 ? 32 : 1) {
++            if (!m.inc) {   // A [128 rows i][64 k] x 2 K halves; B [bn rows j][64 k] x 2
++              tma_load_2d(j < 2 ? a + j * BOX : b + (j - 2) * BB, &mp, &B.full[slot], k0 + 64 * (j & 1), (j < 2 ? m.ra + m.i0 : m.rb + m.j0),
++                          EVICT_NORMAL);
++            } else {        // A [128 rows k][64 i] x 2 MN halves; B [128 rows k][64 j] x 2
++              tma_load_2d(j < 2 ? a + j * BOX : b + (j - 2) * BOX, &mp, &B.full[slot], (j < 2 ? m.i0 : m.j0) + 64 * (j & 1),
++                          (j < 2 ? m.ra : m.rb) + k0, EVICT_NORMAL);
++            }
+           }
+         }
+       }
+@@ -185,6 +186,14 @@ int num_sms() {
+   return n;
+ }
+ 
++#ifndef CTR_ML
++#define CTR_ML 1
++#endif
++inline int ctr_ml() {   // env TM_CTR_ML overrides (read at launch / graph capture)
++  const char* e = getenv("TM_CTR_ML");
++  return e ? atoi(e) : CTR_ML;
++}
++
+ }  // namespace ctr
+ 
+ // planes [P, (nb,) L, L] bf16 contiguous -> t [T, (nb,) L, L] bf16 contiguous (L % 128 == 0); d = contracted channels per direction;
+@@ -209,6 +218,6 @@ void ctr_forward(torch::Tensor planes, torch::Tensor t, int64_t d, int64_t dir,
+   static bool attr = false;
+   if (!attr) { cudaFuncSetAttribute(ctr_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM); attr = true; }
+   tmap::launch_pdl(ctr_kernel, dim3(g), dim3(NTHR), SMEM, at::cuda::getCurrentCUDAStream(), (pdl & 1) != 0, mp, mt, (int)L, (int)nb,
+-                   (int)d, (int)dir, items, (int)((pdl >> 1) & 1));
++                   (int)d, (int)dir, items, (int)((pdl >> 1) & 1), ctr_ml());
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1h.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1h.cu
+index 394abeb4f..73e0e68f9 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1h.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1h.cu
+@@ -86,7 +86,7 @@ __global__ void __launch_bounds__(NTHREADS, 2)
+     k1h_kernel(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mw0, const __grid_constant__ CUtensorMap mw1,
+                const __grid_constant__ CUtensorMap mw2, const __grid_constant__ CUtensorMap mw3, const __grid_constant__ CUtensorMap mplane,
+                const uint8_t* __restrict__ tokmask, int L, const float* __restrict__ gamma, const float* __restrict__ beta, int tiles,
+-               float eps) {
++               float eps, int ml) {
+   using G_ = Cfg<D>;
+   constexpr int KB = G_::KB, NXB = G_::NXB, NWS = G_::NWS, NCH = P / 64;
+   constexpr bool RES = NCH * KB <= NWS;   // every weight block resident: loaded once at entry
+@@ -119,13 +119,18 @@ __global__ void __launch_bounds__(NTHREADS, 2)
+     for (int b = 0; b < 2; ++b) { mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], 4); }
+     fence_mbar_init();
+     prefetch_tmap(&mx); prefetch_tmap(&mplane);
++  }
++  if (warp == 0) {   // the first fills: unit u (x tiles, then weight blocks) issued by lane u % ml (one thread: ~1 TMA per 600 clk)
++    __syncwarp();
+     pdl_wait();   // nothing global is read before this
+-    PHM(1)
+-    for (int b = 0; b < nx0; ++b) xload(b, b);
+-    for (int q = 0; q < nw0; ++q) wload(q, q);
++    if (lane == 0) PHM(1)
++    for (int u = lane; lane < ml && u < nx0 + nw0; u += ml) {
++      if (u < nx0) xload(u, u);
++      else wload(u - nx0, u - nx0);
++    }
+   }
+   if (warp == 2) { tmem_alloc(&B.tmem, 256); tmem_relinquish(); }
+-  if (tid != 0) pdl_wait();
++  if (warp != 0) pdl_wait();
+   for (int k = tid; k < D; k += NTHREADS) {
+     reinterpret_cast<float*>(sm + G_::O_GB)[k] = gamma[k];
+     reinterpret_cast<float*>(sm + G_::O_GB)[D + k] = beta[k];
+@@ -317,6 +322,15 @@ int num_sms() {
+   return n;
+ }
+ 
++#ifndef K1H_ML
++#define K1H_ML 1
++#endif
++inline int k1h_ml() {   // env TM_K1H_ML overrides (read at launch / graph capture)
++  const char* e = getenv("TM_K1H_ML");
++  const int v = e ? atoi(e) : K1H_ML;
++  return v < 1 ? 1 : (v > 32 ? 32 : v);
++}
++
+ }  // namespace k1h
+ 
+ // x [M, D] bf16 (M = B L L, tokens b-major, M % 64 == 0); wl, wlg, wr, wrg [P/2, D] bf16 row-major; tokmask [B L] bool / uint8 or
+@@ -352,7 +366,7 @@ void k1h_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Te
+     static bool attr = false;                                                                                                    \
+     if (!attr) { cudaFuncSetAttribute(k1h_kernel<DD, PP>, cudaFuncAttributeMaxDynamicSharedMemorySize, Cfg<DD>::SMEM); attr = true; } \
+     tmap::launch_pdl(k1h_kernel<DD, PP>, dim3(g), dim3(NTHREADS), Cfg<DD>::SMEM, st, true, mx, mw[0], mw[1], mw[2], mw[3], mp, mk, L, ga, be, \
+-                     tiles, (float)eps);                                                                                         \
++                     tiles, (float)eps, k1h_ml());                                                                                      \
+     C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                                              \
+     return;                                                                                                                      \
+   }
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
+index bd6bbc343..c4f36a43f 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
+@@ -123,7 +123,7 @@ template <int D, int P, int SMJ>
+ __global__ void __launch_bounds__(NTHREADS, 1)
+     k1w_kernel(const __grid_constant__ CUtensorMap mx, const __grid_constant__ WMaps mw, const __grid_constant__ CUtensorMap mplane,
+                const uint8_t* __restrict__ tokmask, int L, float* __restrict__ mean, float* __restrict__ rstd,
+-               const float* __restrict__ gamma, const float* __restrict__ beta, int tiles, float eps, int stats_out, int n2) {
++               const float* __restrict__ gamma, const float* __restrict__ beta, int tiles, float eps, int stats_out, int n2, int ml) {
+   using G_ = Cfg<D>;
+   constexpr int KB = G_::KB, XC = G_::XC, NXN = G_::NXN, NACC = G_::NACC, NWS = G_::NWS, NXS = G_::NXS;
+   constexpr int NCH = P / 64;
+@@ -155,15 +155,16 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+   if (warp == 2) { tmem_alloc(&B.tmem, 512); tmem_relinquish(); }
+   constexpr bool SPRE = K1W_SPRE && D > K1W_INSTAT;   // the wait moves to the transform warps (mean / rstd)
+   if (!SPRE) pdl_wait();   // nothing global is read before this (the previous kernel may write x, the weights, gamma / beta)
+-  if (tid == 0) {
++  if (warp == 0) {
+ #if K1W_EARLY
+     // one-tile latency: the first fill of both rings is issued here, before the TMEM allocation and the CTA barrier (a cold box
+-    // lands ~1.3 us after its issue; the set-up below takes ~1.1 us of that)
+-    for (int q = 0; q < nx0; ++q) {
++    // lands ~1.3 us after its issue; the set-up below takes ~1.1 us of that). ml lanes issue (one thread issues ~1 TMA per 600 clk)
++    __syncwarp();   // lane 0's barrier initialisation -> the other issuing lanes
++    for (int q = lane; lane < ml && q < nx0; q += ml) {
+       mbar_expect_tx(&B.x_full[q], KBB);
+       tma_load_2d(sm + G_::O_X + q * KBB, &mx, &B.x_full[q], (q % KB) * 64, (cta + (q / KB) * G) * TOK, xhint);
+     }
+-    for (int q = 0; q < nw0; ++q) {
++    for (int q = (lane + ml - nx0 % ml) % ml; lane < ml && q < nw0; q += ml) {
+       const int row = ((q / KB) % NCH) * 64, kb = q % KB, side = row < P / 2 ? 0 : 1, r = side ? row - P / 2 : row;
+       mbar_expect_tx(&B.w_full[q], KBB);
+       tma_load_2d(sm + G_::O_W + q * KBB, &mw.m[2 * side + 1], &B.w_full[q], kb * 64, r, EVICT_LAST);
+@@ -182,13 +183,15 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+   if (tid == 0) TL(1)
+ 
+   if (warp < 4) {
+-    if (warp == 0 && lane == 0) {
+-      // ---------------------------------------------------------------- x K-blocks -> ring (slot free once the transform read it)
++    if (warp == 0 && lane < min(ml, NXS)) {
++      // ---------------------------------------------------------------- x K-blocks -> ring (slot free once the transform read it);
++      // slot s issued by lane s % nl
++      const int nl = min(ml, NXS);
+       int s = 0, q = 0; uint32_t ph = 0;
+       for (int i = 0; i < n_local; ++i) {
+         const int row = (cta + i * G) * TOK;
+         for (int kb = 0; kb < KB; ++kb) {
+-          if (q++ >= nx0) {
++          if (q++ >= nx0 && s % nl == lane) {
+             mbar_wait(&B.x_empty[s], ph ^ 1);
+             mbar_expect_tx(&B.x_full[s], KBB);
+             tma_load_2d(sm + G_::O_X + s * KBB, &mx, &B.x_full[s], kb * 64, row, xhint);
+@@ -196,13 +199,14 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+           if (++s == NXS) { s = 0; ph ^= 1; }
+         }
+       }
+-    } else if (warp == 3 && lane == 0) {
+-      // ---------------------------------------------------------------- weight K-blocks: tile, chunk, K-block -> ring
++    } else if (warp == 3 && lane < min(ml, NWS)) {
++      // ---------------------------------------------------------------- weight K-blocks: tile, chunk, K-block -> ring (slot s: lane s % nl)
++      const int nl = min(ml, NWS);
+       int s = 0, q = 0; uint32_t ph = 0;
+       for (int i = 0; i < n_local; ++i)
+         for (int c = 0; c < NCH; ++c)
+           for (int kb = 0; kb < KB; ++kb) {
+-            if (q++ >= nw0) {
++            if (q++ >= nw0 && s % nl == lane) {
+               mbar_wait(&B.w_empty[s], ph ^ 1);
+               mbar_expect_tx(&B.w_full[s], KBB);
+               const int row = c * 64, side = row < P / 2 ? 0 : 1, r = side ? row - P / 2 : row;
+@@ -468,6 +472,16 @@ int num_sms() {
+   return n;
+ }
+ 
++#ifndef K1W_ML
++#define K1W_ML 1
++#endif
++// TMA-issuing lanes per producer warp (env TM_K1W_ML overrides, read at launch / capture: A/B in one process)
++inline int ml_lanes() {
++  const char* e = getenv("TM_K1W_ML");
++  const int v = e ? atoi(e) : K1W_ML;
++  return v < 1 ? 1 : (v > 32 ? 32 : v);
++}
++
+ template <int D, int P>
+ void launch(const CUtensorMap& mx, const WMaps& mw, const CUtensorMap& mp, const uint8_t* mask, int L, float* mean, float* rs,
+             const float* g, const float* b, int tiles, int grid, cudaStream_t st, float eps, int stats_out, int n2) {
+@@ -476,13 +490,13 @@ void launch(const CUtensorMap& mx, const WMaps& mw, const CUtensorMap& mp, const
+     static bool attr_s = false;
+     if (n2 > 0) {
+       if (!attr_s) { cudaFuncSetAttribute(k1w_kernel<D, P, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, Cfg<D>::SMEM); attr_s = true; }
+-      tmap::launch_pdl(k1w_kernel<D, P, 1>, dim3(grid), dim3(NTHREADS), Cfg<D>::SMEM, st, K1W_PDL, mx, mw, mp, mask, L, mean, rs, g, b, tiles, eps, stats_out, n2);
++      tmap::launch_pdl(k1w_kernel<D, P, 1>, dim3(grid), dim3(NTHREADS), Cfg<D>::SMEM, st, K1W_PDL, mx, mw, mp, mask, L, mean, rs, g, b, tiles, eps, stats_out, n2, ml_lanes());
+       return;
+     }
+   }
+   TORCH_CHECK(n2 == 0, "k1w: sample-major planes are D64 only");
+   if (!attr) { cudaFuncSetAttribute(k1w_kernel<D, P, 0>, cudaFuncAttributeMaxDynamicSharedMemorySize, Cfg<D>::SMEM); attr = true; }
+-  tmap::launch_pdl(k1w_kernel<D, P, 0>, dim3(grid), dim3(NTHREADS), Cfg<D>::SMEM, st, K1W_PDL, mx, mw, mp, mask, L, mean, rs, g, b, tiles, eps, stats_out, 0);
++  tmap::launch_pdl(k1w_kernel<D, P, 0>, dim3(grid), dim3(NTHREADS), Cfg<D>::SMEM, st, K1W_PDL, mx, mw, mp, mask, L, mean, rs, g, b, tiles, eps, stats_out, 0, ml_lanes());
+ }
+ 
+ template <int D>
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3g.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3g.cu
+index 4ccc4967d..d53b9c904 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3g.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3g.cu
+@@ -159,7 +159,7 @@ __global__ void __launch_bounds__(512, 1)
+               const float* __restrict__ g_in, const float* __restrict__ b_in, const float* __restrict__ g_out,
+               const float* __restrict__ b_out, const __nv_bfloat16* __restrict__ ds, const __nv_bfloat16* __restrict__ xglob,
+               float* __restrict__ mean_out,
+-              float* __restrict__ rs_out, int L, int tiles, float eps, float4* __restrict__ zero_buf, int zero_n4, int n2) {
++              float* __restrict__ rs_out, int L, int tiles, float eps, float4* __restrict__ zero_buf, int zero_n4, int n2, int ml) {
+   extern __shared__ __align__(1024) uint8_t sm[];      // no static shared memory: the dynamic window starts 1024-aligned
+   using GG = Geo<C, H>;
+   constexpr int XT = GG::XT, TT = GG::TT, WPB = GG::WPB, WG = GG::WG;
+@@ -203,13 +203,19 @@ __global__ void __launch_bounds__(512, 1)
+     fence_mbar_init();
+     prefetch_tmap(&mx); prefetch_tmap(&mtri); prefetch_tmap(&mwp); prefetch_tmap(&mwg); prefetch_tmap(&my);
+     if (SAVE == 1) prefetch_tmap(&mxn);
++  }
+ #if K3_EARLY
+-    // one-tile latency: every first load is issued here, before the TMEM allocation and the CTA barrier
+-    for (int i = 0; i < nx0; ++i) {
++  // one-tile latency: every first load is issued here, before the TMEM allocation and the CTA barrier; unit u (x tiles, t halves,
++  // Wg, Wp blocks) by lane u % ml of warp 0 (one thread issues ~1 TMA per 600 clk)
++  if (warp == 0) {
++    __syncwarp();
++    for (int u = lane; lane < ml && u < nx0 + nth0 + 1 + nwp0; u += ml) {
++    if (u < nx0) {
++      const int i = u;
+       mbar_expect_tx(&B.x_full[i], XT);
+       for (int kb = 0; kb < C / 64; ++kb) tma_load_2d(sm + O_X + i * XT + kb * KBB, &mx, &B.x_full[i], kb * 64, tile_row0(i), EVICT_FIRST);
+-    }
+-    for (int k = 0; k < nth0; ++k) {
++    } else if (u < nx0 + nth0) {
++      const int k = u - nx0;
+       const int row0 = tile_row0(k >> 1);
+       mbar_expect_tx(&B.th_full[k], TT / 2);
+       if constexpr (SMJ != 0) {
+@@ -219,15 +225,17 @@ __global__ void __launch_bounds__(512, 1)
+       } else {
+         tma_load_2d(sm + O_T + k * (TT / 2), &mtri, &B.th_full[k], row0 + 64 * (k & 1), 0, EVICT_FIRST);
+       }
+-    }
+-    mbar_expect_tx(&B.wg_full, WG);
+-    for (int kb = 0; kb < C / 64; ++kb) tma_load_2d(sm + O_WG + kb * (C * 128), &mwg, &B.wg_full, kb * 64, 0, EVICT_LAST);
+-    for (int q = 0; q < nwp0; ++q) {
++    } else if (u == nx0 + nth0) {
++      mbar_expect_tx(&B.wg_full, WG);
++      for (int kb = 0; kb < C / 64; ++kb) tma_load_2d(sm + O_WG + kb * (C * 128), &mwg, &B.wg_full, kb * 64, 0, EVICT_LAST);
++    } else {
++      const int q = u - nx0 - nth0 - 1;
+       mbar_expect_tx(&B.wp_full[q], WPB);
+       tma_load_2d(sm + O_WP + q * WPB, &mwp, &B.wp_full[q], (q % (H / 64)) * 64, 0, EVICT_LAST);
+     }
+-#endif
++    }
+   }
++#endif
+   if (tid == 0 && (smem_u32(sm) & 1023u)) asm volatile("trap;");
+   // training: clear the next backward's atomically accumulated gradient buffer (saves a separate memset launch)
+   for (int k = cta * blockDim.x + tid; k < zero_n4; k += G * blockDim.x) zero_buf[k] = make_float4(0.f, 0.f, 0.f, 0.f);
+@@ -675,6 +683,15 @@ int num_sms() {
+   return n;
+ }
+ 
++#ifndef K3G_ML
++#define K3G_ML 1
++#endif
++inline int k3g_ml() {   // env TM_K3G_ML overrides (read at launch / graph capture)
++  const char* e = getenv("TM_K3G_ML");
++  const int v = e ? atoi(e) : K3G_ML;
++  return v < 1 ? 1 : (v > 32 ? 32 : v);
++}
++
+ }  // namespace k3g
+ 
+ // x [M, C] bf16, tri [H, M] bf16, wp_perm [C, H] (columns in the TMEM K order, written by k1w_prep as wpp), wg [C, C], y [M, C];
+@@ -734,7 +751,7 @@ void k3g_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp_perm, torc
+     cfg.numAttrs = (K3_PDL && tiles <= K3_PDL_TILES * g) ? 1 : 0;   // the kernel computes the same predicate for its t-load gate
+     C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kern, mx, mt, mwp, mwg, my, mxn, (const float*)g_in.data_ptr<float>(), (const float*)b_in.data_ptr<float>(),
+                                       (const float*)g_out.data_ptr<float>(), (const float*)b_out.data_ptr<float>(), dsp, xp, mo, ro, (int)L, tiles,
+-                                      (float)eps, zp, zn4, n2));
++                                      (float)eps, zp, zn4, n2, k3g_ml()));
+   };
+ #define K3G_CASE(CC, HH) \
+   if (C == CC && H == HH) { \
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3h.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3h.cu
+index d48aff969..a34d965da 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3h.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3h.cu
+@@ -82,7 +82,7 @@ template <int C, int H>
+ __global__ void __launch_bounds__(NTHREADS, 2)
+     k3h_kernel(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mtri, const __grid_constant__ CUtensorMap mwp,
+                const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap my, const float* __restrict__ g_in,
+-               const float* __restrict__ b_in, const float* __restrict__ g_out, const float* __restrict__ b_out, int tiles, float eps) {
++               const float* __restrict__ b_in, const float* __restrict__ g_out, const float* __restrict__ b_out, int tiles, float eps, int ml) {
+   extern __shared__ __align__(1024) uint8_t sm[];   // no static shared memory: the dynamic window starts 1024-aligned
+   using GG = Geo<C, H>;
+   constexpr int XT = GG::XT, TT = GG::TT;
+@@ -112,9 +112,15 @@ __global__ void __launch_bounds__(NTHREADS, 2)
+     prefetch_tmap(&mtri); prefetch_tmap(&my);
+     // x and the weights are not written by the contraction this kernel follows: loaded before griddepcontrol.wait
+     mbar_expect_tx(&B.w_full, GG::WG + GG::WP);
+-    for (int kb = 0; kb < C / 64; ++kb) tma_load_2d(sm + GG::O_WG + kb * GG::WGB, &mwg, &B.w_full, kb * 64, 0, EVICT_LAST);
+-    for (int kb = 0; kb < H / 64; ++kb) tma_load_2d(sm + GG::O_WP + kb * GG::WGB, &mwp, &B.w_full, kb * 64, 0, EVICT_LAST);
+-    for (int b = 0; b < nx0; ++b) xload(b, b);
++  }
++  if (warp == 0) {   // unit u (Wg boxes, Wp boxes, x tiles) issued by lane u % ml (one thread: ~1 TMA per 600 clk)
++    __syncwarp();
++    constexpr int NG = C / 64, NP = H / 64;
++    for (int u = lane; lane < ml && u < NG + NP + nx0; u += ml) {
++      if (u < NG) tma_load_2d(sm + GG::O_WG + u * GG::WGB, &mwg, &B.w_full, u * 64, 0, EVICT_LAST);
++      else if (u < NG + NP) tma_load_2d(sm + GG::O_WP + (u - NG) * GG::WGB, &mwp, &B.w_full, (u - NG) * 64, 0, EVICT_LAST);
++      else xload(u - NG - NP, u - NG - NP);
++    }
+   }
+   {
+     float* gb = reinterpret_cast<float*>(sm + GG::O_GB);   // g_out [H], b_out [H], g_in [C], b_in [C]
+@@ -352,6 +358,15 @@ int num_sms() {
+   return n;
+ }
+ 
++#ifndef K3H_ML
++#define K3H_ML 1
++#endif
++inline int k3h_ml() {   // env TM_K3H_ML overrides (read at launch / graph capture)
++  const char* e = getenv("TM_K3H_ML");
++  const int v = e ? atoi(e) : K3H_ML;
++  return v < 1 ? 1 : (v > 32 ? 32 : v);
++}
++
+ }  // namespace k3h
+ 
+ // x [M, C] bf16, tri [H, (B,) L, L] bf16 (channel-major), wp [C, H] / wg [C, C] bf16 row-major ([out, in], natural order), LN affines
+@@ -378,7 +393,7 @@ void k3h_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wp, torch::Te
+     static bool attr = false;                                                                                                     \
+     if (!attr) { cudaFuncSetAttribute(k3h_kernel<CC, HH>, cudaFuncAttributeMaxDynamicSharedMemorySize, Geo<CC, HH>::SMEM); attr = true; } \
+     tmap::launch_pdl(k3h_kernel<CC, HH>, dim3(g), dim3(NTHREADS), Geo<CC, HH>::SMEM, st, pdl != 0, mx, mt, mwp, mwg, my, gi, bi, go, bo, \
+-                     tiles, (float)eps);                                                                                          \
++                     tiles, (float)eps, k3h_ml());                                                                                       \
+     C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                                               \
+     return;                                                                                                                       \
+   }
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+index 4692fe11f..4dd8ce9ab 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+@@ -76,7 +76,7 @@ __global__ void __launch_bounds__(NTHR, 1)
+                const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap my, const __grid_constant__ CUtensorMap mps,
+                const __grid_constant__ CUtensorMap mgs, const float* __restrict__ vec,
+                const float* __restrict__ mu_o, const float* __restrict__ rs_o, const float* __restrict__ mu_i,
+-               const float* __restrict__ rs_i, const __nv_bfloat16* __restrict__ ds, int items, int L, int grouped, int pdl) {
++               const float* __restrict__ rs_i, const __nv_bfloat16* __restrict__ ds, int items, int L, int grouped, int pdl, int ml) {
+   constexpr int KBT = H / 64, KBX = D / 64, NKB = KBT + KBX, NTL = D / NTILE;
+   using LY = Lay<SAVE>;
+   constexpr int NST = LY::NST, O_ST = LY::O_ST, O_XR = LY::O_XR, O_PS = LY::O_PS, O_GS = LY::O_GS, O_VEC = LY::O_VEC, O_BAR = LY::O_BAR;
+@@ -102,12 +102,14 @@ __global__ void __launch_bounds__(NTHR, 1)
+   const uint32_t tmem = B.tmem;
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
++    const int nl = ml < NST ? ml : NST;   // stage s issued by lane s % nl (one thread issues ~1 TMA per 600 clk)
++    if (lane < nl) {
+       // ---------------------------------------------------------------- stages: (t block, Wp' block) x KBT, (x block, Wg' block) x KBX
+       int s = 0; uint32_t ph = 0;
+       int m0, n0;
+       for (int k = 0; S.get(k, m0, n0); ++k) {
+         for (int kb = 0; kb < NKB; ++kb) {
++          if (s % nl != lane) { if (++s == NST) { s = 0; ph ^= 1; } continue; }
+           mbar_wait(&B.st_empty[s], ph ^ 1);
+           mbar_expect_tx(&B.st_full[s], STAGE);
+           uint8_t* a = sm + O_ST + s * STAGE;
+@@ -266,6 +268,15 @@ int num_sms() {
+   return n;
+ }
+ 
++#ifndef K3W_ML
++#define K3W_ML 1
++#endif
++inline int k3w_ml() {   // env TM_K3W_ML overrides (read at launch / graph capture)
++  const char* e = getenv("TM_K3W_ML");
++  const int v = e ? atoi(e) : K3W_ML;
++  return v < 1 ? 1 : (v > 32 ? 32 : v);
++}
++
+ }  // namespace k3w
+ 
+ // x [M, D], t [H, M], wpq = bf16(Wp g_o) [D, H], wgq = bf16(Wg g_i) [D, D] bf16; vec [4, D] fp32 = (sp, ep, sg, eg);
+@@ -303,7 +314,7 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
+     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+     tmap::launch_pdl(kern, dim3(g), dim3(NTHR), smem, st, pdl != 0, mt, mwp, mx, mwg, my, mps, mgs, (const float*)vec.data_ptr<float>(),
+                      (const float*)mu_o.data_ptr<float>(), (const float*)rs_o.data_ptr<float>(), (const float*)mu_i.data_ptr<float>(),
+-                     (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L, grouped, (int)(pdl != 0));
++                     (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L, grouped, (int)(pdl != 0), k3w_ml());
+   };
+ #define K3W_CASE(DD, HH) if (D == DD && H == HH) { \
+     if (save) launch(k3w_kernel<DD, HH, 1>, Lay<1>::SMEM); else launch(k3w_kernel<DD, HH, 0>, Lay<0>::SMEM); \

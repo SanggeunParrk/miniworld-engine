@@ -1,0 +1,291 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+index c9d0fce08..455a48638 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+@@ -59,6 +59,13 @@ CELLS_H16: dict[tuple[int, int, bool], int] = {(384, 2, True): 16, (768, 2, True
+ H16_MIN_TILES: dict[int, int] = {}
+ #: A/B overrides of the picks: None (automatic) or a build of the lists above
+ EXPAND_FORCE = None
++#: (round 3 part 12) bf16 expand builds whose cluster of MC CTAs (hidden chunks of one tile, K unsplit) shares the tile's xn by TMA
++#: multicast (``tsx_expand.cu -DMC``): (hidden units per CTA, MC). EXPAND_MC_FORCE: one of them for every bf16 call (A/B), None: off
++EXPAND_MC = ((32, 2), (32, 4), (32, 8), (64, 2), (64, 4), (64, 8))
++EXPAND_MC_FORCE = None
++#: (round 3 part 12) bf16 squeeze builds whose cluster of MC column blocks of one tile shares h by TMA multicast: (columns per CTA, MC)
++SQUEEZE_MC = ((32, 2), (32, 4), (32, 8), (64, 2), (64, 4))
++SQUEEZE_MC_FORCE = None
+ SQUEEZE_FORCE = None
+ 
+ 
+@@ -80,6 +87,8 @@ def _specs(d: int, n: int, f32: bool, h16: bool = False) -> tuple[tuple[str, str
+     return (
+         ("ln", "widths/tsx_ln.cu", (f"-DDIM={d}", f"-DF32={int(f32)}")),
+         *((f"expand{c}_{k}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", f"-DSK={k}")) for c, k in (EXPAND_F32 if f32 else EXPAND)),
++        *((f"expand{c}_m{mc}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", f"-DMC={mc}")) for c, mc in (() if f32 else EXPAND_MC)),
++        *((f"sq{nb}_m{mc}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DMC={mc}")) for nb, mc in (() if f32 else SQUEEZE_MC)),
+         *((f"sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in (SQUEEZE_F32[d] if f32 else SQUEEZE)),
+     )
+ 
+@@ -174,6 +183,11 @@ def _pick(builds, tiles: int, units: int, a_rows: int, k: int, esz: int, nsm: in
+     return best[1], best[2]
+ 
+ 
++def _pick_mc(tiles: int, units: int, d: int, nsm: int) -> tuple[int, int] | None:
++    """(hidden units per CTA, multicast cluster size) of the bf16 expand, or None for the K-split builds (``_pick``)."""
++    return EXPAND_MC_FORCE
++
++
+ def chain_takes(m: int, d: int, hid: int, f32: bool) -> bool:
+     """Whether the forward chain runs an [m, d] activation (shape only; the route and the generic training forward both ask)."""
+     return hid % d == 0 and (d, hid // d, f32) in CELLS and m % ROWS == 0 and 0 < m // ROWS <= CELLS[(d, hid // d, f32)]
+@@ -208,22 +222,28 @@ def chain(x, gamma, beta, wa, wb, ws, eps: float, save: bool):
+         True,
+     )
+     ch, sk = EXPAND_FORCE or _pick(EXPAND_F32 if f32 else EXPAND, tiles, h, ROWS, d, esz, nsm, 2)
++    mc = _pick_mc(tiles, h, d, nsm) if not f32 else None
++    if mc is not None:  # (round 3 part 12) xn shared by TMA multicast over a cluster of mc hidden chunks
++        ch, mc = mc
+     ext.launch_kernel(
+-        f"{tag}_expand{ch}_{sk}",
++        f"{tag}_expand{ch}_{sk}" if mc is None else f"{tag}_expand{ch}_m{mc}",
+         "transition_sx_expand",
+-        tiles * (h // ch) * sk,
++        tiles * (h // ch) * (sk if mc is None else 1),
+         384,
+-        sk,
++        sk if mc is None else mc,
+         [t(xn, d, m, bke, 128), t(wa, d, h, bke, ch), t(wb, d, h, bke, ch), hid, ab, ab, int(save), 1, 2 * h, h],
+         True,
+     )
+     nb, sq = SQUEEZE_FORCE or _pick(SQUEEZE_F32[d] if f32 else SQUEEZE, tiles, d, ROWS, h, esz, nsm, 1)
++    qmc = None if f32 else SQUEEZE_MC_FORCE
++    if qmc is not None:  # (round 3 part 12) h shared by TMA multicast over a cluster of column blocks
++        nb, qmc = qmc
+     ext.launch_kernel(
+-        f"{tag}_sq{nb}_{sq}",
++        f"{tag}_sq{nb}_{sq}" if qmc is None else f"{tag}_sq{nb}_m{qmc}",
+         "transition_sx_squeeze",
+-        tiles * (d // nb) * sq,
++        tiles * (d // nb) * (sq if qmc is None else 1),
+         256,
+-        sq,
++        sq if qmc is None else qmc,
+         [t(hid, h, m, bke, 128), t(ws, h, d, bke, nb), x, out],
+         True,
+     )
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 339629d02..1d93798e0 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -96,6 +96,13 @@ SMALL_FWD_TILES = 16
+ #: its own layout (MN-major where needed): no transposed or concatenated weight copies per call; with fp32 masters the training
+ #: forward's casts ride in the LayerNorm launch.
+ SX_CH = (32, 64)
++#: (round 3 part 12) expand builds sharing the tile's xn by TMA multicast over a cluster of MC hidden chunks: (units per CTA, MC);
++#: SX_MC_FORCE: one of them for every call (A/B), None: off
++SX_MC = ((32, 2), (32, 4), (32, 8), (64, 2), (64, 4))
++SX_MC_FORCE = None
++#: (round 3 part 12) squeeze builds sharing h by TMA multicast over MC column blocks of one tile: (columns per CTA, MC)
++SX_SQ_MC = ((32, 2), (32, 4), (64, 2), (64, 3), (32, 3))
++SX_SQ_MC_FORCE = None
+ #: squeeze builds: (output columns per cluster, hidden split = cluster size)
+ SX_SQ = ((32, 1), (64, 1), (32, 2), (64, 2))
+ #: weight-gradient output tile widths (columns per CTA), narrowest first
+@@ -235,7 +242,9 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+         (
+             ("sx_ln", "widths/tsx_ln.cu", (f"-DDIM={d}",)),
+             *((f"sx_expand{c}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}")) for c in SX_CH),
++            *((f"sx_expand{c}_m{mc}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", f"-DMC={mc}")) for c, mc in SX_MC),
+             *((f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in SX_SQ),
++            *((f"sx_sq{nb}_m{mc}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DMC={mc}")) for nb, mc in SX_SQ_MC),
+             ("sx_gate", "widths/tsx_gate.cu", dim),
+             ("sx_gdx", "widths/tsx_gdx.cu", dim),
+             *((f"sx_dxn{k}", "widths/tsx_dxn.cu", (*dim, f"-DKS={k}")) for k in (1, 2)),
+@@ -399,23 +408,29 @@ def _sx_forward(k, x, gamma, beta, wa, wb, ws, eps, save, out, rstd, c1, cast=No
+         pdl=True,
+     )
+     ch = _sx_ch(h, tiles, k.nsm)
++    mc = SX_MC_FORCE
++    if mc is not None:
++        ch, mc = mc
+     k.run(
+-        f"sx_expand{ch}",
++        f"sx_expand{ch}" if mc is None else f"sx_expand{ch}_m{mc}",
+         "transition_sx_expand",
+         tiles * (h // ch),
+         (k.tmap(xn, d, m, 64, 128), k.tmap(wa, d, h, 64, ch), k.tmap(wb, d, h, 64, ch), hid, a, b, int(save), int(cast is None), h, 0),
+         block=384,
+-        cluster=1,
++        cluster=1 if mc is None else mc,
+         pdl=True,
+     )
+     nb, sk = _sx_sq(d, tiles, h, k.nsm)
++    qmc = SX_SQ_MC_FORCE
++    if qmc is not None:
++        nb, qmc = qmc
+     k.run(
+-        f"sx_sq{nb}_{sk}",
++        f"sx_sq{nb}_{sk}" if qmc is None else f"sx_sq{nb}_m{qmc}",
+         "transition_sx_squeeze",
+-        tiles * (d // nb) * sk,
++        tiles * (d // nb) * (sk if qmc is None else 1),
+         (k.tmap(hid, h, m, 64, 128), k.tmap(ws, h, d, 64, nb), x, out),
+         block=256,
+-        cluster=sk,
++        cluster=sk if qmc is None else qmc,
+         pdl=True,
+     )
+     if not save:
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+index 632e95ee3..13ae3aa60 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+@@ -37,12 +37,17 @@ using namespace s100;
+ #ifndef H16
+ #define H16 0                                                   // round 3 part 4: fp32 activations on the fp16 tensor cores (inference)
+ #endif
++#ifndef MC
++#define MC 1                                                    // round 3 part 12: CTAs of a cluster sharing the tile's xn by TMA multicast
++#endif
+ static_assert(!(H16 && F32), "H16 is its own operand type");
+ constexpr int ESZ = F32 ? 4 : 2, BKE = 128 / ESZ;              // element bytes, elements of K per 128-byte K-block row
+ constexpr int D_ = DIM, H_ = HID, ROWS = 128, KD = D_ / SK, NKB = KD / BKE, NCHK = H_ / CH, HC = CH / 2;
+ static_assert((CH == 32 || CH == 64 || (CH == 128 && SK == 1)) && H_ % CH == 0 && D_ % (BKE * SK) == 0, "32- / 64- / 128-unit chunks, whole K-blocks per CTA");
+ constexpr int W_ = CH / SK;                                    // units of the chunk each CTA of a cluster owns
+ static_assert(SK == 1 || W_ == 16 || W_ == 32, "owner column groups of 16 or 32 units");
++static_assert(MC == 1 || (SK == 1 && NCHK % MC == 0 && MC <= 16), "multicast clusters: unsplit K, whole clusters per tile");
++constexpr uint16_t MCMASK = (uint16_t)((1u << MC) - 1);
+ constexpr int KBT = ROWS * 128;                                // one [128 rows] K-block of xn, 16 KB
+ constexpr int WKB = 2 * CH * 128;                              // one K-block of [Wa_j; Wb_j]: 2 CH rows x 128 B
+ constexpr int RED = SK > 1 ? SK * ROWS * 2 * W_ * 4 : 0;       // partials received from the other ranks: [SK][128][a W | b W] fp32
+@@ -112,9 +117,10 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int cl = blockIdx.x / SK, rank = SK > 1 ? (int)cluster_rank() : 0;
+   const int tile = cl / NCHK, j = cl % NCHK, row0 = tile * ROWS, h0 = j * CH, k0 = rank * KD;
++  const int mrank = MC > 1 ? (int)cluster_rank() : 0;           // MC: the cluster's CTAs are hidden chunks j .. j + MC - 1 of one tile
+ 
+   if (tid == 0) {
+-    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
++    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], MC); }   // MC: a stage is free once every CTA of the cluster consumed it
+     mbar_init(&B.mma_done, 1);
+     if (SK > 1) { mbar_init(&B.red_full, 1); mbar_expect_tx(&B.red_full, (SK - 1) * ROWS * 2 * W_ * 4); }   // the other ranks' partials
+     fence_barrier_init();
+@@ -130,7 +136,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), TCOLS); tmem_relinquish(); }
+   tc_fence_before();
+   __syncthreads();
+-  if (SK > 1) cluster_sync_relaxed();                          // every CTA of the cluster runs before any distributed-shared store
++  if (SK > 1 || MC > 1) cluster_sync_relaxed();               // every CTA of the cluster runs before any distributed-shared store / multicast
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
+   pdl_wait();                                                  // xn is complete and visible
+@@ -140,13 +146,16 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+     if (lane == 0)
+       for (int kb = 0; kb < NKB; ++kb) {
+         const int s = kb % STG;
+-        if (kb >= STG) mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
++        if (kb >= STG) {
++          if (MC > 1) mbar_wait_cl(&B.empty[s], ((kb / STG) - 1) & 1); else mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
++        }
+         if (!wpre || kb >= STG) {                              // (wpre 0: the LayerNorm launch wrote the weights, complete only now)
+           mbar_expect_tx(&B.full[s], KBT + WKB);
+           tma_load_2d(su + O_W + s * WKB, &mwa, &B.full[s], k0 + kb * BKE, h0);
+           tma_load_2d(su + O_W + s * WKB + CH * 128, &mwb, &B.full[s], k0 + kb * BKE, h0);
+         }
+-        tma_load_2d(su + O_X + s * KBT, &mxn, &B.full[s], k0 + kb * BKE, row0);
++        if (MC == 1) tma_load_2d(su + O_X + s * KBT, &mxn, &B.full[s], k0 + kb * BKE, row0);
++        else if (kb % MC == mrank) tma_load_2d_mc(su + O_X + s * KBT, &mxn, &B.full[s], k0 + kb * BKE, row0, MCMASK);   // to every CTA
+       }
+   } else if (warp == 1) {
+     // ------------------------------------------------------------------------------------------ MMA issue (converged warp)
+@@ -159,7 +168,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+       if (elect_one()) {
+ #pragma unroll
+         for (int ks = 0; ks < 4; ++ks) mma(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), (kb > 0 || ks > 0) ? 1u : 0u);
+-        if (NKB > STG) tc_commit(&B.empty[s]);
++        if (NKB > STG) { if (MC > 1) tc_commit_mc(&B.empty[s], MCMASK); else tc_commit(&B.empty[s]); }
+         if (kb == NKB - 1) tc_commit(&B.mma_done);
+       }
+       __syncwarp();
+@@ -280,6 +289,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+     }
+ #endif
+   }
++  if (MC > 1) cluster_sync();                                  // no CTA leaves while a peer's commit may still arrive on it
+   __syncthreads();
+   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, TCOLS); }
+ }
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+index a0f0ded06..2ea3f3c93 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+@@ -41,6 +41,11 @@ constexpr int ESZ = F32 ? 4 : 2, BKE = 128 / ESZ;              // element bytes,
+ constexpr int D_ = DIM, H_ = HID, ROWS = 128, NB = NBW, NBLK = D_ / NB, KS = H_ / SK, NKB = KS / BKE, W_ = NB / SK;
+ static_assert(H_ % (BKE * SK) == 0 && NB % SK == 0 && (W_ * IOSZ) % 32 == 0, "whole K-blocks per CTA, owner column groups of 32 bytes or more");
+ constexpr int STG = NKB < 6 ? NKB : 6;
++#ifndef MC
++#define MC 1                                                    // round 3 part 12: CTAs of a cluster (column blocks of one tile) sharing h by TMA multicast
++#endif
++static_assert(MC == 1 || (SK == 1 && NBLK % MC == 0 && MC <= 16), "multicast clusters: unsplit hidden, whole clusters per tile");
++constexpr uint16_t MCMASK = (uint16_t)((1u << MC) - 1);
+ constexpr int KBT = ROWS * 128, WBT = NB * 128;                 // h K-block [128][64] 16 KB, Ws K-block [NB rows][64]
+ constexpr int O_A = 0, O_B = STG * KBT, O_RED = O_B + STG * WBT;   // partials received from the other ranks: [SK][128][W] fp32
+ constexpr int O_BAR = O_RED + (SK > 1 ? SK * ROWS * W_ * 4 : 0), SMEM_BYTES = O_BAR + 256;
+@@ -91,9 +96,10 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int cl = blockIdx.x / SK, rank = SK > 1 ? (int)cluster_rank() : 0, tile = cl / NBLK, nb = cl % NBLK;
+   const int row0 = tile * ROWS, k0 = rank * KS;
++  const int mrank = MC > 1 ? (int)cluster_rank() : 0;           // MC: the cluster's CTAs are column blocks nb .. nb + MC - 1 of one tile
+ 
+   if (tid == 0) {
+-    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
++    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], MC); }   // MC: free once all CTAs consumed it
+     mbar_init(&B.acc_full, 1);
+     if (SK > 1) { mbar_init(&B.red_full, 1); mbar_expect_tx(&B.red_full, (SK - 1) * ROWS * W_ * 4); }   // the other ranks' partials
+     fence_barrier_init();
+@@ -103,7 +109,7 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), NB); tmem_relinquish(); }
+   tc_fence_before();
+   __syncthreads();
+-  if (SK > 1) cluster_sync_relaxed();                          // every CTA of the cluster runs before any distributed-shared store
++  if (SK > 1 || MC > 1) cluster_sync_relaxed();                         // every CTA of the cluster runs before any distributed-shared store
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
+ 
+@@ -114,13 +120,17 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+         tma_load_2d(su + O_B + kb * WBT, &mws, &B.full[kb], k0 + kb * BKE, nb * NB);
+       }
+       pdl_wait();
+-      for (int kb = 0; kb < STG; ++kb) tma_load_2d(su + O_A + kb * KBT, &mh, &B.full[kb], k0 + kb * BKE, row0);
++      for (int kb = 0; kb < STG; ++kb) {
++        if (MC == 1) tma_load_2d(su + O_A + kb * KBT, &mh, &B.full[kb], k0 + kb * BKE, row0);
++        else if (kb % MC == mrank) tma_load_2d_mc(su + O_A + kb * KBT, &mh, &B.full[kb], k0 + kb * BKE, row0, MCMASK);   // to every CTA
++      }
+       for (int kb = STG; kb < NKB; ++kb) {
+         const int s = kb % STG;
+-        mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
++        if (MC > 1) mbar_wait_cl(&B.empty[s], ((kb / STG) - 1) & 1); else mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
+         mbar_expect_tx(&B.full[s], KBT + WBT);
+         tma_load_2d(su + O_B + s * WBT, &mws, &B.full[s], k0 + kb * BKE, nb * NB);
+-        tma_load_2d(su + O_A + s * KBT, &mh, &B.full[s], k0 + kb * BKE, row0);
++        if (MC == 1) tma_load_2d(su + O_A + s * KBT, &mh, &B.full[s], k0 + kb * BKE, row0);
++        else if (kb % MC == mrank) tma_load_2d_mc(su + O_A + s * KBT, &mh, &B.full[s], k0 + kb * BKE, row0, MCMASK);
+       }
+     }
+     pdl_wait();
+@@ -135,7 +145,7 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+ #pragma unroll
+         for (int ks = 0; ks < 4; ++ks)
+           mma(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), (kb > 0 || ks > 0) ? 1u : 0u);
+-        tc_commit(&B.empty[s]);
++        if (MC > 1) tc_commit_mc(&B.empty[s], MCMASK); else tc_commit(&B.empty[s]);
+         if (kb == NKB - 1) tc_commit(&B.acc_full);
+       }
+       __syncwarp();
+@@ -260,6 +270,7 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+ #endif
+   }
+ #endif
++  if (MC > 1) cluster_sync();                                  // no CTA leaves while a peer's commit may still arrive on it
+   __syncthreads();
+   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, NB); }
+ }

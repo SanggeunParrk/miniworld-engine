@@ -1,0 +1,538 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
+index 07c2719af..21f714866 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
+@@ -1068,6 +1068,202 @@ void finalize_red(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb,
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
++// ln_fin (v22, 2026-11-17): ln_bwd_pk + finalize_red_k in ONE launch (the last two launches of the training backward's chain). The first
++// nlb blocks are LayerNorm-backward blocks: each 128-thread quarter of a 512-thread block is one of ln_bwd's 4-row blocks (row group gi,
++// the same rows, statements and column sums into acc row gi, so the same bits); a quarter that has written its two partial rows counts
++// itself on g_lnfin[0] (fence, then one atomic). The finalize blocks follow in finalize_red's order; only the row-column blocks of the
++// LayerNorm columns [0, 2 D) wait (thread 0 spins until all ng groups have counted, acquire), and read acc through L2 (ld.cg). The last
++// waiter resets both counters (g_lnfin[1] counts the waiters), so every launch starts at zero. Deterministic: every sum keeps its order.
++__device__ unsigned g_lnfin[2];
++template <int NH, int V>
++__global__ void __launch_bounds__(FR_T) ln_fin_k(const bf* __restrict__ DXA, const bf* __restrict__ X, const float2* __restrict__ ST,
++    const float* __restrict__ LW, const bf* __restrict__ DY, bf* __restrict__ DX, int M, int nlb,
++    const float* __restrict__ DWP, const float* __restrict__ DWO, float* ACC,
++    int width, int rows_a, int rows_b, const bf* __restrict__ WB, const float* __restrict__ LPW, float* __restrict__ OQ, float* __restrict__ OKe,
++    float* __restrict__ OV, float* __restrict__ OG, float* __restrict__ OO, float* __restrict__ OLW, float* __restrict__ OLB,
++    float* __restrict__ OBQ, float* __restrict__ OWB, float* __restrict__ OLPW, Geo G, int ncopy, int nra) {
++  APB_PDL_ENTRY();
++  constexpr int D = 128 * V, HG = FR_G / 2;
++  constexpr int RED_N = (4 * RW * D > NH * HG * 8) ? 4 * RW * D : NH * HG * 8;
++  __shared__ __align__(16) float red[RED_N];
++  __shared__ float fin[NH * 8];
++  const int tid = threadIdx.x;
++  const int ng = (M + RW - 1) / RW;
++  if ((int)blockIdx.x < nlb) {                                              // ---- LayerNorm backward: 4 row groups a block
++    const int q4 = tid >> 7, tq = tid & 127, wq = tq >> 5, lane = tid & 31;
++    const int gi = (int)blockIdx.x * 4 + q4;
++    if (gi >= ng) return;                                                   // whole quarters only: the named barriers stay matched
++    float* rq = red + q4 * RW * D;
++    const long r = (long)gi * RW + wq;
++    float4 aw[V] = {}, ab[V] = {};
++    if (r < M) {
++      float4 dxa[V], xh[V], w[V], g[V], dy[V];
++      ldv<V>(DXA + r * D, dxa); ldv<V>(X + r * D, xh); ldv<V>(LW, w); ldv<V>(DY + r * D, dy);
++      const float2 st = ST[r];
++#pragma unroll
++      for (int k = 0; k < V; ++k) {
++        xh[k] = make_float4((xh[k].x - st.x) * st.y, (xh[k].y - st.x) * st.y, (xh[k].z - st.x) * st.y, (xh[k].w - st.x) * st.y);
++        g[k] = mul4(dxa[k], w[k]);
++        aw[k] = mul4(dxa[k], xh[k]);
++        ab[k] = dxa[k];
++      }
++      const float m1 = warp_sum(sumv<V>(g)) * (1.f / D), m2 = warp_sum(dotv<V>(g, xh)) * (1.f / D);
++#pragma unroll
++      for (int k = 0; k < V; ++k)
++        dy[k] = make_float4(dy[k].x + st.y * (g[k].x - m1 - xh[k].x * m2), dy[k].y + st.y * (g[k].y - m1 - xh[k].y * m2),
++                            dy[k].z + st.y * (g[k].z - m1 - xh[k].z * m2), dy[k].w + st.y * (g[k].w - m1 - xh[k].w * m2));
++      stv<V>(DX + r * D, dy);
++    }
++    // colsum_add over the quarter (ln_bwd's block): the same order (warps 0..3 of the group)
++    auto qsum = [&](const float4 (&v)[V], float* out) {
++      const int c = 4 * V * lane;
++#pragma unroll
++      for (int k = 0; k < V; ++k) *reinterpret_cast<float4*>(rq + wq * D + c + 4 * k) = v[k];
++      asm volatile("bar.sync %0, 128;" ::"r"(1 + q4) : "memory");
++      for (int j = tq; j < D; j += 128) {
++        float t = 0.f;
++#pragma unroll
++        for (int w = 0; w < RW; ++w) t += rq[w * D + j];
++        out[(long)gi * width + j] = t;
++      }
++      asm volatile("bar.sync %0, 128;" ::"r"(1 + q4) : "memory");
++    };
++    qsum(aw, ACC);
++    qsum(ab, ACC + D);
++    __threadfence();
++    asm volatile("bar.sync %0, 128;" ::"r"(1 + q4) : "memory");
++    if (tq == 0) atomicAdd(&g_lnfin[0], 1u);
++    return;
++  }
++  const int W = G.nh * G.dhp, nwf = G.dp / 8;
++  int bid = (int)blockIdx.x - nlb;
++  bid = bid < nwf ? ncopy + nra + bid : bid < nwf + nra ? ncopy + (bid - nwf) : bid - nwf - nra;
++  if (bid < ncopy) {
++    const long nv = 5L * D * D / 4, i = (long)bid * FR_T + tid;
++    if (i >= nv) return;
++    const long e = i * 4, blk = e / (D * D), off = e % (D * D), r = off / D, c = off % D;
++    if (blk < 4) {
++      const long prow = (long)blk * W + (r / G.dh) * G.dhp + r % G.dh;
++      float* dst = (blk == 0 ? OQ : blk == 1 ? OKe : blk == 2 ? OV : OG) + off;
++      V4<float>::store(dst, V4<float>::load(DWP + prow * D + c));
++    } else {
++      V4<float>::store(OO + off, V4<float>::load(DWO + r * W + (c / G.dh) * G.dhp + c % G.dh));
++    }
++    return;
++  }
++  bid -= ncopy;
++  if (bid < nra) {
++    const int c = bid * 8 + (tid & 7), g = tid >> 3, split = 2 * D + W;
++    const bool waits = bid * 8 < 2 * D;
++    if (waits) {
++      if (tid == 0) {
++        unsigned seen;
++        for (;;) {
++          asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(seen) : "l"(&g_lnfin[0]) : "memory");
++          if ((int)seen >= ng) break;
++          __nanosleep(32);
++        }
++      }
++      __syncthreads();
++    }
++    float value = 0.f;
++    if (c < split) {
++#pragma unroll 4
++      for (int row = g; row < rows_a; row += FR_G) value += __ldcg(ACC + (long)row * width + c);
++    }
++    red[g * 8 + (tid & 7)] = value;
++    __syncthreads();
++    if (waits && tid == 0) {
++      const unsigned nwait = (unsigned)((2 * D + 7) / 8);
++      if (atomicAdd(&g_lnfin[1], 1u) == nwait - 1) { g_lnfin[0] = 0; g_lnfin[1] = 0; __threadfence(); }
++    }
++    if (tid < 8 && c < split) {
++      value = red[tid];
++      for (int k = 1; k < FR_G; ++k) value += red[k * 8 + tid];
++      if (c < D) OLW[c] = value;
++      else if (c < 2 * D) OLB[c - D] = value;
++      else {
++        const int rc = real_of(G, c - 2 * D);
++        if (rc >= 0) OBQ[rc] = value;
++      }
++    }
++    return;
++  }
++  bid -= nra;
++  const int c0 = bid * 8, cc = tid & 7, g = tid >> 3;
++  const float* base = ACC + 2 * D + W + c0 + cc;
++  float s[NH];
++#pragma unroll
++  for (int h = 0; h < NH; ++h) s[h] = 0.f;
++#pragma unroll 3
++  for (int row = g; row < rows_b; row += FR_G) {
++    float v[NH];
++#pragma unroll
++    for (int h = 0; h < NH; ++h) v[h] = base[(long)row * width + h * G.dp];
++#pragma unroll
++    for (int h = 0; h < NH; ++h) s[h] += v[h];
++  }
++  if (g >= HG) {
++#pragma unroll
++    for (int h = 0; h < NH; ++h) red[(h * HG + g - HG) * 8 + cc] = s[h];
++  }
++  __syncthreads();
++  if (g < HG) {
++#pragma unroll
++    for (int h = 0; h < NH; ++h) red[(h * HG + g) * 8 + cc] = s[h] + red[(h * HG + g) * 8 + cc];
++  }
++  __syncthreads();
++  if (tid < NH * 8) {
++    const int h = tid >> 3;
++    float t = red[(h * HG) * 8 + cc];
++    for (int k = 1; k < HG; ++k) t += red[(h * HG + k) * 8 + cc];
++    fin[h * 8 + cc] = t;
++    OWB[h * G.dp + c0 + cc] = t * LPW[c0 + cc];
++  }
++  __syncthreads();
++  if (tid < 8) {
++    float t = 0.f;
++    for (int h = 0; h < NH; ++h) t += fin[h * 8 + tid] * __bfloat162float(WB[h * G.dp + c0 + tid]);
++    OLPW[c0 + tid] = t;
++  }
++}
++// ln_bwd_p + finalize_red in one launch (ln_fin_k); the same arguments as the two
++void ln_fin(at::Tensor dxa, at::Tensor x, at::Tensor st, at::Tensor lw, at::Tensor dy, at::Tensor dx, at::Tensor dwp, at::Tensor dwo,
++            at::Tensor acc, at::Tensor wb, at::Tensor lpw, std::vector<at::Tensor> out, int64_t rows_a, int64_t rows_b) {
++  chk(dwp, at::kFloat, "dwp"); chk(dwo, at::kFloat, "dwo"); chk(wb, at::kBFloat16, "wb"); chk(lpw, at::kFloat, "lpw");
++  chk(dxa, at::kBFloat16, "dxa"); chk(x, at::kBFloat16, "x"); chk(dy, at::kBFloat16, "dy"); chk(dx, at::kBFloat16, "dx");
++  chk(lw, at::kFloat, "lw"); chk(st, at::kFloat, "stats");
++  const Geo G = geo(wb.size(0), dwp.size(1), wb.size(1));
++  const int64_t W = width(G), D = G.d, M = x.numel() / D;
++  TORCH_CHECK(lw.numel() == D, "ln_fin: ln weight [d_single]");
++  chk_acc(acc, G);
++  TORCH_CHECK(acc.dim() == 2, "ln_fin: block partial rows [rows, n]");
++  TORCH_CHECK(rows_a == (M + RW - 1) / RW && rows_b >= 1 && rows_a <= acc.size(0) && rows_b <= acc.size(0), "ln_fin: partial row counts");
++  TORCH_CHECK(dwp.numel() == 4 * W * D && dwo.numel() == D * W && lpw.numel() == G.dp, "ln_fin: dwp [4 W, D], dwo [D, W], lpw [d_pair]");
++  TORCH_CHECK(out.size() == 10, "ln_fin: 10 outputs");
++  for (int i = 0; i < 10; ++i) chk(out[i], at::kFloat, "ln_fin output");
++  const at::cuda::CUDAGuard gd(dwp.device());
++  const int ncopy = (int)((5L * D * D / 4 + FR_T - 1) / FR_T), nra = (int)((2 * D + W + 7) / 8), nwf = G.dp / 8;
++  const int nlb = (int)((rows_a + 3) / 4);
++#define LF_GO(NH, V)                                                                                                                       \
++  pdl_go(ln_fin_k<NH, V>, (unsigned)(nlb + ncopy + nra + nwf), FR_T, 0, CP<bf>(dxa), CP<bf>(x), CP<float2>(st), CP<float>(lw), CP<bf>(dy),  \
++      P<bf>(dx), (int)M, nlb, CP<float>(dwp), CP<float>(dwo), P<float>(acc), (int)acc.size(1),                                            \
++      (int)rows_a, (int)rows_b, CP<bf>(wb), CP<float>(lpw), P<float>(out[2]), P<float>(out[4]), P<float>(out[5]), P<float>(out[6]),        \
++      P<float>(out[7]), P<float>(out[0]), P<float>(out[1]), P<float>(out[3]), P<float>(out[9]), P<float>(out[8]), G, ncopy, nra)
++  if (D == 384) {
++    switch (G.nh) {
++      case 8: LF_GO(8, 3); break;
++      case 12: LF_GO(12, 3); break;
++      case 16: LF_GO(16, 3); break;
++      default: LF_GO(24, 3); break;
++    }
++  } else {
++    LF_GO(16, 4);
++  }
++#undef LF_GO
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++
+ // gate_bwd for 12 x 32 / 24 x 16 (W = 384) with every lane busy: a warp per row, lane l takes columns 4 l + 128 k (k < 3), so a head is
+ // HL = dh / 4 neighbouring lanes (D summed over them by shuffles). The shared gate_bwd_hl_k gives a head per lane (12 / 24 of 32 lanes,
+ // 8 / 4 vectors each in a chain). The other geometries go to the shared kernels.
+@@ -1384,6 +1580,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("pair_bias_bwd_wide1", &pair_bias_bwd_wide1);
+   m.def("pair_bwd_wide1_blocks", &pair_bwd_wide1_blocks);
+   m.def("finalize_red", &finalize_red);
++  m.def("ln_fin", &ln_fin);
+   m.def("ksplit_combine32", &ksplit_combine32);
+   m.def("gate_bwd2", &gate_bwd2);
+   m.def("inf_front", &inf_front);
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+index 66ce9830c..d4186f44f 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+@@ -956,12 +956,15 @@ def apb_backward_stages(
+     bias_t: torch.Tensor | None = None,
+     bias_nt: bool = False,
+     dkv_pdl: bool = False,
++    qkvbf: tuple | None = None,
+ ):
+     """``apb_backward``'s three launches, unlaunched: ((bias_transpose, attn_dkv, attn_dqb), (dQ, dK, dV, dbias, bias^T)). The caller
+     holds bias^T until attn_dkv has run (2026-11-17: it was not returned, so the caching allocator handed its block to the next allocation on
+     the caller's stream -- the dO GEMM's output -- while the transpose wrote it on a side stream: wrong dK / dV on a cold
+     first call). Each runs on the stream current when it is called, so a caller can overlap them: the transpose needs only the bias; attn_dkv needs the transpose;
+-    attn_dqb (dQ chunk partials, no zero fill) needs neither -- it may run beside attn_dkv."""
++    attn_dqb (dQ chunk partials, no zero fill) needs neither -- it may run beside attn_dkv.
++    ``qkvbf`` (v22, AttentionPairBias, L == 128): (dqkvg [L, 4 W] bf16, acc columns of dbq [rows, >= W] view): attn_dkv / attn_dqb built
++    -DQKVBF=1 write dK | dV | dQ as bf16 straight into dqkvg and dQ's 4-row column sums into the acc view (qkv_bwd's values): no qkv_bwd."""
+     dev = _index(q)
+     dh, W = APB_GEOMETRY[(heads, d)][0], apb_width(heads, d)
+     nch = L // 128
+@@ -999,30 +1002,33 @@ def apb_backward_stages(
+         defs = _apb_defs(heads, False, d)
+         tr = _sm100_kernel("glue", "bias_transpose_bf16", dev, smem=0).bind((L // 32, L // 32, heads), (32, 8, 1), bias, bias_t, int(L))
+         # dkv_pdl (v20, 2026-11-17): the -DPDLW=1 build launched as a programmatic dependent of the previous kernel on the stream
+-        dkv_defs = defs + (("BIASNT=1",) if bias_nt else ()) + (("PDLW=1",) if dkv_pdl else ())
++        dkv_defs = defs + (("BIASNT=1",) if bias_nt else ()) + (("PDLW=1",) if dkv_pdl else ()) + (("QKVBF=1",) if qkvbf else ())
++        okd, okv = (qkvbf[0][:, W : 2 * W], qkvbf[0][:, 2 * W : 3 * W]) if qkvbf else (DK, DV)
+         dkv = _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, pdl=dkv_pdl, defs=dkv_defs).bind(
+             _grid(heads * (L // 128), dev),
+             (384, 1, 1),
+             *dkv_maps,
+             LSE,
+             Dd,
+-            DK,
+-            DV,
++            okd,
++            okv,
+             None,
+             int(L),
+             1,
+         )  # no dQ zero fill
+-        dqb_defs = defs + ("DQPART=1",)
++        dqb_defs = defs + ("DQPART=1",) + (("QKVBF=1",) if qkvbf else ())
++        dqb_extra = (qkvbf[1], int(qkvbf[1].stride(0))) if qkvbf else ()
+         dqb = _sm100_kernel("attn_dqb", "augattn_dqb_sm100", dev, defs=dqb_defs).bind(
+             _grid(heads * (L // 128) * (L // 128), dev),
+             (384, 1, 1),
+             *dqb_maps,
+             LSE,
+             Dd,
+-            DQ,
++            qkvbf[0] if qkvbf else DQ,
+             DB,
+             int(L),
+             1,
++            *dqb_extra,
+         )
+ 
+         return (tr if made_t else _no_launch), dkv, dqb
+@@ -1037,6 +1043,7 @@ def apb_backward_stages(
+         dev,
+         L,
+         *(t.data_ptr() for t in (q, k, v, dob, bias, LSE, Dd, bias_t, DQ, DB, DK, DV)),
++        *((qkvbf[0].data_ptr(), qkvbf[1].data_ptr(), qkvbf[1].stride(0)) if qkvbf else ()),
+         _rs(q),
+         _rs(k),
+         _rs(v),
+@@ -1171,7 +1178,7 @@ def _pair_bwd_defs(heads: int) -> tuple[str, ...]:
+     return (f"PB_NH={heads}",) + _pb_split_defs(heads)
+ 
+ 
+-def apb_pair_bwd(pair2d, dbias, wf, L: int, eps: float, acc_cols, dz, reserve: int = 0, trace=None) -> int:
++def apb_pair_bwd(pair2d, dbias, wf, L: int, eps: float, acc_cols, dz, reserve: int = 0, trace=None, evf: bool = False) -> int:
+     """dpair [L L, 128] bf16 into ``dz`` and the block partial rows of (dWf [H, 128], per-head dbias sums [H]) into ``acc_cols`` (a
+     [rows, >= H 129] fp32 column view of the backward's accumulator: row b = block b) of AttentionPairBias's d_pair 128 pair backward on
+     tcgen05 (``pair_bwd.cu``; the results of ``apb_rows.cu`` pair_bias_bwd). pair2d [L L, 128] bf16, dbias [H, L, L] fp32, wf [H, 128]
+@@ -1183,7 +1190,7 @@ def apb_pair_bwd(pair2d, dbias, wf, L: int, eps: float, acc_cols, dz, reserve: i
+     assert acc_cols.dtype == torch.float32 and acc_cols.stride(1) == 1
+     grid = min(num_sms(dev) - reserve, L * (L // 128))
+     assert acc_cols.shape[0] >= grid and acc_cols.shape[1] >= heads * 129
+-    defs = _pair_bwd_defs(heads)
++    defs = _pair_bwd_defs(heads) + (("PB_EVF=1",) if evf else ())  # v22: evict_first pair loads
+     k = _sm100_kernel("pair_bwd", "apb_pair_bwd_sm100", dev, defs=defs, smem=_PAIR_BWD_SMEM[heads])
+     _apb_bound(
+         (
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dkv.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dkv.cu
+index 9d1ab1900..f25ec75c5 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dkv.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dkv.cu
+@@ -22,8 +22,11 @@ using namespace s100;
+ #define BIASNT 0                         // 1 (AttentionPairBias, 2026-11-17 part 6): the bias read AS STORED [H, L(query), L(key)] -- a TMA box of
+ #endif                                   // 128 keys x 64 queries, no swizzle; thread r reads its key column (16-bit loads, a warp 64 contiguous bytes)
+                                          // -- instead of the transposed copy: no transpose launch. A = 1 only.
++#ifndef QKVBF
++#define QKVBF 0                          // 1 (AttentionPairBias v22): dK / dV leave as bf16 straight into dqkvg (DK / DV are bf16 pointers to its dK / dV
++#endif                                   // column blocks, row stride 4 W; qkv_bwd's rounding) -- with attn_dqb -DQKVBF=1 no qkv_bwd launch
+ #ifndef TST
+-#define TST 1                            // dK / dV leave through smem-staged TMA bulk stores (coalesced) instead of per-row st.v4
++#define TST 1                           // dK / dV leave through smem-staged TMA bulk stores (coalesced) instead of per-row st.v4
+ #endif
+ #ifndef ST
+ #define ST (TST ? 3 : 4)
+@@ -336,7 +339,15 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
+           return make_uint4(__float_as_uint(__uint_as_float(src[0]) * sc), __float_as_uint(__uint_as_float(src[1]) * sc),
+                             __float_as_uint(__uint_as_float(src[2]) * sc), __float_as_uint(__uint_as_float(src[3]) * sc));
+         };
+-        if (TST && DH == 64) {                                             // 64 columns: two 32-column halves through xa, in turn
++        if (QKVBF) {                                                       // v22: bf16 into dqkvg (DK / DV: its dK / dV column blocks, row stride 4 W)
++          uint4* brow = reinterpret_cast<uint4*>(reinterpret_cast<__nv_bfloat16*>(w == 0 ? DK : DV) + ((size_t)a * L + k0 + r) * (4 * DM) + head * DH);
++#pragma unroll
++          for (int k = 0; k < DH / 8; ++k) {
++            const uint4 lo = sv(8 * k), hi = sv(8 * k + 4);
++            brow[k] = make_uint4(pack_bf16(__uint_as_float(lo.x), __uint_as_float(lo.y)), pack_bf16(__uint_as_float(lo.z), __uint_as_float(lo.w)),
++                                 pack_bf16(__uint_as_float(hi.x), __uint_as_float(hi.y)), pack_bf16(__uint_as_float(hi.z), __uint_as_float(hi.w)));
++          }
++        } else if (TST && DH == 64) {                                      // 64 columns: two 32-column halves through xa, in turn
+           const uint32_t xa = su + O_X + w * (XA + XB);
+ #pragma unroll
+           for (int hf = 0; hf < 2; ++hf) {
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dqb.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dqb.cu
+index 7a861f78c..efc7574db 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dqb.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dqb.cu
+@@ -45,8 +45,11 @@ using namespace s100;
+ #ifndef DQPART
+ #define DQPART 0                         // 1: each key chunk's dQ partial is STORED to its own slice DQ[chunk][a L + row] (deterministic;
+ #endif                                   // the caller adds the L / 128 slices in order) instead of reduce-added into one zeroed dQ
++#ifndef QKVBF
++#define QKVBF 0                          // 1 (AttentionPairBias v22; one key chunk, L == 128, A == 1): dQ leaves as bf16 straight into dqkvg[:, 0:W] (DQ
++#endif                                   // is that bf16 pointer, row stride 4 W) with its 4-row column sums of the bf16 values (qkv_bwd's order) in ACCQ
+ #ifndef DQDET
+-#define DQDET 0                          // 1: a step's two dQ MMA groups in a fixed order (issuer 1's after issuer 0's of the same step, issuer 0's
++#define DQDET 0                         // 1: a step's two dQ MMA groups in a fixed order (issuer 1's after issuer 0's of the same step, issuer 0's
+ #endif                                   // after issuer 1's of the previous step, as attn_dqb_tf32 -DDET): with DQPART the whole dQ is bitwise repeatable.
+                                          // (Each issuer adds four MMAs onto the step's accumulator; unordered, the eight addends interleave: the token
+                                          // DiT at 48 samples, L 384 differed run to run -- 2026-11-17. A name of its own: AttentionPairBias's builds pass DET.)
+@@ -113,7 +116,11 @@ extern "C" __global__ void __launch_bounds__(384, 1)
+ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
+                   const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mqa,
+                   const __grid_constant__ CUtensorMap mqb, const float* __restrict__ LSE,
+-                  const float* __restrict__ DD, float* __restrict__ DQ, float* __restrict__ DB, int L, int A) {
++                  const float* __restrict__ DD, float* __restrict__ DQ, float* __restrict__ DB, int L, int A
++#if QKVBF
++                  , float* __restrict__ ACCQ, int acc_stride
++#endif
++                  ) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+@@ -272,6 +279,32 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
+       if (lane == 0) mbar_arrive(&B.dq_free[b]);
+       if (w == 0 && r == 0) TR(9, g);
+       if (!active) {
++#if QKVBF
++      } else if (true) {                                                   // bf16 into dqkvg, then qkv_bwd's 4-row column sums (lanes 4 j .. 4 j + 3)
++        uint32_t* drow = reinterpret_cast<uint32_t*>(reinterpret_cast<__nv_bfloat16*>(DQ) + ((size_t)arow + r) * (4 * DM) + head * DH + c0);
++        float* arow4 = ACCQ + (size_t)((arow + r) >> 2) * acc_stride + head * DH + c0;
++#pragma unroll
++        for (int q = 0; q < 8; ++q) {
++          if (q * 4 >= nc) break;
++          uint32_t p[2];
++          float x[4];
++#pragma unroll
++          for (int e = 0; e < 2; ++e) {
++            p[e] = pack_bf16(__uint_as_float(v[4 * q + 2 * e]) * RSQD, __uint_as_float(v[4 * q + 2 * e + 1]) * RSQD);
++            x[2 * e] = bf16lo(p[e]); x[2 * e + 1] = __uint_as_float(p[e] & 0xffff0000u);
++          }
++          *reinterpret_cast<uint2*>(drow + 2 * q) = make_uint2(p[0], p[1]);
++#pragma unroll
++          for (int e = 0; e < 4; ++e) {
++            const float x1 = __shfl_down_sync(0xffffffffu, x[e], 1), x2 = __shfl_down_sync(0xffffffffu, x[e], 2),
++                        x3 = __shfl_down_sync(0xffffffffu, x[e], 3);
++            float t = 0.f;
++            t += x[e]; t += x1; t += x2; t += x3;
++            x[e] = t;
++          }
++          if ((lane & 3) == 0) *reinterpret_cast<float4*>(arow4 + 4 * q) = make_float4(x[0], x[1], x[2], x[3]);
++        }
++#endif
+       } else if (TRED) {
+         const bool issuer = r == 0;
+         const int xb = g & 1;
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/pair_bwd.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/pair_bwd.cu
+index 3c16cefda..f55029905 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/pair_bwd.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/pair_bwd.cu
+@@ -31,6 +31,9 @@ using namespace s100;
+ #endif
+ constexpr int NH = PB_NH, DP = 128, TR = 128;
+ constexpr int NHC = (NH + 7) / 8, KH = (NH + 15) / 16;                  // 8-head chunks of a row of a; K = 16 steps of D = a Wf
++#ifndef PB_EVF
++#define PB_EVF 0                         // 1 (v22): the pair tiles load with an L2 evict_first policy (read once; after the measurer's write flush they
++#endif                                   // evict each other instead of the dirty lines)
+ #ifndef PB_SPLIT
+ #define PB_SPLIT 1                       // a = a_hi + a_lo (two bf16 parts, the low one at head slots LO..): D and dWf see a at ~fp32 precision
+ #endif
+@@ -68,8 +71,14 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+     const int i = (int)(t / ntj), j0 = (int)(t % ntj) * TR, s = (int)(n % NS);
+     const uint32_t st = su + s * STG;
+     mbar_expect_tx(&B.full[s], (uint32_t)(XB + DBB));
+-    tma_load_2d(st, &mz, &B.full[s], 0, i * L + j0);
+-    tma_load_2d(st + BOX, &mz, &B.full[s], 64, i * L + j0);
++    if (PB_EVF) {
++      const uint64_t pol = pol_evict_first();
++      tma_load_2d_h(st, &mz, &B.full[s], 0, i * L + j0, pol);
++      tma_load_2d_h(st + BOX, &mz, &B.full[s], 64, i * L + j0, pol);
++    } else {
++      tma_load_2d(st, &mz, &B.full[s], 0, i * L + j0);
++      tma_load_2d(st + BOX, &mz, &B.full[s], 64, i * L + j0);
++    }
+     tma_load_3d(st + XB, &md, &B.full[s], j0, i, 0);
+   };
+   uint4 wv[2];                                                             // Wf's words, read before the tiles' loads queue at the memory
+diff --git a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py b/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
+index 86fe7f2c0..08758bbe3 100644
+--- a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
++++ b/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
+@@ -395,6 +395,9 @@ def _fwd_reserve(dp: int, L: int) -> int:
+ #: each warp's 16 rows loaded by its own lane / mbarrier) -- "stages:blocks per SM" (0: the occupancy); None: the shared pass.
+ #: MINIWORLD_APB_B200_PF2 forces (0: off).
+ _PF2 = os.environ.get("MINIWORLD_APB_B200_PF2", "2:0")
++#: v22: the tcgen05 pair backward's pair loads with an L2 evict_first policy. MINIWORLD_APB_B200_PB_EVF=1 forces on.
++_PB_EVF = os.environ.get("MINIWORLD_APB_B200_PB_EVF", "0") != "0"
++_PF2_TRAIN_MIN = int(os.environ.get("MINIWORLD_APB_B200_PF2_TRAIN_MIN", "384"))
+ 
+ 
+ def _pf2(dp: int, L: int, heads: int) -> tuple[int, int] | None:
+@@ -494,6 +497,29 @@ def _pdl_on(L: int) -> bool:
+     return L <= _PDL_MAX
+ 
+ 
++#: B200 bf16 training backward (v22, 2026-11-17): ln_bwd + finalize_red as one launch (``ln_fin``: the LayerNorm-backward blocks first, the
++#: finalize blocks of the LayerNorm columns wait on an in-kernel counter; the same sums in the same order). MINIWORLD_APB_B200_LNFIN=0 / 1 /
++#: all forces off / on at <= 16 heads / on everywhere.
++_LNFIN = os.environ.get("MINIWORLD_APB_B200_LNFIN")
++
++
++#: B200 bf16 training backward at L 128 (v22): attn_dkv / attn_dqb -DQKVBF=1 write dK | dV | dQ as bf16 into dqkvg and dQ's 4-row column sums
++#: (one key chunk: dQ is complete in one CTA), so the qkv_bwd launch drops off the chain. MINIWORLD_APB_B200_QKVBF=0 / 1 forces.
++_QKVBF = os.environ.get("MINIWORLD_APB_B200_QKVBF")
++
++
++def _qkvbf_on(L: int) -> bool:
++    if L != 128:
++        return False
++    return _QKVBF is not None and _QKVBF != "0"
++
++
++def _lnfin_on(heads: int, L: int) -> bool:
++    if _LNFIN is not None:
++        return _LNFIN == "all" or (_LNFIN != "0" and heads <= 16)
++    return False
++
++
+ def _pdl_call(E, pdl: bool, fn, *args) -> None:
+     """fn(*args) with the extension's PDL launches on when ``pdl``, then the previous setting."""
+     if not pdl:
+@@ -929,7 +955,7 @@ def _forward_b200(single, pair, mask, leaves, eps_s, eps_p, gate_bias):
+             m = _row(mask, b)
+             with torch.cuda.stream(side):
+                 wide: list[torch.Tensor] = []  # a wide pair: (row stats, unmasked bias) for its backward
+-                pf2 = _pf2(dp, L, H) if L >= 384 else None  # L 128: +-2 us, one timer step either way
++                pf2 = _pf2(dp, L, H) if L >= _PF2_TRAIN_MIN else None  # L 128: +-2 us, one timer step either way
+                 if pf2 is not None:  # v21: the B200 form of the d_pair 128 pass (the same bits)
+                     bias = pair.new_empty((H, L, L))
+                     E.pair_bias_fwd2(pair[b].view(L * L, DP), wf, m, bias, L, eps_p, NEG, *pf2)
+@@ -1006,6 +1032,7 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+                 rows_b = E.pair_bwd_blocks(x, H, L) if dp == DP else E.pair_bwd_wide1_blocks(x, H, L, dp)
+             E.sm_reserve(was)
+             acc = torch.empty(max(rows_a, rows_b), rows.acc_n(H, D, dp), device=dev)
++            qkvbf = _qkvbf_on(L) and acc.stride(0) % 4 == 0
+             _join(s1, main)
+             dob = x.new_empty((L, W))
+             dd = x.new_empty((H, L), dtype=f32)
+@@ -1024,6 +1051,7 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+                 bias_t=rest[-1] if fwd_t else None,
+                 bias_nt=not fwd_t and _bias_nt(H, L),
+                 dkv_pdl=pdl,
++                qkvbf=(dqkvg, acc[:, 2 * D :]) if qkvbf else None,
+             )
+             transposed = torch.cuda.Event()
+             with torch.cuda.stream(s1):
+@@ -1040,7 +1068,7 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+                 _rec(dq_done, s2)
+                 if pbtc:  # tcgen05: its block partial rows go into the dWf | dbias-sum columns of acc
+                     z2, dz2 = pair[b].view(L * L, dp), dz_all[b].view(L * L, dp)
+-                    sm.apb_pair_bwd(z2, DB, wf, L, eps_p, acc[:, 2 * D + W :], dz2, _pbtc_reserve(H, L))
++                    sm.apb_pair_bwd(z2, DB, wf, L, eps_p, acc[:, 2 * D + W :], dz2, _pbtc_reserve(H, L), evf=_PB_EVF)
+                 else:
+                     was = E.sm_reserve(_bwd_reserve(dp, L))
+                     rows.pair_bias_bwd(pair[b].view(L * L, dp), DB, wf, L, eps_p, acc, D, saved=wide, out=dz_all[b].view(L * L, dp))
+@@ -1048,7 +1076,8 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+             _after(main, transposed)
+             dkv()
+             _after(main, dq_done)
+-            _pdl_call(E, pdl, E.qkv_bwd_p, DQ, DK, DV, dqkvg, acc, D)
++            if not qkvbf:  # v22: at L 128 the cores wrote dqkvg and the dbq partial rows themselves
++                _pdl_call(E, pdl, E.qkv_bwd_p, DQ, DK, DV, dqkvg, acc, D)
+             if _DXA_FIRST:  # dxa leads the tail (-> ln_bwd -> finalize); dW q|k|v|g is issued after it, on the side stream
+                 qkv_done = torch.cuda.Event()
+                 _rec(qkv_done, main)
+@@ -1060,14 +1089,18 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+                 dwp = torch.mm(dqkvg.t(), xa, out_dtype=f32)
+             if not _DXA_FIRST:
+                 dxa = dqkvg @ wpack
+-            _pdl_call(E, pdl, E.ln_bwd_p, dxa, x, st, lnw, dy2, dx_all[b], acc)
++            lnfin = _lnfin_on(H, L)
++            if not lnfin:
++                _pdl_call(E, pdl, E.ln_bwd_p, dxa, x, st, lnw, dy2, dx_all[b], acc)
+             _join(main, s1)
+             _join(main, s2)
+             dwo.record_stream(main)
+             dwp.record_stream(main)
+             # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel
+             row_outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
+-            if _P5 and H <= 16:
++            if lnfin:  # v22: the LayerNorm backward and the finalize in one launch
++                _pdl_call(E, pdl, E.ln_fin, dxa, x, st, lnw, dy2, dx_all[b], dwp, dwo, acc, wb, lnpw, row_outs, rows_a, rows_b)
++            elif _P5 and H <= 16:
+                 _pdl_call(E, pdl, E.finalize_red, dwp, dwo, acc, wb, lnpw, row_outs, rows_a, rows_b)
+             else:
+                 E.finalize(dwp, dwo, acc, wb, lnpw, row_outs, rows_a, rows_b)

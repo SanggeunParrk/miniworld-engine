@@ -34,9 +34,9 @@ A build or load failure there raises ``_nvcc.KernelBuildError`` (never a fallbac
 
 fp32 stages, B200 (sm_100a) at the served widths with S a multiple of 128 (``cuda/sm100/tf32_fwd.supported_tf32``): every stage on
 the hand-written TF32 tensor-core kernels (``tcgen05.mma kind::tf32``) -- ``tf32_fwd.block_fwd_tf32`` (``_tf32``), the window
-attention included (TF32 Q / K / V / P, fp32 softmax) -- for inference. A training forward (``save``) would take them only with a TF32
-backward, and there is none at the moment (``_tf32_bwd_ready``: the first one was removed for giving different gradients on identical
-steps), so fp32 training runs the Triton fp32 path. A build or load failure raises ``_nvcc.KernelBuildError``. The
+attention included (TF32 Q / K / V / P, fp32 softmax) -- for inference and training: a training forward (``save``) keeps fp32 saves
+that the TF32 backward (``cuda/sm100/tf32_bwd.block_bwd_tf32``, rebuilt after the first one was removed for giving different gradients on
+identical steps) reads, so fp32 training launches no Triton kernel on B200. A build or load failure raises ``_nvcc.KernelBuildError``. The
 hoisted modulation (``native_h100_mod_fwd`` / ``native_h100_mod_bwd``) is not a kernel of these stages.
 
 fp32 stages elsewhere (q fp32): on sm_90 with TF32 allowed (matmul precision "high" or
@@ -661,11 +661,11 @@ def _device_index(device: torch.device) -> int:
 
 @device_constant
 def _tf32_bwd_ready(device: torch.device) -> bool:
-    """Whether an sm_100a TF32 backward serves fp32 training calls on ``device``. None does: the first one (``cuda/sm100/tf32_bwd``)
-    gave different gradients for identical steps and faulted on poisoned memory, so it was removed; until its replacement lands, an
-    fp32 training call (forward with saves, the hoisted modulation with a gradient) keeps the Triton fp32 path. Inference keeps the
-    TF32 forward kernels."""
-    return False
+    """Whether an sm_100a TF32 backward serves fp32 training calls on ``device``: yes (B200, 2026-11-16: ``cuda/sm100/tf32_bwd``, the
+    backward rebuilt on 2026-10-07 / 08 after the first one -- different gradients for identical steps, faults on poisoned memory -- was
+    removed; every gradient column written by one kernel, plain stores, no atomics). The saves of a TF32 training forward are fp32
+    heads, which :func:`_swa_dit_block_bwd` sends to it."""
+    return True
 
 
 @device_constant
@@ -809,6 +809,14 @@ def _swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_
         return _native_h100_fwd(q, mod.float(), cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
     fa4 = _h100_global_composed(q, half_window)  # the composed bf16 stages with FlashAttention-4 as the attention
     if is_global(half_window) and not _PORTABLE[0] and not fa4:
+        if (
+            q.dtype == torch.float32
+            and q.shape[0] == B
+            and tf32_fwd.supported_tf32_global(q, wd.shape[1], half_window, eps)
+            and _tf32_ready(q.device, save)
+        ):
+            # B200 fp32: the TF32 row stages around the bf16 global attention (tf32_fwd.block_fwd_tf32; its saves: tf32_bwd.block_bwd_tf32)
+            return tf32_fwd.block_fwd_tf32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window)
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
             raise RuntimeError(
@@ -1195,6 +1203,12 @@ def _swa_dit_block_bwd(
         grads[1] = grads[1].to(mod.dtype)  # dmod like mod (the contract), whatever the native stages computed it in
         return grads
     if is_global(half_window) and not _PORTABLE[0] and not _h100_global_composed(q, half_window):
+        if q.dtype == torch.float32 and qh.dtype == torch.float32:  # the saves of the B200 TF32 global forward
+            from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+            return tf32_bwd.block_bwd_tf32(
+                dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window
+            )
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
             raise RuntimeError(
@@ -1229,8 +1243,12 @@ def _swa_dit_block_bwd(
             half_window,
         )
     if q.dtype == torch.float32:
-        if qh.dtype == torch.float32:  # fp32 heads: saves of a TF32 training forward, which no backward serves
-            raise RuntimeError("swa_dit_block: fp32 saves of the TF32 forward have no backward (_tf32_bwd_ready is False)")
+        if qh.dtype == torch.float32:  # fp32 heads: the saves of the B200 TF32 training forward, on the TF32 backward kernels
+            from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+            return tf32_bwd.block_bwd_tf32(
+                dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window
+            )
         return _swa_dit_bwd_fp32_launch(
             dy,
             q,

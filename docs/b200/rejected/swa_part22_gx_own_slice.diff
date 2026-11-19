@@ -1,0 +1,37 @@
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/dw_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/dw_tf32.cu
+index 86a7fc342..c5f9aa38b 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/dw_tf32.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/dw_tf32.cu
+@@ -257,21 +257,29 @@ swa_dw_tf32_sm100(const __grid_constant__ CUtensorMap ma0, const __grid_constant
+       fence_proxy_async();
+       named_bar_sync(1, 128);
+       if (tid == 128) {
+-        asm volatile("cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;" :: "l"(wst + (size_t)slice * PB), "r"(su), "r"(PB) : "memory");
++        // r3-swa part 22: every rank but this one reads its slice from global memory; this rank's own slice stays in its staging (the
++        // receive slot of slice s is the staging bytes of slice s): (CL - 1) / CL of the partial stored and loaded
++        const uint32_t lo = (uint32_t)slice * SL, hi = lo + SL;
++        if (lo > 0)
++          asm volatile("cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;" :: "l"(wst + (size_t)slice * PB), "r"(su), "r"(lo) : "memory");
++        if (hi < PB)
++          asm volatile("cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;" :: "l"(wst + (size_t)slice * PB + hi), "r"(su + hi), "r"(PB - hi) : "memory");
+         tma_store_commit();
+         tma_store_wait0();
+         asm volatile("fence.proxy.async.global;" ::: "memory");
+       }
+     }
+-    if (tid == 0) mbar_expect_tx(&B.rcv, PB);
++    if (tid == 0) mbar_expect_tx(&B.rcv, PB - SL);   // (the own slice is not loaded)
+     TR(10, tid == 0);
+     cluster_sync();                                                        // (release / acquire: every rank's partial is in global memory)
+     TR(11, tid == 0);
+     if (tid == 0) {
+       asm volatile("fence.proxy.async.global;" ::: "memory");
+-      for (int s = 0; s < DW_CL; ++s)
++      for (int s = 0; s < DW_CL; ++s) {
++        if (s == slice) continue;
+         asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                      :: "r"(su + (uint32_t)s * SL), "l"(wst + (size_t)s * PB + (size_t)slice * SL), "r"(SL), "r"(smem_u32(&B.rcv)) : "memory");
++      }
+     }
+     mbar_wait(&B.rcv, 0);
+     TR(13, tid == 0);

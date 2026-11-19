@@ -1,0 +1,101 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
+index 32e30e4b3..910dac057 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
+@@ -419,6 +419,15 @@ __device__ __forceinline__ void load_2d_2sm(const void* map, uint32_t dst, uint3
+                :: "r"(dst), "l"(map), "r"(bar & 0xFEFFFFFFu), "r"(c0), "r"(c1) : "memory");
+ }
+ 
++__device__ __forceinline__ void load_3d_2sm(const void* map, uint32_t dst, uint32_t bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];\n"
++               :: "r"(dst), "l"(map), "r"(bar & 0xFEFFFFFFu), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++#ifndef WF_KB
++#define WF_KB 2          // tri_wfront: 64-column K chunks of a weight block in one TMA box (3-D map) while the ring keeps >= 2 stages (B200
++                         // 2026-11-18: a producer is bound by its TMA box count, ~600 clk a box, not by its bytes or issuing lanes)
++#endif
++
+ template <int C, int ND> struct WF {
+   static constexpr int KC = C / 64;
+   static constexpr int XB = WBM * C * 2;                                       // x / y tile bytes
+@@ -430,9 +439,11 @@ template <int C, int ND> struct WF {
+   static constexpr int CAP = 232448 - 512;                                     // 227 KiB opt-in less the barriers; no alignment slack
+   static constexpr int NX = (2 * XB + 2 * WSB + DR + PB) <= CAP ? 2 : 1;
+   static constexpr int SSB = NX == 1 ? WBM * 8 : 0;                            // (mean, rstd) of the rows (one x buffer)
+-  static constexpr int NW0 = (CAP - NX * XB - DR - PB - SSB) / WSB;
+-  static constexpr int NW = NW0 > 6 ? 6 : NW0;
+-  static constexpr int SMEM = NX * XB + NW * WSB + DR + PB + SSB + 512;
++  static constexpr int NW0 = (CAP - NX * XB - DR - PB - SSB) / WSB;           // ring room in chunks
++  static constexpr int KB = (WF_KB > 1 && KC % WF_KB == 0 && NW0 / WF_KB >= 2) ? WF_KB : 1;   // K chunks a stage (one box)
++  static constexpr int SBY = KB * WSB;                                         // stage bytes
++  static constexpr int NW = NW0 / KB > 6 ? 6 : NW0 / KB;
++  static constexpr int SMEM = NX * XB + NW * SBY + DR + PB + SSB + 512;
+   static_assert(NW >= 2, "front W stages");
+ };
+ 
+@@ -458,7 +469,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
+   unsigned char* smb = raw;
+   __nv_bfloat16* sX = reinterpret_cast<__nv_bfloat16*>(smb);                          // [NX][KC][128][64]
+   unsigned char* sW = smb + T::NX * T::XB;                                            // [NW][<=128][64]
+-  __nv_bfloat16* sO = reinterpret_cast<__nv_bfloat16*>(sW + T::NW * T::WSB);          // drain staging
++  __nv_bfloat16* sO = reinterpret_cast<__nv_bfloat16*>(sW + T::NW * T::SBY);          // drain staging
+   float* sP = reinterpret_cast<float*>(reinterpret_cast<unsigned char*>(sO) + T::DR); // gamma | beta
+   float2* sS = reinterpret_cast<float2*>(sP + 2 * C);                                  // (mean, rstd) [128] (one x buffer)
+   uint64_t* bars = reinterpret_cast<uint64_t*>(reinterpret_cast<unsigned char*>(sS) + T::SSB);
+@@ -504,11 +515,12 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
+       int y = 0;
+       for (int pt = pair; pt < np; pt += npair)
+         for (int b = 0; b < NBLK; ++b)
+-          for (int kc = 0; kc < T::KC; ++kc, ++y) {
++          for (int kg = 0; kg < T::KC / T::KB; ++kg, ++y) {     // a stage: KB chunks [KB][half][64], one box
+             const int s = y % T::NW, half = blk_rows(b) >> 1;
+             if (y >= T::NW) wait(we + s, ((y / T::NW) - 1) & 1);
+-            if (lead) expect_tx(wf + s, 2 * half * 128);                 // the pair's bytes, counted on the leader's barrier
+-            load_2d_2sm(half == 8 ? &wbmap : &wmap, bw0 + s * T::WSB, bwf + 8 * s, kc * 64, blk_row0(b) + rank * half);
++            if (lead) expect_tx(wf + s, 2 * half * 128 * T::KB);          // the pair's bytes, counted on the leader's barrier
++            if (T::KB == 1) load_2d_2sm(half == 8 ? &wbmap : &wmap, bw0 + s * T::SBY, bwf + 8 * s, kg * 64, blk_row0(b) + rank * half);
++            else load_3d_2sm(half == 8 ? &wbmap : &wmap, bw0 + s * T::SBY, bwf + 8 * s, 0, blk_row0(b) + rank * half, kg * T::KB);
+           }
+     }
+   } else if (warp == 1) {
+@@ -526,14 +538,20 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
+           const int acc = gb & 1;
+           const uint32_t id = idesc_bf16(256, blk_rows(b), 0, 0);
+           if (gb >= 2) wait_cl(bae + 8 * acc, ((gb >> 1) - 1) & 1);
+-          for (int kc = 0; kc < T::KC; ++kc, ++y) {
++          const int bh2 = blk_rows(b) >> 1;
++          for (int kg = 0; kg < T::KC / T::KB; ++kg, ++y) {
+             const int s = y % T::NW;
+-            if (T::NX == 1 && b == 0) wait_cl(byf + 8 * kc, lt & 1);
++            if (T::NX == 1 && b == 0)
++              for (int i = 0; i < T::KB; ++i) wait_cl(byf + 8 * (kg * T::KB + i), lt & 1);
+             wait(bwf + 8 * s, (y / T::NW) & 1);
+             tc_fence_after();
+-            const uint64_t a = dY + (uint64_t)((kc * WBM * 64 * 2) >> 4), bw = dW0 + (uint64_t)((s * T::WSB) >> 4);
+ #pragma unroll
+-            for (int ks = 0; ks < 4; ++ks) mma2_ss_if(ldr, tmem + acc * 256, a + 2 * ks, bw + 2 * ks, id, (kc | ks) ? 1u : 0u);
++            for (int i = 0; i < T::KB; ++i) {
++              const int kc = kg * T::KB + i;
++              const uint64_t a = dY + (uint64_t)((kc * WBM * 64 * 2) >> 4), bw = dW0 + (uint64_t)((s * T::SBY + i * bh2 * 128) >> 4);
++#pragma unroll
++              for (int ks = 0; ks < 4; ++ks) mma2_ss_if(ldr, tmem + acc * 256, a + 2 * ks, bw + 2 * ks, id, (kc | ks) ? 1u : 0u);
++            }
+             commit2_mc_if(ldr, bwe + 8 * s);
+             __syncwarp();
+           }
+@@ -1500,8 +1518,13 @@ static void launch_wfront_nd(const torch::Tensor& x, const torch::Tensor& lw, co
+   auto m2 = [&](const torch::Tensor& t, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw, const char* w) {
+     return make_map<2>(t.data_ptr(), {cols, rows}, {ld}, {b0, b1}, sw, w); };
+   CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "x", L, geo);
+-  CUtensorMap wm = m2(W, C, W.size(0), C, 64, (uint32_t)(NBR / 2), CU_TENSOR_MAP_SWIZZLE_128B, "W");
+-  CUtensorMap wb = m2(W, C, W.size(0), C, 64, 8, CU_TENSOR_MAP_SWIZZLE_128B, "Wb");
++  // KB > 1: W as [C / 64 K chunks][rows][64], a box = KB chunks of a block's rows
++  auto mw = [&](uint32_t br, const char* w) {
++    if (T::KB == 1) return m2(W, C, W.size(0), C, 64, br, CU_TENSOR_MAP_SWIZZLE_128B, w);
++    return make_map<3>(W.data_ptr(), {64, (uint64_t)W.size(0), (uint64_t)(C / 64)}, {(uint64_t)C, 64}, {64, br, (uint32_t)T::KB},
++                       CU_TENSOR_MAP_SWIZZLE_128B, w); };
++  CUtensorMap wm = mw((uint32_t)(NBR / 2), "W");
++  CUtensorMap wb = mw(8, "Wb");
+   CUtensorMap om[4];
+   for (int i = 0; i < 4; ++i) om[i] = m2(outs[i < nt ? i : 0], HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "qkvg");
+   const int ntiles = (int)(R / WBM);

@@ -1,0 +1,53 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
+index e6204336f..df215581c 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
+@@ -59,6 +59,11 @@ constexpr int OSTW = 64 * 32 * 2;              // per-warp output box: [64 ch][3
+ #ifndef K1W_NXS256
+ #define K1W_NXS256 4
+ #endif
++#ifdef K1W_ABL_NOW
++constexpr bool K1W_NOW = true;   // ablation (wrong data): no weight boxes loaded
++#else
++constexpr bool K1W_NOW = false;
++#endif
+ constexpr int NTHREADS = 512;
+ constexpr float LOG2E = 1.4426950408889634f;
+ constexpr uint32_t IDESC = idesc_bf16(128, 128);
+@@ -205,13 +210,13 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+     }
+     for (int q = 0; q < nw0; ++q) {
+       const int row = ((q / KB) % NCH) * 64, kb = q % KB, side = row < P / 2 ? 0 : 1, r = side ? row - P / 2 : row;
+-      mbar_expect_tx(&B.w_full[q], (FOLD && kb == KB - 1) ? KBB + CRB : KBB);
++      mbar_expect_tx(&B.w_full[q], K1W_NOW ? 0 : ((FOLD && kb == KB - 1) ? KBB + CRB : KBB));
+       if (stats_out & 16) {   // packed [2P, D] weights: chunk c's 64 gate | 64 projection rows at row 128 c, one [128][64] box
+-        tma_load_2d(sm + G_::O_W + q * KBB, &mw.m[0], &B.w_full[q], kb * 64, 2 * row, EVICT_LAST);
++        if (!K1W_NOW) tma_load_2d(sm + G_::O_W + q * KBB, &mw.m[0], &B.w_full[q], kb * 64, 2 * row, EVICT_LAST);
+         if (FOLD && kb == KB - 1) tma_load_2d(sm + G_::O_CR + G_::cslot(q) * CRB, &mw.m[1], &B.w_full[q], 0, 2 * row, EVICT_LAST);   // correction
+       } else {
+-        tma_load_2d(sm + G_::O_W + q * KBB, &mw.m[2 * side + 1], &B.w_full[q], kb * 64, r, EVICT_LAST);
+-        tma_load_2d(sm + G_::O_W + q * KBB + KBB / 2, &mw.m[2 * side], &B.w_full[q], kb * 64, r, EVICT_LAST);
++        if (!K1W_NOW) tma_load_2d(sm + G_::O_W + q * KBB, &mw.m[2 * side + 1], &B.w_full[q], kb * 64, r, EVICT_LAST);
++        if (!K1W_NOW) tma_load_2d(sm + G_::O_W + q * KBB + KBB / 2, &mw.m[2 * side], &B.w_full[q], kb * 64, r, EVICT_LAST);
+       }
+     }
+ #endif
+@@ -241,14 +246,14 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+           for (int kb = 0; kb < KB; ++kb) {
+             if (q >= nw0 && q % wnp == me) {
+               mbar_wait(&B.w_empty[s], ph ^ 1);
+-              mbar_expect_tx(&B.w_full[s], (FOLD && kb == KB - 1) ? KBB + CRB : KBB);
++              mbar_expect_tx(&B.w_full[s], K1W_NOW ? 0 : ((FOLD && kb == KB - 1) ? KBB + CRB : KBB));
+               const int row = c * 64, side = row < P / 2 ? 0 : 1, r = side ? row - P / 2 : row;
+               if (stats_out & 16) {   // packed weights: one box
+-                tma_load_2d(sm + G_::O_W + s * KBB, &mw.m[0], &B.w_full[s], kb * 64, 2 * row, EVICT_LAST);
++                if (!K1W_NOW) tma_load_2d(sm + G_::O_W + s * KBB, &mw.m[0], &B.w_full[s], kb * 64, 2 * row, EVICT_LAST);
+                 if (FOLD && kb == KB - 1) tma_load_2d(sm + G_::O_CR + G_::cslot(s) * CRB, &mw.m[1], &B.w_full[s], 0, 2 * row, EVICT_LAST);
+               } else {
+-                tma_load_2d(sm + G_::O_W + s * KBB, &mw.m[2 * side + 1], &B.w_full[s], kb * 64, r, EVICT_LAST);            // gate rows
+-                tma_load_2d(sm + G_::O_W + s * KBB + KBB / 2, &mw.m[2 * side], &B.w_full[s], kb * 64, r, EVICT_LAST);      // projection
++                if (!K1W_NOW) tma_load_2d(sm + G_::O_W + s * KBB, &mw.m[2 * side + 1], &B.w_full[s], kb * 64, r, EVICT_LAST);            // gate rows
++                if (!K1W_NOW) tma_load_2d(sm + G_::O_W + s * KBB + KBB / 2, &mw.m[2 * side], &B.w_full[s], kb * 64, r, EVICT_LAST);      // projection
+               }
+             }
+             ++q;

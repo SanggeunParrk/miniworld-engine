@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from miniworld_engine.modules.norm import b200 as _b200
 from miniworld_engine.modules.pair_embed import _cuda_arch, _first
 from miniworld_engine.modules.primitives import BackendModule, random_input, wide
 
@@ -76,7 +77,18 @@ class TokenPairInit(BackendModule):
     """
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 2,
+        "cuda:5090_sm120": 1,
+        "cuda:b200_sm100": 3,
+    }  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build
+    # cuda:b200_sm100 1 (2026-11-16): the B200 sm_100a kernels (kernels/token_pair_init/cuda/sm100: tpi_fwd / tpi_bwd, the one-launch tpi_fwd_w)
+    # cuda:b200_sm100 2 (2026-11-17, round 3: B200 >= 1.5x H100): tpi_fwd_w reads bf16 left / right as they are, issues every load one step
+    # ahead (the first item's before the table is staged) and adds three table rows per pair (the chain / entity / bond rows combined once
+    # per CTA); a training step on fp32 weights runs it as its forward and tpi_bwd_w (the ids as they are, one zero fill) as its backward
+    # cuda:b200_sm100 3 (2026-11-17, round 3 part 2): the backward bitwise repeatable and faster (tpi_bwd / tpi_bwd_w: streams with private class
+    # tables and row / column partial sums, no atomics, + tpi_bwd_red: the partials added in a fixed order); tpi_fwd_w stages the weights by bulk
+    # copies and adds TWO table rows per pair (merged residue x token rows), a branch-free item path where the grid has two warps per item
 
     backends = ("pytorch", "cuda", "triton")
 
@@ -140,7 +152,7 @@ class TokenPairInit(BackendModule):
     def _supports_cuda(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond) -> str | None:
         return _first(
             self._supports_kernels(left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond),
-            _cuda_arch(left.device) if left.device.type == "cuda" else None,
+            None if _b200(left) else _cuda_arch(left.device) if left.device.type == "cuda" else None,
             self._sm120_smem(left),
         )
 
@@ -183,7 +195,59 @@ class TokenPairInit(BackendModule):
     def _forward_cuda(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond):
         from miniworld_engine.kernels.token_pair_init.cuda.function import token_pair_init_cuda
 
+        if _b200(left):
+            return self._forward_b200(left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond)
         ids, tbl = self._ids_table(asym_id, residue_idx, token_idx, entity_id, sym_id, one_launch=True)
+        return token_pair_init_cuda(left.contiguous(), right.contiguous(), tbl, ids, self._bond8(bond), self.r_max, self.s_max)
+
+    def _forward_b200(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond):
+        """B200 (sm_100a, ``kernels/token_pair_init/cuda/sm100``): the forward in ONE launch (``tpi_fwd_w``: the table staged from the fp32
+        weights inside the kernel, the ids and bf16 / fp32 ``left`` / ``right`` read as they are); with a gradient its one-kernel backward on the
+        same tensors (``tpi_bwd_w``). Weights that are not contiguous fp32, or ids that are not contiguous int32 / int64: the ids / table by torch
+        ops (differentiable in the weights), then ``tpi_fwd`` / ``tpi_bwd``."""
+        from miniworld_engine.kernels.token_pair_init.cuda.function import token_pair_init_cuda, token_pair_init_fwd_w
+
+        ids5 = [t.reshape(-1) for t in (asym_id, residue_idx, token_idx, entity_id, sym_id)]
+        i_asym, i_res, i_tok, i_ent, i_sym = ids5
+        if (
+            not (torch.is_grad_enabled() and any(t.requires_grad for t in (left, right, self.w_rel, self.w_bond)))
+            and all(t.dtype == torch.float32 and t.is_contiguous() for t in (self.w_rel, self.w_bond))
+            and all(t.dtype in (torch.int32, torch.int64) and t.is_contiguous() for t in ids5)
+        ):
+            # both bf16 (the autocast call): the kernel widens them itself (exact; 2026-11-17: the two casts were ~8 of 24 us at L 128)
+            lr_dt = left.dtype if left.dtype == right.dtype and left.dtype == torch.bfloat16 else torch.float32
+            return token_pair_init_fwd_w(  # pyright: ignore[reportCallIssue]  -- a torch.library custom op (CustomOpDef is callable)
+                left.to(lr_dt).contiguous(),
+                right.to(lr_dt).contiguous(),
+                self.w_rel,
+                self.w_bond,
+                i_asym,
+                i_res,
+                i_tok,
+                i_ent,
+                i_sym,
+                self._bond8(bond),
+                self.r_max,
+                self.s_max,
+            )
+        if all(t.dtype == torch.float32 and t.is_contiguous() for t in (self.w_rel, self.w_bond)) and all(
+            t.dtype in (torch.int32, torch.int64) and t.is_contiguous() for t in ids5
+        ):
+            # with a gradient too: the one-launch forward and its one-kernel backward on the weights / ids as they are (TokenPairInitFunctionW)
+            from miniworld_engine.kernels.token_pair_init.cuda.function import TokenPairInitFunctionW
+
+            lr_dt = left.dtype if left.dtype == right.dtype and left.dtype == torch.bfloat16 else torch.float32
+            return TokenPairInitFunctionW.apply(
+                left.to(lr_dt).contiguous(),
+                right.to(lr_dt).contiguous(),
+                self.w_rel,
+                self.w_bond,
+                *ids5,
+                self._bond8(bond),
+                self.r_max,
+                self.s_max,
+            )
+        ids, tbl = self._ids_table(asym_id, residue_idx, token_idx, entity_id, sym_id, one_launch=False)
         return token_pair_init_cuda(left.contiguous(), right.contiguous(), tbl, ids, self._bond8(bond), self.r_max, self.s_max)
 
     def _forward_triton(self, left, right, asym_id, residue_idx, token_idx, entity_id, sym_id, bond):

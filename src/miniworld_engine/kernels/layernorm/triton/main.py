@@ -9,6 +9,7 @@ import triton.language as tl
 
 
 from miniworld_engine.kernels._shape_key import both_key, length_of, rows_of, pack
+from miniworld_engine.kernels._tf32 import tf32_grid_tile
 
 
 # The two shipped kernels (`layer_norm_fwd_fused`, `layer_norm_bwd_dx_fused`) tile the FEATURE
@@ -45,8 +46,10 @@ def layer_norm_fwd_fused(
     stride_r, stride_c,
     M, N: tl.constexpr, eps: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    shape_key, HAS_ROWSCALE: tl.constexpr, STORE_STATS: tl.constexpr = True,
+    shape_key, HAS_ROWSCALE: tl.constexpr, STORE_STATS: tl.constexpr = True, TF32_OUT: tl.constexpr = False,
 ):
+    # TF32_OUT (fp32 only; the B200 Transition Triton inference forward, 2026-11-17): y is stored on the TF32 grid (kernels/_tf32.py), the
+    # rounding its expand GEMM would otherwise make in a launch of its own. Off everywhere else: the same kernel as before.
     # STORE_STATS=False (inference: nothing will run a backward) drops the two (M,) fp32 stores. At
     # x[1, L, L, 128] bf16 that is 8 of every 520 bytes moved per row, 1.5% of a kernel that sits
     # on the HBM floor. Not part of the autotune key: it changes no tile choice.
@@ -80,6 +83,8 @@ def layer_norm_fwd_fused(
         if HAS_ROWSCALE:  # fold a per-row scale (e.g. AF pair-mask) into the LN epilogue — free
             rs = tl.load(Rowscale + rows, mask=row_mask, other=0.0).to(tl.float32)
             y = y * rs[:, None]
+        if TF32_OUT:
+            y = tf32_grid_tile(y)
         tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
     else:
         mean = tl.zeros([BLOCK_M1], dtype=tl.float32)
@@ -123,6 +128,8 @@ def layer_norm_fwd_fused(
             y = x_hat * w + b
             if HAS_ROWSCALE:
                 y = y * rs[:, None]
+            if TF32_OUT:
+                y = tf32_grid_tile(y)
             tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
 # fmt: on
 # fmt: off
@@ -252,7 +259,7 @@ def layer_norm_bwd_dx_fused(
 # fmt: on
 
 
-def _ln_fwd_fake(x_2d, weight, bias, rs, eps, has_rs, shape_key, store_stats=True):
+def _ln_fwd_fake(x_2d, weight, bias, rs, eps, has_rs, shape_key, store_stats=True, tf32_out=False):
     """``y`` like ``x_2d``, plus ``mean`` and ``rstd`` as (M,) -- fp32, not the bf16 of the
     activation: the kernel reduces and stores the row statistics in fp32 and the backward reloads
     them as such. Without ``store_stats`` (inference) the two are empty (0,) placeholders."""
@@ -274,6 +281,7 @@ def _ln_fwd(
     has_rs: bool,
     shape_key: int,
     store_stats: bool = True,
+    tf32_out: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The launch: ``y = LN(x) * rs`` -> ``(y, mean, rstd)``. ``x_2d`` arrives flat and contiguous.
 
@@ -295,7 +303,7 @@ def _ln_fwd(
         x_2d, y_2d, weight, bias, mean, rstd, rs if has_rs else rstd,
         x_2d.stride(0), x_2d.stride(1),
         M, N, eps,
-        shape_key=pack(shape_key, N=N), HAS_ROWSCALE=has_rs, STORE_STATS=store_stats,
+        shape_key=pack(shape_key, N=N), HAS_ROWSCALE=has_rs, STORE_STATS=store_stats, TF32_OUT=tf32_out,
     )
     # fmt: on
     return y_2d, mean, rstd

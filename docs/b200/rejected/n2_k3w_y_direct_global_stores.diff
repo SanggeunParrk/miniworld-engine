@@ -1,0 +1,65 @@
+--- /tmp/k3w_pre_yd.cu	2026-11-19 05:02:29.416646520 +0900
++++ /tmp/claude-1002/-home-psk6950-practice-MiniWorld/b70277b8-ff66-5282-bcae-5530314a7edb/scratchpad/n2/trimul_inproj/cuda/b200_sources/k3w.cu	2026-11-19 05:02:41.149270397 +0900
+@@ -51,6 +51,9 @@
+ #ifndef K3W_X2_512
+ #define K3W_X2_512 0
+ #endif
++#ifndef K3W_YD
++#define K3W_YD 0   // 1 (X2 modes): y written by the epilogue threads straight to global (no staging tile store); the residual tile is released when the math is done
++#endif
+ #ifndef K3W_SIG
+ #define K3W_SIG 2   // epilogue sigmoid: 0 ex2 + rcp (two MUFU ops), 2 tanh.approx (one MUFU op; 2026-11-17, k1w / k3g's form)
+ #endif
+@@ -139,6 +142,7 @@
+   constexpr int KBT = H / 64, KBX = D / 64, NKB = KBT + KBX, NTL = D / NTILE;
+   constexpr int XM = SAVE ? 0 : xm_of(D, H);   // item epilogue pipeline mode (0 off, 1 two residual tiles, 2 one)
+   constexpr bool X2 = XM != 0;
++  constexpr bool YD = X2 && K3W_YD;
+   constexpr int XB = XM == 1 ? 2 : 1;       // residual / output tiles
+   using LY = Lay<SAVE, OST, XM>;
+   constexpr int NST = LY::NST, O_ST = LY::O_ST, O_XR = LY::O_XR, O_PS = LY::O_PS, O_GS = LY::O_GS, O_VEC = LY::O_VEC, O_BAR = LY::O_BAR;
+@@ -215,10 +219,12 @@
+             int pm, pn;
+             S.get(i - XB, pm, pn);
+             mbar_wait(&B.y_ready[b], ((i - XB) / XB) & 1);
+-            tma_store_2d(&my, sm + O_XR + b * 2 * KBB, pn, pm);
+-            tma_store_2d(&my, sm + O_XR + b * 2 * KBB + KBB, pn + 64, pm);
+-            bulk_commit();
+-            bulk_wait_read<0>();
++            if (!YD) {
++              tma_store_2d(&my, sm + O_XR + b * 2 * KBB, pn, pm);
++              tma_store_2d(&my, sm + O_XR + b * 2 * KBB + KBB, pn + 64, pm);
++              bulk_commit();
++              bulk_wait_read<0>();
++            }
+           }
+           mbar_expect_tx(&B.xr2_full[b], 2 * KBB);
+           tma_load_2d(sm + O_XR + b * 2 * KBB, &mx, &B.xr2_full[b], n0, m0, EVICT_FIRST);
+@@ -228,12 +234,14 @@
+           int pm, pn;
+           S.get(k, pm, pn);
+           const int b = XB == 2 ? (k & 1) : 0;
+-          mbar_wait(&B.y_ready[b], (k / XB) & 1);
+-          tma_store_2d(&my, sm + O_XR + b * 2 * KBB, pn, pm);
+-          tma_store_2d(&my, sm + O_XR + b * 2 * KBB + KBB, pn + 64, pm);
+-          bulk_commit();
++          if (!YD) {
++            mbar_wait(&B.y_ready[b], (k / XB) & 1);
++            tma_store_2d(&my, sm + O_XR + b * 2 * KBB, pn, pm);
++            tma_store_2d(&my, sm + O_XR + b * 2 * KBB + KBB, pn + 64, pm);
++            bulk_commit();
++          }
+         }
+-        bulk_wait<0>();
++        if (!YD) bulk_wait<0>();
+       } else
+       for (int i = 0; S.get(i, m0, n0); ++i) {
+         if (i >= 1) mbar_wait(&B.xr_empty, (i - 1) & 1);
+@@ -499,6 +507,7 @@
+             go[k] = pack_bf16(g.x, g.y);
+           }
+           if (GR) *reinterpret_cast<uint4*>(yg + (size_t)tok * D + n0 + cl) = make_uint4(o[0], o[1], o[2], o[3]);
++          else if (YD) *reinterpret_cast<uint4*>(yg + (size_t)tok * D + n0 + cl) = make_uint4(o[0], o[1], o[2], o[3]);
+           else sts128(addr, o[0], o[1], o[2], o[3]);
+           if (et == 0 && i < 2 && cq == c0 / 32 && q2 == 0) K3TL(20 + i)
+           if (SAVE) {

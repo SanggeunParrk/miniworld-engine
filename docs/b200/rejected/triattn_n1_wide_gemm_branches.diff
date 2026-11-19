@@ -1,0 +1,59 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n1-triattn/b200_triattn.py.prewide	2026-11-18 16:22:41.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n1-triattn/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py	2026-11-18 16:22:41.000000000 +0000
+@@ -605,6 +605,9 @@
+ #: the backward's set-up passes (dy o drop, the head-dim-32 core's bias^T, its zeroed dbias accumulator) in one launch (tri_bwd_pre)
+ #: instead of three (B200 2026-11-17).  MINIWORLD_TRIATTN_B200_BWD_PRE=0: the separate launches.
+ BWD_PRE = os.environ.get("MINIWORLD_TRIATTN_B200_BWD_PRE", "1") != "0"
++#: (N1) the wide backward's weight-gradient GEMMs (dWo, the bias column sum, dWo2) as branches of the captured graph beside the G GEMM / tri_wfinish.
++#: MINIWORLD_TRIATTN_B200_WIDE_SIDE=0 turns it off.
++WIDE_SIDE = os.environ.get("MINIWORLD_TRIATTN_B200_WIDE_SIDE", "1") != "0"
+ 
+ 
+ @functools.lru_cache(maxsize=1)
+@@ -901,11 +904,28 @@
+     # parameter gradients: G = D^T [xhat | 1] (one GEMM, K = B Lp^2: the pad rows of D are zero), then dW / dgamma / dbeta / dWb by the
+     # d_pair 128 algebra (y = gamma o xhat + beta feeds every projection) and dWo without the padded channels, in tri_wfinish.
+     # dWo = dy_s^T u over the caller's B L^2 rows (dy_s and u in the caller's layout and length)
++    side = _side_mod() if WIDE_SIDE else None
++    s_dwo = s_bias = None
+     if TALLK and R <= TALLK_MAX_ROWS and C <= 256:
+         G, dwo = _tallk().tallk(Dall, xh, dys, u)
+     else:
+-        G = _mm32(Dall.t(), xh)
+-        dwo = _mm32(dys.t(), u)
++        s_dwo = side.fork(x.device) if side is not None else None
++        if s_dwo is not None:  # (N1) the dWo GEMM beside the G GEMM: independent, both split-K cuBLAS calls that leave SMs idle
++            with _on(side, s_dwo):
++                dwo = _mm32(dys.t(), u)
++            G = _mm32(Dall.t(), xh)
++            side.join(x.device, s_dwo)
++        else:
++            G = _mm32(Dall.t(), xh)
++            dwo = _mm32(dys.t(), u)
++    # the bias / second out-projection GEMMs read only dys, xh, u2: a branch beside the G GEMM and tri_wfinish, joined where their results are used
++    ob_col = dwo2_raw = None
++    s_bias = side.fork(x.device) if (side is not None and (ob is not None or out_mode == 2)) else None
++    with _on(side, s_bias):
++        if ob is not None:
++            ob_col = _mm32(dys.t(), xh[: dys.shape[0], C : C + 1]).view(-1)  # (xh's ones column: any B L^2 of its rows)
++        if out_mode == 2:
++            dwo2_raw = _mm32(dys.t(), u2)
+     dt = dtypes
+     fp32 = dt[2] == torch.float32
+     dw, dwb, dwo, dgb = w.tri_wfinish(G, wcat, lnw, lnb, dwo, n_head, head_dim, fp32)
+@@ -919,11 +939,13 @@
+     )
+     if gb is not None:
+         dbias[: n_head * head_dim] = G[3 * HDp : 4 * HDp, C].view(n_head, S)[:, :head_dim].reshape(-1)
++    if s_bias is not None:
++        side.join(x.device, s_bias)
+     if ob is not None:
+-        dbias[n_head * head_dim :] = _mm32(dys.t(), xh[: dys.shape[0], C : C + 1]).view(-1)  # (xh's ones column: any B L^2 of its rows)
++        dbias[n_head * head_dim :] = ob_col
+     dwo2 = x.new_empty(0)
+     if out_mode == 2:  # dWo2 = dy_s^T u2 (the padded channels dropped), in Wo's dtype
+-        dwo2 = _mm32(dys.t(), u2).view(C, n_head, S)[:, :, :head_dim].reshape(C, n_head * head_dim).to(dwo.dtype)
++        dwo2 = dwo2_raw.view(C, n_head, S)[:, :, :head_dim].reshape(C, n_head * head_dim).to(dwo.dtype)
+     return dpair.view(B, L, L, C), dgb, dw, dwb, dwo, dbias, dwo2
+ 
+ 

@@ -1,0 +1,472 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
+index 3c229eea1..b97baec1b 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
+@@ -95,6 +95,9 @@ def _specs(f32: bool) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+         specs += [(f"fusedh{d}", "generic/tg_fused_h16.cu", (f"-DD={d}",)) for d in FUSED_H16_WIDTHS]
+         specs += [(f"fusedh{d}s", "generic/tg_fused_h16.cu", (f"-DD={d}", "-DSAVE_BUILD=1")) for d in FUSED_H16_WIDTHS]  # training
+         specs += [("fusedh128e", "generic/tg_fused_h16.cu", ("-DD=128", "-DEP3=1"))]  # (S90) the epilogue split over both warp groups
++        if X3D_F32:  # (S90 part 12) inference builds with the x tile as one 3-D box
++            specs += [(f"fusedh{d}x", "generic/tg_fused_h16.cu", (f"-DD={d}", "-DX3D=1")) for d in FUSED_H16_WIDTHS]
++            specs += [("fusedh128ex", "generic/tg_fused_h16.cu", ("-DD=128", "-DEP3=1", "-DX3D=1"))]
+     return tuple(specs)
+ 
+ 
+@@ -305,6 +308,8 @@ H16_BOUND_L2 = True
+ #: (S90) tg_fused_h16 at D 128 with the y epilogue split over the SwiGLU and the LayerNorm warps and no staging (EP3): from this many rows (fine us, routed -> EP3: [98 304, 128] n 2 45.0 -> 43.6,
+ #: [262 144] 103.1 -> 91.2, [589 824] 223.2 -> 196.5, [1 048 576] 399.6 -> 353.3; below it level or slower: [65 536] 32.3 -> 32.5, [16 384] 11.7 -> 12.6)
+ EP3_F32 = True
++#: (S90 part 12) tg_fused_h16 inference: the x tile as ONE 3-D TMA box of XKB x 16 KB (cubins fusedh{d}x, fusedh128ex)
++X3D_F32 = True
+ EP3_MIN_ROWS = 98304
+ 
+ 
+@@ -376,7 +381,7 @@ def _fwd_h16_launch(
+     v = lambda w: w.view(torch.bfloat16)  # noqa: E731
+     ep3 = EP3_F32 and d == 128 and m % 128 == 0 and m >= EP3_MIN_ROWS
+     k.ext.launch_kernel(
+-        f"generic_f32_fusedh{d}" + ("e" if ep3 else ""),
++        f"generic_f32_fusedh{d}" + ("e" if ep3 else "") + ("x" if X3D_F32 else ""),
+         "tg_fused_h16_sm100",
+         max(1, min(k.nsm, -(-m // 128))),
+         448,
+@@ -398,6 +403,7 @@ def _fwd_h16_launch(
+             out,
+             out,
+             0,
++            *((t(x, d, m, 32, 128, -1, 0, d // 32),) if X3D_F32 else ()),
+         ],
+     )
+     return out
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index e36c5f23f..17bea9ede 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -239,6 +239,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             ("fwd", "widths/tfwd_d256.cu", hid),
+             *((("fwdi", "widths/tfwd_d256.cu", (*hid, *FWD_INFER_FLAGS[(d, n)])),) if (d, n) in FWD_INFER_FLAGS else ()),
+             *((("fwdi1", "widths/tfwd_d256.cu", (*hid, *(f for f in FWD_INFER_FLAGS[(d, n)] if f != "-DX2=1"))),) if (d, n) in FWD_X2 else ()),
++            *((("fwdi3", "widths/tfwd_d256.cu", (*hid, *FWD_INFER_FLAGS[(d, n)], *D256_3D)), ("fwdi13", "widths/tfwd_d256.cu", (*hid, *(f for f in FWD_INFER_FLAGS[(d, n)] if f != "-DX2=1"), *D256_3D))) if (d, n) in FWD_X2 and D256_3D else ()),
+             ("gate", "widths/tgate_w.cu", ("-DDIM=256", *hid)),
+             dxn,
+             lnb,
+@@ -247,7 +248,8 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+     fwd = (
+         (
+             ("fwd", "widths/tfwd_d384.cu", hid),
+-            ("fwdi", "widths/tfwd_d384.cu", (*hid, "-DFOLD=1")),
++            ("fwdi", "widths/tfwd_d384.cu", (*hid, "-DFOLD=1", *X3D_FLAGS, *W4D_FLAGS)),
++            ("fwdx", "widths/tfwd_d384.cu", (*hid, *X3D_FLAGS)),
+             ("stat", "widths/tstat_w.cu", ("-DDIM=384", "-DLPR=16")),
+             ("bwd", "widths/tbwd_d384.cu", hid),
+         )
+@@ -428,6 +430,14 @@ SQ_PARTS = True   # n 2 only: row 33 master -2 to -2.5 % (L 256 190.5 -> 186.2,
+ SQ_FLAGS: tuple[str, ...] = ()
+ #: (S90) the LayerNorm folded into the fused D 384 inference kernel (tfwd_d384.cu -DFOLD, K16 correction MMA)
+ FOLD_D384 = True
++#: (S90 part 12) the D 384 inference x tile as ONE 96 KB 3-D TMA box (tfwd_d384.cu -DX3D=1, the kb_box map as the last argument) instead of 12 boxes of 8 KB
++X3D_D384 = True
++#: (S90 part 12) D 256 inference: x tile as one 64 KB 3-D box, each weight chunk of a CTA as one 32 KB 3-D box (tfwd_d256.cu -DX3D=1 -DW3D=1; cubins fwdi3 / fwdi13)
++D256_3D: tuple[str, ...] = ("-DX3D=1", "-DW3D=1")
++X3D_FLAGS: tuple[str, ...] = ("-DX3D=1",) if X3D_D384 else ()
++#: (S90 part 12) the fold build also takes the expand weights as one 24 KB 4-D box a stage (tfwd_d384.cu -DW4D=1; Wp is stacked [Wa; Wb])
++W4D_D384 = True
++W4D_FLAGS: tuple[str, ...] = ("-DW4D=1",) if W4D_D384 else ()
+ #: from this many rows (in-process A/B, graph medians fold / unfolded, [M, 384]: n 2 16 384 rows 1.133, 65 536 0.967, 262 144 0.948, 589 824 0.947, 1 048 576 0.920, 2 359 296 0.927; n 4 16 384 1.141, 65 536 1.000,
+ #: 262 144 0.908, 589 824 0.938, 1 048 576 0.952, 2 359 296 0.986): below it the prep launch (4.5 us) costs more than the shorter tile saves
+ FOLD_D384_MIN_ROWS = 65536
+@@ -602,14 +612,19 @@ def _fwd_launch(
+         x2 = x2_cell and not x2_off
+         xn = torch.empty_like(x) if save else x.new_empty((1, d))
+         mout = k.rows(out)
++        cubin = "fwd" if (save and (not x2_cell or x2_off)) or (d, k.n) not in FWD_INFER_FLAGS else ("fwdi1" if x2_off else "fwdi")
++        d3 = d == 256 and not save and cubin != "fwd" and bool(D256_3D) and (d, k.n) in FWD_X2
++        if d3:
++            cubin += "3" if cubin == "fwdi" else "3"
++        kb = d // 64
+         k.run(
+-            "fwd" if (save and (not x2_cell or x2_off)) or (d, k.n) not in FWD_INFER_FLAGS else ("fwdi1" if x2_off else "fwdi"),
++            cubin,
+             _FUSED_FWD[d],
+             k.grid,
+             (
+                 k.rows(x),
+-                k.tmap(wa, d, h),
+-                k.tmap(wb, d, h),
++                k.ext.tmap(wa, d, h, 64, 64, -1, 0, kb) if d3 else k.tmap(wa, d, h),
++                k.ext.tmap(wb, d, h, 64, 64, -1, 0, kb) if d3 else k.tmap(wb, d, h),
+                 k.tmap(ws, h, d, 64, d // 2),
+                 mout,
+                 k.rows(xn) if save else mout,
+@@ -621,6 +636,7 @@ def _fwd_launch(
+                 float(eps),
+                 int(save),
+                 *((x, out) if d == 256 else ()),
++                *((k.ext.tmap(x, d, m, 64, 128, -1, 0, kb),) if d3 else ()),
+             ),
+             pdl=save and d == 128 and BWD_PDL,  # (training part 4) tr_fwd_sm100.cu waits (griddepcontrol.wait) at its entry
+         )
+@@ -641,7 +657,7 @@ def _fwd_launch(
+         else:
+             wa_, wb_ = wa, wb
+         k.run(
+-            "fwdi" if fold else "fwd",
++            ("fwdi" if fold else ("fwdx" if X3D_D384 and not save else "fwd")),
+             "transition_fwd_d384_sm100",
+             k.grid,
+             (
+@@ -662,6 +678,8 @@ def _fwd_launch(
+                 float(eps),
+                 int(save),
+                 *((aug,) if fold else ()),
++                *((k.ext.tmap(x, d, m, 64, 128, -1, 0, d // 64),) if X3D_D384 and not save else ()),
++                *((k.ext.tmap(wp, d, h, 64, 32, -1, 0, 3, 1),) if fold and W4D_D384 else ()),
+             ),
+         )
+         return out, xn, rstd, c1, hid, a, b
+@@ -849,8 +867,8 @@ def _bwd_launch(
+                 k.rows(dy),
+                 k.rows(x),
+                 k.tmap(wst, d, h, 64, 32),
+-                k.tmap(wa, d, h),
+-                k.tmap(wb, d, h),
++                k.ext.tmap(wa, d, h, 64, 64, -1, 0, kb) if d3 else k.tmap(wa, d, h),
++                k.ext.tmap(wb, d, h, 64, 64, -1, 0, kb) if d3 else k.tmap(wb, d, h),
+                 k.tmap(a, h, m),
+                 k.tmap(b, h, m),
+                 k.rows(dx),
+@@ -885,8 +903,8 @@ def _bwd_launch(
+                 k.rows(dy),
+                 k.rows(xn),
+                 k.tmap(wst, d, h, 64, 32),
+-                k.tmap(wa, d, h),
+-                k.tmap(wb, d, h),
++                k.ext.tmap(wa, d, h, 64, 64, -1, 0, kb) if d3 else k.tmap(wa, d, h),
++                k.ext.tmap(wb, d, h, 64, 64, -1, 0, kb) if d3 else k.tmap(wb, d, h),
+                 k.tmap(hid, h, m),
+                 mdab,
+                 tiles,
+@@ -1000,8 +1018,8 @@ def _bwd_sx_launch(
+                 b,
+                 dab,
+                 k.tmap(dab, 2 * h, m, 64, 128),
+-                k.tmap(wa, d, h),
+-                k.tmap(wb, d, h),
++                k.ext.tmap(wa, d, h, 64, 64, -1, 0, kb) if d3 else k.tmap(wa, d, h),
++                k.ext.tmap(wb, d, h, 64, 64, -1, 0, kb) if d3 else k.tmap(wb, d, h),
+                 x,
+                 dy,
+                 rstd,
+@@ -1032,8 +1050,8 @@ def _bwd_sx_launch(
+             tiles * (d // 64) * ks,
+             (
+                 k.tmap(dab, 2 * h, m, 64, 128),
+-                k.tmap(wa, d, h),
+-                k.tmap(wb, d, h),
++                k.ext.tmap(wa, d, h, 64, 64, -1, 0, kb) if d3 else k.tmap(wa, d, h),
++                k.ext.tmap(wb, d, h, 64, 64, -1, 0, kb) if d3 else k.tmap(wb, d, h),
+                 x,
+                 dy,
+                 rstd,
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
+index 54e335c10..632d30d41 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
+@@ -55,6 +55,10 @@ using namespace s100;
+ #ifndef MLANE
+ #define MLANE (!SAVE_BUILD)
+ #endif
++// -DX3D=1 (S90 part 12): the x tile (XKB 16 KB boxes, one lane each) as ONE 3-D TMA box of XKB x 16 KB (extra last argument: the kb_box map of x)
++#ifndef X3D
++#define X3D 0
++#endif
+ // -DPROBE=1 (analysis builds only): per-CTA %globaltimer stamps into MEANO (as uint64 [grid][NSTAMP]); tile 0 phases + per-chunk events
+ #ifdef PROBE
+ constexpr int NSTAMP = 96;
+@@ -63,6 +67,12 @@ constexpr int NSTAMP = 96;
+ #else
+ #define STAMP(k) do { } while (0)
+ #endif
++#if X3D
++DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++#endif
+ constexpr int BN = 64;                           // hidden units per chunk (one 128-byte K-block of fp16 h)
+ constexpr int NSW = XG ? 2 : 3, NSS = 2, NH = 2; // stages: expand weight chunks, squeeze weight chunks, h buffers
+ constexpr int NAB = XG ? 1 : 2, NX = XG ? 1 : 2; // [a | b] accumulators, xn buffers (tensor memory)
+@@ -216,7 +226,11 @@ extern "C" __global__ void __launch_bounds__(64 + 32 * (NEPI + NLN), 1)
+ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant__ CUtensorMap mWa, const __grid_constant__ CUtensorMap mWb, const __grid_constant__ CUtensorMap mWs,
+                    const __grid_constant__ CUtensorMap mY, const float* __restrict__ X, const float* __restrict__ G, const float* __restrict__ Bt,
+                    const float* __restrict__ SC, float eps, int M, int HID,
+-                   float* __restrict__ XN, float* __restrict__ MEANO, float* __restrict__ RSTDO, int SAVE) {   // SAVE: the training saves
++                   float* __restrict__ XN, float* __restrict__ MEANO, float* __restrict__ RSTDO, int SAVE
++#if X3D
++                   , const __grid_constant__ CUtensorMap mX3
++#endif
++                   ) {   // SAVE: the training saves
+   extern __shared__ __align__(1024) uint8_t sm[];
+   if (threadIdx.x == 0) STAMP(1);
+   const int ntiles = (M + 127) / 128;
+@@ -460,7 +474,11 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+     if (!XG && xl && (int)blockIdx.x < tiles) {
+       if (lane == 0) mbar_expect_tx(&B.xsfull, XS_BYTES);
+       __syncwarp((1u << XKB) - 1u);
++#if X3D
++      if (lane == 0) tma_load_3d(xs, &mX3, &B.xsfull, 0, blockIdx.x * 128, 0);
++#else
+       tma_load_2d(xs + lane * 16384, &mX, &B.xsfull, lane * 32, blockIdx.x * 128);
++#endif
+     }
+ #else
+     if (!XG && issuer && (int)blockIdx.x < tiles) {
+@@ -472,7 +490,11 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+     if (warp == 2 + NEPI && lane < XKB && (int)blockIdx.x < tiles) {   // the first x tile: XKB 16 KB boxes, one lane each
+       if (lane == 0) mbar_expect_tx(&B.xsfull, 128 * D * 4);
+       __syncwarp((1u << XKB) - 1u);
++#if X3D
++      if (lane == 0) tma_load_3d(su + O_X0, &mX3, &B.xsfull, 0, blockIdx.x * 128, 0);
++#else
+       tma_load_2d(su + O_X0 + lane * 16384, &mX, &B.xsfull, lane * 32, blockIdx.x * 128);
++#endif
+     }
+ #endif
+     int tc = 0;
+@@ -618,7 +640,11 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+         fence_proxy_async();
+         if (lane == 0) mbar_expect_tx(&B.xsfull, XS_BYTES);
+         __syncwarp((1u << XKB) - 1u);
++#if X3D
++        if (lane == 0) tma_load_3d(xs, &mX3, &B.xsfull, 0, (t + gridDim.x) * 128, 0);
++#else
+         tma_load_2d(xs + lane * 16384, &mX, &B.xsfull, lane * 32, (t + gridDim.x) * 128);
++#endif
+       }
+ #else
+       if (!XG && issuer && t + (int)gridDim.x < tiles) {
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/transition_sm100.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/transition_sm100.cu
+index b37882fb6..c5b77e1a0 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/transition_sm100.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/transition_sm100.cu
+@@ -404,7 +404,7 @@ void load_cubin(const std::string& name, const std::string& path) {
+ // kb_box > 1: a 3-D map (box_inner elements, outer rows, inner / box_inner K-blocks; K-block stride box_inner elements) whose box
+ // (box_inner x box_outer x kb_box) lands as kb_box consecutive [box_outer rows][box_inner] K-block slabs: one TMA for several K-blocks
+ TMap tmap(const torch::Tensor& t, int64_t inner, int64_t outer, int64_t box_inner, int64_t box_outer, int64_t row_stride,
+-          int64_t swizzle, int64_t kb_box) {
++          int64_t swizzle, int64_t kb_box, int64_t ab) {
+   static std::map<std::array<uint64_t, 6>, CUtensorMap> cache;
+   static std::mutex lock;
+   if (row_stride < 0) row_stride = inner;
+@@ -413,13 +413,14 @@ TMap tmap(const torch::Tensor& t, int64_t inner, int64_t outer, int64_t box_inne
+   const int64_t esz = f32 ? 4 : 2;
+   expect(t.is_cuda() && (f32 || t.scalar_type() == torch::kBFloat16) && row_stride >= inner && (row_stride * esz) % 16 == 0,
+          "tmap: cuda bf16 or fp32 tensor, row stride >= inner and a multiple of 16 bytes");
+-  expect(row_stride == inner ? (t.is_contiguous() && t.numel() == inner * outer)
++  expect(ab ? (t.is_contiguous() && t.numel() == 2 * inner * outer && row_stride == inner && kb_box >= 1)
++            : row_stride == inner ? (t.is_contiguous() && t.numel() == inner * outer)
+                              : (t.dim() == 2 && t.size(0) == outer && t.size(1) == inner && t.stride(0) == row_stride && t.stride(1) == 1),
+          "tmap: a contiguous tensor of inner x outer elements, or a [outer, inner] view with that row stride");
+   const std::array<uint64_t, 6> key{reinterpret_cast<uint64_t>(t.data_ptr()), static_cast<uint64_t>(inner), static_cast<uint64_t>(outer),
+                                     static_cast<uint64_t>(box_inner), static_cast<uint64_t>(box_outer),
+                                     static_cast<uint64_t>(row_stride) | (f32 ? (1ull << 62) : 0ull) | (swizzle ? (1ull << 61) : 0ull) |
+-                                        (static_cast<uint64_t>(kb_box > 1 ? kb_box : 0) << 48)};
++                                        (static_cast<uint64_t>(kb_box > 1 ? kb_box : 0) << 48) | (ab ? (1ull << 60) : 0ull)};
+   std::lock_guard<std::mutex> guard(lock);
+   auto it = cache.find(key);
+   if (it == cache.end()) {
+@@ -433,10 +434,15 @@ TMap tmap(const torch::Tensor& t, int64_t inner, int64_t outer, int64_t box_inne
+     const cuuint64_t strides3[2] = {static_cast<cuuint64_t>(row_stride * esz), static_cast<cuuint64_t>(box_inner * esz)};
+     const cuuint32_t box3[3] = {static_cast<cuuint32_t>(box_inner), static_cast<cuuint32_t>(box_outer), static_cast<cuuint32_t>(kb_box)};
+     const cuuint32_t elem3[3] = {1, 1, 1};
+-    const bool k3 = kb_box > 1;
++    const bool k3 = kb_box > 1 && !ab;
++    // ab: t = [Wa; Wb] stacked [2 outer][inner]; a 4-D map (K-block element, row, a / b, K-block): the box (box_inner x box_outer x 2 x kb_box) lands as kb_box slabs of [a rows | b rows]
++    const cuuint64_t dims4[4] = {static_cast<cuuint64_t>(box_inner), static_cast<cuuint64_t>(outer), 2, static_cast<cuuint64_t>(inner / box_inner)};
++    const cuuint64_t strides4[3] = {static_cast<cuuint64_t>(inner * esz), static_cast<cuuint64_t>(outer * inner * esz), static_cast<cuuint64_t>(box_inner * esz)};
++    const cuuint32_t box4[4] = {static_cast<cuuint32_t>(box_inner), static_cast<cuuint32_t>(box_outer), 2, static_cast<cuuint32_t>(kb_box)};
++    const cuuint32_t elem4[4] = {1, 1, 1, 1};
+     expect(!k3 || inner % box_inner == 0, "tmap: kb_box needs whole K-blocks");
+-    check(drv().encode(&map, f32 ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32 : CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, k3 ? 3 : 2, t.data_ptr(), k3 ? dims3 : dims,
+-                       k3 ? strides3 : strides, k3 ? box3 : box, k3 ? elem3 : elem, CU_TENSOR_MAP_INTERLEAVE_NONE, swizzle ? CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B : CU_TENSOR_MAP_SWIZZLE_128B,
++    check(drv().encode(&map, f32 ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32 : CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, ab ? 4 : k3 ? 3 : 2, t.data_ptr(), ab ? dims4 : k3 ? dims3 : dims,
++                       ab ? strides4 : k3 ? strides3 : strides, ab ? box4 : k3 ? box3 : box, ab ? elem4 : k3 ? elem3 : elem, CU_TENSOR_MAP_INTERLEAVE_NONE, swizzle ? CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B : CU_TENSOR_MAP_SWIZZLE_128B,
+                        CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
+           "cuTensorMapEncodeTiled");
+@@ -516,7 +522,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("load_cubin", &load_cubin, "register a named cubin and load it on the current device");
+   m.def("tmap", &tmap, "2-D bf16 128-B-swizzled tensor map (inner, outer, box_inner, box_outer, row_stride = -1: contiguous)",
+         py::arg("t"), py::arg("inner"), py::arg("outer"), py::arg("box_inner"), py::arg("box_outer"), py::arg("row_stride") = -1,
+-        py::arg("swizzle") = 0, py::arg("kb_box") = 1);  // swizzle 1: 128 B with 32-B atoms (the MN-major tf32 operand layout, tg_dw.cu)
++        py::arg("swizzle") = 0, py::arg("kb_box") = 1, py::arg("ab") = 0);  // swizzle 1: 128 B with 32-B atoms (the MN-major tf32 operand layout, tg_dw.cu)
+   m.def("launch_kernel", &launch_kernel, "launch a kernel of a loaded cubin on the current stream (pdl: programmatic dependent launch)",
+         py::arg("name"), py::arg("kernel"), py::arg("grid"), py::arg("block"), py::arg("cluster"), py::arg("args"), py::arg("pdl") = false);
+   m.def("load", &load, "set the forward / backward cubins (loaded lazily per device)");
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d256.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d256.cu
+index 6dce05b1a..68716940a 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d256.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d256.cu
+@@ -88,13 +88,33 @@ struct Bars {
+   uint32_t tmem;
+ };
+ 
++// X3D / W3D (S90 part 12, XPAR builds): the x tile of a CTA (96 -> 64 KB) as ONE 3-D TMA box (K-block, row, element: lands as NKB [128][64] slabs; the kb_box map is the LAST argument) and each
++// weight chunk of a CTA (4 boxes of 8 KB -> one box of 32 KB; mwa / mwb are then kb_box maps) instead of the per-K-block boxes
++#ifndef X3D
++#define X3D 0
++#endif
++#ifndef W3D
++#define W3D 0
++#endif
++DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++DEVI void tma_load_3d_2sm(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar) & 0xFEFFFFFFu), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
+ extern "C" __global__ void __launch_bounds__(512, 1)
+ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mwa,
+                           const __grid_constant__ CUtensorMap mwb, const __grid_constant__ CUtensorMap mws,
+                           const __grid_constant__ CUtensorMap mout, const __grid_constant__ CUtensorMap mxn,
+                           const float* __restrict__ gamma, const float* __restrict__ beta, float* __restrict__ rstd,
+                           float* __restrict__ c1, int tiles, float eps, int save,
+-                          const uint8_t* __restrict__ xg, uint8_t* __restrict__ yg) {   // xg / yg: x and y for the X2 residual (S90 part 7: rstd / c1 are the real statistics)
++                          const uint8_t* __restrict__ xg, uint8_t* __restrict__ yg
++#if X3D
++                          , const __grid_constant__ CUtensorMap mx3
++#endif
++                          ) {   // xg / yg: x and y for the X2 residual (S90 part 7: rstd / c1 are the real statistics)
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+@@ -126,18 +146,27 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+ #if X2
+     if (lane == 0) { mbar_expect_tx(&B.xl_full[0], TILE); if (n_local > 1) mbar_expect_tx(&B.xl_full[1], TILE); }
+     __syncwarp();
++#if X3D
++    if (lane < 2 && (lane == 0 || n_local > 1)) tma_load_3d(su + O_XN + lane * TILE, &mx3, &B.xl_full[lane], 0, tile_of(lane) * ROWS, 0);
++#else
+     if (lane < 4 * NKB && (lane < 2 * NKB || n_local > 1)) {
+       const int l = lane & (2 * NKB - 1), t = lane >= 2 * NKB;
+       tma_load_2d(su + O_XN + t * TILE + (l >> 1) * KBT + (l & 1) * 8192, &mx, &B.xl_full[t], (l >> 1) * 64, tile_of(t) * ROWS + (l & 1) * 64);
+     }
++#endif
+ #else
+     if (lane == 0) { mbar_expect_tx(&B.xl_full[0], TILE); mbar_expect_tx(&B.x_full, TILE); }
+     __syncwarp();
++#if X3D
++    if (lane == 0) tma_load_3d(su + O_XN, &mx3, &B.xl_full[0], 0, tile_of(0) * ROWS, 0);
++    else if (lane == 1) tma_load_3d(su + O_X, &mx3, &B.x_full, 0, tile_of(0) * ROWS, 0);
++#else
+     if (lane < 4 * NKB) {
+       const int l = lane & (2 * NKB - 1);
+       tma_load_2d(su + (lane < 2 * NKB ? O_XN : O_X) + (l >> 1) * KBT + (l & 1) * 8192, &mx, lane < 2 * NKB ? &B.xl_full[0] : &B.x_full,
+                   (l >> 1) * 64, tile_of(0) * ROWS + (l & 1) * 64);
+     }
++#endif
+ #endif
+   }
+   cluster_sync_relaxed();                                      // the barriers were published by fence_barrier_init
+@@ -149,7 +178,11 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+ #if XPAR
+     if (lane == 0) mbar_expect_tx(bar, TILE);
+     __syncwarp();
++#if X3D
++    if (lane == 0) tma_load_3d(dst, &mx3, bar, 0, row, 0);
++#else
+     if (lane < 2 * NKB) tma_load_2d(dst + (lane >> 1) * KBT + (lane & 1) * 8192, &mx, bar, (lane >> 1) * 64, row + (lane & 1) * 64);
++#endif
+     return;
+ #endif
+     mbar_expect_tx(bar, TILE);
+@@ -198,7 +231,11 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+         da = __shfl_sync(0xffffffffu, da, 0); ds = __shfl_sync(0xffffffffu, ds, 0);
+         if (da) {
+           const int s = ca % NW, j = ca & (NCH - 1);
++#if W3D
++          if (lane == 0) tma_load_3d_2sm(su + O_WAB + s * WAB_SLOT, mab, &B.wab_full[s], 0, j * HS, 0);
++#else
+           if (lane < NKB) tma_load_2d_2sm(su + O_WAB + s * WAB_SLOT + lane * 8192, mab, &B.wab_full[s], lane * 64, j * HS);
++#endif
+           ++ca;
+         }
+         if (ds) {
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
+index 01c963634..56b5e423f 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
+@@ -25,6 +25,12 @@ using namespace s100;
+ //   a_n = rstd (x . Wp_n - mean u_n + q v_n),
+ // the last two terms rank-1: ONE extra K16 MMA per chunk ([-mean_hi -mean_hi -mean_lo q_hi q_hi q_lo 0 0] x [u_hi u_lo u_hi v_hi v_lo v_hi 0 0], bf16 hi / lo pairs, ~16 bits each) accumulated into [a | b]; the
+ // statistics (two passes over the x tile in shared memory, SwiGLU warps) fill the A column block while the first chunk's main K-blocks run, and the SwiGLU epilogue is a = rstd acc. No-swizzle K-major operands.
++#ifndef X3D
++#define X3D 0                                                   // (S90 part 12) the x tile as ONE 3-D TMA box of 96 KB (K-block, row, element) instead of 12 boxes of 8 KB; extra last argument: the kb_box map
++#endif
++#ifndef W4D
++#define W4D 0                                                   // (S90 part 12, FOLD only: Wp = [Wa; Wb] stacked) the expand weights of a stage as ONE 4-D box of 24 KB (K-block element, row, a / b, K-block) instead of 6 boxes of 4 KB; extra last argument: the map
++#endif
+ #ifndef FOLD
+ #define FOLD 0
+ #endif
+@@ -56,6 +62,14 @@ static_assert(O_WS % 1024 == 0 && O_XN % 1024 == 0 && O_H % 1024 == 0 && O_ST %
+ constexpr uint32_t T_OUT = 0, T_AB = D_;                       // OUT 384; AB 128: [a 0..31 | b 0..31 | a 32..63 | b 32..63]
+ constexpr uint32_t IDESC_EX = idesc_bf16(256, 128), IDESC_SQ0 = idesc_bf16(256, 256), IDESC_SQ1 = idesc_bf16(256, 128);
+ 
++DEVI void tma_load_4d_2sm(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2, int c3) {
++  asm volatile("cp.async.bulk.tensor.4d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar) & 0xFEFFFFFFu), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
++}
++DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
+ __device__ __forceinline__ f2 unpack_bf16x2(uint32_t w) { return mk2u(w << 16, w & 0xffff0000u); }
+ // sigmoid_kit with the first product carrying a zero z read (volatile) after the [a|b] hand-back: a data dependency that keeps ptxas
+ // from scheduling the SiLU above the arrive (it did, delaying the next expand by the whole SiLU; empty asm pins vanish before ptxas).
+@@ -98,6 +112,12 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+                           __nv_bfloat16* __restrict__ as_, __nv_bfloat16* __restrict__ bs, int tiles, float eps, int save
+ #if FOLD
+                           , const uint8_t* __restrict__ aug
++#endif
++#if X3D
++                          , const __grid_constant__ CUtensorMap mx3
++#endif
++#if W4D
++                          , const __grid_constant__ CUtensorMap mwp4
+ #endif
+                           ) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+@@ -149,10 +169,14 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+           const int row = tile_of(i) * ROWS;
+           if (i >= 1) { mbar_wait(&B.xn_empty, (i - 1) & 1); mbar_wait(&B.xn_stored, (i - 1) & 1); }
+           mbar_expect_tx(&B.xl_full, TILE);
++#if X3D
++          tma_load_3d(su + O_XN, &mx3, &B.xl_full, 0, row, 0);       // one op: box 64 x 128 rows x 6 K-blocks lands as 6 [128][64] slabs
++#else
+ #pragma unroll
+           for (int cb = 0; cb < NKB; ++cb)
+ #pragma unroll
+             for (int h = 0; h < 2; ++h) tma_load_2d(su + O_XN + cb * KBT + h * 8192, &mx, &B.xl_full, cb * 64, row + h * 64);
++#endif
+         }
+         const int s = q % NWS;
+         if (q >= NWS) mbar_wait(&B.ws_empty[s], ((q / NWS) - 1) & 1);
+@@ -189,11 +213,15 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+           if (st >= NWK) mbar_wait(&B.wab_empty[s], ((st >> 1) - 1) & 1);
+           const uint32_t dst = su + O_WAB + s * WSTG * WK;
+           if (leader) mbar_expect_tx(&B.wab_full[s], 2 * WSTG * WK);
++#if W4D
++          tma_load_4d_2sm(dst, &mwp4, &B.wab_full[s], 0, j * HS + crank * 32, 0, h * WSTG);   // one op: 3 K-blocks x [a 32 rows | b 32 rows]
++#else
+ #pragma unroll
+           for (int k = 0; k < WSTG; ++k) {                     // B rows [Wa_j 32 | Wb_j 32] of this CTA's 32 units
+             tma_load_2d_2sm(dst + k * WK, &mwa, &B.wab_full[s], (h * WSTG + k) * 64, j * HS + crank * 32);
+             tma_load_2d_2sm(dst + k * WK + 4096, &mwb, &B.wab_full[s], (h * WSTG + k) * 64, j * HS + crank * 32);
+           }
++#endif
+         }
+       }
+     }

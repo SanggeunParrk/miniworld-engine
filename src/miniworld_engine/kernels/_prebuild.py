@@ -621,6 +621,8 @@ def main(argv: list[str] | None = None) -> int:
     t = target(args.arch)
     if t.arch == "sm120":  # the sm_80 builders compile for sm_120a under <name>_sm120 (kernels/_sm120.py), here and in every worker
         os.environ["MINIWORLD_ENGINE_BUILD_ARCH"] = "sm120"
+    elif t.arch == "sm100":  # B200: the sm_80 builders it reuses (ProteinMPNN) compile for sm_100a under <name>_sm100 on any build host
+        os.environ["MINIWORLD_ENGINE_BUILD_ARCH"] = "sm100"
     if args.cutlass:
         os.environ["CUTLASS_PATH"] = args.cutlass
     if args.mathdx:

@@ -1,0 +1,118 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu
+index b7b187848..c5386ecbf 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu
+@@ -72,7 +72,7 @@ extern "C" __global__ void __launch_bounds__(512, 1)
+ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mo,
+                const __grid_constant__ CUtensorMap mo2, const float* __restrict__ bias, const float* __restrict__ res,
+                const float* __restrict__ gate, int M, int N, int K, int NT, int a_col0, int b_row0, int b_col0, int ocol0, int sigmask,
+-               int mode, int save2, int res_ld, int gate_ld, int rndmask, int a_grp, int gate_rows) {
++               int mode, int save2, int res_ld, int gate_ld, int rndmask, int a_grp, int gate_rows, int bpre) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+@@ -95,13 +95,24 @@ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ C
+   __syncthreads();
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
++  const uint32_t tx = (uint32_t)A_BYTES + (uint32_t)NT * 128u;
++  // bpre (round 3 part 9, the inference conditioning tables): B is a constant weight pack made >= 2 launches earlier, so the first ST
++  // stages' B slices are issued BEFORE the grid-dependency wait, one stage per lane of warp 0 (one thread issues ~1 TMA load per ~600 clk);
++  // that lane also posts the stage's whole transaction count. Only A (the previous kernel's output) waits.
++  const int npre = bpre ? min(ST, my * nk) : 0;
++  if (warp == 0 && lane < npre) {
++    int m0, n0;
++    tile_of(lane / nk, m0, n0);
++    const int s = lane, ks = lane % nk;
++    mbar_expect_tx(&B.full[s], tx);
++    tma_load_2d(su + s * STB + A_BYTES, &mb, &B.full[s], b_col0 + 32 * ks, b_row0 + n0);
++  }
+   pdl_wait();                                                        // the previous kernel's outputs are complete and visible
+   pdl_launch();                                                      // the next kernel may be scheduled (it waits the same way)
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer
+     if (lane == 0) {
+-      const uint32_t tx = (uint32_t)A_BYTES + (uint32_t)NT * 128u;
+       int g = 0;
+       for (int i = 0; i < my; ++i) {
+         int m0, n0;
+@@ -111,9 +122,11 @@ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ C
+           const int s = g % ST;
+           if (g >= ST) mbar_wait(&B.empty[s], ((g / ST) - 1) & 1);
+           const uint32_t st = su + s * STB;
+-          mbar_expect_tx(&B.full[s], tx);
++          if (g >= npre) {
++            mbar_expect_tx(&B.full[s], tx);
++            tma_load_2d(st + A_BYTES, &mb, &B.full[s], b_col0 + 32 * ks, b_row0 + n0);
++          }
+           tma_load_2d(st, &ma, &B.full[s], ac + 32 * ks, m0);
+-          tma_load_2d(st + A_BYTES, &mb, &B.full[s], b_col0 + 32 * ks, b_row0 + n0);
+         }
+       }
+     }
+diff --git a/src/miniworld_engine/kernels/integrations/local_dit_b200.py b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+index 0b8621459..a717a76b2 100644
+--- a/src/miniworld_engine/kernels/integrations/local_dit_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+@@ -1233,6 +1233,7 @@ def _cond_tables32(cond, c2_fn, n, weights, pk, cross, save):
+                 a_grp=2 * DS_,
+                 bias=pk.bcond,
+                 sigmask=_SIG_MOD | (0b1000000 if cross else 0),
++                bconst=True,
+             )
+             return (
+                 tab[:, : 6 * DS_],
+@@ -1969,10 +1970,10 @@ def _var_fwd32(
+         def tables():
+             c2 = _padded(cond, n).reshape(cond.shape[0] * n, DC_).contiguous()
+             if ident:  # Chai-1: every table from the raw c, only the output gates (so, st: blocks 4, 5) as sigmoids
+-                return rows.gemm32(c2, pk.wcond, bias=pk.bcond, sigmask=0b110000)
++                return rows.gemm32(c2, pk.wcond, bias=pk.bcond, sigmask=0b110000, bconst=True)
+             cat = torch.empty(c2.shape[0], 3 * DS_, device=dev, dtype=F32)
+             rows.ln32(c2, pk.g1, pk.g2, None, out=cat)
+-            return rows.gemm32(cat, pk.wcond, k=DS_, a_grp=2 * DS_, bias=pk.bcond, sigmask=_SIG_MOD)
++            return rows.gemm32(cat, pk.wcond, k=DS_, a_grp=2 * DS_, bias=pk.bcond, sigmask=_SIG_MOD, bconst=True)
+ 
+         mod = (
+             _hoisted(_HOIST_COND, cond, ("tf32var", tuple((w.data_ptr(), w._version) for w in weights), n, ident), tables)
+diff --git a/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py b/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
+index 247f79117..cd53bfe2e 100644
+--- a/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
+@@ -831,7 +831,7 @@ def _esm_fwd32(
+         def tables():  # (training with a shared conditioning: [N, 1024], read at row r % N)
+             c2 = _padded(cond, n).reshape(cond.shape[0] * n, DC_).contiguous()
+             sc_.append(rows.silu32(c2))  # (training: saved for the tables' weight gradients)
+-            return rows.gemm32(sc_[0], pk.wcond, bias=pk.bcond)
++            return rows.gemm32(sc_[0], pk.wcond, bias=pk.bcond, bconst=True)
+ 
+         tab = _hoisted(_HOIST_COND, cond, ("esm32", wkey, n), tables) if (_hoisting() and not save) else tables()
+         keys = _keys(mask, n0, n)
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+@@ -1130,6 +1136,7 @@ def gemm32(
+     gate=None,
+     out2=None,
+     a_grp=0,
++    bconst=False,
+ ):
+     """The fp32 path's TF32 product (``gemm_tf32.cu``): acc = a[:, a_col0 : a_col0 + k] @ w[b_row0 : b_row0 + n, b_col0 : b_col0 + k]^T.
+ 
+@@ -1202,10 +1209,15 @@ def gemm32(
+         int(rndmask),
+         int(a_grp),
+         int(gate.shape[0]) if gate is not None else int(M),
++        int(bool(bconst) and _BPRE),
+     )
+     return out
+ 
+ 
++#: round 3 part 9: ``gemm32(bconst=True)`` issues the first B (weight) stages before the grid-dependency wait (MW_LD9_BPRE=0: off)
++_BPRE = os.environ.get("MW_LD9_BPRE", "1") != "0"
++
++
+ def round_tf32(t):
+     """t (fp32) rounded to tf32, to nearest with ties away from zero (cvt.rna.tf32.f32): add half a tf32 ulp to the magnitude bits, drop
+     the low 13. For the weight operands of gemm32, once per pack (kind::tf32 MMAs truncate)."""

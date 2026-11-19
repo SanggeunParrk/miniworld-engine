@@ -1,0 +1,168 @@
+diff --git a/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py b/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py
+index b1ef56069..f90c4974e 100644
+--- a/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py
++++ b/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py
+@@ -361,6 +361,11 @@ _B200_VT_MAIN = os.environ.get("MINIWORLD_TOKEN_B200_VT_MAIN", "1") != "0"
+ #: slower, left beside); on a stream of its own at L 256 with a shared conditioning (beside the q | k rows and the pair pass:
+ #: Boltz-2 r183 132.8 -> 126.9 us). 0: v^T beside the chain as before
+ _B200_VT_RULE = os.environ.get("MINIWORLD_TOKEN_B200_VT_RULE", "1") != "0"
++#: B200 RoseTTAFold3 inference (part 7): the flat q / k LayerNorm of a row in one pass (``qk_ln100``; 0: token_dit_rows.cu qk_ln_rows)
++_B200_QKLN1 = os.environ.get("MINIWORLD_TOKEN_B200_QKLN1", "1") != "0"
++#: B200 fp32 inference, several samples at L 128 with a per-sample conditioning and a gating query (part 7, probe): v^T on a stream of
++#: its own beside the pair pass (1) instead of behind it on the pair pass's stream (0)
++_B200_VT_OWN128 = os.environ.get("MINIWORLD_TOKEN_B200_VT_OWN128", "0") != "0"
+ #: B200 fp32 inference without a gating query (Chai-1): the gate columns from the q | k | g GEMM (zero rows, bias +1e4; 0: fill + a q | k GEMM)
+ _B200_NOGATE_GEMM = os.environ.get("MINIWORLD_TOKEN_B200_NOGATE_GEMM", "1") != "0"
+ #: B200 fp32: the pair -> bias pass and the v^T GEMM of a captured inference step as a parallel branch of the graph, joined before the
+@@ -746,9 +751,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+     # (one sample: the side stream's pair pass outlasts the chain to the core -- v^T on the chain, after the q | k rows; five samples keep
+     # it beside the chain: measured 4-6 % slower on the chain at L 256 - 512, 2026-11-17 part 3)
+     several = fp32 and sfork is not None and A * B > 1 and _B200_VT_RULE
+-    vt_own = several and shared and 128 < L <= 256
+-    svt = None
+     vt_main = fp32 and sfork is not None and (A * B == 1 or (several and L <= 128 and (shared or not gated))) and _B200_VT_MAIN
++    vt_own = several and ((shared and 128 < L <= 256) or (_B200_VT_OWN128 and L <= 128 and not vt_main))
++    svt = None
+     if vt_own:  # v^T on a stream of its own (``_B200_VT_RULE``)
+         svt = _side.fork(single.device)
+         with _side.on(svt):
+@@ -772,6 +777,11 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+         torch.addmm(bqkvg[: 2 * D], xa, wqkvg[: 2 * D].t(), out=qkvg[:, : 2 * D])
+     if qk:
+         qknorm_rows(qkvg, nq, nk, eq, ek, D)
++    elif kq_ln and b200 and _B200_QKLN1 and D == 768:
++        # B200 (part 7): q and k of a row in one pass (``qk_ln100``: both halves loaded first, the sums paired; the same bits)
++        from .train import ext as _train_ext
++
++        _train_ext(D, D // heads, rpb=2, dc=DC, dp=pair.shape[-1]).qk_ln100(qkvg, *vpack["kq"], kq_eps, qk_rna)
+     elif kq_ln:
+         qk_ln_rows(qkvg, *vpack["kq"], kq_eps, D, rnd=qk_rna)  # q / k rounded on the way (qk_rna)
+     elif qk_rna:
+diff --git a/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu b/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
+index a08c24fd7..813d4a53e 100644
+--- a/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
++++ b/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
+@@ -29,22 +29,36 @@ __global__ void __launch_bounds__(256) pair_bias_m_k(const ZT* __restrict__ Z, l
+   float* wf = pb_smem;                                                     // [HPAD][S]
+   float* ph = pb_smem + HPAD * S;                                          // [PT][S]
+   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane >> 2, t = lane & 3;
++  // (2026-11-17, part 7) every row of the warp's tile is loaded before the first is reduced, and the next tile's rows are loaded while
++  // this tile's MMA runs: one memory round trip per tile instead of PT / 8 dependent ones (fp32 L 128: the pass was latency bound, 8.5 us
++  // alone, 17 us beside a GEMM). The same arithmetic per row: the same bits.
++  constexpr int RW = PT / 8;
++  float4 xr[RW][NQ];
++  const long ntile = (R + PT - 1) / PT;
++  auto load_tile = [&](long tile) {
++#pragma unroll
++    for (int jj = 0; jj < RW; ++jj) {
++      const long r = tile * PT + warp + 8 * jj;
++#pragma unroll
++      for (int q = 0; q < NQ; ++q) xr[jj][q] = r < R ? V4<ZT>::load(Z + r * sz + q * 128 + lane * 4) : make_float4(0.f, 0.f, 0.f, 0.f);
++    }
++  };
++  if ((long)blockIdx.x < ntile) load_tile(blockIdx.x);
+   for (int i = threadIdx.x; i < HPAD * C4; i += 256) {
+     const int h = i / C4, c4 = i % C4;
+     *reinterpret_cast<float4*>(wf + h * S + 4 * c4) = h < NHH ? reinterpret_cast<const float4*>(WF)[h * C4 + c4] : make_float4(0.f, 0.f, 0.f, 0.f);
+   }
+-  const long ntile = (R + PT - 1) / PT;
+   for (long tl = blockIdx.x; tl < ntile; tl += gridDim.x) {
+     const long r0 = tl * PT;
+     __syncthreads();                                                       // wf in; the previous tile's LN(z) consumed
+-    for (int j = warp; j < PT; j += 8) {
++#pragma unroll
++    for (int jj = 0; jj < RW; ++jj) {
++      const int j = warp + 8 * jj;
+       const long r = r0 + j;
+       float4 xh[NQ];
+ #pragma unroll
+-      for (int q = 0; q < NQ; ++q) xh[q] = make_float4(0.f, 0.f, 0.f, 0.f);
++      for (int q = 0; q < NQ; ++q) xh[q] = xr[jj][q];
+       if (r < R) {
+-#pragma unroll
+-        for (int q = 0; q < NQ; ++q) xh[q] = V4<ZT>::load(Z + r * sz + q * 128 + lane * 4);
+         float s = sum4(xh[0]);
+ #pragma unroll
+         for (int q = 1; q < NQ; ++q) s += sum4(xh[q]);
+@@ -64,6 +78,7 @@ __global__ void __launch_bounds__(256) pair_bias_m_k(const ZT* __restrict__ Z, l
+       for (int q = 0; q < NQ; ++q) *reinterpret_cast<float4*>(ph + j * S + q * 128 + lane * 4) = xh[q];
+     }
+     __syncthreads();
++    if (tl + gridDim.x < ntile) load_tile(tl + gridDim.x);                // the next tile's rows in flight under the MMA
+     // bias^T [32 rows x HPAD] = LN(z) [32 x DPW] Wf^T [DPW x HPAD]: (row tile, head tile) items, one per warp
+     constexpr int NIT = 2 * (HPAD / 8);
+     if (warp < NIT) {
+@@ -107,6 +122,65 @@ void pair_bias_m(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> mask, at
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
++// ---- the flat q / k LayerNorm (RoseTTAFold3), q and k of a row in one pass (2026-11-17, part 7) ----
++// token_dit_rows.cu qk_ln_rows_kernel loads k only after q's two block sums, four barrier pairs a row: here both halves are loaded
++// first and each sum pair shares one barrier pair. Per half the same warp sums, the same order over the warps, the same expressions:
++// the same bits.
++template <int NT>
++__device__ __forceinline__ float2 block_sum2(float u, float v, float* red) {
++  u = warp_sum(u); v = warp_sum(v);
++  const int w = threadIdx.x / 32, l = threadIdx.x % 32;
++  if (l == 0) { red[w] = u; red[NT / 32 + w] = v; }
++  __syncthreads();
++  float s = 0.f, t = 0.f;
++#pragma unroll
++  for (int i = 0; i < NT / 32; ++i) s += red[i];
++#pragma unroll
++  for (int i = 0; i < NT / 32; ++i) t += red[NT / 32 + i];
++  __syncthreads();
++  return make_float2(s, t);
++}
++
++template <int NT, typename T, bool RND>
++__global__ void __launch_bounds__(NT) qk_ln100_k(T* __restrict__ QK, long sq, const float* __restrict__ WQ, const float* __restrict__ BQ,
++    const float* __restrict__ WK, const float* __restrict__ BK, float eps) {
++  constexpr int DW = NT * 4;
++  __shared__ float red[2 * (NT / 32)];
++  const int col = threadIdx.x * 4;
++  T* p = QK + (long)blockIdx.x * sq + col;
++  const float4 x[2] = {V4<T>::load(p), V4<T>::load(p + DW)};
++  const float4 w[2] = {*reinterpret_cast<const float4*>(WQ + col), *reinterpret_cast<const float4*>(WK + col)};
++  const float4 o[2] = {*reinterpret_cast<const float4*>(BQ + col), *reinterpret_cast<const float4*>(BK + col)};
++  const float2 sm = block_sum2<NT>(x[0].x + x[0].y + x[0].z + x[0].w, x[1].x + x[1].y + x[1].z + x[1].w, red);
++  const float mean[2] = {sm.x / DW, sm.y / DW};
++  float a[2], b[2], c[2], d[2];
++#pragma unroll
++  for (int h = 0; h < 2; ++h) { a[h] = x[h].x - mean[h]; b[h] = x[h].y - mean[h]; c[h] = x[h].z - mean[h]; d[h] = x[h].w - mean[h]; }
++  const float2 sv = block_sum2<NT>(a[0] * a[0] + b[0] * b[0] + c[0] * c[0] + d[0] * d[0], a[1] * a[1] + b[1] * b[1] + c[1] * c[1] + d[1] * d[1], red);
++  const float rstd[2] = {rsqrtf(sv.x / DW + eps), rsqrtf(sv.y / DW + eps)};
++#pragma unroll
++  for (int h = 0; h < 2; ++h) {
++    float4 r = make_float4(a[h] * rstd[h] * w[h].x + o[h].x, b[h] * rstd[h] * w[h].y + o[h].y, c[h] * rstd[h] * w[h].z + o[h].z,
++                           d[h] * rstd[h] * w[h].w + o[h].w);
++    if constexpr (RND && std::is_same<T, float>::value) {
++      r.x = rowmath::rna_tf32(r.x); r.y = rowmath::rna_tf32(r.y); r.z = rowmath::rna_tf32(r.z); r.w = rowmath::rna_tf32(r.w);
++    }
++    V4<T>::store(p + h * DW, r);
++  }
++}
++
++// qk [M, >= 2d] rows (q = columns 0 .. d - 1, k = d .. 2d - 1; d = 768), fp32 [d] affine of each (token_dit_rows.cu qk_ln_rows' contract)
++void qk_ln100(at::Tensor qk, at::Tensor wq, at::Tensor bq, at::Tensor wk, at::Tensor bk, double eps, bool rnd) {
++  TORCH_CHECK(qk.dim() == 2 && qk.stride(1) == 1 && qk.size(1) >= 2 * 768 && qk.stride(0) % 4 == 0, "qk_ln100: qk [M, >= 1536] rows");
++  for (auto* w : {&wq, &bq, &wk, &bk}) TORCH_CHECK(w->scalar_type() == at::kFloat && w->is_contiguous() && w->numel() == 768, "qk_ln100: fp32 [768]");
++  const at::cuda::CUDAGuard g(qk.device());
++  TDT_DISPATCH(qk.scalar_type(), T, [&] {
++    auto kern = rnd ? qk_ln100_k<192, T, true> : qk_ln100_k<192, T, false>;
++    kern<<<(unsigned)qk.size(0), 192, 0, S()>>>(P<T>(qk), qk.stride(0), CP<float>(wq), CP<float>(bq), CP<float>(wk), CP<float>(bk), (float)eps);
++  });
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++
+ // ---- the weight pack and the final gradients, UNR vectors per thread ----
+ constexpr int UNR = 8;
+ 
+@@ -402,6 +476,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   rebind(m, "pair_bias", &pair_bias_m, py::arg("z"), py::arg("wf"), py::arg("mask"), py::arg("bias"), py::arg("pst"), py::arg("L"),
+          py::arg("eps"), py::arg("extra") = py::none(), py::arg("extra_scale") = 1.0,
+          py::arg("masked") = -std::numeric_limits<double>::infinity());
++  m.def("qk_ln100", &qk_ln100, py::arg("qk"), py::arg("wq"), py::arg("bq"), py::arg("wk"), py::arg("bk"), py::arg("eps"), py::arg("rnd"));
+   rebind(m, "train_pack90", &train_pack100);
+   rebind(m, "unfold_lnw", &unfold_lnw100);
+   rebind(m, "train_final90", &train_final100, py::arg("params"), py::arg("grads"), py::arg("dwn"), py::arg("raw"), py::arg("w1"),

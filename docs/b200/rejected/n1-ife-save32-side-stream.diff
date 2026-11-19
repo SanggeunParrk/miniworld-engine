@@ -1,0 +1,64 @@
+--- src/miniworld_engine/modules/atom_dit.py	2026-11-18 17:42:08.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n1-transition/tmp/atom_dit.with	2026-11-18 17:42:08.000000000 +0000
+@@ -1551,7 +1551,12 @@
+             if sm100.save_late_ok(x.shape[0] * x.shape[1]):  # r3-swa part 19: kept bf16; the backward widens them under its first kernel (tf32_bwd._bwd_few)
+                 saved = [t.contiguous() for t in s16]
+             else:
+-                w32 = sm100.save32([t.contiguous() for i, t in enumerate(s16) if i != 5])
++                s16c = [t.contiguous() for i, t in enumerate(s16) if i != 5]
++                if sm100.SAVE32_SIDE and any(ctx.needs_input_grad):  # N1 round 4: beside the next block's forward, joined by this block's backward
++                    w32, ctx.s32_ev = sm100.save32_side(s16c)
++                    ctx.s32_keep = s16c  # (read by the side stream: alive until the backward's wait)
++                else:
++                    w32 = sm100.save32(s16c)
+                 saved = [*w32[:5], s16[5], *w32[5:]]
+         elif ctx.tf32:
+             wm, w1, w2, w3, w4, w5 = (w.contiguous() for w in raw)
+@@ -1578,6 +1583,10 @@
+         from miniworld_engine.kernels.swa_dit.cuda import sm100
+         from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+ 
++        ev32 = getattr(ctx, "s32_ev", None)
++        if ev32 is not None:  # N1 round 4: the saves' widening on the side stream (save32_side)
++            torch.cuda.current_stream().wait_event(ev32)
++            ctx.s32_ev = ctx.s32_keep = None
+         n, hw = ctx.meta
+         saved = list(ctx.saved_tensors)
+         wb = tuple(saved[len(saved) - ctx.nwb :]) if ctx.nwb else None
+--- src/miniworld_engine/kernels/swa_dit/cuda/sm100/__init__.py	2026-11-18 17:42:08.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n1-transition/tmp/init.with	2026-11-18 17:42:08.000000000 +0000
+@@ -1651,6 +1651,34 @@
+     return out
+ 
+ 
++
++#: N1 round 4 (development switch): the forward's widening (:func:`save32`, ~8.5 us a block at 4096 rows) on a side stream the backward joins -- the
++#: next block's forward does not wait for it (it only feeds the backward)
++SAVE32_SIDE = __import__("os").environ.get("SWA_SAVE32_SIDE", "1") == "1"
++
++
++def save32_side(saves):
++    """:func:`save32` launched on a side stream forked from the current one: (fp32 copies, join event). The copies are allocated on the current
++    stream (the backward uses them there); the caller keeps ``saves`` alive until the current stream has waited for the event."""
++    n = saves[0].numel()
++    assert len(saves) == 12 and n % 8 == 0 and all(t.numel() == n and t.dtype == torch.bfloat16 and t.is_contiguous() for t in saves)
++    dev = saves[0].device
++    K = kernels(dev.index if dev.index is not None else torch.cuda.current_device())
++    out = [torch.empty(t.shape, device=dev, dtype=torch.float32) for t in saves]
++    p = _Ptr12()
++    for i in range(12):
++        p.s[i], p.d[i] = saves[i].data_ptr(), out[i].data_ptr()
++    n8 = n // 8
++    cur = torch.cuda.current_stream()
++    s = _side_streams(cur.device.index)[1]
++    fork = torch.cuda.Event()
++    fork.record(cur)
++    s.wait_event(fork)
++    K.save32k(((12 * n8 + 255) // 256, 1, 1), (256, 1, 1), p, int(n8), 12, stream=s.cuda_stream)
++    ev = torch.cuda.Event()
++    ev.record(s)
++    return out, ev
++
+ #: r3-swa part 19: the hybrid route widens its saves in the backward, under the FFN gate kernel (:func:`save32_late`), not at the end of
+ #: the forward (development switch: False = :func:`save32` in the forward, as parts 8 - 18)
+ SAVE_LATE = __import__("os").environ.get("SWA_SAVE_LATE", "1") == "1"

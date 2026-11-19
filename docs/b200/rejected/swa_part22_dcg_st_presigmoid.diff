@@ -1,0 +1,251 @@
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/dcg_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/dcg_tf32.cu
+index e962a6c03..ea6361460 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/dcg_tf32.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/dcg_tf32.cu
+@@ -13,6 +13,9 @@
+ // SPDX-License-Identifier: Apache-2.0
+ #include "sm100.cuh"
+ using namespace s100;
++#ifndef TRACE
++#define TRACE 0
++#endif
+ 
+ namespace dcg {
+ __host__ __device__ constexpr uint32_t idesc(int M, int N, int a_mn = 0, int b_mn = 0) {
+@@ -53,7 +56,18 @@ struct Bars {
+ extern "C" __global__ void __launch_bounds__(256, 1)
+ swa_dcg_tf32_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mb, int k0, int nk, int ns,
+                    const float* __restrict__ ACCE, const void* __restrict__ CIN, const float* __restrict__ PREV,
+-                   const void* __restrict__ XADD, void* __restrict__ OUT, int flags) {
++                   const void* __restrict__ XADD, void* __restrict__ OUT, int flags, const float* __restrict__ SS,
++                   const float* __restrict__ TT
++#if TRACE
++                   , long long* TRb
++#endif
++                   ) {
++#if TRACE
++#define TRD(e, cond) do { if (blockIdx.x == 0 && (cond)) TRb[e] = clock64(); } while (0)
++#else
++#define TRD(e, cond) do { } while (0)
++#endif
++  TRD(0, threadIdx.x == 0);
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+@@ -83,6 +97,7 @@ swa_dcg_tf32_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+       mbar_expect_tx(&B.full[s], (uint32_t)SA + bbytes);
+       tma_load_3d(su + s * SLOT + SA, &mb, &B.full[s], 0, k0 + 32 * s, n0 / 32);
+       pdl_wait();                                                       // dmod comes from the kernels before
++      TRD(1, lane == 0);
+       tma_load_2d(su + s * SLOT, &ma, &B.full[s], k0 + 32 * s, row0);
+     }
+     __syncwarp();
+@@ -102,6 +117,7 @@ swa_dcg_tf32_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+     for (int s = 0; s < nk; ++s) {
+       const int slot = s % NST;
+       mbar_wait(&B.full[slot], (s / NST) & 1);
++      TRD(2 + min(s, 7), lane == 0);
+       tc_fence_after();
+       if (elect_one()) {
+         const uint32_t a = su + slot * SLOT, b = a + SA;
+@@ -129,12 +145,27 @@ swa_dcg_tf32_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+         for (int q = 0; q < 8; ++q) {
+           const size_t o = ob + 4 * q;
+           ev[q] = ACCE != nullptr ? *reinterpret_cast<const float4*>(ACCE + o) : z4;
+-          cv[q] = dcg::ld4(CIN, o, cb16);
++          cv[q] = SS != nullptr ? *reinterpret_cast<const float4*>(TT + o) : dcg::ld4(CIN, o, cb16);
+           pv[q] = PREV != nullptr ? *reinterpret_cast<const float4*>(PREV + o) : z4;
+           xv[q] = XADD != nullptr ? dcg::ld4(XADD, o, xb16) : z4;
+         }
+       }
+-      if (c0 == 0) { mbar_wait(&B.accfull, 0); tc_fence_after(); }
++      // r3-swa part 22: silu'(c)'s two factors s = sigmoid(c), t = 1 + c (1 - s) before the accumulator wait (cv[q] -> s, ev... unchanged);
++      // the product after it keeps the order (g s) t: the same bits. (A trace had the epilogue at ~4250 of ~10000 clocks after the MMAs.)
++      // (SS / TT given -- r3-swa part 22, swa_mod_silu_st_sm100: S and T made at the backward's start; cv holds T already)
++      float4 sv[8];
++      if (!early && SS != nullptr) {
++#pragma unroll
++        for (int q = 0; q < 8; ++q) sv[q] = *reinterpret_cast<const float4*>(SS + ob + 4 * q);
++      } else if (!early) {
++#pragma unroll
++        for (int q = 0; q < 8; ++q) {
++          const float4 c = cv[q];
++          sv[q] = make_float4(dcg::sigm(c.x), dcg::sigm(c.y), dcg::sigm(c.z), dcg::sigm(c.w));
++          cv[q] = make_float4(1.f + c.x * (1.f - sv[q].x), 1.f + c.y * (1.f - sv[q].y), 1.f + c.z * (1.f - sv[q].z), 1.f + c.w * (1.f - sv[q].w));
++        }
++      }
++      if (c0 == 0) { TRD(10, threadIdx.x == 128); mbar_wait(&B.accfull, 0); tc_fence_after(); TRD(11, threadIdx.x == 128); }
+       uint32_t v[32];
+       tmem_ld32(trow + (uint32_t)c0, v);
+       tmem_wait_ld();
+@@ -153,10 +184,8 @@ swa_dcg_tf32_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+           const float4 e = ev[q];
+           g = make_float4(e.x + g.x, e.y + g.y, e.z + g.z, e.w + g.w);
+         }
+-        const float4 c = cv[q];
+-        const float sx = dcg::sigm(c.x), sy = dcg::sigm(c.y), sz = dcg::sigm(c.z), sw = dcg::sigm(c.w);
+-        float4 d = make_float4(g.x * sx * (1.f + c.x * (1.f - sx)), g.y * sy * (1.f + c.y * (1.f - sy)), g.z * sz * (1.f + c.z * (1.f - sz)),
+-                               g.w * sw * (1.f + c.w * (1.f - sw)));
++        const float4 t = cv[q], s = sv[q];
++        float4 d = make_float4(g.x * s.x * t.x, g.y * s.y * t.y, g.z * s.z * t.z, g.w * s.w * t.w);
+         if (PREV != nullptr) {
+           const float4 p = pv[q];
+           d = make_float4(p.x + d.x, p.y + d.y, p.z + d.z, p.w + d.w);
+@@ -171,6 +200,7 @@ swa_dcg_tf32_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+           *reinterpret_cast<float4*>(reinterpret_cast<float*>(OUT) + o) = d;
+       }
+     }
++    TRD(12, threadIdx.x == 128);
+     tc_fence_before();
+   }
+   __syncthreads();
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/mod_bwd_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/mod_bwd_tf32.cu
+index 10485af5d..40fb13372 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/mod_bwd_tf32.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/mod_bwd_tf32.cu
+@@ -95,3 +95,18 @@ swa_mod_dsilu_acc_sm100(const float* __restrict__ ACC, const void* __restrict__
+   else
+     *reinterpret_cast<float4*>(reinterpret_cast<float*>(OUT) + o) = d;
+ }
++
++// r3-swa part 22: a = silu(c) (as swa_mod_silu_tf32[_c16]_sm100) and silu'(c)'s two factors S = sigmoid(c), T = 1 + c (1 - S) for the late
++// dc launch (dcg_tf32.cu reads them before its accumulator wait instead of computing 32 sigmoids a thread after the GEMM; the same
++// expressions: the same bits). Off the backward's chain (the side stream that makes a at the backward's start).
++extern "C" __global__ void __launch_bounds__(NWARP * 32)
++swa_mod_silu_st_sm100(const void* __restrict__ CIN, int c_bf16, float* __restrict__ A, float* __restrict__ S, float* __restrict__ T, int R) {
++  const int row = (int)blockIdx.x * NWARP + (threadIdx.x >> 5), lane = threadIdx.x & 31;
++  if (row >= R) return;
++  const size_t o = (size_t)row * C + 4 * lane;
++  const float4 c = c_bf16 ? ldb4(reinterpret_cast<const uint16_t*>(CIN) + o) : *reinterpret_cast<const float4*>(reinterpret_cast<const float*>(CIN) + o);
++  const float sx = sigm(c.x), sy = sigm(c.y), sz = sigm(c.z), sw = sigm(c.w);
++  *reinterpret_cast<uint4*>(A + o) = make_uint4(tf32r(c.x * sigm(c.x)), tf32r(c.y * sigm(c.y)), tf32r(c.z * sigm(c.z)), tf32r(c.w * sigm(c.w)));
++  *reinterpret_cast<float4*>(S + o) = make_float4(sx, sy, sz, sw);
++  *reinterpret_cast<float4*>(T + o) = make_float4(1.f + c.x * (1.f - sx), 1.f + c.y * (1.f - sy), 1.f + c.z * (1.f - sz), 1.f + c.w * (1.f - sw));
++}
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py
+index a3efb0cbd..5196eb961 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py
+@@ -245,6 +245,15 @@ class ModBwdTf32:
+         self.kd16 = _f._load("mod_bwd_tf32", "swa_mod_dsilu_tf32_c16_sm100")
+         # round 3 part 14: dc summed over a stack's blocks inside the kernel (DcAcc)
+         self.kda = _f._load("mod_bwd_tf32", "swa_mod_dsilu_acc_sm100")
++        self.kst = _f._load("mod_bwd_tf32", "swa_mod_silu_st_sm100")
++
++    def silu_st(self, c):
++        """r3-swa part 22: (a = silu(c) as :meth:`silu`, (S, T)) with S = sigmoid(c), T = 1 + c (1 - S) fp32 [R, C] (DcgTf32.late's st)."""
++        R = c.shape[0]
++        a, s, t = (torch.empty(c.shape, device=c.device, dtype=torch.float32) for _ in range(3))
++        assert c.is_contiguous()
++        self.kst(((R + 7) // 8, 1, 1), (256, 1, 1), c, int(c.dtype == torch.bfloat16), a, s, t, int(R))
++        return a, (s, t)
+ 
+     def silu(self, c):
+         R = c.shape[0]
+@@ -583,6 +592,7 @@ class DwTf32:
+             k = self.kcl[name] = _f._load(name, cluster=cl)
+         return k
+ 
++
+     def _bind_cluster(self, cl, pairs, M, dev, split):
+         """:meth:`bind` on the cluster build (round 3 part 15): grid = tiles x cl CTAs, cluster (cl, 1, 1); the final dW written by the
+         kernel (``run.reduce`` does nothing)."""
+@@ -730,10 +740,10 @@ class DcgTf32:
+         M = dmod.shape[0]
+         ns = self.NS_EARLY  # (off the chain: as few SMs as it can, beside the attention backward)
+         maps = self._maps(dmod, wmod, ns)
+-        self.k(((M // 128) * ns, 1, 1), (256, 1, 1), *maps, 2 * C, 4 * C // 32, ns, None, None, None, None, e, 1)
++        self.k(((M // 128) * ns, 1, 1), (256, 1, 1), *maps, 2 * C, 4 * C // 32, ns, None, None, None, None, e, 1, None, None)
+         return (maps, dmod, wmod)
+ 
+-    def late(self, dmod, wmod, e, c):
++    def late(self, dmod, wmod, e, c, st=None):
+         """-> run(prev, out_dtype, fold_x) (``DcAcc.fused``'s protocol; ``fold_x``: the x gradient added, or None) -> dc."""
+         if self.k is None:
+             self.k = _f._load("dcg_tf32")
+@@ -748,8 +758,9 @@ class DcgTf32:
+             assert prev is None or (prev.dtype == torch.float32 and prev.is_contiguous())
+             assert xadd is None or (xadd.is_contiguous() and xadd.numel() == c.numel())
+             flags = (int(c.dtype == b16) << 1) | (int(od == b16) << 2) | (int(xadd is not None and xadd.dtype == b16) << 3)
+-            self.k(((M // 128) * ns, 1, 1), (256, 1, 1), *maps, 0, 2 * C // 32, ns, e, c, prev, xadd, out, flags)
+-            run.keep = (maps, dmod, wmod, e, c, prev, xadd)
++            sts = st if st is not None else (None, None)  # r3-swa part 22: silu'(c)'s factors S, T made at the backward's start
++            self.k(((M // 128) * ns, 1, 1), (256, 1, 1), *maps, 0, 2 * C // 32, ns, e, c, prev, xadd, out, flags, *sts)
++            run.keep = (maps, dmod, wmod, e, c, prev, xadd, st)
+             return out
+ 
+         return run
+@@ -759,6 +770,9 @@ class DcgTf32:
+ DCG = __import__("os").environ.get("SWA_DCG", "1") == "1"
+ #: ... up to this many rows
+ DCG_MAX_ROWS = int(__import__("os").environ.get("SWA_DCG_MAX_ROWS", "8192"))
++#: r3-swa part 22 (development switch): silu'(c)'s factors S, T made with a = silu(c) at the backward's start (swa_mod_silu_st_sm100) and read by
++#: the late launch before its accumulator wait (a trace had its 32 sigmoids a thread at ~4000 of ~10000 clocks; the same bits)
++DCG_ST = __import__("os").environ.get("SWA_DCG_ST", "1") == "1"
+ 
+ 
+ @functools.lru_cache(maxsize=16)
+@@ -1082,7 +1096,11 @@ def _bwd_few(
+         # at its end, so every kernel after it still runs after the gate kernel)
+         qh, kh, vh, g, o, q1, x, pq, pk, att, y, ffn = _widen(_sm.save32_late, qh, kh, vh, g, o, q1, x, pq, pk, att, y, ffn)
+     if modb is not None:  # silu(c) of the modulation's dW: needs nothing of this backward
+-        fork(s2, lambda: res.__setitem__("a", K.mod.silu(modb[0])))
++        if DCG_ST and DCG and M <= 2048 and modb[0].shape[0] == M and modb[0].is_contiguous():  # (where the late launch runs: few tiles)
++            # r3-swa part 22: with silu'(c)'s factors for the late dc launch (DcgTf32.late st)
++            fork(s2, lambda: res.update(zip(("a", "st"), K.mod.silu_st(modb[0]))))
++        else:
++            fork(s2, lambda: res.__setitem__("a", K.mod.silu(modb[0])))
+         a_mod = res["a"]
+     if DYF:  # dy = the gate kernel's partials, summed by the adaLN backward (no GEMM launch)
+         run, dq1 = K.adaln.bind(q1, dyp[0], dq2, ffn, mod, dmod, A, B, eps, 3 * C, att, 2 * C, ndy=dyp[0].shape[0])
+@@ -1224,7 +1242,7 @@ def _bwd_few(
+             return mm_tf32_ks(dmod, w_mod, ksc) if ksc > 1 else mm_tf32(dmod, w_mod)
+ 
+         if dce is not None:  # r3-swa part 19: the GEMM's last third + silu' (+ the stack's sum) in one launch (DcgTf32.late)
+-            lrun = K.dcg.late(dmod, w_mod, dce[0], c_mod)
++            lrun = K.dcg.late(dmod, w_mod, dce[0], c_mod, st=res.get("st"))
+             if dca is not None:
+                 dqx, dcx = dca[0].late(dca[1], lrun, dq)
+                 out[0] = dqx.view(N, S, C)
+diff --git a/src/miniworld_engine/modules/atom_dit.py b/src/miniworld_engine/modules/atom_dit.py
+index ff2aee202..0608663bc 100644
+--- a/src/miniworld_engine/modules/atom_dit.py
++++ b/src/miniworld_engine/modules/atom_dit.py
+@@ -1622,8 +1622,10 @@ class AtomDiTMiniWorld(BackendModule):
+         "cuda:a100_sm80": 7,
+         "cuda:h100_sm90": 2,
+         "cuda:5090_sm120": 2,
+-        "cuda:b200_sm100": 18,
++        "cuda:b200_sm100": 19,
+     }  # cuda:a100_sm80 7 (2026-11-13): the sm_80 window attention exits on a tile past seqused (zero rows, the same bits)
++    # cuda:b200_sm100 19 (2026-11-18, r3-swa part 22): the late dc launch reads silu'(c)'s factors made with silu(c) at the backward's start
++    # (swa_mod_silu_st_sm100) and forms them before its accumulator wait; the dW cluster ranks keep their own slice (the same bits)
+     # cuda:b200_sm100 18 (2026-11-18, r3-swa part 21): few-tile TF32 backward -- dx = dP W as eight per-head partials in the window attention
+     # passes' epilogues (attn_dq / attn_dkv_tf32 DXP; the qkvg adaLN sums them: no dx GEMM after dK / dV), dWqkvg's m-blocks launched as
+     # their operands arrive (DWS), the dW cluster kernel's partials summed through an L2 workspace instead of DSMEM (DW_GX, the same bits);
+@@ -2241,8 +2243,9 @@ class SWAAtomTransformer(BackendModule):
+         "cuda:h100_sm90": 3,
+         "triton": 2,
+         "cuda:5090_sm120": 2,
+-        "cuda:b200_sm100": 26,
++        "cuda:b200_sm100": 27,
+     }  # cuda:a100_sm80 7 (2026-11-13): as AtomDiTMiniWorld
++    # cuda:b200_sm100 27 (2026-11-18, r3-swa part 22): its blocks' training as AtomDiTMiniWorld 19 (the same bits)
+     # cuda:b200_sm100 26 (2026-11-18, r3-swa part 21): its blocks' training as AtomDiTMiniWorld 18 (DXP, DWS; DW_GX also on the global blocks)
+     # cuda:b200_sm100 25 (2026-11-18, r3-swa part 20): its blocks' training as AtomDiTMiniWorld 17 (the same bits)
+     # cuda:b200_sm100 24 (2026-11-18, r3-swa part 19): its blocks' training as AtomDiTMiniWorld 16 (a stack's dc launches through DcAcc.late)
+diff --git a/src/miniworld_engine/modules/embedder.py b/src/miniworld_engine/modules/embedder.py
+index e2a709cf2..f58473c38 100644
+--- a/src/miniworld_engine/modules/embedder.py
++++ b/src/miniworld_engine/modules/embedder.py
+@@ -392,8 +392,9 @@ class InputFeatureEmbedder(BackendModule):
+         "cuda:h100_sm90": 3,
+         "triton": 2,
+         "cuda:5090_sm120": 2,
+-        "cuda:b200_sm100": 27,
++        "cuda:b200_sm100": 28,
+     }  # cuda:a100_sm80 8 / cuda:5090_sm120 2 (2026-11-15): its atom_norm LayerNorm runs the changed forward row kernels (sm_80 / sm_120a; LayerNorm cuda 3 on both cards); no kernel row bump: one would also owe every triton case that lists it
++    # cuda:b200_sm100 28 (2026-11-18, r3-swa part 22): its atom transformer's training as SWAAtomTransformer 27 (the same bits)
+     # cuda:b200_sm100 27 (2026-11-18, r3-swa part 21): its atom transformer's training as SWAAtomTransformer 26
+     # cuda:b200_sm100 26 (2026-11-18, r3-swa part 20): its atom transformer's training as SWAAtomTransformer 25 (the same bits)
+     # cuda:b200_sm100 25 (2026-11-18, r3-swa part 19): its atom transformer's master training as SWAAtomTransformer 24

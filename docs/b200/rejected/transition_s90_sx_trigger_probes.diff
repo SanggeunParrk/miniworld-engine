@@ -1,0 +1,96 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index da5168922..a00cb2d1e 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -111,6 +111,8 @@ SMALL_FWD_TILES = 16
+ #: second launch -- and dWs, dWa | dWb (fp32, or bf16 for bf16 parameters) and dgamma / dbeta over (output tile) CTAs. Every operand is read in
+ #: its own layout (MN-major where needed): no transposed or concatenated weight copies per call; with fp32 masters the training
+ #: forward's casts ride in the LayerNorm launch.
++#: (S90 part 8) extra build flags of the small-M chain kernels by name (ln / expand / sq / gdx / dw): A/B only
++SX_X: dict[str, tuple[str, ...]] = {}
+ SX_CH = (32, 64)
+ #: squeeze builds: (output columns per cluster, hidden split = cluster size)
+ SX_SQ = ((32, 1), (64, 1), (32, 2), (64, 2))
+@@ -256,13 +258,13 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+     )
+     sx = (
+         (
+-            ("sx_ln", "widths/tsx_ln.cu", (f"-DDIM={d}",)),
+-            *((f"sx_expand{c}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}")) for c in SX_CH),
+-            *((f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in SX_SQ),
++            ("sx_ln", "widths/tsx_ln.cu", (f"-DDIM={d}", *SX_X.get("ln", ()))),
++            *((f"sx_expand{c}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", *SX_X.get("expand", ()))) for c in SX_CH),
++            *((f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}", *SX_X.get("sq", ()))) for nb, k in SX_SQ),
+             ("sx_gate", "widths/tsx_gate.cu", dim),
+-            ("sx_gdx", "widths/tsx_gdx.cu", dim),
++            ("sx_gdx", "widths/tsx_gdx.cu", (*dim, *SX_X.get("gdx", ()))),
+             *((f"sx_dxn{k}", "widths/tsx_dxn.cu", (*dim, f"-DKS={k}")) for k in (1, 2)),
+-            *((f"sx_dw{nt}", "widths/tsx_dw.cu", (*dim, f"-DNT={nt}")) for nt in SX_DW_NT if d % nt == 0 and h % nt == 0),
++            *((f"sx_dw{nt}", "widths/tsx_dw.cu", (*dim, f"-DNT={nt}", *SX_X.get("dw", ()))) for nt in SX_DW_NT if d % nt == 0 and h % nt == 0),
+         )
+         if d == 384
+         else ()
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
+index 062a6d352..6b1b2320b 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
+@@ -166,8 +166,14 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+         mbar_expect_tx(&B.dy_full[kb], DYB);
+         tma_load_2d(su + O_DY + kb * DYB, &mdy, &B.dy_full[kb], kb * 64, row0);
+       }
++#ifdef GTRIG0   // (S90) the weight-gradient kernel may start as soon as the flag is cleared (before the gate products are done)
++      if (rank == 0) mbar_wait(&B.flag_clear, 0);
++      pdl_launch();
++      mbar_wait(&B.mma_done, 0);                               // the gate products have read dy and Ws: their stages are free
++#else
+       mbar_wait(&B.mma_done, 0);                               // the gate products have read dy and Ws: their stages are free
+       if (rank == 0) mbar_wait(&B.flag_clear, 0);
++#endif
+       pdl_launch();                                            // the weight-gradient kernel may start: not earlier, its dWs loads
+                                                                // would compete with this tile's dy (its dWab waits for the flags)
+       for (int kb = NDED; kb < STG; ++kb) { mbar_expect_tx(&B.full[kb], STB); load_w(kb); }
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+index 227f64d01..5fac5be13 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+@@ -124,6 +124,9 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+         tma_load_2d(su + O_B + kb * WBT, &mws, &B.full[kb], k0 + kb * BKE, nb * NB);
+       }
+       pdl_wait();
++#ifdef ETRIG
++      pdl_launch();
++#endif
+       TSX_ST(1);
+       for (int kb = 0; kb < STG; ++kb) tma_load_2d(su + O_A + kb * KBT, &mh, &B.full[kb], k0 + kb * BKE, row0);
+       for (int kb = STG; kb < NKB; ++kb) {
+@@ -135,8 +138,14 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+       }
+     }
+     pdl_wait();
++#ifdef ETRIG
++    pdl_launch();
++#endif
+   } else if (warp == 1) {
+     pdl_wait();
++#ifdef ETRIG
++    pdl_launch();
++#endif
+     for (int kb = 0; kb < NKB; ++kb) {
+       const int s = kb % STG;
+       mbar_wait(&B.full[s], (kb / STG) & 1);
+@@ -155,8 +164,15 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+     }
+   } else {
+     pdl_wait();
++#ifdef ETRIG
++    pdl_launch();
++#endif
+   }
++#ifdef ETRIG
++  // (trigger already issued after the waits)
++#else
+   pdl_launch();
++#endif
+ 
+   const int r = (warp & 3) * 32 + lane;
+   const size_t grow = (size_t)(row0 + r);

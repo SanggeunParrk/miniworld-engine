@@ -13,7 +13,25 @@
 // Rounding points as tfwd2.cu: xn bf16, a / b fp32, h = bf16(silu(a) b) (kit sigmoid), acc fp32, out = bf16(x + acc).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
+#include "tsx_store.cuh"
+#ifndef X2
+#define X2 0
+#endif
+#ifndef TBSW
+#define TBSW 0   // timing probes (S90): 1 no TMEM loads / math in the SwiGLU, 2 no residual loads / stores in the X2 epilogue, 3 no LayerNorm math (X2)
+#endif
 using namespace s100;
+// LN2: the LayerNorm of a tile by two warpgroups (4-7 columns 0-127, 8-11 columns 128-255, the row held in registers, statistics
+// exchanged through 512 B of shared memory), and the epilogue split the same way; warps 4-7 still run the even SwiGLU chunks.
+#ifndef LN2
+#define LN2 0
+#endif
+
+#ifdef PROBE
+#define STAMP(k) do { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(c1)[cta * 136 + (k)] = _t; } while (0)
+#else
+#define STAMP(k) do { } while (0)
+#endif
 
 #ifndef HID
 #define HID 1024                                                // hidden units (n x D); n = 4 by default
@@ -26,25 +44,47 @@ constexpr int TILE = ROWS * D_ * 2;                            // 64 KB: four K-
 constexpr int KBT = ROWS * 128;                                // one K-block of a tile: 16 KB
 constexpr int O_WAB = 0, O_WS = NW * WAB_SLOT;
 constexpr int O_X = O_WS + NW * WS_SLOT;
-constexpr int O_XN = O_X + TILE;
-constexpr int O_GB = O_XN + TILE;
+constexpr int O_XN = X2 ? O_X : O_X + TILE;                  // X2: XN[0] at O_X, XN[1] one TILE later
+constexpr int O_GB = O_XN + (X2 ? 2 : 1) * TILE;
 constexpr int O_BAR = O_GB + 2 * D_ * 4;
-constexpr int SMEM_BYTES = O_BAR + 512;
+constexpr int O_RED = O_BAR + 512;                             // LN2: 128 fp32 statistics
+constexpr int SMEM_BYTES = O_BAR + (LN2 ? 1024 : 512);
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
-static_assert(HID != 1024 || SMEM_BYTES == 231936, "bench_w.py SMEM[256]");
+static_assert(HID != 1024 || SMEM_BYTES == (LN2 ? 232448 : 231936), "bench_w.py SMEM[256]");
 constexpr int KS_EX = D_ / 16, KS_SQ = HS / 16;
 constexpr uint32_t T_AB = 0, T_OUT = 256;                      // AB x2 (128 each; h_j in place over its first 32), OUT 256
 constexpr uint32_t IDESC_EX = idesc_bf16(256, 128), IDESC_SQ = idesc_bf16(256, D_);
 
 #define SIGF(a) sigmoid_kit(a)
 
+// XPAR: the x boxes of a tile issued by one lane each (a lane issues ~one TMA load per 600 clk), tile 0 before the cluster barrier.
+// WPAR: the weight boxes likewise (lanes 0 .. NKB - 1 the [Wa_j | Wb_j] K-blocks, lane 31 the Ws_j box).
+#ifndef XPAR
+#define XPAR 0
+#endif
+#ifndef WPAR
+#define WPAR 0
+#endif
+
+// PF2 (needs XPAR; S90): the x boxes of tile i + 1 are prefetched into L2 (cp.async.bulk.prefetch.tensor) when the producer starts tile i, a tile ahead, so the load into
+// the xn buffer after the last expand of tile i hits L2 (the exposed load latency before LN(i + 1) was ~3.6 us of a 14.3 us tile, the tensor pipe idle meanwhile)
+#ifndef PF2
+#define PF2 0
+#endif
+// X2 (S90, inference, needs XPAR WPAR LN2): TWO xn buffers (x(i) lands in XN[i & 1] a tile ahead, the LayerNorm of tile i + 1 runs while tile i expands, so the tensor
+// pipe no longer idles behind one 64 KB buffer) and NO x buffer: the epilogue reads the residual x from global memory and writes y by 128-B-segment row stores
+// (store_t / load_t: groups of 8 lanes cover one 128-B row segment). Roles: warps 4-7 every SwiGLU chunk, warps 8-15 the LayerNorm halves and the epilogue halves.
+// The kernel's rstd / c1 arguments carry x / y (bf16) in this build (the inference call needs neither).
+static_assert(!X2 || (LN2 && XPAR && WPAR), "X2 needs LN2 XPAR WPAR");
+#define XB(i) (X2 ? ((i) & 1) : 0)
+#define XPH(i) (X2 ? (((i) >> 1) & 1) : ((i) & 1))
 struct Bars {
   // leader-only: weight fulls (both CTAs' transactions), xn_full (2 LN arrivals), h_full / out_empty (4 warps per CTA)
-  uint64_t wab_full[NW], ws_full[NW], xn_full, h_full[2], out_empty;
+  uint64_t wab_full[NW], ws_full[NW], xn_full[2], h_full[2], out_empty;
   // both CTAs (leader's multicast commits)
-  uint64_t wab_empty[NW], ws_empty[NW], xn_empty, ex_done[2], sq_done[2], out_full;
+  uint64_t wab_empty[NW], ws_empty[NW], xn_empty[2], ex_done[2], sq_done[2], out_full;
   // local
-  uint64_t xl_full, x_full, x_empty;
+  uint64_t xl_full[2], x_full, x_empty;
   uint32_t tmem;
 };
 
@@ -53,7 +93,8 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
                           const __grid_constant__ CUtensorMap mwb, const __grid_constant__ CUtensorMap mws,
                           const __grid_constant__ CUtensorMap mout, const __grid_constant__ CUtensorMap mxn,
                           const float* __restrict__ gamma, const float* __restrict__ beta, float* __restrict__ rstd,
-                          float* __restrict__ c1, int tiles, float eps, int save) {
+                          float* __restrict__ c1, int tiles, float eps, int save,
+                          const uint8_t* __restrict__ xg, uint8_t* __restrict__ yg) {   // xg / yg: x and y for the X2 residual (S90 part 7: rstd / c1 are the real statistics)
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -66,13 +107,14 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
   const int nch = n_local * NCH;
   auto tile_of = [&](int i) { return i < n_valid ? cta + i * G : (n_valid > 0 ? cta + (n_valid - 1) * G : 0); };
 
+  if (tid == 0) STAMP(0);
   if (tid == 0) {
     for (int s = 0; s < NW; ++s) {
       mbar_init(&B.wab_full[s], 1); mbar_init(&B.ws_full[s], 1); mbar_init(&B.wab_empty[s], 1); mbar_init(&B.ws_empty[s], 1);
     }
     for (int s = 0; s < 2; ++s) { mbar_init(&B.h_full[s], 8); mbar_init(&B.ex_done[s], 1); mbar_init(&B.sq_done[s], 1); }
-    mbar_init(&B.xn_full, 2); mbar_init(&B.xn_empty, 1); mbar_init(&B.out_empty, 8); mbar_init(&B.out_full, 1);
-    mbar_init(&B.xl_full, 1); mbar_init(&B.x_full, 1); mbar_init(&B.x_empty, 1);
+    for (int s = 0; s < 2; ++s) { mbar_init(&B.xn_full[s], 2); mbar_init(&B.xn_empty[s], 1); mbar_init(&B.xl_full[s], 1); } mbar_init(&B.out_empty, LN2 ? 16 : 8); mbar_init(&B.out_full, 1);
+    mbar_init(&B.x_full, 1); mbar_init(&B.x_empty, 1);
     fence_barrier_init();
     prefetch_map(&mx); prefetch_map(&mwa); prefetch_map(&mwb); prefetch_map(&mws); prefetch_map(&mout); prefetch_map(&mxn);
   }
@@ -80,11 +122,36 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
   if (warp == 2) { tmem_alloc2(smem_u32(&B.tmem), 512); tmem_relinquish2(); }
   tc_fence_before();
   __syncthreads();
+  if (XPAR && warp == 0 && n_local > 0) {                     // tile 0: local barriers, no need to wait for the cluster
+#if X2
+    if (lane == 0) { mbar_expect_tx(&B.xl_full[0], TILE); if (n_local > 1) mbar_expect_tx(&B.xl_full[1], TILE); }
+    __syncwarp();
+    if (lane < 4 * NKB && (lane < 2 * NKB || n_local > 1)) {
+      const int l = lane & (2 * NKB - 1), t = lane >= 2 * NKB;
+      tma_load_2d(su + O_XN + t * TILE + (l >> 1) * KBT + (l & 1) * 8192, &mx, &B.xl_full[t], (l >> 1) * 64, tile_of(t) * ROWS + (l & 1) * 64);
+    }
+#else
+    if (lane == 0) { mbar_expect_tx(&B.xl_full[0], TILE); mbar_expect_tx(&B.x_full, TILE); }
+    __syncwarp();
+    if (lane < 4 * NKB) {
+      const int l = lane & (2 * NKB - 1);
+      tma_load_2d(su + (lane < 2 * NKB ? O_XN : O_X) + (l >> 1) * KBT + (l & 1) * 8192, &mx, lane < 2 * NKB ? &B.xl_full[0] : &B.x_full,
+                  (l >> 1) * 64, tile_of(0) * ROWS + (l & 1) * 64);
+    }
+#endif
+  }
   cluster_sync_relaxed();                                      // the barriers were published by fence_barrier_init
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+  if (tid == 0) STAMP(1);
 
   auto load_tile = [&](uint32_t dst, uint64_t* bar, int row) {
+#if XPAR
+    if (lane == 0) mbar_expect_tx(bar, TILE);
+    __syncwarp();
+    if (lane < 2 * NKB) tma_load_2d(dst + (lane >> 1) * KBT + (lane & 1) * 8192, &mx, bar, (lane >> 1) * 64, row + (lane & 1) * 64);
+    return;
+#endif
     mbar_expect_tx(bar, TILE);
 #pragma unroll
     for (int cb = 0; cb < NKB; ++cb)
@@ -96,18 +163,53 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------ x producer: x(i) into the xn buffer (for
     // the LayerNorm, once xn(i - 1) is dead) and into the x buffer (for the residual, once the epilogue of tile i - 1 has stored)
-    if (lane == 0) {
-      for (int i = 0; i < n_local; ++i) {
+    if (XPAR || lane == 0) {
+      if (PF2 && XPAR && n_local > 1 && lane < 2 * NKB) asm volatile("cp.async.bulk.prefetch.tensor.2d.L2.global [%0, {%1, %2}];" :: "l"(&mx), "r"((lane >> 1) * 64), "r"(tile_of(1) * ROWS + (lane & 1) * 64) : "memory");
+      for (int i = XPAR ? 1 : 0; i < n_local; ++i) {
         const int row = tile_of(i) * ROWS;
-        if (i >= 1) mbar_wait(&B.xn_empty, (i - 1) & 1);
-        load_tile(su + O_XN, &B.xl_full, row);
+        if (PF2 && XPAR && i + 1 < n_local && lane < 2 * NKB) asm volatile("cp.async.bulk.prefetch.tensor.2d.L2.global [%0, {%1, %2}];" :: "l"(&mx), "r"((lane >> 1) * 64), "r"(tile_of(i + 1) * ROWS + (lane & 1) * 64) : "memory");
+#if X2
+        if (i < 2) continue;                                  // tiles 0 and 1 were issued at setup
+        mbar_wait(&B.xn_empty[i & 1], ((i >> 1) - 1) & 1);
+        load_tile(su + O_XN + (i & 1) * TILE, &B.xl_full[i & 1], row);
+#else
+        if (i >= 1) mbar_wait(&B.xn_empty[0], (i - 1) & 1);
+        load_tile(su + O_XN, &B.xl_full[0], row);
         if (i >= 1) mbar_wait(&B.x_empty, (i - 1) & 1);
         load_tile(su + O_X, &B.x_full, row);
+#endif
       }
     }
   } else if (warp == 3) {
     // ------------------------------------------------------------------------------------------ weight producer: this CTA's half of
     // every chunk; transactions complete on the leader's barriers, armed with the pair's total bytes
+#if WPAR
+    {
+      const CUtensorMap* mab = leader ? &mwa : &mwb;
+      int ca = 0, cs = 0;
+      while (ca < nch || cs < nch) {
+        int da = 0, ds = 0;
+        if (lane == 0) {
+          da = ca < nch && (ca < NW || mbar_test(&B.wab_empty[ca % NW], ((ca / NW) - 1) & 1));
+          ds = cs < nch && (cs < NW || mbar_test(&B.ws_empty[cs % NW], ((cs / NW) - 1) & 1));
+          if (da && leader) mbar_expect_tx(&B.wab_full[ca % NW], 2 * WAB_SLOT);
+          if (ds && leader) mbar_expect_tx(&B.ws_full[cs % NW], 2 * WS_SLOT);
+        }
+        da = __shfl_sync(0xffffffffu, da, 0); ds = __shfl_sync(0xffffffffu, ds, 0);
+        if (da) {
+          const int s = ca % NW, j = ca & (NCH - 1);
+          if (lane < NKB) tma_load_2d_2sm(su + O_WAB + s * WAB_SLOT + lane * 8192, mab, &B.wab_full[s], lane * 64, j * HS);
+          ++ca;
+        }
+        if (ds) {
+          const int s = cs % NW, j = cs & (NCH - 1);
+          if (lane == 31) tma_load_2d_2sm(su + O_WS + s * WS_SLOT, &mws, &B.ws_full[s], j * HS, crank * (D_ / 2));
+          ++cs;
+        }
+      }
+    }
+    if (false)
+#endif
     if (lane == 0) {
       const CUtensorMap* mab = leader ? &mwa : &mwb;
       int ca = 0, cs = 0;
@@ -135,11 +237,12 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
       if (warp == 1) {
         for (int c = 0; c < nch; ++c) {
           const int i = c / NCH, j = c & (NCH - 1), s = c & 1, u = c >> 1, sw = c % NW;
-          if (j == 0) mbar_wait_cl(&B.xn_full, i & 1);
+          if (j == 0) mbar_wait_cl(&B.xn_full[XB(i)], XPH(i));
           mbar_wait(&B.wab_full[sw], (c / NW) & 1);
           if (c >= 2) mbar_wait(&B.sq_done[s], (u - 1) & 1);   // h_{c-2} (in this buffer) has been consumed
+          if (lane == 0 && c < 48) STAMP(4 + c);
           tc_fence_after();
-          const uint64_t ad = desc_k128(su + O_XN), bd = desc_k128(su + O_WAB + sw * WAB_SLOT);
+          const uint64_t ad = desc_k128(su + O_XN + XB(i) * TILE), bd = desc_k128(su + O_WAB + sw * WAB_SLOT);
           if (elect_one()) {
 #pragma unroll
             for (int ks = 0; ks < KS_EX; ++ks)
@@ -147,7 +250,7 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
                        bd + (uint64_t)(((ks >> 2) * 8192 + (ks & 3) * 32) >> 4), IDESC_EX, ks > 0 ? 1u : 0u);
             tc_commit2_mc(&B.ex_done[s], 3);
             tc_commit2_mc(&B.wab_empty[sw], 3);
-            if (j == NCH - 1) tc_commit2_mc(&B.xn_empty, 3);
+            if (j == NCH - 1) tc_commit2_mc(&B.xn_empty[XB(i)], 3);
           }
           __syncwarp();
         }
@@ -157,6 +260,7 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
           mbar_wait(&B.ws_full[sw], (q / NW) & 1);
           mbar_wait_cl(&B.h_full[s], u & 1);
           if (j == 0 && i >= 1) mbar_wait_cl(&B.out_empty, (i - 1) & 1);
+          if (lane == 0 && q < 48) STAMP(52 + q);
           tc_fence_after();
           const uint64_t bd = desc_k128(su + O_WS + sw * WS_SLOT);
           if (elect_one()) {
@@ -171,16 +275,21 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
         }
       }
     }
-  } else if ((warp >= 4 && warp < 8) || warp >= 12) {
+  } else {
     // ------------------------------------------------------------------------------------------ SwiGLU: two warpgroups alternate chunks,
     // four 16-column steps with the next step's TMEM loads in flight; h_j is stored over the first 32 columns of its own buffer
     setmaxnreg_inc<152>();
     const uint32_t lb = (uint32_t)(warp & 3) * 32, trow = tmem + (lb << 16);
-    for (int c = (warp >= 12 ? 1 : 0); c < nch; c += 2) {
+    auto sw = [&](int c) {
       const int s = c & 1, u = c >> 1;
       mbar_wait(&B.ex_done[s], u & 1);
       tc_fence_after();
       uint32_t hp[32];
+#if TBSW == 1
+#pragma unroll
+      for (int k = 0; k < 32; ++k) hp[k] = 0x3f803f80u;
+      if (false)
+#endif
       {
         uint32_t a[2][16], b[2][16];
         tmem_ld16(trow + T_AB + s * 128, a[0]);
@@ -210,18 +319,17 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive_remote_relaxed(&B.h_full[s], 0);
-    }
-  } else if (warp >= 8) {
+    };
     // ------------------------------------------------------------------------------------------ LayerNorm (in place in the xn buffer) and
     // the residual epilogue, one row per thread
-    setmaxnreg_inc<152>();
     const int t2 = tid - 256;
-    const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
+    const uint32_t r = lb + lane;
     const uint32_t gb_u = su + O_GB;
     auto ln = [&](int i) {
       const int grow = tile_of(i) * ROWS + (int)r;
       const bool real = i < n_valid;
-      mbar_wait(&B.xl_full, i & 1);
+      mbar_wait(&B.xl_full[0], i & 1);
+      if (t2 == 0 && i < 6) STAMP(100 + i);
       if (t2 == 0) tma_store_wait_read0();                 // the previous tile's xn store has read the buffer
       named_bar_sync(1, 128);
       const uint32_t xnb = su + O_XN;
@@ -260,8 +368,9 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
       if (save && real) { rstd[grow] = rs; c1[grow] = mean * rs; }
       fence_proxy_async();
       named_bar_sync(1, 128);
+      if (t2 == 0 && i < 6) STAMP(106 + i);
       if (t2 == 0) {
-        mbar_arrive_remote_cta(&B.xn_full, 0);
+        mbar_arrive_remote_cta(&B.xn_full[0], 0);
         if (save && real) {
           const int row0 = tile_of(i) * ROWS;
 #pragma unroll
@@ -273,20 +382,104 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
         }
       }
     };
-    auto epi = [&](int i) {
+    // LN2: half `half` of the LayerNorm of tile i (warps 4-7: half 0, columns 0-127; warps 8-11: half 1), one row per thread, the
+    // 128 columns held in registers; the row sums meet in O_RED (half 1 posts, half 0 adds and posts the total)
+    auto ln2 = [&](int i, int half) {
+      const int grow = tile_of(i) * ROWS + (int)r;
+      const bool real = i < n_valid, lead = tid == (X2 ? 256 : 128);
+      float* red = reinterpret_cast<float*>(sm + O_RED);
+      mbar_wait(&B.xl_full[XB(i)], XPH(i));
+      if (lead && i < 6) STAMP(100 + i);
+      if (lead) tma_store_wait_read0();
+      named_bar_sync(3, 256);
+      const uint32_t xnb = su + O_XN + XB(i) * TILE + half * 2 * KBT;
+      uint32_t v[64];
+#pragma unroll
+      for (int cq = 0; cq < 16; ++cq) {
+        const uint4 t = lds128(xnb + (cq >> 3) * KBT + sw128(r, cq & 7));
+        v[4 * cq] = t.x; v[4 * cq + 1] = t.y; v[4 * cq + 2] = t.z; v[4 * cq + 3] = t.w;
+      }
+      float s4[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+      for (int cq = 0; cq < 16; ++cq)
+#pragma unroll
+        for (int k = 0; k < 4; ++k) s4[k] += bf16lo(v[4 * cq + k]) + bf16hi(v[4 * cq + k]);
+      const float s = (s4[0] + s4[1]) + (s4[2] + s4[3]);
+      if (half) red[r] = s;
+      named_bar_sync(3, 256);
+      if (!half) red[r] = s + red[r];
+      named_bar_sync(3, 256);
+      const float mean = red[r] * (1.f / D_);
+#pragma unroll
+      for (int k = 0; k < 4; ++k) s4[k] = 0.f;
+#pragma unroll
+      for (int cq = 0; cq < 16; ++cq)
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+          const float d0 = bf16lo(v[4 * cq + k]) - mean, d1 = bf16hi(v[4 * cq + k]) - mean;
+          s4[k] += d0 * d0 + d1 * d1;
+        }
+      const float q = (s4[0] + s4[1]) + (s4[2] + s4[3]);
+      named_bar_sync(3, 256);                                  // every thread has read the mean
+      if (half) red[r] = q;
+      named_bar_sync(3, 256);
+      if (!half) red[r] = q + red[r];
+      named_bar_sync(3, 256);
+      const float rs = rsqrtf(red[r] * (1.f / D_) + eps);
+      const f2 nm2 = mk2(-mean, -mean), rs2 = mk2(rs, rs);
+#pragma unroll
+      for (int cq = 0; cq < 16; ++cq) {
+        const int col = half * 128 + cq * 8;
+        const uint4 g0 = lds128(gb_u + col * 4), g1 = lds128(gb_u + col * 4 + 16);
+        const uint4 b0 = lds128(gb_u + D_ * 4 + col * 4), b1 = lds128(gb_u + D_ * 4 + col * 4 + 16);
+        const float g[8] = {__uint_as_float(g0.x), __uint_as_float(g0.y), __uint_as_float(g0.z), __uint_as_float(g0.w),
+                            __uint_as_float(g1.x), __uint_as_float(g1.y), __uint_as_float(g1.z), __uint_as_float(g1.w)};
+        const float bb[8] = {__uint_as_float(b0.x), __uint_as_float(b0.y), __uint_as_float(b0.z), __uint_as_float(b0.w),
+                             __uint_as_float(b1.x), __uint_as_float(b1.y), __uint_as_float(b1.z), __uint_as_float(b1.w)};
+        uint32_t o[4];
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+          const uint32_t w = v[4 * cq + k];
+          const f2 t = mul2(add2(mk2(bf16lo(w), bf16hi(w)), nm2), rs2);   // ((x - mean) rs) g + b in fp32x2 (the scalar rounding)
+          const f2 y = fma2(t, mk2(g[2 * k], g[2 * k + 1]), mk2(bb[2 * k], bb[2 * k + 1]));
+          o[k] = pack_bf16(lo2(y), hi2(y));
+        }
+        sts128(xnb + (cq >> 3) * KBT + sw128(r, cq & 7), make_uint4(o[0], o[1], o[2], o[3]));
+      }
+      if (save && real && !half) { rstd[grow] = rs; c1[grow] = mean * rs; }
+      fence_proxy_async();
+      named_bar_sync(3, 256);
+      if (lead) {
+        if (i < 6) STAMP(106 + i);
+        mbar_arrive_remote_cta(&B.xn_full[XB(i)], 0);
+        if (save && real) {
+          const int row0 = tile_of(i) * ROWS;
+#pragma unroll
+          for (int cb = 0; cb < NKB; ++cb)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) tma_store_2d(&mxn, su + O_XN + XB(i) * TILE + cb * KBT + h * 8192, cb * 64, row0 + h * 64);
+          tma_store_commit();
+          tma_store_wait_read0();
+        }
+      }
+    };
+    auto epi = [&](int i, int cc0, int cc1, int bar, int nthr, bool lead) {
       mbar_wait(&B.out_full, i & 1);
       mbar_wait(&B.x_full, i & 1);
+      if (lead && i < 6) STAMP(112 + i);
       tc_fence_after();
       const uint32_t xb = su + O_X;
 #pragma unroll 1
-      for (int cc = 0; cc < D_ / 32; ++cc) {
-        uint32_t acc[32];
-        tmem_ld32(trow + T_OUT + cc * 32, acc);
+      for (int c2 = cc0; c2 < cc1; c2 += 2) {                // one K-block (64 columns) a step: both TMEM loads in flight
+        uint32_t acc2[2][32];
+        tmem_ld32(trow + T_OUT + c2 * 32, acc2[0]);
+        tmem_ld32(trow + T_OUT + c2 * 32 + 32, acc2[1]);
         tmem_wait_ld();
-        const int cb = cc >> 1;
+        const int cb = c2 >> 1;
 #pragma unroll
-        for (int qq = 0; qq < 4; ++qq) {
-          const int q = (cc & 1) * 4 + qq;
+        for (int qa = 0; qa < 8; ++qa) {
+          const int q = qa, qq = qa & 3;
+          const uint32_t (&acc)[32] = acc2[qa >> 2];
           const uint32_t ad = xb + cb * KBT + sw128(r, q);
           const uint4 xv = lds128(ad);
           const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
@@ -300,9 +493,10 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive_remote_relaxed(&B.out_empty, 0);
+      if (lead && i < 6) STAMP(118 + i);
       fence_proxy_async();
-      named_bar_sync(1, 128);
-      if (t2 == 0) {
+      named_bar_sync(bar, nthr);
+      if (lead) {
         const int row0 = tile_of(i) * ROWS;
         if (i < n_valid) {
 #pragma unroll
@@ -313,14 +507,88 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
         tma_store_commit();
         tma_store_wait_read0();
         mbar_arrive(&B.x_empty);
+        if (i < 6) STAMP(124 + i);
       }
     };
-    if (n_local > 0) ln(0);
-    for (int i = 0; i < n_local; ++i) {
-      if (i + 1 < n_local) ln(i + 1);
-      epi(i);
+#if X2
+    // the residual epilogue of one half (K-blocks 2 half, 2 half + 1) of tile i: x re-read from global memory in 128-B row segments (load_t), y written the same way (store_t)
+    auto epi2 = [&](int i, int half) {
+      const bool real = i < n_valid;
+      const uint16_t* Xg = reinterpret_cast<const uint16_t*>(xg);
+      uint16_t* Yg = reinterpret_cast<uint16_t*>(yg);
+      const size_t off0 = ((size_t)tile_of(i) * ROWS + (r & ~7u)) * D_ + (size_t)(lane & 7) * 8;
+      uint4 xa[8], xb[8];
+#pragma unroll
+      for (int t = 0; t < 8; ++t) { xa[t] = make_uint4(0, 0, 0, 0); xb[t] = xa[t]; }
+      if (TBSW != 2) {
+        load_t<32>(Xg + off0 + (half * 2 + 0) * 64, (size_t)D_, xa, lane);
+        load_t<32>(Xg + off0 + (half * 2 + 1) * 64, (size_t)D_, xb, lane);   // the residual in flight while the squeezes finish
+      }
+      mbar_wait(&B.out_full, i & 1);
+      tc_fence_after();
+#pragma unroll
+      for (int kb = 0; kb < 2; ++kb) {
+        const int cb = half * 2 + kb;
+        uint32_t o[32], acc2[2][32];
+        tmem_ld32(trow + T_OUT + (cb * 2) * 32, acc2[0]);
+        tmem_ld32(trow + T_OUT + (cb * 2 + 1) * 32, acc2[1]);
+        tmem_wait_ld();
+        if (kb == 1) {                                       // the accumulator is read out: the next tile's squeeze may start
+          tc_fence_before();
+          __syncwarp();
+          if (lane == 0) mbar_arrive_remote_relaxed(&B.out_empty, 0);
+        }
+#pragma unroll
+        for (int hh = 0; hh < 2; ++hh) {
+          const uint32_t (&acc)[32] = acc2[hh];
+#pragma unroll
+          for (int t = 4 * hh; t < 4 * hh + 4; ++t) {
+            const uint4 xv = kb ? xb[t] : xa[t];
+            const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
+#pragma unroll
+            for (int k = 0; k < 4; ++k)
+              o[4 * t + k] = pack_bf16(bf16lo(xw[k]) + __uint_as_float(acc[(t - 4 * hh) * 8 + 2 * k]), bf16hi(xw[k]) + __uint_as_float(acc[(t - 4 * hh) * 8 + 2 * k + 1]));
+          }
+        }
+        if (real && TBSW != 2) store_t<32>(Yg + off0 + cb * 64, (size_t)D_, o, lane);
+      }
+    };
+    if (warp < 8) {
+      for (int c = 0; c < nch; ++c) sw(c);                  // warps 4-7: every SwiGLU chunk
+    } else {
+      const int half = warp >= 12;
+      if (n_local > 0) ln2(0, half);
+      for (int i = 0; i < n_local; ++i) {
+        if (i + 1 < n_local) ln2(i + 1, half);              // overlaps the expands of tile i
+        epi2(i, half);
+      }
     }
-    if (t2 == 0) tma_store_wait0();
+#else
+    const bool odd = warp >= 12, lnw = warp >= 8 && warp < 12;
+    if (!LN2) {
+      if (!lnw) {
+        for (int c = odd ? 1 : 0; c < nch; c += 2) sw(c);
+      } else {
+        if (n_local > 0) ln(0);
+        for (int i = 0; i < n_local; ++i) {
+          if (i + 1 < n_local) ln(i + 1);
+          epi(i, 0, D_ / 32, 1, 128, t2 == 0);
+        }
+      }
+    } else if (odd) {
+      for (int c = 1; c < nch; c += 2) sw(c);
+    } else {
+      const int half = lnw ? 1 : 0;
+      if (n_local > 0) ln2(0, half);
+      for (int i = 0; i < n_local; ++i) {
+        if (!lnw)
+          for (int c = i * NCH; c < (i + 1) * NCH; c += 2) sw(c);
+        if (i + 1 < n_local) ln2(i + 1, half);
+        epi(i, half * (D_ / 64), (half + 1) * (D_ / 64), 2, 256, tid == 128);
+      }
+    }
+#endif
+    if (tid == 256 || tid == 128) tma_store_wait0();
   }
   tc_fence_before();
   __syncthreads();

@@ -1,0 +1,10 @@
+modules: [TriangleAttention]
+backends: [cuda]
+rows: [71, 72, 73, 74, 75, 76]
+lengths: [256, 384, 640]
+depths: min
+samples: min
+seed: 0
+fixed: {bfloat16: 8.0e-3, master: 8.0e-3, float32: 1.0e-5}
+modes: [eval]
+device: cuda

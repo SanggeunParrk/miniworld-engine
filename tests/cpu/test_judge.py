@@ -163,7 +163,8 @@ def test_card_of():
     assert judge.card_of({"gpu": "NVIDIA H100 80GB HBM3", "capability": [9, 0]}) == "h100_sm90"
     assert judge.card_of({"gpu": "NVIDIA A100-SXM4-80GB", "capability": [8, 0]}) == "a100_sm80"
     assert judge.card_of({"gpu": "NVIDIA GeForce RTX 5090", "capability": [12, 0]}) == "5090_sm120"
-    assert set(judge.GPUS) == {"h100_sm90", "a100_sm80", "5090_sm120"}
+    assert judge.card_of({"gpu": "NVIDIA B200", "capability": [10, 0]}) == "b200_sm100"
+    assert set(judge.GPUS) == {"h100_sm90", "a100_sm80", "5090_sm120", "b200_sm100"}
 
 
 def test_case_key_is_readable_and_ordered():

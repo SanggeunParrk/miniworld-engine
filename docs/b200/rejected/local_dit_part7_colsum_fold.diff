@@ -1,0 +1,277 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/rows_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/rows_tf32.cu
+index 5796e23dd..aefc5b13e 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/rows_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/rows_tf32.cu
+@@ -282,6 +282,100 @@ f32_ln_bwd(const float* __restrict__ c, float* __restrict__ dc, const float* __r
+   }
+ }
+ 
++// ---- B200 round 3 part 7 (2026-11-17, r3-local-dit): the table-gradient kernels with their column sums (the bias gradients) folded in.
++// A persistent grid of G blocks: block b takes table rows 8 b + warp, + 8 G, ... (each as f32_tail_bwd / f32_adaln_bwd do), keeps the column
++// sums of its rows' table gradients in registers and writes the block's partial row part[b][pc ..] (pld = part's row pitch) in a fixed order
++// (the 8 warps in order); the caller sums the G rows (``col_jobs``, in order): deterministic. pc < 0: that output's sums are not written.
++// No second read of the [M, 768] table gradient (``f32_colsum`` on it read 755 MB at 48 x 5120 atoms).
++DEVI void block_cols(float4 (&red)[8][32], int w, int lane, const float (&v)[4], float* __restrict__ out) {
++  red[w][lane] = make_float4(v[0], v[1], v[2], v[3]);
++  __syncthreads();
++  if (w == 0) {
++    float4 s = red[0][lane];
++#pragma unroll
++    for (int i = 1; i < 8; ++i) { const float4 u = red[i][lane]; s.x += u.x; s.y += u.y; s.z += u.z; s.w += u.w; }
++    *reinterpret_cast<float4*>(out + 4 * lane) = s;
++  }
++  __syncthreads();
++}
++
++extern "C" __global__ void __launch_bounds__(256)
++f32_tail_bwd_cs(const float* __restrict__ dy, const float* __restrict__ t, const float* __restrict__ st, int stld, float* __restrict__ dt,
++                float* __restrict__ dst, int dstld, int M, int mrows, float* __restrict__ part, int pld, int pc) {
++  pdl_wait();
++  pdl_launch();
++  __shared__ float4 red[8][32];
++  const int w = threadIdx.x >> 5, lane = threadIdx.x & 31, ch = 4 * lane, nsamp = M / mrows;
++  float cs[4] = {0.f, 0.f, 0.f, 0.f};
++  for (int irow = blockIdx.x * 8 + w; irow < mrows; irow += gridDim.x * 8) {
++    float s[4], p[4] = {0.f, 0.f, 0.f, 0.f};
++    ld4(st + (size_t)irow * stld + ch, s);
++    for (int a = 0; a < nsamp; ++a) {
++      const size_t row = (size_t)a * mrows + irow;
++      float d[4], tv[4], o[4];
++      ld4(dy + row * C + ch, d);
++      ld4(t + row * C + ch, tv);
++#pragma unroll
++      for (int i = 0; i < 4; ++i) { o[i] = d[i] * s[i]; p[i] += d[i] * tv[i] * s[i] * (1.f - s[i]); }
++      st4(dt + row * C + ch, o);
++    }
++    st4(dst + (size_t)irow * dstld + ch, p);
++#pragma unroll
++    for (int i = 0; i < 4; ++i) cs[i] += p[i];
++  }
++  if (pc >= 0) block_cols(red, w, lane, cs, part + (size_t)blockIdx.x * pld + pc);
++}
++
++extern "C" __global__ void __launch_bounds__(256)
++f32_adaln_bwd_cs(const float* __restrict__ a_, const float* __restrict__ sc, int scld, const float* __restrict__ dx, const float* __restrict__ dres,
++                 float* __restrict__ da, float* __restrict__ dsc, int dscld, float* __restrict__ dsh, int dshld, const float* __restrict__ y,
++                 const float* __restrict__ so, int sold, float* __restrict__ dso, int dsold, float* __restrict__ dyo, int M, float eps, int mrows,
++                 float* __restrict__ part, int pld, int pcsc, int pcsh, int pcso) {
++  pdl_wait();
++  pdl_launch();
++  __shared__ float4 red[8][32];
++  const int w = threadIdx.x >> 5, lane = threadIdx.x & 31, ch = 4 * lane, nsamp = M / mrows;
++  float csc[4] = {0.f, 0.f, 0.f, 0.f}, csh[4] = {0.f, 0.f, 0.f, 0.f}, cso[4] = {0.f, 0.f, 0.f, 0.f};
++  for (int irow = blockIdx.x * 8 + w; irow < mrows; irow += gridDim.x * 8) {
++    float s[4], g[4], psc[4] = {0.f, 0.f, 0.f, 0.f}, psh[4] = {0.f, 0.f, 0.f, 0.f}, pso[4] = {0.f, 0.f, 0.f, 0.f};
++    ld4(sc + (size_t)irow * scld + ch, s);
++    if (y != nullptr) ld4(so + (size_t)irow * sold + ch, g);
++    for (int a = 0; a < nsamp; ++a) {
++      const size_t row = (size_t)a * mrows + irow;
++      float x[4], d[4], dl[4], o[4];
++      ld4(a_ + row * C + ch, x);
++      ld4(dx + row * C + ch, d);
++      const float rstd = norm128(x, eps);
++#pragma unroll
++      for (int i = 0; i < 4; ++i) { dl[i] = d[i] * s[i]; psc[i] += d[i] * x[i] * s[i] * (1.f - s[i]); psh[i] += d[i]; }
++      ln_back(x, dl, rstd, o);
++      if (dres != nullptr) {
++        float r[4];
++        ld4(dres + row * C + ch, r);
++#pragma unroll
++        for (int i = 0; i < 4; ++i) o[i] += r[i];
++      }
++      st4(da + row * C + ch, o);
++      if (y != nullptr) {
++        float yv[4], q[4];
++        ld4(y + row * C + ch, yv);
++#pragma unroll
++        for (int i = 0; i < 4; ++i) { pso[i] += o[i] * yv[i] * g[i] * (1.f - g[i]); q[i] = o[i] * g[i]; }
++        st4(dyo + row * C + ch, q);
++      }
++    }
++    st4(dsc + (size_t)irow * dscld + ch, psc);
++    st4(dsh + (size_t)irow * dshld + ch, psh);
++    if (y != nullptr) st4(dso + (size_t)irow * dsold + ch, pso);
++#pragma unroll
++    for (int i = 0; i < 4; ++i) { csc[i] += psc[i]; csh[i] += psh[i]; cso[i] += pso[i]; }
++  }
++  float* pr = part + (size_t)blockIdx.x * pld;
++  if (pcsc >= 0) block_cols(red, w, lane, csc, pr + pcsc);
++  if (pcsh >= 0) block_cols(red, w, lane, csh, pr + pcsh);
++  if (pcso >= 0 && y != nullptr) block_cols(red, w, lane, cso, pr + pcso);
++}
++
+ // column sums of a [M, 128 g] fp32 view (row pitch ld): grid (G, g); block (blockIdx.x, blockIdx.y) sums rows blockIdx.x * 8 + warp, + G * 8, ...
+ // of its 128-column block and writes the block's 128 partial sums to part[blockIdx.x][128 blockIdx.y ..]; the G partial rows are summed by the host
+ // (the weight-gradient bias sums: torch's reduce_kernel took 130-170 us per [196608, 128..768] sum, ten times a bandwidth bound)
+diff --git a/src/miniworld_engine/kernels/integrations/local_dit_b200.py b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+index c8afa9239..3f1dfa599 100644
+--- a/src/miniworld_engine/kernels/integrations/local_dit_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+@@ -165,6 +165,14 @@ def _hoisting() -> bool:
+     return True
+ 
+ 
++def _colsum_fold() -> bool:
++    """The fp32 backward's bias gradients from partial rows written by the table-gradient kernels (round 3 part 7, 2026-11-17) instead of
++    ``colsum32`` passes over dmod / dmkv. MW_LD7_CS=0 turns it off (A / B only)."""
++    import os
++
++    return os.environ.get("MW_LD7_CS", "1") != "0"
++
++
+ @device_constant
+ def _kernels_ready(index: int) -> bool:
+     """Build and load the bf16 row kernels and the local attention kernels on ``index`` once (raises on a toolchain / driver failure).
+@@ -1462,7 +1470,10 @@ def _block_bwd32(
+             w = wmap[name]
+             return g.to(w.dtype).reshape(w.shape).clone()
+ 
+-        dt = rows.tail_bwd32(dy, t, mod[:, _ST], dmod[:, _ST])  # out = a1 + st t
++        # (round 3 part 7) the bias gradients' column sums inside the kernels that write dmod / dmkv: partial rows cp [G, 896] (dmod's
++        # column layout, then dmkv's scale), summed by ``col_jobs`` -- no second read of dmod (``_colsum_fold``)
++        cp = rows.colparts(rc, 7 * DS_, dev) if _colsum_fold() else None
++        dt = rows.tail_bwd32(dy, t, mod[:, _ST], dmod[:, _ST], part=cp, pc=640)  # out = a1 + st t
+         dh = rows.gemm32(dt, pk.wsT)  # [m, 256]
+         dab, hh = rows.swiglu_bwd32(dh, u)
+         dx2 = rows.gemm32(dab, pk.wuT)  # K = 512
+@@ -1476,6 +1487,8 @@ def _block_bwd32(
+             y=y,
+             so=mod[:, _SO],
+             dso=dmod[:, _SO],
++            part=cp,
++            pcs=(256, -1, 512),
+         )
+         dgated = rows.gemm32(dyo, pk.woT)
+         dp = torch.empty(m, 4 * DS_, device=dev, dtype=F32)  # d P32 (same column layout)
+@@ -1511,16 +1524,31 @@ def _block_bwd32(
+             dx1q = rows.gemm32(dp, pk.wpT, k=2 * DS_)
+             dxkv = rows.gemm32(dp, pk.wpT, k=2 * DS_, a_col0=2 * DS_, b_col0=2 * DS_)
+             dmkv = torch.empty(rc, 2 * DS_, device=dev, dtype=F32)
++            kv = {"part": cp, "pcs": (6 * DS_, -1, -1)} if cp is not None else {}
+             if parallel:  # the K / V AdaLN of s: its LN backward joins the residual's gradient
+-                dres, _ = rows.adaln_bwd32(s2, mkv[:, :DS_], dxkv, da1, dmkv[:, :DS_], dmkv[:, DS_:])
++                dres, _ = rows.adaln_bwd32(s2, mkv[:, :DS_], dxkv, da1, dmkv[:, :DS_], dmkv[:, DS_:], **kv)
+                 dx1 = dx1q
+             else:
+-                dx1, _ = rows.adaln_bwd32(x1, mkv[:, :DS_], dxkv, dx1q, dmkv[:, :DS_], dmkv[:, DS_:])
++                dx1, _ = rows.adaln_bwd32(x1, mkv[:, :DS_], dxkv, dx1q, dmkv[:, :DS_], dmkv[:, DS_:], **kv)
+                 dres = da1
+         else:
+             dx1 = rows.gemm32(dp, pk.wpT)  # K = 512
+             dres = da1
+-        ds, _ = rows.adaln_bwd32(s2, mod[:, _S1], dx1, dres, dmod[:, _S1], dmod[:, _B1])  # AdaLN 1 + the residual
++        s1p = {"part": cp, "pcs": (0, -1, -1)} if cp is not None else {}
++        ds, _ = rows.adaln_bwd32(s2, mod[:, _S1], dx1, dres, dmod[:, _S1], dmod[:, _B1], **s1p)  # AdaLN 1 + the residual
++
++        def colsums_cp():  # the bias gradients from the partial rows cp (+ d bq's column sum): one ``col_jobs`` launch on side stream 0
++            assert cp is not None
++            out = {
++                "attention.ada_ln_in.to_scale.bias": (cp, 0),
++                "attention.to_query.bias": (rows.colsum32(dp[:, qc : qc + DS_], partials=True), 0),
++                "attention.to_scale.bias": (cp, 512),
++                "transition.ada_ln_in.to_scale.bias": (cp, 256),
++                "transition.to_scale.bias": (cp, 640),
++            }
++            if dmkv is not None:
++                out["attention.ada_ln_kv.to_scale.bias"] = (cp, 6 * DS_)
++            return dict(zip(out, rows.col_jobs([(src, c0, wmap[name]) for name, (src, c0) in out.items()]), strict=True))
+ 
+         def colsums():  # the bias gradients: column sums of the finished dmod / dp / dmkv (memory-bound; side stream 0, beside the products)
+             dcols = rows.colsum32(dmod)
+@@ -1535,7 +1563,7 @@ def _block_bwd32(
+                 out["attention.ada_ln_kv.to_scale.bias"] = rows.colsum32(dmkv[:, :DS_])
+             return {name: own(g, name) for name, g in out.items()}
+ 
+-        col_grads, cols_done = _fork(colsums, 0)
++        col_grads, cols_done = _fork(colsums_cp if cp is not None else colsums, 0)
+         dc = rows.gemm32(dmod, pk.wmodT, k=2 * DS_, a_col0=4 * DS_, b_col0=4 * DS_)  # so, st <- c
+         dcn1 = rows.gemm32(dmod, pk.wmodT, k=2 * DS_)
+         dcn2 = rows.gemm32(dmod, pk.wmodT, k=2 * DS_, a_col0=2 * DS_, b_col0=2 * DS_)
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+index 77ff749a7..0a6eb34fe 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+@@ -880,6 +880,9 @@ KERNELS_TF32 = {
+     "gate_b": ("rows_tf32", "f32_gate_bwd", 0),
+     "ln_b": ("rows_tf32", "f32_ln_bwd", 0),
+     "colsum": ("rows_tf32", "f32_colsum", 0),
++    # (round 3 part 7) the table-gradient kernels with the bias gradients' column sums folded in (``tail_bwd32 / adaln_bwd32(.., part=)``)
++    "tail_b_cs": ("rows_tf32", "f32_tail_bwd_cs", 0),
++    "adaln_b_cs": ("rows_tf32", "f32_adaln_bwd_cs", 0),
+     "adaln_rms": ("rows_tf32", "f32_adaln_rms", 0),
+     "adaln_b_rms": ("rows_tf32", "f32_adaln_bwd_rms", 0),
+     "tail_b_rms": ("rows_tf32", "f32_tail_bwd_rms", 0),
+@@ -1291,12 +1296,15 @@ def gate32(g, o):
+     return out
+ 
+ 
+-def tail_bwd32(dy, t, st, dst, rms=False):
++def tail_bwd32(dy, t, st, dst, rms=False, part=None, pc=0):
+     """-> dt = dy * st; dst (a view, written) = dy * t * st (1 - st) (``rms``, ESMFold2's raw gate: dy * t). st / dst with fewer rows than dy
+-    (tables shared by the samples): dst summed over the samples (fixed order)."""
++    (tables shared by the samples): dst summed over the samples (fixed order). ``part`` (round 3 part 7; not with ``rms``): dst's column
++    sums go to part [G, cols] at columns pc .. (``colparts``: one partial row per block of a persistent grid; ``col_jobs`` sums them)."""
+     dt = _new(dy)
+-    atom_kernel32("tail_b_rms" if rms else "tail_b", _dev(dy))(
+-        _rowgrid(st.shape[0]),
++    cs = part is not None
++    assert not (cs and rms)
++    atom_kernel32("tail_b_cs" if cs else "tail_b_rms" if rms else "tail_b", _dev(dy))(
++        (part.shape[0], 1, 1) if cs else _rowgrid(st.shape[0]),
+         (256, 1, 1),
+         dy,
+         t,
+@@ -1307,6 +1315,7 @@ def tail_bwd32(dy, t, st, dst, rms=False):
+         int(dst.stride(0)),
+         int(dy.shape[0]),
+         int(st.shape[0]),
++        *((part, int(part.stride(0)), int(pc)) if cs else ()),
+     )
+     return dt
+ 
+@@ -1318,15 +1327,19 @@ def swiglu_bwd32(dh, u):
+     return dab, hh
+ 
+ 
+-def adaln_bwd32(a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5, rms=False):
++def adaln_bwd32(a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5, rms=False, part=None, pcs=(-1, -1, -1)):
+     """AdaLN backward: -> da = dres + LN backward of dx * scale; dscale (view) = dx LN(a) scale (1 - scale), dshift (view) = dx. With y:
+     also d so (view) = da y so (1 - so) and the returned dyo = da so (the attention output gate upstream of a1 = a + so y). scale (and so,
+-    dscale, dshift, dso) with fewer rows than a: tables shared by the samples, their gradients summed over the samples (fixed order)."""
++    dscale, dshift, dso) with fewer rows than a: tables shared by the samples, their gradients summed over the samples (fixed order).
++    ``part`` (round 3 part 7; not with ``rms``): the column sums of dscale / dshift / dso into part (``colparts``) at the columns ``pcs``
++    (-1: not written)."""
+     M = a.shape[0]
+     da = _new(a)
+     dyo = _new(a) if y is not None else None
+-    atom_kernel32("adaln_b_rms" if rms else "adaln_b", _dev(a))(
+-        _rowgrid(scale.shape[0]),
++    cs = part is not None
++    assert not (cs and rms)
++    atom_kernel32("adaln_b_cs" if cs else "adaln_b_rms" if rms else "adaln_b", _dev(a))(
++        (part.shape[0], 1, 1) if cs else _rowgrid(scale.shape[0]),
+         (256, 1, 1),
+         a,
+         scale,
+@@ -1347,6 +1360,7 @@ def adaln_bwd32(a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, e
+         int(M),
+         float(eps),
+         int(scale.shape[0]),
++        *((part, int(part.stride(0)), *(int(c) for c in pcs)) if cs else ()),
+     )
+     return da, dyo
+ 
+@@ -1373,6 +1387,13 @@ def gate_bwd32(dgated, g, o, dg, A, n):
+     return do, D
+ 
+ 
++def colparts(mrows, cols, device):
++    """The partial-row buffer of the column-sum builds (``tail_bwd32 / adaln_bwd32(.., part=)``; round 3 part 7): [G, cols] fp32, G = the
++    persistent grid (at most eight 256-thread blocks an SM, one block per 8 table rows at most). Sum its rows with ``col_jobs``."""
++    d = device.index if device.index is not None else torch.cuda.current_device()
++    return torch.empty(max(1, min(8 * num_sms(d), (mrows + 7) // 8)), cols, device=device, dtype=F32)
++
++
+ def colsum32(x, partials=False):
+     """The column sums of a fp32 [M, 128 g] view (unit column stride, any row pitch) -> [128 g] fp32: one launch writing G partial rows (a
+     persistent grid, deterministic) and a tiny sum of those."""

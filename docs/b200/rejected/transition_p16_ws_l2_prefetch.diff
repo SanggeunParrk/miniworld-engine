@@ -1,0 +1,56 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+index 8d8b2322e..ee12f5e5e 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+@@ -260,7 +260,7 @@ def pair_chain(x, gamma, beta, wa, wb, ws, eps: float, out=None):
+         tiles * (h // uh),
+         256 if uh <= 32 else 384,
+         2,
+-        [t(xn, d, m, 64, 64, -1, 0, ke), t(wa, d, h, 64, uh), t(wb, d, h, 64, uh), hid],
++        [t(xn, d, m, 64, 64, -1, 0, ke), t(wa, d, h, 64, uh), t(wb, d, h, 64, uh), hid, ws],
+         True,
+     )
+     sq_args = [t(hid, h, m, 64, 64, -1, 0, kq), t(ws, h, d, 64, nb // 2), x, out]
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu
+index 89393bc2a..74f9d51ff 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu
+@@ -54,6 +54,19 @@ DEVI void load_a(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int st, int
+   if (KBX == 1) tma_load_2d_2sm(dst, m, bar, st * 64, row); else tma_load_3d_2sm(dst, m, bar, 0, row, st * KBX);
+ }
+ 
++// (part 16) WSP: an L2 prefetch of this CTA's 1 / gridDim share of the squeeze's Ws [D][H] (the squeeze CTAs load it cold, from
++// DRAM, at their own entry; at 3+ tiles they enter only as the expand CTAs leave). 1: before griddepcontrol.wait, 2: after it
++#ifndef WSP
++#define WSP 0
++#endif
++DEVI void prefetch_ws(const ACT* ws) {
++  constexpr long TOT = (long)D_ * H_ * 2;
++  const long per = ((TOT + gridDim.x - 1) / gridDim.x + 255) / 256 * 256, b0 = per * blockIdx.x;
++  if (b0 >= TOT) return;
++  const long n = TOT - b0 < per ? TOT - b0 : per;
++  asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(reinterpret_cast<const char*>(ws) + b0), "r"((uint32_t)n) : "memory");
++}
++
+ template <int N> DEVI void tld(uint32_t taddr, uint32_t (&r)[N]) {
+   if constexpr (N == 32) tmem_ld32(taddr, r); else tmem_ld16(taddr, r);
+ }
+@@ -61,7 +74,7 @@ template <int N> DEVI void tld(uint32_t taddr, uint32_t (&r)[N]) {
+ // maps: xn [M][D] (box 64 x 64); wa, wb [H][D] (box 64 x UH). h [M][H] bf16.
+ extern "C" __global__ void __launch_bounds__(128 + 128 * NG, 1)
+ transition_sx_expand2(const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mwa,
+-                      const __grid_constant__ CUtensorMap mwb, ACT* __restrict__ hs TSX_STAMP_ARG) {
++                      const __grid_constant__ CUtensorMap mwb, ACT* __restrict__ hs, const ACT* __restrict__ wsg TSX_STAMP_ARG) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+@@ -95,7 +108,9 @@ transition_sx_expand2(const __grid_constant__ CUtensorMap mxn, const __grid_cons
+     if (leader) mbar_expect_tx(&B.full[lane], 2 * (AST + WST));
+     load_w(lane);
+   }
++  if (WSP == 1 && warp == 3 && lane == 0) prefetch_ws(wsg);
+   pdl_wait();                                                  // xn is complete and visible
++  if (WSP == 2 && warp == 3 && lane == 0) prefetch_ws(wsg);
+   if (tid == 0) TSX_ST(1);
+   pdl_launch();
+ 

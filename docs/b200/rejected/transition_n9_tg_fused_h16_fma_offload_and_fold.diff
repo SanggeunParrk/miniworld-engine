@@ -1,0 +1,57 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n9-base/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu	2026-11-19 01:34:12.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n9-transition/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu	2026-11-19 02:21:50.000000000 +0000
+@@ -36,6 +36,12 @@
+ // (the bf16 kernels' TR_SIG 1 form); 0: 1 / (1 + 2^(-z log2 e)), two MUFU ops (the training build: its saved h / gate stay as before);
+ // 9: timing probe only, no sigmoid (wrong numbers). Measured (random weights, fp64 reference): rms error 3.652e-4 / 3.879e-4 at
+ // [16 384, 256] / [65 536, 128] n 2 either way (the fp16 rounding of h dominates)
++#ifndef HSIG1F
++#define HSIG1F 0                                               // N9: the folded tanh epilogue (7 instructions a pair instead of 8)
++#endif
++#ifndef HFMAPAT
++#define HFMAPAT 0                                              // N9: bit i set = pair position i (mod 4) of the epilogue's sigmoid on the FMA pipe instead of MUFU tanh (HSIG 1)
++#endif
+ #ifndef HSIG
+ #define HSIG (SAVE_BUILD ? 0 : 1)
+ #endif
+@@ -654,7 +660,8 @@
+     const float s_ab = SC[1], inv_sh = SC[2], s_y = SC[3];
+     const f2 K1 = mk2(-1.4426950408889634f * s_ab, -1.4426950408889634f * s_ab), K2 = mk2(s_ab * s_ab * inv_sh, s_ab * s_ab * inv_sh);
+     const f2 KT = mk2(0.5f * s_ab, 0.5f * s_ab);
+-    (void)K1; (void)KT;
++    const f2 K2H = mk2(0.5f * s_ab * s_ab * inv_sh, 0.5f * s_ab * s_ab * inv_sh);
++    (void)K1; (void)KT; (void)K2H;
+ #if LNA
+     if (half == 0 && (int)blockIdx.x < tiles) {   // the first tile's first 16-row group of quarter q4 (see LNA)
+       float mr[4];
+@@ -694,8 +701,20 @@
+             // h = (a / (1 + 2^t)) (b k2), k2 = s_ab^2 / s_h
+ #if HSIG == 1
+             // (round 3 part 20) sigmoid(z) = 0.5 tanh(z / 2) + 0.5, z = a s_ab: one MUFU op per unit
+-            const f2 A = mk2u(a[e], a[e + 1]), T = mul2(A, KT);
++            const f2 A = mk2u(a[e], a[e + 1]);
++#if HFMAPAT
++            // (N9) the pairs whose bit of HFMAPAT (position (e / 2) mod 4) is set take the sigmoid on the FMA pipe (packed polynomial 2^x and Newton reciprocal, no MUFU): the unit's MUFU share moved
++            f2 G;
++            if ((HFMAPAT >> ((e >> 1) & 3)) & 1) G = rcp_nr2(add2(ex2_poly2(mul2(A, K1)), mk2(1.f, 1.f)));
++            else { const f2 T = mul2(A, KT); G = fma2(mk2(tanhf_approx(lo2(T)), tanhf_approx(hi2(T))), mk2(0.5f, 0.5f), mk2(0.5f, 0.5f)); }
++#elif HSIG1F
++            // (N9) h = (a (t + 1)) (b s_ab^2 / (2 s_h)), t = tanh(z / 2): the 0.5 of the sigmoid folded into the b factor, one FFMA2 instead of FFMA2 + FMUL2 a pair
++            const f2 T = mul2(A, KT), tt = mk2(tanhf_approx(lo2(T)), tanhf_approx(hi2(T)));
++            const f2 H = mul2(fma2(A, tt, A), mul2(mk2u(b[e], b[e + 1]), K2H));
++#else
++            const f2 T = mul2(A, KT);
+             const f2 G = fma2(mk2(tanhf_approx(lo2(T)), tanhf_approx(hi2(T))), mk2(0.5f, 0.5f), mk2(0.5f, 0.5f));
++#endif
+ #elif HSIG == 9
+             const f2 A = mk2u(a[e], a[e + 1]);   // timing probe only (wrong numbers): no sigmoid
+             const f2 G = mk2(1.f, 1.f);
+@@ -703,7 +722,9 @@
+             const f2 A = mk2u(a[e], a[e + 1]), T = mul2(A, K1);
+             const f2 G = mk2(rcpf(__fadd_rn(1.f, ex2f(lo2(T)))), rcpf(__fadd_rn(1.f, ex2f(hi2(T)))));
+ #endif
++#if !(HSIG == 1 && HSIG1F && !HFMAPAT)
+             const f2 H = mul2(mul2(A, G), mul2(mk2u(b[e], b[e + 1]), K2));
++#endif
+             hw[8 * p + e / 2] = f2h2(lo2(H), hi2(H));
+           }
+         }

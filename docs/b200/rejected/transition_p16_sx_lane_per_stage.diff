@@ -1,0 +1,109 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+index d4bc014ee..b7e4a12de 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+@@ -72,6 +72,11 @@ constexpr uint32_t IDESC = idesc_bf16(128, 2 * CH);
+ DEVI void mma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) { umma_ss(d, a, b, IDESC, acc); }
+ #endif
+ 
++#ifndef EQML
++#define EQML 0
++#endif
++static_assert(!EQML || STG <= 32, "one ring stage per lane");
++
+ struct Bars {
+   uint64_t full[STG], empty[STG], mma_done, red_full;
+   uint32_t tmem;
+@@ -122,13 +127,23 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+     fence_barrier_init();
+     fence_proxy_async();
+     prefetch_map(&mxn); prefetch_map(&mwa); prefetch_map(&mwb);
+-    if (wpre)
++    if (wpre && !EQML)
+       for (int kb = 0; kb < STG; ++kb) {                        // weights first: they do not depend on the LayerNorm kernel
+         mbar_expect_tx(&B.full[kb], KBT + WKB);
+         tma_load_2d(su + O_W + kb * WKB, &mwa, &B.full[kb], k0 + kb * BKE, h0);
+         tma_load_2d(su + O_W + kb * WKB + CH * 128, &mwb, &B.full[kb], k0 + kb * BKE, h0);
+       }
+   }
++#if EQML
++  if (warp == 0 && wpre) {                                     // the weights of ring stage `lane`, before the wait
++    __syncwarp();
++    if (lane < STG) {
++      mbar_expect_tx(&B.full[lane], KBT + WKB);
++      tma_load_2d(su + O_W + lane * WKB, &mwa, &B.full[lane], k0 + lane * BKE, h0);
++      tma_load_2d(su + O_W + lane * WKB + CH * 128, &mwb, &B.full[lane], k0 + lane * BKE, h0);
++    }
++  }
++#endif
+   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), TCOLS); tmem_relinquish(); }
+   tc_fence_before();
+   __syncthreads();
+@@ -140,8 +155,22 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+   if (tid == 0) TSX_ST(1);
+ 
+   if (warp == 0) {
++#if EQML
++    // (part 16) lane s issues ring stage s of the first round (one thread issues ~one TMA per 600 clocks)
++    if (lane < STG) {
++      if (!wpre) {
++        mbar_expect_tx(&B.full[lane], KBT + WKB);
++        tma_load_2d(su + O_W + lane * WKB, &mwa, &B.full[lane], k0 + lane * BKE, h0);
++        tma_load_2d(su + O_W + lane * WKB + CH * 128, &mwb, &B.full[lane], k0 + lane * BKE, h0);
++      }
++      tma_load_2d(su + O_X + lane * KBT, &mxn, &B.full[lane], k0 + lane * BKE, row0);
++    }
++    if (lane == 0)
++      for (int kb = STG; kb < NKB; ++kb) {
++#else
+     if (lane == 0)
+       for (int kb = 0; kb < NKB; ++kb) {
++#endif
+         const int s = kb % STG;
+         if (kb >= STG) mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
+         if (!wpre || kb >= STG) {                              // (wpre 0: the LayerNorm launch wrote the weights, complete only now)
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+index 0b28b8e04..33ee79a76 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+@@ -63,6 +63,11 @@ constexpr uint32_t IDESC = idesc_bf16(128, NB);
+ DEVI void mma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) { umma_ss(d, a, b, IDESC, acc); }
+ #endif
+ 
++#ifndef QML
++#define QML 0
++#endif
++static_assert(!QML || STG <= 32, "one ring stage per lane");
++
+ struct Bars {
+   uint64_t full[STG], empty[STG], acc_full, red_full;
+   uint32_t tmem;
+@@ -110,7 +115,28 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+   const uint32_t tmem = B.tmem;
+ 
+   if (warp == 0) {
++#if QML
++    // (part 16) lane s issues ring stage s of the first round (weights before the wait, the h box after it): one thread issues ~one
++    // TMA per 600 clocks, and lane 0 alone took ~2.6 us for the 6 h K-blocks of a [1, 768, 384] n 4 CTA
++    if (lane < STG) {
++      mbar_expect_tx(&B.full[lane], KBT + WBT);
++      tma_load_2d(su + O_B + lane * WBT, &mws, &B.full[lane], k0 + lane * BKE, nb * NB);
++      pdl_wait();
++      if (lane == 0) TSX_ST(1);
++      tma_load_2d(su + O_A + lane * KBT, &mh, &B.full[lane], k0 + lane * BKE, row0);
++    }
++    if (lane == 0)
++      for (int kb = STG; kb < NKB; ++kb) {
++        const int s = kb % STG;
++        mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
++        mbar_expect_tx(&B.full[s], KBT + WBT);
++        tma_load_2d(su + O_B + s * WBT, &mws, &B.full[s], k0 + kb * BKE, nb * NB);
++        tma_load_2d(su + O_A + s * KBT, &mh, &B.full[s], k0 + kb * BKE, row0);
++      }
++    if (false) {
++#else
+     if (lane == 0) {
++#endif
+       for (int kb = 0; kb < STG; ++kb) {                        // the weights first: they do not depend on the expand
+         mbar_expect_tx(&B.full[kb], KBT + WBT);
+         tma_load_2d(su + O_B + kb * WBT, &mws, &B.full[kb], k0 + kb * BKE, nb * NB);

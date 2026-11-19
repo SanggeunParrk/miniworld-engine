@@ -1,0 +1,70 @@
+--- src/miniworld_engine/kernels/swa_dit/cuda/sm100/embed_glue.cu	2026-11-18 17:52:33.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n1-transition/tmp/embed_glue.with3	2026-11-18 17:52:33.000000000 +0000
+@@ -485,3 +485,67 @@
+   rope_body<true>(POS, UID, MASK, INV, SRC, COS, SIN, SEQ, B, N, half, nrope, fl);
+ }
+ 
++// N1 round 4: swa_embed_scatter with the run's index / mask / x loads issued together in chunks of 8 atoms (the loop above is a chain of one
++// dependent round trip per atom: 8 for the usual run of 8). The chunk also looks at the index of the atom after it, so a run of exactly 8 atoms
++// needs no second chunk. The atoms of a cell are summed in the same order, so the same bits (a token split over several runs: one red.add a run).
++extern "C" __global__ void __launch_bounds__(256)
++swa_embed_scatter2_sm100(const void* __restrict__ X, const uint8_t* __restrict__ MASK, const long long* __restrict__ IDX,
++                         float* __restrict__ ACC, int B, int N, int ntok, int T, int relu, int x_bf16) {
++  constexpr int CH = 8;
++  const int T8 = T / 8;
++  const long long total = (long long)B * N * T8;
++  for (long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x; t < total; t += (long long)gridDim.x * blockDim.x) {
++    const long long m = t / T8;
++    const int c8 = (int)(t - m * T8), b = (int)(m / N), s = (int)(m - (long long)b * N);
++    const long long tok = IDX[m];
++    if (s > 0 && IDX[m - 1] == tok) continue;                             // not the head of its run
++    const long long end = (long long)(b + 1) * N;
++    float sum[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, cnt = 0.f;
++    long long j = m;
++    bool more = true;
++    while (more) {
++      long long ix[CH + 1];
++      uint8_t mk[CH];
++#pragma unroll
++      for (int u = 0; u <= CH; ++u) ix[u] = j + u < end ? IDX[j + u] : tok + 1;   // (past the row: not in the run)
++#pragma unroll
++      for (int u = 0; u < CH; ++u) mk[u] = j + u < end ? MASK[j + u] : 0;
++      bool use[CH];
++      bool run = true;
++#pragma unroll
++      for (int u = 0; u < CH; ++u) {
++        run = run && ix[u] == tok;
++        use[u] = run && mk[u] != 0;
++      }
++      float4 xa[CH], xb[CH];
++#pragma unroll
++      for (int u = 0; u < CH; ++u) {  // speculative: the rows exist (clamped to the row), whether or not the atom is in the run
++        const long long jj = j + u < end ? j + u : end - 1;
++        if (x_bf16) {
++          const uint4 q = *reinterpret_cast<const uint4*>(reinterpret_cast<const uint16_t*>(X) + (size_t)jj * T + 8 * c8);
++          xa[u] = make_float4(bf16lo(q.x), bf16hi(q.x), bf16lo(q.y), bf16hi(q.y));
++          xb[u] = make_float4(bf16lo(q.z), bf16hi(q.z), bf16lo(q.w), bf16hi(q.w));
++        } else {
++          const float4* p = reinterpret_cast<const float4*>(reinterpret_cast<const float*>(X) + (size_t)jj * T + 8 * c8);
++          xa[u] = p[0];
++          xb[u] = p[1];
++        }
++      }
++#pragma unroll
++      for (int u = 0; u < CH; ++u) {
++        if (!use[u]) continue;
++        const float v[8] = {xa[u].x, xa[u].y, xa[u].z, xa[u].w, xb[u].x, xb[u].y, xb[u].z, xb[u].w};
++#pragma unroll
++        for (int e = 0; e < 8; ++e) sum[e] += relu ? fmaxf(v[e], 0.f) : v[e];
++        cnt += 1.f;
++      }
++      more = run && ix[CH] == tok;  // the atom after the chunk is in the run too
++      j += CH;
++    }
++    if (cnt == 0.f) continue;
++    float* acc = ACC + ((size_t)b * ntok + (size_t)tok) * (T + 1);
++#pragma unroll
++    for (int e = 0; e < 8; ++e) red_add(acc + 8 * c8 + e, sum[e]);
++    if (c8 == 0) red_add(acc + T, cnt);
++  }
++}

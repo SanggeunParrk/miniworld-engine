@@ -1,0 +1,44 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 06faa4f7e..d883ac0e3 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -416,7 +416,7 @@ FWD_X2 = {(256, 2), (256, 4)}
+ #: (S90) the LayerNorm folded into the D 512 inference expand (tstat_w.cu + tswiglu_w.cu -DFOLD) from this many rows
+ FOLD_LN = True
+ #: the statistics pass: lanes a row (16: two rows a warp, 4 x 16-B loads a lane) and blocks an SM
+-FOLD_N4 = False  # n 4 (row 34) kept on the LayerNorm launch: with the fold its expand takes 1437 us against 1328 (L 640) although the statistics pass saves 73 us (76 against 149)
++FOLD_N4 = True  # (A/B) n 4 (row 34) kept on the LayerNorm launch: with the fold its expand takes 1437 us against 1328 (L 640) although the statistics pass saves 73 us (76 against 149)
+ STAT_LPR = 16
+ STAT_BPS = 8
+ FOLD_MIN_ROWS = 1 << 16
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tswiglu_w.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tswiglu_w.cu
+index b51b8e15d..49976c9a3 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tswiglu_w.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tswiglu_w.cu
+@@ -183,14 +183,18 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
+ #ifdef FOLD
+         {
+ #pragma unroll
+-          for (int k = 0; k < 16; ++k) {
+-            const int cu = st2 * 32 + 2 * k;                  // the column's position among this warpgroup's 64 units
+-            const float2 ua = *reinterpret_cast<const float2*>(uvs + cu), va = *reinterpret_cast<const float2*>(uvs + 64 + cu);
+-            const float2 ub = *reinterpret_cast<const float2*>(uvs + 128 + cu), vb = *reinterpret_cast<const float2*>(uvs + 192 + cu);
+-            av[2 * k] = __float_as_uint(fmaf(rsr, __uint_as_float(av[2 * k]), fmaf(-c1r, ua.x, va.x)));
+-            av[2 * k + 1] = __float_as_uint(fmaf(rsr, __uint_as_float(av[2 * k + 1]), fmaf(-c1r, ua.y, va.y)));
+-            bv[2 * k] = __float_as_uint(fmaf(rsr, __uint_as_float(bv[2 * k]), fmaf(-c1r, ub.x, vb.x)));
+-            bv[2 * k + 1] = __float_as_uint(fmaf(rsr, __uint_as_float(bv[2 * k + 1]), fmaf(-c1r, ub.y, vb.y)));
++          for (int k4 = 0; k4 < 8; ++k4) {
++            const int cu = st2 * 32 + 4 * k4;                 // the column's position among this warpgroup's 64 units; float4 broadcast loads
++            const float4 ua = *reinterpret_cast<const float4*>(uvs + cu), va = *reinterpret_cast<const float4*>(uvs + 64 + cu);
++            const float4 ub = *reinterpret_cast<const float4*>(uvs + 128 + cu), vb = *reinterpret_cast<const float4*>(uvs + 192 + cu);
++            av[4 * k4] = __float_as_uint(fmaf(rsr, __uint_as_float(av[4 * k4]), fmaf(-c1r, ua.x, va.x)));
++            av[4 * k4 + 1] = __float_as_uint(fmaf(rsr, __uint_as_float(av[4 * k4 + 1]), fmaf(-c1r, ua.y, va.y)));
++            av[4 * k4 + 2] = __float_as_uint(fmaf(rsr, __uint_as_float(av[4 * k4 + 2]), fmaf(-c1r, ua.z, va.z)));
++            av[4 * k4 + 3] = __float_as_uint(fmaf(rsr, __uint_as_float(av[4 * k4 + 3]), fmaf(-c1r, ua.w, va.w)));
++            bv[4 * k4] = __float_as_uint(fmaf(rsr, __uint_as_float(bv[4 * k4]), fmaf(-c1r, ub.x, vb.x)));
++            bv[4 * k4 + 1] = __float_as_uint(fmaf(rsr, __uint_as_float(bv[4 * k4 + 1]), fmaf(-c1r, ub.y, vb.y)));
++            bv[4 * k4 + 2] = __float_as_uint(fmaf(rsr, __uint_as_float(bv[4 * k4 + 2]), fmaf(-c1r, ub.z, vb.z)));
++            bv[4 * k4 + 3] = __float_as_uint(fmaf(rsr, __uint_as_float(bv[4 * k4 + 3]), fmaf(-c1r, ub.w, vb.w)));
+           }
+         }
+ #endif

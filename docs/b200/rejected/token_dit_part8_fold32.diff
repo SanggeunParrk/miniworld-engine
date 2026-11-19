@@ -1,0 +1,514 @@
+diff --git a/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu b/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
+index a08c24fd7..de7fc432a 100644
+--- a/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
++++ b/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
+@@ -388,6 +388,198 @@ void final_rest100(std::vector<at::Tensor> outs, std::vector<bool> fill, at::Ten
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
++// ---- fp32 inference: the conditioning folded into ONE GEMM (2026-11-18, round 3 part 8; the bf16 CondFold of token_dit_rows.cu in
++// fp32). G [P, 6 D] = c [W1; W2]^T (TF32, no bias); the AdaLN table j of token tok is rstd_c (G_j - mean_c r_j) + b1_j (r = W1 1:
++// LN(c) W1^T + b1 without the LayerNorm pass and the second GEMM; SIG = false, the identity AdaLN, reads the raw c: G_j + b1_j), gate j
++// is G_{4 + j} + b2_j. The residual source is the fp32 block input xin itself (no copy). One row per block of NT threads (D = 4 NT).
++struct Fold32 {
++  const float* r;    // [4 D] W1 1
++  const float* b;    // [4 D] b1
++  const float* gb;   // [2 D] b2
++  float2* st;        // [P] (mean, rstd) of the conditioning rows
++  const float* gg;   // the gates of token 0: G + 4 D, or a second GEMM's output (gates beside the chain)
++  long sgg;          // its row stride
++};
++
++template <int NT>
++__device__ __forceinline__ float2 block_sum2_100(float2 v, float2* red) {
++  v.x = warp_sum(v.x); v.y = warp_sum(v.y);
++  const int w = threadIdx.x / 32, l = threadIdx.x % 32;
++  if (l == 0) red[w] = v;
++  __syncthreads();
++  float2 t = make_float2(0.f, 0.f);
++#pragma unroll
++  for (int i = 0; i < NT / 32; ++i) { t.x += red[i].x; t.y += red[i].y; }
++  __syncthreads();
++  return t;
++}
++
++// out = xhat rstd * f(ms) + mb, the tables (js, js + 1) of the row's G corrected by the conditioning stats s
++template <int NT, bool SIG>
++__device__ __forceinline__ void fold32_tab(float4 a, float rstd, const float* Gt, const Fold32& f, int js, float2 s, float* out) {
++  constexpr int D = NT * 4;
++  const int col = threadIdx.x * 4;
++  float4 m = V4<float>::load(Gt + js * D + col), h = V4<float>::load(Gt + (js + 1) * D + col);
++  const float4 bs = V4<float>::load(f.b + js * D + col), bb = V4<float>::load(f.b + (js + 1) * D + col);
++  if (SIG) {
++    const float4 rs = V4<float>::load(f.r + js * D + col), rb = V4<float>::load(f.r + (js + 1) * D + col);
++    m = make_float4(s.y * fmaf(-s.x, rs.x, m.x), s.y * fmaf(-s.x, rs.y, m.y), s.y * fmaf(-s.x, rs.z, m.z), s.y * fmaf(-s.x, rs.w, m.w));
++    h = make_float4(s.y * fmaf(-s.x, rb.x, h.x), s.y * fmaf(-s.x, rb.y, h.y), s.y * fmaf(-s.x, rb.z, h.z), s.y * fmaf(-s.x, rb.w, h.w));
++  }
++  m = add4(m, bs); h = add4(h, bb);
++  if (SIG) m = sig4(m);
++  V4<float>::store(out + col, make_float4(a.x * rstd * m.x + h.x, a.y * rstd * m.y + h.y, a.z * rstd * m.z + h.z, a.w * rstd * m.w + h.w));
++}
++
++template <int NT>
++__device__ __forceinline__ float4 fold32_gate(int tok, const Fold32& f, int j) {
++  constexpr int D = NT * 4;
++  const int col = threadIdx.x * 4;
++  return sig4(add4(V4<float>::load(f.gg + (long)tok * f.sgg + j * D + col), V4<float>::load(f.gb + j * D + col)));
++}
++
++// xa = AdaLN(xin) with the tables 0, 1 (TWO: xt with 2, 3 -- the parallel block's transition input); the conditioning row's stats from c
++// (stored at st[tok] by the rows tok < P)
++template <int NT, bool TWO, bool SIG>
++__global__ void __launch_bounds__(NT) fold32_in_k(const float* __restrict__ XIN, long sxin, const float* __restrict__ G, long sg,
++    const float* __restrict__ C, long sc, int dc, float* __restrict__ OUT, float* __restrict__ OUT2, int P, float eps, float ceps, Fold32 f) {
++  constexpr int D = NT * 4;
++  __shared__ float2 red[NT / 32];
++  const long row = blockIdx.x;
++  const int tok = row % P, col = threadIdx.x * 4;
++  const float4 x = V4<float>::load(XIN + row * sxin + col);
++  const bool on = SIG && col < dc;
++  const float4 v = on ? V4<float>::load(C + (long)tok * sc + col) : zero4();
++  const float2 m = block_sum2_100<NT>(make_float2(sum4(x), sum4(v)), red);
++  const float mean = m.x / D, cmean = SIG ? m.y / (float)dc : 0.f;
++  const float4 a = make_float4(x.x - mean, x.y - mean, x.z - mean, x.w - mean);
++  const float4 cv = on ? make_float4(v.x - cmean, v.y - cmean, v.z - cmean, v.w - cmean) : zero4();
++  const float2 q = block_sum2_100<NT>(make_float2(sum4(mul4(a, a)), sum4(mul4(cv, cv))), red);
++  const float rstd = rsqrtf(q.x / D + eps);
++  const float2 s = SIG ? make_float2(cmean, rsqrtf(q.y / (float)dc + ceps)) : make_float2(0.f, 1.f);
++  if (SIG && row < P && threadIdx.x == 0) f.st[tok] = s;
++  const float* Gt = G + (long)tok * sg;
++  fold32_tab<NT, SIG>(a, rstd, Gt, f, 0, s, OUT + row * D);
++  if (TWO) fold32_tab<NT, SIG>(a, rstd, Gt, f, 2, s, OUT2 + row * D);
++}
++
++// the sequential block's transition input: xa = AdaLN(xin + sigmoid(gA) ya) with the tables 2, 3
++template <int NT, bool SIG>
++__global__ void __launch_bounds__(NT) fold32_mid_k(const float* __restrict__ XIN, long sxin, const float* __restrict__ YA, long sya,
++    const float* __restrict__ G, long sg, float* __restrict__ OUT, int P, float eps, Fold32 f) {
++  constexpr int D = NT * 4;
++  __shared__ float red[NT / 32];
++  const long row = blockIdx.x;
++  const int tok = row % P, col = threadIdx.x * 4;
++  const float* Gt = G + (long)tok * sg;
++  float4 x = V4<float>::load(XIN + row * sxin + col);
++  const float4 y = V4<float>::load(YA + row * sya + col), g = fold32_gate<NT>(tok, f, 0);
++  x = make_float4(x.x + g.x * y.x, x.y + g.y * y.y, x.z + g.z * y.z, x.w + g.w * y.w);
++  const float mean = block_sum<NT>(sum4(x), red) / D;
++  const float4 a = make_float4(x.x - mean, x.y - mean, x.z - mean, x.w - mean);
++  const float rstd = rsqrtf(block_sum<NT>(sum4(mul4(a, a)), red) / D + eps);
++  fold32_tab<NT, SIG>(a, rstd, Gt, f, 2, SIG ? f.st[tok] : make_float2(0.f, 1.f), OUT + row * D);
++}
++
++// out = (xin + sigmoid(gA) ya) + sigmoid(gT) y: the sequential block's two residuals and the parallel block's one
++template <int NT>
++__global__ void __launch_bounds__(NT) fold32_out_k(const float* __restrict__ XIN, long sxin, const float* __restrict__ YA, long sya,
++    const float* __restrict__ Y, long sy, const float* __restrict__ G, long sg, float* __restrict__ OUT, int P, Fold32 f) {
++  constexpr int D = NT * 4;
++  const long row = blockIdx.x;
++  const int tok = row % P, col = threadIdx.x * 4;
++  const float* Gt = G + (long)tok * sg;
++  float4 x = V4<float>::load(XIN + row * sxin + col);
++  const float4 ya = V4<float>::load(YA + row * sya + col), ga = fold32_gate<NT>(tok, f, 0);
++  x = make_float4(x.x + ga.x * ya.x, x.y + ga.y * ya.y, x.z + ga.z * ya.z, x.w + ga.w * ya.w);
++  const float4 y = V4<float>::load(Y + row * sy + col), gt = fold32_gate<NT>(tok, f, 1);
++  x = make_float4(x.x + gt.x * y.x, x.y + gt.y * y.y, x.z + gt.z * y.z, x.w + gt.w * y.w);
++  V4<float>::store(OUT + row * D + col, x);
++}
++
++static void fold32_check(const at::Tensor& t, const char* name, int64_t rows, int64_t D) {
++  TORCH_CHECK(t.scalar_type() == at::kFloat && t.dim() == 2 && t.size(0) == rows && t.size(1) == D && t.stride(1) == 1 &&
++                  t.stride(0) % 4 == 0 && reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0,
++              "fold32: ", name, " fp32 [", rows, ", ", D, "], 16-byte aligned rows");
++}
++
++static Fold32 fold32_make(const at::Tensor& g, const at::Tensor& r, const at::Tensor& b, const at::Tensor& b2, const at::Tensor& st,
++                          int64_t D, const c10::optional<at::Tensor>& g2) {
++  // G [P, 6 D] (tables then gates), or G [P, >= 4 D] tables and g2 [P, 2 D] gates (the gates' GEMM beside the chain)
++  TORCH_CHECK(g.scalar_type() == at::kFloat && g.dim() == 2 && g.size(1) >= (g2.has_value() ? 4 : 6) * D && g.stride(1) == 1 &&
++                  g.stride(0) % 4 == 0 && reinterpret_cast<uintptr_t>(g.data_ptr()) % 16 == 0,
++              "fold32: G fp32 [P, 6 D] (or [P, 4 D] + g2)");
++  if (g2.has_value())
++    TORCH_CHECK(g2->scalar_type() == at::kFloat && g2->dim() == 2 && g2->size(0) == g.size(0) && g2->size(1) >= 2 * D && g2->stride(1) == 1 &&
++                    g2->stride(0) % 4 == 0 && reinterpret_cast<uintptr_t>(g2->data_ptr()) % 16 == 0,
++                "fold32: g2 fp32 [P, 2 D]");
++  for (const at::Tensor* t : {&r, &b, &b2})
++    TORCH_CHECK(t->scalar_type() == at::kFloat && t->is_contiguous() && t->numel() == (t == &b2 ? 2 : 4) * D, "fold32: r / b1 [4 D], b2 [2 D]");
++  TORCH_CHECK(st.scalar_type() == at::kFloat && st.is_contiguous() && st.numel() == 2 * g.size(0), "fold32: stats fp32 [P, 2]");
++  Fold32 f;
++  f.r = r.data_ptr<float>(); f.b = b.data_ptr<float>(); f.gb = b2.data_ptr<float>(); f.st = reinterpret_cast<float2*>(st.data_ptr());
++  f.gg = g2.has_value() ? g2->data_ptr<float>() : g.data_ptr<float>() + 4 * D;
++  f.sgg = g2.has_value() ? g2->stride(0) : g.stride(0);
++  return f;
++}
++
++#define FOLD32_NT(D, NT, ...)                                                                          \
++  [&] {                                                                                                \
++    TORCH_CHECK((D) == 768 || (D) == 1024, "fold32: width 768 or 1024");                              \
++    if ((D) == 768) { constexpr int NT = 192; return __VA_ARGS__(); }                                  \
++    constexpr int NT = 256; return __VA_ARGS__();                                                      \
++  }()
++
++void fold32_in(at::Tensor xin, at::Tensor g, at::Tensor c, at::Tensor r, at::Tensor b, at::Tensor b2, at::Tensor st, at::Tensor out,
++               c10::optional<at::Tensor> out2, double eps, double ceps, bool sig, c10::optional<at::Tensor> g2) {
++  const int64_t M = xin.size(0), D = xin.size(1), P = g.size(0), dc = c.size(1);
++  TORCH_CHECK(P > 0 && M % P == 0 && c.size(0) == P && dc <= D && dc % 4 == 0, "fold32_in: M a multiple of P, c [P, dc <= D]");
++  fold32_check(xin, "xin", M, D); fold32_check(out, "out", M, D);
++  TORCH_CHECK(c.scalar_type() == at::kFloat && c.stride(1) == 1 && c.stride(0) % 4 == 0 && reinterpret_cast<uintptr_t>(c.data_ptr()) % 16 == 0,
++              "fold32_in: c fp32, 16-byte aligned rows");
++  TORCH_CHECK(out.is_contiguous() && (!out2.has_value() || out2->is_contiguous()), "fold32_in: contiguous out / out2");
++  if (out2.has_value()) fold32_check(*out2, "out2", M, D);
++  const Fold32 f = fold32_make(g, r, b, b2, st, D, g2);
++  const at::cuda::CUDAGuard gd(xin.device());
++  float* o2 = out2.has_value() ? out2->data_ptr<float>() : nullptr;
++  FOLD32_NT(D, NT, [&] {
++    auto k = out2.has_value() ? (sig ? fold32_in_k<NT, true, true> : fold32_in_k<NT, true, false>)
++                              : (sig ? fold32_in_k<NT, false, true> : fold32_in_k<NT, false, false>);
++    k<<<(unsigned)M, NT, 0, at::cuda::getCurrentCUDAStream()>>>(xin.data_ptr<float>(), xin.stride(0), g.data_ptr<float>(), g.stride(0),
++        c.data_ptr<float>(), c.stride(0), (int)dc, out.data_ptr<float>(), o2, (int)P, (float)eps, (float)ceps, f);
++  });
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++
++void fold32_mid(at::Tensor xin, at::Tensor ya, at::Tensor g, at::Tensor r, at::Tensor b, at::Tensor b2, at::Tensor st, at::Tensor out,
++                double eps, bool sig, c10::optional<at::Tensor> g2) {
++  const int64_t M = xin.size(0), D = xin.size(1), P = g.size(0);
++  TORCH_CHECK(P > 0 && M % P == 0 && out.is_contiguous(), "fold32_mid: M a multiple of P, contiguous out");
++  fold32_check(xin, "xin", M, D); fold32_check(ya, "ya", M, D); fold32_check(out, "out", M, D);
++  const Fold32 f = fold32_make(g, r, b, b2, st, D, g2);
++  const at::cuda::CUDAGuard gd(xin.device());
++  FOLD32_NT(D, NT, [&] {
++    auto k = sig ? fold32_mid_k<NT, true> : fold32_mid_k<NT, false>;
++    k<<<(unsigned)M, NT, 0, at::cuda::getCurrentCUDAStream()>>>(xin.data_ptr<float>(), xin.stride(0), ya.data_ptr<float>(), ya.stride(0),
++        g.data_ptr<float>(), g.stride(0), out.data_ptr<float>(), (int)P, (float)eps, f);
++  });
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++
++void fold32_out(at::Tensor xin, at::Tensor ya, at::Tensor y, at::Tensor g, at::Tensor r, at::Tensor b, at::Tensor b2, at::Tensor st,
++                at::Tensor out, c10::optional<at::Tensor> g2) {
++  const int64_t M = xin.size(0), D = xin.size(1), P = g.size(0);
++  TORCH_CHECK(P > 0 && M % P == 0 && out.is_contiguous(), "fold32_out: M a multiple of P, contiguous out");
++  fold32_check(xin, "xin", M, D); fold32_check(ya, "ya", M, D); fold32_check(y, "y", M, D); fold32_check(out, "out", M, D);
++  const Fold32 f = fold32_make(g, r, b, b2, st, D, g2);
++  const at::cuda::CUDAGuard gd(xin.device());
++  FOLD32_NT(D, NT, [&] {
++    fold32_out_k<NT><<<(unsigned)M, NT, 0, at::cuda::getCurrentCUDAStream()>>>(xin.data_ptr<float>(), xin.stride(0), ya.data_ptr<float>(),
++        ya.stride(0), y.data_ptr<float>(), y.stride(0), g.data_ptr<float>(), g.stride(0), out.data_ptr<float>(), (int)P, f);
++  });
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++
+ // replace the shared binding ``name`` (module_::def would add an overload behind it)
+ template <typename F, typename... Extra>
+ void rebind(pybind11::module_& m, const char* name, F&& f, const Extra&... extra) {
+@@ -409,4 +601,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("final_lnw100", &final_lnw100);
+   m.def("final_reduce100", &final_reduce100);
+   m.def("final_rest100", &final_rest100);
++  m.def("fold32_in", &fold32_in);
++  m.def("fold32_mid", &fold32_mid);
++  m.def("fold32_out", &fold32_out);
+ }
+diff --git a/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py b/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py
+index b1ef56069..c92218c71 100644
+--- a/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py
++++ b/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py
+@@ -367,6 +367,16 @@ _B200_NOGATE_GEMM = os.environ.get("MINIWORLD_TOKEN_B200_NOGATE_GEMM", "1") != "
+ #: core (``bias_only_dit.cuda.side``; MINIWORLD_TOKEN_B200_STREAMS=0: one chain). The pair pass is the largest stage of a step whose
+ #: bias is rebuilt per replay (36 of 213 us at L 768 bf16, 115 of 372 us fp32) and reads nothing of the conditioning / single chain.
+ _B200_STREAMS = os.environ.get("MINIWORLD_TOKEN_B200_STREAMS", "1") != "0"
++#: B200 fp32 inference: the conditioning folded into one TF32 GEMM (``fold32_*`` row passes; 0: cond_rows + two GEMMs)
++_B200_FOLD32 = os.environ.get("MINIWORLD_TOKEN_B200_FOLD32", "1") != "0"
++#: B200 fp32 inference, several samples: one q | k | v | g GEMM, v read MN-major by the core (``-DVMN``; 0: the v^T GEMM)
++_B200_VMN = os.environ.get("MINIWORLD_TOKEN_B200_VMN", "1") != "0"
++# EXPERIMENT (X_PAR 1 / 2): the parallel block's transition beside the attention
++_XPAR = int(os.environ.get("X_PAR", "0"))
++#: B200 parallel blocks inside a capture: the transition on its own stream beside the attention (0: on the chain after it)
++_B200_PAR = os.environ.get("MINIWORLD_TOKEN_B200_PAR", "1") != "0"
++_XG2 = os.environ.get("X_G2", "0") == "1"
++_XPLATE = os.environ.get("X_PLATE", "0") == "1"
+ 
+ 
+ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=None, variant=None):
+@@ -534,6 +544,23 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+                     b1_.float().contiguous(),
+                     b2_.float().contiguous(),
+                 )
++            if b200 and fp32 and _B200_FOLD32 and "fold32" not in hit[1][1]:
++                # B200 fp32 (2026-11-18, part 8): the conditioning folded into ONE TF32 GEMM ([W1; W2] fp32, W1 1 summed in fp64, b1 / b2),
++                # made once with the static pack
++                w1_, b1_, w2_, b2_ = hit[0][:4]
++                hit[1][1]["fold32"] = (
++                    torch.cat([w1_, w2_]).float().contiguous(),
++                    w1_.double().sum(1).float(),
++                    b1_.float().contiguous(),
++                    b2_.float().contiguous(),
++                )
++            if b200 and fp32 and _B200_VMN and "qkvg4" not in hit[1][1]:
++                # B200 fp32, several samples (part 8): the q | k | v | g weight / bias (the pack's order is q | k | g | v) for ONE GEMM whose
++                # v columns the core reads MN-major; made after the no-gate bias above
++                wp, bp = hit[0][5], hit[0][6]
++                hit[1][1]["qkvg4"] = tuple(
++                    torch.cat([t[: 2 * D], t[3 * D : 4 * D], t[2 * D : 3 * D]]).contiguous() for t in (wp, bp)
++                )
+             _STATIC_PACKS[key] = hit
+         _capture.hold(hit, not made)  # a capture reads the pack: the count limit above must not free it under the graph
+         packed, (_, vpack), cond_ready, matrix_ready, late_pack = hit
+@@ -685,7 +712,29 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+     # in the row kernels that read them (``token_dit_rows.cu`` CondFold), the identity AdaLN (Chai-1, parallel) reads the raw c anyway --
+     # the LayerNorm pass and the second GEMM are gone
+     fold = not fp32 and (sig or parallel) and c.dtype is torch.bfloat16 and DC <= D
+-    if not fold:
++    # B200 fp32 (2026-11-18, part 8): the same fold in fp32 -- G = c [W1; W2]^T in ONE TF32 GEMM, the tables corrected by the
++    # conditioning's LayerNorm in the row passes (``token_dit_train_rows_sm100.cu`` fold32_*): no cond_rows pass, no second GEMM, no fp32
++    # copy of the residual (the fp32 block input is the residual's source)
++    fold32 = fp32 and b200 and _B200_FOLD32 and DC <= D and c.dtype is torch.float32 and vpack is not None and "fold32" in vpack
++    if fold32:
++        from .train import ext as _train_ext
++
++        T32 = _train_ext(D, D // heads, rpb=2, dc=DC, dp=pair.shape[-1])
++        wc32, r1, b1f, b2f = vpack["fold32"]
++        if c.stride(-1) != 1 or c.stride(0) % 4 or c.data_ptr() % 16:
++            c = c.contiguous()
++        G2 = None
++        if _XG2 and sfork is not None:  # EXPERIMENT: the gates' GEMM beside the chain (read from the transition on)
++            G = torch.mm(c, wc32[: 4 * D].t())
++            sfork.wait_stream(torch.cuda.current_stream(single.device))
++            with _side.on(sfork):
++                G2 = torch.mm(c, wc32[4 * D :].t())
++        else:
++            G = torch.mm(c, wc32.t())  # [P, 6 D]: the AdaLN tables (before the LayerNorm of c), then the gates (no b2)
++        stats = single.new_empty((P, 2), dtype=torch.float32)
++        if late_bias and not _XPLATE:  # the pair pass beside the chain, issued after the conditioning GEMM
++            bias = bias_lookup()
++    elif not fold:
+         cn = single.new_empty((P, DC))
+         cc = torch.empty_like(cn)
+         cond_rows(c, cn, cc, 1e-5)
+@@ -711,6 +760,8 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+         # [P, 6 D] fp32: the AdaLN tables (before the LayerNorm of c), then the gates (no b2)
+         G, cond_join = _cond_gemm(c, wc, fkey, made)
+         stats = single.new_empty((P, 2), dtype=torch.float32)
++    elif fold32:
++        pass
+     else:
+         g1 = torch.addmm(b1, cn if sig else cc, w1.t()).view(P, 4, D)
+         if late_bias:  # the gates' GEMM beside the chain (read after the join before the core), then the pair pass
+@@ -721,16 +772,23 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+             bias = bias_lookup()
+         else:
+             g2 = torch.addmm(b2, cc, w2.t()).view(P, 2, D)
+-    if bias is None:  # (bf16 with the fork: the pair pass after the folded conditioning GEMM)
++    if bias is None and not (fold32 and _XPLATE):  # (bf16 with the fork: the pair pass after the folded conditioning GEMM)
+         bias = bias_lookup()
+     M = A * B * L
+     xin = single.view(M, D)
+     # the fp32 residual (the folded passes read xin instead: no fp32 copy of the stream)
+-    x = single.new_empty((0 if fold else M, D), dtype=torch.float32)
++    x = single.new_empty((0 if fold or fold32 else M, D), dtype=torch.float32)
+     xa = single.new_empty((M, D))
+     # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
+     fused_expand = fp32 and _FP32_SWIGLU_GEMM and not up and not b200 and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
+-    if fold:
++    if fold32:
++        if xin.stride(-1) != 1 or xin.stride(0) % 4 or xin.data_ptr() % 16:
++            xin = xin.contiguous()
++        xt = torch.empty_like(xa) if parallel else xa
++        T32.fold32_in(xin, G, c, r1, b1f, b2f, stats, xa, xt if parallel else None, ada_eps, 1e-5, sig, None)
++        if bias is None and _XPLATE:  # EXPERIMENT: the pair pass issued after the first row pass
++            bias = bias_lookup()
++    elif fold:
+         xt = torch.empty_like(xa) if parallel else xa
+         _ext().adaln_in_rows_cf_cuda(xin, G, r1, b1f, b2f, c, stats, xa, ada_eps, 1e-5, xt if parallel else None, _PDL, sig)
+     elif parallel:
+@@ -740,16 +798,86 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+     else:
+         xt = xa
+         adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, ada_eps, sig)
++    keep: list = []
++
++    def _trans():
++        h = single.new_empty((M, ws.shape[1]))
++        if up and not fp32 and not b200:
++            # silu(a) b u in the SwiGLU GEMM's epilogue (128 x 192 tiles, [Wa 64 | Wb 64 | Wu 64]): [a | b | u] never reaches HBM.
++            # H100 graph replay, K 768, H 1536: M = 640 8.3 against 12.1 us for cuBLAS + the row pass, 1920 20.6 / 30.0, 5120 55.6 / 87.8
++            op = _token_swiglu(single.device.index)
++            op.ext.gemm_swiglu(xt, _bf16_wab64(vpack["wab3"], up=True), h, op.nsm, 64, True, _PDL)
++        elif up:
++            ab = torch.mm(xt, vpack["wab3"].t())  # [M, 3 n D] a | b | u
++            swiglu_rows(ab, h, up=True)
++            keep.append(ab)
++        elif fused_expand:
++            # expand + SwiGLU as one TF32 wgmma GEMM: xt is TF32-rounded by its row kernel and the weights once per pack, so the
++            # TMA-fed (truncating) operands carry cuBLAS's rounding; [a | b] never reaches HBM
++            op = _token_swiglu(single.device.index)
++            ht = _swiglu_ht(M, ws.shape[1], op.nsm)
++            op.ext.gemm_swiglu(xt, _tf32_wab(wab_fp32, ht), h, op.nsm, ht)
++        elif fp32:
++            ab = torch.mm(xt, wab_fp32.t())
++            swiglu_rows(ab, h)
++            keep.append(ab)
++        elif b200:
++            # B200 bf16: from gemm_swiglu.MIN_ROWS rows the sm_100a expand GEMM with the SwiGLU epilogue (the composed runner's: [a | b] never
++            # reaches HBM), below it cuBLAS + the SwiGLU row pass
++            gsw = _b200_swiglu(xt, vpack["wab2"])
++            if gsw is not None:
++                gsw(xt, vpack["wab2"], h)
++            else:
++                ab = torch.mm(xt, vpack["wab2"].t())
++                swiglu_rows(ab, h)
++                keep.append(ab)
++        else:
++            op = _token_swiglu(single.device.index)
++            ht = _swiglu_ht(M, ws.shape[1], op.nsm, bf16=True)
++            op.ext.gemm_swiglu(xt, wab if ht == 128 else _bf16_wab64(wab), h, op.nsm, ht, False, _PDL)
++        y = torch.mm(h, ws.t())
++        keep.append(h)  # (side stream: referenced until the join)
++        return y
++
++    # B200 inside a capture, the parallel block (RoseTTAFold3, Chai-1; 2026-11-18, part 8): the transition reads only xt, so it runs on a
++    # stream of its own beside the attention, forked after the q | k rows (beside the core, whose 48 work items at five samples L 128 leave
++    # most SMs idle) and joined before the output pass. The same kernels, the same bits.
++    spar = ypar = None
++    xpar = (_XPAR or (2 if _B200_PAR else 0)) if (b200 and parallel and sfork is not None) else 0
++    if xpar == 1:  # (experiment: forked right after the AdaLN pass)
++        spar = _side.fork(single.device)
++        with _side.on(spar):
++            ypar = _trans()
+     if matrix_ready is not None:
+         torch.cuda.current_stream(single.device).wait_event(matrix_ready)
+     vt = None
+     # (one sample: the side stream's pair pass outlasts the chain to the core -- v^T on the chain, after the q | k rows; five samples keep
+     # it beside the chain: measured 4-6 % slower on the chain at L 256 - 512, 2026-11-17 part 3)
+     several = fp32 and sfork is not None and A * B > 1 and _B200_VT_RULE
+-    vt_own = several and shared and 128 < L <= 256
++    # B200 fp32, several samples (2026-11-18, part 8): ONE q | k | v | g GEMM and the core reading v MN-major from its columns
++    # (``attn_inf_tf32 -DVMN``): no v^T GEMM, q | k | v rounded in one pass
++    vmn = (
++        fp32 and b200 and _B200_VMN and A * B > 1 and vpack is not None and "qkvg4" in vpack and (gated or _B200_NOGATE_GEMM)
++    )
++    vt_own = several and shared and 128 < L <= 256 and not vmn
+     svt = None
+-    vt_main = fp32 and sfork is not None and (A * B == 1 or (several and L <= 128 and (shared or not gated))) and _B200_VT_MAIN
+-    if vt_own:  # v^T on a stream of its own (``_B200_VT_RULE``)
++    vt_main = (
++        fp32 and sfork is not None and (A * B == 1 or (several and L <= 128 and (shared or not gated))) and _B200_VT_MAIN and not vmn
++    )
++    if vmn:
++        wq4, bq4 = vpack["qkvg4"]
++        qkvg = torch.addmm(bq4, xa, wq4.t())  # [M, 4 D] q | k | v | g
++        if qk:
++            qknorm_rows(qkvg, nq, nk, eq, ek, D)
++            if qk_rna:
++                rna_rows(qkvg[:, 2 * D :], D)
++        elif kq_ln:
++            qk_ln_rows(qkvg, *vpack["kq"], kq_eps, D, rnd=qk_rna)  # q / k rounded on the way (qk_rna)
++            if qk_rna:
++                rna_rows(qkvg[:, 2 * D :], D)
++        elif qk_rna:
++            rna_rows(qkvg, 3 * D)
++    elif vt_own:  # v^T on a stream of its own (``_B200_VT_RULE``)
+         svt = _side.fork(single.device)
+         with _side.on(svt):
+             vt = torch.mm(wqkvg[3 * D :], xa.t())
+@@ -763,19 +891,27 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+             vt = torch.mm(wqkvg[3 * D :], xa.t())
+             if qk_rna:
+                 rna_rows(vt, M)
+-    if gated or not fp32 or (b200 and _B200_NOGATE_GEMM):  # no gating query: the static pack's gate bias is +1e4 (above)
++    if vmn:
++        pass
++    elif gated or not fp32 or (b200 and _B200_NOGATE_GEMM):  # no gating query: the static pack's gate bias is +1e4 (above)
+         qkvg = torch.addmm(bqkvg[: 3 * D], xa, wqkvg[: 3 * D].t()) if fp32 else torch.addmm(bqkvg, xa, wqkvg.t())
+     else:
+         # fp32, no gating query: the core's gate columns hold +1e4 (sigmoid = 1); the TF32 GEMM writes the q | k columns only
+         qkvg = single.new_empty((M, 3 * D))
+         qkvg[:, 2 * D :].fill_(_NO_GATE)
+         torch.addmm(bqkvg[: 2 * D], xa, wqkvg[: 2 * D].t(), out=qkvg[:, : 2 * D])
+-    if qk:
++    if vmn:
++        pass
++    elif qk:
+         qknorm_rows(qkvg, nq, nk, eq, ek, D)
+     elif kq_ln:
+         qk_ln_rows(qkvg, *vpack["kq"], kq_eps, D, rnd=qk_rna)  # q / k rounded on the way (qk_rna)
+     elif qk_rna:
+         rna_rows(qkvg, 2 * D)
++    if xpar == 2:  # the transition beside the core, from after the q | k rows
++        spar = _side.fork(single.device)
++        with _side.on(spar):
++            ypar = _trans()
+     if vt_main:
+         vt = torch.mm(wqkvg[3 * D :], xa.t())
+         if qk_rna:
+@@ -785,11 +921,15 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+     _side.join(single.device, svt)
+     kmask = kernel_mask(mask, L)
+     if fp32:
+-        if vt is None:
++        if vmn:
++            _b200_core(single.device, torch.float32, heads, D // heads)(qkvg, bias, 0, A, vmn=True)
++        elif vt is None:
+             vt = torch.mm(wqkvg[3 * D :], xa.t())
+             if qk_rna:
+                 rna_rows(vt, M)  # v^T rounded as q / k (the core truncates)
+-        if b200:
++        if vmn:
++            pass
++        elif b200:
+             _b200_core(single.device, torch.float32, heads, D // heads)(qkvg, bias, 0, A, vt=vt)
+         else:
+             attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads, kmask=kmask)
+@@ -808,44 +948,18 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+         else:
+             attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B, kmask=kmask)
+     ya = torch.mm(qkvg[:, :D], wo.t())
+-    if not parallel and fold:
++    if not parallel and fold32:
++        T32.fold32_mid(xin, ya, G, r1, b1f, b2f, stats, xa, ada_eps, sig, G2)
++    elif not parallel and fold:
+         _ext().resgate_adaln_cf_cuda(xin, ya, G, r1, b1f, b2f, stats, xa, ada_eps, _PDL)
+     elif not parallel:
+         resgate_adaln_rows(x, ya, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, ada_eps, tf32_round=fused_expand, sig=sig)
+-    h = single.new_empty((M, ws.shape[1]))
+-    if up and not fp32 and not b200:
+-        # silu(a) b u in the SwiGLU GEMM's epilogue (128 x 192 tiles, [Wa 64 | Wb 64 | Wu 64]): [a | b | u] never reaches HBM.
+-        # H100 graph replay, K 768, H 1536: M = 640 8.3 against 12.1 us for cuBLAS + the row pass, 1920 20.6 / 30.0, 5120 55.6 / 87.8
+-        op = _token_swiglu(single.device.index)
+-        op.ext.gemm_swiglu(xt, _bf16_wab64(vpack["wab3"], up=True), h, op.nsm, 64, True, _PDL)
+-    elif up:
+-        ab = torch.mm(xt, vpack["wab3"].t())  # [M, 3 n D] a | b | u
+-        swiglu_rows(ab, h, up=True)
+-    elif fused_expand:
+-        # expand + SwiGLU as one TF32 wgmma GEMM: xt is TF32-rounded by its row kernel and the weights once per pack, so the
+-        # TMA-fed (truncating) operands carry cuBLAS's rounding; [a | b] never reaches HBM
+-        op = _token_swiglu(single.device.index)
+-        ht = _swiglu_ht(M, ws.shape[1], op.nsm)
+-        op.ext.gemm_swiglu(xt, _tf32_wab(wab_fp32, ht), h, op.nsm, ht)
+-    elif fp32:
+-        ab = torch.mm(xt, wab_fp32.t())
+-        swiglu_rows(ab, h)
+-    elif b200:
+-        # B200 bf16: from gemm_swiglu.MIN_ROWS rows the sm_100a expand GEMM with the SwiGLU epilogue (the composed runner's: [a | b] never
+-        # reaches HBM), below it cuBLAS + the SwiGLU row pass
+-        gsw = _b200_swiglu(xt, vpack["wab2"])
+-        if gsw is not None:
+-            gsw(xt, vpack["wab2"], h)
+-        else:
+-            ab = torch.mm(xt, vpack["wab2"].t())
+-            swiglu_rows(ab, h)
+-    else:
+-        op = _token_swiglu(single.device.index)
+-        ht = _swiglu_ht(M, ws.shape[1], op.nsm, bf16=True)
+-        op.ext.gemm_swiglu(xt, wab if ht == 128 else _bf16_wab64(wab), h, op.nsm, ht, False, _PDL)
+-    y = torch.mm(h, ws.t())
++    y = ypar if ypar is not None else _trans()
++    _side.join(single.device, spar)
+     out = torch.empty_like(xa)
+-    if fold:  # out = (xin + sigmoid(gA) ya) + sigmoid(gT) y: both schedules' output
++    if fold32:
++        T32.fold32_out(xin, ya, y, G, r1, b1f, b2f, stats, out, G2)
++    elif fold:  # out = (xin + sigmoid(gA) ya) + sigmoid(gT) y: both schedules' output
+         _ext().resgate_out_cf_cuda(xin, ya, y, G, b2f, out, _PDL)
+         if cond_join is not None:
+             # a capture: the look-ahead GEMM this block issued joins here (it ran under this block's kernels; the next block reads it first)

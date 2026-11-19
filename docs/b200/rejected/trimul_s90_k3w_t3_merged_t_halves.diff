@@ -1,0 +1,39 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+index 88aa66b18..344d2c9c4 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+@@ -39,6 +39,9 @@ namespace k3w {
+ #ifndef K3W_GREG
+ #define K3W_GREG 0   // 1: inference epilogue with the residual and y through registers / global (measured +30-40 % at D256 / D384 L1024 / L768, +3-12 % D512: off)
+ #endif
++#ifndef K3W_T3
++#define K3W_T3 0   // 1: the two 8 KB t boxes of a stage as one 16 KB 3-D box (measured level: D256 L1024 550 / 541 vs 542 / 537 us)
++#endif
+ #ifndef K3W_SIG
+ #define K3W_SIG 2   // epilogue sigmoid: 0 ex2 + rcp (two MUFU ops), 2 tanh.approx (one MUFU op; 2026-11-17, k1w / k3g's form)
+ #endif
+@@ -175,8 +178,11 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+ #endif
+           uint8_t* a = sm + O_ST + s * STAGE;
+           if (kb < KBT) {
+-            tma_load_2d(a, &mt, &B.st_full[s], m0, kb * 64, EVICT_NORMAL);             // [64 ch][64 tok], tokens 0-63
+-            tma_load_2d(a + KBB / 2, &mt, &B.st_full[s], m0 + 64, kb * 64, EVICT_NORMAL);   // tokens 64-127
++            if (!SAVE && K3W_T3) tma_load_3d(a, &mt, &B.st_full[s], 0, kb * 64, m0 / 64, EVICT_NORMAL);   // S90: both token halves in one op: map {64 tok, H ch, M / 64 blocks}, box {64, 64, 2} = [half][64 ch][64 tok]
++            else {
++              tma_load_2d(a, &mt, &B.st_full[s], m0, kb * 64, EVICT_NORMAL);             // [64 ch][64 tok], tokens 0-63
++              tma_load_2d(a + KBB / 2, &mt, &B.st_full[s], m0 + 64, kb * 64, EVICT_NORMAL);   // tokens 64-127
++            }
+ #ifndef K3W_ABL_NOB
+             tma_load_2d(a + KBB, &mwp, &B.st_full[s], kb * 64, n0, EVICT_LAST);
+ #endif
+@@ -514,7 +520,9 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
+   // pdl bits: 0 programmatic dependent; 1 LN_out statistics in the kernel (OST, inference: mu_o / rs_o unused)
+   const bool ost = (pdl >> 1) & 1;
+   TORCH_CHECK(!(ost && p_out.has_value()), "k3w_forward: the in-kernel LN_out statistics are inference only");
+-  auto mt = tmap::make(t.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
++  const bool t3 = K3W_T3 && !p_out.has_value();
++  auto mt = t3 ? tmap::make(t.data_ptr(), bf, {64, (uint64_t)H, (uint64_t)(M / 64)}, {(uint64_t)M * 2, 128}, {64, 64, 2}, CU_TENSOR_MAP_SWIZZLE_128B)
++               : tmap::make(t.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
+   auto mwp = tmap::make(wpq.data_ptr(), bf, {(uint64_t)H, (uint64_t)D}, {(uint64_t)H * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
+   auto mx = tmap::make(x.data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
+   auto mwg = tmap::make(wgq.data_ptr(), bf, {(uint64_t)D, (uint64_t)D}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);

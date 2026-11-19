@@ -1,0 +1,52 @@
+--- src/miniworld_engine/modules/embedder.py	2026-11-18 18:47:13.000000000 +0000
++++ n2out/pre/embedder.py	2026-11-18 18:47:13.000000000 +0000
+@@ -292,6 +292,20 @@
+ _FEAT_B200 = True
+ 
+ 
++#: N2 (development switch): the features' weight-gradient GEMM (K = atoms) split into this many chunks (1: one GEMM)
++_FEAT_F_PAD = True
++_EVAL_RW = __import__("os").environ.get("SWA_EVAL_RW", "1") == "1"  # N2: the inference read-out's bf16 weight form cached
++_SCATTER8 = __import__("os").environ.get("SWA_SCATTER8", "1") == "1"  # N2: the read-out scatter on one thread a group of 8 atoms (swa_embed_scatter8_sm100)
++_ROPE_SIDE = __import__("os").environ.get("SWA_ROPE_SIDE", "1") == "1"  # N2: the RoPE launch beside the features on a side stream
++
++
++class _nullctx:
++    def __enter__(self):
++        return None
++
++    def __exit__(self, *a):
++        return False
++_EVAL_OUTNORM = __import__("os").environ.get("SWA_EVAL_OUTNORM", "1") == "1"  # N2: the inference read-out's terminal norm on swa_embed_outnorm_sm100
+ _FEAT_DWK = __import__("os").environ.get("SWA_FEATDWK", "1") == "1"  # N2: swa_embed_dwf_sm100 for the features' weight gradient
+ _FEAT_DW_KS = int(__import__("os").environ.get("SWA_FEATDW_KS", "16"))
+ 
+@@ -345,18 +359,26 @@
+             K = sm100.embed_glue(dev.index if dev.index is not None else torch.cuda.current_device())
+             dp = torch.empty(m, 128, device=dev, dtype=torch.float32)
+             gb = torch.empty(2, m, 128, device=dev, dtype=torch.float32) if ln else None
+-            nfs = (nf + 7) // 8 * 8  # N2: F's rows padded to 16-B multiples (featbwd writes them so; the GEMM fallback reads f[:, :nf])
++            nfs = (nf + 7) // 8 * 8 if _FEAT_F_PAD else nf  # N2: F's rows padded to 16-B multiples (the GEMM's B operand: nf 133 was an align-1 cutlass kernel)
+             dwk = _FEAT_DWK and m <= 8192 and nf in (6, 133) and nf == (133 if esm else 6)  # N2: the weight gradient by swa_embed_dwf_sm100 (no F)
+             f = None if dwk else torch.empty(m, nfs, device=dev, dtype=torch.float32)
+             dpos = torch.empty(b, n, 3, device=dev, dtype=torch.bfloat16 if dfl & 4 else torch.float32)
+             K.featbwd(grid, (256, 1, 1), g, proj if ln else dp, posk, charge, element, fmask, wk, lw, dp, gb if ln else dp, f, dpos, int(m),
+                       int(esm), int(g.dtype == torch.bfloat16), int(ln), float(eps), dfl)
+             res: dict[str, Any] = {"dw": torch.empty(128, nf, device=dev, dtype=torch.float32)}  # (allocated on the current stream)
++            # N2: the K = M GEMM split over _FEAT_DW_KS chunks (fixed order: bmm partials, then a sum over the chunk axis) -- was one
++            # 2-CTA cutlass launch (11 us) + a split-K reduce (3 us) on the tail
++            ks = _FEAT_DW_KS if (_FEAT_DW_KS > 1 and m % _FEAT_DW_KS == 0 and m >= 1024) else 1
++            part = torch.empty(ks, 128, nf, device=dev, dtype=torch.float32) if (ks > 1 and not dwk) else None
++
+             def gemm():  # round 3 part 14: the weight gradient's GEMM on a side stream beside the column sum and the cast
+                 if dwk:
+                     K.dwf(((6 if not esm else 5 + 16) * 8, 1, 1), (1024, 1, 1), dp, posk, charge, element, fmask, res["dw"], int(m), int(esm), int(fl))
+-                else:
++                elif part is None:
+                     torch.mm(dp.t(), f[:, :nf], out=res["dw"])
++                else:
++                    torch.bmm(dp.view(ks, m // ks, 128).transpose(1, 2), f.view(ks, m // ks, nfs)[:, :, :nf], out=part)
++                    torch.sum(part, 0, out=res["dw"])
+ 
+             def rest():
+                 res["dl"] = _colsum(K, cast(torch.Tensor, gb)).unbind(0) if ln else (None, None)

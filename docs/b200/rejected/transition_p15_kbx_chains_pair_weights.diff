@@ -1,0 +1,511 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+index 8d8b2322e..3374a6ed7 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+@@ -57,6 +57,9 @@ CELLS_H16: dict[tuple[int, int, bool], int] = {(384, 2, True): 16, (768, 2, True
+ #: the fewest tiles a cell takes the fp16 chain from. Round 3 part 7: none (fp32 [1, 128, 384]: TF32 18.0 -> 14.3 us, YELLOW 1.0014 x tol,
+ #: inside the standard; part 4 had kept that one tile on the TF32 chain for it)
+ H16_MIN_TILES: dict[int, int] = {}
++#: (round 3 part 15) K-blocks per 3-D TMA box of the fp16 chain's expand / squeeze (one box per operand and ring stage; part 14's per-SM
++#: box-count finding). 1: the old builds.
++KBX_H16 = 3
+ #: A/B overrides of the picks: None (automatic) or a build of the lists above
+ EXPAND_FORCE = None
+ SQUEEZE_FORCE = None
+@@ -73,8 +76,14 @@ def _specs(d: int, n: int, f32: bool, h16: bool = False) -> tuple[tuple[str, str
+         dh = (f"-DDIM={d}", f"-DHID={n * d}", "-DH16=1")
+         return (
+             ("ln", "widths/tsx_ln.cu", (f"-DDIM={d}", "-DH16=1")),
+-            *((f"expand{c}_{k}", "widths/tsx_expand.cu", (*dh, f"-DCH={c}", f"-DSK={k}")) for c, k in EXPAND_H16[d]),
+-            *((f"sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dh, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in SQUEEZE_H16[d]),
++            *(
++                (f"expand{c}_{k}", "widths/tsx_expand.cu", (*dh, f"-DCH={c}", f"-DSK={k}", f"-DKBX={_ex_kbx(d // k // 64, c, k, KBX_H16)}"))
++                for c, k in EXPAND_H16[d]
++            ),
++            *(
++                (f"sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dh, f"-DNBW={nb}", f"-DSK={k}", f"-DKBX={_kbx(n * d // k // 64, KBX_H16)}"))
++                for nb, k in SQUEEZE_H16[d]
++            ),
+         )
+     dim = (f"-DDIM={d}", f"-DHID={n * d}", f"-DF32={int(f32)}")
+     return (
+@@ -200,12 +209,26 @@ PAIR_PICK: dict[tuple[int, int, int], tuple[int, int]] = {
+ }
+ #: A/B override: ((UH, KBX), (NB, KBX)) or None
+ PAIR_FORCE = None
++#: (part 15) the pair kernels' weight K-blocks of a ring stage as ONE 3-D box each too (Wa / Wb in the expand, Ws in the squeeze): 1, or 0
++#: for the 2-D box per K-block of part 14 (A/B; set before the first ``_pair_load``)
++PAIR_WKBX = 1
+ 
+ 
+ def _kbx(nkb: int, want: int = 4) -> int:
+     return max(k for k in range(1, want + 1) if nkb % k == 0)
+ 
+ 
++def _ex_kbx(nkb: int, ch: int, sk: int, want: int) -> int:
++    """KBX of a ``tsx_expand.cu`` build whose ring keeps two stages (or the whole K) in shared memory (its static_assert)."""
++    red = 1024 * ch if sk > 1 else 0
++    for k in range(want, 0, -1):
++        if nkb % k == 0:
++            cap = (232448 - 1024 - red) // (k * (16384 + 256 * ch))
++            if cap >= 2 or cap >= nkb // k:
++                return k
++    return 1
++
++
+ def pair_takes(m: int, d: int, h: int) -> bool:
+     """Whether the pair chain runs a bf16 inference call of [m, d] (whole 128-row tiles of a ``PAIR_CELLS`` cell)."""
+     cell = (d, h // d) if h % d == 0 else None
+@@ -223,10 +246,11 @@ def _pair_pick(d: int, h: int, tiles: int, nsm: int) -> tuple[tuple[int, int], t
+ def _pair_specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+     dh = (f"-DDIM={d}", f"-DHID={n * d}")
+     ke, kq = _kbx(d // 64), _kbx(n * d // 64)
++    w = int(PAIR_WKBX and ke > 1 and kq > 1)
+     return (
+         ("ln", "widths/tsx_ln.cu", (f"-DDIM={d}", "-DF32=0")),
+-        *((f"ex{u}_{ke}", "widths/tsx_expand2.cu", (*dh, f"-DUH={u}", f"-DKBX={ke}")) for u in PAIR_UH),
+-        *((f"sq{b}_{kq}", "widths/tsx_squeeze2.cu", (*dh, f"-DNBW={b}", f"-DKBX={kq}")) for b in PAIR_NB),
++        *((f"ex{u}_{ke}", "widths/tsx_expand2.cu", (*dh, f"-DUH={u}", f"-DKBX={ke}", f"-DWKBX={w}")) for u in PAIR_UH),
++        *((f"sq{b}_{kq}", "widths/tsx_squeeze2.cu", (*dh, f"-DNBW={b}", f"-DKBX={kq}", f"-DWKBX={w}")) for b in PAIR_NB),
+     )
+ 
+ 
+@@ -247,6 +271,7 @@ def pair_chain(x, gamma, beta, wa, wb, ws, eps: float, out=None):
+     tag = f"pair_d{d}n{h // d}"
+     ext = _pair_load(d, h // d)
+     (uh, ke), (nb, kq) = PAIR_FORCE or _pair_pick(d, h, tiles, num_sms(x.device))
++    kw, kqw = (ke, kq) if PAIR_WKBX and ke > 1 and kq > 1 else (1, 1)  # the 3-D weight maps of the WKBX builds
+     t = ext.tmap
+     xn = torch.empty_like(x)
+     hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
+@@ -260,10 +285,10 @@ def pair_chain(x, gamma, beta, wa, wb, ws, eps: float, out=None):
+         tiles * (h // uh),
+         256 if uh <= 32 else 384,
+         2,
+-        [t(xn, d, m, 64, 64, -1, 0, ke), t(wa, d, h, 64, uh), t(wb, d, h, 64, uh), hid],
++        [t(xn, d, m, 64, 64, -1, 0, ke), t(wa, d, h, 64, uh, -1, 0, kw), t(wb, d, h, 64, uh, -1, 0, kw), hid],
+         True,
+     )
+-    sq_args = [t(hid, h, m, 64, 64, -1, 0, kq), t(ws, h, d, 64, nb // 2), x, out]
++    sq_args = [t(hid, h, m, 64, 64, -1, 0, kq), t(ws, h, d, 64, nb // 2, -1, 0, kqw), x, out]
+     ext.launch_kernel(f"{tag}_sq{nb}_{kq}", "transition_sx_squeeze2", tiles * (d // nb) * 2, 256, 2, sq_args, True)
+     return out
+ 
+@@ -341,23 +366,25 @@ def chain_h16(x, gamma, beta, wa16, wb16, ws16, sc, eps: float):
+     out = torch.empty_like(x)
+     ext.launch_kernel(f"{tag}_ln", "transition_sx_ln", (m + 7) // 8, 256, 1, [x, gamma, beta, xn, sc, m, float(eps)], True)
+     ch, sk = EXPAND_FORCE or _pick(EXPAND_H16[d], tiles, h, ROWS, d, 2, nsm, 2)
++    ke = _ex_kbx(d // sk // 64, ch, sk, KBX_H16)
+     ext.launch_kernel(
+         f"{tag}_expand{ch}_{sk}",
+         "transition_sx_expand",
+         tiles * (h // ch) * sk,
+         384,
+         sk,
+-        [t(v(xn), d, m, 64, 128), t(v(wa16), d, h, 64, ch), t(v(wb16), d, h, 64, ch), hid, hid, hid, 0, 1, h, 0, sc],
++        [t(v(xn), d, m, 64, 128, -1, 0, ke), t(v(wa16), d, h, 64, ch, -1, 0, ke), t(v(wb16), d, h, 64, ch, -1, 0, ke), hid, hid, hid, 0, 1, h, 0, sc],
+         True,
+     )
+     nb, sq = SQUEEZE_FORCE or _pick(SQUEEZE_H16[d], tiles, d, ROWS, h, 2, nsm, 1)
++    kq = _kbx(h // sq // 64, KBX_H16)
+     ext.launch_kernel(
+         f"{tag}_sq{nb}_{sq}",
+         "transition_sx_squeeze",
+         tiles * (d // nb) * sq,
+         256,
+         sq,
+-        [t(v(hid), h, m, 64, 128), t(v(ws16), h, d, 64, nb), x, out, sc],
++        [t(v(hid), h, m, 64, 128, -1, 0, kq), t(v(ws16), h, d, 64, nb, -1, 0, kq), x, out, sc],
+         True,
+     )
+     return out
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 339629d02..1b47cf45d 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -115,6 +115,15 @@ def _sx_ch(h: int, tiles: int, nsm: int) -> int:
+ 
+ #: (columns, split) of the squeeze, None: automatic (kept for A/B runs)
+ SX_SQ_FORCE = None
++#: (round 3 part 15) K-blocks per 3-D TMA box (ring stage) of the round-sx expand / squeeze: xn / Wa / Wb and h / Ws as one box each per
++#: stage instead of one 2-D box per 64-element K-block (part 14: the per-SM TMA box count, not the bytes, paces these kernels). 1: the
++#: old builds. Module constants (A/B runs edit them before the first ``_load``).
++SX_KBX_EX = 3
++SX_KBX_SQ = 3
++
++
++def _sx_kbx(nkb: int, want: int) -> int:
++    return max(k for k in range(1, want + 1) if nkb % k == 0)
+ 
+ 
+ def _sx_sq(d: int, tiles: int, h: int, nsm: int) -> tuple[int, int]:
+@@ -234,8 +243,14 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+     sx = (
+         (
+             ("sx_ln", "widths/tsx_ln.cu", (f"-DDIM={d}",)),
+-            *((f"sx_expand{c}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}")) for c in SX_CH),
+-            *((f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in SX_SQ),
++            *(
++                (f"sx_expand{c}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", f"-DKBX={_sx_kbx(d // 64, SX_KBX_EX)}"))
++                for c in SX_CH
++            ),
++            *(
++                (f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}", f"-DKBX={_sx_kbx(h // k // 64, SX_KBX_SQ)}"))
++                for nb, k in SX_SQ
++            ),
+             ("sx_gate", "widths/tsx_gate.cu", dim),
+             ("sx_gdx", "widths/tsx_gdx.cu", dim),
+             *((f"sx_dxn{k}", "widths/tsx_dxn.cu", (*dim, f"-DKS={k}")) for k in (1, 2)),
+@@ -341,7 +356,9 @@ class _Launch:
+         self.grid = max(2, min(self.nsm - self.nsm % 2, self.tiles + self.tiles % 2))
+         self.ext = _load(self.d, self.n)
+ 
+-    def tmap(self, t, inner, outer, box_inner=64, box_outer=64, row_stride=-1):
++    def tmap(self, t, inner, outer, box_inner=64, box_outer=64, row_stride=-1, kb_box=1):
++        if kb_box > 1:
++            return self.ext.tmap(t, inner, outer, box_inner, box_outer, row_stride, 0, kb_box)
+         return self.ext.tmap(t, inner, outer, box_inner, box_outer, row_stride)
+ 
+     def run(self, cubin, kernel, grid, args, block=512, cluster=2, pdl=False):
+@@ -399,21 +416,34 @@ def _sx_forward(k, x, gamma, beta, wa, wb, ws, eps, save, out, rstd, c1, cast=No
+         pdl=True,
+     )
+     ch = _sx_ch(h, tiles, k.nsm)
++    ke = _sx_kbx(d // 64, SX_KBX_EX)
+     k.run(
+         f"sx_expand{ch}",
+         "transition_sx_expand",
+         tiles * (h // ch),
+-        (k.tmap(xn, d, m, 64, 128), k.tmap(wa, d, h, 64, ch), k.tmap(wb, d, h, 64, ch), hid, a, b, int(save), int(cast is None), h, 0),
++        (
++            k.tmap(xn, d, m, 64, 128, kb_box=ke),
++            k.tmap(wa, d, h, 64, ch, kb_box=ke),
++            k.tmap(wb, d, h, 64, ch, kb_box=ke),
++            hid,
++            a,
++            b,
++            int(save),
++            int(cast is None),
++            h,
++            0,
++        ),
+         block=384,
+         cluster=1,
+         pdl=True,
+     )
+     nb, sk = _sx_sq(d, tiles, h, k.nsm)
++    kq = _sx_kbx(h // sk // 64, SX_KBX_SQ)
+     k.run(
+         f"sx_sq{nb}_{sk}",
+         "transition_sx_squeeze",
+         tiles * (d // nb) * sk,
+-        (k.tmap(hid, h, m, 64, 128), k.tmap(ws, h, d, 64, nb), x, out),
++        (k.tmap(hid, h, m, 64, 128, kb_box=kq), k.tmap(ws, h, d, 64, nb, kb_box=kq), x, out),
+         block=256,
+         cluster=sk,
+         pdl=True,
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+index 632e95ee3..8c1a18f0d 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+@@ -46,31 +46,54 @@ static_assert(SK == 1 || W_ == 16 || W_ == 32, "owner column groups of 16 or 32
+ constexpr int KBT = ROWS * 128;                                // one [128 rows] K-block of xn, 16 KB
+ constexpr int WKB = 2 * CH * 128;                              // one K-block of [Wa_j; Wb_j]: 2 CH rows x 128 B
+ constexpr int RED = SK > 1 ? SK * ROWS * 2 * W_ * 4 : 0;       // partials received from the other ranks: [SK][128][a W | b W] fp32
+-constexpr int CAP = (232448 - 1024 - RED) / (KBT + WKB);
+-constexpr int STG = NKB < CAP ? NKB : CAP;                     // ring stages (the whole K where it fits)
+-constexpr int O_X = 0, O_W = STG * KBT, O_RED = O_W + STG * WKB, O_BAR = O_RED + RED, SMEM_BYTES = O_BAR + 256;
+-static_assert(SMEM_BYTES <= 232448 && STG >= 2, "shared memory budget");
++#ifndef KBX
++#define KBX 1                                                   // (round 3 part 15) K-blocks per ring stage: xn, Wa and Wb of a stage in ONE
++#endif                                                          // 3-D TMA box each (part 14: the per-SM box count paces these kernels)
++static_assert(NKB % KBX == 0, "whole stages");
++constexpr int NS = NKB / KBX, XST = KBX * KBT, WST = KBX * WKB;  // stages; bytes of a stage's xn / weights (KBX > 1: [Wa slabs][Wb slabs])
++constexpr int CAP = (232448 - 1024 - RED) / (XST + WST);
++constexpr int STG = NS < CAP ? NS : CAP;                       // ring stages (the whole K where it fits)
++constexpr int O_X = 0, O_W = STG * XST, O_RED = O_W + STG * WST, O_BAR = O_RED + RED, SMEM_BYTES = O_BAR + 256;
++static_assert(SMEM_BYTES <= 232448 && (STG >= 2 || STG == NS), "shared memory budget");
++DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++// the weights of stage st: KBX 1 [Wa_j; Wb_j] of one K-block (the old layout); KBX > 1 KBX Wa slabs, then KBX Wb slabs, a 3-D box each
++DEVI void load_w(uint32_t w, const CUtensorMap* ma, const CUtensorMap* mb, uint64_t* bar, int k0, int st, int h0) {
++  if (KBX == 1) {
++    tma_load_2d(w, ma, bar, k0 + st * BKE, h0);
++    tma_load_2d(w + CH * 128, mb, bar, k0 + st * BKE, h0);
++  } else {
++    tma_load_3d(w, ma, bar, 0, h0, k0 / BKE + st * KBX);
++    tma_load_3d(w + KBX * CH * 128, mb, bar, 0, h0, k0 / BKE + st * KBX);
++  }
++}
+ constexpr uint32_t TCOLS = 2 * CH;
+ #if F32
+ typedef float ACT;
+ // kind::tf32 instruction descriptor: TF32 A / B (format 2), fp32 D, K-major both, N, M
+-constexpr uint32_t IDESC = (1u << 4) | (2u << 7) | (2u << 10) | ((uint32_t)((2 * CH) >> 3) << 17) | ((uint32_t)(128 >> 4) << 24);
+-DEVI void mma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) {
++constexpr uint32_t idesc_n(int n) { return (1u << 4) | (2u << 7) | (2u << 10) | ((uint32_t)(n >> 3) << 17) | ((uint32_t)(128 >> 4) << 24); }
++constexpr uint32_t IDESC = idesc_n(2 * CH);
++DEVI void mma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc, uint32_t id = IDESC) {
+   asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::1.kind::tf32 [%0], %1, %2, %3, p; }"
+-               :: "r"(d), "l"(a), "l"(b), "r"(IDESC), "r"(acc) : "memory");
++               :: "r"(d), "l"(a), "l"(b), "r"(id), "r"(acc) : "memory");
+ }
+ DEVI float tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return __uint_as_float(r); }
+ #elif H16
+ // -DH16=1: xn (fp16, LN(x) / s_x, tsx_ln.cu -DH16) and Wa16 / Wb16 (/ s_w) on kind::f16 with fp16 A / B (format 0), fp32 D; the epilogue
+ // rescales [a | b] by sc[1] = s_x s_w and stores h = fp16(silu(a) b sc[2]) (sc[2] = 1 / s_h): fused_generic_sm100a._h16_forms' scales
+ typedef __half ACT;
+-constexpr uint32_t IDESC = (1u << 4) | ((uint32_t)((2 * CH) >> 3) << 17) | ((uint32_t)(128 >> 4) << 24);
+-DEVI void mma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) { umma_ss(d, a, b, IDESC, acc); }
++constexpr uint32_t idesc_n(int n) { return (1u << 4) | ((uint32_t)(n >> 3) << 17) | ((uint32_t)(128 >> 4) << 24); }
++constexpr uint32_t IDESC = idesc_n(2 * CH);
++DEVI void mma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc, uint32_t id = IDESC) { umma_ss(d, a, b, id, acc); }
+ #else
+ typedef __nv_bfloat16 ACT;
+-constexpr uint32_t IDESC = idesc_bf16(128, 2 * CH);
+-DEVI void mma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) { umma_ss(d, a, b, IDESC, acc); }
++constexpr uint32_t idesc_n(int n) { return idesc_bf16(128, n); }
++constexpr uint32_t IDESC = idesc_n(2 * CH);
++DEVI void mma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc, uint32_t id = IDESC) { umma_ss(d, a, b, id, acc); }
+ #endif
++constexpr uint32_t IDESC_H = idesc_n(CH);                       // KBX > 1: a and b as two N = CH products (Wa / Wb slabs apart)
+ 
+ struct Bars {
+   uint64_t full[STG], empty[STG], mma_done, red_full;
+@@ -122,9 +145,8 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+     prefetch_map(&mxn); prefetch_map(&mwa); prefetch_map(&mwb);
+     if (wpre)
+       for (int kb = 0; kb < STG; ++kb) {                        // weights first: they do not depend on the LayerNorm kernel
+-        mbar_expect_tx(&B.full[kb], KBT + WKB);
+-        tma_load_2d(su + O_W + kb * WKB, &mwa, &B.full[kb], k0 + kb * BKE, h0);
+-        tma_load_2d(su + O_W + kb * WKB + CH * 128, &mwb, &B.full[kb], k0 + kb * BKE, h0);
++        mbar_expect_tx(&B.full[kb], XST + WST);
++        load_w(su + O_W + kb * WST, &mwa, &mwb, &B.full[kb], k0, kb, h0);
+       }
+   }
+   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), TCOLS); tmem_relinquish(); }
+@@ -138,29 +160,43 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+ 
+   if (warp == 0) {
+     if (lane == 0)
+-      for (int kb = 0; kb < NKB; ++kb) {
++      for (int kb = 0; kb < NS; ++kb) {
+         const int s = kb % STG;
+         if (kb >= STG) mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
+         if (!wpre || kb >= STG) {                              // (wpre 0: the LayerNorm launch wrote the weights, complete only now)
+-          mbar_expect_tx(&B.full[s], KBT + WKB);
+-          tma_load_2d(su + O_W + s * WKB, &mwa, &B.full[s], k0 + kb * BKE, h0);
+-          tma_load_2d(su + O_W + s * WKB + CH * 128, &mwb, &B.full[s], k0 + kb * BKE, h0);
++          mbar_expect_tx(&B.full[s], XST + WST);
++          load_w(su + O_W + s * WST, &mwa, &mwb, &B.full[s], k0, kb, h0);
+         }
+-        tma_load_2d(su + O_X + s * KBT, &mxn, &B.full[s], k0 + kb * BKE, row0);
++        if (KBX == 1) tma_load_2d(su + O_X + s * XST, &mxn, &B.full[s], k0 + kb * BKE, row0);
++        else tma_load_3d(su + O_X + s * XST, &mxn, &B.full[s], 0, row0, k0 / BKE + kb * KBX);
+       }
+   } else if (warp == 1) {
+     // ------------------------------------------------------------------------------------------ MMA issue (converged warp)
+ #pragma unroll 1
+-    for (int kb = 0; kb < NKB; ++kb) {
++    for (int kb = 0; kb < NS; ++kb) {
+       const int s = kb % STG;
+       mbar_wait(&B.full[s], (kb / STG) & 1);
+       tc_fence_after();
+-      const uint64_t da = desc_k128(su + O_X + s * KBT), db = desc_k128(su + O_W + s * WKB);
+       if (elect_one()) {
+ #pragma unroll
+-        for (int ks = 0; ks < 4; ++ks) mma(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), (kb > 0 || ks > 0) ? 1u : 0u);
+-        if (NKB > STG) tc_commit(&B.empty[s]);
+-        if (kb == NKB - 1) tc_commit(&B.mma_done);
++        for (int i = 0; i < KBX; ++i) {
++          const uint64_t da = desc_k128(su + O_X + s * XST + i * KBT);
++          if (KBX == 1) {
++            const uint64_t db = desc_k128(su + O_W + s * WST);
++#pragma unroll
++            for (int ks = 0; ks < 4; ++ks) mma(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), (kb > 0 || ks > 0) ? 1u : 0u);
++          } else {                                             // Wa slab i at i CH rows, Wb slab i at (KBX + i) CH rows
++            const uint64_t dwa = desc_k128(su + O_W + s * WST + i * CH * 128), dwb = desc_k128(su + O_W + s * WST + (KBX + i) * CH * 128);
++#pragma unroll
++            for (int ks = 0; ks < 4; ++ks) {
++              const uint32_t acc = (kb > 0 || i > 0 || ks > 0) ? 1u : 0u;
++              mma(tmem, da + (uint64_t)(ks * 2), dwa + (uint64_t)(ks * 2), acc, IDESC_H);
++              mma(tmem + CH, da + (uint64_t)(ks * 2), dwb + (uint64_t)(ks * 2), acc, IDESC_H);
++            }
++          }
++        }
++        if (NS > STG) tc_commit(&B.empty[s]);
++        if (kb == NS - 1) tc_commit(&B.mma_done);
+       }
+       __syncwarp();
+     }
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu
+index 89393bc2a..6f68d6a83 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu
+@@ -36,6 +36,11 @@ constexpr int O_A = 0, O_W = STG * AST, O_BAR = O_W + STG * WST, SMEM_BYTES = O_
+ static_assert(SMEM_BYTES <= 232448, "shared memory budget");
+ constexpr uint32_t TCOLS = 2 * UH < 32 ? 32 : 2 * UH;
+ constexpr uint32_t IDESC = idesc_bf16(128, 4 * UH);
++#ifndef WKBX
++#define WKBX 0                                                  // 1: Wa / Wb of a stage in one 3-D box each (part 15; host maps kb_box = KBX)
++#endif
++static_assert(!WKBX || KBX > 1, "3-D weight boxes need KBX > 1");
++constexpr uint32_t IDESC_H = idesc_bf16(128, 2 * UH);           // WKBX: a and b as two pair products
+ constexpr int NG = UH > 32 ? 2 : 1, EC = UH / NG;                 // epilogue warpgroups (column halves), units per group
+ typedef __nv_bfloat16 ACT;
+ 
+@@ -85,6 +90,12 @@ transition_sx_expand2(const __grid_constant__ CUtensorMap mxn, const __grid_cons
+   const uint32_t tmem = B.tmem;
+   auto load_w = [&](int st) {                                  // ring stage st % STG: the weights of K-blocks st KBX .. st KBX + KBX - 1
+     const uint32_t w = su + O_W + (st % STG) * WST;
++#if WKBX
++    // (part 15) Wa_r's and Wb_r's K-blocks of the stage as ONE 3-D box each: KBX Wa slabs, then KBX Wb slabs
++    tma_load_3d_2sm(w, &mwa, &B.full[st % STG], 0, h0, st * KBX);
++    tma_load_3d_2sm(w + KBX * UH * 128, &mwb, &B.full[st % STG], 0, h0, st * KBX);
++    return;
++#endif
+ #pragma unroll
+     for (int i = 0; i < KBX; ++i) {
+       tma_load_2d_2sm(w + i * WKB, &mwa, &B.full[st % STG], (st * KBX + i) * 64, h0);
+@@ -122,10 +133,23 @@ transition_sx_expand2(const __grid_constant__ CUtensorMap mxn, const __grid_cons
+         if (elect_one()) {
+ #pragma unroll
+           for (int i = 0; i < KBX; ++i) {
+-            const uint64_t da = desc_k128(su + O_A + s * AST + i * AKB), db = desc_k128(su + O_W + s * WST + i * WKB);
++            const uint64_t da = desc_k128(su + O_A + s * AST + i * AKB);
++#if WKBX
++            // a = xn [Wa_0; Wa_1]^T, b = xn [Wb_0; Wb_1]^T as N = 2 UH pair products: each CTA's columns [0, UH) / [UH, 2 UH) fold as the
++            // N = 4 UH product's [a_r | b_r] (lanes 0-63 the leader's units, 64-127 the peer's)
++            const uint64_t dwa = desc_k128(su + O_W + s * WST + i * UH * 128), dwb = desc_k128(su + O_W + s * WST + (KBX + i) * UH * 128);
++#pragma unroll
++            for (int ks = 0; ks < 4; ++ks) {
++              const uint32_t acc = (st > 0 || i > 0 || ks > 0) ? 1u : 0u;
++              umma_ss2(tmem, da + (uint64_t)(ks * 2), dwa + (uint64_t)(ks * 2), IDESC_H, acc);
++              umma_ss2(tmem + UH, da + (uint64_t)(ks * 2), dwb + (uint64_t)(ks * 2), IDESC_H, acc);
++            }
++#else
++            const uint64_t db = desc_k128(su + O_W + s * WST + i * WKB);
+ #pragma unroll
+             for (int ks = 0; ks < 4; ++ks)
+               umma_ss2(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), IDESC, (st > 0 || i > 0 || ks > 0) ? 1u : 0u);
++#endif
+           }
+           if (NS > STG) tc_commit2_mc(&B.empty[s], 3);
+           if (st == NS - 1) tc_commit2_mc(&B.mma_done, 3);
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+index a0f0ded06..fc3e132f6 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+@@ -40,10 +40,28 @@ constexpr int IOSZ = (F32 || H16) ? 4 : 2;                     // x / out elemen
+ constexpr int ESZ = F32 ? 4 : 2, BKE = 128 / ESZ;              // element bytes, elements of K per 128-byte K-block row
+ constexpr int D_ = DIM, H_ = HID, ROWS = 128, NB = NBW, NBLK = D_ / NB, KS = H_ / SK, NKB = KS / BKE, W_ = NB / SK;
+ static_assert(H_ % (BKE * SK) == 0 && NB % SK == 0 && (W_ * IOSZ) % 32 == 0, "whole K-blocks per CTA, owner column groups of 32 bytes or more");
+-constexpr int STG = NKB < 6 ? NKB : 6;
++#ifndef KBX
++#define KBX 1                                                   // (round 3 part 15) K-blocks per ring stage: h and Ws of a stage in ONE
++#endif                                                          // 3-D TMA box each (the per-SM box count paces these kernels: part 14)
++static_assert(NKB % KBX == 0, "whole stages");
++constexpr int NS = NKB / KBX;
+ constexpr int KBT = ROWS * 128, WBT = NB * 128;                 // h K-block [128][64] 16 KB, Ws K-block [NB rows][64]
+-constexpr int O_A = 0, O_B = STG * KBT, O_RED = O_B + STG * WBT;   // partials received from the other ranks: [SK][128][W] fp32
+-constexpr int O_BAR = O_RED + (SK > 1 ? SK * ROWS * W_ * 4 : 0), SMEM_BYTES = O_BAR + 256;
++constexpr int RED_B = SK > 1 ? SK * ROWS * W_ * 4 : 0;
++constexpr int SCAP = KBX == 1 ? 6 : (232448 - 1024 - RED_B) / (KBX * (KBT + WBT));
++constexpr int STG = NS < SCAP ? NS : SCAP;
++static_assert(STG >= 1, "ring stages");
++constexpr int AST = KBX * KBT, WST = KBX * WBT;
++constexpr int O_A = 0, O_B = STG * AST, O_RED = O_B + STG * WST;   // partials received from the other ranks: [SK][128][W] fp32
++constexpr int O_BAR = O_RED + RED_B, SMEM_BYTES = O_BAR + 256;
++DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++// stage st of the K slice: KBX K-blocks (KBX 1: the 2-D boxes of the old build; else 3-D maps (element, row, K-block))
++DEVI void ld_stage(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int k0, int st, int row) {
++  if (KBX == 1) tma_load_2d(dst, m, bar, k0 + st * BKE, row);
++  else tma_load_3d(dst, m, bar, 0, row, k0 / BKE + st * KBX);
++}
+ static_assert(SMEM_BYTES <= 232448, "shared memory budget");
+ #if F32
+ typedef float ACT;
+@@ -110,33 +128,36 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+   if (warp == 0) {
+     if (lane == 0) {
+       for (int kb = 0; kb < STG; ++kb) {                        // the weights first: they do not depend on the expand
+-        mbar_expect_tx(&B.full[kb], KBT + WBT);
+-        tma_load_2d(su + O_B + kb * WBT, &mws, &B.full[kb], k0 + kb * BKE, nb * NB);
++        mbar_expect_tx(&B.full[kb], AST + WST);
++        ld_stage(su + O_B + kb * WST, &mws, &B.full[kb], k0, kb, nb * NB);
+       }
+       pdl_wait();
+-      for (int kb = 0; kb < STG; ++kb) tma_load_2d(su + O_A + kb * KBT, &mh, &B.full[kb], k0 + kb * BKE, row0);
+-      for (int kb = STG; kb < NKB; ++kb) {
++      for (int kb = 0; kb < STG; ++kb) ld_stage(su + O_A + kb * AST, &mh, &B.full[kb], k0, kb, row0);
++      for (int kb = STG; kb < NS; ++kb) {
+         const int s = kb % STG;
+         mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
+-        mbar_expect_tx(&B.full[s], KBT + WBT);
+-        tma_load_2d(su + O_B + s * WBT, &mws, &B.full[s], k0 + kb * BKE, nb * NB);
+-        tma_load_2d(su + O_A + s * KBT, &mh, &B.full[s], k0 + kb * BKE, row0);
++        mbar_expect_tx(&B.full[s], AST + WST);
++        ld_stage(su + O_B + s * WST, &mws, &B.full[s], k0, kb, nb * NB);
++        ld_stage(su + O_A + s * AST, &mh, &B.full[s], k0, kb, row0);
+       }
+     }
+     pdl_wait();
+   } else if (warp == 1) {
+     pdl_wait();
+-    for (int kb = 0; kb < NKB; ++kb) {
++    for (int kb = 0; kb < NS; ++kb) {
+       const int s = kb % STG;
+       mbar_wait(&B.full[s], (kb / STG) & 1);
+       tc_fence_after();
+-      const uint64_t da = desc_k128(su + O_A + s * KBT), db = desc_k128(su + O_B + s * WBT);
+       if (elect_one()) {
+ #pragma unroll
+-        for (int ks = 0; ks < 4; ++ks)
+-          mma(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), (kb > 0 || ks > 0) ? 1u : 0u);
++        for (int i = 0; i < KBX; ++i) {
++          const uint64_t da = desc_k128(su + O_A + s * AST + i * KBT), db = desc_k128(su + O_B + s * WST + i * WBT);
++#pragma unroll
++          for (int ks = 0; ks < 4; ++ks)
++            mma(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), (kb > 0 || i > 0 || ks > 0) ? 1u : 0u);
++        }
+         tc_commit(&B.empty[s]);
+-        if (kb == NKB - 1) tc_commit(&B.acc_full);
++        if (kb == NS - 1) tc_commit(&B.acc_full);
+       }
+       __syncwarp();
+     }
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu
+index 2635ead92..13c0aeaf0 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu
+@@ -25,6 +25,10 @@ constexpr int AKB = HR * 128, WKB = NBH * 128;                  // one K-block o
+ #ifndef KBX
+ #define KBX 1                                                   // K-blocks per ring stage: the h rows of a stage in ONE 3-D TMA box
+ #endif
++#ifndef WKBX
++#define WKBX 0                                                  // 1: Ws of a stage in one 3-D box too (part 15; host map kb_box = KBX)
++#endif
++static_assert(!WKBX || KBX > 1, "3-D weight boxes need KBX > 1");
+ constexpr int NS = NKB / KBX, AST = KBX * AKB, WST = KBX * WKB;
+ static_assert(NKB % KBX == 0, "whole stages");
+ constexpr int CAP = (232448 - 1024) / (AST + WST);
+@@ -88,9 +92,14 @@ transition_sx_squeeze2(const __grid_constant__ CUtensorMap mh, const __grid_cons
+   if (warp == 0) {
+     if (lane < STG) {
+       auto load_w = [&](int st) {
++#if WKBX
++        // (part 15) the stage's Ws K-blocks as ONE 3-D box (the map built with kb_box = KBX): the same slabs at i WKB
++        tma_load_3d_2sm(su + O_W + lane * WST, &mws, &B.full[lane], 0, c0 + rank * NBH, st * KBX);
++#else
+ #pragma unroll
+         for (int i = 0; i < KBX; ++i)
+           tma_load_2d_2sm(su + O_W + lane * WST + i * WKB, &mws, &B.full[lane], (st * KBX + i) * 64, c0 + rank * NBH);
++#endif
+       };
+       auto load_a = [&](int st) {
+         if (KBX == 1) tma_load_2d_2sm(su + O_A + lane * AST, &mh, &B.full[lane], st * 64, arow);

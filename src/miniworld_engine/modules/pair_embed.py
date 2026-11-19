@@ -34,15 +34,88 @@ def _cuda_arch(device: torch.device) -> str | None:
     return None
 
 
-def _eval_sm120(weight: torch.Tensor, x: torch.Tensor) -> bool:
-    """The ``"cuda"`` backend's RTX 5090 inference launch (``PairEmbedGeom`` / ``PairEmbedCA``): no gradient to the weight, an sm_120 device."""
+def _cuda_arch_b200(device: torch.device) -> str | None:
+    """:func:`_cuda_arch` with the B200 (sm_100a) builds too: the classes of this file and ``ParallelResidual`` have them (2026-11-16)."""
+    if device.type == "cuda" and torch.cuda.get_device_capability(device) == (10, 0):
+        return None
+    return _cuda_arch(device)
+
+
+def _eval_sm120(weight: torch.Tensor, x: torch.Tensor, kind: str) -> bool:
+    """The ``"cuda"`` backend's RTX 5090 inference launch (``PairEmbedGeom`` / ``PairEmbedCA``): no gradient to the weight, an sm_120 device;
+    on a B200 the same launch (its sm_100a build) where ``kernels/pair_embed_geom/cuda/sm100`` ``EVAL_ONE_LAUNCH[kind]`` takes it."""
     from miniworld_engine.kernels._sm120 import is_sm120
 
-    return not (torch.is_grad_enabled() and weight.requires_grad) and is_sm120(x.device)
+    if torch.is_grad_enabled() and weight.requires_grad:
+        return False
+    if is_sm120(x.device):
+        return True
+    if x.device.type == "cuda" and torch.cuda.get_device_capability(x.device) == (10, 0):
+        from miniworld_engine.kernels.pair_embed_geom.cuda.sm100 import one_launch
+
+        return one_launch(kind, x)
+    return False
 
 
 def _first(*reasons: str | None) -> str | None:
     return next((r for r in reasons if r is not None), None)
+
+
+def _b200(device: torch.device) -> bool:
+    return device.type == "cuda" and torch.cuda.get_device_capability(device) == (10, 0)
+
+
+#: B200 cuda route (2026-11-17): the per-call constants of ``_prepared`` (the bin limits), made once per device. A CUDA-graph replay pays
+#: ~2 us per kernel node on that card, and the preparation kernels were 20-45 % of the small cases. Never evicted (a captured graph reads them).
+_B200_CONST: dict = {}
+
+
+def _linspace(device: torch.device, lo: float, hi: float, steps: int, lean: bool) -> torch.Tensor:
+    """``torch.linspace(lo, hi, steps)`` on ``device``; ``lean`` (the B200 cuda route): the tensor made once, outside a capture."""
+    if not lean or torch.compiler.is_compiling():
+        return torch.linspace(lo, hi, steps, device=device)
+    key = (device, float(lo), float(hi), int(steps))
+    t = _B200_CONST.get(key)
+    if t is None:
+        t = torch.linspace(lo, hi, steps, device=device)
+        if not torch.cuda.is_current_stream_capturing() and len(_B200_CONST) < 256:
+            _B200_CONST[key] = t
+    return t
+
+
+def _mask8(mask: torch.Tensor, lean: bool) -> torch.Tensor:
+    """A [B, n] mask as contiguous uint8; ``lean``: a contiguous bool mask is viewed (its bytes are 0 / 1), not copied."""
+    if lean and mask.dtype is torch.bool and mask.is_contiguous():
+        return mask.view(torch.uint8)
+    return mask.to(torch.uint8).contiguous()
+
+
+def _idx_pair(residue_idx: torch.Tensor, chains: torch.Tensor, lean: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    """The encoder pair's integer inputs as int32; ``lean``: contiguous int64 (or int32) inputs as they are -- the B200 forward reads either
+    (``kernels/pair_embed_geom/cuda/sm100`` ``forward``), so no cast kernels."""
+    same = residue_idx.dtype is chains.dtype and residue_idx.dtype in (torch.int32, torch.int64)
+    if lean and same and residue_idx.is_contiguous() and chains.is_contiguous():
+        return residue_idx, chains
+    return residue_idx.to(torch.int32).contiguous(), chains.to(torch.int32).contiguous()
+
+
+class _TableGrad(torch.autograd.Function):
+    """``W^T`` [rows, 256] bf16 with its gradient, one kernel each way (the values of ``weight.t().to(bf16)`` and of its autograd backward)."""
+
+    @staticmethod
+    def forward(ctx, weight):
+        ctx.meta = (weight.shape, weight.dtype)
+        tbl = torch.empty((weight.shape[1], weight.shape[0]), dtype=torch.bfloat16, device=weight.device)
+        tbl.copy_(weight.detach().t())
+        return tbl
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, g):
+        shape, dtype = ctx.meta
+        out = torch.empty(shape, dtype=dtype, device=g.device)
+        out.copy_(g.t())
+        return out
 
 
 def _out(y: torch.Tensor) -> torch.Tensor:
@@ -66,8 +139,11 @@ def _backbone(samples: int, length: int, *, device, generator: torch.Generator) 
     return torch.stack([ca + off[:, :, 0], ca, ca + off[:, :, 1], ca + off[:, :, 2]], 2)
 
 
-def _table(weight: torch.Tensor, track: bool) -> torch.Tensor:
-    """``W^T`` [rows, 256] in bf16, contiguous: differentiable in ``weight`` when ``track``, else one transpose-and-cast kernel."""
+def _table(weight: torch.Tensor, track: bool, lean: bool = False) -> torch.Tensor:
+    """``W^T`` [rows, 256] in bf16, contiguous: differentiable in ``weight`` when ``track``, else one transpose-and-cast kernel. ``lean`` (the
+    B200 cuda route): the differentiable table by :class:`_TableGrad` (two kernels a step instead of four)."""
+    if track and lean:
+        return cast(torch.Tensor, _TableGrad.apply(weight))
     if track:
         return weight.t().to(torch.bfloat16).contiguous()
     tbl = torch.empty((weight.shape[1], weight.shape[0]), dtype=torch.bfloat16, device=weight.device)
@@ -103,7 +179,22 @@ class PairEmbedAdaLN(BackendModule):
     """
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 2,
+        "cuda:5090_sm120": 1,
+        "cuda:b200_sm100": 20,
+        "triton:b200_sm100": 20,
+    }  # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build
+    # triton:b200_sm100 20 (2026-11-17, round 3 restart): the backward row kernel with 1 / 2 / 4 rows a program by B * n (was 8: 16 - 48
+    # programs at S1; its partials in another fixed order): fp32 training L128 / 256 / 384 S1 511 / 1003 / 1560 -> 162 / 332 / 604 us
+    # cuda:b200_sm100 20 (2026-11-17, round 3 restart): inference fwd_s at 2 CTAs per SM (was 4; the same bits): S1 L128 / 256 / 384 fp32
+    # eval 18.3 / 34.7 / 51.1 -> 16.3 / 28.6 / 49.1 us
+    # cuda:b200_sm100 1 (2026-11-16): the sm_100a build of the A100 source (kernels/pair_embed_adaln/cuda/sm100)
+    # cuda:b200_sm100 2 (2026-11-17, round 3): lean preparation (bin limits made once, the bool mask viewed, the inference table cached per
+    # weight version: 4 fewer kernels a call); reduce_parts of the tcgen05 table gradient with 16 partials in flight
+    # cuda:b200_sm100 3 (2026-11-17, round 3 second part): B200 kernels of its own (pe_adaln_sm100.cuh): forward / row backward reading
+    # int64 indices and fp32 / bf16 gamma / beta as they are, the weight gradient in the weight's layout; inference from the LayerNorm
+    # statistics tables of the weights (fwd_s: no per-pair reduction; the tables made once per weight version)
 
     backends = ("pytorch", "cuda", "triton")
 
@@ -182,7 +273,7 @@ class PairEmbedAdaLN(BackendModule):
 
     def _supports_cuda(self, xt, sc, residue_idx, mask, gamma, beta) -> str | None:
         why = _first(
-            self._supports_kernels(xt, sc, residue_idx, mask, gamma, beta), _cuda_arch(xt.device) if xt.device.type == "cuda" else None
+            self._supports_kernels(xt, sc, residue_idx, mask, gamma, beta), _cuda_arch_b200(xt.device) if xt.device.type == "cuda" else None
         )
         if why is not None:
             return why
@@ -193,12 +284,20 @@ class PairEmbedAdaLN(BackendModule):
     def _supports_triton(self, xt, sc, residue_idx, mask, gamma, beta) -> str | None:
         return self._supports_kernels(xt, sc, residue_idx, mask, gamma, beta)
 
-    def _prepared(self, xt, sc, residue_idx, mask, gamma, beta) -> tuple:
+    def _prepared(self, xt, sc, residue_idx, mask, gamma, beta, lean: bool = False) -> tuple:
         """The kernels' inputs: the table W^T fp32, the affine, gamma / beta, fp32 coordinates, int32 indices, uint8 mask, the bin limits and the sizes."""
         dev = xt.device
         xt32 = xt.float().contiguous()
+        if lean and not (torch.is_grad_enabled() and self.weight.requires_grad):
+            # B200 cuda inference (2026-11-17): W^T made once per weight version (a capture reads the entry its warm-up made)
+            from miniworld_engine.kernels import _capture
+
+            w = self.weight
+            tbl = _capture.param_forms("pair_embed_adaln_tbl", (w,), lambda: w.detach().t().contiguous(), capture_reads_eager=True)
+        else:
+            tbl = self.weight.t().contiguous()
         return (
-            self.weight.t().contiguous(),
+            tbl,
             self.ln_weight,
             self.ln_bias,
             gamma,
@@ -206,9 +305,9 @@ class PairEmbedAdaLN(BackendModule):
             xt32,
             (sc if sc is not None else xt).float().contiguous(),
             residue_idx.to(torch.int32).contiguous(),
-            mask.to(torch.uint8).contiguous(),
-            torch.linspace(*self.xt_range, self.n_xt - 1, device=dev),
-            torch.linspace(*self.sc_range, self.n_sc - 1, device=dev),
+            _mask8(mask, lean),
+            _linspace(dev, *self.xt_range, self.n_xt - 1, lean),
+            _linspace(dev, *self.sc_range, self.n_sc - 1, lean),
             int(sc is not None),
             self.n_sep,
             self.n_xt,
@@ -217,9 +316,33 @@ class PairEmbedAdaLN(BackendModule):
         )
 
     def _forward_cuda(self, xt, sc, residue_idx, mask, gamma, beta):
+        if _b200(xt.device):
+            # B200 (2026-11-17, round 3): its own forward / row backward (kernels/pair_embed_adaln/cuda/sm100 pe_adaln_sm100.cuh) from the
+            # module's weight, int64 indices and fp32 / bf16 gamma / beta as they are
+            from miniworld_engine.kernels.pair_embed_adaln.cuda.function import pair_embed_adaln_b200
+
+            dev = xt.device
+            return pair_embed_adaln_b200(
+                self.weight,
+                self.ln_weight,
+                self.ln_bias,
+                gamma,
+                beta,
+                xt.float().contiguous(),
+                (sc if sc is not None else xt).float().contiguous(),
+                residue_idx,
+                _mask8(mask, True),
+                _linspace(dev, *self.xt_range, self.n_xt - 1, True),
+                _linspace(dev, *self.sc_range, self.n_sc - 1, True),
+                int(sc is not None),
+                self.n_sep,
+                self.n_xt,
+                self.eps1,
+                self.eps2,
+            )
         from miniworld_engine.kernels.pair_embed_adaln.cuda.function import pair_embed_adaln_cuda
 
-        return pair_embed_adaln_cuda(*self._prepared(xt, sc, residue_idx, mask, gamma, beta))
+        return pair_embed_adaln_cuda(*self._prepared(xt, sc, residue_idx, mask, gamma, beta, lean=False))
 
     def _forward_triton(self, xt, sc, residue_idx, mask, gamma, beta):
         from miniworld_engine.kernels.pair_embed_adaln.triton.function import pair_embed_adaln_triton
@@ -311,7 +434,18 @@ class PairEmbedGeom(BackendModule):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build; cuda:5090_sm120 2 (2026-11-13): the RTX 5090's own
     # table gradient (pg120_bwd), the fused LayerNorm + table gradient, the one-launch inference forward (pg120_fwd_blk)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 2}
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 2, "cuda:b200_sm100": 20}
+    # cuda:b200_sm100 20 (2026-11-17, round 3 restart): above 128^2 pairs the encoder forward reads the bf16 table from shared memory
+    # (pe_geom_sm100.cuh fwd_smt: one CTA of 16 warps per SM, the table by four bulk copies while the first chunk is binned, 32-pair chunks,
+    # 16 lanes a pair; the same adds in the same order: bitwise the L1 forward); S1 L256 eval 38.8 -> 30.6 us, L384 with LayerNorm 73.6 -> 61.3
+    # (also the LayerNorm backward at <= 128^2 pairs on 8 lanes a pair, as PairEmbedCA 20: L128 training equal)
+    # cuda:b200_sm100 1 (2026-11-16): the sm_100a build of the A100 source (kernels/pair_embed_geom/cuda/sm100)
+    # cuda:b200_sm100 2 (2026-11-17, round 3): inference on the bf16 table cached per weight version (one launch, no table kernel); training
+    # with the lean preparation (bin limits made once, bool masks viewed, the table and its gradient one kernel each: 14 -> 7 kernels a
+    # step) and reduce_parts with 16 partials in flight
+    # cuda:b200_sm100 3 (2026-11-17, round 3 second part): encoder forward / LayerNorm backward of its own (pe_geom_sm100.cuh,
+    # pe_ln_sm100.cuh: persistent warps, int64 indices, register-capped build at 6 CTAs per SM above 128^2 pairs); training table by
+    # pg120_table behind the forward (PDL); the table gradient's reduce inside its launch (cooperative grid barrier; same adds: same bits)
 
     backends = ("pytorch", "cuda", "triton")
     rows = N_ROWS_GEOM
@@ -360,39 +494,45 @@ class PairEmbedGeom(BackendModule):
     def _supports_cuda(self, bb, ca_mask, has_cb, mask, residue_idx, chains) -> str | None:
         return _first(
             self._supports_kernels(bb, ca_mask, has_cb, mask, residue_idx, chains),
-            _cuda_arch(bb.device) if bb.device.type == "cuda" else None,
+            _cuda_arch_b200(bb.device) if bb.device.type == "cuda" else None,
         )
 
     def _supports_triton(self, bb, ca_mask, has_cb, mask, residue_idx, chains) -> str | None:
         return self._supports_kernels(bb, ca_mask, has_cb, mask, residue_idx, chains)
 
-    def _prepared(self, bb, ca_mask, has_cb, mask, residue_idx, chains) -> tuple:
+    def _prepared(self, bb, ca_mask, has_cb, mask, residue_idx, chains, lean: bool = False) -> tuple:
         """The kernels' inputs: the bf16 table W^T, fp32 coordinates, uint8 masks, int32 indices, the bin limits, the LayerNorm eps (-1: none), train."""
         dev = bb.device
         train = torch.is_grad_enabled() and self.weight.requires_grad
         return (
-            _table(self.weight, train),
+            _table(self.weight, train, lean),
             bb.float().contiguous(),
-            ca_mask.to(torch.uint8).contiguous(),
-            has_cb.to(torch.uint8).contiguous(),
-            mask.to(torch.uint8).contiguous(),
-            residue_idx.to(torch.int32).contiguous(),
-            chains.to(torch.int32).contiguous(),
-            torch.linspace(0.1, 2, 20, device=dev),
-            torch.linspace(-torch.pi, torch.pi, 20, device=dev),
+            _mask8(ca_mask, lean),
+            _mask8(has_cb, lean),
+            _mask8(mask, lean),
+            *_idx_pair(residue_idx, chains, lean),
+            _linspace(dev, 0.1, 2, 20, lean),
+            _linspace(dev, -torch.pi, torch.pi, 20, lean),
             -1.0 if self.ln_eps is None else float(self.ln_eps),
             train,
         )
 
     def _forward_cuda(self, bb, ca_mask, has_cb, mask, residue_idx, chains):
-        if _eval_sm120(self.weight, bb):  # RTX 5090 inference: one launch from the module's own inputs (no per-call preparation kernels)
+        if _b200(bb.device):
+            # B200 (2026-11-17, round 3): its own forward / LayerNorm backward (kernels/pair_embed_geom/cuda/sm100 pe_geom_sm100.cuh,
+            # pe_ln_sm100.cuh) from the module's weight and inputs; the weight gradient comes back in the weight's layout
+            from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_geom_b200
+
+            eps = -1.0 if self.ln_eps is None else float(self.ln_eps)
+            return pair_embed_geom_b200(self.weight, bb, ca_mask, has_cb, mask, residue_idx, chains, eps)
+        if _eval_sm120(self.weight, bb, "geom"):  # RTX 5090 inference: one launch from the module's own inputs (no per-call preparation kernels)
             from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_geom_eval_sm120
 
             eps = -1.0 if self.ln_eps is None else float(self.ln_eps)
             return pair_embed_geom_eval_sm120(self.weight, bb, ca_mask, has_cb, mask, residue_idx, chains, eps)
         from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_geom_cuda
 
-        return pair_embed_geom_cuda(*self._prepared(bb, ca_mask, has_cb, mask, residue_idx, chains))
+        return pair_embed_geom_cuda(*self._prepared(bb, ca_mask, has_cb, mask, residue_idx, chains, lean=_b200(bb.device)))
 
     def _forward_triton(self, bb, ca_mask, has_cb, mask, residue_idx, chains):
         from miniworld_engine.kernels.pair_embed_geom.triton.function import pair_embed_geom_triton
@@ -428,7 +568,15 @@ class PairEmbedCA(BackendModule):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build; cuda:5090_sm120 2 (2026-11-13): the RTX 5090's own
     # table gradient (pg120_bwd), the fused LayerNorm + table gradient, the one-launch inference forward (pg120_fwd_ca_blk)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 2}
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 2, "cuda:b200_sm100": 20}
+    # cuda:b200_sm100 20 (2026-11-17, round 3 restart): the LayerNorm backward at <= 128^2 pairs with 8 lanes a pair (was 16; its sums in
+    # another fixed order): S1 L128 training with the LayerNorm 32.6 -> 30.6 us
+    # cuda:b200_sm100 1 (2026-11-16): the sm_100a build of the A100 source (kernels/pair_embed_geom/cuda/sm100)
+    # cuda:b200_sm100 2 (2026-11-17): inference by the B200 decoder-pair forward (pe_ca_sm100.cuh, persistent warps, 8 lanes a pair, packed
+    # bf16x2 / fp32x2 LayerNorm) at every size: the 16 refused cases served
+    # cuda:b200_sm100 3 (2026-11-17, round 3): as PairEmbedGeom 2 (cached inference table: one launch; lean training preparation; reduce_parts)
+    # cuda:b200_sm100 4 (2026-11-17, round 3 second part): training forward with codes on the decoder design (int64 indices), the table
+    # by pg120_table behind it (PDL), LayerNorm backward pe_ln_sm100.cuh, the table gradient's reduce inside its launch (as PairEmbedGeom 3)
 
     backends = ("pytorch", "cuda", "triton")
     rows = N_ROWS_CA
@@ -486,12 +634,12 @@ class PairEmbedCA(BackendModule):
         return None
 
     def _supports_cuda(self, ca, mask, residue_idx=None) -> str | None:
-        return _first(self._supports_kernels(ca, mask, residue_idx), _cuda_arch(ca.device) if ca.device.type == "cuda" else None)
+        return _first(self._supports_kernels(ca, mask, residue_idx), _cuda_arch_b200(ca.device) if ca.device.type == "cuda" else None)
 
     def _supports_triton(self, ca, mask, residue_idx=None) -> str | None:
         return self._supports_kernels(ca, mask, residue_idx)
 
-    def _prepared(self, ca, mask, residue_idx) -> tuple:
+    def _prepared(self, ca, mask, residue_idx, lean: bool = False) -> tuple:
         """The kernels' inputs: the bf16 table W^T, fp32 CA coordinates, uint8 mask, int32 indices, the bin limits, the LayerNorm eps (-1: none), train."""
         dev = ca.device
         b, n = mask.shape
@@ -503,17 +651,21 @@ class PairEmbedCA(BackendModule):
         )
         m8 = mask.contiguous().view(torch.uint8) if mask.dtype is torch.bool else mask.to(torch.uint8).contiguous()
         return (
-            _table(self.weight, train),
+            _table(self.weight, train, lean),
             ca.float().contiguous(),
             m8,
             idx,
-            torch.linspace(0.1, 3.0, 29, device=dev),
+            _linspace(dev, 0.1, 3.0, 29, lean),
             -1.0 if self.ln_eps is None else float(self.ln_eps),
             train,
         )
 
     def _forward_cuda(self, ca, mask, residue_idx=None):
-        if _eval_sm120(self.weight, ca):  # RTX 5090 inference: one launch from the module's own inputs (no per-call preparation kernels)
+        if _b200(ca.device):  # B200 (2026-11-17, round 3): as PairEmbedGeom (the decoder forward pe_ca_sm100.cuh also in training)
+            from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_ca_b200
+
+            return pair_embed_ca_b200(self.weight, ca, mask, residue_idx, -1.0 if self.ln_eps is None else float(self.ln_eps))
+        if _eval_sm120(self.weight, ca, "ca"):  # RTX 5090 inference: one launch from the module's own inputs (no per-call preparation kernels)
             from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_ca_eval_sm120
 
             if residue_idx is None:
@@ -523,7 +675,7 @@ class PairEmbedCA(BackendModule):
             return pair_embed_ca_eval_sm120(self.weight, ca, mask, residue_idx, eps)
         from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_ca_cuda
 
-        return pair_embed_ca_cuda(*self._prepared(ca, mask, residue_idx))
+        return pair_embed_ca_cuda(*self._prepared(ca, mask, residue_idx, lean=_b200(ca.device)))
 
     def _forward_triton(self, ca, mask, residue_idx=None):
         from miniworld_engine.kernels.pair_embed_geom.triton.function import pair_embed_ca_triton

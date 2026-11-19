@@ -1,0 +1,12 @@
+modules: [Transition]
+backends: [cuda]
+external: []
+rows: [31, 32]
+dtypes: [master]
+modes: [eval]
+lengths: all
+depths: min
+samples: min
+device: cuda
+seed: 0
+fixed: {bfloat16: 0.008, master: 0.008, float32: 1.0e-05}

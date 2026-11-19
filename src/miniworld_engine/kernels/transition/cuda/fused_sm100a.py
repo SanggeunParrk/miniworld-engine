@@ -43,18 +43,29 @@ from ..._nvcc import (
     nvcc_path,
 )
 
+
 _dir = Path(__file__).parent / "sm100"
 
 #: Rows must be a whole number of these (the persistent grid's tile).
 ROWS = 128
 D, H = 128, 512
 #: Hidden-slice replicas of the backward's weight role (8 * DW_REPL CTAs, the rest run the input role). 9 measured fastest at
-#: L384 and L768 on a 148-SM B200 (rounds v9, v13, v22); settings.transition_sm100_repl overrides it for A/B runs.
+#: L384 and L768 on a 148-SM B200 (rounds v9, v13, v22); a module constant (A/B runs edit it).
 DW_REPL = 9
+#: (round 3, training part 4) up to DW_REPL_SMALL_TILES row tiles: 8 replicas (the backward launched as a programmatic dependent;
+#: [16 384, 128] step, graph, L2 flushed, three alternated rounds: mean 56.7-56.8 -> 56.4-56.6 us). Module constants (A/B runs edit them).
+DW_REPL_SMALL = 8
+DW_REPL_SMALL_TILES = 128
+#: (S90, 2026-11-18) from DW_REPL_LARGE_TILES row tiles: 10 replicas ([409 600 / 589 824, 128] n 4 step, graph, L2 flushed: 654.0 / 942.2 -> 647.2 /
+#: 913.4 us; 262 144 rows 426.0 -> 430.1 us, so not below; 12 is 1149 us). DW_REPL_LARGE_TILES = 1 << 30: the old counts (A/B).
+DW_REPL_LARGE = 10
+DW_REPL_LARGE_TILES = 3200
 
 
-def _repl() -> int:
-    return DW_REPL
+def _repl(tiles: int = 0) -> int:
+    if tiles <= DW_REPL_SMALL_TILES:
+        return DW_REPL_SMALL
+    return DW_REPL_LARGE if tiles >= DW_REPL_LARGE_TILES else DW_REPL
 
 
 # ------------------------------------------------------------------------------------------------------------------ build
@@ -125,17 +136,18 @@ def _driver_major() -> int | None:
 
 @functools.lru_cache(maxsize=1)
 def kernel_toolchain() -> tuple[str, tuple[int, int], tuple[str, ...]]:
-    """(nvcc, release, host flags) that build the kernel cubins: settings.transition_sm100_nvcc if set, else the newest of
+    """(nvcc, release, host flags) that build the kernel cubins: $MINIWORLD_TRANSITION_SM100_NVCC if set, else the newest of
     ``/usr/local/cuda*/bin/nvcc`` and the torch-matched nvcc that knows sm_100, is no newer (major) than the driver, and can
     drive a host compiler."""
-    cands = [*map(str, Path("/usr/local").glob("cuda*/bin/nvcc")), nvcc_path()]
+    override = os.environ.get("MINIWORLD_TRANSITION_SM100_NVCC") or None
+    cands = [override] if override else [*map(str, Path("/usr/local").glob("cuda*/bin/nvcc")), nvcc_path()]
     driver_major = _driver_major()
     found = {}
     for c in cands:
         if c and Path(c).is_file() and os.path.realpath(c) not in found and _knows_sm100(c):
             rel = _release(c)
-            # a cubin from a newer major toolkit than the driver supports does not load (a 575 driver stops at CUDA 12.9)
-            if rel and (driver_major is None or rel[0] <= driver_major):
+            # a cubin from a newer major toolkit than the driver supports does not load (cssb's 575 driver stops at CUDA 12.9)
+            if rel and (driver_major is None or rel[0] <= driver_major or override):
                 found[os.path.realpath(c)] = rel
     for nvcc, rel in sorted(found.items(), key=lambda kv: kv[1], reverse=True):
         flags = _host_for(nvcc)
@@ -165,7 +177,7 @@ def _cubins() -> tuple[str, str]:
 @functools.lru_cache(maxsize=1)
 def _ext():
     """The host binding (built by the torch-matched toolkit) with the kernel cubins loaded into it (on the current device, so a
-    cubin the driver rejects fails here, inside ``available()``, which raises ``_nvcc.KernelBuildError``)."""
+    cubin the driver rejects fails here, inside ``available()``, and the call keeps the Triton path)."""
     ensure_cuda_home()
     ext = load_extension(
         name="transition_fused_sm100a",
@@ -180,12 +192,10 @@ def _ext():
 
 @functools.lru_cache(maxsize=8)
 def _is_b200(index: int) -> bool:
-    props = torch.cuda.get_device_properties(index)
-    # the backward's role split needs whole 2-CTA clusters on both sides of 8 * DW_REPL
-    return (props.major, props.minor) == (
-        10,
-        0,
-    ) and props.multi_processor_count % 2 == 0
+    # The arch through `torch.cuda.get_device_capability`, as every other dispatch site reads it (and the one `dev derive --arch` patches:
+    # read from the properties, a derivation for sm86 / sm90 on a B200 took this path and recorded no Transition Triton launch).
+    # The backward's role split needs whole 2-CTA clusters on both sides of 8 * DW_REPL.
+    return torch.cuda.get_device_capability(index) == (10, 0) and torch.cuda.get_device_properties(index).multi_processor_count % 2 == 0
 
 
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
@@ -205,18 +215,19 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     return rows > 0 and rows % ROWS == 0
 
 
+_BUILD_FAILED = False
 _WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 
 
 def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """``supported()`` plus a successful (cached) build; a failed build / load raises ``_nvcc.KernelBuildError`` (never a fallback)."""
-    if not supported(x, wa, ws):
+    """``supported()`` plus a successful (cached) build; a build failure raises."""
+    if _BUILD_FAILED or not supported(x, wa, ws):
         return False
     if torch.compiler.is_compiling() or _is_fake(x, wa, ws):
         return True
     try:
         _ext()
-    except Exception as exc:  # a build / load failure is an error, never a fallback
+    except Exception as exc:  # B200 has no engine Triton / silent PyTorch fallback: a build or load failure is an error
         build_failed("fused sm100a Transition", exc)
         return False  # reached only while planning (build_failed returns there)
     return True
@@ -258,6 +269,25 @@ def _fwd_launch(
     return tuple(_ext().transition_fused_fwd(x, gamma, beta, wa, wb, ws, eps, save))
 
 
+def _cast_launch_fake(wa, wb, ws):
+    return tuple(torch.empty(w.shape, dtype=torch.bfloat16, device=w.device) for w in (wa, wb, ws))
+
+
+@opaque(fake=_cast_launch_fake, name="transition_cast_weights_sm100a")
+def _cast_launch(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """bf16 copies of the fp32 (master) wa / wb / ws in one launch instead of three casts."""
+    if _is_fake(wa, wb, ws):
+        return _cast_launch_fake(wa, wb, ws)
+    return tuple(_ext().transition_cast_weights(wa, wb, ws))
+
+
+def _bf16_weights(x, wa, wb, ws):
+    """The kernels' bf16 weight operands: one cast launch for fp32 masters, else ``.to`` (a no-op for bf16 parameters)."""
+    if x.dtype is torch.bfloat16 and all(w.dtype is torch.float32 and w.is_contiguous() for w in (wa, wb, ws)):
+        return _cast_launch(wa, wb, ws)
+    return tuple(w.to(x.dtype).contiguous() for w in (wa, wb, ws))
+
+
 def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws):
     """Output structure only: the six gradients, each shaped like what it is a gradient of (dgamma / dbeta and the weight
     gradients fp32)."""
@@ -287,7 +317,7 @@ def _bwd_launch(
     """(dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch."""
     if _is_fake(dy, x):
         return _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws)
-    return tuple(_ext().transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws, _repl()))
+    return tuple(_ext().transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws, _repl(x.shape[0] // ROWS)))
 
 
 class _FusedTransitionSM100A(torch.autograd.Function):
@@ -302,7 +332,7 @@ class _FusedTransitionSM100A(torch.autograd.Function):
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
-        wa, wb, ws = (w.to(x.dtype).contiguous() for w in (wa, wb, ws))
+        wa, wb, ws = _bf16_weights(x, wa, wb, ws)
         out, xn, rstd, c1 = _fwd_launch(flat, gf, bf, wa, wb, ws, float(eps), True)
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws)
         ctx.shape = shape
@@ -349,6 +379,7 @@ def transition_fused_sm100a(x, gamma, beta, wa, wb, ws, eps):
                 beta.float().contiguous(),
                 tuple(w.to(x.dtype).contiguous() for w in (wa, wb, ws)),
             ),
+            capture_reads_eager=True,
         )
         out, _, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), g, b, *ww, float(eps), False)
         return out.reshape(shape)

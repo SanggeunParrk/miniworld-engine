@@ -1,0 +1,41 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index e36c5f23f..42009c08d 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -259,6 +259,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             ("swiglu_ab", "widths/tswiglu_w.cu", (*dim, "-DSAVE_AB")),
+             ("swiglu_abis", "widths/tswiglu_w.cu", (*dim, "-DSAVE_AB", "-DITEM_SCHED")),
+             ("squeeze", "widths/tgemm_nd.cu", (f"-DDIM={nd}", f"-DKDIM={h}")),
++            *((("fwd512", "widths/tfwd_d512.cu", (*hid, *FWD512_FLAGS)),) if d == 512 else ()),
+             *((("squeezep", "widths/tgemm_nd.cu", (f"-DDIM={nd}", f"-DKDIM={h}", "-DPARTS=1", *SQ_FLAGS)),) if d == 512 else ()),
+             *(
+                 (
+@@ -426,6 +427,8 @@ FOLD_LN = True
+ #: (S90) the D 512 inference squeeze with the K loop per N part and a double-buffered 256-column accumulator (tgemm_nd.cu -DPARTS)
+ SQ_PARTS = True   # n 2 only: row 33 master -2 to -2.5 % (L 256 190.5 -> 186.2, 512 665.4 -> 649.1, 640 1048.0 -> 1027.4); row 34 (n 4) +1 - 3 %
+ SQ_FLAGS: tuple[str, ...] = ()
++FWD512_FLAGS: tuple[str, ...] = tuple(os.environ.get("MW_FWD512_FLAGS", "").split())
++FWD512 = os.environ.get("MW_FWD512", "0") == "1"  # (S90 prototype) fused D 512 pair kernel, n 2 inference
+ #: (S90) the LayerNorm folded into the fused D 384 inference kernel (tfwd_d384.cu -DFOLD, K16 correction MMA)
+ FOLD_D384 = True
+ #: from this many rows (in-process A/B, graph medians fold / unfolded, [M, 384]: n 2 16 384 rows 1.133, 65 536 0.967, 262 144 0.948, 589 824 0.947, 1 048 576 0.920, 2 359 296 0.927; n 4 16 384 1.141, 65 536 1.000,
+@@ -665,6 +668,19 @@ def _fwd_launch(
+             ),
+         )
+         return out, xn, rstd, c1, hid, a, b
++    if FWD512 and not save and d == 512 and h == 2 * d and wa.dtype == x.dtype == torch.bfloat16:
++        # (S90 prototype) the fused D 512 pair kernel: the CTA pair splits the output columns, h by DSMEM (tfwd_d512.cu)
++        xn = torch.empty_like(x)
++        rstd, c1 = torch.empty(m, dtype=torch.float32, device=x.device), torch.empty(m, dtype=torch.float32, device=x.device)
++        k.run("ln", "transition_ln_w", min(m // 16, k.nsm * 4), (x, gamma, beta, xn, rstd, c1, m, float(eps), 0), 256, 1)
++        k.run(
++            "fwd512",
++            "transition_fwd_d512_sm100",
++            k.grid,
++            (k.rows(xn), k.tmap(wa, d, h, 64, 32), k.tmap(wb, d, h, 64, 32), k.tmap(ws, h, d), k.rows(x), k.rows(out), tiles),
++            384,
++        )
++        return out, xn.new_empty((1, d)), x.new_empty((1,), dtype=torch.float32), x.new_empty((1,), dtype=torch.float32), ph(), ph(), ph()
+     hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
+     item = tiles <= ITEM_TILES
+     mh = k.tmap(hid, h, m)

@@ -1,0 +1,102 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/__init__.py
+index 066925acd..373cc7263 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/__init__.py
+@@ -832,6 +832,9 @@ KERNELS_TF32 = {
+     "dkv32": ("lattn_dkv_tf32", "local_attn_dkv_tf32", 209152),
+     "pb_f32": ("lbias_tf32", "local_bias_fwd_f32", 0),
+     "pb_f32e": ("lbias_tf32", "local_bias_fwd_f32_early", 0),  # (programmatic dependent of atom_pre_tf32: pair_bias_early)
++    "pb_f32p": ("lbias_tf32", "local_bias_fwd_f32_pdl", 0),  # (round 3 part 14: PDL, waits first, triggers its dependent at once)
++    "pb_f32w": ("lbias_tf32", "local_bias_fwd_f32_pdlw", 0),
++    "pb_f32o": ("lbias_tf32", "local_bias_fwd_f32_pdl1", 0),
+     "pb_b32": ("lbias_tf32", "local_bias_bwd_f32", 0),
+     "pb_fin32": ("lbias_tf32", "local_bias_fin_f32", 0),
+     "slide_add32": ("lslide", "local_slide_add_f32", 0),
+@@ -839,7 +842,7 @@ KERNELS_TF32 = {
+ 
+ 
+ #: the fp32-path kernels that execute griddepcontrol.wait before any global access (programmatic dependent launch)
+-_PDL_TF32 = ("fwd32", "pb_f32e")
++_PDL_TF32 = ("fwd32", "pb_f32e", "pb_f32p", "pb_f32w", "pb_f32o")
+ 
+ 
+ @functools.lru_cache(maxsize=None)
+@@ -1003,7 +1006,10 @@ def pair_bias_fwd32(z, gamma, wb, eps=1e-5):
+     wb, gamma, bf = _params(wb, gamma)
+     out = torch.empty(NH, nwin, WQ, WK, device=z.device, dtype=torch.float32)
+     d = _dev(z)
+-    _load32("pb_f32", d)(
++    import os
++
++    pv = os.environ.get("MW_LD14_PB", "0")  # (round 3 part 14 A / B: PDL forms of the bias)
++    _load32({"1": "pb_f32p", "2": "pb_f32w", "3": "pb_f32o"}.get(pv, "pb_f32"), d)(
+         (min(4 * num_sms(d), (rows + 255) // 256), 1, 1),
+         (256, 1, 1),
+         z,
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lbias_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lbias_tf32.cu
+index 383fa01f5..0afe188c2 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lbias_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lbias_tf32.cu
+@@ -60,6 +60,62 @@ local_bias_fwd_f32(const float* __restrict__ z, const void* __restrict__ wb, con
+   }
+ }
+ 
++// round 3 part 14 (2026-11-18): local_bias_fwd_f32 as a PDL launch that waits first (its CTAs are resident when the previous grid ends:
++// no launch gap) and lets its dependent (the attention, which waits for this grid) start its setup at once; a thread takes rows r and
++// r + stride together, each by two 256-bit loads (128 B in flight a thread). The same arithmetic per row: the same bits.
++DEVI void load_row_v8(const float* z, size_t r, float* x) {
++#pragma unroll
++  for (int i = 0; i < 2; ++i) {
++    uint32_t w[8];
++    asm volatile("ld.global.nc.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
++                 : "=r"(w[0]), "=r"(w[1]), "=r"(w[2]), "=r"(w[3]), "=r"(w[4]), "=r"(w[5]), "=r"(w[6]), "=r"(w[7]) : "l"(z + r * 16 + 8 * i));
++#pragma unroll
++    for (int k = 0; k < 8; ++k) x[8 * i + k] = __uint_as_float(w[k]);
++  }
++}
++template <bool TRIG, bool TWO>
++DEVI void bias_fwd_pdl(const float* __restrict__ z, const void* __restrict__ wb, const void* __restrict__ gamma, float* __restrict__ bias,
++                       int rows, float eps, int is_bf16) {
++  asm volatile("griddepcontrol.wait;" ::: "memory");
++  if (TRIG) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++  __shared__ float sw[64];
++  load_w(sw, wb, gamma, is_bf16);
++  __syncthreads();
++  const long long st = (long long)gridDim.x * blockDim.x;
++  for (long long r = (long long)blockIdx.x * blockDim.x + threadIdx.x; r < rows; r += (TWO ? 2 : 1) * st) {
++    const long long r2 = TWO ? r + st : rows;
++    float x[16], y[16], rx, ry;
++    load_row_v8(z, r, x);
++    if (r2 < rows) load_row_v8(z, r2, y);
++    normalise(x, eps, rx);
++#pragma unroll
++    for (int h = 0; h < 4; ++h) {
++      float b = 0.f;
++#pragma unroll
++      for (int c = 0; c < 16; ++c) b = fmaf(sw[h * 16 + c], x[c], b);
++      bias[(size_t)h * rows + r] = b;
++    }
++    if (r2 < rows) {
++      normalise(y, eps, ry);
++#pragma unroll
++      for (int h = 0; h < 4; ++h) {
++        float b = 0.f;
++#pragma unroll
++        for (int c = 0; c < 16; ++c) b = fmaf(sw[h * 16 + c], y[c], b);
++        bias[(size_t)h * rows + r2] = b;
++      }
++    }
++  }
++}
++#define BIAS_PDL(name, T, W)                                                                                                     \
++  extern "C" __global__ void __launch_bounds__(256) name(const float* __restrict__ z, const void* __restrict__ wb, const void* __restrict__ gamma, \
++                                                         float* __restrict__ bias, int rows, float eps, int is_bf16) {                       \
++    bias_fwd_pdl<T, W>(z, wb, gamma, bias, rows, eps, is_bf16);                                                                          \
++  }
++BIAS_PDL(local_bias_fwd_f32_pdl, true, true)
++BIAS_PDL(local_bias_fwd_f32_pdlw, false, true)
++BIAS_PDL(local_bias_fwd_f32_pdl1, false, false)
++
+ // 2026-11-17 (round 3 part 8): local_bias_fwd_f32 as a programmatic dependent of atom_pre_tf32 (inference), running BESIDE it: the bias
+ // depends on the pair only. It reads z / the weights and writes the bias before any wait -- safe because its caller makes z, the
+ // parameters and the output buffer before the launches of the chain (z and the parameters are complete: >= 2 launches earlier; the output

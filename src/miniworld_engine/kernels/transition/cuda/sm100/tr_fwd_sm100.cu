@@ -11,19 +11,51 @@
 #include "sm100.cuh"
 using namespace s100;
 
+// LNH (inference builds): the LayerNorm and the epilogue of a tile split over warps 4-7 and 8-11 (bit-identical: see lnh), every SwiGLU
+// chunk on warps 12-15. Default: the original roles (two SwiGLU warpgroups, LayerNorm(i + 1) then epilogue(i) on warps 8-11).
+#ifndef LNH
+#define LNH 0
+#endif
+#ifdef PROBE
+#define STAMP(k) do { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(c1)[cta * 96 + (k)] = _t; } while (0)
+#else
+#define STAMP(k) do { } while (0)
+#endif
+
+// Sum of the 32 leaves f(0) .. f(31) in the order of the sm_90a reduction tree `for k = 16 .. 1: p[l] += p[l + k] (l < k)`, which
+// pairs leaves whose indices differ in the highest bit first: the sum over indices B + S m (m < N) is the sum of its even-m half
+// plus its odd-m half. Evaluated depth first, so at most one partial sum per level is live.
+template <int B, int S, int N, class F> DEVI float tree_sum(F& f) {
+  if constexpr (N == 1) return f(B);
+  else return tree_sum<B, 2 * S, N / 2>(f) + tree_sum<B + S, 2 * S, N / 2>(f);
+}
+template <class F> DEVI float tree32(F f) { return tree_sum<0, 1, 32>(f); }
+
 #ifndef HID
 #define HID 512                                                // hidden units (n x D); n = 4 by default
 #endif
 constexpr int D_ = 128, H_ = HID, HS = 64, NCH = H_ / HS, ROWS = 128;
 static_assert((NCH & (NCH - 1)) == 0 && NCH >= 2, "power-of-two chunk count");
-constexpr int NW = 4;                                          // weight ring depth (both rings)
+// NXS_ x stages (default 2), NW_ weight ring depth (default 4). The x stage lives from its load to the end of the tile's epilogue (y is written over it),
+// so the tile period is the stage lifetime / NXS: S90 stamps at D 128 n 2 (load latency 1.8 us after the stage is free + LayerNorm 1.3 + the chunk chain
+// = ~9.5 us at 2 stages, period 4.6-4.9 us). The inference D 128 n 2 build takes 3 x stages beside a weight ring of 2 slots (3 x 32 KB + 2 x 24 KB; the
+// 4-slot ring and 3 stages do not fit 227 KB): [1 048 576, 128] 4.59 -> 3.91 us a tile, same bits (S90, docs/b200/transition.md).
+#ifndef NXS_
+#define NXS_ 2
+#endif
+#ifndef NW_
+#define NW_ 4
+#endif
+constexpr int NXS = NXS_;
+constexpr int NW = NW_;                                        // weight ring depth (both rings)
 constexpr int WAB_SLOT = 16384, WS_SLOT = 8192;                // this CTA's half: [64 n][128 k] as 2 K-blocks of 8 KB; Ws [64 d][64 k]
 constexpr int O_WAB = 0, O_WS = NW * WAB_SLOT;
 constexpr int O_X = O_WS + NW * WS_SLOT, TILE = 32768;
-constexpr int O_XN = O_X + 2 * TILE;
+constexpr int O_XN = O_X + NXS * TILE;
 constexpr int O_GB = O_XN + 2 * TILE;
 constexpr int O_BAR = O_GB + 1024;
-constexpr int SMEM_BYTES = O_BAR + 512;
+constexpr int O_RED = O_BAR + 512;                             // LNH: 128 fp32 subtree sums
+constexpr int SMEM_BYTES = O_BAR + (LNH ? 1024 : 512);
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
 constexpr int KS_EX = 8, KS_SQ = 4;
 constexpr uint32_t T_AB = 0, T_H = 256, T_OUT = 384;
@@ -38,7 +70,7 @@ struct Bars {
   // both CTAs (leader's multicast commits)
   uint64_t wab_empty[NW], ws_empty[NW], xn_empty[2], ex_done[2], sq_done[2], out_full;
   // local
-  uint64_t x_full[2], x_empty[2];
+  uint64_t x_full[NXS], x_empty[NXS];
   uint32_t tmem;
 };
 
@@ -53,6 +85,7 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int cta = blockIdx.x, G = gridDim.x;
+  if (threadIdx.x == 0) STAMP(0);
   const int crank = (int)cluster_rank();
   const bool leader = crank == 0;
   auto count = [&](int k) { return (tiles > k) ? (tiles - k + G - 1) / G : 0; };
@@ -67,10 +100,15 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
     for (int s = 0; s < 2; ++s) {
       mbar_init(&B.xn_full[s], 2); mbar_init(&B.ab_empty[s], 8); mbar_init(&B.h_full[s], 8);
       mbar_init(&B.xn_empty[s], 1); mbar_init(&B.ex_done[s], 1); mbar_init(&B.sq_done[s], 1);
-      mbar_init(&B.x_full[s], 1); mbar_init(&B.x_empty[s], 1);
     }
-    mbar_init(&B.out_empty, 8); mbar_init(&B.out_full, 1);
+    for (int s = 0; s < NXS; ++s) { mbar_init(&B.x_full[s], 1); mbar_init(&B.x_empty[s], 1); }
+    mbar_init(&B.out_empty, LNH ? 16 : 8); mbar_init(&B.out_full, 1);
     fence_barrier_init();
+  }
+  if (warp == 2) { tmem_alloc2(smem_u32(&B.tmem), 512); tmem_relinquish2(); }
+  pdl_wait();                                                  // (training part 4) launched as a programmatic dependent in training: x, gamma
+                                                               // and the weights are complete from here (a no-op otherwise)
+  if (tid == 0) {
     if (n_local > 0) {                                         // tile 0's x now, not after the cluster sync (its barrier is local)
       fence_proxy_async();
       mbar_expect_tx(&B.x_full[0], TILE);
@@ -82,20 +120,20 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
     prefetch_map(&mx); prefetch_map(&mwa); prefetch_map(&mwb); prefetch_map(&mws); prefetch_map(&mout); prefetch_map(&mxn);
   }
   if (tid < 128) { reinterpret_cast<float*>(sm + O_GB)[tid] = gamma[tid]; reinterpret_cast<float*>(sm + O_GB)[128 + tid] = beta[tid]; }
-  if (warp == 2) { tmem_alloc2(smem_u32(&B.tmem), 512); tmem_relinquish2(); }
   tc_fence_before();
   __syncthreads();
   cluster_sync_relaxed();                                      // the barriers were published by fence_barrier_init
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+  if (tid == 0) STAMP(1);
 
   if (warp < 4) setmaxnreg_dec<56>();
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------ x producer (own tiles)
     if (lane == 0) {
       for (int i = 1; i < n_local; ++i) {                     // tile 0 was issued at setup
-        const int b = i & 1, row = tile_of(i) * ROWS;
-        if (i >= 2) mbar_wait(&B.x_empty[b], ((i >> 1) - 1) & 1);
+        const int b = i % NXS, row = tile_of(i) * ROWS;
+        if (i >= NXS) mbar_wait(&B.x_empty[b], ((i / NXS) - 1) & 1);
         mbar_expect_tx(&B.x_full[b], TILE);
         const uint32_t dst = su + O_X + b * TILE;
 #pragma unroll
@@ -176,17 +214,18 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
         }
       }
     }
-  } else if ((warp >= 4 && warp < 8) || warp >= 12) {
+  } else {
     // ------------------------------------------------------------------------------------------ SwiGLU (as tfwd.cu v6): two
     // warpgroups alternate chunks, each in four 16-column steps with the next step's TMEM loads in flight
     setmaxnreg_inc<152>();
     const uint32_t lb = (uint32_t)(warp & 3) * 32, trow = tmem + (lb << 16);
-    for (int c = (warp >= 12 ? 1 : 0); c < nch; c += 2) {
+    auto sw = [&](int c) {
       const int s = c & 1, u = c >> 1;
       const int rl = warp == 4 ? 2 : 3;
       if (lane == 0 && (warp == 4 || warp == 12)) TR2(rl, 4 * c);
       mbar_wait(&B.ex_done[s], u & 1);
       if (lane == 0 && (warp == 4 || warp == 12)) TR2(rl, 4 * c + 1);
+      if (lane == 0 && (warp & 3) == 0 && c < 16) STAMP(64 + c);
       tc_fence_after();
       uint32_t hp[32];
       {
@@ -204,7 +243,8 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           for (int k = 0; k < 8; ++k) {
             const float a0 = __uint_as_float(a[q & 1][2 * k]), a1 = __uint_as_float(a[q & 1][2 * k + 1]);
             const float b0 = __uint_as_float(b[q & 1][2 * k]), b1 = __uint_as_float(b[q & 1][2 * k + 1]);
-            hp[q * 8 + k] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_kit(a1) * b1);
+            const f2 A = mk2(a0, a1), H = mul2(mul2(A, sigmoid_tr(A)), mk2(b0, b1));   // (a s) b, as the backward's gate_pair16
+            hp[q * 8 + k] = pack_bf16(lo2(H), hi2(H));
           }
           if (q < 3) tmem_wait_ld();
         }
@@ -225,21 +265,23 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
       __syncwarp();
       if (lane == 0) ARRIVE_TC(&B.h_full[s], 0);
       if (lane == 0 && (warp == 4 || warp == 12)) TR2(rl, 4 * c + 3);
-    }
-  } else if (warp >= 8) {
+      if (lane == 0 && (warp & 3) == 0 && c < 16) STAMP(80 + c);
+    };
+    if (!LNH && ((warp >= 4 && warp < 8) || warp >= 12)) {
+      for (int c = (warp >= 12 ? 1 : 0); c < nch; c += 2) sw(c);
+    } else {
     // ------------------------------------------------------------------------------------------ LayerNorm + residual epilogue (own rows)
-    setmaxnreg_inc<152>();
     const int t2 = tid - 256;
-    const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
+    const uint32_t r = lb + lane;
     const uint32_t gb_u = su + O_GB;
     auto ln = [&](int i) {
       const int b = i & 1, grow = tile_of(i) * ROWS + (int)r;
       const bool real = i < n_valid;
-      mbar_wait(&B.x_full[b], (i >> 1) & 1);
+      mbar_wait(&B.x_full[i % NXS], (i / NXS) & 1);
       if (i >= 2) mbar_wait(&B.xn_empty[b], ((i >> 1) - 1) & 1);
       if (t2 == 0) tma_store_wait_read0();
       named_bar_sync(1, 128);
-      const uint32_t xb = su + O_X + b * TILE, xnb = su + O_XN + b * TILE;
+      const uint32_t xb = su + O_X + (i % NXS) * TILE, xnb = su + O_XN + b * TILE;
       uint32_t v[64];
 #pragma unroll
       for (int cb = 0; cb < 2; ++cb)
@@ -248,28 +290,19 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
           const uint4 t = lds128(xb + cb * 16384 + sw128(r, q));
           v[cb * 32 + q * 4 + 0] = t.x; v[cb * 32 + q * 4 + 1] = t.y; v[cb * 32 + q * 4 + 2] = t.z; v[cb * 32 + q * 4 + 3] = t.w;
         }
-      float p[32];                                             // the sm_90a reduction tree (see tfwd.cu)
-#pragma unroll
-      for (int l = 0; l < 32; ++l) p[l] = (bf16lo(v[2 * l]) + bf16hi(v[2 * l])) + (bf16lo(v[2 * l + 1]) + bf16hi(v[2 * l + 1]));
-#pragma unroll
-      for (int k = 16; k; k >>= 1)
-#pragma unroll
-        for (int l = 0; l < k; ++l) p[l] = p[l] + p[l + k];
-      const float mean = p[0] * (1.f / D_);
-#pragma unroll
-      for (int l = 0; l < 32; ++l) {
+      // the sm_90a reduction trees over leaves l = columns 4l .. 4l + 3, evaluated depth first (tree32: no array of 32 partial
+      // sums next to the row, which spilled 88 B), same order and so bit-identical
+      const float mean = tree32([&](int l) {
+        return (bf16lo(v[2 * l]) + bf16hi(v[2 * l])) + (bf16lo(v[2 * l + 1]) + bf16hi(v[2 * l + 1]));
+      }) * (1.f / D_);
+      const float rs = rsqrtf(tree32([&](int l) {
         float acc = 0.f, d;
         d = bf16lo(v[2 * l]) - mean; acc += d * d;
         d = bf16hi(v[2 * l]) - mean; acc += d * d;
         d = bf16lo(v[2 * l + 1]) - mean; acc += d * d;
         d = bf16hi(v[2 * l + 1]) - mean; acc += d * d;
-        p[l] = acc;
-      }
-#pragma unroll
-      for (int k = 16; k; k >>= 1)
-#pragma unroll
-        for (int l = 0; l < k; ++l) p[l] = p[l] + p[l + k];
-      const float rs = rsqrtf(p[0] * (1.f / D_) + eps);
+        return acc;
+      }) * (1.f / D_) + eps);
 #pragma unroll
       for (int cb = 0; cb < 2; ++cb)
 #pragma unroll
@@ -287,6 +320,7 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
       if (save && real) { rstd[grow] = rs; c1[grow] = mean * rs; }
       fence_proxy_async();
       named_bar_sync(1, 128);
+      if (t2 == 0 && i < 12) STAMP(2 + i);
       if (t2 == 0) {
         mbar_arrive_remote_cta(&B.xn_full[b], 0);
         if (save && real) {
@@ -299,13 +333,92 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
         }
       }
     };
-    auto epi = [&](int i) {
-      const int b = i & 1;
+    // LNH: half `half` of the LayerNorm of tile i on warps 4-7 (half 0) / 8-11 (half 1): half h owns the leaves l = h, h + 2, ..
+    // (columns 4l .. 4l + 3, the first / second 8 bytes of every 16-byte chunk), whose sums are exactly the two subtrees tree32 adds last
+    // (tree_sum<h, 2, 16>), so mean, rstd and xn keep their bits; the subtree sums meet in O_RED (half 1 posts, half 0 adds)
+    auto lnh = [&](int i, int half) {
+      const int b = i & 1, grow = tile_of(i) * ROWS + (int)r;
+      const bool real = i < n_valid, lead = tid == 128;
+      float* red = reinterpret_cast<float*>(sm + O_RED);
+      mbar_wait(&B.x_full[i % NXS], (i / NXS) & 1);
+      if (i >= 2) mbar_wait(&B.xn_empty[b], ((i >> 1) - 1) & 1);
+      if (lead) tma_store_wait_read0();
+      if (lead && (i == 1 || i == 2)) STAMP(26 + 5 * (i - 1));
+      named_bar_sync(3, 256);
+      const uint32_t xb = su + O_X + (i % NXS) * TILE, xnb = su + O_XN + b * TILE;
+      uint32_t v[32];                                           // v[2m], v[2m + 1]: leaf l = half + 2m
+#pragma unroll
+      for (int cb = 0; cb < 2; ++cb)
+#pragma unroll
+        for (int q = 0; q < 8; ++q) {
+          uint32_t lo, hi;
+          asm volatile("ld.shared.v2.b32 {%0,%1}, [%2];" : "=r"(lo), "=r"(hi) : "r"(xb + cb * 16384 + sw128(r, q) + half * 8) : "memory");
+          v[(cb * 8 + q) * 2] = lo; v[(cb * 8 + q) * 2 + 1] = hi;
+        }
+      auto fs = [&](int l) { const int m = l >> 1; return (bf16lo(v[2 * m]) + bf16hi(v[2 * m])) + (bf16lo(v[2 * m + 1]) + bf16hi(v[2 * m + 1])); };
+      const float s = half ? tree_sum<1, 2, 16>(fs) : tree_sum<0, 2, 16>(fs);
+      if (half) red[r] = s;
+      named_bar_sync(3, 256);
+      if (!half) red[r] = s + red[r];
+      named_bar_sync(3, 256);
+      if (lead && (i == 1 || i == 2)) STAMP(28 + 5 * (i - 1));
+      const float mean = red[r] * (1.f / D_);
+      auto fq = [&](int l) {
+        const int m = l >> 1;
+        float acc = 0.f, d;
+        d = bf16lo(v[2 * m]) - mean; acc += d * d;
+        d = bf16hi(v[2 * m]) - mean; acc += d * d;
+        d = bf16lo(v[2 * m + 1]) - mean; acc += d * d;
+        d = bf16hi(v[2 * m + 1]) - mean; acc += d * d;
+        return acc;
+      };
+      const float qs = half ? tree_sum<1, 2, 16>(fq) : tree_sum<0, 2, 16>(fq);
+      named_bar_sync(3, 256);                                  // every thread has read the mean
+      if (half) red[r] = qs;
+      named_bar_sync(3, 256);
+      if (!half) red[r] = qs + red[r];
+      named_bar_sync(3, 256);
+      if (lead && (i == 1 || i == 2)) STAMP(29 + 5 * (i - 1));
+      const float rs = rsqrtf(red[r] * (1.f / D_) + eps);
+#pragma unroll
+      for (int cb = 0; cb < 2; ++cb)
+#pragma unroll
+        for (int q = 0; q < 8; ++q) {
+          uint32_t o[2];
+#pragma unroll
+          for (int k = 0; k < 2; ++k) {
+            const int col = cb * 64 + q * 8 + half * 4 + 2 * k;
+            const uint32_t w = v[(cb * 8 + q) * 2 + k];
+            const float2 g2 = lds64f(gb_u + col * 4), b2 = lds64f(gb_u + 512 + col * 4);
+            o[k] = pack_bf16((bf16lo(w) - mean) * rs * g2.x + b2.x, (bf16hi(w) - mean) * rs * g2.y + b2.y);
+          }
+          asm volatile("st.shared.v2.b32 [%0], {%1,%2};" :: "r"(xnb + cb * 16384 + sw128(r, q) + half * 8), "r"(o[0]), "r"(o[1]) : "memory");
+        }
+      if (save && real && !half) { rstd[grow] = rs; c1[grow] = mean * rs; }
+      if (lead && (i == 1 || i == 2)) STAMP(30 + 5 * (i - 1));
+      fence_proxy_async();
+      named_bar_sync(3, 256);
+      if (lead) {
+        if (i < 12) STAMP(2 + i);
+        mbar_arrive_remote_cta(&B.xn_full[b], 0);
+        if (save && real) {
+          const int row0 = tile_of(i) * ROWS;
+#pragma unroll
+          for (int cb = 0; cb < 2; ++cb)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) tma_store_2d(&mxn, xnb + cb * 16384 + h * 8192, cb * 64, row0 + h * 64);
+          tma_store_commit();
+        }
+      }
+    };
+    auto epi = [&](int i, int cc0, int cc1, int bar, int nthr, bool lead) {
+      const int b = i % NXS;
       mbar_wait(&B.out_full, i & 1);
+      if (lead && i < 12) STAMP(38 + i);
       tc_fence_after();
       const uint32_t xb = su + O_X + b * TILE;
 #pragma unroll
-      for (int cc = 0; cc < 4; ++cc) {
+      for (int cc = cc0; cc < cc1; ++cc) {
         uint32_t acc[32];
         tmem_ld32(trow + T_OUT + cc * 32, acc);
         tmem_wait_ld();
@@ -327,8 +440,8 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
       __syncwarp();
       if (lane == 0) ARRIVE_TC(&B.out_empty, 0);
       fence_proxy_async();
-      named_bar_sync(1, 128);
-      if (t2 == 0) {
+      named_bar_sync(bar, nthr);
+      if (lead) {
         const int row0 = tile_of(i) * ROWS;
         if (i < n_valid) {
 #pragma unroll
@@ -339,19 +452,47 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
         tma_store_commit();
         tma_store_wait_read0();
         mbar_arrive(&B.x_empty[b]);
+        if (i < 12) STAMP(50 + i);
       }
     };
-    if (n_local > 0) ln(0);
-    for (int i = 0; i < n_local; ++i) {
-      if (i + 1 < n_local) ln(i + 1);
-      epi(i);
+    if (!LNH) {
+      if (n_local > 0) ln(0);
+      for (int i = 0; i < n_local; ++i) {
+        if (i + 1 < n_local) ln(i + 1);
+        epi(i, 0, 4, 1, 128, t2 == 0);
+      }
+    } else if (warp >= 12) {
+      for (int c = 0; c < nch; ++c) sw(c);
+    } else {
+      const int half = warp >= 8 ? 1 : 0;
+      if (n_local > 0) lnh(0, half);
+      for (int i = 0; i < n_local; ++i) {
+        if (i + 1 < n_local) lnh(i + 1, half);
+        epi(i, 2 * half, 2 * half + 2, 2, 256, tid == 128);
+      }
     }
-    if (t2 == 0) tma_store_wait0();
+    if (tid == 256 || tid == 128) tma_store_wait0();
+    }
   }
   tc_fence_before();
   __syncthreads();
   cluster_sync_relaxed();
   if (warp == 2) { tc_fence_after(); tmem_dealloc2(tmem, 512); }
+}
+
+// fp32 master weights -> the bf16 operands of the kernels, the three tensors in one launch (round to nearest even, as torch's cast):
+// thread t converts elements 8t .. 8t + 7 of the concatenation [wa | wb | ws] (each n elements, n a multiple of 8).
+extern "C" __global__ void __launch_bounds__(256, 1) transition_cast3(const float* __restrict__ wa, const float* __restrict__ wb,
+                                                                     const float* __restrict__ ws, __nv_bfloat16* __restrict__ oa,
+                                                                     __nv_bfloat16* __restrict__ ob, __nv_bfloat16* __restrict__ os, int n) {
+  pdl_launch();                                                 // (training part 4) the forward (a programmatic dependent) may launch
+  const int e = (blockIdx.x * 256 + threadIdx.x) * 8;
+  if (e >= 3 * n) return;
+  const int w = e / n, k = e - w * n;
+  const float* src = (w == 0 ? wa : w == 1 ? wb : ws) + k;
+  __nv_bfloat16* dst = (w == 0 ? oa : w == 1 ? ob : os) + k;
+  const float4 u = __ldg(reinterpret_cast<const float4*>(src)), v = __ldg(reinterpret_cast<const float4*>(src) + 1);
+  *reinterpret_cast<uint4*>(dst) = make_uint4(pack_bf16(u.x, u.y), pack_bf16(u.z, u.w), pack_bf16(v.x, v.y), pack_bf16(v.z, v.w));
 }
 
 // ================================================================================== wiring surface

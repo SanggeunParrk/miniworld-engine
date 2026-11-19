@@ -1,0 +1,188 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index aa9172c2a..2460682cf 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -64,6 +64,13 @@ static_assert(!TA_D16C || TA_D16, "TA_D16C needs TA_D16");
+ #define TA_PH 0          // (experiment, timing only, WRONG results) P packed as fp16 and the PV MMA reading fp16 operands
+ #endif
+ static_assert(!TA_ONES || (TA_HB && !TA_D16), "TA_ONES: the inference (HB) build of 32-channel heads");
++#ifndef TA_SPLITP
++#define TA_SPLITP 0      // (B200 2026-11-18 part 13, inference, FA4's split P arrive) the softmax warps arrive a first P barrier once the first
++                         // TA_SPLITP 16-key chunks of P are in TMEM; the PV warp issues those TA_SPLITP K16 MMAs then and the rest after the full
++                         // P arrive, so PV(y) and QK^T(y + NS) start while the group still works its last chunks.  A warp arrives early only when
++                         // every lane's partial sum is in range and no offset is provisional; a lane whose full-tile sum then still overflows
++                         // (P already partly consumed: no shift / recompute of P) is marked and its row recomputed exactly at the drain.
++#endif
+ #ifndef TA_SPLIT
+ #define TA_SPLIT 1        // forward: 1 = two issue warps (1: QK^T, 14: PV), 0 = one warp issues both (see the issue loops)
+ #endif
+@@ -103,6 +110,8 @@ constexpr float L2E = 1.4426950408889634f;
+ constexpr int CK = TA_CK, NCK = BN / CK;                   // softmax chunk: keys, chunks a tile
+ static_assert(CK == 16 || CK == 32, "CK");
+ static_assert(SMEM <= 232448, "one CTA per SM");
++static_assert(!TA_SPLITP || (TA_HB && !NOSUM && CK == 16 && TA_SPLITP < NCK), "TA_SPLITP: the HB build of 32-channel heads, 16-key chunks");
++constexpr int KS0 = TA_SPLITP ? TA_SPLITP : BN / 16;          // PV K16 MMAs issued on the first P arrive
+ 
+ __device__ __forceinline__ void tmem_ldc(uint32_t taddr, float* v) { if constexpr (CK == 32) tmem_ld32(taddr, v); else tmem_ld16(taddr, v); }
+ __device__ __forceinline__ float ex2f(float x) { float y; asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x)); return y; }
+@@ -251,6 +260,7 @@ __device__ __noinline__ void d16_exact(const __nv_bfloat16* __restrict__ qp, con
+   for (int k2 = 0; k2 < 16; ++k2) ob[k2] = k2 < C / 2 ? pack2(o[2 * k2] * inv, o[2 * k2 + 1] * inv) : 0u;
+ }
+ constexpr int CX = TA_D16 ? 16 : 32;   // channels of the exact recompute / the drain's finiteness check
++constexpr float LFIX = (TA_D16 || TA_ONES) ? 0x1p-100f : 0.f;   // (TA_SPLITP: only the rows marked +inf, or a non-finite O; a fully masked row stays as the base build writes it)
+ 
+ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+     int N, int H, int S, int ntasks, float scl,          // scl = scale * log2(e)
+@@ -291,12 +301,13 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+   uint64_t* rof = lf + 2;            // [R]   (R = 3) the row's O complete: its group drains it
+   uint64_t* lfu = rof + R;           // [R]   (ORING) the row's partial sum written (per row: a group waits its own commits in order)
+   uint64_t* lem = lfu + R;           // [2]   count 4: the slot was read
+-  uint32_t* tslot = reinterpret_cast<uint32_t*>(lem + 2);
++  uint64_t* pfa = lem + 2;           // [NS]  (TA_SPLITP) count 4: P's first TA_SPLITP chunks written
++  uint32_t* tslot = reinterpret_cast<uint32_t*>(pfa + NS);
+   FT0
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   if (tid == 0) {
+     for (int k = 0; k < 2; ++k) { bar_init(qf + k, 1); bar_init(qe + k, 1); }
+-    for (int k = 0; k < NS; ++k) { bar_init(sf + k, 1); bar_init(pf + k, 4); }
++    for (int k = 0; k < NS; ++k) { bar_init(sf + k, 1); bar_init(pf + k, 4); bar_init(pfa + k, 4); }
+     bar_init(of, 1); bar_init(oe, 4); bar_init(lf, 8); bar_init(lf + 1, 8);
+     for (int k = 0; k < NKV; ++k) { bar_init(kvf + k, 1); bar_init(kve + k, 1); }
+     for (int k = 0; k < NB; ++k) { bar_init(bf + k, 1); bar_init(be + k, 4 * NGR); }
+@@ -416,18 +427,28 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #endif
+       cp.next(SPT);
+       FT(4);
+-      wait(pf + b, bp);
++      if (TA_SPLITP) rwait(pfa + b, bp, 3, cp.k); else wait(pf + b, bp);
+       FT(1);
+       if (!G3 && w == 0 && k >= 1) wait(oe, (k - 1) & 1);   // the previous task's O was drained (R = 3: the row's group arrives pf after its drain)
+       FT(2);
+       tc_fence_after();
++      const __nv_bfloat16* v = sKV + st * 2 * KVT + KVT;
++      const uint32_t o = tmem + COL_O + r * D;
+       if (elect_one()) {
+-        const __nv_bfloat16* v = sKV + st * 2 * KVT + KVT;
+-        const uint32_t o = tmem + COL_O + r * D;
+         if (!TA_NOMMA)
+ #pragma unroll
+-        for (int ks = 0; ks < BN / 16; ++ks)
++        for (int ks = 0; ks < KS0; ++ks)
+           mma_ts(o, tmem + COL_S + b * BN + ks * 8, sdesc(sa(v + ks * 16 * D), KVT * 2, 512, 4), ID_O, (j | ks) ? 1u : 0u);
++#if TA_SPLITP
++      }
++      __syncwarp();
++      rwait(pf + b, bp, 4, cp.k);                // the rest of P (the same MMAs in the same order: the same bits)
++      tc_fence_after();
++      if (elect_one()) {
++#pragma unroll
++        for (int ks = KS0; ks < BN / 16; ++ks)
++          mma_ts(o, tmem + COL_S + b * BN + ks * 8, sdesc(sa(v + ks * 16 * D), KVT * 2, 512, 4), ID_O, 1u);
++#endif
+         if (ORING && yl >= 2) { rwait(lem + (yl & 1), ((yl >> 1) - 1) & 1, 2, yl); tc_fence_after(); }   // the slot's y - 2 sum was read
+         if (TA_ONES && !TA_NOMMA)                // l_r += P . ones (N = 16: every column the row sum)
+ #pragma unroll
+@@ -487,7 +508,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+           float* const mslot = sRM + r * BM + row;
+           float* const lslot = sRL + r * BM + row;
+           float mr = *mslot, lr = 0.f;
+-          bool rare;
++          bool rare, early = false;
+           const float2 sc2 = make_float2(scl, scl);
+           // x = S * scale*log2e + bias * log2e for chunk c (32 keys), bias from the staged tile
+           auto logits = [&](int c, float* s32, float2 nm0) {   // x = S * scale*log2e + bias * log2e + nm0 (keys CK c ..)
+@@ -551,6 +572,17 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+               if (!TA_FNOST) {
+ #pragma unroll
+               for (int s8 = 0; s8 < CK / 16; ++s8) tmem_st8(sb + c * (CK / 2) + s8 * 8, pk + s8 * 8); }   // P over S: columns already read
++#if TA_SPLITP
++              if (c == TA_SPLITP - 1) {          // P of keys 0 .. 16 TA_SPLITP - 1 to the PV warp now, if no lane can need it rewritten
++                early = __all_sync(0xffffffffu, acc.x + acc.y <= TA_PMAX && *lslot >= 0.f);
++                if (early) {
++                  tmem_wait_st();
++                  tc_fence_before();
++                  __syncwarp();
++                  if (lane == 0) arrive(pfa + b);
++                }
++              }
++#endif
+             }
+             lr = TA_FNOLOOP ? 128.f : acc.x + acc.y;
+           }
+@@ -566,6 +598,13 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+             // under TA_PMIN -- a masked tile, keys far below the offset -- enters too and mostly leaves at the bias check).
+             rare = NOSUM ? false : __any_sync(0xffffffffu, !(lr <= TA_PMAX) || !(lr >= TA_PMIN));
+             if (rare) {                                             // rare, warp-uniform (tcgen05.ld / st are warp-collective)
++#if TA_SPLITP
++             if (early) {                         // P's first chunks are being consumed: no shift / recompute; an overflowing row
++               const float l0 = *lslot;            // (non-provisional here) is marked (+inf) and recomputed exactly at the drain
++               *lslot = !(lr <= TA_PMAX) ? INFINITY : l0 + lr;
++             } else
++#endif
++             {
+               const float l0 = *lslot;
+               const bool prov = l0 < 0.f;
+               const float lo = fmaxf(l0, 0.f);
+@@ -705,13 +744,14 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+                   }
+                 }
+               }
++             }
+             }
+           }
+           FT(2);
+           tmem_wait_st();
+           tc_fence_before();
+           __syncwarp();
+-          if (lane == 0) arrive(pf + b);
++          if (lane == 0) { if (TA_SPLITP && !early) arrive(pfa + b); arrive(pf + b); }
+           FT(3);
+           if (!NOSUM && !rare) *lslot = fmaxf(*lslot, 0.f) + lr;            // (clears a provisional offset: the sum was in range)
+ 
+@@ -760,11 +800,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+         for (int k2 = 0; k2 < 16; ++k2) ob[k2] = (TA_D16 && k2 >= 8) ? 0u : pack2(o[2 * k2] * inv, o[2 * k2 + 1] * inv);
+         if (g * R + r < N) {
+-#if TA_D16 || TA_ONES
++#if TA_D16 || TA_ONES || TA_SPLITP
+           float sa = 0.f;
+ #pragma unroll
+           for (int c = 0; c < CX; ++c) sa += fabsf(o[c]);
+-          if (!(lr >= 0x1p-100f) || !(lr < 3.0e38f) || !(sa < 3.0e38f)) {
++          if (!(lr >= LFIX) || !(lr < 3.0e38f) || !(sa < 3.0e38f)) {
+             const size_t qr = (size_t)row0(bh, g * R + r);
+             d16_exact<CX>(QG + (qr + qt * BM + row) * LD + hcol(bh), KG + qr * LD + hcol(bh), VG + qr * LD + hcol(bh),
+                       BG + ((size_t)bh * S + qt * BM + row) * S, LD, S, scl, ob);
+@@ -827,12 +867,12 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+         tmem_wait_ld();
+ #pragma unroll
+         for (int k2 = 0; k2 < 16; ++k2) ob[r][k2] = (TA_D16 && k2 >= 8) ? 0u : pack2(o[2 * k2] * inv, o[2 * k2 + 1] * inv);
+-#if TA_D16 || TA_ONES
++#if TA_D16 || TA_ONES || TA_SPLITP
+         {
+           float sa = 0.f;
+ #pragma unroll
+           for (int c = 0; c < CX; ++c) sa += fabsf(o[c]);
+-          if (!(lr >= 0x1p-100f) || !(lr < 3.0e38f) || !(sa < 3.0e38f)) fix |= 1 << r;
++          if (!(lr >= LFIX) || !(lr < 3.0e38f) || !(sa < 3.0e38f)) fix |= 1 << r;
+         }
+ #endif
+       }
+@@ -842,7 +882,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+       for (int r = 0; r < R; ++r) {
+         if (g * R + r >= N) continue;            // a padding row
+-#if TA_D16 || TA_ONES
++#if TA_D16 || TA_ONES || TA_SPLITP
+         if (fix & (1 << r)) {
+           const size_t qr = (size_t)row0(bh, g * R + r);
+           d16_exact<CX>(QG + (qr + qt * BM + row) * LD + hcol(bh), KG + qr * LD + hcol(bh), VG + qr * LD + hcol(bh),
+@@ -1694,7 +1734,7 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
+   static bool attr = false;
+   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_fwd_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+   const float scl = (float)scale * L2E;
+-  TORCH_CHECK(!((TA_D16 || TA_ONES) && want_lse), "the TA_D16 / TA_ONES builds are inference only (no LSE)");
++  TORCH_CHECK(!((TA_D16 || TA_ONES || TA_SPLITP) && want_lse), "the TA_D16 / TA_ONES / TA_SPLITP builds are inference only (no LSE)");
+   launch_pdl(triattn_fwd_sm100, dim3(grid), dim3(THREADS), SMEM, at::cuda::getCurrentCUDAStream(), (int)N, (int)H, (int)S, ntasks, scl, qm, km, vm, bm,
+       reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>(),
+       reinterpret_cast<const __nv_bfloat16*>(q.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(k.data_ptr<at::BFloat16>()), (int)ld,

@@ -1,0 +1,111 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+index 426bedeef..bcf015f0c 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+@@ -21,6 +21,13 @@
+ 
+ using namespace sm100;
+ 
++#ifdef K3W_TT
++// per-item %globaltimer stamps of CTA 0 (S90), read by k3w_tt(): [item][event]
++static __device__ unsigned long long g_k3tt[64][8];
++#define K3T(i, e) { if (blockIdx.x == 0 && (i) < 64) { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); g_k3tt[i][e] = t_; } }
++#else
++#define K3T(i, e) {}
++#endif
+ #ifdef K3W_TL
+ // timeline probe (-DK3W_TL): %globaltimer marks per CTA (ns, comparable across SMs), read by k3w_tl()
+ static __device__ unsigned long long g_k3tl[160][32];
+@@ -33,6 +40,9 @@ namespace k3w {
+ #ifndef K3W_SIG
+ #define K3W_SIG 2   // epilogue sigmoid: 0 ex2 + rcp (two MUFU ops), 2 tanh.approx (one MUFU op; 2026-11-17, k1w / k3g's form)
+ #endif
++#ifndef K3W_SPLITST
++#define K3W_SPLITST 1   // S90 (training save): y stored as its own bulk group so the residual tile is released after y has been read, not after p and g too
++#endif
+ #ifndef K3W_EPW
+ #define K3W_EPW 8
+ #endif
+@@ -146,6 +156,8 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+           const int kb = kb_of(j);
+           if (xf && k == 0 && j == KBX) pdl_wait();
+           mbar_wait(&B.st_empty[s], ph ^ 1);
++          if (j == 0) K3T(k, 4)
++          if (j == NKB - 1) K3T(k, 7)
+           mbar_expect_tx(&B.st_full[s], STAGE);
+           uint8_t* a = sm + O_ST + s * STAGE;
+           if (kb < KBT) {
+@@ -180,6 +192,7 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+     for (int i = 0; S.get(i, m0, n0); ++i) {
+       const int b = i & 1;
+       mbar_wait(&B.acc_empty[b], ((i >> 1) & 1) ^ 1);
++      K3T(i, 0)
+       tc_fence_after();
+       const uint32_t dp = tmem + b * 256, dg = dp + 128;
+ #pragma unroll 1
+@@ -206,6 +219,7 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+         if (++s == NST) { s = 0; ph ^= 1; }
+       }
+       if (ldr) umma_commit(&B.acc_full[b]);
++      K3T(i, 1)
+       __syncwarp();
+     }
+   } else if (OST && warp >= 4 + EPW) {
+@@ -309,6 +323,7 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+     int m0, n0;
+     for (int i = 0; S.get(i, m0, n0); ++i) {
+       const int b = i & 1, tok = m0 + r;
++      if (SAVE && K3W_SPLITST && et == 0) bulk_wait_read<0>();   // the previous item's p / g stores have read their staging tiles
+       named_bar_sync(1, 32 * EPW);                       // the previous item's epilogue has finished with vs
+       for (int k = et; k < 4 * NTILE; k += 32 * EPW) vs[k] = vec[(k / NTILE) * D + n0 + (k % NTILE)];
+       named_bar_sync(1, 32 * EPW);
+@@ -328,9 +343,11 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+       // ds [B L, D]: pair row tok = (s L + i) L + j reads row s L + j (tokens b-major; s = 0 for one sample)
+       const __nv_bfloat16* dsr = ds ? ds + ((size_t)(tok / (L * L)) * L + tok % L) * D + n0 : nullptr;
+       mbar_wait(&B.acc_full[b], (i >> 1) & 1);
++      if (et == 0) K3T(i, 2)
+       if (et == 0 && i < 2) K3TL(8 + 2 * i)
+       tc_fence_after();
+       mbar_wait(&B.xr_full, i & 1);
++      if (et == 0) K3T(i, 5)
+       if (et == 0 && i < 2) K3TL(12 + i)
+ #pragma unroll 1
+       for (int cq = c0 / 32; cq < (c0 + ECH) / 32; ++cq) {   // 32 channels per step
+@@ -389,8 +406,10 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+       named_bar_sync(2, 32 * EPW);
+       if (et == 0) {
+         if (i < 2) K3TL(9 + 2 * i)
++        K3T(i, 3)
+         tma_store_2d(&my, sm + O_XR, n0, m0);
+         tma_store_2d(&my, sm + O_XR + KBB, n0 + 64, m0);
++        if (SAVE && K3W_SPLITST) bulk_commit();
+         if (SAVE) {
+           tma_store_2d(&mps, sm + O_PS, n0, m0);
+           tma_store_2d(&mps, sm + O_PS + KBB, n0 + 64, m0);
+@@ -398,7 +417,8 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+           tma_store_2d(&mgs, sm + O_GS + KBB, n0 + 64, m0);
+         }
+         bulk_commit();
+-        bulk_wait_read<0>();
++        if (SAVE && K3W_SPLITST) bulk_wait_read<1>(); else bulk_wait_read<0>();
++        K3T(i, 6)
+         mbar_arrive(&B.xr_empty);
+       }
+     }
+@@ -476,6 +496,16 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
+   TORCH_CHECK(false, "k3w_forward: unsupported (D, H) = (", D, ", ", H, ")");
+ }
+ 
++torch::Tensor k3w_tt() {
++#ifdef K3W_TT
++  torch::Tensor h = torch::empty({64, 8}, torch::kInt64);
++  cudaMemcpyFromSymbol(h.data_ptr(), g_k3tt, sizeof(unsigned long long) * 64 * 8);
++  return h;
++#else
++  return torch::empty({0});
++#endif
++}
++
+ torch::Tensor k3w_tl() {
+ #ifdef K3W_TL
+   torch::Tensor h = torch::empty({160, 32}, torch::kInt64);

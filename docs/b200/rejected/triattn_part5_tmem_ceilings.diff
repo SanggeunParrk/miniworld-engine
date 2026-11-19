@@ -1,0 +1,183 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index fec23d6c0..dea364c9e 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -36,30 +36,53 @@ using namespace sm100;
+ #ifndef TA_SPLIT
+ #define TA_SPLIT 1        // forward: 1 = two issue warps (1: QK^T, 14: PV), 0 = one warp issues both (see the issue loops)
+ #endif
++#ifndef TA_G4X
++#define TA_G4X 0         // (experiment, timing only) TA_R = 4 as four one-row softmax groups on four S buffers (all 512 columns), O aliased
++#endif                   // into S columns 96-127: the ceiling of a fourth softmax group without the TMEM it needs (round 3 part 5)
++#ifndef TA_SEPPX
++#define TA_SEPPX 0       // (experiment, timing only) TA_R = 3 with P in its own (aliased) columns and QK^T(y + NS) released once the group
++#endif                   // has read S(y): the ceiling of separate P buffers (round 3 part 5)
++#ifndef TA_NOGUARD
++#define TA_NOGUARD 0     // (experiment) no overflow guard, no FLAGS atomics (the variants above write garbage)
++#endif
+ namespace {
+ constexpr int D = 32, BM = 128, BN = 128, R = TA_R;
+ static_assert(R >= 2 && R <= 4, "R");
++static_assert(!TA_G4X || (R == 4 && TA_NOGUARD), "G4X: R = 4, no guard");
++static_assert(!TA_SEPPX || (R == 3 && TA_NOGUARD), "SEPPX: R = 3, no guard");
+ // R = 3 (B200 2026-11-17): three softmax groups, one pair row and one S / P buffer each (group = row = buffer), and each group drains
+ // its own row (no epilogue warps, no row-sum handoff): three softmax warps a sub-partition keep its one MUFU unit (a warp instruction
+ // per 8 clk, the bound of the op: 128 exponentials a row and tile) busy while a group waits for its PV + next QK^T.
+-constexpr bool G3 = R == 3;
+-constexpr int NGR = G3 ? 3 : 2, RPG = R / NGR;             // softmax groups; pair rows a group (rows gi, gi + NGR, ...)
++constexpr bool G3 = R == 3 || TA_G4X;                       // one row (and one S buffer) a softmax group
++constexpr int NGR = G3 ? R : 2, RPG = R / NGR;            // softmax groups; pair rows a group (rows gi, gi + NGR, ...)
+ static_assert(R % NGR == 0, "R");
+ constexpr int QT = BM * D;                                 // Q tile [128 q][32], 64B swizzle (8 KiB)
+ constexpr int KVT = BN * D;                                // K or V tile [128 k][32], 64B swizzle (8 KiB)
+ constexpr int BT = BM * BN;                                // bias tile [2 key halves][128 q][64], 128B swizzle, bf16 (32 KiB)
+ constexpr int NKV = TA_NKV, NB = 2;
+-constexpr int THREADS = G3 ? 480 : 448 + 32 * TA_SPLIT;   // 0 TMA, 1 MMA (QK^T), 2-5 / 6-9 softmax groups (even / odd rows), 10-13 epilogue (R = 3: the third group), 14 MMA (PV)
++constexpr int THREADS = G3 ? 96 + 128 * R : 448 + 32 * TA_SPLIT;
++constexpr int PVW = G3 ? 2 + 4 * R : 14;                   // 0 TMA, 1 MMA (QK^T), 2-5 / 6-9 softmax groups (even / odd rows), 10-13 epilogue (G3: the third group), PVW MMA (PV)
+ static_assert(!G3 || TA_SPLIT, "R = 3 needs the two issue warps");
+ constexpr int SMEM = 1024 + (2 * R * QT + NKV * 2 * KVT + NB * BT) * 2 + 2 * 2 * R * BM * 4 + 2 * R * BM * 4 + 512;   // + the row sums / offsets for the epilogue
+-constexpr int NS = 3;                                      // S/P TMEM buffers: with two, a group's buffer sat idle through PV + QK^T
++constexpr int NS = TA_G4X ? 4 : 3;                         // S/P TMEM buffers: with two, a group's buffer sat idle through PV + QK^T
+ constexpr int COL_S = 0, COL_O = NS * BN;                  // S/P [NS][128] | O [R rows][32] (single: the next task's first PV waits the drain)
++__host__ __device__ constexpr int ocol(int r) { return TA_G4X ? r * BN + 96 : COL_O + r * D; }
++constexpr int COL_PX = 448;                                // (SEPPX) the aliased P columns
+ constexpr uint32_t ID_S = idesc_bf16(128, BN, 0, 0);       // A = Q K-major, B = K K-major
+ constexpr uint32_t ID_O = idesc_bf16(128, D, 0, 1);        // A = P from TMEM, B = V MN-major
+ constexpr float L2E = 1.4426950408889634f;
+ static_assert(SMEM <= 232448, "one CTA per SM");
+ 
+ __device__ __forceinline__ float ex2f(float x) { float y; asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x)); return y; }
++#ifndef TA_PK
++#define TA_PK 0          // (experiment) P's bf16 pack: 0 = cvt (F2FP), 1 = truncation by one byte permute, 2 = round-to-nearest-even in integer ops
++#endif
++__device__ __forceinline__ uint32_t packp(float a, float b) {
++  if (TA_PK == 0) return pack2(a, b);
++  uint32_t ua = __float_as_uint(a), ub = __float_as_uint(b);
++  if (TA_PK == 2) { ua += 0x7fffu + ((ua >> 16) & 1u); ub += 0x7fffu + ((ub >> 16) & 1u); }   // p >= 0, finite
++  return __byte_perm(ua, ub, 0x7632);
++}
+ #ifndef TA_POLY
+ #define TA_POLY 0        // forward: this many of a chunk's 16 exponential pairs as an FMA-pipe polynomial (0: all on the MUFU; with the two issue
+                          // warps, L768: 4 / 8 / 12 of 16 took 700 / 834 / 900 us against 625 -- the softmax warps are bound by their own issue)
+@@ -164,7 +187,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+   uint64_t* oe = of + 1;             // [1]   count 4: the epilogue drained O
+   uint64_t* lf = oe + 1;             // [2]   count 8: both groups wrote the task's row sums
+   uint64_t* rof = lf + 2;            // [R]   (R = 3) the row's O complete: its group drains it
+-  uint32_t* tslot = reinterpret_cast<uint32_t*>(rof + R);
++  uint64_t* scb = rof + R;           // [NS]  (SEPPX) count 4: the group has read S
++  uint32_t* tslot = reinterpret_cast<uint32_t*>(scb + NS);
+   FT0
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   if (tid == 0) {
+@@ -174,6 +198,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+     for (int k = 0; k < NKV; ++k) { bar_init(kvf + k, 1); bar_init(kve + k, 1); }
+     for (int k = 0; k < NB; ++k) { bar_init(bf + k, 1); bar_init(be + k, 4 * NGR); }
+     for (int k = 0; k < R; ++k) bar_init(rof + k, 1);
++    if (TA_SEPPX) for (int k = 0; k < NS; ++k) bar_init(scb + k, 4);
+     bar_init_fence();
+   }
+   if (warp == 1) tmem_alloc(tslot, 512);
+@@ -213,7 +238,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+         }
+       }
+     }
+-  } else if (warp == 1 || warp == 14) {
++  } else if (warp == 1 || warp == PVW) {
+     // flattened sub-steps y (task k = y / SPT, key tile j, row r): QK^T runs up to NS - 1 sub-steps ahead of the PV GEMMs, so a
+     // softmax group finds its next S ready when it hands over P (issued strictly one ahead, each group idled ~1K cycles per sub-step).
+     // B200 2026-11-17 (clock64 buckets of a CTA, L768): one warp issuing both streams was the kernel's critical path -- ~1500 clk of
+@@ -268,11 +293,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+       tc_fence_after();
+       if (elect_one()) {
+         const __nv_bfloat16* v = sKV + st * 2 * KVT + KVT;
+-        const uint32_t o = tmem + COL_O + r * D;
++        const uint32_t o = tmem + ocol(r);
+         if (!TA_NOMMA)
+ #pragma unroll
+         for (int ks = 0; ks < BN / 16; ++ks)
+-          mma_ts(o, tmem + COL_S + b * BN + ks * 8, sdesc(sa(v + ks * 16 * D), KVT * 2, 512, 4), ID_O, (j | ks) ? 1u : 0u);
++          mma_ts(o, tmem + (TA_SEPPX ? COL_PX : COL_S + b * BN) + ks * 8, sdesc(sa(v + ks * 16 * D), KVT * 2, 512, 4), ID_O, (j | ks) ? 1u : 0u);
+         mma_commit(kve + st);
+         if (G3) { if (w >= SPT - R) mma_commit(rof + r); }
+         else if (w == SPT - 1) mma_commit(of);
+@@ -283,7 +308,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+     if (warp == 1) {                             // S buffer y % NS is free once PV(y - NS) retired (its K / V stage barrier)
+       Ctr cw;
+       for (int y = 0; y < total; ++y) {
+-        if (y >= NS) { wait(kve + cw.st, cw.stp); cw.next(SPT); }
++        if (y >= NS) { if (TA_SEPPX) wait(scb + cw.b, cw.bp); else wait(kve + cw.st, cw.stp); cw.next(SPT); }
+         qk();
+       }
+     } else {
+@@ -375,12 +400,13 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+                 else pv = make_float2(ex2f(xx.x), ex2f(xx.y));
+                 if (TA_FNOLOOP) { pk[k2] = 0x3f803f80u; continue; }
+                 acc = add2(acc, pv);
+-                pk[k2] = pack2(pv.x, pv.y);
++                pk[k2] = packp(pv.x, pv.y);
+               }
+               tmem_wait_ld();                    // chunk c+1 landed (and every S column chunk c's P covers was read)
++              if (TA_SEPPX && c == 2) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(scb + b); }   // S read: QK^T(y + NS) may overwrite it
+               if (!TA_FNOST) {
+-              tmem_st8(sb + c * 16, pk);         // P over S: chunk c's 16 columns cover S columns already read
+-              tmem_st8(sb + c * 16 + 8, pk + 8); }
++              tmem_st8((TA_SEPPX ? tmem_at(tmem + COL_PX, q * 32, 0) : sb) + c * 16, pk);         // P over S: chunk c's 16 columns cover S columns already read
++              tmem_st8((TA_SEPPX ? tmem_at(tmem + COL_PX, q * 32, 0) : sb) + c * 16 + 8, pk + 8); }
+             }
+             lr = TA_FNOLOOP ? 128.f : acc.x + acc.y;
+           }
+@@ -394,7 +420,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+             // loop invariants: the body works 8 columns at a time in loops not unrolled), the branch's results in registers (the
+             // row state is in shared memory instead), a shared-memory load before the vote (it reads only this tile's sum; a sum
+             // under TA_PMIN -- a masked tile, keys far below the offset -- enters too and mostly leaves at the bias check).
+-            rare = __any_sync(0xffffffffu, !(lr <= TA_PMAX) || !(lr >= TA_PMIN));
++            rare = !TA_NOGUARD && __any_sync(0xffffffffu, !(lr <= TA_PMAX) || !(lr >= TA_PMIN));
+             if (rare) {                                             // rare, warp-uniform (tcgen05.ld / st are warp-collective)
+               const float l0 = *lslot;
+               const bool prov = l0 < 0.f;
+@@ -522,7 +548,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+                     wait(kve + yp % NKV, (yp / NKV) & 1);
+                     tc_fence_after();
+                   }
+-                  const uint32_t oa = tmem_at(tmem + COL_O + r * D, q * 32, 0);
++                  const uint32_t oa = tmem_at(tmem + ocol(r), q * 32, 0);
+ #pragma unroll 1
+                   for (int i = 0; i < D / 8; ++i) {
+                     float ov[8];
+@@ -559,7 +585,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+         FT(0);
+         tc_fence_after();
+         float o[32];
+-        tmem_ld32(tmem_at(tmem + COL_O + r * D, q * 32, 0), o);
++        tmem_ld32(tmem_at(tmem + ocol(r), q * 32, 0), o);
+         const float lr = fmaxf(sRL[r * BM + row], 0.f), mo = sRM[r * BM + row];
+         const float inv = 1.f / lr;
+         tmem_wait_ld();
+@@ -567,7 +593,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+         for (int k2 = 0; k2 < 16; ++k2) ob[k2] = pack2(o[2 * k2] * inv, o[2 * k2 + 1] * inv);
+         if (g * R + r < N) {
+-          if (!(lr > 0.f) || !(lr < 3.0e38f)) atomicAdd(FLAGS, 1);
++          if (!TA_NOGUARD && (!(lr > 0.f) || !(lr < 3.0e38f))) atomicAdd(FLAGS, 1);
+           if (LSE != nullptr) {
+             const int b_ = bh / H, h_ = bh % H;
+             LSE[((size_t)(b_ * N + g * R + r) * H + h_) * S + qt * BM + row] = (mo > -INFINITY ? mo : 0.f) + __log2f(lr);
+@@ -606,7 +632,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+       for (int r = 0; r < R; ++r) {
+         float o[32];
+-        tmem_ld32(tmem_at(tmem + COL_O + r * D, q * 32, 0), o);
++        tmem_ld32(tmem_at(tmem + ocol(r), q * 32, 0), o);
+         const float lr = sL[((lt & 1) * R + r) * BM + row];
+         const float inv = 1.f / lr;
+         if (g * R + r < N) bad |= !(lr > 0.f) || !(lr < 3.0e38f);
+@@ -630,7 +656,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+         for (int c8 = 0; c8 < 4; ++c8) dst[c8] = make_uint4(ob[r][c8 * 4], ob[r][c8 * 4 + 1], ob[r][c8 * 4 + 2], ob[r][c8 * 4 + 3]);
+       }
+-      if (bad) atomicAdd(FLAGS, 1);
++      if (bad && !TA_NOGUARD) atomicAdd(FLAGS, 1);
+     }
+   }
+   FT(4);

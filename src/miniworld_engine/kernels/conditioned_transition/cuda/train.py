@@ -17,17 +17,29 @@ _dir = Path(__file__).parent
 
 @functools.lru_cache(maxsize=None)
 def ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False, dc: int = 384, n: int = 2, dp: int = 128):
-    """``rows_ext`` for this device (sm_90a on an H100, the portable arch list elsewhere)."""
-    return rows_ext(d, hd, rpb, empty_uniform=empty_uniform, dc=dc, n=n, dp=dp, hopper=torch.cuda.get_device_capability() == (9, 0))
+    """``rows_ext`` for this device (sm_90a on an H100, the portable arch list elsewhere); on a B200 ``rows_ext_sm100``."""
+    cap = torch.cuda.get_device_capability()
+    if cap == (10, 0):
+        return rows_ext_sm100(d, hd, rpb, empty_uniform=empty_uniform, dc=dc, n=n, dp=dp)
+    return rows_ext(d, hd, rpb, empty_uniform=empty_uniform, dc=dc, n=n, dp=dp, hopper=cap == (9, 0))
 
 
 @functools.lru_cache(maxsize=None)
 def rows_ext(
-    d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False, dc: int = 384, n: int = 2, dp: int = 128, hopper: bool = True
+    d: int = 768,
+    hd: int = 48,
+    rpb: int = 8,
+    *,
+    empty_uniform: bool = False,
+    dc: int = 384,
+    n: int = 2,
+    dp: int = 128,
+    hopper: bool = True,
+    sm100: bool = False,
 ):
     """The row kernels for model width ``d``, head dim ``hd``, conditioning width ``dc`` (a multiple of 128: 384, 768, 256, 128),
     transition expansion ``n`` (SwiGLU hidden width n * d) and pair channels ``dp`` of the ln_pair / to_bias weights; one build per
-    combination (layouts 768 x 48 / 32 / 64, 1024 x 64)."""
+    combination (layouts 768 x 48 / 32 / 64, 1024 x 64). ``sm100``: the B200 build (``rows_ext_sm100``)."""
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     assert (d, hd) in ((768, 48), (768, 32), (768, 64), (1024, 64)), (d, hd)
@@ -35,7 +47,8 @@ def rows_ext(
     assert dc in (128, 256, 384, 768), dc
     assert n in (2, 4) and dp in (128, 256, 512), (n, dp)
     ensure_cuda_home()
-    name = "token_dit_train_rows_cuda" if (d, hd) == (768, 48) else f"token_dit_train_rows_cuda_{d}_{hd}"
+    base = "token_dit_train_rows_sm100" if sm100 else "token_dit_train_rows_cuda"
+    name = base if (d, hd) == (768, 48) else f"{base}_{d}_{hd}"
     if rpb != 8:
         name += f"_rpb{rpb}"
     if dc != 384:
@@ -48,7 +61,7 @@ def rows_ext(
         name += "_empty_uniform"
     return load_extension(
         name=name,
-        sources=[str(_dir / "token_dit_train_rows.cu")],
+        sources=[str(_dir / ("token_dit_train_rows_sm100.cu" if sm100 else "token_dit_train_rows.cu"))],
         extra_cuda_cflags=[
             *host_flags(),
             "-O3",
@@ -63,11 +76,18 @@ def rows_ext(
             f"-DTD_N={n}",
             f"-DTD_DP={dp}",
             *(["-DTOKEN_EMPTY_UNIFORM=1"] if empty_uniform else []),
-            *(gencodes("90a") if hopper else gencodes("80", "90", "100", ptx=("100",))),
+            *(gencodes("100a") if sm100 else gencodes("90a") if hopper else gencodes("80", "90", "100", ptx=("100",))),
         ],
         extra_cflags=["-std=c++17"],
         verbose=False,
     )
+
+
+def rows_ext_sm100(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False, dc: int = 384, n: int = 2, dp: int = 128):
+    """The B200 build (sm_100a only): ``token_dit_train_rows_sm100.cu`` -- the shared source included unchanged, plus the B200's own
+    ``pair_bias`` (the masked keys' value as an argument) and 8-vector ``train_pack90`` / ``train_final90`` (2026-11-17: the shared
+    source and the other cards' extension names and builds are exactly origin/main's)."""
+    return rows_ext(d, hd, rpb, empty_uniform=empty_uniform, dc=dc, n=n, dp=dp, hopper=False, sm100=True)
 
 
 RPB = 8  # rows per block of the D-wide kernels (token_dit_train_rows.cu)

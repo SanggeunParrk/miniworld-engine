@@ -1,0 +1,333 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index a5ad725bf..a6c806568 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -113,6 +113,9 @@ SMALL_FWD_TILES = 16
+ #: forward's casts ride in the LayerNorm launch.
+ #: (S90 part 9) extra build flags of the small-M chain kernels by name (gdx): A/B runs edit it
+ SX_X: dict[str, tuple[str, ...]] = {}
++#: (S90 part 10) clusters a tile of the fused gate + d_xn kernel (tsx_gdx.cu -DCC): the hidden units split over CC clusters (each a K slice of d_xn, summed in cluster order through
++#: a workspace by the last cluster); chosen per call as the largest value here with tiles x CC clusters resident; () = one cluster a tile (the part 9 kernel)
++SX_GDX_CCS: tuple[int, ...] = (4, 3, 2)
+ SX_CH = (32, 64)
+ #: squeeze builds: (output columns per cluster, hidden split = cluster size)
+ SX_SQ = ((32, 1), (64, 1), (32, 2), (64, 2))
+@@ -179,6 +182,24 @@ def _sx_gdx_resident(d: int, n: int, index: int) -> int:
+ SX_GDX_FORCE = None
+ 
+ 
++@functools.lru_cache(maxsize=16)
++def _gdx_counters(device: torch.device, n: int) -> torch.Tensor:
++    """The cross-cluster arrival counters of tsx_gdx.cu -DCC (zero between launches: the last cluster resets what it consumed)."""
++    return torch.zeros((n,), dtype=torch.int32, device=device)
++
++
++def _sx_gdx_cc(d: int, n: int, tiles: int, index: int) -> int:
++    resident = _sx_gdx_resident(d, n, index)
++    for c in SX_GDX_CCS:
++        if (n * d // 64) % c == 0 and tiles * c <= resident and f"sx_gdx_c{c}" in _gdx_names(d, n):
++            return c
++    return 1
++
++
++def _gdx_names(d: int, n: int) -> set[str]:
++    return {name for name, _, _ in _specs(d, n)}
++
++
+ def _sx_gdx(d: int, n: int, tiles: int, index: int) -> bool:
+     if SX_GDX_FORCE is not None:
+         return SX_GDX_FORCE
+@@ -272,6 +293,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             *((f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in SX_SQ),
+             ("sx_gate", "widths/tsx_gate.cu", dim),
+             ("sx_gdx", "widths/tsx_gdx.cu", (*dim, *SX_X.get("gdx", ()))),
++            *((f"sx_gdx_c{c}", "widths/tsx_gdx.cu", (*dim, f"-DCC={c}", *SX_X.get("gdx", ()))) for c in SX_GDX_CCS if (h // 64) % c == 0 and h // 64 // c <= 2 * (d // 64)),
+             *((f"sx_dxn{k}", "widths/tsx_dxn.cu", (*dim, f"-DKS={k}")) for k in (1, 2)),
+             *((f"sx_dw{nt}", "widths/tsx_dw.cu", (*dim, f"-DNT={nt}")) for nt in SX_DW_NT if d % nt == 0 and h % nt == 0),
+         )
+@@ -962,13 +984,15 @@ def _bwd_sx_launch(
+     dab = torch.empty((m, 2 * h), dtype=x.dtype, device=x.device)
+     part = torch.empty((tiles, 2 * d), **f32)
+     fused = _sx_gdx(d, k.n, tiles, x.device.index)
+-    flags = torch.empty((tiles,), dtype=torch.int32, device=x.device)  # cleared and set by the fused kernel
++    cc = _sx_gdx_cc(d, k.n, tiles, x.device.index) if fused else 1
++    flags = torch.empty((tiles * cc,), dtype=torch.int32, device=x.device)  # cleared and set by the fused kernel (a flag a cluster)
+     if fused:  # gate + d_xn + LayerNorm backward on one cluster per tile (round sx3)
+         ks = 2
++        wsp = torch.empty((max(tiles * (cc - 1), 1), 128, d), dtype=torch.float32, device=x.device) if cc > 1 else flags  # [tiles][cc - 1][128][D] partials
+         k.run(
+-            "sx_gdx",
++            "sx_gdx" if cc == 1 else f"sx_gdx_c{cc}",
+             "transition_sx_gdx",
+-            tiles * (d // 64) * ks,
++            tiles * (d // 64) * ks * cc,
+             (
+                 k.tmap(dy, d, m, 64, 128),
+                 k.tmap(ws, h, d),
+@@ -986,6 +1010,8 @@ def _bwd_sx_launch(
+                 dx,
+                 part,
+                 flags,
++                wsp,
++                _gdx_counters(x.device, tiles * (d // 64) * ks) if cc > 1 else flags,
+             ),
+             block=384,
+             cluster=(d // 64) * ks,
+@@ -1043,7 +1069,7 @@ def _bwd_sx_launch(
+             tiles,
+             int(wgrad_bf16),
+             flags,
+-            int(fused),
++            cc if fused else 0,
+         ),
+         block=256,
+         cluster=1,
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_dw.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_dw.cu
+index 82b32eaff..8370a424d 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_dw.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_dw.cu
+@@ -84,11 +84,13 @@ transition_sx_dw(const __grid_constant__ CUtensorMap mdy, const __grid_constant_
+ #pragma unroll
+         for (int jb = 0; jb < NT / 64; ++jb) tma_load_2d(su + O_B + s * BBT + jb * 8192, mb, &B.full[s], n0 + jb * 64, kb * 64);
+         if (wait_flags && !(kb & 1)) {                         // the tile's [dA | dB] rows (gdx's release) -> these TMA reads
+-          int f;
+-          for (;;) {
+-            asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(f) : "l"(flags + (kb >> 1)) : "memory");
+-            if (f) break;
+-            __nanosleep(128);                                  // a poll every ~0.1 us: the gdx CTAs' loads share the L2
++          for (int cl = 0; cl < use_flags; ++cl) {              // use_flags: the clusters a tile (tsx_gdx.cu -DCC), one flag each
++            int f;
++            for (;;) {
++              asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(f) : "l"(flags + (kb >> 1) * use_flags + cl) : "memory");
++              if (f) break;
++              __nanosleep(128);
++            }
+           }
+           asm volatile("fence.proxy.async.global;" ::: "memory");
+         }
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
+index bae5d11a6..23491c576 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
+@@ -18,7 +18,7 @@
+ #include "tsx_store.cuh"
+ using namespace s100;
+ #ifdef PROBE
+-#define GSTW(k, w) do { if (warp == (w) && lane == 0) { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(flags + 1024)[blockIdx.x * 16 + (k)] = _t; } } while (0)
++#define GSTW(k, w) do { if (warp == (w) && lane == 0) { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(flags + 1024)[blockIdx.x * 24 + (k)] = _t; } } while (0)
+ #else
+ #define GSTW(k, w) do { } while (0)
+ #endif
+@@ -30,9 +30,13 @@ using namespace s100;
+ #define HID (2 * DIM)
+ #endif
+ constexpr int D_ = DIM, H_ = HID, ROWS = 128, NB = 64, NBLK = D_ / NB, KS = 2, CLS = NBLK * KS;
+-constexpr int NCHK = H_ / 64, GPC = NCHK / CLS, GN = 64 * GPC;  // gate: 64-unit chunks, chunks per CTA, units per CTA
+-static_assert(NCHK % CLS == 0 && (GPC == 1 || GPC == 2) && CLS <= 16, "whole gate chunks per CTA, one cluster per tile");
+-constexpr int NKD = D_ / 64, HKB = H_ / 64, NKX = 2 * HKB / KS;  // dy K-blocks, hidden K-blocks, d_xn K-blocks per CTA
++#ifndef CC
++#define CC 1                                                    // (S90 part 10) clusters a tile: the hidden units split over CC clusters, each owning a K slice of d_xn
++#endif
++constexpr int NCHK = H_ / 64, NHC = NCHK / CC, GPC = CC > 1 ? 1 : NCHK / CLS, GN = 64 * GPC;  // gate: 64-unit chunks, hidden chunks a cluster, chunks per gate CTA, units per CTA
++constexpr int NGC = CC > 1 ? NHC : CLS;                        // gate CTAs a cluster (ranks 0 .. NGC - 1)
++static_assert(NCHK % CC == 0 && (CC > 1 ? NHC <= CLS : NCHK % CLS == 0) && (GPC == 1 || GPC == 2) && CLS <= 16, "whole gate chunks per CTA, one cluster per tile");
++constexpr int NKD = D_ / 64, HKB = H_ / 64, NKX = 2 * HKB / KS / CC;  // dy K-blocks, hidden K-blocks, d_xn K-blocks per CTA
+ constexpr int OW = NB / KS;                                     // owned output columns (32)
+ constexpr int DYB = ROWS * 128, WSB = GN * 128;                // dy K-block 16 KB, Ws K-block [64 k][GN units] (GN / 64 boxes of 8 KB)
+ constexpr int KBT = ROWS * 128, WBT = 64 * 128, STB = KBT + WBT;  // d_xn stage: [dA | dB] K-block 16 KB + weight block 8 KB
+@@ -108,16 +112,18 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+                   const __grid_constant__ CUtensorMap mdab, const __grid_constant__ CUtensorMap mwa,
+                   const __grid_constant__ CUtensorMap mwb, const __nv_bfloat16* __restrict__ xg,
+                   const __nv_bfloat16* __restrict__ dyg, const float* __restrict__ rstd, const float* __restrict__ c1g,
+-                  const float* __restrict__ gamma, __nv_bfloat16* __restrict__ dx, float* __restrict__ part, int* __restrict__ flags) {
++                  const float* __restrict__ gamma, __nv_bfloat16* __restrict__ dx, float* __restrict__ part, int* __restrict__ flags,
++                  float* __restrict__ wsp, int* __restrict__ cnt) {   // wsp [tiles][CC - 1][128][D] fp32 partials, cnt [tiles][CLS] (zero between launches): CC > 1 only
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   GSTW(0, 0);
+-  const int rank = (int)cluster_rank(), nb = rank % NBLK, ks = rank / NBLK, tile = blockIdx.x / CLS, row0 = tile * ROWS;
+-  const int h0 = rank * GN;                                    // the gate's hidden units [h0, h0 + GN)
++  const int rank = (int)cluster_rank(), nb = rank % NBLK, ks = rank / NBLK, tile = blockIdx.x / (CLS * CC), cc = (blockIdx.x / CLS) % CC, row0 = tile * ROWS;
++  const bool gate_cta = rank < NGC;                            // CC > 1: only the first NHC CTAs of a cluster run a gate chunk
++  const int h0 = (CC > 1 ? cc * NHC + rank : rank) * GN;      // the gate's hidden units [h0, h0 + GN)
+   const int own0 = nb * NB + ks * OW;                          // owned output columns [own0, own0 + OW)
+-  const int kb0 = ks * NKX;                                    // first global d_xn K-block (of 2 H / 64: Wa's, then Wb's)
++  const int kb0 = ks * HKB + cc * NKX;                                  // first global d_xn K-block (of 2 H / 64: Wa's, then Wb's)
+ 
+   auto load_w = [&](int kb) {                                  // d_xn weight block of K-block kb into its stage
+     const int g = kb0 + kb, s = kb % STG;
+@@ -132,10 +138,12 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+     fence_proxy_async();
+     prefetch_map(&mdy); prefetch_map(&mws); prefetch_map(&mdab); prefetch_map(&mwa); prefetch_map(&mwb);
+     // parameters only (no dependence on the previous launch): the gate's Ws chunk and the dedicated stages' weight blocks
+-    mbar_expect_tx(&B.w_full, NKD * WSB);
+-    for (int kb = 0; kb < NKD; ++kb)
++    if (gate_cta) {
++      mbar_expect_tx(&B.w_full, NKD * WSB);
++      for (int kb = 0; kb < NKD; ++kb)
+ #pragma unroll
+-      for (int gb = 0; gb < GPC; ++gb) tma_load_2d(su + O_WS + kb * WSB + gb * 8192, &mws, &B.w_full, h0 + gb * 64, kb * 64);
++        for (int gb = 0; gb < GPC; ++gb) tma_load_2d(su + O_WS + kb * WSB + gb * 8192, &mws, &B.w_full, h0 + gb * 64, kb * 64);
++    }
+     for (int kb = 0; kb < NDED; ++kb) { mbar_expect_tx(&B.full[kb], STB); load_w(kb); }
+     mbar_expect_tx(&B.red_full, ROWS * OW * 4);                // the partner's partial (st.async, any time after the setup sync)
+     mbar_expect_tx(&B.rs_full, (CLS - 1) * ROWS * 8);          // the other CTAs' row sums (bulk copies)
+@@ -152,7 +160,7 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+   // 4-lane groups (load_t: 8 rows x 64 B per load)
+   const int gr = (warp & 3) * 32 + lane, gg = (warp - 4) >> 2;   // gate: row, 32-unit half of each chunk
+   uint4 av[GPC][4], bv[GPC][4];
+-  if (warp >= 4) {
++  if (warp >= 4 && gate_cta) {
+ #pragma unroll
+     for (int c = 0; c < GPC; ++c) {
+       const size_t off = (size_t)row0 * H_ + h0 + c * 64 + gg * 32 + store_t_off<16>(gr, lane, H_, 2);
+@@ -163,24 +171,25 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+   pdl_wait();                                                  // dy complete and visible
+   GSTW(2, 0);
+   if (warp == 3 && lane == 0 && rank == 0) {                   // clear this tile's flag before the weight-gradient kernel may start
+-    flags[tile] = 0;
++    flags[tile * CC + cc] = 0;
+     asm volatile("fence.acq_rel.gpu;" ::: "memory");
+     mbar_arrive(&B.flag_clear);
+   }
+ 
+   if (warp == 0) {
+ #ifdef MLN   // (S90) one lane per dy K-block
+-    if (lane < NKD) { mbar_expect_tx(&B.dy_full[lane], DYB); tma_load_2d(su + O_DY + lane * DYB, &mdy, &B.dy_full[lane], lane * 64, row0); }
++    if (gate_cta && lane < NKD) { mbar_expect_tx(&B.dy_full[lane], DYB); tma_load_2d(su + O_DY + lane * DYB, &mdy, &B.dy_full[lane], lane * 64, row0); }
+     __syncwarp();
+ #endif
+     if (lane == 0) {
+ #ifndef MLN
++      if (gate_cta)
+       for (int kb = 0; kb < NKD; ++kb) {                        // a barrier per K-block: the products start as dy lands
+         mbar_expect_tx(&B.dy_full[kb], DYB);
+         tma_load_2d(su + O_DY + kb * DYB, &mdy, &B.dy_full[kb], kb * 64, row0);
+       }
+ #endif
+-      mbar_wait(&B.mma_done, 0);                               // the gate products have read dy and Ws: their stages are free
++      if (gate_cta) mbar_wait(&B.mma_done, 0);                               // the gate products have read dy and Ws: their stages are free
+       if (rank == 0) mbar_wait(&B.flag_clear, 0);
+       pdl_launch();                                            // the weight-gradient kernel may start: not earlier, its dWs loads
+                                                                // would compete with this tile's dy (its dWab waits for the flags)
+@@ -212,9 +221,9 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+     __syncwarp();
+   } else if (warp == 1) {
+     // ------------------------------------------------------------------------------------------ MMA issue (converged warp)
+-    mbar_wait(&B.w_full, 0);
++    if (gate_cta) mbar_wait(&B.w_full, 0);
+ #pragma unroll 1
+-    for (int kb = 0; kb < NKD; ++kb) {
++    for (int kb = 0; kb < (gate_cta ? NKD : 0); ++kb) {
+       mbar_wait(&B.dy_full[kb], 0);
+       tc_fence_after();
+       const uint64_t da = desc_k128(su + O_DY + kb * DYB), db = desc_mn128(su + O_WS + kb * WSB, 8192);
+@@ -253,6 +262,7 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+     // units 0..31 of each 64-unit chunk, warps 8-11 units 32..63
+     const int r = gr, g = gg;
+     const uint32_t trow = tmem + ((uint32_t)((warp & 3) * 32) << 16);
++    if (gate_cta) {
+     mbar_wait(&B.mma_done, 0);
+     GSTW(4, 4);
+     tc_fence_after();
+@@ -274,7 +284,8 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+     }
+     tc_fence_before();
+     GSTW(5, 4);
+-    fence_proxy_async_global();                                // these stores -> the cluster's (and tsx_dw.cu's) TMA reads
++    fence_proxy_async_global();
++    }                                // these stores -> the cluster's (and tsx_dw.cu's) TMA reads
+     cluster_arrive();                                          // release: this CTA's [dA | dB] rows are written
+   } else {
+     cluster_arrive_rx();
+@@ -284,7 +295,7 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+       // loads start ~0.8 us earlier but overlap this kernel's d_xn loads: they ended ~1 us later, measured.)
+       if (rank == 0 && lane == 0) {
+         asm volatile("fence.acq_rel.gpu;" ::: "memory");     // cumulative over the peers' stores acquired by the cluster barrier
+-        asm volatile("st.relaxed.gpu.global.b32 [%0], %1;" :: "l"(flags + tile), "r"(1) : "memory");
++        asm volatile("st.relaxed.gpu.global.b32 [%0], %1;" :: "l"(flags + tile * CC + cc), "r"(1) : "memory");
+       }
+       __syncwarp();
+     }
+@@ -339,6 +350,11 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+     tmem_wait_ld();
+     tc_fence_before();
+   }
++#if CC > 1
++  const bool master = cc == CC - 1;
++#else
++  constexpr bool master = true;
++#endif
+   float cg[16], cb[16];
+   if (epi) {
+     mbar_wait(&B.red_full, 0);                                 // the partner's partial is here
+@@ -353,6 +369,53 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+         v[4 * i + e] = __float_as_uint(ks == 0 ? mine + other : other + mine);
+       }
+     }
++#if CC > 1
++    // (S90 part 10) the K slices of the CC clusters meet here: the first CC - 1 clusters store their owned columns' partial (this row, 16 columns) to the
++    // workspace and signal this rank's counter; the last cluster ("master") sums the partials in cluster order 0, 1, ..., its own last (deterministic) and goes on
++    if (!master) {
++      float4* wp = reinterpret_cast<float4*>(wsp + ((size_t)(tile * (CC - 1) + cc) * ROWS + r) * D_ + c0);
++#pragma unroll
++      for (int i = 0; i < 4; ++i) __stcg(wp + i, make_float4(__uint_as_float(v[4 * i]), __uint_as_float(v[4 * i + 1]), __uint_as_float(v[4 * i + 2]), __uint_as_float(v[4 * i + 3])));
++      GSTW(13, 4);
++      named_bar_sync(1, 256);                                    // every thread's stores precede the releasing increment (barrier causality)
++      if (tid == 128) {
++        asm volatile("atom.add.release.gpu.global.u32 _, [%0], 1;" :: "l"(cnt + tile * CLS + rank) : "memory");
++        GSTW(14, 4);
++      }
++    } else {
++      if (tid == 128) {                                          // every other cluster's partial of this rank's columns is stored
++        unsigned f = 0;
++        do { asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(f) : "l"(cnt + tile * CLS + rank) : "memory"); } while (f < (unsigned)(CC - 1));
++        GSTW(15, 4);
++        asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" :: "l"(cnt + tile * CLS + rank), "r"(0) : "memory");   // ready for the next launch
++      }
++      named_bar_sync(1, 256);
++      GSTW(19, 4);
++      float4 pq[CC - 1][4];                                      // all the loads in flight, then the fixed-order sum
++#pragma unroll
++      for (int c = 0; c < CC - 1; ++c) {
++        const float4* wp = reinterpret_cast<const float4*>(wsp + ((size_t)(tile * (CC - 1) + c) * ROWS + r) * D_ + c0);
++#pragma unroll
++        for (int i = 0; i < 4; ++i) {
++          float4 q;
++          asm("ld.relaxed.gpu.global.v4.f32 {%0, %1, %2, %3}, [%4];" : "=f"(q.x), "=f"(q.y), "=f"(q.z), "=f"(q.w) : "l"(wp + i));
++          pq[c][i] = q;
++        }
++      }
++#pragma unroll
++      for (int i = 0; i < 4; ++i) {
++        float4 s = pq[0][i];
++#pragma unroll
++        for (int c = 1; c < CC - 1; ++c) { s.x += pq[c][i].x; s.y += pq[c][i].y; s.z += pq[c][i].z; s.w += pq[c][i].w; }
++        v[4 * i] = __float_as_uint(s.x + __uint_as_float(v[4 * i]));
++        v[4 * i + 1] = __float_as_uint(s.y + __uint_as_float(v[4 * i + 1]));
++        v[4 * i + 2] = __float_as_uint(s.z + __uint_as_float(v[4 * i + 2]));
++        v[4 * i + 3] = __float_as_uint(s.w + __uint_as_float(v[4 * i + 3]));
++      }
++    }
++#endif
++    GSTW(16, 4);
++    if (master) {
+ #pragma unroll
+     for (int k = 0; k < 8; ++k) np[k] = pack_bf16(__uint_as_float(v[2 * k]), __uint_as_float(v[2 * k + 1]));
+     float pa = 0.f, pb = 0.f;
+@@ -404,9 +467,12 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+       for (int q = 0; q < 4; ++q) s += cp[(q * 2 + which) * OW + c];
+       part[(size_t)tile * 2 * D_ + which * D_ + own0 + c] = s;
+     }
++    GSTW(17, 4);
++    }                                                          // (master)
+   }
+   float ca = 0.f, cbv = 0.f;
+-  if (epi) {
++  if (epi && master) {
++    GSTW(18, 4);
+     mbar_wait(&B.rs_full, 0);                                  // every CTA's row sums are in this CTA's shared memory
+     GSTW(11, 4);
+     float pa = 0.f, pb = 0.f;

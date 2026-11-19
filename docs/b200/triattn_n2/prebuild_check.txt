@@ -1,0 +1,1472 @@
+[prebuild] plan for sm100: 795 artifacts (734 cubin, 61 ext) from 18 families in 2.3 s; 0 not built yet; cache /NHNHOME/WORKSPACE/26mohw002_A/psk6950/.cache/b2511/miniworld_engine_jit
+[prebuild]   have ext     weights_cast_cuda_v1  [9d1a227f]  _cast_cuda.py::_ext
+[prebuild]   have ext     layernorm_rows_sm100  [6c873347]  layernorm/cuda/sm100/__init__.py::_ext
+[prebuild]   have ext     layernorm_pipe_cuda_v1  [1d338169]  layernorm/cuda/pipe/__init__.py::_ext
+[prebuild]   have ext     layernorm_general_cuda_v4  [23e82d71]  layernorm/cuda/general/__init__.py::_ext
+[prebuild]   have ext     sampler_ops_sm100a  [c7657ce0]  sampler_ops/cuda/__init__.py::ext_sm100
+[prebuild]   have ext     dit_variants_train_rows_sm80_sm100  [dc736842]  _sm120.py::sm80_load_extension
+[prebuild]   have cubin   atom_local_sm80_sm100/lbias  [7603a5ae]  augmented_attention/cuda/sm80_atom_local/__init__.py::cubin
+[prebuild]   have ext     dit_variants_edge_sm80_sm100  [55dc22ff]  _sm120.py::sm80_load_extension
+[prebuild]   have cubin   atom_local_mma_sm80_sm100/lattn90  [55f22f32]  dit_variants/cuda/sm80.py::cubin
+[prebuild]   have cubin   atom_local_mma_sm80_sm100/lattn90_tf32  [254bb436]  dit_variants/cuda/sm80.py::cubin
+[prebuild]   have cubin   atom_local_mma_sm80_sm100/lattn90_esm  [af0e3428]  dit_variants/cuda/sm80.py::cubin
+[prebuild]   have ext     augattn_qknorm_local_sm80_sm100  [1bc15922]  _sm120.py::sm80_load_extension
+[prebuild]   have cubin   transition_sm100a/d128/tr_fwd_sm100  [c6e65223]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d128/tr_bwd_sm100  [4c24d1b8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have ext     transition_fused_sm100a  [94fbde40]  transition/cuda/fused_sm100a.py::_ext
+[prebuild]   have cubin   transition_sm100a/d64n4/fwd  [3a393c41]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d64n4/bwd  [acfa893e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n4/fwd  [a7adbcf1]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n4/fwdi  [1cce78fb]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n4/fwdi1  [3e47d0e7]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n4/gate  [3d006b8c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n4/dxn  [de3c5982]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n4/lnbwd  [bebfb522]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/fwd  [e60d9b08]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/fwdi  [057f1838]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/stat  [23cb7040]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/bwd  [d2cfedca]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_ln  [ce7caac5]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_expand32  [c6c4478e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_expand64  [0cc2575c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_expand32f  [cc20fb43]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_expand64f  [d9375538]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_expand128f  [f8d57a56]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_sq32_1  [81ef2892]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_sq64_1  [24721d3c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_sq32_2  [ca2c6f6e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_sq64_2  [db6eda1d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_gate  [abcfe31d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_gdx  [73f84781]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_dxn1  [09082588]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_dxn2  [6914a956]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_dw64  [d6f5ebbb]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_dw128  [a8b1f893]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/sx_dw192  [4bee1d57]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/gate  [ccb498f9]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/gate_is  [64585751]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/dxn  [fdc7a976]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n4/lnbwd  [3c3d5c08]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/ln  [d429ee84]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/swiglu  [f8a28041]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/swiglu_is  [4586fe6b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/swiglu_ab  [577dd45d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/swiglu_abis  [fe3a1f55]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/squeeze  [95ed9425]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/squeezep  [e0e2289c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/stat  [ea564fdf]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/swiglu_fold  [6287859f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/swiglu_fold_is  [72107ff1]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/gate  [0d709940]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/gate_is  [cb8c4837]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/dxn  [e83ee371]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n4/lnbwd  [a67d04ff]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d64n2/fwd  [33e5c6fd]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d64n2/fwdi  [2b7f5414]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d64n2/bwd  [e48677a4]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d128n2/fwd  [318499ba]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d128n2/fwdi  [dec0d7f8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d128n2/bwd  [dbdda133]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n2/fwd  [aaec3812]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n2/fwdi  [23de4dd2]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n2/fwdi1  [7e321eb3]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n2/gate  [a80d074f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n2/dxn  [9c7d675e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d256n2/lnbwd  [5bbd50da]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/fwd  [0a5cb981]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/fwdi  [eb273217]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/stat  [5414f6c6]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/bwd  [9fe4cef5]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_ln  [5b09c648]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_expand32  [dacd4f29]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_expand64  [c3eb59b5]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_expand32f  [877e189b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_expand64f  [ce8b326b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_expand128f  [85e45427]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_sq32_1  [5f3c0813]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_sq64_1  [6ca2f103]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_sq32_2  [475c568c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_sq64_2  [3f42074e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_gate  [e330363c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_gdx  [30f79a09]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_dxn1  [7ed98583]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_dxn2  [a3fd65e3]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_dw64  [c629bd2d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_dw128  [33868be6]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/sx_dw192  [96d1c81c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/gate  [4b54e42d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/gate_is  [f8b0ed33]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/dxn  [b96bbac4]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d384n2/lnbwd  [f9aa930d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/ln  [8fbb3d77]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/swiglu  [9d65b54d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/swiglu_is  [70c392dc]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/swiglu_ab  [3f7ab747]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/swiglu_abis  [6016530f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/squeeze  [1ed91cd1]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/squeezep  [12afabe8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/stat  [5df2037b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/swiglu_fold  [742816d8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/swiglu_fold_is  [bfda83c2]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/gate  [5b068e2b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/gate_is  [e6143d0f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/dxn  [a288684b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d512n2/lnbwd  [8f5cc481]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d768n2/ln  [ef0ec8c4]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d768n2/swiglu  [e3e88707]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d768n2/swiglu_is  [a11a0a42]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d768n2/swiglu_ab  [52fba2d1]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d768n2/swiglu_abis  [2e0560db]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d768n2/squeeze  [a622dfbe]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d768n2/gate  [9ebfd96f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d768n2/gate_is  [4d0b7afe]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d768n2/dxn  [74949b48]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/d768n2/lnbwd  [e700cf20]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/rows  [22ad996c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/swiglu128  [e9988a7f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/swiglu64  [55b87765]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/resid128  [53f58a45]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/resid64  [e162d4ae]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/plain128  [ef14f280]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/plain64  [f5fb415f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/plain32  [466f437d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/gate64  [0d48238b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/ctgate128  [421db9ea]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/ctgate64  [173af57c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/swiglu_ab128  [a35e0622]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/swiglu_ab64  [b194bfaa]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/gate_ab128  [eefee9bc]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/gate_ab64  [19161c14]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/swiglu_ab128x2  [5a577813]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/resid256x2  [db12aee0]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/dw64  [0c0b5a31]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/dw128  [95485d1e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/dw256  [dca0900b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/rows  [9b324559]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/swiglu128  [255dccc5]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/swiglu64  [1441eb1f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/swiglu32  [6c1cf2fa]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/resid128  [cee74b2a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/resid64  [c5001031]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/resid32  [e9916d66]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/plain128  [e966d3f8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/plain64  [5bf8d03d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/plain32  [f0afe5b7]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/gate64  [ed51bc45]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/gate32  [22e6100a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/ctgate128  [01a548ef]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/ctgate64  [9c6496e6]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/ctgate32  [f310314f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/swiglu_ab128  [b57b93ba]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/swiglu_ab64  [60e3112f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/swiglu_ab32  [ba16edb0]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/gate_ab128  [e0d0ddd5]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/gate_ab64  [524c2a97]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/gate_ab32  [705fab86]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/swiglu_ab128x2  [6b73bfb5]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/resid256x2  [df2f3734]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/dw64  [f5b7ad39]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/dw128  [51835336]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/fusedh64  [2555a1d4]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/fusedh128  [5533470c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/fusedh256  [dd7ce86e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/fusedh64s  [88980c81]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/fusedh128s  [a8b262e0]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/fusedh256s  [915dcf62]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/fusedh128e  [5e11861b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/ln  [b3740671]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/expand32_1  [d41a0ce8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/expand64_1  [4798a952]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/expand128_1  [7b8a8633]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/expand32_2  [8ac920e1]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/expand64_2  [23cc5bab]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/expand64_4  [ee5930fa]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/sq32_1  [eb4704f6]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/sq64_1  [48856343]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/sq32_2  [9f15667f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/sq64_2  [c6800a08]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/sq64_4  [dbf246e0]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/psq32  [70841e65]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/psq64  [8e6455d7]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/psq128  [bbce00f6]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2bf16/pex32  [2d311d71]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/bs768_1536_64_128_256  [70754ac5]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/bs768_1536_64_256_256  [bc5261e8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_bf16/bs768_1536_64_256_256_GSPLIT0_LNW0  [5ad432f7]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2f32/ln  [c41e5b03]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2f32/expand32_1  [da09fe2a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2f32/expand64_1  [da74ead9]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2f32/expand128_1  [1349211d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2f32/sq32_1  [c6b0b492]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2f32/sq64_1  [f809cb1a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2f32/sq32_2  [4ed36f75]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2f32/sq64_2  [9d88b813]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/bs384_768_32_32_128_LNW0  [a1bc2ed6]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/bs384_768_64_128_64_LNW0  [5859d7ca]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/bs384_768_128_128_64_LNW0  [d26e0fb8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/bs384_768_128_32_128_LNW0  [6b858112]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/bs384_768_128_128_64_GSPLIT0_LNW0  [4edf4391]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/bs384_768_128_64_128_GSPLIT0_LNW0  [7fb82e3c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/bs384_768_128_32_128_GSPLIT0_LNW0  [ad8f3f5c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/bs768_1536_64_128_128  [fc410e23]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/bs768_1536_128_256_128  [8c783889]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_f32/bs768_1536_128_256_128_LNW0  [abfedba1]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/ln  [d3a91722]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/expand32_1  [45ff8c34]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/expand64_1  [40c6e600]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/expand128_1  [3749bb64]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/sq32_1  [7fb0809a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/sq64_1  [18475626]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/sq32_2  [4ac48da3]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/sq64_2  [e3f32eb3]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/sq64_4  [26fb4ed0]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/sq32_4  [a8ca7a87]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2f32/sq64_8  [f86796ad]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/ln  [7de8e60b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/expand32_1  [fa0ce2a1]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/expand64_1  [b32c1ba1]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/expand128_1  [0f1b9961]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/expand32_2  [2aeed1d4]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/expand64_2  [6153a9ac]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/sq32_1  [b2ef0fb5]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/sq64_1  [6ab4ebb8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/sq32_2  [5d9cc586]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/sq64_2  [9659ecdd]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/sq64_4  [ca701aa5]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/psq32  [4df25104]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/psq64  [ce7bbcf3]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/psq128  [4726e1a2]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2bf16/pex32  [4d229851]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/ln  [c794448a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/expand32_1  [9087646f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/expand64_1  [b0cf711a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/expand128_1  [1c803b20]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/expand32_2  [fdcc5c5e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/expand64_2  [29af65d0]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/sq32_1  [17734bca]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/sq64_1  [5f0a6139]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/sq32_2  [43d1855a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/sq64_2  [ea0cfe8e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/sq64_4  [483ca8cc]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/psq32  [7dcd7414]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/psq64  [be1a678a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/psq128  [472096b2]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n4bf16/pex32  [4fae8c61]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/pair_d768n2/ln  [a4867cf6]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/pair_d768n2/ex16_4  [f7cf7ffc]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/pair_d768n2/ex32_4  [1bf1bc6e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/pair_d768n2/ex64_4  [f5223263]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/pair_d768n2/sq32_4  [ce475dcb]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/pair_d768n2/sq64_4  [720c3bed]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/ln  [3d8ff12f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/expand32_1  [3ad85ee4]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/expand64_1  [694b26b4]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/expand128_1  [ce7a2f46]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/expand32_2  [b25f4218]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/expand64_2  [a1157e02]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/sq32_1  [aa7b3a36]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/sq64_1  [863b026a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/sq32_2  [174b8806]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/sq64_2  [4bbb9fc7]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/sq64_4  [50981762]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/psq32  [da91f445]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/psq64  [509936c9]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/psq128  [8bb69491]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/pex16  [a6ecee4a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/pex32  [65f789be]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d384n2h16/pex64  [7766b002]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/ln  [eebfa988]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/expand32_1  [8909cae6]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/expand64_1  [0a28d067]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/expand128_1  [ed11ff77]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/expand32_2  [bc1d4fa3]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/expand64_2  [4d5c1201]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/expand64_4  [7a58b6d8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/sq32_1  [2666704e]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/sq64_1  [3a53e9f1]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/sq32_2  [1d5abd1f]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/sq64_2  [f94ee4db]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/sq64_4  [64111223]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/sq32_4  [075b5185]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/sq64_8  [c105ee7a]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/psq32  [3080b585]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/psq64  [f94afbd7]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/psq128  [5d41d6e3]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/pex16  [227cb7b8]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/pex32  [c4da6308]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/small_d768n2h16/pex64  [68f042bd]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_h16/ln512  [d943d50d]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_h16/ln768  [9c0a3cc3]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_h16/swiglu128  [a11dea1c]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_h16/swiglu64  [a1cf708b]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_h16/resid128  [4373d889]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_h16/resid64  [a80f8435]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have cubin   transition_sm100a/generic_h16/resid256x2  [79c10606]  transition/cuda/fused_sm100a.py::build_cubins
+[prebuild]   have ext     triattn_b200_core_r2_v20_tt8  [8e150c7e]  triangle_attention/cuda/b200_triattn.py::_core
+[prebuild]   have ext     triattn_b200_core_r3_v20_tt8  [5c71f40d]  triangle_attention/cuda/b200_triattn.py::_core
+[prebuild]   have ext     triattn_b200_core_r2_hb_p4_v2_tt8  [b7745aa4]  triangle_attention/cuda/b200_triattn.py::_core
+[prebuild]   have ext     triattn_b200_core_r2_hb_d16_p4_v3_tt8  [7c924411]  triangle_attention/cuda/b200_triattn.py::_core
+[prebuild]   have ext     triattn_b200_core_r2_hb_d16c_p4_v3_tt8  [d036033d]  triangle_attention/cuda/b200_triattn.py::_core
+[prebuild]   have ext     triattn_b200_core_r3_hb_p2_v2_tt8  [33d329ba]  triangle_attention/cuda/b200_triattn.py::_core
+[prebuild]   have ext     triattn_b200_core_r3_hb_d16_p2_v3_tt8  [d5b50d27]  triangle_attention/cuda/b200_triattn.py::_core
+[prebuild]   have ext     triattn_b200_core_r3_hb_d16c_p2_v3_tt8  [2073c165]  triangle_attention/cuda/b200_triattn.py::_core
+[prebuild]   have ext     triattn_b200_mod_v23_tt11  [ee2b282f]  triangle_attention/cuda/b200_triattn.py::_mod
+[prebuild]   have ext     triattn_b200_pack_v2  [6ae61e63]  triangle_attention/cuda/b200_triattn.py::_pack
+[prebuild]   have ext     triattn_b200_wide_v45_tt7  [f0887c97]  triangle_attention/cuda/b200_triattn.py::_wide
+[prebuild]   have ext     triattn_b200_dh64_v7_tt7  [cbd56813]  triangle_attention/cuda/b200_triattn.py::_core64
+[prebuild]   have ext     triattn_b200_dh64_hb_p2_v1  [cb3d36fe]  triangle_attention/cuda/b200_triattn.py::_core64
+[prebuild]   have ext     triattn_b200_l128_v3_tt8  [f1f69b20]  triangle_attention/cuda/b200_triattn.py::_l128
+[prebuild]   have ext     triattn_b200_tallk_v2  [a7d52903]  triangle_attention/cuda/b200_triattn.py::_tallk
+[prebuild]   have ext     triattn_generic_sm100  [a616c83f]  triangle_attention/cuda/b200_bidir.py::glue
+[prebuild]   have ext     triattn_bidir_sm100  [a8ca5f6c]  triangle_attention/cuda/b200_bidir.py::ext
+[prebuild]   have ext     triattn_b200_ln_v1  [327def22]  triangle_attention/cuda/b200_bidir.py::lnb
+[prebuild]   have ext     triattn_b200_ltmm_v1  [7ea2350f]  triangle_attention/cuda/b200_bidir.py::ltmm
+[prebuild]   have cubin   augattn_sm100/pair_fwd32  [bbffadf2]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_fwd32  [37e4cc48]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_fwd  [66f9150f]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_fwd32  [f849d5a2]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_fwd  [15f7ee82]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_fwd32  [6c8bab7c]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_fwd  [eb9cd23e]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_fwd32  [8ccb4d16]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_fwd  [6897a018]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_fwd32  [6f98c5d1]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_bwd  [8a544bc4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_fwd32  [19eea9e3]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_bwd  [d50994e4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pair_bwd  [a0d1c4e7]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have ext     apb_rows_cuda_sm100  [427d93c5]  augmented_attention/cuda/apb/__init__.py::_ext
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [d56e6d89]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_pack_sm100  [301ec124]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd_tf32  [583b9ca7]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv_tf32  [f6df05d3]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb_tf32  [9c1265e9]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [61ac3a6f]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [e449432b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [7f5451a6]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [15580490]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [3ad800f4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [dae639d3]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/glue  [8cd063eb]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [c9d072ed]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [d1a02c09]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [ce44b1da]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb  [304931e1]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [5e7bb11b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd_tf32  [71e972a8]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv_tf32  [6fcf799a]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb_tf32  [4d83e49c]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [036d5747]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [9c075139]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [98aeda86]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [ea0b81a2]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [90589e27]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [5cd244ec]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [864ec402]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [c6886bfe]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [75fe5992]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb  [615551bf]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [eadda054]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd_tf32  [1856447c]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv_tf32  [6cc540d1]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb_tf32  [ab77ecde]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [bf28abd1]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [003c5526]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [efd7b1cb]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [e3ee6430]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [c74a9a2d]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [af1dae59]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [89b35327]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [c3826525]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [705f47a4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb  [daa8e7a1]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd_tf32  [42a3c514]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv_tf32  [ec17345d]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb_tf32  [d6ff5168]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [aa4456c8]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [888415b5]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [d964d498]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [4638dc04]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [65d7ebdf]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [7bb59ebf]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [9b7a0b03]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [91bd00ab]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [bc4fce0a]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb  [eac8e4ae]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [b7497af3]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd_tf32  [cb3f0ccb]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv_tf32  [7f82d2b8]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb_tf32  [5e1c98bb]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [56ebe0e5]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [bd20f64d]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [df82c8a5]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [54c9304c]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [0b910db4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [6bb997e3]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [15c4a412]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [d399704e]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [3eb18c0f]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb  [bc84de75]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [532c0ba4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [d7d5e199]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [96c26d18]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [89d23be0]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [ae1ae7a0]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [ead506b7]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [d9f16912]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb  [67a6cfe6]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [ba490921]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [cbb5b207]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [313dca54]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [4ea29403]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd_tf32  [5bfbf75b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv_tf32  [0f9453a3]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb_tf32  [9df4d29a]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [f80d9b18]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [677b990b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [1ae57b52]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [4e7eb6b2]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [80e8cc54]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [7cfd809d]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [d2cb43f5]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb  [c541ebfe]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [4ac25c3c]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [d53a8af2]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [3848d6f0]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [f8c766f3]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd_tf32  [ba7b8e06]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv_tf32  [ea44cb2c]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb_tf32  [dbae09e5]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [a8b594c4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [b18e9f13]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [63d826b4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [a481c63b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [4c6f63fb]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [39e5c014]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [73c6566b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb  [57c55efd]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [9f798126]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [89a60a84]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [51b49695]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [3123e0c7]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd_tf32  [c27a4016]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv_tf32  [796c462d]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb_tf32  [d0a77e6e]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [11900da3]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [5f3094c4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf  [e99ca118]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [03db6b2f]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd2  [2c44ba05]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [7cda9591]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv  [0826f232]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb  [f064e273]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [a40ad594]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [5ea2a58e]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [a8876e41]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_inf_tf32  [8b95cac1]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_fwd_tf32  [28643722]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dkv_tf32  [c33f2d43]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/attn_dqb_tf32  [cd51fb51]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_dkv  [b5371ef0]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_dq  [9d72d73e]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_fwd  [6895b225]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lbias  [129cb1e4]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lcross  [46c6da44]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lslide  [8306677b]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_fwd  [3b42c6b6]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/cond_fwd  [d8b99a85]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/cond_fwd  [676e2cc4]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [1aa33bb0]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [658d1e15]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [0ad1416a]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [c6242ab1]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [40cb3313]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/tr_bwd_gate  [22ee8b2b]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_bwd  [60e105d4]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_bwd  [d6703fcc]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_bwd  [dc0ecf36]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_bwd  [63b550be]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/cond_bwd  [498544d0]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [1b88592e]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [74d91120]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/conf_mask  [04300802]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/var_pack  [cf99105c]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/cond_fwd  [4ad83a00]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/cond_fwd  [dcada348]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [4a73693e]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [6317ca30]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [b3c2924c]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [6fe61a43]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [6d22867c]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [e0ba8bf1]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [78b8726c]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [9cb1505d]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [1aef2fa2]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [d3559449]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [52cbafa0]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [4ebea5c3]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [557d2b14]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_bwd  [17aa8576]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_bwd  [26178570]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_bwd  [5e63828c]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/cond_bwd  [d0ec7777]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/tr_bwd_gate  [0f1e2ce4]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_bwd  [82189763]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/kqln_bwd  [07515df2]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/col_jobs  [5c7115fa]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200_tf32/dw_atom  [7989d85d]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   atom_local_b200/lattn_dkv_tf32  [c60a4e4e]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_dq_tf32  [6cc8f852]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_fwd_tf32  [a36912a7]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lbias_tf32  [e8586b31]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [5ca5dc2f]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/gemm_rg_tf32  [d3d30af3]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/gemm_sb_tf32  [a99d0428]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/gemm_tf32  [04328a90]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/rows_tf32  [2cceb7cb]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [d1ac848a]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [0a2dfada]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [888cb2eb]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [ecad77af]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [32629b49]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/gemm_rg_tf32  [9397ade5]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/gemm_tf32  [e612e328]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [570d5467]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [e01e986a]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [c5039be3]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [783c0b7c]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [3f06cea5]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [7ee0a884]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [9c6e1b4b]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [eea85fd8]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [a41cd36b]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [423cf159]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [bff7deb8]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [ee664134]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [82e42a56]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [a0a5ad78]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200/var_rows_tf32  [c5d31af5]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200_tf32/dw_atom  [87c985a5]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200/cond_fwd  [5e0b104f]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [ad97407c]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [cc2a54d4]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [dea4be41]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [93351634]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [e0053c15]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_fwd  [df05b376]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_esm  [218aded3]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lesm  [2a472562]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_esm  [e909c798]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [25b6e854]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [3894bc98]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [66b36d35]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [84b81758]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [b060d598]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   local_dit_b200_tf32/fused_tf32  [40101951]  augmented_attention/cuda/b200_atom/__init__.py::cubin_tf32
+[prebuild]   have cubin   atom_local_b200/lattn_esm_tf32  [f5ce6ef8]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lesm  [423e1a3a]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/tr_bwd_gate  [cfe13a9a]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_bwd  [98405272]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_bwd  [2a182889]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [c186ed53]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/post_bwd  [2240331b]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_bwd  [750a449c]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/pre_fwd  [58c54e67]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/esm_pack  [a76c132b]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   local_dit_b200/esm_pack  [44bc6978]  augmented_attention/cuda/b200_atom/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_esm_dq  [8b562283]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_esm_dkv  [3181526a]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_esm_dq_tf32  [d7cce97e]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   atom_local_b200/lattn_esm_dkv_tf32  [ad907c5a]  augmented_attention/cuda/b200_atom_local/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/qkvg_fwd  [6b1e0662]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/qkvg_fwd2  [2730e557]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/qkvg_fwd2_a1  [25cdb92a]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/ffn_fwd2  [b10865ff]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/ffn_fwd2_a1  [7641779b]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/attn_fwd3  [4d3237c9]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/attn_fwd1h  [c6364056]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/qkvg_fwd1t  [b454a8d6]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/qkvg_fwd1t_tr  [a53dd421]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/mod_fwd_lt  [0761a1c5]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/ffn_fwd1t  [0665fb39]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/qkvg_fwd3  [b12fb5f5]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/ffn_fwd3  [7fc0101f]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/ffn_bwd_gate  [ae9c1c8d]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/ffn_bwd_dy  [e05d3c04]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/oproj_bwd  [73053700]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/attn_dq  [8a40e4bc]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/attn_dkv  [4b46e8b3]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/attn_dkvq  [b0c91209]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/qkvg_bwd  [6c80ea7e]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/mod_fwd  [08fb6b83]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/mod_bwd  [3fff499b]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/dw_bf16  [7096ed63]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/mod_bwd_act  [b626415b]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/ffn_bwd_dy_st  [8e9a4876]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/oproj_bwd_st  [fb880719]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/qkvg_bwd_st  [669e08c5]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/wpack_bf16  [72f419e4]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/ffn_bwd_gate_wp  [cf51c00c]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/ffn_bwd_dy_stwp  [04071903]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/oproj_bwd_stwp  [57bfc17c]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/qkvg_bwd_stwp  [6e2faf90]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/embed_glue  [67bb1925]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_fwd  [042d9a5e]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_fwd_s  [392a0364]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_bwd  [96c866cb]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_bwd_s  [6081bc9a]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_bwd_c  [322ea3c3]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_bwd_c2  [e6a87326]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_bwd_c3  [0ce94eea]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_bwd_c4  [e49609ac]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_bwd_c8  [a13b861e]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_fwd32  [79799c25]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_fwd32_s  [e700c857]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_fwd_c  [a2692fc4]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100/gattn_fwd32_c  [15b80c9f]  swa_dit/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/wprep_tf32  [791bb912]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/mod_fwd_tf32  [1a491470]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/qkvg_fwd_tf32  [99a52c31]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/qkvg_fwd_tf32_modf  [80b78099]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/mod_fwd_tf32_lt  [c0ac2701]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/attn_fwd_tf32  [d65329df]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/ffn_fwd_tf32  [8347e67d]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/wprep_bwd_tf32  [7423d8e8]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/ffn_bwd_gate_tf32  [ecd0ace0]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/ffn_bwd_gate_tf32_dyf  [2595cd9b]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/adaln_bwd_tf32  [2ff5615b]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/oproj_bwd_fused_tf32  [98a1058e]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/attn_dq_tf32  [a0665149]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/attn_dkv_tf32  [96c4f844]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/attn_dq_tf32_x  [f89c6132]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/attn_dkv_tf32_x  [29369dc9]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/mod_bwd_tf32  [b39daef4]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32  [c4972cb2]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_direct  [75b7dace]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_b3  [cac706bf]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_reduce_tf32  [1e1224e1]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/gattn_tf32  [dd384007]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dcx_tf32  [030d1a02]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dcx_tf32_tr  [a0a4fd73]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dcx_tf32_sta  [5b94e48d]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dcx_tf32_sta_tr  [1e25c145]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dcx_tf32_st2  [688a6c6c]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dcx_tf32_st2_tr  [e2a90076]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dcx_tf32_st3  [ae2d950c]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dcx_tf32_st3_tr  [8387b426]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dcg_tf32  [b3b23e5b]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/ffn_fwd_tf32_r64  [87909a9d]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/ffn_fwd_tf32_r64p  [f2e9bcef]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/ffn_fwd_tf32_r32  [2ee5e713]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/ffn_fwd_tf32_r32p  [b7df0fed]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl4_r16  [3b35f8ef]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl4_r16x1  [bc560110]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl4_r16x2  [d0f204d0]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl4_r32  [b8735a54]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl4_r32g  [4ada417a]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl4_r32x1  [7c98ff4e]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl4_r32x2  [8cf7a708]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl4_r64  [1b29cbd9]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl4_r64x1  [242a72bc]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl4_r64x2  [8c399d26]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl8_r16  [92e360ca]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl8_r16x1  [e1c5bee3]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl8_r16x2  [8b9fa3a0]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl8_r32  [ec16a2a2]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl8_r32g  [a82ba81d]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl8_r32x1  [f0bd658a]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl8_r32x2  [5be743c0]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl8_r64  [aca4fa01]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl8_r64x1  [09ab4dad]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl8_r64x2  [acba9d21]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl16_r16  [162120bc]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl16_r16x1  [2c36ff6d]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl16_r16x2  [a7ad3ef6]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl16_r32  [5cf29623]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl16_r32x1  [42ec7f78]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl16_r32x2  [3a1c352b]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl16_r64  [5f5a22e7]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl16_r64x1  [645a5db7]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   swa_dit_sm100_tf32/dw_tf32_cl16_r64x2  [6c217389]  swa_dit/cuda/sm100/tf32_fwd.py::cubin
+[prebuild]   have cubin   smooth_lddt_100a/smooth_lddt  [1b7f6819]  smooth_lddt/cuda/sm100/__init__.py::cubin
+[prebuild]   have ext     bias_only_dit_rows_cuda  [d7703bf8]  bias_only_dit/cuda/__init__.py::_rows_ext
+[prebuild]   have ext     bias_only_dit_train_rows_cuda  [e23c600b]  bias_only_dit/cuda/train.py::_rows_ext
+[prebuild]   have ext     bias_only_dit_f32_rows_cuda  [96023af7]  bias_only_dit/cuda/tf32.py::rows32
+[prebuild]   have cubin   augattn_sm100/bo_tab_sm100  [88240daf]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_front_tf32  [ebfae59b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_front_tf32  [97501532]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_front_tf32  [afb6ca1d]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail_tf32  [65b46ca4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail_tf32  [2da40017]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail2_tf32  [9dae6df1]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_tf32  [bed89ac9]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_tf32  [f1f4a49b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_tf32  [df1c7911]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail_bf16  [f44f7ab4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail_bf16  [be73c8b4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail_bf16  [cca1e295]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail_bf16  [6d0ec3dc]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail_bf16  [03f8c138]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail_bf16  [d0a9083a]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail_bf16  [a427445c]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail_bf16  [5bfd2347]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail2_bf16  [970dd64d]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail2_bf16  [be04c784]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail2_bf16  [a72031d2]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_tail2_bf16  [1b0fbadc]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_front_bf16  [09a59a6b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_front_bf16  [0141aa08]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_front_bf16  [dbde1fde]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_front_bf16  [d3ad7c7d]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_front_bf16  [52b47556]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_front_bf16  [5ab1ab3b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [28a24851]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [0f0a9f84]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [92ae0208]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [5755fd31]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_tf32  [5f97582c]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_tf32  [324c4f62]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/dpb32_sm100  [d4198cf4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/gemm_glu_tf32  [be9d7792]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/dpbx2_sm100  [987b22d2]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_tf32  [764cbdda]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_tf32  [47877ebd]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_tf32  [7153ba53]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_tf32  [a576e44a]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/gemm_swiglu2_sm100  [70d6c58b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_bwd_tail  [4c9cd81e]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_wgrad  [76a124fe]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [0406050f]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_pvdpb  [d2470159]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_pvdpb  [eac9a177]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [c71f82e0]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/dpbx2_sm100  [561b2fd4]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [4247b658]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_pvdpb  [33970d8e]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [0e093970]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_pvdpb  [59de844f]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [7d56fd34]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_pvdpb  [0b967e0d]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [bb3551d2]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_pvdpb  [4e0bf0c9]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [e3d5bbd1]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/bo_pvdpb  [ee14d8fa]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [a3d72cdd]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [f6d8dd0e]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [030bd8bd]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/dpb_sm100  [6dea2316]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [1a4d3ccb]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [8cc8515d]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [e1e62511]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/dpb_sm100  [8912cb32]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [433c1ce0]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/pv_gate_inf  [55f2fc2a]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have ext     token_dit_rows_cuda_sm100  [c3b912a0]  conditioned_transition/cuda/__init__.py::_arch_ext
+[prebuild]   have ext     token_dit_train_rows_sm100_768_32_rpb2  [8bebb940]  conditioned_transition/cuda/train.py::rows_ext
+[prebuild]   have ext     token_dit_train_rows_sm100_rpb2  [669a9af4]  conditioned_transition/cuda/train.py::rows_ext
+[prebuild]   have ext     token_dit_train_rows_sm100_rpb2_dp256  [46114ca0]  conditioned_transition/cuda/train.py::rows_ext
+[prebuild]   have ext     token_dit_train_rows_sm100_rpb2_dp512  [f7f0807a]  conditioned_transition/cuda/train.py::rows_ext
+[prebuild]   have ext     token_dit_train_rows_sm100_rpb2_dc768  [0b7d66c1]  conditioned_transition/cuda/train.py::rows_ext
+[prebuild]   have ext     token_dit_train_rows_sm100_rpb2_dc768_dp256  [cb503a44]  conditioned_transition/cuda/train.py::rows_ext
+[prebuild]   have ext     token_dit_train_rows_sm100_768_64_rpb2  [722ce322]  conditioned_transition/cuda/train.py::rows_ext
+[prebuild]   have ext     token_dit_train_rows_sm100_1024_64_rpb2  [4ffe4d31]  conditioned_transition/cuda/train.py::rows_ext
+[prebuild]   have cubin   augattn_sm100/tdt_pair32_sm100  [25b41b3b]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/tdt_pair32_sm100  [4586857e]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have cubin   augattn_sm100/gemm_swiglu2_sm100  [9adb0edf]  augmented_attention/cuda/sm100/__init__.py::cubin
+[prebuild]   have ext     miniworld_opm_sm100  [60ae8d34]  integrations/opm_train.py::_ext
+[prebuild]   have ext     miniworld_opm_wide_sm100  [51be4779]  integrations/opm_sm100.py::_ext_wide
+[prebuild]   have ext     miniworld_pwa_sm100  [ef7a1620]  integrations/pwa_train.py::_k100
+[prebuild]   have ext     miniworld_pwa_wide_sm100_64_8  [358024cb]  integrations/pwa_sm100.py::_value
+[prebuild]   have ext     miniworld_pwa_wide_sm100_128_8  [f394c542]  integrations/pwa_sm100.py::_value
+[prebuild]   have ext     miniworld_pwa_wide_sm100_128_16  [45516e74]  integrations/pwa_sm100.py::_value
+[prebuild]   have ext     miniworld_pwa_wide_sm100_64_32  [0c014c5f]  integrations/pwa_sm100.py::_value
+[prebuild]   have ext     miniworld_pwa_wide_sm100_256_32  [9bc58942]  integrations/pwa_sm100.py::_value
+[prebuild]   have ext     mpnn_message_sm80_sm100  [9e8666d5]  _sm120.py::sm80_load_extension
+[prebuild]   have ext     mpnn_node_message_sm80_sm100  [e82e354c]  _sm120.py::sm80_load_extension
+[prebuild]   have ext     mpnn_edge_sm80_sm100  [d3aa5211]  _sm120.py::sm80_load_extension
+[prebuild]   have ext     mpnn_relpos_sm80_sm100  [4117af47]  _sm120.py::sm80_load_extension
+[prebuild]   have ext     trimul_b200_v6  [d1c5448c]  trimul_inproj/cuda/b200_infer.py::_ext
+[prebuild]   have ext     trimul_b200_l128_v14  [25681b0d]  trimul_inproj/cuda/b200_infer.py::_tf_ext
+[prebuild]   have ext     trimul_b200_k1wt_v1  [d69f16ed]  trimul_inproj/cuda/b200_train.py::_k1wt
+[prebuild]   have ext     trimul_b200_tft_v1  [b78f1566]  trimul_inproj/cuda/b200_train.py::_tft_ext
+[prebuild]   have ext     graph_rng_sm100_v1  [4ce410d3]  _graph_rng_sm100.py::ext
+[prebuild]   have ext     pair_embed_adaln_sm100  [250e0fb5]  pair_embed_adaln/cuda/sm100/__init__.py::ext
+[prebuild]   have ext     pair_embed_geom_sm100  [449c1917]  pair_embed_geom/cuda/sm100/__init__.py::ext
+[prebuild]   have cubin   token_pair_init_sm100/token_pair_init_rf2  [46ccdd86]  token_pair_init/cuda/sm100/__init__.py::cubin
+[prebuild]   have ext     parallel_residual_sm100  [1db60cdc]  parallel_residual/cuda/__init__.py::ext
+[prebuild] call sites: 207 in the code, 47 reached by the plan
+[prebuild]   not reached: adaln/cuda/sm80.py::_build
+[prebuild]   not reached: augmented_attention/cuda/__init__.py::_ext
+[prebuild]   not reached: augmented_attention/cuda/__init__.py::_rows_ext
+[prebuild]   not reached: augmented_attention/cuda/apb/__init__.py::ext_sm80
+[prebuild]   not reached: augmented_attention/cuda/b200_atom/__init__.py::_owned_wgrad_extension
+[prebuild]   not reached: augmented_attention/cuda/sm100_atom/__init__.py::cubin
+[prebuild]   not reached: augmented_attention/cuda/sm100_atom/__init__.py::cubin_tf32
+[prebuild]   not reached: augmented_attention/cuda/sm100_atom_local/__init__.py::cubin
+[prebuild]   not reached: augmented_attention/cuda/sm90_atom/__init__.py::cubin
+[prebuild]   not reached: bias_only_dit/cuda/__init__.py::h100_ext
+[prebuild]   not reached: bias_only_dit/cuda/__init__.py::h100_gemm_ext
+[prebuild]   not reached: bias_only_dit/cuda/hoist.py::ext
+[prebuild]   not reached: conditioned_transition/cuda/ct_atom_cond_wgrad_fused_sm80.py::_ext
+[prebuild]   not reached: conditioned_transition/cuda/ct_atom_narrow_sm80.py::_ext
+[prebuild]   not reached: conditioned_transition/cuda/ct_atom_small_sm80.py::_ext
+[prebuild]   not reached: conditioned_transition/cuda/ct_atom_split_sm80.py::_ext
+[prebuild]   not reached: conditioned_transition/cuda/ct_atom_wgrad_split_sm80.py::_ext
+[prebuild]   not reached: conditioned_transition/cuda/ct_atom_wgrad_wide_sm80.py::_ext
+[prebuild]   not reached: conditioned_transition/cuda/gemm_swiglu.py::__init__
+[prebuild]   not reached: conditioned_transition/cuda/sm80.py::_build
+[prebuild]   not reached: conditioned_transition/cuda/token_train_pack_alias_sm80.py::_ext
+[prebuild]   not reached: conditioned_transition/cuda/token_train_pack_sm80.py::_ext
+[prebuild]   not reached: conditioned_transition/cuda/train.py::owned_gemm_ext
+[prebuild]   not reached: dit_variants/cuda/__init__.py::edge_ext
+[prebuild]   not reached: gated_projection/cuda/sm80.py::_ext
+[prebuild]   not reached: integrations/opm_train.py::_lt_ext
+[prebuild]   not reached: integrations/pwa_train.py::_build
+[prebuild]   not reached: integrations/pwa_wide.py::_load
+[prebuild]   not reached: integrations/pwa_wide_sm80.py::_glue_sm120
+[prebuild]   not reached: layernorm/cuda/sm80.py::_build
+[prebuild]   not reached: layernorm_linear/cuda/sm80.py::_ext
+[prebuild]   not reached: outer_product_mean/cuda/__init__.py::chai_ext
+[prebuild]   not reached: outer_product_mean/cuda/__init__.py::ext
+[prebuild]   not reached: outer_product_mean/cuda/chai_sm80.py::ext
+[prebuild]   not reached: outer_product_mean/cuda/finalize_typed_sm80.py::_ext
+[prebuild]   not reached: outer_product_mean/cuda/mask_count_ballot_sm80.py::_ext
+[prebuild]   not reached: outer_product_mean/cuda/mask_count_sm80.py::_ext
+[prebuild]   not reached: outer_product_mean/cuda/mask_epilogue_sm80.py::_ext
+[prebuild]   not reached: outer_product_mean/cuda/ogemm_sm80.py::ext
+[prebuild]   not reached: outer_product_mean/cuda/pipeline_native128_sm80.py::_ext
+[prebuild]   not reached: outer_product_mean/cuda/pipeline_sm80.py::_ext
+[prebuild]   not reached: outer_product_mean/cuda/rect_gemm_sm80.py::_ext
+[prebuild]   not reached: outer_product_mean/cuda/sm80.py::ext
+[prebuild]   not reached: outer_product_mean/cuda/sm80.py::rows_ext
+[prebuild]   not reached: pair_embed_adaln/cuda/sm90/__init__.py::ext
+[prebuild]   not reached: pair_embed_geom/cuda/sm90/__init__.py::ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/broadcast_capture_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/broadcast_hybrid_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/broadcast_native_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/broadcast_pipeline_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/broadcast_warp_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/contract_gate_fused128_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/contract_gate_fused_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/contract_gate_narrow_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/dw_cooperative_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/dw_early_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/dw_fold_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/dw_group_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/dw_native_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/gemm_sm120.py::ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/glue_tuned_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/grad_reduce_fused_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/grad_reduce_vector_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/pair_partial_sm80.py::_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/sm80.py::_bmm_ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/sm80.py::ext
+[prebuild]   not reached: pair_weighted_averaging/cuda/wide_sm80.py::ext
+[prebuild]   not reached: rmsnorm/cuda/sm80.py::adamod_ext
+[prebuild]   not reached: sampler_ops/cuda/__init__.py::ext
+[prebuild]   not reached: swa_dit/cuda/loader.py::_build
+[prebuild]   not reached: swa_dit/cuda/sm80/__init__.py::_ext_sm120
+[prebuild]   not reached: token_pair_init/cuda/sm90/__init__.py::ext
+[prebuild]   not reached: transition/cuda/fused_bwd_sm80.py::_build
+[prebuild]   not reached: transition/cuda/fused_fwd_sm80.py::_build
+[prebuild]   not reached: transition/cuda/fused_generic_sm90a.py::_ext
+[prebuild]   not reached: transition/cuda/fused_sm80.py::_ext
+[prebuild]   not reached: transition/cuda/fused_sm90a.py::_build_ext
+[prebuild]   not reached: transition/cuda/fused_sm90a.py::_native_ext
+[prebuild]   not reached: transition/cuda/fused_wide_sm80.py::_build
+[prebuild]   not reached: transition/cuda/fused_wide_sm90a.py::_ext
+[prebuild]   not reached: transition/cuda/fused_wide_sm90a.py::_f32_ext
+[prebuild]   not reached: transition/cuda/parameter_cast_pack_sm80.py::_ext
+[prebuild]   not reached: transition/cuda/parameter_cast_sm80.py::_build
+[prebuild]   not reached: transition/cuda/rect_dx_m64_sm80.py::_ext
+[prebuild]   not reached: transition/cuda/rect_dx_sm80.py::_ext
+[prebuild]   not reached: transition/cuda/weight_grad_lean_sm80.py::_ext
+[prebuild]   not reached: transition/cuda/weight_grad_splitk_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/affine_training_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/b1_finalize_exact_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/b1_gamma_exact_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/b200_bidir.py::bo
+[prebuild]   not reached: triangle_attention/cuda/b200_triattn.py::_core128
+[prebuild]   not reached: triangle_attention/cuda/dq_rows_candidate_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/h100_bidir.py::ext
+[prebuild]   not reached: triangle_attention/cuda/h100_dh.py::ext
+[prebuild]   not reached: triangle_attention/cuda/h100_dh.py::ext_d64
+[prebuild]   not reached: triangle_attention/cuda/h100_sm90.py::_bwd
+[prebuild]   not reached: triangle_attention/cuda/h100_sm90.py::_core
+[prebuild]   not reached: triangle_attention/cuda/h100_sm90.py::_core_h16
+[prebuild]   not reached: triangle_attention/cuda/h100_sm90.py::_mod
+[prebuild]   not reached: triangle_attention/cuda/h100_sm90_generic.py::_front_ext
+[prebuild]   not reached: triangle_attention/cuda/h100_sm90_generic.py::_front_y16
+[prebuild]   not reached: triangle_attention/cuda/h100_sm90_generic.py::_glue
+[prebuild]   not reached: triangle_attention/cuda/h100_sm90_generic.py::_lt
+[prebuild]   not reached: triangle_attention/cuda/h100_triattn.py::extension
+[prebuild]   not reached: triangle_attention/cuda/ln_gamma_exact_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_db_nn_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_front_cache_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_front_ln_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_front_reuse_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_front_shift_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_front_stream2_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_front_stream_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_nt_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_out_fused_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_tn_aug_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_tn_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/native_wo_tn_sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/sm80.py::_ext
+[prebuild]   not reached: triangle_attention/cuda/sm80_bidir.py::ext
+[prebuild]   not reached: triangle_attention/cuda/sm80_bidir.py::glue
+[prebuild]   not reached: triangle_attention/cuda/sm80_core2.py::ext
+[prebuild]   not reached: triangle_attention/cuda/sm80_wide.py::_chunk_ext
+[prebuild]   not reached: triangle_attention/cuda/sm80_wide.py::_rows
+[prebuild]   not reached: trimul_inproj/cuda/_bounded.py::_ext_sm80
+[prebuild]   not reached: trimul_inproj/cuda/_h100_pack.py::_aux_unit
+[prebuild]   not reached: trimul_inproj/cuda/_h100_pack.py::_owned_blas_ext
+[prebuild]   not reached: trimul_inproj/cuda/contract_fragment_lean_sm80.py::_ext
+[prebuild]   not reached: trimul_inproj/cuda/contract_lean_sm80.py::_ext
+[prebuild]   not reached: trimul_inproj/cuda/contract_sm80.py::_ext
+[prebuild]   not reached: trimul_inproj/cuda/contract_streamed_sm80.py::_ext
+[prebuild]   not reached: trimul_inproj/cuda/h100_b1.py::build
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style.py::_front_kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style.py::_output_kernel_standard
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style_aux.py::_unit
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style_d384_tmasave.py::output_kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style_direct.py::_kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style_reorder.py::output_kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style_scalar_tmasave.py::output_kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style_ss.py::_kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style_ss_regtune.py::_kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style_ss_saved.py::_kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style_static.py::output_kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_b200style_tmasave.py::output_kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_b7.py::kernel_plan
+[prebuild]   not reached: trimul_inproj/cuda/h100_d64_b200gate.py::_bwd_wg
+[prebuild]   not reached: trimul_inproj/cuda/h100_d64_b200gate.py::_k3
+[prebuild]   not reached: trimul_inproj/cuda/h100_inference.py::unit
+[prebuild]   not reached: trimul_inproj/cuda/h100_native.py::kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_output.py::kernel
+[prebuild]   not reached: trimul_inproj/cuda/h100_single_b7.py::_build
+[prebuild]   not reached: trimul_inproj/cuda/h100_single_output.py::build
+[prebuild]   not reached: trimul_inproj/cuda/h100_single_output.py::k3_build
+[prebuild]   not reached: trimul_inproj/cuda/h100_uni_d64_b200gate.py::_bwd_wg
+[prebuild]   not reached: trimul_inproj/cuda/h100_uni_d64_b200gate.py::_k3
+[prebuild]   not reached: trimul_inproj/cuda/h100_uni_wide_inference.py::_compile
+[prebuild]   not reached: trimul_inproj/cuda/h100_wide_inference.py::_compile
+[prebuild]   not reached: trimul_inproj/cuda/h100_wide_training.py::_register_pool
+[prebuild]   not reached: trimul_inproj/cuda/h100_wide_training.py::_unit
+[prebuild]   not reached: trimul_inproj/cuda/sm80.py::_build
+[prebuild] native sources: 511 .cu/.cpp files, 207 compiled by a planned artifact
+[prebuild]   not compiled: adaln/cuda/sm80/ops.cu
+[prebuild]   not compiled: augmented_attention/cuda/apb/apb_rows_sm80.cu
+[prebuild]   not compiled: augmented_attention/cuda/attn_dkv.cu
+[prebuild]   not compiled: augmented_attention/cuda/attn_dq.cu
+[prebuild]   not compiled: augmented_attention/cuda/attn_dqb.cu
+[prebuild]   not compiled: augmented_attention/cuda/attn_fwd.cu
+[prebuild]   not compiled: augmented_attention/cuda/attn_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/b200_atom/var_pack32.cu
+[prebuild]   not compiled: augmented_attention/cuda/pair_rows.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/cond_bwd.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/cond_fwd.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/dw_atom.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/fused_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/gemm_rg_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/gemm_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/post_bwd.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/post_fwd.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/pre_bwd.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/pre_fwd.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/rows_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom/tr_bwd_gate.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lattn90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lattn90_esm.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lattn90_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lattn_dkv.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lattn_dkv_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lattn_dq.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lattn_dq_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lattn_fwd.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lattn_fwd_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lbias.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lbias_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm100_atom_local/lcross.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_output_fused.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_output_tiled.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_output_tiled_rolled.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_pair_reduce_bwd.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_pair_reduce_vec.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_pair_uniform_no_db.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_post_grad_delta.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_post_grad_fused.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_post_grad_rolled.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_qkvg.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_qkvg_lean.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_qkvg_resident.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_qkvg_tiled.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/atom_sample_uniform.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/glue_ops.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/ops.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/ops_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/shared_mask_uniform.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80/token_grad_ops.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_atom_local/glue.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_atom_local/lattn_dkv.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_atom_local/lattn_dq.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_atom_local/lattn_fwd.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_atom_local_post.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_atom_local_projection.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_atom_rows/ops.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_core_order237/ops.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_core_qresident248/ops.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_fwd_qresident257/ops.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_shared_score/ops.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_shared_uniform/ops.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_tf32_qk_grad_rne/ops_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_tf32_qk_rne/ops_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_tf32_rne/ops_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm80_tf32_rne_hoisted/ops_tf32.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/cond90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/cond_bwd90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/cond_bwd_sh90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/finalize90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/kqln_bwd90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/pack90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/post90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/post_bwd90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/pre90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/pre_bwd90.cu
+[prebuild]   not compiled: augmented_attention/cuda/sm90_atom/tr_bwd90.cu
+[prebuild]   not compiled: augmented_attention/cuda/token_shared_scale_sm80.cu
+[prebuild]   not compiled: bias_only_dit/cuda/bias_only_dit_hoist_rows.cu
+[prebuild]   not compiled: bias_only_dit/cuda/bo_bwd_mid.cu
+[prebuild]   not compiled: bias_only_dit/cuda/bo_gemm_sm90.cu
+[prebuild]   not compiled: bias_only_dit/cuda/cond_tables_sm100.cu
+[prebuild]   not compiled: bias_only_dit/cuda/gemm_resln_sm100.cu
+[prebuild]   not compiled: bias_only_dit/cuda/pack_sm80.cu
+[prebuild]   not compiled: bias_only_dit/cuda/sm80/ops.cu
+[prebuild]   not compiled: conditioned_transition/cuda/ct_atom_cond_wgrad_fused_sm80.cu
+[prebuild]   not compiled: conditioned_transition/cuda/ct_atom_narrow_sm80.cu
+[prebuild]   not compiled: conditioned_transition/cuda/ct_atom_small_sm80.cu
+[prebuild]   not compiled: conditioned_transition/cuda/ct_atom_split_sm80.cu
+[prebuild]   not compiled: conditioned_transition/cuda/ct_atom_wgrad_split_sm80.cu
+[prebuild]   not compiled: conditioned_transition/cuda/ct_atom_wgrad_wide_sm80.cu
+[prebuild]   not compiled: conditioned_transition/cuda/gemm_swiglu_sm100.cu
+[prebuild]   not compiled: conditioned_transition/cuda/gemm_swiglu_sm90.cu
+[prebuild]   not compiled: conditioned_transition/cuda/sm80/ops.cu
+[prebuild]   not compiled: conditioned_transition/cuda/tdt_epi_sm100.cu
+[prebuild]   not compiled: conditioned_transition/cuda/token_dit_pack.cu
+[prebuild]   not compiled: conditioned_transition/cuda/token_train_pack_alias_sm80.cu
+[prebuild]   not compiled: conditioned_transition/cuda/token_train_pack_sm80.cu
+[prebuild]   not compiled: gated_projection/cuda/sm80/gp_ops.cu
+[prebuild]   not compiled: integrations/csrc/dgv_bwd.cu
+[prebuild]   not compiled: integrations/csrc/ln_vg.cu
+[prebuild]   not compiled: integrations/csrc/opm_epilogue.cu
+[prebuild]   not compiled: integrations/csrc/pair3.cu
+[prebuild]   not compiled: integrations/csrc/pair_wide.cu
+[prebuild]   not compiled: integrations/csrc/pwa_ctr.cu
+[prebuild]   not compiled: integrations/csrc/pwa_fwd2.cu
+[prebuild]   not compiled: integrations/csrc/pwa_fwd3.cu
+[prebuild]   not compiled: integrations/csrc/pwa_gateout.cu
+[prebuild]   not compiled: integrations/csrc/pwa_glue3.cu
+[prebuild]   not compiled: integrations/csrc/pwa_wide.cu
+[prebuild]   not compiled: layernorm/cuda/sm80/norm_rows.cu
+[prebuild]   not compiled: layernorm_linear/cuda/sm80/lnl_ops.cu
+[prebuild]   not compiled: outer_product_mean/cuda/chai.cu
+[prebuild]   not compiled: outer_product_mean/cuda/gather.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/chai_sm80.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/epilogue_rows_sm120.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/finalize_typed.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/mask_count.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/mask_count_ballot.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/mask_epilogue.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/ogemm_cutlass.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/ops.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/pipeline.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/pipeline_native128.cu
+[prebuild]   not compiled: outer_product_mean/cuda/sm80/rect_gemm.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/broadcast_bmm.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/broadcast_capture_old.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/broadcast_capture_pipeline.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/broadcast_hybrid.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/broadcast_native.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/broadcast_pipeline.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/broadcast_warp.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/contract_gate_fused.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/contract_gate_fused128.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/contract_gate_narrow.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/dw_cooperative.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/dw_early.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/dw_fold.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/dw_group.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/dw_native.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/gemm_sm120.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/glue_tuned_ops.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/grad_reduce_fused.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/grad_reduce_vector.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/ops.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/pair_partial.cu
+[prebuild]   not compiled: pair_weighted_averaging/cuda/sm80/wide_ops.cu
+[prebuild]   not compiled: rmsnorm/cuda/sm80/adamod_sm80.cu
+[prebuild]   not compiled: rope/cuda/sm80/rope_sm80.cu
+[prebuild]   not compiled: sampler_ops/cuda/sampler_ops_sm80.cu
+[prebuild]   not compiled: swa_dit/cuda/grad_finalize_sm80.cu
+[prebuild]   not compiled: swa_dit/cuda/inference_ffn_sm80_a100.cu
+[prebuild]   not compiled: swa_dit/cuda/inference_qkvg_sm80_a100.cu
+[prebuild]   not compiled: swa_dit/cuda/inference_rowgrid_ffn_sm80_a100.cu
+[prebuild]   not compiled: swa_dit/cuda/inference_rt8_ffn_sm80_a100.cu
+[prebuild]   not compiled: swa_dit/cuda/sm80/ffn_fwd_tuned.cu
+[prebuild]   not compiled: swa_dit/cuda/sm80/fused_sm120.cu
+[prebuild]   not compiled: swa_dit/cuda/sm80/ops.cu
+[prebuild]   not compiled: swa_dit/cuda/sm80/wgrad_grouped.cu
+[prebuild]   not compiled: swa_dit/cuda/sm80/wgrad_grouped5.cu
+[prebuild]   not compiled: swa_dit/cuda/sm80/wgrad_grouped8.cu
+[prebuild]   not compiled: swa_dit/cuda/sm80/wgrad_grouped8_alloc.cu
+[prebuild]   not compiled: swa_dit/cuda/sm80/wgrad_qkvg.cu
+[prebuild]   not compiled: swa_dit/cuda/sm80/wgrad_split.cu
+[prebuild]   not compiled: swa_dit/cuda/swa_attn.cu
+[prebuild]   not compiled: swa_dit/cuda/swa_ffn_bwd.cu
+[prebuild]   not compiled: swa_dit/cuda/swa_ffn_fwd.cu
+[prebuild]   not compiled: swa_dit/cuda/swa_fp32.cu
+[prebuild]   not compiled: swa_dit/cuda/swa_mod.cu
+[prebuild]   not compiled: swa_dit/cuda/swa_qkvg_fwd.cu
+[prebuild]   not compiled: swa_dit/cuda/swa_slab.cu
+[prebuild]   not compiled: swa_dit/cuda/swa_wgrad.cu
+[prebuild]   not compiled: swa_dit/cuda/swa_wgrad_wg.cu
+[prebuild]   not compiled: swa_dit/cuda/swa_wgrad_wg_f32.cu
+[prebuild]   not compiled: token_pair_init/cuda/sm80/token_pair_init_sm80.cu
+[prebuild]   not compiled: token_pair_init/cuda/sm90/token_pair_init.cu
+[prebuild]   not compiled: transition/cuda/generic_sm90a/bind.cu
+[prebuild]   not compiled: transition/cuda/parameter_cast_pack_sm80.cu
+[prebuild]   not compiled: transition/cuda/parameter_cast_sm80.cu
+[prebuild]   not compiled: transition/cuda/sm80/rect_dx_gemm.cu
+[prebuild]   not compiled: transition/cuda/sm80/rect_dx_m64.cu
+[prebuild]   not compiled: transition/cuda/sm80/transition_bwd_sm80.cu
+[prebuild]   not compiled: transition/cuda/sm80/transition_fwd_sm80.cu
+[prebuild]   not compiled: transition/cuda/sm80/transition_sm80.cu
+[prebuild]   not compiled: transition/cuda/sm80/transition_wide_sm80.cu
+[prebuild]   not compiled: transition/cuda/sm80/weight_grad_lean.cu
+[prebuild]   not compiled: transition/cuda/sm80/weight_grad_splitk.cu
+[prebuild]   not compiled: transition/cuda/transition_fused_bwd_sm90a_kernel.cu
+[prebuild]   not compiled: transition/cuda/transition_fused_fwd_sm90a_kernel.cu
+[prebuild]   not compiled: transition/cuda/transition_fused_sm90a.cu
+[prebuild]   not compiled: transition/cuda/wide/bind.cu
+[prebuild]   not compiled: transition/cuda/wide/d256_fwd.cu
+[prebuild]   not compiled: transition/cuda/wide/d64_bwd.cu
+[prebuild]   not compiled: transition/cuda/wide/d64_fwd.cu
+[prebuild]   not compiled: transition/cuda/wide/d64_fwd_small_f2.cu
+[prebuild]   not compiled: transition/cuda/wide/d64_fwd_small_f3.cu
+[prebuild]   not compiled: transition/cuda/wide/dxln.cu
+[prebuild]   not compiled: transition/cuda/wide/f32io.cu
+[prebuild]   not compiled: transition/cuda/wide/gate.cu
+[prebuild]   not compiled: transition/cuda/wide/gate_noh.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/dxn_lnbwd.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/gate_gemm2.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/ln_swiglu_gemm.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/squeeze_gemm.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/transition_bwd_d64.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/transition_bwd_f32dw.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/transition_bwd_f32dx.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/transition_fwd_d256.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/transition_fwd_d64.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/transition_fwd_f32io.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/transition_fwd_f32xs.cu
+[prebuild]   not compiled: transition/cuda/wide/kernels/transition_lnsg_f32.cu
+[prebuild]   not compiled: transition/cuda/wide/lnsg.cu
+[prebuild]   not compiled: transition/cuda/wide/squeeze.cu
+[prebuild]   not compiled: triangle_attention/cuda/affine263.cu
+[prebuild]   not compiled: triangle_attention/cuda/b200_sources/bidir_sm100.cu
+[prebuild]   not compiled: triangle_attention/cuda/b200_sources/triattn_dh128_sm100.cu
+[prebuild]   not compiled: triangle_attention/cuda/h100_sources/front_fused3_sm90.cu
+[prebuild]   not compiled: triangle_attention/cuda/h100_sources/triattn_bwd_sm90.cu
+[prebuild]   not compiled: triangle_attention/cuda/h100_sources/triattn_d64_sm90.cu
+[prebuild]   not compiled: triangle_attention/cuda/h100_sources/triattn_dh_sm90.cu
+[prebuild]   not compiled: triangle_attention/cuda/h100_sources/triattn_h16_sm90.cu
+[prebuild]   not compiled: triangle_attention/cuda/h100_sources/triattn_mod_sm90.cu
+[prebuild]   not compiled: triangle_attention/cuda/h100_sources/triattn_sm90.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/attn2_ops.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/b1_finalize_exact.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/b1_gamma_exact.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/dq_rows_candidate.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/ln_gamma_exact.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_db_nn.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_front_cache.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_front_ln.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_front_reuse.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_front_shift.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_front_stream.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_front_stream2.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_nt_gemm.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_out_fused.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_tn_aug.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_tn_split.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/native_wo_tn.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/ops.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/rows_chunk_sm120.cu
+[prebuild]   not compiled: triangle_attention/cuda/sm80/rows_ops.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b1/b1_fused.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b200style/k1ss.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b200style/k1ssregtune.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b200style/k1sssave.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b200style/k3.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b200style/k3d384_tmasave.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b200style/k3reorder.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b200style/k3scalar_tmasave.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b200style/k3tmasave.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b7_384/joint.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/b7_768/joint.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/d64_train/d64_bwd_wg.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/d64_train/save_k3_d64.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/d64_train/uni_bwd_wg.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/output/save_k3.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/single_b7/joint.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/single_output/kernel.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/uni_wide/output.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_forward/output.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_forward/output_stream.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/compact_projection_d512.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/compact_projection_fallback_d512.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/contract_d256_l384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/contract_gp_d384_l384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/contract_gp_d512_l384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/contract_gp_l768.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/delta_norm_d512.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/delta_norm_fallback_d512.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/forward_norm_d384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/front_d256.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/front_pre_d384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/front_pre_d512.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/front_pre_ss.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/gate.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/gate_affine.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/input_ln_d384_l384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/input_ln_l384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/input_reduce_d512_l768.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/input_reduce_l768.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/ln_in_d512.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/output_dense.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/output_ln_d256_l384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/output_ln_d384_l384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/output_ln_d512_l384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/output_ln_d512_l768.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/output_ln_l768.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/output_ln_uni_pf.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/source_d256_l384.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/source_d256_l768.cu
+[prebuild]   not compiled: trimul_inproj/cuda/h100_sources/wide_train/weight_reduce_d512_l768.cu
+[prebuild]   not compiled: trimul_inproj/cuda/sm80/contract_bounded.cu
+[prebuild]   not compiled: trimul_inproj/cuda/sm80/contract_fragment_lean.cu
+[prebuild]   not compiled: trimul_inproj/cuda/sm80/contract_lean.cu
+[prebuild]   not compiled: trimul_inproj/cuda/sm80/contract_streamed.cu
+[prebuild]   not compiled: trimul_inproj/cuda/sm80/contract_tuned.cu
+[prebuild]   not compiled: trimul_inproj/cuda/sm80/ops.cu
+[prebuild]   not compiled: trimul_inproj/cuda/sm80/wide_ops.cu
+[prebuild]   not compiled: trimul_inproj/cuda/sm80/wide_train512_ops.cu
+[prebuild] requirements_kernel.csv: 759 rows; 298 match a compiled __global__ function, 34 a Triton kernel (out of scope), 427 neither (204 of them named *_sm90, i.e. H100 hand CUDA)
+[prebuild] H100 families with *_sm90 rows and the planned artifacts compiling their files: augmented_attention 648, bias_only_dit 91, conditioned_transition 36, dit_variants 2, layernorm 9, outer_product_mean 0, pair_embed_adaln 4, pair_embed_geom 12, pair_weighted_averaging 0, parallel_residual 2, sampler_ops 2, smooth_lddt 2, swa_dit 267, token_pair_init 1, transition 809, triangle_attention 37, trimul_inproj 26
+[prebuild]   no compiled kernel matches: trimul_fwd_front_sm90 (trimul_inproj, forward)
+[prebuild]   no compiled kernel matches: trimul_fwd_output_sm90 (trimul_inproj, forward_infer)
+[prebuild]   no compiled kernel matches: trimul_fwd_output_wide_sm90 (trimul_inproj, forward_infer)
+[prebuild]   no compiled kernel matches: swa_dit_inproj_fwd_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_output_swiglu_fwd_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_softmax_fwd_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_inproj_fwd_rows_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_transpose_fp32_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_inproj_fwd_fp32_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_softmax_fwd_fp32_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_output_swiglu_fwd_fp32_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_swiglu_bwd_fp32_sm90 (swa_dit, backward)
+[prebuild]   no compiled kernel matches: swa_dit_output_bwd_fp32_sm90 (swa_dit, backward)
+[prebuild]   no compiled kernel matches: swa_dit_softmax_bwd_fp32_sm90 (swa_dit, backward)
+[prebuild]   no compiled kernel matches: swa_dit_inproj_bwd_fp32_sm90 (swa_dit, backward)
+[prebuild]   no compiled kernel matches: swa_dit_dw_fp32_sm90 (swa_dit, backward)
+[prebuild]   no compiled kernel matches: triangle_attention_fwd_fp16_sm90 (triangle_attention, forward_infer)
+[prebuild]   no compiled kernel matches: triangle_attention_front_wide_sm90 (triangle_attention, forward_infer)
+[prebuild]   no compiled kernel matches: triangle_attention_generic_layernorm_fwd_sm90 (triangle_attention, forward)
+[prebuild]   no compiled kernel matches: triangle_attention_generic_assemble_bwd_sm90 (triangle_attention, backward)
+[prebuild]   no compiled kernel matches: triangle_attention_generic_layernorm_bwd_sm90 (triangle_attention, backward)
+[prebuild]   no compiled kernel matches: triangle_attention_front_fused_sm90 (triangle_attention, forward_infer)
+[prebuild]   no compiled kernel matches: triangle_attention_dh_fwd_sm90 (triangle_attention, forward_infer)
+[prebuild]   no compiled kernel matches: trimul_b200style_front_direct_sm90 (trimul_inproj, forward)
+[prebuild]   no compiled kernel matches: trimul_b200style_front_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_b200style_front_d512_sm90 (trimul_inproj, forward_infer)
+[prebuild]   no compiled kernel matches: trimul_b200style_front_d512_saveact_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_b200style_front_d512_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_b200style_output_sm90 (trimul_inproj, forward_infer)
+[prebuild]   no compiled kernel matches: trimul_b200style_output_d512_sm90 (trimul_inproj, forward_infer)
+[prebuild]   no compiled kernel matches: trimul_b200style_output_saveact_d512_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_b200style_output_saveact_d384_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_b200style_output_saveact_d256_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_output_saveact_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_b1_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_b1_reduce_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_b7_bwd_l384_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_b7_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_single_front_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_single_b1_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_single_reduce_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_single_b7_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_d64_output_saveact_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_d64_b1_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_d64_b2_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_d64_fin_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_d64_uni_b1_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_d64_uni_b2_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_d64_uni_fin_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_front_sm90 (trimul_inproj, forward_infer)
+[prebuild]   no compiled kernel matches: trimul_wide_front_shared_sm90 (trimul_inproj, forward_infer)
+[prebuild]   no compiled kernel matches: trimul_wide_output_stream_sm90 (trimul_inproj, forward_infer)
+[prebuild]   no compiled kernel matches: trimul_wide_front_d256_saveact_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_wide_front_d384_saveact_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_wide_front_d512_saveact_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_uni_wide_front_d512_saveact_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_uni_wide_ln_in_d512_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_wide_output_norm_d256_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_wide_output_epilogue_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_wide_output_norm_d384_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_wide_output_norm_d512_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_wide_delta_apply_d512_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_delta_norm_fallback_d512_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_compact_rows_d512_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_gather_norm_d512_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_scatter_proj_d512_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_compact_projection_fallback_d512_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_gate_affine_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_output_ln_bwd_d256_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_output_ln_bwd_d384_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_output_ln_bwd_d512_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_output_ln_bwd_l768_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_output_ln_bwd_d512_l768_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_contract_gp_l768_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_contract_gp_l384_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_contract_gp_d512_l384_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_contract_d256_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_source_d256_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_input_ln_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_input_ln_bwd_d384_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_input_reduce_l768_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_input_reduce_d512_l768_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_wide_dwp_reduce_d512_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_aux_pack_vec_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_aux_dense_copy_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_aux_copy_n_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_aux_zero_bytes_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_aux_affine_finish_parallel_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_aux_pack_training_pair_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_aux_affine_pair_finish_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_aux_stack_vec_bwd_sm90 (trimul_inproj, backward)
+[prebuild]   no compiled kernel matches: trimul_aux_norm_warp_sm90 (trimul_inproj, forward)
+[prebuild]   no compiled kernel matches: trimul_aux_owned_mask_sm90 (trimul_inproj, forward)
+[prebuild]   no compiled kernel matches: trimul_aux_unit_scale_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: trimul_aux_d64_prepare_sm90 (trimul_inproj, forward_train)
+[prebuild]   no compiled kernel matches: cond_transition_token_train_bias_keymask_sm90 (conditioned_transition, forward_train)
+[prebuild]   no compiled kernel matches: cond_transition_token_train_qk_wgrad_sm90 (conditioned_transition, backward)
+[prebuild]   no compiled kernel matches: cond_transition_token_train_db_reduce_fp32_sm90 (conditioned_transition, backward)
+[prebuild]   no compiled kernel matches: cond_transition_caller_grad_sum_sm90 (conditioned_transition, backward)
+[prebuild]   no compiled kernel matches: cond_transition_caller_grad_add_sm90 (conditioned_transition, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_bwd_dqb_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_bwd_dkv_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_bwd_dkv_tf32_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_bwd_dqb_tf32_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_pair_bias_fwd_fp32_sm90 (augmented_attention, forward_infer)
+[prebuild]   no compiled kernel matches: augmented_attention_apb_exact_fp32_inputs_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_apb_exact_ln_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_apb_exact_attention_fwd_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_apb_exact_attention_db_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_apb_exact_delta_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_apb_exact_point_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_apb_exact_soft_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_apb_exact_bias_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: cond_transition_gemm_swiglu_up_sm90 (conditioned_transition, forward_infer)
+[prebuild]   no compiled kernel matches: bias_only_dit_hoist_ln0_bwd_rows_sm90 (bias_only_dit, backward)
+[prebuild]   no compiled kernel matches: bias_only_dit_cond_tables_gemm_sm90 (bias_only_dit, forward_infer)
+[prebuild]   no compiled kernel matches: bias_only_dit_train_repeat_cond_sm90 (bias_only_dit, forward_train)
+[prebuild]   no compiled kernel matches: augmented_attention_atom_cond_fwd_split_sm90 (augmented_attention, forward)
+[prebuild]   no compiled kernel matches: augmented_attention_atom_pre_fwd_split_sm90 (augmented_attention, forward)
+[prebuild]   no compiled kernel matches: augmented_attention_atom_cond_bwd_shared_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_atom_finalize_bwd_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_pair_bias_fwd_sm90 (augmented_attention, forward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_attn_bwd_dq_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_attn_bwd_dkv_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_attn_bwd_dq_tf32_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_attn_bwd_dkv_tf32_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_bias_bwd_samples_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_pair_bias_bwd_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_pair_bias_bwd_fin_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: swa_dit_native_rows_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_native_copy_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_native_mod_bwd_sm90 (swa_dit, backward)
+[prebuild]   no compiled kernel matches: swa_dit_tiled_attn_fwd_sm90 (swa_dit, forward)
+[prebuild]   no compiled kernel matches: swa_dit_tiled_attn_bwd_dq_sm90 (swa_dit, backward)
+[prebuild]   no compiled kernel matches: swa_dit_tiled_attn_bwd_dkdv_sm90 (swa_dit, backward)
+[prebuild]   no compiled kernel matches: swa_dit_fused_qkvg_bwd_sm90 (swa_dit, backward)
+[prebuild]   no compiled kernel matches: transition_bwd_residual_reduce_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_prepare_weights_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_pair_layout_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_wide_layernorm_bwd_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_wide_layernorm_bwd_compact_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_wide_layernorm_bwd_reduce_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_wide_affine_reduce_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_wide_layernorm_fwd_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_bwd_dxn_layernorm_d256_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_layernorm_expand_swiglu_wide_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_squeeze_residual_wide_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_expand_swiglu_saveact_wide_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_generic_layernorm_fwd_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_generic_expand_swiglu_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_generic_squeeze_residual_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_generic_expand_swiglu_saveact_sm90 (transition, forward_train)
+[prebuild]   no compiled kernel matches: transition_generic_bwd_gate_saveact_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_generic_bwd_dxn_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_generic_bwd_gate_recompute_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_generic_layernorm_bwd_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_generic_layernorm_bwd_reduce_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_generic_prepare_weights_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_generic_h16_absmax_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_generic_h16_apply_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_generic_swiglu_fp32_sm90 (transition, forward_train)
+[prebuild]   no compiled kernel matches: transition_generic_bwd_swiglu_fp32_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: transition_lnsg_f32_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_f32_forms_stats_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_f32_forms_apply_sm90 (transition, forward)
+[prebuild]   no compiled kernel matches: transition_f32_part_reduce_sm90 (transition, backward)
+[prebuild]   no compiled kernel matches: outer_product_mean_pack_weights_sm90 (outer_product_mean, forward)
+[prebuild]   no compiled kernel matches: outer_product_mean_mask_bits_sm90 (outer_product_mean, forward)
+[prebuild]   no compiled kernel matches: outer_product_mean_prologue_tma_sm90 (outer_product_mean, forward)
+[prebuild]   no compiled kernel matches: outer_product_mean_fused_infer_sm90 (outer_product_mean, forward_infer)
+[prebuild]   no compiled kernel matches: outer_product_mean_bwd_dwo_sm90 (outer_product_mean, backward)
+[prebuild]   no compiled kernel matches: outer_product_mean_gather_sm90 (outer_product_mean, forward_infer)
+[prebuild]   no compiled kernel matches: outer_product_mean_chai_proj_sm90 (outer_product_mean, forward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_pair_softmax_sm90 (pair_weighted_averaging, forward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_wgv_pack_sm90 (pair_weighted_averaging, backward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_layernorm_value_sm90 (pair_weighted_averaging, forward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_contract_gate_out_sm90 (pair_weighted_averaging, forward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_bwd_contract_dv_sm90 (pair_weighted_averaging, backward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_bwd_glue_reduce_sm90 (pair_weighted_averaging, backward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_bwd_dgv_sm90 (pair_weighted_averaging, backward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_bwd_dgv_reduce_sm90 (pair_weighted_averaging, backward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_pair_softmax_wide_sm90 (pair_weighted_averaging, forward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_bwd_pair_wide_sm90 (pair_weighted_averaging, backward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_layernorm_value_wide_sm90 (pair_weighted_averaging, forward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_bwd_dm_wide_sm90 (pair_weighted_averaging, backward)
+[prebuild]   no compiled kernel matches: pair_embed_ca_fwd_train_sm90 (pair_embed_geom, forward_train)
+[prebuild]   no compiled kernel matches: augmented_attention_apb_pair_bias_bwd_wide_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: triangle_attention_dh_fwd_train_sm90 (triangle_attention, forward_train)
+[prebuild]   no compiled kernel matches: triangle_attention_dh_bwd_kv_sm90 (triangle_attention, backward)
+[prebuild]   no compiled kernel matches: triangle_attention_dh_bwd_q_sm90 (triangle_attention, backward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_gate_big_sm90 (pair_weighted_averaging, forward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_out_big_sm90 (pair_weighted_averaging, forward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_bwd_gate_big_sm90 (pair_weighted_averaging, backward)
+[prebuild]   no compiled kernel matches: pair_weighted_averaging_bwd_layernorm_big_sm90 (pair_weighted_averaging, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_atom_rms_rows_fwd_sm90 (augmented_attention, forward_infer)
+[prebuild]   no compiled kernel matches: augmented_attention_qknorm_rope_fwd_sm90 (augmented_attention, forward)
+[prebuild]   no compiled kernel matches: augmented_attention_qknorm_rope_bwd_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_esm_pair_bias_fwd_sm90 (augmented_attention, forward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_esm_attn_fwd_sm90 (augmented_attention, forward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_esm_attn_bwd_dq_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_esm_attn_bwd_dkv_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: augmented_attention_local_esm_pair_bias_bwd_sm90 (augmented_attention, backward)
+[prebuild]   no compiled kernel matches: dit_variants_esm_train_rows_fwd_sm90 (dit_variants, forward_train)
+[prebuild]   no compiled kernel matches: dit_variants_esm_train_rows_bwd_sm90 (dit_variants, backward)
+[prebuild]   requirements family whose kernels are compiled only by other recipes: mpnn_edge_tail
+[prebuild]   requirements family whose kernels are compiled only by other recipes: mpnn_message
+[prebuild]   requirements family whose kernels are compiled only by other recipes: mpnn_node_message
+[prebuild]   requirements family whose kernels are compiled only by other recipes: mpnn_relative_position

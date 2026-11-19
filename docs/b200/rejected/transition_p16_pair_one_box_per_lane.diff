@@ -1,0 +1,84 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu
+index 89393bc2a..6206f8c1e 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu
+@@ -54,6 +54,10 @@ DEVI void load_a(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int st, int
+   if (KBX == 1) tma_load_2d_2sm(dst, m, bar, st * 64, row); else tma_load_3d_2sm(dst, m, bar, 0, row, st * KBX);
+ }
+ 
++#ifndef EWML
++#define EWML 0
++#endif
++
+ template <int N> DEVI void tld(uint32_t taddr, uint32_t (&r)[N]) {
+   if constexpr (N == 32) tmem_ld32(taddr, r); else tmem_ld16(taddr, r);
+ }
+@@ -91,10 +95,25 @@ transition_sx_expand2(const __grid_constant__ CUtensorMap mxn, const __grid_cons
+       tma_load_2d_2sm(w + i * WKB + UH * 128, &mwb, &B.full[st % STG], (st * KBX + i) * 64, h0);
+     }
+   };
++#if EWML
++  // (part 16) one weight box per lane: lane l issues box l % (2 KBX) of ring stage l / (2 KBX) (one thread issues ~one TMA per 600
++  // clocks: with lane s issuing all 2 KBX boxes of stage s, the cold weights of a [1, 384, 768] call landed ~2.5 us after entry)
++  constexpr int WBX = 2 * KBX;
++  static_assert(STG * WBX <= 32, "one weight box per lane");
++  if (warp == 0) {
++    if (leader && lane < STG) mbar_expect_tx(&B.full[lane], 2 * (AST + WST));
++    __syncwarp();
++    if (lane < STG * WBX) {
++      const int st = lane / WBX, i = (lane % WBX) >> 1, ab = lane & 1;
++      tma_load_2d_2sm(su + O_W + st * WST + i * WKB + ab * UH * 128, ab ? &mwb : &mwa, &B.full[st], (st * KBX + i) * 64, h0);
++    }
++  }
++#else
+   if (warp == 0 && lane < STG) {                               // the weights of ring stage `lane` (they do not depend on the LayerNorm)
+     if (leader) mbar_expect_tx(&B.full[lane], 2 * (AST + WST));
+     load_w(lane);
+   }
++#endif
+   pdl_wait();                                                  // xn is complete and visible
+   if (tid == 0) TSX_ST(1);
+   pdl_launch();
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu
+index 2635ead92..389ea3717 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu
+@@ -40,6 +40,10 @@ constexpr uint32_t TCOLS = 32;                                 // NB / 2 <= 32 f
+ constexpr uint32_t IDESC = idesc_bf16(128, NB);
+ typedef __nv_bfloat16 ACT;
+ 
++#ifndef SWML
++#define SWML 0
++#endif
++
+ template <int N> DEVI void tld(uint32_t taddr, uint32_t (&r)[N]) {
+   if constexpr (N == 32) tmem_ld32(taddr, r);
+   else if constexpr (N == 16) tmem_ld16(taddr, r);
+@@ -86,6 +90,14 @@ transition_sx_squeeze2(const __grid_constant__ CUtensorMap mh, const __grid_cons
+   const uint32_t tmem = B.tmem;
+ 
+   if (warp == 0) {
++#if SWML
++    // (part 16) one Ws box per lane for the first ring round (one thread issues ~one TMA per 600 clocks)
++    static_assert(STG * KBX <= 32, "one weight box per lane");
++    if (leader && lane < STG) mbar_expect_tx(&B.full[lane], 2 * (AST + WST));
++    __syncwarp();
++    if (lane < STG * KBX)
++      tma_load_2d_2sm(su + O_W + (lane / KBX) * WST + (lane % KBX) * WKB, &mws, &B.full[lane / KBX], lane * 64, c0 + rank * NBH);
++#endif
+     if (lane < STG) {
+       auto load_w = [&](int st) {
+ #pragma unroll
+@@ -96,8 +108,10 @@ transition_sx_squeeze2(const __grid_constant__ CUtensorMap mh, const __grid_cons
+         if (KBX == 1) tma_load_2d_2sm(su + O_A + lane * AST, &mh, &B.full[lane], st * 64, arow);
+         else tma_load_3d_2sm(su + O_A + lane * AST, &mh, &B.full[lane], 0, arow, st * KBX);
+       };
+-      if (leader) mbar_expect_tx(&B.full[lane], 2 * (AST + WST));
+-      load_w(lane);                                            // weights: before the wait
++      if (!SWML) {
++        if (leader) mbar_expect_tx(&B.full[lane], 2 * (AST + WST));
++        load_w(lane);                                          // weights: before the wait
++      }
+       pdl_wait();
+       if (lane == 0) TSX_ST(1);
+       load_a(lane);

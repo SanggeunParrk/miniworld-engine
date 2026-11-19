@@ -48,6 +48,12 @@ def sm120(t: torch.Tensor) -> bool:
     return t.device.type == "cuda" and torch.cuda.get_device_capability(t.device) == (12, 0)
 
 
+def b200(t: torch.Tensor) -> bool:
+    """A CUDA tensor on an NVIDIA B200 (capability 10.0, card key ``b200_sm100``): the ``"cuda"`` backends of the classes that have sm_100a
+    kernels route there to them (the H100, A100 and RTX 5090 paths are unchanged). Device only: capture-safe."""
+    return t.device.type == "cuda" and torch.cuda.get_device_capability(t.device) == (10, 0)
+
+
 def triton_unsupported(*tensors: torch.Tensor) -> str | None:
     """Why the engine's ``"triton"`` backends cannot take these tensors (not CUDA), or ``None``."""
     if tensors[0].device.type != "cuda":
@@ -137,11 +143,13 @@ def _fastln():
         if (p / "cuda_runtime.h").is_file()
     ]
     # sm_80 / sm_90 builds; on the RTX 5090 the same sources as ``..._sm120`` (sm_120a), whose card the sm_80 / sm_90 images do not run on
+    # 2026-11-16: on the B200 the same sources as ``..._sm100`` (sm_100a; the sm_80 / sm_90 images do not run there either)
+    on_b200 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0)
     ext = sm80_load_extension(
-        name="anthropic_protenix_fast_layer_norm_v1",
+        name="anthropic_protenix_fast_layer_norm_v1" + ("_sm100" if on_b200 else ""),
         sources=[str(base / "layer_norm_cuda.cpp"), str(base / "layer_norm_cuda_kernel.cu")],
         extra_include_paths=[str(base), *cuda_inc],
-        extra_cuda_cflags=[*host_flags(), "-O3", *gencodes("80", "90")],
+        extra_cuda_cflags=[*host_flags(), "-O3", *(["-gencode=arch=compute_100a,code=sm_100a"] if on_b200 else gencodes("80", "90"))],
         extra_cflags=["-O3"],
         verbose=False,
     )
@@ -227,11 +235,25 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         "cuda:h100_sm90": 2,
         "cuda:a100_sm80": 3,
         "cuda:5090_sm120": 3,
+        "cuda:b200_sm100": 22,
     }  # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward;
     # 2026-11-13: RTX 5090 (cuda:5090_sm120 2): the staged odd-width forward from 16 rows on, fp32 d 768 rows with early parameters and two row groups a warp;
     # 2026-11-14: A100 (cuda:a100_sm80 3) and RTX 5090 (cuda:5090_sm120 3): the forward kernels take the weight / bias dtype at compile time and issue every load of a row and of its
     # parameters up front (a predicated convert had made each parameter load wait for the one before); fp32 d 768 and bf16 d 2560 load their parameters early on both cards; the 5090 takes the
     # scalar kernel below 4096 rows (not the staged one), a row-per-CTA kernel for odd widths up to 2048 rows, and one row group a warp for bf16 d 384 / 768 (outputs equal up to fp32 rounding)
+    # 2026-11-16: B200 (cuda:b200_sm100 1): routed to the general / pipe / rows kernels' sm_100 builds (kernels/layernorm/cuda/b200.py)
+    # 2026-11-17: B200 (cuda:b200_sm100 2): bf16 D 64 / 128 / 256 (eval + train) and D 384 (eval) on the sub-warp row kernels of the B200 port branch
+    # (kernels/layernorm/cuda/sm100, sm_100a only); bf16 D 64 training no longer refused
+    # 2026-11-17: B200 (cuda:b200_sm100 3): bf16 odd widths (267 / 651) on the skewed-row kernels (sm100/ln_skew_sm100.cuh: aligned 16-byte vectors in registers, one row phase a
+    # CTA; training from 16 384 rows, inference from 65 536), fp32 d 768 on the sub-warp row kernels (was the general kernels with two column-pass launches)
+    # 2026-11-17: B200 (cuda:b200_sm100 4): the skewed-row kernels take fp32 rows and the 451 / 831 / 833 token streams (training), load their first tile before the
+    # affine table copy, 651 forward prefetches its next tile; bf16 d 2560 training on the row kernels as one row a five-warp CTA (four rows a thread in the backward)
+    # 2026-11-17: B200 (cuda:b200_sm100 20, round 6): fp32 d 64 / 128 / 256 / 384 / 512 training on the row kernels (non-persistent four-warp forward, two rows a thread on
+    # four-warp backward CTAs; fp32 d 64 training no longer refused), bf16 backward launches re-tuned, bf16 d 384 / 512 inference on the lean one-warp forward (fwd_lean)
+    # 2026-11-18: B200 (cuda:b200_sm100 21, round 7): the sm100 row / skewed-row kernels launch as programmatic dependents (backward: x before the wait, the
+    # statistics and dy after it; the column pass a dependent of the backward; forwards under 8 MB): training steps one 2 us timer step shorter in many small cells
+    # 2026-11-18: B200 (cuda:b200_sm100 22, round 8): fp32 768 training under 4096 rows runs the fused backward (column CTAs in thread-block clusters
+    # sum dw / db beside the dx CTAs, DSMEM fold; no column-pass launch): [384 / 640 / 768, 768] 14.1-16.2 -> 12.1-14.1 us
 
     def __init__(
         self,
@@ -348,6 +370,10 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
             from miniworld_engine.kernels.layernorm.cuda import sm80
 
             return self._supports_engine(input) or sm80.refusal(input, self.weight, self.bias)
+        if b200(input):  # B200: the plain-CUDA kernels' sm_100 builds (kernels/layernorm/cuda/b200.py)
+            from miniworld_engine.kernels.layernorm.cuda import b200 as ln_b200
+
+            return self._supports_engine(input) or ln_b200.refusal(input, self._wants_grad(input))
         from miniworld_engine.kernels.layernorm.cuda.general import supported
 
         why = h100_unsupported(input) or self._supports_engine(input)
@@ -362,6 +388,10 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
             from miniworld_engine.kernels.layernorm.cuda import sm80
 
             return sm80.layernorm(input, self.weight, self.bias, self.eps)
+        if b200(input):
+            from miniworld_engine.kernels.layernorm.cuda import b200 as ln_b200
+
+            return ln_b200.layernorm(input, self.weight, self.bias, self.eps)
         from miniworld_engine.kernels.layernorm.cuda.general import layernorm_cuda
 
         return layernorm_cuda(input, self.weight, self.bias, self.eps)
@@ -425,6 +455,13 @@ class RMSNorm(BackendModule, nn.RMSNorm):
             from miniworld_engine.kernels.rmsnorm.cuda import sm80
 
             return self._supports_engine(x) or sm80.refusal(x, self.weight)
+        if b200(x):  # B200: the plain-CUDA kernels' sm_100 builds (kernels/layernorm/cuda/b200.py)
+            from miniworld_engine.kernels.layernorm.cuda.general import supported as general_supported
+
+            why = self._supports_engine(x)
+            if why is None and not general_supported(x):
+                why = f"width {x.shape[-1]} ({x.dtype}) is beyond the general CUDA RMSNorm's builds"
+            return why
         from miniworld_engine.kernels.layernorm.cuda.general import supported
 
         why = h100_unsupported(x) or self._supports_engine(x)
@@ -439,6 +476,10 @@ class RMSNorm(BackendModule, nn.RMSNorm):
             from miniworld_engine.kernels.rmsnorm.cuda import sm80
 
             return sm80.rmsnorm(x, self.weight, self.effective_eps(x.dtype))
+        if b200(x):
+            from miniworld_engine.kernels.layernorm.cuda import b200 as ln_b200
+
+            return ln_b200.rmsnorm(x, self.weight, self.effective_eps(x.dtype))
         from miniworld_engine.kernels.rmsnorm.cuda import rmsnorm_cuda
 
         return rmsnorm_cuda(x, self.weight, self.effective_eps(x.dtype))

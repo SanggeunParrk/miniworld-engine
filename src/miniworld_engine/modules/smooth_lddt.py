@@ -42,7 +42,13 @@ class SmoothLddtLoss(BackendModule):
     """
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: A100 split tile launches (KS column parts); 2026-11-12: the sm_120a cubin
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 2,
+        "cuda:5090_sm120": 1,
+        "cuda:b200_sm100": 2,
+    }  # 2026-11-10: A100 split tile launches (KS column parts); 2026-11-12: the sm_120a cubin
+    # cuda:b200_sm100 1 (2026-11-16): the B200 takes the split tile launches (KS column parts, the A100's fill) at every length
+    # cuda:b200_sm100 2 (2026-11-17): slddt_prep4 (four threads a row) for prep grids of at most 4 CTAs per SM (N <= 3072 at B1)
 
     backends = ("pytorch", "cuda", "triton")
 

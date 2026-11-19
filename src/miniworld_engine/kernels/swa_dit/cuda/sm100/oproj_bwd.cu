@@ -12,6 +12,9 @@
 #include "sm100.cuh"
 #include <type_traits>
 using namespace s100;
+#ifndef WPRE
+#define WPRE 0  // 1 (B200 round 3 part 8): the weight forms are complete before this kernel starts -> load them before griddepcontrol.wait
+#endif
 
 constexpr int C = 128, H = 4, NSMAX = 12, UPT = 4;
 constexpr int SLOT = 16384, KBLK = 8192;
@@ -35,7 +38,13 @@ DEVI void sts_bf16(uint32_t a, float x) {
   const unsigned short v = __bfloat16_as_ushort(__float2bfloat16_rn(x));
   asm volatile("st.shared.u16 [%0], %1;" :: "r"(a), "h"(v) : "memory");
 }
-DEVI void red1(float* p, float v) { asm volatile("red.global.add.f32 [%0], %1;" :: "l"(p), "f"(v) : "memory"); }
+#ifndef DMOD_STORE
+#define DMOD_STORE 0  // 1 (B200 2026-11-17): one writer per dmod element (A <= SP: a tile holds every augment of its rows) -> a plain store, no zeroed dmod
+#endif
+DEVI void red1(float* p, float v) {
+  if (DMOD_STORE) *p = v;
+  else asm volatile("red.global.add.f32 [%0], %1;" :: "l"(p), "f"(v) : "memory");
+}
 DEVI float sigm(float x) { return rcpf(1.f + ex2f(-1.4426950408889634f * x)); }
 // v[j] held by every lane -> lane l returns the sum over the warp of v[l]
 DEVI float rscatter32(float (&v)[32], int lane) {
@@ -79,6 +88,10 @@ swa_oproj_bwd_sm100(const __grid_constant__ CUtensorMap mdq1, const __grid_const
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+#if !WPRE
+  pdl_wait();  // programmatic dependent launch (2026-11-17): the setup above overlaps the previous kernel; every global access is below
+  pdl_launch();
+#endif
   const uint32_t tmem = B.tmem;
   if (warp >= 4 && warp < 8) {                                           // Wo^T -> TMEM (A operand): lane c gets row c of Wo^T
     const int lb = (warp & 3) * 32, c = lb + lane;
@@ -95,6 +108,10 @@ swa_oproj_bwd_sm100(const __grid_constant__ CUtensorMap mdq1, const __grid_const
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+#if WPRE  // B200 round 3 part 8: the weights (made at the head of the forward, wpack_bf16.cu) were read above, before the wait
+  pdl_wait();
+  pdl_launch();
+#endif
 
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------------ TMA producer
@@ -164,8 +181,9 @@ swa_oproj_bwd_sm100(const __grid_constant__ CUtensorMap mdq1, const __grid_const
 #pragma unroll
     for (int k = 0; k < 8; ++k) xo[k] = (cch ^ (uint32_t)k) << 4;
     RingPos rp;
-    auto tile = [&](int T, auto at8c) {
-      constexpr bool AT8 = decltype(at8c)::value;
+    auto tile = [&](int T, auto modec) {
+      constexpr int MODE = decltype(modec)::value;                       // 1: AT == 8; 2: one augment, 64-row tiles (A = 1); 0: generic
+      constexpr bool AT8 = MODE == 1, A1 = MODE == 2;
       int b, a0, s0; coords(T, b, a0, s0);
       const int xb = T & 1;
       int sD, sA, sG, sO; uint32_t pD, pA, pG, pO;
@@ -210,6 +228,18 @@ swa_oproj_bwd_sm100(const __grid_constant__ CUtensorMap mdq1, const __grid_const
           const bool ok = ((aok >> (j >> 3)) & (sok >> k) & 1u) != 0;
           gsum[k] += ok ? d1 * at_ : 0.f;
           sts_bf16(aD + j * 128 + xo[k], d1 * ga[k]);
+        }
+      } else if constexpr (A1) {
+        // one augment on 64-row tiles (B200 round 3 part 8): row 32 wg + j is atom s0 + 32 wg + j; d gate_a stored per row
+        float d1_[32], at__[32];
+#pragma unroll
+        for (int j = 0; j < 32; ++j) { d1_[j] = lds_bf16(aD + j * 128 + xo[j & 7]); at__[j] = lds_bf16(aA + j * 128 + xo[j & 7]); }
+        float* dm = DMOD + ((size_t)b * S + s0 + 32 * wg) * (6 * C) + 2 * C + c;
+#pragma unroll
+        for (int j = 0; j < 32; ++j) {
+          const float d1 = d1_[j];
+          red1(dm + (size_t)j * (6 * C), d1 * at__[j]);
+          sts_bf16(aD + j * 128 + xo[j & 7], d1 * rnb(gat(32 * wg + j)));
         }
       } else {
 #pragma unroll 1
@@ -272,7 +302,9 @@ swa_oproj_bwd_sm100(const __grid_constant__ CUtensorMap mdq1, const __grid_const
       }
     };
     for (int T = 0; T < ntT; ++T, rp.next(NS)) {
-      if (AT == 8) tile(T, std::true_type{}); else tile(T, std::false_type{});
+      if (AT == 8) tile(T, std::integral_constant<int, 1>{});
+      else if (AT == 64 && SP == 1) tile(T, std::integral_constant<int, 2>{});
+      else tile(T, std::integral_constant<int, 0>{});
     }
   }
   tc_fence_before();

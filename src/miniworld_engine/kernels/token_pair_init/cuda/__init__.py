@@ -13,3 +13,14 @@ def prebuild(target, rows):
         from .sm80 import ext as sm80_ext
 
         yield sm80_ext
+    elif rows and target.arch == "sm100":  # B200 (sm100/__init__.py): one cubin per forward-tile rows of the lengths
+        import functools
+
+        from . import sm100
+
+        builds = {2}  # cubin(): tpi_fwd_w (the one-launch forward) and the backward (tpi_bwd / tpi_bwd_w / tpi_bwd_red)
+        for r in rows:
+            if r["mode"] == "train":  # weights / ids the one-launch forward does not take: sm100.forward -> cubin(fwd_rows(L))
+                builds |= {sm100.fwd_rows(length) for length in r["lengths"]}
+        for rf in sorted(builds):
+            yield functools.partial(sm100.cubin, rf)

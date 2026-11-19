@@ -1,0 +1,87 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
+index 8901024aa..0ef33f7b5 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
+@@ -144,6 +144,11 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+   constexpr int nx0 = 0, nw0 = 0;
+   const bool wres = false;
+ #endif
++  // weight group boxes (2026-11-18 pass 12; the per-SM TMA box count, not bytes, bounds the ring): flags bits 5-6 = group - 1 with
++  // the packed front -- wgs K-blocks of a chunk as ONE 3-D box (mw.m[1]: [KB][2P][64], wgs x 16 KB) into adjacent ring slots,
++  // completing on the group's first slot barrier. NWS and KB multiples of wgs (a group never wraps the ring), else one K-block a box.
++  const int wgs_ = ((stats_out >> 5) & 3) + 1;
++  const int wgs = ((stats_out & 16) && !wres && NWS % wgs_ == 0 && KB % wgs_ == 0) ? wgs_ : 1;
+   if (K1W_TRIG) pdl_trigger();
+   if (tid == 0) TL(0)
+ 
+@@ -169,6 +174,12 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+     }
+     for (int q = 0; q < nw0; ++q) {
+       const int row = ((q / KB) % NCH) * 64, kb = q % KB, side = row < P / 2 ? 0 : 1, r = side ? row - P / 2 : row;
++      if (wgs > 1) {
++        if (q % wgs) continue;
++        mbar_expect_tx(&B.w_full[q], wgs * KBB);
++        tma_load_3d(sm + G_::O_W + q * KBB, &mw.m[1], &B.w_full[q], 0, 2 * row, kb, EVICT_LAST);
++        continue;
++      }
+       mbar_expect_tx(&B.w_full[q], KBB);
+       if (stats_out & 16) {   // packed [2P, D] weights: chunk c's 64 gate | 64 projection rows at row 128 c, one [128][64] box
+         tma_load_2d(sm + G_::O_W + q * KBB, &mw.m[0], &B.w_full[q], kb * 64, 2 * row, EVICT_LAST);
+@@ -212,7 +223,13 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+       for (int i = 0; i < n_local; ++i)
+         for (int c = 0; c < NCH; ++c)
+           for (int kb = 0; kb < KB; ++kb) {
+-            if (q >= nw0 && q % wnp == wme) {
++            if (wgs > 1) {
++              if (q >= nw0 && q % wgs == 0 && (q / wgs) % wnp == wme) {
++                for (int u = 0; u < wgs; ++u) mbar_wait(&B.w_empty[s + u], ph ^ 1);
++                mbar_expect_tx(&B.w_full[s], wgs * KBB);
++                tma_load_3d(sm + G_::O_W + s * KBB, &mw.m[1], &B.w_full[s], 0, 2 * c * 64, kb, EVICT_LAST);
++              }
++            } else if (q >= nw0 && q % wnp == wme) {
+               mbar_wait(&B.w_empty[s], ph ^ 1);
+               mbar_expect_tx(&B.w_full[s], KBB);
+               const int row = c * 64, side = row < P / 2 ? 0 : 1, r = side ? row - P / 2 : row;
+@@ -246,7 +263,7 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+ #pragma unroll 1
+           for (int kb = 0; kb < KB; ++kb) {
+             if (wres) { s = (c * KB + kb) % NWS; ph = 0; }   // resident: slot fixed, its one fill (phase 0) completes once
+-            mbar_wait(&B.w_full[s], ph);
++            mbar_wait(&B.w_full[s - s % wgs], ph);
+             tc_fence_after();
+             if (ldr && i == 0 && c == 0 && kb == 0) TL(4)
+             if (ldr) {
+@@ -550,10 +567,21 @@ void k1w_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Te
+   // wl [2P, D] (row-major): the packed front (chunk c = rows 128 c .. 128 c + 127: its 64 gate rows, then its 64 projection rows;
+   // b200_infer.pack_front), read as one [128][64] box per ring slot instead of two [64][64] boxes; wlg / wr / wrg are not read
+   const bool packed = wl.size(0) == 2 * P;
++  // weight K-blocks per TMA box with the packed front (2026-11-18 pass 12: the box count bounds the ring): 3 at D384 (KB 6, ring 6),
++  // else 2 (D256: KB 4 / ring 6, D512: KB 8 / ring 6); env TRIMUL_K1W_WG = 1..4 overrides (A/B; the kernel takes 1 where the group
++  // does not divide the ring and the row)
++  const char* wg_env = std::getenv("TRIMUL_K1W_WG");
++  const int wg = !packed ? 1 : (wg_env != nullptr && wg_env[0] >= '1' && wg_env[0] <= '4') ? wg_env[0] - '0' : 1;
+   if (packed) {
+     TORCH_CHECK(wl.size(1) == D && wl.stride(1) == 1 && (wl.stride(0) * 2) % 16 == 0, "k1w_forward: packed front [2P, D], unit column stride");
+     mw.m[0] = tmap::make(wl.data_ptr(), bf, {(uint64_t)D, (uint64_t)(2 * P)}, {(uint64_t)wl.stride(0) * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
+-    mw.m[1] = mw.m[2] = mw.m[3] = mw.m[0];
++    mw.m[2] = mw.m[3] = mw.m[0];
++    // weight group boxes (flags bits 5-6, pass 12): [KB][2P][64], wg K-blocks (wg x 16 KB) per box
++    if (wg > 1)
++      mw.m[1] = tmap::make(wl.data_ptr(), bf, {64, (uint64_t)(2 * P), (uint64_t)(D / 64)}, {(uint64_t)wl.stride(0) * 2, 128},
++                           {64, 128, (uint32_t)wg}, CU_TENSOR_MAP_SWIZZLE_128B);
++    else
++      mw.m[1] = mw.m[0];
+   }
+   for (int k = 0; k < 4 && !packed; ++k) {
+     const torch::Tensor& w = *ws[k];
+@@ -583,8 +611,9 @@ void k1w_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Te
+   // two weight-issuing warps (flags bit 3) at D >= 256 (2026-11-17, round 3 eighth pass: D384 L128 eval -5 %, D256 L128 -2.6 %, D384 L768
+   // -7 %; D <= 128 no gain); env TRIMUL_K1W_NP = 1 / 2 overrides (A/B)
+   const int so_np = (np_env != nullptr ? np_env[0] == '2' : D >= 256) ? 8 : 0;
++  const int so_pr = (wg - 1) << 5;
+ #define K1W_CASE(DD, PP) \
+-  if (D == DD && P == PP) { launch<DD, PP>(mx, mw, mp, mk, L, mu, rs, ga, be, tiles, g, st, (float)eps, so | so_np | (packed ? 16 : 0), n2); C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
++  if (D == DD && P == PP) { launch<DD, PP>(mx, mw, mp, mk, L, mu, rs, ga, be, tiles, g, st, (float)eps, so | so_np | so_pr | (packed ? 16 : 0), n2); C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
+   K1W_CASE(64, 512) K1W_CASE(64, 256) K1W_CASE(64, 128) K1W_CASE(128, 512) K1W_CASE(128, 256) K1W_CASE(256, 1024) K1W_CASE(256, 512)
+   K1W_CASE(384, 1536) K1W_CASE(384, 768) K1W_CASE(512, 2048) K1W_CASE(512, 1024)
+ #undef K1W_CASE

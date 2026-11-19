@@ -395,11 +395,13 @@ def _meta(t: torch.Tensor | None):
     return None if t is None else (t.shape, t.stride(), t.dtype, t.device)
 
 
-def _h100_reason(single: torch.Tensor) -> str | None:
+def _native_reason(single: torch.Tensor) -> str | None:
+    """Why the fused H100 / B200 blocks (``kernels/integrations/token_dit*`` / ``bias_only_dit*``: sm_90a or sm_100a kernels) cannot take
+    a tensor on this device, or ``None``. Their own ``serves`` gates state each card's range."""
     if not single.is_cuda:
         return "CUDA tensors only"
-    if torch.cuda.get_device_capability(single.device) != (9, 0):
-        return "the H100 (sm_90) kernels only"
+    if torch.cuda.get_device_capability(single.device) not in ((9, 0), (10, 0)):
+        return "the H100 (sm_90) / B200 (sm_100a) kernels only"
     return None
 
 
@@ -472,7 +474,10 @@ class TokenDiTProtenix(BackendModule):
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
         "cuda:h100_sm90": 6,
-    }  # cuda:h100_sm90 6 (2026-11-19): the bf16 default-option training block keeps no fp32 copy of the input and the forward keeps h (byte reductions: outputs and gradients bit-identical to 5; TokenDiTMiniWorld inherits it; the variant classes keep their own entries); cuda:h100_sm90 5 (2026-11-18): the bf16 pair bias on the AttentionPairBias tensor-core kernels -- training at 128 / 256 / 512 pair channels (fwd + bwd one pass, bf16 mma, fp32 dbias) and the hoisted bias of a 256 / 512-wide pair at inference (outputs change at bf16 rounding; every subclass); cuda:h100_sm90 4 (2026-11-18): training with the conditioning shared by the samples (stride-0 expand, default options): the conditioning GEMMs on L rows, dG / dGg summed over the samples first (outputs change in summation order; TokenDiTMiniWorld inherits it, the variant classes keep their own entries); cuda:h100_sm90 3 / cuda:a100_sm80 4 (2026-11-13): inference skips the core's key tiles past the last attended key of a padded mask (the
+        "cuda:b200_sm100": 24,
+        "triton:b200_sm100": 2,
+    }  # cuda:b200_sm100 24 (2026-11-18, round 3 part 10): training -- attn_dkv reads the shared bias as stored at every sample count (-DBIASNT; no bias_transpose launch at S > 1, the same values) and both to_scale weight gradients on side stream 0 after dWo instead of at the end of side stream 2 (every subclass); cuda:b200_sm100 23 (2026-11-18, round 3 part 9): fp32 inference with several samples at L 128 (d 768): the up-gate expand (Boltz-2) as a CTA-pair TF32 GEMM with silu(a) b u in its epilogue (pair32 / tdt_pair32_sm100.cu; [a | b | u] never reaches HBM, its input rounded to TF32), and with a conditioning per sample the q | k | v | g GEMM on the pair kernel with the TF32 rounding of q | k | v in its epilogue (no rna pass); every subclass; cuda:b200_sm100 22 (2026-11-18, round 3 part 8): fp32 inference with several samples: ONE q | k | v | g GEMM and the TF32 core reading v MN-major from its columns (attn_inf_tf32 -DVMN; no v^T GEMM, q | k | v rounded in one pass); the parallel blocks (RoseTTAFold3, Chai-1) run the transition on a stream of its own beside the attention inside a capture (every subclass); cuda:b200_sm100 21 (2026-11-17, round 3 part 7): bf16 training: attn_dqb on a side stream beside attn_dkv, and at one sample attn_dkv reads the bias as stored (-DBIASNT, no bias_transpose launch; the same bits; every subclass); cuda:b200_sm100 20 (2026-11-17, round 3 part 6): bf16 training up to 256 rows makes dchat = dG Wn in ONE split-K cluster launch (tdt_epi_sm100, the partial tiles summed in rank order: deterministic) instead of cuBLAS split K + its reduce kernel; fp32 inference with several samples places the v^T GEMM by measured rule (on the chain at L 128 with a shared conditioning or no gating query, on a stream of its own at L 256 with a shared conditioning; the same bits); every subclass; cuda:b200_sm100 5 (2026-11-17, round 3 part 3): training weight gradients straight into their leaves and the rest of the final gradients beside the chain (final_lnw100 / final_reduce100 / final_rest100; the option models through _rest_b200), the conditioning prep beside the weight pack; inference R18 folds in one core launch (attn_inf -DFOLDARG) with one batched pair pass, fp32 the gates' GEMM beside the chain and the pair pass issued after the conditioning GEMMs (v^T on the chain from L 256), one-sample fp32 on attn_inf_tf32 -DQPAIR; cuda:b200_sm100 4 (2026-11-17, round 3 part 2): training bitwise repeatable run to run (attn_dkv -DDET, attn_dqb -DDQPART -DDQDET, attn_dqb_tf32 -DDBPART: partial slices added in a fixed order; the cond-LN weight gradients in block order), the B200 row kernels in their own sm_100a translation unit (token_dit_train_rows_sm100.cu; the shared source is origin/main's), captured steps with side streams (inference: the pair pass and fp32 v^T beside the chain; training: the gate GEMM and the pair pass forward, the weight-gradient GEMMs and the pair backward -- bf16 pair 128 on AttentionPairBias's one-pass pair_bias_bwd -- beside the chain); cuda:b200_sm100 3 (2026-11-17, round 3 -- B200 against the H100): inference at L a multiple of 128 on ``token_inference`` with the B200 cores for every block (the default options too: the folded conditioning, the one-launch bf16 weight pack ``bo_pack_sm100``, the query-tile-pair core for one sample, R18 folds in one call, the sm_100a SwiGLU GEMM from 3840 rows, the wide bf16 pair on ``apb.pair_bias``, fp32 the one-pass pair bias; the model options keep their folded-conditioning operands with the static pack); training on the native row kernels (pack / cond prep / cond backward / final gradients, 8 vectors a thread on sm_100; the model options through the native pack, Boltz-2 through the native final gradients), no padded sample at A = 1 (bf16: the -DQPAIR forward; fp32: the TF32 cores' own odd A), bf16 the one-pass pair bias (``apb`` ``pair_bias_fwd_stats``) and its one-pass backward, small weight-gradient GEMMs unsplit, the partial sums as gemv; triton:b200_sm100 2 (2026-11-17): the Triton attention core hands its bias gradient back head-major on the B200 too (every subclass; no sum over A = 1, no transposing copy); cuda:b200_sm100 2 (2026-11-17): training serves RoseTTAFold3 (the flat q / k LayerNorm as copies, q unscaled for the B200 cores) and Chai-1 fp32 (the fp32 cond as the identity AdaLN's raw copy); inference serves FoldForge R18's B > 1 trunk_seeds (one B = 1 step per fold, a multi-entry pair-bias cache); cuda:b200_sm100 1 (2026-11-16): the B200 (sm_100a) fused inference / training blocks (kernels/integrations/token_dit*.py: their sm_100a paths, the default options, cond 384 / pair 128); cuda:h100_sm90 3 / cuda:a100_sm80 4 (2026-11-13): inference skips the core's key tiles past the last attended key of a padded mask (the
+    # cuda:h100_sm90 6 (2026-11-19): the bf16 default-option training block keeps no fp32 copy of the input and the forward keeps h (byte reductions: outputs and gradients bit-identical to 5; TokenDiTMiniWorld inherits it; the variant classes keep their own entries); cuda:h100_sm90 5 (2026-11-18): the bf16 pair bias on the AttentionPairBias tensor-core kernels -- training at 128 / 256 / 512 pair channels (fwd + bwd one pass, bf16 mma, fp32 dbias) and the hoisted bias of a 256 / 512-wide pair at inference (outputs change at bf16 rounding; every subclass); cuda:h100_sm90 4 (2026-11-18): training with the conditioning shared by the samples (stride-0 expand, default options): the conditioning GEMMs on L rows, dG / dGg summed over the samples first (outputs change in summation order; TokenDiTMiniWorld inherits it, the variant classes keep their own entries); cuda:h100_sm90 3 / cuda:a100_sm80 4 (2026-11-13): inference skips the core's key tiles past the last attended key of a padded mask (the
     # klen held with the hoisted pair bias; bitwise the same outputs; every subclass)
     # cuda:h100_sm90 2 (2026-11-12): bf16 inference folds the conditioning into one grouped GEMM (CondFold), 128 x 128 SwiGLU tiles at small M, PDL row passes (outputs change: fp32 tables; every subclass); 2026-11-10: kits; sm_80 paths; 3: transition weight casts read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton attention core returns its bias gradient head-major on the A100 / H100 (every subclass)
 
@@ -564,7 +569,7 @@ class TokenDiTProtenix(BackendModule):
         if hit is not None:
             return ("infer", _shared_key_mask(mask)[0]) if hit == "infer" else (None, hit[1])
         route, out = self._cuda_route_of(single, cond, pair, mask, compute_dtype, extra_pair_bias)
-        if _h100_reason(single) is None:  # the H100 route only (the A100 route also reads the autocast state)
+        if _native_reason(single) is None:  # the H100 / B200 route only (the A100 route also reads the autocast state)
             if route == "infer":
                 cache[key] = "infer"
             elif route is None:
@@ -574,7 +579,7 @@ class TokenDiTProtenix(BackendModule):
     def _cuda_route_of(self, single, cond, pair, mask, compute_dtype, extra_pair_bias) -> tuple[str | None, Any]:
         if _a100(single):
             return self._a100_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
-        why = _h100_reason(single)
+        why = _native_reason(single)
         if why is not None:
             return None, why
         km, shared = _shared_key_mask(mask)
@@ -939,7 +944,10 @@ class TokenDiTChai1(MasterEntryCast, VariantTokenCuda, TokenDiTProtenix):
     backend_versions: ClassVar[dict[str, int]] = {
         **TokenDiTProtenix.backend_versions,
         "cuda:h100_sm90": 7,
-    }  # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
+        "cuda:b200_sm100": 24,
+    }  # cuda:b200_sm100 24 / 23 / 22 / 21 / 20: as the base class (round 3 part 10 / 9 / 8 / 7 / 6); 6 (2026-11-13): as the base class (the key-tile skip); cuda:b200_sm100 6 (2026-11-17, round 3 part 4): fp32 inference writes the
+    # gate columns (no gating query: zero rows, bias +1e4 in the static pack) with the q | k GEMM -- no strided fill / bias copy per call
+    # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
 
     backends = (
         "pytorch",
@@ -1034,7 +1042,17 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # one gemm120 (dh unrounded), the backward GEMMs on cuBLASLt with measured configurations at the S48 L768 rows, the d_pair 256 pair-bias
     # backward on 8-element tiles; fp32 training too: the measured TF32 GEMM configurations at the S48 L128 rows, dh + SwiGLU backward in one
     # gemm120 (TF32), the attention's bias gradient at L 128 (S >= 8) as one batched GEMM in place of the 16-CTA core
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 4, "cuda:h100_sm90": 4, "cuda:5090_sm120": 5}
+    # cuda:b200_sm100 3 (2026-11-17, round 3: B200 >= 1.5x H100 on every case): inference -- the pack makes only what the three-kernel step
+    # reads (the tail forms of the step's cluster), the one-block conditioning table in one pass after its GEMMs (bo_tab_sm100.cu), the pair
+    # hoist in one pass at pair 128 too (bf16) / on tensor cores (fp32), and inside a CUDA-graph capture the pair part, the step's weights
+    # and the conditioning LayerNorm on side streams (bias_only_dit/cuda/side.py); training -- the pair part (forward and backward) on a side
+    # stream inside a capture, the backward tail as its seven launches, bo_wgrad's fp32 outputs through shared-memory staging, the fp32
+    # backward at <= 1024 rows on plain GEMMs
+    # cuda:b200_sm100 2 (2026-11-17): bf16 training at cond 768 / pair 256 on the per-step backward (rows 105-107 master served); inference:
+    # the runner's weight pack in one launch (bo_pack_sm100.cu, the same values; was ~40 torch kernels per captured replay)
+    # cuda:b200_sm100 1 (2026-11-16): the B200 (sm_100a) paths of kernels/integrations/bias_only_dit*.py (inference: cond 384 / 768, pair
+    # 128 / 256; training: cond 384 / pair 128, fp32 also cond 768 / pair 256)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 4, "cuda:h100_sm90": 4, "cuda:5090_sm120": 5, "cuda:b200_sm100": 3}
 
     def __init__(
         self,
@@ -1106,7 +1124,7 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
             if why is not None:
                 why = f"{_card(single)}: {why.removeprefix('A100: ')}"
             return (None, why) if why is not None else ("a100", None)
-        why = _h100_reason(single)
+        why = _native_reason(single)
         if why is not None:
             return None, why
         view = _kernel_view(self)

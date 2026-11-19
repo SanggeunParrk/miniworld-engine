@@ -1,0 +1,14 @@
+modules: [TriangleAttention]
+backends: [cuda]
+rows: [188]
+lengths: [128, 256, 384, 512, 640, 768]
+depths: min
+samples: min
+timing: [graph]
+warmup: 5
+iterations: 50
+flush_l2: true
+device: cuda
+seed: 0
+fixed: {bfloat16: 8.0e-3, master: 8.0e-3, float32: 1.0e-5}
+modes: [train]

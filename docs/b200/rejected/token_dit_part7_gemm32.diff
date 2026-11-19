@@ -1,0 +1,302 @@
+diff --git a/src/miniworld_engine/kernels/conditioned_transition/cuda/tdt_epi.py b/src/miniworld_engine/kernels/conditioned_transition/cuda/tdt_epi.py
+index 29b7e8da8..d420a3840 100644
+--- a/src/miniworld_engine/kernels/conditioned_transition/cuda/tdt_epi.py
++++ b/src/miniworld_engine/kernels/conditioned_transition/cuda/tdt_epi.py
+@@ -60,10 +60,11 @@ def _nst(bn: int) -> int:
+ 
+ 
+ @functools.lru_cache(maxsize=None)
+-def _kernel(device_index: int, bn: int, trb: int, ks: int, epi: int, nst: int, outf32: int, out_bf16: int):
++def _kernel(device_index: int, bn: int, trb: int, ks: int, epi: int, nst: int, outf32: int, out_bf16: int, tf32: int = 0):
+     from miniworld_engine.kernels.augmented_attention.cuda import sm100
+ 
+     defs = (f"BN={bn}", f"TRB={trb}", f"NST={nst}", f"EPI={epi}", "PDL=1", f"OUTF32={outf32}", f"OUT_BF16={out_bf16}")
++    defs += ("TF32=1",) if tf32 else ()
+     return sm100._sm100_kernel(
+         "tdt_epi_sm100", "tdt_epi_sm100", device_index, pdl=True, src_dir=_dir, defs=defs, cluster=ks, smem=_smem(bn, nst)
+     )
+@@ -167,4 +168,68 @@ def mm(a, w, trb=0, bias=None, out_dtype=torch.bfloat16, bn=64, ks=None, nst=Non
+     return out
+ 
+ 
+-__all__ = ["mm", "res_c", "supported", "swiglu", "swiglu_bwd"]
++def mm32(a, w, bias=None, out=None, bn=128, ks=None, nst=None):
++    """out = a w^T (+ bias), fp32 operands on kind::tf32 MMAs (truncated to TF32 by the tensor cores), fp32 out: a [M, K], w [N, K]
++    (an nn.Linear weight as stored), M a multiple of 128, K of 32, N of ``bn``. K split ``ks`` over a cluster, the partial tiles summed
++    in rank order (deterministic). (2026-11-17, part 7: the fp32 multi-sample inference's 640-row GEMMs.)"""
++    from miniworld_engine.kernels._device import num_sms
++    from miniworld_engine.kernels.augmented_attention.cuda import sm100
++
++    M, K = a.shape
++    N = w.shape[0]
++    assert a.dtype is torch.float32 and w.dtype is torch.float32 and M % BM == 0 and K % 32 == 0 and N % bn == 0
++    if out is None:
++        out = torch.empty(M, N, device=a.device, dtype=torch.float32)
++    if nst is None:
++        nst = _nst(bn)
++    ma = sm100._tm(a, [K, M], a.stride(0) * 4, [32, BM], dtype="f32")
++    mb = sm100._tm(w, [K, N], w.stride(0) * 4, [32, bn], dtype="f32")
++    tiles = (N // bn) * (M // BM)
++    dev = _index(a)
++    if ks is None:
++        ks = _ks(tiles, K // 32, num_sms(dev))
++    args = _Args(_ptr(out), out.stride(0), None, 0, _ptr(bias), 0, None, 0, None, 0)
++    k = _kernel(dev, bn, 0, ks, 0, nst, 1, 1, 1)
++    k((N // bn * ks, M // BM, 1), (192, 1, 1), ma, mb, M, K, ks, args)
++    return out
++
++
++def _mc_smem(bx: int, nst: int) -> int:
++    return 1024 + nst * (128 * 128 + bx * 128) + 256
++
++
++@functools.lru_cache(maxsize=None)
++def _mc_kernel(device_index: int, bx: int, cw: int, cx: int, nst: int):
++    from miniworld_engine.kernels.augmented_attention.cuda import sm100
++
++    defs = (f"BX={bx}", f"CW={cw}", f"CX={cx}", f"NST={nst}")
++    cs = cw * cx
++    return sm100._sm100_kernel(
++        "gemm32mc_sm100", "gemm32mc_sm100", device_index, pdl=True, src_dir=_dir, defs=defs, cluster=cs if cs > 1 else None,
++        smem=_mc_smem(bx, nst),
++    )
++
++
++def mm32mc(x, w, bias=None, out=None, bx=160, cw=2, cx=4, nst=None):
++    """out = x w^T (+ bias), fp32 on kind::tf32 MMAs (``gemm32mc_sm100.cu``): the weight is the MMA's M side (128 rows a CTA), bx
++    activation rows its N side, a cluster of cw x cx CTAs multicasting both operands. x [M, K], w [N, K] fp32, N a multiple of 128 x cw,
++    K of 32, ceil(M / bx) of cx."""
++    M, K = x.shape
++    N = w.shape[0]
++    nwt, nxt = N // 128, -(-M // bx)
++    assert x.dtype is torch.float32 and w.dtype is torch.float32 and N % 128 == 0 and K % 32 == 0
++    assert nwt % cw == 0 and nxt % cx == 0 and x.stride(1) == 1 and w.stride(1) == 1
++    if out is None:
++        out = torch.empty(M, N, device=x.device, dtype=torch.float32)
++    if nst is None:
++        nst = min(8, (232448 - 2048) // (128 * 128 + bx * 128))
++    from miniworld_engine.kernels.augmented_attention.cuda import sm100
++
++    mw = sm100._tm(w, [K, N], w.stride(0) * 4, [32, 128 // cx], dtype="f32")
++    mx = sm100._tm(x, [K, M], x.stride(0) * 4, [32, bx // cw], dtype="f32")
++    k = _mc_kernel(_index(x), bx, cw, cx, nst)
++    k((nwt * nxt, 1, 1), (192, 1, 1), mw, mx, M, N, K, out, out.stride(0), bias, nwt)
++    return out
++
++
++__all__ = ["mm", "mm32", "mm32mc", "res_c", "supported", "swiglu", "swiglu_bwd"]
+diff --git a/src/miniworld_engine/kernels/conditioned_transition/cuda/tdt_epi_sm100.cu b/src/miniworld_engine/kernels/conditioned_transition/cuda/tdt_epi_sm100.cu
+index f3a0f4a60..4dea0173f 100644
+--- a/src/miniworld_engine/kernels/conditioned_transition/cuda/tdt_epi_sm100.cu
++++ b/src/miniworld_engine/kernels/conditioned_transition/cuda/tdt_epi_sm100.cu
+@@ -45,9 +45,12 @@ using namespace s100;
+ #ifndef OUT_BF16
+ #define OUT_BF16 1      // EPI 1: the block output dtype (bf16 or fp32)
+ #endif
++#ifndef TF32
++#define TF32 0          // 1 (2026-11-17, part 7): fp32 operands, kind::tf32 MMAs (EPI 0, TRB 0 only): a 128-B row holds 32 fp32 K values
++#endif
+ 
+-constexpr int BM = 128, BK = 64;
+-constexpr int A_BYTES = BM * BK * 2, B_BYTES = BN * BK * 2, STAGE = A_BYTES + B_BYTES;
++constexpr int ESZ = TF32 ? 4 : 2, BM = 128, BK = 128 / ESZ;                // BK: one 128-B swizzled row of K
++constexpr int A_BYTES = BM * BK * ESZ, B_BYTES = BN * BK * ESZ, STAGE = A_BYTES + B_BYTES;
+ constexpr int RLD = BN + 4;                                       // fp32 staging row stride (floats)
+ constexpr int O_RED = NST * STAGE, O_BAR = O_RED + BM * RLD * 4;
+ constexpr int SMEM_BYTES = 1024 + O_BAR + 256;
+@@ -55,7 +58,8 @@ static_assert(STAGE % 1024 == 0 && SMEM_BYTES <= 232448, "shared memory budget")
+ static_assert(!TRB || BN % 64 == 0, "MN-major B: 64-column boxes");
+ static_assert(BN % 32 == 0 && BN >= 32 && BN <= 256, "tile width");
+ static_assert(EPI != 3 || (TRB == 0 && BN % 16 == 0), "swiglu forward: two K-major halves");
+-constexpr uint32_t IDESC = idesc_bf16(BM, BN, 0, TRB);
++static_assert(!TF32 || (TRB == 0 && EPI == 0), "tf32: the plain K-major GEMM only");
++constexpr uint32_t IDESC = TF32 ? idesc_tf32(BM, BN) : idesc_bf16(BM, BN, 0, TRB);
+ constexpr int TCOLS = BN <= 32 ? 32 : BN <= 64 ? 64 : BN <= 128 ? 128 : 256;
+ 
+ DEVI float sigm(float v) { return 1.f / (1.f + __expf(-v)); }
+@@ -141,9 +145,17 @@ tdt_epi_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CU
+     pdl_wait();
+ #endif
+     if (lane < pre) tma_load_2d(su + lane * STAGE, &ma, &full[lane], (kb0 + lane) * BK, m0);
++#if TF32
++    // (part 7) the steady state too: lane s owns ring slot s (one TMA issuer per slot; a single lane issuing every stage capped a
++    // 24-K-block 640-row TF32 GEMM at ~2 loads per 1200 clk)
++    if (lane < NST) {
++      for (int i = NST + lane; i < nloc; i += NST) {
++        const int s = lane;
++#else
+     if (lane == 0) {
+       for (int i = NST; i < nloc; ++i) {
+         const int s = i % NST;
++#endif
+         mbar_wait(&empty[s], ((i / NST) - 1) & 1);
+         mbar_expect_tx(&full[s], STAGE);
+         load_b(s, kb0 + i);
+@@ -159,8 +171,10 @@ tdt_epi_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CU
+       if (elect_one()) {
+         const uint32_t a = su + s * STAGE, b = a + A_BYTES;
+ #pragma unroll
+-        for (int k = 0; k < BK / 16; ++k) {
+-#if TRB
++        for (int k = 0; k < 4; ++k) {                              // 32-B K steps: 16 bf16 / 8 tf32 values
++#if TF32
++          umma_ss_tf32(tmem, desc_k128(a + k * 32), desc_k128(b + k * 32), IDESC, (i | k) != 0);
++#elif TRB
+           umma_ss(tmem, desc_k128(a + k * 32), desc_mn128(b + k * 2048, 8192), IDESC, (i | k) != 0);
+ #else
+           umma_ss(tmem, desc_k128(a + k * 32), desc_k128(b + k * 32), IDESC, (i | k) != 0);
+diff --git a/src/miniworld_engine/kernels/conditioned_transition/cuda/gemm32mc_sm100.cu b/src/miniworld_engine/kernels/conditioned_transition/cuda/gemm32mc_sm100.cu
+new file mode 100644
+index 000000000..c71ffbe61
+--- /dev/null
++++ b/src/miniworld_engine/kernels/conditioned_transition/cuda/gemm32mc_sm100.cu
+@@ -0,0 +1,149 @@
++// gemm32mc_sm100.cu -- fp32 (kind::tf32) GEMM for the token DiT's few-row fp32 inference steps on sm_100a (2026-11-17, round 3 part 7).
++//
++//   C[M, N] = X[M, K] W[N, K]^T (+ bias[N]), fp32 operands (truncated to TF32 by the tensor cores), fp32 accumulation and output.
++//
++// At 640 rows (five samples x L 128) cuBLAS's TF32 GEMMs run 60 - 120 CTAs, each streaming ~1 MB of fp32 operands from L2: they are
++// bound by the per-SM L2 intake, not by the MMAs. Here the MMA's M side is the weight (128 weight rows a CTA; TMEM lane = output
++// column, so a warp's 32 lanes store 32 consecutive columns of an output row: coalesced) and its N side BX activation rows, and a
++// cluster of CW x CX CTAs shares operands by TMA multicast: the CX CTAs on the same weight tile each load 128 / CX of its rows and
++// multicast them, the CW CTAs on the same activation tile each load BX / CW of its rows. Per SM the L2 intake drops from
++// (128 + BX) K 4 bytes to (128 / CX + BX / CW) K 4 bytes.
++//
++//   W  [N, K] fp32 (an nn.Linear weight as stored)   TMA box [32 (K), 128 / CX], 128-B swizzle (A operand, K-major)
++//   X  [M, K] fp32                                   TMA box [32 (K), BX / CW],  128-B swizzle (B operand, K-major)
++//
++// The cluster is 1-D on the launch (x): CTA rank r = rw + CW rx; cluster c covers weight tiles [cw0, cw0 + CW) and activation tiles
++// [cx0, cx0 + CX). A stage's slot is free again only when every CTA it was multicast to has consumed it: each CTA's MMA commit
++// arrives on the empty barrier of every CTA that feeds it (its CX row peers and CW column peers), so each empty barrier counts
++// CX + CW - 1 arrivals. Producer: lane s owns ring slot s (one thread issues ~1 TMA load per 600 clk). PDL: barriers, TMEM and the
++// first NST weight slices before griddepcontrol.wait, the activation loads after it.
++// SPDX-License-Identifier: Apache-2.0
++#include "sm100.cuh"
++using namespace s100;
++
++#ifndef BX
++#define BX 160
++#endif
++#ifndef CW
++#define CW 2
++#endif
++#ifndef CX
++#define CX 4
++#endif
++#ifndef NST
++#define NST 5
++#endif
++
++constexpr int BMW = 128, BK = 32;                                  // weight rows a CTA; K values per stage (one 128-B row)
++constexpr int A_SL = BMW / CX, B_SL = BX / CW;                     // rows of each box this CTA loads and multicasts
++constexpr int A_BYTES = BMW * BK * 4, B_BYTES = BX * BK * 4, STAGE = A_BYTES + B_BYTES;
++constexpr int O_BAR = NST * STAGE;
++constexpr int SMEM_BYTES = 1024 + O_BAR + 256;
++constexpr int CS = CW * CX;
++static_assert(STAGE % 1024 == 0 && SMEM_BYTES <= 232448, "shared memory budget");
++static_assert(A_SL % 8 == 0 && B_SL % 8 == 0 && BMW % CX == 0 && BX % CW == 0, "slices of whole 8-row swizzle groups");
++static_assert(BX % 16 == 0 && BX >= 16 && BX <= 256 && CS <= 16 && NST <= 32, "tile / cluster shape");
++constexpr uint32_t IDESC = idesc_tf32(BMW, BX);
++constexpr int TCOLS = BX <= 32 ? 32 : BX <= 64 ? 64 : BX <= 128 ? 128 : 256;
++
++extern "C" __global__ void __launch_bounds__(192, 1)
++gemm32mc_sm100(const __grid_constant__ CUtensorMap mw, const __grid_constant__ CUtensorMap mx, int M, int N, int K,
++               float* __restrict__ out, int ldo, const float* __restrict__ bias, int nwt) {
++  extern __shared__ __align__(1024) unsigned char raw[];
++  unsigned char* sm = (unsigned char*)(((uintptr_t)raw + 1023) & ~(uintptr_t)1023);
++  const uint32_t su = smem_u32(sm);
++  uint64_t* full = reinterpret_cast<uint64_t*>(sm + O_BAR);
++  uint64_t* empty = full + NST;
++  uint64_t* done = empty + NST;
++  uint32_t* tslot = reinterpret_cast<uint32_t*>(done + 1);
++
++  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
++  const int rank = blockIdx.x % CS, cl = blockIdx.x / CS;
++  const int rw = rank % CW, rx = rank / CW;
++  const int ncw = nwt / CW;                                        // clusters along the weight tiles
++  const int wt = (cl % ncw) * CW + rw, xt = (cl / ncw) * CX + rx;
++  const int n0 = wt * BMW, m0 = xt * BX;
++  // multicast masks: the CX CTAs on this weight tile (rw fixed), the CW CTAs on this activation tile (rx fixed)
++  uint16_t rowmask = 0, colmask = 0;
++#pragma unroll
++  for (int j = 0; j < CX; ++j) rowmask |= (uint16_t)(1u << (rw + CW * j));
++#pragma unroll
++  for (int i = 0; i < CW; ++i) colmask |= (uint16_t)(1u << (i + CW * rx));
++  const uint16_t feeds = rowmask | colmask;
++  const int nk = K / BK;
++
++  if (threadIdx.x == 0) {
++    for (int s = 0; s < NST; ++s) { mbar_init(&full[s], 1); mbar_init(&empty[s], CX + CW - 1); }
++    mbar_init(done, 1);
++    fence_barrier_init();
++    prefetch_map(&mw); prefetch_map(&mx);
++  }
++  if (warp == 1) { tmem_alloc(smem_u32(tslot), TCOLS); tmem_relinquish(); }
++  tc_fence_before();
++  cluster_sync();                                                  // every peer's barriers exist before the first multicast
++  tc_fence_after();
++  const uint32_t tmem = *tslot;
++
++  if (warp == 0) {                                                 // TMA producer: lane s owns ring slot s
++    auto load_w = [&](int s, int kb) {
++      const uint32_t a = su + s * STAGE + rx * (A_SL * 128);
++      if constexpr (CX > 1) tma_load_2d_mc(a, &mw, &full[s], kb * BK, n0 + rx * A_SL, rowmask);
++      else tma_load_2d(a, &mw, &full[s], kb * BK, n0);
++    };
++    auto load_x = [&](int s, int kb) {
++      const uint32_t b = su + s * STAGE + A_BYTES + rw * (B_SL * 128);
++      if constexpr (CW > 1) tma_load_2d_mc(b, &mx, &full[s], kb * BK, m0 + rw * B_SL, colmask);
++      else tma_load_2d(b, &mx, &full[s], kb * BK, m0);
++    };
++    const int pre = nk < NST ? nk : NST;
++    if (lane < pre) { mbar_expect_tx(&full[lane], STAGE); load_w(lane, lane); }   // weights: before the wait
++    pdl_wait();
++    if (lane < pre) load_x(lane, lane);
++    if (lane < NST) {
++      for (int i = NST + lane; i < nk; i += NST) {
++        mbar_wait(&empty[lane], ((i / NST) - 1) & 1);
++        mbar_expect_tx(&full[lane], STAGE);
++        load_w(lane, i);
++        load_x(lane, i);
++      }
++    }
++    __syncwarp();
++  } else if (warp == 1) {                                          // MMA issuer
++    for (int i = 0; i < nk; ++i) {
++      const int s = i % NST;
++      mbar_wait(&full[s], (i / NST) & 1);
++      tc_fence_after();
++      if (elect_one()) {
++        const uint32_t a = su + s * STAGE, b = a + A_BYTES;
++#pragma unroll
++        for (int k = 0; k < BK / 8; ++k) umma_ss_tf32(tmem, desc_k128(a + k * 32), desc_k128(b + k * 32), IDESC, (i | k) != 0);
++        if constexpr (CS > 1) tc_commit_mc(&empty[s], feeds);
++        else tc_commit(&empty[s]);
++        if (i == nk - 1) tc_commit(done);
++      }
++      __syncwarp();
++    }
++    pdl_launch();
++  } else {                                                         // warps 2-5: TMEM lane quarter q = 32 output columns
++    const int q = warp % 4, n = n0 + q * 32 + lane;
++    const float bn = (bias != nullptr && n < N) ? bias[n] : 0.f;
++    mbar_wait(done, 0);
++    tc_fence_after();
++#pragma unroll 1
++    for (int c = 0; c < BX; c += 32) {
++      uint32_t v[32];
++      tmem_ld32(tmem + ((uint32_t)(q * 32) << 16) + c, v);
++      tmem_wait_ld();
++      if (n < N) {
++#pragma unroll
++        for (int j = 0; j < 32; ++j) {
++          const int m = m0 + c + j;
++          if (m < M) out[(long)m * ldo + n] = __uint_as_float(v[j]) + bn;   // a warp: 32 consecutive columns of row m
++        }
++      }
++    }
++  }
++  tc_fence_before();
++  cluster_sync();                                                  // no peer still multicasts into / commits onto this CTA
++  if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, TCOLS); }
++}

@@ -1,0 +1,113 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index e36c5f23f..861df8bc2 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -113,6 +113,8 @@ SMALL_FWD_TILES = 16
+ #: forward's casts ride in the LayerNorm launch.
+ #: (S90 part 9) extra build flags of the small-M chain kernels by name (gdx): A/B runs edit it
+ SX_X: dict[str, tuple[str, ...]] = {}
++#: (S90 part 12) tsx_gdx.cu -DBIGBOX at n 2: the dy tile and the gate's Ws chunk as 48 KB / 24 KB TMA boxes (2 + 2 ops instead of 12); False: the part 9 kernel (A/B)
++GDX_BB = True
+ SX_CH = (32, 64)
+ #: squeeze builds: (output columns per cluster, hidden split = cluster size)
+ SX_SQ = ((32, 1), (64, 1), (32, 2), (64, 2))
+@@ -278,6 +280,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             *((f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in SX_SQ),
+             ("sx_gate", "widths/tsx_gate.cu", dim),
+             ("sx_gdx", "widths/tsx_gdx.cu", (*dim, *SX_X.get("gdx", ()))),
++            *((("sx_gdx_bb", "widths/tsx_gdx.cu", (*dim, "-DBIGBOX=1", *SX_X.get("gdx", ()))),) if h == 2 * d else ()),
+             *((f"sx_dxn{k}", "widths/tsx_dxn.cu", (*dim, f"-DKS={k}")) for k in (1, 2)),
+             *((f"sx_dw{nt}", "widths/tsx_dw.cu", (*dim, f"-DNT={nt}")) for nt in SX_DW_NT if d % nt == 0 and h % nt == 0),
+         )
+@@ -989,13 +992,14 @@ def _bwd_sx_launch(
+     flags = torch.empty((tiles,), dtype=torch.int32, device=x.device)  # cleared and set by the fused kernel
+     if fused:  # gate + d_xn + LayerNorm backward on one cluster per tile (round sx3)
+         ks = 2
++        bb = GDX_BB and h == 2 * d
+         k.run(
+-            "sx_gdx",
++            "sx_gdx_bb" if bb else "sx_gdx",
+             "transition_sx_gdx",
+             tiles * (d // 64) * ks,
+             (
+-                k.tmap(dy, d, m, 64, 128),
+-                k.tmap(ws, h, d),
++                k.ext.tmap(dy, d, m, 64, 128, -1, 0, 3) if bb else k.tmap(dy, d, m, 64, 128),
++                k.tmap(ws, h, d, 64, 192) if bb else k.tmap(ws, h, d),
+                 a,
+                 b,
+                 dab,
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
+index bae5d11a6..1d9840cd3 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
+@@ -17,6 +17,10 @@
+ #include "sm100.cuh"
+ #include "tsx_store.cuh"
+ using namespace s100;
++DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
+ #ifdef PROBE
+ #define GSTW(k, w) do { if (warp == (w) && lane == 0) { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(flags + 1024)[blockIdx.x * 16 + (k)] = _t; } } while (0)
+ #else
+@@ -33,6 +37,11 @@ constexpr int D_ = DIM, H_ = HID, ROWS = 128, NB = 64, NBLK = D_ / NB, KS = 2, C
+ constexpr int NCHK = H_ / 64, GPC = NCHK / CLS, GN = 64 * GPC;  // gate: 64-unit chunks, chunks per CTA, units per CTA
+ static_assert(NCHK % CLS == 0 && (GPC == 1 || GPC == 2) && CLS <= 16, "whole gate chunks per CTA, one cluster per tile");
+ constexpr int NKD = D_ / 64, HKB = H_ / 64, NKX = 2 * HKB / KS;  // dy K-blocks, hidden K-blocks, d_xn K-blocks per CTA
++#ifndef BIGBOX
++#define BIGBOX 0   // (S90 part 12) one 48 KB 3-D box a DYG dy K-blocks and one 24 KB box a DYG Ws K-blocks (the TMA unit costs ~600 clk an op whatever its size): n 2 only
++#endif
++constexpr int DYG = BIGBOX ? 3 : 1;
++static_assert(!BIGBOX || (GPC == 1 && NKD % DYG == 0), "BIGBOX: one gate chunk a CTA");
+ constexpr int OW = NB / KS;                                     // owned output columns (32)
+ constexpr int DYB = ROWS * 128, WSB = GN * 128;                // dy K-block 16 KB, Ws K-block [64 k][GN units] (GN / 64 boxes of 8 KB)
+ constexpr int KBT = ROWS * 128, WBT = 64 * 128, STB = KBT + WBT;  // d_xn stage: [dA | dB] K-block 16 KB + weight block 8 KB
+@@ -131,11 +140,19 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+     fence_barrier_init();
+     fence_proxy_async();
+     prefetch_map(&mdy); prefetch_map(&mws); prefetch_map(&mdab); prefetch_map(&mwa); prefetch_map(&mwb);
++#if BIGBOX && defined(PFDY)   // (S90) the dy tile (written before this launch, but possibly still in flight from an earlier op: a prefetch only warms L2) from L2 sooner
++    for (int g = 0; g < NKD / DYG; ++g)
++      asm volatile("cp.async.bulk.prefetch.tensor.3d.L2.global [%0, {%1, %2, %3}];" :: "l"(&mdy), "r"(0), "r"(row0), "r"(g * DYG) : "memory");
++#endif
+     // parameters only (no dependence on the previous launch): the gate's Ws chunk and the dedicated stages' weight blocks
+     mbar_expect_tx(&B.w_full, NKD * WSB);
++#if BIGBOX
++    for (int g = 0; g < NKD / DYG; ++g) tma_load_2d(su + O_WS + g * DYG * WSB, &mws, &B.w_full, h0, g * DYG * 64);
++#else
+     for (int kb = 0; kb < NKD; ++kb)
+ #pragma unroll
+       for (int gb = 0; gb < GPC; ++gb) tma_load_2d(su + O_WS + kb * WSB + gb * 8192, &mws, &B.w_full, h0 + gb * 64, kb * 64);
++#endif
+     for (int kb = 0; kb < NDED; ++kb) { mbar_expect_tx(&B.full[kb], STB); load_w(kb); }
+     mbar_expect_tx(&B.red_full, ROWS * OW * 4);                // the partner's partial (st.async, any time after the setup sync)
+     mbar_expect_tx(&B.rs_full, (CLS - 1) * ROWS * 8);          // the other CTAs' row sums (bulk copies)
+@@ -175,10 +192,17 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+ #endif
+     if (lane == 0) {
+ #ifndef MLN
++#if BIGBOX
++      for (int g = 0; g < NKD / DYG; ++g) {
++        mbar_expect_tx(&B.dy_full[g], DYG * DYB);
++        tma_load_3d(su + O_DY + g * DYG * DYB, &mdy, &B.dy_full[g], 0, row0, g * DYG);
++      }
++#else
+       for (int kb = 0; kb < NKD; ++kb) {                        // a barrier per K-block: the products start as dy lands
+         mbar_expect_tx(&B.dy_full[kb], DYB);
+         tma_load_2d(su + O_DY + kb * DYB, &mdy, &B.dy_full[kb], kb * 64, row0);
+       }
++#endif
+ #endif
+       mbar_wait(&B.mma_done, 0);                               // the gate products have read dy and Ws: their stages are free
+       if (rank == 0) mbar_wait(&B.flag_clear, 0);
+@@ -215,7 +239,7 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+     mbar_wait(&B.w_full, 0);
+ #pragma unroll 1
+     for (int kb = 0; kb < NKD; ++kb) {
+-      mbar_wait(&B.dy_full[kb], 0);
++      mbar_wait(&B.dy_full[kb / DYG], 0);
+       tc_fence_after();
+       const uint64_t da = desc_k128(su + O_DY + kb * DYB), db = desc_mn128(su + O_WS + kb * WSB, 8192);
+       if (elect_one()) {

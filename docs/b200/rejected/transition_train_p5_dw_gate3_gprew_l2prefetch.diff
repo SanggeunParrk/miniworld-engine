@@ -1,0 +1,286 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu
+index fb20bf4d8..b5a349e65 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu
+@@ -28,6 +28,21 @@ using namespace s100;
+ #endif
+ #define EPIF2                                                  // fp32x2 LayerNorm-backward epilogue in the DX role (EPI_SCALAR: v9)
+ #define GATE2                                                  // fp32x2 gate arithmetic, bit-identical to the scalar form (GATE1)
++#ifndef GOV
++#define GOV 1                                                  // (training part 5) DW gate: only its stores wait for g_empty (A/B: 0)
++#endif
++#ifndef GPRE
++#define GPRE 1                                                 // (training part 5) DX gate: the a | b part before dh_j's wait (A/B: 0)
++#endif
++#ifndef GPREW
++#define GPREW 0                                                // (training part 5) DW gate: the a | b part before the dh product (measured slower at n 4: off)
++#endif
++#ifndef PFL
++#define PFL 1                                                  // (training part 5) L2 prefetch of the later tiles' inputs (A/B: 0)
++#endif
++#ifndef G3
++#define G3 0                                                   // (training part 5) DW gate on three warpgroups (dw_gate3): measured slower, off
++#endif
+ 
+ #ifndef HID
+ #define HID 512                                                // hidden units (n x D); n = 4 by default
+@@ -68,7 +83,7 @@ struct Par {
+   int tiles, ndw;
+ };
+ 
+-struct BarsW { uint64_t w_full, xn_full[2], dy_full[2], xn_empty[2], dy_empty[2], dhab_full, gate_read, g_full[2], g_empty[2], wg_done; uint32_t tmem; };
++struct BarsW { uint64_t w_full, xn_full[2], dy_full[2], xn_empty[2], dy_empty[2], dhab_full, gate_read, g_full[2], g_empty[2], wg_done, ab_full; uint32_t tmem; };
+ constexpr int GDB = 1;
+ struct BarsX {
+   uint64_t ws_full[2], ws_empty[2], wab_full[NWAB], wab_empty[NWAB], in_full[2], in_empty[2], x_full[2], xn_dead[2], dh_full[2], g_full[2], dh_free[2];
+@@ -92,6 +107,52 @@ DEVI void gate_pair16(uint32_t dh0, uint32_t dh1, uint32_t a0, uint32_t a1, uint
+ }
+ 
+ // ================================================================================================ DW role
++DEVI void tma_prefetch_2d(const CUtensorMap* m, int c0, int c1) {
++  asm volatile("cp.async.bulk.prefetch.tensor.2d.L2.global [%0, {%1, %2}];" :: "l"(m), "r"(c0), "r"(c1) : "memory");
++}
++DEVI void tmem_ld8(uint32_t taddr, uint32_t* r) {
++  asm volatile("tcgen05.ld.sync.aligned.32x32b.x8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
++               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5]), "=r"(r[6]), "=r"(r[7]) : "r"(taddr) : "memory");
++}
++// (training part 5, G3) the DW gate on THREE warpgroups: warpgroup g takes the 8-unit chunks q0 .. q0 + NQ - 1 of the slice's 64 units
++// (warps 4-7: 0-2, 12-15: 3-5, the partial-store warps 8-11: 6-7, idle until the CTA's last tile before). Per tile: TMEM loads, the
++// gate_read arrival, all arithmetic (gate_pair16), then the g_empty wait and the stores (GOV). Same values per unit: the same bits.
++template <int NQ>
++DEVI void dw_gate3(uint8_t* sm, uint32_t su, uint32_t tmem, int n_local, int warp, int lane, int q0) {
++  BarsW& B = *reinterpret_cast<BarsW*>(sm + W_BAR);
++  constexpr uint32_t T_DH = 0, T_AB = 64;
++  const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
++  for (int i = 0; i < n_local; ++i) {
++    mbar_wait(&B.dhab_full, i & 1);
++    tc_fence_after();
++    uint32_t dh[8 * NQ], av[8 * NQ], bv[8 * NQ];
++#pragma unroll
++    for (int q = 0; q < NQ; ++q) {
++      const uint32_t col = (uint32_t)(q0 + q) * 8;
++      tmem_ld8(trow + T_DH + col, dh + 8 * q);
++      tmem_ld8(trow + T_AB + col, av + 8 * q);
++      tmem_ld8(trow + T_AB + 64 + col, bv + 8 * q);
++    }
++    tmem_wait_ld();
++    tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.gate_read);
++    uint32_t hp[4 * NQ], dap[4 * NQ], dbp[4 * NQ];
++#pragma unroll
++    for (int k = 0; k < 4 * NQ; ++k)
++      gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hp[k], dap[k], dbp[k]);
++    if (i >= GDB) mbar_wait(&B.g_empty[i % GDB], ((i / GDB) - 1) & 1);
++#pragma unroll
++    for (int q = 0; q < NQ; ++q) {
++      const uint32_t off = sw128(r, q0 + q);
++      sts128(su + W_H + off, make_uint4(hp[4 * q], hp[4 * q + 1], hp[4 * q + 2], hp[4 * q + 3]));
++      sts128(su + W_DAB + off, make_uint4(dap[4 * q], dap[4 * q + 1], dap[4 * q + 2], dap[4 * q + 3]));
++      sts128(su + W_DAB + KB + off, make_uint4(dbp[4 * q], dbp[4 * q + 1], dbp[4 * q + 2], dbp[4 * q + 3]));
++    }
++    fence_proxy_async();
++    __syncwarp();
++    if (lane == 0) mbar_arrive(&B.g_full[i % GDB]);
++  }
++}
++
+ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+   const uint32_t su = smem_u32(sm);
+   BarsW& B = *reinterpret_cast<BarsW*>(sm + W_BAR);
+@@ -105,8 +166,8 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+     for (int s = 0; s < 2; ++s) {                        // xn and dy of a tile travel separately; each is freed by all CL slices
+       mbar_init(&B.xn_full[s], 1); mbar_init(&B.dy_full[s], 1); mbar_init(&B.xn_empty[s], CL); mbar_init(&B.dy_empty[s], CL);
+     }
+-    mbar_init(&B.dhab_full, 1); mbar_init(&B.gate_read, 8); mbar_init(&B.wg_done, 1);
+-    for (int s = 0; s < 2; ++s) { mbar_init(&B.g_full[s], 8); mbar_init(&B.g_empty[s], 1); }
++    mbar_init(&B.dhab_full, 1); mbar_init(&B.gate_read, G3 ? 12 : 8); mbar_init(&B.wg_done, 1); mbar_init(&B.ab_full, 1);
++    for (int s = 0; s < 2; ++s) { mbar_init(&B.g_full[s], G3 ? 12 : 8); mbar_init(&B.g_empty[s], 1); }
+     fence_barrier_init();
+   }
+   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
+@@ -147,6 +208,16 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+         }
+       }
+     }
++  } else if (warp == 3) {
++#if PFL
++    // (training part 5) L2 prefetch of the CTA's later tiles (its share of the boxes), one lane per box: a tile's load is issued only
++    // when the tile two before it has freed its slot, and then waits on DRAM (the L2 flush before every measured step)
++    for (int t = lane; t < n_local * 2 * (4 / CL); t += 32) {
++      const int i = t / (2 * (4 / CL)), rem = t % (2 * (4 / CL)), src = rem / (4 / CL), bx = crank * (4 / CL) + rem % (4 / CL);
++      if (i < 2) continue;
++      tma_prefetch_2d(src ? p.xn : p.dy, (bx >> 1) * 64, (repl + i * R) * ROWS + (bx & 1) * 64);
++    }
++#endif
+   } else if (warp == 1) {
+     // dh and [a|b] of each tile (converged warp, one elected lane issues: descriptors stay in uniform registers)
+     mbar_wait(&B.w_full, 0);
+@@ -166,6 +237,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+           umma_ss(tmem + T_AB, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
+         }
++        if (GPREW) tc_commit(&B.ab_full);                    // (training part 5) the gate starts on a | b under the dh product
+       }
+       __syncwarp();
+       mbar_wait(&B.dy_full[b], (i >> 1) & 1);
+@@ -213,13 +285,51 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+     setmaxnreg_inc<REG_GATE>();
+     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
+     const int half = warp >= 12 ? 1 : 0;
+-    for (int i = 0; i < n_local; ++i) {
++    if (G3) dw_gate3<3>(sm, su, tmem, n_local, warp, lane, half * 3);
++    for (int i = 0; i < (G3 ? 0 : n_local); ++i) {
+       if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i);
++      uint32_t hp[16], dap[16], dbp[16];
++#if GPREW
++      // (training part 5) the a | b part of the gate (s, l = a s, h = l b, u = l (1 - s) + s: gate_pair16's ops) as soon as a | b is in
++      // tensor memory (its own commit), under the dh product; after dh only dB = g l and dA = (g b) u remain
++      {
++        uint32_t av[32], bv[32], dh[32];
++        f2 Lp[16], Up[16];
++        mbar_wait(&B.ab_full, i & 1);
++        tc_fence_after();
++        tmem_ld32(trow + T_AB + half * 32, av);
++        tmem_ld32(trow + T_AB + 64 + half * 32, bv);
++        tmem_wait_ld();
++#pragma unroll
++        for (int k = 0; k < 16; ++k) {
++          const f2 A = mk2u(av[2 * k], av[2 * k + 1]), Bv = mk2u(bv[2 * k], bv[2 * k + 1]);
++          const f2 S = sigmoid_tr(A);
++          Lp[k] = mul2(A, S);
++          const f2 H = mul2(Lp[k], Bv);
++          hp[k] = pack_bf16(lo2(H), hi2(H));
++          Up[k] = fma2(Lp[k], fma2(S, mk2(-1.f, -1.f), mk2(1.f, 1.f)), S);
++        }
++        mbar_wait(&B.dhab_full, i & 1);
++        if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 1);
++        tc_fence_after();
++        tmem_ld32(trow + T_DH + half * 32, dh);
++        tmem_wait_ld();
++        tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.gate_read);
++#pragma unroll
++        for (int k = 0; k < 16; ++k) {
++          const uint32_t gp = pack_bf16(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1]));
++          const f2 G = mk2(bf16lo(gp), bf16hi(gp)), Bv = mk2u(bv[2 * k], bv[2 * k + 1]);
++          const f2 DB = mul2(G, Lp[k]), DA = mul2(mul2(G, Bv), Up[k]);
++          dap[k] = pack_bf16(lo2(DA), hi2(DA)); dbp[k] = pack_bf16(lo2(DB), hi2(DB));
++        }
++      }
++#else
+       mbar_wait(&B.dhab_full, i & 1);
+       if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 1);
+       tc_fence_after();
++#if !GOV
+       if (i >= GDB) mbar_wait(&B.g_empty[i % GDB], ((i / GDB) - 1) & 1);
+-      if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 2);
++#endif
+       {
+         uint32_t dh[32], av[32], bv[32];
+         tmem_ld32(trow + T_DH + half * 32, dh);
+@@ -227,28 +337,25 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+         tmem_ld32(trow + T_AB + 64 + half * 32, bv);
+         tmem_wait_ld();
+         tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.gate_read);
+-        if (cta == 0 && warp == 4 && lane == 0) TRB(0, 3, 1024 + i);
++        // 8 hidden units -> one 16-byte chunk of h, dA and dB each. (training part 5, GOV) all 16 pairs are computed first and only the
++        // stores wait (g_empty) for the dW products of tile i - 1, which still read h / [dA | dB]: the gate_read arrival, hence the next
++        // tile's dh / [a | b] products, and the arithmetic no longer queue behind them (tbwd_d64.cu has done the first part since w1)
+ #pragma unroll
+-        for (int qq = 0; qq < 4; ++qq) {                   // 8 hidden units -> one 16-byte chunk of h, dA and dB each, stored right away
+-          uint32_t hp[4], dap[4], dbp[4];
++        for (int k = 0; k < 16; ++k)
++          gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hp[k], dap[k], dbp[k]);
++      }
++#endif
++      if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 2);
++#if GOV || GPREW
++      if (i >= GDB) mbar_wait(&B.g_empty[i % GDB], ((i / GDB) - 1) & 1);
++#endif
++      {
+ #pragma unroll
+-          for (int kk = 0; kk < 4; ++kk) {
+-            const int k = qq * 4 + kk;
+-            gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hp[kk], dap[kk], dbp[kk]);
+-            continue;
+-            const uint32_t gp = pack_bf16(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1]));
+-            const float g0 = bf16lo(gp), g1 = bf16hi(gp);
+-            const float a0 = __uint_as_float(av[2 * k]), a1 = __uint_as_float(av[2 * k + 1]);
+-            const float b0 = __uint_as_float(bv[2 * k]), b1 = __uint_as_float(bv[2 * k + 1]);
+-            float s0, s1; SIGMOID2(a0, a1, s0, s1); const float l0 = a0 * s0, l1 = a1 * s1;
+-            hp[kk] = pack_bf16(l0 * b0, l1 * b1);
+-            dap[kk] = pack_bf16(gate_da(g0, b0, s0, l0), gate_da(g1, b1, s1, l1));
+-            dbp[kk] = pack_bf16(g0 * l0, g1 * l1);
+-          }
++        for (int qq = 0; qq < 4; ++qq) {
+           const uint32_t off = sw128(r, half * 4 + qq);
+-          sts128(su + W_H + off, make_uint4(hp[0], hp[1], hp[2], hp[3]));
+-          sts128(su + W_DAB + off, make_uint4(dap[0], dap[1], dap[2], dap[3]));
+-          sts128(su + W_DAB + KB + off, make_uint4(dbp[0], dbp[1], dbp[2], dbp[3]));
++          sts128(su + W_H + off, make_uint4(hp[4 * qq], hp[4 * qq + 1], hp[4 * qq + 2], hp[4 * qq + 3]));
++          sts128(su + W_DAB + off, make_uint4(dap[4 * qq], dap[4 * qq + 1], dap[4 * qq + 2], dap[4 * qq + 3]));
++          sts128(su + W_DAB + KB + off, make_uint4(dbp[4 * qq], dbp[4 * qq + 1], dbp[4 * qq + 2], dbp[4 * qq + 3]));
+         }
+       }
+       fence_proxy_async();
+@@ -260,6 +367,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+     // the CTA's fp32 partials: [dWa_s; dWb_s] rows = TMEM lanes, dWs_s rows (d) = TMEM lanes
+     setmaxnreg_inc<REG_EPI>();
+     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
++    if (G3) dw_gate3<2>(sm, su, tmem, n_local, warp, lane, 6);    // (G3) units 48-63 of the gate first
+     mbar_wait(&B.wg_done, 0);
+     tc_fence_after();
+     float* pab = p.partab + ((size_t)cta * 128 + r) * 128;
+@@ -389,6 +497,15 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+         }
+       }
+     }
++#if PFL
++    else {                                                     // (training part 5) lanes 1-31: L2 prefetch of the later tiles' dy / xn and
++      for (int t = lane - 1; t < n_valid * 12; t += 31) {      // of every tile's x (loaded once its xn is dead)
++        const int i = t / 12, k = t % 12, src = k >> 2, cb = (k >> 1) & 1, h = k & 1;
++        if (src < 2 && i < 2) continue;
++        tma_prefetch_2d(src == 0 ? p.dy : src == 1 ? p.xn : p.x, cb * 64, (cta + i * ndx) * ROWS + h * 64);
++      }
++    }
++#endif
+   } else if (warp == 1) {
+     // [a|b]_j and dh_j (converged warp, elected issue): [a|b]_j into the AB buffer once the gate has loaded chunk c - 1's (its own
+     // commit, so the gate loads it while dh_j runs), then dh_j into DH buffer c & 1 once the d_xn product of chunk c - 2 has read the
+@@ -477,13 +594,37 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+         tc_fence_before();
+         __syncwarp();
+         if (lane == 0) mbar_arrive(&B.ab_read);
++        uint32_t da[16], db[16];
++#if GPRE
++        // (training part 5) the a | b-only part of the gate (s, l = a s, u = l (1 - s) + s: gate_pair16's ops) before dh_j is waited for;
++        // after it only dB = g l and dA = (g b) u remain
++        f2 Lp[16], Up[16];
++#pragma unroll
++        for (int k = 0; k < 16; ++k) {
++          const f2 A = mk2u(av[2 * k], av[2 * k + 1]);
++          const f2 S = sigmoid_tr(A);
++          Lp[k] = mul2(A, S);
++          Up[k] = fma2(Lp[k], fma2(S, mk2(-1.f, -1.f), mk2(1.f, 1.f)), S);
++        }
+         mbar_wait(&B.dh_full[s], u & 1);
+         tc_fence_after();
+         tmem_ld32(trow + T_DH + s * 64 + half * 32, dh);
+         tmem_wait_ld();
+-        uint32_t da[16], db[16];
+ #pragma unroll
+         for (int k = 0; k < 16; ++k) {
++          const uint32_t gp = pack_bf16(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1]));
++          const f2 G = mk2(bf16lo(gp), bf16hi(gp)), Bv = mk2u(bv[2 * k], bv[2 * k + 1]);
++          const f2 DB = mul2(G, Lp[k]), DA = mul2(mul2(G, Bv), Up[k]);
++          da[k] = pack_bf16(lo2(DA), hi2(DA)); db[k] = pack_bf16(lo2(DB), hi2(DB));
++        }
++#else
++        mbar_wait(&B.dh_full[s], u & 1);
++        tc_fence_after();
++        tmem_ld32(trow + T_DH + s * 64 + half * 32, dh);
++        tmem_wait_ld();
++#endif
++#pragma unroll
++        for (int k = 0; k < (GPRE ? 0 : 16); ++k) {
+           { uint32_t hh; gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hh, da[k], db[k]); (void)hh; }
+           continue;
+           const uint32_t gp = pack_bf16(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1]));

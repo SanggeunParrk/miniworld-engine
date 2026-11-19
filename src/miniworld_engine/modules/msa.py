@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.norm import LayerNorm, a100, sm120
+from miniworld_engine.modules.norm import LayerNorm, a100, b200, sm120
 from miniworld_engine.modules.primitives import BackendModule, Dropout, Linear, MasterWeights, key_mask, master_autocast, random_input, wide
 
 #: Release directories of the model kits' own MSA kernels (the ``"anthropic"`` backends; ``modules/_anthropic.load(..., path=...)``).
@@ -194,6 +194,15 @@ class OuterProductMean(BackendModule, MasterWeights):
         # 3 (2026-11-16): inference at depth > 4096 takes cuBLAS + the epilogue on the count table instead of the fused kernel (opm_train._product_route_deep)
         "triton": 2,
         "cuda:5090_sm120": 3,
+        "cuda:b200_sm100": 4,  # 2026-11-16: the sm_100a kernels (kernels.integrations.opm_sm100, outer_product_mean.chai_sm100)
+        # b200 2 (2026-11-17): inference at depth <= 512 (S 384: every length; S 512: N >= 512) on the fused product + projection kernel
+        # (opm_sm100._fused_serves: opm_fused_infer, depth padded to 128); the unfused path pads the depth to 128 (was 256: 0.84-0.98 at S 384)
+        # b200 3 (2026-11-17, round 3): the count_offset divisor table off the prologue's bit rows (opm_norm(bits, dmin, doff); was a cuBLAS
+        # GEMM of the mask + clamp + add: the same fp32 values, three launches fewer); the count table on a side stream beside the product;
+        # inference hands the two projection biases to the prologue through the cast buffer (no cat, no fp32 copy); the cast 8 elements a thread
+        # b200 4 (2026-11-17): inference reads the bf16 parameter forms cast once per parameter version (opm_sm100._infer_flat, as the H100
+        # param_forms: no cast launch per call / graph replay; L128 inference geomean 0.96); the backward's parameter gradients (and Chai-1's) in
+        # one cast launch (_cast_cuda.cast, as the H100 path) instead of one copy each
     }  # 2026-11-10: sm_80 paths; 2026-11-11: count_offset in the triton / sm_80 kernels (FoldForge R2); 2026-11-12: their sm_120a build (RTX 5090)
     # (2026-11-13: inference past L 2048 forms the outer product per chunk of rows, sm80.epilogue_rows: bitwise the same outputs, no version change)
     # 5090 2 (2026-11-13): CUTLASS products on sm_120a (256 x 128 masked outer product from L 512, dA / dB, the Chai-1 groups), wide epilogue at d_pair 256
@@ -426,6 +435,20 @@ class OuterProductMean(BackendModule, MasterWeights):
 
             why = opm_sm80.refusal(self, msa, mask, token_asym_id, residual)
             return ("sm80", None) if why is None else (None, f"opm_sm80: {why}")
+        if b200(msa):  # B200: kernels.integrations.opm_sm100 (groups 1) / outer_product_mean.chai_sm100 (Chai-1)
+            if self.groups > 1:
+                from miniworld_engine.kernels.outer_product_mean import chai_sm100
+
+                if chai_sm100.serves(self, msa, mask):
+                    return "chai_sm100", None
+                return None, (
+                    f"grouped OPM (groups {self.groups} x {self.group_width}, d_msa {msa.shape[-1]}, d_pair {self.to_out.weight.shape[0]}): "
+                    f"the B200 Chai-1 kernels take 8 x 8 groups, d_msa 64, d_pair in {chai_sm100.D_PAIR}, no projection bias"
+                )
+            from miniworld_engine.kernels.integrations import opm_sm100
+
+            why = opm_sm100.refusal(msa, self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0])
+            return ("sm100", None) if why is None else (None, f"opm_sm100: {why}")
         if torch.cuda.get_device_capability(msa.device) != (9, 0):
             return None, "the cuda backend is the H100 (sm_90a) kernels"
         from miniworld_engine.kernels.integrations import opm_train
@@ -481,6 +504,14 @@ class OuterProductMean(BackendModule, MasterWeights):
             if torch.is_grad_enabled():
                 return opm_sm80.update_train(self, msa, mask, residual)
             return opm_sm80.update_inference(self, msa, mask, residual)
+        if route == "sm100":
+            from miniworld_engine.kernels.integrations import opm_sm100
+
+            return opm_sm100.outer_product_mean(self, msa, mask, residual, token_asym_id if self._interchain(token_asym_id) else None)
+        if route == "chai_sm100":
+            from miniworld_engine.kernels.outer_product_mean import chai_sm100
+
+            return chai_sm100.forward(self, msa, mask, token_asym_id, residual)
         if route == "chai":
             return chai.forward(self, msa, mask, token_asym_id, residual)
         if route == "composed":
@@ -576,6 +607,22 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
         "cuda:a100_sm80": 2,
         "cuda:5090_sm120": 3,
         "cuda:h100_sm90": 2,  # 2 (2026-11-18, 3.0.1): wide-width training backward fuses the dropout mask + BIG dv permute (bit-identical); native builds at every served training shape
+        "cuda:b200_sm100": 21,  # 2026-11-16: the sm_100a kernels (kernels.integrations.pwa_sm100)
+        # b200 2 (2026-11-17): inference runs pair_fwd on a side stream on SMs of its own beside the MSA side; wide build: one weight-cast
+        # launch, d_hidden 8 o / v tiles as flat 512-byte TMA rows, deeper stage rings at d_msa 64 / 8 x 8
+        # b200 3 (2026-11-17): wide build: the LayerNorm of ln_vg_w / gate_out_w by two threads a row with the row in registers (d_msa 128
+        # ln_vg_w 22.6 -> 17.7 us at L128 depth 1024, gate_out_w 57.1 -> 54.1 us at L256); inference reads bf16 Wv / Wg / Wo cast once per
+        # parameter version (pwa_sm100._infer_weights: no cast launch per call / per graph replay)
+        # b200 4 (2026-11-17): wide build: glue_w (training backward) back to 320 threads -- version 3 had given it the LayerNorm warps too
+        # and its extra warps drained heads 8-11 (training hung); gate_out_w keeps the one-thread LayerNorm at d_hidden 32
+        # (b200 4, same day): the backward's seven parameter gradients in one cast launch (_cast_cuda.cast, as the H100 path) instead of seven copies
+        # b200 5 (2026-11-17): training at d_msa 64 / 8 x 32 runs pair_fwd on the side stream beside ln_vg too (L128 depth 384 train step
+        # 167.0 -> 162.0 us); the wide build's backward casts Wg / Wv / Wo in one launch (was three .to)
+        # b200 20 (2026-11-17): inference at 64 / 8 x 32 / d_pair 128, N <= 512: pair_fwd and ln_vg in ONE launch on disjoint CTAs (pwa_dual:
+        # no fork / join graph edges; the same bits); L128 depth 384 graph 44.9 -> 40.8 us
+        # b200 21 (2026-11-18): inference at that width, N 128: o = w . v (tcgen05, in place over v) and the gate pass in ONE launch
+        # (pwa_ctr_gate, PDL dependent of pwa_dual, grid counter) instead of cuBLAS bmm + pwa_gate_out; the same bits; L128 depth 384
+        # graph 42.8 -> 38.9 us
     }  # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80); 2026-11-12: the sm_120a build of the sm_80 paths (RTX 5090);
     # 5090 2: inference up to the longest bf16 logit row of 99 KB (L 4080 at d_pair 128; sm80._sm120_infer_len)
     # 5090 3 (2026-11-13): CUTLASS batched GEMMs for the key contraction / dv / dw (gemm_sm120), the BIG width's projections (v head-major from the epilogue), 3-warp gate_out
@@ -896,6 +943,11 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
 
             why = pwa_sm80.refusal(self, msa, pair, mask)
             return None if why is None else f"pwa_sm80: {why}"
+        if b200(msa):  # B200: kernels.integrations.pwa_sm100 (forward + backward, the residual and the row dropout in the kernels)
+            from miniworld_engine.kernels.integrations import pwa_sm100
+
+            why = pwa_sm100.refusal(msa, pair, *self._widths())
+            return None if why is None else f"pwa_sm100: {why}"
         if torch.cuda.get_device_capability(msa.device) != (9, 0):
             return "the cuda backend is the H100 (sm_90a) kernels"
         from miniworld_engine.kernels.integrations import pwa_train
@@ -911,6 +963,10 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
             if self._trains():
                 return pwa_sm80.update_train(self, msa, pair, mask)
             return pwa_sm80.update_inference(self, msa, pair, mask)
+        if b200(msa):
+            from miniworld_engine.kernels.integrations import pwa_sm100
+
+            return pwa_sm100.pair_weighted_averaging(self, msa, pair, mask, train=self._trains())
         from miniworld_engine.kernels.integrations import pwa_train
 
         if self._trains():

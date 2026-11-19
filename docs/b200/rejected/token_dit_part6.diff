@@ -1,0 +1,302 @@
+# round 3 part 6 (r3-token-dit): built, measured, rejected. Inference: F32_EARLY (pair pass first + gates on a 2nd side stream), VT_MAIN_L / VT_OWN as broad switches (the taken rule is narrower). Training: the weight pack in two launches (train_pack100r, tail beside the chain), the tdt_epi res_c / swiglu / swiglu_bwd epilogue routes, dcg via tdt_epi.
+diff --git a/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py b/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py
+index 9a541d814..67a1288bf 100644
+--- a/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py
++++ b/src/miniworld_engine/kernels/conditioned_transition/cuda/__init__.py
+@@ -355,12 +355,19 @@ _B200_FOLDS = os.environ.get("MINIWORLD_TOKEN_B200_FOLDS", "1") != "0"
+ _B200_BF16_FORK = os.environ.get("MINIWORLD_TOKEN_B200_BF16_FORK", "1") != "0"
+ #: B200 fp32 inference inside a capture, one sample: the v^T GEMM on the chain (0: beside it)
+ _B200_VT_MAIN = os.environ.get("MINIWORLD_TOKEN_B200_VT_MAIN", "1") != "0"
++#: ... and with several samples up to this length (0: one sample only)
++_B200_VT_MAIN_L = int(os.environ.get("MINIWORLD_TOKEN_B200_VT_MAIN_L", "0"))
++#: B200 fp32 inference inside a capture up to this length: v^T on a third stream (beside the q | k rows and the pair pass; 0: off)
++_B200_VT_OWN = int(os.environ.get("MINIWORLD_TOKEN_B200_VT_OWN", "0"))
+ #: B200 fp32 inference without a gating query (Chai-1): the gate columns from the q | k | g GEMM (zero rows, bias +1e4; 0: fill + a q | k GEMM)
+ _B200_NOGATE_GEMM = os.environ.get("MINIWORLD_TOKEN_B200_NOGATE_GEMM", "1") != "0"
+ #: B200 fp32: the pair -> bias pass and the v^T GEMM of a captured inference step as a parallel branch of the graph, joined before the
+ #: core (``bias_only_dit.cuda.side``; MINIWORLD_TOKEN_B200_STREAMS=0: one chain). The pair pass is the largest stage of a step whose
+ #: bias is rebuilt per replay (36 of 213 us at L 768 bf16, 115 of 372 us fp32) and reads nothing of the conditioning / single chain.
+ _B200_STREAMS = os.environ.get("MINIWORLD_TOKEN_B200_STREAMS", "1") != "0"
++#: B200 fp32 inference inside a capture: the pair pass issued right after the first conditioning GEMM, the gates' GEMM on a second side
++#: stream (0: the gates' GEMM, then the pair pass, on one side stream)
++_B200_F32_EARLY = os.environ.get("MINIWORLD_TOKEN_B200_F32_EARLY", "1") != "0"
+ 
+ 
+ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=None, variant=None):
+@@ -669,6 +676,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+     # B200 fp32 inside a capture (2026-11-17, part 3): the pair pass (a persistent grid on every SM) is issued after the conditioning
+     # GEMMs below -- issued first, it held the SMs while the conditioning rows and their GEMMs queued behind it (~11 us at L 128)
+     late_bias = sfork is not None
++    sg2 = None  # (B200 fp32, _B200_F32_EARLY: the gates' GEMM's side stream, joined after the core)
+     bias = None if late_bias else bias_lookup()
+     shared = cond.shape[0] == 1 or cond.stride(0) == 0
+     c = (
+@@ -707,7 +715,15 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+         stats = single.new_empty((P, 2), dtype=torch.float32)
+     else:
+         g1 = torch.addmm(b1, cn if sig else cc, w1.t()).view(P, 4, D)
+-        if late_bias:  # the gates' GEMM beside the chain (read after the join before the core), then the pair pass
++        if late_bias and _B200_F32_EARLY:
++            # B200 fp32 (round 3 part 6): the pair pass first on the side stream (it ran after the gates' GEMM there and, with v^T
++            # behind it, was the path to the core), the gates' GEMM on a second side stream, joined after the core (first read there)
++            assert sfork is not None
++            bias = bias_lookup()
++            sg2 = _side.fork(single.device)
++            with _side.on(sg2):
++                g2 = torch.addmm(b2, cc, w2.t()).view(P, 2, D)
++        elif late_bias:  # the gates' GEMM beside the chain (read after the join before the core), then the pair pass
+             assert sfork is not None
+             sfork.wait_stream(torch.cuda.current_stream(single.device))
+             with _side.on(sfork):
+@@ -739,8 +755,16 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+     vt = None
+     # (one sample: the side stream's pair pass outlasts the chain to the core -- v^T on the chain, after the q | k rows; five samples keep
+     # it beside the chain: measured 4-6 % slower on the chain at L 256 - 512, 2026-11-17 part 3)
+-    vt_main = fp32 and sfork is not None and A * B == 1 and _B200_VT_MAIN
+-    if (
++    vt_own = fp32 and sfork is not None and L <= _B200_VT_OWN
++    svt = None
++    vt_main = fp32 and sfork is not None and not vt_own and (A * B == 1 or L <= _B200_VT_MAIN_L) and _B200_VT_MAIN
++    if vt_own:  # B200 fp32 (round 3 part 6): v^T on a stream of its own, beside the q | k rows and the pair pass
++        svt = _side.fork(single.device)
++        with _side.on(svt):
++            vt = torch.mm(wqkvg[3 * D :], xa.t())
++            if qk_rna:
++                rna_rows(vt, M)
++    elif (
+         fp32 and sfork is not None and not vt_main
+     ):  # B200 fp32 inside a capture: v^T (xa is in) beside the q | k | g GEMM and the q / k rows
+         sfork.wait_stream(torch.cuda.current_stream(single.device))
+@@ -767,6 +791,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+             rna_rows(vt, M)
+     # the core skips the key tiles past the last attended key of a padded mask, reading the mask itself (``kernels._key_len``; the same bits)
+     _side.join(single.device, sfork)  # the bias (and v^T) are in
++    _side.join(single.device, svt)
+     kmask = kernel_mask(mask, L)
+     if fp32:
+         if vt is None:
+@@ -791,6 +816,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
+                     core(qkvg[b * L :], bias[b], 0, A, L=L, srow=B * L)
+         else:
+             attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B, kmask=kmask)
++    _side.join(single.device, sg2)  # the gates (g2) are in
+     ya = torch.mm(qkvg[:, :D], wo.t())
+     if not parallel and fold:
+         _ext().resgate_adaln_cf_cuda(xin, ya, G, r1, b1f, b2f, stats, xa, ada_eps, _PDL)
+diff --git a/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu b/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
+index a08c24fd7..ee3c2a3e6 100644
+--- a/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
++++ b/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
+@@ -190,6 +190,41 @@ std::vector<at::Tensor> train_pack100(std::vector<at::Tensor> weights,bool qk,bo
+  train_pack100_k<<<total,256,0,S()>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
+ }
+ 
++// train_pack100 in two parts (round 3 part 6): outputs [o0, o1) only, into ``outs`` when given (the second call), else allocated (all 21, as
++// train_pack100 returns them). grid > 0: train_pack100s_k on that many CTAs (a part beside the chain leaves the other SMs to it); 0: the
++// full grid. The forward needs the outputs past 17 (Wo, [Wa; Wb], Ws) only after the attention core: the first part packs 0-17 on the
++// chain, the second the rest on a side stream. Each output's values are train_pack100's.
++std::vector<at::Tensor> train_pack100r(std::vector<at::Tensor> weights,bool qk,bool fp32,int o0,int o1,int grid,std::vector<at::Tensor> outs) {
++ TORCH_CHECK((D==768||D==1024)&&weights.size()==(qk?25:23),"native token pack: 768 or 1024 wide weights");
++ TORCH_CHECK(0<=o0&&o0<o1&&o1<=21&&(outs.empty()||outs.size()==21),"train_pack100r: output range / outs");
++ const at::cuda::CUDAGuard guard(weights[0].device());
++ TrainPack90 p{};p.qk=qk;
++ for(int j=0;j<(int)weights.size();++j){
++  TORCH_CHECK(weights[j].is_cuda()&&weights[j].is_contiguous()&&weights[j].device()==weights[0].device()&&(weights[j].scalar_type()==at::kFloat||weights[j].scalar_type()==at::kBFloat16),"native token weight layout/dtype");
++  p.src[j]=weights[j].data_ptr();p.sf[j]=weights[j].scalar_type()==at::kFloat;
++ }
++ std::vector<std::vector<int64_t>> shapes={{DC},{DC},{4*D,DC},{4*D,DC},{2*D,DC},{D},{D},{D},{D},
++ {4*D,D},{4*D},{HD},{HD},{DPW},{NHH,DPW},{NHH,DPW},{NHH,DPW},{NHH,DPW},{D,D},{2*HID,D},{D,HID}};
++ const int aliases[21]={6,14,-1,-1,-1,8,16,11,19,-1,-1,qk?23:-1,qk?24:-1,12,13,-1,-1,-1,5,-1,22};
++ const bool given=!outs.empty();int total=0;
++ for(int o=0;o<21;++o){
++  bool isact=(o==3||o==4||o==9||o==10||o==16||o==17||o>=18);
++  auto dt=isact&&!fp32?at::kBFloat16:at::kFloat;p.df[o]=dt==at::kFloat;
++  const int a=aliases[o];
++  const bool alias=a>=0&&weights[a].scalar_type()==dt;
++  if(!given)outs.push_back(alias?weights[a]:at::empty(shapes[o],weights[0].options().dtype(dt)));
++  if(alias||o<o0||o>=o1)continue;
++  TORCH_CHECK(outs[o].scalar_type()==dt&&outs[o].is_contiguous(),"train_pack100r: outs");
++  p.dst[o]=outs[o].data_ptr();p.size[o]=outs[o].numel();p.blocks[o]=(p.size[o]+1024*UNR-1)/(1024*UNR);total+=p.blocks[o];
++ }
++ if(total){
++  if(grid>0)train_pack100s_k<<<std::min(grid,total),256,0,S()>>>(p,total);
++  else train_pack100_k<<<total,256,0,S()>>>(p);
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++ }
++ return outs;
++}
++
+ // the 4 elements at i of gradient output o (train_final90_k's values)
+ __device__ __forceinline__ float4 train_final_value(const TrainGrad90& p,int o,int i) {
+  float4 v=make_float4(0,0,0,0);
+@@ -403,6 +438,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+          py::arg("eps"), py::arg("extra") = py::none(), py::arg("extra_scale") = 1.0,
+          py::arg("masked") = -std::numeric_limits<double>::infinity());
+   rebind(m, "train_pack90", &train_pack100);
++  m.def("train_pack100r", &train_pack100r);
+   rebind(m, "unfold_lnw", &unfold_lnw100);
+   rebind(m, "train_final90", &train_final100, py::arg("params"), py::arg("grads"), py::arg("dwn"), py::arg("raw"), py::arg("w1"),
+          py::arg("w2"), py::arg("allp"), py::arg("dwf"), py::arg("wb"), py::arg("wp"), py::arg("hierarchical") = false);
+diff --git a/src/miniworld_engine/kernels/integrations/token_dit_train.py b/src/miniworld_engine/kernels/integrations/token_dit_train.py
+index 15cb65ea7..9f986a005 100644
+--- a/src/miniworld_engine/kernels/integrations/token_dit_train.py
++++ b/src/miniworld_engine/kernels/integrations/token_dit_train.py
+@@ -465,7 +465,7 @@ def _native_caller_hooks(*tensors, force: bool = False):
+             install(node)
+ 
+ 
+-def _pack(P, qk, dev, at, opts=None):
++def _pack(P, qk, dev, at, opts=None, tail=None):
+     """The block's weights in the kernels' layouts (GEMM operands in ``at``, folded cond / pair LayerNorm weights, fp32 bias
+     vectors). Rebuilt only when a parameter changes -- an optimizer step bumps ``_version`` -- so a training step pays
+     it once per block, not once per forward. Scoped to the CUDA-graph capture (``kernels._capture``): an eager pack is never
+@@ -473,7 +473,9 @@ def _pack(P, qk, dev, at, opts=None):
+ 
+     ``opts``: a model's options (None: the defaults), packed by the torch branch from the block's leaves (``_leaves``): no gating
+     query -> the gate rows' bias +1e4 (sigmoid = 1, its gradient 0); the up-gate transition -> Wab = [W_a; W_b; W_u]; the flat q / k
+-    LayerNorm -> nq / nk / nqb / nkb its [D] affine."""
++    LayerNorm -> nq / nk / nqb / nkb its [D] affine.
++    ``tail`` (B200, round 3 part 6): a runner (``fn -> None``) for the outputs the forward reads only after the attention core (Wo,
++    [W_a; W_b], W_s): the default options pack the others on the chain and these through ``tail`` (a side stream); None: one launch."""
+     # (B200, 2026-11-17: a model's options too -- the canonical leaves through the native pack, then ``_pack_options``; the torch pack was
+     # ~25 small kernels, ~60 us of a Boltz-2 / RoseTTAFold3 / Chai-1 training step)
+     native = _nrows(dev) and (opts is None or not _sm90(dev))
+@@ -520,7 +522,13 @@ def _pack(P, qk, dev, at, opts=None):
+             dp=P["attention.ln_pair.weight"].shape[0],
+         )
+         weights = [P[n] for n in names]
+-        W = dict(zip(keys, T.train_pack90(weights, qk, at is torch.float32), strict=True))
++        if tail is not None and opts is None and _PACK_SPLIT and not _sm90(dev):
++            f32 = at is torch.float32
++            outs = T.train_pack100r(weights, qk, f32, 0, 18, 0, [])
++            tail(lambda: T.train_pack100r(weights, qk, f32, 18, 21, _PACK_SPLIT, outs))
++            W = dict(zip(keys, outs, strict=True))
++        else:
++            W = dict(zip(keys, T.train_pack90(weights, qk, at is torch.float32), strict=True))
+         if opts is not None:
+             _pack_options(W, P, opts, at, d_)
+         if slot is not None:
+@@ -620,6 +628,30 @@ def _swiglu_gemm(xt, wab):
+     return _GSW[idx]
+ 
+ 
++def _epi(h100, fp32, up):
++    """B200, bf16, no up gate: ``tdt_epi`` (the few-row GEMMs with the neighbouring row pass in their epilogue; its ``supported``
++    gates the rows), else None."""
++    if h100 or fp32 or up or not _EPI_B200:
++        return None
++    from miniworld_engine.kernels.conditioned_transition.cuda import tdt_epi
++
++    return tdt_epi
++
++
++def _ok_w(w):
++    """a bf16 weight TMA can stream: contiguous, 16-B aligned"""
++    return w.dtype is BF and w.is_contiguous() and w.data_ptr() % 16 == 0
++
++
++#: B200: the few-row GEMMs with the row pass in their epilogue (``tdt_epi``; 0: cuBLAS + the row kernels)
++_EPI_B200 = os.environ.get("MINIWORLD_TOKEN_B200_EPI", "1") != "0"
++#: B200 training forward: the weight pack in two launches, Wo / [W_a; W_b] / W_s beside the chain on this many CTAs (0: one launch)
++_PACK_SPLIT = int(os.environ.get("MINIWORLD_TOKEN_B200_PACK_SPLIT", "0"))
++#: B200 one sample: dchat = dG Wn as one tdt_epi split-K launch (the K split; 0: cuBLAS)
++_EPI_DC = int(os.environ.get("MINIWORLD_TOKEN_B200_EPI_DC", "0"))
++_EPI_DCG = int(os.environ.get("MINIWORLD_TOKEN_B200_EPI_DCG", "0"))
++
++
+ #: The option leaves after the canonical ones (``_names_for`` with a model's options): the up-gate weight (Boltz-2) and the flat q / k
+ #: LayerNorm's affine (RoseTTAFold3), and the module parameter each one is.
+ UP_LEAF = ("up", "transition.up.weight")
+@@ -869,11 +901,12 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
+     cbf = None if own_c else torch.empty_like(chat)
+     # B200 inside a capture: the gate GEMM (0) and the pair pass (1) beside the chain, joined before the core; the conditioning prep (2)
+     # beside the weight pack (2026-11-17, part 3: issued first, so its few blocks are not queued behind the pack's full grid)
+-    sd = _Side(dev, 3)
++    # (3: the tail of the weight pack, round 3 part 6 -- joined before the out projection)
++    sd = _Side(dev, 4)
+     cst = torch.empty(M, 2, device=dev)
+     if nrows and not h100:
+         sd.run(2, lambda: T.cond_prep90(cond, chat, cbf, cst, EPS))
+-        W = _pack(P, qk, dev, at, None if plain else v)
++        W = _pack(P, qk, dev, at, None if plain else v, tail=lambda fn: sd.run(3, fn))
+         sd.wait(2)
+     else:
+         if nrows:
+@@ -946,12 +979,14 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
+         else:
+             og, LSE = sm90.forward(qn, kn, vc, bias, km if native else _key_mask(mask, A, L), A, L, qkvg, H, DH)  # sigmoid(g) o, no O
+     else:
+-        sd.join()  # the bias and Gg are in
++        for k in (0, 1, 2):  # the bias and Gg are in (not the pack tail: 3)
++            sd.wait(k)
+         if not fp32 and mask is not None and not _pair_fused(h100, fp32, dpw):  # (the one-pass pair_bias wrote the mask)
+             bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
+         O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
+         og = torch.empty(M, D, device=dev, dtype=at)
+         T.gate_o(O, qkvg, og)
++    sd.wait(3)  # the pack tail (Wo, [W_a; W_b], W_s)
+     Wo = W["Wo"]
+     y = mm(og, Wo.t())
+     x1 = torch.empty_like(x)
+@@ -960,16 +995,24 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
+     Wab = W["Wab"]
+     h = torch.empty(M, nexp * D, device=dev, dtype=at)
+     gsw = None if up else _swiglu_gemm(xt, Wab)
++    epi = _epi(h100, fp32, up)
+     if gsw is not None:  # expand GEMM + SwiGLU, a | b saved on the way
+         ab = torch.empty(M, 2 * nexp * D, device=dev, dtype=at)
+         gsw(xt, Wab, h, ab)
++    elif epi is not None and epi.supported("swf", xt) and _ok_w(Wab):  # B200 one sample: the SwiGLU in the GEMM's epilogue
++        ab = torch.empty(M, 2 * nexp * D, device=dev, dtype=at)
++        epi.swiglu(xt, Wab, ab, h)
+     else:
+         ab = mm(xt, Wab.t())  # [M, 2 * n D] a | b ([M, 3 n D] a | b | u up-gated)
+         rows.swiglu_rows(ab, h, up=up)
+     Wsq = W["Wsq"]
+-    z = mm(h, Wsq.t())
+     out = torch.empty(M, D, device=dev, dtype=single.dtype)
+-    T.res_c(x1, z, Gg, bg2, out)
++    if epi is not None and epi.supported("resc", h) and _ok_w(Wsq) and Gg.is_contiguous() and out.dtype in (BF, torch.float32):
++        z = torch.empty(M, D, device=dev, dtype=at)  # B200 one sample: res_c in the squeeze GEMM's epilogue
++        epi.res_c(h, Wsq, x1, Gg, bg2, z, out)
++    else:
++        z = mm(h, Wsq.t())
++        T.res_c(x1, z, Gg, bg2, out)
+     # custom-op outputs may not alias each other: without QK-norm q / k / v are views of qkvg -- not outputs, recovered in _bwd
+     qkv_out = [qn, kn, vsave] if copies else []
+     if cbf is None:
+@@ -1366,10 +1409,14 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+     sd = _Side(dev, 3)  # B200 inside a capture: the weight-gradient GEMMs (streams 0, 2) and the pair backward (stream 1) beside the chain
+     dz = torch.empty(M, D, device=dev, dtype=at)
+     T.res_c_bwd(dout, z, Gg, bg2, dz, dGg, part[0])
+-    dh = mm(dz, Wsq)  # [M, n D]
++    epi = _epi(h100, fp32, up)
+     dab = torch.empty_like(ab)
+-    h = torch.empty_like(dh)
+-    T.swiglu_bwd(dh, ab, dab, h, up)
++    h = torch.empty(M, nexp * D, device=dev, dtype=at)
++    if epi is not None and epi.supported("swb", dz) and _ok_w(Wsq) and ab.is_contiguous():  # B200: swiglu_bwd in the GEMM's epilogue
++        epi.swiglu_bwd(dz, Wsq, ab, dab, h)
++    else:
++        dh = mm(dz, Wsq)  # [M, n D]
++        T.swiglu_bwd(dh, ab, dab, h, up)
+     if lf is not None:
+         sd.run(0, lambda: _mm32(dz.t(), h, out=lf["transition.squeeze.weight"]))
+         dWsq = None
+@@ -1475,8 +1522,14 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+     else:
+         dWg = sd.run(0, lambda: mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf))
+         fin = None
+-    dchat = mm(dG, Wn)
+-    dcg = mm(dGg, Wg)
++    if epi is not None and _EPI_DC and epi.supported("dc", dG) and _ok_w(Wn) and Wn.shape[1] % 64 == 0:
++        dchat = epi.mm(dG, Wn, 1, bn=64, ks=_EPI_DC)  # B200: one split-K cluster launch (cuBLAS: split K + its reduce kernel)
++    else:
++        dchat = mm(dG, Wn)
++    if epi is not None and _EPI_DCG and epi.supported("dc", dGg) and _ok_w(Wg) and Wg.shape[1] % 64 == 0:
++        dcg = epi.mm(dGg, Wg, 1, bn=64, ks=_EPI_DCG)
++    else:
++        dcg = mm(dGg, Wg)
+     dc = torch.empty(M, cond.shape[-1], device=dev, dtype=cdt)
+     if fin is not None:  # B200: every leaf written beside the chain (``_final_b200`` / ``_rest_b200``)
+         if opt & 1:  # the identity AdaLN: the raw conditioning (no LayerNorm of it)

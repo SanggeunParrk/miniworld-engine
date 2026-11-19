@@ -1,0 +1,136 @@
+1781,1913d1780
+< // ---------------------------------------------------------------------------------------------------------------------------------
+< // dkv_small_k (v23, 2026-11-18): the training backward's dK / dV pass (attn_dkv -DDET's quantities) at L 128 / 256 with the KEY rows split
+< // over CTAs: a CTA is (head h, 32 keys), 2 warps of 16 key rows, mma.sync, the bias read as stored (its 32-key column slice). Per key row j:
+< //   P^T = 2^(S^T rsqd log2e + bias^T log2e - LSE) (S^T = k q^T), dP^T = v dO^T, dS^T = P^T (dP^T - D),
+< //   dV = bf16(P^T) dO, dK = bf16(dS^T) q rsqd (fp32, plain stores). Opens with griddepcontrol.wait (a no-op unless launched as a
+< //   programmatic dependent).
+< template <int DHP, int L>
+< __global__ void __launch_bounds__(64, 1) dkv_small_k(const bf* __restrict__ Q, const bf* __restrict__ K, const bf* __restrict__ VV,
+<     const bf* __restrict__ DO, int ldq, int lddo, const bf* __restrict__ BIAS, const float* __restrict__ LSE, const float* __restrict__ DD,
+<     float* __restrict__ DK, float* __restrict__ DV, int NH, int W, float rsqd) {
+<   constexpr int KB = 32, LDH = DHP + 8, LDT = KB + 8, CH = DHP / 8;
+<   extern __shared__ __align__(128) uint8_t smem[];
+<   bf* k_s = reinterpret_cast<bf*>(smem);
+<   bf* v_s = k_s + KB * LDH;
+<   bf* q_s = v_s + KB * LDH;
+<   bf* o_s = q_s + L * LDH;
+<   bf* t_s = o_s + L * LDH;                                  // bias[h, i, k0 .. k0 + 32) per query row i
+<   float* lse_s = reinterpret_cast<float*>(t_s + L * LDT);
+<   float* dd_s = lse_s + L;
+<   asm volatile("griddepcontrol.wait;" ::: "memory");
+<   const int h = (int)blockIdx.x % NH, k0 = ((int)blockIdx.x / NH) * KB;
+<   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, q = lane & 3, rb = 16 * warp;
+<   for (int i = tid; i < KB * CH; i += 64) {
+<     const int r = i / CH, c = i % CH;
+<     cp16(k_s + r * LDH + 8 * c, K + (long)(k0 + r) * ldq + h * DHP + 8 * c);
+<     cp16(v_s + r * LDH + 8 * c, VV + (long)(k0 + r) * ldq + h * DHP + 8 * c);
+<   }
+<   for (int i = tid; i < L * CH; i += 64) {
+<     const int r = i / CH, c = i % CH;
+<     cp16(q_s + r * LDH + 8 * c, Q + (long)r * ldq + h * DHP + 8 * c);
+<     cp16(o_s + r * LDH + 8 * c, DO + (long)r * lddo + h * DHP + 8 * c);
+<   }
+<   for (int i = tid; i < L * (KB / 8); i += 64) {
+<     const int r = i / (KB / 8), c = i % (KB / 8);
+<     cp16(t_s + r * LDT + 8 * c, BIAS + ((long)h * L + r) * L + k0 + 8 * c);
+<   }
+<   for (int i = tid; i < L / 4; i += 64) {
+<     cp16(lse_s + 4 * i, LSE + (long)h * L + 4 * i);
+<     cp16(dd_s + 4 * i, DD + (long)h * L + 4 * i);
+<   }
+<   asm volatile("cp.async.commit_group;\n\tcp.async.wait_group 0;" ::: "memory");
+<   __syncthreads();
+<   uint32_t ka[DHP / 16][4], va[DHP / 16][4];
+< #pragma unroll
+<   for (int kk = 0; kk < DHP / 16; ++kk) {
+<     const bf* ap = k_s + (rb + g) * LDH + 16 * kk + 2 * q;
+<     ka[kk][0] = *reinterpret_cast<const uint32_t*>(ap); ka[kk][1] = *reinterpret_cast<const uint32_t*>(ap + 8 * LDH);
+<     ka[kk][2] = *reinterpret_cast<const uint32_t*>(ap + 8); ka[kk][3] = *reinterpret_cast<const uint32_t*>(ap + 8 * LDH + 8);
+<     const bf* vp = v_s + (rb + g) * LDH + 16 * kk + 2 * q;
+<     va[kk][0] = *reinterpret_cast<const uint32_t*>(vp); va[kk][1] = *reinterpret_cast<const uint32_t*>(vp + 8 * LDH);
+<     va[kk][2] = *reinterpret_cast<const uint32_t*>(vp + 8); va[kk][3] = *reinterpret_cast<const uint32_t*>(vp + 8 * LDH + 8);
+<   }
+<   constexpr float L2E = 1.4426950408889634f;
+<   const float cql = rsqd * L2E;
+<   float dk[DHP / 8][4] = {}, dv[DHP / 8][4] = {};
+<   const int j0 = rb + g, j1 = j0 + 8;  // this thread's key rows (local)
+< #pragma unroll 2
+<   for (int qc = 0; qc < L / 16; ++qc) {  // 16 queries: S^T / dP^T for two 8-query tiles, then one k-step of dV / dK
+<     uint32_t pp[4], pd[4];
+< #pragma unroll
+<     for (int hh = 0; hh < 2; ++hh) {
+<       const int c = 16 * qc + 8 * hh + 2 * q;  // query columns c, c + 1
+<       float s[4] = {}, d[4] = {};
+< #pragma unroll
+<       for (int kk = 0; kk < DHP / 16; ++kk) {
+<         const uint32_t* qp = reinterpret_cast<const uint32_t*>(q_s + (16 * qc + 8 * hh + g) * LDH + 16 * kk + 2 * q);
+<         const uint32_t* op = reinterpret_cast<const uint32_t*>(o_s + (16 * qc + 8 * hh + g) * LDH + 16 * kk + 2 * q);
+<         mma16816(s, ka[kk][0], ka[kk][1], ka[kk][2], ka[kk][3], qp[0], qp[4]);
+<         mma16816(d, va[kk][0], va[kk][1], va[kk][2], va[kk][3], op[0], op[4]);
+<       }
+<       const float b00 = __bfloat162float(t_s[c * LDT + j0]), b01 = __bfloat162float(t_s[(c + 1) * LDT + j0]);
+<       const float b10 = __bfloat162float(t_s[c * LDT + j1]), b11 = __bfloat162float(t_s[(c + 1) * LDT + j1]);
+<       const float l0 = lse_s[c], l1 = lse_s[c + 1], e0 = dd_s[c], e1 = dd_s[c + 1];
+<       const float p0 = sc_ex2(fmaf(s[0], cql, fmaf(b00, L2E, -l0))), p1 = sc_ex2(fmaf(s[1], cql, fmaf(b01, L2E, -l1)));
+<       const float p2 = sc_ex2(fmaf(s[2], cql, fmaf(b10, L2E, -l0))), p3 = sc_ex2(fmaf(s[3], cql, fmaf(b11, L2E, -l1)));
+<       pp[2 * hh] = pack2(p0, p1); pp[2 * hh + 1] = pack2(p2, p3);
+<       pd[2 * hh] = pack2(p0 * (d[0] - e0), p1 * (d[1] - e1)); pd[2 * hh + 1] = pack2(p2 * (d[2] - e0), p3 * (d[3] - e1));
+<     }
+< #pragma unroll
+<     for (int dn = 0; dn < DHP / 8; ++dn) {
+<       uint32_t b0, b1, c0, c1;
+<       ldsm_x2_t(b0, b1, o_s + (16 * qc + (lane & 15)) * LDH + 8 * dn);
+<       ldsm_x2_t(c0, c1, q_s + (16 * qc + (lane & 15)) * LDH + 8 * dn);
+<       mma16816(dv[dn], pp[0], pp[1], pp[2], pp[3], b0, b1);
+<       mma16816(dk[dn], pd[0], pd[1], pd[2], pd[3], c0, c1);
+<     }
+<   }
+<   const long r0 = k0 + j0;
+< #pragma unroll
+<   for (int dn = 0; dn < DHP / 8; ++dn) {
+<     const int col = h * DHP + 8 * dn + 2 * q;
+<     *reinterpret_cast<float2*>(DK + r0 * W + col) = make_float2(dk[dn][0] * rsqd, dk[dn][1] * rsqd);
+<     *reinterpret_cast<float2*>(DK + (r0 + 8) * W + col) = make_float2(dk[dn][2] * rsqd, dk[dn][3] * rsqd);
+<     *reinterpret_cast<float2*>(DV + r0 * W + col) = make_float2(dv[dn][0], dv[dn][1]);
+<     *reinterpret_cast<float2*>(DV + (r0 + 8) * W + col) = make_float2(dv[dn][2], dv[dn][3]);
+<   }
+< }
+< template <int DH, int L>
+< void dkv_small_t(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& dob, const at::Tensor& bias,
+<                  const at::Tensor& lse, const at::Tensor& dd, at::Tensor& dk, at::Tensor& dv, int H, int W, float rsqd, bool pdl) {
+<   constexpr int SMB = (2 * 32 * (DH + 8) + 2 * L * (DH + 8) + L * 40) * 2 + 2 * L * 4;
+<   static bool attr = false;
+<   if (!attr) {
+<     C10_CUDA_CHECK(cudaFuncSetAttribute(dkv_small_k<DH, L>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMB));
+<     attr = true;
+<   }
+<   const int was = g_pdl;
+<   g_pdl = pdl ? 1 : 0;
+<   pdl_go(dkv_small_k<DH, L>, (unsigned)(H * (L / 32)), 64u, (size_t)SMB, CP<bf>(q), CP<bf>(k), CP<bf>(v), CP<bf>(dob), (int)q.stride(0),
+<          (int)dob.stride(0), CP<bf>(bias), CP<float>(lse), CP<float>(dd), P<float>(dk), P<float>(dv), H, W, rsqd);
+<   g_pdl = was;
+< }
+< // q / k / v [L, W] bf16 (column views, one row stride), dob [L, W] bf16, bias [H, L, L] bf16 (natural units, as stored), lse / dd [H, L]
+< // fp32 -> dk (x rsqd) / dv [L, W] fp32. L 128 / 256; head width 16 / 32 / 48.
+< void dkv_small(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor dob, at::Tensor bias, at::Tensor lse, at::Tensor dd, at::Tensor dk,
+<                at::Tensor dv, int64_t L, int64_t dhp, double rsqd, bool pdl) {
+<   const int64_t H = bias.size(0), W = dob.size(1);
+<   TORCH_CHECK((L == 128 || L == 256) && q.stride(0) == k.stride(0) && q.stride(0) == v.stride(0) && q.stride(1) == 1 && dob.stride(1) == 1
+<               && dk.numel() == L * W && dv.numel() == L * W && bias.numel() == H * L * L && H * dhp == W, "dkv_small: shapes");
+<   const at::cuda::CUDAGuard gd(q.device());
+< #define DK_GO(DH)                                                                                                               \
+<   do {                                                                                                                          \
+<     if (L == 128) dkv_small_t<DH, 128>(q, k, v, dob, bias, lse, dd, dk, dv, (int)H, (int)W, (float)rsqd, pdl);                 \
+<     else dkv_small_t<DH, 256>(q, k, v, dob, bias, lse, dd, dk, dv, (int)H, (int)W, (float)rsqd, pdl);                          \
+<   } while (0)
+<   if (dhp == 16) DK_GO(16);
+<   else if (dhp == 32) DK_GO(32);
+<   else if (dhp == 48) DK_GO(48);
+<   else TORCH_CHECK(false, "dkv_small: head width");
+< #undef DK_GO
+<   C10_CUDA_KERNEL_LAUNCH_CHECK();
+< }
+< 
+1919d1785
+<   m.def("dkv_small", &dkv_small);

@@ -210,6 +210,42 @@ def prebuild(target, rows):
         for d, n in fused_wide_sm100a.SHAPES:
             if half.get((d, n)):
                 yield ft.partial(fused_sm100a.build_cubins, f"d{d}n{n}", fused_wide_sm100a._specs(d, n))
+        # the generic kernels: bf16 for the cells route_sm100a.GENERIC sends there and every (D, n) without a tuned build; fp32 (TF32 GEMMs
+        # and the fp16-operand fused forwards) for the float32 rows
+        from . import fused_generic_sm100a, route_sm100a
+
+        tuned = {(128, 4), *fused_wide_sm100a.SHAPES}
+        if any(v and (k not in tuned or any((*k, t) in route_sm100a.GENERIC for t in (False, True))) for k, v in half.items()):
+            yield ft.partial(fused_sm100a.build_cubins, "generic_bf16", fused_generic_sm100a._specs(False))
+        if any(dt == "float32" for v in shapes.values() for (dt, _m) in v):
+            yield ft.partial(fused_sm100a.build_cubins, "generic_f32", fused_generic_sm100a._specs(True))
+        # the small-M chains of the cells fused_small_sm100a.CELLS (bf16 D 768 n 2, fp32 D 384 / 768 n 2)
+        from . import fused_small_sm100a
+
+        for d, n, f32 in fused_small_sm100a.CELLS:
+            if any((dt == "float32") == f32 for (dt, _m) in shapes.get((d, n), {})):
+                yield ft.partial(fused_sm100a.build_cubins, fused_small_sm100a._tag(d, n, f32), fused_small_sm100a._specs(d, n, f32))
+                # (round 3, training) the one-launch backward of the chain cells (fused_generic_sm100a.tg_bwd_small)
+                if any(mode == "train" and (dt == "float32") == f32 for (dt, mode) in shapes.get((d, n), {})):
+                    yield ft.partial(
+                        fused_sm100a.build_cubins, f"generic_{'f32' if f32 else 'bf16'}", fused_generic_sm100a.small_specs(f32)
+                    )
+        # (round 3 part 18) the bf16 inference chains of INFER_CELLS (with their CTA-pair squeeze builds)
+        for d, n in fused_small_sm100a.INFER_CELLS:
+            if (d, n, False) not in fused_small_sm100a.CELLS and "eval" in half.get((d, n), set()):
+                yield ft.partial(fused_sm100a.build_cubins, fused_small_sm100a._tag(d, n, False), fused_small_sm100a._specs(d, n, False))
+        # the CTA-pair chains of the bf16 inference cells (round 3 part 14: tsx_expand2.cu / tsx_squeeze2.cu)
+        for d, n in fused_small_sm100a.PAIR_CELLS:
+            if "eval" in half.get((d, n), set()):
+                yield ft.partial(fused_sm100a.build_cubins, f"pair_d{d}n{n}", fused_small_sm100a._pair_specs(d, n))
+        # fp32 inference on the fp16 tensor cores (round 3 part 4): the chains of CELLS_H16 and the three-launch generic forward
+        for d, n, _f in fused_small_sm100a.CELLS_H16:
+            if ("float32", "eval") in shapes.get((d, n), {}):
+                yield ft.partial(
+                    fused_sm100a.build_cubins, fused_small_sm100a._tag(d, n, True, True), fused_small_sm100a._specs(d, n, True, True)
+                )
+        if any(d in fused_generic_sm100a.GENERIC_H16_WIDTHS and ("float32", "eval") in v for (d, _n), v in shapes.items()):
+            yield ft.partial(fused_sm100a.build_cubins, "generic_h16", fused_generic_sm100a._specs_h16())
     elif target.arch == "sm80":
         # A100 (transition_sm80): fused_sm80 at D 128 / n 4 with bf16 weights, the wide extension at every other width (and as fused_sm80's small-row path), its
         # one-kernel forward / backward builds (fused_fwd_sm80 / fused_bwd_sm80: (D, H) in their SHAPES) and the fp32-master cast; bf16 rows, and the float32 rows on the wide extension

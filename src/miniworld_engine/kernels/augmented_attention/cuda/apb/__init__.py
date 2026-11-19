@@ -79,7 +79,8 @@ def _ext(arch: str, shadow: bool = False):
         shadow_flags = ["-DAPB_H100_FP32_SHADOW=1"]
     return load_extension(
         name=f"apb_rows_cuda_sm{arch}" + ("_shadow" if shadow else ""),
-        sources=[str(_dir / "apb_rows.cu")],
+        # B200: the shared source plus its B200-only passes (apb_rows_sm100.cu includes apb_rows.cu); H100 builds the shared file as is
+        sources=[str(_dir / ("apb_rows_sm100.cu" if arch == "100" else "apb_rows.cu"))],
         extra_include_paths=includes,
         extra_ldflags=["-lcublas", "-lcublasLt"],
         extra_cuda_cflags=[
@@ -194,7 +195,10 @@ def pair_bias_bwd(
         ext().pair_bias_bwd(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d))
     else:
         st, bu = saved
-        ext().pair_bias_bwd_wide(pair2d, dbias.contiguous(), wf, st, bu, dz, acc, int(L), int(d))
+        e = ext()
+        # B200: every 128-column chunk in one launch (apb_rows_sm100.cu pair_bias_bwd_wide1; its partial rows: pair_bwd_wide1_blocks)
+        wide = getattr(e, "pair_bias_bwd_wide1", None)
+        (wide or e.pair_bias_bwd_wide)(pair2d, dbias.contiguous(), wf, st, bu, dz, acc, int(L), int(d))
     if acc.ndim == 2:
         return dz, None, None  # Hopper block partials are reduced by finalize.
     o = 2 * d + width(heads, d)

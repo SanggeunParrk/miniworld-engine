@@ -1,0 +1,188 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 06faa4f7e..0830daf9b 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -243,7 +243,12 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+         )
+     dim = (f"-DDIM={d}", *hid)
+     fwd = (
+-        (("fwd", "widths/tfwd_d384.cu", hid), ("bwd", "widths/tbwd_d384.cu", hid))
++        (
++            ("fwd", "widths/tfwd_d384.cu", hid),
++            ("fwdi", "widths/tfwd_d384.cu", (*hid, "-DFOLD=1")),
++            ("stat", "widths/tstat_w.cu", ("-DDIM=384", "-DLPR=16")),
++            ("bwd", "widths/tbwd_d384.cu", hid),
++        )
+         if d == 384
+         else (
+             ("ln", "widths/tln_w.cu", (f"-DDIM={d}", lpr)),
+@@ -415,6 +420,8 @@ X2_RESID = True
+ FWD_X2 = {(256, 2), (256, 4)}
+ #: (S90) the LayerNorm folded into the D 512 inference expand (tstat_w.cu + tswiglu_w.cu -DFOLD) from this many rows
+ FOLD_LN = True
++#: (S90) the LayerNorm folded into the fused D 384 inference kernel (tfwd_d384.cu -DFOLD)
++FOLD_D384 = True
+ #: the statistics pass: lanes a row (16: two rows a warp, 4 x 16-B loads a lane) and blocks an SM
+ FOLD_N4 = False  # n 4 (row 34) kept on the LayerNorm launch: with the fold its expand takes 1437 us against 1328 (L 640) although the statistics pass saves 73 us (76 against 149)
+ STAT_LPR = 16
+@@ -615,14 +622,22 @@ def _fwd_launch(
+         xn = torch.empty_like(x) if save else x.new_empty((1, d))
+         hid, a, b = ((torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph()) for _ in range(3))
+         mout = k.rows(out)
++        fold = FOLD_D384 and not save and wa.dtype == x.dtype == torch.bfloat16
++        if fold:  # (S90) the LayerNorm folded into the expand: raw x as the A operand, W gamma as B (one prep launch), statistics in the kernel
++            wp = torch.empty((2 * h, d), dtype=x.dtype, device=x.device)
++            u, v = (torch.empty(2 * h, **f32) for _ in range(2))
++            k.run("stat", "transition_ln_stats_w", k.nsm, (x, gamma, beta, wa, wb, wp, u, v, rstd, c1, 0, h, float(eps), 0), 256, 1)
++            wa_, wb_ = wp[:h], wp[h:]
++        else:
++            wa_, wb_ = wa, wb
+         k.run(
+-            "fwd",
++            "fwdi" if fold else "fwd",
+             "transition_fwd_d384_sm100",
+             k.grid,
+             (
+                 k.rows(x),
+-                k.tmap(wa, d, h, 64, 32),
+-                k.tmap(wb, d, h, 64, 32),
++                k.tmap(wa_, d, h, 64, 32),
++                k.tmap(wb_, d, h, 64, 32),
+                 k.tmap(ws, h, d),
+                 k.rows(xn) if save else mout,
+                 mout,
+@@ -636,6 +651,7 @@ def _fwd_launch(
+                 tiles,
+                 float(eps),
+                 int(save),
++                *((u, v) if fold else ()),
+             ),
+         )
+         return out, xn, rstd, c1, hid, a, b
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
+index 715475b9e..4b17a952a 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
+@@ -20,6 +20,12 @@
+ // SPDX-License-Identifier: Apache-2.0
+ #include "sm100.cuh"
+ using namespace s100;
++// FOLD 1 (S90, inference): the LayerNorm folded into the expand, as the D 512 chain: the A operand is the RAW x tile (no apply pass writes xn: the expand of a tile starts the moment its x has landed), the weights are
++// Wp = bf16(W gamma) (a prep launch, tstat_w.cu), the row statistics rstd / c1 = mean rstd come from the two statistics passes over the x tile in shared memory (the SwiGLU warps run them while the first
++// chunk's MMAs run) and the SwiGLU warps correct the accumulators: a_n = rstd (x . Wp_n) - c1 u_n + v_n (u_n = sum Wp_n, v_n = sum beta W_n staged per chunk in shared memory, prefetched a chunk ahead).
++#ifndef FOLD
++#define FOLD 0
++#endif
+ 
+ #ifndef HID
+ #define HID 768                                                 // hidden units (n x D); n = 2 by default
+@@ -37,7 +43,9 @@ constexpr int TILE = NKB * KBT;                                // 96 KB
+ constexpr int O_WAB = 0, O_WS = NWK * WSTG * WK, O_XN = O_WS + NWS * WS_SLOT, O_H = O_XN + TILE, O_ST = O_H + KBT;
+ constexpr int O_GB = O_ST + NST * KBT;
+ constexpr int O_EX = O_GB + 2 * D_ * 4;                        // LayerNorm partial sums: [2 passes][3 thirds][128 rows] fp32
+-constexpr int O_BAR = O_EX + 6 * ROWS * 4;
++constexpr int O_RS = O_EX + 6 * ROWS * 4;                       // FOLD: rstd | c1 of the tile's rows
++constexpr int O_UVS = O_RS + 2 * ROWS * 4;                      // FOLD: [2 warpgroups][2 buffers][ua | va | ub | vb of the chunk's 32 units]
++constexpr int O_BAR = FOLD ? O_UVS + 2 * 2 * 128 * 4 : O_RS;
+ constexpr int SMEM_BYTES = O_BAR + 512;
+ static_assert(SMEM_BYTES <= 232448, "shared memory budget");
+ static_assert(O_WS % 1024 == 0 && O_XN % 1024 == 0 && O_H % 1024 == 0 && O_ST % 1024 == 0 && WS_SLOT % 1024 == 0, "swizzle alignment");
+@@ -75,7 +83,11 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+                           const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mout,
+                           const float* __restrict__ gamma, const float* __restrict__ beta,
+                           float* __restrict__ rstd, float* __restrict__ c1, __nv_bfloat16* __restrict__ hs,
+-                          __nv_bfloat16* __restrict__ as_, __nv_bfloat16* __restrict__ bs, int tiles, float eps, int save) {
++                          __nv_bfloat16* __restrict__ as_, __nv_bfloat16* __restrict__ bs, int tiles, float eps, int save
++#if FOLD
++                          , const float* __restrict__ uu, const float* __restrict__ vv
++#endif
++                          ) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+@@ -227,6 +239,9 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+       const bool real = i < n_valid;
+       const int row0 = tile_of(i) * ROWS;
+       mbar_wait(&B.xl_full, i & 1);
++#if FOLD
++      if (tid == 256) mbar_arrive_remote_cta(&B.xn_full, 0);   // the raw x tile is the A operand: the expand may start now
++#endif
+       f2 s2[2] = {mk2(0.f, 0.f), mk2(0.f, 0.f)};
+ #pragma unroll
+       for (int kb = 0; kb < HK; ++kb)
+@@ -258,6 +273,11 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+       ex[(3 + hf) * ROWS + r] = lo2(vt2) + hi2(vt2);
+       named_bar_sync(1, 384);
+       const float rs = rsqrtf((ex[3 * ROWS + r] + ex[4 * ROWS + r] + ex[5 * ROWS + r]) * (1.f / D_) + eps), cc = mean * rs;
++#if FOLD
++      if (hf == 0) { float* rsv = reinterpret_cast<float*>(sm + O_RS); rsv[r] = rs; rsv[ROWS + r] = cc; }
++      named_bar_sync(1, 384);                                  // every SwiGLU thread's row statistics are in shared memory
++      return;
++#endif
+       const f2 rs2 = mk2(rs, rs), ncc2 = mk2(-cc, -cc);
+ #pragma unroll
+       for (int kb = 0; kb < HK; ++kb)
+@@ -283,7 +303,7 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+       fence_proxy_async();
+       named_bar_sync(1, 384);
+       if (tid == 256) {
+-        mbar_arrive_remote_cta(&B.xn_full, 0);
++        if (!FOLD) mbar_arrive_remote_cta(&B.xn_full, 0);
+         if (save && real) {
+ #pragma unroll
+           for (int cb = 0; cb < NKB; ++cb)
+@@ -298,9 +318,22 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+       // chunk, warpgroup g taking units 32 g .. 32 g + 31; [a|b] handed back as soon as it is read, h_j into the shared-memory slot
+       // (and, in training, a / b / h to global memory). The LayerNorm of each tile comes first.
+       const int g = warp >= 12 ? 1 : 0;
++#if FOLD
++      float* uvs = reinterpret_cast<float*>(sm + O_UVS) + g * 256;                // [2 buffers][128]
++      auto ld_uv = [&](int cc2) {                                                 // this thread's one float of chunk cc2's 128: ua | va | ub | vb of units (cc2 % NCH) 64 + 32 g ..
++        const int vec = r >> 5, k = r & 31;
++        return __ldg((vec == 0 ? uu : vec == 1 ? vv : vec == 2 ? uu + H_ : vv + H_) + (cc2 % NCH) * HS + g * 32 + k);
++      };
++      if (nch > 0) { uvs[r] = ld_uv(0); named_bar_sync(3 + g, 128); }
++#endif
+       for (int c = 0; c < nch; ++c) {
+         const int i = c / NCH, j = c % NCH;
+         if (j == 0) ln(i);
++#if FOLD
++        const float rsr = reinterpret_cast<const float*>(sm + O_RS)[r], ccr = reinterpret_cast<const float*>(sm + O_RS)[ROWS + r];
++        const float pre = (c + 1 < nch) ? ld_uv(c + 1) : 0.f;
++        const float* uvc = uvs + (c & 1) * 128;
++#endif
+         mbar_wait(&B.ex_done, c & 1);
+         tc_fence_after();
+         uint32_t hp[16], ap[16], bp[16];
+@@ -313,6 +346,21 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+           tc_fence_before();
+           __syncwarp();
+           if (lane == 0) mbar_arrive_remote_relaxed(&B.ab_free, 0);
++#if FOLD
++#pragma unroll
++          for (int k4 = 0; k4 < 8; ++k4) {                     // a_n = rstd (x . Wp_n) - c1 u_n + v_n (and the same for b), after the hand-back of [a|b]; float4 broadcast loads
++            const float4 ua = *reinterpret_cast<const float4*>(uvc + 4 * k4), va = *reinterpret_cast<const float4*>(uvc + 32 + 4 * k4);
++            const float4 ub = *reinterpret_cast<const float4*>(uvc + 64 + 4 * k4), vb = *reinterpret_cast<const float4*>(uvc + 96 + 4 * k4);
++            ab[4 * k4] = __float_as_uint(fmaf(rsr, __uint_as_float(ab[4 * k4]), fmaf(-ccr, ua.x, va.x)));
++            ab[4 * k4 + 1] = __float_as_uint(fmaf(rsr, __uint_as_float(ab[4 * k4 + 1]), fmaf(-ccr, ua.y, va.y)));
++            ab[4 * k4 + 2] = __float_as_uint(fmaf(rsr, __uint_as_float(ab[4 * k4 + 2]), fmaf(-ccr, ua.z, va.z)));
++            ab[4 * k4 + 3] = __float_as_uint(fmaf(rsr, __uint_as_float(ab[4 * k4 + 3]), fmaf(-ccr, ua.w, va.w)));
++            ab[32 + 4 * k4] = __float_as_uint(fmaf(rsr, __uint_as_float(ab[32 + 4 * k4]), fmaf(-ccr, ub.x, vb.x)));
++            ab[33 + 4 * k4] = __float_as_uint(fmaf(rsr, __uint_as_float(ab[33 + 4 * k4]), fmaf(-ccr, ub.y, vb.y)));
++            ab[34 + 4 * k4] = __float_as_uint(fmaf(rsr, __uint_as_float(ab[34 + 4 * k4]), fmaf(-ccr, ub.z, vb.z)));
++            ab[35 + 4 * k4] = __float_as_uint(fmaf(rsr, __uint_as_float(ab[35 + 4 * k4]), fmaf(-ccr, ub.w, vb.w)));
++          }
++#endif
+           const float z = __uint_as_float(ldsv32(smem_u32(&B.zero)));
+ #pragma unroll
+           for (int k = 0; k < 16; ++k) {
+@@ -329,6 +377,9 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+         fence_proxy_async();
+         __syncwarp();
+         if (lane == 0) mbar_arrive_remote_cta(&B.h_full, 0);
++#if FOLD
++        if (c + 1 < nch) { uvs[((c + 1) & 1) * 128 + r] = pre; named_bar_sync(3 + g, 128); }   // the next chunk's u / v (the other buffer: this chunk's reads are done)
++#endif
+         if (save && i < n_valid) {
+           // quad transpose (lane k of 4 ends up with 16-byte chunk k of the quad's 4 rows): each store then writes 8 rows x 64 B
+           // instead of 32 rows x 16 B (the row-per-thread stores cost ~35 us per 144 tiles in training, measured)

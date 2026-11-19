@@ -1,0 +1,132 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tallk_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tallk_sm100.cu
+index ab34bcc79..313d571c1 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tallk_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tallk_sm100.cu
+@@ -14,7 +14,11 @@ namespace tk {
+ constexpr int BM = 128, BN = 128, BK = 64, NS = 4, THREADS = 192;
+ constexpr int ABYTES = BM * BK * 2, BBYTES = BN * BK * 2;  // 16 KiB each
+ constexpr int RS = BN + 4;                                 // partial tile row stride (floats)
+-constexpr int SMEM = 1024 + NS * (ABYTES + BBYTES) + 256;
++#ifndef TK_PUSH
++#define TK_PUSH 0
++#endif
++constexpr int RECV = 16 * (BM / 16) * BN * 4;                 // TK_PUSH: the slices every rank pushes to this one: [rank][rows][BN] fp32 (64 KiB at 16 ranks)
++constexpr int SMEM = 1024 + NS * (ABYTES + BBYTES) + 256 + (TK_PUSH ? 1024 + RECV : 0);
+ static_assert(BM * RS * 4 <= NS * (ABYTES + BBYTES), "the partial tile reuses the ring");
+ constexpr uint32_t ID = idesc_bf16(BM, BN, 1, 1);
+ }  // namespace tk
+@@ -29,6 +33,16 @@ struct TkArgs { TkProb p[2]; };
+ __device__ __forceinline__ void cl_sync() {
+   asm volatile("barrier.cluster.arrive.release.aligned;\nbarrier.cluster.wait.acquire.aligned;\n" ::: "memory");
+ }
++__device__ __forceinline__ uint32_t mapa_u32(uint32_t local, uint32_t rank) {
++  uint32_t a;
++  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(a) : "r"(local), "r"(rank));
++  return a;
++}
++__device__ __forceinline__ void st_async4(uint32_t remote, uint32_t rbar, float4 v) {   // 16 bytes into a peer's shared memory, complete_tx on the peer's mbarrier
++  asm volatile("st.async.shared::cluster.mbarrier::complete_tx::bytes.v4.f32 [%0], {%1, %2, %3, %4}, [%5];" :: "r"(remote), "f"(v.x), "f"(v.y), "f"(v.z), "f"(v.w), "r"(rbar) : "memory");
++}
++__device__ __forceinline__ void cl_arrive() { asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory"); }
++__device__ __forceinline__ void cl_wait() { asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory"); }
+ __device__ __forceinline__ float4 ld_cl4(uint32_t local, uint32_t rank) {
+   uint32_t a;
+   asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(a) : "r"(local), "r"(rank));
+@@ -54,17 +68,22 @@ __global__ void __launch_bounds__(tk::THREADS, 1) tallk_sm100(const __grid_const
+   uint64_t* full = bars;
+   uint64_t* empty = full + NS;
+   uint64_t* done = empty + NS;
+-  uint32_t* tslot = reinterpret_cast<uint32_t*>(done + 1);
++  uint64_t* rbar = done + 1;                                 // TK_PUSH: the pushed slices landed
++  uint32_t* tslot = reinterpret_cast<uint32_t*>(rbar + 1);
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   if (tid == 0) {
+     for (int s = 0; s < NS; ++s) { bar_init(full + s, 1); bar_init(empty + s, 1); }
+     bar_init(done, 1);
++    bar_init(rbar, 1);
+     bar_init_fence();
+     prefetch_map(&P.a); prefetch_map(&P.b);
+   }
+   if (warp == 1) tmem_alloc(tslot, BN);
+   tc_fence_before();
+   __syncthreads();
++#if TK_PUSH
++  cl_arrive();                                             // every rank's rbar is initialised before anyone pushes (waited just before the pushes)
++#endif
+   tc_fence_after();
+   const uint32_t tmem = *tslot;
+   if (warp == 0) {
+@@ -120,6 +139,41 @@ __global__ void __launch_bounds__(tk::THREADS, 1) tallk_sm100(const __grid_const
+     }
+   }
+   __syncwarp();
++#if TK_PUSH
++  {   // S90: each rank PUSHES the slices of its partial tile to their owners (st.async, complete_tx on the owner's mbarrier): no remote loads
++    const int rows = BM / split, q4 = BN / 4;
++    unsigned char* recv = smb + NS * (ABYTES + BBYTES) + 1024;       // [rank][rows][BN] fp32
++    __syncthreads();                                                // the drain warps wrote `red`
++    if (tid == 0) expect_tx(rbar, BM * BN * 4);
++    cl_wait();                                                      // every rank's rbar is initialised
++    const uint32_t recv_l = sa(recv), rb_l = sa(rbar);
++    for (int o = 0; o < split; ++o) {
++      const uint32_t rem = mapa_u32(recv_l + (uint32_t)(rank * rows * BN * 4), (uint32_t)o), rbr = mapa_u32(rb_l, (uint32_t)o);
++      for (int e = tid; e < rows * q4; e += THREADS) {
++        const float4 v = *reinterpret_cast<const float4*>(red + (o * rows + e / q4) * RS + (e % q4) * 4);
++        st_async4(rem + (uint32_t)((e / q4) * BN + (e % q4) * 4) * 4u, rbr, v);
++      }
++    }
++    wait(rbar, 0);                                                  // every rank's slice of my rows has landed
++    const float* rf = reinterpret_cast<const float*>(recv);
++    for (int e = tid; e < rows * q4; e += THREADS) {
++      const int rr = rank * rows + e / q4, cq = (e % q4) * 4, m = m0 + rr, n = n0 + cq;
++      float4 s4 = *reinterpret_cast<const float4*>(rf + (e / q4) * BN + cq);
++      for (int q = 1; q < split; ++q) {
++        const float4 t = *reinterpret_cast<const float4*>(rf + (q * rows + e / q4) * BN + cq);
++        s4.x += t.x; s4.y += t.y; s4.z += t.z; s4.w += t.w;
++      }
++      if (m < P.M) {
++        float* o = P.out + (long)m * P.N + n;
++        if (n + 3 < P.N && (P.N & 3) == 0) *reinterpret_cast<float4*>(o) = s4;
++        else {
++          const float sv[4] = {s4.x, s4.y, s4.z, s4.w};
++          for (int j = 0; j < 4; ++j) if (n + j < P.N) o[j] = sv[j];
++        }
++      }
++    }
++  }
++#else
+   cl_sync();                                               // every rank's partial tile is in its shared memory
+   {
+     const int rows = BM / split, q4 = BN / 4;
+@@ -144,6 +198,7 @@ __global__ void __launch_bounds__(tk::THREADS, 1) tallk_sm100(const __grid_const
+       }
+     }
+   }
++#endif
+   cl_sync();                                               // the peers are done reading this CTA's tile
+   tc_fence_before();
+   __syncthreads();
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+index fbda8a4cc..db0f53181 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+@@ -604,10 +604,18 @@ TALLK_MAX_ROWS = 128 * 128
+ BWD_PRE = os.environ.get("MINIWORLD_TRIATTN_B200_BWD_PRE", "1") != "0"
+ 
+ 
++#: (S90 training) the tall-K GEMM's cluster reduction by pushes (st.async + complete_tx into the owner's shared memory, the owner adds the slices in rank order)
++#: instead of remote loads behind two cluster barriers.  MINIWORLD_TRIATTN_B200_TALLK_PUSH=1.
++TALLK_PUSH = os.environ.get("MINIWORLD_TRIATTN_B200_TALLK_PUSH", "0") not in ("", "0")
++
++
+ @functools.lru_cache(maxsize=1)
+ def _tallk():
+     ensure_cuda_home()
+-    return load_extension(name="triattn_b200_tallk_v2", sources=[str(_SRC / "tallk_sm100.cu")], extra_cuda_cflags=_flags(), verbose=False)
++    return load_extension(
++        name="triattn_b200_tallk_v3_push" if TALLK_PUSH else "triattn_b200_tallk_v2", sources=[str(_SRC / "tallk_sm100.cu")],
++        extra_cuda_cflags=[*_flags(), *(("-DTK_PUSH=1",) if TALLK_PUSH else ())], verbose=False,
++    )
+ 
+ 
+ #: B200 2026-11-18 (round 3 part 14): inference with 64-channel heads takes the head-dim-64 core's HB build -- the head-dim-32 inference

@@ -1,0 +1,338 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index aa9172c2a..014afc262 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -1039,7 +1039,10 @@ __global__ void __launch_bounds__(256) triattn_biasT(const __nv_bfloat16* __rest
+ // (32 + 32 bf16 pairs), dV_r / dK_r at 384 + 64 r.  K / V stay in shared memory (double-buffered across tasks).
+ constexpr int KR = 2;
+ constexpr int KB_QW = 64, KB_QT = KB_QW * D, KB_BT = BN * KB_QW;   // Q / dO sub-tile [64][32] (4 KiB), bias^T [2 halves][128 k][32 q] fp32
+-constexpr int KB_NQ = 6, KB_NB = 2, KB_THREADS = 352;              // 0 TMA, 1 S^T MMA, 2-5 / 6-9 grad groups (rows 0 / 1), 10 grad MMA
++#ifndef TB_NQ
++#define TB_NQ 6
++#endif
++constexpr int KB_NQ = TB_NQ, KB_NB = 2, KB_THREADS = 352;              // 0 TMA, 1 S^T MMA, 2-5 / 6-9 grad groups (rows 0 / 1), 10 grad MMA
+ constexpr int KB_COL_P = 256, KB_COL_G = 384;
+ constexpr int KB_SMEM = 1024 + (2 * KR * 2 * KVT + KR * 2 * KVT + KB_NQ * 2 * KB_QT) * 2 + KB_NB * KB_BT * 4 + KB_NQ * 2 * KB_QW * 4 + 512;
+ constexpr uint32_t ID_ST = idesc_bf16(128, KB_QW, 0, 0);
+@@ -1334,6 +1337,297 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+   if (warp == 1) tmem_dealloc(tmem, 512);
+ }
+ 
++#ifndef TB_EARLY3
++#define TB_EARLY3 0
++#endif
++#ifndef TB_KGN
++#define TB_KGN 3
++#endif
++#ifndef TB_KV3
++#define TB_KV3 0
++#endif
++#if TB_KV3
++// ---- S90 (training): the key-side kernel with THREE softmax groups.  A stage y (row r = y & 1, query sub-tile y >> 1) is handled by group
++// y % 3, but the TMEM tiles and every barrier stay keyed by r (two S^T | dP^T tiles, two P^T | dS^T tiles, dV_r | dK_r): the groups are
++// a round robin over the same two buffers.  Chunks of 16 queries (registers ~100: 480 threads a CTA).  The dK / dV drain of a row runs on
++// the group that ran its last stage (its own out tile), while the other two groups carry on with the next stage.
++constexpr int KG3 = 3, KB3_NQ = 5, KB3_THREADS = (TB_KGN == 3 ? 15 : 11) * 32;     // warps: 0 TMA, 1 S^T MMA, 2-5 / 6-9 / 11-14 softmax groups, 10 grad MMA
++constexpr int KB3_SMEM = 1024 + (2 * KR * 2 * KVT + KG3 * 2 * KVT + KB3_NQ * 2 * KB_QT) * 2 + KB_NB * KB_BT * 4 + KB3_NQ * 2 * KB_QW * 4 + 512;
++static_assert(KB3_SMEM <= 232448, "smem kv3");
++
++__global__ void __launch_bounds__(KB3_THREADS, 1) triattn_bwd_kv3_sm100(
++    int N, int H, int S, int ntasks, float scl, float scale,
++    const __grid_constant__ CUtensorMap qmap, const __grid_constant__ CUtensorMap dmap,
++    const __grid_constant__ CUtensorMap kmap, const __grid_constant__ CUtensorMap vmap,
++    const __grid_constant__ CUtensorMap bmap,
++    const float* __restrict__ LSE, const float* __restrict__ DELTA,
++    const __grid_constant__ CUtensorMap dkmap, const __grid_constant__ CUtensorMap dvmap) {
++  pdl_trigger();
++  pdl_wait();
++  const int NK = S / BN, NG = (N + KR - 1) / KR, NQS = S / KB_QW, SPT = KR * NQS;
++  extern __shared__ __align__(1024) unsigned char raw[];
++  unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
++  __nv_bfloat16* sKV = reinterpret_cast<__nv_bfloat16*>(smb);   // [2 task buffers][KR][K | V]
++  __nv_bfloat16* sO = sKV + 2 * KR * 2 * KVT;                    // [group][dV | dK] out tiles for the TMA stores
++  __nv_bfloat16* sQ = sO + KG3 * 2 * KVT;                        // [NQ][Q | dO]
++  float* sB = reinterpret_cast<float*>(sQ + KB3_NQ * 2 * KB_QT);
++  float* sLD = sB + KB_NB * KB_BT;                               // [NQ][lse 64 | delta 64]
++  uint64_t* bars = reinterpret_cast<uint64_t*>(sLD + KB3_NQ * 2 * KB_QW);
++  uint64_t* kvf = bars;              // [2]
++  uint64_t* kve = kvf + 2;           // [2]
++  uint64_t* dfr = kve + 2;           // [KR] row r's dK / dV final
++  uint64_t* de = dfr + KR;           // [KR] count 4: row r drained
++  uint64_t* qf = de + KR;            // [NQ]
++  uint64_t* qe = qf + KB3_NQ;        // [NQ]
++  uint64_t* bf = qe + KB3_NQ;        // [NB]
++  uint64_t* be = bf + KB_NB;         // [NB] count 8
++  uint64_t* sf = be + KB_NB;         // [2]  buffer r's S^T | dP^T ready
++  uint64_t* se = sf + 2;             // [2]  count 4: loaded by a group
++  uint64_t* pf = se + 2;             // [2]  count 4: P^T | dS^T written
++  uint64_t* ge = pf + 2;             // [2]  gradient GEMMs on buffer r retired
++  uint32_t* tslot = reinterpret_cast<uint32_t*>(ge + 2);
++  volatile int* cnt = reinterpret_cast<volatile int*>(tslot + 2);   // [2] S^T loads, [2] P^T stores done (warps), ordering tickets between the groups of one buffer
++  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  if (tid == 0) {
++    cnt[0] = cnt[1] = cnt[2] = cnt[3] = 0;
++    for (int i = 0; i < 2; ++i) {
++      bar_init(kvf + i, 1); bar_init(kve + i, 1); bar_init(dfr + i, 1); bar_init(de + i, 4);
++      bar_init(sf + i, 1); bar_init(se + i, 4); bar_init(pf + i, 4); bar_init(ge + i, 1);
++    }
++    for (int i = 0; i < KB3_NQ; ++i) { bar_init(qf + i, 1); bar_init(qe + i, 1); }
++    for (int i = 0; i < KB_NB; ++i) { bar_init(bf + i, 1); bar_init(be + i, 8); }
++    bar_init_fence();
++  }
++  if (warp == 1) tmem_alloc(tslot, 512);
++  tc_fence_before();
++  __syncthreads();
++  tc_fence_after();
++  const uint32_t tmem = *tslot;
++  const uint32_t sbase = sa(smb);
++  auto A = [&](const void* p) -> uint32_t { return sbase + (uint32_t)(reinterpret_cast<const unsigned char*>(p) - smb); };
++  auto decode = [&](int t, int& kt, int& g, int& bh) { kt = t % NK; g = (t / NK) % NG; bh = t / (NK * NG); };
++  auto nrow = [&](int g, int r) { return min(g * KR + r, N - 1); };
++  const int mytasks = (int)blockIdx.x < ntasks ? (ntasks - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
++  const int total = mytasks * SPT;
++
++  if (warp == 0) {
++    if (lane == 0) {
++      int lt = 0, y = 0;
++      for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
++        int kt, g, bh; decode(t, kt, g, bh);
++        const int b_ = bh / H, h_ = bh % H, kb = lt & 1;
++        if (lt >= 2) wait(A(kve + kb), ((lt >> 1) - 1) & 1);
++        expect_tx(A(kvf + kb), KR * 2 * KVT * 2);
++        for (int r = 0; r < KR; ++r) {
++          const int rw = (b_ * N + nrow(g, r)) * S + kt * BN;
++          load_2d(&kmap, A(sKV + (kb * KR + r) * 2 * KVT), A(kvf + kb), h_ * D, rw);
++          load_2d(&vmap, A(sKV + (kb * KR + r) * 2 * KVT + KVT), A(kvf + kb), h_ * D, rw);
++        }
++        for (int w = 0; w < SPT; ++w, ++y) {
++          const int qs = w >> 1, r = w & 1, sl = y % KB3_NQ;
++          if (r == 0) {
++            const int jb = lt * NQS + qs, bs = jb % KB_NB;
++            if (jb >= KB_NB) wait(A(be + bs), ((jb / KB_NB) - 1) & 1);
++            expect_tx(A(bf + bs), KB_BT * 4);
++            for (int hh = 0; hh < 2; ++hh) load_2d(&bmap, A(sB + bs * KB_BT + hh * BN * 32), A(bf + bs), qs * KB_QW + hh * 32, bh * S + kt * BN);
++          }
++          if (y >= KB3_NQ) wait(A(qe + sl), ((y / KB3_NQ) - 1) & 1);
++          expect_tx(A(qf + sl), 2 * KB_QT * 2 + 2 * KB_QW * 4);
++          const int rw = (b_ * N + nrow(g, r)) * S + qs * KB_QW;
++          load_2d(&qmap, A(sQ + sl * 2 * KB_QT), A(qf + sl), h_ * D, rw);
++          load_2d(&dmap, A(sQ + sl * 2 * KB_QT + KB_QT), A(qf + sl), h_ * D, rw);
++          const size_t st = ((size_t)(b_ * N + nrow(g, r)) * H + h_) * S + qs * KB_QW;
++          bulk_load(A(sLD + sl * 2 * KB_QW), LSE + st, KB_QW * 4, A(qf + sl));
++          bulk_load(A(sLD + sl * 2 * KB_QW + KB_QW), DELTA + st, KB_QW * 4, A(qf + sl));
++        }
++      }
++    }
++  } else if (warp == 1 || warp == 10) {
++    const uint32_t L = elect_one() ? 1u : 0u;
++    constexpr uint64_t SLOT = 2 * KB_QT * 2 / 16, MAT = KB_QT * 2 / 16, KVM = KVT * 2 / 16, KVROW = 2 * KVT * 2 / 16;
++    const uint32_t qfa = A(qf), qea = A(qe), sfa = A(sf), sea = A(se), pfa = A(pf), gea = A(ge), dea = A(de), dfa = A(dfr);
++    int sl = 0, slp = 0, w = 0, lt = 0;
++    if (warp == 1) {
++      const uint64_t dQ0 = desc_k64(sQ), dKV0 = desc_k64(sKV);
++      const uint32_t bfa = A(bf), kvfa = A(kvf), kvea = A(kve);
++      int bs = 0, bsp = 0;
++      for (int y = 0; y < total; ++y) {
++        const int r = w & 1, kb = lt & 1;
++        const uint32_t jp = (uint32_t)(y >> 1);
++        const uint32_t okq = probe(qfa + sl * 8, slp);
++        const uint32_t oke = y >= 2 ? probe(sea + r * 8, (jp - 1) & 1) : 1u;     // buffer r's previous S^T was loaded
++        const uint32_t okb = r == 0 ? probe(bfa + bs * 8, bsp) : 1u;
++        if (w == 0) wait(kvfa + kb * 8, (lt >> 1) & 1);
++        if (!okq) wait(qfa + sl * 8, slp);
++        if (!oke) wait(sea + r * 8, (jp - 1) & 1);
++        if (!okb) wait(bfa + bs * 8, bsp);
++        tc_fence_after();
++        const uint64_t bq = dQ0 + sl * SLOT, ak = dKV0 + (kb * KR + r) * KVROW;
++        const uint32_t d = tmem + r * 128;
++        mma_ss_if(L, d, ak, bq, ID_ST, 0u);
++        mma_ss_if(L, d, ak + 2, bq + 2, ID_ST, 1u);
++        mma_ss_if(L, d + 64, ak + KVM, bq + MAT, ID_ST, 0u);
++        mma_ss_if(L, d + 64, ak + KVM + 2, bq + MAT + 2, ID_ST, 1u);
++        mma_commit_if(L, sfa + r * 8);
++        if (w == SPT - 1) mma_commit_if(L, kvea + kb * 8);
++        if (r == 1) { if (++bs == KB_NB) { bs = 0; bsp ^= 1; } }
++        if (++sl == KB3_NQ) { sl = 0; slp ^= 1; }
++        if (++w == SPT) { w = 0; ++lt; }
++      }
++    } else {
++      const uint64_t dM0 = sdesc(sa(sQ), KB_QT * 2, 512, 4);
++      const uint32_t tG = tmem + KB_COL_G;
++      for (int p = 0; p < total; ++p) {
++        const int r = w & 1;
++        const bool first = w < 2, last = w >= SPT - 2;
++        const uint32_t okp = probe(pfa + r * 8, (p >> 1) & 1);
++        if (first && lt >= 1) wait(dea + r * 8, (lt - 1) & 1);
++        if (!okp) wait(pfa + r * 8, (p >> 1) & 1);
++        tc_fence_after();
++        const uint64_t bm = dM0 + sl * SLOT;
++        const uint32_t acc = first ? 0u : 1u, a = tmem + KB_COL_P + r * 64, g0 = tG + r * 64;
++#pragma unroll
++        for (int kk = 0; kk < KB_QW / 16; ++kk) {
++          mma_ts_if(L, g0, a + kk * 8, bm + MAT + kk * 64, ID_G, (acc | kk) ? 1u : 0u);
++          mma_ts_if(L, g0 + 32, a + 32 + kk * 8, bm + kk * 64, ID_G, (acc | kk) ? 1u : 0u);
++        }
++        mma_commit_if(L, qea + sl * 8);
++        mma_commit_if(L, gea + r * 8);
++        if (last) mma_commit_if(L, dfa + r * 8);
++        if (++sl == KB3_NQ) { sl = 0; slp ^= 1; }
++        if (++w == SPT) { w = 0; ++lt; }
++      }
++    }
++    __syncwarp();
++  } else {
++#if TB_SWAPG
++    const int grp = warp < 6 ? 2 : (warp < 10 ? 1 : 0);   // debug: groups 0 / 2 swap warps
++#else
++    const int grp = warp < 10 ? (warp - 2) >> 2 : 2;
++#endif
++    const int qq = warp & 3, k = qq * 32 + lane;   // TMEM lane = key row of the tile
++    const bool lead = qq == 2 && lane == 0;        // the group's TMA-issuing thread
++    const float2 sc2 = make_float2(scl, scl), neg1 = make_float2(-1.f, -1.f);
++    __nv_bfloat16* sOg = sO + grp * 2 * KVT;
++    for (int y = grp; grp < TB_KGN && y < total; y += TB_KGN) {
++      const int lt = y / SPT, w = y - lt * SPT, qs = w >> 1, r = y & 1;
++      int kt, g, bh; decode(blockIdx.x + lt * gridDim.x, kt, g, bh);
++      const int b_ = bh / H, h_ = bh % H;
++      const int jb = lt * NQS + qs, bs = jb % KB_NB, sl = y % KB3_NQ, js = y >> 1;
++      const uint32_t tS = tmem_at(tmem + r * 128, qq * 32, 0), tP = tmem_at(tmem + KB_COL_P + r * 64, qq * 32, 0);
++      if (js >= 1) { while (cnt[r] < 4 * js) { } }   // stage y - 2 (this buffer) has loaded its S^T: no phase aliasing on sf
++      wait(A(sf + r), js & 1);
++      tc_fence_after();
++      const float* ld = sLD + sl * 2 * KB_QW;
++#if TB_EARLY3
++      float svE[4][16], dpE[4][16];              // every chunk of S^T and dP^T into registers first: the buffer is free again after ~300 clk
++#pragma unroll
++      for (int c = 0; c < 4; ++c) { tmem_ld16(tS + c * 16, svE[c]); tmem_ld16(tS + 64 + c * 16, dpE[c]); }
++      tmem_wait_ld();
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) { arrive(A(se + r)); atomicAdd(const_cast<int*>(cnt + r), 1); }
++#endif
++#pragma unroll
++      for (int c = 0; c < 4; ++c) {              // 16-query chunks (registers)
++        float bl[16];
++#if TB_EARLY3
++        float (&sv)[16] = svE[c]; float (&dp)[16] = dpE[c];
++#else
++        float sv[16], dp[16];
++        tmem_ld16(tS + c * 16, sv);
++        tmem_ld16(tS + 64 + c * 16, dp);
++#endif
++        {
++          const float* bp = sB + bs * KB_BT + (c >> 1) * BN * 32 + k * 32;
++#pragma unroll
++          for (int q4 = 0; q4 < 4; ++q4) {
++            const float4 u = *reinterpret_cast<const float4*>(bp + ((((c & 1) << 2) + q4) ^ (k & 7)) * 4);
++            bl[q4 * 4] = u.x; bl[q4 * 4 + 1] = u.y; bl[q4 * 4 + 2] = u.z; bl[q4 * 4 + 3] = u.w;
++          }
++        }
++#if TB_EARLY3
++        if (c == 3) {                             // the bias tile's reads are done
++          fence_proxy_async();
++          __syncwarp();
++          if (lane == 0) arrive(A(be + bs));
++        }
++#else
++        tmem_wait_ld();
++        if (c == 3) {                             // all chunks loaded: buffer r takes its next S^T; the bias tile's reads are done
++          fence_proxy_async();
++          tc_fence_before();
++          __syncwarp();
++          if (lane == 0) { arrive(A(se + r)); arrive(A(be + bs)); }
++          if (lane == 0) atomicAdd(const_cast<int*>(cnt + r), 1);
++        }
++#endif
++        uint32_t pk[8], dk[8];
++#pragma unroll
++        for (int j = 0; j < 4; ++j) {
++          const float4 l4 = *reinterpret_cast<const float4*>(ld + c * 16 + 4 * j);
++          const float4 d4 = *reinterpret_cast<const float4*>(ld + KB_QW + c * 16 + 4 * j);
++#pragma unroll
++          for (int h2 = 0; h2 < 2; ++h2) {
++            const int i = 4 * j + 2 * h2;
++            const float2 lm = h2 ? make_float2(l4.z, l4.w) : make_float2(l4.x, l4.y);
++            const float2 dm = h2 ? make_float2(d4.z, d4.w) : make_float2(d4.x, d4.y);
++            const float2 x = fma2(lm, neg1, fma2(make_float2(sv[i], sv[i + 1]), sc2, make_float2(bl[i], bl[i + 1])));
++            const float2 pp = make_float2(ex2f(x.x), ex2f(x.y));
++            const float2 ds = mul2(pp, fma2(dm, neg1, make_float2(dp[i], dp[i + 1])));
++            pk[i >> 1] = pack2(pp.x, pp.y);
++            dk[i >> 1] = pack2(ds.x, ds.y);
++          }
++        }
++        if (c == 0 && js >= 1) {                  // the gradient GEMMs of this buffer's previous stage read the P^T | dS^T tile
++          while (cnt[2 + r] < 4 * js) { }       // stage y - 2 has written its P^T | dS^T (arrive order on pf, ge)
++          wait(A(ge + r), (js - 1) & 1);
++          tc_fence_after();
++        }
++        tmem_st8(tP + c * 8, pk);
++        tmem_st8(tP + 32 + c * 8, dk);
++      }
++      tmem_wait_st();
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) { arrive(A(pf + r)); atomicAdd(const_cast<int*>(cnt + 2 + r), 1); }
++      if (w >= SPT - 2) {                         // this stage was row r's last of the task: drain dV_r / dK_r on this group
++        wait(A(dfr + r), lt & 1);
++        tc_fence_after();
++        float v[32], kk[32];
++        tmem_ld32(tmem_at(tmem + KB_COL_G + r * 64, qq * 32, 0), v);
++        tmem_ld32(tmem_at(tmem + KB_COL_G + r * 64 + 32, qq * 32, 0), kk);
++        tmem_wait_ld();
++        tc_fence_before();
++        __syncwarp();
++        if (lane == 0) arrive(A(de + r));
++        if (lead) bulk_wait_read<0>();            // this group's previous drain has read its out tile
++        named_sync(5 + grp, 128);
++        {
++          uint32_t wv[16], wk[16];
++#pragma unroll
++          for (int i = 0; i < 16; ++i) { wv[i] = pack2(v[2 * i], v[2 * i + 1]); wk[i] = pack2(kk[2 * i] * scale, kk[2 * i + 1] * scale); }
++          row_sw64_st(sOg, k, wv);
++          row_sw64_st(sOg + KVT, k, wk);
++        }
++        fence_proxy_async();
++        named_sync(5 + grp, 128);
++        if (lead && g * KR + r < N) {
++          const int rw = (b_ * N + g * KR + r) * S + kt * BN;
++          store_2d(&dvmap, A(sOg), h_ * D, rw);
++          store_2d(&dkmap, A(sOg + KVT), h_ * D, rw);
++          bulk_commit();
++        }
++      }
++    }
++    if (lead) bulk_wait<0>();
++  }
++  tc_fence_before();
++  __syncthreads();
++  if (warp == 1) tmem_dealloc(tmem, 512);
++}
++#endif  // TB_KV3
++
+ // ---- kernel 2: dQ and dbias.  Task = (b, h, 128-query tile) x QR pair rows, all keys in 64-wide sub-tiles (stage = (sub-tile, row)).
+ //   MMA:   S = Q_r . K^T, dP = dO_r . V^T        (ts: A = Q_r / dO_r from TMEM, B = K / V K-major; M = 128 q, N = 64 k, K = 32)
+ //   grad:  dS (bf16) over dP; dbias summed over the QR rows in registers   (group gi: key columns 32 gi .. of the stage)
+@@ -1780,6 +2074,9 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
+   static bool attr = false;
+   if (!attr) {
+     C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_bwd_kv_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, KB_SMEM));
++#if TB_KV3
++    C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_bwd_kv3_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, KB3_SMEM));
++#endif
+     C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_bwd_q_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, QB_SMEM));
+     attr = true;
+   }
+@@ -1791,8 +2088,13 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+   }
+   const int n1 = (int)(B * H * (S / BN) * ((N + KR - 1) / KR));
++#if TB_KV3
++  launch_pdl_if(pdl && S == 128, triattn_bwd_kv3_sm100, dim3(std::min(n1, sms)), dim3(KB3_THREADS), KB3_SMEM, stream, (int)N, (int)H, (int)S, n1, scl, (float)scale, q32, d32, k128, v128, bkv,
++      lse.data_ptr<float>(), delta.data_ptr<float>(), dkm, dvm);
++#else
+   launch_pdl_if(pdl && S == 128, triattn_bwd_kv_sm100, dim3(std::min(n1, sms)), dim3( KB_THREADS),  KB_SMEM,  stream, (int)N, (int)H, (int)S, n1, scl, (float)scale, q32, d32, k128, v128, bkv,
+       lse.data_ptr<float>(), delta.data_ptr<float>(), dkm, dvm);
++#endif
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+   launch_pdl_if(pdl && S == 128, triattn_bwd_q_sm100, dim3(grid2), dim3( QB_THREADS),  QB_SMEM,  stream, (int)N, (int)H, (int)S, n2, scl, (float)scale, q128, d128, k64, v64, bq,
+       lse.data_ptr<float>(), delta.data_ptr<float>(), dqm, dbm, per2, (int)(B * H * S));

@@ -1,0 +1,146 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
+index 5a96b4daa..2650172de 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
+@@ -98,6 +98,11 @@ static_assert(!XLN || (XG && LNS && !SAVE_BUILD), "XLN: the D 256 inference buil
+ static_assert(!YST || RXC, "YST needs RXC");
+ // -DRXT=1 (round 3 part 20; default: the inference build): a CTA's LAST tile takes its residual x from a TMA copy into the (then idle)
+ // weight ring and writes y by TMA stores from there (see the epilogue); the other tiles as before. The same arithmetic: the same bits.
++// -DYE=1 (S90; default: the inference build at D <= 128): the epilogue loads every accumulator column of its tile into registers first and frees the
++// y accumulator (yempty) right after the TMEM loads, not after the residual adds and the stores: the next tile's first squeeze no longer waits for them.
++#ifndef YE
++#define YE (!SAVE_BUILD && D <= 128)
++#endif
+ #ifndef RXT
+ #define RXT (MLANE && YST && !SAVE_BUILD)
+ #endif
+@@ -726,6 +731,18 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+       mbar_wait(&B.yfull, tc & 1);
+       if (ew == 0 && lane == 0 && tc == 0) STAMP(9);
+       tc_fence_after();
++#if YE
++      uint32_t ya[D / 64][16], yb[D / 64][16];
++#pragma unroll
++      for (int u = 0; u < D / 64; ++u) {
++        tmem_ld16(tmem + lrow + T_Y + half * (D / 2) + u * 32, ya[u]);
++        tmem_ld16(tmem + lrow + T_Y + half * (D / 2) + u * 32 + 16, yb[u]);
++      }
++      tmem_wait_ld();
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) mbar_arrive(&B.yempty);
++#endif
+ #pragma unroll
+       for (int u = 0; u < (TBEPI == 1 ? 0 : D / 64); ++u) {
+         const int col = half * (D / 2) + u * 32;
+@@ -746,9 +763,13 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+ #endif
+ #pragma unroll
+         for (int hh = 0; hh < 2; ++hh) {
++#if YE
++          const uint32_t* acc = hh ? yb[u] : ya[u];
++#else
+           uint32_t acc[16];
+           tmem_ld16(tmem + lrow + T_Y + col + 16 * hh, acc);
+           tmem_wait_ld();
++#endif
+ #pragma unroll
+           for (int q = 0; q < 4; ++q) {
+             const uint4 w = RXC ? lds128(slab + sw128((uint32_t)lane, 4 * hh + q)) : cur[4 * hh + q];
+@@ -780,9 +801,11 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+           for (int q = 0; q < 8; ++q) cur[q] = nxt[q];
+         }
+       }
++#if !YE
+       tc_fence_before();
+       __syncwarp();
+       if (lane == 0) mbar_arrive(&B.yempty);
++#endif
+       // the h buffers are written again by the next tile's chunks: every warp's staged stores must have been read out
+       if (!YST && lane == 0) tma_store_wait_read0();
+       named_bar_sync(1, 32 * NEPI);
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d64.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d64.cu
+index 4edd19d8f..b15a549e0 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d64.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d64.cu
+@@ -20,6 +20,11 @@ using namespace s100;
+ #define ROLES 0
+ #endif
+ 
++// NHS_ h slots in tensor memory (default 2, 4 fits: T_H 256 .. 383). A slot's recurrence -- SwiGLU stores h -> h_full (remote arrive) -> squeeze -> sq_done
++// (multicast) -> the next store into it -- comes round once a tile at 2 slots (2 chunks a tile) and once in two tiles at 4 (S90).
++#ifndef NHS_
++#define NHS_ 2
++#endif
+ #ifdef PROBE
+ #define STAMP(k) do { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(c1)[cta * 96 + (k)] = _t; } while (0)
+ #else
+@@ -53,9 +58,9 @@ constexpr uint32_t IDESC_EX = idesc_bf16(256, 128), IDESC_SQ = idesc_bf16(256, 6
+ 
+ struct Bars {
+   // leader-only: w_full (both CTAs' weight transactions), xn_full (2 LN arrivals), ab_empty / h_full / out_empty (4 warps per CTA)
+-  uint64_t w_full, xn_full[2], ab_empty[2], h_full[2], out_empty;
++  uint64_t w_full, xn_full[2], ab_empty[2], h_full[NHS_], out_empty;
+   // both CTAs (leader's multicast commits)
+-  uint64_t xn_empty[2], ex_done[2], sq_done[2], out_full;
++  uint64_t xn_empty[2], ex_done[2], sq_done[NHS_], out_full;
+   // local
+   uint64_t x_full[NXS], x_empty[NXS];
+   uint32_t tmem;
+@@ -83,9 +88,10 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
+   if (tid == 0) {
+     mbar_init(&B.w_full, 1);
+     for (int s = 0; s < 2; ++s) {
+-      mbar_init(&B.xn_full[s], 2); mbar_init(&B.ab_empty[s], 8); mbar_init(&B.h_full[s], 8);
+-      mbar_init(&B.xn_empty[s], 1); mbar_init(&B.ex_done[s], 1); mbar_init(&B.sq_done[s], 1);
++      mbar_init(&B.xn_full[s], 2); mbar_init(&B.ab_empty[s], 8);
++      mbar_init(&B.xn_empty[s], 1); mbar_init(&B.ex_done[s], 1);
+     }
++    for (int s = 0; s < NHS_; ++s) { mbar_init(&B.h_full[s], 8); mbar_init(&B.sq_done[s], 1); }
+     for (int s = 0; s < NXS; ++s) { mbar_init(&B.x_full[s], 1); mbar_init(&B.x_empty[s], 1); }
+     mbar_init(&B.out_empty, 8); mbar_init(&B.out_full, 1);
+     fence_barrier_init();
+@@ -155,7 +161,8 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
+       } else {
+         for (int q = 0; q < nch; ++q) {
+           const int i = q / NCH, j = q & (NCH - 1), s = q & 1, u = q >> 1;
+-          mbar_wait_cl(&B.h_full[s], u & 1);
++          const int sh = q & (NHS_ - 1);
++          mbar_wait_cl(&B.h_full[sh], (q / NHS_) & 1);
+           if (j == 0 && i >= 1) mbar_wait_cl(&B.out_empty, (i - 1) & 1);
+           if (lane == 0 && j == 0 && i < 12) STAMP(26 + i);
+           tc_fence_after();
+@@ -163,8 +170,8 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
+           if (elect_one()) {
+ #pragma unroll
+             for (int ks = 0; ks < KS; ++ks)
+-              umma_ts2(tmem + T_OUT, tmem + T_H + s * 32 + ks * 8, bd + (uint64_t)(ks * 2), IDESC_SQ, (j > 0 || ks > 0) ? 1u : 0u);
+-            tc_commit2_mc(&B.sq_done[s], 3);
++              umma_ts2(tmem + T_OUT, tmem + T_H + sh * 32 + ks * 8, bd + (uint64_t)(ks * 2), IDESC_SQ, (j > 0 || ks > 0) ? 1u : 0u);
++            tc_commit2_mc(&B.sq_done[sh], 3);
+             if (j == NCH - 1) tc_commit2_mc(&B.out_full, 3);
+           }
+           __syncwarp();
+@@ -210,17 +217,18 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
+       tc_fence_before();
+       __syncwarp();
+       if (lane == 0) mbar_arrive_remote_relaxed(&B.ab_empty[s], 0);
+-      if (c >= 2) mbar_wait(&B.sq_done[s], (u - 1) & 1);
++      const int sh = c & (NHS_ - 1);
++      if (c >= NHS_) mbar_wait(&B.sq_done[sh], ((c / NHS_) - 1) & 1);
+       tc_fence_after();
+       uint32_t h0[16], h1[16];
+ #pragma unroll
+       for (int k = 0; k < 16; ++k) { h0[k] = hp[k]; h1[k] = hp[16 + k]; }
+-      tmem_st16(trow + T_H + s * 32, h0);
+-      tmem_st16(trow + T_H + s * 32 + 16, h1);
++      tmem_st16(trow + T_H + sh * 32, h0);
++      tmem_st16(trow + T_H + sh * 32 + 16, h1);
+       tmem_wait_st();
+       tc_fence_before();
+       __syncwarp();
+-      if (lane == 0) mbar_arrive_remote_relaxed(&B.h_full[s], 0);
++      if (lane == 0) mbar_arrive_remote_relaxed(&B.h_full[sh], 0);
+       if (lane == 0 && (warp & 3) == 0 && c < 16) STAMP(80 + c);
+     };
+     const bool is_ln = warp >= 8 && warp < 12;

@@ -1,0 +1,202 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7g.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7g.cu
+index 85399ef69..2165f4874 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7g.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7g.cu
+@@ -25,10 +25,19 @@ using namespace sm100;
+ #ifndef B7_WARPMMA
+ #define B7_WARPMMA 1   // consumer MMA loop run by the whole warp (uniform descriptors), one elected lane issues
+ #endif
++#ifndef B7_MPF
++#define B7_MPF 0
++#endif
+ #ifndef B7_SIG
+ #define B7_SIG 0
+ #endif
+ namespace b7g {
++#ifdef B7G_TL   // S90: per-tile %globaltimer stamps [event][tile][chunk] of both roles (probe builds only), read by b7g_tl()
++__device__ unsigned long long g_b7tl[24][4096][8];
++#define TLT(ev, t, c) { const int t_i = (t); if (t_i < 4096) { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); g_b7tl[ev][t_i][c] = t_; } }
++#else
++#define TLT(ev, t, c)
++#endif
+ 
+ constexpr int C = 128, TOK = 128;
+ constexpr int XT = TOK * C * 2;            // 32 KB tiles ([128][128] bf16, 2 K-blocks)
+@@ -302,9 +311,11 @@ __global__ void __launch_bounds__(384, 1)
+         int ps0 = 0, pj0 = 0, ps1 = 0, pj1 = 0, np = 0;         // stored, not yet published (oldest first)
+         for (int j = b, i = 0; j < n_local; j += 2, ++i) {
+           const int slot = (g * RD + j % RD) * NCH + c;
+-          PW(1, spin_until(a.flags + slot, 0u)); TLS(1);            // consumer of tile j - RD has taken the slot (acquire)
++          const int tt = g + a.SG * j;
++          TLT(3, tt, c);
++          PW(1, spin_until(a.flags + slot, 0u)); TLS(1); TLT(2, tt, c);            // consumer of tile j - RD has taken the slot (acquire)
+           fence_proxy_async_global();                               // ... ordered before this thread's async-proxy writes to it
+-          PW(0, mbar_wait(&B.dgp_ready[b], (j >> 1) & 1)); TLS(0);
++          PW(0, mbar_wait(&B.dgp_ready[b], (j >> 1) & 1)); TLS(0); TLT(1, tt, c);
+           PW(3, tma_store_2d(&mring, sm + S_DGP + b * XT, 0, slot * TOK));
+           PW(3, tma_store_2d(&mring, sm + S_DGP + b * XT + XT / 2, 64, slot * TOK));
+           bulk_commit();
+@@ -316,6 +327,7 @@ __global__ void __launch_bounds__(384, 1)
+             PW(4, fence_acq_rel_gpu());
+             flag_store(a.flags + ps0, (uint32_t)(pj0 + 1));   // generation tag: group-local tile index + 1
+             flag_store(a.flags + ps1, (uint32_t)(pj1 + 1));
++            TLT(0, g + a.SG * pj0, c); TLT(0, g + a.SG * pj1, c);
+             np = 0;
+           }
+           if (np == 0) { ps0 = slot; pj0 = j; } else { ps1 = slot; pj1 = j; }
+@@ -328,6 +340,7 @@ __global__ void __launch_bounds__(384, 1)
+           fence_acq_rel_gpu();
+           flag_store(a.flags + ps0, (uint32_t)(pj0 + 1));
+           if (np == 2) flag_store(a.flags + ps1, (uint32_t)(pj1 + 1));
++          TLT(0, g + a.SG * pj0, c); if (np == 2) TLT(0, g + a.SG * pj1, c);
+         }
+       }
+     } else if (warp >= 4) {
+@@ -341,11 +354,16 @@ __global__ void __launch_bounds__(384, 1)
+       for (int j = 0; j < n_local; ++j) {
+         const int b = j & 1;
+         const float mA = mk0, mB = mk1;
++#if B7_MPF   // the next tile's mask loads go out before this tile's waits (their latency hides behind them)
++        if (j + 1 < n_local) { pix.advance(a.L); pix.mask2(a.tmask, tok0 + tr, a.L, mk0, mk1); }
++#endif
+         if (warp == 4) TLS(4);
++        if (warp == 4 && lane == 0) TLT(12, g + a.SG * j, 0);
+         PW(0, mbar_wait(&B.pre_full[b], (j >> 1) & 1));
+         PW(1, mbar_wait(&B.da_full[b], (j >> 1) & 1));
+         if (j >= 2) PW(2, mbar_wait(&B.dgp_free[b], ((j >> 1) - 1) & 1));
+         if (warp == 4) TLS(5);
++        if (warp == 4 && lane == 0) TLT(13, g + a.SG * j, 0);
+         tc_fence_after();
+         const uint32_t ta = tmem + T_PRE + b * 128 + ((uint32_t)tok0 << 16);
+         uint32_t da[16];
+@@ -429,11 +447,14 @@ __global__ void __launch_bounds__(384, 1)
+         if (warp == 4) TLS(12);
+         named_bar_sync(1, 256);
+         if (tid == 128) mbar_arrive(&B.dgp_ready[b]);
++        if (tid == 128) TLT(14, g + a.SG * j, 0);
+         if (warp == 4) TLS(6);
++#if !B7_MPF
+         if (j + 1 < n_local) {                               // next tile's mask (after the proxy fence, which would wait on it)
+           pix.advance(a.L);
+           pix.mask2(a.tmask, tok0 + tr, a.L, mk0, mk1);
+         }
++#endif
+       }
+     }
+     // flush dW_c
+@@ -477,9 +498,11 @@ __global__ void __launch_bounds__(384, 1)
+         for (int jj = 0; jj < n_local; ++jj) {
+           const int t = tile_of(jj), row0 = t * TOK, g = t % a.SG, s = (t / a.SG) % RD;
+           TLD(0);
++          const int qb = q;
+           for (int kh = 0; kh < 2; ++kh, ++q) {              // dGout K-block kh with Wg rows 64 kh ..: needs no flag
+             const int st = q % NST;
+             PW(1, mbar_wait(&B.st_empty[st], ((q / NST) & 1) ^ 1));
++            TLT(19 + (q - qb) / 8, t, (q - qb) % 8);
+             mbar_expect_tx(&B.st_full[st], STB);
+             const uint32_t d = C_ST + st * STB;
+             tma_load_2d(sm + d, &mgo, &B.st_full[st], 64 * kh, row0, EVICT_FIRST);
+@@ -494,11 +517,13 @@ __global__ void __launch_bounds__(384, 1)
+           for (int c = 0; c < NCH; ++c) {
+             const int slot = (g * RD + s) * NCH + c;
+             PW(0, mbar_wait(&B.fready[fb][c], (jj >> 1) & 1));   // the watcher lane of chunk c has seen its flag
++            TLT(7, t, c);
+             TLD(1 + c);
+             PW(3, fence_proxy_async_global());
+             for (int kh = 0; kh < 2; ++kh, ++q) {          // K-block kh of the chunk: W1 rows 128c + 64kh .., dgp columns 64kh ..
+               const int st = q % NST;
+               PW(1, mbar_wait(&B.st_empty[st], ((q / NST) & 1) ^ 1));
++              TLT(19 + (q - qb) / 8, t, (q - qb) % 8);
+               PROG(0, t * 8 + c);
+               // energy ablations (wrong results): B7_NOW1 skips the W1 half, B7_NORING the dgp half of the stage
+ #if defined(B7_NOW1) && defined(B7_NORING)
+@@ -524,6 +549,7 @@ __global__ void __launch_bounds__(384, 1)
+ #endif
+             }
+           }
++          TLT(15, t, 0);
+           mbar_arrive(&B.fdone[fb]);                       // the watchers may move on to tile jj + 2
+         }
+       }
+@@ -550,6 +576,7 @@ __global__ void __launch_bounds__(384, 1)
+ #pragma unroll 1
+           for (int s2 = 0; s2 < 2 + 2 * NCH; ++s2) {         // 2 (dGout, Wg) stages, then NCH chunks x 2 K-blocks of (dgp_c, W1_c)
+             PW(0, mbar_wait(&B.st_full[st], ph));
++            if (ldr) TLT(16 + s2 / 8, t, s2 % 8);
+             tc_fence_after();
+             // the first / second half of the chunks has landed (their ring slots' global reads are done): hand them to the slot
+             // returner (warp 3 lane 16), which fences and releases; nothing here waits for the MMAs
+@@ -567,11 +594,13 @@ __global__ void __launch_bounds__(384, 1)
+               umma_ss(d, da + 6, db + 384, ID_DX, 1);
+               if (pair) umma_commit_mc(&B.st_empty[st], 3);  // the stage is free in both CTAs once both MMAs have read it
+               else umma_commit(&B.st_empty[st]);
++              TLT(22 + (s2 >> 3), t, s2 & 7);
+             }
+             if (B7_WARPMMA) __syncwarp();
+             if (++st == NST) { st = 0; ph ^= 1; }
+           }
+           if (ldr) umma_commit(&B.acc_full[acc]);
++          if (ldr) TLT(8, t, 0);
+           if (B7_WARPMMA) __syncwarp();
+           TLC(14); TLD(12);
+         }
+@@ -603,7 +632,9 @@ __global__ void __launch_bounds__(384, 1)
+         for (int jj = 0; jj < n_local; ++jj) {
+           const int t = tile_of(jj), g = t % a.SG, s = (t / a.SG) % RD, fb = jj & 1;
+           if (jj >= 2) mbar_wait(&B.fdone[fb], ((jj >> 1) - 1) & 1);
++          TLT(5, t, c);
+           PW(0, spin_until(a.flags + (g * RD + s) * NCH + c, (uint32_t)(t / a.SG + 1)));
++          TLT(4, t, c);
+           mbar_arrive(&B.fready[fb][c]);
+         }
+       } else if (lane == 16) {
+@@ -615,7 +646,7 @@ __global__ void __launch_bounds__(384, 1)
+             mbar_wait(&B.landed[fb][h], (jj >> 1) & 1);
+             fence_proxy_async_global();
+             fence_acq_rel_gpu();
+-            for (int c = h * (NCH / 2); c < (h + 1) * (NCH / 2); ++c) flag_return(a.flags + (g * RD + s) * NCH + c);
++            for (int c = h * (NCH / 2); c < (h + 1) * (NCH / 2); ++c) { flag_return(a.flags + (g * RD + s) * NCH + c); TLT(6, t, c); }
+           }
+           mbar_arrive(&B.retdone[fb]);
+         }
+@@ -639,7 +670,9 @@ __global__ void __launch_bounds__(384, 1)
+         const int t = tile_of(jj), row0 = t * TOK, acc = jj & 1, xb = jj & 1;
+         xrow = xrow0 + xb * XT;
+         if (warp == 4) { TLC(0); TLD(13); }
++        if (et == 0) TLT(9, t, 0);
+         PW(1, mbar_wait(&B.cx_full[xb], (jj >> 1) & 1));
++        if (et == 0) TLT(9, t, 1);
+ #ifdef PROF
+         long long tz = clock64();
+ #endif
+@@ -685,6 +718,7 @@ __global__ void __launch_bounds__(384, 1)
+         PW(0, mbar_wait(&B.acc_full[acc], (jj >> 1) & 1));
+         if (warp == 4 || warp == 11) TLC(warp == 4 ? 4 : 5);
+         if (warp == 4) TLD(14);
++        if (et == 0) TLT(10, t, 0);
+         tc_fence_after();
+ #ifdef PROF
+         tz = clock64();
+@@ -797,6 +831,7 @@ __global__ void __launch_bounds__(384, 1)
+           tma_store_2d(&mdx, sm + C_X + xb * XT + XT / 2, 64, row0);
+           bulk_commit();
+           PROG(2, t);
++          TLT(11, t, 0);
+         }
+ #ifdef PROF
+         pacc_[5] += clock64() - tz;
+@@ -879,3 +914,14 @@ void b7g_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
+   if (NCH == 4) launch((const void*)b7g_kernel<4>, attr4);
+   else launch((const void*)b7g_kernel<8>, attr8);
+ }
++
++// -DB7G_TL=1 (probe builds only): the per-tile %globaltimer stamps [16 events][4096 tiles][8 chunks] of both roles
++torch::Tensor b7g_tl() {
++#ifdef B7G_TL
++  auto h = torch::empty({24, 4096, 8}, torch::kInt64);
++  C10_CUDA_CHECK(cudaMemcpyFromSymbol(h.data_ptr(), b7g::g_b7tl, sizeof(unsigned long long) * 24 * 4096 * 8));
++  return h;
++#else
++  return torch::Tensor();
++#endif
++}

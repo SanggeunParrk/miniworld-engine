@@ -1,0 +1,27 @@
+cases measured 214
+LADDER violations (cuda slower than rung by >2%): 0
+
+H100 1.5x misses (H100 >= 20 us, ratio > 0.667): 19
+0.754 TriangleAttention train 128 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 0.1194 0.1584
+0.748 TriangleAttention train 128 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': True} 0.1175 0.1571
+0.742 TriangleAttention eval 128 {'d_pair': 256, 'n_head': 8, 'p_drop': 0.25, 'starting': False} 0.049 0.066
+0.724 TriangleAttention eval 128 {'d_pair': 256, 'n_head': 8, 'p_drop': 0.25, 'starting': True} 0.047 0.0649
+0.704 TriangleAttention eval 2048 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 11.9429 16.9613
+0.696 TriangleAttention eval 128 {'d_pair': 384, 'n_head': 12, 'p_drop': 0.25, 'starting': False} 0.0757 0.1088
+0.69 TriangleAttention eval 2048 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': True} 11.7684 17.0546
+0.688 TriangleAttention eval 256 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 0.0737 0.107
+0.687 TriangleAttention eval 1536 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 5.1942 7.564
+0.686 TriangleAttention eval 384 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 0.1637 0.2388
+0.683 TriangleAttention eval 512 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 0.3011 0.4406
+0.68 TriangleAttention eval 1536 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': True} 5.1644 7.599
+0.675 TriangleAttention eval 2048 {'d_hidden': 128, 'd_pair': 64, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 11.4447 16.9506
+0.674 TriangleAttention eval 2048 {'d_hidden': 128, 'd_pair': 64, 'n_head': 4, 'p_drop': 0.25, 'starting': True} 11.3566 16.8577
+0.673 TriangleAttention eval 3968 {'d_pair': 384, 'n_head': 12, 'p_drop': 0.25, 'starting': True} 271.3665 403.006
+0.673 TriangleAttention eval 128 {'d_pair': 384, 'n_head': 12, 'p_drop': 0.25, 'starting': True} 0.0736 0.1094
+0.672 TriangleAttention eval 1536 {'d_pair': 256, 'n_head': 8, 'p_drop': 0.25, 'starting': False} 11.3746 16.9181
+0.671 TriangleAttention eval 768 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 0.7864 1.1719
+0.669 TriangleAttention eval 384 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': True} 0.1577 0.2358
+('TriangleAttention', 'train') cases 84 geomean 0.522 worst 0.754
+('BidirectionalTriangleAttention', 'train') cases 6 geomean 0.463 worst 0.507
+('TriangleAttention', 'eval') cases 118 geomean 0.569 worst 0.742
+('BidirectionalTriangleAttention', 'eval') cases 6 geomean 0.477 worst 0.609

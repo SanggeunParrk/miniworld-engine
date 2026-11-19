@@ -1,0 +1,285 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_pair_fwd_rows_sm100.cuh b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_pair_fwd_rows_sm100.cuh
+index 0044d4c66..d0bf3a427 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_pair_fwd_rows_sm100.cuh
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_pair_fwd_rows_sm100.cuh
+@@ -26,9 +26,38 @@ __device__ __forceinline__ void bulk_g2s_h(void* dst, const void* src, uint32_t
+ }
+ template <int NH, int NSF2>
+ constexpr int fwd2_smem() { return NSF2 * fwd_tile<DP>() + 2 * nhp<NH>() * (128 + 4) * 4 + NSF2 * FW * 8; }
+-template <int NH, int NSF2, int HINT = 0>
++// v28: Wf made in the prologue from the master weights (``WBM`` = to_bias.weight [NH, 128] in the parameter dtype, ``LPW`` =
++// ln_pair.weight fp32, ``ws``) -- the words prep_dp writes (WF[k] = bf16(rbf(wb) lpw ws)), so the same bits: the training pass then
++// needs no pack before it. Each lane converts its 4 columns x NT8 x 8 words once.
++template <int NT8, int NH, int DPW, typename TM>
++__device__ __forceinline__ void wf_frags_m(const TM* WBM, const float* LPW, float ws, uint32_t (&b)[NT8][DPW / 16][2], float (&sw0)[NT8],
++                                           float (&sw1)[NT8]) {
++  const int lane = threadIdx.x & 31, g = lane >> 2, q = lane & 3;
++#pragma unroll
++  for (int nt = 0; nt < NT8; ++nt) {
++    float sw = 0.f;
++    const bool live = g + 8 * nt < NH;
++#pragma unroll
++    for (int s = 0; s < DPW / 16; ++s) {
++      const int c0 = 32 * (s >> 1) + 8 * q + 4 * (s & 1);
++      float v[4];
++#pragma unroll
++      for (int c = 0; c < 4; ++c) {
++        const float wb = live ? rbf(static_cast<float>(WBM[(g + 8 * nt) * DPW + c0 + c])) : 0.f;
++        v[c] = live ? wb * LPW[c0 + c] * ws : 0.f;
++      }
++      b[nt][s][0] = live ? pack2(v[0], v[1]) : 0u; b[nt][s][1] = live ? pack2(v[2], v[3]) : 0u;
++      const float2 u = unpack2(b[nt][s][0]), x = unpack2(b[nt][s][1]);
++      sw += u.x + u.y + x.x + x.y;
++    }
++    sw = quad_sum(sw);                                                      // sum_c Wf[g + 8 nt, c]
++    sw0[nt] = __shfl_sync(0xffffffffu, sw, 8 * q); sw1[nt] = __shfl_sync(0xffffffffu, sw, 8 * q + 4);
++  }
++}
++template <int NH, int NSF2, int HINT = 0, typename TM = bf>
+ __global__ void __launch_bounds__(FNT) pair_bias_fwd2_k(const bf* __restrict__ Z, const bf* __restrict__ W, const bool* __restrict__ MASK,
+-                                                       bf* __restrict__ OUT, int L, float eps, float neg) {
++                                                       bf* __restrict__ OUT, int L, float eps, float neg, const TM* __restrict__ WBM = nullptr,
++                                                       const float* __restrict__ LPW = nullptr, float ws = 1.f) {
+   constexpr int NT8 = nhp<NH>() / 8, NHP = nhp<NH>(), FT = fwd_tile<DP>(), UU = DP / 32, TR = 128, TC = TR / 8;
+   extern __shared__ __align__(128) uint8_t smem[];
+   float (*out_s)[NHP][128 + 4] = reinterpret_cast<float (*)[NHP][128 + 4]>(smem + NSF2 * FT);
+@@ -59,7 +88,8 @@ __global__ void __launch_bounds__(FNT) pair_bias_fwd2_k(const bf* __restrict__ Z
+   }
+   uint32_t b[NT8][DP / 16][2];
+   float sw0[NT8], sw1[NT8];
+-  wf_frags<NT8, NH, DP>(W, b, sw0, sw1);
++  if (WBM) wf_frags_m<NT8, NH, DP>(WBM, LPW, ws, b, sw0, sw1);
++  else wf_frags<NT8, NH, DP>(W, b, sw0, sw1);
+   for (long n = 0;; ++n) {
+     const long t = blockIdx.x + n * gridDim.x;
+     if (t >= ntiles) break;
+@@ -150,4 +180,36 @@ void pair_bias_fwd2(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask,
+ #undef PF2
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
++template <int NH, typename TM>
++void pair_bias_fwd2m_t(const at::Tensor& z, const at::Tensor& wb, const at::Tensor& lpw, double ws, const c10::optional<at::Tensor>& mask,
++                       at::Tensor& out, int64_t L, double eps, double neg, int64_t bps) {
++  auto k = pair_bias_fwd2_k<NH, 2, 0, TM>;
++  static int occ = 0;
++  if (!occ) {
++    C10_CUDA_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, fwd2_smem<NH, 2>()));
++    C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, k, FNT, fwd2_smem<NH, 2>()));
++  }
++  const long per_sm = bps > 0 ? std::min<long>(bps, occ) : occ;
++  const long ntiles = L * ((L + 127) / 128);
++  k<<<(unsigned)std::min<long>(per_sm * nsm_of(z), ntiles), FNT, fwd2_smem<NH, 2>(), S()>>>(
++      CP<bf>(z), nullptr, mask ? CP<bool>(*mask) : nullptr, P<bf>(out), (int)L, (float)eps, (float)neg, CP<TM>(wb), CP<float>(lpw), (float)ws);
++}
++// v28: pair_bias_fwd2 (2 stages, plain loads) with Wf made in the kernel from the masters: wb = to_bias.weight [nh, 128] (fp32 or bf16),
++// lpw = ln_pair.weight [128] fp32, Wf = bf16(rbf(wb) lpw ws) as prep_dp makes it. No dependency on the weight pack.
++void pair_bias_fwd2m(at::Tensor z, at::Tensor wb, at::Tensor lpw, double ws, c10::optional<at::Tensor> mask, at::Tensor out, int64_t L,
++                     double eps, double neg, int64_t bps) {
++  chk(z, at::kBFloat16, "pair"); chk(lpw, at::kFloat, "ln_pair.weight"); chk(out, at::kBFloat16, "bias");
++  const bool f32 = wb.scalar_type() == at::kFloat;
++  chk(wb, f32 ? at::kFloat : at::kBFloat16, "to_bias.weight");
++  const int64_t nh = wb.size(0);
++  TORCH_CHECK(wb.size(1) == DP && lpw.numel() == DP && L % 16 == 0 && z.numel() == L * L * DP && out.numel() == nh * L * L,
++              "pair_bias_fwd2m shapes");
++  TORCH_CHECK(nh == 8 || nh == 12 || nh == 16 || nh == 24, "pair_bias_fwd2m: 8, 12, 16 or 24 heads");
++  if (mask) { chk(*mask, at::kBool, "mask"); TORCH_CHECK(mask->numel() == L, "mask [L]"); }
++  const at::cuda::CUDAGuard gd(z.device());
++#define PFM(NH) (f32 ? pair_bias_fwd2m_t<NH, float>(z, wb, lpw, ws, mask, out, L, eps, neg, bps) : pair_bias_fwd2m_t<NH, bf>(z, wb, lpw, ws, mask, out, L, eps, neg, bps))
++  if (nh == 8) PFM(8); else if (nh == 12) PFM(12); else if (nh == 16) PFM(16); else PFM(24);
++#undef PFM
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
+ }  // namespace
+diff --git a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py b/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
+index 79968c6c6..c822db67a 100644
+--- a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
++++ b/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
+@@ -230,6 +230,7 @@ def _prep(
+         wpack, bvec = wq.new_empty((4 * W, D), dtype=bf), wq.new_empty((4 * W,), dtype=bf)
+         wf, wbo, wop = wq.new_empty((H, dp), dtype=bf), wq.new_empty((H, dp), dtype=bf), wq.new_empty((D, W), dtype=bf)
+         E = _rows().ext()
++        E.prep_mb(_PREP_MB)
+         if ln is not None and ln[0].dtype == bf and ln[0].is_contiguous():
+             # the pack and LayerNorm(single) of the first batch row in one launch (prep_ln); ``ln`` = ln_rows' arguments, True appended
+             E.prep_ln(wq, bq, wk, wv, wg, wo, wb, lnpw, wpack, bvec, wop, wf, qs, ws, wbo, float(gate_bias), *ln)
+@@ -1112,6 +1113,29 @@ def _train_fused(L: int, dp: int, heads: int) -> bool:
+     return _TRF > 0 and (L == 128 or (L == 256 and _TRF256 > 0)) and dp == DP and heads != 8
+ 
+ 
++#: v28: the training forward's d_pair 128 pair pass of row 0 from the master weights (``pair_bias_fwd2m``: Wf made in its prologue, the
++#: same words as the pack), so it starts beside the weight pack instead of after it. 0 off; 1 the pair pass captured first (side), then
++#: the pack (main); 2 the pack first. ``_PFM_BPS``: its blocks per SM (0: the occupancy); ``_PFM_RES``: SMs it leaves free.
++_PFM = int(os.environ.get("MINIWORLD_APB_B200_PFM", "0"))
++_PFM_BPS = int(os.environ.get("MINIWORLD_APB_B200_PFM_BPS", "0"))
++_PFM_RES = int(os.environ.get("MINIWORLD_APB_B200_PFM_RES", "0"))
++_PFM_TC = int(os.environ.get("MINIWORLD_APB_B200_PFM_TC", "0"))  # 1: row 0's pass on tcgen05 (sm100 apb_pair_fwd, Wf from the masters)
++_PFM_LS = tuple(int(v) for v in os.environ.get("MINIWORLD_APB_B200_PFM_LS", "128,256,384,512,640,768").split(","))
++#: v28 probe: the q | k | v | g GEMM captured before the side stream's pair pass (graph node order)
++_GEMM_FIRST = os.environ.get("MINIWORLD_APB_B200_GEMM_FIRST", "0") != "0"
++#: v28: prep_ln's minimum blocks per SM (__launch_bounds__; 0: none -- 64 registers at D 512, two waves)
++_PREP_MB = int(os.environ.get("MINIWORLD_APB_B200_PREP_MB", "0"))
++#: v28: the tcgen05 pair backward reduces its own partial rows into dWb / dln_pair.weight (sm100 pair_bwd.cu PB_FIN: the last 16
++#: blocks; finalize_part 4's statements and order: the same bits), so no finalize launch follows it. 16 heads, L <= 512 (the parts route).
++_PB_FIN = os.environ.get("MINIWORLD_APB_B200_PB_FIN", "0") != "0"
++#: the training forward runs pair_bias_fwd2 (the 8-lane-issue form) from this L (v21: 384)
++_PF2_TMIN = int(os.environ.get("MINIWORLD_APB_B200_PF2_TMIN", "384"))
++
++
++def _pfm(dp: int, L: int, heads: int) -> bool:
++    return _PFM > 0 and dp == DP and L in _PFM_LS and heads in (8, 12, 16, 24)
++
++
+ def _forward_b200(single, pair, mask, leaves, eps_s, eps_p, gate_bias):
+     """``forward`` on B200 (2026-11-17): the same kernels and values on two streams, as ``_inference_b200``: the weight pack and each row's
+     pair pass on the side stream, LN(single) / the q | k | v | g GEMM / the core / the gate / to_out on the main one."""
+@@ -1129,20 +1153,55 @@ def _forward_b200(single, pair, mask, leaves, eps_s, eps_p, gate_bias):
+         out = torch.empty_like(single)
+         xa0, st0 = torch.empty_like(single[0]), single.new_empty((L, 2), dtype=torch.float32)
+         ln0: list = [single[0], lnw, lnb, xa0, st0, eps_s, out[0]]
+-        with torch.cuda.stream(side):
++        dp = leaves[9].shape[1]
++        pfm = _pfm(dp, L, H)
++        bias0 = None
++        if pfm and _PFM == 2:  # v28: the pack + LayerNorm launch first (main), the pair pass beside it
+             wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0, gate_bias, ln0)
++        if pfm:  # v28: row 0's pair pass from the masters (Wf made in its prologue: the same words), on the side stream from the start
++            with torch.cuda.stream(side):
++                if _PFM_TC:  # the tcgen05 pass (one 192-thread block per SM), Wf from the masters in its prologue
++                    bias0 = sm.apb_pair_fwd(pair[0].view(L * L, DP), leaves[9], leaves[8], 1.0, _row(mask, 0), L, eps_p, NEG)
++                else:
++                    bias0 = pair.new_empty((H, L, L))
++                    was = E.sm_reserve(_PFM_RES)
++                    E.pair_bias_fwd2m(pair[0].view(L * L, DP), leaves[9], leaves[8], 1.0, _row(mask, 0), bias0, L, eps_p, NEG, _PFM_BPS)
++                    E.sm_reserve(was)
++            if _PFM != 2:
++                wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0, gate_bias, ln0)
++        else:
++            with torch.cuda.stream(side):
++                wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0, gate_bias, ln0)
+         assert wop is not None and wbo is not None  # B200: prep_dp always packs Wo and Wb
+         packed = torch.cuda.Event()
+-        _rec(packed, side)
+-        dp = wf.shape[1]
++        _rec(packed, main if pfm else side)
+         saved: list[torch.Tensor] = []
+         side_made = [wpack, bvec, wf, wop, wbo]
+         for b in range(B):
+             m = _row(mask, b)
++            if pfm and b > 0:
++                _after(side, packed)
++            x, y = single[b], out[b]
++            xa = xa0 if b == 0 else torch.empty_like(x)
++            st = st0 if b == 0 else x.new_empty((L, 2), dtype=torch.float32)
++
++            def gemm():
++                if b > 0 or len(ln0) == 7:  # row 0: LayerNorm(single) went out with the pack (prep_ln), when it could
++                    E.ln_rows(x, lnw, lnb, xa, st, eps_s, y)
++                if b == 0:
++                    _after(main, packed)
++                return torch.addmm(bvec, xa, wpack.t())
++
++            gemm_first = _GEMM_FIRST and not (pfm and b == 0)
++            if gemm_first:  # v28 probe: the q | k | v | g GEMM captured before the side pair pass
++                qkvg = gemm()
+             with torch.cuda.stream(side):
+                 wide: list[torch.Tensor] = []  # a wide pair: (row stats, unmasked bias) for its backward
+-                pf2 = _pf2(dp, L, H, train=True) if L >= 384 else None  # L 128: +-2 us, one timer step either way
+-                if pf2 is not None:  # v21: the B200 form of the d_pair 128 pass (the same bits)
++                pf2 = _pf2(dp, L, H, train=True) if L >= _PF2_TMIN else None  # L 128: +-2 us, one timer step either way
++                if pfm and b == 0:
++                    assert bias0 is not None
++                    bias = bias0
++                elif pf2 is not None:  # v21: the B200 form of the d_pair 128 pass (the same bits)
+                     bias = pair.new_empty((H, L, L))
+                     E.pair_bias_fwd2(pair[b].view(L * L, DP), wf, m, bias, L, eps_p, NEG, *pf2)
+                 elif dp == DP:
+@@ -1159,14 +1218,8 @@ def _forward_b200(single, pair, mask, leaves, eps_s, eps_p, gate_bias):
+             t_done = torch.cuda.Event()
+             _rec(t_done, side)
+             side_made += [bias, *wide, bias_t]
+-            x, y = single[b], out[b]
+-            xa = xa0 if b == 0 else torch.empty_like(x)
+-            st = st0 if b == 0 else x.new_empty((L, 2), dtype=torch.float32)
+-            if b > 0 or len(ln0) == 7:  # row 0: LayerNorm(single) went out with the pack (prep_ln), when it could
+-                E.ln_rows(x, lnw, lnb, xa, st, eps_s, y)
+-            if b == 0:
+-                _after(main, packed)
+-            qkvg = torch.addmm(bvec, xa, wpack.t())
++            if not gemm_first:
++                qkvg = gemm()
+             _after(main, planes)
+             if _train_fused(L, dp, H):  # v26: core + gate + to_out in one launch (O, LSE, og saved as attn_fwd2 / gate_rows write them)
+                 O, LSE, og = x.new_empty((L, W), dtype=torch.float32), x.new_empty((H, L), dtype=torch.float32), x.new_empty((L, W))
+@@ -1222,6 +1275,15 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy, nocopy: bool =
+                 rows_b = E.pair_bwd_blocks(x, H, L) if dp == DP else E.pair_bwd_wide1_blocks(x, H, L, dp)
+             E.sm_reserve(was)
+             acc = torch.empty(max(rows_a, rows_b), rows.acc_n(H, D, dp), device=dev)
++            fsplit = _FSPLIT and _STREAMS and H == 16 and L <= 512
++            if fsplit:  # v27 parts; v28: allocated before the pair backward, which may write dWb / dln_pair.weight itself (PB_FIN)
++                if nocopy:
++                    small = [torch.empty(leaves[i].shape, dtype=f32, device=dev) for i in _NC_SMALL]
++                    ph = small[0]  # out[2], out[4..7]: not written without the copy part
++                    row_outs = [small[0], small[1], ph, small[2], ph, ph, ph, ph, small[3], small[4]]
++                else:
++                    row_outs = [torch.empty(t.shape, dtype=f32, device=dev) for t in leaves]
++            pb_fin = (wb, lnpw, row_outs[9], row_outs[8]) if fsplit and pbtc and _PB_FIN else None
+             _join(s1, main)
+             dqkvg = torch.empty_like(qkvg)
+             sbq = _sbwd(L, H)
+@@ -1235,7 +1297,7 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy, nocopy: bool =
+                 with torch.cuda.stream(s2):
+                     if pbtc:
+                         z2, dz2 = pair[b].view(L * L, dp), dz_all[b].view(L * L, dp)
+-                        sm.apb_pair_bwd(z2, DB, wf, L, eps_p, acc[:, 2 * D + W :], dz2, _pbtc_reserve(H, L))
++                        sm.apb_pair_bwd(z2, DB, wf, L, eps_p, acc[:, 2 * D + W :], dz2, _pbtc_reserve(H, L), fin=pb_fin)
+                     else:
+                         was = E.sm_reserve(_bwd_reserve(dp, L))
+                         rows.pair_bias_bwd(pair[b].view(L * L, dp), DB, wf, L, eps_p, acc, D, saved=wide, out=dz_all[b].view(L * L, dp))
+@@ -1272,6 +1334,7 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy, nocopy: bool =
+                     W,
+                     dp,
+                     eps_p,
++                    pb_fin=pb_fin,
+                 )
+             if _DXA_FIRST:  # dxa leads the tail (-> ln_bwd -> finalize); dW q|k|v|g is issued after it, on the side stream
+                 qkv_done = torch.cuda.Event()
+@@ -1285,18 +1348,11 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy, nocopy: bool =
+             if not _DXA_FIRST:
+                 dxa = dqkvg @ wpack
+             _pdl_call(E, pdl, E.ln_bwd_p, dxa, x, st, lnw, dy2, dx_all[b], acc)
+-            if (
+-                _FSPLIT and _STREAMS and H == 16 and L <= 512
+-            ):  # v27: finalize_red's parts where their inputs are made (the same blocks: the same bits)
+-                if nocopy:
+-                    small = [torch.empty(leaves[i].shape, dtype=f32, device=dev) for i in _NC_SMALL]
+-                    ph = small[0]  # out[2], out[4..7]: not written without the copy part
+-                    row_outs = [small[0], small[1], ph, small[2], ph, ph, ph, ph, small[3], small[4]]
+-                else:
+-                    row_outs = [torch.empty(t.shape, dtype=f32, device=dev) for t in leaves]
++            if fsplit:  # v27: finalize_red's parts where their inputs are made (the same blocks: the same bits)
+                 fin = (dwp, dwo, acc, wb, lnpw, row_outs, rows_a, rows_b, not nocopy)
+-                with torch.cuda.stream(s2):  # dWf | dWb | dln_pair.weight: right after the pair backward
+-                    _pdl_call(E, pdl, E.finalize_part, *fin, 4)
++                if pb_fin is None:
++                    with torch.cuda.stream(s2):  # dWf | dWb | dln_pair.weight: right after the pair backward
++                        _pdl_call(E, pdl, E.finalize_part, *fin, 4)
+                 if not nocopy:
+                     with torch.cuda.stream(s1):  # the dW copies: right after the dW GEMMs
+                         E.finalize_part(*fin, 1)
+@@ -1374,6 +1430,7 @@ def _backward_attn(
+     W,
+     dp,
+     eps_p,
++    pb_fin=None,
+ ):
+     """The v26 attention backward up to dqkvg on the main stream (gate_bwd, attn_dkv, attn_dqb / dqb_small, qkv_bwd; dWo and the bias
+     transpose on s1, dqb and the pair backward on s2); returns dWo."""
+@@ -1413,7 +1470,7 @@ def _backward_attn(
+         _rec(dq_done, s2)
+         if pbtc:  # tcgen05: its block partial rows go into the dWf | dbias-sum columns of acc
+             z2, dz2 = pair[b].view(L * L, dp), dz_all[b].view(L * L, dp)
+-            sm.apb_pair_bwd(z2, DB, wf, L, eps_p, acc[:, 2 * D + W :], dz2, _pbtc_reserve(H, L))
++            sm.apb_pair_bwd(z2, DB, wf, L, eps_p, acc[:, 2 * D + W :], dz2, _pbtc_reserve(H, L), fin=pb_fin)
+         else:
+             was = E.sm_reserve(_bwd_reserve(dp, L))
+             rows.pair_bias_bwd(pair[b].view(L * L, dp), DB, wf, L, eps_p, acc, D, saved=wide, out=dz_all[b].view(L * L, dp))

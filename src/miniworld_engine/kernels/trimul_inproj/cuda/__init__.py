@@ -80,9 +80,15 @@ def prebuild(target, rows):
     if not cells:
         return
     if target.arch == "sm100":
-        from . import b200_infer
+        from miniworld_engine.kernels import _graph_rng_sm100
+
+        from . import b200_infer, b200_train
 
         yield b200_infer._ext
+        yield b200_infer._tf_ext  # D64 L128 one-launch inference update
+        yield b200_train._k1wt  # training front from the fp32 masters
+        yield b200_train._tft_ext  # D64 L128 one-launch training forward
+        yield _graph_rng_sm100.ext  # the graph RNG writer the training draw registers with (shared with TriangleAttention)
         return
     if target.arch == "sm120":
         yield from _sm120(cells)

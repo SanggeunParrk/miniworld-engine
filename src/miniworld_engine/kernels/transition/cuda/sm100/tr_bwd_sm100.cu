@@ -3,7 +3,7 @@
 // sm_100a kernel plus a partial-sum reduction.  SPDX-License-Identifier: Apache-2.0
 //
 // Contract and schedule are the sm_90a kernel's (experiments/transition_fused/src/transition_bwd.cu):
-//   dh = bf16(dy Ws)      a = xn Wa^T, b = xn Wb^T (fp32)      sig = rcp(1 + ex2(-a log2 e))      silu = a sig
+//   dh = bf16(dy Ws)      a = xn Wa^T, b = xn Wb^T (fp32)      sig = sigmoid_tr(a) (sm100.cuh: 0.5 tanh(a / 2) + 0.5)      silu = a sig
 //   h  = bf16(silu b)     dA = bf16((dh b)(sig + silu(1 - sig)))      dB = bf16(dh silu)
 //   dWs = dy^T h, dWa = dA^T xn, dWb = dB^T xn (fp32 sums, rounded once)      d_xn = bf16(dA Wa + dB Wb)
 //   LayerNorm backward from the saved statistics: xhat = (x - mean) rstd, w = gamma d_xn,
@@ -11,16 +11,29 @@
 // Two CTA roles in one launch, no cluster, no atomics:
 //   DW CTAs (8 hidden slices x R replicas) keep their slice's Ws / Wa / Wb resident, recompute dh / a / b for every tile they own,
 //     write h, dA, dB to shared memory and accumulate [dWa_s; dWb_s] (M128 N128) and dWs_s (M128 N64) in tensor memory.
-//   DX CTAs stream the eight weight chunks per tile: dh_j and [a|b]_j into TMEM, the gate writes [dA|dB] back into TMEM as bf16, and
-//     d_xn accumulates with an A-from-TMEM product over the same packed [Wa_j; Wb_j] tile.  The LayerNorm backward reads d_xn straight
-//     from TMEM, one row per thread.
+//   DX CTAs stream the eight weight chunks per tile: dh_j (two buffers) and [a|b]_j (one buffer, free once the gate has loaded it)
+//     into TMEM, the gate writes [dA|dB] back over dh_j as bf16, and d_xn accumulates with an A-from-TMEM product over the same packed
+//     [Wa_j; Wb_j] tile into one of two d_xn buffers. The LayerNorm backward of tile i reads its d_xn straight from TMEM (one row per
+//     thread, 32 columns at a time, once per pass) while tile i + 1 accumulates into the other buffer.
 #include "sm100.cuh"
 using namespace s100;
+#ifndef REG_LOW
 #define REG_LOW 56
+#endif
+#ifndef REG_GATE
 #define REG_GATE 152
+#endif
+#ifndef REG_EPI
 #define REG_EPI 152
+#endif
 #define EPIF2                                                  // fp32x2 LayerNorm-backward epilogue in the DX role (EPI_SCALAR: v9)
 #define GATE2                                                  // fp32x2 gate arithmetic, bit-identical to the scalar form (GATE1)
+#ifndef GOV
+#define GOV 1                                                  // (training part 5) DW gate: only its stores wait for g_empty (A/B: 0)
+#endif
+#ifndef GPRE
+#define GPRE 1                                                 // (training part 5) DX gate: the a | b part before dh_j's wait (A/B: 0)
+#endif
 
 #ifndef HID
 #define HID 512                                                // hidden units (n x D); n = 4 by default
@@ -46,7 +59,12 @@ constexpr uint16_t CL_MASK = (1u << CL) - 1;
 constexpr uint32_t I_DH = idesc_bf16(128, 64, 0, 1), I_AB = idesc_bf16(128, 128), I_DXN = idesc_bf16(128, 128, 0, 1);
 constexpr uint32_t I_DWAB = idesc_bf16(128, 128, 1, 1), I_DWS = idesc_bf16(128, 64, 1, 1);
 
+#ifdef PROBE
+__device__ unsigned long long g_trb[2][4][2048];         // (probe builds) %globaltimer at the trace points of CTA 0 of each role
+#define TRB(slot, role, idx) do { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); g_trb[slot][role][idx] = t_; } while (0)
+#else
 #define TRB(slot, role, idx) do { } while (0)
+#endif
 
 struct Par {
   const CUtensorMap *dy, *xn, *x, *ws, *wa, *wb, *dx, *xch;
@@ -59,19 +77,19 @@ struct Par {
 struct BarsW { uint64_t w_full, xn_full[2], dy_full[2], xn_empty[2], dy_empty[2], dhab_full, gate_read, g_full[2], g_empty[2], wg_done; uint32_t tmem; };
 constexpr int GDB = 1;
 struct BarsX {
-  uint64_t ws_full[2], ws_empty[2], wab_full[NWAB], wab_empty[NWAB], in_full[2], in_empty[2], x_full[2], xn_dead[2], abdh_full[2], g_full[2], ab_free[2];
-  uint64_t dxn_full, dxn_empty; uint32_t tmem;
+  uint64_t ws_full[2], ws_empty[2], wab_full[NWAB], wab_empty[NWAB], in_full[2], in_empty[2], x_full[2], xn_dead[2], dh_full[2], g_full[2], dh_free[2];
+  uint64_t ab_full, ab_read, dxn_full[2], dxn_empty[2]; uint32_t tmem;
 };
 
 // the 16-row block of the packed [Wa_j; Wb_j] tile matching A-operand block ks of the half-by-half [dA | dB] layout
 __device__ constexpr int kRowBlk[8] = {0, 1, 4, 5, 2, 3, 6, 7};
 DEVI float gate_da(float g, float b, float s, float l) { return (g * b) * (s + l * (1.f - s)); }
 // the same gate arithmetic on pairs of units in fp32x2 (FMUL2 / FFMA2 round like FMUL / FFMA; s + l (1 - s) contracted as ptxas
-// does in the scalar form): h = l b, dA = (g b) fma(l, 1 - s, s), dB = g l, with l = a s and the kit sigmoid per unit
+// does in the scalar form): h = l b, dA = (g b) fma(l, 1 - s, s), dB = g l, with l = a s and s = sigmoid_tr (sm100.cuh; the forward's s)
 DEVI void gate_pair16(uint32_t dh0, uint32_t dh1, uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1, uint32_t& hp, uint32_t& dap, uint32_t& dbp) {
   const uint32_t gp = pack_bf16(__uint_as_float(dh0), __uint_as_float(dh1));
   const f2 G = mk2(bf16lo(gp), bf16hi(gp)), A = mk2u(a0, a1), Bv = mk2u(b0, b1);
-  const f2 S = mk2(sigmoid_kit(__uint_as_float(a0)), sigmoid_kit(__uint_as_float(a1)));
+  const f2 S = sigmoid_tr(A);
   const f2 L = mul2(A, S);
   const f2 H = mul2(L, Bv), DB = mul2(G, L);
   const f2 U = fma2(L, fma2(S, mk2(-1.f, -1.f), mk2(1.f, 1.f)), S);
@@ -103,6 +121,8 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
   cluster_sync_relaxed();                                          // every CTA's barriers exist before any multicast or remote arrive
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+  pdl_wait();                                                  // (training part 4) the inputs are complete: launched as a programmatic
+                                                               // dependent, the prologue above overlaps the previous kernel's tail
 
   if (warp == 0) {
     if (lane == 0) {
@@ -204,7 +224,9 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
       mbar_wait(&B.dhab_full, i & 1);
       if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 1);
       tc_fence_after();
+#if !GOV
       if (i >= GDB) mbar_wait(&B.g_empty[i % GDB], ((i / GDB) - 1) & 1);
+#endif
       if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 2);
       {
         uint32_t dh[32], av[32], bv[32];
@@ -214,27 +236,22 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
         tmem_wait_ld();
         tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.gate_read);
         if (cta == 0 && warp == 4 && lane == 0) TRB(0, 3, 1024 + i);
+        // 8 hidden units -> one 16-byte chunk of h, dA and dB each. (training part 5, GOV) all 16 pairs are computed first and only the
+        // stores wait (g_empty) for the dW products of tile i - 1, which still read h / [dA | dB]: the gate_read arrival, hence the next
+        // tile's dh / [a | b] products, and the arithmetic no longer queue behind them (tbwd_d64.cu has done the first part since w1)
+        uint32_t hp[16], dap[16], dbp[16];
 #pragma unroll
-        for (int qq = 0; qq < 4; ++qq) {                   // 8 hidden units -> one 16-byte chunk of h, dA and dB each, stored right away
-          uint32_t hp[4], dap[4], dbp[4];
+        for (int k = 0; k < 16; ++k)
+          gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hp[k], dap[k], dbp[k]);
+#if GOV
+        if (i >= GDB) mbar_wait(&B.g_empty[i % GDB], ((i / GDB) - 1) & 1);
+#endif
 #pragma unroll
-          for (int kk = 0; kk < 4; ++kk) {
-            const int k = qq * 4 + kk;
-            gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hp[kk], dap[kk], dbp[kk]);
-            continue;
-            const uint32_t gp = pack_bf16(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1]));
-            const float g0 = bf16lo(gp), g1 = bf16hi(gp);
-            const float a0 = __uint_as_float(av[2 * k]), a1 = __uint_as_float(av[2 * k + 1]);
-            const float b0 = __uint_as_float(bv[2 * k]), b1 = __uint_as_float(bv[2 * k + 1]);
-            float s0, s1; SIGMOID2(a0, a1, s0, s1); const float l0 = a0 * s0, l1 = a1 * s1;
-            hp[kk] = pack_bf16(l0 * b0, l1 * b1);
-            dap[kk] = pack_bf16(gate_da(g0, b0, s0, l0), gate_da(g1, b1, s1, l1));
-            dbp[kk] = pack_bf16(g0 * l0, g1 * l1);
-          }
+        for (int qq = 0; qq < 4; ++qq) {
           const uint32_t off = sw128(r, half * 4 + qq);
-          sts128(su + W_H + off, make_uint4(hp[0], hp[1], hp[2], hp[3]));
-          sts128(su + W_DAB + off, make_uint4(dap[0], dap[1], dap[2], dap[3]));
-          sts128(su + W_DAB + KB + off, make_uint4(dbp[0], dbp[1], dbp[2], dbp[3]));
+          sts128(su + W_H + off, make_uint4(hp[4 * qq], hp[4 * qq + 1], hp[4 * qq + 2], hp[4 * qq + 3]));
+          sts128(su + W_DAB + off, make_uint4(dap[4 * qq], dap[4 * qq + 1], dap[4 * qq + 2], dap[4 * qq + 3]));
+          sts128(su + W_DAB + KB + off, make_uint4(dbp[4 * qq], dbp[4 * qq + 1], dbp[4 * qq + 2], dbp[4 * qq + 3]));
         }
       }
       fence_proxy_async();
@@ -299,25 +316,29 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
   const int nch = n_local * NCH;
   auto tile_of = [&](int i) { return i < n_valid ? cta + i * ndx : (n_valid > 0 ? cta + (n_valid - 1) * ndx : 0); };
   const int crank = (int)cluster_rank();
-  constexpr uint32_t T_AB = 0, T_DH = 256, T_DXN = 384;          // AB x2 (128 each; [dA|dB] is written back over its first 64), DH x2 (64 each)
+  // AB x1 (128: a | b of the chunk, free once the gate has loaded it), DH x2 (64 each: dh_j, then [dA|dB]_j as bf16 over it),
+  // DXN x2 (128 each: tile i in buffer i & 1)
+  constexpr uint32_t T_AB = 0, T_DH = 128, T_DXN = 256;
   const uint32_t tid = threadIdx.x;
   if (tid == 0) {
     for (int s = 0; s < 2; ++s) {
       mbar_init(&B.ws_full[s], 1); mbar_init(&B.ws_empty[s], CL); mbar_init(&B.in_full[s], 1); mbar_init(&B.in_empty[s], 1);
       mbar_init(&B.x_full[s], 1); mbar_init(&B.xn_dead[s], 1);
-      mbar_init(&B.abdh_full[s], 1); mbar_init(&B.g_full[s], 8); mbar_init(&B.ab_free[s], 1);
+      mbar_init(&B.dh_full[s], 1); mbar_init(&B.g_full[s], 8); mbar_init(&B.dh_free[s], 1);
+      mbar_init(&B.dxn_full[s], 1); mbar_init(&B.dxn_empty[s], 4);
     }
     for (int s = 0; s < NWAB; ++s) { mbar_init(&B.wab_full[s], 1); mbar_init(&B.wab_empty[s], CL); }
-    mbar_init(&B.dxn_full, 1); mbar_init(&B.dxn_empty, 4);
+    mbar_init(&B.ab_full, 1); mbar_init(&B.ab_read, 8);
     fence_barrier_init();
   }
-  if (tid < 128) reinterpret_cast<float*>(sm + X_GAM)[tid] = p.gamma[tid];
   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
   tc_fence_before();
   __syncthreads();
   cluster_sync_relaxed();                                          // every CTA's barriers exist before any multicast or remote arrive
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+  pdl_wait();                                                  // (training part 4) the inputs are complete: launched as a programmatic
+                                                               // dependent, the prologue above overlaps the previous kernel's tail
 
   if (warp == 0) {
     if (lane == 0) {
@@ -372,18 +393,18 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       }
     }
   } else if (warp == 1) {
-    // dh_j and [a|b]_j (converged warp, elected issue)
+    // [a|b]_j and dh_j (converged warp, elected issue): [a|b]_j into the AB buffer once the gate has loaded chunk c - 1's (its own
+    // commit, so the gate loads it while dh_j runs), then dh_j into DH buffer c & 1 once the d_xn product of chunk c - 2 has read the
+    // [dA|dB] there (issued before [a|b]_j, so normally complete)
     for (int c = 0; c < nch; ++c) {
       const int i = c >> LNCH, j = c & (NCH - 1), s = c & 1, u = c >> 1;
       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c);
       const int sw = c % NWAB;
       if (j == 0) mbar_wait(&B.in_full[i & 1], (i >> 1) & 1);
       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 1);
-      mbar_wait(&B.ws_full[s], u & 1);
       mbar_wait(&B.wab_full[sw], (c / NWAB) & 1);
+      if (c >= 1) mbar_wait(&B.ab_read, (c - 1) & 1);
       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 2);
-      if (c >= 2) mbar_wait(&B.ab_free[s], (u - 1) & 1);
-      if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 3);
       tc_fence_after();
       const uint64_t ddy = desc_k128(su + X_IN + (i & 1) * INB), dxn = desc_k128(su + X_IN + (i & 1) * INB + IN_XN);
       const uint64_t dws = desc_mn128(su + X_WS + s * 16384, KB), dwab = desc_k128(su + X_WAB + sw * 32768);
@@ -391,38 +412,47 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
 #pragma unroll
         for (int ks = 0; ks < KS; ++ks) {
           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
-          umma_ss(tmem + T_DH + s * 64, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
+          umma_ss(tmem + T_AB, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
         }
-        tc_commit_mc(&B.ws_empty[s], CL_MASK);             // Ws_j is dead here once dh_j is done (counted in both CTAs)
+        tc_commit(&B.ab_full);
+        if (j == NCH - 1) tc_commit(&B.xn_dead[i & 1]);
+      }
+      __syncwarp();
+      mbar_wait(&B.ws_full[s], u & 1);
+      if (c >= 2) mbar_wait(&B.dh_free[s], (u - 1) & 1);
+      if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 3);
+      tc_fence_after();
+      if (elect_one()) {
 #pragma unroll
         for (int ks = 0; ks < KS; ++ks) {
           const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
-          umma_ss(tmem + T_AB + s * 128, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
+          umma_ss(tmem + T_DH + s * 64, ddy + off, dws + (uint64_t)(ks * 2048 >> 4), I_DH, ks > 0 ? 1u : 0u);
         }
-        tc_commit(&B.abdh_full[s]);
-        if (j == NCH - 1) tc_commit(&B.xn_dead[i & 1]);
+        tc_commit_mc(&B.ws_empty[s], CL_MASK);             // Ws_j is dead here once dh_j is done (counted in both CTAs)
+        tc_commit(&B.dh_full[s]);
       }
       __syncwarp();
       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 4);
     }
   } else if (warp == 2) {
-    // d_xn += [dA | dB] [Wa_j; Wb_j]  (A from TMEM)
+    // d_xn += [dA | dB] [Wa_j; Wb_j]  (A from TMEM), tile i into DXN buffer i & 1
     for (int q = 0; q < nch; ++q) {
       const int i = q >> LNCH, j = q & (NCH - 1), s = q & 1, u = q >> 1;
       if (cta == 0 && lane == 0) TRB(1, 1, 8 * q);
       mbar_wait(&B.g_full[s], u & 1);
       if (cta == 0 && lane == 0) TRB(1, 1, 8 * q + 1);
-      if (j == 0 && i >= 1) mbar_wait(&B.dxn_empty, (i - 1) & 1);
+      if (j == 0 && i >= 2) mbar_wait(&B.dxn_empty[i & 1], ((i >> 1) - 1) & 1);
       if (cta == 0 && lane == 0) TRB(1, 1, 8 * q + 2);
       tc_fence_after();
       const uint64_t dwab = desc_mn128(su + X_WAB + (q % NWAB) * 32768, KB);
       if (elect_one()) {
 #pragma unroll
         for (int ks = 0; ks < KS; ++ks)
-          umma_ts(tmem + T_DXN, tmem + T_AB + s * 128 + ks * 8, dwab + (uint64_t)(kRowBlk[ks] * 2048 >> 4), I_DXN, (j > 0 || ks > 0) ? 1u : 0u);
-        tc_commit(&B.ab_free[s]);
+          umma_ts(tmem + T_DXN + (i & 1) * 128, tmem + T_DH + s * 64 + ks * 8, dwab + (uint64_t)(kRowBlk[ks] * 2048 >> 4), I_DXN,
+                  (j > 0 || ks > 0) ? 1u : 0u);
+        tc_commit(&B.dh_free[s]);
         tc_commit_mc(&B.wab_empty[q % NWAB], CL_MASK);
-        if (j == NCH - 1) tc_commit(&B.dxn_full);
+        if (j == NCH - 1) tc_commit(&B.dxn_full[i & 1]);
       }
       __syncwarp();
       if (cta == 0 && lane == 0) TRB(1, 1, 8 * q + 3);
@@ -436,20 +466,51 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
     for (int c = 0; c < nch; ++c) {
       const int s = c & 1, u = c >> 1;
       if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c);
-      mbar_wait(&B.abdh_full[s], u & 1);
+      mbar_wait(&B.ab_full, c & 1);
       if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c + 1);
       tc_fence_after();
-      // [dA | dB] is written back half by half: columns 0..15 dA(hs 0..31), 16..31 dB(hs 0..31), 32..47 dA(hs 32..63), 48..63 dB(hs 32..63),
-      // so each half lands only on columns it has already read; the d_xn product pairs each 8-column block with the matching B rows
+      // [dA | dB] is written back over dh half by half: columns 0..15 dA(hs 0..31), 16..31 dB(hs 0..31), 32..47 dA(hs 32..63),
+      // 48..63 dB(hs 32..63), so each half lands only on columns it has already read; the d_xn product pairs each 8-column block with
+      // the matching B rows. The AB buffer is handed back as soon as it is loaded.
       {
         uint32_t dh[32], av[32], bv[32];
-        tmem_ld32(trow + T_DH + s * 64 + half * 32, dh);
-        tmem_ld32(trow + T_AB + s * 128 + half * 32, av);
-        tmem_ld32(trow + T_AB + s * 128 + 64 + half * 32, bv);
+        tmem_ld32(trow + T_AB + half * 32, av);
+        tmem_ld32(trow + T_AB + 64 + half * 32, bv);
         tmem_wait_ld();
+        tc_fence_before();
+        __syncwarp();
+        if (lane == 0) mbar_arrive(&B.ab_read);
         uint32_t da[16], db[16];
+#if GPRE
+        // (training part 5) the a | b-only part of the gate (s, l = a s, u = l (1 - s) + s: gate_pair16's ops) before dh_j is waited for;
+        // after it only dB = g l and dA = (g b) u remain
+        f2 Lp[16], Up[16];
 #pragma unroll
         for (int k = 0; k < 16; ++k) {
+          const f2 A = mk2u(av[2 * k], av[2 * k + 1]);
+          const f2 S = sigmoid_tr(A);
+          Lp[k] = mul2(A, S);
+          Up[k] = fma2(Lp[k], fma2(S, mk2(-1.f, -1.f), mk2(1.f, 1.f)), S);
+        }
+        mbar_wait(&B.dh_full[s], u & 1);
+        tc_fence_after();
+        tmem_ld32(trow + T_DH + s * 64 + half * 32, dh);
+        tmem_wait_ld();
+#pragma unroll
+        for (int k = 0; k < 16; ++k) {
+          const uint32_t gp = pack_bf16(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1]));
+          const f2 G = mk2(bf16lo(gp), bf16hi(gp)), Bv = mk2u(bv[2 * k], bv[2 * k + 1]);
+          const f2 DB = mul2(G, Lp[k]), DA = mul2(mul2(G, Bv), Up[k]);
+          da[k] = pack_bf16(lo2(DA), hi2(DA)); db[k] = pack_bf16(lo2(DB), hi2(DB));
+        }
+#else
+        mbar_wait(&B.dh_full[s], u & 1);
+        tc_fence_after();
+        tmem_ld32(trow + T_DH + s * 64 + half * 32, dh);
+        tmem_wait_ld();
+#endif
+#pragma unroll
+        for (int k = 0; k < (GPRE ? 0 : 16); ++k) {
           { uint32_t hh; gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hh, da[k], db[k]); (void)hh; }
           continue;
           const uint32_t gp = pack_bf16(__uint_as_float(dh[2 * k]), __uint_as_float(dh[2 * k + 1]));
@@ -461,8 +522,8 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
           db[k] = pack_bf16(g0 * l0, g1 * l1);
         }
         if (cta == 0 && warp == 4 && lane == 0) TRB(1, 2, 4 * c + 2);
-        tmem_st16(trow + T_AB + s * 128 + half * 32, da);
-        tmem_st16(trow + T_AB + s * 128 + half * 32 + 16, db);
+        tmem_st16(trow + T_DH + s * 64 + half * 32, da);
+        tmem_st16(trow + T_DH + s * 64 + half * 32 + 16, db);
       }
       tmem_wait_st();
       tc_fence_before();
@@ -474,38 +535,40 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
     // ------------------------------------------------------------------------------------ LayerNorm backward + residual
     setmaxnreg_inc<REG_EPI>();
     const int t2 = (int)tid - 256;
+    if (t2 < D_) reinterpret_cast<float*>(sm + X_GAM)[t2] = p.gamma[t2];   // (after griddepcontrol.wait)
+    named_bar_sync(1, 128);
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     const uint32_t gam_u = su + X_GAM;
     float accg[4] = {0.f, 0.f, 0.f, 0.f}, accb[4] = {0.f, 0.f, 0.f, 0.f};
+    // d_xn columns 32 g .. 32 g + 31 of this thread's row, rounded once to bf16 (pairs packed)
+    auto load_dn = [&](uint32_t col, uint32_t (&dn)[16]) {
+      uint32_t v[32];
+      tmem_ld32(col, v);
+      tmem_wait_ld();
+#pragma unroll
+      for (int k = 0; k < 16; ++k) dn[k] = pack_bf16(__uint_as_float(v[2 * k]), __uint_as_float(v[2 * k + 1]));
+    };
     for (int i = 0; i < n_local; ++i) {
       const int b = i & 1, grow = tile_of(i) * ROWS + (int)r;
       const bool real = i < n_valid;
+      const uint32_t tdxn = trow + T_DXN + (uint32_t)b * 128;
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i);
-      mbar_wait(&B.dxn_full, i & 1);
+      const float rs = p.rstd[grow], mean = p.c1[grow] / rs;
+      mbar_wait(&B.dxn_full[b], (i >> 1) & 1);
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 1);
       tc_fence_after();
-      uint32_t dn[64];                                     // d_xn rounded once to bf16
-#pragma unroll
-      for (int cc = 0; cc < 4; ++cc) {
-        uint32_t v[32];
-        tmem_ld32(trow + T_DXN + cc * 32, v);
-        tmem_wait_ld();
-#pragma unroll
-        for (int k = 0; k < 16; ++k) dn[cc * 16 + k] = pack_bf16(__uint_as_float(v[2 * k]), __uint_as_float(v[2 * k + 1]));
-      }
-      tc_fence_before();
-      __syncwarp();
-      if (lane == 0) mbar_arrive(&B.dxn_empty);
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 2);
-      const float rs = p.rstd[grow], mean = p.c1[grow] / rs;
       mbar_wait(&B.x_full[b], (i >> 1) & 1);
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 3);
       const uint32_t dyb = su + X_IN + b * INB, xb = dyb + IN_XN;
-      // fp32x2 form of the two passes (same formulas; x - mean times rstd as one fma, row sums in pair order)
+      // fp32x2 form of the two passes (same formulas; x - mean times rstd as one fma, row sums in pair order); each pass reads d_xn
+      // from tensor memory 32 columns at a time, so no row of it is held in registers across the passes
       const f2 RS = mk2(rs, rs), NMR = mk2(-mean * rs, -mean * rs);
       f2 pa2[2] = {mk2(0.f, 0.f), mk2(0.f, 0.f)}, pb2[2] = {mk2(0.f, 0.f), mk2(0.f, 0.f)};
 #pragma unroll
       for (int g = 0; g < 4; ++g) {
+        uint32_t dn[16];
+        load_dn(tdxn + g * 32, dn);
         float work[32];
 #pragma unroll
         for (int qq = 0; qq < 4; ++qq) {
@@ -514,7 +577,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
 #pragma unroll
           for (int kk = 0; kk < 4; ++kk) {
             const int e = qq * 4 + kk, pr = g * 16 + e;           // column pair
-            const uint32_t n = dn[pr];
+            const uint32_t n = dn[e];
             const f2 N = mk2(bf16lo(n), bf16hi(n));
             const f2 XH = fma2(mk2(bf16lo(xw[kk]), bf16hi(xw[kk])), RS, NMR);
             const float2 gg = lds64f_nv(gam_u + pr * 8);
@@ -527,7 +590,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
         const float sg = reduce_scatter32(work, lane);
         if (real) accg[g] += sg;
 #pragma unroll
-        for (int e = 0; e < 16; ++e) { const uint32_t n = dn[g * 16 + e]; work[2 * e] = bf16lo(n); work[2 * e + 1] = bf16hi(n); }
+        for (int e = 0; e < 16; ++e) { const uint32_t n = dn[e]; work[2 * e] = bf16lo(n); work[2 * e + 1] = bf16hi(n); }
         const float sb = reduce_scatter32(work, lane);
         if (real) accb[g] += sb;
       }
@@ -536,17 +599,24 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
       const float ca = (lo2(PA) + hi2(PA)) * (1.f / D_), cbv = (lo2(PB) + hi2(PB)) * (1.f / D_);
       const f2 NCA = mk2(-ca, -ca), NCB = mk2(-cbv, -cbv);
 #pragma unroll
-      for (int cb = 0; cb < 2; ++cb)
+      for (int g = 0; g < 4; ++g) {
+        uint32_t dn[16];
+        load_dn(tdxn + g * 32, dn);
+        if (g == 3) {                                      // the tile's d_xn buffer is free for tile i + 2
+          tc_fence_before();
+          __syncwarp();
+          if (lane == 0) mbar_arrive(&B.dxn_empty[b]);
+        }
 #pragma unroll
-        for (int q = 0; q < 8; ++q) {
-          const uint32_t off = cb * KB + sw128(r, q);
+        for (int qq = 0; qq < 4; ++qq) {
+          const uint32_t off = (g >> 1) * KB + sw128(r, (g & 1) * 4 + qq);
           const uint4 xv = lds128(xb + off), dv = lds128(dyb + off);
           const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w}, dw[4] = {dv.x, dv.y, dv.z, dv.w};
           uint32_t o[4];
 #pragma unroll
           for (int k = 0; k < 4; ++k) {
-            const int pr = cb * 32 + q * 4 + k;
-            const uint32_t n = dn[pr];
+            const int pr = g * 16 + qq * 4 + k;
+            const uint32_t n = dn[qq * 4 + k];
             const f2 XH = fma2(mk2(bf16lo(xw[k]), bf16hi(xw[k])), RS, NMR);
             const float2 gg = lds64f(gam_u + pr * 8);
             const f2 W = mul2(mk2(gg.x, gg.y), mk2(bf16lo(n), bf16hi(n)));
@@ -556,6 +626,7 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int 
           }
           sts128(dyb + off, make_uint4(o[0], o[1], o[2], o[3]));
         }
+      }
       if (cta == 0 && t2 == 0) TRB(1, 3, 8 * i + 5);
       fence_proxy_async();
       named_bar_sync(1, 128);
@@ -596,35 +667,102 @@ transition_bwd_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_const
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   // the producer / MMA warpgroup gives registers to the math warpgroups. The increase is issued INSIDE each math role's branch: an
   // if / else around both would merge the two limits and ptxas would compile everything after it at the lower one (56).
+  pdl_launch();                                                // the partial-sum reduction may be scheduled (it waits for this grid)
   if (warp < 4) setmaxnreg_dec<REG_LOW>();
+#ifdef PROBE
+  unsigned long long t0;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t0));
+#endif
   if ((int)blockIdx.x < ndw) weight_role(p, sm, blockIdx.x, warp, lane);
   else input_role(p, sm, blockIdx.x - ndw, gridDim.x - ndw, warp, lane);
+#ifdef PROBE
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    unsigned long long t1;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t1));
+    printf("PRB %d %d %llu %llu\n", (int)blockIdx.x, (int)blockIdx.x < ndw ? 1 : 0, t0, t1);
+    if ((int)blockIdx.x == 0 || (int)blockIdx.x == ndw) {
+      const int sl = (int)blockIdx.x == 0 ? 0 : 1;
+      for (int r = 0; r < 4; ++r)
+        for (int i = 0; i < 2048; ++i)
+          if (g_trb[sl][r][i] >= t0 && g_trb[sl][r][i] <= t1) printf("TRB %d %d %d %.2f\n", sl, r, i, (g_trb[sl][r][i] - t0) * 1e-3);
+    }
+  }
+#endif
 }
 
-// partab [NDW][128][128] (rows 0..63 dWa_s, 64..127 dWb_s), parts [NDW][128 d][64 hs] -> fp32 dWa, dWb [512][128], dWs [128][512]
-// (unrounded: the parameters may be an fp32 master);
-// dgbw [NDX * 4][256] -> dgamma, dbeta (fp32)
-extern "C" __global__ void transition_bwd_reduce(const float* __restrict__ partab, const float* __restrict__ parts, const float* __restrict__ dgbw,
-                                                 float* __restrict__ dwa, float* __restrict__ dwb, float* __restrict__ dws,
-                                                 float* __restrict__ dgam, float* __restrict__ dbeta, int ndw, int nrows_dg) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x, R = ndw >> LNCH;
-  if (idx < 2 * H_ * D_) {                                  // dWa / dWb element: (which, slice, hs, d)
-    const int which = idx / (H_ * D_), rem = idx % (H_ * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
+// partab [NDW][128][128] (rows 0..63 dWa_s, 64..127 dWb_s), parts [NDW][128 d][64 hs] -> fp32 dWa, dWb [H][128], dWs [128][H]
+// (unrounded: the parameters may be an fp32 master); dgbw [nrows_dg][256] -> dgamma, dbeta (fp32).
+// 256-thread blocks. Blocks 0 .. RED_WBLK-1: four consecutive weight-gradient elements per thread (16-byte loads and stores), the
+// replicas summed in replica order. The next RED_GBLK blocks: dgamma / dbeta, 16 columns per block, the rows split over 16 lanes
+// groups (group k sums rows k, k + 16, ... in order, then the 16 group sums are added in group order). Every sum has a fixed
+// order, so a replay is bit-identical. Launched as a programmatic dependent of the backward (griddepcontrol.wait first); blocks
+// past RED_WBLK + RED_GBLK return at once, so a launch sized for one thread per output also works.
+#ifndef RQ
+#define RQ 16                                                  // (round 3, training part 3) replica partials in flight per thread (was 8)
+#endif
+#ifndef GQ
+#define GQ 32                                                  // dgamma | dbeta partial rows in flight per lane group (was 8)
+#endif
+constexpr int RED_WBLK = 3 * H_ * D_ / 1024, RED_GBLK = 256 / 16;
+static_assert(3 * H_ * D_ % 1024 == 0, "whole weight-gradient blocks");
+extern "C" __global__ void __launch_bounds__(256, 1) transition_bwd_reduce(
+    const float* __restrict__ partab, const float* __restrict__ parts, const float* __restrict__ dgbw, float* __restrict__ dwa,
+    float* __restrict__ dwb, float* __restrict__ dws, float* __restrict__ dgam, float* __restrict__ dbeta, int ndw, int nrows_dg) {
+  pdl_wait();
+  const int blk = blockIdx.x, t = threadIdx.x, R = ndw >> LNCH;
+  if (blk < RED_WBLK) {
+    const int e = (blk * 256 + t) * 4;                         // first of four consecutive outputs
+    float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
+    const float* src;
+    size_t stride;
+    float* dst;
+    if (e < 2 * H_ * D_) {                                     // dWa / dWb element (which, slice, hs, d .. d + 3)
+      const int which = e / (H_ * D_), rem = e % (H_ * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
+      src = partab + ((size_t)slice * 128 + which * 64 + hs) * 128 + d;
+      stride = (size_t)NCH * 128 * 128;
+      dst = (which == 0 ? dwa : dwb) + rem;
+    } else {                                                   // dWs element (d, slice, hs .. hs + 3)
+      const int rem = e - 2 * H_ * D_, d = rem / H_, hh = rem % H_, slice = hh / HS, hs = hh % HS;
+      src = parts + ((size_t)slice * 128 + d) * 64 + hs;
+      stride = (size_t)NCH * 128 * 64;
+      dst = dws + rem;
+    }
+    // the replicas in replica order, 8 loads in flight at a time (a runtime-length loop of dependent adds kept one L2 load in flight:
+    // R x the L2 latency per thread, 4.5 us at R = 14)
+    for (int r0 = 0; r0 < R; r0 += RQ) {                      // (RQ in flight: one round up to RQ replicas; same order)
+      float4 u[RQ];
+#pragma unroll
+      for (int k = 0; k < RQ; ++k)
+        if (r0 + k < R) u[k] = __ldg(reinterpret_cast<const float4*>(src + (size_t)(r0 + k) * stride));
+#pragma unroll
+      for (int k = 0; k < RQ; ++k)
+        if (r0 + k < R) { v.x += u[k].x; v.y += u[k].y; v.z += u[k].z; v.w += u[k].w; }
+    }
+    *reinterpret_cast<float4*>(dst) = v;
+  } else if (blk < RED_WBLK + RED_GBLK) {
+    __shared__ float part[16][17];
+    const int c16 = t & 15, grp = t >> 4, c = (blk - RED_WBLK) * 16 + c16;
     float v = 0.f;
-    for (int rr = 0; rr < R; ++rr) v += partab[((size_t)(rr * NCH + slice) * 128 + which * 64 + hs) * 128 + d];
-    (which == 0 ? dwa : dwb)[(slice * HS + hs) * D_ + d] = v;
-  } else if (idx < 3 * H_ * D_) {                           // dWs element (d, slice, hs)
-    const int rem = idx - 2 * H_ * D_, d = rem / H_, hh = rem % H_, slice = hh / HS, hs = hh % HS;
-    float v = 0.f;
-    for (int rr = 0; rr < R; ++rr) v += parts[((size_t)(rr * NCH + slice) * 128 + d) * 64 + hs];
-    dws[d * H_ + hh] = v;
-  } else if (idx < 3 * H_ * D_ + 256) {
-    const int c = idx - 3 * H_ * D_;
-    float v = 0.f;
-    for (int rr = 0; rr < nrows_dg; ++rr) v += dgbw[(size_t)rr * 256 + c];
-    (c < 128 ? dgam : dbeta)[c & 127] = v;
+    for (int r0 = grp; r0 < nrows_dg; r0 += 16 * GQ) {           // rows grp, grp + 16, ... in order, GQ loads in flight
+      float tv[GQ];
+#pragma unroll
+      for (int k = 0; k < GQ; ++k) tv[k] = r0 + 16 * k < nrows_dg ? __ldg(dgbw + (size_t)(r0 + 16 * k) * 256 + c) : 0.f;
+#pragma unroll
+      for (int k = 0; k < GQ; ++k)
+        if (r0 + 16 * k < nrows_dg) v += tv[k];
+    }
+    part[grp][c16] = v;
+    __syncthreads();
+    if (grp == 0) {
+      float sum = 0.f;
+#pragma unroll
+      for (int k = 0; k < 16; ++k) sum += part[k][c16];
+      (c < 128 ? dgam : dbeta)[c & 127] = sum;
+    }
   }
 }
+extern "C" __device__ int transition_bwd_reduce_blocks = RED_WBLK + RED_GBLK;
 
 // ================================================================================== wiring surface
 // Built into a cubin by the newest nvcc that knows sm_100a and launched through the driver API from `transition_sm100.cu`;

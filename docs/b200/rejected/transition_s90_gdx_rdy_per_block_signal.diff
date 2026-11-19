@@ -1,0 +1,70 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
+index bae5d11a6..9c0b8fe48 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_gdx.cu
+@@ -54,7 +54,7 @@ constexpr int TC = GN + NB <= 128 ? 128 : 256;                 // tensor memory:
+ constexpr uint32_t IDESC_G = idesc_bf16(128, GN, 0, 1), IDESC_X = idesc_bf16(128, NB, 0, 1);
+ 
+ struct Bars {
+-  uint64_t w_full, dy_full[NKD], mma_done, full[STG], empty[STG], acc_full, red_full, rs_full, flag_clear;
++  uint64_t w_full, dy_full[NKD], mma_done, full[STG], empty[STG], acc_full, red_full, rs_full, flag_clear, rdy[CLS];
+   uint32_t tmem;
+ };
+ static_assert(sizeof(Bars) <= 512, "barrier block");
+@@ -128,6 +128,9 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+     for (int kb = 0; kb < NKD; ++kb) mbar_init(&B.dy_full[kb], 1);
+     for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
+     mbar_init(&B.acc_full, 1); mbar_init(&B.red_full, 1); mbar_init(&B.rs_full, 1); mbar_init(&B.flag_clear, 1);
++#ifdef RDY
++    for (int r = 0; r < CLS; ++r) mbar_init(&B.rdy[r], 1);                   // (S90) CTA r's gate rows are stored: one remote arrival from CTA r
++#endif
+     fence_barrier_init();
+     fence_proxy_async();
+     prefetch_map(&mdy); prefetch_map(&mws); prefetch_map(&mdab); prefetch_map(&mwa); prefetch_map(&mwb);
+@@ -188,6 +191,23 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+     }
+     __syncwarp();
+     cluster_arrive_rx();
++#ifdef RDY   // (S90) each A K-block is loaded as soon as the gate CTA that wrote it has signalled (remote mbarrier), not after the whole-cluster barrier
++    if (lane == 0) {
++      for (int kb = 0; kb < NKX; ++kb) {
++        const int s = kb % STG;
++        if (kb >= STG) {
++          mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
++          mbar_expect_tx(&B.full[s], STB);
++          load_w(kb);
++        }
++        mbar_wait_cl(&B.rdy[((kb0 + kb) % HKB) / GPC], 0);
++        fence_proxy_async_global();
++        tma_load_2d(stage_addr(su, s), &mdab, &B.full[s], (kb0 + kb) * 64, row0);
++      }
++    }
++    __syncwarp();
++    cluster_wait();
++#else
+     cluster_wait();                                            // the tile's [dA | dB] is complete (every CTA's gate)
+ #ifdef MLN   // (S90) the first STG A blocks one lane each (their weight blocks are in place), the rest by lane 0 in ring order
+     if (lane < STG && lane < NKX) { fence_proxy_async_global(); tma_load_2d(stage_addr(su, lane), &mdab, &B.full[lane], (kb0 + lane) * 64, row0); }
+@@ -210,6 +230,7 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+       }
+     }
+     __syncwarp();
++#endif
+   } else if (warp == 1) {
+     // ------------------------------------------------------------------------------------------ MMA issue (converged warp)
+     mbar_wait(&B.w_full, 0);
+@@ -275,6 +296,14 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
+     tc_fence_before();
+     GSTW(5, 4);
+     fence_proxy_async_global();                                // these stores -> the cluster's (and tsx_dw.cu's) TMA reads
++#ifdef RDY
++    asm volatile("fence.acq_rel.gpu;" ::: "memory");
++    named_bar_sync(2, 256);
++    if (tid == 128) {
++#pragma unroll
++      for (int r = 0; r < CLS; ++r) mbar_arrive_remote(&B.rdy[rank], (uint32_t)r);
++    }
++#endif
+     cluster_arrive();                                          // release: this CTA's [dA | dB] rows are written
+   } else {
+     cluster_arrive_rx();

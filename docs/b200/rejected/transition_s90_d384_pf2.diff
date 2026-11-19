@@ -1,0 +1,52 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 55be1b4c8..b71de4f2e 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -243,7 +243,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+         )
+     dim = (f"-DDIM={d}", *hid)
+     fwd = (
+-        (("fwd", "widths/tfwd_d384.cu", hid), ("bwd", "widths/tbwd_d384.cu", hid))
++        (("fwd", "widths/tfwd_d384.cu", hid), ("fwdi", "widths/tfwd_d384.cu", (*hid, "-DPF2=1")), ("bwd", "widths/tbwd_d384.cu", hid))
+         if d == 384
+         else (
+             ("ln", "widths/tln_w.cu", (f"-DDIM={d}", lpr)),
+@@ -588,7 +588,7 @@ def _fwd_launch(
+         hid, a, b = ((torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph()) for _ in range(3))
+         mout = k.rows(out)
+         k.run(
+-            "fwd",
++            "fwd" if save else "fwdi",
+             "transition_fwd_d384_sm100",
+             k.grid,
+             (
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
+index 715475b9e..e80b776e9 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
+@@ -58,6 +58,11 @@ __device__ __forceinline__ void tmem_ld64(uint32_t taddr, uint32_t (&r)[64]) {
+                : "r"(taddr));
+ }
+ 
++// PF2 (S90): lanes 1 .. 2 NKB of the producer warp prefetch tile i + 1's x boxes into L2 (cp.async.bulk.prefetch.tensor) once tile i's x has landed, a tile ahead of the load into the
++// xn buffer (the x load after the last expand was exposed: ~3.6 us of the D 256 tile; same structure here)
++#ifndef PF2
++#define PF2 0
++#endif
+ struct Bars {
+   // leader-only: weight fulls (both CTAs' transactions), xn_full (2 LN arrivals), ab_free / h_full (8 warps per CTA), out_empty (4)
+   uint64_t wab_full[NWK], ws_full[NWS], xn_full, ab_free, h_full, out_empty;
+@@ -111,6 +116,13 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------ x and Ws producer: x(i) into the xn
+     // buffer (for the LayerNorm, once xn(i - 1) is dead), then every chunk's Ws half; Ws transactions complete on the leader's barrier
++    if (PF2 && lane >= 1 && lane <= 2 * NKB) {
++      const int l = lane - 1;
++      for (int i = 0; i + 1 < n_local; ++i) {
++        mbar_wait(&B.xl_full, i & 1);
++        asm volatile("cp.async.bulk.prefetch.tensor.2d.L2.global [%0, {%1, %2}];" :: "l"(&mx), "r"((l >> 1) * 64), "r"(tile_of(i + 1) * ROWS + (l & 1) * 64) : "memory");
++      }
++    }
+     if (lane == 0) {
+       for (int q = 0; q < nch; ++q) {
+         const int i = q / NCH, j = q % NCH;

@@ -40,13 +40,18 @@ def _triton_core_reason(x: torch.Tensor, head_dim: int) -> str | None:
     return None
 
 
-def _triton_core(q, k, v, bias, mask):
+def _triton_core(q, k, v, bias, mask, head_major: bool = False):
     """``softmax(q k^T / sqrt(D) + bias) v`` on the Triton kernel: q / k / v [A, B, L, H, D], bias [B, L, L, H] (shared by the A samples),
-    mask [A, B, L] bool or None (masked keys off). Differentiable in q, k, v and bias."""
-    from miniworld_engine.kernels.augmented_attention.triton.main import triton_augmented_attention_pair_bias
+    mask [A, B, L] bool or None (masked keys off). Differentiable in q, k, v and bias. ``head_major``: the backward hands dbias back as the
+    head-major view on any card (``TritonAugmentedAttentionHeadMajor``; False: the card's default)."""
+    from miniworld_engine.kernels.augmented_attention.triton.main import (
+        triton_augmented_attention_pair_bias,
+        triton_augmented_attention_pair_bias_head_major,
+    )
 
     dt = q.dtype
-    return triton_augmented_attention_pair_bias(q, k.to(dt), v.to(dt), bias.to(dt), mask)
+    core = triton_augmented_attention_pair_bias_head_major if head_major else triton_augmented_attention_pair_bias
+    return core(q, k.to(dt), v.to(dt), bias.to(dt), mask)
 
 
 #: the requirements stream whose ``make_inputs`` adds an ``extra_pair_bias`` (OpenDDE's structural-token refiner: an [L, L] logit bias on every
@@ -128,10 +133,50 @@ class AttentionPairBias(BackendModule, MasterWeights):
         "anthropic": 2,
         "cuda:a100_sm80": 8,
         "cuda:h100_sm90": 5,
+        "cuda:b200_sm100": 29,  # 29 (2026-11-18): 24-head training (d_pair 128, L 256-768) with finalize_red in its three parts per stream, the pair backward reserve 16 at L 256; 28 (2026-11-18): training forward -- prep_ln one wave at d_single 512 (__launch_bounds__(256, 5)), the q | k | v | g GEMM captured before the side pair pass (L 256-768), pair_bias_fwd2 from L 256 at 16 heads; 27 (2026-11-18): training L 128 / 256 attention backward in one launch (small_core_bwd: gate_bwd + dkv + dqb + qkv_bwd), the pair backward reserve 80 (L 128) / 48 (L 256), finalize_red split into its three parts per stream (16 heads, L <= 512); 26 (2026-11-18): inference small_core fused with to_out at L 128 (16 queries a CTA, st.async o exchange; 24 heads 2 a CTA), core-only small_core at L 384 / 512 / 640 (128-key chunks, no key split / combine) and 32 queries a CTA at L 256; 25 (2026-11-18): training 16 x 32 at d_single 512: no dW copies (finalize_red_nc beside the dW GEMMs, the gradients views of their outputs); 24 (2026-11-18): inf_front loads before waits, one tensor-map box per GEMM tile, overlapped roles (inf_fronto_k) at L 256 / 384 for 12 / 24 heads; 21 (2026-11-17): pair_bias_fwd2, the PDL row kernels as B200 copies; 22: its pair loads L2 evict_first in inference from L 512; 23 (2026-11-18): L 128 / 256 dqb_small / dkv_small (training), small_core (inference L 256, d_pair 256 L 128)
         "cuda:5090_sm120": 3,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100; cuda:a100_sm80 4 / cuda:h100_sm90 2 (2026-11-11): B > 1 served (one step per batch row, FoldForge 5I28 confidence head); cuda:a100_sm80 5 (2026-11-12): the composed fp32 path's pair backward is one TF32 tensor-core launch for the batch (pair_bias_gen_bwd_tc); cuda:a100_sm80 6 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd, bf16 pairs) 1.4-2.1x faster, the same values; cuda:5090_sm120 2 (2026-11-12): the pair-bias backwards fit 99 KB on sm_120a (TF32 tensor-core kernel at 2 stages, d_pair 512 x 16 / 24 heads on the one-pass kernel with 8-element tiles)
+    # cuda:b200_sm100 20 (2026-11-17, v20): bf16 / master training at L <= 256: the main stream's own kernels (attn_fwd2, gate_rows,
+    # gate_bwd, attn_dkv, qkv_bwd, ln_bwd, finalize_red) launched as programmatic dependents (same values, bitwise); the tcgen05 pair backward
+    # leaves 96 SMs at L 128 (partial-row count changes: same sums, another fixed order); bf16 inference: the core and its key-split combine
+    # as programmatic dependents, the key split from L 384 (was 512). (Part 7's PDL pair backward measured level and reverted; its fp32
+    # one-sample key split for the token DiT, ksplit_combine32, kept.)
+    # cuda:b200_sm100 9 (2026-11-17, round 3 part 6): bf16 inference at d_pair 128, L <= 256: LayerNorm(single), the q | k | v | g GEMM and
+    # the pair pass in ONE launch (inf_front), the core after it as a programmatic dependent; training at 24 heads L > 256: attn_dkv reads
+    # the bias as stored (-DBIASNT=1, no transpose launch); fp32 inference 8 heads x d_pair 384 from L 512: the pair pass on tcgen05
+    # kind::tf32 (pair_fwd32.cu); the fp32 core keeps its -DKPERM build after the token DiT's QPAIR change (it raised AttributeError)
+    # cuda:b200_sm100 8 (2026-11-17, round 3 part 5): bf16 / master training: acc_reduce + finalize in one launch (finalize_red, <= 16
+    # heads), the gate backward with every lane busy at 12 heads (gate_bwd2), bias^T made by the forward beside its core (bias_transpose64,
+    # <= 16 heads or L <= 256: no transpose launch in the backward), the d_pair 128 pair backward with a = a_hi + a_lo (PB_SPLIT, <= 16 heads:
+    # row 148 L 128 grad:pair 1.25 -> 1.00 x tol)
+    # cuda:b200_sm100 7 (2026-11-17, round 3 part 4, second half): training, d_pair 128: the pair backward on tcgen05 (sm100/pair_bwd.cu:
+    # a Wf and X^T a on the tensor core, the row sums of squares in the epilogue, a store warp; it leaves 32 SMs to the row passes / GEMMs
+    # at <= 16 heads and L <= 512, else 8); the tcgen05 pair -> bias pass reads Wf before its first tiles' loads (start-up), and serves
+    # d_pair 512 at every L, d_pair 384 from L 256 at 16 heads (384 at 8), d_pair 256 from L 256 in training (768 in inference)
+    # cuda:b200_sm100 6 (2026-11-17, round 3 part 4): inference (bf16 and fp32): the weight packs through param_forms(capture_reads_eager):
+    # a capture reads the pack its eager warm-up made, no pack launch per replay (grad off); d_pair 128 inference at L 384-640: the pair pass
+    # leaves 8 SMs so the q | k | v | g GEMM runs under it; the tcgen05 pair pass thresholds re-measured (d_pair 384 / 512 from L 384, 256
+    # from L 1024); bf16 inference: the pair pass starts when LayerNorm(single) has ended (it ran starved beside the pass); training backward:
+    # dxa issued before dW q|k|v|g (the head of the tail)
+    # cuda:b200_sm100 5 (2026-11-17, round 3 part 3): a wide bf16 pair's pair -> bias pass on tcgen05 (sm100/pair_fwd.cu: X X^T and X Wf^T
+    # per 16 columns, row statistics from the Gram diagonal, 192 KB of pair in flight per SM, Wf formed in the kernel so inference starts
+    # it with the step): d_pair 384 from L 384, 256 / 512 from L 512, inference and the training forward; the key-split inference core is
+    # the -DKSPLIT=1 build of the shared sm100/attn_inf.cu (one source)
+    # cuda:b200_sm100 4 (2026-11-17, round 3 continued): extra_pair_bias and the L % 128 pad on the bias planes in one launch (planes_fix: no
+    # sort / gather / cast launches, no padded copy of the pair), fp32 inference on three streams (the packs + pair pass, LN + the q | k | g
+    # GEMM, the v^T GEMM), the key-split bf16 inference core from L 512 (attn_inf -DKSPLIT=1 + ksplit_combine), the pair backward leaves
+    # 8 SMs to the row passes beside it (d_pair 128; wide up to L 256), fp32 training dQ bitwise repeatable (attn_dqb_tf32 -DDQPART=1 -DDET=1)
+    # cuda:b200_sm100 3 (2026-11-17, round 3): bf16 / master: no weight casts (fp32 masters into prep_dp), the pack and LayerNorm(single) in
+    # one launch (prep_ln), the pack / pair pass and the independent backward stages on side streams, a wide pair's backward in one launch
+    # (pair_bias_bwd_wide1, was one per 128 columns); fp32: the pair pass on the TF32 tensor cores (pair_bias32_tc: inference at L >= 256
+    # where it is faster, training always, natural key order: no gathers), the training glue in single launches (pack2_rna, gate32,
+    # gate32_bwd, the packs), dq / dk / dv written into their column blocks
+    # cuda:b200_sm100 2 (2026-11-17): fp32 inference: the TF32 core reads the pair pass's key order itself (-DKPERM=1: no k / v gathers), the
+    # row-wise stages batched over B, the inference packs in one launch; fp32 L 128 served (was refused: slower than triton)
+    # cuda:b200_sm100 1 (2026-11-16): B200 (sm_100a): bf16 / master inference and training on the sm_100a path of attention_pair_bias_b200.py;
+    # fp32 inference on the B200 TF32 gated core (attn_inf_tf32 built per head layout); fp32 training refused
     # cuda:5090_sm120 3 (2026-11-13, main merge): the padded L % 128 inference and batched B > 1 paths above on the sm_120a build
     # cuda:a100_sm80 7 / cuda:h100_sm90 3 (2026-11-12): inference at L % 128 != 0 runs padded to a multiple of 128 (FoldForge OpenDDE n = 12: 2976)
     # cuda:h100_sm90 4 (2026-11-12): bf16 inference at B > 1 runs the batch rows together, one launch per stage (5 launches per chunk of
@@ -366,6 +411,11 @@ class AttentionPairBias(BackendModule, MasterWeights):
                 single_p, _, mask_p, extra_p = _pad_tokens(single, None, mask, extra_pair_bias, lp)
                 extra = None if extra_p is None else _extra_planes(extra_p, single.shape[0], self.n_head, lp)
                 return sm80.update_generic(self, single_p, pair, mask_p, False, extra=extra)[:, :L].contiguous()
+            if torch.cuda.get_device_capability(single.device) == (10, 0) and L % 32 == 0:
+                # B200 (2026-11-17): the pair pass runs at L and its bias planes are padded to lp (planes_fix, with extra_pair_bias in the
+                # same launch): no padded copy of the pair (at L 2976 x d_pair 384 that copy was most of the call)
+                extra = None if extra_pair_bias is None else _extra_planes(extra_pair_bias, single.shape[0], self.n_head, L)
+                return native.update_inference(self, single, pair, mask, extra=extra, lp=lp)
             single_p, pair_p, mask_p, extra_p = _pad_tokens(single, pair, mask, extra_pair_bias, lp)
             return self._forward_cuda(single_p, pair_p, mask_p, extra_p)[:, :L].contiguous()
         # extra_pair_bias (eval only, ``_supports_cuda``): [B, H, L, L] planes added to the kernels' hoisted bias before the core (FoldForge R3)
@@ -756,7 +806,9 @@ class AugmentedAttentionPairBias(BackendModule):
     def _attention_core_triton(self, query, key, value, bias, mask=None, compute_dtype=None):
         if compute_dtype is not None:
             query, key, value, bias = (t.to(compute_dtype) for t in (query, key, value, bias))
-        return _triton_core(query, key, value, bias, mask)
+        # B200 (2026-11-17): dbias as the head-major view (no sum over A = 1, no transposing copy), as the A100 / H100 always had it
+        b200 = query.is_cuda and torch.cuda.get_device_capability(query.device) == (10, 0)
+        return _triton_core(query, key, value, bias, mask, head_major=b200)
 
     def _supports_triton(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
         if compute_dtype not in (None, torch.bfloat16, torch.float32):

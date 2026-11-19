@@ -1,0 +1,107 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n1-triattn/pretp/sm100.cuh	2026-11-18 16:55:34.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n1-triattn/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/sm100.cuh	2026-11-18 16:55:35.000000000 +0000
+@@ -132,6 +132,17 @@
+ __device__ __forceinline__ void store_rows(const void* map, const void* src, int c0, int row0, int L, int g) {
+   store_rows(map, sa(src), c0, row0, L, g);
+ }
++// (N1) tile visiting order of the persistent row-tile kernels. The ending node's x / y tiles are 128 rows (b, n, s0 .. s0 + 127) at the caller's
++// [b, s, n]: one 256-byte piece a row, 128 rows L * 256 B apart. Consecutive CTAs take consecutive logical tiles = consecutive s blocks of one n: their
++// pieces are far apart. With TA_TPERM the sequence number runs over n fastest (the same s block of 148 consecutive n at once: 148 x 256 B contiguous a row).
++#ifndef TA_TPERM
++#define TA_TPERM 0
++#endif
++__device__ __forceinline__ int tperm(int sq, int L, int g) {
++  if (!TA_TPERM || !(g & 1)) return sq;
++  const int nb = L >> 7, nt1 = L * nb, b = sq / nt1, r = sq - b * nt1;
++  return b * nt1 + (r % L) * nb + r / L;
++}
+ // bf16 / fp32 reduce-add of a row tile into the caller's tensor
+ __device__ __forceinline__ void reduce_rows(const void* map, const void* src, int c0, int row0, int L, int g) {
+   if (g == 0) {
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n1-triattn/pretp/triattn_mod_sm100.cu	2026-11-18 16:55:34.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n1-triattn/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu	2026-11-18 16:55:35.000000000 +0000
+@@ -113,7 +113,8 @@
+       for (int kh = 0; kh < CX / 64; ++kh)
+         for (int nh = 0; nh < 4 * HD / WR; ++nh) load_2d(&wmap, sW + kh * 4 * HD * 64 + nh * WR * 64, wf, kh * 64, nh * WR);
+       int lt = 0;
+-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
++      for (int sq_ = blockIdx.x; sq_ < ntiles; sq_ += gridDim.x, ++lt) {
++      const int t = tperm(sq_, L, TRANS);
+         const int st = lt % NST;
+         if (lt >= NST) wait(xe + st, ((lt / NST) - 1) & 1);
+         expect_tx(xf + st, XT * 2);
+@@ -124,7 +125,8 @@
+     if (lane == 0) {
+       wait(wf, 0);
+       int lt = 0;
+-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
++      for (int sq_ = blockIdx.x; sq_ < ntiles; sq_ += gridDim.x, ++lt) {
++      const int t = tperm(sq_, L, TRANS);
+         const int st = lt % NST;
+         wait(yf + st, (lt / NST) & 1);
+         const __nv_bfloat16* y = sX + st * XT;
+@@ -164,7 +166,8 @@
+       return (c >> 6) * BM * 64 + r * 64 + ((((c & 63) >> 3) ^ (r & 7)) << 3);
+     };
+     int lt = 0;
+-    for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
++    for (int sq_ = blockIdx.x; sq_ < ntiles; sq_ += gridDim.x, ++lt) {
++      const int t = tperm(sq_, L, TRANS);
+       const int st = lt % NST;
+       wait(xf + st, (lt / NST) & 1);
+       __nv_bfloat16* xt = sX + st * XT;
+@@ -237,7 +240,8 @@
+     __nv_bfloat16* ring = sO + dw * DWB * WBT;
+     int nst = 0;                                  // this warp's stores issued
+     int lt = 0;
+-    for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
++    for (int sq_ = blockIdx.x; sq_ < ntiles; sq_ += gridDim.x, ++lt) {
++      const int t = tperm(sq_, L, TRANS);
+ #pragma unroll
+       for (int half = 0; half < 2; ++half) {
+         if (NOUT == 1 && half == 0) continue;
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n1-triattn/pretp/tailg_sm100.cuh	2026-11-18 16:55:34.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n1-triattn/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tailg_sm100.cuh	2026-11-18 16:55:35.000000000 +0000
+@@ -125,7 +125,7 @@
+   tc_fence_after();
+   const uint32_t tmem = *tslot;
+   const int n = ntiles > (int)blockIdx.x ? (ntiles - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;   // this CTA's tiles
+-  auto tile = [&](int i) { return (int)blockIdx.x + i * (int)gridDim.x; };
++  auto tile = [&](int i) { return tperm((int)blockIdx.x + i * (int)gridDim.x, L, TRANS); };
+ 
+   if (warp == 0) {
+     if (lane == 0) {
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n1-triattn/pretp/b200_triattn.py	2026-11-18 16:55:34.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n1-triattn/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py	2026-11-18 16:59:34.000000000 +0000
+@@ -186,11 +186,18 @@
+ CORE_PDL = os.environ.get("MINIWORLD_TRIATTN_B200_CORE_PDL", "1") != "0"
+ 
+ 
++#: (N1) the ending node's row-tile kernels visit tiles n-fastest (`tperm`, sm100.cuh). MINIWORLD_TRIATTN_B200_TPERM=0 turns it off.
++TPERM = os.environ.get("MINIWORLD_TRIATTN_B200_TPERM", "1") != "0"
++
++
+ @functools.lru_cache(maxsize=1)
+ def _mod():
+     ensure_cuda_home()
+     return load_extension(
+-        name="triattn_b200_mod_v22_tt10", sources=[str(_SRC / "triattn_mod_sm100.cu")], extra_cuda_cflags=_flags(), verbose=False
++        name="triattn_b200_mod_v22_tt10" + ("_tp" if TPERM else ""),
++        sources=[str(_SRC / "triattn_mod_sm100.cu")],
++        extra_cuda_cflags=[*_flags(), *(("-DTA_TPERM=1",) if TPERM else ())],
++        verbose=False,
+     )
+ 
+ 
+@@ -590,7 +597,10 @@
+ def _wide():
+     ensure_cuda_home()
+     return load_extension(
+-        name="triattn_b200_wide_v45_tt7", sources=[str(_SRC / "triattn_wide_sm100.cu")], extra_cuda_cflags=_flags(), verbose=False
++        name="triattn_b200_wide_v45_tt7" + ("_tp" if TPERM else ""),
++        sources=[str(_SRC / "triattn_wide_sm100.cu")],
++        extra_cuda_cflags=[*_flags(), *(("-DTA_TPERM=1",) if TPERM else ())],
++        verbose=False,
+     )
+ 
+ 

@@ -82,6 +82,8 @@ def prebuild(target, rows):
         return
     if target.arch == "sm120":  # RTX 5090: its builds (the Chai-1 passes included) are planned by kernels/integrations (kernels/_msa_card.prebuild_sm120)
         return
+    if target.arch == "sm100":  # B200: opm_sm100 / chai_sm100 (kernels/integrations plans their extensions); the sm_90a gather / Chai-1 builds never load
+        return
     names = set().union(*(r["kernels"] for r in rows)) if rows else set()
     if "outer_product_mean_gather_sm90" in names:
         yield ext

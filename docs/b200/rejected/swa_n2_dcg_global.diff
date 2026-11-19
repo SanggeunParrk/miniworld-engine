@@ -1,0 +1,20 @@
+--- src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py	2026-11-18 18:47:13.000000000 +0000
++++ n2out/pre/tf32_bwd.py	2026-11-18 18:47:13.000000000 +0000
+@@ -770,6 +770,8 @@
+ #: round 3 part 16 (development switch): the few-tile tail (dx GEMM -> adaLN -> dc GEMM -> silu') as one cluster kernel (DcxTf32)
+ DCX = __import__("os").environ.get("SWA_DCX", "0") == "1"
+ #: ... with dWmod's rows 2C .. 6C early on a stream of their own (_bwd_few)
++#: N2 (development switch): DcgTf32 (dc's early GEMM beside the attention backward, the late third + silu' in one launch) also for global attention
++DCG_GLOBAL = int(__import__("os").environ.get("SWA_DCG_GLOBAL", "0"))
+ DWM_SPLIT = __import__("os").environ.get("SWA_DWM_SPLIT", "1") == "1"
+ #: r3-swa part 21 (development switch): the few-tile backward's dx = dP W as per-head partials in the window attention passes' epilogues
+ #: (attn_dq_tf32 / attn_dkv_tf32 -DDXP=1), summed by the qkvg adaLN backward -- no dx GEMM launch after dK / dV
+@@ -1120,6 +1122,8 @@
+     par = SCHED >= 2 and half_window == _f.HW and 2 * ga <= num_sms()  # dK / dV beside dQ: both passes fit the SMs at once
+     early = par and 2 * ga + dw.ctas(1, 4) <= num_sms()  # and dWo / dWu / dWd beside them
+     dcg_room = early and 2 * ga + dw.ctas(1, 4) + (M // 128) * K.dcg.NS_EARLY <= num_sms()
++    if DCG_GLOBAL and half_window != _f.HW and (DCG_GLOBAL == 1 or (modb is not None and len(modb) > 2 and modb[2] is not None and modb[2][1] == 0)):
++        dcg_room = True  # N2: global attention (its backward on 128 SMs, the early GEMM beside it); 2: the last block's backward only
+     if modb is not None and not fx and DCG and dcg_room and not EARLY_DC and K.dcg.ok(M, dmod, modb[1], modb[0]):
+         # r3-swa part 19: E = dmod[:, 2C:] Wmod[2C:] now, on a stream of its own beside the attention backward (DcgTf32.early); the
+         # current stream waits for it where it already joins the dK / dV stream (no wait in front of a PDL launch)

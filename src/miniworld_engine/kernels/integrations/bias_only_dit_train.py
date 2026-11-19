@@ -101,6 +101,13 @@ TRN = (
 NAMES = ["attention." + n for n in ATT] + ["transition." + n for n in TRN]
 
 
+def _b200_f32_wide(single) -> bool:
+    """B200: cond 768 / pair 256 train on the fp32 (TF32) path and, since 2026-11-17, in bf16 on the per-step backward launches (the fused
+    bf16 backward is built for cond 384 / pair 128 only: on it cond 768 was RED -- the AdaLN shift weight gradient -- and its pair-bias
+    backward merge takes 128 channels only; ``_bwd_fused`` keeps those widths off it)."""
+    return torch.cuda.get_device_capability(single.device) == (10, 0)
+
+
 def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
     """``bias``: the block's hoisted pair bias [1, H, L, L] (then ``pair`` is not read and may be None)."""
 
@@ -135,12 +142,12 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
     d_cond = module.attention.ada_ln_in.to_scale.weight.shape[1]
     if (
         d_cond not in KERNEL_D_CONDS
-        or (d_cond != 384 and not h100_enabled(single.device))
+        or (d_cond != 384 and not (h100_enabled(single.device) or _b200_f32_wide(single)))
         or tuple(cond.shape) != (*single.shape[:3], d_cond)
     ):
         return False
     d_pair = module.attention.to_bias.weight.shape[1]
-    if d_pair not in KERNEL_D_PAIRS or (d_pair != DP and not h100_enabled(single.device)):
+    if d_pair not in KERNEL_D_PAIRS or (d_pair != DP and not (h100_enabled(single.device) or _b200_f32_wide(single))):
         return False
     if bias is None and tuple(pair.shape) != (1, L, L, d_pair):
         return False
@@ -213,13 +220,16 @@ def _fp32_logits(dev) -> bool:
     return h100_enabled(dev)
 
 
-def _bwd_fused(dev, H, DA):
+def _bwd_fused(dev, H, DA, DC=384, dp=DP):
     """(TailBwd, Wgrad) of ``kernels/bias_only_dit/cuda/bwd_fused.py`` when the fused bf16 backward serves (``bwd_fused_on``,
-    always on; sm_100 only) and its kernels built, else None (the per-step launches)."""
+    always on; sm_100 only; cond 384 and pair 128, the widths its kernels are built for) and its kernels built, else None (the per-step
+    launches: B200 at cond 768 / pair 256 runs them as Hopper does, their row and pair kernels templated on both widths)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 
     if not BWF.bwd_fused_on() or h100_enabled(dev):  # the fused backward kernels are sm_100 only: Hopper keeps the per-step launches
+        return None
+    if DC != 384 or dp != DP:
         return None
     idx = dev.index if dev.index is not None else torch.cuda.current_device()
     return BWF.ops(idx, H, DA // H) if BWF.bwd_fused_ready(idx, H, DA // H) else None
@@ -280,8 +290,8 @@ def _pack(P, dev):
     eager pack is never reused inside a capture, whose replays would otherwise run on the weights of capture time."""
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
-    one, mid = _pack1(), BWF.mid_on()
-    key = (tuple((t.data_ptr(), t._version) for t in P.values()), one, mid)
+    one, mid, tailT = _pack1(), BWF.mid_on(), BWF.tail_mode() != "off"
+    key = (tuple((t.data_ptr(), t._version) for t in P.values()), one, mid, tailT)
     slot = _capture.scoped(next(iter(P.values())).data_ptr())
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
@@ -289,7 +299,7 @@ def _pack(P, dev):
         return _capture.hold(hit[1], slot is not None and slot[0] is None)
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 
-    W = _pack_h100(P) if h100_enabled(dev) else _pack_one(P, dev, mid) if one else None
+    W = _pack_h100(P) if h100_enabled(dev) else _pack_one(P, dev, mid, tailT) if one else None
     if W is not None:
         if slot is not None:
             _capture.prune(_PACKS)
@@ -328,12 +338,12 @@ def _pack(P, dev):
         "Wo": g("attention.to_out.weight").detach().to(BF).contiguous(),
         "Wab": torch.cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]).detach().to(BF),
         "Wsq": g("transition.squeeze.weight").detach().to(BF).contiguous(),
-        # K-major B operands of the fused backward (bo_bwd_tail.cu): Wsq^T, Wa^T, Wb^T, Wo^T
-        "WsqT": g("transition.squeeze.weight").detach().to(BF).t().contiguous(),
-        "WaT": g("transition.expand_a.weight").detach().to(BF).t().contiguous(),
-        "WbT": g("transition.expand_b.weight").detach().to(BF).t().contiguous(),
-        "WoT": g("attention.to_out.weight").detach().to(BF).t().contiguous(),
     }
+    if tailT:  # K-major B operands of the fused backward tail (bo_bwd_tail.cu, tail_mode "split3"): Wsq^T, Wa^T, Wb^T, Wo^T
+        W["WsqT"] = g("transition.squeeze.weight").detach().to(BF).t().contiguous()
+        W["WaT"] = g("transition.expand_a.weight").detach().to(BF).t().contiguous()
+        W["WbT"] = g("transition.expand_b.weight").detach().to(BF).t().contiguous()
+        W["WoT"] = g("attention.to_out.weight").detach().to(BF).t().contiguous()
     if mid:  # bo_bwd_mid.cu's K-major B operands, views of one buffer (_mid_views)
         mt = _mid_views(g("attention.to_value.weight").shape[0], dev, g("attention.ada_ln_in.to_scale.weight").shape[1])
         for k, n in (
@@ -366,9 +376,10 @@ def _mid_views(DA, dev, DC):
     return out
 
 
-def _pack_one(P, dev, mid=False):
+def _pack_one(P, dev, mid=False, tailT=True):
     """``_pack`` in one launch (``bias_only_dit_train_rows.cu`` pack16): the same tensors, bit for bit (a parameter that already has
-    the wanted dtype and layout is used as it is); ``mid``: with bo_bwd_mid.cu's transposed weights."""
+    the wanted dtype and layout is used as it is); ``mid``: with bo_bwd_mid.cu's transposed weights; ``tailT``: with bo_bwd_tail.cu's
+    (tail_mode "split3")."""
     DC = P["attention.ada_ln_in.to_scale.weight"].shape[1]
     from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
 
@@ -425,14 +436,16 @@ def _pack_one(P, dev, mid=False):
     seg(Wb_p, Wf_bf, wp_p)  # Wf = Wb diag(wp)
     Wo_p, Wsq_p = g("attention.to_out.weight"), g("transition.squeeze.weight")
     Wa_p, Wb_p2 = g("transition.expand_a.weight"), g("transition.expand_b.weight")
-    trw = {
-        "WsqT": e(Wsq_p.shape[1], Wsq_p.shape[0], dt=BF),
-        "WaT": e(Wa_p.shape[1], Wa_p.shape[0], dt=BF),
-        "WbT": e(Wb_p2.shape[1], Wb_p2.shape[0], dt=BF),
-        "WoT": e(Wo_p.shape[1], Wo_p.shape[0], dt=BF),
-    }
-    for k, w in (("WsqT", Wsq_p), ("WaT", Wa_p), ("WbT", Wb_p2), ("WoT", Wo_p)):
-        seg(w, trw[k], t=1)  # the fused backward's K-major B operands
+    trw = {}
+    if tailT:  # the fused backward tail's K-major B operands (tail_mode "split3")
+        trw = {
+            "WsqT": e(Wsq_p.shape[1], Wsq_p.shape[0], dt=BF),
+            "WaT": e(Wa_p.shape[1], Wa_p.shape[0], dt=BF),
+            "WbT": e(Wb_p2.shape[1], Wb_p2.shape[0], dt=BF),
+            "WoT": e(Wo_p.shape[1], Wo_p.shape[0], dt=BF),
+        }
+        for k, w in (("WsqT", Wsq_p), ("WaT", Wa_p), ("WbT", Wb_p2), ("WoT", Wo_p)):
+            seg(w, trw[k], t=1)
     if mid:  # bo_bwd_mid.cu's: Wv^T, Wgate^T, the to_scale^T, Wn^T
         mt = _mid_views(g("attention.to_value.weight").shape[0], dev, g("attention.ada_ln_in.to_scale.weight").shape[1])
         for k, n in (
@@ -606,6 +619,14 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
         )
         return P, Pt, pst
 
+    # B200, inside a CUDA-graph capture: the pair part on a side stream beside the conditioning / AdaLN / value chain, joined before the core
+    # (bias_only_dit/cuda/side.py; 2026-11-17: pair_bias + softmax_t are 13 of r104 master L128's 155 us, 55 of L768's 333)
+    from miniworld_engine.kernels.bias_only_dit.cuda import side as SD
+
+    hs = SD.fork(dev)
+    if hs is not None:
+        with SD.on(hs):
+            P, Pt, pst = pair_part()
     c2 = cond.reshape(M, DC).contiguous()
     chat = torch.empty(M, DC, device=dev, dtype=BF)
     cst = torch.empty(M, 2, device=dev)
@@ -616,7 +637,9 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
     xst = torch.empty(M, 2, device=dev)
     BT.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
     vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
-    P, Pt, pst = pair_part()
+    if hs is None:
+        P, Pt, pst = pair_part()
+    SD.join(dev, hs)
     og = torch.empty(M, DA, device=dev, dtype=BF)
     _op("pv", dev, H, DA // H)(vg[:, :DA], P.view(H * L, L), og, A, g=vg[:, DA:])  # a = sigmoid(g) (P v)
     y = torch.mm(og, W["Wo"].t())
@@ -836,7 +859,7 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
     # the big weight gradients leave cuBLAS in their parameter's dtype (fp32 accumulation either way), one GEMM per group of
     # parameters that share an input (_BIG): no fp32 -> bf16 copy afterwards; _Block.backward splits them into views
     pdt = {n: p.dtype for n, p in zip(NAMES, params, strict=True)}
-    fused = _bwd_fused(dev, H, DA)
+    fused = _bwd_fused(dev, H, DA, DC, dp)
     if fused is not None:
         return _bwd_fused_step(
             fused,
@@ -1064,6 +1087,17 @@ def _bwd_fused_step(
     ):
         _op("pvpdl", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)
         _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)
+    # B200, inside a CUDA-graph capture: pair_bias_bwd (d pair, the dWf partials: it reads dbias, the pair and its statistics only) on a side
+    # stream beside the rest of the step, finalize after the join -- in place of pair_bias_bwd_fin, which waits for the weight gradients
+    # (bias_only_dit/cuda/side.py; 2026-11-17: 11.7 of r104 master L128's 155 us, 103 of L768's 333)
+    from miniworld_engine.kernels.bias_only_dit.cuda import side as SD
+
+    hs = SD.fork(dev) if dbias_out is None else None
+    if hs is not None:
+        with SD.on(hs):
+            dpair = torch.empty(R, DP, device=dev, dtype=pair.dtype)
+            pwf = torch.empty(BT.partial_rows(M), H, DP, device=dev)
+            nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
     dx = torch.empty(M, D, device=dev, dtype=single.dtype)
     dc = torch.empty(M, DC, device=dev, dtype=cond.dtype)
     # dxa -> adaln_a_bwd -> dchat / dcg -> cond_bwd: three launches of bo_bwd_mid.cu (BWF.mid_on; the pack carries its transposed
@@ -1134,28 +1168,16 @@ def _bwd_fused_step(
             flat,
             norms,
         ]
+    if hs is not None:
+        SD.join(dev, hs)
+        BT.finalize_cuda(part, [*counts, n3], pw, pwf, nwf, W["Wb"], W["wp"], flat[_U(DC) :], norms)
+        return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dpair.view(1, L, L, DP), dWvg, dWab, dWgg, dWsq, dWo, flat, norms]
     dpair = torch.empty(R, DP, device=dev, dtype=pair.dtype)
     pwf = torch.empty(BT.partial_rows(M), H, DP, device=dev)
-    if BWF.pbfin_on():  # one launch: grid barrier, then finalize's jobs
-        BT.pair_bias_bwd_fin_cuda(
-            dbias,
-            p2,
-            pst,
-            W["Wf_bf"],
-            dpair,
-            pwf,
-            part,
-            [*counts, n3],
-            pw,
-            W["Wb"],
-            W["wp"],
-            flat[_U(DC) :],
-            norms,
-            BWF.pb_bar(dev),
-        )
-    else:
-        nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
-        BT.finalize_cuda(part, [*counts, n3], pw, pwf, nwf, W["Wb"], W["wp"], flat[_U(DC) :], norms)
+    # eagerly (no fork): the same two launches as inside a capture, after the weight gradients -- the same bits either way (the one-launch
+    # pair_bias_bwd_fin, BWF.pbfin_on, sums finalize's partials in another order: its last bits differed from a captured step's)
+    nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
+    BT.finalize_cuda(part, [*counts, n3], pw, pwf, nwf, W["Wb"], W["wp"], flat[_U(DC) :], norms)
     return [
         dx.view(A, 1, L, D),
         dc.view(A, 1, L, DC),
@@ -1306,13 +1328,26 @@ def _pair_terms() -> int:
     return 1
 
 
-def _cm(W, name):
+def _cm(W, name, small=False):
     """W[name] as a column-major copy (same values, the operand layout cuBLAS TF32 runs fastest as the weight of a data-gradient GEMM: 25 - 45 % faster
-    at 12288 rows), made once per pack."""
+    at 12288 rows), made once per pack. ``small`` (B200, few rows: ``_small32``): W[name] itself -- a captured step repacks every replay, and
+    the copies were 5 of its launches (~40 us at r104 fp32 L128) for GEMMs of a few hundred rows."""
+    if small:
+        return W[name]
     v = W.get(name + "_cm")
     if v is None:
         v = W[name + "_cm"] = W[name].t().contiguous().t()
     return v
+
+
+#: ``_wgrad32`` on B200: up to this many rows a weight gradient is one plain GEMM (no row-chunk batch, no transposed product); the
+#: data-gradient GEMMs read the weights as packed (``_cm``) and dh + the SwiGLU backward run as cuBLAS + the rows (``_small32``)
+_WGRAD32_DIRECT_ROWS = 1024
+
+
+def _small32(dev, M: int) -> bool:
+    """The fp32 backward on B200 at few rows (2026-11-17: the A = 1 requirement rows, M = L <= 768)."""
+    return M <= _WGRAD32_DIRECT_ROWS and torch.cuda.get_device_capability(dev) == (10, 0)
 
 
 def _wgrad32(a, b):
@@ -1326,6 +1361,10 @@ def _wgrad32(a, b):
     S = 4 if N * K < 2_000_000 or M >= 32768 else 1
     if torch.cuda.get_device_capability(a.device) == (9, 0):
         S = 1  # Hopper TF32: one GEMM per weight is faster (split-4 costs +746 us a step at A = 48, L768: B200 tuning)
+    if M <= _WGRAD32_DIRECT_ROWS and torch.cuda.get_device_capability(a.device) == (10, 0):
+        # B200, few rows (2026-11-17: S = 1 L128-L768): one GEMM straight into the weight's layout -- the row-chunk partials' sum and the
+        # narrow outputs' transposed copy were 11 of the 50 launches of r104 fp32 L128 (~70 us)
+        return torch.mm(a.t(), b)
     if S <= 1 or M % S:
         if (
             b.shape[1] <= 384
@@ -1562,21 +1601,23 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
         dG, dGg, dz = e(M, 4 * D), e(M, 2 * D), e(M, D)
         n0 = F.res_c_bwd_cuda(dout, z, Gg, bg2, dz, dGg, part[0])
         dab = torch.empty_like(ab)
-        glu = _glu(dev, True)
+        sm = _small32(dev, M)
+        # B200 at few rows: cuBLAS + the SwiGLU rows (the tcgen05 dh + SwiGLU-backward GEMM took 24 us at M 128, its tiles under-fill the SMs)
+        glu = None if sm else _glu(dev, True)
         if glu is not None:  # dh = dz Wsq in the GEMM, dab from its epilogue
             WsqT = W.get("WsqT")
             if WsqT is None:  # K-major B: Wsq^T [2D, D], once per pack
                 WsqT = W["WsqT"] = Wsq.t().contiguous()
             glu(dz, WsqT, ab, dab)
         else:
-            dh = torch.mm(dz, _cm(W, "Wsq"))  # [M, 2D]
+            dh = torch.mm(dz, _cm(W, "Wsq", sm))  # [M, 2D]
             F.swiglu_bwd_cuda(dh, ab, dab)
         dWsq = _wgrad32(dz, h)
-        dxt = torch.mm(dab, _cm(W, "Wab"), out=dG[:, 3 * D :])  # d shift2 = dxt: straight into its dG columns
+        dxt = torch.mm(dab, _cm(W, "Wab", sm), out=dG[:, 3 * D :])  # d shift2 = dxt: straight into its dG columns
         dWab = _wgrad32(dab, xt)
         dx1, dy = e(M, D), e(M, D)
         n12 = F.res_adaln_b_bwd_cuda(dout, dxt, x, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2])
-        dog = torch.mm(dy, _cm(W, "Wo"))
+        dog = torch.mm(dy, _cm(W, "Wo", sm))
         dWo = _wgrad32(dy, og)
         # the bias-only attention's backward
         dvg, do, dd = e(M, 2 * DA), e(M, DA), e(A, H, L)
@@ -1607,13 +1648,13 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
             torch.mm(dvt, xa, out=dWvg[:DA])
             torch.mm(dvg[:, DA:].t(), xa, out=dWvg[DA:])
         else:
-            dxa = torch.mm(dvg, _cm(W, "Wvg"), out=dG[:, D : 2 * D])  # d shift1 = dxa: straight into its dG columns
+            dxa = torch.mm(dvg, _cm(W, "Wvg", sm), out=dG[:, D : 2 * D])  # d shift1 = dxa: straight into its dG columns
             dWvg = _wgrad32(dvg, xa)
         dx = e(M, D)
         n3 = F.adaln_a_bwd_cuda(dxa, x, xst, G, bs1, dx1, dx, dG, part[3])
-        dchat = torch.mm(dG, _cm(W, "Wn"))
+        dchat = torch.mm(dG, _cm(W, "Wn", sm))
         dWn = _wgrad32(dG, chat)
-        dcg = torch.mm(dGg, _cm(W, "Wg"))
+        dcg = torch.mm(dGg, _cm(W, "Wg", sm))
         dWgg = _wgrad32(dGg, c2)
         dc = e(M, DC)
         F.cond_bwd_cuda(dchat, dcg, c2, cst, dc)

@@ -1,0 +1,210 @@
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/__init__.py b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/__init__.py
+index 6f2795a1f..d6a515d51 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/__init__.py
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/__init__.py
+@@ -99,6 +99,8 @@ CUBINS = {
+     "gattn_bwd": ("gattn_bwd", ()),
+     # its split mode (round 3, part 3: the (item, query step) sequence cut evenly across the CTAs where whole items leave SMs idle)
+     "gattn_bwd_s": ("gattn_bwd", ("-DSPLITB=1",)),
++    # the split build on an item-aligned grid with sliced dQ (round 3 part 13: each key pair's dQ_b into its own slice, the last adder sums)
++    "gattn_bwd_a": ("gattn_bwd", ("-DSPLITB=1", "-DSLICED=1")),
+     # the forward on fp32 io (round 3, part 4: the fp32 block's inference -- fp32 heads rounded to bf16 in the kernel, O written fp32):
+     # whole items / split mode
+     "gattn_fwd32": ("gattn_fwd", ("-DSPLITB=0", f"-DF32IO={F32IO_MODE}")),
+@@ -820,6 +822,11 @@ SPLIT_GAIN = 1.3
+ SPLIT_MIN_BLOCKS = 12
+ 
+ 
++#: :class:`GattnBwd` split mode on an item-aligned grid (items x CS CTAs, CS = 2 - 4 pieces of Qn / CS query blocks per key pair, the
++#: sweep starts staggered so the dQ adders of a block never tie: gattn_bwd.cu `stag`; round 3 part 13). 0: off (development).
++GBWD_ALIGNED = int(__import__("os").environ.get("SWA_GBWD_ALIGNED", "8"))
++
++
+ def _split_pays(items: int, steps: int, grid: int, max_items: int) -> bool:
+     """Split mode for ``items`` work items of ``steps`` blocks each on a whole-item grid of ``grid`` CTAs (:data:`SPLIT_GAIN`)."""
+     g = num_sms()
+@@ -908,8 +915,10 @@ class GattnBwd:
+     threads = 384
+     smem = 232448  # one CTA per SM: the items of a head wait on each other's dQ adds, so every CTA must be resident
+ 
+-    def __init__(self, cubin="gattn_bwd", trace=None, split_cubin=None):
++    def __init__(self, cubin="gattn_bwd", trace=None, split_cubin=None, aligned_cubin=None):
+         self.k = _load_swa_sm100_kernel(cubin, "swa_gattn_bwd_sm100", self.smem, pdl=PDL_BWD)
++        # the item-aligned sliced build (SPLITB=1 SLICED=1, :meth:`aligned_cs`)
++        self.ka = None if aligned_cubin is None else _load_swa_sm100_kernel(aligned_cubin, "swa_gattn_bwd_sm100", self.smem, pdl=PDL_BWD)
+         # the split-mode build (SPLITB=1, :meth:`splits`)
+         self.ks = None if split_cubin is None else _load_swa_sm100_kernel(split_cubin, "swa_gattn_bwd_sm100", self.smem, pdl=PDL_BWD)
+         self.split = None  # None: automatic; True / False: forced (development)
+@@ -922,8 +931,21 @@ class GattnBwd:
+         S / 64 items of 148 SMs; five samples at L 2048). At most 4 items per SM (the kernel's piece list) and 256 samples (its prefix table)."""
+         if self.ks is None or N > 256:
+             return False
++        if self.ka is not None and self.aligned_cs(N, S) > 1:
++            return True
+         return _split_pays(N * H * (S // 256), S // 64, self.grid(N, S), 4 * num_sms())
+ 
++    @staticmethod
++    def aligned_cs(N: int, S: int) -> int:
++        """Pieces per key pair of the item-aligned split grid (1: none): the largest CS <= :data:`GBWD_ALIGNED` with items x CS <= the SMs,
++        CS dividing the S / 64 query blocks (``gattn_bwd_a``: sliced dQ, no ordered chain)."""
++        P, Qn = S // 256, S // 64
++        items = N * H * P
++        for cs in range(GBWD_ALIGNED, 1, -1):
++            if items * cs <= num_sms() and Qn % cs == 0:
++                return cs
++        return 1
++
+     @staticmethod
+     def grid(N: int, S: int) -> int:
+         """Whole heads per round: a multiple of the S / 256 items of a head, at most one CTA per SM."""
+@@ -956,13 +978,16 @@ class GattnBwd:
+         items = N * H * (S // 256)
+         split = self.splits(N, S) if self.split is None else (self.split and self.ks is not None and N <= 256 and items <= 4 * num_sms())
+         if split:
+-            grid = (num_sms(), 1, 1)  # every CTA resident (the dQ adders of a block wait on each other)
++            cs = self.aligned_cs(N, S) if self.ka is not None else 1
++            grid = (items * cs if cs > 1 else num_sms(), 1, 1)  # every CTA resident (the dQ adders of a block wait on each other)
+             ws, cnt2 = self.ws.get(Qh.device, (None, None))
+             if ws is None or cnt2.numel() < 2 * items:
+                 ws = torch.empty(num_sms() * 4 * 128 * 64, device=Qh.device, dtype=torch.float32)
+                 cnt2 = torch.zeros(max(2 * items, 4096), device=Qh.device, dtype=torch.int32)
+                 self.ws[Qh.device] = (ws, cnt2)
+-            kern = self.ks
++            kern = self.ka if cs > 1 else self.ks
++            if cs > 1:  # sliced dQ: one fp32 slice per key pair
++                acc = torch.empty(rows * D * (S // 256), device=Qh.device, dtype=torch.float32)
+         else:
+             grid = (self.grid(N, S), 1, 1)
+             ws = cnt2 = None
+@@ -1337,7 +1362,7 @@ class _Kernels:
+         self.qkvg3, self.ffn3 = QkvgFwd3(), FfnFwd3()
+         self.gattn = GattnFwd(split_cubin="gattn_fwd_s")
+         self.gattn32 = GattnFwd("gattn_fwd32", split_cubin="gattn_fwd32_s", f32io=F32IO_MODE)
+-        self.gattnb = GattnBwd(split_cubin="gattn_bwd_s")
++        self.gattnb = GattnBwd(split_cubin="gattn_bwd_s", aligned_cubin="gattn_bwd_a")
+ 
+ 
+ @functools.lru_cache(maxsize=16)
+@@ -1355,7 +1380,7 @@ def embed_glue(index: int):
+ 
+     with torch.cuda.device(index):
+         return types.SimpleNamespace(
+-            **{k: _load_swa_sm100_kernel("embed_glue", f"swa_embed_{k}_sm100", 0) for k in ("rope", "feat", "featbwd", "scatter", "tokmean", "outnorm", "outnormbwd", "tokgrad")}
++            **{k: _load_swa_sm100_kernel("embed_glue", f"swa_embed_{k}_sm100", 0) for k in ("rope", "feat", "featbwd", "scatter", "tokmean", "outnorm", "outnormbwd", "tokgrad", "colsum")}
+         )
+ 
+ 
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_bwd.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_bwd.cu
+index d4fe5b4d9..fd18985f0 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_bwd.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_bwd.cu
+@@ -125,6 +125,12 @@ constexpr int BLS = 2 * TQ + 1024;                                         // q
+ constexpr int O_IT = 0, O_BL = QR * IST, O_DS = O_BL + ST * BLS;          // then dS^T (2 x [128][64] bf16, SW128)
+ constexpr int XS = 128 * 64;
+ constexpr int O_X = O_DS + 2 * 16384, O_QS = O_X + 4 * XS;                 // dK / dV staging (2 tiles x 2, SW64); dQ_b staging (NSTG x [64][32] f32)
++#ifndef SLICED
++#define SLICED 0                         // split build: dQ_b per key pair into its own ACC slice, the last adder sums them (no ordered chain)
++#endif
++#ifndef EAGER
++#define EAGER (SPLITB == 1)              // release a bulk add as soon as it lands (else at the warp's next block)
++#endif
+ #ifndef SPLITB
+ #define SPLITB 0                         // 1: split mode (one sample / few items: the (item, query step) sequence cut evenly across the CTAs)
+ #endif
+@@ -176,6 +182,16 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+   auto start_of = [&](int cc) { return (int)((unsigned)cc * T / (unsigned)G0); };
+   auto cta_of = [&](int x) { return (int)(((unsigned)(x + 1) * (unsigned)G0 - 1u) / T); };
+   int my_items = (items > cid) ? (items - cid + G0 - 1) / G0 : 0;
++  // the sweep start of key pair kp: kp Qn / Pn (whole items). Split mode with item-aligned pieces (T a multiple of the grid, the piece
++  // length Lp dividing Qn: the host grid items x CS): kp Lp / Pn -- the Pn adders of a query block then reach it at distinct steps
++  // within their pieces (no two tie on (step, CTA) order), so no adder waits in the steady state (round 3 part 13).
++  auto stag = [&](int kp, int Qn, int Pn) {
++    if (SPL) {
++      const unsigned lp = T / (unsigned)G0;
++      if (lp > 0u && T % (unsigned)G0 == 0u && lp < (unsigned)Qn && (unsigned)Qn % lp == 0u) return kp * (int)lp / Pn;
++    }
++    return kp * Qn / Pn;
++  };
+   // item li of this CTA: sample n, head h, key pair kp; seqused sq, query blocks Qn, contributing items Pn, the sweep's first block st;
+   // its steps t0 .. t0 + len - 1 (whole: 0 .. Qn - 1); split: the item's first global step ist, its CTAs c0 .. c1, its index id
+   struct It { int n, h, kp, sq, Qn, Pn, st, t0, len, c0, c1, id, ist; bool act; };
+@@ -195,7 +211,7 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+       e.Qn = (e.sq + BQ - 1) / BQ; e.Pn = (e.sq + 2 * KM - 1) / (2 * KM);
+       e.act = e.kp < e.Pn; e.t0 = 0; e.len = e.Qn; e.c0 = e.c1 = cid; e.id = 0; e.ist = 0;
+     }
+-    e.st = e.act ? (e.kp * e.Qn) / e.Pn : 0;
++    e.st = e.act ? stag(e.kp, e.Qn, e.Pn) : 0;
+     return e;
+   };
+   auto qb_of = [](const It& e, int t) { const int q = e.st + t; return q >= e.Qn ? q - e.Qn : q; };
+@@ -379,13 +395,61 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+         mbar_wait(&B.stg_full[sb], (G / NSTG) & 1);
+         if (lane == 0) EVT(G, 15);
+         flush();                                                           // the previous block of this warp: landed -> released
++        if (SLICED) {
++          // sliced (split build on the aligned grid, round 3 part 13): every adder stores its dQ_b into its own slice ACC [N, H, P, S, 32]
++          // (no wait on the other adders), counts; the last to count sums the Pn slices in key-pair order (fixed: the same bits whoever
++          // is last), scales, writes dQ and resets the counter.
++          const size_t hb = (size_t)(e.n * H + e.h) * P;
++          int old = 0;
++          if (lane == 0) {
++            bulk_s2g(ACC + ((hb + e.kp) * S + (size_t)qb * BQ) * DH, stg, 8192);
++            tma_store_commit();
++            tma_store_wait0();
++            fence_proxy_async_global();
++            __threadfence();
++            old = atomicAdd(CNT + (e.n * H + e.h) * QB + qb, 1);
++            mbar_arrive(&B.stg_free[sb]);
++          }
++          old = __shfl_sync(~0u, old, 0);
++          if (old == e.Pn - 1) {
++            __threadfence();
++            const size_t row0 = (size_t)(e.n * H + e.h) * S + (size_t)qb * BQ;
++#pragma unroll
++            for (int rr = 0; rr < 2; ++rr) {
++              const int row = 2 * lane + rr;
++              float4 v[8];
++#pragma unroll
++              for (int c4 = 0; c4 < 8; ++c4) v[c4] = make_float4(0.f, 0.f, 0.f, 0.f);
++              for (int k = 0; k < e.Pn; ++k) {
++                const float* sl = ACC + ((hb + k) * S + (size_t)qb * BQ + row) * DH;
++#pragma unroll
++                for (int c4 = 0; c4 < 8; ++c4) {
++                  const float4 a = ldcg4(sl + 4 * c4);
++                  v[c4].x += a.x; v[c4].y += a.y; v[c4].z += a.z; v[c4].w += a.w;
++                }
++              }
++              uint32_t o[16];
++#pragma unroll
++              for (int c4 = 0; c4 < 8; ++c4) {
++                o[2 * c4] = pack_bf16(v[c4].x * scale, v[c4].y * scale);
++                o[2 * c4 + 1] = pack_bf16(v[c4].z * scale, v[c4].w * scale);
++              }
++              uint4* dst = reinterpret_cast<uint4*>(DQ + (row0 + row) * DH);
++#pragma unroll
++              for (int q = 0; q < 4; ++q) dst[q] = make_uint4(o[4 * q], o[4 * q + 1], o[4 * q + 2], o[4 * q + 3]);
++            }
++            if (lane == 0) CNT[(e.n * H + e.h) * QB + qb] = 0;               // ready for the next launch
++          }
++          __syncwarp();
++          continue;
++        }
+         // rank: the items that reach qb before this one (smaller step index (qb - st) mod Qn)
+         int rank = 0;
+         for (int k0 = 0; k0 < e.Pn; k0 += 32) {
+           const int k = k0 + lane;
+           bool before = false;
+           if (k < e.Pn) {
+-            int tk = qb - (k * e.Qn) / e.Pn;
++            int tk = qb - stag(k, e.Qn, e.Pn);
+             if (tk < 0) tk += e.Qn;
+             if (SPL) {                                                       // order: (step within its CTA's range, CTA)
+               const int gk = e.ist + (k - e.kp) * e.Qn + tk;
+@@ -438,6 +502,7 @@ swa_gattn_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+             tma_store_commit();
+           }
+           pend = cnt; pend_sb = sb;
++          if (EAGER) flush();                                              // split: released at once (short pieces: the next adder waits on it)
+         }
+         __syncwarp();
+       }
