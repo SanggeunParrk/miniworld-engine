@@ -759,7 +759,7 @@ class TriangleAttention(_TriangleAttentionBase):
     # cuda:a100_sm80 7 (2026-11-17): as the base class (6): 16-channel heads on the register-resident core from L 256
     backend_versions: ClassVar[dict[str, int]] = {
         **_TriangleAttentionBase.backend_versions,
-        "cuda:a100_sm80": 7,
+        "cuda:a100_sm80": 8,  # 8 (2026-11-19): training (forward_train) passes key_mask=None to the sm_80 attention op: every cuda train call raised before (rows recorded the error); inference unchanged
         "cuda:h100_sm90": 12,
     }  # 12 (2026-11-18, 3.0.1): training backward, query side from L 512: two warpgroups sum their dbias partials in shared memory (half the TMA reduce-adds; dq bitwise unchanged, dbias within fp32 summation order)
     # cuda:a100_sm80 6 (2026-11-14): the A100 row-blocked inference (sm80_wide.forward_rows: OpenDDE's refiner 2976 / 3968, L % 128 != 0) runs
@@ -823,7 +823,11 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
     # outputs change within rounding, accuracy GREEN)
     # 13 (2026-11-18, 3.0.1): training, d_pair 512 x 8 heads of 64 channels: the wgmma bf16 forward core (h100_dh.ext_d64t) and the 2-row query-side backward
     # (two pair rows a CTA sum their dS in shared memory: bf16 dbias planes S / 2; outputs change within rounding)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionBase.backend_versions, "cuda:h100_sm90": 13}
+    backend_versions: ClassVar[dict[str, int]] = {
+        **_TriangleAttentionBase.backend_versions,
+        "cuda:a100_sm80": 7,
+        "cuda:h100_sm90": 13,
+    }  # a100_sm80 7 (2026-11-19): as TriangleAttention 8 (training key_mask), base 6 otherwise
 
     transposed_bias = False
     _anthropic_block = True
