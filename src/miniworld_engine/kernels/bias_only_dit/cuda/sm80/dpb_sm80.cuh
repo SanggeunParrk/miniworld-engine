@@ -32,6 +32,8 @@ struct DpbParams {
   int L, nh, A;
   long long lddo, ldv;
   long long hsd, hsv;           // element offset of head h in do / v: DH, or a plane stride (see pv_gate_sm80.cuh)
+  float* dbias32 = nullptr;     // fp32 dbias [NH L][L] (set: written instead of ``dbias``; the token DiT keeps its pair-bias gradient fp32)
+  float* dpart = nullptr;       // set: the S MODE -- dbias32 receives the raw dP = sum_a do v^T (fp32) and dpart [L / 128 x 2, NH L] the row sums of P dP per (key tile, warp column): D' = sum_j P dP, so that sum_j P (dP - D') = 0 exactly (the caller finishes dbias = P (dP - D'))
 };
 
 template <class G>
@@ -110,7 +112,31 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) dpb_kernel(const DpbParams p
     }
   }
 
-  // ---- epilogue: dbias = P (dP - D), one rounding to bf16
+  if (p.dpart) {                                                  // S mode: dP out, the row sums of P dP (a fixed order, no atomics)
+    float* dp = p.dpart + ((size_t)(blockIdx.x * 2 + wn) * p.nh + h) * p.L + i0;
+#pragma unroll
+    for (int m = 0; m < 2; ++m) {
+#pragma unroll
+      for (int half = 0; half < 2; ++half) {
+        const int lr = 32 * wm + 16 * m + g8 + 8 * half;
+        const size_t base = ((size_t)h * p.L + i0 + lr) * p.L + j0 + 64 * wn + 2 * q4;
+        float part = 0.f;
+#pragma unroll
+        for (int nt = 0; nt < 8; ++nt) {
+          const uint32_t pu = __ldg(reinterpret_cast<const unsigned int*>(p.P + base + 8 * nt));
+          const float s0 = acc[m][nt][2 * half], s1 = acc[m][nt][2 * half + 1];
+          *reinterpret_cast<float2*>(p.dbias32 + base + 8 * nt) = make_float2(s0, s1);
+          part = fmaf(bf16lo(pu), s0, part);
+          part = fmaf(bf16hi(pu), s1, part);
+        }
+        part += __shfl_xor_sync(0xffffffffu, part, 1);
+        part += __shfl_xor_sync(0xffffffffu, part, 2);
+        if (q4 == 0) dp[lr] = part;
+      }
+    }
+    return;
+  }
+  // ---- epilogue: dbias = P (dP - D), one rounding to bf16 (or the fp32 value: dbias32)
 #pragma unroll
   for (int m = 0; m < 2; ++m) {
 #pragma unroll
@@ -122,7 +148,8 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) dpb_kernel(const DpbParams p
       for (int nt = 0; nt < 8; ++nt) {
         const uint32_t pu = __ldg(reinterpret_cast<const unsigned int*>(p.P + base + 8 * nt));
         const float r0 = bf16lo(pu) * (acc[m][nt][2 * half] - dsum), r1 = bf16hi(pu) * (acc[m][nt][2 * half + 1] - dsum);
-        stg32(p.dbias + base + 8 * nt, pack_bf16(r0, r1));
+        if (p.dbias32) *reinterpret_cast<float2*>(p.dbias32 + base + 8 * nt) = make_float2(r0, r1);
+        else stg32(p.dbias + base + 8 * nt, pack_bf16(r0, r1));
       }
     }
   }

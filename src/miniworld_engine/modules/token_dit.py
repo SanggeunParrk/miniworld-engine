@@ -1037,7 +1037,10 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # one gemm120 (dh unrounded), the backward GEMMs on cuBLASLt with measured configurations at the S48 L768 rows, the d_pair 256 pair-bias
     # backward on 8-element tiles; fp32 training too: the measured TF32 GEMM configurations at the S48 L128 rows, dh + SwiGLU backward in one
     # gemm120 (TF32), the attention's bias gradient at L 128 (S >= 8) as one batched GEMM in place of the 16-CTA core
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 4, "cuda:h100_sm90": 4, "cuda:5090_sm120": 5}
+    # cuda:a100_sm80 5 / cuda:5090_sm120 6 (2026-11-19, USER RULE): the pair-bias logits LN(pair) Wf^T and their softmax are fp32 for bf16 / master too (the generic pair-bias kernel
+    # writes fp32 logits, the row kernels read fp32 and write the bf16 P the core reads; was: bf16 logits, resolution 32 .. 1024 at logits of 1e3 .. 2e5); the training backward keeps
+    # dbias fp32 (the bias-gradient core writes fp32, D' = sum_j P dP from the same dP, so the row sums of dbias are 0)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 5, "cuda:h100_sm90": 4, "cuda:5090_sm120": 6}
 
     def __init__(
         self,

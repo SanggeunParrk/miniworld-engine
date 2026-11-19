@@ -9,8 +9,8 @@ The block is its two parts, each on its sm_80 path:
 The attention of the Function (no query, no key: the logits are the pair bias, one softmax for every sample):
 
     forward   [v | g] = xa [Wv; Wg]^T                         cuBLAS, one GEMM (the two weights packed once per parameter version)
-              bias = LN(pair) Wf^T, head-major [H, L, L]      the generic sm_80 pair-bias kernel (``augmented_attention/cuda/sm80.pair_bias_generic``)
-              P = softmax(bias) over the keys (mask: 0)        the family's row kernels (``bias_only_dit_rows.cu`` / fp32 ``bias_only_dit_f32_rows.cu``;
+              bias = LN(pair) Wf^T, head-major [H, L, L] FP32  the generic sm_80 pair-bias kernel (``augmented_attention/cuda/sm80.pair_bias_generic``, ``out_dtype=fp32``: fp32 FFMA on the on-chip LN, Wf fp32; USER RULE 2026-11-19: the logits are 1e3 .. 2e5)
+              P = softmax(bias) over the keys (mask: 0)        fp32 softmax, P rounded to bf16 only for the bf16 core; the family's row kernels (``bias_only_dit_rows.cu`` / fp32 ``bias_only_dit_f32_rows.cu``;
                                                                training also writes P^T beside P)
               a = sigmoid(g) (P v) per head and sample        the sm_80 bias-only core (``bias_only_dit/cuda/sm80``: ``PvGate`` / TF32 ``PvGateTF32``)
               y = a Wo^T ; g2 = cond Ws^T + bs                cuBLAS
@@ -147,20 +147,21 @@ def _pack(params, dt):
     return cached(f"bias_only_dit_sm80_{dt}", tuple(params), build)
 
 
-def _softmax(bias, mask, transpose: bool):
-    """P = softmax over the keys of ``bias`` [H, L, L] (masked keys 0), and P^T [H, L, L] (``transpose``) or None."""
+def _softmax(bias, mask, transpose: bool, pdt: torch.dtype = F32):
+    """P = softmax over the keys of ``bias`` [H, L, L] fp32 (masked keys 0) in ``pdt`` (fp32 for the TF32 core, bf16 for the bf16 core: the logits and the softmax are fp32 in both,
+    only the P the fused core reads is rounded), and P^T [H, L, L] (``transpose``) or None."""
     h, length = bias.shape[0], bias.shape[1]
     m = None if mask is None else mask.reshape(length).contiguous()
-    P = torch.empty_like(bias)
-    Pt = torch.empty_like(bias) if transpose else None
+    P = torch.empty(bias.shape, device=bias.device, dtype=pdt)
+    Pt = torch.empty_like(P) if transpose else None
     flat = (bias.view(h * length, length), P.view(h * length, length))
-    if bias.dtype is F32:
+    if pdt is F32:
         if transpose:
             _rows32().softmax_t_cuda(*flat, cast(torch.Tensor, Pt).view(h * length, length), m, 1, 1.0)
         else:
             _rows32().softmax_rows_cuda(*flat, m)
     elif transpose:
-        _rows().softmax_t(*flat, cast(torch.Tensor, Pt).view(h * length, length), m)
+        _rows().softmax_t(*flat, cast(torch.Tensor, Pt).view(h * length, length), m)  # fp32 logits in, P and P^T bf16 out
     else:
         _rows().softmax_rows(*flat, m)
     return P, Pt
@@ -203,8 +204,8 @@ def _fwd(
             main, side = torch.cuda.current_stream(), _side_stream(x.device)
             side.wait_stream(main)
             with torch.cuda.stream(side):
-                bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0)  # [H, L, L], natural units
-                P, Pt = _softmax(bias, mask, save)
+                bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0, out_dtype=F32)  # [H, L, L], natural units
+                P, Pt = _softmax(bias, mask, save, x.dtype)
                 del bias
             vg = _mm120(x, wvg)  # [M, 2 da]
             g2: torch.Tensor | None = _mm120(cond, ws, bs)
@@ -218,8 +219,8 @@ def _fwd(
                 _record_stream(mask, side)
         else:
             vg = torch.mm(x, wvg.t())  # [M, 2 da]
-            bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0)  # [H, L, L], natural units
-            P, Pt = _softmax(bias, mask, save)
+            bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0, out_dtype=F32)  # [H, L, L], natural units
+            P, Pt = _softmax(bias, mask, save, x.dtype)
             del bias
             g2 = None
         a = torch.empty(x.shape[0], da, device=x.device, dtype=dt)
@@ -283,21 +284,26 @@ def _bwd(
                 return t.reshape(samples, length, heads, hd).permute(2, 1, 0, 3).reshape(heads, length, samples * hd)
 
             s_ = torch.bmm(hm(do), hm(vg[:, :da]).transpose(1, 2), out_dtype=F32) if not f32 else torch.bmm(hm(do), hm(vg[:, :da]).transpose(1, 2))
-            db = (P.float() * (s_ - dd.sum(0)[:, :, None])).to(P.dtype)
+            pf = P.float()
+            db = pf * (s_ - (pf * s_).sum(-1, keepdim=True))  # fp32; D' = sum_j P dP (the softmax backward's row term from the same dP: the row sums of db are 0)
         else:
-            db = torch.empty_like(P)
+            # S mode: the core writes dP = sum_a do v^T (fp32) and the row sums of P dP per (key tile, warp column) in a fixed order; D' = sum_j P dP (not the sum of
+            # do . o over the gated, rounded a: that is a different number by a rounding of a, and the logits' gradient sums over 1e3-large terms), db = P (dP - D') fp32
+            db = torch.empty(P.shape, device=P.device, dtype=F32)
+            dpart = torch.empty((length // 128) * 2, heads * length, device=P.device, dtype=F32)
             (core.Dpb32 if f32 else core.Dpb)(heads, hd)(
-                do, vg[:, :da], P.view(heads * length, length), dd, db.view(heads * length, length), samples
+                do, vg[:, :da], P.view(heads * length, length), dd, db.view(heads * length, length), samples, dpart=dpart
             )
+            db.sub_(dpart.sum(0).view(heads, length, 1)).mul_(P)
         if PB_TE and not f32 and _sm120(x) and heads == 16 and wcm.shape[0] == 256 and pair.shape[1] == length:
             # RTX 5090, d_pair 256: the backward on tiles of PB_TE elements (two blocks an SM; 32 rows a block)
             nz, c = pair.shape[1], wcm.shape[0]
             pw = torch.empty(-(-nz // PB_TE) * -(-nz // 32), heads, c, device=dev, dtype=F32)
             dz = torch.empty_like(pair[0])
-            _sm80()._ext().pair_bias_gen_bwd_te(pair[0], wcm, db.float(), dz, pw, _sm80()._kv(None, dev), length, nz, EPS, 32, PB_TE)
+            _sm80()._ext().pair_bias_gen_bwd_te(pair[0], wcm, db, dz, pw, _sm80()._kv(None, dev), length, nz, EPS, 32, PB_TE)
             dwf = pw.sum(0)
         else:
-            dz, dwf = _sm80().pair_bias_generic_backward(pair[0], wcm, db if f32 else db.float(), None, length, EPS)
+            dz, dwf = _sm80().pair_bias_generic_backward(pair[0], wcm, db, None, length, EPS)
         dx = _ltm(dvg, wvg)
         dwvg = _wgrad120(dvg, x)  # [2 da, d] fp32
         dcond = _ltm(dg2, ws)
@@ -717,8 +723,8 @@ def _block_eval_sm120(module, single, cond, pair, mask) -> torch.Tensor:
 
         # below SIDE_COND_MAX_L the side stream also takes the cond work; from it on the pair bias alone outlasts the main stream's AdaLN and [v | g]
         with torch.cuda.stream(side):
-            bias = _sm80().pair_bias_generic(pr[0], wcm, None, length, EPS, oscale=1.0)  # [H, L, L], natural units
-            P, _ = _softmax(bias, mask, False)
+            bias = _sm80().pair_bias_generic(pr[0], wcm, None, length, EPS, oscale=1.0, out_dtype=F32)  # [H, L, L], natural units
+            P, _ = _softmax(bias, mask, False, dt)
             del bias
             if length < SIDE_COND_MAX_L:
                 g2, gc, aff2 = cond_work()
@@ -818,8 +824,8 @@ def _block_eval_sm120_f32(module, single, cond, pair, mask) -> torch.Tensor:
             if PAIR_SOFTMAX_F32 and heads == 16 and wcm.shape[0] in (128, 256) and length <= 1024:
                 P = core.pair_softmax_f32(pr[0], wcm, mask, length, EPS, PS_CFG)  # the pair bias stays in shared memory
             else:
-                bias = _sm80().pair_bias_generic(pr[0], wcm, None, length, EPS, oscale=1.0)  # [H, L, L], natural units
-                P, _ = _softmax(bias, mask, False)
+                bias = _sm80().pair_bias_generic(pr[0], wcm, None, length, EPS, oscale=1.0, out_dtype=F32)  # [H, L, L], natural units
+                P, _ = _softmax(bias, mask, False, F32)
                 del bias
             gs = _mm32(cs, w3[2]) if GATE_SIDE else None  # the residual gates' logits [g2 | gc] (no bias) behind the pair work
         c3 = core.cond3_f32(cs, ada.ln_cond.weight, cada.ln_cond.weight, float(ada.ln_cond.eps), copy=not GATE_SIDE)
