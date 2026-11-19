@@ -9,6 +9,7 @@ inputs, bf16 / master (fp32 weights under bf16 autocast) / fp32:
 - eval output, and in training the gradients of the pair, ``to_bias.weight`` and ``ln_pair.weight``: relative error (max abs / max abs) < 5e-2.
 """
 
+# pyright: reportCallIssue=false  (torch's Tensor.pow / mean overloads are not resolved by the checker in the error-measure helpers)
 from __future__ import annotations
 
 import copy
