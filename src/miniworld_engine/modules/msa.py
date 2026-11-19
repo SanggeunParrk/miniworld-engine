@@ -193,7 +193,7 @@ class OuterProductMean(BackendModule, MasterWeights):
         # 2 (2026-11-16): AF3-order inference at depth > 4096 takes the wide TMA prologue (the native one streamed at 0.35 TB/s);
         # 3 (2026-11-16): inference at depth > 4096 takes cuBLAS + the epilogue on the count table instead of the fused kernel (opm_train._product_route_deep)
         "triton": 2,
-        "cuda:5090_sm120": 3,
+        "cuda:5090_sm120": 4,  # 4 (2026-11-19): Chai-1 products at S >= 1024 to N 256 take cuBLAS (the live-token launch was 7 % slower there); the masked outer product takes the one-launch live-token reduction (bitwise the same outputs)
     }  # 2026-11-10: sm_80 paths; 2026-11-11: count_offset in the triton / sm_80 kernels (FoldForge R2); 2026-11-12: their sm_120a build (RTX 5090)
     # (2026-11-13: inference past L 2048 forms the outer product per chunk of rows, sm80.epilogue_rows: bitwise the same outputs, no version change)
     # 5090 2 (2026-11-13): CUTLASS products on sm_120a (256 x 128 masked outer product from L 512, dA / dB, the Chai-1 groups), wide epilogue at d_pair 256

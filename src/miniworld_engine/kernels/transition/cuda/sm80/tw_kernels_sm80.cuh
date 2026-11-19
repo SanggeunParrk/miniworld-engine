@@ -33,6 +33,22 @@ __global__ void __launch_bounds__(256) ln_fwd_kernel(const void* __restrict__ x_
   const float s_x = F32IO ? __ldg(sc) : 1.f;
   constexpr int CH = D / 8, LPR = CH < 32 ? CH : 32, RPW = 32 / LPR, XPL = (CH + LPR - 1) / LPR;
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, sub = lane / LPR, cl = lane % LPR;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+  // RTX 5090: the affine parameters of this lane's chunks are loaded once, not once a row (the grid-stride loop revisits them; they are 4 of the 6 memory instructions of a D 256 row)
+  float gg_[XPL][8], bb_[XPL][8];
+#pragma unroll
+  for (int i = 0; i < XPL; ++i) {
+    const int c = cl + i * LPR;
+    float4 g0 = make_float4(0.f, 0.f, 0.f, 0.f), g1 = g0, b0 = g0, b1 = g0;
+    if (c < CH) {
+      g0 = *reinterpret_cast<const float4*>(gamma + c * 8); g1 = *reinterpret_cast<const float4*>(gamma + c * 8 + 4);
+      b0 = *reinterpret_cast<const float4*>(beta + c * 8); b1 = *reinterpret_cast<const float4*>(beta + c * 8 + 4);
+    }
+    const float gv[8] = {g0.x, g0.y, g0.z, g0.w, g1.x, g1.y, g1.z, g1.w}, bv[8] = {b0.x, b0.y, b0.z, b0.w, b1.x, b1.y, b1.z, b1.w};
+#pragma unroll
+    for (int e = 0; e < 8; ++e) { gg_[i][e] = gv[e]; bb_[i][e] = bv[e]; }
+  }
+#endif
   for (int base = (blockIdx.x * 8 + warp) * RPW; base < M; base += gridDim.x * 8 * RPW) {
     const int row = base + sub;
     const bool valid = row < M;
@@ -77,9 +93,14 @@ __global__ void __launch_bounds__(256) ln_fwd_kernel(const void* __restrict__ x_
     for (int i = 0; i < XPL; ++i) {
       const int c = cl + i * LPR;
       if (valid && c < CH) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+        const float* gg = gg_[i];
+        const float* bb = bb_[i];
+#else
         const float4 g0 = *reinterpret_cast<const float4*>(gamma + c * 8), g1 = *reinterpret_cast<const float4*>(gamma + c * 8 + 4);
         const float4 b0 = *reinterpret_cast<const float4*>(beta + c * 8), b1 = *reinterpret_cast<const float4*>(beta + c * 8 + 4);
         const float gg[8] = {g0.x, g0.y, g0.z, g0.w, g1.x, g1.y, g1.z, g1.w}, bb[8] = {b0.x, b0.y, b0.z, b0.w, b1.x, b1.y, b1.z, b1.w};
+#endif
         uint32_t o[4];
         if constexpr (F32IO) {
           float y[8];

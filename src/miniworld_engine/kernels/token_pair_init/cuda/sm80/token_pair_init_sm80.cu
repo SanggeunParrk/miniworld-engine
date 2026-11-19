@@ -21,6 +21,15 @@ __global__ void __launch_bounds__(32 * TPI_FWD_WARPS)
 tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ tbl, const int* __restrict__ ids,
         const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax, int R);
 
+#ifdef MWE_SM120
+// RTX 5090: a persistent grid (one CTA per SM, the class-row table fetched once per CTA) over work units of TPI_UNIT_COLS columns of one row of z
+#define TPI_UNIT_COLS 64
+static inline unsigned tpi_grid_sm120(int B, int L) {
+  const long long units = (long long)B * L * ((L + TPI_UNIT_COLS - 1) / TPI_UNIT_COLS);
+  return (unsigned)std::min<long long>(units, at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
+}
+#define TPI_GRID(B, tiles, L) tpi_grid_sm120((B), (L))
+#endif
 #define tpi_fwd(...) tpi_fwd_h100(__VA_ARGS__)   // the definition only: the launches name it without a following '('
 #define volatile(...) volatile("")               // the H100 forward's mbarrier / bulk-copy statements (the only inline asm of the file)
 #include "../sm90/token_pair_init.cu"
@@ -28,6 +37,59 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
 #undef tpi_fwd
 static_assert(TPI_FWD_WARPS == NWARP, "the forward launch is 32 * NWARP threads");
 
+#ifdef MWE_SM120
+// Persistent forward (R = 1 rows per tile, the 5090's setting): each CTA fetches the table once, then walks the work units (row i, 64 columns) of the whole call in a
+// grid-stride loop -- 384 one-row CTAs on 170 SMs are 2.3 waves of 3; units of 64 columns keep every SM busy to the end.  The sum order per element is the one-row kernel's.
+__global__ void __launch_bounds__(32 * TPI_FWD_WARPS)
+tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ tbl, const int* __restrict__ ids,
+        const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax, int R) {
+  extern __shared__ __align__(128) float sm[];
+  const int nrel = 2 * (2 * rmax + 2) + (2 * smax + 2) + 1, nbin = nrel + 2;
+  uint32_t* pk = (uint32_t*)(sm + nbin * P);                        // [L]
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, BL = B * L;
+  for (int c = threadIdx.x; c < nbin * P / 4; c += blockDim.x) {
+    const unsigned d = (unsigned)__cvta_generic_to_shared(sm + 4 * c);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(d), "l"(tbl + 4 * c));
+  }
+  asm volatile("cp.async.commit_group;\n" ::);
+  const int chunks = (L + TPI_UNIT_COLS - 1) / TPI_UNIT_COLS;
+  const long long units = (long long)B * L * chunks;
+  bool first = true;
+  for (long long u = blockIdx.x; u < units; u += gridDim.x) {
+    const int jc = (int)(u % chunks), bi = (int)(u / chunks), b = bi / L, i = bi % L, j0 = jc * TPI_UNIT_COLS;
+    const int nj = min(TPI_UNIT_COLS, L - j0);
+    if (threadIdx.x < nj) {
+      const int ri = b * L + i, j = j0 + threadIdx.x;
+      pk[threadIdx.x] = pack_pair(load_row(ids, BL, ri), load_row(ids, BL, b * L + j), bond[(size_t)ri * L + j], rmax, smax);
+    }
+    const float4 lf = ((const float4*)(left + (size_t)bi * P))[lane];
+    if (first) { asm volatile("cp.async.wait_group 0;\n" ::: "memory"); first = false; }
+    __syncthreads();
+    const float4* T = (const float4*)sm;
+    float4* obase = (float4*)(out + ((size_t)bi * L + j0) * P);
+    for (int jj = warp * UNR; jj < nj; jj += TPI_FWD_WARPS * UNR) {
+      float4 rt[UNR];
+#pragma unroll
+      for (int q = 0; q < UNR; q++) rt[q] = ((const float4*)(right + ((size_t)b * L + j0 + min(jj + q, nj - 1)) * P))[lane];
+      float4 o[UNR];
+#pragma unroll
+      for (int q = 0; q < UNR; q++) {
+        const uint32_t w = pk[min(jj + q, nj - 1)];
+        o[q] = lf + rt[q];
+        o[q] += T[(w & 255) * 32 + lane];
+        o[q] += T[((w >> 8) & 255) * 32 + lane];
+        o[q] += T[((w >> 16) & 255) * 32 + lane];
+        if ((w >> 24) & 1) o[q] += T[(nrel - 1) * 32 + lane];
+        o[q] += T[(nrel + ((w >> 25) & 1)) * 32 + lane];
+      }
+#pragma unroll
+      for (int q = 0; q < UNR; q++)
+        if (jj + q < nj) obase[(size_t)(jj + q) * 32 + lane] = o[q];
+    }
+    __syncthreads();                                                // pk is rewritten by the next unit
+  }
+}
+#else
 __global__ void __launch_bounds__(32 * TPI_FWD_WARPS)
 tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ tbl, const int* __restrict__ ids,
         const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax, int R) {
@@ -75,3 +137,4 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
     }
   }
 }
+#endif

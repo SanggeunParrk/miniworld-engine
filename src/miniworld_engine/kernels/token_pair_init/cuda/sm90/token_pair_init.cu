@@ -23,6 +23,9 @@
 #include <algorithm>
 #include <vector>
 
+#ifndef TPI_GRID
+#define TPI_GRID(B, tiles, L) ((B) * (tiles))   // the forward grid: one CTA per tile (the RTX 5090 build defines a persistent grid)
+#endif
 constexpr int P = 128;
 #ifdef MWE_SM120
 constexpr int NWARP = 16;                          // RTX 5090 (sm_120a build): the 72 KB class-row table leaves one forward CTA per SM, so it takes twice the warps
@@ -245,7 +248,7 @@ void forward(torch::Tensor left, torch::Tensor right, torch::Tensor tbl, torch::
   const int tiles = (L + R - 1) / R;
   const size_t smem = (size_t)nbin * P * 4 + (size_t)R * L * 4;
   cudaFuncSetAttribute(tpi_fwd, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
-  tpi_fwd<<<B * tiles, 32 * NWARP, smem, at::cuda::getCurrentCUDAStream()>>>(
+  tpi_fwd<<<TPI_GRID(B, tiles, L), 32 * NWARP, smem, at::cuda::getCurrentCUDAStream()>>>(
       left.data_ptr<float>(), right.data_ptr<float>(), tbl.data_ptr<float>(), ids.data_ptr<int>(), bond.data_ptr<uint8_t>(),
       out.data_ptr<float>(), B, L, (int)rmax, (int)smax, (int)R);
   C10_CUDA_KERNEL_LAUNCH_CHECK();

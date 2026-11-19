@@ -22,6 +22,7 @@ Ampere-only and shape-gated by construction: ``supports()`` is the whole gate; e
 
 import functools
 import math
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import NamedTuple
@@ -222,6 +223,30 @@ def _pack_folded(
         1,
     )
     return wp
+
+
+def _bare_front(x: torch.Tensor, d: int, save: bool, length: int, variant: bool = False) -> bool:
+    """RTX 5090, inference, D 256: the front GEMM without the constant columns (``_pack_bare``).  cuBLAS keeps its fast tile at K = D = 256 where K = D + 8
+    falls to a 32 x 32 wmma tile (T = 16384, N = 1032: 100 against 147 us).  The variants (Chai1 and its confidence head, RoseTTAFold3) take it at every
+    length (interleaved A-B-A-B, CUDA graph, L2 flushed: 16-23 % faster at L 128 and 384 .. 1024, equal at L 256); the d_pair-256 rows engine from L 256 on
+    keeps its padded layouts (``padding`` below: those lengths were tuned and are 3-26 % faster than the bare form)."""
+    mode = os.environ.get("MINIWORLD_TRIATTN_BARE", "auto")
+    if mode == "0" or save or d != 256 or not _arch.on_sm120(x):
+        return False
+    return mode == "1" or variant or length < 256
+
+
+def _pack_bare(
+    weights, ln_w: torch.Tensor, ln_b: torch.Tensor, cfg: Cfg, columns: int | None = None, gate_bias: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(wp [N, D], bvec [N] bf16)``: the folded weights without the constant columns; ``bvec`` = ``b_hi + b_lo`` of ``_pack_folded`` rounded to bf16."""
+    full = _pack_folded(weights, ln_w, ln_b, cfg, 8, columns)
+    d = cfg.d
+    shift = full[:, d].float() + full[:, d + 1].float()
+    if gate_bias is not None:  # a variant's gate bias joins the shift: one rounding
+        shift = shift + gate_bias.float()
+    bvec = shift.to(BF)
+    return full[:, :d].contiguous(), bvec
 
 
 def _pack_fused(weights, ln_w: torch.Tensor, ln_b: torch.Tensor, cfg: Cfg) -> tuple[torch.Tensor, torch.Tensor]:
@@ -463,6 +488,16 @@ def _original_forward_ops(
             dhp,
             cfg.lhd,
         )
+    elif _bare_front(x, cfg.d, save, length):
+        # RTX 5090 inference: xh [T, D] with no constant columns (K = D = 256 keeps cuBLAS on its fast tile: 100 us against 147 us for K = D + 8 at
+        # T = 16384, N = 1032) and the folded LayerNorm shift is the GEMM bias (addmm, bf16: the same rounding as the bf16 projection it joins)
+        wp, bvec = _core.eval_form(
+            ("triattn_sm80w_bare", cfg), (*weights, ln_w, ln_b), lambda: _pack_bare(weights, ln_w, ln_b, cfg), save
+        )
+        xh = torch.empty((t, d), dtype=BF, device=dev)
+        rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
+        y = torch.addmm(bvec, xh, wp.t())  # q | k | v | g | bias heads
+        rows.bias_planes(y, mask, bias, 4 * dhp, cfg.h, length, int(flip))
     else:
         padding = (
             32
@@ -1462,13 +1497,31 @@ def variant_forward_ops(
     t, d, dhp, n = b * length * length, vc.d, pc.dhp, pc.n
     x2 = x.view(t, d)
     dev = x.device
-    wp = _core.eval_form(
-        ("triattn_sm80w_variant", vc), (*weights, ln_w, ln_b), lambda: _pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n), save
-    )
-    xh = torch.empty((t, d + 8), dtype=BF, device=dev)
+    bare = _bare_front(x, d, save, length, True)
+    if bare:  # RTX 5090 inference at D 256: no constant columns, the shift (and the gate bias) is the GEMM bias
+        def _gate() -> torch.Tensor | None:
+            if not gb.numel():
+                return None
+            g = torch.zeros((n,), dtype=F32, device=dev)
+            g[3 * dhp : 4 * dhp] = torch.nn.functional.pad(gb.view(h, hd).float(), (0, ch - hd)).reshape(-1)
+            return g
+
+        wp, bvec = _core.eval_form(
+            ("triattn_sm80w_variant_bare", vc),
+            (*weights, ln_w, ln_b, *((gb,) if gb.numel() else ())),
+            lambda: _pack_bare(_v_weights(weights, vc), ln_w, ln_b, pc, n, _gate()),
+            save,
+        )
+    else:
+        wp = _core.eval_form(
+            ("triattn_sm80w_variant", vc), (*weights, ln_w, ln_b), lambda: _pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n), save
+        )
+    xh = torch.empty((t, d if bare else d + 8), dtype=BF, device=dev)
     stats = torch.empty((t, 2), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
-    if gb.numel():  # RoseTTAFold3's gate bias in the GEMM's epilogue (one rounding, as the reference's biased projection)
+    if bare:
+        y = torch.addmm(bvec, xh, wp.t())
+    elif gb.numel():  # RoseTTAFold3's gate bias in the GEMM's epilogue (one rounding, as the reference's biased projection)
         bvec = torch.zeros((n,), dtype=BF, device=dev)
         bvec[3 * dhp : 4 * dhp] = torch.nn.functional.pad(gb.view(h, hd), (0, ch - hd)).reshape(-1)
         y = torch.addmm(bvec, xh, wp.t())

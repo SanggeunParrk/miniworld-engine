@@ -81,11 +81,21 @@ void ln_rows(torch::Tensor x, torch::Tensor xh, torch::Tensor stats, int64_t D, 
   TORCH_CHECK(D % 64 == 0 && D >= 64 && D <= 512 && T % (L * L) == 0 && T < (int64_t(1) << 31), "ln_rows: D a multiple of 64 up to 512, T a multiple of L^2 below 2^31");
   check_rows(x, T, D, "ln_rows x");
   const bool padded = (D == 256 || D == 384 || D == 512) && xh.size(-1) == D + 32 && !stats.numel();
-  check_rows(xh, T, D + (padded ? 32 : 8), "ln_rows xh");
+  const bool bare = (D == 256 || D == 384 || D == 512) && xh.size(-1) == D;  // RTX 5090 inference: no constant columns (the shift is the GEMM bias)
+  check_rows(xh, T, D + (bare ? 0 : padded ? 32 : 8), "ln_rows xh");
   TORCH_CHECK(!stats.numel() || (stats.scalar_type() == at::kFloat && stats.is_contiguous() && stats.numel() == 2 * T), "ln_rows: stats [T, 2] fp32");
   a100::LnRowsParams p;
   p.x = bp(x); p.xh = bm(xh); p.stats = stats.numel() ? stats.data_ptr<float>() : nullptr;
   p.T = (size_t)T; p.L = (int)L; p.transposed = (int)transposed; p.eps = (float)eps;
+  if (bare) {
+#define LN_BARE_CASE(DD) case DD: { using S = a100::RowShape<DD>; \
+    const unsigned grid = (unsigned)std::min<int64_t>((T + 8 * S::RPW - 1) / (8 * S::RPW), (int64_t)nsm() * 16); \
+    a100::ln_rows_kernel<DD, 0><<<grid, 256, 0, stream()>>>(p); break; }
+    switch (D) { LN_BARE_CASE(256) LN_BARE_CASE(384) LN_BARE_CASE(512) default: TORCH_CHECK(false, "ln_rows: bare width"); }
+#undef LN_BARE_CASE
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
   if (padded) {
 #define LN_PAD_CASE(DD) case DD: { using S = a100::RowShape<DD>; \
     const unsigned grid = (unsigned)std::min<int64_t>((T + 8 * S::RPW - 1) / (8 * S::RPW), (int64_t)nsm() * 16); \

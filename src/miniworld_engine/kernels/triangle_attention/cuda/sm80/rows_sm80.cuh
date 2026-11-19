@@ -146,7 +146,7 @@ __global__ void __launch_bounds__(256) ln_rows_kernel(const LnRowsParams p) {
                                      pack_bf16((bf16lo(v[i].w) - mean) * rstd, (bf16hi(v[i].w) - mean) * rstd)));
     }
     if (tl == 0) {
-      stg128(xo + D, make_uint4(0x3f803f80u, 0u, 0u, 0u));       // the constant columns: 1, 1, 0 ... (bf16)
+      if constexpr (PAD > 0) stg128(xo + D, make_uint4(0x3f803f80u, 0u, 0u, 0u));       // the constant columns: 1, 1, 0 ... (bf16); PAD 0: none (the shift is the GEMM's bias)
 #pragma unroll
       for (int pad = 8; pad < PAD; pad += 8) stg128(xo + D + pad, make_uint4(0u, 0u, 0u, 0u));
       if (p.stats != nullptr) *reinterpret_cast<float2*>(p.stats + 2 * t) = make_float2(mean, rstd);
