@@ -1014,6 +1014,7 @@ def forward_train(
         bias,
         1.0 / math.sqrt(D),
         True,
+        None,  # key_mask: inference-only key streaming (_forward_entry ignores it when the lse is saved); training keeps its core
         direct=launch_direct,
     )
     res = _training_launch(_back, out, qkvg, wo, pair, ds, transposed, direct=launch_direct)
