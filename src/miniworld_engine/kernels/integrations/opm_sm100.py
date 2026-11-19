@@ -179,17 +179,24 @@ def _counts(bits: torch.Tensor, dmin: float, doff: float) -> torch.Tensor:
 _NORM_SIDE = [True]
 
 
-def _product_and_counts(a2: torch.Tensor, bt: torch.Tensor, bits: torch.Tensor, dmin: float, doff: float):
-    """O = A2 . BT^T (cuBLAS NT) and the count table; the table on a side stream when `_NORM_SIDE`."""
+def _product_and_counts(a2: torch.Tensor, bt: torch.Tensor, bits: torch.Tensor, dmin: float, doff: float, f8=None, pre8: bool = False):
+    """O = A2 . BT^T (cuBLAS NT) and the count table; the table on a side stream when `_NORM_SIDE`. ``f8``: the opt-in e4m3 product
+    (``opm_fp8_b200``, docs/b200/fp8.md) in place of the bf16 cuBLAS one."""
+    if f8 is not None:
+        from . import opm_fp8_b200 as _f8b
+
+        mm = lambda: _f8b.product(f8, a2, bt, pre8)  # noqa: E731
+    else:
+        mm = lambda: torch.matmul(a2, bt.t())  # noqa: E731
     if not _NORM_SIDE[0]:
-        return torch.matmul(a2, bt.t()), _counts(bits, dmin, doff)
+        return mm(), _counts(bits, dmin, doff)
     main = torch.cuda.current_stream(a2.device)
     aux = _side_stream(a2.device)
     aux.wait_stream(main)
     with torch.cuda.stream(aux):
         norm = _counts(bits, dmin, doff)
     bits.record_stream(aux)
-    o = torch.matmul(a2, bt.t())
+    o = mm()
     main.wait_stream(aux)
     norm.record_stream(main)
     return o, norm
@@ -211,6 +218,12 @@ def _params(args: list[torch.Tensor]) -> list[torch.Tensor]:
     return [args[4], args[5], args[6], args[7], *((args[9],) if args[9].numel() else ()), *(a for a in args[11:12] if a.numel())]
 
 
+def _F8_ON() -> bool:
+    from . import opm_fp8 as _h
+
+    return _h.POLICY == "bound"
+
+
 def _forward(args: list[torch.Tensor], eps: float, after: bool, dmin: float, doff: float, save: bool):
     """args = [msa [1, S, N, d_msa], mask bool [1, S, N], lnw, lnb, wa, wb, wo, bo, residual | empty, pbias | empty, asym | empty]
     (S % 128, N % 64). Returns z [1, N, N, c_z] and what the backward reads."""
@@ -230,15 +243,24 @@ def _forward(args: list[torch.Tensor], eps: float, after: bool, dmin: float, dof
     else:
         (wa16, wb16, wo16, bo16, *pb16), w16 = _bf16_params(ps)
     lnw_, lnb_ = lnw.detach().contiguous(), lnb.detach().contiguous()
+    f8 = None
+    if not save and _F8_ON():  # opt-in e4m3 product (MINIWORLD_OPM_FP8=bound)
+        from . import opm_fp8_b200 as _f8b
+
+        f8 = _f8b.serves(args, n, m.shape[0], save)
     wext = None
+    pre8 = False
     if cm != CM or cz != CZ or has_pb:
         wext = _ext_wide()
         # the biases in bf16, as the module's bf16 Linear adds them (its fp32 accumulation, one rounding of the sum)
         pb, roff = _pb_arg(pb16, w16, _seg_offsets(ps)) if has_pb else (m.new_empty((0,), dtype=torch.float32), CH)
         a2, bt, stats, bits = wext.opm_wprologue(m, mk, lnw_, lnb_, float(eps), wa16, wb16, pb, bool(save), roff)
+    elif f8 is not None:  # the prologue writes e4m3 A2 / BT itself (qa, qb: the static scales), no cast pass
+        a2, bt, bits = ext.opm_prologue_f8(m, mk, lnw_, lnb_, float(eps), wa16, wb16, f8["qa_host"], f8["qb_host"])
+        stats, pre8 = None, True
     else:
         a2, bt, _, stats, bits = ext.opm_prologue(m, mk, lnw_, lnb_, float(eps), wa16, wb16, bool(save), False)
-    o, norm = _product_and_counts(a2, bt, bits, dmin, doff)  # O [(i, c), (j, e)] bf16 (cuBLAS NT), the count table
+    o, norm = _product_and_counts(a2, bt, bits, dmin, doff, f8, pre8)  # O [(i, c), (j, e)] bf16 (cuBLAS NT), the count table
     if cz == CZ:
         z = ext.opm_epilogue(o, norm, wo16, bo16, n, n, residual, int(after), asym)
     else:

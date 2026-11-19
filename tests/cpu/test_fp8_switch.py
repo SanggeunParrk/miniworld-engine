@@ -307,3 +307,27 @@ def test_engine_fp8_scope(env, model):
     )  # direct _forward_cuda call; copies follow their module
     # training calls (train mode, or grad on): every part with the process's switches, as on cuda
     assert [r for _, r in out["train"]] == [base] * 15 and len(out["train"]) == 15
+
+
+# ------------------------------------------------------------------------------------------------------------------ B200 (sm_100a) routes
+def test_b200_route_table():
+    assert fp8.SLOTS == ("triattn", "trimul", "opm", "pwa", "transition", "token_dit", "atom_dit")
+    assert set(fp8.B200_ROUTES) <= set(fp8.SLOTS)
+    assert fp8.serves_sm100("transition")
+    assert fp8.arch() in ("sm90", "sm100")
+
+
+_B200_POLICY = (
+    "from miniworld_engine.kernels.transition.cuda import fp8_sm100a as m; print(repr(m.POLICY))"
+)
+
+
+def test_b200_transition_route_follows_the_preset():
+    def policy(**env):
+        out = subprocess.run([sys.executable, "-c", _B200_POLICY], env={**_clean_env(), **env}, capture_output=True, text=True, check=True)
+        return out.stdout.strip().splitlines()[-1]
+
+    assert policy() == "None"  # default: off
+    assert policy(MINIWORLD_FP8="safe") == "'calib'"
+    assert policy(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8="") == "None"  # an explicitly set per-route variable wins
+    assert policy(MINIWORLD_TRANSITION_FP8="calib") == "'calib'"

@@ -358,6 +358,12 @@ def forward(
     dropout_p = module.p_drop if dropout_p is None else dropout_p
     live = bool(dropout_p) and dropout_p > 0.0 and module.training
     if route_name == "b200_infer":
+        if not live:  # opt-in FP8 planes (docs/b200/fp8.md; POLICY None = off: the bf16 route below, bit for bit)
+            from miniworld_engine.kernels.trimul_inproj.cuda import b200_fp8 as _f8
+
+            y = _f8.module_route(module, pair, mask, bidirectional, rf3) if _f8.POLICY is not None else None
+            if y is not None:
+                return y
         return update_inference(module, pair, mask, dropout_scale(pair, dropout_p) if live else None, bidirectional=bidirectional, rf3=rf3)
     # training: the draw alone here, its scale made by the training call's forms launch (``b200_train.kernel_forms`` at D <= 128, the wide forms
     # launch at D >= 256: S90)

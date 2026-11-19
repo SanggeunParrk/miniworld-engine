@@ -3309,3 +3309,7 @@ only one warp per SMSP issues exponentials, 64 MUFU in 966 clk (15 clk each, twi
 drops the period to 1165 - 1190 clk (gate of ~1200 met by a one-flag ablation) with the same bits, but the kernel follows only where it is short: N 1 S 3072 25.8 -> 24.5, S 4096 32.1 -> 30.8 us (-4 %),
 and loses where the grid is full or long: N 1 S 5120 47.3 -> 49.2, N 5 S 2048 / 4096 / 6144 +3 / +3 / +4 %, N 48 S 1024 / 2048 +3 / +4 %, S 6144 64.5 -> 67.1. So clk per block is not the kernel time here
 (prologue 3.5 - 4 k and epilogue 12 - 17 k clk and the CTA-to-CTA balance grow with it); no schedule was written on that basis.
+
+## 2026-11-19 (agent C, n13-fp8-c): FP8 for the atom DiT inference stages -- measured, not built
+The H100 e4m3 row kernels (`pre90_f8` / `post90_f8`) have no B200 counterpart; the B200 stages are row-thread / TMA-latency bound with the MMAs hidden, tensor time is 13-16 % of the block at 5 x 4096 .. 5 x 8192 atoms
+(analytic, from the measured bf16 block times 52 / 89 us), so the bound of an e4m3 product is ~6-8 % before the per-row amax cast it would add to the binding row-thread path. Nothing in this file's kernels changed; numbers and reasoning in `docs/b200/fp8.md`.

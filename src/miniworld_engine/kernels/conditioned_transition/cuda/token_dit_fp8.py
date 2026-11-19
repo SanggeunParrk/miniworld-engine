@@ -65,6 +65,10 @@ _F8_PACKS: dict = _capture.weight_cache("conditioned_transition.token_fp8_packs"
 
 @functools.lru_cache(maxsize=None)
 def ext():
+    if torch.cuda.is_available() and torch.cuda.get_device_capability(torch.cuda.current_device()) == (10, 0):  # B200: the tcgen05 expand + the row passes of sm_100a
+        from . import token_dit_fp8_b200
+
+        return token_dit_fp8_b200.ext()
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
@@ -89,7 +93,20 @@ def ext():
     )
 
 
-def active(M: int, D: int, fp32: bool, plain: bool, identity: bool = False, parallel: bool = False, up: bool = False) -> frozenset[str]:
+#: B200 (sm_100a): the placements built there (the tcgen05 e4m3 expand; qkvg / out / squeeze are measured in docs/b200/fp8.md and not served
+#: unless listed by ``MINIWORLD_TOKEN_DIT_FP8_B200`` (comma list), the up-gate expand is not built) and their row gates (starting value = the H100 gate,
+#: replaced by the B200 measurement, docs/b200/fp8.md)
+B200_PLACES: frozenset[str] = frozenset(
+    p for p in (_fp8_env("MINIWORLD_TOKEN_DIT_FP8_B200", "expand") or "").replace(" ", "").split(",") if p in _ALL
+)
+#: CTAs of the e4m3 expand grid when the parallel block runs it beside the attention core (side stream, graph capture; docs/b200/fp8.md)
+B200_PAR_CTAS = 96
+MIN_ROWS_B200: dict[str, int] = {"qkvg": 2560, "expand": 1024, "out": 2560, "squeeze": 2560}
+
+
+def active(
+    M: int, D: int, fp32: bool, plain: bool, identity: bool = False, parallel: bool = False, up: bool = False, b200: bool = False
+) -> frozenset[str]:
     """The placements this block call takes: bf16 default-option blocks (the CondFold route) at width 768, M % 128 == 0, each placement
     from its row gate (``MIN_ROWS`` or ``MIN_ROWS_PER``). ``identity``: Chai-1's option block (parallel attention / transition, identity
     AdaLN, no gating query; the CondFold route) takes ``expand`` (the transition's AdaLN comes out of the attention's LN pass as e4m3),
@@ -101,6 +118,11 @@ def active(M: int, D: int, fp32: bool, plain: bool, identity: bool = False, para
     if not PLACES or fp32 or D != 768 or M % 128 or not (plain or identity or parallel):
         return frozenset()
     places = PLACES if plain else (PLACES - {"qkvg"} if identity else PLACES & {"expand"})
+    if b200:
+        if not (plain or identity):  # RoseTTAFold3 (parallel, k-q LayerNorm): the extra quantising pass outweighs the e4m3 expand (docs/b200/fp8.md)
+            return frozenset()
+        places = places & B200_PLACES - ({"expand"} if up else set())
+        return frozenset(p for p in places if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_B200[p]))
     return frozenset(
         p for p in places if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_UP if up and p == "expand" else MIN_ROWS_PER[p])
     )

@@ -27,6 +27,9 @@ def prebuild(target, _rows):
         yield functools.partial(opm_train._ext, arch="sm100")
         yield opm_sm100._ext_wide
         yield from pwa_sm100.builds()
+        from miniworld_engine.kernels.integrations import opm_fp8_b200  # the opt-in e4m3 routes (docs/b200/fp8.md): the cast / e4m3 helper extension
+
+        yield from opm_fp8_b200.prebuild_items()
         yield from _prebuild_mpnn()  # ProteinMPNN: the sm_100a builds of the sm_80 sources (<name>_sm100, kernels/_sm120.py building_sm100)
         return
     if target.arch == "sm80":

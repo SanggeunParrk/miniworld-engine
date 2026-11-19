@@ -1521,3 +1521,9 @@ no small_core_bwd / pair_bias_fwd2 at 24 heads (both measured slower, v27 / v28)
 backward. Master eval (r148 / r41 L 256 front, r147 24 heads, r41 / r146 L 384): unchanged; item (3) not built -- the front's v24 stamps
 show first-touch latency (two dependent round trips), not the transfer, and the pair backward's measurements above found no gain from finer
 stages.
+
+## 2026-11-19 (agent C, n13-fp8-c): opt-in e4m3 expand on B200 (`MINIWORLD_TOKEN_DIT_FP8=expand`, default OFF)
+New files `token_dit_fp8_b200.py`, `gemm_swiglu_f8_sm100.cu`, `token_dit_fp8_bind_sm100.cu`; the default route is bit-identical (398 / 398 measurer cases, eager + graph, `docs/b200/fp8.md`).
+The bf16 chain above is unchanged; with the switch on, the AF3-family default block and Chai-1's identity block replace the expand step (row pass -> cuBLAS / sm_100a SwiGLU GEMM) by the quantising AdaLN pass + the tcgen05
+`kind::f8f6f4` expand + SwiGLU kernel (M >= 1024 rows; 96-CTA grid beside the attention core in the parallel schedule). Block time -2 .. -5 % (Protenix / MiniWorld), -5 .. -9 % (Chai-1), energy -3 .. -14 %; update error 5.4 % (bf16 route
+0.7 %). qkvg / out / squeeze, RoseTTAFold3 and Boltz-2 are not served: see "Rejected" there. Blocker table entry: the bf16 expand is 12-21 us of an 80-300 us block; whatever the e4m3 saves is bounded by that share.

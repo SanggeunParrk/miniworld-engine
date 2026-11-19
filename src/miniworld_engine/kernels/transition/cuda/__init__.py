@@ -246,6 +246,11 @@ def prebuild(target, rows):
                 )
         if any(d in fused_generic_sm100a.GENERIC_H16_WIDTHS and ("float32", "eval") in v for (d, _n), v in shapes.items()):
             yield ft.partial(fused_sm100a.build_cubins, "generic_h16", fused_generic_sm100a._specs_h16())
+        # the opt-in e4m3 inference route (fp8_sm100a, docs/b200/fp8.md): LayerNorm + quantize and the e4m3 GEMMs, at the widths it serves
+        from . import fp8_sm100a
+
+        if any(d in fp8_sm100a.WIDTHS and d % 128 == 0 and "eval" in m for (d, _n), m in half.items()):
+            yield ft.partial(fused_sm100a.build_cubins, "fp8", fp8_sm100a._specs())
     elif target.arch == "sm80":
         # A100 (transition_sm80): fused_sm80 at D 128 / n 4 with bf16 weights, the wide extension at every other width (and as fused_sm80's small-row path), its
         # one-kernel forward / backward builds (fused_fwd_sm80 / fused_bwd_sm80: (D, H) in their SHAPES) and the fp32-master cast; bf16 rows, and the float32 rows on the wide extension

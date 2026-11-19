@@ -180,6 +180,20 @@ def _join(main: torch.cuda.Stream, aux: torch.cuda.Stream, w16: torch.Tensor) ->
         w16.record_stream(main)
 
 
+def _contract(w16: torch.Tensor, v: torch.Tensor, args: list[torch.Tensor], train: bool) -> torch.Tensor:
+    """o = w . v (cuBLAS bmm); the opt-in e4m3 contraction (``pwa_fp8_b200``, MINIWORLD_PWA_FP8=1, docs/b200/fp8.md) in inference where it serves."""
+    if not train:
+        from . import pwa_fp8 as _h
+
+        if _h.ENABLED:
+            from . import pwa_fp8_b200 as _f8
+
+            c = _f8.serves(args, w16, v)
+            if c is not None:
+                return _f8.contract(c, w16, v)
+    return torch.bmm(w16, v)
+
+
 def _forward(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float, train: bool) -> list[torch.Tensor]:
     """args = [msa [1, S, N, d_msa], pair [1, N, N, d_pair], key mask bool [N], lnm_w, lnm_b, wv, wg, lnz_w, wb, wo] (S, N % 128)
     -> [out [S, N, d_msa] (msa + update), w, v, y, o, dropout draw | empty] (training) or [out]."""
@@ -192,7 +206,15 @@ def _forward(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float
     # the pair side (pair_fwd: z, the key mask -> w) and the MSA side (ln_vg: m -> v) are independent until the bmm: in inference
     # pair_fwd runs on a side stream beside the weight cast and ln_vg (two branches of the CUDA graph), on SMs of its own
     main = torch.cuda.current_stream(m.device)
-    if not train and _DUAL[0] and _uses_mw(args, False) and pair.shape[-1] == 128:
+    f8c = None
+    if not train and _uses_mw(args, False):  # opt-in e4m3 v straight out of ln_vg (pwa_fp8_b200, docs/b200/fp8.md)
+        from . import pwa_fp8 as _h
+
+        if _h.ENABLED:
+            from . import pwa_fp8_b200 as _f8
+
+            f8c = _f8.serves_fused(args, n)
+    if not train and _DUAL[0] and f8c is None and _uses_mw(args, False) and pair.shape[-1] == 128:
         pc, mc = _split(n, d_msa, m.device, True)
         same = len({t.dtype for t in (lnm_w, lnm_b, lnz_w, wb)}) == 1 and lnm_w.dtype in (torch.float32, bf)
         if pc > 0 and same and all(w.dtype == bf for w in (wv, wg, wo)):
@@ -216,7 +238,7 @@ def _forward(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float
             ctr = _ctr(m.device) if _CTR_GATE[0] and n == 128 else None
             if ctr is not None:
                 return [k.pwa_ctr_gate(w16, v, m, lnw, lnb, eps_m, wg.detach().contiguous(), wo.detach().contiguous(), ctr)]
-            o = torch.bmm(w16, v)
+            o = _contract(w16, v, args, train)
             return [k.pwa_gate_out(o, m, lnw, lnb, eps_m, wg.detach().contiguous(), wo.detach().contiguous(), None, 1.0, 0.5)]
     aux = _side_stream(m.device) if _PAIR_SIDE[0] and (not train or (_PAIR_SIDE_TRAIN[0] and _uses_mw(args, True))) else main
     pc, mc = _split(n, d_msa, m.device, aux is not main)
@@ -233,9 +255,14 @@ def _forward(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float
             wv16, wg16, wo16 = k.pwa_wcast(wv.detach().contiguous(), wg.detach().contiguous(), wo.detach().contiguous())
         else:
             wv16, wg16, wo16 = (w.detach().contiguous() for w in (wv, wg, wo))
-        v, y = k.ln_vg(m, lnw, lnb, wv16, eps_m, bool(train), mc)
-        _join(main, aux, w16)
-        o = torch.bmm(w16, v)  # head-major [H, N, S*C], cuBLAS
+        if f8c is not None:
+            v8 = k.ln_vg_f8(m, lnw, lnb, wv16, eps_m, f8c["qv_host"], mc)
+            _join(main, aux, w16)
+            o = _f8.contract8(f8c, w16, v8)
+        else:
+            v, y = k.ln_vg(m, lnw, lnb, wv16, eps_m, bool(train), mc)
+            _join(main, aux, w16)
+            o = _contract(w16, v, args, train)  # head-major [H, N, S*C], cuBLAS
         draw = None
         if p_drop > 0:  # the module's drop_msa: one keep per (token, channel) over the MSA rows; the kernels keep rand > p
             draw = torch.rand(n, d_msa, device=m.device, dtype=bf)
@@ -247,7 +274,7 @@ def _forward(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float
         (wv16, wg16, wo16), _ = _bf16_params([wv, wg, wo])  # the three bf16 copies in one launch (opm_cast_bf16)
         v, y = kv.ln_vg_w(m, lnw, lnb, wv16, eps_m, bool(train), mc)
         _join(main, aux, w16)
-        o = torch.bmm(w16, v)
+        o = _contract(w16, v, args, train)
         draw = None
         if p_drop > 0:
             draw = (torch.rand(n, d_msa, device=m.device, dtype=bf) > p_drop).to(bf)

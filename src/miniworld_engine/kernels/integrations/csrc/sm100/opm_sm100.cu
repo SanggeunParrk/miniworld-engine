@@ -16,6 +16,7 @@
 // (/ n, + bias, bf16, + residual) through a swizzled staging tile and one TMA store per tile.
 #include <torch/extension.h>
 #include "sm100.cuh"
+#include <cuda_fp8.h>
 
 using namespace sm100;
 
@@ -238,7 +239,7 @@ static_assert(CTAS * (SMEM + 1024) <= 233472, "CTAS per SM (each also pays the 1
 static_assert(CTAS * TMEM_COLS <= 512, "TMEM columns");
 }  // namespace pro
 
-template <typename WT>
+template <typename WT, bool F8 = false>
 __global__ void __launch_bounds__(pro::THREADS, pro::CTAS) opm_prologue_sm100(
     int N, int S, int ntiles, float eps,
     const __grid_constant__ CUtensorMap xmap,      // m [S][N][64]: (64, N, S), box (64, 1, 128), 128B swizzle
@@ -249,7 +250,8 @@ __global__ void __launch_bounds__(pro::THREADS, pro::CTAS) opm_prologue_sm100(
     const __grid_constant__ CUtensorMap wbmap,     // Wb [32][64]
     const WT* __restrict__ LNW, const WT* __restrict__ LNB,
     float2* __restrict__ STATS,                    // [N][S] (mean, rstd) or nullptr
-    uint32_t* __restrict__ BITS) {                 // [N][S/32]
+    uint32_t* __restrict__ BITS,                   // [N][S/32]
+    float qa = 1.f, float qb = 1.f) {              // F8 (EXPERIMENTAL, opt-in: opm_fp8_b200): A2 / BT written as e4m3(value * q), amap / bmap are u8 maps (box 64 x 32, 64B swizzle)
   using namespace pro;
   const int NSB = S / BS;
   extern __shared__ __align__(1024) unsigned char raw[];
@@ -391,6 +393,24 @@ __global__ void __launch_bounds__(pro::THREADS, pro::CTAS) opm_prologue_sm100(
         tmem_ld32(tmem_at(tmem + b * BS, q * 32, sh * 64 + h * 32), acc);
         tmem_wait_ld();
         if (h == 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + b); }
+        if constexpr (F8) {  // 32 s of this channel as 32 e4m3 bytes (two 16-byte chunks of the 64-byte staging row, 64B swizzle)
+          const float qq = (q & 1) ? qb : qa;
+          uint8_t* row8 = reinterpret_cast<uint8_t*>(sT + b * TT) + (sh * 64 + ch) * 64;
+#pragma unroll
+          for (int k2 = 0; k2 < 2; ++k2) {
+            uint32_t pk[4];
+#pragma unroll
+            for (int k = 0; k < 4; ++k) {
+              const int j = k2 * 16 + k * 4;
+              const __nv_fp8x2_storage_t lo = __nv_cvt_float2_to_fp8x2(make_float2(acc[j] * qq, acc[j + 1] * qq), __NV_SATFINITE, __NV_E4M3);
+              const __nv_fp8x2_storage_t hi = __nv_cvt_float2_to_fp8x2(make_float2(acc[j + 2] * qq, acc[j + 3] * qq), __NV_SATFINITE, __NV_E4M3);
+              pk[k] = (uint32_t)lo | ((uint32_t)hi << 16);
+            }
+            const int chunk = (h * 2 + k2) ^ (((sh * 64 + ch) >> 1) & 3);
+            *reinterpret_cast<uint4*>(row8 + chunk * 16) = make_uint4(pk[0], pk[1], pk[2], pk[3]);
+          }
+          continue;
+        }
 #pragma unroll
         for (int c8 = 0; c8 < 4; ++c8) {
           uint4 o;
@@ -404,8 +424,14 @@ __global__ void __launch_bounds__(pro::THREADS, pro::CTAS) opm_prologue_sm100(
       if (leader) {
         const __nv_bfloat16* tb = sT + b * TT;
         for (int hh = 0; hh < 2; ++hh) {
-          store_2d(&amap, tb + hh * 64 * 64, s0 + hh * 64, i * CH);
+          if constexpr (F8) {
+            const uint8_t* tb8 = reinterpret_cast<const uint8_t*>(tb);
+            store_2d(&amap, tb8 + hh * 4096, s0 + hh * 64, i * CH);
+            store_2d(&bmap, tb8 + hh * 4096 + CH * 64, s0 + hh * 64, i * CH);
+          } else {
+            store_2d(&amap, tb + hh * 64 * 64, s0 + hh * 64, i * CH);
           store_2d(&bmap, tb + hh * 64 * 64 + CH * 64, s0 + hh * 64, i * CH);
+          }
         }
         bulk_commit();
       }
@@ -1502,6 +1528,55 @@ std::vector<torch::Tensor> opm_prologue(torch::Tensor m, torch::Tensor mask, tor
   return {A2, BT, norm, stats, bits};
 }
 
+// EXPERIMENTAL (opt-in, docs/b200/fp8.md): opm_prologue with e4m3 A2 / BT: e4m3(value * qa), e4m3(value * qb) written by the drain (half the bytes, no cast pass) -> (A2q, BTq, bits)
+std::vector<torch::Tensor> opm_prologue_f8(torch::Tensor m, torch::Tensor mask, torch::Tensor lnw, torch::Tensor lnb, double eps,
+                                           torch::Tensor wa, torch::Tensor wb, double qa, double qb) {
+  using namespace pro;
+  TORCH_CHECK(m.is_cuda() && m.scalar_type() == torch::kBFloat16 && m.is_contiguous() && m.dim() == 3 && m.size(2) == CM, "m: [S, N, 64] bf16");
+  const long S = m.size(0), N = m.size(1);
+  TORCH_CHECK(S % BS == 0 && N % 32 == 0, "S % 128, N % 32");
+  TORCH_CHECK(mask.scalar_type() == torch::kBool && mask.is_contiguous() && mask.numel() == S * N, "mask: bool [S, N]");
+  TORCH_CHECK(wa.scalar_type() == torch::kBFloat16 && wa.is_contiguous() && wa.numel() == CH * CM, "wa: bf16 [32, 64]");
+  TORCH_CHECK(wb.scalar_type() == torch::kBFloat16 && wb.is_contiguous() && wb.numel() == CH * CM, "wb: bf16 [32, 64]");
+  TORCH_CHECK(lnw.scalar_type() == lnb.scalar_type() && lnw.is_contiguous() && lnb.is_contiguous(), "LayerNorm affine");
+  auto o8 = m.options().dtype(torch::kFloat8_e4m3fn);
+  auto A2 = torch::empty({N * CH, S}, o8);
+  auto BT = torch::empty({N * CH, S}, o8);
+  auto bits = torch::empty({N, S / 32}, m.options().dtype(torch::kInt32));
+  CUtensorMap xm = make_map<3>(m.data_ptr(), {(uint64_t)CM, (uint64_t)N, (uint64_t)S}, {(uint64_t)CM, (uint64_t)N * CM}, {64, 1, BS}, CU_TENSOR_MAP_SWIZZLE_128B, "m");
+  CUtensorMap am = make_map<2>(A2.data_ptr(), {(uint64_t)S, (uint64_t)N * CH}, {(uint64_t)S}, {64, CH}, CU_TENSOR_MAP_SWIZZLE_64B, "A2q", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+  CUtensorMap bm = make_map<2>(BT.data_ptr(), {(uint64_t)S, (uint64_t)N * CH}, {(uint64_t)S}, {64, CH}, CU_TENSOR_MAP_SWIZZLE_64B, "BTq", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+  const int ntiles = (int)(N * (S / BS));
+  auto st = at::cuda::getCurrentCUDAStream();
+  auto* bp = reinterpret_cast<uint32_t*>(bits.data_ptr<int>());
+  CUtensorMap mm = make_map<2>(mask.data_ptr(), {(uint64_t)N, (uint64_t)S}, {(uint64_t)N}, {16, BS}, CU_TENSOR_MAP_SWIZZLE_NONE, "mask", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+  CUtensorMap wam = make_map<2>(wa.data_ptr(), {(uint64_t)CM, (uint64_t)CH}, {(uint64_t)CM}, {64, CH}, CU_TENSOR_MAP_SWIZZLE_128B, "wa");
+  CUtensorMap wbm = make_map<2>(wb.data_ptr(), {(uint64_t)CM, (uint64_t)CH}, {(uint64_t)CM}, {64, CH}, CU_TENSOR_MAP_SWIZZLE_128B, "wb");
+  const int grid = std::min(ntiles, CTAS * num_sms(m.device().index()));
+  if (lnw.scalar_type() == torch::kFloat32) {
+    static bool a = false;
+    if (!a) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(opm_prologue_sm100<float, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
+      C10_CUDA_CHECK(cudaFuncSetAttribute(opm_prologue_sm100<float, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
+      a = true;
+    }
+    opm_prologue_sm100<float, true><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps, xm, am, bm, mm, wam, wbm,
+        lnw.data_ptr<float>(), lnb.data_ptr<float>(), nullptr, bp, (float)qa, (float)qb);
+  } else {
+    TORCH_CHECK(lnw.scalar_type() == torch::kBFloat16, "LayerNorm affine: fp32 or bf16");
+    static bool a = false;
+    if (!a) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(opm_prologue_sm100<__nv_bfloat16, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
+      C10_CUDA_CHECK(cudaFuncSetAttribute(opm_prologue_sm100<__nv_bfloat16, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
+      a = true;
+    }
+    opm_prologue_sm100<__nv_bfloat16, true><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps, xm, am, bm, mm, wam, wbm,
+        reinterpret_cast<const __nv_bfloat16*>(lnw.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(lnb.data_ptr<at::BFloat16>()), nullptr, bp, (float)qa, (float)qb);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {A2, BT, bits};
+}
+
 // ctas > 0: the kernel's CTA budget (a multiple of NPART; it runs on a side stream beside the dA / dB GEMMs, which leave it that many
 // SMs), with the deeper ring; 0: one CTA an SM.  The split count (and so the fp32 summation order) follows the budget: deterministic per budget.
 torch::Tensor opm_dwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t nj, int64_t grad_bf16, int64_t ctas) {
@@ -1724,6 +1799,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("dmin") = 1.0, py::arg("doff") = 0.0);
   m.def("opm_prologue_bwd", &opm_prologue_bwd, "sm100 fused OPM prologue backward: mask, both projections and the LayerNorm in one pass");
   m.def("opm_dwo", &opm_dwo, "sm100 dWo straight off the grouped outer product, no permute", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0, py::arg("ctas") = 0);
+  m.def("opm_prologue_f8", &opm_prologue_f8, "EXPERIMENTAL sm100 OPM prologue with e4m3 A2 / BT (value * q): (A2q, BTq, bits)",
+        py::arg("m"), py::arg("mask"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wa"), py::arg("wb"), py::arg("qa"), py::arg("qb"));
   m.def("opm_prologue", &opm_prologue, "sm100 fused OPM prologue: LN + both projections + mask -> A2, BT (grouped layouts), mask count, LN stats [N][S]",
         py::arg("m"), py::arg("mask"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wa"), py::arg("wb"), py::arg("save_stats") = true, py::arg("want_norm") = false);
   m.def("opm_fused_infer", &opm_fused_infer, "sm100 fused outer product + projection (inference): the grouped product never reaches HBM",

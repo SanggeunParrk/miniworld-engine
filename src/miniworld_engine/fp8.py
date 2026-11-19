@@ -52,7 +52,7 @@ of each site (calibration) and kept for the process. A value past the e4m3 range
 :func:`check` once (one host sync per route): True means some route saturated and was rescaled -- run that forward again (at most 3 times).
 OuterProductMean (``bound``), token DiT and atom DiT (exact per-row scales) cannot saturate.
 
-The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a) only; everything else (training, fp32, other GPUs) runs the
+The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a) and, for the slots of :data:`B200_ROUTES` (Transition so far; docs/b200/fp8.md), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
 default route, whose outputs are bit-identical with FP8 off.
 """
 
@@ -139,12 +139,51 @@ def env(name: str, default: str | None = None) -> str | None:
     return default
 
 
-_MODULES: list[tuple[Any, ...]] = []
+#: The route slots of :func:`_modules` / :func:`status` / :func:`route_stats`, in tuple order.
+SLOTS = ("triattn", "trimul", "opm", "pwa", "transition", "token_dit", "atom_dit")
+#: B200 (sm_100a, capability (10, 0)) route modules: slot -> module path. On a B200 :func:`_modules` returns this module instead of the H100 one for
+#: that slot; it must offer the same interface as the H100 module of the slot (``POLICY`` / ``ENABLED`` / ``PLACES`` / ``FP8_ROWS``, ``GUARD``,
+#: ``GUARD_STATS`` / ``STATS``, ``overflow_peak`` / ``rescale_all`` / ``take_overflow`` where the slot has a static-scale guard) and read its switch
+#: through :func:`env` with the preset's variable name. A slot with no entry runs the default route on a B200 (the H100 module's ``serves`` is
+#: False there). Entries are added by the route's owner when its B200 module exists and is verified.
+B200_ROUTES: dict[str, str] = {
+    "trimul": "miniworld_engine.kernels.trimul_inproj.cuda.b200_fp8",  # (agent B; a tree without that file keeps the H100 module in the slot)
+    "transition": "miniworld_engine.kernels.transition.cuda.fp8_sm100a",
+}
+
+
+def arch() -> str:
+    """``"sm100"`` when the current CUDA device is a B200 (capability (10, 0)), else ``"sm90"`` (the H100 modules; also what a CPU-only process sees)."""
+    try:
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0):
+            return "sm100"
+    except Exception:  # noqa: BLE001 -- no usable CUDA: the H100 modules (their serves() is False off sm_90)
+        pass
+    return "sm90"
+
+
+def serves_sm100(slot: str) -> bool:
+    """Whether the FP8 route ``slot`` (one of :data:`SLOTS`) has a B200 module in this tree (``engine-fp8`` / ``MINIWORLD_FP8`` then serve it at capability (10, 0))."""
+    path = B200_ROUTES.get(slot)
+    if path is None:
+        return False
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(path) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+_MODULES: dict[str, tuple[Any, ...]] = {}
 
 
 def _modules() -> tuple[Any, ...]:
-    if _MODULES:
-        return _MODULES[0]
+    a = arch()
+    if a in _MODULES:
+        return _MODULES[a]
     from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as td
     from miniworld_engine.kernels.integrations import local_dit_h100 as ad
     from miniworld_engine.kernels.integrations import opm_fp8 as opm
@@ -153,8 +192,18 @@ def _modules() -> tuple[Any, ...]:
     from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as ta
     from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as tm
 
-    _MODULES.append((ta, tm, opm, pwa, tr, td, ad))
-    return _MODULES[0]
+    mods = dict(zip(SLOTS, (ta, tm, opm, pwa, tr, td, ad), strict=True))
+    if a == "sm100":
+        import importlib
+
+        for slot, path in B200_ROUTES.items():
+            try:
+                mods[slot] = importlib.import_module(path)
+            except ModuleNotFoundError as e:  # the route file is absent in this tree: the slot keeps the H100 module (a missing dependency is an error)
+                if e.name != path:
+                    raise
+    _MODULES[a] = tuple(mods[k] for k in SLOTS)
+    return _MODULES[a]
 
 
 # ------------------------------------------------------------------------------------------------------------- the engine-fp8 backend

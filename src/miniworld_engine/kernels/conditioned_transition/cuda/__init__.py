@@ -782,8 +782,10 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     identity = parallel and not sig and not up and not kq_ln and not qk
     # ``up``: the default block plus Boltz-2's up-gate transition (its expand reads [Wa 64 | Wb 64 | Wu 64] tiles, ht 64)
     f8 = (
-        _fp8.active(M, D, fp32, (plain or v == VARIANT_UP) and fold, identity and fold, parallel and fold and not up and not identity, up)
-        if _fp8.PLACES and not b200  # (the e4m3 routes are sm90a kernels: never on B200)
+        _fp8.active(
+            M, D, fp32, (plain or v == VARIANT_UP) and fold, identity and fold, parallel and fold and not up and not identity, up, b200
+        )
+        if _fp8.PLACES  # (B200: the tcgen05 e4m3 expand of token_dit_fp8_b200, expand only unless MINIWORLD_TOKEN_DIT_FP8_B200 says more)
         else frozenset()
     )
     if _fp8.PLACES:  # observability only (fp8.route_stats()): plain int bumps at call time
@@ -799,7 +801,11 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
             wqkvg,
             wo,
             ws,
-            (_bf16_wab64(vpack["wab3"], up=True), 64) if up else _f8_wab(wab, M, ws.shape[1], single.device.index),
+            (_bf16_wab64(vpack["wab3"], up=True), 64)
+            if up
+            else (vpack["wab2"], 128)
+            if b200
+            else _f8_wab(wab, M, ws.shape[1], single.device.index),
             bqkvg,
         )
     if f8 and "qkvg" in f8:
@@ -823,13 +829,20 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     else:
         xt = xa
         adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, ada_eps, sig)
+    if f8 and "expand" in f8 and parallel and not identity:
+        # the parallel schedule's transition input is the block input's AdaLN rows (one quantising row pass; before any fork: the B200 side-stream
+        # schedule runs the transition beside the attention)
+        xt8, sxt = _fp8.rows_q8(xt)
     keep: list = []
 
     def _trans():
         h = single.new_empty((M, ws.shape[1]))
         if f8 and "expand" in f8:
             a8, sa8, ht = f8w["expand"]
-            _fp8.ext().gemm_swiglu_f8(xt8, a8, h, sxt, sa8, _fp8_nsm(single.device.index), ht, _PDL, up)
+            # (B200 parallel schedule: the transition runs beside the attention core on a side stream; a persistent expand grid over every SM would
+            # wait for the core's CTAs (Chai-1 L512 A5: 1.044 with 148 CTAs, 0.964 with 96): ``token_dit_fp8.B200_PAR_CTAS``)
+            nsm_f8 = _fp8.B200_PAR_CTAS if b200 and xpar else _fp8_nsm(single.device.index)
+            _fp8.ext().gemm_swiglu_f8(xt8, a8, h, sxt, sa8, nsm_f8, ht, _PDL, up)
         elif up and not fp32 and not b200:
             # silu(a) b u in the SwiGLU GEMM's epilogue (128 x 192 tiles, [Wa 64 | Wb 64 | Wu 64]): [a | b | u] never reaches HBM.
             # H100 graph replay, K 768, H 1536: M = 640 8.3 against 12.1 us for cuBLAS + the row pass, 1920 20.6 / 30.0, 5120 55.6 / 87.8
@@ -1007,11 +1020,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         else:
             ya = torch.mm(qkvg[:, :D], wo.t())
     if f8 and "expand" in f8 and parallel:
-        if not identity:
-            xt8, sxt = _fp8.rows_q8(
-                xt
-            )  # the parallel schedule's transition input is the block input's AdaLN rows (one quantising row pass)
-        # identity: xt8 / sxt came out of the attention's LN pass (above)
+        pass  # xt8 / sxt were made above (identity: by the attention's LN pass; otherwise one quantising row pass)
     elif f8 and "expand" in f8:
         xt8 = torch.empty((M, D), device=single.device, dtype=_fp8.E4M3)
         sxt = torch.empty((M, 1), device=single.device, dtype=torch.float32)
@@ -1328,6 +1337,18 @@ def _prebuild_sm100(rows):
     for k, hidden, save_ab in sorted(swiglu):
         if k % 64 == 0 and hidden % 128 == 0 and hidden % k == 0:  # gemm_swiglu.supported
             yield _swiglu_sm100(k, hidden, save_ab)
+    # the opt-in e4m3 expand route (docs/b200/fp8.md, token_dit_fp8.active on a B200): its rows module and the width-768 expand cubin
+    if any(
+        r["mode"] == "eval"
+        and r["dtype"] != "float32"
+        and r["module"] in _SM100_TOKEN
+        and r["module"] not in _SM100_UP
+        and _kv(r["dims"]).get("d_single") == "768"
+        for r in token
+    ):
+        from . import token_dit_fp8_b200
+
+        yield from token_dit_fp8_b200.prebuild_items()
 
 
 def _swiglu_sm100(k: int, hidden: int, save_ab: bool):

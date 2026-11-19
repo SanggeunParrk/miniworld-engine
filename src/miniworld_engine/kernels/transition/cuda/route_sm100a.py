@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import torch
 
-from . import fused_generic_sm100a, fused_small_sm100a, fused_sm100a, fused_wide_sm100a
+from . import fp8_sm100a, fused_generic_sm100a, fused_small_sm100a, fused_sm100a, fused_wide_sm100a
 
 #: The tuned builds in the order they are tried (each ``available`` is its own whole gate).
 _TUNED = (
@@ -74,10 +74,13 @@ def transition_sm100a(
     wb: torch.Tensor,
     ws: torch.Tensor,
     eps: float,
+    _fp8: bool = True,
 ) -> torch.Tensor | None:
     """``x + W_s(silu(W_a LN(x)) * (W_b LN(x)))`` on the B200 kernels, or ``None`` when none takes the call."""
     tuned = _TUNED
     grad = _wants_grad(x, gamma, beta, wa, wb, ws)
+    if _fp8 and fp8_sm100a.POLICY is not None and not grad and fp8_sm100a.serves(x, wa, ws):  # opt-in e4m3 route (docs/b200/fp8.md); POLICY is None by default
+        return fp8_sm100a.inference(x, gamma, beta, wa, wb, ws, eps)
     if FOLD_FIRST and not grad and fused_wide_sm100a.fold_first(x, wa, ws):  # (N1) the LayerNorm-folded D 384 chain (2 launches) before the small-M chains (3 launches)
         return fused_wide_sm100a.transition_wide_sm100a(x, gamma, beta, wa, wb, ws, eps)
     if fused_small_sm100a.available(x, wa, ws, grad):  # the small-M chains of the cells the D 384 bf16 chains do not take

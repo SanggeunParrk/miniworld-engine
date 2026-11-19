@@ -10,6 +10,7 @@
 //   pair_bwd:   dz, dWb, dgamma_z                          parameter gradients from per-head sums (M = db^T xhat)
 #include <torch/extension.h>
 #include "sm100.cuh"
+#include <cuda_fp8.h>
 
 using namespace sm100;
 
@@ -67,14 +68,14 @@ constexpr uint32_t IDESC = idesc_bf16(128, HC);
 static_assert(SMEM <= 232448, "one CTA per SM (TMEM: 2 x 256 columns)");
 }  // namespace lv
 
-template <typename WT_>
+template <typename WT_, bool F8 = false>
 __device__ __forceinline__ void ln_vg_body(const int BIDX, const int NBLK,
     int N, int S, int ntiles, float eps, int want_y,
     const CUtensorMap& xmap,     // m [S][N][64]: (64, N, S), box (64, 1, 128), 128B swizzle
     const CUtensorMap& ymap,     // y, same (written only if want_y: inference recomputes it downstream)
     const CUtensorMap& wmap,     // Wv [256][64], box (64, 256), 128B swizzle
-    const CUtensorMap& vmap,     // v [H*N][S*C] as (32 c, S, H*N), box (32, 128, 1), 64B swizzle
-    const WT_* __restrict__ LNW, const WT_* __restrict__ LNB) {
+    const CUtensorMap& vmap,     // v [H*N][S*C] as (32 c, S, H*N), box (32, 128, 1), 64B swizzle; F8: e4m3 bytes, no swizzle
+    const WT_* __restrict__ LNW, const WT_* __restrict__ LNB, const float qv = 1.f) {
   using namespace lv;
   const int NSB = S / BS;                        // tile t = (token t / NSB, s block t % NSB)
   extern __shared__ __align__(1024) unsigned char raw[];
@@ -214,6 +215,19 @@ __device__ __forceinline__ void ln_vg_body(const int BIDX, const int NBLK,
         tmem_ld32(tmem_at(tmem + b * HC, q * 32, h * C), v);
         tmem_wait_ld();
         if (h == H - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + b); }
+        if constexpr (F8) {  // EXPERIMENTAL e4m3 v (opt-in route, docs/b200/fp8.md): v * qv saturating e4m3, a 32-byte row, staging without swizzle
+          uint8_t* row8 = reinterpret_cast<uint8_t*>(vb) + (h * BS + r) * C;
+          uint32_t pk[8];
+#pragma unroll
+          for (int k = 0; k < 8; ++k) {
+            const __nv_fp8x2_storage_t lo = __nv_cvt_float2_to_fp8x2(make_float2(v[4 * k] * qv, v[4 * k + 1] * qv), __NV_SATFINITE, __NV_E4M3);
+            const __nv_fp8x2_storage_t hi = __nv_cvt_float2_to_fp8x2(make_float2(v[4 * k + 2] * qv, v[4 * k + 3] * qv), __NV_SATFINITE, __NV_E4M3);
+            pk[k] = (uint32_t)lo | ((uint32_t)hi << 16);
+          }
+          *reinterpret_cast<uint4*>(row8) = make_uint4(pk[0], pk[1], pk[2], pk[3]);
+          *reinterpret_cast<uint4*>(row8 + 16) = make_uint4(pk[4], pk[5], pk[6], pk[7]);
+          continue;
+        }
         __nv_bfloat16* row = vb + (h * BS + r) * C;
 #pragma unroll
         for (int c8 = 0; c8 < 4; ++c8) {
@@ -226,7 +240,10 @@ __device__ __forceinline__ void ln_vg_body(const int BIDX, const int NBLK,
       fence_proxy_async();
       named_sync(2, 128);
       if (leader) {
-        for (int h = 0; h < H; ++h) store_3d(&vmap, vb + h * BS * C, 0, s0, h * N + n);
+        for (int h = 0; h < H; ++h) {
+          if constexpr (F8) store_3d(&vmap, reinterpret_cast<uint8_t*>(vb) + h * BS * C, 0, s0, h * N + n);
+          else store_3d(&vmap, vb + h * BS * C, 0, s0, h * N + n);
+        }
         bulk_commit();
       }
     }
@@ -242,6 +259,14 @@ __global__ void __launch_bounds__(lv::THREADS, 1) ln_vg_sm100(int N, int S, int 
     const __grid_constant__ CUtensorMap ymap, const __grid_constant__ CUtensorMap wmap, const __grid_constant__ CUtensorMap vmap,
     const WT_* __restrict__ LNW, const WT_* __restrict__ LNB) {
   ln_vg_body<WT_>(blockIdx.x, gridDim.x, N, S, ntiles, eps, want_y, xmap, ymap, wmap, vmap, LNW, LNB);
+}
+
+// the e4m3 form (EXPERIMENTAL, opt-in: pwa_fp8_b200.py): v = e4m3(v * qv) head-major, the y store off
+template <typename WT_>
+__global__ void __launch_bounds__(lv::THREADS, 1) ln_vg_f8_sm100(int N, int S, int ntiles, float eps, const __grid_constant__ CUtensorMap xmap,
+    const __grid_constant__ CUtensorMap ymap, const __grid_constant__ CUtensorMap wmap, const __grid_constant__ CUtensorMap vmap,
+    const WT_* __restrict__ LNW, const WT_* __restrict__ LNB, float qv) {
+  ln_vg_body<WT_, true>(blockIdx.x, gridDim.x, N, S, ntiles, eps, 0, xmap, ymap, wmap, vmap, LNW, LNB, qv);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2723,6 +2748,37 @@ std::vector<torch::Tensor> ln_vg(torch::Tensor m, torch::Tensor lnw, torch::Tens
   return {v, y};
 }
 
+// EXPERIMENTAL (opt-in, docs/b200/fp8.md): m [S, N, 64] bf16 -> v8 = e4m3(v * qv) head-major [H, N, S*C] (the default ln_vg's v, one saturating cast in the drain; no y)
+torch::Tensor ln_vg_f8(torch::Tensor m, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wv, double eps, double qv, int64_t ctas) {
+  using namespace lv;
+  TORCH_CHECK(m.is_cuda() && m.scalar_type() == torch::kBFloat16 && m.is_contiguous() && m.dim() == 3 && m.size(2) == D, "m: [S, N, 64] bf16");
+  TORCH_CHECK(wv.scalar_type() == torch::kBFloat16 && wv.is_contiguous() && wv.size(0) == HC && wv.size(1) == D, "wv: [256, 64] bf16");
+  TORCH_CHECK(lnw.scalar_type() == lnb.scalar_type() && lnw.is_contiguous() && lnb.is_contiguous() && lnw.numel() == D, "LN affine [64]");
+  const long S = m.size(0), N = m.size(1);
+  TORCH_CHECK(S % BS == 0, "S must be a multiple of ", BS);
+  auto v = torch::empty({H, N, S * C}, m.options().dtype(torch::kFloat8_e4m3fn));
+  CUtensorMap xm = make_map<3>(m.data_ptr(), {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)N * D}, {64, 1, BS}, CU_TENSOR_MAP_SWIZZLE_128B, "m");
+  CUtensorMap wm = make_map<2>(wv.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, HC}, CU_TENSOR_MAP_SWIZZLE_128B, "wv");
+  CUtensorMap vm = make_map<3>(v.data_ptr(), {(uint64_t)C, (uint64_t)S, (uint64_t)H * N}, {(uint64_t)C, (uint64_t)S * C}, {C, BS, 1}, CU_TENSOR_MAP_SWIZZLE_NONE, "v8",
+                               CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+  const int ntiles = (int)(N * (S / BS));
+  const int grid = std::min(ntiles, ctas > 0 ? (int)ctas : num_sms(m.device().index()));
+  auto st = at::cuda::getCurrentCUDAStream();
+  if (lnw.scalar_type() == torch::kFloat32) {
+    static bool a = false;
+    if (!a) { C10_CUDA_CHECK(cudaFuncSetAttribute(ln_vg_f8_sm100<float>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); a = true; }
+    ln_vg_f8_sm100<float><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps, xm, xm, wm, vm, lnw.data_ptr<float>(), lnb.data_ptr<float>(), (float)qv);
+  } else {
+    TORCH_CHECK(lnw.scalar_type() == torch::kBFloat16, "LN affine: fp32 or bf16");
+    static bool a = false;
+    if (!a) { C10_CUDA_CHECK(cudaFuncSetAttribute(ln_vg_f8_sm100<__nv_bfloat16>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); a = true; }
+    ln_vg_f8_sm100<__nv_bfloat16><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps, xm, xm, wm, vm,
+        reinterpret_cast<const __nv_bfloat16*>(lnw.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(lnb.data_ptr<at::BFloat16>()), (float)qv);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return v;
+}
+
 // the glue with the dgp consumers inside: o [H, N, S*C], y / dres [S, N, 64], wg = Wg / 2 [HC, 64] and wot = Wo^T [HC, 64] (pwa_wprep)
 // -> (do head-major [H, N, S*C], dyg [S, N, 64] bf16 (= dgp . Wg), dWo [64, HC], dWg [HC, 64] in the requested dtype)
 // -> (do, dyg, the [grid][64][512] dWo | 2 dWg^T slab: dv_bwd's finish launch sums it with its own)
@@ -3114,6 +3170,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("pwa_ctr_gate", &pwa_ctr_gate, "sm100 PWA inference at N 128: o = w . v and the gate / out-projection / residual pass in one launch (PDL dependent of pwa_dual, in place over v)",
         py::arg("w"), py::arg("v"), py::arg("msa"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wg"), py::arg("wo"), py::arg("ctr"));
+  m.def("ln_vg_f8", &ln_vg_f8, "EXPERIMENTAL sm100 LayerNorm + value projection with an e4m3 v (v * qv, head-major [H,N,S*C])",
+        py::arg("m"), py::arg("lnw"), py::arg("lnb"), py::arg("wv"), py::arg("eps"), py::arg("qv"), py::arg("ctas") = 0);
   m.def("ln_vg", &ln_vg, "sm100 LayerNorm + value projection: (v head-major [H,N,S*C], y [S,N,64])",
         py::arg("m"), py::arg("lnw"), py::arg("lnb"), py::arg("wv"), py::arg("eps") = 1e-5, py::arg("want_y") = true, py::arg("ctas") = 0);
   m.def("pair_fwd", &pair_fwd, "sm100 pair-side forward (d_pair 64 / 128 / 256 / 384 / 512, N <= 2048): LN_z folded into proj_z (tensor core on raw z) -> key mask -> softmax over j",
