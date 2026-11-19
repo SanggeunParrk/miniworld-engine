@@ -23,7 +23,9 @@ def _module(d: int, n: int) -> Transition:
     return module
 
 
-@pytest.mark.parametrize(("d", "n", "rows", "offset"), [(256, 2, 40000, 0.0), (384, 2, 33000, 0.0), (512, 4, 40001, 0.0), (256, 4, 65536, 12.0)])
+@pytest.mark.parametrize(
+    ("d", "n", "rows", "offset"), [(256, 2, 40000, 0.0), (384, 2, 33000, 0.0), (512, 4, 40001, 0.0), (256, 4, 65536, 12.0)]
+)
 def test_fused_layernorm_within_the_unfused_error(monkeypatch: pytest.MonkeyPatch, d: int, n: int, rows: int, offset: float) -> None:
     from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 

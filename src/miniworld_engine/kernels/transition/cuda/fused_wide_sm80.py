@@ -134,7 +134,9 @@ def _tiles_sm120(m: int, d: int, h: int) -> tuple[int, int]:
     elif d == 128:
         res = 2 if m < 393216 else 8
     else:
-        res = 2 if _rows64_ok(m) else 7  # (config 7, 256 x 128 / 8 warps, was taken from 5e10 multiply-adds on: the interleaved A-B-A-B of 2026-11-19, D 256 .. 512 at 65 k .. 2 M rows, has config 2 1-4 % faster everywhere)
+        res = (
+            2 if _rows64_ok(m) else 7
+        )  # (config 7, 256 x 128 / 8 warps, was taken from 5e10 multiply-adds on: the interleaved A-B-A-B of 2026-11-19, D 256 .. 512 at 65 k .. 2 M rows, has config 2 1-4 % faster everywhere)
     return (2 if _rows64_ok(m) else 0), res
 
 
@@ -169,7 +171,14 @@ SM120_RES_OVERRIDE = None
 
 
 def _fused_ln(m: int, d: int, dual: int, x: torch.Tensor) -> bool:
-    return SM120_FUSED_LN and d >= SM120_FUSED_LN_MIN_D and m >= SM120_FUSED_LN_MIN_ROWS and dual in SM120_FUSED_LN_CFGS and is_sm120(x.device) and not torch.is_grad_enabled()
+    return (
+        SM120_FUSED_LN
+        and d >= SM120_FUSED_LN_MIN_D
+        and m >= SM120_FUSED_LN_MIN_ROWS
+        and dual in SM120_FUSED_LN_CFGS
+        and is_sm120(x.device)
+        and not torch.is_grad_enabled()
+    )
 
 
 def _ln_fold(gamma, beta, wa, wb):
@@ -348,7 +357,13 @@ def _fwd_launch(
         res = SM120_RES_OVERRIDE
     if ln and not save and _fused_ln(m, d, dual, x):
         hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
-        return (_squeeze(ext, hid, ws, x, ln, res), x.new_empty((0,)), torch.empty((0, 2), dtype=torch.float32, device=x.device), x.new_empty((0,)), x.new_empty((0,)))
+        return (
+            _squeeze(ext, hid, ws, x, ln, res),
+            x.new_empty((0,)),
+            torch.empty((0, 2), dtype=torch.float32, device=x.device),
+            x.new_empty((0,)),
+            x.new_empty((0,)),
+        )
     if ln:
         xn, stats = ext.ln_fwd(x, gamma, beta, eps, save)
     else:
@@ -398,7 +413,9 @@ def forward_into(
     ext = _ext()
     gamma, beta = _f32(gamma, True), _f32(beta, True)
     wa, wb, ws = _kernel_weights(wa, wb, ws, x.dtype, cache=True)
-    dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(m, d, wa.shape[0])  # the RTX 5090 takes its own tile table (the A100 one is 20-30 % slower there)
+    dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(
+        m, d, wa.shape[0]
+    )  # the RTX 5090 takes its own tile table (the A100 one is 20-30 % slower there)
     if _fused_ln(m, d, dual, x):
         hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
     else:
