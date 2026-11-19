@@ -68,6 +68,7 @@ class Transition(BackendModule, MasterWeights):
         "cuda:a100_sm80": 6,
         "triton:a100_sm80": 2,
         "cuda:5090_sm120": 4,
+        "triton:5090_sm120": 2,  # 2026-11-19: fp32 TF32-off training at 2048 / 4096 / 8192 rows (augment chunk 8 / 12 / 24 x 384 tokens, d 384) has table entries (it hit OutOfResources on the default config); no kernel output changes
     }
     # 2026-11-14 (RTX 5090): cuda:5090_sm120 4 = calls past 64 x 65535 rows (L 2048 pair, D >= 256 eval) take 128-row tiles (they failed with a grid y
     # overflow: invalid configuration argument)
