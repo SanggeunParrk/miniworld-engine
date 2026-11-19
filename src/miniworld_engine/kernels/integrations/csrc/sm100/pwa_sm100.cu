@@ -2464,15 +2464,16 @@ __global__ void __launch_bounds__(448, 1) pair_fwd_sm100(int N, float eps, const
 // Inference, MiniWorld's MSA side: pair_fwd and ln_vg in ONE launch on disjoint CTAs (CTAs [0, npair) run pair_fwd's body over the rows
 // i, the rest ln_vg's over the (token, 128-row) tiles), instead of two kernels on two streams joined before the bmm: the graph keeps one
 // branch (no fork / join edges). The same code per CTA as the two kernels, so the same bits.
-template <typename T_, int DZ_>
+template <typename T_, int DZ_, bool F8_ = false>   // F8_ (EXPERIMENTAL, opt-in: pwa_fp8_b200): the MSA side writes an e4m3 v (v * qv, u8 map); false = the default kernel
 __global__ void __launch_bounds__(448, 1) pwa_dual_fwd_sm100(int npair, int N, float eps_z, const __grid_constant__ CUtensorMap zmap,
     const uint8_t* __restrict__ MASK, const T_* __restrict__ LNWZ, const T_* __restrict__ WB, __nv_bfloat16* __restrict__ W,
     int S, int ntiles, float eps_m, const __grid_constant__ CUtensorMap xmap, const __grid_constant__ CUtensorMap ymap,
-    const __grid_constant__ CUtensorMap wmap, const __grid_constant__ CUtensorMap vmap, const T_* __restrict__ LNW, const T_* __restrict__ LNB) {
+    const __grid_constant__ CUtensorMap wmap, const __grid_constant__ CUtensorMap vmap, const T_* __restrict__ LNW, const T_* __restrict__ LNB,
+    float qv = 1.f) {
   static_assert(lv::THREADS == 448, "the two bodies run with the same block");
   asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory");   // pwa_ctr_gate (a programmatic dependent) may take SMs as they free
   if ((int)blockIdx.x < npair) pair_fwd_body<T_, T_, DZ_, 1024, false>(blockIdx.x, npair, N, eps_z, zmap, MASK, LNWZ, WB, W, nullptr);
-  else ln_vg_body<T_>((int)blockIdx.x - npair, (int)gridDim.x - npair, N, S, ntiles, eps_m, 0, xmap, ymap, wmap, vmap, LNW, LNB);
+  else ln_vg_body<T_, F8_>((int)blockIdx.x - npair, (int)gridDim.x - npair, N, S, ntiles, eps_m, 0, xmap, ymap, wmap, vmap, LNW, LNB, qv);
 }
 
 // sum_k P[k * W + c] over the splits for this block's 32 columns c = col0 + lane: 8 split groups (one warp each, two chains) then a
@@ -3105,8 +3106,8 @@ torch::Tensor pwa_ctr_gate(torch::Tensor w, torch::Tensor v, torch::Tensor msa, 
 
 // inference, MiniWorld's MSA side: (w [H, N, N] bf16, v head-major [H, N, S*C]) from pair_fwd + ln_vg in one launch on npair + nln CTAs
 // (pwa_dual_fwd_sm100); the pair-side and MSA-side parameters in one dtype (fp32 or bf16), N <= 1024
-std::vector<torch::Tensor> pwa_dual(torch::Tensor z, torch::Tensor mask, torch::Tensor lnzw, double eps_z, torch::Tensor wb, torch::Tensor m,
-                                    torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wv, double eps_m, int64_t npair, int64_t nln) {
+static std::vector<torch::Tensor> pwa_dual_impl(torch::Tensor z, torch::Tensor mask, torch::Tensor lnzw, double eps_z, torch::Tensor wb, torch::Tensor m,
+                                                torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wv, double eps_m, int64_t npair, int64_t nln, bool f8, double qv) {
   TORCH_CHECK(z.is_contiguous() && z.scalar_type() == torch::kBFloat16 && z.dim() == 3 && z.size(0) == z.size(1), "z: [N, N, d_pair] bf16");
   const long N = z.size(0), DZ = z.size(2);
   TORCH_CHECK(DZ == 128 && N % 128 == 0 && N <= 1024, "pwa_dual: d_pair 128, N a multiple of 128, at most 1024");
@@ -3122,28 +3123,42 @@ std::vector<torch::Tensor> pwa_dual(torch::Tensor z, torch::Tensor mask, torch::
   TORCH_CHECK(S % lv::BS == 0 && npair > 0 && nln > 0, "S % 128, CTAs");
   using P = PF<128, 1024>;
   auto w = torch::empty({(long)H, N, N}, z.options());
-  auto v = torch::empty({H, N, S * C}, m.options());
+  auto v = torch::empty({H, N, S * C}, f8 ? m.options().dtype(torch::kFloat8_e4m3fn) : m.options());
   CUtensorMap zm = make_map<2>(z.data_ptr(), {(uint64_t)DZ, (uint64_t)(N * N)}, {(uint64_t)DZ}, {64, (uint32_t)P::BJ}, CU_TENSOR_MAP_SWIZZLE_128B, "z");
   CUtensorMap xm = make_map<3>(m.data_ptr(), {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)N * D}, {64, 1, lv::BS}, CU_TENSOR_MAP_SWIZZLE_128B, "m");
   CUtensorMap wm = make_map<2>(wv.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, HC}, CU_TENSOR_MAP_SWIZZLE_128B, "wv");
-  CUtensorMap vm = make_map<3>(v.data_ptr(), {(uint64_t)C, (uint64_t)S, (uint64_t)H * N}, {(uint64_t)C, (uint64_t)S * C}, {C, lv::BS, 1}, CU_TENSOR_MAP_SWIZZLE_64B, "v");
+  CUtensorMap vm = f8 ? make_map<3>(v.data_ptr(), {(uint64_t)C, (uint64_t)S, (uint64_t)H * N}, {(uint64_t)C, (uint64_t)S * C}, {C, lv::BS, 1}, CU_TENSOR_MAP_SWIZZLE_NONE, "v8", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1)
+                      : make_map<3>(v.data_ptr(), {(uint64_t)C, (uint64_t)S, (uint64_t)H * N}, {(uint64_t)C, (uint64_t)S * C}, {C, lv::BS, 1}, CU_TENSOR_MAP_SWIZZLE_64B, "v");
   const int ntiles = (int)(N * (S / lv::BS));
   const int np = (int)std::min<long>(npair, N), nl = (int)std::min<long>(nln, ntiles);
   constexpr int SM = P::SMEM > lv::SMEM ? P::SMEM : lv::SMEM;
   auto st = at::cuda::getCurrentCUDAStream();
   const auto* mp = reinterpret_cast<const uint8_t*>(mask.data_ptr<bool>());
   auto* wp = reinterpret_cast<__nv_bfloat16*>(w.data_ptr<at::BFloat16>());
-  auto go = [&](auto t) {
+  auto go = [&](auto t, auto f) {
     using T = decltype(t);
+    constexpr bool F8 = decltype(f)::value;
     static bool attr = false;
-    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_dual_fwd_sm100<T, 128>, cudaFuncAttributeMaxDynamicSharedMemorySize, SM)); attr = true; }
-    pwa_dual_fwd_sm100<T, 128><<<np + nl, 448, SM, st>>>(np, (int)N, (float)eps_z, zm, mp, reinterpret_cast<const T*>(lnzw.data_ptr()),
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_dual_fwd_sm100<T, 128, F8>, cudaFuncAttributeMaxDynamicSharedMemorySize, SM)); attr = true; }
+    pwa_dual_fwd_sm100<T, 128, F8><<<np + nl, 448, SM, st>>>(np, (int)N, (float)eps_z, zm, mp, reinterpret_cast<const T*>(lnzw.data_ptr()),
         reinterpret_cast<const T*>(wb.data_ptr()), wp, (int)S, ntiles, (float)eps_m, xm, xm, wm, vm, reinterpret_cast<const T*>(lnw.data_ptr()),
-        reinterpret_cast<const T*>(lnb.data_ptr()));
+        reinterpret_cast<const T*>(lnb.data_ptr()), (float)qv);
   };
-  if (pt == torch::kFloat32) go(float{}); else go(__nv_bfloat16{});
+  if (f8) { if (pt == torch::kFloat32) go(float{}, std::true_type{}); else go(__nv_bfloat16{}, std::true_type{}); }
+  else { if (pt == torch::kFloat32) go(float{}, std::false_type{}); else go(__nv_bfloat16{}, std::false_type{}); }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {w, v};
+}
+
+std::vector<torch::Tensor> pwa_dual(torch::Tensor z, torch::Tensor mask, torch::Tensor lnzw, double eps_z, torch::Tensor wb, torch::Tensor m,
+                                    torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wv, double eps_m, int64_t npair, int64_t nln) {
+  return pwa_dual_impl(z, mask, lnzw, eps_z, wb, m, lnw, lnb, wv, eps_m, npair, nln, false, 1.0);
+}
+
+// EXPERIMENTAL (opt-in e4m3 route, docs/b200/fp8.md): pwa_dual with an e4m3 v (v * qv, saturating) -> (w, v8)
+std::vector<torch::Tensor> pwa_dual_f8(torch::Tensor z, torch::Tensor mask, torch::Tensor lnzw, double eps_z, torch::Tensor wb, torch::Tensor m,
+                                       torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wv, double eps_m, double qv, int64_t npair, int64_t nln) {
+  return pwa_dual_impl(z, mask, lnzw, eps_z, wb, m, lnw, lnb, wv, eps_m, npair, nln, true, qv);
 }
 
 #ifdef PCG_TRACE
@@ -3164,6 +3179,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pcg_trace", &pcg_trace);
   m.def("pcg_fine", &pcg_fine);
 #endif
+  m.def("pwa_dual_f8", &pwa_dual_f8, "EXPERIMENTAL sm100 PWA inference: pwa_dual with an e4m3 v (v * qv) -> (w, v8)",
+        py::arg("z"), py::arg("mask"), py::arg("lnzw"), py::arg("eps_z"), py::arg("wb"), py::arg("m"), py::arg("lnw"), py::arg("lnb"), py::arg("wv"),
+        py::arg("eps_m"), py::arg("qv"), py::arg("npair"), py::arg("nln"));
   m.def("pwa_dual", &pwa_dual, "sm100 PWA inference (64 / 8 x 32, d_pair 128): pair_fwd + ln_vg in one launch on disjoint CTAs -> (w, v)",
         py::arg("z"), py::arg("mask"), py::arg("lnzw"), py::arg("eps_z"), py::arg("wb"), py::arg("m"), py::arg("lnw"), py::arg("lnb"), py::arg("wv"),
         py::arg("eps_m"), py::arg("npair"), py::arg("nln"));

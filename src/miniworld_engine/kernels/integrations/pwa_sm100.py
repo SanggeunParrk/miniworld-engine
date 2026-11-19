@@ -136,6 +136,8 @@ _SPLIT: list[int] = []
 #: (`pwa_dual`: CTAs [0, npair) run pair_fwd's body, the rest ln_vg's) instead of two kernels on two streams joined before the bmm.
 #: B200 2026-11-17, graph, L2 flushed, 64 / 8 x 32 / 128: L128 depth 384 44.9 -> 40.8 us, depth 1024 73.7 -> 71.6, L256 depth 384
 #: 70.6 -> 63.4 (+16), L512 depth 384 131.5 -> 122.9 (+16); the same bits. A / B switch.
+#: the e4m3 route (``pwa_fp8_b200.serves_fused``) also takes the one-launch pair_fwd + ln_vg form (``pwa_dual_f8``) where `_DUAL` applies; A / B switch
+_DUAL_F8 = [True]
 _DUAL = [True]
 #: CTAs moved from the ln_vg part to the pair part of `pwa_dual`, per N (measured: L128 +8 / +16 level, L256 / L512 +16 best).
 _DUAL_EXTRA: dict[int, int] = {128: 8, 256: 16, 384: 0, 512: 16}
@@ -214,27 +216,19 @@ def _forward(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float
             from . import pwa_fp8_b200 as _f8
 
             f8c = _f8.serves_fused(args, n)
-    if not train and _DUAL[0] and f8c is None and _uses_mw(args, False) and pair.shape[-1] == 128:
+    if not train and _DUAL[0] and (f8c is None or _DUAL_F8[0]) and _uses_mw(args, False) and pair.shape[-1] == 128:
         pc, mc = _split(n, d_msa, m.device, True)
         same = len({t.dtype for t in (lnm_w, lnm_b, lnz_w, wb)}) == 1 and lnm_w.dtype in (torch.float32, bf)
         if pc > 0 and same and all(w.dtype == bf for w in (wv, wg, wo)):
             # pair_fwd + ln_vg in ONE launch on disjoint CTAs (`pwa_dual`): one graph branch, no fork / join edges; the same bits
             ex = _DUAL_EXTRA.get(n, 0)
             lnw, lnb = lnm_w.detach().contiguous(), lnm_b.detach().contiguous()
-            w16, v = k.pwa_dual(
-                z,
-                km,
-                lnz_w.detach().contiguous(),
-                eps_z,
-                wb.detach().contiguous(),
-                m,
-                lnw,
-                lnb,
-                wv.detach().contiguous(),
-                eps_m,
-                pc + ex,
-                mc - ex,
-            )
+            dargs = (z, km, lnz_w.detach().contiguous(), eps_z, wb.detach().contiguous(), m, lnw, lnb, wv.detach().contiguous(), eps_m)
+            if f8c is not None:  # the e4m3 v from the one launch (pwa_dual_f8), then the e4m3 contraction (pwa_fp8_b200)
+                w16, v8 = k.pwa_dual_f8(*dargs, f8c["qv_host"], pc + ex, mc - ex)
+                o = _f8.contract8(f8c, w16, v8)
+                return [k.pwa_gate_out(o, m, lnw, lnb, eps_m, wg.detach().contiguous(), wo.detach().contiguous(), None, 1.0, 0.5)]
+            w16, v = k.pwa_dual(*dargs, pc + ex, mc - ex)
             ctr = _ctr(m.device) if _CTR_GATE[0] and n == 128 else None
             if ctr is not None:
                 return [k.pwa_ctr_gate(w16, v, m, lnw, lnb, eps_m, wg.detach().contiguous(), wo.detach().contiguous(), ctr)]
@@ -272,9 +266,23 @@ def _forward(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float
     else:
         kv = _value(d_msa, wv.shape[0] // H)
         (wv16, wg16, wo16), _ = _bf16_params([wv, wg, wo])  # the three bf16 copies in one launch (opm_cast_bf16)
-        v, y = kv.ln_vg_w(m, lnw, lnb, wv16, eps_m, bool(train), mc)
-        _join(main, aux, w16)
-        o = _contract(w16, v, args, train)
+        f8w = None
+        if not train:  # opt-in e4m3 v straight out of ln_vg_w (pwa_fp8_b200.serves_fused_wide, docs/b200/fp8.md)
+            from . import pwa_fp8 as _h
+
+            if _h.ENABLED:
+                from . import pwa_fp8_b200 as _f8
+
+                f8w = _f8.serves_fused_wide(args, n)
+        if f8w is not None:
+            v8, y = kv.ln_vg_w_f8(m, lnw, lnb, wv16, eps_m, f8w["qv_host"], False, mc)
+            _join(main, aux, w16)
+            o = _f8.contract8(f8w, w16, v8)
+            v = v8
+        else:
+            v, y = kv.ln_vg_w(m, lnw, lnb, wv16, eps_m, bool(train), mc)
+            _join(main, aux, w16)
+            o = torch.bmm(w16, v)  # the wide builds: the fused e4m3 v route above replaces the cast route (measured faster at every shape, docs/b200/fp8.md)
         draw = None
         if p_drop > 0:
             draw = (torch.rand(n, d_msa, device=m.device, dtype=bf) > p_drop).to(bf)

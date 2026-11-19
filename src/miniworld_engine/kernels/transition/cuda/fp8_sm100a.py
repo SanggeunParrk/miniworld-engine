@@ -4,7 +4,8 @@ Off by default: with ``MINIWORLD_TRANSITION_FP8`` unset (and ``MINIWORLD_FP8`` o
 route (``route_sm100a``), bit-identical to the tree without this module. The switch is the one the H100 route reads (``fp8.PRESETS``), so
 ``MINIWORLD_FP8=safe`` / ``engine-fp8`` turn this route on at capability (10, 0) as well.
 
-The recipe is the H100 one (``fp8_sm90a.py``, docs/fp8.md "Transition forward"), on tcgen05 kernels in three launches (PDL chain):
+The recipe is the H100 one (``fp8_sm90a.py``, docs/fp8.md "Transition forward"), on tcgen05 kernels. D 128 / 256 (n 2 / 4; ``MINIWORLD_TRANSITION_FP8_FUSED``): ONE fused 2-CTA kernel
+(``sm100/fp8/tr8_fwd_sm100.cu``: LayerNorm -> e4m3 xn, expand + SwiGLU with e4m3 h in tensor memory, squeeze from tensor memory, residual; docs/b200/fp8.md section 8); the other widths in three launches (PDL chain):
 
 1. ``tf8_ln`` (``sm100/fp8/tf8_ln.cu``): fp32 LayerNorm, xn quantized straight to e4m3 (one power-of-two scale ``sx`` from the LayerNorm bound
    sqrt(D - 1) max|gamma| + max|beta|: cannot saturate, no calibration);
@@ -18,7 +19,7 @@ planes (``overflow_peak`` / ``rescale_all`` / ``fp8.check()``; ``sync`` guard re
 CUDA-graph capture). Scale floors: amax >= 1e-12 (stricter than H100's 1e-30: a scale product must stay finite in fp32).
 
 Environment (read at import): ``MINIWORLD_TRANSITION_FP8=calib``; ``_GUARD`` sync | lazy | off; ``_HEADROOM`` (16); ``_MINROWS`` (replaces ``ROW_GATE``);
-``_WIDTHS``.
+``_WIDTHS``; ``_FUSED`` (widths on the fused kernel, default 128,256), ``_FUSED_FLAGS`` (extra nvcc flags of its builds), ``_PAIRB`` (chain GEMMs on 2-CTA clusters sharing B by multicast).
 """
 
 from __future__ import annotations
@@ -44,10 +45,17 @@ MIN_ROWS: int | None = int(_MINROWS_ENV) if _MINROWS_ENV else None
 #: smallest row count routed per (D, n) (below it, and for a (D, n) not listed, the B200 default route runs). Measured on the B200 (docs/b200/fp8.md, same-process
 #: interleaved A/B against the default route, graph medians and sustained, idle gap 0.15 s): D 512 n 4 x0.50 at 1024 rows .. 0.77 at 65536+; D 512 n 2 x0.63 at 4096,
 #: 0.78 at 8192, 0.89 sustained at 16384 +; D 768 n 4 x1.07 at 1024, 0.90 at 2048, 0.60-0.65 from 4096; D 768 n 2 x1.30 at 1024, 1.16 at 2048, 0.51-0.76 from 4096.
-#: Not routed by default (no gain or a loss): D 384 (x0.93-1.09 at 4096-262144 rows, 1.5 at 1024), D 256 (x1.17-1.46), D 128 (x2.0): the three-launch chain is
-#: epilogue / launch bound at K <= 384; ``MINIWORLD_TRANSITION_FP8_MINROWS`` + ``_WIDTHS`` switch them on for experiments.
-ROW_GATE = {(512, 4): 1024, (512, 2): 4096, (768, 4): 4096, (768, 2): 4096}
-WIDTHS = tuple(int(w) for w in os.environ.get("MINIWORLD_TRANSITION_FP8_WIDTHS", "512,768").split(",") if w)
+#: D 128 / 256 run the FUSED one-kernel forward (tr8_fwd_sm100.cu, section 8 of docs/b200/fp8.md): D 128 n 4 sustained x1.00 at 16384 rows, 0.95 at 65536, 0.85-0.86 from 147456 (energy
+#: x0.83-0.86); D 128 n 2 x0.93 at 65536, 0.87-0.94 from 147456; D 256 n 4 x0.92 at 4096-16384, 0.83-0.84 from 65536 (energy x0.73-0.83).
+#: Not routed by default (no gain or a loss, measured with the built kernels): D 128 n 2 below 65536 rows (x1.00, energy x0.88-0.95), D 256 n 2 (sustained x1.00-1.09 to 0.95, cool graph 1.00-1.11),
+#: D 384 (chain x0.99-1.05 at 65536-262144 rows n 4, 1.16 n 2, 1.5 at 1024). ``MINIWORLD_TRANSITION_FP8_MINROWS`` + ``_WIDTHS`` switch them on for experiments.
+ROW_GATE = {(512, 4): 1024, (512, 2): 4096, (768, 4): 4096, (768, 2): 4096, (128, 4): 4096, (128, 2): 16384, (256, 4): 1024, (256, 2): 1024}
+#: (D, n) cells served only BELOW a row count (the default wins above it): D 256 n 2 (3-launch chain x0.78 at 1024-4096 rows, 1.00 at 8192, 1.39 at 16384; the fused kernel 1.07-1.11)
+ROW_MAX = {(256, 2): 8192}
+#: smallest row count at which the FUSED kernel runs a (D, n) (below it the 3-launch chain: the fused kernel has a ~24.6 us floor at D 256 n 4 below ~12000 rows where the chain takes 14.4 us at 1024 rows .. 22.7 us at 8192
+#: against the default 26.7 us): D 256 n 4 12288, D 256 n 2 never (chain below ROW_MAX, default above). D 128: fused from its gate.
+FUSED_MIN_ROWS = {(256, 4): 12288, (256, 2): 1 << 60}
+WIDTHS = tuple(int(w) for w in os.environ.get("MINIWORLD_TRANSITION_FP8_WIDTHS", "128,256,512,768").split(",") if w)
 PDL = True
 E4M3_MAX = 448.0
 AMAX_FLOOR = 1e-12
@@ -55,13 +63,30 @@ GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0,
 _CACHES: dict = {}  # per module (key: data_ptr of expand_a's weight; dropped when that tensor is freed)
 _LAZY: dict = {}
 
+FUSED_WIDTHS = tuple(int(w) for w in os.environ.get("MINIWORLD_TRANSITION_FP8_FUSED", "128,256").split(",") if w)  # widths run by the fused one-kernel e4m3 forward (tr8_fwd_sm100.cu); the others (and unlisted) the 3-launch chain
+_FUSED_FLAGS = tuple(os.environ.get("MINIWORLD_TRANSITION_FP8_FUSED_FLAGS", "").split())  # extra nvcc flags of the fused builds (experiments: -DSIG=1 -DNXS_=3 ...)
+
+PAIRB = os.environ.get("MINIWORLD_TRANSITION_FP8_PAIRB", "0") == "1"  # chain GEMMs on 2-CTA clusters sharing the B tile by multicast (tf8_gemm.cu PAIRB): A/B experiment, off by default
+
 _SPECS = (
+    ("f128n4", "fp8/tr8_fwd_sm100.cu", ("-DHID=512", *_FUSED_FLAGS)),
+    ("f128n2", "fp8/tr8_fwd_sm100.cu", ("-DHID=256", *_FUSED_FLAGS)),
+    ("f256n4", "fp8/tr8_fwd_sm100.cu", ("-DDIM=256", "-DHID=1024", *_FUSED_FLAGS)),
+    ("f256n2", "fp8/tr8_fwd_sm100.cu", ("-DDIM=256", "-DHID=512", *_FUSED_FLAGS)),
     ("ln", "fp8/tf8_ln.cu", ()),
     ("swiglu128", "fp8/tf8_gemm.cu", ("-DE4=1", "-DMODE=0", "-DBN=128")),
     ("resid128", "fp8/tf8_gemm.cu", ("-DE4=1", "-DMODE=1", "-DBN=128")),
     ("resid192", "fp8/tf8_gemm.cu", ("-DE4=1", "-DMODE=1", "-DBN=192")),
     ("resid256", "fp8/tf8_gemm.cu", ("-DE4=1", "-DMODE=1", "-DBN=256")),
 )
+
+if PAIRB:  # the cluster variants of the chain GEMMs are built (and planned by the prebuild) only when asked for
+    _SPECS += (
+        ("swiglu128p", "fp8/tf8_gemm.cu", ("-DE4=1", "-DMODE=0", "-DBN=128", "-DPAIRB=1")),
+        ("resid128p", "fp8/tf8_gemm.cu", ("-DE4=1", "-DMODE=1", "-DBN=128", "-DPAIRB=1")),
+        ("resid192p", "fp8/tf8_gemm.cu", ("-DE4=1", "-DMODE=1", "-DBN=192", "-DPAIRB=1")),
+        ("resid256p", "fp8/tf8_gemm.cu", ("-DE4=1", "-DMODE=1", "-DBN=256", "-DPAIRB=1")),
+    )
 
 
 def _specs() -> tuple[tuple[str, str, tuple[str, ...]], ...]:
@@ -89,7 +114,8 @@ def serves(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         return False
     rows = x.numel() // d
     gate = MIN_ROWS if MIN_ROWS is not None else ROW_GATE.get((d, wa.shape[0] // d))
-    return gate is not None and rows >= max(gate, 1)
+    top = None if MIN_ROWS is not None else ROW_MAX.get((d, wa.shape[0] // d))
+    return gate is not None and rows >= max(gate, 1) and (top is None or rows < top)
 
 
 def _pow2_floor(v: torch.Tensor) -> torch.Tensor:
@@ -168,7 +194,39 @@ def _bn_resid(m: int, d: int, nsm: int) -> int:
     return 192 if d % 192 == 0 else 128
 
 
+def _flag_hs(flags) -> int:
+    return 32 if "-DHS_=32" in flags else 64
+
+
+def _launch_fused(x2, cache, peak, eps, cubin=None, hs=None):
+    """One launch: the fused e4m3 forward (tr8_fwd_sm100.cu, 2-CTA pairs, rows a multiple of 128)."""
+    ext = _load()
+    m, d = x2.shape
+    hid = cache["wa8"].shape[0]
+    t, bf = ext.tmap, torch.bfloat16
+    hs = hs or _flag_hs(_FUSED_FLAGS)
+    out = torch.empty_like(x2)
+    tiles = m // 128
+    grid = min(num_sms(x2.device), tiles)
+    grid = max(grid - grid % 2, 2)
+    ext.launch_kernel(cubin or f"fp8_f{d}n{hid // d}", "tr8_fwd_sm100", grid, 512, 2,
+                      [t(x2, d, m, 64, 64), t(cache["wa8"].view(bf), d // 2, hid, 64, hs), t(cache["wb8"].view(bf), d // 2, hid, 64, hs),
+                       t(cache["ws8"].view(bf), hid // 2, d, 64, d // 2), t(out, d, m, 64, 64), cache["gamma"], cache["beta"], cache["scales"], peak,
+                       tiles, float(eps), x2, out], PDL)
+    return out
+
+
 def _launch(x2, cache, peak, eps):
+    d = x2.shape[1]
+    if d in FUSED_WIDTHS and d in (128, 256) and cache["wa8"].shape[0] in (2 * d, 4 * d) and x2.shape[0] >= FUSED_MIN_ROWS.get((d, cache["wa8"].shape[0] // d), 0):
+        m0 = x2.shape[0]
+        xp = x2 if m0 % 128 == 0 else torch.nn.functional.pad(x2, (0, 0, 0, -m0 % 128))
+        out = _launch_fused(xp, cache, peak, eps)
+        return out if m0 == xp.shape[0] else out[:m0]
+    return _launch_chain(x2, cache, peak, eps)
+
+
+def _launch_chain(x2, cache, peak, eps):
     ext = _load()
     m, d = x2.shape
     hid = cache["wa8"].shape[0]
@@ -180,18 +238,31 @@ def _launch(x2, cache, peak, eps):
                       [x2, cache["gamma"], cache["beta"], xn8, sc, m, d, float(eps)], PDL)
     h8 = torch.empty((m, hid), dtype=torch.uint8, device=x2.device)
     bf = torch.bfloat16
+    pb = PAIRB
     ma = t(xn8.view(bf), d // 2, m, 64, 128)
-    mb0, mb1 = t(cache["wa8"].view(bf), d // 2, hid, 64, 128), t(cache["wb8"].view(bf), d // 2, hid, 64, 128)
-    tiles = -(-m // 128) * (hid // 128)
-    ext.launch_kernel("fp8_swiglu128", "tf8_gemm_sm100", max(1, min(nsm, tiles)), 320, 1,
-                      [ma, mb0, mb1, h8, h8, sc, peak, m, hid, d, hid, 0], PDL)
+    hb = 64 if pb else 128                                    # B box rows: half of BN under PAIRB (each CTA of the pair loads half and multicasts)
+    mb0, mb1 = t(cache["wa8"].view(bf), d // 2, hid, 64, hb), t(cache["wb8"].view(bf), d // 2, hid, 64, hb)
+    mt = -(-m // 128)
+    if pb:
+        tiles = -(-mt // 2) * (hid // 128)
+        ext.launch_kernel("fp8_swiglu128p", "tf8_gemm_sm100", 2 * max(1, min(nsm // 2, tiles)), 320, 2,
+                          [ma, mb0, mb1, h8, h8, sc, peak, m, hid, d, hid, 0], PDL)
+    else:
+        tiles = mt * (hid // 128)
+        ext.launch_kernel("fp8_swiglu128", "tf8_gemm_sm100", max(1, min(nsm, tiles)), 320, 1,
+                          [ma, mb0, mb1, h8, h8, sc, peak, m, hid, d, hid, 0], PDL)
     out = torch.empty_like(x2)
     bn = _bn_resid(m, d, nsm)
     ma = t(h8.view(bf), hid // 2, m, 64, 128)
-    mb = t(cache["ws8"].view(bf), hid // 2, d, 64, bn)
-    tiles = -(-m // 128) * (d // bn)
-    ext.launch_kernel(f"fp8_resid{bn}", "tf8_gemm_sm100", max(1, min(nsm, tiles)), 320, 1,
-                      [ma, mb, mb, out, x2, sc, peak, m, d, hid, d, d], PDL)
+    mb = t(cache["ws8"].view(bf), hid // 2, d, 64, bn // 2 if pb else bn)
+    if pb:
+        tiles = -(-mt // 2) * (d // bn)
+        ext.launch_kernel(f"fp8_resid{bn}p", "tf8_gemm_sm100", 2 * max(1, min(nsm // 2, tiles)), 320, 2,
+                          [ma, mb, mb, out, x2, sc, peak, m, d, hid, d, d], PDL)
+    else:
+        tiles = mt * (d // bn)
+        ext.launch_kernel(f"fp8_resid{bn}", "tf8_gemm_sm100", max(1, min(nsm, tiles)), 320, 1,
+                          [ma, mb, mb, out, x2, sc, peak, m, d, hid, d, d], PDL)
     return out
 
 

@@ -260,10 +260,19 @@ def fwd_group(batch: int, heads: int, length: int) -> int:
     return max(1, min(batch, GROUP_TASKS // per))
 
 
-def _core_forward(q, k, v, bias, scale, need, hb=False, d16=False, d16c=False, qs=False):
+def _core_forward(q, k, v, bias, scale, need, hb=False, d16=False, d16c=False, qs=False, kind=None, site=None):
     """The core's forward over [B, N, S, H, 32] tensors in launches of `fwd_group` samples -> (out [B, N, S, H, 32], lse or empty).
     hb: the bias is bf16(bias * log2 e) (inference: see HB_INFER); d16 (with hb): 16-channel heads whose v carries 1.0 in channel 16 (D16_INFER)."""
     B, N, S, H, _ = q.shape
+    if kind is not None and hb and not need and not d16:  # opt-in e4m3 P / V core (docs/b200/fp8.md "TriAttn"; off unless fp8.enable_triattn set the switches)
+        from . import h100_sm90 as _hs
+
+        if _hs.FP8_PV:
+            from . import b200_fp8
+
+            o8 = b200_fp8.route(kind, q, k, v, bias, scale, qs, site)
+            if o8 is not None:
+                return o8, q.new_empty(0, dtype=torch.float32)
     e = _core(_rows_per_task(S, B * H), hb, d16, d16c=d16c, qs=qs)
     g = fwd_group(B, H, S)
     if g >= B:
@@ -395,7 +404,7 @@ def fused_forward(
         x, lw, lb, eps, w4f, wbf, mask if mask is not None else _empty_mask(pair.device), B, Lp, trans, bt, lr, gx
     )
     shp = (B, Lp, Lp, H, D)
-    o, lse = _core_forward(q.view(shp), k.view(shp), v.view(shp), bias, D**-0.5, need, hb, qs=qs)
+    o, lse = _core_forward(q.view(shp), k.view(shp), v.view(shp), bias, D**-0.5, need, hb, qs=qs, kind="fused", site=wv)
     E32 = x.new_empty(0, dtype=torch.float32)
     if gx:
         y = m.tri_tailg(
@@ -747,10 +756,19 @@ def wide_inference(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5
     return y
 
 
-def _core64_forward(q, k, v, bias, scale, need=False, hb=False, qs=False):
+def _core64_forward(q, k, v, bias, scale, need=False, hb=False, qs=False, kind=None, site=None):
     """The head-dim-64 core over [B, N, S, H, 64] tensors -> (out [B, N, S, H, 64], base-2 lse [B, N, H, S] or empty unless `need`);
     hb: the bias is bf16(bias * log2 e) (inference: HB64_INFER)."""
     assert not (hb and need)
+    if kind is not None and hb:  # opt-in e4m3 P / V core of the 64-channel heads (docs/b200/fp8.md "TriAttn"; the whitelist kind "d64")
+        from . import h100_sm90 as _hs
+
+        if _hs.FP8_PV and _hs.FP8_PV_D64:
+            from . import b200_fp8
+
+            o8 = b200_fp8.route(kind, q, k, v, bias, scale, qs, site)
+            if o8 is not None:
+                return o8, q.new_empty(0, dtype=torch.float32)
     o, lse, _ = _core64(hb, qs=qs).triattn_fwd64(q, k, v, bias, scale, q.new_empty(0), need, q.new_empty(0, dtype=torch.float32))
     return o, lse
 
@@ -817,7 +835,7 @@ def wide_forward(
             x, lnw, lnb, eps, wcat, n_head, mk, B, Lp, stats, trans, gb if gb is not None and not nog else E32, bt, lr, nog
         )
     shp = (B, Lp, Lp, n_head, S)
-    core = functools.partial(_core_forward, hb=hb, d16=d16, qs=qs_for(hb, head_dim, Lp)) if S == D else functools.partial(_core64_forward, hb=hb, qs=qs_for(hb, head_dim, Lp)) if S == 64 else _core128_forward
+    core = functools.partial(_core_forward, hb=hb, d16=d16, qs=qs_for(hb, head_dim, Lp), kind="unfused", site=wcat) if S == D else functools.partial(_core64_forward, hb=hb, qs=qs_for(hb, head_dim, Lp), kind="d64", site=wcat) if S == 64 else _core128_forward
     o, lse = core(q.view(shp), k.view(shp), v.view(shp), bias, head_dim**-0.5, need)
     o2 = o.view(-1, HDp)
     if nog:

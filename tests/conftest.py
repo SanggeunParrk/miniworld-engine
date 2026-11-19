@@ -38,3 +38,19 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                 item.add_marker(
                     pytest.mark.skip(reason=f"needs an {m.upper()} (sm_{CARDS[m][0]}{CARDS[m][1]}), this is sm_{cap[0]}{cap[1]}")
                 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_tf32_flags():
+    """The measure harness (``speed.make_step`` / ``accuracy``) sets ``torch.backends.{cuda.matmul,cudnn}.allow_tf32`` process-wide; a test that builds a
+    step through it would leak that into every later test of the process (the B200 sampler glue test compares against fp32 PyTorch and fails under TF32).
+    Restore the flags after each test (n14 integration: found when the atom DiT FP8 test file ran before ``test_misc_b200.py`` in one process)."""
+    import sys
+
+    torch = sys.modules.get("torch")
+    if torch is None or not hasattr(torch, "backends"):
+        yield
+        return
+    flags = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+    yield
+    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = flags

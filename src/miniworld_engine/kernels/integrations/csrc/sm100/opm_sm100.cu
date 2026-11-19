@@ -893,6 +893,7 @@ constexpr int THREADS = 512;
 constexpr int O_OP = NST * STAGE * 2;
 constexpr uint32_t IDESC = idesc_bf16(256, 256);
 constexpr uint32_t ZCOL = 384;
+constexpr uint32_t IDESC8 = (1u << 4) | ((uint32_t)(256 >> 3) << 17) | ((uint32_t)(256 >> 4) << 24);   // F8: D = f32, A = B = e4m3 (format 0), K-major, M 256 N 256
 constexpr int RASTER = 4;                    // i blocks per raster group (A / B panels stay in L2)
 // per c_z (128, or 64: MiniWorld's B200 trunk): each CTA of the pair holds the weight rows of c_z / 2 outputs
 template <int CZF>
@@ -919,6 +920,15 @@ __device__ __forceinline__ void load_3d_2sm(const void* map, uint32_t dst, uint3
 __device__ __forceinline__ void mma2(uint32_t d, uint64_t a, uint64_t b, uint32_t idesc, uint32_t acc) {
   asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %4, 0;\ntcgen05.mma.cta_group::2.kind::f16 [%0], %1, %2, %3, p;\n}\n"
                :: "r"(d), "l"(a), "l"(b), "r"(idesc), "r"(acc) : "memory");
+}
+__device__ __forceinline__ void mma2_f8(uint32_t d, uint64_t a, uint64_t b, uint32_t idesc, uint32_t acc) {   // e4m3 x e4m3, K = 32 per instruction (EXPERIMENTAL opt-in route)
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %4, 0;\ntcgen05.mma.cta_group::2.kind::f8f6f4 [%0], %1, %2, %3, p;\n}\n"
+               :: "r"(d), "l"(a), "l"(b), "r"(idesc), "r"(acc) : "memory");
+}
+template <bool F8>
+__device__ __forceinline__ void mma_main(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) {
+  if constexpr (F8) mma2_f8(d, a, b, IDESC8, acc);
+  else mma2(d, a, b, IDESC, acc);
 }
 // arrives on the barrier at this offset in both CTAs once every MMA issued so far has completed
 __device__ __forceinline__ void commit2(uint32_t bar) {
@@ -955,7 +965,7 @@ __device__ __forceinline__ int first_half(int p) { return (p & 1) ? 0 : 1; }
 // DB (c_z 64): the two passes in flight own disjoint TMEM halves (columns [256 (p & 1), + 256)), so a pass never waits for the drain of the
 // previous one (the 0.5-1 us pass-to-pass bubble of the three-slot rotation); each pass's projection lands in the first c_z columns of its
 // own, drained, half and the epilogue warps sum the four passes' partials in fp32 registers (no TMEM column is left for a persistent z).
-template <int CZF, bool DB>
+template <int CZF, bool DB, bool F8 = false>   // F8 (EXPERIMENTAL, opt-in: opm_fp8_b200): u8 A2 / BT maps, e4m3 mainloop (K = 128 per stage), the product scaled by dq in the drain; false = the default kernel
 __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fz::THREADS, 1) opm_fused_sm100(
     int N, int nk, int nitems,
     const __grid_constant__ CUtensorMap amap,     // A2 as (s, c 32, i N), box (64, 8, 16), 128B swizzle
@@ -963,8 +973,9 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fz::THREADS, 1) opm_
     const __grid_constant__ CUtensorMap wmap,     // the k-permuted Wo [c_z][1024], box (64, c_z / 2)
     const uint32_t* __restrict__ BITS, int W,     // the prologue's bit mask [N][W = S/32]
     const void* __restrict__ BIAS, int bias_bf16,
-    const __nv_bfloat16* __restrict__ RES, __nv_bfloat16* __restrict__ Z, int after) {
+    const __nv_bfloat16* __restrict__ RES, __nv_bfloat16* __restrict__ Z, int after, float dq = 1.f) {
   using namespace fz;
+  constexpr int KE = F8 ? 128 : BK;                 // s per stage (the map coordinate of a stage)
   using F = FZ<CZF>;
   constexpr int WC = F::WC, O_W = F::O_W, O_BAR = F::O_BAR;
   constexpr uint32_t IDESC_P = F::IDESC_P;
@@ -1027,8 +1038,8 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fz::THREADS, 1) opm_
             if (g >= NST) wait(EMPTY + 8 * s, ((g / NST) - 1) & 1);
             if (leader) expect_tx(FULL + 8 * s, 2 * STAGE * 2);
             const uint32_t st = sb + s * STAGE * 2;
-            load_3d_2sm(&amap, st, FULL + 8 * s, kb * BK, q * 8, i0);
-            load_2d_2sm(&bmap, st + ATILE * 2, FULL + 8 * s, kb * BK, jrow);
+            load_3d_2sm(&amap, st, FULL + 8 * s, kb * KE, q * 8, i0);
+            load_2d_2sm(&bmap, st + ATILE * 2, FULL + 8 * s, kb * KE, jrow);
           }
       }
     }
@@ -1073,7 +1084,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fz::THREADS, 1) opm_
             const uint32_t st = sb + s * STAGE * 2;
 #pragma unroll
             for (int ks = 0; ks < BK / 16; ++ks) {
-              mma2(d, sdesc(st + ks * 32, 16, 1024, 2), sdesc(st + ATILE * 2 + ks * 32, 16, 1024, 2), IDESC, (kb | ks) ? 1u : 0u);
+              mma_main<F8>(d, sdesc(st + ks * 32, 16, 1024, 2), sdesc(st + ATILE * 2 + ks * 32, 16, 1024, 2), (kb | ks) ? 1u : 0u);
             }
             commit2(EMPTY + 8 * s);
             if (pp >= 0 && test_cl(OPF, pp & 1)) { proj(pp); pp = -1; }
@@ -1114,7 +1125,7 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fz::THREADS, 1) opm_
             const uint32_t st = sb + s * STAGE * 2;
 #pragma unroll
             for (int ks = 0; ks < BK / 16; ++ks) {
-              mma2(d, sdesc(st + ks * 32, 16, 1024, 2), sdesc(st + ATILE * 2 + ks * 32, 16, 1024, 2), IDESC, (kb | ks) ? 1u : 0u);
+              mma_main<F8>(d, sdesc(st + ks * 32, 16, 1024, 2), sdesc(st + ATILE * 2 + ks * 32, 16, 1024, 2), (kb | ks) ? 1u : 0u);
             }
             commit2(EMPTY + 8 * s);
             if (pp >= 0 && test_cl(OPF, pp & 1)) { proj(pp); pp = -1; }
@@ -1144,6 +1155,10 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fz::THREADS, 1) opm_
           tmem_ld32(ta, v);
           tmem_ld32(ta + 32, v + 32);
           tmem_wait_ld();
+          if constexpr (F8) {
+#pragma unroll
+            for (int u = 0; u < 64; ++u) v[u] *= dq;   // the e4m3 product: the dequantisation scale sa sb before the bf16 rounding of O
+          }
           if (hh == 0 && p >= 1) wait(OPE, (p - 1) & 1);   // the previous pass's projection has read Opair
 #pragma unroll
           for (int bb = 0; bb < 2; ++bb) {
@@ -1180,6 +1195,10 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fz::THREADS, 1) opm_
           tmem_ld32(ta, v);
           tmem_ld32(ta + 32, v + 32);
           tmem_wait_ld();
+          if constexpr (F8) {
+#pragma unroll
+            for (int u = 0; u < 64; ++u) v[u] *= dq;   // the e4m3 product: the dequantisation scale sa sb before the bf16 rounding of O
+          }
           tc_fence_before();
           __syncwarp();
           if (lane == 0) arrive_leader_relaxed(ACCE + 8 * r);
@@ -1727,9 +1746,9 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
 
 
 // The fused inference outer product + projection (opm_fused_sm100).  a2 / bt: the prologue's [N*32, S]; bits: its int32 [N, S/32] mask;
-template <int CZF, bool DB>
+template <int CZF, bool DB, bool F8 = false>
 static torch::Tensor opm_fused_launch(const torch::Tensor& a2, const torch::Tensor& bt, const torch::Tensor& bits, const torch::Tensor& wperm,
-                                      const torch::Tensor& bias, const c10::optional<torch::Tensor>& residual, int64_t after) {
+                                      const torch::Tensor& bias, const c10::optional<torch::Tensor>& residual, int64_t after, float dq = 1.f) {
   using namespace fz;
   using F = FZ<CZF>;
   const long rows = a2.size(0), S = a2.size(1), N = rows / CH;
@@ -1737,33 +1756,37 @@ static torch::Tensor opm_fused_launch(const torch::Tensor& a2, const torch::Tens
   if (has_res)
     TORCH_CHECK(residual->scalar_type() == torch::kBFloat16 && residual->is_contiguous() && residual->numel() == N * N * CZF,
                 "residual: contiguous bf16 [1, N, N, c_z]");
-  auto z = torch::empty({1, N, N, (long)CZF}, a2.options());
-  CUtensorMap am = make_map<3>(a2.data_ptr(), {(uint64_t)S, (uint64_t)CH, (uint64_t)N}, {(uint64_t)S, (uint64_t)S * CH}, {64, 8, 16},
-                               CU_TENSOR_MAP_SWIZZLE_128B, "A2");
-  CUtensorMap bm = make_map<2>(bt.data_ptr(), {(uint64_t)S, (uint64_t)rows}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "BT");
+  auto z = torch::empty({1, N, N, (long)CZF}, a2.options().dtype(torch::kBFloat16));
+  constexpr int KE = F8 ? 128 : BK;   // s per stage: 128 e4m3 or 64 bf16 = one 128-byte swizzle row
+  CUtensorMap am = F8 ? make_map<3>(a2.data_ptr(), {(uint64_t)S, (uint64_t)CH, (uint64_t)N}, {(uint64_t)S, (uint64_t)S * CH}, {128, 8, 16},
+                                    CU_TENSOR_MAP_SWIZZLE_128B, "A2q", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1)
+                      : make_map<3>(a2.data_ptr(), {(uint64_t)S, (uint64_t)CH, (uint64_t)N}, {(uint64_t)S, (uint64_t)S * CH}, {64, 8, 16},
+                                    CU_TENSOR_MAP_SWIZZLE_128B, "A2");
+  CUtensorMap bm = F8 ? make_map<2>(bt.data_ptr(), {(uint64_t)S, (uint64_t)rows}, {(uint64_t)S}, {128, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "BTq", CU_TENSOR_MAP_DATA_TYPE_UINT8, 1)
+                      : make_map<2>(bt.data_ptr(), {(uint64_t)S, (uint64_t)rows}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "BT");
   CUtensorMap wm = make_map<2>(wperm.data_ptr(), {(uint64_t)NCH, (uint64_t)CZF}, {(uint64_t)NCH}, {64, (uint32_t)F::WR},
                                CU_TENSOR_MAP_SWIZZLE_128B, "Wo");
   const int nitems = (int)((N / 32) * (N / 8));
   static bool attr = false;
   static int max_clusters = 0;
   if (!attr) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(opm_fused_sm100<CZF, DB>, cudaFuncAttributeMaxDynamicSharedMemorySize, F::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(opm_fused_sm100<CZF, DB, F8>, cudaFuncAttributeMaxDynamicSharedMemorySize, F::SMEM));
     // the persistent grid: as many CTA pairs as can be resident at once (a pair takes two SMs of one GPC; the runtime reports 64 on
     // this 148-SM card), so no pair of the grid waits for a second wave
     cudaLaunchConfig_t cfg = {};
     cfg.gridDim = dim3(2 * (num_sms(a2.device().index()) / 2));
     cfg.blockDim = dim3(THREADS);
     cfg.dynamicSmemBytes = F::SMEM;
-    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&max_clusters, (void*)opm_fused_sm100<CZF, DB>, &cfg));
+    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&max_clusters, (void*)opm_fused_sm100<CZF, DB, F8>, &cfg));
     TORCH_CHECK(max_clusters > 0, "opm_fused_sm100: no CTA pair fits an SM pair");
     attr = true;
   }
   const int clusters = std::min(nitems, max_clusters);
-  opm_fused_sm100<CZF, DB><<<2 * clusters, THREADS, F::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)N, (int)(S / BK), nitems, am, bm, wm, reinterpret_cast<const uint32_t*>(bits.data_ptr<int>()), (int)(S / 32),
+  opm_fused_sm100<CZF, DB, F8><<<2 * clusters, THREADS, F::SMEM, at::cuda::getCurrentCUDAStream()>>>(
+      (int)N, (int)(S / KE), nitems, am, bm, wm, reinterpret_cast<const uint32_t*>(bits.data_ptr<int>()), (int)(S / 32),
       bias.data_ptr(), bias.scalar_type() == torch::kBFloat16 ? 1 : 0,
       has_res ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
-      reinterpret_cast<__nv_bfloat16*>(z.data_ptr<at::BFloat16>()), (int)after);
+      reinterpret_cast<__nv_bfloat16*>(z.data_ptr<at::BFloat16>()), (int)after, dq);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return z;
 }
@@ -1789,7 +1812,25 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
                   : opm_fused_launch<128, false>(a2, bt, bits, wperm, bias, residual, after);
 }
 
+// EXPERIMENTAL (opt-in e4m3 route, docs/b200/fp8.md): opm_fused_infer on e4m3 A2 / BT (e4m3(value * q): opm_prologue_f8 / opm_wprologue_f8); the mainloop runs kind::f8f6f4 (K = 128 per stage)
+// and the drain multiplies the fp32 product by dq = sa sb before its bf16 rounding; everything after (Opair, the projection, count, bias, residual) is the bf16 kernel s.
+torch::Tensor opm_fused_infer_f8(torch::Tensor a2, torch::Tensor bt, torch::Tensor bits, torch::Tensor wperm, torch::Tensor bias,
+                                 c10::optional<torch::Tensor> residual, int64_t after, double dq) {
+  TORCH_CHECK(a2.is_cuda() && a2.scalar_type() == torch::kFloat8_e4m3fn && a2.is_contiguous() && a2.dim() == 2 && bt.sizes() == a2.sizes() &&
+              bt.scalar_type() == torch::kFloat8_e4m3fn && bt.is_contiguous(), "a2 / bt: contiguous e4m3 [N * 32, S]");
+  const long rows = a2.size(0), S = a2.size(1), N = rows / CH;
+  TORCH_CHECK(rows % CH == 0 && N % 32 == 0 && S % 128 == 0 && S >= 128, "fused OPM e4m3 (sm100): N % 32, S % 128");
+  TORCH_CHECK(bits.scalar_type() == torch::kInt32 && bits.is_contiguous() && bits.dim() == 2 && bits.size(0) == N && bits.size(1) == S / 32, "bits: int32 [N, S / 32]");
+  const long cz = wperm.dim() == 2 ? wperm.size(0) : 0;
+  TORCH_CHECK((cz == 64 || cz == 128) && wperm.scalar_type() == torch::kBFloat16 && wperm.is_contiguous() && wperm.size(1) == NCH, "wperm: bf16 [c_z 64 | 128, 1024] (k-permuted)");
+  TORCH_CHECK((bias.scalar_type() == torch::kFloat32 || bias.scalar_type() == torch::kBFloat16) && bias.is_contiguous() && bias.numel() == cz, "bias: fp32 or bf16 [c_z]");
+  return cz == 64 ? opm_fused_launch<64, true, true>(a2, bt, bits, wperm, bias, residual, after, (float)dq)
+                  : opm_fused_launch<128, false, true>(a2, bt, bits, wperm, bias, residual, after, (float)dq);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("opm_fused_infer_f8", &opm_fused_infer_f8, "EXPERIMENTAL sm100 fused outer product + projection on e4m3 A2 / BT (the product scaled by dq)",
+        py::arg("a2"), py::arg("bt"), py::arg("bits"), py::arg("wperm"), py::arg("bias"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("dq") = 1.0);
   m.def("opm_epilogue", &opm_epilogue, "sm100 fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
         py::arg("O"), py::arg("norm"), py::arg("wo"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(),
         py::arg("after") = 0, py::arg("asym") = py::none());

@@ -254,7 +254,11 @@ def _forward(args: list[torch.Tensor], eps: float, after: bool, dmin: float, dof
         wext = _ext_wide()
         # the biases in bf16, as the module's bf16 Linear adds them (its fp32 accumulation, one rounding of the sum)
         pb, roff = _pb_arg(pb16, w16, _seg_offsets(ps)) if has_pb else (m.new_empty((0,), dtype=torch.float32), CH)
-        a2, bt, stats, bits = wext.opm_wprologue(m, mk, lnw_, lnb_, float(eps), wa16, wb16, pb, bool(save), roff)
+        if f8 is not None:  # the wide prologue writes e4m3 A2 / BT itself (the projection biases added before the cast), no cast pass
+            a2, bt, bits = wext.opm_wprologue_f8(m, mk, lnw_, lnb_, float(eps), wa16, wb16, pb, roff, f8["qa_host"], f8["qb_host"])
+            stats, pre8 = None, True
+        else:
+            a2, bt, stats, bits = wext.opm_wprologue(m, mk, lnw_, lnb_, float(eps), wa16, wb16, pb, bool(save), roff)
     elif f8 is not None:  # the prologue writes e4m3 A2 / BT itself (qa, qb: the static scales), no cast pass
         a2, bt, bits = ext.opm_prologue_f8(m, mk, lnw_, lnb_, float(eps), wa16, wb16, f8["qa_host"], f8["qb_host"])
         stats, pre8 = None, True
@@ -308,11 +312,23 @@ def _fused_forward(args: list[torch.Tensor], eps: float, after: bool) -> torch.T
         flat = args[12] if len(args) > 12 and args[12].numel() else ext.opm_cast_bf16([p.detach().contiguous() for p in ps], 2)
         wa16, wb16, wo16, bo16, *pb16 = _bf16_views(flat, ps)
     lnw_, lnb_ = lnw.detach().contiguous(), lnb.detach().contiguous()
+    f8 = None
+    if _F8_ON():  # opt-in e4m3 product inside the fused kernel (opm_fp8_b200.serves_fused, docs/b200/fp8.md)
+        from . import opm_fp8_b200 as _f8b
+
+        f8 = _f8b.serves_fused(args, n, m.shape[0])
     if has_pb:
         pb, roff = _pb_arg(pb16, flat, _seg_offsets(ps))
-        a2, bt, _, bits = _ext_wide().opm_wprologue(m, mk, lnw_, lnb_, float(eps), wa16, wb16, pb, False, roff)
+        if f8 is not None:
+            a2, bt, bits = _ext_wide().opm_wprologue_f8(m, mk, lnw_, lnb_, float(eps), wa16, wb16, pb, roff, f8["qa_host"], f8["qb_host"])
+        else:
+            a2, bt, _, bits = _ext_wide().opm_wprologue(m, mk, lnw_, lnb_, float(eps), wa16, wb16, pb, False, roff)
+    elif f8 is not None:
+        a2, bt, bits = ext.opm_prologue_f8(m, mk, lnw_, lnb_, float(eps), wa16, wb16, f8["qa_host"], f8["qb_host"])
     else:
         a2, bt, _, _, bits = ext.opm_prologue(m, mk, lnw_, lnb_, float(eps), wa16, wb16, False, False)
+    if f8 is not None:
+        return ext.opm_fused_infer_f8(a2, bt, bits, wo16, bo16, residual, int(after), f8["dq_host"]).view(1, n, n, -1)
     return ext.opm_fused_infer(a2, bt, bits, wo16, bo16, residual, int(after)).view(1, n, n, -1)
 
 

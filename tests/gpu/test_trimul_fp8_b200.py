@@ -317,3 +317,43 @@ def test_rf3_graph_follows_the_mask(f8):
         y0 = m(x, mask)
     assert _rel(y, y64, x) < 0.06 and _rel(y, y64, x) < 9 * _rel(y0, y64, x)
     assert f8.GUARD_STATS["calibrations"] == 1
+
+
+# ---------------------------------------------------------------------------------------------------- quiet-GPU gate re-measurement + wider sweeps (agent G)
+def test_remeasured_gates(f8):
+    """MIN_L after the quiet-GPU re-measurement (docs/b200/fp8.md): D384 serves from 128 (bidirectional) / 256, the D128 bidirectional block from 384; the default route unchanged below."""
+    assert f8.MIN_L[(384, 0)] == 128 and f8.MIN_L[(384, 1)] == 256 and f8.MIN_L[(384, 2)] == 256 and f8.MIN_L[(128, 0)] == 384
+    m = _make(384, 1)
+    x = torch.randn(1, 256, 256, 384, device="cuda").bfloat16()
+    with torch.no_grad():
+        f8.POLICY = None
+        y0 = m(x, None)
+        f8.POLICY, f8.GUARD, f8._MINL_ENV = "calib", "lazy", None
+        m(x, None)
+        assert f8.serves(m, x, None, False)
+        assert not f8.serves(m, x[:, :128, :128].contiguous(), None, False)
+        f8.POLICY = None
+        y1 = m(x, None)
+    assert torch.equal(y0, y1)
+
+
+@pytest.mark.parametrize("d,kind,n,nb", [(384, 0, 128, 1), (384, 0, 256, 1), (512, 0, 256, 1), (512, 2, 256, 1), (128, 1, 256, 2), (256, 1, 256, 2), (128, 1, 128, 4)])
+def test_accuracy_bidirectional_d384_d512_and_batches(f8, d, kind, n, nb):
+    """D384 / D512 bidirectional and B > 1: update error < 6 % (bidirectional < 8 %), < 7.5x the bf16 default's, the route ran."""
+    m = _make(d, kind)
+    torch.manual_seed(3)
+    x = torch.randn(nb, n, n, d, device="cuda").bfloat16()
+    mask = torch.ones(nb, n, dtype=torch.bool, device="cuda")
+    mask[:, n - 5 :] = False
+    with torch.no_grad():
+        f8.POLICY = None
+        y0 = m(x, mask)
+        y64 = _gold(m, d, kind, x, mask)
+        f8.POLICY, f8.GUARD, f8._MINL_ENV = "calib", "lazy", "0"
+        y1 = m(x, mask)
+        peak = f8.overflow_peak()
+    e0, e1 = _rel(y0, y64, x), _rel(y1, y64, x)
+    assert torch.isfinite(y1.float()).all() and peak <= 448.0
+    assert e1 < (0.08 if kind == 0 else 0.06) and e1 < 7.5 * e0, (e0, e1)
+    assert not torch.equal(y0, y1)
+    print("TriMul", d, kind, n, nb, "bf16", e0, "e4m3", e1)

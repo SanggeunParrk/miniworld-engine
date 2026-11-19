@@ -252,8 +252,10 @@ def _esm_fwd(
 ) -> torch.Tensor:
     """ESMFold2's block output [A, 1, N, 128] bf16 (inference). ``cos`` / ``sin``: the rotary tables, fp32 [n, 16] at the padded length."""
     from miniworld_engine.kernels.augmented_attention.cuda import b200_atom as rows
+    from miniworld_engine.kernels.augmented_attention.cuda.b200_atom import f8 as _f8
     from miniworld_engine.kernels.augmented_attention.cuda.b200_atom_local import esm as local
 
+    f8 = _f8 if _f8.ENABLED else None  # FP8 (opt-in, ``b200_atom.f8``)
     a, _, n0, _ = single.shape
     n = _padded_length(n0)
     m = a * n
@@ -283,6 +285,11 @@ def _esm_fwd(
             bs = _kv_pack(weights, True)[1]
             wq, wk = qkw  # (the affine-free q / k RMSNorm: constant fp32 ones)
             # Q / K leave the projection kernel normalised and rotated (``-DQKROPE=1``; round 3 part 4: one launch fewer)
+            if f8 is not None and f8.serves("pre", m, False):  # FP8 (opt-in): the e4m3 projections, same epilogue (RMS / rotary on the staged rows)
+                qn, kn, v, sg = f8.pre_fwd(
+                    s2, mod, wp[0], wp[1], mkv=mkv, bs=bs, eps=RMS_EPS, parallel=True, rms=True, raw=True, rope=(wq, wk, cos, sin, RMS_EPS)
+                )
+                return mod, v, sg, qn, kn
             qn, kn, v, sg, _, _ = cast(tuple, rows.pre_fwd_kv(
                 s2, mod, wp[0], wp[1], mkv, bs, eps=RMS_EPS, parallel=True, rms=True, raw=True, rope=(wq, wk, cos, sin, RMS_EPS)
             ))
@@ -291,7 +298,10 @@ def _esm_fwd(
         mod, v, sg, qn, kn = chain()
         bias2 = side()
         o = local.attn_esm_sm100(qn.view(a, n, DS_), kn.view(a, n, DS_), v.view(a, n, DS_), bias2)
-        out = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, eps=RMS_EPS, rms=True, raw=True)[0]
+        if f8 is not None and f8.serves("post", m, False):
+            out = f8.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, eps=RMS_EPS, rms=True, raw=True)
+        else:
+            out = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, eps=RMS_EPS, rms=True, raw=True)[0]
     return _unpadded(out.view(a, 1, n, DS_), single.shape)
 
 

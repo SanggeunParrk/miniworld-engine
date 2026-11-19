@@ -181,6 +181,9 @@ def prebuild_sm100(target, rows):
             for name in ("prex_eb", "prexp_eb"):  # (round 3 part 12: inference, the pair bias inside the projection launch)
                 stem, _, _, _, *defs = b200_atom.KERNELS[name]
                 calls.append(ft.partial(b200_atom.cubin, stem, *defs))
+            from .b200_atom import f8 as _atom_f8
+
+            calls.extend(_atom_f8.prebuild_items())  # (agent E: the opt-in e4m3 pre / post row builds, ``b200_atom.f8``)
         var_modes = {mode for m, f, mode in atom if m in VARIANT_CORE and f == f32}
         if var_modes:  # the variant builds (local_dit_b200._run_variant: every build of the tables is loaded, whatever the model)
             calls.append(ft.partial(b200_atom.cubin, "conf_mask"))

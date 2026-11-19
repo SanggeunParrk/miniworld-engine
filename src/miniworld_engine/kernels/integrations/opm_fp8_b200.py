@@ -25,9 +25,11 @@ E4M3 = torch.float8_e4m3fn
 MIN_S: int | None = None
 
 
-def _gate(s: int, n: int) -> bool:
+def _gate(s: int, n: int, wide: bool = False) -> bool:
     if MIN_S is not None:
         return s >= MIN_S
+    if wide:  # d_msa 128 / 256 or c_z 256 / 384 / 512 (no bf16 fused kernel; the wide e4m3 prologue + product + epilogue): 0.84-0.95 from padded S 256 at N 256-768 (docs/b200/fp8.md); S 128 0.92-0.96 stays bf16
+        return s >= 256
     return s >= 1024 or (s >= 512 and n >= 256)
 
 
@@ -51,6 +53,9 @@ def _ext():
 
 def prebuild_items():
     yield _ext
+    from . import pwa_fp8_b200 as _pb  # the grouped PWA contraction extension (docs/b200/fp8.md): its plan entry rides on this family
+
+    yield _pb._ext_grouped
 
 
 def _scales(args, device):
@@ -66,19 +71,45 @@ def _scales(args, device):
     pbias = torch.cat([args[9], args[11]]) if args[9].numel() and len(args) > 11 and args[11].numel() else None
     s = _h.bound_scales(lnw, lnb, wa, wb, pbias).to(device).contiguous()
     qh = (1.0 / s).tolist()
-    c = _CACHES[key] = {"qa_host": float(qh[0]), "qb_host": float(qh[1]), "s": s, "q": (1.0 / s).contiguous(), "sa": s[0].clone(), "sb": s[1].clone()}
+    c = _CACHES[key] = {"qa_host": float(qh[0]), "qb_host": float(qh[1]), "dq_host": float(s[0].item() * s[1].item()), "s": s, "q": (1.0 / s).contiguous(), "sa": s[0].clone(), "sb": s[1].clone()}
     weakref.finalize(wa, _CACHES.pop, key, None)
     return c
 
 
 def serves(args, n: int, s: int, save: bool):
     """The scale entry when the route takes this ``opm_sm100._forward`` call (inference, bf16 activations, ``MINIWORLD_OPM_FP8=bound``, shape gate), else None."""
-    if save or _h.POLICY != "bound" or args[0].dtype != torch.bfloat16 or not _gate(s, n):
+    wide = args[0].shape[-1] != 64 or args[6].shape[0] != 128
+    if save or _h.POLICY != "bound" or args[0].dtype != torch.bfloat16 or not _gate(s, n, wide):
         return None
     c = _scales(args, args[0].device)
     if c is None:
         STATS["declined"] += 1
         return None
+    return c
+
+
+#: gate of the fused e4m3 kernel (the bf16 fused kernel serves S <= 512): padded S >= 256 (`_gate_fused`); MIN_S_FUSED / MIN_S (the other routes' override) replace it
+MIN_S_FUSED: int | None = None
+
+
+def _gate_fused(s: int, n: int) -> bool:
+    if MIN_S is not None:
+        return s >= MIN_S
+    if MIN_S_FUSED is not None:
+        return s >= MIN_S_FUSED
+    return s >= 256  # measured (docs/b200/fp8.md): S 256 0.94-0.95, S 384 0.87-0.89, S 512 0.78-0.87 at L 384-1024; S 128 is flat (0.985-0.996): bf16
+
+
+def serves_fused(args, n: int, s: int):
+    """The scale entry when the fused e4m3 kernel (``opm_fused_infer_f8``) takes this ``opm_sm100._fused_forward`` call (inference, bf16, ``MINIWORLD_OPM_FP8=bound``, shape gate), else None."""
+    if _h.POLICY != "bound" or args[0].dtype != torch.bfloat16 or not _gate_fused(s, n):
+        return None
+    c = _scales(args, args[0].device)
+    if c is None:
+        STATS["declined"] += 1
+        return None
+    STATS["calls"] += 1
+    _h.GUARD_STATS["calls"] += 1
     return c
 
 
@@ -93,3 +124,46 @@ def product(c, a2, bt, pre8: bool = False):
     STATS["calls"] += 1
     _h.GUARD_STATS["calls"] += 1
     return torch._scaled_mm(a8, b8.t(), scale_a=c["sa"], scale_b=c["sb"], out_dtype=torch.bfloat16)
+
+
+# ---------------------------------------------------------------------------------------------------- Chai-1 grouped OPM (agent G)
+#: gate of the grouped route: the (padded N, padded S) rule of `_gate_chai`; MIN_S_CHAI / MIN_S (the other route's override) replace it
+MIN_S_CHAI: int | None = None
+_CHAI_CACHES: dict = {}
+
+
+def _gate_chai(s: int, n: int) -> bool:
+    if MIN_S is not None:
+        return s >= MIN_S
+    if MIN_S_CHAI is not None:
+        return s >= MIN_S_CHAI
+    return (n >= 384 and s >= 1024) or (n >= 256 and s >= 2048) or (n >= 768 and s >= 512)  # measured (docs/b200/fp8.md): every served cell <= 0.92, the cells outside lose or are flat
+
+
+def serves_chai(lnw, lnb, wl, wr, n: int, s: int):
+    """The scale entry when the grouped e4m3 route takes this ``chai_sm100`` inference call (``MINIWORLD_OPM_FP8=bound``, shape gate), else None."""
+    if _h.POLICY != "bound" or not _gate_chai(s, n):
+        return None
+    key = wl.data_ptr()
+    c = _CHAI_CACHES.get(key)
+    if c is not None:
+        return c
+    if torch.cuda.is_current_stream_capturing():
+        STATS["declined"] += 1
+        return None
+    sc = _h.bound_scales(lnw, lnb, wl, wr).to(wl.device).contiguous()
+    qh = (1.0 / sc).tolist()
+    c = _CHAI_CACHES[key] = {"qa_host": float(qh[0]), "qb_host": float(qh[1]), "sa": sc[0].clone(), "sb": sc[1].clone()}
+    weakref.finalize(wl, _CHAI_CACHES.pop, key, None)
+    return c
+
+
+def chai_products(c, a8, b8, n: int, s: int):
+    """O [8, N 8, N 8] bf16 = sa sb (a_g^T . b_g) per group from the prologue's e4m3 a8 / b8 [8, S N, 8] (S-major rows: both operands MN-major, which cuBLASLt takes as they are)."""
+    nk = n * 8
+    av, bv = a8.view(8, s, nk), b8.view(8, s, nk)
+    o = torch.empty((8, nk, nk), device=a8.device, dtype=torch.bfloat16)
+    for g in range(8):
+        torch._scaled_mm(av[g].t(), bv[g], scale_a=c["sa"], scale_b=c["sb"], out_dtype=torch.bfloat16, out=o[g])
+    STATS["calls"] += 1
+    return o

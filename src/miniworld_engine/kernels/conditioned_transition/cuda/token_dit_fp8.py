@@ -102,6 +102,13 @@ B200_PLACES: frozenset[str] = frozenset(
 #: CTAs of the e4m3 expand grid when the parallel block runs it beside the attention core (side stream, graph capture; docs/b200/fp8.md)
 B200_PAR_CTAS = 96
 MIN_ROWS_B200: dict[str, int] = {"qkvg": 2560, "expand": 1024, "out": 2560, "squeeze": 2560}
+#: agent E (2026-11-19): RoseTTAFold3's parallel non-identity block (``rows_q8`` + the e4m3 expand) on a B200 -- measured in docs/b200/fp8.md
+#: (served with the ``expand`` placement from ``MIN_ROWS_B200_RF3`` rows; ``MINIWORLD_TOKEN_DIT_FP8_B200_RF3=0`` turns it off)
+B200_RF3: bool = (_fp8_env("MINIWORLD_TOKEN_DIT_FP8_B200_RF3", "1") or "1") not in ("", "0")
+MIN_ROWS_B200_RF3 = 2560
+#: agent E: Boltz-2's up-gate expand on tcgen05 (``gemm_swiglu_f8_up_sm100.cu``; ``MINIWORLD_TOKEN_DIT_FP8_B200_UP=0`` turns it off), its row gate (docs/b200/fp8.md)
+B200_UP: bool = (_fp8_env("MINIWORLD_TOKEN_DIT_FP8_B200_UP", "1") or "1") not in ("", "0")
+MIN_ROWS_B200_UP = 1280
 
 
 def active(
@@ -119,10 +126,15 @@ def active(
         return frozenset()
     places = PLACES if plain else (PLACES - {"qkvg"} if identity else PLACES & {"expand"})
     if b200:
-        if not (plain or identity):  # RoseTTAFold3 (parallel, k-q LayerNorm): the extra quantising pass outweighs the e4m3 expand (docs/b200/fp8.md)
+        rf3 = not (plain or identity)  # RoseTTAFold3 (parallel, k-q LayerNorm): ``rows_q8`` + the e4m3 expand, measured 0.95-0.99 from 2560 rows (docs/b200/fp8.md, agent E)
+        if rf3 and not B200_RF3:
             return frozenset()
-        places = places & B200_PLACES - ({"expand"} if up else set())
-        return frozenset(p for p in places if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_B200[p]))
+        places = places & B200_PLACES - ({"expand"} if up and not B200_UP else set())
+        return frozenset(
+            p
+            for p in places
+            if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_B200_UP if up and p == "expand" else MIN_ROWS_B200_RF3 if rf3 else MIN_ROWS_B200[p])
+        )
     return frozenset(
         p for p in places if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_UP if up and p == "expand" else MIN_ROWS_PER[p])
     )

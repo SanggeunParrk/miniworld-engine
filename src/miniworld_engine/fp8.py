@@ -52,7 +52,7 @@ of each site (calibration) and kept for the process. A value past the e4m3 range
 :func:`check` once (one host sync per route): True means some route saturated and was rescaled -- run that forward again (at most 3 times).
 OuterProductMean (``bound``), token DiT and atom DiT (exact per-row scales) cannot saturate.
 
-The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a) and, for the slots of :data:`B200_ROUTES` (Transition so far; docs/b200/fp8.md), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
+The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a) and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
 default route, whose outputs are bit-identical with FP8 off.
 """
 
@@ -147,8 +147,14 @@ SLOTS = ("triattn", "trimul", "opm", "pwa", "transition", "token_dit", "atom_dit
 #: through :func:`env` with the preset's variable name. A slot with no entry runs the default route on a B200 (the H100 module's ``serves`` is
 #: False there). Entries are added by the route's owner when its B200 module exists and is verified.
 B200_ROUTES: dict[str, str] = {
+    "triattn": "miniworld_engine.kernels.triangle_attention.cuda.b200_fp8",  # (agent D; delegates its switches to the h100_sm90 ones that enable_triattn sets, so the model whitelist decides)
     "trimul": "miniworld_engine.kernels.trimul_inproj.cuda.b200_fp8",  # (agent B; a tree without that file keeps the H100 module in the slot)
     "transition": "miniworld_engine.kernels.transition.cuda.fp8_sm100a",
+}
+#: B200 routes that are served at capability (10, 0) but are NOT in a slot replacement and NOT in the ``safe`` preset (their own interface, own switch variable;
+#: measured effect too small / outside the judge: docs/b200/fp8.md "Agent E"): slot -> module path. The atom DiT e4m3 rows route: ``MINIWORLD_ATOMDIT_FP8_B200`` (1 / all / pre / post).
+B200_OPTIN: dict[str, str] = {
+    "atom_dit": "miniworld_engine.kernels.augmented_attention.cuda.b200_atom.f8",
 }
 
 
@@ -166,7 +172,7 @@ def arch() -> str:
 
 def serves_sm100(slot: str) -> bool:
     """Whether the FP8 route ``slot`` (one of :data:`SLOTS`) has a B200 module in this tree (``engine-fp8`` / ``MINIWORLD_FP8`` then serve it at capability (10, 0))."""
-    path = B200_ROUTES.get(slot)
+    path = B200_ROUTES.get(slot) or B200_OPTIN.get(slot)
     if path is None:
         return False
     import importlib.util
@@ -178,6 +184,15 @@ def serves_sm100(slot: str) -> bool:
 
 
 _MODULES: dict[str, tuple[Any, ...]] = {}
+
+
+def _atom_b200():
+    """The B200 atom DiT e4m3 rows module (``b200_atom.f8``) on a B200, else None."""
+    if arch() != "sm100" or not serves_sm100("atom_dit"):
+        return None
+    import importlib
+
+    return importlib.import_module(B200_OPTIN["atom_dit"])
 
 
 def _modules() -> tuple[Any, ...]:
@@ -232,17 +247,27 @@ def backend_model() -> str | None:
 _TA_SWITCHES = ("FP8_PV", "FP8_PV_FUSED", "FP8_PV_UNFUSED", "FP8_VSCALE_AUTO", "FP8_PV_HL", "FP8_PV_MIN_S", "FP8_PV_FRONT_MIN_S", "FP8_QK")
 
 
+def _h100_triattn():
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90
+
+    return h100_sm90
+
+
 def _snapshot() -> tuple:
     """The route switches as they are (what :func:`enable` / :func:`disable` set; calibrated scales and guards are not switches)."""
-    ta, tm, opm, pwa, tr, td, ad = _modules()
-    return tuple(getattr(ta, a) for a in _TA_SWITCHES), tm.POLICY, opm.POLICY, pwa.ENABLED, tr.POLICY, td.PLACES, ad.FP8_ROWS
+    _b, tm, opm, pwa, tr, td, ad = _modules()
+    ta = _h100_triattn()  # the switches live on the H100 module (the B200 module of the slot reads them from there)
+    return tuple(getattr(ta, a) for a in _TA_SWITCHES), tm.POLICY, opm.POLICY, pwa.ENABLED, tr.POLICY, td.PLACES, ad.FP8_ROWS, (a8.ENABLED if (a8 := _atom_b200()) is not None else None)
 
 
 def _restore(snap: tuple) -> None:
-    ta, tm, opm, pwa, tr, td, ad = _modules()
+    _b, tm, opm, pwa, tr, td, ad = _modules()
+    ta = _h100_triattn()  # (setattr on the B200 module would shadow its delegating __getattr__)
     for a, v in zip(_TA_SWITCHES, snap[0], strict=True):
         setattr(ta, a, v)
-    tm.POLICY, opm.POLICY, pwa.ENABLED, tr.POLICY, td.PLACES, ad.FP8_ROWS = snap[1:]
+    tm.POLICY, opm.POLICY, pwa.ENABLED, tr.POLICY, td.PLACES, ad.FP8_ROWS, a8_enabled = snap[1:]
+    if a8_enabled is not None and (a8 := _atom_b200()) is not None:
+        a8.ENABLED = a8_enabled
 
 
 #: The ``engine-fp8`` scopes open now, innermost last (True: an ``engine-fp8`` module's call; False: a module on another backend called
@@ -323,6 +348,9 @@ def enable(name: str = "safe", *, model: str | None = None, guard: str | None = 
     tr.POLICY = env_of.get("MINIWORLD_TRANSITION_FP8") or None
     td.PLACES = td._parse(env_of.get("MINIWORLD_TOKEN_DIT_FP8", ""))
     ad.enable_fp8(ad._fp8_parts(env_of.get("MINIWORLD_ATOMDIT_FP8", "")))
+    a8 = _atom_b200()
+    if a8 is not None:  # B200: the rows route has its own variable and is not in a preset; an explicitly set variable wins (as env())
+        a8.enable(os.environ.get("MINIWORLD_ATOMDIT_FP8_B200", env_of.get("MINIWORLD_ATOMDIT_FP8_B200", "")))
     enable_triattn(*triattn_for(model))
     if guard is not None:
         if guard not in ("sync", "lazy", "off"):
@@ -337,6 +365,9 @@ def disable() -> None:
     pwa.ENABLED = False
     td.PLACES = frozenset()
     ad.enable_fp8(False)
+    a8 = _atom_b200()
+    if a8 is not None:
+        a8.enable(False)
     enable_triattn(frozenset(), False)
 
 
@@ -344,6 +375,7 @@ def status() -> dict:
     """The switches in force, per route."""
     ta, tm, opm, pwa, tr, td, ad = _modules()
     kinds = sorted(k for k, on in (("d64", ta.FP8_PV_D64), ("fused", ta.FP8_PV_FUSED), ("unfused", ta.FP8_PV_UNFUSED)) if on) if ta.FP8_PV else []
+    a8 = _atom_b200()
     return {
         "triattn": {"pv": kinds, "qk": bool(ta.FP8_QK and ta.FP8_PV)},
         "trimul": tm.POLICY,
@@ -351,13 +383,14 @@ def status() -> dict:
         "pwa": pwa.ENABLED,
         "transition": tr.POLICY,
         "token_dit": sorted(td.PLACES),
-        "atom_dit": sorted(ad.FP8_ROWS),
+        "atom_dit": sorted(a8.ENABLED) if a8 is not None else sorted(ad.FP8_ROWS),  # B200: the b200_atom.f8 stages (opt-in, not in safe)
         "guard": {"trimul": tm.GUARD, "opm": opm.GUARD, "pwa": pwa.GUARD, "transition": tr.GUARD},
     }
 
 
 def _stat_dicts() -> dict[str, dict]:
     ta, tm, opm, pwa, tr, td, ad = _modules()
+    a8 = _atom_b200()
     return {
         "triattn": ta.STATS,
         "trimul": tm.GUARD_STATS,
@@ -365,7 +398,7 @@ def _stat_dicts() -> dict[str, dict]:
         "pwa": pwa.STATS,
         "transition": tr.GUARD_STATS,
         "token_dit": td.STATS,
-        "atom_dit": ad.STATS,
+        "atom_dit": ad.STATS if a8 is None else a8.STATS,  # B200: pre / post / pre_declined / post_declined of b200_atom.f8
     }
 
 

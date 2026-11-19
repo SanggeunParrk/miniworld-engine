@@ -12,6 +12,7 @@
 // row (64 B: 64B swizzle, 32 B: 32B, 16 B: none), the LayerNorm is one thread per row in three passes over shared memory (a 128-wide row
 // does not fit the registers of a 448 / 576-thread CTA), and the epilogue drains the output in 32-channel pieces.
 #include <torch/extension.h>
+#include <cuda_fp8.h>
 #include "sm100.cuh"
 
 using namespace sm100;
@@ -54,6 +55,15 @@ static CUtensorMap head_map(void* p, long S, long N, uint32_t rows, const char* 
                        CU_TENSOR_MAP_SWIZZLE_NONE, name);
   else
     return make_map<3>(p, {(uint64_t)C, (uint64_t)S, (uint64_t)(H * N)}, {(uint64_t)C, (uint64_t)(S * C)}, {(uint32_t)C, rows, 1}, VSW, name);
+}
+// the e4m3 twin of head_map (opt-in route): one byte per value, no swizzle (a C-byte row: C = 8 only through the flat 256-byte-row view)
+static CUtensorMap head_map8(void* p, long S, long N, uint32_t rows, const char* name) {
+  if constexpr (FLATV)
+    return make_map<3>(p, {256, (uint64_t)(S * C / 256), (uint64_t)(H * N)}, {256, (uint64_t)(S * C)}, {256, rows * C / 256, 1},
+                       CU_TENSOR_MAP_SWIZZLE_NONE, name, CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
+  else
+    return make_map<3>(p, {(uint64_t)C, (uint64_t)S, (uint64_t)(H * N)}, {(uint64_t)C, (uint64_t)(S * C)}, {(uint32_t)C, rows, 1},
+                       CU_TENSOR_MAP_SWIZZLE_NONE, name, CU_TENSOR_MAP_DATA_TYPE_UINT8, 1);
 }
 template <int N_> __device__ __forceinline__ void tmem_ldn(uint32_t taddr, float* v) {
   if constexpr (N_ == 8) tmem_ld8(taddr, v);
@@ -208,14 +218,14 @@ constexpr int TCOLS = 2 * HC < 32 ? 32 : 2 * HC;
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace lvw
 
-template <typename LT_>
+template <typename LT_, bool F8_ = false>      // F8_: EXPERIMENTAL e4m3 v (opt-in pwa_fp8_b200 route, docs/b200/fp8.md); false = the default kernel
 __global__ void __launch_bounds__(lvw::THREADS, 1) ln_vg_w_sm100(
     int N, int S, int ntiles, float eps, int want_y,
     const __grid_constant__ CUtensorMap xmap,     // m [S][N][D]: (D, N, S), box (64, 1, 128), 128B swizzle
     const __grid_constant__ CUtensorMap ymap,     // y, same
     const __grid_constant__ CUtensorMap wmap,     // Wv [HC][D]: (D, HC), box (64, HC), 128B swizzle
     const __grid_constant__ CUtensorMap vmap,     // v [H*N][S*C] as (C, S, H*N), box (C, 128, 1)
-    const LT_* __restrict__ LNW, const LT_* __restrict__ LNB) {
+    const LT_* __restrict__ LNW, const LT_* __restrict__ LNB, float qv = 1.f) {
   using namespace lvw;
   const int NSB = S / BS;
   extern __shared__ __align__(1024) unsigned char raw[];
@@ -345,6 +355,16 @@ __global__ void __launch_bounds__(lvw::THREADS, 1) ln_vg_w_sm100(
         tmem_ldn<C>(tmem_at(tmem + b * HC, q * 32, h * C), v);
         tmem_wait_ld();
         if (h == H - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + b); }
+        if constexpr (F8_) {   // v * qv -> saturating e4m3, a C-byte row (unswizzled staging; the u8 map is `head_map8`)
+          uint8_t* row8 = reinterpret_cast<uint8_t*>(vb) + (h * BS + r) * C;
+#pragma unroll
+          for (int k = 0; k < C / 4; ++k) {
+            const __nv_fp8x2_storage_t lo = __nv_cvt_float2_to_fp8x2(make_float2(v[4 * k] * qv, v[4 * k + 1] * qv), __NV_SATFINITE, __NV_E4M3);
+            const __nv_fp8x2_storage_t hi = __nv_cvt_float2_to_fp8x2(make_float2(v[4 * k + 2] * qv, v[4 * k + 3] * qv), __NV_SATFINITE, __NV_E4M3);
+            *reinterpret_cast<uint32_t*>(row8 + 4 * k) = (uint32_t)lo | ((uint32_t)hi << 16);
+          }
+          continue;
+        }
         __nv_bfloat16* row = vb + (h * BS + r) * C;
 #pragma unroll
         for (int c8 = 0; c8 < C / 8; ++c8) {
@@ -357,7 +377,10 @@ __global__ void __launch_bounds__(lvw::THREADS, 1) ln_vg_w_sm100(
       fence_proxy_async();
       named_sync(2, 128);
       if (leader) {
-        for (int h = 0; h < H; ++h) store_3d(&vmap, vb + h * BS * C, 0, flat_row(s0), h * N + n);
+        for (int h = 0; h < H; ++h) {
+          if constexpr (F8_) store_3d(&vmap, reinterpret_cast<uint8_t*>(vb) + h * BS * C, 0, flat_row(s0), h * N + n);
+          else store_3d(&vmap, vb + h * BS * C, 0, flat_row(s0), h * N + n);
+        }
         bulk_commit();
       }
     }
@@ -1690,6 +1713,37 @@ std::vector<torch::Tensor> ln_vg_w(torch::Tensor m, torch::Tensor lnw, torch::Te
   return {v, y};
 }
 
+// EXPERIMENTAL (opt-in e4m3 route, docs/b200/fp8.md): ln_vg_w with v written as e4m3 (v * qv, saturating) -> (v8 head-major [H, N, S*C] e4m3, y or empty)
+std::vector<torch::Tensor> ln_vg_w_f8(torch::Tensor m, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor wv, double eps, double qv, bool want_y, int64_t ctas) {
+  using namespace lvw;
+  TORCH_CHECK(m.is_contiguous() && m.scalar_type() == torch::kBFloat16 && m.dim() == 3 && m.size(2) == D, "m: [S, N, d_msa] bf16");
+  const long S = m.size(0), N = m.size(1);
+  TORCH_CHECK(S % BS == 0 && N % 128 == 0, "S and N must be multiples of 128");
+  TORCH_CHECK(wv.is_contiguous() && wv.scalar_type() == torch::kBFloat16 && wv.size(0) == HC && wv.size(1) == D, "wv: [8 d_hidden, d_msa] bf16");
+  check_ln(lnw, lnb);
+  auto v = torch::empty({(long)H, N, S * C}, m.options().dtype(torch::kFloat8_e4m3fn));
+  auto y = want_y ? torch::empty_like(m) : torch::empty({0}, m.options());
+  CUtensorMap xm = make_map<3>(m.data_ptr(), {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)(N * D)}, {64, 1, BS},
+                               CU_TENSOR_MAP_SWIZZLE_128B, "m");
+  CUtensorMap ym = want_y ? make_map<3>(y.data_ptr(), {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)(N * D)}, {64, 1, BS},
+                                        CU_TENSOR_MAP_SWIZZLE_128B, "y") : xm;
+  CUtensorMap wm = make_map<2>(wv.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, (uint32_t)HC}, CU_TENSOR_MAP_SWIZZLE_128B, "wv");
+  CUtensorMap vm = head_map8(v.data_ptr(), S, N, BS, "v8");
+  const int ntiles = (int)(N * (S / BS));
+  const int grid = std::min(ntiles, ctas > 0 ? (int)ctas : num_sms(m.device().index()));
+  auto st = at::cuda::getCurrentCUDAStream();
+  auto launch = [&](auto lt) {
+    using LT = decltype(lt);
+    static bool attr = false;
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(ln_vg_w_sm100<LT, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+    ln_vg_w_sm100<LT, true><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps, (int)want_y, xm, ym, wm, vm,
+                                                         reinterpret_cast<const LT*>(lnw.data_ptr()), reinterpret_cast<const LT*>(lnb.data_ptr()), (float)qv);
+  };
+  if (lnw.scalar_type() == torch::kFloat32) launch(float{}); else launch(__nv_bfloat16{});
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {v, y};
+}
+
 // o head-major [H, N, S*C] bf16, msa [S, N, D] bf16 -> out = msa + drop(bf16(PWA update)) [S, N, D]
 torch::Tensor gate_out_w(torch::Tensor o, torch::Tensor msa, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor wg, torch::Tensor wo,
                          c10::optional<torch::Tensor> dmask, double dscale) {
@@ -1905,6 +1959,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("ln_vg_w", &ln_vg_w, "sm100 wide PWA LayerNorm + value projection: (v head-major [H,N,S*C], y [S,N,D] or empty)",
         py::arg("m"), py::arg("lnw"), py::arg("lnb"), py::arg("wv"), py::arg("eps") = 1e-5, py::arg("want_y") = false, py::arg("ctas") = 0);
+  m.def("ln_vg_w_f8", &ln_vg_w_f8, "EXPERIMENTAL sm100 wide PWA LayerNorm + value projection with an e4m3 v (v * qv, head-major [H,N,S*C])",
+        py::arg("m"), py::arg("lnw"), py::arg("lnb"), py::arg("wv"), py::arg("eps") = 1e-5, py::arg("qv") = 1.0, py::arg("want_y") = false, py::arg("ctas") = 0);
   m.def("gate_out_w", &gate_out_w, "sm100 wide PWA gate / out-projection / residual pass over a given head-major o",
         py::arg("o"), py::arg("msa"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wg"), py::arg("wo"),
         py::arg("dmask") = py::none(), py::arg("dscale") = 1.0);

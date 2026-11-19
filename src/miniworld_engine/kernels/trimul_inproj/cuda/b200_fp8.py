@@ -42,8 +42,10 @@ _MINL_ENV = os.environ.get("MINIWORLD_TRIMUL_FP8_MINL")
 WIDTHS = (64, 128, 256, 384, 512)
 #: smallest L the e4m3 chain takes, per (width, direction: 1 outgoing / 2 incoming / 0 bidirectional); below it the bf16 route runs unchanged
 #: (B200 measurements: docs/b200/fp8.md). ``MINIWORLD_TRIMUL_FP8_MINL=<n>`` replaces every gate (0 = none).
-MIN_L: dict = {(64, 1): 512, (64, 2): 512, (64, 0): 384, (128, 0): 512, (128, 1): 512, (128, 2): 512, (256, 1): 384, (256, 2): 384, (384, 0): 512, (384, 1): 512, (384, 2): 512, (512, 0): 128, (512, 1): 128, (512, 2): 128}  # (width, direction); other cells: MIN_L_DEFAULT. Served only where the gap-measured FP8 / bf16 ratio is <= 0.99 (docs/b200/fp8.md)
+MIN_L: dict = {(64, 1): 512, (64, 2): 512, (64, 0): 384, (128, 0): 384, (128, 1): 512, (128, 2): 512, (256, 1): 384, (256, 2): 384, (384, 0): 128, (384, 1): 256, (384, 2): 256, (512, 0): 128, (512, 1): 128, (512, 2): 128}  # (width, direction); other cells: MIN_L_DEFAULT. Served only where the gap-measured FP8 / bf16 ratio is <= 0.99; re-measured on a quiet GPU 2026-11-19 (agent G): (128, 0) 512 -> 384, (384, *) 512 -> 128 / 256 / 256 (docs/b200/fp8.md)
 MIN_L_DEFAULT = 256
+#: RoseTTAFold3 floor (every direction / width): quiet-GPU measurement, e4m3 / bf16 gap 1.11-1.39 at L 256-512, 1.02-1.07 at L 768, D128 0.947 at L 1024, D64 0.996 at L 1024 and 0.931 at L 1280 (docs/b200/fp8.md)
+MIN_L_RF3 = {64: 1280, 128: 1024}
 GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0, "calibrations": 0}
 _CACHES: dict = {}   # calibration state per module (key: data_ptr of its to_left weight; dropped when that tensor is freed)
 _PEAK: dict = {}     # per device: int32 [8] -- max scaled plane value (fp32 bits) since the last read (the lazy guard)
@@ -324,6 +326,8 @@ def serves(module, pair, mask, bidirectional, rf3: bool = False) -> bool:
     if TB._plan(module, pair, True, bidirectional)[0] < bsz:  # a call the default splits into several launches: not measured here
         return False
     gate = MIN_L.get((d, direction), MIN_L_DEFAULT)
+    if rf3:  # RoseTTAFold3 (length factor, one sample, D <= 128): the e4m3 chain loses below L 768 on a quiet GPU (docs/b200/fp8.md, agent G)
+        gate = max(gate, MIN_L_RF3.get(d, 1024))
     return n >= (int(_MINL_ENV) if _MINL_ENV is not None else gate)
 
 

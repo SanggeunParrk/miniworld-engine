@@ -123,6 +123,10 @@ def prebuild(target, rows):
         yield b200_bidir.ext
         yield b200_bidir.lnb   # (N1) the bias-only LayerNorm backward at C = 128
         yield b200_bidir.ltmm  # (N1) tuned cublasLt tall-K GEMMs of the bias-only backward
+        from . import b200_fp8
+
+        yield b200_fp8._f8  # the opt-in e4m3 P / V core, head dim 32 (docs/b200/fp8.md "TriAttn"; b200_fp8.route, off unless fp8.enable_triattn)
+        yield ft.partial(b200_fp8._f8, ("-DTF_D=64",))  # ... and its 64-channel-head build (the whitelist kind "d64")
     elif target.arch in ("sm80", "sm120"):  # the 5090 builds the same sources for sm_120a (sm80_arch)
         yield from _sm80(rows)
 

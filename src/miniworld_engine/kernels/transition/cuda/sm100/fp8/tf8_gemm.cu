@@ -20,6 +20,9 @@ using namespace s100;
 #ifndef BN
 #define BN 128
 #endif
+#ifndef PAIRB
+#define PAIRB 0   // 1: a 2-CTA cluster takes two m-tiles at the same n: each CTA loads HALF of the B rows and multicasts them to both (B intake per CTA halves); own MMAs (cta_group::1)
+#endif
 #ifndef ABL
 #define ABL 0   // timing ablations only (wrong output): 1 no silu, 2 no stores, 3 no epilogue math and no stores
 #endif
@@ -69,7 +72,7 @@ tf8_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__ C
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   if (threadIdx.x == 0) {
-    for (int s = 0; s < NST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
+    for (int s = 0; s < NST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], PAIRB ? 2 : 1); }
     for (int s = 0; s < 2; ++s) { mbar_init(&B.accf[s], 1); mbar_init(&B.acce[s], NEPI); }
     fence_barrier_init();
     prefetch_map(&mA); prefetch_map(&mB0); if (NACC > 1) prefetch_map(&mB1);
@@ -77,27 +80,44 @@ tf8_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__ C
   if (warp == 1) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
   tc_fence_before();
   __syncthreads();
+#if PAIRB
+  cluster_sync_relaxed();                                       // the peer may multicast into this CTA from here on: the barriers are initialised
+#endif
   pdl_wait();
   pdl_launch();
   tc_fence_after();
   const uint32_t tmem = B.tmem;
   constexpr int BKE = E4 ? 128 : 64;
-  const int NT = N / BN, MT = (M + 127) / 128, tiles = MT * NT, nk = K / BKE;
+  const int NT = N / BN, MT = (M + 127) / 128, nk = K / BKE;
+#if PAIRB
+  const int crank = (int)cluster_rank();
+  const int tiles = ((MT + 1) / 2) * NT;                        // (pair of m-tiles, n)
+  const int cta = blockIdx.x >> 1, ncta = gridDim.x >> 1;      // the pair walks the tiles together
+#define M0_OF(t) ((2 * ((t) / NT) + crank) * 128)
+#else
+  const int tiles = MT * NT;
   const int cta = blockIdx.x, ncta = gridDim.x;
+#define M0_OF(t) (((t) / NT) * 128)
+#endif
 
   if (warp == 0) {
     if (lane == 0) {
       int it = 0;
       for (int t = cta; t < tiles; t += ncta) {
-        const int m0 = (t / NT) * 128, n0 = (t % NT) * BN;
+        const int m0 = M0_OF(t), n0 = (t % NT) * BN;
         for (int k = 0; k < nk; ++k, ++it) {
           const int s = it % NST;
           mbar_wait(&B.empty[s], ((it / NST) & 1) ^ 1);
           mbar_expect_tx(&B.full[s], A_BYTES + NACC * B_BYTES);
           const uint32_t base = su + s * STAGE;
           tma_load_2d(base, &mA, &B.full[s], k * 64, m0);
+#if PAIRB
+          tma_load_2d_mc(base + A_BYTES + crank * (BN / 2) * 128, &mB0, &B.full[s], k * 64, n0 + crank * (BN / 2), 3);
+          if (NACC > 1) tma_load_2d_mc(base + A_BYTES + B_BYTES + crank * (BN / 2) * 128, &mB1, &B.full[s], k * 64, n0 + crank * (BN / 2), 3);
+#else
           tma_load_2d(base + A_BYTES, &mB0, &B.full[s], k * 64, n0);
           if (NACC > 1) tma_load_2d(base + A_BYTES + B_BYTES, &mB1, &B.full[s], k * 64, n0);
+#endif
         }
       }
     }
@@ -121,7 +141,11 @@ tf8_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__ C
 #pragma unroll
             for (int kk = 0; kk < 4; ++kk) umma(dbase + j * BN, da + (uint64_t)(kk * 2), db + (uint64_t)(kk * 2), (k > 0 || kk > 0) ? 1u : 0u);
           }
+#if PAIRB
+          tc_commit_mc(&B.empty[s], 3);
+#else
           tc_commit(&B.empty[s]);
+#endif
         }
         tc_commit(&B.accf[buf]);
       }
@@ -132,7 +156,7 @@ tf8_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__ C
     int tc = 0;
     for (int t = cta; t < tiles; t += ncta, ++tc) {
       const int buf = tc & 1;
-      const int m0 = (t / NT) * 128, n0 = (t % NT) * BN;
+      const int m0 = M0_OF(t), n0 = (t % NT) * BN;
       const int row = m0 + q4 * 32 + lane;
       mbar_wait(&B.accf[buf], (tc >> 1) & 1);
       tc_fence_after();
@@ -207,6 +231,9 @@ tf8_gemm_sm100(const __grid_constant__ CUtensorMap mA, const __grid_constant__ C
   }
   tc_fence_before();
   __syncthreads();
+#if PAIRB
+  cluster_sync_relaxed();
+#endif
   if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }
 }
 

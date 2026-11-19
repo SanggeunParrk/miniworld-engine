@@ -64,3 +64,21 @@ Accuracy (fp64 gold, random non-zero weights, stress x{1e-3,1,40} x offset{0,25}
 Framework: `fp8.py` gets `B200_ROUTES`, `SLOTS`, `arch()`, `serves_sm100()`; `MINIWORLD_FP8=safe` serves capability (10, 0) with the route modules that exist; the `and not b200` guard (section 18) is lifted for the token DiT expand route only, the other sm90a routes stay guarded.
 Verified on the B200 (combined tree): 505 tests passed / 256 skipped (H100-only) / 0 failed; `_prebuild --arch sm100` 813 artifacts; `MINIWORLD_FP8=safe` end to end with TriMul + Transition D512 / D768 + token DiT expand in ONE captured CUDA graph (`fp8.check()` False, graph == eager bytes, route_stats without retries / fallbacks).
 NOT verified / open: end-level (structure) accuracy of the B200 FP8 routes (only module level fp64 protocol); the TriMul MIN_L gates and the k1w8 cost were measured while a foreign job shared the GPU (re-check on a quiet GPU; k1w8 isolated cost +0.5-2.5 percent); atom DiT FP8 declined by an analytic bound (tensor time is 13-16 percent of a block), not by an ablation; the gate-projection-only e4m3 TriMul front (H100 emulation 4.2 percent error) was not built (estimated 1-5 percent); Boltz-2 up-gate e4m3 expand, OPM wide prologue / PWA wide e4m3 writes, MXFP8 block scales and training are not implemented.
+
+## FP8 (e4m3) on B200: final state (replaces the route list of section 19; details in docs/b200/fp8.md "consolidated state")
+
+All opt-in, default OFF; FP8-off outputs are bit-identical to the 3.0.3 + B200 base (no backend_versions bump). On: `MINIWORLD_FP8=safe` (+ `MINIWORLD_FP8_MODEL=<whitelisted>` for TriAttn) or `fp8.enable("safe", model=...)` / backend `engine-fp8`; per-route variables win over the preset.
+
+| slot | module | served (gates) | time x (e4m3 / default) | switch |
+|---|---|---|---|---|
+| trimul | `trimul_inproj.cuda.b200_fp8` | D 64-512, L >= MIN_L (per D / direction), RF3 D <= 128 L >= 1024 / 1280 | 0.85 at L2048, 0.94 at L1024 | `MINIWORLD_TRIMUL_FP8=calib` |
+| triattn | `triangle_attention.cuda.b200_fp8` | head dim 32 sites, S >= 1024, whitelisted model | 1.01 / 0.97 (L1024), 0.96 (L2048) | model whitelist (`enable_triattn`) |
+| transition | `transition.cuda.fp8_sm100a` | D 128 / 256 / 512 / 768 with row gates (`WIDTHS` default 128,256,512,768); fused one-kernel forward D128 / D256 | D512 0.78, D768 0.63, D128 0.97-0.99 (sustained 0.85-0.95) | `MINIWORLD_TRANSITION_FP8=calib` |
+| token_dit | `conditioned_transition.cuda.token_dit_fp8(_b200)` | placement `expand`: Protenix / Chai-1, Boltz-2 up gate (>= 1280 rows), RF3 (>= 2560 rows) | 0.94-0.97 block | `MINIWORLD_TOKEN_DIT_FP8=expand`; graphs need `static_weights()` |
+| opm | `integrations.opm_fp8_b200` | wide prologue, fused S >= 256, Chai-1 grouped | 0.64-0.66 (L384 S2048), 0.62-0.95 | `MINIWORLD_OPM_FP8=bound` |
+| pwa | `integrations.pwa_fp8_b200` | narrow / wide / BIG / dual / one-launch 8 heads, work gates | 0.79 (8x32 N1536) | `MINIWORLD_PWA_FP8=1` |
+| atom_dit | `augmented_attention.cuda.b200_atom.f8` | rows <= 10240, NOT in `safe` | 0.93-1.06 | `MINIWORLD_ATOMDIT_FP8_B200=1|pre|post` |
+
+Registration (`fp8.py`): `B200_ROUTES` = {trimul, triattn, transition}; `B200_OPTIN` = {atom_dit}; `enable / disable / status / route_stats / _snapshot` aware of the B200 atom module; TriAttn switches stay on `h100_sm90`.
+Tested on the combined tree: gpu 831 passed, cpu 3500 passed, FP8-off bit identity (token DiT/APB 398, atom DiT 258, OPM+PWA 174, TriMul 24, Transition 23 shapes, TriAttn 90; eager + graph), `safe` end to end in one captured graph, prebuild sm100 835 artifacts / 0 not built.
+Open: end-level accuracy NOT run for any B200 e4m3 route; atom DiT effect <= 0.3 % and error 6x bf16 (kept out of `safe`); Transition D384 unserved; TriAttn q/k + 64-channel core closed; `tests/conftest.py` restores TF32 flags per test.

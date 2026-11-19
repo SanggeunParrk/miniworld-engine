@@ -126,3 +126,138 @@ def test_graph_equals_eager(tmp_path, route):
     g.replay()
     torch.cuda.synchronize()
     assert torch.equal(a, og.float()) and torch.equal(a, ye)
+
+
+# ---------------------------------------------------------------------------------------------------- wide builds: the fused e4m3 v (``ln_vg_w_f8``, agent G)
+WIDE_CASES = [  # (label fragment, N, depth): each above the build's work gate (MIN_WORK_WIDE)
+    ("d_msa=64;d_pair=128;n_head=8;d_hidden=8;p_drop=0.25", 1536, 1024),
+    ("d_msa=128;d_pair=256;n_head=8;d_hidden=16;p_drop=0.25", 1280, 1024),
+    ("d_msa=64;d_pair=256;n_head=8;d_hidden=32;p_drop=0.25", 768, 1024),
+    ("d_msa=256;d_pair=512;n_head=8;d_hidden=32;p_drop=0.25", 768, 1024),
+]
+
+
+@pytest.mark.parametrize("dims,L,D", WIDE_CASES)
+def test_wide_fused_accuracy_and_stress(tmp_path, route, dims, L, D):
+    H, B = route
+    m, inp, step, S = _rig(tmp_path, dims, L, D)
+    for stress in (1.0, 8.0):  # LN weights / biases x 8: the bound policy's scale follows the weights
+        with torch.no_grad():
+            if stress != 1.0:
+                m.ln_msa.weight.mul_(stress)
+                if m.ln_msa.bias is not None:
+                    m.ln_msa.bias.mul_(stress)
+        H.ENABLED, B.MIN_N = False, None
+        y0 = _run(step)
+        gold = _gold(m, inp, S)
+        H.ENABLED = True
+        B._CACHES.clear()
+        B.STATS.update({k: 0 for k in B.STATS})
+        y1 = _run(step)
+        e0, e1 = _err(y0, gold), _err(y1, gold)
+        assert B.STATS["calls"] == 1, B.STATS  # contract8 ran (the fused wide route)
+        assert torch.isfinite(y1).all() and not torch.equal(y0, y1)
+        assert e1[1] < 0.02 and e1[0] < 0.02, (dims, stress, e0, e1)
+        print("PWA wide", dims, L, D, "stress", stress, "bf16 route (rms, max):", e0, "e4m3:", e1)
+
+
+def test_wide_below_gate_is_bit_equal(tmp_path, route):
+    H, B = route
+    m, inp, step, S = _rig(tmp_path, "d_msa=128;d_pair=256;n_head=8;d_hidden=8;p_drop=0.25", 1280, 512)  # 8 x 8 below its work gate
+    H.ENABLED = False
+    y0 = _run(step)
+    H.ENABLED, B.MIN_N = True, None
+    B.STATS.update({k: 0 for k in B.STATS})
+    y1 = _run(step)
+    assert B.STATS["calls"] == 0 and torch.equal(y0, y1)
+
+
+def test_wide_graph_equals_eager(tmp_path, route):
+    from miniworld_engine.kernels import _capture
+
+    H, B = route
+    m, inp, step, S = _rig(tmp_path, "d_msa=128;d_pair=256;n_head=8;d_hidden=16;p_drop=0.25", 1280, 1024)
+    H.ENABLED, B.MIN_N = True, None
+    ye = _run(step)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with _capture.static_weights(), _capture.static_inputs():
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                step()
+        torch.cuda.synchronize()
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g, stream=side):
+            og = step()
+    og = og if torch.is_tensor(og) else og[0]
+    g.replay()
+    torch.cuda.synchronize()
+    a = og.float().clone()
+    g.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(a, og.float()) and torch.equal(a, ye)
+
+
+# ---------------------------------------------------------------------------------------------------- input stress {x scale} x {offset} (agent G)
+@pytest.mark.parametrize("xs,off", [(1e-3, 0.0), (40.0, 0.0), (1.0, 25.0), (40.0, 25.0)])
+@pytest.mark.parametrize("dims,L,D", [("d_msa=128;d_pair=256;n_head=8;d_hidden=16;p_drop=0.25", 1280, 1024), ("d_msa=64;d_pair=128;n_head=8;d_hidden=8;p_drop=0.25", 1536, 1024)])
+def test_wide_input_stress_scale_offset(tmp_path, route, xs, off, dims, L, D):
+    """x scale {1e-3, 40} and offset 25 on the float inputs: finite, static bound scales cannot saturate, error against fp64 next to the bf16 route's."""
+    H, B = route
+    m, inp, step, S = _rig(tmp_path, dims, L, D)
+    inp2 = dict(inp)
+    for k, v in inp.items():
+        if torch.is_tensor(v) and v.is_floating_point() and v.dim() == 4:
+            inp2[k] = (v.float() * xs + off).to(v.dtype)
+    from miniworld_engine.measure import config as C
+
+    step2 = S.make_step(m, inp2, backend="cuda", train=False, autocast=None, seed=0, compile_mode=None)
+    H.ENABLED, B.MIN_N = False, None
+    y0 = _run(step2)
+    gold = _gold(m, inp2, S)
+    H.ENABLED = True
+    B._CACHES.clear()
+    B.STATS.update({k: 0 for k in B.STATS})
+    y1 = _run(step2)
+    e0, e1 = _err(y0, gold), _err(y1, gold)
+    assert B.STATS["calls"] == 1, B.STATS
+    assert torch.isfinite(y1).all()
+    print("PWA input stress", dims[:40], "x", xs, "off", off, "bf16 route (rms, max):", e0, "e4m3:", e1)
+    assert e1[1] < 0.05 and e1[1] < 8 * e0[1] + 0.02, (e0, e1)
+
+
+# ---------------------------------------------------------------------------------------------------- the grouped one-launch contraction (``pwa8_forward``, agent G)
+@pytest.mark.parametrize("n,sc", [(128, 1024), (256, 8192), (768, 16384), (1280, 8192)])
+def test_grouped_kernel_equals_per_head_gemms(route, n, sc):
+    """pwa8_forward (all heads, one tcgen05 e4m3 launch) == the eight per-head cuBLASLt `_scaled_mm`s bit for bit (same fp32 accumulation, the scale applied before the bf16 rounding)."""
+    H, B = route
+    E4 = torch.float8_e4m3fn
+    torch.manual_seed(2)
+    w8 = (torch.rand(8, n, n, device="cuda") * 2).to(E4)
+    v8 = torch.randn(8, n, sc, device="cuda").to(E4)
+    sw, sv = torch.tensor(1.0 / 256.0, device="cuda"), torch.tensor(0.25, device="cuda")
+    dq = (sw * sv).reshape(1).contiguous()
+    o_g = torch.empty(8, n, sc, device="cuda", dtype=torch.bfloat16)
+    B._ext_grouped().pwa8_forward(w8, v8, o_g, dq)
+    o_h = torch.empty_like(o_g)
+    for k in range(8):
+        torch._scaled_mm(w8[k], v8[k], scale_a=sw, scale_b=sv, out_dtype=torch.bfloat16, out=o_h[k])
+    torch.cuda.synchronize()
+    assert torch.equal(o_g, o_h)
+
+
+def test_grouped_route_equals_streams_route(tmp_path, route):
+    H, B = route
+    m, inp, step, S = _rig(tmp_path, "d_msa=64;d_pair=128;n_head=8;d_hidden=8;p_drop=0.25", 1280, 1024)  # per-head work 1.3e10: the grouped kernel serves
+    H.ENABLED, B.MIN_N = True, 0
+    old = (B.GROUPED, B.HEAD_STREAMS)
+    try:
+        B.GROUPED = True
+        y_g = _run(step)
+        B.GROUPED = False
+        y_s = _run(step)
+        B.GROUPED, B.HEAD_STREAMS = False, 1
+        y_1 = _run(step)
+    finally:
+        B.GROUPED, B.HEAD_STREAMS = old
+    assert torch.equal(y_g, y_s) and torch.equal(y_g, y_1)

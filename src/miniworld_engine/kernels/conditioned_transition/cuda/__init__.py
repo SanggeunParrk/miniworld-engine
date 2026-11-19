@@ -1338,17 +1338,18 @@ def _prebuild_sm100(rows):
         if k % 64 == 0 and hidden % 128 == 0 and hidden % k == 0:  # gemm_swiglu.supported
             yield _swiglu_sm100(k, hidden, save_ab)
     # the opt-in e4m3 expand route (docs/b200/fp8.md, token_dit_fp8.active on a B200): its rows module and the width-768 expand cubin
-    if any(
-        r["mode"] == "eval"
-        and r["dtype"] != "float32"
-        and r["module"] in _SM100_TOKEN
-        and r["module"] not in _SM100_UP
-        and _kv(r["dims"]).get("d_single") == "768"
+    f8_rows = [
+        r
         for r in token
-    ):
+        if r["mode"] == "eval" and r["dtype"] != "float32" and r["module"] in _SM100_TOKEN and _kv(r["dims"]).get("d_single") == "768"
+    ]
+    if f8_rows:
         from . import token_dit_fp8_b200
 
-        yield from token_dit_fp8_b200.prebuild_items()
+        # (agent E: Boltz-2's up-gate expand has its own cubin)
+        yield from token_dit_fp8_b200.prebuild_items(
+            plain=any(r["module"] not in _SM100_UP for r in f8_rows), up=any(r["module"] in _SM100_UP for r in f8_rows)
+        )
 
 
 def _swiglu_sm100(k: int, hidden: int, save_ab: bool):

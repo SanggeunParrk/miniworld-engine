@@ -110,15 +110,37 @@ def test_off_and_gated_are_bit_equal(tmp_path, f8, module):
     assert torch.equal(y0, y1)
 
 
-def test_rf3_and_up_blocks_are_not_served(tmp_path, f8):
-    for module in ("TokenDiTRoseTTAFold3", "TokenDiTBoltz2"):
+def test_rf3_row_gate_and_flag(f8, monkeypatch):
+    f8.PLACES, f8.MIN_ROWS = f8._parse("expand"), None
+    args = (False, False, False, True, False, True)  # fp32 False, plain False, identity False, parallel True, up False, b200 True
+    assert f8.active(1920, 768, *args) == frozenset() and f8.active(2560, 768, *args) == frozenset({"expand"})
+    monkeypatch.setattr(f8, "B200_RF3", False)
+    assert f8.active(2560, 768, *args) == frozenset()
+
+
+def test_rf3_and_boltz2_up_gate_served(tmp_path, f8, monkeypatch):
+    """Agent E: Boltz-2's up-gate expand (tcgen05 ``gemm_swiglu_f8_up_sm100``) and RoseTTAFold3's ``rows_q8`` + expand are served with the expand placement."""
+    for module in ("TokenDiTBoltz2", "TokenDiTRoseTTAFold3"):
         rig = Rig(_case(tmp_path, module, 384))
         f8.PLACES, f8.MIN_ROWS = frozenset(), 0
         y0 = rig.run()
+        gold, x = rig.gold()
         f8.PLACES = f8._parse("expand")
         f8.STATS.update({k: 0 for k in f8.STATS})
         y1 = rig.run()
-        assert f8.STATS["calls"] == 0 and torch.equal(y0, y1), (module, f8.STATS)
+        assert f8.STATS["expand"] >= 1 and f8.STATS["declined"] == 0, (module, f8.STATS)
+        assert torch.isfinite(y1).all() and not torch.equal(y0, y1)
+        e0, e1 = _err(y0, gold, x), _err(y1, gold, x)
+        assert e1[0] < 0.12 and e1[0] / max(e0[0], 1e-9) < 20, (module, e0, e1)
+    monkeypatch.setattr(f8, "B200_UP", False)  # the switch turns the up-gate expand off: the block is the default route again
+    monkeypatch.setattr(f8, "B200_RF3", False)
+    rig = Rig(_case(tmp_path, "TokenDiTBoltz2", 384))
+    f8.PLACES, f8.MIN_ROWS = frozenset(), 0
+    y0 = rig.run()
+    f8.PLACES = f8._parse("expand")
+    f8.STATS.update({k: 0 for k in f8.STATS})
+    y1 = rig.run()
+    assert f8.STATS["calls"] == 0 and torch.equal(y0, y1), f8.STATS
 
 
 def test_graph_equals_eager(tmp_path, f8):

@@ -100,6 +100,52 @@ class SwigluF8:
         return out
 
 
+
+
+class SwigluF8Up(SwigluF8):
+    """``gemm_swiglu_f8_up_sm100.cu``: h = bf16(silu(a) b u), W8 [3 H, K] = the H100 ``_bf16_wab64`` pack ([Wa 64 | Wb 64 | Wu 64] per chunk), 64-unit items."""
+
+    def __init__(self, device_index: int, K: int, H: int):
+        from miniworld_engine.kernels._device import num_sms
+
+        from ...augmented_attention.cuda import sm100
+
+        assert K % 128 == 0 and H % K == 0 and H % 64 == 0
+        self._tm = sm100._tm
+        self.K, self.H = K, H
+        self.k = sm100._sm100_kernel(
+            "gemm_swiglu_f8_up_sm100",
+            "gemm_swiglu_f8_up_sm100",
+            device_index,
+            src_dir=str(_dir),
+            defs=(f"DIM={K}", f"HMUL={H // K}", *DEFS),
+            cluster=2,
+            smem=5 * 28672 + 32768 + 512,
+        )
+        self.nsm = num_sms(device_index)
+        self.runs: dict = {}
+
+    def _bind(self, x8, w8, out, sx, sw, nsm):
+        M, K = x8.shape
+        H = self.H
+        assert K == self.K and w8.shape == (3 * H, K) and out.shape == (M, H) and M % 128 == 0
+        assert x8.is_contiguous() and w8.is_contiguous() and out.is_contiguous() and sx.is_contiguous() and sw.is_contiguous()
+        tm = self._tm
+        maps = (
+            tm(x8.view(torch.uint8), [K, M], K, [128, 64], dtype="u8"),
+            tm(w8.view(torch.uint8), [K, 3 * H], K, [128, 96], dtype="u8"),
+            tm(out, [H, M], H * 2, [64, 64]),
+        )
+        grid = (min(self.nsm, GRID_CTAS if GRID_CTAS is not None else nsm) & ~1, 1, 1)
+        tiles = M // 128
+
+        def run():
+            self.k(grid, (512, 1, 1), *maps, sx, sw, int(tiles))
+
+        run.keep = (maps, x8, w8, out, sx, sw)  # ty: ignore[unresolved-attribute]
+        return run
+
+
 _OPS: dict = {}
 
 
@@ -111,12 +157,11 @@ class _Ext:
 
     @staticmethod
     def gemm_swiglu_f8(x8, a8, h, sx, sa, nsm, ht, pdl, up=False):
-        assert not up, "B200 e4m3 expand: the up-gate block is not built"
         idx = x8.device.index if x8.device.index is not None else torch.cuda.current_device()
-        key = (idx, x8.shape[1], h.shape[1])
+        key = (idx, x8.shape[1], h.shape[1], up)
         op = _OPS.get(key)
         if op is None:
-            op = _OPS[key] = SwigluF8(idx, x8.shape[1], h.shape[1])
+            op = _OPS[key] = (SwigluF8Up if up else SwigluF8)(idx, x8.shape[1], h.shape[1])
         return op(x8, a8, h, sx.view(-1), sa.view(-1), int(nsm))
 
 
@@ -125,9 +170,12 @@ def ext():
     return _Ext()
 
 
-def prebuild_items():
-    """Prebuild plan entries (``_prebuild --arch sm100``): the rows module and the cubin of the width-768 expand."""
+def prebuild_items(plain: bool = True, up: bool = False):
+    """Prebuild plan entries (``_prebuild --arch sm100``): the rows module and the cubin of the width-768 expand (``up``: Boltz-2's up-gate expand)."""
     yield _rows_ext
     from ...augmented_attention.cuda import sm100
 
-    yield functools.partial(sm100.cubin, "gemm_swiglu_f8_sm100", ("DIM=768", "HMUL=2", "ITEM_SCHED", *DEFS), src_dir=str(_dir))
+    if plain:
+        yield functools.partial(sm100.cubin, "gemm_swiglu_f8_sm100", ("DIM=768", "HMUL=2", "ITEM_SCHED", *DEFS), src_dir=str(_dir))
+    if up:
+        yield functools.partial(sm100.cubin, "gemm_swiglu_f8_up_sm100", ("DIM=768", "HMUL=2", *DEFS), src_dir=str(_dir))

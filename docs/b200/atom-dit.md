@@ -3313,3 +3313,8 @@ and loses where the grid is full or long: N 1 S 5120 47.3 -> 49.2, N 5 S 2048 / 
 ## 2026-11-19 (agent C, n13-fp8-c): FP8 for the atom DiT inference stages -- measured, not built
 The H100 e4m3 row kernels (`pre90_f8` / `post90_f8`) have no B200 counterpart; the B200 stages are row-thread / TMA-latency bound with the MMAs hidden, tensor time is 13-16 % of the block at 5 x 4096 .. 5 x 8192 atoms
 (analytic, from the measured bf16 block times 52 / 89 us), so the bound of an e4m3 product is ~6-8 % before the per-row amax cast it would add to the binding row-thread path. Nothing in this file's kernels changed; numbers and reasoning in `docs/b200/fp8.md`.
+
+## 2026-11-19 (agent E, n14-e): the FP8 atom DiT rows route is BUILT and measured (supersedes the analytic note above)
+`b200_atom/{pre_fwd_f8.cu, post_fwd_f8.cu, f8.py}`: e4m3 q / k / v / gate projections and out projection + SwiGLU expand (Boltz-2's up gate included) on tcgen05 `kind::f8f6f4`, opt-in (`MINIWORLD_ATOMDIT_FP8_B200`), default off and bit-identical
+(`pre_fwd.cu` / `post_fwd.cu` untouched). Measured (docs/b200/fp8.md, "Agent E"): 0.93-0.99 of a block at 1024 atoms x 5 samples, level time and -4 .. -5 % energy at 2048 x 5, +1.5 .. +6 % above; the tensor time the analytic note
+bounded at 6-8 % is real (free-quantisation ablation of the built stages: 0.85-0.90 of a row stage at 5120 rows, 0.95-0.99 at >= 20480), the per-row amax + cast on the row-thread path eats it. Served from 0 to 10240 rows.

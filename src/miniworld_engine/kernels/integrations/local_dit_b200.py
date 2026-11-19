@@ -636,10 +636,22 @@ def _block_fwd(
         )
         qkr = None
         xkv = None
-        if cross:  # keys and values from a second AdaLN of x1 (or of the raw atoms, ``parallel``), inside pre_fwd
+        from miniworld_engine.kernels.augmented_attention.cuda.b200_atom import f8 as _f8
+
+        f8 = _f8 if _f8.ENABLED else None  # FP8 (opt-in, ``b200_atom.f8``): inference, the plain and cross pre_fwd builds / the non-up post_fwd
+        if cross and f8 is not None and f8.serves("pre", m, save):
+            bs = _kv_pack(weights, not save)[1]
+            w_pre, b_pre = wp
+            q, k, v, sg = f8.pre_fwd(s2, mod, w_pre, b_pre, mkv=mkv, bs=bs, parallel=parallel, eb=eb)
+        elif cross:  # keys and values from a second AdaLN of x1 (or of the raw atoms, ``parallel``), inside pre_fwd
             bs = _kv_pack(weights, not save)[1]
             w_pre, b_pre = wp
             q, k, v, sg, x1, xkv = cast(tuple, rows.pre_fwd_kv(s2, mod, w_pre, b_pre, mkv, bs, save=save, parallel=parallel, eb=eb))
+        elif not kqln and f8 is not None and f8.serves("pre", m, save):
+            assert eb is None or var, "eb: the variant (ADA1) or cross builds"
+            q, k, v, sg = f8.pre_fwd(s2, mod, *wp, eps=eps, ada1=var, eb=eb)
+        elif kqln and f8 is not None and f8.serves("pre", m, save):
+            q, k, v, sg = f8.pre_fwd(s2, mod, wp[0], wp[1], eps=eps, ada1=True, eb=eb, kq=kq, kq_eps=kq_eps)
         elif kqln:
             q, k, v, sg, x1, qkr = rows.pre_fwd_kq(s2, mod, wp[0], wp[1], kq, kq_eps, save=save, eps=eps, ada1=True, eb=eb)
         else:
@@ -662,7 +674,11 @@ def _block_fwd(
             # at 1024 atoms; measured against the join before pre_fwd and against the bias on the main stream: level or slower)
             pdl=var or (not save and _PDL_ATTN),
         )
-        out, u, a2, x2, t = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, save=save, eps=eps, pars=pars, wup=wup, ada1=var)
+        if f8 is not None and f8.serves("post", m, save):
+            out = f8.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, eps=eps, pars=pars, ada1=var, wup=wup)
+            u = a2 = x2 = t = None
+        else:
+            out, u, a2, x2, t = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, save=save, eps=eps, pars=pars, wup=wup, ada1=var)
     out = _unpadded(out.view(a // nf, nf, n, DS_), single.shape)
     if not save:
         return [out]

@@ -28,14 +28,14 @@ def _mods():
 @pytest.fixture()
 def route():
     f8, r = _mods()
-    old = (f8.POLICY, f8.MIN_ROWS, f8.GUARD, f8.WIDTHS)
-    f8.POLICY, f8.MIN_ROWS, f8.GUARD, f8.WIDTHS = "calib", 0, "sync", (128, 256, 384, 512, 768)
+    old = (f8.POLICY, f8.MIN_ROWS, f8.GUARD, f8.WIDTHS, f8.FUSED_WIDTHS, f8.FUSED_MIN_ROWS)
+    f8.POLICY, f8.MIN_ROWS, f8.GUARD, f8.WIDTHS, f8.FUSED_WIDTHS, f8.FUSED_MIN_ROWS = "calib", 0, "sync", (128, 256, 384, 512, 768), (128, 256), {}
     f8._CACHES.clear()
     f8.overflow_peak()
     for k in f8.GUARD_STATS:
         f8.GUARD_STATS[k] = 0
     yield f8, r
-    f8.POLICY, f8.MIN_ROWS, f8.GUARD, f8.WIDTHS = old
+    f8.POLICY, f8.MIN_ROWS, f8.GUARD, f8.WIDTHS, f8.FUSED_WIDTHS, f8.FUSED_MIN_ROWS = old
     f8._CACHES.clear()
 
 
@@ -311,3 +311,184 @@ def test_nonfinite_input_does_not_break_the_guard(route):
     r.transition_sm100a(xb, gm, bt, wa, wb, ws, EPS)
     fp8.check()  # (peak inf: no rescale, no exception)
     assert torch.equal(f8._CACHES[wa.data_ptr()]["sh"], sh0)
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+# the fused one-kernel e4m3 forward (sm100/fp8/tr8_fwd_sm100.cu): D 128 / 256, n 2 / 4
+
+
+def _both(route, x, gm, bt, wa, wb, ws, fused):
+    """(calibrated, then measured) output of the route with the fused kernel on / off (the 3-launch chain)."""
+    f8, r = route
+    f8.FUSED_WIDTHS = (128, 256) if fused else ()
+    f8._CACHES.clear()
+    r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+    return r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+
+
+@pytest.mark.parametrize("d,n", [(128, 4), (128, 2), (256, 4), (256, 2)])
+def test_fused_error_and_chain_agreement(route, d, n):
+    f8, r = route
+    gm, bt, wa, wb, ws = _weights(d, n)
+    x = _x(16384, d)
+    y64 = _gold(x, gm, bt, wa, wb, ws)
+    yf = _both(route, x, gm, bt, wa, wb, ws, True)
+    yc = _both(route, x, gm, bt, wa, wb, ws, False)
+    yd = r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS, _fp8=False)
+    assert torch.isfinite(yf.float()).all()
+    jf, jd = _judge(yf, y64), _judge(yd, y64)
+    assert jf < 0.05 and jf / jd < 16, (jf, jd)  # H100 acceptance band 0.035-0.045 (full e4m3)
+    # same quantisation points as the chain (the packed LayerNorm rounds a few xn values differently: an e4m3 step on a handful of elements)
+    assert (yf.float() - yc.float()).abs().max() / yc.float().abs().max() < 0.02 and abs(jf - _judge(yc, y64)) < 0.01
+    assert (yf != yc).float().mean() < 1e-3
+
+
+@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("scale,off", [(1e-3, 0.0), (1e-3, 25.0), (40.0, 0.0), (40.0, 25.0), (1.0, 25.0)])
+def test_fused_stress(route, d, scale, off):
+    f8, r = route
+    gm, bt, wa, wb, ws = _weights(d, 4)
+    x = _x(8192, d, scale, off)
+    y64 = _gold(x, gm, bt, wa, wb, ws)
+    y8 = _both(route, x, gm, bt, wa, wb, ws, True)
+    yc = _both(route, x, gm, bt, wa, wb, ws, False)
+    yd = r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS, _fp8=False)
+    assert torch.isfinite(y8.float()).all()
+    # (x scale 1e-3: eps dominates the LayerNorm, the update is ~6.5 % of y - x: the fused kernel is within 5 % of the chain's error, whatever the band)
+    assert _judge(y8, y64) < 0.08 and _judge(y8, y64) <= 1.05 * _judge(yc, y64) + 1e-3 and _judge(y8, y64) / _judge(yd, y64) < 20
+
+
+@pytest.mark.parametrize("d", [128, 256])
+def test_fused_sync_guard_redoes_a_saturated_call(route, d):
+    f8, r = route
+    gm, bt, wa, wb, ws = _weights(d, 4)
+    f8.FUSED_WIDTHS = (128, 256)
+    r.transition_sm100a(_x(8192, d, 1e-4), gm, bt, wa, wb, ws, EPS)  # calibrates on the small input
+    x = _x(8192, d)
+    y64 = _gold(x, gm, bt, wa, wb, ws)
+    y8 = r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+    assert f8.GUARD_STATS["retries"] >= 1 and f8.GUARD_STATS["fallbacks"] == 0
+    assert _judge(y8, y64) < 0.06
+
+
+@pytest.mark.parametrize("d", [128, 256])
+def test_fused_lazy_guard_and_graph_replay(route, d):
+    """Saturation seen through a captured graph (fp8.check() lowers the scale in place, rerun), then graph replay = eager bytes."""
+    f8, r = route
+    f8.GUARD = "lazy"
+    gm, bt, wa, wb, ws = _weights(d, 4)
+    r.transition_sm100a(_x(8192, d, 1e-4), gm, bt, wa, wb, ws, EPS)  # eager calibration on the small input
+    x = _x(8192, d)
+    y64 = _gold(x, gm, bt, wa, wb, ws)
+    out = torch.empty_like(x)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+    torch.cuda.synchronize()
+    f8.overflow_peak()
+    f8.refresh(next(iter(f8._CACHES.values())))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out.copy_(r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS))
+    graph.replay()
+    torch.cuda.synchronize()
+    assert fp8.check() is True
+    for _ in range(3):
+        graph.replay()
+        torch.cuda.synchronize()
+        if not fp8.check():
+            break
+    else:
+        pytest.fail("still saturating after 3 reruns")
+    assert _judge(out, y64) < 0.06
+    eager = r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS).clone()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert _sha(out) == _sha(eager)
+    assert f8.GUARD_STATS["capture_fallbacks"] == 0
+
+
+@pytest.mark.parametrize("d,rows", [(128, 8192 + 37), (128, 1000), (256, 4096 + 1), (256, 300)])
+def test_fused_ragged_rows(route, d, rows):
+    f8, r = route
+    gm, bt, wa, wb, ws = _weights(d, 4)
+    x = _x(rows, d)
+    y64 = _gold(x, gm, bt, wa, wb, ws)
+    r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+    y8 = r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+    assert y8.shape == x.shape and torch.isfinite(y8.float()).all()
+    assert _judge(y8, y64) < 0.05
+
+
+def test_fused_off_is_the_default_route(route):
+    """FP8 off: the fused build is never reached and the default route's bytes do not change."""
+    f8, r = route
+    gm, bt, wa, wb, ws = _weights(128, 4)
+    x = _x(16384, 128)
+    f8.POLICY = None
+    assert not f8.serves(x, wa, ws)
+    assert _sha(r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)) == _sha(r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS, _fp8=False))
+
+
+def test_gates_of_the_fused_widths(route):
+    """D 128 / 256 gates, the D 256 n 2 upper row limit and the chain below the fused kernel's row threshold (served rows are the measured ones, docs/b200/fp8.md section 8)."""
+    f8, r = route
+    f8.MIN_ROWS = None
+    f8.FUSED_MIN_ROWS = {(256, 4): 12288, (256, 2): 1 << 60}
+    f8.WIDTHS = (128, 256, 512, 768)
+    g128 = _weights(128, 4)
+    assert not f8.serves(_x(2048, 128), g128[2], g128[4]) and f8.serves(_x(4096, 128), g128[2], g128[4])
+    g128n2 = _weights(128, 2)
+    assert not f8.serves(_x(8192, 128), g128n2[2], g128n2[4]) and f8.serves(_x(16384, 128), g128n2[2], g128n2[4])
+    g256, g256n2 = _weights(256, 4), _weights(256, 2)
+    assert not f8.serves(_x(512, 256), g256[2], g256[4]) and f8.serves(_x(1024, 256), g256[2], g256[4]) and f8.serves(_x(262144, 256), g256[2], g256[4])
+    assert f8.serves(_x(4096, 256), g256n2[2], g256n2[4]) and not f8.serves(_x(8192, 256), g256n2[2], g256n2[4])
+    # D 256 n 4 at 4096 rows runs the chain (the fused kernel has a floor there); at 16384 rows the fused kernel: both within the e4m3 band, the chain bytes differ from the fused bytes
+    gm, bt, wa, wb, ws = g256
+    for rows in (4096, 16384):
+        x = _x(rows, 256)
+        y64 = _gold(x, gm, bt, wa, wb, ws)
+        f8._CACHES.clear()
+        r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+        y8 = r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+        assert _judge(y8, y64) < 0.05
+    f8.MIN_ROWS = 0
+
+
+@pytest.mark.parametrize("d", [128, 256])
+def test_fused_nonfinite_input_does_not_break_the_guard(route, d):
+    f8, r = route
+    gm, bt, wa, wb, ws = _weights(d, 4)
+    x = _x(8192, d)
+    r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)  # calibrate
+    sh0 = f8._CACHES[wa.data_ptr()]["sh"].clone()
+    xb = x.clone()
+    xb[7, 3] = float("inf")
+    y = r.transition_sm100a(xb, gm, bt, wa, wb, ws, EPS)  # must return, not raise
+    assert y.shape == x.shape
+    ok = torch.ones(x.shape[0], dtype=torch.bool, device="cuda")
+    ok[7] = False
+    assert torch.isfinite(y[ok].float()).all()
+    assert torch.equal(f8._CACHES[wa.data_ptr()]["sh"], sh0)
+    f8.GUARD = "lazy"
+    r.transition_sm100a(xb, gm, bt, wa, wb, ws, EPS)
+    fp8.check()
+    assert torch.equal(f8._CACHES[wa.data_ptr()]["sh"], sh0)
+
+
+@pytest.mark.parametrize("d,n", [(128, 4), (256, 4)])
+def test_fused_second_module_and_weight_update(route, d, n):
+    """Two modules (different weights) keep separate calibrations; an in-place weight update is repacked (the cache key is data_ptr + _version)."""
+    f8, r = route
+    gm, bt, wa, wb, ws = _weights(d, n, seed=0)
+    gm2, bt2, wa2, wb2, ws2 = _weights(d, n, seed=5)
+    x = _x(8192, d)
+    y1 = r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+    y1 = r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+    r.transition_sm100a(x, gm2, bt2, wa2, wb2, ws2, EPS)
+    assert f8.GUARD_STATS["calibrations"] == 2
+    ws.mul_(0.5)  # in-place update: new bytes
+    y2 = r.transition_sm100a(x, gm, bt, wa, wb, ws, EPS)
+    y64 = _gold(x, gm, bt, wa, wb, ws)
+    assert not torch.equal(y1, y2) and _judge(y2, y64) < 0.06

@@ -83,10 +83,24 @@ def _fwd_op(args: list[torch.Tensor], eps: float, eps_prod: float, train: bool) 
     _, s, n, _ = msa.shape
     ext = _ext()
     lnw32, lnb32, wlr, wf, bf = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo, infer=not train)
-    a, b, st1 = ext.opm_chai_prologue(
-        msa[0].contiguous(), _mask(msa, mask), lnw32, lnb32, float(eps), wlr[: G * K], wlr[G * K :], bool(train)
-    )
-    o = torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))  # [8, N K, N K]
+    f8 = None
+    if not train:  # opt-in e4m3 grouped product (MINIWORLD_OPM_FP8=bound; docs/b200/fp8.md, agent G)
+        from miniworld_engine.kernels.integrations import opm_fp8 as _oh
+
+        if _oh.POLICY == "bound":
+            from miniworld_engine.kernels.integrations import opm_fp8_b200 as _f8b
+
+            f8 = _f8b.serves_chai(lnw, lnb, wl, wr, n, s)
+    if f8 is not None:  # the prologue writes e4m3 a / b itself (the static bound scales), the product is eight cuBLASLt e4m3 GEMMs
+        a, b = ext.opm_chai_prologue_f8(
+            msa[0].contiguous(), _mask(msa, mask), lnw32, lnb32, float(eps), wlr[: G * K], wlr[G * K :], f8["qa_host"], f8["qb_host"]
+        )
+        o = _f8b.chai_products(f8, a, b, n, s)
+    else:
+        a, b, st1 = ext.opm_chai_prologue(
+            msa[0].contiguous(), _mask(msa, mask), lnw32, lnb32, float(eps), wlr[: G * K], wlr[G * K :], bool(train)
+        )
+        o = torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))  # [8, N K, N K]
     z, y, st, ws = ext.opm_chai_epilogue(
         o, wf, bf, residual if residual.numel() else None, bool(train), float(eps_prod), asym if asym.numel() else None
     )
