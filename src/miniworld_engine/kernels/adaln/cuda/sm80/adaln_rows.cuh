@@ -41,7 +41,8 @@ __global__ void __launch_bounds__(RW * 32) cond_ln_kernel(const T* __restrict__ 
   if (ST != nullptr && lane == 0) ST[row] = make_float2(mean, rstd);
 }
 
-template <int D, typename XT>
+// ID = Chai-1's IdentityAdaptiveLayerNorm: y = (1 + S) LN(x) + B (no sb, no sigmoid; SB is not read).  ID = false is the sigmoid form, unchanged.
+template <int D, typename XT, bool ID = false>
 __global__ void __launch_bounds__(RW * 32) adaln_epi_kernel(const XT* __restrict__ X, long sx, const XT* __restrict__ SBT, long ssb, const XT* __restrict__ SB, XT* __restrict__ Y,
                                                             float2* __restrict__ XST, long M, long P, float eps) {
   constexpr int NV = D / 128;
@@ -65,7 +66,9 @@ __global__ void __launch_bounds__(RW * 32) adaln_epi_kernel(const XT* __restrict
   const float rstd = rsqrtf(warp_sum(q) / D + eps);
 #pragma unroll
   for (int v = 0; v < NV; ++v) {
-    const float4 g = sig4(add4(sc[v], V4<XT>::load(SB + vcol(v, lane))));
+    float4 g;
+    if constexpr (ID) g = make_float4(sc[v].x + 1.f, sc[v].y + 1.f, sc[v].z + 1.f, sc[v].w + 1.f);
+    else g = sig4(add4(sc[v], V4<XT>::load(SB + vcol(v, lane))));
     V4<XT>::store(Y + row * D + vcol(v, lane), add4(mul4(g, scale4(x[v], rstd)), bi[v]));
   }
   if (XST != nullptr && lane == 0) XST[row] = make_float2(mean, rstd);
@@ -90,7 +93,8 @@ ADL_DEVI void block_partial_row(float4 (*cs)[D / 4], const float4 (&acc)[D / 128
 // D (row r: dscale | dy, 2 d wide, AT: the GEMM operand dtype), dx, and the column sums of dscale.  xhat = (x - mean) rstd, g = sigmoid(S + sb),
 // dscale = dy xhat g (1 - g), dxhat = dy g, dx = rstd (dxhat - mean(dxhat) - xhat mean(dxhat xhat)) + dres.  Rows are dealt to the warps of the grid round-robin;
 // gridDim.x is the number of partial rows.
-template <int D, typename XT>
+// ID (the identity AdaLN): g = 1 + S, dscale = dy xhat (the column sums in PSB are written but unused: no sb), SB is not read.
+template <int D, typename XT, bool ID = false>
 __global__ void __launch_bounds__(RW * 32) adaln_bwd_x_kernel(const XT* __restrict__ DY, const XT* __restrict__ X, const float2* __restrict__ XST, const XT* __restrict__ SBT, long ssb,
                                                               const XT* __restrict__ SB, const XT* __restrict__ DRES, XT* __restrict__ DM, XT* __restrict__ DX, float* __restrict__ PSB,
                                                               long M, long P) {
@@ -114,9 +118,15 @@ __global__ void __launch_bounds__(RW * 32) adaln_bwd_x_kernel(const XT* __restri
 #pragma unroll
     for (int v = 0; v < NV; ++v) {
       const float4 xh = make_float4((x[v].x - st.x) * st.y, (x[v].y - st.x) * st.y, (x[v].z - st.x) * st.y, (x[v].w - st.x) * st.y);
-      g[v] = sig4(add4(g[v], V4<XT>::load(SB + vcol(v, lane))));
-      const float4 dsc = make_float4(dy[v].x * xh.x * g[v].x * (1.f - g[v].x), dy[v].y * xh.y * g[v].y * (1.f - g[v].y), dy[v].z * xh.z * g[v].z * (1.f - g[v].z),
-                                     dy[v].w * xh.w * g[v].w * (1.f - g[v].w));
+      float4 dsc;
+      if constexpr (ID) {
+        g[v] = make_float4(g[v].x + 1.f, g[v].y + 1.f, g[v].z + 1.f, g[v].w + 1.f);
+        dsc = mul4(dy[v], xh);
+      } else {
+        g[v] = sig4(add4(g[v], V4<XT>::load(SB + vcol(v, lane))));
+        dsc = make_float4(dy[v].x * xh.x * g[v].x * (1.f - g[v].x), dy[v].y * xh.y * g[v].y * (1.f - g[v].y), dy[v].z * xh.z * g[v].z * (1.f - g[v].z),
+                          dy[v].w * xh.w * g[v].w * (1.f - g[v].w));
+      }
       V4<XT>::store(DM + row * 2 * D + vcol(v, lane), dsc);
       V4<XT>::store(DM + row * 2 * D + D + vcol(v, lane), dy[v]);
       acc[v] = add4(acc[v], dsc);

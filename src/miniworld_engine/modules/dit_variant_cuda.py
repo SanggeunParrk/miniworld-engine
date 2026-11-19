@@ -357,11 +357,7 @@ class VariantTokenCuda:
         from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
 
         grad = _wants_grad(self, single, cond)
-        if (
-            type(self.transition) is ConditionedTransition
-            and not isinstance(self.transition.ada_ln_in, IdentityAdaptiveLayerNorm)
-            and ct_sm80.serves(self.transition, single, cond, single.dtype, grad)
-        ):
+        if type(self.transition) is ConditionedTransition and ct_sm80.serves(self.transition, single, cond, single.dtype, grad):
             with torch.autocast("cuda", enabled=False):
                 return ct_sm80.update(self.transition, single, cond, False, single.dtype, grad)
         return self.transition.delta(single, cond)

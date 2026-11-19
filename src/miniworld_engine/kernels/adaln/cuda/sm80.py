@@ -109,6 +109,34 @@ def epilogue(
     return y, st
 
 
+def epilogue_identity(
+    x: torch.Tensor, sbt: torch.Tensor, eps: float, stats: bool = False
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Chai-1's identity AdaLN: ``y = (1 + S) LN(x) + B`` for x [M, d], sbt = [S | B] [period, 2 d] (row r of x reads row r % period); with ``stats`` also the (mean, rstd) of every x row [M, 2] fp32."""
+    m, d = x.shape
+    y = torch.empty(m, d, device=x.device, dtype=x.dtype)
+    st = torch.empty(m, 2, device=x.device, dtype=torch.float32) if stats else None
+    _ext().adaln_epi_id(x, sbt, y, st, sbt.shape[0], float(eps))
+    return y, st
+
+
+def bwd_x_identity(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    xst: torch.Tensor,
+    sbt: torch.Tensor,
+    dres: torch.Tensor | None,
+    operand_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(D, dx)`` of the identity AdaLN: D [M, 2 d] = [dscale | dy] with dscale = dy xhat, dx [M, d] = the LayerNorm backward of dy (1 + S) (+ ``dres``)."""
+    m, d = x.shape
+    dm = torch.empty(m, 2 * d, device=x.device, dtype=operand_dtype)
+    dx = torch.empty(m, d, device=x.device, dtype=x.dtype)
+    psb = torch.empty(warp_blocks_for(m, x.device), d, device=x.device, dtype=torch.float32)
+    _ext().adaln_bwd_x_id(dy, x, xst, sbt, dres, dm, dx, psb, sbt.shape[0])
+    return dm, dx
+
+
 def bwd_x(
     dy: torch.Tensor,
     x: torch.Tensor,
@@ -282,8 +310,10 @@ __all__ = [
     "available",
     "blocks_for",
     "bwd_x",
+    "bwd_x_identity",
     "cond_bwd",
     "cond_ln",
     "epilogue",
+    "epilogue_identity",
     "finish",
 ]

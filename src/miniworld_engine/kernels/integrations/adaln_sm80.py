@@ -11,6 +11,9 @@ Training (an autograd Function; forward and backward each one opaque op): the sa
 recomputes the gate from [S | B], writes ``D = [dscale | dy]`` and dx in one pass (``adaln_bwd_x``), then dcond_aff = D [Ws; Wb] and [dWs; dWb] = D^T aff on cuBLAS (fp32 outputs), then
 ``cond_ln_bwd`` (dcond, d w); the column sums (d sb, d w) and the casts of the weight gradients are one closing launch (``finish``) that adds the per-block partial rows in a fixed
 order, so the backward is bit-reproducible.
+Chai-1's ``IdentityAdaptiveLayerNorm`` (no conditioning LayerNorm, ``y = (1 + W_s c) LN(x) + W_b c`` on the raw ``c``, both projections bias-free) is served by the identity form of the same
+row kernels (``identity_inference`` / ``_TrainingIdentity``): one GEMM ``[S | B] = c [Ws; Wb]^T``, ``adaln_epi`` / ``adaln_bwd_x`` with ``ID`` (the rest unchanged: the sigmoid path's code is
+untouched), the weight / conditioning gradients on GEMMs; the d = dc = 128 atom kernels are not used for it.
 Numerics and timings: ``docs/gpus/a100/adaptive_layernorm/adaptive_layernorm.md``.
 """
 
@@ -69,6 +72,11 @@ def _period(x: torch.Tensor, cond: torch.Tensor, grad: bool) -> int | None:
     return None
 
 
+def is_identity(module) -> bool:
+    """Chai-1's ``IdentityAdaptiveLayerNorm``: no conditioning LayerNorm (``ln_cond``)."""
+    return not hasattr(module, "ln_cond")
+
+
 def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool) -> bool:
     """Whether ``module`` (an ``AdaptiveLayerNorm`` whose backend resolved to the engine's kernels) runs this call on the sm_80 path: ``compute_dtype`` is the dtype the module
     casts x / cond / the weights to, ``grad`` its ``needs_backward``."""
@@ -76,15 +84,17 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
         return False
     if x.shape[-1] not in WIDTHS or cond.shape[-1] not in WIDTHS or x.numel() == 0:
         return False
-    # IdentityAdaptiveLayerNorm (Chai-1): no conditioning LayerNorm and a (1 + W_s c) scale, not the sigmoid form of these kernels: the module serves it
-    if not hasattr(module, "ln_cond"):
-        return False
-    if module.ln_cond.weight is None or module.to_scale.bias is None or module.to_bias.bias is not None:
+    identity = is_identity(module)
+    if identity:  # IdentityAdaptiveLayerNorm (Chai-1): (1 + W_s c) LN(x) + W_b c on the RAW conditioning, both projections bias-free
+        if module.to_scale.bias is not None or module.to_bias.bias is not None:
+            return False
+    elif module.ln_cond.weight is None or module.to_scale.bias is None or module.to_bias.bias is not None:
         return False
     if torch.cuda.get_device_capability(x.device) not in ((8, 0), (12, 0)):  # A100, or the RTX 5090 (the same sources built for sm_120a)
         return False
     if (
-        compute_dtype is torch.float32
+        not identity
+        and compute_dtype is torch.float32
         and not grad
         and x.shape[-1] == 128
         and cond.shape[-1] == 128
@@ -425,6 +435,54 @@ class _Training(torch.autograd.Function):
         return dx, dcond, dlnw, dws, dsb, dwb, None, None
 
 
+# ------------------------------------------------------------------------------------------------------------ identity AdaLN (Chai-1)
+def identity_table(cond: torch.Tensor, ws: torch.Tensor, wb: torch.Tensor, wcat: torch.Tensor | None = None) -> torch.Tensor:
+    """``[S | B] = cond [Ws; Wb]^T`` [P, 2 d] (the RAW conditioning: no LayerNorm of it, no biases) in the operand dtype: one GEMM."""
+    return _mm_op(cond, (wcat if wcat is not None else torch.cat([ws, wb])).t())
+
+
+def identity_inference(x: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wb: torch.Tensor, eps_x: float) -> torch.Tensor:
+    """``(1 + W_s c) LN(x) + W_b c`` (``IdentityAdaptiveLayerNorm``): x [M, d], cond [P, dc] contiguous rows (P divides M), Ws / Wb [d, dc] -> y [M, d]."""
+    k = _kernels()
+    with torch.cuda.device(x.device):
+        ws, wb = cast_params((ws, wb), x.dtype, True)
+        sbt = identity_table(cond, ws, wb, _wcat(ws, wb, True))
+        return k.epilogue_identity(x, sbt, eps_x)[0]
+
+
+class _TrainingIdentity(torch.autograd.Function):
+    """The identity AdaLN's training: forward saves [S | B] and the x statistics, the backward is one row pass (dscale | dy, dx) and three GEMMs."""
+
+    @staticmethod
+    def forward(ctx, x, cond, ws, wb, eps_x):
+        ctx.fp32_grads = master((ws,), x.dtype)
+        k = _kernels()
+        with torch.cuda.device(x.device):
+            wsc, wbc = cast_params((ws, wb), x.dtype, False)
+            wcat = torch.cat([wsc, wbc])
+            sbt = identity_table(cond, wsc, wbc, wcat)
+            y, xst = k.epilogue_identity(x, sbt, eps_x, stats=True)
+        assert xst is not None  # stats=True
+        ctx.save_for_backward(x, cond, ws, wb, wcat, sbt, xst)
+        return y
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, dy):
+        x, cond, ws, wb, wcat, sbt, xst = ctx.saved_tensors
+        k = _kernels()
+        d = x.shape[1]
+        with torch.cuda.device(x.device):
+            dm, dx = k.bwd_x_identity(dy.contiguous(), x, xst, sbt, None, x.dtype)  # [dscale | dy], dx
+            br = Branch(x.device)
+            dw = br.run(lambda: _wgrad(dm, cond), dm, cond)  # [2 d, dc] fp32: [dWs; dWb], beside the data gradient's GEMM
+            dcond = _mm_op(dm, wcat)  # [M, dc] in cond's dtype: dscale Ws + dy Wb
+            br.join()
+            gl = [like(ws, ctx.fp32_grads), like(wb, ctx.fp32_grads)]
+            dws, dwb = k.finish([], [], [dw[:d], dw[d:]], gl)
+        return dx, dcond, dws, dwb, None
+
+
 # ------------------------------------------------------------------------------------------------------------ module entry
 def update(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool) -> torch.Tensor:
     """``AdaptiveLayerNorm`` forward on the sm_80 path (``serves`` must have accepted the call); ``grad`` = ``needs_backward``."""
@@ -435,6 +493,9 @@ def update(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
     else:
         cs = cond if _period(x, cond, False) == xs.shape[0] else cond[0]  # shared: the first sample's rows are the table
         cs = cs.to(compute_dtype).reshape(-1, dc).contiguous()
+    if is_identity(module):
+        run = _TrainingIdentity.apply if grad else identity_inference
+        return run(xs, cs, module.to_scale.weight, module.to_bias.weight, float(module.ln_in.eps)).reshape(x.shape)
     ps = (module.to_scale.weight, module.to_scale.bias, module.to_bias.weight)
     eps = (float(module.ln_in.eps), float(module.ln_cond.eps))
     run = _Training.apply if grad else inference

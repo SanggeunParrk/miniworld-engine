@@ -1352,10 +1352,14 @@ def _adaln(module, single, cond):
 
     ada = module.ada_ln_in
     dt = single.dtype
-    if dt in (torch.float32, BF) and not torch.is_autocast_enabled():
+    # bf16 activations under bf16 autocast (the master layout) reach the kernels too for the identity AdaLN (Chai-1): it has no backend of its own, its Linears would run in bf16 under autocast
+    # as the kernels' casts of the fp32 master weights do (the sigmoid AdaLN's module dispatches to adaln_sm80 itself under autocast)
+    master_identity = dt is BF and adaln_sm80.is_identity(ada) and torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") == BF
+    if dt in (torch.float32, BF) and (not torch.is_autocast_enabled() or master_identity):
         grad = torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, *ada.parameters()))
         if adaln_sm80.serves(ada, single, cond, dt, grad):
-            return adaln_sm80.update(ada, single, cond, dt, grad)
+            with torch.autocast("cuda", enabled=False):
+                return adaln_sm80.update(ada, single, cond, dt, grad)
     return ada(single, cond)
 
 
