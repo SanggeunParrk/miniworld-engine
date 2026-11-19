@@ -205,10 +205,12 @@ _side: dict = {}
 #: shared memory half as often per MMA: interleaved A-B-A-B (CUDA graph, 256 MB L2 flush, vs Triton) d 256 n 4 L 1024 / 1536 1.008 / 1.034 -> 0.967 / 0.965, d 384 n 2 L 1024 0.986 -> 0.946,
 #: d 512 n 4 L 512 1.016 -> 0.990; below the work the 64-row tiles are 1-3 % faster (d 256 n 2 L 512 0.942 vs 0.965).  The accumulation order per output element is the same: the same bits.
 SM120_FOLD_BIG_WORK = 200_000_000
+#: ... or a hidden width of at least this (d 512 n 4: L 256 1.009 -> 0.997 at 65536 rows)
+SM120_FOLD_BIG_H = 2048
 
 
 def _fold_tiles(m: int, h: int, dual: int, res: int) -> tuple[int, int]:
-    return (14, 13) if m * h >= SM120_FOLD_BIG_WORK else (dual, res)
+    return (14, 13) if m * h >= SM120_FOLD_BIG_WORK or h >= SM120_FOLD_BIG_H else (dual, res)
 
 
 def _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual):

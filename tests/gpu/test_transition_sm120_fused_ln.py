@@ -109,6 +109,7 @@ def test_big_work_tiles_give_the_same_bits(monkeypatch: pytest.MonkeyPatch, d: i
     outs = []
     for work in (0, 10**18):
         monkeypatch.setattr(fw, "SM120_FOLD_BIG_WORK", work)
+        monkeypatch.setattr(fw, "SM120_FOLD_BIG_H", 0 if work == 0 else 10**9)
         assert fw._fold_tiles(rows, n * 2 * d // 2 * 1, 2, 2) == ((14, 13) if work == 0 else (2, 2))
         with torch.no_grad():
             outs.append(kern(x))
