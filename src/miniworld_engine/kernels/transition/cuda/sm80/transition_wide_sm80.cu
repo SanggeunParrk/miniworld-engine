@@ -240,10 +240,10 @@ torch::Tensor ln_stats(torch::Tensor x, double eps) {
 }
 
 // h = SwiGLU(LN(x) [Wa; Wb]^T): the dual GEMM on x with wa / wb = bf16(gamma W) (``ln_fold_weights``), the LayerNorm folded into the epilogue (stats from ln_stats, cs / bias [2, H] f32)
-torch::Tensor dual_swiglu_ln(torch::Tensor x, torch::Tensor cs, torch::Tensor bias, torch::Tensor wa, torch::Tensor wb, int64_t cfg, double eps) {
+torch::Tensor dual_swiglu_ln(torch::Tensor x, torch::Tensor stats, torch::Tensor cs, torch::Tensor bias, torch::Tensor wa, torch::Tensor wb, int64_t cfg) {
   TORCH_CHECK(x.is_cuda() && x.is_contiguous() && x.dim() == 2 && x.scalar_type() == at::kBFloat16, "x: [M, K] bf16");
   TORCH_CHECK(wa.is_contiguous() && wb.is_contiguous() && wa.sizes() == wb.sizes() && wa.size(1) == x.size(1), "wa / wb: [H, K]");
-  TORCH_CHECK(x.size(1) % 8 == 0 && x.size(1) <= 768, "dual_swiglu_ln: K % 8 == 0, K <= 768");
+  TORCH_CHECK(stats.is_contiguous() && stats.scalar_type() == at::kFloat && stats.size(0) == x.size(0), "stats [M, 2] f32");
   TORCH_CHECK(cs.scalar_type() == at::kFloat && bias.scalar_type() == at::kFloat && cs.is_contiguous() && bias.is_contiguous() && cs.numel() == 2 * wa.size(0) && bias.numel() == 2 * wa.size(0), "cs / bias: [2, H] f32");
   const int64_t M = x.size(0), K = x.size(1), H = wa.size(0);
   TORCH_CHECK(K % bk_of((int)cfg) == 0 && H % hidden_per_cta((int)cfg) == 0, "dual tiling: K % BK, H % hidden per tile");
@@ -251,10 +251,7 @@ torch::Tensor dual_swiglu_ln(torch::Tensor x, torch::Tensor cs, torch::Tensor bi
   if (M == 0) return h;
   a100::DualParams p{};
   p.a = cptr<__nv_bfloat16>(x); p.wa = cptr<__nv_bfloat16>(wa); p.wb = cptr<__nv_bfloat16>(wb); p.h = mptr<__nv_bfloat16>(h);
-  const int bm = cfg == 0 || cfg == 1 || cfg == 3 || cfg == 4 || cfg == 6 || cfg == 7 || cfg == 9 || cfg == 11 ? 128 : (cfg == 5 || cfg == 8 ? 256 : 64);
-  auto stats = torch::empty({M, 2}, x.options().dtype(at::kFloat));
-  auto cnt = torch::zeros({(M + bm - 1) / bm}, x.options().dtype(at::kInt));
-  p.stats = mptr<float2>(stats); p.cnt = mptr<int>(cnt); p.eps = (float)eps; p.cs = cptr<float>(cs); p.bias = cptr<float>(bias);
+  p.stats = cptr<float2>(stats); p.cs = cptr<float>(cs); p.bias = cptr<float>(bias);
   p.M = (int)M; p.K = (int)K; p.H = (int)H;
   auto st = at::cuda::getCurrentCUDAStream();
   switch (cfg) {

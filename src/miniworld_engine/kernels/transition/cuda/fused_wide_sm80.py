@@ -187,7 +187,7 @@ def _ln_fold(gamma, beta, wa, wb):
 
 def _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual):
     wa_, wb_, cs, bias = _ln_fold(gamma, beta, wa, wb)
-    return ext.dual_swiglu_ln(x, cs, bias, wa_, wb_, dual, eps)
+    return ext.dual_swiglu_ln(x, ext.ln_stats(x, eps), cs, bias, wa_, wb_, dual)
 
 
 def _gate_tile(m: int, d: int, h: int, sm120: bool) -> int:
