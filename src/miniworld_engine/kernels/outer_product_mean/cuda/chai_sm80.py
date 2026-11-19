@@ -63,11 +63,9 @@ def chai_products(a, b, mask, s, n):
         return torch.bmm(a.view(8, s, n * 8).transpose(1, 2), b.view(8, s, n * 8))
     from . import ogemm_sm80
 
-    live = mask.view(s, n).to(torch.uint8).amax(0).contiguous()
-    o = a.new_empty((8, n * 8, n * 8))
-    for g in range(8):
-        ogemm_sm80.outer(a[g].view(s, n * 8), b[g].view(s, n * 8), live, 8, o[g])
-    return o
+    mk = mask.view(s, n)
+    live = ogemm_sm80.live_tokens(mk.view(torch.uint8) if mk.dtype is torch.bool else mk.to(torch.uint8))
+    return ogemm_sm80.outer_batched(a.view(8, s, n * 8), b.view(8, s, n * 8), live, 8)  # one launch for the eight groups (8 launches ran 3 waves each, the last one 0.67 full)
 
 
 def chai_bwd_products(a, b, do, s, n):

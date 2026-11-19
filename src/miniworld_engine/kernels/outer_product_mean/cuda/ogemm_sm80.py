@@ -29,7 +29,13 @@ def ext():
 
 def live_tokens(mask_u8: torch.Tensor) -> torch.Tensor:
     """[S, L] uint8 mask -> [L] uint8: 1 where some MSA row keeps the token."""
-    return mask_u8.amax(0).contiguous()
+    from miniworld_engine.kernels import _msa_card
+
+    if _msa_card.sm120():  # the RTX 5090 keeps the reduction it shipped with
+        return mask_u8.amax(0).contiguous()
+    if mask_u8.shape[0] > 2048:  # (the one-block-column kernel is latency bound at a deep MSA)
+        return mask_u8.amax(0).contiguous()
+    return ext().live_tokens(mask_u8.contiguous())  # A100: one small kernel (torch's amax over the MSA rows costs 13-21 us at S <= 2048, this 8-10 us)
 
 
 def outer(a: torch.Tensor, b: torch.Tensor, live: torch.Tensor, ch: int = 32, out: torch.Tensor | None = None) -> torch.Tensor:
@@ -38,4 +44,12 @@ def outer(a: torch.Tensor, b: torch.Tensor, live: torch.Tensor, ch: int = 32, ou
     m = a.shape[1]
     out = a.new_empty((m, m)) if out is None else out
     ext().ogemm_skip(a, b, live, out, int(ch))
+    return out
+
+
+def outer_batched(a: torch.Tensor, b: torch.Tensor, live: torch.Tensor, ch: int = 8) -> torch.Tensor:
+    """a, b [G, S, ch L] bf16 -> O [G, ch L, ch L] bf16 = a_g^T b_g (the dead tokens' blocks zeros), ONE launch for the G products (A100, not the RTX 5090)."""
+    g, _, m = a.shape
+    out = a.new_empty((g, m, m))
+    ext().ogemm_skip_batched(a, b, live, out, int(ch))
     return out

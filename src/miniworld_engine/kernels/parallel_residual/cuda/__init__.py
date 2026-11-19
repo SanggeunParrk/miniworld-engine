@@ -14,6 +14,8 @@ from miniworld_engine.kernels._compile import opaque
 
 _dir = Path(__file__).parent
 _ARCH = {"sm90": "90a", "sm80": "80", "sm120": "120a"}  # sm120: the GeForce RTX 5090 (sm_120a), the same source
+# A100: plain loads and stores (PR_HINT=1): the streaming-hinted ones (ld.global.cs / st.global.cs, the H100 default) run 5-8 % under the Triton kernel there (1.60 vs 1.71 TB/s of 1.94)
+_FLAGS = {"sm80": ("-DPR_HINT=1",)}
 
 
 @functools.lru_cache(maxsize=None)
@@ -25,7 +27,7 @@ def ext(arch: str):
     return load_extension(
         name=f"parallel_residual_{arch}",
         sources=[str(_dir / "parallel_residual.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes(_ARCH[arch])],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes(_ARCH[arch]), *_FLAGS.get(arch, ())],
         extra_cflags=["-O3", "-std=c++17"],
         verbose=False,
     )

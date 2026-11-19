@@ -188,7 +188,7 @@ class OuterProductMean(BackendModule, MasterWeights):
     #:       ``ef2_msa_v2.opm_fused`` (LN + W x row mask producer, cuBLAS, projection + bias / clamp(n, 1) + pair residual epilogue)
     backends = ("pytorch", "anthropic", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 3,
+        "cuda:a100_sm80": 4,  # 4 (2026-11-19): the dead-token liveness in one small kernel (torch amax 13-21 us), the Chai-1 products in one batched launch (bit-identical outputs)
         "cuda:h100_sm90": 4,  # 4 (2026-11-18): inference cells outside the TMA table (any N >= 1024, S outside 512 / 1024 / 2048 / 4096, N 512-768 at the other depths) take the wide TMA prologue, not the non-TMA native one (825 us at L 1024; opm_train._h100_path; outputs differ by at most 1 bf16 ulp from the native prologue)
         # 2 (2026-11-16): AF3-order inference at depth > 4096 takes the wide TMA prologue (the native one streamed at 0.35 TB/s);
         # 3 (2026-11-16): inference at depth > 4096 takes cuBLAS + the epilogue on the count table instead of the fused kernel (opm_train._product_route_deep)
