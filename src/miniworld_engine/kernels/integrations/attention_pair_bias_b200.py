@@ -946,12 +946,11 @@ def backward32(
             dy2 = dyc[b]
             dog = dy2 @ wop
             dwo = dy2.t() @ og
-            s = qkvg[:, 3 * W :]  # sigmoid(g), written by the forward
-            dcat = x.new_empty((L, 4 * W))  # dq | dk | dv (the core writes them in place) | dg
-            dO = dog * s
-            dog.mul_(O)  # dog O
-            dd = (dog * s).view(L, H, dhp).sum(-1).t().contiguous().view(1, H, L)
-            torch.mul(dog, s * (1.0 - s), out=dcat[:, 3 * W :])
+            dcat =x.new_empty((L, 4 * W))  # dq | dk | dv (the core writes them in place) | dg
+            # dO = dog s; dd[h] = sum_d (dog O) s; the gate gradient (dog O) s (1 - s): one kernel (was eight launches)
+            dO = torch.empty_like(dog)
+            dd = x.new_empty((1, H, L))
+            E.gate32_bwd(dog, O, qkvg, dO, dd, dcat, dhp)
             dq, _, _, db_p = _sm90().tf32_backward(
                 qs,
                 k,

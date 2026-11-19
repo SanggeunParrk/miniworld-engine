@@ -174,7 +174,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cuda:a100_sm80": 9,  # 2026-11-19 (9; 5090 4): the fp32 GEMMs of the fused update follow the caller's TF32 setting (IEEE fp32: the engine's own GEMM, kernels/ieee_f32)
-        "cuda:h100_sm90": 5,
+        "cuda:h100_sm90": 6,  # 6 (2026-11-20): the fp32 TF32 training backward's gate / dO / dd glue in one kernel (eight launches before; dd summed in order, agrees to fp32 rounding)
         "cuda:5090_sm120": 4,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
