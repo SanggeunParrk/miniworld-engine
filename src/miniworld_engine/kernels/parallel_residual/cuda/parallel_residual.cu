@@ -25,7 +25,10 @@ constexpr int kThreads = 256;
 constexpr int kUnroll = 4;  // 16-byte vectors per thread of the backward (one tensor in, one out)
 // 16-byte vectors per thread and tensor of the forward: the loads of (1 + NB) tensors in flight fill the registers (measured H100: 4
 // vectors a tensor at NB = 3 ran 25 % under the bandwidth; one vector a tensor, as the Triton kernel, keeps the occupancy)
-__host__ __device__ constexpr int fwd_unroll(int nb) { return nb == 1 ? 2 : 1; }
+#ifndef PR_UNROLL
+#define PR_UNROLL 0  // 0: the default (2 vectors a thread for one branch, else 1); N > 0: N vectors a thread and tensor (an arch build sets it)
+#endif
+__host__ __device__ constexpr int fwd_unroll(int nb) { return PR_UNROLL > 0 ? PR_UNROLL : (nb == 1 ? 2 : 1); }
 constexpr int kMaxBranches = 5;  // 5: Chai-1's parallel PairformerBlock (two triangle multiplications, two triangle attentions, the transition)
 
 struct Branches {
