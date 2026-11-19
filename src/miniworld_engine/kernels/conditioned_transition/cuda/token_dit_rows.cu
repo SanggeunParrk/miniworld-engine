@@ -21,6 +21,7 @@
 #include <type_traits>
 
 #include "token_dit_common.cuh"
+#include "../../_sm_count.cuh"
 
 namespace {
 using namespace tdr;
@@ -792,7 +793,7 @@ void rna_rows(at::Tensor t, int64_t cols) {
   TORCH_CHECK(t.scalar_type() == at::kFloat && cols % 4 == 0, "rna_rows: fp32 rows, a multiple of 4 columns");
   const at::cuda::CUDAGuard g(t.device());
   const long n4 = t.size(0) * (cols / 4);
-  const unsigned grid = (unsigned)std::min<long>((n4 + 255) / 256, (long)at::cuda::getCurrentDeviceProperties()->multiProcessorCount * 16);
+  const unsigned grid = (unsigned)std::min<long>((n4 + 255) / 256, (long)mw::sm_count() * 16);
   rna_rows_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(ptr<float>(t), t.stride(0), (int)(cols / 4), n4);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -1094,7 +1095,7 @@ void pair_bias_f32_fused(at::Tensor z, at::Tensor wf, at::Tensor out, c10::optio
   C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_f32_k<16>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
   int per = 1;
   cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, pair_bias_f32_k<16>, 128, smem);
-  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm = mw::sm_count();
   const unsigned grid = (unsigned)std::max<int64_t>(1, std::min<int64_t>((R + 127) / 128, (int64_t)std::max(per, 1) * nsm));
   pair_bias_f32_k<16><<<grid, 128, smem, at::cuda::getCurrentCUDAStream()>>>(
       z.data_ptr<float>(), wf.data_ptr<float>(), out.data_ptr<float>(), mp, R, (int)L, (float)eps, perm);

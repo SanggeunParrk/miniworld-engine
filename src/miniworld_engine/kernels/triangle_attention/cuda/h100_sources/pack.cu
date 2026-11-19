@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include "../../../_sm_count.cuh"
 
 // PyTorch's graph replay updates Philox seed/offset scalars with aten::fill_.
 // Keep its generator, counter reservation and stream ordering unchanged, but
@@ -223,8 +224,8 @@ torch::Tensor drop_scale(torch::Tensor pair,double threshold,double inverse) {
   c10::cuda::CUDAGuard guard(pair.device());
   enable_graph_rng_writer();
   auto out=torch::empty({pair.size(0),pair.size(1),pair.size(3)},pair.options());
-  int64_t n=out.numel();auto* prop=at::cuda::getCurrentDeviceProperties();
-  int blocks=std::min<int64_t>((n+255)/256,prop->multiProcessorCount*(prop->maxThreadsPerMultiProcessor/256));
+  int64_t n=out.numel();const int sms=mw::sm_count(),tpsm=mw::max_threads_per_sm();
+  int blocks=std::min<int64_t>((n+255)/256,sms*(tpsm/256));
   uint64_t increment=((n-1)/(int64_t(blocks)*256*4)+1)*4;
   auto* gen=at::check_generator<at::CUDAGeneratorImpl>(at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState state;
@@ -244,8 +245,8 @@ torch::Tensor drop_keep(torch::Tensor like,int64_t rows,int64_t cols,double prob
   c10::cuda::CUDAGuard guard(like.device());
   enable_graph_rng_writer();
   auto out=torch::empty({rows,cols},like.options());
-  int64_t n=out.numel();auto* prop=at::cuda::getCurrentDeviceProperties();
-  int blocks=std::min<int64_t>((n+255)/256,prop->multiProcessorCount*(prop->maxThreadsPerMultiProcessor/256));
+  int64_t n=out.numel();const int sms=mw::sm_count(),tpsm=mw::max_threads_per_sm();
+  int blocks=std::min<int64_t>((n+255)/256,sms*(tpsm/256));
   uint64_t increment=((n-1)/(int64_t(blocks)*256*4)+1)*4;
   auto* gen=at::check_generator<at::CUDAGeneratorImpl>(at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState state;

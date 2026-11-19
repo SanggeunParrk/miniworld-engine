@@ -4,10 +4,11 @@
 #include <set>
 #include "ct_atom_small_adaln.cuh"
 #include "ct_atom_small_tail.cuh"
+#include "../../_sm_count.cuh"
 namespace ct_atom_small80 {
 template<class G,class P,class K>void launch(K kernel,const P&p,cudaStream_t stream){
  static std::set<int> devices;if(devices.insert(at::cuda::current_device()).second)C10_CUDA_CHECK(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,G::SMEM));
- const int sm=at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+ const int sm=mw::sm_count();
  const int grid=std::min<int64_t>((p.M+16*G::NW-1)/(16*G::NW),sm*G::MINB);
  kernel<<<grid,G::NTHR,G::SMEM,stream>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

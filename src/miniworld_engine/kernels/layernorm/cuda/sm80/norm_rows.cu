@@ -30,6 +30,7 @@
 #include <map>
 #include <type_traits>
 #include <utility>
+#include "../../../_sm_count.cuh"
 
 using namespace norms;
 
@@ -921,7 +922,7 @@ __global__ void __launch_bounds__(NTS) bwd_wide(const XT* __restrict__ DY, const
 }
 
 // ------------------------------------------------------------------------------------------------------------------ host side
-int sm_count() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+int sm_count() { return mw::sm_count(); }
 
 template <typename K> int blocks_per_sm(K kernel, int threads, size_t dyn) {
   static std::map<std::pair<const void*, size_t>, int> cache;

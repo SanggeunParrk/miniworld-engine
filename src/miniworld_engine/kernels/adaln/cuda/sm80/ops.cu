@@ -12,6 +12,7 @@
 #include "adaln_finish.cuh"
 #include "adaln_launch.cuh"
 #include "adaln_rows.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace {
 using namespace adl;
@@ -177,7 +178,7 @@ void adaln_atom_fwd(at::Tensor x, at::Tensor cond, at::Tensor lnw, at::Tensor ws
 // the backward in one kernel (adaln_atom_bwd.cuh): dx (+ dres), dcond (+ dextra), dscale and aff (bf16, the operands of the weight-gradient GEMMs), psb / plnw [grid, 128] fp32 = per-CTA
 // partial column sums of dscale and of dcond_aff chat (grid = atom_bwd_grid(M)); cond is one row per row of x (P == M); wt1 = Ws^T, wt2 = Wb^T
 int64_t atom_bwd_grid(int64_t M) {
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   return std::max<int64_t>(1, std::min<int64_t>(((M + 15) / 16 + AdalnAtomBwdCfg<8>::NW - 1) / AdalnAtomBwdCfg<8>::NW, (int64_t)sms));
 }
 void adaln_atom_bwd(at::Tensor dy, at::Tensor x, at::Tensor cond, at::Tensor xst, at::Tensor cst, at::Tensor lnw, at::Tensor ws, at::Tensor wt1, at::Tensor wt2, at::Tensor sb,

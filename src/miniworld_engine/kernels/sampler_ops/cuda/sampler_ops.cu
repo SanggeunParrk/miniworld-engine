@@ -18,6 +18,7 @@
 #include <cfloat>
 #include <climits>
 #include <cuda_bf16.h>
+#include "../../_sm_count.cuh"
 
 namespace {
 constexpr int THREADS = 256;
@@ -717,7 +718,7 @@ at::Tensor pool_atoms_bwd(at::Tensor gout, at::Tensor x, at::Tensor skey, at::Te
   if (gx.numel() == 0) return gx;
   // samples per block: up to BWD_SAMPLES (one slot search per row and block), fewer while the grid holds less than ~32 blocks (256 warps) per SM: a short
   // structure with many samples (1024 atoms x 48 samples) is otherwise latency bound on the serial sample loop. The sums do not depend on it.
-  const int64_t row_blocks = (R + BWD_ROWS - 1) / BWD_ROWS, target = 32LL * at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int64_t row_blocks = (R + BWD_ROWS - 1) / BWD_ROWS, target = 32LL * mw::sm_count();
   const int64_t want = std::max<int64_t>(1, (target + row_blocks - 1) / row_blocks);
   const int spb = (int)std::min<int64_t>(BWD_SAMPLES, std::max<int64_t>(1, (S + want - 1) / want));
   const dim3 grid((unsigned)row_blocks, (unsigned)((S + spb - 1) / spb)), block(32, BWD_ROWS);

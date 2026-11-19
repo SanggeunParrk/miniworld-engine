@@ -16,6 +16,7 @@
 #include "b3_sm80.cuh"
 #include "b1_sm80.cuh"
 #include "wgrad_sm80.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace {
 
@@ -68,7 +69,7 @@ template <class G>
 void launch_attn_rf(const a100::AttnParams& p, int z, double scl, const at::TensorOptions& opts, int rows = 0) {
   const at::Tensor fix = at::empty({a100::rf_fix_ints<G>(p.L, z * p.H, rows)}, opts.dtype(at::kInt));   // [count, tiles...] of the recomputation
   int* fp = fix.data_ptr<int>();
-  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm = mw::sm_count();
   const cudaError_t err = a100::attn_rf_launch<G>(p, z, scl, fp, at::cuda::getCurrentCUDAStream(), nsm, rows);
   C10_CUDA_CHECK(err);
 }
@@ -390,7 +391,7 @@ void front(torch::Tensor x, torch::Tensor w, torch::Tensor bvec, torch::Tensor m
   TORCH_CHECK(!xh.numel() || (xh.scalar_type() == at::kBFloat16 && xh.is_contiguous() && xh.numel() == T * 136), "front: xh [T, 136] bf16 (training)");
   p.xh = xh.numel() ? reinterpret_cast<__nv_bfloat16*>(xh.data_ptr()) : nullptr;
   p.L = (int)L; p.transposed = (int)(transposed & 1); p.flip = (int)((transposed >> 1) & 1); p.eps = (float)eps; p.ntile = (size_t)(T / 32);   // transposed bit 1: flip (F1Params)
-  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm = mw::sm_count();
   if (nw == 8) launch_front<a100::F1Cfg<8>>(p, nsm);
   else if (nw == 12) launch_front<a100::F1Cfg<12>>(p, nsm);
   else if (nw == 16) launch_front<a100::F1Cfg<16>>(p, nsm);
@@ -440,7 +441,7 @@ void back(torch::Tensor o, torch::Tensor g, torch::Tensor wo, torch::Tensor res,
               "back: ds [Z, L, 128] bf16 (the dropout scale, training)");
   p.ds = ds.numel() ? reinterpret_cast<const __nv_bfloat16*>(ds.data_ptr()) : nullptr;
   p.ldg = g.stride(0); p.ntile = (size_t)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
-  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm = mw::sm_count();
   if (nw == 8) launch_back<a100::F3Cfg<8>>(p, nsm);
   else if (nw == 12) launch_back<a100::F3Cfg<12>>(p, nsm);
   else if (nw == 16) launch_back<a100::F3Cfg<16>>(p, nsm);
@@ -488,7 +489,7 @@ void back_bwd(torch::Tensor dout, torch::Tensor ds, torch::Tensor o, torch::Tens
   TORCH_CHECK(!delta.numel() || (delta.scalar_type() == at::kFloat && delta.is_contiguous() && delta.numel() == 4 * T), "back_bwd: delta [Z, 4, L, L] fp32");
   p.delta = delta.numel() ? delta.data_ptr<float>() : nullptr;
   p.ldg = g.stride(0); p.lddg = dg.stride(0); p.ntile = (size_t)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
-  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm = mw::sm_count();
   if (nw == 8) launch_back_bwd<a100::F3Cfg<8>>(p, nsm);
   else if (nw == 12) launch_back_bwd<a100::F3Cfg<12>>(p, nsm);
   else TORCH_CHECK(false, "back_bwd: unsupported warps per CTA");
@@ -534,7 +535,7 @@ void front_bwd(torch::Tensor d, torch::Tensor db, torch::Tensor x, torch::Tensor
   p.wt = reinterpret_cast<const __nv_bfloat16*>(wt.data_ptr()); p.wbt = reinterpret_cast<const __nv_bfloat16*>(wbt.data_ptr());
   p.gamma = gamma.data_ptr<float>();
   p.ldd = d.stride(0); p.ntile = (size_t)(T / 16); p.L = (int)L; p.transposed = (int)transposed;
-  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm = mw::sm_count();
   if (nw == 8) launch_front_bwd<a100::B1Cfg<8>>(p, nsm);
   else if (nw == 12) launch_front_bwd<a100::B1Cfg<12>>(p, nsm);
   else TORCH_CHECK(false, "front_bwd: unsupported warps per CTA");

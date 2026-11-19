@@ -32,35 +32,101 @@ int sm_count() {
   return n;
 }
 
-struct Plan { int gz; bool small; };
+// The launch shape: a tile (128 x 128 or 128 x 64 by 256 threads, 64 x 128 or 64 x 64 by 128) and a split-K depth gz (the k range cut in gz slabs summed afterwards in slab order: bitwise
+// repeatable).  Chosen by a cost model fitted to timings of every (tile, gz) over the shapes of a Protenix v1 fp32 training step on the RTX 5090 (170 SMs): the busiest SM's
+// FFMA work (a SM alone with a CTA runs slower per FFMA than with several), a constant per launch, and for gz > 1 the slab round trip.  Depends on the shape and the SM count only.
+struct Plan { int cfg; int gz; };
+struct CfgInfo { int bm, bn; double s1, s2, c0; };  // us per million FFMA of the busiest SM (one CTA a SM / several), constant (us)
+// B stored [K, N] (the backward GEMMs) and B stored [N, K] (the forward weights, transposed through shared memory) fit differently
+constexpr CfgInfo CFGS_KN[4] = {{128, 128, 4.677, 5.412, -15.980}, {64, 128, 6.525, 5.765, -4.729}, {64, 64, 8.098, 5.892, -3.514}, {128, 64, 5.330, 5.575, -6.544}};
+constexpr CfgInfo CFGS_NK[4] = {{128, 128, 7.189, 6.045, -8.119}, {64, 128, 10.881, 5.616, -7.480}, {64, 64, 14.737, 6.229, -6.743}, {128, 64, 10.437, 6.102, -8.781}};
 
-// The launch shape: 128-row blocks when they fill the GPU; else, for a long K (a weight gradient) 128-row blocks with split-K, for a short K 64-row blocks (with split-K
-// when even those leave SMs idle and the product can be summed afterwards).
-Plan plan(long gx, long M, long K, bool splittable) {
+Plan plan(long M, long N, long K, bool splittable, bool wide_only, bool kn) {
+  const CfgInfo* CFGS = kn ? CFGS_KN : CFGS_NK;
   const int sms = sm_count();
-  const long t128 = gx * ((M + 127) / 128);
-  if (t128 >= sms) return {1, false};
-  if (!splittable) return {1, true};
-  const long sa = std::max(1L, std::min((2L * sms + t128 - 1) / t128, K / 256));
-  if (t128 * sa * 5 >= (long)sms * 6) return {(int)sa, false};  // 128-row blocks with split-K fill the GPU: the better tile
-  const long t64 = gx * ((M + 63) / 64);
-  if (t64 >= sms) return {1, true};
-  return {(int)std::max(1L, std::min((2L * sms + t64 - 1) / t64, K / 128)), true};
+  static const int gzs[] = {1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 48, 64, 85, 96, 128};
+  Plan best{0, 1};
+  double best_t = 1e30;
+  for (int ci = 0; ci < 4; ++ci) {
+    if (wide_only && CFGS[ci].bn != 128) continue;
+    const long tiles = ((N + CFGS[ci].bn - 1) / CFGS[ci].bn) * ((M + CFGS[ci].bm - 1) / CFGS[ci].bm);
+    for (int gz : gzs) {
+      if (gz > 1 && (!splittable || K / gz < 64 || tiles * gz > 6000 || (double)gz * M * N > 268435456.0)) continue;
+      const long ncta = tiles * gz;
+      const long per = (ncta + sms - 1) / sms;
+      const double ks = (double)((K + gz - 1) / gz);
+      const double f = (double)per * CFGS[ci].bm * CFGS[ci].bn * ks / 1e6;
+      double t = (per == 1 ? CFGS[ci].s1 : CFGS[ci].s2) * f + CFGS[ci].c0;
+      if (ci != 0) t *= 1.08;  // hysteresis: the 128 x 128 tile unless another is clearly faster
+      if (gz > 1) t += 2.5 + (gz + 1) * (double)M * N * 4.0 / 1.4e6;
+      if (t < best_t) { best_t = t; best = {ci, gz}; }
+    }
+  }
+  return best;
 }
 
-template <int LA, int LB, int EPI>
-void launch(Args& p, int gx, Plan pl) {
-  const dim3 block(NTHR);
-  if (pl.small) {
-    const dim3 grid((unsigned)gx, (unsigned)((p.M + 63) / 64), (unsigned)pl.gz);
-    gemm_k<LA, LB, EPI, 64><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(p);
-  } else {
-    const dim3 grid((unsigned)gx, (unsigned)((p.M + 127) / 128), (unsigned)pl.gz);
-    gemm_k<LA, LB, EPI, 128><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(p);
-  }
+
+// The best (tile, gz) of the shapes of the real Protenix v1 fp32 training step on the RTX 5090 (timed over every candidate with cold operands: la, lb, M, N, K, cfg, gz); the model
+// above is the rule for every other shape (it lands within 8% of these by weighted time).  An entry is a plain choice of launch shape: any (cfg, gz) is correct for any shape.
+struct Tuned { int la, lb, M, N, K, cfg, gz; };
+constexpr Tuned TUNED[] = {
+    {0, 0, 384, 768, 384, 2, 6},
+    {0, 0, 384, 768, 768, 2, 6},
+    {0, 0, 384, 768, 1536, 1, 12},
+    {0, 0, 384, 1536, 384, 2, 3},
+    {0, 0, 384, 3072, 768, 1, 3},
+    {0, 0, 3072, 768, 384, 3, 1},
+    {0, 0, 3072, 768, 768, 1, 3},
+    {0, 0, 3072, 768, 1536, 1, 3},
+    {0, 0, 3072, 1536, 384, 2, 1},
+    {0, 0, 3072, 3072, 768, 1, 1},
+    {0, 0, 4096, 128, 128, 3, 2},
+    {0, 0, 4096, 128, 256, 2, 3},
+    {0, 0, 4096, 512, 128, 2, 1},
+    {0, 0, 32768, 128, 128, 2, 1},
+    {0, 0, 32768, 512, 128, 1, 1},
+    {0, 1, 3072, 384, 768, 0, 2},
+    {0, 1, 3072, 384, 1536, 0, 2},
+    {0, 1, 3072, 768, 3072, 0, 1},
+    {0, 1, 3072, 1536, 768, 0, 1},
+    {0, 1, 4096, 128, 128, 2, 1},
+    {0, 1, 32768, 128, 256, 0, 1},
+    {0, 1, 32768, 128, 512, 0, 1},
+    {1, 1, 128, 128, 4096, 2, 32},
+    {1, 1, 128, 128, 32768, 0, 128},
+    {1, 1, 256, 128, 32768, 0, 64},
+    {1, 1, 512, 128, 32768, 0, 32},
+    {1, 1, 512, 128, 147456, 0, 85},
+    {1, 1, 768, 384, 3072, 0, 8},
+    {1, 1, 768, 768, 3072, 0, 4},
+    {1, 1, 1536, 384, 3072, 0, 4},
+    {1, 1, 1536, 768, 3072, 0, 2},
+    {1, 1, 3072, 768, 3072, 0, 1},
+};
+
+Plan tuned_plan(int64_t la, int64_t lb, long M, long N, long K) {
+  if (sm_count() != 170) return {-1, 1};  // measured on the 170-SM card
+  for (const Tuned& t : TUNED)
+    if (t.la == la && t.lb == lb && t.M == M && t.N == N && t.K == K) return {t.cfg, t.gz};
+  return {-1, 1};
+}
+template <int LA, int LB, int EPI, int BMT, int BNT, int NT, int MINB>
+void launch_cfg(Args& p, int gz) {
+  const unsigned gx = (EPI == EPI_SWIGLU) ? (unsigned)((p.N + 63) / 64) : (unsigned)((p.N + BNT - 1) / BNT);
+  const dim3 grid(gx, (unsigned)((p.M + BMT - 1) / BMT), (unsigned)gz);
+  gemm_k<LA, LB, EPI, BMT, BNT, NT, MINB><<<grid, dim3(NT), 0, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+template <int LA, int LB, int EPI>
+void launch(Args& p, Plan pl) {
+  if (pl.cfg == 0) launch_cfg<LA, LB, EPI, 128, 128, 256, 1>(p, pl.gz);
+  else if (pl.cfg == 1) launch_cfg<LA, LB, EPI, 64, 128, 128, 3>(p, pl.gz);
+  else if constexpr (EPI != EPI_SWIGLU) {  // (the SwiGLU tile is 128 wide: plan() never picks a 64-wide one for it)
+    if (pl.cfg == 2) launch_cfg<LA, LB, EPI, 64, 64, 128, 4>(p, pl.gz);
+    else launch_cfg<LA, LB, EPI, 128, 64, 256, 2>(p, pl.gz);
+  }
+}
 // out [M, N] = sum of the slabs [gz, M, N] (+ res) in slab order
 __global__ void sum_slabs_k(const float* __restrict__ slabs, const float* __restrict__ res, float* __restrict__ out, int gz, long n4, long slab4, int cols4, long ldo) {
   const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -95,11 +161,11 @@ void check_f32(const at::Tensor& t, const char* what) {
 
 namespace {
 template <int EPI>
-void run_layout(Args& p, int64_t la, int64_t lb, int gx, Plan pl) {
-  if (la == LA_MK && lb == LB_NK) launch<LA_MK, LB_NK, EPI>(p, gx, pl);
-  else if (la == LA_MK && lb == LB_KN) launch<LA_MK, LB_KN, EPI>(p, gx, pl);
-  else if (la == LA_KM && lb == LB_NK) launch<LA_KM, LB_NK, EPI>(p, gx, pl);
-  else launch<LA_KM, LB_KN, EPI>(p, gx, pl);
+void run_layout(Args& p, int64_t la, int64_t lb, Plan pl) {
+  if (la == LA_MK && lb == LB_NK) launch<LA_MK, LB_NK, EPI>(p, pl);
+  else if (la == LA_MK && lb == LB_KN) launch<LA_MK, LB_KN, EPI>(p, pl);
+  else if (la == LA_KM && lb == LB_NK) launch<LA_KM, LB_NK, EPI>(p, pl);
+  else launch<LA_KM, LB_KN, EPI>(p, pl);
 }
 // the k range of one split-K slab, a multiple of BK
 int kper_of(int64_t K, int gz) { return (int)(((K + gz - 1) / gz + BK - 1) / BK * BK); }
@@ -118,27 +184,27 @@ at::Tensor mm(at::Tensor a, int64_t lda, int64_t la, at::Tensor b, int64_t ldb, 
   Args p{};
   p.a = a.data_ptr<float>(); p.lda = lda; p.b0 = b.data_ptr<float>(); p.b1 = p.b0; p.ldb = ldb; p.bsplit = INT_MAX;
   p.M = (int)M; p.N = (int)N; p.K = (int)K;
-  const int gx = (int)((N + BN - 1) / BN);
   if (bias.has_value()) {  // the residual epilogue with a zero row stride: one pass, no split
     check_f32(*bias, "bias");
     TORCH_CHECK(bias->is_contiguous() && bias->numel() == N, "bias: [N]");
     auto out = into.has_value() ? *into : at::empty({M, N}, a.options());
     p.kper = (int)K; p.c = out.data_ptr<float>(); p.ldc = out.stride(0); p.r = bias->data_ptr<float>(); p.ldr = 0;
-    run_layout<EPI_RES>(p, la, lb, gx, plan(gx, M, K, false));
+    run_layout<EPI_RES>(p, la, lb, plan(M, N, K, false, false, lb == LB_KN));
     return out;
   }
-  Plan pl = plan(gx, M, K, true);
+  Plan pl = tuned_plan(la, lb, M, N, K);
+  if (pl.cfg < 0) pl = plan(M, N, K, true, false, lb == LB_KN);
   p.kper = kper_of(K, pl.gz);
   pl.gz = (int)((K + p.kper - 1) / p.kper);
   if (pl.gz == 1) {  // straight into the result (``into``: a caller's buffer, a row stride allowed)
     auto res = into.has_value() ? *into : at::empty({M, N}, a.options());
     p.c = res.data_ptr<float>(); p.ldc = res.stride(0); p.slab = 0;
-    run_layout<EPI_STORE>(p, la, lb, gx, pl);
+    run_layout<EPI_STORE>(p, la, lb, pl);
     return res;
   }
   auto out = at::empty({pl.gz, M, N}, a.options());
   p.c = out.data_ptr<float>(); p.ldc = N; p.slab = M * N;
-  run_layout<EPI_STORE>(p, la, lb, gx, pl);
+  run_layout<EPI_STORE>(p, la, lb, pl);
   return sum_slabs(out, nullptr, into);
 }
 
@@ -152,13 +218,12 @@ at::Tensor mm_stacked(at::Tensor a, at::Tensor b0, at::Tensor b1) {
   Args p{};
   p.a = a.data_ptr<float>(); p.lda = K; p.b0 = b0.data_ptr<float>(); p.b1 = b1.data_ptr<float>(); p.ldb = N; p.bsplit = (int)kb;
   p.M = (int)M; p.N = (int)N; p.K = (int)K;
-  const int gx = (int)((N + BN - 1) / BN);
-  Plan pl = plan(gx, M, K, true);
+  Plan pl = plan(M, N, K, true, false, true);
   p.kper = kper_of(K, pl.gz);
   pl.gz = (int)((K + p.kper - 1) / p.kper);
   auto out = at::empty({pl.gz, M, N}, a.options());
   p.c = out.data_ptr<float>(); p.ldc = N; p.slab = M * N;
-  launch<LA_MK, LB_KN, EPI_STORE>(p, gx, pl);
+  launch<LA_MK, LB_KN, EPI_STORE>(p, pl);
   return pl.gz == 1 ? out.view({M, N}) : sum_slabs(out, nullptr);
 }
 
@@ -175,8 +240,7 @@ std::vector<at::Tensor> swiglu_fwd(at::Tensor x, at::Tensor wa, at::Tensor wb, b
   p.a = x.data_ptr<float>(); p.lda = K; p.b0 = wa.data_ptr<float>(); p.b1 = wb.data_ptr<float>(); p.ldb = K; p.bsplit = INT_MAX;
   p.c = h.data_ptr<float>(); p.ldc = H; p.aux = save ? ab.data_ptr<float>() : nullptr; p.ldaux = 2 * H;
   p.M = (int)M; p.N = (int)H; p.K = (int)K; p.kper = (int)K; p.H = (int)H;
-  const int gx = (int)((H + 63) / 64);
-  launch<LA_MK, LB_NK, EPI_SWIGLU>(p, gx, plan(gx, M, K, false));
+  launch<LA_MK, LB_NK, EPI_SWIGLU>(p, plan(M, 2 * H, K, false, true, false));
   return {h, ab};
 }
 
@@ -190,19 +254,18 @@ at::Tensor gemm_res(at::Tensor h, at::Tensor ws, at::Tensor x) {
   Args p{};
   p.a = h.data_ptr<float>(); p.lda = K; p.b0 = ws.data_ptr<float>(); p.b1 = p.b0; p.ldb = K; p.bsplit = INT_MAX;
   p.M = (int)M; p.N = (int)N; p.K = (int)K;
-  const int gx = (int)((N + BN - 1) / BN);
-  Plan pl = plan(gx, M, K, true);
+  Plan pl = plan(M, N, K, true, false, false);
   p.kper = kper_of(K, pl.gz);
   pl.gz = (int)((K + p.kper - 1) / p.kper);
   if (pl.gz == 1) {
     auto y = at::empty({M, N}, h.options());
     p.c = y.data_ptr<float>(); p.ldc = N; p.r = x.data_ptr<float>(); p.ldr = N;
-    launch<LA_MK, LB_NK, EPI_RES>(p, gx, pl);
+    launch<LA_MK, LB_NK, EPI_RES>(p, pl);
     return y;
   }
   auto slabs = at::empty({pl.gz, M, N}, h.options());  // split-K: the slabs, then their sum with the residual
   p.c = slabs.data_ptr<float>(); p.ldc = N; p.slab = M * N;
-  launch<LA_MK, LB_NK, EPI_STORE>(p, gx, pl);
+  launch<LA_MK, LB_NK, EPI_STORE>(p, pl);
   return sum_slabs(slabs, &x);
 }
 
@@ -218,8 +281,7 @@ at::Tensor dab_gemm(at::Tensor dy, at::Tensor ws, at::Tensor ab) {
   p.a = dy.data_ptr<float>(); p.lda = K; p.b0 = ws.data_ptr<float>(); p.b1 = p.b0; p.ldb = H; p.bsplit = INT_MAX;
   p.r = ab.data_ptr<float>(); p.ldr = 2 * H; p.aux = dab.data_ptr<float>(); p.ldaux = 2 * H;
   p.M = (int)M; p.N = (int)H; p.K = (int)K; p.kper = (int)K; p.H = (int)H;
-  const int gx = (int)((H + BN - 1) / BN);
-  launch<LA_MK, LB_KN, EPI_DAB>(p, gx, plan(gx, M, K, false));
+  launch<LA_MK, LB_KN, EPI_DAB>(p, plan(M, H, K, false, false, true));
   return dab;
 }
 

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <vector>
 #include "ffn_fwd_tuned.cuh"
+#include "../../../_sm_count.cuh"
 namespace swa_ffn_fwd_tuned80 {
 std::vector<torch::Tensor> compute(torch::Tensor qi,torch::Tensor g,torch::Tensor o,
  torch::Tensor mod,torch::Tensor wo,torch::Tensor wu,torch::Tensor wd,
@@ -21,7 +22,7 @@ std::vector<torch::Tensor> compute(torch::Tensor qi,torch::Tensor g,torch::Tenso
  static bool set=false;if(!set){C10_CUDA_CHECK(cudaFuncSetAttribute(ffn_fwd_kernel<G>,cudaFuncAttributeMaxDynamicSharedMemorySize,G::SMEM));set=true;}
  int active=0;C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active,ffn_fwd_kernel<G>,G::NTHR,G::SMEM));
  TORCH_CHECK(active>=1,"No valid resident CTA");const int ntile=((p.S+15)/16)*(p.M/p.S);
- const int ctas=std::min(at::cuda::getCurrentDeviceProperties()->multiProcessorCount*active,(ntile+G::NW-1)/G::NW);
+ const int ctas=std::min(mw::sm_count()*active,(ntile+G::NW-1)/G::NW);
  ffn_fwd_kernel<G><<<ctas,G::NTHR,G::SMEM,at::cuda::getCurrentCUDAStream()>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();
  return {out,q1,att,y,ff};
 }

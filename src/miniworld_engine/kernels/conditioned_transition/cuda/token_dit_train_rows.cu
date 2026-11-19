@@ -29,6 +29,7 @@
 #include <unordered_map>
 
 #include "token_dit_common.cuh"
+#include "../../_sm_count.cuh"
 
 namespace {
 using namespace tdr;
@@ -780,7 +781,7 @@ int shared_rows(const at::Tensor& g, int64_t M) {
   return (int)g.size(0);
 }
 
-int nsm() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+int nsm() { return mw::sm_count(); }
 // resident blocks per SM of a kernel at `threads` threads (cached per kernel)
 // `smem`: the kernel's dynamic shared memory (the pair-bias kernels); above the 48 KB default it is opted in here, once, before any launch
 template <typename K> int occupancy(K* kern, int threads, size_t smem = 0) {

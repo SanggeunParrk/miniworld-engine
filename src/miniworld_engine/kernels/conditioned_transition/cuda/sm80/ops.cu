@@ -11,6 +11,7 @@
 #include "ct_atom_fwd.cuh"
 #include "ct_atom_fwd_tf32.cuh"
 #include "ct_rows.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace {
 using namespace adl;
@@ -169,7 +170,7 @@ void ct_gate_tf32(at::Tensor z, c10::optional<at::Tensor> xin, at::Tensor cond, 
 
 // the backward's gate kernel (ct_atom_bwd.cuh): dz, dg, dcond2 [M, 128], hh [M, 256], dab [M, 512] bf16 and pbsc [grid, 128] fp32 (per-CTA partial column sums of dg; grid = ct_bwd_grid(M))
 int64_t ct_bwd_grid(int64_t M) {
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   return std::max<int64_t>(1, std::min<int64_t>(((M + 15) / 16 + CtAtomBwdGateCfg<8>::NW - 1) / CtAtomBwdGateCfg<8>::NW, (int64_t)sms));
 }
 void ct_atom_bwd_gate(at::Tensor dy, at::Tensor z, at::Tensor cond, at::Tensor xa, at::Tensor wab, at::Tensor wdt, at::Tensor wsc, at::Tensor wsct, at::Tensor bsc, at::Tensor dz,

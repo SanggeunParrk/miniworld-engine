@@ -9,6 +9,7 @@
 #include "attn_bwd_dq_sm80.cuh"       // db_reduce_kernel
 #include "attn2_bwd_sm80.cuh"
 #include "attn_rf_fwd_sm80.cuh"      // the register-resident inference core (16-channel heads)
+#include "../../../_sm_count.cuh"
 
 namespace {
 
@@ -67,7 +68,7 @@ template <class G>
 void launch_rf16(const a100::AttnParams& p, int64_t Z, double scl, const torch::Tensor& like) {
   const at::Tensor fix = at::empty({a100::rf_fix_ints<G>(p.L, (int)(Z * p.H))}, like.options().dtype(at::kInt));
   int* fp = fix.data_ptr<int>();
-  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm = mw::sm_count();
   const cudaError_t err = a100::attn_rf_launch<G>(p, (int)Z, scl, fp, at::cuda::getCurrentCUDAStream(), nsm);
   C10_CUDA_CHECK(err);
 }

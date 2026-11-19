@@ -21,6 +21,7 @@
 #include <stdint.h>
 
 #include "../../../pair_embed_geom/cuda/sm90/pe_sm90.cuh"
+#include "../../../_sm_count.cuh"
 
 constexpr int C = 256;
 constexpr int NW = 8;                       // warps per rows-kernel CTA = rows per CTA
@@ -371,7 +372,7 @@ void forward(torch::Tensor tbl, torch::Tensor lnw, torch::Tensor lnb, torch::Ten
   const at::cuda::CUDAGuard guard(tbl.device());
   int B = idx.size(0), n = idx.size(1);
   if (jp <= 0) {   // the largest chunk of 32 / 16 / 8 that still gives the GPU's warp slots (64 per SM) one item each, else 4
-    const long long slots = (long long)at::cuda::getCurrentDeviceProperties()->multiProcessorCount * 64;
+    const long long slots = (long long)mw::sm_count() * 64;
     jp = 4;
     for (int c : {32, 16, 8}) if ((long long)B * n * ((n + c - 1) / c) >= slots) { jp = c; break; }
   }

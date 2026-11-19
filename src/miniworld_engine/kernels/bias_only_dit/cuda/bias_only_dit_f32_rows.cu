@@ -27,6 +27,7 @@
 
 #include "bo_rows.cuh"
 #include "bo_ptx.cuh"
+#include "../../_sm_count.cuh"
 
 namespace {
 using namespace tdr;
@@ -1090,7 +1091,7 @@ void f32r(const at::Tensor& t, const char* n) {      // fp32 rows: unit column s
               && reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0, n, ": fp32 rows, 16-byte aligned");
 }
 
-int nsm() { static int n = at::cuda::getCurrentDeviceProperties()->multiProcessorCount; return n; }
+int nsm() { static int n = mw::sm_count(); return n; }
 //: rows of every partial buffer: an upper bound of the blocks of any launch here (the kernels return how many they wrote); the
 //: same bound as the bf16 training extension's, whose finalize sums them
 int64_t partial_rows(int64_t) { return 8 * (int64_t)nsm(); }

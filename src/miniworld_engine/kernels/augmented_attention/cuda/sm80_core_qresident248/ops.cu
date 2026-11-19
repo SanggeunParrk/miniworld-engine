@@ -2,6 +2,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "atom_core_qresident_dkv.cuh"
+#include "../../../_sm_count.cuh"
 namespace {
 void check_bf16(const torch::Tensor& t, const char* name) {
   TORCH_CHECK(t.is_cuda() && t.scalar_type() == at::kBFloat16, name, ": a bf16 CUDA tensor");
@@ -50,8 +51,8 @@ template<class G, bool DQ> std::vector<int64_t> resource_values(){
  cudaFuncAttributes a; int blocks=0;
  if constexpr(DQ){C10_CUDA_CHECK(cudaFuncGetAttributes(&a,atom_core_qresident248::attn_bwd_dq_kernel<G>));C10_CUDA_CHECK(cudaFuncSetAttribute(atom_core_qresident248::attn_bwd_dq_kernel<G>,cudaFuncAttributeMaxDynamicSharedMemorySize,G::SMEM));C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks,atom_core_qresident248::attn_bwd_dq_kernel<G>,256,G::SMEM));}
  else{C10_CUDA_CHECK(cudaFuncGetAttributes(&a,atom_core_qresident248::attn_bwd_dkv_kernel<G>));C10_CUDA_CHECK(cudaFuncSetAttribute(atom_core_qresident248::attn_bwd_dkv_kernel<G>,cudaFuncAttributeMaxDynamicSharedMemorySize,G::SMEM));C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks,atom_core_qresident248::attn_bwd_dkv_kernel<G>,256,G::SMEM));}
- cudaDeviceProp prop;C10_CUDA_CHECK(cudaGetDeviceProperties(&prop,at::cuda::current_device()));
- return {a.numRegs,(int64_t)a.localSizeBytes,(int64_t)a.sharedSizeBytes,G::SMEM,256,blocks,blocks*8,prop.maxThreadsPerMultiProcessor,prop.multiProcessorCount,a.binaryVersion,a.ptxVersion};
+ 
+ return {a.numRegs,(int64_t)a.localSizeBytes,(int64_t)a.sharedSizeBytes,G::SMEM,256,blocks,blocks*8,mw::max_threads_per_sm(),mw::sm_count(),a.binaryVersion,a.ptxVersion};
 }
 } // anonymous
 void attn_bwd_dq(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor dov, torch::Tensor bias, torch::Tensor lse, torch::Tensor delta,

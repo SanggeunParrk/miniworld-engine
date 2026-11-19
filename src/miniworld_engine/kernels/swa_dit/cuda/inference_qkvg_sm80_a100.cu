@@ -26,7 +26,7 @@ template<class G> int initialize(int cfg) {
 template<class G> void launch(const QkvgFwdParams& p,int cfg) {
  initialize<G>(cfg);
  const int ntile=(p.M+G::ROWS-1)/G::ROWS;
- const int ctas=std::min(at::cuda::getCurrentDeviceProperties()->multiProcessorCount,ntile);
+ const int ctas=std::min(mw::sm_count(),ntile);
  // Each head group receives the exact original row tile allocation. Group0 and
  // group1 have disjoint head/channel stores and jointly one original weight set.
  const dim3 grid(ctas,4,1);
@@ -76,6 +76,7 @@ std::vector<std::vector<int>> cache_snapshot() {
 #include <mutex>
 #include <vector>
 #include "inference_qkvg_headgroup_sm80.cuh"
+#include "../../_sm_count.cuh"
 namespace swa_a100_infer_group80 {
 struct Init {int active,attributes,occupancy,cold_capture;};
 std::mutex init_mutex;
@@ -96,7 +97,7 @@ template<class G> int initialize(int cfg) {
 template<class G> void launch(const QkvgFwdParams& p,int cfg) {
  initialize<G>(cfg);
  const int ntile=(p.M+G::ROWS-1)/G::ROWS;
- const int ctas=std::min(at::cuda::getCurrentDeviceProperties()->multiProcessorCount,ntile);
+ const int ctas=std::min(mw::sm_count(),ntile);
  // Each head group receives the exact original row tile allocation. Group0 and
  // group1 have disjoint head/channel stores and jointly one original weight set.
  const dim3 grid(ctas,2,1);

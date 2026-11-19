@@ -7,6 +7,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include "../../_sm_count.cuh"
 
 namespace {
 __device__ __forceinline__ uint16_t e4m3x2(float lo, float hi) {
@@ -67,7 +68,7 @@ torch::Tensor o8_quant(torch::Tensor o, torch::Tensor inv, torch::Tensor amax) {
   TORCH_CHECK(inv.scalar_type() == torch::kFloat && inv.numel() == 1 && amax.scalar_type() == torch::kFloat && amax.numel() == 1, "inv / amax: fp32[1]");
   auto q = torch::empty(o.sizes(), o.options().dtype(torch::kFloat8_e4m3fn));
   const long n8 = o.numel() / 8;
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   const int grid = (int)std::min<long>((n8 + 255) / 256, (long)sms * 8);
   quant_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const uint4*>(o.data_ptr()), reinterpret_cast<uint2*>(q.data_ptr()), n8,
                                                                   inv.data_ptr<float>(), amax.data_ptr<float>());
@@ -80,7 +81,7 @@ torch::Tensor o8_dequant(torch::Tensor q, torch::Tensor scale) {
   TORCH_CHECK(scale.scalar_type() == torch::kFloat && scale.numel() == 1, "scale: fp32[1]");
   auto y = torch::empty(q.sizes(), q.options().dtype(torch::kBFloat16));
   const long n8 = q.numel() / 8;
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   const int grid = (int)std::min<long>((n8 + 255) / 256, (long)sms * 8);
   dequant_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const uint2*>(q.data_ptr()), reinterpret_cast<uint4*>(y.data_ptr()), n8,
                                                                     scale.data_ptr<float>());

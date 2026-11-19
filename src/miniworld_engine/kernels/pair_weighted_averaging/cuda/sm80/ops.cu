@@ -20,6 +20,7 @@
 #include "pwa_pair_fwd_sm80.cuh"
 #include "pwa_finalize_sm80.cuh"
 #include "pwa_lt_gemm.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace {
 
@@ -48,7 +49,7 @@ HeadMajor head_major(const torch::Tensor& t, int S, int L, int C, const char* na
 }
 
 
-int num_sms() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+int num_sms() { return mw::sm_count(); }
 
 template <int DZ> void launch_pair_fwd(const pwa80::PairFwdParams& p, cudaStream_t st) {
   using C = pwa80::PairFwdCfg<DZ>;

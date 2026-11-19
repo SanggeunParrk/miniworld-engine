@@ -16,6 +16,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <algorithm>
+#include "../../../_sm_count.cuh"
 
 using namespace norms;
 
@@ -341,7 +342,7 @@ __global__ void __launch_bounds__(NTA, 1) adamod_bwd(const bf* __restrict__ DY, 
 }
 
 bool aligned16(const void* p) { return p == nullptr || (reinterpret_cast<uintptr_t>(p) & 15) == 0; }
-int sm_count() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+int sm_count() { return mw::sm_count(); }
 
 template <bool HAS_W, bool SAVE>
 void run_fwd(const at::Tensor& q, const at::Tensor& c, const at::Tensor& wsc, const at::Tensor& wsh, const at::Tensor& wg, const c10::optional<at::Tensor>& w, at::Tensor& y,

@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include "glue_sm80.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace {
 
@@ -19,7 +20,7 @@ void check_rows(const torch::Tensor& t, const char* name, int64_t M, int64_t d) 
 inline unsigned grid_for(int64_t M, int64_t d) {
   const int64_t chunks = M * (d / 8);
   const int64_t blocks = (chunks + aa80::GLUE_NT - 1) / aa80::GLUE_NT;
-  const int64_t cap = (int64_t)at::cuda::getCurrentDeviceProperties()->multiProcessorCount * 16;
+  const int64_t cap = (int64_t)mw::sm_count() * 16;
   return (unsigned)std::max<int64_t>(1, std::min(blocks, cap));
 }
 

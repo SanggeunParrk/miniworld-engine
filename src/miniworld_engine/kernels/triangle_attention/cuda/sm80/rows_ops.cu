@@ -10,6 +10,7 @@
 
 #include "rows_sm80.cuh"
 #include "fused_sm80.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace {
 
@@ -29,7 +30,7 @@ void check_strided_rows(const torch::Tensor& t, int64_t rows, int64_t cols, cons
   TORCH_CHECK(t.dim() == 2 && t.size(0) == rows && t.size(1) == cols && t.stride(1) == 1 && t.stride(0) >= cols && t.stride(0) % 8 == 0 && aligned16(t) &&
               (t.storage_offset() + (rows - 1) * t.stride(0) + cols) * t.element_size() <= (int64_t)t.storage().nbytes(), what, ": [T, cols] rows of 16-byte aligned bf16");
 }
-int nsm() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+int nsm() { return mw::sm_count(); }
 cudaStream_t stream() { return at::cuda::getCurrentCUDAStream(); }
 
 }  // namespace

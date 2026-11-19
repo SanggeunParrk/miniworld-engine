@@ -21,6 +21,7 @@
 #include <type_traits>
 
 #include "../../conditioned_transition/cuda/token_dit_common.cuh"
+#include "../../_sm_count.cuh"
 
 namespace {
 using namespace tdr;
@@ -978,7 +979,7 @@ void tail_attn_fwd(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor info, at
   const long N = q.size(1);
   const int A = q.size(0), G = tb.size(0), nloop = tb.size(1);
   TORCH_CHECK(tb.is_contiguous() && tb.dim() == 5 && A % G == 0 && (long)nloop * WQ <= N, "tail_attn_fwd: tb [G, nloop, 4, 32, 128]");
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   // about 6 CTAs per SM (from the shapes only), two windows per CTA per step
   const int C = std::max(1, std::min((nloop + 1) / 2, (6 * sms + A * NH - 1) / (A * NH)));
   const int blocks = A * NH * C;
@@ -1031,7 +1032,7 @@ at::Tensor tail_bias_bwd(at::Tensor z, at::Tensor gamma, at::Tensor wb, at::Tens
   // dz (z's shape and dtype) += the tail windows' LN / projection backward of sum_sc dtbp[sc]; -> per-block partials [4 x SMs, 80] (a fixed grid per device: the same partials, in the same order, every call)
   const c10::cuda::CUDAGuard guard(z.device());
   TORCH_CHECK(dz.is_contiguous() && dz.sizes() == z.sizes() && dz.scalar_type() == z.scalar_type(), "tail_bias_bwd: dz like z");
-  const int blocks = 4 * at::cuda::getCurrentDeviceProperties()->multiProcessorCount, SC = dtbp.size(0), nloop = dtbp.size(1);
+  const int blocks = 4 * mw::sm_count(), SC = dtbp.size(0), nloop = dtbp.size(1);
   TORCH_CHECK(dtbp.is_contiguous() && nloop <= z.size(0), "tail_bias_bwd: dtbp [SC, nloop <= W, 4, 32, 128]");
   auto part = at::empty({blocks, PC + NH * PC}, z.options().dtype(at::kFloat));
   if (is_bf(z)) tail_bias_bwd_k<bf><<<blocks, 256, 0, S_()>>>(CP<bf>(z), CP<float>(gamma), CP<float>(wb), CP<float>(dtbp), SC, CP<int64_t>(info), P<bf>(dz),

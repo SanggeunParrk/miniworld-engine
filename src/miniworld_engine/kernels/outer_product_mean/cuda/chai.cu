@@ -16,6 +16,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cudaTypedefs.h>
 #include "chai_helpers.cuh"
+#include "../../_sm_count.cuh"
 
 namespace {
 typedef __nv_bfloat16 bf16;
@@ -268,7 +269,7 @@ std::vector<at::Tensor> chai_epilogue(at::Tensor O, at::Tensor wfold, at::Tensor
     encode(&ymap, y.data_ptr(), 2, dims, strides, box, true);
   }
   const int tiles = (int)(N * N / BM);
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   const int zs = (int)(CZ / NZ);
   const dim3 grid(std::max(1, std::min(tiles, 2 * sms / zs)), zs);
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -521,7 +522,7 @@ at::Tensor chai_bwd(at::Tensor dy, at::Tensor y, at::Tensor stats, int64_t N) {
     encode(&omap, dO.data_ptr(), 4, dims, strides, box, false);
   }
   const int tiles = (int)(N * N / BM2);
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   cudaFuncSetAttribute(chai_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)SMEM_BWD);
   chai_bwd_kernel<<<std::min(tiles, 2 * sms), 128, SMEM_BWD, at::cuda::getCurrentCUDAStream()>>>(dymap, ymap, omap, stats.data_ptr<float>(), (int)N, tiles);
   C10_CUDA_KERNEL_LAUNCH_CHECK();

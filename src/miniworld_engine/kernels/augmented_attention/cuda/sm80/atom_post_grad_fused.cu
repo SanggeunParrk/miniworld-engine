@@ -5,6 +5,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "adaln_mma.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace atom_post_grad165 {
 using namespace adl;
@@ -78,7 +79,7 @@ __global__ void __launch_bounds__(NW*32,MINB) kernel(Params p) {
   }
 }
 template<int NW,int MINB,bool DIAG>void launch(Params p,cudaStream_t stream) {
-  const int nsm=at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int nsm=mw::sm_count();
   const int grid=std::min<int64_t>((p.M+16*NW-1)/(16*NW),nsm*MINB);
   kernel<NW,MINB,DIAG><<<grid,NW*32,32768,stream>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -98,8 +99,7 @@ template<int NW,int MINB>std::vector<int64_t> resource() {
   cudaFuncAttributes a;int blocks;
   C10_CUDA_CHECK(cudaFuncGetAttributes(&a,kernel<NW,MINB,false>));
   C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks,kernel<NW,MINB,false>,NW*32,32768));
-  const auto *d=at::cuda::getCurrentDeviceProperties();
-  return {a.numRegs,(int64_t)a.localSizeBytes,(int64_t)a.sharedSizeBytes,32768,NW*32,blocks,blocks*NW,d->maxThreadsPerMultiProcessor,d->multiProcessorCount,a.binaryVersion,a.ptxVersion,a.maxThreadsPerBlock};
+  return {a.numRegs,(int64_t)a.localSizeBytes,(int64_t)a.sharedSizeBytes,32768,NW*32,blocks,blocks*NW,mw::max_threads_per_sm(),mw::sm_count(),a.binaryVersion,a.ptxVersion,a.maxThreadsPerBlock};
 }
 std::vector<int64_t> resources(int64_t cfg) {
   switch(cfg) {

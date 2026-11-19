@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdint>
 #include <tuple>
+#include "../../../_sm_count.cuh"
 
 namespace {
 using bf16 = __nv_bfloat16;
@@ -232,7 +233,7 @@ __global__ void __launch_bounds__(256) softmax_k(const bf16* __restrict__ logits
 }
 
 int grid(long n) {
-  const long sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const long sms = mw::sm_count();
   return (int)std::max<long>(1, std::min<long>((n + 255) / 256, sms * 16));
 }
 const bf16* cp(const torch::Tensor& t) { return reinterpret_cast<const bf16*>(t.data_ptr<at::BFloat16>()); }

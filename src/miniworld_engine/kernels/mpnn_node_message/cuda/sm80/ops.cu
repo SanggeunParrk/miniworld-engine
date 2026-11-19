@@ -5,6 +5,7 @@
 
 #include "node_fwd_sm80.cuh"
 #include "node_bwd_sm80.cuh"
+#include "../../../_sm_count.cuh"
 
 #define CHECK_CUDA_BF16(x) TORCH_CHECK((x).is_cuda() && (x).scalar_type() == torch::kBFloat16, #x " must be a CUDA bf16 tensor")
 #define CHECK_CUDA_F32(x) TORCH_CHECK((x).is_cuda() && (x).scalar_type() == torch::kFloat32, #x " must be a CUDA fp32 tensor")
@@ -14,7 +15,7 @@
 namespace {
 using bf = __nv_bfloat16;
 inline const bf* bptr(const torch::Tensor& t) { return reinterpret_cast<const bf*>(t.data_ptr()); }
-inline int num_sms() { return at::cuda::getCurrentDeviceProperties()->multiProcessorCount; }
+inline int num_sms() { return mw::sm_count(); }
 }  // namespace
 
 // E [G * K, 128] bf16, q [G, 128] bf16, nb [NN, 128] bf16, idx [G * K] int64, W1e / W2 [128, 128] bf16, b2 [128] bf16, mask [G * K] fp32 or bf16 -> reduced [G, 128] fp32

@@ -14,6 +14,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "sm80_common.cuh"
+#include "../../../_sm_count.cuh"
 
 namespace {
 typedef __nv_bfloat16 bf16;
@@ -252,7 +253,7 @@ std::vector<at::Tensor> chai_epilogue(at::Tensor O, at::Tensor wfold, at::Tensor
 #else
   const at::Tensor colsum = wfold.to(at::kFloat).sum(1).contiguous();      // the epilogue's mean term: sum_p W'[o, p]
 #endif
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   auto launch = [&](auto kernel, int smem) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
     kernel<<<std::min(tasks, 2 * sms), 256, smem, at::cuda::getCurrentCUDAStream()>>>(
@@ -275,7 +276,7 @@ at::Tensor chai_bwd(at::Tensor dy, at::Tensor y, at::Tensor stats, int64_t N) {
   const int64_t nk = N * KK;
   auto dO = at::empty({G, nk, nk}, dy.options());
   const int tiles = (int)(N * N / 32);
-  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int sms = mw::sm_count();
   C10_CUDA_CHECK(cudaFuncSetAttribute(chai_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 64 * 1024));
   chai_bwd_kernel<<<std::min(tiles, 3 * sms), 256, 64 * 1024, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const bf16*>(dy.data_ptr()), reinterpret_cast<const bf16*>(y.data_ptr()), stats.data_ptr<float>(),

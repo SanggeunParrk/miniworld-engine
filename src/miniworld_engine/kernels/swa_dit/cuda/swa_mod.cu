@@ -12,6 +12,7 @@
 #include <cuda_bf16.h>
 #include "swa_ptx.cuh"
 #include "pdl.cuh"
+#include "../../_sm_count.cuh"
 
 namespace {
 constexpr int C = 128, MW = 768;
@@ -341,7 +342,7 @@ std::vector<torch::Tensor> mod_fwd(torch::Tensor c, torch::Tensor w, bool save) 
   auto aout = save ? torch::empty({R, C}, c.options()) : torch::empty({0}, c.options());
   if (R == 0) return {out, aout};
   const size_t smem = 128 * LDS * sizeof(bf16);
-  static const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  static const int sms = mw::sm_count();
   const int tiles = (R + 63) / 64;
   const dim3 grid(std::max(1, std::min(tiles, (sms * 3 + MW / 128 - 1) / (MW / 128))), MW / 128);   // ~3 CTAs per SM
   cudaFuncSetAttribute(mod_fwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem));
