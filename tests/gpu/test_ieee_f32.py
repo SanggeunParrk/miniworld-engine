@@ -32,7 +32,7 @@ def _err(y: torch.Tensor, y64: torch.Tensor) -> float:
 @skip
 @pytest.mark.parametrize("ta", [False, True])
 @pytest.mark.parametrize("tb", [False, True])
-@pytest.mark.parametrize(("m", "n", "k"), [(384, 512, 384), (36, 20, 124), (256, 128, 9000)])
+@pytest.mark.parametrize(("m", "n", "k"), [(384, 512, 384), (36, 20, 124), (256, 128, 9000), (384, 768, 384), (3072, 384, 768), (4096, 128, 128), (128, 128, 4096), (512, 128, 32768), (1536, 768, 3072), (3072, 3072, 768)])
 def test_mm_layouts(ta: bool, tb: bool, m: int, n: int, k: int) -> None:
     from miniworld_engine.kernels import ieee_f32
 
