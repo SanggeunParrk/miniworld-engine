@@ -874,7 +874,7 @@ template <> struct Chunk8<float> {
   __device__ __forceinline__ void get(float (&v)[8]) const { v[0] = a.x; v[1] = a.y; v[2] = a.z; v[3] = a.w; v[4] = b.x; v[5] = b.y; v[6] = b.z; v[7] = b.w; }
 };
 template <int CP, typename XT, int MB, bool HD = true>
-__global__ void __launch_bounds__(256, MB) logits_tc_k(const XT* __restrict__ Z, const float* __restrict__ WF, float* __restrict__ LG, long R, float eps) {
+__global__ void __launch_bounds__(256, MB) logits_tc_k(const XT* __restrict__ Z, const float* __restrict__ WF, float* __restrict__ LG, float2* __restrict__ PST, long R, float eps) {
   static_assert(CP == 128 || CP == 256, "pair width 128 or 256");
   constexpr int NT = 2, KS = CP / 8, NC = CP / 32;
   constexpr bool HOLD = HD && (sizeof(XT) == 2 || CP == 128);   // the row chunks stay in registers between the passes (fp32 at 256 would need 128 of them)
@@ -966,6 +966,7 @@ __global__ void __launch_bounds__(256, MB) logits_tc_k(const XT* __restrict__ Z,
         LG[(long)h * R + rb + g] = acc[t][e];
         LG[(long)h * R + rb + g + 8] = acc[t][2 + e];
       }
+    if (PST != nullptr && q == 0) { PST[rb + g] = make_float2(mean[0], rs[0]); PST[rb + g + 8] = make_float2(mean[1], rs[1]); }
   }
 }
 
@@ -1539,7 +1540,7 @@ void pair_bias_tc(at::Tensor z, at::Tensor wf, at::Tensor bias, at::Tensor pst, 
 }
 
 // lg [16, R] fp32 <- the 16 heads' exact-class logits of the pair rows z [R, 128 | 256] (bf16 or fp32) and W' [16, width] fp32 (``logits_tc_k``)
-template <int CP, typename XT, int MB, bool HD> void logits_tc_launch(const at::Tensor& z, const at::Tensor& wf, at::Tensor& lg, double eps) {
+template <int CP, typename XT, int MB, bool HD> void logits_tc_launch(const at::Tensor& z, const at::Tensor& wf, at::Tensor& lg, float2* pst, double eps) {
   const int64_t R = z.size(0);
   constexpr size_t smem = (size_t)(CP / 8) * 2 * 32 * 16;
   static bool attr = cudaFuncSetAttribute(logits_tc_k<CP, XT, MB, HD>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem) == cudaSuccess;
@@ -1547,9 +1548,9 @@ template <int CP, typename XT, int MB, bool HD> void logits_tc_launch(const at::
   int per = 1;
   cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, logits_tc_k<CP, XT, MB, HD>, 256, smem);
   const unsigned g = (unsigned)std::max<int64_t>(1, std::min<int64_t>((R / 16 + WPB - 1) / WPB, (int64_t)std::max(per, 1) * nsm()));
-  logits_tc_k<CP, XT, MB, HD><<<g, 256, smem, S()>>>(reinterpret_cast<const XT*>(z.data_ptr()), wf.data_ptr<float>(), lg.data_ptr<float>(), R, (float)eps);
+  logits_tc_k<CP, XT, MB, HD><<<g, 256, smem, S()>>>(reinterpret_cast<const XT*>(z.data_ptr()), wf.data_ptr<float>(), lg.data_ptr<float>(), pst, R, (float)eps);
 }
-void logits_tc(at::Tensor z, at::Tensor wf, at::Tensor lg, double eps, int64_t mb) {
+void logits_tc(at::Tensor z, at::Tensor wf, at::Tensor lg, double eps, int64_t mb, at::Tensor pst) {
   f32c(wf, "Wf"); f32c(lg, "logits");
   const int64_t R = z.size(0), cp = z.size(1);
   TORCH_CHECK(z.is_cuda() && z.is_contiguous() && z.dim() == 2 && (cp == 128 || cp == 256) && R % 16 == 0 &&
@@ -1557,7 +1558,9 @@ void logits_tc(at::Tensor z, at::Tensor wf, at::Tensor lg, double eps, int64_t m
               lg.numel() == 16 * R, "logits_tc: pair [R, 128 or 256] bf16 / fp32 (R a multiple of 16), Wf [16, width] fp32, logits [16, R] fp32");
   const at::cuda::CUDAGuard gd(z.device());
   const bool b = z.scalar_type() == at::kBFloat16;
-#define LTC(CPV, XTV) if (mb == 1) logits_tc_launch<CPV, XTV, 1, true>(z, wf, lg, eps); else if (mb == 11) logits_tc_launch<CPV, XTV, 1, false>(z, wf, lg, eps); else if (mb == 3) logits_tc_launch<CPV, XTV, 3, true>(z, wf, lg, eps); else if (mb == 13) logits_tc_launch<CPV, XTV, 3, false>(z, wf, lg, eps); else if (mb == 12) logits_tc_launch<CPV, XTV, 2, false>(z, wf, lg, eps); else logits_tc_launch<CPV, XTV, 2, true>(z, wf, lg, eps)
+  TORCH_CHECK(pst.numel() == 0 || (pst.is_cuda() && pst.is_contiguous() && pst.scalar_type() == at::kFloat && pst.numel() == 2 * R), "logits_tc: pst float [R, 2] or empty");
+  float2* ps = pst.numel() == 0 ? nullptr : reinterpret_cast<float2*>(pst.data_ptr());
+#define LTC(CPV, XTV) if (mb == 1) logits_tc_launch<CPV, XTV, 1, true>(z, wf, lg, ps, eps); else logits_tc_launch<CPV, XTV, 2, true>(z, wf, lg, ps, eps)
   if (cp == 128) { if (b) { LTC(128, __nv_bfloat16); } else { LTC(128, float); } }
   else { if (b) { LTC(256, __nv_bfloat16); } else { LTC(256, float); } }
 #undef LTC
@@ -1662,7 +1665,7 @@ std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
   FA(pair_bias_tc_k<12, 1, 256>); FA(pair_bias_tc_k<16, 1, 256>); FA(pair_bias_tc_k<24, 1, 256>); FA(pair_bias_tc_k<12, 3, 256>);
   FA(pair_bias_tc_k<16, 3, 256>); FA(pair_bias_tc_k<24, 3, 256>); FA(pair_bias_bwd_tc_k<12, 1, 256>); FA(pair_bias_bwd_tc_k<16, 1, 256>);
   FA((logits_tc_k<128, float, 2>)); FA((logits_tc_k<128, __nv_bfloat16, 2>)); FA((logits_tc_k<256, float, 2>)); FA((logits_tc_k<256, __nv_bfloat16, 2>));
-  FA((logits_tc_k<256, __nv_bfloat16, 2, false>)); FA((logits_tc_k<256, __nv_bfloat16, 3>)); FA((logits_tc_k<256, __nv_bfloat16, 3, false>));
+  FA((logits_tc_k<256, float, 1>)); FA((logits_tc_k<256, __nv_bfloat16, 1>));
   FA(pair_bias_bwd_tc_k<24, 1, 256>); FA(pair_bias_bwd_tc_k<12, 3, 256>); FA(pair_bias_bwd_tc_k<16, 3, 256>); FA(pair_bias_bwd_tc_k<24, 3, 256>);
 #undef FA
   return out;

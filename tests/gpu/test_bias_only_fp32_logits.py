@@ -217,3 +217,10 @@ def test_logits_tc_error_class_of_fma(case: str, dtype: torch.dtype, dp: int) ->
     print(case, dtype, dp, f"max-abs fma {e_fma:.2e} tc {e_tc:.2e}; TV fma {tv(fma):.2e} tc {tv(tc):.2e}")
     assert e_tc <= 2.0 * e_fma, f"logits max-abs error {e_tc:.3e} > 2x the FMA path's {e_fma:.3e}"
     assert tv(tc) <= max(1.5 * tv(fma), tv_floor), f"max-row TV {tv(tc):.3e} above 1.5x the FMA path's {tv(fma):.3e}"
+    # the row statistics (mean, rstd) the training backward reads: the same fp32 values as the LN0 rows kernel's (different summation order)
+    pst = torch.empty(n, 2, device="cuda")
+    HK.logits_tc(pair, wf, tc, pst)
+    _, pst_ref = HK.ln0_fp32(pair, EPS, stats=True)
+    assert pst_ref is not None
+    torch.testing.assert_close(pst[:, 1], pst_ref[:, 1], rtol=1e-5, atol=0)
+    torch.testing.assert_close(pst[:, 0], pst_ref[:, 0], rtol=1e-5, atol=1e-5)

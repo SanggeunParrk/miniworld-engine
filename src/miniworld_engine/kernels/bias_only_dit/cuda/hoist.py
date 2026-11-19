@@ -20,7 +20,7 @@ import torch
 _dir = Path(__file__).parent
 #: switches of the exact-fp32 fusions (A-B tests in one process; all on in a release): "logits" saves the fp32 logits (no re-forming
 #: in the backward), "bwd" the one-pass hoist backward of a block, "fwd" the one-pass logits of a block
-OPT = {"logits": True, "bwd": True, "fwd": True, "rows": True, "bwd_rg": 2, "eval_tc": True, "tc_mb": 0}
+OPT = {"logits": True, "bwd": True, "fwd": True, "rows": True, "bwd_rg": 2, "eval_tc": True, "train_tc": True, "tc_mb": 0}
 
 
 @functools.lru_cache(maxsize=None)
@@ -133,11 +133,16 @@ def pair_logits(p2: torch.Tensor, wf32: torch.Tensor, stats: bool = False) -> tu
         pst = torch.empty(R, 2, device=p2.device, dtype=torch.float32) if stats else p2.new_empty(0, dtype=torch.float32)
         ext().logits_fused_cuda(p2, wf32, lg, pst, 1e-5)
         return lg, (pst if stats else None)
+    if OPT["train_tc"] and p2.shape[1] == 256 and logits_tc_ok(p2, wf32):  # the 256-wide pair, 16 heads: the one-pass tensor-core logits (+ the row statistics)
+        lg = torch.empty(16, R, device=p2.device, dtype=torch.float32)
+        pst = torch.empty(R, 2, device=p2.device, dtype=torch.float32) if stats else None
+        logits_tc(p2, wf32, lg, pst)
+        return lg, pst
     ln32, pst = ln0_fp32(p2, 1e-5, stats=stats)
     return exact_logits(wf32, ln32), pst
 
 
-def logits_tc(p2: torch.Tensor, wf32: torch.Tensor, out: torch.Tensor) -> None:
+def logits_tc(p2: torch.Tensor, wf32: torch.Tensor, out: torch.Tensor, pst: torch.Tensor | None = None) -> None:
     """out [16, R] fp32 <- one block's 16-head logits of the pair rows p2 [R, 128 | 256] (bf16 / fp32) and W' wf32 [16, C] fp32 in ONE pass
     (``logits_tc_k``): LN0 in fp32 on chip, the products on TF32 tensor cores with the split fp32 operands (all 4 hi / lo products, a fresh
     partial per k-step added in round-to-nearest fp32), the
@@ -146,7 +151,7 @@ def logits_tc(p2: torch.Tensor, wf32: torch.Tensor, out: torch.Tensor) -> None:
 
     # launch bounds (blocks of 8 warps an SM): 2 at 128 channels; 1 at 256 (register file: 2 spilled 360 bytes, 190 us against 295 us at L 768)
     mb = OPT["tc_mb"] or (1 if p2.shape[1] == 256 else 2)
-    tf32.rows32().logits_tc_cuda(p2, wf32, out, 1e-5, mb)
+    tf32.rows32().logits_tc_cuda(p2, wf32, out, 1e-5, mb, out.new_empty(0) if pst is None else pst)
 
 
 def logits_tc_ok(p2: torch.Tensor, wf32: torch.Tensor) -> bool:
