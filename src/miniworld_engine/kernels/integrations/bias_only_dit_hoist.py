@@ -255,7 +255,9 @@ class _Hoist(torch.autograd.Function):
         )  # wf: the backward GEMMs' operand (rounded to the pair dtype); wf32: the exact logits'
         ctx.set_materialize_grads(False)  # an unused block's bias: None, not a zero tensor
         pst = None
-        if is_h100(pair) and wf32.shape[0] == 16 and dp == 128 and eps == 1e-5:  # one block of 16 heads: LN0 and the dot products in one pass, + the row statistics
+        if (
+            is_h100(pair) and wf32.shape[0] == 16 and dp == 128 and eps == 1e-5
+        ):  # one block of 16 heads: LN0 and the dot products in one pass, + the row statistics
             from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
             ball, pst = HK.pair_logits(pair.reshape(L * L, dp), wf32, stats=True)
@@ -273,7 +275,9 @@ class _Hoist(torch.autograd.Function):
         R = L * L
         dball = sink.take(grads)
         if is_h100(pair):  # fp32 dbias (``dbias_dtype``), exact backward products
-            dpair, dwf = hoist_bwd_exact(pair.reshape(R, dp), (wts * gam[:, None, :]).reshape(-1, dp).contiguous(), dball, eps, _split(R), rest[0] if rest else None)
+            dpair, dwf = hoist_bwd_exact(
+                pair.reshape(R, dp), (wts * gam[:, None, :]).reshape(-1, dp).contiguous(), dball, eps, _split(R), rest[0] if rest else None
+            )
         else:
             dpair, dwf = _hoist_bwd(pair.reshape(R, dp), wf, dball, eps, _split(R))
         del dball
