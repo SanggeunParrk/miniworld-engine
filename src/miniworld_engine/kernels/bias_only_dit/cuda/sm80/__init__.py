@@ -239,15 +239,6 @@ class Dpb:
         return out
 
 
-#: the S mode's finish ``db = (dP - D') P`` in one kernel (``dbias_finish``); False: dpart.sum(0), sub_, mul_ (the A-B switch of the tests)
-DBIAS_FINISH = True
-
-
-def dbias_finish(db: torch.Tensor, dpart: torch.Tensor, P: torch.Tensor) -> None:
-    """db [R, L] fp32 <- (db - D) o P in place, D[r] = sum_i dpart[i, r] (the rows' partial sums of P dP, in index order); P [R, L] bf16 / fp32."""
-    _ext().dbias_finish(db, dpart, P)
-
-
 class Dpb32:
     """The TF32 twin of :class:`Dpb`: fp32 ``do`` / ``v`` views [A L, W], fp32 ``P`` / ``dbias`` [nh L, L], ``dd`` fp32 [A, nh, L]; the products on TF32 tensor cores (a fixed order: reruns are bit-identical)."""
 
