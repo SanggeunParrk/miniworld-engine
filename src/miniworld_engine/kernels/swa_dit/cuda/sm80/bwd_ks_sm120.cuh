@@ -1,19 +1,32 @@
+#pragma once
 // bwd_ks_sm120.cuh -- the FFN backward's dy kernel and the qkvg backward kernel of the SWA atom DiT block for the RTX 5090 (sm_120a; 99 KB of shared memory per block), the K-split form.
 // A 16-row tile of 5120 rows is one of only 320: a warp per tile leaves 2 warps on an SM and the mma of one warp alone (512 products of m16n8k16 per tile) ~ 9 us.  Here a tile is FOUR warps ("parts"),
 // each summing the K blocks kb = 4 kg + part (kg = 0 .. 3) of the 512 K units, and the CTA holds NW tiles (one group per CTA, grid = the number of groups).  The weight W^T [128 channels][512] streams
 // through a 3-stage cp.async ring of 32 KB (stage kg = the four K blocks 4 kg .. 4 kg + 3, 8 KB each, shared by all tiles of the CTA).  The partial sums meet in shared memory (the ring, free after the
 // last stage): part p receives the others' partial sums of ITS group of 32 channels (a reduce-scatter in the fixed order of the parts), and the adaLN backward then runs per channel group on every
 // part (the row statistic of the dot product is exchanged through shared memory).  The sm_80 headers are not changed.
-#pragma once
-#include "bwd_stream_sm120.cuh"
+
+#include "ffn_bwd_sm80.cuh"      // adaln_bwd_epilogue helpers (ldg_f4b), wut_off, qf_channel
+#include "qkvg_bwd_sm80.cuh"
 
 namespace sw80 {
 
-template <int NW_, int DBG_ = 0>
+// NW tiles of 4 warps per CTA; the weight ring: NST = 3 stages of 32 KB (the four K blocks 4 kg .. 4 kg + 3, 8 KB each, per stage kg)
+template <int NW_>
 struct KsCfg {
-  static constexpr int NW = NW_, NTHR = NW_ * 128, KPS = 4, NST = 3, MINB = 1, DBG = DBG_;
+  static constexpr int NW = NW_, NTHR = NW_ * 128, KPS = 4, NST = 3, MINB = 1;
   static constexpr int STAGE = 32768, SMEM = NST * STAGE + 2048;
 };
+
+// stage of K blocks 4 kg + j (32 units each), j < 4: sub-block j, smem row r (the f1 order: output channel qf_channel(r)) of 64 B at r 64 -- the B fragment of row g8 of n tile nt, chunk q4 is at
+// j 8192 + nt 512 + g8 64 + q4 16 (a quarter warp reads 128 contiguous bytes: no bank conflicts)
+template <class G>
+DEVI void bs_load_stage(const __nv_bfloat16* wt, uint32_t stage, int kg, int tid) {
+  for (int i = tid; i < G::KPS * 512; i += G::NTHR) {
+    const int j = i >> 9, r = (i >> 2) & 127, c = i & 3;
+    cp_async16(stage + j * 8192 + r * 64 + c * 16, wt + (size_t)qf_channel(r) * 512 + (kg * G::KPS + j) * 32 + c * 8);
+  }
+}
 
 // one K-split tile reduce-scatter: part r writes its partial sums of the groups of the other parts (acc[gq] of 4 x 4 per lane) into xb [gq][3][16][32 lanes]
 DEVI void ks_scatter(const float (&acc)[4][4][4], float* xb, int part, int lane) {
@@ -168,21 +181,19 @@ __global__ void __launch_bounds__(G::NTHR, 1) ffn_bwd_dy_ks_kernel(const FfnBwdD
     for (int hh = 0; hh < 2; ++hh) { a[0][hh] = ua[kg][hh].x; a[0][2 + hh] = ua[kg][hh].y; a[1][hh] = ua[kg][hh].z; a[1][2 + hh] = ua[kg][hh].w; }
     const uint32_t stg = sring + (kg % 3) * G::STAGE;
 #pragma unroll
-    for (int nt = 0; nt < (G::DBG == 2 ? 0 : 16); ++nt) {
+    for (int nt = 0; nt < 16; ++nt) {
       const uint4 b = lds128(stg + nt * 512 + wlane);   // volatile: must not sink past the barrier that lets the ring buffer be refilled
       mma16816(acc[nt >> 2][nt & 3], a[0], b.x, b.y);
       mma16816(acc[nt >> 2][nt & 3], a[1], b.z, b.w);
     }
     if (kg == 0) ks_pre(kp, rm, uq, part, q4, p.mod, 512, p.eps);
   }
-  if (G::DBG == 1) { float sm = 0.f; for (int g = 0; g < 4; ++g) for (int j = 0; j < 4; ++j) for (int e = 0; e < 4; ++e) sm += acc[g][j][e]; if (sm == 12345.f) p.dq1[0] = __float2bfloat16(sm); return; }
   __syncthreads();                                              // the ring is free: the reduce-scatter buffer
   float* xb = reinterpret_cast<float*>(smem_raw) + slot * 6144;
   ks_scatter(acc, xb, part, lane);
   __syncthreads();
   float mine[4][4];
   ks_gather(mine, acc, xb, part, lane);
-  if (G::DBG == 3) { float sm = 0.f; for (int j = 0; j < 4; ++j) for (int e = 0; e < 4; ++e) sm += mine[j][e]; if (sm == 12345.f) p.dq1[0] = __float2bfloat16(sm); return; }
   ks_epilogue(mine, rm, kp, udr, part, q4, g8, p.dq1, p.dmod, 384, reinterpret_cast<float*>(smem_raw + 3 * G::STAGE) + slot * 64);
 }
 

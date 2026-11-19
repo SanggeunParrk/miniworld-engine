@@ -611,9 +611,15 @@ def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: floa
 
 
 def _gate_launch_sm120(m: int, s: int) -> tuple[int, int]:
-    """(cfg, hsplit) of the FFN backward's gate kernel on the RTX 5090: the 8-warp CTAs (72 KB ring: one an SM), the hidden chunks spread over the fewest CTAs per tile group that give at least 80 CTAs (measured: L 5120 hsplit 2 and 4 are 4-5 % faster than 8)."""
-    ngrp = -(-(-(-s // 16) * (m // s)) // 8)
-    return 0, next((hs for hs in (1, 2, 4) if ngrp * hs >= 80), 8)
+    """(cfg, hsplit) of the FFN backward's gate kernel on the RTX 5090 by the row count M (graph replays of every cfg x hsplit, one sample, 2026-11-19; us): the 4-warp CTAs (cfg 1) with the hidden chunks over 8 / 4 / 2 CTAs
+    per tile group up to 5120 rows (M 1024: 6.6, 2048: 8.5, 4096: 12.8, 5120: 13.6 -- the 8-warp CTAs with the old rule 8.9 / 9.8 / 13.1 / 19.0), the 8-warp CTAs over 2 CTAs past it (6144 .. 8192: 19.4 .. 20.3)."""
+    if m <= 1024:
+        return 1, 8
+    if m <= 2048:
+        return 1, 4
+    if m <= 5120:
+        return 1, 2
+    return 0, 2
 
 
 def ffn_bwd_gate_sm120(dy, y, ffn, mod, wu, wdt, dmod, n: int, s: int):
@@ -628,21 +634,21 @@ def ffn_bwd_gate_sm120(dy, y, ffn, mod, wu, wdt, dmod, n: int, s: int):
     return dffn, hh, dab
 
 
-def ffn_bwd_dy_sm120(dab, q1, dy, mod, wut, dmod, n: int, s: int, eps: float, cfg: int = 0):
-    """The FFN backward's dy kernel on the RTX 5090 (``bwd_stream_sm120.cuh``: ``Wu^T`` streamed through a cp.async ring, in place of the 128 KB resident one): ``dq1`` [M, 128] bf16 of ``dab`` [M, 512],
+def ffn_bwd_dy_sm120(dab, q1, dy, mod, wut, dmod, n: int, s: int, eps: float):
+    """The FFN backward's dy kernel on the RTX 5090 (``bwd_ks_sm120.cuh``: ``Wu^T`` streamed through a cp.async ring in place of the 128 KB resident one, K split over 4 warps per tile): ``dq1`` [M, 128] bf16 of ``dab`` [M, 512],
     ``q1`` / ``dy`` [M, 128] bf16, ``mod`` [M, 768] fp32, ``wut`` = Wu^T [128, 512]; d shift_f | d scale_f go into columns 384 .. 639 of ``dmod``."""
     dq1 = torch.empty_like(q1)
-    _ext_sm120().swa_ffn_bwd_dy_stream(dab, q1, dy, mod, wut, dq1, dmod, s, n, eps, cfg)
+    _ext_sm120().swa_ffn_bwd_dy_stream(dab, q1, dy, mod, wut, dq1, dmod, s, n, eps)
     return dq1
 
 
-def qkvg_bwd_sm120(qi, pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wt, dmod, n: int, s: int, eps: float, qk_eps: float, cfg: int = 0):
-    """The qkvg backward on the RTX 5090 (``bwd_stream_sm120.cuh``: ``(Wqkv | Wg)^T`` streamed): ``(dq [M, 128], dP [M, 512])`` bf16, the operands of :func:`qkvg_bwd` (``wt`` = (Wqkv | Wg)^T [128, 512]);
+def qkvg_bwd_sm120(qi, pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wt, dmod, n: int, s: int, eps: float, qk_eps: float):
+    """The qkvg backward on the RTX 5090 (``bwd_ks_sm120.cuh``: ``(Wqkv | Wg)^T`` streamed): ``(dq [M, 128], dP [M, 512])`` bf16, the operands of :func:`qkvg_bwd` (``wt`` = (Wqkv | Wg)^T [128, 512]);
     d shift_a | d scale_a go into columns 0 .. 255 of ``dmod``."""
     m = qi.shape[0]
     dq = torch.empty(m, C, device=qi.device, dtype=torch.bfloat16)
     dp = torch.empty(m, 4 * C, device=qi.device, dtype=torch.bfloat16)
-    _ext_sm120().swa_qkvg_bwd_stream(qi, pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wt, dq, dp, dmod, s, n, eps, qk_eps, cfg)
+    _ext_sm120().swa_qkvg_bwd_stream(qi, pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wt, dq, dp, dmod, s, n, eps, qk_eps)
     return dq, dp
 
 

@@ -32,12 +32,11 @@ FUSED_SM120 = True
 TRAIN_FUSED_SM120_MIN_ROWS: int | None = 4096
 #: RTX 5090 bf16 training backward: the FFN backward's gate kernel and the out-projection backward of the sm_80 stages (``sm80.ffn_bwd_gate_sm120`` / ``oproj_bwd``) in place of the composed row stages around cuBLAS products
 BWD_FUSED_SM120 = True
-#: RTX 5090 training backward: the FFN backward's dy kernel and the qkvg backward kernel with their weights STREAMED (``bwd_stream_sm120.cuh``; the sm_80 kernels keep 128 KB resident) in place of
-#: the cuBLAS products and row stages around them; the launch shapes (``sm80.ffn_bwd_dy_sm120`` / ``qkvg_bwd_sm120`` cfg)
+#: RTX 5090 training backward: the FFN backward's dy kernel and the qkvg backward kernel with their weights STREAMED (``bwd_ks_sm120.cuh``; the sm_80 kernels keep 128 KB resident) in place of
+#: the cuBLAS products and row stages around them
 BWD_STREAM_SM120 = True
 #: RTX 5090 training backward: the five weight-gradient GEMMs as one grouped kernel (``sm80.wgrad5_sm120``, ``wgrad5_sm120.cu``) in place of five cuBLAS products; needs the row count a multiple of 256
 WGRAD5_SM120 = True
-BWD_STREAM_CFG_SM120 = (100, 100)
 #: the out-projection backward kernel's launch shape on the RTX 5090 (``sm80.oproj_bwd`` cfg: warps per CTA 8 / 4 / 2 / 1 for 0 / 1 / 2 / 3)
 OPROJ_BWD_CFG_SM120 = 1
 #: RTX 5090: the bf16 modulation backward on cuBLAS products (``_mod_bwd``) at every row count (the A100 table: up to 3072 rows)
@@ -258,7 +257,7 @@ def _bwd_fp32(
         dab, hh = empty(m, 4 * C), empty(m, 2 * C)
         _rows(7, [ab, dh], [dab, hh], n, s, bf)
     if fused and BWD_STREAM_SM120 and _ks_ok(m, s):  # stage 8 and the product before it: dq1 and d shift_f | d scale_f from dab Wu, the weight streamed
-        dq1 = sm80.ffn_bwd_dy_sm120(dab, q1, dy.reshape(m, C), mod, f["wut"], dmod, n, s, FP32_EPS, BWD_STREAM_CFG_SM120[0])
+        dq1 = sm80.ffn_bwd_dy_sm120(dab, q1, dy.reshape(m, C), mod, f["wut"], dmod, n, s, FP32_EPS)
     else:
         d_y = mm(dab, wu)
         dq1 = empty(m, C)
@@ -276,7 +275,7 @@ def _bwd_fp32(
     dqh, dkh, dvh = attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window)
     if fused and BWD_STREAM_SM120 and "wt" in f and _ks_ok(m, s):  # stages 11 + 12 and the product between them: dP, dx = dP W and the adaLN backward, the weight streamed
         dq, dp = sm80.qkvg_bwd_sm120(
-            q.reshape(m, C), pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, f["wt"], dmod, n, s, FP32_EPS, FP32_EPS, BWD_STREAM_CFG_SM120[1]
+            q.reshape(m, C), pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, f["wt"], dmod, n, s, FP32_EPS, FP32_EPS
         )
     else:
         dp = empty(m, 4 * C)

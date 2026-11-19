@@ -12,7 +12,6 @@
 #include "fp32_fwd_sm120.cuh"
 #include "attn_global_sm120.cuh"
 #include "ffn_bwd_sm80.cuh"
-#include "bwd_stream_sm120.cuh"
 #include "bwd_ks_sm120.cuh"
 #include "../../../_sm_count.cuh"
 
@@ -54,29 +53,9 @@ void launch_ffn_u32(const sw80::FfnFwdParams& p) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template <class G>
-void launch_bwd_stream(const sw80::FfnBwdDyParams* pd, const sw80::QkvgBwdParams* pq) {
-  const int M = pd ? pd->M : pq->M, S = pd ? pd->S : pq->S;
-  const int ntile = ((S + 15) / 16) * (M / S), ngrp = (ntile + G::NW - 1) / G::NW;
-  const unsigned ctas = (unsigned)std::max(1, std::min(num_sms() * G::MINB, ngrp));
-  static bool attr[2][64] = {};
-  const int dev = at::cuda::current_device() & 63, w = pd ? 0 : 1;
-  if (pd) {
-    if (!attr[w][dev]) { C10_CUDA_CHECK(cudaFuncSetAttribute(sw80::ffn_bwd_dy_stream_kernel<G, sw80::MODE_SINGLE>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM)); attr[w][dev] = true; }
-    sw80::ffn_bwd_dy_stream_kernel<G, sw80::MODE_SINGLE><<<ctas, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(*pd);
-  } else {
-    if (!attr[w][dev]) { C10_CUDA_CHECK(cudaFuncSetAttribute(sw80::qkvg_bwd_stream_kernel<G, sw80::MODE_SINGLE>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM)); attr[w][dev] = true; }
-    sw80::qkvg_bwd_stream_kernel<G, sw80::MODE_SINGLE><<<ctas, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(*pq);
-  }
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
-template <int NW, int KPS, int NST, int MINB, int DBG = 0>
-void bwd_stream_case(const sw80::FfnBwdDyParams* pd, const sw80::QkvgBwdParams* pq) { launch_bwd_stream<sw80::BwdStreamCfg<NW, KPS, NST, MINB, DBG>>(pd, pq); }
-
-template <int NW, int DBG = 0>
+template <int NW>
 void launch_ks(const sw80::FfnBwdDyParams* pd, const sw80::QkvgBwdParams* pq, int ngrp) {
-  using G = sw80::KsCfg<NW, DBG>;
+  using G = sw80::KsCfg<NW>;
   static bool attr[2][64] = {};
   const int dev = at::cuda::current_device() & 63, w = pd ? 0 : 1;
   if (pd) {
@@ -89,48 +68,19 @@ void launch_ks(const sw80::FfnBwdDyParams* pd, const sw80::QkvgBwdParams* pq, in
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// cfg 100: the K-split kernels (bwd_ks_sm120.cuh), NW tiles per CTA = the fewest that give one group per SM (at most 4)
-void ks_dispatch(const sw80::FfnBwdDyParams* pd, const sw80::QkvgBwdParams* pq, int dbg = 0) {
+// the K-split kernels (bwd_ks_sm120.cuh), NW tiles per CTA = the fewest that give one group per SM (at most 4)
+void ks_dispatch(const sw80::FfnBwdDyParams* pd, const sw80::QkvgBwdParams* pq) {
   const int M = pd ? pd->M : pq->M, S = pd ? pd->S : pq->S;
   const int ntile = ((S + 15) / 16) * (M / S), sms = num_sms();
   for (int nw = 1; nw <= 4; ++nw) {
     if ((ntile + nw - 1) / nw > sms && nw < 4) continue;
     TORCH_CHECK((ntile + nw - 1) / nw <= sms, "K-split backward: too many row tiles for one group per SM");
     const int ngrp = (ntile + nw - 1) / nw;
-    if (dbg == 1) { launch_ks<2, 1>(pd, pq, ngrp); return; } if (dbg == 2) { launch_ks<2, 2>(pd, pq, ngrp); return; } if (dbg == 3) { launch_ks<2, 3>(pd, pq, ngrp); return; }
     if (nw == 1) launch_ks<1>(pd, pq, ngrp); else if (nw == 2) launch_ks<2>(pd, pq, ngrp); else if (nw == 3) launch_ks<3>(pd, pq, ngrp); else launch_ks<4>(pd, pq, ngrp);
     return;
   }
 }
 
-// launch shape cfg of the streaming backward kernels: (warps per CTA, K blocks per ring stage, ring stages, CTAs per SM)
-void bwd_stream_dispatch(int64_t cfg, const sw80::FfnBwdDyParams* pd, const sw80::QkvgBwdParams* pq) {
-  if (cfg >= 100) { ks_dispatch(pd, pq, (int)cfg - 100); return; }
-  switch (cfg) {
-    case 0: bwd_stream_case<2, 2, 3, 2>(pd, pq); break;
-    case 1: bwd_stream_case<4, 2, 3, 2>(pd, pq); break;
-    case 2: bwd_stream_case<2, 1, 4, 2>(pd, pq); break;
-    case 3: bwd_stream_case<4, 1, 4, 2>(pd, pq); break;
-    case 4: bwd_stream_case<8, 2, 3, 1>(pd, pq); break;
-    case 5: bwd_stream_case<1, 2, 3, 2>(pd, pq); break;
-    case 6: bwd_stream_case<8, 1, 4, 2>(pd, pq); break;
-    case 7: bwd_stream_case<1, 1, 4, 2>(pd, pq); break;
-    case 8: bwd_stream_case<3, 2, 3, 2>(pd, pq); break;
-    case 9: bwd_stream_case<2, 4, 2, 2>(pd, pq); break;
-    case 10: bwd_stream_case<2, 2, 6, 1>(pd, pq); break;
-    case 11: bwd_stream_case<4, 2, 6, 1>(pd, pq); break;
-    case 12: bwd_stream_case<2, 1, 8, 1>(pd, pq); break;
-    case 13: bwd_stream_case<2, 2, 3, 2, 1>(pd, pq); break;
-    case 14: bwd_stream_case<2, 2, 6, 1, 1>(pd, pq); break;
-    case 15: bwd_stream_case<1, 1, 6, 1>(pd, pq); break;
-    case 16: bwd_stream_case<2, 2, 3, 2, 3>(pd, pq); break;
-    case 17: bwd_stream_case<2, 1, 4, 2, 3>(pd, pq); break;
-    case 19: bwd_stream_case<2, 2, 3, 2, 5>(pd, pq); break;
-    case 20: bwd_stream_case<2, 2, 3, 2, 6>(pd, pq); break;
-    case 18: bwd_stream_case<2, 2, 3, 2, 4>(pd, pq); break;
-    default: TORCH_CHECK(false, "unknown streaming backward configuration");
-  }
-}
 }  // namespace
 
 // qkvg stage (inference): x [M, C] bf16, mod [B S, 6C] fp32, cos / sin [B S, 16] fp32, Wqkv [3C, C], Wg [C, C] -> Qh, Kh, Vh [N, H, S, 32] (tm: token-major [M, H, 32]), G [M, C]
@@ -299,9 +249,9 @@ void swa_attn_global_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torc
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// the FFN backward's dy kernel streaming its weight (bwd_stream_sm120.cuh): dab [M, 512] da | db, q1, dy (= dq2) [M, 128] bf16, mod [M, 768] fp32, Wu^T [128, 512] -> dq1 [M, 128] bf16;
+// the FFN backward's dy kernel streaming its weight (bwd_ks_sm120.cuh): dab [M, 512] da | db, q1, dy (= dq2) [M, 128] bf16, mod [M, 768] fp32, Wu^T [128, 512] -> dq1 [M, 128] bf16;
 // d shift_f | d scale_f go into dmod columns 384 .. 639
-void swa_ffn_bwd_dy_stream(torch::Tensor dab, torch::Tensor q1, torch::Tensor dy, torch::Tensor mod, torch::Tensor wut, torch::Tensor dq1, torch::Tensor dmod, int64_t S, int64_t B, double eps, int64_t cfg) {
+void swa_ffn_bwd_dy_stream(torch::Tensor dab, torch::Tensor q1, torch::Tensor dy, torch::Tensor mod, torch::Tensor wut, torch::Tensor dq1, torch::Tensor dmod, int64_t S, int64_t B, double eps) {
   for (const auto* t : {&dab, &q1, &dy, &wut, &dq1}) { CHECK_CUDA_BF16(*t); CHECK_CONTIG(*t); }
   CHECK_CUDA_F32(mod); CHECK_CUDA_F32(dmod); CHECK_CONTIG(mod); CHECK_CONTIG(dmod);
   const int64_t M = dy.size(0);
@@ -310,12 +260,12 @@ void swa_ffn_bwd_dy_stream(torch::Tensor dab, torch::Tensor q1, torch::Tensor dy
   if (M == 0) return;
   c10::cuda::CUDAGuard guard(dy.device());
   sw80::FfnBwdDyParams p{bptr(dab), bptr(q1), bptr(dy), mod.data_ptr<float>(), bptr(wut), bptr_w(dq1), dmod.data_ptr<float>(), (int)M, (int)S, (int)B, (float)eps};
-  bwd_stream_dispatch(cfg, &p, nullptr);
+  ks_dispatch(&p, nullptr);
 }
 
 // the qkvg backward streaming its weight: operands of swa_qkvg_bwd (ops.cu), MODE_SINGLE
 void swa_qkvg_bwd_stream(torch::Tensor qi, torch::Tensor pq, torch::Tensor pk, torch::Tensor dqh, torch::Tensor dkh, torch::Tensor dvh, torch::Tensor dg, torch::Tensor dq1, torch::Tensor mod,
-                         torch::Tensor cos, torch::Tensor sin, torch::Tensor wt, torch::Tensor dq, torch::Tensor dp, torch::Tensor dmod, int64_t S, int64_t B, double eps, double qk_eps, int64_t cfg) {
+                         torch::Tensor cos, torch::Tensor sin, torch::Tensor wt, torch::Tensor dq, torch::Tensor dp, torch::Tensor dmod, int64_t S, int64_t B, double eps, double qk_eps) {
   for (const auto* t : {&qi, &pq, &pk, &dqh, &dkh, &dvh, &dg, &dq1, &wt, &dq, &dp}) { CHECK_CUDA_BF16(*t); CHECK_CONTIG(*t); }
   for (const auto* t : {&mod, &cos, &sin, &dmod}) { CHECK_CUDA_F32(*t); CHECK_CONTIG(*t); }
   const int64_t M = qi.size(0);
@@ -325,7 +275,7 @@ void swa_qkvg_bwd_stream(torch::Tensor qi, torch::Tensor pq, torch::Tensor pk, t
   c10::cuda::CUDAGuard guard(qi.device());
   sw80::QkvgBwdParams p{bptr(qi), bptr(pq), bptr(pk), bptr(dqh), bptr(dkh), bptr(dvh), bptr(dg), bptr(dq1), mod.data_ptr<float>(), cos.data_ptr<float>(), sin.data_ptr<float>(), bptr(wt),
                         bptr_w(dq), bptr_w(dp), dmod.data_ptr<float>(), (int)M, (int)S, (int)B, (float)eps, (float)qk_eps};
-  bwd_stream_dispatch(cfg, nullptr, &p);
+  ks_dispatch(nullptr, &p);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
