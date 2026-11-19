@@ -119,7 +119,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         "cueq": 2,
         "cuda:a100_sm80": 6,  # 6 (2026-11-17): core2 runs the register-resident core from L 128 (64-channel heads) / L 256 (32- and 16-channel heads); 5 (2026-11-13): the register-resident inference core (attn_rf_fwd_sm80.cuh) at L >= 512, plain and gated
         "cuda:h100_sm90": 9,  # 8 (2026-11-14): d_pair 64 x 32-channel heads beyond L 768: the fp16-exact fused front (one kernel for LN + GEMMs + bias; outputs bitwise unchanged); 9 (2026-11-15): the unfused fp16 front (d_pair 384 x 12 heads) makes the pair bias in its LayerNorm kernel (mma.sync = the cuBLAS bias GEMM bits; outputs bitwise unchanged); also the dh16 core (software-pipelined sub-step, PV as m64n24, K in 16 channels: bitwise unchanged)
-        "cuda:5090_sm120": 4,  # 2: the bias-only one-direction path on sm_120a; 3 (2026-11-13): main's row-blocked / padded inference on the sm_120a build; 4 (2026-11-17, re-measure only): the 2.5.14 register-resident core keeps 2 ring slots for 32- / 64-channel heads on sm_120a (two CTAs an SM; bitwise the same outputs, 1.04-1.09x module)
+        "cuda:5090_sm120": 5,  # 2: the bias-only one-direction path on sm_120a; 3 (2026-11-13): main's row-blocked / padded inference on the sm_120a build; 4 (2026-11-17, re-measure only): the 2.5.14 register-resident core keeps 2 ring slots for 32- / 64-channel heads on sm_120a (two CTAs an SM; bitwise the same outputs, 1.04-1.09x module); 5 (2026-11-19): inference at D 256 on the rows engine: no constant columns in xh (K = 256) and the folded LayerNorm shift in the GEMM bias (addmm) for the Chai-1 / Chai-1 confidence variants at every L and for the plain AF3 / Protenix classes below L 256 (cuBLAS fell to its 32 x 32 wmma tile at K = 264: 147 vs 100 us at L 128); outputs within the bf16 rounding of the shift
         "triton": 2,
     }  # 2026-11-10: kits; sm_80 paths; 3: A100 AF3 flip in the fronts, inference casts / packs read by captures; cuda:a100_sm80 4 / triton 2
     # (2026-11-12): row-blocked inference past a whole-pair budget (FoldForge OpenDDE refiner, 2976 / 3968 tokens at d_pair 384; A100: also
@@ -920,6 +920,8 @@ class TriangleAttentionRF3(_TriangleAttentionFp32Softmax):
 
     version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 3: (2026-11-13) the H100 d_pair 128 x 4 heads inference gate in fp32 inside the tail
+    #: cuda:5090_sm120 5 (2026-11-19): inference folds the gate bias into the front's shift columns (one plain mm instead of the biased-epilogue addmm: 4.1 -> 3.0 ms of 12 at L 1024)
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:5090_sm120": 5}
 
     _projection_biases = True
 

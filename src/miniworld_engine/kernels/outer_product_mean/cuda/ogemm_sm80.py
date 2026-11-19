@@ -21,7 +21,9 @@ def ext():
         name=_card.name("opm_ogemm_sm80"),
         sources=[str(_dir / "ogemm_cutlass.cu")],
         extra_include_paths=[str(_dir), str(cutlass_include())],
-        extra_cuda_cflags=_card.cflags([*host_flags(), "-O3", "-std=c++17", "-gencode=arch=compute_80,code=sm_80", "--expt-relaxed-constexpr"]),
+        extra_cuda_cflags=_card.cflags(
+            [*host_flags(), "-O3", "-std=c++17", "-gencode=arch=compute_80,code=sm_80", "--expt-relaxed-constexpr"]
+        ),
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
     )
@@ -31,7 +33,12 @@ def live_tokens(mask_u8: torch.Tensor) -> torch.Tensor:
     """[S, L] uint8 mask -> [L] uint8: 1 where some MSA row keeps the token."""
     from miniworld_engine.kernels import _msa_card
 
-    if _msa_card.sm120():  # the RTX 5090 keeps the reduction it shipped with
+    if _msa_card.sm120():
+        if mask_u8.is_cuda and mask_u8.dim() == 2 and mask_u8.element_size() == 1:
+            # RTX 5090: the one-launch column reduction (``gemm_sm120.live_tokens``: 3.6 us against the torch amax's 8.4 us + a copy at S 1024, L 128); 0 / 1 masks: the same bytes
+            from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120
+
+            return gemm_sm120.live_tokens(mask_u8, mask_u8.shape[0], mask_u8.shape[1])
         return mask_u8.amax(0).contiguous()
     if mask_u8.shape[0] > 2048:  # (the one-block-column kernel is latency bound at a deep MSA)
         return mask_u8.amax(0).contiguous()
