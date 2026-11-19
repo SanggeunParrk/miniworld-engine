@@ -104,7 +104,7 @@ class InputFeatureEmbedder(BackendModule):
         "cuda:a100_sm80": 8,
         "cuda:h100_sm90": 4,
         "triton": 2,
-        "cuda:5090_sm120": 2,
+        "cuda:5090_sm120": 3,
     }  # cuda:a100_sm80 8 / cuda:5090_sm120 2 (2026-11-15): its atom_norm LayerNorm runs the changed forward row kernels (sm_80 / sm_120a; LayerNorm cuda 3 on both cards); no kernel row bump: one would also owe every triton case that lists it
     # cuda:a100_sm80 7 (2026-11-13): its SWAAtomTransformer's
     #: The engine backends this composition hands to its children.

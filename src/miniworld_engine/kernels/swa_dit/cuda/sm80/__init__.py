@@ -559,7 +559,7 @@ _INFER_DEFAULT_SM120 = (dict(cfg=1, nsplit=1), 0)
 FUSED_MIN_ROWS_SM120 = 2049
 
 
-def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: float, qk_eps: float) -> torch.Tensor:
+def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: float, qk_eps: float, glob: bool = False, save: bool = False):
     """The bf16 window block's inference on the RTX 5090: ``q`` [N, S, 128] bf16, ``mod`` [N S, 768] fp32 (one modulation row per sequence row), ``cos`` / ``sin``
     [N S, 16] fp32 -> [N, S, 128] bf16.  ``block_fwd``'s three stages (the same statements and rounding points) with the qkvg / FFN kernels of ``fused_sm120.cu``;
     the launch shapes from ``_INFER_CFG_SM120``."""
@@ -570,8 +570,21 @@ def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: floa
     ext = _ext_sm120()
     qh, kh, vh = (torch.empty(n, H, s, D, device=q.device, dtype=torch.bfloat16) for _ in range(3))
     g = torch.empty(m, C, device=q.device, dtype=torch.bfloat16)
-    ext.swa_qkvg_fwd_half(qf, mod, cos, sin, wqkv, wg, qh, kh, vh, g, s, n, eps, qk_eps, qcfg["cfg"], False, qcfg["nsplit"], qcfg.get("max_pairs", 0))
-    o, _ = attn_fwd(qh, kh, vh, seqused, save_lse=False)
+    xs, pqs, pks = (torch.empty(m, C, device=q.device, dtype=torch.bfloat16) if save else None for _ in range(3))
+    q1s, atts, ys, ffs = (torch.empty(m, C, device=q.device, dtype=torch.bfloat16) if save else None for _ in range(4))
+    ext.swa_qkvg_fwd_half(qf, mod, cos, sin, wqkv, wg, qh, kh, vh, g, s, n, eps, qk_eps, qcfg["cfg"], False, qcfg["nsplit"], qcfg.get("max_pairs", 0), *(xs, pqs, pks))
+    lse = None
+    if glob and not save:  # global attention: every key of the sequence (attn_global_sm120.cuh), the same qkvg / FFN stages around it
+        o = torch.empty_like(qf)
+        ext.swa_attn_global_fwd(qh, kh, vh, seqused, o)
+    elif glob:  # training: FlashAttention-2 with its lse (the backward reads it)
+        from miniworld_engine.kernels.swa_dit.cuda.sm80 import composed
+
+        o, lse = composed.attention_fwd(qh, kh, vh, seqused, 1 << 30)
+    else:
+        o, lse = attn_fwd(qh, kh, vh, seqused, save_lse=save)
     out = torch.empty_like(qf)
-    ext.swa_ffn_fwd_u32(qf, g, o, mod, wo, wu, wd, out, s, n, eps, fcfg)
+    ext.swa_ffn_fwd_u32(qf, g, o, mod, wo, wu, wd, out, s, n, eps, fcfg, *(q1s, atts, ys, ffs))
+    if save:
+        return [out.view(n, s, C), qh, kh, vh, g, o, lse, q1s, xs, pqs, pks, atts, ys, ffs]
     return out.view(n, s, C)

@@ -10,6 +10,7 @@
 #include "qkvg_fwd_sm120.cuh"
 #include "ffn_fwd_sm120.cuh"
 #include "fp32_fwd_sm120.cuh"
+#include "attn_global_sm120.cuh"
 #include "../../../_sm_count.cuh"
 
 #define CHECK_CUDA_BF16(x) TORCH_CHECK((x).is_cuda() && (x).scalar_type() == torch::kBFloat16, #x " must be a CUDA bf16 tensor")
@@ -53,7 +54,8 @@ void launch_ffn_u32(const sw80::FfnFwdParams& p) {
 
 // qkvg stage (inference): x [M, C] bf16, mod [B S, 6C] fp32, cos / sin [B S, 16] fp32, Wqkv [3C, C], Wg [C, C] -> Qh, Kh, Vh [N, H, S, 32] (tm: token-major [M, H, 32]), G [M, C]
 void swa_qkvg_fwd_half(torch::Tensor x, torch::Tensor mod, torch::Tensor cos, torch::Tensor sin, torch::Tensor wqkv, torch::Tensor wg, torch::Tensor qh, torch::Tensor kh,
-                       torch::Tensor vh, torch::Tensor g, int64_t S, int64_t B, double eps, double qk_eps, int64_t cfg, bool tm, int64_t nsplit, int64_t max_pairs) {
+                       torch::Tensor vh, torch::Tensor g, int64_t S, int64_t B, double eps, double qk_eps, int64_t cfg, bool tm, int64_t nsplit, int64_t max_pairs,
+                       c10::optional<torch::Tensor> xs, c10::optional<torch::Tensor> pqs, c10::optional<torch::Tensor> pks) {
   TORCH_CHECK(nsplit == 1 || nsplit == 2 || nsplit == 4, "nsplit must be 1, 2 or 4 (of a half's 4 output blocks)");
   CHECK_CUDA_BF16(x); CHECK_CUDA_BF16(wqkv); CHECK_CUDA_BF16(wg); CHECK_CUDA_BF16(qh); CHECK_CUDA_BF16(kh); CHECK_CUDA_BF16(vh); CHECK_CUDA_BF16(g);
   CHECK_CUDA_F32(mod); CHECK_CUDA_F32(cos); CHECK_CUDA_F32(sin);
@@ -66,6 +68,10 @@ void swa_qkvg_fwd_half(torch::Tensor x, torch::Tensor mod, torch::Tensor cos, to
   c10::cuda::CUDAGuard guard(x.device());
   sw80::QkvgFwdParams p{bptr(x), mod.data_ptr<float>(), cos.data_ptr<float>(), sin.data_ptr<float>(), bptr(wqkv), bptr(wg), bptr_w(qh), bptr_w(kh), bptr_w(vh), bptr_w(g),
                         nullptr, nullptr, nullptr, (int)M, (int)S, (int)B, (float)eps, (float)qk_eps, tm ? 1 : 0, (int)nsplit};
+  if (xs.has_value()) {   // training: the stage keeps x, p_q, p_k (bf16 [M, C]) for the backward
+    for (const torch::Tensor* t : {&*xs, &*pqs, &*pks}) { CHECK_CUDA_BF16(*t); CHECK_CONTIG(*t); TORCH_CHECK(t->numel() == M * 128, "bad save sizes"); }
+    p.xs = bptr_w(*xs); p.pqs = bptr_w(*pqs); p.pks = bptr_w(*pks);
+  }
   switch (cfg) {
     case 0: launch_qkvg_half<sw80::QkvgHalfCfg<8, 2>>(p, max_pairs); break;
     case 1: launch_qkvg_half<sw80::QkvgHalfCfg<16, 1>>(p, max_pairs); break;
@@ -77,7 +83,8 @@ void swa_qkvg_fwd_half(torch::Tensor x, torch::Tensor mod, torch::Tensor cos, to
 
 // out-projection + gated residual + FFN stage (inference): Qin, G, O [M, C] bf16, mod [B S, 6C] fp32, Wo [C, C], Wu [2 hidden, C], Wd [C, hidden] -> out [M, C]
 void swa_ffn_fwd_u32(torch::Tensor qi, torch::Tensor g, torch::Tensor o, torch::Tensor mod, torch::Tensor wo, torch::Tensor wu, torch::Tensor wd, torch::Tensor out, int64_t S,
-                     int64_t B, double eps, int64_t cfg) {
+                     int64_t B, double eps, int64_t cfg, c10::optional<torch::Tensor> q1s, c10::optional<torch::Tensor> atts, c10::optional<torch::Tensor> ys,
+                     c10::optional<torch::Tensor> ffs) {
   CHECK_CUDA_BF16(qi); CHECK_CUDA_BF16(g); CHECK_CUDA_BF16(o); CHECK_CUDA_BF16(wo); CHECK_CUDA_BF16(wu); CHECK_CUDA_BF16(wd); CHECK_CUDA_BF16(out); CHECK_CUDA_F32(mod);
   for (const auto* t : {&qi, &g, &o, &mod, &wo, &wu, &wd, &out}) CHECK_CONTIG(*t);
   const int64_t M = qi.size(0);
@@ -87,6 +94,10 @@ void swa_ffn_fwd_u32(torch::Tensor qi, torch::Tensor g, torch::Tensor o, torch::
   c10::cuda::CUDAGuard guard(qi.device());
   sw80::FfnFwdParams p{bptr(qi), bptr(g), bptr(o), mod.data_ptr<float>(), bptr(wo), bptr(wu), bptr(wd), bptr_w(out), nullptr, nullptr, nullptr, nullptr,
                        (int)M, (int)S, (int)B, (float)eps, nullptr};
+  if (q1s.has_value()) {   // training: q1, att, y, ffn (bf16 [M, C]) for the backward
+    for (const torch::Tensor* t : {&*q1s, &*atts, &*ys, &*ffs}) { CHECK_CUDA_BF16(*t); CHECK_CONTIG(*t); TORCH_CHECK(t->numel() == M * 128, "bad save sizes"); }
+    p.q1s = bptr_w(*q1s); p.atts = bptr_w(*atts); p.ys = bptr_w(*ys); p.ffs = bptr_w(*ffs);
+  }
   switch (cfg) {
     case 0: launch_ffn_u32<sw80::FfnHalfCfg<8>>(p); break;
     case 1: launch_ffn_u32<sw80::FfnHalfCfg<4>>(p); break;
@@ -156,7 +167,24 @@ void swa_ffn_f32(torch::Tensor q, torch::Tensor g, torch::Tensor o, torch::Tenso
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// global-attention forward (attn_global_sm120.cuh): q, k, v head-major [N, 4, S, 32] bf16, seqused [N] int32 -> o [N S, C] bf16 (no lse)
+void swa_attn_global_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor seqused, torch::Tensor o) {
+  CHECK_CUDA_BF16(q); CHECK_CUDA_BF16(k); CHECK_CUDA_BF16(v); CHECK_CUDA_BF16(o);
+  for (const auto* t : {&q, &k, &v, &o}) CHECK_CONTIG(*t);
+  TORCH_CHECK(q.dim() == 4 && q.size(1) == 4 && q.size(3) == 32 && k.sizes() == q.sizes() && v.sizes() == q.sizes(), "q, k, v must be [N, 4, S, 32]");
+  TORCH_CHECK(seqused.scalar_type() == torch::kInt32 && seqused.is_cuda() && seqused.numel() == q.size(0), "seqused must be int32 [N]");
+  const int64_t N = q.size(0), S = q.size(2);
+  TORCH_CHECK(o.numel() == N * S * 128, "bad output size");
+  if (N * S == 0) return;
+  c10::cuda::CUDAGuard guard(q.device());
+  sw80::AttnGParams p{bptr(q), bptr(k), bptr(v), seqused.data_ptr<int>(), bptr_w(o), (int)S, 0.17677669529663687f * 1.4426950408889634f};
+  const dim3 grid((unsigned)((S + sw80::AG_BQ - 1) / sw80::AG_BQ), (unsigned)(N * 4));
+  sw80::attn_global_fwd_kernel<<<grid, sw80::AG_NW * 32, sw80::AG_SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("swa_attn_global_fwd", &swa_attn_global_fwd);
   m.def("swa_qkvg_f32", &swa_qkvg_f32);
   m.def("swa_ffn_f32", &swa_ffn_f32);
   m.def("swa_qkvg_fwd_half", &swa_qkvg_fwd_half);
