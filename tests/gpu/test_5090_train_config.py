@@ -20,7 +20,7 @@ from miniworld_engine.modules.transition import Transition
 pytestmark = [pytest.mark.gpu, pytest.mark.rtx5090]
 
 #: the 5090 table keys that were missing (transition, layernorm families)
-CHUNKS = (8, 12, 24)
+CHUNKS = (4, 8, 12, 24)
 
 
 def _run(module: torch.nn.Module, x: torch.Tensor, up: torch.Tensor, backend: str) -> dict[str, torch.Tensor]:
@@ -80,3 +80,27 @@ def test_table_keys_for_the_chunk_rows_exist():
     flags = {(dt, flag) for (dt, _, flag) in keys}
     assert ("float32", (("HALF", 0), ("STORE_AB", 1))) in flags
     assert ("float16+float32", (("HALF", 1), ("STORE_AB", 1))) in flags
+
+
+def test_sampler_conditioning_transition_no_grad_7680_rows():
+    """The diffusion head's sampler conditioning runs the d 384 Transition forward under ``no_grad`` on 20 samples x 384 rows (7680 rows, the 4096
+    launch bucket, ``STORE_AB=0``): without its table key the default config needed 131072 B of shared memory and the training step graph capture
+    failed with ``OutOfResources``."""
+    assert _launch_config.gpu_key() == "5090_sm120"
+    torch.manual_seed(0)
+    module = Transition(384, 2).cuda().float()
+    C.randomize(module, torch.Generator(device="cuda").manual_seed(0))
+    x = torch.randn(20, 384, 384, device="cuda")
+    gold = copy.deepcopy(module).double()
+    gold.set_backend("pytorch")
+    with torch.no_grad():
+        want = gold(x.double())
+        module.set_backend("pytorch")
+        ref = module(x)
+        module.set_backend("triton")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = module(x)
+    assert not [str(w.message) for w in caught if "launch_config" in str(w.message)]
+    assert torch.isfinite(out).all()
+    assert _err(out, want) <= max(_err(ref, want), 8e-3)

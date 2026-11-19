@@ -1656,6 +1656,12 @@
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.02048},
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 8}, "num_warps": 4, "num_stages": 2, "ms": 0.022528}
    ],
+   "float32|M=1024,N=384|HAS_ROWSCALE=0": [
+    {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 16}, "num_warps": 2, "num_stages": 3, "ms": 0.014336},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.016384},
+    {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 8}, "num_warps": 4, "num_stages": 2, "ms": 0.016736},
+    {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 32}, "num_warps": 2, "num_stages": 3, "ms": 0.0184}
+   ],
    "float32|M=128,N=384|HAS_ROWSCALE=0": [
     {"kwargs": {"BLOCK_K": 128, "BLOCK_M1": 16}, "num_warps": 2, "num_stages": 3, "ms": 0.01024},
     {"kwargs": {"BLOCK_K": 64, "BLOCK_M1": 4}, "num_warps": 4, "num_stages": 2, "ms": 0.012288},
