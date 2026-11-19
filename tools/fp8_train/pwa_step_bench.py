@@ -16,15 +16,15 @@ specs = sys.argv[1:]
 OUT = os.environ.get("PWA_BENCH_OUT", "pwa_step_bench") + ".jsonl"
 DONE = set()
 if os.path.exists(OUT):
-    for line in open(OUT):
+    for line in open(OUT):  # noqa: SIM115
         DONE.add(json.loads(line)["case"])
 DEADLINE = int(os.environ.get("DEADLINE", time.time() + 500)) - 40
 dev = "cuda"
 P_DROP = float(os.environ.get("P_DROP", "0.15"))
 PROFILE = os.environ.get("PROFILE", "1") == "1"
 
-from miniworld_engine.kernels.integrations import pwa_fp8_train as F  # noqa: E402
-from miniworld_engine.modules.msa import MSAPairWeightedAveraging  # noqa: E402
+from miniworld_engine.kernels.integrations import pwa_fp8_train as F
+from miniworld_engine.modules.msa import MSAPairWeightedAveraging
 
 VARIANTS = []
 for item in os.environ.get("VARIANTS", "bwd=dv,dw/fused/e4m3;bwdo8=dv,dw/fused/e4m3+o8;f8e4=fwd,dv,dw/fused/e4m3").split(";"):
@@ -88,7 +88,7 @@ for spec in specs:
     mask = torch.ones(1, N, dtype=torch.bool, device=dev)
     params = [q for q in m.parameters() if q.requires_grad]
 
-    def step():
+    def step(m=m, x=x, z=z, mask=mask, params=params, gy=gy):
         y = m(x, z, mask)
         return torch.autograd.grad(y, [x, z, *params], gy)
 

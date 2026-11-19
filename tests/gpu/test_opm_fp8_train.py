@@ -199,7 +199,7 @@ def test_gate_and_delayed_scale(mode, monkeypatch) -> None:
     assert not F8.serves(torch.zeros((1, 1024, 256, 256), device="cuda", dtype=torch.bfloat16), 256, 512)  # d_pair 512: 1.03x in round 2
     monkeypatch.setattr(F8, "MIN_L", 0)  # round 3: the per-d_pair length table (MAX_CZ 384 = the default gate)
     monkeypatch.setattr(F8, "MAX_CZ", 384)
-    z = lambda n, c: torch.zeros((1, 1024, n, c), device="cuda", dtype=torch.bfloat16)  # noqa: E731
+    z = lambda n, c: torch.zeros((1, 1024, n, c), device="cuda", dtype=torch.bfloat16)
     assert F8.serves(z(128, 64), 64, 128) and not F8.serves(z(128, 128), 128, 256) and F8.serves(z(256, 128), 128, 256)
     assert not F8.serves(z(256, 128), 128, 384) and F8.serves(z(384, 128), 128, 384)
     monkeypatch.setattr(F8, "MAX_CZ", 256)

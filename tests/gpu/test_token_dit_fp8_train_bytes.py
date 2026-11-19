@@ -176,7 +176,7 @@ def test_rx1_keeps_no_fp32_x1() -> None:
 def test_default_route_takes_the_byte_reductions_and_is_unchanged(A: int, L: int) -> None:
     """Release candidate: with no switch the H100 bf16 block runs nox + hsave and equals the route without them bit for bit."""
     F = _F()
-    assert F.DEFAULT_BYTES == frozenset(("nox", "hsave"))
+    assert frozenset(("nox", "hsave")) == F.DEFAULT_BYTES
     old = F.PLACES
     F.PLACES = frozenset()
     try:

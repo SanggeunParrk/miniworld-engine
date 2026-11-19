@@ -91,7 +91,7 @@ def run(L, S, cm, cz, after, routes=("def", "ctl", "e4m3", "e4m3:fp8", "e4m3:rec
     for _ in range(3):
         for r, g in gs.items():
             sus[r].append(burst(g, max(1, int(nb[r] * 1.5))))
-    med = lambda v: sorted(v)[len(v) // 2]  # noqa: E731
+    med = lambda v: sorted(v)[len(v) // 2]
     row = {"L": L, "S": S, "cm": cm, "cz": cz, "after": after,
            "cool": {r: round(med(v), 4) for r, v in cool.items()}, "sus": {r: round(sum(v) / len(v), 4) for r, v in sus.items()}}
     row["ratio_cool"] = {r: round(row["cool"][r] / row["cool"]["def"], 3) for r in gs}
@@ -105,11 +105,11 @@ if __name__ == "__main__":
     deadline = float(os.environ.get("DEADLINE", "1e12"))
     done = set()
     if os.path.exists(out):
-        for ln in open(out):
+        for ln in open(out):  # noqa: SIM115
             if ln.startswith("{"):
                 d = json.loads(ln)
                 done.add((d["L"], d["S"], d["cm"], d["cz"], d["after"]))
-    for ln in open(sys.argv[1]):
+    for ln in open(sys.argv[1]):  # noqa: SIM115
         if not ln.strip() or ln.startswith("#"):
             continue
         L, S, cm, cz, after = (int(t) for t in ln.split())
@@ -123,7 +123,7 @@ if __name__ == "__main__":
             row = run(L, S, cm, cz, bool(after))
             with open(out, "a") as f:
                 f.write(json.dumps(row) + "\n")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             import traceback
 
             traceback.print_exc()
