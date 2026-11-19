@@ -37,6 +37,8 @@ BWD_FUSED_SM120 = True
 BWD_STREAM_SM120 = True
 #: RTX 5090 training backward: the five weight-gradient GEMMs as one grouped kernel (``sm80.wgrad5_sm120``, ``wgrad5_sm120.cu``) in place of five cuBLAS products; needs the row count a multiple of 256
 WGRAD5_SM120 = True
+#: ... up to this many rows (measured: 48 samples x 2048 .. 8192 rows, 98304 .. 393216: cuBLAS and the kernel are level)
+WGRAD5_MAX_ROWS_SM120 = 16384
 #: the out-projection backward kernel's launch shape on the RTX 5090 (``sm80.oproj_bwd`` cfg: warps per CTA 8 / 4 / 2 / 1 for 0 / 1 / 2 / 3)
 OPROJ_BWD_CFG_SM120 = 1
 #: RTX 5090: the bf16 modulation backward on cuBLAS products (``_mod_bwd``) at every row count (the A100 table: up to 3072 rows)
@@ -289,7 +291,7 @@ def _bwd_fp32(
         dq = empty(m, C)
         _rows(12, [dq1, dx, q, mod], [dq, dmod], n, s, bf)
     if (
-        fused and WGRAD5_SM120 and sm80.wgrad5_ok_sm120(m)
+        fused and WGRAD5_SM120 and m <= WGRAD5_MAX_ROWS_SM120 and sm80.wgrad5_ok_sm120(m)
     ):  # the five weight gradients in one grouped split-K GEMM + one reduction (cuBLAS runs them at ~40 TFLOPs there)
         dwqkv, dwg, dwo, dwu, dwd = sm80.wgrad5_sm120(dp, x, dab, y, datt, gated, dffn, hh)
         return [dq.view(n, s, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
