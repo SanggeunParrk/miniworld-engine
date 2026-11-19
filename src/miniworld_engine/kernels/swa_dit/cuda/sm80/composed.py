@@ -107,7 +107,14 @@ def attention_fwd(qh, kh, vh, seqused, half_window: int, out_dtype: torch.dtype 
         o = torch.empty(n * s, C, device=qh.device, dtype=_BF)
         sm80._ext_sm120().swa_attn_global_fwd(qh, kh, vh, seqused.contiguous(), o, None)
         return o, None
-    if not inference and is_global(half_window) and out_dtype == _BF and GLOBAL_TRAIN_SM120 and qh.shape[2] <= GLOBAL_TRAIN_SM120_MAX_S and _sm120.is_sm120(qh.device):
+    if (
+        not inference
+        and is_global(half_window)
+        and out_dtype == _BF
+        and GLOBAL_TRAIN_SM120
+        and qh.shape[2] <= GLOBAL_TRAIN_SM120_MAX_S
+        and _sm120.is_sm120(qh.device)
+    ):
         n, _, s, _ = qh.shape  # training: the sm_120a kernel with its lse ([N, 4, S] natural log) for the backward of the same file
         o = torch.empty(n * s, C, device=qh.device, dtype=_BF)
         lse = torch.empty(n, H, s, device=qh.device, dtype=_F32)

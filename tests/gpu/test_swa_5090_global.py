@@ -73,7 +73,10 @@ def test_swa_block_train_fused_forward(half_window, length, monkeypatch):
     _case(half_window, length, 1, True, monkeypatch, train_min_rows=0)
 
 
-@pytest.mark.parametrize("half_window,length,samples", [(64, 5120, 1), (64, 3000, 1), (500000, 4096, 1), (500000, 2048, 1), (500000, 1100, 5), (64, 1280, 2), (64, 8192, 1)])
+@pytest.mark.parametrize(
+    "half_window,length,samples",
+    [(64, 5120, 1), (64, 3000, 1), (500000, 4096, 1), (500000, 2048, 1), (500000, 1100, 5), (64, 1280, 2), (64, 8192, 1)],
+)
 def test_swa_block_train_streaming_backward(half_window, length, samples, monkeypatch):
     """Training backward on the K-split streaming dy / qkvg kernels (``bwd_ks_sm120.cuh``) and the grouped weight-gradient GEMM (``wgrad5_sm120.cu``; 3000 rows
     are not a multiple of 256: the cuBLAS products), every gradient against the block's PyTorch statements in float64."""
