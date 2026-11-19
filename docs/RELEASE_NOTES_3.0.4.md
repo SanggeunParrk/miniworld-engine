@@ -64,7 +64,7 @@ No module `version` was bumped. No H100 entry changed.
 | TokenDiTChai1 | a100_sm80 / 5090_sm120 | 4 / default (1) | 7 / 4 | identity AdaLN and the transition on the sm_80 row kernels (6 / 3: fp32 gate fix; 7 / 4: the identity form) |
 | TokenDiT* (same classes + MiniWorld) | 5090_sm120 | default (1) | 2 | TF32 no longer forced |
 | AttentionPairBias | a100_sm80 / 5090_sm120 | 8 / 3 | 9 / 4 | fp32 GEMMs of the fused update follow TF32 setting (IEEE fp32) |
-| Transition | a100_sm80 / 5090_sm120 | 6 / 4 | 7 / 6 | IEEE fp32 chain (a100: was refused to Triton / PyTorch); 5090 also does not save `xn` |
+| Transition | a100_sm80 / 5090_sm120 | 6 / 4 | 7 / 7 | IEEE fp32 chain (a100: was refused to Triton / PyTorch); 5090: no `xn` save (rebuilt up to 147456 rows), L 2048 eval split, tile table |
 | TriangleAttention / TriangleAttentionAF3 | a100_sm80 | 7 / 6 | 8 / 7 | `forward_train` key_mask fix (every cuda training call raised before) |
 | PairformerBlock | a100_sm80 | 9 | 10 | its TriangleAttention training |
 | PoolAtoms | a100_sm80 / 5090_sm120 | 2 / 1 | 3 / 2 | fp32 atom features (`sampler_ops_f32_sm80.cu`) |
@@ -72,15 +72,23 @@ No module `version` was bumped. No H100 entry changed.
 
 ## Honest caveats
 
-- **A100 and 5090 judge tokens are owed.** The judge, run on this tree, owes on `a100_sm80` **2140 accuracy + 2140 speed** cells and on `5090_sm120` **2107 + 2107** (96 of each card are the old
-  `PairformerBlock` chai1 rows without a token since 3.0.1). They are not re-measured for this release; the A100 is waiting for its queue. `h100_sm90` owes **0 / 0**. What was measured instead is stated in
-  "Verification" (installed-wheel accuracy runs, the real 5090 step).
+- **Judge tokens.** `h100_sm90` owes **0 / 0**. `5090_sm120` owes **0 / 0**: its tokens were re-measured on the integration tree (`e02136187`) and the Transition cells again on the final source
+  (accuracy: GREEN / YELLOW only, RED 0, engine error tokens 0). `a100_sm80` still owes **2140 accuracy + 2140 speed** cells (96 of them are the old `PairformerBlock` chai1 rows without a token
+  since 3.0.1); the A100 was not re-measured and **no real A100 run exists for 3.0.4** (the A100 queue is full; the installed-wheel check on an A100 is queued).
+- **5090 Transition (backend version 7).** The training regression of the `xn` rebuild is limited: `xn` is rebuilt in the backward only up to 147456 rows (the L 384 pair); above it the `ln_apply`
+  pass cost 4-10 % of the D 64 / 128 step. The inference split at 64 x 65535 rows applies to the wide chain only (D 64 / 128 keep the one-launch fused forward: the split made L 2048 D 64 / 128 1.4-1.8x
+  slower), so the L 2048 pair keeps its 64-row tiles; `forward_into` takes the 5090 tile table; squeeze config 2 at D >= 256 (config 7 lost 1-4 %). Python-only change (no prebuilt kernel re-keyed).
+- **Known limits (5090 Transition).** The cuda Transition eval is still **3-9 % slower than Triton** at D 256..512, mid L (it needs a fused kernel; not in this release). Transition training at L 384 is
+  **+4.5 %** slower from the `xn` rebuild, kept for the training memory rule.
+- **Chai1.** `IdentityAdaptiveLayerNorm` (attention part and transition of TokenDiTChai1) is now served by cuda on the sm_80 family (A100, 5090) instead of PyTorch ops.
 - **FoldForge's policy limits `cuda` to the H100.** Unless the caller sets the backend explicitly (or, as in the benchmark above, patches the card the policy treats as cuda-capable), FoldForge on an A100 or
   a 5090 still picks Triton. The 5090 step above used `PF_CC=12,0`; this release does not change FoldForge, and FoldForge was not notified.
 - The 5090 real-model numbers are one model (Protenix v1, 48 blocks, 384 tokens), one seed, 4 steps.
 - Nothing else about the H100 changed: no new FP8 route, no re-measure.
 
 ## Prebuild regeneration (release build)
+
+Final plan on the release tree (`_prebuild --list --check`, sm90a / sm80 / sm120a): **0 artifacts to build** on all three (the last source changes, 5090 Transition and the 5090 tokens, are Python-only or data), so the kernels wheels are the ones described below.
 
 Kernels wheels (sm90 / sm80 / sm120, cu129, cp312) rebuilt incrementally from the 3.0.3 release cache with GCC 12.4 and the pixi CUDA 12.9 toolkit (torch 2.13+cu129; CUTLASS 4.2, MathDx), GPU-less on the cluster
 (`MINIWORLD_ENGINE_TARGET_ARCH` set): sm90a **40 built** (579 artifacts, 0 absent; the 40 are the artifacts that include `_sm_count.cuh`, re-keyed, outputs unchanged), sm80 **30 built** (29 + 1 AdaLN extension after the Chai1 fixes) (74 artifacts),
@@ -106,4 +114,4 @@ Installed-wheel runs use the five release artifacts extracted without the repo o
 | RTX 5090 installed `test_restored_triton_backends.py` | 59 passed, 4 skipped (the H100 / A100 bias-only path) |
 | RTX 5090 real Protenix v1 step from the installed wheels | see the table above; 0 engine kernels built into the empty JIT cache, no segfault |
 | A100 installed wheels | **not run on an A100**: the A100 partition of cssb3 is full (the job is queued, estimated start 2026-11-22). Stand-in: GPU-less, installed wheels, empty cache, `MINIWORLD_ENGINE_TARGET_ARCH=sm80`: all 74 indexed sm80 artifacts present and resolved by the runtime loaders, 0 compiled. No A100 accuracy, restored-Triton or real-step run exists for 3.0.4 yet |
-| judge owed (versions only) | `h100_sm90` 0 / 0; `a100_sm80` 2140 / 2140 and `5090_sm120` 2107 / 2107 owed (not re-measured, see caveats) |
+| judge owed (versions only) | `h100_sm90` 0 / 0; `5090_sm120` 0 / 0 (RED 0); `a100_sm80` 2140 / 2140 owed (A100 queue) |
