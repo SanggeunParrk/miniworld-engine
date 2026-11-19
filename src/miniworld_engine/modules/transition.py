@@ -67,7 +67,7 @@ class Transition(BackendModule, MasterWeights):
         "cuda:h100_sm90": 7,
         "cuda:a100_sm80": 7,  # 2026-11-19 (7): fp32 with TF32 off runs on the engine's IEEE fp32 CUDA chain (kernels/ieee_f32; was refused to Triton / PyTorch); TF32 and bf16 unchanged
         "triton:a100_sm80": 2,
-        "cuda:5090_sm120": 7,  # 2026-11-19 (7): see the comment below; (6): bf16 training on the one-kernel backward does not save xn (rebuilt by ln_apply from the saved (mean, rstd), -36 MiB at L 384; gradients bitwise unchanged); (5): the same IEEE fp32 chain (fp32 TF32-off training at 2048 / 4096 / 8192 rows and the 384-row no-grad calls fell to Triton)
+        "cuda:5090_sm120": 8,  # 2026-11-19 (8): bf16 inference at D >= 256 and >= 32768 rows folds the LayerNorm into the dual GEMM (statistics kernel + gamma-folded weights, xn never written; kernels/transition/cuda/fused_wide_sm80._dual_ln), -80 us of the L 512 d 256 n 2 call, outputs differ from 7 within the accuracy standard; (7): see the comment below; (6): bf16 training on the one-kernel backward does not save xn (rebuilt by ln_apply from the saved (mean, rstd), -36 MiB at L 384; gradients bitwise unchanged); (5): the same IEEE fp32 chain (fp32 TF32-off training at 2048 / 4096 / 8192 rows and the 384-row no-grad calls fell to Triton)
     }
     # 2026-11-19 (RTX 5090): cuda:5090_sm120 7 = the xn rebuild of 6 only up to 147456 rows (L 384 pair; fused_wide_sm80.SM120_XN_RECOMPUTE_MAX_ROWS): above it the ln_apply pass cost 4-10 % of the D 64 / 128 training step at L 512 .. 768 (tile / routing items of this version: see the commit message)
     # 2026-11-14 (RTX 5090): cuda:5090_sm120 4 = calls past 64 x 65535 rows (L 2048 pair, D >= 256 eval) take 128-row tiles (they failed with a grid y

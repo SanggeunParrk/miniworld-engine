@@ -44,6 +44,7 @@ using Cfg8 = a100::DualCfg<256, 64, 4, 2, 4>;       // Cfg5 with a 4-slice ring
 using Cfg9 = a100::DualCfg<128, 64, 2, 2, 5>;       // Cfg0 with a 5-slice ring (80 KB: still two CTAs per SM)
 using Cfg10 = a100::DualCfg<64, 64, 2, 2, 5>;       // Cfg2 with a 5-slice ring
 using Cfg11 = a100::DualCfg<128, 32, 4, 1, 5>;      // Cfg4 with a 5-slice ring
+using Cfg14 = a100::DualCfg<128, 64, 2, 2, 3>;      // Cfg0 with a 3-slice ring (48 KB: two CTAs per SM; 4 warps of 64 x (32 a + 32 b))
 using Cfg13 = a100::DualCfg<64, 32, 2, 2, 4>;       // 4 warps of 32 x (16 a + 16 b): few rows (the RTX 5090: twice the CTAs of Cfg2)
 
 template <class C>
@@ -83,9 +84,22 @@ void dispatch_dual(int cfg, const a100::DualParams& p, bool gate, int epi, cudaS
     case 10: launch_dual<Cfg10>(p, gate, epi, st); break;
     case 11: launch_dual<Cfg11>(p, gate, epi, st); break;
     case 13: launch_dual<Cfg13>(p, gate, epi, st); break;
+    case 14: launch_dual<Cfg14>(p, gate, epi, st); break;
     default: TORCH_CHECK(false, "dual tile config ", cfg);
   }
 }
+#ifdef MWE_SM120
+// forward with the LayerNorm folded into the epilogue (a = x, p.stats / cs / bias set); only configs 0 / 2 (the RTX 5090 tiles) are instantiated
+template <class C>
+void launch_dual_ln(const a100::DualParams& p, cudaStream_t st) {
+  const int hn = C::HPW * C::WN;
+  const dim3 grid((unsigned)(p.H / hn), (unsigned)((p.M + C::BM - 1) / C::BM));
+  TORCH_CHECK(C::SMEM <= 101376, "tile config needs ", C::SMEM, " B of shared memory");
+  set_smem(a100::dual_swiglu_kernel<C, 0, true>, C::SMEM);
+  a100::dual_swiglu_kernel<C, 0, true><<<grid, C::NTHR, C::SMEM, st>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+#endif
 int hidden_per_cta(int cfg) {
   switch (cfg) {
     case 0: return Cfg0::HPW * Cfg0::WN;
@@ -101,6 +115,7 @@ int hidden_per_cta(int cfg) {
     case 10: return Cfg10::HPW * Cfg10::WN;
     case 11: return Cfg11::HPW * Cfg11::WN;
     case 13: return Cfg13::HPW * Cfg13::WN;
+    case 14: return Cfg14::HPW * Cfg14::WN;
   }
   return 64;
 }
@@ -153,6 +168,7 @@ using RCfg7 = a100::GCfg<256, 128, 32, 4, 2, 4>;    // RCfg4 with a 4-slice ring
 using RCfg8 = a100::GCfg<128, 64, 32, 4, 1, 5>;     // RCfg3 with a 5-slice ring
 using RCfg9 = a100::GCfg<128, 256, 64, 2, 4, 3>;    // the shape of cuBLAS's 128x256_64x3 kernel (147 KB, one CTA per SM)
 using RCfg10 = a100::GCfg<256, 128, 64, 4, 2, 3>;
+using RCfg13 = a100::GCfg<128, 128, 32, 2, 2, 3>;    // RCfg0 with a 3-slice ring (48 KB: two CTAs per SM, 4 warps of 64 x 64)
 using RCfg12 = a100::GCfg<64, 64, 32, 2, 2, 4>;      // 4 warps of 32 x 32: few rows (the RTX 5090; the fp32 bindings' RCfg11)
 
 template <class C>
@@ -166,7 +182,7 @@ void launch_res(const a100::ResParams& p, cudaStream_t st) {
 int bn_of_res(int cfg) {
   switch (cfg) {
     case 0: return RCfg0::BN; case 1: return RCfg1::BN; case 2: return RCfg2::BN; case 3: return RCfg3::BN; case 4: return RCfg4::BN;
-    case 5: return RCfg5::BN; case 6: return RCfg6::BN; case 7: return RCfg7::BN; case 8: return RCfg8::BN; case 9: return RCfg9::BN; case 10: return RCfg10::BN; case 12: return RCfg12::BN;
+    case 5: return RCfg5::BN; case 6: return RCfg6::BN; case 7: return RCfg7::BN; case 8: return RCfg8::BN; case 9: return RCfg9::BN; case 10: return RCfg10::BN; case 12: return RCfg12::BN; case 13: return RCfg13::BN;
   }
   return 128;
 }
@@ -200,6 +216,70 @@ std::vector<torch::Tensor> ln_fwd(torch::Tensor x, torch::Tensor gamma, torch::T
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {xn, stats};
 }
+
+#ifdef MWE_SM120
+// (mean, rstd) per row of x [M, D] bf16 -> [M, 2] f32, the statistics of ln_fwd
+torch::Tensor ln_stats(torch::Tensor x, double eps) {
+  TORCH_CHECK(x.is_cuda() && x.is_contiguous() && x.dim() == 2 && x.scalar_type() == at::kBFloat16, "x: [M, D] bf16");
+  const int64_t M = x.size(0);
+  const int D = (int)x.size(1);
+  auto stats = torch::empty({M, 2}, x.options().dtype(at::kFloat));
+  if (M == 0) return stats;
+  const int tot = (int)M;
+  auto st = at::cuda::getCurrentCUDAStream();
+#define LN_STATS_CASE(DV)                                                                                                                              \
+  case DV: {                                                                                                                                           \
+    constexpr int rpw = 32 / (DV / 8 < 32 ? DV / 8 : 32);                                                                                              \
+    const int blocks = std::max(1, std::min((tot + 8 * rpw - 1) / (8 * rpw), 8 * num_sms()));                                                          \
+    a100::ln_fwd_kernel<DV, false, true><<<blocks, 256, 0, st>>>(cptr<__nv_bfloat16>(x), nullptr, nullptr, nullptr, mptr<float2>(stats), tot, (float)eps); \
+    break;                                                                                                                                             \
+  }
+  switch (D) {
+    LN_STATS_CASE(64) LN_STATS_CASE(128) LN_STATS_CASE(256) LN_STATS_CASE(384) LN_STATS_CASE(512) LN_STATS_CASE(768)
+    default: TORCH_CHECK(false, "ln_stats: unsupported width ", D);
+  }
+#undef LN_STATS_CASE
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return stats;
+}
+
+// h = SwiGLU(LN(x) [Wa; Wb]^T): the dual GEMM on x with wa / wb = bf16(gamma W) (``ln_fold_weights``), the LayerNorm folded into the epilogue (stats from ln_stats, cs / bias [2, H] f32)
+torch::Tensor dual_swiglu_ln(torch::Tensor x, torch::Tensor stats, torch::Tensor cs, torch::Tensor bias, torch::Tensor wa, torch::Tensor wb, int64_t cfg, c10::optional<torch::Tensor> out_buf = c10::nullopt) {
+  TORCH_CHECK(x.is_cuda() && x.is_contiguous() && x.dim() == 2 && x.scalar_type() == at::kBFloat16, "x: [M, K] bf16");
+  TORCH_CHECK(wa.is_contiguous() && wb.is_contiguous() && wa.sizes() == wb.sizes() && wa.size(1) == x.size(1), "wa / wb: [H, K]");
+  TORCH_CHECK(stats.is_contiguous() && stats.scalar_type() == at::kFloat && stats.size(0) == x.size(0), "stats [M, 2] f32");
+  TORCH_CHECK(cs.scalar_type() == at::kFloat && bias.scalar_type() == at::kFloat && cs.is_contiguous() && bias.is_contiguous() && cs.numel() == 2 * wa.size(0) && bias.numel() == 2 * wa.size(0), "cs / bias: [2, H] f32");
+  const int64_t M = x.size(0), K = x.size(1), H = wa.size(0);
+  TORCH_CHECK(K % bk_of((int)cfg) == 0 && H % hidden_per_cta((int)cfg) == 0, "dual tiling: K % BK, H % hidden per tile");
+  torch::Tensor h = out_buf.has_value() ? *out_buf : torch::empty({M, H}, x.options());
+  if (out_buf.has_value()) TORCH_CHECK(h.is_cuda() && h.is_contiguous() && h.scalar_type() == at::kBFloat16 && h.size(0) == M && h.size(1) == H, "out: [M, H] bf16");
+  if (M == 0) return h;
+  a100::DualParams p{};
+  p.a = cptr<__nv_bfloat16>(x); p.wa = cptr<__nv_bfloat16>(wa); p.wb = cptr<__nv_bfloat16>(wb); p.h = mptr<__nv_bfloat16>(h);
+  p.stats = cptr<float2>(stats); p.cs = cptr<float>(cs); p.bias = cptr<float>(bias);
+  p.M = (int)M; p.K = (int)K; p.H = (int)H;
+  auto st = at::cuda::getCurrentCUDAStream();
+  switch (cfg) {
+    case 0: launch_dual_ln<Cfg0>(p, st); break;
+    case 1: launch_dual_ln<Cfg1>(p, st); break;
+    case 2: launch_dual_ln<Cfg2>(p, st); break;
+    case 3: launch_dual_ln<Cfg3>(p, st); break;
+    case 4: launch_dual_ln<Cfg4>(p, st); break;
+    case 5: launch_dual_ln<Cfg5>(p, st); break;
+    case 6: launch_dual_ln<Cfg6>(p, st); break;
+    case 7: launch_dual_ln<Cfg7>(p, st); break;
+    case 8: launch_dual_ln<Cfg8>(p, st); break;
+    case 9: launch_dual_ln<Cfg9>(p, st); break;
+    case 10: launch_dual_ln<Cfg10>(p, st); break;
+    case 11: launch_dual_ln<Cfg11>(p, st); break;
+    case 13: launch_dual_ln<Cfg13>(p, st); break;
+    case 14: launch_dual_ln<Cfg14>(p, st); break;
+    default: TORCH_CHECK(false, "dual tile config ", cfg);
+  }
+  return h;
+}
+
+#endif
 
 torch::Tensor dual_swiglu(torch::Tensor a, torch::Tensor wa, torch::Tensor wb, int64_t cfg, int64_t epi = 0) {
   TORCH_CHECK(a.is_cuda() && a.is_contiguous() && a.dim() == 2 && a.scalar_type() == at::kBFloat16, "a: [M, K] bf16");
@@ -370,6 +450,7 @@ torch::Tensor gemm_res(torch::Tensor a, torch::Tensor w, torch::Tensor res, int6
     case 9: launch_res<RCfg9>(p, st); break;
     case 10: launch_res<RCfg10>(p, st); break;
     case 12: launch_res<RCfg12>(p, st); break;
+    case 13: launch_res<RCfg13>(p, st); break;
     default: TORCH_CHECK(false, "res tile config ", cfg);
   }
   return out;
@@ -638,6 +719,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("add_res", &add_res);
   m.def("gemm_res", &gemm_res, pybind11::arg("a"), pybind11::arg("w"), pybind11::arg("res"), pybind11::arg("cfg"), pybind11::arg("out") = pybind11::none());
   m.def("ln_fwd", &ln_fwd);
+#ifdef MWE_SM120
+  m.def("ln_stats", &ln_stats);
+  m.def("dual_swiglu_ln", &dual_swiglu_ln, pybind11::arg("x"), pybind11::arg("stats"), pybind11::arg("cs"), pybind11::arg("bias"), pybind11::arg("wa"), pybind11::arg("wb"), pybind11::arg("cfg"), pybind11::arg("out") = pybind11::none());
+#endif
   m.def("dual_swiglu", &dual_swiglu, pybind11::arg("a"), pybind11::arg("wa"), pybind11::arg("wb"), pybind11::arg("cfg"), pybind11::arg("epi") = 0);
   m.def("dual_swiglu_save", &dual_swiglu_save);
   m.def("gate_dh", &gate_dh);

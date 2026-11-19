@@ -41,6 +41,7 @@ def _build(suffix: str, gencode: str):
             "-O3",
             gencode,
             f"-I{_dir}",
+            *(["-DMWE_SM120=1"] if suffix == "sm120" else []),
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
@@ -133,7 +134,9 @@ def _tiles_sm120(m: int, d: int, h: int) -> tuple[int, int]:
     elif d == 128:
         res = 2 if m < 393216 else 8
     else:
-        res = 2 if _rows64_ok(m) else 7  # (config 7, 256 x 128 / 8 warps, was taken from 5e10 multiply-adds on: the interleaved A-B-A-B of 2026-11-19, D 256 .. 512 at 65 k .. 2 M rows, has config 2 1-4 % faster everywhere)
+        res = (
+            2 if _rows64_ok(m) else 7
+        )  # (config 7, 256 x 128 / 8 warps, was taken from 5e10 multiply-adds on: the interleaved A-B-A-B of 2026-11-19, D 256 .. 512 at 65 k .. 2 M rows, has config 2 1-4 % faster everywhere)
     return (2 if _rows64_ok(m) else 0), res
 
 
@@ -151,6 +154,93 @@ def _rows64_ok(m: int) -> bool:
 #: RTX 5090 few-row thresholds (``_tiles_sm120``, ``_hand_squeeze``, the gate backward's tile)
 SM120_SMALL_ROWS = 2048
 SM120_HAND_SQUEEZE_MIN_ROWS = 512
+
+
+#: RTX 5090 inference: the LayerNorm is folded into the dual GEMM (``ext.ln_stats`` + ``ext.dual_swiglu_ln``): LN(x) W^T = rstd (x (gamma W)^T - mean sum_k (gamma W)) + beta W
+#: with W' = bf16(gamma W), cs = its row sums and bias = beta W (f32, cached by the parameters' version), so xn is never written or re-read (167 -> 87 us of the d 256 n 2
+#: L 512 call's LayerNorm).  Not bit-identical to ``ln_fwd`` + ``dual_swiglu`` (W' is rounded instead of xn): within the accuracy standard (docs page).  Widths from
+#: ``SM120_FUSED_LN_MIN_D`` on, the dual configs 0 / 2, grad off.
+SM120_FUSED_LN = True
+SM120_FUSED_LN_MIN_D = 256
+#: fewest rows: below it (L 128 pair, 16384 rows) the statistics pass + the epilogue's per-row loads cost more than the saved xn round trip (new / old 1.01-1.02)
+SM120_FUSED_LN_MIN_ROWS = 32768
+SM120_FUSED_LN_CFGS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14)
+SM120_DUAL_OVERRIDE = None  # experiments: the dual config of calls of at least SM120_DUAL_OVERRIDE_ROWS rows
+SM120_DUAL_OVERRIDE_ROWS = 0
+SM120_RES_OVERRIDE = None
+
+
+def _fused_ln(m: int, d: int, dual: int, x: torch.Tensor) -> bool:
+    return (
+        SM120_FUSED_LN
+        and d >= SM120_FUSED_LN_MIN_D
+        and m >= SM120_FUSED_LN_MIN_ROWS
+        and dual in SM120_FUSED_LN_CFGS
+        and is_sm120(x.device)
+        and not torch.is_grad_enabled()
+    )
+
+
+def _ln_fold(gamma, beta, wa, wb):
+    """(bf16(gamma Wa), bf16(gamma Wb), cs [2, H], bias [2, H]) f32: the folded LayerNorm weights of ``ext.dual_swiglu_ln``, cached by the parameters' version."""
+
+    def build():
+        fa, fb = wa.float() * gamma, wb.float() * gamma
+        wa_, wb_ = fa.bfloat16().contiguous(), fb.bfloat16().contiguous()
+        cs = torch.stack([wa_.float().sum(1), wb_.float().sum(1)]).contiguous()
+        bias = torch.stack([(wa.float() * beta).sum(1), (wb.float() * beta).sum(1)]).contiguous()
+        return wa_, wb_, cs, bias
+
+    return _capture.param_forms("transition_sm120_ln_fold", [gamma, beta, wa, wb], build, capture_reads_eager=True)
+
+
+#: rows from which the statistics pass runs on a side stream in ``SM120_STATS_CHUNKS`` row chunks, so the bandwidth-bound statistics of chunk k + 1 overlap the tensor-bound dual GEMM of chunk k
+SM120_STATS_OVERLAP_MIN_ROWS = 131072
+SM120_STATS_CHUNKS = 8
+_side: dict = {}
+
+
+#: The fused LayerNorm path's tiles from ``m * H >= SM120_FOLD_BIG_WORK`` (rows x hidden width): dual config 14 (128 x 64, 3 stages, 48 KB: two CTAs per SM, warp tiles of 64 x (32 a + 32 b)) and
+#: squeeze config 13 (128 x 128, 3 stages, 48 KB, warp tiles of 64 x 64) instead of the 64-row tiles (2 / 2).  The GPU runs at its 575 W power limit there, and the larger warp tiles read
+#: shared memory half as often per MMA: interleaved A-B-A-B (CUDA graph, 256 MB L2 flush, vs Triton) d 256 n 4 L 1024 / 1536 1.008 / 1.034 -> 0.967 / 0.965, d 384 n 2 L 1024 0.986 -> 0.946,
+#: d 512 n 4 L 512 1.016 -> 0.990; below the work the 64-row tiles are 1-3 % faster (d 256 n 2 L 512 0.942 vs 0.965).  The accumulation order per output element is the same: the same bits.
+SM120_FOLD_BIG_WORK = 200_000_000
+#: ... or a hidden width of at least this (d 512 n 4: L 256 1.009 -> 0.997 at 65536 rows)
+SM120_FOLD_BIG_H = 1536
+
+
+def _fold_tiles(m: int, h: int, dual: int, res: int) -> tuple[int, int]:
+    return (14, 13) if m * h >= SM120_FOLD_BIG_WORK or h >= SM120_FOLD_BIG_H else (dual, res)
+
+
+def _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual):
+    wa_, wb_, cs, bias = _ln_fold(gamma, beta, wa, wb)
+    m = x.shape[0]
+    if m < SM120_STATS_OVERLAP_MIN_ROWS or SM120_STATS_CHUNKS < 2:
+        return ext.dual_swiglu_ln(x, ext.ln_stats(x, eps), cs, bias, wa_, wb_, dual)
+    cur = torch.cuda.current_stream(x.device)
+    side = _side.get(x.device.index)
+    if side is None:
+        side = _side[x.device.index] = torch.cuda.Stream(x.device)
+    step = -(-m // SM120_STATS_CHUNKS)
+    step = -(-step // 256) * 256
+    bounds = [(r, min(r + step, m)) for r in range(0, m, step)]
+    side.wait_stream(cur)  # x is ready
+    stats, events = [], []
+    with torch.cuda.stream(side):
+        for r0, r1 in bounds:
+            st = ext.ln_stats(x[r0:r1], eps)
+            ev = torch.cuda.Event()
+            ev.record(side)
+            stats.append(st)
+            events.append(ev)
+    hid = torch.empty((m, wa_.shape[0]), dtype=x.dtype, device=x.device)
+    for (r0, r1), st, ev in zip(bounds, stats, events, strict=True):
+        cur.wait_event(ev)
+        _record_stream(st, cur)
+        ext.dual_swiglu_ln(x[r0:r1], st, cs, bias, wa_, wb_, dual, out=hid[r0:r1])
+    _record_stream(x, side)
+    return hid
 
 
 def _gate_tile(m: int, d: int, h: int, sm120: bool) -> int:
@@ -305,6 +395,25 @@ def _fwd_launch(
     ext = _ext()
     wa, wb, ws = _kernel_weights(wa, wb, ws, x.dtype, cache=not save)
     dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(m, d, wa.shape[0])
+    if SM120_DUAL_OVERRIDE is not None and m >= SM120_DUAL_OVERRIDE_ROWS:
+        dual = SM120_DUAL_OVERRIDE
+    if SM120_RES_OVERRIDE is not None and m >= SM120_DUAL_OVERRIDE_ROWS:
+        res = SM120_RES_OVERRIDE
+    if save and ln and d >= SM120_FUSED_LN_MIN_D and m >= SM120_FUSED_LN_MIN_ROWS and is_sm120(x.device):
+        dual, res = (
+            14,
+            13,
+        )  # the training forward takes the 128-row tiles as well (interleaved A-B-A-B vs Triton, train D 256 .. 512 at 65 k .. 590 k rows: 18 -> 35 of 42 cells <= 1.00; same bits)
+    if ln and not save and _fused_ln(m, d, dual, x):
+        dual, res = _fold_tiles(m, wa.shape[0], dual, res)
+        hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
+        return (
+            _squeeze(ext, hid, ws, x, ln, res),
+            x.new_empty((0,)),
+            torch.empty((0, 2), dtype=torch.float32, device=x.device),
+            x.new_empty((0,)),
+            x.new_empty((0,)),
+        )
     if ln:
         xn, stats = ext.ln_fwd(x, gamma, beta, eps, save)
     else:
@@ -354,10 +463,16 @@ def forward_into(
     ext = _ext()
     gamma, beta = _f32(gamma, True), _f32(beta, True)
     wa, wb, ws = _kernel_weights(wa, wb, ws, x.dtype, cache=True)
-    dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(m, d, wa.shape[0])  # the RTX 5090 takes its own tile table (the A100 one is 20-30 % slower there)
-    xn, _ = ext.ln_fwd(x, gamma, beta, eps, False)
-    hid = ext.dual_swiglu(xn, wa, wb, dual)
-    del xn
+    dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(
+        m, d, wa.shape[0]
+    )  # the RTX 5090 takes its own tile table (the A100 one is 20-30 % slower there)
+    if _fused_ln(m, d, dual, x):
+        dual, res = _fold_tiles(m, wa.shape[0], dual, res)
+        hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
+    else:
+        xn, _ = ext.ln_fwd(x, gamma, beta, eps, False)
+        hid = ext.dual_swiglu(xn, wa, wb, dual)
+        del xn
     ext.gemm_res(hid, ws, x, res, out)
 
 
