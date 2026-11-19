@@ -160,10 +160,15 @@ SM120_HAND_SQUEEZE_MIN_ROWS = 512
 #: ``SM120_FUSED_LN_MIN_D`` on, the dual configs 0 / 2, grad off.
 SM120_FUSED_LN = True
 SM120_FUSED_LN_MIN_D = 256
+#: fewest rows: below it (L 128 pair, 16384 rows) the statistics pass + the epilogue's per-row loads cost more than the saved xn round trip (new / old 1.01-1.02)
+SM120_FUSED_LN_MIN_ROWS = 32768
+SM120_FUSED_LN_CFGS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13)
+SM120_DUAL_OVERRIDE = None  # experiments: the dual config of calls of at least SM120_DUAL_OVERRIDE_ROWS rows
+SM120_DUAL_OVERRIDE_ROWS = 0
 
 
 def _fused_ln(m: int, d: int, dual: int, x: torch.Tensor) -> bool:
-    return SM120_FUSED_LN and d >= SM120_FUSED_LN_MIN_D and dual in (0, 2) and is_sm120(x.device) and not torch.is_grad_enabled()
+    return SM120_FUSED_LN and d >= SM120_FUSED_LN_MIN_D and m >= SM120_FUSED_LN_MIN_ROWS and dual in SM120_FUSED_LN_CFGS and is_sm120(x.device) and not torch.is_grad_enabled()
 
 
 def _ln_fold(gamma, beta, wa, wb):
@@ -336,6 +341,8 @@ def _fwd_launch(
     ext = _ext()
     wa, wb, ws = _kernel_weights(wa, wb, ws, x.dtype, cache=not save)
     dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(m, d, wa.shape[0])
+    if SM120_DUAL_OVERRIDE is not None and m >= SM120_DUAL_OVERRIDE_ROWS:
+        dual = SM120_DUAL_OVERRIDE
     if ln and not save and _fused_ln(m, d, dual, x):
         hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
         return (_squeeze(ext, hid, ws, x, ln, res), x.new_empty((0,)), torch.empty((0, 2), dtype=torch.float32, device=x.device), x.new_empty((0,)), x.new_empty((0,)))

@@ -92,6 +92,7 @@ template <class C>
 void launch_dual_ln(const a100::DualParams& p, cudaStream_t st) {
   const int hn = C::HPW * C::WN;
   const dim3 grid((unsigned)(p.H / hn), (unsigned)((p.M + C::BM - 1) / C::BM));
+  TORCH_CHECK(C::SMEM <= 101376, "tile config needs ", C::SMEM, " B of shared memory");
   set_smem(a100::dual_swiglu_kernel<C, 0, true>, C::SMEM);
   a100::dual_swiglu_kernel<C, 0, true><<<grid, C::NTHR, C::SMEM, st>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -245,15 +246,30 @@ torch::Tensor dual_swiglu_ln(torch::Tensor x, torch::Tensor stats, torch::Tensor
   TORCH_CHECK(stats.is_contiguous() && stats.scalar_type() == at::kFloat && stats.size(0) == x.size(0), "stats [M, 2] f32");
   TORCH_CHECK(cs.scalar_type() == at::kFloat && bias.scalar_type() == at::kFloat && cs.is_contiguous() && bias.is_contiguous() && cs.numel() == 2 * wa.size(0) && bias.numel() == 2 * wa.size(0), "cs / bias: [2, H] f32");
   const int64_t M = x.size(0), K = x.size(1), H = wa.size(0);
-  TORCH_CHECK(cfg == 0 || cfg == 2, "dual_swiglu_ln: tile config ", cfg);
-  TORCH_CHECK(K % 32 == 0 && H % 64 == 0, "dual tiling: K % BK, H % hidden per tile");
+  TORCH_CHECK(K % bk_of((int)cfg) == 0 && H % hidden_per_cta((int)cfg) == 0, "dual tiling: K % BK, H % hidden per tile");
   auto h = torch::empty({M, H}, x.options());
   if (M == 0) return h;
   a100::DualParams p{};
   p.a = cptr<__nv_bfloat16>(x); p.wa = cptr<__nv_bfloat16>(wa); p.wb = cptr<__nv_bfloat16>(wb); p.h = mptr<__nv_bfloat16>(h);
   p.stats = cptr<float2>(stats); p.cs = cptr<float>(cs); p.bias = cptr<float>(bias);
   p.M = (int)M; p.K = (int)K; p.H = (int)H;
-  if (cfg == 0) launch_dual_ln<Cfg0>(p, at::cuda::getCurrentCUDAStream()); else launch_dual_ln<Cfg2>(p, at::cuda::getCurrentCUDAStream());
+  auto st = at::cuda::getCurrentCUDAStream();
+  switch (cfg) {
+    case 0: launch_dual_ln<Cfg0>(p, st); break;
+    case 1: launch_dual_ln<Cfg1>(p, st); break;
+    case 2: launch_dual_ln<Cfg2>(p, st); break;
+    case 3: launch_dual_ln<Cfg3>(p, st); break;
+    case 4: launch_dual_ln<Cfg4>(p, st); break;
+    case 5: launch_dual_ln<Cfg5>(p, st); break;
+    case 6: launch_dual_ln<Cfg6>(p, st); break;
+    case 7: launch_dual_ln<Cfg7>(p, st); break;
+    case 8: launch_dual_ln<Cfg8>(p, st); break;
+    case 9: launch_dual_ln<Cfg9>(p, st); break;
+    case 10: launch_dual_ln<Cfg10>(p, st); break;
+    case 11: launch_dual_ln<Cfg11>(p, st); break;
+    case 13: launch_dual_ln<Cfg13>(p, st); break;
+    default: TORCH_CHECK(false, "dual tile config ", cfg);
+  }
   return h;
 }
 
