@@ -559,10 +559,21 @@ def _training_weights(wa, wb, ws, dtype):
     return tuple(w.to(dtype).contiguous() for w in (wa, wb, ws))
 
 
+#: RTX 5090: the rebuild (``ln_apply``: read x, write xn, at the memory roofline) costs 4-10 % of a D 64 / 128 Transition step at 262 k .. 590 k rows (L 512 .. 768 pair:
+#: 1.07 -> 1.14 ms, 2.33 -> 2.53 ms measured); it is kept for the Pairformer training size (L 384 pair = 147456 rows: -36 MiB a block) and below.
+SM120_XN_RECOMPUTE_MAX_ROWS = 147456
+
+
 def _recompute_xn(x: torch.Tensor, ln: bool, h: int) -> bool:
-    """RTX 5090, bf16 training on the one-kernel backward: ``xn`` [M, D] (36 MiB at L 384) is not kept with the other saved tensors; the backward rebuilds it
-    (``_xn_rebuild``).  Off sm_120 (A100) and on the other backward chains the saved set is unchanged."""
-    return ln and x.dtype is torch.bfloat16 and is_sm120(x.device) and _one_kernel_bwd(x.shape[0], x.shape[1], h, x.device)
+    """RTX 5090, bf16 training on the one-kernel backward, up to ``SM120_XN_RECOMPUTE_MAX_ROWS`` rows: ``xn`` [M, D] (36 MiB at L 384) is not kept with the other saved
+    tensors; the backward rebuilds it (``_xn_rebuild``).  Above that (and off sm_120 / on the other backward chains) the saved set is unchanged."""
+    return (
+        ln
+        and x.dtype is torch.bfloat16
+        and is_sm120(x.device)
+        and x.shape[0] <= SM120_XN_RECOMPUTE_MAX_ROWS
+        and _one_kernel_bwd(x.shape[0], x.shape[1], h, x.device)
+    )
 
 
 def _xn_rebuild_fake(x, stats, gamma, beta):
