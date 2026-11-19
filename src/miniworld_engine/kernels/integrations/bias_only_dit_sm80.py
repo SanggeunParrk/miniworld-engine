@@ -295,7 +295,15 @@ def _bwd(
                 do, vg[:, :da], P.view(heads * length, length), dd, db.view(heads * length, length), samples, dpart=dpart
             )
             db.sub_(dpart.sum(0).view(heads, length, 1)).mul_(P)
-        if PB_TE and not f32 and _sm120(x) and heads == 16 and wcm.shape[0] == 256 and pair.shape[1] == length:
+        if PB_BWD_TC and heads == 16 and wcm.shape[0] in (128, 256) and pair.is_contiguous() and pair.shape[1] == length:
+            sm = _sm80()
+            nct = sm._sms(dev.index if dev.index is not None else torch.cuda.current_device()) * PB_TC_CTA
+            dz = torch.empty_like(pair)
+            pw = torch.empty(1, nct, heads, wcm.shape[0], device=dev, dtype=F32)
+            dw = torch.empty(1, heads, wcm.shape[0], device=dev, dtype=F32)
+            sm._ext().pair_bias_gen_bwd_tc3(pair, wcm, db, dz, pw, dw, sm._kv(None, dev), length, length, nct, EPS)
+            dwf = dw[0]
+        elif PB_TE and not f32 and _sm120(x) and heads == 16 and wcm.shape[0] == 256 and pair.shape[1] == length:
             # RTX 5090, d_pair 256: the backward on tiles of PB_TE elements (two blocks an SM; 32 rows a block)
             nz, c = pair.shape[1], wcm.shape[0]
             pw = torch.empty(-(-nz // PB_TE) * -(-nz // 32), heads, c, device=dev, dtype=F32)
@@ -344,6 +352,12 @@ class _Attention(torch.autograd.Function):
             *(g if need[6 + i] else None for i, g in enumerate(pg)),
         )
 
+
+#: the pair-bias backward on TF32 tensor cores (augmented_attention sm80 ``pair_bias_gen_bwd_tc``, bf16 and fp32 pair; one read of z, one write of dz; the pair gradient's product in 3xTF32,
+#: dW' in 1xTF32 on the rounded xh) instead of the fp32-FFMA ``pair_bias_gen_bwd`` (d_pair 128 / 256, 16 heads)
+PB_BWD_TC = True
+#: CTAs of the tensor-core pair-bias backward per SM (persistent over the pair tiles)
+PB_TC_CTA = 2
 
 #: RTX 5090 training: the AdaLN inside the attention's Function (_AdaAttention120)
 ADA_ATTN_120 = True

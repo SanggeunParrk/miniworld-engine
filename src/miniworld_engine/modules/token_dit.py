@@ -1059,7 +1059,9 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # cuda:h100_sm90 8 (2026-11-20, speed of the exact fp32 TRAINING path, same accuracy standard): the hoist backward of a block (16 heads, 128 / 256 channels) in ONE pass on error-compensated TF32 mma
     # (hoist.hoist_bwd_tc, bias_only_dit_f32_rows.cu hoist_bwd_tc_k: d LN0 = dbias^T W', the LN0 backward and dW' = dbias Y, four-term hi / lo split, fp32 partials added in round-to-nearest; dW' error 0.2 .. 0.4 x the
     # FMA path's against fp64, dx as before) in place of the FMA kernels / cuBLAS fp32 GEMMs, and the 128 / 256-wide training forward on logits_tc (pair_logits); gradient bits differ from 7 by fp32 rounding noise
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 5, "cuda:h100_sm90": 8, "cuda:5090_sm120": 6, "triton:5090_sm120": 2}
+    # cuda:a100_sm80 6 / cuda:5090_sm120 7 (2026-11-20, speed of the exact fp32 path): the training pair-bias backward (d_pair 128 / 256) on TF32 tensor cores in one pass (pair_bias_gen_bwd_tc3: the
+    # pair gradient and, for an fp32 pair, dW' in 3xTF32; bf16 pair: dW' in 1xTF32 on the rounded xh), two CTAs an SM; was the fp32-FFMA pair_bias_gen_bwd; gradients differ by fp32 / TF32 rounding noise
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 6, "cuda:h100_sm90": 8, "cuda:5090_sm120": 7, "triton:5090_sm120": 2}
 
     def __init__(
         self,

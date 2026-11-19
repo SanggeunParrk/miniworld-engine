@@ -487,7 +487,7 @@ DEVI void pbt_mma(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t
                : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
                : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
-DEVI void pbt_cp16(float* dst, const float* src, bool valid) {
+DEVI void pbt_cp16(void* dst, const void* src, bool valid) {
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"((uint32_t)__cvta_generic_to_shared(dst)), "l"(src), "r"(valid ? 16u : 0u) : "memory");
 }
 DEVI void pbt_cp4(float* dst, const float* src, bool valid) {
@@ -496,7 +496,18 @@ DEVI void pbt_cp4(float* dst, const float* src, bool valid) {
 DEVI void pbt_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
 template <int N> DEVI void pbt_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N) : "memory"); }
 
-template <int C_, int H_> struct PbTcCfg {
+// z element access of the tensor-core backward: fp32 (as always) or bf16 (the bias-only token DiT's bf16 training: the pair stays bf16 in shared memory, converted to fp32 on read)
+DEVI float2 pbt_rd2(const float* p) { return *reinterpret_cast<const float2*>(p); }
+DEVI float2 pbt_rd2(const __nv_bfloat16* p) {
+  const uint32_t w = *reinterpret_cast<const uint32_t*>(p);
+  return make_float2(__uint_as_float(w << 16), __uint_as_float(w & 0xffff0000u));
+}
+DEVI float pbt_rd1(const float* p) { return *p; }
+DEVI float pbt_rd1(const __nv_bfloat16* p) { return __bfloat162float(*p); }
+DEVI void pbt_st2(float* p, float a, float b) { *reinterpret_cast<float2*>(p) = make_float2(a, b); }
+DEVI void pbt_st2(__nv_bfloat16* p, float a, float b) { *reinterpret_cast<__nv_bfloat162*>(p) = __floats2bfloat162_rn(a, b); }
+
+template <int C_, int H_, int ZB_ = 4> struct PbTcCfg {
   static constexpr int C = C_, H = H_, NW = 8, NT = 256, TM = 16, CW = C_ / NW, NN = CW / 8, MT = CW / 16, KH = H_ / 8;
   static constexpr int P = C_ + 8;          // z row pitch: the accumulator-layout float2 reads and the A-fragment reads are conflict-free (P = 8 mod 32)
   static constexpr int HP = H_ + 4;         // dbias / W' row pitch (H + 4 = 4 mod 8: the fragment reads of 8 rows x 4 heads are conflict-free)
@@ -507,16 +518,17 @@ template <int C_, int H_> struct PbTcCfg {
 #else
   static constexpr int CAP = 160 * 1024;
 #endif
-  static constexpr int STAGES = (FIXED + 3 * (ZST + GST)) * 4 <= CAP ? 3 : 2;
-  static constexpr int SMEM = (FIXED + STAGES * (ZST + GST)) * 4;
+  static constexpr int STAGES = FIXED * 4 + 3 * (ZST * ZB_ + GST * 4) <= CAP ? 3 : 2;   // ZB_: bytes of a z element (4: fp32, 2: bf16)
+  static constexpr int SMEM = FIXED * 4 + STAGES * (ZST * ZB_ + GST * 4);
   static constexpr bool FITS = SMEM <= CAP;
   static_assert(C_ % 128 == 0 && C_ <= 512 && H_ % 8 == 0 && H_ <= 24, "C: 128 .. 512 (a multiple of 128), H: 8, 16 or 24");
 };
 
-template <int C, int H>
-__global__ void __launch_bounds__(256, 1) pair_bias_gen_bwd_tc_kernel(const float* __restrict__ z, const float* __restrict__ wcm, const float* __restrict__ db, float* __restrict__ dz,
+template <int C, int H, typename TZ = float, bool DW3_ = false>
+__global__ void __launch_bounds__(256, 2) pair_bias_gen_bwd_tc_kernel(const TZ* __restrict__ z, const float* __restrict__ wcm, const float* __restrict__ db, TZ* __restrict__ dz,
                                                                       float* __restrict__ pw, int N, int NZ, const unsigned char* __restrict__ kv, float eps) {
-  using G = PbTcCfg<C, H>;
+  using G = PbTcCfg<C, H, (int)sizeof(TZ)>;
+  constexpr bool DW3 = DW3_ && sizeof(TZ) == 4;                // dW' on 3xTF32 (fp32 pair only; bf16: the rounding of the bf16 network dominates)
   constexpr int TM = G::TM, P = G::P, HP = G::HP, NW = G::NW, CW = G::CW, NN = G::NN, MT = G::MT, KH = G::KH, ST = G::STAGES;
 #ifdef MWE_SM120
   static_assert(G::SMEM <= 101376, "sm_120a: 99 KB of shared memory per block");
@@ -525,8 +537,8 @@ __global__ void __launch_bounds__(256, 1) pair_bias_gen_bwd_tc_kernel(const floa
   float* ws = tsm;                                  // W' channel-major [C][HP], fp32
   float* red = ws + C * HP;                         // [4][NW][TM]: row sums, centred squares, m1, m2 per warp
   float* stat = red + 4 * NW * TM;                  // [TM][2]: mean, rstd of the tile's rows
-  float* zst = stat + 2 * TM;                       // [ST][TM][P]
-  float* gst = zst + ST * G::ZST;                   // [ST][TM][HP]
+  TZ* zst = reinterpret_cast<TZ*>(stat + 2 * TM);     // [ST][TM][P]
+  float* gst = reinterpret_cast<float*>(zst + ST * G::ZST);                   // [ST][TM][HP]
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gq = lane >> 2, tq = lane & 3, c0 = warp * CW;
   const int b = blockIdx.y, nct = gridDim.x;
   const long long R = (long long)NZ * NZ;
@@ -536,14 +548,26 @@ __global__ void __launch_bounds__(256, 1) pair_bias_gen_bwd_tc_kernel(const floa
   db += (size_t)b * H * N * N;
   if (kv != nullptr) kv += (size_t)b * NZ;
   for (int k = tid; k < C * H; k += G::NT) ws[(k / H) * HP + k % H] = wcm[k];
+  __syncthreads();
+  // W' as the B fragments of the 3xTF32 products (hi / lo parts): loop-invariant, split once
+  uint32_t wbh[KH][NN][2], wbl[KH][NN][2];
+#pragma unroll
+  for (int kk = 0; kk < KH; ++kk)
+#pragma unroll
+    for (int n = 0; n < NN; ++n) {
+      const float* wr = ws + (c0 + 8 * n + gq) * HP + 8 * kk + tq;
+      pbt_split(wr[0], wbh[kk][n][0], wbl[kk][n][0]);
+      pbt_split(wr[4], wbh[kk][n][1], wbl[kk][n][1]);
+    }
 
   auto load = [&](long long t, int s) {
     const long long r0 = t * TM;
-    float* zs = zst + s * G::ZST;
+    TZ* zs = zst + s * G::ZST;
     float* gs = gst + s * G::GST;
+    constexpr int V = 16 / (int)sizeof(TZ);                      // channels of a 16-byte copy
 #pragma unroll
-    for (int idx = tid; idx < TM * (C / 4); idx += G::NT) {
-      const int row = idx / (C / 4), c4 = (idx - row * (C / 4)) * 4;
+    for (int idx = tid; idx < TM * (C / V); idx += G::NT) {
+      const int row = idx / (C / V), c4 = (idx - row * (C / V)) * V;
       const bool ok = r0 + row < R;
       pbt_cp16(zs + row * P + c4, ok ? z + (size_t)(r0 + row) * C + c4 : z, ok);
     }
@@ -581,15 +605,15 @@ __global__ void __launch_bounds__(256, 1) pair_bias_gen_bwd_tc_kernel(const floa
       if (tn < tiles) load(tn, (it + ST - 1) % ST);
       pbt_commit();
     }
-    const float* zs = zst + s * G::ZST;
+    const TZ* zs = zst + s * G::ZST;
     const float* gs = gst + s * G::GST;
     const long long r0 = t * TM;
     // z of rows gq, gq + 8 at the accumulator columns 8 n + 2 tq, + 1 of this warp's channels
     float x[NN][4];
 #pragma unroll
     for (int n = 0; n < NN; ++n) {
-      const float2 u = *reinterpret_cast<const float2*>(zs + gq * P + c0 + 8 * n + 2 * tq);
-      const float2 v = *reinterpret_cast<const float2*>(zs + (gq + 8) * P + c0 + 8 * n + 2 * tq);
+      const float2 u = pbt_rd2(zs + gq * P + c0 + 8 * n + 2 * tq);
+      const float2 v = pbt_rd2(zs + (gq + 8) * P + c0 + 8 * n + 2 * tq);
       x[n][0] = u.x; x[n][1] = u.y; x[n][2] = v.x; x[n][3] = v.y;
     }
     float s0 = 0.f, s1 = 0.f;
@@ -634,10 +658,7 @@ __global__ void __launch_bounds__(256, 1) pair_bias_gen_bwd_tc_kernel(const floa
       pbt_split(gs[(gq + 8) * HP + 8 * kk + tq + 4], ah[3], al[3]);
 #pragma unroll
       for (int n = 0; n < NN; ++n) {
-        const float* wr = ws + (c0 + 8 * n + gq) * HP + 8 * kk + tq;
-        uint32_t bh0, bl0, bh1, bl1;
-        pbt_split(wr[0], bh0, bl0);
-        pbt_split(wr[4], bh1, bl1);
+        const uint32_t bh0 = wbh[kk][n][0], bh1 = wbh[kk][n][1], bl0 = wbl[kk][n][0], bl1 = wbl[kk][n][1];
         pbt_mma(d[n], al[0], al[1], al[2], al[3], bh0, bh1);   // 3xTF32: the small cross terms first, then hi x hi
         pbt_mma(d[n], ah[0], ah[1], ah[2], ah[3], bl0, bl1);
         pbt_mma(d[n], ah[0], ah[1], ah[2], ah[3], bh0, bh1);
@@ -669,28 +690,43 @@ __global__ void __launch_bounds__(256, 1) pair_bias_gen_bwd_tc_kernel(const floa
     }
     M10 *= invc; M11 *= invc; M20 *= invc; M21 *= invc;
     const bool live0 = r0 + gq < R, live1 = r0 + gq + 8 < R;
-    float* o0 = dz + (size_t)(r0 + gq) * C + c0 + 2 * tq;
-    float* o1 = dz + (size_t)(r0 + gq + 8) * C + c0 + 2 * tq;
+    TZ* o0 = dz + (size_t)(r0 + gq) * C + c0 + 2 * tq;
+    TZ* o1 = dz + (size_t)(r0 + gq + 8) * C + c0 + 2 * tq;
 #pragma unroll
     for (int n = 0; n < NN; ++n) {
-      if (live0) *reinterpret_cast<float2*>(o0 + 8 * n) = make_float2(rstd0 * (d[n][0] - M10 - x[n][0] * M20), rstd0 * (d[n][1] - M10 - x[n][1] * M20));
-      if (live1) *reinterpret_cast<float2*>(o1 + 8 * n) = make_float2(rstd1 * (d[n][2] - M11 - x[n][2] * M21), rstd1 * (d[n][3] - M11 - x[n][3] * M21));
+      if (live0) pbt_st2(o0 + 8 * n, rstd0 * (d[n][0] - M10 - x[n][0] * M20), rstd0 * (d[n][1] - M10 - x[n][1] * M20));
+      if (live1) pbt_st2(o1 + 8 * n, rstd1 * (d[n][2] - M11 - x[n][2] * M21), rstd1 * (d[n][3] - M11 - x[n][3] * M21));
     }
     // dW'^T += xh^T g: A = xh^T [16 channels x 8 rows], B = g [8 rows x 8 heads]
 #pragma unroll
     for (int ks = 0; ks < 2; ++ks) {
       const int ra = 8 * ks + tq, rb = ra + 4;
       const float ma = stat[2 * ra], sa = stat[2 * ra + 1], mb = stat[2 * rb], sb = stat[2 * rb + 1];
-      uint32_t b0[KH], b1[KH];
+      uint32_t b0[KH], b1[KH], l0[KH], l1[KH];
 #pragma unroll
-      for (int n = 0; n < KH; ++n) { b0[n] = pbt_tf32(gs[ra * HP + 8 * n + gq]); b1[n] = pbt_tf32(gs[rb * HP + 8 * n + gq]); }
+      for (int n = 0; n < KH; ++n) {
+        if (DW3) { pbt_split(gs[ra * HP + 8 * n + gq], b0[n], l0[n]); pbt_split(gs[rb * HP + 8 * n + gq], b1[n], l1[n]); }   // fp32 pair: 3xTF32 like dxh
+        else { b0[n] = pbt_tf32(gs[ra * HP + 8 * n + gq]); b1[n] = pbt_tf32(gs[rb * HP + 8 * n + gq]); l0[n] = l1[n] = 0u; }
+      }
 #pragma unroll
       for (int m = 0; m < MT; ++m) {
         const int ch = c0 + 16 * m + gq;
-        const uint32_t a0 = pbt_tf32((zs[ra * P + ch] - ma) * sa), a1 = pbt_tf32((zs[ra * P + ch + 8] - ma) * sa);
-        const uint32_t a2 = pbt_tf32((zs[rb * P + ch] - mb) * sb), a3 = pbt_tf32((zs[rb * P + ch + 8] - mb) * sb);
+        const float xa0 = (pbt_rd1(zs + ra * P + ch) - ma) * sa, xa1 = (pbt_rd1(zs + ra * P + ch + 8) - ma) * sa;
+        const float xa2 = (pbt_rd1(zs + rb * P + ch) - mb) * sb, xa3 = (pbt_rd1(zs + rb * P + ch + 8) - mb) * sb;
+        if (DW3) {
+          uint32_t ah[4], al[4];
+          pbt_split(xa0, ah[0], al[0]); pbt_split(xa1, ah[1], al[1]); pbt_split(xa2, ah[2], al[2]); pbt_split(xa3, ah[3], al[3]);
 #pragma unroll
-        for (int n = 0; n < KH; ++n) pbt_mma(acc[m][n], a0, a1, a2, a3, b0[n], b1[n]);
+          for (int n = 0; n < KH; ++n) {
+            pbt_mma(acc[m][n], al[0], al[1], al[2], al[3], b0[n], b1[n]);   // the small cross terms first, then hi x hi
+            pbt_mma(acc[m][n], ah[0], ah[1], ah[2], ah[3], l0[n], l1[n]);
+            pbt_mma(acc[m][n], ah[0], ah[1], ah[2], ah[3], b0[n], b1[n]);
+          }
+        } else {
+          const uint32_t a0 = pbt_tf32(xa0), a1 = pbt_tf32(xa1), a2 = pbt_tf32(xa2), a3 = pbt_tf32(xa3);
+#pragma unroll
+          for (int n = 0; n < KH; ++n) pbt_mma(acc[m][n], a0, a1, a2, a3, b0[n], b1[n]);
+        }
       }
     }
   }

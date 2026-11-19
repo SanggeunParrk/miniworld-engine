@@ -15,7 +15,9 @@ from miniworld_engine.kernels._compile import opaque
 _dir = Path(__file__).parent
 _ARCH = {"sm90": "90a", "sm80": "80", "sm120": "120a"}  # sm120: the GeForce RTX 5090 (sm_120a), the same source
 # A100: plain loads and stores (PR_HINT=1): the streaming-hinted ones (ld.global.cs / st.global.cs, the H100 default) run 5-8 % under the Triton kernel there (1.60 vs 1.71 TB/s of 1.94)
-_FLAGS = {"sm80": ("-DPR_HINT=1",)}
+# H100: read-only loads (PR_HINT=2: ld.global.nc, plain stores): the streaming-hinted ones ran 3-4 % under the Triton kernel (msa d 64 L 2048: 0.363 vs 0.350 ms;
+# pair d 256 L 2048 n 2: 2.827 vs 2.728 ms); nc loads / plain loads equal it (bit-identical outputs; 2 a hair ahead at small sizes). sm120 keeps the hinted default.
+_FLAGS = {"sm80": ("-DPR_HINT=1",), "sm90": ("-DPR_HINT=2",)}
 
 
 @functools.lru_cache(maxsize=None)
