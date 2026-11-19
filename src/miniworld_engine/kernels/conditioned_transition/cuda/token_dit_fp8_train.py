@@ -48,7 +48,9 @@ PRESETS = {
 }
 #: what ``MINIWORLD_FP8_TRAIN=1`` turns on for this block (the attention-side projections stay bf16: the inference q|k|v|g placement
 #: moved AF3 FoldBench; docs/fp8_training.md)
-RECOMMENDED = frozenset(("nox", "hsave"))  # round 4: the bit-identical byte reductions only; the e4m3 expand cost +2 % diffusion loss in the real fine-tune (docs/fp8_training.md)
+RECOMMENDED = frozenset(
+    ("nox", "hsave")
+)  # round 4: the bit-identical byte reductions only; the e4m3 expand cost +2 % diffusion loss in the real fine-tune (docs/fp8_training.md)
 
 
 def parse(v: str) -> frozenset[str]:
@@ -188,9 +190,12 @@ def _check(a8, sa, w8, sw, out) -> None:
     bad = int((~torch.isfinite(out)).sum())
     if bad and _SEEN[0] < 8:
         _SEEN[0] += 1
-        print(f"FP8_DEBUG non-finite product: out {tuple(out.shape)} bad={bad} sa[min,max,nonfinite]=[{float(sa.min()):.3g},{float(sa.max()):.3g},"
-              f"{int((~torch.isfinite(sa)).sum())}] sw[min,max,nonfinite]=[{float(sw.min()):.3g},{float(sw.max()):.3g},{int((~torch.isfinite(sw)).sum())}] "
-              f"a8_nan={int(torch.isnan(a8.float()).sum())}", flush=True)
+        print(
+            f"FP8_DEBUG non-finite product: out {tuple(out.shape)} bad={bad} sa[min,max,nonfinite]=[{float(sa.min()):.3g},{float(sa.max()):.3g},"
+            f"{int((~torch.isfinite(sa)).sum())}] sw[min,max,nonfinite]=[{float(sw.min()):.3g},{float(sw.max()):.3g},{int((~torch.isfinite(sw)).sum())}] "
+            f"a8_nan={int(torch.isnan(a8.float()).sum())}",
+            flush=True,
+        )
 
 
 __all__ = [

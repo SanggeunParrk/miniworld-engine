@@ -648,7 +648,9 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, n=2, dp=DP, up=False, no
         e((0 if ((fp32 and not h100) or _pair_fused(h100, fp32, dp)) else R, dp), dtype=at),
         e((0 if (apb and dp == DP) else R, 2), dtype=f32),  # (mean, rstd) of the pair rows (the 128-wide APB backward recomputes them)
         e((H * R if (apb and dp != DP) else 0,), dtype=f32),  # the wide APB forward's unmasked fp32 bias (its backward's S2)
-        e((M, n * D) if hsave else (0, n * D), dtype=at),  # hsave: h = SwiGLU(a, b) as the squeeze GEMM read it (the backward does not rewrite it)
+        e(
+            (M, n * D) if hsave else (0, n * D), dtype=at
+        ),  # hsave: h = SwiGLU(a, b) as the squeeze GEMM read it (the backward does not rewrite it)
     ]
 
 
@@ -874,7 +876,9 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
     y = f8.mm(*f8.q8(og), f8w["out"]) if "out" in f8p else mm(og, Wo.t())
-    rx1 = "rx1" in f8p  # round 4: x1 (fp32 residual after the attention branch) is not stored; res_c and the backward recompute it from the input
+    rx1 = (
+        "rx1" in f8p
+    )  # round 4: x1 (fp32 residual after the attention branch) is not stored; res_c and the backward recompute it from the input
     x1 = torch.empty(0, D, device=dev) if rx1 else torch.empty(M, D, device=dev)
     x1st = torch.empty(M, 2, device=dev)
     xq = None  # the e4m3 copy of xt (+ row scales) made by res_adaln_b itself ("expand"; round 4: no separate q8 pass over xt)
@@ -882,7 +886,9 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         xq = (torch.empty(M, D, device=dev, dtype=f8.E4M3), torch.empty(M, 1, device=dev))
         T.res_adaln_b_q8(sin if x is None else x, y, Gg, bg1, G, bs2, x1, xt, x1st, xq[0], xq[1].view(-1), ada_eps, opt)
     else:
-        T.res_adaln_b(sin if x is None else x, y, Gg, bg1, G, bs2, x1, xt, x1st, ada_eps, opt)  # the parallel block: x1 only (xt is adaln_a's)
+        T.res_adaln_b(
+            sin if x is None else x, y, Gg, bg1, G, bs2, x1, xt, x1st, ada_eps, opt
+        )  # the parallel block: x1 only (xt is adaln_a's)
     Wab = W["Wab"]
     h = torch.empty(M, nexp * D, device=dev, dtype=at)
     gsw = None if (up or f8p) else _swiglu_gemm(xt, Wab)
@@ -893,7 +899,9 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
         ab = f8.mm(*(xq or f8.q8(xt)), f8w["expand"]) if "expand" in f8p else mm(xt, Wab.t())
         h8, sh = f8.swiglu_q8(ab)
     else:
-        ab = f8.mm(*(xq or f8.q8(xt)), f8w["expand"]) if "expand" in f8p else mm(xt, Wab.t())  # [M, 2 * n D] a | b ([M, 3 n D] a | b | u up-gated)
+        ab = (
+            f8.mm(*(xq or f8.q8(xt)), f8w["expand"]) if "expand" in f8p else mm(xt, Wab.t())
+        )  # [M, 2 * n D] a | b ([M, 3 n D] a | b | u up-gated)
         rows.swiglu_rows(ab, h, up=up)
     Wsq = W["Wsq"]
     z = f8.mm(h8, sh, f8w["squeeze"]) if "squeeze" in f8p else mm(h, Wsq.t())
@@ -1250,7 +1258,9 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     if x1.numel() == 0:  # rx1: x1 was not kept; the kernel recomputes it from the input
         T.res_adaln_b_bwd(dout, dxt, xin, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2], opt, True)
     else:
-        T.res_adaln_b_bwd(dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2], opt)  # the parallel block: no AdaLN of x1 (dxt goes to adaln_a_bwd)
+        T.res_adaln_b_bwd(
+            dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2], opt
+        )  # the parallel block: no AdaLN of x1 (dxt goes to adaln_a_bwd)
     dog = f8.mm(*f8.q8(dy, e5), f8w["dout"]) if "dout" in f8p else mm(dy, Wo)
     dWo = mm32(dy.t(), og)
     dob = torch.empty(M, D, device=dev, dtype=at)

@@ -1,8 +1,11 @@
 """Pin `miniworld_engine` (namespace package) to the wt-fp8t3-tokendit tree, before anything imports it."""
-import importlib.machinery, sys, types
+
+import importlib.machinery
+import os
+import sys
+import types
 from pathlib import Path
 
-import os
 TREE = Path(os.environ.get("PIN_TREE", "."))
 pkg = TREE / "src/miniworld_engine"
 spec = importlib.machinery.ModuleSpec("miniworld_engine", None, is_package=True)
