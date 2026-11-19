@@ -145,6 +145,9 @@ def hoist_bwd_exact(
 
     N, R = dball.shape
     dp = pair2d.shape[-1]
+    if N == 16 and eps == 1e-5 and HK.hoist_bwd_tc_ok(pair2d, dball, wf32):
+        # one block's 16 heads, width 128 / 256: d LN0, the LN0 backward and dW' in ONE pass on error-compensated TF32 mma (no row statistics needed)
+        return list(HK.hoist_bwd_tc(pair2d, dball, wf32))
     if (
         HK.OPT["bwd"]
         and pst is not None
