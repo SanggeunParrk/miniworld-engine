@@ -388,7 +388,11 @@ struct DualParams {
   const __nv_bfloat16* a2;     // gate_f16: dy16 [M][K] (fp16 dy / s_dy); wsT: Ws16^T [H][K]
   const float* bs;             // gate_f16: the backward scales [8] (dy_convert_kernel)
   // forward with the LayerNorm folded into the epilogue (FOLD): ``a`` = x, wa / wb = bf16(gamma W); stats = (mean, rstd) per row; cs, bias [2][H] f32 = (sum_k of the rounded gamma W, beta W)
-  const float2* stats;
+  // stats: (mean, rstd) per row of ``a``, computed by the CTAs of a row tile themselves (``ln_tile_stats``: CTA c of the tile's ncol = H / hidden-per-CTA takes rows c, c + ncol, ..., publishes them
+  // and bumps cnt[row tile]; the epilogue waits for ncol NWARP bumps); cnt: [row tiles] int, zeroed per call
+  float2* stats;
+  int* cnt;
+  float eps;
   const float* cs;
   const float* bias;
   int M, K, H;
@@ -437,6 +441,58 @@ DEVI void dual_mainloop(float (&acc)[C::MT][C::NT][4], uint32_t smem, const Dual
   gemm_mainloop<C>(acc, smem, KT, load_a, load_b, fr);
 }
 
+
+// (mean, rstd) of one row of x [K] bf16 per warp: the arithmetic of ln_fwd_kernel (one row per warp, 16-byte chunk c = lane + 32 i, two passes in registers), so the same bits as ln_stats
+DEVI float2 ln_row_stats(const __nv_bfloat16* xr, int K, int lane, float eps) {
+  const int CH = K >> 3;
+  float v[3][8];
+  float s = 0.f;
+#pragma unroll
+  for (int i = 0; i < 3; ++i) {
+    const int c = lane + i * 32;
+    uint4 u = make_uint4(0u, 0u, 0u, 0u);
+    if (c < CH) u = *reinterpret_cast<const uint4*>(xr + c * 8);
+    const uint32_t w[4] = {u.x, u.y, u.z, u.w};
+#pragma unroll
+    for (int e = 0; e < 4; ++e) { v[i][2 * e] = bf16lo(w[e]); v[i][2 * e + 1] = bf16hi(w[e]); s += v[i][2 * e] + v[i][2 * e + 1]; }
+  }
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+  const float mean = s * (1.f / K);
+  float q = 0.f;
+#pragma unroll
+  for (int i = 0; i < 3; ++i) {
+    const int c = lane + i * 32;
+#pragma unroll
+    for (int e = 0; e < 8; ++e) { v[i][e] -= mean; if (c < CH) q = fmaf(v[i][e], v[i][e], q); }
+  }
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) q += __shfl_xor_sync(0xffffffffu, q, o);
+  return make_float2(mean, rsqrtf(q * (1.f / K) + eps));
+}
+
+// the statistics of this CTA's share of its row tile (rows j of the tile with j % ncol == c), published for the tile's other CTAs
+template <class C>
+DEVI void ln_tile_stats(const DualParams& p, int m0, int ncol, int c, int warp, int lane) {
+  for (int j = c + warp * ncol; j < C::BM; j += ncol * C::NWARP) {
+    if (m0 + j >= p.M) break;
+    const float2 st = ln_row_stats(p.a + (size_t)(m0 + j) * p.K, p.K, lane, p.eps);
+    if (lane == 0) *reinterpret_cast<volatile float2*>(p.stats + m0 + j) = st;
+  }
+  __threadfence();
+  __syncwarp();
+  if (lane == 0) atomicAdd(p.cnt + blockIdx.y, 1);
+}
+
+DEVI void ln_tile_wait(const DualParams& p, int target, int lane) {
+  if (lane == 0) {
+    const volatile int* c = p.cnt + blockIdx.y;
+    while (*c < target) { }
+    __threadfence();
+  }
+  __syncwarp();
+}
+
 template <class C, int EPI = 0, bool FOLD = false>
 __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const DualParams p) {
   extern __shared__ __align__(128) uint8_t smem_raw[];
@@ -447,7 +503,9 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const Dua
   Frag<C> fr(wm, wn, lane);
   float acc[C::MT][C::NT][4];
   zero_acc<C>(acc);
+  if constexpr (FOLD) ln_tile_stats<C>(p, m0, p.H / (C::HPW * C::WN), blockIdx.x, warp, lane);
   dual_mainloop<C>(acc, smem, p, m0, hn0, fr, tid);
+  if constexpr (FOLD) ln_tile_wait(p, (p.H / (C::HPW * C::WN)) * C::NWARP, lane);
 
   // SwiGLU: a = acc[mt][j], b = acc[mt][NT / 2 + j]; h = rn(silu(a) b) staged as [BM][HN] bf16 (swizzled); p.ab != nullptr (training): a and b are staged too ([h | a | b])
   // C::F16 (the fp32 Transition): a = acc s_x s_w, b likewise, h = silu(a) b in full fp32 precision, staged as fp16 h / s_h
@@ -478,7 +536,8 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const Dua
           }
           if constexpr (FOLD) {   // LN(x) W^T = rstd (x (gamma W)^T - mean sum_k (gamma W)) + beta W
             const int col = hn0 + wn * C::HPW + j * 8 + 2 * q + k;
-            const float2 st = p.stats[m0 + wm * C::MT * 16 + 16 * mt + 8 * hh + g8 < p.M ? m0 + wm * C::MT * 16 + 16 * mt + 8 * hh + g8 : p.M - 1];
+            const int srow = m0 + wm * C::MT * 16 + 16 * mt + 8 * hh + g8;
+            const float2 st = __ldcg(p.stats + (srow < p.M ? srow : p.M - 1));
             av = fmaf(st.y, fmaf(-st.x, __ldg(p.cs + col), av), __ldg(p.bias + col));
             bv = fmaf(st.y, fmaf(-st.x, __ldg(p.cs + p.H + col), bv), __ldg(p.bias + p.H + col));
           }
