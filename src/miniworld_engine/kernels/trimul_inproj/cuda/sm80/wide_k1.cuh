@@ -240,7 +240,7 @@ namespace a100 {
 // across the n-tiles, and stores the plane words straight from the accumulators (4 channels x 32 contiguous bytes per warp store: whole sectors).
 //
 // 8 warps: 4 (32 tokens each) x 2 (64 packed rows = 32 channels of each 128-row n-tile).
-template <int HS>
+template <int HS, int NZ = 2>
 struct K1w64 {
   static constexpr int D = 64, NCOL = 4 * HS, NTN = NCOL / 128, NTHR = 256;
   // G column groups (hidden 128: two): a CTA keeps the NCOLG = 256 packed rows of its group resident and does that group's NTNG = 2 n-tiles of every token tile it
@@ -249,14 +249,14 @@ struct K1w64 {
   static constexpr int G = HS / 64, NCOLG = NCOL / G, NTNG = NTN / G;
   static constexpr int W_KT = NCOLG * 64;                // bytes of one 32-wide k-tile of the packed weights (wkmaj rows)
   static constexpr int Z_KT = 128 * 64;                  // bytes of one k-tile of a 128-token input tile
-  static constexpr int ZOFF = 2 * W_KT, ZBUF = 2 * Z_KT;  // two input buffers after the weights
-  static constexpr int STOFF = ZOFF + 2 * ZBUF;           // (mean, rstd) of the current tile's 128 tokens
+  static constexpr int ZOFF = 2 * W_KT, ZBUF = 2 * Z_KT;  // NZ input buffers after the weights (2: the next tile streams in under this one; 1: it streams in once this tile's rows sit in registers, 49 KB: two CTAs an SM on 100 KB)
+  static constexpr int STOFF = ZOFF + NZ * ZBUF;           // (mean, rstd) of the current tile's 128 tokens
   static constexpr int SMEM = STOFF + 128 * 8;
 };
 
-template <int HS>
+template <int HS, int NZ = 2>
 __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
-  using C = K1w64<HS>;
+  using C = K1w64<HS, NZ>;
   extern __shared__ __align__(128) uint8_t smem[];
   const uint32_t s0 = smem_u32(smem);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, wm = warp >> 1, wn = warp & 1, g8 = lane >> 2, q = lane & 3;
@@ -292,11 +292,15 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
   for (int buf = 0; tile < ntiles; tile += step, buf ^= 1) {
     const int t0 = tile * 128;
     // the next tile into the other buffer (its readers finished before the previous iteration's second barrier)
-    if (tile + step < ntiles) issue_z(tile + step, buf ^ 1);
-    cp_async_commit();
-    cp_async_wait<1>();
+    if constexpr (NZ == 2) {
+      if (tile + step < ntiles) issue_z(tile + step, buf ^ 1);
+      cp_async_commit();
+      cp_async_wait<1>();
+    } else {
+      cp_async_wait<0>();
+    }
     __syncthreads();
-    const uint32_t zb = s0 + C::ZOFF + buf * C::ZBUF;
+    const uint32_t zb = s0 + C::ZOFF + (NZ == 2 ? buf : 0) * C::ZBUF;
     if (tid < 128) {   // k1w's STATS statistics: one thread per token row, two passes, the same order
       float sum = 0.f;
 #pragma unroll
@@ -327,6 +331,10 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
 #pragma unroll
       for (int kk = 0; kk < 4; ++kk) ldsm_x4(af[mt][kk], zb + aoff[kk] + mt * 1024);
     __syncthreads();
+    if constexpr (NZ == 1) {   // the rows are in registers and the statistics in shared memory: the next tile streams in under the n-tile loop
+      if (tile + step < ntiles) issue_z(tile + step, 0);
+      cp_async_commit();
+    }
     float rs[2][2], mr[2][2], mk[2][2];
 #pragma unroll
     for (int mt = 0; mt < 2; ++mt)
@@ -346,6 +354,50 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
 #pragma unroll 1
     for (int nt = 0; nt < C::NTNG; ++nt) {
       const int gnt = grp * C::NTNG + nt;                 // the n-tile among all NTN
+#ifdef MWE_SM120
+      // one 16-row block (np: 8 channels' g and p rows) at a time: its 16 MMAs, then its epilogue, which the scheduler overlaps with the next block's MMAs
+      // (every block's accumulators are independent; 32 live registers instead of 64).  The same MMAs in the same k order per element: bit-identical planes.
+#pragma unroll
+      for (int np = 0; np < 4; ++np) {
+        float acc[2][2][4];
+#pragma unroll
+        for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+          for (int n = 0; n < 2; ++n)
+#pragma unroll
+            for (int e = 0; e < 4; ++e) acc[mt][n][e] = 0.f;
+#pragma unroll
+        for (int kk = 0; kk < 4; ++kk) {
+          uint32_t bf[4];
+          ldsm_x4(bf, s0 + boff[kk] + nt * 8192 + np * 1024);
+#pragma unroll
+          for (int mt = 0; mt < 2; ++mt) {
+            mma16816(acc[mt][0], af[mt][kk], bf[0], bf[1]);
+            mma16816(acc[mt][1], af[mt][kk], bf[2], bf[3]);
+          }
+        }
+        const int R = gnt * 128 + 64 * wn + 16 * np + 2 * q;
+        const float2 sg = __ldg(reinterpret_cast<const float2*>(p.vs + R)), sp = __ldg(reinterpret_cast<const float2*>(p.vs + R + 8));
+        const float2 bg = __ldg(reinterpret_cast<const float2*>(p.vb + R)), bp = __ldg(reinterpret_cast<const float2*>(p.vb + R + 8));
+        const int ch = gnt * 64 + 32 * wn + 8 * np + 2 * q;
+#pragma unroll
+        for (int mt = 0; mt < 2; ++mt) {
+          float u[2][2];
+#pragma unroll
+          for (int rh = 0; rh < 2; ++rh)
+#pragma unroll
+            for (int cc = 0; cc < 2; ++cc) {
+              const float ag = acc[mt][0][2 * rh + cc], ap = acc[mt][1][2 * rh + cc];
+              const float g = fmaf(rs[mt][rh], ag, fmaf(-mr[mt][rh], cc ? sg.y : sg.x, cc ? bg.y : bg.x));
+              const float pp = fmaf(rs[mt][rh], ap, fmaf(-mr[mt][rh], cc ? sp.y : sp.x, cc ? bp.y : bp.x));
+              u[rh][cc] = round_bf16f(fmaf(pp, tanh_approx(g), pp)) * mk[mt][rh];
+            }
+          __nv_bfloat16* o = p.planes + (size_t)ch * p.T + t0 + 32 * wm + 16 * mt + 2 * g8;
+          stg32(o, pack_bf16(u[0][0], u[1][0]));
+          stg32(o + p.T, pack_bf16(u[0][1], u[1][1]));
+        }
+      }
+#else
       float acc[2][8][4];
 #pragma unroll
       for (int mt = 0; mt < 2; ++mt)
@@ -388,6 +440,7 @@ __global__ void __launch_bounds__(256, 2) k1w64_kernel(const K1wParams p) {
           stg32(o + p.T, pack_bf16(u[0][1], u[1][1]));
         }
       }
+#endif
     }
   }
   cp_async_wait<0>();
