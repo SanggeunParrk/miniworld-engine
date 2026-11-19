@@ -10,7 +10,8 @@ Checked against fp64, per backend and dtype (bf16 module, fp32 module): the atte
 block output ``y`` and, in training, the gradients of the pair, ``to_bias.weight`` and ``ln_pair.weight`` (max error of the max).
 """
 
-# pyright: reportCallIssue=false  (torch's Tensor.pow / mean overloads are not resolved by the checker in the error-measure helpers)
+# torch's Tensor.pow / mean overloads are not resolved by the checker in the error-measure helpers:
+# pyright: reportCallIssue=false
 from __future__ import annotations
 
 import copy
