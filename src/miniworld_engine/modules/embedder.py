@@ -202,9 +202,7 @@ class InputFeatureEmbedder(BackendModule):
         missing = [type(c).__name__ for c in self._engine_children() if backend not in c.backends]
         if missing:
             return f"its {', '.join(missing)} has no {backend!r} backend"
-        if (
-            backend == "cuda"
-        ):  # the H100 or (the children's sm_80 builds) the A100 and the RTX 5090; each child states its own range when it runs
+        if backend == "cuda":  # the H100 or (the children's sm_80 builds) the A100 and the RTX 5090; each child states its own range when it runs
             return None if a100(pos) or sm120(pos) else h100_unsupported(pos)
         return triton_unsupported(pos)
 
