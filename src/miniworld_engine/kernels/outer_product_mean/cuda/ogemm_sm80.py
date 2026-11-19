@@ -53,3 +53,29 @@ def outer_batched(a: torch.Tensor, b: torch.Tensor, live: torch.Tensor, ch: int 
     out = a.new_empty((g, m, m))
     ext().ogemm_skip_batched(a, b, live, out, int(ch))
     return out
+
+
+_PROBES: dict = {}
+
+
+def all_live(mask_u8: torch.Tensor) -> bool:
+    """Whether no token is masked in every MSA row (the dense product is then the whole answer and cuBLAS runs it 3-25 % faster than the skip kernel).
+
+    A host-side choice of the product only (both are exact): read once per mask tensor (address, version, shape) outside a graph capture -- one small
+    reduction and a sync -- and remembered; during a capture the remembered answer is used (a mask not seen before: the skip kernel). A graph is
+    captured after its eager warm-up calls, which have probed the same static mask. ``MINIWORLD_OPM_PROBE=0`` always takes the skip kernel."""
+    import os
+
+    if os.environ.get("MINIWORLD_OPM_PROBE", "1") == "0":
+        return False
+    key = (mask_u8.data_ptr(), mask_u8._version, tuple(mask_u8.shape), mask_u8.device.index)
+    hit = _PROBES.get(key)
+    if hit is not None:
+        return hit
+    if torch.cuda.is_current_stream_capturing():
+        return False
+    res = bool((mask_u8 != 0).all().item())
+    if len(_PROBES) > 256:
+        _PROBES.clear()
+    _PROBES[key] = res
+    return res

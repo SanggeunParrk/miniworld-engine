@@ -64,6 +64,8 @@ def chai_products(a, b, mask, s, n):
     from . import ogemm_sm80
 
     mk = mask.view(s, n)
+    if ogemm_sm80.all_live(mk.view(torch.uint8) if mk.dtype is torch.bool else mk.to(torch.uint8)):  # nothing to skip: the cuBLAS batched GEMM
+        return torch.bmm(a.view(8, s, n * 8).transpose(1, 2), b.view(8, s, n * 8))
     live = ogemm_sm80.live_tokens(mk.view(torch.uint8) if mk.dtype is torch.bool else mk.to(torch.uint8))
     return ogemm_sm80.outer_batched(a.view(8, s, n * 8), b.view(8, s, n * 8), live, 8)  # one launch for the eight groups (8 launches ran 3 waves each, the last one 0.67 full)
 

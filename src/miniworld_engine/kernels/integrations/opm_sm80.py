@@ -235,6 +235,8 @@ def _outer(sm, a, b, mk):
         return sm.lt_mm(a, b, True, False)
     from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
 
+    if not _card.sm120() and ogemm_sm80.all_live(mk):  # nothing to skip: cuBLAS
+        return torch.mm(a.t(), b)
     return ogemm_sm80.outer(a, b, ogemm_sm80.live_tokens(mk))
 
 
