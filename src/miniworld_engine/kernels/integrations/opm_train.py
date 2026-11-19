@@ -1078,7 +1078,13 @@ def outer_product_mean(
     ]
     if torch.is_grad_enabled():
         save_o = True
-        out = OpmTrainFn.apply(*tensors, eps, save_o, after, dmin, doff)
+        # EXPERIMENTAL opt-in (MINIWORLD_OPM_FP8_TRAIN / MINIWORLD_FP8_TRAIN): FP8 products in forward and backward; off by default
+        from miniworld_engine.kernels.integrations import opm_fp8_train
+
+        if opm_fp8_train.MODE is not None and opm_fp8_train.serves(msa, msa.shape[3], cz):
+            out = opm_fp8_train.apply(tensors, eps, after, dmin, doff)
+        else:
+            out = OpmTrainFn.apply(*tensors, eps, save_o, after, dmin, doff)
         if torch.cuda.get_device_capability(msa.device) == (9, 0):
             from miniworld_engine.kernels.integrations.token_dit_train import (
                 _native_caller_output,
