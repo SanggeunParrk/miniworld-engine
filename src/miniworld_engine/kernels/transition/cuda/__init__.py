@@ -57,8 +57,9 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
     rows = x.numel() // x.shape[-1] if x.dim() else 0
     limit = fused_fwd_sm80.max_rows(x.device, x.dtype)
     grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, ln_weight, ln_bias, wa, wb, ws))
-    if x.dtype is torch.bfloat16 and not grad and is_sm120(x.device):
-        # RTX 5090 inference: no call past the rows the 64-row tile configs take (fused_wide_sm80._rows64_ok): a 4 M-row call (L 2048 pair) ran the 128-row tiles, 8 -10 % slower
+    if x.dtype is torch.bfloat16 and not grad and is_sm120(x.device) and not fused_fwd_sm80.supports(x.shape[-1], wa.shape[0]):
+        # RTX 5090 inference of the wide chain (D 256 and up; the D 64 / 128 one-kernel forward takes any row count in one launch): no call past the rows the 64-row tile
+        # configs take (fused_wide_sm80._rows64_ok): a 4 M-row call (L 2048 pair) ran the 128-row tiles, 8-10 % slower
         limit = min(limit, fused_wide_sm80.SM120_INFER_MAX_ROWS)
     if rows > limit and not grad:
         # inference past one call's rows (the kernels' work lists / row grid): one call per contiguous row block (rows are independent).
