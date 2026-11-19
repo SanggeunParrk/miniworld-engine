@@ -46,7 +46,7 @@ def _train(mod, args):
         out = mod(*args)
     outs = out if isinstance(out, tuple) else (out,)
     loss = sum((o.float() * torch.linspace(0.5, 1.5, o.shape[-1], device="cuda")).square().mean() for o in outs)
-    loss.backward()
+    loss.backward()  # pyright: ignore[reportAttributeAccessIssue]
     return [o.detach() for o in outs], {n: p.grad.detach().clone() for n, p in mod.named_parameters() if p.grad is not None}
 
 

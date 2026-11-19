@@ -24,13 +24,13 @@ CHUNKS = (4, 8, 12, 24)
 
 
 def _run(module: torch.nn.Module, x: torch.Tensor, up: torch.Tensor, backend: str) -> dict[str, torch.Tensor]:
-    module.set_backend(backend)
+    module.set_backend(backend)  # pyright: ignore[reportCallIssue]
     module.zero_grad(set_to_none=True)
     x = x.detach().clone().requires_grad_(True)
     y = module(x)
     y.backward(up.to(y.dtype))
     grads = {n: p.grad for n, p in module.named_parameters() if p.grad is not None}
-    return {"y": y.detach(), "dx": x.grad, **grads}
+    return {"y": y.detach(), "dx": x.grad, **grads}  # pyright: ignore[reportReturnType]
 
 
 def _err(a: torch.Tensor, gold: torch.Tensor) -> float:
