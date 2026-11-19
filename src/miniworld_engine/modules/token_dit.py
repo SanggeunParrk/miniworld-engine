@@ -1056,7 +1056,7 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # cuda:h100_sm90 7 (2026-11-20, speed of the exact fp32 EVAL hoist, same accuracy standard): runner.hoist (inference) and the multi-block / 256-wide pair_bias_all forward take the logits of a block in ONE pass
     # over the pair rows (hoist.logits_tc, bias_only_dit_f32_rows.cu logits_tc_k: LN0 in fp32 on chip, TF32 mma with the split fp32 operands, all four hi / lo products, a fresh partial per k-step added in fp32;
     # max-abs logits error 0.34 .. 0.51 x the cuBLAS fp32 GEMM's against fp64 on the huge / extreme / wide repro, max-row TV of P <= 0.95 x) in place of the fp32 LN0 rows in memory + the FMA GEMM; logits bits differ from 6
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 5, "cuda:h100_sm90": 7, "cuda:5090_sm120": 6}
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 5, "cuda:h100_sm90": 7, "cuda:5090_sm120": 6, "triton:5090_sm120": 2}
 
     def __init__(
         self,

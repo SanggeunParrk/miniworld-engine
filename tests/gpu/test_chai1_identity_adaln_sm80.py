@@ -58,7 +58,7 @@ def _grads(fn, leaves: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tenso
         t.grad = None
     out = fn()
     out.backward(dy.to(out.dtype))
-    return [t.grad for t in leaves]
+    return [t.grad for t in leaves]  # pyright: ignore[reportReturnType]
 
 
 @pytest.mark.skipif(not _sm80_family(), reason="sm_80-family (A100 / RTX 5090) cuda path")

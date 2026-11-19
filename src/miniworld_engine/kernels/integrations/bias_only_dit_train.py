@@ -931,7 +931,7 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, logits=N
         elif logits is None:  # not saved (HK.OPT["logits"] off): re-form them (LN + exact products), as the forward made them
             from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
-            logits, _ = HK.pair_logits(p2, (Wb.float() * wp.float()[None, :]).contiguous())
+            logits, _ = HK.pair_logits(p2, (Wb.float() * wp.float()[None, :]).contiguous())  # pyright: ignore[reportArgumentType]  (p2 is set on this path)
         _dbias_exact(do, vg[:, :DA], logits, mask, A, H, L, DA, dbias)
     else:
         _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)  # P o (dP - D); masked keys get P = 0
