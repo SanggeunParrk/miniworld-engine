@@ -447,6 +447,26 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const Dua
   Frag<C> fr(wm, wn, lane);
   float acc[C::MT][C::NT][4];
   zero_acc<C>(acc);
+  // FOLD: the epilogue's per-row (mean, rstd) and per-column (cs, bias) terms, loaded before the mainloop (the staging stores below carry a memory clobber: loads left inside the loops are re-issued)
+  float2 fst[C::MT][2];
+  float fcs[C::NT][2], fbi[C::NT][2];
+  if constexpr (FOLD) {
+#pragma unroll
+    for (int mt = 0; mt < C::MT; ++mt)
+#pragma unroll
+      for (int hh = 0; hh < 2; ++hh) {
+        const int srow = m0 + wm * C::MT * 16 + 16 * mt + 8 * hh + g8;
+        fst[mt][hh] = __ldg(p.stats + (srow < p.M ? srow : p.M - 1));
+      }
+#pragma unroll
+    for (int j = 0; j < C::NT / 2; ++j) {
+      const int col = hn0 + wn * C::HPW + j * 8 + 2 * q;
+      const float2 ca = __ldg(reinterpret_cast<const float2*>(p.cs + col)), cb = __ldg(reinterpret_cast<const float2*>(p.cs + p.H + col));
+      const float2 ba = __ldg(reinterpret_cast<const float2*>(p.bias + col)), bb = __ldg(reinterpret_cast<const float2*>(p.bias + p.H + col));
+      fcs[j][0] = ca.x; fcs[j][1] = ca.y; fcs[C::NT / 2 + j][0] = cb.x; fcs[C::NT / 2 + j][1] = cb.y;
+      fbi[j][0] = ba.x; fbi[j][1] = ba.y; fbi[C::NT / 2 + j][0] = bb.x; fbi[C::NT / 2 + j][1] = bb.y;
+    }
+  }
   dual_mainloop<C>(acc, smem, p, m0, hn0, fr, tid);
 
   // SwiGLU: a = acc[mt][j], b = acc[mt][NT / 2 + j]; h = rn(silu(a) b) staged as [BM][HN] bf16 (swizzled); p.ab != nullptr (training): a and b are staged too ([h | a | b])
@@ -476,11 +496,9 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const Dua
             hv[k] = av * sigmoid_f32(av) * bv * s_h;
             continue;
           }
-          if constexpr (FOLD) {   // LN(x) W^T = rstd (x (gamma W)^T - mean sum_k (gamma W)) + beta W
-            const int col = hn0 + wn * C::HPW + j * 8 + 2 * q + k;
-            const float2 st = p.stats[m0 + wm * C::MT * 16 + 16 * mt + 8 * hh + g8 < p.M ? m0 + wm * C::MT * 16 + 16 * mt + 8 * hh + g8 : p.M - 1];
-            av = fmaf(st.y, fmaf(-st.x, __ldg(p.cs + col), av), __ldg(p.bias + col));
-            bv = fmaf(st.y, fmaf(-st.x, __ldg(p.cs + p.H + col), bv), __ldg(p.bias + p.H + col));
+          if constexpr (FOLD) {   // LN(x) W^T = rstd (x (gamma W)^T - mean sum_k (gamma W)) + beta W  (the per-column and per-row terms are hoisted above the loops)
+            av = fmaf(fst[mt][hh].y, fmaf(-fst[mt][hh].x, fcs[j][k], av), fbi[j][k]);
+            bv = fmaf(fst[mt][hh].y, fmaf(-fst[mt][hh].x, fcs[C::NT / 2 + j][k], bv), fbi[C::NT / 2 + j][k]);
           }
           if constexpr (TW_ROUND_SWIGLU && EPI == 0) {
             if (p.K == 256) { av = round_bf16f(av); bv = round_bf16f(bv); }
