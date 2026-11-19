@@ -41,6 +41,7 @@ def _build(suffix: str, gencode: str):
             "-O3",
             gencode,
             f"-I{_dir}",
+            *(["-DMWE_SM120=1"] if suffix == "sm120" else []),
         ],
         extra_cflags=["-std=c++17", "-O3"],
         verbose=False,
@@ -151,6 +152,36 @@ def _rows64_ok(m: int) -> bool:
 #: RTX 5090 few-row thresholds (``_tiles_sm120``, ``_hand_squeeze``, the gate backward's tile)
 SM120_SMALL_ROWS = 2048
 SM120_HAND_SQUEEZE_MIN_ROWS = 512
+
+
+#: RTX 5090 inference: the LayerNorm is folded into the dual GEMM (``ext.ln_stats`` + ``ext.dual_swiglu_ln``): LN(x) W^T = rstd (x (gamma W)^T - mean sum_k (gamma W)) + beta W
+#: with W' = bf16(gamma W), cs = its row sums and bias = beta W (f32, cached by the parameters' version), so xn is never written or re-read (167 -> 87 us of the d 256 n 2
+#: L 512 call's LayerNorm).  Not bit-identical to ``ln_fwd`` + ``dual_swiglu`` (W' is rounded instead of xn): within the accuracy standard (docs page).  Widths from
+#: ``SM120_FUSED_LN_MIN_D`` on, the dual configs 0 / 2, grad off.
+SM120_FUSED_LN = True
+SM120_FUSED_LN_MIN_D = 256
+
+
+def _fused_ln(m: int, d: int, dual: int, x: torch.Tensor) -> bool:
+    return SM120_FUSED_LN and d >= SM120_FUSED_LN_MIN_D and dual in (0, 2) and is_sm120(x.device) and not torch.is_grad_enabled()
+
+
+def _ln_fold(gamma, beta, wa, wb):
+    """(bf16(gamma Wa), bf16(gamma Wb), cs [2, H], bias [2, H]) f32: the folded LayerNorm weights of ``ext.dual_swiglu_ln``, cached by the parameters' version."""
+
+    def build():
+        fa, fb = wa.float() * gamma, wb.float() * gamma
+        wa_, wb_ = fa.bfloat16().contiguous(), fb.bfloat16().contiguous()
+        cs = torch.stack([wa_.float().sum(1), wb_.float().sum(1)]).contiguous()
+        bias = torch.stack([(wa.float() * beta).sum(1), (wb.float() * beta).sum(1)]).contiguous()
+        return wa_, wb_, cs, bias
+
+    return _capture.param_forms("transition_sm120_ln_fold", [gamma, beta, wa, wb], build, capture_reads_eager=True)
+
+
+def _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual):
+    wa_, wb_, cs, bias = _ln_fold(gamma, beta, wa, wb)
+    return ext.dual_swiglu_ln(x, ext.ln_stats(x, eps), cs, bias, wa_, wb_, dual)
 
 
 def _gate_tile(m: int, d: int, h: int, sm120: bool) -> int:
@@ -305,6 +336,9 @@ def _fwd_launch(
     ext = _ext()
     wa, wb, ws = _kernel_weights(wa, wb, ws, x.dtype, cache=not save)
     dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(m, d, wa.shape[0])
+    if ln and not save and _fused_ln(m, d, dual, x):
+        hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
+        return (_squeeze(ext, hid, ws, x, ln, res), x.new_empty((0,)), torch.empty((0, 2), dtype=torch.float32, device=x.device), x.new_empty((0,)), x.new_empty((0,)))
     if ln:
         xn, stats = ext.ln_fwd(x, gamma, beta, eps, save)
     else:
@@ -355,9 +389,12 @@ def forward_into(
     gamma, beta = _f32(gamma, True), _f32(beta, True)
     wa, wb, ws = _kernel_weights(wa, wb, ws, x.dtype, cache=True)
     dual, res = (_tiles_sm120 if is_sm120(x.device) else _tiles)(m, d, wa.shape[0])  # the RTX 5090 takes its own tile table (the A100 one is 20-30 % slower there)
-    xn, _ = ext.ln_fwd(x, gamma, beta, eps, False)
-    hid = ext.dual_swiglu(xn, wa, wb, dual)
-    del xn
+    if _fused_ln(m, d, dual, x):
+        hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
+    else:
+        xn, _ = ext.ln_fwd(x, gamma, beta, eps, False)
+        hid = ext.dual_swiglu(xn, wa, wb, dual)
+        del xn
     ext.gemm_res(hid, ws, x, res, out)
 
 

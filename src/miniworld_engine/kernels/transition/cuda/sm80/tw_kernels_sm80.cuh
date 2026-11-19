@@ -26,7 +26,7 @@ namespace a100 {
 
 // ===================================================================================================================== LayerNorm forward
 // F32IO (the fp32 Transition): x fp32, xn written as fp16 xn * sc[0] (the scale of the fp16 operand).
-template <int D, bool F32IO = false>
+template <int D, bool F32IO = false, bool SONLY = false>   // SONLY: (mean, rstd) only (xn is not written: the LayerNorm is applied to the dual GEMM's A fragments)
 __global__ void __launch_bounds__(256) ln_fwd_kernel(const void* __restrict__ x_, const float* __restrict__ gamma, const float* __restrict__ beta,
                                                      __nv_bfloat16* __restrict__ xn, float2* __restrict__ stats, int M, float eps,
                                                      const float* __restrict__ sc = nullptr) {
@@ -73,6 +73,7 @@ __global__ void __launch_bounds__(256) ln_fwd_kernel(const void* __restrict__ x_
     for (int o = LPR / 2; o > 0; o >>= 1) q += __shfl_xor_sync(0xffffffffu, q, o);
     const float rstd = rsqrtf(q * (1.f / D) + eps);
     if (valid && cl == 0 && stats != nullptr) stats[row] = make_float2(mean, rstd);
+    if constexpr (SONLY) continue;
 #pragma unroll
     for (int i = 0; i < XPL; ++i) {
       const int c = cl + i * LPR;
@@ -386,6 +387,10 @@ struct DualParams {
   const float* sc;             // the forward / gate_f16: [8] (f32_forms_apply_kernel)
   const __nv_bfloat16* a2;     // gate_f16: dy16 [M][K] (fp16 dy / s_dy); wsT: Ws16^T [H][K]
   const float* bs;             // gate_f16: the backward scales [8] (dy_convert_kernel)
+  // forward with the LayerNorm folded into the epilogue (FOLD): ``a`` = x, wa / wb = bf16(gamma W); stats = (mean, rstd) per row; cs, bias [2][H] f32 = (sum_k of the rounded gamma W, beta W)
+  const float2* stats;
+  const float* cs;
+  const float* bias;
   int M, K, H;
 };
 
@@ -432,7 +437,7 @@ DEVI void dual_mainloop(float (&acc)[C::MT][C::NT][4], uint32_t smem, const Dual
   gemm_mainloop<C>(acc, smem, KT, load_a, load_b, fr);
 }
 
-template <class C, int EPI = 0>
+template <class C, int EPI = 0, bool FOLD = false>
 __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const DualParams p) {
   extern __shared__ __align__(128) uint8_t smem_raw[];
   const uint32_t smem = smem_u32(smem_raw);
@@ -470,6 +475,12 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const Dua
             av *= s_ab; bv *= s_ab;
             hv[k] = av * sigmoid_f32(av) * bv * s_h;
             continue;
+          }
+          if constexpr (FOLD) {   // LN(x) W^T = rstd (x (gamma W)^T - mean sum_k (gamma W)) + beta W
+            const int col = hn0 + wn * C::HPW + j * 8 + 2 * q + k;
+            const float2 st = p.stats[m0 + wm * C::MT * 16 + 16 * mt + 8 * hh + g8 < p.M ? m0 + wm * C::MT * 16 + 16 * mt + 8 * hh + g8 : p.M - 1];
+            av = fmaf(st.y, fmaf(-st.x, __ldg(p.cs + col), av), __ldg(p.bias + col));
+            bv = fmaf(st.y, fmaf(-st.x, __ldg(p.cs + p.H + col), bv), __ldg(p.bias + p.H + col));
           }
           if constexpr (TW_ROUND_SWIGLU && EPI == 0) {
             if (p.K == 256) { av = round_bf16f(av); bv = round_bf16f(bv); }
