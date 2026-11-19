@@ -90,7 +90,7 @@ def _head_major(t: torch.Tensor, n: int, s: int) -> torch.Tensor:
     return t.view(n, s, H, D).transpose(1, 2).contiguous()
 
 
-def attention_fwd(qh, kh, vh, seqused, half_window: int, out_dtype: torch.dtype = _BF, inference: bool = False):
+def attention_fwd(qh, kh, vh, seqused, half_window: int, out_dtype: torch.dtype = _BF, inference: bool = False, o_out=None, lse_out=None):
     """The attention of the block on bf16 head-major Q / K / V [N, 4, S, 32]: ``(O [N S, 128] bf16, lse)``, rows >= seqused 0. The
     window (half window 64) on the sm_80 kernel; global attention on FlashAttention-2 (its own lse layout, read back only by
     :func:`attention_bwd`). ``out_dtype`` fp32 (the window kernel only): O
@@ -124,8 +124,8 @@ def attention_fwd(qh, kh, vh, seqused, half_window: int, out_dtype: torch.dtype 
         if out_dtype == _BF:
             return sm80.attn_fwd(qh, kh, vh, seqused)
         n, _, s, _ = qh.shape
-        o = torch.empty(n * s, C, device=qh.device, dtype=_F32)
-        lse = torch.empty(n, H, s, device=qh.device, dtype=_F32)
+        o = o_out if o_out is not None else torch.empty(n * s, C, device=qh.device, dtype=_F32)  # (o_out / lse_out: rows of a chunked call's buffers)
+        lse = lse_out if lse_out is not None else torch.empty(n, H, s, device=qh.device, dtype=_F32)
         sm80._ext().swa_attn_fwd(qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), seqused, o, lse)
         return o, lse
     n, _, s, _ = qh.shape
@@ -201,7 +201,7 @@ def _bwd_bf16(
 
 
 # ------------------------------------------------------------------------------------------------------------------- fp32 stages
-def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int, save: bool) -> list[torch.Tensor]:
+def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int, save: bool, sink=None) -> list[torch.Tensor]:
     """The fp32 block (``dispatch._native_h100_fwd``'s fp32 branch on the sm_80 row stages): the same outputs as :func:`_fwd_bf16`, every
     tensor fp32 but Q / K / V (bf16), O (fp32 with the window; bf16 from FlashAttention) and lse.
 
@@ -219,31 +219,34 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
             q, mod, cos, sin, seqused.contiguous(), wqkv, wg, wo, wu, wd, FP32_EPS, FP32_EPS, is_global(half_window), True
         )
 
-    def empty(*shape, dtype=act):
+    def empty(*shape, dtype=act, keep=None):
+        if sink is not None and keep is not None:  # a saved tensor of a chunked call: its rows of the full buffer (``_fwd_fp32_chunked``)
+            return sink(keep, shape, dtype)
         return torch.empty(shape, device=dev, dtype=dtype)
 
-    x = empty(m, C)
+    x = empty(m, C, keep="x")
     _rows(0, [q, mod], [x], n, s, bf)
     from miniworld_engine.kernels.swa_dit.dispatch import eval_form
 
     wstack = eval_form("swa_a100_fp32_wstack", (wqkv, wg), lambda: torch.cat([wqkv, wg]), save)  # per weight version in inference
     p = mm(x, wstack.t())
-    qh, kh, vh = (empty(n, H, s, D, dtype=_BF) for _ in range(3))
-    g, pq, pk = (empty(m, C) for _ in range(3))
+    qh, kh, vh = (empty(n, H, s, D, dtype=_BF, keep=k) for k in ("qh", "kh", "vh"))
+    g, pq, pk = (empty(m, C, keep=k) for k in ("g", "pq", "pk"))
     _rows(1, [p, cos, sin], [qh, kh, vh, g, pq, pk], n, s, bf)
+    o_buf = (sink("o", (m, C), _F32), sink("lse", (n, H, s), _F32)) if sink is not None and save else (None, None)
     o, lse = attention_fwd(
-        qh, kh, vh, seqused, half_window, act, inference=not save
+        qh, kh, vh, seqused, half_window, act, inference=not save, o_out=o_buf[0], lse_out=o_buf[1]
     )  # fp32 O from the window kernel (global: bf16); bf16 O for bf16
     gated = empty(m, C)
     _rows(2, [o, g], [gated], n, s, bf)
-    att = mm(gated, wo.t())
-    q1, y = empty(m, C), empty(m, C)
+    att = mm(gated, wo.t()) if sink is None else torch.mm(gated, wo.t(), out=sink("att", (m, C), act))
+    q1, y = empty(m, C, keep="q1"), empty(m, C, keep="y")
     _rows(3, [q, att, mod], [q1, y], n, s, bf)
     ab = mm(y, wu.t())
     hh = empty(m, 2 * C)
     _rows(4, [ab], [hh], n, s, bf)
-    ffn = mm(hh, wd.t())
-    out = empty(m, C)
+    ffn = mm(hh, wd.t()) if sink is None else torch.mm(hh, wd.t(), out=sink("ffn", (m, C), act))
+    out = empty(m, C, keep="out")
     _rows(5, [q1, ffn, mod], [out], n, s, bf)
     outputs = [out.view(n, s, C)]
     if save:
@@ -252,7 +255,7 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
 
 
 def _bwd_fp32(
-    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, half_window: int, forms=None
+    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, half_window: int, forms=None, dq_out=None, acc=None, dmod_out=None
 ) -> list[torch.Tensor]:
     """``[dq, dmod, dWqkv, dWg, dWo, dWu, dWd]`` fp32 of :func:`_fwd_fp32` (``dispatch._native_h100_bwd``'s fp32 branch); for bf16 (the
     RTX 5090) the activation gradients bf16 as the forward's, dmod and the weight gradients fp32."""
@@ -266,7 +269,7 @@ def _bwd_fp32(
     def empty(*shape, dtype=act):
         return torch.empty(shape, device=dev, dtype=dtype)
 
-    dmod = torch.empty(mod.shape, device=dev, dtype=_F32)
+    dmod = dmod_out if dmod_out is not None else torch.empty(mod.shape, device=dev, dtype=_F32)
     f = forms or {}
     fused = (
         bf and BWD_FUSED_SM120 and "wdt" in f and "wot" in f and _sm120.is_sm120(dev)
@@ -309,21 +312,26 @@ def _bwd_fp32(
         _rows(11, [pq, pk, dqh, dkh, dvh, dg, cos, sin], [dp], n, s, bf)
         wstack = torch.cat([wqkv, wg])
         dx = mm(dp, wstack)
-        dq = empty(m, C)
+        dq = dq_out if dq_out is not None else empty(m, C)
         _rows(12, [dq1, dx, q, mod], [dq, dmod], n, s, bf)
     if (
         fused and WGRAD5_SM120 and m <= WGRAD5_MAX_ROWS_SM120 and sm80.wgrad5_ok_sm120(m)
     ):  # the five weight gradients in one grouped split-K GEMM + one reduction (cuBLAS runs them at ~40 TFLOPs there)
         dwqkv, dwg, dwo, dwu, dwd = sm80.wgrad5_sm120(dp, x, dab, y, datt, gated, dffn, hh)
         return [dq.view(n, s, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
+    def wgrad(i: int, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:  # acc: the running sums of a chunked call (beta 1 in the product)
+        if acc is None:
+            return _mm(a, b)
+        return torch.addmm(acc[i], a, b, out=acc[i])
+
     return [
         dq.view(n, s, C),
         dmod,
-        _mm(dp[:, : 3 * C].t(), x),
-        _mm(dp[:, 3 * C :].t(), x),
-        _mm(datt.t(), gated),
-        _mm(dab.t(), y),
-        _mm(dffn.t(), hh),
+        wgrad(0, dp[:, : 3 * C].t(), x),
+        wgrad(1, dp[:, 3 * C :].t(), x),
+        wgrad(2, datt.t(), gated),
+        wgrad(3, dab.t(), y),
+        wgrad(4, dffn.t(), hh),
     ]
 
 
@@ -529,6 +537,62 @@ def train_forms(weights) -> tuple[list[torch.Tensor], dict[str, torch.Tensor]]:
     return ws, forms
 
 
+#: RTX 5090, fp32 training: the stages of a call of more rows than this run on chunks of whole samples of about this many rows. The stage-to-stage tensors of a chunk
+#: (100 MB each at 196608 rows) stay in the 96 MB L2 then (measured, window 128 float32 train, ns a row: 24576 rows 52.3, 49152 56.3, 196608 57.1)
+CHUNK_ROWS_SM120 = 24576
+CHUNK_MIN_ROWS_SM120 = 32768
+_FWD_SAVES = ("qh", "kh", "vh", "g", "o", "lse", "q1", "x", "pq", "pk", "att", "y", "ffn")
+
+
+def _chunk_samples(x: torch.Tensor, half_window: int) -> int | None:
+    """Samples per chunk of the fp32 training stages on the RTX 5090 (window attention: FlashAttention-2's varlen lse of a global window is not per sample), or None (one call over every sample)."""
+    n, s, _ = x.shape
+    if x.dtype != _F32 or is_global(half_window) or not CHUNK_ROWS_SM120 or not _sm120.is_sm120(x.device) or n * s < CHUNK_MIN_ROWS_SM120:
+        return None
+    nsub = max(1, CHUNK_ROWS_SM120 // s)
+    return nsub if nsub < n else None
+
+
+def _cut(t: torch.Tensor, n: int, s: int, n0: int, nc: int) -> torch.Tensor:
+    """The samples n0 .. n0 + nc of a tensor whose leading dimension is the samples (``n``) or the rows (``n s``: modulation, cos / sin, the row saves)."""
+    return t[n0 : n0 + nc] if t.shape[0] == n else t[n0 * s : (n0 + nc) * s]
+
+
+def _fwd_fp32_chunked(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int, nsub: int) -> list[torch.Tensor]:
+    """:func:`_fwd_fp32` (training) over chunks of ``nsub`` samples, the saved tensors written into their rows of one buffer each (same outputs row for row)."""
+    n, s, _ = q.shape
+    bufs: dict[str, torch.Tensor] = {}
+    at = {"n0": 0, "nc": 0}
+
+    def sink(name: str, shape, dtype) -> torch.Tensor:
+        per = shape[0] // at["nc"]  # leading dim: samples (1 a sample) or rows (s a sample)
+        buf = bufs.get(name)
+        if buf is None:
+            buf = bufs[name] = torch.empty((per * n, *shape[1:]), device=q.device, dtype=dtype)
+        return buf[at["n0"] * per : (at["n0"] + at["nc"]) * per]
+
+    for n0 in range(0, n, nsub):
+        at["n0"], at["nc"] = n0, min(nsub, n - n0)
+        cut = [_cut(t, n, s, n0, at["nc"]) for t in (q, mod, cos, sin, seqused)]
+        _fwd_fp32(*cut, wqkv, wg, wo, wu, wd, half_window, True, sink)
+    return [bufs.pop("out").view(n, s, C), *(bufs[k] for k in _FWD_SAVES)]
+
+
+def _bwd_fp32_chunked(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, *saves, half_window: int, nsub: int) -> list[torch.Tensor]:
+    """:func:`_bwd_fp32` over chunks of ``nsub`` samples: dq written into its rows, dmod per row, the five weight gradients summed over the chunks (beta 1)."""
+    n, s, _ = q.shape
+    dq = torch.empty(q.shape, device=q.device, dtype=_F32)
+    dmod = torch.empty(mod.shape, device=q.device, dtype=_F32)
+    shapes = [(3 * C, C), (C, C), (C, C), (4 * C, C), (C, 2 * C)]  # dWqkv, dWg, dWo, dWu, dWd
+    acc = [torch.zeros(sh, device=q.device, dtype=_F32) for sh in shapes]
+    for n0 in range(0, n, nsub):
+        nc = min(nsub, n - n0)
+        cut = [_cut(t, n, s, n0, nc) for t in (dy, q, mod, cos, sin, seqused)]
+        cs = [_cut(t, n, s, n0, nc) for t in saves]  # per-sample (qh, kh, vh, lse) or per-row (the rest) saves
+        _bwd_fp32(*cut, wqkv, wg, wo, wu, wd, *cs, half_window, None, _cut(dq, n, s, n0, nc).view(nc * s, C), acc, _cut(dmod, n, s, n0, nc))
+    return [dq, dmod, *acc]
+
+
 class SWABlockA100(torch.autograd.Function):
     """:func:`block` with a backward: gradients of x, cond and the six weights (in each one's own dtype; an fp32 master weight gets the
     unrounded fp32 gradient). cos / sin / seqused get none."""
@@ -548,7 +612,11 @@ class SWABlockA100(torch.autograd.Function):
         with torch.autocast("cuda", enabled=False):
             mod, a = _mod_fwd(c, ws[0], True)
             fwd = _fwd_bf16 if x.dtype == _BF and not _sm120.is_sm120(x.device) else _fwd_fp32
-            outputs = fwd(x, mod, cos, sin, seqused, *ws[1:], half_window, True)
+            nsub = _chunk_samples(x, half_window)
+            if nsub is not None:
+                outputs = _fwd_fp32_chunked(x, mod, cos, sin, seqused, *ws[1:], half_window, nsub)
+            else:
+                outputs = fwd(x, mod, cos, sin, seqused, *ws[1:], half_window, True)
         ctx.form_keys = tuple(forms)
         ctx.save_for_backward(x, c, a, mod, cos, sin, seqused, *ws, *outputs[1:], *forms.values())
         return outputs[0]
@@ -564,6 +632,8 @@ class SWABlockA100(torch.autograd.Function):
             args = (dy.to(x.dtype).contiguous(), x, mod, cos, sin, seqused, *weights, *saves, half_window)
             if x.dtype == _BF and not _sm120.is_sm120(x.device):
                 dx, dmod, *dw = _bwd_bf16(*args, forms=forms)
+            elif (nsub := _chunk_samples(x, half_window)) is not None:  # the RTX 5090, fp32: chunks of samples (``_fwd_fp32_chunked``)
+                dx, dmod, *dw = _bwd_fp32_chunked(*args[:-1], half_window=half_window, nsub=nsub)
             else:  # fp32, or the RTX 5090 (the bf16 stages keep 128 KB of weights resident: the composed fp32-structured path, bf16 rounded)
                 dx, dmod, *dw = _bwd_fp32(*args, forms=forms)
             dc, dwmod = _mod_bwd(dmod, c, a, wmod)
