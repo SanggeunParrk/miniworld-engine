@@ -260,8 +260,8 @@ void gate_bwd(torch::Tensor da, torch::Tensor o, torch::Tensor g, torch::Tensor 
 }
 
 // the front's backward rows: dxn [T, D] (bf16(D W)), db [Z, H, L, L], wb [H, D], x / dout [T, D] (the module's layout), stats [T, 2], gamma [D] fp32 -> dpair [T, D] (the module's layout; not x / dout)
-void ln_bwd(torch::Tensor dxn, torch::Tensor db, torch::Tensor wb, torch::Tensor x, torch::Tensor stats, torch::Tensor dout, torch::Tensor gamma, torch::Tensor dpair,
-            int64_t L, int64_t H, int64_t transposed) {
+static void ln_bwd_launch(torch::Tensor dxn, torch::Tensor db, torch::Tensor wb, torch::Tensor x, torch::Tensor stats, torch::Tensor dout, torch::Tensor gamma, torch::Tensor dpair,
+                          int64_t L, int64_t H, int64_t transposed, const torch::Tensor* xh) {
   const int64_t T = x.size(0), D = x.size(1);
   TORCH_CHECK(D % 64 == 0 && D >= 64 && D <= 512 && H >= 1 && H <= 16 && T % (L * L) == 0 && T < (int64_t(1) << 31), "ln_bwd: shapes");
   check_rows(dxn, T, D, "ln_bwd dxn");
@@ -277,14 +277,37 @@ void ln_bwd(torch::Tensor dxn, torch::Tensor db, torch::Tensor wb, torch::Tensor
   a100::LnBwdParams p;
   p.dxn = bp(dxn); p.db = bp(db); p.wb = bp(wb); p.x = bp(x); p.stats = stats.data_ptr<float>(); p.dout = bp(dout); p.gamma = gamma.data_ptr<float>(); p.dpair = bm(dpair);
   p.T = (size_t)T; p.L = (int)L; p.H = (int)H; p.transposed = (int)transposed;
+#ifdef TRIATTN_SM120
+  p.xh_out = xh ? bm(*xh) : nullptr;
+#endif
   const unsigned smem = (unsigned)(H * D * 2);
+#ifdef TRIATTN_SM120
+#define LB_LAUNCH(DD) if (xh) a100::ln_bwd_rows_kernel<DD, true><<<grid, 256, smem, stream()>>>(p); else a100::ln_bwd_rows_kernel<DD><<<grid, 256, smem, stream()>>>(p);
+#else
+#define LB_LAUNCH(DD) a100::ln_bwd_rows_kernel<DD><<<grid, 256, smem, stream()>>>(p);
+#endif
 #define LB_CASE(DD) case DD: { using S = a100::RowShape<DD>; \
     const unsigned grid = (unsigned)std::min<int64_t>((T + 8 * S::RPW - 1) / (8 * S::RPW), (int64_t)nsm() * 8); \
-    a100::ln_bwd_rows_kernel<DD><<<grid, 256, smem, stream()>>>(p); break; }
+    LB_LAUNCH(DD) break; }
   switch (D) { LB_CASE(64) LB_CASE(128) LB_CASE(192) LB_CASE(256) LB_CASE(320) LB_CASE(384) LB_CASE(448) LB_CASE(512) default: TORCH_CHECK(false, "ln_bwd: width"); }
 #undef LB_CASE
+#undef LB_LAUNCH
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+
+void ln_bwd(torch::Tensor dxn, torch::Tensor db, torch::Tensor wb, torch::Tensor x, torch::Tensor stats, torch::Tensor dout, torch::Tensor gamma, torch::Tensor dpair,
+            int64_t L, int64_t H, int64_t transposed) {
+  ln_bwd_launch(dxn, db, wb, x, stats, dout, gamma, dpair, L, H, transposed, nullptr);
+}
+
+#ifdef TRIATTN_SM120
+// ln_bwd that also writes the forward's xh [T, D + 8] (RTX 5090 training: xh is not saved, the backward's weight-gradient GEMMs read this one)
+void ln_bwd_xh(torch::Tensor dxn, torch::Tensor db, torch::Tensor wb, torch::Tensor x, torch::Tensor stats, torch::Tensor dout, torch::Tensor gamma, torch::Tensor dpair,
+               torch::Tensor xh, int64_t L, int64_t H, int64_t transposed) {
+  TORCH_CHECK(xh.scalar_type() == at::kBFloat16 && xh.is_contiguous() && xh.numel() == x.size(0) * (x.size(1) + 8), "ln_bwd_xh: xh [T, D + 8] bf16");
+  ln_bwd_launch(dxn, db, wb, x, stats, dout, gamma, dpair, L, H, transposed, &xh);
+}
+#endif
 
 // the parameters' gradients (rows_sm80.cuh, wgrad_w_kernel): g [4 DHp + H, D + 8] fp32, go [D, DHp] fp32 -> dwq .. dwg [H hd, D], dwb [H, D], dwo [D, H hd] (bf16), dgamma / dbeta [D] (the LayerNorm parameters' dtype)
 void wgrad_w(torch::Tensor g, torch::Tensor go, torch::Tensor wq, torch::Tensor wk, torch::Tensor wv, torch::Tensor wg, torch::Tensor wb, torch::Tensor dwq, torch::Tensor dwk,
@@ -508,5 +531,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dy_rows", &dy_rows);
   m.def("gate_bwd", &gate_bwd);
   m.def("ln_bwd", &ln_bwd);
+#ifdef TRIATTN_SM120
+  m.def("ln_bwd_xh", &ln_bwd_xh);
+#endif
   m.def("wgrad_w", &wgrad_w);
 }

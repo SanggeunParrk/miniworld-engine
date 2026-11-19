@@ -283,6 +283,12 @@ def _pack_bwd_fused(weights, wo: torch.Tensor, ln_w: torch.Tensor, cfg: Cfg):
 
 
 # ----------------------------------------------------------------------------------------------------------------------------------- forward
+def _recompute_xh(x: torch.Tensor, fused: bool) -> bool:
+    """RTX 5090, rows engine, training: the normalised input ``xh`` [T, D + 8] (38 MiB at L 384, D 128) is not kept with the other saved tensors; the backward's
+    ``ln_bwd`` row kernel writes it again (``ln_bwd_xh``: (x - mean) rstd in ``ln_rows``' arithmetic, the same bits) before the weight-gradient GEMMs.  Off sm_120 (A100) the saved set is unchanged."""
+    return not fused and _arch.on_sm120(x)
+
+
 def _original_forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip=False):
     """[out] and, when ``save``, [xh, stats, y, bias, o, lse]: fresh tensors."""
     cfg = Cfg(x.shape[-1], n_head, hd, fused)
@@ -291,7 +297,7 @@ def _original_forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transp
     out = [x.new_empty(x.shape)]
     if save:
         out += [
-            x.new_empty((t, cfg.d + 8)),
+            x.new_empty((0,)) if _recompute_xh(x, fused) else x.new_empty((t, cfg.d + 8)),
             x.new_empty((t, 2), dtype=F32),
             x.new_empty((t, cfg.n)),
             x.new_empty((b, cfg.h, length, length)),
@@ -598,6 +604,8 @@ def _original_forward_ops(
         else:
             yo = torch.mm(a, wo_p.t())  # [T, D]
             rows.out_rows(yo, x2, ds, out.view(t, d), length, int(transposed))
+    if save and _recompute_xh(x, fused):
+        xh = x.new_empty((0,))  # freed here: the backward rebuilds it
     return [out, xh, stats, y, bias, o, lse] if save else [out]
 
 
@@ -1127,7 +1135,7 @@ def backward_ops(
     hd: int,
     fused: bool,
 ) -> list[torch.Tensor]:
-    """The gradients of ``forward_ops`` (``saved`` = its [xh, stats, y, bias, o, lse]): [dpair, dwq, dwk, dwv, dwg, dwb, dwo, dln_w, dln_b], the weights' and the LayerNorm
+    """The gradients of ``forward_ops`` (``saved`` = its [xh, stats, y, bias, o, lse]; xh empty on the 5090: rebuilt by the front's backward row kernel): [dpair, dwq, dwk, dwv, dwg, dwb, dwo, dln_w, dln_b], the weights' and the LayerNorm
     parameters' gradients in their dtypes."""
     rows = _rows()
     xh, stats, y, bias, o, lse = saved
@@ -1203,19 +1211,12 @@ def backward_ops(
         )
     else:
         dxn = torch.mm(dqkvg, _pack_plain(weights, cfg))  # [T, D]
-        rows.ln_bwd(
-            dxn,
-            db,
-            weights[4].contiguous(),
-            x.view(t, d),
-            stats,
-            dout2,
-            ln_w.detach().float().contiguous(),
-            dpair.view(t, d),
-            length,
-            cfg.h,
-            int(transposed),
-        )
+        ln_args = (dxn, db, weights[4].contiguous(), x.view(t, d), stats, dout2, ln_w.detach().float().contiguous(), dpair.view(t, d))
+        if xh.numel():
+            rows.ln_bwd(*ln_args, length, cfg.h, int(transposed))
+        else:  # RTX 5090: xh was not saved (_recompute_xh): the same launch writes it too (the forward's arithmetic: (x - mean) rstd, bf16, constant columns 1, 1, 0 ...)
+            xh = torch.empty((t, d + 8), dtype=BF, device=dev)
+            rows.ln_bwd_xh(*ln_args, xh, length, cfg.h, int(transposed))
         del dxn
     g = torch.cat(
         [
