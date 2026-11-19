@@ -4,6 +4,10 @@
 #pragma once
 #include "sm80_common.cuh"
 
+#include <cuda_fp16.h>
+
+#include <type_traits>
+
 namespace sw120f {
 using namespace sw80;
 
@@ -31,24 +35,31 @@ DEVI float sig(float v) { return 1.f / (1.f + expf(-v)); }      // rows_sm80.cuh
 constexpr int CHUNK = 1024;                 // floats per chunk (4 KB)
 template <int KIND> constexpr int chunks_per_tile() { return KIND == 0 ? 8 : 14; }
 
-template <int NS, int KIND>
+// HALF (s5090/four): the weights are stored as fp16 (the tf32-rounded values of the fp32 packs, exactly representable: 10 mantissa bits), half the bytes of a chunk through
+// L2; the B fragments are widened to fp32 (the same tf32 bits) in registers before the mma.  The slot stride is CHUNK floats (fp32 weights) or CHUNK / 2.
+template <int NS, int KIND, bool HALF_ = false>
 struct Ring {
+  using E = std::conditional_t<HALF_, __half, float>;
+  static constexpr bool HALF = HALF_;
+  static constexpr int SLOTF = HALF_ ? CHUNK / 2 : CHUNK;   // floats per ring slot
+  static constexpr int PER_LANE = HALF_ ? 4 : 8;            // 16-byte pieces of a chunk a lane copies
+  static constexpr int ELEMS16 = 16 / (int)sizeof(E);       // elements in 16 bytes
   float* base;                              // the warp's NS slots
-  const float* w0;                          // the warp's packed block of: qkvg W1 | Wo
-  const float* w1;                          // Wu
-  const float* w2;                          // Wd
+  const E* w0;                              // the warp's packed block of: qkvg W1 | Wo
+  const E* w1;                              // Wu
+  const E* w2;                              // Wd
   int q, total, lane;
-  DEVI const float* src(int j) const {
+  DEVI const E* src(int j) const {
     if (KIND == 0) return w0 + (j % 8) * CHUNK;
     j %= 14;
     return j < 2 ? w0 + j * CHUNK : j < 10 ? w1 + (j - 2) * CHUNK : w2 + (j - 10) * CHUNK;
   }
   DEVI void issue(int j) {
     if (j < total) {
-      const float* s = src(j);
-      const uint32_t d = smem_u32(base + (j % NS) * CHUNK);
+      const E* s = src(j);
+      const uint32_t d = smem_u32(base + (j % NS) * SLOTF);
 #pragma unroll
-      for (int i = 0; i < 8; ++i) cp_async16(d + (i * 32 + lane) * 16, s + (i * 32 + lane) * 4);
+      for (int i = 0; i < PER_LANE; ++i) cp_async16(d + (i * 32 + lane) * 16, s + (i * 32 + lane) * ELEMS16);
     }
     cp_async_commit();                      // a group per chunk, empty past the end: the wait counts stay uniform
   }
@@ -57,11 +68,11 @@ struct Ring {
     for (int j = 0; j < NS - 1; ++j) issue(j);
   }
   // the next chunk, complete and visible to the whole warp; the slot of the chunk before it is refilled
-  DEVI const float* acquire() {
+  DEVI const E* acquire() {
     cp_async_wait<NS - 2>();
     __syncwarp();
     issue(q + NS - 1);
-    return base + (q++ % NS) * CHUNK;
+    return reinterpret_cast<const E*>(base + (q++ % NS) * SLOTF);
   }
 };
 
@@ -73,7 +84,7 @@ DEVI void warp_gemm(float (&acc)[MT][NT][4], const float* sa, RingT& ring, int l
   const int g = lane >> 2, t = lane & 3;
 #pragma unroll 1
   for (int sl = 0; sl < NSL; ++sl) {
-    const float* b = ring.acquire();
+    const auto* b = ring.acquire();
 #pragma unroll
     for (int kl = 0; kl < KPS; ++kl) {
       const int kp = sl * KPS + kl;
@@ -89,7 +100,14 @@ DEVI void warp_gemm(float (&acc)[MT][NT][4], const float* sa, RingT& ring, int l
         }
 #pragma unroll
       for (int nt = 0; nt < NT; ++nt) {
-        const float4 bb = *reinterpret_cast<const float4*>(b + ((kl * NT + nt) * 32 + lane) * 4);
+        float4 bb;
+        if constexpr (RingT::HALF) {   // 4 fp16 -> the same 4 tf32 values in fp32 registers
+          const uint2 u = *reinterpret_cast<const uint2*>(b + ((kl * NT + nt) * 32 + lane) * 4);
+          const float2 lo = __half22float2(*reinterpret_cast<const __half2*>(&u.x)), hi = __half22float2(*reinterpret_cast<const __half2*>(&u.y));
+          bb = make_float4(lo.x, lo.y, hi.x, hi.y);
+        } else {
+          bb = *reinterpret_cast<const float4*>(b + ((kl * NT + nt) * 32 + lane) * 4);
+        }
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt) {
           mma1688(acc[mt][nt], a[mt][0], __float_as_uint(bb.x), __float_as_uint(bb.y));
@@ -211,33 +229,36 @@ static_assert(qkvg_smem<4>() <= 101376, "99 KB");
 
 // ================================================================ out-projection + FFN
 // ring slots per warp: as many as fit beside the R-row tiles (163 KB per CTA)
-template <int MT> constexpr int ffn_ns() { return 2; }
+// (HW: fp16 weight packs, 2 KB chunks: a deeper ring fits, three slots at MT 1)
+template <int MT, bool HW = false> constexpr int ffn_ns() { return HW ? (MT == 1 ? 3 : 2) : 2; }
 
 struct FfnParams {
   const float* q;                 // [M][128] the block input (residual)
   const float* g;                 // [M][128]
   const void* o;                  // [M][128] attention output, fp32 or bf16 (obf)
   const float* mod;               // [B S][768]
-  const float* wo;                // packed [8][8 kp][2 nt][32][4]: warp w = att columns 16 w ..
-  const float* wu;                // packed [8][8 kp][8 nt][32][4]: warp w = a units 32 w .. (nt 0..3), b units 32 w .. (nt 4..7)
-  const float* wd;                // packed [8][16 kp][2 nt][32][4]: warp w = out columns 16 w ..
+  const void* wo;                 // packed [8][8 kp][2 nt][32][4]: warp w = att columns 16 w ..   (fp32, or fp16 with HW)
+  const void* wu;                 // packed [8][8 kp][8 nt][32][4]: warp w = a units 32 w .. (nt 0..3), b units 32 w .. (nt 4..7)
+  const void* wd;                 // packed [8][16 kp][2 nt][32][4]: warp w = out columns 16 w ..
   float* out;                     // [M][128]
   int M, S, B, obf;
   float eps;
 };
 
-template <int MT>
+template <int MT, bool HW = false>
 __global__ void __launch_bounds__(NTHR, 1) ffn_f32_kernel(const FfnParams p) {
-  constexpr int R = 16 * MT, NS = ffn_ns<MT>();
+  constexpr int R = 16 * MT, NS = ffn_ns<MT, HW>();
+  using RingT = Ring<NS, 1, HW>;
+  using E = typename RingT::E;
   extern __shared__ __align__(16) float smf[];
-  float* sx = smf + NW * NS * CHUNK;                                              // [R][XS] gated, then y (tf32)
+  float* sx = smf + NW * NS * RingT::SLOTF;                                       // [R][XS] gated, then y (tf32)
   float* sq = sx + R * XS;                                      // [R][XS] q1 (fp32)
   float* sh = sq + R * XS;                                      // [R][HS] h (tf32)
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g8 = lane >> 2, q4 = lane & 3;
   const int ntile = (p.M + R - 1) / R;
   const int mine = blockIdx.x < ntile ? (ntile - 1 - blockIdx.x) / gridDim.x + 1 : 0;
-  Ring<NS, 1> ring{smf + warp * NS * CHUNK, p.wo + (size_t)warp * 2 * CHUNK, p.wu + (size_t)warp * 8 * CHUNK, p.wd + (size_t)warp * 4 * CHUNK, 0,
-                   mine * chunks_per_tile<1>(), lane};
+  RingT ring{smf + warp * NS * RingT::SLOTF, static_cast<const E*>(p.wo) + (size_t)warp * 2 * CHUNK, static_cast<const E*>(p.wu) + (size_t)warp * 8 * CHUNK,
+             static_cast<const E*>(p.wd) + (size_t)warp * 4 * CHUNK, 0, mine * chunks_per_tile<1>(), lane};
   ring.start();
   for (int tile = blockIdx.x; tile < ntile; tile += gridDim.x) {
     const long t0 = (long)tile * R;
@@ -339,7 +360,8 @@ __global__ void __launch_bounds__(NTHR, 1) ffn_f32_kernel(const FfnParams p) {
   }
 }
 
-template <int MT> constexpr int ffn_smem() { return (NW * ffn_ns<MT>() * CHUNK + 16 * MT * (2 * XS + HS)) * 4; }
+template <int MT, bool HW = false> constexpr int ffn_smem() { return (NW * ffn_ns<MT, HW>() * Ring<2, 1, HW>::SLOTF + 16 * MT * (2 * XS + HS)) * 4; }
 static_assert(ffn_smem<1>() <= 101376, "99 KB");
+static_assert(ffn_smem<1, true>() <= 101376 && ffn_smem<2, true>() <= 101376, "99 KB (fp16 weights)");
 
 }  // namespace sw120f

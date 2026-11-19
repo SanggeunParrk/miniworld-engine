@@ -242,10 +242,7 @@ def _split_front(x: torch.Tensor, d: int, save: bool, dhp: int, h: int, hd: int)
     64 x 64 tile at 72 TFLOP/s; N = 512 at K = 128 reaches 125 (L 640: 807 us against 493 + 84 us); the shift and the gate bias are the GEMM biases (bf16, one rounding
     with the projection)."""
     return (
-        not save
-        and (d, dhp, h, hd) == (128, 128, 4, 32)
-        and os.environ.get("MINIWORLD_TRIATTN_SPLIT", "auto") != "0"
-        and _arch.on_sm120(x)
+        not save and (d, dhp, h, hd) == (128, 128, 4, 32) and os.environ.get("MINIWORLD_TRIATTN_SPLIT", "auto") != "0" and _arch.on_sm120(x)
     )
 
 
@@ -1538,7 +1535,12 @@ def variant_forward_ops(
     bare = _bare_front(x, d, save, length, True)
     split = _split_front(x, d, save, dhp, h, hd)
     fold_gb = (
-        bool(gb.numel()) and not save and not bare and not split and os.environ.get("MINIWORLD_TRIATTN_BARE", "auto") != "0" and _arch.on_sm120(x)
+        bool(gb.numel())
+        and not save
+        and not bare
+        and not split
+        and os.environ.get("MINIWORLD_TRIATTN_BARE", "auto") != "0"
+        and _arch.on_sm120(x)
     )
 
     def _gate() -> torch.Tensor | None:
@@ -1566,7 +1568,9 @@ def variant_forward_ops(
         wp = _core.eval_form(
             ("triattn_sm80w_variant", vc), (*weights, ln_w, ln_b), lambda: _pack_folded(_v_weights(weights, vc), ln_w, ln_b, pc, 8, n), save
         )
-    xh = torch.empty((t, d if bare else d + 8), dtype=BF, device=dev)  # split: ln_rows' padded rows, the GEMMs read the first d columns (lda d + 8)
+    xh = torch.empty(
+        (t, d if bare else d + 8), dtype=BF, device=dev
+    )  # split: ln_rows' padded rows, the GEMMs read the first d columns (lda d + 8)
     stats = torch.empty((t, 2), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
     pb = None

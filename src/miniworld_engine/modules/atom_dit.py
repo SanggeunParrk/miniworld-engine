@@ -1254,7 +1254,7 @@ class AtomDiTMiniWorld(BackendModule):
         "anthropic": 2,
         "cuda:a100_sm80": 7,
         "cuda:h100_sm90": 3,
-        "cuda:5090_sm120": 6,  # 6 (2026-11-20): fp32 window training on chunks of ~24576 rows of whole samples (the stage-to-stage tensors stay in the L2: 48 x 4096 atoms 11.22 -> 10.25 ms; per-row results the same up to TF32 sums)
+        "cuda:5090_sm120": 7,  # 7 (2026-11-20): fp32 window inference: the out-projection + FFN kernel streams fp16 weight packs (the tf32-rounded values, exact) and takes 32-row tiles past one wave of 16-row tiles (L 2048 S 5: 0.162 -> 0.139 ms; outputs within TF32 sums); 6 (2026-11-20): fp32 window training on chunks of ~24576 rows of whole samples (the stage-to-stage tensors stay in the L2: 48 x 4096 atoms 11.22 -> 10.25 ms; per-row results the same up to TF32 sums)
     }  # cuda:a100_sm80 7 (2026-11-13): the sm_80 window attention exits on a tile past seqused (zero rows, the same bits)
     # cuda:5090_sm120 3 (3.0.5): global attention inference on its own sm_120a kernel (attn_global_sm120.cuh, in place of FlashAttention-2) and on the fused qkvg / FFN stages; bf16 training forward on the fused stages from 4096 rows; modulation backward on cuBLAS at every row count; weight casts in one launch
     # cuda:5090_sm120 4 (3.0.5): bf16 training backward on the RTX 5090: the FFN backward's dy kernel and the qkvg backward as K-split kernels streaming their weight through a cp.async ring (bwd_ks_sm120.cuh, in place of cuBLAS products + row stages), the five weight gradients as one grouped split-K GEMM (wgrad5_sm120.cu, in place of five cuBLAS products), the FFN gate kernel's launch table (fp32 sums in another order; no change of any other output)
@@ -1659,7 +1659,7 @@ class SWAAtomTransformer(BackendModule):
         "cuda:a100_sm80": 7,
         "cuda:h100_sm90": 4,
         "triton": 2,
-        "cuda:5090_sm120": 6,  # 6 (2026-11-20): fp32 window training on chunks of ~24576 rows of whole samples (the stage-to-stage tensors stay in the L2: 48 x 4096 atoms 11.22 -> 10.25 ms; per-row results the same up to TF32 sums)
+        "cuda:5090_sm120": 7,  # 7 (2026-11-20): fp32 window inference: the out-projection + FFN kernel streams fp16 weight packs (the tf32-rounded values, exact) and takes 32-row tiles past one wave of 16-row tiles (L 2048 S 5: 0.162 -> 0.139 ms; outputs within TF32 sums); 6 (2026-11-20): fp32 window training on chunks of ~24576 rows of whole samples (the stage-to-stage tensors stay in the L2: 48 x 4096 atoms 11.22 -> 10.25 ms; per-row results the same up to TF32 sums)
     }  # cuda:a100_sm80 7 (2026-11-13): as AtomDiTMiniWorld
     # cuda:5090_sm120 4 (3.0.5): as AtomDiTMiniWorld (bf16 training backward kernels)
     # cuda:h100_sm90 4 (3.0.1): as AtomDiTMiniWorld (bf16 training modulation table)
