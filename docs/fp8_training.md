@@ -376,3 +376,16 @@ the per-channel scale 1e-39 and 1 / scale = inf; every quantizer now floors the 
 - The bit-identical byte reductions `nox` + `hsave` are the whole win: 0.9-1.1 % sustained (1.5-2.1 % cool) at M >= 18432, 0.5-1.1 % sustained below, peak -3 %, largest A at L 384 1536 -> 1792 (+17 %), output and 27 gradients
   bit-identical to 3.0.1. Release candidate: branch `fp8t4/tokendit-bytes-default` (see the report: diff, `TokenDiTProtenix.backend_versions["cuda:h100_sm90"]` 5 -> 6, 292 accuracy + 292 speed cells owed on h100_sm90).
 - Finer scales, 8-bit saved activations (ab), `rx1`: no-go (above). Fused q8: kept (-0.2 / -0.3 %, bit-identical).
+
+### Round 4 verification and the release candidate
+
+- Real fine-tune D (job 59102, `nox + hsave` only, steps 1400-1402): loss and diffusion loss equal to the default run A to the printed 4 digits (0.3677 / 0.3644 / 0.3457), as
+  the bit-identity says; A is also the evidence that the run is repeatable.
+- Tests (H100): `test_token_dit_fp8_train.py` + `_bytes.py` + `train_accumulation` + `shared_cond` + `pair_apb`: 59 passed (this branch); 62 passed (release branch);
+  `tests/cpu/test_fp8_switch.py` 19 passed; pyright 0 errors; ruff check / format clean on the touched files (`token_dit.py`'s pre-existing format drift left alone).
+- Release candidate (a decision for the user): branch `fp8t4/tokendit-bytes-default` = this branch + (i) `DEFAULT_BYTES = {nox, hsave}` in `token_dit_fp8_train.active()` (default-on for H100 bf16
+  default-option width-768 blocks; `MINIWORLD_TOKEN_DIT_TRAIN_BYTES=0` restores the 3.0.1 route), (ii) `TokenDiTProtenix.backend_versions["cuda:h100_sm90"]` 5 -> 6 (TokenDiTMiniWorld inherits it;
+  Boltz2 / RF3 / Chai1 keep their own 7 because their blocks are not the default-option block), nothing else (no module `version`, no kernel / table version). Output and 27 gradients are
+  bit-identical to 3.0.1 (sha1, 6 shapes, `res/bit_release.json` = `res/bit_base301.json`), so the re-measure is for the record only: `judge owed` with the bump = 292 accuracy + 292 speed cases
+  on h100_sm90 (`res/owed_bump.txt`; 0 owed before). The kernel change is in `token_dit_train_rows.cu` (new template instantiations, new kernels `res_adaln_b_q8`; the
+  default kernels' existing instantiations are untouched) and `token_dit_train.py`; the FP8 module `token_dit_fp8_train.py` ships opt-in as in this branch. The prebuilt kernels wheel must be rebuilt (the rows source changed).
