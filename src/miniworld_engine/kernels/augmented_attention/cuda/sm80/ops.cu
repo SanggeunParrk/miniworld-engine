@@ -407,7 +407,7 @@ void pair_bias_fwd(torch::Tensor z, torch::Tensor w, torch::Tensor bo, torch::Te
 }
 
 namespace {
-template <int H, int R, bool PAD, typename T>
+template <int H, int R, bool PAD, typename T, typename TO>
 void launch_gen(const torch::Tensor& z, const torch::Tensor& wcm, torch::Tensor& bo, const unsigned char* kvp, int64_t N, int64_t NZ, int64_t C, double eps, double oscale, float fill) {
 #ifdef MWE_SM120
   // RTX 5090: the pair staged through shared memory in whole 128-B lines (pair_gen_sm120.cuh; bitwise the same result), where W' and the two-stage ring fit
@@ -416,12 +416,12 @@ void launch_gen(const torch::Tensor& z, const torch::Tensor& wcm, torch::Tensor&
     static bool set_s[64] = {};
     const int dev_s = at::cuda::current_device() & 63;
     if (!set_s[dev_s]) {
-      C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_staged_kernel<H, PAD, T, T>, cudaFuncAttributeMaxDynamicSharedMemorySize, AA80_SMEM_CAP));
+      C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_staged_kernel<H, PAD, T, TO>, cudaFuncAttributeMaxDynamicSharedMemorySize, AA80_SMEM_CAP));
       set_s[dev_s] = true;
     }
     dim3 grid_s((unsigned)(N / aa80::PG_TJ), (unsigned)(N / aa80::PG_ROWS));
-    aa80::pair_bias_gen_staged_kernel<H, PAD, T, T><<<grid_s, aa80::PG_NT, aa80::pg_smem<H>((int)C), at::cuda::getCurrentCUDAStream()>>>(
-        reinterpret_cast<const T*>(z.data_ptr()), wcm.data_ptr<float>(), reinterpret_cast<T*>(bo.data_ptr()), (int)N, (int)NZ, (int)C, kvp, (float)eps, (float)oscale, fill);
+    aa80::pair_bias_gen_staged_kernel<H, PAD, T, TO><<<grid_s, aa80::PG_NT, aa80::pg_smem<H>((int)C), at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const T*>(z.data_ptr()), wcm.data_ptr<float>(), reinterpret_cast<TO*>(bo.data_ptr()), (int)N, (int)NZ, (int)C, kvp, (float)eps, (float)oscale, fill);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
   }
@@ -431,35 +431,35 @@ void launch_gen(const torch::Tensor& z, const torch::Tensor& wcm, torch::Tensor&
   static bool set[64] = {};                                   // the attribute is per device (and per instantiation: a static of the template)
   const int dev = at::cuda::current_device() & 63;
   if (!set[dev]) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_kernel<H, R, PAD, T, T>, cudaFuncAttributeMaxDynamicSharedMemorySize, AA80_SMEM_CAP));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_kernel<H, R, PAD, T, TO>, cudaFuncAttributeMaxDynamicSharedMemorySize, AA80_SMEM_CAP));
     set[dev] = true;
   }
   dim3 grid((unsigned)(N / aa80::PB_TJ), (unsigned)(N / (4 * R)));
-  aa80::pair_bias_gen_kernel<H, R, PAD, T, T><<<grid, aa80::PB_NT, smem, at::cuda::getCurrentCUDAStream()>>>(
-      reinterpret_cast<const T*>(z.data_ptr()), wcm.data_ptr<float>(), reinterpret_cast<T*>(bo.data_ptr()), (int)N, (int)NZ, (int)C, kvp, (float)eps, (float)oscale, fill);
+  aa80::pair_bias_gen_kernel<H, R, PAD, T, TO><<<grid, aa80::PB_NT, smem, at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<const T*>(z.data_ptr()), wcm.data_ptr<float>(), reinterpret_cast<TO*>(bo.data_ptr()), (int)N, (int)NZ, (int)C, kvp, (float)eps, (float)oscale, fill);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template <int R, bool PAD, typename T>
+template <int R, bool PAD, typename T, typename TO>
 void launch_gen_h(int64_t H, const torch::Tensor& z, const torch::Tensor& wcm, torch::Tensor& bo, const unsigned char* kvp, int64_t N, int64_t NZ, int64_t C, double eps, double oscale, float fill) {
-#define GEN_H(HH) if (H == HH) { launch_gen<HH, R, PAD, T>(z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill); return; }
+#define GEN_H(HH) if (H == HH) { launch_gen<HH, R, PAD, T, TO>(z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill); return; }
   GEN_H(4) GEN_H(8) GEN_H(12) GEN_H(16) GEN_H(24) GEN_H(32)
 #undef GEN_H
   TORCH_CHECK(false, "pair_bias_gen: heads 4, 8, 12, 16, 24 or 32");
 }
 
-template <bool PAD, typename T>
+template <bool PAD, typename T, typename TO>
 void launch_gen_r(int64_t rows, int64_t H, const torch::Tensor& z, const torch::Tensor& wcm, torch::Tensor& bo, const unsigned char* kvp, int64_t N, int64_t NZ, int64_t C, double eps, double oscale, float fill) {
-  if (rows == 4) launch_gen_h<4, PAD, T>(H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
-  else if (rows == 1) launch_gen_h<1, PAD, T>(H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
-  else launch_gen_h<2, PAD, T>(H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
+  if (rows == 4) launch_gen_h<4, PAD, T, TO>(H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
+  else if (rows == 1) launch_gen_h<1, PAD, T, TO>(H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
+  else launch_gen_h<2, PAD, T, TO>(H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
 }
 }  // namespace
 
 // The pair bias at any pair width: bo [H, N, N] (z's dtype: bf16 or fp32) = oscale rstd (z . W' - mean sum W') from z [NZ, NZ, C] (C a multiple of 8) and wcm = W' channel-major [C, H] fp32
 // (H = 4, 8, 12, 16, 24, 32); the key mask kv, the padding N > NZ and the fill as ``pair_bias_fwd``.  ``rows`` (1, 2 or 4) is the rows a thread takes (the weights' shared-memory reads are shared by them).
 void pair_bias_gen(torch::Tensor z, torch::Tensor wcm, torch::Tensor bo, torch::Tensor kv, int64_t N, int64_t NZ, double eps, double oscale, int64_t rows) {
-  TORCH_CHECK(z.is_cuda() && (z.scalar_type() == at::kBFloat16 || z.scalar_type() == at::kFloat) && bo.is_cuda() && bo.scalar_type() == z.scalar_type() && z.is_contiguous() && bo.is_contiguous(),
+  TORCH_CHECK(z.is_cuda() && (z.scalar_type() == at::kBFloat16 || z.scalar_type() == at::kFloat) && bo.is_cuda() && (bo.scalar_type() == z.scalar_type() || bo.scalar_type() == at::kFloat) && z.is_contiguous() && bo.is_contiguous(),
               "pair_bias_gen: z and bo contiguous CUDA tensors of one dtype (bf16 or fp32)");
   const int64_t C = z.numel() / (NZ * NZ), H = wcm.size(1);
   TORCH_CHECK(C % 8 == 0 && z.numel() == NZ * NZ * C && NZ <= N && N % 64 == 0 && wcm.dim() == 2 && wcm.size(0) == C && wcm.scalar_type() == at::kFloat && wcm.is_contiguous() && wcm.is_cuda(),
@@ -469,11 +469,14 @@ void pair_bias_gen(torch::Tensor z, torch::Tensor wcm, torch::Tensor bo, torch::
   const at::cuda::CUDAGuard guard(z.device());
   const float fill = (float)(aa80::PB_MASKED * oscale);
   if (z.scalar_type() == at::kBFloat16) {
-    if (N == NZ) launch_gen_r<false, __nv_bfloat16>(rows, H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
-    else launch_gen_r<true, __nv_bfloat16>(rows, H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
+    if (bo.scalar_type() == at::kFloat) {   // bf16 pair, fp32 logits (the token DiT's bias-only attention: the logits are 1e3 .. 2e5, bf16 would round them to 32 .. 1024)
+      if (N == NZ) launch_gen_r<false, __nv_bfloat16, float>(rows, H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
+      else launch_gen_r<true, __nv_bfloat16, float>(rows, H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
+    } else if (N == NZ) launch_gen_r<false, __nv_bfloat16, __nv_bfloat16>(rows, H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
+    else launch_gen_r<true, __nv_bfloat16, __nv_bfloat16>(rows, H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
   } else {
-    if (N == NZ) launch_gen_r<false, float>(rows, H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
-    else launch_gen_r<true, float>(rows, H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
+    if (N == NZ) launch_gen_r<false, float, float>(rows, H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
+    else launch_gen_r<true, float, float>(rows, H, z, wcm, bo, kvp, N, NZ, C, eps, oscale, fill);
   }
 }
 

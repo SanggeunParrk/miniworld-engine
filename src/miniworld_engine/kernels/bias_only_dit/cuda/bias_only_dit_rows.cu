@@ -199,8 +199,8 @@ __global__ void __launch_bounds__(256) transpose_hll_kernel(const __nv_bfloat16*
 
 // One warp per row of L keys, 8 keys (16 B of bf16) per lane step, CPL steps per lane; in place is allowed (a row is read whole before
 // it is written).
-template <int CPL>
-__global__ void __launch_bounds__(256) softmax_rows_kernel(const __nv_bfloat16* __restrict__ BIAS, __nv_bfloat16* P,
+template <int CPL, typename IT = __nv_bfloat16>
+__global__ void __launch_bounds__(256) softmax_rows_kernel(const IT* __restrict__ BIAS, __nv_bfloat16* P,
     const bool* __restrict__ MASK, long R, int L) {
   const long row = (long)blockIdx.x * 8 + threadIdx.x / 32;
   const int lane = threadIdx.x % 32, nch = L / 8;
@@ -212,7 +212,7 @@ __global__ void __launch_bounds__(256) softmax_rows_kernel(const __nv_bfloat16* 
   for (int c = 0; c < CPL; ++c) {
     const int ch = lane + 32 * c;
     if (ch < nch) {
-      const float4 lo = V4<__nv_bfloat16>::load(BIAS + row * L + ch * 8), hi = V4<__nv_bfloat16>::load(BIAS + row * L + ch * 8 + 4);
+      const float4 lo = V4<IT>::load(BIAS + row * L + ch * 8), hi = V4<IT>::load(BIAS + row * L + ch * 8 + 4);
       const float e[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
       unsigned char mk[8];
       if (MASK) *reinterpret_cast<uint2*>(mk) = *reinterpret_cast<const uint2*>(MASK + ch * 8);
@@ -520,8 +520,9 @@ void softmax_t(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> pt_opt, 
 }
 
 void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask) {
-  TORCH_CHECK(bias.is_cuda() && bias.scalar_type() == at::kBFloat16 && bias.is_contiguous() && bias.dim() == 2, "softmax_rows: bf16 [R, L]");
-  TORCH_CHECK(p.scalar_type() == at::kBFloat16 && p.is_contiguous() && p.sizes() == bias.sizes(), "softmax_rows: p like bias");
+  const bool f32 = bias.scalar_type() == at::kFloat;       // fp32 logits (the sm_80 / sm_120 token DiT: the pair-bias logits stay fp32 up to the softmax), P bf16
+  TORCH_CHECK(bias.is_cuda() && (bias.scalar_type() == at::kBFloat16 || f32) && bias.is_contiguous() && bias.dim() == 2, "softmax_rows: bf16 or fp32 [R, L]");
+  TORCH_CHECK(p.scalar_type() == at::kBFloat16 && p.is_contiguous() && p.sizes() == bias.sizes(), "softmax_rows: p bf16 like bias");
   const int64_t R = bias.size(0), L = bias.size(1);
   TORCH_CHECK(L % 8 == 0 && L <= 3072, "softmax_rows: L a multiple of 8, at most 3072");
   const bool* mk = nullptr;
@@ -532,8 +533,17 @@ void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask)
   const at::cuda::CUDAGuard g(bias.device());
   auto st = at::cuda::getCurrentCUDAStream();
   const unsigned grid = (unsigned)((R + 7) / 8);
-  const auto* b = ptr<const __nv_bfloat16>(bias);
   auto* o = ptr<__nv_bfloat16>(p);
+  if (f32) {
+    const auto* b = ptr<const float>(bias);
+    if (L <= 512) softmax_rows_kernel<2, float><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
+    else if (L <= 1024) softmax_rows_kernel<4, float><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
+    else if (L <= 2048) softmax_rows_kernel<8, float><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
+    else softmax_rows_kernel<12, float><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
+  const auto* b = ptr<const __nv_bfloat16>(bias);
   if (L <= 512) softmax_rows_kernel<2><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
   else if (L <= 1024) softmax_rows_kernel<4><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
   else if (L <= 2048) softmax_rows_kernel<8><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);

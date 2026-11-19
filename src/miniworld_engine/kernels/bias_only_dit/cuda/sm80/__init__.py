@@ -206,7 +206,8 @@ DPB_CFG = 0
 
 class Dpb:
     """The A100 twin of ``cuda.DpbKernel``: ``dbias [nh L, L] = P o (sum_a do v^T - D)`` per head, ``D[h, i] = sum_a dd[a, h, i]`` -- ``do`` / ``v`` bf16 ``[A L, W]`` views (any row stride),
-    ``P`` / ``dbias`` bf16 ``[nh L, L]`` contiguous, ``dd`` fp32 ``[A, nh, L]``; a masked key (P = 0) gets 0."""
+    ``P`` bf16 / ``dbias`` bf16 or fp32 ``[nh L, L]`` contiguous, ``dd`` fp32 ``[A, nh, L]``; a masked key (P = 0) gets 0.  ``dpart`` (fp32 ``[(L / 128) 2, nh L]``, ``out`` fp32): the S mode --
+    ``out`` receives dP = sum_a do v^T and ``dpart`` the row sums of P dP (``dpart.sum(0)`` = D' = sum_j P dP: the caller finishes ``out = P (dP - D')``, whose row sums are 0 exactly)."""
 
     def __init__(self, nh: int, dh: int):
         assert dh in HEAD_WIDTHS, dh
@@ -221,6 +222,7 @@ class Dpb:
         out: torch.Tensor,
         A: int,
         cfg: int | None = None,
+        dpart: torch.Tensor | None = None,
     ) -> torch.Tensor:
         _ext().dpb(
             do,
@@ -232,6 +234,7 @@ class Dpb:
             self.nh,
             self.dh,
             DPB_CFG if cfg is None else cfg,
+            out.new_empty(0) if dpart is None else dpart,
         )
         return out
 
@@ -243,8 +246,8 @@ class Dpb32:
         assert dh in HEAD_WIDTHS, dh
         self.nh, self.dh = nh, dh
 
-    def __call__(self, do, v, P, dd, out, A):
-        _ext().dpb32(do, v, P, dd, out, A, self.nh, self.dh)
+    def __call__(self, do, v, P, dd, out, A, dpart=None):
+        _ext().dpb32(do, v, P, dd, out, A, self.nh, self.dh, out.new_empty(0) if dpart is None else dpart)
         return out
 
 

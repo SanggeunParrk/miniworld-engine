@@ -168,10 +168,11 @@ void launch_dpb_cfg(const bo80::DpbParams& p, int cfg) {
 
 // dbias [nh L, L] = P (sum_a do v^T - D) per head, D[h, i] = sum_a dd[a, h, i]: do / v bf16 views [A L, W = nh DH] (any row stride), P / dbias bf16 [nh L, L] contiguous, dd fp32 [A, nh, L];
 // ``cfg`` picks the schedule (0: 2 stages x 1 sample, two CTAs per SM; 1: 3 x 1; 2: 2 x 2; 3: 3 x 2)
-void dpb(torch::Tensor dout, torch::Tensor v, torch::Tensor P, torch::Tensor dd, torch::Tensor dbias, int64_t A, int64_t nh, int64_t dh, int64_t cfg) {
+void dpb(torch::Tensor dout, torch::Tensor v, torch::Tensor P, torch::Tensor dd, torch::Tensor dbias, int64_t A, int64_t nh, int64_t dh, int64_t cfg, torch::Tensor dpart) {
   check_view(dout, "do"); check_view(v, "v");
-  TORCH_CHECK(P.is_cuda() && P.scalar_type() == torch::kBFloat16 && P.is_contiguous() && P.dim() == 2 && dbias.is_cuda() && dbias.scalar_type() == torch::kBFloat16 && dbias.is_contiguous()
-              && dbias.sizes() == P.sizes(), "P and dbias must be contiguous CUDA bf16 [nh L, L]");
+  const bool d32 = dbias.is_cuda() && dbias.scalar_type() == torch::kFloat;   // fp32 dbias (P stays bf16): the token DiT keeps its pair-bias gradient unrounded
+  TORCH_CHECK(P.is_cuda() && P.scalar_type() == torch::kBFloat16 && P.is_contiguous() && P.dim() == 2 && dbias.is_cuda() && (d32 || dbias.scalar_type() == torch::kBFloat16) && dbias.is_contiguous()
+              && dbias.sizes() == P.sizes(), "P bf16 and dbias bf16 / fp32 must be contiguous CUDA [nh L, L]");
   const int64_t L = P.size(1);
   TORCH_CHECK(P.size(0) == nh * L && L % 128 == 0, "P must be [nh L, L] with L a multiple of 128");
   TORCH_CHECK(dout.size(0) == A * L && v.size(0) == A * L && dout.size(1) >= nh * dh && v.size(1) >= nh * dh, "bad operand sizes");
@@ -179,6 +180,11 @@ void dpb(torch::Tensor dout, torch::Tensor v, torch::Tensor P, torch::Tensor dd,
   TORCH_CHECK(cfg >= 0 && cfg <= 3, "cfg 0 .. 3");
   c10::cuda::CUDAGuard guard(dout.device());
   bo80::DpbParams p{bptr(dout), bptr(v), bptr(P), dd.data_ptr<float>(), bptr_w(dbias), (int)L, (int)nh, (int)A, dout.stride(0), v.stride(0), dh, dh};
+  if (d32) { p.dbias = nullptr; p.dbias32 = dbias.data_ptr<float>(); }
+  if (dpart.numel() > 0) {   // S mode: dbias (fp32) gets dP, dpart [(L / 128) 2, nh L] the row sums of P dP
+    TORCH_CHECK(d32 && dpart.is_cuda() && dpart.scalar_type() == torch::kFloat && dpart.is_contiguous() && dpart.numel() == (L / 128) * 2 * nh * L, "dpart: fp32 [(L / 128) 2, nh L], dbias fp32");
+    p.dpart = dpart.data_ptr<float>();
+  }
   switch (dh) {
     case 32: launch_dpb_cfg<32>(p, (int)cfg); break;
     case 48: launch_dpb_cfg<48>(p, (int)cfg); break;
@@ -204,7 +210,7 @@ void launch_dpb32(const bo80::DpbTParams& p) {
 }  // namespace
 
 // the fp32 / TF32 twin of dpb: do / v fp32 views [A L, W], P / dbias fp32 [nh L, L], dd fp32 [A, nh, L]
-void dpb32(torch::Tensor dout, torch::Tensor v, torch::Tensor P, torch::Tensor dd, torch::Tensor dbias, int64_t A, int64_t nh, int64_t dh) {
+void dpb32(torch::Tensor dout, torch::Tensor v, torch::Tensor P, torch::Tensor dd, torch::Tensor dbias, int64_t A, int64_t nh, int64_t dh, torch::Tensor dpart) {
   check_view32(dout, "do"); check_view32(v, "v");
   TORCH_CHECK(P.is_cuda() && P.scalar_type() == torch::kFloat32 && P.is_contiguous() && P.dim() == 2 && dbias.is_cuda() && dbias.scalar_type() == torch::kFloat32 && dbias.is_contiguous()
               && dbias.sizes() == P.sizes(), "P and dbias must be contiguous CUDA fp32 [nh L, L]");
@@ -214,6 +220,10 @@ void dpb32(torch::Tensor dout, torch::Tensor v, torch::Tensor P, torch::Tensor d
   TORCH_CHECK(dd.is_cuda() && dd.scalar_type() == torch::kFloat && dd.is_contiguous() && dd.numel() == A * nh * L, "dd must be a contiguous fp32 [A, nh, L]");
   c10::cuda::CUDAGuard guard(dout.device());
   bo80::DpbTParams p{dout.data_ptr<float>(), v.data_ptr<float>(), P.data_ptr<float>(), dd.data_ptr<float>(), dbias.data_ptr<float>(), (int)L, (int)nh, (int)A, dout.stride(0), v.stride(0)};
+  if (dpart.numel() > 0) {   // S mode: dbias gets dP, dpart [(L / 128) 2, nh L] the row sums of P dP
+    TORCH_CHECK(dpart.is_cuda() && dpart.scalar_type() == torch::kFloat && dpart.is_contiguous() && dpart.numel() == (L / 128) * 2 * nh * L, "dpart: fp32 [(L / 128) 2, nh L]");
+    p.dpart = dpart.data_ptr<float>();
+  }
   switch (dh) {
     case 32: launch_dpb32<32, 2, 2>(p); break;
     case 48: launch_dpb32<48, 2, 1>(p); break;

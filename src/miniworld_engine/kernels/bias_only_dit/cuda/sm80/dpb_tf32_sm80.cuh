@@ -39,6 +39,7 @@ struct DpbTParams {
   float* dbias;                 // [NH L][L]
   int L, nh, A;
   long long lddo, ldv;
+  float* dpart = nullptr;       // S mode (see dpb_sm80.cuh DpbParams::dpart): dbias receives dP, dpart the row sums of P dP
 };
 
 template <class G>
@@ -114,6 +115,30 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) dpb_tf32_kernel(const DpbTPa
     }
   }
 
+  if (p.dpart) {                                                  // S mode: dP out, the row sums of P dP (a fixed order, no atomics)
+    float* dp = p.dpart + ((size_t)(blockIdx.x * 2 + wn) * p.nh + h) * p.L + i0;
+#pragma unroll
+    for (int m = 0; m < 2; ++m) {
+#pragma unroll
+      for (int half = 0; half < 2; ++half) {
+        const int lr = 32 * wm + 16 * m + g8 + 8 * half;
+        const size_t base = ((size_t)h * p.L + i0 + lr) * p.L + j0 + 64 * wn + 2 * q4;
+        float part = 0.f;
+#pragma unroll
+        for (int nt = 0; nt < 8; ++nt) {
+          const float2 pv = __ldg(reinterpret_cast<const float2*>(p.P + base + 8 * nt));
+          const float s0 = acc[m][nt][2 * half], s1 = acc[m][nt][2 * half + 1];
+          *reinterpret_cast<float2*>(p.dbias + base + 8 * nt) = make_float2(s0, s1);
+          part = fmaf(pv.x, s0, part);
+          part = fmaf(pv.y, s1, part);
+        }
+        part += __shfl_xor_sync(0xffffffffu, part, 1);
+        part += __shfl_xor_sync(0xffffffffu, part, 2);
+        if (q4 == 0) dp[lr] = part;
+      }
+    }
+    return;
+  }
   // ---- epilogue: dbias = P (dP - D)
 #pragma unroll
   for (int m = 0; m < 2; ++m) {

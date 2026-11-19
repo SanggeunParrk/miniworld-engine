@@ -760,12 +760,13 @@ def pair_bias_generic(
     oscale: float = 1.0,
     out: torch.Tensor | None = None,
     rows: int | None = None,
+    out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """The pair bias ``LayerNorm(z) Wb^T`` at any width, head-major ``[H, n, n]`` in z's dtype (bf16 or fp32): ``z`` ``[NZ, NZ, C]`` (contiguous), ``wcm`` = the folded weight
     ``bias_weight x ln_weight`` fp32 channel-major ``[C, H]``, ``mask`` a bool ``[NZ]`` key mask or None, ``n`` the attention's length (a multiple of 128 >= NZ), ``oscale`` the scale
-    of the output (sqrt(head dim) for the bf16 core's raw units, 1 for the TF32 core's natural units).  A masked or padded key carries ``oscale * MASKED_BIAS``, a padded query row 0."""
+    of the output (sqrt(head dim) for the bf16 core's raw units, 1 for the TF32 core's natural units), ``out_dtype`` the logits' dtype (None: z's; ``torch.float32`` for a bf16 ``z``: the logits unrounded -- the bias-only token DiT keeps them fp32).  A masked or padded key carries ``oscale * MASKED_BIAS``, a padded query row 0."""
     nz, c, heads = z.shape[0], z.shape[-1], wcm.shape[1]
-    bo = out if out is not None else torch.empty(heads, n, n, device=z.device, dtype=z.dtype)
+    bo = out if out is not None else torch.empty(heads, n, n, device=z.device, dtype=z.dtype if out_dtype is None else out_dtype)
     _ext().pair_bias_gen(
         z.reshape(nz, nz, c),
         wcm,
