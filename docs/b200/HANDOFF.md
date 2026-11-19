@@ -82,3 +82,20 @@ All opt-in, default OFF; FP8-off outputs are bit-identical to the 3.0.3 + B200 b
 Registration (`fp8.py`): `B200_ROUTES` = {trimul, triattn, transition}; `B200_OPTIN` = {atom_dit}; `enable / disable / status / route_stats / _snapshot` aware of the B200 atom module; TriAttn switches stay on `h100_sm90`.
 Tested on the combined tree: gpu 831 passed, cpu 3500 passed, FP8-off bit identity (token DiT/APB 398, atom DiT 258, OPM+PWA 174, TriMul 24, Transition 23 shapes, TriAttn 90; eager + graph), `safe` end to end in one captured graph, prebuild sm100 835 artifacts / 0 not built.
 Open: end-level accuracy NOT run for any B200 e4m3 route; atom DiT effect <= 0.3 % and error 6x bf16 (kept out of `safe`); Transition D384 unserved; TriAttn q/k + 64-channel core closed; `tests/conftest.py` restores TF32 flags per test.
+
+## 20. End-level verification of the FP8 routes and the anthropic comparison (2026-11-20)
+
+**anthropic comparison (eval, CUDA graph, 0.15 s idle gap, ours = default route).** 25 modules, 1,626 anthropic cases (all lengths incl. L12288/16384 for the atom DiTs, AlignEuler, PoolAtoms). Every module except LayerNorm: 0 cases where ours is slower than anthropic (per-module worst ours/anthropic 0.12-0.85). **LayerNorm is an explicit exception (owner decision):** 5 cases are 1.002-1.004x (8.1 us vs 8.0 us, one graph tick) and 32 anthropic-supported master-dtype eval cases (L 256-2048, normalized_shape 64-384) are `unsupported` for the cuda backend, so unmeasured. Anthropic training is not compared (eval only, per owner).
+
+**FP8 `safe` end to end (structure level).** Only possible on a team-gm copy ported to the 3.0 flat `modules` API (engine 3.0.3 has no `ops/settings/architecture`; MiniWorld/team-gm have no 3.0-API revision). Port lives in a copy only (`$W/b2511/work/fp8-e2e/mw3`, `port.diff`), not committed anywhere. Model: v2 phase 2a epoch-200 EMA, 14 FoldBench targets (200-1976 tokens), 200 steps, 3 samples, recycles 10, USalign TM vs ground truth:
+
+| seed | bf16 | fp8 safe | diff |
+|---|---|---|---|
+| 0 | 0.6109 | 0.6071 | -0.0038 |
+| 1 | 0.6053 | 0.6086 | +0.0034 |
+| 2 | 0.6083 | 0.6121 | +0.0038 |
+
+Differences change sign across seeds and are smaller than the bf16 seed-to-seed variation (mean |dTM| 0.0218 between seeds); no degradation beyond seed variation was observed (3 seeds only). bf16 repeated with the same seed is byte-identical. The port itself matches the 2.2-engine reference in mean TM (0.6109 vs 0.6106) but not sample by sample on 4 targets.
+Routes actually exercised by this model: trimul, opm, pwa, transition (check() False, retries/fallbacks 0).
+
+**NOT verified at structure level:** TriAttn e4m3, token DiT expand, atom DiT e4m3 (the checkpoint has no triangle attention, a bias-only token DiT, and an SWA atom DiT that has no e4m3 route). Their evidence is module-level only (TriAttn ~2 %, token DiT 3-5 % relative error). A checkpoint using those blocks on the 3.0 API is required.
