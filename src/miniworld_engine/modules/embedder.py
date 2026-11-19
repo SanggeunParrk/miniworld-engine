@@ -104,7 +104,7 @@ class InputFeatureEmbedder(BackendModule):
         "cuda:a100_sm80": 8,
         "cuda:h100_sm90": 4,
         "triton": 2,
-        "cuda:5090_sm120": 2,
+        "cuda:5090_sm120": 5,
     }  # cuda:a100_sm80 8 / cuda:5090_sm120 2 (2026-11-15): its atom_norm LayerNorm runs the changed forward row kernels (sm_80 / sm_120a; LayerNorm cuda 3 on both cards); no kernel row bump: one would also owe every triton case that lists it
     # cuda:a100_sm80 7 (2026-11-13): its SWAAtomTransformer's
     #: The engine backends this composition hands to its children.
@@ -202,7 +202,9 @@ class InputFeatureEmbedder(BackendModule):
         missing = [type(c).__name__ for c in self._engine_children() if backend not in c.backends]
         if missing:
             return f"its {', '.join(missing)} has no {backend!r} backend"
-        if backend == "cuda":  # the H100 or (the children's sm_80 builds) the A100 and the RTX 5090; each child states its own range when it runs
+        if (
+            backend == "cuda"
+        ):  # the H100 or (the children's sm_80 builds) the A100 and the RTX 5090; each child states its own range when it runs
             return None if a100(pos) or sm120(pos) else h100_unsupported(pos)
         return triton_unsupported(pos)
 

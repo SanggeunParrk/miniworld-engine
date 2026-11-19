@@ -1254,8 +1254,11 @@ class AtomDiTMiniWorld(BackendModule):
         "anthropic": 2,
         "cuda:a100_sm80": 7,
         "cuda:h100_sm90": 3,
-        "cuda:5090_sm120": 2,
+        "cuda:5090_sm120": 5,
     }  # cuda:a100_sm80 7 (2026-11-13): the sm_80 window attention exits on a tile past seqused (zero rows, the same bits)
+    # cuda:5090_sm120 3 (3.0.5): global attention inference on its own sm_120a kernel (attn_global_sm120.cuh, in place of FlashAttention-2) and on the fused qkvg / FFN stages; bf16 training forward on the fused stages from 4096 rows; modulation backward on cuBLAS at every row count; weight casts in one launch
+    # cuda:5090_sm120 4 (3.0.5): bf16 training backward on the RTX 5090: the FFN backward's dy kernel and the qkvg backward as K-split kernels streaming their weight through a cp.async ring (bwd_ks_sm120.cuh, in place of cuBLAS products + row stages), the five weight gradients as one grouped split-K GEMM (wgrad5_sm120.cu, in place of five cuBLAS products), the FFN gate kernel's launch table (fp32 sums in another order; no change of any other output)
+    # cuda:5090_sm120 5 (3.0.5): global-attention training up to 3072 rows per sample on the sm_120a forward with lse and backward (attn_global_sm120.cuh, in place of FlashAttention-2 fwd / bwd; outputs within bf16 noise)
     # cuda:h100_sm90 3 (3.0.1): bf16 training: the modulation table is bf16 (hoist GEMMs on bf16 operands, slab kernels read it and write dmod in bf16); A 48 x 4096 atoms, 3 blocks 11.09 -> 9.80 ms
 
     def __init__(
@@ -1496,7 +1499,9 @@ class AtomDiTMiniWorld(BackendModule):
         if torch.is_grad_enabled() and any(t.requires_grad for t in (q, c, wmod, *weights)):
             from miniworld_engine.kernels.integrations.token_dit_train import _native_caller_output
 
-            mod = _native_caller_output(SWADiTModulationH100.apply(c, wmod, bf16_table(q, c, self.attn.half_window)), cond, wmod, force=True)
+            mod = _native_caller_output(
+                SWADiTModulationH100.apply(c, wmod, bf16_table(q, c, self.attn.half_window)), cond, wmod, force=True
+            )
             # one modulation row per sequence row: B = N (no augment structure is known here)
             return SWADiTBlockFunction.apply(q, mod, cos, sin, seqused, *weights, n, self.attn.half_window)
         return self._h100_eval(q, native_h100_silu(c), cos, sin, seqused)
@@ -1654,8 +1659,9 @@ class SWAAtomTransformer(BackendModule):
         "cuda:a100_sm80": 7,
         "cuda:h100_sm90": 4,
         "triton": 2,
-        "cuda:5090_sm120": 2,
+        "cuda:5090_sm120": 5,
     }  # cuda:a100_sm80 7 (2026-11-13): as AtomDiTMiniWorld
+    # cuda:5090_sm120 4 (3.0.5): as AtomDiTMiniWorld (bf16 training backward kernels)
     # cuda:h100_sm90 4 (3.0.1): as AtomDiTMiniWorld (bf16 training modulation table)
 
     class Config(BaseModel):
@@ -1888,7 +1894,9 @@ class AtomDiTESMFold2Pair(BackendModule):
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     backends = ("pytorch", "triton", "cuda")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:5090_sm120": 1}  # 2026-11-12: the sm_80 paths built for sm_120a (bias tile / band read from global memory)
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:5090_sm120": 1
+    }  # 2026-11-12: the sm_80 paths built for sm_120a (bias tile / band read from global memory)
 
     def __init__(
         self, d_single: int = 128, d_cond: int = 128, d_pair: int = 16, n_head: int = 4, n: int = 2, *, backend: str = "pytorch"

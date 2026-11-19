@@ -28,6 +28,34 @@ C, H, D = sm80.C, sm80.H, sm80.D
 _BF, _F32 = torch.bfloat16, torch.float32
 #: RTX 5090 bf16 window inference on the fused stages within 99 KB (``sm80.block_infer_sm120``); False: the composed row stages (``_fwd_fp32``)
 FUSED_SM120 = True
+#: RTX 5090 bf16 training forward on the fused stages (``sm80.block_infer_sm120`` with ``save``: the saves of the backward written by the stages themselves) from this many rows; None: the composed row stages
+TRAIN_FUSED_SM120_MIN_ROWS: int | None = 4096
+#: RTX 5090 bf16 training backward: the FFN backward's gate kernel and the out-projection backward of the sm_80 stages (``sm80.ffn_bwd_gate_sm120`` / ``oproj_bwd``) in place of the composed row stages around cuBLAS products
+BWD_FUSED_SM120 = True
+#: RTX 5090 training backward: the FFN backward's dy kernel and the qkvg backward kernel with their weights STREAMED (``bwd_ks_sm120.cuh``; the sm_80 kernels keep 128 KB resident) in place of
+#: the cuBLAS products and row stages around them
+BWD_STREAM_SM120 = True
+#: RTX 5090 training backward: the five weight-gradient GEMMs as one grouped kernel (``sm80.wgrad5_sm120``, ``wgrad5_sm120.cu``) in place of five cuBLAS products; needs the row count a multiple of 256
+WGRAD5_SM120 = True
+#: ... up to this many rows (measured: 48 samples x 2048 .. 8192 rows, 98304 .. 393216: cuBLAS and the kernel are level)
+WGRAD5_MAX_ROWS_SM120 = 16384
+#: the out-projection backward kernel's launch shape on the RTX 5090 (``sm80.oproj_bwd`` cfg: warps per CTA 8 / 4 / 2 / 1 for 0 / 1 / 2 / 3)
+OPROJ_BWD_CFG_SM120 = 1
+#: RTX 5090: the bf16 modulation backward on cuBLAS products (``_mod_bwd``) at every row count (the A100 table: up to 3072 rows)
+MOD_BWD_GEMM_SM120 = True
+#: RTX 5090 global-attention inference on ``attn_global_sm120.cuh`` (False: FlashAttention-2); one sample from this many rows stays on FlashAttention-2 (measured: 8192 rows 270 vs 254 us)
+GLOBAL_SM120 = True
+GLOBAL_SM120_SINGLE_MAX = 8192
+#: RTX 5090 global-attention TRAINING on the sm_120a forward with lse and backward of ``attn_global_sm120.cuh`` (False: FlashAttention-2 fwd / bwd)
+GLOBAL_TRAIN_SM120 = True
+#: ... for sequences up to this length (graph replays, S 1024 / 2048 / 4096 / 5120: forward + backward 48 / 95 / 309 / 383 us against FlashAttention-2 69 / 125 / 298 / 371: the backward kernel loses from 4096)
+GLOBAL_TRAIN_SM120_MAX_S = 3072
+
+
+def _ks_ok(m: int, s: int) -> bool:
+    """The K-split backward kernels (``bwd_ks_sm120.cuh``) hold one tile group per SM: at most 4 row tiles of 16 per CTA."""
+    sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return -(-(-(-s // 16) * (m // s)) // 4) <= sms
 
 
 def _rows(stage: int, ins: list, outs: list, n: int, s: int, bf: bool) -> None:
@@ -62,11 +90,36 @@ def _head_major(t: torch.Tensor, n: int, s: int) -> torch.Tensor:
     return t.view(n, s, H, D).transpose(1, 2).contiguous()
 
 
-def attention_fwd(qh, kh, vh, seqused, half_window: int, out_dtype: torch.dtype = _BF):
+def attention_fwd(qh, kh, vh, seqused, half_window: int, out_dtype: torch.dtype = _BF, inference: bool = False):
     """The attention of the block on bf16 head-major Q / K / V [N, 4, S, 32]: ``(O [N S, 128] bf16, lse)``, rows >= seqused 0. The
     window (half window 64) on the sm_80 kernel; global attention on FlashAttention-2 (its own lse layout, read back only by
     :func:`attention_bwd`). ``out_dtype`` fp32 (the window kernel only): O
-    unrounded, as the fp32 block takes it."""
+    unrounded, as the fp32 block takes it. ``inference`` (no lse wanted; the RTX 5090): global attention on the sm_120a kernel of ``attn_global_sm120.cuh``
+    (head-major planes read as they are, keys split over two warps; ``lse`` None), from the row counts where it beats FlashAttention-2."""
+    if (
+        inference
+        and is_global(half_window)
+        and _sm120.is_sm120(qh.device)
+        and GLOBAL_SM120
+        and (qh.shape[0] > 1 or qh.shape[2] < GLOBAL_SM120_SINGLE_MAX)
+    ):
+        n, _, s, _ = qh.shape
+        o = torch.empty(n * s, C, device=qh.device, dtype=_BF)
+        sm80._ext_sm120().swa_attn_global_fwd(qh, kh, vh, seqused.contiguous(), o, None)
+        return o, None
+    if (
+        not inference
+        and is_global(half_window)
+        and out_dtype == _BF
+        and GLOBAL_TRAIN_SM120
+        and qh.shape[2] <= GLOBAL_TRAIN_SM120_MAX_S
+        and _sm120.is_sm120(qh.device)
+    ):
+        n, _, s, _ = qh.shape  # training: the sm_120a kernel with its lse ([N, 4, S] natural log) for the backward of the same file
+        o = torch.empty(n * s, C, device=qh.device, dtype=_BF)
+        lse = torch.empty(n, H, s, device=qh.device, dtype=_F32)
+        sm80._ext_sm120().swa_attn_global_fwd(qh, kh, vh, seqused.contiguous(), o, lse)
+        return o, lse
     if not is_global(half_window):
         if out_dtype == _BF:
             return sm80.attn_fwd(qh, kh, vh, seqused)
@@ -90,6 +143,10 @@ def attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window: int):
     if not is_global(half_window):
         return sm80.attn_bwd(qh, kh, vh, d_o, lse, delta, seqused)
     n, _, s, _ = qh.shape
+    if GLOBAL_TRAIN_SM120 and _sm120.is_sm120(qh.device) and lse.dim() == 3:  # the lse of the sm_120a forward ([N, 4, S] fp32)
+        dq, dk, dv = (torch.empty_like(qh) for _ in range(3))
+        sm80._ext_sm120().swa_attn_global_bwd(qh, kh, vh, d_o, lse, delta, seqused.contiguous(), dq, dk, dv)
+        return dq, dk, dv
     cu, _used_k = _varlen(seqused, s)
     q, k, v = (_token_major(t) for t in (qh, kh, vh))
     empty = torch.empty(0, device=qh.device)
@@ -157,6 +214,10 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
     bf = q.dtype == _BF
     act = q.dtype
     mm = torch.mm if bf else _mm
+    if bf and save and TRAIN_FUSED_SM120_MIN_ROWS is not None and m >= TRAIN_FUSED_SM120_MIN_ROWS and _sm120.is_sm120(dev):
+        return sm80.block_infer_sm120(
+            q, mod, cos, sin, seqused.contiguous(), wqkv, wg, wo, wu, wd, FP32_EPS, FP32_EPS, is_global(half_window), True
+        )
 
     def empty(*shape, dtype=act):
         return torch.empty(shape, device=dev, dtype=dtype)
@@ -170,7 +231,9 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
     qh, kh, vh = (empty(n, H, s, D, dtype=_BF) for _ in range(3))
     g, pq, pk = (empty(m, C) for _ in range(3))
     _rows(1, [p, cos, sin], [qh, kh, vh, g, pq, pk], n, s, bf)
-    o, lse = attention_fwd(qh, kh, vh, seqused, half_window, act)  # fp32 O from the window kernel (global: bf16); bf16 O for bf16
+    o, lse = attention_fwd(
+        qh, kh, vh, seqused, half_window, act, inference=not save
+    )  # fp32 O from the window kernel (global: bf16); bf16 O for bf16
     gated = empty(m, C)
     _rows(2, [o, g], [gated], n, s, bf)
     att = mm(gated, wo.t())
@@ -189,7 +252,7 @@ def _fwd_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: int,
 
 
 def _bwd_fp32(
-    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, half_window: int
+    dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, half_window: int, forms=None
 ) -> list[torch.Tensor]:
     """``[dq, dmod, dWqkv, dWg, dWo, dWu, dWd]`` fp32 of :func:`_fwd_fp32` (``dispatch._native_h100_bwd``'s fp32 branch); for bf16 (the
     RTX 5090) the activation gradients bf16 as the forward's, dmod and the weight gradients fp32."""
@@ -204,26 +267,55 @@ def _bwd_fp32(
         return torch.empty(shape, device=dev, dtype=dtype)
 
     dmod = torch.empty(mod.shape, device=dev, dtype=_F32)
-    dffn = empty(m, C)
-    _rows(6, [dy, mod, ffn], [dffn, dmod], n, s, bf)
-    ab, dh = mm(y, wu.t()), mm(dffn, wd)
-    dab, hh = empty(m, 4 * C), empty(m, 2 * C)
-    _rows(7, [ab, dh], [dab, hh], n, s, bf)
-    d_y = mm(dab, wu)
-    dq1 = empty(m, C)
-    _rows(8, [dy, d_y, q1, mod], [dq1, dmod], n, s, bf)
-    datt, gated = empty(m, C), empty(m, C)
-    _rows(9, [dq1, mod, att, o, g], [datt, gated, dmod], n, s, bf)
-    dgated = mm(datt, wo)
-    d_o, dg, delta = empty(m, C, dtype=_BF), empty(m, C), empty(n, H, s, dtype=_F32)
-    _rows(10, [dgated, o, g], [d_o, dg, delta], n, s, bf)
+    f = forms or {}
+    fused = (
+        bf and BWD_FUSED_SM120 and "wdt" in f and "wot" in f and _sm120.is_sm120(dev)
+    )  # the RTX 5090: the sm_80 kernels whose weights fit its 99 KB
+    if fused:  # stages 6 + 7 and their two products: the FFN backward's gate kernel (a streamed 72 KB weight ring)
+        dffn, hh, dab = sm80.ffn_bwd_gate_sm120(dy.reshape(m, C), y, ffn, mod, wu, f["wdt"], dmod, n, s)
+    else:
+        dffn = empty(m, C)
+        _rows(6, [dy, mod, ffn], [dffn, dmod], n, s, bf)
+        ab, dh = mm(y, wu.t()), mm(dffn, wd)
+        dab, hh = empty(m, 4 * C), empty(m, 2 * C)
+        _rows(7, [ab, dh], [dab, hh], n, s, bf)
+    if (
+        fused and BWD_STREAM_SM120 and _ks_ok(m, s)
+    ):  # stage 8 and the product before it: dq1 and d shift_f | d scale_f from dab Wu, the weight streamed
+        dq1 = sm80.ffn_bwd_dy_sm120(dab, q1, dy.reshape(m, C), mod, f["wut"], dmod, n, s, FP32_EPS)
+    else:
+        d_y = mm(dab, wu)
+        dq1 = empty(m, C)
+        _rows(8, [dy, d_y, q1, mod], [dq1, dmod], n, s, bf)
+    if fused:  # stages 9 + 10 and the product between them: the out-projection backward (32 KB of Wo^T)
+        d_o, dg, datt, gated, delta = sm80.oproj_bwd(
+            dq1, o, g, att, mod, wo, dmod, n, s, sm80.MODE_SINGLE, OPROJ_BWD_CFG_SM120, wot=f["wot"]
+        )
+    else:
+        datt, gated = empty(m, C), empty(m, C)
+        _rows(9, [dq1, mod, att, o, g], [datt, gated, dmod], n, s, bf)
+        dgated = mm(datt, wo)
+        d_o, dg, delta = empty(m, C, dtype=_BF), empty(m, C), empty(n, H, s, dtype=_F32)
+        _rows(10, [dgated, o, g], [d_o, dg, delta], n, s, bf)
     dqh, dkh, dvh = attention_bwd(qh, kh, vh, o, d_o, lse, delta, seqused, half_window)
-    dp = empty(m, 4 * C)
-    _rows(11, [pq, pk, dqh, dkh, dvh, dg, cos, sin], [dp], n, s, bf)
-    wstack = torch.cat([wqkv, wg])
-    dx = mm(dp, wstack)
-    dq = empty(m, C)
-    _rows(12, [dq1, dx, q, mod], [dq, dmod], n, s, bf)
+    if (
+        fused and BWD_STREAM_SM120 and "wt" in f and _ks_ok(m, s)
+    ):  # stages 11 + 12 and the product between them: dP, dx = dP W and the adaLN backward, the weight streamed
+        dq, dp = sm80.qkvg_bwd_sm120(
+            q.reshape(m, C), pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, f["wt"], dmod, n, s, FP32_EPS, FP32_EPS
+        )
+    else:
+        dp = empty(m, 4 * C)
+        _rows(11, [pq, pk, dqh, dkh, dvh, dg, cos, sin], [dp], n, s, bf)
+        wstack = torch.cat([wqkv, wg])
+        dx = mm(dp, wstack)
+        dq = empty(m, C)
+        _rows(12, [dq1, dx, q, mod], [dq, dmod], n, s, bf)
+    if (
+        fused and WGRAD5_SM120 and m <= WGRAD5_MAX_ROWS_SM120 and sm80.wgrad5_ok_sm120(m)
+    ):  # the five weight gradients in one grouped split-K GEMM + one reduction (cuBLAS runs them at ~40 TFLOPs there)
+        dwqkv, dwg, dwo, dwu, dwd = sm80.wgrad5_sm120(dp, x, dab, y, datt, gated, dffn, hh)
+        return [dq.view(n, s, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
     return [
         dq.view(n, s, C),
         dmod,
@@ -358,9 +450,12 @@ def _mod_bwd(dmod: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.T
     dWmod partial sums run on a few CTAs there (L 1024: 40 us of a 270 us step)."""
     tc = sm80.train_cfg(c.shape[0])
     bf = c.dtype == _BF
-    if bf and not tc.get("mod_bwd_gemm"):
+    gemm = tc.get("mod_bwd_gemm") or (
+        bf and MOD_BWD_GEMM_SM120 and _sm120.is_sm120(c.device)
+    )  # the RTX 5090: cuBLAS at every row count (L 5120: 12 % of the step)
+    if bf and not gemm:
         return sm80.mod_bwd(dmod, c, a, wmod, dw_dtype=_F32, **tc.get("mod_bwd", {}))
-    if bf:
+    if bf:  # the gemm form
         w32, a32 = torch.empty(wmod.shape, device=c.device, dtype=_F32), torch.empty(a.shape, device=c.device, dtype=_F32)
         sm80._ext().native_copy([wmod, a], [w32, a32], 0)  # exact: bf16 values in fp32
         wmod, a = w32, a32
@@ -390,9 +485,14 @@ def block(x, cond, cos, sin, seqused, half_window: int, weights) -> torch.Tensor
     with torch.autocast("cuda", enabled=False):
         mod = _mod_fwd(c, ws[0], False)[0]
         if _sm120.is_sm120(x.device):
-            if x.dtype == _BF and not is_global(half_window) and FUSED_SM120 and x.shape[0] * x.shape[1] >= sm80.FUSED_MIN_ROWS_SM120:  # the fused bf16 stages within 99 KB
-                return sm80.block_infer_sm120(x, mod, cos, sin, seqused, *ws[1:], FP32_EPS, FP32_EPS)
-            if x.dtype == _F32 and not is_global(half_window) and torch.backends.cuda.matmul.allow_tf32 and FUSED_SM120:  # the TF32 row kernels with shallower weight rings
+            glob = is_global(half_window)
+            if (
+                x.dtype == _BF and (not glob or GLOBAL_SM120) and FUSED_SM120 and x.shape[0] * x.shape[1] >= sm80.FUSED_MIN_ROWS_SM120
+            ):  # the fused bf16 stages within 99 KB (a global window: around attn_global_sm120.cuh)
+                return sm80.block_infer_sm120(x, mod, cos, sin, seqused.contiguous(), *ws[1:], FP32_EPS, FP32_EPS, glob)
+            if (
+                x.dtype == _F32 and not is_global(half_window) and torch.backends.cuda.matmul.allow_tf32 and FUSED_SM120
+            ):  # the TF32 row kernels with shallower weight rings
                 return _infer_fp32(x, mod, cos, sin, seqused, *ws[1:], half_window, sm120=True)
             # the row stages around cuBLAS (the A100 fused stages' weight tiles exceed its 99 KB)
             return _fwd_fp32(x, mod, cos, sin, seqused, *ws[1:], half_window, False)[0]
@@ -438,7 +538,9 @@ class SWABlockA100(torch.autograd.Function):
         raw = (wmod, wqkv, wg, wo, wu, wd)
         ctx.meta = (half_window, [w.dtype for w in raw], cond.shape, cond.dtype)
         forms: dict[str, torch.Tensor] = {}
-        if x.dtype == _BF and not _sm120.is_sm120(x.device) and all(w.shape[-1] == C for w in raw[:5]):  # bf16: the casts and the backward's transposes in one launch
+        if x.dtype == _BF and all(
+            w.shape[-1] == C for w in raw[:5]
+        ):  # bf16: the casts and the backward's transposes in one launch (the RTX 5090: its composed backward reads no transposed form)
             ws, forms = train_forms(raw)
             x, c, cos, sin, _ = _prepare(x, cond, cos, sin, ())
         else:
@@ -463,7 +565,7 @@ class SWABlockA100(torch.autograd.Function):
             if x.dtype == _BF and not _sm120.is_sm120(x.device):
                 dx, dmod, *dw = _bwd_bf16(*args, forms=forms)
             else:  # fp32, or the RTX 5090 (the bf16 stages keep 128 KB of weights resident: the composed fp32-structured path, bf16 rounded)
-                dx, dmod, *dw = _bwd_fp32(*args)
+                dx, dmod, *dw = _bwd_fp32(*args, forms=forms)
             dc, dwmod = _mod_bwd(dmod, c, a, wmod)
         grads = [g.to(dt) for g, dt in zip((dwmod, *dw), dtypes, strict=True)]
         return dx, dc.view(cond_shape).to(cond_dtype), None, None, None, None, *grads

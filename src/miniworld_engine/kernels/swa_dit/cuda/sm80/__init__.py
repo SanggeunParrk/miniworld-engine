@@ -559,7 +559,7 @@ _INFER_DEFAULT_SM120 = (dict(cfg=1, nsplit=1), 0)
 FUSED_MIN_ROWS_SM120 = 2049
 
 
-def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: float, qk_eps: float) -> torch.Tensor:
+def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: float, qk_eps: float, glob: bool = False, save: bool = False):
     """The bf16 window block's inference on the RTX 5090: ``q`` [N, S, 128] bf16, ``mod`` [N S, 768] fp32 (one modulation row per sequence row), ``cos`` / ``sin``
     [N S, 16] fp32 -> [N, S, 128] bf16.  ``block_fwd``'s three stages (the same statements and rounding points) with the qkvg / FFN kernels of ``fused_sm120.cu``;
     the launch shapes from ``_INFER_CFG_SM120``."""
@@ -570,8 +570,124 @@ def block_infer_sm120(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, eps: floa
     ext = _ext_sm120()
     qh, kh, vh = (torch.empty(n, H, s, D, device=q.device, dtype=torch.bfloat16) for _ in range(3))
     g = torch.empty(m, C, device=q.device, dtype=torch.bfloat16)
-    ext.swa_qkvg_fwd_half(qf, mod, cos, sin, wqkv, wg, qh, kh, vh, g, s, n, eps, qk_eps, qcfg["cfg"], False, qcfg["nsplit"], qcfg.get("max_pairs", 0))
-    o, _ = attn_fwd(qh, kh, vh, seqused, save_lse=False)
+    xs, pqs, pks = (torch.empty(m, C, device=q.device, dtype=torch.bfloat16) if save else None for _ in range(3))
+    q1s, atts, ys, ffs = (torch.empty(m, C, device=q.device, dtype=torch.bfloat16) if save else None for _ in range(4))
+    ext.swa_qkvg_fwd_half(
+        qf,
+        mod,
+        cos,
+        sin,
+        wqkv,
+        wg,
+        qh,
+        kh,
+        vh,
+        g,
+        s,
+        n,
+        eps,
+        qk_eps,
+        qcfg["cfg"],
+        False,
+        qcfg["nsplit"],
+        qcfg.get("max_pairs", 0),
+        *(xs, pqs, pks),
+    )
+    lse = None
+    if glob and not save:  # global attention: every key of the sequence (attn_global_sm120.cuh), the same qkvg / FFN stages around it
+        o = torch.empty_like(qf)
+        ext.swa_attn_global_fwd(qh, kh, vh, seqused, o, None)
+    elif glob:  # training: FlashAttention-2 with its lse (the backward reads it)
+        from miniworld_engine.kernels.swa_dit.cuda.sm80 import composed
+
+        o, lse = composed.attention_fwd(qh, kh, vh, seqused, 1 << 30)
+    else:
+        o, lse = attn_fwd(qh, kh, vh, seqused, save_lse=save)
     out = torch.empty_like(qf)
-    ext.swa_ffn_fwd_u32(qf, g, o, mod, wo, wu, wd, out, s, n, eps, fcfg)
+    ext.swa_ffn_fwd_u32(qf, g, o, mod, wo, wu, wd, out, s, n, eps, fcfg, *(q1s, atts, ys, ffs))
+    if save:
+        return [out.view(n, s, C), qh, kh, vh, g, o, lse, q1s, xs, pqs, pks, atts, ys, ffs]
     return out.view(n, s, C)
+
+
+def _gate_launch_sm120(m: int, s: int) -> tuple[int, int]:
+    """(cfg, hsplit) of the FFN backward's gate kernel on the RTX 5090 by the row count M (graph replays of every cfg x hsplit, one sample, 2026-11-19; us): the 4-warp CTAs (cfg 1) with the hidden chunks over 8 / 4 / 2 CTAs
+    per tile group up to 5120 rows (M 1024: 6.6, 2048: 8.5, 4096: 12.8, 5120: 13.6 -- the 8-warp CTAs with the old rule 8.9 / 9.8 / 13.1 / 19.0), the 8-warp CTAs over 2 CTAs past it (6144 .. 8192: 19.4 .. 20.3)."""
+    if m <= 1024:
+        return 1, 8
+    if m <= 2048:
+        return 1, 4
+    if m <= 5120:
+        return 1, 2
+    return 0, 2
+
+
+def ffn_bwd_gate_sm120(dy, y, ffn, mod, wu, wdt, dmod, n: int, s: int):
+    """The FFN backward's gate kernel alone (``fused_sm120.cu``): ``(dffn, hh, dab)`` bf16 of ``dy`` / ``y`` / ``ffn`` [M, 128], ``mod`` [M, 768] fp32 (one modulation row per sequence row), ``wu`` [512, 128],
+    ``wdt`` = Wd^T [256, 128]; d gate_f goes into columns 640 .. 767 of ``dmod``. The rest of the FFN backward (dy = dab Wu, the adaLN backward) stays with the caller."""
+    m = dy.shape[0]
+    dffn = torch.empty(m, C, device=dy.device, dtype=torch.bfloat16)
+    hh = torch.empty(m, NHID, device=dy.device, dtype=torch.bfloat16)
+    dab = torch.empty(m, 2 * NHID, device=dy.device, dtype=torch.bfloat16)
+    cfg, hsplit = _gate_launch_sm120(m, s)
+    _ext_sm120().swa_ffn_bwd_gate(dy, y, ffn, mod, wu.contiguous(), wdt, dffn, hh, dab, dmod, s, n, cfg, hsplit)
+    return dffn, hh, dab
+
+
+def ffn_bwd_dy_sm120(dab, q1, dy, mod, wut, dmod, n: int, s: int, eps: float):
+    """The FFN backward's dy kernel on the RTX 5090 (``bwd_ks_sm120.cuh``: ``Wu^T`` streamed through a cp.async ring in place of the 128 KB resident one, K split over 4 warps per tile): ``dq1`` [M, 128] bf16 of ``dab`` [M, 512],
+    ``q1`` / ``dy`` [M, 128] bf16, ``mod`` [M, 768] fp32, ``wut`` = Wu^T [128, 512]; d shift_f | d scale_f go into columns 384 .. 639 of ``dmod``."""
+    dq1 = torch.empty_like(q1)
+    _ext_sm120().swa_ffn_bwd_dy_stream(dab, q1, dy, mod, wut, dq1, dmod, s, n, eps)
+    return dq1
+
+
+def qkvg_bwd_sm120(qi, pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wt, dmod, n: int, s: int, eps: float, qk_eps: float):
+    """The qkvg backward on the RTX 5090 (``bwd_ks_sm120.cuh``: ``(Wqkv | Wg)^T`` streamed): ``(dq [M, 128], dP [M, 512])`` bf16, the operands of :func:`qkvg_bwd` (``wt`` = (Wqkv | Wg)^T [128, 512]);
+    d shift_a | d scale_a go into columns 0 .. 255 of ``dmod``."""
+    m = qi.shape[0]
+    dq = torch.empty(m, C, device=qi.device, dtype=torch.bfloat16)
+    dp = torch.empty(m, 4 * C, device=qi.device, dtype=torch.bfloat16)
+    _ext_sm120().swa_qkvg_bwd_stream(qi, pq, pk, dqh, dkh, dvh, dg, dq1, mod, cos, sin, wt, dq, dp, dmod, s, n, eps, qk_eps)
+    return dq, dp
+
+
+@functools.lru_cache(maxsize=1)
+def _ext_wgrad5_sm120():
+    """The sm_120a extension of the five grouped weight-gradient GEMMs (``wgrad5_sm120.cu``)."""
+    ensure_cuda_home()
+    from miniworld_engine.kernels._nvcc import load_extension as _load
+
+    return _load(
+        name="swa_wgrad5_sm120",
+        sources=[str(_dir / "wgrad5_sm120.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_120a,code=sm_120a",
+            "-DMWE_SM120=1",
+            f"-I{_dir}",
+            "-Xcompiler=-fno-gnu-unique",
+        ],
+        extra_cflags=["-std=c++17", "-O3", "-fno-gnu-unique"],
+        verbose=False,
+    )
+
+
+#: rows of K a variant of :func:`wgrad5_sm120` needs to be a multiple of (splits x 32)
+WGRAD5_VARIANT_SM120 = 2
+
+
+def wgrad5_ok_sm120(m: int, variant: int | None = None) -> bool:
+    v = WGRAD5_VARIANT_SM120 if variant is None else variant
+    return m % ((32 if v == 1 else 8 if v in (2, 4, 5) else 4 if v == 6 else 16) * 32) == 0
+
+
+def wgrad5_sm120(dp, x, dab, y, datt, gated, dffn, hh, variant: int | None = None):
+    """The five weight gradients (fp32, unrounded) of the training backward on the RTX 5090: ``(dWqkv [384, 128], dWg [128, 128], dWo [128, 128], dWu [512, 128], dWd [128, 256])`` of
+    ``dp^T x`` (split into q k v | g), ``datt^T gated``, ``dab^T y``, ``dffn^T hh`` over the M rows (bf16 [M, .]): one split-K grouped GEMM and one reduction."""
+    dqkv, dg, dwu, dwo, dwd = _ext_wgrad5_sm120().compute(
+        dp, x, dab, y, datt, gated, dffn, hh, WGRAD5_VARIANT_SM120 if variant is None else variant
+    )
+    return dqkv, dg, dwo, dwu, dwd
