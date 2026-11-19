@@ -568,10 +568,10 @@ void pair_bias_gen_bwd_te(torch::Tensor z, torch::Tensor wcm, torch::Tensor db, 
 #endif
 
 namespace {
-template <int C, int H>
+template <int C, int H, typename TZ, bool D3>
 void launch_gen_bwd_tc(const torch::Tensor& z, const torch::Tensor& wcm, const torch::Tensor& db, torch::Tensor& dz, torch::Tensor& pw, const unsigned char* kvp, int64_t N, int64_t NZ,
                        int64_t B, int64_t nct, double eps) {
-  using G = aa80::PbTcCfg<C, H>;
+  using G = aa80::PbTcCfg<C, H, (int)sizeof(TZ)>;
 #ifdef MWE_SM120
   if constexpr (!G::FITS) {  // C 512 x 16 / 24 heads: over 99 KB at 2 stages (the caller takes the one-pass kernel, pair_bias_generic_backward_tc_supported)
     TORCH_CHECK(false, "pair_bias_gen_bwd_tc: C ", C, " x ", H, " heads does not fit 99 KB of shared memory on sm_120a");
@@ -582,21 +582,21 @@ void launch_gen_bwd_tc(const torch::Tensor& z, const torch::Tensor& wcm, const t
   static bool set[64] = {};
   const int dev = at::cuda::current_device() & 63;
   if (!set[dev]) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_bwd_tc_kernel<C, H>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(aa80::pair_bias_gen_bwd_tc_kernel<C, H, TZ, D3>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
     set[dev] = true;
   }
-  aa80::pair_bias_gen_bwd_tc_kernel<C, H><<<dim3((unsigned)nct, (unsigned)B), G::NT, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      z.data_ptr<float>(), wcm.data_ptr<float>(), db.data_ptr<float>(), dz.data_ptr<float>(), pw.data_ptr<float>(), (int)N, (int)NZ, kvp, (float)eps);
+  aa80::pair_bias_gen_bwd_tc_kernel<C, H, TZ, D3><<<dim3((unsigned)nct, (unsigned)B), G::NT, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<const TZ*>(z.data_ptr()), wcm.data_ptr<float>(), db.data_ptr<float>(), reinterpret_cast<TZ*>(dz.data_ptr()), pw.data_ptr<float>(), (int)N, (int)NZ, kvp, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
 }
 
-template <int C>
+template <int C, typename TZ, bool D3>
 void launch_gen_bwd_tc_h(int64_t H, const torch::Tensor& z, const torch::Tensor& wcm, const torch::Tensor& db, torch::Tensor& dz, torch::Tensor& pw, const unsigned char* kvp, int64_t N,
                          int64_t NZ, int64_t B, int64_t nct, double eps) {
-  if (H == 8) launch_gen_bwd_tc<C, 8>(z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
-  else if (H == 16) launch_gen_bwd_tc<C, 16>(z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
-  else if (H == 24) launch_gen_bwd_tc<C, 24>(z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
+  if (H == 8) launch_gen_bwd_tc<C, 8, TZ, D3>(z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
+  else if (H == 16) launch_gen_bwd_tc<C, 16, TZ, D3>(z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
+  else if (H == 24) launch_gen_bwd_tc<C, 24, TZ, D3>(z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
   else TORCH_CHECK(false, "pair_bias_gen_bwd_tc: heads 8, 16 or 24");
 }
 }  // namespace
@@ -604,10 +604,12 @@ void launch_gen_bwd_tc_h(int64_t H, const torch::Tensor& z, const torch::Tensor&
 // The fp32 pair-bias backward on tensor cores for a batch (``pair_bias_gen_bwd_tc_kernel``): z [B, NZ, NZ, C] fp32 (C = 128 / 256 / 384 / 512), wcm = W' channel-major [C, H] fp32
 // (H = 8 / 16 / 24), db [B, H, N, N] fp32 (each row's bias gradient, natural units), kv a bool [B, NZ] key mask or empty -> dz [B, NZ, NZ, C] fp32 and dw [B, H, C] fp32 (each batch row's
 // dW', summed over its nct CTAs in CTA order through the scratch pw [B, nct, H, C]).
-void pair_bias_gen_bwd_tc(torch::Tensor z, torch::Tensor wcm, torch::Tensor db, torch::Tensor dz, torch::Tensor pw, torch::Tensor dw, torch::Tensor kv, int64_t N, int64_t NZ, int64_t nct,
+template <bool D3>
+void pair_bias_gen_bwd_tc_impl(torch::Tensor z, torch::Tensor wcm, torch::Tensor db, torch::Tensor dz, torch::Tensor pw, torch::Tensor dw, torch::Tensor kv, int64_t N, int64_t NZ, int64_t nct,
                           double eps) {
-  TORCH_CHECK(z.is_cuda() && z.scalar_type() == at::kFloat && z.is_contiguous() && dz.is_cuda() && dz.scalar_type() == at::kFloat && dz.is_contiguous() && dz.numel() == z.numel(),
-              "pair_bias_gen_bwd_tc: z and dz contiguous fp32 CUDA tensors of one size");
+  TORCH_CHECK(z.is_cuda() && (z.scalar_type() == at::kFloat || z.scalar_type() == at::kBFloat16) && z.is_contiguous() && dz.is_cuda() && dz.scalar_type() == z.scalar_type() && dz.is_contiguous() &&
+                  dz.numel() == z.numel(),
+              "pair_bias_gen_bwd_tc: z and dz contiguous CUDA tensors of one size and dtype (fp32 or bf16)");
   TORCH_CHECK(wcm.dim() == 2 && wcm.is_cuda() && wcm.scalar_type() == at::kFloat && wcm.is_contiguous(), "pair_bias_gen_bwd_tc: wcm fp32 [C, H]");
   const int64_t C = wcm.size(0), H = wcm.size(1);
   TORCH_CHECK(NZ >= 1 && NZ <= N && z.numel() % (NZ * NZ * C) == 0, "pair_bias_gen_bwd_tc: z [B, NZ, NZ, C]");
@@ -622,14 +624,27 @@ void pair_bias_gen_bwd_tc(torch::Tensor z, torch::Tensor wcm, torch::Tensor db, 
     kvp = reinterpret_cast<const unsigned char*>(kv.data_ptr());
   }
   const at::cuda::CUDAGuard guard(z.device());
-  if (C == 128) launch_gen_bwd_tc_h<128>(H, z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
-  else if (C == 256) launch_gen_bwd_tc_h<256>(H, z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
-  else if (C == 384) launch_gen_bwd_tc_h<384>(H, z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
-  else if (C == 512) launch_gen_bwd_tc_h<512>(H, z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
-  else TORCH_CHECK(false, "pair_bias_gen_bwd_tc: C 128, 256, 384 or 512");
+  auto go = [&](auto tag) {
+    using TZ = decltype(tag);
+    if (C == 128) launch_gen_bwd_tc_h<128, TZ, D3>(H, z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
+    else if (C == 256) launch_gen_bwd_tc_h<256, TZ, D3>(H, z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
+    else if (C == 384) launch_gen_bwd_tc_h<384, TZ, D3>(H, z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
+    else if (C == 512) launch_gen_bwd_tc_h<512, TZ, D3>(H, z, wcm, db, dz, pw, kvp, N, NZ, B, nct, eps);
+    else TORCH_CHECK(false, "pair_bias_gen_bwd_tc: C 128, 256, 384 or 512");
+  };
+  if (z.scalar_type() == at::kFloat) go(float{});
+  else go(__nv_bfloat16{});
   const int HC = (int)(H * C);
   aa80::pair_bias_pw_reduce_kernel<<<dim3((unsigned)((HC + 255) / 256), (unsigned)B), 256, 0, at::cuda::getCurrentCUDAStream()>>>(pw.data_ptr<float>(), dw.data_ptr<float>(), (int)nct, HC);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// the same, d_pair's dW' (fp32 z) on 3xTF32 too (the bias-only token DiT's fp32 training: the weight gradients at the exactness class of the fp32 FFMA backward); bf16 z: as pair_bias_gen_bwd_tc
+void pair_bias_gen_bwd_tc(torch::Tensor z, torch::Tensor wcm, torch::Tensor db, torch::Tensor dz, torch::Tensor pw, torch::Tensor dw, torch::Tensor kv, int64_t N, int64_t NZ, int64_t nct, double eps) {
+  pair_bias_gen_bwd_tc_impl<false>(z, wcm, db, dz, pw, dw, kv, N, NZ, nct, eps);
+}
+void pair_bias_gen_bwd_tc3(torch::Tensor z, torch::Tensor wcm, torch::Tensor db, torch::Tensor dz, torch::Tensor pw, torch::Tensor dw, torch::Tensor kv, int64_t N, int64_t NZ, int64_t nct, double eps) {
+  pair_bias_gen_bwd_tc_impl<true>(z, wcm, db, dz, pw, dw, kv, N, NZ, nct, eps);
 }
 
 // dz [NZ, NZ, 16] (z's dtype) and the per-block partials pw [(N / 64) (N / 32), 4, 16] fp32 of d(W') from db [4, N, N] fp32 (summed over the samples).
@@ -674,5 +689,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pair_bias_gen_bwd_te", &pair_bias_gen_bwd_te);
 #endif
   m.def("pair_bias_gen_bwd_tc", &pair_bias_gen_bwd_tc);
+  m.def("pair_bias_gen_bwd_tc3", &pair_bias_gen_bwd_tc3);
   m.def("pair_bias_bwd", &pair_bias_bwd);
 }
