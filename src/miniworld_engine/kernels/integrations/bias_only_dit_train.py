@@ -965,7 +965,7 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, logits=N
     pwf = torch.empty(BT.partial_rows(M), H, dp, device=dev)  # dWf partials, one per block
     if exact_db:  # fp32 dbias, exact products: d LN = dbias^T Wf, the LN backward rows, dWf = dbias LN (the hoist's backward for one block)
         wf32 = (Wb.float() * wp.float()[None, :]).contiguous()
-        dpair, dwf = hoist_bwd_exact(p2, wf32, dbias.view(H, R), EPS, _hsplit(R), pst)
+        dpair, dwf = hoist_bwd_exact(p2, wf32, dbias.view(H, R), EPS, _hsplit(R), pst)  # pyright: ignore[reportArgumentType]  (p2 is set on the exact_db path)
         pwf[0] = dwf  # one partial row
         nwf = 1
     else:
@@ -1686,7 +1686,7 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
             dpair = e(R, dp)
             pwf = e(F.partial_rows(M), H, dp)  # dWf partials, one per block
             if hop:  # fp32 dbias into exact products (the hoist's backward for one block), one partial row of dWf
-                dpair, dwf = hoist_bwd_exact(p2, W["Wf"].reshape(H, -1), dbias.view(H, R), EPS, _hsplit(R), pst)
+                dpair, dwf = hoist_bwd_exact(p2, W["Wf"].reshape(H, -1), dbias.view(H, R), EPS, _hsplit(R), pst)  # pyright: ignore[reportArgumentType]  (p2 is set on the hop path)
                 pwf[0] = dwf
                 nwf = 1
             else:
