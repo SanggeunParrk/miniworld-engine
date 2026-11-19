@@ -536,6 +536,46 @@ void gate_res_b_f32(torch::Tensor x, torch::Tensor z, torch::Tensor g, torch::Te
 }
 #endif
 
+namespace {
+
+// db [R, L] fp32 <- (db - D) o P in place, D[r] = sum_i dpart[i, r] (the S mode's row sums of P dP, summed in index order): the softmax-gradient finish of the
+// bias gradient in ONE pass (it was dpart.sum(0), db.sub_, db.mul_(P): three kernels and two extra passes over db). One warp a row, P bf16 or fp32.
+template <typename PT>
+__device__ __forceinline__ float4 ld4(const PT* p);
+template <> __device__ __forceinline__ float4 ld4<float>(const float* p) { return *reinterpret_cast<const float4*>(p); }
+template <> __device__ __forceinline__ float4 ld4<bf>(const bf* p) {
+  const uint2 u = *reinterpret_cast<const uint2*>(p);
+  const float2 a = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.x)), b = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.y));
+  return make_float4(a.x, a.y, b.x, b.y);
+}
+template <typename PT>
+__global__ void __launch_bounds__(128) dbias_finish_kernel(float* __restrict__ DB, const float* __restrict__ DPART, const PT* __restrict__ P, long rows, int L, int n) {
+  const long row = (long)blockIdx.x * 4 + threadIdx.x / 32;
+  if (row >= rows) return;
+  const int lane = threadIdx.x % 32;
+  float d = 0.f;
+  for (int i = 0; i < n; ++i) d += DPART[(long)i * rows + row];
+  for (int j = lane * 4; j < L; j += 128) {
+    const float4 g = *reinterpret_cast<const float4*>(DB + row * L + j), p = ld4<PT>(P + row * L + j);
+    *reinterpret_cast<float4*>(DB + row * L + j) = make_float4((g.x - d) * p.x, (g.y - d) * p.y, (g.z - d) * p.z, (g.w - d) * p.w);
+  }
+}
+
+void dbias_finish(torch::Tensor db, torch::Tensor dpart, torch::Tensor P) {
+  TORCH_CHECK(db.is_cuda() && db.dim() == 2 && db.is_contiguous() && db.scalar_type() == torch::kFloat && db.size(1) % 4 == 0, "dbias_finish: db fp32 [R, L], L a multiple of 4");
+  const int64_t rows = db.size(0), L = db.size(1);
+  TORCH_CHECK(dpart.is_cuda() && dpart.is_contiguous() && dpart.scalar_type() == torch::kFloat && dpart.dim() == 2 && dpart.size(1) == rows, "dbias_finish: dpart fp32 [n, R]");
+  TORCH_CHECK(P.is_cuda() && P.is_contiguous() && P.sizes() == db.sizes() && (P.scalar_type() == torch::kFloat || P.scalar_type() == torch::kBFloat16), "dbias_finish: P [R, L] bf16 / fp32");
+  TORCH_CHECK((reinterpret_cast<uintptr_t>(db.data_ptr()) & 15) == 0 && (reinterpret_cast<uintptr_t>(P.data_ptr()) & 15) == 0, "dbias_finish: 16-byte aligned");
+  const c10::cuda::CUDAGuard g(db.device());
+  const unsigned blocks = (unsigned)((rows + 3) / 4);
+  auto st = at::cuda::getCurrentCUDAStream();
+  if (P.scalar_type() == torch::kFloat) dbias_finish_kernel<float><<<blocks, 128, 0, st>>>(db.data_ptr<float>(), dpart.data_ptr<float>(), P.data_ptr<float>(), rows, (int)L, (int)dpart.size(0));
+  else dbias_finish_kernel<bf><<<blocks, 128, 0, st>>>(db.data_ptr<float>(), dpart.data_ptr<float>(), bptr(P), rows, (int)L, (int)dpart.size(0));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+}  // namespace
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef MWE_SM120
   m.def("gemm120", &gemm120);
@@ -554,6 +594,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pv_gate32", &pv_gate32);
   m.def("dpb", &dpb);
   m.def("dpb32", &dpb32);
+  m.def("dbias_finish", &dbias_finish);
   m.def("pv_planes", &pv_planes);
   m.def("dpb_planes", &dpb_planes);
   m.def("delta_planes", &delta_planes);

@@ -294,7 +294,10 @@ def _bwd(
             (core.Dpb32 if f32 else core.Dpb)(heads, hd)(
                 do, vg[:, :da], P.view(heads * length, length), dd, db.view(heads * length, length), samples, dpart=dpart
             )
-            db.sub_(dpart.sum(0).view(heads, length, 1)).mul_(P)
+            if core.DBIAS_FINISH and length % 4 == 0:
+                core.dbias_finish(db.view(heads * length, length), dpart, P.view(heads * length, length))  # (dP - D') P in one pass
+            else:
+                db.sub_(dpart.sum(0).view(heads, length, 1)).mul_(P)
         if PB_TE and not f32 and _sm120(x) and heads == 16 and wcm.shape[0] == 256 and pair.shape[1] == length:
             # RTX 5090, d_pair 256: the backward on tiles of PB_TE elements (two blocks an SM; 32 rows a block)
             nz, c = pair.shape[1], wcm.shape[0]

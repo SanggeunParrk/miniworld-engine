@@ -1050,7 +1050,10 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # cuda:a100_sm80 5 / cuda:5090_sm120 6 (2026-11-19, USER RULE): the pair-bias logits LN(pair) Wf^T and their softmax are fp32 for bf16 / master too (the generic pair-bias kernel
     # writes fp32 logits, the row kernels read fp32 and write the bf16 P the core reads; was: bf16 logits, resolution 32 .. 1024 at logits of 1e3 .. 2e5); the training backward keeps
     # dbias fp32 (the bias-gradient core writes fp32, D' = sum_j P dP from the same dP, so the row sums of dbias are 0)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 5, "cuda:h100_sm90": 5, "cuda:5090_sm120": 6}
+    # cuda:h100_sm90 6 (2026-11-20, speed of the exact fp32 path, same accuracy standard): the logits LN0(pair) W'^T of one block in one fused pass (fp32 FMA, the dot products in channel order: 2-3 ulp
+    # off the cuBLAS summation order, the same distance from fp64), the non-hoisted backward reads the saved fp32 logits (no recompute), the one-pass fp32 hoist backward of a block (d LN0, LN0 backward, dW' without
+    # d LN0 / Y in memory) and the one-pass softmax-gradient epilogue (P, D = sum P dP, P (dP - D)); bf16 / fp32 train grads differ from 5 by fp32 rounding noise (1e-4 .. 1e-3 relative)
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 5, "cuda:h100_sm90": 6, "cuda:5090_sm120": 6}
 
     def __init__(
         self,

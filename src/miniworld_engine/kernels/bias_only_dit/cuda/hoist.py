@@ -18,6 +18,9 @@ from pathlib import Path
 import torch
 
 _dir = Path(__file__).parent
+#: switches of the exact-fp32 fusions (A-B tests in one process; all on in a release): "logits" saves the fp32 logits (no re-forming
+#: in the backward), "bwd" the one-pass hoist backward of a block, "fwd" the one-pass logits of a block
+OPT = {"logits": True, "bwd": True, "fwd": True, "rows": True, "bwd_rg": 2}
 
 
 @functools.lru_cache(maxsize=None)
@@ -86,6 +89,54 @@ def ln0_bwd_rows(x: torch.Tensor, dy: torch.Tensor, dx: torch.Tensor, y: torch.T
     ext().ln0_bwd_rows_cuda(x, dy, dx, y, float(eps))
 
 
+def hoist_bwd_fused(x: torch.Tensor, dball: torch.Tensor, wf32: torch.Tensor, pst: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """The exact fp32 backward of one block's hoisted pair bias in two passes over the rows (``dln_bwd_kernel``, ``dwf_kernel``): x [R, 128]
+    bf16 / fp32, dball [16, R] fp32, W' [16, 128] fp32 -> (d pair [R, 128] in x's dtype, dW' [16, 128] fp32). d LN0 and Y stay on chip;
+    the per-warp dW' partials are summed in a fixed order."""
+    R = x.shape[0]
+    nw = min(2112, -(-(R // 32) // 8) * 8)  # 264 blocks of 8 warps (2 an SM on 132 SMs: whole waves), fewer for small R; partials <= 17 MB
+    part = torch.empty(nw, 16, 128, device=x.device, dtype=torch.float32)
+    dx = torch.empty_like(x)
+    ext().hoist_bwd_fused_cuda(x, dball, wf32, pst, dx, part, nw, OPT["bwd_rg"])
+    return dx, part.sum(0)
+
+
+def dbias_rows(logits: torch.Tensor, dp: torch.Tensor, out: torch.Tensor, mask: torch.Tensor | None, pin: bool = False) -> bool:
+    """out [H L, L] fp32 <- P o (dp - D) (``dbias_rows_kernel``; out may be dp): P = softmax(logits) re-formed in fp32 (key mask folded in), D = sum_j P dp the exact
+    fp32 row sum; one read of the logits (``pin``: of P itself) and dP, one write. False (nothing done) where L is not 128 .. 1024 in steps of 128."""
+    L = dp.shape[-1]
+    if not OPT["rows"] or L % 128 or L > 1024 or not dp.is_contiguous() or not out.is_contiguous() or not logits.is_contiguous():
+        return False
+    m = mask.reshape(L).to(torch.bool).contiguous() if mask is not None else torch.empty(0, device=dp.device, dtype=torch.bool)
+    ext().dbias_rows_cuda(logits.view(-1, L), dp.view(-1, L), out.view(-1, L), m, pin)
+    return True
+
+
+def permute_dv(do: torch.Tensor, v: torch.Tensor, samples: int, heads: int, length: int) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Head-major copies [H, L, A dh] of do and v (bf16 [A L, H dh], v a column slice of v | g): the operands of dP[h] = dO[h] V[h]^T (K = (a, d)) in one
+    kernel (the two torch permute copies took 1.7 x its time). None where it does not serve (``OPT["rows"]`` off, dh not a multiple of 8, > 128 chunks a row)."""
+    dh = do.shape[1] // heads
+    if not OPT["rows"] or dh % 8 or heads * (dh // 8) > 128 or do.dtype is not torch.bfloat16 or v.dtype is not torch.bfloat16:
+        return None
+    a, b = (torch.empty(heads, length, samples * dh, device=do.device, dtype=torch.bfloat16) for _ in range(2))
+    ext().permute_dv_cuda(do, v, a, b, samples, heads, length)
+    return a, b
+
+
+def pair_logits(p2: torch.Tensor, wf32: torch.Tensor, stats: bool = False) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """The EXACT fp32 logits [N, R] (head-major) of the pair rows p2 [R, C] and the gamma-folded fp32 weights wf32 [N, C], and (``stats``) the row
+    statistics float [R, 2]: LN0 in fp32, every product on the FMA pipe. One fused pass (``logits_fused_kernel``: no LN0 in memory) for 16 heads of
+    128 channels, else ln0_fp32 + the cuBLAS FMA GEMM."""
+    R = p2.shape[0]
+    if OPT["fwd"] and tuple(wf32.shape) == (16, 128) and p2.shape[1] == 128 and R % 32 == 0 and p2.is_contiguous() and wf32.is_contiguous():
+        lg = torch.empty(16, R, device=p2.device, dtype=torch.float32)
+        pst = torch.empty(R, 2, device=p2.device, dtype=torch.float32) if stats else p2.new_empty(0, dtype=torch.float32)
+        ext().logits_fused_cuda(p2, wf32, lg, pst, 1e-5)
+        return lg, (pst if stats else None)
+    ln32, pst = ln0_fp32(p2, 1e-5, stats=stats)
+    return exact_logits(wf32, ln32), pst
+
+
 def operand_cols(dtype: torch.dtype, width: int = 128) -> int:
     """Columns of ``ln0_bwd_rows``'s y for a path's dtype and the pair width C: 2 C (bf16, the two-term split) or C (fp32)."""
     return 2 * width if dtype is torch.bfloat16 else width
@@ -96,4 +147,16 @@ def kernel_attrs() -> list[tuple[str, int, int]]:
     return [tuple(a) for a in ext().func_attrs()]
 
 
-__all__ = ["exact_fp32_gemms", "exact_logits", "ext", "kernel_attrs", "ln0_bwd_rows", "ln0_fp32", "ln0_rows", "operand_cols"]
+__all__ = [
+    "dbias_rows",
+    "pair_logits",
+    "exact_fp32_gemms",
+    "exact_logits",
+    "ext",
+    "hoist_bwd_fused",
+    "kernel_attrs",
+    "ln0_bwd_rows",
+    "ln0_fp32",
+    "ln0_rows",
+    "operand_cols",
+]

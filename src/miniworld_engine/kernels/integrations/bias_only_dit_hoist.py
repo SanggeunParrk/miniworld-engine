@@ -129,7 +129,9 @@ def _bwd_exact_fake(pair2d, wf32, dball, eps, split):
 
 
 @opaque(fake=_bwd_exact_fake, name="bias_only_dit_hoist_bwd_exact")
-def hoist_bwd_exact(pair2d: torch.Tensor, wf32: torch.Tensor, dball: torch.Tensor, eps: float, split: int) -> list[torch.Tensor]:
+def hoist_bwd_exact(
+    pair2d: torch.Tensor, wf32: torch.Tensor, dball: torch.Tensor, eps: float, split: int, pst: torch.Tensor | None = None
+) -> list[torch.Tensor]:
     """``_hoist_bwd`` with an fp32 dbias_all [N, R] and the unrounded fp32 W': every product exact fp32 (FMA pipe, TF32 off) --
     [d pair [R, dp] in the pair's dtype, dW'_all [N, dp] fp32]. d LN0 = dbias^T W'; the LN0 backward rows write Y = LN0 in fp32;
     dW' = dbias Y as a strided batch of ``split`` row chunks."""
@@ -137,6 +139,18 @@ def hoist_bwd_exact(pair2d: torch.Tensor, wf32: torch.Tensor, dball: torch.Tenso
 
     N, R = dball.shape
     dp = pair2d.shape[-1]
+    if (
+        HK.OPT["bwd"]
+        and pst is not None
+        and N == 16
+        and dp == 128
+        and R % 32 == 0
+        and pair2d.is_contiguous()
+        and dball.stride(1) == 1
+        and wf32.is_contiguous()
+    ):
+        # one block's 16 heads: d LN0 = dbias^T W', the LN0 backward and dW' = dbias Y in ONE pass over the rows (no d LN0 / Y in memory)
+        return list(HK.hoist_bwd_fused(pair2d, dball, wf32, pst))
     with HK.exact_fp32_gemms(), torch.autocast("cuda", enabled=False):
         dln = torch.mm(dball.t(), wf32)  # [R, dp] fp32
         dpair = torch.empty_like(pair2d)
@@ -240,20 +254,26 @@ class _Hoist(torch.autograd.Function):
             params, pair.dtype
         )  # wf: the backward GEMMs' operand (rounded to the pair dtype); wf32: the exact logits'
         ctx.set_materialize_grads(False)  # an unused block's bias: None, not a zero tensor
-        ball = _hoist_fwd(pair.reshape(L * L, dp), wf32, eps)  # fp32 logits whatever the pair dtype
-        ctx.save_for_backward(pair, wf, gam, wts)
+        pst = None
+        if is_h100(pair) and wf32.shape[0] == 16 and dp == 128 and eps == 1e-5:  # one block of 16 heads: LN0 and the dot products in one pass, + the row statistics
+            from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+            ball, pst = HK.pair_logits(pair.reshape(L * L, dp), wf32, stats=True)
+        else:
+            ball = _hoist_fwd(pair.reshape(L * L, dp), wf32, eps)  # fp32 logits whatever the pair dtype
+        ctx.save_for_backward(pair, wf, gam, wts, *(() if pst is None else (pst,)))
         ctx.meta = (eps, nb, H, sink, [p.dtype for p in params])
         return tuple(ball[i * H : (i + 1) * H].view(1, H, L, L) for i in range(nb))
 
     @staticmethod
     def backward(ctx, *grads):
-        pair, wf, gam, wts = ctx.saved_tensors
+        pair, wf, gam, wts, *rest = ctx.saved_tensors
         eps, nb, H, sink, pdts = ctx.meta
         L, dp = pair.shape[1], pair.shape[-1]
         R = L * L
         dball = sink.take(grads)
         if is_h100(pair):  # fp32 dbias (``dbias_dtype``), exact backward products
-            dpair, dwf = hoist_bwd_exact(pair.reshape(R, dp), (wts * gam[:, None, :]).reshape(-1, dp).contiguous(), dball, eps, _split(R))
+            dpair, dwf = hoist_bwd_exact(pair.reshape(R, dp), (wts * gam[:, None, :]).reshape(-1, dp).contiguous(), dball, eps, _split(R), rest[0] if rest else None)
         else:
             dpair, dwf = _hoist_bwd(pair.reshape(R, dp), wf, dball, eps, _split(R))
         del dball
