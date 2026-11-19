@@ -133,7 +133,8 @@ def pair_logits(p2: torch.Tensor, wf32: torch.Tensor, stats: bool = False) -> tu
         pst = torch.empty(R, 2, device=p2.device, dtype=torch.float32) if stats else p2.new_empty(0, dtype=torch.float32)
         ext().logits_fused_cuda(p2, wf32, lg, pst, 1e-5)
         return lg, (pst if stats else None)
-    if OPT["train_tc"] and p2.shape[1] == 256 and logits_tc_ok(p2, wf32):  # the 256-wide pair, 16 heads: the one-pass tensor-core logits (+ the row statistics)
+    # the 256-wide pair, 16 heads: the one-pass tensor-core logits (+ the row statistics)
+    if OPT["train_tc"] and p2.shape[1] == 256 and logits_tc_ok(p2, wf32):
         lg = torch.empty(16, R, device=p2.device, dtype=torch.float32)
         pst = torch.empty(R, 2, device=p2.device, dtype=torch.float32) if stats else None
         logits_tc(p2, wf32, lg, pst)
