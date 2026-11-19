@@ -42,7 +42,7 @@ no H100 `backend_versions` entry and no module `version` changed, and the instal
 
 | | engine cuda (installed 3.0.4 wheels, empty JIT cache) | PyTorch |
 |---|---|---|
-| step time | **2.0 s** | 5.0 s |
+| step time | **2.0 s** (re-run on the final wheels: step 0 loss / gnorm 0.3764 / 1.242 again, 16.93 / 25.34 GiB) | 5.0 s |
 | loss / gnorm at step 0 | 0.3764 / 1.242 | 0.3768 / 1.261 |
 | peak memory | 16.93 GiB allocated, 25.34 GiB reserved | not measured here |
 | engine modules on Triton | 0 (BackendModule calls: cuda 9021, pytorch 774 = the `PairformerBlock` wrapper, triton 0) | n/a |
@@ -97,12 +97,12 @@ Installed-wheel runs use the five release artifacts extracted without the repo o
 |---|---|
 | sha256 of the five artifacts | `dist/SHA256SUMS`, checked before every run |
 | H100 installed-wheel load of every indexed sm90 artifact (579 = 163 + 190 + 226) | 579 present, 579 resolved, **0 compiled**; also with the system libstdc++ preloaded (RHEL 8) |
-| H100 installed accuracy (12 modules, pytorch / cuda / triton, minimum lengths) | RED 0, 0 builds |
+| H100 installed accuracy (13 modules incl. TokenDiTChai1, pytorch / cuda / triton, minimum lengths) | RED 0, 0 builds; TokenDiTChai1 cuda 12 GREEN / 2 YELLOW, no error |
 | H100 installed `test_restored_triton_backends.py` | 63 passed |
 | H100 default routes, installed 3.0.3 vs installed 3.0.4 (separate processes) | inference outputs (29 cases) and the default fp16 h16 TriAttn core (6) bitwise identical; default TRAINING paths: token DiT (Protenix x4, MiniWorld), OPM x2, PWA, Transition D128 bitwise identical; Boltz-2 / RF3 token DiT, TriMul D128 / D256 and TriAttn differ between two runs of 3.0.4 itself, exactly as in 3.0.3 (nondeterministic backward) |
 | CPU gate (`tools/check.sh cpu`) | ruff check clean, pyright 0 errors, tests/cpu 3414 passed, 2 skipped (`ruff format --check` lists files that are not mass-formatted: not enforced) |
 | RTX 5090 installed-wheel load of every indexed sm120 artifact (66) | 66 present, 66 resolved, **0 compiled** |
-| RTX 5090 installed accuracy (12 modules, pytorch / cuda / triton) | RED 0, 0 builds |
+| RTX 5090 installed accuracy (13 modules incl. TokenDiTChai1) | RED 0, 0 builds; TokenDiTChai1 cuda 14 cells (all fp32 and bf16 minimum-length cells) 8 GREEN / 6 YELLOW, 0 error, 0 unsupported |
 | RTX 5090 installed `test_restored_triton_backends.py` | 59 passed, 4 skipped (the H100 / A100 bias-only path) |
 | RTX 5090 real Protenix v1 step from the installed wheels | see the table above; 0 engine kernels built into the empty JIT cache, no segfault |
 | A100 installed wheels | **not run on an A100**: the A100 partition of cssb3 is full (the job is queued, estimated start 2026-11-22). Stand-in: GPU-less, installed wheels, empty cache, `MINIWORLD_ENGINE_TARGET_ARCH=sm80`: all 74 indexed sm80 artifacts present and resolved by the runtime loaders, 0 compiled. No A100 accuracy, restored-Triton or real-step run exists for 3.0.4 yet |
