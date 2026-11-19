@@ -33,6 +33,7 @@ NOT_WEIGHT_DERIVED = {
     "kernels/_pretune.py:_SQUEUE": "tuning queue",
     "kernels/integrations/bias_only_dit_sm80.py:_SIDE": "the side CUDA stream per device (the 5090 inference block)",
     "kernels/pair_embed_geom/cuda/sm80/__init__.py:_LIMITS": "bin limits per (device, kind): constants of the module, not derived from weights",
+    "kernels/outer_product_mean/cuda/ogemm_sm80.py:_PROBES": "the all-live answer per mask tensor (address, version, shape), derived from the MSA mask, not from weights",
     "kernels/_capture.py:_PINNED": "pinned keys of the registered stores (cleared with them)",
     "kernels/_capture.py:_INPUT_STORES": "the per-input stores lookup_inputs filled (registered ones) and their alive tests",
     "kernels/_capture.py:_HELD_BY_CAPTURES": "the forms capture_reads_eager captures read (held for the process: what live graphs read)",
