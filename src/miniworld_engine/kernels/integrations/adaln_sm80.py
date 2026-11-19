@@ -76,6 +76,9 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
         return False
     if x.shape[-1] not in WIDTHS or cond.shape[-1] not in WIDTHS or x.numel() == 0:
         return False
+    # IdentityAdaptiveLayerNorm (Chai-1): no conditioning LayerNorm and a (1 + W_s c) scale, not the sigmoid form of these kernels: the module serves it
+    if not hasattr(module, "ln_cond"):
+        return False
     if module.ln_cond.weight is None or module.to_scale.bias is None or module.to_bias.bias is not None:
         return False
     if torch.cuda.get_device_capability(x.device) not in ((8, 0), (12, 0)):  # A100, or the RTX 5090 (the same sources built for sm_120a)

@@ -74,6 +74,8 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
     if x.shape[-1] not in WIDTHS or cond.shape[-1] not in WIDTHS or x.numel() == 0:
         return False
     ada = module.ada_ln_in
+    if not hasattr(ada, "ln_cond"):  # IdentityAdaptiveLayerNorm (Chai-1): not the sigmoid AdaLN of these kernels
+        return False
     if ada.ln_cond.weight is None or ada.to_scale.bias is None or ada.to_bias.bias is not None or module.to_scale.bias is None:
         return False
     if any(w.bias is not None for w in (module.expand_a, module.expand_b, module.squeeze)):
