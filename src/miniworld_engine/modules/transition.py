@@ -67,8 +67,7 @@ class Transition(BackendModule, MasterWeights):
         "cuda:h100_sm90": 7,
         "cuda:a100_sm80": 7,  # 2026-11-19 (7): fp32 with TF32 off runs on the engine's IEEE fp32 CUDA chain (kernels/ieee_f32; was refused to Triton / PyTorch); TF32 and bf16 unchanged
         "triton:a100_sm80": 2,
-        "cuda:5090_sm120": 5,  # 2026-11-19 (5): the same IEEE fp32 chain (fp32 TF32-off training at 2048 / 4096 / 8192 rows and the 384-row no-grad calls fell to Triton)
-        "triton:5090_sm120": 3,  # 2026-11-19 (3: + the sampler conditioning forward at 7680 rows, no grad, 8192-row no-grad forward, 1024-row train keys for chunk 3-5); fp32 TF32-off training at 2048 / 4096 / 8192 rows (augment chunk 8 / 12 / 24 x 384 tokens, d 384) has table entries (it hit OutOfResources on the default config); no kernel output changes
+        "cuda:5090_sm120": 5,  # triton:5090_sm120 stays at the default 1 (the 2026-11-19 table commits only ADD keys absent from the requirements rows); 2026-11-19 (5): the same IEEE fp32 chain (fp32 TF32-off training at 2048 / 4096 / 8192 rows and the 384-row no-grad calls fell to Triton)
     }
     # 2026-11-14 (RTX 5090): cuda:5090_sm120 4 = calls past 64 x 65535 rows (L 2048 pair, D >= 256 eval) take 128-row tiles (they failed with a grid y
     # overflow: invalid configuration argument)
