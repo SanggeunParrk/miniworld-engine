@@ -1061,7 +1061,8 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # FMA path's against fp64, dx as before) in place of the FMA kernels / cuBLAS fp32 GEMMs, and the 128 / 256-wide training forward on logits_tc (pair_logits); gradient bits differ from 7 by fp32 rounding noise
     # cuda:a100_sm80 6 / cuda:5090_sm120 7 (2026-11-20, speed of the exact fp32 path): the training pair-bias backward (d_pair 128 / 256) on TF32 tensor cores in one pass (pair_bias_gen_bwd_tc3: the
     # pair gradient and, for an fp32 pair, dW' in 3xTF32; bf16 pair: dW' in 1xTF32 on the rounded xh), two CTAs an SM; was the fp32-FFMA pair_bias_gen_bwd; gradients differ by fp32 / TF32 rounding noise
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 6, "cuda:h100_sm90": 8, "cuda:5090_sm120": 7, "triton:5090_sm120": 2}
+    # cuda:h100_sm90 9 (2026-11-20, inference length): L > 3072 up to 8192 (the softmax rows run two passes past the 3072 keys a warp holds in registers; pv_cta / pv_cta_tf32 bound 3072 -> 8192; a call past 3072 must fit the device memory, else a refusal) and the bf16 hoist takes softmax_rows past 1024 (softmax_t held 1024: bf16 / master inference at 1024 < L <= 3072 raised); L <= 3072 outputs bit-identical (fp32; bf16 at L <= 1024), logits and softmax stay fp32
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 6, "cuda:h100_sm90": 9, "cuda:5090_sm120": 7, "triton:5090_sm120": 2}
 
     def __init__(
         self,
@@ -1152,6 +1153,14 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
 
         if bias_only_dit.serves(view, single, cond, pair, mask, bias=bias):
             return "infer", None
+        if single.ndim == 4 and single.shape[2] > 3072 and single.shape[2] % 128 == 0:
+            from miniworld_engine.kernels.bias_only_dit.cuda import H100_MAX_L
+
+            if single.shape[2] > H100_MAX_L:
+                return None, f"inference: L {single.shape[2]} is past the H100 bias-only inference block's longest length, {H100_MAX_L}"
+            why_long = bias_only_dit.long_refusal(view, single, bias)
+            if why_long is not None:
+                return None, f"inference: {why_long}"
         return None, (
             "inference: outside the fused H100 bias-only inference block's range (bf16 / fp32 weights without autocast, "
             "[A, 1, L, 768] with L a multiple of 128, heads x head width 16 x 48 / 24 x 32 / 12 x 64 / 16 x 64, cond 384 or 768, "

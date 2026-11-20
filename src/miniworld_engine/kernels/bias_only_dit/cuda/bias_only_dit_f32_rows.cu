@@ -477,6 +477,46 @@ __global__ void __launch_bounds__(256, 2) softmax_rows_k(const float* __restrict
     if (lane + 32 * c < L / 4) st4(P + row * L + (lane + 32 * c) * 4, v[c]);
 }
 
+// Rows past the 3072 keys a warp keeps in registers (softmax_rows_k<24>): two passes over the row -- an online max / sum (a running maximum
+// rescales the lane's sum; the lanes combine at the end), then the weights; the row is read twice from L2, no register holds it. Same masking.
+__global__ void __launch_bounds__(256) softmax_rows_long_k(const float* __restrict__ BIAS, float* P, const bool* __restrict__ MASK, long R, int L) {
+  const long row = (long)blockIdx.x * 8 + threadIdx.x / 32;
+  const int lane = threadIdx.x % 32, nch = L / 4;
+  if (row >= R) return;
+  constexpr float NEG = -3.0e38f;
+  float mx = NEG, sum = 0.f;
+  for (int ch = lane; ch < nch; ch += 32) {
+    float4 e = ld4(BIAS + row * L + ch * 4);
+    if (MASK) {
+      const uchar4 mk = *reinterpret_cast<const uchar4*>(MASK + ch * 4);
+      if (!mk.x) e.x = NEG;
+      if (!mk.y) e.y = NEG;
+      if (!mk.z) e.z = NEG;
+      if (!mk.w) e.w = NEG;
+    }
+    const float nm = fmaxf(mx, fmaxf(fmaxf(e.x, e.y), fmaxf(e.z, e.w)));
+    sum *= __expf(mx - nm);
+    sum += (__expf(e.x - nm) + __expf(e.y - nm)) + (__expf(e.z - nm) + __expf(e.w - nm));
+    mx = nm;
+  }
+  float M = mx;
+#pragma unroll
+  for (int o = 16; o; o >>= 1) M = fmaxf(M, __shfl_xor_sync(0xffffffffu, M, o));
+  sum *= __expf(mx - M);
+  const float inv = 1.f / warp_sum(sum);
+  for (int ch = lane; ch < nch; ch += 32) {
+    float4 e = ld4(BIAS + row * L + ch * 4);
+    if (MASK) {
+      const uchar4 mk = *reinterpret_cast<const uchar4*>(MASK + ch * 4);
+      if (!mk.x) e.x = NEG;
+      if (!mk.y) e.y = NEG;
+      if (!mk.z) e.z = NEG;
+      if (!mk.w) e.w = NEG;
+    }
+    st4(P + row * L + ch * 4, make_float4(__expf(e.x - M) * inv, __expf(e.y - M) * inv, __expf(e.z - M) * inv, __expf(e.w - M) * inv));
+  }
+}
+
 // softmax_row for two rows of a warp: both rows' loads issued before any math (the per-row arithmetic is softmax_row's, in the same
 // order: the same bits)
 template <int CPL>
@@ -1638,14 +1678,15 @@ void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask)
   f32c(bias, "bias"); f32c(p, "p");
   TORCH_CHECK(bias.dim() == 2 && p.sizes() == bias.sizes(), "softmax_rows: p like bias [R, L]");
   const int64_t R = bias.size(0), L = bias.size(1);
-  TORCH_CHECK(L % 4 == 0 && L <= 3072, "softmax_rows: L a multiple of 4, at most 3072");
+  TORCH_CHECK(L % 4 == 0 && L <= 8192, "softmax_rows: L a multiple of 4, at most 8192");
   const bool* mk = mask_ptr(mask, L, "softmax_rows");
   const at::cuda::CUDAGuard gd(bias.device());
   const unsigned g = (unsigned)((R + 7) / 8);
   if (L <= 512) softmax_rows_k<4><<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);
   else if (L <= 1024) softmax_rows_k<8><<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);
   else if (L <= 2048) softmax_rows_k<16><<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);
-  else softmax_rows_k<24><<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);
+  else if (L <= 3072) softmax_rows_k<24><<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);
+  else softmax_rows_long_k<<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);   // past the registers: two passes
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

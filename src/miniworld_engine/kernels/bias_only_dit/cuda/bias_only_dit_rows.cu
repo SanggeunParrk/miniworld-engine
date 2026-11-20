@@ -241,6 +241,48 @@ __global__ void __launch_bounds__(256) softmax_rows_kernel(const IT* __restrict_
   }
 }
 
+// Rows past the 3072 keys a warp keeps in registers (softmax_rows_kernel<12>): the same warp per row, two passes over it -- an online max / sum
+// (a running maximum rescales the lane's sum; the lanes combine at the end), then the weights. The row (4 L bytes fp32) is read twice from
+// L2; the registers hold no row, so any L fits (the host bounds it). Same masking as above (a fully masked row is uniform).
+template <typename IT = __nv_bfloat16>
+__global__ void __launch_bounds__(256) softmax_rows_long_kernel(const IT* __restrict__ BIAS, __nv_bfloat16* P,
+    const bool* __restrict__ MASK, long R, int L) {
+  const long row = (long)blockIdx.x * 8 + threadIdx.x / 32;
+  const int lane = threadIdx.x % 32, nch = L / 8;
+  if (row >= R) return;
+  constexpr float NEG = -3.0e38f;
+  float mx = NEG, sum = 0.f;
+  for (int ch = lane; ch < nch; ch += 32) {
+    const float4 lo = V4<IT>::load(BIAS + row * L + ch * 8), hi = V4<IT>::load(BIAS + row * L + ch * 8 + 4);
+    float e[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+    unsigned char mk[8];
+    if (MASK) *reinterpret_cast<uint2*>(mk) = *reinterpret_cast<const uint2*>(MASK + ch * 8);
+    float cm = NEG;
+#pragma unroll
+    for (int k = 0; k < 8; ++k) { if (MASK && !mk[k]) e[k] = NEG; cm = fmaxf(cm, e[k]); }
+    const float nm = fmaxf(mx, cm);
+    sum *= __expf(mx - nm);
+#pragma unroll
+    for (int k = 0; k < 8; ++k) sum += __expf(e[k] - nm);
+    mx = nm;
+  }
+  float M = mx;
+#pragma unroll
+  for (int o = 16; o; o >>= 1) M = fmaxf(M, __shfl_xor_sync(0xffffffffu, M, o));
+  sum *= __expf(mx - M);
+  const float inv = 1.f / warp_sum(sum);
+  for (int ch = lane; ch < nch; ch += 32) {
+    const float4 lo = V4<IT>::load(BIAS + row * L + ch * 8), hi = V4<IT>::load(BIAS + row * L + ch * 8 + 4);
+    float e[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+    unsigned char mk[8];
+    if (MASK) *reinterpret_cast<uint2*>(mk) = *reinterpret_cast<const uint2*>(MASK + ch * 8);
+#pragma unroll
+    for (int k = 0; k < 8; ++k) e[k] = __expf(((MASK && !mk[k]) ? NEG : e[k]) - M) * inv;
+    V4<__nv_bfloat16>::store(P + row * L + ch * 8, make_float4(e[0], e[1], e[2], e[3]));
+    V4<__nv_bfloat16>::store(P + row * L + ch * 8 + 4, make_float4(e[4], e[5], e[6], e[7]));
+  }
+}
+
 // ------------------------------------------------------------------------------------------------ host
 void check_rows(const at::Tensor& t, const char* name, int64_t cols) {
   TORCH_CHECK(t.is_cuda() && t.dim() == 2 && t.stride(1) == 1, name, ": a CUDA [rows, cols] view with unit column stride");
@@ -524,7 +566,7 @@ void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask)
   TORCH_CHECK(bias.is_cuda() && (bias.scalar_type() == at::kBFloat16 || f32) && bias.is_contiguous() && bias.dim() == 2, "softmax_rows: bf16 or fp32 [R, L]");
   TORCH_CHECK(p.scalar_type() == at::kBFloat16 && p.is_contiguous() && p.sizes() == bias.sizes(), "softmax_rows: p bf16 like bias");
   const int64_t R = bias.size(0), L = bias.size(1);
-  TORCH_CHECK(L % 8 == 0 && L <= 3072, "softmax_rows: L a multiple of 8, at most 3072");
+  TORCH_CHECK(L % 8 == 0 && L <= 8192, "softmax_rows: L a multiple of 8, at most 8192");
   const bool* mk = nullptr;
   if (mask.has_value()) {
     TORCH_CHECK(mask->scalar_type() == at::kBool && mask->is_contiguous() && mask->numel() == L, "softmax_rows: bool mask [L]");
@@ -539,7 +581,8 @@ void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask)
     if (L <= 512) softmax_rows_kernel<2, float><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
     else if (L <= 1024) softmax_rows_kernel<4, float><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
     else if (L <= 2048) softmax_rows_kernel<8, float><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
-    else softmax_rows_kernel<12, float><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
+    else if (L <= 3072) softmax_rows_kernel<12, float><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
+    else softmax_rows_long_kernel<float><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);   // past the registers: two passes (L up to 8192)
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
   }
@@ -547,7 +590,8 @@ void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask)
   if (L <= 512) softmax_rows_kernel<2><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
   else if (L <= 1024) softmax_rows_kernel<4><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
   else if (L <= 2048) softmax_rows_kernel<8><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
-  else softmax_rows_kernel<12><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);   // the sampler's long rungs (L 2560)
+  else if (L <= 3072) softmax_rows_kernel<12><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);   // the sampler's long rungs (L 2560)
+  else softmax_rows_long_kernel<__nv_bfloat16><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
