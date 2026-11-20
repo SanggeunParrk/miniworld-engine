@@ -1,6 +1,6 @@
 # miniworld-engine 3.0.4
 
-Base: 3.0.3 (`b63ba5a9c`, tag `v3.0.3` -> `edc8deca4`). Source: `rc/3.0.4-final` (+ the one-line sm120 prebuild-plan fix), released from `rc/3.0.4-release2`.
+Base: 3.0.3 (`b63ba5a9c`, tag `v3.0.3` -> `edc8deca4`). Source: `rc/3.0.4-final` (`aa21ef752`), released from `rc/3.0.4-release2`.
 
 **What this release is.**
 
@@ -47,17 +47,17 @@ Only Triton launches in the run (`_gather_grad_kernel`) are FoldForge's own. One
 
 | class | card | 3.0.3 | 3.0.4 | cause |
 |---|---|---|---|---|
-| TokenDiTMiniWorldBiasOnly | h100_sm90 / a100_sm80 / 5090_sm120 | 4 / 4 / 5 | 6 / 5 / 6 | fp32 pair-bias logits |
+| TokenDiTMiniWorldBiasOnly | h100_sm90 / a100_sm80 / 5090_sm120 | 4 / 4 / 5 | 8 / 6 / 7 | fp32 pair-bias logits; H100 8 = eval hoist with TF32-compensated mma |
 | TokenDiTMiniWorldBiasOnly | triton:5090_sm120 | default | 2 | fp32 logits, 5090 Triton table |
 | AtomDiT* (Protenix, Boltz2, Chai1, OpenFold3, RF3), `_LocalAtomDiT` | a100_sm80 | 4 | 5 | IEEE fp32 chain |
 | AtomDiT* (same), TokenDiTProtenix / Boltz2 / RF3 / MiniWorld | 5090_sm120 | default | 2 | IEEE fp32 / TF32 no longer forced |
-| AtomDiTESMFold2, AtomDiTMiniWorld, SWAAtomTransformer | 5090_sm120 | 2 | 6 | window training in L2-sized chunks, streaming backward |
+| AtomDiTESMFold2, AtomDiTMiniWorld, SWAAtomTransformer | 5090_sm120 | 2 | 7 | window training in L2-sized chunks, streaming backward |
 | InputFeatureEmbedder | 5090_sm120 | 2 | 5 | same family |
 | TokenDiTProtenix, Boltz2, Chai1, RF3 | a100_sm80 | 4 | 5 | AdaLN / SwiGLU GEMMs follow the caller's TF32 setting |
 | TokenDiTMiniWorld | a100_sm80 | 5 | 6 | inherits |
 | TokenDiTChai1 | a100_sm80 / 5090_sm120 | 4 / default | 7 / 4 | identity AdaLN and transition on the sm_80 row kernels |
 | AttentionPairBias | a100_sm80 / 5090_sm120 | 8 / 3 | 9 / 4 | IEEE fp32 GEMMs of the fused update |
-| OuterProductMean | a100_sm80 / 5090_sm120 | 3 / 3 | 5 / 4 | Chai-1 per-group products, all-live probe, cuBLAS at deep MSA |
+| OuterProductMean | a100_sm80 / 5090_sm120 | 3 / 3 | 5 / 5 | Chai-1 per-group products, all-live probe, cuBLAS at deep MSA |
 | ParallelResidual | a100_sm80 | default | 2 | plain loads / stores |
 | Transition | a100_sm80 / 5090_sm120 | 6 / 4 | 7 / 8 | IEEE fp32 chain; 5090: LN folded into the dual GEMM at D >= 256, `xn` rebuild |
 | TriangleAttention (+AF3) | a100_sm80 | 7 (AF3 6) | 8 (AF3 7) | `forward_train` key_mask fix |
@@ -68,6 +68,11 @@ Only Triton launches in the run (`_gather_grad_kernel`) are FoldForge's own. One
 | TokenPairInit | 5090_sm120 | 1 | 3 | 5090 fixes |
 | LayerNorm | 5090_sm120 | 3 | 3 | unchanged (table keys only) |
 
+| AttentionPairBias | h100_sm90 | 5 | 6 | `gate32_bwd` (apb_rows.cu) |
+| LayerNorm | h100_sm90 | 2 | 3 | odd-width backward (ln_rows.cu) |
+| ParallelResidual | h100_sm90 | default | 2 | H100 build of the plain-load kernel |
+| TriangleAttentionRF3 | 5090_sm120 | 4 | 6 | RF3 triangle front |
+
 No other H100 entry changed.
 
 ## Judge
@@ -76,8 +81,8 @@ No other H100 entry changed.
 
 ## KNOWN LIMITS
 
-(a) **The exact fp32 logits rule costs speed.** H100 bias-only token DiT cuda: eval up to 2x (master eval d_pair 256 S5: +62 % median, +114 % at L768: 0.425 -> 0.906 ms); train +4..+55 % by cell (bf16 non-hoist L >= 512 +12..14 %, fp32 non-hoist +4..11 % in the module-level measurements of the bias/speed branch). A100 train up to +6 %, 5090 up to +2 %. A speed recovery of the H100 eval hoist exists as a branch (`bias/eval`, unverified at the time of this draft; planned next release).
-(b) 5090 Transition train residual cells 1.00-1.02 and OPM Chai train L128 / L256 1.0075-1.018 vs Triton; A100 OPM non-Chai residual cells <= 1.025; LayerNorm exceptions.
+(a) **The exact fp32 logits rule costs speed.** H100 bias-only token DiT cuda (with the verified `bias/eval` TF32-compensated eval hoist, backend version 8): eval master d_pair 256 L768 +10..11.5 % vs the bf16-logit 3.0.3 path; train master d_pair 128 S1 L768 +37.5 % (train +4..+55 % by cell before the eval recovery; bf16 non-hoist L >= 512 +12..14 %, fp32 non-hoist +4..11 % in the module-level measurements). A100 train up to +6 %, 5090 residual up to 1-2 %.
+(b) 5090 Transition train residual cells 1.00-1.02 and OPM Chai train L128 / L256 1.0075-1.018 vs Triton; 5090 residual cells 1-2 %; H100 OPM train L128 1.03-1.06; A100 OPM non-Chai residual cells <= 1.025; A100 LayerNorm N = 256 / 512 at large L 0.4-1.0 % (LayerNorm exceptions); A100 TriMul large L.
 (c) **FoldForge's policy `choose_backend` allows cuda only on the H100**: FoldForge on an A100 / 5090 selects Triton unless overridden (the 5090 benchmark above used `PF_CC=12,0`). FoldForge was not changed or notified.
 (d) **The peptide-bond geometry (C-N length) end-to-end check of the fp32 logits fix was NOT run in this release**: kernel-level checks only (see above). The check list (FoldBench targets 7xi5 7yhr 8t93 8pak) is in the MiniWorld session: `~/MiniWorld/scripts/analysis/fp32_inference/` (`fused_logit.sbatch`, `fusedlogit_geometry.sbatch`, `x0hat_bonds` / `cif_geometry.py`).
 (e) A100 judge cells were re-measured on a shared cluster: some cuda cells are 3-5 % noise versus the previous tokens.
@@ -85,9 +90,9 @@ No other H100 entry changed.
 
 ## Prebuild regeneration (release build)
 
-Kernels wheels (sm90 / sm80 / sm120, cu129, cp312) built incrementally from the 3.0.3 release cache (via the earlier 3.0.4 candidate cache) with GCC 12.4 and the pixi CUDA 12.9 toolkit (torch 2.13+cu129; CUTLASS 4.2, MathDx), GPU-less on the cluster. The final plan: sm90a 579 artifacts (4 newly built on the final source: `token_pair_init_sm90`, `parallel_residual_sm90`, hoist-rows extension and one more), sm80 74 (8 built), sm120a 67 (9 built + `swa_wgrad5_sm120`). Carried names (`triattn_h100_core_h16_v2`, `miniworld_pwa_dgv_bwd`, `_glue3`, `_pair3`) are carried byte-for-byte (8 files).
+Kernels wheels (sm90 / sm80 / sm120, cu129, cp312) built incrementally from the 3.0.3 release cache (via the earlier 3.0.4 candidate cache) with GCC 12.4 and the pixi CUDA 12.9 toolkit (torch 2.13+cu129; CUTLASS 4.2, MathDx), GPU-less on the cluster. The final plan: sm90a 579 artifacts (5 built on the final source, the heaviest, `layernorm_general_cuda_v4`, with ninja -j4 outside the prebuild pool because the pool builds with MAX_JOBS=1 and exceeds the 10-minute job limit), sm80 74 (3 built), sm120a 67 (4 built). Carried names (`triattn_h100_core_h16_v2`, `miniworld_pwa_dgv_bwd`, `_glue3`, `_pair3`) are carried byte-for-byte (8 files).
 **No name of 3.0.3 is dropped:** manifest names sm90 364 -> 364 (0 dropped / 0 added), sm80 72 -> 74 (0 / 2: `ieee_f32_sm80`, `sampler_ops_f32_sm80`), sm120 64 -> 67 (0 / 3: `ieee_f32_sm120`, `sampler_ops_f32_sm80_sm120`, `swa_wgrad5_sm120`).
-**`ldd` on every `.so` of every arch (staged trees and installed wheels, 377 files at the baseline build): 0 link a CUDA-13 library, 0 unresolved**; the CUDA libraries are `libcudart.so.12`, `libcublas.so.12`, `libcublasLt.so.12` only. Highest symbol versions: GLIBC 2.14, GLIBCXX 3.4.21, CXXABI 1.3.11. The sm90 kernels wheel is 100.74 MB (PyPI limit 100 MiB; 3.0.3 was 100.25 MB).
+**`ldd` on every `.so` of every arch (staged trees and installed wheels, 378 files): 0 link a CUDA-13 library, 0 unresolved**; the CUDA libraries are `libcudart.so.12`, `libcublas.so.12`, `libcublasLt.so.12` only. Highest symbol versions: GLIBC 2.14, GLIBCXX 3.4.21, CXXABI 1.3.11. The sm90 kernels wheel is 101.67 MB (101,674,304 B; PyPI limit 100 MiB = 104,857,600 B; 3.0.3 was 100.25 MB).
 
 ## Verification
 
@@ -98,11 +103,11 @@ Installed-wheel runs use the release artifacts extracted without the repo on the
 | ldd of every `.so` (staged trees + installed wheels) | 0 link CUDA 13, 0 unresolved |
 | H100 installed-wheel load of every indexed sm90 artifact (579 = 163 + 190 + 226) | 579 present, 579 resolved, **0 compiled**; also with the system libstdc++ preloaded |
 | H100 installed accuracy (13 modules, pytorch / cuda / triton) | RED 0, error 0, 0 builds (cuda 172 GREEN / 98 YELLOW) |
-| H100 `test_restored_triton_backends.py` / `test_bias_only_fp32_logits.py` (installed wheel, no JIT) | 63 passed / 46 passed, 8 skipped (Triton has no hoisted-bias path of its own) |
-| H100 outputs vs the installed 3.0.3 wheel (`_sm_count.cuh` modules: OPM, TokenDiT rows, bias-only DiT, PairEmbed*, TriAttn, AugmentNoise / AlignEuler / PoolAtoms, TokenPairInit; 108 registry eval cases, min length) | 100 cases bitwise identical, 0 different, 0 error; the 8 `TokenDiTMiniWorldBiasOnly` cases (fp32, master) changed as intended by the fp32-logits rule, error vs fp64 unchanged (e.g. rel-rms 2.66e-4 / 3.08e-3 in both versions) |
+| H100 `test_restored_triton_backends.py` / `test_bias_only_fp32_logits.py` (installed wheel, no JIT) | 63 passed / 66 passed, 8 skipped (Triton has no hoisted-bias path of its own) |
+| H100 outputs vs the installed 3.0.3 wheel (cuda eval, 199 registry cases at min length: OPM, TokenDiT x5, PairEmbed*, TriAttn, AugmentNoise / AlignEuler / PoolAtoms, TokenPairInit, AttentionPairBias, LayerNorm, ParallelResidual, Transition) | 186 cases bitwise identical, 0 different, 5 cases unsupported in both (Transition fp32 eval); the 8 `TokenDiTMiniWorldBiasOnly` cases (fp32, master) changed as intended by the fp32-logits rule / eval hoist, error vs fp64 unchanged (rel-rms 2.66e-4 fp32 / 3.08e-3 master in both versions) |
 | H100 default routes vs 3.0.3 (inference 29 cases, h16 TriAttn core 6) | bitwise identical; default training paths: as 3.0.3 (token DiT Boltz-2 / RF3, TriMul D128 / D256, TriAttn differ between two runs of the same wheel: nondeterministic backward, same as 3.0.3) |
-| A100 installed wheels (cssb3) | 74 indexed artifacts resolved, 0 compiled; accuracy RED 0 / error 0 (cuda 181 GREEN / 103 YELLOW); `test_restored_triton_backends.py` + `test_bias_only_fp32_logits_sm80.py`: 69 passed; 0 kernels built (baseline build, before the sm120 plan fix) |
+| A100 installed wheels (cssb3, final build) | 74 indexed artifacts resolved, 0 compiled; accuracy RED 0 / error 0 (cuda 181 GREEN / 103 YELLOW); `test_restored_triton_backends.py` + `test_bias_only_fp32_logits_sm80.py`: 69 passed; 0 kernels built |
 | RTX 5090 installed wheels (final build) | 67 indexed sm120 artifacts resolved, **0 compiled**; accuracy RED 0, error 0 (cuda 188 GREEN / 96 YELLOW; the 7 `swa_wgrad5_sm120` errors of the first build are gone); restored Triton + sm80 bias-only fp32 tests: 65 passed, 4 skipped; 0 kernels built |
-| RTX 5090 real Protenix v1 step (installed wheels) | 2.0 s / step, step-0 loss / gnorm 0.3764 / 1.242, 0 engine Triton, no segfault, 0 kernels built, peak 16.93 / 25.32 GiB (alloc / reserved) |
-| RTX 5090 max Pairformer blocks L 384 (`pf_train_bench.py max`, installed wheels, default allocator) | **31** (0.264 s / step, 27.99 GiB alloc); 32 blocks fit only with `expandable_segments:True` (28.81 GiB alloc) |
+| RTX 5090 real Protenix v1 step (installed wheels) | 2.0 s / step, step-0 loss / gnorm 0.3764 / 1.242, 0 engine Triton, no segfault, 0 kernels built, peak 16.93 / 25.30 GiB (alloc / reserved) |
+| RTX 5090 max Pairformer blocks L 384 (`pf_train_bench.py max`, installed wheels, default allocator) | **31** (0.266 s / step, 27.99 GiB alloc); 32 blocks fit only with `expandable_segments:True` (28.81 GiB alloc) |
 | CPU gate (source branch) | ruff, pyright 0 errors, pytest 3414 |
