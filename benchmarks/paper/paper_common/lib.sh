@@ -24,5 +24,3 @@ fp8_stage() {
   python "$PAPER/E4_fp8/fp8_pair.py" --gates "$gates" --out "${RECORDS:-$PAPER/E4_fp8/records}/$CARD/fp8_$gates.r$REP.jsonl" --budget-seconds "$BUDGET" $EXTRA
 }
 
-# E5: the external libraries are installed into PAPER_EXT_PATH (pip install --target, see E5_other_kernels/README.md), not into the engine env
-[ -d "${PAPER_EXT_PATH:-$HOME/paper-ext}" ] && export PYTHONPATH=$PYTHONPATH:${PAPER_EXT_PATH:-$HOME/paper-ext}

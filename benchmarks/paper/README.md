@@ -54,4 +54,18 @@ Smoke run (1-2 cases, no records committed): `EXTRA="--module TriangleMultiplica
 
 ## Status (3.0.6 candidate; full measurements wait for the released tag)
 
-STATUS_TABLE
+Smoke = 1-2 cases, 1 repeat, on the 3.0.6 candidate tree (rc-3.0.6 c40a761ef + this harness). **Full measurement: not yet, pending the 3.0.6 tag, on every card.**
+
+| ID | H100 | A100 | RTX 5090 |
+|---|---|---|---|
+| E1 | smoke yes (engine + kit stack) | smoke yes (engine + kit) | smoke yes (engine + kit) |
+| E2 | smoke yes (TriMul engine; TriAttn kit stage queued) | smoke yes (TriMul + TriAttn, engine + kit) | smoke yes (TriMul engine + kit) |
+| E3 | smoke yes (TriAttn, engine + kit) | smoke yes (TriMul, engine + kit) | smoke yes |
+| E4 | smoke yes (TriMul, both gate passes; TriAttn queued) | n/a (no FP8 path) | smoke yes: no sm120 FP8 route (`routes_fired` false, ratio ~ 1) |
+| E5 | adapters installed; smoke queued | smoke yes: trifast runs, ds4sci fails to JIT-build (needs CUTLASS_PATH + nvcc; recorded as failed with the reason) | smoke queued (GPU lock) |
+| E6 | smoke queued | smoke yes | smoke yes |
+
+Smoke caveats: kernels were JIT-built on first use in the worktree (a cold cache ate a 10-minute job on H100): prebuild the tag's kernels
+before a campaign (`python -m miniworld_engine.kernels._prebuild --arch sm90a`, sm80 on the A100; `tools/slurm/cycle.sh` shows the job shape).
+Where there is no `.git` (cssb3, cssb-rtx copies) set `MWE_COMMIT=<tag commit>` (and `MWE_VERSION` if the tree has no pyproject) so records carry the commit.
+Library accuracy of the E5 adapters is not verified against float64 (speed only).

@@ -38,37 +38,38 @@ def _ds4sci_core(q, k, v, bias, mask):
     return out.transpose(2, 3)
 
 
-def _trifast_layout():
-    """The layout trifast's own test-tensor generator uses: shapes of (q, k, v, bias, mask), probed at run time (the README states none)."""
-    from trifast.utils import gen_tensors
-
-    got = gen_tensors(8, 32, 2, use_mask=True, device="cuda", dtype=torch.bfloat16, std=1.0)
-    return [tuple(t.shape) for t in got[:5]]
-
-
 def _trifast_core(q, k, v, bias, mask):
+    """trifast.triangle_attention (latkins/trifast 0.1.13): q / k / v ``[B, H, N, N, d]``, bias ``[B, H, N, N]``, mask ``[B, N, N]`` bool where True =
+    masked (trifast/equiv.py: ``neg_inf * mask``); the softmax scale ``d^-0.5`` is inside. Our core layout is ``[B, N, H, Q, d]``."""
     from trifast import triangle_attention
 
-    b = q.shape[0]
-    # the tensor layout is not documented: probed once from trifast.utils.gen_tensors, the call is made in that layout
-    shapes = _trifast_layout()
-    q5 = tuple(shapes[0])
-    if len(q5) == 4:  # [N, H, S, d] or [S, ...]: no batch dim -> one sample per call
-        if b != 1:
-            raise RuntimeError(f"trifast takes no batch dimension (layout {shapes}); B={b}")
-        tq, tk, tv = (t[0] for t in (q, k, v))
-        tb = bias[0, 0]
-        tm = mask[0] if mask is not None else None
-        out = triangle_attention(tq, tk, tv, tb, tm)
-        return out[None]
-    return triangle_attention(q, k, v, bias.float(), mask)
+    b, n, _h, s, _d = q.shape
+    tq, tk, tv = (t.transpose(1, 2).contiguous() for t in (q, k, v))
+    tb = bias[:, 0].to(q.dtype).contiguous()
+    tm = (
+        torch.zeros(b, n, s, dtype=torch.bool, device=q.device) if mask is None else (~mask.bool())[:, None, :].expand(b, n, s).contiguous()
+    )
+    return triangle_attention(tq, tk, tv, tb, tm).transpose(1, 2)
 
 
 # --------------------------------------------------------------------------------------------------------------------------- adapters
+_IMPORT_PROBES = {"deepspeed": "deepspeed.ops.deepspeed4science", "trifast": "trifast"}
+
+
+def _import_error(probe: str) -> str | None:
+    """Why the library cannot be imported (not installed, a missing dependency, a failed import), or None."""
+    try:
+        importlib.import_module(_IMPORT_PROBES.get(probe, probe))
+    except Exception as exc:  # recorded as the reason the backend does not serve the case
+        return f"{probe}: {type(exc).__name__}: {str(exc)[:200]} (see E5_other_kernels/README.md)"
+    return None
+
+
 def _supports(name: str, probe: str):
     def supports(self, pair, mask=None):
-        if importlib.util.find_spec(probe) is None:
-            return f"{probe} is not installed (see E5_other_kernels/README.md)"
+        why = _import_error(probe)
+        if why is not None:
+            return why
         if name == "ds4sci" and pair.dtype not in (torch.bfloat16, torch.float16):
             return f"DS4Sci_EvoformerAttention takes bf16 / fp16, got {pair.dtype}"
         if not torch.cuda.is_available():
@@ -90,8 +91,14 @@ def _forward(core):
 
 def install(names) -> None:
     """Add the named external backends to every single-direction triangle-attention class that has the cueq core signature."""
+    import os
+    import sys
+
     import miniworld_engine.modules.triangle as tri
 
+    ext = os.environ.get("PAPER_EXT_PATH") or os.path.expanduser("~/paper-ext")
+    if os.path.isdir(ext) and ext not in sys.path:
+        sys.path.append(ext)  # after site-packages: the engine env wins for every package it has
     table = {"ds4sci": ("deepspeed", _ds4sci_core), "trifast": ("trifast", _trifast_core)}
     for name in names:
         if name not in table:
