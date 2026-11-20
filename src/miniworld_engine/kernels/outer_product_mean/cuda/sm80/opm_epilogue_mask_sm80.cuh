@@ -44,8 +44,15 @@ struct EpilogueParams {
   float norm_add = 0.f;
 };
 
+#ifndef OPM_EP_BI
+#if defined(MWE_SM120)
+#define OPM_EP_BI 2   // RTX 5090 (170 SMs, two 48 KB CTAs each): L 256 is 1024 CTAs of 64 pairs = 3.01 waves of 340 slots, not 512 of 128 pairs = 3.01 waves of 170 (0.92 -> 0.90 ms at d_msa 64, depth 1024)
+#else
+#define OPM_EP_BI 4
+#endif
+#endif
 template <int CZ, int NSTAGE = (CZ == 384 ? 2 : 3), int NMINB = 1, bool WIDE = false> struct EpCfg {
-  static constexpr int BJ = 32, BI = (CZ <= 128 || WIDE) ? 4 : 2, MT = BI * BJ, NTHR = WIDE ? 512 : 256;     // WIDE: 16 warps, 128 pairs, 4 x 4 warp grid (all channels of d_pair 256 / 384 in one CTA)
+  static constexpr int BJ = 32, BI = WIDE ? 4 : (CZ <= 128 ? OPM_EP_BI : 2), MT = BI * BJ, NTHR = WIDE ? 512 : 256;     // WIDE: 16 warps, 128 pairs, 4 x 4 warp grid (all channels of d_pair 256 / 384 in one CTA)
   static constexpr int WARPS_M = WIDE ? 4 : 2, WARPS_N = 4;
   static constexpr int WM = MT / WARPS_M, WN = CZ / WARPS_N, RM = WM / 16, RN = WN / 8;
   static constexpr int NCH = CZ / 8;                        // 16-byte chunks per output row

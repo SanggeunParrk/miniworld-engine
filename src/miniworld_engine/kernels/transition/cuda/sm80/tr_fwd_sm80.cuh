@@ -52,6 +52,13 @@ struct TrParams {
 #ifndef TANH16
 #define TANH16 0
 #endif
+#ifndef TR_F32H
+#if defined(MWE_SM120)
+#define TR_F32H 1
+#else
+#define TR_F32H 0
+#endif
+#endif
 #ifndef TR_NWARP
 #define TR_NWARP 8
 #endif
@@ -62,7 +69,11 @@ struct TrCfgT {
   // F32: fp32 x / out on fp16 tensor cores with fp32 accumulation (the wide family's fp32 scheme, fused): 16 rows per warp (MTF = 1: the fp32
   // output accumulator takes the registers of the second m16 tile), inference only
   static constexpr bool F32 = F32_;
-  static constexpr int MTF = F32 ? 1 : 2;   // m16 tiles per warp of a full work item
+  // F32H (RTX 5090 build): the fp32 Transition squeezes in f16 accumulation (twice the f32-accumulate tensor rate on GeForce Blackwell, half the
+  // accumulator registers: 32 rows per warp, the weights stream from L2 half as often); h16 carries a per-call power of two (f16s) so that the
+  // worst-case sum of H products stays inside f16 range; the residual is added in fp32 at the store
+  static constexpr bool F32H = F32 && TR_F32H;
+  static constexpr int MTF = F32 && !F32H ? 1 : 2;   // m16 tiles per warp of a full work item
   static constexpr int D = D_, H = H_, NWARP = TR_NWARP, NTHR = 32 * NWARP, MINB = 8 / NWARP, BM = 16 * MTF * NWARP;
   static constexpr int NS = D / 16, NJ = D / 8, NV = D / 32;   // GEMM1 k steps, GEMM2 n8 tiles, 16-byte vectors per row of a quad thread
 #ifndef TR_CH
@@ -102,6 +113,7 @@ struct TrCfgT {
   static_assert(SMEM <= 101376, "sm_120 shared memory (99 KB a block)");
 #endif
   static_assert(D % 32 == 0 && H % CH == 0, "widths");
+  static_assert(!F32H || H <= 256, "F32H: the f16 accumulator range holds for H <= 256");
 };
 using TrCfg = TrCfgT<128, 512>;
 
@@ -207,7 +219,15 @@ template <int MT, class G, bool LN = true>
 DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt) {
   constexpr int D = G::D, NCHUNK = G::NCHUNK, NST = G::NST, NS = G::NS, NJ = G::NJ, NV = G::NV;
   const int g8 = w.g8, q = w.q;
-  const float s_ab = G::F32 ? __ldg(p.sc + 1) : 0.f, s_h = G::F32 ? __ldg(p.sc + 2) : 0.f;   // the fp32 path's scales
+  const float s_ab = G::F32 ? __ldg(p.sc + 1) : 0.f;
+  float s_h = G::F32 ? __ldg(p.sc + 2) : 0.f;
+  // F32H: a power of two f keeps the f16 accumulator inside its range: the sum of H products |h16| |ws16| is at most H a_max^2 max|Ws| / (s_h s_ws) (sc[4], sc[5] = D max|Ws|, sc[3])
+  float f16s = 1.f;
+  if constexpr (G::F32H) {
+    const float bound = (float)G::H * __ldg(p.sc + 4) * __ldg(p.sc + 4) * (__ldg(p.sc + 5) * (1.f / G::D)) / __ldg(p.sc + 3);
+    if (bound > 60000.f) f16s = exp2f(-ceilf(log2f(bound * (1.f / 60000.f))));
+  }
+  s_h *= f16s;   // the fp32 path's scales
 
   // ---- LayerNorm of rows (16 mt + 8 hr + g8) straight into the A fragments: word v = 2 s + e2 of the thread's 2 D / 4 bytes -> fa[mt][s][hr + 2 e2].
   //      The same bytes (as f16) initialise the output accumulator: word J = accumulator tile J, so the residual costs nothing at the end.
@@ -241,7 +261,7 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
           xv[8 * i + 4] = __uint_as_float(u1.x); xv[8 * i + 5] = __uint_as_float(u1.y); xv[8 * i + 6] = __uint_as_float(u1.z); xv[8 * i + 7] = __uint_as_float(u1.w);
         }
 #pragma unroll
-        for (int j = 0; j < NJ; ++j) { acc2f[mt][j][2 * hr] = 0.f; acc2f[mt][j][2 * hr + 1] = 0.f; }
+        for (int j = 0; j < NJ; ++j) { acc2f[mt][j][2 * hr] = 0.f; acc2f[mt][j][2 * hr + 1] = 0.f; acc2[mt][j][hr] = 0u; }
         float sm = 0.f;
 #pragma unroll
         for (int e = 0; e < 8 * NV; ++e) sm += xv[e];
@@ -418,7 +438,7 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
         if (j + G2_AHEAD < NS) ldsm_x4(bs[(j + G2_AHEAD) % NB], wb + w.w2_off + ps * (32 * D) + (j + G2_AHEAD) * 256);
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt) {
-          if constexpr (G::F32) {   // fp32 accumulation
+          if constexpr (G::F32 && !G::F32H) {   // fp32 accumulation
             mma16816_f16(acc2f[mt][2 * j], ha[mt], bs[cb][0], bs[cb][1]);
             mma16816_f16(acc2f[mt][2 * j + 1], ha[mt], bs[cb][2], bs[cb][3]);
           } else {
@@ -443,7 +463,7 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
   if constexpr (G::F32) {
     // ---- fp32 store: out = acc s_h s_ws + x (x re-read from L2, where the item's prefetch put it); tiles J = 4 i .. 4 i + 3 are the thread's 8 floats
     // at columns 32 i + 8 q .. + 7 of its rows (32 contiguous bytes)
-    const float s_o = __ldg(p.sc + 3);
+    const float s_o = __ldg(p.sc + 3) / f16s;
 #pragma unroll
     for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
@@ -459,8 +479,14 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
             float o[8];
 #pragma unroll
             for (int k = 0; k < 4; ++k) {
-              o[2 * k] = fmaf(acc2f[mt][4 * i + k][2 * hr], s_o, xr[2 * k]);
-              o[2 * k + 1] = fmaf(acc2f[mt][4 * i + k][2 * hr + 1], s_o, xr[2 * k + 1]);
+              if constexpr (G::F32H) {
+                const float2 v = unpack_f16(acc2[mt][4 * i + k][hr]);
+                o[2 * k] = fmaf(v.x, s_o, xr[2 * k]);
+                o[2 * k + 1] = fmaf(v.y, s_o, xr[2 * k + 1]);
+              } else {
+                o[2 * k] = fmaf(acc2f[mt][4 * i + k][2 * hr], s_o, xr[2 * k]);
+                o[2 * k + 1] = fmaf(acc2f[mt][4 * i + k][2 * hr + 1], s_o, xr[2 * k + 1]);
+              }
             }
             float* dst = p.out32 + (size_t)r * D + 32 * i + 8 * q;
             *reinterpret_cast<float4*>(dst) = make_float4(o[0], o[1], o[2], o[3]);
@@ -507,16 +533,18 @@ __global__ void __launch_bounds__(G::NTHR, G::MINB) tr_fwd_kernel(const TrParams
   // at once, is then half as large -- then full tiles b, b + grid, ...
   const int f = p.num_tiles / grid, rem = p.num_tiles - f * grid;
   const int rem_rows = p.T - f * grid * BM, nh = (rem_rows + BM / 2 - 1) / (BM / 2);
-  const bool half_mode = G::MTF == 2 && rem > 0 && nh <= grid;   // F32 items are one m16 tile per warp: no half tiles
+  // F32H: up to two half tiles a CTA (the 2304 tiles of L 768 on 170 SMs: 94 left over = 188 halves, not a round of 14 full tiles on 94 SMs)
+  constexpr int MAXH = G::F32H ? 2 : 1;
+  const bool half_mode = G::MTF == 2 && rem > 0 && nh <= MAXH * grid;
   const int n_full = half_mode ? f : f + (b < rem ? 1 : 0);
-  const int n_half = (half_mode && b < nh) ? 1 : 0;
+  const int n_half = half_mode ? nh / grid + (b < nh % grid ? 1 : 0) : 0;
   const int n_items = n_full + n_half;
   // work list entry: (first row of the item's CTA tile) * 4 + m16 tiles per warp; a warp's rows start 16 mt warp further
   int* sched = reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(bars) + G::BAR_BYTES + G::SMEM_GB);
   for (int it = tid; it <= G::MAX_ITEMS; it += G::NTHR) {
     int e = -1;
     if (it < n_items && it < G::MAX_ITEMS)
-      e = it < n_half ? ((f * grid * BM + b * (BM / 2)) << 2) | 1 : (((b + (it - n_half) * grid) * BM) << 2) | G::MTF;
+      e = it < n_half ? ((f * grid * BM + (it * grid + b) * (BM / 2)) << 2) | 1 : (((b + (it - n_half) * grid) * BM) << 2) | G::MTF;
     sched[it] = e;
   }
 

@@ -70,7 +70,11 @@ torch::Tensor fwd_f32_t(torch::Tensor x, torch::Tensor w, torch::Tensor gb, torc
   p.x = nullptr; p.w = cptr<__nv_bfloat16>(w); p.gb = cptr<float4>(gb); p.out = nullptr; p.stats = nullptr; p.xn = nullptr; p.trace = nullptr;
   p.x32 = cptr<float>(x); p.out32 = mptr<float>(out); p.sc = cptr<float>(sc);
   p.T = (int)T; p.num_tiles = (p.T + G::BM - 1) / G::BM; p.eps = (float)eps;
+#if defined(MWE_SM120)
+  const int g = G::MTF == 2 && 2 * p.num_tiles <= num_sms() * G::MINB ? (p.T + G::BM / 2 - 1) / (G::BM / 2) : std::min(p.num_tiles, num_sms() * G::MINB);
+#else
   const int g = std::min(p.num_tiles, num_sms() * G::MINB);
+#endif
   TORCH_CHECK(p.num_tiles / g + 2 <= G::MAX_ITEMS, "fwd_f32: too many work items per CTA");
   set_smem(a100::tr_fwd_kernel<G, true>, G::SMEM);
   a100::tr_fwd_kernel<G, true><<<g, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
