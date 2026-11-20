@@ -13,7 +13,7 @@ from miniworld_engine.measure import config as C
 from miniworld_engine.modules import MSAPairWeightedAveraging
 from miniworld_engine.modules.primitives import key_mask, random_input
 
-pytestmark = [pytest.mark.gpu, pytest.mark.a100]
+pytestmark = [pytest.mark.gpu]  # A100 and RTX 5090: the tests skip on other cards themselves
 
 
 def _card() -> tuple[int, int] | None:
