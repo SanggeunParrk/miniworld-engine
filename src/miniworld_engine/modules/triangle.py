@@ -921,7 +921,8 @@ class TriangleAttentionRF3(_TriangleAttentionFp32Softmax):
     version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
     #: 3: (2026-11-13) the H100 d_pair 128 x 4 heads inference gate in fp32 inside the tail
     #: cuda:5090_sm120 5 (2026-11-19): inference folds the gate bias into the front's shift columns (one plain mm instead of the biased-epilogue addmm: 4.1 -> 3.0 ms of 12 at L 1024)
-    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:5090_sm120": 5}
+    #: cuda:5090_sm120 6 (2026-11-20): d_pair 128 x 4 heads inference splits the front into q | k | v | g (K = 128, N = 512 on cuBLAS' fast 64 x 64 tile, shift and gate bias as GEMM biases) and the bias heads (N = 8): 807 -> 520 us of the L 640 call (K = 136 / N = 520 ran 72 TFLOP/s against 125); outputs within the bf16 rounding of the shift
+    backend_versions: ClassVar[dict[str, int]] = {**_TriangleAttentionFp32Softmax.backend_versions, "cuda:5090_sm120": 6}
 
     _projection_biases = True
 

@@ -235,7 +235,8 @@ def _outer(sm, a, b, mk):
         return sm.lt_mm(a, b, True, False)
     from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
 
-    if not _card.sm120() and ogemm_sm80.all_live(mk):  # nothing to skip: cuBLAS
+    # nothing to skip: cuBLAS.  The RTX 5090 from L 384 only (s5090/four: rows 55 / 63 at L 384 1.93 -> 1.82 / 1.72 -> 1.69 ms; at L 128 the skip kernel leads: 0.25 vs 0.27 ms)
+    if (not _card.sm120() or a.shape[1] >= 32 * 384) and ogemm_sm80.all_live(mk):
         return torch.mm(a.t(), b)
     return ogemm_sm80.outer(a, b, ogemm_sm80.live_tokens(mk))
 
@@ -295,7 +296,9 @@ def inference(
         m = msa[0]
         mk = _mask_u8(mask)
         a, b, _ = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, False, None, *pb)
-        if _card.sm120() and m.shape[1] * m.shape[1] > sm.ROWS_TOKENS:  # RTX 5090 past L 2048: O per chunk of rows (2 KiB a pair in one piece)
+        if (
+            _card.sm120() and m.shape[1] * m.shape[1] > sm.ROWS_TOKENS
+        ):  # RTX 5090 past L 2048: O per chunk of rows (2 KiB a pair in one piece)
             norm, nconst = _norm(mk, m.shape[0], clamp=dmin > 0)
             out = sm.epilogue_rows(
                 a, b, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first, dmin=dmin, doff=doff

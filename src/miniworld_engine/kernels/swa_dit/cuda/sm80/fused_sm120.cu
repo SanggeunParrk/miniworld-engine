@@ -198,6 +198,38 @@ void swa_ffn_f32(torch::Tensor q, torch::Tensor g, torch::Tensor o, torch::Tenso
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+template <int MT>
+void launch_ffn_f32h(const sw120f::FfnParams& p) {
+  static bool attr[64] = {};
+  const int dev = at::cuda::current_device() & 63;
+  if (!attr[dev]) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(sw120f::ffn_f32_kernel<MT, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, sw120f::ffn_smem<MT, true>()));
+    attr[dev] = true;
+  }
+  const unsigned ctas = (unsigned)std::min<int64_t>(num_sms(), (p.M + 16 * MT - 1) / (16 * MT));
+  sw120f::ffn_f32_kernel<MT, true><<<ctas, sw120f::NTHR, sw120f::ffn_smem<MT, true>(), at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// swa_ffn_f32 with the weight packs in fp16 (the tf32-rounded values of the fp32 packs, exact while their magnitudes are inside fp16's range: the caller checks): half the bytes
+// through L2 per row tile; mt 1 or 2 (16 / 32-row tiles)
+void swa_ffn_f32h(torch::Tensor q, torch::Tensor g, torch::Tensor o, torch::Tensor mod, torch::Tensor wo, torch::Tensor wu, torch::Tensor wd, torch::Tensor out, int64_t S,
+                  int64_t B, double eps, int64_t mt) {
+  CHECK_CUDA_F32(q); CHECK_CUDA_F32(g); CHECK_CUDA_F32(mod); CHECK_CUDA_F32(out);
+  for (const auto* t : {&wo, &wu, &wd}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kFloat16, "the weight packs must be CUDA fp16 tensors");
+  TORCH_CHECK(o.is_cuda() && (o.scalar_type() == torch::kFloat32 || o.scalar_type() == torch::kBFloat16), "o must be a CUDA fp32 or bf16 tensor");
+  for (const auto* t : {&q, &g, &o, &mod, &wo, &wu, &wd, &out}) CHECK_CONTIG(*t);
+  const int64_t M = q.numel() / 128;
+  TORCH_CHECK(q.numel() == M * 128 && g.numel() == M * 128 && o.numel() == M * 128 && out.numel() == M * 128 && M % S == 0 && mod.numel() == B * S * 768, "bad operand sizes");
+  TORCH_CHECK(wo.numel() == 128 * 128 && wu.numel() == 512 * 128 && wd.numel() == 128 * 256, "bad weight sizes");
+  TORCH_CHECK(mt == 1 || mt == 2, "mt 1 or 2");
+  if (M == 0) return;
+  c10::cuda::CUDAGuard guard(q.device());
+  sw120f::FfnParams p{q.data_ptr<float>(), g.data_ptr<float>(), o.data_ptr(), mod.data_ptr<float>(), wo.data_ptr(), wu.data_ptr(), wd.data_ptr(),
+                      out.data_ptr<float>(), (int)M, (int)S, (int)B, o.scalar_type() == torch::kBFloat16 ? 1 : 0, (float)eps};
+  if (mt == 2) launch_ffn_f32h<2>(p); else launch_ffn_f32h<1>(p);
+}
+
 template <class G>
 void launch_ffn_bwd_gate_sm120(const sw80::FfnBwdGateParams& p) {
   static bool attr[64] = {};
@@ -305,6 +337,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swa_qkvg_bwd_stream", &swa_qkvg_bwd_stream);
   m.def("swa_qkvg_f32", &swa_qkvg_f32);
   m.def("swa_ffn_f32", &swa_ffn_f32);
+  m.def("swa_ffn_f32h", &swa_ffn_f32h);
   m.def("swa_qkvg_fwd_half", &swa_qkvg_fwd_half);
   m.def("swa_ffn_fwd_u32", &swa_ffn_fwd_u32);
 }

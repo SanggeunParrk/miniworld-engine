@@ -18,6 +18,8 @@ d_atom 128 = 4 heads x 32, d_cond 128, SwiGLU hidden 256; ``mod`` [N S, 768] fp3
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from miniworld_engine.kernels import _sm120
@@ -410,6 +412,31 @@ def _fp32_packs(wqkv, wg, wo, wu, wd) -> list[torch.Tensor]:
     return [_pack(torch.cat([wqkv, wg]), _qkvg_rows(dev)), _pack(wo), _pack(wu, _wu_rows(dev)), _pack(wd)]
 
 
+#: RTX 5090 fp32 inference: the out-projection + FFN kernel streams its weight packs as fp16 (the tf32-rounded values, exact inside fp16's range; ``_fp16_packs``): half the bytes
+#: through L2 for every 16- / ``FFN_F16W_MT * 16``-row tile (s5090/four).  False: the fp32 packs.
+FFN_F16W_SM120 = os.environ.get("MWE_SWA_FFN_F16W", "1") != "0"
+FFN_F16W_MT = int(
+    os.environ.get("MWE_SWA_FFN_MT", "0")
+)  # 0: 32-row tiles when there are more 16-row tiles than SMs (one weight pass per tile: fewer passes), else 16-row
+
+
+def _ffn_mt(m: int) -> int:
+    if FFN_F16W_MT in (1, 2):
+        return FFN_F16W_MT
+    sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return 2 if -(-m // 16) > sms else 1
+
+
+def _fp16_packs(wop, wup, wdp) -> list[torch.Tensor] | None:
+    """The three tf32 packs of the FFN stage as fp16 (exact: tf32 and fp16 both carry 10 mantissa bits), or None when a magnitude is beyond fp16's range (the fp32 packs
+    serve) or the pack is built under a stream capture (the eager warm-up builds it first, a graph replays its result)."""
+    if torch.cuda.is_current_stream_capturing():
+        return None
+    if not all(bool((p.abs().max() <= 6.0e4).item()) for p in (wop, wup, wdp)):
+        return None
+    return [p.to(torch.float16).contiguous() for p in (wop, wup, wdp)]
+
+
 #: rows per CTA tile / 16 of the fp32 TF32 kernels (the FFN kernel at most 2): None = the shortest tile whose tile count fits one wave of
 #: CTAs (one per SM), else 4 (a weight pass per tile: longer tiles stream fewer); a tuple ((max rows, mt), ..) overrides (experiments)
 _F32_MT = None
@@ -465,7 +492,11 @@ def _infer_fp32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, half_window: in
     o = _attention_infer(qkv, seqused, n, s, half_window, True)
     out = torch.empty(m, C, device=dev, dtype=_F32)
     if sm120:
-        ext.swa_ffn_f32(q, g, o, mod, wop, wup, wdp, out, s, n, FP32_EPS)
+        h16 = eval_form("swa_sm120_fp32_f16_packs", (wo, wu, wd), lambda: _fp16_packs(wop, wup, wdp)) if FFN_F16W_SM120 else None
+        if h16 is not None:
+            ext.swa_ffn_f32h(q, g, o, mod, *h16, out, s, n, FP32_EPS, _ffn_mt(m))
+        else:
+            ext.swa_ffn_f32(q, g, o, mod, wop, wup, wdp, out, s, n, FP32_EPS)
     else:
         ext.swa_ffn_f32(q, g, o, mod, wop, wup, wdp, out, s, n, FP32_EPS, min(mt, 2))
     return out.view(n, s, C)

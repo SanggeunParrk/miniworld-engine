@@ -1,4 +1,4 @@
-"""RTX 5090 (sm_120a), s5090/pair-speed: the D 256 triangle-attention front without constant columns (K = 256, the LayerNorm shift in the GEMM bias),
+"""RTX 5090 (sm_120a), s5090/pair-speed (and s5090/four: the RF3 D 128 split front): the D 256 triangle-attention front without constant columns (K = 256, the LayerNorm shift in the GEMM bias),
 the persistent TokenPairInit forward and the Chai-1 outer-product products at S >= 1024 keep the old outputs (the shift's one bf16 rounding aside)."""
 
 import copy
@@ -76,3 +76,28 @@ def test_rf3_gate_bias_folded_into_the_front_shift(length: int, monkeypatch: pyt
     scale = ref.abs().max().item()
     assert (folded - epilogue).abs().max().item() <= 8e-3 * scale
     assert (folded - ref).abs().max().item() <= max((epilogue - ref).abs().max().item(), 8e-3 * scale)
+
+
+@pytest.mark.parametrize("starting", [True, False])
+@pytest.mark.parametrize("length", [128, 384])
+def test_rf3_d128_front_split_into_two_gemms(length: int, starting: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """s5090/four: inference at D 128 with four 32-channel heads runs q | k | v | g (N 512) and the bias heads (N 8) as two GEMMs on ``ln_rows``' padded rows
+    (K = 128): within the bf16 rounding of the folded shift of the single K = 136 / N = 520 GEMM, and no further from the reference than it."""
+    from miniworld_engine.modules import TriangleAttentionRF3
+
+    module = TriangleAttentionRF3(d_pair=128, n_head=4, starting=starting, p_drop=0.0, master_weights=True).cuda().float()
+    C.randomize(module, torch.Generator(device="cuda").manual_seed(0))
+    module.set_master_weights()
+    inputs = module.make_inputs(
+        length=length, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=torch.Generator(device="cuda").manual_seed(1)
+    )
+    with monkeypatch.context() as m:
+        m.setenv("MINIWORLD_TRIATTN_SPLIT", "auto")
+        split = _run(module, inputs, "cuda")
+    with monkeypatch.context() as m:
+        m.setenv("MINIWORLD_TRIATTN_SPLIT", "0")
+        single = _run(module, inputs, "cuda")
+    ref = _run(module, inputs, "pytorch")
+    scale = ref.abs().max().item()
+    assert (split - single).abs().max().item() <= 8e-3 * scale
+    assert (split - ref).abs().max().item() <= max((single - ref).abs().max().item(), 8e-3 * scale)
