@@ -34,20 +34,21 @@ MAX_LEN_INFER = 8192  # inference: pair_fwd keeps the row in shared memory as fp
 
 
 def max_len(d_pair: int, training: bool) -> int:
-    """The longest L the kernels take: MAX_LEN in training, MAX_LEN_INFER in inference (every d_pair: past the bf16 shared-memory row the logits are staged in the output rows; the
-    d_pair 384 tiles).  The RTX 5090 (99 KB) in inference: the longest bf16 row of logits that fits next to the tiles (``_sm120_infer_len``)."""
+    """The longest L the kernels take: MAX_LEN in training, MAX_LEN_INFER in inference (past the bf16 shared-memory row the logits are staged in the output rows).
+    The RTX 5090 in inference: the card's memory bounds it (``_sm120_infer_len``)."""
     if not training and _card.sm120():
         return _sm120_infer_len(d_pair)
     return MAX_LEN if training else MAX_LEN_INFER
 
 
 def _sm120_infer_len(d_pair: int) -> int:
-    """The RTX 5090's inference limit of ``pair_fwd`` (sm80/ops.cu launch_pair_fwd, sm80/pwa_pair_fwd_sm80.cuh PairFwdCfg under MWE_SM120): the shared memory is
-    FIXED + 8 (L + 4) 2 bytes (the bf16 row of logits of the 8 heads) within 101376 B; FIXED = LW warps x a [16][d_pair] bf16 tile + gamma / beta + the Wb^T fragments
-    (LW = 4 at d_pair >= 384, else 8).  L a multiple of 16: 4080 at d_pair 128, 1840 at 256, 2672 at 384."""
-    lw = 4 if d_pair >= 384 else 8
-    fixed = lw * 16 * d_pair * 2 + 2 * d_pair * 4 + d_pair * 16
-    return ((101376 - fixed) // 16 - 4) // 16 * 16
+    """The RTX 5090's inference limit (32 GB, 99 KB of shared memory): ``pair_fwd`` keeps the bf16 row in shared memory up to L 4080 / 1840 / 2672 (d_pair 128 / 256 / 384; the 3.0.5 limit) and
+    stages the logits in the output rows (sm80/ops.cu, GLOB) beyond it, so the bound is the card's memory: the pair [L, L, d_pair] the caller holds plus
+    w [8, L, L] (L^2 (2 d_pair + 16) bytes) within the total memory minus 2 GiB for the MSA side and the workspaces; L a multiple of 16, at most
+    ``MAX_LEN_INFER``.  Past it the backend refuses (another backend serves the call; never an out-of-memory).  32 GB card: 8192 at d_pair 128, 7712 at 256, 6336 at 384."""
+    total = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+    fit = int(((total - 2 * 2**30) / (2 * d_pair + 16)) ** 0.5) // 16 * 16
+    return min(MAX_LEN_INFER, fit)
 
 
 @functools.lru_cache(maxsize=1)

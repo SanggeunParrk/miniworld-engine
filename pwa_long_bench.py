@@ -11,7 +11,7 @@ from miniworld_engine.measure import config as C
 from miniworld_engine.modules import MSAPairWeightedAveraging
 
 sys.path.insert(0, "tests/gpu")
-from test_pwa_long_inference_sm80 import gold_f64
+from test_pwa_long_inference_sm80 import gold_f64, make_inputs_chunked  # pyright: ignore[reportMissingImports]
 
 import miniworld_engine.modules.msa as _msa_mod
 
@@ -62,7 +62,8 @@ for length in lengths:
     gen = torch.Generator(device="cuda").manual_seed(0)
     base = MSAPairWeightedAveraging(dm, dp, 8, d_hidden=dh, p_drop=0.25).cuda().eval()
     C.randomize(base, gen)
-    inp = base.make_inputs(length=length, samples=1, depth=32, dtype=torch.bfloat16, device="cuda", generator=gen)
+    depth = 8 if length * length * dp * 2 > 24 * 2**30 else 32  # a 28 GiB pair leaves no room for the float64 gold at depth 32
+    inp = make_inputs_chunked(base, length, depth, gen)
     rows = {}
     with torch.no_grad():
         gold = gold_f64(base, inp["msa"], inp["pair"], inp["mask"])
