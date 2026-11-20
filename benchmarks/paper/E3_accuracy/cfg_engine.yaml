@@ -1,0 +1,18 @@
+# E3, engine stack: accuracy against the float64 gold of every requirements row (the judge's canonical accuracy run: miniworld_engine/measure/
+# configs/accuracy.yaml), the engine's cuda / triton backends and cuEquivariance. Light: tol = max(err_pytorch, fixed[dtype]); GREEN <= tol,
+# YELLOW <= 5 tol, RED beyond; the fixed standard per dtype is the judge's (Methods).
+modules: all
+backends: [pytorch, cuda, triton, cueq]
+external: [cueq]
+rows: []
+dtypes: []
+modes: []
+lengths: all
+depths: min
+samples: min
+device: cuda
+seed: 0
+fixed:
+  bfloat16: 8.0e-3
+  master: 8.0e-3
+  float32: 1.0e-5

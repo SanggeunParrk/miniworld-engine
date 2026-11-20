@@ -1,0 +1,18 @@
+# E2, engine stack: the sweep grid of requirements_e2.csv (self-contained: TriAttn d=512 and the training lengths above 768 are in no
+# predictor's requirements row), eager PyTorch reference + the engine's cuda / triton backends + cuEquivariance.
+requirements: requirements_e2.csv   # relative to this file
+modules: [TriangleMultiplication, TriangleAttention]
+backends: [pytorch, cuda, triton, cueq]
+external: [cueq]
+rows: []
+dtypes: []
+modes: []
+lengths: all
+depths: min
+samples: min
+timing: [graph]
+warmup: 5
+iterations: 100
+flush_l2: true
+device: cuda
+seed: 0

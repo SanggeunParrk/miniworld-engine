@@ -1,0 +1,18 @@
+# E5: the E2 grid (TriAttn is what the libraries serve) with the external backends installed by externals.py (run_measure.py --ext ds4sci trifast),
+# next to the PyTorch reference, cuEquivariance and the engine's cuda for context. A case a library does not serve is recorded `unsupported`.
+requirements: ../E2_sweeps/requirements_e2.csv   # relative to this file
+modules: [TriangleAttention]
+backends: [pytorch, cuda, cueq, ds4sci, trifast]
+external: [cueq, ds4sci, trifast]
+rows: []
+dtypes: []
+modes: []
+lengths: all
+depths: min
+samples: min
+timing: [graph]
+warmup: 5
+iterations: 100
+flush_l2: true
+device: cuda
+seed: 0

@@ -1,0 +1,14 @@
+# E6, kit stack (Anthropic kernels through the card's kit-stack wrapper): the sweep grid of requirements_e2.csv (self-contained: TriAttn d=512 and the training lengths above 768 are in no
+# predictor's requirements row), pytorch is the same-process reference.
+requirements: ../E2_sweeps/requirements_e2.csv   # relative to this file: the E2 grid
+modules: [TriangleMultiplication, TriangleAttention]
+backends: [pytorch, anthropic]
+external: [anthropic]
+rows: []
+dtypes: []
+modes: []
+lengths: all
+depths: min
+samples: min
+device: cuda
+seed: 0
