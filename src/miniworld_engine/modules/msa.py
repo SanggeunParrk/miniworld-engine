@@ -573,7 +573,7 @@ class MSAPairWeightedAveraging(BackendModule, MasterWeights):
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 2,
+        "cuda:a100_sm80": 3,  # 3 (2026-11-20): inference past L 2048 (pair_fwd stages the bf16 logits in the output rows when the shared-memory row does not fit; L <= 2048 bit-identical)
         "cuda:5090_sm120": 3,
         "cuda:h100_sm90": 3,  # 3 (2026-11-20): inference past L 2048 up to 8192 (pair_fwd3 stages the bf16 logits in the output rows when the shared-memory row does not fit; L <= 2048 bit-identical); 2 (2026-11-18, 3.0.1): wide-width training backward fuses the dropout mask + BIG dv permute (bit-identical); native builds at every served training shape
     }  # 2026-11-10: the BIG width (d_msa 256 / d_pair 512) on sm_80 (pwa_wide_sm80); 2026-11-12: the sm_120a build of the sm_80 paths (RTX 5090);

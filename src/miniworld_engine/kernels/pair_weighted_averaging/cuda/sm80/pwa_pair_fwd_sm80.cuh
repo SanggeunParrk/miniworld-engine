@@ -56,15 +56,17 @@ template <typename LT> DEVI LT f_lt(float v);
 template <> DEVI float f_lt<float>(float v) { return v; }
 template <> DEVI __nv_bfloat16 f_lt<__nv_bfloat16>(float v) { return __float2bfloat16_rn(v); }
 
-template <int DZ, typename LT = float>
+// GLOB (inference, L past what a bf16 row of the 8 heads fits next to the tiles): the bf16-valued logits are staged in the output rows themselves (w[h][i][:], global memory,
+// the CTA's own 8 x L x 2 bytes, resident in L2) instead of shared memory, and the softmax rewrites them in place -- the same values, the same order of the reductions.
+template <int DZ, typename LT = float, bool GLOB = false>
 __global__ void __launch_bounds__(256, 1) pwa_pair_fwd_kernel(const PairFwdParams p) {
   using C = PairFwdCfg<DZ>;
   extern __shared__ __align__(128) unsigned char smem[];
   const uint32_t sbase = smem_u32(smem);
   float* sg = reinterpret_cast<float*>(smem + C::LW * C::TILE);             // gamma [DZ], beta [DZ]
   uint2* sbw = reinterpret_cast<uint2*>(sg + 2 * DZ);                       // B fragments of Wb^T: [ks][lane] = (n = head lane / 4, k = 16 ks + 2 (lane % 4) (+8)) pairs
-  LT* sb = reinterpret_cast<LT*>(sbw + C::NK * 32);                         // logits [8][NP]
-  const int NP = p.L + 4;
+  LT* sb = GLOB ? reinterpret_cast<LT*>(p.w) + (long)blockIdx.x * p.L : reinterpret_cast<LT*>(sbw + C::NK * 32);   // logits [8][NP] (GLOB: w[h][i][:], LT is bf16)
+  const long NP = GLOB ? (long)p.L * p.L : (long)p.L + 4;                   // the stride of a head
   const int i = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, q = lane & 3;
   for (int k = tid; k < DZ; k += C::NTHR) { sg[k] = p.lnw[k]; sg[DZ + k] = p.lnb[k]; }
   for (int idx = tid; idx < C::NK * 32; idx += C::NTHR) {                    // (kept in shared memory: 2 NK registers a thread would not fit at d_pair 384)

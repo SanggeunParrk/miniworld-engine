@@ -30,11 +30,11 @@ D_MSA = (64, 128)
 D_PAIR = (128, 256, 384)
 D_HIDDEN = (8, 16, 32)
 MAX_LEN = 1024  # training: the pair backward keeps a row of logits per head in shared memory
-MAX_LEN_INFER = 2048  # inference (FoldForge 5I28 E3): pair_fwd keeps the row in fp32 while it fits, else as bf16 (the same bf16-valued logits; sm80/ops.cu)
+MAX_LEN_INFER = 8192  # inference: pair_fwd keeps the row in shared memory as fp32 (L <= ~1.1k), as bf16 (up to 2048 at every d_pair), and past that stages the same bf16-valued logits in the output rows (global, L2; sm80/ops.cu); the bound is the A100's 80 GB (pair [L, L, d_pair] + w [8, L, L])
 
 
 def max_len(d_pair: int, training: bool) -> int:
-    """The longest L the kernels take: MAX_LEN in training, MAX_LEN_INFER in inference (every d_pair: a bf16 row of 2048 logits fits next to the
+    """The longest L the kernels take: MAX_LEN in training, MAX_LEN_INFER in inference (every d_pair: past the bf16 shared-memory row the logits are staged in the output rows; the
     d_pair 384 tiles).  The RTX 5090 (99 KB) in inference: the longest bf16 row of logits that fits next to the tiles (``_sm120_infer_len``)."""
     if not training and _card.sm120():
         return _sm120_infer_len(d_pair)
