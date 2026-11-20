@@ -38,8 +38,11 @@ LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
 _H100_PVX = True
 _H100_DPB2 = True  # the 128 x TN bias-gradient kernel (False: the 64 x 64 ``dpb_pipe``)
 _H100_PVX_FORCE = (0, 0, 0)  # (consumer warpgroups, samples per CTA, cluster); 0 = the host cost model
-#: Longest L the Hopper inference path serves (``pvx`` / ``pvx32`` stream P; the softmax rows take up to 3072 keys).
-H100_MAX_L = 3072
+#: Longest L the Hopper inference path serves: ``pvx`` / ``pvx32`` stream P through a TMA ring (no length bound of their own), the softmax rows keep
+#: a row of up to 3072 keys in registers and run two passes over longer ones (``softmax_rows_long``), 8192 the host bound of both. Past
+#: ``H100_REGISTER_L`` the call must also fit the device's memory (``long_refusal``: a refusal, never an out-of-memory).
+H100_MAX_L = 8192
+H100_REGISTER_L = 3072
 
 
 def h100_enabled(device) -> bool:
@@ -183,6 +186,15 @@ def softmax_rows(bias, p, mask=None):
     _ext().softmax_rows_cuda(bias, p, mask)
 
 
+def softmax_hoist(bias, p, mask=None):
+    """The inference hoist's softmax: p [R, L] bf16 = softmax over the keys of bias [R, L] (fp32 logits; ``mask`` [L] bool drops the False keys).
+    L <= 1024: ``softmax_t``'s P-only form (unchanged); longer rows: ``softmax_rows`` (``softmax_t`` holds L <= 1024 only)."""
+    if bias.shape[1] <= 1024:
+        softmax_t(bias, p, None, mask)
+    else:
+        softmax_rows(bias, p, mask)
+
+
 def softmax_t(bias, p, pt=None, mask=None, samples=1, scale=1.0):
     """softmax_rows that also writes pt[h] = p[h]^T (bias, p, pt [16 L, L] bf16; p may be bias, pt may not). bias may also be fp32
     (the Hopper training logits, not overwritten: p is a separate bf16 buffer). ``pt`` None: P only.
@@ -238,7 +250,7 @@ def pick_group(S: int, L: int, nsm: int, nh: int = H, dh: int = DH) -> int:
 def core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
     """bf16, d attention channels as h heads in LAYOUTS (768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64), L a multiple of 128
     up to 768 on sm_100 (the P tile and two accumulators in 512 TMEM columns), up to ``H100_MAX_L`` on Hopper (``pvx`` / ``pvx32``
-    stream P through a TMA ring: no length bound of their own; the sampler's token rungs reach 2560).
+    stream P through a TMA ring: no length bound of their own; the softmax rows run two passes past 3072 keys; ``long_refusal`` bounds the memory).
     settings.bias_only_dit_core=0 turns it off.
     fp32: the TF32 core (``tf32.py``; same layouts and lengths), once the fp32 path's kernels load (``tf32_ready``)."""
     if h100_enabled(device_index):  # Hopper: ``pvx`` (bf16) / the TF32 wgmma core ``pvx32`` (fp32), head widths 32 / 48 / 64
@@ -263,6 +275,45 @@ def core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int
         and 0 < L <= 768
         and torch.cuda.get_device_capability(device_index) == (10, 0)
     )
+
+
+def long_footprint(dtype: torch.dtype, L: int, S: int, d: int = 768, h: int = 16) -> int:
+    """Bytes one inference call of a block makes on top of its inputs (the pair [L, L, dp] and the activations in hand), L past ``H100_REGISTER_L``:
+    P [h, L, L] in the step's dtype, the block's fp32 logits [h, L, L] (the hoist's chunk), and the step's buffers (the fp32 residual, the
+    projections and the SwiGLU rows, ~ d (4 + 13 es) bytes a token), plus 512 MiB of cuBLAS workspace and allocator slack."""
+    es = 4 if dtype is torch.float32 else 2
+    return h * L * L * (es + 4) + S * L * d * (4 + 13 * es) + (512 << 20)
+
+
+def long_refusal(dtype: torch.dtype, L: int, S: int, d: int, h: int, dp: int, device, bias_given: bool = False) -> str | None:
+    """Why an inference call at L > ``H100_REGISTER_L`` cannot run (None: it can): its footprint, the pair beside it, against the device's memory.
+    Checked against the TOTAL memory (the pair the caller holds counts as allocated: the call is refused only when no free device could run it);
+    ``hoist_free_refusal`` is the live check made where P is built."""
+    if L <= H100_REGISTER_L:
+        return None
+    es = 4 if dtype is torch.float32 else 2
+    need = long_footprint(dtype, L, S, d, h) + (4 * h * L * L if bias_given else L * L * dp * es)
+    total = torch.cuda.get_device_properties(device).total_memory
+    if need > 0.95 * total:
+        return (
+            f"L {L}, S {S}: the call needs about {need / 2**30:.1f} GiB (P and the fp32 logits [{h}, L, L], the step's buffers and the "
+            f"{'bias' if bias_given else 'pair'}) of the device's {total / 2**30:.1f} GiB"
+        )
+    return None
+
+
+def hoist_free_refusal(dtype: torch.dtype, L: int, S: int, d: int, h: int, device) -> str | None:
+    """The live check where a new P is about to be built (L > ``H100_REGISTER_L``): ``long_footprint`` against the device's free memory (the
+    allocator's unused blocks count as free). None while a CUDA graph is captured or torch.compile traces (the buffers exist by then)."""
+    if L <= H100_REGISTER_L or torch.compiler.is_compiling() or torch.cuda.is_current_stream_capturing():
+        return None
+    need = long_footprint(dtype, L, S, d, h)
+    free = torch.cuda.mem_get_info(device)[0] + torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+    if need > free:
+        return (
+            f"L {L}, S {S}: the hoist and the step need about {need / 2**30:.1f} GiB, {free / 2**30:.1f} GiB of the device's memory is free"
+        )
+    return None
 
 
 def _descriptors(*maps):
@@ -978,6 +1029,9 @@ __all__ = [
     "transpose_hll",
     "adaln_in_rows",
     "core_supported",
+    "hoist_free_refusal",
+    "long_refusal",
+    "softmax_hoist",
     "ln_rows",
     "pick_group",
     "resgate_adaln_rows",

@@ -172,7 +172,7 @@ class FusedBiasOnlyDiT:
             if self.fp32:
                 _tf32().rows32().softmax_rows_cuda(lg.view(-1, L), P[sl].view(-1, L), m)
             else:
-                C.softmax_t(lg.view(-1, L), P[sl].view(-1, L), None, m)  # fp32 logits -> fp32 softmax -> bf16 P
+                C.softmax_hoist(lg.view(-1, L), P[sl].view(-1, L), m)  # fp32 logits -> fp32 softmax -> bf16 P
             del lg
         return P
 

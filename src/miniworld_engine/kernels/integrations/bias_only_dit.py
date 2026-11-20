@@ -18,7 +18,7 @@ and a layout or build ``tf32.inf3_ready`` refuses, run the 12-launch cuBLAS + ro
 ``serves()`` is the whole gate: no autograd, the engine's kernels (the block's ``cuda`` backend, through its kernel view), B200 or
 H100, bf16 or fp32, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384, or 768 on H100 / pair 128, or 256 on H100 /
-transition n = 2), B == 1, L a multiple of 128 (up to 768; 3072 on H100: ``core_supported``), a key mask [1, L] or
+transition n = 2), B == 1, L a multiple of 128 (up to 768; 8192 on H100: ``core_supported``, past 3072 within the device memory: ``long_refusal``), a key mask [1, L] or
 none, LayerNorm eps 1e-5. The conditioning may be one per sample or one shared by the samples (sample axis 1 or stride 0).
 Anything else is refused: the block's ``cuda`` backend raises ``BackendUnsupported`` (``_supports_cuda``), never another path.
 
@@ -134,7 +134,34 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
     from miniworld_engine.kernels.bias_only_dit.cuda import core_supported
 
     idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
-    return core_supported(single.dtype, L, da, at.n_head, idx)
+    return core_supported(single.dtype, L, da, at.n_head, idx) and long_refusal(module, single, bias) is None
+
+
+def long_refusal(module, single, bias=None) -> str | None:
+    """Why an inference call past the register softmax's 3072 keys cannot run (None: it can, or L is not past): the call's footprint (P, the fp32
+    logits, the step's buffers and the pair) against the device's memory -- a refusal, never an out-of-memory. H100 only."""
+    L = single.shape[2]
+    if torch.cuda.get_device_capability(single.device) != (9, 0):
+        return None
+    from miniworld_engine.kernels.bias_only_dit.cuda import long_refusal as long_why
+
+    at = module.attention
+    idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
+    dp = at.ln_pair.weight.shape[0]
+    return long_why(single.dtype, L, single.shape[0], single.shape[-1], at.n_head, dp, idx, bias is not None)
+
+
+def _check_long_free(single, pair, runner) -> None:
+    """A new P past the register softmax's 3072 keys: the hoist and the step against the device's free memory now (``serves`` bounded the total);
+    raises ``BackendUnsupported`` with the reason where the free memory is short -- never an out-of-memory in the hoist."""
+    if single.shape[2] <= 3072 or torch.cuda.get_device_capability(single.device) != (9, 0):
+        return
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist_free_refusal
+    from miniworld_engine.modules.primitives import BackendUnsupported
+
+    why = hoist_free_refusal(single.dtype, single.shape[2], single.shape[0], runner.d, runner.h, single.device)
+    if why is not None:
+        raise BackendUnsupported(f"bias-only token DiT, H100 inference: {why}")
 
 
 def _fake(single, cond, pair, mask, weights):
@@ -196,6 +223,7 @@ def _infer(
                 # a capture (static_weights) reads the eager P: kernels._capture.refresh_static_inputs remakes it in place
                 _capture.note_static_read((id(runner), "p", P.data_ptr()), P, lambda: runner.hoist(pair.contiguous(), mask), (pair, mask))
         else:
+            _check_long_free(single, pair, runner)
             P = runner.hoist(pair.contiguous(), mask)
             if pkey is not None:
                 capturing = torch.cuda.is_current_stream_capturing()
@@ -232,7 +260,7 @@ def _infer_bias(
         else:
             from miniworld_engine.kernels.bias_only_dit import cuda as C
 
-            C.softmax_t(bias.reshape(H * L, L), P.view(H * L, L), None, m)  # bf16 or fp32 logits; softmax in fp32, P rounded to bf16
+            C.softmax_hoist(bias.reshape(H * L, L), P.view(H * L, L), m)  # fp32 logits; softmax in fp32, P rounded to bf16
         return runner.step(single, cond, P, kmask=kernel_mask(m, L))
 
 

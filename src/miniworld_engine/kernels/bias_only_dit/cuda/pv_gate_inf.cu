@@ -393,7 +393,7 @@ at::Tensor pv_cta_prof(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,at::Te
 }
 void pv_cta(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,c10::optional<at::Tensor> gate,int64_t H,int64_t DH,int64_t nsm,int64_t fw,int64_t fg,int64_t fc){
  at::cuda::CUDAGuard guard(v.device());cudaSetDevice(v.get_device());int L=v.size(0)/A;
- TORCH_CHECK(L%128==0&&L<=3072&&DH%2==0&&DH<=64&&v.scalar_type()==at::kBFloat16,"pvx shape");
+ TORCH_CHECK(L%128==0&&L<=8192&&DH%2==0&&DH<=64&&v.scalar_type()==at::kBFloat16,"pvx shape");
  int wgs=2,sg=1,cs=1;pvx_pick(L,A,H,nsm,wgs,sg,cs,fw,fg,fc);
  if(gate){ if(wgs==2)pvx_dispatch<true,2>(cs,v,p,out,A,gate,H,DH,nsm,sg); else pvx_dispatch<true,1>(cs,v,p,out,A,gate,H,DH,nsm,sg); }
  else    { if(wgs==2)pvx_dispatch<false,2>(cs,v,p,out,A,gate,H,DH,nsm,sg); else pvx_dispatch<false,1>(cs,v,p,out,A,gate,H,DH,nsm,sg); }
@@ -575,7 +575,7 @@ template<int WGS,int DHT> static void pvx32_launch(at::Tensor vt,at::Tensor p,at
 }
 void pv_cta_tf32(at::Tensor vt,at::Tensor p,at::Tensor out,int64_t A,at::Tensor gate,int64_t H,int64_t DH,int64_t nsm,c10::optional<at::Tensor> kmask){
  at::cuda::CUDAGuard guard(vt.device());cudaSetDevice(vt.get_device());int L=vt.size(1)/A;
- TORCH_CHECK(L%128==0&&L<=3072&&(DH==32||DH==48||DH==64)&&vt.scalar_type()==at::kFloat&&p.scalar_type()==at::kFloat&&gate.scalar_type()==at::kFloat&&out.scalar_type()==at::kFloat,"pvx32 shape/dtype");
+ TORCH_CHECK(L%128==0&&L<=8192&&(DH==32||DH==48||DH==64)&&vt.scalar_type()==at::kFloat&&p.scalar_type()==at::kFloat&&gate.scalar_type()==at::kFloat&&out.scalar_type()==at::kFloat,"pvx32 shape/dtype");
  TORCH_CHECK(vt.size(0)==H*DH&&vt.is_contiguous()&&p.is_contiguous()&&gate.stride(1)==1&&out.stride(1)==1,"pvx32 layout");
  int wgs=2,sg=1;pvx32_pick(L,A,H,(int)DH,nsm,wgs,sg);
  const bool hk=kmask.has_value()&&kmask->defined();
