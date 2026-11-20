@@ -237,7 +237,7 @@ def prebuild(target, rows):
 
             yield ieee_f32._ext_sm80
         f32 = any(dt == "float32" for (d, _n), v in shapes.items() if d in fused_wide_sm80.F32_WIDTHS for (dt, _m) in v)
-        if any(dt == "bfloat16" for (dt, _m) in shapes.get((128, 4), {})):  # fused_sm80 takes bf16 weights only (no master row reaches it)
+        if half.get((128, 4)):  # fused_sm80 takes bf16 weights and bf16 activations: the requirements rows carry only the master dtype, whose bf16-model twin (bf16 parameters, the AF3 bf16 model) reaches it at 256-row multiples from FUSED_MIN_ROWS
             yield fused_sm80._ext
         if served or f32:
             yield fused_wide_sm80._ext_sm80

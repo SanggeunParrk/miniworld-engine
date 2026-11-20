@@ -80,3 +80,24 @@ def test_plan_is_reentrant():
     assert not problems and not problems2, problems + problems2
     assert first, "the cast family plans nothing on sm90a"
     assert [s.key for s in first] == [s.key for s in second]
+
+
+def _list_names(arch: str) -> set[str]:
+    env = {**os.environ, "PYTHONPATH": f"{SRC}{os.pathsep}{os.environ.get('PYTHONPATH', '')}", "CUDA_VISIBLE_DEVICES": ""}
+    done = subprocess.run(
+        [sys.executable, "-m", "miniworld_engine.kernels._prebuild", "--arch", arch, "--list"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+        check=False,
+    )
+    assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
+    return {name for _kind, name, _key, _fam in _plan(done.stdout)}
+
+
+def test_a100_plan_ships_fused_sm80_transition():
+    """``transition_fused_sm80`` (the A100 one-kernel D 128 / n 4 Transition, rows from FUSED_MIN_ROWS) is reached by bf16 parameters, which the requirements
+    carry as master rows: it was missing from the 3.0.0 .. 3.0.5 kernels wheels (a ``KernelBuildError`` on an installed A100). The RTX 5090 does not serve it (shared memory)."""
+    assert "transition_fused_sm80" in _list_names("sm80")
+    assert "transition_fused_sm80" not in _list_names("sm120a")
