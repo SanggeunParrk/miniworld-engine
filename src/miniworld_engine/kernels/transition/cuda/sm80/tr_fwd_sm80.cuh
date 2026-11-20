@@ -123,6 +123,10 @@ DEVI uint32_t swz_x(uint32_t r, uint32_t G) { return r * 256 + ((G ^ ((r & 1u) <
 
 // GEMM2 runs in f16 (h and Ws as f16, f16 accumulation): the same tensor rate on sm_80 as f32 accumulation and half the accumulator
 // registers (64 instead of 128 for 32 x 128 outputs); the accumulator starts at x, so it also carries the residual.
+// The accumulator carries (x + Ws h) * TR_RESID_SCALE: a bf16 x reaches 3.4e38 but an f16 only 65504 (AF3 5I28 msa_transition: |x| = 65536 -> inf), so x
+// starts scaled by 2^-4 and the packed Ws (pack flag bit 30) carries the same factor; the bf16 store multiplies it back (powers of two: exact except at
+// the f16 subnormal floor).  |x| up to 1.0e6 is finite.  The fp32 builds (G::F32) add x in fp32 at the store: not affected.
+constexpr float TR_RESID_SCALE = 1.f / 16.f, TR_RESID_UNSCALE = 16.f;
 DEVI void mma16816_h(uint32_t (&d)[2], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
   asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};\n"
                : "+r"(d[0]), "+r"(d[1]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
@@ -316,7 +320,7 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
 #pragma unroll
       for (int e = 0; e < 4 * NV; ++e) { xv[2 * e] = bf16lo(wv[e]); xv[2 * e + 1] = bf16hi(wv[e]); }
 #pragma unroll
-      for (int e = 0; e < 4 * NV; ++e) acc2[mt][e][hr] = LN ? pack_f16(xv[2 * e], xv[2 * e + 1]) : 0u;   // LN: the output accumulator starts at x (the residual)
+      for (int e = 0; e < 4 * NV; ++e) acc2[mt][e][hr] = LN ? pack_f16(xv[2 * e] * TR_RESID_SCALE, xv[2 * e + 1] * TR_RESID_SCALE) : 0u;   // LN: the output accumulator starts at x / 16 (the residual)
       if (LN) {                                                  // the LayerNorm: statistics, the normalised A fragments, xn / stats for the backward
       float sm = 0.f;
 #pragma unroll
@@ -511,7 +515,7 @@ DEVI void tile(const TrParams& p, TrWarp& w, int r0, int xpar, int nr0, int nmt)
 #pragma unroll
           for (int k = 0; k < 4; ++k) {
             const float2 v = unpack_f16(acc2[mt][4 * i + k][hr]);
-            o[k] = pack_bf16(v.x, v.y);
+            o[k] = pack_bf16(v.x * TR_RESID_UNSCALE, v.y * TR_RESID_UNSCALE);
           }
           stg128(dst + 32 * i, make_uint4(o[0], o[1], o[2], o[3]));    // a quad writes 64 contiguous bytes
         }

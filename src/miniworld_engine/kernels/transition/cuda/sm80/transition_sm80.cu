@@ -128,7 +128,7 @@ std::vector<torch::Tensor> bwd(torch::Tensor dy, torch::Tensor x, torch::Tensor 
 }
 
 // weight packing in one launch: out16[j] = cvt(scale * src[idx16[j]]), out32[j] = src32[idx32[j]].  idx16 entry: bits 0-25 element,
-// 26-27 source (Wa | Wb | Ws, bf16), 28: x 0.5, 29: f16 (else bf16); idx32: bits 0-25 element, 26: beta (else gamma), f32 sources
+// 26-27 source (Wa | Wb | Ws, bf16), 28: x 0.5, 29: f16 (else bf16), 30: x TR_RESID_SCALE (the squeeze weights); idx32: bits 0-25 element, 26: beta (else gamma), f32 sources
 __global__ void pack_kernel(const __nv_bfloat16* __restrict__ wa, const __nv_bfloat16* __restrict__ wb, const __nv_bfloat16* __restrict__ ws,
                             const float* __restrict__ gamma, const float* __restrict__ beta, const int* __restrict__ idx16, int n16,
                             uint16_t* __restrict__ out16, const int* __restrict__ idx32, int n32, float* __restrict__ out32) {
@@ -137,6 +137,7 @@ __global__ void pack_kernel(const __nv_bfloat16* __restrict__ wa, const __nv_bfl
     const int e = idx16[j], k = e & 0x3ffffff, src = (e >> 26) & 3;
     float v = __bfloat162float((src == 0 ? wa : src == 1 ? wb : ws)[k]);
     if (e & (1 << 28)) v *= 0.5f;
+    if (e & (1 << 30)) v *= a100::TR_RESID_SCALE;   // the f16 squeeze runs on (x + Ws h) / 16: tr_fwd_sm80.cuh
     out16[j] = (e & (1 << 29)) ? __half_as_ushort(__float2half_rn(v)) : __bfloat16_as_ushort(__float2bfloat16_rn(v));
   } else if (j - n16 < n32) {
     const int e = idx32[j - n16];
