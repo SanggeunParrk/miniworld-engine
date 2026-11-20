@@ -27,6 +27,17 @@ def _card() -> tuple[int, int] | None:
 
 requires_h100 = pytest.mark.skipif(_card() != (9, 0), reason="H100 (sm_90)")
 
+
+@pytest.fixture(autouse=True)
+def _free_cuda_between_cases():
+    """The long cases hold tens of GiB (pair, float64 gold, two module copies): free it before and after each case so one process runs them all."""
+    gc.collect()
+    torch.cuda.empty_cache()
+    yield
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 S = 2
 DTYPES = ["master", "float32"]
 
