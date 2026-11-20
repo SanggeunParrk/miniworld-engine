@@ -74,7 +74,7 @@ _NATIVE_TRAINING_SCOPE: ContextVar[bool] = ContextVar("pwa_native_training", def
 _SPLIT_MIN_N = 512
 
 
-NMAX_INFER = 2048  # longest sequence of the inference path (pair_fwd3's shared-memory row of logits)
+NMAX_INFER = _wide.NMAX_INFER  # longest sequence of the inference path (pair_fwd3: the shared-memory row of logits up to 2048, the output rows past it; the bound is the 80 GB of the H100)
 
 
 def _split_contraction(n: int) -> bool:
@@ -180,6 +180,12 @@ def refusal(
         n_max = 1024 if torch.is_grad_enabled() else NMAX_INFER
         if cap == (9, 0) and native and (n == 0 or s == 0 or n > n_max):
             return f"the CUDA-only H100 path needs positive S and N <= {n_max}, got N={n}, S={s}"
+        if cap == (9, 0) and not torch.is_grad_enabled() and 0 < n <= NMAX_INFER and s > 0:
+            long_why = _wide.long_refusal(
+                n, s, d_msa, d_hidden, msa.device
+            )  # past 2048: 32-bit offsets and the workspace against the free memory (a refusal, never an OOM)
+            if long_why is not None:
+                return long_why
         if cap == (9, 0) and torch.is_grad_enabled() and n > 1024:
             # past 1024 the training step would run the Triton pair kernels (pair3.cu's backward holds N <= 1024): slower than the triton
             # backend (H100, boltz2 widths, L 1536: 5.80 vs 5.50 ms) -- refused, as at the other widths (FoldForge 5I28: inference only)
