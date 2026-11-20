@@ -27,7 +27,8 @@ static_assert(DZ % 64 == 0, "d_pair must be a multiple of 64");
 constexpr int TILEB = GJ * DZ * 2;                        // one [16][DZ] bf16 tile
 // the forward holds H rows of N bf16 logits next to its tile ring: N <= 2048 fits every width (d_pair 384: 144 KiB of tiles + 32 KiB of logits; FoldForge
 // 5I28 E3: 1536 / 2048 tokens in inference). The backward stages the w / dw rows [H][N] fp32 on the tile area: N <= 1024 (pair_bwd3).
-constexpr int NMAX_FWD = 2048;
+constexpr int NMAX_FWD = 2048;                            // the longest N whose bf16 row of logits is kept in shared memory (the unchanged path)
+constexpr int NMAX_INFER_GLOB = 8192;                     // past it the logits are staged in the output rows (GLOB); the bound is the 80 GB of the H100 (pair [N, N, DZ] + w [8, N, N])
 
 __device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
 __device__ __forceinline__ float bf16r(float x) { return __bfloat162float(__float2bfloat16(x)); }
@@ -63,13 +64,18 @@ using csrc_sm90::mma::cp_commit;
 using csrc_sm90::mma::cp_wait;
 
 // ---------------------------------------------------------------- forward ----------------------------------------------------------------
+// GLOB (inference past N 2048, where the bf16 row of the 8 heads no longer fits next to the tile ring): the bf16 logits are staged in the CTA's own
+// output rows W[h][i][:] (global memory, 8 x N x 2 bytes, resident in L2) instead of shared memory, and the softmax pass rewrites them in place -- the same
+// bf16 values, the same reductions in the same order, the same __expf: the output equals the shared-memory path's.
+template <bool GLOB>
 __global__ void __launch_bounds__(THREADS, PW_MINB) pair_fwd_kernel(const __nv_bfloat16* __restrict__ Z, const __nv_bfloat16* __restrict__ MASK,
                                                               const float* __restrict__ LNW, const float* __restrict__ LNB, const __nv_bfloat16* __restrict__ WB,
-                                                              __nv_bfloat16* __restrict__ W, int N, int NP, float eps) {
+                                                              __nv_bfloat16* __restrict__ W, int N, int NP_, float eps) {
   extern __shared__ __align__(128) unsigned char smem[];
   unsigned char* tiles = smem;                                          // [NWARP][2][TILEB]
-  __nv_bfloat16* sb = reinterpret_cast<__nv_bfloat16*>(smem + NWARP * 2 * TILEB);   // [H][NP] logits (bf16-rounded values)
-  float* sg = reinterpret_cast<float*>(sb + H * NP);                    // gamma [DZ], beta [DZ]
+  const long NP = GLOB ? (long)N * N : (long)NP_;                       // the stride of a head
+  __nv_bfloat16* sb = GLOB ? W + (long)blockIdx.x * N : reinterpret_cast<__nv_bfloat16*>(smem + NWARP * 2 * TILEB);   // [H][NP] logits (bf16-rounded values; GLOB: W[h][i][:])
+  float* sg = GLOB ? reinterpret_cast<float*>(smem + NWARP * 2 * TILEB) : reinterpret_cast<float*>(sb + H * NP);   // gamma [DZ], beta [DZ]
   const int i = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, q = lane & 3, r = lane >> 2;
   for (int k = tid; k < DZ; k += THREADS) { sg[k] = LNW[k]; sg[DZ + k] = LNB[k]; }
   // B fragments of Wb^T [k = d][n = h]: b0 = (Wb[n][16ks + 2q], +1), b1 = (+8, +9), n = lane / 4
@@ -379,10 +385,10 @@ __global__ void __launch_bounds__(THREADS, PW_MINB) pair_bwd_kernel(const __nv_b
 }
 }  // namespace
 
-torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w, torch::Tensor ln_b, double eps, torch::Tensor wb) {
+torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w, torch::Tensor ln_b, double eps, torch::Tensor wb, int64_t glob) {
   TORCH_CHECK(z.is_cuda() && z.scalar_type() == torch::kBFloat16 && z.is_contiguous() && z.dim() == 3 && z.size(2) == DZ && z.size(0) == z.size(1), "z: [N, N, DZ] bf16");
   const int N = (int)z.size(0);
-  TORCH_CHECK(N % GJ == 0 && N <= NMAX_FWD, "N must be a multiple of 16 (and <= ", NMAX_FWD, ")");
+  TORCH_CHECK(N % GJ == 0 && N <= NMAX_INFER_GLOB, "N must be a multiple of 16 (and <= ", NMAX_INFER_GLOB, ")");
   TORCH_CHECK(mask.scalar_type() == torch::kBFloat16 && mask.is_contiguous() && mask.numel() == (long)N, "mask: the [N] key mask, bf16 0/1");
   TORCH_CHECK(ln_w.scalar_type() == torch::kFloat && ln_w.is_contiguous() && ln_w.numel() == DZ && ln_b.scalar_type() == torch::kFloat && ln_b.is_contiguous() && ln_b.numel() == DZ, "LN params fp32[DZ]");
   auto wb16 = wb.to(torch::kBFloat16).contiguous();
@@ -390,12 +396,23 @@ torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w,
   auto w = torch::empty({H, N, N}, z.options());
   const int NP = N + 4;
   const int smem = NWARP * 2 * TILEB + H * NP * 2 + 2 * DZ * 4;
-  static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + H * (NMAX_FWD + 4) * 2 + 2 * DZ * 4)); attr = true; }
-  pair_fwd_kernel<<<N, THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
-      reinterpret_cast<const __nv_bfloat16*>(z.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(mask.data_ptr<at::BFloat16>()),
-      ln_w.data_ptr<float>(), ln_b.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),
-      reinterpret_cast<__nv_bfloat16*>(w.data_ptr<at::BFloat16>()), N, NP, (float)eps);
+  // glob: -1 = automatic (the shared-memory row up to N 2048 -- the unchanged path -- and the output rows past it), 0 = shared memory, 1 = output rows
+  const bool use_glob = glob < 0 ? N > NMAX_FWD : glob != 0;
+  static bool attr = false, attr_glob = false;
+  if (use_glob) {
+    if (!attr_glob) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + 2 * DZ * 4)); attr_glob = true; }
+    pair_fwd_kernel<true><<<N, THREADS, NWARP * 2 * TILEB + 2 * DZ * 4, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16*>(z.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(mask.data_ptr<at::BFloat16>()),
+        ln_w.data_ptr<float>(), ln_b.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(w.data_ptr<at::BFloat16>()), N, NP, (float)eps);
+  } else {
+    TORCH_CHECK(N <= NMAX_FWD, "pair_fwd3: the shared-memory row of logits is built for N <= ", NMAX_FWD, " (glob=0), got N=", N);
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + H * (NMAX_FWD + 4) * 2 + 2 * DZ * 4)); attr = true; }
+    pair_fwd_kernel<false><<<N, THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16*>(z.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(mask.data_ptr<at::BFloat16>()),
+        ln_w.data_ptr<float>(), ln_b.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(w.data_ptr<at::BFloat16>()), N, NP, (float)eps);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return w;
 }
@@ -425,6 +442,6 @@ std::vector<torch::Tensor> pair_bwd3(torch::Tensor z, torch::Tensor w16, torch::
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
-  mod.def("pair_fwd3", &pair_fwd3, "pair LN -> proj_z -> mask -> softmax (tensor cores)", py::arg("z"), py::arg("mask"), py::arg("ln_w"), py::arg("ln_b"), py::arg("eps"), py::arg("wb"));
+  mod.def("pair_fwd3", &pair_fwd3, "pair LN -> proj_z -> mask -> softmax (tensor cores)", py::arg("z"), py::arg("mask"), py::arg("ln_w"), py::arg("ln_b"), py::arg("eps"), py::arg("wb"), py::arg("glob") = -1);
   mod.def("pair_bwd3", &pair_bwd3, "pair backward (tensor cores): (dz, dWb, dgamma, dbeta)", py::arg("z"), py::arg("w16"), py::arg("dw"), py::arg("ln_w"), py::arg("ln_b"), py::arg("eps"), py::arg("wb"));
 }

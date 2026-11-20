@@ -37,7 +37,30 @@ DHID = (8, 16)
 # LayerNorm backward (`ln_bwd_w`); the pair side is `pair_wide.cu` at d_pair 512
 BIG = ((256, 512, 32),)
 NMAX = 1024  # training: the pair backward stages a row of w / dw logits [H][N] fp32 on its tile ring (pair_wide.cu pair_bwd3)
-NMAX_INFER = 2048  # inference: a row of bf16 logits [H][N] next to the tiles (pair_wide.cu NMAX_FWD; FoldForge 5I28 E3)
+NMAX_INFER = 8192  # inference: past 2048 (where the bf16 row of logits [H][N] stops fitting next to the tiles) pair_fwd3 stages the logits in the output rows (pair_wide.cu GLOB); the bound is the H100's 80 GB (pair [N, N, d_pair] + w [8, N, N])
+NMAX_INFER_SMEM = 2048  # the longest inference N whose row of logits stays in shared memory (the unchanged path; pair_wide.cu NMAX_FWD)
+_I32 = 2**31 - 1
+
+
+def long_refusal(n: int, s: int, d_msa: int, d_hidden: int, device: torch.device | None = None) -> str | None:
+    """Why an inference call past ``NMAX_INFER_SMEM`` tokens cannot run (None: it can): the 32-bit element offsets of the MSA-side kernels, and the
+    workspace (w [8, N, N] bf16, v / o [8, N, S * C], y / out [S, N, D]) against the free device memory -- a clean refusal instead of an out-of-memory.
+    The free-memory check is skipped while a CUDA graph is captured or torch.compile traces (the activations are allocated by then)."""
+    if n <= NMAX_INFER_SMEM:
+        return None
+    hc = H * d_hidden
+    if s * n * max(d_msa, hc) > _I32:
+        return f"S * N * max(d_msa, d_hidden * {H}) = {s * n * max(d_msa, hc)} exceeds the kernels' 32-bit element offsets (S={s}, N={n})"
+    work = 2 * H * n * n + 2 * s * n * (2 * hc + 3 * d_msa) + (256 << 20)
+    if device is not None and not torch.compiler.is_compiling() and not torch.cuda.is_current_stream_capturing():
+        free = (
+            torch.cuda.mem_get_info(device)[0] + torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+        )  # the caching allocator's unused blocks are free too
+        if work > free:
+            return f"the long-N workspace needs {work / 2**30:.1f} GiB, {free / 2**30:.1f} GiB free (N={n}, S={s})"
+    return None
+
+
 _EXT: dict[str, Any] = {}
 
 
@@ -230,7 +253,9 @@ def _backward_op(
     if not p_drop:
         dout = dres
     elif FUSED_BWD_AUX:
-        dout = _aux().drop_bwd_w(dres, dmask, 1.0 / (1.0 - p_drop))  # one pass: bf16(bf16(dres * keep) * scale), the two PyTorch ops' arithmetic
+        dout = _aux().drop_bwd_w(
+            dres, dmask, 1.0 / (1.0 - p_drop)
+        )  # one pass: bf16(bf16(dres * keep) * scale), the two PyTorch ops' arithmetic
     else:
         dout = (dres * dmask[None] * (1.0 / (1.0 - p_drop))).contiguous()
     dgv = torch.empty((s, n, 2 * hc), device=m.device, dtype=bf)  # [dgp | dv], natural layout
