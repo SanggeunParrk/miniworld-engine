@@ -129,13 +129,13 @@ def _layout_fwd(wa, wb, ws, dev, d, h):
 
 @functools.lru_cache(maxsize=16)
 def _tables(dev, d, h):
-    """Gather tables of the pack kernel: idx16 (the packed weights [nchunk][W1 | W2]: element | source << 26 (Wa, Wb, Ws) | x0.5 << 28 | f16 << 29) and idx32 (the
+    """Gather tables of the pack kernel: idx16 (the packed weights [nchunk][W1 | W2]: element | source << 26 (Wa, Wb, Ws) | x0.5 << 28 | f16 << 29 | x TR_RESID_SCALE << 30) and idx32 (the
     LayerNorm affine as float4 slots: element | beta << 26)."""
     n = h * d
     code = lambda src: torch.arange(n, device=dev, dtype=torch.int64) | (src << 26)  # noqa: E731
     wa, wb = code(0).view(h, d), code(1).view(h, d)
     ws = code(2).view(d, h)
-    w1, w2 = _layout_fwd(wa | (1 << 28), wb, ws | (1 << 29), dev, d, h)  # W1 carries 0.5 Wa; W2 runs in f16
+    w1, w2 = _layout_fwd(wa | (1 << 28), wb, ws | (1 << 29) | (1 << 30), dev, d, h)  # W1 carries 0.5 Wa; W2 runs in f16, scaled by TR_RESID_SCALE (bit 30)
     idx16 = torch.cat([w1, w2], 1).reshape(-1).to(torch.int32).contiguous()
     s_, q_ = (
         torch.arange(d // 16, device=dev).view(-1, 1),
