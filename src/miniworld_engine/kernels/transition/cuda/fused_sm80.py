@@ -153,7 +153,9 @@ def _pack_tables(dev):
     half = 1 << 28
     wa, wb = code(0).view(H, D), code(1).view(H, D)
     ws = code(2).view(D, H)
-    w1, w2 = _layout_fwd(wa | half, wb, ws | (1 << 29) | (1 << 30), dev)  # W1 carries 0.5 Wa; W2 runs in f16, scaled by TR_RESID_SCALE (bit 30)
+    w1, w2 = _layout_fwd(
+        wa | half, wb, ws | (1 << 29) | (1 << 30), dev
+    )  # W1 carries 0.5 Wa; W2 runs in f16, scaled by TR_RESID_SCALE (bit 30)
     w = torch.cat([w1, w2], 1).reshape(-1)
     wdw, wx = _layout_bwd(wa | half, wb, ws, dev)  # W1s carries 0.5 Wa
     _, wx = _layout_bwd(wa | half, wb, ws, dev)  # X: 0.5 Wa (PW's dA tile holds 2 dA, build flag PW_2DA)

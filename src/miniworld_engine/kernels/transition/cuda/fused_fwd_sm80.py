@@ -135,7 +135,9 @@ def _tables(dev, d, h):
     code = lambda src: torch.arange(n, device=dev, dtype=torch.int64) | (src << 26)  # noqa: E731
     wa, wb = code(0).view(h, d), code(1).view(h, d)
     ws = code(2).view(d, h)
-    w1, w2 = _layout_fwd(wa | (1 << 28), wb, ws | (1 << 29) | (1 << 30), dev, d, h)  # W1 carries 0.5 Wa; W2 runs in f16, scaled by TR_RESID_SCALE (bit 30)
+    w1, w2 = _layout_fwd(
+        wa | (1 << 28), wb, ws | (1 << 29) | (1 << 30), dev, d, h
+    )  # W1 carries 0.5 Wa; W2 runs in f16, scaled by TR_RESID_SCALE (bit 30)
     idx16 = torch.cat([w1, w2], 1).reshape(-1).to(torch.int32).contiguous()
     s_, q_ = (
         torch.arange(d // 16, device=dev).view(-1, 1),
