@@ -1,4 +1,4 @@
-# miniworld-engine 3.0.6 (NOT RELEASED: installed-wheel verification found two failures, see "Open issues")
+# miniworld-engine 3.0.6 (DRAFT, local candidate `rc-3.0.6`; wheels built and verified, not released)
 
 Base: 3.0.5 (`bef4085c2`). Integration branch `rc-3.0.6` = 3.0.5 + `fix-tr-sm80-resid-overflow` + `pwa-long-h100` + `tokendit-long-h100` + `pwa-long-l` (A100 PWA) + `tokendit-bugs-h100` (tests only) + `pwa-long-l-5090` (5090 PWA, cherry-picked `7992df822`). The package version is NOT bumped in this candidate.
 
@@ -57,46 +57,56 @@ Integration-step GPU tests: see "Verification".
 | H100 Transition spike check (`chk1.py`: D 64 / 128, n 2 / 4, master and bf16 params, rows 16384 / 65536, spikes 65536 and 1e6, eval and train) | nonfinite 0, Triton launches 0 in all 64 cases, relrms 5e-6 .. 8e-5 vs float64 (D 128 rows seen) |
 | CPU gate (`rc-3.0.6`) | pyright 0 errors; ruff check `src` clean; ruff format: no new unformatted file versus 3.0.5 (`ruff format --check .` already reports 175 files on 3.0.5, 174 here); pytest cpu (judge, modules_cpu, requirements, prebuild_plan, supports_signature, imports, init, capture_api) 3231 passed, 2 skipped |
 
-## Release build (`release306`, from `rc-3.0.6` 46303e5a3 = version bump; the notes commits after it do not change `src/`)
+## Two install-time defects found and fixed during release verification
 
-- Prebuild (incremental, warm release cache, GCC 12.4 host): sm90 8 artifacts built (`miniworld_pwa_pair3_native_v1`, `miniworld_pwa_pair_wide_{128_8_2,256_4_3,384_6_1,512_4_1}`, `bias_only_dit_sm90a`, `bias_only_dit_rows_cuda_sm90a`, `bias_only_dit_f32_rows_cuda`); sm80 5 (`transition_fwd_sm80`, `transition_bwd_sm80`, `pwa_sm80`, `bias_only_dit_rows_cuda`, `bias_only_dit_f32_rows_cuda`); sm120 5 (`transition_fwd_sm120`, `transition_bwd_sm120`, `pwa_sm80_sm120`, `bias_only_dit_rows_cuda`, `bias_only_dit_f32_rows_cuda`). 0 failed. Plans: sm90 579, sm80 74, sm120 67 artifacts.
-- Manifest names against the 3.0.5 wheels: sm90 364 -> 364, sm80 74 -> 74, sm120 67 -> 67; dropped 0, added 0 (the 8 carried older-release sm90 names are byte-identical to their source wheels).
-- `ldd` of every `.so` staged (sm90 258, sm80 65, sm120 58) and of the 378 installed `.so`: 0 link a CUDA 13 library, 0 unresolved; no RPATH; max symbol versions GLIBC 2.14 / GLIBCXX 3.4.21 / CXXABI 1.3.11.
-- `twine check`: 5 of 5 PASSED; engine METADATA pins the three kernels wheels `==3.0.6`, no git URLs.
+Both were found by the installed-wheel GPU tests (empty JIT cache, no nvcc) and both predate 3.0.6:
+
+1. **A100: `transition_fused_sm80` was not in the sm80 kernels wheel (3.0.0 .. 3.0.5).** The A100 one-kernel Transition (D 128 / n 4, bf16 parameters, rows from `FUSED_MIN_ROWS` 8192) is reached by bf16-parameter models, but the requirements rows carry that width only as `master` rows, so the prebuild plan skipped it and an installed A100 without a toolchain raised `KernelBuildError` (3.0.5 included). The A100 part of the residual-overflow fix of this release lives in that kernel. Fix: the sm80 plan now builds it for every (128, 4) bf16 / master row (`kernels/transition/cuda/__init__.py`); the RTX 5090 plan does not (the kernel needs more shared memory than the card has; `test_prebuild_plan.py::test_a100_plan_ships_fused_sm80_transition` pins both). The sm80 manifest gains the name `transition_fused_sm80` [fc09f682] (75 names, none dropped).
+2. **RTX 5090: the shipped `pwa_gemm_sm120.so` (nvcc 12.9.86) faults for d_pair 512 (3.0.5 and earlier).** `MSAPairWeightedAveraging` d_pair 512 (the BIG width) gave `illegal memory access` / `CUBLAS_STATUS_INTERNAL_ERROR`. Same source, flags and key built with nvcc 12.8 (5090 box JIT, 12.8.61; and the cluster toolkit 12.8.93 under GCC 12.4 / glibc 2.28) passes; the two builds differ in register allocation (e.g. 104-106 vs 150-152 registers on the smallest kernels), so the cause is the compiler version (nvcc 12.9.86 codegen of this CUTLASS GEMM for sm_120a), not the source or a flag; which instruction is miscompiled was not pursued. The sm120 wheel now carries the nvcc 12.8.93 build of that one artifact (name and key unchanged; every other sm120 artifact is the unchanged 12.9 build). A JIT build on the 5090 box already used 12.8, so only wheel users were affected. d_pair 128 / 256 / 384 and AF3 never used this kernel.
+
+## Release build (`release306`, wheels built from `rc-3.0.6` d6b7183e0; later commits change docs only)
+
+- Prebuild (incremental, warm release cache, GCC 12.4 host): first pass sm90 8 / sm80 5 / sm120 5 new artifacts (`miniworld_pwa_pair3_native_v1`, `miniworld_pwa_pair_wide_{128_8_2,256_4_3,384_6_1,512_4_1}`, `bias_only_dit_sm90a`, `bias_only_dit_rows_cuda_sm90a`, `bias_only_dit_f32_rows_cuda`, `transition_{fwd,bwd}_{sm80,sm120}`, `pwa_sm80`, `pwa_sm80_sm120`, `bias_only_dit_rows_cuda`, `bias_only_dit_f32_rows_cuda`), then `transition_fused_sm80` for sm80 (1 artifact, 223 s). 0 failed. Plans: sm90 579, sm80 75, sm120 67 artifacts.
+- Manifest names against the 3.0.5 wheels: sm90 364 -> 364, sm80 74 -> 75 (+ `transition_fused_sm80`), sm120 67 -> 67; dropped 0 everywhere.
+- `ldd` of every staged `.so` (sm90 258, sm80 66, sm120 58) and of the 379 installed `.so`: 0 link a CUDA 13 library, 0 unresolved; no RPATH; max symbol versions GLIBC 2.14 / GLIBCXX 3.4.21 / CXXABI 1.3.11 (the 12.8 `pwa_gemm_sm120.so` also GLIBC 2.14).
+- `twine check`: 5 of 5 PASSED; the engine METADATA pins the three kernels wheels `==3.0.6`, no git URLs.
 - sha256 (`release306/dist/SHA256SUMS`):
 
 ```
-6a98fd4dadbabb7e1491a4fb2befc9d0f57e7a896f9da61555a23d36209d342a  miniworld_engine-3.0.6-py3-none-any.whl
-3265b7f7533410719bc4757106160a699eff4387451f37ff266e714f871d61e4  miniworld_engine_kernels_sm120_cu129-3.0.6-cp312-cp312-manylinux_2_28_x86_64.whl
-d12e4cb55230b6be8b5615abcbfeef9aebc745a39c36d710c40aac2c143f3bd2  miniworld_engine_kernels_sm80_cu129-3.0.6-cp312-cp312-manylinux_2_28_x86_64.whl
+7648a4014ce35b9e7088f9a59c66014387a2323b303d1ba5bf46f215c15577a6  miniworld_engine-3.0.6-py3-none-any.whl
+321bb56c786763f162b3fb00c971518c03e0826ce49dd9246411234641d779ee  miniworld_engine_kernels_sm120_cu129-3.0.6-cp312-cp312-manylinux_2_28_x86_64.whl
+022765ed2028e413a217d1243e45e3c65a23fc0faace01a5e07eeda0b434eca8  miniworld_engine_kernels_sm80_cu129-3.0.6-cp312-cp312-manylinux_2_28_x86_64.whl
 99bb3b0beaf3654186683eb41982e853864110dfabba5c1d93fdbdbc6b6a1664  miniworld_engine_kernels_sm90_cu129-3.0.6-cp312-cp312-manylinux_2_28_x86_64.whl
-b78d7f77f435f7b8e12aeb11f2ef41fd9e7802a43884f7490e6103244805bce7  miniworld_engine-3.0.6.tar.gz
+2fd6949991bb522e756a1d39417440b85abd1df28edef31c0b784a7be58fa5f1  miniworld_engine-3.0.6.tar.gz
 ```
 
 - `benchmarks/paper/`: paper experiment harness (E1-E6) for re-measuring on one release; not part of the wheel.
 
-## Installed-wheel verification (extracted wheels, empty JIT cache, no nvcc, no repo on the path)
+## Installed-wheel verification (extracted final wheels, empty JIT cache, no nvcc, no repo on the path)
 
 | item | H100 | A100 (cssb3) | RTX 5090 (cssb-rtx) |
 |---|---|---|---|
-| import, versions | 3.0.6 engine + kernels | 3.0.6 / 3.0.6 | 3.0.6 / 3.0.6 |
-| every indexed artifact loads, 0 builds | sm90 579 of 579 | sm80 74 of 74 | sm120 67 of 67 |
-| accuracy per module (pytorch / cuda / triton), RED | 0, builds 0 | 0, builds 0 | 0, builds 0 |
-| `judge owed` (repo tree; the wheel carries no tokens) | 0 / 0 on all three cards | | |
+| import, versions | 3.0.6 | 3.0.6 / 3.0.6 | 3.0.6 / 3.0.6 |
+| every indexed artifact loads, 0 builds | sm90 579 of 579 (parts 163 + 190 + 226) | sm80 75 of 75 | sm120 67 of 67 |
+| accuracy per module (pytorch / cuda / triton), RED + error rows | 12 modules, 36 rows, 0; builds 0 | 12 modules, 0; builds 0 | 13 modules, 39 rows, 0; builds 0 |
+| `judge owed` (repo tree at the release commit; the wheel carries no tokens) | 0 / 0 on h100_sm90, a100_sm80, 5090_sm120 | | |
 | `test_pwa_long_inference_sm90` | 26 passed | | |
 | `test_bias_only_long_inference_sm90` | 21 passed | | |
 | `test_bias_only_mid_inference` | 25 passed, 6 skipped | 18 passed, 13 skipped | 18 passed, 13 skipped |
-| `test_large_magnitude_inference_sm90` | 98 passed, 1 xfailed (documented TriAttn limit) | | |
-| `test_transition_sm80_resid_overflow` | 4 skipped (sm_80 family only) | **1 failed**, 3 passed | 4 passed |
-| `test_pwa_long_inference_sm80` | | 27 passed, 3 skipped | **fails** (d_pair 512 cases, see below) |
-| `test_large_magnitude_inference_sm80` | | **2 failed**, 280 passed, 7 skipped | **245 failed**, 42 passed (one sticky CUDA error, see below) |
-| `test_restored_triton_backends` | | 63 passed | 59 passed, 4 skipped |
-| AF3 5I28 n=1 through FoldForge, installed 3.0.6 | | finite, 18026 hook calls, 0 non-finite; all 9 engine ops cuda (install and runtime); `msa_stack.2/3.msa_transition` max abs 64768 | finite; all op plans cuda except conditioning (Triton / PyTorch by plan, not used by the AF3 classes listed); the 3.0.2 failing `msa_transition` input (max abs 65536) replayed finite on cuda |
+| `test_large_magnitude_inference_sm90` / `_sm80` | 98 passed, 1 xfailed (documented TriAttn limit) | 282 passed, 7 skipped | 282 passed, 7 skipped |
+| `test_transition_sm80_resid_overflow` | 4 skipped | 4 passed | 4 passed |
+| `test_pwa_long_inference_sm80` | | 27 passed, 3 skipped | 25 passed, 5 skipped |
+| `test_restored_triton_backends` | 63 passed | 63 passed | 59 passed, 4 skipped |
+| kernel-build lines / `KernelBuildError` in all test logs | 0 | 0 | 0 |
+| AF3 5I28 n=1 through FoldForge, installed 3.0.6 | not run (not required) | finite, all 9 engine ops cuda (install and runtime), 18026 hook calls, 0 non-finite | finite, engine op plans cuda (conditioning by plan Triton / PyTorch, outside the AF3 engine classes counted), 3.0.2 failing `msa_transition` input replayed finite on cuda |
 
-## Open issues found by the installed-wheel verification
+Before the two fixes the same tests failed on the first wheels (A100 `[128-4]` / `Transition(128,4)` / `PairformerBlock` 3 cases; RTX 5090 `test_pwa_long_inference_sm80` d_pair 512 and 245 large-magnitude cases after one sticky CUDA error): all of them pass now. The 5090 `test_bias_only_fp32_logits` file skips on this card. Verification on the H100 ran under heavy cluster load: jobs that took 25 s earlier needed minutes, so its parts were split by independent files / modules (no change of job shape otherwise).
 
-1. **A100: `transition_fused_sm80` is not in the sm80 kernels wheel.** `Transition` D 128 n 4 at the row counts routed through `fused_sm80` (the A100 one-kernel path that carries the 3.0.6 residual-scale fix) requests `transition_fused_sm80 [fc09f682]`; with no nvcc / ninja the load raises `KernelBuildError`. The same request exists in the 3.0.5 wheel (`[da43d32e]`) and the name was never in the 3.0.0 / 3.0.4 / 3.0.5 sm80 manifests, so this gap is not new, but it means the A100 part of the Transition fix is only reachable with a toolchain. The failing cases are `test_transition_sm80_resid_overflow[128-4]` and the two `Transition(d_hidden=128,n=4)` / `PairformerBlock` cases of the large-magnitude net.
-2. **RTX 5090: shipped `pwa_gemm_sm120` artifact faults for d_pair 512.** `MSAPairWeightedAveraging` d_pair 512 (the BIG width) raises `illegal memory access` / `CUBLAS_STATUS_INTERNAL_ERROR` with the wheel's `pwa_gemm_sm120.so` (built with nvcc 12.9, 2026-11-15 release cache); the same source key built by the 5090 box's JIT (nvcc 12.8) passes (`test_pwa_long_inference_sm80[256-512-32-2176]` passed after swapping only that file). The 3.0.5 wheel fails the same case, so it predates 3.0.6; d_pair 128 / 256 / 384 and AF3 are not affected. The error is sticky, which is why the large-magnitude net on the 5090 reports 245 failures after its first d_pair 512 case.
+CPU gate (`rc-3.0.6` at the release commit): pyright 0 errors; ruff check clean; `tests/cpu` 3415 passed, 2 skipped (run split by file lists: 11 + 1300 + 328 + 545 + 1233; includes the new plan test). `ruff format --check` still reports files that already were unformatted in 3.0.5.
+
+## Gap sweep (Ship-prebuilt rule)
+
+The installed-wheel net (accuracy of every requirements module, the large-magnitude net with a bf16-model twin of every master case, the new long-L tests, the restored-Triton test) was run on all three cards with an empty JIT cache and no nvcc; build requests and `KernelBuildError` are counted in every log. The only gap it found is `transition_fused_sm80` on the A100 (fixed above); the other 5090 failures were the sticky error of the PWA fault. This is a test-net sweep, not a proof that no other shape route needs a build.
 
 ## AF3 end-to-end facts (FoldForge, from the e2e agent; not re-measured here)
 
@@ -113,4 +123,4 @@ b78d7f77f435f7b8e12aeb11f2ef41fd9e7802a43884f7490e6103244805bce7  miniworld_engi
 
 ## Release steps
 
-NOT DONE: tag, PyPI upload, `pixi.lock`, push. Held by the two open issues above.
+NOT DONE: tag, PyPI upload, `pixi.lock`, push (waiting for the user's go).
