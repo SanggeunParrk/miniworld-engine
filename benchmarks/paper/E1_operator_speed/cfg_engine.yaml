@@ -1,0 +1,17 @@
+# E1, engine stack: every requirements row (src/miniworld_engine/requirements/requirements_module.csv), eager PyTorch reference + the engine's
+# cuda / triton backends + cuEquivariance, CUDA-graph timing, cold L2.
+modules: all
+backends: [pytorch, cuda, triton, cueq]
+external: [cueq]
+rows: []
+dtypes: []
+modes: []
+lengths: all
+depths: min
+samples: min
+timing: [graph]
+warmup: 5
+iterations: 100
+flush_l2: true
+device: cuda
+seed: 0

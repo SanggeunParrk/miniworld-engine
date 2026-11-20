@@ -1,0 +1,8 @@
+module,model,stream,lengths,depths,dims,options,dtypes,modes,eval_samples,train_samples,source
+TriangleMultiplication,paper_sweep,token_pair,128|256|384|512|640|768|1024|1536|2048,,d_pair=128,outgoing=True;p_drop=0.25,master,eval|train,1,1,paper E2 sweep (TriMul outgoing / TriAttn starting - 32 channels per head): L sweep at d=128
+TriangleMultiplication,paper_sweep,token_pair,768,,d_pair=64|256|384|512,outgoing=True;p_drop=0.25,master,eval|train,1,1,paper E2 sweep (TriMul outgoing / TriAttn starting - 32 channels per head): D sweep at L=768 (d=128 is the L sweep's L=768)
+TriangleAttention,paper_sweep,token_pair,128|256|384|512|640|768|1024|1536|2048,,d_pair=128;n_head=4,starting=True;p_drop=0.25,master,eval|train,1,1,paper E2 sweep (TriMul outgoing / TriAttn starting - 32 channels per head): L sweep at d=128
+TriangleAttention,paper_sweep,token_pair,768,,d_pair=64;n_head=2,starting=True;p_drop=0.25,master,eval|train,1,1,paper E2 sweep (TriMul outgoing / TriAttn starting - 32 channels per head): D sweep at L=768 (d=64)
+TriangleAttention,paper_sweep,token_pair,768,,d_pair=256;n_head=8,starting=True;p_drop=0.25,master,eval|train,1,1,paper E2 sweep (TriMul outgoing / TriAttn starting - 32 channels per head): D sweep at L=768 (d=256)
+TriangleAttention,paper_sweep,token_pair,768,,d_pair=384;n_head=12,starting=True;p_drop=0.25,master,eval|train,1,1,paper E2 sweep (TriMul outgoing / TriAttn starting - 32 channels per head): D sweep at L=768 (d=384)
+TriangleAttention,paper_sweep,token_pair,768,,d_pair=512;n_head=16,starting=True;p_drop=0.25,master,eval|train,1,1,paper E2 sweep (TriMul outgoing / TriAttn starting - 32 channels per head): D sweep at L=768 (d=512); d=512 is in no predictor: not in requirements_module.csv

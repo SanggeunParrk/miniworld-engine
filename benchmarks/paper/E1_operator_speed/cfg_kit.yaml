@@ -1,0 +1,16 @@
+# E1, kit stack: the Anthropic kernels, run through the card's kit-stack wrapper (see README). pytorch is the same-process reference.
+modules: all
+backends: [pytorch, anthropic]
+external: [anthropic]
+rows: []
+dtypes: []
+modes: []
+lengths: all
+depths: min
+samples: min
+timing: [graph]
+warmup: 5
+iterations: 100
+flush_l2: true
+device: cuda
+seed: 0

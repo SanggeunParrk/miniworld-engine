@@ -1,0 +1,4 @@
+slurm-*.log
+*/records/**/*.done
+__pycache__/
+.ruff_cache/

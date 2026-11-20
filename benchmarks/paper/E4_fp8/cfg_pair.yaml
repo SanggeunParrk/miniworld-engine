@@ -1,0 +1,17 @@
+# E4: the E2 grid, inference only, TriMul + TriAttn (fp8_pair.py builds both routes of each case itself; backends here only select cases).
+requirements: ../E2_sweeps/requirements_e2.csv   # relative to this file
+modules: [TriangleMultiplication, TriangleAttention]
+backends: [pytorch, cuda]
+external: []
+rows: []
+dtypes: []
+modes: [eval]
+lengths: all
+depths: min
+samples: min
+timing: [graph]
+warmup: 5
+iterations: 100
+flush_l2: true
+device: cuda
+seed: 0

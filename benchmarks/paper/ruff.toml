@@ -1,0 +1,4 @@
+extend = "../../pyproject.toml"
+
+[lint]
+extend-ignore = ["C408"]  # dict(...) calls build the CSV rows
