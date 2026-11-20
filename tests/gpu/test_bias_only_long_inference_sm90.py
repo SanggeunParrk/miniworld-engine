@@ -34,6 +34,9 @@ def _free_cuda_between_cases():
     gc.collect()
     torch.cuda.empty_cache()
     yield
+    from miniworld_engine.kernels.integrations import bias_only_dit
+
+    bias_only_dit._RUNNERS.clear()  # a runner keeps the last hoisted pair-bias P and its (pair, mask) key tensors alive: tens of GiB at these lengths
     gc.collect()
     torch.cuda.empty_cache()
 

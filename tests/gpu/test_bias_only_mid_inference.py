@@ -22,6 +22,19 @@ pytestmark = [pytest.mark.gpu]
 
 _CARD = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
 requires_cuda_card = pytest.mark.skipif(_CARD not in ((9, 0), (8, 0), (12, 0)), reason="H100 / A100 / RTX 5090")
+
+
+@pytest.fixture(autouse=True)
+def _free_cuda_between_cases():
+    """A bias-only runner keeps its last hoisted P and the (pair, mask) key tensors alive: drop the runners and the cache after each case, so the long-L tests of the same process fit."""
+    yield
+    from miniworld_engine.kernels.integrations import bias_only_dit
+
+    bias_only_dit._RUNNERS.clear()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 S = 2
 DTYPES = ["master", "bfloat16", "float32"]
 
