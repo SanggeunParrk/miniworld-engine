@@ -10,6 +10,7 @@
 // product with Wb^T (B fragments held in registers; N = 8 heads is one n8 tile).  The next tile's copy is issued as soon as the fragments are loaded.
 // The logits of the whole row are staged in shared memory [8][L], then warp h takes the softmax of head h.
 #pragma once
+#include <type_traits>
 #include "sm80_common.cuh"
 
 namespace pwa80 {
@@ -66,7 +67,8 @@ __global__ void __launch_bounds__(256, 1) pwa_pair_fwd_kernel(const PairFwdParam
   float* sg = reinterpret_cast<float*>(smem + C::LW * C::TILE);             // gamma [DZ], beta [DZ]
   uint2* sbw = reinterpret_cast<uint2*>(sg + 2 * DZ);                       // B fragments of Wb^T: [ks][lane] = (n = head lane / 4, k = 16 ks + 2 (lane % 4) (+8)) pairs
   LT* sb = GLOB ? reinterpret_cast<LT*>(p.w) + (long)blockIdx.x * p.L : reinterpret_cast<LT*>(sbw + C::NK * 32);   // logits [8][NP] (GLOB: w[h][i][:], LT is bf16)
-  const long NP = GLOB ? (long)p.L * p.L : (long)p.L + 4;                   // the stride of a head
+  using NPT = std::conditional_t<GLOB, long, int>;                          // 32-bit strides in shared memory (as before), 64-bit in the output rows
+  const NPT NP = GLOB ? (NPT)((long)p.L * p.L) : (NPT)(p.L + 4);          // the stride of a head
   const int i = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, q = lane & 3;
   for (int k = tid; k < DZ; k += C::NTHR) { sg[k] = p.lnw[k]; sg[DZ + k] = p.lnb[k]; }
   for (int idx = tid; idx < C::NK * 32; idx += C::NTHR) {                    // (kept in shared memory: 2 NK registers a thread would not fit at d_pair 384)

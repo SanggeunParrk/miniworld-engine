@@ -13,6 +13,21 @@ from miniworld_engine.modules import MSAPairWeightedAveraging
 sys.path.insert(0, "tests/gpu")
 from test_pwa_long_inference_sm80 import gold_f64
 
+import miniworld_engine.modules.msa as _msa_mod
+
+
+def _chunked_random(shape, *, dtype, device, generator, scale=1.0):
+    """random_input drawn a slab at a time (an fp32 draw of an L 8192 pair would not fit next to its bf16 result)."""
+    out = torch.empty(tuple(shape), dtype=dtype, device=device)
+    flat = out.view(-1)
+    step = 1 << 27
+    for i in range(0, flat.numel(), step):
+        part = flat[i : i + step]
+        part.copy_(scale * torch.randn(part.shape, device=device, generator=generator))
+    return out
+
+
+_msa_mod.random_input = _chunked_random
 dm, dp, dh = map(int, sys.argv[1:4])
 lengths = [int(x) for x in sys.argv[4:]]
 FLUSH = torch.empty(256 * 2**20, dtype=torch.uint8, device="cuda")
@@ -61,7 +76,7 @@ for length in lengths:
                 continue
             try:
                 g, out = graph_of(k, inp)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 rows[name] = f"error: {str(e)[:90]}"
                 continue
             g.replay()
