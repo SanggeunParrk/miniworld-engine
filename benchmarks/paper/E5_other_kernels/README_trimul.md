@@ -25,3 +25,5 @@ eval and train where the backend serves them, 20 timed iterations (`requirements
 the 5090 records were taken before the scope reduction on the wider E2 grid with 100 iterations (same cells included; `ext_trimul.r*.jsonl.meta.json` has the settings): the
 cells of the reported scope are reused. Not connected as separate operator classes: LayerNorm / gate kernels of fast_trimul are internal helpers of its fused module (no
 module-level API to wrap), the other libraries expose only the whole update.
+
+5090 train L=2048 (OOM in the three repeats on the shared GPU): one extra run, records/rtx5090/fill_l2048_train.r1.jsonl (20 iterations): pytorch 468.3 ms, cuda 66.9 ms, fast_trimul 516.5 ms (x7.72 of cuda).
