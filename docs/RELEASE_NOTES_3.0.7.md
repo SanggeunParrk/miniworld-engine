@@ -53,20 +53,20 @@ In all four the cuda backend ran with `refused=None` and no Triton kernel in the
 
 | item | H100 | A100 (cssb3) | RTX 5090 (cssb-rtx) |
 |---|---|---|---|
-| import, versions | 3.0.7 | 3.0.7 / 3.0.7 | PENDING (GPU lock busy) |
-| every indexed artifact loads, 0 builds | sm90 580 of 580 (164 + 190 + 226) | sm80 75 of 75 | sm120 67 of 67 (first stage run, rc=0) |
+| import, versions | 3.0.7 | 3.0.7 / 3.0.7 | 3.0.7 / 3.0.7 |
+| every indexed artifact loads, 0 builds | sm90 580 of 580 (164 + 190 + 226) | sm80 75 of 75 | sm120 67 of 67 |
 | accuracy per module (pytorch / cuda / triton) | 12 modules, 36 rows, 620 G / 190 Y / 0 RED / 0 error; builds 0 | 12 modules, 36 rows, 608 G / 202 Y / 0 RED / 0 error; builds 0 | |
-| `test_ieee_f32` | 5 passed, 49 skipped | 49 passed, 5 skipped | |
-| `test_bias_only_logit_modes` | 24 passed, 4 skipped | 20 passed, 8 skipped | |
+| `test_ieee_f32` | 5 passed, 49 skipped | 49 passed, 5 skipped | 49 passed, 5 skipped |
+| `test_bias_only_logit_modes` | 24 passed, 4 skipped | 20 passed, 8 skipped | 20 passed, 8 skipped |
 | `test_bias_only_fp32_logits` (_sm80 on A100) | 82 passed, 8 skipped | 6 passed | |
-| `test_large_magnitude_inference_sm90` / `_sm80` | 98 passed, 1 xfailed (documented TriAttn limit) | 282 passed, 7 skipped | |
-| `test_pwa_long_inference_sm90` / `_sm80` | 26 passed | 27 passed, 3 skipped | |
+| `test_large_magnitude_inference_sm90` / `_sm80` | 98 passed, 1 xfailed (documented TriAttn limit) | 282 passed, 7 skipped | 282 passed, 7 skipped |
+| `test_pwa_long_inference_sm90` / `_sm80` | 26 passed | 27 passed, 3 skipped | 25 passed, 5 skipped |
 | `test_bias_only_long_inference_sm90` | 21 passed | | |
-| `test_bias_only_mid_inference` | 25 passed, 6 skipped | 18 passed, 13 skipped | |
-| `test_transition_sm80_resid_overflow` | | 4 passed | |
-| `test_restored_triton_backends` | 63 passed | 63 passed | |
+| `test_bias_only_mid_inference` | 25 passed, 6 skipped | 18 passed, 13 skipped | 18 passed, 13 skipped |
+| `test_transition_sm80_resid_overflow` | | 4 passed | 4 passed |
+| `test_restored_triton_backends` | 63 passed | 63 passed | 59 passed, 4 skipped |
 | `test_gated_core_cache` | 19 skipped (B200 only) | 19 skipped | |
-| kernel-build lines / `KernelBuildError` in all test logs | 0 | 0 | |
+| kernel-build lines / `KernelBuildError` in all test logs | 0 | 0 | 0 |
 
 The first run on the first engine wheel found the two failures of items 4 and 5 (H100: 4, A100: 4 + 6); all of them pass on the final wheel. B200: not verified in this release (no B200 wheel; the B200 branch's own tests ran on the card, see docs/b200/HANDOFF.md).
 
