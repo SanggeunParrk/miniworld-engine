@@ -140,7 +140,7 @@ def test_logits_softmax_fp32(case: str, dtype: str):
     yt, gr = _run(mq, *ins, mask, gy_q, True, ac)
     mf: typing.Any = copy.deepcopy(mq).set_backend("pytorch")
 
-    def fixed(self, pair, mask, bias, dtype_):
+    def fixed(self, pair, mask, bias, dtype_, mode="fp32"):
         with torch.autocast("cuda", enabled=False):
             ln = F.layer_norm(pair.float(), (DP,), None, None, 1e-5) * self.ln_pair.weight.float()
             lg_ = (ln @ self.to_bias.weight.float().t()).permute(0, 3, 1, 2)
