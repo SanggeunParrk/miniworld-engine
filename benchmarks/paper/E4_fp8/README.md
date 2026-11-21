@@ -12,7 +12,7 @@ Training is not measured: there is no FP8 backward and `engine-fp8` runs the def
 
 **Cards.** H100 only: the routes take inference calls on sm_90a. **RTX 5090: no sm120 FP8 path** (checked: `miniworld_engine/fp8.py` states the
 routes are H100 / sm_90a only and no `sm120` kernel under `kernels/` has an e4m3 route; `engine-fp8` resolves to the default `cuda`
-kernels there). `rtx5090.sh` still runs the pair so the records show `routes_fired: false` and ratio ~ 1; `collect.py` labels those rows. **A100: n/a** (no script).
+kernels there). **RTX 5090: no FP8 route (checked in code: `fp8.py` is sm_90a only); not measured, no E4 CSV for this card** (the smoke / repeat-1 pair records, `routes_fired: false`, ratio ~ 1, are not part of the results). **A100: n/a** (no script).
 
     cd benchmarks/paper && REP=1 paper_common/chain.sh 6 E4_fp8/h100.sbatch ; python E4_fp8/collect.py --card h100
 
