@@ -1,0 +1,59 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_pairtest.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_pairtest.cu
+new file mode 100644
+index 000000000..150188aee
+--- /dev/null
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_pairtest.cu
+@@ -0,0 +1,53 @@
++// analysis only (not shipped): where cta_group::2 M = 128 puts the accumulator rows in each CTA's tensor memory.
++// A (per CTA 64 rows x 64 K): A[r][0] = global row + 1; B (per CTA N / 2 = 32 rows): B[n][0] = global n + 1. D = (row + 1)(n + 1).
++#include "sm100.cuh"
++using namespace s100;
++constexpr int NN = 64;
++extern "C" __global__ void __launch_bounds__(128, 1) tsx_pairtest(float* __restrict__ out) {
++  extern __shared__ __align__(1024) uint8_t sm[];
++  const uint32_t su = smem_u32(sm);
++  uint64_t* bar = reinterpret_cast<uint64_t*>(sm + 12288);
++  uint32_t* tm = reinterpret_cast<uint32_t*>(sm + 12288 + 64);
++  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  const int rank = (int)cluster_rank();
++  for (int i = tid; i < 12288 / 4; i += 128) sts32(su + 4 * i, 0u);
++  __syncthreads();
++  if (tid < 64) {                                               // A row tid
++    const float v = (float)(rank * 64 + tid + 1);
++    const uint32_t w = pack_bf16(v, 0.f);
++    sts32(su + sw128(tid, 0), w);
++  } else if (tid < 96) {
++    const int n = tid - 64;
++    const float v = (float)(rank * 32 + n + 1);
++    sts32(su + 8192 + sw128(n, 0), pack_bf16(v, 0.f));
++  }
++  fence_proxy_async();
++  if (tid == 0) { mbar_init(bar, 1); fence_barrier_init(); }
++  if (warp == 1) { tmem_alloc2(smem_u32(tm), 64); tmem_relinquish2(); }
++  tc_fence_before();
++  __syncthreads();
++  cluster_sync();
++  tc_fence_after();
++  const uint32_t tmem = *tm;
++  if (rank == 0 && warp == 0) {
++    if (elect_one()) {
++      const uint64_t da = desc_k128(su), db = desc_k128(su + 8192);
++      for (int ks = 0; ks < 4; ++ks) umma_ss2(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), idesc_bf16(128, NN), ks > 0 ? 1u : 0u);
++      tc_commit2_mc(bar, 3);
++    }
++    __syncwarp();
++  }
++  mbar_wait(bar, 0);
++  tc_fence_after();
++  uint32_t v[32];
++  for (int c = 0; c < NN; c += 32) {
++    tmem_ld32(tmem + ((uint32_t)(warp * 32) << 16) + c, v);
++    tmem_wait_ld();
++    for (int i = 0; i < 32; ++i) out[((size_t)rank * 128 + warp * 32 + lane) * NN + c + i] = __uint_as_float(v[i]);
++  }
++  tc_fence_before();
++  __syncthreads();
++  cluster_sync();
++  if (warp == 1) { tc_fence_after(); tmem_dealloc2(tmem, 64); }
++}
++extern "C" __device__ int transition_smem_bytes = 16384;

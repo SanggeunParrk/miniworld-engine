@@ -1,0 +1,77 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-base/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/ctr.cu	2026-11-18 17:59:29.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-trimul/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/ctr.cu	2026-11-18 18:56:07.000000000 +0000
+@@ -182,7 +182,7 @@
+         }
+       }
+     }
+-    if (lane == 0) bulk_wait<0>();
++    if (lane == 0) BULK_END_N2();
+   }
+   tc_fence_before();
+   __syncthreads();
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-base/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3h.cu	2026-11-18 17:59:29.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-trimul/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3h.cu	2026-11-18 18:56:07.000000000 +0000
+@@ -337,7 +337,7 @@
+       if (warp == 8 && lane == 0) { mbar_arrive(&B.xo_ready); if (i == 0) TL3(6) }
+       epi_tile(i, 0, lat ? 2 : 1);
+     }
+-    if (warp == 8 && lane == 0) { TL3(11) bulk_wait<0>(); TL3(12) }
++    if (warp == 8 && lane == 0) { TL3(11) BULK_END_N2(); TL3(12) }
+   }
+   tc_fence_before();
+   __syncthreads();
+@@ -687,7 +687,7 @@
+       if (warp == 8 && lane == 0) mbar_arrive(&B.sto[b]);
+       epi_tile(i, 0);
+     }
+-    if (warp == 8 && lane == 0) bulk_wait<0>();
++    if (warp == 8 && lane == 0) BULK_END_N2();
+   }
+   tc_fence_before();
+   __syncthreads();
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-base/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1h.cu	2026-11-18 17:59:29.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-trimul/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1h.cu	2026-11-18 18:56:07.000000000 +0000
+@@ -252,7 +252,7 @@
+           }
+         }
+       }
+-      if (lane == 0) bulk_wait<0>();
++      if (lane == 0) BULK_END_N2();
+       if (lane == 0 && q == 0) TLH(8 + grp)
+     };
+     if (warp < 8) {
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-base/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu	2026-11-18 17:59:29.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-trimul/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu	2026-11-18 18:56:07.000000000 +0000
+@@ -695,7 +695,7 @@
+     }
+     if (warp == 8 && lane == 0) TL(8)
+     if (warp == 12 && lane == 0) TL(9)
+-    if (lane == 0) bulk_wait<0>();
++    if (lane == 0) BULK_END_N2();
+     if (warp == 8 && lane == 0) TL(10)
+     if (warp == 12 && lane == 0) TL(11)
+   }
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-base/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3g.cu	2026-11-18 17:59:29.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-trimul/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3g.cu	2026-11-18 18:56:07.000000000 +0000
+@@ -745,7 +745,7 @@
+       }
+     }
+     if (r == 0 && part == 0) TL(11)
+-    if (r == 0 && part == 0) bulk_wait<0>();
++    if (r == 0 && part == 0) BULK_END_N2();
+     if (r == 0 && part == 0) TL(12)
+   };
+   if (warp >= 12) epilogue(0);
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-base/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/sm100.cuh	2026-11-18 17:59:29.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-trimul/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/sm100.cuh	2026-11-18 18:56:07.000000000 +0000
+@@ -261,3 +261,10 @@
+ #define PROF_END(row)
+ #endif
+ }  // namespace sm100
++
++// (n2 2026-11-18) the final TMA-store wait of an inference kernel: 0 waits for the writes (the previous form); 1 only until the stores have read shared memory
++// (the writes complete with the grid: a dependent's griddepcontrol.wait and the next launch see them)
++#ifndef K_NWC_N2
++#define K_NWC_N2 0
++#endif
++#define BULK_END_N2() do { if (K_NWC_N2) asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory"); else asm volatile("cp.async.bulk.wait_group 0;" ::: "memory"); } while (0)

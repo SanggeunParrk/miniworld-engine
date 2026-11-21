@@ -1,0 +1,180 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+index 8d8b2322e..357c02da8 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+@@ -200,6 +200,10 @@ PAIR_PICK: dict[tuple[int, int, int], tuple[int, int]] = {
+ }
+ #: A/B override: ((UH, KBX), (NB, KBX)) or None
+ PAIR_FORCE = None
++#: (part 15) the pair squeeze with its hidden width split over SQK pairs of one cluster (``tsx_squeeze2.cu -DSQK``: half the h / Ws intake
++#: per SM, the fp32 partials added in pair 0 in pair order): {(D, n, tiles): (NB, SQK)} where it is taken; A/B: edit
++PAIR_SQ_SPLIT: dict[tuple[int, int, int], tuple[int, int]] = {(768, 2, 2): (64, 2)}
++PAIR_SQK = (2,)
+ 
+ 
+ def _kbx(nkb: int, want: int = 4) -> int:
+@@ -227,6 +231,11 @@ def _pair_specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+         ("ln", "widths/tsx_ln.cu", (f"-DDIM={d}", "-DF32=0")),
+         *((f"ex{u}_{ke}", "widths/tsx_expand2.cu", (*dh, f"-DUH={u}", f"-DKBX={ke}")) for u in PAIR_UH),
+         *((f"sq{b}_{kq}", "widths/tsx_squeeze2.cu", (*dh, f"-DNBW={b}", f"-DKBX={kq}")) for b in PAIR_NB),
++        *(
++            (f"sq{b}_{_kbx(n * d // 64 // s)}s{s}", "widths/tsx_squeeze2.cu", (*dh, f"-DNBW={b}", f"-DKBX={_kbx(n * d // 64 // s)}", f"-DSQK={s}"))
++            for b in PAIR_NB
++            for s in PAIR_SQK
++        ),
+     )
+ 
+ 
+@@ -263,8 +272,11 @@ def pair_chain(x, gamma, beta, wa, wb, ws, eps: float, out=None):
+         [t(xn, d, m, 64, 64, -1, 0, ke), t(wa, d, h, 64, uh), t(wb, d, h, 64, uh), hid],
+         True,
+     )
++    nb, sqk = (nb, 1) if PAIR_FORCE else PAIR_SQ_SPLIT.get((d, h // d, tiles), (nb, 1))
++    kq = kq if sqk == 1 else _kbx(h // 64 // sqk)
+     sq_args = [t(hid, h, m, 64, 64, -1, 0, kq), t(ws, h, d, 64, nb // 2), x, out]
+-    ext.launch_kernel(f"{tag}_sq{nb}_{kq}", "transition_sx_squeeze2", tiles * (d // nb) * 2, 256, 2, sq_args, True)
++    sfx = "" if sqk == 1 else f"s{sqk}"
++    ext.launch_kernel(f"{tag}_sq{nb}_{kq}{sfx}", "transition_sx_squeeze2", tiles * (d // nb) * 2 * sqk, 256, 2 * sqk, sq_args, True)
+     return out
+ 
+ 
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu
+index 2635ead92..a5c17c5ae 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu
+@@ -19,18 +19,24 @@ using namespace s100;
+ #ifndef NBW
+ #define NBW 32
+ #endif
+-constexpr int D_ = DIM, H_ = HID, ROWS = 128, HR = 64, NB = NBW, NBH = NB / 2, NBLK = D_ / NB, NKB = H_ / 64;
+-static_assert((NB == 16 || NB == 32 || NB == 64) && D_ % NB == 0 && H_ % 64 == 0, "16- / 32- / 64-column blocks, whole K-blocks");
++#ifndef SQK
++#define SQK 1                                                   // (part 15) the hidden width split over SQK pairs of a 2 SQK-CTA cluster:
++#endif                                                          // pair p runs K-blocks [p NKB, (p + 1) NKB) and pairs p > 0 send their
++                                                                // fp32 partials to pair 0 (distributed shared memory), added in pair order
++constexpr int D_ = DIM, H_ = HID, ROWS = 128, HR = 64, NB = NBW, NBH = NB / 2, NBLK = D_ / NB, NKB = H_ / 64 / SQK;
++static_assert((NB == 16 || NB == 32 || NB == 64) && D_ % NB == 0 && H_ % (64 * SQK) == 0, "16- / 32- / 64-column blocks, whole K-blocks");
++static_assert(SQK == 1 || NBH % 4 == 0, "16-byte partial chunks");
++constexpr int RED = SQK > 1 ? (SQK - 1) * 128 * NBH * 4 : 0;   // pair 0: the other pairs' partials [pair - 1][TMEM lane][NBH] fp32
+ constexpr int AKB = HR * 128, WKB = NBH * 128;                  // one K-block of this CTA's 64 h rows (8 KB) / of its NB / 2 Ws rows
+ #ifndef KBX
+ #define KBX 1                                                   // K-blocks per ring stage: the h rows of a stage in ONE 3-D TMA box
+ #endif
+ constexpr int NS = NKB / KBX, AST = KBX * AKB, WST = KBX * WKB;
+ static_assert(NKB % KBX == 0, "whole stages");
+-constexpr int CAP = (232448 - 1024) / (AST + WST);
++constexpr int CAP = (232448 - 1024 - RED) / (AST + WST);
+ constexpr int STG = (NS < CAP ? NS : CAP) < 32 ? (NS < CAP ? NS : CAP) : 32;
+ static_assert(STG >= 2, "ring stages");
+-constexpr int O_A = 0, O_W = STG * AST, O_BAR = O_W + STG * WST, SMEM_BYTES = O_BAR + 512;
++constexpr int O_A = 0, O_W = STG * AST, O_RED = O_W + STG * WST, O_BAR = O_RED + RED, SMEM_BYTES = O_BAR + 512;
+ DEVI void tma_load_3d_2sm(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
+   asm volatile("cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
+                :: "r"(dst), "l"(m), "r"(smem_u32(bar) & 0xFEFFFFFFu), "r"(c0), "r"(c1), "r"(c2) : "memory");
+@@ -54,7 +60,7 @@ template <int NW> DEVI void st_row(ACT* grp, ACT* own, const uint32_t (&o)[NW],
+ }
+ 
+ struct Bars {
+-  uint64_t full[STG], empty[STG], acc_full;
++  uint64_t full[STG], empty[STG], acc_full, red_full;
+   uint32_t tmem;
+ };
+ static_assert(sizeof(Bars) <= 512, "barrier block");
+@@ -67,14 +73,17 @@ transition_sx_squeeze2(const __grid_constant__ CUtensorMap mh, const __grid_cons
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+-  const int pair = blockIdx.x >> 1, rank = (int)cluster_rank();
++  const int crank = (int)cluster_rank(), rank = crank & 1, pr = crank >> 1;   // CTA of the pair, pair of the cluster (K slice)
++  const int pair = blockIdx.x / (2 * SQK);
+   const bool leader = rank == 0;
+-  const int tile = pair / NBLK, nb = pair % NBLK, arow = tile * ROWS + rank * HR, c0 = nb * NB;
++  const int tile = pair / NBLK, nb = pair % NBLK, arow = tile * ROWS + rank * HR, c0 = nb * NB, kb0 = pr * NKB;
++  const uint16_t pmask = (uint16_t)(3u << (2 * pr));            // this pair's CTAs (the MMA commits' multicast)
+   if (tid == 0) TSX_ST(0);
+ 
+   if (tid == 0) {
+     for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
+     mbar_init(&B.acc_full, 1);
++    if (SQK > 1 && pr == 0) { mbar_init(&B.red_full, 1); mbar_expect_tx(&B.red_full, RED); }
+     fence_barrier_init();
+     prefetch_map(&mh); prefetch_map(&mws);
+   }
+@@ -90,11 +99,11 @@ transition_sx_squeeze2(const __grid_constant__ CUtensorMap mh, const __grid_cons
+       auto load_w = [&](int st) {
+ #pragma unroll
+         for (int i = 0; i < KBX; ++i)
+-          tma_load_2d_2sm(su + O_W + lane * WST + i * WKB, &mws, &B.full[lane], (st * KBX + i) * 64, c0 + rank * NBH);
++          tma_load_2d_2sm(su + O_W + lane * WST + i * WKB, &mws, &B.full[lane], (kb0 + st * KBX + i) * 64, c0 + rank * NBH);
+       };
+       auto load_a = [&](int st) {
+-        if (KBX == 1) tma_load_2d_2sm(su + O_A + lane * AST, &mh, &B.full[lane], st * 64, arow);
+-        else tma_load_3d_2sm(su + O_A + lane * AST, &mh, &B.full[lane], 0, arow, st * KBX);
++        if (KBX == 1) tma_load_2d_2sm(su + O_A + lane * AST, &mh, &B.full[lane], (kb0 + st) * 64, arow);
++        else tma_load_3d_2sm(su + O_A + lane * AST, &mh, &B.full[lane], 0, arow, kb0 + st * KBX);
+       };
+       if (leader) mbar_expect_tx(&B.full[lane], 2 * (AST + WST));
+       load_w(lane);                                            // weights: before the wait
+@@ -127,8 +136,8 @@ transition_sx_squeeze2(const __grid_constant__ CUtensorMap mh, const __grid_cons
+             for (int ks = 0; ks < 4; ++ks)
+               umma_ss2(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), IDESC, (st > 0 || i > 0 || ks > 0) ? 1u : 0u);
+           }
+-          if (NS > STG) tc_commit2_mc(&B.empty[s], 3);
+-          if (st == NS - 1) tc_commit2_mc(&B.acc_full, 3);
++          if (NS > STG) tc_commit2_mc(&B.empty[s], pmask);
++          if (st == NS - 1) tc_commit2_mc(&B.acc_full, pmask);
+         }
+         __syncwarp();
+       }
+@@ -147,14 +156,40 @@ transition_sx_squeeze2(const __grid_constant__ CUtensorMap mh, const __grid_cons
+     const uint32_t trow = tmem + ((uint32_t)(q * 32) << 16);
+     constexpr int NX = NBH * 2 / 16;                             // 16-byte residual chunks of a row segment
+     uint4 xv[NX];
++    if (pr == 0) {
+ #pragma unroll
+-    for (int i = 0; i < NX; ++i) xv[i] = ldg128(xg + grow * D_ + col + 8 * i);
++      for (int i = 0; i < NX; ++i) xv[i] = ldg128(xg + grow * D_ + col + 8 * i);
++    }
+     mbar_wait(&B.acc_full, 0);
+     if (warp == 4 && lane == 0) TSX_ST(4);
+     tc_fence_after();
+     uint32_t v[NBH];
+     tld(trow, v);
+     tmem_wait_ld();
++#if SQK > 1
++    const uint32_t L = (uint32_t)(q * 32 + lane);                // TMEM lane: the same lane of the same rank in pair 0 holds the same outputs
++    if (pr > 0) {                                               // send this K slice's partial to pair 0's CTA of this rank, then done
++      const uint32_t dst = su + O_RED + (uint32_t)((pr - 1) * 128 * NBH * 4), bar = smem_u32(&B.red_full);
++#pragma unroll
++      for (int i = 0; i < NBH / 4; ++i)
++        st_async_v4(dst + swz16(L * (NBH / 4) + i), bar, (uint32_t)rank, v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]);
++    } else {
++      mbar_wait(&B.red_full, 0);
++#pragma unroll
++      for (int p = 1; p < SQK; ++p) {                            // pair order: deterministic
++        const uint32_t src = su + O_RED + (uint32_t)((p - 1) * 128 * NBH * 4);
++#pragma unroll
++        for (int i = 0; i < NBH / 4; ++i) {
++          const uint4 t = lds128(src + swz16(L * (NBH / 4) + i));
++          v[4 * i] = __float_as_uint(__uint_as_float(v[4 * i]) + __uint_as_float(t.x));
++          v[4 * i + 1] = __float_as_uint(__uint_as_float(v[4 * i + 1]) + __uint_as_float(t.y));
++          v[4 * i + 2] = __float_as_uint(__uint_as_float(v[4 * i + 2]) + __uint_as_float(t.z));
++          v[4 * i + 3] = __float_as_uint(__uint_as_float(v[4 * i + 3]) + __uint_as_float(t.w));
++        }
++      }
++    }
++    if (pr == 0) {
++#endif
+     constexpr int NW = NBH / 2;
+     uint32_t o[NW];
+ #pragma unroll
+@@ -164,6 +199,9 @@ transition_sx_squeeze2(const __grid_constant__ CUtensorMap mh, const __grid_cons
+       for (int k = 0; k < 4; ++k) o[4 * i + k] = pack_bf16(bf16lo(xw[k]) + __uint_as_float(v[8 * i + 2 * k]), bf16hi(xw[k]) + __uint_as_float(v[8 * i + 2 * k + 1]));
+     }
+     st_row<NW>(out + (size_t)(arow + (r & ~(NW / 4 - 1))) * D_ + col + (lane & (NW / 4 - 1)) * 8, out + grow * D_ + col, o, lane);
++#if SQK > 1
++    }
++#endif
+     if (warp == 4 && lane == 0) TSX_ST(6);
+     tc_fence_before();
+   }

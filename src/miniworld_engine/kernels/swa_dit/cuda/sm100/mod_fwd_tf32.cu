@@ -48,6 +48,9 @@ DEVI float silu32(float x) { return x * rcpf(1.f + ex2f(-1.4426950408889634f * x
 // the bulk store group issued two quarters ago has finished READING its staging buffer (at most one group still reading)
 DEVI void tma_store_wait_read1() { asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory"); }
 
+// io16 (B200 2026-11-17, round 3 part 6): c arrives as bf16 (master training: no fp32 copy of c). Its k-block kb is loaded as a [128 rows]
+// [32 bf16] 64-B-swizzled box into the first 8 KB of the fp32 k-block slot; the silu threads read their two k-blocks' bf16 rows, meet
+// at a named barrier (the fp32 rows they write overlap other rows' bf16), then write the fp32 k-blocks as before.
 constexpr int KB = 128 * 128;                                              // one k-block: [128 rows][32 fp32], 128-B swizzle (16 KB)
 constexpr int CT = 4 * KB;                                                 // a c tile: 4 k-blocks (64 KB)
 constexpr int NWS = 4;                                                     // Wmod ring: one channel block's four k-blocks
@@ -65,7 +68,8 @@ static_assert(sizeof(Bars) <= 512, "barriers");
 
 extern "C" __global__ void __launch_bounds__(512, 1)
 swa_mod_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constant__ CUtensorMap mw, const __grid_constant__ CUtensorMap mout,
-                       int ntile, int NG) {
+                       int ntile, int NG, int io16) {
+  const bool XB16 = io16 & 1;                                              // c bf16
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -91,35 +95,45 @@ swa_mod_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mc, const __grid_cons
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+#ifdef LATE_TRIGGER
+  // round 3 part 7 (beside qkvg_fwd_tf32 -DMODF): the trigger after this grid's own wait -- when the dependent kernel starts, everything
+  // before this kernel is complete (MODF reads q / c without a griddepcontrol.wait of its own)
+  pdl_wait();
+#endif
   pdl_launch();                                                            // PDL: the next kernel may launch now
 
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------------ TMA producer: c tiles
-    if (lane == 0) {
+    // the four k-blocks of a tile by lanes 0 - 3 at once (round 3 part 10: one thread issues a TMA load per ~600 clocks, _tools/t0/tmabw.py)
+    if (lane < 4) {
       pdl_wait();                                                          // c comes from the previous kernels
       for (int T = 0; T < ntT; ++T) {
         int r0, nb0; item(T, r0, nb0);
         const int cb = T & 1;
-        if (T >= 2) mbar_wait(&B.cfree[cb], ((T >> 1) - 1) & 1);           // every MMA of item T - 2 has read c[cb]
-        mbar_expect_tx(&B.cfull[cb], CT);
-        for (int kb = 0; kb < 4; ++kb) tma_load_2d(su + O_C + cb * CT + kb * KB, &mc, &B.cfull[cb], 32 * kb, r0);   // rows >= R: zeros
+        if (lane == 0) {
+          if (T >= 2) mbar_wait(&B.cfree[cb], ((T >> 1) - 1) & 1);         // every MMA of item T - 2 has read c[cb]
+          mbar_expect_tx(&B.cfull[cb], XB16 ? CT / 2 : CT);
+        }
+        __syncwarp(0xfu);
+        tma_load_2d(su + O_C + cb * CT + lane * KB, &mc, &B.cfull[cb], 32 * lane, r0);   // k-block = lane; rows >= R: zeros
       }
     }
   } else if (warp == 2) {
     // ------------------------------------------------------------------------------------------------ TMA producer: Wmod ring
     // per item, per channel block nb0 + i, k-blocks 0-3 -- the MMA warp's order
-    if (lane == 0) {
+    if (lane < NWS) {                                                      // NWS lanes issue: lane l the loads j = l mod NWS (its own slot)
       pdl_wait();                                                          // the rounded Wmod may come from the kernel just before
-      int j = 0;
-      for (int T = 0; T < ntT; ++T) {
+      for (int j = lane; j < ntT * NB * 4; j += NWS) {
+        const int T = j / (NB * 4), i = (j / 4) % NB, kb = j & 3;
         int r0, nb0; item(T, r0, nb0);
-        for (int i = 0; i < NB; ++i)
-          for (int kb = 0; kb < 4; ++kb, ++j) {
+        {
+          {
             const int slot = j % NWS;
             if (j >= NWS) mbar_wait(&B.wempty[slot], ((j / NWS) - 1) & 1);
             mbar_expect_tx(&B.wfull[slot], KB);
             tma_load_2d(su + O_W + slot * KB, &mw, &B.wfull[slot], 32 * kb, 128 * (nb0 + i));
           }
+        }
       }
     }
   } else if (warp == 1) {
@@ -197,12 +211,29 @@ swa_mod_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mc, const __grid_cons
     for (int T = 0; T < ntT; ++T) {
       const int cb = T & 1;
       mbar_wait(&B.cfull[cb], (T >> 1) & 1);
-#pragma unroll 1
+      uint4 xb[2][4];                                                      // this thread's two k-block rows, bf16
+      if (XB16) {
+#pragma unroll
+        for (int kk = 0; kk < 2; ++kk)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) xb[kk][q] = lds128(su + O_C + cb * CT + (2 * h + kk) * KB + sw64(r, q));
+        named_bar_sync(2, 256);                                              // every bf16 row read before any fp32 row is written
+      }
+#pragma unroll
       for (int kk = 0; kk < 2; ++kk) {
         const uint32_t base = su + O_C + cb * CT + (2 * h + kk) * KB;
         uint4 x[8];
+        if (XB16) {
 #pragma unroll
-        for (int k = 0; k < 8; ++k) x[k] = lds128(base + sw128(r, k));
+          for (int q = 0; q < 4; ++q) {
+          const uint4 v = xb[kk][q];
+          x[2 * q] = make_uint4(__float_as_uint(bf16lo(v.x)), __float_as_uint(bf16hi(v.x)), __float_as_uint(bf16lo(v.y)), __float_as_uint(bf16hi(v.y)));
+          x[2 * q + 1] = make_uint4(__float_as_uint(bf16lo(v.z)), __float_as_uint(bf16hi(v.z)), __float_as_uint(bf16lo(v.w)), __float_as_uint(bf16hi(v.w)));
+          }
+        } else {
+#pragma unroll
+          for (int k = 0; k < 8; ++k) x[k] = lds128(base + sw128(r, k));
+        }
 #pragma unroll
         for (int k = 0; k < 8; ++k)
           x[k] = make_uint4(tf32r(silu32(__uint_as_float(x[k].x))), tf32r(silu32(__uint_as_float(x[k].y))),

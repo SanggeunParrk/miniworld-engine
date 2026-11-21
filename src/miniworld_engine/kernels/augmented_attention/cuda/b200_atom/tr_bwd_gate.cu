@@ -1,0 +1,450 @@
+
+#if defined(ATOM_HOPPER)
+#include "sm100.cuh"
+using namespace atom90;
+// Same B200 recomputation boundary: transition output gate, dH GEMM,
+// expand A/B recompute and SwiGLU gradients. Bias sums are reduced separately
+// in fixed row order, rather than nondeterministic cross-CTA atomics.
+extern "C" __global__ __launch_bounds__(160, 1)
+void atom_tr_bwd_sm90(const __nv_bfloat16* dy,const __nv_bfloat16* ts,
+ const __nv_bfloat16* mod,const __nv_bfloat16* x2,
+ const __grid_constant__ CUtensorMap mwu,const __grid_constant__ CUtensorMap mwst,
+ __nv_bfloat16* dt,__nv_bfloat16* hh,__nv_bfloat16* dab,__nv_bfloat16* dmod,int M) {
+ extern __shared__ __align__(1024) uint8_t sm[];
+ constexpr int NST=3,TD=98304,TA=TD+16384,BAR=TA+16384;
+ uint64_t* bars=reinterpret_cast<uint64_t*>(sm+BAR);
+ int t=threadIdx.x,l=t&31,w=t>>5,nt=(M+63)/64;
+ int tiles=blockIdx.x<nt?(nt-int(blockIdx.x)+int(gridDim.x)-1)/int(gridDim.x):0;
+ if(t==0){for(int j=0;j<6;++j)init(bars+j);init_fence();}__syncthreads();
+ if(t>=128) {
+   if(t==128)for(int it=0;it<tiles;++it)for(int p=0;p<6;++p){
+     int g=it*6+p,st=g%NST,half=p/3,type=p%3;
+     if(g>=NST)bwait(bars+NST+st,((g/NST)-1)&1);
+     expect(bars+st,32768);
+     const CUtensorMap* wm=type==0?&mwst:&mwu;
+     int nr=128*half+(type==2?256:0);
+     for(int k=0;k<2;++k)load2(sm+st*32768+k*16384,wm,bars+st,k*64,nr);
+   }
+   return;
+ }
+ const int r0=w*16+l/4,cq=2*(l&3);
+ for(int it=0;it<tiles;++it){
+   int row=64*(int(blockIdx.x)+it*int(gridDim.x));
+   uint32_t fd[32],fx[32];
+   #pragma unroll
+   for(int i=0;i<16;++i)
+     #pragma unroll
+     for(int rr=0;rr<2;++rr){
+       int r=row+r0+8*rr,c=8*i+cq;float2 dyv=make_float2(0,0),tv=dyv,st=dyv;
+       uint32_t xv=0;
+       if(r<M){
+         dyv=unpack(*reinterpret_cast<const uint32_t*>(dy+size_t(r)*128+c));
+         tv=unpack(*reinterpret_cast<const uint32_t*>(ts+size_t(r)*128+c));
+         st=unpack(*reinterpret_cast<const uint32_t*>(mod+size_t(r)*768+640+c));
+         xv=*reinterpret_cast<const uint32_t*>(x2+size_t(r)*128+c);
+       }
+       uint32_t dv=pack(dyv.x*st.x,dyv.y*st.y);
+       uint32_t ds=pack(rn(rn(dyv.x*tv.x)*rn(1.f-st.x))*st.x,rn(rn(dyv.y*tv.y)*rn(1.f-st.y))*st.y);
+       fd[4*(i>>1)+2*(i&1)+rr]=dv;fx[4*(i>>1)+2*(i&1)+rr]=xv;
+       if(r<M){*reinterpret_cast<uint32_t*>(dt+size_t(r)*128+c)=dv;*reinterpret_cast<uint32_t*>(dmod+size_t(r)*768+640+c)=ds;}
+     }
+   #pragma unroll 1
+   for(int p=0;p<6;++p){
+     int g=it*6+p,st=g%NST,half=p/3,type=p%3;bwait(bars+st,(g/NST)&1);
+     uint32_t input[32];
+     #pragma unroll
+     for(int j=0;j<32;++j)input[j]=type==0?fd[j]:fx[j];
+     float acc[64];matmul128(input,sm+st*32768,acc);
+     bsync();if(t==0)asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"::"r"(sa(bars+NST+st)):"memory");
+     #pragma unroll
+     for(int i=0;i<16;++i)
+       #pragma unroll
+       for(int rr=0;rr<2;++rr){
+         int pos=off(r0+8*rr,8*i+cq);
+         if(type<2)*reinterpret_cast<uint32_t*>(sm+(type==0?TD:TA)+pos)=pack(acc[4*i+2*rr],acc[4*i+2*rr+1]);
+         else{
+           float2 av=unpack(*reinterpret_cast<uint32_t*>(sm+TA+pos)),dh=unpack(*reinterpret_cast<uint32_t*>(sm+TD+pos));
+           float b0=rn(acc[4*i+2*rr]),b1=rn(acc[4*i+2*rr+1]);
+           float s0=sig(av.x),s1=sig(av.y),sl0=rn(av.x*s0),sl1=rn(av.y*s1);
+           float da0=rn(dh.x*b0)*s0*(1.f+av.x*(1.f-s0));
+           float da1=rn(dh.y*b1)*s1*(1.f+av.y*(1.f-s1));
+           int r=row+r0+8*rr,c=half*128+8*i+cq;
+           if(r<M){
+             *reinterpret_cast<uint32_t*>(hh+size_t(r)*256+c)=pack(sl0*b0,sl1*b1);
+             *reinterpret_cast<uint32_t*>(dab+size_t(r)*512+c)=pack(da0,da1);
+             *reinterpret_cast<uint32_t*>(dab+size_t(r)*512+256+c)=pack(dh.x*sl0,dh.y*sl1);
+           }
+         }
+       }
+   }
+ }
+}
+
+extern "C" __global__ void atom_pack_transpose_sm90(const __nv_bfloat16* wc,const __nv_bfloat16* wp,
+ const __nv_bfloat16* wo,const __nv_bfloat16* wu,const __nv_bfloat16* wd,
+ __nv_bfloat16* wct,__nv_bfloat16* wpt,__nv_bfloat16* wot,__nv_bfloat16* wut,__nv_bfloat16* wdt) {
+ __shared__ __nv_bfloat16 tile[32][33];
+ int b=blockIdx.x,rows,cols;const __nv_bfloat16* src;__nv_bfloat16* dst;
+ if(b<96){rows=768;cols=128;src=wc;dst=wct;}
+ else if(b<160){b-=96;rows=512;cols=128;src=wp;dst=wpt;}
+ else if(b<176){b-=160;rows=128;cols=128;src=wo;dst=wot;}
+ else if(b<240){b-=176;rows=512;cols=128;src=wu;dst=wut;}
+ else {b-=240;rows=128;cols=256;src=wd;dst=wdt;}
+ int r0=(b/(cols/32))*32,c0=(b%(cols/32))*32,x=threadIdx.x,y=threadIdx.y;
+ #pragma unroll
+ for(int j=0;j<32;j+=8)tile[y+j][x]=src[(r0+y+j)*cols+c0+x];
+ __syncthreads();
+ #pragma unroll
+ for(int j=0;j<32;j+=8)dst[(c0+y+j)*rows+r0+x]=tile[x][y+j];
+}
+
+#else
+// tr_bwd_gate.cu — first part of the atom DiT block's ConditionedTransition backward on sm_100a (the bf16 module's autograd rounding
+// points; forward y = rn(st t), t = rn(h Ws^T), h = rn(rn(silu(a)) b), a | b = rn(x2 Wa^T) | rn(x2 Wb^T)):
+//   dt = rn(dy st);  dst = rn(dy t);  dts = rn(rn(dst rn(1 - st)) st)                       (st = rn(sigmoid(ts)) from cond_fwd's mod)
+//   a, b = recomputed from x2;  dh = rn(dt Ws);  sa = sigmoid(a);  sl = rn(a sa);  h = rn(sl b)
+//   ds = rn(dh b);  db = rn(dh sl);  da = rn(ds sa (1 + a (1 - sa)))
+//   -> DT [M, 128], HH [M, 256] (the dWs = DT^T HH operands), DAB = [da | db] [M, 512] (dWu = DAB^T x2, and tr_bwd_dx's input),
+//      dts into dmod's block 5, and d bts = sum_rows dts (per-thread register sums, one red.add per CTA and channel at the end).
+// Structure (post_fwd.cu's frame): transposed 16-row tiles; Wa | Wb (512 x 128) and Ws^T (256 x 128) in TMEM as bf16 A operands (384
+// columns); the two compute warpgroups take alternate tiles, each with its own TMA producer warp, MMA warp, NSW-stage ring and 48
+// accumulator columns, reused by the two 128-hidden chunks: a^T | b^T | dh^T (M = 128 hidden, N = 16 rows).
+// Threads: dt / dts eight threads per row (16 channels, 16-B shared loads, bf16x2 math); the SwiGLU backward in the mma-fragment layout
+// (tcgen05.ld 16x256b), h / da / db stored transposed by stmatrix.trans into row-major tiles; the leader thread issues the TMA stores.
+// Stage (40 KB): dy -> dt | t -> dts | st | x2 | h [16][256] | dab [16][512].
+// TMEM: Wa (hidden 0-127, 128-255) 0 / 64, Wb 128 / 192, Ws^T 256 / 320; warpgroup w's accumulators at 384 + 64 w: a^T 0, b^T 16, dh^T 32.
+// mrows: the rows of the conditioning tables (mod, mkv): M, or N when the samples share one conditioning (table row = r % mrows); then the
+// tiles go in the sample-inner order and the tables' gradient is summed over the samples here into PART [N / 16][J][16][C] (tsum.cuh)
+// SPDX-License-Identifier: Apache-2.0
+#include "sm100.cuh"
+#include "tsum.cuh"
+using namespace s100;
+
+#ifndef DIAG
+#define DIAG 0                             // 1: no compute math (handshakes only), 2: no MMAs
+#endif
+#ifndef UP
+#define UP 0                               // Boltz-2 (B200 variant path, 2026-11-17): the up-gated SwiGLU h = rn(rn(rn(silu(a)) b) u), u = rn(x2 Wu^T):
+#endif                                     //   sb = rn(sl b);  dsb = rn(dh u);  du = rn(dh sb);  ds = rn(dsb b);  db = rn(dsb sl);  da as below from ds
+                                           // Wu [256][128] stays in shared memory (mwup: no TMEM columns left), a fourth accumulator u^T at 48;
+                                           // DAB = [da | db | du] [M, 768]; one input stage per warpgroup (the stage is 48 KB, Wu 64 KB)
+#ifndef NSW
+#define NSW (UP ? 1 : 2)                   // input stages per warpgroup
+#endif
+#ifndef RMS
+#define RMS 0                              // ESMFold2: the transition's gate st is raw (W silu(c)): dts = rn(dy t), no sigmoid backward
+#endif
+constexpr int R = 16;
+constexpr int KB = R * 128;                                                // [16 rows][64] bf16, SW128 (2 KB)
+constexpr int T_ = 2 * KB;                                                 // [16][128] row-major tile (4 KB)
+constexpr int O_DY = 0, O_T = T_, O_ST = 2 * T_, O_X2 = 3 * T_, O_H = 4 * T_, O_DAB = 6 * T_, STG = (UP ? 12 : 10) * T_;
+constexpr int O_WU = 2 * NSW * STG;                                        // UP: Wu, hidden chunk hc at 32768 hc (K-major SW128, two 64-wide K blocks);
+constexpr int O_WEND = O_WU + (UP ? 65536 : 0);                            // under the weights' staging units: loaded once they are in TMEM
+constexpr int O_BAR = (O_WEND > 6 * 32768 ? O_WEND : 6 * 32768), O_RED = O_BAR + 512;
+constexpr int SMEM = O_RED + 8 * 128 * 4;
+static_assert(SMEM <= 232448, "shared memory");
+constexpr uint32_t T_WU = 0, T_WS = 256, T_ACC = 384;
+constexpr uint32_t I_16 = idesc_bf16(128, 16);
+
+struct Bars {
+  uint64_t wfull, wfree, wufull, infull[2][NSW], infree[2][NSW], stfull[2][NSW], afull[2], abfull[2], abfree[2];
+  uint32_t tmem;
+};
+DEVI uint32_t bmul2(uint32_t a, uint32_t b) { uint32_t r; asm("mul.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
+DEVI uint32_t bsub2(uint32_t a, uint32_t b) { uint32_t r; asm("sub.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
+// torch's bf16 sigmoid backward, every step rounded: rn(rn(g rn(1 - y)) y)
+DEVI uint32_t sig_bwd2(uint32_t g, uint32_t y) { return bmul2(bmul2(g, bsub2(0x3F803F80u, y)), y); }
+DEVI void tmem_ld16x256b2(uint32_t taddr, uint32_t (&r)[8]) {
+  asm volatile("tcgen05.ld.sync.aligned.16x256b.x2.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5]), "=r"(r[6]), "=r"(r[7]) : "r"(taddr));
+}
+DEVI void stsm4t(uint32_t a, const uint32_t (&r)[4]) {
+  asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};" :: "r"(a), "r"(r[0]), "r"(r[1]), "r"(r[2]), "r"(r[3]) : "memory");
+}
+
+extern "C" __global__ void __launch_bounds__(384, 1)
+atom_tr_bwd_gate_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_constant__ CUtensorMap mt, const __grid_constant__ CUtensorMap mmod,
+                       const __grid_constant__ CUtensorMap mx2, const __grid_constant__ CUtensorMap mwu, const __grid_constant__ CUtensorMap mwst,
+                       const __grid_constant__ CUtensorMap mdt, const __grid_constant__ CUtensorMap mdmod, const __grid_constant__ CUtensorMap mh,
+                       const __grid_constant__ CUtensorMap mdab, float* __restrict__ DBTS, int ntile, int mrows, float* __restrict__ PART, int J
+#if UP
+                       , const __grid_constant__ CUtensorMap mwup
+#endif
+                       ) {
+  extern __shared__ __align__(1024) uint8_t sm[];
+  const uint32_t su = smem_u32(sm);
+  Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int ntT = (int)blockIdx.x < ntile ? (ntile - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
+  auto stage = [&](int w, int i) { return su + (uint32_t)((w * NSW + i % NSW) * STG); };
+
+  if (tid == 0) {
+    mbar_init(&B.wfull, 1); mbar_init(&B.wfree, 1); mbar_init(&B.wufull, 1);
+    for (int w = 0; w < 2; ++w) {
+      for (int s = 0; s < NSW; ++s) { mbar_init(&B.infull[w][s], 1); mbar_init(&B.infree[w][s], 1); mbar_init(&B.stfull[w][s], 1); }
+      mbar_init(&B.afull[w], 1); mbar_init(&B.abfull[w], 1); mbar_init(&B.abfree[w], 4);
+    }
+    fence_barrier_init();
+  }
+  if (warp == 1) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
+  tc_fence_before();
+  __syncthreads();
+  tc_fence_after();
+  const uint32_t tmem = B.tmem;
+  pdl_launch();
+
+  if (warp == 0 || warp == 2) {
+    // ------------------------------------------------------------------------------------------------ TMA producers (warp 0: warpgroup 0, 2: 1)
+    const int w = warp >> 1;
+    TileSched S;
+    S.init(w, ntT, ntile, mrows);
+    if (lane == 0) {
+      if (w == 0) {
+        // Wa | Wb (units 0-3: rows 128 u ..) and Ws^T (units 4-5: hidden 128 (u - 4) ..) as K-major SW64 [128][32] atoms
+        mbar_expect_tx(&B.wfull, 6 * 32768);
+        for (int i = 0; i < 24; ++i) {
+          const int u = i >> 2, ka = i & 3;
+          tma_load_2d(su + u * 32768 + ka * 8192, u < 4 ? &mwu : &mwst, &B.wfull, 32 * ka, u < 4 ? 128 * u : 128 * (u - 4));
+        }
+      }
+      mbar_wait(&B.wfree, 0);
+#if UP
+      if (w == 0) {                                                        // Wu into its resident place (the staging units are in TMEM now)
+        mbar_expect_tx(&B.wufull, 65536);
+        for (int hu = 0; hu < 2; ++hu)
+          for (int kb = 0; kb < 2; ++kb) tma_load_2d(su + O_WU + hu * 32768 + kb * 16384, &mwup, &B.wufull, 64 * kb, 128 * hu);
+      }
+#endif
+      pdl_wait();                                                          // dy comes from the previous kernels
+      for (int i = 0; i < S.cnt; ++i) {
+        const int s = i % NSW, r0 = S.row(i);
+        if (i >= NSW) mbar_wait(&B.infree[w][s], ((i / NSW) - 1) & 1);
+        const uint32_t st = stage(w, i);
+        uint64_t* bar = &B.infull[w][s];
+        mbar_expect_tx(bar, 8 * KB);
+        for (int kb = 0; kb < 2; ++kb) {
+          tma_load_2d(st + O_DY + kb * KB, &mdy, bar, 64 * kb, r0);
+          tma_load_2d(st + O_T + kb * KB, &mt, bar, 64 * kb, r0);
+          tma_load_2d(st + O_ST + kb * KB, &mmod, bar, 640 + 64 * kb, r0 % mrows);   // st: the forward mod's block 5
+          tma_load_2d(st + O_X2 + kb * KB, &mx2, bar, 64 * kb, r0);
+        }
+      }
+    } else if (lane == 1) {
+      // the TMA stores of this warpgroup's tiles: issued (and waited for) off the compute threads, which go on to the next tile's row work
+      pdl_wait();
+      for (int i = 0; i < S.cnt; ++i) {
+        const int s = i % NSW, r0 = S.row(i);
+        const uint32_t st = stage(w, i);
+        mbar_wait(&B.stfull[w][s], (i / NSW) & 1);
+        for (int kb = 0; kb < 2; ++kb) {
+          tma_store_2d(&mdt, st + O_DY + kb * KB, 64 * kb, r0);
+          if (!S.A) tma_store_2d(&mdmod, st + O_T + kb * KB, 640 + 64 * kb, r0);   // dts -> dmod block 5 (shared: summed here)
+        }
+        for (int kb = 0; kb < 4; ++kb) tma_store_2d(&mh, st + O_H + kb * KB, 64 * kb, r0);
+        for (int kb = 0; kb < (UP ? 12 : 8); ++kb) tma_store_2d(&mdab, st + O_DAB + kb * KB, 64 * kb, r0);
+        tma_store_commit();
+        tma_store_wait_read0();                                            // (a short wait: the stores only have to read the stage)
+        mbar_arrive(&B.infree[w][s]);                                      // this tile's stage is free for tile i + NSW
+      }
+      tma_store_wait0();
+    }
+  } else if (warp == 1 || warp == 3) {
+    // ------------------------------------------------------------------------------------------------ MMA issuers (warp 1: warpgroup 0, 3: 1)
+    const int w = warp >> 1;
+    TileSched S;
+    S.init(w, ntT, ntile, mrows);
+    if (w == 0) {
+      mbar_wait(&B.wfull, 0);
+      tc_fence_after();
+      if (elect_one()) {
+        for (int u = 0; u < 6; ++u)
+#pragma unroll
+          for (int ks = 0; ks < 8; ++ks) tmem_cp_128x256b(tmem + 64 * u + ks * 8, desc_sw64(su + u * 32768 + (ks >> 1) * 8192) + (uint64_t)((ks & 1) * 2));
+        tc_commit(&B.wfree);
+      }
+      __syncwarp();
+    }
+    mbar_wait(&B.wfree, 0);
+#if UP
+    mbar_wait(&B.wufull, 0);
+#endif
+    const uint32_t ta = tmem + T_ACC + 64 * w;
+    auto bdesc = [&](uint32_t base, int ks) { return desc_k128(base + (ks >> 2) * KB) + (uint64_t)((ks & 3) * 2); };
+    for (int i = 0; i < S.cnt; ++i) {
+      const uint32_t st = stage(w, i);
+      mbar_wait(&B.afull[w], i & 1);                                       // dt written over dy; x2 landed
+      for (int hc = 0; hc < 2; ++hc) {
+        const int k = 2 * i + hc;                                          // accumulator use
+        if (k > 0) mbar_wait(&B.abfree[w], (k - 1) & 1);
+        tc_fence_after();
+        if (elect_one()) {
+#pragma unroll
+          for (int ks = 0; ks < (DIAG == 2 ? 0 : 8); ++ks) {
+            umma_ts(ta, tmem + T_WU + 64 * hc + ks * 8, bdesc(st + O_X2, ks), I_16, ks > 0 ? 1u : 0u);
+            umma_ts(ta + 16, tmem + T_WU + 64 * (2 + hc) + ks * 8, bdesc(st + O_X2, ks), I_16, ks > 0 ? 1u : 0u);
+            umma_ts(ta + 32, tmem + T_WS + 64 * hc + ks * 8, bdesc(st + O_DY, ks), I_16, ks > 0 ? 1u : 0u);
+#if UP
+            umma_ss(ta + 48, desc_k128(su + O_WU + hc * 32768 + (ks >> 2) * 16384) + (uint64_t)((ks & 3) * 2), bdesc(st + O_X2, ks), I_16,
+                    ks > 0 ? 1u : 0u);
+#endif
+          }
+          tc_commit(&B.abfull[w]);
+        }
+        __syncwarp();
+      }
+    }
+  } else {
+    // ------------------------------------------------------------------------------------------------ compute warpgroups
+    const int w = (warp - 4) >> 2, qw = warp & 3, ct = tid & 127;
+    TileSched S;
+    S.init(w, ntT, ntile, mrows);
+    const uint32_t lb = (uint32_t)qw * 32;
+    const bool leader = qw == 0 && lane == 0;
+    const uint32_t ta = tmem + T_ACC + 64 * w;
+    const int ar = ct >> 3, ak = ct & 7;
+    const uint32_t aoff = sw128((uint32_t)ar, (uint32_t)ak);
+    float tacc[2][8];                                          // shared conditioning: this thread's table-gradient sums (fp32)
+#pragma unroll
+    for (int b = 0; b < 2; ++b)
+#pragma unroll
+      for (int e = 0; e < 8; ++e) tacc[b][e] = 0.f;
+    const uint32_t fj = (uint32_t)(8 * ((lane >> 3) & 1) + (lane & 7)), fh = (uint32_t)(lane >> 4);
+    auto faddr = [&](uint32_t base, uint32_t ch) { return base + (ch >> 6) * KB + fj * 128u + ((((ch & 63u) >> 3) ^ (fj & 7u)) << 4); };
+    float bsum[16];                                                        // d bts over this thread's rows: channels 8 ak + e, 64 + 8 ak + e
+#pragma unroll
+    for (int e = 0; e < 16; ++e) bsum[e] = 0.f;
+    for (int i = 0; i < S.cnt; ++i) {
+      const int s = i % NSW, r0 = S.row(i);
+      const uint32_t st = stage(w, i);
+      mbar_wait(&B.infull[w][s], (i / NSW) & 1);
+      // ---- A: dt = rn(dy st) over dy, dts = rn(rn(dy t) (1 - st) st) over t
+#pragma unroll
+      for (int kb = 0; kb < (DIAG == 1 ? 0 : 2); ++kb) {
+        const uint4 dy = lds128(st + O_DY + kb * KB + aoff), t = lds128(st + O_T + kb * KB + aoff), sg = lds128(st + O_ST + kb * KB + aoff);
+        const uint32_t d4[4] = {dy.x, dy.y, dy.z, dy.w}, t4[4] = {t.x, t.y, t.z, t.w}, s4[4] = {sg.x, sg.y, sg.z, sg.w};
+        uint32_t dt[4], ds[4];
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+          dt[e] = bmul2(d4[e], s4[e]);
+          const uint32_t dst = bmul2(d4[e], t4[e]);
+          ds[e] = RMS ? dst : sig_bwd2(dst, s4[e]);
+          bsum[8 * kb + 2 * e] += bf16lo(ds[e]);
+          bsum[8 * kb + 2 * e + 1] += bf16hi(ds[e]);
+        }
+        sts128(st + O_DY + kb * KB + aoff, make_uint4(dt[0], dt[1], dt[2], dt[3]));
+        sts128(st + O_T + kb * KB + aoff, make_uint4(ds[0], ds[1], ds[2], ds[3]));
+      }
+      fence_proxy_async();
+      named_bar_sync(1 + w, 128);
+      if (leader) mbar_arrive(&B.afull[w]);
+      // ---- B: the SwiGLU backward for hidden 128 hc + lb + 16 L + .., rows in pairs
+#pragma unroll 1
+      for (int hc = 0; hc < 2; ++hc) {
+        mbar_wait(&B.abfull[w], (2 * i + hc) & 1);
+        tc_fence_after();
+        uint32_t va[2][8], vb[2][8], vd[2][8];
+#if UP
+        uint32_t vu[2][8];
+#endif
+#pragma unroll
+        for (int L = 0; L < 2; ++L) {
+          const uint32_t tl = ta + ((lb + 16 * L) << 16);
+          tmem_ld16x256b2(tl, va[L]); tmem_ld16x256b2(tl + 16, vb[L]); tmem_ld16x256b2(tl + 32, vd[L]);
+#if UP
+          tmem_ld16x256b2(tl + 48, vu[L]);
+#endif
+        }
+        tmem_wait_ld();
+        tc_fence_before();
+        __syncwarp();
+        if (lane == 0) mbar_arrive(&B.abfree[w]);
+#pragma unroll
+        for (int L = 0; L < (DIAG == 1 ? 0 : 2); ++L) {
+          uint32_t rh[4], ra[4], rb[4];
+#if UP
+          uint32_t ru[4];
+#endif
+#pragma unroll
+          for (int mi = 0; mi < 4; ++mi) {                                 // rows 2 (lane % 4) + {0, 1} (+ 8): a bf16 pair each
+            const int k = 4 * (mi & 1) + 2 * (mi >> 1);
+            const uint32_t A2 = pack_bf16(__uint_as_float(va[L][k]), __uint_as_float(va[L][k + 1]));
+            const uint32_t B2 = pack_bf16(__uint_as_float(vb[L][k]), __uint_as_float(vb[L][k + 1]));
+#if UP
+            const uint32_t DH2 = pack_bf16(__uint_as_float(vd[L][k]), __uint_as_float(vd[L][k + 1]));
+            const uint32_t U2 = pack_bf16(__uint_as_float(vu[L][k]), __uint_as_float(vu[L][k + 1]));
+            const uint32_t D2 = bmul2(DH2, U2);                            // dsb = rn(dh u): the gradient at sb = rn(sl b)
+#else
+            const uint32_t D2 = pack_bf16(__uint_as_float(vd[L][k]), __uint_as_float(vd[L][k + 1]));
+#endif
+            const f2 a = mk2u(A2 << 16, A2 & 0xFFFF0000u);
+            const f2 e = mul2(a, mk2(-1.4426950408889634f, -1.4426950408889634f));
+            const f2 d = add2(mk2(ex2f(lo2(e)), ex2f(hi2(e))), mk2(1.f, 1.f));
+            const f2 sa = mk2(rcpf(lo2(d)), rcpf(hi2(d)));                  // sigmoid(a)
+            const f2 sl = mul2(a, sa);
+            const uint32_t SL2 = pack_bf16(lo2(sl), hi2(sl));
+            const uint32_t DS2 = bmul2(D2, B2);                            // ds = rn(dh b)
+#if UP
+            const uint32_t SB2 = bmul2(SL2, B2);
+            rh[mi] = bmul2(SB2, U2);                                       // h = rn(rn(sl b) u)
+            ru[mi] = bmul2(DH2, SB2);                                      // du = rn(dh sb)
+#else
+            rh[mi] = bmul2(SL2, B2);                                       // h = rn(sl b)
+#endif
+            rb[mi] = bmul2(D2, SL2);                                       // db = rn(dh sl)
+            const f2 ds = mk2u(DS2 << 16, DS2 & 0xFFFF0000u);
+            const f2 w = fma2(a, add2(neg2(sa), mk2(1.f, 1.f)), mk2(1.f, 1.f));   // 1 + a (1 - sa)
+            const f2 da = mul2(mul2(ds, sa), w);                           // da = rn(ds sa (1 + a (1 - sa)))
+            ra[mi] = pack_bf16(lo2(da), hi2(da));
+          }
+          const uint32_t hid = 128 * hc + lb + 16 * L + 8 * fh;
+          stsm4t(faddr(st + O_H, hid), rh);
+          stsm4t(faddr(st + O_DAB, hid), ra);
+          stsm4t(faddr(st + O_DAB, 256 + hid), rb);
+#if UP
+          stsm4t(faddr(st + O_DAB, 512 + hid), ru);
+#endif
+        }
+      }
+      fence_proxy_async();
+      named_bar_sync(1 + w, 128);
+      if (S.A) {                                                       // shared conditioning: add this tile's table gradient
+        tsum_add8(tacc[0], lds128(st + O_T + aoff));
+        tsum_add8(tacc[1], lds128(st + O_T + KB + aoff));
+        if (S.run_end(i)) {                                            // the end of a table tile's run: its partial out
+          float* pp = PART + (S.slot(i, J) * 16 + ar) * 128 + 8 * ak;
+          tsum_put8(pp + 64 * 0, tacc[0]);
+#pragma unroll
+          for (int e = 0; e < 8; ++e) tacc[0][e] = 0.f;
+          tsum_put8(pp + 64 * 1, tacc[1]);
+#pragma unroll
+          for (int e = 0; e < 8; ++e) tacc[1][e] = 0.f;
+        }
+        named_bar_sync(1 + w, 128);                                    // every thread has read the stage
+      }
+      if (leader) mbar_arrive(&B.stfull[w][i % NSW]);                      // the store thread of this warpgroup takes it from here
+    }
+    // d bts: the 16 threads of each chunk column (8 per row x 16 rows share ak) -> shared sums -> one red.add per channel
+    float* red = reinterpret_cast<float*>(sm + O_RED);                      // [8 warps][128 channels]
+    const int cw = warp - 4;
+    for (int c = lane; c < 128; c += 32) red[cw * 128 + c] = 0.f;
+    __syncwarp();
+#pragma unroll
+    for (int e = 0; e < 16; ++e) {
+      float v = bsum[e];
+      v += __shfl_xor_sync(~0u, v, 8); v += __shfl_xor_sync(~0u, v, 16);   // the warp's four rows
+      if ((lane >> 3) == 0) red[cw * 128 + (e < 8 ? 8 * ak + e : 64 + 8 * ak + (e - 8))] = v;
+    }
+    named_bar_sync(3, 256);
+    if (ct < 128 && w == 0) {
+      float v = 0.f;
+#pragma unroll
+      for (int k = 0; k < 8; ++k) v += red[k * 128 + ct];
+      atomicAdd(DBTS + (size_t)blockIdx.x * COLS_STRIDE + ct, v);  // this CTA's row of the column partials (deterministic)
+    }
+  }
+  tc_fence_before();
+  __syncthreads();
+  if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }
+}
+
+#endif // ATOM_HOPPER

@@ -1,0 +1,46 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b1s.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b1s.cu
+index 6e740ec33..42a2d578c 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b1s.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b1s.cu
+@@ -723,6 +723,9 @@ static_assert(NT <= 4 && NX <= 4 && NX >= 2 && NT >= 2, "ring depths");
+ #ifndef B1U_PDL
+ #define B1U_PDL 1
+ #endif
++#ifndef B1U_SPLIT
++#define B1U_SPLIT 1   // b1u / b1v loader: tri loads before the x-slot wait (S90)
++#endif
+ #ifndef B1U_ML
+ #define B1U_ML 1   // b1u / b1v loaders: the tile's loads issued by four lanes (2026-11-17 part 5: D64 hidden 128 L128 0.0687 -> 0.0667, D64 L256 0.0954 -> 0.0934 ms; the rest level)
+ #endif
+@@ -829,17 +832,27 @@ DEV void b1u_body(const CUtensorMap& mxn, const CUtensorMap& mtri, const CUtenso
+     // (2026-11-17 part 5) the tile's four loads (tri halves, xn, dy) issued by four lanes (one thread issues ~one TMA per 600 clk)
+     for (int i = 0; i < n_local; ++i) {
+       const int row0 = (cta + G * i) * TOK, ts = i % NT, xs = i % NX;
++      uint8_t* pt = sm + t_addr(i);
++      uint8_t* px = sm + x_addr(i);
+       if (lane == 0) {
+         if (i >= NT) PW(0, mbar_wait(&B.t_free[ts], ((i / NT) - 1) & 1));
+         mbar_expect_tx(&B.t_full[ts], TT);
+-        if (i >= NX) PW(1, mbar_wait(&B.x_free[xs], ((i / NX) - 1) & 1));
+-        mbar_expect_tx(&B.x_full[xs], XS);
++        if (!B1U_SPLIT) {
++          if (i >= NX) PW(1, mbar_wait(&B.x_free[xs], ((i / NX) - 1) & 1));
++          mbar_expect_tx(&B.x_full[xs], XS);
++        }
+       }
+       __syncwarp();
+-      uint8_t* pt = sm + t_addr(i);
+-      uint8_t* px = sm + x_addr(i);
+       if (SMJ != 0 && B1U_T1_ON) { if (lane == 0) tri_load1(pt, &mtri, &B.t_full[ts], row0, a.n2, EVICT_FIRST); }
+       else if (lane < 2) tri_load<SMJ>(pt + lane * (TT / 2), &mtri, &B.t_full[ts], row0 + 64 * lane, a.n2, EVICT_FIRST);
++      if (B1U_SPLIT) {   // S90: the tile's tri loads go out BEFORE the wait for the x slot (tile i - NX) to be free
++        __syncwarp();
++        if (lane == 0) {
++          if (i >= NX) PW(1, mbar_wait(&B.x_free[xs], ((i / NX) - 1) & 1));
++          mbar_expect_tx(&B.x_full[xs], XS);
++        }
++        __syncwarp();
++      }
+       if (lane == 2) tma_load_2d(px, &mxn, &B.x_full[xs], 0, row0, EVICT_NORMAL);
+       else if (lane == 3) tma_load_2d(px + XT, &mdy, &B.x_full[xs], 0, row0, EVICT_NORMAL);
+       __syncwarp();

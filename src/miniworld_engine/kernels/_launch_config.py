@@ -39,6 +39,16 @@ _TUNE, _WON, _WARNED = [False], {}, set()
 PRETUNE: list[typing.Any] = [None]
 
 
+def untracked(write, t: torch.Tensor, *args):
+    """``write(*args)`` (an in-place write of ``t``: a tuning reset / restore) without bumping ``t``'s autograd version counter. A tensor the
+    tuner zeroes or restores may be one autograd saved for the backward (a layer input, a view of it): the restored values are the
+    caller's, so the step must not see it as modified in place (it raised "modified by an inplace operation" while tuning a backward)."""
+    from torch.autograd.grad_mode import _unsafe_preserve_version_counter
+
+    with _unsafe_preserve_version_counter(t):
+        write(*args)
+
+
 def tune(on: bool = True) -> bool:
     """The one switch for in-process tuning of the stored top-K. Returns the previous state."""
     prev, _TUNE[0] = _TUNE[0], bool(on)
@@ -167,10 +177,10 @@ class Configured:
 
             def call():
                 for n in self.reset_to_zero:
-                    every[n].zero_()
+                    untracked(every[n].zero_, every[n])
                 launch(c)
                 for n, t in saved.items():
-                    every[n].copy_(t)
+                    untracked(every[n].copy_, every[n], t)
 
             return _bench(call)
 

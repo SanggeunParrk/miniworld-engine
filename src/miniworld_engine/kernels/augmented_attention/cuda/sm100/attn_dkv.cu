@@ -12,9 +12,16 @@
 #include "sm100.cuh"
 using namespace s100;
 
+#ifndef DET
+#define DET 0                            // 1: dK / dV accumulated in block order: the issuer of block G waits for the other issuer's
+#endif                                   // accumulating MMAs of block G - 1 (bitwise repeatable; AttentionPairBias builds it, 2026-11-17)
 #ifndef PP
 #define PP 1                             // FA4-style ping-pong: the two dS warpgroups take turns on the exponentials (named bars 3, 4)
 #endif
+#ifndef BIASNT
+#define BIASNT 0                         // 1 (AttentionPairBias, 2026-11-17 part 6): the bias read AS STORED [H, L(query), L(key)] -- a TMA box of
+#endif                                   // 128 keys x 64 queries, no swizzle; thread r reads its key column (16-bit loads, a warp 64 contiguous bytes)
+                                         // -- instead of the transposed copy: no transpose launch. A = 1 only.
 #ifndef TST
 #define TST 1                            // dK / dV leave through smem-staged TMA bulk stores (coalesced) instead of per-row st.v4
 #endif
@@ -54,6 +61,9 @@ __device__ unsigned long long g_tr[8][256];
 #ifndef PCNT
 #define PCNT 0
 #endif
+#ifndef PDLW
+#define PDLW 0                           // 1 (AttentionPairBias v20, 2026-11-17): launched as a programmatic dependent -- griddepcontrol.wait after the
+#endif                                   // prologue (barriers, TMEM), then its own dependents may be scheduled
 // 2^x for a pair on the FMA pipe (as attn_fwd2.cu): degree-3 fit of 2^f, f = x - round(x), exponent added to the bit pattern
 DEVI f2 ex2_poly2(f2 x) {
   const float x0 = fminf(fmaxf(lo2(x), -126.f), 126.f), x1 = fminf(fmaxf(hi2(x), -126.f), 126.f);
@@ -119,6 +129,10 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+#if PDLW
+  pdl_wait();
+  pdl_launch();
+#endif
 
   if (warp < 4) setmaxnreg_dec<56>();
   if (warp == 0) {
@@ -141,7 +155,11 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           TR(0, G);
           tma_load_2d(st, &mq, &B.full[s], qcol, a * L + n * BQ);
           tma_load_2d(st + TQ, &mdo, &B.full[s], qcol, a * L + n * BQ);
+#if BIASNT
+          tma_load_2d(st + 2 * TQ, &mbt, &B.full[s], k0, head * L + n * BQ);
+#else
           tma_load_2d(st + 2 * TQ, &mbt, &B.full[s], n * BQ, head * L + k0);
+#endif
           bulk_g2s(st + 2 * TQ + TBT, LSE + li0 + n * BQ, BQ * 4, &B.full[s]);
           bulk_g2s(st + 2 * TQ + TBT + 512, DD + li0 + n * BQ, BQ * 4, &B.full[s]);
           TR(0, G);
@@ -187,6 +205,7 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         else __nanosleep(20);
       }
       if (n <= 1 && li >= 1) mbar_wait(&B.acc_free, (li - 1) & 1);          // the previous item's dK / dV have been read out (and zeroed)
+      if (DET && G >= 1) mbar_wait(&B.ds_free[1 - w], ((G - 1) >> 1) & 1); // block G - 1's dV / dK MMAs (the other issuer) are done
       tc_fence_after();
       const uint32_t st = su + O_ST + s * STB;
       const uint64_t dq = desc_mn128(st, 8192), ddo = desc_mn128(st + TQ, 8192);
@@ -239,8 +258,20 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         uint32_t pp[16], pd[16];
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
+#if BIASNT
+          uint32_t bb[4];
+#pragma unroll
+          for (int e = 0; e < 4; ++e) {
+            const int c0 = cc * 32 + 2 * (q * 4 + e);
+            uint16_t lo, hi;
+            asm volatile("ld.shared.u16 %0, [%1];" : "=h"(lo) : "r"(sb + (uint32_t)(c0 * KM + r) * 2) : "memory");
+            asm volatile("ld.shared.u16 %0, [%1];" : "=h"(hi) : "r"(sb + (uint32_t)((c0 + 1) * KM + r) * 2) : "memory");
+            bb[e] = (uint32_t)lo | ((uint32_t)hi << 16);
+          }
+#else
           const uint4 bw = lds128(sb + sw128(r, cc * 4 + q));
           const uint32_t bb[4] = {bw.x, bw.y, bw.z, bw.w};
+#endif
 #pragma unroll
           for (int e = 0; e < 4; ++e) {
             const int j = q * 4 + e, col = cc * 32 + 2 * j;

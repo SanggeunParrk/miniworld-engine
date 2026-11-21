@@ -1,0 +1,389 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tri_l128_bwd_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tri_l128_bwd_sm100.cu
+new file mode 100644
+index 000000000..abfd7f991
+--- /dev/null
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tri_l128_bwd_sm100.cu
+@@ -0,0 +1,383 @@
++// TriangleAttention core backward at L = 128 on B200 (sm_100a): the key side, the query side and the dbias sum in ONE cooperative launch.
++//
++// At L128 the chain triattn_bwd_kv -> triattn_bwd_q -> triattn_db_slabs is three one-tile-a-CTA launches (~10.8 + 10.4 + 2.9 us at
++// d_pair 128 x 4 heads) for ~3 us of steady work.  Here a CTA owns R consecutive pair rows of one (sample, head) -- B H (128 / R) <= SMs
++// CTAs, all co-resident -- and per pair row (one 128-query x 128-key tile, head dim 32):
++//   query side (warps 2-5, a query a thread): S = Q K^T, dP = dO V^T (TMEM); P = 2^(S scl + bias log2e - lse), dS = P o (dP - Delta);
++//            dS (fp32) added into the CTA's dbias rows (shared memory), dS bf16 over dP; dQ = scale dS K (ts MMA) -> global;
++//   key side (warps 6-9, a key a thread): S^T = K Q^T, dP^T = V dO^T; P^T, dS^T the same way from bias^T (transposed once a CTA);
++//            P^T / dS^T bf16 over S^T / dP^T; dV = P^T dO, dK = scale dS^T Q (ts MMAs) -> global.
++// Then the CTA stores its dbias rows (its slab: the sum over its R pair rows, in row order), meets the others at a grid barrier, and sums
++// the slabs of R query rows of its (sample, head) in slab order (two halves a float4, half 0 + half 1): deterministic.
++// Warps: 0 TMA, 1 tcgen05 issue, 2-5 query side, 6-9 key side.  TMEM: query S | dP (256 columns), key S^T | dP^T (256); the bf16 P / dS
++// take the first 64 columns of their buffer, dQ / dV / dK accumulate in columns 64-95 of S / S^T / dP^T.
++#include <torch/extension.h>
++#include "sm100.cuh"
++using namespace sm100;
++
++namespace {
++constexpr float L2E = 1.4426950408889634f;
++constexpr int BM = 128, D = 32, QT = BM * D, BT = BM * BM;
++constexpr int THREADS = 576;
++constexpr int COL_QS = 0, COL_QP = 128, COL_KS = 256, COL_KP = 384;
++constexpr uint32_t ID_S = idesc_bf16(128, 128, 0, 0), ID_O = idesc_bf16(128, 32, 0, 1);
++// shared memory: tiles [2 stages][Q | K | V | dO] (64B-swizzled [128][32]), bias, bias^T ([2][128][64] 128B-swizzled bf16), dbias rows
++// fp32 [128][128] (16-byte groups xor-swizzled by row & 7)
++constexpr int SM_TILES = 2 * 4 * QT * 2, SM_BIAS = BT * 2, SM_ACC = BT * 4;
++constexpr int SM_LD = 2 * 2 * BM * 4;   // [2 stages][lse | delta][128] fp32
++constexpr int SMEM = 1024 + SM_TILES + 2 * SM_BIAS + SM_ACC + SM_LD + 256;
++static_assert(SMEM <= 232448, "smem");
++
++#ifndef L1B_A
++#define L1B_A 0
++#endif
++#ifndef L1B_B
++#define L1B_B 0
++#endif
++#ifndef L1B_C
++#define L1B_C 0
++#endif
++#ifndef L1B_TL
++#define L1B_TL 0
++#endif
++#if L1B_TL
++__device__ unsigned long long g_tl[80];
++__device__ __forceinline__ unsigned long long gtime() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
++#define TLM(i) do { if (blockIdx.x == 0 && (i) < 80) g_tl[i] = gtime(); } while (0)
++#else
++#define TLM(i)
++#endif
++__device__ __forceinline__ float ex2f(float x) { float y; asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x)); return y; }
++__device__ __forceinline__ void bulk_load(uint32_t dst, const void* src, uint32_t bytes, uint64_t* bar) {
++  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];\n"
++               :: "r"(dst), "l"(src), "r"(bytes), "r"(sa(bar)) : "memory");
++}
++__device__ __forceinline__ int boff(int row, int col) { return (col >> 6) * BM * 64 + row * 64 + ((((col & 63) >> 3) ^ (row & 7)) << 3) + (col & 7); }
++
++__global__ void __launch_bounds__(THREADS, 1) tri_l128_bwd_sm100(
++    const int H, const int R, const int L, const float scl, const float scale,
++    const __grid_constant__ CUtensorMap qmap, const __grid_constant__ CUtensorMap kmap,   // [rows][H 32] bf16, box (32, 128), 64B swizzle
++    const __grid_constant__ CUtensorMap vmap, const __grid_constant__ CUtensorMap dmap,
++    const __grid_constant__ CUtensorMap bmap,                                             // bias [B H L][L] bf16, box (64, 128), 128B swizzle
++    const float* __restrict__ LSE, const float* __restrict__ DELTA,                       // [B, N, H, S]
++    __nv_bfloat16* __restrict__ DQ, __nv_bfloat16* __restrict__ DK, __nv_bfloat16* __restrict__ DV, const long ldo,   // rows at stride ldo
++    float* __restrict__ SLAB,                                                             // [B H G][128][128] fp32
++    float* __restrict__ DB,                                                               // [B, H, L, L] fp32
++    unsigned long long* __restrict__ GBAR) {
++  extern __shared__ __align__(1024) unsigned char raw[];
++  unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
++  __nv_bfloat16* sT = reinterpret_cast<__nv_bfloat16*>(smb);            // [2][4][QT]
++  __nv_bfloat16* sB = sT + 2 * 4 * QT;
++  __nv_bfloat16* sBT = sB + BT;
++  float* sAcc = reinterpret_cast<float*>(sBT + BT);
++  float* sLD = sAcc + BT;
++  uint64_t* bars = reinterpret_cast<uint64_t*>(sLD + 4 * BM);
++  uint64_t *tfull = bars, *tfree = bars + 2, *bfull = bars + 4, *sq = bars + 5, *sk = bars + 6, *dsq = bars + 7, *dsk = bars + 8;
++  uint64_t *dqd = bars + 9, *dkvd = bars + 10, *qfree = bars + 11, *kfree = bars + 12;
++  uint32_t* tslot = reinterpret_cast<uint32_t*>(bars + 13);
++  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  const int G = L / R;
++  const int cta = blockIdx.x, g = cta % G, bh = cta / G, h = bh % H, b = bh / H;
++  if (tid == 0) TLM(0);
++  if (tid == 0) {
++    for (int i = 0; i < 2; ++i) { bar_init(tfull + i, 1); bar_init(tfree + i, 1); }
++    bar_init(bfull, 1); bar_init(sq, 1); bar_init(sk, 1); bar_init(dsq, 8); bar_init(dsk, 8); bar_init(dqd, 1); bar_init(dkvd, 1);
++    bar_init(qfree, 8); bar_init(kfree, 8);
++    bar_init_fence();
++    expect_tx(bfull, BT * 2);
++    for (int hh = 0; hh < 2; ++hh) load_2d(&bmap, sB + hh * BM * 64, bfull, hh * 64, bh * L);
++  }
++  if (warp == 1) tmem_alloc(tslot, 512);
++  tc_fence_before();
++  __syncthreads();
++  tc_fence_after();
++  const uint32_t tmem = *tslot;
++  auto rowbase = [&](int i) { return ((long)b * L + (long)g * R + i) * L; };   // first kernel row of pair row g R + i
++
++  if (warp == 0) {
++    if (lane == 0) {
++      for (int i = 0; i < R; ++i) {
++        const int st = i & 1;
++        if (i >= 2) wait(tfree + st, ((i >> 1) - 1) & 1);
++        __nv_bfloat16* t = sT + st * 4 * QT;
++        expect_tx(tfull + st, 4 * QT * 2 + 2 * BM * 4);
++        const int r0 = (int)rowbase(i);
++        const long lb = (rowbase(i) / L * H + h) * (long)L;
++        bulk_load(sa(sLD + st * 2 * BM), LSE + lb, BM * 4, tfull + st);
++        bulk_load(sa(sLD + st * 2 * BM + BM), DELTA + lb, BM * 4, tfull + st);
++        load_2d(&qmap, t, tfull + st, h * D, r0);
++        load_2d(&kmap, t + QT, tfull + st, h * D, r0);
++        load_2d(&vmap, t + 2 * QT, tfull + st, h * D, r0);
++        load_2d(&dmap, t + 3 * QT, tfull + st, h * D, r0);
++      }
++    }
++  } else if (warp == 1) {
++    if (lane == 0) {
++      for (int i = 0; i < R; ++i) {
++        const int st = i & 1;
++        const __nv_bfloat16 *tq = sT + st * 4 * QT, *tk = tq + QT, *tv = tq + 2 * QT, *td = tq + 3 * QT;
++        wait(tfull + st, (i >> 1) & 1);
++        if (i > 0) wait(qfree, (i - 1) & 1);
++        tc_fence_after();
++#pragma unroll
++        for (int ks = 0; ks < 2; ++ks) mma_ss(tmem + COL_QS, desc_k64(tq + ks * 16), desc_k64(tk + ks * 16), ID_S, ks);
++#pragma unroll
++        for (int ks = 0; ks < 2; ++ks) mma_ss(tmem + COL_QP, desc_k64(td + ks * 16), desc_k64(tv + ks * 16), ID_S, ks);
++        mma_commit(sq);
++        if (i > 0) wait(kfree, (i - 1) & 1);
++        tc_fence_after();
++#pragma unroll
++        for (int ks = 0; ks < 2; ++ks) mma_ss(tmem + COL_KS, desc_k64(tk + ks * 16), desc_k64(tq + ks * 16), ID_S, ks);
++#pragma unroll
++        for (int ks = 0; ks < 2; ++ks) mma_ss(tmem + COL_KP, desc_k64(tv + ks * 16), desc_k64(td + ks * 16), ID_S, ks);
++        mma_commit(sk);
++        wait(dsq, i & 1);
++        tc_fence_after();
++#pragma unroll
++        for (int ks = 0; ks < BM / 16; ++ks)   // dQ = dS K (K [keys][32]: MN-major B)
++          mma_ts(tmem + COL_QS + 96, tmem + COL_QP + (ks >> 2) * 64 + (ks & 3) * 8, sdesc(sa(tk + ks * 16 * D), QT * 2, 512, 4), ID_O, ks ? 1u : 0u);
++        mma_commit(dqd);
++        wait(dsk, i & 1);
++        tc_fence_after();
++#pragma unroll
++        for (int ks = 0; ks < BM / 16; ++ks)   // dV = P^T dO
++          mma_ts(tmem + COL_KS + 96, tmem + COL_KS + (ks >> 2) * 64 + (ks & 3) * 8, sdesc(sa(td + ks * 16 * D), QT * 2, 512, 4), ID_O, ks ? 1u : 0u);
++#pragma unroll
++        for (int ks = 0; ks < BM / 16; ++ks)   // dK = dS^T Q
++          mma_ts(tmem + COL_KP + 96, tmem + COL_KP + (ks >> 2) * 64 + (ks & 3) * 8, sdesc(sa(tq + ks * 16 * D), QT * 2, 512, 4), ID_O, ks ? 1u : 0u);
++        mma_commit(dkvd);
++        mma_commit(tfree + st);
++      }
++    }
++  } else {
++    // ---- bias^T once a CTA, by the key side's warps (8 x 8 blocks transposed in registers); the query side starts at once
++    wait(bfull, 0);
++    if (warp >= 10) {
++      for (int blk = tid - 320; blk < 256; blk += 256) {
++        const int q0 = (blk >> 4) * 8, k0 = (blk & 15) * 8;
++        uint32_t m[8][4];
++#pragma unroll
++        for (int r = 0; r < 8; ++r) {
++          const uint4 u = *reinterpret_cast<const uint4*>(sB + boff(q0 + r, k0));
++          m[r][0] = u.x; m[r][1] = u.y; m[r][2] = u.z; m[r][3] = u.w;
++        }
++#pragma unroll
++        for (int c = 0; c < 8; ++c) {          // row k0 + c of bias^T = column c of the block
++          uint32_t w[4];
++#pragma unroll
++          for (int r2 = 0; r2 < 4; ++r2) {
++            const uint32_t a = m[2 * r2][c >> 1], b = m[2 * r2 + 1][c >> 1];
++            w[r2] = (c & 1) ? __byte_perm(a, b, 0x7632) : __byte_perm(a, b, 0x5410);
++          }
++          *reinterpret_cast<uint4*>(sBT + boff(k0 + c, q0)) = make_uint4(w[0], w[1], w[2], w[3]);
++        }
++      }
++      named_sync(1, 256);
++    }
++    if (tid == 64) TLM(1);
++    const bool qside = warp < 10;
++    const int half = (warp - (qside ? 2 : 10)) >> 2;      // the 64 columns (keys or queries) this warp takes
++    const int row = (warp & 3) * 32 + lane;                 // query (query side) or key (key side) = TMEM lane
++    const __nv_bfloat16* bsrc = qside ? sB : sBT;
++    const float2 sc2 = make_float2(scl, scl), l2 = make_float2(L2E, L2E);
++    float* accrow = sAcc + row * BM;
++    for (int i = 0; i < R; ++i) {
++      const long r0 = rowbase(i);
++      const float* sl = sLD + (i & 1) * 2 * BM;                // this row's lse | delta (landed with its tiles: implied by sq / sk)
++      const uint32_t sb = tmem_at(tmem + (qside ? COL_QS : COL_KS), (warp & 3) * 32, 0);
++      const uint32_t pb = tmem_at(tmem + (qside ? COL_QP : COL_KP), (warp & 3) * 32, 0);
++      wait(qside ? sq : sk, i & 1);
++      tc_fence_after();
++      const int tb = (qside ? 4 : 40) + 4 * i;
++      if (lane == 0 && (warp == 2 || warp == 10) && i < 8) TLM(tb);
++      float nl = 0.f, dl = 0.f;
++      if (qside) {
++        const float ls = sl[row];
++        nl = ls > -INFINITY ? -ls : -INFINITY;
++        dl = sl[BM + row];
++      }
++      float s[2][16], p[2][16];
++      tmem_ld16(sb + half * 64, s[0]);
++      tmem_ld16(pb + half * 64, p[0]);
++#pragma unroll
++      for (int cc = 0; cc < 4; ++cc) {
++        const int c = half * 4 + cc;            // 16-column sub-chunks, the next one's TMEM loads in flight
++        const __nv_bfloat16* bp = bsrc + (c >> 2) * BM * 64 + row * 64;
++        const uint4 b0 = *reinterpret_cast<const uint4*>(bp + ((((c & 3) * 2) ^ (row & 7)) << 3));
++        const uint4 b1 = *reinterpret_cast<const uint4*>(bp + ((((c & 3) * 2 + 1) ^ (row & 7)) << 3));
++        const uint32_t bw[8] = {b0.x, b0.y, b0.z, b0.w, b1.x, b1.y, b1.z, b1.w};
++        tmem_wait_ld();
++        if (cc + 1 < 4) { tmem_ld16(sb + (c + 1) * 16, s[(c + 1) & 1]); tmem_ld16(pb + (c + 1) * 16, p[(c + 1) & 1]); }
++        const float* sc = s[c & 1];
++        const float* pc = p[c & 1];
++        uint32_t pk[8], dk[8];
++        float ds[16];
++#pragma unroll
++        for (int k2 = 0; k2 < 8; ++k2) {
++          const int i2 = 2 * k2;
++          const float2 xx = fma2(bf2f(bw[k2]), l2, mul2(make_float2(sc[i2], sc[i2 + 1]), sc2));
++          float2 nn, dd;
++          if (qside) { nn = make_float2(nl, nl); dd = make_float2(dl, dl); }
++          else {
++            const float2 lv = *reinterpret_cast<const float2*>(sl + c * 16 + i2);
++            dd = *reinterpret_cast<const float2*>(sl + BM + c * 16 + i2);
++            nn = make_float2(lv.x > -INFINITY ? -lv.x : -INFINITY, lv.y > -INFINITY ? -lv.y : -INFINITY);
++          }
++          const float2 pv = L1B_A ? make_float2(xx.x + nn.x, xx.y + nn.y) : make_float2(ex2f(xx.x + nn.x), ex2f(xx.y + nn.y));
++          ds[i2] = pv.x * (pc[i2] - dd.x); ds[i2 + 1] = pv.y * (pc[i2 + 1] - dd.y);
++          pk[k2] = pack2(pv.x, pv.y);
++          dk[k2] = pack2(ds[i2], ds[i2 + 1]);
++        }
++        if (!L1B_C) tmem_st8(pb + half * 64 + cc * 8, dk);  // dS (dS^T) over the half's dP (dP^T) columns already read
++        if (qside && !L1B_B) {
++#pragma unroll
++          for (int j = 0; j < 4; ++j) {         // dbias rows: dS added in pair-row order
++            float4* a = reinterpret_cast<float4*>(accrow) + ((c * 4 + j) ^ (row & 7));
++            float4 v = make_float4(ds[4 * j], ds[4 * j + 1], ds[4 * j + 2], ds[4 * j + 3]);
++            if (i > 0) { const float4 o = *a; v.x += o.x; v.y += o.y; v.z += o.z; v.w += o.w; }
++            *a = v;
++          }
++        } else if (!qside && !L1B_C) {
++          tmem_st8(sb + half * 64 + cc * 8, pk);             // P^T over S^T (dV's A operand)
++        }
++      }
++      tmem_wait_st();
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) arrive(qside ? dsq : dsk);
++      if (lane == 0 && (warp == 2 || warp == 10) && i < 8) TLM(tb + 1);
++      // ---- the MMA results of this pair row -> global (dQ for the query side; dV, dK for the key side), then release the buffers
++      wait(qside ? dqd : dkvd, i & 1);
++      tc_fence_after();
++      if (lane == 0 && (warp == 2 || warp == 10) && i < 8) TLM(tb + 2);
++      {
++        float v[32];
++        const int n = qside ? 16 : 32;
++        if (qside) tmem_ld16(sb + 96 + half * 16, v); else tmem_ld32((half ? pb : sb) + 96, v);
++        tmem_wait_ld();
++        const float f = (qside || half) ? scale : 1.f;
++        uint32_t w[16];
++#pragma unroll
++        for (int k2 = 0; k2 < 16; ++k2) w[k2] = pack2(v[2 * k2] * f, v[2 * k2 + 1] * f);
++        __nv_bfloat16* dst = qside ? DQ : half ? DK : DV;
++        uint4* pd = reinterpret_cast<uint4*>(dst + (r0 + row) * ldo + h * D + (qside ? half * 16 : 0));
++#pragma unroll
++        for (int c = 0; c < 4; ++c)
++          if (c * 8 < n) pd[c] = make_uint4(w[4 * c], w[4 * c + 1], w[4 * c + 2], w[4 * c + 3]);
++      }
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) arrive(qside ? qfree : kfree);
++      if (lane == 0 && (warp == 2 || warp == 10) && i < 8) TLM(tb + 3);
++    }
++  }
++  __syncthreads();                               // this CTA's slab: its dbias rows, coalesced
++  {
++    float4* dst = reinterpret_cast<float4*>(SLAB + (long)cta * BM * BM);
++    const float4* a = reinterpret_cast<const float4*>(sAcc);
++    for (int e = tid; e < BM * 32; e += THREADS) dst[e] = a[(e & ~31) | ((e & 31) ^ ((e >> 5) & 7))];
++  }
++  // ---- grid barrier, then the slab sum of R query rows of this (sample, head): slab order, two halves a float4
++  __threadfence();
++  __syncthreads();
++  if (tid == 0) {
++    TLM(36);
++    const unsigned long long old = atomicAdd(GBAR + gridDim.x, 1ull);
++    const unsigned long long target = (old / gridDim.x + 1) * gridDim.x;
++    unsigned long long now;
++    do { asm volatile("ld.acquire.gpu.global.u64 %0, [%1];" : "=l"(now) : "l"(GBAR + gridDim.x) : "memory"); } while (now < target);
++    TLM(37);
++  }
++  __syncthreads();
++  {
++    const int n4 = R * 32;                       // float4 of the R rows
++    const float4* sl = reinterpret_cast<const float4*>(SLAB) + (long)bh * G * BM * 32 + (long)g * R * 32;
++    float4* out = reinterpret_cast<float4*>(DB) + ((long)bh * L + (long)g * R) * 32;
++    const int half = G / 2;
++    for (int base = 0; base < 2 * n4; base += THREADS & ~1) {
++      const int e = base + tid, j = e >> 1, hf = e & 1;
++      float4 s = make_float4(0.f, 0.f, 0.f, 0.f);
++      if (e < 2 * n4 && tid < (THREADS & ~1)) {
++        const float4* p = sl + (long)(hf * half) * BM * 32 + j;
++#pragma unroll 16
++        for (int k = 0; k < half; ++k) { const float4 v = __ldcg(p + (long)k * BM * 32); s.x += v.x; s.y += v.y; s.z += v.z; s.w += v.w; }
++      }
++      const float4 o = make_float4(__shfl_xor_sync(0xffffffffu, s.x, 1), __shfl_xor_sync(0xffffffffu, s.y, 1),
++                                   __shfl_xor_sync(0xffffffffu, s.z, 1), __shfl_xor_sync(0xffffffffu, s.w, 1));
++      if (e < 2 * n4 && hf == 0 && tid < (THREADS & ~1)) out[j] = make_float4(s.x + o.x, s.y + o.y, s.z + o.z, s.w + o.w);
++    }
++  }
++  if (tid == 0) TLM(38);
++  tc_fence_before();
++  __syncthreads();
++  if (warp == 1) tmem_dealloc(tmem, 512);
++}
++}  // namespace
++
++// the pair rows a CTA (a power of two): the fewest with B H (L / R) <= SMs (every CTA co-resident: the grid barrier), 0 = does not fit
++inline int l128_rows(long B, long H, long L, int sms) {
++  for (int r = 2; r <= (int)L; r *= 2)
++    if (B * H * (L / r) <= sms) return r;
++  return 0;
++}
++
++// q, k, v, dout [B, L, L, H, 32] bf16 (L = 128); bias [B, H, L, L] bf16; lse / delta fp32 [B, L, H, L] -> (dq, dk, dv, dbias fp32 [B, H, L, L]).
++// dq_out / dk_out / dv_out: optional [rows, H 32] views at a 16-byte-multiple row stride (as triattn_bwd), else fresh.
++std::vector<torch::Tensor> tri_l128_bwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor dout, torch::Tensor lse,
++                                        torch::Tensor delta, double scale, torch::Tensor dq_out, torch::Tensor dk_out, torch::Tensor dv_out,
++                                        torch::Tensor db_out) {
++  TORCH_CHECK(q.dim() == 5 && q.size(4) == D && q.scalar_type() == torch::kBFloat16, "q: [B, L, L, H, 32] bf16");
++  const long B = q.size(0), L = q.size(1), H = q.size(3);
++  TORCH_CHECK(L == 128 && q.size(2) == L, "tri_l128_bwd: L = 128");
++  for (const auto* t : {&q, &k, &v, &dout}) TORCH_CHECK(t->is_contiguous() && t->sizes() == q.sizes() && t->scalar_type() == torch::kBFloat16, "q, k, v, dout");
++  TORCH_CHECK(bias.scalar_type() == torch::kBFloat16 && bias.is_contiguous() && bias.numel() == B * H * L * L, "bias [B, H, L, L] bf16");
++  for (const auto* t : {&lse, &delta}) TORCH_CHECK(t->scalar_type() == torch::kFloat32 && t->is_contiguous() && t->numel() == B * L * H * L, "lse / delta");
++  const int sms = num_sms(q.device().index());
++  const int R = l128_rows(B, H, L, sms);
++  TORCH_CHECK(R > 0, "tri_l128_bwd: B H > SMs");
++  const long G = L / R, rows = B * L * L, cols = H * D;
++  const bool given = dq_out.defined() && dq_out.numel() > 0;
++  auto dq = given ? dq_out : torch::empty_like(q), dk = given ? dk_out : torch::empty_like(q), dv = given ? dv_out : torch::empty_like(q);
++  long ldo = cols;
++  if (given) {
++    ldo = dq.stride(0);
++    for (const auto* t : {&dq, &dk, &dv})
++      TORCH_CHECK(t->scalar_type() == torch::kBFloat16 && t->dim() == 2 && t->size(0) == rows && t->size(1) == cols && t->stride(1) == 1 && t->stride(0) == ldo &&
++                  ldo % 8 == 0, "dq / dk / dv outputs: [rows, H*32] bf16, one 16-byte-multiple row stride");
++  }
++  auto db = (db_out.defined() && db_out.numel() == B * H * L * L) ? db_out.view({B, H, L, L}) : torch::empty({B, H, L, L}, q.options().dtype(torch::kFloat32));
++  auto slab = torch::empty({B * H * G, BM, BM}, q.options().dtype(torch::kFloat32));
++  auto m2 = [&](const torch::Tensor& t, const char* what) { return make_map<2>(t.data_ptr(), {(uint64_t)cols, (uint64_t)rows}, {(uint64_t)cols}, {D, 128}, CU_TENSOR_MAP_SWIZZLE_64B, what); };
++  CUtensorMap qm = m2(q, "q"), km = m2(k, "k"), vm = m2(v, "v"), dm = m2(dout, "dout");
++  CUtensorMap bm = make_map<2>(bias.data_ptr(), {(uint64_t)L, (uint64_t)(B * H * L)}, {(uint64_t)L}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "bias");
++  static bool attr = false;
++  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_l128_bwd_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
++  static torch::Tensor ctr[64];
++  torch::Tensor& gbar = ctr[q.device().index()];
++  if (!gbar.defined()) gbar = torch::zeros({256}, q.options().dtype(torch::kInt64));
++  auto* gp = reinterpret_cast<unsigned long long*>(gbar.data_ptr<int64_t>());
++  cudaLaunchConfig_t cfg = {};
++  cudaLaunchAttribute at[1];
++  at[0].id = cudaLaunchAttributeCooperative;
++  at[0].val.cooperative = 1;
++  cfg.gridDim = dim3((unsigned)(B * H * G)); cfg.blockDim = dim3(THREADS); cfg.dynamicSmemBytes = SMEM; cfg.stream = at::cuda::getCurrentCUDAStream();
++  cfg.attrs = at; cfg.numAttrs = 1;
++  auto bp = [](torch::Tensor& t) { return reinterpret_cast<__nv_bfloat16*>(t.data_ptr<at::BFloat16>()); };
++  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, tri_l128_bwd_sm100, (int)H, R, (int)L, (float)(scale * L2E), (float)scale, qm, km, vm, dm, bm,
++                                    lse.data_ptr<float>(), delta.data_ptr<float>(), bp(dq), bp(dk), bp(dv), ldo, slab.data_ptr<float>(),
++                                    db.data_ptr<float>(), gp));
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++  return {dq, dk, dv, db};
++}
++
++#if L1B_TL
++torch::Tensor tri_l128_bwd_tl() { auto t = torch::empty({80}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), g_tl, sizeof(g_tl))); return t; }
++#endif
++PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
++#if L1B_TL
++  m.def("tri_l128_bwd_tl", &tri_l128_bwd_tl);
++#endif
++  m.def("tri_l128_bwd", &tri_l128_bwd, "sm100 triangle-attention core backward at L = 128 (head dim 32): dq, dk, dv, dbias in one cooperative launch",
++        py::arg("q"), py::arg("k"), py::arg("v"), py::arg("bias"), py::arg("dout"), py::arg("lse"), py::arg("delta"), py::arg("scale"),
++        py::arg("dq_out"), py::arg("dk_out"), py::arg("dv_out"), py::arg("db_out"));
++}

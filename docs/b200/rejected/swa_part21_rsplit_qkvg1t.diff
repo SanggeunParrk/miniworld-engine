@@ -1,0 +1,132 @@
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/__init__.py b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/__init__.py
+index 66c20ba4d..b17e17562 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/__init__.py
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/__init__.py
+@@ -62,6 +62,9 @@ CUBINS = {
+     "qkvg_fwd1t": ("qkvg_fwd1t", ()),
+     # round 3 part 8 (master training of one sample): the qkvg stage with its saves, the modulation kernel beside it (LATE_TRIGGER / LATE_WAIT)
+     "qkvg_fwd1t_tr": ("qkvg_fwd1t", ("-DSAVE=1", "-DLATE_WAIT=1")),
++    # r3-swa part 21: the pair builds' epilogue split by rows (RSPLIT: both warpgroups on both projections of the rank)
++    "qkvg_fwd1t_rs": ("qkvg_fwd1t", ("-DRSPLIT=1",)),
++    "qkvg_fwd1t_tr_rs": ("qkvg_fwd1t", ("-DSAVE=1", "-DLATE_WAIT=1", "-DRSPLIT=1")),
+     "mod_fwd_lt": ("mod_fwd", ("-DLATE_TRIGGER=1",)),
+     "ffn_fwd1t": ("ffn_fwd1t", ("-DPDL_EARLY=0",)),
+     # many tiles per CTA (inference on more rows than one tile per SM): the 1t design as a loop over the CTA's tiles -- the modulation
+@@ -1179,6 +1182,8 @@ def _map_w64(w, n):
+ 
+ #: B200 (2026-11-18, round 3 part 12): qkvg_fwd1t on two CTAs per tile where 2 x tiles fit the SMs (rank r: projections r, r + 2)
+ PAIR1T = __import__("os").environ.get("SWA_PAIR1T", "1") == "1"
++#: r3-swa part 21 (development switch): the pair build's epilogue split by rows over both warpgroups (qkvg_fwd1t.cu RSPLIT)
++RSPLIT1T = __import__("os").environ.get("SWA_RSPLIT1T", "1") == "1"
+ 
+ 
+ class QkvgFwd1t:
+@@ -1454,8 +1459,9 @@ class _Kernels:
+         self.save32k = _load_swa_sm100_kernel("wpack_bf16", "swa_save32_sm100", 0, pdl=PDL)
+         self.save32lw = _load_swa_sm100_kernel("wpack_bf16", "swa_save32_lw_sm100", 0, pdl=True)
+         self.wpackh = _load_swa_sm100_kernel("wpack_bf16", "swa_wpack_hybrid_sm100", 0)
+-        self.qkvg1t, self.ffn1t = QkvgFwd1t(), FfnFwd1t()
+-        self.qkvg1t_tr, self.modf_lt = QkvgFwd1t("qkvg_fwd1t_tr"), ModFwd("mod_fwd_lt")
++        rs = "_rs" if RSPLIT1T else ""
++        self.qkvg1t, self.ffn1t = QkvgFwd1t("qkvg_fwd1t" + rs), FfnFwd1t()
++        self.qkvg1t_tr, self.modf_lt = QkvgFwd1t("qkvg_fwd1t_tr" + rs), ModFwd("mod_fwd_lt")
+         self.qkvg3, self.ffn3 = QkvgFwd3(), FfnFwd3()
+         self.gattn = GattnFwd(split_cubin="gattn_fwd_s", csplit_cubin="gattn_fwd_c")
+         self.gattn32 = GattnFwd("gattn_fwd32", split_cubin="gattn_fwd32_s", f32io=F32IO_MODE, csplit_cubin="gattn_fwd32_c")
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/qkvg_fwd1t.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/qkvg_fwd1t.cu
+index 3059123e4..ddb4a220d 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/qkvg_fwd1t.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/qkvg_fwd1t.cu
+@@ -25,6 +25,10 @@ using namespace s100;
+ #define LATE_WAIT 0   // 1: no wait before the input loads -- the kernel before (mod_fwd LATE_TRIGGER) let this one start only after its own wait,
+                       // so every input is final; the stores still wait (this kernel ends after the modulation kernel beside it)
+ #endif
++#ifndef RSPLIT
++#define RSPLIT 0      // 1 (r3-swa part 21): pair builds' epilogue by rows -- warpgroup wg takes rows 16 wg .. 16 wg + 15 of BOTH projections of
++                      // the rank (Q | K with the head RMS + RoPE, then V | G) instead of one projection each (Q | K's pass was the long one)
++#endif
+ #ifndef IN_FIRST
+ #define IN_FIRST 1                         // the tile inputs before Wmod in the TMA queue (0: Wmod first, before the wait for the previous kernel)
+ #endif
+@@ -69,6 +73,17 @@ DEVI float rscatter32(float (&v)[32], int lane) {
+   { const bool up = lane & 1; const float k = up ? v[1] : v[0], s = up ? v[0] : v[1]; v[0] = k + __shfl_xor_sync(~0u, s, 1); }
+   return v[0];
+ }
++// 16 values per lane: lanes l and l ^ 16 get the 32-lane sum of v[l & 15]
++DEVI float rscatter16(float (&v)[16], int lane) {
++#pragma unroll
++  for (int i = 0; i < 8; ++i) { const bool up = lane & 8; const float k = up ? v[i + 8] : v[i], s = up ? v[i] : v[i + 8]; v[i] = k + __shfl_xor_sync(~0u, s, 8); }
++#pragma unroll
++  for (int i = 0; i < 4; ++i) { const bool up = lane & 4; const float k = up ? v[i + 4] : v[i], s = up ? v[i] : v[i + 4]; v[i] = k + __shfl_xor_sync(~0u, s, 4); }
++#pragma unroll
++  for (int i = 0; i < 2; ++i) { const bool up = lane & 2; const float k = up ? v[i + 2] : v[i], s = up ? v[i] : v[i + 2]; v[i] = k + __shfl_xor_sync(~0u, s, 2); }
++  { const bool up = lane & 1; const float k = up ? v[1] : v[0], s = up ? v[0] : v[1]; v[0] = k + __shfl_xor_sync(~0u, s, 1); }
++  return v[0] + __shfl_xor_sync(~0u, v[0], 16);
++}
+ 
+ // mq: q [C, S, N, 1] box (64, 32, 1, 1) SW128; mw: [Wq; Wk; Wv; Wg] [C, 4C] box (32, 128) SW64; mwm: Wmod [C, 6C] box (32, 128) SW64;
+ // mc: c [C, N S] box (64, 32) SW128; mcos / msin: [16, N S] fp32 box (16, 32); mQ / mK / mV: head-major 5-D box (32, 32, 1, 1, 1) SW64;
+@@ -246,8 +261,62 @@ swa_qkvg_fwd1t_sm100(const __grid_constant__ CUtensorMap mq, const __grid_consta
+     tc_fence_after();
+     const int dd = lane & 15;
+     const uint32_t sw_l = (uint32_t)(lane & 7) * 2, ck = (uint32_t)lane >> 3;
++#if RSPLIT
++    if (pair) {
++#pragma unroll 1
++      for (int pp = 0; pp < 2; ++pp) {
++        const int p = rank + 2 * pp;                                       // Q | K, then V | G: rows 16 wg .. 16 wg + 15 of each
++        const int j0 = 16 * wg;
++        uint32_t av[16];
++        tmem_ld16(tmem + (lb << 16) + T_ACC + 32 * p + (uint32_t)j0, av);
++        tmem_wait_ld();
++        if (p < 2) {
++          if (SAVE) {
++            const uint32_t sb = su + (p == 0 ? O_PQ : O_PK) + cofs;
++#pragma unroll
++            for (int jj = 0; jj < 16; ++jj) { const int j = j0 + jj; sts_bf16(sb + (uint32_t)j * 128u + xo[j & 7], __uint_as_float(av[jj])); }
++          }
++          float v[16];
++#pragma unroll
++          for (int jj = 0; jj < 16; ++jj) { const float y = rnb(__uint_as_float(av[jj])); v[jj] = y * y; }
++          const float ss = rscatter16(v, lane);
++          if (lane < 16) rrv[(wg * 4 + qw) * 32 + lane] = rsqrtf(ss * (1.f / D) + qk_eps);
++          __syncwarp();
++          const uint32_t hb = su + (p == 0 ? O_HQ : O_HK) + (uint32_t)qw * 2048u + sw_l;
++#pragma unroll
++          for (int j8 = 0; j8 < 2; ++j8) {
++            float cs[8], sn[8], rr[8];
++#pragma unroll
++            for (int e = 0; e < 8; ++e) {
++              const int jj = 8 * j8 + e, at = j0 + jj;
++              rr[e] = rrv[(wg * 4 + qw) * 32 + jj];
++              cs[e] = *reinterpret_cast<const float*>(sm + O_CS + at * 64 + dd * 4);
++              sn[e] = *reinterpret_cast<const float*>(sm + O_SN + at * 64 + dd * 4);
++            }
++#pragma unroll
++            for (int e = 0; e < 8; ++e) {
++              const int jj = 8 * j8 + e, j = j0 + jj;
++              const float yn = rnb(rnb(__uint_as_float(av[jj])) * rr[e]);
++              const float pr = __shfl_xor_sync(~0u, yn, 16);
++              const float z = lane < 16 ? yn * cs[e] - pr * sn[e] : yn * cs[e] + pr * sn[e];
++              sts_bf16(hb + (uint32_t)j * 64u + ((ck ^ (((uint32_t)j >> 1) & 3u)) << 4), z);
++            }
++          }
++          __syncwarp();
++        } else if (p == 2) {
++          const uint32_t hb = su + O_HV + (uint32_t)qw * 2048u + sw_l;
++#pragma unroll
++          for (int jj = 0; jj < 16; ++jj) { const int j = j0 + jj; sts_bf16(hb + (uint32_t)j * 64u + ((ck ^ (((uint32_t)j >> 1) & 3u)) << 4), __uint_as_float(av[jj])); }
++        } else {
++          const uint32_t gb = su + O_G + cofs;
++#pragma unroll
++          for (int jj = 0; jj < 16; ++jj) { const int j = j0 + jj; sts_bf16(gb + (uint32_t)j * 128u + xo[j & 7], __uint_as_float(av[jj])); }
++        }
++      }
++    }
++#endif
+ #pragma unroll 1
+-    for (int pp = 0; pp < 2 - pair; ++pp) {
++    for (int pp = 0; pp < ((RSPLIT && pair) ? 0 : 2 - pair); ++pp) {
+       const int p = pair ? rank + 2 * wg : wg + 2 * pp;                   // wg 0: Q (0), V (2); wg 1: K (1), G (3) (pair: rank r -> r, r + 2)
+       const uint32_t tacc = tmem + (lb << 16) + T_ACC + 32 * p;
+       uint32_t av[32];

@@ -938,13 +938,19 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_output: torch.Tensor):
+        return TritonAugmentedAttentionFunction._backward(ctx, grad_output, None)
+
+    @staticmethod
+    def _backward(ctx, grad_output, head_major):
+        """``head_major``: how dbias is handed back -- None: the card's default (``_head_major_dbias``: the head-major view on the A100 /
+        H100, the contiguous (B, L, L, H) copy elsewhere); True (``TritonAugmentedAttentionHeadMajor``): the head-major view on any card."""
         (dy,) = grad_output
         q, k, v, bias, mask, o, m = ctx.saved_tensors
         if dy.dtype != q.dtype:
             dy = dy.to(q.dtype)
 
         A, B, L, H, _ = q.shape
-        head_major = _head_major_dbias(q.device)
+        head_major = _head_major_dbias(q.device) if head_major is None else bool(head_major)
         if A * B * H * L * L * 4 > _SPLIT_BIAS_BUDGET_BYTES:
             dq, dk, dv, dbias = _aa_bwd_chunked(dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(L))
         else:
@@ -960,6 +966,16 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
         return dq, dk, dv, dbias, None  # mask takes no gradient
 
 
+class TritonAugmentedAttentionHeadMajor(TritonAugmentedAttentionFunction):
+    """The same op with dbias handed back as the head-major view on every card: the B200 token DiT blocks' Triton backend (2026-11-17 --
+    there the default, a sum over A = 1 and a transposing copy of the [1, H, L, L] accumulator, plus the ``to_bias`` backward on the
+    (B, L, L, H) copy, was the 3-5 % by which the fp32 training step trailed the PyTorch block; the values are the same)."""
+
+    @staticmethod
+    def backward(ctx, *grad_output: torch.Tensor):
+        return TritonAugmentedAttentionFunction._backward(ctx, grad_output, True)
+
+
 @functools.lru_cache(maxsize=None)
 def _head_major_capability(index: int) -> bool:
     return torch.cuda.get_device_capability(index) in ((8, 0), (9, 0))
@@ -971,3 +987,4 @@ def _head_major_dbias(device: torch.device) -> bool:
 
 
 triton_augmented_attention_pair_bias = TritonAugmentedAttentionFunction.apply
+triton_augmented_attention_pair_bias_head_major = TritonAugmentedAttentionHeadMajor.apply

@@ -1,0 +1,17 @@
+cases measured 106
+LADDER violations (cuda slower than rung by >2%): 0
+
+H100 1.5x misses (H100 >= 20 us, ratio > 0.667): 12
+0.743 TriangleAttention eval 128 {'d_pair': 256, 'n_head': 8, 'p_drop': 0.25, 'starting': False} 0.0491 0.066
+0.724 TriangleAttention eval 128 {'d_pair': 256, 'n_head': 8, 'p_drop': 0.25, 'starting': True} 0.047 0.0649
+0.696 TriangleAttention eval 128 {'d_pair': 384, 'n_head': 12, 'p_drop': 0.25, 'starting': False} 0.0757 0.1088
+0.694 TriangleAttention eval 2048 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 11.7632 16.9613
+0.683 TriangleAttention eval 1536 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 5.1624 7.564
+0.677 TriangleAttention eval 2048 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': True} 11.5445 17.0546
+0.677 TriangleAttention eval 1536 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': True} 5.1465 7.599
+0.674 TriangleAttention eval 2048 {'d_hidden': 128, 'd_pair': 64, 'n_head': 4, 'p_drop': 0.25, 'starting': True} 11.3542 16.8577
+0.672 TriangleAttention eval 2048 {'d_hidden': 128, 'd_pair': 64, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 11.3854 16.9506
+0.671 TriangleAttention eval 3968 {'d_pair': 384, 'n_head': 12, 'p_drop': 0.25, 'starting': True} 270.3779 403.006
+0.669 TriangleAttention eval 256 {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': False} 0.0716 0.107
+0.667 TriangleAttention eval 1536 {'d_pair': 256, 'n_head': 8, 'p_drop': 0.25, 'starting': False} 11.2918 16.9181
+('TriangleAttention', 'eval') cases 106 geomean 0.606 worst 0.743

@@ -7,6 +7,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
+#ifndef LATE_TRIGGER
+#define LATE_TRIGGER 0  // 1 (round 3 part 8): trigger the next kernel only after this one's wait -- the qkvg stage after it (qkvg_fwd1t
+                        // LATE_WAIT) then reads its own inputs without a wait and waits for this kernel once, at its end
+#endif
 
 constexpr int C = 128;
 constexpr int KB = 128 * 128;                                              // [128 rows][64] bf16 k-block
@@ -29,11 +33,12 @@ swa_mod_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constant_
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = *tptr;
-  pdl_launch();
+  if (!LATE_TRIGGER) pdl_launch();
   if (tid == 0) {
     mbar_expect_tx(full, 4 * KB);
     for (int kb = 0; kb < 2; ++kb) tma_load_2d(su + O_W + kb * KB, &mw, full, kb * 64, n0);    // weights: no dependence
     pdl_wait();                                                            // c comes from the previous kernels
+    if (LATE_TRIGGER) pdl_launch();
     for (int kb = 0; kb < 2; ++kb) tma_load_2d(su + O_C + kb * KB, &mc, full, kb * 64, r0);
   }
   mbar_wait(full, 0);

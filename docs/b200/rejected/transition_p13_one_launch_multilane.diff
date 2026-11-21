@@ -1,0 +1,489 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 339629d02..a8f6f139f 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -103,6 +103,45 @@ SX_DW_NT = (64, 128, 192)
+ #: weight-gradient tile width, None: automatic (kept for A/B runs)
+ SX_DW_NT_FORCE = None
+ 
++#: round 3 part 6: the whole small-M INFERENCE forward in one launch (sm100/widths/tsx_one.cu): one cluster of SK CTAs per row tile, CTA k
++#: the hidden slice k (the LayerNorm rows split over the cluster and exchanged in distributed shared memory; expand + SwiGLU + squeeze on
++#: the SM; the squeeze partials reduced in rank order in distributed shared memory). Builds: cluster sizes SK (hidden slices of whole 64 units).
++SX_ONE = (4, 6, 8, 12)
++#: n -> the largest tile count the one-launch forward takes (measured against the three-launch chain: docs/b200/transition.md part 6)
++SX_ONE_TILES = {2: 16, 4: 16}
++#: SK override for A/B runs, False: the one-launch forward off, None: automatic
++SX_ONE_FORCE: "int | bool | None" = None
++
++
++def _sx_one_builds(d: int, n: int) -> tuple[int, ...]:
++    return tuple(k for k in SX_ONE if n * d // k % 64 == 0 and d // k % 16 == 0)
++
++
++@functools.lru_cache(maxsize=32)
++def _sx_one_resident(d: int, n: int, sk: int, index: int) -> int:
++    """Resident SK-CTA clusters of the one-launch forward (one wave)."""
++    return int(_load(d, n).max_active_clusters(f"d{d}n{n}_sx_one{sk}", "transition_sx_one", 384, sk))
++
++
++def sx_one_takes(cell: tuple[int, int, bool], rows: int, grad: bool) -> bool:
++    """True when the one-launch inference forward takes this (D, n, training) cell at ``rows`` (the router then skips GENERIC)."""
++    d, n, _ = cell
++    tiles = (rows + ROWS - 1) // ROWS
++    return not grad and SX_ONE_FORCE is not False and _sx(d, tiles) and (SX_ONE_FORCE is not None or tiles <= SX_ONE_TILES.get(n, 0))
++
++
++def _sx_one(d: int, n: int, tiles: int, index: int) -> "int | None":
++    """SK of the one-launch inference forward for this call (the widest cluster whose tiles fit one wave), None when it does not take it."""
++    if SX_ONE_FORCE is False:
++        return None
++    if isinstance(SX_ONE_FORCE, int) and not isinstance(SX_ONE_FORCE, bool):
++        return SX_ONE_FORCE
++    if tiles > SX_ONE_TILES.get(n, 0):
++        return None
++    builds = _sx_one_builds(d, n)
++    fit = [k for k in builds if tiles <= _sx_one_resident(d, n, k, index)]
++    return max(fit) if fit else min(builds)
++
+ 
+ def _sx(d: int, tiles: int) -> bool:
+     return d == 384 and tiles <= SMALL_FWD_TILES
+@@ -240,6 +279,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             ("sx_gdx", "widths/tsx_gdx.cu", dim),
+             *((f"sx_dxn{k}", "widths/tsx_dxn.cu", (*dim, f"-DKS={k}")) for k in (1, 2)),
+             *((f"sx_dw{nt}", "widths/tsx_dw.cu", (*dim, f"-DNT={nt}")) for nt in SX_DW_NT if d % nt == 0 and h % nt == 0),
++            *((f"sx_one{k}", "widths/tsx_one.cu", (*dim, f"-DSK={k}")) for k in _sx_one_builds(d, n)),
+         )
+         if d == 384
+         else ()
+@@ -546,6 +586,18 @@ def _fwd_launch(
+             ),
+         )
+         return out, xn, rstd, c1, ph(), ph(), ph()
++    sk = _sx_one(d, k.n, tiles, x.device.index or 0) if (not save and _sx(d, tiles)) else None
++    if sk is not None:  # the whole forward in one launch (round 3 part 6, tsx_one.cu)
++        k.run(
++            f"sx_one{sk}",
++            "transition_sx_one",
++            tiles * sk,
++            (k.tmap(wa, d, h, 64, 64), k.tmap(wb, d, h, 64, 64), k.tmap(ws, h, d, 64, 128), x, gamma, beta, out, float(eps)),
++            block=384,
++            cluster=sk,
++            pdl=True,
++        )
++        return out, x.new_empty((1, d)), rstd, c1, ph(), ph(), ph()
+     if _sx(d, tiles):  # three programmatic-dependent kernels sized for a few tiles (round sx: tsx_ln, tsx_expand, tsx_squeeze)
+         return _sx_forward(k, x, gamma, beta, wa, wb, ws, eps, save, out, rstd, c1)
+     if d == 384:  # one fused kernel (round n2, tfwd_d384.cu)
+diff --git a/src/miniworld_engine/kernels/transition/cuda/route_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/route_sm100a.py
+index 08806ed52..4031146bc 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/route_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/route_sm100a.py
+@@ -77,7 +77,7 @@ def transition_sm100a(
+     if fused_small_sm100a.available(x, wa, ws, grad):  # the small-M chains of the cells the D 384 bf16 chains do not take
+         return fused_small_sm100a.transition_small_sm100a(x, gamma, beta, wa, wb, ws, eps)
+     cell = (x.shape[-1], wa.shape[0] // x.shape[-1], grad)
+-    if cell in GENERIC and GENERIC[cell][0] <= rows <= GENERIC[cell][1]:
++    if cell in GENERIC and GENERIC[cell][0] <= rows <= GENERIC[cell][1] and not fused_wide_sm100a.sx_one_takes(cell, rows, grad):
+         tuned = ()
+     for kern, entry in tuned:
+         if kern.available(xs, wa, ws):
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_one.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_one.cu
+new file mode 100644
+index 000000000..8f6e5a8db
+--- /dev/null
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_one.cu
+@@ -0,0 +1,393 @@
++// tsx_one.cu -- the whole Transition forward at SMALL M in ONE launch (round 3 part 6): LayerNorm -> expand + SwiGLU -> squeeze +
++// residual (-DDIM=384 -DHID=<n D> -DSK=<CTAs per tile = cluster size>), sm_100a, bf16 activations (inference: nothing saved).
++// One cluster of SK CTAs per 128-row tile; CTA k owns the hidden slice [k H / SK, (k + 1) H / SK) (HS units, whole 64-unit steps):
++//  1. LayerNorm in the loader: CTA k normalises its share of the tile's rows (tsx_ln.cu's bf16 arithmetic: the same xn bits), writes
++//     them into its shared xn tile (the expand's A operand, K-major, 128-B swizzle) and copies them into every other CTA's xn tile
++//     (bulk shared::cta -> shared::cluster copies completing on the receiver's barrier): each CTA holds the whole normalised tile after
++//     1 / SK of the LayerNorm work, without a round trip through L2.
++//  2. expand: per 64-unit step c of the slice, [a | b] = xn [Wa_c; Wb_c]^T (M 128, N 128) into tensor memory;
++//  3. SwiGLU (8 epilogue warps): h = bf16(silu(a) b) (tsx_expand.cu's arithmetic) into a shared [128 x 64] K-block (two buffers);
++//  4. squeeze: each h K-block goes straight into y += h_c Ws[:, c]^T (M 128, three N 128 pieces of the [128 x 384] fp32 accumulator in
++//     tensor memory): h never leaves the SM.
++//     Every weight operand (a [Wa_c; Wb_c] K-block, a 128-row Ws piece) is one 16 KB slot of ONE ring, loaded in the order the tensor
++//     pipe takes them, so the loads run as far ahead as the ring holds whatever the products wait for (two rings, one per operand, had
++//     each load wait for its own ring's slot: 2-3 TMA latencies per expand step, measured 26 us per CTA at [1, 640, 384] n 4).
++//  5. the SK partials of y meet in distributed shared memory (bulk copies, two rounds of half the columns; see the epilogue): CTA o
++//     owns output columns [o D / SK, (o + 1) D / SK), adds the partials in rank order (deterministic), adds the residual and stores
++//     bf16 -- one rounding, as tsx_squeeze.cu.
++// The weight slots are loaded before griddepcontrol.wait (parameters / their per-parameter-version forms).
++// SPDX-License-Identifier: Apache-2.0
++#include "sm100.cuh"
++#include "tsx_store.cuh"
++using namespace s100;
++
++#ifndef DIM
++#define DIM 384
++#endif
++#ifndef HID
++#define HID (4 * DIM)
++#endif
++#ifndef SK
++#define SK 8
++#endif
++#ifndef ML
++#define ML 1                                                    // multi-lane weight producer (part 13)
++#endif
++constexpr int D_ = DIM, H_ = HID, ROWS = 128, HS = H_ / SK, NSUB = HS / 64, NKD = D_ / 64, NP = D_ / 128, WO = D_ / SK, PER = D_ / 128;
++constexpr int ACC0 = D_;                                       // the expand accumulator after the squeeze's columns
++static_assert(D_ == 384, "the 384-column squeeze accumulator and the 128-column expand accumulator fill the 512 tensor-memory columns");
++static_assert(H_ % SK == 0 && HS % 64 == 0 && WO % 16 == 0 && SK >= 2 && SK <= 16, "whole 64-unit steps per CTA, owned columns");
++constexpr int XNB = ROWS * 128, SLOT = 128 * 128, HBB = ROWS * 128;
++constexpr int O_XN = 0, O_H = NKD * XNB, O_R = O_H + 2 * HBB;
++constexpr int CAP = (232448 - 1024 - 512 - O_R) / SLOT;
++constexpr int NS = CAP < 16 ? CAP : 16;                        // ring slots
++constexpr int O_BAR = O_R + NS * SLOT, SMEM_BYTES = O_BAR + 512;
++constexpr int NRW = (ROWS / SK + 1 + 7) / 8;                // LayerNorm rows per epilogue warp (at most)
++static_assert(NS >= 4 && SMEM_BYTES <= 232448 - 1024 && ROWS * D_ * 4 <= O_BAR, "shared memory budget (the partials reuse the operands)");
++constexpr uint32_t IDN = idesc_bf16(128, 128);
++
++struct Bars {
++  uint64_t full[16], empty[16], xn_full, ln_done, acc_full, acc_empty, h_full[2], h_empty[2], out_full, red_full[2];
++  uint32_t tmem;
++};
++static_assert(sizeof(Bars) <= 512, "barrier block");
++
++DEVI int rows_lo(int k) { return k * ROWS / SK; }             // this rank's LayerNorm rows: [rows_lo(k), rows_lo(k + 1))
++// the order the tensor pipe takes the operands: expand steps, each h block's squeeze one expand step later (its SwiGLU runs meanwhile)
++template <class FE, class FQ> DEVI void schedule(FE&& e, FQ&& q) {
++#pragma unroll 1
++  for (int c = 0; c < NSUB; ++c) {
++    e(c);
++    if (c >= 1) q(c - 1);
++  }
++  q(NSUB - 1);
++}
++DEVI f2 unpack_bf16x2(uint32_t w) { return mk2u(w << 16, w & 0xffff0000u); }
++DEVI void tmem_ld8(uint32_t taddr, uint32_t (&r)[8]) {
++  asm volatile("tcgen05.ld.sync.aligned.32x32b.x8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
++               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5]), "=r"(r[6]), "=r"(r[7]) : "r"(taddr) : "memory");
++}
++#ifdef PROBE
++DEVI unsigned long long gtime() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
++#define STAMP(i) (tp[blockIdx.x * 16 + (i)] = gtime())
++#else
++#define STAMP(i) ((void)0)
++#endif
++DEVI void sts64(uint32_t a, uint32_t x, uint32_t y) { asm volatile("st.shared.v2.b32 [%0], {%1, %2};" :: "r"(a), "r"(x), "r"(y) : "memory"); }
++
++// maps: wa, wb [H][D] (box 64 x 64), ws [D][H] (box 64 x 128). x / out [M][D] bf16, gamma / beta fp32.
++extern "C" __global__ void __launch_bounds__(384, 1)
++transition_sx_one(const __grid_constant__ CUtensorMap mwa, const __grid_constant__ CUtensorMap mwb, const __grid_constant__ CUtensorMap mws,
++                  const __nv_bfloat16* __restrict__ x, const float* __restrict__ gamma, const float* __restrict__ beta,
++                  __nv_bfloat16* __restrict__ out, float eps
++#ifdef PROBE
++                  , unsigned long long* __restrict__ tp
++#endif
++                  ) {
++  extern __shared__ __align__(1024) uint8_t sm[];
++  const uint32_t su = smem_u32(sm);
++  Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
++  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  const int rank = (int)cluster_rank(), tile = blockIdx.x / SK, row0 = tile * ROWS, h0 = rank * HS;
++  const int r0 = rows_lo(rank), r1 = rows_lo(rank + 1);
++  if (tid == 0) STAMP(0);
++
++  if (tid == 0) {
++    for (int s = 0; s < NS; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
++    for (int b = 0; b < 2; ++b) { mbar_init(&B.h_full[b], 8); mbar_init(&B.h_empty[b], 1); }
++    mbar_init(&B.acc_full, 1);
++    mbar_init(&B.acc_empty, 8);
++    mbar_init(&B.ln_done, 1);
++    mbar_init(&B.out_full, 1);
++    mbar_init(&B.xn_full, 1);
++    mbar_expect_tx(&B.xn_full, (ROWS - (r1 - r0)) * D_ * 2);  // the other ranks' normalised rows
++    for (int h = 0; h < 2; ++h) { mbar_init(&B.red_full[h], 1); mbar_expect_tx(&B.red_full[h], (SK - 1) * ROWS * (WO / 2) * 4); }
++    fence_barrier_init();
++    fence_proxy_async();
++    prefetch_map(&mwa); prefetch_map(&mwb); prefetch_map(&mws);
++  }
++  if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
++  tc_fence_before();
++  __syncthreads();
++  cluster_sync_relaxed();                                      // every CTA's barriers exist before any distributed-shared copy
++  tc_fence_after();
++  const uint32_t tmem = B.tmem;
++  if (tid == 0) STAMP(1);
++
++  if (warp == 0) {
++    // ------------------------------------------------------------------------------------------ TMA producer (weights only, one ring)
++    // round 3 part 13 (-DML=1): lane s issues ring slot s (one thread issues ~one TMA per 600 clocks on this B200: the single-lane
++    // producer capped the ring at ~55 GB/s per SM); every lane walks the same schedule and takes only its own slot's loads.
++    if (ML ? lane < NS : lane == 0) {
++      int i = 0;
++      auto slot = [&]() {
++        const int s = i % NS;
++        const bool mine = !ML || s == lane;
++        if (mine) {
++          if (i >= NS) mbar_wait(&B.empty[s], ((i / NS) - 1) & 1);
++          mbar_expect_tx(&B.full[s], SLOT);
++        }
++        ++i;
++        return mine ? s : -1;
++      };
++      schedule(
++          [&](int c) {
++#pragma unroll 1
++            for (int kb = 0; kb < NKD; ++kb) {
++              const int s = slot();
++              if (s < 0) continue;
++              tma_load_2d(su + O_R + s * SLOT, &mwa, &B.full[s], kb * 64, h0 + c * 64);
++              tma_load_2d(su + O_R + s * SLOT + 64 * 128, &mwb, &B.full[s], kb * 64, h0 + c * 64);
++            }
++          },
++          [&](int j) {
++#pragma unroll 1
++            for (int p = 0; p < NP; ++p) {
++              const int s = slot();
++              if (s < 0) continue;
++              tma_load_2d(su + O_R + s * SLOT, &mws, &B.full[s], h0 + j * 64, p * 128);
++            }
++          });
++    }
++  } else if (warp == 1) {
++    // ------------------------------------------------------------------------------------------ MMA issue (converged warp)
++    mbar_wait(&B.ln_done, 0);
++    mbar_wait(&B.xn_full, 0);
++    tc_fence_after();
++    if (lane == 0) STAMP(4);
++    int i = 0;
++    auto take = [&]() {
++      const int s = i % NS;
++      mbar_wait(&B.full[s], (i / NS) & 1);
++      tc_fence_after();
++      ++i;
++      return s;
++    };
++    schedule(
++        [&](int c) {
++          if (c >= 1) { mbar_wait(&B.acc_empty, (c - 1) & 1); tc_fence_after(); }
++#pragma unroll 1
++          for (int kb = 0; kb < NKD; ++kb) {
++            const int s = take();
++            const uint64_t da = desc_k128(su + O_XN + kb * XNB), db = desc_k128(su + O_R + s * SLOT);
++            if (elect_one()) {
++#pragma unroll
++              for (int ks = 0; ks < 4; ++ks) umma_ss(tmem + ACC0, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), IDN, (kb > 0 || ks > 0) ? 1u : 0u);
++              tc_commit(&B.empty[s]);
++              if (kb == NKD - 1) tc_commit(&B.acc_full);
++            }
++            __syncwarp();
++          }
++        },
++        [&](int j) {
++          const int hb = j & 1;
++          mbar_wait(&B.h_full[hb], (j >> 1) & 1);
++          tc_fence_after();
++          const uint64_t dh = desc_k128(su + O_H + hb * HBB);
++#pragma unroll 1
++          for (int p = 0; p < NP; ++p) {
++            const int s = take();
++            const uint64_t dq = desc_k128(su + O_R + s * SLOT);
++            if (elect_one()) {
++#pragma unroll
++              for (int ks = 0; ks < 4; ++ks)
++                umma_ss(tmem + p * 128, dh + (uint64_t)(ks * 2), dq + (uint64_t)(ks * 2), IDN, (j > 0 || ks > 0) ? 1u : 0u);
++              tc_commit(&B.empty[s]);
++              if (p == NP - 1) {
++                tc_commit(&B.h_empty[hb]);
++                if (j == NSUB - 1) tc_commit(&B.out_full);
++              }
++            }
++            __syncwarp();
++          }
++        });
++  } else if (warp >= 4) {
++    const int e = warp - 4;
++    // ------------------------------------------------------------------------------------------ LayerNorm of this rank's rows
++    pdl_wait();                                                // x is complete and visible
++    if (e == 0 && lane == 0) STAMP(2);
++    pdl_launch();
++    uint2 xa[NRW][PER];                                        // every row of this warp in flight at once (one memory latency)
++#pragma unroll
++    for (int u = 0; u < NRW; ++u)
++      if (r0 + e + 8 * u < r1) {
++        const uint2* xr = reinterpret_cast<const uint2*>(x + (size_t)(row0 + r0 + e + 8 * u) * D_);
++#pragma unroll
++        for (int i = 0; i < PER; ++i) xa[u][i] = xr[lane + 32 * i];
++      }
++#pragma unroll
++    for (int u = 0; u < NRW; ++u) {
++      const int R = r0 + e + 8 * u;
++      if (R >= r1) break;
++      const uint2 (&v)[PER] = xa[u];
++      f2 s2 = mk2(0.f, 0.f);
++#pragma unroll
++      for (int i = 0; i < PER; ++i) s2 = add2(s2, add2(unpack_bf16x2(v[i].x), unpack_bf16x2(v[i].y)));
++      float s = lo2(s2) + hi2(s2);
++#pragma unroll
++      for (int o = 16; o; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
++      const float mean = s * (1.f / D_);
++      const f2 nm2 = mk2(-mean, -mean);
++      f2 q2 = mk2(0.f, 0.f);
++#pragma unroll
++      for (int i = 0; i < PER; ++i) {
++        const f2 d0 = add2(unpack_bf16x2(v[i].x), nm2), d1 = add2(unpack_bf16x2(v[i].y), nm2);
++        q2 = fma2(d0, d0, q2);
++        q2 = fma2(d1, d1, q2);
++      }
++      float qq = lo2(q2) + hi2(q2);
++#pragma unroll
++      for (int o = 16; o; o >>= 1) qq += __shfl_xor_sync(0xffffffffu, qq, o);
++      const float rs = rsqrtf(qq * (1.f / D_) + eps), cc = mean * rs;
++      const f2 rs2 = mk2(rs, rs), ncc2 = mk2(-cc, -cc);
++#pragma unroll
++      for (int i = 0; i < PER; ++i) {
++        const int col = (lane + 32 * i) * 4;
++        const float4 g = __ldg(reinterpret_cast<const float4*>(gamma + col)), bb = __ldg(reinterpret_cast<const float4*>(beta + col));
++        const f2 g0 = mk2(g.x, g.y), g1 = mk2(g.z, g.w), b0 = mk2(bb.x, bb.y), b1 = mk2(bb.z, bb.w);
++        const f2 y0 = fma2(unpack_bf16x2(v[i].x), mul2(rs2, g0), fma2(ncc2, g0, b0));
++        const f2 y1 = fma2(unpack_bf16x2(v[i].y), mul2(rs2, g1), fma2(ncc2, g1, b1));
++        sts64(su + O_XN + (col >> 6) * XNB + sw128((uint32_t)R, (uint32_t)((col & 63) >> 3)) + (col & 7) * 2, pack_bf16(lo2(y0), hi2(y0)),
++              pack_bf16(lo2(y1), hi2(y1)));
++      }
++    }
++    fence_proxy_async();                                       // the rows are read by the tensor cores and the bulk copies
++    named_bar_sync(1, 256);
++    if (e == 0 && lane == 0) {
++#pragma unroll 1
++      for (int p = 1; p < SK; ++p) {
++        const uint32_t o = (uint32_t)((rank + p) % SK);
++#pragma unroll 1
++        for (int kb = 0; kb < NKD; ++kb) {
++          const uint32_t a = su + O_XN + kb * XNB + r0 * 128;
++          dsm_bulk(a, a, (r1 - r0) * 128, smem_u32(&B.xn_full), o);
++        }
++      }
++      mbar_arrive(&B.ln_done);
++      STAMP(3);
++    }
++    // ------------------------------------------------------------------------------------------ SwiGLU: warps 4-7 / 8-11 the first /
++    // second 32 units of each step, one row per thread
++    const int qd = warp & 3, g = e >> 2, r = qd * 32 + lane;
++    const uint32_t trow = tmem + ((uint32_t)(qd * 32) << 16);
++#pragma unroll 1
++    for (int c = 0; c < NSUB; ++c) {
++      const int hb = c & 1;
++      mbar_wait(&B.acc_full, c & 1);
++      tc_fence_after();
++      uint32_t av[32], bv[32], hp[16];
++      tmem_ld32(trow + ACC0 + g * 32, av);
++      tmem_ld32(trow + ACC0 + 64 + g * 32, bv);
++      tmem_wait_ld();
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) mbar_arrive(&B.acc_empty);
++#pragma unroll
++      for (int k = 0; k < 16; ++k) {
++        const float a0 = __uint_as_float(av[2 * k]), a1 = __uint_as_float(av[2 * k + 1]);
++        hp[k] = pack_bf16(a0 * sigmoid_kit(a0) * __uint_as_float(bv[2 * k]), a1 * sigmoid_kit(a1) * __uint_as_float(bv[2 * k + 1]));
++      }
++      if (c >= 2) mbar_wait(&B.h_empty[hb], ((c >> 1) - 1) & 1);   // the squeeze has read this buffer's previous block
++#pragma unroll
++      for (int t = 0; t < 4; ++t)
++        sts128(su + O_H + hb * HBB + sw128((uint32_t)r, (uint32_t)(g * 4 + t)), make_uint4(hp[4 * t], hp[4 * t + 1], hp[4 * t + 2], hp[4 * t + 3]));
++      fence_proxy_async();
++      __syncwarp();
++      if (lane == 0) mbar_arrive(&B.h_full[hb]);
++    }
++    mbar_wait(&B.out_full, 0);
++    if (e == 0 && lane == 0) STAMP(5);
++  }
++  // ------------------------------------------------------------------------------------------ the partials meet in distributed shared
++  // memory in two rounds (CTA o owns output columns [o WO, (o + 1) WO); round h moves their half h, WH columns): every CTA stages each
++  // other owner's block from tensor memory into its shared memory (slot per owner) and copies it with ONE bulk copy into that owner's
++  // receive slot [this rank] (completing on the owner's red_full[h]); the owner adds the SK partials in rank order (deterministic), the
++  // residual, and stores bf16 -- one rounding, as tsx_squeeze.cu. A cluster barrier frees every CTA's operand buffers before round 0 (the
++  // staging / receive slots reuse them), one separates the rounds (slots reused), one keeps every CTA resident until its copies are read.
++  // Measured alternatives (per CTA at SK 6 / 8): st.async 16-B pushes 9-10 us, ld.shared::cluster pulls of a staged partial 17-21 us;
++  // the bulk copies run at the xn exchange's ~100 GB/s.
++  __syncwarp();
++  cluster_sync();                                              // every CTA's products are done: its operand buffers take the slots
++  if (warp == 4 && lane == 0) STAMP(6);
++  constexpr int WH = WO / 2, RS = ROWS * WH * 4;               // columns per round, bytes of one slot
++  static_assert(WH % 8 == 0 && 2 * SK * RS <= O_BAR, "16-byte chunks; staging + receive slots in the operand buffers");
++  constexpr uint32_t O_STG = 0, O_RCV = SK * RS;
++  const int e = warp - 4, qd = warp & 3, g = (warp - 4) >> 2, r = qd * 32 + lane;
++  const uint32_t trow = tmem + ((uint32_t)(qd * 32) << 16);
++  const size_t grow = (size_t)(row0 + r);
++#pragma unroll 1
++  for (int h = 0; h < 2; ++h) {
++    if (warp >= 4) {
++      tc_fence_after();
++      const int c0 = rank * WO + h * WH;
++      uint4 xv[WH / 8];
++      if (g == h) {
++#pragma unroll
++        for (int i = 0; i < WH / 8; ++i) xv[i] = ldg128(x + grow * D_ + c0 + 8 * i);
++      }
++#pragma unroll 1
++      for (int oo = 1 + g; oo < SK; oo += 2) {                 // warp halves stage alternate owners
++        const int o = (rank + oo) % SK;
++        uint32_t v[WH / 8][8];                                 // every column of the block in flight, one wait (part 13)
++#pragma unroll
++        for (int c8 = 0; c8 < WH; c8 += 8) tmem_ld8(trow + o * WO + h * WH + c8, v[c8 / 8]);
++        tmem_wait_ld();
++#pragma unroll
++        for (int c8 = 0; c8 < WH; c8 += 8) {
++          const uint32_t L = (uint32_t)(r * (WH / 4) + c8 / 4);
++          sts128(su + O_STG + o * RS + swz16(L), make_uint4(v[c8 / 8][0], v[c8 / 8][1], v[c8 / 8][2], v[c8 / 8][3]));
++          sts128(su + O_STG + o * RS + swz16(L + 1), make_uint4(v[c8 / 8][4], v[c8 / 8][5], v[c8 / 8][6], v[c8 / 8][7]));
++        }
++      }
++      fence_proxy_async();
++      named_bar_sync(1, 256);
++      if (e == 0 && lane == 0)
++        for (int oo = 1; oo < SK; ++oo) {
++          const uint32_t o = (uint32_t)((rank + oo) % SK);
++          dsm_bulk(su + O_RCV + rank * RS, su + O_STG + o * RS, RS, smem_u32(&B.red_full[h]), o);
++        }
++      if (g == h) {
++        mbar_wait(&B.red_full[h], 0);                          // every other rank's partial of these columns is here
++        if (e == 4 * h && lane == 0) STAMP(7 + h);
++        float sum[WH];
++#pragma unroll
++        for (int i = 0; i < WH; ++i) sum[i] = 0.f;
++#pragma unroll 1
++        for (int o = 0; o < SK; ++o) {                         // fixed order over the hidden slices: deterministic
++          if (o == rank) {
++#pragma unroll
++            for (int c8 = 0; c8 < WH; c8 += 8) {
++              uint32_t v[8];
++              tmem_ld8(trow + rank * WO + h * WH + c8, v);
++              tmem_wait_ld();
++#pragma unroll
++              for (int i = 0; i < 8; ++i) sum[c8 + i] += __uint_as_float(v[i]);   // (own block: once per round)
++            }
++          } else {
++            const uint32_t src = su + O_RCV + (uint32_t)(o * RS);
++#pragma unroll
++            for (int i = 0; i < WH / 4; ++i) {
++              const uint4 t = lds128(src + swz16((uint32_t)(r * (WH / 4) + i)));
++              sum[4 * i] += __uint_as_float(t.x); sum[4 * i + 1] += __uint_as_float(t.y);
++              sum[4 * i + 2] += __uint_as_float(t.z); sum[4 * i + 3] += __uint_as_float(t.w);
++            }
++          }
++        }
++#pragma unroll
++        for (int i = 0; i < WH / 8; ++i) {
++          const uint32_t xw[4] = {xv[i].x, xv[i].y, xv[i].z, xv[i].w};
++          uint32_t o[4];
++#pragma unroll
++          for (int k = 0; k < 4; ++k) o[k] = pack_bf16(bf16lo(xw[k]) + sum[8 * i + 2 * k], bf16hi(xw[k]) + sum[8 * i + 2 * k + 1]);
++          stg128(out + grow * D_ + c0 + 8 * i, make_uint4(o[0], o[1], o[2], o[3]));
++        }
++      }
++      tc_fence_before();
++    }
++    __syncwarp();
++    cluster_sync();                                            // round h is consumed everywhere: the slots are free again / may leave
++  }
++  if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
++}
++
++extern "C" __device__ int transition_smem_bytes = SMEM_BYTES;

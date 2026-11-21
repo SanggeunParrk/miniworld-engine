@@ -148,8 +148,11 @@ bo_wgrad_sm100(const __grid_constant__ CUtensorMap ma0, const __grid_constant__ 
     if (tid == 128) EV(4);
     const int orow = QM * mt + (int)r, ld = act_cols(g);
     const bool f32 = (ODT >> g) & 1;
-    // the two warp halves take alternate 32-column chunks: a thread's 32 columns are contiguous (64 B bf16 / 128 B fp32 stores, one
-    // TMEM load per chunk; bwdf4's 16-column halves took 11 us mean, 41 us for the unfold tiles)
+    // the two warp halves take alternate 32-column chunks: one TMEM load per chunk (bwdf4's 16-column halves took 11 us mean, 41 us for
+    // the unfold tiles). fp32 outputs leave through the warp's 4 KB of the (then idle) operand stages: each thread puts its row's 32 values
+    // there (16-byte chunks XOR-swizzled by row), then the warp stores 4 rows x 128 B per instruction -- whole lines, where a thread's own
+    // row (32 rows x 16 B per instruction) left the epilogue at ~17 GB/s per SM (11.5 of a 27.6 us launch at M 128; 2026-11-17)
+    float* stg = reinterpret_cast<float*>(sm + O_OP) + ew * 1024;
     for (int q = hh; q < NC / 32; q += 2) {
       uint32_t v[32];
       tmem_ld32w(trow + 32 * q, v);
@@ -158,51 +161,67 @@ bo_wgrad_sm100(const __grid_constant__ CUtensorMap ma0, const __grid_constant__ 
       for (int k = 0; k < 32; ++k) t[k] = __uint_as_float(v[k]);
       const int cc = c0 + 32 * q;
       if (g == 4) {
+        // the warp's 32 rows x 32 columns of Wraw through its second 4 KB of staging (coalesced 4 rows x 128 B per load, then each thread
+        // its own row: a thread's own row straight from global left the unfold tiles at twice the others' time)
+        float* stw = stg + 8 * 1024;
+        const float* wr0 = WRAW + (long)(QM * mt + 32 * q4) * 384 + cc;
+        __syncwarp();
+        float4 wl[8];
 #pragma unroll
-        for (int h2 = 0; h2 < 2; ++h2) {                          // two 16-column halves (registers)
-          const int ch = cc + 16 * h2;
-          const float* wv = (orow < 1536 ? W1 : W2) + ch;
-          const float* wr = WRAW + (long)orow * 384 + ch;
-          float4 w4[4], r4[4];                                   // every load of the half in flight at once
+        for (int i = 0; i < 8; ++i) wl[i] = __ldg(reinterpret_cast<const float4*>(wr0 + (long)(4 * i + (lane >> 3)) * 384) + (lane & 7));
 #pragma unroll
-          for (int k = 0; k < 4; ++k) { w4[k] = __ldg(reinterpret_cast<const float4*>(wv) + k); r4[k] = __ldg(reinterpret_cast<const float4*>(wr) + k); }
-          const float* th = t + 16 * h2;
-          float o[16], pw[16];
+        for (int i = 0; i < 8; ++i) {
+          const int rr = 4 * i + (lane >> 3), j = lane & 7;
+          *reinterpret_cast<float4*>(stw + rr * 32 + 4 * (j ^ (rr & 7))) = wl[i];
+        }
+        __syncwarp();
+        const float* wv = (orow < 1536 ? W1 : W2) + cc;           // the cond-LN weight of the rows' block (a tile is in one block)
+        float pw[32];
 #pragma unroll
-          for (int k = 0; k < 4; ++k) {
-            o[4 * k] = th[4 * k] * w4[k].x; o[4 * k + 1] = th[4 * k + 1] * w4[k].y; o[4 * k + 2] = th[4 * k + 2] * w4[k].z; o[4 * k + 3] = th[4 * k + 3] * w4[k].w;
-            pw[4 * k] = th[4 * k] * r4[k].x; pw[4 * k + 1] = th[4 * k + 1] * r4[k].y; pw[4 * k + 2] = th[4 * k + 2] * r4[k].z; pw[4 * k + 3] = th[4 * k + 3] * r4[k].w;
-          }
+        for (int j = 0; j < 8; ++j) {
+          const float4 w4 = __ldg(reinterpret_cast<const float4*>(wv) + j);
+          const float4 r4 = *reinterpret_cast<const float4*>(stw + lane * 32 + 4 * (j ^ (lane & 7)));
+          float* th = t + 4 * j;
+          pw[4 * j] = th[0] * r4.x; pw[4 * j + 1] = th[1] * r4.y; pw[4 * j + 2] = th[2] * r4.z; pw[4 * j + 3] = th[3] * r4.w;
+          th[0] *= w4.x; th[1] *= w4.y; th[2] *= w4.z; th[3] *= w4.w;   // the unfolded value
+        }
+        // PW: per 16 rows the column sums of dWn o Wraw -- the products through the same staging (each thread its row, as Wraw came in),
+        // then lane l sums column l over rows 0-15 and 16-31 in row order (bwdf: 16 x 4 shuffles per half-chunk took the unfold tiles
+        // to 3.5 x the others' epilogue)
+        __syncwarp();
 #pragma unroll
-          for (int k = 0; k < 16; ++k) {                         // sum over the 16 rows of this half-warp (fixed tree)
+        for (int j = 0; j < 8; ++j)
+          *reinterpret_cast<float4*>(stw + lane * 32 + 4 * (j ^ (lane & 7))) = make_float4(pw[4 * j], pw[4 * j + 1], pw[4 * j + 2], pw[4 * j + 3]);
+        __syncwarp();
+        const int cj = lane >> 2, cw = lane & 3;
+        float s0 = 0.f, s1 = 0.f;
 #pragma unroll
-            for (int o2 = 1; o2 < 16; o2 <<= 1) pw[k] += __shfl_xor_sync(0xffffffffu, pw[k], o2);
-          }
-          if ((lane & 15) == 0) {
-            float* pr = PW + (long)(8 * mt + 2 * q4 + (lane >> 4)) * 384 + ch;
+        for (int rr = 0; rr < 16; ++rr) {
+          s0 += stw[rr * 32 + 4 * (cj ^ (rr & 7)) + cw];
+          s1 += stw[(rr + 16) * 32 + 4 * (cj ^ ((rr + 16) & 7)) + cw];
+        }
+        float* pr = PW + (long)(8 * mt + 2 * q4) * 384 + cc + lane;
+        pr[0] = s0;
+        pr[384] = s1;
+      }
+      void* out = g == 0 ? OUT0 : g == 1 ? OUT1 : g == 2 ? OUT2 : g == 3 ? OUT3 : g == 4 ? DWU : OUT5;
+      const int ldo = g == 4 ? 384 : ld;
+      if (f32) {
+        __syncwarp();                                             // the warp's previous chunk is out of the staging buffer
 #pragma unroll
-            for (int k = 0; k < 4; ++k) *reinterpret_cast<float4*>(pr + 4 * k) = make_float4(pw[4 * k], pw[4 * k + 1], pw[4 * k + 2], pw[4 * k + 3]);
-          }
-          if (f32) {
-            float* po = reinterpret_cast<float*>(DWU) + (long)orow * 384 + ch;
+        for (int j = 0; j < 8; ++j)
+          *reinterpret_cast<float4*>(stg + lane * 32 + 4 * (j ^ (lane & 7))) = make_float4(t[4 * j], t[4 * j + 1], t[4 * j + 2], t[4 * j + 3]);
+        __syncwarp();
+        float* po = reinterpret_cast<float*>(out) + (long)(QM * mt + 32 * q4) * ldo + cc;
 #pragma unroll
-            for (int k = 0; k < 4; ++k) *reinterpret_cast<float4*>(po + 4 * k) = make_float4(o[4 * k], o[4 * k + 1], o[4 * k + 2], o[4 * k + 3]);
-          } else {
-            __nv_bfloat16* po = reinterpret_cast<__nv_bfloat16*>(DWU) + (long)orow * 384 + ch;
-            stg128(po, pk8(o)); stg128(po + 8, pk8(o + 8));
-          }
+        for (int i = 0; i < 8; ++i) {
+          const int rr = 4 * i + (lane >> 3), j = lane & 7;
+          *reinterpret_cast<float4*>(po + (long)rr * ldo + 4 * j) = *reinterpret_cast<const float4*>(stg + rr * 32 + 4 * (j ^ (rr & 7)));
         }
       } else {
-        void* out = g == 0 ? OUT0 : g == 1 ? OUT1 : g == 2 ? OUT2 : g == 3 ? OUT3 : OUT5;
-        if (f32) {
-          float* po = reinterpret_cast<float*>(out) + (long)orow * ld + cc;
+        __nv_bfloat16* po = reinterpret_cast<__nv_bfloat16*>(out) + (long)orow * ldo + cc;
 #pragma unroll
-          for (int k = 0; k < 8; ++k) *reinterpret_cast<float4*>(po + 4 * k) = make_float4(t[4 * k], t[4 * k + 1], t[4 * k + 2], t[4 * k + 3]);
-        } else {
-          __nv_bfloat16* po = reinterpret_cast<__nv_bfloat16*>(out) + (long)orow * ld + cc;
-#pragma unroll
-          for (int k = 0; k < 4; ++k) stg128(po + 8 * k, pk8(t + 8 * k));
-        }
+        for (int k = 0; k < 4; ++k) stg128(po + 8 * k, pk8(t + 8 * k));
       }
     }
     if (tid == 128) EV(5);

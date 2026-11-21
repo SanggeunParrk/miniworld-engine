@@ -1,0 +1,89 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
+index 32e30e4b3..3882cde22 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
+@@ -850,7 +850,9 @@ __global__ void __launch_bounds__(256) tri_bwd_pre(const __nv_bfloat16* __restri
+ // ---- dbias fp32 [B][H][L][L] -> rows [R][64] bf16 (row (b, j, k): its H heads, then zeros), the head backward's A block
+ // bt: the bias orientation of tri_wfront's BT (row (b, j, k) produced bias[b, h, k, j]: its gradient is dbias[b, h, k, j])
+ __global__ void __launch_bounds__(256) tri_db_rows(const float* __restrict__ DB, __nv_bfloat16* __restrict__ OUT, long ldo, int H, int L,
+-                                                   long R, int bt) {
++                                                   long R, int bt, const float* __restrict__ SL, int NP, long STOT) {
++  // SL: the attention core's unsummed dbias slabs [NP][B H L L] (triattn_bwd raw_slabs), summed here in slab order (deterministic; one
++  // launch fewer than triattn_db_slabs, B200 2026-11-18) instead of reading DB
+   // a thread = one row x one 8-column (16-byte) piece, the piece index slowest: a warp's loads are 32 consecutive rows of one head
+   // plane (coalesced), the pieces beyond the heads only write zeros (B200 2026-11-17: one thread a whole row took 6.4 us at L128)
+   const long t = (long)blockIdx.x * blockDim.x + threadIdx.x;
+@@ -865,8 +867,15 @@ __global__ void __launch_bounds__(256) tri_db_rows(const float* __restrict__ DB,
+ #pragma unroll
+   for (int i = 0; i < 4; ++i) {
+     const int h0 = 8 * q + 2 * i, h1 = h0 + 1;
+-    const float a = h0 < H ? DB[((long)b * H + h0) * L * L + at] : 0.f;
+-    const float c = h1 < H ? DB[((long)b * H + h1) * L * L + at] : 0.f;
++    float a = 0.f, c = 0.f;
++    if (SL == nullptr) {
++      a = h0 < H ? DB[((long)b * H + h0) * L * L + at] : 0.f;
++      c = h1 < H ? DB[((long)b * H + h1) * L * L + at] : 0.f;
++    } else {
++      const long e0 = ((long)b * H + h0) * L * L + at, e1 = e0 + (long)L * L;
++      if (h0 < H) { a = __ldg(SL + e0); for (int p = 1; p < NP; ++p) a += __ldg(SL + p * STOT + e0); }
++      if (h1 < H) { c = __ldg(SL + e1); for (int p = 1; p < NP; ++p) c += __ldg(SL + p * STOT + e1); }
++    }
+     w[i] = pk2(a, c);
+   }
+   reinterpret_cast<uint4*>(OUT + row * ldo)[q] = make_uint4(w[0], w[1], w[2], w[3]);
+@@ -1649,15 +1658,20 @@ std::vector<torch::Tensor> tri_bwd_pre_h(torch::Tensor dy, torch::Tensor drop, i
+   return {out, bT, db};
+ }
+ 
+-torch::Tensor tri_db_rows_h(torch::Tensor db, torch::Tensor out, int64_t B, int64_t L, bool bt) {
++torch::Tensor tri_db_rows_h(torch::Tensor db, torch::Tensor out, int64_t B, int64_t L, bool bt, torch::Tensor slabs) {
+   TORCH_CHECK(db.is_cuda() && db.scalar_type() == torch::kFloat32 && db.is_contiguous() && db.dim() == 4 && db.size(0) == B, "db: fp32 [B, H, L, L]");
+   const int H = (int)db.size(1);
+   TORCH_CHECK(H <= 64, "heads <= 64");
+   const long R = B * L * L;
+   TORCH_CHECK(out.scalar_type() == torch::kBFloat16 && out.dim() == 2 && out.size(0) == R && out.size(1) == 64 && out.stride(1) == 1 &&
+               out.stride(0) % 8 == 0, "out: [R, 64] bf16 view, dense rows at a 16-byte-multiple stride");
++  // slabs: the core's unsummed dbias slabs fp32 [NP B H L L] (triattn_bwd raw_slabs; db then only gives the shape), or empty
++  const long tot = db.numel();
++  const bool sl = slabs.defined() && slabs.numel() > 0;
++  if (sl) TORCH_CHECK(slabs.scalar_type() == torch::kFloat32 && slabs.is_contiguous() && slabs.numel() % tot == 0, "slabs fp32 [NP * B*H*L*L]");
+   tri_db_rows<<<(unsigned)((8 * R + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(db.data_ptr<float>(),
+-      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), out.stride(0), H, (int)L, R, bt ? 1 : 0);
++      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), out.stride(0), H, (int)L, R, bt ? 1 : 0, sl ? slabs.data_ptr<float>() : nullptr,
++      sl ? (int)(slabs.numel() / tot) : 0, tot);
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+   return out;
+ }
+@@ -1923,7 +1937,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("tri_bwd_pre", &tri_bwd_pre_h, "the backward set-up in one launch: (dy o drop, bias^T * log2e fp32, zeroed dbias fp32)", py::arg("dy"),
+         py::arg("drop"), py::arg("L"), py::arg("trans"), py::arg("bias"), py::arg("zero") = true);
+   m.def("tri_db_rows", &tri_db_rows_h, "dbias [B, H, L, L] fp32 -> rows [R, 64] bf16 (into a view)", py::arg("db"), py::arg("out"),
+-        py::arg("B"), py::arg("L"), py::arg("bt"));
++        py::arg("B"), py::arg("L"), py::arg("bt"), py::arg("slabs") = torch::Tensor());
+   m.def("tri_wgbwd", &tri_wgbwd_h, "wide gate backward: (do, dg, u, delta); dg into a view", py::arg("dys"), py::arg("g"), py::arg("o"),
+         py::arg("wot"), py::arg("dg_out"), py::arg("B"), py::arg("L"), py::arg("trans"), py::arg("lr") = 0);
+   m.def("tri_whbwd", &tri_whbwd_h, "wide head backward: (dx, xhat | 1)", py::arg("D"), py::arg("x"), py::arg("dy"), py::arg("lnw"),
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+index 69b011cd5..911419126 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+@@ -692,13 +692,16 @@ def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved
+     if S == D:
+         e = _core(_rows_per_task(Lp))
+         dbw, btw = (dbz.view(-1), bT) if dbz is not None else (E32, E32)
+-        _, _, _, db = e.triattn_bwd(
+-            q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim**-0.5, dbw, cut(0), cut(1), cut(2), btw
++        # the core's dbias slabs come back unsummed and tri_db_rows sums them (one launch fewer; B200 2026-11-18)
++        res = e.triattn_bwd(
++            q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim**-0.5, dbw, cut(0), cut(1), cut(2), btw, True
+         )
++        db, slabs = (dbz.view(B, n_head, Lp, Lp) if dbz is not None else bias.new_empty(B, n_head, Lp, Lp, dtype=torch.float32)), res[3]
+     else:  # delta per 32-channel slice [B, L, S/32 x heads, L]: the core adds a head's slices where it reads them
+         bwd = _core64().triattn_bwd64 if S == 64 else _core128().triattn_bwd128
+         _, _, _, db = bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim**-0.5, cut(0), cut(1), cut(2))
+-    w.tri_db_rows(db, cut(4, 64), B, Lp, bt)
++        slabs = E32
++    w.tri_db_rows(db, cut(4, 64), B, Lp, bt, slabs)
+     dpair, xh = w.tri_whbwd(Dall, x, dy, lnw, stats, wall_t, Lp, trans, lr)
+     # parameter gradients: G = D^T [xhat | 1] (one GEMM, K = B Lp^2: the pad rows of D are zero), then dW / dgamma / dbeta / dWb by the
+     # d_pair 128 algebra (y = gamma o xhat + beta feeds every projection) and dWo without the padded channels, in tri_wfinish.

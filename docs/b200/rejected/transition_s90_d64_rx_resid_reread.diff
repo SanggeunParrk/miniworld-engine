@@ -1,0 +1,102 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 55be1b4c8..4fdf0bbbd 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -397,7 +397,7 @@ _FUSED_FWD = {
+ #: (save = 1) keeps the ``fwd`` cubin the backward was built against. A module constant (A/B runs edit it).
+ #: (S90) the D 256 inference builds with two xn buffers and no x buffer (tfwd_d256.cu -DX2=1): the kernel's rstd / c1 arguments carry x / y. X2_RESID False: the 2.5.14 build.
+ X2_RESID = True
+-FWD_X2 = {(256, 2), (256, 4)}
++FWD_X2 = {(256, 2), (256, 4), (128, 2)}
+ FWD_INFER_FLAGS: dict[tuple[int, int], tuple[str, ...]] = {
+     (64, 2): ("-DROLES=1",),
+     (128, 2): ("-DLNH=1", "-DNXS_=3", "-DNW_=2"),
+@@ -555,7 +555,7 @@ def _fwd_launch(
+     if d in _FUSED_FWD:
+         # (S90) D 256 inference: the two-xn-buffer build (X2) from the second tile of a CTA; one tile a CTA keeps the single-buffer build (the tile's own latency, no ring to overlap)
+         x2_cell = X2_RESID and not save and (d, k.n) in FWD_X2
+-        x2_off = x2_cell and tiles <= k.grid
++        x2_off = x2_cell and d == 256 and tiles <= k.grid
+         x2 = x2_cell and not x2_off
+         xn = torch.empty_like(x) if save else x.new_empty((1, d))
+         mout = k.rows(out)
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d64.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d64.cu
+index 4edd19d8f..799735e8b 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d64.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d64.cu
+@@ -9,6 +9,7 @@
+ // Rounding points as tfwd2.cu: xn bf16, a / b fp32, h = bf16((a s) b) (s = sigmoid_tr, sm100.cuh), acc fp32, out = bf16(x + acc).
+ // SPDX-License-Identifier: Apache-2.0
+ #include "sm100.cuh"
++#include "tsx_store.cuh"
+ using namespace s100;
+ 
+ // ROLES (warps 4-15, three warpgroups): 0 two SwiGLU warpgroups (4-7 even chunks, 12-15 odd) and LayerNorm(i + 1) then epilogue(i) on 8-11;
+@@ -20,6 +21,11 @@ using namespace s100;
+ #define ROLES 0
+ #endif
+ 
++// RX 1 (S90, inference, needs ROLES 1): residual re-read from global memory (before the accumulator wait) and y written in 128-B row segments from registers; an x stage is released after
++// its LayerNorm. The kernel's rstd / c1 arguments carry x / y.
++#ifndef RX
++#define RX 0
++#endif
+ #ifdef PROBE
+ #define STAMP(k) do { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(c1)[cta * 96 + (k)] = _t; } while (0)
+ #else
+@@ -289,6 +295,7 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
+       if (t2 == 0 && i < 12) STAMP(2 + i);
+       if (t2 == 0) {
+         mbar_arrive_remote_cta(&B.xn_full[b], 0);
++        if (RX) mbar_arrive(&B.x_empty[xs]);
+         if (save && real) {
+           const int row0 = tile_of(i) * ROWS;
+ #pragma unroll
+@@ -297,6 +304,35 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
+         }
+       }
+     };
++#if RX
++    auto epi2 = [&](int i) {
++      const bool real = i < n_valid;
++      const uint16_t* Xg = reinterpret_cast<const uint16_t*>(rstd);
++      uint16_t* Yg = reinterpret_cast<uint16_t*>(c1);
++      const size_t off0 = ((size_t)tile_of(i) * ROWS + (r & ~7u)) * D_ + (size_t)(lane & 7) * 8;
++      uint4 xr[8];
++      load_t<32>(Xg + off0, (size_t)D_, xr, lane);
++      mbar_wait(&B.out_full, i & 1);
++      tc_fence_after();
++      uint32_t acc2[2][32], o[32];
++      tmem_ld32(trow + T_OUT, acc2[0]);
++      tmem_ld32(trow + T_OUT + 32, acc2[1]);
++      tmem_wait_ld();
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) mbar_arrive_remote_relaxed(&B.out_empty, 0);
++#pragma unroll
++      for (int hh = 0; hh < 2; ++hh)
++#pragma unroll
++        for (int t = 4 * hh; t < 4 * hh + 4; ++t) {
++          const uint32_t xw[4] = {xr[t].x, xr[t].y, xr[t].z, xr[t].w};
++#pragma unroll
++          for (int k = 0; k < 4; ++k)
++            o[4 * t + k] = pack_bf16(bf16lo(xw[k]) + __uint_as_float(acc2[hh][(t - 4 * hh) * 8 + 2 * k]), bf16hi(xw[k]) + __uint_as_float(acc2[hh][(t - 4 * hh) * 8 + 2 * k + 1]));
++        }
++      if (real) store_t<32>(Yg + off0, (size_t)D_, o, lane);
++    };
++#endif
+     auto epi = [&](int i, int cc0, int cc1, int bar, int nthr, bool lead) {
+       const int b = i & (NXS - 1);
+       mbar_wait(&B.out_full, i & 1);
+@@ -355,7 +391,11 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
+     } else {
+       if (is_ln) for (int i = 0; i < n_local; ++i) ln(i);
+       else if (odd) for (int c = 0; c < nch; ++c) sw(c);
++#if RX
++      else for (int i = 0; i < n_local; ++i) epi2(i);
++#else
+       else for (int i = 0; i < n_local; ++i) epi(i, 0, 2, 2, 128, tid == 128);
++#endif
+     }
+     if (tid == 256 || tid == 128) tma_store_wait0();
+   }

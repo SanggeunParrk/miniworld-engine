@@ -1,0 +1,51 @@
+commit edd07c92ea9f586987faafe909ece44c07e2f9ec
+Author: SanggeunParrk <psk6950@snu.ac.kr>
+Date:   Wed Nov 18 10:16:35 2026 +0900
+
+    b200r3-transition (part 16, inference): tsx_ln loads gamma / beta (and the fp16 scale) before griddepcontrol.wait (LNPF, bf16 + H16 builds; the compiler had kept 5 of 6 chunks behind rsqrt, a second dependent DRAM round trip): fine us [1, 256 / 384 / 768, 768] 11.42 / 12.62 / 15.21 -> 10.49 / 11.38 / 14.16, fp32 [1, 1024 / 2048, 384] 11.42 / 14.62 -> 11.05 / 14.16; bitwise identical; TSX stamps in tsx_expand / tsx_squeeze (off by default); tr_fwd GBR (off: measured level)
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
+index b514f506a..9596285e9 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
+@@ -16,6 +16,9 @@ using namespace s100;
+ #ifndef LNH
+ #define LNH 0
+ #endif
++#ifndef GBR
++#define GBR 0                                                  // gamma / beta via the LayerNorm threads' registers (part 16)
++#endif
+ #ifdef PROBE
+ #define STAMP(k) do { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(c1)[cta * 96 + (k)] = _t; } while (0)
+ #else
+@@ -103,7 +106,15 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
+     }
+     prefetch_map(&mx); prefetch_map(&mwa); prefetch_map(&mwb); prefetch_map(&mws); prefetch_map(&mout); prefetch_map(&mxn);
+   }
++#if GBR
++  // (round 3 part 16) gamma / beta into registers of the LayerNorm threads, stored to shared memory by them after the cluster sync (their
++  // first named barrier publishes it): the cold load no longer holds the __syncthreads below, i.e. the weight producer's first TMA
++  const int gbt = tid - (LNH ? 128 : 256);
++  const float gbv = (gbt >= 0 && gbt < (LNH ? 256 : 128)) ? (gbt < 128 ? gamma[gbt] : beta[gbt - 128]) : 0.f;
++  const float gbv2 = (!LNH && gbt >= 0 && gbt < 128) ? beta[gbt] : 0.f;
++#else
+   if (tid < 128) { reinterpret_cast<float*>(sm + O_GB)[tid] = gamma[tid]; reinterpret_cast<float*>(sm + O_GB)[128 + tid] = beta[tid]; }
++#endif
+   if (warp == 2) { tmem_alloc2(smem_u32(&B.tmem), 512); tmem_relinquish2(); }
+   tc_fence_before();
+   __syncthreads();
+@@ -259,6 +270,12 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
+     const int t2 = tid - 256;
+     const uint32_t r = lb + lane;
+     const uint32_t gb_u = su + O_GB;
++#if GBR
++    if (gbt >= 0 && gbt < (LNH ? 256 : 128)) {
++      reinterpret_cast<float*>(sm + O_GB)[gbt] = gbv;
++      if (!LNH) reinterpret_cast<float*>(sm + O_GB)[128 + gbt] = gbv2;
++    }
++#endif
+     auto ln = [&](int i) {
+       const int b = i & 1, grow = tile_of(i) * ROWS + (int)r;
+       const bool real = i < n_valid;

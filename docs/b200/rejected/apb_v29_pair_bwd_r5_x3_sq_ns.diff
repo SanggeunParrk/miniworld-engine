@@ -1,0 +1,338 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+index 0f7df76e6..2a5b5f674 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+@@ -1192,10 +1192,33 @@ def apb_pair_fwd(pair2d, wsrc, lpw, ws: float, mask, L: int, eps: float, neg: fl
+ 
+ #: AttentionPairBias pair backward on tcgen05 (``pair_bwd.cu``, d_pair 128): heads -> its shared memory bytes (SMEM_BYTES there)
+ _PAIR_BWD_SMEM = {8: 147456 + 61440, 12: 155648 + 61440, 16: 163840 + 61440, 24: 135168 + 61440}
++#: v29 (PB_R5, <= 16 heads): five 32 KB pair stages + a four-slot dbias ring, a / Wf^T in the 64-B swizzle (pair_bwd.cu). 0: the v28 ring.
++_PB_R5 = 0 if os.environ.get("MINIWORLD_APB_B200_PB_R5") == "0" else 1
++_PAIR_BWD_SMEM_R5 = {h: 5 * 32768 + 4 * ((h * 512 + 1023) // 1024) * 1024 + 16384 + 8192 + 8192 + 2560 for h in (8, 12, 16)}
++
++
++#: v29 (PB_X3): the pair tile as one 3-D 32 KB box for the load and the store (2 + 1 TMA ops a tile instead of 3 + 2)
++_PB_X3 = 0 if os.environ.get("MINIWORLD_APB_B200_PB_X3") == "0" else 1
++#: v29 (PB_SQ): phase A's sums with independent partial sums (1), and the whole row's sum of squares per thread without the halves' barrier (2)
++_PB_SQ = int(os.environ.get("MINIWORLD_APB_B200_PB_SQ", "0"))
++#: v29 (PB_NS): ns the MMA thread sleeps when neither MMA is ready (0: a tight test_wait poll)
++_PB_NS = int(os.environ.get("MINIWORLD_APB_B200_PB_NS", "0"))
+ 
+ 
+ def _pair_bwd_defs(heads: int) -> tuple[str, ...]:
+-    return (f"PB_NH={heads}",) + _pb_split_defs(heads)
++    r5 = ("PB_R5=1",) if _PB_R5 and heads <= 16 else ("PB_R5=0",)
++    return (f"PB_NH={heads}",) + _pb_split_defs(heads) + r5 + ((f"PB_X3={_PB_X3}",) if _PB_X3 else ()) + ((f"PB_SQ={_PB_SQ}",) if _PB_SQ else ()) + ((f"PB_NS={_PB_NS}",) if _PB_NS else ())
++
++
++def _pair_tm(t, L: int):
++    """The pair [L L, 128] bf16 as pair_bwd's tile map: one 3-D box (64 columns, 128 rows, 2 halves) with PB_X3, else two 2-D boxes."""
++    if _PB_X3:
++        return _tmn(t, [64, L * L, 2], [256, 128], [64, 128, 2])
++    return _tmn(t, [128, L * L], 256, [64, 128])
++
++
++def _pair_bwd_smem(heads: int) -> int:
++    return _PAIR_BWD_SMEM_R5[heads] if _PB_R5 and heads <= 16 else _PAIR_BWD_SMEM[heads]
+ 
+ 
+ def apb_pair_bwd(pair2d, dbias, wf, L: int, eps: float, acc_cols, dz, reserve: int = 0, trace=None) -> int:
+@@ -1211,7 +1234,7 @@ def apb_pair_bwd(pair2d, dbias, wf, L: int, eps: float, acc_cols, dz, reserve: i
+     grid = min(num_sms(dev) - reserve, L * (L // 128))
+     assert acc_cols.shape[0] >= grid and acc_cols.shape[1] >= heads * 129
+     defs = _pair_bwd_defs(heads)
+-    k = _sm100_kernel("pair_bwd", "apb_pair_bwd_sm100", dev, defs=defs, smem=_PAIR_BWD_SMEM[heads])
++    k = _sm100_kernel("pair_bwd", "apb_pair_bwd_sm100", dev, defs=defs, smem=_pair_bwd_smem(heads))
+     _apb_bound(
+         (
+             "pbwd",
+@@ -1228,8 +1251,8 @@ def apb_pair_bwd(pair2d, dbias, wf, L: int, eps: float, acc_cols, dz, reserve: i
+         lambda: k.bind(
+             (grid, 1, 1),
+             (352, 1, 1),
+-            _tmn(pair2d, [128, L * L], 256, [64, 128]),
+-            _tmn(dz, [128, L * L], 256, [64, 128]),
++            _pair_tm(pair2d, L),
++            _pair_tm(dz, L),
+             _tmn(dbias, [L, L, heads], [L * 4, L * L * 4], [128, 1, heads], swizzle=0, dtype="f32"),
+             wf,
+             acc_cols,
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/pair_bwd.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/pair_bwd.cu
+index 3c16cefda..42c061198 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/pair_bwd.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/pair_bwd.cu
+@@ -36,24 +36,57 @@ constexpr int NHC = (NH + 7) / 8, KH = (NH + 15) / 16;                  // 8-hea
+ #endif
+ constexpr int LO = NH <= 16 ? 16 : 32, KD = PB_SPLIT ? (LO + NH + 15) / 16 : KH;   // K steps of D = a Wf (with the low part)
+ constexpr int ONES = 24, NB32 = 32;                                     // B rows of MMA1: heads, then ones at row 24
+-constexpr int XB = TR * DP * 2, BOX = TR * 128, DBB = NH * TR * 4;
+-constexpr int STG = XB + ((DBB + 1023) / 1024) * 1024, NS = NH > 16 ? 3 : 4;
+-constexpr int O_A = NS * STG, O_WT = O_A + 2 * TR * 128, O_WF = O_WT + DP * 128, O_MISC = O_WF + 2 * NB32 * 128;
+-constexpr int SMEM_BYTES = O_MISC + 4096;
++// v29 (PB_R5, <= 16 heads): a five-stage pair ring. The a tiles and Wf^T hold <= 32 head slots (hi + lo), so they sit in the 64-B swizzle
++// (64-B rows: 16 + 8 KB instead of 32 + 16), and dbias gets a ring of its own (NSD slots, freed after phase A instead of after the store's
++// read): the 32 KB pair stages get the room -- 5 x 32 + 4 x 8 KB instead of 4 x 40. The tile period is the stage's occupancy (load ~3 us +
++// epilogue + store read) over the stage count.
++#ifndef PB_R5
++#define PB_R5 (PB_NH <= 16)
++#endif
++// v29 (PB_X3): the pair tile's two 64-column boxes as one 3-D box (64 columns, 128 rows, 2 halves; the same shared layout) for the load
++// and for the store: 2 loads + 1 store a tile instead of 3 + 2 (a TMA op costs ~600 clock of issue whatever its size: BRIEF6 SWA finding)
++#ifndef PB_X3
++#define PB_X3 0
++#endif
++// v29 (PB_SQ): phase A's reductions with independent partial sums (the epilogue warps, 2 a scheduler, are latency-bound: the tile period
++// is phase A ~1.0 us + phase B ~0.6 us, the loads land early -- trace, 16 x 768). 1: 8-way sum of squares + 4-way S1 / S2; 2: also the
++// whole row's sum of squares per thread (no exchange, no barrier between the halves). Changes the rounding of rstd / S1 / S2 (not bitwise).
++#ifndef PB_SQ
++#define PB_SQ 0
++#endif
++#ifndef PB_TX
++#define PB_TX 0
++#endif
++#ifndef PB_NS
++#define PB_NS 0
++#endif
++static_assert(!PB_R5 || NH <= 16, "PB_R5: <= 16 heads (32 head slots in a 64-B row)");
++constexpr int XB = TR * DP * 2, BOX = TR * 128, DBB = NH * TR * 4, DBS = ((DBB + 1023) / 1024) * 1024;
++constexpr int STG = PB_R5 ? XB : XB + DBS, NS = PB_R5 ? 5 : NH > 16 ? 3 : 4, NSD = PB_R5 ? 4 : NS;
++constexpr int AROW = PB_R5 ? 64 : 128, NWH = PB_R5 ? 32 : 64;          // bytes per a / Wf^T row; N of dWf^T += X^T a
++constexpr int O_DB = NS * STG, O_A = O_DB + (PB_R5 ? NSD * DBS : 0), O_WT = O_A + 2 * TR * AROW, O_WF = O_WT + DP * AROW;
++constexpr int O_MISC = O_WF + 2 * NB32 * 128;
++constexpr int SMEM_BYTES = O_MISC + (PB_R5 ? 2560 : 4096);
+ static_assert(SMEM_BYTES <= 232448 && NH <= ONES, "shared memory / heads");
++static_assert(2 * NH * TR * 4 <= 2 * TR * AROW, "the partial-row scratch fits the a tiles");
+ constexpr uint32_t T_Y = 0, T_D = 64, T_W = 320;                       // TMEM columns: [Wf ; 1] x, D (two: 64, 192), dWf^T
++DEVI uint32_t asw(uint32_t r, uint32_t q) { return PB_R5 ? sw64(r, q) : sw128(r, q); }
++DEVI uint64_t adesc(uint32_t a) { return PB_R5 ? desc_sw64(a) : desc_k128(a); }
++DEVI uint64_t adesc_mn(uint32_t a) { return PB_R5 ? desc_sw64(a) : desc_mn128(a, BOX); }
+ struct Misc {
+-  uint64_t full[NS], empty[NS], edone[NS], gdone, gfree, afull[2], ddone[2];
++  uint64_t full[NS], empty[NS], edone[NS], dempty[NSD], gdone, gfree, afull[2], ddone[2];
+   float sw[NB32];
+   float tot[2 * NH];
+   float ssq[2][2][TR];                                                    // [tile parity][half][key]: the halves' sums of squares
+   uint32_t tmem;
+ };
++static_assert(sizeof(Misc) <= SMEM_BYTES - O_MISC, "Misc");
+ 
+ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __grid_constant__ CUtensorMap mz,
+     const __grid_constant__ CUtensorMap mdz, const __grid_constant__ CUtensorMap md, const __nv_bfloat16* __restrict__ W,
+     float* __restrict__ AWF, int acc_stride, int L, float eps, unsigned long long* __restrict__ TRC) {
+ #define TRK(ev, n) do { if (TRC != nullptr && blockIdx.x == 0 && (n) < 64) TRC[(ev) * 64 + (n)] = clock64(); } while (0)
++#define TRX(ev, n) do { if (PB_TX && TRC != nullptr && threadIdx.x == 0 && blockIdx.x == 0 && (n) < 64) TRC[1024 + ((ev) - 6) * 64 + (n)] = clock64(); } while (0)
+   extern __shared__ __align__(1024) uint8_t smem[];
+   Misc& B = *reinterpret_cast<Misc*>(smem + O_MISC);
+   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+@@ -68,9 +101,13 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+     const int i = (int)(t / ntj), j0 = (int)(t % ntj) * TR, s = (int)(n % NS);
+     const uint32_t st = su + s * STG;
+     mbar_expect_tx(&B.full[s], (uint32_t)(XB + DBB));
++#if PB_X3
++    tma_load_3d(st, &mz, &B.full[s], 0, i * L + j0, 0);                  // both 64-column boxes as ONE 32 KB box (dims: 64, rows, half)
++#else
+     tma_load_2d(st, &mz, &B.full[s], 0, i * L + j0);
+     tma_load_2d(st + BOX, &mz, &B.full[s], 64, i * L + j0);
+-    tma_load_3d(st + XB, &md, &B.full[s], j0, i, 0);
++#endif
++    tma_load_3d(PB_R5 ? su + O_DB + (uint32_t)(n % NSD) * DBS : st + XB, &md, &B.full[s], j0, i, 0);
+   };
+   uint4 wv[2];                                                             // Wf's words, read before the tiles' loads queue at the memory
+ #pragma unroll
+@@ -81,6 +118,7 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+   }
+   if (tid == 0) {
+     for (int s = 0; s < NS; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); mbar_init(&B.edone[s], 8); }
++    for (int s = 0; s < NSD; ++s) mbar_init(&B.dempty[s], 8);
+     mbar_init(&B.gdone, 1); mbar_init(&B.gfree, 8);
+     for (int k = 0; k < 2; ++k) { mbar_init(&B.afull[k], 8); mbar_init(&B.ddone[k], 1); }
+     fence_barrier_init();
+@@ -90,15 +128,15 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+   __syncthreads();
+   tc_fence_after();
+   if (tid == 0)
+-    for (long n = 0; n < NS && n < mine; ++n) issue(n);
++    for (long n = 0; n < NSD && n < mine; ++n) issue(n);
+   // operands made once: the MMA1 B boxes ([Wf ; 1], rows 0..31 x 64 columns per box), Wf^T [128 columns][64 heads], a's zero heads,
+   // s_h = sum_c Wf[h, c] (every global read issued before the first is used)
+   {
+     uint8_t* wf = smem + O_WF;
+     uint8_t* wt = smem + O_WT;
+     uint8_t* at = smem + O_A;
+-    for (int e = tid; e < 2 * TR * 8; e += 352) *reinterpret_cast<uint4*>(at + 16 * e) = make_uint4(0u, 0u, 0u, 0u);
+-    for (int e = tid; e < DP * 8; e += 352) *reinterpret_cast<uint4*>(wt + 16 * e) = make_uint4(0u, 0u, 0u, 0u);
++    for (int e = tid; e < 2 * TR * AROW / 16; e += 352) *reinterpret_cast<uint4*>(at + 16 * e) = make_uint4(0u, 0u, 0u, 0u);
++    for (int e = tid; e < DP * AROW / 16; e += 352) *reinterpret_cast<uint4*>(wt + 16 * e) = make_uint4(0u, 0u, 0u, 0u);
+     __syncthreads();
+     // thread e (of NB32 DP / 8 = 512, two passes) takes 8 consecutive columns of row r = e / 16: both passes' reads go out first
+ #pragma unroll
+@@ -112,8 +150,8 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+ #pragma unroll
+           for (int q = 0; q < 8; ++q) {
+             const uint32_t u = w4[q >> 1];
+-            *reinterpret_cast<uint16_t*>(wt + sw128((uint32_t)(c0 + q), (uint32_t)(r >> 3)) + (r & 7) * 2) = (uint16_t)((q & 1) ? (u >> 16) : (u & 0xffffu));
+-            if (PB_SPLIT) *reinterpret_cast<uint16_t*>(wt + sw128((uint32_t)(c0 + q), (uint32_t)((LO + r) >> 3)) + ((LO + r) & 7) * 2) = (uint16_t)((q & 1) ? (u >> 16) : (u & 0xffffu));
++            *reinterpret_cast<uint16_t*>(wt + asw((uint32_t)(c0 + q), (uint32_t)(r >> 3)) + (r & 7) * 2) = (uint16_t)((q & 1) ? (u >> 16) : (u & 0xffffu));
++            if (PB_SPLIT) *reinterpret_cast<uint16_t*>(wt + asw((uint32_t)(c0 + q), (uint32_t)((LO + r) >> 3)) + ((LO + r) & 7) * 2) = (uint16_t)((q & 1) ? (u >> 16) : (u & 0xffffu));
+             s += (q & 1) ? bf16hi(u) : bf16lo(u);
+           }
+         }
+@@ -129,8 +167,8 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+   if (TRC != nullptr && threadIdx.x == 0) TRC[384 + 4 * blockIdx.x + 1] = gtime();
+   if (warp == 8) {
+     if (lane == 0) {                                                       // the MMA thread
+-      constexpr uint32_t I_Y = idesc_bf16(TR, NB32), I_D = idesc_bf16(TR, DP), I_W = idesc_bf16(DP, 64, 1, 1);
+-      const uint64_t dwt = desc_k128(su + O_WT);
++      constexpr uint32_t I_Y = idesc_bf16(TR, NB32), I_D = idesc_bf16(TR, DP), I_W = idesc_bf16(DP, NWH, 1, 1);
++      const uint64_t dwt = adesc(su + O_WT);
+       auto mma1 = [&](long n) {                                           // [Wf ; 1] x of tile n
+         const int s = (int)(n % NS);
+         const uint32_t st = su + s * STG;
+@@ -155,18 +193,23 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+           mma1(n1++);
+           continue;
+         }
+-        if (n2 >= n1 || !mbar_test(&B.afull[n2 & 1], (uint32_t)((n2 >> 1) & 1))) continue;
++        if (n2 >= n1 || !mbar_test(&B.afull[n2 & 1], (uint32_t)((n2 >> 1) & 1))) {
++#if PB_NS
++          __nanosleep(PB_NS);                                              // v29: the poll off the epilogue warps' issue slots (warps 0 / 4 share its scheduler)
++#endif
++          continue;
++        }
+         const long n = n2++;
+         const int s = (int)(n % NS), ab = (int)(n & 1);
+         const uint32_t st = su + s * STG;
+         tc_fence_after();
+-        const uint64_t da = desc_k128(su + O_A + ab * TR * 128), dab = desc_mn128(su + O_A + ab * TR * 128, BOX);
++        const uint64_t da = adesc(su + O_A + ab * TR * AROW), dab = adesc_mn(su + O_A + ab * TR * AROW);
+ #pragma unroll
+         for (int ks = 0; ks < KD; ++ks) umma_ss(tmem + T_D + 128 * ab, da + (uint64_t)(2 * ks), dwt + (uint64_t)(2 * ks), I_D, ks ? 1u : 0u);
+         const uint64_t dxm = desc_mn128(st, BOX);
+ #pragma unroll
+-        for (int ks = 0; ks < TR / 16; ++ks)                              // K = 16 keys: 2 KB of every box
+-          umma_ss(tmem + T_W, dxm + (uint64_t)((ks * 2048) >> 4), dab + (uint64_t)((ks * 2048) >> 4), I_W, (n | ks) ? 1u : 0u);
++        for (int ks = 0; ks < TR / 16; ++ks)                              // K = 16 keys: 2 KB of every box, 16 a rows
++          umma_ss(tmem + T_W, dxm + (uint64_t)((ks * 2048) >> 4), dab + (uint64_t)((ks * 16 * AROW) >> 4), I_W, (n | ks) ? 1u : 0u);
+         tc_commit(&B.ddone[ab]);
+       }
+     }
+@@ -176,8 +219,12 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+         const long t = blockIdx.x + n * gridDim.x;
+         const int s = (int)(n % NS), i = (int)(t / ntj), j0 = (int)(t % ntj) * TR;
+         mbar_wait(&B.edone[s], (uint32_t)((n / NS) & 1));
++#if PB_X3
++        tma_store_3d(&mdz, su + s * STG, 0, i * L + j0, 0);
++#else
+         tma_store_2d(&mdz, su + s * STG, 0, i * L + j0);
+         tma_store_2d(&mdz, su + s * STG + BOX, 64, i * L + j0);
++#endif
+         tma_store_commit();
+         tma_store_wait_read0();
+         mbar_arrive(&B.empty[s]);
+@@ -186,8 +233,9 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+     }
+   } else if (warp == 9) {
+     if (lane == 0)                                                         // the loader
+-      for (long n = NS; n < mine; ++n) {
+-        mbar_wait(&B.empty[n % NS], (uint32_t)(((n / NS) - 1) & 1));
++      for (long n = NSD; n < mine; ++n) {
++        if (n >= NS) mbar_wait(&B.empty[n % NS], (uint32_t)(((n / NS) - 1) & 1));
++        if (PB_R5) mbar_wait(&B.dempty[n % NSD], (uint32_t)(((n / NSD) - 1) & 1));
+         TRK(5, n);
+         issue(n);
+       }
+@@ -210,6 +258,22 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+       uint32_t y[32];
+       tmem_ld32(trow + T_Y, y);
+       float sq = 0.f;                                                      // this half's sum of squares of the row (bf16 values, fp32)
++#if PB_SQ
++      // v29: 8 partial sums (chains of 8 / 16 FMAs instead of one of 64); PB_SQ 2: each thread sums the whole row (both boxes), so the
++      // halves need no exchange and no 256-thread barrier (both halves add in the same order: the same rstd)
++      float sa[8];
++#pragma unroll
++      for (int j = 0; j < 8; ++j) sa[j] = 0.f;
++#pragma unroll
++      for (int q = 0; q < (PB_SQ == 2 ? 16 : 8); ++q) {
++        const int bx = PB_SQ == 2 ? q >> 3 : half;
++        const uint4 xv = lds128(su + s * STG + bx * BOX + sw128((uint32_t)r, (uint32_t)(q & 7)));
++        const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
++#pragma unroll
++        for (int e = 0; e < 4; ++e) { sa[2 * e] = fmaf(bf16lo(xw[e]), bf16lo(xw[e]), sa[2 * e]); sa[2 * e + 1] = fmaf(bf16hi(xw[e]), bf16hi(xw[e]), sa[2 * e + 1]); }
++      }
++      sq = ((sa[0] + sa[1]) + (sa[2] + sa[3])) + ((sa[4] + sa[5]) + (sa[6] + sa[7]));
++#else
+       {
+         const uint32_t box = su + s * STG + half * BOX;
+ #pragma unroll
+@@ -220,22 +284,40 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+           for (int e = 0; e < 4; ++e) { sq = fmaf(bf16lo(xw[e]), bf16lo(xw[e]), sq); sq = fmaf(bf16hi(xw[e]), bf16hi(xw[e]), sq); }
+         }
+       }
+-      B.ssq[ab][half][r] = sq;
++#endif
++      if (PB_SQ != 2) B.ssq[ab][half][r] = sq;
++      TRX(6, n);
+       tmem_wait_ld();
++      TRX(7, n);
+       tc_fence_before();
+       __syncwarp();
+       if (lane == 0) mbar_arrive(&B.gfree);
+-      named_bar_sync(4, 256);
+-      const float ss = B.ssq[ab][0][r] + B.ssq[ab][1][r];                 // half 0 + half 1: the same sum in both halves
++      if (PB_SQ != 2) named_bar_sync(4, 256);
++      const float ss = PB_SQ == 2 ? sq : B.ssq[ab][0][r] + B.ssq[ab][1][r];  // half 0 + half 1: the same sum in both halves
+       const float mean = __uint_as_float(y[ONES]) * (1.f / DP);
+       const float rstd = rsqrtf(fmaxf(ss * (1.f / DP) - mean * mean, 0.f) + eps);
+-      const float* dbs = reinterpret_cast<const float*>(stg + XB);         // [NH][128]
++      const float* dbs = reinterpret_cast<const float*>(PB_R5 ? smem + O_DB + (n % NSD) * DBS : stg + XB);   // [NH][128]
+       float d[NH];
+ #pragma unroll
+       for (int h = 0; h < NH; ++h) d[h] = dbs[h * TR + r];
++      TRX(8, n);
++      if (PB_R5) {                                                         // dbias slot back to the loader
++        asm volatile("" : : "f"(d[NH - 1]) : "memory");
++        __syncwarp();
++        if (lane == 0) mbar_arrive(&B.dempty[n % NSD]);
++      }
+       float S1 = 0.f, S2 = 0.f;
++#if PB_SQ
++      {
++        float s1[4] = {0.f, 0.f, 0.f, 0.f}, s2[4] = {0.f, 0.f, 0.f, 0.f};
++#pragma unroll
++        for (int h = 0; h < NH; ++h) { s1[h & 3] = fmaf(d[h], sw[h], s1[h & 3]); s2[h & 3] = fmaf(d[h], __uint_as_float(y[h]), s2[h & 3]); }
++        S1 = (s1[0] + s1[1]) + (s1[2] + s1[3]); S2 = (s2[0] + s2[1]) + (s2[2] + s2[3]);
++      }
++#else
+ #pragma unroll
+       for (int h = 0; h < NH; ++h) { S1 = fmaf(d[h], sw[h], S1); S2 = fmaf(d[h], __uint_as_float(y[h]), S2); }
++#endif
+       const float m1 = S1 * (1.f / DP), m2 = rstd * (S2 - mean * S1) * (1.f / DP);
+       kk = -rstd * rstd * m2; c0 = rstd * (rstd * m2 * mean - m1);
+       if (half == 0) {
+@@ -245,6 +327,7 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+           hsum[h] += d[h];
+         }
+       }
++      TRX(9, n);
+ #pragma unroll
+       for (int cg = half; cg < NHC; cg += 2) {                             // the halves write alternate 8-head chunks
+         uint32_t p[4], pl[4];
+@@ -255,8 +338,8 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+           p[e] = pack_bf16(a0, a1);
+           pl[e] = pack_bf16(a0 - bf16lo(p[e]), a1 - bf16hi(p[e]));
+         }
+-        sts128(su + O_A + ab * TR * 128 + sw128((uint32_t)r, (uint32_t)cg), make_uint4(p[0], p[1], p[2], p[3]));
+-        if (PB_SPLIT) sts128(su + O_A + ab * TR * 128 + sw128((uint32_t)r, (uint32_t)(LO / 8 + cg)), make_uint4(pl[0], pl[1], pl[2], pl[3]));
++        sts128(su + O_A + ab * TR * AROW + asw((uint32_t)r, (uint32_t)cg), make_uint4(p[0], p[1], p[2], p[3]));
++        if (PB_SPLIT) sts128(su + O_A + ab * TR * AROW + asw((uint32_t)r, (uint32_t)(LO / 8 + cg)), make_uint4(pl[0], pl[1], pl[2], pl[3]));
+       }
+       fence_proxy_async();
+       __syncwarp();
+@@ -274,6 +357,7 @@ extern "C" __global__ void __launch_bounds__(352, 1) apb_pair_bwd_sm100(const __
+       tmem_ld32(trow + T_D + 128 * ab + 64 * half, v0);
+       tmem_ld32(trow + T_D + 128 * ab + 64 * half + 32, v1);
+       tmem_wait_ld();
++      TRX(10, n);
+       tc_fence_before();
+       const uint32_t box = su + s * STG + half * BOX;
+ #pragma unroll

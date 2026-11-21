@@ -14,12 +14,14 @@ from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.kernels.transition.triton.main import (
+    _round_x_in_kernel,
     _expand_swiglu,
     _expand_swiglu_saveact,
     swiglu_squeeze_backward,
 )
 from miniworld_engine.kernels.transition.triton.training import swiglu_squeeze_backward_saved
 from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import input_ln_residual
+from miniworld_engine.kernels.layernorm.triton.main import _ln_fwd
 
 
 @functools.cache
@@ -156,7 +158,7 @@ def squeeze_residual(
     prec = dot_precision(h.dtype)
     pre = prec == "tf32" and h.dtype is torch.float32
     if pre:
-        weight = tf32_cached((weight,), lambda: tf32_grid_many(weight))[0]
+        weight = tf32_cached((weight,), lambda: tf32_grid_many(weight), by_address=True)[0]
         if not h_rounded:
             h = tf32_grid_many(h)[0]
     split = _split_k(m, n, k, h.device)
@@ -197,7 +199,7 @@ def squeeze_residual(
 
 class ResidualTransitionFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, xn, wa, wb, ws, residual, save_act=True, half_scale=None):
+    def forward(ctx, xn, wa, wb, ws, residual, save_act=True, half_scale=None, xn_on_grid=False):
         shape = xn.shape
         xn = xn.reshape(-1, shape[-1]).contiguous()
         key = both_key(rows_of(shape))
@@ -205,7 +207,7 @@ class ResidualTransitionFunction(torch.autograd.Function):
             h, a, b = _expand_swiglu_saveact(xn, wa, wb, key, half_scale)  # training: the halves, see main.TritonTransitionFunction
             ctx.save_for_backward(xn, wa, wb, ws, h, a, b, *(() if half_scale is None else (half_scale,)))
         else:
-            h = _expand_swiglu(xn, wa, wb, key)
+            h = _expand_swiglu(xn, wa, wb, key, xn_on_grid)
             ctx.save_for_backward()
         ctx.shape = shape
         ctx.key = key
@@ -220,7 +222,7 @@ class ResidualTransitionFunction(torch.autograd.Function):
         dx, dwa, dwb, dws = swiglu_squeeze_backward_saved(
             xn, wa, wb, ws, flat, ctx.key, saved=(h, a, b), half_scale=scale[0] if scale else None
         )
-        return dx.reshape(ctx.shape), dwa, dwb, dws, dy, None, None
+        return dx.reshape(ctx.shape), dwa, dwb, dws, dy, None, None, None
 
 
 @torch.no_grad()
@@ -235,6 +237,13 @@ def half_scale(gamma, beta, wa, wb):
     return (xn_max * w1 * (1.0 / 60000.0)).clamp_min(1.0).reshape(1)
 
 
+def _ln_rounds_x(x: torch.Tensor) -> bool:
+    """fp32 on a B200 where the expand would round x in a launcher pass (``main._round_x_in_kernel`` false) and TF32 is on."""
+    return (
+        x.dtype is torch.float32 and x.is_cuda and dot_precision(x.dtype) == "tf32" and x.shape[-1] % 64 == 0 and not _round_x_in_kernel(x)
+    )
+
+
 #: fp32 training at up to this many rows keeps the saved expand halves in fp32 (no fp16 scale), see transition_residual.
 _FP32_HALVES_MAX_ROWS = 4096
 
@@ -242,9 +251,15 @@ _FP32_HALVES_MAX_ROWS = 4096
 def transition_residual(x, gamma, beta, wa, wb, ws, eps):
     # Returning the identity from the SAME LN Function lets its two gradients meet
     # inside LN backward. No activation copy, separate dx add, or duplicate dgamma/dbeta.
-    xn, residual = input_ln_residual(x, gamma, beta, eps)
     # grad mode and an operand that wants one, decided here: ``ctx.needs_input_grad`` is true for parameters under no_grad too
     save = torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
+    if not save and _ln_rounds_x(x):
+        # fp32 inference on a B200 whose expand takes x rounded by the launcher (K > 128): the LayerNorm stores xn on the TF32 grid instead,
+        # one launch fewer (the same xn bits as LayerNorm then tf32_grid); no statistics are kept
+        flat = x.reshape(-1, x.shape[-1]).contiguous()
+        xn = _ln_fwd(flat, gamma, beta, None, eps, False, both_key(rows_of(x.shape)), store_stats=False, tf32_out=True)[0]
+        return ResidualTransitionFunction.apply(xn.reshape(x.shape), wa, wb, ws, x, False, None, True)
+    xn, residual = input_ln_residual(x, gamma, beta, eps)
     # fp32: the saved halves are fp16 below a scale only where their traffic matters; at few rows they stay fp32 and the scale's
     # reductions over the weights (more than the halves themselves cost there) are not made
     rows = xn.numel() // xn.shape[-1]

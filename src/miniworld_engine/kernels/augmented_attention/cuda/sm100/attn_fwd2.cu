@@ -76,6 +76,9 @@ struct Bars {
 #ifndef PCNT
 #define PCNT 0
 #endif
+#ifndef PDLW
+#define PDLW 0                           // 1 (AttentionPairBias v20, 2026-11-17): launched as a programmatic dependent -- griddepcontrol.wait after the
+#endif                                   // prologue (barriers, TMEM), then its own dependents may be scheduled
 // 2^x for a pair on the FMA pipe: x = r + f (r = round(x), |f| <= 1/2), 2^f by a degree-3 fit (max rel. error 8.8e-5: below the
 // bf16 rounding of P), the exponent added to the bit pattern; x clamped to [-126, 126]
 DEVI f2 ex2_poly2(f2 x) {
@@ -126,6 +129,10 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
   __syncthreads();
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+#if PDLW
+  pdl_wait();
+  pdl_launch();
+#endif
 
   if (warp < 4) setmaxnreg_dec<56>();
   if (warp == 0) {

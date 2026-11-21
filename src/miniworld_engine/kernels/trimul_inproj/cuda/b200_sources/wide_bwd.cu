@@ -324,49 +324,247 @@ __global__ void __launch_bounds__(256) ln_apply_kernel(const __nv_bfloat16* __re
 
 }  // namespace wbwd
 
+// ============================================================================================ B200-only (S90, 2026-11-18)
+// Opened after the first namespace close (h100_b200style_aux.py compiles only the text above it for the H100). The B200 wide backward's
+// memory-bound kernels as measured by clock (``_tools/micro.py``: L2-flushed graph replays on random data, D256 L512): gate_bwd 3.9 TB/s,
+// lnout_bwd 3.7 TB/s against a 6.0 TB/s copy. gate_bwd3 (a row per warp) and lnout_bwd2 (16 channel rows per block) replace them on the B200
+// (the kernels above stay for the H100 port); fp32 sums associate differently, the per-element arithmetic is the same.
+namespace wbwd {
+
+
+#ifndef GB3_RR
+#define GB3_RR 1      // gate_bwd3: rows a warp keeps in flight (every load of them issued before the first reduction)
+#endif
+// gate_bwd3: one row per warp (lane = 8 channels, NI = ceil(D / 256) channel groups per lane), the rows' loads first (lnin_bwd's structure):
+// the per-token sums S1 / S2 are ONE warp reduction each (no segmented shuffle, no atomics, no zeroing: each row is written once),
+// the per-column sums r0 / r1 are per-thread registers summed over the warp's rows, then over the block's 8 warps in warp order -> a row
+// of per-block partials (colsum). Same arithmetic per element as gate_bwd_kernel; the sums associate differently (fp32, fixed order).
+// Block 0 also zeroes colsum3's arrival counters (cnt: 256 words, nullable): one memset launch fewer.
+template <int D>
+__global__ void __launch_bounds__(256) gate_bwd3_kernel(const __nv_bfloat16* __restrict__ dy, const __nv_bfloat16* __restrict__ p,
+                                                         const __nv_bfloat16* __restrict__ g, const __nv_bfloat16* __restrict__ ds,
+                                                         const float* __restrict__ vec, const float* __restrict__ mu_o,
+                                                         const float* __restrict__ rs_o, __nv_bfloat16* __restrict__ dpr_out,
+                                                         __nv_bfloat16* __restrict__ dg_out, int ldg, float* __restrict__ S1,
+                                                         float* __restrict__ S2, float* __restrict__ part, int M, int L,
+                                                         unsigned* __restrict__ cnt) {
+  constexpr int G8 = D / 8, NI = (G8 + 31) / 32, RR = GB3_RR;
+  __shared__ float cs[2][8][D];
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  if (cnt && blockIdx.x == 0) cnt[threadIdx.x] = 0u;
+  float sp[NI][8], ep[NI][8], c0[NI][8], c1[NI][8];
+#pragma unroll
+  for (int it = 0; it < NI; ++it)
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      const int q = lane + 32 * it;
+      sp[it][j] = q < G8 ? vec[q * 8 + j] : 0.f;
+      ep[it][j] = q < G8 ? vec[D + q * 8 + j] : 0.f;
+      c0[it][j] = 0.f; c1[it][j] = 0.f;
+    }
+  const int gw = blockIdx.x * 8 + warp, nw = gridDim.x * 8;
+  for (int row0 = gw * RR; row0 < M; row0 += nw * RR) {
+    uint4 vy[RR][NI], vp[RR][NI], vg[RR][NI], vd[RR][NI];
+    float ro[RR], mu[RR];
+#pragma unroll
+    for (int r = 0; r < RR; ++r) {
+      const int row = row0 + r;
+      if (row < M) {
+        ro[r] = rs_o[row]; mu[r] = mu_o[row];
+        const int dr = M > L * L ? row % L + row / (L * L) * L : row % L;
+#pragma unroll
+        for (int it = 0; it < NI; ++it) {
+          const int q = lane + 32 * it;
+          if (q < G8) {
+            const size_t e = (size_t)row * G8 + q;
+            vy[r][it] = reinterpret_cast<const uint4*>(dy)[e];
+            vp[r][it] = reinterpret_cast<const uint4*>(p)[e];
+            vg[r][it] = reinterpret_cast<const uint4*>(g)[e];
+            if (ds) vd[r][it] = *reinterpret_cast<const uint4*>(ds + (size_t)dr * D + q * 8);
+          }
+        }
+      }
+    }
+#pragma unroll
+    for (int r = 0; r < RR; ++r) {
+      const int row = row0 + r;
+      if (row >= M) break;
+      const float rr = ro[r], rm = rr * mu[r];
+      float s1 = 0.f, s2 = 0.f;
+#pragma unroll
+      for (int it = 0; it < NI; ++it) {
+        const int q = lane + 32 * it;
+        if (q >= G8) break;
+        float fy[8], fp[8], fg[8], fd[8], odpr[8], odg[8];
+        unpack8(vy[r][it], fy); unpack8(vp[r][it], fp); unpack8(vg[r][it], fg);
+        if (ds) unpack8(vd[r][it], fd);
+        else {
+#pragma unroll
+          for (int j = 0; j < 8; ++j) fd[j] = 1.f;
+        }
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          const float sg = sigmoidf_fast(fg[j]);
+          const float dpv = fy[j] * fd[j] * sg;
+          odpr[j] = dpv * rr;
+          odg[j] = dpv * fp[j] * (1.f - sg);
+          s1 = fmaf(dpv, sp[it][j], s1);
+          s2 = fmaf(dpv, fp[j] - ep[it][j], s2);
+          c0[it][j] += dpv;
+          c1[it][j] = fmaf(dpv, rm, c1[it][j]);
+        }
+        reinterpret_cast<uint4*>(dpr_out)[(size_t)row * G8 + q] = pack8(odpr);
+        *reinterpret_cast<uint4*>(dg_out + (size_t)row * ldg + q * 8) = pack8(odg);
+      }
+      s1 = warp_sum(s1); s2 = warp_sum(s2);
+      if (lane == 0) { S1[row] = s1; S2[row] = s2; }
+    }
+  }
+#pragma unroll
+  for (int it = 0; it < NI; ++it) {
+    const int q = lane + 32 * it;
+    if (q >= G8) break;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) { cs[0][warp][q * 8 + j] = c0[it][j]; cs[1][warp][q * 8 + j] = c1[it][j]; }
+  }
+  __syncthreads();
+  for (int c = threadIdx.x; c < D; c += 256) {
+    float a = 0.f, b = 0.f;
+#pragma unroll
+    for (int w = 0; w < 8; ++w) { a += cs[0][w][c]; b += cs[1][w][c]; }
+    part[(size_t)blockIdx.x * 2 * D + c] = a;
+    part[(size_t)blockIdx.x * 2 * D + D + c] = b;
+  }
+}
+#ifndef LO2_CH
+#define LO2_CH 16     // channel rows per lnout_bwd2 block (8 warps x LO2_CH / 8)
+#endif
+__global__ void __launch_bounds__(256) lnout_bwd2_kernel(const __nv_bfloat16* __restrict__ dor, const __nv_bfloat16* __restrict__ t,
+                                                          const float* __restrict__ mu_o, const float* __restrict__ rs_o,
+                                                          const float* __restrict__ S1, const float* __restrict__ S2,
+                                                          const float* __restrict__ go, __nv_bfloat16* __restrict__ dt,
+                                                          float* __restrict__ dgb, int M, int H) {
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int c0 = blockIdx.y * LO2_CH + warp * (LO2_CH / 8);
+  float sgs[LO2_CH / 8], sbs[LO2_CH / 8];
+#pragma unroll
+  for (int k = 0; k < LO2_CH / 8; ++k) { sgs[k] = 0.f; sbs[k] = 0.f; }
+  for (int grp = blockIdx.x; grp < M / 256; grp += gridDim.x) {
+    const int tok = grp * 256 + lane * 8;
+    uint4 vd[LO2_CH / 8], vt[LO2_CH / 8];
+#pragma unroll
+    for (int k = 0; k < LO2_CH / 8; ++k) {
+      const size_t off = (size_t)(c0 + k) * M + tok;
+      vd[k] = *reinterpret_cast<const uint4*>(dor + off);
+      vt[k] = *reinterpret_cast<const uint4*>(t + off);
+    }
+    float mu[8], a1[8], a2r[8], irs[8];
+    {
+      const float4 m0 = *reinterpret_cast<const float4*>(mu_o + tok), m1 = *reinterpret_cast<const float4*>(mu_o + tok + 4);
+      const float4 r0 = *reinterpret_cast<const float4*>(rs_o + tok), r1 = *reinterpret_cast<const float4*>(rs_o + tok + 4);
+      const float4 p0 = *reinterpret_cast<const float4*>(S1 + tok), p1 = *reinterpret_cast<const float4*>(S1 + tok + 4);
+      const float4 q0 = *reinterpret_cast<const float4*>(S2 + tok), q1 = *reinterpret_cast<const float4*>(S2 + tok + 4);
+      const float mm[8] = {m0.x, m0.y, m0.z, m0.w, m1.x, m1.y, m1.z, m1.w}, rr[8] = {r0.x, r0.y, r0.z, r0.w, r1.x, r1.y, r1.z, r1.w};
+      const float ss1[8] = {p0.x, p0.y, p0.z, p0.w, p1.x, p1.y, p1.z, p1.w}, ss2[8] = {q0.x, q0.y, q0.z, q0.w, q1.x, q1.y, q1.z, q1.w};
+      const float ih = 1.f / H;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        mu[j] = mm[j]; irs[j] = rcp_ftz(rr[j]);
+        a1[j] = rr[j] * ss1[j] * ih;
+        a2r[j] = rr[j] * rr[j] * ss2[j] * ih;
+      }
+    }
+#pragma unroll
+    for (int k = 0; k < LO2_CH / 8; ++k) {
+      const int c = c0 + k;
+      const size_t off = (size_t)c * M + tok;
+      float dv[8], tv[8], o[8];
+      unpack8(vd[k], dv);
+      unpack8(vt[k], tv);
+      const float gc = go[c];
+      float sg = 0.f, sb = 0.f;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const float tc = tv[j] - mu[j];
+        o[j] = gc * dv[j] - a1[j] - tc * a2r[j];
+        sg = fmaf(dv[j], tc, sg);
+        sb = fmaf(dv[j], irs[j], sb);
+      }
+      *reinterpret_cast<uint4*>(dt + off) = pack8(o);
+      sgs[k] += sg; sbs[k] += sb;
+    }
+  }
+#pragma unroll
+  for (int k = 0; k < LO2_CH / 8; ++k) {
+    const float sg = warp_sum(sgs[k]), sb = warp_sum(sbs[k]);
+    if (lane == 0) { dgb[(size_t)blockIdx.x * 2 * H + c0 + k] = sg; dgb[(size_t)blockIdx.x * 2 * H + H + c0 + k] = sb; }
+  }
+}
+}  // namespace wbwd
+
 #define WB_WIDTHS(X) X(256) X(384) X(512)
+#ifndef WGB_BLOCKS
+#define WGB_BLOCKS (148 * 6)
+#endif
+void wide_colsum(const float* part, float* out, int R, int C, cudaStream_t st);   // wide_aux.cu (B200 only)
 #define BF(t) reinterpret_cast<__nv_bfloat16*>((t).data_ptr())
 #define CBF(t) reinterpret_cast<const __nv_bfloat16*>((t).data_ptr())
 
 // dy, p, g [M, D]; ds [L, D] or none; vec [4, D] (k3w's sp, ep, ...); mu_o / rs_o [M] -> dpr [M, D]; dg -> dg_out[:, :D]
 // (row stride ldg); S1 / S2 [M]; r01 [2D] = (r0 ; r1).
-void wide_gate_bwd(torch::Tensor dy, torch::Tensor p, torch::Tensor g, c10::optional<torch::Tensor> ds, torch::Tensor vec,
+// defer (S90): the per-block partial table is RETURNED (the caller reduces it with wide_colsum3) instead of reduced here; cnt (optional,
+// adjacent after S2): its first 256 words are zeroed by block 0 (colsum3's arrival counters)
+torch::Tensor wide_gate_bwd(torch::Tensor dy, torch::Tensor p, torch::Tensor g, c10::optional<torch::Tensor> ds, torch::Tensor vec,
                    torch::Tensor mu_o, torch::Tensor rs_o, torch::Tensor dpr, torch::Tensor dg_out, torch::Tensor S1,
-                   torch::Tensor S2, torch::Tensor r01, int64_t L) {
+                   torch::Tensor S2, torch::Tensor r01, int64_t L, bool defer, c10::optional<torch::Tensor> cnt) {
   using namespace wbwd;
   const int M = (int)dy.size(0), D = (int)dy.size(1);
   TORCH_CHECK(dg_out.stride(1) == 1 && dg_out.stride(0) % 8 == 0);
   auto st = at::cuda::getCurrentCUDAStream();
   const __nv_bfloat16* dsp = ds.has_value() ? CBF(*ds) : nullptr;
-  S1.zero_(); S2.zero_(); r01.zero_();
-#define GB(DD) if (D == DD) { gate_bwd_kernel<DD><<<GB_BLOCKS, 256, 0, st>>>(CBF(dy), CBF(p), CBF(g), dsp, \
-    vec.data_ptr<float>(), mu_o.data_ptr<float>(), rs_o.data_ptr<float>(), BF(dpr), BF(dg_out), (int)dg_out.stride(0), \
-    S1.data_ptr<float>(), S2.data_ptr<float>(), r01.data_ptr<float>(), M, (int)L); \
-    C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
+  // gate_bwd3 writes S1 / S2 once each (no zeroing); block 0 zeroes colsum3's counters
+  if (cnt.has_value()) TORCH_CHECK(cnt->data_ptr<float>() == S2.data_ptr<float>() + M, "wide_gate_bwd: cnt right after S2");
+  // r0 / r1 (the W_o column sums) from per-block partials reduced in block order (gate_bwd3_kernel + colsum, the H100
+  // port's deterministic form): bit-identical run to run (2026-11-16; before, an atomic flush per block into r01)
+  // B200 grid WGB_BLOCKS (2026-11-17): 148 x 15 blocks left a 2220-row partial table (4.5 MB at D256) and a 7-17 us column sum at L128;
+  // a multiple of 3 keeps the thread count a multiple of D / 8 (gate_bwd_kernel owns fixed columns per thread)
+  const int gb = WGB_BLOCKS;
+  auto part = torch::empty({(int64_t)gb * 2 * D}, S1.options());
+#define GB(DD) if (D == DD) { \
+    gate_bwd3_kernel<DD><<<gb, 256, 0, st>>>(CBF(dy), CBF(p), CBF(g), dsp, vec.data_ptr<float>(), mu_o.data_ptr<float>(), rs_o.data_ptr<float>(), \
+        BF(dpr), BF(dg_out), (int)dg_out.stride(0), S1.data_ptr<float>(), S2.data_ptr<float>(), part.data_ptr<float>(), M, (int)L, \
+        cnt.has_value() ? reinterpret_cast<unsigned*>(cnt->data_ptr<float>()) : nullptr); \
+    C10_CUDA_KERNEL_LAUNCH_CHECK(); \
+    if (defer) return part.view({(int64_t)gb, 2 * DD}); \
+    wide_colsum(part.data_ptr<float>(), r01.data_ptr<float>(), gb, 2 * DD, st); \
+    C10_CUDA_KERNEL_LAUNCH_CHECK(); return torch::Tensor(); }
   WB_WIDTHS(GB)
 #undef GB
   TORCH_CHECK(false, "wide_gate_bwd: unsupported D ", D);
+  return torch::Tensor();
 }
 
 // dor = (dpr Wp)^T [H, M] channel-major, t [H, M]; -> dt [H, M]; dgb [2H] = (dg_o ; db_o)
-void wide_lnout_bwd(torch::Tensor dout, torch::Tensor t, torch::Tensor mu_o, torch::Tensor rs_o, torch::Tensor S1, torch::Tensor S2,
-                    torch::Tensor go, torch::Tensor dt, torch::Tensor dgb) {
+torch::Tensor wide_lnout_bwd(torch::Tensor dout, torch::Tensor t, torch::Tensor mu_o, torch::Tensor rs_o, torch::Tensor S1, torch::Tensor S2,
+                    torch::Tensor go, torch::Tensor dt, torch::Tensor dgb, bool defer) {
   using namespace wbwd;
   const int H = (int)t.size(0), M = (int)(t.numel() / H);
   TORCH_CHECK(M % 256 == 0 && H % 64 == 0 && dout.is_contiguous() && t.is_contiguous() && dt.is_contiguous());
   const int gx = M / 256;
   auto part = torch::empty({(int64_t)gx * 2 * H}, mu_o.options());
-lnout_bwd_kernel<<<dim3(gx, H / LOB_CH), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+  lnout_bwd2_kernel<<<dim3(gx, H / LO2_CH), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       CBF(dout), CBF(t), mu_o.data_ptr<float>(), rs_o.data_ptr<float>(), S1.data_ptr<float>(), S2.data_ptr<float>(),
       go.data_ptr<float>(), BF(dt), part.data_ptr<float>(), M, H);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  colsum_kernel<<<(2 * H + 31) / 32, 256, 0, at::cuda::getCurrentCUDAStream()>>>(part.data_ptr<float>(), dgb.data_ptr<float>(), gx, 2 * H);
+  if (defer) return part.view({(int64_t)gx, 2 * H});
+  wide_colsum(part.data_ptr<float>(), dgb.data_ptr<float>(), gx, 2 * H, at::cuda::getCurrentCUDAStream());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return torch::Tensor();
 }
 
 // dxn, x, dy [M, D]; -> dx [M, D]; dgb [2D] = (dg_i ; db_i)
-void wide_lnin_bwd(torch::Tensor dxn, torch::Tensor x, torch::Tensor dy, torch::Tensor mu_i, torch::Tensor rs_i, torch::Tensor gi,
-                   torch::Tensor dx, torch::Tensor dgb) {
+torch::Tensor wide_lnin_bwd(torch::Tensor dxn, torch::Tensor x, torch::Tensor dy, torch::Tensor mu_i, torch::Tensor rs_i, torch::Tensor gi,
+                   torch::Tensor dx, torch::Tensor dgb, bool defer) {
   using namespace wbwd;
   const int M = (int)x.size(0), D = (int)x.size(1);
   auto st = at::cuda::getCurrentCUDAStream();
@@ -377,11 +575,13 @@ void wide_lnin_bwd(torch::Tensor dxn, torch::Tensor x, torch::Tensor dy, torch::
 #define LB(DD) if (D == DD) { lnin_bwd_kernel<DD><<<nb, 256, 0, st>>>(CBF(dxn), CBF(x), CBF(dy), \
     mu_i.data_ptr<float>(), rs_i.data_ptr<float>(), gi.data_ptr<float>(), BF(dx), part.data_ptr<float>(), M); \
     C10_CUDA_KERNEL_LAUNCH_CHECK(); \
-    colsum_kernel<<<(2 * D + 31) / 32, 256, 0, st>>>(part.data_ptr<float>(), dgb.data_ptr<float>(), nb, 2 * D); \
-    C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
+    if (defer) return part.view({(int64_t)nb, 2 * DD}); \
+    wide_colsum(part.data_ptr<float>(), dgb.data_ptr<float>(), nb, 2 * D, st); \
+    C10_CUDA_KERNEL_LAUNCH_CHECK(); return torch::Tensor(); }
   WB_WIDTHS(LB)
 #undef LB
   TORCH_CHECK(false, "wide_lnin_bwd: unsupported D ", D);
+  return torch::Tensor();
 }
 
 void wide_ln_apply(torch::Tensor x, torch::Tensor mean, torch::Tensor rstd, torch::Tensor g, torch::Tensor b, torch::Tensor xn) {
@@ -393,4 +593,196 @@ void wide_ln_apply(torch::Tensor x, torch::Tensor mean, torch::Tensor rstd, torc
   WB_WIDTHS(LA)
 #undef LA
   TORCH_CHECK(false, "wide_ln_apply: unsupported D ", D);
+}
+
+// ============================================================================================ B200-only additions
+// Reopened namespace AFTER the first "}  // namespace wbwd" (h100_b200style_aux.py compiles the text up to that first close for the H100:
+// it stays byte-identical); the kernels below are in the B200 extension only.
+namespace wbwd {
+// ---------------------------------------------------------------------------------------------------------------- D64, 8 D planes
+// The D64 bidirectional hidden-128 block (b200_train._backward_hid_body): its forward is k3g's (no p / g saved), so the output-side
+// backward gets q = t^T Wp'^T and g = xn Wg^T from cuBLAS (fp32) and forms p by k3w's fold, p = rs_o (q - mu_o sp) + ep.
+//   gate_bwd_fold  as gate_bwd, with p from (q, mu_o, rs_o, sp, ep) and fp32 q / g:  p - ep = rs_o (q - mu_o sp)
+//   lnin_bwd64     lnin_bwd at D = 64 with the LayerNorm statistics recomputed from x (a row is 8 lanes x 8 channels: 4 rows per
+//                  warp instruction instead of lnin_bwd's row per warp with 24 idle lanes); dg_i / db_i per-block partials summed by
+//                  colsum_kernel in a fixed order
+template <int D>
+__global__ void __launch_bounds__(256) gate_bwd_fold_kernel(const __nv_bfloat16* __restrict__ dy, const float* __restrict__ q,
+                                                             const float* __restrict__ g, const __nv_bfloat16* __restrict__ ds,
+                                                             const float* __restrict__ vec, const float* __restrict__ mu_o,
+                                                             const float* __restrict__ rs_o, __nv_bfloat16* __restrict__ dpr_out,
+                                                             __nv_bfloat16* __restrict__ dg_out, int ldg, float* __restrict__ S1,
+                                                             float* __restrict__ S2, float* __restrict__ part, int M, int L) {
+  constexpr int G8 = D / 8;
+  const size_t T = (size_t)gridDim.x * blockDim.x, n = (size_t)M * G8;
+  const size_t e0 = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  const int qq = (int)(e0 % G8), c8 = qq * 8;
+  float sp[8], ep[8], c0[8], c1[8];
+#pragma unroll
+  for (int j = 0; j < 8; ++j) { sp[j] = vec[c8 + j]; ep[j] = vec[D + c8 + j]; c0[j] = 0.f; c1[j] = 0.f; }
+  for (size_t base = 0; base < n; base += T) {            // uniform trip count per warp (shuffles need every lane)
+    const size_t e = base + e0;
+    const bool ok = e < n;
+    const int row = ok ? (int)(e / G8) : -1;
+    float s1 = 0.f, s2 = 0.f;
+    if (ok) {
+      float fy[8], fq[8], fg[8], fd[8];
+      unpack8(reinterpret_cast<const uint4*>(dy)[e], fy);
+      {
+        const float4 a = reinterpret_cast<const float4*>(q)[2 * e], b = reinterpret_cast<const float4*>(q)[2 * e + 1];
+        const float4 u = reinterpret_cast<const float4*>(g)[2 * e], v = reinterpret_cast<const float4*>(g)[2 * e + 1];
+        fq[0] = a.x; fq[1] = a.y; fq[2] = a.z; fq[3] = a.w; fq[4] = b.x; fq[5] = b.y; fq[6] = b.z; fq[7] = b.w;
+        fg[0] = u.x; fg[1] = u.y; fg[2] = u.z; fg[3] = u.w; fg[4] = v.x; fg[5] = v.y; fg[6] = v.z; fg[7] = v.w;
+      }
+      if (ds) {
+        const int dr = M > L * L ? row % L + row / (L * L) * L : row % L;
+        unpack8(*reinterpret_cast<const uint4*>(ds + (size_t)dr * D + c8), fd);
+      } else {
+#pragma unroll
+        for (int j = 0; j < 8; ++j) fd[j] = 1.f;
+      }
+      const float ro = rs_o[row], mo = mu_o[row], rm = ro * mo;
+      float odpr[8], odg[8];
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const float pc = ro * fmaf(-mo, sp[j], fq[j]);   // p - ep
+        const float sg = sigmoidf_fast(fg[j]);
+        const float dpv = fy[j] * fd[j] * sg;
+        odpr[j] = dpv * ro;
+        odg[j] = dpv * (pc + ep[j]) * (1.f - sg);
+        s1 = fmaf(dpv, sp[j], s1);
+        s2 = fmaf(dpv, pc, s2);
+        c0[j] += dpv;
+        c1[j] = fmaf(dpv, rm, c1[j]);
+      }
+      reinterpret_cast<uint4*>(dpr_out)[e] = pack8(odpr);
+      *reinterpret_cast<uint4*>(dg_out + (size_t)row * ldg + c8) = pack8(odg);
+    }
+    seg_sum_atomic(s1, row, S1);                         // a row is G8 lanes of one warp: one add per row onto zero (exact)
+    seg_sum_atomic(s2, row, S2);
+  }
+  // r0 / r1: this block's row of partials, summed over its threads in a fixed order (colsum_kernel adds the rows): deterministic
+  __shared__ float cs[2][256 / G8][D];
+  const int slot = threadIdx.x / G8;                      // threads of one slot own the D channels (q = threadIdx.x % G8)
+#pragma unroll
+  for (int j = 0; j < 8; ++j) { cs[0][slot][c8 + j] = c0[j]; cs[1][slot][c8 + j] = c1[j]; }
+  __syncthreads();
+  for (int k = threadIdx.x; k < 2 * D; k += blockDim.x) {
+    const int w = k / D, c = k % D;
+    float a = 0.f;
+    for (int r = 0; r < 256 / G8; ++r) a += cs[w][r][c];
+    part[(size_t)blockIdx.x * 2 * D + k] = a;
+  }
+}
+
+__device__ __forceinline__ float rsqrt_ftz_(float x) { float y; asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x)); return y; }
+__device__ __forceinline__ float sum8(float v) {         // over the 8 lanes of a row (lane groups of 8)
+  v += __shfl_xor_sync(0xffffffffu, v, 1); v += __shfl_xor_sync(0xffffffffu, v, 2); v += __shfl_xor_sync(0xffffffffu, v, 4);
+  return v;
+}
+constexpr int L64_RR = 2;                                  // rows per thread per step (loads in flight)
+__global__ void __launch_bounds__(256) lnin_bwd64_kernel(const __nv_bfloat16* __restrict__ dxn, const __nv_bfloat16* __restrict__ x,
+                                                          const __nv_bfloat16* __restrict__ dy, const float* __restrict__ gi,
+                                                          __nv_bfloat16* __restrict__ dx, float* __restrict__ part, int M, float eps) {
+  constexpr int D = 64;
+  __shared__ float cs[2][32][D];
+  const int lane = threadIdx.x & 31, sub = lane & 7, rw = threadIdx.x >> 3;   // rw: this thread's row slot in the block (0..31)
+  const int c8 = sub * 8;
+  float gg[8], c0[8], c1[8];
+#pragma unroll
+  for (int j = 0; j < 8; ++j) { gg[j] = gi[c8 + j]; c0[j] = 0.f; c1[j] = 0.f; }
+  for (int row0 = blockIdx.x * 32 * L64_RR; row0 < M; row0 += gridDim.x * 32 * L64_RR) {   // fixed grid: fixed partial order
+    uint4 vd[L64_RR], vx[L64_RR], vy[L64_RR];
+#pragma unroll
+    for (int r = 0; r < L64_RR; ++r) {
+      const int row = row0 + r * 32 + rw;
+      if (row < M) {
+        const size_t e = (size_t)row * 8 + sub;
+        vd[r] = reinterpret_cast<const uint4*>(dxn)[e];
+        vx[r] = reinterpret_cast<const uint4*>(x)[e];
+        vy[r] = reinterpret_cast<const uint4*>(dy)[e];
+      }
+    }
+#pragma unroll
+    for (int r = 0; r < L64_RR; ++r) {
+      const int row = row0 + r * 32 + rw;
+      const bool ok = row < M;                             // every lane runs the shuffles; rows past M contribute nothing
+      float fd[8], fx[8], fy[8];
+      unpack8(ok ? vd[r] : make_uint4(0, 0, 0, 0), fd); unpack8(ok ? vx[r] : make_uint4(0, 0, 0, 0), fx);
+      float s = 0.f;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) s += fx[j];
+      const float mu = sum8(s) * (1.f / D);
+      float v = 0.f;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) { const float d = fx[j] - mu; v = fmaf(d, d, v); }
+      const float rs = rsqrt_ftz_(sum8(v) * (1.f / D) + eps);
+      float a = 0.f, b = 0.f, xh[8];
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        xh[j] = (fx[j] - mu) * rs;
+        const float gd = gg[j] * fd[j];
+        a += gd; b = fmaf(gd, xh[j], b);
+        c0[j] = fmaf(fd[j], xh[j], c0[j]);
+        c1[j] += fd[j];
+      }
+      a = sum8(a) * (1.f / D); b = sum8(b) * (1.f / D);
+      if (ok) {
+        unpack8(vy[r], fy);
+        float o[8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) o[j] = fy[j] + rs * (gg[j] * fd[j] - a - xh[j] * b);
+        reinterpret_cast<uint4*>(dx)[(size_t)row * 8 + sub] = pack8(o);
+      }
+    }
+  }
+#pragma unroll
+  for (int j = 0; j < 8; ++j) { cs[0][rw][c8 + j] = c0[j]; cs[1][rw][c8 + j] = c1[j]; }
+  __syncthreads();
+  if (threadIdx.x < 2 * D) {
+    const int k = threadIdx.x >> 6, c = threadIdx.x & 63;
+    float acc = 0.f;
+#pragma unroll 8
+    for (int w = 0; w < 32; ++w) acc += cs[k][w][c];
+    part[(size_t)blockIdx.x * 2 * D + k * D + c] = acc;     // (dg_i | db_i) row of this block; colsum_kernel adds the rows in order
+  }
+}
+
+}  // namespace wbwd (B200-only additions)
+
+// D64 bidirectional hidden 128: dy [M, 64]; q = t^T Wp'^T, g = xn Wg^T [M, 64] fp32; ds [B L, 64] or none; vec [4, 64] (fold_prep's
+// sp, ep, ...); mu_o / rs_o [M] -> dpr [M, 64]; dg -> dg_out[:, :64] (row stride ldg); S1 / S2 [M]; r01 [128] = (r0 ; r1).
+void hid_gate_bwd(torch::Tensor dy, torch::Tensor q, torch::Tensor g, c10::optional<torch::Tensor> ds, torch::Tensor vec,
+                  torch::Tensor mu_o, torch::Tensor rs_o, torch::Tensor dpr, torch::Tensor dg_out, torch::Tensor S1, torch::Tensor S2,
+                  torch::Tensor r01, int64_t L) {
+  using namespace wbwd;
+  const int M = (int)dy.size(0), D = (int)dy.size(1);
+  TORCH_CHECK(D == 64 && dg_out.stride(1) == 1 && dg_out.stride(0) % 8 == 0 && q.is_contiguous() && g.is_contiguous() &&
+              q.scalar_type() == torch::kFloat32 && g.scalar_type() == torch::kFloat32 && q.size(0) == M && g.size(0) == M);
+  auto st = at::cuda::getCurrentCUDAStream();
+  const __nv_bfloat16* dsp = ds.has_value() ? CBF(*ds) : nullptr;
+  S1.zero_(); S2.zero_();
+  constexpr int NB = 148 * 4;                           // x 256 threads, a multiple of G8 = 8
+  auto part = torch::empty({(int64_t)NB * 2 * D}, S1.options());
+  gate_bwd_fold_kernel<64><<<NB, 256, 0, st>>>(CBF(dy), q.data_ptr<float>(), g.data_ptr<float>(), dsp, vec.data_ptr<float>(),
+      mu_o.data_ptr<float>(), rs_o.data_ptr<float>(), BF(dpr), BF(dg_out), (int)dg_out.stride(0), S1.data_ptr<float>(),
+      S2.data_ptr<float>(), part.data_ptr<float>(), M, (int)L);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  colsum_kernel<<<(2 * D + 31) / 32, 256, 0, st>>>(part.data_ptr<float>(), r01.data_ptr<float>(), NB, 2 * D);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// D64: dxn, x, dy [M, 64] -> dx [M, 64]; dgb [128] = (dg_i ; db_i); the LayerNorm statistics are recomputed from x
+void hid_lnin_bwd(torch::Tensor dxn, torch::Tensor x, torch::Tensor dy, torch::Tensor gi, torch::Tensor dx, torch::Tensor dgb,
+                  double eps) {
+  using namespace wbwd;
+  const int M = (int)x.size(0), D = (int)x.size(1);
+  TORCH_CHECK(D == 64 && dxn.is_contiguous() && x.is_contiguous() && dy.is_contiguous() && dx.is_contiguous());
+  auto st = at::cuda::getCurrentCUDAStream();
+  const int nb = std::min((M + 32 * L64_RR - 1) / (32 * L64_RR), 148 * 4);
+  auto part = torch::empty({(int64_t)nb * 2 * D}, gi.options());
+  lnin_bwd64_kernel<<<nb, 256, 0, st>>>(CBF(dxn), CBF(x), CBF(dy), gi.data_ptr<float>(), BF(dx), part.data_ptr<float>(), M, (float)eps);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  colsum_kernel<<<(2 * D + 31) / 32, 256, 0, st>>>(part.data_ptr<float>(), dgb.data_ptr<float>(), nb, 2 * D);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

@@ -1,0 +1,184 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index aa9172c2a..bb9592372 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -153,6 +153,19 @@ __device__ __forceinline__ float2 logit2(uint32_t w, float s0, float s1, float2
+ // forward: a tile whose exponentials sum past TA_PMAX raises the row's offset (so p, l_r and O_r stay ~2^64 at most: far from
+ // overflow); under TA_PMIN a provisional offset (every key so far masked) takes the tile maximum
+ constexpr float TA_PMAX = 0x1p64f, TA_PMIN = 0x1p-64f;
++#ifndef TB_SLEEP
++#define TB_SLEEP 0       // backward kv: bit 0 TMA warp, 1 S^T MMA warp, 2 grad MMA warp wait with a suspend hint (no issue slots taken from the softmax warps)
++#endif
++__device__ __forceinline__ void wait_sl(uint32_t b, uint32_t parity) {
++  asm volatile("{\n.reg .pred p;\nWAITS_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1, %2;\n@!p bra WAITS_%=;\n}\n" :: "r"(b), "r"(parity), "r"(1000000u) : "memory");
++}
++#define WSL(bit, b, p) do { if (TB_SLEEP & (bit)) wait_sl((b), (p)); else wait((b), (p)); } while (0)
++#ifndef TB_NOEPI
++#define TB_NOEPI 0
++#endif
++#ifndef TB_EARLY
++#define TB_EARLY 0       // backward kv: both S^T / dP^T chunks loaded to registers up front, the TMEM buffer released early
++#endif
+ #ifndef TB_POLY
+ #define TB_POLY 0        // the same split in both backward kernels (each recomputes P: one ex2 per score)
+ #endif
+@@ -914,7 +927,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #define TA_FAKEK 0
+ #endif
+ #if TA_TL          // clock64 timeline of one CTA: [event][stage]
+-__device__ long long g_tl[24][256];
++__device__ long long g_tl[32][256];
+ #define TL(e, y) do { if (blockIdx.x == TA_TL && (y) < 256) g_tl[e][y] = clock64(); } while (0)
+ #else
+ #define TL(e, y) do {} while (0)
+@@ -1108,7 +1121,7 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+       for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
+         int kt, g, bh; decode(t, kt, g, bh);
+         const int b_ = bh / H, h_ = bh % H, kb = lt & 1;
+-        if (lt >= 2) wait(A(kve + kb), ((lt >> 1) - 1) & 1);
++        if (lt >= 2) WSL(1, A(kve + kb), ((lt >> 1) - 1) & 1);
+         expect_tx(A(kvf + kb), KR * 2 * KVT * 2);
+         for (int r = 0; r < KR; ++r) {
+           const int rw = (b_ * N + nrow(g, r)) * S + kt * BN;
+@@ -1119,14 +1132,14 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+           const int qs = w >> 1, r = w & 1, sl = y % KB_NQ;
+           if (r == 0) {
+             const int jb = lt * NQS + qs, bs = jb % KB_NB;
+-            if (jb >= KB_NB) wait(A(be + bs), ((jb / KB_NB) - 1) & 1);
++            if (jb >= KB_NB) WSL(1, A(be + bs), ((jb / KB_NB) - 1) & 1);
+             if (TA_BIAS1 && jb >= KB_NB) arrive(A(bf + bs));   // timing only
+             else {
+             expect_tx(A(bf + bs), KB_BT * 4);
+             for (int hh = 0; hh < 2; ++hh) load_2d(&bmap, A(sB + bs * KB_BT + hh * BN * 32), A(bf + bs), qs * KB_QW + hh * 32, bh * S + kt * BN);
+             }
+           }
+-          if (y >= KB_NQ) wait(A(qe + sl), ((y / KB_NQ) - 1) & 1);
++          if (y >= KB_NQ) WSL(1, A(qe + sl), ((y / KB_NQ) - 1) & 1);
+           if (TA_QD1 && y >= KB_NQ) { arrive(A(qf + sl)); continue; }   // timing only
+           expect_tx(A(qf + sl), 2 * KB_QT * 2 + 2 * KB_QW * 4);
+           const int rw = (b_ * N + nrow(g, r)) * S + qs * KB_QW;
+@@ -1155,12 +1168,16 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+         const int r = w & 1, kb = lt & 1;
+         TL(0, y);
+         const uint32_t okq = probe(qfa + sl * 8, slp);
++        TL(16, y);
+         const uint32_t oke = y >= 2 ? probe(sea + r * 8, gp ^ 1) : 1u;     // group r loaded its previous S^T
++        TL(17, y);
+         const uint32_t okb = r == 0 ? probe(bfa + bs * 8, bsp) : 1u;
+-        if (w == 0) wait(kvfa + kb * 8, (lt >> 1) & 1);
+-        if (!okq) wait(qfa + sl * 8, slp);
+-        if (!oke) wait(sea + r * 8, gp ^ 1);
+-        if (!okb) wait(bfa + bs * 8, bsp);
++        TL(18, y);
++        if (w == 0) WSL(2, kvfa + kb * 8, (lt >> 1) & 1);
++        if (!okq) WSL(2, qfa + sl * 8, slp);
++        if (!oke) WSL(2, sea + r * 8, gp ^ 1);
++        if (!okb) WSL(2, bfa + bs * 8, bsp);
++        TL(19, y);
+         tc_fence_after();
+         const uint64_t bq = dQ0 + sl * SLOT, ak = dKV0 + (kb * KR + r) * KVROW;
+         const uint32_t d = tmem + r * 128;
+@@ -1184,8 +1201,8 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+         const bool first = w < 2, last = w >= SPT - 2;
+         TL(2, p);
+         const uint32_t okp = probe(pfa + r * 8, gp);
+-        if (first && lt >= 1) wait(dea + r * 8, (lt - 1) & 1);   // the row's accumulators of the previous task were drained
+-        if (!okp) wait(pfa + r * 8, gp);
++        if (first && lt >= 1) WSL(4, dea + r * 8, (lt - 1) & 1);   // the row's accumulators of the previous task were drained
++        if (!okp) WSL(4, pfa + r * 8, gp);
+         TL(3, p);
+         tc_fence_after();
+         const uint64_t bm = dM0 + sl * SLOT;
+@@ -1221,10 +1238,23 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+         if (lane == 0 && qq == 2) TL(5 + gi * 6, y);
+         tc_fence_after();
+         const float* ld = sLD + sl * 2 * KB_QW;
++#if TB_EARLY
++        float svE[2][32], dpE[2][32];   // both chunks of S^T and dP^T in registers at once: the group's S^T | dP^T TMEM buffer is released after the loads, not after the chunk-0 math
++        tmem_ld32(tS, svE[0]); tmem_ld32(tS + 64, dpE[0]); tmem_ld32(tS + 32, svE[1]); tmem_ld32(tS + 96, dpE[1]);
++        tmem_wait_ld();
++        tc_fence_before();
++        __syncwarp();
++        if (lane == 0) arrive(A(se + gi));
++#endif
+ #pragma unroll
+         for (int c = 0; c < 2; ++c) {              // 32-query chunks (registers)
++#if TB_EARLY
++          float (&sv)[32] = svE[c]; float (&dp)[32] = dpE[c]; float bl[32];
++#else
+           float sv[32], dp[32], bl[32];
+-#if TA_NOLD
++#endif
++#if TB_EARLY
++#elif TA_NOLD
+ #pragma unroll
+           for (int i = 0; i < 32; ++i) { sv[i] = __int_as_float(tS + i + c); dp[i] = sv[i] * 0.5f; }
+ #else
+@@ -1247,9 +1277,15 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+           tmem_wait_ld();
+           if (c == 1) {                             // both chunks loaded: the group's S^T buffer takes its next stage
+             fence_proxy_async();                    // the bias^T tile's reads, before its release: an arrive alone does not wait for outstanding LDS
++#if TB_EARLY
++            __syncwarp();
++            if (lane == 0) arrive(A(be + bs));
++#else
+             tc_fence_before();
+             __syncwarp();
++            if (lane == 0 && qq == 2) TL(28 + gi, y);
+             if (lane == 0) { arrive(A(se + gi)); arrive(A(be + bs)); }
++#endif
+           }
+           uint32_t pk[16], dk[16];
+ #if TA_NOMATH
+@@ -1300,7 +1336,9 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+         if (lane == 0 && qq == 2) TL(7 + gi * 6, y);
+       }
+       // ---- dK / dV of row gi ----
++      if (gi == 0 && qq == 2 && lane == 0) TL(20, lt);
+       wait(A(dfr + gi), lt & 1);
++      if (gi == 0 && qq == 2 && lane == 0) TL(21, lt);
+       tc_fence_after();
+       float v[32], kk[32];
+       tmem_ld32(tmem_at(tmem + KB_COL_G + gi * 64, qq * 32, 0), v);
+@@ -1309,8 +1347,15 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+       tc_fence_before();
+       __syncwarp();
+       if (lane == 0) arrive(A(de + gi));           // the accumulators are free for the next task
++      if (gi == 0 && qq == 2 && lane == 0) TL(22, lt);
++#if TB_NOEPI
++      if (v[0] == 1.2345f && kk[0] == 2.5f) { store_2d(&dvmap, A(sO), 0, 0); }   // (ablation: no drain)
++      continue;
++#endif
+       if (lead) bulk_wait_read<0>();               // the previous task's stores have read the out tiles
++      if (gi == 0 && lead) TL(24, lt);
+       named_sync(1 + gi, 128);
++      if (gi == 0 && lead) TL(25, lt);
+       {
+         uint32_t wv[16], wk[16];
+ #pragma unroll
+@@ -1318,13 +1363,16 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+         row_sw64_st(sO + gi * 2 * KVT, k, wv);
+         row_sw64_st(sO + gi * 2 * KVT + KVT, k, wk);
+       }
++      if (gi == 0 && lead) TL(26, lt);
+       fence_proxy_async();
+       named_sync(1 + gi, 128);
++      if (gi == 0 && lead) TL(27, lt);
+       if (lead && g * KR + gi < N) {
+         const int rw = (b_ * N + g * KR + gi) * S + kt * BN;
+         store_2d(&dvmap, A(sO + gi * 2 * KVT), h_ * D, rw);
+         store_2d(&dkmap, A(sO + gi * 2 * KVT + KVT), h_ * D, rw);
+         bulk_commit();
++        if (gi == 0) TL(23, lt);
+       }
+     }
+     if (lead) bulk_wait<0>();
+@@ -1710,7 +1758,7 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
+ torch::Tensor triattn_ftl() { auto t = torch::empty({40}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), g_ftl, sizeof(g_ftl))); return t; }
+ #endif
+ #if TA_TL
+-torch::Tensor triattn_tl() { auto t = torch::empty({24, 256}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), g_tl, sizeof(g_tl))); return t; }
++torch::Tensor triattn_tl() { auto t = torch::empty({32, 256}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), g_tl, sizeof(g_tl))); return t; }
+ #endif
+ // delta = rowsum(dout o out) fp32 [B, N, H, S] from dout / out [B, N, S, H, 32] bf16
+ torch::Tensor triattn_delta_rows(torch::Tensor dout, torch::Tensor out) {

@@ -1,0 +1,211 @@
+row	dtype	stream	L	D	n	M	t_us	t_sol_us	bound	SOL%	SOL%+floor	t_sol_fp16	SOL%fp16	SOL%sustained
+25	master	token_pair	128	64	2	16384	12.10	0.65	mem	5.4	55.8			5.4
+25	master	token_pair	256	64	2	65536	16.26	2.57	mem	15.8	53.3			15.8
+25	master	token_pair	384	64	2	147456	22.34	5.77	mem	25.8	53.1			25.8
+25	master	token_pair	512	64	2	262144	32.48	10.24	mem	31.5	50.3			31.5
+25	master	token_pair	640	64	2	409600	42.98	15.99	mem	37.2	51.4			37.2
+25	master	token_pair	768	64	2	589824	57.26	23.02	mem	40.2	50.8			40.2
+25	master	token_pair	1024	64	2	1048576	92.16	40.90	mem	44.4	51.0			44.4
+25	master	token_pair	1536	64	2	2359296	191.33	92.02	mem	48.1	51.3			48.1
+25	master	token_pair	2048	64	2	4194304	328.08	163.57	mem	49.9	51.7			49.9
+26	master	token_pair	128	64	4	16384	12.16	1.03	tensor	8.4	58.6			9.7
+26	master	token_pair	256	64	4	65536	20.35	4.10	tensor	20.2	50.1			23.2
+26	master	token_pair	384	64	4	147456	30.45	9.23	tensor	30.3	50.4			34.9
+26	master	token_pair	512	64	4	262144	44.78	16.41	tensor	36.6	50.3			42.2
+26	master	token_pair	640	64	4	409600	63.23	25.64	tensor	40.6	50.2			46.7
+26	master	token_pair	768	64	4	589824	85.82	36.93	tensor	43.0	50.1			49.5
+26	master	token_pair	1024	64	4	1048576	141.14	65.65	tensor	46.5	50.8			53.5
+26	master	token_pair	1536	64	4	2359296	295.73	147.71	tensor	49.9	52.0			57.5
+26	master	token_pair	2048	64	4	4194304	513.84	262.59	tensor	51.1	52.3			58.8
+27	float32	token_pair	128	128	2	16384	16.19	3.85	tensor	23.8	61.5	2.62	16.2	16.2
+27	float32	token_pair	256	128	2	65536	36.75	15.42	tensor	42.0	58.5	10.28	28.0	28.0
+27	float32	token_pair	384	128	2	147456	61.47	34.69	tensor	56.4	66.4	23.06	37.5	37.5
+27	float32	token_pair	512	128	2	262144	98.26	61.67	tensor	62.8	69.0	40.95	41.7	41.7
+27	float32	token_pair	640	128	2	409600	145.18	96.36	tensor	66.4	70.6	63.95	44.0	44.0
+27	float32	token_pair	768	128	2	589824	200.72	138.76	tensor	69.1	72.2	92.06	45.9	45.9
+27	float32	token_pair	1024	128	2	1048576	341.98	246.69	tensor	72.1	73.9	163.62	47.8	47.8
+27	float32	token_pair	1536	128	2	2359296	763.66	555.05	tensor	72.7	73.5	368.06	48.2	48.2
+27	float32	token_pair	2048	128	2	4194304	1403.79	986.76	tensor	70.3	70.7	654.28	46.6	46.6
+27	master	token_pair	128	128	2	16384	16.14	2.05	tensor	12.7	50.5			14.6
+27	master	token_pair	256	128	2	65536	26.50	8.21	tensor	31.0	54.0			35.6
+27	master	token_pair	384	128	2	147456	42.88	18.46	tensor	43.1	57.3			49.5
+27	master	token_pair	512	128	2	262144	65.50	32.82	tensor	50.1	59.4			57.6
+27	master	token_pair	640	128	2	409600	96.13	51.29	tensor	53.4	59.7			61.4
+27	master	token_pair	768	128	2	589824	132.67	73.85	tensor	55.7	60.3			64.0
+27	master	token_pair	1024	128	2	1048576	219.23	131.29	tensor	59.9	62.7			68.9
+27	master	token_pair	1536	128	2	2359296	479.10	295.41	tensor	61.7	62.9			70.9
+27	master	token_pair	2048	128	2	4194304	867.34	525.18	tensor	60.6	61.3			69.7
+28	master	token_pair	128	128	4	16384	18.24	4.10	tensor	22.5	55.9			25.9
+28	master	token_pair	256	128	4	65536	34.69	16.41	tensor	47.3	64.9			54.4
+28	master	token_pair	384	128	4	147456	55.10	36.93	tensor	67.0	78.1			77.1
+28	master	token_pair	512	128	4	262144	86.00	65.65	tensor	76.3	83.4			87.8
+28	master	token_pair	640	128	4	409600	126.78	102.57	tensor	80.9	85.7			93.1
+28	master	token_pair	768	128	4	589824	178.02	147.71	tensor	83.0	86.4			95.4
+28	master	token_pair	1024	128	4	1048576	306.14	262.59	tensor	85.8	87.8			98.7
+28	master	token_pair	1536	128	4	2359296	691.15	590.82	tensor	85.5	86.4			98.3
+28	master	token_pair	2048	128	4	4194304	1244.94	1050.36	tensor	84.4	84.9			97.1
+29	float32	token_pair	128	256	2	16384	28.48	15.42	tensor	54.1	75.6	8.40	29.5	35.1
+29	float32	token_pair	256	256	2	65536	81.89	61.67	tensor	75.3	82.8	33.62	41.1	48.8
+29	float32	token_pair	384	256	2	147456	157.70	138.76	tensor	88.0	91.9	75.64	48.0	57.0
+29	float32	token_pair	512	256	2	262144	264.06	246.69	tensor	93.4	95.7	134.47	50.9	60.5
+29	float32	token_pair	640	256	2	409600	408.11	385.45	tensor	94.4	95.9	210.11	51.5	61.2
+29	float32	token_pair	768	256	2	589824	583.46	555.05	tensor	95.1	96.2	302.56	51.9	61.6
+29	float32	token_pair	1024	256	2	1048576	1029.31	986.76	tensor	95.9	96.5	537.89	52.3	62.1
+29	float32	token_pair	1536	256	2	2359296	2330.96	2220.21	tensor	95.2	95.5	1210.24	51.9	61.7
+29	float32	token_pair	2048	256	2	4194304	4684.83	3947.03	tensor	84.3	84.4	2151.55	45.9	54.6
+29	master	token_pair	128	256	2	16384	24.67	8.21	tensor	33.3	58.0			38.3
+29	master	token_pair	256	256	2	65536	59.28	32.82	tensor	55.4	65.7			63.7
+29	master	token_pair	384	256	2	147456	101.79	73.85	tensor	72.6	78.5			83.5
+29	master	token_pair	512	256	2	262144	161.71	131.29	tensor	81.2	85.0			93.4
+29	master	token_pair	640	256	2	409600	245.66	205.15	tensor	83.5	86.0			96.1
+29	master	token_pair	768	256	2	589824	354.24	295.41	tensor	83.4	85.1			95.9
+29	master	token_pair	1024	256	2	1048576	628.74	525.18	tensor	83.5	84.5			96.1
+29	master	token_pair	1536	256	2	2359296	1436.45	1181.65	tensor	82.3	82.7			94.6
+29	master	token_pair	2048	256	2	4194304	2677.49	2100.71	tensor	78.5	78.7			90.3
+30	master	token_pair	128	256	4	16384	34.62	16.41	tensor	47.4	65.0			54.5
+30	master	token_pair	256	256	4	65536	92.16	65.65	tensor	71.2	77.9			81.9
+30	master	token_pair	384	256	4	147456	167.82	147.71	tensor	88.0	91.6			101.2
+30	master	token_pair	512	256	4	262144	282.43	262.59	tensor	93.0	95.1			107.0
+30	master	token_pair	640	256	4	409600	441.04	410.29	tensor	93.0	94.4			107.0
+30	master	token_pair	768	256	4	589824	649.07	590.82	tensor	91.0	92.0			104.7
+30	master	token_pair	1024	256	4	1048576	1277.25	1050.36	tensor	82.2	82.7			94.6
+30	master	token_pair	1536	256	4	2359296	2644.27	2363.30	tensor	89.4	89.6			102.8
+30	master	token_pair	2048	256	4	4194304	5201.62	4201.42	tensor	80.8	80.9			92.9
+31	master	token_pair	128	384	2	16384	39.14	18.46	tensor	47.2	62.8			54.3
+31	master	token_pair	256	384	2	65536	120.83	73.85	tensor	61.1	66.2			70.3
+31	master	token_pair	384	384	2	147456	219.14	166.17	tensor	75.8	78.6			87.2
+31	master	token_pair	512	384	2	262144	366.37	295.41	tensor	80.6	82.3			92.8
+31	master	token_pair	640	384	2	409600	565.25	461.58	tensor	81.7	82.7			93.9
+31	master	token_pair	768	384	2	589824	814.91	664.68	tensor	81.6	82.3			93.8
+31	master	token_pair	1024	384	2	1048576	1433.65	1181.65	tensor	82.4	82.8			94.8
+31	master	token_pair	1536	384	2	2359296	3564.94	2658.71	tensor	74.6	74.8			85.8
+31	master	token_pair	2048	384	2	4194304	6407.41	4726.60	tensor	73.8	73.9			84.9
+31	master	token_pair	2976	384	2	8856576	13773.71	9980.55	tensor	72.5	72.5			83.4
+31	master	token_pair	3968	384	2	15745024	24679.25	17743.20	tensor	71.9	71.9			82.7
+32	master	token_pair	128	384	4	16384	57.26	36.93	tensor	64.5	75.1			74.2
+32	master	token_pair	256	384	4	65536	190.40	147.71	tensor	77.6	80.8			89.2
+32	master	token_pair	384	384	4	147456	362.37	332.34	tensor	91.7	93.4			105.5
+32	master	token_pair	512	384	4	262144	630.30	590.82	tensor	93.7	94.7			107.8
+32	master	token_pair	640	384	4	409600	983.10	923.16	tensor	93.9	94.5			108.0
+32	master	token_pair	768	384	4	589824	1438.51	1329.36	tensor	92.4	92.8			106.3
+32	master	token_pair	1024	384	4	1048576	3113.17	2363.30	tensor	75.9	76.1			87.3
+32	master	token_pair	1536	384	4	2359296	6333.18	5317.42	tensor	84.0	84.1			96.6
+32	master	token_pair	2048	384	4	4194304	11420.03	9453.20	tensor	82.8	82.8			95.2
+33	float32	token_pair	128	512	2	16384	81.73	61.67	tensor	75.5	82.9	33.62	41.1	48.9
+33	float32	token_pair	256	512	2	65536	253.65	246.69	tensor	97.3	99.7	134.47	53.0	63.0
+33	float32	token_pair	384	512	2	147456	541.92	555.05	tensor	102.4	103.5	302.56	55.8	66.4
+33	float32	token_pair	512	512	2	262144	939.86	986.76	tensor	105.0	105.6	537.89	57.2	68.0
+33	float32	token_pair	640	512	2	409600	1463.07	1541.81	tensor	105.4	105.8	840.45	57.4	68.3
+33	float32	token_pair	768	512	2	589824	2129.26	2220.21	tensor	104.3	104.6	1210.24	56.8	67.5
+33	master	token_pair	128	512	2	16384	61.39	32.82	tensor	53.5	63.4			61.5
+33	master	token_pair	256	512	2	65536	190.46	131.29	tensor	68.9	72.1			79.3
+33	master	token_pair	384	512	2	147456	376.88	295.41	tensor	78.4	80.0			90.2
+33	master	token_pair	512	512	2	262144	665.41	525.18	tensor	78.9	79.8			90.8
+33	master	token_pair	640	512	2	409600	1047.95	820.59	tensor	78.3	78.9			90.1
+33	master	token_pair	768	512	2	589824	1600.32	1181.65	tensor	73.8	74.2			84.9
+34	master	token_pair	128	512	4	16384	92.08	65.65	tensor	71.3	77.9			82.0
+34	master	token_pair	256	512	4	65536	317.57	262.59	tensor	82.7	84.6			95.1
+34	master	token_pair	384	512	4	147456	688.11	590.82	tensor	85.9	86.7			98.8
+34	master	token_pair	512	512	4	262144	1270.70	1050.36	tensor	82.7	83.1			95.1
+34	master	token_pair	640	512	4	409600	2002.70	1641.18	tensor	81.9	82.3			94.3
+34	master	token_pair	768	512	4	589824	3171.20	2363.30	tensor	74.5	74.7			85.7
+35	float32	token_single	128	384	2	128	12.30	0.60	mem	4.9	54.4	0.60	4.9	4.9
+35	float32	token_single	256	384	2	256	14.11	0.66	mem	4.7	47.9	0.66	4.7	4.7
+35	float32	token_single	384	384	2	384	14.11	0.81	tensor	5.8	49.0	0.72	5.1	5.1
+35	float32	token_single	512	384	2	512	14.14	1.08	tensor	7.7	50.8	0.78	5.5	5.5
+35	float32	token_single	640	384	2	640	14.11	1.36	tensor	9.6	52.8	0.84	5.9	6.2
+35	float32	token_single	768	384	2	768	14.18	1.63	tensor	11.5	54.5	0.90	6.3	7.4
+35	float32	token_single	1024	384	2	1024	15.82	2.17	tensor	13.7	52.3	1.18	7.5	8.9
+35	float32	token_single	1536	384	2	1536	16.16	3.25	tensor	20.1	57.9	1.77	11.0	13.0
+35	float32	token_single	2048	384	2	2048	18.30	4.34	tensor	23.7	57.0	2.36	12.9	15.3
+35	master	token_single	128	384	2	128	14.11	0.57	mem	4.0	47.3			4.0
+35	master	token_single	256	384	2	256	14.21	0.60	mem	4.2	47.2			4.2
+35	master	token_single	384	384	2	384	14.11	0.63	mem	4.5	47.7			4.5
+35	master	token_single	512	384	2	512	14.14	0.66	mem	4.7	47.8			4.7
+35	master	token_single	640	384	2	640	14.18	0.72	tensor	5.1	48.1			5.9
+35	master	token_single	768	384	2	768	14.18	0.87	tensor	6.1	49.1			7.0
+35	master	token_single	1024	384	2	1024	16.13	1.15	tensor	7.2	45.0			8.2
+35	master	token_single	1536	384	2	1536	16.16	1.73	tensor	10.7	48.5			12.3
+35	master	token_single	2048	384	2	2048	18.24	2.31	tensor	12.7	46.1			14.6
+36	master	token_single	128	384	4	128	16.10	1.11	mem	6.9	44.8			6.9
+36	master	token_single	256	384	4	256	16.26	1.14	mem	7.0	44.5			7.0
+36	master	token_single	384	384	4	384	16.22	1.17	mem	7.2	44.8			7.2
+36	master	token_single	512	384	4	512	16.26	1.20	mem	7.4	44.9			8.2
+36	master	token_single	640	384	4	640	18.21	1.44	tensor	7.9	41.4			9.1
+36	master	token_single	768	384	4	768	18.21	1.73	tensor	9.5	43.0			10.9
+36	master	token_single	1024	384	4	1024	18.26	2.31	tensor	12.6	46.1			14.5
+36	master	token_single	1536	384	4	1536	18.30	3.46	tensor	18.9	52.2			21.8
+36	master	token_single	2048	384	4	2048	20.29	4.62	tensor	22.8	52.8			26.2
+36	master	token_single	2976	384	4	2976	28.51	6.71	tensor	23.5	44.9			27.1
+36	master	token_single	3968	384	4	3968	26.43	8.94	tensor	33.8	56.9			38.9
+37	float32	token_single	128	768	2	128	16.19	2.28	mem	14.1	51.7	2.28	14.1	14.1
+37	float32	token_single	256	768	2	256	16.26	2.40	mem	14.7	52.3	2.40	14.7	14.7
+37	float32	token_single	384	768	2	384	18.24	3.25	tensor	17.8	51.3	2.52	13.8	13.8
+37	float32	token_single	512	768	2	512	20.29	4.34	tensor	21.4	51.4	2.64	13.0	13.8
+37	float32	token_single	640	768	2	640	20.32	5.42	tensor	26.7	56.7	2.95	14.5	17.3
+37	float32	token_single	768	768	2	768	20.32	6.50	tensor	32.0	62.0	3.55	17.4	20.7
+37	float32	token_single	1024	768	2	1024	22.64	8.67	tensor	38.3	65.3	4.73	20.9	24.8
+37	float32	token_single	1536	768	2	1536	24.38	13.01	tensor	53.4	78.4	7.09	29.1	34.6
+37	float32	token_single	2048	768	2	2048	40.74	17.35	tensor	42.6	57.6	9.46	23.2	27.6
+37	master	token_single	128	768	2	128	14.26	2.22	mem	15.6	58.3			15.6
+37	master	token_single	256	768	2	256	16.26	2.28	mem	14.0	51.5			14.0
+37	master	token_single	384	768	2	384	16.38	2.34	mem	14.3	51.5			14.3
+37	master	token_single	512	768	2	512	20.26	2.40	mem	11.8	41.9			13.1
+37	master	token_single	640	768	2	640	20.29	2.88	tensor	14.2	44.3			16.4
+37	master	token_single	768	768	2	768	20.34	3.46	tensor	17.0	47.0			19.6
+37	master	token_single	1024	768	2	1024	22.40	4.62	tensor	20.6	47.8			23.7
+37	master	token_single	1536	768	2	1536	24.35	6.92	tensor	28.4	53.5			32.7
+37	master	token_single	2048	768	2	2048	26.43	9.23	tensor	34.9	58.0			40.2
+38	master	msa_token	128	64	4	49152	18.24	3.08	tensor	16.9	50.3			19.4
+38	master	msa_token	256	64	4	98304	24.48	6.15	tensor	25.1	50.1			28.9
+38	master	msa_token	384	64	4	147456	30.34	9.23	tensor	30.4	50.5			35.0
+38	master	msa_token	512	64	4	196608	36.67	12.31	tensor	33.6	50.2			38.6
+38	master	msa_token	640	64	4	245760	40.96	15.39	tensor	37.6	52.5			43.2
+38	master	msa_token	768	64	4	294912	48.94	18.46	tensor	37.7	50.2			43.4
+38	master	msa_token	1024	64	4	393216	59.33	24.62	tensor	41.5	51.8			47.7
+38	master	msa_token	1536	64	4	589824	84.02	36.93	tensor	44.0	51.2			50.6
+38	master	msa_token	2048	64	4	786432	108.35	49.24	tensor	45.4	51.1			52.3
+39	master	msa_token	128	128	4	131072	50.98	32.82	tensor	64.4	76.4			74.1
+39	master	msa_token	256	128	4	262144	85.92	65.65	tensor	76.4	83.5			87.9
+39	master	msa_token	384	128	4	393216	120.74	98.47	tensor	81.6	86.6			93.8
+39	master	msa_token	512	128	4	524288	157.52	131.29	tensor	83.4	87.2			95.9
+39	master	msa_token	640	128	4	655360	192.59	164.12	tensor	85.2	88.4			98.0
+39	master	msa_token	768	128	4	786432	231.26	196.94	tensor	85.2	87.8			98.0
+39	master	msa_token	1024	128	4	1048576	305.10	262.59	tensor	86.1	88.1			99.0
+39	master	msa_token	1536	128	4	1572864	455.09	393.88	tensor	86.6	87.9			99.6
+39	master	msa_token	2048	128	4	2097152	612.13	525.18	tensor	85.8	86.8			98.7
+40	master	msa_token	128	256	4	131072	149.41	131.29	tensor	87.9	92.0			101.1
+40	master	msa_token	256	256	4	262144	282.50	262.59	tensor	93.0	95.1			106.9
+40	master	msa_token	384	256	4	393216	419.79	393.88	tensor	93.8	95.3			107.9
+40	master	msa_token	512	256	4	524288	563.01	525.18	tensor	93.3	94.4			107.3
+40	master	msa_token	640	256	4	655360	718.59	656.47	tensor	91.4	92.2			105.1
+40	master	msa_token	768	256	4	786432	853.79	787.77	tensor	92.3	93.0			106.1
+
+# summary (cases, SOL% min / median / max; count >= 90 / 70 / 50)
+# master SOL%: n=139 min 4.0 med 59.9 max 93.9; >=90 12 >=70 62 >=50 76
+# master SOL%+floor: n=139 min 41.4 med 64.9 max 95.3; >=90 14 >=70 66 >=50 118
+# master SOL%sustained-peak: n=139 min 4.0 med 68.9 max 108.0; >=90 48 >=70 68 >=50 83
+# float32 SOL%: n=42 min 4.7 med 55.3 max 105.4; >=90 10 >=70 17 >=50 23
+# float32 SOL%+floor: n=42 min 47.9 med 69.8 max 105.8; >=90 11 >=70 21 >=50 40
+# float32 SOL%sustained-peak: n=42 min 4.7 med 36.3 max 68.3; >=90 0 >=70 0 >=50 12
+# all SOL%: n=181 min 4.0 med 56.4 max 105.4; >=90 22 >=70 79 >=50 99
+# all SOL%+floor: n=181 min 41.4 med 65.7 max 105.8; >=90 25 >=70 87 >=50 158
+# all SOL%sustained-peak: n=181 min 4.0 med 54.4 max 108.0; >=90 48 >=70 68 >=50 95
+# float32 vs fp16 kind::f16 peak: n=42 min 4.7 med 33.5 max 57.4; >=90 0 >=70 0 >=50 10
+
+# lowest 15 (SOL%)
+# row 35 master L128 D384 n2 t 14.11 t_sol 0.57 mem 4.0% (+floor 47.3%)
+# row 35 master L256 D384 n2 t 14.21 t_sol 0.60 mem 4.2% (+floor 47.2%)
+# row 35 master L384 D384 n2 t 14.11 t_sol 0.63 mem 4.5% (+floor 47.7%)
+# row 35 master L512 D384 n2 t 14.14 t_sol 0.66 mem 4.7% (+floor 47.8%)
+# row 35 float32 L256 D384 n2 t 14.11 t_sol 0.66 mem 4.7% (+floor 47.9%)
+# row 35 float32 L128 D384 n2 t 12.30 t_sol 0.60 mem 4.9% (+floor 54.4%)
+# row 35 master L640 D384 n2 t 14.18 t_sol 0.72 tensor 5.1% (+floor 48.1%)
+# row 25 master L128 D64 n2 t 12.10 t_sol 0.65 mem 5.4% (+floor 55.8%)
+# row 35 float32 L384 D384 n2 t 14.11 t_sol 0.81 tensor 5.8% (+floor 49.0%)
+# row 35 master L768 D384 n2 t 14.18 t_sol 0.87 tensor 6.1% (+floor 49.1%)
+# row 36 master L128 D384 n4 t 16.10 t_sol 1.11 mem 6.9% (+floor 44.8%)
+# row 36 master L256 D384 n4 t 16.26 t_sol 1.14 mem 7.0% (+floor 44.5%)
+# row 35 master L1024 D384 n2 t 16.13 t_sol 1.15 tensor 7.2% (+floor 45.0%)
+# row 36 master L384 D384 n4 t 16.22 t_sol 1.17 mem 7.2% (+floor 44.8%)
+# row 36 master L512 D384 n4 t 16.26 t_sol 1.20 mem 7.4% (+floor 44.9%)

@@ -65,6 +65,9 @@ COND_WIDTHS_H100 = (384, 768)
 QK_WEIGHTS = ("attention.norm_query.weight", "attention.norm_key.weight")
 #: Packed runners keyed by the weights' (pointer, version): see ``_infer``.
 _RUNNERS: dict = _capture.weight_cache("token_dit.runners")
+#: the hoisted pair biases a runner keeps beyond the newest (bytes; ``_infer``): B200's per-trunk_seed steps of a B > 1 call (FoldForge R18:
+#: 5 folds x [16, L, L] bf16 at L 256 = 10 MB) each find their fold's bias
+BIAS_CACHE_BYTES = 64 << 20
 
 
 # ------------------------------------------------------------------------------------------------ the models' options
@@ -254,33 +257,43 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
     if pair.ndim != 4 or tuple(pair.shape[:3]) != (single.shape[1], single.shape[2], single.shape[2]):
         return False
     if single.shape[1] != 1 and not (
-        # B trunk_seeds, each its own pair (the grouped-bias attention): bf16 on H100 only, a pair per trunk_seed
+        # B trunk_seeds, each its own pair: bf16, a pair per trunk_seed -- H100 the grouped-bias attention, B200 one B = 1 step per trunk_seed
+        # (``update``; the default options only)
         single.dtype is torch.bfloat16
         and pair.ndim == 4
         and pair.shape[0] == single.shape[1]
-        and torch.cuda.get_device_capability(single.device) == (9, 0)
+        and (
+            torch.cuda.get_device_capability(single.device) == (9, 0)
+            or (torch.cuda.get_device_capability(single.device) == (10, 0) and not _b200_options(module))
+        )
     ):
         return False
     d = single.shape[-1]
     if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * d:
         return False
-    # cond 384; 768 (ESMFold2's token DiT) on H100, where the weight pack and the conditioning rows are built per cond width
+    # cond 384; 768 (ESMFold2's token DiT) on H100 and B200, where the weight pack and the conditioning rows are built per cond width
     if cond.shape[-1] != _cond_width(module) or not (
-        cond.shape[-1] == 384 or (cond.shape[-1] in COND_WIDTHS_H100 and torch.cuda.get_device_capability(single.device) == (9, 0))
+        cond.shape[-1] == 384
+        or (cond.shape[-1] in COND_WIDTHS_H100 and torch.cuda.get_device_capability(single.device) in ((9, 0), (10, 0)))
     ):
         return False
     # the pair enters once per sample, through the bias hoist: 128 everywhere; 256 (Protenix-v2's diffusion pair) and 512
     # (IntelliFold2's) on H100, where the hoist normalises it with the CUDA LayerNorm rows (``conditioned_transition.cuda._pair_bias_wide``;
     # fp32 takes ``_native_fp32_inference`` above)
     if pair.shape[-1] != 128 and not (
-        pair.shape[-1] in PAIR_WIDTHS_H100 and single.dtype is torch.bfloat16 and torch.cuda.get_device_capability(single.device) == (9, 0)
+        pair.shape[-1] in PAIR_WIDTHS_H100
+        and (
+            (single.dtype is torch.bfloat16 and torch.cuda.get_device_capability(single.device) == (9, 0))
+            # B200: bf16 and fp32, the composed runner's wide-pair hoist (CUDA LayerNorm rows + one GEMM, ``FusedTokenDiTComposed._hoist``)
+            or torch.cuda.get_device_capability(single.device) == (10, 0)
+        )
     ):
         return False
     # One conditioning shared by the samples (a sampling step: L table rows) or one per sample (S L rows); the runner
     # takes either (FusedTokenDiT._cond). Anything else does not describe these samples.
     if cond.shape[0] not in (1, single.shape[0]) or cond.shape[1:3] != single.shape[1:3]:
         return False
-    if not _norms_ok(module, h100=torch.cuda.get_device_capability(single.device) == (9, 0)):
+    if not _norms_ok(module, h100=torch.cuda.get_device_capability(single.device) in ((9, 0), (10, 0))):
         return False
     cap = torch.cuda.get_device_capability(single.device)
     if a.use_qk_norm and not (cap in ((9, 0), (10, 0)) and _cuda_rows()):
@@ -289,6 +302,9 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         return False  # the other head layouts: the CUDA rows (H100: attn_fwd.cu / attn_tf32.cu per layout; B200: sm_100a core)
     if cap == (10, 0):
         # any length, through the sm_100a core (a length the Triton gated core cannot tile needs it)
+        # a model's options: ``conditioned_transition.cuda.token_inference`` with the B200 cores (L a multiple of 128)
+        if _b200_options(module):
+            return single.shape[2] % 128 == 0
         if single.shape[2] % 128 == 0 and (a.n_head, d) == (16, 768):
             return True
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
@@ -296,6 +312,19 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
         return sm100.inference_core_supported(single.dtype, _pad8(single.shape[2]), d, a.n_head, idx)
     return cap == (9, 0) and single.shape[2] % 128 == 0 and (a.n_head, d) in LAYOUTS
+
+
+def _variant_default() -> tuple[float, ...]:
+    from miniworld_engine.kernels.conditioned_transition.cuda import VARIANT_DEFAULT
+
+    return VARIANT_DEFAULT
+
+
+def _b200_options(module) -> bool:
+    """A block with model options (Boltz-2, RoseTTAFold3, Chai-1): on B200 it runs ``conditioned_transition.cuda.token_inference`` (the H100
+    composition with the B200 gated cores, cuBLAS + the SwiGLU rows), the default options the composed runner."""
+    opts = options(module)
+    return opts is not None and opts != _variant_default()
 
 
 def serves_extra_bias(single, extra) -> bool:
@@ -352,7 +381,9 @@ def _infer_launch(
     otherwise -- or a flat q / k LayerNorm, then the option leaves); ``variant``: its ``options`` (H100; off H100 the defaults only).
 
     ``extra``: an [L, L] logit bias for every head (Hopper CUDA path only; ``serves`` rejects it elsewhere)."""
-    if torch.cuda.get_device_capability(single.device) == (9, 0):
+    if torch.cuda.get_device_capability(single.device) == (9, 0) or (
+        torch.cuda.get_device_capability(single.device) == (10, 0) and (tuple(variant) != _variant_default() or single.shape[2] % 128 == 0)
+    ):
         from miniworld_engine.kernels.conditioned_transition import cuda
         from miniworld_engine.kernels.integrations.token_dit_train import _tf32
 
@@ -414,9 +445,12 @@ def _infer_launch(
                 mask._version,
             )
         )
-        hit = runner.__dict__.get("_bias_cache")
+        # several entries (B200: the per-trunk_seed steps of a B > 1 call each read their own pair's bias), the newest kept and the older
+        # ones only while the store holds at most BIAS_CACHE_BYTES of bias
+        store = runner.__dict__.setdefault("_bias_cache", {})
+        hit = None if bkey is None else store.get(bkey)
         L, L8 = single.shape[2], _pad8(single.shape[2])
-        if bkey is not None and hit is not None and hit[0] == bkey:
+        if bkey is not None and hit is not None:
             bias = hit[1]
             _capture.hold(hit, bkey[0] is None)  # a capture reads it: the next pair replacing the entry must not free it under the graph
             if bkey[0] is None and not hit[3] and torch.cuda.is_current_stream_capturing():
@@ -439,8 +473,13 @@ def _infer_launch(
             bias = runner.hoist(pair.contiguous(), mask)
             if bkey is not None:
                 # (an attribute of this cache, not of the runner class); [3]: made inside a capture (a replay remakes it: no refresh)
-                runner.__dict__["_bias_cache"] = (bkey, bias, pinned, torch.cuda.is_current_stream_capturing())
-                _capture.hold(runner.__dict__["_bias_cache"], False)
+                entry = store[bkey] = (bkey, bias, pinned, torch.cuda.is_current_stream_capturing())
+                _capture.hold(entry, False)
+                size = 0
+                for k in reversed(list(store)):  # newest first: drop the older entries past the byte budget
+                    size += store[k][1].numel() * store[k][1].element_size()
+                    if k != bkey and size > BIAS_CACHE_BYTES:
+                        del store[k]
         if L8 == L:
             return runner.step(single, cond, bias)
         # padded query rows: zero single / cond rows, computed and dropped (a shared cond stays one table)
@@ -500,4 +539,26 @@ def update(module, single, cond, pair, mask, extra=None, args=None):
     # the pair as the caller holds it: _infer keys its pair-bias cache on this tensor and makes it contiguous on a miss
     weights, qk, eq, ek, heads, opts = infer_args(module, single.dtype) if args is None else args
     run = _infer_launch if _plain_eager(single) else _infer
+    if single.shape[1] > 1 and torch.cuda.get_device_capability(single.device) == (10, 0) and single.shape[2] % 128:
+        # B200, B trunk_seeds (FoldForge R18's grouped sampler: [S, F, L, d], a pair per fold), L not a multiple of 128: one B = 1 step per
+        # trunk_seed on the composed runner (it takes one pair per call); L a multiple of 128 runs all folds in ONE ``token_inference`` call
+        # (the GEMMs and row passes over every fold's rows, one core launch per fold)
+        assert mask is not None  # filled above off sm_90
+        outs = [
+            run(
+                single[:, b : b + 1].contiguous(),
+                cond[:, b : b + 1],
+                pair[b : b + 1],
+                mask[b : b + 1] if mask.shape[0] > 1 else mask,
+                weights,
+                qk,
+                eq,
+                ek,
+                heads,
+                extra,
+                opts,
+            )
+            for b in range(single.shape[1])
+        ]
+        return torch.cat(outs, dim=1)
     return run(single.contiguous(), cond, pair, mask, weights, qk, eq, ek, heads, extra, opts)

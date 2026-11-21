@@ -1,0 +1,71 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 7d3231c1e..e5062512a 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -73,6 +73,10 @@ REPL = {(64, 4): 20, (64, 2): 30, (128, 2): 14}
+ #: backward's prologue (barriers, tensor memory, cluster sync) runs as the forward's CTAs leave, griddepcontrol.wait before its first
+ #: read. A module constant (A/B runs edit it); D 128 n 4 (`transition_sm100.cu`) always.
+ BWD_PDL = True
++
++#: (S90) D 256 training keeps a, b (bf16) from a ln -> swiglu_ab -> squeeze forward and takes the backward gate from them (tgate_ab.cu) instead of
++#: the fused forward + the fp32-recompute gate (tgate_w.cu); False: the old pair (A/B)
++D256_SAVE = False
+ #: (training part 5) A/B builds of the two-role backwards (D 64 `widths/tbwd_d64.cu`, D 128 n 2 `tr_bwd_sm100.cu`): None runs "bwd"; a flag
+ #: tuple (e.g. ("-DGOV=0",)) builds and runs cubin "bwdab" with those flags. A module constant (A/B runs edit it).
+ BWD_AB_FLAGS: tuple[str, ...] | None = None
+@@ -212,6 +216,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             *((("bwdab", "tr_bwd_sm100.cu", (*hid, *BWD_AB_FLAGS)),) if BWD_AB_FLAGS else ()),
+         )
+     lpr = f"-DLPR={32 if d in (512, 768) else 16}"
++    dim256 = ("-DDIM=256", *hid)
+     nd = HALF if d == 768 else d
+     lnb = ("lnbwd", "widths/tlnbwd_w.cu", (f"-DDIM={d}", lpr))
+     dxn = (
+@@ -224,6 +229,11 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             ("fwd", "widths/tfwd_d256.cu", hid),
+             *((("fwdi", "widths/tfwd_d256.cu", (*hid, *FWD_INFER_FLAGS[(d, n)])),) if (d, n) in FWD_INFER_FLAGS else ()),
+             ("gate", "widths/tgate_w.cu", ("-DDIM=256", *hid)),
++            ("ln", "widths/tln_w.cu", ("-DDIM=256", lpr)),
++            ("swiglu_ab", "widths/tswiglu_w.cu", (*dim256, "-DSAVE_AB")),
++            ("swiglu_abis", "widths/tswiglu_w.cu", (*dim256, "-DSAVE_AB", "-DITEM_SCHED")),
++            ("squeeze", "widths/tgemm_nd.cu", ("-DDIM=256", f"-DKDIM={h}")),
++            ("gatab", "widths/tgate_ab.cu", (*dim256, "-DNO_H")),
+             dxn,
+             lnb,
+         )
+@@ -492,7 +502,7 @@ def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
+     m, d = x.shape
+     rows = m if save else 1
+     f32 = dict(dtype=torch.float32, device=x.device)
+-    keep = save and d >= 384
++    keep = save and (d >= 384 or (d == 256 and D256_SAVE))
+     hab = [x.new_empty((m, wa.shape[0])) if keep else x.new_empty((1, 1)) for _ in range(3)]
+     return (
+         torch.empty_like(x),
+@@ -535,7 +545,7 @@ def _fwd_launch(
+     def ph():  # distinct placeholders: custom-op outputs must not alias each other
+         return x.new_empty((1, 1))
+ 
+-    if d in _FUSED_FWD:
++    if d in _FUSED_FWD and not (d == 256 and save and D256_SAVE):
+         xn = torch.empty_like(x) if save else x.new_empty((1, d))
+         mout = k.rows(out)
+         k.run(
+@@ -782,7 +792,7 @@ def _bwd_launch(
+     wab_t = wabt if have_t else torch.cat((wa, wb), 0).t().contiguous()  # [D, 2H]
+     dab = torch.empty((m, 2 * h), dtype=x.dtype, device=x.device)
+     mdab = k.tmap(dab, 2 * h, m)
+-    if d == 256:
++    if d == 256 and not (D256_SAVE and a.shape[0] == m):
+         hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
+         k.run(
+             "gate",
+@@ -803,7 +813,7 @@ def _bwd_launch(
+     else:
+         mh = k.tmap(hid, h, m)
+         k.run(
+-            "gate_is" if small else "gate",
++            "gate_is" if small else ("gatab" if d == 256 else "gate"),
+             "transition_gate_ab_sm100",
+             k.nsm if small else k.grid,
+             (

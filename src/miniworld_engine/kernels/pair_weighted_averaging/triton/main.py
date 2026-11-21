@@ -53,6 +53,21 @@ def _divides(**axes):
     return prune
 
 
+def _sm100_tmem_safe(configs, named_args, **kw):
+    """``early_config_prune`` of the pair backward on sm_100 (B200): with BJ >= 64 Triton 3.7 lowers ``dzy = dl Wb`` ([BJ, DZP] fp32) to
+    tcgen05 with the accumulator in tensor memory; at DZP 512 that accumulator alone is all 512 TMEM columns and the A operand's
+    TMEM copy lands past them (the compiled kernel reports 520 columns): the launch faults with "misaligned address" (d_pair 384 / 512
+    training). BJ <= 32 stays on mma.sync (no TMEM). A correctness exclusion on sm_100 only; every other GPU keeps every config."""
+    args = {**named_args, **kw}
+    z = args["Z"]
+    if args["DZP"] < 512 or not z.is_cuda or torch.cuda.get_device_capability(z.device)[0] != 10:
+        return configs
+    keep = [c for c in configs if c.kwargs["BJ"] <= 32]
+    if not keep:
+        raise ValueError(f"no config with BJ <= 32 for DZP {args['DZP']} on sm_100 (tensor-memory overflow at BJ >= 64)")
+    return keep
+
+
 # ---------------------------------------------------------------------------------------------------- forward kernels
 @configured(
     "pair_weighted_averaging_layernorm_gemm_softmax_triton",
@@ -394,7 +409,8 @@ def _pwa_bwd_layernorm_gemm_dx_dlnw_kernel(
 @configured(
     "pair_weighted_averaging_bwd_layernorm_gemm_softmax_triton",
     key=["shape_key", "DZP", "HP", "HAS_MASK"],
-    default=dict(BJ=64, num_warps=4, num_stages=2),
+    default=[dict(BJ=64, num_warps=4, num_stages=2), dict(BJ=32, num_warps=4, num_stages=2)],  # the second: sm_100 at DZP 512 (below)
+    prune=_sm100_tmem_safe,
     reset_to_zero=["DWB", "DGZ"],
 )
 @triton.jit

@@ -42,17 +42,21 @@ def bwd_fused_on() -> bool:
 
 
 def tail_mode() -> str:
-    """How the tail runs (settings.bias_only_dit_bwd_tail): "split3" (default) -- three launches of bo_bwd_tail.cu on CTA pairs
-    ([R1, G1, G2], [R2], [G4]; GEMM items M 256 x N with cta_group::2, 4 operand stages; graph node A/B 270.3 -> 268.8 / 533.4 -> 526.9
-    us at L384 / L768 against the seven launches); "off" -- the seven launches (res_c_bwd, mm dh, swiglu_bwd, mm dxt,
-    res_adaln_b_bwd, mm dog, gate_bwd). Read per call."""
-    return "split3"
+    """How the tail runs: "off" (default since 2026-11-17) -- the seven launches (res_c_bwd, mm dh, swiglu_bwd, mm dxt,
+    res_adaln_b_bwd, mm dog, gate_bwd); "split3" -- three launches of bo_bwd_tail.cu on CTA pairs ([R1, G1, G2], [R2], [G4]; GEMM
+    items M 256 x N with cta_group::2, 4 operand stages). split3 won its graph node A/B in 2026-10 (270.3 -> 268.8 / 533.4 -> 526.9 us at
+    L384 / L768); on the 2.5.12 stack (torch 2.13 cuBLAS) it loses at every length: r104 master S1 graph step 274.5 / 323.6 / 452.6 ->
+    182.9 / 227.4 / 360.5 us at L128 / L384 / L768 with "off" (its three launches are a serial R1 -> G1 -> G2 chain on 10-30 CTA pairs,
+    ~120 us at every L). "off" also drops the pack's four transposed weights (the tail's K-major B operands). Read per call."""
+    return "off"
 
 
 def pbfin_on() -> bool:
     """pair_bias_bwd and finalize in one launch (bias_only_dit_train_rows.cu pair_bias_bwd_fin_k: a grid barrier between the pair
     LayerNorm backward and finalize's 248 jobs) -- the default: one launch fewer at the same speed (graph node A/B +0.3 / +0.5 us at
-    L384 / L768, inside the 0.1-33 us spread); settings.bias_only_dit_bwd_pbfin=0 keeps the two launches. Read per call."""
+    L384 / L768, inside the 0.1-33 us spread); settings.bias_only_dit_bwd_pbfin=0 keeps the two launches. Read per call.
+    Since 2026-11-17 the fused backward step no longer reads it: it runs pair_bias_bwd early (inside a CUDA-graph capture on a side stream
+    beside the rest of the step, ``side.py``) and finalize after the weight gradients, eagerly and captured alike."""
     return True
 
 

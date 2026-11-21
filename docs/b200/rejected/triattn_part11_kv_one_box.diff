@@ -1,0 +1,82 @@
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -215,7 +215,9 @@
+     const __nv_bfloat16* __restrict__ QG,                // q / k [B*N*S rows at stride LD][H*32]: the overflow guard's recompute
+     const __nv_bfloat16* __restrict__ KG, int LD,
+     const __nv_bfloat16* __restrict__ VG,                // (TA_D16) v at the stride LD and the bias [B*H*S][S]: the exact recompute of a bad row
+-    const __nv_bfloat16* __restrict__ BG) {
++    const __nv_bfloat16* __restrict__ BG,
++    const int KVJ) {                                     // 1: kmap loads K | V as one box (v at a fixed element offset from k: the front's
++                                                         // joint q | k | v buffer), vmap unused
+   const int QTILES = S / BM, NK = S / BN, NG = (N + R - 1) / R;
+   extern __shared__ __align__(1024) unsigned char raw[];
+   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
+@@ -289,8 +291,13 @@
+             if (TA_NOKV && x >= NKV) { arrive(kvf + st); continue; }
+             expect_tx(kvf + st, 2 * KVT * 2);
+             const int rw = row0(bh, g * R + r) + j * BN;
+-            ldt(&kmap, sKV + st * 2 * KVT, kvf + st, bh, rw);
+-            ldt(&vmap, sKV + st * 2 * KVT + KVT, kvf + st, bh, rw);
++            if (KVJ) {                         // K | V in one box: the map's outer dimension steps from k to v
++              if (TA_D16C) load_4d(&kmap, sKV + st * 2 * KVT, kvf + st, 0, bh % H, rw, 0);
++              else load_3d(&kmap, sKV + st * 2 * KVT, kvf + st, hcol(bh), rw, 0);
++            } else {
++              ldt(&kmap, sKV + st * 2 * KVT, kvf + st, bh, rw);
++              ldt(&vmap, sKV + st * 2 * KVT + KVT, kvf + st, bh, rw);
++            }
+           }
+         }
+       }
+@@ -1589,15 +1596,22 @@
+   torch::Tensor& flags = flags_dev[q.device().index()];
+   if (!flags.defined()) flags = torch::zeros({1}, q.options().dtype(torch::kInt32));
+   const uint64_t rows = (uint64_t)(B * N * S), cols = (uint64_t)(H * DG);
+-  auto qkv_map = [&](const torch::Tensor& t, uint32_t box, const char* what) {
++  // K | V as one box when v sits at a fixed positive element offset from k (16-byte multiple): the front's joint q | k | v buffer.
++  // B200 2026-11-18: the TMA box count, not the bytes, bounds a producer lane (one box ~600 clk).  MINIWORLD_TRIATTN_B200_KVJ=0: two boxes.
++  static const bool kvj_on = [] { const char* e = std::getenv("MINIWORLD_TRIATTN_B200_KVJ"); return !(e && e[0] == '0'); }();
++  const long kvd = (long)((const __nv_bfloat16*)v.data_ptr() - (const __nv_bfloat16*)k.data_ptr());
++  const int kvj = kvj_on && kvd > 0 && kvd % 8 == 0 && (uint64_t)kvd < (1ull << 38) ? 1 : 0;
++  auto qkv_map = [&](const torch::Tensor& t, uint32_t box, const char* what, bool joint) {
+     if (TA_D16C) {   // [rows][H][16]; the 32-channel box zero-fills 16 .. 31
++      if (joint) return make_map<4>(t.data_ptr(), {16, (uint64_t)H, rows, 2}, {16, (uint64_t)ld, (uint64_t)kvd}, {D, 1, box, 2}, CU_TENSOR_MAP_SWIZZLE_64B, what);
+       return make_map<3>(t.data_ptr(), {16, (uint64_t)H, rows}, {16, (uint64_t)ld}, {D, 1, box}, CU_TENSOR_MAP_SWIZZLE_64B, what);
+     }
++    if (joint) return make_map<3>(t.data_ptr(), {cols, rows, 2}, {(uint64_t)ld, (uint64_t)kvd}, {D, box, 2}, CU_TENSOR_MAP_SWIZZLE_64B, what);
+     return make_map<2>(t.data_ptr(), {cols, rows}, {(uint64_t)ld}, {D, box}, CU_TENSOR_MAP_SWIZZLE_64B, what);
+   };
+-  CUtensorMap qm = qkv_map(q, BM, "q");
+-  CUtensorMap km = qkv_map(k, BN, "k");
+-  CUtensorMap vm = qkv_map(v, BN, "v");
++  CUtensorMap qm = qkv_map(q, BM, "q", false);
++  CUtensorMap km = qkv_map(k, BN, "k", kvj != 0);
++  CUtensorMap vm = qkv_map(v, BN, "v", false);
+   // bias [B*H*S][S] as [S / 64 key blocks][rows][64]: a key tile's two 64-key halves in one box
+   CUtensorMap bm = make_map<3>(b16.data_ptr(), {64, (uint64_t)(B * H * S), (uint64_t)(S / 64)}, {(uint64_t)S, 64}, {64, BM, 2},
+                                CU_TENSOR_MAP_SWIZZLE_128B, "bias");
+@@ -1610,7 +1624,7 @@
+   launch_pdl(triattn_fwd_sm100, dim3(grid), dim3(THREADS), SMEM, at::cuda::getCurrentCUDAStream(), (int)N, (int)H, (int)S, ntasks, scl, qm, km, vm, bm,
+       reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>(),
+       reinterpret_cast<const __nv_bfloat16*>(q.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(k.data_ptr<at::BFloat16>()), (int)ld,
+-      reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(b16.data_ptr<at::BFloat16>()));
++      reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(b16.data_ptr<at::BFloat16>()), kvj);
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+   return {out, lse, flags};
+ }
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
+index aecd12169..6a0dbd76d 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
+@@ -1668,7 +1668,11 @@ static std::vector<torch::Tensor> launch_front(const torch::Tensor& x, const tor
+   TORCH_CHECK(W.scalar_type() == torch::kBFloat16 && W.is_contiguous() && W.size(0) >= 4 * HD && W.size(1) == CX, "W [>= 4 HD, CX] bf16");
+   TORCH_CHECK(NHB >= 1 && NHB <= NH, "1 .. 4 bias heads");
+   auto opt = x.options();
+-  auto q = torch::empty({R, HD}, opt), k = torch::empty({R, HD}, opt), v = torch::empty({R, HD}, opt), g = torch::empty({g3 ? 0 : R, HD}, opt);
++  // g3 (inference): q | k | v in one buffer, so the core loads K | V of a sub-step as one TMA box (its KVJ map; B200 2026-11-18: a
++  // producer lane is bound by its box count)
++  auto qkv = g3 ? torch::empty({3, R, HD}, opt) : torch::Tensor();
++  auto q = g3 ? qkv[0] : torch::empty({R, HD}, opt), k = g3 ? qkv[1] : torch::empty({R, HD}, opt), v = g3 ? qkv[2] : torch::empty({R, HD}, opt),
++       g = torch::empty({g3 ? 0 : R, HD}, opt);
+   auto bias = torch::empty({B, NHB, L, L}, opt);
+   const bool* mp = nullptr;
+   torch::Tensor mk;

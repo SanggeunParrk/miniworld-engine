@@ -92,6 +92,8 @@ swa_attn_dq_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+  pdl_wait();  // programmatic dependent launch (2026-11-17): the setup above overlaps the previous kernel; every global access is below
+  pdl_launch();
   const uint32_t tmem = B.tmem;
 
 #if SETMAXNREG

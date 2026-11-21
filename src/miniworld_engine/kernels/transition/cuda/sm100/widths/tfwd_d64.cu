@@ -6,10 +6,25 @@
 //     32 crank + 31: 4 x 4 KB), loaded once per launch -- no weight ring
 //   * expand   [a|b]_j = xn [Wa_j; Wb_j]^T   M 256, N 128, K 64 (one 128-B-swizzled K-block)
 //   * squeeze  acc    += h_j Ws_j^T          M 256, N  64 (32 per CTA), K 64, A = h_j from tensor memory
-// Rounding points as tfwd2.cu: xn bf16, a / b fp32, h = bf16(silu(a) b) (kit sigmoid), acc fp32, out = bf16(x + acc).
+// Rounding points as tfwd2.cu: xn bf16, a / b fp32, h = bf16((a s) b) (s = sigmoid_tr, sm100.cuh), acc fp32, out = bf16(x + acc).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
+
+// ROLES (warps 4-15, three warpgroups): 0 two SwiGLU warpgroups (4-7 even chunks, 12-15 odd) and LayerNorm(i + 1) then epilogue(i) on 8-11;
+// 1 epilogue on 4-7, every SwiGLU chunk on 12-15, LayerNorm alone on 8-11 (bit-identical to 0). Measured, eager, L2 flushed, back-to-back
+// launches: n 2 [147456, 64] 20.85 -> 18.57 us, [65536, 64] 14.12 -> 12.34 (one SwiGLU warpgroup keeps up with two chunks a tile); n 4
+// [98304, 64] 20.56 -> 22.48 (four chunks a tile do not): n 2 builds with ROLES 1. A third layout (each SwiGLU warpgroup writing half
+// the epilogue) deadlocks at n 4 (SwiGLU(i + 1) waits for the squeeze of tile i + 1, which waits for epilogue(i)) and gained 2 % at n 2.
+#ifndef ROLES
+#define ROLES 0
+#endif
+
+#ifdef PROBE
+#define STAMP(k) do { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(c1 + (long)tiles * ROWS)[cta * 96 + (k)] = _t; } while (0)
+#else
+#define STAMP(k) do { } while (0)
+#endif
 
 #ifndef HID
 #define HID 256                                                // hidden units (n x D); n = 4 by default
@@ -20,19 +35,20 @@ constexpr int WAB_CH = 8192, WS_CH = 4096;                     // this CTA's hal
 constexpr int O_WAB = 0, O_WS = NCH * WAB_CH;
 constexpr int TILE = ROWS * D_ * 2;                            // 16 KB: one K-block of 128 rows
 constexpr int O_X = O_WS + NCH * WS_CH;
-constexpr int O_XN = O_X + 2 * TILE;
+// x stages: a stage lives from its load through the tile's LayerNorm, its four chunks and the epilogue (which writes y over it), so with
+// two stages the load of tile i + 2 was issued only after tile i's epilogue and its latency was exposed before LN(i + 2); four stages
+// keep it ahead (L768 B4, 18432 tiles: 0.413 -> 0.375 ms)
+constexpr int NXS = 4;
+constexpr int O_XN = O_X + NXS * TILE;
 constexpr int O_GB = O_XN + 2 * TILE;
 constexpr int O_BAR = O_GB + 512;
 constexpr int SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
-static_assert(HID != 256 || SMEM_BYTES == 115712, "bench_w.py SMEM[64]");
+static_assert(HID != 256 || SMEM_BYTES == 148480, "bench_w.py SMEM[64]");
 static_assert(O_X % 1024 == 0 && O_XN % 1024 == 0 && O_WS % 1024 == 0, "128-B swizzled operands need 1 KB alignment");
 constexpr int KS = 4;                                          // K = 64 in K16 steps (expand: D; squeeze: the chunk's 64 hidden units)
 constexpr uint32_t T_AB = 0, T_H = 256, T_OUT = 384;
-// sigmoid of the SwiGLU: the kit form (ex2 + rcp on MUFU) by default; SIG_NR takes the reciprocal on the FMA pipe (Newton, error below
-// rcp.approx's), SIG_POLY the exponential (degree-6 polynomial, error below ex2.approx's), SIG_TANH 0.5 tanh(a / 2) + 0.5 (one MUFU op;
-// relaxed: tanh.approx relative error ~2^-11)
-#define SIGF(a) sigmoid_kit(a)
+// sigmoid of the SwiGLU: sigmoid_tr (sm100.cuh, TR_SIG), the function the backward's gate evaluates too
 constexpr uint32_t IDESC_EX = idesc_bf16(256, 128), IDESC_SQ = idesc_bf16(256, 64);
 
 struct Bars {
@@ -41,7 +57,7 @@ struct Bars {
   // both CTAs (leader's multicast commits)
   uint64_t xn_empty[2], ex_done[2], sq_done[2], out_full;
   // local
-  uint64_t x_full[2], x_empty[2];
+  uint64_t x_full[NXS], x_empty[NXS];
   uint32_t tmem;
 };
 
@@ -63,13 +79,14 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
   const int nch = n_local * NCH;                                // its last tile as a dummy whose results are not stored
   auto tile_of = [&](int i) { return i < n_valid ? cta + i * G : (n_valid > 0 ? cta + (n_valid - 1) * G : 0); };
 
+  if (tid == 0) STAMP(0);
   if (tid == 0) {
     mbar_init(&B.w_full, 1);
     for (int s = 0; s < 2; ++s) {
       mbar_init(&B.xn_full[s], 2); mbar_init(&B.ab_empty[s], 8); mbar_init(&B.h_full[s], 8);
       mbar_init(&B.xn_empty[s], 1); mbar_init(&B.ex_done[s], 1); mbar_init(&B.sq_done[s], 1);
-      mbar_init(&B.x_full[s], 1); mbar_init(&B.x_empty[s], 1);
     }
+    for (int s = 0; s < NXS; ++s) { mbar_init(&B.x_full[s], 1); mbar_init(&B.x_empty[s], 1); }
     mbar_init(&B.out_empty, 8); mbar_init(&B.out_full, 1);
     fence_barrier_init();
     if (n_local > 0) {                                         // tile 0's x now, not after the cluster sync (its barrier is local)
@@ -86,14 +103,15 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
   cluster_sync_relaxed();
   tc_fence_after();
   const uint32_t tmem = B.tmem;
+  if (tid == 0) STAMP(1);
 
   if (warp < 4) setmaxnreg_dec<56>();
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------ x producer (own tiles)
     if (lane == 0) {
       for (int i = 1; i < n_local; ++i) {                     // tile 0 was issued at setup
-        const int b = i & 1, row = tile_of(i) * ROWS;
-        if (i >= 2) mbar_wait(&B.x_empty[b], ((i >> 1) - 1) & 1);
+        const int b = i & (NXS - 1), row = tile_of(i) * ROWS;
+        if (i >= NXS) mbar_wait(&B.x_empty[b], ((i / NXS) - 1) & 1);
         mbar_expect_tx(&B.x_full[b], TILE);
         const uint32_t dst = su + O_X + b * TILE;
 #pragma unroll
@@ -122,6 +140,7 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
           const int i = c / NCH, j = c & (NCH - 1), s = c & 1, u = c >> 1;
           if (j == 0) mbar_wait_cl(&B.xn_full[i & 1], (i >> 1) & 1);
           if (c >= 2) mbar_wait_cl(&B.ab_empty[s], (u - 1) & 1);
+          if (lane == 0 && j == 0 && i < 12) STAMP(14 + i);
           tc_fence_after();
           const uint64_t ad = desc_k128(su + O_XN + (i & 1) * TILE), bd = desc_k128(su + O_WAB + j * WAB_CH);
           if (elect_one()) {
@@ -138,6 +157,7 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
           const int i = q / NCH, j = q & (NCH - 1), s = q & 1, u = q >> 1;
           mbar_wait_cl(&B.h_full[s], u & 1);
           if (j == 0 && i >= 1) mbar_wait_cl(&B.out_empty, (i - 1) & 1);
+          if (lane == 0 && j == 0 && i < 12) STAMP(26 + i);
           tc_fence_after();
           const uint64_t bd = desc_k128(su + O_WS + j * WS_CH);
           if (elect_one()) {
@@ -151,14 +171,15 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
         }
       }
     }
-  } else if ((warp >= 4 && warp < 8) || warp >= 12) {
-    // ------------------------------------------------------------------------------------------ SwiGLU (as tfwd2.cu): two warpgroups
-    // alternate chunks, each in four 16-column steps with the next step's TMEM loads in flight
+  } else {
+    // ------------------------------------------------------------------------------------------ SwiGLU, LayerNorm, epilogue (ROLES)
     setmaxnreg_inc<152>();
     const uint32_t lb = (uint32_t)(warp & 3) * 32, trow = tmem + (lb << 16);
-    for (int c = (warp >= 12 ? 1 : 0); c < nch; c += 2) {
+    // SwiGLU of chunk c (as tfwd2.cu): four 16-column steps with the next step's TMEM loads in flight
+    auto sw = [&](int c) {
       const int s = c & 1, u = c >> 1;
       mbar_wait(&B.ex_done[s], u & 1);
+      if (lane == 0 && (warp & 3) == 0 && c < 16) STAMP(64 + c);
       tc_fence_after();
       uint32_t hp[32];
       {
@@ -176,7 +197,8 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
           for (int k = 0; k < 8; ++k) {
             const float a0 = __uint_as_float(a[q & 1][2 * k]), a1 = __uint_as_float(a[q & 1][2 * k + 1]);
             const float b0 = __uint_as_float(b[q & 1][2 * k]), b1 = __uint_as_float(b[q & 1][2 * k + 1]);
-            hp[q * 8 + k] = pack_bf16(a0 * SIGF(a0) * b0, a1 * SIGF(a1) * b1);
+            const f2 A = mk2(a0, a1), H = mul2(mul2(A, sigmoid_tr(A)), mk2(b0, b1));   // (a s) b, as the backward's gate_pair16
+            hp[q * 8 + k] = pack_bf16(lo2(H), hi2(H));
           }
           if (q < 3) tmem_wait_ld();
         }
@@ -195,23 +217,22 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
       tc_fence_before();
       __syncwarp();
       if (lane == 0) mbar_arrive_remote_relaxed(&B.h_full[s], 0);
-    }
-  } else if (warp >= 8) {
-    // ------------------------------------------------------------------------------------------ LayerNorm + residual epilogue (own rows)
-    setmaxnreg_inc<152>();
+      if (lane == 0 && (warp & 3) == 0 && c < 16) STAMP(80 + c);
+    };
+    const bool is_ln = warp >= 8 && warp < 12;
     const int t2 = tid - 256;
-    const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
+    const uint32_t r = lb + lane;
     const uint32_t gb_u = su + O_GB;
     // gamma / beta by the LayerNorm warps themselves, under tile 0's x load (ln's first named barrier publishes them)
-    if (t2 < 64) { reinterpret_cast<float*>(sm + O_GB)[t2] = gamma[t2]; reinterpret_cast<float*>(sm + O_GB)[64 + t2] = beta[t2]; }
+    if (is_ln && t2 < 64) { reinterpret_cast<float*>(sm + O_GB)[t2] = gamma[t2]; reinterpret_cast<float*>(sm + O_GB)[64 + t2] = beta[t2]; }
     auto ln = [&](int i) {
-      const int b = i & 1, grow = tile_of(i) * ROWS + (int)r;
+      const int b = i & 1, xs = i & (NXS - 1), grow = tile_of(i) * ROWS + (int)r;
       const bool real = i < n_valid;
-      mbar_wait(&B.x_full[b], (i >> 1) & 1);
+      mbar_wait(&B.x_full[xs], (i / NXS) & 1);
       if (i >= 2) mbar_wait(&B.xn_empty[b], ((i >> 1) - 1) & 1);
       if (t2 == 0) tma_store_wait_read0();
       named_bar_sync(1, 128);
-      const uint32_t xb = su + O_X + b * TILE, xnb = su + O_XN + b * TILE;
+      const uint32_t xb = su + O_X + xs * TILE, xnb = su + O_XN + b * TILE;
       uint32_t v[32];
 #pragma unroll
       for (int q = 0; q < 8; ++q) {
@@ -255,6 +276,7 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
       if (save && real) { rstd[grow] = rs; c1[grow] = mean * rs; }
       fence_proxy_async();
       named_bar_sync(1, 128);
+      if (t2 == 0 && i < 12) STAMP(2 + i);
       if (t2 == 0) {
         mbar_arrive_remote_cta(&B.xn_full[b], 0);
         if (save && real) {
@@ -265,13 +287,14 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
         }
       }
     };
-    auto epi = [&](int i) {
-      const int b = i & 1;
+    auto epi = [&](int i, int cc0, int cc1, int bar, int nthr, bool lead) {
+      const int b = i & (NXS - 1);
       mbar_wait(&B.out_full, i & 1);
+      if (lead && i < 12) STAMP(38 + i);
       tc_fence_after();
       const uint32_t xb = su + O_X + b * TILE;
 #pragma unroll
-      for (int cc = 0; cc < 2; ++cc) {
+      for (int cc = cc0; cc < cc1; ++cc) {
         uint32_t acc[32];
         tmem_ld32(trow + T_OUT + cc * 32, acc);
         tmem_wait_ld();
@@ -282,8 +305,12 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
           const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
           uint32_t o[4];
 #pragma unroll
+#ifdef NOEPI   // (probe, wrong results)
+          for (int k = 0; k < 4; ++k) o[k] = xw[k] ^ acc[qq * 8 + 2 * k];
+#else
           for (int k = 0; k < 4; ++k)
             o[k] = pack_bf16(bf16lo(xw[k]) + __uint_as_float(acc[qq * 8 + 2 * k]), bf16hi(xw[k]) + __uint_as_float(acc[qq * 8 + 2 * k + 1]));
+#endif
           sts128(ad, make_uint4(o[0], o[1], o[2], o[3]));
         }
       }
@@ -291,8 +318,8 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
       __syncwarp();
       if (lane == 0) mbar_arrive_remote_relaxed(&B.out_empty, 0);
       fence_proxy_async();
-      named_bar_sync(1, 128);
-      if (t2 == 0) {
+      named_bar_sync(bar, nthr);
+      if (lead) {
         const int row0 = tile_of(i) * ROWS;
         if (i < n_valid) {
 #pragma unroll
@@ -301,14 +328,26 @@ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_co
         tma_store_commit();
         tma_store_wait_read0();
         mbar_arrive(&B.x_empty[b]);
+        if (i < 12) STAMP(50 + i);
       }
     };
-    if (n_local > 0) ln(0);
-    for (int i = 0; i < n_local; ++i) {
-      if (i + 1 < n_local) ln(i + 1);
-      epi(i);
+    const bool swg = !is_ln, odd = warp >= 12;
+    if (ROLES == 0) {
+      if (swg) {
+        for (int c = odd ? 1 : 0; c < nch; c += 2) sw(c);
+      } else {
+        if (n_local > 0) ln(0);
+        for (int i = 0; i < n_local; ++i) {
+          if (i + 1 < n_local) ln(i + 1);
+          epi(i, 0, 2, 1, 128, t2 == 0);
+        }
+      }
+    } else {
+      if (is_ln) for (int i = 0; i < n_local; ++i) ln(i);
+      else if (odd) for (int c = 0; c < nch; ++c) sw(c);
+      else for (int i = 0; i < n_local; ++i) epi(i, 0, 2, 2, 128, tid == 128);
     }
-    if (t2 == 0) { tma_store_wait0(); }
+    if (tid == 256 || tid == 128) tma_store_wait0();
   }
   tc_fence_before();
   __syncthreads();

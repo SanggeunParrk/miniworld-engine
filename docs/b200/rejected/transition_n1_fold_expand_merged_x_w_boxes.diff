@@ -1,0 +1,140 @@
+--- tsx_expand.cu.v1	2026-11-18 23:44:57.951601405 +0900
++++ tsx_expand.cu	2026-11-18 23:57:42.840001898 +0900
+@@ -41,6 +41,12 @@
+ #ifndef FOLD
+ #define FOLD 0                                                  // N1: the LayerNorm folded into the expand (bf16 inference, SK 1): raw x as A, W gamma as B, K16 correction MMA, statistics in the epilogue warps
+ #endif
++#ifndef X3D
++#define X3D 0                                                   // FOLD: x tile in boxes of X3D K-blocks (3-D tensor map, kb_box): 0 = one box per K-block
++#endif
++#ifndef W3D
++#define W3D 0                                                   // FOLD with X3D: the weight chunk of a CTA as ONE 3-D box each for Wa and Wb (all K-blocks), a and b as two N = CH products
++#endif
+ #ifndef CHM
+ #define CHM 1                                                   // part 17: partials received chunk-major (512-B runs per warp store); 0: row-major swizzled
+ #endif
+@@ -55,6 +61,8 @@
+ constexpr int W_ = CH / SK;                                    // units of the chunk each CTA of a cluster owns
+ static_assert(SK == 1 || W_ == 16 || W_ == 32, "owner column groups of 16 or 32 units");
+ constexpr int KBT = ROWS * 128;                                // one [128 rows] K-block of xn, 16 KB
++static_assert(!W3D || (FOLD && X3D), "W3D needs the folded expand with merged x boxes");
++constexpr int XTX = X3D ? 0 : ROWS * 128;                      // bytes of x a stage barrier expects (X3D: the x boxes have their own barriers)
+ constexpr int WKB = 2 * CH * 128;                              // one K-block of [Wa_j; Wb_j]: 2 CH rows x 128 B
+ constexpr int RED = SK > 1 ? SK * ROWS * 2 * W_ * 4 : 0;       // partials received from the other ranks: [SK][128][a W | b W] fp32
+ constexpr int FEX = FOLD ? 2 * CH * 16 + 2048 + 2048 + 512 + 2048 : 0;   // FOLD: B correction plane, A plane, zero plane, rstd, statistics exchange
+@@ -84,10 +92,12 @@
+ typedef __nv_bfloat16 ACT;
+ constexpr uint32_t IDESC = idesc_bf16(128, 2 * CH);
+ DEVI void mma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) { umma_ss(d, a, b, IDESC, acc); }
++constexpr uint32_t IDESC_H = idesc_bf16(128, CH);
++DEVI void mma_h(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) { umma_ss(d, a, b, IDESC_H, acc); }
+ #endif
+ 
+ struct Bars {
+-  uint64_t full[STG], empty[STG], mma_done, red_full, aug_b_full, aug_a_full;
++  uint64_t full[STG], empty[STG], mma_done, red_full, aug_b_full, aug_a_full, xfull[4];
+   uint32_t tmem;
+ };
+ static_assert(sizeof(Bars) <= 256, "barrier block");
+@@ -104,6 +114,11 @@
+   asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" :: "r"(dst), "l"(src), "r"(bytes), "r"(smem_u32(bar)) : "memory");
+ }
+ 
++DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++
+ // NV values of a row (fp32 bit patterns) -> the activation dtype's words (bf16: packed pairs; fp32: as they are, `round` to the TF32 grid)
+ template <int NV> DEVI void pack_act(const uint32_t (&v)[NV], uint32_t (&o)[F32 ? NV : NV / 2], bool round) {
+ #if F32
+@@ -145,6 +160,7 @@
+     mbar_init(&B.mma_done, 1);
+ #if FOLD
+     mbar_init(&B.aug_b_full, 1); mbar_init(&B.aug_a_full, 1);
++    for (int g = 0; g < 4; ++g) mbar_init(&B.xfull[g], 1);
+ #endif
+     if (SK > 1) { mbar_init(&B.red_full, 1); mbar_expect_tx(&B.red_full, (SK - 1) * ROWS * 2 * W_ * 4); }   // the other ranks' partials
+     fence_barrier_init();
+@@ -155,12 +171,18 @@
+     bulk_g2s(su + O_BP, aug + (size_t)h0 * 16, CH * 16, &B.aug_b_full);
+     bulk_g2s(su + O_BP + CH * 16, aug + (size_t)(H_ + h0) * 16, CH * 16, &B.aug_b_full);
+ #endif
++#if W3D
++    mbar_expect_tx(&B.full[0], 2 * NKB * CH * 128);
++    tma_load_3d(su + O_W, &mwa, &B.full[0], 0, h0, 0);
++    tma_load_3d(su + O_W + NKB * CH * 128, &mwb, &B.full[0], 0, h0, 0);
++#else
+     if (wpre)
+       for (int kb = 0; kb < STG; ++kb) {                        // weights first: they do not depend on the LayerNorm kernel
+-        mbar_expect_tx(&B.full[kb], KBT + WKB);
++        mbar_expect_tx(&B.full[kb], XTX + WKB);
+         tma_load_2d(su + O_W + kb * WKB, &mwa, &B.full[kb], k0 + kb * BKE, h0);
+         tma_load_2d(su + O_W + kb * WKB + CH * 128, &mwb, &B.full[kb], k0 + kb * BKE, h0);
+       }
++#endif
+   }
+   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), TCOLS); tmem_relinquish(); }
+ #if FOLD
+@@ -182,11 +204,16 @@
+         const int s = kb % STG;
+         if (kb >= STG) mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
+         if (!wpre || kb >= STG) {                              // (wpre 0: the LayerNorm launch wrote the weights, complete only now)
+-          mbar_expect_tx(&B.full[s], KBT + WKB);
++          mbar_expect_tx(&B.full[s], XTX + WKB);
+           tma_load_2d(su + O_W + s * WKB, &mwa, &B.full[s], k0 + kb * BKE, h0);
+           tma_load_2d(su + O_W + s * WKB + CH * 128, &mwb, &B.full[s], k0 + kb * BKE, h0);
+         }
+-        tma_load_2d(su + O_X + s * KBT, &mxn, &B.full[s], k0 + kb * BKE, row0);
++        if (X3D == 0) tma_load_2d(su + O_X + s * KBT, &mxn, &B.full[s], k0 + kb * BKE, row0);
++      }
++    if (lane == 0 && X3D)
++      for (int g = 0; g < NKB / (X3D ? X3D : 1); ++g) {
++        mbar_expect_tx(&B.xfull[g], X3D * KBT);
++        tma_load_3d(su + O_X + g * X3D * KBT, &mxn, &B.xfull[g], 0, row0, g * X3D);
+       }
+     if (lane == 0) TSX_ST(2);
+   } else if (warp == 1) {
+@@ -194,14 +221,23 @@
+ #pragma unroll 1
+     for (int kb = 0; kb < NKB; ++kb) {
+       const int s = kb % STG;
+-      mbar_wait(&B.full[s], (kb / STG) & 1);
++      if (W3D) { if (kb == 0) mbar_wait(&B.full[0], 0); } else mbar_wait(&B.full[s], (kb / STG) & 1);
++      if (X3D) mbar_wait(&B.xfull[kb / (X3D ? X3D : 1)], 0);
+       if (lane == 0 && kb == 0) TSX_ST(3);
+       if (lane == 0 && kb == NKB - 1) TSX_ST(4);
+       tc_fence_after();
+       const uint64_t da = desc_k128(su + O_X + s * KBT), db = desc_k128(su + O_W + s * WKB);
+       if (elect_one()) {
+ #pragma unroll
++#if W3D
++        const uint64_t dba = desc_k128(su + O_W + kb * CH * 128), dbb = desc_k128(su + O_W + NKB * CH * 128 + kb * CH * 128);
++        for (int ks = 0; ks < 4; ++ks) {
++          mma_h(tmem, da + (uint64_t)(ks * 2), dba + (uint64_t)(ks * 2), (kb > 0 || ks > 0) ? 1u : 0u);
++          mma_h(tmem + CH, da + (uint64_t)(ks * 2), dbb + (uint64_t)(ks * 2), (kb > 0 || ks > 0) ? 1u : 0u);
++        }
++#else
+         for (int ks = 0; ks < 4; ++ks) mma(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), (kb > 0 || ks > 0) ? 1u : 0u);
++#endif
+         if (NKB > STG) tc_commit(&B.empty[s]);
+         if (!FOLD && kb == NKB - 1) tc_commit(&B.mma_done);
+       }
+@@ -238,7 +274,7 @@
+     float rs;
+     {
+       const uint32_t xb = su + O_X;
+-      mbar_wait(&B.full[0], 0);
++      mbar_wait(X3D ? &B.xfull[0] : &B.full[0], 0);
+       const uint4 t0 = lds128(xb + sw128(r, 0));
+       const float shift = __uint_as_float(t0.x << 16);
+       const f2 nsh = mk2(-shift, -shift);
+@@ -246,7 +282,7 @@
+ #pragma unroll
+       for (int kk = 0; kk < NKB / 2; ++kk) {
+         const int kb = g * (NKB / 2) + kk;
+-        mbar_wait(&B.full[kb], 0);
++        mbar_wait(X3D ? &B.xfull[kb / (X3D ? X3D : 1)] : &B.full[kb], 0);
+ #pragma unroll
+         for (int q = 0; q < 8; ++q) {
+           const uint4 t = lds128(xb + kb * KBT + sw128(r, q));

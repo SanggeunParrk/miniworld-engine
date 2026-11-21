@@ -1,0 +1,400 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu bb/apb_rows_sm100.cu
+index 0f1a5041a..0a257e36c 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
++++ bb/apb_rows_sm100.cu
+@@ -236,6 +236,29 @@ void prep_ln(at::Tensor wq, at::Tensor bq, at::Tensor wk, at::Tensor wv, at::Ten
+   const LnArgs ln{x, lw, lb, xa, st, y, eps};
+   prep_dp_impl(wq, bq, wk, wv, wg, wo, wb, lpw, wp, bv, wop, wf, qs, ws, wbo, gate_bias, &ln);
+ }
++// v27 (training forward): only Wf = rbf(Wb) ln_pair.weight ws and Wb as bf16 (prep_dp_body's statements, the same bits) -- a launch of
++// its own ahead of the pair pass, so the pair pass need not wait for the whole weight pack (which runs beside it on the other stream)
++template <typename T>
++__global__ void __launch_bounds__(256) prep_wf_k(const T* __restrict__ WB, const float* __restrict__ LPW, bf* __restrict__ WF, bf* __restrict__ WBO,
++                                                 int n, int dp, float ws) {
++  const int k = (int)blockIdx.x * 256 + threadIdx.x;
++  if (k >= n) return;
++  const float wb = rbf(static_cast<float>(WB[k]));
++  WF[k] = __float2bfloat16_rn(wb * LPW[k % dp] * ws);
++  WBO[k] = __float2bfloat16_rn(wb);
++}
++void prep_wf(at::Tensor wb, at::Tensor lpw, at::Tensor wf, at::Tensor wbo, double ws) {
++  chk(lpw, at::kFloat, "ln_pair.weight"); chk(wf, at::kBFloat16, "wf"); chk(wbo, at::kBFloat16, "wbo");
++  const int n = (int)wb.numel(), dp = (int)wb.size(1);
++  TORCH_CHECK(wb.is_contiguous() && lpw.numel() == dp && wf.numel() == n && wbo.numel() == n, "prep_wf shapes");
++  const at::cuda::CUDAGuard gd(wb.device());
++  const unsigned grid = (unsigned)((n + 255) / 256);
++  if (wb.scalar_type() == at::kBFloat16)
++    prep_wf_k<bf><<<grid, 256, 0, S()>>>(CP<bf>(wb), CP<float>(lpw), P<bf>(wf), P<bf>(wbo), n, dp, (float)ws);
++  else
++    prep_wf_k<float><<<grid, 256, 0, S()>>>(CP<float>(wb), CP<float>(lpw), P<bf>(wf), P<bf>(wbo), n, dp, (float)ws);
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
+ 
+ // ------------------------------------------------------------------------------------------------ fp32 pair -> bias on the tensor cores
+ // pair_bias32_tc: what pair_bias32_fwd computes (bias[h, i, j] = Wf[h] . LN(pair[i, j]), fp32 head-major, ``neg`` on masked keys, the keys
+@@ -2124,24 +2147,32 @@ __device__ unsigned long long g_sbtl[512][8];
+ #else
+ #define SBT(i)
+ #endif
+-template <int DHP, int L, int QB, int SP> struct SB {
++template <int DHP, int L, int QB, int SP, int DS = 0> struct SB {
+   static constexpr int LDH = DHP + 8, LDR = L + 8, LDC = QB + 8, NTH = 2 * (QB / 16) * SP * 32;
+   static constexpr int OFF_Q = 0, OFF_K = OFF_Q + L * LDH * 2, OFF_V = OFF_K + L * LDH * 2, OFF_DO = OFF_V + L * LDH * 2,
+                        OFF_BR = OFF_DO + L * LDH * 2, OFF_BC = OFF_BR + QB * LDR * 2, OFF_LSE = OFF_BC + L * LDC * 2,
+                        OFF_DD = OFF_LSE + L * 4, OFF_END = OFF_DD + L * 4;
++  // DS > 0 (v27 dog in the kernel): dy rows [QB][DS + 8], the head's Wo columns [DS][DHP + 8], the dog k-split partials [KS][QB][DHP] fp32
++  static constexpr int NW = NTH / 32, TILES = (QB / 16) * (DHP / 8), KS = DS ? NW / TILES : 1, LDY = DS + 8, LDWO = DHP + 8;
++  static constexpr int OFF_DY = OFF_END, OFF_WO = OFF_DY + (DS ? QB * LDY * 2 : 0), OFF_DGP = OFF_WO + (DS ? DS * LDWO * 2 : 0),
++                       OFF_END2 = OFF_DGP + (DS ? KS * QB * DHP * 4 : 0);
+   static constexpr int PART = SP * QB * DHP;                                        // floats of one partial set (dq, dk or dv)
+-  static constexpr int SMEM = OFF_END > 3 * PART * 4 ? OFF_END : 3 * PART * 4;  // the partials alias the operand region (dead by then)
++  static constexpr int SMEM = OFF_END2 > 3 * PART * 4 ? OFF_END2 : 3 * PART * 4;  // the partials alias the operand region (dead by then)
+   static_assert(DHP % 16 == 0 && QB % 16 == 0 && L % QB == 0 && (L / SP) % 16 == 0 && SMEM <= 232448 && NTH <= 1024, "small_core_bwd: shapes");
++  static_assert(!DS || (KS * TILES == NW && (DS / KS) % 16 == 0), "small_core_bwd: dog tiles");
+ };
+-template <int NH, int DHP, int L, int QB, int SP>
+-__global__ void __launch_bounds__(SB<DHP, L, QB, SP>::NTH, SB<DHP, L, QB, SP>::NTH <= 256 ? 2 : 1) small_core_bwd_k(const bf* __restrict__ DOG,
+-    const float* __restrict__ O, const bf* __restrict__ OG, const bf* __restrict__ QKVG, const bf* __restrict__ BIAS, const float* __restrict__ LSE,
+-    bf* __restrict__ DQKVG, float* __restrict__ DB, float* __restrict__ ABQ, int acc_stride, float rsqd) {
+-  using C = SB<DHP, L, QB, SP>;
++template <int NH, int DHP, int L, int QB, int SP, int DS = 0>
++__global__ void __launch_bounds__(SB<DHP, L, QB, SP, DS>::NTH, SB<DHP, L, QB, SP, DS>::NTH <= 256 ? 2 : 1) small_core_bwd_k(const bf* __restrict__ DOG, const float* __restrict__ O,
++    const bf* __restrict__ OG, const bf* __restrict__ QKVG, const bf* __restrict__ BIAS, const float* __restrict__ LSE, bf* __restrict__ DQKVG, float* __restrict__ DB,
++    float* __restrict__ ABQ, int acc_stride, float rsqd, const bf* __restrict__ WO) {
++  // DS > 0: DOG is dy [L, DS] and WO the packed Wo [DS, W]: dog = dy Wo of the CTA's rows and head is made here; the CTAs of a head form a
++  // cluster (rank = query block) and read each other's dO rows / D from shared memory (no other kernel, no global round trip)
++  using C = SB<DHP, L, QB, SP, DS>;
+   constexpr int W = NH * DHP, LDH = C::LDH, LDR = C::LDR, LDC = C::LDC, NTH = C::NTH, CH = DHP / 8, NS = QB / 16, LS = L / SP;
+   constexpr int TPR = NTH >= 4 * L ? 4 : NTH >= 2 * L ? 2 : 1, CPT = DHP / TPR;  // gate pass: TPR threads a row, CPT columns each
+   static_assert(CPT % 4 == 0 && NTH == TPR * L, "small_core_bwd: gate columns");
+   constexpr long ld4 = 4L * W;
++  constexpr int NQ = L / QB;
+   extern __shared__ __align__(128) uint8_t smem[];
+   bf* q_s = reinterpret_cast<bf*>(smem + C::OFF_Q);
+   bf* k_s = reinterpret_cast<bf*>(smem + C::OFF_K);
+@@ -2153,19 +2184,21 @@ __global__ void __launch_bounds__(SB<DHP, L, QB, SP>::NTH, SB<DHP, L, QB, SP>::N
+   float* dd_s = reinterpret_cast<float*>(smem + C::OFF_DD);
+   float* part = reinterpret_cast<float*>(smem);  // after the loops: [3][SP][QB][DHP] (dq, dk, dv)
+   SBT(0);
+-  const int h = (int)blockIdx.x % NH, j0 = ((int)blockIdx.x / NH) * QB;
++  const int h = DS ? (int)blockIdx.x / NQ : (int)blockIdx.x % NH, jb = DS ? (int)blockIdx.x % NQ : (int)blockIdx.x / NH, j0 = jb * QB;
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, q = lane & 3;
+-  // the gate pass is one row part per thread (NTH / TPR == L); its forward operands (g, og, own rows' O) are issued first
+-  const int rr = tid / TPR, gc0 = (tid % TPR) * CPT;
+-  const bool own = rr >= j0 && rr < j0 + QB;
+-  float4 og4[CPT / 4], o4[CPT / 4], s4[CPT / 4], dg4[CPT / 4];
+-#pragma unroll
+-  for (int c = 0; c < CPT / 4; ++c) {
+-    s4[c] = V4<bf>::load(QKVG + (long)rr * ld4 + 3 * W + h * DHP + gc0 + 4 * c);
+-    og4[c] = V4<bf>::load(OG + (long)rr * W + h * DHP + gc0 + 4 * c);
+-    if (own) o4[c] = V4<float>::load(O + (long)rr * W + h * DHP + gc0 + 4 * c);
+-  }
+-  // the forward's tensors (q / k / v, the bias, LSE, O, og) were complete before the dO GEMM ran: loaded before griddepcontrol.wait
++  // v27: the gate pass is one row part per thread (NTH / TPR == L); its forward operands (g, og, own rows' O) are issued first
++  const int rr = DS ? tid / (DHP / 4) : tid / TPR, gc0 = DS ? 4 * (tid % (DHP / 4)) : (tid % TPR) * CPT;
++  constexpr int GV = DS ? 1 : CPT / 4;  // DS: thread t < QB DHP / 4 takes 4 columns of own row j0 + t / (DHP / 4)
++  const bool own = DS ? tid < QB * (DHP / 4) : rr >= j0 && rr < j0 + QB;
++  const int grow = DS ? j0 + rr : rr;
++  float4 og4[GV], o4[GV], s4[GV], dg4[GV];
++#pragma unroll
++  for (int c = 0; c < GV; ++c) {
++    if (!DS || own) s4[c] = V4<bf>::load(QKVG + (long)grow * ld4 + 3 * W + h * DHP + gc0 + 4 * c);
++    if (!DS) og4[c] = V4<bf>::load(OG + (long)grow * W + h * DHP + gc0 + 4 * c);
++    if (own) o4[c] = V4<float>::load(O + (long)grow * W + h * DHP + gc0 + 4 * c);
++  }
++  // the forward's tensors (q / k / v, the bias, LSE, O, Wo) were complete before this backward began: loaded before griddepcontrol.wait
+   for (int i = tid; i < L * CH; i += NTH) {
+     const int r = i / CH, c = i % CH;
+     const bf* row = QKVG + (long)r * ld4 + h * DHP + 8 * c;
+@@ -2181,13 +2214,20 @@ __global__ void __launch_bounds__(SB<DHP, L, QB, SP>::NTH, SB<DHP, L, QB, SP>::N
+     const int r = i / (QB / 8), c = i % (QB / 8);
+     cp16(bc_s + r * LDC + 8 * c, BIAS + ((long)h * L + r) * L + j0 + 8 * c);
+   }
++  if constexpr (DS > 0) {
++    bf* wo_s = reinterpret_cast<bf*>(smem + C::OFF_WO);
++    for (int i = tid; i < DS * CH; i += NTH) {
++      const int r = i / CH, c = i % CH;
++      cp16(wo_s + r * C::LDWO + 8 * c, WO + (long)r * W + h * DHP + 8 * c);
++    }
++  }
+   asm volatile("cp.async.commit_group;" ::: "memory");
+   for (int r = tid; r < L; r += NTH) lse_s[r] = LSE[(long)h * L + r];
+   asm volatile("griddepcontrol.wait;" ::: "memory");
+   SBT(1);
+-  // gate backward for every row of the head: dO = dog s (bf16 into do_s), D = sum dog og (og = s o, the forward's bf16), dg = dog o s (1 - s)
+-  // (rows j0 .. only, with o fp32)
+-  {
++  if constexpr (DS == 0) {
++    // gate backward for every row of the head: dO = dog s (bf16 into do_s), D = sum dog og (og = s o, the forward's bf16), dg = dog o s (1 - s)
++    // (rows j0 .. only, with o fp32)
+ #pragma unroll
+     for (int c = 0; c < CPT / 4; ++c) dg4[c] = V4<bf>::load(DOG + (long)rr * W + h * DHP + gc0 + 4 * c);
+     float dsum = 0.f;
+@@ -2205,10 +2245,68 @@ __global__ void __launch_bounds__(SB<DHP, L, QB, SP>::NTH, SB<DHP, L, QB, SP>::N
+ #pragma unroll
+     for (int x = 1; x < TPR; x <<= 1) dsum += __shfl_xor_sync(0xffffffffu, dsum, x);
+     if (tid % TPR == 0) dd_s[rr] = dsum;
++    SBT(2);
++    asm volatile("cp.async.wait_group 0;" ::: "memory");
++    __syncthreads();
++  } else {
++    constexpr int LDY = C::LDY, LDWO = C::LDWO, KS = C::KS, KR = DS / KS;
++    bf* dy_s = reinterpret_cast<bf*>(smem + C::OFF_DY);
++    const bf* wo_s = reinterpret_cast<const bf*>(smem + C::OFF_WO);
++    float* dgp = reinterpret_cast<float*>(smem + C::OFF_DGP);
++    for (int i = tid; i < QB * (DS / 8); i += NTH) {  // dy rows j0 .. (the previous kernel's input: after the wait)
++      const int r = i / (DS / 8), c = i % (DS / 8);
++      cp16(dy_s + r * LDY + 8 * c, DOG + (long)(j0 + r) * DS + 8 * c);
++    }
++    asm volatile("cp.async.commit_group;" ::: "memory");
++    asm volatile("cp.async.wait_group 0;" ::: "memory");
++    __syncthreads();
++    {  // dog tile (16 rows x 8 columns) of warp w over its K range (DS / KS), fp32 partials
++      const int tl = warp % C::TILES, ks = warp / C::TILES, mt = tl / (DHP / 8), nt = tl % (DHP / 8);
++      float c4[4] = {};
++#pragma unroll 4
++      for (int kk = 0; kk < KR / 16; ++kk) {
++        const int k0 = ks * KR + 16 * kk;
++        const bf* ap = dy_s + (16 * mt + g) * LDY + k0 + 2 * q;
++        uint32_t b0, b1;
++        ldsm_x2_t(b0, b1, wo_s + (k0 + (lane & 15)) * LDWO + 8 * nt);
++        mma16816(c4, *reinterpret_cast<const uint32_t*>(ap), *reinterpret_cast<const uint32_t*>(ap + 8 * LDY),
++                 *reinterpret_cast<const uint32_t*>(ap + 8), *reinterpret_cast<const uint32_t*>(ap + 8 * LDY + 8), b0, b1);
++      }
++      float* dp = dgp + ks * QB * DHP + (16 * mt + g) * DHP + 8 * nt + 2 * q;
++      *reinterpret_cast<float2*>(dp) = make_float2(c4[0], c4[1]);
++      *reinterpret_cast<float2*>(dp + 8 * DHP) = make_float2(c4[2], c4[3]);
++    }
++    __syncthreads();
++    if (own) {  // own rows: dog = bf16(sum of the K partials in order) (the GEMM's bf16 output), then gate_bwd's statements
++      float4 dg = make_float4(0.f, 0.f, 0.f, 0.f);
++#pragma unroll
++      for (int ks = 0; ks < KS; ++ks) dg = add4(dg, *reinterpret_cast<const float4*>(dgp + ks * QB * DHP + rr * DHP + gc0));
++      dg = make_float4(rbf(dg.x), rbf(dg.y), rbf(dg.z), rbf(dg.w));
++      const float4 s = sig4(s4[0]), d_o = mul4(dg, s), t = mul4(dg, o4[0]);
++      V4<bf>::store(do_s + (j0 + rr) * LDH + gc0, d_o);
++      const float4 dgv = make_float4(t.x * s.x * (1.f - s.x), t.y * s.y * (1.f - s.y), t.z * s.z * (1.f - s.z), t.w * s.w * (1.f - s.w));
++      V4<bf>::store(DQKVG + (long)(j0 + rr) * ld4 + 3 * W + h * DHP + gc0, dgv);
++      float dsum = sum4(mul4(d_o, o4[0]));
++#pragma unroll
++      for (int x = 1; x < DHP / 4; x <<= 1) dsum += __shfl_xor_sync(0xffffffffu, dsum, x);
++      if (tid % (DHP / 4) == 0) dd_s[j0 + rr] = dsum;
++    }
++    SBT(2);
++    cluster_sync_all();  // every CTA of the head has its own dO rows / D in shared memory
++    // the other query blocks' dO rows and D from their CTAs (ld.shared::cluster, 16 B), into the same places here
++    constexpr int RC = QB * CH;  // 16-byte chunks of one block's dO rows
++    for (int i = tid; i < (NQ - 1) * (RC + QB / 4); i += NTH) {
++      const int pi = i / (RC + QB / 4), e = i % (RC + QB / 4), pr = (jb + 1 + pi) % NQ;
++      uint32_t a;
++      if (e < RC) a = su32(do_s + (pr * QB + e / CH) * LDH + 8 * (e % CH));
++      else a = su32(dd_s + pr * QB + 4 * (e - RC));
++      uint4 v;
++      asm volatile("ld.shared::cluster.v4.u32 {%0, %1, %2, %3}, [%4];" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "r"(mapa(a, (uint32_t)pr)) : "memory");
++      asm volatile("st.shared.v4.u32 [%0], {%1, %2, %3, %4};" ::"r"(a), "r"(v.x), "r"(v.y), "r"(v.z), "r"(v.w) : "memory");
++    }
++    asm volatile("barrier.cluster.arrive.relaxed.aligned;" ::: "memory");  // my remote reads are done (waited on before exit)
++    __syncthreads();
+   }
+-  SBT(2);
+-  asm volatile("cp.async.wait_group 0;" ::: "memory");
+-  __syncthreads();
+   SBT(3);
+   constexpr float L2E = 1.4426950408889634f;
+   const float cql = rsqd * L2E;
+@@ -2361,16 +2459,18 @@ __global__ void __launch_bounds__(SB<DHP, L, QB, SP>::NTH, SB<DHP, L, QB, SP>::N
+     *reinterpret_cast<uint32_t*>(DQKVG + (long)(j0 + r) * ld4 + set * W + h * DHP + c) = pack2(t.x, t.y);
+   }
+   SBT(5);
++  if constexpr (DS > 0) asm volatile("barrier.cluster.wait.aligned;" ::: "memory");  // no CTA exits while a peer may read its rows
+ }
+-template <int NH, int DHP, int L, int QB>
+-void sbwd_t(const at::Tensor& dog, const at::Tensor& o, const at::Tensor& og, const at::Tensor& qkvg, const at::Tensor& bias, const at::Tensor& lse,
+-            at::Tensor& dqkvg, at::Tensor& db, float* abq, int stride, float rsqd, bool pdl) {
++template <int NH, int DHP, int L, int QB, int DS = 0>
++void sbwd_t(const at::Tensor& dog, const at::Tensor& o, const at::Tensor& og, const at::Tensor& qkvg, const at::Tensor& bias, const at::Tensor& lse, at::Tensor& dqkvg,
++            at::Tensor& db, float* abq, int stride, float rsqd, bool pdl, const bf* wo = nullptr) {
+   constexpr int SP = NH > 16 && L == 256 && QB == 32 ? 2 : 4;  // 24 heads at L 256: 192 CTAs, two a SM (256 threads each)
+-  using C = SB<DHP, L, QB, SP>;
+-  auto k = small_core_bwd_k<NH, DHP, L, QB, SP>;
++  using C = SB<DHP, L, QB, SP, DS>;
++  auto k = small_core_bwd_k<NH, DHP, L, QB, SP, DS>;
+   static bool attr = false;
+   if (!attr) {
+     C10_CUDA_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM));
++    if (DS) C10_CUDA_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeNonPortableClusterSizeAllowed, 1));
+     attr = true;
+   }
+   cudaLaunchConfig_t cfg = {};
+@@ -2378,44 +2478,76 @@ void sbwd_t(const at::Tensor& dog, const at::Tensor& o, const at::Tensor& og, co
+   cfg.blockDim = dim3(C::NTH);
+   cfg.dynamicSmemBytes = C::SMEM;
+   cfg.stream = S();
+-  cudaLaunchAttribute at[1];
+-  at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+-  at[0].val.programmaticStreamSerializationAllowed = 1;
++  cudaLaunchAttribute at[2];
++  int na = 0;
++  if (DS) {
++    at[na].id = cudaLaunchAttributeClusterDimension;
++    at[na].val.clusterDim.x = L / QB; at[na].val.clusterDim.y = 1; at[na].val.clusterDim.z = 1;
++    ++na;
++  }
++  if (pdl) {
++    at[na].id = cudaLaunchAttributeProgrammaticStreamSerialization;
++    at[na].val.programmaticStreamSerializationAllowed = 1;
++    ++na;
++  }
+   cfg.attrs = at;
+-  cfg.numAttrs = pdl ? 1 : 0;
+-  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, k, CP<bf>(dog), CP<float>(o), CP<bf>(og), CP<bf>(qkvg), CP<bf>(bias), CP<float>(lse), P<bf>(dqkvg), P<float>(db),
+-                                    abq, stride, rsqd));
+-}
+-// v27: dog [L, W] bf16 (dy Wo), o [L, W] fp32, og [L, W] bf16 (sigmoid(g) o, saved by the forward), qkvg [L, 4 W] bf16 (q unscaled), bias
+-// [H, L, L] bf16 (natural units), lse [H, L] fp32 (log2) -> dqkvg [L, 4 W] bf16 (dq | dk | dv | dg), db [H, L, L] fp32 (dbias),
+-// acc[0 : L / 4, 2 d : 2 d + W] (dbq's 4-row partial sums). L 128 / 256; qb 16 / 32 query (and key) rows per CTA.
+-void small_core_bwd(at::Tensor dog, at::Tensor o, at::Tensor og, at::Tensor qkvg, at::Tensor bias, at::Tensor lse, at::Tensor dqkvg, at::Tensor db,
+-                    at::Tensor acc, int64_t d, int64_t L, double rsqd, bool pdl, int64_t qb) {
++  cfg.numAttrs = na;
++  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, k, CP<bf>(dog), CP<float>(o), CP<bf>(og), CP<bf>(qkvg), CP<bf>(bias), CP<float>(lse), P<bf>(dqkvg), P<float>(db), abq,
++                                    stride, rsqd, wo));
++}
++// v27: dog [L, W] bf16 (dy Wo), o [L, W] fp32, og [L, W] bf16, qkvg [L, 4 W] bf16 (q unscaled), bias [H, L, L] bf16 (natural units), lse
++// [H, L] fp32 (log2) -> dqkvg [L, 4 W] bf16 (dq | dk | dv | dg), db [H, L, L] fp32 (dbias), acc[0 : L / 4, 2 d : 2 d + W] (dbq's 4-row
++// partial sums). L 128 / 256; qb 16 / 32 query (and key) rows per CTA. small_core_bwd2: dy [L, d] and the packed wo [d, W] instead of dog
++// and og (dog made in the kernel, a cluster per head; head width 16 / 32).
++void sbwd_impl(at::Tensor dog, at::Tensor o, at::Tensor og, at::Tensor qkvg, at::Tensor bias, at::Tensor lse, at::Tensor dqkvg, at::Tensor db, at::Tensor acc,
++               int64_t d, int64_t L, double rsqd, bool pdl, int64_t qb, c10::optional<at::Tensor> wo) {
+   chk(dog, at::kBFloat16, "dog"); chk(o, at::kFloat, "o"); chk(og, at::kBFloat16, "og"); chk(qkvg, at::kBFloat16, "qkvg"); chk(bias, at::kBFloat16, "bias");
+   chk(lse, at::kFloat, "lse"); chk(dqkvg, at::kBFloat16, "dqkvg"); chk(db, at::kFloat, "db"); chk(acc, at::kFloat, "acc");
+   const int64_t H = bias.size(0), W = o.size(1);
+   TORCH_CHECK((L == 128 || L == 256) && (qb == 16 || qb == 32) && qkvg.size(0) == L && qkvg.size(1) == 4 * W && dqkvg.sizes() == qkvg.sizes()
+-              && dog.numel() == L * W && o.numel() == L * W && og.numel() == L * W && bias.numel() == H * L * L && db.numel() == H * L * L
++              && dog.numel() == L * (wo ? d : W) && o.numel() == L * W && og.numel() == L * W && bias.numel() == H * L * L && db.numel() == H * L * L
+               && lse.numel() == H * L && acc.dim() == 2 && acc.size(0) >= L / 4 && acc.size(1) >= 2 * d + W, "small_core_bwd: shapes");
++  if (wo) { chk(*wo, at::kBFloat16, "wo"); TORCH_CHECK(wo->size(0) == d && wo->size(1) == W && qb == 32 && (d == 384 || d == 512), "small_core_bwd2: wo [d, W]"); }
+   const at::cuda::CUDAGuard gd(o.device());
+   float* abq = acc.data_ptr<float>() + 2 * d;
+   const int st = (int)acc.size(1);
+   const float rs = (float)rsqd;
+-#define SB_GO(NH, DHP)                                                                                            \
+-  do {                                                                                                            \
++  const bf* pw = wo ? CP<bf>(*wo) : nullptr;
++#define SB_GO(NH, DHP)                                                                                       \
++  do {                                                                                                       \
+     if (L == 128 && qb == 16) sbwd_t<NH, DHP, 128, 16>(dog, o, og, qkvg, bias, lse, dqkvg, db, abq, st, rs, pdl); \
+     else if (L == 128) sbwd_t<NH, DHP, 128, 32>(dog, o, og, qkvg, bias, lse, dqkvg, db, abq, st, rs, pdl);       \
+     else if (qb == 16) sbwd_t<NH, DHP, 256, 16>(dog, o, og, qkvg, bias, lse, dqkvg, db, abq, st, rs, pdl);       \
+     else sbwd_t<NH, DHP, 256, 32>(dog, o, og, qkvg, bias, lse, dqkvg, db, abq, st, rs, pdl);                      \
+   } while (0)
+-  if (H == 16 && W == 512) SB_GO(16, 32);
++#define SB_G2(NH, DHP, DS)                                                                                                  \
++  do {                                                                                                                      \
++    if (L == 128) sbwd_t<NH, DHP, 128, 32, DS>(dog, o, og, qkvg, bias, lse, dqkvg, db, abq, st, rs, pdl, pw);               \
++    else sbwd_t<NH, DHP, 256, 32, DS>(dog, o, og, qkvg, bias, lse, dqkvg, db, abq, st, rs, pdl, pw);                        \
++  } while (0)
++  if (wo) {
++    if (H == 16 && W == 512 && d == 512) SB_G2(16, 32, 512);
++    else if (H == 16 && W == 512) SB_G2(16, 32, 384);
++    else if (H == 12 && W == 384) SB_G2(12, 32, 384);
++    else if (H == 24 && W == 384) SB_G2(24, 16, 384);
++    else TORCH_CHECK(false, "small_core_bwd2: geometry");
++  } else if (H == 16 && W == 512) SB_GO(16, 32);
+   else if (H == 12 && W == 384) SB_GO(12, 32);
+   else if (H == 24 && W == 384) SB_GO(24, 16);
+   else if (H == 8 && W == 384) SB_GO(8, 48);
+   else TORCH_CHECK(false, "small_core_bwd: geometry");
+ #undef SB_GO
++#undef SB_G2
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
++void small_core_bwd(at::Tensor dog, at::Tensor o, at::Tensor og, at::Tensor qkvg, at::Tensor bias, at::Tensor lse, at::Tensor dqkvg, at::Tensor db, at::Tensor acc,
++                    int64_t d, int64_t L, double rsqd, bool pdl, int64_t qb) {
++  sbwd_impl(dog, o, og, qkvg, bias, lse, dqkvg, db, acc, d, L, rsqd, pdl, qb, c10::nullopt);
++}
++void small_core_bwd2(at::Tensor dy, at::Tensor wo, at::Tensor o, at::Tensor og, at::Tensor qkvg, at::Tensor bias, at::Tensor lse, at::Tensor dqkvg, at::Tensor db,
++                     at::Tensor acc, int64_t d, int64_t L, double rsqd, bool pdl) {
++  sbwd_impl(dy, o, og, qkvg, bias, lse, dqkvg, db, acc, d, L, rsqd, pdl, 32, wo);
++}
+ 
+ }  // namespace
+ 
+@@ -2424,6 +2556,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("small_core_train", &small_core_train);
+   m.def("dqb_small", &dqb_small);
+   m.def("small_core_bwd", &small_core_bwd);
++  m.def("small_core_bwd2", &small_core_bwd2);
+ #if SBW_TL
+   m.def("sb_tl", []() { std::vector<unsigned long long> v(512 * 8); cudaMemcpyFromSymbol(v.data(), g_sbtl, sizeof(unsigned long long) * 512 * 8); return v; });
+ #endif
+@@ -2440,6 +2573,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   apb_shared_defs(m);
+   m.def("prep_dp", &prep_dp);
+   m.def("prep_ln", &prep_ln);
++  m.def("prep_wf", &prep_wf);
+   m.def("pair_bias32_tc", &pair_bias32_tc);
+   m.def("pack2_rna", &pack2_rna);
+   m.def("gate32", &gate32);
+diff --git a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py bb/attention_pair_bias_b200.py
+index 88519e614..4e5a05fdc 100644
+--- a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
++++ bb/attention_pair_bias_b200.py
+@@ -464,6 +464,13 @@ def _dqb_small(L: int) -> bool:
+ #: v27 (2026-11-18): the training attention backward at L 128 / 256 in ONE launch (``small_core_bwd``: gate_bwd + attn_dkv + dqb + qkv_bwd;
+ #: a CTA per head and SBWD query / key rows). 0: the separate stages. MINIWORLD_APB_B200_SBWD overrides.
+ _SBWD = int(os.environ.get("MINIWORLD_APB_B200_SBWD", "32"))
++_SBWD2 = os.environ.get("MINIWORLD_APB_B200_SBWD2", "1") != "0"  # dog = dy Wo in the same launch (head width <= 32)
++_SBWD24 = os.environ.get("MINIWORLD_APB_B200_SBWD24", "0") != "0"  # 24 heads at L 256 (two 256-thread CTAs a SM)
++
++
++#: v27 (2026-11-18): the training forward makes Wf / Wb in a launch of its own on the side stream ahead of the pair pass; the weight pack +
++#: LayerNorm(single) (prep_ln) runs on the main stream beside them. MINIWORLD_APB_B200_EARLY_WF=0: the pack on the side stream first.
++_EARLY_WF = os.environ.get("MINIWORLD_APB_B200_EARLY_WF", "0") != "0"
+ 
+ 
+ #: v27: finalize_red split into its three parts, each launched on the stream that makes its inputs (dWf part after the pair backward on
+@@ -473,7 +480,7 @@ _FSPLIT = os.environ.get("MINIWORLD_APB_B200_FSPLIT", "1") != "0"
+ 
+ 
+ def _sbwd(L: int, heads: int) -> int:
+-    return _SBWD if _SBWD > 0 and (L == 128 or (L == 256 and heads <= 16)) else 0
++    return _SBWD if _SBWD > 0 and (L == 128 or (L == 256 and (heads <= 16 or _SBWD24))) else 0
+ 
+ 
+ def _rsqd(heads: int, d: int) -> float:
+@@ -1106,10 +1113,18 @@ def _forward_b200(single, pair, mask, leaves, eps_s, eps_p, gate_bias):
+         out = torch.empty_like(single)
+         xa0, st0 = torch.empty_like(single[0]), single.new_empty((L, 2), dtype=torch.float32)
+         ln0: list = [single[0], lnw, lnb, xa0, st0, eps_s, out[0]]
+-        with torch.cuda.stream(side):
+-            wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0, gate_bias, ln0)
+         packed = torch.cuda.Event()
+-        _rec(packed, side)
++        if _EARLY_WF and _STREAMS:  # v27: Wf / Wb by a launch of their own on the side stream (the pair pass follows at once), the pack on main
++            with torch.cuda.stream(side):
++                wb_l, lnpw_l = leaves[9], leaves[8]
++                wf, wbo = wb_l.new_empty(wb_l.shape, dtype=torch.bfloat16), wb_l.new_empty(wb_l.shape, dtype=torch.bfloat16)
++                E.prep_wf(wb_l, lnpw_l, wf, wbo, 1.0)
++            wpack, bvec, _wf2, wop, _wbo2 = _prep(leaves, 1.0, 1.0, gate_bias, ln0)  # its Wf / Wb copies unused (the same bits)
++            _rec(packed, main)
++        else:
++            with torch.cuda.stream(side):
++                wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0, gate_bias, ln0)
++            _rec(packed, side)
+         assert wop is not None and wbo is not None  # B200: prep_dp always packs Wo and Wb
+         dp = wf.shape[1]
+         saved: list[torch.Tensor] = []
+@@ -1206,8 +1221,11 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy, nocopy: bool =
+                 DB = torch.empty((H, L, L), device=dev, dtype=f32)
+                 with torch.cuda.stream(s1):
+                     dwo = torch.mm(dy2.t(), og, out_dtype=f32)
+-                dog = dy2 @ wo
+-                E.small_core_bwd(dog, O, og, qkvg, bias, LSE, dqkvg, DB, acc, D, L, _rsqd(H, D), pdl, sbq)
++                if _SBWD2 and H != 8:  # dog = dy Wo inside the launch (a cluster per head): no dO GEMM
++                    E.small_core_bwd2(dy2, wo, O, og, qkvg, bias, LSE, dqkvg, DB, acc, D, L, _rsqd(H, D), pdl)
++                else:
++                    dog = dy2 @ wo
++                    E.small_core_bwd(dog, O, og, qkvg, bias, LSE, dqkvg, DB, acc, D, L, _rsqd(H, D), pdl, sbq)
+                 _join(s2, main)
+                 with torch.cuda.stream(s2):
+                     if pbtc:

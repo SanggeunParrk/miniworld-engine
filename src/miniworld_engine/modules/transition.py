@@ -17,6 +17,7 @@ from miniworld_engine.modules.norm import (
     _as_rows3,
     _wants_grad,
     a100,
+    b200,
     h100_unsupported,
     sm120,
     triton_unsupported,
@@ -68,7 +69,117 @@ class Transition(BackendModule, MasterWeights):
         "cuda:a100_sm80": 8,  # 2026-11-20 (8): bf16 one-kernel forward (fused_fwd_sm80 / fused_sm80, D 64 / 128) keeps its f16 squeeze finite for |x| up to 1e6 (residual and Ws carried x 2^-4; was inf at |x| >= 65504: AF3 5I28 msa_transition); results otherwise within 1 bf16 ulp of 7; 2026-11-19 (7): fp32 with TF32 off runs on the engine's IEEE fp32 CUDA chain (kernels/ieee_f32; was refused to Triton / PyTorch); TF32 and bf16 unchanged
         "triton:a100_sm80": 2,
         "cuda:5090_sm120": 10,  # 2026-11-20 (10): the same bf16 one-kernel forward fix as cuda:a100_sm80 8 (inf at |x| >= 65504 in the D 64 / 128 f16 squeeze); (9): 2026-11-20 (9): fp32 inference (d 128, n 2, float32 TF32-allowed) squeezes in f16 accumulation with 32 rows a warp and up to two half tiles a CTA (kernels/transition/cuda/sm80/tr_fwd_sm80.cuh F32H, 0.97-1.03 -> 0.94-0.96 of anthropic; rms vs float64 5.9e-4, PyTorch TF32 3.4e-4); (8): 2026-11-19 (8): bf16 inference at D >= 256 and >= 32768 rows folds the LayerNorm into the dual GEMM (statistics kernel + gamma-folded weights, xn never written; kernels/transition/cuda/fused_wide_sm80._dual_ln), -80 us of the L 512 d 256 n 2 call, outputs differ from 7 within the accuracy standard; (7): see the comment below; (6): bf16 training on the one-kernel backward does not save xn (rebuilt by ln_apply from the saved (mean, rstd), -36 MiB at L 384; gradients bitwise unchanged); (5): the same IEEE fp32 chain (fp32 TF32-off training at 2048 / 4096 / 8192 rows and the 384-row no-grad calls fell to Triton)
+        "cuda:b200_sm100": 66,
+        "triton:b200_sm100": 22,
     }
+    # 2026-11-19 (B200, N9, inference): cuda:b200_sm100 66 = the bf16 expand epilogue (tsx_expand.cu: the D 384 / D 768 small-M chains, the fold, the K-split cluster) on packed f32x2 pairs with the one-MUFU tanh sigmoid (0.5 tanh(a / 2) + 0.5, the TR_SIG 1 / SIGT 1 form of the other bf16 kernels) in place of ex2 + rcp (4 MUFU ops a pair -> 2): row 36 / 37 chains -0.3 - -0.6 us device time; end-to-end error vs fp64 unchanged to 3 digits (rms), fp32 / fp16 expands untouched
+    # 2026-11-19 (B200, N1, inference): cuda:b200_sm100 62 = (1) the small-M D 384 chain (4 - 24 tiles of n 2 as far as the chain takes them (<= 16), 5 - 12 of n 4) with the LayerNorm folded into the expand (tsx_expand.cu -DFOLD: raw x as A, Wp = bf16(W gamma) as B and one K16 correction MMA, row statistics from the x tile in shared memory by the epilogue warps; Wp and the u / v images are a weight form made once per weights): no LayerNorm launch, device time -0.2 - -3 us (the 128-unit chunk, with its own weight ring beside the resident x tile, also covers the cells that used fused_small's chains: n 4 8 - 12 tiles keep its CTA-pair squeeze, n 2 13 - 16 tiles; a 7-tile n 4 and 13 - 15-tile n 2 hole of 2 - 3 us is gone); the squeeze of 7 - 12 tiles of n 2 on the 64-column CTA pair (the old rule fell back to (32, 1) there: -0.2 - -0.8 us); (2) the fused D 384 inference kernel's fold prep (Wp, u / v images: a 4.5 us launch plus a zero fill in front of every call) cached as a weight form, so the fold now serves n 2 from 16 384 rows (was 65 536) and n 4 from 32 768: -4 - -7 %; (3) the D 512 inference fold prep (Wp, u, v: 32 blocks of the statistics launch) cached as a weight form: the fold now serves n 2 and n 4 from 16 384 rows (-1 - -4 % device time); (4) route_sm100a: the zero-row pad of a ragged row count only where a tuned build runs (it ran, 2 kernels / ~4 us in a graph, for the small-M chains and the generic kernels that need none: row 36 L 2976 26.5 -> 23.1 us)
+    # 2026-11-18 (B200, S90, inference): cuda:b200_sm100 60 = the D 512 n 2 inference squeeze GEMM (tgemm_nd.cu -DPARTS) with the K loop per N part and a double-buffered 256-column accumulator: the epilogue of one part overlaps the
+    # MMAs of the next (the single whole-row accumulator left the tensor pipe idle ~68 us of 244 at row 33 L 512): squeeze 244 -> 235 us, row 33 master -2 to -2.5 %
+    # 2026-11-18 (B200, S90, inference): cuda:b200_sm100 58 = the fused D 384 inference kernel (rows 31 / 32 from 65 536 rows) with the LayerNorm folded into the expand: raw x as the A operand (no apply pass), W gamma as B (prep launch),
+    # the row statistics in the SwiGLU warps and a K16 CORRECTION MMA per chunk ([-mean q] x [u v] bf16 hi / lo pairs) for the rank-1 terms; the SwiGLU epilogue is a = rstd acc: -3 to -9 % at 65 536 rows and up
+    # 2026-11-18 (B200, S90, inference): cuda:b200_sm100 56 = the D 512 fold's statistics pass at 16 lanes a row and 8 blocks a SM (68 -> 47 us at row 33 L 512, 88 % of the HBM peak)
+    # 2026-11-18 (B200, S90, inference): cuda:b200_sm100 54 = D 512 n 2 inference (row 33, 65 536 .. 524 288 rows) with the LayerNorm folded into the expand GEMM (raw x as the A operand, W gamma as B,
+    # a = rstd (x . Wp) - c1 u + v; one statistics + weight-fold launch: no xn round trip): row 33 master -3 to -5 %
+    # 2026-11-18 (B200, S90, inference): cuda:b200_sm100 52 = the fp32 inference forward tg_fused_h16 at D 128 (row 27 float32, from 98 304 rows) with the y epilogue split over both warp groups, no staging
+    # (EP3: residual re-read from global in 128-B segments, y by row-segment stores): [262 144, 128] n 2 103.1 -> 91.2 us, [589 824] 223.2 -> 196.5; same bits
+    # 2026-11-18 (B200, S90, inference): cuda:b200_sm100 50 = the D 256 inference forward (tfwd_d256.cu -DX2=1) with TWO xn buffers and no x buffer (the LayerNorm of tile i + 1 overlaps the
+    # expands of tile i; the residual is re-read from global memory, y written in 128-B row segments): [589 824, 256] n 2 13.5 -> 11.9 us a tile, n 4 24.6 -> 21.5; same bits
+    # 2026-11-18 (B200, S90, inference): cuda:b200_sm100 48 = the D 256 inference forward (tfwd_d256.cu) prefetches the next tile's x into L2 a tile ahead (PF2; same bits,
+    # [589 824, 256] n 2 14.0 -> 13.6 us a tile, n 4 22.85 -> 22.60)
+    # 2026-11-18 (B200, S90, inference): cuda:b200_sm100 46 = the D 128 n 2 inference pair forward (tr_fwd_sm100.cu) with 3 x stages and a 2-slot weight ring
+    # (NXS_ / NW_: the tile period is the x stage lifetime / stages), 4.59 -> 3.91 us a tile at [1 048 576, 128], bit-identical
+    # (S90 part 7, training, 53): the D 256 training forward on the inference X2 build (two xn buffers, residual re-read, y from registers; the kernel now takes x / y as
+    # extra arguments, rstd / c1 stay the saved statistics): [98 304 / 147 456, 256] n 4 step 672 / 913 -> 647 / 883 us, n 2 [147 456] 565 -> 532; one tile a CTA keeps the old build.
+    # 2026-11-18 (B200, S90 part 6, training): cuda:b200_sm100 53 (51 in the log: part 6) = the D 64 n 2 training forward with ROLES 1 (FWD_TRAIN_FLAGS): [589 824, 64] step 239.7 -> 227.3 us,
+    # y bit-identical; (45: the D 64 pair backward of part 5).
+    # 2026-11-18 (B200, S90 part 5, training): cuda:b200_sm100 45 = the D 64 two-role backward (rows 209 / 210 / 220): the DX input stage carries x (XSEP: no
+    # x reload behind the producer's in-order issue), n 2 on one gate warpgroup + two LayerNorm-backward epilogues on alternate tiles, a double-buffered
+    # d_xn accumulator and three tile buffers, D 64 n 2 weight-role replicas 34 from 129 tiles: [589 824, 64] n 2 step 291 -> 242 us, [147 456] 88.1 -> 79.8,
+    # [65 536] 51.2 -> 49.2, n 4 [589 824] 387 -> 371; y / dx bit-identical, dW regrouped (GREEN), deterministic.
+    # 2026-11-18 (B200, S90, training): cuda:b200_sm100 43 = fp32 training: D >= 256 keeps a, b from the TF32 forward (GATE_AB; D 256 leaves the fp16
+    # forward) and D 128 / 512 take d_xn from cuBLAS (fused_generic_sm100a._AB_F32_MIN_D, _DXN_CUBLAS_F32): D 512 n 2 step -22 to -31 %, D 256
+    # -4 to -7 %, D 128 -2 to -4 %.
+    # bf16 two-role backward: tile-dependent weight-role replicas (D 128 n 2 15 / 16 above 128 / 2048 tiles, D 128 n 4 10 from 3200 tiles,
+    # D 64 n 4 19): D 128 n 2 [262 144 .. 589 824] -5 to -9 %, n 4 [589 824] -3 %, D 64 n 4 -2 to -3 %; dx / y bit-identical, dW regrouped
+    # (GREEN). Grads bit-identical to 42 except D 256 >= 65 536 rows (forward on TF32 instead of fp16); deterministic.
+    # 2026-11-18 (B200, round 3 part 20, inference): cuda:b200_sm100 42 = the fp32 inference forward tg_fused_h16 (rows 27 / 29 float32):
+    # SwiGLU sigmoid as 0.5 tanh.approx(z / 2) + 0.5 (one MUFU op a unit; HSIG 1, the bf16 kernels' form), and a CTA's last tile takes
+    # its residual from a TMA copy into the idle weight ring and writes y by TMA stores (RXT; the same bits); a reconverging __syncwarp
+    # before the final barrier. Random weights vs fp64: rms 3.652e-4 / 3.880e-4 at [16 384, 256] / [65 536, 128] n 2 (was 3.652e-4 /
+    # 3.879e-4); 4-10 % faster at every row count. The training build (SAVE_BUILD) keeps its sigmoid and epilogue.
+    # 2026-11-18 (B200, round 3 part 19, inference): cuda:b200_sm100 40 = bf16 inference at D 768 n 2 13-16 row tiles and D 384 n 4 13-31
+    # tiles (rows 37 / 36 L 2048-3968, ragged rows too) on the small-M chain with the PERSISTENT pair expand (tsx_expand2p.cu: M = 256
+    # pair products, resident weight panels, 72 pairs looping over 256-row blocks, double-buffered accumulators) and the cuBLAS squeeze
+    # onto the x copy the LayerNorm launch writes (fused_small_sm100a.PEX), instead of the generic kernels
+    # 2026-11-18 (B200, round 3 part 18, inference): cuda:b200_sm100 38 = bf16 inference at D 768 n 2 7-12 row tiles, D 384 n 2 16 tiles and
+    # D 384 n 4 8-12 tiles (rows 37 / 35 / 36 L 1024-2048) on the small-M chain (fused_small_sm100a.INFER_CELLS: tsx_ln -> K-split
+    # tsx_expand -> the squeeze on a CTA pair, tsx_squeeze2 bf16 NB 128 / 64) instead of the generic kernels with the cuBLAS squeeze
+    # 2026-11-18 (B200, round 3 part 17, inference): cuda:b200_sm100 36 = the small-M chains' K-split partials exchanged chunk-major
+    # (tsx_expand / tsx_squeeze -DCHM: one 512-B contiguous st.async run per warp instruction; same bits, training too) and the fp32
+    # inference fp16 chain's squeeze on a CTA pair (tsx_squeeze2 -DH16, no partial exchange) at the H16_PAIR_SQ cells
+    # 2026-11-18 (B200, round 3, training part 5): cuda:b200_sm100 33 = the two-role backwards' gates reordered (same bits): the D 128 / D 64
+    # weight role computes h / dA / dB before waiting for the previous tile's dW products (only its stores wait), the D 128 input role
+    # computes the a | b part of the gate (s, l, u) before waiting for dh_j
+    # 2026-11-18 (B200, round 3 part 16, inference; merged into 34 with training 33): cuda:b200_sm100 32 = tsx_ln (the small-M / pair chains' LayerNorm, bf16 and the fp16
+    # inference build) loads gamma / beta before griddepcontrol.wait instead of after the row statistics (one dependent DRAM round trip
+    # off the chain's first launch; bitwise identical): fine device time of row 37 master [1, 256 / 384 / 768, 768] -0.9 / -1.2 / -1.1 us
+    # 2026-11-18 (B200, round 3, training part 4): cuda:b200_sm100 31 = the training forward (D 128) and the two-role backwards (D 64, D 128)
+    # launched as programmatic dependents (griddepcontrol.wait at the forward's entry and after the backward's prologue; same bits), the
+    # D 128 n 2 reduce too; D 128 n 4 backward with 8 weight-role replicas up to 128 row tiles (dW partial sums regrouped)
+    # 2026-11-18 (B200, round 3, training part 3): cuda:b200_sm100 29 = tg_bwd_small: barrier arrivals as gpu-scope release atomics, the
+    # proxy fences only at the barrier whose data is TMA-loaded next, the gate elementwise with two vectors per load round (no re-reads of
+    # unused slabs), the LayerNorm phase on several warps per row at D 768 / <= 2 rows per CTA (dx bits change: row sums in part order),
+    # measured phase-2 / gate plans for bf16 [512-768, 768] (SB_PLAN_TUNED, SB_GATE_TUNED)
+    # 2026-11-18 (B200, round 3 part 14, inference): cuda:b200_sm100 28 = bf16 D 768 n 2 inference at 1-6 row tiles (row 37 single stream) on the
+    # CTA-pair chain tsx_ln -> tsx_expand2 -> tsx_squeeze2 (cta_group::2, M = 128 pair products, 3-D multi-K-block TMA boxes; fp32 sums over the
+    # whole K instead of the K-split partials: output within one bf16 ulp of 26 / 27)
+    # 2026-11-18 (B200, round 3, training): cuda:b200_sm100 27 = the small-M chain cells (fp32 D 384 / 768, bf16 D 768, n 2, 1-6 row tiles) train
+    # with the one-launch backward tg_bwd_small (persistent grid, software grid barriers: split-K gate + elementwise gate, d_xn beside dW, the
+    # LayerNorm backward, dgamma | dbeta), the weights read MN-major (no transposed copies) and their per-step forms made in the forward chain's
+    # LayerNorm launch (no tg_prep); fp32 dy as it is (TF32-truncated by the MMAs, no split): YELLOW 1.37-1.60 x tol (was 1.00-1.08)
+    # 2026-11-17 (B200, round 3 part 9, training): cuda:b200_sm100 25 = fp32 training weight gradients on cuBLAS over 8 / 16 row slabs (one
+    # bmm each, the slabs and the dgamma | dbeta partials added in fixed order by one tg_wsum launch; tg_dw now only to 2^21 x elements);
+    # the backward's partial reductions (transition_bwd_reduce, tbwd_d64 / d384 reduce, tg_wsum, tsx_dw,
+    # transition_lnbwd_w_reduce) with their loads batched (same order, same bits)
+    # 2026-11-18 (B200, round 3 part 11, inference): cuda:b200_sm100 26 = tg_fused_h16 D 256 inference: both 16-row groups' LayerNorm statistics
+    # before the wait for the xn buffer, the first tile's first group normalized by the idle SwiGLU warps (LNA) from an x tile TMA-staged in
+    # the second expand stage / squeeze ring (XS0); the same bits. Training build (SAVE_BUILD) unchanged.
+    # 2026-11-17 (B200, round 3 part 10, inference): cuda:b200_sm100 24 = the fp32 inference forward tg_fused_h16 (D 64 / 128 / 256): gamma | beta
+    # staged in shared memory by a bulk copy, the epilogue's residual read coalesced through the staging slab and y written by coalesced stores
+    # (the same bits); D 256: the LayerNorm reads its rows in the tcgen05 16x256b fragment order (4x fewer L1 wavefronts; xn within the
+    # LayerNorm's summation order), x tiles prefetched into L2. The training build (SAVE_BUILD) is unchanged
+    # 2026-11-17 (B200, round 3 part 9, inference): cuda:b200_sm100 22 = inference cubins of the fused wide forwards (fused_wide_sm100a.FWD_INFER_FLAGS):
+    # D 64 n 2 with the epilogue on its own warpgroup (same bits), D 128 n 2 with the LayerNorm and the epilogue split over two warpgroups (same
+    # bits), D 256 with the LayerNorm and the epilogue on two warpgroups and the x / weight boxes issued from one lane each (xn within the LayerNorm's
+    # summation order); triton:b200_sm100 22 = fp32 inference with K > 128: the LayerNorm stores xn on the TF32 grid (layernorm/triton TF32_OUT,
+    # the same bits), no launcher rounding pass (one launch fewer)
+    # 2026-11-17 (B200, round 3 part 8): cuda:b200_sm100 20 = bf16 D 384 inference from 8 row tiles (n 4) / 16 (n 2) on the generic kernels with
+    # the cuBLAS squeeze (also wherever the RESID squeeze's tiles leave SMs idle); fp32 D 256 training d_xn on cuBLAS; wide-build training at
+    # D >= 256 from fp32 masters: the bf16 forms + Ws^T / [Wa; Wb]^T in one tg_prep launch, the dgamma | dbeta sum inside tg_dw / tg_wsum
+    # 2026-11-17 (B200, round 3 part 7): cuda:b200_sm100 7 = fp32 TRAINING forward on the fp16 tensor cores at D 64 / 128 / 256 from 65 536 rows
+    # (tg_fused_h16 with saves of xn / mean / rstd; the step's fp16 forms + scales and the backward's TF32 copies in one tg_prep16 launch; the
+    # H100's F32_TRAIN_SHAPES); fp32 inference: the fp16 chain from one row tile at D 384 and up to 12 tiles at D 768, the three-launch fp16
+    # forward at D 768 above (YELLOW inside the engine standard)
+    # 2026-11-17 (B200, round 3 part 5): cuda:b200_sm100 6 = the backward's weight gradients on one tg_dw launch (MN-major tcgen05 GEMM over the rows,
+    # kind::tf32 with the 128-B-swizzle 32-B-atom layout for fp32, a deterministic row split whose slabs tg_wsum adds in order) instead of the two
+    # cuBLAS GEMMs, in the generic and the wide (D 256 / 384 / 512) backward; the generic GEMM / row launches as programmatic dependent launches;
+    # tg_colsum folded into tg_dw where the rows are not split; fp32 takes tg_dw only up to 2^22 x elements (cuBLAS above: measured faster)
+    # 2026-11-17 (B200, round 3 part 4): cuda:b200_sm100 5 = fp32 inference on the fp16 tensor cores beyond D 256: the small-M chains at D 384 (2-16 row
+    # tiles) / D 768 (up to 8) as -DH16 builds (fp16 xn / weights / h, fp32 x / out) and D 512 in three launches (tsx_ln -DH16 -> tg_gemm -DH16 SWIGLU ->
+    # RESID), the H100 f32io / lnsg_f32 scheme; the fp16 h scale from a Cauchy-Schwarz bound (s_h = 1 for ordinary weights), which also lifts the D 256
+    # 2^20-row cap of tg_fused_h16
+    # 2026-11-17 (B200, round 3 part 2): cuda:b200_sm100 4 = the small-M chains (tsx_ln -> tsx_expand -> tsx_squeeze, programmatic dependent launches) beyond
+    # D 384 bf16: fp32 on the TF32 tensor cores at D 384 / 768 n 2 and bf16 at D 768 n 2 (fused_small_sm100a; K-block rings, the expand's K split over a
+    # cluster), in inference and as the forward of the generic training step (packed [a | b] saved for GATE_AB)
+    # 2026-11-17 (B200, round 3): cuda:b200_sm100 3 = fp32 inference at D 64 / 128 / 256 (D 256 up to 2^20 rows) on the one-launch tg_fused_h16 (fp16
+    # operands as the H100 f32io forward; the TF32 tg_fused_f32 removed), D 64 n 2 training back on the wide build (tbwd_d64 -DDXN32: d_xn fp32
+    # through the LayerNorm backward, GREEN), inference weight forms read by a graph capture as the warm-up made them (capture_reads_eager)
+    # 2026-11-17 (B200): cuda:b200_sm100 2 = D 64 n 2 training on the generic kernels (route_sm100a.GENERIC: the wide build was YELLOW there)
+    # 2026-11-17 (B200): triton:b200_sm100 1 = fp32 with K > 128: x rounded to the TF32 grid in a launcher pass instead of inside the expand kernel
+    # (kernels/transition/triton/main.ROUND_X_IN_KERNEL_SM100), the TF32 weight forms cached by address (kernels/_tf32.tf32_cached by_address)
+    # 2026-11-16 (B200): cuda:b200_sm100 1 = routed on the B200 (kernels/transition/cuda/route_sm100a: fused_sm100a, fused_wide_sm100a, fused_generic_sm100a,
+    # ported from the b200/ladder-final branch)
     # 2026-11-19 (RTX 5090): cuda:5090_sm120 7 = the xn rebuild of 6 only up to 147456 rows (L 384 pair; fused_wide_sm80.SM120_XN_RECOMPUTE_MAX_ROWS): above it the ln_apply pass cost 4-10 % of the D 64 / 128 training step at L 512 .. 768 (tile / routing items of this version: see the commit message)
     # 2026-11-14 (RTX 5090): cuda:5090_sm120 4 = calls past 64 x 65535 rows (L 2048 pair, D >= 256 eval) take 128-row tiles (they failed with a grid y
     # overflow: invalid configuration argument)
@@ -367,6 +478,8 @@ class Transition(BackendModule, MasterWeights):
     def _supports_cuda(self, x: torch.Tensor) -> str | None:
         if a100(x) or sm120(x):  # A100 / RTX 5090: the sm_80 sources (built for sm_120a on the 5090)
             return self._supports_cuda_sm80(x)
+        if b200(x):
+            return self._supports_cuda_sm100(x)
         from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
         why = h100_unsupported(x) or self._supports_engine(x)
@@ -400,6 +513,17 @@ class Transition(BackendModule, MasterWeights):
                 from miniworld_engine.modules.primitives import BackendUnsupported
 
                 raise BackendUnsupported("Transition backend 'cuda': no sm_80 Transition build takes this call")
+            return out
+        if b200(x):
+            from miniworld_engine.kernels.transition.cuda.route_sm100a import transition_sm100a
+
+            out = transition_sm100a(
+                x, self.ln_in.weight, self.ln_in.bias, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.ln_in.eps
+            )
+            if out is None:
+                from miniworld_engine.modules.primitives import BackendUnsupported
+
+                raise BackendUnsupported("Transition backend 'cuda': no sm_100a Transition build takes this call")
             return out
         from miniworld_engine.kernels.transition.cuda import transition_sm90a
 
@@ -462,6 +586,31 @@ class Transition(BackendModule, MasterWeights):
             )
         if fused_wide_sm80.route(x, wa, ws) is None:
             return "the sm_80 Transition extension failed to build"
+        return None
+
+    def _supports_cuda_sm100(self, x: torch.Tensor) -> str | None:
+        """B200 (sm_100a): ``kernels/transition/cuda/route_sm100a.transition_sm100a`` -- ``fused_sm100a`` (D 128, n 4) and
+        ``fused_wide_sm100a`` (D 64-512 with n 2 / 4, D 768 with n 2) on whole 128-row tiles (a ragged bf16 call zero-padded to them), else
+        ``fused_generic_sm100a`` (D a multiple of 64 up to 1024, hidden a multiple of 128, any row count; fp32 activations on TF32
+        tensor cores, so only where torch allows TF32). bf16 / fp32 parameters (fp32 masters cast inside, their gradients fp32)."""
+        from miniworld_engine.kernels.transition.cuda import fused_generic_sm100a, route_sm100a
+
+        why = self._supports_engine(x)
+        if why is not None:
+            return why
+        if x.dtype not in (torch.bfloat16, torch.float32):
+            return f"dtype {x.dtype}: the sm_100a kernels take bfloat16 (float32 on TF32) activations"
+        matrices = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight)
+        if any(p.dtype not in (torch.bfloat16, torch.float32) for p in matrices) or len({p.dtype for p in matrices}) != 1:
+            return "the projections must share one dtype, bfloat16 or float32"
+        if x.dtype is torch.float32 and not fused_generic_sm100a._tf32_allowed():
+            return "float32 activations run on TF32 tensor cores only (torch does not allow TF32 here)"
+        wa, ws = self.expand_a.weight, self.squeeze.weight
+        if not route_sm100a.supported(x, wa, ws):
+            return (
+                f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_100a build takes it (generic: d a multiple of 64 up to 1024, hidden a "
+                "multiple of 128)"
+            )
         return None
 
     def _supports_triton(self, x: torch.Tensor) -> str | None:

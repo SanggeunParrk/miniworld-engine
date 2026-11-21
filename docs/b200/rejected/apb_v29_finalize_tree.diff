@@ -1,0 +1,99 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
+index d6aa4e5a8..253b2fbef 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
+@@ -39,6 +39,8 @@ namespace {
+ // PDL launches (2026-11-17, v20): ``pdl(1)`` makes the launchers below start their kernel as a programmatic dependent of the previous kernel
+ // on the stream (its griddepcontrol.wait, APB_PDL_ENTRY, holds every read); ``pdl(0)``: plain launches (the same kernels and values).
+ int g_pdl = 0;
++// v29: finalize_red_k's dWf blocks with the prefetch + tree reduction (1, default) or the v28 serial sums (0); ``fr_tree(v)`` sets it, returns the previous
++int g_frtree = 1;
+ template <typename... KA, typename... A>
+ void pdl_go(void (*k)(KA...), unsigned grid, unsigned block, size_t smem, A... a) {
+   cudaLaunchConfig_t cfg = {};
+@@ -956,12 +958,11 @@ void planes_fix(at::Tensor src, at::Tensor dst, c10::optional<at::Tensor> extra,
+ // (64 row groups g: rows g, g + 64, ..., the upper 32 groups added onto the lower, then the 32 in order), dWb = dWf ln_pair.weight,
+ // dln_pair.weight[c] = sum_h dWf[h, c] Wb[h, c] in head order. Deterministic; every output written by one thread.
+ constexpr int FR_T = 512, FR_G = FR_T / 8;
+-template <int NH>
++template <int NH, bool TREE>
+ __global__ void __launch_bounds__(FR_T) finalize_red_k(const float* __restrict__ DWP, const float* __restrict__ DWO, const float* __restrict__ ACC,
+     int width, int rows_a, int rows_b, const bf* __restrict__ WB, const float* __restrict__ LPW, float* __restrict__ OQ, float* __restrict__ OKe,
+     float* __restrict__ OV, float* __restrict__ OG, float* __restrict__ OO, float* __restrict__ OLW, float* __restrict__ OLB,
+     float* __restrict__ OBQ, float* __restrict__ OWB, float* __restrict__ OLPW, Geo G, int ncopy, int nra, int boff) {
+-  APB_PDL_ENTRY();
+   constexpr int HG = FR_G / 2;
+   __shared__ __align__(16) float red[NH * HG * 8];
+   __shared__ float fin[NH * 8];
+@@ -971,6 +972,14 @@ __global__ void __launch_bounds__(FR_T) finalize_red_k(const float* __restrict__
+   // grid order: the dWf blocks, the row-column blocks, then the copies (the reduction chains start first)
+   bid = bid < nwf ? ncopy + nra + bid : bid < nwf + nra ? ncopy + (bid - nwf) : bid - nwf - nra;
+   const int tid = threadIdx.x;
++  // v29 (TREE): the dWf blocks read ln_pair.weight / Wb (parameters: not made by the predecessor) before griddepcontrol.wait
++  float lpw_r = 0.f, wb_r = 0.f;
++  if (TREE && bid >= ncopy + nra && tid < NH * 8) {
++    const int cw = (bid - ncopy - nra) * 8 + (tid & 7);
++    lpw_r = LPW[cw];
++    wb_r = __bfloat162float(WB[(tid >> 3) * G.dp + cw]);
++  }
++  APB_PDL_ENTRY();
+   if (bid < ncopy) {
+     const long nv = 5L * D * D / 4, i = (long)bid * FR_T + tid;
+     if (i >= nv) return;
+@@ -1030,6 +1039,31 @@ __global__ void __launch_bounds__(FR_T) finalize_red_k(const float* __restrict__
+     for (int h = 0; h < NH; ++h) red[(h * HG + g) * 8 + cc] = s[h] + red[(h * HG + g) * 8 + cc];
+   }
+   __syncthreads();
++  if constexpr (TREE) {
++  // v29: the 32 group sums of each (h, c) as a fixed tree (5 steps over all threads) instead of 32 serial adds by NH * 8 threads; the
++  // head sum of dln_pair.weight as products t Wb (prefetched) added in head order. Deterministic; the rounding differs from v28.
++#pragma unroll
++  for (int w = HG / 2; w >= 1; w >>= 1) {
++    for (int e = tid; e < NH * w * 8; e += FR_T) {
++      const int h = e / (w * 8), g2 = (e / 8) % w, c8 = e & 7;
++      red[(h * HG + g2) * 8 + c8] += red[(h * HG + g2 + w) * 8 + c8];
++    }
++    __syncthreads();
++  }
++  if (tid < NH * 8) {
++    const int h = tid >> 3;
++    const float t = red[(h * HG) * 8 + cc];
++    fin[h * 8 + cc] = t * wb_r;
++    OWB[h * G.dp + c0 + cc] = t * lpw_r;
++  }
++  __syncthreads();
++  if (tid < 8) {
++    float t = 0.f;
++#pragma unroll
++    for (int h = 0; h < NH; ++h) t += fin[h * 8 + tid];
++    OLPW[c0 + tid] = t;
++  }
++  } else {
+   if (tid < NH * 8) {
+     const int h = tid >> 3;
+     float t = red[(h * HG) * 8 + cc];
+@@ -1043,6 +1077,7 @@ __global__ void __launch_bounds__(FR_T) finalize_red_k(const float* __restrict__
+     for (int h = 0; h < NH; ++h) t += fin[h * 8 + tid] * __bfloat162float(WB[h * G.dp + c0 + tid]);
+     OLPW[c0 + tid] = t;
+   }
++  }
+ }
+ void finalize_red_impl(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at::Tensor lpw, std::vector<at::Tensor> out, int64_t rows_a,
+                        int64_t rows_b, bool copy, int parts = 7) {
+@@ -1063,7 +1098,7 @@ void finalize_red_impl(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tenso
+   TORCH_CHECK(parts == 7 || parts == 4 || parts == 2 || parts == 1 || parts == 3, "finalize parts");
+   if (hi <= lo) return;
+ #define FR_GO(NH)                                                                                                                       \
+-  pdl_go(finalize_red_k<NH>, (unsigned)(hi - lo), FR_T, 0, CP<float>(dwp), CP<float>(dwo), CP<float>(acc), (int)acc.size(1), \
++  pdl_go(g_frtree ? finalize_red_k<NH, true> : finalize_red_k<NH, false>, (unsigned)(hi - lo), FR_T, 0, CP<float>(dwp), CP<float>(dwo), CP<float>(acc), (int)acc.size(1), \
+       (int)rows_a, (int)rows_b, CP<bf>(wb), CP<float>(lpw), P<float>(out[2]), P<float>(out[4]), P<float>(out[5]), P<float>(out[6]),       \
+       P<float>(out[7]), P<float>(out[0]), P<float>(out[1]), P<float>(out[3]), P<float>(out[9]), P<float>(out[8]), G, ncopy, nra, lo)
+   switch (G.nh) {
+@@ -2452,6 +2487,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("finalize_red", &finalize_red);
+   m.def("finalize_red_nc", &finalize_red_nc);
+   m.def("finalize_part", &finalize_part);
++  m.def("fr_tree", [](int64_t v) { const int was = g_frtree; g_frtree = (int)v; return was; });
+   m.def("ksplit_combine32", &ksplit_combine32);
+   m.def("gate_bwd2", &gate_bwd2);
+   m.def("inf_front", &inf_front);

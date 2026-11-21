@@ -1,0 +1,57 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
+index a3f6dfd12..13755746a 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
+@@ -13,6 +13,12 @@ using namespace s100;
+ 
+ // LNH (inference builds): the LayerNorm and the epilogue of a tile split over warps 4-7 and 8-11 (bit-identical: see lnh), every SwiGLU
+ // chunk on warps 12-15. Default: the original roles (two SwiGLU warpgroups, LayerNorm(i + 1) then epilogue(i) on warps 8-11).
++#ifndef TBSW
++#define TBSW 0   // timing probes (S90, off): 1 no sigmoid (h = a b), 2 no TMEM loads / math in the SwiGLU
++#endif
++#ifndef TBEPI
++#define TBEPI 0  // 1: no TMEM loads / residual add in the epilogue
++#endif
+ #ifndef LNH
+ #define LNH 0
+ #endif
+@@ -217,6 +223,10 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
+       if (lane == 0 && (warp & 3) == 0 && c < 16) STAMP(64 + c);
+       tc_fence_after();
+       uint32_t hp[32];
++#if TBSW == 2
++#pragma unroll
++      for (int k = 0; k < 32; ++k) hp[k] = 0x3f803f80u;
++#else
+       {
+         uint32_t a[2][16], b[2][16];
+         tmem_ld16(trow + T_AB + s * 128, a[0]);
+@@ -232,12 +242,17 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
+           for (int k = 0; k < 8; ++k) {
+             const float a0 = __uint_as_float(a[q & 1][2 * k]), a1 = __uint_as_float(a[q & 1][2 * k + 1]);
+             const float b0 = __uint_as_float(b[q & 1][2 * k]), b1 = __uint_as_float(b[q & 1][2 * k + 1]);
++#if TBSW == 1
++            const f2 A = mk2(a0, a1), H = mul2(A, mk2(b0, b1));
++#else
+             const f2 A = mk2(a0, a1), H = mul2(mul2(A, sigmoid_tr(A)), mk2(b0, b1));   // (a s) b, as the backward's gate_pair16
++#endif
+             hp[q * 8 + k] = pack_bf16(lo2(H), hi2(H));
+           }
+           if (q < 3) tmem_wait_ld();
+         }
+       }
++#endif
+       tc_fence_before();
+       __syncwarp();
+       if (lane == 0) ARRIVE_TC(&B.ab_empty[s], 0);
+@@ -408,6 +423,10 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
+       const uint32_t xb = su + O_X + b * TILE;
+ #pragma unroll
+       for (int cc = cc0; cc < cc1; ++cc) {
++#if TBEPI == 1
++        (void)cc;
++        continue;
++#endif
+         uint32_t acc[32];
+         tmem_ld32(trow + T_OUT + cc * 32, acc);
+         tmem_wait_ld();

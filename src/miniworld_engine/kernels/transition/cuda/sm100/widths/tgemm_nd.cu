@@ -11,6 +11,25 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
+// PARTS 1 (S90, EPI_RESID only): the K loop runs PER N PART (256 columns): an item is (tile, part) with its own 256-column accumulator buffer, double-buffered in tensor memory (it % 2), so the epilogue of
+// part p drains buffer b while the MMAs of the next part (or tile) run in the other. The single-buffered whole-row accumulator of D >= 512 left the tensor pipe idle while the epilogue read it out
+// (S90 probes: the squeeze of row 33 L 512 takes 244 us, 176 us with the epilogue removed = the tensor SOL, 237 / 224 us with the Ws / h loads removed). Cost: the h (A) tile is read once per part.
+#ifndef PARTS
+#define PARTS 0
+#endif
+// timing probes (wrong numbers): TBW / TBA the B (Ws) / A (h) boxes loaded for the first ring fill only, TBE the epilogue stores nothing (accumulator released right after the TMEM loads)
+#ifndef TBW
+#define TBW 0
+#endif
+#ifndef TBA
+#define TBA 0
+#endif
+#ifndef XEF
+#define XEF 0                                                   // (N1 probe) the epilogue x loads with an L2 evict_first hint
+#endif
+#ifndef TBE
+#define TBE 0
+#endif
 
 #ifndef DIM
 #define DIM 384
@@ -23,7 +42,11 @@ constexpr int NP = (D_ + 255) / 256;                           // N parts
 __host__ __device__ constexpr int part_n0(int p) { return p * 256; }
 __host__ __device__ constexpr int part_len(int p) { return (D_ - p * 256) < 256 ? (D_ - p * 256) : 256; }
 constexpr int KBT = ROWS * 128;                                // one K-block of a 128-row tile: 16 KB
+#if PARTS
+constexpr int BHALF = ((D_ < 256 ? D_ : 256) / 2) * 128;       // one part: this CTA's half of its B rows
+#else
 constexpr int BHALF = (D_ / 2) * 128;                          // this CTA's B rows (half of every part) of one K-block
+#endif
 constexpr int S_A = 0, S_B = KBT, STAGE = KBT + BHALF;
 // epilogue warpgroups: 2 (warps 4-7, 12-15), or 3 with -DEPI3 (warps 8-11 too): with 3 at D = 384 every warpgroup owns two column
 // blocks and two x slots, so no slot is refilled inside a tile and the accumulator is released as soon as it is read
@@ -31,7 +54,7 @@ constexpr int NEPI = 2;
 #ifdef NST_
 constexpr int NST = NST_;
 #else
-constexpr int NST = D_ >= 512 ? 3 : (NEPI == 3 ? 3 : 4);
+constexpr int NST = PARTS ? 5 : (D_ >= 512 ? 3 : (NEPI == 3 ? 3 : 4));
 #endif
 constexpr int NACC = D_ <= 256 ? 2 : 1;
 constexpr int O_ST = 0, O_X = NST * STAGE;                     // epilogue x-block rings: NEPI warpgroups x 2 slots x 16 KB
@@ -79,6 +102,135 @@ transition_gemm_nd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_co
   const uint32_t tmem = B.tmem;
 
   if (warp < 4) setmaxnreg_dec<56>();
+#if PARTS
+  if (warp == 0) {
+    if (lane == 0) {
+      int st = 0;
+      for (int i = 0; i < n_local; ++i) {
+        const int row = tile_of(i) * ROWS;
+        for (int p = 0; p < NP; ++p) {
+          const int half = part_len(p) / 2, r0 = part_n0(p) + crank * half;
+          for (int kb = 0; kb < NKB; ++kb, ++st) {
+            const int s = st % NST;
+            if (st >= NST) mbar_wait(&B.empty[s], ((st / NST) - 1) & 1);
+            const bool la = !(TBA && st >= NST), lw = !(TBW && st >= NST);
+            if (leader) mbar_expect_tx(&B.full[s], 2 * ((la ? KBT : 0) + (lw ? half * 128 : 0)));
+            const uint32_t base = su + O_ST + s * STAGE;
+            if (la) {
+#pragma unroll
+              for (int h = 0; h < 2; ++h) tma_load_2d_2sm(base + S_A + h * 8192, &ma, &B.full[s], kb * 64, row + h * 64);
+            }
+            if (lw) { for (int b = 0; b < half / 64; ++b) tma_load_2d_2sm(base + S_B + b * 8192, &mbt, &B.full[s], kb * 64, r0 + b * 64); }
+          }
+        }
+      }
+    }
+  } else if (warp == 1) {
+    if (leader) {
+      int st = 0, it = 0;
+      for (int i = 0; i < n_local; ++i) {
+        for (int p = 0; p < NP; ++p, ++it) {
+          const int b = it & 1, u = it >> 1;
+          if (it >= 2) mbar_wait_cl(&B.acc_empty[b], (u - 1) & 1);
+          const uint32_t idesc = idesc_bf16(256, part_len(p));
+          for (int kb = 0; kb < NKB; ++kb, ++st) {
+            const int sg = st % NST;
+            mbar_wait(&B.full[sg], (st / NST) & 1);
+            tc_fence_after();
+            const uint32_t base = su + O_ST + sg * STAGE;
+            const uint64_t da = desc_k128(base + S_A), db = desc_k128(base + S_B);
+            if (elect_one()) {
+#pragma unroll
+              for (int ks = 0; ks < 4; ++ks)
+                umma_ss2(tmem + b * 256, da + (uint64_t)(ks * 2), db + (uint64_t)(ks * 2), idesc, (kb > 0 || ks > 0) ? 1u : 0u);
+              tc_commit2_mc(&B.empty[sg], 3);
+              if (kb == NKB - 1) tc_commit2_mc(&B.acc_full[b], 3);
+            }
+            __syncwarp();
+          }
+        }
+      }
+    }
+  } else if ((warp >= 4 && warp < 8) || warp >= 12) {
+    setmaxnreg_inc<152>();
+    const int g = warp >= 12 ? 1 : 0;
+    const bool lead = (warp & 3) == 0 && lane == 0;
+    const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
+    auto nbp = [&](int p) { return (part_len(p) / 64 - g + NEPI - 1) / NEPI; };          // this warpgroup's column blocks of part p
+    int T = 0;
+    for (int p = 0; p < NP; ++p) T += nbp(p);                                           // ... of a tile
+    const int total = n_local * T;
+    auto blk_cb = [&](int fb, int& ti) {                                                // flat block index -> (tile, global column block)
+      ti = fb / T;
+      int rem = fb % T, cbg = 0;
+      for (int p = 0; p < NP; ++p) { if (rem < nbp(p)) { cbg = part_n0(p) / 64 + g + NEPI * rem; break; } rem -= nbp(p); }
+      return cbg;
+    };
+    auto issue_x = [&](int fb, int sl) {
+      int ti; const int cb = blk_cb(fb, ti);
+      const int row = tile_of(ti) * ROWS;
+      const uint32_t dst = su + O_X + (g * 2 + sl) * KBT;
+      mbar_expect_tx(&B.xfull[g][sl], KBT);
+#pragma unroll
+#if XEF
+      for (int h = 0; h < 2; ++h) tma_load_2d_h(dst + h * 8192, &mx, &B.xfull[g][sl], cb * 64, row + h * 64, pol_evict_first());
+#else
+      for (int h = 0; h < 2; ++h) tma_load_2d(dst + h * 8192, &mx, &B.xfull[g][sl], cb * 64, row + h * 64);
+#endif
+    };
+    if (lead) { if (total > 0) issue_x(0, 0); if (total > 1) issue_x(1, 1); }
+    int fb = 0, it = 0;
+    for (int i = 0; i < n_local; ++i) {
+      for (int p = 0; p < NP; ++p, ++it) {
+        const int b = it & 1, u = it >> 1;
+        mbar_wait(&B.acc_full[b], u & 1);
+        tc_fence_after();
+        const int nb = nbp(p);
+        for (int k = 0; k < nb; ++k, ++fb) {
+          const int sl = fb & 1, cbl = g + NEPI * k, cbg = part_n0(p) / 64 + cbl;
+          uint32_t acc[64];
+          tmem_ld32(trow + b * 256 + cbl * 64, *reinterpret_cast<uint32_t(*)[32]>(acc));
+          tmem_ld32(trow + b * 256 + cbl * 64 + 32, *reinterpret_cast<uint32_t(*)[32]>(acc + 32));
+          tmem_wait_ld();
+          if (k == nb - 1) {
+            tc_fence_before();
+            __syncwarp();
+            if (lane == 0) mbar_arrive_remote_relaxed(&B.acc_empty[b], 0);
+          }
+          if (TBE) { if (acc[0] == 0x7f7fffffu) sts128(su, make_uint4(acc[1], 2, 3, 4)); continue; }
+          const uint32_t xb = su + O_X + (g * 2 + sl) * KBT;
+          mbar_wait(&B.xfull[g][sl], (fb >> 1) & 1);
+#pragma unroll
+          for (int q = 0; q < 8; ++q) {
+            const uint32_t ad = xb + sw128(r, q);
+            const uint4 xv = lds128(ad);
+            const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
+            uint32_t o[4];
+#pragma unroll
+            for (int e = 0; e < 4; ++e)
+              o[e] = pack_bf16(bf16lo(xw[e]) + __uint_as_float(acc[q * 8 + 2 * e]), bf16hi(xw[e]) + __uint_as_float(acc[q * 8 + 2 * e + 1]));
+            sts128(ad, make_uint4(o[0], o[1], o[2], o[3]));
+          }
+          fence_proxy_async();
+          named_bar_sync(1 + g, 128);
+          if (lead) {
+            const int row = tile_of(i) * ROWS;
+            if (i < n_valid) {
+#pragma unroll
+              for (int h = 0; h < 2; ++h) tma_store_2d(&mout, xb + h * 8192, cbg * 64, row + h * 64);
+            }
+            tma_store_commit();
+            tma_store_wait_read0();                               // the slot is refilled next
+            if (fb + 2 < total) issue_x(fb + 2, sl);
+          }
+          named_bar_sync(1 + g, 128);
+        }
+      }
+    }
+    if (lead) tma_store_wait0();
+  }
+  if (false)
+#endif
   if (warp == 0) {
     if (lane == 0) {
       int st = 0;
@@ -148,7 +300,11 @@ transition_gemm_nd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_co
       const uint32_t dst = su + O_X + (g * 2 + sl) * KBT;
       mbar_expect_tx(&B.xfull[g][sl], KBT);
 #pragma unroll
+#if XEF
+      for (int h = 0; h < 2; ++h) tma_load_2d_h(dst + h * 8192, &mx, &B.xfull[g][sl], cb * 64, row + h * 64, pol_evict_first());
+#else
       for (int h = 0; h < 2; ++h) tma_load_2d(dst + h * 8192, &mx, &B.xfull[g][sl], cb * 64, row + h * 64);
+#endif
     };
     if (lead && n_local > 0) { issue_x(0, 0, 0); if (nblk > 1) issue_x(0, 1, 1); }
     for (int i = 0; i < n_local; ++i) {

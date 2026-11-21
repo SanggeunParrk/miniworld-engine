@@ -73,6 +73,7 @@ class PairformerBlock(BackendModule, MasterWeights):
         "cuda:a100_sm80": 10,  # 10 (2026-11-19): its TriangleAttention training (forward_train key_mask=None; every train call raised before); 9 (2026-11-14): its TriMul's k1tw / transposed-plane fronts; 8: its TriMul's bounded contraction; 7: APB key-tile skip (mask-skip-attn); 6: TriMul D64 k3s; 5: TriAttn rf core
         "cuda:h100_sm90": 9,
         "cuda:5090_sm120": 3,  # the sub-modules sm_120a builds (1, 2026-11-12); 2 (2026-11-13): their main-merge changes on sm_120a; 3 (2026-11-13): its TriMul sm_120 launch choices
+        "cuda:b200_sm100": 2,  # 2: (2026-11-17) the children changed in the optimization round (TriMul 2, TriAttn 4, Transition 2, LayerNorm 2); 1 (2026-11-16): the sub-modules' B200 (sm_100a) routes; the block itself has no kernel (it runs when every child does)
     }  # 2026-11-11: the A100 sub-modules' inference weight forms read by captures; cuda 3 / 2 (2026-11-11): B > 1 without autograd runs
     # batched (the cuda AttentionPairBias takes B > 1: no refusal-driven per-sample path)
     # cuda:a100_sm80 4 (2026-11-12): its AttentionPairBias's generic sm_80 pair-bias backward faster (the same values)

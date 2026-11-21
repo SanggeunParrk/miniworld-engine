@@ -1,0 +1,441 @@
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dkv_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dkv_tf32.cu
+index a2d810ba8..b02cb9c4b 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dkv_tf32.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dkv_tf32.cu
+@@ -104,23 +104,25 @@ DEVI void head_bwd(float (&d)[32], const float* __restrict__ P, const float* __r
+   for (int e = 0; e < 32; ++e) d[e] = __uint_as_float(tf::rna(r * (u[e] - p[e] * r * t)));
+ }
+ 
+-extern "C" __global__ void __launch_bounds__(512, 1)
+-swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mqm,
+-                        const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
+-                        const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mdom,
++// r3-swa part 20: the kernel body as a device function of (CTA index, CTA count) -- the __global__ entry below, and
++// attn_dqkv_tf32.cu's one launch of both passes
++DEVI void attn_dkv_body(const int bx, const int gx, const CUtensorMap& mq, const CUtensorMap& mqm,
++                        const CUtensorMap& mk, const CUtensorMap& mv,
++                        const CUtensorMap& mdo, const CUtensorMap& mdom,
+                         const float* __restrict__ LSE, const float* __restrict__ DD, const int* __restrict__ SEQU,
+                         const float* __restrict__ PKS, const float* __restrict__ COS, const float* __restrict__ SIN,
+-                        const __grid_constant__ CUtensorMap mdp, int S, int N, int Bn, float scale, float eps) {
++                        const CUtensorMap& mdp, int S, int N, int Bn, float scale, float eps) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  TRP_DECL if (tid == 0) TRP_AT(0);
+   const int mt = S / KM;
+   const int items = N * mt * H;
+-  const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
++  const int my_items = (items > bx) ? (items - bx + gx - 1) / gx : 0;
+   // item li of this CTA: wi = blockIdx + li grid = ((n mt + m) H + h); its query blocks [lo, hi) (one masked block when none is valid)
+   auto item_raw = [&](int li, int& n, int& j0, int& h, int& lo, int& hi, int& sq) {
+-    const int wi = (int)blockIdx.x + li * (int)gridDim.x;
++    const int wi = bx + li * gx;
+     h = wi % H; const int r = wi / H;
+     j0 = (r % mt) * KM; n = r / mt;
+     sq = __ldg(SEQU + n);
+@@ -155,22 +157,27 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
+   __syncthreads();
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
++  if (tid == 0) TRP_AT(1);
+   pdl_launch();
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer
+-    if (lane == 0) {
++    if (lane < ST || lane == 31) {                                         // r3-swa part 20: lane s = block stage s, lane 31 the items
+       pdl_wait();                                                          // q / k / v / dO / lse / D come from the previous kernels
++      TRP_AT(2);
+       int g = 0;
+       for (int li = 0; li < my_items; ++li) {
+         int n, j0, h, lo, hi, sq; item_of(li, n, j0, h, lo, hi, sq);
+         const int is = li % QR, krow = (n * H + h) * S + j0;
+-        if (li >= QR) mbar_wait(&B.it_empty[is], ((li / QR) - 1) & 1);
+-        mbar_expect_tx(&B.it_full[is], IST);
+-        tma_load_2d(su + O_IT + is * IST, &mk, &B.it_full[is], 0, krow);
+-        tma_load_2d(su + O_IT + is * IST + TKV, &mv, &B.it_full[is], 0, krow);
++        if (lane == 31) {
++          if (li >= QR) mbar_wait(&B.it_empty[is], ((li / QR) - 1) & 1);
++          mbar_expect_tx(&B.it_full[is], IST);
++          tma_load_2d(su + O_IT + is * IST, &mk, &B.it_full[is], 0, krow);
++          tma_load_2d(su + O_IT + is * IST + TKV, &mv, &B.it_full[is], 0, krow);
++        }
+         for (int qb = lo; qb < hi; ++qb, ++g) {
+           const int s = g % ST;
++          if (s != lane) continue;
+           if (g >= ST) mbar_wait(&B.bl_empty[s], ((g / ST) - 1) & 1);
+           const uint32_t st = su + O_BL + s * BLS;
+           const int qrow = (n * H + h) * S + qb * BQ, orow = n * S + qb * BQ;
+@@ -246,7 +253,12 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
+     const uint32_t trow = tmem + ((uint32_t)(lq * 32) << 16);
+     for (int li = 0; li < my_items; ++li) {
+       int n, j0, h, lo, hi, sq; item_of(li, n, j0, h, lo, hi, sq);
++      {  // r3-swa part 20: the head tail's operands into L1 while the item computes
++        const size_t m = (size_t)n * S + j0 + r, mc = ((size_t)(n % Bn) * S + j0 + r) * 16;
++        prefetch_l1(PKS + m * 128 + 32 * h); prefetch_l1(COS + mc); prefetch_l1(SIN + mc);
++      }
+       mbar_wait(&B.acc_full[li & 1], (li >> 1) & 1);
++      if (tid == 384 && li == 0) TRP_AT(3);
+       tc_fence_after();
+       uint32_t vv[32], vk[32];
+       tmem_ld32(trow + T_ACC + 64 * (li & 1), vv);
+@@ -346,4 +358,16 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
+   tc_fence_before();
+   __syncthreads();
+   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
++  if (tid == 0) TRP_AT(6);
++  TRP_PRINT("dkv");
++}
++
++extern "C" __global__ void __launch_bounds__(512, 1)
++swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mqm,
++                        const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
++                        const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mdom,
++                        const float* __restrict__ LSE, const float* __restrict__ DD, const int* __restrict__ SEQU,
++                        const float* __restrict__ PKS, const float* __restrict__ COS, const float* __restrict__ SIN,
++                        const __grid_constant__ CUtensorMap mdp, int S, int N, int Bn, float scale, float eps) {
++  attn_dkv_body((int)blockIdx.x, (int)gridDim.x, mq, mqm, mk, mv, mdo, mdom, LSE, DD, SEQU, PKS, COS, SIN, mdp, S, N, Bn, scale, eps);
+ }
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dq_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dq_tf32.cu
+index 804562f05..081f10900 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dq_tf32.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dq_tf32.cu
+@@ -99,23 +99,25 @@ DEVI void head_bwd(float (&d)[32], const float* __restrict__ P, const float* __r
+   for (int e = 0; e < 32; ++e) d[e] = __uint_as_float(tf::rna(r * (u[e] - p[e] * r * t)));
+ }
+ 
+-extern "C" __global__ void __launch_bounds__(512, 1)
+-swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mdo,
+-                       const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
+-                       const __grid_constant__ CUtensorMap mkm, const float* __restrict__ LSE, const float* __restrict__ DD,
++// r3-swa part 20: the kernel body as a device function of (CTA index, CTA count) -- the __global__ entry below, and
++// attn_dqkv_tf32.cu's one launch of both passes
++DEVI void attn_dq_body(const int bx, const int gx, const CUtensorMap& mq, const CUtensorMap& mdo,
++                       const CUtensorMap& mk, const CUtensorMap& mv,
++                       const CUtensorMap& mkm, const float* __restrict__ LSE, const float* __restrict__ DD,
+                        const int* __restrict__ SEQU, const float* __restrict__ PQS, const float* __restrict__ COS,
+-                       const float* __restrict__ SIN, const __grid_constant__ CUtensorMap mdp, int S, int N, int Bn, float scale,
++                       const float* __restrict__ SIN, const CUtensorMap& mdp, int S, int N, int Bn, float scale,
+                        float eps) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  TRP_DECL if (tid == 0) TRP_AT(0);
+   const int mt = S / QM;
+   const int items = N * mt * H;
+-  const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
++  const int my_items = (items > bx) ? (items - bx + gx - 1) / gx : 0;
+   // item li of this CTA: wi = blockIdx + li grid = ((n mt + m) H + h); its key blocks [lo, hi) (one masked block when none is valid)
+   auto item_raw = [&](int li, int& n, int& i0, int& h, int& lo, int& hi, int& sq) {
+-    const int wi = (int)blockIdx.x + li * (int)gridDim.x;
++    const int wi = bx + li * gx;
+     h = wi % H; const int r = wi / H;
+     i0 = (r % mt) * QM; n = r / mt;
+     sq = __ldg(SEQU + n);
+@@ -150,22 +152,27 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
+   __syncthreads();
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
++  if (tid == 0) TRP_AT(1);
+   pdl_launch();
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer
+-    if (lane == 0) {
++    if (lane < ST || lane == 31) {                                         // r3-swa part 20: lane s = block stage s, lane 31 the items
+       pdl_wait();                                                          // q / k / v / dO / lse / D come from the previous kernels
++      TRP_AT(2);
+       int g = 0;
+       for (int li = 0; li < my_items; ++li) {
+         int n, i0, h, lo, hi, sq; item_of(li, n, i0, h, lo, hi, sq);
+         const int is = li % QR;
+-        if (li >= QR) mbar_wait(&B.it_empty[is], ((li / QR) - 1) & 1);
+-        mbar_expect_tx(&B.it_full[is], IST);
+-        tma_load_2d(su + O_IT + is * IST, &mq, &B.it_full[is], 0, (n * H + h) * S + i0);
+-        tma_load_2d(su + O_IT + is * IST + TQI, &mdo, &B.it_full[is], h * DH, n * S + i0);
++        if (lane == 31) {
++          if (li >= QR) mbar_wait(&B.it_empty[is], ((li / QR) - 1) & 1);
++          mbar_expect_tx(&B.it_full[is], IST);
++          tma_load_2d(su + O_IT + is * IST, &mq, &B.it_full[is], 0, (n * H + h) * S + i0);
++          tma_load_2d(su + O_IT + is * IST + TQI, &mdo, &B.it_full[is], h * DH, n * S + i0);
++        }
+         for (int kb = lo; kb < hi; ++kb, ++g) {
+           const int s = g % ST;
++          if (s != lane) continue;
+           if (g >= ST) mbar_wait(&B.bl_empty[s], ((g / ST) - 1) & 1);
+           const uint32_t st = su + O_BL + s * BLS;
+           const int krow = (n * H + h) * S + kb * BK;
+@@ -236,7 +243,12 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
+     const uint32_t trow = tmem + ((uint32_t)(lq * 32) << 16);
+     for (int li = 0; li < my_items; ++li) {
+       int n, i0, h, lo, hi, sq; item_of(li, n, i0, h, lo, hi, sq);
++      {  // r3-swa part 20: the head tail's operands into L1 while the item computes
++        const size_t m = (size_t)n * S + i0 + r, mc = ((size_t)(n % Bn) * S + i0 + r) * 16;
++        prefetch_l1(PQS + m * 128 + 32 * h); prefetch_l1(COS + mc); prefetch_l1(SIN + mc);
++      }
+       mbar_wait(&B.q_full[li & 1], (li >> 1) & 1);
++      if (tid == 384 && li == 0) TRP_AT(3);
+       tc_fence_after();
+       uint32_t v[32];
+       tmem_ld32(trow + T_DQ + 32 * (li & 1), v);
+@@ -320,4 +332,16 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
+   tc_fence_before();
+   __syncthreads();
+   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
++  if (tid == 0) TRP_AT(6);
++  TRP_PRINT("dq");
++}
++
++extern "C" __global__ void __launch_bounds__(512, 1)
++swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mdo,
++                       const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
++                       const __grid_constant__ CUtensorMap mkm, const float* __restrict__ LSE, const float* __restrict__ DD,
++                       const int* __restrict__ SEQU, const float* __restrict__ PQS, const float* __restrict__ COS,
++                       const float* __restrict__ SIN, const __grid_constant__ CUtensorMap mdp, int S, int N, int Bn, float scale,
++                       float eps) {
++  attn_dq_body((int)blockIdx.x, (int)gridDim.x, mq, mdo, mk, mv, mkm, LSE, DD, SEQU, PQS, COS, SIN, mdp, S, N, Bn, scale, eps);
+ }
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dqkv_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dqkv_tf32.cu
+new file mode 100644
+index 000000000..c2dc45ad2
+--- /dev/null
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dqkv_tf32.cu
+@@ -0,0 +1,36 @@
++// attn_dqkv_tf32.cu — r3-swa part 20: the window-attention backward's two passes (attn_dq_tf32.cu, attn_dkv_tf32.cu) in ONE launch:
++// CTAs 0 .. nq - 1 run the dQ pass (as CTAs 0 .. nq - 1 of a grid of nq), the rest the dK / dV pass (as CTAs 0 .. of a grid of their
++// own). Same code, same items, the same bits. Why: the two passes ran side by side as two launches, dK / dV on a side stream forked after
++// the out-projection kernel -- a cross-stream launch has no programmatic dependency, so its prologue (barriers, TMEM, item table) and its
++// first loads started only after the out-projection had ended. One launch on the main stream starts both under the out-projection (PDL).
++// Used where both passes fit the SMs at once (every CTA a wave of one).
++// SPDX-License-Identifier: Apache-2.0
++#include "sm100.cuh"
++
++#define ST 12
++namespace kq {
++#include "attn_dq_tf32.cu"
++}
++#undef ST
++#define ST 7
++namespace kk {
++#include "attn_dkv_tf32.cu"
++}
++#undef ST
++
++extern "C" __global__ void __launch_bounds__(512, 1)
++swa_attn_dqkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mdo,
++                         const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
++                         const __grid_constant__ CUtensorMap mkm, const __grid_constant__ CUtensorMap kmq,
++                         const __grid_constant__ CUtensorMap kmqm, const __grid_constant__ CUtensorMap kmk,
++                         const __grid_constant__ CUtensorMap kmv, const __grid_constant__ CUtensorMap kmdo,
++                         const __grid_constant__ CUtensorMap kmdom, const __grid_constant__ CUtensorMap mdp,
++                         const float* __restrict__ LSE, const float* __restrict__ DD, const int* __restrict__ SEQU,
++                         const float* __restrict__ PQS, const float* __restrict__ PKS, const float* __restrict__ COS,
++                         const float* __restrict__ SIN, int S, int N, int Bn, float scale, float eps, int nq) {
++  if ((int)blockIdx.x < nq)
++    kq::attn_dq_body((int)blockIdx.x, nq, mq, mdo, mk, mv, mkm, LSE, DD, SEQU, PQS, COS, SIN, mdp, S, N, Bn, scale, eps);
++  else
++    kk::attn_dkv_body((int)blockIdx.x - nq, (int)gridDim.x - nq, kmq, kmqm, kmk, kmv, kmdo, kmdom, LSE, DD, SEQU, PKS, COS, SIN, mdp, S, N,
++                      Bn, scale, eps);
++}
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py
+index caf3708a0..242c7ca95 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py
+@@ -47,9 +47,28 @@ class FfnBwdGateTf32:
+     def __init__(self):
+         self.k = _f._load("ffn_bwd_gate_tf32")
+         self.kdy = None  # the DYF build (dy partials inside), loaded on first use
++        self.kfa = None  # r3-swa part 20: the FADA build (+ the FFN adaLN backward), loaded on first use
++        self._cnt = {}  # FADA tile counters per (device, stream): never reset (each launch adds 8 a tile)
++
++    def fada_ok(self, A, B, S, dyf, q1, ffn, att, dq2) -> bool:
++        """r3-swa part 20: the FADA build serves this call -- one augment, the DYF build, every tile's items one wave (an item a CTA),
++        the forward's saves q1 / ffn / att and dq2 in bf16 (the hybrid route of master training)."""
++        if not (FADA and dyf and A == 1):
++            return False
++        if any(t is None or t.dtype != torch.bfloat16 or not t.is_contiguous() for t in (q1, ffn, att, dq2)):
++            return False
++        SP, AT = _f.tiling(A)
++        ntile = ((S + AT - 1) // AT) * B
++        NG = 1
++        while NG < 8 and ntile * NG * 2 <= num_sms():
++            NG *= 2
++        return ntile * min(NG, self.NGMAX) <= num_sms()
+ 
+-    def bind(self, y, dq2, mod, wab, wdt, A, B, dyf=False, late_trigger=False):
++    def bind(self, y, dq2, mod, wab, wdt, A, B, dyf=False, late_trigger=False, fada=None):
+         """``late_trigger`` (r3-swa part 19): the dependents triggered after the kernel's wait (the next launch is ``sm100.save32_late``).
++        ``fada`` (r3-swa part 20; ``fada_ok``): (q1, ffn, att, dmod, eps) -- the FADA build also runs the FFN norm's adaLN backward
++        (``AdalnBwdTf32.bind(q1, dyp, dq2, ffn, mod, dmod, A, B, eps, 3 C, att, 2 C, ndy=NG)``, the same bits) and returns dq1 as a fifth
++        element: (dffn, hh, dab, dyp, dq1).
+         ``dyf`` (round 3 part 6): the DYF build -- also DYP [NG, M, C] fp32, the items' partial dy = [da | db] Wab (sum over NG in
+         group order: ``AdalnBwdTf32.bind(ndy=NG)``); returns (dffn, hh, dab, dyp) then."""
+         M = y.numel() // C
+@@ -80,6 +99,19 @@ class FfnBwdGateTf32:
+                 _f._f32map(wab, [C, 2 * NHID], C * 4, [32, 64], swizzle="128a32"),  # Wab[j] as the MN-major dy operand
+                 _f._f32map(dyp, [C, S, B, A, NG], W5, [16, AT, 1, SP, 1], swizzle=64),
+             )
++        fx = ()
++        if fada is not None:
++            assert dyf and A == 1 and ntile * NG <= num_sms()
++            if self.kfa is None:
++                self.kfa = _f._load("ffn_bwd_gate_tf32_dyfa")
++            k = self.kfa
++            q1, ffn, att, dmod, eps = fada
++            dq1 = torch.empty(M, C, device=dev, dtype=torch.float32)
++            key = (dev.index, torch.cuda.current_stream(dev).cuda_stream)
++            cnt = self._cnt.get(key)
++            if cnt is None or cnt.numel() < ntile:
++                cnt = self._cnt[key] = torch.zeros(max(256, ntile), device=dev, dtype=torch.int32)
++            fx = (q1, dq2, ffn, att, dyp, mod, dq1, dmod, cnt, float(eps))
+         maps = (
+             _f._rows_map_any(y, A, B, S, SP, AT),
+             _f._rows_map_any(dq2, A, B, S, SP, AT),
+@@ -108,9 +140,13 @@ class FfnBwdGateTf32:
+                 int(ntile),
+                 int(NG),
+                 _f._b16(dq2) | (_f._b16(y) << 1) | (int(late_trigger) << 2),
++                *fx,
+             )
+ 
+         run.keep = (maps, mod, y, dq2, dffn, hh, dab)
++        if fada is not None:
++            run.keep += (dyp, fx)
++            return run, (dffn, hh, dab, dyp, dq1)
+         if dyf:
+             run.keep += (dyp,)
+             return run, (dffn, hh, dab, dyp)
+@@ -394,6 +430,7 @@ class AttnBwdTf32:
+     def __init__(self):
+         self.kq = _f._load("attn_dq_tf32")
+         self.kk = _f._load("attn_dkv_tf32")
++        self.kb = None  # r3-swa part 20: both passes in one launch (attn_dqkv_tf32.cu), loaded on first use
+ 
+     @staticmethod
+     def _mat(t, rows, cols, box_rows, swizzle=128):
+@@ -429,11 +466,18 @@ class AttnBwdTf32:
+         def run_k():
+             self.kk(grid, (512, 1, 1), *mk, lse, dv, seqused, pk, cos, sin, mdp, int(S), int(N), int(B), scale, float(_f.EPS))
+ 
++        def run_both():  # r3-swa part 20: CTAs 0 .. g - 1 the dQ pass, g .. 2 g - 1 the dK / dV pass (both fit the SMs: the caller's check)
++            if self.kb is None:
++                self.kb = _f._load("attn_dqkv_tf32")
++            eps = float(_f.EPS)
++            self.kb((2 * grid[0], 1, 1), (512, 1, 1), *mq, *mk, mdp, lse, dv, seqused, pq, pk, cos, sin, int(S), int(N), int(B), scale, eps, int(grid[0]))
++
+         def run():
+             run_q()
+             run_k()
+ 
+         run.q, run.k = run_q, run_k
++        run.both = run_both
+ 
+         run.keep = (mq, mk, mdp, qh, kh, vh, do, lse, dv, seqused, pq, pk, cos, sin, dp)
+         return run
+@@ -984,6 +1028,10 @@ def block_bwd_tf32(
+ SCHED = 2
+ #: round 3 part 6 (development switch): the few-tile schedule's dy GEMM inside the gate kernel (``FfnBwdGateTf32.bind(dyf=True)``)
+ DYF = __import__("os").environ.get("SWA_DYF", "1") == "1"
++#: r3-swa part 20 (development switch): the FFN adaLN backward inside the DYF gate kernel (FfnBwdGateTf32.fada_ok)
++FADA = __import__("os").environ.get("SWA_FADA", "0") == "1"
++#: r3-swa part 20 (development switch): the attention backward's dQ and dK / dV passes in one launch (AttnBwdTf32 run.both)
++ATT_ONE = __import__("os").environ.get("SWA_ATT_ONE", "0") == "1"
+ 
+ 
+ def _bwd_few(
+@@ -1022,7 +1070,10 @@ def _bwd_few(
+     if w16 and not DYF:  # (the late widening is wired for the DYF gate build only)
+         qh, kh, vh, g, o, q1, x, pq, pk, att, y, ffn = _widen(_sm.save32, qh, kh, vh, g, o, q1, x, pq, pk, att, y, ffn)
+         w16 = False
+-    run, (dffn, hh, dab, *dyp) = K.ffn_gate.bind(y, dq2, mod, wab, wdt, A, B, dyf=DYF, late_trigger=w16)
++    fada = None
++    if w16 and K.ffn_gate.fada_ok(A, B, S, DYF, q1, ffn, att, dq2):
++        fada = (q1, ffn, att, dmod, eps)  # (the bf16 saves, before the widening below)
++    run, (dffn, hh, dab, *dyp) = K.ffn_gate.bind(y, dq2, mod, wab, wdt, A, B, dyf=DYF, late_trigger=w16, fada=fada)
+     run()
+     if w16:
+         # r3-swa part 19: the hybrid forward's bf16 saves widened now, under the gate kernel (it read y in bf16; save32_late waits for it
+@@ -1031,11 +1082,14 @@ def _bwd_few(
+     if modb is not None:  # silu(c) of the modulation's dW: needs nothing of this backward
+         fork(s2, lambda: res.__setitem__("a", K.mod.silu(modb[0])))
+         a_mod = res["a"]
+-    if DYF:  # dy = the gate kernel's partials, summed by the adaLN backward (no GEMM launch)
+-        run, dq1 = K.adaln.bind(q1, dyp[0], dq2, ffn, mod, dmod, A, B, eps, 3 * C, att, 2 * C, ndy=dyp[0].shape[0])
++    if fada is not None:  # r3-swa part 20: the gate kernel ran the adaLN backward too (FADA)
++        dq1 = dyp[1]
+     else:
+-        run, dq1 = K.adaln.bind(q1, mm_tf32(dab, wu), dq2, ffn, mod, dmod, A, B, eps, 3 * C, att, 2 * C)
+-    run()
++        if DYF:  # dy = the gate kernel's partials, summed by the adaLN backward (no GEMM launch)
++            run, dq1 = K.adaln.bind(q1, dyp[0], dq2, ffn, mod, dmod, A, B, eps, 3 * C, att, 2 * C, ndy=dyp[0].shape[0])
++        else:
++            run, dq1 = K.adaln.bind(q1, mm_tf32(dab, wu), dq2, ffn, mod, dmod, A, B, eps, 3 * C, att, 2 * C)
++        run()
+     fx = DCX and modb is not None and not EARLY_DC and K.dcx.ok(A, M, q, dq1, modb[0], w, modb[1], mod)
+     dwm = None
+     if fx and DWM_SPLIT:
+@@ -1091,7 +1145,9 @@ def _bwd_few(
+         _global_attn_bwd(qh, kh, vh, o, dO, lse, seqused, pq, pk, cos, sin, dP, B)
+     else:
+         at = K.attn.bind(qh, kh, vh, dO, lse, Dv, seqused, pq, pk, cos, sin, dP, B)
+-        if par:
++        if par and ATT_ONE:  # r3-swa part 20: both passes in one launch on this stream (PDL under the out-projection)
++            at.both()
++        elif par:
+             fork(s2, at.k)
+             at.q()
+             join(s2)
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_fwd.py b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_fwd.py
+index d4031556c..52d139965 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_fwd.py
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_fwd.py
+@@ -71,10 +71,12 @@ CUBINS = {
+     "ffn_bwd_gate_tf32": ("ffn_bwd_gate_tf32", ()),
+     # round 3 part 6: dy = [da | db] Wab inside the gate kernel (per-item partials, single-buffered accumulators)
+     "ffn_bwd_gate_tf32_dyf": ("ffn_bwd_gate_tf32", ("-DDYF=1",)),
++    "ffn_bwd_gate_tf32_dyfa": ("ffn_bwd_gate_tf32", ("-DDYF=1", "-DFADA=1")),  # r3-swa part 20: + the FFN adaLN backward
+     "adaln_bwd_tf32": ("adaln_bwd_tf32", ()),
+     "oproj_bwd_fused_tf32": ("oproj_bwd_fused_tf32", ()),
+     "attn_dq_tf32": ("attn_dq_tf32", ()),
+     "attn_dkv_tf32": ("attn_dkv_tf32", ()),
++    "attn_dqkv_tf32": ("attn_dqkv_tf32", ()),  # r3-swa part 20: both passes in one launch
+     "mod_bwd_tf32": ("mod_bwd_tf32", ()),
+     "dw_tf32": ("dw_tf32", ()),
+     "dw_tf32_direct": ("dw_tf32", ("-DDW_DIRECT=1",)),  # round 3 part 14: coalesced direct stores (development A/B, DwTf32.DIRECT_STORE)
+@@ -112,10 +114,12 @@ SMEM = {
+     "wprep_bwd_tf32": 0,
+     "ffn_bwd_gate_tf32": 6 * 16384 + 10 * 8192 + 6 * 8192 + 512,
+     "ffn_bwd_gate_tf32_dyf": 6 * 16384 + 10 * 8192 + 6 * 8192 + 512,
++    "ffn_bwd_gate_tf32_dyfa": 6 * 16384 + 10 * 8192 + 6 * 8192 + 512,
+     "adaln_bwd_tf32": 0,
+     "oproj_bwd_fused_tf32": 4 * 16384 + 8 * 16384 + 2 * 16384 + 512,
+     "attn_dq_tf32": 2 * 32768 + 12 * 12288 + 16384 + 64 * 16 + 512,
+     "attn_dkv_tf32": 2 * 32768 + 7 * 17408 + 2 * 16384 + 64 * 16 + 512,
++    "attn_dqkv_tf32": 2 * 32768 + 12 * 12288 + 16384 + 64 * 16 + 512,  # (the larger: dQ)
+     "mod_bwd_tf32": 0,
+     "dw_tf32": 5 * 20 * 2048 + 256,
+     "dw_tf32_direct": 5 * 20 * 2048 + 256,
+@@ -152,10 +156,12 @@ FUNCS = {
+     "wprep_bwd_tf32": "swa_wprep_bwd_tf32_sm100",
+     "ffn_bwd_gate_tf32": "swa_ffn_bwd_gate_tf32_sm100",
+     "ffn_bwd_gate_tf32_dyf": "swa_ffn_bwd_gate_tf32_sm100",
++    "ffn_bwd_gate_tf32_dyfa": "swa_ffn_bwd_gate_tf32_sm100",
+     "adaln_bwd_tf32": "swa_adaln_bwd_tf32_sm100",
+     "oproj_bwd_fused_tf32": "swa_oproj_bwd_fused_tf32_sm100",
+     "attn_dq_tf32": "swa_attn_dq_tf32_sm100",
+     "attn_dkv_tf32": "swa_attn_dkv_tf32_sm100",
++    "attn_dqkv_tf32": "swa_attn_dqkv_tf32_sm100",
+     "mod_bwd_tf32": "swa_mod_silu_tf32_sm100",
+     "dw_tf32": "swa_dw_tf32_sm100",
+     "dw_tf32_direct": "swa_dw_tf32_sm100",
+@@ -202,6 +208,7 @@ def cubin(name: str) -> str:
+         "-lineinfo",
+         f"-I{_dir}",
+         *extra,
++        *__import__("os").environ.get("SWA_NVCC_DEV", "").split(),  # r3-swa part 20 DEV (remove)
+     )
+     return str(_nvcc.cubin(f"swa_dit_sm100_tf32/{name}", flags, source=_dir / f"{stem}.cu", toolchain="sm100"))
+ 

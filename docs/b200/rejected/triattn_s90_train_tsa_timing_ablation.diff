@@ -1,0 +1,32 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index 902e95657..9598bec68 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -159,6 +159,9 @@ __device__ __forceinline__ float2 logit2(uint32_t w, float s0, float s1, float2
+ // forward: a tile whose exponentials sum past TA_PMAX raises the row's offset (so p, l_r and O_r stay ~2^64 at most: far from
+ // overflow); under TA_PMIN a provisional offset (every key so far masked) takes the tile maximum
+ constexpr float TA_PMAX = 0x1p64f, TA_PMIN = 0x1p-64f;
++#ifndef TB_TSA
++#define TB_TSA 0
++#endif
+ #ifndef TB_POLY
+ #define TB_POLY 0        // the same split in both backward kernels (each recomputes P: one ex2 per score)
+ #endif
+@@ -1225,10 +1228,17 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+         tc_fence_after();
+         const uint64_t bq = dQ0 + sl * SLOT, ak = dKV0 + (kb * KR + r) * KVROW;
+         const uint32_t d = tmem + r * 128;
++#if TB_TSA   // (timing ablation, wrong results) K_r / V_r as TMEM operands: the S^T and dP^T MMAs in the ts form (A read from TMEM columns, here the dV | dK region)
++        mma_ts_if(L, d, tmem + KB_COL_G, bq, ID_ST, 0u);
++        mma_ts_if(L, d, tmem + KB_COL_G + 8, bq + 2, ID_ST, 1u);
++        mma_ts_if(L, d + 64, tmem + KB_COL_G + 16, bq + MAT, ID_ST, 0u);
++        mma_ts_if(L, d + 64, tmem + KB_COL_G + 24, bq + MAT + 2, ID_ST, 1u);
++#else
+         mma_ss_if(L, d, ak, bq, ID_ST, 0u);
+         mma_ss_if(L, d, ak + 2, bq + 2, ID_ST, 1u);
+         mma_ss_if(L, d + 64, ak + KVM, bq + MAT, ID_ST, 0u);
+         mma_ss_if(L, d + 64, ak + KVM + 2, bq + MAT + 2, ID_ST, 1u);
++#endif
+         TL(1, y);
+         mma_commit_if(L, sfa + r * 8);
+         if (w == SPT - 1) mma_commit_if(L, kvea + kb * 8);  // the task's K / V buffer is free once these retire

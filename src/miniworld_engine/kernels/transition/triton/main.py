@@ -2,6 +2,8 @@ from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/transition.py
 
 from miniworld_engine.kernels._launch_config import configured
+import functools
+
 import torch
 
 # FP32 projections follow torch's TF32 switch (kernels/_dot_precision.py): IEEE dot precision unless torch allows TF32
@@ -141,7 +143,7 @@ def transition_fwd_kernel(
         tl.store(b_ptr + (offs_m[:, None] * ND + offs_n[None, :]), B_tile.to(b_ptr.dtype.element_ty), mask=store_mask)
 
 
-def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, shape_key):
+def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, shape_key, x_on_grid=False):
     """The expand activation, (M, ND) in ``x``'s dtype: the two SwiGLU halves are already
     multiplied together in the epilogue, so the width is ``ND`` and not ``2*ND``."""
     return x.new_empty((x.shape[0], expand_a_weight.shape[0]))
@@ -149,9 +151,25 @@ def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, shape_key):
 
 #: A/B switch for the tests and records: True keeps the saved halves in fp32 under fp32 activations (the pre-fp16 behaviour).
 _SAVED_HALVES_FP32 = False
+#: fp32 on a B200 (capability 10.0): the activation is rounded to the TF32 grid in a launcher pass, not inside the expand kernel. Rounding
+#: the x tile in registers keeps Triton 3.7 from feeding tl.dot from the shared-memory tiles it loaded; measured on the B200 (eval, graph)
+#: [1, 2048, 768] n2 114.7 -> 92.1 us, [1, 256^2, 512] n2 829 -> 655 us, [1, 384^2, 512] n2 1807 -> 1417 us (PyTorch 82 / 795 / 1735).
+#: Up to K 128 the in-kernel rounding stays (the extra pass measured 4-9 % slower at D 128: [1, L, L, 128] n2 eval). Other cards unchanged.
+ROUND_X_IN_KERNEL_SM100 = False
 
 
-def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, half_scale=None):
+@functools.lru_cache(maxsize=16)
+def _cap(index: int) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(index)
+
+
+def _round_x_in_kernel(x: torch.Tensor) -> bool:
+    if x.is_cuda and _cap(x.device.index if x.device.index is not None else torch.cuda.current_device()) == (10, 0):
+        return ROUND_X_IN_KERNEL_SM100 or x.shape[-1] <= 128
+    return True
+
+
+def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, half_scale=None, x_on_grid=False):
     M, N = x.shape
     # ND comes from the WEIGHT, not from an expansion ratio. The kernel only ever needed the
     # expanded width; taking it as ``n * N`` made a caller state twice something the weight
@@ -172,11 +190,11 @@ def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, hal
     prec = dot_precision(x.dtype)
     pre = prec == "tf32" and x.dtype is torch.float32  # operands rounded to nearest here, once, and h at its store (kernels/_tf32.py)
     stack = lambda: torch.stack((expand_a_weight, expand_b_weight), dim=1).reshape(2 * nd, N)  # noqa: E731
-    w_ab = tf32_cached((expand_a_weight, expand_b_weight), lambda: tf32_grid_many(stack()))[0] if pre else stack()
+    w_ab = tf32_cached((expand_a_weight, expand_b_weight), lambda: tf32_grid_many(stack()), by_address=True)[0] if pre else stack()
     round_x = (
-        pre and N % 64 == 0
+        pre and N % 64 == 0 and _round_x_in_kernel(x)
     )  # the activation tile is rounded inside the kernel (no extra pass over x); a ragged K tile is why the other shapes round it here, in a launcher pass
-    x_op = x if round_x or not pre else tf32_grid_many(x)[0]
+    x_op = x if round_x or not pre or x_on_grid else tf32_grid_many(x)[0]
     grid = lambda META: tile_grid(M, nd, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
     transition_fwd_kernel[grid](
         x_op,
@@ -206,15 +224,17 @@ def _expand_swiglu(
     expand_a_weight: torch.Tensor,
     expand_b_weight: torch.Tensor,
     shape_key: int,
+    x_on_grid: bool = False,
 ) -> torch.Tensor:
-    """The launch, and only the launch: ``SwiGLU(x @ Wa^T, x @ Wb^T)`` -> ``(M, n*N)``.
+    """The launch, and only the launch: ``SwiGLU(x @ Wa^T, x @ Wb^T)`` -> ``(M, n*N)``. ``x_on_grid``: fp32 ``x`` is already on the TF32 grid
+    (the LayerNorm stored it so), no launcher rounding pass.
 
     Split out of ``TritonTransitionFunction.forward`` so the flatten, the autocast casts, the
     squeeze GEMM and ``save_for_backward`` stay traceable and only this stays opaque -- see
     ``kernels._compile``. ``x`` arrives already 2-D and contiguous; ``shape_key`` is computed from
     the PRE-flatten shape by the caller, which is the only place that still knows it.
     """
-    return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, False)[0]
+    return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, False, x_on_grid=x_on_grid)[0]
 
 
 def _expand_swiglu_saveact_fake(x, expand_a_weight, expand_b_weight, shape_key, half_scale=None):

@@ -1,0 +1,45 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/post_fwd.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/post_fwd.cu
+index 86bbabfcd..d6fbab761 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/post_fwd.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/post_fwd.cu
+@@ -412,6 +412,9 @@ using namespace s100;
+ #ifndef NSW
+ #define NSW (UP ? 2 : 3)                   // input stages per warpgroup
+ #endif
++#ifndef PREIN
++#define PREIN 1                            // round 3 part 10: the first stages' a / sg / mod loads before the grid-dependency wait
++#endif
+ constexpr int R = 16;
+ constexpr int KB = R * 128;                                                // [16 rows][64] bf16, SW128 (2 KB)
+ constexpr int T_ = 2 * KB;                                                 // [16][128] row-major tile (4 KB)
+@@ -498,8 +501,29 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
+           for (int kb = 0; kb < 2; ++kb) tma_load_2d(su + O_WU + hu * 32768 + kb * 16384, &mwup, &B.wofull, 64 * kb, 128 * hu);
+ #endif
+       }
++#if PREIN
++      // (round 3 part 10) a, sg and the tables are complete before the chain's last launch (the block input; pre_fwd and cond_fwd run >= 2
++      // launches before this kernel, complete by PDL's wait-then-launch chain): the first NSW tiles' a / sg / mod loads go out before the
++      // grid-dependency wait, only o (the attention's output) after it
++      const int npre = (ntT - w + 1) / 2 < NSW ? (ntT - w + 1) / 2 : NSW;
++      for (int i = 0; i < npre; ++i) {
++        const int r0 = row0(2 * i + w);
++        const uint32_t st = stage(w, i);
++        uint64_t* bar = &B.infull[w][i];
++        mbar_expect_tx(bar, 14 * KB);
++        for (int kb = 0; kb < 2; ++kb) {
++          tma_load_2d(st + O_A + kb * KB, &ma, bar, 64 * kb, r0);
++          tma_load_2d(st + O_G + kb * KB, &mg, bar, 64 * kb, r0);
++        }
++        for (int kb = 0; kb < 8; ++kb) tma_load_2d(st + O_M + kb * KB, &mmod, bar, 256 + 64 * kb, r0 % mrows);   // os | sc2 | bi2 | ts
++      }
++#else
++      const int npre = 0;
++#endif
+       pdl_wait();                                                          // a / o / g / mod come from the previous kernels
+-      for (int i = 0; 2 * i + w < ntT; ++i) {
++      for (int i = 0; i < npre; ++i)
++        for (int kb = 0; kb < 2; ++kb) tma_load_2d(stage(w, i) + O_O + kb * KB, &mo, &B.infull[w][i], 64 * kb, row0(2 * i + w));
++      for (int i = npre; 2 * i + w < ntT; ++i) {
+         const int s = i % NSW, r0 = row0(2 * i + w);
+         if (i >= NSW) mbar_wait(&B.infree[w][s], ((i / NSW) - 1) & 1);
+         const uint32_t st = stage(w, i);

@@ -55,7 +55,7 @@ Each is a :class:`~miniworld_engine.modules.primitives.BackendModule`; ``_forwar
 
 from __future__ import annotations
 
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -79,7 +79,7 @@ from miniworld_engine.modules.functional import (
     build_attention_params,
     slide_starts,
 )
-from miniworld_engine.modules.norm import RMS_EPS, AdaptiveLayerNorm, AdaptiveRMSNorm, IdentityAdaptiveLayerNorm, LayerNorm, RMSNorm
+from miniworld_engine.modules.norm import RMS_EPS, AdaptiveLayerNorm, AdaptiveRMSNorm, IdentityAdaptiveLayerNorm, LayerNorm, RMSNorm, b200
 from miniworld_engine.modules.primitives import (
     BackendModule,
     Linear,
@@ -109,6 +109,12 @@ def _a100(t: torch.Tensor) -> bool:
     """A CUDA tensor on an A100 (sm_80) or an RTX 5090 (sm_120a builds of the same sources, ``kernels/_sm120.py``): the cards of the
     ``"cuda"`` backends' sm_80 paths (``kernels/integrations/*_sm80.py``)."""
     return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0))
+
+
+def _local_sm80(t: torch.Tensor) -> bool:
+    """The cards of the block-local atom DiTs' sm_80 paths: A100, RTX 5090 (sm_120a builds) and the B200 (sm_100a builds of the same
+    sources, ``kernels/_sm120.building_sm100``; card ``b200_sm100``)."""
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0), (10, 0))
 
 
 def _sm120(t: torch.Tensor) -> bool:
@@ -250,9 +256,15 @@ class _LocalAtomDiT(BackendModule):
         "anthropic": 2,
         "cuda:a100_sm80": 5,  # 2026-11-19: fp32 with TF32 off is IEEE (the fp32 train GEMMs of dit_variants / augattn: kernels/ieee_f32)
         "cuda:5090_sm120": 2,
+        "cuda:b200_sm100": 2,
     }  # 2026-11-10: kits; sm_80 paths; cuda:a100_sm80 3 (2026-11-13): a CTA whose keys are all masked writes its zero rows without computing (bitwise the same)
     # cuda:a100_sm80 4 (2026-11-13): "slide" / "slide_qblock": the query windows past the last real one (padding queries only) read the slid
     # keys [R - 128, R) as the reference does (the tail kernels of dit_variants edge.cu); they kept the clipped window. Real rows unchanged.
+    # cuda:b200_sm100 1 (2026-11-16): the B200 runs the sm_80 paths built for sm_100a (kernels/_sm120.building_sm100): local_dit_sm80_block and the
+    # dit_variants path, as the A100
+    # cuda:b200_sm100 2 (2026-11-17): Protenix / OpenFold3 ("pad" / "slide") on the tcgen05 local DiT (kernels/integrations/local_dit_b200, the
+    # b200_atom / b200_atom_local kernels of origin/b200/ladder-final); the dit_variants path (Boltz-2, RoseTTAFold3, Chai-1; "pad" /
+    # "slide") on the tcgen05 window attention and pair bias (dit_variants/cuda/train._b200_core) where N is a multiple of 128
 
     #: The default of the constructor's ``key_window``: one of :data:`KEY_WINDOWS` (see the module docstring).
     key_window: str = "slide"
@@ -424,12 +436,16 @@ class _LocalAtomDiT(BackendModule):
     def _supports_cuda(self, single, cond, pair, mask=None, uid=None, **kw) -> str | None:
         if kw:
             return f"{', '.join(kw)} (not an input of the H100 atom block)"
-        if _a100(single):
+        if _local_sm80(single):
+            if self._b200_tc(single, cond, pair, mask, uid):  # B200: the tcgen05 block (B > 1 folds in one inference call)
+                return None
             if _folds(single) > 1:  # B > 1 folds: one sm_80 call per fold (the sm_80 atom paths take one pair)
                 why = _multi_fold_reason(self, single, cond, pair, mask, uid)
                 if why is not None:
                     return f"A100: {why}"
                 single, cond, pair, mask, uid = _fold(single, cond, pair, mask, uid, 0)
+            if self._b200_tc(single, cond, pair, mask, uid):
+                return None
             return self._a100_reason(single, cond, pair, mask)
         if not _h100(single):
             return "the H100 atom block kernels run on an H100 (sm_90) CUDA tensor only"
@@ -512,10 +528,25 @@ class _LocalAtomDiT(BackendModule):
         fn, why = VariantAtomCuda._atom_serving(cast(VariantAtomCuda, self), single, cond, pair, mask, None)
         return None if fn is not None else why
 
+    # B200 (sm_100a): the tcgen05 / TMEM local atom block (kernels/integrations/local_dit_b200, origin/b200/ladder-final's local DiT) for the
+    # chained (Protenix) or parallel (OpenFold3) K / V AdaLN, the clipped or slid key window, bf16 / master and fp32, inference and
+    # training; every other B200 call keeps the sm_80 paths built for sm_100a (above).
+    def _b200_tc(self, single, cond, pair, mask, uid) -> bool:
+        if not b200(single):
+            return False
+        from miniworld_engine.kernels.integrations import local_dit_b200
+
+        return local_dit_b200.reason(self, single, cond, pair, mask, uid) is None
+
     def _forward_cuda(self, single, cond, pair, mask=None, uid=None):
-        if _a100(single) and _folds(single) > 1:  # B > 1 folds (``_supports_cuda``): one sm_80 call per fold, in fold order
+        if self._b200_tc(single, cond, pair, mask, uid):  # (B > 1 folds included: one call, each fold's pair bias for its rows)
+            from miniworld_engine.kernels.integrations import local_dit_b200
+
+            with torch.autocast("cuda", enabled=False):  # the kernels run on packs of their own
+                return local_dit_b200.run_block(self, single, cond, pair, mask, uid)
+        if _local_sm80(single) and _folds(single) > 1:  # B > 1 folds (``_supports_cuda``): one sm_80 call per fold, in fold order
             return torch.cat([self._forward_cuda(*_fold(single, cond, pair, mask, uid, b)) for b in range(_folds(single))], 1)
-        if _a100(single):
+        if _local_sm80(single):
             if not self._a100_rows(single, cond, pair, mask):
                 from miniworld_engine.modules import dit_variant_cuda as dv
 
@@ -822,7 +853,32 @@ class AtomDiTProtenix(_LocalAtomDiT):
     #: 2026-11-12: 3, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
     #: 2026-11-13: 4, H100 "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R) (the tail
     #: kernels of dit_variants edge.cu; they kept the clipped window). Real rows unchanged.
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
+    #: 2026-11-17: cuda:b200_sm100 3 (this class's own entry): the inference packs of the tcgen05 block read by a capture from the eager
+    #: warm-up (no cast / cat kernel per replay); B > 1 folds in one call; the conditioning tables and the K / V AdaLN's in one launch
+    #: (cond_fwd -DKV=1: no LayerNorm launch, no cuBLAS product)
+    #: 2026-11-17: cuda:b200_sm100 4: bf16 inference: the windowed pair bias inside the conditioning launch (cond_fwd -DPB=1: one launch
+    #: fewer; its rows four in flight per thread, lbias_sm100.cuh) and the attention as a programmatic dependent launch (-DLATTN_PDL)
+    #: 2026-11-17: cuda:b200_sm100 5: "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R)
+    #: as the reference does (slide.cuh: the edge CTAs take every moved window up to the group's four, ltail.cuh runs the rest inside the
+    #: same launches). Real rows unchanged.
+    #: 2026-11-17: cuda:b200_sm100 6 (round 3 part 4): the bf16 windowed pair bias by its own launch at eight CTAs an SM (lbias.cu; the
+    #: conditioning launch's -DPB rows removed: they ran after the tables, one CTA an SM)
+    #: 2026-11-17: cuda:b200_sm100 7 (round 3 part 5): fp32 inference of few tiles: the fused TF32 kernels in quarter units
+    #: (atom_post_tf32 32-row units, atom_pre_tf32 64-row x 256-column units when four a tile fit one wave); same outputs bit for bit
+    #: 2026-11-17: cuda:b200_sm100 8 (round 3 part 6): fp32 inference of <= 2304 rows: atom_post_tf32 on CTA pairs (-DPAIR: one hidden half
+    #: each, t_1 added through DSMEM in a fixed order; 1024 atoms 55.3 -> 53.2 us)
+    #: cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the pair bias launched beside atom_pre_tf32 as its
+    #: programmatic dependent (local_bias_fwd_f32_early; <= 6144 rows, 16384 with a shared conditioning); the fused TF32 kernels stream their weights from several lanes and
+    #: before the grid-dependency wait (the same bits)
+    #: cuda:b200_sm100 24 (2026-11-18, round 3 part 12, r3-local-dit; all six AtomDiT classes): bf16 inference: the pair bias made by the
+    #: projection launch's compute warps before their first tile (pre_*_eb, <= 12288 rows / 16384 shared; no bias launch); ESMFold2 fp32
+    #: inference: its pair bias beside atom_pre_tf32 as the programmatic dependent (esm_bias_early); the same bits
+    #: cuda:b200_sm100 25 (2026-11-18, round 3 part 13, r3-local-dit; all six AtomDiT classes): the plain pair-bias launches trigger their
+    #: PDL dependents at once and read a bf16 pair row by one 256-bit load; fp32 training: dgated with the output gate's backward in its
+    #: epilogue (gemm_rg_tf32 -DGATEB); the same bits
+    #: cuda:b200_sm100 27 (2026-11-18, round 3 part 15, r3-local-dit; all six AtomDiT classes): fp32 inference, the 64-row fp16-exact units:
+    #: the pre's two row rounds from one load round, the post's x2 inputs one round ahead (-DPRE1R / -DPOST1R); the same bits
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4, "cuda:b200_sm100": 27}
 
 
 class AtomDiTOpenFold3(_LocalAtomDiT):
@@ -850,7 +906,18 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     #: 2026-11-12: 3, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
     #: 2026-11-13: 4, H100 "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R) (the tail
     #: kernels of dit_variants edge.cu; they kept the clipped window). Real rows unchanged.
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
+    #: 2026-11-17: cuda:b200_sm100 3 (this class's own entry): "slide_qblock" and mask_form="af3" on the tcgen05 block (slide.cuh's QB
+    #: rounding; they ran the sm_80 builds); the inference packs read by a capture from the eager warm-up; the conditioning tables and the
+    #: K / V AdaLN's in one launch (cond_fwd -DKV=1)
+    #: 2026-11-17: cuda:b200_sm100 4: as AtomDiTProtenix 4 (pair bias inside the conditioning launch, PDL attention)
+    #: cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the pair bias launched beside atom_pre_tf32 as its
+    #: programmatic dependent (local_bias_fwd_f32_early; <= 6144 rows, 16384 with a shared conditioning); the fused TF32 kernels stream their weights from several lanes and
+    #: before the grid-dependency wait (the same bits)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4, "cuda:b200_sm100": 27}
+    #: 2026-11-17: cuda:b200_sm100 5: as AtomDiTProtenix 5 (the slid window's padding-only query windows)
+    #: 2026-11-17: cuda:b200_sm100 6: as AtomDiTProtenix 6 (the pair bias by its own launch at eight CTAs an SM)
+    #: 2026-11-17: cuda:b200_sm100 7: as AtomDiTProtenix 7 (the fused TF32 kernels in quarter units at few tiles)
+    #: 2026-11-17: cuda:b200_sm100 8: as AtomDiTProtenix 8 (atom_post_tf32 on CTA pairs at <= 2304 rows)
     #: ``"keys"`` or ``"af3"`` (see the class docstring)
     mask_form: str = "keys"
 
@@ -936,7 +1003,21 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     #: 2026-11-12: 4, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
     #: 2026-11-13: 5, H100 "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R) (the tail
     #: kernels of dit_variants edge.cu; they kept the clipped window). Real rows unchanged.
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 5}
+    #: cuda:b200_sm100 20 (2026-11-17, round 3 part 7, r3-local-dit): fp32 inference: the up-gated post kernel (atom_post_tf32 -DUP) on
+    #: CTA pairs at <= 2304 rows (-DPAIR: rank r the hidden quarters 2 r, 2 r + 1, t summed over DSMEM in a fixed order): 1024 atoms 57.9 ->
+    #: 54.1 us, 2048 atoms 59.9 -> 57.9 us
+    #: cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the pair bias launched beside atom_pre_tf32 as its
+    #: programmatic dependent (local_bias_fwd_f32_early; <= 6144 rows, 16384 with a shared conditioning); the fused TF32 kernels stream their weights from several lanes and
+    #: before the grid-dependency wait (the same bits)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 5, "cuda:b200_sm100": 27}
+    # cuda:b200_sm100 7 (2026-11-17, round 3 part 5, r3-local-dit): as AtomDiTProtenix 7 (fp32 inference: the fused TF32 kernels in quarter units)
+    # cuda:b200_sm100 6 (2026-11-17, round 3 part 4, r3-local-dit): the stand-alone bf16 pair bias at eight CTAs an SM (lbias.cu)
+    # cuda:b200_sm100 5 (2026-11-17, round 3, r3-local-dit): as AtomDiTProtenix 5 (the slid window's padding-only query windows)
+    # cuda:b200_sm100 4 (2026-11-17, B200 round 3b): bf16 / master, the AdaLN outputs and the residual updates with one rounding each (pre_fwd /
+    # post_fwd -DADA1 -DRES1: the bf16-autocast reference keeps its AdaLN in fp32; two output roundings less), the first input tiles prefetched
+    # into L2 (-DPF); fp32 values unchanged
+    # cuda:b200_sm100 3 (2026-11-17, B200 round 3): the block on the tcgen05 local DiT's variant builds (integrations/local_dit_b200: UP post /
+    # backward row kernels, one-launch weight pack), inference and training, bf16 / master and fp32 (TF32); was the dit_variants sm_80 path
     _release_module = "boltz_atom_kernels"
     _release_path = "boltz2/opt/forward/atom/src"
 
@@ -1017,7 +1098,16 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     #: 2026-11-12: 4, H100 conditioning at 8448 .. 16832 rows (cond90_split grid.y 2) gave the out gates of LN(c): grid.y 4
     #: 2026-11-13: 5, H100 "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R) (the tail
     #: kernels of dit_variants edge.cu; they kept the clipped window). Real rows unchanged.
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 5}
+    #: cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the pair bias launched beside atom_pre_tf32 as its
+    #: programmatic dependent (local_bias_fwd_f32_early; <= 6144 rows, 16384 with a shared conditioning); the fused TF32 kernels stream their weights from several lanes and
+    #: before the grid-dependency wait (the same bits)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 5, "cuda:b200_sm100": 27}
+    # cuda:b200_sm100 7 (2026-11-17, round 3 part 5, r3-local-dit): as AtomDiTProtenix 7 (fp32 inference: the fused TF32 kernels in quarter units)
+    # cuda:b200_sm100 6 (2026-11-17, round 3 part 4, r3-local-dit): the stand-alone bf16 pair bias at eight CTAs an SM (lbias.cu)
+    # cuda:b200_sm100 5 (2026-11-17, round 3, r3-local-dit): as AtomDiTProtenix 5 (the slid window's padding-only query windows)
+    # cuda:b200_sm100 4 (2026-11-17, B200 round 3b): as AtomDiTBoltz2 4; fp32 inference: the parallel schedule's transition runs before the
+    # attention's end (atom_post_tf32 -DEARLY; same values)
+    # cuda:b200_sm100 3 (2026-11-17, B200 round 3): as AtomDiTBoltz2 (PARS post / backward builds, the flat q / k LayerNorm in pre_fwd and kqln_bwd)
 
 
 class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
@@ -1047,7 +1137,15 @@ class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
     #: 2026-11-10: H100 on the one atom DiT implementation (local_dit_h100; was kernels/dit_variants): 2 "pad", 3 "slide"
     #: 2026-11-13: 4, H100 "slide" / "slide_qblock": the query windows past the last real one read the slid keys [R - 128, R) (the tail
     #: kernels of dit_variants edge.cu; they kept the clipped window). Real rows unchanged.
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4}
+    #: cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the pair bias launched beside atom_pre_tf32 as its
+    #: programmatic dependent (local_bias_fwd_f32_early; <= 6144 rows, 16384 with a shared conditioning); the fused TF32 kernels stream their weights from several lanes and
+    #: before the grid-dependency wait (the same bits)
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4, "cuda:b200_sm100": 27}
+    # cuda:b200_sm100 7 (2026-11-17, round 3 part 5, r3-local-dit): as AtomDiTProtenix 7 (fp32 inference: the fused TF32 kernels in quarter units)
+    # cuda:b200_sm100 6 (2026-11-17, round 3 part 4, r3-local-dit): the stand-alone bf16 pair bias at eight CTAs an SM (lbias.cu)
+    # cuda:b200_sm100 5 (2026-11-17, round 3, r3-local-dit): as AtomDiTProtenix 5 (the slid window's padding-only query windows)
+    # cuda:b200_sm100 4 (2026-11-17, B200 round 3b): as AtomDiTRoseTTAFold3 4
+    # cuda:b200_sm100 3 (2026-11-17, B200 round 3): as AtomDiTBoltz2 (IDENT tables / backward builds, PARS, the conformer mask in one launch)
 
     def __init__(
         self,
@@ -1225,6 +1323,321 @@ class SwiGLUFFN(nn.Module):
         return self.w_down(F.silu(x1) * x2)
 
 
+#: B200: bf16 SWA training on fewer rows (N S) than this stays off the sm_100a stages: measured slower than the (pretuned) Triton stages at
+#: 1024 - 4096 rows (one sample: every backward launch is 8 - 32 CTAs), faster from 7168 (2026-11-17, after the stream overlap of
+#: ``_SWATrainB200``: ESMFold2 L 4096 S 1 0.195 against 0.174 ms, L 7168 S 1 0.238 against 0.256; ``AtomDiTMiniWorld._b200_reason``)
+_B200_BF16_MIN_ROWS = 7168
+#: B200 master training (bf16 activations, fp32 weights) of window attention on at most this many rows (N S) runs on the TF32 kernels (x and c in fp32,
+#: the output back to bf16; one cast each way per SWA stack): faster than the bf16 stages' 128-row tiles there (2026-11-17, round 3
+#: part 5: ESMFold2 L 7168 S 1 0.206 against 0.227 ms, SWA 3 blocks L 8192 0.594 against 0.716; S 48 L 1024 (49152 rows) stays bf16:
+#: 0.708 against 0.823)
+_B200_MT_TF32_MAX_ROWS = 8192
+#: B200 master global-attention training of _B200_BF16_MIN_ROWS - _B200_MT_TF32_MAX_ROWS rows (one sample, L 7168 / 8192) on the TF32 row
+#: stages with the native global backward (gattn_bwd.cu) in place of the bf16 stages (2026-11-17, swa-global part 2; embedder L 7168 / 8192:
+#: 1.58 - 1.62 -> 1.47 - 1.54 ms, L 8192 1.72 - 1.76 -> 1.65 - 1.69; relu L 7168 gradients 1.96 -> 1.16 x tol (H100 1.64), linear L 7168
+#: 1.28 -> GREEN 0.87; run-to-run deterministic, _tools/det.py).
+#: Below 7168 rows the same route served the refused cases faster than Triton (0.75 - 0.97 x) but slower than the H100 (1.08 - 1.17 x) and
+#: linear L 1024 at 1.48 x tol (H100 1.36, Triton 1.10): those stay refused.
+_B200_MT_TF32_GLOBAL = True
+#: ... from this many rows (below: refused). 2026-11-17, swa-global part 3 (native training forward, split global attention fwd / bwd):
+#: embedder master training L 5120 / 6144 0.82 - 0.85 x the H100 (served from here), L 1024 - 4096 1.03 - 1.11 x (still slower: refused)
+#: 2026-11-17, round 3 part 11: from 1024 rows -- with the embedder's own training statements on kernels (InputFeatureEmbedder
+#: cuda:b200_sm100 17) its L 1024 - 4096 master training measures 0.87 - 0.99 x the H100 (was refused; Triton 1.1 - 1.6 x)
+_B200_MT_TF32_GLOBAL_MIN_ROWS = 1024
+#: development switch (round 3 part 6): master training on the TF32 kernels reads x / c / dy and writes out / dx / dc in bf16 in place (False: the
+#: part-5 form, fp32 copies around the block; the same bits)
+_B200_MT_IO16 = True
+#: B200 round 3 part 8 (development switch): bf16 training with fp32 masters makes every bf16 weight form of both passes in one launch
+#: (sm100.master_pack_train; the backward kernels then load their weights before griddepcontrol.wait)
+_B200_WPACK = True
+#: B200 round 3 part 8: master training of window attention on at most this many rows (N S) runs on the bf16 stages (the one-launch
+#: weight forms, the _wp backward builds) instead of the TF32 kernels (0: off)
+_B200_MT_BF16_MAX_ROWS = 0
+#: B200 round 3 part 8: master training on the TF32 route (one sample, window attention, bf16 x) runs the bf16 FORWARD (one-launch weight forms,
+#: bf16 stages) and the TF32 backward on its saves widened to fp32 (_SWATrainB200; the output bf16, also between a stack's blocks)
+_B200_MT_HYBRID = True
+#: ... on at most this many rows: the widening of the twelve saves is bandwidth-bound (8.3 us at 4096 rows), so from 7168 rows the TF32
+#: forward is faster (A/B, same process, 2026-11-17: ESMFold2 hybrid / TF32 L 3072 0.953, 4096 0.984, 5120 0.991, 6144 1.000, 7168 1.023,
+#: 8192 1.043; embedder linear L 4096 0.977, 6144 0.991, 8192 1.018)
+_B200_MT_HYBRID_MAX_ROWS = 6144
+#: B200 round 3 part 14 (development switch): a master-training stack's glue -- the blocks' weight forms on a side stream ahead of them,
+#: c read in its own dtype, the blocks' dc summed inside their dsilu launches (tf32_bwd.DcAcc)
+_B200_STACK_GLUE = True
+#: B200 bf16 global-attention inference without FlashAttention-4 (PyTorch's FlashAttention-2 fallback) on fewer rows than this: slower
+#: than Triton (2026-11-16: L 1024 S 5 0.106 against 0.099 ms); with FlashAttention-4 every row count wins (L 1024 S 5 0.072 ms)
+_B200_FA2_GLOBAL_MIN_ROWS = 8192
+
+
+class _SWAModulationB200(torch.autograd.Function):
+    """B200: the SWA block's modulation ``silu(c) W^T`` [R, 6 C] fp32 and its backward. bf16 ``c`` [R, C]: the sm_100a ``mod_fwd`` (bf16
+    operands, exact products, fp32 accumulation) and ``mod_bwd`` (dc bf16, dW fp32; R a multiple of 128); ``w`` bf16 or an fp32 master (its
+    bf16 form is the operand, the gradient comes back in its dtype). fp32 ``c`` (and fp32 ``w``): ``mod_fwd_tf32`` and
+    ``tf32_bwd.mod_bwd_tf32`` (TF32 tensor cores)."""
+
+    @staticmethod
+    def forward(ctx, c, w):
+        from miniworld_engine.kernels.swa_dit.cuda import sm100
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
+
+        ctx.w_dtype = w.dtype
+        if c.dtype == _F32:
+            w32 = w.float().contiguous()
+            ctx.save_for_backward(c, w32)
+            return tf32_fwd.mod_fwd_tf32(c, w32)
+        w16 = w.to(_BF).contiguous()
+        ctx.save_for_backward(c, w16)
+        return sm100.mod_fwd(c, w16)
+
+    @staticmethod
+    def backward(ctx, g):
+        from miniworld_engine.kernels.swa_dit.cuda import sm100
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+        c, w = ctx.saved_tensors
+        g = g.float().contiguous()
+        dc, dw = tf32_bwd.mod_bwd_tf32(g, c, w) if c.dtype == _F32 else sm100.mod_bwd(g, c, w)
+        return dc, dw.to(ctx.w_dtype)
+
+
+def _b200_hybrid(x, hw, raw, out16) -> bool:
+    """master training on the TF32 kernels (``out16`` not None) of window attention with bf16 activations and fp32 weights: the bf16
+    forward + the TF32 backward (round 3 part 8, :data:`_B200_MT_HYBRID`)."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+    rows = x.shape[0] * x.shape[1]
+    return (
+        _B200_MT_HYBRID
+        and out16 is not None
+        and x.dtype == _BF
+        and rows <= _B200_MT_HYBRID_MAX_ROWS
+        and hw == sm100.HW
+        and sm100.pack_ok(raw)
+    )
+
+
+def _b200_hybrid_pack(raw, stream=None):
+    """``sm100.master_pack_hybrid(raw)`` cached per weight version (``kernels._capture.param_forms``: an eager call packs once per optimizer
+    update; a CUDA-graph capture packs once per capture, every replay repacking the weights as they are then). ``stream``: made on that
+    stream (the caller orders it)."""
+    from miniworld_engine.kernels import _capture
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+    raw = tuple(raw)
+    return _capture.param_forms(("swa_dit_sm100", "master_pack_hybrid"), raw, lambda: sm100.master_pack_hybrid(raw, stream))
+
+
+def _b200_prefetch_hybrid(blocks, x) -> list | None:
+    """B200 round 3 part 14: the weight forms of every block of a master-training stack on the bf16-forward / TF32-backward route
+    (:func:`_b200_hybrid`) made on a side stream forked from the current one: the packs leave the dependent chain (one ~2.6-us launch per
+    block). Returns one event per block (the current stream waits on block i's before block i: :func:`_b200_wait`), or None when the blocks
+    are not on that route (nothing made)."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+    raws = [tuple(cast(torch.Tensor, m.weight) for m in b._a100_linears()) for b in blocks]
+    if not raws or not all(_b200_hybrid(x, b.attn.half_window, r, True) for b, r in zip(blocks, raws, strict=True)):
+        return None
+    cur = torch.cuda.current_stream()
+    s = sm100._side_streams(cur.device.index)[0]
+    s.wait_stream(cur)  # the weights as the current stream has them (an optimizer step before this call)
+    evs = []
+    for r in raws:
+        _b200_hybrid_pack(r, s)
+        ev = torch.cuda.Event()
+        ev.record(s)
+        evs.append(ev)
+    return evs
+
+
+#: B200 round 3 part 15 (development switch): a master-training stack on the TF32 forward (global attention, or rows beyond the hybrid
+#: route) makes every block's weight forms (Wmod rounding, the block pack, the backward's Wd^T / Wo^T) and its modulation silu(c) Wmod^T
+#: on a side stream ahead of the blocks (_b200_prefetch_tf32): every block is conditioned on the same c, so none of these waits for the
+#: block before -- they leave the dependent chain (embedder global L 2048: ~10 us of round + modulation between two blocks' stages)
+_B200_TF32_PREFETCH = __import__("os").environ.get("SWA_TF32PRE", "1") == "1"
+
+
+def _b200_prefetch_tf32(blocks, x, c) -> tuple[list, list] | None:
+    """(mods, events): block i's modulation [R, 6C] fp32 and the event its forms + modulation are done on, made on a side stream forked
+    from the current one; None when a block is not on the TF32 forward route (nothing made)."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+    from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd, tf32_fwd
+
+    if not _B200_TF32_PREFETCH:
+        return None
+    raws = [tuple(cast(torch.Tensor, m.weight) for m in b._a100_linears()) for b in blocks]
+    if not raws or any(_b200_hybrid(x, b.attn.half_window, r, True) for b, r in zip(blocks, raws, strict=True)):
+        return None
+    if any(w.dtype != _F32 or not w.is_contiguous() for r in raws for w in r):
+        return None
+    cur = torch.cuda.current_stream()
+    s = sm100._side_streams(cur.device.index)[0]
+    s.wait_stream(cur)  # the weights as the current stream has them (an optimizer step before this call), c made
+    mods, evs = [], []
+    if _B200_MOD0_MAIN and _B200_EARLY_FORMS:
+        # N2: block 0's modulation on the current stream right behind the features (its forms were made ahead on s: one wait on them) -- the first block's
+        # qkvg stage no longer waits behind the other blocks' modulation launches and a cross-stream hop; the other blocks' on s as before
+        ev0 = torch.cuda.Event()
+        ev0.record(s)
+        cur.wait_event(ev0)
+        wm, w1, w2, w3, w4, w5 = raws[0]
+        sm100._cached(tf32_fwd._tf32_block_forms, w1, w2, w3, w4, w5)
+        mods.append(tf32_fwd.mod_fwd_tf32(c, wm))
+        ev = torch.cuda.Event()
+        ev.record(cur)
+        evs.append(ev)
+    with torch.cuda.stream(s):
+        for bi, (wm, w1, w2, w3, w4, w5) in enumerate(raws):
+            sm100._cached(tf32_fwd._tf32_block_forms, w1, w2, w3, w4, w5)
+            if bi == 0 and mods:
+                continue
+            mods.append(tf32_fwd.mod_fwd_tf32(c, wm))
+            ev = torch.cuda.Event()
+            ev.record(s)
+            evs.append(ev)
+        for _, _, _, w3, _, w5 in raws:  # the backward's forms after every forward form (the caller waits on the last event at the end)
+            sm100._cached(tf32_bwd._bwd_forms, w5, w3)
+        ev = torch.cuda.Event()
+        ev.record(s)
+        evs.append(ev)
+    return mods, evs
+
+
+#: N2 (2026-11-18, development switch): the TF32 route's weight forms (wprep / round) made on the side stream at the START of the embedder
+#: step (before the RoPE launch and the features: they do not depend on c), the modulation launches (they do) after the features as before
+#: N2 (development switch): the first block's modulation on the current stream (see _b200_prefetch_tf32)
+_B200_MOD0_MAIN = __import__("os").environ.get("SWA_MOD0_MAIN", "0") == "1"
+_B200_EARLY_FORMS = __import__("os").environ.get("SWA_EARLYFORMS", "0") == "1"
+
+
+def _b200_prefetch_tf32_forms(blocks, x) -> bool:
+    """The blocks' TF32 weight forms ahead on the side stream (served from the capture cache to the stack's :func:`_b200_prefetch_tf32`
+    later; same stream, so its modulation launches order after them). False when a block is not on the TF32 forward route."""
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+    from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
+
+    if not (_B200_EARLY_FORMS and _B200_TF32_PREFETCH):
+        return False
+    raws = [tuple(cast(torch.Tensor, m.weight) for m in b._a100_linears()) for b in blocks]
+    if not raws or any(_b200_hybrid(x, b.attn.half_window, r, True) for b, r in zip(blocks, raws, strict=True)):
+        return False
+    if any(w.dtype != _F32 or not w.is_contiguous() for r in raws for w in r):
+        return False
+    cur = torch.cuda.current_stream()
+    s = sm100._side_streams(cur.device.index)[0]
+    s.wait_stream(cur)
+    with torch.cuda.stream(s):
+        for wm_, w1, w2, w3, w4, w5 in raws:
+            sm100._cached(tf32_fwd._tf32_block_forms, w1, w2, w3, w4, w5)
+            if _B200_MOD0_MAIN:
+                tf32_fwd._forms(tf32_fwd._tf32_wmod, wm_, save=True)  # (mod_fwd_tf32's own rounding, cached for it)
+    return True
+
+
+def _b200_wait(evs, i) -> None:
+    if evs is not None:
+        torch.cuda.current_stream().wait_event(evs[i])
+
+
+#: B200 round 3 part 14 (development switch): a master-training stack's non-final blocks leave their weight-gradient side streams to be
+#: joined by the first block's backward (tf32_bwd._bwd_few / DcAcc.hold) when that is safe (_b200_defer_ok)
+_B200_DEFER_DW = True
+
+
+def _b200_defer_ok(raw) -> bool:
+    """Every weight is an fp32 leaf without a gradient yet and without hooks: AccumulateGrad then takes the returned gradient as it is (no
+    kernel reads it), so its side-stream producer may finish later -- before the stack's backward ends (the first block joins it)."""
+    return _B200_DEFER_DW and bool(raw) and all(
+        p.is_leaf
+        and p.dtype == _F32
+        and p.grad is None
+        and not p._backward_hooks
+        and not getattr(p, "_post_accumulate_grad_hooks", None)
+        for p in raw
+    )
+
+
+class _SWATrainB200(torch.autograd.Function):
+    """B200 bf16 training of one SWA block, the modulation included: the bf16 forms of the six weights from one cast (``sm100.master_pack``),
+    ``mod_fwd`` then the sm_100a block forward; the backward runs the block backward and, from its dmod, the modulation backward's two kernels
+    on side streams beside the block's weight-gradient kernel (``sm100.block_bwd(modb=...)``): at one sample of a few thousand atoms every
+    launch is a few CTAs, so the independent ones overlap. The weights' gradients come back in their own dtype (fp32 masters unrounded)."""
+
+    @staticmethod
+    def forward(ctx, x, c, wmod, cos, sin, seqused, wqkv, wg, wo, wu, wd, n, hw, out16=None, c16=None, dca=None, pmod=None):
+        from miniworld_engine.kernels.swa_dit.cuda import sm100
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
+
+        raw = (wmod, wqkv, wg, wo, wu, wd)
+        # fp32 (fp32 weights): the TF32 kernels, the modulation's backward on side streams likewise (tf32_bwd). out16 (not None): master
+        # training on the TF32 kernels (round 3 part 6) -- x / c fp32 or bf16, read in place; the output bf16 when out16, else fp32 (a stack
+        # keeps fp32 between its blocks); the gradients come back in the inputs' dtypes
+        ctx.tf32 = x.dtype == _F32 or out16 is not None
+        wb: tuple = ()
+        if ctx.tf32 and _b200_hybrid(x, hw, raw, out16):
+            # round 3 part 8 (master training of one sample): the bf16 forward (one pack launch for the bf16 weight forms, the modulation,
+            # the bf16 row / attention stages: ~30 us at 1024 rows against the TF32 forward's ~52) and the TF32 backward on its saves widened
+            # to fp32 in one launch (exact); the output stays bf16 (also between the blocks of a stack)
+            from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+            wm, w1, w2, w3, w4, w5 = (w.contiguous() for w in raw)
+            # every weight form of both passes in one plain launch (the modulation kernel after it reads Wmod before its wait); the TF32
+            # backward finds its forms in the cache its _cached calls read
+            from miniworld_engine.kernels import _capture
+
+            # round 3 part 14: cached per weight version (eager: once per optimizer update; a capture: once per capture, or made ahead on a
+            # side stream by the stack / the embedder -- _b200_prefetch_hybrid)
+            (wb16, b1, b2, b3, b4, b5), tf, bw = _b200_hybrid_pack(raw)
+            _capture.param_forms(("swa_dit_sm100", tf32_fwd._tf32_block_forms.__name__), (w1, w2, w3, w4, w5), lambda: tf)
+            _capture.param_forms(("swa_dit_sm100", tf32_bwd._bwd_forms.__name__), (w5, w3), lambda: bw)
+            cb = c16 if c16 is not None else c if c.dtype == _BF else c.to(_BF)
+            if sm100.train_c_ok(x, n, hw):  # the qkvg stage makes shift_a / scale_a itself, the modulation kernel beside it
+                mod, (out, *s16) = sm100.block_fwd_train_c(x, cb.contiguous(), wb16, cos, sin, seqused, b1, b2, b3, b4, b5, n)
+            else:
+                mod = sm100.mod_fwd(cb.contiguous(), wb16)
+                out, *s16 = sm100.block_fwd(x, mod, cos, sin, seqused, b1, b2, b3, b4, b5, n, True, hw)
+            if sm100.save_late_ok(x.shape[0] * x.shape[1]):  # r3-swa part 19: kept bf16; the backward widens them under its first kernel (tf32_bwd._bwd_few)
+                saved = [t.contiguous() for t in s16]
+            else:
+                w32 = sm100.save32([t.contiguous() for i, t in enumerate(s16) if i != 5])
+                saved = [*w32[:5], s16[5], *w32[5:]]
+        elif ctx.tf32:
+            wm, w1, w2, w3, w4, w5 = (w.contiguous() for w in raw)
+            # round 3 part 15: ``pmod`` -- the modulation made ahead on a side stream by the stack (_b200_prefetch_tf32), off the chain
+            mod = pmod if pmod is not None else tf32_fwd.mod_fwd_tf32(c, wm)
+            out, *saved = tf32_fwd.block_fwd_tf32(x, mod, cos, sin, seqused, w1, w2, w3, w4, w5, n, True, hw, out16=out16)
+        else:
+            if _B200_WPACK and sm100.pack_ok(raw):
+                # round 3 part 8: every bf16 form of both passes in one launch (the backward kernels then read theirs before their wait)
+                (wm, w1, w2, w3, w4, w5), wb = sm100.master_pack_train(raw)
+            else:
+                wm, w1, w2, w3, w4, w5 = sm100.master_pack(raw)
+            mod = sm100.mod_fwd(c, wm)
+            out, *saved = sm100.block_fwd(x, mod, cos, sin, seqused, w1, w2, w3, w4, w5, n, True, hw)
+        ctx.nwb = len(wb)
+        ctx.dca = dca if ctx.tf32 else None  # round 3 part 14: (tf32_bwd.DcAcc, block index): the stack's dc sum inside the dsilu launches
+        ctx.raw = raw if ctx.dca is not None else ()
+        ctx.save_for_backward(x, mod, cos, sin, seqused, w1, w2, w3, w4, w5, *saved, c, wm, *wb)
+        ctx.dtypes, ctx.meta = [w.dtype for w in raw], (n, hw)
+        return out
+
+    @staticmethod
+    def backward(ctx, dy):
+        from miniworld_engine.kernels.swa_dit.cuda import sm100
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+        n, hw = ctx.meta
+        saved = list(ctx.saved_tensors)
+        wb = tuple(saved[len(saved) - ctx.nwb :]) if ctx.nwb else None
+        *rest, c, wm = saved[: len(saved) - ctx.nwb]
+        # (the saved tensors are exactly the backward's 23 leading tensor parameters: an untyped call)
+        bwd = cast(Any, tf32_bwd.block_bwd_tf32 if ctx.tf32 else sm100.block_bwd)
+        kw = {"wb": wb} if wb is not None else {}
+        with torch.autocast("cuda", enabled=False):  # a master-training backward runs under the caller's autocast
+            modb = (c, wm) if ctx.dca is None else (c, wm, (*ctx.dca, _b200_defer_ok(ctx.raw)))
+            dq, _, dwqkv, dwg, dwo, dwu, dwd, dc, dwm = bwd(dy.contiguous(), *rest, n, hw, modb=modb, **kw)
+        dws = [g.to(dt) for g, dt in zip((dwm, dwqkv, dwg, dwo, dwu, dwd), ctx.dtypes, strict=True)]
+        return dq, dc, dws[0], None, None, None, *dws[1:], None, None, None, None, None, None
+
+
 class AtomDiTMiniWorld(BackendModule):
     """MiniWorld's ESMFold2-style SWA atom block (``block_style="esmfold2"``; ESMFold2 Algorithm 8): adaLN-Zero, sliding-window 3D RoPE
     attention and SwiGLU, no atom-pair representation.
@@ -1255,7 +1668,64 @@ class AtomDiTMiniWorld(BackendModule):
         "cuda:a100_sm80": 7,
         "cuda:h100_sm90": 3,
         "cuda:5090_sm120": 7,  # 7 (2026-11-20): fp32 window inference: the out-projection + FFN kernel streams fp16 weight packs (the tf32-rounded values, exact) and takes 32-row tiles past one wave of 16-row tiles (L 2048 S 5: 0.162 -> 0.139 ms; outputs within TF32 sums); 6 (2026-11-20): fp32 window training on chunks of ~24576 rows of whole samples (the stage-to-stage tensors stay in the L2: 48 x 4096 atoms 11.22 -> 10.25 ms; per-row results the same up to TF32 sums)
+        "cuda:b200_sm100": 21,
     }  # cuda:a100_sm80 7 (2026-11-13): the sm_80 window attention exits on a tile past seqused (zero rows, the same bits)
+    # cuda:b200_sm100 21 (2026-11-18, N2 round, training; training versions are odd): the modulation weight gradient dWmod = dmod^T silu(c) of the TF32 block backward on the cluster dW kernel (dw_tf32.cu DWM build, tf32_bwd.DwModTf32) instead of a cuBLAS GEMM with K = rows (a 12-CTA sm80-style kernel, 11 - 20 us beside the chain): L 4096 master global embedder training 659 -> 647 us
+    # cuda:b200_sm100 19 (2026-11-18, N1 round 4, training): the global blocks' glue (tf32_bwd._global_attn_bwd): the native backward's three head casts and dO16 + D in ONE launch (gattn_tf32.cu swa_gprep, launched programmatically), the forward cast launch triggering the attention's launch at once; the same bits; L 4096 ESMFold2 master step -9 - -17 us
+    # cuda:b200_sm100 18 (2026-11-18, r3-swa part 21): few-tile TF32 backward -- dx = dP W as eight per-head partials in the window attention
+    # passes' epilogues (attn_dq / attn_dkv_tf32 DXP; the qkvg adaLN sums them: no dx GEMM after dK / dV), dWqkvg's m-blocks launched as
+    # their operands arrive (DWS), the dW cluster kernel's partials summed through an L2 workspace instead of DSMEM (DW_GX, the same bits);
+    # ESMFold2 master train L 1024 81.8 -> 78.2 us
+    # cuda:b200_sm100 17 (2026-11-18, r3-swa part 20): the TF32 backward's store round trips (few tiles, NG >= 4) -- the out-projection
+    # backward stages its three head tiles in ring slots no longer refilled, the DATT / DFFN stores are shared by a tile's items, the gate
+    # kernel stages its dy partial in its spent ring; the adaLN backward loads 4 - 8 dy partials at once (the same bits; ESMFold2 master
+    # train L 2048 96.2 -> 94.3 us)
+    # cuda:b200_sm100 16 (2026-11-18, r3-swa part 19): master training of one sample -- the bf16 saves widened in the backward under the FFN
+    # gate kernel (swa_save32_lw_sm100, the gate reading y in bf16; <= 1024 rows or <= 96 gate CTAs); few-tile backwards with room beside the
+    # attention backward (1024 rows) split the c gradient's GEMM at column 2C (dcg_tf32.cu: early columns off the chain, silu' in the late launch)
+    # cuda:b200_sm100 15 (2026-11-18, round 3 part 15): the TF32 backward's five weight gradients summed inside one cluster per output tile
+    # over DSMEM (dw_tf32.cu DW_CL, bulk copies, rank order): no workspace, no reduce launch
+    # cuda:b200_sm100 14 (2026-11-18, round 3 part 14): the TF32 backward's weight-gradient reduce writes dWg into a tensor of its own (no
+    # clone launch; the same bits); master training's hybrid weight packs cached per weight version (param_forms: eager once per optimizer
+    # update, a capture once per capture)
+    # cuda:b200_sm100 13 (2026-11-18, round 3 part 12): bf16 few-tile inference: qkvg_fwd1t on two CTAs per tile where 2 x tiles fit the SMs
+    # (rank r: projections r, r + 2 -- half of W, half the MMAs and epilogue; the same bits); the few-tile TF32 backward from 2048 rows: dx = dP W
+    # and dc = dmod Wmod as K-split batched GEMMs (2 / 3 slices) summed in slice order by the adaLN / dsilu kernels (deterministic)
+    # cuda:b200_sm100 12 (2026-11-17, round 3 part 11): the few-tile fp32 FFN stage on a CTA pair per tile (ffn_fwd_tf32 -DPAIR: rank r the
+    # hidden chunks 4 r .. 4 r + 3, the partial ffn halves exchanged over DSMEM, p0 + p1 on both; 64-row tiles where 32-row pairs do not fit):
+    # ESMFold2 float32 inference L 1024 44.9 -> 42.8 us, L 3072 48.8 -> 44.9; float32 training L 1024 108.7 -> 104.6
+    # cuda:b200_sm100 11 (2026-11-17, round 3 part 10): the fp32 (TF32) forward stages issue their TMA loads from several lanes
+    # (ffn_fwd_tf32 / qkvg_fwd_tf32 rings: up to 8, mod_fwd_tf32 4, attn_fwd_tf32 3; one thread issued ~one load per 600 clocks):
+    # the same bits; ESMFold2 float32 inference L 1024 46.7 -> 44.9 us, L 8192 59.1 -> 57.3
+    # cuda:b200_sm100 10 (2026-11-17, round 3 part 8): master training of window attention on <= 8192 rows (one sample) runs the bf16
+    # FORWARD (every weight form of both passes in one launch, wpack_bf16.cu; the bf16 modulation / row / attention stages) and the TF32
+    # backward on its saves widened to fp32 in one launch (exact), the output bf16 also between a stack's blocks (was the TF32 forward:
+    # ESMFold2 L 1024 109.0 -> 91.9 us); the bf16 backward kernels gained one-augment 64-row paths (qkvg_bwd / oproj_bwd A1) and the
+    # pre-wait weight builds (WPRE), mod_dc_slab.cu (development route _B200_MT_BF16_MAX_ROWS, off)
+    # cuda:b200_sm100 9 (2026-11-17, round 3 part 7): float32 inference of one augment on <= 1792 rows makes shift_a / scale_a inside the
+    # qkvg stage (qkvg_fwd_tf32 -DMODF) with the modulation kernel beside it (one launch off the chain, the same bits); float32 training of
+    # global attention on one sequence of >= 4096 atoms takes FlashAttention-2's forward (accuracy: FA4's forward 2.45 / 2.52 x tol at L 7168 /
+    # 8192 against the FA2-measured tokens 1.77 / 2.03)
+    # cuda:b200_sm100 8 (2026-11-17, round 3 part 6): master training on the TF32 kernels reads x / c / dy and writes out / dx / dc in bf16 in
+    # place (no fp32 copies: the same bits as 7); float32 / master training of few tiles computes dy = [da | db] Wab inside the FFN gate kernel
+    # (ffn_bwd_gate_tf32 DYF build: per-item partials summed by the adaLN backward; the cuBLAS dy GEMM launch gone, another K order)
+    # cuda:b200_sm100 7 (2026-11-17, round 3 part 5): master training on at most 8192 rows (one sample) on the TF32 kernels -- x and c cast to
+    # fp32, the float32 training block, the output back to bf16 (was: refused below 7168 rows, the bf16 stages from 7168)
+    # cuda:b200_sm100 6 (2026-11-17, round 3 part 4): float32 training of at most one 128-row tile per SM -- the backward's launches as their
+    # dependencies allow (dK / dV beside dQ, the weight gradients and the modulation's dW on side streams), warp-per-row adaLN backward of one
+    # augment, ffn_bwd_gate_tf32 / oproj_bwd_fused_tf32 items of (tile, chunk / head group), dw_tf32 slices of 64 rows stored by TMA, the
+    # ffn_fwd_tf32 -DROWS=64 / 32 builds; the same bits
+    # cuda:b200_sm100 5 (2026-11-17, round 3): bf16 inference on more rows than one tile per SM on the many-tile row kernels (qkvg_fwd3.cu /
+    # ffn_fwd3.cu: the modulation inside, overlapped tiles, loads two tiles ahead; no modulation launch); the same bits
+    # cuda:b200_sm100 4 (2026-11-17, round 3): bf16 inference of at most one 32-row tile per SM (<= 4736 rows) on the few-tile row kernels
+    # (qkvg_fwd1t.cu / ffn_fwd1t.cu: the modulation inside, W read in place, loads in the order of need; no modulation launch); the same bits
+    # cuda:b200_sm100 3 (2026-11-17, round 3): the modulation on cuBLAS from 4096 rows (forward) / 16384 rows (backward), dmod by plain stores
+    # for A <= 8, the inference weight forms packed / read from the eager warm-up (bf16 and fp32), fp32 global attention's casts and the
+    # backward's head-wise tail in one launch each (gattn_tf32.cu)
+    # cuda:b200_sm100 1 (2026-11-16): the B200 on the dispatch's sm_100a stages (bf16 / master forward + backward, fp32 inference on TF32)
+    # cuda:b200_sm100 2 (2026-11-17): bf16 training as one Function with the modulation (_SWATrainB200: one-launch master cast, dQ || dK dV and
+    # the modulation backward || the weight gradients on side streams, PDL on the backward kernels, finer dW split-K), served from 7168 rows
+    # (was 8192); global attention on FlashAttention-4 when installed (bf16 inference then at every row count)
     # cuda:5090_sm120 3 (3.0.5): global attention inference on its own sm_120a kernel (attn_global_sm120.cuh, in place of FlashAttention-2) and on the fused qkvg / FFN stages; bf16 training forward on the fused stages from 4096 rows; modulation backward on cuBLAS at every row count; weight casts in one launch
     # cuda:5090_sm120 4 (3.0.5): bf16 training backward on the RTX 5090: the FFN backward's dy kernel and the qkvg backward as K-split kernels streaming their weight through a cp.async ring (bwd_ks_sm120.cuh, in place of cuBLAS products + row stages), the five weight gradients as one grouped split-K GEMM (wgrad5_sm120.cu, in place of five cuBLAS products), the FFN gate kernel's launch table (fp32 sums in another order; no change of any other output)
     # cuda:5090_sm120 5 (3.0.5): global-attention training up to 3072 rows per sample on the sm_120a forward with lse and backward (attn_global_sm120.cuh, in place of FlashAttention-2 fwd / bwd; outputs within bf16 noise)
@@ -1371,6 +1841,8 @@ class AtomDiTMiniWorld(BackendModule):
 
         if _a100(x):
             return self._a100_reason(x, cond, attention_params)
+        if b200(x):
+            return self._b200_reason(x, cond, attention_params)
         if not x.is_cuda or torch.cuda.get_device_capability(x.device) != (9, 0):
             return "the H100 (sm_90) kernels only"
         if len(attention_params) != 6:
@@ -1474,9 +1946,172 @@ class AtomDiTMiniWorld(BackendModule):
             # one modulation row per sequence row: b = N
             return sm80.block_fwd(x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, FP32_EPS, FP32_EPS, False)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
 
+    # B200 (sm_100a, card b200_sm100): the fused block through the dispatch's sm_100a stages (kernels/swa_dit/cuda/sm100, tcgen05 / TMEM /
+    # TMA; ``swa_dit_block_fwd`` / ``SWADiTBlockFunction`` with ``portable`` off): bf16 / master every stage hand CUDA, forward and backward
+    # (global attention on FlashAttention-4 between the stages, or PyTorch's FlashAttention-2 where FA4 is not installed); fp32 on the TF32 kernels (cuda/sm100/tf32_fwd, tf32_bwd). The modulation
+    # silu(c) W^T on the sm_100a ``mod_fwd`` / ``mod_bwd`` (bf16) or ``mod_fwd_tf32`` / ``tf32_bwd.mod_bwd_tf32``. fp32 training: the TF32
+    # forward with saves and the TF32 backward (cuda/sm100/tf32_bwd). Range: the Triton backend's contract with d_cond 128 and the atom
+    # count S a multiple of 128 (the kernels' tile). fp32 global attention: the TF32 row stages around the bf16 global attention
+    # (tf32_fwd.block_fwd_tf32; its backward tf32_bwd._global_attn_bwd: the global attention's backward and the head-wise RMSNorm + rotary tail).
+    def _b200_reason(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> str | None:
+        why = self._supports_triton(x, cond, attention_params)
+        if why is not None:
+            return f"B200: {why}"
+        if cond.shape[-1] != 128:
+            return f"B200: d_cond {cond.shape[-1]} (the sm_100a modulation kernels: 128)"
+        if x.shape[1] % 128:
+            return f"B200: the atom count S = {x.shape[1]} is not a multiple of 128 (the sm_100a kernels' tile; pad the atoms, seqused masks them)"
+        # global attention: FlashAttention-4, or PyTorch's FlashAttention-2 without it (swa_dit/cuda/sm100._fa2_global_fwd); fp32 around it
+        # the TF32 row stages
+        rows = x.shape[0] * x.shape[1]
+        if x.dtype == _BF:
+            from miniworld_engine.kernels.swa_dit._common import is_global
+
+            hw = self.attn.half_window
+            if (
+                _needs_grad(self, x, cond)
+                and rows < _B200_BF16_MIN_ROWS
+                and not self._b200_master_tf32(x, hw)
+                and not self._b200_master_bf16(x, hw)
+            ):
+                return (
+                    f"B200: bf16 training on {rows} rows (< {_B200_BF16_MIN_ROWS}): the sm_100a backward's 128-row tiles leave most SMs idle "
+                    "and the Triton stages are faster there (2026-11-17: ESMFold2 L 4096 S 1 0.195 against 0.174 ms)"
+                )
+            from miniworld_engine.kernels.swa_dit.cuda.sm100 import _has_fa4
+
+            if is_global(self.attn.half_window) and not _needs_grad(self, x, cond) and rows < _B200_FA2_GLOBAL_MIN_ROWS and not _has_fa4():
+                return (
+                    f"B200: bf16 global attention on {rows} rows (< {_B200_FA2_GLOBAL_MIN_ROWS}) without FlashAttention-4: FlashAttention-2 and its varlen setup lose to the "
+                    "Triton stages there (2026-11-16: L 1024 S 5 0.106 against 0.099 ms)"
+                )
+        return None
+
+    def _b200_master_bf16(self, x, hw) -> bool:
+        """master training (bf16 activations, fp32 weights) of window attention on few rows that the bf16 stages serve (round 3 part 8)."""
+        from miniworld_engine.kernels.swa_dit._common import FP32_EPS, is_global
+        from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+        rows = x.shape[0] * x.shape[1]
+        if x.dtype != _BF or rows > _B200_MT_BF16_MAX_ROWS or is_global(hw) or not _B200_WPACK:
+            return False
+        weights = [cast(torch.Tensor, m.weight) for m in self._a100_linears()]
+        return sm100.pack_ok(weights) and sm100.supported(x, weights[-1].shape[1], hw, FP32_EPS)
+
+    def _b200_master_tf32(self, x, hw) -> bool:
+        """master training (bf16 activations, fp32 weights) that the TF32 kernels serve whole: x and c in fp32, the TF32 block, the output
+        back to bf16 (autograd casts the gradients)."""
+        if self._b200_master_bf16(x, hw):
+            return False
+        from miniworld_engine.kernels.swa_dit._common import is_global
+
+        rows = x.shape[0] * x.shape[1]
+        if x.dtype != _BF or rows > _B200_MT_TF32_MAX_ROWS:
+            return False
+        if is_global(hw):
+            if _B200_MT_TF32_GLOBAL and rows >= _B200_MT_TF32_GLOBAL_MIN_ROWS:
+                from miniworld_engine.kernels.swa_dit.cuda.sm100 import native_global_train
+
+                xh = torch.empty((1, 1, 1, 1), device=x.device, dtype=_BF).expand(x.shape[0], 4, x.shape[1], 32)
+                if native_global_train(xh):
+                    weights = [cast(torch.Tensor, m.weight) for m in self._a100_linears()]
+                    xf = torch.empty((1, 1), device=x.device, dtype=_F32).expand(x.shape)
+                    return all(w.dtype == _F32 for w in weights) and self._b200_tf32_train(xf, weights[1:], hw)
+            # else global attention stays on the bf16 path (refused below 5120 rows; part 3: still 1.03 - 1.11 x the H100 at 1024 - 4096
+            # rows). Before part 2, on FlashAttention-4's backward, through the TF32 row stages it measured slower than the H100 below 7168 rows (embedder L 1024 - 6144 1.07 - 1.36 x), one case less accurate than the H100 / triton tokens (L 5120
+            # relu: 1.66 x tol against 1.47 / 1.41) and the embedder's L 8192 gradients not run-to-run deterministic (_tools/det.py)
+            return False
+        weights = [cast(torch.Tensor, m.weight) for m in self._a100_linears()]
+        xf = torch.empty((1, 1), device=x.device, dtype=_F32).expand(x.shape)
+        return all(w.dtype == _F32 for w in weights) and self._b200_tf32_train(xf, weights[1:], hw)
+
+    def _b200_tf32_train(self, x, weights, hw) -> bool:
+        """fp32 training that the TF32 kernels serve whole (fp32 weights; the window path, or global attention with its TF32 row stages):
+        then ``_SWATrainB200`` runs it with the modulation, as the bf16 calls."""
+        from miniworld_engine.kernels.swa_dit import dispatch
+        from miniworld_engine.kernels.swa_dit._common import FP32_EPS, is_global
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
+
+        if x.dtype != _F32 or any(w.dtype != _F32 for w in (*weights, self.adaln_modulation[1].weight)):
+            return False
+        nhid = weights[-1].shape[1]
+        if is_global(hw):
+            return tf32_fwd.supported_tf32_global(x, nhid, hw, FP32_EPS) and dispatch._tf32_ready(x.device, True)
+        return dispatch._tf32(x, nhid, hw, FP32_EPS, True) is not None
+
+    def _b200_mt(self, x: torch.Tensor, c: torch.Tensor, attention_params: tuple, out16: bool, c16=None, dca=None, pmod=None) -> torch.Tensor:
+        """Master training of this block on the TF32 kernels (B200 round 3 part 6): x [N, S, C] bf16 or fp32 and c [.., d_cond] bf16 or
+        fp32 read in place (no fp32 copies), the output in bf16 (``out16``) or fp32 (inside a stack); the gradients in the inputs' dtypes."""
+        cos, sin, seqused = attention_params[:3]
+        cos, sin = cos.reshape(-1, cos.shape[-1]).float().contiguous(), sin.reshape(-1, sin.shape[-1]).float().contiguous()
+        wmod, *weights = (cast(torch.Tensor, m.weight) for m in self._a100_linears())
+        c = c.reshape(-1, c.shape[-1]).contiguous()
+        return _SWATrainB200.apply(
+            x.contiguous(), c, wmod, cos, sin, seqused.contiguous(), *weights, x.shape[0], self.attn.half_window, out16, c16, dca, pmod
+        )
+
+    def _forward_b200(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple, silu: torch.Tensor | None = None) -> torch.Tensor:
+        """``silu``: bf16 inference on many rows from a stack, ``silu(cond)`` [N S, d_cond] bf16 made once for its blocks
+        (``SWAAtomTransformer._forward_cuda``): the modulation is then the cuBLAS GEMM alone (``sm100.mod_fwd``'s many-row branch)."""
+        from miniworld_engine.kernels.swa_dit import dispatch
+        from miniworld_engine.kernels.swa_dit._common import FP32_EPS
+        from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction
+        from miniworld_engine.kernels.swa_dit.cuda import sm100
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
+        from miniworld_engine.kernels.swa_dit.dispatch import eval_form, swa_dit_block_fwd
+
+        n, hw = x.shape[0], self.attn.half_window
+        cos, sin, seqused = attention_params[:3]
+        cos, sin = cos.reshape(-1, cos.shape[-1]).contiguous(), sin.reshape(-1, sin.shape[-1]).contiguous()
+        wmod, *weights = (cast(torch.Tensor, m.weight) for m in self._a100_linears())
+        c = cond.reshape(-1, cond.shape[-1])
+        with torch.autocast("cuda", enabled=False):
+            if _needs_grad(self, x, cond) and self._b200_master_tf32(x, hw):
+                # master training on the TF32 kernels: x / c bf16 read in place, the output written in bf16 (round 3 part 6; were four casts)
+                if not _B200_MT_IO16:
+                    return self._b200_mt(x.float(), c.float(), attention_params, False).to(_BF)
+                return self._b200_mt(x, c if c.dtype in (_BF, _F32) else c.float(), attention_params, True)
+            if _needs_grad(self, x, cond) and (
+                x.dtype == _BF or self._b200_tf32_train(x, weights, hw)
+            ):  # the modulation and the block as one Function
+                return _SWATrainB200.apply(
+                    x.contiguous(), c.to(x.dtype).contiguous(), wmod, cos, sin, seqused.contiguous(), *weights, n, hw
+                )
+            if _needs_grad(self, x, cond):  # the modulation and the block with their backwards (fp32: the TF32 kernels)
+                mod = _SWAModulationB200.apply(c.to(x.dtype).contiguous(), wmod)
+                # one modulation row per sequence row: B = N
+                return SWADiTBlockFunction.apply(x.contiguous(), mod, cos, sin, seqused.contiguous(), *weights, n, hw)
+            if x.dtype == _BF:
+                # the bf16 forms of the (fp32 master) weights once per weight version, views of one buffer with [Wqkv; Wg] adjacent (the
+                # qkvg stage reads that stack as a view: no cat per replay); a capture reads the eager forms
+                wm, *ws = eval_form("swa_b200_bf16p", [wmod, *weights], lambda: sm100.master_pack([wmod, *weights]))  # pyright: ignore[reportCallIssue]  -- tensors of the weight list
+                if silu is None and sm100.supported(x, ws[4].shape[1], hw, FP32_EPS):
+                    # B200 round 3 (2026-11-17): the row kernels make the modulation themselves from c (no modulation launch, no fp32
+                    # [N S, 768] in HBM): the few-tile kernels up to one 32-row tile per SM, the many-tile kernels (qkvg_fwd3 /
+                    # ffn_fwd3) above; the same bits as the path below
+                    return sm100.block_fwd_c(x.contiguous(), c.to(_BF).contiguous(), wm, cos, sin, seqused.contiguous(), *ws, hw)  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
+                mod = torch.mm(silu, wm.t(), out_dtype=torch.float32) if silu is not None else sm100.mod_fwd(c.to(_BF).contiguous(), wm)
+            else:
+                ws = [w.contiguous() for w in weights]
+                if (
+                    c.dtype == _F32
+                    and wmod.dtype == _F32
+                    and tf32_fwd.modf_ok(x, n, hw)
+                    and dispatch._tf32(x, ws[4].shape[1], hw, FP32_EPS, False) is not None
+                ):
+                    # B200 round 3 part 7: the qkvg stage makes shift_a / scale_a from c itself, the modulation kernel runs beside it
+                    # (one launch less on the dependent chain; the same bits)
+                    return tf32_fwd.block_fwd_tf32_c(
+                        x.contiguous(), c.contiguous(), wmod.contiguous(), cos, sin, seqused.contiguous(), *ws, n, hw  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
+                    )
+                mod = tf32_fwd.mod_fwd_tf32(c.contiguous(), wmod.contiguous(), infer=True)
+            return swa_dit_block_fwd(x.contiguous(), mod, cos, sin, seqused.contiguous(), *ws, n, hw, FP32_EPS, False)[0]  # pyright: ignore[reportCallIssue]  -- the weight list unpacked into the launcher's fixed parameters
+
     def _forward_cuda(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         if _a100(x):
             return self._forward_a100(x, cond, attention_params)
+        if b200(x):
+            return self._forward_b200(x, cond, attention_params)
         from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction, SWADiTModulationH100
         from miniworld_engine.kernels.swa_dit.dispatch import bf16_table, native_h100_silu
 
@@ -1660,7 +2295,52 @@ class SWAAtomTransformer(BackendModule):
         "cuda:h100_sm90": 4,
         "triton": 2,
         "cuda:5090_sm120": 7,  # 7 (2026-11-20): fp32 window inference: the out-projection + FFN kernel streams fp16 weight packs (the tf32-rounded values, exact) and takes 32-row tiles past one wave of 16-row tiles (L 2048 S 5: 0.162 -> 0.139 ms; outputs within TF32 sums); 6 (2026-11-20): fp32 window training on chunks of ~24576 rows of whole samples (the stage-to-stage tensors stay in the L2: 48 x 4096 atoms 11.22 -> 10.25 ms; per-row results the same up to TF32 sums)
-    }  # cuda:a100_sm80 7 (2026-11-13): as AtomDiTMiniWorld
+        "cuda:b200_sm100": 31,
+    }  # cuda:b200_sm100 31 (2026-11-19, N7, training) / 30 (inference): the native global attention forward's split build (gattn_fwd.cu CMBS=2) combines the pieces' partials through shared memory, CTA order kept: the same bits, N 1 L 5120 - 7168 -4 .. -7 % of the kernel; cuda:a100_sm80 7 (2026-11-13): as AtomDiTMiniWorld
+    # cuda:b200_sm100 29 (2026-11-18, N2 round, training; training versions are odd): its blocks as AtomDiTMiniWorld 21 (the modulation weight gradient dWmod = dmod^T silu(c) on the cluster dW kernel, dw_tf32.cu DWM build, instead of a cuBLAS GEMM with K = rows; silu(c) made once for the stack; operands truncated by the MMA like the other weight gradients, the same bits run to run)
+    # cuda:b200_sm100 27 (2026-11-18, N1 round 4, training): its global blocks as AtomDiTMiniWorld 19 (the backward's three head casts + dO16 / D in one launch, swa_gprep, launched programmatically; the forward's cast launch triggers the attention at once; the same bits)
+    # cuda:b200_sm100 26 (2026-11-18, r3-swa part 21): its blocks' training as AtomDiTMiniWorld 18 (DXP, DWS; DW_GX also on the global blocks)
+    # cuda:b200_sm100 25 (2026-11-18, r3-swa part 20): its blocks' training as AtomDiTMiniWorld 17 (the same bits)
+    # cuda:b200_sm100 24 (2026-11-18, r3-swa part 19): its blocks' training as AtomDiTMiniWorld 16 (a stack's dc launches through DcAcc.late)
+    # cuda:b200_sm100 23 (2026-11-18, r3-swa part 18): the global attention backward of few items on the cluster split (gattn_bwd.cu CSB: one
+    # item per cluster of 2 - 4 CTAs, query shares, the dK | dV partials reduce-scattered over DSMEM by st.async, summed in rank order)
+    # cuda:b200_sm100 22 (2026-11-18, r3-swa part 17): the global attention forward of few items on the cluster split (gattn_fwd.cu CSPLIT: one
+    # item per cluster of 2 - 8 CTAs, key shares, partial (O, l) reduce-scattered over DSMEM by st.async, summed in rank order)
+    # cuda:b200_sm100 21 (2026-11-18, round 3 part 16): global attention on the TF32 training stages -- the forward on the F32IO attention
+    # build with the native backward's lse save (no q cast, no O16.float() copy; same bits), the backward's head-wise tail and delta with
+    # eight threads per (row, head) (gattn_tf32.cu gtail8 / gdelta8: one sample of 2048 atoms ran them on 32 SMs)
+    # cuda:b200_sm100 20 (2026-11-18, round 3 part 15): as AtomDiTMiniWorld 15; master-training stacks on the TF32 forward: every block's
+    # forms and modulation made ahead on a side stream (_b200_prefetch_tf32), c read in its own dtype
+    # cuda:b200_sm100 19 (2026-11-18, round 3 part 14): as AtomDiTMiniWorld 14; master training stacks: the blocks' weight packs on a side
+    # stream ahead of them, c read in its own dtype, the blocks' dc summed inside their dsilu launches (tf32_bwd.DcAcc, the non-final ones
+    # on a stream of their own; the same bits where x and c differ)
+    # cuda:b200_sm100 18 (2026-11-18, round 3 part 12): as AtomDiTMiniWorld 13
+    # cuda:b200_sm100 17 (2026-11-17, round 3 part 11): as AtomDiTMiniWorld 12 (the few-tile fp32 FFN stage on CTA pairs);
+    # master training of global attention on one sample served from 1024 rows (_B200_MT_TF32_GLOBAL_MIN_ROWS; was 5120)
+    # cuda:b200_sm100 16 (2026-11-17, round 3 part 10): as AtomDiTMiniWorld 11 (multi-lane TMA issue in the fp32 forward stages)
+    # cuda:b200_sm100 15 (2026-11-17, round 3 part 4, swa-global): fp32 global inference of at most 20480 rows on gattn_fwd32 (q read fp32 and O
+    # written fp32 inside the attention kernel: no q cast, no O16.float(); the same bits)
+    # cuda:b200_sm100 14 (2026-11-17, round 3 part 8): as AtomDiTMiniWorld 10 (13 is the swa-global agent's)
+    # cuda:b200_sm100 13 (2026-11-17, round 3 part 3, swa-global): global attention training forward on the native gattn_fwd.cu (was FA4's);
+    # split mode of gattn_fwd / gattn_bwd (an item's key / query range cut across CTAs, fixed-order combine) where whole items leave SMs idle
+    # cuda:b200_sm100 12 (2026-11-17, round 3 part 7): as AtomDiTMiniWorld 9
+    # cuda:b200_sm100 11 (2026-11-17): the merge of 10 (swa-global part 2) and 9 (round 3 part 6) below
+    # cuda:b200_sm100 10 (2026-11-17, round 3 part 2, swa-global): global attention training on a native deterministic tcgen05 backward
+    # (gattn_bwd.cu: key-pair items, dQ added in a fixed rotated order through per-block counters) in place of FlashAttention-4's; the
+    # training forward stays FA4's (its max-subtracted P keeps the gradients GREEN); fp32 inference without the zero fill of O
+    # cuda:b200_sm100 11 (2026-11-17, round 3 part 6): as AtomDiTMiniWorld 8; a master stack reads q in bf16 in its first block and writes
+    # the bf16 output from its last (c in fp32 once, as before)
+    # cuda:b200_sm100 8 (2026-11-17, round 3 part 5): as AtomDiTMiniWorld 7; a stack casts q and c to fp32 once for its blocks
+    # cuda:b200_sm100 7 (2026-11-17, round 3 part 4): as AtomDiTMiniWorld 6 (float32 training of few tiles: shorter dependent chain)
+    # cuda:b200_sm100 6 (2026-11-17, round 3, swa-global): global attention's forward on the native tcgen05 kernel (gattn_fwd.cu: no running
+    # maximum -- the qk RMSNorm bounds the logits --, merged commits) in place of FlashAttention-4's for inference (training keeps FA4's
+    # forward and backward); O no longer zeroed first there
+    # cuda:b200_sm100 5 (2026-11-17, round 3): as AtomDiTMiniWorld 5 (many-tile inference blocks with the modulation inside; no shared silu(c) launch)
+    # cuda:b200_sm100 4 (2026-11-17, round 3): as AtomDiTMiniWorld 4 (few-tile inference blocks; a stack in that range makes no silu(c) of its own)
+    # cuda:b200_sm100 3 (2026-11-17, round 3): as AtomDiTMiniWorld 3; bf16 inference stacks on >= 4096 rows make silu(c) once
+    # cuda:b200_sm100 1 (2026-11-16): as AtomDiTMiniWorld (every block on the sm_100a stages)
+    # cuda:b200_sm100 2 (2026-11-17): as AtomDiTMiniWorld 2
+    # cuda:a100_sm80 7 (2026-11-13): as AtomDiTMiniWorld
     # cuda:5090_sm120 4 (3.0.5): as AtomDiTMiniWorld (bf16 training backward kernels)
     # cuda:h100_sm90 4 (3.0.1): as AtomDiTMiniWorld (bf16 training modulation table)
 
@@ -1748,6 +2428,75 @@ class SWAAtomTransformer(BackendModule):
             for block in blocks:
                 q = block._h100_eval(q, a, cos, sin, seqused)
             return q
+        if (
+            len(blocks) > 1
+            and b200(q)
+            and q.dtype == _BF
+            and self.config.n_checkpoint_segments is None
+            and not (torch.is_grad_enabled() and (q.requires_grad or c.requires_grad or any(p.requires_grad for p in self.parameters())))
+        ):
+            from miniworld_engine.kernels.swa_dit._common import FP32_EPS
+            from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+            b0 = blocks[0]
+            in_kernel = sm100.supported(q, cast(torch.Tensor, b0._a100_linears()[-1].weight).shape[1], b0.attn.half_window, FP32_EPS)
+            if q.shape[0] * q.shape[1] >= sm100.MOD_FWD_CUBLAS_ROWS and not in_kernel:
+                # (the blocks' own range -- d_atom 128, hidden 256, window 64 or global -- makes the modulation inside the row kernels)
+                # B200 bf16 inference on many rows (2026-11-17, round 3): every block is conditioned on the same c and its modulation is
+                # silu(c) Wmod^T on cuBLAS there, so silu(c) is made once for the stack (as the H100 stack does)
+                with torch.autocast("cuda", enabled=False):
+                    a = F.silu(c.reshape(-1, c.shape[-1]).to(_BF).contiguous())
+                for block in blocks:
+                    q = block._forward_b200(q, c, attention_params, silu=a)
+                return q
+        if (
+            len(blocks) > 1
+            and b200(q)
+            and self.config.n_checkpoint_segments is None
+            and _needs_grad(self, q, c)
+            and blocks[0]._b200_master_tf32(q, blocks[0].attn.half_window)
+        ):
+            # master training on the TF32 kernels: c in fp32 once for the stack (its gradient sums over the blocks in fp32), q read in
+            # place as bf16 by the first block, fp32 between the blocks, the last block's output written in bf16 (round 3 part 6: were a
+            # cast of q and of the output each way)
+            with torch.autocast("cuda", enabled=False):
+                from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+
+                cos, sin, *rest = attention_params
+                params = (cos.float(), sin.float(), *rest)
+                # round 3 part 14: on the bf16-forward / TF32-backward route the blocks' weight forms are made on a side stream ahead of
+                # the blocks (per weight version: an eager step after the first makes none), c is read in its own dtype (no fp32 copy:
+                # the forward reads c16, the backward's silu / dsilu read c as it is), and the blocks' dc are summed inside their dsilu
+                # launches (tf32_bwd.DcAcc; with q and c one tensor -- the embedder -- also with the first block's dq): no autograd adds
+                evs = _b200_prefetch_hybrid(blocks, q) if _B200_MT_IO16 and _B200_STACK_GLUE else None
+                qx = q.contiguous()
+                c16 = c.reshape(-1, c.shape[-1]).to(_BF).contiguous() if _B200_MT_HYBRID and q.dtype == _BF else None
+                pre = None
+                if evs is None and _B200_MT_IO16 and _B200_STACK_GLUE and c.dtype in (_BF, _F32):
+                    # round 3 part 15: the TF32 forward route -- c read in its own dtype as on the hybrid route (the modulation kernel and
+                    # the backward's silu / dsilu read bf16 c in place), every block's forms and modulation made ahead on a side stream
+                    pre = _b200_prefetch_tf32(blocks, q, c.reshape(-1, c.shape[-1]).contiguous())
+                cf = c if (evs is not None or pre is not None) and c.dtype in (_BF, _F32) else c.float()
+                cf = cf.contiguous()
+                if pre is not None:
+                    mods, evs = pre
+                dca = tf32_bwd.DcAcc(len(blocks), cf.dtype, q is c) if _B200_STACK_GLUE else None
+                if not _B200_MT_IO16:
+                    qx = qx.float()
+                for i, block in enumerate(blocks):
+                    _b200_wait(evs, i)
+                    qx = cast(AtomDiTMiniWorld, block)._b200_mt(
+                        qx,
+                        cf,
+                        params,
+                        _B200_MT_IO16 and i == len(blocks) - 1,
+                        c16,
+                        (dca, i) if dca is not None else None,
+                        mods[i] if pre is not None else None,
+                    )
+                if pre is not None:
+                    _b200_wait(evs, len(blocks))  # the backward's weight forms (made last on the side stream)
+                return qx.to(_BF)
         return self._forward_pytorch(q, c, attention_params, c_base)  # the blocks run their own backend
 
     def _forward_anthropic(self, q, c, attention_params, c_base=None):
@@ -1894,8 +2643,28 @@ class AtomDiTESMFold2Pair(BackendModule):
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     backends = ("pytorch", "triton", "cuda")
+    # cuda:5090_sm120 1 (2026-11-12): the sm_80 paths built for sm_120a (bias tile / band read from global memory)
+    # cuda:b200_sm100 1 (2026-11-16): the sm_80 paths built for sm_100a (kernels/_sm120.building_sm100)
+    # cuda:b200_sm100 2 (2026-11-17): inference on the tcgen05 ESMFold2 block of origin/b200/ladder-final (kernels/integrations/local_dit_esm_b200:
+    # the RMS row kernels of b200_atom, the rank-window attention / q-k norm / pair bias of b200_atom_local/esm.py; bf16 / master and fp32), its
+    # packs read by a capture from the eager warm-up (no cast kernels per replay); training keeps the sm_80 path
+    # cuda:b200_sm100 3 (2026-11-17, round 3): bf16 inference: the transition's residual update with one rounding (post_fwd -DRES3:
+    # master eval 18 / 12 -> 27 / 3 GREEN / YELLOW, worst e / tol 1.13 -> 1.03)
+    # cuda:b200_sm100 4 (2026-11-17, round 3 part 4, r3-local-dit): ESMFold2's pair bias by position (lesm.cu local_esm_bias) at eight CTAs
+    # an SM (<= 32 registers; it took 99 and ran two an SM) with its key-mask byte and pair row loaded independently; bf16 inference: the q / k
+    # RMSNorm + rotary inside the projection kernel (pre_fwd -DQKROPE: one launch fewer)
+    # cuda:b200_sm100 5 (2026-11-17, round 3 part 5, r3-local-dit): fp32 inference: the fused TF32 kernels in quarter units at few tiles
+    # (as AtomDiTProtenix 7; same outputs bit for bit)
+    # cuda:b200_sm100 6 (2026-11-17, round 3 part 6, r3-local-dit): fp32 inference: atom_post_tf32 -DRMS on CTA pairs at <= 2304 rows
+    # (as AtomDiTProtenix 8; 1024 atoms 55.3 -> 53.2 us)
+    # cuda:b200_sm100 20 (2026-11-17, round 3 part 7, r3-local-dit; numbered from 20 by the restart brief): training on the tcgen05
+    # ESMFold2 block (local_dit_esm_b200 _EsmBlock / _EsmBlock32; it ran the sm_80 path): the AdaLNs with raw scale tables forward and backward (-DRAWSC), the packs in one launch
+    # (esm_pack.cu), q / k norm + rotary in the projection kernel (-DQKSAVE), side-stream forks at <= 4096 rows
+    # cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the fused TF32 kernels issue their TMA loads from several lanes
+    # (the fp32 weights also before the grid-dependency wait; the same bits)
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:5090_sm120": 1
+        "cuda:5090_sm120": 1,
+        "cuda:b200_sm100": 29,
     }  # 2026-11-12: the sm_80 paths built for sm_120a (bias tile / band read from global memory)
 
     def __init__(
@@ -2018,9 +2787,15 @@ class AtomDiTESMFold2Pair(BackendModule):
     def _supports_cuda(self, single, cond, pair, mask=None, rope=None) -> str | None:
         from miniworld_engine.kernels.integrations import local_dit_esm
 
-        return local_dit_esm.reason(self, single, cond, pair, mask, rope)
+        return local_dit_esm.reason(self, single, cond, pair, mask, rope)  # (the B200's tcgen05 block has the same contract)
 
     def _forward_cuda(self, single, cond, pair, mask=None, rope=None):
+        if b200(single):  # the B200: the tcgen05 ESMFold2 block for the calls it takes (inference and training), else the sm_80 path below
+            from miniworld_engine.kernels.integrations import local_dit_esm_b200
+
+            if local_dit_esm_b200.reason(self, single, cond, pair, mask, rope) is None:
+                with torch.autocast("cuda", enabled=False):  # the kernels run on packs of their own
+                    return local_dit_esm_b200.run_block(self, single, cond, pair, mask, rope)
         from miniworld_engine.kernels.integrations import local_dit_esm
 
         # the kernels' precision is their own (bf16 operands, or TF32 for fp32): an enclosing autocast must not recast their torch glue

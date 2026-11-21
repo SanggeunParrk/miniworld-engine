@@ -1,0 +1,26 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-base/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu	2026-11-18 17:59:29.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-trimul/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu	2026-11-18 19:11:45.000000000 +0000
+@@ -49,6 +49,9 @@
+ #ifndef K1W_XKEEP
+ #define K1W_XKEEP 24   // x stays in L2 for k3g / the backward (no evict-first hint) while it is at most this many MB
+ #endif
++#ifndef K1W_WPF
++#define K1W_WPF 0   // 1: L2 prefetch of the weight groups at entry (see k1w_kernel)
++#endif
+ #ifndef K1W_TRIG
+ #define K1W_TRIG 1   // launch_dependents at entry: the inference contraction (ctr.cu, a programmatic dependent) schedules its CTAs as k1w's retire
+ #endif
+@@ -189,6 +192,13 @@
+   }
+   if (K1W_TRIG) pdl_trigger();
+   if (tid == 0) TL(0)
++#if K1W_WPF
++  // (n2) the grouped packed weights (inference) are cold in L2 after a flush: every CTA prefetches one group at entry (the 128 CTAs together cover the matrix), so the
++  // per-CTA weight streams below hit L2
++  if (gw > 1 && tid == 96 && cta < NCH * (KB / gw))
++    asm volatile("cp.async.bulk.prefetch.tensor.3d.L2.global.tile [%0, {%1, %2, %3}];" :: "l"(reinterpret_cast<uint64_t>(&mw.m[2])), "r"(0),
++                 "r"(2 * (cta / (KB / gw)) * 64), "r"((cta % (KB / gw)) * gw) : "memory");
++#endif
+ 
+   if (tid == 0) {
+     for (int s = 0; s < NWS; ++s) { mbar_init(&B.w_full[s], 1); mbar_init(&B.w_empty[s], gw); }   // gw: K-blocks a weight op delivers (S90)

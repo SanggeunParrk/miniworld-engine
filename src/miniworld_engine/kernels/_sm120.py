@@ -54,36 +54,58 @@ def building_sm120() -> bool:
     return torch.cuda.is_available() and is_sm120()
 
 
-def _retarget(flags: list[Any]) -> list[Any]:
+def building_sm100() -> bool:
+    """Whether sm_80 builders compile for sm_100a now (the B200, card ``b200_sm100``): ``MINIWORLD_ENGINE_BUILD_ARCH=sm100`` if set, else
+    the current device is capability 10.0. The A100 sources run unchanged on sm_100a (``mma.sync`` / ``ldmatrix`` / ``cp.async`` and
+    the 227 KB shared memory of the H100); the extension name gets ``_sm100`` and ``-DMWE_SM100`` is defined. Nothing else changes."""
+    forced = os.environ.get(ENV, "").lower().removeprefix("sm").removeprefix("_").rstrip("a")
+    if forced:
+        return forced == "100"
+    return torch.cuda.is_available() and _capability(torch.cuda.current_device()) == (10, 0)
+
+
+def _target() -> str | None:
+    """The arch an sm_80 builder retargets to now: "120a" (RTX 5090), "100a" (B200) or None (the sm_80 build itself)."""
+    if building_sm120():
+        return "120a"
+    if building_sm100():
+        return "100a"
+    return None
+
+
+def _retarget(flags: list[Any], arch: str = "120a") -> list[Any]:
     from miniworld_engine.kernels._codegraph import GENCODE_MARKER, PTX_MARKER
 
     out: list[Any] = []
     for f in flags:
         s = str(f)
         if s == _SM80:
-            out.append(_SM120)
+            out.append(f"-gencode=arch=compute_{arch},code=sm_{arch}")
         elif s == "-arch=sm_80":
-            out.append("-arch=sm_120a")
+            out.append(f"-arch=sm_{arch}")
         elif s == f"{GENCODE_MARKER}80":
-            out.append(f"{GENCODE_MARKER}120a")
+            out.append(f"{GENCODE_MARKER}{arch}")
         elif s.startswith(PTX_MARKER):
             continue
         else:
             out.append(f)
-    return [*out, "-DMWE_SM120"]
+    return [*out, f"-DMWE_SM{arch.rstrip('a')}"]
 
 
 def sm80_load_extension(name: str, sources: list[str], **kwargs: Any) -> Any:
-    """``_nvcc.load_extension`` of an sm_80 extension, built for sm_120a as ``<name>_sm120`` when :func:`building_sm120`."""
-    if building_sm120():
+    """``_nvcc.load_extension`` of an sm_80 extension, built for sm_120a as ``<name>_sm120`` when :func:`building_sm120` (for sm_100a as
+    ``<name>_sm100`` when :func:`building_sm100`)."""
+    arch = _target()
+    if arch is not None:
         kwargs = dict(kwargs)
-        kwargs["extra_cuda_cflags"] = _retarget(list(kwargs.get("extra_cuda_cflags") or []))
-        name = f"{name}_sm120"
+        kwargs["extra_cuda_cflags"] = _retarget(list(kwargs.get("extra_cuda_cflags") or []), arch)
+        name = f"{name}_sm{arch.rstrip('a')}"
     return _nvcc.load_extension(name, sources, **kwargs)
 
 
 def sm80_cubin_flags(flags: list[str]) -> tuple[str, list[str]]:
     """(stem suffix, flags) of an sm_80 ``_nvcc.cubin`` build, retargeted like :func:`sm80_load_extension`."""
-    if building_sm120():
-        return "_sm120", [str(f) for f in _retarget(flags)]
+    arch = _target()
+    if arch is not None:
+        return f"_sm{arch.rstrip('a')}", [str(f) for f in _retarget(flags, arch)]
     return "", flags

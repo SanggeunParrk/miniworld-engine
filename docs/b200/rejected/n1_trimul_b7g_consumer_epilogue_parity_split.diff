@@ -1,0 +1,202 @@
+--- n1-trimul/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7g.cu	2026-11-18 17:40:15.000000000 +0000
++++ n1-trimul-x/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7g.cu	2026-11-18 17:03:10.000000000 +0000
+@@ -45,8 +45,8 @@
+ #ifndef B7_SPLIT_MINL
+ #define B7_SPLIT_MINL 256
+ #endif
+-#ifndef B7_SPLIT_MAXL
+-#define B7_SPLIT_MAXL 512
++#ifndef B7_CSPLIT
++#define B7_CSPLIT 0   // 1: consumer epilogue split by tile parity (experiment)
+ #endif
+ #ifndef B7_ABL
+ #define B7_ABL 0   // timing ablations (wrong results): 1 no W1 loads, 2 no dgp loads, 4 no consumer MMA, 8 no dx store, 16 no source EW math, 32 no ring store, 64 no consumer output pass, 128 no consumer c1c2 pass
+@@ -80,7 +80,7 @@
+   // source
+   uint64_t w_full, x_full[NX], x_free[NX], da_full[2], da_free[2], pre_full[2], pre_free[2], dgp_ready[2], dgp_free[2];
+   // consumer
+-  uint64_t st_full[NST], st_empty[NST], acc_full[2], acc_empty[2], cx_full[2], cx_free[2], dy_full, dy_free, fready[2][8], fdone[2],
++  uint64_t st_full[NST], st_empty[NST], acc_full[2], acc_empty[2], cx_full[2], cx_free[2], dy_full, dy_free, dy_done[2], fready[2][8], fdone[2],
+       landed[2][2], retdone[2];
+   uint32_t tmem;
+ };
+@@ -208,12 +208,12 @@
+     for (int b = 0; b < 2; ++b) {
+       mbar_init(&B.da_full[b], 1); mbar_init(&B.da_free[b], SPLIT ? 4 : 8);
+       mbar_init(&B.pre_full[b], 1); mbar_init(&B.pre_free[b], SPLIT ? 4 : 8); mbar_init(&B.dgp_ready[b], 1); mbar_init(&B.dgp_free[b], 2);
+-      mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], 8);
++      mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], B7_CSPLIT ? 4 : 8);
+     }
+     for (int b = 0; b < NX; ++b) { mbar_init(&B.x_full[b], 1); mbar_init(&B.x_free[b], 1); }
+     for (int b = 0; b < NST; ++b) { mbar_init(&B.st_full[b], 1); mbar_init(&B.st_empty[b], a.pair ? 2 : 1); }   // consumer pairs: both CTAs' MMAs release a stage
+     for (int b = 0; b < 2; ++b) { mbar_init(&B.cx_full[b], 1); mbar_init(&B.cx_free[b], 1); }
+-    mbar_init(&B.dy_full, 1); mbar_init(&B.dy_free, 1);
++    mbar_init(&B.dy_full, 1); mbar_init(&B.dy_free, 1); mbar_init(&B.dy_done[0], 1); mbar_init(&B.dy_done[1], 1);
+     for (int b = 0; b < 2; ++b) {
+       mbar_init(&B.fdone[b], 1);
+       for (int c = 0; c < 8; ++c) mbar_init(&B.fready[b][c], 1);
+@@ -734,6 +734,155 @@
+           mbar_arrive(&B.retdone[fb]);
+         }
+       }
++    } else if (B7_CSPLIT && warp >= 4) {
++      // B7_CSPLIT: the consumer epilogue split by tile parity: warps 4-7 take the even tiles, warps 8-11 the odd tiles; one thread per
++      // row, all 128 columns (no half-row exchange, 128-thread named barriers); the dy tile is still one buffer, so the output passes of
++      // consecutive tiles run one after the other while the statistics and c1 / c2 passes of the other tile overlap them.
++      const int q = warp & 3, grp = (warp - 4) >> 2, r = q * 32 + lane, et = tid - 128 - 128 * grp;   // et 0..127 within the group
++      float agi[8], abi[8];
++#pragma unroll
++      for (int m = 0; m < 8; ++m) { agi[m] = abi[m] = 0.f; }
++      const uint32_t gbase = su + O_GI;
++      for (int jj = grp; jj < n_local; jj += 2) {
++        const int t = tile_of(jj), row0 = t * TOK, acc = jj & 1, xb = jj & 1;
++        const uint32_t xrow = su + C_X + xb * XT, yrow = su + C_DY;
++        auto xa = [&](int ch) { return xrow + (ch >> 3) * (XT / 2) + sw128(r, ch & 7); };
++        auto ya = [&](int ch) { return yrow + (ch >> 3) * (XT / 2) + sw128(r, ch & 7); };
++        mbar_wait(&B.cx_full[xb], (jj >> 1) & 1);
++        uint32_t xs[64];
++#pragma unroll
++        for (int ch = 0; ch < 16; ++ch) {
++          const uint4 v = lds128(xa(ch));
++          xs[4 * ch] = v.x; xs[4 * ch + 1] = v.y; xs[4 * ch + 2] = v.z; xs[4 * ch + 3] = v.w;
++        }
++        float mean, rstd;
++        {   // input-LN statistics: one pass over the whole row about its first element (pivot)
++          const float pv = __uint_as_float(xs[0] << 16);
++          const float2 np2 = make_float2(-pv, -pv);
++          float2 s1a = make_float2(0.f, 0.f), s1b = s1a, s2a = s1a, s2b = s1a;
++#pragma unroll
++          for (int w = 0; w < 64; w += 2) {
++            const float2 d0 = __fadd2_rn(up(xs[w]), np2), d1 = __fadd2_rn(up(xs[w + 1]), np2);
++            s1a = __fadd2_rn(s1a, d0); s2a = __ffma2_rn(d0, d0, s2a);
++            s1b = __fadd2_rn(s1b, d1); s2b = __ffma2_rn(d1, d1, s2b);
++          }
++          const float2 s1 = __fadd2_rn(s1a, s1b), s2 = __fadd2_rn(s2a, s2b);
++          const float m1 = __fmul_rn(__fadd_rn(s1.x, s1.y), 1.f / C);
++          mean = __fadd_rn(pv, m1);
++          const float var = fmaxf(__fmaf_rn(-m1, m1, __fmul_rn(__fadd_rn(s2.x, s2.y), 1.f / C)), 0.f);
++          rstd = rsqrt_ftz(__fadd_rn(var, a.eps));
++        }
++        const float2 nmean = make_float2(-mean, -mean), rs2 = make_float2(rstd, rstd);
++        mbar_wait(&B.acc_full[acc], (jj >> 1) & 1);
++        tc_fence_after();
++        const uint32_t trow = tmem + T_ACC + acc * 128 + ((uint32_t)(q * 32) << 16);
++        float c1, c2;
++        {
++          float2 c1a[2] = {make_float2(0.f, 0.f), make_float2(0.f, 0.f)}, c2a[2] = {make_float2(0.f, 0.f), make_float2(0.f, 0.f)};
++#pragma unroll
++          for (int h32 = 0; h32 < 4; ++h32) {
++            uint32_t dv[32];
++            tmem_ld32(trow + 32 * h32, dv);
++            tmem_wait_ld();
++#pragma unroll
++            for (int c4 = 0; c4 < 4; ++c4) {
++              const int ch = 4 * h32 + c4;
++              const float4 g0 = lds128f(gbase + 32 * ch), g1 = lds128f(gbase + 32 * ch + 16);
++              const float2 gw[4] = {make_float2(g0.x, g0.y), make_float2(g0.z, g0.w), make_float2(g1.x, g1.y), make_float2(g1.z, g1.w)};
++#pragma unroll
++              for (int e = 0; e < 4; ++e) {
++                const int w = 4 * ch + e;
++                const float2 d = up(pack_bf16(__uint_as_float(dv[8 * c4 + 2 * e]), __uint_as_float(dv[8 * c4 + 2 * e + 1])));
++                const float2 xh = __fmul2_rn(__fadd2_rn(up(xs[w]), nmean), rs2);
++                const float2 dg = __fmul2_rn(d, gw[e]);
++                c1a[e & 1] = __ffma2_rn(dg, xh, c1a[e & 1]);
++                c2a[e & 1] = __fadd2_rn(c2a[e & 1], dg);
++              }
++            }
++          }
++          const float2 c1s = __fadd2_rn(c1a[0], c1a[1]), c2s = __fadd2_rn(c2a[0], c2a[1]);
++          c1 = __fmul_rn(__fadd_rn(c1s.x, c1s.y), 1.f / C); c2 = __fmul_rn(__fadd_rn(c2s.x, c2s.y), 1.f / C);
++        }
++        const float2 c1b = make_float2(c1, c1), c2b = make_float2(c2, c2);
++        if (jj >= 1) mbar_wait(&B.dy_done[(jj - 1) & 1], ((jj - 1) >> 1) & 1);   // the previous tile's output pass has left the dy tile
++        mbar_wait(&B.dy_full, jj & 1);
++#pragma unroll
++        for (int hq = 0; hq < 8; ++hq) {
++          float2 pg[8], pb[8];
++          uint32_t dv[16];
++          tmem_ld16(trow + 16 * hq, dv);
++          tmem_wait_ld();
++          if (hq == 7) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.acc_empty[acc]); }
++#pragma unroll
++          for (int h2 = 0; h2 < 2; ++h2) {
++            const int ch = 2 * hq + h2;
++            const uint4 yv = lds128(ya(ch));
++            const float4 g0 = lds128f(gbase + 32 * ch), g1 = lds128f(gbase + 32 * ch + 16);
++            const float2 gw[4] = {make_float2(g0.x, g0.y), make_float2(g0.z, g0.w), make_float2(g1.x, g1.y), make_float2(g1.z, g1.w)};
++            const uint32_t ys[4] = {yv.x, yv.y, yv.z, yv.w};
++            uint32_t o[4];
++#pragma unroll
++            for (int e = 0; e < 4; ++e) {
++              const int w = 4 * ch + e;
++              const float2 d = up(pack_bf16(__uint_as_float(dv[8 * h2 + 2 * e]), __uint_as_float(dv[8 * h2 + 2 * e + 1])));
++              const float2 xh = __fmul2_rn(__fadd2_rn(up(xs[w]), nmean), rs2);
++              const float2 u = __fadd2_rn(__fmul2_rn(xh, c1b), c2b);
++              const float2 v = __fadd2_rn(__fmul2_rn(d, gw[e]), make_float2(-u.x, -u.y));
++              const uint32_t lw = pack_bf16(__fmul_rn(rstd, v.x), __fmul_rn(rstd, v.y));
++              const float2 tt = __fadd2_rn(up(lw), up(ys[e]));
++              o[e] = pack_bf16(tt.x, tt.y);
++              pg[4 * h2 + e] = __fmul2_rn(d, xh); pb[4 * h2 + e] = d;
++            }
++            sts128(xa(ch), o[0], o[1], o[2], o[3]);
++          }
++#pragma unroll
++          for (int st = 0, msk = 16, nh = 4; st < 3; ++st, msk >>= 1, nh >>= 1) {
++            const bool hi = (lane & msk) != 0;
++#pragma unroll
++            for (int kk = 0; kk < 4; ++kk) {
++              if (kk < nh) {
++                const float2 sg_ = hi ? pg[kk] : pg[kk + nh], kg = hi ? pg[kk + nh] : pg[kk];
++                const float2 sb_ = hi ? pb[kk] : pb[kk + nh], kb = hi ? pb[kk + nh] : pb[kk];
++                pg[kk] = __fadd2_rn(kg, make_float2(__shfl_xor_sync(0xffffffffu, sg_.x, msk), __shfl_xor_sync(0xffffffffu, sg_.y, msk)));
++                pb[kk] = __fadd2_rn(kb, make_float2(__shfl_xor_sync(0xffffffffu, sb_.x, msk), __shfl_xor_sync(0xffffffffu, sb_.y, msk)));
++              }
++            }
++          }
++          {
++            const bool hi = (lane & 2) != 0;
++            float g_ = hi ? pg[0].x : pg[0].y, kg = hi ? pg[0].y : pg[0].x;
++            float b_ = hi ? pb[0].x : pb[0].y, kb = hi ? pb[0].y : pb[0].x;
++            kg += __shfl_xor_sync(0xffffffffu, g_, 2); kb += __shfl_xor_sync(0xffffffffu, b_, 2);
++            kg += __shfl_xor_sync(0xffffffffu, kg, 1); kb += __shfl_xor_sync(0xffffffffu, kb, 1);
++            agi[hq] += kg; abi[hq] += kb;
++          }
++        }
++        fence_async_smem();
++        named_bar_sync(4 + grp, 128);
++        if (et == 0) {
++          mbar_arrive(&B.dy_free); mbar_arrive(&B.dy_done[jj & 1]);
++          tma_store_2d(&mdx, sm + C_X + xb * XT, 0, row0);
++          tma_store_2d(&mdx, sm + C_X + xb * XT + XT / 2, 64, row0);
++          bulk_commit();
++          bulk_wait_read<0>();
++          mbar_arrive(&B.cx_free[xb]);                      // this tile's dx has left its x buffer
++        }
++      }
++      if (et == 0) bulk_wait<0>();
++      // dgi / dbi: the 8 (group, row quarter) column sums combined in a fixed order (the stage ring is drained), one row per CTA
++      named_bar_sync(2, 256);                             // both groups done: every MMA has read the stage ring
++      float* xsm = reinterpret_cast<float*>(sm + C_ST);
++      const int wi = grp * 4 + q;
++      if ((lane & 1) == 0) {
++#pragma unroll
++        for (int h = 0; h < 8; ++h) {
++          const int col = 16 * h + 2 * (lane >> 2) + ((lane >> 1) & 1);
++          xsm[wi * 256 + col] = agi[h]; xsm[wi * 256 + 128 + col] = abi[h];
++        }
++      }
++      named_bar_sync(2, 256);
++      const int e2 = tid - 128;
++      a.lnpart[(size_t)k * 256 + e2] = ((((((xsm[e2] + xsm[256 + e2]) + xsm[512 + e2]) + xsm[768 + e2]) + xsm[1024 + e2]) + xsm[1280 + e2]) + xsm[1536 + e2]) + xsm[1792 + e2];
+     } else if (warp >= 4) {
+       // LN backward + residual: row r = 32 (warp % 4) + lane, column half hc = 64 columns; the two halves of a row exchange
+       // their partial sums through shared memory. The x half row is read from shared memory once per tile into registers (packed
+@@ -997,7 +1146,7 @@
+     C10_CUDA_CHECK(cudaLaunchKernelExC(&cfg, fn, params));
+   };
+   static bool attr4 = false, attr8 = false, attr4s = false, attr8s = false;
+-  const bool sp = B7_SPLIT && L >= B7_SPLIT_MINL && L <= B7_SPLIT_MAXL && (L & 255) == 0;   // sustained step (power cap): L256 / L512 gain, L384 / L768 / L1024 +0.2 %
++  const bool sp = B7_SPLIT && L >= B7_SPLIT_MINL;
+   if (NCH == 4) { if (sp) launch((const void*)b7g_kernel<4, 1>, attr4s); else launch((const void*)b7g_kernel<4, 0>, attr4); }
+   else { if (sp) launch((const void*)b7g_kernel<8, 1>, attr8s); else launch((const void*)b7g_kernel<8, 0>, attr8); }
+ }

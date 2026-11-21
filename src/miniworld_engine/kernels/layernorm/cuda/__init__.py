@@ -11,6 +11,10 @@ def prebuild(target, rows):
         if any(row["module"] in ("LayerNorm", "RMSNorm") for row in rows):
             yield sm80.ext_sm80 if target.arch == "sm80" else sm80.ext_sm120
         return
+    if target.arch == "sm100" and any(row["module"] in ("LayerNorm", "RMSNorm", "InputFeatureEmbedder") for row in rows):
+        from . import sm100  # B200: the sub-warp row kernels (sm100/ln_rows_sm100.cu), sm_100a only
+
+        yield sm100._ext
     from . import general, pipe
 
     if any(

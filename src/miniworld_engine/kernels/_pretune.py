@@ -569,7 +569,7 @@ class Pretuner:
     def configured(self, k, gpu, key, named, kwargs, every, launch, time_one):
         import torch
 
-        from miniworld_engine.kernels._launch_config import _cfg
+        from miniworld_engine.kernels._launch_config import _cfg, untracked
 
         if self._skip():
             return None
@@ -618,12 +618,12 @@ class Pretuner:
             s, r = snap, saved  # (locals: closure variables are not narrowed; both are dropped below)
             if s is not None:
                 for n, t in s.items():
-                    tensors[n].copy_(t)
+                    untracked(tensors[n].copy_, tensors[n], t)  # (no version bump: the step's autograd may hold it)
             elif r is not None:
                 for n in k.reset_to_zero:
-                    every[n].zero_()
+                    untracked(every[n].zero_, every[n])
                 for n, t in r.items():
-                    every[n].copy_(t)
+                    untracked(every[n].copy_, every[n], t)
 
         # compile every candidate first, in parallel threads (ptxas runs as a subprocess); errors surface again at the launch
         todo = [c for c in cands if _ident(_from_triton(c)) not in crashed]

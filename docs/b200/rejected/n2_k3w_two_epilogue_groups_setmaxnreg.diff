@@ -1,0 +1,217 @@
+--- /tmp/k3w_pre_eg2.cu	2026-11-19 04:25:20.396648315 +0900
++++ /tmp/claude-1002/-home-psk6950-practice-MiniWorld/b70277b8-ff66-5282-bcae-5530314a7edb/scratchpad/n2/trimul_inproj/cuda/b200_sources/k3w.cu	2026-11-19 04:42:24.755479709 +0900
+@@ -64,6 +64,9 @@
+ // this CTA (the grouped schedule) copy the previous item's statistics and leave their stages unread.
+ constexpr int NSTW = 4, NTHR_OST = NTHR + 32 * NSTW;
+ constexpr int xm_of(int d, int h) { return K3W_GREG ? 0 : (d == 256 ? (h == 256 ? K3W_X2_256 : K3W_X2_256B) : (d == 384 ? K3W_X2_384 : (d == 512 ? K3W_X2_512 : 0))); }
++// mode 3 = mode 1 plus two epilogue warp groups (EPW warps each): the items of a CTA alternate between the groups, so two items' epilogues run at once
++constexpr int xthr(int xm, int ost) { return 128 + 32 * EPW * (xm == 3 ? 2 : 1) + (ost ? 32 * NSTW : 0); }
++constexpr bool xm_two_tiles(int xm) { return xm == 1 || xm == 3; }
+ constexpr int TOK = 128, NTILE = 128, KBB = 16384, STAGE = 2 * KBB;
+ 
+ // the k-th item of CTA c: grouped = token tile c + (k / NTL) G, all NTL channel items of it in a row; else item c + k G
+@@ -81,10 +84,10 @@
+ // the stage ring shrinks from 5 to 3 to make room.
+ template <int SAVE, int OST = 0, int X2 = 0>
+ struct Lay {
+-  static constexpr int NST = SAVE ? 3 : (X2 == 1 ? 4 : 5);   // X2 1: two residual / output tiles instead of one: one stage less
+-  static constexpr int O_ST = 0, O_XR = O_ST + NST * STAGE, O_PS = O_XR + (X2 == 1 ? 4 : 2) * KBB, O_GS = O_PS + (SAVE ? 2 * KBB : 0),
++  static constexpr int NST = SAVE ? 3 : (xm_two_tiles(X2) ? 4 : 5);   // X2 1 / 3: two residual / output tiles instead of one: one stage less
++  static constexpr int O_ST = 0, O_XR = O_ST + NST * STAGE, O_PS = O_XR + (xm_two_tiles(X2) ? 4 : 2) * KBB, O_GS = O_PS + (SAVE ? 2 * KBB : 0),
+                        O_VEC = O_GS + (SAVE ? 2 * KBB : 0),
+-                       O_SP = O_VEC + (X2 ? 2 : 1) * 4 * NTILE * 4,  // OST: [NSTW warps][2 (mean, M2)][TOK] partials
++                       O_SP = O_VEC + (X2 == 3 ? 4 : (X2 ? 2 : 1)) * 4 * NTILE * 4,  // OST: [NSTW warps][2 (mean, M2)][TOK] partials
+                        O_SB = O_SP + (OST ? NSTW * 2 * TOK * 4 : 0), // OST: [2 items][2 (mu, rs)][TOK]
+                        O_BAR = O_SB + (OST ? 2 * 2 * TOK * 4 : 0);
+   static constexpr int SMEM = O_BAR + 256 + 1024;
+@@ -127,7 +130,7 @@
+ 
+ // flags (the host's pdl argument): bit 0 launched as a programmatic dependent
+ template <int D, int H, int SAVE, int OST>
+-__global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
++__global__ void __launch_bounds__(xthr(SAVE ? 0 : xm_of(D, H), OST), 1)
+     k3w_kernel(const __grid_constant__ CUtensorMap mt, const __grid_constant__ CUtensorMap mwp, const __grid_constant__ CUtensorMap mx,
+                const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap my, const __grid_constant__ CUtensorMap mps,
+                const __grid_constant__ CUtensorMap mgs, const float* __restrict__ vec,
+@@ -138,7 +141,9 @@
+   constexpr int KBT = H / 64, KBX = D / 64, NKB = KBT + KBX, NTL = D / NTILE;
+   constexpr int XM = SAVE ? 0 : xm_of(D, H);   // item epilogue pipeline mode (0 off, 1 two residual tiles, 2 one)
+   constexpr bool X2 = XM != 0;
+-  constexpr int XB = XM == 1 ? 2 : 1;       // residual / output tiles
++  constexpr int XB = xm_two_tiles(XM) ? 2 : 1;       // residual / output tiles
++  constexpr bool EG2 = XM == 3;                       // two epilogue warp groups
++  constexpr int EPWT = EG2 ? 2 * EPW : EPW;           // epilogue warps
+   using LY = Lay<SAVE, OST, XM>;
+   constexpr int NST = LY::NST, O_ST = LY::O_ST, O_XR = LY::O_XR, O_PS = LY::O_PS, O_GS = LY::O_GS, O_VEC = LY::O_VEC, O_BAR = LY::O_BAR;
+   const int pdl = flags & 1;
+@@ -171,6 +176,12 @@
+   if (tid == 0) K3TL(1)
+   const uint32_t tmem = B.tmem;
+ 
++  if constexpr (EG2) {   // 768 threads: the launch bound caps registers at 80; the epilogue warp groups take the ones the other roles do not need
++    // (the pool is what the other roles release: 128 x (80 - 40) + 128 x (80 - 64) = 7168 registers = 14 more for each of the 512 epilogue threads -> 88)
++    if (warp < 4) asm volatile("setmaxnreg.dec.sync.aligned.u32 40;");
++    else if (OST && warp >= 4 + EPWT) asm volatile("setmaxnreg.dec.sync.aligned.u32 64;");
++    else asm volatile("setmaxnreg.inc.sync.aligned.u32 88;");
++  }
+   if (warp == 0) {
+     if (lane == 0) {
+       // ---------------------------------------------------------------- stages: (t block, Wp' block) x KBT, (x block, Wg' block) x KBX
+@@ -278,12 +289,12 @@
+       if (ldr) { umma_commit(&B.acc_full[b]); K3T2(i, 3) }
+       __syncwarp();
+     }
+-  } else if (OST && warp >= 4 + EPW) {
++  } else if (OST && warp >= 4 + EPWT) {
+     // ------------------------------------------------------------------ LN_out statistics from the t stages (OST)
+     // thread = 8 tokens (one 16-byte chunk of a stage row) x 8 channels of every t stage: tc = token chunk 0..15 (half tc / 8),
+     // cg = channel group 0..7 (lanes 0-15 / 16-31 of a warp: two groups). Pivot-shifted sums per token as ln_stats_kernel, merged
+     // with Chan's formula (lane pairs by shuffle, then the four warps in order through shared memory): deterministic.
+-    const int st = tid - NTHR, sw = st >> 5, tc = st & 15, cg = st >> 4, hf = tc >> 3, jc = tc & 7;
++    const int st = tid - (128 + 32 * EPWT), sw = st >> 5, tc = st & 15, cg = st >> 4, hf = tc >> 3, jc = tc & 7;
+     float* part = reinterpret_cast<float*>(sm + LY::O_SP);   // [NSTW][2][TOK]
+     float* sbuf = reinterpret_cast<float*>(sm + LY::O_SB);   // [2][2][TOK]
+     int s = 0, m0, n0, prev = -1; uint32_t ph = 0;
+@@ -366,7 +377,10 @@
+     }
+   } else if (warp >= 4) {
+     // ------------------------------------------------------------------ epilogue: thread = token row r
+-    const int r = (warp & 3) * 32 + lane, et = tid - 128, c0 = ((warp - 4) >> 2) * ECH;   // c0: this warp's first channel
++    const int eg = (EG2 && warp - 4 >= EPW) ? 1 : 0;        // epilogue warp group (EG2: items alternate between the groups)
++    const int estep = EG2 ? 2 : 1;
++    const int bs1 = eg ? 4 : 1, bs2 = eg ? 5 : 2;            // the groups' own named barriers
++    const int r = (warp & 3) * 32 + lane, et = tid - 128 - eg * 32 * EPW, c0 = (((warp - 4 - eg * EPW)) >> 2) * ECH;   // c0: this warp's first channel
+     const uint32_t lane_off = (uint32_t)((warp & 3) * 32) << 16;
+     float* vs = reinterpret_cast<float*>(sm + O_VEC);     // sp, ep, sg, eg of this item's 128 channels
+     const uint32_t vsu = su + O_VEC;
+@@ -382,28 +396,31 @@
+     float mi_c = 0.f, ri_c = 0.f;                   // X2: the carried mu_i / rs_i of this item (loaded one item ahead)
+     if constexpr (X2) {
+       int fm, fn;
+-      S.get(0, fm, fn);
+-      for (int k = et; k < 4 * NTILE; k += 32 * EPW) vs[k] = vec[(k / NTILE) * D + fn + (k % NTILE)];
+-      named_bar_sync(1, 32 * EPW);
++      if (S.get(eg, fm, fn)) {
++        for (int k = et; k < 4 * NTILE; k += 32 * EPW) vs[(EG2 ? eg * 2 * 4 * NTILE : 0) + k] = vec[(k / NTILE) * D + fn + (k % NTILE)];
++        named_bar_sync(bs1, 32 * EPW);
++      }
+     }
+-    for (int i = 0; S.get(i, m0, n0); ++i) {
++    for (int i = eg; S.get(i, m0, n0); i += estep) {
+       const int b = i & 1, tok = m0 + r;
++      const int vcur = EG2 ? eg * 2 + ((i >> 1) & 1) : b;                     // this item's vector buffer
++      const int vnx = EG2 ? eg * 2 + (((i + 2) >> 1) & 1) : ((i + 1) & 1);    // the next item's (of this group)
+       float vnext[VPT], minx = 0.f, rinx = 0.f;
+       int m1 = 0, n1 = 0;
+       bool hn = false;
+       if constexpr (X2) {   // the next item's vectors / statistics: global loads in flight during this item's wait and arithmetic
+-        hn = S.get(i + 1, m1, n1);
++        hn = S.get(i + estep, m1, n1);
+         if (hn) {
+ #pragma unroll
+           for (int q = 0; q < VPT; ++q) { const int k = et + q * 32 * EPW; vnext[q] = vec[(k / NTILE) * D + n1 + (k % NTILE)]; }
+           minx = mu_i[m1 + r]; rinx = rs_i[m1 + r];
+         }
+       } else {
+-        named_bar_sync(1, 32 * EPW);                     // the previous item's epilogue has finished with vs
++        named_bar_sync(bs1, 32 * EPW);                   // the previous item's epilogue has finished with vs
+         for (int k = et; k < 4 * NTILE; k += 32 * EPW) vs[k] = vec[(k / NTILE) * D + n0 + (k % NTILE)];
+-        named_bar_sync(1, 32 * EPW);
++        named_bar_sync(bs1, 32 * EPW);
+       }
+-      const uint32_t vsb = vsu + (X2 ? (uint32_t)b * (16u * NTILE) : 0u);   // X2: vector buffer b
++      const uint32_t vsb = vsu + (X2 ? (uint32_t)vcur * (16u * NTILE) : 0u);   // X2: this item's vector buffer
+       const int bx = XB == 2 ? b : 0;                                          // X2: residual / output tile
+       const uint32_t xrb = su + O_XR + (uint32_t)bx * 2u * KBB;
+       if (et == 0 && i < 2) K3TL(16 + i)
+@@ -419,7 +436,7 @@
+         mo = mu_o[tok]; ro = rs_o[tok];
+       }
+       float mi, ri;
+-      if constexpr (X2) { if (i == 0) { mi = mu_i[tok]; ri = rs_i[tok]; } else { mi = mi_c; ri = ri_c; } }
++      if constexpr (X2) { if (i == eg) { mi = mu_i[tok]; ri = rs_i[tok]; } else { mi = mi_c; ri = ri_c; } }
+       else { mi = mu_i[tok]; ri = rs_i[tok]; }
+       const float2 ro2 = make_float2(ro, ro), nmo2 = make_float2(-mo, -mo), ri2 = make_float2(ri, ri), nmi2 = make_float2(-mi, -mi);
+       // ds [B L, D]: pair row tok = (s L + i) L + j reads row s L + j (tokens b-major; s = 0 for one sample)
+@@ -433,21 +450,27 @@
+       if (et == 0 && i < 2) K3TL(12 + i)
+       if (et == 0) K3T2(i, 7)
+ #pragma unroll 1
+-      for (int cq = c0 / 32; cq < (c0 + ECH) / 32; ++cq) {   // 32 channels per step
+-        uint4 xr4[4];
++      constexpr int CWD = EG2 ? 16 : 32;                    // channels per step (EG2: 16, the registers of 96 are enough)
++      for (int cq = c0 / CWD; cq < (c0 + ECH) / CWD; ++cq) {
++        uint4 xr4[CWD / 8];
+         if (GR) {   // S90: the residual row chunks straight from global (L2) into registers, issued before the TMEM wait
+ #pragma unroll
+-          for (int q2 = 0; q2 < 4; ++q2) xr4[q2] = ldg128_k3w(xg + (size_t)tok * D + n0 + cq * 32 + q2 * 8);
++          for (int q2 = 0; q2 < CWD / 8; ++q2) xr4[q2] = ldg128_k3w(xg + (size_t)tok * D + n0 + cq * CWD + q2 * 8);
++        }
++        uint32_t pv[CWD], gv[CWD];
++        if constexpr (CWD == 32) {
++          tmem_ld32(tmem + lane_off + b * 256 + cq * 32, pv);
++          tmem_ld32(tmem + lane_off + b * 256 + 128 + cq * 32, gv);
++        } else {
++          tmem_ld16(tmem + lane_off + b * 256 + cq * 16, pv);
++          tmem_ld16(tmem + lane_off + b * 256 + 128 + cq * 16, gv);
+         }
+-        uint32_t pv[32], gv[32];
+-        tmem_ld32(tmem + lane_off + b * 256 + cq * 32, pv);
+-        tmem_ld32(tmem + lane_off + b * 256 + 128 + cq * 32, gv);
+         tmem_wait_ld();
+-        if (et == 0 && i < 2 && cq == c0 / 32) K3TL(18 + i)
+-        if (cq == (c0 + ECH) / 32 - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.acc_empty[b]); }
++        if (et == 0 && i < 2 && cq == c0 / CWD) K3TL(18 + i)
++        if (cq == (c0 + ECH) / CWD - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.acc_empty[b]); }
+ #pragma unroll
+-        for (int q2 = 0; q2 < 4; ++q2) {                // 8 channels = one 16-byte chunk of the row
+-          const int cl = cq * 32 + q2 * 8;              // channel within the tile
++        for (int q2 = 0; q2 < CWD / 8; ++q2) {          // 8 channels = one 16-byte chunk of the row
++          const int cl = cq * CWD + q2 * 8;              // channel within the tile
+           const uint32_t addr = xrb + (cl >> 6) * KBB + sw128(r, (cl & 63) >> 3);
+           const uint4 xv = GR ? xr4[q2] : lds128(addr);
+           uint4 dv = make_uint4(0x3f803f80u, 0x3f803f80u, 0x3f803f80u, 0x3f803f80u);
+@@ -495,7 +518,7 @@
+           }
+           if (GR) *reinterpret_cast<uint4*>(yg + (size_t)tok * D + n0 + cl) = make_uint4(o[0], o[1], o[2], o[3]);
+           else sts128(addr, o[0], o[1], o[2], o[3]);
+-          if (et == 0 && i < 2 && cq == c0 / 32 && q2 == 0) K3TL(20 + i)
++          if (et == 0 && i < 2 && cq == c0 / CWD && q2 == 0) K3TL(20 + i)
+           if (SAVE) {
+             const uint32_t off = addr - xrb;
+             sts128(su + O_PS + off, po[0], po[1], po[2], po[3]);
+@@ -507,16 +530,16 @@
+       if constexpr (X2) {
+         if (hn) {   // the next item's vectors into the other buffer (its last readers finished the previous item before this item's end barrier)
+ #pragma unroll
+-          for (int q = 0; q < VPT; ++q) vs[((i + 1) & 1) * 4 * NTILE + et + q * 32 * EPW] = vnext[q];
++          for (int q = 0; q < VPT; ++q) vs[vnx * 4 * NTILE + et + q * 32 * EPW] = vnext[q];
+           mi_c = minx; ri_c = rinx;
+         }
+         fence_async_smem();
+-        named_bar_sync(2, 32 * EPW);
++        named_bar_sync(bs2, 32 * EPW);
+         if (et == 0) { if (i < 2) K3TL(9 + 2 * i) mbar_arrive(&B.y_ready[bx]); }
+       } else
+       if (!GR) {
+       fence_async_smem();
+-      named_bar_sync(2, 32 * EPW);
++      named_bar_sync(bs2, 32 * EPW);
+       if (et == 0) {
+         if (i < 2) K3TL(9 + 2 * i)
+         K3T2(i, 6)
+@@ -597,10 +620,10 @@
+   };
+ #define K3W_CASE(DD, HH) if (D == DD && H == HH) { \
+     constexpr int X2_ = xm_of(DD, HH); \
+-    if (save && ost) launch(k3w_kernel<DD, HH, 1, 1>, Lay<1, 1>::SMEM, NTHR_OST); \
+-    else if (save) launch(k3w_kernel<DD, HH, 1, 0>, Lay<1>::SMEM, NTHR); \
+-    else if (ost) launch(k3w_kernel<DD, HH, 0, 1>, Lay<0, 1, X2_>::SMEM, NTHR_OST); \
+-    else launch(k3w_kernel<DD, HH, 0, 0>, Lay<0, 0, X2_>::SMEM, NTHR); \
++    if (save && ost) launch(k3w_kernel<DD, HH, 1, 1>, Lay<1, 1>::SMEM, xthr(0, 1)); \
++    else if (save) launch(k3w_kernel<DD, HH, 1, 0>, Lay<1>::SMEM, xthr(0, 0)); \
++    else if (ost) launch(k3w_kernel<DD, HH, 0, 1>, Lay<0, 1, X2_>::SMEM, xthr(X2_, 1)); \
++    else launch(k3w_kernel<DD, HH, 0, 0>, Lay<0, 0, X2_>::SMEM, xthr(X2_, 0)); \
+     C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
+   K3W_CASE(256, 512) K3W_CASE(256, 256) K3W_CASE(384, 768) K3W_CASE(384, 384) K3W_CASE(512, 1024) K3W_CASE(512, 512)
+   K3W_CASE(128, 128) K3W_CASE(128, 256)   // D128 inference (b200_infer.K3W_D128 cells): one channel item a token tile

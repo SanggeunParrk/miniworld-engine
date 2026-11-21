@@ -748,7 +748,8 @@ __device__ __forceinline__ void mma_tf32(float (&d)[4], uint32_t a0, uint32_t a1
   asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
                : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
-__device__ __forceinline__ uint32_t tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
+// round to nearest, ties away: the bits of cvt.rna.tf32.f32 for finite x, on the integer pipe (the conversion runs at a quarter rate)
+__device__ __forceinline__ uint32_t tf32r(float x) { return (__float_as_uint(x) + 0x1000u) & 0xffffe000u; }
 __device__ __forceinline__ uint32_t tf32lo(float x, uint32_t hi) { return tf32r(x - __uint_as_float(hi)); }
 __device__ __forceinline__ uint4 split2(float w0, float w1) {   // (hi w0, hi w1, lo w0, lo w1)
   const uint32_t h0 = tf32r(w0), h1 = tf32r(w1);
@@ -885,6 +886,7 @@ __global__ void __launch_bounds__(256, 2) pair_bias_tc_k(const float* __restrict
   }
 }
 
+constexpr bool kLogitsFast = true;   // logits_tc_k: bf16 rows whose |mean| <= std / 2 take the two-product path (see the kernel)
 // ---- the EXACT-class fp32 pair-bias LOGITS of the inference hoist (user rule 2026-11-19), one pass, pair rows bf16 or fp32, width 128 / 256 --------------
 // logits[h, r] = sum_c W'[h, c] LN0(x[r])[c] for the 16 heads of one block: the LN0 in fp32 (two exact passes), the products on mma.sync m16n8k8
 // TF32 with the split fp32 operands (all four hi / lo products, a fresh fp32 partial per k-step added in round-to-nearest fp32: error below that of the FMA-pipe
@@ -920,6 +922,7 @@ __global__ void __launch_bounds__(256, MB) logits_tc_k(const XT* __restrict__ Z,
   constexpr bool HOLD = HD && (sizeof(XT) == 2 || CP == 128);   // the row chunks stay in registers between the passes (fp32 at 256 would need 128 of them)
   extern __shared__ uint4 pbw_[];
   uint4 (*bw)[NT][32] = reinterpret_cast<uint4 (*)[NT][32]>(pbw_);
+  __shared__ float wsum_[16];
   const int lane = threadIdx.x % 32, g = lane / 4, q = lane % 4;
   const long wid = (long)blockIdx.x * WPB + threadIdx.x / 32, nw = (long)gridDim.x * WPB;
   for (int i = threadIdx.x; i < KS * NT * 32; i += blockDim.x) {
@@ -927,7 +930,11 @@ __global__ void __launch_bounds__(256, MB) logits_tc_k(const XT* __restrict__ Z,
     const int c = 32 * (kk / 4) + 8 * (l % 4) + 2 * (kk % 4);
     bw[kk][t][l] = split2(WF[h * CP + c], WF[h * CP + c + 1]);
   }
+  if (threadIdx.x < 16) { double sacc = 0.0; for (int c = 0; c < CP; ++c) sacc += (double)WF[threadIdx.x * CP + c]; wsum_[threadIdx.x] = (float)sacc; }
   __syncthreads();
+  float wsum[16];
+#pragma unroll
+  for (int h = 0; h < 16; ++h) wsum[h] = wsum_[h];
   for (long rb = wid * 16; rb < R; rb += nw * 16) {
     const XT* zr[2] = {Z + (rb + g) * CP + 8 * q, Z + (rb + g + 8) * CP + 8 * q};
     Chunk8<XT> u[2][HOLD ? NC : 1];
@@ -967,6 +974,58 @@ __global__ void __launch_bounds__(256, MB) logits_tc_k(const XT* __restrict__ Z,
     float acc[NT][4];
 #pragma unroll
     for (int t = 0; t < NT; ++t) acc[t][0] = acc[t][1] = acc[t][2] = acc[t][3] = 0.f;
+    bool fastp = false;
+    if constexpr (kLogitsFast && sizeof(XT) == 2 && HOLD) {
+      // bf16 rows are exact TF32 operands: logits = rs (sum_c W'_c x_c - mean sum_c W'_c), two products per k-step (x exact; W' hi / lo). The cancellation of the
+      // mean term is harmless while |mean| <= std / 2; otherwise the warp's tile takes the LN0-first path below (exact LN0 values, four products).
+      const float c0v = mean[0] * rs[0], c1v = mean[1] * rs[1];
+      fastp = __all_sync(0xffffffffu, c0v * c0v <= 0.25f && c1v * c1v <= 0.25f);
+      if (fastp) {
+#pragma unroll
+        for (int j = 0; j < NC; ++j) {
+          uint32_t w0[4] = {u[0][j].w.x, u[0][j].w.y, u[0][j].w.z, u[0][j].w.w};
+          uint32_t w1[4] = {u[1][j].w.x, u[1][j].w.y, u[1][j].w.z, u[1][j].w.w};
+#pragma unroll
+          for (int sp = 0; sp < 2; ++sp) {
+            uint4 b[2][NT];
+#pragma unroll
+            for (int u2 = 0; u2 < 2; ++u2)
+#pragma unroll
+              for (int t = 0; t < NT; ++t)
+                asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(b[u2][t].x), "=r"(b[u2][t].y), "=r"(b[u2][t].z), "=r"(b[u2][t].w)
+                             : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&bw[4 * j + 2 * sp + u2][t][lane]))));
+            float d[2][NT][4];
+#pragma unroll
+            for (int u2 = 0; u2 < 2; ++u2)
+#pragma unroll
+              for (int t = 0; t < NT; ++t) d[u2][t][0] = d[u2][t][1] = d[u2][t][2] = d[u2][t][3] = 0.f;
+#pragma unroll
+            for (int u2 = 0; u2 < 2; ++u2) {
+              const int sidx = 2 * sp + u2;
+              const uint32_t a0 = w0[sidx] << 16, a2 = w0[sidx] & 0xffff0000u, a1 = w1[sidx] << 16, a3 = w1[sidx] & 0xffff0000u;
+#pragma unroll
+              for (int t = 0; t < NT; ++t) {
+                mma_tf32(d[u2][t], a0, a1, a2, a3, b[u2][t].z, b[u2][t].w);   // x W'_lo (smaller first)
+                mma_tf32(d[u2][t], a0, a1, a2, a3, b[u2][t].x, b[u2][t].y);   // x W'_hi
+              }
+            }
+#pragma unroll
+            for (int u2 = 0; u2 < 2; ++u2)
+#pragma unroll
+              for (int t = 0; t < NT; ++t) { acc[t][0] += d[u2][t][0]; acc[t][1] += d[u2][t][1]; acc[t][2] += d[u2][t][2]; acc[t][3] += d[u2][t][3]; }
+          }
+        }
+#pragma unroll
+        for (int t = 0; t < NT; ++t)
+#pragma unroll
+          for (int e = 0; e < 2; ++e) {
+            const int h = 8 * t + 2 * q + e;
+            acc[t][e] = rs[0] * (acc[t][e] - mean[0] * wsum[h]);
+            acc[t][2 + e] = rs[1] * (acc[t][2 + e] - mean[1] * wsum[h]);
+          }
+      }
+    }
+    if (!fastp) {
 #pragma unroll
     for (int j = 0; j < NC; ++j) {
       float v0[8], v1[8];
@@ -1016,6 +1075,7 @@ __global__ void __launch_bounds__(256, MB) logits_tc_k(const XT* __restrict__ Z,
 #pragma unroll
           for (int t = 0; t < NT; ++t) { acc[t][0] += d[u2][t][0]; acc[t][1] += d[u2][t][1]; acc[t][2] += d[u2][t][2]; acc[t][3] += d[u2][t][3]; }
       }
+    }
     }
 #pragma unroll
     for (int t = 0; t < NT; ++t)

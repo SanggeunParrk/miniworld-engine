@@ -83,13 +83,52 @@ def prebuild(target, rows):
         if needs("triangle_attention_d64_fwd_train_sm90"):
             yield h100_dh.ext_d64t
     elif target.arch == "sm100":
-        from . import b200_triattn
+        from . import b200_bidir, b200_triattn  # b200_bidir: the bias-only forms' glue + gate backward
 
         lengths = {n for r in rows for n in r["lengths"]}
         for rows_per_task in sorted({b200_triattn._rows_per_task(n) for n in lengths}):
             yield ft.partial(b200_triattn._core, rows_per_task)
+        # the inference build with the bias pre-scaled by log2 e (b200_triattn.HB_INFER: lengths above the L128 kernel's)
+        for rows_per_task in sorted({b200_triattn._rows_per_task(n) for n in lengths if n > b200_triattn.TOK}):
+            yield ft.partial(b200_triattn._core, rows_per_task, True)
+            if b200_triattn.QS_INFER:
+                yield ft.partial(b200_triattn._core, rows_per_task, True, qs=True)   # q pre-scaled by scale * log2 e (b200_triattn.QS_INFER)
+            yield ft.partial(b200_triattn._core, rows_per_task, True, True)   # 16-channel heads (b200_triattn.D16_INFER)
+            yield ft.partial(b200_triattn._core, rows_per_task, True, True, d16c=True)   # compact (b200_triattn.D16C_INFER)
+            if b200_triattn.QS_INFER and rows_per_task >= 3:   # the QS form of the 16-channel heads (above b200_triattn.QS_MIN_L16 = 256: three rows a task)
+                yield ft.partial(b200_triattn._core, rows_per_task, True, True, d16c=False, qs=True)
+                yield ft.partial(b200_triattn._core, rows_per_task, True, True, d16c=True, qs=True)
         yield b200_triattn._mod
+        yield b200_triattn._pack
         yield b200_triattn._wide
+        # the wide path's per-head-width cores (b200_triattn.slot: 64 -> _core64, 96 / 128 -> _core128) for the head widths of the
+        # TriangleAttention* rows (d_hidden, default d_pair, over n_head); the other classes' triangle attention has 32-channel heads
+        from miniworld_engine.kernels._prebuild import _kv
+
+        slots = set()
+        for r in rows:
+            if r["module"].startswith("TriangleAttention"):
+                d = _kv(r["dims"])
+                slots.add(b200_triattn.slot(int(d.get("d_hidden", d["d_pair"])) // int(d["n_head"])))
+        if 64 in slots:
+            yield b200_triattn._core64
+            yield ft.partial(b200_triattn._core64, True)   # the inference build (b200_triattn.HB64_INFER)
+            if b200_triattn.QS_INFER:
+                yield ft.partial(b200_triattn._core64, True, None, True)   # its QS form (q pre-scaled; b200_triattn.QS_MIN_L64)
+        if 128 in slots:
+            yield b200_triattn._core128
+        yield b200_triattn._l128  # d_pair 64 / 128 at L128: the one-kernel path
+        yield b200_triattn._tallk  # core backward, key-side tail
+        yield b200_bidir.glue
+        yield b200_bidir.ext
+        yield b200_bidir.lnb   # (N1) the bias-only LayerNorm backward at C = 128
+        yield b200_bidir.ltmm  # (N1) tuned cublasLt tall-K GEMMs of the bias-only backward
+        from . import b200_fp8
+
+        yield b200_fp8._f8  # the opt-in e4m3 P / V core, head dim 32 (docs/b200/fp8.md "TriAttn"; b200_fp8.route, off unless fp8.enable_triattn)
+        yield ft.partial(b200_fp8._f8, ("-DTF_D=64",))  # ... and its 64-channel-head build (the whitelist kind "d64")
+        yield ft.partial(b200_fp8._f8, ("-DTF_Q8=1",))  # ... and the e4m3 q / k build (docs/b200/fp8.md "TriAttn e4m3 q / k": the front-written rows; the standalone q / k pass lives in it too)
+        yield ft.partial(b200_fp8._f8, ("-DTF_D=64", "-DTF_Q8=1"))  # (the 64-channel-head form: built by the prebuild, gate closed)
     elif target.arch in ("sm80", "sm120"):  # the 5090 builds the same sources for sm_120a (sm80_arch)
         yield from _sm80(rows)
 

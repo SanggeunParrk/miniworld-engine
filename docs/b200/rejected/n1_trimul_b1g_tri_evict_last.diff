@@ -1,0 +1,23 @@
+--- n1-trimul-x/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b1g.cu	2026-11-18 15:36:18.000000000 +0000
++++ n1-trimul-y/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b1g.cu	2026-11-18 17:14:15.000000000 +0000
+@@ -42,6 +42,9 @@
+ #ifndef B1G_ABL
+ #define B1G_ABL 0   // timing ablations (wrong results): 1 no front MMAs, 2 no front epilogue math, 4 no LN-side MMAs, 8 no LN backward math, 16 no dTri store, 32 no ring dPr store
+ #endif
++#ifndef B1G_TRIHINT
++#define B1G_TRIHINT 0   // 1: the front CTAs load tri with EVICT_LAST (the LN CTAs read the same tile again ~6 us later)
++#endif
+ namespace b1g {
+ 
+ constexpr int C = 128, TOK = 128;
+@@ -270,8 +273,8 @@
+           const int row0 = tile_of(i) * TOK;
+           if (u >= 1) PW(0, mbar_wait(&F.s_free[s], (u - 1) & 1));
+           mbar_expect_tx(&F.s_full[s], TT / 2);
+-          tma_load_2d(sm + G_::F_S + s * G_::SLOT, &mtric, &F.s_full[s], row0, c * (H / 2), EVICT_NORMAL);
+-          tma_load_2d(sm + G_::F_S + s * G_::SLOT + TT / 4, &mtric, &F.s_full[s], row0 + 64, c * (H / 2), EVICT_NORMAL);
++          tma_load_2d(sm + G_::F_S + s * G_::SLOT, &mtric, &F.s_full[s], row0, c * (H / 2), (B1G_TRIHINT ? EVICT_LAST : EVICT_NORMAL));
++          tma_load_2d(sm + G_::F_S + s * G_::SLOT + TT / 4, &mtric, &F.s_full[s], row0 + 64, c * (H / 2), (B1G_TRIHINT ? EVICT_LAST : EVICT_NORMAL));
+         };
+         for (int i = 0; i < n_local; ++i) {
+           const int row0 = tile_of(i) * TOK;

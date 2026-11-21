@@ -1,0 +1,78 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py
+index 86b850f50..375c24f49 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py
+@@ -88,13 +88,41 @@ def _tf_ext():
+     )
+ 
+ 
+-#: the one-launch L128 path (``_tf_ext``); env TRIMUL_B200_L128=0 runs the three-kernel chain (A/B)
++#: extra nvcc defines of the bidirectional L128 one-launch extension (``tfb_sm100.cu``)
++TFB_DEFS: tuple[str, ...] = ()
++
++
++@functools.lru_cache(maxsize=1)
++def _tfb_ext():
++    """``tfb_sm100.cu``: the D64 BIDIRECTIONAL L = 128 inference update in one cluster launch (``tf_sm100.cu``'s design with both
++    directions' planes, two release counters, two contraction passes per operand slot and t = [t_out | t_in] exchanged through DSMEM)."""
++    ensure_cuda_home()
++    return load_extension(
++        name="trimul_b200_l128b_v1",
++        sources=[str(_SRC / "tfb_sm100.cu")],
++        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("100a"), "--expt-relaxed-constexpr", "-DNDEBUG", f"-I{_SRC}", *TFB_DEFS],
++        extra_cflags=["-std=c++17", f"-I{_SRC}"],
++        verbose=False,
++    )
++
++
++#: the one-launch L128 path (``_tf_ext``; bidirectional ``_tfb_ext``); env TRIMUL_B200_L128=0 runs the three-kernel chain (A/B)
+ FUSED = os.environ.get("TRIMUL_B200_L128", "1") == "1"
++#: the bidirectional one-launch path alone (env TRIMUL_B200_L128B=0: the chain for the bidirectional cell)
++FUSED_BI = os.environ.get("TRIMUL_B200_L128B", "1") == "1"
+ 
+ 
+ def _fused_ok(x, n, bsz, d, hid, direction, ds, wg, wp, front) -> bool:
+-    if not (FUSED and n == 128 and bsz == 1 and d == 64 and hid == 64 and direction in (1, 2) and ds is None):
++    if not (FUSED and n == 128 and bsz == 1 and d == 64 and hid == 64 and ds is None):
+         return False
++    if direction == 0:
++        if not FUSED_BI:
++            return False
++        shapes = ((128, 64),) * 4 + ((64, 64), (64, 128))
++        ws = (*front, wg, wp)
++        if not all(w.dtype == torch.bfloat16 and tuple(w.shape) == s and w.stride(1) == 1 and w.stride(0) % 8 == 0 for w, s in zip(ws, shapes)):
++            return False
++        return bool(_tfb_ext().tfb_supported())
+     ws = (*front, wg, wp)
+     if not all(w.dtype == torch.bfloat16 and w.shape == (64, 64) and w.stride(1) == 1 for w in ws):
+         return False
+@@ -184,6 +212,8 @@ def _bmm(a, b, out):
+ #: 51.0 -> 51.1). Training keeps ``_contract``.
+ CTR_CELLS = frozenset({(128, True, 64), (128, True, 128), (128, True, 256), (256, True, 64), (128, False, 128)})
+ CTR = True
++#: D >= 256 chain: ctr lets wide_ln_stats (a programmatic dependent that waits for ctr's completion first) launch at ctr's entry
++CTR_TRIG_WIDE = os.environ.get("TRIMUL_CTR_TRIG_WIDE", "0") == "1"
+ 
+ 
+ def _contract_inf(E, planes, d, direction, trigger=True):
+@@ -341,7 +371,10 @@ def _inference_body(leaves, mask, ds, direction, y):
+             y = torch.empty_like(x)
+         if d <= 128:
+             if _fused_ok(x, n, bsz, d, hid, direction, ds, wg, wp, (wl, wlg, wr, wrg)):
+-                _tf_ext().tf_forward(x2, wl, wlg, wr, wrg, wg, wp, mask, gi, bi, go, bo, planes, y.view(m, d), direction, EPS)
++                if direction == 0:
++                    _tfb_ext().tfb_forward(x2, wl, wlg, wr, wrg, wg, wp, mask, gi, bi, go, bo, planes, y.view(m, d), EPS)
++                else:
++                    _tf_ext().tf_forward(x2, wl, wlg, wr, wrg, wg, wp, mask, gi, bi, go, bo, planes, y.view(m, d), direction, EPS)
+                 return y
+             if len(leaves) > 11:  # kernel_forms: row-major front matrices and wpp made once
+                 wpp, front = leaves[12], (wl, wlg, wr, wrg)
+@@ -369,7 +402,7 @@ def _inference_body(leaves, mask, ds, direction, y):
+             E.k1w_stats(x2, mean, rstd, EPS)
+         front = (leaves[14],) * 4 if PACK and len(leaves) > 14 else _front(E, wl, wlg, wr, wrg)   # the forms' packed front
+         E.k1w_forward(x2, *front, mask, mean, rstd, gi, bi, planes, 0, EPS)
+-        t = _contract_inf(E, planes, d, direction, trigger=False)
++        t = _contract_inf(E, planes, d, direction, trigger=CTR_TRIG_WIDE)
+         del planes
+         mo = torch.empty_like(mean)
+         ro = torch.empty_like(mean)

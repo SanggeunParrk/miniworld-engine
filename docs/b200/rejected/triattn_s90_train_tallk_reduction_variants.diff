@@ -1,0 +1,332 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/sm100.cuh b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/sm100.cuh
+index d6e53971b..7b4f04032 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/sm100.cuh
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/sm100.cuh
+@@ -18,6 +18,17 @@
+ 
+ namespace sm100 {
+ 
++#ifndef S90_TL
++#define S90_TL 0
++#endif
++#if S90_TL   // (S90 training) %globaltimer stamps of thread 0 of every CTA: [kernel id][CTA][entry, prologue done, end]
++__device__ unsigned long long g_s90[8][160][8];
++__device__ __forceinline__ unsigned long long gtimer() { unsigned long long t; asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t)); return t; }
++#define S90_ST(kid, k) do { if (threadIdx.x == 0) g_s90[kid][blockIdx.x][k] = gtimer(); } while (0)
++#else
++#define S90_ST(kid, k) do {} while (0)
++#endif
++
+ __device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
+ 
+ // ---------------------------------------------------------------- mbarrier
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tallk_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tallk_sm100.cu
+index ab34bcc79..ae78a1a00 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tallk_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tallk_sm100.cu
+@@ -10,8 +10,17 @@
+ using namespace sm100;
+ 
+ namespace {
++#ifndef TK_ML
++#define TK_ML 0
++#endif
+ namespace tk {
+-constexpr int BM = 128, BN = 128, BK = 64, NS = 4, THREADS = 192;
++#ifndef TK_NOMMA
++#define TK_NOMMA 0
++#endif
++#ifndef TK_NS
++#define TK_NS 4
++#endif
++constexpr int BM = 128, BN = 128, BK = 64, NS = TK_NS, THREADS = 192;
+ constexpr int ABYTES = BM * BK * 2, BBYTES = BN * BK * 2;  // 16 KiB each
+ constexpr int RS = BN + 4;                                 // partial tile row stride (floats)
+ constexpr int SMEM = 1024 + NS * (ABYTES + BBYTES) + 256;
+@@ -38,6 +47,7 @@ __device__ __forceinline__ float4 ld_cl4(uint32_t local, uint32_t rank) {
+ }
+ 
+ __global__ void __launch_bounds__(tk::THREADS, 1) tallk_sm100(const __grid_constant__ TkArgs args, int split) {
++  S90_ST(5, 0);
+   using namespace tk;
+   const int pi = (int)blockIdx.y < args.p[0].tiles ? 0 : 1;
+   const TkProb& P = args.p[pi];
+@@ -65,9 +75,28 @@ __global__ void __launch_bounds__(tk::THREADS, 1) tallk_sm100(const __grid_const
+   if (warp == 1) tmem_alloc(tslot, BN);
+   tc_fence_before();
+   __syncthreads();
++  S90_ST(5, 1);
+   tc_fence_after();
+   const uint32_t tmem = *tslot;
+   if (warp == 0) {
++#if TK_ML
++    {   // S90: the four loads of a K step issued by four lanes at once (one TMA issue a thread costs ~600 clk)
++      const bool a2 = m0 + 64 < P.M, b2 = n0 + 64 < P.N;
++      for (int i = 0; i < nk; ++i) {
++        const int s = i % NS, k0 = (kb0 + i) * BK;
++        if (i >= NS) wait(empty + s, ((i / NS) - 1) & 1);
++        if (lane == 0) expect_tx(full + s, (ABYTES + BBYTES) / 2 + (a2 ? ABYTES / 2 : 0) + (b2 ? BBYTES / 2 : 0));
++        __syncwarp();
++        const bool isb = lane >= 2, hi = lane & 1;
++        const bool ok = lane < 4 && (hi ? (isb ? b2 : a2) : true);
++        if (ok) {
++          unsigned char* dst = (isb ? sB + s * BBYTES : sA + s * ABYTES) + (hi ? 64 * 64 * 2 : 0);
++          load_2d(isb ? &P.b : &P.a, dst, full + s, (isb ? n0 : m0) + (hi ? 64 : 0), k0);
++        }
++        __syncwarp();
++      }
++    }
++#else
+     if (lane == 0) {
+       for (int i = 0; i < nk; ++i) {
+         const int s = i % NS, k0 = (kb0 + i) * BK;
+@@ -84,17 +113,21 @@ __global__ void __launch_bounds__(tk::THREADS, 1) tallk_sm100(const __grid_const
+         if (b2) load_2d(&P.b, b + 64 * 64 * 2, full + s, n0 + 64, k0);
+       }
+     }
++#endif
+   } else if (warp == 1) {
+     if (lane == 0) {
+       for (int i = 0; i < nk; ++i) {
+         const int s = i % NS;
+         wait(full + s, (i / NS) & 1);
++        if (i == 0) g_s90[5][blockIdx.x][6] = gtimer();
+         tc_fence_after();
+         const unsigned char* a = sA + s * ABYTES;
+         const unsigned char* b = sB + s * BBYTES;
++#if !TK_NOMMA
+ #pragma unroll
+         for (int ks = 0; ks < BK / 16; ++ks)
+           mma_ss(tmem, desc_mn128(a + ks * 16 * 128, 64 * 64 * 2), desc_mn128(b + ks * 16 * 128, 64 * 64 * 2), ID, (i | ks) ? 1u : 0u);
++#endif
+         mma_commit(empty + s);
+       }
+       mma_commit(done);
+@@ -103,7 +136,7 @@ __global__ void __launch_bounds__(tk::THREADS, 1) tallk_sm100(const __grid_const
+   float* red = reinterpret_cast<float*>(smb);              // [BM][RS] partial tile, over the drained ring
+   if (warp >= 2) {
+     const int qq = warp & 3, r = qq * 32 + lane;
+-    if (nk > 0) { wait(done, 0); tc_fence_after(); }
++    if (nk > 0) { wait(done, 0); tc_fence_after(); if (tid == 128) g_s90[5][blockIdx.x][4] = gtimer(); }
+ #pragma unroll 1
+     for (int cc = 0; cc < BN; cc += 32) {
+       float v[32];
+@@ -120,16 +153,15 @@ __global__ void __launch_bounds__(tk::THREADS, 1) tallk_sm100(const __grid_const
+     }
+   }
+   __syncwarp();
+-  cl_sync();                                               // every rank's partial tile is in its shared memory
++  cl_sync();
++  S90_ST(5, 3);                                               // every rank's partial tile is in its shared memory
+   {
+-    const int rows = BM / split, q4 = BN / 4;
++    const int rows = BM / split, q4 = BN / 4, tot = rows * q4;
+     const uint32_t base = sa(red);
+-    for (int e = tid; e < rows * q4; e += THREADS) {
++    // S90: two elements a thread per round, all 2 x split loads of both in flight before either is added (each ld.shared::cluster is a
++    // ~1.5 us round trip; one element a round took two rounds, 3.3 us at split 16)
++    auto store = [&](int e, const float4* t) {
+       const int rr = rank * rows + e / q4, cq = (e % q4) * 4, m = m0 + rr, n = n0 + cq;
+-      const uint32_t off = base + (uint32_t)(rr * RS + cq) * 4u;
+-      float4 t[16];                                        // every rank's value in flight at once, then added in rank order
+-#pragma unroll
+-      for (int q = 0; q < 16; ++q) if (q < split) t[q] = ld_cl4(off, q);
+       float4 s4 = t[0];
+ #pragma unroll
+       for (int q = 1; q < 16; ++q)
+@@ -142,11 +174,27 @@ __global__ void __launch_bounds__(tk::THREADS, 1) tallk_sm100(const __grid_const
+           for (int j = 0; j < 4; ++j) if (n + j < P.N) o[j] = sv[j];
+         }
+       }
++    };
++    for (int eb = tid; eb < tot; eb += 2 * THREADS) {
++      const int e0 = eb, e1 = eb + THREADS;
++      const bool has1 = e1 < tot;
++      const uint32_t off0 = base + (uint32_t)((rank * rows + e0 / q4) * RS + (e0 % q4) * 4) * 4u;
++      const uint32_t off1 = base + (uint32_t)((rank * rows + e1 / q4) * RS + (e1 % q4) * 4) * 4u;
++      float4 t0[16], t1[16];
++      const bool v0 = m0 + rank * rows + e0 / q4 < P.M, v1 = has1 && (m0 + rank * rows + e1 / q4 < P.M);   // rows past M are never stored: not read either
++#pragma unroll
++      for (int q = 0; q < 16; ++q) if (q < split && v0) t0[q] = ld_cl4(off0, q);
++#pragma unroll
++      for (int q = 0; q < 16; ++q) if (q < split && v1) t1[q] = ld_cl4(off1, q);
++      if (v0) store(e0, t0);
++      if (v1) store(e1, t1);
+     }
+   }
++  S90_ST(5, 5);
+   cl_sync();                                               // the peers are done reading this CTA's tile
+   tc_fence_before();
+   __syncthreads();
++  S90_ST(5, 2);
+   if (warp == 1) tmem_dealloc(tmem, BN);
+ }
+ 
+@@ -201,7 +249,13 @@ std::vector<torch::Tensor> tallk(torch::Tensor a0, torch::Tensor b0, torch::Tens
+ }
+ }  // namespace
+ 
++#if S90_TL
++static torch::Tensor s90_tl() { auto t = torch::empty({8, 160, 8}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), sm100::g_s90, sizeof(sm100::g_s90))); return t; }
++#endif
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
++#if S90_TL
++  m.def("s90_tl", &s90_tl);
++#endif
+   m.def("tallk", &tallk, "sm100 (a0^T b0, a1^T b1) fp32 in one launch: tall-K GEMMs, cluster split-K reduced in rank order (deterministic)",
+         py::arg("a0"), py::arg("b0"), py::arg("a1") = torch::Tensor(), py::arg("b1") = torch::Tensor(), py::arg("split") = 0);
+ }
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tri_l128_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tri_l128_sm100.cu
+index a7c988820..cd5f74504 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tri_l128_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tri_l128_sm100.cu
+@@ -185,6 +185,7 @@ __global__ void __launch_bounds__(LC<CX, HD>::THREADS, 1) tri_l128_sm100(
+     float* __restrict__ LSEo,                           // TR: [B, L, NH, 128] base-2 log-sum-exp (the core's)
+     const __nv_bfloat16* __restrict__ DROP,             // TR: [B][Lr][CX] dropout scale or null (tri_tail's)
+     float2* __restrict__ STATS) {                      // TR: (mean, rstd) [R] for the wide backward, or null
++  S90_ST(6, 0);
+   using T = LC<CX, HD>;
+   constexpr int BM = T::BM, NH = T::NH, QT = T::QT, XT = T::XT, BT = T::BT;
+   extern __shared__ __align__(1024) unsigned char raw[];
+@@ -226,6 +227,7 @@ __global__ void __launch_bounds__(LC<CX, HD>::THREADS, 1) tri_l128_sm100(
+   if (warp == 1) tmem_alloc(tslot, 512);
+   tc_fence_before();
+   __syncthreads();
++  S90_ST(6, 1);
+   tc_fence_after();
+   if (tid == 0) TLM(1);
+   const uint32_t tmem = *tslot;
+@@ -649,6 +651,7 @@ __global__ void __launch_bounds__(LC<CX, HD>::THREADS, 1) tri_l128_sm100(
+   }
+   tc_fence_before();
+   __syncthreads();
++  S90_ST(6, 2);
+   if (tid == 0) TLM(15);
+   if (warp == 1) tmem_dealloc(tmem, 512);
+ }
+@@ -814,7 +817,13 @@ std::vector<torch::Tensor> tri_l128_train(torch::Tensor x, torch::Tensor lnw, to
+ #if L1_TL
+ torch::Tensor tri_l128_tl() { auto t = torch::empty({160, 24}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), g_tl, sizeof(g_tl))); return t; }
+ #endif
++#if S90_TL
++static torch::Tensor s90_tl() { auto t = torch::empty({8, 160, 8}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), sm100::g_s90, sizeof(sm100::g_s90))); return t; }
++#endif
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
++#if S90_TL
++  m.def("s90_tl", &s90_tl);
++#endif
+ #if L1_TL
+   m.def("tri_l128_tl", &tri_l128_tl);
+ #endif
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index 6e4da1f6e..b7b3d7e8e 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -964,6 +964,7 @@ __device__ __forceinline__ void row_sw64(const __nv_bfloat16* tile, int row, uin
+ // ---- dbias = the query-side kernel's slabs summed in slab order (deterministic): element (bh, q, k) of unit u = bh * (S / 128) + q / 128
+ // has n_u slabs (the CTAs that ran the unit's NG tasks, `per` consecutive tasks a CTA)
+ __global__ void __launch_bounds__(256) triattn_db_slabs(const float* __restrict__ SL, float* __restrict__ DB, int S, int NG, int per, long total, long n4) {
++  S90_ST(2, 0);
+   pdl_trigger();   // round 8: PDL at S = 128 (launch_pdl_if): the next kernel may launch; this one waits for the previous grid
+   pdl_wait();
+   // a block = 32 float4 columns x 8 slab lanes: lane g sums slabs g, g + 8, ... (loads in flight), lane 0 adds the lane sums in lane
+@@ -988,6 +989,7 @@ __global__ void __launch_bounds__(256) triattn_db_slabs(const float* __restrict_
+   __shared__ float4 part[8][32];
+   part[lane][col] = a;
+   __syncthreads();
++  S90_ST(2, 2);
+   if (lane == 0 && i < n4) {
+     float4 r = part[0][col];
+ #pragma unroll
+@@ -1061,6 +1063,7 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+     const float* __restrict__ LSE, const float* __restrict__ DELTA,   // [B, N, H, S]
+     const __grid_constant__ CUtensorMap dkmap,           // dK / dV [B*N*S][H*32] bf16, box (32, 128), 64B swizzle (TMA stores)
+     const __grid_constant__ CUtensorMap dvmap) {
++  S90_ST(0, 0);
+   pdl_trigger();   // round 8: PDL at S = 128 (launch_pdl_if): the next kernel may launch; this one waits for the previous grid
+   pdl_wait();
+   const int NK = S / BN, NG = (N + KR - 1) / KR, NQS = S / KB_QW, SPT = KR * NQS;
+@@ -1098,6 +1101,7 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+   if (warp == 1) tmem_alloc(tslot, 512);
+   tc_fence_before();
+   __syncthreads();
++  S90_ST(0, 1);
+   tc_fence_after();
+   const uint32_t tmem = *tslot;
+   const uint32_t sbase = sa(smb);                  // shared-window address of p: sbase + (p - smb), no S2R per use
+@@ -1336,6 +1340,7 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+   }
+   tc_fence_before();
+   __syncthreads();
++  S90_ST(0, 2);
+   if (warp == 1) tmem_dealloc(tmem, 512);
+ }
+ 
+@@ -1366,6 +1371,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
+     const __grid_constant__ CUtensorMap dqmap,           // dQ [B*N*S][H*32] bf16, box (32, 128), 64B swizzle (TMA stores)
+     const __grid_constant__ CUtensorMap dbmap,           // dbias slabs fp32 [P][B*H*S][S]; box (32, 128), 128B swizzle (see below)
+     const int per, const int bhs) {                      // tasks a CTA (a contiguous range), B*H*S
++  S90_ST(1, 0);
+   pdl_trigger();   // round 8: PDL at S = 128 (launch_pdl_if): the next kernel may launch; this one waits for the previous grid
+   pdl_wait();
+   const int QTL = S / BM, NG = (N + QR - 1) / QR, NKS = S / QB_KW, SPT = QR * NKS;
+@@ -1401,6 +1407,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
+   if (warp >= 2 && (warp & 3) == 2 && lane == 0) bulk_wait<0>();
+   tc_fence_before();
+   __syncthreads();
++  S90_ST(1, 1);
+   tc_fence_after();
+   const uint32_t tmem = *tslot;
+   const uint32_t sbase = sa(smb);                  // shared-window address of p: sbase + (p - smb), no S2R per use
+@@ -1646,6 +1653,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
+   if (warp >= 2 && (warp & 3) == 2 && lane == 0) bulk_wait<0>();
+   tc_fence_before();
+   __syncthreads();
++  S90_ST(1, 2);
+   if (warp == 1) tmem_dealloc(tmem, 512);
+ }
+ }  // namespace
+@@ -1715,6 +1723,9 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
+ torch::Tensor triattn_ftl() { auto t = torch::empty({40}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), g_ftl, sizeof(g_ftl))); return t; }
+ #endif
+ #if TA_TL
++#if S90_TL
++torch::Tensor s90_tl() { auto t = torch::empty({8, 160, 8}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), sm100::g_s90, sizeof(sm100::g_s90))); return t; }
++#endif
+ torch::Tensor triattn_tl() { auto t = torch::empty({24, 256}, torch::kInt64); C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), g_tl, sizeof(g_tl))); return t; }
+ #endif
+ // delta = rowsum(dout o out) fp32 [B, N, H, S] from dout / out [B, N, S, H, 32] bf16
+@@ -1827,6 +1838,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+ #endif
+ #if TA_TL
+   m.def("triattn_tl", &triattn_tl);
++#if S90_TL
++  m.def("s90_tl", &s90_tl);
++#endif
+ #endif
+   m.def("triattn_delta", &triattn_delta_rows, "rowsum(dout o out) fp32 [B, N, H, S]");
+   m.def("triattn_bwd", &triattn_bwd, "sm100 triangle-attention backward: (dq, dk, dv [B, N, S, H, 32] bf16, dbias fp32 [B, H, S, S])",
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+index fbda8a4cc..a02a5cfc0 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+@@ -604,10 +604,18 @@ TALLK_MAX_ROWS = 128 * 128
+ BWD_PRE = os.environ.get("MINIWORLD_TRIATTN_B200_BWD_PRE", "1") != "0"
+ 
+ 
++#: (S90 training) the tall-K GEMM kernel's producer issues the four loads of a K step from four lanes at once (one TMA issue a thread costs ~600 clk)
++TALLK_ML = os.environ.get("MINIWORLD_TRIATTN_B200_TALLK_ML", "0") != "0"
++TALLK_NS = int(os.environ.get("MINIWORLD_TRIATTN_B200_TALLK_NS", "4"))
++
++
+ @functools.lru_cache(maxsize=1)
+ def _tallk():
+     ensure_cuda_home()
+-    return load_extension(name="triattn_b200_tallk_v2", sources=[str(_SRC / "tallk_sm100.cu")], extra_cuda_cflags=_flags(), verbose=False)
++    return load_extension(
++        name=("triattn_b200_tallk_v3_ml" if TALLK_ML else "triattn_b200_tallk_v2") + (f"_ns{TALLK_NS}" if TALLK_NS != 4 else "") + ("_nomma" if os.environ.get("S90_TK_NOMMA") else ""), sources=[str(_SRC / "tallk_sm100.cu")],
++        extra_cuda_cflags=[*_flags(), *(("-DTK_ML=1",) if TALLK_ML else ()), f"-DTK_NS={TALLK_NS}", *(("-DTK_NOMMA=1",) if os.environ.get("S90_TK_NOMMA") else ())], verbose=False,
++    )
+ 
+ 
+ #: B200 2026-11-18 (round 3 part 14): inference with 64-channel heads takes the head-dim-64 core's HB build -- the head-dim-32 inference

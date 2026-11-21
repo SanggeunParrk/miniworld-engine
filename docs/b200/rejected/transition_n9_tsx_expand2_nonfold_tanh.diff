@@ -1,0 +1,24 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n9-base/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu	2026-11-19 01:34:12.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n9-transition/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu	2026-11-19 02:34:58.000000000 +0000
+@@ -27,6 +27,9 @@
+ #ifndef FOLD
+ #define FOLD 0
+ #endif
++#ifndef SIGN2
++#define SIGN2 0                                                 // N9: the non-FOLD bf16 epilogue on packed pairs with the one-MUFU tanh sigmoid
++#endif
+ #ifndef SIGT
+ #define SIGT 1                                                  // FOLD epilogue: packed f32x2 + the one-MUFU tanh sigmoid (tsx_expand.cu keeps sigmoid_kit)
+ #endif
+@@ -325,6 +328,11 @@
+         const float b1 = fmaf(rs_, fmaf(-mean_, __uint_as_float(c1.z), __uint_as_float(bv[2 * k + 1])), __uint_as_float(c1.w));
+         hp[k] = pack_bf16(a0 * sigmoid_kit(a0) * b0, a1 * sigmoid_kit(a1) * b1);
+ #endif
++#elif SIGN2
++        // (N9) a sigmoid(a) = ah (1 + tanh(ah)), ah = a / 2: three packed ops and one MUFU op an element (the TR_SIG 1 / SIGT 1 form)
++        const f2 ah = mul2(mk2u(av[2 * k], av[2 * k + 1]), mk2(0.5f, 0.5f));
++        const f2 h2 = mul2(fma2(ah, mk2(tanhf_approx(lo2(ah)), tanhf_approx(hi2(ah))), ah), mk2u(bv[2 * k], bv[2 * k + 1]));
++        hp[k] = pack_bf16(lo2(h2), hi2(h2));
+ #else
+         const float a0 = __uint_as_float(av[2 * k]), a1 = __uint_as_float(av[2 * k + 1]);
+         hp[k] = pack_bf16(a0 * sigmoid_kit(a0) * __uint_as_float(bv[2 * k]), a1 * sigmoid_kit(a1) * __uint_as_float(bv[2 * k + 1]));

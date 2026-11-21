@@ -1,0 +1,152 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
+index 8da01de3d..1c22a2f6c 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
+@@ -975,6 +975,20 @@ def _small_spec(f32: bool, d: int, hid: int, bng: int, bnp: int, ntw: int, probe
+     return name, "generic/tg_bwd_small.cu", (*dims, *flags)
+ 
+ 
++#: (round 3, training part 3) dW tiles of ``tg_bwd_small``: 64-row K-blocks per TMA box and ring stage (the per-SM TMA box count, not the
++#: bytes, bounds the operand intake: docs/b200/transition.md part 14); 1: one K-block per box (A/B)
++SB_DWKB = 2
++
++
++def _dw_kb(d: int, ntw: int, f32: bool) -> int:
++    """K-blocks per dW box: SB_DWKB while two ring stages still fit (tg_dw.cu: 200 KB for the ring)."""
++    epb = 32 if f32 else 64
++    kb = SB_DWKB
++    while kb > 1 and 200 * 1024 // ((128 // epb + ntw // epb) * 8192 * kb) < 2:
++        kb //= 2
++    return kb
++
++
+ def _small_config(m: int, d: int, hid: int, f32: bool, nsm: int) -> tuple[int, int, int, int, int, int, tuple[str, ...]]:
+     """(gate width, d_xn width, d_xn K slices, dW width, d_xn CTAs, gate K slices (0: GATE_AB tiles), build flags) of one call."""
+     bng, bnp, ksp, ntw, npc = _small_plan(m, d, hid, f32, nsm)
+@@ -994,6 +1008,9 @@ def _small_config(m: int, d: int, hid: int, f32: bool, nsm: int) -> tuple[int, i
+     if -(-m // nsm) > 2 or d % 768:  # (several warps per LayerNorm row: D 768 at <= 2 rows per CTA only; measured slower at D 384
+         # [384, 384] fp32 +0.7 us and, with the build serving it, at D 768 L 640 / 768 +2 us)
+         flags += ("-DLNW=0",)
++    kb = _dw_kb(d, ntw, f32)
++    if kb > 1:
++        flags += (f"-DDWKB={kb}",)
+     return bng, bnp, ksp, ntw, npc, ksg, flags
+ 
+ 
+@@ -1116,7 +1133,8 @@ def _bwd_small(k, dy, x, xn, mean, rstd, gamma, ws_, wab, ab):
+     bke = k.bke
+     ocg = 32 if f32 else 64
+     e, sw = 128 // x.element_size(), int(f32)
+-    tw = lambda a, inner: t(a, inner, m, e, 64, -1, sw)  # noqa: E731
++    kb = next((int(f[7:]) for f in flags if f.startswith("-DDWKB=")), 1)
++    tw = lambda a, inner: t(a, inner, m, e, 64 * kb, -1, sw)  # noqa: E731 (the dW boxes: 64 kb rows)
+     args = [
+         t(dyg, d, m, bke, 128),
+         t(ws_, hid, d, bke, bke, -1, sw),  # Ws [D][H]: the gate B operand MN-major (no Ws^T)
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_bwd_small.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_bwd_small.cu
+index a7e64ad27..00396add8 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_bwd_small.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_bwd_small.cu
+@@ -55,6 +55,9 @@ using namespace s100;
+ #ifndef PROBE
+ #define PROBE 0
+ #endif
++#ifndef DWKB
++#define DWKB 1                                     // (round 3, training part 3) dW tiles: 64-row K-blocks per TMA box (fewer, larger boxes)
++#endif
+ #ifndef LNW
+ #define LNW 1                                      // P3: several warps per row where the CTA's rows leave warps idle (A/B: 0 = one per warp)
+ #endif
+@@ -116,9 +119,11 @@ namespace plain {
+ }  // namespace plain
+ namespace dw {
+ #define NT NTW
++#define KBG DWKB                                   // 64-row K-blocks per dW TMA box / ring stage (the host map boxes: 64 DWKB rows)
+ #define SPL (F32 && !DYRAW)
+ #include "tg_dw.cu"
+ #undef NT
++#undef KBG
+ #undef SPL
+ }  // namespace dw
+ 
+@@ -488,7 +493,7 @@ tg_bwd_small_sm100(const __grid_constant__ CUtensorMap gA, const __grid_constant
+     int tc = 0;
+     for (int t = c - NPC; t < DWT; t += G - NPC, ++tc) {
+       if (tc > 0) { tc_fence_before(); __syncthreads(); tc_fence_after(); }   // the previous tile's epilogue has read tensor memory
+-      dw::tg_dw_roles(&wdy, &wh, &wdab, &wxn, &wdylo, DWS, DWS, DWAB, M, DIM, HID, 1, DGB, DGB, 0, BW, su, tmem, t, tc * nkb, tc);
++      dw::tg_dw_roles(&wdy, &wh, &wdab, &wxn, &wdylo, DWS, DWS, DWAB, M, DIM, HID, 1, DGB, DGB, 0, BW, su, tmem, t, tc * ((nkb + dw::KB - 1) / dw::KB), tc);
+       __syncwarp();                                // reconverge (see P1)
+     }
+   }
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_dw.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_dw.cu
+index d7b4a1a1a..064771152 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_dw.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_dw.cu
+@@ -25,7 +25,11 @@ static_assert(!SPL || F32, "the dy split is an fp32 build");
+ constexpr int ESZ = F32 ? 4 : 2, EPB = 128 / ESZ;             // element bytes, MN elements per 128-B block row
+ constexpr int KI = F32 ? 8 : 16;                              // K rows per MMA instruction
+ constexpr int NAB = 128 / EPB, NBB = NT / EPB;                // 8 KB MN blocks of one 64-row K-block: A (128 rows of out), B (NT)
+-constexpr int ABT = NAB * 8192, BBT = NBB * 8192, STB = ABT + BBT + (SPL ? ABT : 0);
++#ifndef KBG
++#define KBG 1                                                   // (round 3, training part 3) 64-row K-blocks per TMA box and ring stage:
++#endif                                                          // boxes of 64 KBG rows (the per-SM TMA box count bounds the intake)
++constexpr int KB = KBG, MNB = KB * 8192;                       // bytes of one MN block of a stage (64 KB rows x 128 B)
++constexpr int ABT = NAB * MNB, BBT = NBB * MNB, STB = ABT + BBT + (SPL ? ABT : 0);
+ constexpr int STG = (200 * 1024 / STB) > 8 ? 8 : (200 * 1024 / STB);
+ constexpr int O_A = 0, O_B = STG * ABT, O_L = O_B + STG * BBT, O_BAR = O_L + (SPL ? STG * ABT : 0), SMEM_BYTES = O_BAR + 256;
+ static_assert(STG >= 2 && SMEM_BYTES <= 232448, "shared memory budget");
+@@ -49,7 +53,7 @@ struct Bars {
+ // MN-major operand descriptor: bf16 128-B swizzle (layout type 2); tf32 128-B swizzle with 32-B atoms (layout type 1, the TMA map's
+ // CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B: MN-major kind::tf32 reads this layout). LBO = 8 KB between MN blocks, SBO = 1 KB (bf16) between K groups.
+ DEVI uint64_t desc_op(uint32_t saddr) {
+-  const uint64_t d = desc_mn128(saddr, 8192);
++  const uint64_t d = desc_mn128(saddr, MNB);
+   // BASE32B (Swizzle<2,5,2>): the pattern repeats every 4 rows of 128 B, so the K groups are 4 rows (SBO 512 B)
+   return F32 ? ((d & ~((uint64_t)7 << 61) & ~((uint64_t)0x3FFF << 32)) | ((uint64_t)(512 >> 4) << 32) | ((uint64_t)1 << 61)) : d;
+ }
+@@ -82,24 +86,24 @@ DEVI void tg_dw_roles(const CUtensorMap* pdy, const CUtensorMap* ph, const CUten
+   const size_t ntot = (size_t)3 * d * hid;
+   float* outp = nsplit > 1 ? ws + (size_t)s * ntot + (p1 ? 0 : (size_t)d * hid) : (p1 ? o1 : o2);
+   const int nkb = (m + 63) / 64;
+-  const int kb0 = (int)((long)s * nkb / nsplit), kb1 = (int)((long)(s + 1) * nkb / nsplit), n = kb1 - kb0;
++  const int kb0 = (int)((long)s * nkb / nsplit), kb1 = (int)((long)(s + 1) * nkb / nsplit), n = (kb1 - kb0 + KB - 1) / KB;   // stages (KB > 1: nsplit 1 only, TMA zero-fills past M)
+ 
+   if (warp == 0) {
+     if (lane == 0) {
+       for (int i = 0; i < n; ++i) {
+-        const int st = (it0 + i) % STG, kb = kb0 + i;
++        const int st = (it0 + i) % STG, kb = kb0 + i * KB;
+         if (it0 + i >= STG) mbar_wait(&B.empty[st], (((it0 + i) / STG) - 1) & 1);
+         mbar_expect_tx(&B.full[st], (SPL && p1) ? STB : STB - (SPL ? ABT : 0));
+ #if SPL
+         if (p1) {
+ #pragma unroll
+-          for (int j = 0; j < NAB; ++j) tma_load_2d(su + O_L + st * ABT + j * 8192, pdylo, &B.full[st], m0 + j * EPB, kb * 64);
++          for (int j = 0; j < NAB; ++j) tma_load_2d(su + O_L + st * ABT + j * MNB, pdylo, &B.full[st], m0 + j * EPB, kb * 64);
+         }
+ #endif
+ #pragma unroll
+-        for (int j = 0; j < NAB; ++j) tma_load_2d(su + O_A + st * ABT + j * 8192, ma, &B.full[st], m0 + j * EPB, kb * 64);
++        for (int j = 0; j < NAB; ++j) tma_load_2d(su + O_A + st * ABT + j * MNB, ma, &B.full[st], m0 + j * EPB, kb * 64);
+ #pragma unroll
+-        for (int j = 0; j < NBB; ++j) tma_load_2d(su + O_B + st * BBT + j * 8192, mb, &B.full[st], n0 + j * EPB, kb * 64);
++        for (int j = 0; j < NBB; ++j) tma_load_2d(su + O_B + st * BBT + j * MNB, mb, &B.full[st], n0 + j * EPB, kb * 64);
+       }
+     }
+   } else if (warp == 1) {
+@@ -110,13 +114,13 @@ DEVI void tg_dw_roles(const CUtensorMap* pdy, const CUtensorMap* ph, const CUten
+       const uint64_t da = desc_op(su + O_A + st * ABT), db = desc_op(su + O_B + st * BBT);
+       if (elect_one()) {
+ #pragma unroll
+-        for (int ks = 0; ks < 64 / KI; ++ks)
++        for (int ks = 0; ks < 64 * KB / KI; ++ks)
+           mma(tmem, da + (uint64_t)((ks * KI * 128) >> 4), db + (uint64_t)((ks * KI * 128) >> 4), (i > 0 || ks > 0) ? 1u : 0u);
+ #if SPL
+         if (p1) {
+           const uint64_t dl = desc_op(su + O_L + st * ABT);
+ #pragma unroll
+-          for (int ks = 0; ks < 64 / KI; ++ks) mma(tmem, dl + (uint64_t)((ks * KI * 128) >> 4), db + (uint64_t)((ks * KI * 128) >> 4), 1u);
++          for (int ks = 0; ks < 64 * KB / KI; ++ks) mma(tmem, dl + (uint64_t)((ks * KI * 128) >> 4), db + (uint64_t)((ks * KI * 128) >> 4), 1u);
+         }
+ #endif
+         tc_commit(&B.empty[st]);

@@ -1,0 +1,481 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py
+index 1ed205a8d..392fb5581 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py
+@@ -282,6 +282,18 @@ XF_WIDE = True
+ K3W_D128_CELLS = frozenset({(128, False), (256, False), (384, False), *((n, True) for n in (128, 256, 384, 512, 640, 768))})
+ 
+ 
++#: k3c (pass 16): the contraction inside the output kernel (``k3w.cu`` CT: CTA c contracts channel(s) c (+ 128) and releases a
++#: per-64-channel counter; the output's t stages wait on the counters instead of a launch boundary), so the L128 chain is front ->
++#: (contraction + output), two launches. One sample at L128 only (every CTA resident; a batch keeps ctr + k3w -- the same bits).
++#: env TRIMUL_K3C=0: ctr + k3w (A/B). Cells: (d_pair, bidirectional).
++K3C = os.environ.get("TRIMUL_K3C", "1") == "1"
++K3C_CELLS: frozenset = frozenset({(128, False)})
++
++
++def _k3c_cell(n: int, bsz: int, d: int, direction: int) -> bool:
++    return K3C and K3W_OST_PDL and n == 128 and bsz == 1 and (d, direction == 0) in K3C_CELLS
++
++
+ @functools.cache
+ def _num_sms(index: int) -> int:
+     return torch.cuda.get_device_properties(index).multi_processor_count
+@@ -471,13 +483,20 @@ def _inference_body(leaves, mask, ds, direction, y):
+                 mean = x.new_empty((m,), dtype=torch.float32)
+                 rstd = torch.empty_like(mean)
+                 wf, cr = leaves[-2:]
++                k3c = _k3c_cell(n, bsz, d, direction)
++                g1 = -2 if k3c else 0  # k3c reads x before its wait: k1w triggers it after its own wait
+                 if cr.numel() and fold_cell(n, d, direction):
+-                    E.k1w_forward(x2, wf, cr, wf, wf, mask, mean, rstd, gi, bi, planes, 0, EPS)
++                    E.k1w_forward(x2, wf, cr, wf, wf, mask, mean, rstd, gi, bi, planes, g1, EPS)
+                 else:
+-                    E.k1w_forward(x2, *front, mask, mean, rstd, gi, bi, planes, 0, EPS)
++                    E.k1w_forward(x2, *front, mask, mean, rstd, gi, bi, planes, g1, EPS)
++                wpq, wgq, vec = leaves[-5:-2]
++                if k3c:
++                    cw = contracted(d, hid, direction)
++                    t = planes.new_empty(((2 if direction == 0 else 1) * cw, n, n))
++                    E.k3c_forward(x2, planes.view(p, n, n), t, wpq, wgq, vec, mean, rstd, y.view(m, d), cw, direction)
++                    return y
+                 t = _contract_inf(E, planes, contracted(d, hid, direction), direction, trigger=2 if XF and n <= XF_MAXL else False)
+                 del planes
+-                wpq, wgq, vec = leaves[-5:-2]
+                 grp = K3W_OST_GROUP and n * n // 128 <= _num_sms(x.device.index)
+                 E.k3w_forward(x2, t.view(t.shape[0], m), wpq, wgq, vec, mean, mean, mean, rstd, None, y.view(m, d), n, 0, None, None,
+                               int(K3W_OST_PDL) | 2 | (8 if grp else 0) | (16 if XF and n <= XF_MAXL and K3W_OST_PDL else 0))  # fmt: skip
+@@ -509,15 +528,22 @@ def _inference_body(leaves, mask, ds, direction, y):
+             return y
+         mean = x.new_empty((m,), dtype=torch.float32)
+         rstd = torch.empty_like(mean)
++        # k3c: the contraction inside the output kernel (needs the cached fold, k3w's in-kernel statistics)
++        k3c = _k3c_cell(n, bsz, d, direction) and ds is None and len(leaves) > 11 and K3W_OST and K3W_OST_GROUP
++        g1 = -2 if k3c else -1
+         if len(leaves) > 16 and fold_cell(n, d, direction):  # the forms' LN_in-folded front (front_fold)
+             wf, cr = leaves[15], leaves[16]
+-            E.k1w_forward(x2, wf, cr, wf, wf, mask, mean, rstd, gi, bi, planes, -1, EPS)
++            E.k1w_forward(x2, wf, cr, wf, wf, mask, mean, rstd, gi, bi, planes, g1, EPS)
+         else:
+             if d > K1W_INSTAT:
+                 E.k1w_stats(x2, mean, rstd, EPS)
+             front = (leaves[14],) * 4 if PACK and len(leaves) > 14 else _front(E, wl, wlg, wr, wrg)   # the forms' packed front
+             # grid -1: an inference call (k1w.cu: the third weight issuer at D >= 256 with one tile a CTA; the same bits)
+-            E.k1w_forward(x2, *front, mask, mean, rstd, gi, bi, planes, -1, EPS)
++            E.k1w_forward(x2, *front, mask, mean, rstd, gi, bi, planes, g1, EPS)
++        if k3c:
++            t = planes.new_empty(((2 if direction == 0 else 1) * d, n, n))
++            E.k3c_forward(x2, planes.view(p, n, n), t, *leaves[11:14], mean, rstd, y.view(m, d), d, direction)
++            return y
+         # one token tile a CTA per sample (decided by L, not by the batch: a batch must give each sample's bits): grouped OST
+         grp = K3W_OST and K3W_OST_GROUP and n * n // 128 <= _num_sms(x.device.index)
+         ost = (K3W_OST and n >= K3W_OST_MINL) or grp
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/bind_b200.cpp b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/bind_b200.cpp
+index dd1f526c3..94a31b509 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/bind_b200.cpp
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/bind_b200.cpp
+@@ -22,6 +22,8 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
+                  int64_t L, int64_t grid, c10::optional<torch::Tensor> p_out, c10::optional<torch::Tensor> g_out, int64_t pdl);
+ void wide_ln_stats(torch::Tensor t, torch::Tensor mean, torch::Tensor rstd, double eps);
+ void ctr_forward(torch::Tensor planes, torch::Tensor t, int64_t d, int64_t dir, int64_t grid, int64_t pdl);
++void k3c_forward(torch::Tensor x, torch::Tensor planes, torch::Tensor t, torch::Tensor wpq, torch::Tensor wgq, torch::Tensor vec,
++                 torch::Tensor mu_i, torch::Tensor rs_i, torch::Tensor y, int64_t d, int64_t dir);
+ torch::Tensor b7m_prof();  // role probes of b7m (built with -DPROF=1; an empty tensor otherwise)
+ torch::Tensor b1u_tl();   // b1u phase trace (built with -DPT_TL=1; an empty tensor otherwise; b7m_prof returns b7m's then)
+ void wide_fold_prep(torch::Tensor wp, torch::Tensor go, torch::Tensor bo, torch::Tensor wg, torch::Tensor gi, torch::Tensor bi,
+@@ -114,6 +116,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("k3w_forward", &k3w_forward);
+   m.def("wide_ln_stats", &wide_ln_stats);
+   m.def("ctr_forward", &ctr_forward);
++  m.def("k3c_forward", &k3c_forward);
+   m.def("b7m_prof", &b7m_prof);
+   m.def("b1u_tl", &b1u_tl);
+   m.def("wide_fold_prep", &wide_fold_prep);
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
+index 0f10b482f..2baa8372c 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
+@@ -169,7 +169,10 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+   constexpr int nx0 = 0, nw0 = 0;
+   const bool wres = false;
+ #endif
+-  if (K1W_TRIG) pdl_trigger();
++  // flags bit 13 (pass 16, the fused contraction + output k3c): trigger the dependent only after this kernel's own wait, so the dependent
++  // may read what is older than this kernel (x, the weights) before its own griddepcontrol.wait
++  const bool late_trig = (stats_out & 8192) != 0;
++  if (K1W_TRIG && !late_trig) pdl_trigger();
+   if (tid == 0) TL(0)
+ 
+   if (tid == 0) {
+@@ -186,6 +189,7 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+   if (warp == 2) { tmem_alloc(&B.tmem, 512); tmem_relinquish(); }
+   constexpr bool SPRE = K1W_SPRE && D > K1W_INSTAT && !FOLD;   // the wait moves to the transform warps (mean / rstd)
+   if (!SPRE) pdl_wait();   // nothing global is read before this (the previous kernel may write x, the weights, gamma / beta)
++  if (late_trig) { if (SPRE) pdl_wait(); pdl_trigger(); }
+   if (tid == 0) {
+ #if K1W_EARLY
+     // one-tile latency: the first fill of both rings is issued here, before the TMEM allocation and the CTA barrier (a cold box
+@@ -838,6 +842,7 @@ void k1w_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Te
+   // change the bits, and a batch of samples (several tiles a CTA, no split) must give each sample's bits. env TRIMUL_K1W_TS = 1 (A/B)
+   const char* ts_env = std::getenv("TRIMUL_K1W_TS");
+   if (ts_env != nullptr && ts_env[0] == '1') so_np |= 128;
++  if (grid <= -2) so_np |= 8192;   // grid -2: an inference call whose dependent (k3c) reads x before its wait: trigger after this kernel's wait
+ #define K1W_CASE(DD, PP) \
+   if (D == DD && P == PP) { launch<DD, PP>(mx, mw, mp, mk, L, mu, rs, ga, be, tiles, g, st, (float)eps, so | so_np | (packed ? 16 : 0), n2); C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
+   K1W_CASE(64, 512) K1W_CASE(64, 256) K1W_CASE(64, 128) K1W_CASE(128, 512) K1W_CASE(128, 256) K1W_CASE(256, 1024) K1W_CASE(256, 512)
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+index 426bedeef..27a33ed19 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+@@ -58,24 +58,42 @@ struct Sched {
+ };
+ // SAVE (training): the epilogue also stores p and g (bf16) for the backward, through two more [128 tok][128 ch] staging tiles;
+ // the stage ring shrinks from 5 to 3 to make room.
+-template <int SAVE, int OST = 0>
++// CT (inference, L128, one sample; pass 16, "k3c"): the triangle contraction runs inside this kernel -- the launch between the front
++// and the output is gone. CTA c computes contraction item(s) c (+ G) (ctr.cu's item at L128: one output channel's whole 128 x 128
++// plane, A / B 64 KB in the O_CT region, accumulator in TMEM columns 256 / 0), stores its t plane through the O_CT staging and
++// increments the counter of its 64-channel block (release, GPU scope); the t stages of the output wait on those counters (acquire)
++// instead of a grid barrier. The 3-slot ring makes room for O_CT.
++template <int SAVE, int OST = 0, int CT = 0>
+ struct Lay {
+-  static constexpr int NST = SAVE ? 3 : 5;
++  static constexpr int NST = SAVE ? 3 : (CT ? 3 : 5);
+   static constexpr int O_ST = 0, O_XR = O_ST + NST * STAGE, O_PS = O_XR + 2 * KBB, O_GS = O_PS + (SAVE ? 2 * KBB : 0),
+                        O_VEC = O_GS + (SAVE ? 2 * KBB : 0),
+                        O_SP = O_VEC + 4 * NTILE * 4,                 // OST: [NSTW warps][2 (mean, M2)][TOK] partials
+                        O_SB = O_SP + (OST ? NSTW * 2 * TOK * 4 : 0), // OST: [2 items][2 (mu, rs)][TOK]
+-                       O_BAR = O_SB + (OST ? 2 * 2 * TOK * 4 : 0);
++                       O_CT = O_SB + (OST ? 2 * 2 * TOK * 4 : 0),    // CT: A (2 boxes) | B (2 boxes), A reused as the t staging
++                       O_BAR = O_CT + (CT ? 4 * KBB : 0);
+   static constexpr int SMEM = O_BAR + 256 + 1024;
+   static_assert(SMEM <= 232448, "smem");
++  static_assert(!CT || O_CT % 1024 == 0, "CT region alignment");
+ };
+ constexpr int NSTMAX = 5;
+ constexpr uint32_t ID_P = idesc_bf16_mj(128, NTILE, 1, 0), ID_G = idesc_bf16_mj(128, NTILE, 0, 0);
++// CT: per 64-channel block of t, a monotonic counter; every launch adds exactly CT_INC to each block it covers (64 channels x 8
++// epilogue warps); a launch's base is read at entry (before its own increments; k3w never triggers its dependents early, so the
++// previous launch has completed)
++constexpr unsigned CT_INC = 64 * 8;
++__device__ unsigned g_ctcnt[8];
++DEV unsigned ld_acquire_gpu(const unsigned* p) {
++  unsigned v; asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(p) : "memory"); return v;
++}
++DEV void fence_proxy_async_global() { asm volatile("fence.proxy.async.global;" ::: "memory"); }
+ 
+ struct Bars {
+-  uint64_t st_full[NSTMAX], st_empty[NSTMAX], acc_full[2], acc_empty[2], xr_full, xr_empty, sf[2], se[2];
++  uint64_t st_full[NSTMAX], st_empty[NSTMAX], acc_full[2], acc_empty[2], xr_full, xr_empty, sf[2], se[2], ct_full, ct_full2, ct_acc, ct_free;
+   uint32_t tmem;
++  unsigned cbase[8];
+ };
++static_assert(sizeof(Bars) <= 256, "bars");
+ 
+ DEV uint32_t sw128(uint32_t r, uint32_t q) { return r * 128u + ((q ^ (r & 7u)) << 4); }
+ DEV uint4 lds128(uint32_t a) {
+@@ -95,20 +113,32 @@ DEV float2 lds2f(uint32_t a) { float2 v; asm volatile("ld.shared.v2.f32 {%0,%1},
+ 
+ 
+ // flags (the host's pdl argument): bit 0 launched as a programmatic dependent
+-template <int D, int H, int SAVE, int OST>
++// CT maps / arguments (unused without CT): mpl the planes ([P L rows][L cols], box {64, 128} SW128, ctr's mp), mts t as [H L rows][L
++// cols] (box {64, 32} SW128, ctr's mt), cdir / cd ctr's dir / d
++template <int D, int H, int SAVE, int OST, int CT = 0>
+ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+     k3w_kernel(const __grid_constant__ CUtensorMap mt, const __grid_constant__ CUtensorMap mwp, const __grid_constant__ CUtensorMap mx,
+                const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap my, const __grid_constant__ CUtensorMap mps,
+                const __grid_constant__ CUtensorMap mgs, const float* __restrict__ vec,
+                const float* __restrict__ mu_o, const float* __restrict__ rs_o, const float* __restrict__ mu_i,
+-               const float* __restrict__ rs_i, const __nv_bfloat16* __restrict__ ds, int items, int L, int grouped, int flags, float eps) {
++               const float* __restrict__ rs_i, const __nv_bfloat16* __restrict__ ds, int items, int L, int grouped, int flags, float eps,
++               const __grid_constant__ CUtensorMap mpl, const __grid_constant__ CUtensorMap mts, int cdir, int cd) {
+   constexpr int KBT = H / 64, KBX = D / 64, NKB = KBT + KBX, NTL = D / NTILE;
+-  using LY = Lay<SAVE, OST>;
++  using LY = Lay<SAVE, OST, CT>;
+   constexpr int NST = LY::NST, O_ST = LY::O_ST, O_XR = LY::O_XR, O_PS = LY::O_PS, O_GS = LY::O_GS, O_VEC = LY::O_VEC, O_BAR = LY::O_BAR;
++  static_assert(!CT || (OST && !SAVE && H <= 512), "CT: inference with OST");
+   const int pdl = flags & 1;
+   // flags bit 4 (XF, OST inference, pass 15): the x / Wg' stages of a CTA's first item are loaded and multiplied BEFORE griddepcontrol.wait,
+   // then the t stages (the previous kernel triggers only after its own wait -- ctr trig 2 -- or completes: x is older than it)
+-  const int xf = (OST && pdl && (flags & 16)) ? 1 : 0;
++  // CT: always XF (the previous kernel is the front, launched to trigger after its own wait: k1w flags bit 13)
++  const int xf = CT ? 1 : ((OST && pdl && (flags & 16)) ? 1 : 0);
++  // CT: this CTA's contraction items c = blockIdx.x + q G < H (at most 2: TMEM columns 256 then 0, the latter free until the
++  // output's p MMAs, which wait for every item's counter)
++  // (pass 16: one item a CTA -- H == grid; two items measured slower and need a third accumulator, see docs/b200/trimul.md)
++  const int nci = CT ? 1 : 0;
++  // CT flags: bit 5 the counter add relaxed after the store's completion (no release / proxy fence), bit 6 the t stages issued by
++  // 2 KBT lanes (each spins on its own block's counter), bit 7 the operands' two K halves on two barriers
++  const bool ct_relax = CT && (flags & 32), ct_mlt = CT && (flags & 64), ct_split = CT && (flags & 128);
+   auto kb_of = [&](int j) { return xf ? (j < KBX ? KBT + j : j - KBX) : j; };   // stage j of an item -> K-block (t blocks 0..KBT-1)
+   extern __shared__ __align__(1024) uint8_t smem_raw[];
+   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
+@@ -124,6 +154,11 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+     if (OST) for (int b = 0; b < 2; ++b) { mbar_init(&B.sf[b], 1); mbar_init(&B.se[b], EPW); }
+     for (int b = 0; b < 2; ++b) { mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], EPW); }
+     mbar_init(&B.xr_full, 1); mbar_init(&B.xr_empty, 1);
++    if (CT) {
++      mbar_init(&B.ct_full, 1); mbar_init(&B.ct_full2, 1); mbar_init(&B.ct_acc, 1); mbar_init(&B.ct_free, EPW);
++      for (int k = 0; k < KBT; ++k) B.cbase[k] = ld_acquire_gpu(&g_ctcnt[k]) & ~(CT_INC - 1);
++      prefetch_tmap(&mpl); prefetch_tmap(&mts);
++    }
+     fence_mbar_init();
+     prefetch_tmap(&mt); prefetch_tmap(&mwp); prefetch_tmap(&mx); prefetch_tmap(&mwg); prefetch_tmap(&my);
+   }
+@@ -135,7 +170,42 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+   const uint32_t tmem = B.tmem;
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
++    if (CT && ct_mlt) {
++      // ---------------------------------------------------------------- CT, one item: x / Wg' stages (lane 0), then every t stage's
++      // slot claimed and its Wp' half issued by lane 0, then the t boxes by 2 KBT lanes, each behind its own block's counter
++      int m0, n0;
++      S.get(0, m0, n0);
++      int s = 0; uint32_t ph = 0;
++      for (int j = 0; j < KBX; ++j) {
++        if (lane == 0) {
++          mbar_wait(&B.st_empty[s], ph ^ 1);
++          mbar_expect_tx(&B.st_full[s], STAGE);
++          uint8_t* a = sm + O_ST + s * STAGE;
++          tma_load_2d(a, &mx, &B.st_full[s], j * 64, m0, EVICT_NORMAL);
++          tma_load_2d(a + KBB, &mwg, &B.st_full[s], j * 64, n0, EVICT_LAST);
++        }
++        if (++s == NST) { s = 0; ph ^= 1; }
++      }
++      int mys = 0;
++      for (int u = 0; u < KBT; ++u) {
++        if (lane == 0) {
++          mbar_wait(&B.st_empty[s], ph ^ 1);
++          mbar_expect_tx(&B.st_full[s], STAGE);
++          tma_load_2d(sm + O_ST + s * STAGE + KBB, &mwp, &B.st_full[s], u * 64, n0, EVICT_LAST);
++        }
++        if ((lane >> 1) == u) mys = s;
++        if (++s == NST) { s = 0; ph ^= 1; }
++      }
++      __syncwarp();
++      if (lane < 2 * KBT) {
++        const int kb = lane >> 1, hf = lane & 1;
++        const unsigned tgt = B.cbase[kb] + CT_INC;
++        while ((int)(ld_acquire_gpu(&g_ctcnt[kb]) - tgt) < 0) {}
++        fence_proxy_async_global();
++        if (hf == 0 && kb < 2) K3TL(27 + kb)
++        tma_load_2d(sm + O_ST + mys * STAGE + hf * (KBB / 2), &mt, &B.st_full[mys], m0 + 64 * hf, kb * 64, EVICT_NORMAL);
++      }
++    } else if (lane == 0) {
+       // ---------------------------------------------------------------- stages: (t block, Wp' block) x KBT, (x block, Wg' block) x KBX
+       // OST: the previous kernel is the contraction itself (no ln_stats in between): t is read only after it completed
+       if (OST && pdl && !xf) pdl_wait();
+@@ -144,11 +214,20 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+       for (int k = 0; S.get(k, m0, n0); ++k) {
+         for (int j = 0; j < NKB; ++j) {
+           const int kb = kb_of(j);
+-          if (xf && k == 0 && j == KBX) pdl_wait();
++          if (!CT && xf && k == 0 && j == KBX) pdl_wait();
+           mbar_wait(&B.st_empty[s], ph ^ 1);
+           mbar_expect_tx(&B.st_full[s], STAGE);
+           uint8_t* a = sm + O_ST + s * STAGE;
+-          if (kb < KBT) {
++          if (CT && kb < KBT) {
++            // the weight half first (older than this kernel), then the t block once its 64 channels are stored (every item of them)
++            tma_load_2d(a + KBB, &mwp, &B.st_full[s], kb * 64, n0, EVICT_LAST);
++            const unsigned tgt = B.cbase[kb] + CT_INC;
++            while ((int)(ld_acquire_gpu(&g_ctcnt[kb]) - tgt) < 0) {}
++            fence_proxy_async_global();
++            if (k == 0 && kb < 2) K3TL(27 + kb)
++            tma_load_2d(a, &mt, &B.st_full[s], m0, kb * 64, EVICT_NORMAL);
++            tma_load_2d(a + KBB / 2, &mt, &B.st_full[s], m0 + 64, kb * 64, EVICT_NORMAL);
++          } else if (kb < KBT) {
+             tma_load_2d(a, &mt, &B.st_full[s], m0, kb * 64, EVICT_NORMAL);             // [64 ch][64 tok], tokens 0-63
+             tma_load_2d(a + KBB / 2, &mt, &B.st_full[s], m0 + 64, kb * 64, EVICT_NORMAL);   // tokens 64-127
+             tma_load_2d(a + KBB, &mwp, &B.st_full[s], kb * 64, n0, EVICT_LAST);
+@@ -162,15 +241,38 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+       }
+     }
+   } else if (warp == 3) {
+-    if (lane == 0) {
++    if (lane == 0 || CT) {
+       // ---------------------------------------------------------------- residual x tile [128 tok][128 ch] (2 K-blocks)
+-      if (OST && pdl && !xf) pdl_wait();
++      if (lane == 0 && OST && pdl && !xf) pdl_wait();
+       int m0, n0;
+       for (int i = 0; S.get(i, m0, n0); ++i) {
+-        if (i >= 1) mbar_wait(&B.xr_empty, (i - 1) & 1);
+-        mbar_expect_tx(&B.xr_full, 2 * KBB);
+-        tma_load_2d(sm + O_XR, &mx, &B.xr_full, n0, m0, EVICT_FIRST);
+-        tma_load_2d(sm + O_XR + KBB, &mx, &B.xr_full, n0 + 64, m0, EVICT_FIRST);
++        if (lane == 0) {
++          if (i >= 1) mbar_wait(&B.xr_empty, (i - 1) & 1);
++          mbar_expect_tx(&B.xr_full, 2 * KBB);
++          tma_load_2d(sm + O_XR, &mx, &B.xr_full, n0, m0, EVICT_FIRST);
++          tma_load_2d(sm + O_XR + KBB, &mx, &B.xr_full, n0 + 64, m0, EVICT_FIRST);
++        }
++        if (CT && i == 0) {
++          // ------------------------------------------------------------ CT: the contraction operands (after the front: the wait),
++          // one box a lane (ctr's boxes: outgoing A rows i / B rows j as two 64-wide K halves, incoming rows k as two 64-wide MN halves:
++          // the same coordinates); the second item's once the first item's staging (its A region) has been stored
++          // [64][64] boxes, one a lane (8 lanes): lane = (operand A / B, half, row half); with ct_split (flags bit 7) the two K halves
++          // complete on their own barriers (the MMA starts on the first). Outgoing: K half = the 64-wide column box (kh), rows i / j split
++          // in two; incoming: K = rows k, so K half = the row half, the 64-wide MN box (h) in the other bit
++          pdl_wait();
++          if (lane == 0) K3TL(24)
++          const int c = (int)blockIdx.x;
++          const int pa = c, pb = c + (cdir == 0 ? 2 * cd : cd);
++          const bool inc = cdir == 2 || (cdir == 0 && c >= cd);
++          const int op = lane >> 2, hb = (lane >> 1) & 1, lb = lane & 1;   // inc: hb = MN half, lb = K half; out: hb = K half, lb = row half
++          const int kh = inc ? lb : hb;
++          uint64_t* bar = (ct_split && kh) ? &B.ct_full2 : &B.ct_full;
++          if (lane == 0) mbar_expect_tx(&B.ct_full, ct_split ? 2 * KBB : 4 * KBB);
++          if (lane == 1 && ct_split) mbar_expect_tx(&B.ct_full2, 2 * KBB);
++          __syncwarp();
++          if (lane < 8)
++            tma_load_2d(sm + LY::O_CT + op * 2 * KBB + hb * KBB + lb * (KBB / 2), &mpl, bar, hb * 64, (op ? pb : pa) * L + lb * 64, EVICT_FIRST);
++        }
+       }
+     }
+   } else if (warp == 1) {
+@@ -185,6 +287,32 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+ #pragma unroll 1
+       for (int j = 0; j < NKB; ++j) {
+         const int kb = kb_of(j);
++        if (CT && i == 0 && j == KBX) {
++          // ---------------------------------------------------------- CT: the contraction items (ctr's MMAs, the same order: its bits)
++          const uint32_t id_o = idesc_bf16_mj(128, 128, 0, 0), id_i = idesc_bf16_mj(128, 128, 1, 1);
++          for (int q = 0; q < nci; ++q) {
++            const int c = (int)blockIdx.x + q * G;
++            const bool inc = cdir == 2 || (cdir == 0 && c >= cd);
++            mbar_wait(&B.ct_full, q & 1);   // !ct_split: all eight boxes on this barrier
++            tc_fence_after();
++            if (ldr && q == 0) K3TL(25)
++            if (ldr) {
++              const uint32_t acc = tmem + (q ? 0u : 256u);
++              const uint32_t a = su + LY::O_CT, b = a + 2 * KBB;
++#pragma unroll
++              for (int kk = 0; kk < 8; ++kk) {
++                if (kk == 4 && ct_split) { mbar_wait(&B.ct_full2, q & 1); tc_fence_after(); }
++                if (!inc)
++                  umma_ss(acc, desc_k_sw128(a + (kk >> 2) * KBB + (kk & 3) * 32), desc_k_sw128(b + (kk >> 2) * KBB + (kk & 3) * 32), id_o,
++                          kk != 0);
++                else
++                  umma_ss(acc, desc_mn_sw128(a + kk * 2048, KBB), desc_mn_sw128(b + kk * 2048, KBB), id_i, kk != 0);
++              }
++              umma_commit(&B.ct_acc);
++            }
++            __syncwarp();
++          }
++        }
+         mbar_wait(&B.st_full[s], ph);
+         if (ldr && i < 2 && (kb == 0 || kb == NKB - 1)) K3TL(2 + 3 * i + (kb ? 1 : 0))
+         tc_fence_after();
+@@ -305,6 +433,51 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+ #else
+ #define VSL(i) ldf2(vs + (i))
+ #endif
++    if (CT) {
++      // ---------------------------------------------------------------- CT: the contraction epilogue (ctr's: warp = lane quarter x
++      // 64-column half, TMEM -> bf16 -> SW128 [32 rows][64 cols] staging in the item's A region -> TMA store), then the release of
++      // the item's 64-channel block counter
++      static_assert(!CT || EPW == 8, "CT: ctr's epilogue layout");
++      const int qd = warp & 3, h = (warp - 4) >> 2;
++      const uint32_t stg = su + LY::O_CT + (warp - 4) * 4096;
++      for (int q = 0; q < nci; ++q) {
++        const int c = (int)blockIdx.x + q * G;
++        mbar_wait(&B.ct_acc, q & 1);
++        tc_fence_after();
++        if (warp == 4 && lane == 0 && q == 0) K3TL(29)
++        const uint32_t ta = tmem + lane_off + (q ? 0u : 256u) + h * 64;
++#pragma unroll
++        for (int cc = 0; cc < 2; ++cc) {
++          uint32_t v[32];
++          tmem_ld32(ta + cc * 32, v);
++          tmem_wait_ld();
++#pragma unroll
++          for (int k = 0; k < 4; ++k) {
++            auto pk = [&](int e) { return pack_bf16(__uint_as_float(v[8 * k + 2 * e]), __uint_as_float(v[8 * k + 2 * e + 1])); };
++            sts128(stg + sw128(lane, cc * 4 + k), pk(0), pk(1), pk(2), pk(3));
++          }
++        }
++        tc_fence_before();
++        fence_async_smem();
++        __syncwarp();
++        if (lane == 0) {
++          tma_store_2d(&mts, sm + LY::O_CT + (warp - 4) * 4096, 64 * h, c * L + qd * 32);
++          bulk_commit();
++          if (warp == 4 && q == 0) K3TL(30)
++          bulk_wait<0>();
++          if (warp == 4 && q == 0) K3TL(31)
++          if (ct_relax) {
++            asm volatile("red.relaxed.gpu.global.add.u32 [%0], 1;" ::"l"(&g_ctcnt[c >> 6]) : "memory");
++          } else {
++            fence_proxy_async_global();
++            asm volatile("red.release.gpu.global.add.u32 [%0], 1;" ::"l"(&g_ctcnt[c >> 6]) : "memory");
++          }
++          if (warp == 4 && q == 0) K3TL(26)
++          if (q + 1 < nci) mbar_arrive(&B.ct_free);
++        }
++        __syncwarp();
++      }
++    }
+     if (pdl) pdl_wait();   // mu_o / rs_o are the previous kernel's (wide_ln_stats) output (OST: mu_i / rs_i, older); t, x, the weights and vec are older
+     int m0, n0;
+     for (int i = 0; S.get(i, m0, n0); ++i) {
+@@ -463,7 +636,8 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
+     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+     tmap::launch_pdl(kern, dim3(g), dim3(nthr), smem, st, (pdl & 1) != 0, mt, mwp, mx, mwg, my, mps, mgs, (const float*)vec.data_ptr<float>(),
+                      (const float*)mu_o.data_ptr<float>(), (const float*)rs_o.data_ptr<float>(), (const float*)mu_i.data_ptr<float>(),
+-                     (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L, grouped, (int)(pdl & 1) | (int)(pdl & 16), 1e-5f);   // LN eps 1e-5 (the route's contract)
++                     (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L, grouped, (int)(pdl & 1) | (int)(pdl & 16), 1e-5f,   // LN eps 1e-5 (the route's contract)
++                     mt, mt, 0, 0);
+   };
+ #define K3W_CASE(DD, HH) if (D == DD && H == HH) { \
+     if (save) launch(k3w_kernel<DD, HH, 1, 0>, Lay<1>::SMEM, NTHR); \
+@@ -476,6 +650,48 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
+   TORCH_CHECK(false, "k3w_forward: unsupported (D, H) = (", D, ", ", H, ")");
+ }
+ 
++// k3c (pass 16): the contraction and the output in ONE launch (k3w CT), inference, L = 128, one sample. planes [P, L, L] bf16 (k1w's
++// output, launched with grid -2: it triggers after its own wait), t [H, L, L] bf16 scratch (written and read by this launch), x / wpq /
++// wgq / vec / mu_i / rs_i / y as k3w_forward with OST; d / dir as ctr_forward. A programmatic dependent of the front; one CTA per
++// token tile (128), every CTA resident at once (the counter waits spin), CTA c contracts channels c (+ 128).
++bool k3c_ok(int64_t D, int64_t H) {
++  return D == 128 && H == 128;
++}
++void k3c_forward(torch::Tensor x, torch::Tensor planes, torch::Tensor t, torch::Tensor wpq, torch::Tensor wgq, torch::Tensor vec,
++                 torch::Tensor mu_i, torch::Tensor rs_i, torch::Tensor y, int64_t d, int64_t dir) {
++  using namespace k3w;
++  const int64_t M = x.size(0), D = x.size(1), H = t.size(0), L = planes.size(-1), P = planes.size(0);
++  TORCH_CHECK(L == 128 && M == L * L && planes.numel() == P * L * L && t.numel() == H * M, "k3c_forward: one sample, L = 128");
++  TORCH_CHECK(dir >= 0 && dir <= 2 && P == (dir == 0 ? 4 : 2) * d && H == (dir == 0 ? 2 : 1) * d, "k3c_forward: plane / channel counts");
++  TORCH_CHECK(x.is_contiguous() && t.is_contiguous() && planes.is_contiguous() && wpq.is_contiguous() && wgq.is_contiguous() &&
++              vec.is_contiguous() && y.is_contiguous() && wpq.size(0) == D && wpq.size(1) == H && wgq.size(0) == D && wgq.size(1) == D);
++  TORCH_CHECK(k3c_ok(D, H), "k3c_forward: unsupported (D, H) = (", D, ", ", H, ")");
++  const int tiles = (int)(M / TOK), items = (int)(tiles * (D / NTILE));
++  TORCH_CHECK(tiles <= num_sms() && H == tiles && D == 128, "k3c_forward: every CTA resident, one contraction item a CTA (D128, one direction)");
++  const auto bf = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
++  auto mt = tmap::make(t.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
++  auto mwp = tmap::make(wpq.data_ptr(), bf, {(uint64_t)H, (uint64_t)D}, {(uint64_t)H * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
++  auto mx = tmap::make(x.data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
++  auto mwg = tmap::make(wgq.data_ptr(), bf, {(uint64_t)D, (uint64_t)D}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
++  auto my = tmap::make(y.data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
++  auto mpl = tmap::make(planes.data_ptr(), bf, {(uint64_t)L, (uint64_t)(P * L)}, {(uint64_t)L * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
++  // CT flags (bits 5-7, see the kernel); env TRIMUL_K3C_FLAGS overrides (A/B), read per call
++  const char* cf_env = std::getenv("TRIMUL_K3C_FLAGS");
++  const int cflags = cf_env != nullptr ? std::atoi(cf_env) : (64 | 128);
++  auto mts = tmap::make(t.data_ptr(), bf, {(uint64_t)L, (uint64_t)(H * L)}, {(uint64_t)L * 2}, {64, 32}, CU_TENSOR_MAP_SWIZZLE_128B);
++  auto st = at::cuda::getCurrentCUDAStream();
++  const float* mi = mu_i.data_ptr<float>();
++  const float* ri = rs_i.data_ptr<float>();
++  auto launch = [&](auto kern) {
++    using LY = Lay<0, 1, 1>;
++    cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, LY::SMEM);
++    tmap::launch_pdl(kern, dim3(tiles), dim3(NTHR_OST), LY::SMEM, st, true, mt, mwp, mx, mwg, my, my, my, (const float*)vec.data_ptr<float>(),
++                     mi, ri, mi, ri, (const __nv_bfloat16*)nullptr, items, (int)L, 1, 1 | 16 | (cflags & 224), 1e-5f, mpl, mts, (int)dir, (int)d);
++  };
++  launch(k3w_kernel<128, 128, 0, 1, 1>);
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++
+ torch::Tensor k3w_tl() {
+ #ifdef K3W_TL
+   torch::Tensor h = torch::empty({160, 32}, torch::kInt64);

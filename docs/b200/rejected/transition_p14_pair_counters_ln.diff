@@ -1,0 +1,96 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu
+index ab363bd2b..767d1fb27 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu
+@@ -21,6 +21,9 @@ static_assert(D_ % 128 == 0, "whole 4-column chunks per lane");
+ #ifndef H16
+ #define H16 0
+ #endif
++#ifndef TGT
++#define TGT 0                                                   // (bf16) the pair chain's per-tile targets: block 0 adds tgt_add to tgt[0 .. tiles)
++#endif
+ 
+ #if H16
+ // -DH16=1 (round 3 part 4): fp32 activations on the fp16 tensor cores (inference). x fp32 in; xn = fp16(LN(x) / s_x) out (sc[0] = 1 / s_x,
+@@ -130,10 +133,17 @@ extern "C" __global__ void __launch_bounds__(WPB * 32)
+ transition_sx_ln(const __nv_bfloat16* __restrict__ x, const float* __restrict__ gamma, const float* __restrict__ beta,
+                  __nv_bfloat16* __restrict__ xn, float* __restrict__ rstd, float* __restrict__ c1, int M, float eps, int save,
+                  const float* __restrict__ w0, const float* __restrict__ w1, const float* __restrict__ w2, __nv_bfloat16* __restrict__ o0,
+-                 __nv_bfloat16* __restrict__ o1, __nv_bfloat16* __restrict__ o2, int ncast) {
++                 __nv_bfloat16* __restrict__ o1, __nv_bfloat16* __restrict__ o2, int ncast
++#if TGT
++                 , unsigned* __restrict__ tgt, int tiles, int tgt_add
++#endif
++                 ) {
+   const int lane = threadIdx.x & 31, nrb = (M + WPB - 1) / WPB, row = blockIdx.x * WPB + (threadIdx.x >> 5);
+   pdl_wait();
+   pdl_launch();
++#if TGT
++  if (blockIdx.x == 0 && (int)threadIdx.x < tiles) atomicAdd(tgt + threadIdx.x, (unsigned)tgt_add);   // (tsx_squeeze2.cu -DCNT)
++#endif
+   if ((int)blockIdx.x >= nrb) {                                // weight casts: two 8-element groups per thread, loads first
+     const int n8 = ncast / 8, i0 = ((blockIdx.x - nrb) * blockDim.x + threadIdx.x) * 2;
+     float4 v[4];
+# CNT parts of tsx_expand2.cu / tsx_squeeze2.cu (part 14, rejected: graph +2 us)
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-67-transition_sx_squeeze2(const __grid_constant__ CUtensorMap mh, const __grid_constant__ CUtensorMap mws, const ACT* __restrict__ xg,
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-68-                       ACT* __restrict__ out
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu:69:#if CNT
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-70-                       , const unsigned* __restrict__ cnt, const unsigned* __restrict__ tgt
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-71-#endif
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-72-                       TSX_STAMP_ARG) {
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-73-  extern __shared__ __align__(1024) uint8_t sm[];
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-74-  const uint32_t su = smem_u32(sm);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-75-  Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-76-  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-77-  const int pair = blockIdx.x >> 1, rank = (int)cluster_rank();
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-78-  const bool leader = rank == 0;
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-79-  const int tile = pair / NBLK, nb = pair % NBLK, arow = tile * ROWS + rank * HR, c0 = nb * NB;
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-80-  if (tid == 0) TSX_ST(0);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-81-
+--
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-106-      if (leader) mbar_expect_tx(&B.full[lane], 2 * (AST + WST));
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-107-      load_w(lane);                                            // weights: before the wait
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu:108:#if CNT
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-109-      if (lane == 0) {                                         // this tile's h: every expand CTA of the tile has released it
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-110-        unsigned t, c;
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-111-        asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(t) : "l"(tgt + tile) : "memory");
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-112-        do asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(c) : "l"(cnt + tile) : "memory"); while ((int)(c - t) < 0);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-113-      }
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-114-      __syncwarp(STG >= 32 ? 0xffffffffu : (1u << (STG & 31)) - 1u);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-115-      asm volatile("fence.proxy.async.global;" ::: "memory"); // generic-proxy h stores -> these TMA reads
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-116-#else
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-117-      pdl_wait();
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-118-#endif
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-119-      if (lane == 0) TSX_ST(1);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze2.cu-120-      load_a(lane);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-66-transition_sx_expand2(const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mwa,
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-67-                      const __grid_constant__ CUtensorMap mwb, ACT* __restrict__ hs
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu:68:#if CNT
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-69-                      , unsigned* __restrict__ cnt
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-70-#endif
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-71-                      TSX_STAMP_ARG) {
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-72-  extern __shared__ __align__(1024) uint8_t sm[];
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-73-  const uint32_t su = smem_u32(sm);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-74-  Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-75-  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-76-  const int pair = blockIdx.x >> 1, rank = (int)cluster_rank();
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-77-  const bool leader = rank == 0;
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-78-  const int tile = pair / NP, j = pair % NP, row0 = tile * ROWS, arow = row0 + rank * HR, h0 = j * 2 * UH + rank * UH;
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-79-  if (tid == 0) TSX_ST(0);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-80-
+--
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-167-    if (warp == 4 && lane == 0) TSX_ST(7);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-168-    tc_fence_before();
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu:169:#if CNT
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-170-    named_bar_sync(1, 128 * NG);                               // every h store of this CTA is issued
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-171-    if (warp == 4 && lane == 0) {                              // release them to the squeeze CTAs of this tile (tsx_squeeze2.cu -DCNT)
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-172-      __threadfence();
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-173-      asm volatile("red.release.gpu.global.add.u32 [%0], 1;" :: "l"(cnt + tile) : "memory");
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-174-    }
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-175-#endif
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-176-  }
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-177-  __syncthreads();
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-178-  cluster_sync_relaxed();                                      // the leader's products read the peer's shared memory until mma_done
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-179-  if (tid == 0) TSX_ST(8);
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-180-  if (warp == 2) { tc_fence_after(); tmem_dealloc2(tmem, TCOLS); }
+src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2.cu-181-}

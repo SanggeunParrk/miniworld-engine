@@ -129,3 +129,36 @@ class FusedTokenDiTComposed(FusedTokenDiT):
                     build_failed("TF32 token DiT core", exc)
             cores[idx] = core
         return cores[idx]
+
+    def _hoist(self, pair, mask):
+        """The pair bias of every block. A pair wider than 128 (256: Protenix-v2 / ESMFold2, 512: IntelliFold2; B200 -- H100 takes the native
+        block) is not an input of ``pair_bias_all``'s 128-wide LayerNorm rows: the CUDA LayerNorm rows over its width (``layernorm_rows``,
+        128-512 columns), one cuBLAS GEMM into the head-major [nb H, L, L] planes, the masked keys -inf (as ``pair_bias_all``). Made once per
+        pair (the runner's bias cache), so the passes cost nothing a solver step."""
+        if self.dp == 128 or not hasattr(self.K, "layernorm_rows") or self._tf32_core(pair.device, pair.shape[1]) is not None:
+            return super()._hoist(pair, mask)
+        L = pair.shape[1]
+        self._bias_perm = False
+        z = pair.reshape(L * L, self.dp)
+        zh = torch.empty(z.shape, device=z.device, dtype=self.dtype)
+        self.K.layernorm_rows(z, zh, self.eps)
+        out = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
+        torch.mm(self.pw_t.t(), zh.t(), out=out.view(self.nb * self.h, L * L))
+        if mask is not None:
+            out[:, :, ~mask.reshape(L)] = float("-inf")
+        return out
+
+    def _cond(self, cond, L, D):
+        """The conditioning tables. A 768-wide conditioning (ESMFold2 / Boltz-2 widths) is not an input of ``layernorm_rows`` (128-512):
+        the CUDA ``cond_rows`` (LN(c) and the cast, 384 or 768 columns) as at 384, then the same two GEMMs."""
+        if self.dc != 768 or not hasattr(self.K, "cond_rows"):
+            return super()._cond(cond, L, D)
+        shared = cond.shape[0] == 1 or cond.stride(0) == 0
+        c = cond[0, 0] if shared else cond.reshape(-1, self.dc)
+        rows = c.shape[0]
+        cn = torch.empty(rows, self.dc, device=c.device, dtype=self.dtype)
+        cc = torch.empty_like(cn)
+        self.K.cond_rows(c, cn, cc, self.eps)
+        g1 = torch.addmm(self.b1, cn, self.w1.t()).view(rows, self.nb, 4, D)
+        g2 = torch.addmm(self.b2, cc, self.w2.t()).view(rows, self.nb, 2, D)
+        return g1, g2

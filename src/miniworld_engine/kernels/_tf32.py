@@ -29,6 +29,7 @@ activation tiles in the kernel +17 (launches), the same with the rounded weights
 from __future__ import annotations
 
 import contextlib
+import functools
 from typing import cast
 
 import torch
@@ -165,7 +166,7 @@ _CACHE: dict[tuple, tuple] = _capture.weight_cache("tf32.operands")
 _CACHE_MAX = 256
 
 
-def tf32_cached(sources: tuple[torch.Tensor, ...], build):
+def tf32_cached(sources: tuple[torch.Tensor, ...], build, by_address: bool = False):
     """``build()`` (a tuple of tensors made from the parameters ``sources``: their TF32 grid values, possibly stacked) memoised while torch's grad
     mode is off, i.e. for inference, where the weights do not change between calls: a launch per call costs more than the small kernels it
     feeds (ConditionedTransition / AdaLN inference at d768: +17 us on 102). The key is the identity, version and layout of the sources'
@@ -175,6 +176,8 @@ def tf32_cached(sources: tuple[torch.Tensor, ...], build):
 
     if torch.is_grad_enabled():
         return build()
+    if by_address and _b200(sources[0]):  # B200 callers that opt in (the Transition launchers): see _cached_by_address
+        return _cached_by_address(sources, build)
     bases = [t._base if t._base is not None else t for t in sources]
     key = tuple(id(b) for b in bases)  # one entry per set of parameters: a new version replaces the old one
     stamp = tuple((t._version, tuple(t.shape), t.stride(), t.storage_offset(), t.dtype) for t in sources)
@@ -190,4 +193,35 @@ def tf32_cached(sources: tuple[torch.Tensor, ...], build):
             stamp,
             value,
         )  # a dead source evicts its entry
+    return value
+
+
+@functools.lru_cache(maxsize=16)
+def _cap(index: int) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(index)
+
+
+def _b200(t: torch.Tensor) -> bool:
+    return t.is_cuda and _cap(t.device.index if t.device.index is not None else torch.cuda.current_device()) == (10, 0)
+
+
+#: B200 (capability 10.0), callers that pass ``by_address`` (the Triton Transition launchers): the TF32 operand forms keyed by the sources' addresses. The weights reach the launchers through the opaque
+#: ops (``kernels/_compile.opaque``) as fresh alias tensors every call, so the identity key of :func:`tf32_cached` never hits there and the
+#: stacked / rounded weights were rebuilt per call (Transition fp32 inference: a stack and two rounding launches, ~8 us of a 70 us call at
+#: [1, 2048, 768] n 2). The key is (address, shape, stride, offset, dtype, version) of each source; like every engine weight cache it is
+#: dropped by ``_capture.clear_weight_caches`` (the contract for replacing weights: a new tensor at a freed one's address). Other cards
+#: keep the identity key.
+_ADDR_CACHE: dict[tuple, object] = _capture.weight_cache("tf32.operands.address")
+
+
+def _cached_by_address(sources: tuple[torch.Tensor, ...], build):
+    key = tuple((t.data_ptr(), t.device.index, tuple(t.shape), t.stride(), t.dtype, t._version) for t in sources)
+    hit = _ADDR_CACHE.get(key)
+    if hit is not None:
+        return _capture.hold(hit)
+    value = build()
+    if not torch.cuda.is_current_stream_capturing():
+        if len(_ADDR_CACHE) >= _CACHE_MAX:
+            _ADDR_CACHE.pop(next(iter(_ADDR_CACHE)))
+        _ADDR_CACHE[key] = value
     return value

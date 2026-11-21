@@ -1,0 +1,361 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+index c9d0fce08..42ad50c1d 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+@@ -57,6 +57,11 @@ CELLS_H16: dict[tuple[int, int, bool], int] = {(384, 2, True): 16, (768, 2, True
+ #: the fewest tiles a cell takes the fp16 chain from. Round 3 part 7: none (fp32 [1, 128, 384]: TF32 18.0 -> 14.3 us, YELLOW 1.0014 x tol,
+ #: inside the standard; part 4 had kept that one tile on the TF32 chain for it)
+ H16_MIN_TILES: dict[int, int] = {}
++#: (round 3 part 12) bf16 inference: the LayerNorm inside the expand launch (``tsx_expand.cu -DLNF=1``: per-row statistics from global
++#: memory, each x K-block normalised in place in shared memory; the same xn bits as ``tsx_ln``), two launches instead of three. False: A/B
++LNF = True
++#: analysis only: a uint64 tensor the -DLNF_STAMP build writes its globaltimer stamps into (None: off)
++STAMP = None
+ #: A/B overrides of the picks: None (automatic) or a build of the lists above
+ EXPAND_FORCE = None
+ SQUEEZE_FORCE = None
+@@ -80,6 +85,7 @@ def _specs(d: int, n: int, f32: bool, h16: bool = False) -> tuple[tuple[str, str
+     return (
+         ("ln", "widths/tsx_ln.cu", (f"-DDIM={d}", f"-DF32={int(f32)}")),
+         *((f"expand{c}_{k}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", f"-DSK={k}")) for c, k in (EXPAND_F32 if f32 else EXPAND)),
++        *((f"expand{c}_{k}l", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", f"-DSK={k}", "-DLNF=1", *__import__("os").environ.get("TSX_LNFX", "").split())) for c, k in (() if f32 else EXPAND)),
+         *((f"sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in (SQUEEZE_F32[d] if f32 else SQUEEZE)),
+     )
+ 
+@@ -198,6 +204,22 @@ def chain(x, gamma, beta, wa, wb, ws, eps: float, save: bool):
+     mean = torch.empty((m if save else 1,), dtype=torch.float32, device=x.device)
+     rstd = torch.empty_like(mean)
+     ab = torch.empty((m, 2 * h), dtype=x.dtype, device=x.device) if save else x.new_empty((1, 1))
++    if LNF and not save and not f32:  # the LayerNorm in the expand launch (round 3 part 12): x by TMA, normalised in shared memory
++        ch, sk = EXPAND_FORCE or _pick(EXPAND, tiles, h, ROWS, d, esz, nsm, 2)
++        ext.launch_kernel(
++            f"{tag}_expand{ch}_{sk}l",
++            "transition_sx_expand",
++            tiles * (h // ch) * sk,
++            384,
++            sk,
++            [t(x, d, m, bke, 128), t(wa, d, h, bke, ch), t(wb, d, h, bke, ch), hid, STAMP if STAMP is not None else hid, hid, 0, 1, h, 0, x, gamma, beta, float(eps)],
++            True,
++        )
++        nb, sq = SQUEEZE_FORCE or _pick(SQUEEZE, tiles, d, ROWS, h, esz, nsm, 1)
++        ext.launch_kernel(
++            f"{tag}_sq{nb}_{sq}", "transition_sx_squeeze", tiles * (d // nb) * sq, 256, sq, [t(hid, h, m, bke, 128), t(ws, h, d, bke, nb), x, out], True
++        )
++        return out, xn, mean, rstd, ab
+     ext.launch_kernel(
+         f"{tag}_ln",
+         "transition_sx_ln",
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 339629d02..dc6f74ea3 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -96,6 +96,8 @@ SMALL_FWD_TILES = 16
+ #: its own layout (MN-major where needed): no transposed or concatenated weight copies per call; with fp32 masters the training
+ #: forward's casts ride in the LayerNorm launch.
+ SX_CH = (32, 64)
++#: (round 3 part 12) inference: the LayerNorm inside the expand launch (``tsx_expand.cu -DLNF=1``, the same xn bits), two launches. False: A/B
++SX_LNF = True
+ #: squeeze builds: (output columns per cluster, hidden split = cluster size)
+ SX_SQ = ((32, 1), (64, 1), (32, 2), (64, 2))
+ #: weight-gradient output tile widths (columns per CTA), narrowest first
+@@ -235,6 +237,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+         (
+             ("sx_ln", "widths/tsx_ln.cu", (f"-DDIM={d}",)),
+             *((f"sx_expand{c}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}")) for c in SX_CH),
++            *((f"sx_expand{c}l", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", "-DLNF=1", *__import__("os").environ.get("TSX_LNFX", "").split())) for c in SX_CH),
+             *((f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in SX_SQ),
+             ("sx_gate", "widths/tsx_gate.cu", dim),
+             ("sx_gdx", "widths/tsx_gdx.cu", dim),
+@@ -388,6 +391,28 @@ def _sx_forward(k, x, gamma, beta, wa, wb, ws, eps, save, out, rstd, c1, cast=No
+     xn = torch.empty_like(x)  # the expand's A operand, kept for the backward with save
+     hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
+     a, b = ((torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph()) for _ in range(2))
++    if SX_LNF and not save and cast is None:  # (round 3 part 12) the LayerNorm in the expand launch: two launches
++        ch = _sx_ch(h, tiles, k.nsm)
++        k.run(
++            f"sx_expand{ch}l",
++            "transition_sx_expand",
++            tiles * (h // ch),
++            (k.tmap(x, d, m, 64, 128), k.tmap(wa, d, h, 64, ch), k.tmap(wb, d, h, 64, ch), hid, a, b, 0, 1, h, 0, x, gamma, beta, float(eps)),
++            block=384,
++            cluster=1,
++            pdl=True,
++        )
++        nb, sk = _sx_sq(d, tiles, h, k.nsm)
++        k.run(
++            f"sx_sq{nb}_{sk}",
++            "transition_sx_squeeze",
++            tiles * (d // nb) * sk,
++            (k.tmap(hid, h, m, 64, 128), k.tmap(ws, h, d, 64, nb), x, out),
++            block=256,
++            cluster=sk,
++            pdl=True,
++        )
++        return out, x.new_empty((1, d)), rstd, c1, ph(), ph(), ph()
+     nrb = (m + 7) // 8
+     k.run(
+         "sx_ln",
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+index 632e95ee3..938c0274f 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+@@ -37,6 +37,10 @@ using namespace s100;
+ #ifndef H16
+ #define H16 0                                                   // round 3 part 4: fp32 activations on the fp16 tensor cores (inference)
+ #endif
++#ifndef LNF
++#define LNF 0                                                   // round 3 part 12: the LayerNorm inside this kernel (bf16 inference)
++#endif
++static_assert(!LNF || (!F32 && !H16), "LNF: bf16 activations only");
+ static_assert(!(H16 && F32), "H16 is its own operand type");
+ constexpr int ESZ = F32 ? 4 : 2, BKE = 128 / ESZ;              // element bytes, elements of K per 128-byte K-block row
+ constexpr int D_ = DIM, H_ = HID, ROWS = 128, KD = D_ / SK, NKB = KD / BKE, NCHK = H_ / CH, HC = CH / 2;
+@@ -46,9 +50,10 @@ static_assert(SK == 1 || W_ == 16 || W_ == 32, "owner column groups of 16 or 32
+ constexpr int KBT = ROWS * 128;                                // one [128 rows] K-block of xn, 16 KB
+ constexpr int WKB = 2 * CH * 128;                              // one K-block of [Wa_j; Wb_j]: 2 CH rows x 128 B
+ constexpr int RED = SK > 1 ? SK * ROWS * 2 * W_ * 4 : 0;       // partials received from the other ranks: [SK][128][a W | b W] fp32
+-constexpr int CAP = (232448 - 1024 - RED) / (KBT + WKB);
++constexpr int SRES = LNF ? 1024 + 8 * KD : 0, BARB = LNF ? 512 : 256;     // LNF: per-row rstd / -mean rstd; the barrier block
++constexpr int CAP = (232448 - 1024 - RED - SRES - (BARB - 256)) / (KBT + WKB);
+ constexpr int STG = NKB < CAP ? NKB : CAP;                     // ring stages (the whole K where it fits)
+-constexpr int O_X = 0, O_W = STG * KBT, O_RED = O_W + STG * WKB, O_BAR = O_RED + RED, SMEM_BYTES = O_BAR + 256;
++constexpr int O_X = 0, O_W = STG * KBT, O_RED = O_W + STG * WKB, O_BAR = O_RED + RED, O_ST = O_BAR + BARB, SMEM_BYTES = O_ST + SRES;
+ static_assert(SMEM_BYTES <= 232448 && STG >= 2, "shared memory budget");
+ constexpr uint32_t TCOLS = 2 * CH;
+ #if F32
+@@ -74,9 +79,12 @@ DEVI void mma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) { umma_ss(d, a,
+ 
+ struct Bars {
+   uint64_t full[STG], empty[STG], mma_done, red_full;
++#if LNF
++  uint64_t nfull[STG];                                         // the stage's x K-block normalised in place (8 LayerNorm warps)
++#endif
+   uint32_t tmem;
+ };
+-static_assert(sizeof(Bars) <= 256, "barrier block");
++static_assert(sizeof(Bars) <= BARB, "barrier block");
+ 
+ template <int N> DEVI void tld(uint32_t taddr, uint32_t (&r)[N]) {
+   if constexpr (N == 32) tmem_ld32(taddr, r); else tmem_ld16(taddr, r);
+@@ -104,6 +112,9 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+                      ACT* __restrict__ bs, int save, int wpre, int ldab, int boff
+ #if H16
+                      , const float* __restrict__ sc
++#endif
++#if LNF
++                     , const __nv_bfloat16* __restrict__ xg, const float* __restrict__ gamma, const float* __restrict__ beta, float eps
+ #endif
+                      ) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+@@ -112,21 +123,45 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int cl = blockIdx.x / SK, rank = SK > 1 ? (int)cluster_rank() : 0;
+   const int tile = cl / NCHK, j = cl % NCHK, row0 = tile * ROWS, h0 = j * CH, k0 = rank * KD;
++#ifdef LNF_STAMP
++#define STP(k, c) do { if (c) { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(as_)[blockIdx.x * 16 + (k)] = _t; } } while (0)
++#else
++#define STP(k, c) do { } while (0)
++#endif
++  STP(0, tid == 128);
+ 
+   if (tid == 0) {
+-    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
++    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1);
++#if LNF
++      mbar_init(&B.nfull[s], 8);
++#endif
++    }
+     mbar_init(&B.mma_done, 1);
+     if (SK > 1) { mbar_init(&B.red_full, 1); mbar_expect_tx(&B.red_full, (SK - 1) * ROWS * 2 * W_ * 4); }   // the other ranks' partials
+     fence_barrier_init();
+     fence_proxy_async();
+     prefetch_map(&mxn); prefetch_map(&mwa); prefetch_map(&mwb);
++  }
++  if (warp == 0) {
++    __syncwarp();
++    // weights first: they do not depend on the LayerNorm kernel. One lane per stage (round 3 part 12: a single issuing thread takes
++    // ~600 clocks a TMA load whatever the box size; the lanes issue in parallel)
+     if (wpre)
+-      for (int kb = 0; kb < STG; ++kb) {                        // weights first: they do not depend on the LayerNorm kernel
++      for (int kb = lane; kb < STG; kb += 32) {
+         mbar_expect_tx(&B.full[kb], KBT + WKB);
+         tma_load_2d(su + O_W + kb * WKB, &mwa, &B.full[kb], k0 + kb * BKE, h0);
+         tma_load_2d(su + O_W + kb * WKB + CH * 128, &mwb, &B.full[kb], k0 + kb * BKE, h0);
+       }
+   }
++#if LNF
++  if (warp >= 4) {                                             // gamma / beta of this K slice to shared memory (parameters: before the wait)
++    float4* gs = reinterpret_cast<float4*>(sm + O_ST + 1024);
++    for (int i = tid - 128; i < KD / 4; i += 256) {
++      gs[i] = __ldg(reinterpret_cast<const float4*>(gamma + k0) + i);
++      gs[KD / 4 + i] = __ldg(reinterpret_cast<const float4*>(beta + k0) + i);
++    }
++  }
++#endif
+   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), TCOLS); tmem_relinquish(); }
+   tc_fence_before();
+   __syncthreads();
+@@ -134,11 +169,20 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
+   pdl_wait();                                                  // xn is complete and visible
++  STP(1, tid == 128);
+   pdl_launch();                                                // the squeeze may start its prologue
+ 
+   if (warp == 0) {
++    for (int kb = lane; kb < STG; kb += 32) {                  // the first ring cycle: one lane per stage
++      if (!wpre) {
++        mbar_expect_tx(&B.full[kb], KBT + WKB);
++        tma_load_2d(su + O_W + kb * WKB, &mwa, &B.full[kb], k0 + kb * BKE, h0);
++        tma_load_2d(su + O_W + kb * WKB + CH * 128, &mwb, &B.full[kb], k0 + kb * BKE, h0);
++      }
++      tma_load_2d(su + O_X + kb * KBT, &mxn, &B.full[kb], k0 + kb * BKE, row0);
++    }
+     if (lane == 0)
+-      for (int kb = 0; kb < NKB; ++kb) {
++      for (int kb = STG; kb < NKB; ++kb) {                     // the refills in order (one waiting lane)
+         const int s = kb % STG;
+         if (kb >= STG) mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
+         if (!wpre || kb >= STG) {                              // (wpre 0: the LayerNorm launch wrote the weights, complete only now)
+@@ -154,6 +198,10 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+     for (int kb = 0; kb < NKB; ++kb) {
+       const int s = kb % STG;
+       mbar_wait(&B.full[s], (kb / STG) & 1);
++#if LNF
++      mbar_wait(&B.nfull[s], (kb / STG) & 1);   // and normalised in place
++#endif
++      STP(kb == 0 ? 7 : 8, lane == 0 && (kb == 0 || kb == NKB - 1));
+       tc_fence_after();
+       const uint64_t da = desc_k128(su + O_X + s * KBT), db = desc_k128(su + O_W + s * WKB);
+       if (elect_one()) {
+@@ -165,6 +213,97 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+       __syncwarp();
+     }
+   } else if (warp >= 4) {
++#if LNF
++    {
++      // ---------------------------------------------------------------------------------------- the LayerNorm (tsx_ln.cu's arithmetic:
++      // the same xn bits). Statistics: warp w of the 8 takes rows 16 w .. 16 w + 15 of the tile from global memory (one warp per row,
++      // D / 128 eight-byte chunks per lane, eight rows in flight), rstd and -mean rstd to shared memory. Then each stage's x K-block,
++      // TMA-loaded in the 128-byte swizzled layout the MMA reads, is normalised in place (thread t: row t / 2, four 16-byte chunks)
++      // and handed to the MMA warp by nfull[s] (generic-proxy writes fenced for the async proxy before the arrive).
++      constexpr int PER = D_ / 128, RB = PER <= 3 ? 16 : 8;
++      float* st = reinterpret_cast<float*>(sm + O_ST);
++      const int ew = warp - 4;
++#ifndef LNF_NOSTAT
++#pragma unroll 1
++      for (int rb = 0; rb < 16; rb += RB) {
++        uint2 v[RB][PER];
++#pragma unroll
++        for (int i = 0; i < RB; ++i) {
++          const uint2* xr = reinterpret_cast<const uint2*>(xg + (size_t)(row0 + ew * 16 + rb + i) * D_);
++#pragma unroll
++          for (int c = 0; c < PER; ++c) v[i][c] = xr[lane + 32 * c];
++        }
++#pragma unroll
++        for (int i = 0; i < RB; ++i) {
++          f2 s2 = mk2(0.f, 0.f);
++#pragma unroll
++          for (int c = 0; c < PER; ++c)
++            s2 = add2(s2, add2(mk2u(v[i][c].x << 16, v[i][c].x & 0xffff0000u), mk2u(v[i][c].y << 16, v[i][c].y & 0xffff0000u)));
++          float s = lo2(s2) + hi2(s2);
++#pragma unroll
++          for (int o = 16; o; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
++          const float mean = s * (1.f / D_);
++          const f2 nm2 = mk2(-mean, -mean);
++          f2 q2 = mk2(0.f, 0.f);
++#pragma unroll
++          for (int c = 0; c < PER; ++c) {
++            const f2 d0 = add2(mk2u(v[i][c].x << 16, v[i][c].x & 0xffff0000u), nm2);
++            const f2 d1 = add2(mk2u(v[i][c].y << 16, v[i][c].y & 0xffff0000u), nm2);
++            q2 = fma2(d0, d0, q2);
++            q2 = fma2(d1, d1, q2);
++          }
++          float q = lo2(q2) + hi2(q2);
++#pragma unroll
++          for (int o = 16; o; o >>= 1) q += __shfl_xor_sync(0xffffffffu, q, o);
++          const float rs = rsqrtf(q * (1.f / D_) + eps);
++          if (lane == 0) { st[ew * 16 + rb + i] = rs; st[128 + ew * 16 + rb + i] = -(mean * rs); }
++        }
++      }
++#else
++      if (lane < 16) { st[ew * 16 + lane] = 1.f; st[128 + ew * 16 + lane] = 0.f; }
++#endif
++      named_bar_sync(1, 256);
++      STP(2, tid == 128);
++      const int t = tid - 128, rr = t >> 1;
++      const float rs = st[rr], ncc = st[128 + rr];
++      const f2 rs2 = mk2(rs, rs), ncc2 = mk2(ncc, ncc);
++#pragma unroll 1
++      for (int kb = 0; kb < NKB; ++kb) {
++        const int s = kb % STG;
++        mbar_wait(&B.full[s], (kb / STG) & 1);
++        const uint32_t base = su + O_X + s * KBT + rr * 128;
++#ifndef LNF_NONORM
++        uint4 w[4];
++#pragma unroll
++        for (int p = 0; p < 4; ++p) w[p] = lds128(base + (((t & 1) * 4 + p) << 4));
++#pragma unroll
++        for (int p = 0; p < 4; ++p) {
++          const int col = kb * BKE + ((((t & 1) * 4 + p) ^ (rr & 7)) << 3);   // in the K slice
++          const uint32_t ga_ = su + O_ST + 1024 + col * 4, gb_ = ga_ + KD * 4;
++          const uint4 ga4 = lds128(ga_), gb4 = lds128(ga_ + 16), ba4 = lds128(gb_), bb4 = lds128(gb_ + 16);
++          const float4 ga = make_float4(__uint_as_float(ga4.x), __uint_as_float(ga4.y), __uint_as_float(ga4.z), __uint_as_float(ga4.w));
++          const float4 gb = make_float4(__uint_as_float(gb4.x), __uint_as_float(gb4.y), __uint_as_float(gb4.z), __uint_as_float(gb4.w));
++          const float4 ba = make_float4(__uint_as_float(ba4.x), __uint_as_float(ba4.y), __uint_as_float(ba4.z), __uint_as_float(ba4.w));
++          const float4 bb = make_float4(__uint_as_float(bb4.x), __uint_as_float(bb4.y), __uint_as_float(bb4.z), __uint_as_float(bb4.w));
++          const uint32_t xw[4] = {w[p].x, w[p].y, w[p].z, w[p].w};
++          const float gg[8] = {ga.x, ga.y, ga.z, ga.w, gb.x, gb.y, gb.z, gb.w}, bv8[8] = {ba.x, ba.y, ba.z, ba.w, bb.x, bb.y, bb.z, bb.w};
++          uint32_t o[4];
++#pragma unroll
++          for (int e = 0; e < 4; ++e) {
++            const f2 g0 = mk2(gg[2 * e], gg[2 * e + 1]), b0 = mk2(bv8[2 * e], bv8[2 * e + 1]);
++            const f2 y0 = fma2(mk2u(xw[e] << 16, xw[e] & 0xffff0000u), mul2(rs2, g0), fma2(ncc2, g0, b0));   // (x rs - mean rs) g + b
++            o[e] = pack_bf16(lo2(y0), hi2(y0));
++          }
++          sts128(base + (((t & 1) * 4 + p) << 4), make_uint4(o[0], o[1], o[2], o[3]));
++        }
++#endif
++        fence_proxy_async();
++        __syncwarp();
++        if (lane == 0) mbar_arrive(&B.nfull[s]);
++        STP(kb == 0 ? 3 : 4, tid == 128 && (kb == 0 || kb == NKB - 1));
++      }
++    }
++#endif
+ #if H16
+     const float s1 = __ldg(sc + 1), s2 = __ldg(sc + 2);
+ #endif
+@@ -280,6 +419,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+     }
+ #endif
+   }
++  STP(6, tid == 128);
+   __syncthreads();
+   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, TCOLS); }
+ }
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+index a0f0ded06..e7d2e5b19 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+@@ -108,13 +108,14 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+   const uint32_t tmem = B.tmem;
+ 
+   if (warp == 0) {
++    // the first ring cycle one lane per stage (round 3 part 12: a single issuing thread takes ~600 clocks a TMA load)
++    for (int kb = lane; kb < STG; kb += 32) {                  // the weights first: they do not depend on the expand
++      mbar_expect_tx(&B.full[kb], KBT + WBT);
++      tma_load_2d(su + O_B + kb * WBT, &mws, &B.full[kb], k0 + kb * BKE, nb * NB);
++    }
++    pdl_wait();
++    for (int kb = lane; kb < STG; kb += 32) tma_load_2d(su + O_A + kb * KBT, &mh, &B.full[kb], k0 + kb * BKE, row0);
+     if (lane == 0) {
+-      for (int kb = 0; kb < STG; ++kb) {                        // the weights first: they do not depend on the expand
+-        mbar_expect_tx(&B.full[kb], KBT + WBT);
+-        tma_load_2d(su + O_B + kb * WBT, &mws, &B.full[kb], k0 + kb * BKE, nb * NB);
+-      }
+-      pdl_wait();
+-      for (int kb = 0; kb < STG; ++kb) tma_load_2d(su + O_A + kb * KBT, &mh, &B.full[kb], k0 + kb * BKE, row0);
+       for (int kb = STG; kb < NKB; ++kb) {
+         const int s = kb % STG;
+         mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);

@@ -302,7 +302,6 @@ __global__ void __launch_bounds__(1024) colsum1_kernel(const float* __restrict__
 }  // namespace sm100
 
 // ---------------------------------------------------------------- host: tensor maps
-#ifndef SM100_NO_HOST
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 namespace sm100 {
@@ -385,4 +384,3 @@ inline int num_sms(int dev) {
   return sms[dev];
 }
 }  // namespace sm100
-#endif

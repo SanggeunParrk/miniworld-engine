@@ -1,0 +1,115 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index f015c887b..2497694de 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -53,7 +53,14 @@ constexpr int THREADS = G3 ? 480 : 448 + 32 * TA_SPLIT;   // 0 TMA, 1 MMA (QK^T)
+ static_assert(!G3 || TA_SPLIT, "R = 3 needs the two issue warps");
+ constexpr int SMEM = 1024 + (2 * R * QT + NKV * 2 * KVT + NB * BT) * 2 + 2 * 2 * R * BM * 4 + 2 * R * BM * 4 + 512;   // + the row sums / offsets for the epilogue
+ constexpr int NS = 3;                                      // S/P TMEM buffers: with two, a group's buffer sat idle through PV + QK^T
+-constexpr int COL_S = 0, COL_O = NS * BN;                  // S/P [NS][128] | O [R rows][32] (single: the next task's first PV waits the drain)
++#ifndef TA_OB2
++#define TA_OB2 1        // forward, two-row build: O double-buffered in TMEM (the next task's PVs do not wait for this task's drain)
++#endif
++constexpr int COL_S = 0, COL_O = NS * BN;                  // S/P [NS][128] | O [OB][R rows][32]
++// B200 2026-11-18 (round 3 part 8): with two rows a task (L <= 256: four sub-steps a task) the next task's first PV waited for the
++// epilogue warps to drain O; two O buffers by task parity fill the 512 columns exactly (3 x 128 + 2 x 2 x 32).  The same bits.
++constexpr int OB = (!G3 && TA_OB2 && NS * BN + 2 * R * D <= 512) ? 2 : 1;
++__host__ __device__ constexpr int col_o(int task) { return COL_O + (OB == 2 ? (task & 1) * R * D : 0); }
+ constexpr uint32_t ID_S = idesc_bf16(128, BN, 0, 0);       // A = Q K-major, B = K K-major
+ constexpr uint32_t ID_O = idesc_bf16(128, D, 0, 1);        // A = P from TMEM, B = V MN-major
+ constexpr float L2E = 1.4426950408889634f;
+@@ -160,9 +167,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+   uint64_t* be = bf + NB;            // [NB]  count 8: both softmax groups are done with the bias tile
+   uint64_t* sf = be + NB;            // [NS]  S of the sub-step ready
+   uint64_t* pf = sf + NS;            // [NS]  count 4: P written (over S)
+-  uint64_t* of = pf + NS;            // [1]   the task's O complete
+-  uint64_t* oe = of + 1;             // [1]   count 4: the epilogue drained O
+-  uint64_t* lf = oe + 1;             // [2]   count 8: both groups wrote the task's row sums
++  uint64_t* of = pf + NS;            // [OB]  the task's O complete (by task parity with two O buffers)
++  uint64_t* oe = of + OB;            // [OB]  count 4: the epilogue drained O
++  uint64_t* lf = oe + OB;            // [2]   count 8: both groups wrote the task's row sums
+   uint64_t* rof = lf + 2;            // [R]   (R = 3) the row's O complete: its group drains it
+   uint32_t* tslot = reinterpret_cast<uint32_t*>(rof + R);
+   FT0
+@@ -170,7 +177,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+   if (tid == 0) {
+     for (int k = 0; k < 2; ++k) { bar_init(qf + k, 1); bar_init(qe + k, 1); }
+     for (int k = 0; k < NS; ++k) { bar_init(sf + k, 1); bar_init(pf + k, 4); }
+-    bar_init(of, 1); bar_init(oe, 4); bar_init(lf, 8); bar_init(lf + 1, 8);
++    for (int k = 0; k < OB; ++k) { bar_init(of + k, 1); bar_init(oe + k, 4); }
++    bar_init(lf, 8); bar_init(lf + 1, 8);
+     for (int k = 0; k < NKV; ++k) { bar_init(kvf + k, 1); bar_init(kve + k, 1); }
+     for (int k = 0; k < NB; ++k) { bar_init(bf + k, 1); bar_init(be + k, 4 * NGR); }
+     for (int k = 0; k < R; ++k) bar_init(rof + k, 1);
+@@ -266,19 +274,19 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+       FT(4);
+       wait(pf + b, bp);
+       FT(1);
+-      if (!G3 && w == 0 && k >= 1) wait(oe, (k - 1) & 1);   // the previous task's O was drained (R = 3: the row's group arrives pf after its drain)
++      if (!G3 && w == 0 && k >= OB) wait(oe + (OB == 2 ? (k & 1) : 0), ((k - OB) / OB) & 1);   // O buffer k % OB drained (task k - OB) (R = 3: the row's group arrives pf after its drain)
+       FT(2);
+       tc_fence_after();
+       if (elect_one()) {
+         const __nv_bfloat16* v = sKV + st * 2 * KVT + KVT;
+-        const uint32_t o = tmem + COL_O + r * D;
++        const uint32_t o = tmem + col_o(k) + r * D;
+         if (!TA_NOMMA)
+ #pragma unroll
+         for (int ks = 0; ks < BN / 16; ++ks)
+           mma_ts(o, tmem + COL_S + b * BN + ks * 8, sdesc(sa(v + ks * 16 * D), KVT * 2, 512, 4), ID_O, (j | ks) ? 1u : 0u);
+         mma_commit(kve + st);
+         if (G3) { if (w >= SPT - R) mma_commit(rof + r); }
+-        else if (w == SPT - 1) mma_commit(of);
++        else if (w == SPT - 1) mma_commit(of + (OB == 2 ? (k & 1) : 0));
+       }
+       __syncwarp();
+     };
+@@ -525,7 +533,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+                     wait(kve + yp % NKV, (yp / NKV) & 1);
+                     tc_fence_after();
+                   }
+-                  const uint32_t oa = tmem_at(tmem + COL_O + r * D, q * 32, 0);
++                  const uint32_t oa = tmem_at(tmem + col_o(lt) + r * D, q * 32, 0);
+ #pragma unroll 1
+                   for (int i = 0; i < D / 8; ++i) {
+                     float ov[8];
+@@ -597,7 +605,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+     for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
+       int bh, qt, g; decode(t, bh, qt, g);
+       FT(4);
+-      wait(of, lt & 1);
++      wait(of + (OB == 2 ? (lt & 1) : 0), (OB == 2 ? (lt >> 1) : lt) & 1);
+       FT(0);
+       wait(lf + (lt & 1), (lt >> 1) & 1);
+       FT(1);
+@@ -609,7 +617,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+       for (int r = 0; r < R; ++r) {
+         float o[32];
+-        tmem_ld32(tmem_at(tmem + COL_O + r * D, q * 32, 0), o);
++        tmem_ld32(tmem_at(tmem + col_o(lt) + r * D, q * 32, 0), o);
+         const float lr = sL[((lt & 1) * R + r) * BM + row];
+         const float inv = 1.f / lr;
+         if (g * R + r < N) bad |= !(lr > 0.f) || !(lr < 3.0e38f);
+@@ -619,7 +627,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+       }
+       tc_fence_before();
+       __syncwarp();
+-      if (lane == 0) arrive(oe);                 // O is free for the next task's PV GEMMs
++      if (lane == 0) arrive(oe + (OB == 2 ? (lt & 1) : 0));   // O buffer lt % OB is free for task lt + OB's PV GEMMs
+ #pragma unroll
+       for (int r = 0; r < R; ++r) {
+         if (g * R + r >= N) continue;            // a padding row
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+index b76116c37..2ab61c372 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+@@ -63,7 +63,7 @@ def _rows_per_task(length: int, bh: int = 1) -> int:
+ def _core(rows: int = 4):
+     ensure_cuda_home()
+     return load_extension(
+-        name=f"triattn_b200_core_r{rows}_v19_tt1",
++        name=f"triattn_b200_core_r{rows}_v20_tt1",
+         sources=[str(_SRC / "triattn_sm100.cu")],
+         extra_cuda_cflags=[*_flags(), f"-DTA_R={rows}"],
+         verbose=False,

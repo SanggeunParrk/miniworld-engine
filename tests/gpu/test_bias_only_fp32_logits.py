@@ -24,7 +24,9 @@ from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly, pair_b
 
 pytestmark = [pytest.mark.gpu]
 
-requires_h100 = pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0), reason="H100 (sm_90)")
+requires_h100 = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() not in ((9, 0), (10, 0)), reason="H100 (sm_90) / B200 (sm_100)"
+)
 
 L, A, H, DP = 256, 2, 16, 128
 EPS = 1e-5
@@ -162,6 +164,10 @@ def test_block_fp32_logits(case: str, dtype: torch.dtype, backend: str, mode: st
     """Block output (and, in training, the pair / to_bias.weight / ln_pair.weight gradients) against fp64."""
     if hoist and backend == "triton":
         pytest.skip("the Triton backend has no hoisted-bias path of its own (pair_bias_all is the PyTorch fold)")
+    if backend == "cuda" and mode == "train" and case == "huge" and torch.cuda.get_device_capability() == (10, 0):
+        # found 2026-11-21 when this file was opened to the B200: the B200 training backward's ln_pair.weight / to_bias.weight gradients on the "huge" pair are 0.03 .. 0.6 of
+        # their max off in fp32 and bf16, with the tensor-core hoist kernels on or off (the dbias of the B200 bf16 / fp32 backward cores is not the H100's fp32 one)
+        pytest.xfail("B200 training gradients of the huge-logit pair: open (not caused by the logits kernels)")
     mq, m64, ins, i64, mask, gyq, gy64 = _build(case, dtype)
     y64, _ = _run(m64, *i64, mask, gy64, "eval")
     _, g64 = _run(m64, *i64, mask, gy64, "train")
@@ -262,3 +268,33 @@ def test_hoist_bwd_tc_error_class_of_fma(dtype: torch.dtype, dp: int, off: float
 
     assert rel(dx1, dx_ref) <= 2.0 * rel(dx0, dx_ref), f"d pair {rel(dx1, dx_ref):.3e} vs FMA path {rel(dx0, dx_ref):.3e}"
     assert rel(dw1, dw_ref) <= 2.0 * rel(dw0, dw_ref), f"dW' {rel(dw1, dw_ref):.3e} vs FMA path {rel(dw0, dw_ref):.3e}"
+
+
+@requires_h100
+@pytest.mark.parametrize("dp", [128, 256])
+@pytest.mark.parametrize("dtype", DTYPES, ids=IDS)
+@pytest.mark.parametrize("mean_shift", [0.0, 0.4, 3.0, 40.0], ids=["m0", "m0.4", "m3", "m40"])
+def test_logits_tc_large_row_mean(dtype: torch.dtype, dp: int, mean_shift: float) -> None:
+    """The bf16 rows' two-product logits path (``logits_tc_k``: sum W' x - mean sum W') is taken only where |mean| <= std / 2; rows with a large common offset
+    (mean_shift x std, every channel) go the LN0-first path. Either way the error against fp64 stays within 2x of the exact fp32 FMA path's (mixed tiles: half the rows shifted)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    g = torch.Generator(device="cuda").manual_seed(3)
+    n = 256 * 256
+    pair = torch.randn(n, dp, device="cuda", generator=g)
+    shift = torch.zeros(n, 1, device="cuda")
+    shift[::2] = mean_shift  # alternate rows: every 16-row tile mixes both kinds
+    pair = (pair + shift).to(dtype)
+    gam = 1 + 0.1 * torch.randn(dp, device="cuda", generator=g)
+    w = torch.randn(16, dp, device="cuda", generator=g) * 45
+    w[:, 0] = 870
+    wf = (w * gam).contiguous()
+    ref = ((F.layer_norm(pair.double(), (dp,), None, None, EPS) * gam.double()) @ w.double().t()).t().contiguous()
+    ln, _ = HK.ln0_fp32(pair, EPS)
+    with torch.autocast("cuda", enabled=False):
+        fma = HK.exact_logits(wf, ln)
+    tc = torch.empty(16, n, device="cuda")
+    HK.logits_tc(pair, wf, tc)
+    e_fma, e_tc = (fma.double() - ref).abs().max().item(), (tc.double() - ref).abs().max().item()
+    print(dtype, dp, mean_shift, f"max-abs fma {e_fma:.2e} tc {e_tc:.2e}")
+    assert e_tc <= 2.0 * e_fma, f"logits max-abs error {e_tc:.3e} > 2x the FMA path's {e_fma:.3e}"

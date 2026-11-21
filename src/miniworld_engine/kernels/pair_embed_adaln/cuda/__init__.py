@@ -13,3 +13,7 @@ def prebuild(target, rows):
         from .sm80 import ext as sm80_ext
 
         yield sm80_ext
+    elif rows and target.arch == "sm100":  # the B200 build (sm100/__init__.py: the A100 source + the tcgen05 table gradient)
+        from .sm100 import ext as sm100_ext
+
+        yield sm100_ext

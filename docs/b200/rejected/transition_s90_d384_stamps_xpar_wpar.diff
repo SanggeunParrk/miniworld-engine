@@ -1,0 +1,144 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
+index 715475b9e..5e7e5b883 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d384.cu
+@@ -58,6 +58,20 @@ __device__ __forceinline__ void tmem_ld64(uint32_t taddr, uint32_t (&r)[64]) {
+                : "r"(taddr));
+ }
+ 
++#ifdef PROBE
++#define STAMP(k) do { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(c1)[cta * 64 + (k)] = _t; } while (0)
++#else
++#define STAMP(k) do { } while (0)
++#endif
++// XPAR (S90): the x tile's 12 boxes issued by 12 lanes at once (one lane issued them one after the other: the x load of the next tile took 4.1 us after the last expand, the LayerNorm
++// and the tensor pipe waiting; stamps in docs/b200/transition.md)
++#ifndef XPAR
++#define XPAR 0
++#endif
++// WPAR (S90): the expand weight boxes of a stage (3 K-blocks x Wa / Wb = 6 boxes) issued by 6 lanes at once
++#ifndef WPAR
++#define WPAR 0
++#endif
+ struct Bars {
+   // leader-only: weight fulls (both CTAs' transactions), xn_full (2 LN arrivals), ab_free / h_full (8 warps per CTA), out_empty (4)
+   uint64_t wab_full[NWK], ws_full[NWS], xn_full, ab_free, h_full, out_empty;
+@@ -111,6 +125,30 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------ x and Ws producer: x(i) into the xn
+     // buffer (for the LayerNorm, once xn(i - 1) is dead), then every chunk's Ws half; Ws transactions complete on the leader's barrier
++#if XPAR
++    for (int q = 0; q < nch; ++q) {
++      const int i = q / NCH, j = q % NCH;
++      if (j == 0) {
++        const int row = tile_of(i) * ROWS;
++        if (lane == 0) {
++          if (i >= 1) { mbar_wait(&B.xn_empty, (i - 1) & 1); mbar_wait(&B.xn_stored, (i - 1) & 1); }
++          mbar_expect_tx(&B.xl_full, TILE);
++        }
++        __syncwarp();
++        if (lane < 2 * NKB) tma_load_2d(su + O_XN + (lane >> 1) * KBT + (lane & 1) * 8192, &mx, &B.xl_full, (lane >> 1) * 64, row + (lane & 1) * 64);
++      }
++      if (lane == 0) {
++        const int s = q % NWS;
++        if (q >= NWS) mbar_wait(&B.ws_empty[s], ((q / NWS) - 1) & 1);
++        if (leader) mbar_expect_tx(&B.ws_full[s], 2 * WS_SLOT);
++        const uint32_t slot = su + O_WS + s * WS_SLOT;
++        tma_load_2d_2sm(slot, &mws, &B.ws_full[s], j * HS, crank * 128);
++        tma_load_2d_2sm(slot + 8192, &mws, &B.ws_full[s], j * HS, crank * 128 + 64);
++        tma_load_2d_2sm(slot + 16384, &mws, &B.ws_full[s], j * HS, 256 + crank * 64);
++      }
++    }
++    if (false)
++#endif
+     if (lane == 0) {
+       for (int q = 0; q < nch; ++q) {
+         const int i = q / NCH, j = q % NCH;
+@@ -136,6 +174,29 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+     // ------------------------------------------------------------------------------------------ expand weight producer: this CTA's
+     // half of every chunk (units 32 crank .. + 31 of Wa and Wb, so that each SwiGLU warpgroup finds its a and b in 64 adjacent TMEM
+     // columns), three K-blocks per stage, completing on the leader's barriers
++#if WPAR
++    {
++      int st = 0;
++      for (int c = 0; c < nch; ++c) {
++        const int j = c % NCH;
++#pragma unroll
++        for (int h = 0; h < NWK; ++h, ++st) {
++          const int s = st & 1;
++          if (lane == 0) {
++            if (st >= NWK) mbar_wait(&B.wab_empty[s], ((st >> 1) - 1) & 1);
++            if (leader) mbar_expect_tx(&B.wab_full[s], 2 * WSTG * WK);
++          }
++          __syncwarp();
++          if (lane < 2 * WSTG) {
++            const int k = lane >> 1, isb = lane & 1;
++            tma_load_2d_2sm(su + O_WAB + s * WSTG * WK + k * WK + isb * 4096, isb ? &mwb : &mwa, &B.wab_full[s], (h * WSTG + k) * 64, j * HS + crank * 32);
++          }
++          __syncwarp();
++        }
++      }
++    }
++    if (false)
++#endif
+     if (lane == 0) {
+       int st = 0;
+       for (int c = 0; c < nch; ++c) {
+@@ -165,7 +226,7 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+         int st = 0;
+         for (int c = 0; c < nch; ++c) {
+           const int i = c / NCH, j = c % NCH;
+-          if (j == 0) mbar_wait_cl(&B.xn_full, i & 1);
++          if (j == 0) { mbar_wait_cl(&B.xn_full, i & 1); if (lane == 0 && i < 5) STAMP(8 + i); }
+           if (c >= 1) mbar_wait_cl(&B.ab_free, (c - 1) & 1);   // the SwiGLU has read [a|b]_{c-1}
+ #pragma unroll
+           for (int h = 0; h < NWK; ++h, ++st) {
+@@ -183,7 +244,7 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+               tc_commit2_mc(&B.wab_empty[s], 3);
+               if (h == NWK - 1) {
+                 tc_commit2_mc(&B.ex_done, 3);
+-                if (j == NCH - 1) tc_commit2_mc(&B.xn_empty, 3);
++                if (j == NCH - 1) { tc_commit2_mc(&B.xn_empty, 3); if (i < 5) STAMP(14 + i); }
+               }
+             }
+             __syncwarp();
+@@ -227,6 +288,7 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+       const bool real = i < n_valid;
+       const int row0 = tile_of(i) * ROWS;
+       mbar_wait(&B.xl_full, i & 1);
++      if (tid == 256 && i < 5) STAMP(20 + i);
+       f2 s2[2] = {mk2(0.f, 0.f), mk2(0.f, 0.f)};
+ #pragma unroll
+       for (int kb = 0; kb < HK; ++kb)
+@@ -283,6 +345,7 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+       fence_proxy_async();
+       named_bar_sync(1, 384);
+       if (tid == 256) {
++        if (i < 5) STAMP(26 + i);
+         mbar_arrive_remote_cta(&B.xn_full, 0);
+         if (save && real) {
+ #pragma unroll
+@@ -329,6 +392,7 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+         fence_proxy_async();
+         __syncwarp();
+         if (lane == 0) mbar_arrive_remote_cta(&B.h_full, 0);
++        if (warp == 4 && lane == 0 && j == NCH - 1 && i < 5) STAMP(32 + i);
+         if (save && i < n_valid) {
+           // quad transpose (lane k of 4 ends up with 16-byte chunk k of the quad's 4 rows): each store then writes 8 rows x 64 B
+           // instead of 32 rows x 16 B (the row-per-thread stores cost ~35 us per 144 tiles in training, measured)
+@@ -377,6 +441,7 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+         const int row0 = tile_of(i) * ROWS;
+         if (t2 == 0 && real) { load_x(row0, 0); load_x(row0, 1); }
+         mbar_wait(&B.out_full, i & 1);
++        if (t2 == 0 && i < 5) STAMP(38 + i);
+         tc_fence_after();
+ #pragma unroll 1
+         for (int cb = 0; cb < NKB; ++cb) {
+@@ -416,6 +481,7 @@ transition_fwd_d384_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+           }
+         }
+         if (real) nu += NKB;
++        if (t2 == 0 && i < 5) STAMP(44 + i);
+       };
+       for (int i = 0; i < n_local; ++i) {
+         ln(i);

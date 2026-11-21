@@ -1,0 +1,723 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_sm100a.py
+index 9a91704c8..ed3135f18 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_sm100a.py
+@@ -62,6 +62,21 @@ def _repl(tiles: int = 1 << 30) -> int:
+     return DW_REPL_SMALL if tiles <= DW_REPL_SMALL_TILES else DW_REPL
+ 
+ 
++#: (training part 5) the backward sums the replicas' partials and the dgamma | dbeta rows itself (`tr_bwd_sm100.cu` ired_tail, the
++#: same order and bits as `transition_bwd_reduce`), no reduction launch. False: the reduction launch (A/B). A module constant.
++BWD_IRED = True
++_RED_CNT: dict[int, torch.Tensor] = {}
++
++
++def _red_cnt(device: torch.device) -> torch.Tensor:
++    """The D 128 backward's in-kernel reduction counters (monotonic, zeroed once per device; ``tr_bwd_sm100.cu`` ired_tail)."""
++    idx = device.index if device.index is not None else torch.cuda.current_device()
++    c = _RED_CNT.get(idx)
++    if c is None:
++        c = _RED_CNT[idx] = torch.zeros((16,), dtype=torch.int32, device=device)
++    return c
++
++
+ # ------------------------------------------------------------------------------------------------------------------ build
+ # The kernels are built into cubins by the newest nvcc on the machine that knows sm_100a, not by the toolkit torch pins, and the
+ # extension loads them through the driver API. Measured on the B200: the same backward source through CUDA 12.9's ptxas runs ~8 %
+@@ -311,7 +326,8 @@ def _bwd_launch(
+     """(dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch."""
+     if _is_fake(dy, x):
+         return _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws)
+-    return tuple(_ext().transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws, _repl(x.shape[0] // ROWS)))
++    cnt = _red_cnt(x.device) if BWD_IRED else torch.empty((0,), dtype=torch.int32, device=x.device)
++    return tuple(_ext().transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws, _repl(x.shape[0] // ROWS), cnt))
+ 
+ 
+ class _FusedTransitionSM100A(torch.autograd.Function):
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 421d81a58..4d2c5bff0 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -45,7 +45,7 @@ from miniworld_engine.kernels._device import num_sms
+ 
+ from ..._compile import opaque
+ from ..._nvcc import build_failed
+-from .fused_sm100a import _ext, _is_b200, build_cubins
++from .fused_sm100a import _ext, _is_b200, _red_cnt, build_cubins
+ 
+ 
+ #: (D, n) with a build here; (128, 4) is ``fused_sm100a``. Each builds its own cubins on first use.
+@@ -73,6 +73,13 @@ REPL = {(64, 4): 20, (64, 2): 30, (128, 2): 14}
+ #: backward's prologue (barriers, tensor memory, cluster sync) runs as the forward's CTAs leave, griddepcontrol.wait before its first
+ #: read. A module constant (A/B runs edit it); D 128 n 4 (`transition_sm100.cu`) always.
+ BWD_PDL = True
++#: (training part 5) A/B builds of the D 128 n 2 backward (`tr_bwd_sm100.cu`): None runs the default build ("bwd": BX = 1);
++#: a flag tuple (e.g. ("-DBX=0",)) builds and runs cubin "bwdab" with those flags (BX = 0: the 64 x 64 tensor maps).
++#: A module constant (A/B runs edit it).
++BWD_AB_FLAGS: tuple[str, ...] | None = None
++#: (training part 5) D 128 n 2: the backward sums the replicas' partials and the dgamma | dbeta rows itself (`tr_bwd_sm100.cu` ired_tail,
++#: the bits of `transition_bwd_reduce`), no reduction launch; False: the reduction launch (A/B). A module constant.
++BWD_IRED = True
+ #: D >= 384: the expand + SwiGLU deals (tile pair, chunk) items over all SMs up to this many tiles, whole tile pairs above.
+ ITEM_TILES = 1152
+ #: Column width of one squeeze / d_xn GEMM launch at D = 768 (two halves; one launch's accumulator must fit 512 TMEM columns).
+@@ -199,12 +206,14 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             ("fwd", "widths/tfwd_d64.cu", hid),
+             *((("fwdi", "widths/tfwd_d64.cu", (*hid, *FWD_INFER_FLAGS[(d, n)])),) if (d, n) in FWD_INFER_FLAGS else ()),
+             ("bwd", "widths/tbwd_d64.cu", (*hid, *(("-DDXN32",) if n == 2 else ()))),
++            *((("bwdab", "widths/tbwd_d64.cu", (*hid, *(("-DDXN32",) if n == 2 else ()), *BWD_AB_FLAGS)),) if BWD_AB_FLAGS else ()),
+         )
+     if d == 128:
+         return (
+             ("fwd", "tr_fwd_sm100.cu", hid),
+             *((("fwdi", "tr_fwd_sm100.cu", (*hid, *FWD_INFER_FLAGS[(d, n)])),) if (d, n) in FWD_INFER_FLAGS else ()),
+             ("bwd", "tr_bwd_sm100.cu", hid),
++            *((("bwdab", "tr_bwd_sm100.cu", (*hid, *BWD_AB_FLAGS)),) if BWD_AB_FLAGS else ()),
+         )
+     lpr = f"-DLPR={32 if d in (512, 768) else 16}"
+     nd = HALF if d == 768 else d
+@@ -258,10 +267,14 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+     )
+ 
+ 
+-@functools.lru_cache(maxsize=16)
+ def _load(d: int, n: int):
+     """Build this (width, n)'s cubins and register them with the extension (loaded on the current device: a cubin the driver
+     rejects fails here, inside ``available()``). Returns the extension."""
++    return _load_cached(d, n, BWD_AB_FLAGS)
++
++
++@functools.lru_cache(maxsize=16)
++def _load_cached(d: int, n: int, ab: tuple[str, ...] | None):
+     ext = _ext()
+     for name, path in build_cubins(f"d{d}n{n}", _specs(d, n)).items():
+         ext.load_cubin(f"d{d}n{n}_{name}", path)
+@@ -682,18 +695,31 @@ def _bwd_launch(
+             torch.empty(ws.shape, **f32),
+         )  # unrounded
+         dgam, dbeta = torch.empty((d,), **f32), torch.empty((d,), **f32)
+-        maps = (
+-            k.rows(dy),
+-            k.rows(xn),
+-            k.rows(x),
+-            k.tmap(ws, h, d),
+-            k.tmap(wa, d, h),
+-            k.tmap(wb, d, h),
+-            k.rows(dx),
+-        )
++        ab = BWD_AB_FLAGS or ()
++        bx = d == 128 and "-DBX=0" not in ab
++        ired = d == 128 and BWD_IRED and ndw >= 16
++        cnt = _red_cnt(x.device) if ired else torch.empty((0,), dtype=torch.int32, device=x.device)  # empty: nullptr
++        if bx:  # tr_bwd_sm100.cu BX: [M, 128] activations as 64 x 128 x 2 boxes, Ws_j 64 x 128, Wa_j / Wb_j 64 x 64 x 2
++            maps = (
++                *(k.ext.tmap(t, d, m, 64, 128, -1, 0, 2) for t in (dy, xn, x)),
++                k.tmap(ws, h, d, 64, 128),
++                k.ext.tmap(wa, d, h, 64, 64, -1, 0, 2),
++                k.ext.tmap(wb, d, h, 64, 64, -1, 0, 2),
++                k.ext.tmap(dx, d, m, 64, 128, -1, 0, 2),
++            )
++        else:
++            maps = (
++                k.rows(dy),
++                k.rows(xn),
++                k.rows(x),
++                k.tmap(ws, h, d),
++                k.tmap(wa, d, h),
++                k.tmap(wb, d, h),
++                k.rows(dx),
++            )
+         if d == 64:
+             k.run(
+-                "bwd",
++                "bwdab" if BWD_AB_FLAGS else "bwd",
+                 "transition_bwd_d64_sm100",
+                 k.nsm,
+                 (*maps, rstd, c1, gamma, partab, parts, dgbw, tiles, ndw),
+@@ -712,13 +738,17 @@ def _bwd_launch(
+             )
+             return dx, dgam, dbeta, dwa, dwb, dws
+         else:
++            # IRED: the replicas' partials and the dgamma | dbeta rows are summed inside the backward (counters _red_cnt; same order
++            # as transition_bwd_reduce), no reduction launch
+             k.run(
+-                "bwd",
++                "bwdab" if BWD_AB_FLAGS else "bwd",
+                 "transition_bwd_sm100",
+                 k.nsm,
+-                (*maps, rstd, c1, gamma, x, partab, parts, dgbw, tiles, ndw),
++                (*maps, rstd, c1, gamma, x, partab, parts, dgbw, tiles, ndw, dwa, dwb, dws, dgam, dbeta, cnt),
+                 pdl=BWD_PDL,
+             )
++            if ired:
++                return dx, dgam, dbeta, dwa, dwb, dws
+             reduce = "transition_bwd_reduce"
+         nred = 3 * h * d + 2 * d
+         k.run(
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu
+index fb20bf4d8..680c10840 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu
+@@ -53,6 +53,50 @@ constexpr uint16_t CL_MASK = (1u << CL) - 1;
+ constexpr uint32_t I_DH = idesc_bf16(128, 64, 0, 1), I_AB = idesc_bf16(128, 128), I_DXN = idesc_bf16(128, 128, 0, 1);
+ constexpr uint32_t I_DWAB = idesc_bf16(128, 128, 1, 1), I_DWS = idesc_bf16(128, 64, 1, 1);
+ 
++// (training part 5, BX) few large TMA boxes: the B200 SM takes in TMA boxes at a fixed rate whatever their size (Transition part 14),
++// and the DX tile took ~36 (n 2) / ~60 (n 4) 8 KB boxes. With BX the activations (dy, xn, x, dx) move as ONE 3-D box of both
++// K-blocks per tile (the host's kb_box = 2 maps; same [K-block][128 rows][64] layout), Ws_j as one 64 x 128 box, and Wa_j / Wb_j as
++// one 3-D box each, which land as [Wa kb0][Wa kb1][Wb kb0][Wb kb1] (8 KB each) instead of the packed [Wa kb0; Wb kb0][Wa kb1; Wb kb1]:
++// the a | b product runs as two N = 64 products (a, b) and the d_xn product reads [Wa_j; Wb_j] with an 8 KB d-block stride. The same
++// MMAs per output element: bit-identical.
++#ifndef BX
++#define BX 1
++#endif
++#ifndef GOV
++#define GOV 1                                                  // (training part 5) DW gate computes before its g_empty wait (A/B: 0)
++#endif
++constexpr uint32_t I_AB64 = idesc_bf16(128, 64);
++DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++DEVI void tma_load_3d_mc(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2, uint16_t mask) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4, %5}], [%2], %6;"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2), "h"(mask) : "memory");
++}
++DEVI void tma_store_3d(const CUtensorMap* m, uint32_t src, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.bulk_group [%0, {%2, %3, %4}], [%1];" :: "l"(m), "r"(src), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++// a | b of one 128-row tile: xn (K-major, [kb][128][64]) times the [Wa_j; Wb_j] slot at `wab` (smem address) into tmem columns t .. t + 127
++DEVI void ab_product(uint32_t t, uint64_t dxn, uint32_t wab) {
++#if BX
++  const uint64_t da = desc_k128(wab), db = desc_k128(wab + 16384);
++#pragma unroll
++  for (int ks = 0; ks < KS; ++ks) {
++    const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4), offw = (uint64_t)(((ks >> 2) * 8192 + (ks & 3) * 32) >> 4);
++    umma_ss(t, dxn + off, da + offw, I_AB64, ks > 0 ? 1u : 0u);
++    umma_ss(t + 64, dxn + off, db + offw, I_AB64, ks > 0 ? 1u : 0u);
++  }
++#else
++  const uint64_t dwab = desc_k128(wab);
++#pragma unroll
++  for (int ks = 0; ks < KS; ++ks) {
++    const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
++    umma_ss(t, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
++  }
++#endif
++}
++
+ #ifdef PROBE
+ __device__ unsigned long long g_trb[2][4][2048];         // (probe builds) %globaltimer at the trace points of CTA 0 of each role
+ #define TRB(slot, role, idx) do { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); g_trb[slot][role][idx] = t_; } while (0)
+@@ -66,6 +110,8 @@ struct Par {
+   const __nv_bfloat16* xg;
+   float *partab, *parts, *dgbw;
+   int tiles, ndw;
++  float *dwa, *dwb, *dws, *dgam, *dbeta;                       // (IRED) the final gradients
++  unsigned* cnt;                                               // (IRED) counters; nullptr: the partials are left to transition_bwd_reduce
+ };
+ 
+ struct BarsW { uint64_t w_full, xn_full[2], dy_full[2], xn_empty[2], dy_empty[2], dhab_full, gate_read, g_full[2], g_empty[2], wg_done; uint32_t tmem; };
+@@ -121,6 +167,11 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+   if (warp == 0) {
+     if (lane == 0) {
+       mbar_expect_tx(&B.w_full, 49152);
++#if BX
++      tma_load_2d(su + W_WS, p.ws, &B.w_full, slice * HS, 0);
++      tma_load_3d(su + W_WAB, p.wa, &B.w_full, 0, slice * HS, 0);
++      tma_load_3d(su + W_WAB + 16384, p.wb, &B.w_full, 0, slice * HS, 0);
++#else
+       tma_load_2d(su + W_WS, p.ws, &B.w_full, slice * HS, 0);
+       tma_load_2d(su + W_WS + 8192, p.ws, &B.w_full, slice * HS, 64);
+ #pragma unroll
+@@ -128,6 +179,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+         tma_load_2d(su + W_WAB + cb * KB, p.wa, &B.w_full, cb * 64, slice * HS);
+         tma_load_2d(su + W_WAB + cb * KB + 8192, p.wb, &B.w_full, cb * 64, slice * HS);
+       }
++#endif
+       // xn first (it is freed first, by the dWab product), then dy (freed by dWs); the CL slices share each tile, each requesting
+       // 4 / CL of the four 8 KB boxes of each half and multicasting them
+       for (int i = 0; i < n_local; ++i) {
+@@ -139,18 +191,23 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+           if (i >= 2) mbar_wait(src ? &B.xn_empty[b] : &B.dy_empty[b], ((i >> 1) - 1) & 1);
+           if (cta == 0 && src == 1) TRB(0, 3, i);
+           mbar_expect_tx(full, INB / 2);
++#if BX
++          static_assert(CL == 2, "BX: one CTA of the pair issues xn, the other dy");
++          if (crank == src) tma_load_3d_mc(dst + src * IN_XN, src ? p.xn : p.dy, full, 0, row, 0, CL_MASK);
++#else
+ #pragma unroll
+           for (int k = 0; k < 4 / CL; ++k) {
+             const int bx = crank * (4 / CL) + k, cb = bx >> 1, h = bx & 1;
+             tma_load_2d_mc(dst + src * IN_XN + cb * KB + h * 8192, src ? p.xn : p.dy, full, cb * 64, row + h * 64, CL_MASK);
+           }
++#endif
+         }
+       }
+     }
+   } else if (warp == 1) {
+     // dh and [a|b] of each tile (converged warp, one elected lane issues: descriptors stay in uniform registers)
+     mbar_wait(&B.w_full, 0);
+-    const uint64_t dws = desc_mn128(su + W_WS, KB), dwab = desc_k128(su + W_WAB);
++    const uint64_t dws = desc_mn128(su + W_WS, KB);
+     for (int i = 0; i < n_local; ++i) {
+       const int b = i & 1;
+       if (cta == 0 && lane == 0) TRB(0, 0, 4 * i);
+@@ -160,13 +217,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+       if (cta == 0 && lane == 0) TRB(0, 0, 4 * i + 2);
+       tc_fence_after();
+       const uint64_t ddy = desc_k128(su + W_IN + b * INB), dxn = desc_k128(su + W_IN + b * INB + IN_XN);
+-      if (elect_one()) {
+-#pragma unroll
+-        for (int ks = 0; ks < KS; ++ks) {
+-          const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+-          umma_ss(tmem + T_AB, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
+-        }
+-      }
++      if (elect_one()) ab_product(tmem + T_AB, dxn, su + W_WAB);
+       __syncwarp();
+       mbar_wait(&B.dy_full[b], (i >> 1) & 1);
+       tc_fence_after();
+@@ -218,9 +269,36 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+       mbar_wait(&B.dhab_full, i & 1);
+       if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 1);
+       tc_fence_after();
++#if GOV
++      // (training part 5) the gate of tile i loads and computes while the dW products of tile i - 1 still read h / [dA | dB] from shared
++      // memory; it waits for them (g_empty) only before its stores
++      {
++        uint32_t dh[32], av[32], bv[32];
++        tmem_ld32(trow + T_DH + half * 32, dh);
++        tmem_ld32(trow + T_AB + half * 32, av);
++        tmem_ld32(trow + T_AB + 64 + half * 32, bv);
++        tmem_wait_ld();
++        tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.gate_read);
++        uint32_t hp[16], dap[16], dbp[16];
++#pragma unroll
++        for (int k = 0; k < 16; ++k)
++          gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hp[k], dap[k], dbp[k]);
++        if (i >= GDB) mbar_wait(&B.g_empty[i % GDB], ((i / GDB) - 1) & 1);
++        if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 2);
++#pragma unroll
++        for (int qq = 0; qq < 4; ++qq) {
++          const uint32_t off = sw128(r, half * 4 + qq);
++          sts128(su + W_H + off, make_uint4(hp[4 * qq], hp[4 * qq + 1], hp[4 * qq + 2], hp[4 * qq + 3]));
++          sts128(su + W_DAB + off, make_uint4(dap[4 * qq], dap[4 * qq + 1], dap[4 * qq + 2], dap[4 * qq + 3]));
++          sts128(su + W_DAB + KB + off, make_uint4(dbp[4 * qq], dbp[4 * qq + 1], dbp[4 * qq + 2], dbp[4 * qq + 3]));
++        }
++      }
++      if (false)
++#else
+       if (i >= GDB) mbar_wait(&B.g_empty[i % GDB], ((i / GDB) - 1) & 1);
+-      if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 2);
++#endif
+       {
++        if (cta == 0 && warp == 4 && lane == 0) TRB(0, 2, 4 * i + 2);
+         uint32_t dh[32], av[32], bv[32];
+         tmem_ld32(trow + T_DH + half * 32, dh);
+         tmem_ld32(trow + T_AB + half * 32, av);
+@@ -344,6 +422,10 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+         if (i >= 2) mbar_wait(&B.in_empty[b], ((i >> 1) - 1) & 1);
+         mbar_expect_tx(&B.in_full[b], INB);
+         const uint32_t dst = su + X_IN + b * INB;
++#if BX
++        tma_load_3d(dst, p.dy, &B.in_full[b], 0, row, 0);
++        tma_load_3d(dst + IN_XN, p.xn, &B.in_full[b], 0, row, 0);
++#else
+ #pragma unroll
+         for (int cb = 0; cb < 2; ++cb)
+ #pragma unroll
+@@ -351,16 +433,21 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+             tma_load_2d(dst + cb * KB + h * 8192, p.dy, &B.in_full[b], cb * 64, row + h * 64);
+             tma_load_2d(dst + IN_XN + cb * KB + h * 8192, p.xn, &B.in_full[b], cb * 64, row + h * 64);
+           }
++#endif
+       };
+       auto issue_x = [&](int i) {                         // the tile's xn is dead: reload that half with x for the epilogue
+         const int b = i & 1, row = tile_of(i) * ROWS;
+         mbar_wait(&B.xn_dead[b], (i >> 1) & 1);
+         mbar_expect_tx(&B.x_full[b], 32768);
+         const uint32_t dst = su + X_IN + b * INB + IN_XN;
++#if BX
++        tma_load_3d(dst, p.x, &B.x_full[b], 0, row, 0);
++#else
+ #pragma unroll
+         for (int cb = 0; cb < 2; ++cb)
+ #pragma unroll
+           for (int h = 0; h < 2; ++h) tma_load_2d(dst + cb * KB + h * 8192, p.x, &B.x_full[b], cb * 64, row + h * 64);
++#endif
+       };
+       for (int i = 0; i <= n_local; ++i) {
+         if (i < n_local) issue_in(i);
+@@ -376,15 +463,23 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+           const int s = cs & 1, j = cs & (NCH - 1);
+           const uint32_t slot = su + X_WS + s * 16384;
+           mbar_expect_tx(&B.ws_full[s], 16384);             // this CTA requests one of the two halves, multicast to both
++#if BX
++          if ((cs & 1) == crank) tma_load_2d_mc(slot, p.ws, &B.ws_full[s], j * HS, 0, CL_MASK);   // the whole Ws_j, CTAs alternating
++#else
+           tma_load_2d_mc(slot + crank * 8192, p.ws, &B.ws_full[s], j * HS, crank * 64, CL_MASK);
++#endif
+           ++cs;
+         }
+         if (ca < nch && (ca < NWAB || mbar_test(&B.wab_empty[ca % NWAB], ((ca / NWAB) - 1) & 1))) {
+           const int s = ca % NWAB, j = ca & (NCH - 1);
+           const uint32_t slot = su + X_WAB + s * 32768;
+           mbar_expect_tx(&B.wab_full[s], 32768);             // K-block `crank` of [Wa_j; Wb_j] from this CTA, multicast to both
++#if BX
++          tma_load_3d_mc(slot + crank * 16384, crank ? p.wb : p.wa, &B.wab_full[s], 0, j * HS, 0, CL_MASK);   // Wa_j / Wb_j, both K-blocks
++#else
+           tma_load_2d_mc(slot + crank * KB, p.wa, &B.wab_full[s], crank * 64, j * HS, CL_MASK);
+           tma_load_2d_mc(slot + crank * KB + 8192, p.wb, &B.wab_full[s], crank * 64, j * HS, CL_MASK);
++#endif
+           ++ca;
+         }
+       }
+@@ -404,13 +499,9 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+       if (cta == 0 && lane == 0) TRB(1, 0, 8 * c + 2);
+       tc_fence_after();
+       const uint64_t ddy = desc_k128(su + X_IN + (i & 1) * INB), dxn = desc_k128(su + X_IN + (i & 1) * INB + IN_XN);
+-      const uint64_t dws = desc_mn128(su + X_WS + s * 16384, KB), dwab = desc_k128(su + X_WAB + sw * 32768);
++      const uint64_t dws = desc_mn128(su + X_WS + s * 16384, KB);
+       if (elect_one()) {
+-#pragma unroll
+-        for (int ks = 0; ks < KS; ++ks) {
+-          const uint64_t off = (uint64_t)(((ks >> 2) * KB + (ks & 3) * 32) >> 4);
+-          umma_ss(tmem + T_AB, dxn + off, dwab + off, I_AB, ks > 0 ? 1u : 0u);
+-        }
++        ab_product(tmem + T_AB, dxn, su + X_WAB + sw * 32768);
+         tc_commit(&B.ab_full);
+         if (j == NCH - 1) tc_commit(&B.xn_dead[i & 1]);
+       }
+@@ -441,11 +532,18 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+       if (j == 0 && i >= 2) mbar_wait(&B.dxn_empty[i & 1], ((i >> 1) - 1) & 1);
+       if (cta == 0 && lane == 0) TRB(1, 1, 8 * q + 2);
+       tc_fence_after();
++#if BX
++      // [Wa kb0][Wa kb1][Wb kb0][Wb kb1]: d blocks 8 KB apart, Wb's rows 16 KB after Wa's
++      const uint64_t dwab = desc_mn128(su + X_WAB + (q % NWAB) * 32768, 8192);
++      auto rowoff = [](int ks) { const int rb = kRowBlk[ks]; return (uint64_t)(((rb >> 2) * 16384 + (rb & 3) * 2048) >> 4); };
++#else
+       const uint64_t dwab = desc_mn128(su + X_WAB + (q % NWAB) * 32768, KB);
++      auto rowoff = [](int ks) { return (uint64_t)(kRowBlk[ks] * 2048 >> 4); };
++#endif
+       if (elect_one()) {
+ #pragma unroll
+         for (int ks = 0; ks < KS; ++ks)
+-          umma_ts(tmem + T_DXN + (i & 1) * 128, tmem + T_DH + s * 64 + ks * 8, dwab + (uint64_t)(kRowBlk[ks] * 2048 >> 4), I_DXN,
++          umma_ts(tmem + T_DXN + (i & 1) * 128, tmem + T_DH + s * 64 + ks * 8, dwab + rowoff(ks), I_DXN,
+                   (j > 0 || ks > 0) ? 1u : 0u);
+         tc_commit(&B.dh_free[s]);
+         tc_commit_mc(&B.wab_empty[q % NWAB], CL_MASK);
+@@ -606,10 +704,14 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+       if (t2 == 0) {
+         const int row0 = tile_of(i) * ROWS;
+         if (real) {
++#if BX
++          tma_store_3d(p.dx, dyb, 0, row0, 0);
++#else
+ #pragma unroll
+           for (int cb = 0; cb < 2; ++cb)
+ #pragma unroll
+             for (int h = 0; h < 2; ++h) tma_store_2d(p.dx, dyb + cb * KB + h * 8192, cb * 64, row0 + h * 64);
++#endif
+           tma_store_commit();
+           tma_store_wait_read0();
+         }
+@@ -628,14 +730,118 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
+ }
+ 
++#ifndef RQ
++#define RQ 16                                                  // (round 3, training part 3) replica partials in flight per thread (was 8)
++#endif
++#ifndef GQ
++#define GQ 32                                                  // dgamma | dbeta partial rows in flight per lane group (was 8)
++#endif
++#ifndef TRQ
++#define TRQ 8                                                  // (IRED) the same in the backward's tail (compiled at the 56-register limit)
++#endif
++#ifndef TGQ
++#define TGQ 16
++#endif
++
++// ================================================================================================ (training part 5) IRED: the sums in the backward
++// transition_bwd_reduce ran after the whole backward (a programmatic dependent: its blocks start as the backward's CTAs leave, ~2.4-3.5 us
++// of tail). Here the R replicas of a hidden slice meet on a counter as soon as their partials are stored and each sums 1 / R of the slice
++// (the DW role ends before the DX role); the first 16 DW CTAs then wait for every DX CTA and sum dgamma | dbeta, 16 columns each. The
++// orders are transition_bwd_reduce's (replicas in replica order from 0; dgamma | dbeta rows g, g + 16, ... per lane group, then the 16
++// group sums in group order): the same bits. All CTAs are resident (one per SM, the host launches SM-count CTAs).
++// Counters (zeroed once per device, back to 0 at the end of every launch): cnt[s] slice s (R arrivals), cnt[8] DX CTAs (ndx), cnt[9] exits
++// (G). The last CTA to exit (every other CTA is past its waits) resets cnt[0..9]; the next launch reads them after griddepcontrol.wait.
++// (A monotonic launch-number form hung: launches with other R / ndx share the buffer.)
++DEVI unsigned ld_acq(const unsigned* p) { unsigned v; asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(p) : "memory"); return v; }
++DEVI void arrive_rel(unsigned* p) { asm volatile("red.release.gpu.global.add.u32 [%0], 1;" :: "l"(p) : "memory"); }
++DEVI void wait_ge(const unsigned* p, unsigned target) { while ((int)(ld_acq(p) - target) < 0) { } }
++DEVI void ired_tail(const Par& p, uint8_t* sm, int ndx) {
++  const int tid = threadIdx.x, blk = blockIdx.x;
++  const bool dw = blk < p.ndw;
++  unsigned* cnt = p.cnt;
++  float (*part)[17] = reinterpret_cast<float (*)[17]>(sm + 128);
++  __syncthreads();                                             // the CTA's partial stores (every thread) before thread 0's release
++  if (tid == 0) {
++    arrive_rel(cnt + (dw ? (blk & (NCH - 1)) : 8));
++  }
++  __syncthreads();
++  if (dw) {
++    const int slice = blk & (NCH - 1), repl = blk >> LNCH, R = p.ndw >> LNCH;
++    if (tid == 0) wait_ge(cnt + slice, (unsigned)R);
++    __syncthreads();
++    // 6144 float4 outputs per slice: [0, 4096) dWa | dWb (which = q >> 11; hs, d), [4096, 6144) dWs (d, hs)
++    for (int q = repl * 512 + tid; q < 6144; q += R * 512) {
++      const float* src;
++      size_t stride;
++      float* dst;
++      if (q < 4096) {
++        const int which = q >> 11, e = (q & 2047) * 4, hs = e >> 7, d = e & 127;
++        src = p.partab + ((size_t)slice * 128 + which * 64 + hs) * 128 + d;
++        stride = (size_t)NCH * 128 * 128;
++        dst = (which ? p.dwb : p.dwa) + slice * HS * D_ + e;
++      } else {
++        const int e = (q - 4096) * 4, d = e >> 6, hs = e & 63;
++        src = p.parts + ((size_t)slice * 128 + d) * 64 + hs;
++        stride = (size_t)NCH * 128 * 64;
++        dst = p.dws + (size_t)d * H_ + slice * HS + hs;
++      }
++      float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
++      for (int r0 = 0; r0 < R; r0 += TRQ) {
++        float4 u[TRQ];
++#pragma unroll
++        for (int k = 0; k < TRQ; ++k)
++          if (r0 + k < R) u[k] = __ldcg(reinterpret_cast<const float4*>(src + (size_t)(r0 + k) * stride));
++#pragma unroll
++        for (int k = 0; k < TRQ; ++k)
++          if (r0 + k < R) { v.x += u[k].x; v.y += u[k].y; v.z += u[k].z; v.w += u[k].w; }
++      }
++      *reinterpret_cast<float4*>(dst) = v;
++    }
++    if (blk < 16) {                                            // dgamma | dbeta columns 16 blk .. 16 blk + 15
++      if (tid == 0) wait_ge(cnt + 8, (unsigned)ndx);
++      __syncthreads();
++      const int nrows = ndx * 4;
++      if (tid < 256) {
++        const int c16 = tid & 15, grp = tid >> 4, c = blk * 16 + c16;
++        float v = 0.f;
++        for (int r0 = grp; r0 < nrows; r0 += 16 * TGQ) {
++          float tv[TGQ];
++#pragma unroll
++          for (int k = 0; k < TGQ; ++k) tv[k] = r0 + 16 * k < nrows ? __ldcg(p.dgbw + (size_t)(r0 + 16 * k) * 256 + c) : 0.f;
++#pragma unroll
++          for (int k = 0; k < TGQ; ++k)
++            if (r0 + 16 * k < nrows) v += tv[k];
++        }
++        part[grp][c16] = v;
++      }
++      __syncthreads();
++      if (tid < 16) {
++        float sum = 0.f;
++#pragma unroll
++        for (int k = 0; k < 16; ++k) sum += part[k][tid];
++        const int c = blk * 16 + tid;
++        (c < 128 ? p.dgam : p.dbeta)[c & 127] = sum;
++      }
++    }
++  }
++  if (tid == 0) {
++    const unsigned old = atomicAdd(cnt + 9, 1u);
++    if (old == gridDim.x - 1u) {                               // the last CTA: every other one is past its waits
++      __threadfence();
++      for (int k = 0; k < 10; ++k) atomicExch(cnt + k, 0u);
++    }
++  }
++}
++
+ extern "C" __global__ void __launch_bounds__(512, 1)
+ transition_bwd_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mx,
+                      const __grid_constant__ CUtensorMap mws, const __grid_constant__ CUtensorMap mwa, const __grid_constant__ CUtensorMap mwb,
+                      const __grid_constant__ CUtensorMap mdx, const float* __restrict__ rstd, const float* __restrict__ c1,
+                      const float* __restrict__ gamma, const __nv_bfloat16* __restrict__ xg, float* __restrict__ partab,
+-                     float* __restrict__ parts, float* __restrict__ dgbw, int tiles, int ndw
+-                     ) {
+-  const Par p{&mdy, &mxn, &mx, &mws, &mwa, &mwb, &mdx, nullptr, rstd, c1, gamma, xg, partab, parts, dgbw, tiles, ndw};
++                     float* __restrict__ parts, float* __restrict__ dgbw, int tiles, int ndw, float* dwa, float* dwb, float* dws,
++                     float* dgam, float* dbeta, unsigned* cnt) {
++  const Par p{&mdy, &mxn, &mx, &mws, &mwa, &mwb, &mdx, nullptr, rstd, c1, gamma, xg, partab, parts, dgbw, tiles, ndw,
++              dwa, dwb, dws, dgam, dbeta, cnt};
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+   // the producer / MMA warpgroup gives registers to the math warpgroups. The increase is issued INSIDE each math role's branch: an
+@@ -648,6 +854,7 @@ transition_bwd_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_const
+ #endif
+   if ((int)blockIdx.x < ndw) weight_role(p, sm, blockIdx.x, warp, lane);
+   else input_role(p, sm, blockIdx.x - ndw, gridDim.x - ndw, warp, lane);
++  if (cnt != nullptr) ired_tail(p, sm, gridDim.x - ndw);       // (training part 5) the sums here, no reduction launch
+ #ifdef PROBE
+   __syncthreads();
+   if (threadIdx.x == 0) {
+@@ -671,12 +878,6 @@ transition_bwd_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_const
+ // groups (group k sums rows k, k + 16, ... in order, then the 16 group sums are added in group order). Every sum has a fixed
+ // order, so a replay is bit-identical. Launched as a programmatic dependent of the backward (griddepcontrol.wait first); blocks
+ // past RED_WBLK + RED_GBLK return at once, so a launch sized for one thread per output also works.
+-#ifndef RQ
+-#define RQ 16                                                  // (round 3, training part 3) replica partials in flight per thread (was 8)
+-#endif
+-#ifndef GQ
+-#define GQ 32                                                  // dgamma | dbeta partial rows in flight per lane group (was 8)
+-#endif
+ constexpr int RED_WBLK = 3 * H_ * D_ / 1024, RED_GBLK = 256 / 16;
+ static_assert(3 * H_ * D_ % 1024 == 0, "whole weight-gradient blocks");
+ extern "C" __global__ void __launch_bounds__(256, 1) transition_bwd_reduce(
+@@ -741,3 +942,5 @@ extern "C" __device__ int transition_bwd_reduce_blocks = RED_WBLK + RED_GBLK;
+ // Built into a cubin by the newest nvcc that knows sm_100a and launched through the driver API from `transition_sm100.cu`;
+ // the dynamic shared-memory size the launch must request is exported here so the host never restates it.
+ extern "C" __device__ int transition_sm100_bwd_smem_bytes = SMEM_BYTES;
++// (training part 5) 1: the BX tensor maps (dy / xn / x / dx: 3-D 64 x 128 x 2 boxes; ws: 64 x 128; wa / wb: 3-D 64 x 64 x 2)
++extern "C" __device__ int transition_bwd_bx = BX;
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/transition_sm100.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/transition_sm100.cu
+index b37882fb6..da1247e06 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/transition_sm100.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/transition_sm100.cu
+@@ -89,7 +89,7 @@ void check(CUresult r, const std::string& what) {
+ // ---------------------------------------------------------------------------------------------------------------- kernels
+ struct Kernels {
+   CUfunction fwd = nullptr, bwd = nullptr, reduce = nullptr, cast = nullptr;
+-  int fwd_smem = 0, bwd_smem = 0, reduce_blocks = 0;
++  int fwd_smem = 0, bwd_smem = 0, reduce_blocks = 0, bwd_bx = 0;
+ };
+ 
+ std::string g_fwd_cubin, g_bwd_cubin;
+@@ -135,6 +135,11 @@ const Kernels& kernels() {
+   k.fwd_smem = read_int(mf, "transition_sm100_fwd_smem_bytes");
+   k.bwd_smem = read_int(mb, "transition_sm100_bwd_smem_bytes");
+   k.reduce_blocks = read_int(mb, "transition_bwd_reduce_blocks");
++  {                                                          // (training part 5) absent in older cubins: the 64 x 64 maps
++    CUdeviceptr p = 0;
++    size_t bytes = 0;
++    if (drv().global(&p, &bytes, mb, "transition_bwd_bx") == CUDA_SUCCESS) k.bwd_bx = read_int(mb, "transition_bwd_bx");
++  }
+   check(drv().attribute(k.fwd, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, k.fwd_smem), "forward smem opt-in");
+   check(drv().attribute(k.bwd, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, k.bwd_smem), "backward smem opt-in");
+   return g_kernels.emplace(dev, k).first->second;
+@@ -188,6 +193,27 @@ const CUtensorMap& tile_map(const torch::Tensor& t, uint32_t inner, uint32_t out
+   return cache.emplace(key, map).first->second;
+ }
+ 
++// (training part 5) the backward's BX maps: kb > 1 a 3-D map (64 elements, outer rows, inner / 64 K-blocks) with a 64 x box_outer x kb
++// box landing as kb consecutive [box_outer][64] K-block slabs; kb == 1 a 2-D 64 x box_outer box. 128-B swizzle.
++const CUtensorMap& box_map(const torch::Tensor& t, uint32_t inner, uint32_t outer, uint32_t box_outer, uint32_t kb) {
++  static std::map<std::array<uint64_t, 5>, CUtensorMap> cache;
++  static std::mutex lock;
++  const std::array<uint64_t, 5> key{reinterpret_cast<uint64_t>(t.data_ptr()), inner, outer, box_outer, kb};
++  std::lock_guard<std::mutex> guard(lock);
++  auto it = cache.find(key);
++  if (it != cache.end()) return it->second;
++  if (cache.size() > 4096) cache.clear();
++  CUtensorMap map{};
++  const cuuint64_t dims[3] = {kb > 1 ? 64u : inner, outer, inner / 64};
++  const cuuint64_t strides[2] = {static_cast<cuuint64_t>(inner) * 2, 128};
++  const cuuint32_t box[3] = {64, box_outer, kb};
++  const cuuint32_t elem[3] = {1, 1, 1};
++  check(drv().encode(&map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, kb > 1 ? 3 : 2, t.data_ptr(), dims, strides, box, elem, CU_TENSOR_MAP_INTERLEAVE_NONE,
++                     CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
++        "cuTensorMapEncodeTiled");
++  return cache.emplace(key, map).first->second;
++}
++
+ int sm_count(const torch::Tensor& t) { return at::cuda::getDeviceProperties(t.device().index())->multiProcessorCount; }
+ 
+ void expect_weights(const torch::Tensor& wa, const torch::Tensor& wb, const torch::Tensor& ws) {
+@@ -274,7 +300,10 @@ std::vector<torch::Tensor> transition_cast_weights(torch::Tensor wa, torch::Tens
+ // (8 * repl CTAs). Returns (dx, dgamma, dbeta, dWa, dWb, dWs); dx already carries the residual branch, dgamma / dbeta are fp32 and the
+ // weight gradients bf16 (fp32 sums rounded once).
+ std::vector<torch::Tensor> transition_fused_bwd(torch::Tensor dy, torch::Tensor x, torch::Tensor xn, torch::Tensor rstd, torch::Tensor c1,
+-                                                torch::Tensor gamma, torch::Tensor wa, torch::Tensor wb, torch::Tensor ws, int64_t repl) {
++                                                torch::Tensor gamma, torch::Tensor wa, torch::Tensor wb, torch::Tensor ws, int64_t repl,
++                                                torch::Tensor cnt) {
++  // cnt: (training part 5) int32 [16] counters zeroed once per device: the backward sums the partials itself (no reduction launch);
++  // an empty tensor: the reduction launch
+   // the backward runs on autograd's device thread: make x's primary context current before the first driver call (the tensor
+   // maps), as the generic surface's make_current does (a first backward there failed with "invalid device context")
+   cudaSetDevice(x.device().index());
+@@ -298,13 +327,14 @@ std::vector<torch::Tensor> transition_fused_bwd(torch::Tensor dy, torch::Tensor
+   auto dgbw = torch::empty({ndx * 4, 256}, f32);
+   auto dwa = torch::empty(wa.sizes(), f32), dwb = torch::empty(wb.sizes(), f32), dws = torch::empty(ws.sizes(), f32);   // fp32, unrounded
+   auto dgam = torch::empty({D}, f32), dbeta = torch::empty({D}, f32);
+-  const CUtensorMap& mdy = tile_map(dy, D, M);
+-  const CUtensorMap& mxn = tile_map(xn, D, M);
+-  const CUtensorMap& mx = tile_map(x, D, M);
+-  const CUtensorMap& mws = tile_map(ws, H, D);
+-  const CUtensorMap& mwa = tile_map(wa, D, H);
+-  const CUtensorMap& mwb = tile_map(wb, D, H);
+-  const CUtensorMap& mdx = tile_map(dx, D, M);
++  const bool bx = k.bwd_bx != 0;                             // (training part 5) the cubin's BX maps: few large boxes
++  const CUtensorMap& mdy = bx ? box_map(dy, D, M, 128, 2) : tile_map(dy, D, M);
++  const CUtensorMap& mxn = bx ? box_map(xn, D, M, 128, 2) : tile_map(xn, D, M);
++  const CUtensorMap& mx = bx ? box_map(x, D, M, 128, 2) : tile_map(x, D, M);
++  const CUtensorMap& mws = bx ? box_map(ws, H, D, 128, 1) : tile_map(ws, H, D);
++  const CUtensorMap& mwa = bx ? box_map(wa, D, H, 64, 2) : tile_map(wa, D, H);
++  const CUtensorMap& mwb = bx ? box_map(wb, D, H, 64, 2) : tile_map(wb, D, H);
++  const CUtensorMap& mdx = bx ? box_map(dx, D, M, 128, 2) : tile_map(dx, D, M);
+   const float* rs = rstd.data_ptr<float>();
+   const float* c = c1.data_ptr<float>();
+   const float* g = gamma.data_ptr<float>();
+@@ -318,11 +348,16 @@ std::vector<torch::Tensor> transition_fused_bwd(torch::Tensor dy, torch::Tensor
+   float* pdg = dgam.data_ptr<float>();
+   float* pdb = dbeta.data_ptr<float>();
+   int tiles = static_cast<int>(M / ROWS), nrows_dg = ndx * 4;
++  const bool ired = cnt.numel() >= 16;
++  expect(!ired || (cnt.is_cuda() && cnt.scalar_type() == torch::kInt32 && ndw >= 16), "cnt: int32 [16] counters, >= 16 weight-role CTAs");
++  void* pcnt = ired ? cnt.data_ptr() : nullptr;
+   auto stream = at::cuda::getCurrentCUDAStream();
+   launch(k.bwd, sms, 512, k.bwd_smem, 2, stream,
+          {(void*)&mdy, (void*)&mxn, (void*)&mx, (void*)&mws, (void*)&mwa, (void*)&mwb, (void*)&mdx, (void*)&rs, (void*)&c, (void*)&g,
+-          (void*)&xg, (void*)&pab, (void*)&ps, (void*)&pg, (void*)&tiles, (void*)&ndw},
++          (void*)&xg, (void*)&pab, (void*)&ps, (void*)&pg, (void*)&tiles, (void*)&ndw, (void*)&pwa, (void*)&pwb, (void*)&pws,
++          (void*)&pdg, (void*)&pdb, (void*)&pcnt},
+          "backward launch", /*pdl=*/true);   // (training part 4) its prologue overlaps the previous kernel's tail
++  if (ired) return {dx, dgam, dbeta, dwa, dwb, dws};
+   // a programmatic dependent of the backward: its blocks are scheduled as the backward's CTAs leave and wait (griddepcontrol.wait)
+   // for the whole backward
+   launch(k.reduce, static_cast<unsigned>(k.reduce_blocks), 256, 0, 1, stream,
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tbwd_d64.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tbwd_d64.cu
+index 9720e4113..bfd48aae8 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tbwd_d64.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tbwd_d64.cu
+@@ -21,8 +21,11 @@ using namespace s100;
+ #define REG_GATE 152
+ #define REG_EPI 152
+ 
++#ifndef GOV
++#define GOV 1                                                  // (training part 5) DW gate arithmetic before its g_empty wait (A/B: 0)
++#endif
+ #ifndef HID
+-#define HID 256                                                // hidden units (n x D); n = 4 by default
++#define HID 256                                               // hidden units (n x D); n = 4 by default
+ #endif
+ constexpr int D_ = 64, H_ = HID, HS = 64, NSL = H_ / HS, ROWS = 128;
+ constexpr int KB = 16384;                                      // one K-block: [128 rows][64 bf16], 128-B swizzled
+@@ -184,9 +187,24 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+       tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.gate_read);
+       // only the shared-memory writes wait for the previous tile's weight-gradient products: the TMEM loads above (and with them
+       // gate_read, hence the next tile's dh / [a|b] products) no longer queue behind them (L768 B4: training step -20 us)
++#if GOV
++      // (training part 5) the gate arithmetic before the wait too: only the stores wait for the previous tile's products
++      uint32_t hq[16], daq[16], dbq[16];
++#pragma unroll
++      for (int k = 0; k < 16; ++k) gate_pair16(dh[2 * k], dh[2 * k + 1], av[2 * k], av[2 * k + 1], bv[2 * k], bv[2 * k + 1], hq[k], daq[k], dbq[k]);
++      if (i >= 1) mbar_wait(&B.g_empty, (i - 1) & 1);
++#pragma unroll
++      for (int qq = 0; qq < 4; ++qq) {
++        const uint32_t off = sw128(r, half * 4 + qq);
++        sts128(su + W_H + off, make_uint4(hq[4 * qq], hq[4 * qq + 1], hq[4 * qq + 2], hq[4 * qq + 3]));
++        sts128(su + W_DAB + off, make_uint4(daq[4 * qq], daq[4 * qq + 1], daq[4 * qq + 2], daq[4 * qq + 3]));
++        sts128(su + W_DAB + KB + off, make_uint4(dbq[4 * qq], dbq[4 * qq + 1], dbq[4 * qq + 2], dbq[4 * qq + 3]));
++      }
++#else
+       if (i >= 1) mbar_wait(&B.g_empty, (i - 1) & 1);
++#endif
+ #pragma unroll
+-      for (int qq = 0; qq < 4; ++qq) {                     // 8 hidden units -> one 16-byte chunk of h, dA and dB each
++      for (int qq = 0; qq < (GOV ? 0 : 4); ++qq) {         // 8 hidden units -> one 16-byte chunk of h, dA and dB each
+         uint32_t hp[4], dap[4], dbp[4];
+ #pragma unroll
+         for (int kk = 0; kk < 4; ++kk) {

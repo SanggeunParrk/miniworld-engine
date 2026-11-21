@@ -1,0 +1,76 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dkv.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dkv.cu
+index 9d1ab1900..8de6e173a 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dkv.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dkv.cu
+@@ -129,7 +129,10 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
+   tc_fence_before();
+   __syncthreads();
+   tc_fence_after();
+-#if PDLW
++#if PDLW == 2
++  if (tid != 0) pdl_wait();                                               // v25: the producer thread waits in its loop (above)
++  pdl_launch();
++#elif PDLW
+   pdl_wait();
+   pdl_launch();
+ #endif
+@@ -139,6 +142,22 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
+     // ------------------------------------------------------------------------------------------------ TMA producer
+     if (lane == 0) {
+       int G = 0;
++#if PDLW == 2
++      // v25 (2026-11-18): the loads that do not read the previous kernel's output (K / V, q, bias^T, LSE: the forward's) of the first ST
++      // blocks go out before griddepcontrol.wait; dO and D (the gate backward's) after it, onto the same stage barriers
++      struct Pend { uint32_t st; int qcol, row; const float* dd; uint64_t* bar; };
++      Pend pend[ST];
++      int np = 0;
++      bool waited = false;
++      auto owed = [&]() {
++        pdl_wait();
++        waited = true;
++        for (int p = 0; p < np; ++p) {
++          tma_load_2d(pend[p].st + TQ, &mdo, pend[p].bar, pend[p].qcol, pend[p].row);
++          bulk_g2s(pend[p].st + 2 * TQ + TBT + 512, pend[p].dd, BQ * 4, pend[p].bar);
++        }
++      };
++#endif
+       for (int li = 0; li < my_items; ++li) {
+         int a, k0, head; item_of(li, a, k0, head);
+         const int ks = li & 1, qcol = head * DH;
+@@ -149,11 +168,26 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
+         const size_t li0 = ((size_t)a * NHEAD + head) * L;
+         for (int n = 0; n < nb; ++n, ++G) {
+           const int s = G % ST;
++#if PDLW == 2
++          if (!waited && G >= ST) owed();
++#endif
+           if (G >= ST) mbar_wait(&B.empty[s], ((G / ST) - 1) & 1);
+           const uint32_t st = su + O_ST + s * STB;
+           mbar_expect_tx(&B.full[s], 2 * BQ * DH * 2 + TBT + 2 * BQ * 4);
+           TR(0, G);
+           tma_load_2d(st, &mq, &B.full[s], qcol, a * L + n * BQ);
++#if PDLW == 2
++          if (!waited) {
++            pend[np++] = Pend{st, qcol, a * L + n * BQ, DD + li0 + n * BQ, &B.full[s]};
++#if BIASNT
++            tma_load_2d(st + 2 * TQ, &mbt, &B.full[s], k0, head * L + n * BQ);
++#else
++            tma_load_2d(st + 2 * TQ, &mbt, &B.full[s], n * BQ, head * L + k0);
++#endif
++            bulk_g2s(st + 2 * TQ + TBT, LSE + li0 + n * BQ, BQ * 4, &B.full[s]);
++            continue;
++          }
++#endif
+           tma_load_2d(st + TQ, &mdo, &B.full[s], qcol, a * L + n * BQ);
+ #if BIASNT
+           tma_load_2d(st + 2 * TQ, &mbt, &B.full[s], k0, head * L + n * BQ);
+@@ -165,6 +199,9 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
+           TR(0, G);
+         }
+       }
++#if PDLW == 2
++      if (!waited) owed();
++#endif
+     }
+   } else if (warp == 1 || warp == 2) {
+     // ------------------------------------------------------------------------------------------------ MMA issuers: warp 1 + w serves

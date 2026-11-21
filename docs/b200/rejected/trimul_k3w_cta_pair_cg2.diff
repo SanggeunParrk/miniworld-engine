@@ -1,0 +1,296 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+index fc5adbd7f..5793ce4f2 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+@@ -17,6 +17,7 @@
+ // the two-die B200 could each fetch the tile from HBM).
+ #include "sm100.cuh"
+ #include "tmap.h"
++#include <cstdlib>
+ 
+ using namespace sm100;
+ 
+@@ -45,22 +46,28 @@ constexpr int NSTW = 4, NTHR_OST = NTHR + 32 * NSTW;
+ constexpr int TOK = 128, NTILE = 128, KBB = 16384, STAGE = 2 * KBB;
+ 
+ // the k-th item of CTA c: grouped = token tile c + (k / NTL) G, all NTL channel items of it in a row; else item c + k G
++// CG 2 (cta_group::2, inference): c / G count CTA PAIRS, a token tile is TT = 256 tokens and this CTA's 128 start at off = 128 rank
+ struct Sched {
+-  int c, G, T, NTL, grouped;
++  int c, G, T, NTL, grouped, TT, off;
+   DEV bool get(int k, int& m0, int& n0) const {
+     int tile, half;
+     if (grouped) { tile = c + (k / NTL) * G; half = k % NTL; }
+     else { const int w = c + k * G; tile = w / NTL; half = w % NTL; }
+-    m0 = tile * TOK; n0 = half * NTILE;
++    m0 = tile * TT + off; n0 = half * NTILE;
+     return tile < T;
+   }
+ };
++#ifndef K3W_NS2
++#define K3W_NS2 7   // CG 2 stage ring (24 KB stages)
++#endif
+ // SAVE (training): the epilogue also stores p and g (bf16) for the backward, through two more [128 tok][128 ch] staging tiles;
+ // the stage ring shrinks from 5 to 3 to make room.
+-template <int SAVE, int OST = 0>
++// CG 2: a stage is this CTA's A block (16 KB) and its HALF of the B block (64 of the 128 weight rows, 8 KB).
++template <int SAVE, int OST = 0, int CG = 1>
+ struct Lay {
+-  static constexpr int NST = SAVE ? 3 : 5;
+-  static constexpr int O_ST = 0, O_XR = O_ST + NST * STAGE, O_PS = O_XR + 2 * KBB, O_GS = O_PS + (SAVE ? 2 * KBB : 0),
++  static constexpr int STG = CG == 2 ? KBB + KBB / 2 : STAGE;
++  static constexpr int NST = SAVE ? 3 : (CG == 2 ? K3W_NS2 : 5);
++  static constexpr int O_ST = 0, O_XR = O_ST + NST * STG, O_PS = O_XR + 2 * KBB, O_GS = O_PS + (SAVE ? 2 * KBB : 0),
+                        O_VEC = O_GS + (SAVE ? 2 * KBB : 0),
+                        O_SP = O_VEC + 4 * NTILE * 4,                 // OST: [NSTW warps][2 (mean, M2)][TOK] partials
+                        O_SB = O_SP + (OST ? NSTW * 2 * TOK * 4 : 0), // OST: [2 items][2 (mu, rs)][TOK]
+@@ -68,8 +75,30 @@ struct Lay {
+   static constexpr int SMEM = O_BAR + 256 + 1024;
+   static_assert(SMEM <= 232448, "smem");
+ };
+-constexpr int NSTMAX = 5;
++constexpr int NSTMAX = 8;
+ constexpr uint32_t ID_P = idesc_bf16_mj(128, NTILE, 1, 0), ID_G = idesc_bf16_mj(128, NTILE, 0, 0);
++constexpr uint32_t ID_P2 = idesc_bf16_mj(256, NTILE, 1, 0), ID_G2 = idesc_bf16_mj(256, NTILE, 0, 0);
++// ---- cta_group::2 helpers (the Transition pair chain's forms)
++DEV void tma_load_2d_2sm(void* dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, uint64_t hint) {
++  // into this CTA's shared memory, the transaction completing on the LEADER's barrier (peer bit cleared)
++  asm volatile(
++      "cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1, {%3, %4}], [%2], %5;"
++      ::"r"(smem_u32(dst)), "l"(reinterpret_cast<uint64_t>(m)), "r"(smem_u32(bar) & 0xFEFFFFFFu), "r"(c0), "r"(c1), "l"(hint) : "memory");
++}
++DEV void umma_ss2(uint32_t d, uint64_t a, uint64_t b, uint32_t idesc, uint32_t acc) {
++  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::2.kind::f16 [%0], %1, %2, %3, p; }"
++               ::"r"(d), "l"(a), "l"(b), "r"(idesc), "r"(acc) : "memory");
++}
++DEV void commit2_mc(uint64_t* bar) {   // arrive on the barrier at this offset in BOTH CTAs of the pair
++  asm volatile("tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%0], %1;"
++               ::"r"(smem_u32(bar)), "h"((uint16_t)3) : "memory");
++}
++DEV void tmem_alloc2(uint32_t* dst, uint32_t n) {
++  asm volatile("tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32 [%0], %1;" ::"r"(smem_u32(dst)), "r"(n) : "memory");
++}
++DEV void tmem_relinquish2() { asm volatile("tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned;" ::: "memory"); }
++DEV void tmem_dealloc2(uint32_t a, uint32_t n) { asm volatile("tcgen05.dealloc.cta_group::2.sync.aligned.b32 %0, %1;" ::"r"(a), "r"(n) : "memory"); }
++DEV void cluster_sync_k3() { asm volatile("barrier.cluster.arrive.release.aligned; barrier.cluster.wait.acquire.aligned;" ::: "memory"); }
+ 
+ struct Bars {
+   uint64_t st_full[NSTMAX], st_empty[NSTMAX], acc_full[2], acc_empty[2], xr_full, xr_empty, sf[2], se[2];
+@@ -94,7 +123,7 @@ DEV float2 lds2f(uint32_t a) { float2 v; asm volatile("ld.shared.v2.f32 {%0,%1},
+ 
+ 
+ // flags (the host's pdl argument): bit 0 launched as a programmatic dependent
+-template <int D, int H, int SAVE, int OST>
++template <int D, int H, int SAVE, int OST, int CG = 1>
+ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+     k3w_kernel(const __grid_constant__ CUtensorMap mt, const __grid_constant__ CUtensorMap mwp, const __grid_constant__ CUtensorMap mx,
+                const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap my, const __grid_constant__ CUtensorMap mps,
+@@ -102,7 +131,9 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+                const float* __restrict__ mu_o, const float* __restrict__ rs_o, const float* __restrict__ mu_i,
+                const float* __restrict__ rs_i, const __nv_bfloat16* __restrict__ ds, int items, int L, int grouped, int flags, float eps) {
+   constexpr int KBT = H / 64, KBX = D / 64, NKB = KBT + KBX, NTL = D / NTILE;
+-  using LY = Lay<SAVE, OST>;
++  using LY = Lay<SAVE, OST, CG>;
++  static_assert(CG == 1 || !SAVE, "the CTA pair form is inference only");
++  constexpr int STG = LY::STG;
+   constexpr int NST = LY::NST, O_ST = LY::O_ST, O_XR = LY::O_XR, O_PS = LY::O_PS, O_GS = LY::O_GS, O_VEC = LY::O_VEC, O_BAR = LY::O_BAR;
+   const int pdl = flags & 1;
+   extern __shared__ __align__(1024) uint8_t smem_raw[];
+@@ -111,20 +142,25 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+   if (threadIdx.x == 0) K3TL(0)
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+-  const int cta = blockIdx.x, G = gridDim.x;
+-  const Sched S{cta, G, items / NTL, NTL, grouped};
++  const int rank = CG == 2 ? (int)cluster_ctarank() : 0;
++  const int cta = CG == 2 ? (int)(blockIdx.x >> 1) : (int)blockIdx.x, G = CG == 2 ? (int)(gridDim.x >> 1) : (int)gridDim.x;
++  const Sched S{cta, G, items / NTL, NTL, grouped, CG * TOK, rank * TOK};
+ 
+   if (tid == 0) {
+     for (int s = 0; s < NST; ++s) { mbar_init(&B.st_full[s], 1); mbar_init(&B.st_empty[s], OST ? 1 + NSTW : 1); }
+     if (OST) for (int b = 0; b < 2; ++b) { mbar_init(&B.sf[b], 1); mbar_init(&B.se[b], EPW); }
+-    for (int b = 0; b < 2; ++b) { mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], EPW); }
++    for (int b = 0; b < 2; ++b) { mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], CG * EPW); }   // CG 2: both CTAs' epilogues
+     mbar_init(&B.xr_full, 1); mbar_init(&B.xr_empty, 1);
+     fence_mbar_init();
+     prefetch_tmap(&mt); prefetch_tmap(&mwp); prefetch_tmap(&mx); prefetch_tmap(&mwg); prefetch_tmap(&my);
+   }
+-  if (warp == 2) { tmem_alloc(&B.tmem, 512); tmem_relinquish(); }
++  if (warp == 2) {
++    if constexpr (CG == 2) { tmem_alloc2(&B.tmem, 512); tmem_relinquish2(); }
++    else { tmem_alloc(&B.tmem, 512); tmem_relinquish(); }
++  }
+   tc_fence_before();
+   __syncthreads();
++  if constexpr (CG == 2) cluster_sync_k3();   // the peer's barriers are initialised before any remote arrive / transaction
+   tc_fence_after();
+   if (tid == 0) K3TL(1)
+   const uint32_t tmem = B.tmem;
+@@ -139,8 +175,23 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+       for (int k = 0; S.get(k, m0, n0); ++k) {
+         for (int kb = 0; kb < NKB; ++kb) {
+           mbar_wait(&B.st_empty[s], ph ^ 1);
++          uint8_t* a = sm + O_ST + s * STG;
++          if constexpr (CG == 2) {
++            // the leader's barrier counts both CTAs' bytes; each CTA loads its 128 tokens and its 64 of the item's weight rows
++            if (rank == 0) mbar_expect_tx(&B.st_full[s], 2 * STG);
++            if (kb < KBT) {
++              tma_load_2d_2sm(a, &mt, &B.st_full[s], m0, kb * 64, EVICT_NORMAL);
++              tma_load_2d_2sm(a + KBB / 2, &mt, &B.st_full[s], m0 + 64, kb * 64, EVICT_NORMAL);
++              tma_load_2d_2sm(a + KBB, &mwp, &B.st_full[s], kb * 64, n0 + 64 * rank, EVICT_LAST);
++            } else {
++              const int kx = kb - KBT;
++              tma_load_2d_2sm(a, &mx, &B.st_full[s], kx * 64, m0, EVICT_NORMAL);
++              tma_load_2d_2sm(a + KBB, &mwg, &B.st_full[s], kx * 64, n0 + 64 * rank, EVICT_LAST);
++            }
++            if (++s == NST) { s = 0; ph ^= 1; }
++            continue;
++          }
+           mbar_expect_tx(&B.st_full[s], STAGE);
+-          uint8_t* a = sm + O_ST + s * STAGE;
+           if (kb < KBT) {
+             tma_load_2d(a, &mt, &B.st_full[s], m0, kb * 64, EVICT_NORMAL);             // [64 ch][64 tok], tokens 0-63
+             tma_load_2d(a + KBB / 2, &mt, &B.st_full[s], m0 + 64, kb * 64, EVICT_NORMAL);   // tokens 64-127
+@@ -166,6 +217,43 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+         tma_load_2d(sm + O_XR + KBB, &mx, &B.xr_full, n0 + 64, m0, EVICT_FIRST);
+       }
+     }
++  } else if (warp == 1 && CG == 2) {
++    // ------------------------------------------------------------------ MMA, CTA pair: the leader issues M = 256 (its tokens, then the
++    // peer's), N = 128 (B rows 0-63 from the leader, 64-127 from the peer); every commit arrives on both CTAs' barriers
++    if (rank == 0) {
++      const bool ldr = elect_one();
++      int s = 0, m0, n0; uint32_t ph = 0;
++      for (int i = 0; S.get(i, m0, n0); ++i) {
++        const int b = i & 1;
++        mbar_wait_cluster(&B.acc_empty[b], ((i >> 1) & 1) ^ 1);   // the peer's epilogue arrives remotely (release.cluster)
++        tc_fence_after();
++        const uint32_t dp = tmem + b * 256, dg = dp + 128;
++#pragma unroll 1
++        for (int kb = 0; kb < NKB; ++kb) {
++          mbar_wait(&B.st_full[s], ph);
++          if (ldr && i < 2 && (kb == 0 || kb == NKB - 1)) K3TL(2 + 3 * i + (kb ? 1 : 0))
++          tc_fence_after();
++          if (ldr) {
++            const uint32_t a = su + O_ST + s * STG, bw = a + KBB;
++            if (kb < KBT) {
++#pragma unroll
++              for (int k = 0; k < 4; ++k)
++                umma_ss2(dp, desc_mn_sw128(a + k * 2048, KBB / 2), desc_k_sw128(bw + k * 32), ID_P2, (kb | k) != 0);
++            } else {
++              const int kx = kb - KBT;
++#pragma unroll
++              for (int k = 0; k < 4; ++k)
++                umma_ss2(dg, desc_k_sw128(a + k * 32), desc_k_sw128(bw + k * 32), ID_G2, (kx | k) != 0);
++            }
++            commit2_mc(&B.st_empty[s]);
++          }
++          __syncwarp();
++          if (++s == NST) { s = 0; ph ^= 1; }
++        }
++        if (ldr) commit2_mc(&B.acc_full[b]);
++        __syncwarp();
++      }
++    }
+   } else if (warp == 1) {
+     // ------------------------------------------------------------------ MMA
+     const bool ldr = elect_one();
+@@ -219,7 +307,7 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+       for (int kb = 0; kb < NKB; ++kb) {
+         mbar_wait(&B.st_full[s], ph);
+         if (fresh && kb < KBT) {
+-          const uint32_t base = su + O_ST + s * STAGE + hf * (KBB / 2) + cg * 8 * 128;
++          const uint32_t base = su + O_ST + s * STG + hf * (KBB / 2) + cg * 8 * 128;
+           uint4 v[8];
+ #pragma unroll
+           for (int cc = 0; cc < 8; ++cc) v[cc] = lds128(base + cc * 128 + ((jc ^ cc) << 4));
+@@ -330,7 +418,13 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+         tmem_ld32(tmem + lane_off + b * 256 + 128 + cq * 32, gv);
+         tmem_wait_ld();
+         if (et == 0 && i < 2 && cq == c0 / 32) K3TL(18 + i)
+-        if (cq == (c0 + ECH) / 32 - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.acc_empty[b]); }
++        if (cq == (c0 + ECH) / 32 - 1) {
++          tc_fence_before(); __syncwarp();
++          if (lane == 0) {
++            if (CG == 2 && rank != 0) mbar_arrive_remote(mapa(smem_u32(&B.acc_empty[b]), 0));   // the leader's MMA waits on its own
++            else mbar_arrive(&B.acc_empty[b]);
++          }
++        }
+ #pragma unroll
+         for (int q2 = 0; q2 < 4; ++q2) {                // 8 channels = one 16-byte chunk of the row
+           const int cl = cq * 32 + q2 * 8;              // channel within the tile
+@@ -398,7 +492,12 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+   tc_fence_before();
+   __syncthreads();
+   if (tid == 0) { K3TL(14) }
+-  if (warp == 2) tmem_dealloc(tmem, 512);
++  if constexpr (CG == 2) {
++    cluster_sync_k3();   // no remote arrive / MMA into this CTA is pending when either CTA frees its tensor memory or exits
++    if (warp == 2) { tc_fence_after(); tmem_dealloc2(tmem, 512); }
++  } else {
++    if (warp == 2) tmem_dealloc(tmem, 512);
++  }
+ }
+ 
+ int num_sms() {
+@@ -428,29 +527,51 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
+   // pdl bits: 0 programmatic dependent; 1 LN_out statistics in the kernel (OST, inference: mu_o / rs_o unused)
+   const bool ost = (pdl >> 1) & 1;
+   TORCH_CHECK(!(ost && p_out.has_value()), "k3w_forward: the in-kernel LN_out statistics are inference only");
++  // pdl bit 2: the CTA-pair form (cta_group::2, inference; env TRIMUL_K3W_CG = 1 / 2 overrides for A/B)
++  const char* cg_env = std::getenv("TRIMUL_K3W_CG");
++  const bool cg2 = (cg_env != nullptr ? cg_env[0] == '2' : ((pdl >> 2) & 1) != 0) && !p_out.has_value() && M % (2 * TOK) == 0;
++  const uint32_t wrows = cg2 ? 64 : 128;   // CG 2: each CTA loads its half of a weight block
+   auto mt = tmap::make(t.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
+-  auto mwp = tmap::make(wpq.data_ptr(), bf, {(uint64_t)H, (uint64_t)D}, {(uint64_t)H * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
++  auto mwp = tmap::make(wpq.data_ptr(), bf, {(uint64_t)H, (uint64_t)D}, {(uint64_t)H * 2}, {64, wrows}, CU_TENSOR_MAP_SWIZZLE_128B);
+   auto mx = tmap::make(x.data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
+-  auto mwg = tmap::make(wgq.data_ptr(), bf, {(uint64_t)D, (uint64_t)D}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
++  auto mwg = tmap::make(wgq.data_ptr(), bf, {(uint64_t)D, (uint64_t)D}, {(uint64_t)D * 2}, {64, wrows}, CU_TENSOR_MAP_SWIZZLE_128B);
+   auto my = tmap::make(y.data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);
+   const bool save = p_out.has_value();
+   TORCH_CHECK(save == g_out.has_value());
+   auto mps = save ? tmap::make(p_out->data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B) : my;
+   auto mgs = save ? tmap::make(g_out->data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B) : my;
+-  const int items = (int)(M / TOK * (D / NTILE));
+-  int g = grid > 0 ? (int)grid : num_sms();
++  const int ttok = cg2 ? 2 * TOK : TOK;    // CG 2: a work item is 256 tokens (the pair) x 128 channels
++  const int items = (int)(M / ttok * (D / NTILE));
++  int g = grid > 0 ? (int)grid : num_sms() / (cg2 ? 2 : 1);   // CTAs, or CTA pairs (CG 2)
+   g = std::min(g, items);
+-  const int grouped = (M / TOK) >= 4LL * g;   // enough token tiles: a CTA takes all channel items of a tile in a row (Sched)
++  const int grouped = (M / ttok) >= 4LL * g;   // enough token tiles: a CTA takes all channel items of a tile in a row (Sched)
+   auto st = at::cuda::getCurrentCUDAStream();
+   const __nv_bfloat16* dsp = ds.has_value() ? reinterpret_cast<const __nv_bfloat16*>(ds->data_ptr()) : nullptr;
+   auto launch = [&](auto kern, int smem, int nthr) {
+     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+-    tmap::launch_pdl(kern, dim3(g), dim3(nthr), smem, st, (pdl & 1) != 0, mt, mwp, mx, mwg, my, mps, mgs, (const float*)vec.data_ptr<float>(),
+-                     (const float*)mu_o.data_ptr<float>(), (const float*)rs_o.data_ptr<float>(), (const float*)mu_i.data_ptr<float>(),
+-                     (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L, grouped, (int)(pdl & 1), 1e-5f);   // LN eps 1e-5 (the route's contract)
++    if (!cg2) {
++      tmap::launch_pdl(kern, dim3(g), dim3(nthr), smem, st, (pdl & 1) != 0, mt, mwp, mx, mwg, my, mps, mgs, (const float*)vec.data_ptr<float>(),
++                       (const float*)mu_o.data_ptr<float>(), (const float*)rs_o.data_ptr<float>(), (const float*)mu_i.data_ptr<float>(),
++                       (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L, grouped, (int)(pdl & 1), 1e-5f);   // LN eps 1e-5 (the route's contract)
++      return;
++    }
++    cudaLaunchConfig_t cfg = {};
++    cfg.gridDim = dim3(2 * g); cfg.blockDim = dim3(nthr); cfg.dynamicSmemBytes = smem; cfg.stream = st;
++    cudaLaunchAttribute at[2];
++    at[0].id = cudaLaunchAttributeClusterDimension;
++    at[0].val.clusterDim.x = 2; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
++    at[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
++    at[1].val.programmaticStreamSerializationAllowed = 1;
++    cfg.attrs = at; cfg.numAttrs = (pdl & 1) ? 2 : 1;
++    C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kern, mt, mwp, mx, mwg, my, mps, mgs, (const float*)vec.data_ptr<float>(),
++                                      (const float*)mu_o.data_ptr<float>(), (const float*)rs_o.data_ptr<float>(),
++                                      (const float*)mu_i.data_ptr<float>(), (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L,
++                                      grouped, (int)(pdl & 1), 1e-5f));
+   };
+ #define K3W_CASE(DD, HH) if (D == DD && H == HH) { \
+-    if (save) launch(k3w_kernel<DD, HH, 1, 0>, Lay<1>::SMEM, NTHR); \
++    if (cg2 && ost) launch(k3w_kernel<DD, HH, 0, 1, 2>, Lay<0, 1, 2>::SMEM, NTHR_OST); \
++    else if (cg2) launch(k3w_kernel<DD, HH, 0, 0, 2>, Lay<0, 0, 2>::SMEM, NTHR); \
++    else if (save) launch(k3w_kernel<DD, HH, 1, 0>, Lay<1>::SMEM, NTHR); \
+     else if (ost) launch(k3w_kernel<DD, HH, 0, 1>, Lay<0, 1>::SMEM, NTHR_OST); \
+     else launch(k3w_kernel<DD, HH, 0, 0>, Lay<0>::SMEM, NTHR); \
+     C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }

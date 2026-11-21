@@ -1,0 +1,182 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
+index e6c349668..cac2788c3 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
+@@ -1711,6 +1711,108 @@ __global__ void __launch_bounds__(256) tri_param_finish(const float* __restrict_
+   }
+ }
+ 
++// (round 11) tri_slot_sum (M_t / vector segments) + tri_param_finish in ONE launch.  At L128 d_pair 128 the two kernels are 4.9 + 3.5
++// us of almost no work: the slot sum is NOT bound by its bytes (B200 2026-11-18: the same 4.9-5.1 us with 19 MB or, cluster-summed,
++// 2.4 MB of M_t slots), so the second launch is the cost.  Block b < 512 = the M_t row (t, c) = b: its 32 float4 columns summed over
++// the slots by 16 slot lanes (lane g: slots g, g + 16, ..; the lane sums added in lane order -- tri_slot_sum's order: the same M bits),
++// cs_t the same way, then dW_t[o][c] = gamma_c M + beta_c cs_t[o] for the row's 128 o and the row's shares of dgamma / dbeta
++// (sum_o W_t[o][c] M, sum_o W_t[o][c] cs_t[o], a fixed shuffle order) into WS; blocks 512..515 sum B_h, block 516 cdb.  The last block
++// to arrive (a self-resetting ticket) adds the four tensors' shares a channel in t order and writes dgamma | dbeta | dWb.
++template <typename OutT>
++__global__ void __launch_bounds__(512) tri_slot_finish(const float* __restrict__ MTS, const float* __restrict__ VECS, const int nsp,
++    const __nv_bfloat16* __restrict__ W4, const float* __restrict__ LNW, const float* __restrict__ LNB, const float* __restrict__ WBF,
++    OutT* __restrict__ DW, OutT* __restrict__ DGB, float* __restrict__ WS, unsigned* __restrict__ TICKET) {
++  constexpr int NVP = 1056;                                   // wg::NVECP
++  const int tid = threadIdx.x, col = tid & 31, ln = tid >> 5;
++  __shared__ float4 part[16][32];
++  __shared__ unsigned last;
++  // column `col` of a [nsp][stride] slot array at base: lane-strided sum, lanes added in order -> valid in warp 0
++  __shared__ float4 part2[16][32];
++  // column `col` of two [nsp][stride] slot arrays: lane-strided sums (every load of a lane in flight at once: a missing slot adds
++  // +0, which leaves the sum's bits), the lanes added in order -> valid in warp 0
++  float4 r1, r2;
++  auto ssum2 = [&](const float* b1, long s1, const float* b2, long s2) {
++    const float4* p1 = reinterpret_cast<const float4*>(b1) + col;
++    const float4* p2 = b2 ? reinterpret_cast<const float4*>(b2) + col : p1;
++    const long st1 = s1 / 4, st2 = s2 / 4;
++    float4 a = make_float4(0.f, 0.f, 0.f, 0.f), a2 = a;
++    for (int k0 = ln; k0 < nsp; k0 += 8 * 16) {
++      float4 v[8], w[8];
++#pragma unroll
++      for (int u = 0; u < 8; ++u) {
++        const bool ok = k0 + u * 16 < nsp;
++        v[u] = ok ? __ldg(p1 + (long)(k0 + u * 16) * st1) : make_float4(0.f, 0.f, 0.f, 0.f);
++        w[u] = ok && b2 ? __ldg(p2 + (long)(k0 + u * 16) * st2) : make_float4(0.f, 0.f, 0.f, 0.f);
++      }
++#pragma unroll
++      for (int u = 0; u < 8; ++u) { add4(a, v[u]); add4(a2, w[u]); }
++    }
++    part[ln][col] = a; part2[ln][col] = a2;
++    __syncthreads();
++    r1 = part[0][col]; r2 = part2[0][col];
++    if (ln == 0) {
++#pragma unroll
++      for (int g = 1; g < 16; ++g) { add4(r1, part[g][col]); add4(r2, part2[g][col]); }
++    }
++    __syncthreads();
++  };
++  auto ssum = [&](const float* base, long stride) -> float4 { ssum2(base, stride, nullptr, 0); return r1; };
++  const int b = blockIdx.x;
++  if (b < 4 * C) {
++    const int t = b >> 7, c = b & (C - 1);
++    ssum2(MTS + ((long)t * C + c) * C, 4L * C * C, VECS + t * C, NVP);
++    const float4 m = r1, cs = r2;
++    if (ln == 0) {
++      const float g = LNW[c], be = LNB[c];
++      const float mv[4] = {m.x, m.y, m.z, m.w}, cv[4] = {cs.x, cs.y, cs.z, cs.w};
++      float pg = 0.f, pb = 0.f;
++#pragma unroll
++      for (int e = 0; e < 4; ++e) {
++        const long wi = ((long)t * C + 4 * col + e) * C + c;
++        st_out(DW + wi, g * mv[e] + be * cv[e]);
++        const float w = __bfloat162float(W4[wi]);
++        pg = fmaf(w, mv[e], pg);
++        pb = fmaf(w, cv[e], pb);
++      }
++#pragma unroll
++      for (int o = 16; o >= 1; o >>= 1) { pg += __shfl_xor_sync(0xffffffffu, pg, o); pb += __shfl_xor_sync(0xffffffffu, pb, o); }
++      if (col == 0) { __stcg(WS + t * C + c, pg); __stcg(WS + 4 * C + t * C + c, pb); }
++    }
++  } else if (b < 4 * C + NH) {
++    const int h = b - 4 * C;
++    const float4 v = ssum(VECS + 4 * C + h * C, NVP);
++    if (ln == 0) __stcg(reinterpret_cast<float4*>(WS + 8 * C + h * C) + col, v);
++  } else {
++    const float4 v = ssum(VECS + 8 * C, NVP);                 // cdb: column 0 only
++    if (ln == 0 && col == 0) __stcg(reinterpret_cast<float4*>(WS + 12 * C), v);
++  }
++  __syncthreads();
++  if (tid == 0) {
++    __threadfence();
++    last = atomicAdd(TICKET, 1u) == gridDim.x - 1;
++  }
++  __syncthreads();
++  if (!last) return;
++  __threadfence();
++  if (tid < C) {
++    const int c = tid;
++    float g = 0.f, bb = 0.f;
++#pragma unroll
++    for (int t = 0; t < 4; ++t) { g += __ldcg(WS + t * C + c); bb += __ldcg(WS + 4 * C + t * C + c); }
++    const float lg = LNW[c], lb = LNB[c];
++#pragma unroll
++    for (int h = 0; h < NH; ++h) {
++      const float bh = __ldcg(WS + 8 * C + h * C + c), cd = __ldcg(WS + 12 * C + h);
++      g = fmaf(WBF[h * C + c], bh, g);
++      bb = fmaf(WBF[h * C + c], cd, bb);
++      st_out(DGB + 2 * C + h * C + c, lg * bh + lb * cd);
++    }
++    st_out(DGB + c, g);
++    st_out(DGB + C + c, bb);
++  }
++  if (tid == 0) *TICKET = 0u;
++}
++
+ // ---- parameter pack (one launch per forward): [Wq; Wk; Wv; Wg] -> w4 bf16 [512, 128], Wo -> bf16 [128, 128],
+ // lnw | lnb | Wb -> fp32 [6, 128] (the layout head_bwd's constant block and every kernel's fp32 parameters use); any float dtype in
+ __device__ __forceinline__ float ld_any(const void* p, long i, int f32) {
+@@ -1877,7 +1979,7 @@ std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::
+   const int ntiles = (int)(R / wg::BM), sms = num_sms(x.device().index());
+   const int NG = WG_NG ? WG_NG : wg::wg_groups(ntiles, sms);
+   int nsp = std::min(ntiles, sms / NG);
+-  const int fmode = det && finish ? (int)fold : 0;   // (round 10) 1: every tail folded in; 2: only the dWo sum (wgrad's idle row warps)
++  const int fmode = det && finish ? (int)(fold & 3) : 0;   // (round 10) 1: every tail folded in; 2: only the dWo sum (wgrad's idle row warps)
+   if (fmode == 1) { const int per = (ntiles + nsp - 1) / nsp; nsp = (ntiles + per - 1) / per; }   // the same tiles a CTA on fewer CTAs: fewer slots
+   const int grid = nsp * NG;
+   // det: the per-CTA partials (every slot written whole by its CTA: no zeroing), summed into mt / vec by tri_slot_sum.
+@@ -1925,6 +2027,25 @@ std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::
+       finish && fp32_out ? nullptr : reinterpret_cast<__nv_bfloat16*>(dgb.data_ptr<at::BFloat16>()), det ? 2 : 0, mtm, geo, NG, F);
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+   if (fmode == 1) return {dw, dgb, dwo_f};
++  if (fmode == 2 && (fold & 4)) {
++    // (round 11) slot sum + finish in one launch (tri_slot_finish); dWo was written by the wgrad CTAs (fold 2)
++    static torch::Tensor tk[64];
++    const int dev = x.device().index();
++    if (!tk[dev].defined()) tk[dev] = torch::zeros({1}, x.options().dtype(torch::kInt32));
++    auto fws = torch::empty({12L * C + 4}, opt);
++    auto stream = at::cuda::getCurrentCUDAStream();
++    const auto* w4p = reinterpret_cast<const __nv_bfloat16*>(w4.data_ptr<at::BFloat16>());
++    unsigned* tkp = reinterpret_cast<unsigned*>(tk[dev].data_ptr<int>());
++    if (fp32_out)
++      tri_slot_finish<float><<<4 * C + NH + 1, 512, 0, stream>>>(mts.data_ptr<float>(), vecs.data_ptr<float>(), nsp, w4p, lw.data_ptr<float>(),
++          lb.data_ptr<float>(), wbf.data_ptr<float>(), dw.data_ptr<float>(), dgb.data_ptr<float>(), fws.data_ptr<float>(), tkp);
++    else
++      tri_slot_finish<__nv_bfloat16><<<4 * C + NH + 1, 512, 0, stream>>>(mts.data_ptr<float>(), vecs.data_ptr<float>(), nsp, w4p,
++          lw.data_ptr<float>(), lb.data_ptr<float>(), wbf.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(dw.data_ptr<at::BFloat16>()),
++          reinterpret_cast<__nv_bfloat16*>(dgb.data_ptr<at::BFloat16>()), fws.data_ptr<float>(), tkp);
++    C10_CUDA_KERNEL_LAUNCH_CHECK();
++    return {dw, dgb, dwo_f};
++  }
+   if (fmode == 2) dwo32 = torch::empty({0}, opt);
+   const bool wo_ = dwo32.defined() && dwo32.numel() > 0;
+   if (wo_) TORCH_CHECK(dwo32.scalar_type() == torch::kFloat32 && dwo32.is_contiguous() && dwo32.numel() % (C * C) == 0 && (det || dwo32.numel() == C * C),
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+index 045280920..249ca1cfc 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+@@ -183,7 +183,7 @@ CORE_PDL = os.environ.get("MINIWORLD_TRIATTN_B200_CORE_PDL", "1") != "0"
+ def _mod():
+     ensure_cuda_home()
+     return load_extension(
+-        name="triattn_b200_mod_v20_tt10", sources=[str(_SRC / "triattn_mod_sm100.cu")], extra_cuda_cflags=_flags(), verbose=False
++        name="triattn_b200_mod_v20_tt11", sources=[str(_SRC / "triattn_mod_sm100.cu")], extra_cuda_cflags=_flags(), verbose=False
+     )
+ 
+ 
+@@ -453,7 +453,7 @@ def fused_backward(dy, pair, eps, drop, saved, dtypes, trans=False):
+         dwo if hwo else E32,
+     )
+     done = dwo_h.numel() > 0
+-    dw, dgb, dwo = m.tri_wgrad(dq, dk, dv, dg, db, x, eps, B, Lp, w4, wbf, lw, lb, True, E32 if done else dwo, wmt, fp32, det, trans, lr, WFOLD if det and not done else 0)
++    dw, dgb, dwo = m.tri_wgrad(dq, dk, dv, dg, db, x, eps, B, Lp, w4, wbf, lw, lb, True, E32 if done else dwo, wmt, fp32, det, trans, lr, (WFOLD | (FTAIL << 2)) if det and not done else 0)
+     if done:
+         dwo = dwo_h
+     return dpair.view(B, L, L, C), dgb, dw, dwo
+@@ -472,6 +472,11 @@ GATE_BIAST = os.environ.get("MINIWORLD_TRIATTN_B200_GATE_BIAST", "1") != "0"
+ #: is ~16-27 MB of L2 reads, not a launch overhead) -- kept opt-in only.  0: the separate launches.
+ WFOLD = int(os.environ.get("MINIWORLD_TRIATTN_B200_WFOLD", "2"))
+ 
++#: (training tails round 11) with WFOLD = 2: tri_slot_sum + tri_param_finish as ONE launch (tri_slot_finish: the M_t rows summed and
++#: finished in the same block, dgamma / dbeta by the last block to arrive).  The slot sum is not bound by its bytes (4.9-5.1 us with
++#: 19 MB or 2.4 MB of M_t slots at L128), so a launch is what can go.  0: the two launches.
++FTAIL = int(os.environ.get("MINIWORLD_TRIATTN_B200_FTAIL", "1"))
++
+ #: (training tails round 9) tri_head_bwd and tri_wgrad as one CTA-split launch (tri_hw_bwd: the two read the same inputs and not each
+ #: other's outputs): head_bwd on ~60-64 of the 148 SMs, wgrad (2 tensor groups) on the rest -- one launch fewer and ~40 % fewer wgrad
+ #: slots for the slot sum.  Module training step (graph, d_pair 128, starting / ending, us): L256 294.7 -> 287.9 / 298.0 -> 290.6 (nh 60),

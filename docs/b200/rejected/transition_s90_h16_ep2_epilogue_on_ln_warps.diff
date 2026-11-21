@@ -1,0 +1,103 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
+index 5a96b4daa..3fe1373b2 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
+@@ -19,6 +19,7 @@
+ // TMEM columns: [a | b] x 2 at 0 / 128, y at 256 (D columns), xn x 2 (D / 2 columns each) after it.
+ // SPDX-License-Identifier: Apache-2.0
+ #include "sm100.cuh"
++#include "../widths/tsx_store.cuh"
+ using namespace s100;
+ 
+ #ifndef D
+@@ -98,8 +99,14 @@ static_assert(!XLN || (XG && LNS && !SAVE_BUILD), "XLN: the D 256 inference buil
+ static_assert(!YST || RXC, "YST needs RXC");
+ // -DRXT=1 (round 3 part 20; default: the inference build): a CTA's LAST tile takes its residual x from a TMA copy into the (then idle)
+ // weight ring and writes y by TMA stores from there (see the epilogue); the other tiles as before. The same arithmetic: the same bits.
++// -DEP2=1 (S90; D <= 128 inference, M a multiple of 128): the y epilogue moves from the SwiGLU warps (where it ran after every tile's chunks, in the h buffers the next tile's chunks need, so
++// SwiGLU(i + 1) waited for epilogue(i)) to the LayerNorm warps (10-13), which run it after the LayerNorm of the next tile: residual x re-read from global memory in 128-B row segments,
++// y written the same way from registers (store_t / load_t, no staging), the accumulator released after its last TMEM load.
++#ifndef EP2
++#define EP2 0
++#endif
+ #ifndef RXT
+-#define RXT (MLANE && YST && !SAVE_BUILD)
++#define RXT (MLANE && YST && !SAVE_BUILD && !EP2)
+ #endif
+ static_assert(!RXT || (MLANE && YST && !SAVE_BUILD), "RXT: the inference build with the lane-parallel producer");
+ // -DLNA=1 (round 3 part 11; default: the D 256 inference build): at a CTA's first tile the SwiGLU warps of half 0 (idle until the first
+@@ -182,7 +189,7 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+   const int tiles = (M + 127) / 128, NC = HID / BN;
+ 
+   if (threadIdx.x == 0) {
+-    mbar_init(&B.yfull, 1); mbar_init(&B.yempty, NEPI); mbar_init(&B.xa0, 4); mbar_init(&B.xsfull, 1); mbar_init(&B.gbfull, 1);
++    mbar_init(&B.yfull, 1); mbar_init(&B.yempty, EP2 ? NLN : NEPI); mbar_init(&B.xa0, 4); mbar_init(&B.xsfull, 1); mbar_init(&B.gbfull, 1);
+     mbar_init(&B.rxgo, 1); mbar_init(&B.rxfull, 1);
+     for (int s = 0; s < 2; ++s) { mbar_init(&B.xfull[s], NLN); mbar_init(&B.xempty[s], 1); }
+     for (int s = 0; s < NSW; ++s) { mbar_init(&B.wfull[s], 1); mbar_init(&B.wempty[s], 1); }
+@@ -428,6 +435,38 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+       __syncwarp((1u << XKB) - 1u);
+       tma_load_2d(su + O_X0 + lane * 16384, &mX, &B.xsfull, lane * 32, blockIdx.x * 128);
+     }
++#endif
++#if EP2
++    // y of tile t on the LayerNorm warps: 32 rows a warp, 32-column blocks (128-B segments of an fp32 row)
++    auto yepi = [&](int t, int tcy) {
++      const float s_yy = SC[3];
++      float* Yg = XN;
++      const size_t off0 = ((size_t)t * 128 + (rr & ~7u)) * D + (size_t)(lane & 7) * 4;
++      uint4 xr[2][8];
++      load_t<32>(X + off0, (size_t)D, xr[0], lane);
++      mbar_wait(&B.yfull, tcy & 1);
++      tc_fence_after();
++#pragma unroll
++      for (int cb = 0; cb < D / 32; ++cb) {
++        uint32_t acc[32], o[32];
++        tmem_ld32(tmem + lrow + T_Y + cb * 32, acc);
++        if (cb + 1 < D / 32) load_t<32>(X + off0 + (cb + 1) * 32, (size_t)D, xr[(cb + 1) & 1], lane);
++        tmem_wait_ld();
++        if (cb == D / 32 - 1) {
++          tc_fence_before();
++          __syncwarp();
++          if (lane == 0) mbar_arrive(&B.yempty);
++        }
++#pragma unroll
++        for (int tt = 0; tt < 8; ++tt) {
++          o[4 * tt + 0] = __float_as_uint(fmaf(__uint_as_float(acc[4 * tt + 0]), s_yy, __uint_as_float(xr[cb & 1][tt].x)));
++          o[4 * tt + 1] = __float_as_uint(fmaf(__uint_as_float(acc[4 * tt + 1]), s_yy, __uint_as_float(xr[cb & 1][tt].y)));
++          o[4 * tt + 2] = __float_as_uint(fmaf(__uint_as_float(acc[4 * tt + 2]), s_yy, __uint_as_float(xr[cb & 1][tt].z)));
++          o[4 * tt + 3] = __float_as_uint(fmaf(__uint_as_float(acc[4 * tt + 3]), s_yy, __uint_as_float(xr[cb & 1][tt].w)));
++        }
++        store_t<32>(Yg + off0 + cb * 32, (size_t)D, o, lane);
++      }
++    };
+ #endif
+     int tc = 0;
+     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++tc) {
+@@ -587,7 +626,16 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+       __syncwarp();
+       if (lane == 0) mbar_arrive(&B.xfull[xb]);
+       if (warp == 2 + NEPI && lane == 0) { if (tc == 0) STAMP(8); if (tc < 8) STAMP(76 + tc); }
++#if EP2
++      if (tc >= 1) yepi(t - (int)gridDim.x, tc - 1);          // the previous tile's y, after this tile's LayerNorm
++#endif
+     }
++#if EP2
++    {
++      const int nt = tc;                                       // tiles of this CTA
++      if (nt >= 1) yepi(blockIdx.x + (nt - 1) * (int)gridDim.x, nt - 1);
++    }
++#endif
+   } else {
+     // ------------------------------------------------------------------------------------------------ epilogue (warps 2-9)
+     const int ew = warp - 2, q4 = warp & 3, half = ew >> 2;
+@@ -661,6 +709,9 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+         __syncwarp();
+         if (lane == 0) mbar_arrive(&B.hfull[hb]);
+       }
++#if EP2
++      continue;                                                // the y epilogue runs on the LayerNorm warps
++#endif
+ #if RXT
+       if (t + (int)gridDim.x >= tiles) {
+         // (round 3 part 20, RXT) the CTA's last tile: its residual x is in the (idle) weight ring as XKB swizzled [128][32] boxes; each

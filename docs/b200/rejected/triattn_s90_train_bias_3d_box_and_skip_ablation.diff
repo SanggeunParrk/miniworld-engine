@@ -1,0 +1,78 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index c09924748..1b1b0af44 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -159,6 +159,13 @@ __device__ __forceinline__ float2 logit2(uint32_t w, float s0, float s1, float2
+ // forward: a tile whose exponentials sum past TA_PMAX raises the row's offset (so p, l_r and O_r stay ~2^64 at most: far from
+ // overflow); under TA_PMIN a provisional offset (every key so far masked) takes the tile maximum
+ constexpr float TA_PMAX = 0x1p64f, TA_PMIN = 0x1p-64f;
++#ifndef TB_B3
++#define TB_B3 0
++#endif
++__device__ __forceinline__ void load_3d_u32(const void* map, uint32_t dst, uint32_t bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];\n"
++               :: "r"(dst), "l"(map), "r"(bar), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
+ #ifndef TB_POLY
+ #define TB_POLY 0        // the same split in both backward kernels (each recomputes P: one ex2 per score)
+ #endif
+@@ -1131,7 +1138,11 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+             if (TA_BIAS1 && jb >= KB_NB) arrive(A(bf + bs));   // timing only
+             else {
+             expect_tx(A(bf + bs), KB_BT * 4);
++#if TB_B3
++            load_3d_u32(&bmap, A(sB + bs * KB_BT), A(bf + bs), 0, bh * S + kt * BN, qs * 2);   // both 32-query halves in one op (3-D map: q, key row, q chunk)
++#else
+             for (int hh = 0; hh < 2; ++hh) load_2d(&bmap, A(sB + bs * KB_BT + hh * BN * 32), A(bf + bs), qs * KB_QW + hh * 32, bh * S + kt * BN);
++#endif
+             }
+           }
+           if (y >= KB_NQ) wait(A(qe + sl), ((y / KB_NQ) - 1) & 1);
+@@ -1782,8 +1793,13 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
+   // the dbias zero fill), or empty (made here by triattn_biasT)
+   const bool given_t = bias_t.defined() && bias_t.numel() == B * H * S * S && bias_t.scalar_type() == torch::kFloat32 && bias_t.is_contiguous();
+   auto bT = given_t ? bias_t : torch::empty({B, H, S, S}, q.options().dtype(torch::kFloat32));
++#if TB_B3
++  CUtensorMap bkv = make_map<3>(bT.data_ptr(), {32, (uint64_t)(B * H * S), (uint64_t)(S / 32)}, {(uint64_t)S, 32}, {32, BN, 2}, CU_TENSOR_MAP_SWIZZLE_128B, "bias^T 3d",
++                                CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
++#else
+   CUtensorMap bkv = make_map<2>(bT.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {32, BN}, CU_TENSOR_MAP_SWIZZLE_128B, "bias^T",
+                                 CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
++#endif
+   CUtensorMap bq = make_map<2>(b16.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {QB_KW, BM}, CU_TENSOR_MAP_SWIZZLE_128B, "bias");
+   static bool attr = false;
+   if (!attr) {
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+index fbda8a4cc..dcbc2df27 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+@@ -30,6 +30,7 @@ SIDE_STREAMS = os.environ.get("MINIWORLD_TRIATTN_B200_SIDE", "0") not in ("", "0
+ #: (S90 training, cuda:b200_sm100 67) the core backward's key-side and query-side kernels are independent: while a CUDA graph is captured they are two branches (the query side with its slab sum on a side stream), so the SMs the key side leaves idle in its
+ #: second task round run query-side CTAs.  Step graph, off -> on (us): d_pair 64 x 2 L128 77.5 -> 73.5, L256 189.7 -> 184.8, L512 739.4 -> 722.4; 64 x 4 L128 90.4 -> 89.5, L512 1242 -> 1210; 256 x 8 L128 191.7 -> 186.9, L512 2588 -> 2534; 384 x 12 L512 4082 -> 4019.
+ #: MINIWORLD_TRIATTN_B200_KVQ_BRANCH=0 turns it off (eager calls never branch).
++S90_SKIP = os.environ.get("S90_SKIP", "")   # timing ablations (wrong outputs): comma list of pre, dbrows
+ KVQ_BRANCH = os.environ.get("MINIWORLD_TRIATTN_B200_KVQ_BRANCH", "1") not in ("", "0")
+ 
+ 
+@@ -861,7 +862,10 @@ def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved
+     bT = dbz = None
+     if BWD_PRE and S == D and bias.dtype == torch.bfloat16:
+         # one launch: dy_s, the core's bias^T and its zeroed dbias accumulator (head dim 32; B200 2026-11-17)
+-        dys, bT, dbz = w.tri_bwd_pre(dy, drop if dr else x.new_empty(0), L, trans, bias, False)
++        if "pre" in S90_SKIP:  # (timing ablation only, outputs wrong) no set-up launch
++            dys, bT, dbz = dy, torch.empty(B, n_head, Lp, Lp, device=x.device, dtype=torch.float32), None
++        else:
++            dys, bT, dbz = w.tri_bwd_pre(dy, drop if dr else x.new_empty(0), L, trans, bias, False)
+     else:
+         dys = w.tri_scale_rows(dy, drop, L, trans) if dr else dy
+     Dall = x.new_empty(R, 4 * HDp + 64)  # [dq | dk | dv | dg | db rows], written in place by their producers
+@@ -891,7 +895,8 @@ def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved
+     else:  # delta per 32-channel slice [B, L, S/32 x heads, L]: the core adds a head's slices where it reads them
+         bwd = _core64().triattn_bwd64 if S == 64 else _core128().triattn_bwd128
+         _, _, _, db = bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim**-0.5, cut(0), cut(1), cut(2))
+-    w.tri_db_rows(db, cut(4, 64), B, Lp, bt)
++    if "dbrows" not in S90_SKIP:
++        w.tri_db_rows(db, cut(4, 64), B, Lp, bt)
+     dpair, xh = w.tri_whbwd(Dall, x, dy, lnw, stats, wall_t, Lp, trans, lr)
+     # parameter gradients: G = D^T [xhat | 1] (one GEMM, K = B Lp^2: the pad rows of D are zero), then dW / dgamma / dbeta / dWb by the
+     # d_pair 128 algebra (y = gamma o xhat + beta feeds every projection) and dWo without the padded channels, in tri_wfinish.

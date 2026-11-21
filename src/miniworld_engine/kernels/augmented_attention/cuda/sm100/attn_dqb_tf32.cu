@@ -45,6 +45,15 @@ static_assert(DHP == 64 || DHP == 48 || DHP == 32, "TF32 head width 64, 48 or 32
 #ifndef ROT
 #define ROT 1                            // start each key chunk's sample walk at a different sample (spreads the dQ reductions)
 #endif
+#ifndef DET
+#define DET 0                            // 1: a step's two dQ MMAs in a fixed order (issuer 1's after issuer 0's of the same step, issuer 0's
+#endif                                   // after issuer 1's of the previous step): a step's dQ partial bitwise repeatable (with DQPART the whole dQ)
+#ifndef DQPART
+#define DQPART 0                         // 1: each 64-key chunk's dQ partial is STORED to its own slice DQ[chunk][a L + row] (rows ldq floats
+#endif                                   // apart; the caller adds the L / 64 slices in order) instead of reduce-added into one zeroed dQ; NS = 1
+#ifndef DBPART
+#define DBPART 0                         // 1: each sample group's dbias is STORED to its own slice DB[group][head][q][k] (the caller adds the NS
+#endif                                   // slices in order: bitwise repeatable) instead of reduce-added into one zeroed DB (2026-11-17, token DiT)
 constexpr int NDQ = 3;                   // dQ accumulator buffers (the epilogue of step g runs NDQ - 1 = 2 steps later)
 constexpr int BN = 32, KC = 64, DH = DHP, QM = 128, DM = NHEAD * DHP;
 constexpr int NA = DH / 32, NBX = (DH % 32) / 16, NV = (DH + 31) / 32;    // 128-B boxes, 64-B boxes, MN atoms of a head row
@@ -214,6 +223,10 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         else __nanosleep(20);
       }
       if (g >= NDQ) mbar_wait(&B.dq_free[b], ((g / NDQ) - 1) & 1);         // step g - NDQ's dQ has been read out (and zeroed)
+      if (DET) {                                                           // issuer 0 (g) after issuer 1 (g - 1), issuer 1 (g) after issuer 0 (g)
+        if (w == 1) mbar_wait(&B.ds_free[0], g & 1);
+        else if (g >= 1) mbar_wait(&B.ds_free[1], (g - 1) & 1);
+      }
       tc_fence_after();
       // K_w as MN-major B: keys as rows (8 keys = 1 KB per K step), two 32-column atoms 8 KB apart
       const uint64_t dk = desc_mn32b(su + O_K + (g % STK) * SK + K_M + w * BN * 128, KC * 128);
@@ -257,8 +270,12 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
 #pragma unroll
       for (int k = 0; k < 8; ++k) {
         if (k * 4 >= nc) break;
-        red4(drow + 4 * k, __uint_as_float(v[4 * k]) * RSQD, __uint_as_float(v[4 * k + 1]) * RSQD, __uint_as_float(v[4 * k + 2]) * RSQD,
-             __uint_as_float(v[4 * k + 3]) * RSQD);
+        if (DQPART)
+          *reinterpret_cast<float4*>(drow + 4 * k) = make_float4(__uint_as_float(v[4 * k]) * RSQD, __uint_as_float(v[4 * k + 1]) * RSQD,
+                                                                 __uint_as_float(v[4 * k + 2]) * RSQD, __uint_as_float(v[4 * k + 3]) * RSQD);
+        else
+          red4(drow + 4 * k, __uint_as_float(v[4 * k]) * RSQD, __uint_as_float(v[4 * k + 1]) * RSQD, __uint_as_float(v[4 * k + 2]) * RSQD,
+               __uint_as_float(v[4 * k + 3]) * RSQD);
       }
     };
     float db[BN];
@@ -325,8 +342,8 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         // reductions into the zeroed DB
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.bempty);
-        float* brow = DB + ((size_t)head * L + m0 + r) * L + c * KC + w * BN;
-        if (NS == 1) {
+        float* brow = DB + (DBPART ? (size_t)(a / AS) * NHEAD * L * L : (size_t)0) + ((size_t)head * L + m0 + r) * L + c * KC + w * BN;
+        if (NS == 1 || DBPART) {
 #pragma unroll
           for (int k = 0; k < BN / 4; ++k)
             *reinterpret_cast<float4*>(brow + 4 * k) = make_float4(db[4 * k], db[4 * k + 1], db[4 * k + 2], db[4 * k + 3]);
@@ -335,7 +352,7 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
           for (int k = 0; k < BN / 4; ++k) red4(brow + 4 * k, db[4 * k], db[4 * k + 1], db[4 * k + 2], db[4 * k + 3]);
         }
       }
-      e2r = e1r; e2h = e1h; e1r = a * L + m0; e1h = head;
+      e2r = e1r; e2h = e1h; e1r = (DQPART ? c * A * L : 0) + a * L + m0; e1h = head;
       advance(li, i, c, m0, head, a);
     }
     if (ng >= 2) epi(ng - 2, e2r, e2h);

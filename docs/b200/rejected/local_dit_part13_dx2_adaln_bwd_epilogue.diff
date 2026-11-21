@@ -1,0 +1,330 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+index d4a328638..6a1559f8d 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+@@ -898,6 +898,7 @@ KERNELS_TF32 = {
+     "gemm": ("gemm_tf32", "atom_gemm_tf32", 229632),
+     "gemm_rg": ("gemm_rg_tf32", "atom_gemm_rg_tf32", 229632),
+     "gemm_rg_gb": ("gemm_rg_tf32", "atom_gemm_rg_tf32", 229632, ("GATEB=1",)),  # (round 3 part 13: dgated + the output gate's backward)
++    "gemm_ab": ("gemm_ab_tf32", "atom_gemm_ab_tf32", 229632),  # (round 3 part 13: dx2 + the AdaLN backward)
+     "gemm_sb": ("gemm_sb_tf32", "atom_gemm_sb_tf32", 229632),  # (round 3 part 11: dh product + SwiGLU backward)
+     "gemm_k64": ("gemm_tf32", "atom_gemm_tf32", 229632, ("K64=1",)),  # (round 3 part 11: K = 64 stages from 3-D boxes)
+     "ln": ("rows_tf32", "f32_ln_aff", 0),
+@@ -1389,6 +1390,41 @@ def gemm_gate_bwd32(dyo, woT, g, o, dg, A, n):
+     return do, D
+ 
+ 
++def gemm_adaln_bwd32(dab, wT, a, scale, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5):
++    """dx = dab @ wT^T (N = 128) with ``adaln_bwd32`` as its epilogue (round 3 part 13, ``gemm_ab_tf32.cu``: dx never leaves the chip) ->
++    (da, dyo). One table row per activation row (no shared tables). Bit for bit gemm32 + adaln_bwd32."""
++    M, K = dab.shape
++    d = _dev(dab)
++    assert M % 128 == 0 and K % 32 == 0 and wT.shape == (DM, K) and scale.shape[0] == M and a.is_contiguous() and dab.is_contiguous()
++    da = _new(a)
++    dyo = _new(a) if y is not None else None
++    atom_kernel32("gemm_ab", d)(
++        (min(num_sms(d), M // 128), 1, 1),
++        (512, 1, 1),
++        _tm32(dab, (32, 128)),
++        _tm32(wT, (32, 128)),
++        int(M),
++        int(K),
++        a,
++        scale,
++        int(scale.stride(0)),
++        dres,
++        da,
++        dscale,
++        int(dscale.stride(0)),
++        dshift,
++        int(dshift.stride(0)),
++        y,
++        so,
++        int(so.stride(0)) if so is not None else 0,
++        dso,
++        int(dso.stride(0)) if dso is not None else 0,
++        dyo,
++        float(eps),
++    )
++    return da, dyo
++
++
+ def round_tf32(t):
+     """t (fp32) rounded to tf32, to nearest with ties away from zero (cvt.rna.tf32.f32): add half a tf32 ulp to the magnitude bits, drop
+     the low 13. For the weight operands of gemm32, once per pack (kind::tf32 MMAs truncate)."""
+diff --git a/src/miniworld_engine/kernels/integrations/local_dit_b200.py b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+index 681e84c12..aea29cc6c 100644
+--- a/src/miniworld_engine/kernels/integrations/local_dit_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+@@ -1502,6 +1502,18 @@ def _block_fwd32(
+     return [*saved, cnkv, mkv, xkv]
+ 
+ 
++def _dx_adaln_bwd(dab, wT, a, sc, dres, dsc, dsh, y=None, so=None, dso=None, eps=1e-5):
++    """dx = dab wT^T, then the AdaLN backward (+ the output gate with y) -> (da, dyo): one launch when the tables are per row (round 3 part
++    13, ``gemm_adaln_bwd32``: dx stays on chip; MW_LD13_AB=0: gemm32 + adaln_bwd32, A / B)."""
++    import os
++
++    from miniworld_engine.kernels.augmented_attention.cuda import b200_atom as rows
++
++    if os.environ.get("MW_LD13_AB", "1") != "0" and sc.shape[0] == a.shape[0]:
++        return rows.gemm_adaln_bwd32(dab, wT, a, sc, dres, dsc, dsh, y=y, so=so, dso=dso, eps=eps)
++    return rows.adaln_bwd32(a, sc, rows.gemm32(dab, wT), dres, dsc, dsh, y=y, so=so, dso=dso, eps=eps)
++
++
+ def _gated_bwd(dyo, woT, g, o, dg, a, n):
+     """dgated = dyo Wo, then the output gate's backward -> (dO, D): one launch (round 3 part 13, ``gemm_gate_bwd32``: dgated stays in TMEM;
+     MW_LD13_GB=0: gemm32 + gate_bwd32, A / B)."""
+@@ -1563,11 +1575,11 @@ def _block_bwd32(
+ 
+         dt = rows.tail_bwd32(dy, t, mod[:, _ST], dmod[:, _ST])  # out = a1 + st t
+         dab, hh = rows.dh_swiglu_bwd32(dt, pk.wsT, u)  # dh = dt Ws (in TMEM) -> the SwiGLU backward (round 3 part 11: one launch)
+-        dx2 = rows.gemm32(dab, pk.wuT)  # K = 512
+-        da1, dyo = rows.adaln_bwd32(
++        da1, dyo = _dx_adaln_bwd(  # dx2 = dab Wu (K = 512) -> AdaLN 2 backward + the output gate (round 3 part 13: one launch)
++            dab,
++            pk.wuT,
+             a1,
+             mod[:, _S2],
+-            dx2,
+             dy,
+             dmod[:, _S2],
+             dmod[:, _B2],
+@@ -2232,15 +2244,15 @@ def _var_bwd32(
+             assert upf is not None
+             dabu, hh = rows.swiglu_up_bwd32(dh, u, upf)
+             dab, dup = dabu[:, : 4 * DS_], dabu[:, 4 * DS_ :]
+-            dx2 = rows.gemm32(dabu, pk.wuupT)
++            dxa, dxw = dabu, pk.wuupT
+         else:
+             dab, hh = rows.swiglu_bwd32(dh, u)
+-            dx2 = rows.gemm32(dab, pk.wuT)  # K = 512
++            dxa, dxw = dab, pk.wuT  # K = 512
+         if pars:  # AdaLN 2 normalised the block input: its LN backward joins the residual's gradient there; the gate reads dy
+-            da1, _ = adaln_b(s2, mod[:, _S2], dx2, dy, dmod[:, _S2], dmod[:, _B2])
++            da1, _ = adaln_b(s2, mod[:, _S2], rows.gemm32(dxa, dxw), dy, dmod[:, _S2], dmod[:, _B2])
+             dyo = rows.tail_bwd32(dy, y, mod[:, _SO], dmod[:, _SO])
+         else:
+-            da1, dyo = rows.adaln_bwd32(a1, mod[:, _S2], dx2, dy, dmod[:, _S2], dmod[:, _B2], y=y, so=mod[:, _SO], dso=dmod[:, _SO], eps=eps)
++            da1, dyo = _dx_adaln_bwd(dxa, dxw, a1, mod[:, _S2], dy, dmod[:, _S2], dmod[:, _B2], y=y, so=mod[:, _SO], dso=dmod[:, _SO], eps=eps)
+         dp = torch.empty(m, 4 * DS_, device=dev, dtype=F32)  # d P32 (same column layout)
+         do, dd = _gated_bwd(dyo, pk.woT, p[:, gc : gc + DS_], o.view(m, DS_), dp[:, gc : gc + DS_], a, n)
+         p3 = p.view(a, n, 4 * DS_)
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_ab_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_ab_tf32.cu
+new file mode 100644
+index 000000000..8cc214e01
+--- /dev/null
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_ab_tf32.cu
+@@ -0,0 +1,212 @@
++// gemm_ab_tf32.cu — an activation-gradient product of the fp32 training backward with the AdaLN backward as its epilogue (sm_100a,
++// tcgen05 kind::tf32), round 3 part 13 (2026-11-18): dx = A . B^T [M, 128] (dx2 = dab Wu, K = 512) never leaves the chip.
++//
++//   dx = A[:, 0 : K] . B[0 : 128, 0 : K]^T, then f32_adaln_bwd's row arithmetic (one table row per activation row: no shared tables):
++//   da = dres + LN backward of dx * s (LN of a), dsc = dx LN(a) s (1 - s), dsh = dx; with y: dso = da y so (1 - so), dyo = da so
++//
++// Producer / MMA / A rounding as gemm_rg_tf32.cu (persistent 128-row tiles, 3-stage ring, two TMEM accumulators). The epilogue: warpgroup
++// wg takes the tiles i with i % 2 == wg (accumulator i % 2); its warp qd copies the 32 x 128 dx rows of its TMEM lane quadrant into a
++// shared buffer (row r: 512 B, 16-B unit k at k ^ (r & 31)), releases the accumulator, and then works the rows as f32_adaln_bwd does --
++// a row a warp, lane l on channels 4 l .. 4 l + 3 (coalesced global loads / stores of a, s, dres, y, so and the outputs), the same
++// statements: the outputs are f32_adaln_bwd's bit for bit.
++// smem: 3 stages of A 16 KB | B 16 KB, 2 x 64 KB dx buffers, barriers = 229632 B.
++// SPDX-License-Identifier: Apache-2.0
++#include "../sm100/sm100.cuh"
++using namespace s100;
++
++constexpr int ST = 3, NT = 128, A_BYTES = 128 * 128, B_BYTES = NT * 128, STB = A_BYTES + B_BYTES;
++constexpr int O_DX = ST * STB, DXB = 128 * 512, O_BAR = O_DX + 2 * DXB, SMEM_BYTES = O_BAR + 256;
++static_assert(SMEM_BYTES <= 232448, "shared memory");
++constexpr int C = 128;
++#ifndef RU
++#define RU 4                                                         // rows a warp has in flight
++#endif
++
++struct Bars {
++  uint64_t full[ST], rfull[ST], empty[ST], accfull[2], accfree[2];
++  uint32_t tmem;
++};
++DEVI uint32_t rna_tf32(uint32_t x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(__uint_as_float(x))); return r; }
++
++// ---- f32_adaln_bwd's helpers (rows_tf32.cu), verbatim
++DEVI float wsum(float v) {
++#pragma unroll
++  for (int o = 16; o >= 1; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
++  return v;
++}
++DEVI void ld4(const float* p, float (&x)[4]) {
++  const float4 v = __ldg(reinterpret_cast<const float4*>(p));
++  x[0] = v.x; x[1] = v.y; x[2] = v.z; x[3] = v.w;
++}
++DEVI void st4(float* p, const float (&x)[4]) { *reinterpret_cast<float4*>(p) = make_float4(x[0], x[1], x[2], x[3]); }
++DEVI float norm128(float (&x)[4], float eps) {
++  const float mean = wsum(x[0] + x[1] + x[2] + x[3]) * (1.f / C);
++  float v = 0.f;
++#pragma unroll
++  for (int i = 0; i < 4; ++i) { x[i] -= mean; v += x[i] * x[i]; }
++  const float rstd = 1.f / sqrtf(wsum(v) * (1.f / C) + eps);
++#pragma unroll
++  for (int i = 0; i < 4; ++i) x[i] *= rstd;
++  return rstd;
++}
++DEVI void ln_back(const float (&xn)[4], const float (&dl)[4], float rstd, float (&o)[4]) {
++  const float m1 = wsum(dl[0] + dl[1] + dl[2] + dl[3]) * (1.f / C);
++  const float m2 = wsum(dl[0] * xn[0] + dl[1] * xn[1] + dl[2] * xn[2] + dl[3] * xn[3]) * (1.f / C);
++#pragma unroll
++  for (int i = 0; i < 4; ++i) o[i] = rstd * (dl[i] - m1 - xn[i] * m2);
++}
++
++extern "C" __global__ void __launch_bounds__(512, 1)
++atom_gemm_ab_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mb, int M, int K,
++                  const float* __restrict__ a_, const float* __restrict__ sc, int scld, const float* __restrict__ dres, float* __restrict__ da,
++                  float* __restrict__ dsc, int dscld, float* __restrict__ dsh, int dshld, const float* __restrict__ y,
++                  const float* __restrict__ so, int sold, float* __restrict__ dso, int dsold, float* __restrict__ dyo, float eps) {
++  extern __shared__ __align__(1024) uint8_t sm[];
++  const uint32_t su = smem_u32(sm);
++  Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
++  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  const int tiles = M >> 7, nk = K >> 5;
++  const int my = (int)blockIdx.x < tiles ? (tiles - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
++  auto tile_m0 = [&](int i) { return ((int)blockIdx.x + i * (int)gridDim.x) * 128; };
++
++  if (tid == 0) {
++    for (int s = 0; s < ST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.rfull[s], 4); mbar_init(&B.empty[s], 1); }
++    for (int b = 0; b < 2; ++b) { mbar_init(&B.accfull[b], 1); mbar_init(&B.accfree[b], 4); }
++    fence_barrier_init();
++  }
++  if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 256); tmem_relinquish(); }
++  tc_fence_before();
++  __syncthreads();
++  tc_fence_after();
++  const uint32_t tmem = B.tmem;
++  pdl_wait();
++  pdl_launch();
++
++  if (warp == 0) {
++    if (lane == 0) {
++      const uint32_t tx = (uint32_t)A_BYTES + (uint32_t)B_BYTES;
++      int g = 0;
++      for (int i = 0; i < my; ++i) {
++        const int m0 = tile_m0(i);
++        for (int ks = 0; ks < nk; ++ks, ++g) {
++          const int s = g % ST;
++          if (g >= ST) mbar_wait(&B.empty[s], ((g / ST) - 1) & 1);
++          const uint32_t st = su + s * STB;
++          mbar_expect_tx(&B.full[s], tx);
++          tma_load_2d(st, &ma, &B.full[s], 32 * ks, m0);
++          tma_load_2d(st + A_BYTES, &mb, &B.full[s], 32 * ks, 0);
++        }
++      }
++    }
++  } else if (warp == 1) {
++    const uint32_t idesc = idesc_tf32(128, NT);
++    int g = 0;
++    for (int i = 0; i < my; ++i) {
++      const int ab = i & 1;
++      if (i >= 2) mbar_wait(&B.accfree[ab], ((i >> 1) - 1) & 1);
++      tc_fence_after();
++      const uint32_t d = tmem + (uint32_t)(ab * NT);
++      for (int ks = 0; ks < nk; ++ks, ++g) {
++        const int s = g % ST;
++        mbar_wait(&B.rfull[s], (g / ST) & 1);
++        tc_fence_after();
++        const uint32_t st = su + s * STB;
++        const uint64_t dA = desc_k128(st), dB = desc_k128(st + A_BYTES);
++        if (elect_one()) {
++#pragma unroll
++          for (int kk = 0; kk < 4; ++kk) umma_ss_tf32(d, dA + (uint64_t)(2 * kk), dB + (uint64_t)(2 * kk), idesc, (ks | kk) ? 1u : 0u);
++          tc_commit(&B.empty[s]);
++        }
++        __syncwarp();
++      }
++      if (elect_one()) tc_commit(&B.accfull[ab]);
++      __syncwarp();
++    }
++  } else if (warp >= 12) {
++    const int rt = tid - 384;
++    int g = 0;
++    for (int i = 0; i < my; ++i)
++      for (int ks = 0; ks < nk; ++ks, ++g) {
++        const int s = g % ST;
++        const uint32_t st = su + s * STB;
++        mbar_wait(&B.full[s], (g / ST) & 1);
++#pragma unroll
++        for (int q = 0; q < A_BYTES / 16 / 128; ++q) {
++          const uint32_t ad = st + (uint32_t)(q * 128 + rt) * 16u;
++          const uint4 v = lds128(ad);
++          sts128(ad, make_uint4(rna_tf32(v.x), rna_tf32(v.y), rna_tf32(v.z), rna_tf32(v.w)));
++        }
++        fence_proxy_async();
++        __syncwarp();
++        if (lane == 0) mbar_arrive(&B.rfull[s]);
++      }
++  } else if (warp >= 4) {
++    // epilogue: warpgroup wg takes tiles wg, wg + 2, ..; warp qd its lane quadrant (rows 32 qd ..)
++    const int e = warp - 4, qd = e & 3, wg = e >> 2;
++    const uint32_t dxb = su + O_DX + (uint32_t)wg * DXB;
++    const int ch = 4 * lane;
++    for (int i = wg; i < my; i += 2) {
++      const int ab = i & 1, m0 = tile_m0(i);
++      mbar_wait(&B.accfull[ab], (i >> 1) & 1);
++      tc_fence_after();
++      const uint32_t tacc = tmem + ((uint32_t)(32 * qd) << 16) + (uint32_t)(ab * NT);
++      const uint32_t rrow = (uint32_t)(32 * qd + lane);
++#pragma unroll
++      for (int c = 0; c < 4; ++c) {
++        uint32_t r[32];
++        tmem_ld32(tacc + 32 * c, r);
++        tmem_wait_ld();
++#pragma unroll
++        for (int j = 0; j < 8; ++j)
++          sts128(dxb + rrow * 512u + ((uint32_t)((8 * c + j) ^ (int)(rrow & 31u)) << 4), make_uint4(r[4 * j], r[4 * j + 1], r[4 * j + 2], r[4 * j + 3]));
++      }
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) mbar_arrive(&B.accfree[ab]);                   // the accumulator is free; the rows below run beside the next MMAs
++      // f32_adaln_bwd on the warp's 32 rows, RU at a time
++      for (int r0 = 0; r0 < 32; r0 += RU) {
++        float x[RU][4], d[RU][4], s[RU][4], rr[RU][4], yv[RU][4], g[RU][4];
++#pragma unroll
++        for (int u = 0; u < RU; ++u) {
++          const uint32_t lr = (uint32_t)(32 * qd + r0 + u);
++          const size_t row = (size_t)m0 + lr;
++          ld4(sc + row * scld + ch, s[u]);
++          if (y != nullptr) ld4(so + row * sold + ch, g[u]);
++          ld4(a_ + row * C + ch, x[u]);
++          const uint4 dv = lds128(dxb + lr * 512u + ((uint32_t)(lane ^ (int)(lr & 31u)) << 4));
++          d[u][0] = __uint_as_float(dv.x); d[u][1] = __uint_as_float(dv.y); d[u][2] = __uint_as_float(dv.z); d[u][3] = __uint_as_float(dv.w);
++          if (dres != nullptr) ld4(dres + row * C + ch, rr[u]);
++          if (y != nullptr) ld4(y + row * C + ch, yv[u]);
++        }
++#pragma unroll
++        for (int u = 0; u < RU; ++u) {
++          const size_t row = (size_t)m0 + 32 * qd + r0 + u;
++          float psc[4] = {0.f, 0.f, 0.f, 0.f}, psh[4] = {0.f, 0.f, 0.f, 0.f}, pso[4] = {0.f, 0.f, 0.f, 0.f};
++          float dl[4], o[4];
++          const float rstd = norm128(x[u], eps);
++#pragma unroll
++          for (int k = 0; k < 4; ++k) { dl[k] = d[u][k] * s[u][k]; psc[k] += d[u][k] * x[u][k] * s[u][k] * (1.f - s[u][k]); psh[k] += d[u][k]; }
++          ln_back(x[u], dl, rstd, o);
++          if (dres != nullptr) {
++#pragma unroll
++            for (int k = 0; k < 4; ++k) o[k] += rr[u][k];
++          }
++          st4(da + row * C + ch, o);
++          if (y != nullptr) {
++            float q[4];
++#pragma unroll
++            for (int k = 0; k < 4; ++k) { pso[k] += o[k] * yv[u][k] * g[u][k] * (1.f - g[u][k]); q[k] = o[k] * g[u][k]; }
++            st4(dyo + row * C + ch, q);
++          }
++          st4(dsc + row * dscld + ch, psc);
++          st4(dsh + row * dshld + ch, psh);
++          if (y != nullptr) st4(dso + row * dsold + ch, pso);
++        }
++      }
++      __syncwarp();                                                  // every lane has read the dx buffer before the next tile's copy
++    }
++  }
++  tc_fence_before();
++  __syncthreads();
++  if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 256); }
++}

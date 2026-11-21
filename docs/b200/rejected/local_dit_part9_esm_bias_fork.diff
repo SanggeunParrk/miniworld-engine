@@ -1,0 +1,51 @@
+diff --git a/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py b/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
+index 247f79117..086db7e99 100644
+--- a/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
+@@ -203,6 +203,11 @@ def _fork_rows() -> int:
+     return int(os.environ.get("MW_ESM_FORK", "4096"))
+ 
+ 
++#: fp32 inference (round 3 part 9): the pair bias forked onto a side stream before the conditioning tables (MW_LD9_EF=0: after them, on the
++#: current stream, as before)
++_EARLY_ESM_BIAS = os.environ.get("MW_LD9_EF", "1") != "0"
++
++
+ def _fork(dev, m, build, second=False):
+     """``build()`` on a side stream beside what the caller launches next (a fork / join in a captured graph) when the block has at most
+     ``_fork_rows()`` rows (few tiles: the main chain leaves most SMs idle), else on the current stream: -> (result, join or None) --
+@@ -833,7 +838,6 @@ def _esm_fwd32(
+             sc_.append(rows.silu32(c2))  # (training: saved for the tables' weight gradients)
+             return rows.gemm32(sc_[0], pk.wcond, bias=pk.bcond)
+ 
+-        tab = _hoisted(_HOIST_COND, cond, ("esm32", wkey, n), tables) if (_hoisting() and not save) else tables()
+         keys = _keys(mask, n0, n)
+ 
+         def bias():
+@@ -842,8 +846,17 @@ def _esm_fwd32(
+         jb = None
+         if _hoisting() and not save:
+             mk = None if mask is None else _tkey(mask)
+-            bias2 = _hoisted(_HOIST_BIAS, pair, ("esm32", wkey[_GAMMA], wkey[_WBIAS], n, mk), bias, () if mask is None else (mask,))
++
++            def hoisted_bias():
++                return _hoisted(_HOIST_BIAS, pair, ("esm32", wkey[_GAMMA], wkey[_WBIAS], n, mk), bias, () if mask is None else (mask,))
++
++            if _EARLY_ESM_BIAS:  # (round 3 part 9: on a side stream from the start, beside the tables and pre; joined before the attention)
++                bias2, jb = _fork(dev, m, hoisted_bias)
++            else:
++                bias2 = hoisted_bias()
++            tab = _hoisted(_HOIST_COND, cond, ("esm32", wkey, n), tables)
+         else:
++            tab = tables()
+             bias2, jb = _fork(dev, m, bias)
+         if not save:  # inference: the fused fp32 row stages (``-DRMS=1`` builds): pre (AdaLNs + projections), attention, post (the rest)
+             p = rows.pre32(
+@@ -862,6 +875,7 @@ def _esm_fwd32(
+             # (the q / k norm + rotary inside atom_pre_tf32's epilogue was measured slower, round 3 part 4: 3072 atoms 71.7 -> 86.0 us with
+             # the silu GEMM A phase; the pre kernel alone 13.6 -> 18.5 us against this 2.8 us launch)
+             qn, kn = local.esm_qkrope32(p[:, 0:DS_], p[:, 2 * DS_ : 3 * DS_], pk.wq, pk.wk, cos, sin, RMS_EPS)
++            _join(jb)
+             o = local.attn_esm32(qn.view(a, n, DS_), kn.view(a, n, DS_), p.view(a, n, 4 * DS_)[..., 3 * DS_ :], bias2)
+             out = rows.post32(
+                 o.view(m, DS_),

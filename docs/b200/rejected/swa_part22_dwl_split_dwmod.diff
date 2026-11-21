@@ -1,0 +1,94 @@
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py	2026-11-18 16:16:29.878673050 +0900
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py	2026-11-18 16:16:29.875673110 +0900
+@@ -592,6 +592,28 @@
+             k = self.kcl[name] = _f._load(name, cluster=cl)
+         return k
+ 
++    def bind_mod(self, dmod, a, out):
++        """r3-swa part 22: dWmod = dmod^T a [6C, C] (dmod [M, 6C], a = silu(c) [M, C] fp32) on the cluster build in problem 0's form (an
++        output tile = 4 column atoms of dmod) -> run(lo, hi, cl): the 128-row m-blocks lo .. hi - 1 (hi - lo <= 4) of ``out`` in one
++        launch of hi - lo clusters of cl CTAs (the A map starts at dmod's column 128 lo)."""
++        M = dmod.shape[0]
++        br = self.CL_ROWS
++        assert dmod.is_contiguous() and a.is_contiguous() and out.is_contiguous() and dmod.shape[1] == 6 * C and M % 16 == 0
++        mb_ = _f._f32map(a, [32, M, C // 32], [C * 4, 128], [32, br, C // 32], swizzle="128a32")
++        gws = self._gws(4, dmod.device)
++
++        def run(lo, hi, cl):
++            assert 0 <= lo < hi <= 6 and hi - lo <= 4 and M >= 16 * cl
++            sub = dmod[:, 128 * lo :]
++            ma = _f._f32map(sub, [32, M, (6 - lo) * 4], [6 * C * 4, 128], [32, br, 4], swizzle="128a32")
++            o0 = out[128 * lo :]
++            maps = (ma, mb_) * 4
++            self._clk(cl)(((hi - lo) * cl, 1, 1), (256, 1, 1), *maps, gws, int(M), 0, 0, 0, 0, 0, ma, mb_, o0, o0, o0, o0, None)
++            run.keep.append((ma, sub))
++
++        # (``out`` is not kept: a second reference to a returned gradient makes AccumulateGrad copy it)
++        run.keep = [mb_, dmod, a, gws]
++        return run
+ 
+     def _bind_cluster(self, cl, pairs, M, dev, split):
+         """:meth:`bind` on the cluster build (round 3 part 15): grid = tiles x cl CTAs, cluster (cl, 1, 1); the final dW written by the
+@@ -793,6 +815,11 @@
+ #: of DWS_CL)
+ DWS = __import__("os").environ.get("SWA_DWS", "1") == "1"
+ DWS_CL = int(__import__("os").environ.get("SWA_DWS_CL", "8"))
++#: r3-swa part 22 (development switch): dWmod in two parts where one sample of <= DWL_MAX_ROWS rows has both attention passes at once
++#: (DWL): rows 2C .. 6C on cuBLAS after the FFN adaLN off the chain, rows 0 .. 2C after the qkvg adaLN on the dW cluster kernel
++DWL = __import__("os").environ.get("SWA_DWL", "1") == "1"
++DWL_CL = int(__import__("os").environ.get("SWA_DWL_CL", "8"))
++DWL_MAX_ROWS = int(__import__("os").environ.get("SWA_DWL_MAX_ROWS", "1024"))
+ 
+ 
+ @functools.lru_cache(maxsize=16)
+@@ -1121,6 +1148,28 @@
+             mm_tf32_out(dmod[:, 2 * C :].t(), a_mod, dwm[2 * C :])
+         ev_m = torch.cuda.Event()
+         ev_m.record(ds)
++    dwl = None
++    if (
++        DWL
++        and modb is not None
++        and not fx
++        and A == 1
++        and dmod.shape[0] == M
++        and M <= DWL_MAX_ROWS
++        and SCHED >= 2
++        and half_window == _f.HW
++        and 2 * N * (S // 128) * H <= num_sms()
++    ):
++        # r3-swa part 22 (DWL): dWmod's rows 2C .. 6C (dmod columns of the FFN adaLN) now on cuBLAS on a stream of its own (off the chain);
++        # its rows 0 .. 2C after the qkvg adaLN on the dW cluster kernel (DwTf32.bind_mod, clusters of DWL_CL) instead of one cuBLAS GEMM
++        dwm = torch.empty(6 * C, C, device=dev, dtype=torch.float32)
++        sw = _xstream(_index(q), 0)
++        sw.wait_stream(cur)
++        sw.wait_stream(s2)  # silu(c)
++        with torch.cuda.stream(sw):
++            mm_tf32_out(dmod[:, 2 * C :].t(), a_mod, dwm[2 * C :])
++        dwl = K.dw.bind_mod(dmod, a_mod.reshape(M, C), dwm)
++        extra.append(sw)
+     dP = torch.empty(M, 4 * C, device=dev, dtype=torch.float32)
+     run, (datt, gated, dO, Dv) = K.oproj_fused.bind(dq1, o, g, mod, wot, dP, A, B)
+     dw, (dwqkv, dwo, dwu, dwd) = K.dw.bind(dP, x.view(M, C), datt, gated.view(M, C), dab, y.view(M, C), dffn, hh, split=True)
+@@ -1230,7 +1279,11 @@
+         def mod_dw():
+             res["dw"] = mm_tf32(dmod.t(), a_mod)
+ 
+-        fork(s2, mod_dw)
++        if dwl is not None:  # r3-swa part 22 (DWL): the rows 0 .. 2C on the cluster kernel (the rows 2C .. 6C are under way on their stream)
++            fork(s2, lambda: dwl(0, 2, DWL_CL))
++            res["dw"] = dwm
++        else:
++            fork(s2, mod_dw)
+         ksc = _ks(dmod.shape[0], KSPLIT_DC) if KSPLIT_DC > 1 and M >= KSPLIT_MIN_ROWS else 1
+ 
+         def make_acc():
+@@ -1260,7 +1313,7 @@
+             # here: the next block's backward starts after this block's dq. Only when every weight's .grad is None and unhooked (the
+             # gradients are then stolen by AccumulateGrad without a kernel; nothing reads them before the stack's backward ends)
+             # (keep the kernels' inputs and workspace, never the returned gradients: a second reference makes AccumulateGrad copy them)
+-            mk = ([xp] if xp is not None else [])
++            mk = ([xp] if xp is not None else []) + ([dwl.keep] if dwl is not None else [])
+             dca[0].hold([s1, s2, *extra], [dw.keep[:-1], dP, dmod, a_mod] + ([dce[0], dce[2]] if dce is not None else []) + mk)
+             return out
+         join(s2)

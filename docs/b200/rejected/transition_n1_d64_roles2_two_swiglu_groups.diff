@@ -1,0 +1,171 @@
+--- d64.cu.orig	2026-11-19 00:52:24.336635076 +0900
++++ d64.cu	2026-11-19 00:53:23.669732755 +0900
+@@ -16,9 +16,13 @@
+ // launches: n 2 [147456, 64] 20.85 -> 18.57 us, [65536, 64] 14.12 -> 12.34 (one SwiGLU warpgroup keeps up with two chunks a tile); n 4
+ // [98304, 64] 20.56 -> 22.48 (four chunks a tile do not): n 2 builds with ROLES 1. A third layout (each SwiGLU warpgroup writing half
+ // the epilogue) deadlocks at n 4 (SwiGLU(i + 1) waits for the squeeze of tile i + 1, which waits for epilogue(i)) and gained 2 % at n 2.
++// ROLES 2 (N1, inference, 640 threads: warps 4-7 epilogue, 8-11 LayerNorm, 12-15 and 16-19 the SwiGLU of EVERY chunk, split by hidden units: units 0 - 31 on 12-15, 32 - 63 on 16-19, each warp group
++// writing its half of the chunk's h): the single SwiGLU warp group of ROLES 1 (0.8 us a chunk) paced the tile
+ #ifndef ROLES
+ #define ROLES 0
+ #endif
++constexpr int NTHR = ROLES == 2 ? 640 : 512;
++constexpr int NSWG = ROLES == 2 ? 16 : 8;                       // SwiGLU warps of the pair (arrivals on ab_empty / h_full)
+ 
+ #ifdef PROBE
+ #define STAMP(k) do { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(c1 + (long)tiles * ROWS)[cta * 96 + (k)] = _t; } while (0)
+@@ -61,7 +65,7 @@
+   uint32_t tmem;
+ };
+ 
+-extern "C" __global__ void __launch_bounds__(512, 1)
++extern "C" __global__ void __launch_bounds__(NTHR, 1)
+ transition_fwd_d64_sm100(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mwa,
+                          const __grid_constant__ CUtensorMap mwb, const __grid_constant__ CUtensorMap mws,
+                          const __grid_constant__ CUtensorMap mout, const __grid_constant__ CUtensorMap mxn,
+@@ -83,7 +87,7 @@
+   if (tid == 0) {
+     mbar_init(&B.w_full, 1);
+     for (int s = 0; s < 2; ++s) {
+-      mbar_init(&B.xn_full[s], 2); mbar_init(&B.ab_empty[s], 8); mbar_init(&B.h_full[s], 8);
++      mbar_init(&B.xn_full[s], 2); mbar_init(&B.ab_empty[s], NSWG); mbar_init(&B.h_full[s], NSWG);
+       mbar_init(&B.xn_empty[s], 1); mbar_init(&B.ex_done[s], 1); mbar_init(&B.sq_done[s], 1);
+     }
+     for (int s = 0; s < NXS; ++s) { mbar_init(&B.x_full[s], 1); mbar_init(&B.x_empty[s], 1); }
+@@ -105,7 +109,7 @@
+   const uint32_t tmem = B.tmem;
+   if (tid == 0) STAMP(1);
+ 
+-  if (warp < 4) setmaxnreg_dec<56>();
++  if (warp < 4) setmaxnreg_dec<(ROLES == 2 ? 40 : 56)>();
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------ x producer (own tiles)
+     if (lane == 0) {
+@@ -173,25 +177,26 @@
+     }
+   } else {
+     // ------------------------------------------------------------------------------------------ SwiGLU, LayerNorm, epilogue (ROLES)
+-    setmaxnreg_inc<152>();
++    setmaxnreg_inc<(ROLES == 2 ? 112 : 152)>();
+     const uint32_t lb = (uint32_t)(warp & 3) * 32, trow = tmem + (lb << 16);
+     // SwiGLU of chunk c (as tfwd2.cu): four 16-column steps with the next step's TMEM loads in flight
+-    auto sw = [&](int c) {
++    constexpr int NQ = ROLES == 2 ? 2 : 4;                      // 16-unit steps of a chunk a SwiGLU warp group takes
++    auto sw = [&](int c, int q0) {
+       const int s = c & 1, u = c >> 1;
+       mbar_wait(&B.ex_done[s], u & 1);
+       if (lane == 0 && (warp & 3) == 0 && c < 16) STAMP(64 + c);
+       tc_fence_after();
+-      uint32_t hp[32];
++      uint32_t hp[8 * NQ];
+       {
+         uint32_t a[2][16], b[2][16];
+-        tmem_ld16(trow + T_AB + s * 128, a[0]);
+-        tmem_ld16(trow + T_AB + s * 128 + 64, b[0]);
++        tmem_ld16(trow + T_AB + s * 128 + q0 * 16, a[0]);
++        tmem_ld16(trow + T_AB + s * 128 + 64 + q0 * 16, b[0]);
+         tmem_wait_ld();
+ #pragma unroll
+-        for (int q = 0; q < 4; ++q) {
+-          if (q < 3) {
+-            tmem_ld16(trow + T_AB + s * 128 + (q + 1) * 16, a[(q + 1) & 1]);
+-            tmem_ld16(trow + T_AB + s * 128 + 64 + (q + 1) * 16, b[(q + 1) & 1]);
++        for (int q = 0; q < NQ; ++q) {
++          if (q < NQ - 1) {
++            tmem_ld16(trow + T_AB + s * 128 + (q0 + q + 1) * 16, a[(q + 1) & 1]);
++            tmem_ld16(trow + T_AB + s * 128 + 64 + (q0 + q + 1) * 16, b[(q + 1) & 1]);
+           }
+ #pragma unroll
+           for (int k = 0; k < 8; ++k) {
+@@ -200,7 +205,7 @@
+             const f2 A = mk2(a0, a1), H = mul2(mul2(A, sigmoid_tr(A)), mk2(b0, b1));   // (a s) b, as the backward's gate_pair16
+             hp[q * 8 + k] = pack_bf16(lo2(H), hi2(H));
+           }
+-          if (q < 3) tmem_wait_ld();
++          if (q < NQ - 1) tmem_wait_ld();
+         }
+       }
+       tc_fence_before();
+@@ -208,11 +213,18 @@
+       if (lane == 0) mbar_arrive_remote_relaxed(&B.ab_empty[s], 0);
+       if (c >= 2) mbar_wait(&B.sq_done[s], (u - 1) & 1);
+       tc_fence_after();
+-      uint32_t h0[16], h1[16];
++      if (NQ == 2) {                                           // ROLES 2: this warp group's half of the chunk's h (units q0 * 16 .. + 31)
++        uint32_t h0[16];
+ #pragma unroll
+-      for (int k = 0; k < 16; ++k) { h0[k] = hp[k]; h1[k] = hp[16 + k]; }
+-      tmem_st16(trow + T_H + s * 32, h0);
+-      tmem_st16(trow + T_H + s * 32 + 16, h1);
++        for (int k = 0; k < 16; ++k) h0[k] = hp[k];
++        tmem_st16(trow + T_H + s * 32 + q0 * 8, h0);
++      } else {
++        uint32_t h0[16], h1[16];
++#pragma unroll
++        for (int k = 0; k < 16; ++k) { h0[k] = hp[k]; h1[k] = hp[16 + k]; }
++        tmem_st16(trow + T_H + s * 32, h0);
++        tmem_st16(trow + T_H + s * 32 + 16, h1);
++      }
+       tmem_wait_st();
+       tc_fence_before();
+       __syncwarp();
+@@ -334,7 +346,7 @@
+     const bool swg = !is_ln, odd = warp >= 12;
+     if (ROLES == 0) {
+       if (swg) {
+-        for (int c = odd ? 1 : 0; c < nch; c += 2) sw(c);
++        for (int c = odd ? 1 : 0; c < nch; c += 2) sw(c, 0);
+       } else {
+         if (n_local > 0) ln(0);
+         for (int i = 0; i < n_local; ++i) {
+@@ -344,7 +356,10 @@
+       }
+     } else {
+       if (is_ln) for (int i = 0; i < n_local; ++i) ln(i);
+-      else if (odd) for (int c = 0; c < nch; ++c) sw(c);
++      else if (odd) {
++        const int q0 = (ROLES == 2 && warp >= 16) ? 2 : 0;
++        for (int c = 0; c < nch; ++c) sw(c, q0);
++      }
+       else for (int i = 0; i < n_local; ++i) epi(i, 0, 2, 2, 128, tid == 128);
+     }
+     if (tid == 256 || tid == 128) tma_store_wait0();
+
+# python side (build list, block 640, A/B switch):
+--- fw.py.v8	2026-11-19 00:53:34.779376560 +0900
++++ fw.py	2026-11-19 00:53:51.801830790 +0900
+@@ -221,6 +221,7 @@
+         return (
+             ("fwd", "widths/tfwd_d64.cu", (*hid, *FWD_TRAIN_FLAGS.get((d, n), ()))),
+             *((("fwdi", "widths/tfwd_d64.cu", (*hid, *FWD_INFER_FLAGS[(d, n)])),) if (d, n) in FWD_INFER_FLAGS else ()),
++            *((f"fwdi_r{r}", "widths/tfwd_d64.cu", (*hid, f"-DROLES={r}")) for r in D64_ROLES_VARIANTS),
+             ("bwd", "widths/tbwd_d64.cu", (*hid, *(("-DDXN32",) if n == 2 else ()), *D64_BWD_FLAGS[n])),
+             *((("bwdab", "widths/tbwd_d64.cu", (*hid, *(("-DDXN32",) if n == 2 else ()), *BWD_AB_FLAGS)),) if BWD_AB_FLAGS else ()),
+         )
+@@ -447,6 +448,9 @@
+ FOLD_MAX_ROWS = 524288
+ #: (S90 part 7) the training forward at D 256 on the same X2 build (saves xn, rstd, c1 as before); False: the 2.5.14 training build
+ X2_TRAIN = True
++#: (N1) A/B builds of the D 64 inference forward by ROLES (0 / 1 / 2); D64_ROLES: None = FWD_INFER_FLAGS, else the ROLES of the call
++D64_ROLES_VARIANTS = (0, 1, 2)
++D64_ROLES: int | None = None
+ FWD_INFER_FLAGS: dict[tuple[int, int], tuple[str, ...]] = {
+     (64, 2): ("-DROLES=1",),
+     (128, 2): ("-DLNH=1", "-DNXS_=3", "-DNW_=2"),
+@@ -615,7 +619,7 @@
+         xn = torch.empty_like(x) if save else x.new_empty((1, d))
+         mout = k.rows(out)
+         k.run(
+-            "fwd" if (save and (not x2_cell or x2_off)) or (d, k.n) not in FWD_INFER_FLAGS else ("fwdi1" if x2_off else "fwdi"),
++            f"fwdi_r{D64_ROLES}" if (d == 64 and not save and D64_ROLES is not None) else "fwd" if (save and (not x2_cell or x2_off)) or (d, k.n) not in FWD_INFER_FLAGS else ("fwdi1" if x2_off else "fwdi"),
+             _FUSED_FWD[d],
+             k.grid,
+             (
+@@ -635,6 +639,7 @@
+                 *((x, out) if d == 256 else ()),
+             ),
+             pdl=save and d == 128 and BWD_PDL,  # (training part 4) tr_fwd_sm100.cu waits (griddepcontrol.wait) at its entry
++            block=640 if (d == 64 and not save and (D64_ROLES == 2 or (D64_ROLES is None and "-DROLES=2" in FWD_INFER_FLAGS.get((d, k.n), ())))) else 512,
+         )
+         return out, xn, rstd, c1, ph(), ph(), ph()
+     if _sx(d, tiles):  # three programmatic-dependent kernels sized for a few tiles (round sx: tsx_ln, tsx_expand, tsx_squeeze)

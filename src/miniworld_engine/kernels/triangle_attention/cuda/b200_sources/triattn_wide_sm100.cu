@@ -3,7 +3,13 @@
 //
 //   q | k | v | g, bias = LN(x) . [Wq; Wk; Wv; Wg; Wb]^T   tri_wfront<C, ND>  2-CTA clusters; bias head-major, masked keys = finfo(bf16).min
 //   o = attention(q, k, v, bias)                          triattn_fwd
-//   out = x + drop o ((sigmoid(g) o o) . Wo^T)            tri_wtail<C>       without dropout the residual enters the accumulator by MMA
+//   out = x + drop o ((sigmoid(g) o o) . Wo^T [+ bo])     tri_wtail<C>       without dropout the residual enters the accumulator by MMA
+//
+// Model options (FoldForge's families): RoseTTAFold3's gate / out-projection biases (bg added to g in the front's drain, bo to the
+// accumulator in the tail's drain, both in fp32 before the one rounding); AlphaFold 3's ending-node bias orientation (`BT`: the bias of
+// the pair as it is, i.e. row (b, j, k) of the attention layout writes bias[b, h, k, j], its key j); Chai-1's output variants are host
+// compositions of the tail (its residual / output orientation, or two tails for the dual output).  Heads of 64 channels (HDp = 64 heads)
+// take the separate core triattn_dh64_sm100.cu.
 //
 // Backward (b200_triattn.WideTrain): tri_scale_rows (dy_s = dy o drop, with dropout) -> tri_wgbwd<C> (do, dg, u = sigmoid(g) o o,
 // delta) -> the core's backward (dq, dk, dv, dbias) -> tri_db_rows -> tri_whbwd<C> (dx and [xhat | 1], from the row statistics
@@ -18,6 +24,7 @@
 // padded columns of Wo are 0, and the softmax scale stays 1/sqrt(16)), so every width runs the one head-dim-32 core.
 #include <torch/extension.h>
 #include "sm100.cuh"
+#include "tailg_sm100.cuh"
 using namespace sm100;
 
 namespace {
@@ -117,6 +124,37 @@ __global__ void __launch_bounds__(256) tri_gate_mul(const __nv_bfloat16* __restr
 
 // =============================================================================================================================
 // Fused kernels for the wide path (tcgen05 / TMEM / TMA; the weights stream through shared memory in 64-column K chunks).
+// WF_TL / WT_TL (default off): %globaltimer stamps of CTAs 0 / 1 into g_tl (tri_wtl_read)
+#ifndef WF_TL
+#define WF_TL 0
+#endif
+#ifndef WT_TL
+#define WT_TL 0
+#endif
+__device__ long long g_tl[2][64];
+__device__ __forceinline__ long long gtimer() { long long t; asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t)); return t; }
+#define TLS(i) do { if ((WF_TL || WT_TL) && blockIdx.x < 2) g_tl[blockIdx.x][i] = gtimer(); } while (0)
+#ifndef WF_BIG
+#define WF_BIG 1         // the front drain stores 64-column x 32-row boxes (128B swizzle, two TMEM slices a round)
+#endif
+#ifndef WF_BIG_MAXL
+#define WF_BIG_MAXL 256
+#endif
+#ifndef WT_MERGE
+#define WT_MERGE 0       // 1: the d_pair 384 tail runs both 192-column halves of a tile as one item (g / o loaded and gated once; one 384-column accumulator)
+#endif
+#ifndef WT_DW8
+#define WT_DW8 1         // 1: the inference tail drains with eight warps (L <= 256)
+#endif
+#ifndef WT_PAIR
+#define WT_PAIR 2        // the tail drain takes two 32-column slices a round (one TMEM wait, two stores, one commit)
+#endif
+#ifndef WF_ML
+#define WF_ML 1          // producer lanes of the front's W stream (a stage y goes to lane y % WF_ML: one lane issues ~one TMA load per 600 clk whatever its size)
+#endif
+#ifndef WT_ML
+#define WT_ML 1          // producer lanes of the tail's stage stream (stage y -> lane y % WT_ML)
+#endif
 constexpr int WBM = 128;                                   // row tile (TMEM lanes)
 constexpr int WDRAIN_BUF = 3;                              // per-drain-warp staging ring of [32 rows][32] bf16 (2 KiB each)
 constexpr int WSMEM_CAP = 222 * 1024;                      // usable dynamic shared memory for these kernels (after 1 KiB align slack)
@@ -130,8 +168,8 @@ __device__ __forceinline__ float wsig(float x) { float t; asm("tanh.approx.f32 %
 // residual goes through the MMA: the item's x chunks [128][64] come first, packed into one ring stage, and D[:, 64 j ..] =
 // x_j . I64 (a resident 64 x 64 identity) starts each accumulator block at x exactly; with dropout the drain adds x (global
 // loads) after the scale, out = x + drop o (u . Wo^T).
-template <int C> struct WT {
-  static constexpr int CO = (C > 256 && (C / 2) % 64 == 0) ? C / 2 : C;       // output columns per item
+template <int C, int PR = 0> struct WT {   // PR: the drain variant (WT_PAIR; 0 = 32 x 32 boxes)
+  static constexpr int CO = (C > 256 && (C / 2) % 64 == 0 && !(WT_MERGE && C == 384)) ? C / 2 : C;       // output columns per item
   static constexpr int NH = C / CO;                                            // items per row tile
   static constexpr int NN = CO > 256 ? 2 : 1, NNR = CO / NN;                   // MMA N split
   static constexpr int NACC = 2 * CO <= 512 ? 2 : 1;
@@ -139,7 +177,8 @@ template <int C> struct WT {
   static constexpr int SB = 2 * XC + CO * 64 * 2;                              // stage bytes: g | o | W
   static constexpr int CPS = SB / XC;                                          // residual x chunks a stage holds
   static constexpr int KXS = (CO / 64 + CPS - 1) / CPS;                        // residual stages per item
-  static constexpr int DR = 4 * WDRAIN_BUF * 32 * 32 * 2;
+  static constexpr int NDW = PR == 4 ? 8 : 4, WB = PR == 4 ? 2 : WDRAIN_BUF, THR = 448 + (PR == 4 ? 128 : 0);   // PR 4: eight drain warps (two a TMEM quadrant, alternate slices)
+  static constexpr int DR = NDW * ((PR == 2 || PR == 3) ? 4096 : WB * 1024) * 2;
   static constexpr int IB = 64 * 64 * 2;                                       // the identity block
   static constexpr int NSTG0 = (232448 - 1024 - 256 - DR - IB) / SB;            // 227 KiB opt-in, 1 KiB alignment slack
   static constexpr int NSTG = NSTG0 > 4 ? 4 : NSTG0;
@@ -148,15 +187,20 @@ template <int C> struct WT {
   static_assert(CO % 64 == 0 || NACC == 1, "residual chunks");
 };
 
-template <int C>
-__global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, int fold,
-    const __grid_constant__ CUtensorMap gmap, const __grid_constant__ CUtensorMap omap,   // [R][HDp], box (64, 128), 128B swizzle
+template <int C, int PR>
+__global__ void __launch_bounds__(WT<C, PR>::THR, 1) tri_wtail_sm100(int ntiles, int KC, int fold,
+    const __grid_constant__ CUtensorMap gmap, const __grid_constant__ CUtensorMap omap, const __grid_constant__ CUtensorMap gomap,   // [R][HDp], box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap wmap,                                               // Wo [C][HDp], box (64, NNR), 128B swizzle
     const __grid_constant__ CUtensorMap xmap,                                               // x [R][C], box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap ymap,                                               // out [R][C], box (32, 32), 64B swizzle
     const __nv_bfloat16* __restrict__ X,                                                    // residual [R][C] (dropout path)
-    const __nv_bfloat16* __restrict__ DROP, int L) {        // dropout scale [B][L (the row's last index)][C] or nullptr
-  using T = WT<C>;
+    const __nv_bfloat16* __restrict__ DROP, int L,          // dropout scale [B][L (the row's last index)][C] or nullptr
+    const int TRANS,                                        // geometry of x / out: the ending node's layout, a ragged length (see load_rows)
+    const float* __restrict__ OB,                           // out-projection bias [C] fp32 (inside the dropout), or nullptr
+    const int DFIRST) {                                     // 1: the dropout scale is indexed by the row's FIRST position (Chai-1's
+                                                            // untransposed / second dual update: the caller's broadcast axis lies
+                                                            // across the kernel rows)
+  using T = WT<C, PR>;
   constexpr int CO = T::CO, KX = CO / 64;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -174,7 +218,7 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
   const int nitems = ntiles * T::NH, KXS = fold ? T::KXS : 0;
   if (tid == 0) {
     for (int i = 0; i < T::NSTG; ++i) { bar_init(sf + i, 1); bar_init(uf + i, 8); bar_init(se + i, 1); }
-    for (int i = 0; i < T::NACC; ++i) { bar_init(af + i, 1); bar_init(ae + i, 4); }
+    for (int i = 0; i < T::NACC; ++i) { bar_init(af + i, 1); bar_init(ae + i, T::NDW); }
     bar_init_fence();
   }
   if (fold) {
@@ -192,23 +236,25 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
   auto Xc = [&](int s, int i) { return reinterpret_cast<__nv_bfloat16*>(stg + s * T::SB + i * T::XC); };
 
   if (warp == 0) {
-    if (lane == 0) {
+    if (lane < WT_ML) {
+      pdl_wait();                                  // PDL: g / o / the residual rows after the core completed
       int y = 0;
       for (int it = blockIdx.x; it < nitems; it += gridDim.x) {
         const int t = it / T::NH, c0 = (it % T::NH) * CO;
         for (int kc = 0; kc < KXS + KC; ++kc, ++y) {
+          if (WT_ML > 1 && (y % WT_ML) != lane) continue;             // (stage y belongs to another producer lane)
           const int s = y % T::NSTG;
           if (y >= T::NSTG) wait(se + s, ((y / T::NSTG) - 1) & 1);
+          if (WT_TL && y == 0 && lane == 0) TLS(0);
           if (kc < KXS) {                                             // residual stage: up to CPS x chunks of the block
             const int j0 = kc * T::CPS, j1 = min(KX, j0 + T::CPS);
             expect_tx(sf + s, (j1 - j0) * T::XC);
-            for (int j = j0; j < j1; ++j) load_2d(&xmap, Xc(s, j - j0), sf + s, c0 + j * 64, t * WBM);
+            for (int j = j0; j < j1; ++j) load_rows(&xmap, Xc(s, j - j0), sf + s, c0 + j * 64, t * WBM, L, TRANS);
             continue;
           }
           const int ku = kc - KXS;
           expect_tx(sf + s, T::SB);
-          load_2d(&gmap, G(s), sf + s, ku * 64, t * WBM);
-          load_2d(&omap, O(s), sf + s, ku * 64, t * WBM);
+          { load_2d(&gmap, G(s), sf + s, ku * 64, t * WBM); load_2d(&omap, O(s), sf + s, ku * 64, t * WBM); }
           for (int nh = 0; nh < T::NN; ++nh) load_2d(&wmap, Wc(s) + nh * T::NNR * 64, sf + s, ku * 64, c0 + nh * T::NNR);
         }
       }
@@ -258,6 +304,7 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
       for (int kc = 0; kc < KXS + KC; ++kc, ++y) {
         const int s = y % T::NSTG;
         wait(sf + s, (y / T::NSTG) & 1);
+        if (WT_TL && y == 0 && lane == 0 && warp == 2) TLS(1);
         if (kc < KXS) { __syncwarp(); if (lane == 0) arrive(uf + s); continue; }   // residual stage: nothing to compute
         __nv_bfloat16* gr = G(s) + r * 64;
         const __nv_bfloat16* orow = O(s) + r * 64;
@@ -276,33 +323,103 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
         if (lane == 0) arrive(uf + s);
       }
   } else {
+    pdl_wait();                                    // PDL: the stores after the core completed
     const int qq = warp & 3;
-    __nv_bfloat16* ring = sO + qq * WDRAIN_BUF * 32 * 32;
+    __nv_bfloat16* ring = sO + (PR == 4 ? (warp - 10) * T::WB * 1024 : qq * ((PR == 2 || PR == 3) ? 4096 : WDRAIN_BUF * 1024));
     int nst = 0, lt = 0;
     for (int it = blockIdx.x; it < nitems; it += gridDim.x, ++lt) {
       const int t = it / T::NH, c0 = (it % T::NH) * CO;
       const int acc = lt % T::NACC;
       const long row = (long)t * WBM + qq * 32 + lane;
-      const uint4* xr = reinterpret_cast<const uint4*>(X + row * C + c0);
+      const long xrow = row_at(row, L, TRANS);                      // -1: a ragged length's pad row (its x reads as 0, its store is cut)
+      const uint4* xr = reinterpret_cast<const uint4*>(X + (xrow < 0 ? 0 : xrow) * C + c0);
       uint4 xv[2][4] = {};
-      if (!fold) {
+      if (!fold && xrow >= 0) {
 #pragma unroll
         for (int c = 0; c < 4; ++c) xv[0][c] = __ldg(xr + c);
       }
       wait(af + acc, (lt / T::NACC) & 1);
       tc_fence_after();
+      if (WT_TL && lt == 0 && warp == 10 && lane == 0) TLS(2);
+      if (PR >= 1 && PR <= 3) {                               // two 32-column slices a round: one TMEM wait, one fence, one commit (as the front's drain)
 #pragma unroll
-      for (int k = 0; k < CO / 32; ++k) {
+        for (int k = 0; k < CO / 32; k += 2) {
+          float v2[2][32];
+          tmem_ld32(tmem_at(tmem + acc * CO + k * 32, qq * 32, 0), v2[0]);
+          tmem_ld32(tmem_at(tmem + acc * CO + k * 32 + 32, qq * 32, 0), v2[1]);
+          uint4 xk[2][4] = {};
+          if (!fold && xrow >= 0) {
+#pragma unroll
+            for (int p = 0; p < 2; ++p)
+#pragma unroll
+              for (int c = 0; c < 4; ++c) xk[p][c] = __ldg(xr + (k + p) * 4 + c);
+          }
+          tmem_wait_ld();
+          if (k + 2 >= CO / 32) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(ae + acc); }
+          if (PR == 3) { if (qq == 0 && lane == 0 && nst >= 2) bulk_wait_read<1>(); named_sync(2, 128); }   // the 128-row buffer is free for all four warps
+          else if (lane == 0 && nst >= (PR == 2 ? 2 : 1)) bulk_wait_read<PR == 2 ? 1 : 0>();   // the previous round's stores have read their buffers
+          __syncwarp();
+#pragma unroll
+          for (int p = 0; p < 2; ++p) {
+            float* v = v2[p];
+            if (OB != nullptr) {
+#pragma unroll
+              for (int i = 0; i < 32; ++i) v[i] += __ldg(OB + c0 + (k + p) * 32 + i);
+            }
+            if (DROP != nullptr) {
+              const uint4* sp = reinterpret_cast<const uint4*>(DROP + drop_row(row, L, TRANS, DFIRST != 0) * C + c0 + (k + p) * 32);
+#pragma unroll
+              for (int c = 0; c < 4; ++c) {
+                const uint4 u = __ldg(sp + c);
+                const uint32_t sw[4] = {u.x, u.y, u.z, u.w};
+#pragma unroll
+                for (int e = 0; e < 4; ++e) { const float2 sv = bf2(sw[e]); v[c * 8 + 2 * e] *= sv.x; v[c * 8 + 2 * e + 1] *= sv.y; }
+              }
+            }
+            unsigned char* rowp = (PR == 3) ? reinterpret_cast<unsigned char*>(sO + ((nst & 1) * 4 + qq) * 2048) + lane * 128 : (PR == 2) ? reinterpret_cast<unsigned char*>(ring + (nst & 1) * 2048) + lane * 128 : reinterpret_cast<unsigned char*>(ring + p * 32 * 32) + lane * 64;
+#pragma unroll
+            for (int c = 0; c < 4; ++c) {
+              const uint32_t xw[4] = {xk[p][c].x, xk[p][c].y, xk[p][c].z, xk[p][c].w};
+              uint32_t w[4];
+#pragma unroll
+              for (int e = 0; e < 4; ++e) { const float2 xx = bf2(xw[e]); w[e] = pk2(v[c * 8 + 2 * e] + xx.x, v[c * 8 + 2 * e + 1] + xx.y); }
+              *reinterpret_cast<uint4*>(rowp + ((((PR == 2 || PR == 3) ? ((p * 4 + c) ^ (lane & 7)) : (c ^ ((lane >> 1) & 3)))) << 4)) = make_uint4(w[0], w[1], w[2], w[3]);
+            }
+          }
+          fence_proxy_async();
+          __syncwarp();
+          if (PR == 3) {                        // one 128-row x 64-column store (16 KiB) for the four drain warps
+            named_sync(2, 128);
+            if (qq == 0 && lane == 0) {
+              store_rows(&ymap, sO + (nst & 1) * 4 * 2048, c0 + k * 32, t * WBM, L, TRANS);
+              bulk_commit();
+            }
+          } else if (lane == 0) {
+            if (PR == 2) store_rows(&ymap, ring + (nst & 1) * 2048, c0 + k * 32, t * WBM + qq * 32, L, TRANS);
+            else { store_rows(&ymap, ring, c0 + k * 32, t * WBM + qq * 32, L, TRANS); store_rows(&ymap, ring + 32 * 32, c0 + k * 32 + 32, t * WBM + qq * 32, L, TRANS); }
+            bulk_commit();
+          }
+          nst += 1;
+        }
+      }
+#pragma unroll
+      for (int k = (PR == 4 && warp >= 14) ? 1 : 0; k < ((PR >= 1 && PR <= 3) ? 0 : CO / 32); k += (PR == 4 ? 2 : 1)) {
         float v[32];
+        if (WT_TL && lt == 0 && warp == 10 && lane == 0 && k < 8) TLS(8 + k);   // slice k: load issued
         tmem_ld32(tmem_at(tmem + acc * CO + k * 32, qq * 32, 0), v);
-        if (!fold && k + 1 < CO / 32) {
+        if (!fold && xrow >= 0 && k + 1 < CO / 32) {
 #pragma unroll
           for (int c = 0; c < 4; ++c) xv[(k + 1) & 1][c] = __ldg(xr + (k + 1) * 4 + c);
         }
         tmem_wait_ld();
-        if (k == CO / 32 - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(ae + acc); }
+        if (WT_TL && lt == 0 && warp == 10 && lane == 0 && k < 8) TLS(16 + k);   // slice k loaded
+        if (k + (PR == 4 ? 2 : 1) >= CO / 32) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(ae + acc); }
+        if (OB != nullptr) {                                         // the column's bias (one address across the warp)
+#pragma unroll
+          for (int i = 0; i < 32; ++i) v[i] += __ldg(OB + c0 + k * 32 + i);
+        }
         if (DROP != nullptr) {
-          const uint4* sp = reinterpret_cast<const uint4*>(DROP + ((row / ((long)L * L)) * L + row % L) * C + c0 + k * 32);
+          const uint4* sp = reinterpret_cast<const uint4*>(DROP + drop_row(row, L, TRANS, DFIRST != 0) * C + c0 + k * 32);
 #pragma unroll
           for (int c = 0; c < 4; ++c) {
             const uint4 u = __ldg(sp + c);
@@ -318,20 +435,23 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
 #pragma unroll
           for (int e = 0; e < 4; ++e) { const float2 xx = bf2(xw[e]); w[c * 4 + e] = pk2(v[c * 8 + 2 * e] + xx.x, v[c * 8 + 2 * e + 1] + xx.y); }
         }
-        __nv_bfloat16* buf = ring + (nst % WDRAIN_BUF) * 32 * 32;
-        if (lane == 0 && nst >= WDRAIN_BUF) bulk_wait_read<WDRAIN_BUF - 1>();
+        __nv_bfloat16* buf = ring + (nst % T::WB) * 32 * 32;
+        if (lane == 0 && nst >= T::WB) bulk_wait_read<T::WB - 1>();
         __syncwarp();
+        if (WT_TL && lt == 0 && warp == 10 && lane == 0 && k < 8) TLS(32 + k);   // after the pack and the ring wait
         unsigned char* rowp = reinterpret_cast<unsigned char*>(buf) + lane * 64;
 #pragma unroll
         for (int c = 0; c < 4; ++c)
           *reinterpret_cast<uint4*>(rowp + ((c ^ ((lane >> 1) & 3)) << 4)) = make_uint4(w[c * 4], w[c * 4 + 1], w[c * 4 + 2], w[c * 4 + 3]);
         fence_proxy_async();
         __syncwarp();
-        if (lane == 0) { store_2d(&ymap, buf, c0 + k * 32, t * WBM + qq * 32); bulk_commit(); }
+        if (WT_TL && lt == 0 && warp == 10 && lane == 0 && k < 8) TLS(24 + k);   // after STS + fence
+        if (lane == 0) { store_rows(&ymap, buf, c0 + k * 32, t * WBM + qq * 32, L, TRANS); bulk_commit(); }
+        if (WT_TL && lt == 0 && warp == 10 && lane == 0 && k < 8) TLS(40 + k);   // store issued
         ++nst;
       }
     }
-    if (lane == 0) bulk_wait<0>();
+    if (lane == 0) { bulk_wait<0>(); if (WT_TL && warp == 10) TLS(3); }
   }
   tc_fence_before();
   __syncthreads();
@@ -417,8 +537,10 @@ template <int C, int ND> struct WF {
   static_assert(NW >= 2, "front W stages");
 };
 
-template <int C, int ND>
-__global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles, int L, int HDp, int NH, int NBR, float eps,
+// TRANS: x in the ending node's layout (see load_rows); compile-time (a runtime flag spilled).  GBIAS: the gate bias is added in the
+// drain (built with ND = 4 only: at ND = 8's 96 registers it spilled)
+template <int C, int ND, bool TRANS, bool GBIAS>
+__global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles, int L, int LR2, int HDp, int NH, int NBR, float eps,
     const __grid_constant__ CUtensorMap xmap,                                   // x [R][C], box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap wmap,                                   // W [4 HDp + 16][C], box (64, NBR / 2), 128B swizzle
     const __grid_constant__ CUtensorMap wbmap,                                  // the same W, box (64, 8)
@@ -426,8 +548,12 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
     const __nv_bfloat16* __restrict__ X,                                        // x [R][C] (row statistics, one x buffer)
     const float* __restrict__ LNW, const float* __restrict__ LNB, const bool* __restrict__ MASK,
     __nv_bfloat16* __restrict__ BIAS,                                           // [B][NH][L][L]
-    float2* __restrict__ STATS) {                                               // (mean, rstd) [R] for the backward, or nullptr
+    float2* __restrict__ STATS,                                                 // (mean, rstd) [R] for the backward, or nullptr
+    const float* __restrict__ GB,                                               // gate bias [HDp] fp32 (padded layout; GBIAS)
+    const int BT,                                                               // 1: bias[b, h, k, j] from row (b, j, k) (see the header)
+    const int NT, const int BIGF) {                                                             // projections written: 4 (q, k, v, g), or 3 (no g: tri_wtailg projects it)
   using T = WF<C, ND>;
+  const int G = (TRANS ? 1 : 0) | LR2;                 // geometry of x (see load_rows): LR2 = the ragged length << 1, else 0
   extern __shared__ __align__(1024) unsigned char raw[];
   if ((sa(raw) & 1023u) != 0u) __trap();                                              // SMEM carries no alignment slack
   unsigned char* smb = raw;
@@ -449,7 +575,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int rank = (int)cl_rank();
   const bool lead = rank == 0;
-  const int NBT = HDp / NBR, NBLK = 4 * NBT + 1;                                // blocks per tensor, blocks a tile (NBR rows each)
+  const int NBT = HDp / NBR, NBLK = NT * NBT + 1;                               // blocks per tensor, blocks a tile (NBR rows each)
   const int np = ntiles >> 1, pair = blockIdx.x >> 1, npair = gridDim.x >> 1;   // pair tiles: this CTA's tile is 2 pt + rank
   if (tid == 0) {
     for (int i = 0; i < NXF; ++i) { bar_init(xf + i, 1); bar_init(yf + i, 16); }
@@ -465,22 +591,25 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
   cl_sync_relaxed();                                   // both CTAs' barriers exist before any remote arrive or pair transaction
   tc_fence_after();
   const uint32_t tmem = *tslot;
-  auto blk_rows = [&](int b) { return b < 4 * NBT ? NBR : 16; };
-  auto blk_row0 = [&](int b) { return b < 4 * NBT ? (b / NBT) * HDp + (b % NBT) * NBR : 4 * HDp; };
+  pdl_trigger();                                   // the core (PDL) may start its set-up on SMs this grid frees
+  auto blk_rows = [&](int b) { return b < NT * NBT ? NBR : 16; };
+  auto blk_row0 = [&](int b) { return b < NT * NBT ? (b / NBT) * HDp + (b % NBT) * NBR : 4 * HDp; };
   auto load_x = [&](int t, int xb) {
     expect_tx(xf + xb, T::XB);
-    for (int kc = 0; kc < T::KC; ++kc) load_2d(&xmap, sX + (xb * T::KC + kc) * WBM * 64, xf + xb, kc * 64, t * WBM);
+    for (int kc = 0; kc < T::KC; ++kc) load_rows(&xmap, sX + (xb * T::KC + kc) * WBM * 64, xf + xb, kc * 64, t * WBM, L, G);
   };
 
   if (warp == 0) {
-    if (lane == 0) {
+    if (lane < WF_ML) {
       const uint32_t bwf = sa(wf), bw0 = sa(sW);
       int y = 0;
       for (int pt = pair; pt < np; pt += npair)
         for (int b = 0; b < NBLK; ++b)
           for (int kc = 0; kc < T::KC; ++kc, ++y) {
+            if (WF_ML > 1 && (y % WF_ML) != lane) continue;              // (stage y belongs to another producer lane)
             const int s = y % T::NW, half = blk_rows(b) >> 1;
             if (y >= T::NW) wait(we + s, ((y / T::NW) - 1) & 1);
+            if (WF_TL && y == 0 && lane == 0) TLS(0);
             if (lead) expect_tx(wf + s, 2 * half * 128);                 // the pair's bytes, counted on the leader's barrier
             load_2d_2sm(half == 8 ? &wbmap : &wmap, bw0 + s * T::WSB, bwf + 8 * s, kc * 64, blk_row0(b) + rank * half);
           }
@@ -504,6 +633,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
             const int s = y % T::NW;
             if (T::NX == 1 && b == 0) wait_cl(byf + 8 * kc, lt & 1);
             wait(bwf + 8 * s, (y / T::NW) & 1);
+            if (WF_TL && y == 0) TLS(3);
             tc_fence_after();
             const uint64_t a = dY + (uint64_t)((kc * WBM * 64 * 2) >> 4), bw = dW0 + (uint64_t)((s * T::WSB) >> 4);
 #pragma unroll
@@ -515,6 +645,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
           __syncwarp();
         }
         commit2_mc_if(ldr, bxe + 8 * xb);
+        if (WF_TL) TLS(4);
         __syncwarp();
       }
     }
@@ -531,7 +662,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
       auto load_chunks = [&](int tt) {
         for (int kc = 0; kc < T::KC; ++kc) {
           expect_tx(xf + kc, WBM * 64 * 2);
-          load_2d(&xmap, sX + kc * WBM * 64, xf + kc, kc * 64, tt * WBM);
+          load_rows(&xmap, sX + kc * WBM * 64, xf + kc, kc * 64, tt * WBM, L, G);
         }
       };
       auto stats = [&](int tt) {
@@ -539,12 +670,14 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
         for (int rr = 0; rr < 16; rr += 4) {
           uint4 u[4][PER];
 #pragma unroll
-          for (int i = 0; i < 4; ++i)
+          for (int i = 0; i < 4; ++i) {
+            const long xrow = row_at((long)tt * WBM + r0 + rr + i, L, G);   // -1: a ragged length's pad row (zeros, as TMA fills it)
 #pragma unroll
             for (int p = 0; p < PER; ++p) {
               const int j = lane + 32 * p;
-              u[i][p] = j < NV ? __ldg(X4 + ((long)tt * WBM + r0 + rr + i) * NV + j) : make_uint4(0u, 0u, 0u, 0u);
+              u[i][p] = j < NV && xrow >= 0 ? __ldg(X4 + xrow * NV + j) : make_uint4(0u, 0u, 0u, 0u);
             }
+          }
           float s1[4], s2[4];
 #pragma unroll
           for (int i = 0; i < 4; ++i) {
@@ -616,6 +749,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
     for (int pt = pair; pt < np; pt += npair, ++lt) {
       const int xb = lt % T::NX, tn = 2 * (pt + npair) + rank;
       wait(xf + xb, (lt / T::NX) & 1);
+      if (WF_TL && lt == 0 && warp == 2 && lane == 0) TLS(1);
       __nv_bfloat16* Xt = sX + xb * T::KC * WBM * 64;
       auto chunk = [&](int j) { return Xt + (j >> 3) * WBM * 64 + r * 64 + (((j & 7) ^ (r & 7)) << 3); };
       float s1 = 0.f, s2 = 0.f;
@@ -646,6 +780,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
       }
       fence_proxy_async();
       __syncwarp();
+      if (WF_TL && lt == 0 && warp == 2 && lane == 0) TLS(2);
       if (lane == 0) arrive_lead_cta(byf + 8 * xb);
       if (T::NX == 2 && leader && tn < ntiles) {                       // the next tile into the other buffer, once the previous
         if (lt >= 1) wait(xe + (xb ^ 1), ((lt - 1) / 2) & 1);         // tile's GEMMs are done (after this LN: the LN of a tile
@@ -670,8 +805,9 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
       for (int b = 0; b < NBLK; ++b, ++gb) {
         const int acc = gb & 1;
         wait(af + acc, (gb >> 1) & 1);
+        if (WF_TL && gb == 0 && warp == 10 && lane == 0) TLS(6);
         tc_fence_after();
-        if (b == 4 * NBT) {                        // bias block: 16 columns, heads 0 .. NH-1 -> [b][h][j][k], masked keys
+        if (b == NT * NBT) {                       // bias block: 16 columns, heads 0 .. NH-1 -> [b][h][j][k], masked keys
           float v[16];
           if (hv == 0) { tmem_ld16(tmem_at(tmem + acc * 256, qq * 32, 0), v); tmem_wait_ld(); }
           tc_fence_before();
@@ -681,8 +817,12 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
             const int kx = (int)(row % L);
             const long bj = row / L;
             const int j = (int)(bj % L), bb = (int)(bj / L);
-            const bool keep = MASK == nullptr || MASK[(long)bb * L + kx];
-            for (int h = 0; h < NH; ++h) BIAS[(((long)bb * NH + h) * L + j) * L + kx] = keep ? __float2bfloat16_rn(v[h]) : lo;
+            // BT: this row's bias is bias[k][j] of the attention's (query, key) frame, its key j; the stores of a warp are then
+            // strided by L (32 sectors, merged in L2)
+            const int qi = BT ? kx : j, ki = BT ? j : kx;
+            const int lr = geo_len(L, G);             // keys beyond the caller's length: the ragged length's pad, masked
+            const bool keep = ki < lr && (MASK == nullptr || MASK[(long)bb * lr + ki]);
+            for (int h = 0; h < NH; ++h) BIAS[(((long)bb * NH + h) * L + qi) * L + ki] = keep ? __float2bfloat16_rn(v[h]) : lo;
           }
           continue;
         }
@@ -693,38 +833,55 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
           continue;
         }
         const int ten = b / NBT, c0 = (b % NBT) * NBR;
+        const float* gbp = GBIAS && ten == 3 ? GB + c0 : nullptr;
         for (int rd = hv; rd < NRD; rd += ND / 4) {            // two 32-column slices a round: one TMEM wait, one fence, one commit
           const int ch = 2 * rd;
           const bool two = ch + 1 < NSL;
           float v[2][32];
+          if (WF_TL && gb == 0 && warp == 10 && lane == 0 && nst < 6) TLS(28 + (nst >> 1) * 6);   // load issued
           tmem_ld32(tmem_at(tmem + acc * 256 + ch * 32, qq * 32, 0), v[0]);
           if (two) tmem_ld32(tmem_at(tmem + acc * 256 + ch * 32 + 32, qq * 32, 0), v[1]);
           tmem_wait_ld();
+          if (WF_TL && gb == 0 && warp == 10 && lane == 0 && nst < 6) TLS(28 + (nst >> 1) * 6 + 1);   // loaded
           if (rd + ND / 4 >= NRD) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive_lead_relaxed(bae + 8 * acc); }
+          if (GBIAS && gbp != nullptr) {                         // g + gate bias, in fp32 before the bf16 rounding (one address
+#pragma unroll                                                   // across the warp: broadcast loads)
+            for (int i = 0; i < 32; ++i) v[0][i] += __ldg(gbp + ch * 32 + i);
+            if (two) {
+#pragma unroll
+              for (int i = 0; i < 32; ++i) v[1][i] += __ldg(gbp + ch * 32 + 32 + i);
+            }
+          }
           if (lane == 0) bulk_wait_read<T::FB == 4 ? 1 : 0>();  // (4 buffers) all but the last round read: this round's two are free
           __syncwarp();
+          if (WF_TL && gb == 0 && warp == 10 && lane == 0 && nst < 6) TLS(28 + (nst >> 1) * 6 + 2);   // after the ring wait
 #pragma unroll
           for (int p = 0; p < 2; ++p) {
             if (p == 1 && !two) break;
-            unsigned char* rowp = reinterpret_cast<unsigned char*>(ring + ((nst + p) % T::FB) * 32 * 32) + lane * 64;
+            unsigned char* rowp = BIGF ? reinterpret_cast<unsigned char*>(ring + ((nst >> 1) % (T::FB / 2)) * 2048) + lane * 128 : reinterpret_cast<unsigned char*>(ring + ((nst + p) % T::FB) * 32 * 32) + lane * 64;
 #pragma unroll
             for (int c = 0; c < 4; ++c)
-              *reinterpret_cast<uint4*>(rowp + ((c ^ ((lane >> 1) & 3)) << 4)) =
-                  make_uint4(pk2(v[p][c * 8], v[p][c * 8 + 1]), pk2(v[p][c * 8 + 2], v[p][c * 8 + 3]), pk2(v[p][c * 8 + 4], v[p][c * 8 + 5]),
-                             pk2(v[p][c * 8 + 6], v[p][c * 8 + 7]));
+              *reinterpret_cast<uint4*>(rowp + (((BIGF ? ((p * 4 + c) ^ (lane & 7)) : (c ^ ((lane >> 1) & 3)))) << 4)) =
+                  make_uint4(pk2(v[p][c * 8], v[p][c * 8 + 1]), pk2(v[p][c * 8 + 2], v[p][c * 8 + 3]), pk2(v[p][c * 8 + 4], v[p][c * 8 + 5]), pk2(v[p][c * 8 + 6], v[p][c * 8 + 7]));
           }
+          if (WF_TL && gb == 0 && warp == 10 && lane == 0 && nst < 6) TLS(28 + (nst >> 1) * 6 + 5);   // after the pack + STS
           fence_proxy_async();
           __syncwarp();
+          if (WF_TL && gb == 0 && warp == 10 && lane == 0 && nst < 6) TLS(28 + (nst >> 1) * 6 + 3);   // after STS + fence
           if (lane == 0) {
-            store_2d(&omaps.m[ten], ring + (nst % T::FB) * 32 * 32, c0 + ch * 32, t * WBM + qq * 32);
-            if (two) store_2d(&omaps.m[ten], ring + ((nst + 1) % T::FB) * 32 * 32, c0 + ch * 32 + 32, t * WBM + qq * 32);
+            if (BIGF) { store_2d(&omaps.m[ten], ring + ((nst >> 1) % (T::FB / 2)) * 2048, c0 + ch * 32, t * WBM + qq * 32); }
+            else {
+              store_2d(&omaps.m[ten], ring + (nst % T::FB) * 32 * 32, c0 + ch * 32, t * WBM + qq * 32);
+              if (two) store_2d(&omaps.m[ten], ring + ((nst + 1) % T::FB) * 32 * 32, c0 + ch * 32 + 32, t * WBM + qq * 32);
+            }
             bulk_commit();
           }
+          if (WF_TL && gb == 0 && warp == 10 && lane == 0 && nst < 6) TLS(28 + (nst >> 1) * 6 + 4);   // store issued
           nst += two ? 2 : 1;
         }
       }
     }
-    if (lane == 0) bulk_wait<0>();
+    if (lane == 0) { bulk_wait<0>(); if (WF_TL && warp == 10) TLS(7); }
   }
   tc_fence_before();
   __syncthreads();
@@ -737,40 +894,98 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
 
 // ---- dy_s = dy o drop[b, j, :] (the module's broadcast dropout scale), 8 channels a thread
 __global__ void __launch_bounds__(256) tri_scale_rows(const __nv_bfloat16* __restrict__ DY, const __nv_bfloat16* __restrict__ DROP,
-                                                      __nv_bfloat16* __restrict__ OUT, int C, int L, long R) {
+                                                      __nv_bfloat16* __restrict__ OUT, int C, int L, long R, int trans,
+                                                      const __nv_bfloat16* __restrict__ X) {   // X: + a residual (bias-only path's tail), or nullptr
   const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   const int per = C / 8;
   if (i >= R * per) return;
   const long row = i / per;
   const int c = (int)(i % per) * 8;
-  const long srow = (row / ((long)L * L)) * L + row % L;
+  // the scale is per (sample, the row's last position): kernel row (b, n, s) -> s; in the ending node's layout row (b, i, j) is
+  // kernel row (b, j, i), so the index is i
+  const long srow = (row / ((long)L * L)) * L + (trans ? (row / L) % L : row % L);
   const uint4 d = *reinterpret_cast<const uint4*>(DY + row * C + c), m = __ldg(reinterpret_cast<const uint4*>(DROP + srow * C + c));
   const uint32_t dw[4] = {d.x, d.y, d.z, d.w}, mw[4] = {m.x, m.y, m.z, m.w};
   uint32_t o[4];
+  if (X == nullptr) {
 #pragma unroll
-  for (int e = 0; e < 4; ++e) { const float2 a = bf2(dw[e]), b = bf2(mw[e]); o[e] = pk2(a.x * b.x, a.y * b.y); }
+    for (int e = 0; e < 4; ++e) { const float2 a = bf2(dw[e]), b = bf2(mw[e]); o[e] = pk2(a.x * b.x, a.y * b.y); }
+  } else {
+    const uint4 xv = *reinterpret_cast<const uint4*>(X + row * C + c);
+    const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
+#pragma unroll
+    for (int e = 0; e < 4; ++e) { const float2 a = bf2(dw[e]), b = bf2(mw[e]), r = bf2(xw[e]); o[e] = pk2(fmaf(a.x, b.x, r.x), fmaf(a.y, b.y, r.y)); }
+  }
   *reinterpret_cast<uint4*>(OUT + row * C + c) = make_uint4(o[0], o[1], o[2], o[3]);
 }
 
+// ---- the backward's small set-up passes in one launch (B200 2026-11-17: at L128 each was its own ~1.2-2.4 us launch):
+// blocks [0, nsb): dy_s = dy o drop (tri_scale_rows' body; nsb = 0 without dropout); [nsb, nsb + nbt): bias^T * log2e fp32 for the
+// core's key-side kernel (triattn_biasT's 32 x 32 tiles, the same bits); the rest: the dbias accumulator zeroed (the query-side
+// kernel reduce-adds into it).
+__global__ void __launch_bounds__(256) tri_bwd_pre(const __nv_bfloat16* __restrict__ DY, const __nv_bfloat16* __restrict__ DROP,
+                                                   __nv_bfloat16* __restrict__ OUT, int C, int L, long R, int trans, int nsb,
+                                                   const __nv_bfloat16* __restrict__ BIAS, float* __restrict__ BT, int S, int nbt,
+                                                   float4* __restrict__ Z, long nz4) {
+  int bx = (int)blockIdx.x;
+  if (bx < nsb) {
+    const long i = (long)bx * blockDim.x + threadIdx.x;
+    const int per = C / 8;
+    if (i >= R * per) return;
+    const long row = i / per;
+    const int c = (int)(i % per) * 8;
+    const long srow = (row / ((long)L * L)) * L + (trans ? (row / L) % L : row % L);
+    const uint4 d = *reinterpret_cast<const uint4*>(DY + row * C + c), m = __ldg(reinterpret_cast<const uint4*>(DROP + srow * C + c));
+    const uint32_t dw[4] = {d.x, d.y, d.z, d.w}, mw[4] = {m.x, m.y, m.z, m.w};
+    uint32_t o[4];
+#pragma unroll
+    for (int e = 0; e < 4; ++e) { const float2 a = bf2(dw[e]), b = bf2(mw[e]); o[e] = pk2(a.x * b.x, a.y * b.y); }
+    *reinterpret_cast<uint4*>(OUT + row * C + c) = make_uint4(o[0], o[1], o[2], o[3]);
+    return;
+  }
+  bx -= nsb;
+  if (bx < nbt) {
+    constexpr float L2E = 1.4426950408889634f;
+    __shared__ float t[32][33];
+    const int nt = S / 32, k0 = (bx % nt) * 32, q0 = ((bx / nt) % nt) * 32, bh = bx / (nt * nt);
+    const int tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
+    const __nv_bfloat16* src = BIAS + (size_t)bh * S * S;
+#pragma unroll
+    for (int i = ty; i < 32; i += 8) t[i][tx] = __bfloat162float(src[(size_t)(q0 + i) * S + k0 + tx]) * L2E;
+    __syncthreads();
+    float* dst = BT + (size_t)bh * S * S;
+#pragma unroll
+    for (int i = ty; i < 32; i += 8) dst[(size_t)(k0 + i) * S + q0 + tx] = t[tx][i];
+    return;
+  }
+  bx -= nbt;
+  const long nzb = (long)gridDim.x - nsb - nbt;
+  for (long i = (long)bx * blockDim.x + threadIdx.x; i < nz4; i += nzb * blockDim.x) Z[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+}
+
 // ---- dbias fp32 [B][H][L][L] -> rows [R][64] bf16 (row (b, j, k): its H heads, then zeros), the head backward's A block
+// bt: the bias orientation of tri_wfront's BT (row (b, j, k) produced bias[b, h, k, j]: its gradient is dbias[b, h, k, j])
 __global__ void __launch_bounds__(256) tri_db_rows(const float* __restrict__ DB, __nv_bfloat16* __restrict__ OUT, long ldo, int H, int L,
-                                                   long R) {
-  const long row = (long)blockIdx.x * blockDim.x + threadIdx.x;
-  if (row >= R) return;
+                                                   long R, int bt) {
+  // a thread = one row x one 8-column (16-byte) piece, the piece index slowest: a warp's loads are 32 consecutive rows of one head
+  // plane (coalesced), the pieces beyond the heads only write zeros (B200 2026-11-17: one thread a whole row took 6.4 us at L128)
+  const long t = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (t >= 8 * R) return;
+  const int q = (int)(t / R);
+  const long row = t % R;
   const int kx = (int)(row % L);
   const long bj = row / L;
   const int j = (int)(bj % L), b = (int)(bj / L);
-  uint32_t w[32];
+  const long at = bt ? (long)kx * L + j : (long)j * L + kx;
+  uint32_t w[4];
 #pragma unroll
-  for (int i = 0; i < 32; ++i) {
-    const int h0 = 2 * i, h1 = 2 * i + 1;
-    const float a = h0 < H ? DB[(((long)b * H + h0) * L + j) * L + kx] : 0.f;
-    const float c = h1 < H ? DB[(((long)b * H + h1) * L + j) * L + kx] : 0.f;
+  for (int i = 0; i < 4; ++i) {
+    const int h0 = 8 * q + 2 * i, h1 = h0 + 1;
+    const float a = h0 < H ? DB[((long)b * H + h0) * L * L + at] : 0.f;
+    const float c = h1 < H ? DB[((long)b * H + h1) * L * L + at] : 0.f;
     w[i] = pk2(a, c);
   }
-  uint4* dst = reinterpret_cast<uint4*>(OUT + row * ldo);
-#pragma unroll
-  for (int q = 0; q < 8; ++q) dst[q] = make_uint4(w[4 * q], w[4 * q + 1], w[4 * q + 2], w[4 * q + 3]);
+  reinterpret_cast<uint4*>(OUT + row * ldo)[q] = make_uint4(w[0], w[1], w[2], w[3]);
 }
 
 // ---- gate backward:  du = dy_s . Wo  (dy_s = dy o drop);  s = sigmoid(g);  do = du o s;  dg = du o o o s (1 - s);  u = s o o;
@@ -779,6 +994,9 @@ __global__ void __launch_bounds__(256) tri_db_rows(const float* __restrict__ DB,
 // TMEM accumulators.  The drain computes the gate math per 32-column slice (one head): eight warps, two a TMEM lane quarter taking
 // alternate slices, each prefetching its next g | o slice by TMA into a three-slot ring; do | dg | u overwrite the slot in place
 // and leave by TMA.  warp 0: TMA (A | W stages); warp 1: tcgen05; warps 2-9: drain.
+// Chai-1's dual output (DUAL: K = 2C): the second out-projection's update lands transposed, so du = dy_s . Wo + dy_s^T . Wo2: the K loop
+// runs on over the same dy_s read in the other orientation (amap2) against WoT2 (the right half of the [HDp][2C] W), and u is also
+// stored in the other orientation (umap2: dWo2 = dy_s^T u2 pairs them as dWo does).
 constexpr int GB_SLOT = 3 * 32 * 32 * 2;                  // a drain slot: g | o in (TMA), then do | dg | u out
 template <int C> struct WG {
   static constexpr int KC = C / 64;
@@ -792,15 +1010,19 @@ template <int C> struct WG {
   static_assert(NW >= 2, "gate backward stages");
 };
 
-template <int C>
-__global__ void __launch_bounds__(320, 1) tri_wgbwd_sm100(int ntiles, int L, int HDp, int NBR,
+template <int C, bool TRANS, bool DUAL>   // TRANS: dy_s and u in the ending node's layout; compile-time (a runtime flag spilled)
+__global__ void __launch_bounds__(320, 1) tri_wgbwd_sm100(int ntiles, int L, int LR2, int HDp, int NBR,
     const __grid_constant__ CUtensorMap amap,                                   // dy_s [R][C], box (64, 128), 128B swizzle
-    const __grid_constant__ CUtensorMap wmap,                                   // WoT [HDp][C], box (64, NBR), 128B swizzle
+    const __grid_constant__ CUtensorMap amap2,                                  // the same in the other orientation (dual only)
+    const __grid_constant__ CUtensorMap wmap,                                   // WoT [HDp][C] ([HDp][2C] dual), box (64, NBR), 128B swizzle
     const __grid_constant__ CUtensorMap domap, const __grid_constant__ CUtensorMap dgmap,
     const __grid_constant__ CUtensorMap umap,                                   // [R][HDp], box (32, 32), 64B swizzle
     const __grid_constant__ CUtensorMap gmap, const __grid_constant__ CUtensorMap omap,   // g / o [R][HDp], box (32, 32), 64B swizzle
+    const __grid_constant__ CUtensorMap umap2,                                  // u in the other orientation (dual only)
     float* __restrict__ DELTA) {                                                // [B][L][H][L]
   using T = WG<C>;
+  constexpr int KCT = DUAL ? 2 * T::KC : T::KC;                                // K chunks
+  const int G = (TRANS ? 1 : 0) | LR2;                                         // geometry of dy_s / u (see load_rows)
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
   unsigned char* stg = smb;                                                           // [NW][A | W]
@@ -831,11 +1053,12 @@ __global__ void __launch_bounds__(320, 1) tri_wgbwd_sm100(int ntiles, int L, int
       int y = 0;
       for (int t = blockIdx.x; t < ntiles; t += gridDim.x)
         for (int b = 0; b < NBT; ++b)
-          for (int kc = 0; kc < T::KC; ++kc, ++y) {
+          for (int kc = 0; kc < KCT; ++kc, ++y) {
             const int s = y % T::NW;
             if (y >= T::NW) wait(se + s, ((y / T::NW) - 1) & 1);
             expect_tx(sf + s, (WBM + NBR) * 128);
-            load_2d(&amap, stg + s * T::SB, sf + s, kc * 64, t * WBM);
+            if (!DUAL || kc < T::KC) load_rows(&amap, stg + s * T::SB, sf + s, kc * 64, t * WBM, L, G);
+            else load_rows(&amap2, stg + s * T::SB, sf + s, (kc - T::KC) * 64, t * WBM, L, G ^ 1);
             load_2d(&wmap, stg + s * T::SB + WBM * 128, sf + s, kc * 64, b * NBR);
           }
     }
@@ -849,7 +1072,7 @@ __global__ void __launch_bounds__(320, 1) tri_wgbwd_sm100(int ntiles, int L, int
       for (int b = 0; b < NBT; ++b, ++gb) {
         const int acc = gb & 1;
         if (gb >= 2) wait(bae + 8 * acc, ((gb >> 1) - 1) & 1);
-        for (int kc = 0; kc < T::KC; ++kc, ++y) {
+        for (int kc = 0; kc < KCT; ++kc, ++y) {
           const int s = y % T::NW;
           wait(bsf + 8 * s, (y / T::NW) & 1);
           tc_fence_after();
@@ -867,18 +1090,16 @@ __global__ void __launch_bounds__(320, 1) tri_wgbwd_sm100(int ntiles, int L, int
     const int PER = (NSB - hv + 1) / 2;                                        // this warp's slices a block
     unsigned char* ring = sOut + dw * T::NSL * GB_SLOT;
     uint64_t* glw = gl + dw * T::NSL;
-    // load cursor (one slice ahead of the processing cursor)
-    int lt_ = blockIdx.x, lb = 0, lj = 0, nl = 0;
-    auto load_one = [&]() {                                                     // lane 0: slice (lt_, lb, lj) into slot nl % NSL
-      const int sl = nl % T::NSL, col = lb * NBR + (hv + 2 * lj) * 32, row = lt_ * WBM + qq * 32;
+    // the g | o slice loads run one slice ahead of the processing; the next slice's coordinates are derived from the current ones (a
+    // separate load cursor kept live through the loop spilled)
+    auto load_at = [&](int tl, int bl, int jl, int sl) {                        // lane 0: slice (tile tl, block bl, j jl) into slot sl
+      const int col = bl * NBR + (hv + 2 * jl) * 32, row = tl * WBM + qq * 32;
       unsigned char* p = ring + sl * GB_SLOT;
       expect_tx(glw + sl, 2 * 2048);
       load_2d(&gmap, p, glw + sl, col, row);
       load_2d(&omap, p + 2048, glw + sl, col, row);
-      ++nl;
-      if (++lj == PER) { lj = 0; if (++lb == NBT) { lb = 0; lt_ += gridDim.x; } }
     };
-    if (lane == 0 && PER > 0 && lt_ < ntiles) load_one();
+    if (lane == 0 && PER > 0 && (int)blockIdx.x < ntiles) load_at(blockIdx.x, 0, 0, 0);
     int n = 0, gb = 0;
     for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
       const long row = (long)t * WBM + qq * 32 + lane;
@@ -892,7 +1113,11 @@ __global__ void __launch_bounds__(320, 1) tri_wgbwd_sm100(int ntiles, int L, int
         if (PER == 0) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(ae + acc); continue; }
         for (int j = 0; j < PER; ++j, ++n) {
           const int ch = hv + 2 * j, col0 = b * NBR + ch * 32, h = col0 / 32, sl = n % T::NSL;
-          if (lane == 0 && lt_ < ntiles) { bulk_wait_read<1>(); load_one(); }  // the slot of slice n - 2: its stores have been read
+          if (lane == 0) {                                                       // the next slice, into the slot of slice n - 2
+            int tn = t, bn = b, jn = j + 1;
+            if (jn == PER) { jn = 0; if (++bn == NBT) { bn = 0; tn += gridDim.x; } }
+            if (tn < ntiles) { bulk_wait_read<1>(); load_at(tn, bn, jn, (n + 1) % T::NSL); }   // (its stores have been read)
+          }
           float du[32];
           tmem_ld32(tmem_at(tmem + acc * 256 + ch * 32, qq * 32, 0), du);
           tmem_wait_ld();
@@ -940,7 +1165,8 @@ __global__ void __launch_bounds__(320, 1) tri_wgbwd_sm100(int ntiles, int L, int
           if (lane == 0) {
             store_2d(&domap, slot, col0, t * WBM + qq * 32);
             store_2d(&dgmap, slot + 2048, col0, t * WBM + qq * 32);
-            store_2d(&umap, slot + 4096, col0, t * WBM + qq * 32);
+            store_rows(&umap, slot + 4096, col0, t * WBM + qq * 32, L, G);   // (u pairs with dy_s in dWo = dy_s^T u)
+            if (DUAL) store_rows(&umap2, slot + 4096, col0, t * WBM + qq * 32, L, G ^ 1);
             bulk_commit();
           }
         }
@@ -978,7 +1204,7 @@ template <int C> struct WH {
 };
 
 template <int C>
-__global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int ntiles, int HDp,
+__global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int ntiles, int HDp, int L, int TRANS,   // TRANS: the geometry of x / dy / dx (see load_rows)
     const __grid_constant__ CUtensorMap amap,                                            // D = [dq | dk | dv | dg | db] [R][4 HDp + 64], box (64, 128), 128B
     const __grid_constant__ CUtensorMap wmap,                                            // W^T [C][4 HDp + 64], box (64, NNR), 128B
     const __grid_constant__ CUtensorMap dxmap,                                           // dx [R][C], box (32, 32), 64B
@@ -1074,11 +1300,11 @@ __global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int n
       unsigned char* p = ring + sl * HB_SLOT;
       if (lj < NKW) {
         expect_tx(glw + sl, 2048);
-        load_2d(&xmap, p, glw + sl, (hv + NH2 * lj) * 32, row);
+        load_rows(&xmap, p, glw + sl, (hv + NH2 * lj) * 32, row, L, TRANS);
       } else {
         expect_tx(glw + sl, 4096);
-        load_2d(&xmap, p, glw + sl, (hv + NH2 * (lj - NKW)) * 32, row);
-        load_2d(&dymap, p + 2048, glw + sl, (hv + NH2 * (lj - NKW)) * 32, row);
+        load_rows(&xmap, p, glw + sl, (hv + NH2 * (lj - NKW)) * 32, row, L, TRANS);
+        load_rows(&dymap, p + 2048, glw + sl, (hv + NH2 * (lj - NKW)) * 32, row, L, TRANS);
       }
       ++nl;
       if (++lj == NJ) { lj = 0; lt_ += gridDim.x; }
@@ -1171,7 +1397,7 @@ __global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int n
         fence_proxy_async();
         __syncwarp();
         if (lane == 0) {
-          store_2d(&dxmap, slot, k * 32, t * WBM + qq * 32);
+          store_rows(&dxmap, slot, k * 32, t * WBM + qq * 32, L, TRANS);
           store_2d(&xhmap, slot + 2048, k * 32, t * WBM + qq * 32);
           if (k == NK - 1) {                            // xhat's extra columns: 1 at C, zeros after
             store_2d(&xhmap, sPad, C, t * WBM + qq * 32);
@@ -1188,7 +1414,8 @@ __global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int n
   if (warp == 1) tmem_dealloc(tmem, 512);
 }
 
-// ---- parameter gradients from G = D^T [xhat | 1] (fp32 [4 HDp + 64][C + 64]):  for a projection row o of W (padded layout,
+// ---- parameter gradients from G = D^T [xhat | 1] (fp32 [4 HDp + 64][C + 64]):  for a projection row o of W (padded layout: SL = 32
+// channels a head, 16 zero-padded, 64, or 128, 96 zero-padded,
 // the rows of wcat): dW[o][c] = G[o][c] gamma[c] + G[o][C] beta[c];  dgamma[c] = sum_o W[o][c] G[o][c];  dbeta[c] = sum_o W[o][c] G[o][C];
 // rows of zero-padded channels are skipped in the outputs (their W rows are 0).  Grid (C/32 + dWo blocks, row chunks of FR rows):
 // threads (8 rows x 32 columns), coalesced along c; each block leaves its dgamma / dbeta partial in PART [chunk][2][C], which
@@ -1202,11 +1429,11 @@ template <typename OutT>
 __global__ void __launch_bounds__(256) tri_wfinish(const float* __restrict__ G, const __nv_bfloat16* __restrict__ W, const float* __restrict__ GAM,
     const float* __restrict__ BET, int C, int HDp, int NH, int hd, OutT* __restrict__ DW, OutT* __restrict__ DWB, float* __restrict__ PART,
     const float* __restrict__ DWO, OutT* __restrict__ DWOU) {
-  const int ncb = C / 32, ldg = C + 64, HD = NH * hd, tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
+  const int ncb = C / 32, ldg = C + 64, HD = NH * hd, SL = HDp / NH, tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
   if ((int)blockIdx.x >= ncb) {
     const long i = ((long)(blockIdx.x - ncb) * gridDim.y + blockIdx.y) * 256 + threadIdx.x;   // an element of dWo [C][HD]
     if (i >= (long)C * HD) return;
-    const int c = (int)(i / HD), o = (int)(i % HD), op = (o / hd) * 32 + o % hd;
+    const int c = (int)(i / HD), o = (int)(i % HD), op = (o / hd) * SL + o % hd;
     st_out(DWOU + i, DWO[(long)c * HDp + op]);
     return;
   }
@@ -1220,7 +1447,7 @@ __global__ void __launch_bounds__(256) tri_wfinish(const float* __restrict__ G, 
     db = fmaf(w, gs, db);
     const float v = gv * g + gs * b;
     if (r < 4 * HDp) {
-      const int t = r / HDp, rr = r % HDp, head = rr / 32, ch = rr % 32;
+      const int t = r / HDp, rr = r % HDp, head = rr / SL, ch = rr % SL;
       if (ch < hd) st_out(DW + ((long)t * HD + head * hd + ch) * C + c, v);
     } else {
       st_out(DWB + (long)(r - 4 * HDp) * C + c, v);
@@ -1315,68 +1542,96 @@ torch::Tensor tri_gate_mul_h(torch::Tensor g, torch::Tensor o) {
 
 
 // ---- fused wide tail: g [R, HDp] (dense rows at a 16-byte-multiple stride), o [R, HDp], x [R, C], wo [C, HDp] -> x + (sigmoid(g) o o) . wo^T
-template <int C>
-static void launch_wtail(const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& x, const torch::Tensor& wo, torch::Tensor& out,
-                         const __nv_bfloat16* drop, long L) {
-  using T = WT<C>;
-  const long R = x.size(0), HDp = o.size(1);
+template <int C, int PR>
+static void launch_wtail_t(const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& x, const torch::Tensor& wo, torch::Tensor& out,
+                         const __nv_bfloat16* drop, long L, int geo, const float* ob, bool dfirst) {
+  using T = WT<C, PR>;
+  const long R = o.size(0), HDp = o.size(1);             // the kernels' rows (whole tiles); x / out: the caller's (geo)
   auto m2 = [&](const torch::Tensor& t, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw, const char* w) {
     return make_map<2>(t.data_ptr(), {cols, rows}, {ld}, {b0, b1}, sw, w); };
   CUtensorMap gm = m2(g, HDp, R, g.stride(0), 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "g");
+  CUtensorMap gom = make_map<3>(g.data_ptr(), {64, (uint64_t)R, (uint64_t)(HDp / 64)}, {(uint64_t)g.stride(0), 64}, {64, (uint32_t)WBM, 2}, CU_TENSOR_MAP_SWIZZLE_128B, "go");
   CUtensorMap om = m2(o, HDp, R, HDp, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "o");
   CUtensorMap wm = m2(wo, HDp, C, HDp, 64, T::NNR, CU_TENSOR_MAP_SWIZZLE_128B, "wo");
-  CUtensorMap ym = m2(out, C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "out");
-  CUtensorMap xm = m2(x, C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "x");
+  CUtensorMap ym = (PR == 2 || PR == 3) ? make_rows_map(out.data_ptr(), C, R, C, 64, PR == 3 ? WBM : 32, CU_TENSOR_MAP_SWIZZLE_128B, "out", L, geo)
+                                  : make_rows_map(out.data_ptr(), C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "out", L, geo);
+  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "x", L, geo);
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wtail_sm100<C>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM)); attr = true; }
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wtail_sm100<C, PR>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM)); attr = true; }
   const int ntiles = (int)(R / WBM);
-  tri_wtail_sm100<C><<<std::min(ntiles * T::NH, num_sms(x.device().index())), 448, T::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      ntiles, (int)(HDp / 64), drop == nullptr ? 1 : 0, gm, om, wm, xm, ym, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
-      drop, (int)L);
+  launch_pdl(tri_wtail_sm100<C, PR>, dim3(std::min(ntiles * T::NH, num_sms(x.device().index()))), dim3(T::THR), T::SMEM, at::cuda::getCurrentCUDAStream(),
+      ntiles, (int)(HDp / 64), drop == nullptr ? 1 : 0, gm, om, gom, wm, xm, ym, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
+      drop, (int)L, geo, ob, dfirst ? 1 : 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-torch::Tensor tri_wtail_h(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L) {
-  TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [R, C] bf16");
-  const long R = x.size(0), C = x.size(1);
-  TORCH_CHECK(o.scalar_type() == torch::kBFloat16 && o.is_contiguous() && o.dim() == 2 && o.size(0) == R && o.size(1) % 64 == 0, "o: [R, HDp]");
+// The 64 x 32 store-box drain (PR 2) from L <= 256: its larger staging ring takes 8 KiB of the stage ring, which costs the longer pairs (L >= 384).
+template <int C>
+static void launch_wtail(const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& x, const torch::Tensor& wo, torch::Tensor& out,
+                         const __nv_bfloat16* drop, long L, int geo, const float* ob, bool dfirst) {
+  if (WT_DW8 && C == 256 && drop == nullptr && L <= 256) launch_wtail_t<C, 4>(g, o, x, wo, out, drop, L, geo, ob, dfirst);   // eight drain warps (no dropout: the residual rides the MMA)
+  else if (WT_PAIR >= 2 && L <= 256) launch_wtail_t<C, WT_PAIR>(g, o, x, wo, out, drop, L, geo, ob, dfirst);
+  else launch_wtail_t<C, 0>(g, o, x, wo, out, drop, L, geo, ob, dfirst);
+}
+
+// out_: a contiguous [R, C] bf16 tensor (or a view of one: a chunk's rows of a batch's output) to write into, or empty (fresh); it may be
+// x itself (each item reads its own rows / columns of x before it writes them: the dual output's second tail runs in place)
+// ob: the out-projection bias, fp32 [C], or empty; dfirst: the dropout scale indexed by the kernel row's first position (see the kernel)
+torch::Tensor tri_wtail_h(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L, torch::Tensor out_,
+                          bool trans, torch::Tensor ob, bool dfirst, int64_t lr) {
+  TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [Rr, C] bf16");
+  const long R = o.size(0), C = x.size(1);
+  TORCH_CHECK(o.scalar_type() == torch::kBFloat16 && o.is_contiguous() && o.dim() == 2 && o.size(1) % 64 == 0 && R % (L * L) == 0, "o: [R, HDp], R = B L^2");
+  const int geo = rows_geo(trans, L, lr);
+  const long Lr = geo_rows_len(L, geo), Rr = R / (L * L) * Lr * Lr;   // x and the output: the caller's [B, Lr, Lr, C]
+  TORCH_CHECK(x.size(0) == Rr, "x: the caller's B Lr^2 rows");
   TORCH_CHECK(g.scalar_type() == torch::kBFloat16 && g.sizes() == o.sizes() && g.stride(1) == 1 && g.stride(0) % 8 == 0, "g: [R, HDp]");
   TORCH_CHECK(wo.scalar_type() == torch::kBFloat16 && wo.is_contiguous() && wo.size(0) == C && wo.size(1) == o.size(1), "wo: [C, HDp]");
   TORCH_CHECK(R % WBM == 0, "rows % 128");
   const __nv_bfloat16* dp = nullptr;
   if (drop.defined() && drop.numel() > 0) {
-    TORCH_CHECK(drop.scalar_type() == torch::kBFloat16 && drop.is_contiguous() && drop.numel() * L == R * C && R % (L * L) == 0,
-                "drop: [B, L, C] bf16 contiguous");
+    TORCH_CHECK(drop.scalar_type() == torch::kBFloat16 && drop.is_contiguous() && drop.numel() == R / (L * L) * Lr * C,
+                "drop: [B, Lr, C] bf16 contiguous");
     dp = reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>());
   }
-  auto out = torch::empty_like(x);
+  const bool given = out_.defined() && out_.numel() > 0;
+  if (given) TORCH_CHECK(out_.scalar_type() == torch::kBFloat16 && out_.is_contiguous() && out_.numel() == Rr * C && out_.device() == x.device(),
+                         "out: contiguous bf16 with B Lr^2 x C elements");
+  auto out = given ? out_.view({Rr, C}) : torch::empty_like(x);
+  const float* obp = nullptr;
+  if (ob.defined() && ob.numel() > 0) {
+    TORCH_CHECK(ob.scalar_type() == torch::kFloat32 && ob.is_contiguous() && ob.numel() == C && ob.device() == x.device(), "ob: fp32 [C]");
+    obp = ob.data_ptr<float>();
+  }
   switch (C) {
-    case 64: launch_wtail<64>(g, o, x, wo, out, dp, L); break;
-    case 128: launch_wtail<128>(g, o, x, wo, out, dp, L); break;
-    case 192: launch_wtail<192>(g, o, x, wo, out, dp, L); break;
-    case 256: launch_wtail<256>(g, o, x, wo, out, dp, L); break;
-    case 320: launch_wtail<320>(g, o, x, wo, out, dp, L); break;
-    case 384: launch_wtail<384>(g, o, x, wo, out, dp, L); break;
-    case 448: launch_wtail<448>(g, o, x, wo, out, dp, L); break;
-    case 512: launch_wtail<512>(g, o, x, wo, out, dp, L); break;
+    case 64: launch_wtail<64>(g, o, x, wo, out, dp, L, geo, obp, dfirst); break;
+    case 128: launch_wtail<128>(g, o, x, wo, out, dp, L, geo, obp, dfirst); break;
+    case 192: launch_wtail<192>(g, o, x, wo, out, dp, L, geo, obp, dfirst); break;
+    case 256: launch_wtail<256>(g, o, x, wo, out, dp, L, geo, obp, dfirst); break;
+    case 320: launch_wtail<320>(g, o, x, wo, out, dp, L, geo, obp, dfirst); break;
+    case 384: launch_wtail<384>(g, o, x, wo, out, dp, L, geo, obp, dfirst); break;
+    case 448: launch_wtail<448>(g, o, x, wo, out, dp, L, geo, obp, dfirst); break;
+    case 512: launch_wtail<512>(g, o, x, wo, out, dp, L, geo, obp, dfirst); break;
     default: TORCH_CHECK(false, "tri_wtail: C must be a multiple of 64 in 64 .. 512");
   }
   return out;
 }
 
 // ---- fused wide front: x [R, C], LN w / b [C], W [4 HDp + 16, C] bf16 -> (q, k, v, g [R, HDp] bf16, bias [B, NH, L, L] bf16)
-template <int C, int ND>
+template <int C, int ND, bool TR, bool GBIAS>
 static void launch_wfront_nd(const torch::Tensor& x, const torch::Tensor& lw, const torch::Tensor& lb, double eps, const torch::Tensor& W,
-                             long HDp, long NH, const bool* mp, long L, long NBR, std::vector<torch::Tensor>& outs, float2* stp) {
+                             long HDp, long NH, const bool* mp, long L, long NBR, std::vector<torch::Tensor>& outs, float2* stp,
+                             const float* gbp, int bt, int geo, int nt) {
   using T = WF<C, ND>;
-  const long R = x.size(0);
+  const long R = outs[0].size(0);                         // the kernels' rows (whole tiles); x: the caller's (geo)
   auto m2 = [&](const torch::Tensor& t, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw, const char* w) {
     return make_map<2>(t.data_ptr(), {cols, rows}, {ld}, {b0, b1}, sw, w); };
-  CUtensorMap xm = m2(x, C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "x");
+  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "x", L, geo);
   CUtensorMap wm = m2(W, C, W.size(0), C, 64, (uint32_t)(NBR / 2), CU_TENSOR_MAP_SWIZZLE_128B, "W");
   CUtensorMap wb = m2(W, C, W.size(0), C, 64, 8, CU_TENSOR_MAP_SWIZZLE_128B, "Wb");
   CUtensorMap om[4];
-  for (int i = 0; i < 4; ++i) om[i] = m2(outs[i], HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "qkvg");
+  const bool big = WF_BIG && NBR % 64 == 0 && HDp % 64 == 0 && L <= WF_BIG_MAXL;   // the 64 x 32 store box (two slices a round)
+  for (int i = 0; i < 4; ++i) om[i] = big ? m2(outs[i < nt ? i : 0], HDp, R, HDp, 64, 32, CU_TENSOR_MAP_SWIZZLE_128B, "qkvg") : m2(outs[i < nt ? i : 0], HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "qkvg");
   const int ntiles = (int)(R / WBM);
   TORCH_CHECK(ntiles % 2 == 0, "tri_wfront: an even number of 128-row tiles");
   cudaLaunchConfig_t cfg = {};
@@ -1387,32 +1642,48 @@ static void launch_wfront_nd(const torch::Tensor& x, const torch::Tensor& lw, co
   static int ncl[16] = {0};                               // co-resident 2-CTA clusters (the persistent grid must be one wave)
   const int dev = x.device().index();
   if (ncl[dev] == 0) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wfront_sm100<C, ND>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wfront_sm100<C, ND, TR, GBIAS>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM));
     cfg.gridDim = dim3(num_sms(dev) & ~1);
-    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&ncl[dev], reinterpret_cast<const void*>(&tri_wfront_sm100<C, ND>), &cfg));
+    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&ncl[dev], reinterpret_cast<const void*>(&tri_wfront_sm100<C, ND, TR, GBIAS>), &cfg));
     TORCH_CHECK(ncl[dev] >= 1, "tri_wfront: no 2-CTA cluster fits");
   }
   cfg.gridDim = dim3(std::min(2 * ncl[dev], ntiles));
-  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, tri_wfront_sm100<C, ND>, ntiles, (int)L, (int)HDp, (int)NH, (int)NBR, (float)eps, xm, wm, wb,
+  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, tri_wfront_sm100<C, ND, TR, GBIAS>, ntiles, (int)L, geo & ~1, (int)HDp, (int)NH, (int)NBR, (float)eps, xm, wm, wb,
                                     Maps4{{om[0], om[1], om[2], om[3]}}, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
                                     (const float*)lw.data_ptr<float>(), (const float*)lb.data_ptr<float>(), mp,
-                                    reinterpret_cast<__nv_bfloat16*>(outs[4].data_ptr<at::BFloat16>()), stp));
+                                    reinterpret_cast<__nv_bfloat16*>(outs[4].data_ptr<at::BFloat16>()), stp, gbp, bt, nt, big ? 1 : 0));
 }
 
 template <int C>
 static void launch_wfront(const torch::Tensor& x, const torch::Tensor& lw, const torch::Tensor& lb, double eps, const torch::Tensor& W,
-                          long HDp, long NH, const bool* mp, long L, std::vector<torch::Tensor>& outs, float2* stp) {
+                          long HDp, long NH, const bool* mp, long L, std::vector<torch::Tensor>& outs, float2* stp, int geo,
+                          const float* gbp, int bt, int nt) {
+  const bool trans = geo & 1;
   long NBR = 0;                                           // rows per output block: the largest divisor of HDp <= 256, a multiple of 32
   for (long d = 256; d >= 32 && !NBR; d -= 32) if (HDp % d == 0) NBR = d;
-  if (C <= 256 && NBR >= 128) launch_wfront_nd<C, 8>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
-  else launch_wfront_nd<C, 4>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
+  if (gbp != nullptr) {                                   // the gate bias: the four-warp drain (see tri_wfront_sm100)
+    if (trans) launch_wfront_nd<C, 4, true, true>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt, geo, nt);
+    else launch_wfront_nd<C, 4, false, true>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt, geo, nt);
+  } else if (C <= 256 && NBR >= 128) {
+    if constexpr (C <= 256) {                             // (not instantiated where it is never launched: those instances spilled)
+      if (trans) launch_wfront_nd<C, 8, true, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt, geo, nt);
+      else launch_wfront_nd<C, 8, false, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt, geo, nt);
+    }
+  } else {
+    if (trans) launch_wfront_nd<C, 4, true, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt, geo, nt);
+    else launch_wfront_nd<C, 4, false, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt, geo, nt);
+  }
 }
 
+// gb: the gate bias in the padded HDp layout, fp32 [HDp], or empty; bt: the bias orientation (see the header)
 std::vector<torch::Tensor> tri_wfront_h(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps, torch::Tensor W, int64_t NH,
-                                        torch::Tensor mask, int64_t B, int64_t L, torch::Tensor stats) {
-  TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [R, C] bf16");
-  const long R = x.size(0), C = x.size(1);
-  TORCH_CHECK(R == B * L * L && L % WBM == 0, "rows = B*L*L, L % 128");
+                                        torch::Tensor mask, int64_t B, int64_t L, torch::Tensor stats, bool trans, torch::Tensor gb, bool bt,
+                                        int64_t lr, bool nog) {
+  TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [Rr, C] bf16");
+  const long R = B * L * L, C = x.size(1);
+  const int geo = rows_geo(trans, L, lr);
+  const long Lr = geo_rows_len(L, geo);                   // x: the caller's [B, Lr, Lr, C]; L: the kernels' (whole tiles)
+  TORCH_CHECK(x.size(0) == B * Lr * Lr && L % WBM == 0, "x: B Lr^2 rows, L % 128");
   TORCH_CHECK(W.scalar_type() == torch::kBFloat16 && W.is_contiguous() && W.size(1) == C && (W.size(0) - 16) % 256 == 0, "W: [4 HDp + 16, C]");
   const long HDp = (W.size(0) - 16) / 4;
   TORCH_CHECK(HDp % 64 == 0 && HDp <= 512 && NH >= 1 && NH <= 16, "HDp 64 .. 512 (a multiple of 64), heads <= 16");
@@ -1424,48 +1695,97 @@ std::vector<torch::Tensor> tri_wfront_h(torch::Tensor x, torch::Tensor w, torch:
   }
   const bool* mp = nullptr;
   torch::Tensor mk;
-  if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * L, "mask [B, L]"); mp = mk.data_ptr<bool>(); }
+  if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * Lr, "mask [B, Lr]"); mp = mk.data_ptr<bool>(); }
+  const float* gbp = nullptr;
+  if (gb.defined() && gb.numel() > 0) {
+    TORCH_CHECK(gb.scalar_type() == torch::kFloat32 && gb.is_contiguous() && gb.numel() == HDp && gb.device() == x.device(), "gb: fp32 [HDp]");
+    gbp = gb.data_ptr<float>();
+  }
   auto opt = x.options();
   std::vector<torch::Tensor> outs = {torch::empty({R, HDp}, opt), torch::empty({R, HDp}, opt), torch::empty({R, HDp}, opt),
-                                     torch::empty({R, HDp}, opt), torch::empty({B, NH, L, L}, opt)};
+                                     torch::empty({nog ? 0 : R, HDp}, opt), torch::empty({B, NH, L, L}, opt)};
   switch (C) {
-    case 64: launch_wfront<64>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 128: launch_wfront<128>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 192: launch_wfront<192>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 256: launch_wfront<256>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 320: launch_wfront<320>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 384: launch_wfront<384>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 448: launch_wfront<448>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 512: launch_wfront<512>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
+    case 64: launch_wfront<64>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, geo, gbp, bt ? 1 : 0, nog ? 3 : 4); break;
+    case 128: launch_wfront<128>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, geo, gbp, bt ? 1 : 0, nog ? 3 : 4); break;
+    case 192: launch_wfront<192>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, geo, gbp, bt ? 1 : 0, nog ? 3 : 4); break;
+    case 256: launch_wfront<256>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, geo, gbp, bt ? 1 : 0, nog ? 3 : 4); break;
+    case 320: launch_wfront<320>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, geo, gbp, bt ? 1 : 0, nog ? 3 : 4); break;
+    case 384: launch_wfront<384>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, geo, gbp, bt ? 1 : 0, nog ? 3 : 4); break;
+    case 448: launch_wfront<448>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, geo, gbp, bt ? 1 : 0, nog ? 3 : 4); break;
+    case 512: launch_wfront<512>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, geo, gbp, bt ? 1 : 0, nog ? 3 : 4); break;
     default: TORCH_CHECK(false, "tri_wfront: C must be a multiple of 64 in 64 .. 512");
   }
   return outs;
 }
 
 
+// ---- inference tail with the gate projected from x (tailg_sm100.cuh; the front ran with nog): o [R, HDp], x the caller's [Rr, C],
+// wo [C, HDp], wg [HDp, C] (rows 3 HDp .. 4 HDp of the front's W), lnw / lnb fp32 [C], gb fp32 [HDp] / ob fp32 [C] or empty
+torch::Tensor tri_wtailg_h(torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor wg, torch::Tensor lnw, torch::Tensor lnb, double eps,
+                           int64_t L, torch::Tensor out_, bool trans, int64_t lr, torch::Tensor gb, torch::Tensor ob) {
+  TORCH_CHECK(x.dim() == 2 && o.dim() == 2, "x [Rr, C], o [R, HDp]");
+  const long C = x.size(1), HDp = o.size(1);
+  auto lw = lnw.to(torch::kFloat32).contiguous(), lb = lnb.to(torch::kFloat32).contiguous();
+  if (C == 64 && HDp == 64) return tailg::launch<64, 64>(o, x, wo, wg, lw, lb, eps, L, out_, trans, lr, gb, ob);
+  if (C == 64 && HDp == 128) return tailg::launch<64, 128>(o, x, wo, wg, lw, lb, eps, L, out_, trans, lr, gb, ob);
+  TORCH_CHECK(false, "tri_wtailg: (C, HDp) in (64, 64), (64, 128)");
+  return torch::Tensor();
+}
+
 // ---- backward host wrappers
-torch::Tensor tri_scale_rows_h(torch::Tensor dy, torch::Tensor drop, int64_t L) {
+torch::Tensor tri_scale_rows_h(torch::Tensor dy, torch::Tensor drop, int64_t L, bool trans, std::optional<torch::Tensor> xo) {
   TORCH_CHECK(dy.is_cuda() && dy.scalar_type() == torch::kBFloat16 && dy.is_contiguous() && dy.dim() == 2, "dy: [R, C] bf16");
   const long R = dy.size(0), C = dy.size(1);
   TORCH_CHECK(drop.scalar_type() == torch::kBFloat16 && drop.is_contiguous() && drop.numel() * L == R * C && C % 8 == 0, "drop: [B, L, C]");
+  const bool res = xo.has_value() && xo->defined() && xo->numel() > 0;   // out = x + dy o drop (one rounding)
+  torch::Tensor x = res ? *xo : torch::Tensor();
+  if (res) TORCH_CHECK(x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.numel() == R * C && x.device() == dy.device(), "x: like dy");
   auto out = torch::empty_like(dy);
   const long n = R * (C / 8);
   tri_scale_rows<<<(unsigned)((n + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(dy.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()),
-      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), (int)C, (int)L, R);
+      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), (int)C, (int)L, R, trans ? 1 : 0,
+      res ? reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()) : nullptr);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
 
-torch::Tensor tri_db_rows_h(torch::Tensor db, torch::Tensor out, int64_t B, int64_t L) {
+// dy [R, C] bf16, drop [B, L, C] bf16 or empty (no dropout: dys = dy, not written), bias [B, H, S, S] bf16 ->
+// (dys [R, C] bf16 (or dy itself), bias^T * log2e fp32 [B, H, S, S], dbias accumulator fp32 [B, H, S, S] zeroed): one launch
+std::vector<torch::Tensor> tri_bwd_pre_h(torch::Tensor dy, torch::Tensor drop, int64_t L, bool trans, torch::Tensor bias, bool zero) {
+  TORCH_CHECK(dy.is_cuda() && dy.scalar_type() == torch::kBFloat16 && dy.is_contiguous() && dy.dim() == 2, "dy: [R, C] bf16");
+  TORCH_CHECK(bias.scalar_type() == torch::kBFloat16 && bias.is_contiguous() && bias.dim() == 4 && bias.size(2) == bias.size(3) && bias.size(3) % 32 == 0,
+              "bias: [B, H, S, S] bf16, S % 32 == 0");
+  const long R = dy.size(0), C = dy.size(1), S = bias.size(3), BH = bias.size(0) * bias.size(1);
+  const bool dr = drop.defined() && drop.numel() > 0;
+  if (dr) TORCH_CHECK(drop.scalar_type() == torch::kBFloat16 && drop.is_contiguous() && drop.numel() * L == R * C && C % 8 == 0, "drop: [B, L, C]");
+  auto out = dr ? torch::empty_like(dy) : dy;
+  auto bT = torch::empty({bias.size(0), bias.size(1), S, S}, bias.options().dtype(torch::kFloat32));
+  auto db = torch::empty({bias.size(0), bias.size(1), S, S}, bias.options().dtype(torch::kFloat32));
+  const int nsb = dr ? (int)((R * (C / 8) + 255) / 256) : 0;
+  const int nbt = (int)(BH * (S / 32) * (S / 32));
+  const long nz4 = BH * S * S / 4;
+  // zero = false: the dbias buffer is returned unzeroed (the cores write every element since B200 2026-11-17: deterministic slabs)
+  const int nzb = zero ? (int)std::min<long>((nz4 + 255) / 256, 296) : 0;
+  tri_bwd_pre<<<(unsigned)(nsb + nbt + nzb), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<const __nv_bfloat16*>(dy.data_ptr<at::BFloat16>()),
+      dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr,
+      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), (int)C, (int)L, R, trans ? 1 : 0, nsb,
+      reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr<at::BFloat16>()), bT.data_ptr<float>(), (int)S, nbt,
+      reinterpret_cast<float4*>(db.data_ptr<float>()), nz4);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {out, bT, db};
+}
+
+torch::Tensor tri_db_rows_h(torch::Tensor db, torch::Tensor out, int64_t B, int64_t L, bool bt) {
   TORCH_CHECK(db.is_cuda() && db.scalar_type() == torch::kFloat32 && db.is_contiguous() && db.dim() == 4 && db.size(0) == B, "db: fp32 [B, H, L, L]");
   const int H = (int)db.size(1);
   TORCH_CHECK(H <= 64, "heads <= 64");
   const long R = B * L * L;
   TORCH_CHECK(out.scalar_type() == torch::kBFloat16 && out.dim() == 2 && out.size(0) == R && out.size(1) == 64 && out.stride(1) == 1 &&
               out.stride(0) % 8 == 0, "out: [R, 64] bf16 view, dense rows at a 16-byte-multiple stride");
-  tri_db_rows<<<(unsigned)((R + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(db.data_ptr<float>(),
-      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), out.stride(0), H, (int)L, R);
+  tri_db_rows<<<(unsigned)((8 * R + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(db.data_ptr<float>(),
+      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), out.stride(0), H, (int)L, R, bt ? 1 : 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
@@ -1475,52 +1795,73 @@ static long pick_rows(long HDp, long maxn) {             // the largest divisor 
   return 32;
 }
 
-template <int C>
-static void launch_wgbwd(const torch::Tensor& dys, const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& wot, long L,
-                         std::vector<torch::Tensor>& outs) {                      // outs[1] (dg) may be a strided view
+template <int C, bool TR, bool DUAL>
+static void launch_wgbwd_t(const torch::Tensor& dys, const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& wot, long L,
+                           std::vector<torch::Tensor>& outs, int geo) {             // outs[1] (dg) may be a strided view
   using T = WG<C>;
-  const long R = dys.size(0), HDp = g.size(1), NBR = pick_rows(HDp, T::MAXN);
+  const long R = g.size(0), HDp = g.size(1), NBR = pick_rows(HDp, T::MAXN);       // the kernels' rows; dy_s / u: the caller's (geo)
   auto m2 = [&](const torch::Tensor& t, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw, const char* w) {
     return make_map<2>(t.data_ptr(), {cols, rows}, {ld}, {b0, b1}, sw, w); };
-  CUtensorMap am = m2(dys, C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "dy");
-  CUtensorMap wm = m2(wot, C, HDp, C, 64, (uint32_t)NBR, CU_TENSOR_MAP_SWIZZLE_128B, "wo^T");
+  constexpr bool dual = DUAL;
+  CUtensorMap am = make_rows_map(dys.data_ptr(), C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "dy", L, geo);
+  CUtensorMap am2 = make_rows_map(dys.data_ptr(), C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "dy", L, geo ^ 1);
+  CUtensorMap wm = m2(wot, wot.size(1), HDp, wot.size(1), 64, (uint32_t)NBR, CU_TENSOR_MAP_SWIZZLE_128B, "wo^T");
   CUtensorMap dom = m2(outs[0], HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "do");
   CUtensorMap dgm = m2(outs[1], HDp, R, outs[1].stride(0), 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "dg");
-  CUtensorMap um = m2(outs[2], HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "u");
+  CUtensorMap um = make_rows_map(outs[2].data_ptr(), HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "u", L, geo);
   CUtensorMap gm = m2(g, HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "g");
   CUtensorMap omm = m2(o, HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "o");
+  CUtensorMap um2 = make_rows_map((dual ? outs[4] : outs[2]).data_ptr(), HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "u2", L, geo ^ 1);
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wgbwd_sm100<C>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM)); attr = true; }
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wgbwd_sm100<C, TR, DUAL>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM)); attr = true; }
   const int ntiles = (int)(R / WBM);
-  tri_wgbwd_sm100<C><<<std::min(ntiles, num_sms(dys.device().index())), 320, T::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      ntiles, (int)L, (int)HDp, (int)NBR, am, wm, dom, dgm, um, gm, omm, outs[3].data_ptr<float>());
+  tri_wgbwd_sm100<C, TR, DUAL><<<std::min(ntiles, num_sms(dys.device().index())), 320, T::SMEM, at::cuda::getCurrentCUDAStream()>>>(
+      ntiles, (int)L, geo & ~1, (int)HDp, (int)NBR, am, am2, wm, dom, dgm, um, gm, omm, um2, outs[3].data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// dy_s [R, C], g / o [R, HDp], wo^T [HDp, C] -> (do, dg, u [R, HDp] bf16, delta fp32 [B, L, HDp/32, L])
+template <int C>
+static void launch_wgbwd(const torch::Tensor& dys, const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& wot, long L,
+                         std::vector<torch::Tensor>& outs, int geo) {
+  const bool dual = wot.size(1) == 2 * C, trans = geo & 1;
+  if (dual) {
+    if (trans) launch_wgbwd_t<C, true, true>(dys, g, o, wot, L, outs, geo);
+    else launch_wgbwd_t<C, false, true>(dys, g, o, wot, L, outs, geo);
+  } else {
+    if (trans) launch_wgbwd_t<C, true, false>(dys, g, o, wot, L, outs, geo);
+    else launch_wgbwd_t<C, false, false>(dys, g, o, wot, L, outs, geo);
+  }
+}
+
+// dy_s [R, C], g / o [R, HDp], wo^T [HDp, C] (or [HDp, 2C] = [Wo^T | Wo2^T]: Chai-1's dual output, the second update transposed)
+// -> (do, dg, u [R, HDp] bf16, delta fp32 [B, L, HDp/32, L] (per 32-channel slice), u2 [R, HDp] in the other orientation (dual) or empty)
 std::vector<torch::Tensor> tri_wgbwd_h(torch::Tensor dys, torch::Tensor g, torch::Tensor o, torch::Tensor wot, torch::Tensor dg_out,
-                                       int64_t B, int64_t L) {
-  TORCH_CHECK(dys.is_cuda() && dys.scalar_type() == torch::kBFloat16 && dys.is_contiguous() && dys.dim() == 2, "dy_s: [R, C] bf16");
-  const long R = dys.size(0), C = dys.size(1);
-  TORCH_CHECK(R == B * L * L && R % WBM == 0, "rows = B*L*L, a multiple of 128");
+                                       int64_t B, int64_t L, bool trans, int64_t lr) {
+  TORCH_CHECK(dys.is_cuda() && dys.scalar_type() == torch::kBFloat16 && dys.is_contiguous() && dys.dim() == 2, "dy_s: [Rr, C] bf16");
+  const long R = B * L * L, C = dys.size(1);
+  const int geo = rows_geo(trans, L, lr);
+  const long Lr = geo_rows_len(L, geo), Rr = B * Lr * Lr;   // dy_s and u: the caller's [B, Lr, Lr, .]
+  TORCH_CHECK(dys.size(0) == Rr && R % WBM == 0, "dy_s: B Lr^2 rows; B L^2 a multiple of 128");
   for (const auto* t : {&g, &o}) TORCH_CHECK(t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->dim() == 2 && t->size(0) == R, "g / o: [R, HDp]");
   const long HDp = g.size(1);
   TORCH_CHECK(o.size(1) == HDp && HDp % 64 == 0 && HDp <= 512, "HDp 64 .. 512");
-  TORCH_CHECK(wot.scalar_type() == torch::kBFloat16 && wot.is_contiguous() && wot.size(0) == HDp && wot.size(1) == C, "wo^T: [HDp, C]");
+  TORCH_CHECK(wot.scalar_type() == torch::kBFloat16 && wot.is_contiguous() && wot.size(0) == HDp && (wot.size(1) == C || wot.size(1) == 2 * C),
+              "wo^T: [HDp, C] or [HDp, 2C]");
   auto opt = g.options();
   TORCH_CHECK(dg_out.scalar_type() == torch::kBFloat16 && dg_out.dim() == 2 && dg_out.size(0) == R && dg_out.size(1) == HDp &&
               dg_out.stride(1) == 1 && dg_out.stride(0) % 8 == 0, "dg_out: [R, HDp] bf16 view");
-  std::vector<torch::Tensor> outs = {torch::empty({R, HDp}, opt), dg_out, torch::empty({R, HDp}, opt),
-                                     torch::empty({B, L, HDp / 32, L}, opt.dtype(torch::kFloat32))};
+  std::vector<torch::Tensor> outs = {torch::empty({R, HDp}, opt), dg_out, torch::empty({Rr, HDp}, opt),
+                                     torch::empty({B, L, HDp / 32, L}, opt.dtype(torch::kFloat32)),
+                                     wot.size(1) == 2 * C ? torch::empty({Rr, HDp}, opt) : torch::empty({0}, opt)};
   switch (C) {
-    case 64: launch_wgbwd<64>(dys, g, o, wot, L, outs); break;
-    case 128: launch_wgbwd<128>(dys, g, o, wot, L, outs); break;
-    case 192: launch_wgbwd<192>(dys, g, o, wot, L, outs); break;
-    case 256: launch_wgbwd<256>(dys, g, o, wot, L, outs); break;
-    case 320: launch_wgbwd<320>(dys, g, o, wot, L, outs); break;
-    case 384: launch_wgbwd<384>(dys, g, o, wot, L, outs); break;
-    case 448: launch_wgbwd<448>(dys, g, o, wot, L, outs); break;
-    case 512: launch_wgbwd<512>(dys, g, o, wot, L, outs); break;
+    case 64: launch_wgbwd<64>(dys, g, o, wot, L, outs, geo); break;
+    case 128: launch_wgbwd<128>(dys, g, o, wot, L, outs, geo); break;
+    case 192: launch_wgbwd<192>(dys, g, o, wot, L, outs, geo); break;
+    case 256: launch_wgbwd<256>(dys, g, o, wot, L, outs, geo); break;
+    case 320: launch_wgbwd<320>(dys, g, o, wot, L, outs, geo); break;
+    case 384: launch_wgbwd<384>(dys, g, o, wot, L, outs, geo); break;
+    case 448: launch_wgbwd<448>(dys, g, o, wot, L, outs, geo); break;
+    case 512: launch_wgbwd<512>(dys, g, o, wot, L, outs, geo); break;
     default: TORCH_CHECK(false, "tri_wgbwd: C must be a multiple of 64 in 64 .. 512");
   }
   return outs;
@@ -1528,34 +1869,36 @@ std::vector<torch::Tensor> tri_wgbwd_h(torch::Tensor dys, torch::Tensor g, torch
 
 template <int C>
 static void launch_whbwd(const torch::Tensor& Dall, const torch::Tensor& x, const torch::Tensor& dy, const torch::Tensor& lw,
-                         const torch::Tensor& stats, const torch::Tensor& wt, torch::Tensor& dx, torch::Tensor& xh) {
+                         const torch::Tensor& stats, const torch::Tensor& wt, torch::Tensor& dx, torch::Tensor& xh, long L, int geo) {
   using T = WH<C>;
-  const long R = x.size(0), HDp = (Dall.size(1) - 64) / 4;
+  const long R = Dall.size(0), HDp = (Dall.size(1) - 64) / 4;   // the kernels' rows; x / dy / dx: the caller's (geo)
   auto m2 = [&](const torch::Tensor& t, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw, const char* w) {
     return make_map<2>(t.data_ptr(), {cols, rows}, {ld}, {b0, b1}, sw, w); };
   CUtensorMap am = m2(Dall, Dall.size(1), R, Dall.size(1), 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "D");
   CUtensorMap wm = m2(wt, wt.size(1), C, wt.size(1), 64, T::NNR, CU_TENSOR_MAP_SWIZZLE_128B, "W^T");
-  CUtensorMap dxm = m2(dx, C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "dx");
+  CUtensorMap dxm = make_rows_map(dx.data_ptr(), C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "dx", L, geo);
   CUtensorMap xhm = m2(xh, C + 64, R, C + 64, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "xhat");
-  CUtensorMap xm = m2(x, C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "x");
-  CUtensorMap dym = m2(dy, C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "dy");
+  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "x", L, geo);
+  CUtensorMap dym = make_rows_map(dy.data_ptr(), C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "dy", L, geo);
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_whbwd_sm100<C>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM)); attr = true; }
   const int ntiles = (int)(R / WBM);
   tri_whbwd_sm100<C><<<std::min(ntiles, num_sms(x.device().index())), (2 + T::ND) * 32, T::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      ntiles, (int)HDp, am, wm, dxm, xhm, xm, dym, reinterpret_cast<const float2*>(stats.data_ptr<float>()), lw.data_ptr<float>());
+      ntiles, (int)HDp, (int)L, geo, am, wm, dxm, xhm, xm, dym, reinterpret_cast<const float2*>(stats.data_ptr<float>()), lw.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // D = [dq | dk | dv | dg | db rows] [R, 4 HDp + 64] bf16; x, dy [R, C]; LN gamma [C]; W^T = [Wq; Wk; Wv; Wg; Wb64]^T [C, 4 HDp + 64]
 // -> (dx = dy + LN-backward(D . W) [R, C] bf16, xhat | 1 | 0.. [R, C + 64] bf16)
 std::vector<torch::Tensor> tri_whbwd_h(torch::Tensor Dall, torch::Tensor x, torch::Tensor dy, torch::Tensor lnw, torch::Tensor stats,
-                                       torch::Tensor wt) {
-  TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [R, C] bf16");
-  const long R = x.size(0), C = x.size(1);
-  TORCH_CHECK(R % WBM == 0, "rows % 128");
+                                       torch::Tensor wt, int64_t L, bool trans, int64_t lr) {
+  TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [Rr, C] bf16");
+  const long R = Dall.size(0), C = x.size(1);
+  const int geo = rows_geo(trans, L, lr);
+  const long Lr = geo_rows_len(L, geo);
+  TORCH_CHECK(R % WBM == 0 && R % (L * L) == 0 && x.size(0) == R / (L * L) * Lr * Lr, "rows % 128; x: the caller's B Lr^2 rows");
   TORCH_CHECK(dy.sizes() == x.sizes() && dy.is_contiguous() && dy.scalar_type() == torch::kBFloat16, "dy: like x");
-  TORCH_CHECK(Dall.scalar_type() == torch::kBFloat16 && Dall.is_contiguous() && Dall.dim() == 2 && Dall.size(0) == R && (Dall.size(1) - 64) % 256 == 0,
+  TORCH_CHECK(Dall.scalar_type() == torch::kBFloat16 && Dall.is_contiguous() && Dall.dim() == 2 && (Dall.size(1) - 64) % 256 == 0,
               "D: [R, 4 HDp + 64] bf16");
   const long HDp = (Dall.size(1) - 64) / 4;
   TORCH_CHECK(HDp >= 64 && HDp <= 512, "HDp 64 .. 512");
@@ -1565,14 +1908,14 @@ std::vector<torch::Tensor> tri_whbwd_h(torch::Tensor Dall, torch::Tensor x, torc
   TORCH_CHECK(stats.scalar_type() == torch::kFloat32 && stats.is_contiguous() && stats.numel() == 2 * R, "stats: fp32 [R, 2] (the forward's)");
   auto dx = torch::empty_like(x), xh = torch::empty({R, C + 64}, x.options());
   switch (C) {
-    case 64: launch_whbwd<64>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 128: launch_whbwd<128>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 192: launch_whbwd<192>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 256: launch_whbwd<256>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 320: launch_whbwd<320>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 384: launch_whbwd<384>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 448: launch_whbwd<448>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 512: launch_whbwd<512>(Dall, x, dy, lw, stats, wt, dx, xh); break;
+    case 64: launch_whbwd<64>(Dall, x, dy, lw, stats, wt, dx, xh, L, geo); break;
+    case 128: launch_whbwd<128>(Dall, x, dy, lw, stats, wt, dx, xh, L, geo); break;
+    case 192: launch_whbwd<192>(Dall, x, dy, lw, stats, wt, dx, xh, L, geo); break;
+    case 256: launch_whbwd<256>(Dall, x, dy, lw, stats, wt, dx, xh, L, geo); break;
+    case 320: launch_whbwd<320>(Dall, x, dy, lw, stats, wt, dx, xh, L, geo); break;
+    case 384: launch_whbwd<384>(Dall, x, dy, lw, stats, wt, dx, xh, L, geo); break;
+    case 448: launch_whbwd<448>(Dall, x, dy, lw, stats, wt, dx, xh, L, geo); break;
+    case 512: launch_whbwd<512>(Dall, x, dy, lw, stats, wt, dx, xh, L, geo); break;
     default: TORCH_CHECK(false, "tri_whbwd: C must be a multiple of 64 in 64 .. 512");
   }
   return {dx, xh};
@@ -1587,7 +1930,8 @@ std::vector<torch::Tensor> tri_wfinish_h(torch::Tensor G, torch::Tensor wcat, to
   TORCH_CHECK(C % 32 == 0 && wcat.scalar_type() == torch::kBFloat16 && wcat.is_contiguous() && wcat.size(0) == 4 * HDp + 16 && wcat.size(1) == C,
               "wcat: [4 HDp + 16, C] bf16");
   TORCH_CHECK(dwo.scalar_type() == torch::kFloat32 && dwo.is_contiguous() && dwo.size(0) == C && dwo.size(1) == HDp, "dWo: fp32 [C, HDp]");
-  TORCH_CHECK(NH * 32 == HDp && (hd == 16 || hd == 32), "heads x 32 = HDp, head dim 16 / 32");
+  TORCH_CHECK((NH * 32 == HDp && (hd == 16 || hd == 32)) || (NH * 64 == HDp && hd == 64) || (NH * 128 == HDp && (hd == 96 || hd == 128)),
+              "heads x 32 (head dim 16 / 32), x 64 or x 128 (head dim 96 / 128) = HDp");
   auto gam = lnw.to(torch::kFloat32).contiguous(), bet = lnb.to(torch::kFloat32).contiguous();
   auto opt = G.options().dtype(fp32_out ? torch::kFloat32 : torch::kBFloat16);
   auto dw = torch::empty({4, HD, C}, opt), dwb = torch::empty({NH, C}, opt), dwou = torch::empty({C, HD}, opt);
@@ -1611,21 +1955,124 @@ std::vector<torch::Tensor> tri_wfinish_h(torch::Tensor G, torch::Tensor wcat, to
   return {dw, dwb, dwou, dgb};
 }
 
+// ---- the wide path's weight packs in one launch (B200 2026-11-17).  The pack was a dozen and a half torch casts / fills / cats /
+// transposes (`b200_triattn.pack_wide_weights`), each its own launch: a training capture replays them every step, ~50 us of a
+// 140-170 us step at L128.  Outputs (bf16, HDp = heads x slot, a head's channels beyond `hd` zero):
+//   wcat [4 HDp + 16, C] = [Wq; Wk; Wv; Wg; Wb (16 rows)]   wo_p [C, HDp] = Wo   wo_t [HDp, C (2 C: | Wo2^T)] = Wo^T
+//   wall_t [C, 4 HDp + 64] = [Wq; Wk; Wv; Wg; Wb (64 rows)]^T   wo2_p [C, HDp] = Wo2 (the dual output's, else empty)
+// One element a thread over the outputs laid end to end; the casts round as torch's (round to nearest even).
+template <typename T> struct WPackArgs {
+  const T* w[4];              // Wq, Wk, Wv, Wg  [NH hd, C]
+  const T* wb;                // [NH, C]
+  const T* wo;                // [C, NH hd]
+  const T* wo2;               // [C, NH hd] or nullptr
+  __nv_bfloat16 *wcat, *wo_p, *wo_t, *wall_t, *wo2_p;
+  int C, NH, hd, S, HDp;
+};
+__device__ __forceinline__ float wp_f(float v) { return v; }
+__device__ __forceinline__ float wp_f(__nv_bfloat16 v) { return __bfloat162float(v); }
+template <typename T>
+__global__ void __launch_bounds__(256) tri_wpack_k(const WPackArgs<T> a, long n0, long n1, long n2, long n3, long n4) {
+  long i = (long)blockIdx.x * 256 + threadIdx.x;
+  const int C = a.C, S = a.S, HDp = a.HDp, hd = a.hd, NH = a.NH;
+  // a projection weight's padded row r (head h, channel ch) at column c; the bias projection's row i
+  auto proj = [&](int r, int c) -> float {
+    const int t = r / HDp, rr = r % HDp, h = rr / S, ch = rr % S;
+    return ch < hd ? wp_f(a.w[t][(long)(h * hd + ch) * C + c]) : 0.f;
+  };
+  auto bias = [&](int i2, int c) -> float { return i2 < NH ? wp_f(a.wb[(long)i2 * C + c]) : 0.f; };
+  auto outp = [&](const T* wo, int c, int k) -> float {
+    const int h = k / S, ch = k % S;
+    return ch < hd ? wp_f(wo[(long)c * (NH * hd) + h * hd + ch]) : 0.f;
+  };
+  if (i < n0) {                                            // wcat [4 HDp + 16, C]
+    const int r = (int)(i / C), c = (int)(i % C);
+    a.wcat[i] = __float2bfloat16(r < 4 * HDp ? proj(r, c) : bias(r - 4 * HDp, c));
+    return;
+  }
+  i -= n0;
+  if (i < n1) { a.wo_p[i] = __float2bfloat16(outp(a.wo, (int)(i / HDp), (int)(i % HDp))); return; }   // wo_p [C, HDp]
+  i -= n1;
+  if (i < n2) {                                            // wo_t [HDp, C] or [HDp, 2 C]
+    const int W = a.wo2 != nullptr ? 2 * C : C, k = (int)(i / W), c = (int)(i % W);
+    a.wo_t[i] = __float2bfloat16(c < C ? outp(a.wo, c, k) : outp(a.wo2, c - C, k));
+    return;
+  }
+  i -= n2;
+  if (i < n3) {                                            // wall_t [C, 4 HDp + 64]
+    const int W = 4 * HDp + 64, c = (int)(i / W), r = (int)(i % W);
+    a.wall_t[i] = __float2bfloat16(r < 4 * HDp ? proj(r, c) : bias(r - 4 * HDp, c));
+    return;
+  }
+  i -= n3;
+  if (i < n4) a.wo2_p[i] = __float2bfloat16(outp(a.wo2, (int)(i / HDp), (int)(i % HDp)));              // wo2_p [C, HDp]
+}
+template <typename T>
+static void launch_wpack(const std::vector<torch::Tensor>& w, torch::Tensor wb, torch::Tensor wo, torch::Tensor wo2, bool dual,
+                         std::vector<torch::Tensor>& out, int NH, int hd, int S) {
+  WPackArgs<T> a;
+  auto src = [](const torch::Tensor& t) { return reinterpret_cast<const T*>(t.data_ptr()); };
+  auto dst = [](torch::Tensor& t) { return reinterpret_cast<__nv_bfloat16*>(t.data_ptr<at::BFloat16>()); };
+  for (int i = 0; i < 4; ++i) a.w[i] = src(w[i]);
+  a.wb = src(wb); a.wo = src(wo); a.wo2 = dual ? src(wo2) : nullptr;
+  a.wcat = dst(out[0]); a.wo_p = dst(out[1]); a.wo_t = dst(out[2]); a.wall_t = dst(out[3]); a.wo2_p = dual ? dst(out[4]) : nullptr;
+  a.C = (int)wo.size(0); a.NH = NH; a.hd = hd; a.S = S; a.HDp = NH * S;
+  const long n0 = out[0].numel(), n1 = out[1].numel(), n2 = out[2].numel(), n3 = out[3].numel(), n4 = dual ? out[4].numel() : 0;
+  const long n = n0 + n1 + n2 + n3 + n4;
+  tri_wpack_k<T><<<(unsigned)((n + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(a, n0, n1, n2, n3, n4);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+// (wcat, wo_p, wo_t, wall_t, wo2_p) from the module's weights (all fp32 or all bf16, contiguous); S = the head's slot (32 / 64 / 128)
+std::vector<torch::Tensor> tri_wpack_h(torch::Tensor wq, torch::Tensor wk, torch::Tensor wv, torch::Tensor wg, torch::Tensor wb,
+                                       torch::Tensor wo, torch::Tensor wo2, int64_t S) {
+  const auto dt = wq.scalar_type();
+  TORCH_CHECK(wq.is_cuda() && (dt == torch::kFloat32 || dt == torch::kBFloat16) && wq.dim() == 2 && wb.dim() == 2, "wq: [NH hd, C] fp32 / bf16");
+  const long C = wq.size(1), NH = wb.size(0), HD = wq.size(0), hd = HD / NH;
+  TORCH_CHECK(HD % NH == 0 && hd <= S && NH <= 16, "heads");
+  const bool dual = wo2.defined() && wo2.numel() > 0;
+  std::vector<torch::Tensor> ws = {wq, wk, wv, wg};
+  for (auto& t : ws) TORCH_CHECK(t.scalar_type() == dt && t.is_contiguous() && t.size(0) == HD && t.size(1) == C && t.device() == wq.device(), "projection weights: [NH hd, C], one dtype");
+  TORCH_CHECK(wb.scalar_type() == dt && wb.is_contiguous() && wb.size(1) == C && wb.device() == wq.device(), "wb: [NH, C]");
+  TORCH_CHECK(wo.scalar_type() == dt && wo.is_contiguous() && wo.dim() == 2 && wo.size(0) == C && wo.size(1) == HD && wo.device() == wq.device(), "wo: [C, NH hd]");
+  if (dual) TORCH_CHECK(wo2.scalar_type() == dt && wo2.is_contiguous() && wo2.sizes() == wo.sizes() && wo2.device() == wq.device(), "wo2: like wo");
+  const long HDp = NH * S;
+  auto opt = wq.options().dtype(torch::kBFloat16);
+  std::vector<torch::Tensor> out = {torch::empty({4 * HDp + 16, C}, opt), torch::empty({C, HDp}, opt), torch::empty({HDp, dual ? 2 * C : C}, opt),
+                                    torch::empty({C, 4 * HDp + 64}, opt), dual ? torch::empty({C, HDp}, opt) : torch::empty({0}, opt)};
+  if (dt == torch::kFloat32) launch_wpack<float>(ws, wb, wo, wo2, dual, out, (int)NH, (int)hd, (int)S);
+  else launch_wpack<__nv_bfloat16>(ws, wb, wo, wo2, dual, out, (int)NH, (int)hd, (int)S);
+  return out;
+}
+torch::Tensor tri_wtl_read() {
+  auto t = torch::empty({2, 64}, torch::dtype(torch::kInt64));
+  C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr<int64_t>(), g_tl, sizeof(long long) * 2 * 64));
+  return t;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("tri_scale_rows", &tri_scale_rows_h, "dy o drop[b, j, :]", py::arg("dy"), py::arg("drop"), py::arg("L"));
+  m.def("tri_wtl_read", &tri_wtl_read);
+  m.def("tri_wpack", &tri_wpack_h, "the wide path's weight packs in one launch: (wcat, wo_p, wo_t, wall_t, wo2_p)", py::arg("wq"), py::arg("wk"), py::arg("wv"),
+        py::arg("wg"), py::arg("wb"), py::arg("wo"), py::arg("wo2"), py::arg("S"));
+  m.def("tri_scale_rows", &tri_scale_rows_h, "(x +) dy o drop[b, j, :]", py::arg("dy"), py::arg("drop"), py::arg("L"), py::arg("trans"),
+        py::arg("x") = py::none());
+  m.def("tri_bwd_pre", &tri_bwd_pre_h, "the backward set-up in one launch: (dy o drop, bias^T * log2e fp32, zeroed dbias fp32)", py::arg("dy"),
+        py::arg("drop"), py::arg("L"), py::arg("trans"), py::arg("bias"), py::arg("zero") = true);
   m.def("tri_db_rows", &tri_db_rows_h, "dbias [B, H, L, L] fp32 -> rows [R, 64] bf16 (into a view)", py::arg("db"), py::arg("out"),
-        py::arg("B"), py::arg("L"));
+        py::arg("B"), py::arg("L"), py::arg("bt"));
   m.def("tri_wgbwd", &tri_wgbwd_h, "wide gate backward: (do, dg, u, delta); dg into a view", py::arg("dys"), py::arg("g"), py::arg("o"),
-        py::arg("wot"), py::arg("dg_out"), py::arg("B"), py::arg("L"));
+        py::arg("wot"), py::arg("dg_out"), py::arg("B"), py::arg("L"), py::arg("trans"), py::arg("lr") = 0);
   m.def("tri_whbwd", &tri_whbwd_h, "wide head backward: (dx, xhat | 1)", py::arg("D"), py::arg("x"), py::arg("dy"), py::arg("lnw"),
-        py::arg("stats"), py::arg("wt"));
+        py::arg("stats"), py::arg("wt"), py::arg("L"), py::arg("trans"), py::arg("lr") = 0);
   m.def("tri_wfinish", &tri_wfinish_h, "wide parameter gradients from G = D^T [xhat | 1]", py::arg("G"), py::arg("wcat"), py::arg("lnw"),
         py::arg("lnb"), py::arg("dwo"), py::arg("NH"), py::arg("hd"), py::arg("fp32_out"));
   m.def("tri_wfront", &tri_wfront_h, "fused LN + [q | k | v | g | bias] projections for any width",
         py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("W"), py::arg("NH"), py::arg("mask"), py::arg("B"), py::arg("L"),
-        py::arg("stats"));
+        py::arg("stats"), py::arg("trans"), py::arg("gb"), py::arg("bt"), py::arg("lr") = 0, py::arg("nog") = false);
+  m.def("tri_wtailg", &tri_wtailg_h, "inference tail, the gate projected from x: x + (sigmoid(LN(x) . Wg^T [+ gb]) o o) . Wo^T [+ bo]",
+        py::arg("o"), py::arg("x"), py::arg("wo"), py::arg("wg"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("L"), py::arg("out"),
+        py::arg("trans"), py::arg("lr"), py::arg("gb"), py::arg("ob"));
   m.def("tri_wtail", &tri_wtail_h, "fused x + (sigmoid(g) o o) . Wo^T for any width", py::arg("g"), py::arg("o"), py::arg("x"), py::arg("wo"),
-        py::arg("drop"), py::arg("L"));
+        py::arg("drop"), py::arg("L"), py::arg("out"), py::arg("trans"), py::arg("ob"), py::arg("dfirst") = false, py::arg("lr") = 0);
   m.def("tri_ln_rows", &tri_ln_rows_h, "LayerNorm over C (64 .. 512) rows: bf16 -> bf16", py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("xcopy"));
   m.def("tri_bias_heads", &tri_bias_heads_h, "bias columns of the projection -> head-major masked bias [B, NH, L, L]",
         py::arg("P"), py::arg("cb"), py::arg("NH"), py::arg("mask"), py::arg("B"), py::arg("L"));

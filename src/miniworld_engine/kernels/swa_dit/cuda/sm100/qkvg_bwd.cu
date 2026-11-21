@@ -16,6 +16,9 @@
 #include "sm100.cuh"
 #include <type_traits>
 using namespace s100;
+#ifndef WPRE
+#define WPRE 0  // 1 (B200 round 3 part 8): the weight forms are complete before this kernel starts -> load them before griddepcontrol.wait
+#endif
 
 constexpr int C = 128, D = 32, NSMAX = 12, UPT = 8;
 constexpr int SLOT = 16384, HB = 4096, KBLK = 8192;                  // [64 rows][128 ch] tile: 2 x [64][64] SW128 / 4 heads x [64][32] SW64
@@ -56,7 +59,13 @@ struct RingPos {
   DEVI void get(int u, int ns, int& s, uint32_t& ph) const { s = b + u; ph = p; if (s >= ns) { s -= ns; ph ^= 1u; } }
   DEVI void next(int ns) { b += UPT; if (b >= ns) { b -= ns; p ^= 1u; } }
 };
-DEVI void red1(float* p, float v) { asm volatile("red.global.add.f32 [%0], %1;" :: "l"(p), "f"(v) : "memory"); }
+#ifndef DMOD_STORE
+#define DMOD_STORE 0  // 1 (B200 2026-11-17): one writer per dmod element (A <= SP: a tile holds every augment of its rows) -> a plain store, no zeroed dmod
+#endif
+DEVI void red1(float* p, float v) {
+  if (DMOD_STORE) *p = v;
+  else asm volatile("red.global.add.f32 [%0], %1;" :: "l"(p), "f"(v) : "memory");
+}
 
 // v[2 j] / v[2 j + 1] = two per-row quantities of row j (32 rows) held by every lane -> lane l returns their sums over the warp for row l
 DEVI void rscatter64(float (&v)[64], int lane, float& o0, float& o1) {
@@ -104,6 +113,10 @@ swa_qkvg_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+#if !WPRE
+  pdl_wait();  // programmatic dependent launch (2026-11-17): the setup above overlaps the previous kernel; every global access is below
+  pdl_launch();
+#endif
   const uint32_t tmem = B.tmem;
   if (warp >= 4) {                                                       // W^T -> TMEM (A operand): warpgroup w writes outs 256 w ..
     const int wg = (warp - 4) >> 2, lb = (warp & 3) * 32, c = lb + lane;
@@ -120,6 +133,10 @@ swa_qkvg_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+#if WPRE  // B200 round 3 part 8: the weights (made at the head of the forward, wpack_bf16.cu) were read above, before the wait
+  pdl_wait();
+  pdl_launch();
+#endif
   if (tid == 0 && TRACE && blockIdx.x == 0) TRb[24 * 48] = clock64();
 
   if (warp == 0) {
@@ -294,8 +311,9 @@ swa_qkvg_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
 #pragma unroll
     for (int k = 0; k < 8; ++k) xo[k] = (cch ^ (uint32_t)k) << 4;
     // final phase: one channel c per thread (its TMEM lane), rows 32 wg .. 32 wg + 31 (TMEM columns of dx^T)
-    auto fin = [&](int T, auto at8c) {
-      constexpr bool AT8 = decltype(at8c)::value;
+    auto fin = [&](int T, auto modec) {
+      constexpr int MODE = decltype(modec)::value;                       // 1: AT == 8; 2: one augment, 64-row tiles (A = 1); 0: generic
+      constexpr bool AT8 = MODE == 1, A1 = MODE == 2;
       int b, a0, s0; coords(T, b, a0, s0);
       const int xb = T & 1; int slQ, slD1; uint32_t phQ, phD1; rrp.get(U_Q, NS, slQ, phQ); rrp.get(U_DQ1, NS, slD1, phD1);
       const uint32_t ax = O_AUX + (T & 1) * AUXST;
@@ -389,6 +407,51 @@ swa_qkvg_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
         for (int k = 0; k < 8; ++k)
           if ((sok >> k) & 1u) { float* dm = DMOD + ((size_t)b * S + s0 + k) * (6 * C) + c; red1(dm, ash[k]); red1(dm + C, asc[k]); }
         if (tl) TR(T, 41);
+      } else if constexpr (A1) {
+        // one augment on 64-row tiles (SP = 1, AT = 64; B200 round 3 part 8, master training of one sample): rows 32 wg + j are the atoms
+        // s0 + 32 wg + j -- the AT8 form with the scale per row and the modulation gradient stored per row (one writer per element), in
+        // place of the generic path's row-at-a-time loop (a TMEM load, a wait and two butterflies per row: 22 us of a 1024-row step)
+        {
+          uint32_t dv[32];
+          tmem_ld32(tdx, dv);
+          float v[64];
+#pragma unroll
+          for (int j = 0; j < 32; ++j) {
+            const float qv = lds_bf16(qa + j * 128 + xo[j & 7]);
+            v[2 * j] = qv * qv; v[2 * j + 1] = qv * (1.f + scl(32 * wg + j));
+          }
+          tmem_wait_ld();
+#pragma unroll
+          for (int j = 0; j < 32; ++j) v[2 * j + 1] *= __uint_as_float(dv[j]);
+          float o0, o1;
+          rscatter64(v, lane, o0, o1);
+          red[(wg * 4 + qw) * 32 + lane] = make_float2(o0, o1);
+        }
+        exchange();
+        {
+          uint32_t dv[32];
+          tmem_ld32(tdx, dv);
+          const float4* rp = reinterpret_cast<const float4*>(rs + wg * 32);
+          float qa_[32], d1a_[32];
+#pragma unroll
+          for (int j = 0; j < 32; ++j) { qa_[j] = lds_bf16(qa + j * 128 + xo[j & 7]); d1a_[j] = lds_bf16(d1a + j * 128 + xo[j & 7]); }
+          tmem_wait_ld();
+          float* dm = DMOD + ((size_t)b * S + s0 + 32 * wg) * (6 * C) + c;
+#pragma unroll
+          for (int j2 = 0; j2 < 16; ++j2) {
+            const float4 r2 = rp[j2];
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+              const int j = 2 * j2 + e;
+              const float rstd = e ? r2.z : r2.x, s2 = e ? r2.w : r2.y;
+              const float qv = qa_[j], d1 = d1a_[j];
+              const float dx = __uint_as_float(dv[j]), xh = qv * rstd, dxh = dx * (1.f + scl(32 * wg + j));
+              sts_bf16(d1a + j * 128 + xo[j & 7], d1 + rstd * (dxh - xh * s2));
+              red1(dm + (size_t)j * (6 * C), dx); red1(dm + (size_t)j * (6 * C) + C, dx * xh);
+            }
+          }
+        }
+        release();
       } else {
         // generic AT: one row at a time (rare training shapes, A < 8): warp sums by butterfly, per-row red.add of the modulation gradient
 #pragma unroll 1
@@ -428,7 +491,9 @@ swa_qkvg_bwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
       mbar_wait_h(&B.auxfull[T & 1], (T >> 1) & 1);
       qk_phase(T, U_PQ, U_DQH);
       qk_phase(T, U_PK, U_DKH);
-      if (AT == 8) fin(T, std::true_type{}); else fin(T, std::false_type{});
+      if (AT == 8) fin(T, std::integral_constant<int, 1>{});
+      else if (AT == 64 && SP == 1) fin(T, std::integral_constant<int, 2>{});
+      else fin(T, std::integral_constant<int, 0>{});
       rrp.next(NS);
     }
   }

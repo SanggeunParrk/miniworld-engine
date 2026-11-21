@@ -119,17 +119,56 @@ def _pool_atoms_bwd_op(
     return ext().pool_atoms_bwd(gout, x, skey, perm, w, idx.shape[1])
 
 
+def _pool_atoms_train_fake(x, idx, gather_mask, atom_mask):
+    """[out [S, T, C] (x's dtype), count [Q] int32]."""
+    return [_pool_atoms_fake(x, idx, gather_mask, atom_mask), torch.empty(x.shape[1], dtype=torch.int32, device=x.device)]
+
+
+@opaque(fake=_pool_atoms_train_fake, name="sampler_ops_pool_atoms_train_sm100")
+def _pool_atoms_train_op(x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor) -> list[torch.Tensor]:
+    """B200 (``sampler_ops_sm100.cu``): the pooling forward that also zeroes the sort-free backward's per-row slot counters."""
+    from miniworld_engine.kernels.sampler_ops.cuda.sm80 import device_ext as ext
+
+    out, count = ext().pool_atoms_train(x, idx, gather_mask, atom_mask, True)
+    return [out, count]
+
+
+@opaque(fake=_pool_atoms_bwd_fake, name="sampler_ops_pool_atoms_bwd_sm100", mutates_args=("count",))
+def _pool_atoms_bwd_b200_op(
+    gout: torch.Tensor, x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor, count: torch.Tensor
+) -> torch.Tensor:
+    """B200: d out / d x without a sort -- the slots bucketed by row (``count`` from the forward), each row's slots added in slot order (the
+    stable sort's order: the H100 kernel's sums, bitwise)."""
+    from miniworld_engine.kernels.sampler_ops.cuda.sm80 import device_ext as ext
+
+    return ext().pool_atoms_bwd_b200(gout, x, idx, gather_mask, atom_mask, count)
+
+
+def _b200(t: torch.Tensor) -> bool:
+    return torch.cuda.get_device_capability(t.device) == (10, 0)
+
+
 class _PoolAtomsCuda(torch.autograd.Function):
     """The pooling with its backward (``x`` only: the index and the masks carry no gradient)."""
 
     @staticmethod
     def forward(ctx, x, idx, gather_mask, atom_mask):
+        if _b200(x):  # 2026-11-17: the sort-free backward (sampler_ops_sm100.cu)
+            out, count = _pool_atoms_train_op(x, idx, gather_mask, atom_mask)
+            ctx.save_for_backward(x, idx, gather_mask, atom_mask, count)
+            return out
         ctx.save_for_backward(x, idx, gather_mask, atom_mask)
         return _pool_atoms_op(x, idx, gather_mask, atom_mask)
 
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, gout):
+        if len(ctx.saved_tensors) == 5:
+            x, idx, gather_mask, atom_mask, count = ctx.saved_tensors
+            if getattr(ctx, "counted", False):  # a second backward (retain_graph): the counters hold the first one's counts
+                count.zero_()
+            ctx.counted = True
+            return _pool_atoms_bwd_b200_op(gout.contiguous(), x, idx, gather_mask, atom_mask, count), None, None, None
         x, idx, gather_mask, atom_mask = ctx.saved_tensors
         return _pool_atoms_bwd_op(gout.contiguous(), x, idx, gather_mask, atom_mask), None, None, None
 

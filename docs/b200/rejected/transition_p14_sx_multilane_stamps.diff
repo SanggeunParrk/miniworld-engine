@@ -1,0 +1,240 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+index 632e95ee3..7626e575e 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+@@ -37,6 +37,9 @@ using namespace s100;
+ #ifndef H16
+ #define H16 0                                                   // round 3 part 4: fp32 activations on the fp16 tensor cores (inference)
+ #endif
++#ifndef ML
++#define ML 0                                                    // one issuing lane per ring stage (one TMA thread issues ~1 load per 600 clk)
++#endif
+ static_assert(!(H16 && F32), "H16 is its own operand type");
+ constexpr int ESZ = F32 ? 4 : 2, BKE = 128 / ESZ;              // element bytes, elements of K per 128-byte K-block row
+ constexpr int D_ = DIM, H_ = HID, ROWS = 128, KD = D_ / SK, NKB = KD / BKE, NCHK = H_ / CH, HC = CH / 2;
+@@ -105,6 +108,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+ #if H16
+                      , const float* __restrict__ sc
+ #endif
++                     TSX_STAMP_ARG
+                      ) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+@@ -112,6 +116,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int cl = blockIdx.x / SK, rank = SK > 1 ? (int)cluster_rank() : 0;
+   const int tile = cl / NCHK, j = cl % NCHK, row0 = tile * ROWS, h0 = j * CH, k0 = rank * KD;
++  if (tid == 0) TSX_ST(0);
+ 
+   if (tid == 0) {
+     for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
+@@ -120,7 +125,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+     fence_barrier_init();
+     fence_proxy_async();
+     prefetch_map(&mxn); prefetch_map(&mwa); prefetch_map(&mwb);
+-    if (wpre)
++    if (wpre && !ML)
+       for (int kb = 0; kb < STG; ++kb) {                        // weights first: they do not depend on the LayerNorm kernel
+         mbar_expect_tx(&B.full[kb], KBT + WKB);
+         tma_load_2d(su + O_W + kb * WKB, &mwa, &B.full[kb], k0 + kb * BKE, h0);
+@@ -133,12 +138,18 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+   if (SK > 1) cluster_sync_relaxed();                          // every CTA of the cluster runs before any distributed-shared store
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
++  if (ML && wpre && warp == 0 && lane < STG) {               // ML: stage `lane`'s weights from lane `lane`
++    mbar_expect_tx(&B.full[lane], KBT + WKB);
++    tma_load_2d(su + O_W + lane * WKB, &mwa, &B.full[lane], k0 + lane * BKE, h0);
++    tma_load_2d(su + O_W + lane * WKB + CH * 128, &mwb, &B.full[lane], k0 + lane * BKE, h0);
++  }
+   pdl_wait();                                                  // xn is complete and visible
++  if (tid == 0) TSX_ST(1);
+   pdl_launch();                                                // the squeeze may start its prologue
+ 
+   if (warp == 0) {
+-    if (lane == 0)
+-      for (int kb = 0; kb < NKB; ++kb) {
++    if (ML ? lane < STG : lane == 0)
++      for (int kb = ML ? lane : 0; kb < NKB; kb += ML ? STG : 1) {
+         const int s = kb % STG;
+         if (kb >= STG) mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
+         if (!wpre || kb >= STG) {                              // (wpre 0: the LayerNorm launch wrote the weights, complete only now)
+@@ -148,12 +159,15 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+         }
+         tma_load_2d(su + O_X + s * KBT, &mxn, &B.full[s], k0 + kb * BKE, row0);
+       }
++    if (lane == 0) TSX_ST(2);
+   } else if (warp == 1) {
+     // ------------------------------------------------------------------------------------------ MMA issue (converged warp)
+ #pragma unroll 1
+     for (int kb = 0; kb < NKB; ++kb) {
+       const int s = kb % STG;
+       mbar_wait(&B.full[s], (kb / STG) & 1);
++      if (lane == 0 && kb == 0) TSX_ST(3);
++      if (lane == 0 && kb == NKB - 1) TSX_ST(4);
+       tc_fence_after();
+       const uint64_t da = desc_k128(su + O_X + s * KBT), db = desc_k128(su + O_W + s * WKB);
+       if (elect_one()) {
+@@ -177,6 +191,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+     constexpr int EC = HC > 32 ? 32 : HC;                      // units per step (CH 128: two steps of 32)
+     constexpr int NW = F32 ? EC : EC / 2;                      // 32-bit words of a thread's row segment
+     mbar_wait(&B.mma_done, 0);
++    if (warp == 4 && lane == 0) TSX_ST(5);
+     tc_fence_after();
+ #pragma unroll
+     for (int cc = 0; cc < HC; cc += EC) {
+@@ -205,6 +220,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+         store_t(bs + boff + aoff, ldab, bp, lane);
+       }
+     }
++    if (warp == 4 && lane == 0) TSX_ST(7);
+     tc_fence_before();
+ #else
+     // ------------------------------------------------------------------------------------------ the K slices' partials meet in the
+@@ -212,6 +228,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+     constexpr int NW = F32 ? W_ : W_ / 2;
+     if (warp < 8) {
+       mbar_wait(&B.mma_done, 0);
++      if (warp == 4 && lane == 0) TSX_ST(5);
+       tc_fence_after();
+       uint32_t oa[W_], ob[W_];
+ #pragma unroll
+@@ -236,6 +253,7 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+       }
+       tc_fence_before();
+       mbar_wait(&B.red_full, 0);                               // every other rank's partial of these units is here
++      if (warp == 4 && lane == 0) TSX_ST(6);
+       float sa[W_], sb[W_];
+ #pragma unroll
+       for (int i = 0; i < W_; ++i) { sa[i] = 0.f; sb[i] = 0.f; }
+@@ -277,10 +295,12 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+         store_t(as_ + aoff, ldab, ap, lane);
+         store_t(bs + boff + aoff, ldab, bp, lane);
+       }
++      if (warp == 4 && lane == 0) TSX_ST(7);
+     }
+ #endif
+   }
+   __syncthreads();
++  if (tid == 0) TSX_ST(8);
+   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, TCOLS); }
+ }
+ 
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+index a0f0ded06..5893a77a0 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_squeeze.cu
+@@ -27,6 +27,9 @@ using namespace s100;
+ #ifndef F32
+ #define F32 0
+ #endif
++#ifndef ML
++#define ML 0                                                    // one issuing lane per ring stage (one TMA thread issues ~1 load per 600 clk)
++#endif
+ #ifndef H16
+ #define H16 0                                                   // round 3 part 4: h / Ws16 on the fp16 tensor cores, fp32 x / out, y = acc sc[3] + x
+ #endif
+@@ -84,6 +87,7 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+ #if H16
+                       , const float* __restrict__ sc
+ #endif
++                      TSX_STAMP_ARG
+                       ) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+@@ -91,6 +95,7 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int cl = blockIdx.x / SK, rank = SK > 1 ? (int)cluster_rank() : 0, tile = cl / NBLK, nb = cl % NBLK;
+   const int row0 = tile * ROWS, k0 = rank * KS;
++  if (tid == 0) TSX_ST(0);
+ 
+   if (tid == 0) {
+     for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
+@@ -108,12 +113,28 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+   const uint32_t tmem = B.tmem;
+ 
+   if (warp == 0) {
++#if ML
++    if (lane < STG) {
++      mbar_expect_tx(&B.full[lane], KBT + WBT);
++      tma_load_2d(su + O_B + lane * WBT, &mws, &B.full[lane], k0 + lane * BKE, nb * NB);
++      pdl_wait();
++      if (lane == 0) TSX_ST(1);
++      tma_load_2d(su + O_A + lane * KBT, &mh, &B.full[lane], k0 + lane * BKE, row0);
++      for (int kb = lane + STG; kb < NKB; kb += STG) {
++        mbar_wait(&B.empty[lane], ((kb / STG) - 1) & 1);
++        mbar_expect_tx(&B.full[lane], KBT + WBT);
++        tma_load_2d(su + O_B + lane * WBT, &mws, &B.full[lane], k0 + kb * BKE, nb * NB);
++        tma_load_2d(su + O_A + lane * KBT, &mh, &B.full[lane], k0 + kb * BKE, row0);
++      }
++    }
++#else
+     if (lane == 0) {
+       for (int kb = 0; kb < STG; ++kb) {                        // the weights first: they do not depend on the expand
+         mbar_expect_tx(&B.full[kb], KBT + WBT);
+         tma_load_2d(su + O_B + kb * WBT, &mws, &B.full[kb], k0 + kb * BKE, nb * NB);
+       }
+       pdl_wait();
++      TSX_ST(1);
+       for (int kb = 0; kb < STG; ++kb) tma_load_2d(su + O_A + kb * KBT, &mh, &B.full[kb], k0 + kb * BKE, row0);
+       for (int kb = STG; kb < NKB; ++kb) {
+         const int s = kb % STG;
+@@ -123,12 +144,15 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+         tma_load_2d(su + O_A + s * KBT, &mh, &B.full[s], k0 + kb * BKE, row0);
+       }
+     }
++#endif
+     pdl_wait();
+   } else if (warp == 1) {
+     pdl_wait();
+     for (int kb = 0; kb < NKB; ++kb) {
+       const int s = kb % STG;
+       mbar_wait(&B.full[s], (kb / STG) & 1);
++      if (lane == 0 && kb == 0) TSX_ST(2);
++      if (lane == 0 && kb == NKB - 1) TSX_ST(3);
+       tc_fence_after();
+       const uint64_t da = desc_k128(su + O_A + s * KBT), db = desc_k128(su + O_B + s * WBT);
+       if (elect_one()) {
+@@ -161,6 +185,7 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+ #if SK == 1
+   if (warp >= 4) {
+     mbar_wait(&B.acc_full, 0);
++    if (warp == 4 && lane == 0) TSX_ST(4);
+     tc_fence_after();
+ #pragma unroll
+     for (int cc = 0; cc < NB; cc += 32) {
+@@ -191,6 +216,7 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+       store_t(out + (size_t)row0 * D_ + c0 + cc + store_t_off<16>(r, lane, D_, 2), D_, o, lane);
+ #endif
+     }
++    if (warp == 4 && lane == 0) TSX_ST(6);
+     tc_fence_before();
+   }
+   __syncthreads();
+@@ -200,6 +226,7 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+     // ------------------------------------------------------------------------------------------ the other owners' columns go
+     // straight into their shared memory (distributed shared memory), [source rank][row][W] fp32
+     mbar_wait(&B.acc_full, 0);
++    if (warp == 4 && lane == 0) TSX_ST(4);
+     tc_fence_after();
+ #pragma unroll
+     for (int oo = 1; oo <= SK; ++oo) {
+@@ -222,6 +249,7 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+   }
+   if (warp >= 4) {
+     mbar_wait(&B.red_full, 0);                                 // every other rank's partial of these columns is here
++    if (warp == 4 && lane == 0) TSX_ST(5);
+     float sum[W_];
+ #pragma unroll
+     for (int i = 0; i < W_; ++i) sum[i] = 0.f;
+@@ -258,9 +286,11 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
+     }
+     store_t(out + (size_t)row0 * D_ + c0 + store_t_off<W_ / 2>(r, lane, D_, 2), D_, o, lane);
+ #endif
++    if (warp == 4 && lane == 0) TSX_ST(6);
+   }
+ #endif
+   __syncthreads();
++  if (tid == 0) TSX_ST(7);
+   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, NB); }
+ }
+ 

@@ -1,0 +1,153 @@
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_fwd1h.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_fwd1h.cu
+index 8b0ade054..b73b1550a 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_fwd1h.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_fwd1h.cu
+@@ -62,18 +62,22 @@ swa_attn_fwd1h_sm100(const __grid_constant__ CUtensorMap mq, const __grid_consta
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer: q, K, V of the head
+-    if (lane == 0) {
++    // q, K, V of an item by lanes 0 - 2 at once (round 3 part 10: one thread issues a TMA load per ~600 clocks, _tools/t0/tmabw.py)
++    if (lane < 3) {
+       pdl_wait();                                                          // q / K / V come from the previous kernel
+       for (int li = 0; li < my_items; ++li) {
+         int n, i0, h, sq; item_of(li, n, i0, h, sq);
+         const int s = li & 1;
+-        if (li >= 2) mbar_wait(&B.empty[s], ((li >> 1) - 1) & 1);
+         const uint32_t st = su + O_ST + s * IST;
+-        mbar_expect_tx(&B.full[s], TQ + 2 * TK);
++        if (lane == 0) {
++          if (li >= 2) mbar_wait(&B.empty[s], ((li >> 1) - 1) & 1);
++          mbar_expect_tx(&B.full[s], TQ + 2 * TK);
++        }
++        __syncwarp(0x7u);
+         const int row = (n * H + h) * S;
+-        tma_load_2d(st, &mq, &B.full[s], 0, row + i0);
+-        tma_load_2d(st + TQ, &mk, &B.full[s], 0, row + i0 - HW);           // keys [i0 - 64, i0 + 192): rows outside the head are masked
+-        tma_load_2d(st + TQ + TK, &mv, &B.full[s], 0, row + i0 - HW);      //  (or zero-filled)
++        if (lane == 0) tma_load_2d(st, &mq, &B.full[s], 0, row + i0);
++        if (lane == 1) tma_load_2d(st + TQ, &mk, &B.full[s], 0, row + i0 - HW);           // keys [i0 - 64, i0 + 192): rows outside the head are masked
++        if (lane == 2) tma_load_2d(st + TQ + TK, &mv, &B.full[s], 0, row + i0 - HW);      //  (or zero-filled)
+       }
+     }
+   } else if (warp == 1) {
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_fwd3.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_fwd3.cu
+index 7d0dee20c..fd0513ef7 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_fwd3.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_fwd3.cu
+@@ -86,20 +86,24 @@ swa_attn_fwd3_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer: q, K, V (both heads)
+-    if (lane == 0) {
++    // the six loads of an item by lanes 0 - 5 at once (round 3 part 10: one thread issues a TMA load per ~600 clocks, _tools/t0/tmabw.py)
++    if (lane < 6) {
+       pdl_wait();                                                          // q / K / V come from the previous kernel
+       for (int li = 0; li < my_items; ++li) {
+         int n, i0, hp, sq; item_of(li, n, i0, hp, sq);
+         const int s = li & 1;
+-        if (li >= 2) mbar_wait_h(&B.empty[s], ((li >> 1) - 1) & 1);
+         const uint32_t st = su + O_ST + s * IST;
+-        EVW(0);
+-        mbar_expect_tx(&B.full[s], 2 * TQ + 4 * TK);
+-        for (int w = 0; w < 2; ++w) {
+-          const int row = (n * H + 2 * hp + w) * S;
+-          tma_load_2d(st + w * TQ, &mq, &B.full[s], 0, row + i0);
+-          tma_load_2d(st + 2 * TQ + w * TK, &mk, &B.full[s], 0, row + i0 - HW);         // keys [i0 - 64, i0 + 192): rows outside the
+-          tma_load_2d(st + 2 * TQ + 2 * TK + w * TK, &mv, &B.full[s], 0, row + i0 - HW); //  head are masked (or zero-filled)
++        if (lane == 0) {
++          if (li >= 2) mbar_wait_h(&B.empty[s], ((li >> 1) - 1) & 1);
++          EVW(0);
++          mbar_expect_tx(&B.full[s], 2 * TQ + 4 * TK);
++        }
++        __syncwarp(0x3fu);
++        {
++          const int w = lane % 2, row = (n * H + 2 * hp + w) * S;         // keys [i0 - 64, i0 + 192): rows outside the head are masked (or zero-filled)
++          if (lane < 2) tma_load_2d(st + w * TQ, &mq, &B.full[s], 0, row + i0);
++          else if (lane < 4) tma_load_2d(st + 2 * TQ + w * TK, &mk, &B.full[s], 0, row + i0 - HW);
++          else tma_load_2d(st + 2 * TQ + 2 * TK + w * TK, &mv, &B.full[s], 0, row + i0 - HW);
+         }
+       }
+     }
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_fwd.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_fwd.cu
+index 4a54952b3..d0165eb06 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_fwd.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_fwd.cu
+@@ -215,41 +215,52 @@ swa_gattn_fwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------ TMA producer: the q tile pair, then K | V blocks
+-    if (lane == 0) {
++    // lanes 0 / 1 issue the two loads of a q pair / K | V stage at once (round 3 part 10: one thread issues a TMA load per ~600 clocks)
++    if (lane < 2) {
+       int g = 0;
+       for (int li = 0; li < my_items; ++li) {
+         Pc P; item_of(li, P);
+         const int qs = li % QR, row = (P.n * H + P.h) * S, m0 = P.m0, nb = P.nb, kb0 = row + P.b0 * BN;
+         if (F32IO) {                                                       // raw fp32 into staging; warp 3 makes the bf16 tiles
+-          if (li >= 1) mbar_wait(&B.qraw_empty, (li - 1) & 1);
+-          mbar_expect_tx(&B.qraw_full, 2 * TQR);
+-          for (int w = 0; w < 2; ++w) tma_load_2d(su + O_QR + w * TQR, &mq, &B.qraw_full, 0, row + row_of(m0, w));
++          if (lane == 0) {
++            if (li >= 1) mbar_wait(&B.qraw_empty, (li - 1) & 1);
++            mbar_expect_tx(&B.qraw_full, 2 * TQR);
++          }
++          __syncwarp(0x3u);
++          tma_load_2d(su + O_QR + lane * TQR, &mq, &B.qraw_full, 0, row + row_of(m0, lane));
+         }
+         if (F32IO == 1) {
+           for (int b = 0; b < nb; ++b, ++g) {
+             const int s = g % RS;
+-            if (g >= RS) mbar_wait(&B.raw_empty[s], ((g / RS) - 1) & 1);
+             const uint32_t st = su + O_R + s * 2 * TKR;
+-            mbar_expect_tx(&B.raw_full[s], 2 * TKR);
+-            tma_load_2d(st, &mk, &B.raw_full[s], 0, kb0 + b * BN);
+-            tma_load_2d(st + TKR, &mv, &B.raw_full[s], 0, kb0 + b * BN);
++            if (lane == 0) {
++              if (g >= RS) mbar_wait(&B.raw_empty[s], ((g / RS) - 1) & 1);
++              mbar_expect_tx(&B.raw_full[s], 2 * TKR);
++            }
++            __syncwarp(0x3u);
++            tma_load_2d(st + lane * TKR, lane ? &mv : &mk, &B.raw_full[s], 0, kb0 + b * BN);
+           }
+           continue;
+         }
+         if (!F32IO) {
+-          if (li >= QR) mbar_wait(&B.q_empty[qs], ((li / QR) - 1) & 1);
+-          mbar_expect_tx(&B.q_full[qs], 2 * TQ);
+-          for (int w = 0; w < 2; ++w) tma_load_2d(su + O_Q + qs * 2 * TQ + w * TQ, &mq, &B.q_full[qs], 0, row + row_of(m0, w));
++          if (lane == 0) {
++            if (li >= QR) mbar_wait(&B.q_empty[qs], ((li / QR) - 1) & 1);
++            mbar_expect_tx(&B.q_full[qs], 2 * TQ);
++          }
++          __syncwarp(0x3u);
++          tma_load_2d(su + O_Q + qs * 2 * TQ + lane * TQ, &mq, &B.q_full[qs], 0, row + row_of(m0, lane));
+         }
+         for (int b = 0; b < nb; ++b, ++g) {
+           const int s = g % ST;
+-          if (g >= ST) mbar_wait(&B.kv_empty[s], ((g / ST) - 1) & 1);
+           const uint32_t st = su + O_ST + s * STB;
+-          mbar_expect_tx(&B.kv_full[s], STB);                              // every part of the stage lands on every CTA's kv_full
++          if (lane == 0) {
++            if (g >= ST) mbar_wait(&B.kv_empty[s], ((g / ST) - 1) & 1);
++            mbar_expect_tx(&B.kv_full[s], STB);                            // every part of the stage lands on every CTA's kv_full
++          }
++          __syncwarp(0x3u);
+           if (CL == 1) {
+-            tma_load_2d(st, &mk, &B.kv_full[s], 0, kb0 + b * BN);
+-            tma_load_2d(st + TK, &mv, &B.kv_full[s], 0, kb0 + b * BN);
+-          } else {                                                         // part crank: K or V (crank & 1), rows (crank >> 1) of CL / 2
++            tma_load_2d(st + lane * TK, lane ? &mv : &mk, &B.kv_full[s], 0, kb0 + b * BN);
++          } else if (lane == 0) {                                          // part crank: K or V (crank & 1), rows (crank >> 1) of CL / 2
+             constexpr int PR = BN / (CL > 2 ? CL / 2 : 1);
+             const int hp = crank >> 1;
+             tma_load_2d_mc(st + (crank & 1) * TK + hp * PR * 64, (crank & 1) ? &mv : &mk, &B.kv_full[s], 0, kb0 + b * BN + hp * PR,
+@@ -257,7 +268,7 @@ swa_gattn_fwd_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+           }
+         }
+       }
+-      if (CL > 1)                                                          // drain: every CTA's release of my last stages has landed
++      if (CL > 1 && lane == 0)                                             // drain: every CTA's release of my last stages has landed
+         for (int x = max(g - ST, 0); x < g; ++x) mbar_wait(&B.kv_empty[x % ST], (x / ST) & 1);
+     }
+   } else if (warp == 1 || warp == 2) {

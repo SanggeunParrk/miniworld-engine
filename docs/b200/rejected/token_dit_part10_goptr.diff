@@ -1,0 +1,213 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_inf_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_inf_tf32.cu
+index 13dc0c0a0..c27625ed7 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_inf_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_inf_tf32.cu
+@@ -66,13 +66,21 @@ static_assert(!KSPLIT || QPAIR, "the key split is built for the query-tile pairs
+ #define VMN 0
+ #endif
+ static_assert(!VMN || !QPAIR, "the MN-major v is built for the sample-pair schedule");
++// -DGOPTR=1 (with VMN; 2026-11-18, token DiT part 10 -- only the token DiT's VMN build sets it): the g-in / o-out columns of the 16-column
++// B box (32 .. 47 of a 48-wide head) are read / written by each softmax thread straight from / to global memory (pointers GP / OP, row
++// stride RSF floats; one sample is L rows) instead of through the staging buffers: 16 KB less shared memory, so the 16 x 48 VMN build
++// keeps three stages. Default 0: every existing build computes and lays out what it did.
++#ifndef GOPTR
++#define GOPTR 0
++#endif
++static_assert(!GOPTR || (VMN && !KSPLIT), "the direct g / o columns are built for the VMN schedule");
+ // a 4-D tiled TMA load (the VMN v box: column, key, 32-column atom, sample)
+ DEVI void tma_load_4d_vmn(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2, int c3) {
+   asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6}], [%2];"
+                :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
+ }
+ #ifndef ST
+-#define ST (DHP == 64 || ((QPAIR || VMN) && DHP == 48) ? 2 : 3)
++#define ST (DHP == 64 || ((QPAIR || (VMN && !GOPTR)) && DHP == 48) ? 2 : 3)
+ #endif
+ constexpr int BN = 32, DH = DHP, QM = 128;
+ constexpr int NA = DH / 32, NBX = (DH % 32) / 16;                         // 128-B boxes and 64-B boxes of a head row
+@@ -86,7 +94,8 @@ constexpr int NKV = QPAIR ? 1 : 2, NBI = QPAIR ? 2 : 1;                    // k
+ constexpr int S_KA = 0, S_KB = NKV * NA * KA, S_VT = S_KB + NKV * NBX * KB, S_BIAS = S_VT + NKV * TV;
+ constexpr int TBIAS = QM * BN * 4, STB = S_BIAS + NBI * TBIAS;                  // 40 KB at 48
+ constexpr int O_Q = 0, O_ST = 2 * TQ, O_BAR = O_ST + ST * STB;
+-constexpr int XG = TQ;                                                     // per warpgroup: g in, gated o out (A + B boxes)
++constexpr int XG = GOPTR ? NA * QA : TQ;                                   // per warpgroup: g in, gated o out (A + B boxes; GOPTR: A only)
++constexpr bool XB_ST = NBX && !GOPTR;                                      // the B box goes through the staging buffer
+ constexpr int O_X = O_BAR + 1024, SMEM_BYTES = O_X + 2 * XG;
+ static_assert(SMEM_BYTES <= 232448, "shared memory");
+ static_assert((O_ST % 1024) == 0 && (STB % 1024) == 0 && (O_X % 1024) == 0 && (S_VT % 1024) == 0 && (TV % 1024) == 0,
+@@ -111,6 +120,9 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
+                        const __grid_constant__ CUtensorMap mga, const __grid_constant__ CUtensorMap mgb, int L, int A
+ #if KSPLIT
+                        , const __grid_constant__ CUtensorMap mpa, const __grid_constant__ CUtensorMap mpb, float* __restrict__ LSEP, int NS
++#endif
++#if GOPTR
++                       , const float* __restrict__ GP, float* __restrict__ OP, int RSF
+ #endif
+                        ) {
+ #if !KSPLIT
+@@ -259,11 +271,25 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
+     if (PP && w == 1) named_bar_arrive(3, 256);
+     const uint32_t xa = su + O_X + w * XG, xb = xa + NA * QA;              // A boxes at xa + j QA, the B box at xb
+     float m_i = -INFINITY, l_i = 0.f;
++#if GOPTR
++    float4 gbv[4];                                                         // this thread's row: g columns 32 * NA .. + 15 of the head
++    long long grow = -1;                                                   // its global row (-1: past L or a missing sample)
++#endif
+     for (int G = 0, li = 0, n = 0; G < nblk; ++G, ++n) {
+       if (n == nb) { n = 0; ++li; }
+       const int s = G % ST;
+       if (n == 0) {
+         m_i = -INFINITY; l_i = 0.f;
++#if GOPTR
++        {
++          int a0, m0, head, sp; item_of(li, a0, m0, head, sp);
++          const int rw = row_of(m0, w) + (int)r;
++          grow = live(a0, m0, w) && rw < L ? ((long long)smp_of(a0, w) * L + rw) * RSF + head * DH + 32 * NA : -1;
++          const float* gp = GP + (grow < 0 ? 0 : grow);
++#pragma unroll
++          for (int i = 0; i < 4; ++i) gbv[i] = grow < 0 ? make_float4(0.f, 0.f, 0.f, 0.f) : __ldg(reinterpret_cast<const float4*>(gp) + i);
++        }
++#endif
+         if (!KSPLIT && r == 0) {                                           // this item's g tile into the (drained) staging buffer
+           int a0, m0, head, sp; item_of(li, a0, m0, head, sp);
+           tma_store_wait_read0();
+@@ -271,7 +297,7 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
+           const int a = smp_of(a0, w), rw = row_of(m0, w);
+ #pragma unroll
+           for (int j = 0; j < NA; ++j) tma_load_3d(xa + j * QA, &mga, &B.g_full[w], head * DH + 32 * j, rw, a);
+-          if (NBX) tma_load_3d(xb, &mgb, &B.g_full[w], head * DH + 32 * NA, rw, a);
++          if (XB_ST) tma_load_3d(xb, &mgb, &B.g_full[w], head * DH + 32 * NA, rw, a);
+         }
+       }
+       mbar_wait(&B.kv_full[s], (G / ST) & 1);                              // the bias tile of this block
+@@ -381,8 +407,17 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
+         }
+ #endif
+         mbar_wait(&B.g_full[w], li & 1);
++#if GOPTR
++#pragma unroll
++        for (int q = 8 * NA; q < DH / 4; ++q) {                            // the B columns: g from registers, o straight to global
++          const float4 gw = gbv[q - 8 * NA];
++          const float4 o = make_float4(__uint_as_float(ov[4 * q + 0]) * inv * sigmoid_kit(gw.x), __uint_as_float(ov[4 * q + 1]) * inv * sigmoid_kit(gw.y),
++                                       __uint_as_float(ov[4 * q + 2]) * inv * sigmoid_kit(gw.z), __uint_as_float(ov[4 * q + 3]) * inv * sigmoid_kit(gw.w));
++          if (grow >= 0) reinterpret_cast<float4*>(OP + grow)[q - 8 * NA] = o;
++        }
++#endif
+ #pragma unroll
+-        for (int q = 0; q < DH / 4; ++q) {                                 // 4 channels per 16-byte chunk: 8 in each A box, 4 in B
++        for (int q = 0; q < (GOPTR ? 8 * NA : DH / 4); ++q) {              // 4 channels per 16-byte chunk: 8 in each A box, 4 in B
+           const uint32_t ad = q < 8 * NA ? xa + (q / 8) * QA + sw128(r, q % 8) : xb + sw64(r, q - 8 * NA);
+           const uint4 gw = lds128(ad);
+           const float o0 = __uint_as_float(ov[4 * q + 0]) * inv * sigmoid_kit(__uint_as_float(gw.x));
+@@ -396,7 +431,7 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
+         if (r == 0 && live(a0, m0, w)) {
+ #pragma unroll
+           for (int j = 0; j < NA; ++j) tma_store_3d(&mqa, xa + j * QA, head * DH + 32 * j, row_of(m0, w), smp_of(a0, w));
+-          if (NBX) tma_store_3d(&mqb, xb, head * DH + 32 * NA, row_of(m0, w), smp_of(a0, w));
++          if (XB_ST) tma_store_3d(&mqb, xb, head * DH + 32 * NA, row_of(m0, w), smp_of(a0, w));
+           tma_store_commit();
+         }
+       }
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+index 0d9e2119b..d6bc6dd26 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+@@ -52,6 +52,9 @@ H, D = 16, 48
+ _dir = Path(__file__).parent
+ #: B200 fp32 token DiT inference at one sample: the TF32 core's query-tile-pair build (0: the sample-pair schedule)
+ _TF32_QPAIR = os.environ.get("MINIWORLD_TOKEN_B200_TF32_QPAIR", "1") != "0"
++# the token DiT's VMN fp32 core at 48 wide (part 10, 2026-11-18): -DGOPTR, the g / o B columns straight from / to global, three stages
++# (MINIWORLD_TOKEN_B200_GOPTR=0: the two-stage VMN build of part 8). Only ``vmn`` binds read it: no other caller's build changes.
++_VMN_GOPTR = os.environ.get("MINIWORLD_TOKEN_B200_GOPTR", "1") != "0"
+ #: B200 fp32 token DiT inference at one sample (2026-11-17, AttentionPairBias part 7): the TF32 core's key split (``attn_inf_tf32 -DQPAIR
+ #: -DKSPLIT`` + ``ksplit_combine32``) where the query-tile pairs leave most SMs idle. MINIWORLD_TOKEN_B200_TF32_KSPLIT=n forces n chunks (1: off).
+ _TF32_KSPLIT = os.environ.get("MINIWORLD_TOKEN_B200_TF32_KSPLIT")
+@@ -201,7 +204,7 @@ def _tdit_defs(heads: int = H, dh: int = D):
+     return (f"NHEAD={heads}", f"DHP={dh}", f"RSQDV={dh**-0.5!r}f")
+ 
+ 
+-def forward(q2, k2, v2, bias_hll, A, L, heads: int = H, dh: int = D):
++def forward(q2, k2, v2, bias_hll, A, L, heads: int = H, dh: int = D, pdl: bool = False):
+     """q2, k2, v2 [A L, heads dh] bf16 rows, bias [heads, L, L] bf16 (natural units) -> O [A L, heads dh] fp32, LSE [A, heads, L]
+     (log2). Default 16 x 48 (d 768)."""
+     dev = _index(q2)
+@@ -219,7 +222,10 @@ def forward(q2, k2, v2, bias_hll, A, L, heads: int = H, dh: int = D):
+     # A = 1 (a training block of one sample): the -DQPAIR build pairs two 128-query tiles of a head (AttentionPairBias's schedule) where
+     # the sample-pair schedule needed a zero partner sample -- the whole block padded to A = 2 (2026-11-17)
+     qpair = A == 1
+-    _sm100_kernel("attn_fwd2", "augattn_fwd2_sm100", dev, defs=((("QPAIR=1",) if qpair else ()) + _tdit_defs(heads, dh)))(
++    # pdl (token DiT part 10): the -DPDLW=1 build launched as a programmatic dependent of the previous kernel (APB v20's form)
++    _sm100_kernel(
++        "attn_fwd2", "augattn_fwd2_sm100", dev, pdl=pdl, defs=((("QPAIR=1",) if qpair else ()) + _tdit_defs(heads, dh) + (("PDLW=1",) if pdl else ()))
++    )(
+         _grid(((L // 128 + 1) // 2) * heads if qpair else (A // 2) * heads * (L // 128), dev),
+         (384, 1, 1),
+         *maps,
+@@ -389,15 +395,17 @@ def backward_tf32(
+     return (DQ if DQP is None else DQP), DK, DV, DB
+ 
+ 
+-def backward(q2, k2, v2, dob, bias_hll, LSE, Dd, A, L, heads: int = H, dh: int = D, det: bool = False, bias_nt: bool = False, side=None):
++def backward(
++    q2, k2, v2, dob, bias_hll, LSE, Dd, A, L, heads: int = H, dh: int = D, det: bool = False, bias_nt: bool = False, side=None, pdl: bool = False
++):
+     """dQ, dK, dV [A L, heads dh] fp32 and dbias [heads, L, L] fp32. dob [A L, heads dh] bf16, Dd = rowsum(dO O) [A, heads, L]
+     fp32. Default 16 x 48 (d 768). ``det`` (the token DiT training block, 2026-11-17): bitwise repeatable -- ``attn_dkv -DDET=1``
+     (dK / dV accumulated in block order) and ``attn_dqb -DDQPART=1 -DDQDET=1`` (each 128-key chunk's dQ partial stored as its own slice,
+-    added here in chunk order, no zero fill; a step's two dQ MMA groups in a fixed order). ``bias_nt`` (A = 1 only; the token DiT,
+-    2026-11-17 part 7): attn_dkv built -DBIASNT=1 reads the bias as stored -- no bias_transpose launch (the same values)."""
++    added here in chunk order, no zero fill; a step's two dQ MMA groups in a fixed order). ``bias_nt`` (the token DiT, 2026-11-17 part 7;
++    any A since part 10 -- the bias is shared by the samples, the tile attn_dkv loads does not depend on the sample): attn_dkv built
++    -DBIASNT=1 reads the bias as stored -- no bias_transpose launch (the same values). Only the token DiT passes it."""
+     dev = _index(q2)
+     W = heads * dh
+-    bias_nt = bias_nt and A == 1
+     bias_t = bias_hll if bias_nt else bias_transpose(bias_hll)
+     nch = L // 128 if det else 1
+     DQ = torch.empty(nch * A * L, W, device=q2.device, dtype=torch.float32)
+@@ -442,7 +450,14 @@ def backward(q2, k2, v2, dob, bias_hll, LSE, Dd, A, L, heads: int = H, dh: int =
+     if side is not None and det:
+         side[0](dqb)
+     # attn_dkv zero-fills dQ on the way; attn_dqb then adds one partial per 128-key chunk (det: stores it to the chunk's slice).
+-    _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, defs=defs + (("DET=1",) if det else ()) + (("BIASNT=1",) if bias_nt else ()))(
++    # pdl (token DiT part 10): attn_dkv -DPDLW=1 as a programmatic dependent of the previous kernel on the stream
++    _sm100_kernel(
++        "attn_dkv",
++        "augattn_dkv_sm100",
++        dev,
++        pdl=pdl,
++        defs=defs + (("DET=1",) if det else ()) + (("BIASNT=1",) if bias_nt else ()) + (("PDLW=1",) if pdl else ()),
++    )(
+         _grid(A * heads * (L // 128), dev),
+         (384, 1, 1),
+         *dkv_maps,
+@@ -625,9 +640,19 @@ class GatedInferenceCore:
+             )
+ 
+             kf = self.k
++            gop = ()
+             if vmn:
+                 assert S > 1 and srow is None, "the MN-major v build serves several samples"
+-                kf = _sm100_kernel("attn_inf_tf32", "augattn_inf_tf32_sm100", self.device_index, defs=("VMN=1", *_tdit_defs(self.heads, self.dh)))
++                # token DiT part 10: at 48 wide the g / o B columns go straight to / from global (-DGOPTR: three stages instead of two)
++                go = _VMN_GOPTR and self.dh == 48
++                kf = _sm100_kernel(
++                    "attn_inf_tf32",
++                    "augattn_inf_tf32_sm100",
++                    self.device_index,
++                    defs=("VMN=1", *(("GOPTR=1",) if go else ()), *_tdit_defs(self.heads, self.dh)),
++                )
++                if go:
++                    gop = (g, q, int(rs // es))  # (tensors: the launcher packs ints as 32-bit)
+             own = getattr(self, "tf32_qpair", True) and not vmn  # AttentionPairBias's -DKPERM core opts out of the token DiT's one-sample forms
+             ns = tf32_ksplit(L, Hh, self.nsm) if S == 1 and srow is None and own else 1
+             if ns > 1:
+@@ -665,7 +690,7 @@ class GatedInferenceCore:
+                 grid = (min(self.nsm, ((-(-L // 128) + 1) // 2) * Hh), 1, 1)
+ 
+             def run():
+-                kf(grid, (384, 1, 1), *maps, int(L), int(S))
++                kf(grid, (384, 1, 1), *maps, int(L), int(S), *gop)
+         else:
+             Dm, DH = W // 4, self.dh
+             q, k, v, g = (qkvg[:, i * Dm : (i + 1) * Dm] for i in range(4))

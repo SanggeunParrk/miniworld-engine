@@ -1,0 +1,434 @@
+--- n1-base/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu	2026-11-18 14:30:27.000000000 +0000
++++ n1-triattn/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu	2026-11-18 15:24:31.000000000 +0000
+@@ -1112,6 +1112,21 @@
+ // that group goes out during its math), each group rewrites its P^T | dS^T buffer only a stage later, and the S^T and gradient GEMMs
+ // have their own issuing warps.  TMEM: S^T | dP^T of group g at 128 g (64 + 64 fp32), P^T | dS^T of group g at 256 + 64 g
+ // (32 + 32 bf16 pairs), dV_r / dK_r at 384 + 64 r.  K / V stay in shared memory (double-buffered across tasks).
++#ifdef N1_STAMP
++__device__ unsigned long long g_n1st[1024 * 8];   // per-CTA %globaltimer stamps: 0 entry, 1 after the PDL wait, 2 prologue done, 3 end
++#define N1ST(s) do { if (threadIdx.x == 0) { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); g_n1st[blockIdx.x * 8 + (s)] = t_; } } while (0)
++#else
++#define N1ST(s) do {} while (0)
++#endif
++#ifdef N1_STAMP4
++__device__ unsigned long long g_n1w[1024 * 32];   // per-warp stamps: [warp] before the last block barrier, [16 + warp] at the last instruction
++#define N1TS(idx) do { if ((threadIdx.x & 31) == 0) { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); g_n1w[blockIdx.x * 32 + (idx)] = t_; } } while (0)
++#define N1PRE N1TS(threadIdx.x >> 5)
++#define N1ST4 N1TS(16 + (threadIdx.x >> 5))
++#else
++#define N1PRE do {} while (0)
++#define N1ST4 do {} while (0)
++#endif
+ constexpr int KR = 2;
+ constexpr int KB_QW = 64, KB_QT = KB_QW * D, KB_BT = BN * KB_QW;   // Q / dO sub-tile [64][32] (4 KiB), bias^T [2 halves][128 k][32 q] fp32
+ constexpr int KB_NQ = 6, KB_NB = 2, KB_THREADS = 352;              // 0 TMA, 1 S^T MMA, 2-5 / 6-9 grad groups (rows 0 / 1), 10 grad MMA
+@@ -1121,18 +1136,23 @@
+ constexpr uint32_t ID_G = idesc_bf16(128, D, 0, 1);
+ static_assert(KB_SMEM <= 232448, "smem");
+ 
+-__global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
++__device__ __forceinline__ void triattn_bwd_kv_body(const int bid, const int nb,
+     int N, int H, int S, int ntasks, float scl, float scale,
+-    const __grid_constant__ CUtensorMap qmap,            // q / dO [B*N*S][H*32], box (32, 64), 64B swizzle
+-    const __grid_constant__ CUtensorMap dmap,
+-    const __grid_constant__ CUtensorMap kmap,            // k / v, box (32, 128), 64B swizzle
+-    const __grid_constant__ CUtensorMap vmap,
+-    const __grid_constant__ CUtensorMap bmap,            // bias^T * log2e fp32 [B*H*S (k)][S (q)], box (32, 128), 128B swizzle
++    const CUtensorMap& qmap,            // q / dO [B*N*S][H*32], box (32, 64), 64B swizzle
++    const CUtensorMap& dmap,
++    const CUtensorMap& kmap,            // k / v, box (32, 128), 64B swizzle
++    const CUtensorMap& vmap,
++    const CUtensorMap& bmap,            // bias^T * log2e fp32 [B*H*S (k)][S (q)], box (32, 128), 128B swizzle
+     const float* __restrict__ LSE, const float* __restrict__ DELTA,   // [B, N, H, S]
+-    const __grid_constant__ CUtensorMap dkmap,           // dK / dV [B*N*S][H*32] bf16, box (32, 128), 64B swizzle (TMA stores)
+-    const __grid_constant__ CUtensorMap dvmap) {
++    const CUtensorMap& dkmap,           // dK / dV [B*N*S][H*32] bf16, box (32, 128), 64B swizzle (TMA stores)
++    const CUtensorMap& dvmap) {
+   pdl_trigger();   // round 8: PDL at S = 128 (launch_pdl_if): the next kernel may launch; this one waits for the previous grid
++  N1ST(0);
++#ifdef N1_PF
++  if (threadIdx.x == 0) { prefetch_map(&qmap); prefetch_map(&dmap); prefetch_map(&kmap); prefetch_map(&vmap); prefetch_map(&bmap); prefetch_map(&dkmap); prefetch_map(&dvmap); }
++#endif
+   pdl_wait();
++  N1ST(1);
+   const int NK = S / BN, NG = (N + KR - 1) / KR, NQS = S / KB_QW, SPT = KR * NQS;
+   extern __shared__ __align__(1024) unsigned char raw[];
+   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
+@@ -1168,19 +1188,25 @@
+   if (warp == 1) tmem_alloc(tslot, 512);
+   tc_fence_before();
+   __syncthreads();
++  N1ST(2);
+   tc_fence_after();
+   const uint32_t tmem = *tslot;
++#ifdef N1_EMPTY2
++  __syncthreads();
++  if (warp == 1) tmem_dealloc(tmem, 512);
++  return;
++#endif
+   const uint32_t sbase = sa(smb);                  // shared-window address of p: sbase + (p - smb), no S2R per use
+   auto A = [&](const void* p) -> uint32_t { return sbase + (uint32_t)(reinterpret_cast<const unsigned char*>(p) - smb); };
+   auto decode = [&](int t, int& kt, int& g, int& bh) { kt = t % NK; g = (t / NK) % NG; bh = t / (NK * NG); };
+   auto nrow = [&](int g, int r) { return min(g * KR + r, N - 1); };   // rows past N compute on row N-1 and store nothing
+-  const int mytasks = (int)blockIdx.x < ntasks ? (ntasks - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
++  const int mytasks = (int)bid < ntasks ? (ntasks - 1 - (int)bid) / (int)nb + 1 : 0;
+   const int total = mytasks * SPT;
+ 
+   if (warp == 0) {
+     if (lane == 0) {
+       int lt = 0, y = 0;
+-      for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
++      for (int t = bid; t < ntasks; t += nb, ++lt) {
+         int kt, g, bh; decode(t, kt, g, bh);
+         const int b_ = bh / H, h_ = bh % H, kb = lt & 1;
+         if (lt >= 2) wait(A(kve + kb), ((lt >> 1) - 1) & 1);
+@@ -1286,7 +1312,43 @@
+     const float2 sc2 = make_float2(scl, scl), neg1 = make_float2(-1.f, -1.f);
+     const uint32_t tS = tmem_at(tmem + gi * 128, qq * 32, 0), tP = tmem_at(tmem + KB_COL_P + gi * 64, qq * 32, 0);
+     int js = 0, lt = 0;                            // this group's stage count (phase of sf / se / pf / ge), task
+-    for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
++    bool pend = false; int plt = 0, pg = 0, pb = 0, ph = 0, pkt = 0;   // the task whose drain is pending
++      // (N1) the drain of a task runs after the NEXT task's first stage (its dfr wait overlaps that stage's math); N1_DRAIN_EARLY keeps the old order
++      auto drain = [&](const int lt_, const int g, const int b_, const int h_, const int kt) {
++      wait(A(dfr + gi), lt_ & 1);
++      tc_fence_after();
++#ifdef N1_NOEPI
++      if (lane == 0) arrive(A(de + gi));
++#else
++      float v[32], kk[32];
++      tmem_ld32(tmem_at(tmem + KB_COL_G + gi * 64, qq * 32, 0), v);
++      tmem_ld32(tmem_at(tmem + KB_COL_G + gi * 64 + 32, qq * 32, 0), kk);
++      tmem_wait_ld();
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) arrive(A(de + gi));           // the accumulators are free for the next task
++      if (lead) bulk_wait_read<0>();               // the previous task's stores have read the out tiles
++      named_sync(1 + gi, 128);
++      {
++        uint32_t wv[16], wk[16];
++#pragma unroll
++        for (int i = 0; i < 16; ++i) { wv[i] = pack2(v[2 * i], v[2 * i + 1]); wk[i] = pack2(kk[2 * i] * scale, kk[2 * i + 1] * scale); }
++        row_sw64_st(sO + gi * 2 * KVT, k, wv);
++        row_sw64_st(sO + gi * 2 * KVT + KVT, k, wk);
++      }
++      fence_proxy_async();
++      named_sync(1 + gi, 128);
++      if (lead && g * KR + gi < N) {
++        const int rw = (b_ * N + g * KR + gi) * S + kt * BN;
++#ifndef N1_NOSTORE
++        store_2d(&dvmap, A(sO + gi * 2 * KVT), h_ * D, rw);
++        store_2d(&dkmap, A(sO + gi * 2 * KVT + KVT), h_ * D, rw);
++#endif
++        bulk_commit();
++      }
++#endif
++      };
++    for (int t = bid; t < ntasks; t += nb, ++lt) {
+       int kt, g, bh; decode(t, kt, g, bh);
+       const int b_ = bh / H, h_ = bh % H;
+       for (int qs = 0; qs < NQS; ++qs, ++js) {
+@@ -1347,40 +1409,39 @@
+         __syncwarp();
+         if (lane == 0) arrive(A(pf + gi));
+         if (lane == 0 && qq == 2) TL(7 + gi * 6, y);
++#ifndef N1_DRAIN_EARLY
++        if (qs == 0 && pend) { drain(plt, pg, pb, ph, pkt); pend = false; }
++#endif
+       }
+-      // ---- dK / dV of row gi ----
+-      wait(A(dfr + gi), lt & 1);
+-      tc_fence_after();
+-      float v[32], kk[32];
+-      tmem_ld32(tmem_at(tmem + KB_COL_G + gi * 64, qq * 32, 0), v);
+-      tmem_ld32(tmem_at(tmem + KB_COL_G + gi * 64 + 32, qq * 32, 0), kk);
+-      tmem_wait_ld();
+-      tc_fence_before();
+-      __syncwarp();
+-      if (lane == 0) arrive(A(de + gi));           // the accumulators are free for the next task
+-      if (lead) bulk_wait_read<0>();               // the previous task's stores have read the out tiles
+-      named_sync(1 + gi, 128);
+-      {
+-        uint32_t wv[16], wk[16];
+-#pragma unroll
+-        for (int i = 0; i < 16; ++i) { wv[i] = pack2(v[2 * i], v[2 * i + 1]); wk[i] = pack2(kk[2 * i] * scale, kk[2 * i + 1] * scale); }
+-        row_sw64_st(sO + gi * 2 * KVT, k, wv);
+-        row_sw64_st(sO + gi * 2 * KVT + KVT, k, wk);
+-      }
+-      fence_proxy_async();
+-      named_sync(1 + gi, 128);
+-      if (lead && g * KR + gi < N) {
+-        const int rw = (b_ * N + g * KR + gi) * S + kt * BN;
+-        store_2d(&dvmap, A(sO + gi * 2 * KVT), h_ * D, rw);
+-        store_2d(&dkmap, A(sO + gi * 2 * KVT + KVT), h_ * D, rw);
+-        bulk_commit();
+-      }
++#ifdef N1_DRAIN_EARLY
++      drain(lt, g, b_, h_, kt);
++#else
++      pend = true; plt = lt; pg = g; pb = b_; ph = h_; pkt = kt;
++#endif
+     }
++#ifndef N1_DRAIN_EARLY
++    if (pend) drain(plt, pg, pb, ph, pkt);
++#endif
+     if (lead) bulk_wait<0>();
+   }
++  N1PRE;
+   tc_fence_before();
+   __syncthreads();
++  N1ST(3);
+   if (warp == 1) tmem_dealloc(tmem, 512);
++  N1ST4;
++}
++
++__global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
++    int N, int H, int S, int ntasks, float scl, float scale,
++    const __grid_constant__ CUtensorMap qmap, const __grid_constant__ CUtensorMap dmap, const __grid_constant__ CUtensorMap kmap,
++    const __grid_constant__ CUtensorMap vmap, const __grid_constant__ CUtensorMap bmap,
++    const float* __restrict__ LSE, const float* __restrict__ DELTA,
++    const __grid_constant__ CUtensorMap dkmap, const __grid_constant__ CUtensorMap dvmap) {
++#ifdef N1_EMPTY
++  return;
++#endif
++  triattn_bwd_kv_body((int)blockIdx.x, (int)gridDim.x, N, H, S, ntasks, scl, scale, qmap, dmap, kmap, vmap, bmap, LSE, DELTA, dkmap, dvmap);
+ }
+ 
+ // ---- kernel 2: dQ and dbias.  Task = (b, h, 128-query tile) x QR pair rows, all keys in 64-wide sub-tiles (stage = (sub-tile, row)).
+@@ -1399,19 +1460,24 @@
+ static_assert(QB_COL_A + QR * 32 <= 512, "TMEM");
+ static_assert(QB_SMEM <= 232448, "smem");
+ 
+-__global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
++__device__ __forceinline__ void triattn_bwd_q_body(const int bid, const int nb,
+     int N, int H, int S, int ntasks, float scl, float scale,
+-    const __grid_constant__ CUtensorMap qmap,            // q / dO [B*N*S][H*32], box (32, 128), 64B swizzle
+-    const __grid_constant__ CUtensorMap dmap,
+-    const __grid_constant__ CUtensorMap kmap,            // k / v, box (32, 64), 64B swizzle
+-    const __grid_constant__ CUtensorMap vmap,
+-    const __grid_constant__ CUtensorMap bmap,            // bias bf16 [B*H*S][S], box (64, 128), 128B swizzle
++    const CUtensorMap& qmap,            // q / dO [B*N*S][H*32], box (32, 128), 64B swizzle
++    const CUtensorMap& dmap,
++    const CUtensorMap& kmap,            // k / v, box (32, 64), 64B swizzle
++    const CUtensorMap& vmap,
++    const CUtensorMap& bmap,            // bias bf16 [B*H*S][S], box (64, 128), 128B swizzle
+     const float* __restrict__ LSE, const float* __restrict__ DELTA,
+-    const __grid_constant__ CUtensorMap dqmap,           // dQ [B*N*S][H*32] bf16, box (32, 128), 64B swizzle (TMA stores)
+-    const __grid_constant__ CUtensorMap dbmap,           // dbias slabs fp32 [P][B*H*S][S]; box (32, 128), 128B swizzle (see below)
++    const CUtensorMap& dqmap,           // dQ [B*N*S][H*32] bf16, box (32, 128), 64B swizzle (TMA stores)
++    const CUtensorMap& dbmap,           // dbias slabs fp32 [P][B*H*S][S]; box (32, 128), 128B swizzle (see below)
+     const int per, const int bhs) {                      // tasks a CTA (a contiguous range), B*H*S
+   pdl_trigger();   // round 8: PDL at S = 128 (launch_pdl_if): the next kernel may launch; this one waits for the previous grid
++  N1ST(0);
++#ifdef N1_PF
++  if (threadIdx.x == 0) { prefetch_map(&qmap); prefetch_map(&dmap); prefetch_map(&kmap); prefetch_map(&vmap); prefetch_map(&bmap); prefetch_map(&dqmap); prefetch_map(&dbmap); }
++#endif
+   pdl_wait();
++  N1ST(1);
+   const int QTL = S / BM, NG = (N + QR - 1) / QR, NKS = S / QB_KW, SPT = QR * NKS;
+   extern __shared__ __align__(1024) unsigned char raw[];
+   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
+@@ -1445,8 +1511,14 @@
+   if (warp >= 2 && (warp & 3) == 2 && lane == 0) bulk_wait<0>();
+   tc_fence_before();
+   __syncthreads();
++  N1ST(2);
+   tc_fence_after();
+   const uint32_t tmem = *tslot;
++#ifdef N1_EMPTY2
++  __syncthreads();
++  if (warp == 1) tmem_dealloc(tmem, 512);
++  return;
++#endif
+   const uint32_t sbase = sa(smb);                  // shared-window address of p: sbase + (p - smb), no S2R per use
+   auto A = [&](const void* p) -> uint32_t { return sbase + (uint32_t)(reinterpret_cast<const unsigned char*>(p) - smb); };
+   const int NP = (NG + per - 1) / per;                 // parts of a unit's row groups
+@@ -1456,7 +1528,7 @@
+   // deterministic dbias: each CTA runs one part (up to `per` row groups) of one (b, h, query tile) unit and writes the part's slab of it
+   // (its first task stores, the later ones reduce-add after the earlier writes completed), and triattn_db_slabs sums the NP slabs in a
+   // fixed order: every bit the same each run
+-  const int part = ((int)blockIdx.x / QTL) % NP, t0 = (int)blockIdx.x * per, t1 = t0 + min(per, NG - part * per);
++  const int part = ((int)bid / QTL) % NP, t0 = (int)bid * per, t1 = t0 + min(per, NG - part * per);
+   auto nrow = [&](int g, int r) { return min(g * QR + r, N - 1); };
+ 
+   if (warp == 0) {
+@@ -1545,7 +1617,7 @@
+       if (++pw == SPT) pw = 0;
+     }
+     __syncwarp();
+-  } else {
++  } else if (warp < 10) {
+     const int qq = warp & 3, row = qq * 32 + lane;   // TMEM lane = query row of the tile
+     const int gi = (warp - 2) >> 2, c0 = gi * 32;    // key columns of a stage; rows gi, gi + 2 for the Q / dO copy and dQ drain
+     const float2 sc2 = make_float2(scl, scl);
+@@ -1690,7 +1762,38 @@
+   if (warp >= 2 && (warp & 3) == 2 && lane == 0) bulk_wait<0>();
+   tc_fence_before();
+   __syncthreads();
++  N1ST(3);
+   if (warp == 1) tmem_dealloc(tmem, 512);
++  N1ST4;
++}
++
++// (N1) wrappers: the bodies above are device functions so the two kernels can also run as one launch (triattn_bwd_kq_sm100).
++__global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
++    int N, int H, int S, int ntasks, float scl, float scale,
++    const __grid_constant__ CUtensorMap qmap, const __grid_constant__ CUtensorMap dmap, const __grid_constant__ CUtensorMap kmap,
++    const __grid_constant__ CUtensorMap vmap, const __grid_constant__ CUtensorMap bmap,
++    const float* __restrict__ LSE, const float* __restrict__ DELTA,
++    const __grid_constant__ CUtensorMap dqmap, const __grid_constant__ CUtensorMap dbmap, const int per, const int bhs) {
++#ifdef N1_EMPTY
++  return;
++#endif
++  triattn_bwd_q_body((int)blockIdx.x, (int)gridDim.x, N, H, S, ntasks, scl, scale, qmap, dmap, kmap, vmap, bmap, LSE, DELTA, dqmap, dbmap, per, bhs);
++}
++
++// (N1) the key-side and the query-side kernels in ONE grid: CTAs [0, nkv) run the key side, the rest the query side (352 threads: the
++// query role's warp 10 only joins the two block barriers). At L = 128 the two kernels left 20 us of a 90 us step: as two launches they
++// fill the SMs one after the other (a PDL-early CTA of one holds its SM while it waits), together they pack the SMs by work.
++__global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kq_sm100(
++    int nkv, int N, int H, int S, int n1, int n2, float scl, float scale,
++    const __grid_constant__ CUtensorMap kq, const __grid_constant__ CUtensorMap kd, const __grid_constant__ CUtensorMap kk,
++    const __grid_constant__ CUtensorMap kv_, const __grid_constant__ CUtensorMap kb, const __grid_constant__ CUtensorMap kdk,
++    const __grid_constant__ CUtensorMap kdv,
++    const __grid_constant__ CUtensorMap qq, const __grid_constant__ CUtensorMap qd, const __grid_constant__ CUtensorMap qk,
++    const __grid_constant__ CUtensorMap qv, const __grid_constant__ CUtensorMap qb, const __grid_constant__ CUtensorMap qdq,
++    const __grid_constant__ CUtensorMap qdb,
++    const float* __restrict__ LSE, const float* __restrict__ DELTA, const int per, const int bhs) {
++  if ((int)blockIdx.x < nkv) triattn_bwd_kv_body((int)blockIdx.x, nkv, N, H, S, n1, scl, scale, kq, kd, kk, kv_, kb, LSE, DELTA, kdk, kdv);
++  else triattn_bwd_q_body((int)blockIdx.x - nkv, (int)gridDim.x - nkv, N, H, S, n2, scl, scale, qq, qd, qk, qv, qb, LSE, DELTA, qdq, qdb, per, bhs);
+ }
+ }  // namespace
+ 
+@@ -1805,6 +1908,21 @@
+   const int NGq = (int)((N + QR - 1) / QR), n2 = (int)(B * H * (S / BM) * NGq);
+   int per2 = (n2 + sms_ - 1) / sms_;                 // the fewest rows a CTA with B H QTL ceil(NG / per) CTAs <= the SMs
+   while (per2 < NGq && B * H * (S / BM) * ((NGq + per2 - 1) / per2) > sms_) ++per2;
++  int nkvm = 0;   // (N1) which == 3: CTAs of the merged launch that run the key side
++  if (which == 3) {   // split the SMs by work: a key task ~1 unit, a query task ~2 (L128 timelines); the query side takes whole slab groups
++    const int n1m = (int)(B * H * (S / BN) * ((N + KR - 1) / KR));
++    double best = 1e30;
++    const char* fp_ = getenv("N1_KQ_PER"); const int forced = fp_ ? atoi(fp_) : 0;
++    for (int p = 1; p <= NGq; ++p) {
++      if (forced && p != forced) continue;
++      const int ns = (NGq + p - 1) / p, cq = (int)(B * H * (S / BM) * ns);
++      if (cq >= sms_) continue;
++      const int x = sms_ - cq;
++      const double cost = std::max((double)((n1m + x - 1) / x), 2.0 * p);
++      if (cost < best) { best = cost; per2 = p; nkvm = x; }
++    }
++    if (nkvm == 0) which = 0;   // no split (many tasks): the two launches
++  }
+   const int nslab = (NGq + per2 - 1) / per2, grid2 = (int)(B * H * (S / BM) * nslab);
+   auto slabs = torch::empty({(long)nslab * B * H * S, S}, q.options().dtype(torch::kFloat32));
+   CUtensorMap dbm = make_map<2>(slabs.data_ptr(), {(uint64_t)S, (uint64_t)(nslab * B * H * S)}, {(uint64_t)S}, {32, BM}, CU_TENSOR_MAP_SWIZZLE_128B, "dbias",
+@@ -1836,12 +1954,21 @@
+     triattn_biasT<<<dim3(S / 32, S / 32, B * H), 256, 0, stream>>>(reinterpret_cast<const __nv_bfloat16*>(b16.data_ptr<at::BFloat16>()), bT.data_ptr<float>(), (int)S);
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+   }
++  if (which == 3) {   // (N1) key side + query side in one grid
++    static bool attr3 = false;
++    constexpr int KQ_SMEM = KB_SMEM > QB_SMEM ? KB_SMEM : QB_SMEM;
++    if (!attr3) { C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_bwd_kq_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, KQ_SMEM)); attr3 = true; }
++    const int n1m = (int)(B * H * (S / BN) * ((N + KR - 1) / KR));
++    launch_pdl_if(pdl && S == 128, triattn_bwd_kq_sm100, dim3(nkvm + grid2), dim3(KB_THREADS), KQ_SMEM, stream, nkvm, (int)N, (int)H, (int)S, n1m, n2, scl, (float)scale,
++        q32, d32, k128, v128, bkv, dkm, dvm, q128, d128, k64, v64, bq, dqm, dbm, lse.data_ptr<float>(), delta.data_ptr<float>(), per2, (int)(B * H * S));
++    C10_CUDA_KERNEL_LAUNCH_CHECK();
++  }
+   const int n1 = (int)(B * H * (S / BN) * ((N + KR - 1) / KR));
+-  if (which != 2)
++  if (which != 2 && which != 3)
+   launch_pdl_if(pdl && S == 128, triattn_bwd_kv_sm100, dim3(std::min(n1, sms)), dim3( KB_THREADS),  KB_SMEM,  stream, (int)N, (int)H, (int)S, n1, scl, (float)scale, q32, d32, k128, v128, bkv,
+       lse.data_ptr<float>(), delta.data_ptr<float>(), dkm, dvm);
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+-  if (which != 1) {
++  if (which != 1 && which != 3) {
+   launch_pdl_if(pdl && S == 128, triattn_bwd_q_sm100, dim3(grid2), dim3( QB_THREADS),  QB_SMEM,  stream, (int)N, (int)H, (int)S, n2, scl, (float)scale, q128, d128, k64, v64, bq,
+       lse.data_ptr<float>(), delta.data_ptr<float>(), dqm, dbm, per2, (int)(B * H * S));
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+@@ -1869,7 +1996,35 @@
+   return {dq, dk, dv, db};
+ }
+ 
++#ifdef N1_STAMP
++__global__ void n1_mark_k(unsigned long long* p) { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); p[0] = t; }
++void n1_mark(torch::Tensor t, int64_t i) { n1_mark_k<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<unsigned long long*>(t.data_ptr<int64_t>()) + i); }
++#ifdef N1_STAMP4
++torch::Tensor n1_wstamps() {
++  auto t = torch::empty({1024 * 32}, torch::TensorOptions().dtype(torch::kInt64));
++  C10_CUDA_CHECK(cudaDeviceSynchronize());
++  C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), g_n1w, sizeof(g_n1w)));
++  return t;
++}
++#endif
++torch::Tensor n1_stamps() {
++  auto t = torch::empty({1024 * 8}, torch::TensorOptions().dtype(torch::kInt64));
++  C10_CUDA_CHECK(cudaDeviceSynchronize());
++  C10_CUDA_CHECK(cudaMemcpyFromSymbol(t.data_ptr(), g_n1st, sizeof(g_n1st)));
++  return t;
++}
++#endif
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
++#if TA_TL
++  m.def("triattn_tl", &triattn_tl);
++#endif
++#ifdef N1_STAMP
++  m.def("n1_stamps", &n1_stamps);
++  m.def("n1_mark", &n1_mark);
++#ifdef N1_STAMP4
++  m.def("n1_wstamps", &n1_wstamps);
++#endif
++#endif
+   m.def("triattn_fwd", &triattn_fwd, "sm100 triangle-attention forward (D = 32, bf16, no mask): q/k/v/out [B, N, S, H, 32], optional base-2 LSE",
+         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("bias"), py::arg("scale"), py::arg("want_lse") = false,
+         py::arg("out"), py::arg("lse"));
+--- n1-base/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py	2026-11-18 14:30:28.000000000 +0000
++++ n1-triattn/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py	2026-11-18 14:41:45.000000000 +0000
+@@ -34,6 +34,10 @@
+ #: Starting-node bias orientation only (bt: the old kernel).  Step graph, off -> on (us): d_pair 64 x 2 L128 73.6 -> 71.2, L256 184.7 -> 178.0, L512 722.4 -> 689.5, L768 1879 -> 1801; 64 x 4 89.6 -> 88.4 (L128), 268 -> 261 (L256), 1209 -> 1180 (L512), 3331 -> 3257 (L768, ending); 256 x 8 187.7 -> 186.0 / 576 -> 569 / 2537 -> 2517 / 6870 -> 6809; 384 x 12 L512 4021 -> 4008.  Bitwise equal output, poison-fill tests equal.  MINIWORLD_TRIATTN_B200_DBROWS=0 turns it off.
+ DBROWS_FUSED = os.environ.get("MINIWORLD_TRIATTN_B200_DBROWS", "1") not in ("", "0")
+ KVQ_BRANCH = os.environ.get("MINIWORLD_TRIATTN_B200_KVQ_BRANCH", "1") not in ("", "0")
++#: (N1, cuda:b200_sm100 71) at L = 128 the core backward's key-side and query-side kernels run as ONE grid (`triattn_bwd(which=3)`): CTAs split by work, the slab sum sees half the slabs.
++#: MINIWORLD_TRIATTN_B200_KQ=0 turns it off.  KQ_PDL: the merged launch is a programmatic-dependent launch (the two-branch form is not).
++KQ_MERGE = os.environ.get("MINIWORLD_TRIATTN_B200_KQ", "1") not in ("", "0")
++KQ_PDL = os.environ.get("MINIWORLD_TRIATTN_B200_KQ_PDL", "0") not in ("", "0")
+ 
+ 
+ #: drop tensor data_ptr -> the side stream its draw runs on (set by integrations.triattn_b200.forward, joined by fused_forward before the
+@@ -469,7 +473,8 @@
+         bT = None
+     shp = (B, Lp, Lp, H, D)
+     raw = False  # (the slabs summed by tri_head_bwd: measured and rejected, see docs/b200/triattn.md round 7)
+-    side = _side_mod() if KVQ_BRANCH and not raw else None
++    kq = KQ_MERGE and Lp == 128 and not raw
++    side = _side_mod() if KVQ_BRANCH and not raw and not kq else None
+     s_ = side.fork(x.device) if side is not None else None
+     if s_ is not None:  # (S90) the key-side and the query-side kernels as two branches of the captured graph
+         with _on(side, s_):
+@@ -480,7 +485,7 @@
+     else:
+         res = e.triattn_bwd(
+         q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, D**-0.5, dbws.view(-1), E, E, E,
+-        bT if bT is not None else E, raw, False, 0, E,
++        bT if bT is not None else E, raw, KQ_PDL and kq, 3 if kq else 0, E,
+     )
+     dq, dk, dv = res[0].view(-1, C), res[1].view(-1, C), res[2].view(-1, C)
+     db = dbws.view(B, H, Lp, Lp) if raw else res[3]
+@@ -878,7 +883,8 @@
+         e = _core(_rows_per_task(Lp))
+         dbw, btw = (dbz.view(-1), bT) if dbz is not None else (E32, E32)
+         dbr = cut(4, 64) if (DBROWS_FUSED and not bt) else q.new_empty(0)   # (S90) the slab sum writes the head backward's dbias rows
+-        side = _side_mod() if KVQ_BRANCH else None
++        kq = KQ_MERGE and Lp == 128
++        side = _side_mod() if KVQ_BRANCH and not kq else None
+         s_ = side.fork(x.device) if side is not None else None
+         if s_ is not None:  # (S90) the key-side and the query-side kernels are independent: two branches of the captured graph share the SMs
+             with _on(side, s_):
+@@ -890,7 +896,7 @@
+         else:
+             _, _, _, db = e.triattn_bwd(
+             q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim**-0.5, dbw, cut(0), cut(1), cut(2), btw, False,
+-            CORE_PDL, 0, dbr,
++            CORE_PDL, 3 if kq else 0, dbr,
+         )
+     else:  # delta per 32-channel slice [B, L, S/32 x heads, L]: the core adds a head's slices where it reads them
+         bwd = _core64().triattn_bwd64 if S == 64 else _core128().triattn_bwd128

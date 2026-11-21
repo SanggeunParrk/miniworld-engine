@@ -1061,6 +1061,11 @@ def prebuild(target, rows):
         if "float32" in served:
             yield tf32.rows32
         return
+    if target.arch == "sm100":  # B200: the sm_100a cubins and the portable row extensions (prebuild_sm100.py)
+        from .prebuild_sm100 import prebuild_sm100
+
+        yield from prebuild_sm100(target, rows)
+        return
     if target.arch != "sm90":
         return
     from . import hoist, tf32, train

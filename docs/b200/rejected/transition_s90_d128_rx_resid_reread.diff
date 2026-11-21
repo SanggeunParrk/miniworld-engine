@@ -1,0 +1,102 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 55be1b4c8..4fdf0bbbd 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -397,7 +397,7 @@ _FUSED_FWD = {
+ #: (save = 1) keeps the ``fwd`` cubin the backward was built against. A module constant (A/B runs edit it).
+ #: (S90) the D 256 inference builds with two xn buffers and no x buffer (tfwd_d256.cu -DX2=1): the kernel's rstd / c1 arguments carry x / y. X2_RESID False: the 2.5.14 build.
+ X2_RESID = True
+-FWD_X2 = {(256, 2), (256, 4)}
++FWD_X2 = {(256, 2), (256, 4), (128, 2)}
+ FWD_INFER_FLAGS: dict[tuple[int, int], tuple[str, ...]] = {
+     (64, 2): ("-DROLES=1",),
+     (128, 2): ("-DLNH=1", "-DNXS_=3", "-DNW_=2"),
+@@ -555,7 +555,7 @@ def _fwd_launch(
+     if d in _FUSED_FWD:
+         # (S90) D 256 inference: the two-xn-buffer build (X2) from the second tile of a CTA; one tile a CTA keeps the single-buffer build (the tile's own latency, no ring to overlap)
+         x2_cell = X2_RESID and not save and (d, k.n) in FWD_X2
+-        x2_off = x2_cell and tiles <= k.grid
++        x2_off = x2_cell and d == 256 and tiles <= k.grid
+         x2 = x2_cell and not x2_off
+         xn = torch.empty_like(x) if save else x.new_empty((1, d))
+         mout = k.rows(out)
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
+index 159f9a0e4..8fa0e2aab 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
+@@ -9,10 +9,16 @@
+ // the leader's barriers (remote arrives), and the leader's commits arrive on both CTAs' barriers (multicast).
+ // SPDX-License-Identifier: Apache-2.0
+ #include "sm100.cuh"
++#include "widths/tsx_store.cuh"
+ using namespace s100;
+ 
+ // LNH (inference builds): the LayerNorm and the epilogue of a tile split over warps 4-7 and 8-11 (bit-identical: see lnh), every SwiGLU
+ // chunk on warps 12-15. Default: the original roles (two SwiGLU warpgroups, LayerNorm(i + 1) then epilogue(i) on warps 8-11).
++// RX 1 (S90, inference, needs LNH): the residual x is re-read from global memory in 128-B row segments and y written the same way from registers (store_t / load_t), so an x stage lives only
++// from its load to the end of its LayerNorm (was: to the end of the epilogue, ~9.5 us) and no x stage is the staging area of y. The kernel's rstd / c1 arguments carry x / y.
++#ifndef RX
++#define RX 0
++#endif
+ #ifndef LNH
+ #define LNH 0
+ #endif
+@@ -401,6 +407,7 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
+       if (lead) {
+         if (i < 12) STAMP(2 + i);
+         mbar_arrive_remote_cta(&B.xn_full[b], 0);
++        if (RX) mbar_arrive(&B.x_empty[i % NXS]);              // the x stage is dead once its LayerNorm is done
+         if (save && real) {
+           const int row0 = tile_of(i) * ROWS;
+ #pragma unroll
+@@ -411,6 +418,34 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
+         }
+       }
+     };
++#if RX
++    // the epilogue of K-block `half` (columns 64 half .. +63) of tile i: residual re-read from global in 128-B segments before the accumulator wait, y by row-segment stores
++    auto epi2_off = [&](int i, int half) { return ((size_t)tile_of(i) * ROWS + (r & ~7u)) * D_ + (size_t)half * 64 + (size_t)(lane & 7) * 8; };
++    auto epi2 = [&](int i, int half, const uint4 (&xr)[8]) {
++      const bool real = i < n_valid;
++      uint16_t* Yg = reinterpret_cast<uint16_t*>(c1);
++      const size_t off0 = epi2_off(i, half);
++      mbar_wait(&B.out_full, i & 1);
++      tc_fence_after();
++      uint32_t acc2[2][32], o[32];
++      tmem_ld32(trow + T_OUT + (half * 2) * 32, acc2[0]);
++      tmem_ld32(trow + T_OUT + (half * 2 + 1) * 32, acc2[1]);
++      tmem_wait_ld();
++      tc_fence_before();
++      __syncwarp();
++      if (lane == 0) ARRIVE_TC(&B.out_empty, 0);
++#pragma unroll
++      for (int hh = 0; hh < 2; ++hh)
++#pragma unroll
++        for (int t = 4 * hh; t < 4 * hh + 4; ++t) {
++          const uint32_t xw[4] = {xr[t].x, xr[t].y, xr[t].z, xr[t].w};
++#pragma unroll
++          for (int k = 0; k < 4; ++k)
++            o[4 * t + k] = pack_bf16(bf16lo(xw[k]) + __uint_as_float(acc2[hh][(t - 4 * hh) * 8 + 2 * k]), bf16hi(xw[k]) + __uint_as_float(acc2[hh][(t - 4 * hh) * 8 + 2 * k + 1]));
++        }
++      if (real) store_t<32>(Yg + off0, (size_t)D_, o, lane);
++    };
++#endif
+     auto epi = [&](int i, int cc0, int cc1, int bar, int nthr, bool lead) {
+       const int b = i % NXS;
+       mbar_wait(&B.out_full, i & 1);
+@@ -467,8 +502,15 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
+       const int half = warp >= 8 ? 1 : 0;
+       if (n_local > 0) lnh(0, half);
+       for (int i = 0; i < n_local; ++i) {
++#if RX
++        uint4 xr[8];                                            // tile i's residual in flight during the LayerNorm of tile i + 1
++        load_t<32>(reinterpret_cast<const uint16_t*>(rstd) + epi2_off(i, half), (size_t)D_, xr, lane);
++        if (i + 1 < n_local) lnh(i + 1, half);
++        epi2(i, half, xr);
++#else
+         if (i + 1 < n_local) lnh(i + 1, half);
+         epi(i, 2 * half, 2 * half + 2, 2, 256, tid == 128);
++#endif
+       }
+     }
+     if (tid == 256 || tid == 128) tma_store_wait0();

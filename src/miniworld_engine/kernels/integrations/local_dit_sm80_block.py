@@ -67,9 +67,9 @@ def serves(module, single, cond, pair, mask) -> bool:
     a, tr = module.attention, module.transition
     if a.use_qk_norm:
         return False
-    # A100 only: its row kernels keep 128-160 KB of weights in shared memory (the RTX 5090 has 99 KB a block); on the 5090 the atom DiTs take
-    # the dit_variants path (modules/dit_variant_cuda.VariantAtomCuda) instead
-    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (8, 0)):
+    # A100 (and the B200: its sm_100a build, 227 KB of shared memory a block) only: its row kernels keep 128-160 KB of weights in shared
+    # memory (the RTX 5090 has 99 KB a block); on the 5090 the atom DiTs take the dit_variants path (modules/dit_variant_cuda.VariantAtomCuda) instead
+    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) in ((8, 0), (10, 0))):
         return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF):
         return False

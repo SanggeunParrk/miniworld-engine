@@ -1,0 +1,295 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3h.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3h.cu
+index 7859700d8..7a5fa2b2f 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3h.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3h.cu
+@@ -440,7 +440,7 @@ struct Geo {
+ };
+ 
+ struct Bars {
+-  uint64_t w_full, x_full[2], x_empty[2], t_full[2], t_empty[2], sti[2], sto[2], acc_full[2], acc_empty[2];
++  uint64_t w_full, x_full[2], x_empty[2], t_full[2], t_empty[2], sti[2], sto[2], acc_full[2], acc_empty[2], sti_free[2], sto_free[2];
+   uint32_t tmem;
+ };
+ 
+@@ -685,6 +685,255 @@ __global__ void __launch_bounds__(NTHREADS, CPS)
+   if (warp == 2) tmem_dealloc(tmem, ACCB * 128);
+ }
+ 
++
++// ---------------------------------------------------------------------------------------------------------------------- k3hs
++// k3hf with the per-tile statistics and the epilogue on DIFFERENT warps (S90 part 3). In k3hf warps 4-7 / 8-11 compute a tile's statistics and then its
++// epilogue, one after the other: the tile's chain (statistics 653 + join 258 + wait 274 + fences 182 + epilogue arithmetic 1306 + store 210 clk, measured
++// with clock64) is the CTA's period. Here warps 4-7 (LN_in) and 8-11 (LN_out) only run the statistics, up to two tiles ahead of the epilogue (the
++// per-tile tables are double buffered, freed by the epilogue warps through sti_free / sto_free), and warps 12-15 (one per TMEM lane quadrant, all 64
++// channels) only run the epilogues: the statistics of tile i + 1 overlap the epilogue of tile i. 512 threads, two CTAs an SM (64 registers).
++#ifndef K3HS_NEG
++#define K3HS_NEG 2   // epilogue warp groups (4 warps each, a share of the channels)
++#endif
++constexpr int NEG = K3HS_NEG;
++constexpr int NTHREADS_S = 32 * (12 + 4 * NEG);
++
++template <int C, int H>
++__global__ void __launch_bounds__(NTHREADS_S, 2)
++    k3hs_kernel(const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mtri, const __grid_constant__ CUtensorMap mwp,
++                const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap my, const float* __restrict__ vec, int tiles,
++                float eps) {
++  extern __shared__ __align__(1024) uint8_t sm[];
++  using GG = Geo<C, H>;
++  constexpr int XT = GG::XT, TT = GG::TT;
++  constexpr uint32_t IDG = idesc_bf16(64, C), IDP = idesc_bf16_mj(64, C, 1, 0);
++  const uint32_t su = smem_u32(sm);
++  Bars& B = *reinterpret_cast<Bars*>(sm + GG::O_BAR);
++  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  const int cta = blockIdx.x, G = gridDim.x;
++  const int n_local = tiles > cta ? (tiles - cta + G - 1) / G : 0;
++  const int nx0 = min(n_local, 2);
++  auto row0_of = [&](int i) { return (cta + i * G) * TOK; };
++  auto xload = [&](int b, int i) {
++    mbar_expect_tx(&B.x_full[b], XT);
++    for (int kb = 0; kb < C / 64; ++kb) tma_load_2d(sm + GG::O_X + b * XT + kb * XB, &mx, &B.x_full[b], kb * 64, row0_of(i), EVICT_FIRST);
++  };
++  pdl_trigger();
++  if (tid == 0) {
++    mbar_init(&B.w_full, 1);
++    for (int b = 0; b < 2; ++b) {
++      mbar_init(&B.x_full[b], 1); mbar_init(&B.x_empty[b], 1); mbar_init(&B.t_full[b], 1); mbar_init(&B.t_empty[b], 5);
++      mbar_init(&B.sti[b], 1); mbar_init(&B.sto[b], 1); mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], 4 * NEG);
++      mbar_init(&B.sti_free[b], 4 * NEG); mbar_init(&B.sto_free[b], 4 * NEG);
++    }
++    fence_mbar_init();
++    prefetch_tmap(&mtri); prefetch_tmap(&my);
++    mbar_expect_tx(&B.w_full, GG::WG + GG::WP);
++    for (int kb = 0; kb < C / 64; ++kb) tma_load_2d(sm + GG::O_WG + kb * GG::WGB, &mwg, &B.w_full, kb * 64, 0, EVICT_LAST);
++    for (int kb = 0; kb < H / 64; ++kb) tma_load_2d(sm + GG::O_WP + kb * GG::WGB, &mwp, &B.w_full, kb * 64, 0, EVICT_LAST);
++    for (int b = 0; b < nx0; ++b) xload(b, b);
++  }
++  for (int k = tid; k < 4 * C; k += NTHREADS_S) reinterpret_cast<float*>(sm + GG::O_VEC)[k] = vec[k];   // sp, ep, sg, eg
++  if (warp == 2) { tmem_alloc(&B.tmem, 256); tmem_relinquish(); }
++  tc_fence_before();
++  __syncthreads();
++  tc_fence_after();
++  const uint32_t tmem = B.tmem;
++  const uint32_t O_SP = su + GG::O_VEC, O_EP = O_SP + 4 * C, O_SG = O_EP + 4 * C, O_EG = O_SG + 4 * C;
++  float* sti = reinterpret_cast<float*>(sm + GG::O_STI);   // [2][2][TOK]: mu_i, rs_i
++  float* sto = reinterpret_cast<float*>(sm + GG::O_STO);   // [2][2][TOK]: mu_o, rs_o
++
++  if (warp == 0 && lane == 0) {
++    for (int i = nx0; i < n_local; ++i) {
++      const int b = i & 1;
++      mbar_wait(&B.x_empty[b], ((i >> 1) - 1) & 1);
++      xload(b, i);
++    }
++  } else if (warp == 2 && lane == 0) {
++    pdl_wait();   // t is the previous kernel's output
++    for (int i = 0; i < n_local; ++i) {
++      const int b = i & 1;
++      if (i >= 2) mbar_wait(&B.t_empty[b], ((i >> 1) - 1) & 1);
++      mbar_expect_tx(&B.t_full[b], TT);
++      tma_load_2d(sm + GG::O_T + b * TT, &mtri, &B.t_full[b], row0_of(i), 0, EVICT_FIRST);
++    }
++  } else if (warp == 1 && lane == 0) {
++    mbar_wait(&B.w_full, 0);
++    for (int i = 0; i < n_local; ++i) {
++      const int b = i & 1;
++      const uint32_t ph = (i >> 1) & 1, d = tmem + b * (2 * C);
++      if (i >= 2) mbar_wait(&B.acc_empty[b], ph ^ 1);
++      mbar_wait(&B.x_full[b], ph);
++      tc_fence_after();
++#pragma unroll
++      for (int k = 0; k < C / 16; ++k)
++        umma_ss(d + C, desc_k_sw128(su + GG::O_X + b * XT + (k >> 2) * XB + (k & 3) * 32),
++                desc_k_sw128(su + GG::O_WG + (k >> 2) * GG::WGB + (k & 3) * 32), IDG, k != 0);
++      mbar_wait(&B.t_full[b], ph);
++      tc_fence_after();
++#pragma unroll
++      for (int k = 0; k < H / 16; ++k)
++        umma_ss(d, desc_mn_sw128(su + GG::O_T + b * TT + k * 2048, 8192), desc_k_sw128(su + GG::O_WP + (k >> 2) * GG::WGB + (k & 3) * 32),
++                IDP, k != 0);
++      umma_commit(&B.t_empty[b]);
++      umma_commit(&B.acc_full[b]);
++    }
++  }
++
++  if (warp >= 4 && warp < 8) {
++    // ------------------------------------------------------------------ LN_in statistics only: thread pair = row r, half h of the channels
++    const int t = tid - 128, r = t >> 1, h = t & 1;
++    auto up = [](uint32_t w) { return make_float2(__uint_as_float(w << 16), __uint_as_float(w & 0xffff0000u)); };
++    constexpr int NQ = C / 16;
++    for (int i = 0; i < n_local; ++i) {
++      const int b = i & 1;
++      mbar_wait(&B.x_full[b], (i >> 1) & 1);
++      if (i >= 2) mbar_wait(&B.sti_free[b], ((i >> 1) - 1) & 1);
++      const uint32_t xt = su + GG::O_X + b * XT;
++      auto adr = [&](int k) { const int qq = h * NQ + k; return xt + (qq >> 3) * XB + k3h::sw128(r, qq & 7); };
++      uint4 v[NQ];
++      float2 a0 = make_float2(0.f, 0.f), a1 = a0, a2 = a0, a3 = a0;
++#pragma unroll
++      for (int k = 0; k < NQ; ++k) {
++        v[k] = k3h::lds128(adr(k));
++        a0 = __fadd2_rn(a0, up(v[k].x)); a1 = __fadd2_rn(a1, up(v[k].y)); a2 = __fadd2_rn(a2, up(v[k].z)); a3 = __fadd2_rn(a3, up(v[k].w));
++      }
++      a0 = __fadd2_rn(__fadd2_rn(a0, a1), __fadd2_rn(a2, a3));
++      float s = __fadd_rn(a0.x, a0.y);
++      s = __fadd_rn(s, __shfl_xor_sync(0xffffffffu, s, 1));
++      const float mu = __fmul_rn(s, 1.f / C);
++      const float2 nm = make_float2(-mu, -mu);
++      a0 = a1 = a2 = a3 = make_float2(0.f, 0.f);
++#pragma unroll
++      for (int k = 0; k < NQ; ++k) {
++        float2 dd;
++        dd = __fadd2_rn(up(v[k].x), nm); a0 = __ffma2_rn(dd, dd, a0);
++        dd = __fadd2_rn(up(v[k].y), nm); a1 = __ffma2_rn(dd, dd, a1);
++        dd = __fadd2_rn(up(v[k].z), nm); a2 = __ffma2_rn(dd, dd, a2);
++        dd = __fadd2_rn(up(v[k].w), nm); a3 = __ffma2_rn(dd, dd, a3);
++      }
++      a0 = __fadd2_rn(__fadd2_rn(a0, a1), __fadd2_rn(a2, a3));
++      float ss = __fadd_rn(a0.x, a0.y);
++      ss = __fadd_rn(ss, __shfl_xor_sync(0xffffffffu, ss, 1));
++      if (h == 0) { sti[b * 2 * TOK + r] = mu; sti[b * 2 * TOK + TOK + r] = k3h::rsqrt_ftz(__fadd_rn(__fmul_rn(ss, 1.f / C), eps)); }
++      named_bar_sync(1, 128);
++      if (t == 0) mbar_arrive(&B.sti[b]);
++    }
++  } else if (warp >= 8 && warp < 12) {
++    // ------------------------------------------------------------------ LN_out statistics only (k3h's one-pass pivot form): warp q = tokens 16 q ..
++    const int q = warp & 3, t4 = lane & 3, tr = lane >> 2;
++    const int tok0 = q * 16, tc = tok0 >> 3;
++    auto up = [](uint32_t w) { return make_float2(__uint_as_float(w << 16), __uint_as_float(w & 0xffff0000u)); };
++    for (int i = 0; i < n_local; ++i) {
++      const int b = i & 1;
++      const uint32_t base = su + GG::O_T + b * TT;
++      auto ldj = [&](int j, uint32_t (&w)[4]) {
++        const int mm = lane >> 3, ch = 16 * j + 8 * (mm & 1) + (lane & 7), qc = tc + (mm >> 1);
++        k3h::ldsm_x4_trans(base + k3h::sw128(ch, qc), w[0], w[1], w[2], w[3]);
++      };
++      mbar_wait(&B.t_full[b], (i >> 1) & 1);
++      uint32_t w0[4]; ldj(0, w0);
++      const float kA = __shfl_sync(0xffffffffu, up(w0[0]).x, lane & ~3), kB = __shfl_sync(0xffffffffu, up(w0[2]).x, lane & ~3);
++      const float2 nkA = make_float2(-kA, -kA), nkB = make_float2(-kB, -kB);
++      float2 sA = make_float2(0.f, 0.f), sA2 = sA, sB = sA, sB2 = sA, qA = sA, qA2 = sA, qB = sA, qB2 = sA;
++#pragma unroll 4
++      for (int j = 0; j < H / 16; ++j) {
++        uint32_t w[4]; ldj(j, w);
++        float2 d;
++        d = __fadd2_rn(up(w[0]), nkA); sA = __fadd2_rn(sA, d); qA = __ffma2_rn(d, d, qA);
++        d = __fadd2_rn(up(w[1]), nkA); sA2 = __fadd2_rn(sA2, d); qA2 = __ffma2_rn(d, d, qA2);
++        d = __fadd2_rn(up(w[2]), nkB); sB = __fadd2_rn(sB, d); qB = __ffma2_rn(d, d, qB);
++        d = __fadd2_rn(up(w[3]), nkB); sB2 = __fadd2_rn(sB2, d); qB2 = __ffma2_rn(d, d, qB2);
++      }
++      fence_async_smem();   // generic reads of t before the TMA that refills the buffer
++      __syncwarp();
++      if (lane == 0) mbar_arrive(&B.t_empty[b]);
++      float tA = __fadd_rn(__fadd_rn(sA.x, sA.y), __fadd_rn(sA2.x, sA2.y)), tB = __fadd_rn(__fadd_rn(sB.x, sB.y), __fadd_rn(sB2.x, sB2.y));
++      float uA = __fadd_rn(__fadd_rn(qA.x, qA.y), __fadd_rn(qA2.x, qA2.y)), uB = __fadd_rn(__fadd_rn(qB.x, qB.y), __fadd_rn(qB2.x, qB2.y));
++#pragma unroll
++      for (int o = 1; o <= 2; o <<= 1) {
++        tA = __fadd_rn(tA, __shfl_xor_sync(0xffffffffu, tA, o)); tB = __fadd_rn(tB, __shfl_xor_sync(0xffffffffu, tB, o));
++        uA = __fadd_rn(uA, __shfl_xor_sync(0xffffffffu, uA, o)); uB = __fadd_rn(uB, __shfl_xor_sync(0xffffffffu, uB, o));
++      }
++      const float mA = __fmul_rn(tA, 1.f / H), mB = __fmul_rn(tB, 1.f / H);
++      const float vA = fmaxf(__fmaf_rn(-mA, mA, __fmul_rn(uA, 1.f / H)), 0.f), vB = fmaxf(__fmaf_rn(-mB, mB, __fmul_rn(uB, 1.f / H)), 0.f);
++      if (i >= 2) mbar_wait(&B.sto_free[b], ((i >> 1) - 1) & 1);
++      if (t4 == 0) {
++        sto[b * 2 * TOK + tok0 + tr] = __fadd_rn(kA, mA); sto[b * 2 * TOK + TOK + tok0 + tr] = k3h::rsqrt_ftz(__fadd_rn(vA, eps));
++        sto[b * 2 * TOK + tok0 + tr + 8] = __fadd_rn(kB, mB); sto[b * 2 * TOK + TOK + tok0 + tr + 8] = k3h::rsqrt_ftz(__fadd_rn(vB, eps));
++      }
++      named_bar_sync(2, 128);
++      if (warp == 8 && lane == 0) mbar_arrive(&B.sto[b]);
++    }
++  } else if (warp >= 12) {
++    // ------------------------------------------------------------------ epilogue: warp q = TMEM lane quadrant q (tokens 16 q ..), all channels
++    const int q = warp & 3, tr = lane >> 2, t4 = lane & 3;
++    constexpr int CW = 32, NCQ = C / CW / NEG;
++    const int eg = (warp - 12) >> 2, cq0 = eg * NCQ;
++    for (int i = 0; i < n_local; ++i) {
++      const int b = i & 1;
++      const uint32_t ph = (i >> 1) & 1;
++      mbar_wait(&B.sti[b], ph);
++      mbar_wait(&B.sto[b], ph);
++      float mo[2], ro[2], mi[2], ri[2];
++#pragma unroll
++      for (int tb = 0; tb < 2; ++tb) {
++        const int r = 16 * q + tr + 8 * tb;
++        mi[tb] = sti[b * 2 * TOK + r]; ri[tb] = sti[b * 2 * TOK + TOK + r];
++        mo[tb] = sto[b * 2 * TOK + r]; ro[tb] = sto[b * 2 * TOK + TOK + r];
++      }
++      __syncwarp();
++      if (lane == 0) { mbar_arrive(&B.sti_free[b]); mbar_arrive(&B.sto_free[b]); }
++      mbar_wait(&B.acc_full[b], ph);
++      mbar_wait(&B.x_full[b], ph);
++      tc_fence_after();
++      const uint32_t xr = su + GG::O_X + b * XT;
++#pragma unroll
++      for (int cq = cq0; cq < cq0 + NCQ; ++cq) {
++        uint32_t pv[16], gv[16];
++        const uint32_t ta = tmem + b * (2 * C) + ((uint32_t)(q * 32) << 16) + cq * CW;
++        k3h::tmem_ld16x256_x4(ta, pv);
++        k3h::tmem_ld16x256_x4(ta + C, gv);
++        tmem_wait_ld();
++        if (cq == cq0 + NCQ - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive(&B.acc_empty[b]); }
++#pragma unroll
++        for (int j = 0; j < 4; ++j) {
++          const int ch = cq * CW + 8 * j + 2 * t4;
++          const float2 sp = k3h::lds64f(O_SP + ch * 4), ep = k3h::lds64f(O_EP + ch * 4), sg = k3h::lds64f(O_SG + ch * 4), eg = k3h::lds64f(O_EG + ch * 4);
++#pragma unroll
++          for (int tb = 0; tb < 2; ++tb) {
++            const int r = 16 * q + tr + 8 * tb;
++            const uint32_t a = xr + (ch >> 6) * XB + k3h::sw128(r, (ch & 63) >> 3) + (ch & 7) * 2;
++            const uint32_t xw = k3h::lds32(a);
++            const float2 pa = make_float2(__uint_as_float(pv[4 * j + 2 * tb]), __uint_as_float(pv[4 * j + 2 * tb + 1]));
++            const float2 ga = make_float2(__uint_as_float(gv[4 * j + 2 * tb]), __uint_as_float(gv[4 * j + 2 * tb + 1]));
++            const float2 pp = __ffma2_rn(make_float2(ro[tb], ro[tb]), __ffma2_rn(make_float2(-mo[tb], -mo[tb]), sp, pa), ep);
++            const float2 gg = __ffma2_rn(make_float2(ri[tb], ri[tb]), __ffma2_rn(make_float2(-mi[tb], -mi[tb]), sg, ga), eg);
++            const float2 h = __fmul2_rn(gg, make_float2(0.5f, 0.5f));   // sigmoid(g) = 0.5 tanh(g / 2) + 0.5
++            float2 th;
++            asm("tanh.approx.f32 %0, %1;" : "=f"(th.x) : "f"(h.x));
++            asm("tanh.approx.f32 %0, %1;" : "=f"(th.y) : "f"(h.y));
++            const float2 sgm = __ffma2_rn(th, make_float2(0.5f, 0.5f), make_float2(0.5f, 0.5f));
++            const float2 y = __fadd2_rn(make_float2(bf16lo(xw), bf16hi(xw)), k3h::rbf2(__fmul2_rn(sgm, pp)));
++            k3h::sts32(a, pack_bf16(y.x, y.y));
++          }
++        }
++      }
++      fence_async_smem();
++      named_bar_sync(3, 128 * NEG);
++      if (warp == 12 && lane == 0) {
++        for (int kb = 0; kb < C / 64; ++kb) tma_store_2d(&my, sm + GG::O_X + b * XT + kb * XB, kb * 64, row0_of(i));
++        bulk_commit();
++        bulk_wait_read<0>();
++        mbar_arrive(&B.x_empty[b]);
++      }
++    }
++    if (warp == 12 && lane == 0) bulk_wait<0>();
++  }
++  tc_fence_before();
++  __syncthreads();
++  if (warp == 2) tmem_dealloc(tmem, 256);
++}
+ }  // namespace k3hf
+ 
+ // x [M, C] bf16, tri [H, (B,) L, L] bf16, wpq = bf16(Wp g_o) [C, H], wgq = bf16(Wg g_i) [C, C], vec [4, C] fp32 (sp, ep, sg, eg:
+@@ -707,6 +956,25 @@ void k3hf_forward(torch::Tensor x, torch::Tensor tri, torch::Tensor wpq, torch::
+   const float* vp = vec.data_ptr<float>();
+   const char* cps_env = std::getenv("TRIMUL_K3HF_CPS");   // 0: two CTAs an SM (A/B)
+   const bool use3 = !(cps_env != nullptr && cps_env[0] == '0');
++  const char* s_env = std::getenv("TRIMUL_K3HF_S");   // 1: statistics and epilogue on different warps (k3hs)
++  if (s_env != nullptr && s_env[0] == '1') {
++    int g = grid > 0 ? (int)grid : 2 * k3h::num_sms();
++    g = std::min(g, tiles);
++    if (C == 64 && H == 64) {
++      static bool attr = false;
++      if (!attr) { cudaFuncSetAttribute(k3hs_kernel<64, 64>, cudaFuncAttributeMaxDynamicSharedMemorySize, Geo<64, 64>::SMEM); attr = true; }
++      tmap::launch_pdl(k3hs_kernel<64, 64>, dim3(g), dim3(NTHREADS_S), Geo<64, 64>::SMEM, st, pdl != 0, mx, mt, mwp, mwg, my, vp, tiles, (float)eps);
++      C10_CUDA_KERNEL_LAUNCH_CHECK();
++      return;
++    }
++    if (C == 64 && H == 128) {
++      static bool attr = false;
++      if (!attr) { cudaFuncSetAttribute(k3hs_kernel<64, 128>, cudaFuncAttributeMaxDynamicSharedMemorySize, Geo<64, 128>::SMEM); attr = true; }
++      tmap::launch_pdl(k3hs_kernel<64, 128>, dim3(g), dim3(NTHREADS_S), Geo<64, 128>::SMEM, st, pdl != 0, mx, mt, mwp, mwg, my, vp, tiles, (float)eps);
++      C10_CUDA_KERNEL_LAUNCH_CHECK();
++      return;
++    }
++  }
+ #define K3HF_GO(CC, HH, CP)                                                                                                       \
+   {                                                                                                                               \
+     int g = grid > 0 ? (int)grid : (CP) * k3h::num_sms();                                                                         \

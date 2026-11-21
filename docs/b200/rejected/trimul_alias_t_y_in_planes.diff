@@ -1,0 +1,55 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py
+index 295461d3e..f86b6e6de 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_infer.py
+@@ -181,6 +181,17 @@ M64_FRONT: frozenset = M64_CELLS - {(256, False, 64, 128)}  # hidden 128 L256: k
+ M64_OUT: frozenset = M64_CELLS
+ 
+ 
++#: L128 inference, D <= 128: no buffer of its own for t or y. ``ctr`` (one item -- the whole 128 x 128 product -- per channel at L128,
++#: its operands in shared memory before its store) writes t over the left planes it has just read, and the output kernel writes y over
++#: the first d right planes (dead once ctr has completed; k3g / k3h write y only after their griddepcontrol.wait). The forward then
++#: allocates L2 lines for the planes only: under a dirty L2 (the measurer's flush, a previous layer's stores) every newly allocated
++#: line evicts a dirty one, and on the two-die B200 the cost of those write-backs depends on where the buffers land -- D64 L128 measured
++#: 18.5-20.1 us over placements of planes / t / y with the flush and a flat 18.0 without it (``_tools/addr.py``). y is a view of the
++#: planes' storage (2 x its own size while it lives: 4 MB at D64 L128).
++ALIAS_CELLS = frozenset({(128, b, 64, 64) for b in (False, True)} | {(128, False, 64, 128), (128, True, 64, 128), (128, False, 128, 128), (128, True, 128, 128)})
++ALIAS = True
++
++
+ def _fold(x):
+     """[c, (B,) n, n] -> [c * B, n, n]: the samples join the channel planes in cuBLAS's batch dim (a view, the planes are contiguous)."""
+     n = x.shape[-1]
+@@ -291,7 +302,11 @@ def _inference_body(leaves, mask, ds, direction, y):
+         hid = hidden_of(wl.shape[0], direction)
+         p = planes_of(d, hid, direction)
+         planes = x.new_empty((p, bsz, n, n))
+-        if y is None:
++        cell = (n, direction == 0, d, hid)
++        alias = ALIAS and y is None and ds is None and d <= 128 and cell in ALIAS_CELLS
++        if alias:  # t over the left planes, y over the first right planes (see ALIAS_CELLS)
++            y = planes[p // 2 : p // 2 + d].view(x.shape)
++        elif y is None:
+             y = torch.empty_like(x)
+         if d <= 128:
+             if len(leaves) > 11:  # kernel_forms: row-major front matrices and wpp made once
+@@ -299,13 +314,17 @@ def _inference_body(leaves, mask, ds, direction, y):
+             else:
+                 wpp = x.new_empty((d, p // 2))  # k3g's output projection, columns in its TMEM K order
+                 front = _front(E, wl, wlg, wr, wrg, wp, wpp)
+-            cell = (n, direction == 0, d, hid)
+             m64f, m64o = cell in M64_FRONT, ds is None and cell in M64_OUT and wp.dtype == torch.bfloat16 and wp.is_contiguous() and wg.is_contiguous()
+             if m64f:
+                 E.k1h_forward(x2, *front, mask, gi, bi, planes, 0, EPS)
+             else:
+                 E.k1w_forward(x2, *front, mask, None, None, gi, bi, planes, 0, EPS)
+-            t = _contract_inf(E, planes, contracted(d, hid, direction), direction)
++            if alias:
++                c = contracted(d, hid, direction)
++                t = planes[: (2 if direction == 0 else 1) * c]
++                E.ctr_forward(planes, t, c, direction, 0, 3)
++            else:
++                t = _contract_inf(E, planes, contracted(d, hid, direction), direction)
+             del planes
+             if m64o:
+                 E.k3h_forward(x2, t, wp, wg, gi, bi, go, bo, y.view(m, d), EPS, 0, 1)

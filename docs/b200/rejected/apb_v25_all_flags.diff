@@ -1,0 +1,538 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_pdl_sm100.cuh b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_pdl_sm100.cuh
+index 03827d1ba..c4440afec 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_pdl_sm100.cuh
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_pdl_sm100.cuh
+@@ -132,4 +132,116 @@ __global__ void __launch_bounds__(NT) ln_bwd_pk(const AT* __restrict__ DXA, cons
+   __syncthreads();
+   colsum_add<V>(ab, red, ALNB, acc_stride);
+ }
++
++// ---- v25 (2026-11-18): the same kernels with every load that does not read the previous kernel's output issued BEFORE griddepcontrol.wait
++// (the "first touch" under the predecessor's tail). Safe because each predecessor waits for its own predecessor before it triggers, and the
++// cross-stream inputs arrive through full (event) dependencies: gate_rows -- the gate columns of qkvg (the GEMM before the core); gate_bwd
++// -- o and the gate columns (forward); qkv_bwd -- the dq key-chunk partials (side stream, joined by an event); ln_bwd -- x, the row
++// statistics, the LayerNorm weight, dy. The same statements on the same values: bitwise the *_pk results.
++#define APB_PDL_WAIT() asm volatile("griddepcontrol.wait;" ::: "memory")
++#define APB_PDL_TRIGGER() asm volatile("griddepcontrol.launch_dependents;" ::: "memory")
++template <int V>
++__global__ void __launch_bounds__(NT) gate_rows_pf(const float* __restrict__ O, const bf* __restrict__ QKVG, bf* __restrict__ OG, int M) {
++  constexpr int WD = 128 * V;
++  const long r = (long)blockIdx.x * RW + (threadIdx.x >> 5);
++  if (r >= M) return;
++  float4 o[V], g[V];
++  ldv<V>(QKVG + r * 4 * WD + 3 * WD, g);
++  APB_PDL_WAIT(); APB_PDL_TRIGGER();
++  ldv<V>(O + r * WD, o);
++#pragma unroll
++  for (int k = 0; k < V; ++k) o[k] = mul4(sig4(g[k]), o[k]);
++  stv<V>(OG + r * WD, o);
++}
++template <int V, int HL>
++__global__ void __launch_bounds__(NT) gate_bwd_pf(const bf* __restrict__ DOG, const float* __restrict__ O, const bf* __restrict__ QKVG,
++    bf* __restrict__ DOB, float* __restrict__ DD, bf* __restrict__ DQKVG, int M) {
++  constexpr int WD = 128 * V;
++  const long r = (long)blockIdx.x * RW + (threadIdx.x >> 5);
++  if (r >= M) return;
++  const int lane = threadIdx.x & 31;
++  float4 dog[V], o[V], s[V], d_o[V], dg[V];
++  ldv<V>(O + r * WD, o); ldv<V>(QKVG + r * 4 * WD + 3 * WD, s);
++  APB_PDL_WAIT(); APB_PDL_TRIGGER();
++  ldv<V>(DOG + r * WD, dog);
++#pragma unroll
++  for (int k = 0; k < V; ++k) {
++    s[k] = sig4(s[k]);
++    d_o[k] = mul4(dog[k], s[k]);
++    const float4 t = mul4(dog[k], o[k]);
++    dg[k] = make_float4(t.x * s[k].x * (1.f - s[k].x), t.y * s[k].y * (1.f - s[k].y), t.z * s[k].z * (1.f - s[k].z),
++                        t.w * s[k].w * (1.f - s[k].w));
++  }
++  stv<V>(DOB + r * WD, d_o);
++  stv<V>(DQKVG + r * 4 * WD + 3 * WD, dg);
++  float dsum = dotv<V>(d_o, o);
++#pragma unroll
++  for (int o_ = 1; o_ < HL; o_ <<= 1) dsum += __shfl_xor_sync(0xffffffffu, dsum, o_);
++  if (lane % HL == 0) DD[(long)(lane / HL) * M + r] = dsum;
++}
++template <int V>
++__global__ void __launch_bounds__(NT) qkv_bwd_pf(const float* __restrict__ DQ, const float* __restrict__ DK, const float* __restrict__ DV,
++    bf* __restrict__ DQKVG, float* __restrict__ ABQ, int M, int NCH, int acc_stride) {
++  constexpr int WD = 128 * V;
++  __shared__ __align__(16) float red[RW * WD];
++  const long r = (long)blockIdx.x * RW + (threadIdx.x >> 5);
++  float4 v[V] = {};
++  if (r < M) {
++    ldv<V>(DQ + r * WD, v);
++    for (int c0 = 1; c0 < NCH; c0 += 4) {                                   // 4 chunks' loads in flight, added in chunk order
++      float4 p[4][V];
++#pragma unroll
++      for (int u = 0; u < 4; ++u)
++        if (c0 + u < NCH) ldv<V>(DQ + ((long)(c0 + u) * M + r) * WD, p[u]);
++#pragma unroll
++      for (int u = 0; u < 4; ++u)
++        if (c0 + u < NCH) {
++#pragma unroll
++          for (int k = 0; k < V; ++k) v[k] = add4(v[k], p[u][k]);
++        }
++    }
++#pragma unroll
++    for (int k = 0; k < V; ++k) v[k] = rnd<bf>(v[k]);
++  }
++  APB_PDL_WAIT(); APB_PDL_TRIGGER();
++  if (r < M) {
++    stv<V>(DQKVG + r * 4 * WD, v);
++    float4 t[V], u[V];
++    ldv<V>(DK + r * WD, t); ldv<V>(DV + r * WD, u);
++    stv<V>(DQKVG + r * 4 * WD + WD, t); stv<V>(DQKVG + r * 4 * WD + 2 * WD, u);
++  }
++  colsum_add<V>(v, red, ABQ, acc_stride);
++}
++template <typename XT, typename OT, int V, typename AT = bf>
++__global__ void __launch_bounds__(NT) ln_bwd_pf(const AT* __restrict__ DXA, const XT* __restrict__ X, const float2* __restrict__ ST,
++    const float* __restrict__ LW, const OT* __restrict__ DY, OT* __restrict__ DX, float* __restrict__ ALNW, float* __restrict__ ALNB, int M,
++    int acc_stride) {
++  constexpr int D = 128 * V;
++  __shared__ __align__(16) float red[RW * D];
++  const long r = (long)blockIdx.x * RW + (threadIdx.x >> 5);
++  float4 aw[V] = {}, ab[V] = {};
++  float4 dxa[V], xh[V], w[V], g[V], dy[V];
++  float2 st = make_float2(0.f, 0.f);
++  if (r < M) { ldv<V>(X + r * D, xh); ldv<V>(LW, w); ldv<V>(DY + r * D, dy); st = ST[r]; }
++  APB_PDL_WAIT(); APB_PDL_TRIGGER();
++  if (r < M) {
++    ldv<V>(DXA + r * D, dxa);
++#pragma unroll
++    for (int k = 0; k < V; ++k) {
++      xh[k] = make_float4((xh[k].x - st.x) * st.y, (xh[k].y - st.x) * st.y, (xh[k].z - st.x) * st.y, (xh[k].w - st.x) * st.y);
++      g[k] = mul4(dxa[k], w[k]);
++      aw[k] = mul4(dxa[k], xh[k]);
++      ab[k] = dxa[k];
++    }
++    const float m1 = warp_sum(sumv<V>(g)) * (1.f / D), m2 = warp_sum(dotv<V>(g, xh)) * (1.f / D);
++#pragma unroll
++    for (int k = 0; k < V; ++k)
++      dy[k] = make_float4(dy[k].x + st.y * (g[k].x - m1 - xh[k].x * m2), dy[k].y + st.y * (g[k].y - m1 - xh[k].y * m2),
++                          dy[k].z + st.y * (g[k].z - m1 - xh[k].z * m2), dy[k].w + st.y * (g[k].w - m1 - xh[k].w * m2));
++    stv<V>(DX + r * D, dy);
++  }
++  colsum_add<V>(aw, red, ALNW, acc_stride);
++  __syncthreads();
++  colsum_add<V>(ab, red, ALNB, acc_stride);
++}
+ }  // namespace
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
+index 5f381292c..2e9588b8b 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
+@@ -39,6 +39,8 @@ namespace {
+ // PDL launches (2026-11-17, v20): ``pdl(1)`` makes the launchers below start their kernel as a programmatic dependent of the previous kernel
+ // on the stream (its griddepcontrol.wait, APB_PDL_ENTRY, holds every read); ``pdl(0)``: plain launches (the same kernels and values).
+ int g_pdl = 0;
++// v25: the row kernels in their *_pf forms (independent loads before griddepcontrol.wait; ``pf(1)``, with pdl on)
++int g_pf = 0;
+ template <typename... KA, typename... A>
+ void pdl_go(void (*k)(KA...), unsigned grid, unsigned block, size_t smem, A... a) {
+   cudaLaunchConfig_t cfg = {};
+@@ -60,7 +62,7 @@ void gate_rows_p(at::Tensor o, at::Tensor qkvg, at::Tensor og) {
+   chk(o, at::kFloat, "o"); chk(qkvg, at::kBFloat16, "qkvg"); chk(og, at::kBFloat16, "og");
+   TORCH_CHECK((W == 384 || W == 512) && qkvg.size(1) == 4 * W && og.size(1) == W, "gate_rows widths");
+   const at::cuda::CUDAGuard gd(o.device());
+-  pdl_go(W == 384 ? gate_rows_pk<3> : gate_rows_pk<4>, blocks(M), NT, 0, CP<float>(o), CP<bf>(qkvg), P<bf>(og), (int)M);
++  pdl_go(g_pf ? (W == 384 ? gate_rows_pf<3> : gate_rows_pf<4>) : (W == 384 ? gate_rows_pk<3> : gate_rows_pk<4>), blocks(M), NT, 0, CP<float>(o), CP<bf>(qkvg), P<bf>(og), (int)M);
+ }
+ void qkv_bwd_p(at::Tensor dq, at::Tensor dk, at::Tensor dv, at::Tensor dqkvg, at::Tensor acc, int64_t d) {
+   const int64_t NCH = dq.dim() == 3 ? dq.size(0) : 1, M = dk.size(0), W = dk.size(1);
+@@ -68,7 +70,7 @@ void qkv_bwd_p(at::Tensor dq, at::Tensor dk, at::Tensor dv, at::Tensor dqkvg, at
+   chk(dq, at::kFloat, "dq"); chk(dk, at::kFloat, "dk"); chk(dv, at::kFloat, "dv"); chk(dqkvg, at::kBFloat16, "dqkvg"); chk(acc, at::kFloat, "acc");
+   TORCH_CHECK(W == 384 || W == 512, "qkv_bwd width");
+   const at::cuda::CUDAGuard gd(dq.device());
+-  pdl_go(W == 384 ? qkv_bwd_pk<3> : qkv_bwd_pk<4>, blocks(M), NT, 0, CP<float>(dq), CP<float>(dk), CP<float>(dv), P<bf>(dqkvg),
++  pdl_go(g_pf ? (W == 384 ? qkv_bwd_pf<3> : qkv_bwd_pf<4>) : (W == 384 ? qkv_bwd_pk<3> : qkv_bwd_pk<4>), blocks(M), NT, 0, CP<float>(dq), CP<float>(dk), CP<float>(dv), P<bf>(dqkvg),
+          P<float>(acc) + 2 * d, (int)M, (int)NCH, acc.dim() == 2 ? (int)acc.size(1) : 0);
+ }
+ void ln_bwd_p(at::Tensor dxa, at::Tensor x, at::Tensor st, at::Tensor lw, at::Tensor dy, at::Tensor dx, at::Tensor acc) {
+@@ -77,7 +79,7 @@ void ln_bwd_p(at::Tensor dxa, at::Tensor x, at::Tensor st, at::Tensor lw, at::Te
+   chk(dxa, at::kBFloat16, "dxa"); chk(x, at::kBFloat16, "x"); chk(dy, at::kBFloat16, "dy"); chk(dx, at::kBFloat16, "dx");
+   chk(lw, at::kFloat, "lw"); chk(st, at::kFloat, "stats"); chk(acc, at::kFloat, "acc");
+   const at::cuda::CUDAGuard gd(x.device());
+-  pdl_go(D == 384 ? ln_bwd_pk<bf, bf, 3> : ln_bwd_pk<bf, bf, 4>, blocks(M), NT, 0, CP<bf>(dxa), CP<bf>(x), CP<float2>(st), CP<float>(lw),
++  pdl_go(g_pf ? (D == 384 ? ln_bwd_pf<bf, bf, 3> : ln_bwd_pf<bf, bf, 4>) : (D == 384 ? ln_bwd_pk<bf, bf, 3> : ln_bwd_pk<bf, bf, 4>), blocks(M), NT, 0, CP<bf>(dxa), CP<bf>(x), CP<float2>(st), CP<float>(lw),
+          CP<bf>(dy), P<bf>(dx), P<float>(acc), P<float>(acc) + D, (int)M, acc.dim() == 2 ? (int)acc.size(1) : 0);
+ }
+ void gate_bwd_p(at::Tensor dog, at::Tensor o, at::Tensor qkvg, at::Tensor dob, at::Tensor dd, at::Tensor dqkvg) {
+@@ -86,7 +88,7 @@ void gate_bwd_p(at::Tensor dog, at::Tensor o, at::Tensor qkvg, at::Tensor dob, a
+   chk(dqkvg, at::kBFloat16, "dqkvg");
+   TORCH_CHECK((W == 384 && (nh == 8 || nh == 12 || nh == 24)) || (W == 512 && nh == 16), "gate_bwd widths");
+   const at::cuda::CUDAGuard gd(o.device());
+-  auto k = nh == 24 ? gate_bwd_hl_pk<24, 16> : nh == 12 ? gate_bwd_hl_pk<12, 32> : W == 384 ? gate_bwd_pk<3, 4> : gate_bwd_pk<4, 2>;
++  auto k = nh == 24 ? gate_bwd_hl_pk<24, 16> : nh == 12 ? gate_bwd_hl_pk<12, 32> : W == 384 ? (g_pf ? gate_bwd_pf<3, 4> : gate_bwd_pk<3, 4>) : (g_pf ? gate_bwd_pf<4, 2> : gate_bwd_pk<4, 2>);
+   pdl_go(k, blocks(M), NT, 0, CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), (int)M);
+ }
+ 
+@@ -1041,8 +1043,8 @@ __global__ void __launch_bounds__(FR_T) finalize_red_k(const float* __restrict__
+     OLPW[c0 + tid] = t;
+   }
+ }
+-void finalize_red(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at::Tensor lpw, std::vector<at::Tensor> out, int64_t rows_a,
+-                  int64_t rows_b) {
++void finalize_red_impl(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at::Tensor lpw, std::vector<at::Tensor> out, int64_t rows_a,
++                       int64_t rows_b, bool copy) {
+   chk(dwp, at::kFloat, "dwp"); chk(dwo, at::kFloat, "dwo"); chk(wb, at::kBFloat16, "wb"); chk(lpw, at::kFloat, "lpw");
+   const Geo G = geo(wb.size(0), dwp.size(1), wb.size(1));
+   const int64_t W = width(G), D = G.d;
+@@ -1053,7 +1055,7 @@ void finalize_red(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb,
+   TORCH_CHECK(out.size() == 10, "finalize_red: 10 outputs");
+   for (int i = 0; i < 10; ++i) chk(out[i], at::kFloat, "finalize_red output");
+   const at::cuda::CUDAGuard gd(dwp.device());
+-  const int ncopy = (int)((5L * D * D / 4 + FR_T - 1) / FR_T), nra = (int)((2 * D + W + 7) / 8), nwf = G.dp / 8;
++  const int ncopy = copy ? (int)((5L * D * D / 4 + FR_T - 1) / FR_T) : 0, nra = (int)((2 * D + W + 7) / 8), nwf = G.dp / 8;
+ #define FR_GO(NH)                                                                                                                       \
+   pdl_go(finalize_red_k<NH>, (unsigned)(ncopy + nra + nwf), FR_T, 0, CP<float>(dwp), CP<float>(dwo), CP<float>(acc), (int)acc.size(1), \
+       (int)rows_a, (int)rows_b, CP<bf>(wb), CP<float>(lpw), P<float>(out[2]), P<float>(out[4]), P<float>(out[5]), P<float>(out[6]),       \
+@@ -1067,23 +1069,72 @@ void finalize_red(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb,
+ #undef FR_GO
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
++void finalize_red(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at::Tensor lpw, std::vector<at::Tensor> out, int64_t rows_a,
++                  int64_t rows_b) {
++  finalize_red_impl(dwp, dwo, acc, wb, lpw, out, rows_a, rows_b, true);
++}
++// v25 (2026-11-18): finalize_red's copy blocks alone (dW q | k | v | g real rows, dWo real columns into the parameter gradients), for a side
++// stream right after the dW GEMMs while finalize_red_nc reduces on the main stream; the same statements as finalize_red_k's copy branch.
++__global__ void __launch_bounds__(FR_T) fin_copy_k(const float* __restrict__ DWP, const float* __restrict__ DWO, float* __restrict__ OQ,
++    float* __restrict__ OKe, float* __restrict__ OV, float* __restrict__ OG, float* __restrict__ OO, Geo G) {
++  const int W = G.nh * G.dhp, D = G.d;
++  const long nv = 5L * D * D / 4, i = (long)blockIdx.x * FR_T + threadIdx.x;
++  if (i >= nv) return;
++  const long e = i * 4, blk = e / (D * D), off = e % (D * D), r = off / D, c = off % D;
++  if (blk < 4) {
++    const long prow = (long)blk * W + (r / G.dh) * G.dhp + r % G.dh;
++    float* dst = (blk == 0 ? OQ : blk == 1 ? OKe : blk == 2 ? OV : OG) + off;
++    V4<float>::store(dst, V4<float>::load(DWP + prow * D + c));
++  } else {
++    V4<float>::store(OO + off, V4<float>::load(DWO + r * W + (c / G.dh) * G.dhp + c % G.dh));
++  }
++}
++void fin_copy(at::Tensor dwp, at::Tensor dwo, at::Tensor wb, std::vector<at::Tensor> out) {
++  chk(dwp, at::kFloat, "dwp"); chk(dwo, at::kFloat, "dwo");
++  const Geo G = geo(wb.size(0), dwp.size(1), wb.size(1));
++  const int64_t W = width(G), D = G.d;
++  TORCH_CHECK(dwp.numel() == 4 * W * D && dwo.numel() == D * W && out.size() == 10, "fin_copy shapes");
++  for (int i : {2, 4, 5, 6, 7}) { chk(out[i], at::kFloat, "fin_copy output"); TORCH_CHECK(out[i].numel() == D * D, "fin_copy: [D, D] outputs"); }
++  const at::cuda::CUDAGuard gd(dwp.device());
++  fin_copy_k<<<(unsigned)((5L * D * D / 4 + FR_T - 1) / FR_T), FR_T, 0, S()>>>(CP<float>(dwp), CP<float>(dwo), P<float>(out[2]), P<float>(out[4]),
++      P<float>(out[5]), P<float>(out[6]), P<float>(out[7]), G);
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++// v25 (2026-11-18): finalize_red without its copy blocks -- for W == d_single (no head padding) the dW q | k | v | g rows and dWo ARE the
++// parameter gradients (the caller hands out views of the GEMM outputs); out[2], out[4..7] are not written. It reads neither dwp nor dwo, so it
++// need not wait for the dW GEMMs.
++void finalize_red_nc(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at::Tensor lpw, std::vector<at::Tensor> out, int64_t rows_a,
++                     int64_t rows_b) {
++  finalize_red_impl(dwp, dwo, acc, wb, lpw, out, rows_a, rows_b, false);
++}
+ 
+ // gate_bwd for 12 x 32 / 24 x 16 (W = 384) with every lane busy: a warp per row, lane l takes columns 4 l + 128 k (k < 3), so a head is
+ // HL = dh / 4 neighbouring lanes (D summed over them by shuffles). The shared gate_bwd_hl_k gives a head per lane (12 / 24 of 32 lanes,
+ // 8 / 4 vectors each in a chain). The other geometries go to the shared kernels.
+-template <int HL>
++template <int HL, bool PF = false>
+ __global__ void __launch_bounds__(NT) gate_bwd_s_k(const bf* __restrict__ DOG, const float* __restrict__ O, const bf* __restrict__ QKVG,
+     bf* __restrict__ DOB, float* __restrict__ DD, bf* __restrict__ DQKVG, int M) {
+   constexpr int WD = 384, HC = 4 * HL;
+-  APB_PDL_ENTRY();
++  if constexpr (!PF) APB_PDL_ENTRY();
+   const long r = (long)blockIdx.x * RW + (threadIdx.x >> 5);
+   if (r >= M) return;
+   const int lane = threadIdx.x & 31;
+   float4 dog[3], o[3], s[3];
++  if constexpr (PF) {                                                       // v25: o and the gate columns before the wait
+ #pragma unroll
+-  for (int k = 0; k < 3; ++k) {
+-    const int c = 4 * lane + 128 * k;
+-    dog[k] = V4<bf>::load(DOG + r * WD + c); o[k] = V4<float>::load(O + r * WD + c); s[k] = V4<bf>::load(QKVG + r * 4 * WD + 3 * WD + c);
++    for (int k = 0; k < 3; ++k) {
++      const int c = 4 * lane + 128 * k;
++      o[k] = V4<float>::load(O + r * WD + c); s[k] = V4<bf>::load(QKVG + r * 4 * WD + 3 * WD + c);
++    }
++    APB_PDL_WAIT(); APB_PDL_TRIGGER();
++#pragma unroll
++    for (int k = 0; k < 3; ++k) dog[k] = V4<bf>::load(DOG + r * WD + 4 * lane + 128 * k);
++  } else {
++#pragma unroll
++    for (int k = 0; k < 3; ++k) {
++      const int c = 4 * lane + 128 * k;
++      dog[k] = V4<bf>::load(DOG + r * WD + c); o[k] = V4<float>::load(O + r * WD + c); s[k] = V4<bf>::load(QKVG + r * 4 * WD + 3 * WD + c);
++    }
+   }
+ #pragma unroll
+   for (int k = 0; k < 3; ++k) {
+@@ -1105,7 +1156,7 @@ void gate_bwd2(at::Tensor dog, at::Tensor o, at::Tensor qkvg, at::Tensor dob, at
+   chk(dqkvg, at::kBFloat16, "dqkvg"); chk(qkvg, at::kBFloat16, "qkvg");
+   TORCH_CHECK(qkvg.size(1) == 4 * W && dqkvg.size(1) == 4 * W && dd.size(1) == M, "gate_bwd2 widths");
+   const at::cuda::CUDAGuard gd(o.device());
+-  pdl_go(nh == 12 ? gate_bwd_s_k<8> : gate_bwd_s_k<4>, blocks(M), NT, 0, CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), (int)M);
++  pdl_go(g_pf ? (nh == 12 ? gate_bwd_s_k<8, true> : gate_bwd_s_k<4, true>) : (nh == 12 ? gate_bwd_s_k<8> : gate_bwd_s_k<4>), blocks(M), NT, 0, CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), (int)M);
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
+@@ -1956,10 +2007,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("pair_bias_bwd_wide1", &pair_bias_bwd_wide1);
+   m.def("pair_bwd_wide1_blocks", &pair_bwd_wide1_blocks);
+   m.def("finalize_red", &finalize_red);
++  m.def("finalize_red_nc", &finalize_red_nc);
++  m.def("fin_copy", &fin_copy);
+   m.def("ksplit_combine32", &ksplit_combine32);
+   m.def("gate_bwd2", &gate_bwd2);
+   m.def("inf_front", &inf_front);
+   m.def("pdl", [](int64_t k) { const int was = g_pdl; g_pdl = (int)k; return was; });
++  m.def("pf", [](int64_t k) { const int was = g_pf; g_pf = (int)k; return was; });
+   m.def("front_tmw", [](int64_t k) { const int was = g_front_tmw; g_front_tmw = (int)k; return was; });
+   m.def("gate_rows_p", &gate_rows_p);
+   m.def("gate_bwd_p", &gate_bwd_p);
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+index 0d9e2119b..a9e395246 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+@@ -1026,7 +1026,7 @@ def apb_backward_stages(
+         defs = _apb_defs(heads, False, d)
+         tr = _sm100_kernel("glue", "bias_transpose_bf16", dev, smem=0).bind((L // 32, L // 32, heads), (32, 8, 1), bias, bias_t, int(L))
+         # dkv_pdl (v20, 2026-11-17): the -DPDLW=1 build launched as a programmatic dependent of the previous kernel on the stream
+-        dkv_defs = defs + (("BIASNT=1",) if bias_nt else ()) + (("PDLW=1",) if dkv_pdl else ())
++        dkv_defs = defs + (("BIASNT=1",) if bias_nt else ()) + (((f"PDLW={2 if _DKV_PF else 1}"),) if dkv_pdl else ())
+         dkv = _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, pdl=dkv_pdl, defs=dkv_defs).bind(
+             _grid(heads * (L // 128), dev),
+             (384, 1, 1),
+@@ -1058,7 +1058,7 @@ def apb_backward_stages(
+         "bwd3",
+         made_t,
+         bias_nt,
+-        dkv_pdl,
++        (2 if _DKV_PF else 1) if dkv_pdl else 0,
+         heads,
+         d,
+         dev,
+@@ -1194,8 +1194,25 @@ def apb_pair_fwd(pair2d, wsrc, lpw, ws: float, mask, L: int, eps: float, neg: fl
+ _PAIR_BWD_SMEM = {8: 147456 + 61440, 12: 155648 + 61440, 16: 163840 + 61440, 24: 135168 + 61440}
+ 
+ 
++#: v25 (2026-11-18): attn_dkv as a programmatic dependent with its K / V / q / bias / LSE loads before griddepcontrol.wait (-DPDLW=2; dO and D
++#: after it). MINIWORLD_APB_B200_DKV_PF=0: -DPDLW=1.
++_DKV_PF = os.environ.get("MINIWORLD_APB_B200_DKV_PF", "0") != "0"
++#: v25 (2026-11-18): the tcgen05 pair backward issues its loads / stores from several lanes (pair_bwd.cu PB_ML). MINIWORLD_APB_B200_PB_ML=0: one lane.
++_PB_ML = os.environ.get("MINIWORLD_APB_B200_PB_ML", "0") != "0"
++#: v25: the epilogue runs B(n) before A(n + 1) when tile n + 1 has not arrived (pair_bwd.cu PB_RO). MINIWORLD_APB_B200_PB_RO=0: never.
++_PB_RO = os.environ.get("MINIWORLD_APB_B200_PB_RO", "0") != "0"
++#: v25: the epilogue's shared-memory row loads batched ahead of their use (pair_bwd.cu PB_BL; the same values). MINIWORLD_APB_B200_PB_BL=0: off.
++_PB_BL = os.environ.get("MINIWORLD_APB_B200_PB_BL", "0") != "0"
++#: v25: 16 epilogue warps (32 columns each) in the tcgen05 pair backward at 8 / 12 / 16 heads (pair_bwd.cu PB_EW). MINIWORLD_APB_B200_PB_EW=0: 8.
++_PB_EW = os.environ.get("MINIWORLD_APB_B200_PB_EW", "0") != "0"
++
++
++def _pb_ew(heads: int) -> int:
++    return 16 if _PB_EW and heads <= 16 and heads % 4 == 0 else 8
++
++
+ def _pair_bwd_defs(heads: int) -> tuple[str, ...]:
+-    return (f"PB_NH={heads}",) + _pb_split_defs(heads)
++    return (f"PB_NH={heads}",) + _pb_split_defs(heads) + (("PB_ML=1",) if _PB_ML else ()) + (("PB_RO=1",) if _PB_RO else ()) + (("PB_BL=1",) if _PB_BL else ()) + (("PB_EW=16",) if _pb_ew(heads) == 16 else ())
+ 
+ 
+ def apb_pair_bwd(pair2d, dbias, wf, L: int, eps: float, acc_cols, dz, reserve: int = 0, trace=None) -> int:
+@@ -1211,7 +1228,8 @@ def apb_pair_bwd(pair2d, dbias, wf, L: int, eps: float, acc_cols, dz, reserve: i
+     grid = min(num_sms(dev) - reserve, L * (L // 128))
+     assert acc_cols.shape[0] >= grid and acc_cols.shape[1] >= heads * 129
+     defs = _pair_bwd_defs(heads)
+-    k = _sm100_kernel("pair_bwd", "apb_pair_bwd_sm100", dev, defs=defs, smem=_PAIR_BWD_SMEM[heads])
++    ew = _pb_ew(heads)
++    k = _sm100_kernel("pair_bwd", "apb_pair_bwd_sm100", dev, defs=defs, smem=_PAIR_BWD_SMEM[heads] + (4096 if ew == 16 else 0))
+     _apb_bound(
+         (
+             "pbwd",
+@@ -1227,7 +1245,7 @@ def apb_pair_bwd(pair2d, dbias, wf, L: int, eps: float, acc_cols, dz, reserve: i
+         + (() if trace is None else (trace.data_ptr(),)),
+         lambda: k.bind(
+             (grid, 1, 1),
+-            (352, 1, 1),
++            (32 * (ew + 3), 1, 1),
+             _tmn(pair2d, [128, L * L], 256, [64, 128]),
+             _tmn(dz, [128, L * L], 256, [64, 128]),
+             _tmn(dbias, [L, L, heads], [L * 4, L * L * 4], [128, 1, heads], swizzle=0, dtype="f32"),
+diff --git a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py b/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
+index 2b3650218..a35af5fae 100644
+--- a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
++++ b/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
+@@ -404,6 +404,8 @@ def _pf2(dp: int, L: int, heads: int, train: bool = False) -> tuple[int, int] |
+     if _PF2 is None or _PF2 == "0" or dp != DP:
+         return None
+     s, b = _PF2.split(":")
++    if s == "2" and train and _PF2_EVF_TRAIN_MIN_L and L >= _PF2_EVF_TRAIN_MIN_L:
++        s = "12"  # v25: the training forward with evict_first pair loads (the same bits)
+     if s == "2" and L >= _PF2_EVF_MIN_L and not train:
+         s = "12"  # v22: the same pass with the pair loads under an L2 evict_first policy (the same bits)
+     return int(s), int(b)
+@@ -418,6 +420,10 @@ def _pf2(dp: int, L: int, heads: int, train: bool = False) -> tuple[int, int] |
+ #: Inference only: the training forward (A / B L 512 level, L 768 -1 to -9 us) read 3 more cases above 0.667 in the measurer (r146 L 640 / 768,
+ #: r222 L 768, +5 to +9 us), so it keeps the plain loads.
+ _PF2_EVF_MIN_L = int(os.environ.get("MINIWORLD_APB_B200_PF2_EVF_MIN_L", "512"))
++#: v25 (2026-11-18): the training forward runs pair_bias_fwd2 from this L (below: the shared pass); its pair loads under evict_first from
++#: _PF2_EVF_TRAIN_MIN_L (0: never).
++_PF2_TRAIN_MIN_L = int(os.environ.get("MINIWORLD_APB_B200_PF2_TRAIN_MIN_L", "384"))
++_PF2_EVF_TRAIN_MIN_L = int(os.environ.get("MINIWORLD_APB_B200_PF2_EVF_TRAIN_MIN_L", "0"))
+ 
+ 
+ def _pair_tc(dp: int, L: int, heads: int, train: bool = False) -> bool:
+@@ -521,16 +527,26 @@ def _pdl_on(L: int) -> bool:
+     return L <= _PDL_MAX
+ 
+ 
++#: v25 (2026-11-18): the PDL row kernels in their prefetch forms (apb_rows_pdl_sm100.cuh *_pf: the loads that do not read the previous
++#: kernel's output issued before griddepcontrol.wait; bitwise the same). MINIWORLD_APB_B200_PF=0: the *_pk forms.
++_PF = os.environ.get("MINIWORLD_APB_B200_PF", "0") != "0"
++
++
+ def _pdl_call(E, pdl: bool, fn, *args) -> None:
+-    """fn(*args) with the extension's PDL launches on when ``pdl``, then the previous setting."""
++    """fn(*args) with the extension's PDL launches on when ``pdl`` (and the prefetch forms when ``_PF``), then the previous settings."""
+     if not pdl:
+-        fn(*args)
++        wpf = E.pf(1 if _PF else 0)  # v25: the prefetch forms also without PDL (griddepcontrol.wait is then a no-op)
++        try:
++            fn(*args)
++        finally:
++            E.pf(wpf)
+         return
+-    was = E.pdl(1)
++    was, wpf = E.pdl(1), E.pf(1 if _PF else 0)
+     try:
+         fn(*args)
+     finally:
+         E.pdl(was)
++        E.pf(wpf)
+ 
+ 
+ def _bwd_reserve(dp: int, L: int) -> int:
+@@ -878,6 +894,57 @@ def _backward_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy):
+     ]
+ 
+ 
++#: v25 (2026-11-18): B200 training at W == d_single (no head padding: 8 x 48, 12 x 32, 24 x 16, 16 x 32 at 512): the dW q | k | v | g GEMM rows
++#: and dWo ARE the parameter gradients -- ``backward_nc`` returns the two GEMM outputs and the autograd function hands out views of them
++#: (finalize_red_nc: no copy blocks, beside the GEMMs). The same values. MINIWORLD_APB_B200_NOCOPY=0: the copying finalize.
++_NOCOPY = os.environ.get("MINIWORLD_APB_B200_NOCOPY", "0") != "0"
++_NC_SMALL = (0, 1, 3, 8, 9)  # ln_single w / b, bq, ln_pair w, Wb: finalize_red_nc's outputs
++#: v25: with head padding (16 x 24 at 384), finalize_red_nc on the main stream and the dW copies (fin_copy) on side stream 0 after the dW GEMMs
++#: instead of one finalize after both. MINIWORLD_APB_B200_FSPLIT=0: off.
++_FSPLIT = os.environ.get("MINIWORLD_APB_B200_FSPLIT", "0") != "0"
++
++
++def _nocopy(single, leaves) -> bool:
++    if not _NOCOPY or single.dtype == torch.float32 or torch.cuda.get_device_capability(single.device) != (10, 0):
++        return False
++    H, _, W, D = _geometry(leaves)
++    return W == D and leaves[9].shape[1] == DP
++
++
++def _backward_nc_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy):
++    H, _, W, D = _geometry(leaves)
++    f32 = torch.float32
++    return [
++        torch.empty_like(single),
++        torch.empty_like(pair),
++        torch.empty((4 * W, D), dtype=f32, device=single.device),
++        torch.empty((D, W), dtype=f32, device=single.device),
++        *(torch.empty(leaves[i].shape, dtype=f32, device=single.device) for i in _NC_SMALL),
++    ]
++
++
++@opaque(fake=_backward_nc_fake, name="apb_b200_train_bwd_nc")
++def backward_nc(
++    single: torch.Tensor,
++    pair: torch.Tensor,
++    mask: torch.Tensor | None,
++    leaves: list[torch.Tensor],
++    eps_s: float,
++    eps_p: float,
++    saved: list[torch.Tensor],
++    dy: torch.Tensor,
++) -> list[torch.Tensor]:
++    """``backward`` on B200 at W == d_single: [dx, dpair, dW q|k|v|g [4 W, D], dWo [D, W], the gradients of ``_NC_SMALL``]."""
++    return _backward_b200(single, pair, mask, leaves, eps_p, saved, dy, nocopy=True)
++
++
++def _nc_grads(dwp: torch.Tensor, dwo: torch.Tensor, small: list[torch.Tensor]) -> list[torch.Tensor]:
++    """The ten parameter gradients in ``_leaves`` order from ``backward_nc``'s outputs (views of the two GEMM outputs)."""
++    W = dwo.shape[1]
++    g0, g1, g3, g8, g9 = small
++    return [g0, g1, dwp[:W], g3, dwp[W : 2 * W], dwp[2 * W : 3 * W], dwp[3 * W :], dwo, g8, g9]
++
++
+ @opaque(fake=_backward_fake, name="apb_b200_train_bwd")
+ def backward(
+     single: torch.Tensor,
+@@ -988,7 +1055,7 @@ def _forward_b200(single, pair, mask, leaves, eps_s, eps_p, gate_bias):
+             m = _row(mask, b)
+             with torch.cuda.stream(side):
+                 wide: list[torch.Tensor] = []  # a wide pair: (row stats, unmasked bias) for its backward
+-                pf2 = _pf2(dp, L, H, train=True) if L >= 384 else None  # L 128: +-2 us, one timer step either way
++                pf2 = _pf2(dp, L, H, train=True) if L >= _PF2_TRAIN_MIN_L else None  # L 128: +-2 us, one timer step either way
+                 if pf2 is not None:  # v21: the B200 form of the d_pair 128 pass (the same bits)
+                     bias = pair.new_empty((H, L, L))
+                     E.pair_bias_fwd2(pair[b].view(L * L, DP), wf, m, bias, L, eps_p, NEG, *pf2)
+@@ -1028,7 +1095,7 @@ def _forward_b200(single, pair, mask, leaves, eps_s, eps_p, gate_bias):
+     return [out, wf, wpack, wop, wbo, *saved]
+ 
+ 
+-def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
++def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy, nocopy: bool = False):
+     """``backward`` on B200 (2026-11-17): the same kernels and values, the independent stages on three streams per batch row --
+     main: dO = dy Wo, the gate backward, attn_dkv, qkv_bwd, dxa, the LayerNorm backward; side 0: dWo, the bias transpose, dW q|k|v|g;
+     side 1: attn_dqb, then the pair backward (it needs only dbias). The parameter-gradient accumulator's regions are disjoint per writer."""
+@@ -1123,6 +1190,35 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+             if not _DXA_FIRST:
+                 dxa = dqkvg @ wpack
+             _pdl_call(E, pdl, E.ln_bwd_p, dxa, x, st, lnw, dy2, dx_all[b], acc)
++            if nocopy:  # v25: finalize reads only acc: it runs beside dWo / dW q|k|v|g, whose outputs are the gradients themselves
++                _join(main, s2)
++                small = [torch.empty(leaves[i].shape, dtype=f32, device=dev) for i in _NC_SMALL]
++                ph = small[0]  # out[2], out[4..7]: not written by finalize_red_nc
++                row_outs = [small[0], small[1], ph, small[2], ph, ph, ph, ph, small[3], small[4]]
++                _pdl_call(E, pdl, E.finalize_red_nc, dwp, dwo, acc, wb, lnpw, row_outs, rows_a, rows_b)
++                _join(main, s1)
++                dwo.record_stream(main)
++                dwp.record_stream(main)
++                got = [dwp, dwo, *small]
++                if b == 0:
++                    outs = got
++                else:
++                    torch._foreach_add_(outs, got)  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
++                continue
++            if _FSPLIT:  # v25: the reductions on main beside dW, the dW copies on side stream 0 right after its GEMMs
++                _join(main, s2)
++                row_outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
++                _pdl_call(E, pdl, E.finalize_red_nc, dwp, dwo, acc, wb, lnpw, row_outs, rows_a, rows_b)
++                with torch.cuda.stream(s1):
++                    E.fin_copy(dwp, dwo, wb, row_outs)
++                _join(main, s1)
++                dwo.record_stream(main)
++                dwp.record_stream(main)
++                if b == 0:
++                    outs = row_outs
++                else:
++                    torch._foreach_add_(outs, row_outs)  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
++                continue
+             _join(main, s1)
+             _join(main, s2)
+             dwo.record_stream(main)
+@@ -1283,7 +1379,11 @@ class _Training(torch.autograd.Function):
+             list(v[13 : 13 + ctx.saved_count]),
+         )
+         eps_s, eps_p = ctx.eps
+-        dx, dz, *grads = backward(single, pair, mask, leaves, eps_s, eps_p, saved, dy)
++        if _nocopy(single, leaves):  # v25: B200, no head padding
++            dx, dz, dwp, dwo, *small = backward_nc(single, pair, mask, leaves, eps_s, eps_p, saved, dy)
++            grads = _nc_grads(dwp, dwo, small)
++        else:
++            dx, dz, *grads = backward(single, pair, mask, leaves, eps_s, eps_p, saved, dy)
+         if ctx.exact_dwb:  # per batch row (the shadow is a one-row recompute), summed in row order
+             params = list(v[13 + ctx.saved_count :])
+             dyc = dy.contiguous()

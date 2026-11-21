@@ -24,6 +24,7 @@ namespace {
 #ifndef PR_HINT
 #define PR_HINT 0  // 0: streaming hints (ld.global.cs / st.global.cs); 1: plain accesses; 2: ld.global.nc (__ldg) loads, plain stores
 #endif
+#ifndef PR_LD_CUSTOM  // an arch file (parallel_residual_sm100.cu) defines PR_LD as a macro that needs n and T of the calling kernel
 template <typename P>
 __device__ __forceinline__ uint4 PR_LD(const P* p) {
 #if PR_HINT == 1
@@ -34,6 +35,7 @@ __device__ __forceinline__ uint4 PR_LD(const P* p) {
   return __ldcs(reinterpret_cast<const uint4*>(p));
 #endif
 }
+#endif
 __device__ __forceinline__ void PR_ST(uint4* p, uint4 v) {
 #if PR_HINT == 0
   __stcs(p, v);

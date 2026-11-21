@@ -77,8 +77,59 @@ def _rows():
     return rows
 
 
+class _Lazy:
+    """A per-key pack made on first use (``make(key)``) and kept -- only when made in the capture state this holder was created in (a
+    pack recorded inside a capture is not computed until a replay; one made eagerly is not remade by a replay): otherwise made per call."""
+
+    def __init__(self, make):
+        self.make, self.made, self.capturing = make, {}, torch.cuda.is_current_stream_capturing()
+
+    def __getitem__(self, key):
+        if torch.cuda.is_current_stream_capturing() != self.capturing:
+            return self.make(key)
+        if key not in self.made:
+            self.made[key] = self.make(key)
+        return self.made[key]
+
+
+#: B200 inference hoist, bf16: the pair LayerNorm + bias projection in ONE pass (the training block's ``pair_bias`` kernel) at pair 128 / 256
+_B200_HOIST1 = True
+#: B200 inference hoist, fp32: the tensor-core pair-bias kernel (``pair_bias_tc``, _HOIST_TC_TERMS products) at pair 128 as at 256
+_B200_HOIST_TC = True
+
+
+def _b200(device) -> bool:
+    return torch.cuda.get_device_capability(device) == (10, 0)
+
+
+class _TailForms:
+    """One weight's tail-kernel forms per cluster size (B200 three-kernel step): the constructor's pack launch makes those of the step's
+    cluster (``add``); another size is made on first use by a pack launch of its own, kept only when made in the runner's own capture
+    state (``FusedBiasOnlyDiT._lazy_ok``; ``_Lazy``'s rule)."""
+
+    def __init__(self, runner, make):
+        self.runner, self.make, self.made = runner, make, {}
+
+    def add(self, pack, cl):
+        self.made[cl] = self.make(pack, cl)
+
+    def __getitem__(self, cl):
+        if cl in self.made:
+            return self.made[cl]
+        from miniworld_engine.kernels.bias_only_dit.cuda import pack_sm100
+
+        P = pack_sm100.Pack(self.runner.dtype)
+        t = self.make(P, cl)
+        P.launch(t.device)
+        if self.runner._lazy_ok():
+            self.made[cl] = t
+        return t
+
+
 class FusedBiasOnlyDiT:
-    def __init__(self, blocks, dtype=torch.bfloat16):
+    def __init__(self, blocks, dtype=torch.bfloat16, rows: int | None = None):
+        """``rows``: the step's S L rows when known (B200: the pack then makes the tail's weight forms for that row count's cluster only,
+        others on first use)."""
         assert dtype in (torch.bfloat16, torch.float32), "bf16, or fp32 on TF32 tensor cores"
         blocks = list(blocks)
         a0 = blocks[0].attention
@@ -90,6 +141,27 @@ class FusedBiasOnlyDiT:
         self.dp = a0.ln_pair.weight.shape[0]
         self.fp32 = dtype is torch.float32
         dev = a0.to_value.weight.device
+        self._p3 = None  # the fp32 three-kernel step's TF32-rounded weight pack
+        self._p3b = None  # the bf16 three-kernel step's weight pack
+        self._capturing = torch.cuda.is_current_stream_capturing()  # built inside a CUDA-graph capture (``_lazy_ok``)
+        self.dtype = dtype
+        self._ops: dict = {}
+        self._pack_side = None  # the side stream of a captured pack, until the first step joins it (``_join``)
+        self._hoist_side = None  # the side stream of a captured pack's pair projection and of the hoist (``_join_hoist``)
+        self._tab_bias = None  # (b1, [b2 | b1]): the one-block table pass's bias vector (``_tab_b200``; the B200 pack makes it)
+        self._blocks = blocks  # B200: the 12-launch step's natural pack is made from them on first use (``_step_natural``)
+        self.w1 = None
+        if not self._pack_b200(blocks, dtype, dev, rows):
+            self._pack_torch(blocks, dtype, dev)
+        # the one-kernel conditioning tables (cond_tables_sm100.cu): [W1; W2], their biases, and the column sums of the bf16 W1
+        # rows (LN(c) W1^T = rstd (c W1^T - mu colsum(W1)))
+        self.n_g1 = self.nb * 4 * self.d
+        self._wcc = None  # (wc, bc, csc): made on first use (``_cond_pack``; the B200 three-kernel step never reads them)
+        self._buf: dict = {}
+        self._tab3: dict = {}  # hoisted conditioning tables of the three-kernel step
+
+    def _pack_torch(self, blocks, dtype, dev):
+        """The weight pack by torch ops (every card; on B200 where ``_pack_b200`` does not apply)."""
         f32 = lambda t: t.detach().float()
         w1, b1, w2, b2, pw = [], [], [], [], []
         self.per = []
@@ -128,23 +200,189 @@ class FusedBiasOnlyDiT:
         self.b2 = torch.cat(b2, 0).to(dtype).contiguous()
         self.pw32 = torch.cat(pw, 0).contiguous()  # [nb H, dp] fp32, W diag(gamma) unrounded: the exact logits' operand (hoist)
         self.pw = self.pw32.to(dtype).contiguous()  # [nb H, dp]
-        # the one-kernel conditioning tables (cond_tables_sm100.cu): [W1; W2], their biases, and the column sums of the bf16 W1
-        # rows (LN(c) W1^T = rstd (c W1^T - mu colsum(W1)))
-        self.n_g1 = self.w1.shape[0]
-        self.wc = torch.cat([self.w1, self.w2], 0).contiguous()
-        self.bc = torch.cat([self.b1, self.b2], 0).float().contiguous()
-        self.csc = torch.cat([self.w1.float().sum(1), torch.zeros(self.w2.shape[0], device=dev)], 0).contiguous()
-        self.dtype = dtype
-        self._buf: dict = {}
-        self._ops: dict = {}
-        self._tab3: dict = {}  # hoisted conditioning tables of the three-kernel step
-        self._p3 = None  # its TF32-rounded weight pack
-        self._p3b = None  # the bf16 three-kernel step's weight pack
+
+    def _step_natural(self, single, cond, P, out_dtype, kmask):
+        """The 12-launch step on a B200 runner, whose constructor packed only the three-kernel step's forms (``_pack_b200``; reached only
+        when that step does not serve): the natural pack by torch ops first, kept only in the runner's own capture state (``_lazy_ok``),
+        else made for this call and dropped after it."""
+        self._join(single.device)
+        self._join_hoist(single.device)
+        if self.w1 is not None:
+            return self._step(single, cond, P, out_dtype, kmask)
+        saved = (self.w2, self.b2, self.pw, self.per)
+        self._pack_torch(self._blocks, self.dtype, self.w2.device)
+        try:
+            return self._step(single, cond, P, out_dtype, kmask)
+        finally:
+            if not self._lazy_ok():
+                self.w2, self.b2, self.pw, self.per = saved
+                self.w1 = None
+                self._buf.clear()
+
+    def _pack_b200(self, blocks, dtype, dev, rows=None) -> bool:
+        """B200, where the step runs the three-kernel path (bf16 ``_inf3b_ok`` / fp32 ``_inf3_ok``): the pack that step reads -- the AdaLN
+        table weights in its order, their biases, the gate projections, the folded pair projection, per block [Wv; Wg], [Wa; Wb] (bf16
+        as cast; fp32 rounded to the nearest TF32) and Wo / Wsq in the tail kernels' pair-packed forms -- in ONE launch per block
+        (``bo_pack_sm100.cu``), the same values as ``_pack_torch`` + ``_pack3`` / ``_pack3b``, bit for bit. A CUDA-graph replay re-runs the
+        pack (it is scoped to the capture), so it makes only what the step reads (2026-11-17: r104 L128 S5 pack 36 / 42 us -> see
+        docs/b200/bias-only.md): the tail forms for the cluster of ``rows`` (all of them when None; another one on first use,
+        ``_TailForms``), none of the 12-launch step's natural forms (``_step_natural`` on first use). False: not this card / path (the torch
+        pack then)."""
+        if torch.cuda.get_device_capability(dev) != (10, 0) or self.d != 768:
+            return False
+        if not (self._inf3_ok(dev) if self.fp32 else self._inf3b_ok(dev)):
+            return False
+        from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+        from miniworld_engine.kernels.bias_only_dit.cuda import pack_sm100
+
+        nb, D, DA, dc, H, dp = self.nb, self.d, self.da, self.dc, self.h, self.dp
+        e = lambda *shape: torch.empty(*shape, device=dev, dtype=dtype)  # noqa: E731
+        self.w2, self.pw, w1r = e(nb * 2 * D, dc), e(nb * H, dp), e(nb * 4 * D, dc)
+        bb = e(nb * 6 * D)  # [b2 | b1r]: one block's table pass reads them as one vector (``_tab_b200``)
+        self.b2, b1r = bb[: nb * 2 * D], bb[nb * 2 * D :]
+        if nb == 1:
+            self._tab_bias = (b1r, bb)
+        rnd = 2 if self.fp32 else None  # the tail kernels' operands: TF32-rounded fp32, or bf16 as they are
+        tail = (self._ops3(dev) if self.fp32 else self._ops3b(dev))[2]
+        tpair = _tf32().TAIL_PAIR if self.fp32 else B16.TAIL_PAIR
+        if rows is not None and rows % 128 == 0:
+            cl = tail.cluster(rows // 128)
+            want = {8} if cl == tpair else {cl}
+        else:
+            want = set(_tf32().TAIL_CLUSTERS if self.fp32 else B16.TAIL_CLUSTERS)
+        pair = rows is not None and rows % 128 == 0 and tail.cluster(rows // 128) == tpair
+        bw = 32 if self.fp32 else 64
+        # Inside a CUDA-graph capture (the pack is then re-run by every replay) the block step's weights (~5 M of the ~7 M elements) are
+        # packed on a side stream forked here and joined by the runner's first step (``_join``): the pack is latency-bound (~3 TB/s),
+        # and the hoist and the conditioning tables before the first block read none of them. Eagerly: one stream.
+        # The pair projection (a few K elements) goes on a second stream forked here, on which ``hoist`` then runs the pair part beside the
+        # conditioning tables (``side.py``): the tables and the pair part read nothing of each other until the first core.
+        # the exact fp32 logits' operand of the hoist (``_hoist``: W diag(gamma) unrounded): torch ops, made before the side streams fork
+        # (the hoist stream reads it); the packed ``pw`` above is the dtype-cast form for the other readers
+        self.pw32 = torch.cat(
+            [(b.attention.to_bias.weight.detach().float() * b.attention.ln_pair.weight.detach().float()) for b in blocks], 0
+        ).contiguous()  # [nb H, dp] fp32
+        from miniworld_engine.kernels.bias_only_dit.cuda import side as SD
+
+        side, hside = SD.fork(dev), SD.fork(dev)
+        self.per, packs = [], []
+        for i, blk in enumerate(blocks):
+            at, tr = blk.attention, blk.transition
+            # P: what the tables read; Q: the block step's weights; Ph: what the hoist reads
+            P, Q, Ph = pack_sm100.Pack(dtype), pack_sm100.Pack(dtype), pack_sm100.Pack(dtype)
+            la, lt = at.ada_ln_in.ln_cond.weight, tr.ada_ln_in.ln_cond.weight
+            ws1, wb1 = at.ada_ln_in.to_scale.weight, at.ada_ln_in.to_bias.weight
+            ws2, wb2 = tr.ada_ln_in.to_scale.weight, tr.ada_ln_in.to_bias.weight
+            r4 = lambda t, j: t[(4 * i + j) * D : (4 * i + j + 1) * D]  # noqa: E731
+            for j, (w, s) in enumerate(((ws1, la), (ws2, lt), (wb1, la), (wb2, lt))):  # the three-kernel order: s1, s2, sh1, sh2
+                P.copy(w, r4(w1r, j), s)
+            for j, bias in enumerate((at.ada_ln_in.to_scale.bias, tr.ada_ln_in.to_scale.bias, None, None)):
+                P.copy(bias, r4(b1r, j)) if bias is not None else P.zero(r4(b1r, j))
+            for j, (w, bias) in enumerate(((at.to_scale.weight, at.to_scale.bias), (tr.to_scale.weight, tr.to_scale.bias))):
+                P.copy(w, self.w2[(2 * i + j) * D : (2 * i + j + 1) * D])
+                P.copy(bias, self.b2[(2 * i + j) * D : (2 * i + j + 1) * D])
+            Ph.copy(at.to_bias.weight, self.pw[i * H : (i + 1) * H], at.ln_pair.weight)  # ln_pair weight folded
+            wvg, wab = e(2 * DA, D), e(4 * D, D)  # bf16: cast; fp32: rounded to the nearest TF32
+            Q.copy(at.to_value.weight, wvg[:DA], ddt=rnd)
+            Q.copy(at.to_gate.weight, wvg[DA:], ddt=rnd)
+            Q.copy(tr.expand_a.weight, wab[: 2 * D], ddt=rnd)
+            Q.copy(tr.expand_b.weight, wab[2 * D :], ddt=rnd)
+            wo, wsq = at.to_out.weight, tr.squeeze.weight
+            fp32 = self.fp32
+            blk_pack = dict(
+                wvg=wvg,
+                wab=wab,
+                wo=_TailForms(self, lambda Q, cl, w=wo: Q.pairs(w, cl, bw, ddt=rnd)),
+                # bf16 CL 8 tail: Wsq in each CTA's z order
+                wsq=_TailForms(
+                    self, lambda Q, cl, w=wsq: Q.pairs(w, cl, bw, zo=(2 * D // cl // 64 if (cl == 8 and not fp32) else 0), ddt=rnd)
+                ),
+            )
+            if not self.fp32:
+                blk_pack["wsqn"] = _TailForms(self, lambda Q, cl, w=wsq: Q.pairs(w, 8, bw))  # the pair tail: natural k order
+            for cl in sorted(want):
+                blk_pack["wo"].add(Q, cl)
+                if self.fp32 or not pair or cl != 8:
+                    blk_pack["wsq"].add(Q, cl)
+            if pair and not self.fp32:
+                blk_pack["wsqn"].add(Q, 8)
+            with SD.on(hside):
+                Ph.launch(dev)
+            P.launch(dev)
+            with SD.on(side):  # inside a capture: on a side stream, beside the hoist and the tables (joined by the first step)
+                Q.launch(dev)
+            packs.append(blk_pack)
+        self._pack_side, self._hoist_side = side, hside
+        if self.fp32:
+            self._p3 = (w1r, b1r, packs)
+        else:
+            self._p3b = (w1r, b1r, packs)
+        return True
+
+    def _join(self, device) -> None:
+        """The first step after a captured pack waits for its side stream (``_pack_b200``); later steps of the capture are ordered after
+        that one."""
+        side = self._pack_side
+        if side is not None and torch.cuda.is_current_stream_capturing():
+            torch.cuda.current_stream(device).wait_stream(side)
+            self._pack_side = None
+
+    def _join_hoist(self, device) -> None:
+        """A step's first core after a captured pack / hoist waits for their side stream (``_pack_b200``, ``hoist``)."""
+        side = self._hoist_side
+        if side is not None and torch.cuda.is_current_stream_capturing():
+            torch.cuda.current_stream(device).wait_stream(side)
+            self._hoist_side = None
+
+    def _cond_pack(self):
+        """[W1; W2], their fp32 biases and the fp32 column sums of the W1 rows (zeros for W2): the one-kernel conditioning tables'
+        operands, made on first use and kept with the runner (a captured runner makes them inside its capture, as the rest of its pack)."""
+        assert self.w1 is not None, "the 12-launch step's natural pack (_step_natural)"
+
+        def build():
+            dev = self.w1.device
+            return (
+                torch.cat([self.w1, self.w2], 0).contiguous(),
+                torch.cat([self.b1, self.b2], 0).float().contiguous(),
+                torch.cat([self.w1.float().sum(1), torch.zeros(self.w2.shape[0], device=dev)], 0).contiguous(),
+            )
+
+        if not self._lazy_ok():  # made in the other capture state than the runner: not kept (see _lazy_ok)
+            return build()
+        if self._wcc is None:
+            self._wcc = build()
+        return self._wcc
+
+    def _lazy_ok(self) -> bool:
+        """A part of the pack made after the constructor is kept only when made in the runner's own capture state: inside a capture the
+        kernels only record (an eager runner read there would keep unwritten memory), eagerly they run once (a captured runner's replays
+        would not remake it)."""
+        return torch.cuda.is_current_stream_capturing() == self._capturing
+
+    @property
+    def wc(self):
+        return self._cond_pack()[0]
+
+    @property
+    def bc(self):
+        return self._cond_pack()[1]
+
+    @property
+    def csc(self):
+        return self._cond_pack()[2]
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
         """pair [1, L, L, dp] -> every block's attention weights P [nb H, L, L] in the runner's dtype (rows sum to 1 over the keys).
-        ``mask`` [L] bool marks the real tokens; the other keys get zero weight."""
+        ``mask`` [L] bool marks the real tokens; the other keys get zero weight. Inside the capture of a B200 pack: on that pack's hoist
+        stream (``_pack_b200``), joined by the step's first core (the caller keeps ``pair`` / ``mask`` alive until then: a step follows)."""
+        from miniworld_engine.kernels.bias_only_dit.cuda import side as SD
+
+        hs = self._hoist_side if torch.cuda.is_current_stream_capturing() else None
+        with SD.on(hs):
+            return self._hoist(pair, mask)
+
+    def _hoist(self, pair, mask=None):
         L = pair.shape[1]
         z2d = pair.reshape(L * L, self.dp)
         m = None if mask is None else mask.reshape(L).to(torch.bool).contiguous()
@@ -265,11 +503,11 @@ class FusedBiasOnlyDiT:
         if not self.fp32:
             if self._inf3b_ok(single.device):
                 return self._step3b(single, cond, P, out_dtype, kmask)
-            return self._step(single, cond, P, out_dtype, kmask)
+            return self._step_natural(single, cond, P, out_dtype, kmask)
         with _tf32().tf32_gemms():
             if self._inf3_ok(single.device):
                 return self._step3(single, cond, P, out_dtype, kmask)
-            return self._step(single, cond, P, out_dtype, kmask)
+            return self._step_natural(single, cond, P, out_dtype, kmask)
 
     # ------------------------------------------------------------------ fp32, three kernels per block (default; INF3=0: off)
     def _inf3_ok(self, device) -> bool:
@@ -325,6 +563,8 @@ class FusedBiasOnlyDiT:
             T = c.shape[0]
             cn = torch.empty(T, self.dc, device=c.device, dtype=torch.float32)
             C.ln_rows(c, cn, EPS)
+            if self._tab_one():
+                return self._tab_b200(cn, c, w1, b1, T)
             g1 = torch.addmm(b1, cn, w1.t()).view(T, nb, 4, D)  # s1, s2, sh1, sh2
             g2 = torch.addmm(self.b2, c, self.w2.t()).view(T, nb, 2, D)  # gate1, gate2
             tab = torch.cat([g2, g1], 2)  # gate1, gate2, s1, s2, sh1, sh2
@@ -352,6 +592,32 @@ class FusedBiasOnlyDiT:
             inputs=(cond,),
         )
         return entry[1]
+
+    def _tab_one(self) -> bool:
+        """B200, one block: the three-kernel step's table GEMMs write into the table and ``bo_tab_sm100.cu`` adds the biases and the sigmoids
+        in one pass (``_tab_b200``)."""
+        return self.nb == 1 and torch.cuda.get_device_capability(self.w2.device) == (10, 0)
+
+    def _tab_b200(self, cn, c, w1, b1, T):
+        """The table [T, 1, 6, 768] (gate1, gate2, s1, s2, sh1, sh2; the first four through their sigmoid) of one block: the two GEMMs
+        (no bias) straight into its columns (cuBLAS takes the row pitch), then ONE pass (``bo_tab_sm100.cu``) adds [b2 | b1] and applies
+        the sigmoids -- in place of two biased GEMMs, a cat and a strided sigmoid (four launches, two strided elementwise kernels: 26 us at
+        r104 master L512 S5). The bias vector [b2 | b1] is made once per runner."""
+        from miniworld_engine.kernels.bias_only_dit.cuda import pack_sm100
+
+        D, dev = self.d, cn.device
+        tab = torch.empty(T, 1, 6, D, device=dev, dtype=self.dtype)
+        t2 = tab.view(T, 6 * D)
+        torch.mm(c, self.w2.t(), out=t2[:, : 2 * D])  # gate1, gate2
+        torch.mm(cn, w1.t(), out=t2[:, 2 * D :])  # s1, s2, sh1, sh2
+        bias = self._tab_bias
+        if bias is None or bias[0] is not b1:
+            bias = (b1, torch.cat([self.b2, b1]).contiguous())
+            if torch.cuda.is_current_stream_capturing() == self._capturing:
+                self._tab_bias = bias
+        n = T * 6 * D // 4
+        pack_sm100.tab_kernel(dev)(((n + 255) // 256, 1, 1), (256, 1, 1), t2, bias[1], T, 6 * D, 4 * D, int(self.fp32))
+        return tab
 
     def _ops3(self, device):
         """(front, core, tail) of the three-kernel step."""
@@ -404,6 +670,8 @@ class FusedBiasOnlyDiT:
             _tf32().tail_rows(M, tcl),
         )  # the pair tail: the CL 8 packs, scratch of whole tile pairs
         buf = self._buffers3(S, L, dev)
+        self._join(dev)
+        self._join_hoist(dev)  # before the front: the core is its programmatic dependent launch and reads P
         x = single.reshape(M, D).float().contiguous()
         out = torch.empty(M, D, device=dev, dtype=torch.float32)
         vg, a = buf["vg"], buf["a"]
@@ -459,9 +727,10 @@ class FusedBiasOnlyDiT:
                 dict(
                     wvg=p["wvg"],
                     wab=p["wab"],
-                    wo={cl: B16.pack_pairs_bf16(p["wo"], cl) for cl in B16.TAIL_CLUSTERS},
-                    wsq={cl: B16.pack_pairs_bf16(p["ws"], cl, z_order=True) for cl in B16.TAIL_CLUSTERS},
-                    wsqn=B16.pack_pairs_bf16(p["ws"], 8),
+                    # per tail cluster size, made when a step first takes that size (the step takes one or two of the five)
+                    wo=_Lazy(lambda cl, w=p["wo"]: B16.pack_pairs_bf16(w, cl)),
+                    wsq=_Lazy(lambda cl, w=p["ws"]: B16.pack_pairs_bf16(w, cl, z_order=True)),
+                    wsqn=_Lazy(lambda cl, w=p["ws"]: B16.pack_pairs_bf16(w, 8)),
                 )
                 for p in self.per
             ]  # the pair tail: natural k order
@@ -483,6 +752,8 @@ class FusedBiasOnlyDiT:
             T = c.shape[0]
             cn = torch.empty(T, self.dc, device=c.device, dtype=self.dtype)
             C.ln_rows(c, cn, EPS)
+            if self._tab_one():
+                return self._tab_b200(cn, c, w1, b1, T)
             g1 = torch.addmm(b1, cn, w1.t()).view(T, nb, 4, D)  # s1, s2, sh1, sh2
             g2 = torch.addmm(self.b2, c, self.w2.t()).view(T, nb, 2, D)  # gate1, gate2
             tab = torch.cat([g2, g1], 2)  # gate1, gate2, s1, s2, sh1, sh2
@@ -565,6 +836,8 @@ class FusedBiasOnlyDiT:
         tcl = tail.cluster(M // 128)  # 8, 6, or the pair tail where it takes fewer rounds
         pair, Mt = tcl == B16.TAIL_PAIR, B16.tail_rows(M, tcl)
         buf = self._buffers3b(S, L, dev)
+        self._join(dev)
+        self._join_hoist(dev)  # before the front: the core is its programmatic dependent launch and reads P
         xin = single.reshape(M, D)
         out = torch.empty(M, D, device=dev, dtype=out_dtype or single.dtype)
         xa, vg, a = buf["xa"], buf["vg"], buf["a"]
@@ -575,7 +848,7 @@ class FusedBiasOnlyDiT:
             tb = tab[:, b]
             front_op(xin, tb, p["wvg"], vg, T, xa=xa, serial=early and b == 0)
             core(vg[:, :DA], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:])  # sigmoid(g) * (P v)
-            wo, wsq = (p["wo"][8], p["wsqn"]) if pair else (p["wo"][tcl], p["wsq"][tcl])
+            wo, wsq = (p["wo"][8], p["wsqn"][8]) if pair else (p["wo"][tcl], p["wsq"][tcl])
             tail(
                 a,
                 xin,
@@ -603,8 +876,9 @@ class FusedBiasOnlyDiT:
         T = c.shape[0]
         cond_op = self._cond(dev)
         if cond_op is not None:  # one kernel; the sigmoid tables arrive as sigmoids
-            G = torch.empty(T, self.wc.shape[0], device=dev, dtype=self.dtype)
-            cond_op(c, self.wc, self.bc, self.csc, G, self.n_g1, EPS)
+            wc, bc, csc = self._cond_pack()
+            G = torch.empty(T, wc.shape[0], device=dev, dtype=self.dtype)
+            cond_op(c, wc, bc, csc, G, self.n_g1, EPS)
             g1, g2 = (
                 G[:, : self.n_g1].view(T, nb, 4, D),
                 G[:, self.n_g1 :].view(T, nb, 2, D),

@@ -66,7 +66,7 @@ class GemmSwiglu:
             smem=self.SMEM,
         )
         self.nsm = num_sms(device_index)
-        self.runs: dict = {}
+        self.runs = sm100.BoundedRuns()  # an LRU of descriptor-only runs: they do not own the caller's tensors
 
     def _bind(self, x, w_ab, out, ab=None):
         M, K = x.shape
@@ -98,7 +98,10 @@ class GemmSwiglu:
         def run():
             self.k(grid, (512, 1, 1), *maps, int(tiles))
 
-        run.keep = (maps, x, w_ab, out, ab)  # ty: ignore[unresolved-attribute]
+        for m in maps:
+            if not isinstance(m, int):
+                m.keep = None  # a cached run must not pin the caller's buffers (a sampler's fresh x / out every step)
+        run.keep = (maps,)  # ty: ignore[unresolved-attribute]
         return run
 
     def __call__(self, x, w_ab, out, ab=None):
@@ -107,9 +110,7 @@ class GemmSwiglu:
             self._bind(x, w_ab, out, ab)()
             return out
         key = (x.data_ptr(), w_ab.data_ptr(), out.data_ptr(), tuple(x.shape))
-        run = self.runs.get(key)
-        if run is None:
-            run = self.runs[key] = self._bind(x, w_ab, out, ab)
+        run = self.runs.bind(key, lambda: self._bind(x, w_ab, out, ab))
         run()
         return out
 

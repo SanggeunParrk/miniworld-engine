@@ -436,7 +436,7 @@ def prebuild(target, rows):
       from its eval / train rows.
 
     What stays here: which extension / source stem / define set implements which kernel (the tables above and the define sets of the
-    launchers: attn_dq L % 192, the empty-token variants, KS), and the B200 builds (not enumerated by requirement).
+    launchers: attn_dq L % 192, the empty-token variants, KS); the B200 builds are prebuild_sm100.py's, the A100 / RTX 5090 ones prebuild_sm80.py's.
     Each is a call of the loader itself, so the planned key is the runtime's."""
     import functools as ft
 
@@ -449,6 +449,11 @@ def prebuild(target, rows):
 
         yield from prebuild_sm80(rows)
         yield from _sm80_apb(rows)
+        return
+    if target.arch == "sm100":  # B200: prebuild_sm100.py (augattn_sm100 cores, b200_atom / b200_atom_local)
+        from .prebuild_sm100 import prebuild_sm100
+
+        yield from prebuild_sm100(target, rows)
         return
     from . import apb, sm90_atom, sm100_atom, sm100_atom_local
 
@@ -609,43 +614,6 @@ def prebuild(target, rows):
         for stem, names in _LOCAL_STEMS.items():
             if need(names, "f32" if stem.endswith("tf32") else None):
                 calls.append(ft.partial(sm100_atom_local.cubin, stem, True))
-    else:
-        calls.append(ft.partial(apb._ext, "100", False))
-        atom = sm100_atom.KERNELS.values()
-        # (the augattn_sm100/* cubins, sm100.cubin, take stems / defines from many B200 launchers: not enumerated here)
-        for stem in sorted({s for s, *_ in sm100_atom.KERNELS_TF32.values()} | {s for s, *_ in sm100_atom.KERNELS_FUSED32.values()}):
-            calls.append(ft.partial(sm100_atom.cubin_tf32, stem))
-        for f32 in (False, True):  # sm100_atom.AtomDw
-            bkr, ns = (32, 2) if f32 else (16, 5)
-            calls.append(ft.partial(sm100_atom.cubin_tf32, "dw_atom", (f"DW_BKR={bkr}", f"NS={ns}", "DW_F32") if f32 else (f"NS={ns}",)))
-        for stem in sorted({s for s, *_ in sm100_atom_local.KERNELS_TF32.values()}):
-            calls.append(ft.partial(sm100_atom_local.cubin, stem))
-        for stem, _, _, _, *defs in atom:
-            calls.append(ft.partial(sm100_atom.cubin, stem, *defs, hopper=False))
-        local = {
-            *sm100_atom_local.KERNELS,
-            *sm100_atom_local._HOPPER_CROSS,
-            *sm100_atom_local._MMA_KERNELS,
-            *sm100_atom_local._MMA_KERNELS32,
-            "fwd",
-            "dq",
-            "dkv",
-            "db_samples",
-            "kv_bias_part",
-            "reduce_columns",
-            "zero_kv",
-            "add_cond",
-            "cross_grad_pack",
-            "kv_pack",
-        }
-        stems = set()
-        for name in local:
-            try:
-                stems.add(sm100_atom_local._resolve(name, False)[0])
-            except NotImplementedError:
-                pass
-        for stem in sorted(stems):
-            calls.append(ft.partial(sm100_atom_local.cubin, stem, False))
     yield from calls
 
 

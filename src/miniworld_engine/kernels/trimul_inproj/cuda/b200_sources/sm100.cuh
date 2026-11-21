@@ -17,33 +17,16 @@ DEV void mbar_init(uint64_t* b, uint32_t count) {
   asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(smem_u32(b)), "r"(count));
 }
 DEV void fence_mbar_init() { asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory"); }
+// programmatic dependent launch: block until the previous grid of the stream completed and its writes are visible (a no-op when
+// the kernel was not launched with the attribute); let the next grid of the stream start launching
+DEV void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
+DEV void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
 DEV void mbar_expect_tx(uint64_t* b, uint32_t bytes) {
   asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(smem_u32(b)), "r"(bytes) : "memory");
 }
 DEV void mbar_arrive(uint64_t* b) {
   asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" ::"r"(smem_u32(b)) : "memory");
 }
-#ifdef MBAR_DEBUG
-__shared__ volatile int g_dbg_s[8];
-#define MBAR_DBG_PTR g_dbg_s
-DEV void mbar_wait(uint64_t* b, uint32_t parity) {
-  for (long long n = 0;; ++n) {
-    uint32_t ok;
-    asm volatile("{ .reg .pred p; mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2; selp.u32 %0, 1, 0, p; }"
-                 : "=r"(ok) : "r"(smem_u32(b)), "r"(parity) : "memory");
-    if (ok) return;
-    if (n == 20000000) {
-#ifdef MBAR_DBG_PTR
-      const volatile int* d = MBAR_DBG_PTR;
-      printf("MBAR HANG blk %d thr %d bar_off %u parity %u dbg %d %d %d %d %d\n", blockIdx.x, threadIdx.x, smem_u32(b), parity, d[0], d[1], d[2], d[3], d[4]);
-#else
-      printf("MBAR HANG blk %d thr %d bar_off %u parity %u\n", blockIdx.x, threadIdx.x, smem_u32(b), parity);
-#endif
-    }
-    if (n == 400000000) asm volatile("trap;");
-  }
-}
-#else
 DEV void mbar_wait(uint64_t* b, uint32_t parity) {
   asm volatile(
       "{\n\t.reg .pred p;\n\t"
@@ -57,18 +40,12 @@ DEV void mbar_wait(uint64_t* b, uint32_t parity) {
       "r"(parity)
       : "memory");
 }
-#endif
 
 // ------------------------------------------------------------------ TMA
 DEV void prefetch_tmap(const CUtensorMap* m) {
   asm volatile("prefetch.tensormap [%0];" ::"l"(reinterpret_cast<uint64_t>(m)) : "memory");
 }
 DEV void tma_load_2d(void* dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, uint64_t hint) {
-#ifdef NO_HINT
-  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4}], [%2];"
-               ::"r"(smem_u32(dst)), "l"(reinterpret_cast<uint64_t>(m)), "r"(smem_u32(bar)), "r"(c0), "r"(c1) : "memory");
-  return;
-#endif
   asm volatile(
       "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1, {%3, %4}], [%2], %5;" ::"r"(
           smem_u32(dst)),
@@ -76,11 +53,6 @@ DEV void tma_load_2d(void* dst, const CUtensorMap* m, uint64_t* bar, int c0, int
       : "memory");
 }
 DEV void tma_load_3d(void* dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2, uint64_t hint) {
-#ifdef NO_HINT
-  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
-               ::"r"(smem_u32(dst)), "l"(reinterpret_cast<uint64_t>(m)), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
-  return;
-#endif
   asm volatile(
       "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1, {%3, %4, %5}], [%2], %6;" ::"r"(
           smem_u32(dst)),
@@ -93,6 +65,21 @@ DEV void tma_store_3d(const CUtensorMap* m, const void* src, int c0, int c1, int
                "r"(smem_u32(src)), "r"(c0), "r"(c1), "r"(c2)
                : "memory");
 }
+// 4-D boxes of a channel-major activation map (tmap::make_chmajor): coordinates (token in sample, 0, sample, 64-channel chunk)
+DEV void tma_load_4d(void* dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2, int c3, uint64_t hint) {
+  asm volatile(
+      "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1, {%3, %4, %5, %6}], [%2], %7;" ::"r"(
+          smem_u32(dst)),
+      "l"(reinterpret_cast<uint64_t>(m)), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "l"(hint)
+      : "memory");
+}
+DEV void tma_store_4d(const CUtensorMap* m, const void* src, int c0, int c1, int c2, int c3) {
+  asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.bulk_group [%0, {%2, %3, %4, %5}], [%1];" ::"l"(reinterpret_cast<uint64_t>(m)),
+               "r"(smem_u32(src)), "r"(c0), "r"(c1), "r"(c2), "r"(c3)
+               : "memory");
+}
+// token -> (token in sample, sample) for the 4-D maps above
+DEV void tok_split(int tok, int n2, int& q, int& s) { s = tok / n2; q = tok - s * n2; }
 DEV void tma_store_2d(const CUtensorMap* m, const void* src, int c0, int c1) {
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, {%2, %3}], [%1];" ::"l"(reinterpret_cast<uint64_t>(m)),
                "r"(smem_u32(src)), "r"(c0), "r"(c1)

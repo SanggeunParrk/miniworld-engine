@@ -1,0 +1,26 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-base/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu	2026-11-18 17:59:29.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-trimul/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu	2026-11-18 18:48:54.000000000 +0000
+@@ -114,9 +114,23 @@
+ DEV float tanh_approx(float x) { float y; asm("tanh.approx.f32 %0, %1;" : "=f"(y) : "f"(x)); return y; }
+ DEV float rsqrt_ftz(float x) { float y; asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x)); return y; }
+ // k1.cu K1_SIG == 2: 0.5 + 0.5 tanh.approx(g / 2)
++#ifndef K1W_SIGM
++#define K1W_SIGM 0   // 0: tanh.approx.f32 per element; 1: ABLATION (no MUFU: wrong values); 2: tanh.approx.bf16x2 / f16x2 packed (two elements per MUFU op)
++#endif
+ DEV float2 sigmoid2(float2 g) {
+   const float2 h = __fmul2_rn(g, make_float2(0.5f, 0.5f));
++#if K1W_SIGM == 1
++  return __ffma2_rn(h, make_float2(0.5f, 0.5f), make_float2(0.5f, 0.5f));
++#elif K1W_SIGM == 2
++  uint32_t hi, ho;
++  asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(hi) : "f"(h.y), "f"(h.x));
++  asm("tanh.approx.f16x2 %0, %1;" : "=r"(ho) : "r"(hi));
++  float2 t;
++  asm("{ .reg .b16 lo, hi; mov.b32 {lo, hi}, %2; cvt.f32.f16 %0, lo; cvt.f32.f16 %1, hi; }" : "=f"(t.x), "=f"(t.y) : "r"(ho));
++  return __ffma2_rn(t, make_float2(0.5f, 0.5f), make_float2(0.5f, 0.5f));
++#else
+   return __ffma2_rn(make_float2(tanh_approx(h.x), tanh_approx(h.y)), make_float2(0.5f, 0.5f), make_float2(0.5f, 0.5f));
++#endif
+ }
+ DEV uint32_t sw128(uint32_t r, uint32_t q) { return r * 128u + ((q ^ (r & 7u)) << 4); }
+ DEV uint4 lds128(uint32_t a) {
