@@ -1,7 +1,4 @@
-# E5 (ext_attn): the Pairformer-operator candidates of third_party/{geometric-nn-ops,openfold3,megafold,bionemo-ir,turbopairformer,ligo-af3}, next to the PyTorch reference
-# and the engine's cuda. Rows (requirements_ext_attn.csv) are E1 / E2 rows of the operator classes the candidates serve: TriAttn (E2 sweeps), AttentionPairBias,
-# OuterProductMean, MSAPairWeightedAveraging, Transition, LayerNorm (E1 rows, lengths 256 | 768 | 1536). A backend serves only the classes its adapter attaches to;
-# a case it cannot serve is recorded `unsupported` with the reason. Run: run_ext_attn.py cfg_ext_attn.yaml --ext <names> (README).
+# E5 (ext_attn): the Pairformer-operator candidates next to the PyTorch reference and the engine cuda. Scope (coordinator, 2026-11-21): AF3 setup only, L 512 / 1024 / 2048, 20 timed iterations (warmup 5).
 requirements: requirements_ext_attn.csv   # relative to this file
 modules: all
 backends: [pytorch, cuda, gnops, of3tri, megafold, bionemo_ir, turbopf, ligo_pwa, megafold_tr]
@@ -14,7 +11,7 @@ depths: min
 samples: min
 timing: [graph]
 warmup: 5
-iterations: 100
+iterations: 20
 flush_l2: true
 device: cuda
 seed: 0

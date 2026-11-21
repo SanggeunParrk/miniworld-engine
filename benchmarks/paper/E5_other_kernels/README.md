@@ -34,7 +34,7 @@ Run through `run_ext_attn.py` (it is `paper_common/run_measure.py` with the regi
     python E5_other_kernels/run_ext_attn.py E5_other_kernels/cfg_ext_attn_acc.yaml --kind accuracy --out ... --ext ...     # vs the float64 gold of the module's reference
 
 The upstream trees are installed per card by `third_party/<name>/fetch.sh` into `$PAPER_EXT_ATTN` (default `~/paper-ext-attn`; not `~/paper-ext`, which the trifast / ds4sci campaigns use).
-Cases: `requirements_ext_attn.csv` (E1 / E2 rows of the classes below; lengths 256 | 768 | 1536 for the E1 rows, the E2 sweeps for TriAttn); a backend serves only the classes its adapter attaches to,
+Cases: `requirements_ext_attn.csv` (AF3 setup rows only, L 512 | 1024 | 2048); a backend serves only the classes its adapter attaches to,
 and a case outside a library's range is recorded `unsupported` with the reason (never re-routed).
 
 | backend | library (license) | classes | modes / dtypes | cards |
