@@ -237,7 +237,7 @@ def main(argv=None) -> None:
     import os
 
     p = argparse.ArgumentParser()
-    p.add_argument("--card", required=True, choices=["h100", "a100", "rtx5090"])
+    p.add_argument("--card", required=True, choices=["h100", "a100", "rtx5090", "b200"])
     a = p.parse_args(argv)
     base = Path(os.environ["RECORDS"]) if os.environ.get("RECORDS") else HERE / "records"
     rows = rows_of(a.card, base)

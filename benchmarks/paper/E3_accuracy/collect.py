@@ -10,5 +10,5 @@ from paper_common import collect_exp
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--card", required=True, choices=["h100", "a100", "rtx5090"])
+    p.add_argument("--card", required=True, choices=["h100", "a100", "rtx5090", "b200"])
     collect_exp.main("accuracy", "E3", str(HERE), p.parse_args().card)
