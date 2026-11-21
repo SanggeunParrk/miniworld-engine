@@ -1,35 +1,71 @@
-"""E5: other public triangle-attention / triangle-multiplication kernels as external backends of the measurer, installed at run time.
+"""E5: every external candidate kernel as a backend of the measurer, installed at run time by ONE entry point (``install(names)``; ``run_measure.py --ext <name>``).
 
-Nothing under src/ is edited: ``install(names)`` adds the backend name to ``backends`` of the triangle-attention classes (a class attribute
-tuple) and attaches ``_supports_<name>`` / ``_forward_<name>`` to them, exactly the shape the measurers read (``BackendModule.backends``,
-``unsupported`` -> ``_supports_<name>``, ``_forward_<name>``). The forward is the module's own ``_residual`` with the library's attention CORE
-(the cuEquivariance-signature core: q / k / v ``[B, N, H, Q, d]``, bias ``[B, 1, H, Q, K]``, key mask ``[B, K]``), so LayerNorm, projections,
-gate, out-projection and residual are the module's own statements, as for ``cueq`` / ``cuda``: only the attention core differs.
+Nothing under src/ is edited: ``install`` adds the backend name to ``backends`` of the module classes (a class attribute tuple) and attaches
+``_supports_<name>`` / ``_forward_<name>`` to them, exactly the shape the measurers read (``BackendModule.backends``, ``unsupported`` -> ``_supports_<name>``,
+``_forward_<name>``). A case a library does not serve is recorded ``unsupported`` with the reason, never re-routed.
 
-Backends (a missing package or an unsupported shape is recorded as ``unsupported`` with the reason, never re-routed):
-  ds4sci   DeepSpeed4Science ``DS4Sci_EvoformerAttention`` (deepspeed.ops.deepspeed4science): bf16 / fp16, the library's own head-width limits.
-  trifast  ``trifast.triangle_attention`` (pip install trifast): Triton kernels, fp32 / bf16 / fp16.
-Triangle multiplication: no published fused kernel besides cuEquivariance (``cueq``, already a backend) and the Anthropic kits was found;
-``tm_candidates()`` lists what was checked (README).
+Families (``AVAILABLE`` lists all names; ``CLASS_OF`` says which operator class each serves):
+  inline (this file)          ds4sci, trifast: triangle-attention cores (the module's own ``_residual`` with the library's attention CORE).
+  triangle multiplication     fast_trimul, gpumode, geonn: adapters ``ext_<name>_trimul.py`` define ``PROBE``, ``supports(self, pair, mask, dropout_p)`` and
+                              ``forward(self, pair, mask, dropout_p)`` (the whole update incl. residual); attached to ``TriangleMultiplication``.
+  Pairformer operators        gnops, of3tri, megafold, bionemo_ir, turbopf, ligo_pwa, megafold_tr: adapters ``ext_<name>.py`` with ``install()``
+                              (TriAttn / AttentionPairBias / OPM / PWA / Transition; see ``ext_attn_common.py``).
 """
 
 from __future__ import annotations
 
 import importlib
 import importlib.util
+import os
+import sys
+from pathlib import Path
 
 import torch
 
-AVAILABLE = ("ds4sci", "trifast")
+_HERE = Path(__file__).resolve().parent
+INLINE = ("ds4sci", "trifast")
+#: triangle-multiplication adapters (measurer backend name -> adapter module)
+TRIMUL_REGISTRY = {
+    "fast_trimul": "ext_fast_trimul",  # tiagomonteiro0715/fast_trimul 3.0.6 (Apache-2.0): CuTe DSL fp16 fused update
+    "gpumode": "ext_gpumode_trimul",  # arseniivanov/trimul (MIT): GPU MODE TriMul competition Triton kernels (A100 / H100 / B200 files)
+    "geonn": "ext_geonn_trimul",  # ROCm/geometric-nn-ops 1.0.0 (Apache-2.0): Triton forward, cuEquivariance signature
+}
+#: Pairformer-operator adapters (each module's ``install()`` attaches its backend to the classes it serves)
+ATTN_REGISTRY = {
+    "gnops": "ext_gnops",
+    "of3tri": "ext_of3tri",
+    "megafold": "ext_megafold",
+    "bionemo_ir": "ext_bionemo_ir",
+    "turbopf": "ext_turbopf",
+    "ligo_pwa": "ext_ligo_pwa",
+    "megafold_tr": "ext_megafold_tr",
+}
+AVAILABLE = (*INLINE, *TRIMUL_REGISTRY, *ATTN_REGISTRY)
+#: operator classes each backend serves (the adapters refuse what a library does not cover, with a reason)
+CLASS_OF = {
+    "ds4sci": ("TriAttn",),
+    "trifast": ("TriAttn",),
+    "fast_trimul": ("TriMul",),
+    "gpumode": ("TriMul",),
+    "geonn": ("TriMul",),
+    "gnops": ("TriAttn", "AttentionPairBias"),
+    "of3tri": ("TriAttn", "AttentionPairBias"),
+    "megafold": ("TriAttn", "AttentionPairBias"),
+    "bionemo_ir": ("TriAttn", "OPM", "PWA", "Transition"),
+    "turbopf": ("TriAttn",),
+    "ligo_pwa": ("PWA",),
+    "megafold_tr": ("Transition",),
+}
 
 
 # ------------------------------------------------------------------------------------------------------------------------------- cores
 def _ds4sci_core(q, k, v, bias, mask):
     from deepspeed.ops.deepspeed4science import DS4Sci_EvoformerAttention
 
-    b, n, _h, s, d = q.shape
+    b, n, _h, s, _d = q.shape
     dt = q.dtype
-    qq, kk, vv = ((t.transpose(2, 3)).contiguous() for t in (q * d**-0.5, k, v))  # [B, N, Q, H, d]; the library has no internal scale
+    # The kernel applies the d^-0.5 softmax scale itself (checked against a float64 reference: pre-scaling q, as the first E5 run did, scales twice -> relative error 0.19, gradients 0.9)
+    qq, kk, vv = ((t.transpose(2, 3)).contiguous() for t in (q, k, v))  # [B, N, Q, H, d]
     if mask is None:
         mbias = torch.zeros(b, n, 1, 1, s, dtype=dt, device=q.device)
     else:
@@ -89,11 +125,63 @@ def _forward(core):
     return fwd
 
 
-def install(names) -> None:
-    """Add the named external backends to every single-direction triangle-attention class that has the cueq core signature."""
-    import os
-    import sys
+def add_paths(third_party_dir: str) -> None:
+    """Make a fetched upstream tree importable: ``$PAPER_EXT_PATH`` (default ``~/paper-ext``), ``$PAPER_EXT_ATTN/<dir>`` (default ``~/paper-ext-attn``),
+    then the repo's ``third_party/<dir>/upstream``."""
+    ext = os.environ.get("PAPER_EXT_PATH") or os.path.expanduser("~/paper-ext")
+    attn = os.environ.get("PAPER_EXT_ATTN") or os.path.expanduser("~/paper-ext-attn")
+    for p in (ext, os.path.join(attn, third_party_dir), str(_HERE.parents[2] / "third_party" / third_party_dir / "upstream")):
+        if os.path.isdir(p) and p not in sys.path:
+            sys.path.append(p)  # after site-packages: the engine environment wins for every package it has
 
+
+def library_refusal(self, pair, mask) -> str | None:
+    """What every TriMul adapter needs: [B, L, L, d] pair, a bool [B, L] residue mask, one LayerNorm epsilon."""
+    if pair.dim() != 4 or pair.shape[1] != pair.shape[2]:
+        return f"pair must be [B, L, L, d_pair], got {tuple(pair.shape)}"
+    if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(pair.shape[:2])):
+        return "mask must be a bool [B, L] residue mask"
+    if self.ln_pair.eps != self.ln_out.eps:
+        return "the library op takes one LayerNorm epsilon for LN_in and LN_out"
+    if not torch.cuda.is_available():
+        return "no CUDA device"
+    return None
+
+
+def import_error(module: str, probe: str) -> str | None:
+    try:
+        importlib.import_module(probe)
+    except Exception as exc:  # recorded as the reason the backend does not serve the case
+        return f"{probe}: {type(exc).__name__}: {str(exc)[:240]} ({module}; see third_party/ and E5_other_kernels/README.md)"
+    return None
+
+
+def _install_trimul(names) -> None:
+    import miniworld_engine.modules.triangle as tri
+
+    for name in names:
+        mod = importlib.import_module(TRIMUL_REGISTRY[name])
+        cls = tri.TriangleMultiplication
+        if name not in cls.backends:
+            cls.backends = (*cls.backends, name)
+
+        def supports(self, pair, mask=None, dropout_p=None, _m=mod):
+            why = library_refusal(self, pair, mask) or import_error(_m.__name__, _m.PROBE)
+            return why or _m.supports(self, pair, mask, dropout_p)
+
+        def fwd(self, pair, mask=None, dropout_p=None, _m=mod):
+            return _m.forward(self, pair, mask, dropout_p)
+
+        setattr(cls, f"_supports_{name}", supports)
+        setattr(cls, f"_forward_{name}", fwd)
+
+
+def _install_attn(names) -> None:
+    for name in names:
+        importlib.import_module(ATTN_REGISTRY[name]).install()
+
+
+def _install_inline(names) -> None:
     import miniworld_engine.modules.triangle as tri
 
     ext = os.environ.get("PAPER_EXT_PATH") or os.path.expanduser("~/paper-ext")
@@ -101,14 +189,25 @@ def install(names) -> None:
         sys.path.append(ext)  # after site-packages: the engine env wins for every package it has
     table = {"ds4sci": ("deepspeed", _ds4sci_core), "trifast": ("trifast", _trifast_core)}
     for name in names:
-        if name not in table:
-            raise ValueError(f"unknown external backend {name!r}; choose from {AVAILABLE}")
         probe, core = table[name]
         for cls in _classes(tri):
             if name not in cls.backends:
                 cls.backends = (*cls.backends, name)
             setattr(cls, f"_supports_{name}", _supports(name, probe))
             setattr(cls, f"_forward_{name}", _forward(core))
+
+
+def install(names) -> None:
+    """Install the named external backends (any of ``AVAILABLE``) on the module classes they serve."""
+    names = list(names)
+    unknown = [n for n in names if n not in AVAILABLE]
+    if unknown:
+        raise ValueError(f"unknown external backend(s) {unknown}; choose from {AVAILABLE}")
+    if str(_HERE) not in sys.path:
+        sys.path.insert(0, str(_HERE))  # the adapters ext_<name>.py and ext_attn_common.py sit next to this file
+    _install_inline([n for n in names if n in INLINE])
+    _install_trimul([n for n in names if n in TRIMUL_REGISTRY])
+    _install_attn([n for n in names if n in ATTN_REGISTRY])
 
 
 def _classes(tri):
@@ -118,12 +217,3 @@ def _classes(tri):
         out.append(c)
         todo.extend(c.__subclasses__())
     return [c for c in out if "cueq" in c.backends]
-
-
-def tm_candidates() -> list[str]:
-    return [
-        "cuequivariance_torch.triangle_multiplicative_update (already the `cueq` backend)",
-        "Anthropic kits (already the `anthropic` backend)",
-        "DeepSpeed4Science: attention only (no triangle multiplication kernel)",
-        "trifast: attention only",
-    ]

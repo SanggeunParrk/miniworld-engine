@@ -1,0 +1,12 @@
+{
+  "name": "TurboPairFormer",
+  "pypi": "turbopairformer 0.1.3.post1 (cp314 / torch 2.10 wheel, used for its Python + CUDA sources)",
+  "wheel_sha256": "61275e1063be841a555f74d21c6dd128f9dcd286e1b492e579fb521c0134d020",
+  "repo": "https://github.com/RyanAIResearch/openfold3_triangle_kernel",
+  "paper": "arXiv 2610.05854",
+  "license": "Apache-2.0",
+  "fetch": "fetch.sh (curl + sha256 + unzip; _ext/*.so excluded)",
+  "build": "build_local.sh (development JIT of the 4 CUDA extensions, sm_90a)",
+  "e5_backend": "turbopf",
+  "adapter": "benchmarks/paper/E5_other_kernels/ext_turbopf.py"
+}

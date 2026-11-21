@@ -1,0 +1,17 @@
+{
+  "name": "gpumode_trimul",
+  "repository": "https://github.com/arseniivanov/trimul",
+  "revision": "558b9f26382ec9b88b961d9f8306bf46706da0f6",
+  "license": "MIT (LICENSE of the repository, Copyright (c) 2025 Arseni Ivanov)",
+  "also_published_as": "https://huggingface.co/kernels-community/trimul_gpumode (sha 4d5304141f1a9b02d896891a3cc7ac7505d95b34; no license declared there; its kernel_global is from davidberard98/gpumode-trimul, no license file: not used)",
+  "files": [
+    {"path": "LICENSE", "sha256": "841a08280d21614c305aea6d8ab96c19d4b9bdef6a658d91fadd1900693d5e0b"},
+    {"path": "task.py", "sha256": "856c8f04c06fc4b0768fca5e267c34f1884355054f89c629a6aac07b3c099174"},
+    {"path": "reference.py", "sha256": "e90405e5386923d643753ac70f09d3441925835cefb41849f229a340a0e26ff6"},
+    {"path": "utils.py", "sha256": "a8a6a725c4fcc3d5e9cd50b9299a77d9f8a39e41830a994481171033f95b2681"},
+    {"path": "triton_a100.py", "sha256": "5fa85c21db75661b1dd00d0050b38becced566fd3e849e35d0af80c95ab844d4"},
+    {"path": "triton_h100.py", "sha256": "6a22a05344f6a2ebda5b2067b36e135268f261fea3b9f8f287548f5e9ddaa92b"},
+    {"path": "triton_b200.py", "sha256": "105ed18686007c003aebc4695e06271fa878fd1b96a695717938bd6f8d881ce2"}
+  ],
+  "patches": []
+}

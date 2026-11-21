@@ -1,0 +1,25 @@
+{
+ "engine_version": "3.0.6",
+ "commit": "fc7d602d9ea80ffeb31b63f96d5ba82dc4594d18",
+ "card": "h100",
+ "card_key": "h100_sm90",
+ "gpu": "NVIDIA H100 80GB HBM3",
+ "torch": "2.13.0+cu129",
+ "cuda": "12.9",
+ "cuda_driver": "12.9",
+ "driver": "575.51.03",
+ "triton": "3.7.1",
+ "python": "3.12.13",
+ "node": "node02",
+ "slurm_job": "62966",
+ "paper_bench_commit": "5665cdc961b74c16b44d98e3153bc53ac611d047",
+ "config": "/home/psk6950/miniworld-engine-scratch/paper-run-h100/benchmarks/paper/E5_other_kernels/cfg_engine.yaml",
+ "settings": {
+  "timing": [
+   "graph"
+  ],
+  "warmup": 5,
+  "iterations": 20,
+  "flush_l2": true
+ }
+}

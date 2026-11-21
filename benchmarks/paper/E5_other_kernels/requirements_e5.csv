@@ -1,2 +1,0 @@
-module,model,stream,lengths,depths,dims,options,dtypes,modes,eval_samples,train_samples,source
-TriangleAttention,paper_sweep,token_pair,512|1024|2048,,d_pair=128;n_head=4,starting=True;p_drop=0.25,master,eval|train,1,1,paper E5: AF3 setup only (d_pair=128, 4 heads of 32 channels), L 512 | 1024 | 2048
