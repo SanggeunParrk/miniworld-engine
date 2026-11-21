@@ -71,9 +71,9 @@ def _activation_dtype_reason(x: torch.Tensor, *others: torch.Tensor) -> str | No
     return None
 
 
-def _wants_grad(module: nn.Module, *tensors: torch.Tensor) -> bool:
+def _wants_grad(module: nn.Module, *tensors: torch.Tensor | None) -> bool:
     """A gradient is recorded for this call: grad mode on and an input or a parameter requires one."""
-    return torch.is_grad_enabled() and (any(t.requires_grad for t in tensors) or any(p.requires_grad for p in module.parameters()))
+    return torch.is_grad_enabled() and (any(t is not None and t.requires_grad for t in tensors) or any(p.requires_grad for p in module.parameters()))
 
 
 def _as_rows3(x: torch.Tensor) -> torch.Tensor:
