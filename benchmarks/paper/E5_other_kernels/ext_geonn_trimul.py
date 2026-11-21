@@ -9,9 +9,9 @@ unsupported rather than measured as PyTorch. Validated by AMD on MI300 only; her
 from __future__ import annotations
 
 import torch
-from ext_trimul_registry import add_paths
+from externals import add_paths
 
-add_paths("geometric-nn-ops-trimul")
+add_paths("geometric-nn-ops")
 PROBE = "geometric_nn_ops_torch.triangle"
 
 

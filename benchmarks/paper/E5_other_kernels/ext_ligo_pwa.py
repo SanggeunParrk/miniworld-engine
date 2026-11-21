@@ -40,6 +40,7 @@ def _supports(self, msa, pair, mask=None):
 
 def _forward(self, msa, pair, mask=None):
     from einops import rearrange
+
     from miniworld_engine.modules.primitives import master_autocast
 
     if self.dead and not (self.training or torch.is_grad_enabled()):

@@ -55,6 +55,7 @@ def _supports(self, x, *args, **kwargs):
 
 def _forward(self, x):
     import torch.nn.functional as F
+
     from miniworld_engine.modules.primitives import master_autocast
 
     if self.dead and not (self.training or torch.is_grad_enabled()):

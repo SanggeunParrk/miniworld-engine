@@ -1,0 +1,25 @@
+{
+ "engine_version": "3.0.6",
+ "commit": "fc7d602d9",
+ "card": "a100",
+ "card_key": "a100_sm80",
+ "gpu": "NVIDIA A100 80GB PCIe",
+ "torch": "2.13.0+cu129",
+ "cuda": "12.9",
+ "cuda_driver": "12.8",
+ "driver": "570.211.01",
+ "triton": "3.7.1",
+ "python": "3.12.13",
+ "node": "gpu06",
+ "slurm_job": "97170",
+ "paper_bench_commit": "unknown",
+ "config": "/home/psk6950/paper-e5all/benchmarks/paper/E5_other_kernels/cfg_e5_all.yaml",
+ "settings": {
+  "timing": [
+   "graph"
+  ],
+  "warmup": 5,
+  "iterations": 20,
+  "flush_l2": true
+ }
+}

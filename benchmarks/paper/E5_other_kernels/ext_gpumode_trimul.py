@@ -24,7 +24,7 @@ import importlib
 import weakref
 
 import torch
-from ext_trimul_registry import add_paths
+from externals import add_paths
 
 add_paths("gpumode_trimul")
 PROBE = "gpumode_trimul.triton_h100"

@@ -14,7 +14,7 @@ from __future__ import annotations
 import weakref
 
 import torch
-from ext_trimul_registry import add_paths
+from externals import add_paths
 
 add_paths("fast_trimul")
 PROBE = "fast_trimul._kernels"

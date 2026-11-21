@@ -18,7 +18,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import ext_trimul_registry as reg
+import externals as reg
 
 
 def build(d: int, seed: int):
@@ -62,13 +62,13 @@ def grads(m, pair, mask, backend):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--backends", nargs="+", default=["pytorch", "cuda", *reg.AVAILABLE])
+    ap.add_argument("--backends", nargs="+", default=["pytorch", "cuda", *reg.TRIMUL_REGISTRY])
     ap.add_argument(
         "--grads", action="store_true", help="training: input and W_o gradients against the fp64 reference (cases without padding)"
     )
     ap.add_argument("--cases", nargs="+", default=["128:128", "512:128", "768:128", "768:64", "768:256", "768:512"])
     a = ap.parse_args()
-    reg.install([b for b in a.backends if b in reg.REGISTRY])
+    reg.install([b for b in a.backends if b in reg.TRIMUL_REGISTRY])
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     rows = []

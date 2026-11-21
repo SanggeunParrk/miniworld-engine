@@ -1,0 +1,17 @@
+{
+ "engine_version": "3.0.6",
+ "commit": "fc7d602d9",
+ "card": "rtx5090",
+ "card_key": "5090_sm120",
+ "gpu": "NVIDIA GeForce RTX 5090",
+ "torch": "2.13.0+cu129",
+ "cuda": "12.9",
+ "cuda_driver": "13.2",
+ "driver": "595.99.02",
+ "triton": "3.7.1",
+ "python": "3.12.3",
+ "node": "cssb-rtx",
+ "slurm_job": null,
+ "paper_bench_commit": "unknown",
+ "config": "/home/psk6950/mwe/paper-e5all/benchmarks/paper/E5_other_kernels/cfg_e5_all.yaml"
+}

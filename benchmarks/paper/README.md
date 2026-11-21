@@ -11,7 +11,7 @@ version, the commit, torch / CUDA / driver, the GPU and the node.
 | E2 | `E2_sweeps/` | TriMul (outgoing) / TriAttn (starting, 32 channels per head): L sweep (d=128) and D sweep (L=768), inference + training | Supp 5-7 | H100, A100, 5090 |
 | E3 | `E3_accuracy/` | accuracy against float64 (judge tolerances), the E1 cases | Methods | H100, A100, 5090 |
 | E4 | `E4_fp8/` | FP8 path of TriMul / TriAttn inference against the default path, same process, alternating | Fig 1c, Supp 5 | H100 (5090: no sm120 FP8 path; A100 n/a) |
-| E5 | `E5_other_kernels/` | other public kernels (DeepSpeed4Science EvoformerAttention, trifast) as external backends | Fig 1c, Supp 2-7 | H100, A100, 5090 |
+| E5 | `E5_other_kernels/` | 12 other public candidates (ds4sci, trifast, fast_trimul, gpumode, geonn, gnops, of3tri, megafold, megafold_tr, bionemo_ir, turbopf, ligo_pwa) + cuEquivariance as external backends of every Pairformer operator class (TriAttn, TriMul, AttentionPairBias, OPM, PWA, Transition); results in `E5_other_kernels/E5_results.md` | Fig 1c, Supp 2-7 | H100, A100, 5090 |
 | E6 | `E6_memory/` | peak memory per operator / backend on the E2 grid, inference + training | new (Supp) | H100, A100, 5090 |
 
 Each folder has `README.md` (what, conditions, commands, output), config `*.yaml` / extra requirements CSV, one script per card
@@ -62,10 +62,10 @@ Smoke = 1-2 cases, 1 repeat, on the 3.0.6 candidate tree (rc-3.0.6 c40a761ef + t
 | E2 | smoke yes (TriMul engine; TriAttn kit stage queued) | smoke yes (TriMul + TriAttn, engine + kit) | smoke yes (TriMul engine + kit) |
 | E3 | smoke yes (TriAttn, engine + kit) | smoke yes (TriMul, engine + kit) | smoke yes |
 | E4 | smoke yes (TriMul, both gate passes; TriAttn queued) | n/a (no FP8 path) | smoke yes: no sm120 FP8 route (`routes_fired` false, ratio ~ 1) |
-| E5 | adapters installed; smoke queued | smoke yes: trifast runs, ds4sci fails to JIT-build (needs CUTLASS_PATH + nvcc; recorded as failed with the reason) | smoke queued (GPU lock) |
+| E5 | measured 2026-11-21, engine 3.0.6 (3 repeats, 20 iterations; CUDA-graph validity checked) | measured as H100 (A100: `cssb3`, 3 repeats, graph check) | measured (5090: 3 repeats; part of the TriMul records 100 iterations or re-measured at 20: see `E5_other_kernels/README.md`; graph check partial: out-of-memory cells unchecked) |
 | E6 | smoke queued | smoke yes | smoke yes |
 
 Smoke caveats: kernels were JIT-built on first use in the worktree (a cold cache ate a 10-minute job on H100): prebuild the tag's kernels
 before a campaign (`python -m miniworld_engine.kernels._prebuild --arch sm90a`, sm80 on the A100; `tools/slurm/cycle.sh` shows the job shape).
 Where there is no `.git` (cssb3, cssb-rtx copies) set `MWE_COMMIT=<tag commit>` (and `MWE_VERSION` if the tree has no pyproject) so records carry the commit.
-Library accuracy of the E5 adapters is not verified against float64 (speed only).
+Library accuracy of the E5 candidates against float64: `E5_other_kernels/E5_results.md` section 4 (E5 speed records are graph timings; a candidate whose kernels leave the CUDA graph is `invalid_graph`, section 0 of that file).

@@ -27,6 +27,18 @@ def upstream(name: str) -> str:
     return os.path.join(ext_root(), name)
 
 
+def find_upstream(name: str, package: str) -> str:
+    """The root that contains ``package``: ``$PAPER_EXT_ATTN/<name>``, ``$PAPER_EXT_PATH`` (the TriMul adapters' install dir), then the repo's
+    ``third_party/<name>/upstream`` (``geometric-nn-ops`` is one entry for the ``geonn`` and ``gnops`` adapters); the first existing, else the first."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    roots = [
+        upstream(name),
+        os.environ.get("PAPER_EXT_PATH") or os.path.expanduser("~/paper-ext"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(here))), "third_party", name, "upstream"),
+    ]
+    return next((r for r in roots if os.path.isdir(os.path.join(r, package))), roots[0])
+
+
 def load_file(modname: str, path: str):
     """Import one source file as its own module (no package ``__init__`` runs), registered as ``modname``."""
     if modname in sys.modules:

@@ -36,3 +36,28 @@ Common helpers: `_attn_common.sh` (git / wheel pinning). On a card the attention
 | [trifast](trifast/README.md) | trifast 0.1.13 (record of the pinned install; connected in `externals.py`) | MIT | `trifast` | TriAttn |
 | [deepspeed](deepspeed/README.md) | DeepSpeed 0.20.0 DS4Sci Evoformer attention (record; connected in `externals.py`) | Apache-2.0 | `ds4sci` | TriAttn |
 <!-- END third-party-attn -->
+
+## Index of every candidate (name, purpose, pinned version, license, where it is used)
+
+The authoritative pins are the `UPSTREAM.json` of each entry (revision or wheel sha256); a short form:
+
+| entry | purpose | pinned version | license | used in |
+|---|---|---|---|---|
+| `anthropic/` | Anthropic uplifting-biomolecular-modeling kernels (TriAttn, TriMul, ...) | git `f4f62fa6` | Apache-2.0 | E1, E2, E3 (`anthropic` backend; not an E5 candidate) |
+| `deepspeed/` | DeepSpeed4Science EvoformerAttention (TriAttn) | deepspeed 0.20.0 (pip, `--target`) | Apache-2.0 | E5 `ds4sci` (graph timing invalid: see `benchmarks/paper/E5_other_kernels/README.md`; eager timing used) |
+| `trifast/` | Triton triangle attention | trifast 0.1.13 (wheel sha256 in UPSTREAM.json) | MIT | E5 `trifast` |
+| `fast_trimul/` | fused TriMul in CuTe DSL (fp16) | fast_trimul 3.0.6 (wheel sha256) | Apache-2.0 | E5 `fast_trimul` |
+| `gpumode_trimul/` | GPU MODE TriMul competition Triton kernels | git `558b9f26` | MIT | E5 `gpumode` |
+| `geometric-nn-ops/` | AMD triangle attention + triangle multiplicative update (Triton) | git `c58e24cd` (v1.0.0; attention records from `232ed824`, same package files) | Apache-2.0 | E5 `geonn`, `gnops` |
+| `openfold3/` | OpenFold3 Triton Evoformer attention | git `4b59bbf3` | Apache-2.0 | E5 `of3tri` |
+| `megafold/` | MegaFold EvoAttention + fused Transition | git `845905e7` | MIT | E5 `megafold`, `megafold_tr` |
+| `bionemo-ir/` | NVIDIA BioNeMo Inference Runtime (CuTeDSL CUBINs; inference only) | PyPI wheel (sha256 in UPSTREAM.json) | Apache-2.0 (kernel source not published) | E5 `bionemo_ir` |
+| `turbopairformer/` | TurboPairFormer Hopper triangle attention | turbopairformer 0.1.3.post1 sources, built locally | Apache-2.0 | E5 `turbopf` (H100 only) |
+| `ligo-af3/` | Ligo AlphaFold3 Triton MSA pair-weighted averaging (patched) | git `621531e4` + `patches/` | Apache-2.0 | E5 `ligo_pwa` |
+| `flashbias/` | FlashBias low-rank-bias attention | git `254a8b87` | MIT | none: not applicable to a dense pair bias (not connected) |
+
+## Adding a candidate
+
+1. `third_party/<name>/` with `README.md` (what it is, license, what it covers / does not cover), `UPSTREAM.json` (repository, pinned revision or wheel sha256, license, adapter path, E5 backend name), `fetch.sh` (idempotent, pinned, sha256 checked; use `_attn_common.sh` `git_pin` / `wheel_pin`), `.gitignore` (`upstream/`). Never vendor code with an unclear license.
+2. One adapter `benchmarks/paper/E5_other_kernels/ext_<name>.py` (TriMul adapters: `PROBE`, `supports`, `forward`; Pairformer-operator adapters: `install()` calling `ext_attn_common.attach`) and one line in `externals.py` (`TRIMUL_REGISTRY` or `ATTN_REGISTRY`, plus `CLASS_OF`). Nothing under `src/` changes.
+3. Measure with `run_measure.py ... --ext <name>`, then run `graph_check.py` for it (a library whose kernels leave the CUDA graph is invalid), `collect.py`, `report.py`.

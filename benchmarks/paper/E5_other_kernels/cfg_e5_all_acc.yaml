@@ -1,0 +1,17 @@
+# E5 accuracy against the float64 gold of the module's PyTorch reference (miniworld_engine.measure.accuracy; run_measure.py --kind accuracy): the smallest length of each case.
+requirements: requirements_e5_all.csv
+modules: all
+backends: [pytorch, cuda, cueq, ds4sci, trifast, fast_trimul, gpumode, geonn, gnops, of3tri, megafold, bionemo_ir, turbopf, ligo_pwa, megafold_tr]
+external: [cueq, ds4sci, trifast, fast_trimul, gpumode, geonn, gnops, of3tri, megafold, bionemo_ir, turbopf, ligo_pwa, megafold_tr]
+rows: []
+dtypes: []
+modes: []
+lengths: min
+depths: min
+samples: min
+device: cuda
+seed: 0
+fixed:
+  bfloat16: 8.0e-3
+  master: 8.0e-3
+  float32: 1.0e-5

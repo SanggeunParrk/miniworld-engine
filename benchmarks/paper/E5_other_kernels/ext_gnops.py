@@ -16,7 +16,7 @@ NAME = "gnops"
 
 
 def _mod():
-    root = common.upstream("geometric-nn-ops")
+    root = common.find_upstream("geometric-nn-ops", "geometric_nn_ops_torch")
     if root not in sys.path:
         sys.path.insert(0, root)
     from geometric_nn_ops_torch.triangle import triangle_attention

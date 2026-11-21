@@ -68,7 +68,9 @@ def native_refusal() -> str | None:
             _NATIVE.append(None)
         except BaseException as exc:
             why = str(exc).split(" (required")[0][:120]
-            _NATIVE.append(f"native library bionemo_ir.libs._cutedsl_kernels cannot be loaded on this host ({why}): its CuTeDSL kernels are unavailable")
+            _NATIVE.append(
+                f"native library bionemo_ir.libs._cutedsl_kernels cannot be loaded on this host ({why}): its CuTeDSL kernels are unavailable"
+            )
     return _NATIVE[0]
 
 
@@ -174,6 +176,7 @@ def _pwa_supports(self, msa, pair, mask=None):
 
 def _pwa_forward(self, msa, pair, mask=None):
     import torch.nn.functional as F
+
     from miniworld_engine.modules.primitives import master_autocast
 
     if self.dead and not (self.training or torch.is_grad_enabled()):
