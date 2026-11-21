@@ -59,18 +59,23 @@ def main(argv=None) -> int:
         import externals
 
         externals.install(args.ext)
-    have: dict[tuple, int] = {}
+    have: dict[tuple, set] = {}  # case_key -> backends already recorded (each counts once, however many duplicate records)
     if out.exists():
         for rec in csvio.read_jsonl(str(out)):
             if rec.get("timing", "graph") == "graph" and rec.get("status") != "error":
-                have[case_key(rec)] = have.get(case_key(rec), 0) + 1
+                have.setdefault(case_key(rec), set()).add(rec["backend"])
     todo, budget_hit = [], False
+    missing: dict[tuple, list[str]] = {}
     for case in cfgmod.limit(cfg, args.max_cases):
-        if have.get(case_key(case), 0) >= len(config.backends_of(cfg, case)):
-            continue
-        todo.append(case)
+        miss = [b for b in config.backends_of(cfg, case) if b not in have.get(case_key(case), ())]
+        if miss:
+            missing[case_key(case)] = miss
+            todo.append(case)
     total = len(todo)
-    print(f"[paper] {total} case(s) to measure ({sum(have.values())} records already in {out.name})", flush=True)
+    print(f"[paper] {total} case(s) to measure ({sum(map(len, have.values()))} records already in {out.name})", flush=True)
+    # speed.run measures config.backends_of(cfg, case): only the backends a case still lacks (resume per backend, not per case)
+    _all_backends = config.backends_of
+    config.backends_of = lambda c, case: missing.get(case_key(case), _all_backends(c, case))
 
     def gen(_cfg):
         nonlocal budget_hit
