@@ -1,0 +1,24 @@
+diff --git a/src/models/components/msa_kernel.py b/src/models/components/msa_kernel.py
+index cd81a36..5985b65 100644
+--- a/src/models/components/msa_kernel.py
++++ b/src/models/components/msa_kernel.py
+@@ -19,7 +19,7 @@ import math
+ import triton
+ import triton.language as tl
+ 
+-INF: tl.constexpr = 1e9
++INF = tl.constexpr(1e9)
+ 
+ def nearest_pow2(n: int):
+     power = math.ceil(math.log2(n))
+@@ -199,8 +199,8 @@ class _MSAWeightedAveragingFused(torch.autograd.Function):
+         n_batches, n_seq, n_res, no_heads, c_hidden = v.shape
+         
+         # allocate output
+-        out = torch.empty((n_batches, n_seq, n_res, no_heads * c_hidden), device=g.device, dtype=g.dtype)
+-        vw = torch.empty((n_batches, n_seq, n_res, no_heads * c_hidden), device=g.device, dtype=g.dtype)
++        out = torch.zeros((n_batches, n_seq, n_res, no_heads * c_hidden), device=g.device, dtype=g.dtype)
++        vw = torch.zeros((n_batches, n_seq, n_res, no_heads * c_hidden), device=g.device, dtype=g.dtype)
+         logsumexp = torch.empty((n_batches, n_res, 1, no_heads), device=g.device, dtype=g.dtype)
+ 
+         BLOCK_SIZE_ROW = 32

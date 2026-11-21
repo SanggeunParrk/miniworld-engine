@@ -1,0 +1,9 @@
+{
+  "name": "Ligo Biosciences AlphaFold3 (MSA pair-weighted-averaging Triton kernel)",
+  "repo": "https://github.com/Ligo-Biosciences/AlphaFold3",
+  "revision": "621531e4f36c3ce5e20157f88f27049d3f3f1fcc",
+  "license": "Apache-2.0 (kernel file credited to Alex Zhang)",
+  "fetch": "fetch.sh (git, pinned) + patches/ligo-msa-kernel-fixes.patch",
+  "e5_backend": "ligo_pwa",
+  "adapter": "benchmarks/paper/E5_other_kernels/ext_ligo_pwa.py"
+}

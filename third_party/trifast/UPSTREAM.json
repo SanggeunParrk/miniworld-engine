@@ -1,0 +1,12 @@
+{
+  "name": "trifast",
+  "repo": "https://github.com/latkins/trifast",
+  "pypi": "trifast 0.1.13 (py3-none-any wheel)",
+  "wheel_sha256": "e96fc0224b85e98802b04c495380198387110e3e712ce2ca7d2e672a27e10496",
+  "license": "MIT",
+  "fetch": "fetch.sh (curl + sha256 + unzip)",
+  "dependency": "platformdirs 4.14.8 (pure python; the E5 campaigns read it from ~/paper-ext)",
+  "e5_backend": "trifast",
+  "adapter": "benchmarks/paper/E5_other_kernels/externals.py (existing; unchanged)",
+  "runtime_path_in_use": "~/paper-ext (PAPER_EXT_PATH) - the running E5 campaigns import from there; this record only documents the pinned install"
+}

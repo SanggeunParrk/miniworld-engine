@@ -1,0 +1,10 @@
+{
+  "name": "OpenFold3 (Triton evoformer attention)",
+  "repo": "https://github.com/aqlaboratory/openfold-3",
+  "revision": "4b59bbf39a31b4aef7c33e5b567d25d7b4a61bf3",
+  "license": "Apache-2.0",
+  "fetch": "fetch.sh (git, pinned)",
+  "e5_backend": "of3tri",
+  "adapter": "benchmarks/paper/E5_other_kernels/ext_of3tri.py",
+  "kernel_file": "openfold3/core/kernels/triton/evoformer.py"
+}

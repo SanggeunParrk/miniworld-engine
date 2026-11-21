@@ -1,2 +1,0 @@
-module,model,stream,lengths,depths,dims,options,dtypes,modes,eval_samples,train_samples,source
-TriangleMultiplication,paper_sweep,token_pair,512|1024|2048,,d_pair=128,outgoing=True;p_drop=0.25,master,eval|train,1,1,paper E5: AF3 setup only (d_pair=128 outgoing), L 512 | 1024 | 2048
