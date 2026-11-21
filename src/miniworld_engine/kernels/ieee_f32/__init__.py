@@ -10,14 +10,15 @@ layout, no copy); every dimension a multiple of 4.  ``transition_ieee(x, gamma, 
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 from typing import Any
 
 import torch
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels._nvcc import build_failed, ensure_cuda_home, host_flags, load_extension
-from miniworld_engine.kernels._sm120_builds import per_arch, served
+from miniworld_engine.kernels._nvcc import build_failed, ensure_cuda_home, gencodes, host_flags, load_extension
+from miniworld_engine.kernels._sm120_builds import _cc, _index, per_arch, served
 
 _dir = Path(__file__).parent
 
@@ -36,7 +37,29 @@ def _build(suffix: str, gencode: str):
     )
 
 
-_ext, _ext_sm80, _ext_sm120 = per_arch(_build)
+_ext_a, _ext_sm80, _ext_sm120 = per_arch(_build)
+
+
+@functools.lru_cache(maxsize=1)
+def _ext_sm90():
+    """The same sources built for sm_90a (H100): plain FFMA, no sm_90 feature; used by the H100 fp32 Transition (``transition_ieee``) only."""
+    ensure_cuda_home()
+    return load_extension(
+        name="ieee_f32_sm90",
+        sources=[str(_dir / "ieee_f32.cu")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a")],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
+    )
+
+
+def _hopper(device: torch.device | None = None) -> bool:
+    """The card of ``device`` (default: the current one) is an H100 (capability 9.0)."""
+    return (device is None or device.type == "cuda") and _cc(_index(device)) == (9, 0)
+
+
+def _ext():
+    return _ext_sm90() if _hopper() else _ext_a()
 
 
 def _x() -> Any:
@@ -55,9 +78,10 @@ def loads() -> bool:
     return True
 
 
-def available(x: torch.Tensor) -> bool:
-    """fp32 CUDA tensor on a card the sm_80 sources serve (A100, RTX 5090)."""
-    return x.is_cuda and x.dtype is torch.float32 and served(x.device) and loads()
+def available(x: torch.Tensor, *, hopper: bool = False) -> bool:
+    """fp32 CUDA tensor on a card the sm_80 sources serve (A100, RTX 5090); ``hopper=True`` also the H100 (the Transition's fp32 chain, nothing else:
+    the other fp32 callers keep cuBLAS there)."""
+    return x.is_cuda and x.dtype is torch.float32 and (served(x.device) or (hopper and _hopper(x.device))) and loads()
 
 
 # ---------------------------------------------------------------------------------------------------------------------------- generic mm
@@ -178,12 +202,12 @@ def _wgrad(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return _x().mm(a, mo, 1, b, no, 1, mo, no, k, None, None)
 
 
-def supported_transition(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
+def supported_transition(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, *, hopper: bool = False) -> bool:
     """fp32 activations [..., D] with D a multiple of 4 up to ``MAX_D``, hidden H a multiple of 4."""
     d = x.shape[-1]
     h = wa.shape[0]
     return (
-        available(x)
+        available(x, hopper=hopper)
         and d % 4 == 0
         and d <= MAX_D
         and h % 4 == 0
