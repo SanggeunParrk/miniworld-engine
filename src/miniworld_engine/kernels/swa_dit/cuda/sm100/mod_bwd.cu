@@ -80,6 +80,8 @@ swa_mod_bwd_dc_sm100(const __grid_constant__ CUtensorMap mg, const __grid_consta
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+  pdl_wait();  // programmatic dependent launch (2026-11-17): the setup above overlaps the previous kernel; every global access is below
+  pdl_launch();
   const uint32_t tmem = *tptr;
   EVT(1);
   if (warp == 8) {
@@ -215,6 +217,8 @@ swa_mod_bwd_dw_sm100(const __grid_constant__ CUtensorMap mg, const __grid_consta
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
+  pdl_wait();  // programmatic dependent launch (2026-11-17): the setup above overlaps the previous kernel; every global access is below
+  pdl_launch();
   const uint32_t tmem = *tptr;
   if (warp == 8) {
     if ((tid & 31) == 0)

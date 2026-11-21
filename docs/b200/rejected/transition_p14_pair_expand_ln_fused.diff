@@ -1,0 +1,263 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2l.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2l.cu
+new file mode 100644
+index 000000000..b219bc5cb
+--- /dev/null
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2l.cu
+@@ -0,0 +1,257 @@
++// tsx_expand2l.cu -- tsx_expand2.cu with the input LayerNorm inside (the chain in TWO launches: this -> tsx_squeeze2.cu), sm_100a, bf16,
++// inference (-DDIM=<D> -DHID=<H> -DUH=<hidden units per CTA: 16 / 32 / 64> -DKW=<weight K-blocks per 3-D TMA box>).
++// One 2-CTA cluster per (128-row tile, 2 UH-unit hidden chunk). CTA r normalises rows [64 r, 64 r + 64) of the tile itself: eight warps,
++// a row per warp at a time (tsx_ln.cu's arithmetic: two-pass fp32 statistics from registers, xn = bf16((x rs - mean rs) gamma + beta)),
++// written straight into the A operand's 128-B-swizzled K-blocks in shared memory (the whole K stays resident), then released to the
++// pair leader (fence.proxy.async + a CTA-scope release arrive on the leader's barrier). A pair takes half the tile's rows per SM, so
++// normalising in place costs each SM the bytes the separate LayerNorm launch's xn would have (the single-CTA LNF build of part 12 read
++// the whole tile per CTA). The weights come in 3-D boxes of KW K-blocks ([kb][UH rows] for Wa and for Wb), loaded before
++// griddepcontrol.wait; a K-block takes two pair products (N = 2 UH each: the a and the b columns), which leave tensor memory as
++// tsx_expand2.cu's (lanes 0-63: the leader's [a | b] of this CTA's rows, lanes 64-127: the peer's).
++// SPDX-License-Identifier: Apache-2.0
++#include "sm100.cuh"
++#include "tsx_store.cuh"
++using namespace s100;
++
++#ifndef DIM
++#define DIM 768
++#endif
++#ifndef HID
++#define HID (2 * DIM)
++#endif
++#ifndef UH
++#define UH 16
++#endif
++#ifndef KW
++#define KW 4
++#endif
++#ifndef KX
++#define KX 4                                                    // x K-blocks per 3-D TMA box
++#endif
++constexpr int D_ = DIM, H_ = HID, ROWS = 128, HR = 64, NKB = D_ / 64, NP = H_ / (2 * UH), PER = D_ / 128;
++static_assert((UH == 16 || UH == 32 || UH == 64) && H_ % (2 * UH) == 0 && D_ % 128 == 0 && NKB % KW == 0 && NKB % KX == 0, "shapes");
++constexpr int AKB = HR * 128, WSL = UH * 128;                   // one K-block of the 64 xn rows (8 KB) / of Wa_r (or Wb_r)
++constexpr int NWS = NKB / KW, WST = 2 * KW * WSL;              // weight stages of the whole K, bytes of a stage (Wa box, Wb box)
++constexpr int O_A = 0, O_W = NKB * AKB;
++constexpr int CAP = (232448 - 1024 - O_W) / WST;
++constexpr int STG = NWS < CAP ? NWS : CAP;
++static_assert(STG >= 1 && STG <= 32, "weight ring stages");
++constexpr int O_BAR = O_W + STG * WST, SMEM_BYTES = O_BAR + 256;
++static_assert(SMEM_BYTES <= 232448, "shared memory budget");
++constexpr uint32_t TCOLS = 2 * UH < 32 ? 32 : 2 * UH;
++constexpr uint32_t IDESC = idesc_bf16(128, 2 * UH);
++constexpr int NG = UH > 32 ? 2 : 1, EC = UH / NG;
++#ifndef LNX
++#define LNX 0                                                   // timing builds only: 1 no shuffles, 2 no stores
++#endif
++#ifndef RB
++#define RB 4
++#endif
++constexpr int LNW = 8, RPW = HR / LNW;                 // LayerNorm warps (4-11), rows per warp, rows per register batch
++typedef __nv_bfloat16 ACT;
++
++struct Bars {
++  uint64_t full[STG], empty[STG], xfull, xready, mma_done;
++  uint32_t tmem;
++};
++static_assert(sizeof(Bars) <= 256, "barrier block");
++
++DEVI void tma_load_3d_2sm(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar) & 0xFEFFFFFFu), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++DEVI f2 unpack_bf16x2(uint32_t w) { return mk2u(w << 16, w & 0xffff0000u); }
++
++template <int N> DEVI void tld(uint32_t taddr, uint32_t (&r)[N]) {
++  if constexpr (N == 32) tmem_ld32(taddr, r); else tmem_ld16(taddr, r);
++}
++
++// x: a 3-D kb_box map of [M][D] (box 64 x 64 x KX); gamma / beta fp32 [D]; wa, wb: 3-D kb_box maps of [H][D] (box 64 x UH x KW). h [M][H] bf16.
++extern "C" __global__ void __launch_bounds__(384, 1)
++transition_sx_expand2l(const __grid_constant__ CUtensorMap mx, const float* __restrict__ gamma, const float* __restrict__ beta,
++                       const __grid_constant__ CUtensorMap mwa, const __grid_constant__ CUtensorMap mwb, ACT* __restrict__ hs,
++                       float eps TSX_STAMP_ARG) {
++  extern __shared__ __align__(1024) uint8_t sm[];
++  const uint32_t su = smem_u32(sm);
++  Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
++  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  const int pair = blockIdx.x >> 1, rank = (int)cluster_rank();
++  const bool leader = rank == 0;
++  const int tile = pair / NP, j = pair % NP, row0 = tile * ROWS, arow = row0 + rank * HR, h0 = j * 2 * UH + rank * UH;
++  if (tid == 0) TSX_ST(0);
++
++  if (tid == 0) {
++    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
++    mbar_init(&B.xfull, 1);
++    mbar_init(&B.xready, 2 * LNW);                             // every LayerNorm warp of both CTAs
++    mbar_init(&B.mma_done, 1);
++    fence_barrier_init();
++    prefetch_map(&mx); prefetch_map(&mwa); prefetch_map(&mwb);
++  }
++  if (warp == 2) { tmem_alloc2(smem_u32(&B.tmem), TCOLS); tmem_relinquish2(); }
++  tc_fence_before();
++  __syncthreads();
++  cluster_sync_relaxed();
++  tc_fence_after();
++  const uint32_t tmem = B.tmem;
++  auto load_w = [&](int st) {                                  // weight stage st % STG: Wa_r and Wb_r over K-blocks st KW .. + KW - 1
++    const uint32_t w = su + O_W + (st % STG) * WST;
++    tma_load_3d_2sm(w, &mwa, &B.full[st % STG], 0, h0, st * KW);
++    tma_load_3d_2sm(w + KW * WSL, &mwb, &B.full[st % STG], 0, h0, st * KW);
++  };
++  if (warp == 0 && lane < STG) {                               // weights first: parameters, not written by the previous launch
++    if (leader) mbar_expect_tx(&B.full[lane], 2 * WST);
++    load_w(lane);
++  }
++  pdl_wait();                                                  // x is complete and visible
++  if (tid == 0) TSX_ST(1);
++  pdl_launch();
++
++  if (warp == 0) {
++    if (lane == 0) mbar_expect_tx(&B.xfull, NKB * AKB);
++    __syncwarp();
++    if (lane < NKB / KX)                                       // this CTA's 64 x rows, KX K-blocks a box, one lane a box
++      tma_load_3d(su + O_A + lane * KX * AKB, &mx, &B.xfull, 0, arow, lane * KX);
++    if (lane < STG)
++      for (int st = lane + STG; st < NWS; st += STG) {
++        mbar_wait(&B.empty[lane], ((st / STG) - 1) & 1);
++        if (leader) mbar_expect_tx(&B.full[lane], 2 * WST);
++        load_w(st);
++      }
++  } else if (warp == 1) {
++    if (leader) {
++      mbar_wait_cl(&B.xready, 0);                              // both CTAs' xn rows are in shared memory
++      if (lane == 0) TSX_ST(3);
++#pragma unroll 1
++      for (int st = 0; st < NWS; ++st) {
++        const int s = st % STG;
++        mbar_wait(&B.full[s], (st / STG) & 1);
++        tc_fence_after();
++        if (elect_one()) {
++#pragma unroll
++          for (int i = 0; i < KW; ++i) {
++            const int kb = st * KW + i;
++            const uint64_t da = desc_k128(su + O_A + kb * AKB);
++            const uint64_t dwa = desc_k128(su + O_W + s * WST + i * WSL), dwb = desc_k128(su + O_W + s * WST + (KW + i) * WSL);
++#pragma unroll
++            for (int ks = 0; ks < 4; ++ks) {
++              umma_ss2(tmem, da + (uint64_t)(ks * 2), dwa + (uint64_t)(ks * 2), IDESC, (kb > 0 || ks > 0) ? 1u : 0u);
++              umma_ss2(tmem + UH, da + (uint64_t)(ks * 2), dwb + (uint64_t)(ks * 2), IDESC, (kb > 0 || ks > 0) ? 1u : 0u);
++            }
++          }
++          if (NWS > STG) tc_commit2_mc(&B.empty[s], 3);
++          if (st == NWS - 1) tc_commit2_mc(&B.mma_done, 3);
++        }
++        __syncwarp();
++      }
++      if (lane == 0) TSX_ST(4);
++    }
++  } else if (warp >= 4) {
++    // ------------------------------------------------------------------------------------------ the LayerNorm of this CTA's 64 rows
++    const int lw = warp - 4;
++    float4 gv[PER], bv4[PER];                                  // gamma / beta of this lane's columns (no L1 beside this shared memory)
++#pragma unroll
++    for (int i = 0; i < PER; ++i) {
++      gv[i] = __ldg(reinterpret_cast<const float4*>(gamma + (lane + 32 * i) * 4));
++      bv4[i] = __ldg(reinterpret_cast<const float4*>(beta + (lane + 32 * i) * 4));
++    }
++    mbar_wait(&B.xfull, 0);
++    if (warp == 4 && lane == 0) TSX_ST(6);
++    // rows of a batch side by side (their shuffle trees interleave); plain shared accesses so the compiler may schedule them
++    auto xo = [&](int r, int col) {                            // byte offset of (row r, columns col .. col + 3) in the swizzled A
++      return O_A + (col >> 6) * AKB + r * 128 + ((((col & 63) >> 3) ^ (r & 7)) << 4) + (col & 7) * 2;
++    };
++#pragma unroll 1
++    for (int rb = 0; rb < RPW; rb += RB) {
++      uint2 v[RB][PER];
++      float s[RB], qq[RB];
++#pragma unroll
++      for (int q = 0; q < RB; ++q)
++#pragma unroll
++        for (int i = 0; i < PER; ++i) v[q][i] = *reinterpret_cast<const uint2*>(sm + xo(lw * RPW + rb + q, (lane + 32 * i) * 4));
++#pragma unroll
++      for (int q = 0; q < RB; ++q) {
++        f2 s2 = mk2(0.f, 0.f);
++#pragma unroll
++        for (int i = 0; i < PER; ++i) s2 = add2(s2, add2(unpack_bf16x2(v[q][i].x), unpack_bf16x2(v[q][i].y)));
++        s[q] = lo2(s2) + hi2(s2);
++      }
++#pragma unroll
++#if LNX != 1
++      for (int o = 16; o; o >>= 1)
++#pragma unroll
++        for (int q = 0; q < RB; ++q) s[q] += __shfl_xor_sync(0xffffffffu, s[q], o);
++#endif
++#pragma unroll
++      for (int q = 0; q < RB; ++q) {
++        const f2 nm2 = mk2(-s[q] * (1.f / D_), -s[q] * (1.f / D_));
++        f2 q2 = mk2(0.f, 0.f);
++#pragma unroll
++        for (int i = 0; i < PER; ++i) {
++          const f2 d0 = add2(unpack_bf16x2(v[q][i].x), nm2), d1 = add2(unpack_bf16x2(v[q][i].y), nm2);
++          q2 = fma2(d0, d0, q2);
++          q2 = fma2(d1, d1, q2);
++        }
++        qq[q] = lo2(q2) + hi2(q2);
++      }
++#pragma unroll
++#if LNX != 1
++      for (int o = 16; o; o >>= 1)
++#pragma unroll
++        for (int q = 0; q < RB; ++q) qq[q] += __shfl_xor_sync(0xffffffffu, qq[q], o);
++#endif
++#pragma unroll
++      for (int q = 0; q < RB; ++q) {
++        const int r = lw * RPW + rb + q;                         // the row within this CTA's 64
++        const float mean = s[q] * (1.f / D_), rs = rsqrtf(qq[q] * (1.f / D_) + eps), cc = mean * rs;
++        const f2 rs2 = mk2(rs, rs), ncc2 = mk2(-cc, -cc);
++#pragma unroll
++        for (int i = 0; i < PER; ++i) {
++          const float4 g = gv[i], b = bv4[i];
++          const f2 g0 = mk2(g.x, g.y), g1 = mk2(g.z, g.w), b0 = mk2(b.x, b.y), b1 = mk2(b.z, b.w);
++          const f2 y0 = fma2(unpack_bf16x2(v[q][i].x), mul2(rs2, g0), fma2(ncc2, g0, b0));   // (x rs - mean rs) g + b
++          const f2 y1 = fma2(unpack_bf16x2(v[q][i].y), mul2(rs2, g1), fma2(ncc2, g1, b1));
++          if (LNX != 2)           *reinterpret_cast<uint2*>(sm + xo(r, (lane + 32 * i) * 4)) = make_uint2(pack_bf16(lo2(y0), hi2(y0)), pack_bf16(lo2(y1), hi2(y1)));
++        }
++      }
++    }
++    fence_proxy_async();                                       // the generic-proxy stores -> the pair's tensor-core reads
++    __syncwarp();
++    if (lane == 0) mbar_arrive_remote_cta(&B.xready, 0);
++    if (warp == 4 && lane == 0) TSX_ST(2);
++    if (warp < 4 + 4 * NG) {
++      // ---------------------------------------------------------------------------------------- SwiGLU (as tsx_expand2.cu)
++      const int g = (warp - 4) >> 2, q = warp & 3, r = (q & 1) * 32 + lane, hb = j * 2 * UH + (q >> 1) * UH;
++      const uint32_t trow = tmem + ((uint32_t)((warp & 3) * 32) << 16);
++      constexpr int ES = EC > 32 ? 32 : EC, NW = ES / 2;
++      mbar_wait(&B.mma_done, 0);
++      if (warp == 4 && lane == 0) TSX_ST(5);
++      tc_fence_after();
++#pragma unroll
++      for (int cc = 0; cc < EC; cc += ES) {
++        uint32_t av[ES], bv[ES], hp[NW];
++        tld<ES>(trow + g * EC + cc, av);
++        tld<ES>(trow + UH + g * EC + cc, bv);
++        tmem_wait_ld();
++#pragma unroll
++        for (int k = 0; k < NW; ++k) {
++          const float a0 = __uint_as_float(av[2 * k]), a1 = __uint_as_float(av[2 * k + 1]);
++          hp[k] = pack_bf16(a0 * sigmoid_kit(a0) * __uint_as_float(bv[2 * k]), a1 * sigmoid_kit(a1) * __uint_as_float(bv[2 * k + 1]));
++        }
++        store_t(hs + (size_t)arow * H_ + hb + g * EC + cc + store_t_off<NW>(r, lane, H_, 2), H_, hp, lane);
++      }
++      if (warp == 4 && lane == 0) TSX_ST(7);
++      tc_fence_before();
++    }
++  }
++  __syncthreads();
++  cluster_sync_relaxed();
++  if (tid == 0) TSX_ST(8);
++  if (warp == 2) { tc_fence_after(); tmem_dealloc2(tmem, TCOLS); }
++}
++
++extern "C" __device__ int transition_smem_bytes = SMEM_BYTES;

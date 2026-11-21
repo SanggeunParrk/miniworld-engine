@@ -1,0 +1,730 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+index 0ca995d9a..621ea377a 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+@@ -895,14 +895,19 @@ KERNELS_FUSED32 = {
+     # the post kernel on a CTA pair, one hidden half each (round 3 part 6; post32 pair=True)
+     "post_pair": ("fused_tf32", "atom_post_tf32", 229632, ("PAIR=1",)),
+     "post_rms_pair": ("fused_tf32", "atom_post_tf32", 229632, ("RMS=1", "PAIR=1")),
++    # the pre kernel with the conditioning tables inside (round 3 part 7; pre32 tab=...)
++    "pre_tab": ("fused_tf32", "atom_pre_tf32", 229632, ("TAB=1",)),
++    "pre_rms_tab": ("fused_tf32", "atom_pre_tf32", 229632, ("RMS=1", "TAB=1")),
+ }
+ #: ... and their B200 variant-path builds (2026-11-17): RoseTTAFold3's flat q / k LayerNorm (pre), the parallel schedule and Boltz-2's
+ #: up-gated SwiGLU (post)
+ KERNELS_FUSED32_VAR = {
+     "pre_kq": ("fused_tf32", "atom_pre_tf32", 229632, ("KQLN=1",)),
++    "pre_kq_tab": ("fused_tf32", "atom_pre_tf32", 229632, ("KQLN=1", "TAB=1")),
+     # (round 3b: the PARS build runs its transition before the attention's end -- EARLY, its default)
+     "post_pars": ("fused_tf32", "atom_post_tf32", 229632, ("PARS=1",)),
+     "post_up": ("fused_tf32", "atom_post_tf32", 229632, ("UP=1",)),
++    "post_up_pair": ("fused_tf32", "atom_post_tf32", 229632, ("UP=1", "PAIR=1")),
+ }
+ 
+ 
+@@ -945,12 +950,12 @@ def _quarters(var: str) -> bool:
+     return os.environ.get(var, "1") != "0"
+ 
+ 
+-def _pair_units(tiles, nsm_):
++def _pair_units(tiles, nsm_, var="MW_LD6_PAIR"):
+     """The post kernel on CTA pairs (``-DPAIR=1``, round 3 part 6): -1 (quarter units, a pair each) when the pairs of every tile's quarters
+     fit one wave (<= 18 tiles, 2304 rows), else None. MW_LD6_PAIR=0 turns it off (A / B)."""
+     import os
+ 
+-    mode = os.environ.get("MW_LD6_PAIR", "1")
++    mode = os.environ.get(var, "1")
+     if mode == "0":
+         return None
+     if _quarters("MW_LD5_PQ") and 8 * tiles <= nsm_:  # quarter units only (halves on pairs: 4096 atoms 71.7 -> 73.5 us)
+@@ -958,31 +963,84 @@ def _pair_units(tiles, nsm_):
+     return None
+ 
+ 
+-def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None, parallel=False, rms=False, kq=None, kq_eps=1e-5):
++def tab_shape(M, mrows, nsm_):
++    """``pre32(tab=...)``'s units in one wave (round 3 part 7): (nfull, table unit rows) -- pre in quarter (nfull -1) or half (0) units
++    beside 2 x (mrows / trt) table units -- or None (more units than SMs: the separate table launches). MW_LD7_TAB=0 turns it off (A / B)."""
++    import os
++
++    if os.environ.get("MW_LD7_TAB", "1") == "0":
++        return None
++    tiles, mt = M // 128, mrows // 128
++    for nfull, pu in ((-1, 4 * tiles), (0, 2 * tiles)):
++        for trt, tu in ((64, 4 * mt), (128, 2 * mt)):
++            if pu + tu <= nsm_:
++                return nfull, trt
++    return None
++
++
++def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None, parallel=False, rms=False, kq=None, kq_eps=1e-5, tab=None):
+     """Fused AdaLN 1 (+ the cross mode's K / V AdaLN, when mks / mkb are given) and the four input projections (``atom_pre_tf32``):
+     s [M, 128] fp32 contiguous, s1 / b1 (and mks / mkb) fp32 [M, 128] views with a common row stride each, wp the tf32-rounded [512, 128]
+     pack ([q; g; k; v] with mks, else [q; k; v; g]), bq [128] -> P [M, 512] fp32 (the blocks in rndmask tf32-rounded). ``nfull`` (default
+     ``_nfull``): the 128-row tiles run whole; the others as two 128 x 256 column halves. ``parallel`` (AlphaFold 3): the K / V AdaLN
+     normalises s instead of x1. The tables may have mrows < M rows (a conditioning shared by the M / mrows samples): row r reads r % mrows. ``rms``
+-    (ESMFold2): RMSNorm AdaLNs (the ``-DRMS=1`` build)."""
++    (ESMFold2): RMSNorm AdaLNs (the ``-DRMS=1`` build).
++    ``tab`` (round 3 part 7; s1 / b1 / mks / mkb then None): the conditioning tables made inside this launch (``-DTAB=1``), a namespace of
++    c [mrows, 128] fp32 contiguous, wcond [256 pairs, 128] tf32-rounded, bcond [256 pairs], g0 / g1 (the LN gammas of pairs 0 / 1), tform
++    (2 bits per pair: 0 raw c, 1 LN(c) gamma, 2 silu(c)), sigm (the sigmoid 128-column blocks), tpair (the pair of column half 0 / 1, 2 bits
++    each: 0 = s1 | b1, 3 = mks | mkb; the chained cross mode makes pair 0, then 3 in its k | v half), g3 (pair 3's gamma), teps, out
++    [mrows, 256 pairs] (pairs 1 and 2 written, and the column halves' pairs). Needs ``tab_shape`` not None."""
+     M = s.shape[0]
+     assert M % 128 == 0 and s.is_contiguous() and s.shape[1] == DM and tuple(wp.shape) == (4 * DM, DM), (s.shape, wp.shape)
+-    assert s1.stride(1) == b1.stride(1) == 1 and s1.stride(0) == b1.stride(0)
+-    mrows = s1.shape[0]
+-    assert M % mrows == 0 and mrows % 128 == 0 and b1.shape[0] == mrows, (M, mrows)
+-    cross = mks is not None
+-    if cross:
+-        assert mks.stride(1) == mkb.stride(1) == 1 and mks.stride(0) == mkb.stride(0)
++    cross = tab.tpair != 0 if tab is not None else mks is not None
++    if tab is not None:
++        mrows = tab.c.shape[0]
++        assert tab.c.is_contiguous() and tab.c.shape[1] == DM and tab.out.shape[0] == mrows
++        s1 = b1 = tab.out
++    else:
++        assert s1.stride(1) == b1.stride(1) == 1 and s1.stride(0) == b1.stride(0)
++        mrows = s1.shape[0]
++        assert b1.shape[0] == mrows
++        if cross:
++            assert mks.stride(1) == mkb.stride(1) == 1 and mks.stride(0) == mkb.stride(0)
++    assert M % mrows == 0 and mrows % 128 == 0, (M, mrows)
+     p = torch.empty(M, 4 * DM, device=s.device, dtype=F32)
+     d = _dev(s)
+     tiles = M // 128
++    shape = None
++    if tab is not None:
++        shape = tab_shape(M, mrows, num_sms(d))
++        assert shape is not None, (M, mrows)
++        nfull = shape[0]
+     if nfull is None and 4 * tiles <= num_sms(d) and _quarters("MW_LD5_PRQ"):
+         nfull = -1  # every tile as four 64-row x 256-column quarter units (round 3 part 5)
+     nfull = _nfull(tiles, num_sms(d)) if nfull is None else int(nfull)
+     units = 4 * tiles if nfull < 0 else nfull + 2 * (tiles - nfull)
+     assert not (rms and kq is not None)
+-    fused_kernel32("pre_rms" if rms else "pre_kq" if kq is not None else "pre", d)(
+-        (min(num_sms(d), units), 1, 1),
++    name = "pre_rms" if rms else "pre_kq" if kq is not None else "pre"
++    tail = ()
++    grid = min(num_sms(d), units)
++    if tab is not None:
++        trt = shape[1]
++        name += "_tab"
++        grid = units + 2 * (mrows // trt)
++        tail = (
++            _tm32(tab.wcond, (32, 256)),
++            _tm32(tab.out, (32, 32)),
++            tab.c,
++            tab.bcond,
++            tab.g0,
++            tab.g1,
++            getattr(tab, "g3", None),
++            int(tab.tform),
++            int(tab.sigm),
++            int(tab.tpair),
++            int(units),
++            int(trt),
++            float(tab.teps),
++        )
++    fused_kernel32(name, d)(
++        (grid, 1, 1),
+         (384, 1, 1),
+         _tm32(wp, (32, 256)),
+         _tm32(p, (32, 32)),
+@@ -992,7 +1050,7 @@ def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None,
+         int(s1.stride(0)),
+         mks,
+         mkb,
+-        int(mks.stride(0)) if cross else 0,
++        int(mks.stride(0)) if cross and tab is None else 0,
+         bq,
+         int(2 if cross and parallel else cross),
+         int(rndmask),
+@@ -1001,6 +1059,7 @@ def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None,
+         int(nfull),
+         int(mrows),
+         *((kq, float(kq_eps)) if kq is not None else ()),
++        *tail,
+     )
+     return p
+ 
+@@ -1019,8 +1078,8 @@ def post32(o, g, s, so, s2, b2, st, wo, wu, ws, eps=1e-5, nfull=None, rms=False,
+     d = _dev(s)
+     tiles = M // 128
+     pair = None
+-    if nfull is None and not (pars or up):
+-        pair = _pair_units(tiles, num_sms(d))
++    if nfull is None and not pars:  # (round 3 part 7: UP too, its hidden quarters 2 r, 2 r + 1 on rank r)
++        pair = _pair_units(tiles, num_sms(d), "MW_LD7_UPPAIR" if up else "MW_LD6_PAIR")
+         if pair is not None:
+             nfull = pair
+     if nfull is None and 4 * tiles <= num_sms(d) and _quarters("MW_LD5_PQ"):
+@@ -1029,7 +1088,7 @@ def post32(o, g, s, so, s2, b2, st, wo, wu, ws, eps=1e-5, nfull=None, rms=False,
+     units = 4 * tiles if nfull < 0 else nfull + 2 * (tiles - nfull)
+     assert not (pars and up) and not (rms and (pars or up))
+     if pair is not None:  # a CTA pair per unit (clusters of 2), one hidden half each
+-        name = "post_rms_pair" if rms else "post_pair"
++        name = "post_rms_pair" if rms else "post_up_pair" if up else "post_pair"
+         grid = 2 * min(num_sms(d) // 2, units)
+     else:
+         name = "post_rms" if rms else "post_up" if up else "post_pars" if pars else "post"
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/fused_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/fused_tf32.cu
+index 37a4da020..81cdb0517 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/fused_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/fused_tf32.cu
+@@ -61,7 +61,7 @@ static_assert(!EARLY || (PARS && !UP), "EARLY: the parallel schedule's post buil
+ #define PAIR 0   // post (round 3 part 6): a CTA pair (cluster of 2) per unit: CTA rank r takes hidden half r ([Wa_r; Wb_r], Ws_r: 12 weight
+ #endif           // slices, not 20); both make y and x2; rank 1 hands its partial t_1 = h_1 Ws_1^T to rank 0 through DSMEM (into rank 0's tile H,
+                  // once rank 0's MMAs are done: hfree), rank 0 adds t = t_0 + t_1 (always in this order) and writes the output
+-static_assert(!PAIR || (!EARLY && !UP && !PARS), "PAIR: the default / RMS post builds");
++static_assert(!PAIR || (!EARLY && !PARS), "PAIR: the default / RMS / UP post builds");
+ #if PAIR
+ #define PCID ((int)blockIdx.x >> 1)   // post: the unit loop runs over clusters
+ #define PCN ((int)gridDim.x >> 1)
+@@ -69,6 +69,13 @@ static_assert(!PAIR || (!EARLY && !UP && !PARS), "PAIR: the default / RMS post b
+ #define PCID ((int)blockIdx.x)
+ #define PCN ((int)gridDim.x)
+ #endif
++#if PAIR   // UP on a pair (round 3 part 7): CTA rank r takes the hidden quarters 2 r, 2 r + 1
++#define NQ 2
++#define QOF(qq) (2 * (int)rk + (qq))
++#else
++#define NQ 4
++#define QOF(qq) (qq)
++#endif
+ 
+ struct Bars {
+   uint64_t wfull[NST], wempty[NST], afull, hfull, accf, xfull, hfree;
+@@ -78,11 +85,18 @@ struct Bars {
+ #ifndef RMS
+ #define RMS 0   // ESMFold2 (-DRMS=1): every LayerNorm is an RMSNorm (no mean; the tables hold the identity-centred scales and raw gates)
+ #endif
++#ifndef TAB
++#define TAB 0   // pre (round 3 part 7): the conditioning tables inside this launch (no ln32 + gemm32 launches ahead of it). A pre unit (a column
++#endif          // half: quarter or half units only) makes its own AdaLN table pair (s1 | b1, or the cross mode's mks | mkb) from c: c's operand
++                // form -> tile H, one 256-column product into TMEM [256, 512), then x1 = LN(s) scale + shift lane per row in tile A; the
++                // first sample's units store that pair into the table too. The CTAs past npre are table units: the post kernel's pairs
++                // (s2 | b2 and so | st) of trt rows, one product each, stored into the table. One unit per CTA (one wave; host-checked).
+ DEVI float sigf(float x) { return rcpf(1.f + __expf(-x)); }          // the fp32 path's sigmoid (gemm_tf32 / rows_tf32 alike)
+ DEVI float rna(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return __uint_as_float(r); }
+ // x[k] (this lane's 4 channels of 4 rows) -> (x - mean) * rstd per row: rows_tf32's two-pass norm128 with the 4 rows' butterfly reductions
+ // interleaved (each row's additions in rows_tf32's order: lanes ^16, ^8, ^4, ^2, ^1)
+-DEVI void ln4x4(float (&x)[4][4], float eps) {
++template <bool R>
++DEVI void ln4x4_(float (&x)[4][4], float eps) {
+   float a[4];
+ #pragma unroll
+   for (int k = 0; k < 4; ++k) a[k] = x[k][0] + x[k][1] + x[k][2] + x[k][3];
+@@ -92,7 +106,7 @@ DEVI void ln4x4(float (&x)[4][4], float eps) {
+     for (int k = 0; k < 4; ++k) a[k] += __shfl_xor_sync(0xffffffffu, a[k], o);
+ #pragma unroll
+   for (int k = 0; k < 4; ++k) {
+-    const float mean = RMS ? 0.f : a[k] * (1.f / 128);
++    const float mean = R ? 0.f : a[k] * (1.f / 128);
+     float v = 0.f;
+ #pragma unroll
+     for (int i = 0; i < 4; ++i) { x[k][i] -= mean; v += x[k][i] * x[k][i]; }
+@@ -109,6 +123,7 @@ DEVI void ln4x4(float (&x)[4][4], float eps) {
+     for (int i = 0; i < 4; ++i) x[k][i] *= rstd;
+   }
+ }
++DEVI void ln4x4(float (&x)[4][4], float eps) { ln4x4_<RMS != 0>(x, eps); }
+ DEVI float4 ldg4(const float* p) { return __ldg(reinterpret_cast<const float4*>(p)); }
+ DEVI uint4 u4(float a, float b, float c, float d) { return make_uint4(__float_as_uint(a), __float_as_uint(b), __float_as_uint(c), __float_as_uint(d)); }
+ DEVI float4 lds4f(uint32_t a) { const uint4 v = lds128(a); return make_float4(__uint_as_float(v.x), __uint_as_float(v.y), __uint_as_float(v.z), __uint_as_float(v.w)); }
+@@ -238,6 +253,86 @@ DEVI void put_row_peer(uint32_t base, int r, int j, const float (&v)[32], uint32
+   }
+ }
+ 
++#if TAB
++// TAB: c's operand form of table pair p (tform bits 2p..2p+1): 0 raw c, 1 LN(c) gamma (mean-centred, teps), 2 silu(c) -- f32_ln_aff /
++// f32_silu's arithmetic; rows m0 + e + 8 (k0 + k) of c (mrows rows, stride 128), tf32-rounded (RNA) into the operand tile at base
++DEVI void tab_operand(uint32_t base, const float* __restrict__ c, const float* __restrict__ gp, int form, int m0, int e, int k0, int lane, float teps) {
++  float x[4][4];
++#pragma unroll
++  for (int k = 0; k < 4; ++k) {
++    const float4 v = ldg4(c + (size_t)(m0 + e + 8 * (k0 + k)) * 128 + 4 * lane);
++    x[k][0] = v.x; x[k][1] = v.y; x[k][2] = v.z; x[k][3] = v.w;
++  }
++  if (form == 1) {
++    ln4x4_<false>(x, teps);
++    const float4 g = ldg4(gp + 4 * lane);
++#pragma unroll
++    for (int k = 0; k < 4; ++k) { x[k][0] *= g.x; x[k][1] *= g.y; x[k][2] *= g.z; x[k][3] *= g.w; }
++  } else if (form == 2) {
++#pragma unroll
++    for (int k = 0; k < 4; ++k)
++#pragma unroll
++      for (int i = 0; i < 4; ++i) x[k][i] = x[k][i] / (1.f + __expf(-x[k][i]));
++  }
++#pragma unroll
++  for (int k = 0; k < 4; ++k) sts128(opnd(base, e + 8 * (k0 + k), lane), u4(rna(x[k][0]), rna(x[k][1]), rna(x[k][2]), rna(x[k][3])));
++}
++// TAB: 32 table columns col .. col + 31 of this lane's row from TMEM: + bias, sigmoid when their 128-column block is in sigm (gemm_tf32's epilogue)
++DEVI void tab_cols(uint32_t taddr, const float* __restrict__ bc, int col, int sigm, float (&v)[32]) {
++  tld(taddr, v);
++  const float4* bp = reinterpret_cast<const float4*>(bc + col);
++#pragma unroll
++  for (int q = 0; q < 8; ++q) {
++    const float4 b = __ldg(bp + q);
++    v[4 * q] += b.x; v[4 * q + 1] += b.y; v[4 * q + 2] += b.z; v[4 * q + 3] += b.w;
++  }
++  if ((sigm >> (col >> 7)) & 1) {
++#pragma unroll
++    for (int j = 0; j < 32; ++j) v[j] = sigf(v[j]);
++  }
++}
++// TAB: a table unit -- pair tp in {1, 2} (the post kernel's s2 | b2, so | st) of rows m0 .. m0 + trt: c's form -> tile A, one 128 x 256 product
++// (wcond rows 256 tp ..) into TMEM [0, 256), bias / sigmoid, TMA-stored into the table (mtab: [mrows, 256 x pairs], box 32 x 32)
++DEVI void tab_unit(Bars& B, uint32_t su, uint32_t tmem, int warp, int lane, const CUtensorMap* mwc, const CUtensorMap* mtab, const float* __restrict__ c,
++                   const float* __restrict__ bc, const float* __restrict__ tg1, int tform, int sigm, int tu, int trt, int mrows, float teps) {
++  const int tpu = mrows / trt, tp = 1 + tu / tpu, m0 = (tu % tpu) * trt;
++  const uint32_t sa = su + O_A;
++  if (warp == 0) {
++    if (lane == 0)
++      for (int l = 0; l < 4; ++l) wload(B, su, l, mwc, 32 * l, 256 * tp, 32768u);
++  } else if (warp == 1) {
++    Mma mm{su, 0};
++    mbar_wait(&B.afull, 0);
++    tc_fence_after();
++    mm.run(B, tmem, sa, idesc_tf32(128, 256), true);
++    commit_acc(B);
++  } else if (warp == 3) {
++    pf_rows(c, 128, m0, trt, lane);
++  } else if (warp >= 4) {
++    const int e = warp - 4, qd = warp & 3, wg = e >> 2;
++    const int form = (tform >> (2 * tp)) & 3;
++#pragma unroll 1
++    for (int k0 = 0; k0 < (trt >> 3); k0 += 4) tab_operand(sa, c, tg1, form, m0, e, k0, lane, teps);
++    fence_proxy_async();
++    __syncwarp();
++    if (lane == 0) mbar_arrive(&B.afull);
++    mbar_wait(&B.accf, 0);
++    tc_fence_after();
++    const uint32_t sbase = sa + (uint32_t)e * 2 * EPB;               // staging inside tile A (the product has read it)
++    int nst = 0;
++    if (32 * qd < trt)
++      for (int cc = wg; cc < 8; cc += 2) {
++        float v[32];
++        tab_cols(tmem + ((uint32_t)(32 * qd) << 16) + 32 * cc, bc, 256 * tp + 32 * cc, sigm, v);
++        put_chunk(mtab, sbase, nst, lane, 256 * tp + 32 * cc, m0 + 32 * qd, v);
++      }
++    tc_fence_before();
++    if (lane == 0) tma_store_wait0();
++    __syncwarp();
++  }
++}
++#endif
++
+ // ==================================================================================================================== pre
+ // s [M, 128] (row stride 128), s1 / b1 rows mld apart, mks / mkb (cross) rows kld apart (the tables: mrows rows, row r read at r % mrows --
+ // mrows < M when the samples share the conditioning), bq [128]; mwp: Wp [512, 128] (box 32 x 256);
+@@ -248,6 +343,13 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
+               int kld, const float* __restrict__ bq, int cross, int rndmask, int M, float eps, int nfull, int mrows
+ #if KQLN
+               , const float* __restrict__ KQ, float kq_eps
++#endif
++#if TAB   // mwc: wcond [256 pairs, 128] (box 32 x 256); mtab: the table [mrows, 256 pairs] (box 32 x 32); c [mrows, 128]; bc: wcond's bias;
++          // tg0 / tg1 / tg3: the LN gammas of pairs 0 / 1 / 3; tform / sigm: see tab_operand / tab_cols; tpair: the pair of column half 0 (bits 0..1)
++          // and 1 (bits 2..3); npre: the pre units (CTAs past them: table units of trt rows); teps: the conditioning LN's eps
++              , const __grid_constant__ CUtensorMap mwc, const __grid_constant__ CUtensorMap mtab, const float* __restrict__ c,
++              const float* __restrict__ bc, const float* __restrict__ tg0, const float* __restrict__ tg1, const float* __restrict__ tg3, int tform,
++              int sigm, int tpair, int npre, int trt, float teps
+ #endif
+               ) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+@@ -258,6 +360,13 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
+   const int my = units_of(units);
+   const uint32_t sa = su + O_A, sh = su + O_H;
+   const uint32_t tmem = setup(B, warp);
++#if TAB
++  if ((int)blockIdx.x >= npre) {
++    tab_unit(B, su, tmem, warp, lane, &mwc, &mtab, c, bc, tg1, tform, sigm, (int)blockIdx.x - npre, trt, mrows, teps);
++    teardown(tmem, warp);
++    return;
++  }
++#endif
+   auto unit = [&](int i) { return (int)blockIdx.x + i * (int)gridDim.x; };
+   // a unit's column half (a half unit), or -1 (a full unit: all 512 columns); its first row and row count. nfull = -1 (round 3 part 5,
+   // 2026-11-17): every tile as four quarter units, 64 rows x one column half (unit 4 t + 2 rh + cb)
+@@ -270,15 +379,29 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
+       int gi = 0;
+       for (int i = 0; i < my; ++i) {
+         const int cb = half_of(unit(i));
++#if TAB
++        if (cross == 1 && cb == 1)                                   // (the chained K / V AdaLN: x1 first, from pair 0)
++          for (int l = 0; l < 4; ++l, ++gi) wload(B, su, gi, &mwc, 32 * l, 0, 32768u);
++        for (int l = 0; l < 4; ++l, ++gi) wload(B, su, gi, &mwc, 32 * l, 256 * ((tpair >> (2 * cb)) & 3), 32768u);   // the unit's table pair
++#endif
+         for (int l = (cb == 1 ? 4 : 0); l < (cb == 0 ? 4 : 8); ++l, ++gi) wload(B, su, gi, &mwp, 32 * (l & 3), 256 * (l >> 2), 32768u);
+       }
+     }
+   } else if (warp == 1) {
+     const uint32_t i256 = idesc_tf32(128, 256);
+     Mma mm{su, 0};
++    int na = 0;
+     for (int i = 0; i < my; ++i) {
+       const int cb = half_of(unit(i));
+-      mbar_wait(&B.afull, i & 1);
++#if TAB
++      for (int j = 0; j < (cross == 1 && cb == 1 ? 2 : 1); ++j) {   // c's operand (tile H) -> the table pair(s) into TMEM [256, 512)
++        mbar_wait(&B.afull, (na++) & 1);
++        tc_fence_after();
++        mm.run(B, tmem + 256, sh, i256, true);
++        commit_acc(B);
++      }
++#endif
++      mbar_wait(&B.afull, (na++) & 1);
+       tc_fence_after();
+       mm.run(B, tmem, sa, i256, true);                               // x1 (or a half unit's A) against its first 256 Wp rows
+       if (cb < 0) mm.run(B, tmem + 256, cross ? sh : sa, i256, true);  // a full unit: cols 256..511 from xkv (cross) or x1
+@@ -287,18 +410,103 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
+   } else if (warp == 3) {
+     for (int i = 0; i < my && i < 2; ++i) {                          // the first two units' rows into L2
+       const int m0 = row0_of(unit(i)), cb = half_of(unit(i)), t0 = m0 % mrows;
++#if TAB
++      pf_rows(s, 128, m0, rt, lane); pf_rows(c, 128, t0, rt, lane);
++      (void)cb;
++#else
+       pf_rows(s, 128, m0, rt, lane); pf_rows(s1, mld, t0, rt, lane); pf_rows(b1, mld, t0, rt, lane);
+       if (cross && cb != 0) { pf_rows(mks, kld, t0, rt, lane); pf_rows(mkb, kld, t0, rt, lane); }
++#endif
+     }
+   } else if (warp >= 4) {
+     const int e = warp - 4, qd = warp & 3, wg = e >> 2;
+     const uint32_t tl = tmem + ((uint32_t)(32 * qd) << 16);
+     const uint32_t sbase = sa + (uint32_t)e * 2 * EPB;               // staging inside tile A (free once the MMAs have read it)
+-    int nst = 0;
++    int nst = 0, nc = 0;
+     for (int i = 0; i < my; ++i) {
+       const int cb = half_of(unit(i));
+       const int m0 = row0_of(unit(i));
+       const bool act = 32 * qd < rt;                                 // this warp's TMEM lane quadrant holds unit rows
++#if TAB
++      // ---------------------------------------------------------------- warp per row: c's form -> tile H, LN(s) (unrounded) -> tile A
++      // stages: one table pair (x1 = LN(s) s1 + b1, or AlphaFold 3's LN(s) mks + mkb); the chained K / V half (cross 1, cb 1) two: x1 from
++      // pair 0, then xkv = LN(x1) mks + mkb from pair 3 (x1 exact fp32 in tile A between them)
++      {
++        const bool chn = cross == 1 && cb == 1;
++        const int nstage = chn ? 2 : 1;
++        const int cm0 = m0 % mrows;
++        auto gam = [&](int p) { return p == 0 ? tg0 : p == 1 ? tg1 : tg3; };
++        int tp = chn ? 0 : (tpair >> (2 * cb)) & 3;
++#pragma unroll 1
++        for (int k0 = 0; k0 < (rt >> 3); k0 += 4) {                  // 4 rows per warp in flight
++          tab_operand(sh, c, gam(tp), (tform >> (2 * tp)) & 3, cm0, e, k0, lane, teps);
++          float x[4][4];
++#pragma unroll
++          for (int k = 0; k < 4; ++k) {
++            const float4 sv = ldg4(s + (size_t)(m0 + e + 8 * (k0 + k)) * 128 + 4 * lane);
++            x[k][0] = sv.x; x[k][1] = sv.y; x[k][2] = sv.z; x[k][3] = sv.w;
++          }
++          ln4x4(x, eps);                                             // (cross == 2, the k | v half: AlphaFold 3's LN(s) mks + mkb, the same norm)
++#pragma unroll
++          for (int k = 0; k < 4; ++k) sts128(opnd(sa, e + 8 * (k0 + k), lane), u4(x[k][0], x[k][1], x[k][2], x[k][3]));
++        }
++        fence_proxy_async();
++        __syncwarp();
++        if (lane == 0) mbar_arrive(&B.afull);
++        const uint32_t hbase = sh + (uint32_t)e * 2 * EPB;           // the table stores' staging: tile H (the table product has read it)
++        const int r = 32 * qd + lane;
++        for (int j = 0; j < nstage; ++j) {
++          const bool last = j == nstage - 1;
++          // ------------------------------------------------------------ lane per row: (normalised rows) scale + shift (the pair from TMEM) in tile A
++          mbar_wait(&B.accf, (nc++) & 1);
++          tc_fence_after();
++          const bool keep = m0 < mrows && (cross || cb == 0 || !last);   // the first sample's rows: the pair into the table too (the hoist's)
++          const bool kst = keep && !(chn && j == 0);                 // (the chained half's pair 0: its cb 0 sibling stores it)
++          if (act)
++            for (int cc = 2 * wg; cc < 2 * wg + 2; ++cc) {
++              float vs[32], vb[32];
++              tab_cols(tl + 256 + 32 * cc, bc, 256 * tp + 32 * cc, sigm, vs);
++              tab_cols(tl + 384 + 32 * cc, bc, 256 * tp + 128 + 32 * cc, sigm, vb);
++              if (kst) {
++                put_chunk(&mtab, hbase, nst, lane, 256 * tp + 32 * cc, m0 + 32 * qd, vs);
++                put_chunk(&mtab, hbase, nst, lane, 256 * tp + 128 + 32 * cc, m0 + 32 * qd, vb);
++              }
++#pragma unroll
++              for (int q = 0; q < 8; ++q) {
++                const uint32_t a = sa + (uint32_t)cc * SLICE + sw128((uint32_t)r, (uint32_t)q);
++                const float4 xh = lds4f(a);
++                float y0 = fmaf(xh.x, vs[4 * q], vb[4 * q]), y1 = fmaf(xh.y, vs[4 * q + 1], vb[4 * q + 1]);
++                float y2 = fmaf(xh.z, vs[4 * q + 2], vb[4 * q + 2]), y3 = fmaf(xh.w, vs[4 * q + 3], vb[4 * q + 3]);
++                if (last) { y0 = rna(y0); y1 = rna(y1); y2 = rna(y2); y3 = rna(y3); }
++                sts128(a, u4(y0, y1, y2, y3));
++              }
++            }
++          tc_fence_before();
++          if (!last) {                                               // the chained half: LN(x1) in place, pair 3's operand -> tile H
++            if (lane == 0) tma_store_wait_read0();                   // (tile H's stagings read before it is overwritten)
++            __syncwarp();
++            named_bar_sync(1, 256);                                  // every row of x1 is in tile A
++            tp = (tpair >> (2 * cb)) & 3;
++#pragma unroll 1
++            for (int k0 = 0; k0 < (rt >> 3); k0 += 4) {
++              tab_operand(sh, c, gam(tp), (tform >> (2 * tp)) & 3, cm0, e, k0, lane, teps);
++              float x[4][4];
++#pragma unroll
++              for (int k = 0; k < 4; ++k) {
++                const float4 v = lds4f(opnd(sa, e + 8 * (k0 + k), lane));
++                x[k][0] = v.x; x[k][1] = v.y; x[k][2] = v.z; x[k][3] = v.w;
++              }
++              ln4x4(x, eps);
++#pragma unroll
++              for (int k = 0; k < 4; ++k) sts128(opnd(sa, e + 8 * (k0 + k), lane), u4(x[k][0], x[k][1], x[k][2], x[k][3]));
++            }
++          }
++          fence_proxy_async();
++          __syncwarp();
++          if (lane == 0) mbar_arrive(&B.afull);
++        }
++      }
++#else
+       const size_t tsh = (size_t)(m0 - m0 % mrows);                   // table row = row - tsh (row % mrows: mrows a multiple of 128)
+       const bool x1_to_a = cb != 1 || !cross;                       // tile A holds x1, or (cross, k | v half) xkv
+       const bool want_kv = cross && cb != 0;
+@@ -356,8 +564,9 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
+       fence_proxy_async();                                           // generic-proxy writes -> the MMAs' (async-proxy) reads
+       __syncwarp();
+       if (lane == 0) mbar_arrive(&B.afull);
++#endif
+       // ---------------------------------------------------------------- lane per row: P out of TMEM (bias on q, tf32 rounding on q / k / v)
+-      mbar_wait(&B.accf, i & 1);
++      mbar_wait(&B.accf, (nc++) & 1);
+       tc_fence_after();
+       const int c0 = cb < 0 ? 0 : 8 * cb, nch = cb < 0 ? 16 : 8;   // P's 32-column chunks of this unit; TMEM column 32 (c - c0)
+ #if KQLN
+@@ -473,7 +682,8 @@ atom_post_tf32(const __grid_constant__ CUtensorMap mwo, const __grid_constant__
+ #endif
+         for (int k = 0; k < 4; ++k, ++gi) wload(B, su, gi, &mwo, 32 * k, 0, 16384u);           // Wo
+ #if UP
+-        for (int q = 0; q < 4; ++q) {                                  // [Wa_q; Wb_q; Wu_q] (192 rows), then Ws of hidden 64 q .. (K 64)
++        for (int qq = 0; qq < NQ; ++qq) {                              // [Wa_q; Wb_q; Wu_q] (192 rows), then Ws of hidden 64 q .. (K 64)
++          const int q = QOF(qq);                                     // (PAIR: this CTA's two quarters)
+           for (int k = 0; k < 4; ++k, ++gi) wload(B, su, gi, &mwu, 32 * k, 192 * q, 24576u);
+           for (int k = 0; k < 2; ++k, ++gi) wload(B, su, gi, &mws, 64 * q + 32 * k, 0, 16384u);
+         }
+@@ -526,11 +736,11 @@ atom_post_tf32(const __grid_constant__ CUtensorMap mwo, const __grid_constant__
+         const uint32_t i192 = idesc_tf32(128, 192);
+         mm.run(B, tmem + 128, sa, i192, true);                       // [a | b | u] of hidden 0..63
+         commit_acc(B);
+-        for (int q = 1; q <= 4; ++q) {
++        for (int q = 1; q <= NQ; ++q) {
+           mbar_wait(&B.hfull, (nh++) & 1);                           // h_{q - 1} (tile H, K-slices 0..1)
+           tc_fence_after();
+           mm.run(B, tmem + 384, sh, i128, q == 1, 2);                // t (+)= h_{q - 1} Ws_{q - 1}^T
+-          if (q < 4) mm.run(B, tmem + 128, sa, i192, true);          // [a | b | u] of hidden 64 q ..
++          if (q < NQ) mm.run(B, tmem + 128, sa, i192, true);          // [a | b | u] of hidden 64 q ..
+           commit_acc(B);
+         }
+         (void)i256;
+@@ -729,7 +939,7 @@ atom_post_tf32(const __grid_constant__ CUtensorMap mwo, const __grid_constant__
+       if (lane == 0) mbar_arrive(&B.afull);
+       // ---------------------------------------------------------------- lane per row: h = silu(a) b of each hidden half -> tile H
+ #if UP
+-      for (int q = 0; q < 4; ++q) {                                  // h_q = silu(a) b u of hidden 64 q .. -> tile H K-slices 0..1
++      for (int q = 0; q < NQ; ++q) {                                 // h_q = silu(a) b u of hidden 64 q .. -> tile H K-slices 0..1
+         mbar_wait(&B.accf, (nc++) & 1);                              // q > 0: the Ws_{q - 1} MMAs have read h_{q - 1} too
+         tc_fence_after();
+         if (act) {
+diff --git a/src/miniworld_engine/kernels/integrations/local_dit_b200.py b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+index c8afa9239..6507d8038 100644
+--- a/src/miniworld_engine/kernels/integrations/local_dit_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+@@ -1227,6 +1227,82 @@ def _cond_tables32(cond, c2_fn, n, weights, pk, cross, save):
+     )
+ 
+ 
++def _tab_tables32(s2, cond, n, key, width, tab, pre, wrap=lambda t: t, unwrap=lambda v: v, store=None):
++    """Inference (round 3 part 7): the conditioning tables made INSIDE the pre kernel (``b200_atom.pre32(tab=...)``, ``-DTAB=1``: no ln32 /
++    gemm32 launches ahead of it) when its units and the table units fit one wave. -> (table [rows, width], P or None) or None (no fit:
++    the caller's launches). A hoisted table (``_HOIST_COND`` under ``key``, the caller's own key and value form: ``wrap`` / ``unwrap``) is
++    served as before -- P None, the caller runs its pre on it; a miss runs the TAB pre and hoists the table it wrote (every column: the
++    first sample's pre units store their pairs). ``tab``: pre32's namespace without c / out; ``pre(tab=...)`` runs pre32."""
++    from miniworld_engine.kernels.augmented_attention.cuda import b200_atom as rows
++
++    mrows = cond.shape[0] * n
++    if rows.tab_shape(s2.shape[0], mrows, num_sms(s2.device.index if s2.device.index is not None else torch.cuda.current_device())) is None:
++        return None
++    got = []
++
++    def build():
++        c2 = _padded(cond, n).reshape(mrows, DC_).contiguous()
++        out = torch.empty(mrows, width, device=s2.device, dtype=F32)
++        got.append(pre(SimpleNamespace(c=c2, out=out, **tab)))
++        return wrap(out)
++
++    val = _hoisted(_HOIST_COND if store is None else store, cond, key, build) if _hoisting() else build()
++    return unwrap(val), (got[0] if got else None)
++
++
++def _tab_pre32(s2, cond, n, weights, pk, cross=False, parallel=False, eps=1e-5):
++    """``_block_fwd32``'s inference chain on ``_tab_tables32``: -> (mod, P) or None. The cross mode: the q | g half makes pair 0, the k | v
++    half pair 3 (the K / V AdaLN's [sigmoid scale | shift] of LN(c) gkv) -- after x1 from pair 0 when chained (Protenix)."""
++    from miniworld_engine.kernels.augmented_attention.cuda import b200_atom as rows
++
++    rnd = _P_RND[cross]
++
++    def pre(tab=None, mod=None):
++        if tab is not None:
++            return rows.pre32(s2, None, None, pk.wp, pk.bp[:DS_], rnd, eps=eps, parallel=parallel, tab=tab)
++        mod, mkv = mod[0], mod[4]  # (the hoist's value: _cond_tables32's tuple)
++        return rows.pre32(
++            s2,
++            mod[:, _S1],
++            mod[:, _B1],
++            pk.wp,
++            pk.bp[:DS_],
++            rnd,
++            mks=mkv[:, :DS_] if cross else None,
++            mkb=mkv[:, DS_:] if cross else None,
++            eps=eps,
++            parallel=parallel,
++        )
++
++    width = (8 if cross else 6) * DS_
++    tab = dict(
++        wcond=pk.wcond,
++        bcond=pk.bcond,
++        g0=pk.g1,
++        g1=pk.g2,
++        g3=pk.gkv,
++        tform=0b01000101 if cross else 0b0101,
++        sigm=_SIG_MOD | (0b1000000 if cross else 0),
++        tpair=0b1100 if cross else 0,
++        teps=1e-5,
++    )
++    got = _tab_tables32(
++        s2,
++        cond,
++        n,
++        ("tf32", tuple((w.data_ptr(), w._version) for w in weights), n),
++        width,
++        tab,
++        pre,
++        wrap=lambda t: (t[:, : 6 * DS_], None, None, None, t[:, 6 * DS_ :] if cross else None),
++        unwrap=lambda v: v,
++    )
++    if got is None:
++        return None
++    val, p = got
++    return val[0], (p if p is not None else pre(mod=val))
++
++
+ def _pair_bias32(pair, n, weights, save):
+     """The windowed pair bias of an fp32 trunked pair, hoisted per pair tensor in an inference call (``_pair_bias``)."""
+     from miniworld_engine.kernels.augmented_attention.cuda import (
+@@ -1325,6 +1401,9 @@ def _block_fwd32(
+         if not save and _fused32_ready(dev):  # inference: pre (AdaLNs + projections), attention, post (the rest)
+ 
+             def chain():  # the atoms' chain up to the attention's operands
++                got = _tab_pre32(s2, cond, n, weights, pk, cross=cross, parallel=parallel)  # round 3 part 7: tables inside pre
++                if got is not None:
++                    return got
+                 mod, _, _, _, mkv = tables()
+                 return (
+                     mod,
+@@ -1923,12 +2002,30 @@ def _var_fwd32(
+             rows.ln32(c2, pk.g1, pk.g2, None, out=cat)
+             return rows.gemm32(cat, pk.wcond, k=DS_, a_grp=2 * DS_, bias=pk.bcond, sigmask=_SIG_MOD)
+ 
+-        mod = (
+-            _hoisted(_HOIST_COND, cond, ("tf32var", tuple((w.data_ptr(), w._version) for w in weights), n, ident), tables)
+-            if _hoisting()
+-            else tables()
++        def pre(tab=None, mod=None):
++            if tab is not None:
++                return rows.pre32(s2, None, None, pk.wp, pk.bp[:DS_], _P_RND[False], eps=eps, kq=pk.kq, kq_eps=kq_eps, tab=tab)
++            return rows.pre32(s2, mod[:, _S1], mod[:, _B1], pk.wp, pk.bp[:DS_], _P_RND[False], eps=eps, kq=pk.kq, kq_eps=kq_eps)
++
++        key = ("tf32var", tuple((w.data_ptr(), w._version) for w in weights), n, ident)
++        tab = dict(
++            wcond=pk.wcond,
++            bcond=pk.bcond,
++            g0=pk.g1,
++            g1=pk.g2,
++            tform=0 if ident else 0b0101,
++            sigm=0b110000 if ident else _SIG_MOD,
++            tpair=0,
++            teps=1e-5,
+         )
+-        p = rows.pre32(s2, mod[:, _S1], mod[:, _B1], pk.wp, pk.bp[:DS_], _P_RND[False], eps=eps, kq=pk.kq, kq_eps=kq_eps)
++        got = _tab_tables32(s2, cond, n, key, 6 * DS_, tab, pre)  # round 3 part 7: the tables inside the pre launch when one wave holds both
++        if got is not None:
++            mod, p = got
++            if p is None:
++                p = pre(mod=mod)
++        else:
++            mod = _hoisted(_HOIST_COND, cond, key, tables) if _hoisting() else tables()
++            p = pre(mod=mod)
+         torch.cuda.current_stream().wait_event(join)
+         p3 = p.view(a, n, 4 * DS_)
+         qc, kc, vc, gc = _P_COLS[False]
+diff --git a/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py b/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
+index 5742a3c09..5b1a1db7a 100644
+--- a/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
+@@ -52,6 +52,7 @@ from miniworld_engine.kernels.integrations.local_dit_b200 import (
+     _padded,
+     _padded_length,
+     _shared_cond,
++    _tab_tables32,
+     _tkey,
+     _trunk,
+     _unpadded,
+@@ -618,7 +619,31 @@ def _esm_fwd32(
+             c2 = _padded(cond, n).reshape(cond.shape[0] * n, DC_).contiguous()
+             return rows.gemm32(rows.silu32(c2), pk.wcond, bias=pk.bcond)
+ 
+-        tab = _hoisted(_HOIST_COND, cond, ("esm32", wkey, n), tables) if (_hoisting() and not save) else tables()
++        def pre(tb=None, tab=None):  # inference: atom_pre_tf32 (RMS) on the table, or making it (tb: round 3 part 7, ``-DTAB=1``)
++            return rows.pre32(
++                s2,
++                None if tb is not None else tab[:, _S1],
++                None if tb is not None else tab[:, _B1],
++                pk.wp,
++                pk.bp[:DS_],
++                0b1000,
++                mks=None if tb is not None else tab[:, 6 * DS_ : 7 * DS_],
++                mkb=None if tb is not None else tab[:, 7 * DS_ :],
++                eps=RMS_EPS,
++                parallel=True,
++                rms=True,
++                tab=tb,
++            )  # P = [q | g | k | v], v tf32-rounded
++
++        p = None
++        got = None
++        if not save and _hoisting():  # every table a product of silu(c), no sigmoid; the k | v half makes the K / V pair (3)
++            tb = dict(wcond=pk.wcond, bcond=pk.bcond, g0=None, g1=None, tform=0b10101010, sigm=0, tpair=0b1100, teps=1e-5)
++            got = _tab_tables32(s2, cond, n, ("esm32", wkey, n), 8 * DS_, tb, pre, store=_HOIST_COND)
++        if got is not None:
++            tab, p = got
++        else:
++            tab = _hoisted(_HOIST_COND, cond, ("esm32", wkey, n), tables) if (_hoisting() and not save) else tables()
+         keys = _keys(mask, n0, n)
+ 
+         def bias():
+@@ -630,19 +655,8 @@ def _esm_fwd32(
+         else:
+             bias2 = bias()
+         if not save:  # inference: the fused fp32 row stages (``-DRMS=1`` builds): pre (AdaLNs + projections), attention, post (the rest)
+-            p = rows.pre32(
+-                s2,
+-                tab[:, _S1],
+-                tab[:, _B1],
+-                pk.wp,
+-                pk.bp[:DS_],
+-                0b1000,
+-                mks=tab[:, 6 * DS_ : 7 * DS_],
+-                mkb=tab[:, 7 * DS_ :],
+-                eps=RMS_EPS,
+-                parallel=True,
+-                rms=True,
+-            )  # P = [q | g | k | v], v tf32-rounded
++            if p is None:
++                p = pre(tab=tab)
+             # (the q / k norm + rotary inside atom_pre_tf32's epilogue was measured slower, round 3 part 4: 3072 atoms 71.7 -> 86.0 us with
+             # the silu GEMM A phase; the pre kernel alone 13.6 -> 18.5 us against this 2.8 us launch)
+             qn, kn = local.esm_qkrope32(p[:, 0:DS_], p[:, 2 * DS_ : 3 * DS_], pk.wq, pk.wk, cos, sin, RMS_EPS)

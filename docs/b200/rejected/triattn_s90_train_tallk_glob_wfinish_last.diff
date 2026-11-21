@@ -1,0 +1,89 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
+index 854199e8b..a729cd278 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
+@@ -1460,6 +1460,10 @@ __global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int n
+ // threads (8 rows x 32 columns), coalesced along c; each block leaves its dgamma / dbeta partial in PART [chunk][2][C], which
+ // tri_wfinish_sum adds in chunk order.  Blocks x >= C/32 copy dWo [C][HDp] -> [C][HD] without the padded channels.
+ constexpr int FR = 32;
++#ifndef WF_LAST
++#define WF_LAST 0
++#endif
++__device__ unsigned g_wf_ticket = 0;          // WF_LAST: blocks that have left their dgamma / dbeta partial (the last one sums them; self-resetting)
+ 
+ __device__ __forceinline__ void st_out(float* p, float v) { *p = v; }
+ __device__ __forceinline__ void st_out(__nv_bfloat16* p, float v) { *p = __float2bfloat16_rn(v); }
+@@ -1467,7 +1471,7 @@ __device__ __forceinline__ void st_out(__nv_bfloat16* p, float v) { *p = __float
+ template <typename OutT>
+ __global__ void __launch_bounds__(256) tri_wfinish(const float* __restrict__ G, const __nv_bfloat16* __restrict__ W, const float* __restrict__ GAM,
+     const float* __restrict__ BET, int C, int HDp, int NH, int hd, OutT* __restrict__ DW, OutT* __restrict__ DWB, float* __restrict__ PART,
+-    const float* __restrict__ DWO, OutT* __restrict__ DWOU) {
++    const float* __restrict__ DWO, OutT* __restrict__ DWOU, float* __restrict__ DGB, int NCH) {
+   const int ncb = C / 32, ldg = C + 64, HD = NH * hd, SL = HDp / NH, tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
+   if ((int)blockIdx.x >= ncb) {
+     const long i = ((long)(blockIdx.x - ncb) * gridDim.y + blockIdx.y) * 256 + threadIdx.x;   // an element of dWo [C][HD]
+@@ -1503,6 +1507,22 @@ __global__ void __launch_bounds__(256) tri_wfinish(const float* __restrict__ G,
+     PART[((long)blockIdx.y * 2) * C + c] = sg;
+     PART[((long)blockIdx.y * 2 + 1) * C + c] = sb;
+   }
++#if WF_LAST
++  __threadfence();
++  __syncthreads();
++  __shared__ unsigned last_s;
++  if (threadIdx.x == 0) last_s = (atomicAdd(&g_wf_ticket, 1u) == (unsigned)(ncb * gridDim.y) - 1u) ? 1u : 0u;
++  __syncthreads();
++  if (last_s) {                                                        // the last block adds the chunk partials in chunk order (tri_wfinish_sum's sum)
++    __threadfence();
++    for (int i = threadIdx.x; i < 2 * C; i += 256) {
++      float s = 0.f;
++      for (int k = 0; k < NCH; ++k) s += __ldcg(PART + (long)k * 2 * C + i);
++      DGB[i] = s;
++    }
++    if (threadIdx.x == 0) g_wf_ticket = 0u;
++  }
++#endif
+ }
+ 
+ // PART [NCH][2][C] -> dgamma | dbeta [2][C] (fixed order)
+@@ -1981,15 +2001,17 @@ std::vector<torch::Tensor> tri_wfinish_h(torch::Tensor G, torch::Tensor wcat, to
+   if (fp32_out)
+     tri_wfinish<float><<<grid, 256, 0, st>>>(G.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wcat.data_ptr<at::BFloat16>()),
+         gam.data_ptr<float>(), bet.data_ptr<float>(), (int)C, (int)HDp, (int)NH, (int)hd, dw.data_ptr<float>(), dwb.data_ptr<float>(),
+-        part.data_ptr<float>(), dwo.data_ptr<float>(), dwou.data_ptr<float>());
++        part.data_ptr<float>(), dwo.data_ptr<float>(), dwou.data_ptr<float>(), dgb.data_ptr<float>(), nch);
+   else
+     tri_wfinish<__nv_bfloat16><<<grid, 256, 0, st>>>(G.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wcat.data_ptr<at::BFloat16>()),
+         gam.data_ptr<float>(), bet.data_ptr<float>(), (int)C, (int)HDp, (int)NH, (int)hd,
+         reinterpret_cast<__nv_bfloat16*>(dw.data_ptr<at::BFloat16>()), reinterpret_cast<__nv_bfloat16*>(dwb.data_ptr<at::BFloat16>()),
+-        part.data_ptr<float>(), dwo.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(dwou.data_ptr<at::BFloat16>()));
++        part.data_ptr<float>(), dwo.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(dwou.data_ptr<at::BFloat16>()), dgb.data_ptr<float>(), nch);
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
++#if !WF_LAST
+   tri_wfinish_sum<<<(unsigned)((2 * C + 255) / 256), 256, 0, st>>>(part.data_ptr<float>(), nch, (int)C, dgb.data_ptr<float>());
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
++#endif
+   return {dw, dwb, dwou, dgb};
+ }
+ 
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+index fbda8a4cc..f93a3ff4b 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+@@ -583,11 +583,16 @@ WIDE_TAIL_GATE = ((64, 64), (64, 128))
+ WIDE_FRONT64 = True
+ 
+ 
++#: (S90 training) tri_wfinish's last block adds the dgamma / dbeta chunk partials (a self-resetting ticket): no tri_wfinish_sum launch.  MINIWORLD_TRIATTN_B200_WF_LAST=1.
++WF_LAST = os.environ.get("MINIWORLD_TRIATTN_B200_WF_LAST", "0") not in ("", "0")
++
++
+ @functools.lru_cache(maxsize=1)
+ def _wide():
+     ensure_cuda_home()
+     return load_extension(
+-        name="triattn_b200_wide_v45_tt7", sources=[str(_SRC / "triattn_wide_sm100.cu")], extra_cuda_cflags=_flags(), verbose=False
++        name="triattn_b200_wide_v45_tt7" + ("_wfl" if WF_LAST else ""), sources=[str(_SRC / "triattn_wide_sm100.cu")],
++        extra_cuda_cflags=[*_flags(), *(("-DWF_LAST=1",) if WF_LAST else ())], verbose=False,
+     )
+ 
+ 

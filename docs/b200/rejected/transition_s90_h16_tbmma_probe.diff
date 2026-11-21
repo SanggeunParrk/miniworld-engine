@@ -1,0 +1,33 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
+index 5a96b4daa..0dbf13e04 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_fused_h16.cu
+@@ -98,6 +98,10 @@ static_assert(!XLN || (XG && LNS && !SAVE_BUILD), "XLN: the D 256 inference buil
+ static_assert(!YST || RXC, "YST needs RXC");
+ // -DRXT=1 (round 3 part 20; default: the inference build): a CTA's LAST tile takes its residual x from a TMA copy into the (then idle)
+ // weight ring and writes y by TMA stores from there (see the epilogue); the other tiles as before. The same arithmetic: the same bits.
++// TBMMA 1 (timing probe, wrong numbers): no MMA instructions (the commits only)
++#ifndef TBMMA
++#define TBMMA 0
++#endif
+ #ifndef RXT
+ #define RXT (MLANE && YST && !SAVE_BUILD)
+ #endif
+@@ -362,7 +366,7 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+             if (tc == 0 && c < 16) STAMP(20 + c);
+             tc_fence_after();
+             const uint32_t ta = tmem + T_AB + buf * 2 * BN, wb = su + O_W + sw * WST;
+-            for (int k = 0; k < KBD; ++k) {
++            for (int k = 0; k < KBD && !TBMMA; ++k) {
+               const uint64_t dw = desc_k128(wb + k * WKB);
+ #pragma unroll
+               for (int kk = 0; kk < 4; ++kk) umma_ts(ta, tx + k * 32 + kk * 8, dw + (uint64_t)(kk * 2), IDE, (k > 0 || kk > 0) ? 1u : 0u);
+@@ -381,7 +385,7 @@ tg_fused_h16_sm100(const __grid_constant__ CUtensorMap mX, const __grid_constant
+             tc_fence_after();
+             const uint64_t dh = desc_k128(su + O_H + hb * H_BYTES), dw = desc_k128(su + O_WS + ss * WS_BYTES);
+ #pragma unroll
+-            for (int kk = 0; kk < 4; ++kk)
++            for (int kk = 0; kk < (TBMMA ? 0 : 4); ++kk)
+               umma_ss(tmem + T_Y, dh + (uint64_t)(kk * 2), dw + (uint64_t)(kk * 2), IDS, (c > 1 || kk > 0) ? 1u : 0u);
+             tc_commit(&B.sempty[ss]);
+             tc_commit(&B.hempty[hb]);

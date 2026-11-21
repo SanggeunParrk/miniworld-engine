@@ -1,0 +1,230 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+index c9ec5f5b6..4070d92e9 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+@@ -101,6 +101,8 @@ KERNELS = {
+     "pre": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True),
+     "prex": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1",)),
+     "prexp": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1", "PARALLEL=1")),
++    "prex_lr": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1", "LATEREL=1")),  # (round 3 part 9: dependents after the wait)
++    "prexp_lr": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1", "PARALLEL=1", "LATEREL=1")),
+     "post": ("post_fwd", "atom_post_fwd_sm100", _SMEM, True),
+     "trg": ("tr_bwd_gate", "atom_tr_bwd_gate_sm100", _SMEM, True),
+     "postb": ("post_bwd", "atom_post_bwd_sm100", _SMEM, True),
+@@ -438,7 +440,7 @@ def _pre_fwd(a, mod, W, bq, save, eps, cross, kq, kq_eps, ada1=False):
+     return Q, K, V, G, X, (extra[2] if kq is not None else None)
+ 
+ 
+-def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False, rms=False, raw=False, rope=None):
++def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False, rms=False, raw=False, rope=None, late=False):
+     # (every sm_100a row kernel reads the conditioning tables mod / mkv at row r % rows(mod): per-row tables [M, ..], or [N, ..] shared
+     # by the samples)
+     """The cross-attention mode's ``pre_fwd``: K and V from xkv = LN(x1) sigmoid(mkv[:, :128] + bs) + mkv[:, 128:] (a second AdaLN of x1)
+@@ -477,6 +479,9 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False, rms
+         qkr = torch.empty(M, 2 * DM, device=a.device, dtype=torch.bfloat16)
+         extra = (*extra, qkr)
+     name = (("pre_rms_raw_rope_save" if qkr is not None else "pre_rms_raw_rope" if rope is not None else "pre_rms_raw") if raw else "pre_rms") if rms else "prexp" if parallel else "prex"
++    if late:  # (round 3 part 9: the late-release build, the bf16 pair bias beside it as its programmatic dependent)
++        assert not rms and name in ("prex", "prexp"), name
++        name += "_lr"
+     atom_kernel(name, d)(
+         (min(num_sms(d), ntile), 1, 1),
+         (384, 1, 1),
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
+index 406fdb77e..5b9da641e 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
+@@ -211,6 +211,9 @@ using namespace s100;
+ #ifndef ADA1
+ #define ADA1 0                             // x1 = rn(s1 LN(a) + bi1) with ONE rounding (the bf16-autocast reference keeps the LayerNorm and the AdaLN's
+ #endif                                     // products in fp32; B200 round 3b, 2026-11-17)
++#ifndef LATEREL
++#define LATEREL 0                          // round 3 part 9 (2026-11-18): the dependents start only after the producer's grid-dependency wait (every
++#endif                                     // kernel before this one is complete then): the bf16 pair bias runs beside it (lbias.cu local_bias_fwd_early)
+ #ifndef NI
+ #define NI (CROSS ? 2 : 4)
+ #endif
+@@ -291,7 +294,9 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+   __syncthreads();
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
++#if !LATEREL
+   pdl_launch();
++#endif
+ #if PF
+   if (warp == 3 && PFP != nullptr && ntT > 0) {                          // 32 rows x 256 B: 64 lines of 128 B
+     const char* pf = reinterpret_cast<const char*>(PFP) + (size_t)row0(0) * 256;
+@@ -307,6 +312,9 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+         for (int ka = 0; ka < 4; ++ka) tma_load_2d(su + p * 32768 + ka * 8192, &mw, &B.wfull, 32 * ka, 128 * p);
+       mbar_wait(&B.wfree, 0);
+       pdl_wait();                                                          // a / mod come from the previous kernels
++#if LATEREL
++      pdl_launch();                                                        // (LATEREL: the dependents start now: everything before is complete)
++#endif
+       for (int T = 0; T < ntT; ++T) {
+         const int s = T % NI, r0 = row0(T);
+         if (T >= NI) mbar_wait(&B.infree[s], ((T / NI) - 1) & 1);
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/__init__.py
+index 124dad686..2d3ed77c1 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/__init__.py
+@@ -38,6 +38,7 @@ The fp32 path (fp32 activations; ``KERNELS_TF32``, loaded by ``_load32`` and onl
+ from __future__ import annotations
+ 
+ import functools
++import os
+ from pathlib import Path
+ 
+ import torch
+@@ -76,6 +77,7 @@ KERNELS = {
+     "dq": ("lattn_dq", "local_attn_dq", 222720),
+     "dkv": ("lattn_dkv", "local_attn_dkv", 223744),
+     "pb_f": ("lbias", "local_bias_fwd", 0),
++    "pb_fe": ("lbias", "local_bias_fwd_early", 0),  # (round 3 part 9: programmatic dependent of the late-release pre_fwd: pair_bias_early)
+     "pb_b": ("lbias", "local_bias_bwd", 0),
+     "pb_fin": ("lbias", "local_bias_fin", 0),
+     "cond_ln": ("lcross", "local_cond_ln", 0),
+@@ -206,7 +208,7 @@ def _load(name: str, device_index: int):
+         raise NotImplementedError(f"local atom kernel {name!r} exists on sm_90a only")
+     else:
+         stem, func, smem = KERNELS[name]
+-    pdl = hopper and (name in _MMA_KERNELS or name in _MMA_KERNELS32 or name in _ESM_KERNELS)
++    pdl = (hopper and (name in _MMA_KERNELS or name in _MMA_KERNELS32 or name in _ESM_KERNELS)) or (not hopper and name == "pb_fe")
+     with torch.cuda.device(device_index):
+         return driver.Kernel(cubin(stem, hopper), func, smem, pdl=pdl)
+ 
+@@ -580,6 +582,27 @@ def pair_bias_fwd(z, gamma, wb, eps=1e-5):
+     return out
+ 
+ 
++def pair_bias_early(z, gamma, wb, eps=1e-5):
++    """The bf16 inference pair bias as a programmatic dependent of the late-release ``pre_fwd`` build (``local_bias_fwd_early``, round 3
++    part 9; ``pair_bias_early32``'s bf16 twin): -> (bias, launch). Call it BEFORE the launches of the chain (z, the parameters and the
++    bias buffer are made here, so the kernel's writes before its grid-dependency wait touch nothing a running kernel reads), and
++    ``launch()`` right after ``pre_fwd_kv(..., late=True)`` (whose dependents start after its own wait: everything before it is complete
++    then); the attention follows as the bias kernel's dependent. The same bits as ``pair_bias_fwd``."""
++    z = z.contiguous()
++    nwin = z.shape[0]
++    rows = z.numel() // DP
++    wb, gamma, bf = _params(wb, gamma)
++    out = torch.empty(NH, nwin, WQ, WK, device=z.device, dtype=torch.float32)
++    d = _dev(z)
++    k = _load("pb_fe", d)
++    grid = (min(int(os.environ.get("MW_LD9_EBG", "4")) * num_sms(d), (rows + 255) // 256), 1, 1)  # (one resident wave beside pre_fwd)
++
++    def launch():
++        k(grid, (256, 1, 1), z, wb, gamma, out, int(rows), float(eps), bf)
++
++    return out, launch
++
++
+ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
+     """dbias [4, nwin, 32, 128] fp32 -> dz (z's shape and dtype, contiguous), dgamma [16], dWb [4, 16] (fp32)."""
+     rows = z.numel() // DP
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lbias.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lbias.cu
+index 0cd04cb51..88a298bbe 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lbias.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lbias.cu
+@@ -43,6 +43,33 @@ DEVI void load_w(float* sw, const void* wb, const void* gamma, int is_bf16) {
+ #endif
+ }
+ 
++// 2026-11-18 (round 3 part 9): local_bias_fwd as a programmatic dependent of the bf16 pre_fwd's late-release build (-DLATEREL: its
++// dependents start after its own grid-dependency wait, so everything before pre_fwd is complete), running BESIDE pre_fwd -- the bf16 twin of
++// lbias_tf32.cu's local_bias_fwd_f32_early, with the same contract: the caller makes z, the parameters and the output buffer before the
++// chain's launches (the writes before the wait touch nothing a running kernel reads); CTA 0 waits for pre_fwd before it exits, so the
++// attention (this grid's dependent) sees the projections complete. Same arithmetic as local_bias_fwd (same bits).
++extern "C" __global__ void __launch_bounds__(256, 8)
++local_bias_fwd_early(const __nv_bfloat16* __restrict__ z, const void* __restrict__ wb, const void* __restrict__ gamma, float* __restrict__ bias,
++                     int rows, float eps, int is_bf16) {
++  __shared__ float sw[64];
++  load_w(sw, wb, gamma, is_bf16);
++  __syncthreads();
++  for (int r = blockIdx.x * blockDim.x + threadIdx.x; r < rows; r += gridDim.x * blockDim.x) {
++    float x[16], rstd;
++    load_row(z, r, x);
++    normalise(x, eps, rstd);
++#pragma unroll
++    for (int h = 0; h < 4; ++h) {
++      float b = 0.f;
++#pragma unroll
++      for (int c = 0; c < 16; ++c) b += sw[h * 16 + c] * x[c];
++      bias[(size_t)h * rows + r] = b;
++    }
++  }
++  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");     // after the rows: the attention CTAs (big shared memory, waiting
++  if (blockIdx.x == 0) asm volatile("griddepcontrol.wait;" ::: "memory");  // for this grid) must not take the SMs while bias rows remain
++}
++
+ // 2026-11-17 (round 3 part 4): eight CTAs an SM (<= 32 registers; it took 98) and a 8 x SMs grid -- a row is one dependent load -> LayerNorm ->
+ // store chain, so the warps in flight set the rate (16384 atoms: see docs/b200/atom-dit.md)
+ extern "C" __global__ void __launch_bounds__(256, 8)
+diff --git a/src/miniworld_engine/kernels/integrations/local_dit_b200.py b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+index 0b8621459..134298242 100644
+--- a/src/miniworld_engine/kernels/integrations/local_dit_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+@@ -307,6 +307,35 @@ def _pair_bias(pair, n, weights, save):
+     )
+ 
+ 
++#: bf16 inference (round 3 part 9): the pair bias as a programmatic dependent of the late-release pre_fwd build, beside it (MW_LD9_EB=0: its
++#: own launch after pre_fwd, as before)
++_EARLY_BIAS_BF16 = os.environ.get("MW_LD9_EB", "1") != "0"
++
++
++def _pair_bias_deferred_bf16(pair, n, weights):
++    """-> (bias, launch or None): the bf16 inference pair bias (hoisted per pair tensor as ``_pair_bias``) made ready here, BEFORE the
++    chain's launches, and launched by ``launch()`` right after ``pre_fwd_kv(..., late=True)`` (``b200_atom_local.pair_bias_early``). A
++    hoisted table needs no launch; a later rebuild of the entry (a refresh) launches at once (``_pair_bias_deferred``'s pattern)."""
++    from miniworld_engine.kernels.augmented_attention.cuda import (
++        b200_atom_local as local,
++    )
++
++    g, wb = weights[_GAMMA], weights[_WBIAS]
++    st: dict = {"defer": True}
++
++    def build():
++        z = _trunk(pair, n)
++        if st["defer"]:
++            bias, st["launch"] = local.pair_bias_early(z, g, wb)
++            return bias
++        return local.pair_bias_fwd(z, g, wb)
++
++    key = ((g.data_ptr(), g._version, wb.data_ptr(), wb._version), n)  # (``_pair_bias``'s key: one entry for both forms, same bits)
++    bias = _hoisted(_HOIST_BIAS, pair, key, build) if _hoisting() else build()
++    st["defer"] = False
++    return bias, st.pop("launch", None)
++
++
+ def _var_packs(weights, kqln, up, backward=False):
+     """The variant block's weight packs in ONE launch (``b200_atom.var_pack``; the per-tensor packing of ``_pack`` recorded ~18 small kernels
+     into every captured step): (wc, wp, wo) as ``b200_atom.cond_params`` / ``pre_params`` / ``post_params`` give them, kq fp32 [4, 128] =
+@@ -584,6 +613,9 @@ def _block_fwd(
+             if not torch.cuda.is_current_stream_capturing():
+                 bias.record_stream(cur)
+         cross = len(weights) > len(WEIGHTS) and not var
++        early = None  # (round 3 part 9: bf16 inference, cross mode -- the pair bias beside the late-release pre_fwd)
++        if cross and not save and _EARLY_BIAS_BF16:
++            bias, early = _pair_bias_deferred_bf16(pair, n, weights)
+         if var:
+             wc, wp, wo, kq, wup = _var_packs(weights, kqln, up, save)[:5]  # (training: the backward's operands in the same launch)
+         else:
+@@ -599,14 +631,16 @@ def _block_fwd(
+         if cross:  # keys and values from a second AdaLN of x1 (or of the raw atoms, ``parallel``), inside pre_fwd
+             bs = _kv_pack(weights, not save)[1]
+             w_pre, b_pre = wp
+-            q, k, v, sg, x1, xkv = rows.pre_fwd_kv(s2, mod, w_pre, b_pre, mkv, bs, save=save, parallel=parallel)
++            q, k, v, sg, x1, xkv = rows.pre_fwd_kv(s2, mod, w_pre, b_pre, mkv, bs, save=save, parallel=parallel, late=early is not None)
++            if early is not None:
++                early()
+         elif kqln:
+             q, k, v, sg, x1, qkr = rows.pre_fwd_kq(s2, mod, wp[0], wp[1], kq, kq_eps, save=save, eps=eps, ada1=True)
+         else:
+             q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save, eps=eps, ada1=var)
+         if join is not None:
+             torch.cuda.current_stream().wait_event(join)
+-        else:
++        elif not (cross and not save and _EARLY_BIAS_BF16):  # (else: made above, _pair_bias_deferred_bf16)
+             bias = _pair_bias(pair, n, weights, save)
+         o, lse = local.attn_fwd(
+             q.view(a, n, DS_),

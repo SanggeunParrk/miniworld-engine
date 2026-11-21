@@ -1,0 +1,344 @@
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py	2026-11-18 15:49:12.614536278 +0900
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py	2026-11-18 15:47:36.923452632 +0900
+@@ -405,7 +405,7 @@
+         """r3-swa part 21: the DXP builds need one item a CTA (both passes' grids = their items)."""
+         return N * (S // 128) * H <= num_sms()
+ 
+-    def bind(self, qh, kh, vh, do, lse, dv, seqused, pq, pk, cos, sin, dp, B, w=None, xp=None):
++    def bind(self, qh, kh, vh, do, lse, dv, seqused, pq, pk, cos, sin, dp, B, w=None, xp=None, pf=None):
+         """``w`` [4C, C] fp32 (TF32-valued) and ``xp`` [8, N S, C] fp32 (r3-swa part 21, DXP): the passes also write dx = dP w as eight
+         per-head partials into ``xp`` (dQ pass: [dpq_h | dg_h] [Wq_h; Wg_h] at h, dK / dV pass: [dpk_h | dpv_h] [Wk_h; Wv_h] at 4 + h)."""
+         N, _, S, _ = qh.shape
+@@ -442,8 +442,11 @@
+                 self._mat(xp.view(8 * N * S, C), 8 * N * S, C, 128),
+             )
+ 
++        # (DXP: ``pf`` -- a contiguous fp32 tensor the dQ pass prefetches into L2, 16 KB a CTA; None: nothing)
++        xq = xa + ((pf, int(pf.numel() * 4) if pf is not None else 0) if xp is not None else ())
++
+         def run_q():
+-            kq(grid, (512, 1, 1), *mq, lse, dv, seqused, pq, cos, sin, mdp, int(S), int(N), int(B), scale, float(_f.EPS), *xa)
++            kq(grid, (512, 1, 1), *mq, lse, dv, seqused, pq, cos, sin, mdp, int(S), int(N), int(B), scale, float(_f.EPS), *xq)
+ 
+         def run_k():
+             kk(grid, (512, 1, 1), *mk, lse, dv, seqused, pk, cos, sin, mdp, int(S), int(N), int(B), scale, float(_f.EPS), *xa)
+@@ -581,6 +584,29 @@
+             k = self.kcl[name] = _f._load(name, cluster=cl)
+         return k
+ 
++    def bind_mod(self, dmod, a, out):
++        """r3-swa part 21: dWmod = dmod^T a [6C, C] (dmod [M, 6C], a = silu(c) [M, C] fp32) on the cluster build in problem 0's form (an
++        output tile = 4 column atoms of dmod) -> run(lo, hi, cl): the 128-row m-blocks lo .. hi - 1 (hi - lo <= 4) of ``out`` in one
++        launch of hi - lo clusters of cl CTAs (the A map starts at dmod's column 128 lo)."""
++        M = dmod.shape[0]
++        br = self.CL_ROWS
++        assert dmod.is_contiguous() and a.is_contiguous() and out.is_contiguous() and dmod.shape[1] == 6 * C and M % 16 == 0
++        mb_ = _f._f32map(a, [32, M, C // 32], [C * 4, 128], [32, br, C // 32], swizzle="128a32")
++        gws = self._gws(4, dmod.device)
++
++        def run(lo, hi, cl):
++            assert 0 <= lo < hi <= 6 and hi - lo <= 4 and M >= 16 * cl
++            sub = dmod[:, 128 * lo :]
++            ma = _f._f32map(sub, [32, M, (6 - lo) * 4], [6 * C * 4, 128], [32, br, 4], swizzle="128a32")
++            o0 = out[128 * lo :]
++            maps = (ma, mb_) * 4
++            self._clk(cl)(((hi - lo) * cl, 1, 1), (256, 1, 1), *maps, gws, int(M), 0, 0, 0, 0, 0, ma, mb_, o0, o0, o0, o0, None)
++            run.keep.append((ma, sub))
++
++        # (``out`` is not kept: a second reference to a returned gradient makes AccumulateGrad copy it)
++        run.keep = [mb_, dmod, a, gws]
++        return run
++
+     def _bind_cluster(self, cl, pairs, M, dev, split):
+         """:meth:`bind` on the cluster build (round 3 part 15): grid = tiles x cl CTAs, cluster (cl, 1, 1); the final dW written by the
+         kernel (``run.reduce`` does nothing)."""
+@@ -753,6 +779,61 @@
+         return run
+ 
+ 
++class AdcTf32:
++    """r3-swa part 21 (adc_tf32.cu): the qkvg RMS-adaLN backward of one augment per atom (``AdalnBwdTf32`` with out_col 0) and the c
++    gradient's late part (``DcgTf32.late``: (E + dmod[:, :2C] Wmod[:2C]) silu'(c) [+ prev] [+ xadd | + dq]) in one launch of 16-row blocks."""
++
++    def __init__(self):
++        self.k = self.k16 = None
++
++    @staticmethod
++    def ok(A, M, x, res, mod, dmod, wmod, c) -> bool:
++        return (
++            A == 1
++            and M % 16 == 0
++            and x.dtype in (torch.float32, torch.bfloat16)
++            and res.dtype == torch.float32
++            and mod.dtype == torch.float32
++            and mod.is_contiguous()
++            and dmod.is_contiguous()
++            and dmod.shape[0] == M
++            and wmod.dtype == torch.float32
++            and wmod.is_contiguous()
++            and tuple(wmod.shape) == (6 * C, C)
++            and c.is_contiguous()
++            and c.dtype in (torch.float32, torch.bfloat16)
++        )
++
++    def bind(self, x, dy, ndy, res, mod, dmod, wmod, e, c, eps):
++        """-> run(prev, out_dtype, fold) -> dc (``DcAcc.fused``'s protocol), and dq (x's dtype; written by the same launch)."""
++        if self.k is None:
++            name = __import__("os").environ.get("SWA_ADC_NAME", "adc_tf32")  # (development probes: adc_tf32_x*)
++            self.k = _f._load(name)
++            self.k16 = _f._load(name, "swa_adc_tf32_xo16_sm100")
++        M = x.numel() // C
++        assert dy.is_contiguous() and dy.numel() == ndy * M * C and dy.dtype == torch.float32 and 1 <= ndy <= 8
++        dq = torch.empty(M, C, device=x.device, dtype=x.dtype)
++        mw = _f._f32map(wmod, [C, 6 * C], C * 4, [32, 256])
++        k = self.k16 if x.dtype == torch.bfloat16 else self.k
++        b16 = torch.bfloat16
++
++        def run(prev=None, out_dtype=None, fold=False):
++            od = out_dtype or c.dtype
++            dc = torch.empty(c.shape, device=c.device, dtype=od)
++            assert prev is None or (prev.dtype == torch.float32 and prev.is_contiguous())
++            flags = (int(c.dtype == b16) << 1) | (int(od == b16) << 2) | (int(bool(fold)) << 4)
++            k(((M + 15) // 16, 1, 1), (256, 1, 1), x, dy, res, mod, dq, dmod, int(M), float(eps), int(ndy), M * C if ndy > 1 else 0, mw, e, c,
++              prev, None, dc, flags)
++            run.keep = (mw, x, dy, res, mod, dmod, wmod, e, c, prev)
++            return dc
++
++        return run, dq
++
++
++#: r3-swa part 21 (development switch): AdcTf32 in place of the qkvg adaLN + DcgTf32.late in the few-tile backward (_bwd_few)
++ADC = __import__("os").environ.get("SWA_ADC", "0") == "1"
++
++
+ #: r3-swa part 19 (development switch): the c gradient as DcgTf32's early / late launches in the few-tile backward (_bwd_few)
+ DCG = __import__("os").environ.get("SWA_DCG", "1") == "1"
+ #: ... up to this many rows
+@@ -772,16 +853,19 @@
+ #: r3-swa part 21 (development switch): the few-tile backward's dx = dP W as per-head partials in the window attention passes' epilogues
+ #: (attn_dq_tf32 / attn_dkv_tf32 -DDXP=1), summed by the qkvg adaLN backward -- no dx GEMM launch after dK / dV
+ DXP = __import__("os").environ.get("SWA_DXP", "1") == "1"
+-#: r3-swa part 21 (development switch): dWqkvg's m-blocks launched as their operands arrive where the early weight gradients fit beside
+-#: the attention passes (DWS: dWg with the early tiles after the out-projection, dWq after the dQ pass, dWk / dWv after dK / dV on clusters
+-#: of DWS_CL)
++#: r3-swa part 21 (development switches): dWqkvg's m-blocks launched as their operands arrive (DWS; dWk / dWv on clusters of DWS_CL),
++#: dWmod on the dW cluster kernel in an early (rows 2C .. 6C) and a late (rows 0 .. 2C) launch (DWMC)
+ DWS = __import__("os").environ.get("SWA_DWS", "1") == "1"
+ DWS_CL = int(__import__("os").environ.get("SWA_DWS_CL", "8"))
++DWMC = __import__("os").environ.get("SWA_DWMC", "0") == "1"
++DWMC_CL_EARLY = int(__import__("os").environ.get("SWA_DWMC_CLE", "4"))
++DWMC_CL_LATE = int(__import__("os").environ.get("SWA_DWMC_CLL", "8"))
++DWMC_AT = int(__import__("os").environ.get("SWA_DWMC_AT", "0"))  # the early launch: 0 after the FFN adaLN, 1 after the out-projection
+ 
+ 
+ @functools.lru_cache(maxsize=16)
+ def _xstream(index: int, k: int):
+-    """r3-swa part 21: the few-tile backward's extra side stream (1: dWq after the dQ pass)."""
++    """r3-swa part 21: the few-tile backward's extra side streams (0: dWmod, 1: dWq after the dQ pass)."""
+     with torch.cuda.device(index):
+         return torch.cuda.Stream()
+ 
+@@ -797,6 +881,7 @@
+         self.dw = DwTf32()
+         self.dcx = DcxTf32()
+         self.dcg = DcgTf32()
++        self.adc = AdcTf32()
+ 
+ 
+ @functools.lru_cache(maxsize=16)
+@@ -1089,7 +1174,30 @@
+     run()
+     fx = DCX and modb is not None and not EARLY_DC and K.dcx.ok(A, M, q, dq1, modb[0], w, modb[1], mod)
+     dwm = None
++    dwmc = None
+     extra = []  # side streams of this backward beyond s1 / s2 (joined / held with them)
++    ga0 = N * (S // 128) * H
++    if (
++        modb is not None
++        and not fx
++        and DWMC
++        and DWMC_AT == 0
++        and SCHED >= 2
++        and half_window == _f.HW
++        and A == 1
++        and dmod.shape[0] == M
++        and M <= 2048
++        and 2 * ga0 <= num_sms()
++    ):
++        # r3-swa part 21 (DWMC, at 0): dWmod's rows 2C .. 6C on the dW cluster kernel right after the FFN adaLN (beside the out-projection)
++        dwm = torch.empty(6 * C, C, device=dev, dtype=torch.float32)
++        dwmc = K.dw.bind_mod(dmod, a_mod.reshape(M, C), dwm)
++        sw = _xstream(_index(q), 0)
++        sw.wait_stream(cur)
++        sw.wait_stream(s2)  # silu(c)
++        with torch.cuda.stream(sw):
++            dwmc(2, 6, DWMC_CL_EARLY)
++        extra.append(sw)
+     if fx and DWM_SPLIT:
+         # round 3 part 16: dWmod = dmod^T silu(c) in two parts -- the rows 2C .. 6C (dmod columns written by the FFN adaLN above) now, on a
+         # stream of their own beside the out-projection / attention; the rows 0 .. 2C after the one-kernel tail (they need its adaLN)
+@@ -1142,6 +1250,28 @@
+     dws = DWS and early and hasattr(dw, "tiles")
+     if early:
+         fork(s1, (lambda: dw.tiles(3, 10)) if dws else (lambda: dw.part(1, 4)))
++    if (
++        dwmc is None
++        and modb is not None
++        and not fx
++        and DWMC
++        and DWMC_AT == 1
++        and early
++        and A == 1
++        and dmod.shape[0] == M
++        and 2 * ga + dw.ctas(1, 4) + (dw.ctas(0, 1) // 4 if dws else 0) + (M // 128) + 4 * DWMC_CL_EARLY <= num_sms()
++    ):
++        # r3-swa part 21 (DWMC): dWmod = dmod^T silu(c) on the dW cluster kernel in two launches -- the rows 2C .. 6C (dmod columns made by
++        # the FFN adaLN) now, on a stream of their own beside the attention backward; the rows 0 .. 2C after the qkvg adaLN (was one cuBLAS
++        # GEMM after it, ~6 us at 1024 rows)
++        dwm = torch.empty(6 * C, C, device=dev, dtype=torch.float32)
++        dwmc = K.dw.bind_mod(dmod, a_mod.reshape(M, C), dwm)
++        sw = _xstream(_index(q), 0)
++        sw.wait_stream(cur)
++        sw.wait_stream(s2)  # silu(c)
++        with torch.cuda.stream(sw):
++            dwmc(2, 6, DWMC_CL_EARLY)
++        extra.append(sw)
+     xp = None
+     if DXP and par and not fx and K.attn.dxp_ok(N, S):
+         # r3-swa part 21: dx = dP W as eight per-head partials written by the attention passes' epilogues (no dx GEMM launch)
+@@ -1149,7 +1279,10 @@
+     if half_window != _f.HW:
+         _global_attn_bwd(qh, kh, vh, o, dO, lse, seqused, pq, pk, cos, sin, dP, B)
+     else:
+-        at = K.attn.bind(qh, kh, vh, dO, lse, Dv, seqused, pq, pk, cos, sin, dP, B, w=w if xp is not None else None, xp=xp)
++        pf = None
++        if xp is not None and ADC and modb is not None and modb[1].is_contiguous() and modb[1].dtype == torch.float32:
++            pf = modb[1][: 2 * C]  # (AdcTf32's Wmod rows)
++        at = K.attn.bind(qh, kh, vh, dO, lse, Dv, seqused, pq, pk, cos, sin, dP, B, w=w if xp is not None else None, xp=xp, pf=pf)
+         if par:
+             fork(s2, at.k)
+             at.q()
+@@ -1201,8 +1334,13 @@
+         dysrc, ndy = mm_tf32_ks(dP, w, ksx), ksx
+     else:
+         dysrc, ndy = mm_tf32(dP, w), 1
+-    run, dq = K.adaln.bind(q.reshape(M, C), dysrc, dq1, None, mod, dmod, A, B, eps, 0, ndy=ndy)
+-    run()
++    adc = None
++    if ADC and modb is not None and dce is not None and K.adc.ok(A, M, q, dq1, mod, dmod, modb[1], modb[0]):
++        # r3-swa part 21: the qkvg adaLN backward and dc's late part in one launch (AdcTf32), launched below by the dc protocol
++        adc, dq = K.adc.bind(q.reshape(M, C), dysrc, ndy, dq1, mod, dmod, modb[1], dce[0], modb[0], eps)
++    else:
++        run, dq = K.adaln.bind(q.reshape(M, C), dysrc, dq1, None, mod, dmod, A, B, eps, 0, ndy=ndy)
++        run()
+     out = [dq.view(N, S, C), dmod, dwqkv, dw.dwg, dwo, dwu, dwd]
+     if modb is not None:
+         c_mod, w_mod, dca = (*modb, None)[:3]
+@@ -1210,7 +1348,23 @@
+         def mod_dw():
+             res["dw"] = mm_tf32(dmod.t(), a_mod)
+ 
+-        fork(s2, mod_dw)
++        def dwmod_late():  # (after the launch that writes dmod's columns 0 .. 2C)
++            if dwmc is not None:
++                fork(extra[0], lambda: dwmc(0, 2, DWMC_CL_LATE))
++                res["dw"] = dwm
++            else:
++                fork(s2, mod_dw)
++
++        if adc is not None:
++            if dca is not None:
++                dqx, dcx = dca[0].fused(dca[1], adc, dq)
++                out[0] = dqx.view(N, S, C)
++            else:
++                dcx = adc()
++            dwmod_late()
++            out += [dcx, res["dw"]]
++        else:
++            dwmod_late()
+         ksc = _ks(dmod.shape[0], KSPLIT_DC) if KSPLIT_DC > 1 and M >= KSPLIT_MIN_ROWS else 1
+ 
+         def make_acc():
+@@ -1221,7 +1375,9 @@
+                 return acc2
+             return mm_tf32_ks(dmod, w_mod, ksc) if ksc > 1 else mm_tf32(dmod, w_mod)
+ 
+-        if dce is not None:  # r3-swa part 19: the GEMM's last third + silu' (+ the stack's sum) in one launch (DcgTf32.late)
++        if adc is not None:
++            pass
++        elif dce is not None:  # r3-swa part 19: the GEMM's last third + silu' (+ the stack's sum) in one launch (DcgTf32.late)
+             lrun = K.dcg.late(dmod, w_mod, dce[0], c_mod)
+             if dca is not None:
+                 dqx, dcx = dca[0].late(dca[1], lrun, dq)
+@@ -1240,7 +1396,8 @@
+             # here: the next block's backward starts after this block's dq. Only when every weight's .grad is None and unhooked (the
+             # gradients are then stolen by AccumulateGrad without a kernel; nothing reads them before the stack's backward ends)
+             # (keep the kernels' inputs and workspace, never the returned gradients: a second reference makes AccumulateGrad copy them)
+-            mk = [xp] if xp is not None else []
++            mk = [dwmc.keep] if dwmc is not None else []
++            mk += [xp] if xp is not None else []
+             dca[0].hold([s1, s2, *extra], [dw.keep[:-1], dP, dmod, a_mod] + ([dce[0], dce[2]] if dce is not None else []) + mk)
+             return out
+         join(s2)
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_fwd.py	2026-11-18 15:48:00.880973513 +0900
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_fwd.py	2026-11-18 15:47:36.923452632 +0900
+@@ -96,6 +96,9 @@
+     "dcx_tf32_st3_tr": ("dcx_tf32", ("-DSTA=3", "-DTRACE=1")),
+     # r3-swa part 19: the c gradient's GEMM split at column 2C -- the early columns off the chain, silu' in the late launch (tf32_bwd.DcgTf32)
+     "dcg_tf32": ("dcg_tf32", ()),
++    # r3-swa part 21: the qkvg adaLN backward with dc's late part (mma.sync over Wmod[0:2C]) in one launch (tf32_bwd.AdcTf32)
++    "adc_tf32": ("adc_tf32", ()),
++    **{f"adc_tf32_x{_x}": ("adc_tf32", (f"-DADCX={_x}",)) for _x in (1, 2, 3, 4, 7)},  # development probes
+ }
+ #: few-tile builds (B200 2026-11-17, round 3 part 4): -DROWS=64 / 32 tile slots with a deeper weight ring (:func:`tile_rows`)
+ ROWS_STEMS = ("ffn_fwd_tf32",)
+@@ -136,6 +139,8 @@
+     "dcx_tf32_st3": 229376 + 256,
+     "dcx_tf32_st3_tr": 229376 + 256,
+     "dcg_tf32": 225280 + 256,
++    "adc_tf32": 4 * 32768 + 16 * 260 * 4 + 64,
++    **{f"adc_tf32_x{_x}": 4 * 32768 + 16 * 260 * 4 + 64 for _x in (1, 2, 3, 4, 7)},
+ }
+ SMEM.update(
+     {
+@@ -178,6 +183,8 @@
+     "dcx_tf32_st3": "swa_dcx_tf32_sm100",
+     "dcx_tf32_st3_tr": "swa_dcx_tf32_sm100",
+     "dcg_tf32": "swa_dcg_tf32_sm100",
++    "adc_tf32": "swa_adc_tf32_sm100",
++    **{f"adc_tf32_x{_x}": "swa_adc_tf32_sm100" for _x in (1, 2, 3, 4, 7)},
+ }
+ for _s in ROWS_STEMS:
+     for _r in (64, 32):
+@@ -192,7 +199,7 @@
+             CUBINS[_n] = ("dw_tf32", ("-DDW_BOX3=1", f"-DDW_CL={_c}", f"-DDW_BKR={_r}", f"-DDW_CLX={_x}"))
+             SMEM[_n] = 5 * 20 * 2048 + 256
+             FUNCS[_n] = "swa_dw_tf32_sm100"
+-            if not _x and _c <= 8 and _r == 32:  # r3-swa part 21: the partials through a global workspace (DwTf32.GX)
++            if not _x and _c <= 8:  # r3-swa part 21: the partials through a global workspace (DwTf32.GX)
+                 CUBINS[_n + "g"] = ("dw_tf32", ("-DDW_BOX3=1", f"-DDW_CL={_c}", f"-DDW_BKR={_r}", "-DDW_GX=1"))
+                 SMEM[_n + "g"] = SMEM[_n]
+                 FUNCS[_n + "g"] = FUNCS[_n]
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dq_tf32.cu	2026-11-18 15:48:12.712736893 +0900
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dq_tf32.cu	2026-11-18 15:47:36.950452092 +0900
+@@ -122,7 +122,8 @@
+                        const float* __restrict__ SIN, const __grid_constant__ CUtensorMap mdp, int S, int N, int Bn, float scale,
+                        float eps
+ #if DXP
+-                       , const __grid_constant__ CUtensorMap mw, const __grid_constant__ CUtensorMap mxp
++                       , const __grid_constant__ CUtensorMap mw, const __grid_constant__ CUtensorMap mxp,
++                       const float* __restrict__ PFL2, int pf_bytes
+ #endif
+                        ) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+@@ -204,6 +205,10 @@
+         tma_load_3d(su + O_XW, &mw, &B.xw_full, 0, 32 * h, 0);
+         tma_load_3d(su + O_XW + 16384, &mw, &B.xw_full, 0, 384 + 32 * h, 0);
+         tma_load_2d(su + O_XW + 32768, &mdp, &B.xw_full, 384 + 32 * h, n * S + i0);
++        // a later kernel's cold weight (AdcTf32: Wmod[0:2C]) into L2, a 16-KB share per CTA (the measurer flushes L2 before a step)
++        const int off = (int)blockIdx.x * 16384;
++        if (PFL2 != nullptr && off < pf_bytes)
++          asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(reinterpret_cast<const char*>(PFL2) + off), "r"(min(16384, pf_bytes - off)) : "memory");
+       }
+ #endif
+     }

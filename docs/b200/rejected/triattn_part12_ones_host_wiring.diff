@@ -1,0 +1,57 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/__init__.py b/src/miniworld_engine/kernels/triangle_attention/cuda/__init__.py
+index b3ab10257..6a5c2ce37 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/__init__.py
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/__init__.py
+@@ -81,6 +81,7 @@ def prebuild(target, rows):
+             yield ft.partial(b200_triattn._core, rows_per_task, True)
+             yield ft.partial(b200_triattn._core, rows_per_task, True, True)   # 16-channel heads (b200_triattn.D16_INFER)
+             yield ft.partial(b200_triattn._core, rows_per_task, True, True, d16c=True)   # compact (b200_triattn.D16C_INFER)
++            yield ft.partial(b200_triattn._core, rows_per_task, True, ones=True)   # the row sum on the tensor core (b200_triattn.ONES_INFER)
+         yield b200_triattn._mod
+         yield b200_triattn._pack
+         yield b200_triattn._wide
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+index 418aed35d..85205878a 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+@@ -97,6 +97,11 @@ D16_INFER = os.environ.get("MINIWORLD_TRIATTN_B200_D16", "1") != "0"
+ #: q / k / v stores, the core's loads (3-D maps whose 32-channel box zero-fills channels 16 .. 31; the core writes v's 1.0 into the
+ #: landed V tile, TA_D16C) and the tail's o loads / out-projection (K = 64 instead of 128).  MINIWORLD_TRIATTN_B200_D16C=0 turns it off.
+ D16C_INFER = os.environ.get("MINIWORLD_TRIATTN_B200_D16C", "1") != "0"
++#: B200 2026-11-18 (round 3 part 12): the 32-channel inference core takes the row sum from the tensor core (the H100 fp16 core's
++#: `[O | l] += P [V | 1]`; TA_ONES): eight ts MMAs M128 N16 a sub-step against a ones tile instead of the FADD2 a key pair and the per-tile
++#: overflow guard (a bad row is recomputed exactly at the drain, as the 16-channel core).  Two rows a task accumulate l in TMEM; three
++#: rows (no TMEM room for three 16-column sums) pass each sub-step's partial through a two-slot ring.  MINIWORLD_TRIATTN_B200_ONES=0 turns it off.
++ONES_INFER = os.environ.get("MINIWORLD_TRIATTN_B200_ONES", "1") != "0"
+ 
+ 
+ def POLY_INFER(rows: int) -> int:
+@@ -112,15 +117,15 @@ L2E = 1.4426950408889634
+ 
+ 
+ @functools.lru_cache(maxsize=None)
+-def _core(rows: int = 4, hb: bool = False, d16: bool = False, poly: int | None = None, d16c: bool = False):
++def _core(rows: int = 4, hb: bool = False, d16: bool = False, poly: int | None = None, d16c: bool = False, ones: bool = False):
+     """The head-dim-32 core with `rows` pair rows a task; hb: the inference build (bias pre-scaled by log2 e, TA_HB), d16: its
+-    16-channel-head form (TA_D16), poly: exponential pairs of 16 on the FMA pipe (TA_POLY; None: POLY_INFER(rows)), d16c: (with d16) compact 16-channel heads in global memory (TA_D16C)."""
++    16-channel-head form (TA_D16), poly: exponential pairs of 16 on the FMA pipe (TA_POLY; None: POLY_INFER(rows)), d16c: (with d16) compact 16-channel heads in global memory (TA_D16C), ones: (hb, 32-channel heads) the row sum on the tensor core (TA_ONES)."""
+     ensure_cuda_home()
+     p = (POLY_INFER(rows) if poly is None else poly) if hb else 0
+     return load_extension(
+-        name=(f"triattn_b200_core_r{rows}_hb_d16{'c' if d16c else ''}_p{p}_v3_tt8" if d16 else f"triattn_b200_core_r{rows}_hb_p{p}_v2_tt8") if hb else f"triattn_b200_core_r{rows}_v20_tt8",
++        name=(f"triattn_b200_core_r{rows}_hb_d16{'c' if d16c else ''}_p{p}_v3_tt8" if d16 else f"triattn_b200_core_r{rows}_hb{'_o' if ones else ''}_p{p}_v{4 if ones else 2}_tt8") if hb else f"triattn_b200_core_r{rows}_v20_tt8",
+         sources=[str(_SRC / "triattn_sm100.cu")],
+-        extra_cuda_cflags=[*_flags(), f"-DTA_R={rows}", *(("-DTA_HB=1", "-DTA_CK=16", f"-DTA_POLY={p}") if hb else ()), *(("-DTA_D16=1",) if hb and d16 else ()), *(("-DTA_D16C=1",) if hb and d16 and d16c else ())],
++        extra_cuda_cflags=[*_flags(), f"-DTA_R={rows}", *(("-DTA_HB=1", "-DTA_CK=16", f"-DTA_POLY={p}") if hb else ()), *(("-DTA_D16=1",) if hb and d16 else ()), *(("-DTA_D16C=1",) if hb and d16 and d16c else ()), *(("-DTA_ONES=1",) if hb and ones and not d16 else ())],
+         verbose=False,
+     )
+ 
+@@ -237,7 +242,7 @@ def _core_forward(q, k, v, bias, scale, need, hb=False, d16=False, d16c=False):
+     """The core's forward over [B, N, S, H, 32] tensors in launches of `fwd_group` samples -> (out [B, N, S, H, 32], lse or empty).
+     hb: the bias is bf16(bias * log2 e) (inference: see HB_INFER); d16 (with hb): 16-channel heads whose v carries 1.0 in channel 16 (D16_INFER)."""
+     B, N, S, H, _ = q.shape
+-    e = _core(_rows_per_task(S, B * H), hb, d16, d16c=d16c)
++    e = _core(_rows_per_task(S, B * H), hb, d16, d16c=d16c, ones=hb and not d16 and ONES_INFER)
+     g = fwd_group(B, H, S)
+     if g >= B:
+         E = q.new_empty(0)  # (pybind: the optional outputs are passed explicitly)

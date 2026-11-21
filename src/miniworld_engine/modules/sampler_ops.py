@@ -15,12 +15,12 @@ from miniworld_engine.modules.primitives import BackendModule, random_input
 
 
 def _cuda_h100(device: torch.device) -> str | None:
-    """Why the hand-written CUDA kernels cannot run on ``device`` (they are built for the H100, sm_90a, the A100, sm_80, and the RTX 5090, sm_120a: the sm_80 source), or ``None``."""
+    """Why the hand-written CUDA kernels cannot run on ``device`` (they are built for the H100, sm_90a, the A100, sm_80, the RTX 5090, sm_120a: the sm_80 source, and the B200, sm_100a: the H100 source), or ``None``."""
     if device.type != "cuda":
         return "the kernels run on CUDA tensors only"
     cc = torch.cuda.get_device_capability(device)
-    if cc not in ((9, 0), (8, 0), (12, 0)):
-        return f"the CUDA kernels are the H100 (sm_90a), A100 (sm_80) and RTX 5090 (sm_120a) builds, got sm_{cc[0]}{cc[1]}"
+    if cc not in ((9, 0), (8, 0), (12, 0), (10, 0)):
+        return f"the CUDA kernels are the H100 (sm_90a), A100 (sm_80), RTX 5090 (sm_120a) and B200 (sm_100a) builds, got sm_{cc[0]}{cc[1]}"
     return None
 
 
@@ -81,7 +81,10 @@ class AugmentNoise(BackendModule):
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 3,
         "cuda:5090_sm120": 1,
-    }  # 2026-11-10: sm_80 paths; 3 (2026-11-11): small launches (B * C * N <= 2^18 atom reads) as one kernel; 2026-11-12: the sm_120a build
+        "cuda:b200_sm100": 2,
+    }  # 2026-11-10: sm_80 paths; 3 (2026-11-11): small launches (B * C * N <= 2^18 atom reads) as one kernel; 2026-11-12: the sm_120a build;
+    # cuda:b200_sm100 1 (2026-11-16): the sm_100a build of the H100 source (sampler_ops.cu)
+    # cuda:b200_sm100 2 (2026-11-17, round 3): one thread-block-cluster kernel a call (sampler_ops_sm100.cu augment_noise_cl_k; was 2 kernels)
 
     def __init__(
         self,
@@ -180,7 +183,14 @@ class AlignEuler(BackendModule):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 1}  # 2026-11-10: sm_80 paths; 2026-11-12: their sm_120a build
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 2,
+        "cuda:5090_sm120": 1,
+        "cuda:b200_sm100": 2,
+    }  # 2026-11-10: sm_80 paths; 2026-11-12: their sm_120a build
+    # cuda:b200_sm100 1 (2026-11-16): the sm_100a build of the H100 source (sampler_ops.cu)
+    # cuda:b200_sm100 2 (2026-11-17, round 3): one cluster kernel a call (align_euler_cl_k: one-pass moments, Horn's rotation in one thread's
+    # registers; was 3 kernels)
 
     def __init__(self, *, step_scale: float = 1.5, backend: str = "pytorch") -> None:
         super().__init__()
@@ -295,7 +305,15 @@ class PoolAtoms(BackendModule):
 
     backends = ("pytorch", "anthropic", "cuda", "triton")
     # cuda:h100_sm90 2 (2026-11-12): the wide pooling kernel at 1024+ CTAs takes SUB = 4 (engine 2.4.4's), below SUB = 8 (same bits)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 2, "cuda:5090_sm120": 2}  # 2026-11-19: fp32 atom features on the sm_80 / sm_120a build (sampler_ops_f32_sm80.cu), forward and backward  # 2026-11-10: sm_80 paths; 2026-11-12: their sm_120a build
+    backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 3,
+        "cuda:h100_sm90": 2,
+        "cuda:5090_sm120": 2,
+        "cuda:b200_sm100": 2,
+    }  # 2026-11-19: fp32 atom features on the sm_80 / sm_120a build (sampler_ops_f32_sm80.cu), forward and backward; 2026-11-10: sm_80 paths; 2026-11-12: their sm_120a build
+    # cuda:b200_sm100 1 (2026-11-16): the sm_100a build of the H100 source (sampler_ops.cu)
+    # cuda:b200_sm100 2 (2026-11-17, round 3): the forward with every atom row of a token in flight (pool_atoms_b200_k); the backward without
+    # the sort (pool_prep_b200_k + pool_bwd_b200_k: 2 kernels, was prep + torch.sort + bwd = 6-13)
 
     #: Channels of ``make_inputs``' atom features (the atom encoder's ``d_single``) and atoms per token (the token-atoms layout's width).
     _C, _A = 128, 24

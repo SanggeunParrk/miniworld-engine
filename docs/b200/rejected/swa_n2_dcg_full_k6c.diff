@@ -1,0 +1,44 @@
+--- src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py	2026-11-18 18:55:58.000000000 +0000
++++ n2out/pre/tf32_bwd_dcgfull.py	2026-11-18 18:55:58.000000000 +0000
+@@ -768,8 +768,9 @@
+         self.k(((M // 128) * ns, 1, 1), (256, 1, 1), *maps, 2 * C, 4 * C // 32, ns, None, None, None, None, e, 1)
+         return (maps, dmod, wmod)
+ 
+-    def late(self, dmod, wmod, e, c):
+-        """-> run(prev, out_dtype, fold_x) (``DcAcc.fused``'s protocol; ``fold_x``: the x gradient added, or None) -> dc."""
++    def late(self, dmod, wmod, e, c, full=False):
++        """-> run(prev, out_dtype, fold_x) (``DcAcc.fused``'s protocol; ``fold_x``: the x gradient added, or None) -> dc. ``full`` (N2): the whole K = 6C
++        in this launch (``e`` None): dc = (dmod Wmod) silu'(c) [+ prev] [+ xadd], one launch for the cuBLAS GEMM + its split-K reduce + the dsilu launch."""
+         if self.k is None:
+             self.k = _f._load("dcg_tf32")
+         M = dmod.shape[0]
+@@ -783,7 +784,7 @@
+             assert prev is None or (prev.dtype == torch.float32 and prev.is_contiguous())
+             assert xadd is None or (xadd.is_contiguous() and xadd.numel() == c.numel())
+             flags = (int(c.dtype == b16) << 1) | (int(od == b16) << 2) | (int(xadd is not None and xadd.dtype == b16) << 3)
+-            self.k(((M // 128) * ns, 1, 1), (256, 1, 1), *maps, 0, 2 * C // 32, ns, e, c, prev, xadd, out, flags)
++            self.k(((M // 128) * ns, 1, 1), (256, 1, 1), *maps, 0, (6 if full else 2) * C // 32, ns, e, c, prev, xadd, out, flags)
+             run.keep = (maps, dmod, wmod, e, c, prev, xadd)
+             return out
+ 
+@@ -806,6 +807,8 @@
+ DCX = __import__("os").environ.get("SWA_DCX", "0") == "1"
+ #: ... with dWmod's rows 2C .. 6C early on a stream of their own (_bwd_few)
+ PROBE_SKIP = int(__import__("os").environ.get("SWA_PROBE_SKIP", "0"))  # timing probe (wrong gradients): 1 no dWmod GEMM, 2 no dc GEMM
++#: N2 (development switch): the c gradient's whole GEMM + silu' (+ the stack's sum) as ONE DcgTf32 launch (K = 6C) after the qkvg adaLN backward where the early / late split is not used
++DCG_FULL = __import__("os").environ.get("SWA_DCG_FULL", "1") == "1"
+ DWM_SPLIT = __import__("os").environ.get("SWA_DWM_SPLIT", "1") == "1"
+ #: r3-swa part 21 (development switch): the few-tile backward's dx = dP W as per-head partials in the window attention passes' epilogues
+ #: (attn_dq_tf32 / attn_dkv_tf32 -DDXP=1), summed by the qkvg adaLN backward -- no dx GEMM launch after dK / dV
+@@ -1275,8 +1278,9 @@
+                 return acc2
+             return mm_tf32_ks(dmod, w_mod, ksc) if ksc > 1 else mm_tf32(dmod, w_mod)
+ 
+-        if dce is not None:  # r3-swa part 19: the GEMM's last third + silu' (+ the stack's sum) in one launch (DcgTf32.late)
+-            lrun = K.dcg.late(dmod, w_mod, dce[0], c_mod)
++        full_dcg = dce is None and DCG_FULL and K.dcg.ok(M, dmod, w_mod, c_mod)
++        if dce is not None or full_dcg:  # r3-swa part 19: the GEMM's last third + silu' (+ the stack's sum) in one launch (DcgTf32.late); N2: or all of it
++            lrun = K.dcg.late(dmod, w_mod, dce[0], c_mod) if dce is not None else K.dcg.late(dmod, w_mod, None, c_mod, full=True)
+             if dca is not None:
+                 dqx, dcx = dca[0].late(dca[1], lrun, dq)
+                 out[0] = dqx.view(N, S, C)

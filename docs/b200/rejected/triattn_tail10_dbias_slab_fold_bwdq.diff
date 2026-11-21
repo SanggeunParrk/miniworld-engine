@@ -1,0 +1,129 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index e6d07a191..69a3d625d 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -1236,6 +1236,11 @@ constexpr uint32_t ID_SQ = idesc_bf16(128, QB_KW, 0, 0);
+ static_assert(QB_COL_A + QR * 32 <= 512, "TMEM");
+ static_assert(QB_SMEM <= 232448, "smem");
+ 
++__device__ __forceinline__ unsigned qb_ld_acquire(const unsigned* p) {
++  unsigned v; asm volatile("ld.acquire.gpu.global.u32 %0, [%1];\n" : "=r"(v) : "l"(p) : "memory"); return v;
++}
++__device__ __forceinline__ void qb_st_release(unsigned* p, unsigned v) { asm volatile("st.release.gpu.global.u32 [%0], %1;\n" :: "l"(p), "r"(v) : "memory"); }
++
+ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
+     int N, int H, int S, int ntasks, float scl, float scale,
+     const __grid_constant__ CUtensorMap qmap,            // q / dO [B*N*S][H*32], box (32, 128), 64B swizzle
+@@ -1246,7 +1251,8 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
+     const float* __restrict__ LSE, const float* __restrict__ DELTA,
+     const __grid_constant__ CUtensorMap dqmap,           // dQ [B*N*S][H*32] bf16, box (32, 128), 64B swizzle (TMA stores)
+     const __grid_constant__ CUtensorMap dbmap,           // dbias slabs fp32 [P][B*H*S][S]; box (32, 128), 128B swizzle (see below)
+-    const int per, const int bhs) {                      // tasks a CTA (a contiguous range), B*H*S
++    const int per, const int bhs,                        // tasks a CTA (a contiguous range), B*H*S
++    const float* __restrict__ SLB, float* __restrict__ DBO, unsigned* __restrict__ UB, const long total) {   // (round 10) folded slab sum (UB null: off)
+   pdl_trigger();   // round 8: PDL at S = 128 (launch_pdl_if): the next kernel may launch; this one waits for the previous grid
+   pdl_wait();
+   const int QTL = S / BM, NG = (N + QR - 1) / QR, NKS = S / QB_KW, SPT = QR * NKS;
+@@ -1524,10 +1530,62 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
+                                                       // wait_read<1> may leave this store pending; buffer 0's then retires it
+     }
+   }
+-  if (warp >= 2 && (warp & 3) == 2 && lane == 0) bulk_wait<0>();
++  if (warp >= 2 && (warp & 3) == 2 && lane == 0) {
++    bulk_wait<0>();
++    if (UB != nullptr) asm volatile("fence.proxy.async.global;\n" ::: "memory");   // the slab writes (async proxy) -> other CTAs' loads
++  }
+   tc_fence_before();
+   __syncthreads();
+   if (warp == 1) tmem_dealloc(tmem, 512);
++  if (UB != nullptr) {
++    // ---- (round 10) the unit's slab sum folded in (no triattn_db_slabs launch): the NP CTAs of a (b, h, query tile) unit meet at a
++    // self-resetting barrier (the grid is at most one CTA an SM: all resident), then each sums a 1 / NP slice of the unit's [128][S]
++    // block over the NP slabs in slab order (2 lanes: even / odd slabs, added in lane order) and writes dbias ----
++    const int qt = (int)blockIdx.x % QTL, bh = (int)blockIdx.x / (QTL * NP), unit = bh * QTL + qt;
++    unsigned* cnt = UB + 2 * unit;
++    if (tid == 0) {                                   // arrivals cnt[0] (release by fence.acq_rel + a relaxed reduction, acquire polls)
++      asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
++      asm volatile("red.relaxed.gpu.global.add.u32 [%0], 1;\n" :: "l"(cnt) : "memory");
++      while (qb_ld_acquire(cnt) < (unsigned)NP) {}
++    }
++    __syncthreads();
++    const long n4u = 32L * S, sz = (n4u + NP - 1) / NP, c0 = part * sz, c1 = min(n4u, c0 + sz);
++    const long base = ((long)bh * S + (long)qt * BM) * S;
++    float4* scr = reinterpret_cast<float4*>(smb);
++    static_assert(QB_THREADS == 320, "2 lanes x 160 columns");
++    const int col = tid % 160, ln = tid / 160;
++    for (long cb = c0; cb < c1; cb += 160) {
++      const long c = cb + col;
++      float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
++      if (c < c1) {
++        const float4* p = reinterpret_cast<const float4*>(SLB + base) + c;
++        const long st = total / 4;
++        int s = ln;
++        for (; s + 14 < NP; s += 16) {
++          float4 v[8];
++#pragma unroll
++          for (int u = 0; u < 8; ++u) v[u] = __ldcg(p + (long)(s + 2 * u) * st);
++#pragma unroll
++          for (int u = 0; u < 8; ++u) { a.x += v[u].x; a.y += v[u].y; a.z += v[u].z; a.w += v[u].w; }
++        }
++        for (; s < NP; s += 2) { const float4 v = __ldcg(p + (long)s * st); a.x += v.x; a.y += v.y; a.z += v.z; a.w += v.w; }
++      }
++      if (ln == 1) scr[col] = a;
++      __syncthreads();
++      if (ln == 0 && c < c1) {
++        const float4 v = scr[col];
++        a.x += v.x; a.y += v.y; a.z += v.z; a.w += v.w;
++        reinterpret_cast<float4*>(DBO + base)[c] = a;
++      }
++      __syncthreads();
++    }
++    // departures cnt[1]: the unit's last CTA out resets both counters for the next launch (every CTA of the unit passed the wait)
++    if (tid == 0) {
++      unsigned d;
++      asm volatile("atom.relaxed.gpu.global.add.u32 %0, [%1], 1;\n" : "=r"(d) : "l"(cnt + 1) : "memory");
++      if (d == (unsigned)NP - 1) { cnt[0] = 0u; cnt[1] = 0u; }
++    }
++  }
+ }
+ }  // namespace
+ 
+@@ -1612,7 +1670,8 @@ inline void launch_pdl_if(bool on, void (*kern)(P...), dim3 grid, dim3 block, si
+ 
+ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor dout,
+                                        torch::Tensor lse, torch::Tensor delta, double scale, torch::Tensor db_ws,
+-                                       torch::Tensor dq_out, torch::Tensor dk_out, torch::Tensor dv_out, torch::Tensor bias_t, bool raw_slabs, bool pdl) {
++                                       torch::Tensor dq_out, torch::Tensor dk_out, torch::Tensor dv_out, torch::Tensor bias_t, bool raw_slabs, bool pdl,
++                                       bool fold) {
+   TORCH_CHECK(q.is_cuda() && q.scalar_type() == torch::kBFloat16 && q.dim() == 5 && q.size(4) == D, "q: [B, N, S, H, 32] bf16");
+   for (const auto* t : {&q, &k, &v, &dout}) TORCH_CHECK(t->is_contiguous() && t->sizes() == q.sizes() && t->scalar_type() == torch::kBFloat16, "q, k, v, dout: contiguous, same shape");
+   const long B = q.size(0), N = q.size(1), S = q.size(2), H = q.size(3);
+@@ -1671,9 +1730,19 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
+   launch_pdl_if(pdl && S == 128, triattn_bwd_kv_sm100, dim3(std::min(n1, sms)), dim3( KB_THREADS),  KB_SMEM,  stream, (int)N, (int)H, (int)S, n1, scl, (float)scale, q32, d32, k128, v128, bkv,
+       lse.data_ptr<float>(), delta.data_ptr<float>(), dkm, dvm);
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
++  // (round 10) fold: the slab sum inside the query-side kernel (a unit's CTAs meet at a per-unit barrier: needs the whole grid resident,
++  // grid2 <= SMs at one CTA an SM) -- no triattn_db_slabs launch
++  const long nunits = B * H * (S / BM);
++  fold = fold && !raw_slabs && grid2 <= sms_ && nunits <= 2048;
++  static torch::Tensor ubar[64];
++  const int dev_ = q.device().index();
++  if (fold && !ubar[dev_].defined()) ubar[dev_] = torch::zeros({4096}, q.options().dtype(torch::kInt32));
+   launch_pdl_if(pdl && S == 128, triattn_bwd_q_sm100, dim3(grid2), dim3( QB_THREADS),  QB_SMEM,  stream, (int)N, (int)H, (int)S, n2, scl, (float)scale, q128, d128, k64, v64, bq,
+-      lse.data_ptr<float>(), delta.data_ptr<float>(), dqm, dbm, per2, (int)(B * H * S));
++      lse.data_ptr<float>(), delta.data_ptr<float>(), dqm, dbm, per2, (int)(B * H * S), (const float*)slabs.data_ptr<float>(),
++      fold ? db.data_ptr<float>() : (float*)nullptr, fold ? reinterpret_cast<unsigned*>(ubar[dev_].data_ptr<int>()) : (unsigned*)nullptr,
++      (long)(B * H * S * S));
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
++  if (fold) return {dq, dk, dv, db};
+   // raw_slabs: the slabs come back unsummed with (NG, per) on the host -- the caller's consumer sums them in the same order
+   // (tri_head_bwd: the fused d_pair 128 path, one launch fewer)
+   if (raw_slabs) return {dq, dk, dv, slabs, torch::tensor({(long)NGq, (long)per2}, torch::kLong)};
+@@ -1699,5 +1768,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("triattn_delta", &triattn_delta_rows, "rowsum(dout o out) fp32 [B, N, H, S]");
+   m.def("triattn_bwd", &triattn_bwd, "sm100 triangle-attention backward: (dq, dk, dv [B, N, S, H, 32] bf16, dbias fp32 [B, H, S, S])",
+         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("bias"), py::arg("dout"), py::arg("lse"), py::arg("delta"), py::arg("scale"),
+-        py::arg("db_ws"), py::arg("dq_out"), py::arg("dk_out"), py::arg("dv_out"), py::arg("bias_t") = torch::Tensor(), py::arg("raw_slabs") = false, py::arg("pdl") = false);
++        py::arg("db_ws"), py::arg("dq_out"), py::arg("dk_out"), py::arg("dv_out"), py::arg("bias_t") = torch::Tensor(), py::arg("raw_slabs") = false, py::arg("pdl") = false,
++        py::arg("fold") = false);
+ }

@@ -1,0 +1,49 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
+index 9a33c9f48..bb76f52da 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_wide_sm100.cu
+@@ -27,6 +27,10 @@
+ #include "tailg_sm100.cuh"
+ using namespace sm100;
+ 
++#ifndef WF_ML
++#define WF_ML 1          // tri_wfront / tri_wtail: one TMA-issuing lane a ring stage (0: lane 0 issues every stage)
++#endif
++
+ namespace {
+ 
+ __device__ __forceinline__ float2 bf2(uint32_t u) { return make_float2(__uint_as_float(u << 16), __uint_as_float(u & 0xffff0000u)); }
+@@ -204,13 +208,14 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
+   auto Xc = [&](int s, int i) { return reinterpret_cast<__nv_bfloat16*>(stg + s * T::SB + i * T::XC); };
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
++    if (WF_ML ? lane < T::NSTG : lane == 0) {     // WF_ML: lane s streams ring stage s (one TMA a ~600 clk a thread, see tri_wfront)
+       pdl_wait();                                  // PDL: g / o / the residual rows after the core completed
+       int y = 0;
+       for (int it = blockIdx.x; it < nitems; it += gridDim.x) {
+         const int t = it / T::NH, c0 = (it % T::NH) * CO;
+         for (int kc = 0; kc < KXS + KC; ++kc, ++y) {
+           const int s = y % T::NSTG;
++          if (WF_ML && s != lane) continue;
+           if (y >= T::NSTG) wait(se + s, ((y / T::NSTG) - 1) & 1);
+           if (kc < KXS) {                                             // residual stage: up to CPS x chunks of the block
+             const int j0 = kc * T::CPS, j1 = min(KX, j0 + T::CPS);
+@@ -499,13 +504,16 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
+   };
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
++    // WF_ML: lane s streams ring stage s (B200 2026-11-18: one thread issues about one TMA load per ~600 clk whatever the box, so a
++    // single issuing lane capped the weight stream at ~27 B/clk an SM with these 16 KiB boxes; the loads are the same)
++    if (WF_ML ? lane < T::NW : lane == 0) {
+       const uint32_t bwf = sa(wf), bw0 = sa(sW);
+       int y = 0;
+       for (int pt = pair; pt < np; pt += npair)
+         for (int b = 0; b < NBLK; ++b)
+           for (int kc = 0; kc < T::KC; ++kc, ++y) {
+             const int s = y % T::NW, half = blk_rows(b) >> 1;
++            if (WF_ML && s != lane) continue;
+             if (y >= T::NW) wait(we + s, ((y / T::NW) - 1) & 1);
+             if (lead) expect_tx(wf + s, 2 * half * 128);                 // the pair's bytes, counted on the leader's barrier
+             load_2d_2sm(half == 8 ? &wbmap : &wmap, bw0 + s * T::WSB, bwf + 8 * s, kc * 64, blk_row0(b) + rank * half);

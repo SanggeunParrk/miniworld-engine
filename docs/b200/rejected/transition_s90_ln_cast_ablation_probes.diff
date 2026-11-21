@@ -1,0 +1,88 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index e36c5f23f..17e263340 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -113,6 +113,8 @@ SMALL_FWD_TILES = 16
+ #: forward's casts ride in the LayerNorm launch.
+ #: (S90 part 9) extra build flags of the small-M chain kernels by name (gdx): A/B runs edit it
+ SX_X: dict[str, tuple[str, ...]] = {}
++#: (S90 part 14) 8-element groups a thread in the weight-cast blocks of the chain's LayerNorm launch
++SX_CASTU = 2
+ SX_CH = (32, 64)
+ #: squeeze builds: (output columns per cluster, hidden split = cluster size)
+ SX_SQ = ((32, 1), (64, 1), (32, 2), (64, 2))
+@@ -273,7 +275,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+     )
+     sx = (
+         (
+-            ("sx_ln", "widths/tsx_ln.cu", (f"-DDIM={d}",)),
++            ("sx_ln", "widths/tsx_ln.cu", (f"-DDIM={d}", f"-DCASTU={SX_CASTU}", *SX_X.get("ln", ()))),
+             *((f"sx_expand{c}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}")) for c in SX_CH),
+             *((f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in SX_SQ),
+             ("sx_gate", "widths/tsx_gate.cu", dim),
+@@ -465,7 +467,7 @@ def _sx_forward(k, x, gamma, beta, wa, wb, ws, eps, save, out, rstd, c1, cast=No
+     k.run(
+         "sx_ln",
+         "transition_sx_ln",
+-        nrb + ((3 * h * d // 8 + 511) // 512 if cast is not None else 0),  # cast blocks: 2 x 8 elements per thread
++        nrb + ((3 * h * d // 8 + 256 * SX_CASTU - 1) // (256 * SX_CASTU) if cast is not None else 0),  # cast blocks: SX_CASTU x 8 elements per thread
+         (x, gamma, beta, xn, rstd, c1, m, float(eps), int(save), *(cast or (x, x, x)), wa, wb, ws, h * d if cast else 0),
+         block=256,
+         cluster=1,
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu
+index d8cfbeeb1..e5bf87a08 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu
+@@ -13,6 +13,12 @@ using namespace s100;
+ #ifndef DIM
+ #define DIM 384
+ #endif
++#ifndef CASTU
++#define CASTU 2   // 8-element groups a thread in the weight cast blocks (loads first)
++#endif
++#ifndef CASTN
++#define CASTN 3   // (probe) matrices cast: 3 = Wa, Wb, Ws
++#endif
+ constexpr int D_ = DIM, PER = D_ / 128, WPB = 8;               // eight-byte chunks per lane, warps (rows) per block
+ static_assert(D_ % 128 == 0, "whole 4-column chunks per lane");
+ #ifndef F32
+@@ -165,20 +171,23 @@ transition_sx_ln(const __nv_bfloat16* __restrict__ x, const float* __restrict__
+   pdl_wait();
+   pdl_launch();
+   if ((int)blockIdx.x >= nrb) {                                // weight casts: two 8-element groups per thread, loads first
+-    const int n8 = ncast / 8, i0 = ((blockIdx.x - nrb) * blockDim.x + threadIdx.x) * 2;
+-    float4 v[4];
++#ifdef NOCAST   // (probe, wrong results)
++    return;
++#endif
++    const int n8 = ncast / 8, i0 = ((blockIdx.x - nrb) * blockDim.x + threadIdx.x) * CASTU;
++    float4 v[2 * CASTU];
+ #pragma unroll
+-    for (int u = 0; u < 2; ++u) {
++    for (int u = 0; u < CASTU; ++u) {
+       const int i = i0 + u, w = i / n8, j = i - w * n8;
+-      if (i < 3 * n8) {
++      if (i < CASTN * n8) {
+         const float4* src = reinterpret_cast<const float4*>(w == 0 ? w0 : w == 1 ? w1 : w2) + 2 * j;
+         v[2 * u] = __ldg(src); v[2 * u + 1] = __ldg(src + 1);
+       }
+     }
+ #pragma unroll
+-    for (int u = 0; u < 2; ++u) {
++    for (int u = 0; u < CASTU; ++u) {
+       const int i = i0 + u, w = i / n8, j = i - w * n8;
+-      if (i < 3 * n8) {
++      if (i < CASTN * n8) {
+         const float4 a = v[2 * u], b = v[2 * u + 1];
+         reinterpret_cast<uint4*>(w == 0 ? o0 : w == 1 ? o1 : o2)[j] =
+             make_uint4(pack_bf16(a.x, a.y), pack_bf16(a.z, a.w), pack_bf16(b.x, b.y), pack_bf16(b.z, b.w));
+@@ -186,6 +195,9 @@ transition_sx_ln(const __nv_bfloat16* __restrict__ x, const float* __restrict__
+     }
+     return;
+   }
++#ifdef NOLN   // (probe, wrong results)
++  return;
++#endif
+   if (row >= M) return;
+   const uint2* xr = reinterpret_cast<const uint2*>(x + (size_t)row * D_);
+   uint2 v[PER];

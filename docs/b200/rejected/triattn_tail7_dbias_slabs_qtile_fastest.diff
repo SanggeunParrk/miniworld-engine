@@ -1,0 +1,214 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_dh128_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_dh128_sm100.cu
+index ddf73dbff..85d123098 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_dh128_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_dh128_sm100.cu
+@@ -702,7 +702,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd128_q(
+   const uint32_t tmem = *tslot;
+   const uint32_t sbase = sa(smb);
+   auto A = [&](const void* p) -> uint32_t { return sbase + (uint32_t)(reinterpret_cast<const unsigned char*>(p) - smb); };
+-  auto decode = [&](int t, int& qt, int& n, int& bh) { n = t % N; qt = (t / N) % QTL; bh = t / (QTL * N); };
++  auto decode = [&](int t, int& qt, int& n, int& bh) { qt = t % QTL; n = (t / QTL) % N; bh = t / (QTL * N); };
+   // deterministic dbias slabs (triattn_sm100.cu bwd_q): CTA c runs the tasks [c per, c per + per)
+   const int t0 = (int)blockIdx.x * per, t1 = min(t0 + per, ntasks);
+ 
+@@ -805,8 +805,8 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd128_q(
+     for (int t = t0; t < t1; ++t, ++lt) {
+       int qt, n, bh; decode(t, qt, n, bh);
+       const int b_ = bh / H;
+-      const int u = t / N, slab = (int)blockIdx.x - (u * N) / per;   // this CTA's slab of unit u
+-      const bool first = t == t0 || t % N == 0;                     // its first task in the unit: stores, not reduce-adds
++      const int slab = (int)blockIdx.x - (bh * N * QTL) / per;          // this CTA's slab of the units (bh, qt)
++      const bool first = t - QTL < t0 || n == 0;                    // its first task in unit (bh, qt): stores, not reduce-adds
+       const int dbrow = slab * bhs + bh * S + qt * BM;
+       if (!first && lead) bulk_wait<0>();            // the previous task's writes into this slab are complete: a fixed order
+       float lse, dl;
+@@ -967,25 +967,22 @@ std::vector<torch::Tensor> triattn_fwd128(torch::Tensor q, torch::Tensor k, torc
+ // dbias = the query-side kernel's slabs summed in slab order (deterministic; triattn_sm100.cu triattn_db_slabs): unit u = bh * (S / 128) +
+ // q / 128 has n_u slabs
+ __global__ void __launch_bounds__(256) tri_db_slabs128(const float* __restrict__ SL, float* __restrict__ DB, int S, int NG, int per, long total, long n4) {
+-  // a block = 32 float4 columns x 8 slab lanes: lane g sums slabs g, g + 8, ... (loads in flight), lane 0 adds the lane sums in lane
+-  // order -- a fixed order every run (B200 2026-11-17: a thread walking every slab in series was latency-bound, 7 us at L128)
++  // tasks t = ((bh NG + g) QTL + qt): CTA c ran [c per, c per + per) and wrote slab c - first(bh) of every unit (bh, qt) it touched.
++  // A block = 32 float4 columns x 8 slab lanes: lane g sums slabs g, g + 8, ... (the touched ones), lane 0 adds the lane sums in lane
++  // order -- a fixed order every run.
+   const int col = threadIdx.x & 31, lane = threadIdx.x >> 5;
+   const long i = (long)blockIdx.x * 32 + col;
+   float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+   const long e = i * 4, ss = (long)S * S;
+-  int n = 0;
+   if (i < n4) {
+-    const long u = (e / ss) * (S / 128) + (e % ss) / ((long)S * 128);
+-    n = (int)(((u + 1) * NG - 1) / per - (u * NG) / per + 1);
+-    int p = lane;
+-    for (; p + 24 < n; p += 32) {
+-      float4 v[4];
+-#pragma unroll
+-      for (int k = 0; k < 4; ++k) v[k] = __ldg(reinterpret_cast<const float4*>(SL + (p + 8 * k) * total + e));
+-#pragma unroll
+-      for (int k = 0; k < 4; ++k) { a.x += v[k].x; a.y += v[k].y; a.z += v[k].z; a.w += v[k].w; }
++    const int QTL = S / 128;
++    const long bh = e / ss, qt = (e % ss) / ((long)S * 128), bs = bh * NG * QTL, be = bs + (long)NG * QTL, f = bs / per;
++    const int n = (int)((be - 1) / per - f + 1);
++    for (int p = lane; p < n; p += 8) {
++      const long c = f + p, lo = c * per > bs ? c * per : bs, hi = c * per + per < be ? c * per + per : be;
++      const long t = lo + ((qt - lo % QTL) % QTL + QTL) % QTL;
++      if (t < hi) { const float4 v = __ldg(reinterpret_cast<const float4*>(SL + p * total + e)); a.x += v.x; a.y += v.y; a.z += v.z; a.w += v.w; }
+     }
+-    for (; p < n; p += 8) { const float4 v = __ldg(reinterpret_cast<const float4*>(SL + p * total + e)); a.x += v.x; a.y += v.y; a.z += v.z; a.w += v.w; }
+   }
+   __shared__ float4 part[8][32];
+   part[lane][col] = a;
+@@ -1026,7 +1023,7 @@ std::vector<torch::Tensor> triattn_bwd128(torch::Tensor q, torch::Tensor k, torc
+   // the query-side kernel's deterministic dbias slabs (triattn_sm100.cu triattn_bwd: CTA c runs `per` consecutive tasks)
+   const int sms_ = num_sms(q.device().index());
+   const long NGq = N, n2_ = B * H * (S / BM) * NGq;
+-  const int per2 = (int)((n2_ + sms_ - 1) / sms_), grid2 = (int)((n2_ + per2 - 1) / per2), nslab = (int)((NGq + per2 - 1) / per2 + 1);
++  const int per2 = (int)((n2_ + sms_ - 1) / sms_), grid2 = (int)((n2_ + per2 - 1) / per2), nslab = (int)((NGq * (S / BM) + per2 - 1) / per2 + 1);
+   auto slabs = torch::empty({(long)nslab * B * H * S, S}, q.options().dtype(torch::kFloat32));
+   auto bT = torch::empty({B, H, S, S}, q.options().dtype(torch::kFloat32));
+   const uint64_t rows = (uint64_t)(B * N * S), cols = (uint64_t)(H * D);
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_dh64_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_dh64_sm100.cu
+index 46a290ab5..89552c748 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_dh64_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_dh64_sm100.cu
+@@ -708,7 +708,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd64_q(
+   const uint32_t tmem = *tslot;
+   const uint32_t sbase = sa(smb);
+   auto A = [&](const void* p) -> uint32_t { return sbase + (uint32_t)(reinterpret_cast<const unsigned char*>(p) - smb); };
+-  auto decode = [&](int t, int& qt, int& g, int& bh) { g = t % NG; qt = (t / NG) % QTL; bh = t / (QTL * NG); };
++  auto decode = [&](int t, int& qt, int& g, int& bh) { qt = t % QTL; g = (t / QTL) % NG; bh = t / (QTL * NG); };
+   // deterministic dbias slabs (triattn_sm100.cu bwd_q): CTA c runs the tasks [c per, c per + per)
+   const int t0 = (int)blockIdx.x * per, t1 = min(t0 + per, ntasks);
+   auto nrow = [&](int g, int r) { return min(g * QR + r, N - 1); };
+@@ -814,8 +814,8 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd64_q(
+     for (int t = t0; t < t1; ++t, ++lt) {
+       int qt, g, bh; decode(t, qt, g, bh);
+       const int b_ = bh / H;
+-      const int u = t / NG, slab = (int)blockIdx.x - (u * NG) / per;   // this CTA's slab of unit u
+-      const bool first = t == t0 || t % NG == 0;                     // its first task in the unit: stores, not reduce-adds
++      const int slab = (int)blockIdx.x - (bh * NG * QTL) / per;          // this CTA's slab of the units (bh, qt)
++      const bool first = t - QTL < t0 || g == 0;                    // its first task in unit (bh, qt): stores, not reduce-adds
+       const int dbrow = slab * bhs + bh * S + qt * BM;
+       if (!first && lead) bulk_wait<0>();            // the previous task's writes into this slab are complete: a fixed order
+       float lse[QR], dl[QR];
+@@ -994,25 +994,22 @@ std::vector<torch::Tensor> triattn_fwd64(torch::Tensor q, torch::Tensor k, torch
+ // dbias = the query-side kernel's slabs summed in slab order (deterministic; triattn_sm100.cu triattn_db_slabs): unit u = bh * (S / 128) +
+ // q / 128 has n_u slabs
+ __global__ void __launch_bounds__(256) tri_db_slabs64(const float* __restrict__ SL, float* __restrict__ DB, int S, int NG, int per, long total, long n4) {
+-  // a block = 32 float4 columns x 8 slab lanes: lane g sums slabs g, g + 8, ... (loads in flight), lane 0 adds the lane sums in lane
+-  // order -- a fixed order every run (B200 2026-11-17: a thread walking every slab in series was latency-bound, 7 us at L128)
++  // tasks t = ((bh NG + g) QTL + qt): CTA c ran [c per, c per + per) and wrote slab c - first(bh) of every unit (bh, qt) it touched.
++  // A block = 32 float4 columns x 8 slab lanes: lane g sums slabs g, g + 8, ... (the touched ones), lane 0 adds the lane sums in lane
++  // order -- a fixed order every run.
+   const int col = threadIdx.x & 31, lane = threadIdx.x >> 5;
+   const long i = (long)blockIdx.x * 32 + col;
+   float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+   const long e = i * 4, ss = (long)S * S;
+-  int n = 0;
+   if (i < n4) {
+-    const long u = (e / ss) * (S / 128) + (e % ss) / ((long)S * 128);
+-    n = (int)(((u + 1) * NG - 1) / per - (u * NG) / per + 1);
+-    int p = lane;
+-    for (; p + 24 < n; p += 32) {
+-      float4 v[4];
+-#pragma unroll
+-      for (int k = 0; k < 4; ++k) v[k] = __ldg(reinterpret_cast<const float4*>(SL + (p + 8 * k) * total + e));
+-#pragma unroll
+-      for (int k = 0; k < 4; ++k) { a.x += v[k].x; a.y += v[k].y; a.z += v[k].z; a.w += v[k].w; }
++    const int QTL = S / 128;
++    const long bh = e / ss, qt = (e % ss) / ((long)S * 128), bs = bh * NG * QTL, be = bs + (long)NG * QTL, f = bs / per;
++    const int n = (int)((be - 1) / per - f + 1);
++    for (int p = lane; p < n; p += 8) {
++      const long c = f + p, lo = c * per > bs ? c * per : bs, hi = c * per + per < be ? c * per + per : be;
++      const long t = lo + ((qt - lo % QTL) % QTL + QTL) % QTL;
++      if (t < hi) { const float4 v = __ldg(reinterpret_cast<const float4*>(SL + p * total + e)); a.x += v.x; a.y += v.y; a.z += v.z; a.w += v.w; }
+     }
+-    for (; p < n; p += 8) { const float4 v = __ldg(reinterpret_cast<const float4*>(SL + p * total + e)); a.x += v.x; a.y += v.y; a.z += v.z; a.w += v.w; }
+   }
+   __shared__ float4 part[8][32];
+   part[lane][col] = a;
+@@ -1053,7 +1050,7 @@ std::vector<torch::Tensor> triattn_bwd64(torch::Tensor q, torch::Tensor k, torch
+   // the query-side kernel's deterministic dbias slabs (triattn_sm100.cu triattn_bwd: CTA c runs `per` consecutive tasks)
+   const int sms_ = num_sms(q.device().index());
+   const long NGq = (N + QR - 1) / QR, n2_ = B * H * (S / BM) * NGq;
+-  const int per2 = (int)((n2_ + sms_ - 1) / sms_), grid2 = (int)((n2_ + per2 - 1) / per2), nslab = (int)((NGq + per2 - 1) / per2 + 1);
++  const int per2 = (int)((n2_ + sms_ - 1) / sms_), grid2 = (int)((n2_ + per2 - 1) / per2), nslab = (int)((NGq * (S / BM) + per2 - 1) / per2 + 1);
+   auto slabs = torch::empty({(long)nslab * B * H * S, S}, q.options().dtype(torch::kFloat32));
+   auto bT = torch::empty({B, H, S, S}, q.options().dtype(torch::kFloat32));
+   const uint64_t rows = (uint64_t)(B * N * S), cols = (uint64_t)(H * D);
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index a254e9ce6..6d4b80ecd 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -732,25 +732,22 @@ __device__ __forceinline__ void row_sw64(const __nv_bfloat16* tile, int row, uin
+ // ---- dbias = the query-side kernel's slabs summed in slab order (deterministic): element (bh, q, k) of unit u = bh * (S / 128) + q / 128
+ // has n_u slabs (the CTAs that ran the unit's NG tasks, `per` consecutive tasks a CTA)
+ __global__ void __launch_bounds__(256) triattn_db_slabs(const float* __restrict__ SL, float* __restrict__ DB, int S, int NG, int per, long total, long n4) {
+-  // a block = 32 float4 columns x 8 slab lanes: lane g sums slabs g, g + 8, ... (loads in flight), lane 0 adds the lane sums in lane
+-  // order -- a fixed order every run (B200 2026-11-17: a thread walking every slab in series was latency-bound, 7 us at L128)
++  // tasks t = ((bh NG + g) QTL + qt): CTA c ran [c per, c per + per) and wrote slab c - first(bh) of every unit (bh, qt) it touched.
++  // A block = 32 float4 columns x 8 slab lanes: lane g sums slabs g, g + 8, ... (the touched ones), lane 0 adds the lane sums in lane
++  // order -- a fixed order every run.
+   const int col = threadIdx.x & 31, lane = threadIdx.x >> 5;
+   const long i = (long)blockIdx.x * 32 + col;
+   float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+   const long e = i * 4, ss = (long)S * S;
+-  int n = 0;
+   if (i < n4) {
+-    const long u = (e / ss) * (S / 128) + (e % ss) / ((long)S * 128);
+-    n = (int)(((u + 1) * NG - 1) / per - (u * NG) / per + 1);
+-    int p = lane;
+-    for (; p + 24 < n; p += 32) {
+-      float4 v[4];
+-#pragma unroll
+-      for (int k = 0; k < 4; ++k) v[k] = __ldg(reinterpret_cast<const float4*>(SL + (p + 8 * k) * total + e));
+-#pragma unroll
+-      for (int k = 0; k < 4; ++k) { a.x += v[k].x; a.y += v[k].y; a.z += v[k].z; a.w += v[k].w; }
++    const int QTL = S / 128;
++    const long bh = e / ss, qt = (e % ss) / ((long)S * 128), bs = bh * NG * QTL, be = bs + (long)NG * QTL, f = bs / per;
++    const int n = (int)((be - 1) / per - f + 1);
++    for (int p = lane; p < n; p += 8) {
++      const long c = f + p, lo = c * per > bs ? c * per : bs, hi = c * per + per < be ? c * per + per : be;
++      const long t = lo + ((qt - lo % QTL) % QTL + QTL) % QTL;
++      if (t < hi) { const float4 v = __ldg(reinterpret_cast<const float4*>(SL + p * total + e)); a.x += v.x; a.y += v.y; a.z += v.z; a.w += v.w; }
+     }
+-    for (; p < n; p += 8) { const float4 v = __ldg(reinterpret_cast<const float4*>(SL + p * total + e)); a.x += v.x; a.y += v.y; a.z += v.z; a.w += v.w; }
+   }
+   __shared__ float4 part[8][32];
+   part[lane][col] = a;
+@@ -1168,10 +1165,11 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
+   const uint32_t tmem = *tslot;
+   const uint32_t sbase = sa(smb);                  // shared-window address of p: sbase + (p - smb), no S2R per use
+   auto A = [&](const void* p) -> uint32_t { return sbase + (uint32_t)(reinterpret_cast<const unsigned char*>(p) - smb); };
+-  auto decode = [&](int t, int& qt, int& g, int& bh) { g = t % NG; qt = (t / NG) % QTL; bh = t / (QTL * NG); };
+-  // deterministic dbias: CTA c runs the tasks [c per, c per + per) (row groups g fastest), so the CTAs that add into one (b, h, query
+-  // tile) unit u are consecutive; CTA c writes slab c - first(u) of that unit (its first task there stores, the later ones reduce-add
+-  // after the earlier writes completed), and triattn_db_slabs sums slabs 0 .. n_u - 1 in order: every bit the same each run
++  auto decode = [&](int t, int& qt, int& g, int& bh) { qt = t % QTL; g = (t / QTL) % NG; bh = t / (QTL * NG); };
++  // deterministic dbias: CTA c runs the tasks [c per, c per + per) (query tiles fastest: a CTA reuses a row's K / V across the tiles;
++  // row groups g fastest lost that reuse -- bwd_q L640 546 -> 704 us), so the CTAs that add into the units (b, h, query tile) of one
++  // (b, h) are consecutive; CTA c writes slab c - first(b, h) of each unit it touches (its first task there stores, the later ones
++  // reduce-add after the earlier writes completed), and triattn_db_slabs sums the touched slabs in a fixed order: the same bits each run
+   const int t0 = (int)blockIdx.x * per, t1 = min(t0 + per, ntasks);
+   auto nrow = [&](int g, int r) { return min(g * QR + r, N - 1); };
+ 
+@@ -1273,8 +1271,8 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
+       int qt, g, bh; decode(t, qt, g, bh);
+       const int b_ = bh / H;
+       float lse[QR], dl[QR];
+-      const int u = t / NG, slab = (int)blockIdx.x - (u * NG) / per;   // this CTA's slab of unit u
+-      const bool first = t == t0 || t % NG == 0;                     // its first task in the unit: stores, not reduce-adds
++      const int slab = (int)blockIdx.x - (bh * NG * QTL) / per;          // this CTA's slab of the units (bh, qt)
++      const bool first = t - QTL < t0 || g == 0;                    // its first task in unit (bh, qt): stores, not reduce-adds
+       const int dbrow = slab * bhs + bh * S + qt * BM;
+       if (!first && lead) bulk_wait<0>();            // the previous task's writes into this slab are complete: a fixed order
+       {
+@@ -1500,7 +1498,7 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
+   // unit of NG tasks is touched by at most ceil(NG / per) + 1 CTAs = slabs
+   const int sms_ = num_sms(q.device().index());
+   const int NGq = (int)((N + QR - 1) / QR), n2 = (int)(B * H * (S / BM) * NGq), per2 = (n2 + sms_ - 1) / sms_, grid2 = (n2 + per2 - 1) / per2;
+-  const int nslab = (NGq + per2 - 1) / per2 + 1;
++  const int nslab = (int)((NGq * (S / BM) + per2 - 1) / per2 + 1);   // the CTAs over one (b, h)'s NG x QTL tasks
+   auto slabs = torch::empty({(long)nslab * B * H * S, S}, q.options().dtype(torch::kFloat32));
+   CUtensorMap dbm = make_map<2>(slabs.data_ptr(), {(uint64_t)S, (uint64_t)(nslab * B * H * S)}, {(uint64_t)S}, {32, BM}, CU_TENSOR_MAP_SWIZZLE_128B, "dbias",
+                                 CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);

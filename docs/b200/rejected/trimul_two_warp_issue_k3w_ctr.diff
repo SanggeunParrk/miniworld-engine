@@ -1,0 +1,113 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/ctr.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/ctr.cu
+index 6dc5c9a74..17a610986 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/ctr.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/ctr.cu
+@@ -19,6 +19,7 @@
+ // row, two warps per TMEM lane quarter, one 64-column half each: TMEM -> bf16 -> SW128 staging [32 rows][64 cols] -> TMA store).
+ #include "sm100.cuh"
+ #include "tmap.h"
++#include <cstdlib>
+ 
+ using namespace sm100;
+ 
+@@ -73,7 +74,8 @@ __global__ void __launch_bounds__(NTHR, 1)
+   const int BB = bn * 64 * 2;             // one B K-half (or MN) box: [bn rows][64 k] / [128 k][64 j]
+   // trig: the next kernel (k3g) may launch its CTAs as these retire -- only for a dependent that waits for this grid before it reads t
+   // (k3g does; k3w reads t before its wait, so the D >= 256 chain launches ctr without it)
+-  if (trig) pdl_trigger();
++  const int cnp = (trig & 2) ? 2 : 1;   // bit 1: stages issued by two warps (0: even, 3: odd), one thread each
++  if (trig & 1) pdl_trigger();
+   if (tid == 0) {
+     for (int s = 0; s < NST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
+     for (int b = 0; b < 2; ++b) { mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], 4 * EG); }
+@@ -86,13 +88,15 @@ __global__ void __launch_bounds__(NTHR, 1)
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
+ 
+-  if (warp == 0) {
++  if (warp == 0 || (warp == 3 && cnp == 2)) {
+     if (lane == 0) {
+       pdl_wait();   // the planes are the previous kernel's (k1w) output; nothing global is touched before this
++      const int cme = warp == 0 ? 0 : 1;
+       int q = 0;
+       for (int it = cta; it < items; it += G) {
+         const Item m = item_of(it, L, nb, d, dir, bn);
+         for (int ks = 0; ks < KS; ++ks, ++q) {
++          if (q % cnp != cme) continue;
+           const int slot = q % NST;
+           if (q >= NST) mbar_wait(&B.empty[slot], ((q / NST) - 1) & 1);
+           uint8_t* a = sm + O_ST + slot * STG;
+@@ -179,6 +183,8 @@ __global__ void __launch_bounds__(NTHR, 1)
+   if (warp == 2) tmem_dealloc(tmem, 256);
+ }
+ 
++inline int ctr_np2() { const char* e = std::getenv("TRIMUL_CTR_NP"); return (e != nullptr && e[0] == '2') ? 2 : 0; }
++
+ int num_sms() {
+   static int n = 0;
+   if (!n) { int dv; cudaGetDevice(&dv); cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dv); }
+@@ -209,6 +215,6 @@ void ctr_forward(torch::Tensor planes, torch::Tensor t, int64_t d, int64_t dir,
+   static bool attr = false;
+   if (!attr) { cudaFuncSetAttribute(ctr_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM); attr = true; }
+   tmap::launch_pdl(ctr_kernel, dim3(g), dim3(NTHR), SMEM, at::cuda::getCurrentCUDAStream(), (pdl & 1) != 0, mp, mt, (int)L, (int)nb,
+-                   (int)d, (int)dir, items, (int)((pdl >> 1) & 1));
++                   (int)d, (int)dir, items, (int)((pdl >> 1) & 1) | ctr_np2());
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+index 4692fe11f..9ae3bf176 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+@@ -17,6 +17,7 @@
+ // the two-die B200 could each fetch the tile from HBM).
+ #include "sm100.cuh"
+ #include "tmap.h"
++#include <cstdlib>
+ 
+ using namespace sm100;
+ 
+@@ -86,6 +87,8 @@ __global__ void __launch_bounds__(NTHR, 1)
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int cta = blockIdx.x, G = gridDim.x;
++  const int snp = (grouped & 2) ? 2 : 1;   // bit 1: stages issued by two warps (0: even, 2: odd), one thread each
++  grouped &= 1;
+   const Sched S{cta, G, items / NTL, NTL, grouped};
+ 
+   if (tid == 0) {
+@@ -101,13 +104,15 @@ __global__ void __launch_bounds__(NTHR, 1)
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
+ 
+-  if (warp == 0) {
++  if (warp == 0 || (warp == 2 && snp == 2)) {
+     if (lane == 0) {
+       // ---------------------------------------------------------------- stages: (t block, Wp' block) x KBT, (x block, Wg' block) x KBX
+-      int s = 0; uint32_t ph = 0;
++      const int sme = warp == 0 ? 0 : 1;
++      int s = 0, q = 0; uint32_t ph = 0;
+       int m0, n0;
+       for (int k = 0; S.get(k, m0, n0); ++k) {
+-        for (int kb = 0; kb < NKB; ++kb) {
++        for (int kb = 0; kb < NKB; ++kb, ++q) {
++          if (q % snp != sme) { if (++s == NST) { s = 0; ph ^= 1; } continue; }
+           mbar_wait(&B.st_empty[s], ph ^ 1);
+           mbar_expect_tx(&B.st_full[s], STAGE);
+           uint8_t* a = sm + O_ST + s * STAGE;
+@@ -297,13 +302,15 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
+   int g = grid > 0 ? (int)grid : num_sms();
+   g = std::min(g, items);
+   const int grouped = (M / TOK) >= 4LL * g;   // enough token tiles: a CTA takes all channel items of a tile in a row (Sched)
++  const char* np_env = std::getenv("TRIMUL_K3W_NP");
++  const int gflags = grouped | ((np_env != nullptr && np_env[0] == '2') ? 2 : 0);   // bit 1: two stage-issuing warps
+   auto st = at::cuda::getCurrentCUDAStream();
+   const __nv_bfloat16* dsp = ds.has_value() ? reinterpret_cast<const __nv_bfloat16*>(ds->data_ptr()) : nullptr;
+   auto launch = [&](auto kern, int smem) {
+     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+     tmap::launch_pdl(kern, dim3(g), dim3(NTHR), smem, st, pdl != 0, mt, mwp, mx, mwg, my, mps, mgs, (const float*)vec.data_ptr<float>(),
+                      (const float*)mu_o.data_ptr<float>(), (const float*)rs_o.data_ptr<float>(), (const float*)mu_i.data_ptr<float>(),
+-                     (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L, grouped, (int)(pdl != 0));
++                     (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L, gflags, (int)(pdl != 0));
+   };
+ #define K3W_CASE(DD, HH) if (D == DD && H == HH) { \
+     if (save) launch(k3w_kernel<DD, HH, 1>, Lay<1>::SMEM); else launch(k3w_kernel<DD, HH, 0>, Lay<0>::SMEM); \

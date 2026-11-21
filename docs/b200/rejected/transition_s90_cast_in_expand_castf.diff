@@ -1,0 +1,206 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index e36c5f23f..e08839b88 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -113,6 +113,8 @@ SMALL_FWD_TILES = 16
+ #: forward's casts ride in the LayerNorm launch.
+ #: (S90 part 9) extra build flags of the small-M chain kernels by name (gdx): A/B runs edit it
+ SX_X: dict[str, tuple[str, ...]] = {}
++#: (S90 part 15) the training chain's fp32 master cast: Ws in the LayerNorm launch (one matrix of three), Wa / Wb converted by the expand itself (tsx_expand.cu -DCASTF); False: the three matrices in the LayerNorm launch
++SX_CAST_IN_EXPAND = True
+ SX_CH = (32, 64)
+ #: squeeze builds: (output columns per cluster, hidden split = cluster size)
+ SX_SQ = ((32, 1), (64, 1), (32, 2), (64, 2))
+@@ -274,6 +276,8 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+     sx = (
+         (
+             ("sx_ln", "widths/tsx_ln.cu", (f"-DDIM={d}",)),
++            ("sx_ln_c1", "widths/tsx_ln.cu", (f"-DDIM={d}", "-DCASTN=1")),
++            *((f"sx_expand{c}_cf", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", "-DCASTF=1")) for c in SX_CH),
+             *((f"sx_expand{c}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}")) for c in SX_CH),
+             *((f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in SX_SQ),
+             ("sx_gate", "widths/tsx_gate.cu", dim),
+@@ -462,21 +466,22 @@ def _sx_forward(k, x, gamma, beta, wa, wb, ws, eps, save, out, rstd, c1, cast=No
+     hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
+     a, b = ((torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph()) for _ in range(2))
+     nrb = (m + 7) // 8
++    cf = SX_CAST_IN_EXPAND and cast is not None
+     k.run(
+-        "sx_ln",
++        "sx_ln_c1" if cf else "sx_ln",
+         "transition_sx_ln",
+-        nrb + ((3 * h * d // 8 + 511) // 512 if cast is not None else 0),  # cast blocks: 2 x 8 elements per thread
+-        (x, gamma, beta, xn, rstd, c1, m, float(eps), int(save), *(cast or (x, x, x)), wa, wb, ws, h * d if cast else 0),
++        nrb + ((h * d // 8 + 511) // 512 if cf else (3 * h * d // 8 + 511) // 512 if cast is not None else 0),  # cast blocks: 2 x 8 elements per thread
++        (x, gamma, beta, xn, rstd, c1, m, float(eps), int(save), *((cast[2], cast[0], cast[1]) if cf else (cast or (x, x, x))), *((ws, wa, wb) if cf else (wa, wb, ws)), h * d if cast else 0),
+         block=256,
+         cluster=1,
+         pdl=True,
+     )
+     ch = _sx_ch(h, tiles, k.nsm)
+     k.run(
+-        f"sx_expand{ch}",
++        f"sx_expand{ch}_cf" if cf else f"sx_expand{ch}",
+         "transition_sx_expand",
+         tiles * (h // ch),
+-        (k.tmap(xn, d, m, 64, 128), k.tmap(wa, d, h, 64, ch), k.tmap(wb, d, h, 64, ch), hid, a, b, int(save), int(cast is None), h, 0),
++        (k.tmap(xn, d, m, 64, 128), k.tmap(wa, d, h, 64, ch), k.tmap(wb, d, h, 64, ch), hid, a, b, int(save), int(cast is None), h, 0, *((cast[0], cast[1], wa, wb) if cf else ())),
+         block=384,
+         cluster=1,
+         pdl=True,
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+index 119a4df2a..3f8dbc022 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand.cu
+@@ -38,6 +38,9 @@ using namespace s100;
+ #define H16 0                                                   // round 3 part 4: fp32 activations on the fp16 tensor cores (inference)
+ #endif
+ static_assert(!(H16 && F32), "H16 is its own operand type");
++#ifndef CASTF
++#define CASTF 0   // (S90 part 15) the expand converts the fp32 masters Wa / Wb itself (registers -> swizzled bf16 K-blocks before the first MMA, tile 0 also stores the bf16 forms)
++#endif
+ #ifndef CHM
+ #define CHM 1                                                   // part 17: partials received chunk-major (512-B runs per warp store); 0: row-major swizzled
+ #endif
+@@ -58,6 +61,8 @@ constexpr int CAP = (232448 - 1024 - RED) / (KBT + WKB);
+ constexpr int STG = NKB < CAP ? NKB : CAP;                     // ring stages (the whole K where it fits)
+ constexpr int O_X = 0, O_W = STG * KBT, O_RED = O_W + STG * WKB, O_BAR = O_RED + RED, SMEM_BYTES = O_BAR + 256;
+ static_assert(SMEM_BYTES <= 232448 && STG >= 2, "shared memory budget");
++static_assert(!CASTF || (!F32 && !H16 && SK == 1 && NKB <= STG), "CASTF: bf16, one K slice, the whole K in the ring");
++constexpr int NCONV = 256;                                     // CASTF: warps 4 .. 11 convert
+ constexpr uint32_t TCOLS = 2 * CH;
+ #if F32
+ typedef float ACT;
+@@ -112,6 +117,9 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+                      ACT* __restrict__ bs, int save, int wpre, int ldab, int boff
+ #if H16
+                      , const float* __restrict__ sc
++#endif
++#if CASTF
++                     , const float* __restrict__ wfa, const float* __restrict__ wfb, ACT* __restrict__ oa, ACT* __restrict__ ob
+ #endif
+                      TSX_STAMP_ARG
+                      ) {
+@@ -124,13 +132,13 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+   if (tid == 0) TSX_ST(0);
+ 
+   if (tid == 0) {
+-    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
++    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1 + (CASTF ? NCONV : 0)); mbar_init(&B.empty[s], 1); }
+     mbar_init(&B.mma_done, 1);
+     if (SK > 1) { mbar_init(&B.red_full, 1); mbar_expect_tx(&B.red_full, (SK - 1) * ROWS * 2 * W_ * 4); }   // the other ranks' partials
+     fence_barrier_init();
+     fence_proxy_async();
+     prefetch_map(&mxn); prefetch_map(&mwa); prefetch_map(&mwb);
+-    if (wpre)
++    if (wpre && !CASTF)
+       for (int kb = 0; kb < STG; ++kb) {                        // weights first: they do not depend on the LayerNorm kernel
+         mbar_expect_tx(&B.full[kb], KBT + WKB);
+         tma_load_2d(su + O_W + kb * WKB, &mwa, &B.full[kb], k0 + kb * BKE, h0);
+@@ -143,6 +151,41 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+   if (SK > 1) cluster_sync_relaxed();                          // every CTA of the cluster runs before any distributed-shared store
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
++#if CASTF
++  if (warp >= 4) {                                             // (before griddepcontrol.wait: the masters are parameters) fp32 Wa_j / Wb_j rows -> bf16 swizzled K-blocks
++    const int ct = tid - 128;
++    constexpr int CPK = CH / 16;                               // 8-column chunks a thread and K-block (2 CH rows x 8 chunks / 256 threads)
++    constexpr int GK = CPK * 2 * NKB <= 28 ? NKB : (NKB % 3 == 0 ? 3 : (NKB % 2 == 0 ? 2 : 1));   // K-blocks in flight (all of them where the registers allow)
++    const bool wr = tile == 0;                                 // tile 0 also stores the bf16 forms for the later kernels
++#pragma unroll 1
++    for (int kg = 0; kg < NKB; kg += GK) {
++      float4 buf[GK][CPK][2];
++#pragma unroll
++      for (int kk = 0; kk < GK; ++kk)
++#pragma unroll
++        for (int i = 0; i < CPK; ++i) {
++          const int c = ct + NCONV * i, row = c >> 3, q = c & 7, kb = kg + kk;
++          const float* src = (row < CH ? wfa : wfb) + (size_t)(h0 + (row % CH)) * D_ + kb * BKE + q * 8;
++          buf[kk][i][0] = __ldg(reinterpret_cast<const float4*>(src));
++          buf[kk][i][1] = __ldg(reinterpret_cast<const float4*>(src) + 1);
++        }
++#pragma unroll
++      for (int kk = 0; kk < GK; ++kk) {
++        const int kb = kg + kk;
++#pragma unroll
++        for (int i = 0; i < CPK; ++i) {
++          const int c = ct + NCONV * i, row = c >> 3, q = c & 7;
++          const float4 a = buf[kk][i][0], b = buf[kk][i][1];
++          const uint4 o = make_uint4(pack_bf16(a.x, a.y), pack_bf16(a.z, a.w), pack_bf16(b.x, b.y), pack_bf16(b.z, b.w));
++          sts128(su + O_W + kb * WKB + sw128((uint32_t)row, (uint32_t)q), o);
++          if (wr) stg128((row < CH ? oa : ob) + (size_t)(h0 + (row % CH)) * D_ + kb * BKE + q * 8, o);
++        }
++        fence_proxy_async();
++        mbar_arrive(&B.full[kb]);
++      }
++    }
++  }
++#endif
+   pdl_wait();                                                  // xn is complete and visible
+   pdl_launch();                                                // the squeeze may start its prologue
+   if (tid == 0) TSX_ST(1);
+@@ -152,11 +195,15 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
+       for (int kb = 0; kb < NKB; ++kb) {
+         const int s = kb % STG;
+         if (kb >= STG) mbar_wait(&B.empty[s], ((kb / STG) - 1) & 1);
++#if CASTF
++        mbar_expect_tx(&B.full[s], KBT);                       // the weights arrive from the converter warps
++#else
+         if (!wpre || kb >= STG) {                              // (wpre 0: the LayerNorm launch wrote the weights, complete only now)
+           mbar_expect_tx(&B.full[s], KBT + WKB);
+           tma_load_2d(su + O_W + s * WKB, &mwa, &B.full[s], k0 + kb * BKE, h0);
+           tma_load_2d(su + O_W + s * WKB + CH * 128, &mwb, &B.full[s], k0 + kb * BKE, h0);
+         }
++#endif
+         tma_load_2d(su + O_X + s * KBT, &mxn, &B.full[s], k0 + kb * BKE, row0);
+       }
+     if (lane == 0) TSX_ST(2);
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu
+index d8cfbeeb1..66e6db880 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_ln.cu
+@@ -13,6 +13,9 @@ using namespace s100;
+ #ifndef DIM
+ #define DIM 384
+ #endif
++#ifndef CASTN
++#define CASTN 3   // matrices the cast blocks convert (w0, w1, w2): 1 = only w0 (the chain with the expand converting Wa / Wb itself)
++#endif
+ constexpr int D_ = DIM, PER = D_ / 128, WPB = 8;               // eight-byte chunks per lane, warps (rows) per block
+ static_assert(D_ % 128 == 0, "whole 4-column chunks per lane");
+ #ifndef F32
+@@ -161,6 +164,16 @@ transition_sx_ln(const __nv_bfloat16* __restrict__ x, const float* __restrict__
+       bv[i] = __ldg(reinterpret_cast<const float4*>(beta) + lane + 32 * i);
+     }
+   }
++#endif
++#if CASTN == 1   // (S90 part 15) the expand converts Wa / Wb (w1 / w2: fp32 masters) itself: their 2 x ncast x 4 bytes are brought into L2 from this launch, the first of the chain
++  if ((int)blockIdx.x >= nrb && threadIdx.x == 0) {
++    const int nb = (int)gridDim.x - nrb, bi = (int)blockIdx.x - nrb;
++    const int per = ((ncast * 4 / nb) + 15) / 16 * 16, lo = bi * per, hi = min(lo + per, ncast * 4);
++    if (lo < hi) {
++      asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(reinterpret_cast<const char*>(w1) + lo), "r"(hi - lo) : "memory");
++      asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(reinterpret_cast<const char*>(w2) + lo), "r"(hi - lo) : "memory");
++    }
++  }
+ #endif
+   pdl_wait();
+   pdl_launch();
+@@ -170,7 +183,7 @@ transition_sx_ln(const __nv_bfloat16* __restrict__ x, const float* __restrict__
+ #pragma unroll
+     for (int u = 0; u < 2; ++u) {
+       const int i = i0 + u, w = i / n8, j = i - w * n8;
+-      if (i < 3 * n8) {
++      if (i < CASTN * n8) {
+         const float4* src = reinterpret_cast<const float4*>(w == 0 ? w0 : w == 1 ? w1 : w2) + 2 * j;
+         v[2 * u] = __ldg(src); v[2 * u + 1] = __ldg(src + 1);
+       }
+@@ -178,7 +191,7 @@ transition_sx_ln(const __nv_bfloat16* __restrict__ x, const float* __restrict__
+ #pragma unroll
+     for (int u = 0; u < 2; ++u) {
+       const int i = i0 + u, w = i / n8, j = i - w * n8;
+-      if (i < 3 * n8) {
++      if (i < CASTN * n8) {
+         const float4 a = v[2 * u], b = v[2 * u + 1];
+         reinterpret_cast<uint4*>(w == 0 ? o0 : w == 1 ? o1 : o2)[j] =
+             make_uint4(pack_bf16(a.x, a.y), pack_bf16(a.z, a.w), pack_bf16(b.x, b.y), pack_bf16(b.z, b.w));

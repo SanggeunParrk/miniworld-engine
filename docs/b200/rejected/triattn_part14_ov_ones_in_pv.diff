@@ -1,0 +1,226 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index aa9172c2a..01daf3a08 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -64,6 +64,14 @@ static_assert(!TA_D16C || TA_D16, "TA_D16C needs TA_D16");
+ #define TA_PH 0          // (experiment, timing only, WRONG results) P packed as fp16 and the PV MMA reading fp16 operands
+ #endif
+ static_assert(!TA_ONES || (TA_HB && !TA_D16), "TA_ONES: the inference (HB) build of 32-channel heads");
++#ifndef TA_OV
++#define TA_OV 0          // (B200 2026-11-18 part 14, inference, 32-channel heads) the row sum INSIDE the PV MMA: [O | l] += P [V | 1] at N = 48,
++                         // the B operand's second MN block (channels 32 ..) reached by the descriptor's leading-byte offset is a 1 KiB block
++                         // of ones (no extra MMA, no front change).  No FADD2 a pair, no per-tile overflow guard for those rows (a bad row
++                         // is recomputed exactly at the drain, d16_exact<32>).  TMEM: two rows 3 x 128 + 2 x 48 = 480; three rows (R = 3)
++                         // 3 x 128 + 2 x 48 + 32 = 512: rows 0 / 1 take the ones, row 2 keeps its FADD2 sum and the guard.
++#endif
++static_assert(!TA_OV || (TA_HB && !TA_D16 && !TA_ONES), "TA_OV: the inference (HB) build of 32-channel heads");
+ #ifndef TA_SPLIT
+ #define TA_SPLIT 1        // forward: 1 = two issue warps (1: QK^T, 14: PV), 0 = one warp issues both (see the issue loops)
+ #endif
+@@ -83,13 +91,19 @@ constexpr int BT = BM * BN;                                // bias tile [2 key h
+ constexpr int NKV = TA_NKV, NB = 2;
+ constexpr int THREADS = G3 ? 480 : 448 + 32 * TA_SPLIT;   // 0 TMA, 1 MMA (QK^T), 2-5 / 6-9 softmax groups (even / odd rows), 10-13 epilogue (R = 3: the third group), 14 MMA (PV)
+ static_assert(!G3 || TA_SPLIT, "R = 3 needs the two issue warps");
+-constexpr int ONT = TA_ONES ? 16 * D : 0;                 // (TA_ONES) the ones tile: B [16 rows][32] K-major 64B-swizzled, all 1.0 (1 KiB)
++constexpr int ONT = (TA_ONES || TA_OV) ? 16 * D : 0;      // (TA_ONES / TA_OV) the ones tile: [16][32] bf16, all 1.0 (1 KiB)
++static_assert(!TA_OV || R <= 3, "TA_OV: two or three rows");
++constexpr int NOV = TA_OV ? (R == 3 ? 2 : R) : 0;          // (TA_OV) rows 0 .. NOV - 1 take their sum from the PV MMA
++constexpr int DOV = 48;                                    // (TA_OV) their O columns: 32 channels + 16 sum columns
++__host__ __device__ constexpr int colo(int r) { return r < NOV ? r * DOV : NOV * DOV + (r - NOV) * 32; }   // a row's O column (from COL_O)
+ constexpr int SMEM = 1024 + (2 * R * QT + NKV * 2 * KVT + NB * BT + ONT) * 2 + 2 * 2 * R * BM * 4 + 2 * R * BM * 4 + 512;   // + the row sums / offsets for the epilogue
+ constexpr int NS = 3;                                      // S/P TMEM buffers: with two, a group's buffer sat idle through PV + QK^T
+ constexpr int COL_S = 0, COL_O = NS * BN;                  // S/P [NS][128] | O [R rows][32] (single: the next task's first PV waits the drain)
+ constexpr int COL_L = 512 - 32;                            // (TA_ONES) l_r: 16 columns a row (two rows)
+ constexpr bool NOSUM = TA_D16 || TA_ONES;                  // the row sum comes from the tensor core: no FADD2, no per-tile guard
+ static_assert(!TA_ONES || COL_O + R * D <= COL_L, "TA_ONES: TMEM");
++static_assert(COL_O + colo(R) <= 512, "TMEM");
++constexpr uint32_t ID_OV = idesc_bf16(128, DOV, 0, 1);     // (TA_OV) [O | l] += P [V | 1]: N = 48
+ // TA_ONES with three rows (48 sum columns do not fit beside 3 S + 3 O): a two-slot ring -- sub-step y's ones MMAs write its partial sum into
+ // slot y & 1 (no accumulate) and commit lfu[row] (per row: a group waits on its own commits in order -- one barrier per slot let a
+ // group wait two phases ahead and read a stale slot); the row's group reads it after the tile, adds it in fp32 (key-tile order) and arrives
+@@ -306,7 +320,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+     bar_init_fence();
+   }
+   if (warp == 1) tmem_alloc(tslot, 512);
+-  if constexpr (TA_ONES) {
++  if constexpr (TA_ONES || TA_OV) {
+     for (int i = tid; i < ONT / 2; i += THREADS) reinterpret_cast<uint32_t*>(sOnes)[i] = 0x3f803f80u;
+     fence_proxy_async();                         // the MMAs (async proxy) read the ones
+   }
+@@ -423,8 +437,12 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+       tc_fence_after();
+       if (elect_one()) {
+         const __nv_bfloat16* v = sKV + st * 2 * KVT + KVT;
+-        const uint32_t o = tmem + COL_O + r * D;
+-        if (!TA_NOMMA)
++        const uint32_t o = tmem + COL_O + colo(r);
++        if (TA_OV && r < NOV) {                  // the second MN block (channels 32 ..) = the ones block, at the leading-byte offset
++#pragma unroll
++          for (int ks = 0; ks < BN / 16; ++ks)
++            mma_ts(o, tmem + COL_S + b * BN + ks * 8, sdesc(sa(v + ks * 16 * D), sa(sOnes) - sa(v + ks * 16 * D), 512, 4), ID_OV, (j | ks) ? 1u : 0u);
++        } else if (!TA_NOMMA)
+ #pragma unroll
+         for (int ks = 0; ks < BN / 16; ++ks)
+           mma_ts(o, tmem + COL_S + b * BN + ks * 8, sdesc(sa(v + ks * 16 * D), KVT * 2, 512, 4), ID_O, (j | ks) ? 1u : 0u);
+@@ -461,6 +479,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+   } else if (warp < 2 + 4 * NGR) {
+     const int q = warp & 3, row = q * 32 + lane;   // TMEM lane = query row of the tile
+     const int gi = (warp - 2) >> 2;                // this group's rows: gi, gi + NGR, ...
++    // (TA_OV) the groups whose rows take the sum from the PV MMA run their own instantiation (no FADD2, no guard): NOSR
++    auto softmax_groups = [&](auto nosc) {
++    constexpr bool NOSR = decltype(nosc)::value;
+     int lt = 0, x = 0, jb = 0;
+     for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
+       int bh, qt, g; decode(t, bh, qt, g);
+@@ -544,7 +565,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+                 else if (TA_NOEX || TA_FNOMATH) pv = fma2(xx, make_float2(1e-3f, 1e-3f), make_float2(1.f, 1.f));
+                 else pv = make_float2(ex2f(xx.x), ex2f(xx.y));
+                 if (TA_FNOLOOP) { pk[k2] = 0x3f803f80u; continue; }
+-                if (!NOSUM) acc = add2(acc, pv);
++                if (!(NOSUM || NOSR)) acc = add2(acc, pv);
+                 pk[k2] = pack2p(pv.x, pv.y);
+               }
+               tmem_wait_ld();                    // chunk c+1 landed (and every S column chunk c's P covers was read)
+@@ -564,7 +585,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+             // loop invariants: the body works 8 columns at a time in loops not unrolled), the branch's results in registers (the
+             // row state is in shared memory instead), a shared-memory load before the vote (it reads only this tile's sum; a sum
+             // under TA_PMIN -- a masked tile, keys far below the offset -- enters too and mostly leaves at the bias check).
+-            rare = NOSUM ? false : __any_sync(0xffffffffu, !(lr <= TA_PMAX) || !(lr >= TA_PMIN));
++            rare = (NOSUM || NOSR) ? false : __any_sync(0xffffffffu, !(lr <= TA_PMAX) || !(lr >= TA_PMIN));
+             if (rare) {                                             // rare, warp-uniform (tcgen05.ld / st are warp-collective)
+               const float l0 = *lslot;
+               const bool prov = l0 < 0.f;
+@@ -692,7 +713,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+                     wait(kve + yp % NKV, (yp / NKV) & 1);
+                     tc_fence_after();
+                   }
+-                  const uint32_t oa = tmem_at(tmem + COL_O + r * D, q * 32, 0);
++                  const uint32_t oa = tmem_at(tmem + COL_O + colo(r), q * 32, 0);
+ #pragma unroll 1
+                   for (int i = 0; i < D / 8; ++i) {
+                     float ov[8];
+@@ -713,7 +734,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+           __syncwarp();
+           if (lane == 0) arrive(pf + b);
+           FT(3);
+-          if (!NOSUM && !rare) *lslot = fmaxf(*lslot, 0.f) + lr;            // (clears a provisional offset: the sum was in range)
++          if (!(NOSUM || NOSR) && !rare) *lslot = fmaxf(*lslot, 0.f) + lr;            // (clears a provisional offset: the sum was in range)
+ 
+         }
+         x += R;
+@@ -741,7 +762,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+         FT(0);
+         tc_fence_after();
+         float o[32];
+-        tmem_ld32(tmem_at(tmem + COL_O + r * D, q * 32, 0), o);
++        tmem_ld32(tmem_at(tmem + COL_O + colo(r), q * 32, 0), o);
+         const float mo = sRM[r * BM + row];
+ #if TA_D16
+         tmem_wait_ld();
+@@ -752,7 +773,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+         if (!ORING) tmem_wait_ld();
+         const float inv = 1.f / lr;
+ #else
+-        const float lr = fmaxf(sRL[r * BM + row], 0.f);
++        float lr;
++        if constexpr (NOSR) lr = tmem_ld1(tmem_at(tmem + COL_O + colo(r) + 32, q * 32, 0));   // (TA_OV) P . ones in the PV MMA
++        else lr = fmaxf(sRL[r * BM + row], 0.f);
+         const float inv = 1.f / lr;
+         tmem_wait_ld();
+ #endif
+@@ -760,7 +783,10 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+         for (int k2 = 0; k2 < 16; ++k2) ob[k2] = (TA_D16 && k2 >= 8) ? 0u : pack2(o[2 * k2] * inv, o[2 * k2 + 1] * inv);
+         if (g * R + r < N) {
+-#if TA_D16 || TA_ONES
++#if !(TA_D16 || TA_ONES)
++          if (NOSR)
++#endif
++          {
+           float sa = 0.f;
+ #pragma unroll
+           for (int c = 0; c < CX; ++c) sa += fabsf(o[c]);
+@@ -768,10 +794,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+             const size_t qr = (size_t)row0(bh, g * R + r);
+             d16_exact<CX>(QG + (qr + qt * BM + row) * LD + hcol(bh), KG + qr * LD + hcol(bh), VG + qr * LD + hcol(bh),
+                       BG + ((size_t)bh * S + qt * BM + row) * S, LD, S, scl, ob);
+-            if (TA_ONES) atomicAdd(FLAGS, 1);   // (TA_ONES: FLAGS counts the rows recomputed)
++            if (TA_ONES || NOSR) atomicAdd(FLAGS, 1);   // (TA_ONES / TA_OV: FLAGS counts the rows recomputed)
+           }
+-#else
+-          if (!(lr > 0.f) || !(lr < 3.0e38f)) atomicAdd(FLAGS, 1);
++          }
++#if !(TA_D16 || TA_ONES)
++          else if (!(lr > 0.f) || !(lr < 3.0e38f)) atomicAdd(FLAGS, 1);
+ #endif
+           if (LSE != nullptr) {
+             const int b_ = bh / H, h_ = bh % H;
+@@ -792,6 +819,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+       if (lane == 0) arrive(lf + (lt & 1));
+       }
+     }
++    };
++    if constexpr (TA_OV) { if (gi < NOV) softmax_groups(std::true_type{}); else softmax_groups(std::false_type{}); }
++    else softmax_groups(std::false_type{});
+   } else if (!G3 && warp < 14) {
+     // ---- epilogue warps: O_r / l_r -> bf16 -> out, overlapping the next task's softmax ----
+     const int q = warp & 3, row = q * 32 + lane;
+@@ -812,13 +842,16 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+       for (int r = 0; r < R; ++r) {
+         float o[32];
+-        tmem_ld32(tmem_at(tmem + COL_O + r * D, q * 32, 0), o);
++        tmem_ld32(tmem_at(tmem + COL_O + colo(r), q * 32, 0), o);
+ #if TA_D16
+         tmem_wait_ld();
+         const float lr = o[16];                   // P . ones (the PV GEMM's channel 16)
+ #elif TA_ONES
+         const float lr = tmem_ld1(tmem_at(tmem + COL_L + lslot(r) * 16, q * 32, 0));
+         tmem_wait_ld();
++#elif TA_OV
++        const float lr = tmem_ld1(tmem_at(tmem + COL_O + colo(r) + 32, q * 32, 0));   // P . ones in the PV MMA (two rows: both)
++        tmem_wait_ld();
+ #else
+         const float lr = sL[((lt & 1) * R + r) * BM + row];
+ #endif
+@@ -827,7 +860,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+         tmem_wait_ld();
+ #pragma unroll
+         for (int k2 = 0; k2 < 16; ++k2) ob[r][k2] = (TA_D16 && k2 >= 8) ? 0u : pack2(o[2 * k2] * inv, o[2 * k2 + 1] * inv);
+-#if TA_D16 || TA_ONES
++#if TA_D16 || TA_ONES || TA_OV
+         {
+           float sa = 0.f;
+ #pragma unroll
+@@ -842,12 +875,12 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+       for (int r = 0; r < R; ++r) {
+         if (g * R + r >= N) continue;            // a padding row
+-#if TA_D16 || TA_ONES
++#if TA_D16 || TA_ONES || TA_OV
+         if (fix & (1 << r)) {
+           const size_t qr = (size_t)row0(bh, g * R + r);
+           d16_exact<CX>(QG + (qr + qt * BM + row) * LD + hcol(bh), KG + qr * LD + hcol(bh), VG + qr * LD + hcol(bh),
+                     BG + ((size_t)bh * S + qt * BM + row) * S, LD, S, scl, ob[r]);
+-          if (TA_ONES) atomicAdd(FLAGS, 1);   // (TA_ONES: FLAGS counts the rows recomputed)
++          if (TA_ONES || TA_OV) atomicAdd(FLAGS, 1);   // (TA_ONES / TA_OV: FLAGS counts the rows recomputed)
+         }
+ #endif
+         if (LSE != nullptr) {                     // base 2: lse = m + log2(l), [B, N, H, S]
+@@ -860,7 +893,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+         for (int c8 = 0; c8 < DG / 8; ++c8) dst[c8] = make_uint4(ob[r][c8 * 4], ob[r][c8 * 4 + 1], ob[r][c8 * 4 + 2], ob[r][c8 * 4 + 3]);
+       }
+-      if (bad && !NOSUM) atomicAdd(FLAGS, 1);
++      if (bad && !NOSUM && !TA_OV) atomicAdd(FLAGS, 1);
+     }
+   }
+   FT(4);
+@@ -1666,6 +1699,7 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
+   TORCH_CHECK(ld >= H * DG && ld % 8 == 0, "q / k / v row stride: >= H*DG and a multiple of 8 elements");
+   TORCH_CHECK(S % BM == 0, "S must be a multiple of 128");
+   TORCH_CHECK(bias.numel() == B * H * S * S, "bias: [B, H, S, S]");
++  TORCH_CHECK(!(TA_OV && want_lse), "the TA_OV build is inference only (no LSE)");
+   auto b16 = bias.scalar_type() == torch::kBFloat16 ? bias.contiguous() : bias.to(torch::kBFloat16).contiguous();
+   const bool og = out_.defined() && out_.numel() > 0, lg = want_lse && lse_.defined() && lse_.numel() > 0;
+   if (og) TORCH_CHECK(out_.scalar_type() == torch::kBFloat16 && out_.is_contiguous() && out_.numel() == q.numel(), "out: contiguous bf16 like q");

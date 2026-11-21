@@ -1,0 +1,167 @@
+TriangleAttention {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': True} L128 mod[]: graph 110.8 us
+      0.0 +   1.6 gap   0.0  (anonymous namespace)::rng_scalar_write(long*, long, long*, long)
+    202.9 +   2.0 gap 201.3  drop_scale_kernel(__nv_bfloat16*, long, at::PhiloxCudaState, float, float)
+    205.0 +   3.4 gap   0.0  (anonymous namespace)::tri_pack((anonymous namespace)::PackIn, __nv_bfloat16*, __nv_bfloat
+    208.5 +  10.7 gap   0.1  void (anonymous namespace)::tri_front_sm100<128, 128, 4>(int, int, int, float, CUtensorMap
+    210.8 +  17.5 gap  -8.5  (anonymous namespace)::triattn_fwd_sm100(int, int, int, int, float, CUtensorMap_st, CUtens
+    225.4 +   9.9 gap  -2.9  (anonymous namespace)::tri_tail_sm100(int, int, __nv_bfloat16 const*, CUtensorMap_st, CUte
+    235.3 +  12.5 gap   0.0  (anonymous namespace)::tri_gate_bwd_sm100(int, int, CUtensorMap_st, CUtensorMap_st, CUtens
+    247.9 +  10.6 gap   0.1  (anonymous namespace)::triattn_bwd_kv_sm100(int, int, int, int, float, float, CUtensorMap_
+    258.4 +  10.4 gap  -0.1  (anonymous namespace)::triattn_bwd_q_sm100(int, int, int, int, float, float, CUtensorMap_s
+    268.7 +   2.8 gap  -0.1  (anonymous namespace)::triattn_db_slabs(float const*, float*, int, int, int, long, long)
+    272.7 +  11.7 gap   1.2  (anonymous namespace)::tri_head_bwd_sm100(int, int, float, CUtensorMap_st, CUtensorMap_st,
+    284.4 +  16.4 gap  -0.1  (anonymous namespace)::tri_wgrad_sm100(int, int, float, CUtensorMap_st, CUtensorMap_st, CU
+    300.7 +   4.9 gap  -0.1  (anonymous namespace)::tri_slot_sum((anonymous namespace)::SlotSeg, (anonymous namespace):
+    305.5 +   3.6 gap  -0.1  void (anonymous namespace)::tri_param_finish<float>(float const*, float const*, __nv_bfloa
+  span 309.1 us
+TriangleAttention {'d_pair': 384, 'n_head': 12, 'p_drop': 0.25, 'starting': True} L128 mod[]: graph 282.2 us
+      0.0 +   1.5 gap   0.0  (anonymous namespace)::rng_scalar_write(long*, long, long*, long)
+    202.1 +   2.2 gap 200.5  drop_scale_kernel(__nv_bfloat16*, long, at::PhiloxCudaState, float, float)
+    204.3 +  26.2 gap   0.0  void tri_wpack_k<float>(WPackArgs<float>, long, long, long, long, long)
+    230.5 +  29.9 gap   0.1  void (anonymous namespace)::tri_wfront_sm100<384, 4, false, false>(int, int, int, int, int
+    233.0 +  47.2 gap -27.4  (anonymous namespace)::triattn_fwd_sm100(int, int, int, int, float, CUtensorMap_st, CUtens
+    275.9 +  28.7 gap  -4.3  void (anonymous namespace)::tri_wtail_sm100<384>(int, int, int, CUtensorMap_st, CUtensorMa
+    304.4 +   7.7 gap  -0.1  (anonymous namespace)::tri_bwd_pre(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat
+    312.0 +  19.4 gap  -0.1  void (anonymous namespace)::tri_wgbwd_sm100<384, false, false>(int, int, int, int, int, CU
+    330.7 +  26.0 gap  -0.8  (anonymous namespace)::triattn_bwd_kv_sm100(int, int, int, int, float, float, CUtensorMap_
+    351.0 +  31.3 gap  -5.6  (anonymous namespace)::triattn_bwd_q_sm100(int, int, int, int, float, float, CUtensorMap_s
+    356.1 +  29.9 gap -26.3  (anonymous namespace)::triattn_db_slabs(float const*, float*, int, int, int, long, long)
+    385.8 +   3.3 gap  -0.2  (anonymous namespace)::tri_db_rows(float const*, __nv_bfloat16*, long, int, int, long, int
+    389.0 +  37.9 gap  -0.1  void (anonymous namespace)::tri_whbwd_sm100<384>(int, int, int, int, CUtensorMap_st, CUten
+    426.6 +  24.2 gap  -0.3  nvjet_tss_128x160_64x6_2x2_2cta_h_bz_splitK_NTT
+    450.5 +   5.7 gap  -0.3  void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, 
+    455.9 +  10.1 gap  -0.2  nvjet_tss_64x64_64x16_2x1_2cta_v_bz_splitK_NTT
+    466.0 +   2.2 gap  -0.1  void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, 
+    468.1 +   7.3 gap  -0.1  void (anonymous namespace)::tri_wfinish<float>(float const*, __nv_bfloat16 const*, float c
+    475.3 +   3.7 gap  -0.1  (anonymous namespace)::tri_wfinish_sum(float const*, int, int, float*)
+  span 479.0 us
+TriangleAttention {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': True, 'use_self_attention': False} L128 mod[]: graph 10
+      0.0 +   1.4 gap   0.0  (anonymous namespace)::rng_scalar_write(long*, long, long*, long)
+    211.1 +   1.9 gap 209.7  drop_scale_kernel(__nv_bfloat16*, long, at::PhiloxCudaState, float, float)
+    213.0 +   1.6 gap   0.0  cast_w_k(float const*, float const*, float const*, float const*, __nv_bfloat16*, __nv_bflo
+    214.6 +   4.2 gap   0.0  void ln_fwd_k<16>(__nv_bfloat16 const*, float const*, float const*, __nv_bfloat16*, float*
+    218.9 +   4.5 gap   0.0  nvjet_tst_128x144_64x8_2x2_2cta_h_bz_TNT
+    223.4 +   1.8 gap   0.0  (anonymous namespace)::logits_k(__nv_bfloat16 const*, bool const*, float*, int, int, long)
+    225.3 +   2.0 gap   0.0  void (anonymous namespace)::softmax_warp_forward<float, float, float, 7, false, false, 32>
+    227.3 +   1.3 gap   0.0  void at::native::vectorized_elementwise_kernel<8, at::native::bfloat16_copy_kernel_cuda(at
+    228.6 +   3.5 gap   0.1  nvjet_tst_64x256_64x8_2x2_2cta_h_bz_TNT
+    232.0 +   3.3 gap  -0.1  gate_u_k(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, long, int, long, int)
+    235.3 +   3.6 gap  -0.1  nvjet_tst_64x256_64x8_2x2_2cta_h_bz_TTT
+    238.8 +   3.5 gap  -0.1  (anonymous namespace)::tri_scale_rows(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfl
+    242.2 +   3.5 gap  -0.1  (anonymous namespace)::tri_scale_rows(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfl
+    245.6 +   7.2 gap  -0.1  nvjet_tss_64x32_64x16_2x4_2cta_h_bz_splitK_TTT
+    252.7 +   2.1 gap  -0.1  void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, 
+    254.6 +   7.4 gap  -0.1  void gate_bwd_fused_k<128>(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const
+    262.0 +   3.6 gap  -0.1  nvjet_tst_64x256_64x8_2x2_2cta_h_bz_NNT
+    265.5 +   7.3 gap  -0.1  nvjet_tss_64x32_64x16_2x4_2cta_h_bz_NTT
+    272.7 +   1.7 gap  -0.1  (anonymous namespace)::bo_rowdot_k(__nv_bfloat16 const*, float const*, float*, long, int)
+    274.3 +   2.4 gap  -0.1  (anonymous namespace)::smbwd_k(__nv_bfloat16 const*, float const*, float const*, __nv_bflo
+    276.6 +   7.5 gap  -0.1  nvjet_tss_64x16_64x16_1x2_h_bz_splitK_NNT
+    284.0 +   2.1 gap  -0.1  void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, 
+    286.0 +   5.1 gap  -0.1  nvjet_tss_64x256_64x9_2x2_2cta_h_bz_NTT
+    290.9 +  10.1 gap  -0.1  void ln_bwd_k<16, float>(float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, float c
+    300.9 +   2.9 gap  -0.1  void sm100::colsum_kernel<float>(float const*, float*, float*, int, int, int, long, int)
+    303.9 +   6.0 gap   0.0  void sm100::colsum_kernel<float>(float const*, float*, float*, int, int, int, long, int)
+  span 309.9 us
+TriangleAttention {'d_pair': 64, 'n_head': 4, 'p_drop': 0.25, 'starting': True} L128 mod[]: graph 90.3 us
+      0.0 +   1.4 gap   0.0  (anonymous namespace)::rng_scalar_write(long*, long, long*, long)
+    221.8 +   1.9 gap 220.4  drop_scale_kernel(__nv_bfloat16*, long, at::PhiloxCudaState, float, float)
+    223.8 +   3.3 gap   0.0  void tri_wpack_k<float>(WPackArgs<float>, long, long, long, long, long)
+    227.1 +  16.8 gap   0.0  void (anonymous namespace)::tri_l128_sm100<64, 128, true, true>(int, int, float, float, CU
+    244.1 +   2.8 gap   0.2  (anonymous namespace)::tri_bwd_pre(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat
+    247.0 +   6.4 gap   0.0  void (anonymous namespace)::tri_wgbwd_sm100<64, false, false>(int, int, int, int, int, CUt
+    253.0 +  11.0 gap  -0.4  (anonymous namespace)::triattn_bwd_kv_sm100(int, int, int, int, float, float, CUtensorMap_
+    259.7 +  14.0 gap  -4.3  (anonymous namespace)::triattn_bwd_q_sm100(int, int, int, int, float, float, CUtensorMap_s
+    264.6 +  11.9 gap  -9.1  (anonymous namespace)::triattn_db_slabs(float const*, float*, int, int, int, long, long)
+    276.4 +   3.4 gap  -0.1  (anonymous namespace)::tri_db_rows(float const*, __nv_bfloat16*, long, int, int, long, int
+    279.7 +   9.1 gap  -0.1  void (anonymous namespace)::tri_whbwd_sm100<64>(int, int, int, int, CUtensorMap_st, CUtens
+    288.7 +  11.4 gap  -0.1  (anonymous namespace)::tallk_sm100((anonymous namespace)::TkArgs, int)
+    300.0 +   4.8 gap  -0.1  void (anonymous namespace)::tri_wfinish<float>(float const*, __nv_bfloat16 const*, float c
+    304.7 +   2.3 gap  -0.1  (anonymous namespace)::tri_wfinish_sum(float const*, int, int, float*)
+  span 307.0 us
+TriangleAttention {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': True} L512 mod[]: graph 1213.3 us
+      0.0 +   1.5 gap   0.0  (anonymous namespace)::rng_scalar_write(long*, long, long*, long)
+    205.4 +   2.2 gap 203.9  drop_scale_kernel(__nv_bfloat16*, long, at::PhiloxCudaState, float, float)
+    207.7 +   3.3 gap   0.0  (anonymous namespace)::tri_pack((anonymous namespace)::PackIn, __nv_bfloat16*, __nv_bfloat
+    211.0 +  63.1 gap   0.0  void (anonymous namespace)::tri_front_sm100<128, 128, 4>(int, int, int, float, CUtensorMap
+    270.6 + 212.1 gap  -3.5  (anonymous namespace)::triattn_fwd_sm100(int, int, int, int, float, CUtensorMap_st, CUtens
+    466.0 +  80.1 gap -16.7  (anonymous namespace)::tri_tail_sm100(int, int, __nv_bfloat16 const*, CUtensorMap_st, CUte
+    546.1 +  82.4 gap  -0.0  (anonymous namespace)::tri_gate_bwd_sm100(int, int, CUtensorMap_st, CUtensorMap_st, CUtens
+    628.4 +   4.0 gap  -0.1  (anonymous namespace)::tri_bwd_pre(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat
+    632.2 + 299.1 gap  -0.3  (anonymous namespace)::triattn_bwd_kv_sm100(int, int, int, int, float, float, CUtensorMap_
+    931.0 + 286.0 gap  -0.3  (anonymous namespace)::triattn_bwd_q_sm100(int, int, int, int, float, float, CUtensorMap_s
+   1216.7 +  15.9 gap  -0.3  (anonymous namespace)::triattn_db_slabs(float const*, float*, int, int, int, long, long)
+   1233.8 + 174.2 gap   1.2  (anonymous namespace)::tri_hw_bwd_sm100(int, int, int, float, CUtensorMap_st, CUtensorMap_
+   1408.0 +   5.6 gap   0.0  (anonymous namespace)::tri_slot_sum((anonymous namespace)::SlotSeg, (anonymous namespace):
+   1413.3 +   3.7 gap  -0.3  void (anonymous namespace)::tri_param_finish<float>(float const*, float const*, __nv_bfloa
+  span 1416.9 us
+TriangleAttention {'d_pair': 384, 'n_head': 12, 'p_drop': 0.25, 'starting': True} L512 mod[]: graph 4079.4 us
+      0.0 +   1.4 gap   0.0  (anonymous namespace)::rng_scalar_write(long*, long, long*, long)
+    245.9 +   3.4 gap 244.6  drop_scale_kernel(__nv_bfloat16*, long, at::PhiloxCudaState, float, float)
+    249.4 +  26.1 gap   0.0  void tri_wpack_k<float>(WPackArgs<float>, long, long, long, long, long)
+    275.5 + 296.5 gap   0.1  void (anonymous namespace)::tri_wfront_sm100<384, 4, false, false>(int, int, int, int, int
+    552.8 + 607.7 gap -19.2  (anonymous namespace)::triattn_fwd_sm100(int, int, int, int, float, CUtensorMap_st, CUtens
+   1136.0 + 281.0 gap -24.6  void (anonymous namespace)::tri_wtail_sm100<384>(int, int, int, CUtensorMap_st, CUtensorMa
+   1416.8 +  85.3 gap  -0.2  (anonymous namespace)::tri_bwd_pre(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat
+   1502.0 + 258.6 gap  -0.1  void (anonymous namespace)::tri_wgbwd_sm100<384, false, false>(int, int, int, int, int, CU
+   1760.3 + 876.8 gap  -0.2  (anonymous namespace)::triattn_bwd_kv_sm100(int, int, int, int, float, float, CUtensorMap_
+   2636.8 + 807.0 gap  -0.3  (anonymous namespace)::triattn_bwd_q_sm100(int, int, int, int, float, float, CUtensorMap_s
+   3443.6 +  32.1 gap  -0.3  (anonymous namespace)::triattn_db_slabs(float const*, float*, int, int, int, long, long)
+   3475.3 +  49.2 gap  -0.3  (anonymous namespace)::tri_db_rows(float const*, __nv_bfloat16*, long, int, int, long, int
+   3524.4 + 472.0 gap  -0.1  void (anonymous namespace)::tri_whbwd_sm100<384>(int, int, int, int, CUtensorMap_st, CUten
+   3996.0 + 246.1 gap  -0.3  nvjet_tss_256x192_64x4_2x1_2cta_v_bz_splitK_NTT
+   4241.7 +   5.0 gap  -0.4  void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, 
+   4246.4 +  67.7 gap  -0.3  nvjet_tss_192x128_64x6_2x1_2cta_v_bz_splitK_NTT
+   4313.8 +   3.6 gap  -0.3  void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, 
+   4317.2 +   7.9 gap  -0.3  void (anonymous namespace)::tri_wfinish<float>(float const*, __nv_bfloat16 const*, float c
+   4324.9 +   4.0 gap  -0.1  (anonymous namespace)::tri_wfinish_sum(float const*, int, int, float*)
+  span 4328.9 us
+TriangleAttention {'d_pair': 128, 'n_head': 4, 'p_drop': 0.25, 'starting': True, 'use_self_attention': False} L512 mod[]: graph 56
+      0.0 +   1.4 gap   0.0  (anonymous namespace)::rng_scalar_write(long*, long, long*, long)
+    256.6 +   2.2 gap 255.3  drop_scale_kernel(__nv_bfloat16*, long, at::PhiloxCudaState, float, float)
+    258.9 +   2.0 gap   0.0  cast_w_k(float const*, float const*, float const*, float const*, __nv_bfloat16*, __nv_bflo
+    261.0 +  35.4 gap   0.0  void ln_fwd_k<16>(__nv_bfloat16 const*, float const*, float const*, __nv_bfloat16*, float*
+    296.2 +  35.1 gap  -0.2  nvjet_tst_256x144_64x4_1x2_h_bz_TNT
+    331.2 +   3.8 gap  -0.1  (anonymous namespace)::logits_k(__nv_bfloat16 const*, bool const*, float*, int, int, long)
+    334.8 +   3.1 gap  -0.2  void (anonymous namespace)::softmax_warp_forward<float, float, float, 9, false, false, 32>
+    337.9 +   1.7 gap   0.0  void at::native::vectorized_elementwise_kernel<8, at::native::bfloat16_copy_kernel_cuda(at
+    339.6 +  29.0 gap   0.1  nvjet_tst_128x256_64x6_2x1_2cta_v_bz_TNT
+    368.6 +  30.8 gap  -0.0  gate_u_k(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, long, int, long, int)
+    399.1 +  17.5 gap  -0.3  nvjet_tst_128x256_64x4_1x2_h_bz_TTT
+    416.4 +  35.1 gap  -0.3  (anonymous namespace)::tri_scale_rows(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfl
+    451.2 +  28.5 gap  -0.3  (anonymous namespace)::tri_scale_rows(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfl
+    479.4 +  32.0 gap  -0.3  nvjet_tss_64x32_64x16_2x1_2cta_v_bz_splitK_TTT
+    511.1 +   3.2 gap  -0.3  void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, 
+    514.1 +  67.4 gap  -0.3  void gate_bwd_fused_k<128>(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16 const
+    581.2 +  26.8 gap  -0.3  nvjet_tst_128x256_64x6_2x1_2cta_v_bz_NNT
+    607.7 +  41.5 gap  -0.3  nvjet_tss_128x64_64x10_2x2_2cta_h_bz_NTT
+    649.0 +   3.1 gap  -0.3  (anonymous namespace)::bo_rowdot_k(__nv_bfloat16 const*, float const*, float*, long, int)
+    651.8 +   4.1 gap  -0.3  (anonymous namespace)::smbwd_k(__nv_bfloat16 const*, float const*, float const*, __nv_bflo
+    655.9 +  37.0 gap  -0.1  nvjet_tss_64x56_64x14_2x1_v_bz_splitK_NNT
+    692.5 +   3.3 gap  -0.4  void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, 
+    695.5 +  36.6 gap  -0.3  nvjet_tss_128x256_64x4_1x2_h_bz_NTT
+    732.2 +  81.1 gap   0.1  void ln_bwd_k<16, float>(float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, float c
+    813.1 +   7.3 gap  -0.3  void sm100::colsum_kernel<float>(float const*, float*, float*, int, int, int, long, int)
+    820.3 +   5.7 gap  -0.1  void sm100::colsum_kernel<float>(float const*, float*, float*, int, int, int, long, int)
+  span 825.9 us
+TriangleAttention {'d_pair': 64, 'n_head': 4, 'p_drop': 0.25, 'starting': True} L512 mod[]: graph 1221.6 us
+      0.0 +   1.5 gap   0.0  (anonymous namespace)::rng_scalar_write(long*, long, long*, long)
+    225.8 +   2.0 gap 224.3  drop_scale_kernel(__nv_bfloat16*, long, at::PhiloxCudaState, float, float)
+    227.8 +   3.2 gap   0.0  void tri_wpack_k<float>(WPackArgs<float>, long, long, long, long, long)
+    231.1 +  54.8 gap   0.0  void (anonymous namespace)::tri_front_sm100<64, 128, 4>(int, int, int, float, CUtensorMap_
+    280.9 + 214.1 gap  -5.0  (anonymous namespace)::triattn_fwd_sm100(int, int, int, int, float, CUtensorMap_st, CUtens
+    477.7 +  63.7 gap -17.2  void (anonymous namespace)::tri_wtail_sm100<64>(int, int, int, CUtensorMap_st, CUtensorMap
+    541.2 +  16.3 gap  -0.2  (anonymous namespace)::tri_bwd_pre(__nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat
+    557.4 +  64.2 gap  -0.1  void (anonymous namespace)::tri_wgbwd_sm100<64, false, false>(int, int, int, int, int, CUt
+    621.3 + 303.7 gap  -0.3  (anonymous namespace)::triattn_bwd_kv_sm100(int, int, int, int, float, float, CUtensorMap_
+    924.8 + 286.3 gap  -0.3  (anonymous namespace)::triattn_bwd_q_sm100(int, int, int, int, float, float, CUtensorMap_s
+   1210.8 +  16.2 gap  -0.3  (anonymous namespace)::triattn_db_slabs(float const*, float*, int, int, int, long, long)
+   1226.6 +  45.0 gap  -0.3  (anonymous namespace)::tri_db_rows(float const*, __nv_bfloat16*, long, int, int, long, int
+   1271.5 +  78.3 gap  -0.1  void (anonymous namespace)::tri_whbwd_sm100<64>(int, int, int, int, CUtensorMap_st, CUtens
+   1349.5 +  63.6 gap  -0.3  nvjet_tss_64x192_64x9_2x1_2cta_v_bz_splitK_NTT
+   1412.8 +   3.1 gap  -0.3  void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, 
+   1415.6 +  23.7 gap  -0.3  nvjet_tss_64x32_64x16_2x2_2cta_h_bz_splitK_NTT
+   1439.1 +   3.0 gap  -0.3  void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, 
+   1441.7 +   4.8 gap  -0.3  void (anonymous namespace)::tri_wfinish<float>(float const*, __nv_bfloat16 const*, float c
+   1446.5 +   2.3 gap  -0.1  (anonymous namespace)::tri_wfinish_sum(float const*, int, int, float*)
+  span 1448.7 us

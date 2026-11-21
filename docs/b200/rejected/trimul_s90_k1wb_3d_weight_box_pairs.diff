@@ -1,0 +1,91 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1wb.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1wb.cu
+index d325369e0..35250f480 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1wb.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1wb.cu
+@@ -21,6 +21,7 @@ constexpr int OSTW = DAB + 2 * DPB;
+ constexpr int NTHREADS = 512;
+ constexpr float LOG2E = 1.4426950408889634f;
+ constexpr uint32_t IDESC = idesc_bf16(128, 128);
++constexpr uint32_t IDESC64 = idesc_bf16(128, 64);
+ 
+ template <int D>
+ struct Cfg {
+@@ -38,7 +39,10 @@ struct Cfg {
+   static_assert(SMEM <= 232448, "smem");
+ };
+ 
+-struct WMaps { CUtensorMap m[4]; };   // W_l, W_lg, W_r, W_rg
++#ifndef K1WB_GW3
++#define K1WB_GW3 1   // S90: the weights as 3-D boxes of two K-blocks (16 KB per TMA op instead of 8 KB: a TMA op costs ~600 clk per SM whatever its size), N = 64 MMAs per K-block half
++#endif
++struct WMaps { CUtensorMap m[4]; CUtensorMap m3[4]; };   // W_l, W_lg, W_r, W_rg
+ 
+ struct Bars {
+   uint64_t w_full[8], w_empty[8], x_full[4], x_empty[4], xn_full[2], xn_empty[2], acc_full[3], acc_empty[3], da_full[8];
+@@ -111,6 +115,7 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+     for (int w = 0; w < 8; ++w) mbar_init(&B.da_full[w], 1);
+     prefetch_tmap(&mx); prefetch_tmap(&mda); prefetch_tmap(&mdpre);
+     for (int k = 0; k < 4; ++k) prefetch_tmap(&mw.m[k]);
++    if (K1WB_GW3 && KB % 2 == 0) for (int k = 0; k < 4; ++k) prefetch_tmap(&mw.m3[k]);
+   }
+   for (int k = tid; k < D; k += NTHREADS) {
+     reinterpret_cast<float*>(sm + G_::O_GB)[k] = gamma[k];
+@@ -135,7 +140,20 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+           if (++s == NXS) { s = 0; ph ^= 1; }
+         }
+       }
+-    } else if (warp == 3 && lane == 0) {
++    } else if (K1WB_GW3 && KB % 2 == 0 && warp == 3 && lane == 0) {
++      // weight K-block PAIRS: [gate kb0 | gate kb1 | proj kb0 | proj kb1] (4 x 8 KB) per group slot, two 16 KB 3-D boxes
++      int s = 0; uint32_t ph = 0;
++      for (int i = 0; i < n_local; ++i)
++        for (int c = 0; c < NCH; ++c)
++          for (int kg = 0; kg < KB / 2; ++kg) {
++            mbar_wait(&B.w_empty[s], ph ^ 1);
++            mbar_expect_tx(&B.w_full[s], 2 * KBB);
++            const int row = c * 64, side = row < P / 2 ? 0 : 1, r = side ? row - P / 2 : row;
++            tma_load_3d(sm + G_::O_W + s * 2 * KBB, &mw.m3[2 * side + 1], &B.w_full[s], 0, r, 2 * kg, EVICT_LAST);           // gate rows, 2 K-blocks
++            tma_load_3d(sm + G_::O_W + s * 2 * KBB + KBB, &mw.m3[2 * side], &B.w_full[s], 0, r, 2 * kg, EVICT_LAST);       // projection
++            if (++s == NWS / 2) { s = 0; ph ^= 1; }
++          }
++    } else if (!(K1WB_GW3 && KB % 2 == 0) && warp == 3 && lane == 0) {
+       // ---------------------------------------------------------------- weight K-blocks: tile, chunk, K-block -> ring
+       int s = 0; uint32_t ph = 0;
+       for (int i = 0; i < n_local; ++i)
+@@ -165,6 +183,26 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+           mbar_wait(&B.acc_empty[a], pa ^ 1);
+           tc_fence_after();
+           const uint32_t d = tmem + G_::T_ACC + a * 128;
++          if (K1WB_GW3 && KB % 2 == 0) {
++            #pragma unroll 1
++            for (int kg = 0; kg < KB / 2; ++kg) {
++              mbar_wait(&B.w_full[s], ph);
++              tc_fence_after();
++              if (ldr) {
++                for (int j = 0; j < 2; ++j) {
++                  const int kb = 2 * kg + j;
++                  const uint32_t xk = xa + kb * 32;
++                  for (int part = 0; part < 2; ++part) {   // gate rows (acc columns 0-63), then projection rows (64-127): N = 64 each
++                    const uint64_t wd = w0 + (uint64_t)((s * 2 * KBB + part * KBB + j * (KBB / 2)) >> 4);
++                    for (int kk = 0; kk < 4; ++kk) umma_ts(d + part * 64, xk + 8 * kk, wd + 2 * kk, IDESC64, (kb | kk) != 0);
++                  }
++                }
++                umma_commit(&B.w_empty[s]);
++              }
++              __syncwarp();
++              if (++s == NWS / 2) { s = 0; ph ^= 1; }
++            }
++          } else
+ #pragma unroll 1
+           for (int kb = 0; kb < KB; ++kb) {
+             mbar_wait(&B.w_full[s], ph);
+@@ -418,6 +456,9 @@ void k1wb_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::T
+     TORCH_CHECK(w.size(0) == P / 2 && w.size(1) == D && w.stride(1) == 1 && (w.stride(0) * 2) % 16 == 0);
+     mw.m[k] = tmap::make(w.data_ptr(), bf, {(uint64_t)D, (uint64_t)(P / 2)}, {(uint64_t)w.stride(0) * 2}, {64, 64},
+                          CU_TENSOR_MAP_SWIZZLE_128B);
++    mw.m3[k] = (D / 64) % 2 == 0
++                   ? tmap::make(w.data_ptr(), bf, {64, (uint64_t)(P / 2), (uint64_t)(D / 64)}, {(uint64_t)w.stride(0) * 2, 128}, {64, 64, 2}, CU_TENSOR_MAP_SWIZZLE_128B)
++                   : mw.m[k];
+   }
+   auto mda = tmap::make(da.data_ptr(), bf, {(uint64_t)M, (uint64_t)P}, {(uint64_t)M * 2}, {32u, 64}, CU_TENSOR_MAP_SWIZZLE_64B);
+   auto mdp = tmap::make(dpre.data_ptr(), bf, {(uint64_t)(2 * P), (uint64_t)M}, {(uint64_t)dpre.stride(0) * 2}, {64, 32},

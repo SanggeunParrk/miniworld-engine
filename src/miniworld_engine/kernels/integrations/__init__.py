@@ -21,9 +21,16 @@ def prebuild(target, _rows):
     from miniworld_engine.kernels._prebuild import _kv, family_rows
     from miniworld_engine.kernels.integrations import opm_train, pwa_train, pwa_wide
 
-    if target.arch == "sm100":
+    if target.arch == "sm100":  # B200: opm_sm100 / chai_sm100 (opm_*sm100.cu), pwa_sm100 (pwa_*sm100.cu)
+        from miniworld_engine.kernels.integrations import opm_sm100, pwa_sm100
+
         yield functools.partial(opm_train._ext, arch="sm100")
-        yield pwa_train._k100
+        yield opm_sm100._ext_wide
+        yield from pwa_sm100.builds()
+        from miniworld_engine.kernels.integrations import opm_fp8_b200  # the opt-in e4m3 routes (docs/b200/fp8.md): the cast / e4m3 helper extension
+
+        yield from opm_fp8_b200.prebuild_items()
+        yield from _prebuild_mpnn()  # ProteinMPNN: the sm_100a builds of the sm_80 sources (<name>_sm100, kernels/_sm120.py building_sm100)
         return
     if target.arch == "sm80":
         yield from _prebuild_sm80()
@@ -214,7 +221,7 @@ def _prebuild_sm80():
 
 def _prebuild_mpnn():
     """ProteinMPNN (its "cuda" backend: mpnn_msg_sm80 / mpnn_edge_sm80): the four shape-independent sm_80 extensions, for a bf16 (master) row;
-    on the RTX 5090 target their sm_120a builds (``<name>_sm120``, kernels/_sm120.py)."""
+    on the RTX 5090 target their sm_120a builds (``<name>_sm120``, kernels/_sm120.py), on the B200 target their sm_100a builds (``<name>_sm100``)."""
     from miniworld_engine.kernels._prebuild import family_rows
 
     if any(r["dtype"] in ("bfloat16", "master") for r in family_rows("mpnn_message")):

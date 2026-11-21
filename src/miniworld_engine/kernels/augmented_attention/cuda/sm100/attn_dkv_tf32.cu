@@ -21,6 +21,9 @@
 #include "sm100.cuh"
 using namespace s100;
 
+#ifndef DET
+#define DET 0                            // 1: dK / dV accumulated in block order: the issuer of block G waits for the other issuer's
+#endif                                   // accumulating MMAs of block G - 1 (bitwise repeatable; AttentionPairBias builds it, 2026-11-17)
 #ifndef PP
 #define PP 1                             // the two dS warpgroups take turns on the exponentials (named bars 3, 4)
 #endif
@@ -220,6 +223,7 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         else __nanosleep(20);
       }
       if (n <= 1 && li >= 1) mbar_wait(&B.acc_free, (li - 1) & 1);          // the previous item's dK / dV have been read out (and zeroed)
+      if (DET && G >= 1) mbar_wait(&B.ds_free[1 - w], ((G - 1) >> 1) & 1); // block G - 1's dV / dK MMAs (the other issuer) are done
       tc_fence_after();
       const uint32_t st = su + O_ST + s * STB;
       // q / dO as MN-major B: queries as rows (8 queries = 1 KB per K step), two 32-column atoms 4 KB apart

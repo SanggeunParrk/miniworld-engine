@@ -1,0 +1,14 @@
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py
+@@ -89,4 +89,6 @@
+ def _rows_per_task(length: int, bh: int = 1) -> int:
++    if os.environ.get("TA_ROWS_EXP") and length <= 128:   # experiment (n9 triattn-b): pair rows a core task at L128 (wide chain d_pair 256 / 384)
++        return int(os.environ["TA_ROWS_EXP"])
+     return 2 if length <= 128 or (length <= 256 and bh < 12) else 3
+
+
+# Result (abp.py, graph, GPU 1 exclusive, us, d_pair 384 x 12 ending / d_pair 256 x 8 ending, L128; two rounds each):
+#   rows 2 (current): 75.8 / 75.8  and  47.1 / 47.1      <- kept
+#   rows 3          : 75.8 / 75.8  and  49.2 / 49.2
+#   rows 4          : 79.9 / 79.8  and  51.2 / 51.2
+# (core span 49.4 / 49.7 -> 50.3 / 55.6 for d_pair 384; the tail also lengthens: 21.5 -> 24.4 / 26.3 us).  Rejected, the file is unchanged.

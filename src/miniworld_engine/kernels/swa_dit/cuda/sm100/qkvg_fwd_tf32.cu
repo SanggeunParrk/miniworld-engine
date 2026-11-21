@@ -37,10 +37,14 @@
 //                  item T + 1's x is written while item T's projections run, projection p + 1 accumulates while p's epilogue reads
 //   registers      x: one 16-channel unit at a time (q from TMEM, shift, scale as float4s); epilogue: one head's 32 accumulators + 4
 //                  cos / sin float4s at a time -- designed for <= 128 / thread (launch bound 384 threads x 1 CTA leaves the compiler up to 168)
-// Outputs leave by plain 16-B global stores, 128 contiguous bytes per (row, head) and thread (as qkvg_fwd.cu).
+// Outputs leave by TMA stores from a per-warpgroup [128][32] SW128 staging tile (Q / K / V head-major as 5-D boxes [32, AT, 1, 1, SP]; G, p_q, p_k as
+// row boxes); the x save stays on direct 16-B stores. Shared memory: ring 128 KB | weight ring NW = 6 x 8 KB | cos / sin 16 KB | staging 32 KB.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
+#ifndef PL
+#define PL 8  // lanes that issue the TMA loads of the activation / weight producer warps (round 3 part 10; 1: one lane)
+#endif
 
 // ------------------------------------------------------------------ kind::tf32 (local: sm100.cuh is the bf16 kernels' header)
 __host__ __device__ constexpr uint32_t idesc_tf32(int M, int N, int a_mn = 0, int b_mn = 0) {
@@ -53,6 +57,12 @@ DEVI void umma_ts_tf32(uint32_t d_tmem, uint32_t a_tmem, uint64_t b, uint32_t id
                :: "r"(d_tmem), "r"(a_tmem), "l"(b), "r"(idesc), "r"(accumulate) : "memory");
 }
 DEVI uint32_t tf32r(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
+// D[tmem] (+)= A[smem] B[smem] (the modulation's silu(c) tile as the A operand)
+DEVI void umma_ss_tf32(uint32_t d_tmem, uint64_t a, uint64_t b, uint32_t idesc, uint32_t accumulate) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::1.kind::tf32 [%0], %1, %2, %3, p; }"
+               :: "r"(d_tmem), "l"(a), "l"(b), "r"(idesc), "r"(accumulate) : "memory");
+}
+DEVI float silu32(float x) { return x * rcpf(1.f + ex2f(-1.4426950408889634f * x)); }   // mod_fwd_tf32.cu's silu (the same bits)
 DEVI float4 u2f4(uint4 u) { return make_float4(__uint_as_float(u.x), __uint_as_float(u.y), __uint_as_float(u.z), __uint_as_float(u.w)); }
 DEVI float4 ldg4(const float* p) { return u2f4(ldg128(p)); }
 DEVI void stg32w(float* p, const uint32_t (&v)[32]) {                       // 128 contiguous bytes
@@ -60,21 +70,42 @@ DEVI void stg32w(float* p, const uint32_t (&v)[32]) {                       // 1
   for (int k = 0; k < 8; ++k) stg128(p + 4 * k, make_uint4(v[4 * k], v[4 * k + 1], v[4 * k + 2], v[4 * k + 3]));
 }
 
+DEVI void tma_store_5d(const CUtensorMap* m, uint32_t src, int c0, int c1, int c2, int c3, int c4) {
+  asm volatile("cp.async.bulk.tensor.5d.global.shared::cta.bulk_group [%0, {%2, %3, %4, %5, %6}], [%1];"
+               :: "l"(m), "r"(src), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4) : "memory");
+}
+
+// io16 (B200 2026-11-17, round 3 part 6): q arrives as bf16 (master training: no fp32 copy of x). Its k-blocks are [AT, SP] boxes of
+// [32 bf16] rows, 64-B swizzled, in the first half of a ring slot; pass 1 converts them (the rest is the fp32 kernel).
 constexpr int C = 128, H = 4, D = 32;
 constexpr int KB = 128 * 128;                                              // activation k-block: [128 rows][32 fp32], SW128 (16 KB)
 constexpr int WB = 64 * 128;                                               // weight slot: [64 output rows][32 fp32], SW128 (8 KB)
-constexpr int NA = 8, NW = 10;                                             // activation ring, weight ring
+constexpr int NA = 8, NW = 6;                                              // activation ring, weight ring
 constexpr int NQK = 12;                                                    // ring k-blocks per item: q0-3, then sh / sc per k-block
-constexpr int O_A = 0, O_W = NA * KB, O_CS = O_W + NW * WB, O_BAR = O_CS + 2 * 128 * 64;
+// lanes of the producer warps: at most a ring's slot count -- each lane's previous wait then implies the in-order consumer released
+// every load two rounds back, so no slot's empty-barrier parity can alias (PL 16 on 8 slots corrupted the ring)
+constexpr int PLA = PL < NA ? PL : NA, PLW = PL < NW ? PL : NW;
+constexpr int O_A = 0, O_W = NA * KB, O_CS = O_W + NW * WB, O_STG = O_CS + 2 * 128 * 64, O_BAR = O_STG + 2 * KB;   // staging: one [128][32] tile per warpgroup
 constexpr int SMEM_BYTES = O_BAR + 512;
 static_assert(SMEM_BYTES <= 232448, "shared memory");
-static_assert((O_W % 1024) == 0 && (O_CS % 1024) == 0 && (O_BAR % 1024) == 0, "1 KB alignment of the swizzled tiles");
+static_assert((O_W % 1024) == 0 && (O_CS % 1024) == 0 && (O_STG % 1024) == 0 && (O_BAR % 1024) == 0, "1 KB alignment of the swizzled tiles");
 // cos / sin: row at, 16-B chunk k (of 4) in the 64-B swizzle is sm100.cuh's sw64 (chunk k ^ ((at >> 1) & 3)): conflict-free over 8 rows
-constexpr uint32_t T_X = 0, T_ACC = 256;
+// MODF (B200 2026-11-17, round 3 part 7; fp32 inference of one augment, one item per CTA, one projection per item): shift_a | scale_a =
+// silu(c) Wmod[0 .. 2C)^T computed here (the ring's k-blocks 4-7 carry c; silu in place by the row threads; 16 Wmod slots stream ahead of
+// W through the weight ring; M128 N64 MMAs into TMEM 128 .. 383), so this kernel does not wait for mod_fwd_tf32 (which runs beside it for
+// the FFN's columns, built with its PDL trigger after its own wait: when this kernel starts, everything before that kernel is complete).
+// No griddepcontrol.wait before the loads; one at the very end, so this grid completes only after mod_fwd_tf32 has (the FFN's
+// chain: FFN waits for the attention, the attention for this kernel). TMEM: x 0 | shift 128 | scale 256 | acc 384.
+#ifdef MODF
+constexpr uint32_t T_X = 0, T_MOD = 128, T_ACC = 384;
+#else
+constexpr uint32_t T_X = 0, T_MOD = 0, T_ACC = 256;                   // (T_MOD: MODF only)
+#endif
 constexpr uint32_t I_P = idesc_tf32(128, 64);
 
 struct Bars {
   uint64_t afull[NA], aempty[NA], wfull[NW], wempty[NW], xfull[2], xfree[2], accfull[2], accfree[2], csfull, csempty;
+  uint64_t cready, modfull;                                                // MODF: silu(c) in the ring, shift | scale in TMEM
   uint32_t tmem;
 };
 static_assert(sizeof(Bars) <= 512, "barriers");
@@ -82,9 +113,17 @@ static_assert(sizeof(Bars) <= 512, "barriers");
 extern "C" __global__ void __launch_bounds__(384, 1)
 swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mw, const __grid_constant__ CUtensorMap mmod,
                         const __grid_constant__ CUtensorMap mcos, const __grid_constant__ CUtensorMap msin,
+                        const __grid_constant__ CUtensorMap mqo, const __grid_constant__ CUtensorMap mko, const __grid_constant__ CUtensorMap mvo,
+                        const __grid_constant__ CUtensorMap mgo, const __grid_constant__ CUtensorMap mpq, const __grid_constant__ CUtensorMap mpk,
                         int S, int A, int Bn, int SP, int AT, int nab, int nag, int ntile, int NG, float eps, float qk_eps, int save,
-                        float* __restrict__ Qo, float* __restrict__ Ko, float* __restrict__ Vo, float* __restrict__ Go,
-                        float* __restrict__ Xs, float* __restrict__ PQs, float* __restrict__ PKs) {
+                        float* __restrict__ Xs, int io16, const __grid_constant__ CUtensorMap mc, const __grid_constant__ CUtensorMap mwm) {
+  // mc: c [B S, C] fp32, box (32, AT) SW128; mwm: Wmod [6C, C] fp32 TF32-rounded, box (32, 64) SW128 (MODF only; others ignore them)
+#ifdef MODF
+  constexpr bool MF = true;
+#else
+  constexpr bool MF = false;
+#endif
+  const bool XB16 = io16 & 1;                                              // q bf16
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -105,6 +144,7 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
       mbar_init(&B.xfull[i], 8); mbar_init(&B.xfree[i], 1); mbar_init(&B.accfull[i], 1); mbar_init(&B.accfree[i], 8);
     }
     mbar_init(&B.csfull, 1); mbar_init(&B.csempty, 8);
+    mbar_init(&B.cready, 8); mbar_init(&B.modfull, 1);
     fence_barrier_init();
   }
   if (warp == 1) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
@@ -116,13 +156,25 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
 
   if (warp == 0) {
     // ------------------------------------------------------------------------------------------------ TMA producer: the activation ring
-    if (lane == 0) {
-      pdl_wait();                                                          // q / mod come from the previous kernels
-      const uint32_t abytes = (uint32_t)(SP * AT * 128), mbytes = (uint32_t)(AT * 128);   // full boxes (out of range: zero-filled)
-      for (int T = 0; T < ntT; ++T) {
-        int b, a0, s0, grp; item(T, b, a0, s0, grp);
-        for (int k = 0; k < NQK; ++k) {
-          const int i = NQK * T + k, slot = i % NA;
+    // PL lanes issue (lane l: loads l mod PL; round 3 part 10): from one lane the 8-KB loads streamed at ~14 B / clock per CTA
+    // (_tools/t0/tmabw.py: one thread issues a TMA load per ~600 clocks whatever its size)
+    if (lane < PLA) {
+      if (!MF) pdl_wait();                                                 // q / mod come from the previous kernels
+      const uint32_t abytes = (uint32_t)(SP * AT * (XB16 ? 64 : 128)), mbytes = (uint32_t)(AT * 128);   // full boxes (out of range: zero-filled)
+      if (MF) {                                                            // q0-3, then c0-3 (one item: no slot is used twice)
+        for (int T = 0; T < ntT; ++T) {
+          int b, a0, s0, grp; item(T, b, a0, s0, grp);
+          for (int k = lane; k < 8; k += PLA) {
+            const uint32_t dst = su + O_A + k * KB;
+            mbar_expect_tx(&B.afull[k], k < 4 ? abytes : mbytes);
+            if (k < 4) tma_load_4d(dst, &mq, &B.afull[k], 32 * k, s0, b, a0);
+            else tma_load_2d(dst, &mc, &B.afull[k], 32 * (k - 4), b * S + s0);
+          }
+        }
+      } else {
+        for (int i = lane; i < NQK * ntT; i += PLA) {
+          const int T = i / NQK, k = i % NQK, slot = i % NA;
+          int b, a0, s0, grp; item(T, b, a0, s0, grp);
           if (i >= NA) mbar_wait(&B.aempty[slot], ((i / NA) - 1) & 1);
           const uint32_t dst = su + O_A + slot * KB;
           if (k < 4) {
@@ -137,38 +189,61 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
     }
   } else if (warp == 2) {
     // ------------------------------------------------------------------------------------------------ TMA producer: cos / sin
-    if (lane == 0) {
-      pdl_wait();
+    if (lane < 2) {                                                        // cos by lane 0, sin by lane 1
+      if (!MF) pdl_wait();
       for (int T = 0; T < ntT; ++T) {
         int b, a0, s0, grp; item(T, b, a0, s0, grp);
-        if (T >= 1) mbar_wait(&B.csempty, (T - 1) & 1);                   // item T - 1's epilogue has applied its RoPE
-        mbar_expect_tx(&B.csfull, (uint32_t)(2 * AT * 64));
-        tma_load_2d(su + O_CS, &mcos, &B.csfull, 0, b * S + s0);
-        tma_load_2d(su + O_CS + 128 * 64, &msin, &B.csfull, 0, b * S + s0);
+        if (lane == 0) {
+          if (T >= 1) mbar_wait(&B.csempty, (T - 1) & 1);                 // item T - 1's epilogue has applied its RoPE
+          mbar_expect_tx(&B.csfull, (uint32_t)(2 * AT * 64));
+        }
+        __syncwarp(0x3u);
+        if (lane == 0) tma_load_2d(su + O_CS, &mcos, &B.csfull, 0, b * S + s0);
+        if (lane == 1) tma_load_2d(su + O_CS + 128 * 64, &msin, &B.csfull, 0, b * S + s0);
       }
     }
   } else if (warp == 3) {
     // ------------------------------------------------------------------------------------------------ TMA producer: weight ring
     // per item, per projection p of its group: half hf (output rows 128 p + 64 hf ..), k-blocks 0-3 -- the MMA warp's order
-    if (lane == 0) {
-      pdl_wait();                                                          // W: the weight-form kernel (wprep_tf32) runs in the chain
-      int j = 0;
-      for (int T = 0; T < ntT; ++T) {
-        int b, a0, s0, grp; item(T, b, a0, s0, grp);
-        for (int pp = 0; pp < PG; ++pp)
-          for (int hf = 0; hf < 2; ++hf)
-            for (int kb = 0; kb < 4; ++kb, ++j) {
-              const int slot = j % NW;
-              if (j >= NW) mbar_wait(&B.wempty[slot], ((j / NW) - 1) & 1);
-              mbar_expect_tx(&B.wfull[slot], WB);
-              tma_load_2d(su + O_W + slot * WB, &mw, &B.wfull[slot], 32 * kb, 128 * (grp * PG + pp) + 64 * hf);
-            }
+    if (lane < PLW) {                                                      // PLW lanes issue (as the activation ring)
+      if (!MF) pdl_wait();                                                 // W: the weight-form kernel (wprep_tf32) runs in the chain
+      const int jm = (MF && ntT > 0) ? 16 : 0, per = PG * 8;               // Wmod rows 0 .. 2C (shift_a | scale_a): 4 x 64 rows, k-blocks 0-3
+      for (int j = lane; j < jm + ntT * per; j += PLW) {
+        const int slot = j % NW;
+        if (j >= NW) mbar_wait(&B.wempty[slot], ((j / NW) - 1) & 1);
+        mbar_expect_tx(&B.wfull[slot], WB);
+        if (j < jm) {
+          tma_load_2d(su + O_W + slot * WB, &mwm, &B.wfull[slot], 32 * (j & 3), 64 * (j >> 2));
+        } else {
+          const int T = (j - jm) / per, r = (j - jm) % per, pp = r >> 3, hf = (r >> 2) & 1, kb = r & 3;
+          int b, a0, s0, grp; item(T, b, a0, s0, grp);
+          tma_load_2d(su + O_W + slot * WB, &mw, &B.wfull[slot], 32 * kb, 128 * (grp * PG + pp) + 64 * hf);
+        }
       }
     }
   } else if (warp == 1) {
     // ------------------------------------------------------------------------------------------------ MMA issuer
     // projection p of item T: acc[ab] (ab = parity of the item's running projection count) = x[T & 1] W_p^T, as two N = 64 halves
     int j = 0;
+    if (MF && ntT > 0) {                                                   // shift_a | scale_a = silu(c) Wmod[0 .. 2C)^T -> TMEM T_MOD ..
+      mbar_wait(&B.cready, 0);                                             // the row threads' silu(c), rounded, in ring slots 4-7
+      tc_fence_after();
+      for (int nb = 0; nb < 4; ++nb)
+        for (int kb = 0; kb < 4; ++kb, ++j) {
+          const int slot = j % NW;
+          mbar_wait(&B.wfull[slot], (j / NW) & 1);
+          tc_fence_after();
+          if (elect_one()) {
+            const uint64_t da = desc_k128(su + O_A + (4 + kb) * KB), dw = desc_k128(su + O_W + slot * WB);
+#pragma unroll
+            for (int ks = 0; ks < 4; ++ks)
+              umma_ss_tf32(tmem + T_MOD + 64 * nb, da + (uint64_t)(2 * ks), dw + (uint64_t)(2 * ks), I_P, (kb | ks) ? 1u : 0u);
+            tc_commit(&B.wempty[slot]);
+            if (nb == 3 && kb == 3) tc_commit(&B.modfull);
+          }
+          __syncwarp();
+        }
+    }
     for (int T = 0; T < ntT; ++T) {
       const int xb = T & 1;
       for (int pp = 0; pp < PG; ++pp) {
@@ -197,12 +272,23 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
       }
     }
   } else if (warp >= 4) {
-    pdl_wait();                                                            // output stores (the tables now arrive by TMA)
+    if (!MF) pdl_wait();                                                   // output stores (the tables now arrive by TMA)
     // ------------------------------------------------------------------------------------------------ row threads
     const int wg = (warp - 4) >> 2;
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     const int sp = (int)r / AT, at = (int)r % AT;
     const bool rowok = (int)r < SP * AT;
+    // outputs: each warpgroup stages a thread's 32 values (one 128-B row) in a [128][32] SW128 tile and one thread stores it by TMA (a thread's own
+    // 128-B row stored directly touched 32 half-filled sectors per store instruction)
+    const bool elected = (warp & 3) == 0 && lane == 0;
+    const uint32_t xs = su + O_STG + (uint32_t)wg * KB;
+    auto stage_wait = [&]() { if (elected) tma_store_wait_read0(); named_bar_sync(1 + wg, 128); };
+    auto stage = [&](const uint32_t (&vv)[32]) {
+#pragma unroll
+      for (int q = 0; q < 8; ++q) sts128(xs + sw128(r, q), make_uint4(vv[4 * q], vv[4 * q + 1], vv[4 * q + 2], vv[4 * q + 3]));
+      fence_proxy_async();
+      named_bar_sync(1 + wg, 128);
+    };
     auto slot_of = [&](int T, int k) { return su + O_A + ((NQK * T + k) % NA) * KB; };   // ring position k of item T
     auto pro = [&](int T) {                                                // x of item T -> TMEM x[T & 1] (and the x save)
       int b, a0, s0, grp; item(T, b, a0, s0, grp);
@@ -210,6 +296,25 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
       const int n = (a0 + sp) * Bn + b, s = s0 + at;
       const bool ok = rowok && a0 + sp < A && s < S;
       const uint32_t tx = trow + T_X + 128 * xb;
+      if (MF) {                                                            // silu(c) of this warpgroup's k-blocks 2 wg, 2 wg + 1, in place, TF32-rounded
+        for (int k = 0; k < 2; ++k) {
+          const int kb = 2 * wg + k;
+          mbar_wait(&B.afull[4 + kb], 0);
+          const uint32_t cs = su + O_A + (4 + kb) * KB;
+          uint4 v[8];
+#pragma unroll
+          for (int q = 0; q < 8; ++q) v[q] = lds128(cs + sw128(r, q));
+#pragma unroll
+          for (int q = 0; q < 8; ++q)
+            v[q] = make_uint4(tf32r(silu32(__uint_as_float(v[q].x))), tf32r(silu32(__uint_as_float(v[q].y))),
+                              tf32r(silu32(__uint_as_float(v[q].z))), tf32r(silu32(__uint_as_float(v[q].w))));
+#pragma unroll
+          for (int q = 0; q < 8; ++q) sts128(cs + sw128(r, q), v[q]);
+        }
+        fence_proxy_async();                                               // the generic writes, then the MMAs' async-proxy reads
+        __syncwarp();
+        if (lane == 0) mbar_arrive(&B.cready);
+      }
       for (int kb = 0; kb < 4; ++kb) mbar_wait(&B.afull[(NQK * T + kb) % NA], ((NQK * T + kb) / NA) & 1);
       if (T >= 2) mbar_wait(&B.xfree[xb], ((T >> 1) - 1) & 1);            // the MMAs of item T - 2 have read x[xb]
       tc_fence_after();
@@ -220,7 +325,14 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
         uint32_t qr[16];
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
-          const uint4 u = lds128(slot_of(T, g >> 1) + sw128(r, 4 * (g & 1) + e));
+          uint4 u;
+          if (XB16) {
+            const uint4 w = lds128(slot_of(T, g >> 1) + sw64(r, 2 * (g & 1) + (e >> 1)));
+            u = (e & 1) ? make_uint4(__float_as_uint(bf16lo(w.z)), __float_as_uint(bf16hi(w.z)), __float_as_uint(bf16lo(w.w)), __float_as_uint(bf16hi(w.w)))
+                                  : make_uint4(__float_as_uint(bf16lo(w.x)), __float_as_uint(bf16hi(w.x)), __float_as_uint(bf16lo(w.y)), __float_as_uint(bf16hi(w.y)));
+          } else {
+            u = lds128(slot_of(T, g >> 1) + sw128(r, 4 * (g & 1) + e));
+          }
           const float4 v = u2f4(u);
           ss0 = fmaf(v.x, v.x, fmaf(v.y, v.y, ss0));
           ss1 = fmaf(v.z, v.z, fmaf(v.w, v.w, ss1));
@@ -235,22 +347,39 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
       tmem_wait_st();
       float* xsave = Xs + ((size_t)n * S + s) * C;
       const bool sv = save && ok && grp == 0;
-      for (int k = 0; k < 2; ++k) {                                        // this warpgroup's shift / scale k-blocks (2 wg + k)
-        const int i = NQK * T + 4 + 2 * (2 * wg + k);
-        mbar_wait(&B.afull[i % NA], (i / NA) & 1);
-        mbar_wait(&B.afull[(i + 1) % NA], ((i + 1) / NA) & 1);
+      if (MF) {
+        mbar_wait(&B.modfull, 0);                                          // shift_a | scale_a in TMEM (this thread's row = its lane)
+        tc_fence_after();
+      } else {
+        for (int k = 0; k < 2; ++k) {                                      // this warpgroup's shift / scale k-blocks (2 wg + k)
+          const int i = NQK * T + 4 + 2 * (2 * wg + k);
+          mbar_wait(&B.afull[i % NA], (i / NA) & 1);
+          mbar_wait(&B.afull[(i + 1) % NA], ((i + 1) / NA) & 1);
+        }
       }
 #pragma unroll 1
       for (int u = 0; u < 4; ++u) {                                        // pass 2: this warpgroup's 64 channels, 16 per unit
         const int c0 = 64 * wg + 16 * u, kb = c0 >> 5, q0 = (c0 & 31) >> 2;
-        const uint32_t ash = slot_of(T, 4 + 2 * kb), asc = slot_of(T, 5 + 2 * kb);
         uint32_t xr[16];
         tmem_ld16(tx + c0, xr);
         float4 sh[4], sc[4];
+        if (MF) {
+          uint32_t shr[16], scr[16];
+          tmem_ld16(trow + T_MOD + c0, shr);
+          tmem_ld16(trow + T_MOD + C + c0, scr);
+          tmem_wait_ld();
 #pragma unroll
-        for (int e = 0; e < 4; ++e) {
-          sh[e] = u2f4(lds128(ash + sw128((uint32_t)at, q0 + e)));
-          sc[e] = u2f4(lds128(asc + sw128((uint32_t)at, q0 + e)));
+          for (int e = 0; e < 4; ++e) {
+            sh[e] = make_float4(__uint_as_float(shr[4 * e]), __uint_as_float(shr[4 * e + 1]), __uint_as_float(shr[4 * e + 2]), __uint_as_float(shr[4 * e + 3]));
+            sc[e] = make_float4(__uint_as_float(scr[4 * e]), __uint_as_float(scr[4 * e + 1]), __uint_as_float(scr[4 * e + 2]), __uint_as_float(scr[4 * e + 3]));
+          }
+        } else {
+          const uint32_t ash = slot_of(T, 4 + 2 * kb), asc = slot_of(T, 5 + 2 * kb);
+#pragma unroll
+          for (int e = 0; e < 4; ++e) {
+            sh[e] = u2f4(lds128(ash + sw128((uint32_t)at, q0 + e)));
+            sc[e] = u2f4(lds128(asc + sw128((uint32_t)at, q0 + e)));
+          }
         }
         tmem_wait_ld();
 #pragma unroll
@@ -268,13 +397,15 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
       }
       // every warp releases all eight modulation k-blocks (the slots' count is 8), after waiting for the ones it did not read: a full
       // slot was loaded, so its previous use was released by all 8 warps and this arrival lands in the right phase
-      for (int k = 4; k < NQK; ++k) {
-        const int i = NQK * T + k;
-        mbar_wait(&B.afull[i % NA], (i / NA) & 1);
+      if (!MF) {
+        for (int k = 4; k < NQK; ++k) {
+          const int i = NQK * T + k;
+          mbar_wait(&B.afull[i % NA], (i / NA) & 1);
+        }
+        __syncwarp();
+        if (lane == 0)
+          for (int k = 4; k < NQK; ++k) mbar_arrive(&B.aempty[(NQK * T + k) % NA]);
       }
-      __syncwarp();
-      if (lane == 0)
-        for (int k = 4; k < NQK; ++k) mbar_arrive(&B.aempty[(NQK * T + k) % NA]);
       tmem_wait_st();
       tc_fence_before();
       __syncwarp();
@@ -302,19 +433,25 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
             __syncwarp();
             if (lane == 0) mbar_arrive(&B.accfree[ab]);
           }
-          if (!ok) continue;
           if (p == 3) {                                                    // G: raw fp32, row-major
-            stg32w(Go + ((size_t)n * S + s) * C + 32 * h, v);
+            stage_wait();
+            stage(v);
+            if (elected) { tma_store_4d(&mgo, xs, 32 * h, s0, b, a0); tma_store_commit(); }
             continue;
           }
-          float* hm = (p == 0 ? Qo : p == 1 ? Ko : Vo) + (((size_t)n * H + h) * S + s) * D;
           if (p == 2) {                                                    // V: head-major, rounded to TF32 (the PV operand)
 #pragma unroll
             for (int d = 0; d < 32; ++d) v[d] = tf32r(__uint_as_float(v[d]));
-            stg32w(hm, v);
+            stage_wait();
+            stage(v);
+            if (elected) { tma_store_5d(&mvo, xs, 0, s0, h, b, a0); tma_store_commit(); }
             continue;
           }
-          if (save) stg32w((p == 0 ? PQs : PKs) + ((size_t)n * S + s) * C + 32 * h, v);   // raw p_q / p_k for the backward
+          if (save) {                                                      // raw p_q / p_k for the backward
+            stage_wait();
+            stage(v);
+            if (elected) { tma_store_4d(p == 0 ? &mpq : &mpk, xs, 32 * h, s0, b, a0); tma_store_commit(); }
+          }
           float ss0 = 0.f, ss1 = 0.f;
 #pragma unroll
           for (int d = 0; d < 32; d += 2) {
@@ -334,7 +471,9 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
               v[d + 16] = tf32r(y2 * cv[e] + y1 * sv[e]);
             }
           }
-          stg32w(hm, v);
+          stage_wait();
+          stage(v);
+          if (elected) { tma_store_5d(p == 0 ? &mqo : &mko, xs, 0, s0, h, b, a0); tma_store_commit(); }
         }
       }
     };
@@ -346,6 +485,8 @@ swa_qkvg_fwd_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
       if (lane == 0) mbar_arrive(&B.csempty);                              // cos / sin of item T applied: item T + 1's may load
     }
   }
+  if (warp >= 4 && (warp & 3) == 0 && lane == 0) tma_store_wait0();
+  if (MF) pdl_wait();                                                      // this grid completes after mod_fwd_tf32 (the FFN reads its columns)
   tc_fence_before();
   __syncthreads();
   if (warp == 1) { tc_fence_after(); tmem_dealloc(tmem, 512); }

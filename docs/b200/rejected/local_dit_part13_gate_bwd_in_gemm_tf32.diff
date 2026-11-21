@@ -1,0 +1,45 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu
+index f8c53c1a8..d71927e47 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu
+@@ -88,7 +88,7 @@ extern "C" __global__ void __launch_bounds__(512, 1)
+ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mo,
+                const __grid_constant__ CUtensorMap mo2, const float* __restrict__ bias, const float* __restrict__ res,
+                const float* __restrict__ gate, int M, int N, int K, int NT, int a_col0, int b_row0, int b_col0, int ocol0, int sigmask,
+-               int mode, int save2, int res_ld, int gate_ld, int rndmask, int a_grp, int gate_rows) {
++               int mode, int save2, int res_ld, int gate_ld, int rndmask, int a_grp, int gate_rows, float* __restrict__ Dg, int dg_n) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+@@ -231,7 +231,30 @@ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ C
+               v[4 * q] += b.x; v[4 * q + 1] += b.y; v[4 * q + 2] += b.z; v[4 * q + 3] += b.w;
+             }
+           }
+-          if (mode == 0) {
++          if (mode == 3) {                                           // the attention output gate's backward (f32_gate_bwd, element for element)
++            const float4* op = reinterpret_cast<const float4*>(res + (size_t)row * res_ld + n0 + 32 * c);
++            const float4* gp = reinterpret_cast<const float4*>(gate + (size_t)row * gate_ld + n0 + 32 * c);
++            float dg[32], pt[8];
++#pragma unroll
++            for (int q = 0; q < 8; ++q) {
++              const float4 ov4 = __ldg(op + q), gv4 = __ldg(gp + q);
++              const float ov[4] = {ov4.x, ov4.y, ov4.z, ov4.w}, gv[4] = {gv4.x, gv4.y, gv4.z, gv4.w};
++              float part = 0.f;
++#pragma unroll
++              for (int i = 0; i < 4; ++i) {
++                const float s = sigf(gv[i]), d = v[4 * q + i];
++                const float dov = __uint_as_float(rna_tf32(__float_as_uint(d * s)));
++                dg[4 * q + i] = d * ov[i] * s * (1.f - s);
++                part = fmaf(dov, ov[i], part);
++                v[4 * q + i] = dov;
++              }
++              pt[q] = part;
++            }
++            const float Dv = ((pt[0] + pt[1]) + (pt[2] + pt[3])) + ((pt[4] + pt[5]) + (pt[6] + pt[7]));   // gate_bwd's xor 1 / 2 / 4 tree
++            const int ha = row / dg_n, hi = row - ha * dg_n;
++            Dg[((size_t)ha * 4 + ((n0 >> 5) + c)) * dg_n + hi] = Dv;
++            put_chunk(&mo2, sbase, dbl, nst, lane, n0 + 32 * c, r0, dg);
++          } else if (mode == 0) {
+             if ((sigmask >> (nb >> 7)) & 1) {
+ #pragma unroll
+               for (int j = 0; j < 32; ++j) v[j] = sigf(v[j]);

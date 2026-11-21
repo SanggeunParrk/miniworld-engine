@@ -1,0 +1,181 @@
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/adc_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/adc_tf32.cu
+new file mode 100644
+index 000000000..0ea3fed16
+--- /dev/null
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/adc_tf32.cu
+@@ -0,0 +1,175 @@
++// adc_tf32.cu — r3-swa part 21: the few-tile fp32 SWA atom block backward's qkvg RMS-adaLN backward (adaln_bwd_tf32.cu's adaln_bwd1, one
++// augment per atom) with the c gradient's late part in the same kernel (was the adaLN launch + dcg_tf32.cu's late launch, which read the
++// adaLN's dmod columns back through TMA at ~80 GB/s a CTA):
++//   dy = sum of NDY partials (in order);  xh = x rstd;  dxh = dy (1 + scale);  OUT = res + rstd (dxh - xh mean(dxh xh))
++//   dmod[:, 0:C] = dy,  dmod[:, C:2C] = dy xh                                         (adaln_bwd1's equations and stores)
++//   DC = (E + dmod[:, 0:2C] Wmod[0:2C]) silu'(c) [+ PREV] [+ XADD | + OUT (fold)]       (dcg_tf32.cu's late equations)
++// A block = 16 rows: its 8 warps take 2 rows each (lane = 4 channels, as adaln_bwd1), the rows' dmod[:, 0:2C] go to shared memory, then
++// the [16 x 2C] x [2C x C] product on the warp-level TF32 tensor cores (mma.sync m16n8k8, operands rounded with cvt.rna; warp w: columns
++// 16 w .. 16 w + 15, K halves 0 .. C - 1 and C .. 2C - 1 in order, then added). Wmod[0:2C] (128 KB) is loaded by four TMA boxes (128-B swizzle: conflict-free B fragments) BEFORE
++// griddepcontrol.wait (a weight). Every output is written once by one thread, fixed order: deterministic.
++// SPDX-License-Identifier: Apache-2.0
++#include "sm100.cuh"
++#include <cuda_bf16.h>
++using namespace s100;
++#ifndef ADCX
++#define ADCX 0   // development probes: 1 no MMA loop, 2 no Wmod load / wait, 4 no adaLN rows
++#endif
++
++namespace adc {
++constexpr int C = 128, MODW = 6 * C, RB = 16, AST = 2 * C + 4;           // rows a block; A row stride (floats): 260 -> conflict-free
++constexpr uint32_t O_W = 0, WSEG = 256 * 128, O_A = 4 * WSEG, O_BAR = O_A + RB * AST * 4, SMEM_BYTES = O_BAR + 64;
++DEVI float warp_sum(float v) {
++#pragma unroll
++  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
++  return v;
++}
++DEVI float4 ld4(const float* p) { return *reinterpret_cast<const float4*>(p); }
++DEVI float4 ld4(const __nv_bfloat16* p) {
++  const uint2 u = *reinterpret_cast<const uint2*>(p);
++  return make_float4(__uint_as_float(u.x << 16), __uint_as_float(u.x & 0xffff0000u), __uint_as_float(u.y << 16), __uint_as_float(u.y & 0xffff0000u));
++}
++DEVI void st4(float* p, float4 v) { *reinterpret_cast<float4*>(p) = v; }
++DEVI void st4(__nv_bfloat16* p, float4 v) {
++  const __nv_bfloat162 a = __floats2bfloat162_rn(v.x, v.y), b = __floats2bfloat162_rn(v.z, v.w);
++  *reinterpret_cast<uint2*>(p) = make_uint2(*reinterpret_cast<const uint32_t*>(&a), *reinterpret_cast<const uint32_t*>(&b));
++}
++DEVI float lv(const void* p, size_t o, bool b16) {
++  return b16 ? __uint_as_float((uint32_t)reinterpret_cast<const uint16_t*>(p)[o] << 16) : reinterpret_cast<const float*>(p)[o];
++}
++DEVI float2 lv2(const void* p, size_t o, bool b16) {
++  if (b16) {
++    const uint32_t u = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint16_t*>(p) + o);
++    return make_float2(__uint_as_float(u << 16), __uint_as_float(u & 0xffff0000u));
++  }
++  return *reinterpret_cast<const float2*>(reinterpret_cast<const float*>(p) + o);
++}
++DEVI uint32_t rna(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
++DEVI float sigm(float x) { return 1.f / (1.f + __expf(-x)); }
++DEVI float dsilu(float g, float c) { const float s = sigm(c); return g * s * (1.f + c * (1.f - s)); }
++DEVI uint32_t bf2(float lo, float hi) { uint32_t r; asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(hi), "f"(lo)); return r; }
++DEVI void mma8(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
++  asm("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
++               : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
++}
++// Wmod element (k, n) in the four 128-B-swizzled segments [n / 32][256 rows][32 fp32]
++DEVI uint32_t woff(int k, int n) { return (uint32_t)(n >> 5) * WSEG + (uint32_t)k * 128u + ((uint32_t)(((n & 31) >> 2) ^ (k & 7)) << 4) + (uint32_t)(n & 3) * 4u; }
++}  // namespace adc
++
++// flags: bit 1 c bf16, bit 2 DC bf16, bit 3 XADD bf16, bit 4 fold (DC += this kernel's OUT)
++template <typename TX, typename TO>
++DEVI void adc_body(const TX* __restrict__ X, const float* __restrict__ DY, const float* __restrict__ RES, const float* __restrict__ MOD,
++                   TO* __restrict__ OUT, float* __restrict__ DMOD, int R, float eps, int ndy, int ndys, const CUtensorMap* mw,
++                   const float* __restrict__ ACCE, const void* __restrict__ CIN, const float* __restrict__ PREV, const void* __restrict__ XADD,
++                   void* __restrict__ DC, int flags) {
++  using namespace adc;
++  extern __shared__ __align__(1024) uint8_t sm[];
++  const uint32_t su = smem_u32(sm);
++  uint64_t* bar = reinterpret_cast<uint64_t*>(sm + O_BAR);
++  float* As = reinterpret_cast<float*>(sm + O_A);
++  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  const bool cb16 = flags & 2, ob16 = flags & 4, xb16 = flags & 8, fold = flags & 16;
++  if (tid == 0 && !(ADCX & 2)) {
++    mbar_init(bar, 1);
++    fence_barrier_init();
++    mbar_expect_tx(bar, 4 * WSEG);
++#pragma unroll
++    for (int s = 0; s < 4; ++s) tma_load_2d(su + O_W + s * WSEG, mw, bar, 32 * s, 0);   // Wmod rows 0 .. 2C (a weight: before the wait)
++  }
++  asm volatile("griddepcontrol.wait;" ::: "memory");
++  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++  const int row0 = (int)blockIdx.x * RB;
++  // ---------------------------------------------------------------------------------------------- the adaLN backward (adaln_bwd1), 2 rows a warp
++#pragma unroll
++  for (int i = 0; i < 2; ++i) {
++    const int rr = 2 * warp + i, row = row0 + rr;
++    float4 dy = make_float4(0.f, 0.f, 0.f, 0.f), xs = dy;
++    if (row < R && !(ADCX & 4)) {
++      const size_t o = (size_t)row * C + 4 * lane, om = (size_t)row * MODW + 4 * lane;
++      const float4 sc4 = *reinterpret_cast<const float4*>(MOD + om + C);
++      float4 w[8];
++#pragma unroll
++      for (int g = 0; g < 8; ++g)
++        if (g < ndy) w[g] = *reinterpret_cast<const float4*>(DY + o + (size_t)g * ndys);
++      const float4 q = ld4(X + o), d2 = ld4(RES + o);
++      dy = w[0];
++#pragma unroll
++      for (int g = 1; g < 8; ++g)
++        if (g < ndy) { dy.x += w[g].x; dy.y += w[g].y; dy.z += w[g].z; dy.w += w[g].w; }
++      const float rstd = 1.f / sqrtf(warp_sum(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w) * (1.f / C) + eps);
++      const float4 xh = make_float4(q.x * rstd, q.y * rstd, q.z * rstd, q.w * rstd);
++      const float4 dxh = make_float4(dy.x * (1.f + sc4.x), dy.y * (1.f + sc4.y), dy.z * (1.f + sc4.z), dy.w * (1.f + sc4.w));
++      const float m = warp_sum(dxh.x * xh.x + dxh.y * xh.y + dxh.z * xh.z + dxh.w * xh.w) * (1.f / C);
++      float4 r;
++      r.x = d2.x + rstd * (dxh.x - xh.x * m); r.y = d2.y + rstd * (dxh.y - xh.y * m);
++      r.z = d2.z + rstd * (dxh.z - xh.z * m); r.w = d2.w + rstd * (dxh.w - xh.w * m);
++      st4(OUT + o, r);
++      dy = make_float4(0.f + dy.x, 0.f + dy.y, 0.f + dy.z, 0.f + dy.w);
++      xs = make_float4(0.f + dy.x * xh.x, 0.f + dy.y * xh.y, 0.f + dy.z * xh.z, 0.f + dy.w * xh.w);
++      *reinterpret_cast<float4*>(DMOD + om) = dy;
++      *reinterpret_cast<float4*>(DMOD + om + C) = xs;
++    }
++    *reinterpret_cast<float4*>(As + rr * AST + 4 * lane) = dy;
++    *reinterpret_cast<float4*>(As + rr * AST + C + 4 * lane) = xs;
++  }
++  __syncthreads();                                                         // the dq rows (OUT, for the fold) and dmod rows are written
++  if (!(ADCX & 2)) mbar_wait(bar, 0);
++  // ---------------------------------------------------------------------------------------------- [16 x 2C] x Wmod[0:2C] on mma.sync
++  const int g = lane >> 2, t = lane & 3, n0 = 16 * warp;
++  // four independent accumulators (2 column tiles x the two K halves, added at the end in that order): the mma.sync latency chain was
++  // the loop's time with one accumulator per tile (and volatile shared loads that kept the loads from running ahead)
++  float d[2][2][4] = {};
++  const float* Ws = reinterpret_cast<const float*>(sm + O_W);
++  if (!(ADCX & 1)) {
++#pragma unroll
++    for (int k0 = 0; k0 < C; k0 += 8) {
++#pragma unroll
++      for (int kh = 0; kh < 2; ++kh) {
++        const int k = k0 + kh * C;
++        const uint32_t a0 = rna(As[g * AST + k + t]), a1 = rna(As[(g + 8) * AST + k + t]);
++        const uint32_t a2 = rna(As[g * AST + k + t + 4]), a3 = rna(As[(g + 8) * AST + k + t + 4]);
++#pragma unroll
++        for (int nt = 0; nt < 2; ++nt) {
++          const int n = n0 + 8 * nt + g;
++          const uint32_t b0 = rna(Ws[woff(k + t, n) >> 2]), b1 = rna(Ws[woff(k + t + 4, n) >> 2]);
++          mma8(d[nt][kh], a0, a1, a2, a3, b0, b1);
++        }
++      }
++    }
++  }
++#pragma unroll
++  for (int nt = 0; nt < 2; ++nt)
++#pragma unroll
++    for (int e = 0; e < 4; ++e) d[nt][0][e] += d[nt][1][e];
++  // ---------------------------------------------------------------------------------------------- epilogue: (E + D) silu'(c) [+ PREV] [+ XADD | OUT]
++#pragma unroll
++  for (int nt = 0; nt < 2; ++nt) {
++#pragma unroll
++    for (int h = 0; h < 2; ++h) {
++      const int row = row0 + g + 8 * h, col = n0 + 8 * nt + 2 * t;
++      if (row >= R) continue;
++      const size_t o = (size_t)row * C + col;
++      float2 v = make_float2(d[nt][0][2 * h], d[nt][0][2 * h + 1]);
++      if (ACCE != nullptr) { const float2 e = *reinterpret_cast<const float2*>(ACCE + o); v = make_float2(e.x + v.x, e.y + v.y); }
++      const float2 cc = lv2(CIN, o, cb16);
++      float2 r = make_float2(dsilu(v.x, cc.x), dsilu(v.y, cc.y));
++      if (PREV != nullptr) { const float2 p = *reinterpret_cast<const float2*>(PREV + o); r = make_float2(p.x + r.x, p.y + r.y); }
++      if (fold) { const float2 x = lv2(OUT, o, sizeof(TO) == 2); r = make_float2(x.x + r.x, x.y + r.y); }
++      else if (XADD != nullptr) { const float2 x = lv2(XADD, o, xb16); r = make_float2(x.x + r.x, x.y + r.y); }
++      if (ob16) *reinterpret_cast<uint32_t*>(reinterpret_cast<uint16_t*>(DC) + o) = adc::bf2(r.x, r.y);
++      else *reinterpret_cast<float2*>(reinterpret_cast<float*>(DC) + o) = r;
++    }
++  }
++}
++
++#define ADC_ENTRY(SUF, TX, TO)                                                                                                            \
++  extern "C" __global__ void __launch_bounds__(256, 1)                                                                                   \
++  swa_adc_tf32##SUF##_sm100(const TX* __restrict__ X, const float* __restrict__ DY, const float* __restrict__ RES,                       \
++                            const float* __restrict__ MOD, TO* __restrict__ OUT, float* __restrict__ DMOD, int R, float eps, int ndy,  \
++                            int ndys, const __grid_constant__ CUtensorMap mw, const float* __restrict__ ACCE,                            \
++                            const void* __restrict__ CIN, const float* __restrict__ PREV, const void* __restrict__ XADD,                 \
++                            void* __restrict__ DC, int flags) {                                                                          \
++    adc_body<TX, TO>(X, DY, RES, MOD, OUT, DMOD, R, eps, ndy, ndys, &mw, ACCE, CIN, PREV, XADD, DC, flags);                             \
++  }
++ADC_ENTRY(, float, float)
++ADC_ENTRY(_xo16, __nv_bfloat16, __nv_bfloat16)

@@ -1,0 +1,70 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d256.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d256.cu
+index 9c078a054..4b5a0ecad 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d256.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tfwd_d256.cu
+@@ -17,6 +17,11 @@
+ #ifndef X2
+ #define X2 0
+ #endif
++// X3 (needs X2): the LayerNorm is no longer on the critical path (two xn buffers: it runs a tile ahead), so it takes ONE warpgroup (warps 8-11, whole rows, the single-warpgroup `ln`) and the
++// SwiGLU goes back to two warpgroups alternating chunks (warps 4-7 even, 12-15 odd); the epilogue halves stay on warps 8-11 (K-blocks 0, 1) and 12-15 (2, 3, after their SwiGLU chunks of the tile).
++#ifndef X3
++#define X3 0
++#endif
+ #ifndef TBSW
+ #define TBSW 0   // timing probes (S90): 1 no TMEM loads / math in the SwiGLU, 2 no residual loads / stores in the X2 epilogue, 3 no LayerNorm math (X2)
+ #endif
+@@ -327,11 +332,11 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+     auto ln = [&](int i) {
+       const int grow = tile_of(i) * ROWS + (int)r;
+       const bool real = i < n_valid;
+-      mbar_wait(&B.xl_full[0], i & 1);
++      mbar_wait(&B.xl_full[XB(i)], XPH(i));
+       if (t2 == 0 && i < 6) STAMP(100 + i);
+       if (t2 == 0) tma_store_wait_read0();                 // the previous tile's xn store has read the buffer
+       named_bar_sync(1, 128);
+-      const uint32_t xnb = su + O_XN;
++      const uint32_t xnb = su + O_XN + XB(i) * TILE;
+       float sum[4] = {0.f, 0.f, 0.f, 0.f};
+ #pragma unroll 4
+       for (int cq = 0; cq < 8 * NKB; ++cq) {                // 8 columns at a time
+@@ -369,7 +374,7 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+       named_bar_sync(1, 128);
+       if (t2 == 0 && i < 6) STAMP(106 + i);
+       if (t2 == 0) {
+-        mbar_arrive_remote_cta(&B.xn_full[0], 0);
++        mbar_arrive_remote_cta(&B.xn_full[XB(i)], 0);
+         if (save && real) {
+           const int row0 = tile_of(i) * ROWS;
+ #pragma unroll
+@@ -552,6 +557,22 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+         if (real && TBSW != 2) store_t<32>(Yg + off0 + cb * 64, (size_t)D_, o, lane);
+       }
+     };
++#if X3
++    if (warp < 8) {
++      for (int c = 0; c < nch; c += 2) sw(c);               // warps 4-7: the even SwiGLU chunks
++    } else if (warp < 12) {                                  // warps 8-11: LayerNorm (whole rows) a tile ahead, epilogue half 0
++      if (n_local > 0) ln(0);
++      for (int i = 0; i < n_local; ++i) {
++        if (i + 1 < n_local) ln(i + 1);
++        epi2(i, 0);
++      }
++    } else {                                                 // warps 12-15: the odd chunks of each tile, then epilogue half 1
++      for (int i = 0; i < n_local; ++i) {
++        for (int c = i * NCH + 1; c < (i + 1) * NCH; c += 2) sw(c);
++        epi2(i, 1);
++      }
++    }
++#else
+     if (warp < 8) {
+       for (int c = 0; c < nch; ++c) sw(c);                  // warps 4-7: every SwiGLU chunk
+     } else {
+@@ -562,6 +583,7 @@ transition_fwd_d256_sm100(const __grid_constant__ CUtensorMap mx, const __grid_c
+         epi2(i, half);
+       }
+     }
++#endif
+ #else
+     const bool odd = warp >= 12, lnw = warp >= 8 && warp < 12;
+     if (!LN2) {

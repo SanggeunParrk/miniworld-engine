@@ -1,0 +1,27 @@
+--- n1-trimul-x/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7g.cu	2026-11-18 17:03:10.000000000 +0000
++++ n1-trimul-y/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7g.cu	2026-11-18 17:14:15.000000000 +0000
+@@ -36,6 +36,13 @@
+ #define TLT(ev, t, c)
+ #endif
+ 
++#ifndef B7_RHINT
++#define B7_RHINT 0   // 1: the ring dgp TMA stores carry the EVICT_LAST hint, 2: EVICT_FIRST
++#endif
++DEV void tma_store_2d_hint(const CUtensorMap* m, const void* src, int c0, int c1, uint64_t hint) {
++  asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group.L2::cache_hint [%0, {%2, %3}], [%1], %4;" ::"l"(reinterpret_cast<uint64_t>(m)),
++               "r"(smem_u32(src)), "r"(c0), "r"(c1), "l"(hint) : "memory");
++}
+ constexpr int C = 128, TOK = 128;
+ constexpr int XT = TOK * C * 2;            // 32 KB tiles ([128][128] bf16, 2 K-blocks)
+ constexpr int DAT = 64 * TOK * 2;          // 16 KB
+@@ -305,8 +312,8 @@
+           PW(1, spin_until(a.flags + slot, 0u)); TLS(1); TLT(2, tt, c);            // consumer of tile j - RD has taken the slot (acquire)
+           fence_proxy_async_global();                               // ... ordered before this thread's async-proxy writes to it
+           PW(0, mbar_wait(&B.dgp_ready[b], (j >> 1) & 1)); TLS(0); TLT(1, tt, c);
+-          if (!(B7_ABL & 32)) PW(3, tma_store_2d(&mring, sm + S_DGP + b * XT, 0, slot * TOK));
+-          if (!(B7_ABL & 32)) PW(3, tma_store_2d(&mring, sm + S_DGP + b * XT + XT / 2, 64, slot * TOK));
++          if (!(B7_ABL & 32)) PW(3, B7_RHINT ? tma_store_2d_hint(&mring, sm + S_DGP + b * XT, 0, slot * TOK, B7_RHINT == 1 ? EVICT_LAST : EVICT_FIRST) : tma_store_2d(&mring, sm + S_DGP + b * XT, 0, slot * TOK));
++          if (!(B7_ABL & 32)) PW(3, B7_RHINT ? tma_store_2d_hint(&mring, sm + S_DGP + b * XT + XT / 2, 64, slot * TOK, B7_RHINT == 1 ? EVICT_LAST : EVICT_FIRST) : tma_store_2d(&mring, sm + S_DGP + b * XT + XT / 2, 64, slot * TOK));
+           bulk_commit();
+           PW(2, bulk_wait_read<0>());
+           mbar_arrive(&B.dgp_free[b]); TLS(2);                      // smem read: EW may refill the buffer

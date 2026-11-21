@@ -1,0 +1,30 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n2-ife/tf32_bwd.pre_dcxwaves.py	2026-11-18 19:07:19.000000000 +0000
++++ src/miniworld_engine/kernels/swa_dit/cuda/sm100/tf32_bwd.py	2026-11-18 19:07:19.000000000 +0000
+@@ -674,7 +674,7 @@
+             A == 1
+             and mod.is_contiguous()
+             and M % 128 == 0
+-            and (M // 128) * self.CL <= num_sms()
++            and (M // 128) * self.CL <= DCX_WAVES * num_sms()
+             and res.dtype == torch.float32
+             and mod.dtype == torch.float32
+             and wmod.dtype == torch.float32
+@@ -804,6 +804,9 @@
+ 
+ #: round 3 part 16 (development switch): the few-tile tail (dx GEMM -> adaLN -> dc GEMM -> silu') as one cluster kernel (DcxTf32)
+ DCX = __import__("os").environ.get("SWA_DCX", "0") == "1"
++#: N2 (development): the DCX tail kernel on up to this many waves of clusters (tiles are independent), and only for the last block backward of a stack
++DCX_WAVES = int(__import__("os").environ.get("SWA_DCX_WAVES", "1"))
++DCX_LAST = __import__("os").environ.get("SWA_DCX_LAST", "0") == "1"
+ #: ... with dWmod's rows 2C .. 6C early on a stream of their own (_bwd_few)
+ PROBE_SKIP = int(__import__("os").environ.get("SWA_PROBE_SKIP", "0"))  # timing probe (wrong gradients): 1 no dWmod GEMM, 2 no dc GEMM
+ #: N2 (development switch): silu(c) of the modulation's weight gradient made once for the blocks of a stack (they share c)
+@@ -1145,7 +1148,7 @@
+     else:
+         run, dq1 = K.adaln.bind(q1, mm_tf32(dab, wu), dq2, ffn, mod, dmod, A, B, eps, 3 * C, att, 2 * C)
+     run()
+-    fx = DCX and modb is not None and not EARLY_DC and K.dcx.ok(A, M, q, dq1, modb[0], w, modb[1], mod)
++    fx = DCX and modb is not None and not EARLY_DC and K.dcx.ok(A, M, q, dq1, modb[0], w, modb[1], mod) and (not DCX_LAST or (len(modb) > 2 and modb[2] is not None and modb[2][1] == 0))
+     dwm = None
+     extra = []  # side streams of this backward beyond s1 / s2 (joined / held with them)
+     if fx and DWM_SPLIT:

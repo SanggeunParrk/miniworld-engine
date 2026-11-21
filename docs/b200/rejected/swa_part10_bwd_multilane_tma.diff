@@ -1,0 +1,206 @@
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dkv_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dkv_tf32.cu
+index a2d810ba8..ad4994966 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dkv_tf32.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dkv_tf32.cu
+@@ -159,28 +159,35 @@ swa_attn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_con
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer
+-    if (lane == 0) {
++    // the loads of an item / block by lanes 0 - 5 at once (round 3 part 10: one thread issues a TMA load per ~600 clocks)
++    if (lane < 6) {
+       pdl_wait();                                                          // q / k / v / dO / lse / D come from the previous kernels
+       int g = 0;
+       for (int li = 0; li < my_items; ++li) {
+         int n, j0, h, lo, hi, sq; item_of(li, n, j0, h, lo, hi, sq);
+         const int is = li % QR, krow = (n * H + h) * S + j0;
+-        if (li >= QR) mbar_wait(&B.it_empty[is], ((li / QR) - 1) & 1);
+-        mbar_expect_tx(&B.it_full[is], IST);
+-        tma_load_2d(su + O_IT + is * IST, &mk, &B.it_full[is], 0, krow);
+-        tma_load_2d(su + O_IT + is * IST + TKV, &mv, &B.it_full[is], 0, krow);
++        if (lane == 0) {
++          if (li >= QR) mbar_wait(&B.it_empty[is], ((li / QR) - 1) & 1);
++          mbar_expect_tx(&B.it_full[is], IST);
++        }
++        __syncwarp(0x3fu);
++        if (lane == 0) tma_load_2d(su + O_IT + is * IST, &mk, &B.it_full[is], 0, krow);
++        if (lane == 1) tma_load_2d(su + O_IT + is * IST + TKV, &mv, &B.it_full[is], 0, krow);
+         for (int qb = lo; qb < hi; ++qb, ++g) {
+           const int s = g % ST;
+-          if (g >= ST) mbar_wait(&B.bl_empty[s], ((g / ST) - 1) & 1);
+           const uint32_t st = su + O_BL + s * BLS;
+           const int qrow = (n * H + h) * S + qb * BQ, orow = n * S + qb * BQ;
+-          mbar_expect_tx(&B.bl_full[s], 4 * TQ + 2 * BQ * 4);
+-          tma_load_2d(st, &mq, &B.bl_full[s], 0, qrow);
+-          tma_load_2d(st + TQ, &mdo, &B.bl_full[s], h * DH, orow);
+-          tma_load_2d(st + 2 * TQ, &mqm, &B.bl_full[s], 0, qrow);
+-          tma_load_2d(st + 3 * TQ, &mdom, &B.bl_full[s], h * DH, orow);
+-          bulk_g2s(st + 4 * TQ, LSE + qrow, BQ * 4, &B.bl_full[s]);
+-          bulk_g2s(st + 4 * TQ + 128, DD + qrow, BQ * 4, &B.bl_full[s]);
++          if (lane == 0) {
++            if (g >= ST) mbar_wait(&B.bl_empty[s], ((g / ST) - 1) & 1);
++            mbar_expect_tx(&B.bl_full[s], 4 * TQ + 2 * BQ * 4);
++          }
++          __syncwarp(0x3fu);
++          if (lane == 0) tma_load_2d(st, &mq, &B.bl_full[s], 0, qrow);
++          if (lane == 1) tma_load_2d(st + TQ, &mdo, &B.bl_full[s], h * DH, orow);
++          if (lane == 2) tma_load_2d(st + 2 * TQ, &mqm, &B.bl_full[s], 0, qrow);
++          if (lane == 3) tma_load_2d(st + 3 * TQ, &mdom, &B.bl_full[s], h * DH, orow);
++          if (lane == 4) bulk_g2s(st + 4 * TQ, LSE + qrow, BQ * 4, &B.bl_full[s]);
++          if (lane == 5) bulk_g2s(st + 4 * TQ + 128, DD + qrow, BQ * 4, &B.bl_full[s]);
+         }
+       }
+     }
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dq_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dq_tf32.cu
+index 804562f05..f3bb14e2c 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dq_tf32.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/attn_dq_tf32.cu
+@@ -154,25 +154,32 @@ swa_attn_dq_tf32_sm100(const __grid_constant__ CUtensorMap mq, const __grid_cons
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer
+-    if (lane == 0) {
++    // the loads of an item / block by lanes 0 - 2 at once (round 3 part 10: one thread issues a TMA load per ~600 clocks)
++    if (lane < 3) {
+       pdl_wait();                                                          // q / k / v / dO / lse / D come from the previous kernels
+       int g = 0;
+       for (int li = 0; li < my_items; ++li) {
+         int n, i0, h, lo, hi, sq; item_of(li, n, i0, h, lo, hi, sq);
+         const int is = li % QR;
+-        if (li >= QR) mbar_wait(&B.it_empty[is], ((li / QR) - 1) & 1);
+-        mbar_expect_tx(&B.it_full[is], IST);
+-        tma_load_2d(su + O_IT + is * IST, &mq, &B.it_full[is], 0, (n * H + h) * S + i0);
+-        tma_load_2d(su + O_IT + is * IST + TQI, &mdo, &B.it_full[is], h * DH, n * S + i0);
++        if (lane == 0) {
++          if (li >= QR) mbar_wait(&B.it_empty[is], ((li / QR) - 1) & 1);
++          mbar_expect_tx(&B.it_full[is], IST);
++        }
++        __syncwarp(0x7u);
++        if (lane == 0) tma_load_2d(su + O_IT + is * IST, &mq, &B.it_full[is], 0, (n * H + h) * S + i0);
++        if (lane == 1) tma_load_2d(su + O_IT + is * IST + TQI, &mdo, &B.it_full[is], h * DH, n * S + i0);
+         for (int kb = lo; kb < hi; ++kb, ++g) {
+           const int s = g % ST;
+-          if (g >= ST) mbar_wait(&B.bl_empty[s], ((g / ST) - 1) & 1);
+           const uint32_t st = su + O_BL + s * BLS;
+           const int krow = (n * H + h) * S + kb * BK;
+-          mbar_expect_tx(&B.bl_full[s], BLS);
+-          tma_load_2d(st, &mk, &B.bl_full[s], 0, krow);
+-          tma_load_2d(st + TK, &mv, &B.bl_full[s], 0, krow);
+-          tma_load_2d(st + 2 * TK, &mkm, &B.bl_full[s], 0, krow);
++          if (lane == 0) {
++            if (g >= ST) mbar_wait(&B.bl_empty[s], ((g / ST) - 1) & 1);
++            mbar_expect_tx(&B.bl_full[s], BLS);
++          }
++          __syncwarp(0x7u);
++          if (lane == 0) tma_load_2d(st, &mk, &B.bl_full[s], 0, krow);
++          if (lane == 1) tma_load_2d(st + TK, &mv, &B.bl_full[s], 0, krow);
++          if (lane == 2) tma_load_2d(st + 2 * TK, &mkm, &B.bl_full[s], 0, krow);
+         }
+       }
+     }
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/ffn_bwd_gate_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/ffn_bwd_gate_tf32.cu
+index 4d5d5f66f..7ee564928 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/ffn_bwd_gate_tf32.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/ffn_bwd_gate_tf32.cu
+@@ -61,6 +61,10 @@ constexpr int KB = 128 * 128;                                              // ac
+ constexpr int WB = 64 * 128;                                               // weight slot: [64 rows][32 fp32], SW128 (8 KB)
+ constexpr int NA = 6, NW = 10;
+ constexpr int NAK = 12, NWK = 64;                                          // ring k-blocks / weight slots per tile
++#ifndef PL
++#define PL 8  // producer lanes (round 3 part 10: one thread issues a TMA load per ~600 clocks, _tools/t0/tmabw.py); at most a ring's
++#endif     // slot count each (no empty-barrier parity alias two rounds back)
++constexpr int PLA = PL < NA ? PL : NA, PLW = PL < NW ? PL : NW;
+ constexpr int SGB = 128 * 64;                                              // one staged tile: [128 rows][16 fp32], SW64 (8 KB)
+ constexpr int O_A = 0, O_W = NA * KB, O_STG = O_W + NW * WB, O_BAR = O_STG + 2 * 3 * SGB;
+ constexpr int SMEM_BYTES = O_BAR + 512;
+@@ -144,13 +148,14 @@ swa_ffn_bwd_gate_tf32_sm100(const __grid_constant__ CUtensorMap my, const __grid
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer: the activation ring
+-    if (lane == 0) {
++    if (lane < PLA) {                                                      // PLA lanes issue (lane l: loads l mod PLA; round 3 part 10)
+       pdl_wait();                                                          // y / dq2 / mod come from the previous kernels
+       const uint32_t abytes = (uint32_t)(SP * AT * 128), mbytes = (uint32_t)(AT * 128);   // full boxes (out of range: zero-filled)
+-      for (int T = 0; T < ntT; ++T) {
++      for (int i = lane; i < NAK * ntT; i += PLA) {
++        const int T = i / NAK, k = i % NAK;
+         int b, a0, s0; coords(T, b, a0, s0);
+-        for (int k = 0; k < NAK; ++k) {
+-          const int i = NAK * T + k, slot = i % NA;
++        {
++          const int slot = i % NA;
+           if (i >= NA) mbar_wait(&B.aempty[slot], ((i / NA) - 1) & 1);
+           const uint32_t dst = su + O_A + slot * KB;
+           if (k % 3 < 2) {                                                  // k = 3 kb + {0: y, 1: dq2, 2: gate_f}
+@@ -165,17 +170,18 @@ swa_ffn_bwd_gate_tf32_sm100(const __grid_constant__ CUtensorMap my, const __grid
+     }
+   } else if (warp == 3) {
+     // ------------------------------------------------------------------------------------------------ TMA producer: weight ring
+-    if (lane == 0) {
++    if (lane < PLW) {                                                      // PLW lanes issue (as the activation ring)
+       pdl_wait();                                                          // the weight forms are made by the kernels before
+-      int j = 0;
+-      for (int T = 0; T < ntT; ++T)
+-        for (int k = 0; k < SPC * nc; ++k, ++j) {
++      for (int j = lane; j < SPC * nc * ntT; j += PLW) {
++        const int T = j / (SPC * nc), k = j % (SPC * nc);
++        {
+           int kind, c0, c1; wslot(SPC * nc * group(T) + k, kind, c0, c1);
+           const int slot = j % NW;
+           if (j >= NW) mbar_wait(&B.wempty[slot], ((j / NW) - 1) & 1);
+           mbar_expect_tx(&B.wfull[slot], kind == 1 ? WB / 2 : WB);
+           tma_load_2d(su + O_W + slot * WB, kind == 1 ? &mwdt : kind == 2 ? &mwab32 : &mwab, &B.wfull[slot], c0, c1);
+         }
++      }
+     }
+   } else if (warp == 1) {
+     // ------------------------------------------------------------------------------------------------ MMA issuer
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/oproj_bwd_fused_tf32.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/oproj_bwd_fused_tf32.cu
+index 9416a142f..0ab6078be 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/oproj_bwd_fused_tf32.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/oproj_bwd_fused_tf32.cu
+@@ -36,6 +36,10 @@ DEVI float4 u2f4(uint4 u) { return make_float4(__uint_as_float(u.x), __uint_as_f
+ constexpr int C = 128, H = 4;
+ constexpr int KB = 128 * 128;                                              // a k-block / staging tile: [128 rows][32 fp32], SW128 (16 KB)
+ constexpr int NA = 8, NAK = 16;                                            // ring slots; ring entries per tile
++#ifndef PL
++#define PL 8  // ring producer lanes, at most NA (round 3 part 10: one thread issues a TMA load per ~600 clocks, _tools/t0/tmabw.py)
++#endif
++static_assert(PL <= NA, "a producer lane per ring slot at most (no empty-barrier parity alias two rounds back)");
+ constexpr int O_W = 0, O_A = 4 * KB, O_STG = O_A + NA * KB, O_BAR = O_STG + 2 * 1 * KB;
+ constexpr int SMEM_BYTES = O_BAR + 512;
+ static_assert(SMEM_BYTES <= 232448, "shared memory");
+@@ -85,13 +89,14 @@ swa_oproj_bwd_fused_tf32_sm100(const __grid_constant__ CUtensorMap mdq1, const _
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer: the ring
+-    if (lane == 0) {
++    if (lane < PL) {                                                       // PL lanes issue (lane l: loads l mod PL; round 3 part 10)
+       pdl_wait();                                                          // dq1 / o / g / mod come from the previous kernels
+       const uint32_t abytes = (uint32_t)(SP * AT * 128), mbytes = (uint32_t)(AT * 128);   // full boxes (out of range: zero-filled)
+-      for (int T = 0; T < ntT; ++T) {
++      for (int i = lane; i < NAKi * ntT; i += PL) {
++        const int T = i / NAKi, k = i % NAKi;
+         int b, a0, s0; coords(T, b, a0, s0);
+-        for (int k = 0; k < NAKi; ++k) {
+-          const int i = NAKi * T + k, slot = i % NA;
++        {
++          const int slot = i % NA;
+           if (i >= NA) mbar_wait(&B.aempty[slot], ((i / NA) - 1) & 1);
+           const uint32_t dst = su + O_A + slot * KB;
+           if (k < 8) {
+@@ -106,10 +111,11 @@ swa_oproj_bwd_fused_tf32_sm100(const __grid_constant__ CUtensorMap mdq1, const _
+     }
+   } else if (warp == 3) {
+     // ------------------------------------------------------------------------------------------------ TMA producer: Wo^T, once
+-    if (lane == 0) {
++    if (lane < 4) {                                                        // the four k-blocks by lanes 0 - 3 at once
+       pdl_wait();                                                          // the weight form is made by a kernel / torch op before
+-      mbar_expect_tx(&B.wofull, 4 * KB);
+-      for (int kb = 0; kb < 4; ++kb) tma_load_2d(su + O_W + kb * KB, &mwot, &B.wofull, 32 * kb, 0);
++      if (lane == 0) mbar_expect_tx(&B.wofull, 4 * KB);
++      __syncwarp(0xfu);
++      tma_load_2d(su + O_W + lane * KB, &mwot, &B.wofull, 32 * lane, 0);
+     }
+   } else if (warp == 1) {
+     // ------------------------------------------------------------------------------------------------ MMA issuer

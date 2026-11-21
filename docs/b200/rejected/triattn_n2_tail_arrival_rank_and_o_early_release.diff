@@ -1,0 +1,122 @@
+--- tailg_sm100.cuh	2026-11-19 04:33:29.542827996 +0900
++++ tailg_full.cuh	2026-11-19 04:33:00.398772666 +0900
+@@ -18,6 +18,14 @@
+ #ifndef TG_NOPDL
+ #define TG_NOPDL 0   // timing only: the tail never waits for the previous grid (WRONG results; the bound of a finer core -> tail hand-off)
+ #endif
++#ifndef TG_RANK
++#define TG_RANK 0    // B200 N2: > 0: the CTAs take their tile counts by ARRIVAL order (atomicInc rank), a ramp of TG_RANK tiles from the first
++                     // arrival to the last (the core's CTAs finish up to one task apart; the tail's static strided tiles made the last arrival
++                     // carry the same count as the first).  Needs the core -> tail row flags (TG_FLAG) for correctness when it also skips pdl_wait.
++#endif
++#ifndef TG_OEARLY
++#define TG_OEARLY 0  // B200 N2: the gate step reads its o tile into registers before the arithmetic and frees the o slot then (the single o slot at CP 128: the next o load hid only behind the LayerNorm)
++#endif
+ #ifndef TG_STAMP
+ #define TG_STAMP 0   // timing only: %globaltimer start / end / rank / tiles of every CTA into g_tg_stamp (read by tri_tail_stamps)
+ #endif
+@@ -50,7 +58,38 @@
+ #endif
+ namespace tailg {
+ using namespace sm100;
++// B200 N2 (TG_RANK): arrival-ordered tile counts.  Rank q (the atomicInc order of the CTAs' starts) gets n_q = n_lo + #{j : q < cut_j} + [q < rem]
++// tiles, cut_j = G (2 (k - j) + 1) / (2 k), j = 1..k: a ramp of k tiles from the first arrival to the last; n_q is non-increasing in q, so round i
++// of the persistent loop is carried by the ranks [0, m_i) and its tiles are base_i + q (base_i = the sum of the earlier rounds' m).  k = 0: the
++// classic strided split (n_q = n_lo + [q < rem], tile = q + i G).
++__device__ unsigned int g_tg_ctr;
+ __device__ unsigned long long g_tg_stamp[4][512];
++struct RankSplit {
++  int G, k, n_lo, rem, T[8];   // T: the k + 1 thresholds (the cuts and rem), descending
++  __device__ __forceinline__ void init(int ntiles, int grid, int kk) {
++    G = grid; k = kk;
++    if (k > 6 || ntiles < G * (k + 2)) k = 0;
++    int s = 0;
++    for (int j = 1; j <= k; ++j) { const int c = G * (2 * (k - j) + 1) / (2 * k); T[j - 1] = c; s += c; }
++    n_lo = (ntiles - s) / G;
++    rem = ntiles - s - G * n_lo;
++    int pos = k;
++    while (pos > 0 && T[pos - 1] < rem) { T[pos] = T[pos - 1]; --pos; }
++    T[pos] = rem;
++  }
++  __device__ __forceinline__ int count(int q) const {
++    int c = 0;
++#pragma unroll
++    for (int d = 0; d < 8; ++d) c += (d <= k && q < T[d]) ? 1 : 0;
++    return n_lo + c;
++  }
++  __device__ __forceinline__ int base(int i) const {   // first tile id of round i
++    if (i <= n_lo) return i * G;
++    int b = n_lo * G;
++    for (int d = 0; d < i - n_lo && d <= k; ++d) b += T[d];
++    return b;
++  }
++};
+ __device__ __forceinline__ long long gtimer_tg() { long long t; asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t)); return t; }
+ #ifndef TG_TL
+ #define TG_TL 0     // timing only: per-tile stage stamps of CTA 10 into g_tg_tl (tri_tail_tl)
+@@ -123,6 +162,7 @@
+   uint32_t* tslot = reinterpret_cast<uint32_t*>(wf + 1);
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   if (tid == 0) {
++    if (TG_RANK) tslot[1] = atomicInc(&g_tg_ctr, gridDim.x - 1);   // arrival rank (the counter wraps to 0 after the last CTA of the launch)
+     if (TG_STAMP) g_tg_stamp[0][blockIdx.x] = (unsigned long long)gtimer_tg();
+     for (int i = 0; i < NXS; ++i) { bar_init(xf + i, 1); bar_init(xe + i, T::DW2 ? 8 : 4); }
+     for (int i = 0; i < NOS; ++i) { bar_init(of + i, 1); bar_init(oe + i, 8); }
+@@ -138,9 +178,11 @@
+   __syncthreads();
+   tc_fence_after();
+   const uint32_t tmem = *tslot;
+-  const int n = ntiles > (int)blockIdx.x ? (ntiles - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;   // this CTA's tiles
+-  auto tile = [&](int i) { return (int)blockIdx.x + i * (int)gridDim.x; };
+-  if (TG_STAMP && tid == 0) { g_tg_stamp[2][blockIdx.x] = (unsigned long long)blockIdx.x; g_tg_stamp[3][blockIdx.x] = (unsigned long long)n; }
++  const int rank = TG_RANK ? (int)tslot[1] : (int)blockIdx.x;
++  RankSplit rs; rs.init(ntiles, (int)gridDim.x, TG_RANK);
++  const int n = TG_RANK ? (ntiles >= (int)gridDim.x ? rs.count(rank) : (rank < ntiles ? 1 : 0)) : (ntiles > (int)blockIdx.x ? (ntiles - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0);   // this CTA's tiles
++  auto tile = [&](int i) { return TG_RANK ? (ntiles >= (int)gridDim.x ? rs.base(i) + rank : rank) : (int)blockIdx.x + i * (int)gridDim.x; };
++  if (TG_STAMP && tid == 0) { g_tg_stamp[2][blockIdx.x] = (unsigned long long)rank; g_tg_stamp[3][blockIdx.x] = (unsigned long long)n; }
+ 
+   if (warp == 0) {
+     if (lane == 0) {
+@@ -275,10 +317,28 @@
+         TLS(2, 5, j);
+         const __nv_bfloat16* ot = sO + so * T::OT;
+         uint32_t uv[HC / 2];
++        uint4 ovr[TG_OEARLY ? HC / 8 : 1];
++        if (TG_OEARLY) {   // B200 N2: the o tile read into registers FIRST and its slot released at once (the next o load, ~1.4 us, then runs under this step's arithmetic and the next LayerNorm)
++#pragma unroll
++          for (int c8 = 0; c8 < HC / 8; ++c8) {
++            if (OPL) {
++              const int c = hv * HC + c8 * 8;
++              const __nv_bfloat16* pp = ot + (c >> 6) * 64 * BM + (c & 63) * BM + row;
++              auto pk = [&](int e) { return (uint32_t)__bfloat16_as_ushort(pp[e * BM]) | ((uint32_t)__bfloat16_as_ushort(pp[(e + 1) * BM]) << 16); };
++              ovr[c8] = make_uint4(pk(0), pk(2), pk(4), pk(6));
++            } else {
++              ovr[c8] = *reinterpret_cast<const uint4*>(ot + soff(hv * HC + c8 * 8));
++            }
++          }
++          __syncwarp();
++          if (lane == 0) arrive(oe + so);
++        }
+ #pragma unroll
+         for (int c8 = 0; c8 < HC / 8; ++c8) {
+           uint4 ov;
+-          if (OPL) {   // channel-major plane tile [KH][64 channels][128 tokens]: lanes are consecutive tokens
++          if (TG_OEARLY) {
++            ov = ovr[c8];
++          } else if (OPL) {   // channel-major plane tile [KH][64 channels][128 tokens]: lanes are consecutive tokens
+             const int c = hv * HC + c8 * 8;
+             const __nv_bfloat16* pp = ot + (c >> 6) * 64 * BM + (c & 63) * BM + row;
+             auto pk = [&](int e) { return (uint32_t)__bfloat16_as_ushort(pp[e * BM]) | ((uint32_t)__bfloat16_as_ushort(pp[(e + 1) * BM]) << 16); };
+@@ -294,8 +354,10 @@
+             uv[c8 * 4 + e] = pack2(sig_t(gv[k >> 5][k & 31]) * f.x, sig_t(gv[(k + 1) >> 5][(k + 1) & 31]) * f.y);
+           }
+         }
+-        __syncwarp();
+-        if (lane == 0) arrive(oe + so);           // o read (the values are in registers)
++        if (!TG_OEARLY) {
++          __syncwarp();
++          if (lane == 0) arrive(oe + so);         // o read (the values are in registers)
++        }
+         if (CP != HD && j >= 2) wait(yr + b, ((j >> 1) - 1) & 1);   // a separate U[b]: tile j - 2's out GEMM has read it
+         tc_fence_after();
+ #pragma unroll

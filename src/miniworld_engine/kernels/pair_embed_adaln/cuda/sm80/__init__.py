@@ -45,5 +45,11 @@ backward = _on_this_build(_h100.backward)
 
 
 def device_build():
-    """The launchers of the current device's build: this one on an A100 (and its sm_120a build on an RTX 5090), else the H100 (sm_90a) one."""
-    return sys.modules[__name__] if torch.cuda.get_device_capability() in ((8, 0), (12, 0)) else _h100
+    """The launchers of the current device's build: this one on an A100 (and its sm_120a build on an RTX 5090), the sm_100a build of this
+    source on a B200 (cuda/sm100), else the H100 (sm_90a) one."""
+    cc = torch.cuda.get_device_capability()
+    if cc == (10, 0):
+        from miniworld_engine.kernels.pair_embed_adaln.cuda import sm100
+
+        return sm100
+    return sys.modules[__name__] if cc in ((8, 0), (12, 0)) else _h100

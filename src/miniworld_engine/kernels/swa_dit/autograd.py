@@ -49,6 +49,18 @@ class SWADiTBlockFunction(torch.autograd.Function):
             wqkv, wg, wo, wu, wd = native_h100_cast(list(raw_weights), [torch.empty_like(w, dtype=q.dtype) for w in raw_weights])
         elif not portable and q.dtype == torch.bfloat16 and any(w.dtype == torch.float32 for w in raw_weights) and is_h100(q.device):
             wqkv, wg, wo, wu, wd = pack_master(raw_weights)
+        elif (
+            not portable
+            and q.dtype == torch.bfloat16
+            and any(w.dtype == torch.float32 for w in raw_weights)
+            and q.is_cuda
+            and torch.cuda.get_device_capability(q.device) == (10, 0)
+        ):
+            # B200 (2026-11-17): the bf16 forms as views of one cast buffer (two launches; the sm_100a stages then read [Wqkv; Wg] and the
+            # backward's transposes without per-weight copies: cuda/sm100.master_pack)
+            from miniworld_engine.kernels.swa_dit.cuda.sm100 import master_pack
+
+            wqkv, wg, wo, wu, wd = master_pack(raw_weights)
         else:
             wqkv, wg, wo, wu, wd = (w.to(q.dtype).contiguous() for w in raw_weights)
         outputs = swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, FP32_EPS, True, portable)

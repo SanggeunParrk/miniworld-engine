@@ -1,0 +1,179 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tailg_sm100.cuh b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tailg_sm100.cuh
+index ae8c4aa92..f7421696f 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tailg_sm100.cuh
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/tailg_sm100.cuh
+@@ -39,6 +39,20 @@ __device__ __forceinline__ float sig_t(float x) {   // 0.5 + 0.5 tanh(x / 2): on
+   return fmaf(0.5f, t, 0.5f);
+ }
+ 
++// Work items of the persistent row-tile kernels (tri_front_sm100, tri_tailg_sm100): when the last wave of 128-row tiles would occupy at most
++// half of the CTAs (ntiles % nsm <= nsm / 2), its tiles run as two 64-row halves each -- items 0 .. nfull - 1 are whole tiles, the rest
++// halves -- so the CTAs that take a last-wave item do half a tile more than the others instead of a whole one (B200 2026-11-18: L256,
++// 512 tiles on 148 CTAs: 3 or 4 tiles a CTA -> 3 or 3.5).  -> the item count; MINIWORLD_TRIATTN_B200_HALF=0 turns it off.
++inline int hsplit(int ntiles, int nsm, int& nfull) {
++  static const bool on = [] { const char* e = std::getenv("MINIWORLD_TRIATTN_B200_HALF"); return !(e && e[0] == '0'); }();
++  nfull = ntiles;
++  if (!on || ntiles <= nsm) return ntiles;
++  const int r = ntiles % nsm;
++  if (r == 0 || 2 * r > nsm) return ntiles;
++  nfull = ntiles - r;
++  return nfull + 2 * r;
++}
++
+ template <int CP, int HD> struct Cfg {
+   static constexpr int BM = 128, THREADS = 480;
+   static constexpr int XT = BM * CP, OT = BM * HD;        // x and o tiles: [K chunks of 64][128][64] 128B-swizzled
+@@ -57,8 +71,11 @@ template <int CP, int HD> struct Cfg {
+ template <int CP, int HD>
+ __global__ void __launch_bounds__(480, 1) tri_tailg_sm100(
+     int ntiles, int L, float eps,
++    const int nfull,                                      // work items >= nfull are 64-row half tiles (hsplit)
+     const __grid_constant__ CUtensorMap omap,             // o [R][HD] bf16, box (64, 128), 128B swizzle
+     const __grid_constant__ CUtensorMap xmap,             // x (the caller's rows) [.][CP], box (64, 128), 128B swizzle
++    const __grid_constant__ CUtensorMap omap64,           // o / x, box (64, 64): a half item's rows
++    const __grid_constant__ CUtensorMap xmap64,
+     const __grid_constant__ CUtensorMap wmap,             // Wo [CP][HD] bf16, box (64, CP), 128B swizzle
+     const __grid_constant__ CUtensorMap wgmap,            // Wg [HD][CP] bf16, box (64, HD), 128B swizzle
+     const __grid_constant__ CUtensorMap ymap,             // out (the caller's rows), box (64, 32), 128B swizzle (TMA stores)
+@@ -109,14 +126,17 @@ __global__ void __launch_bounds__(480, 1) tri_tailg_sm100(
+   const uint32_t tmem = *tslot;
+   const int n = ntiles > (int)blockIdx.x ? (ntiles - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;   // this CTA's tiles
+   auto tile = [&](int i) { return (int)blockIdx.x + i * (int)gridDim.x; };
++  auto irow0 = [&](int i) { const int t = tile(i); return t < nfull ? t * BM : nfull * BM + (t - nfull) * (BM / 2); };   // (hsplit)
++  auto ihalf = [&](int i) { return tile(i) >= nfull; };
+ 
+   if (warp == 0) {
+     if (lane == 0) {
+       for (int i = 0; i < n; ++i) {
+         const int s = i % NXS;
+         if (i >= NXS) wait(xe + s, ((i / NXS) - 1) & 1);
+-        expect_tx(xf + s, T::XT * 2);
+-        for (int kx = 0; kx < KX; ++kx) load_rows(&xmap, sX + s * T::XT + kx * BM * 64, xf + s, kx * 64, tile(i) * BM, L, TRANS);
++        const bool hf = ihalf(i);
++        expect_tx(xf + s, (hf ? T::XT / 2 : T::XT) * 2);
++        for (int kx = 0; kx < KX; ++kx) load_rows(hf ? &xmap64 : &xmap, sX + s * T::XT + kx * BM * 64, xf + s, kx * 64, irow0(i), L, TRANS);
+       }
+     }
+   } else if (warp == 14) {
+@@ -128,8 +148,9 @@ __global__ void __launch_bounds__(480, 1) tri_tailg_sm100(
+       for (int i = 0; i < n; ++i) {
+         const int s = i % NOS;
+         if (i >= NOS) wait(oe + s, ((i / NOS) - 1) & 1);
+-        expect_tx(of + s, T::OT * 2);
+-        for (int kh = 0; kh < KH; ++kh) load_2d(&omap, sO + s * T::OT + kh * BM * 64, of + s, kh * 64, tile(i) * BM);
++        const bool hf = ihalf(i);
++        expect_tx(of + s, (hf ? T::OT / 2 : T::OT) * 2);
++        for (int kh = 0; kh < KH; ++kh) load_2d(hf ? &omap64 : &omap, sO + s * T::OT + kh * BM * 64, of + s, kh * 64, irow0(i));
+       }
+     }
+   } else if (warp == 1) {
+@@ -261,7 +282,8 @@ __global__ void __launch_bounds__(480, 1) tri_tailg_sm100(
+     pdl_wait();                                    // PDL: the stores come after the core (and everything before it) completed
+     const int qq = warp & 3, r = qq * 32 + lane;
+     for (int j = 0; j < n; ++j) {
+-      const int b = j & 1, t = tile(j), s = j % NXS;
++      const int b = j & 1, s = j % NXS, r0 = irow0(j);
++      const bool act = !ihalf(j) || qq < 2;     // a half item: rows 0 .. 63 only
+       wait(af + b, (j >> 1) & 1);
+       wait(xf + s, (j / NXS) & 1);                // (the slot cannot be refilled before this tile's drain releases it)
+       tc_fence_after();
+@@ -297,7 +319,7 @@ __global__ void __launch_bounds__(480, 1) tri_tailg_sm100(
+           fence_proxy_async();
+           __syncwarp();
+           if (lane == 0) {
+-            if (!TG_NOST) store_rows(&ymap, xs + (ch >> 1) * BM * 64 + qq * 32 * 64, (ch >> 1) * 64, t * BM + qq * 32, L, TRANS);
++            if (!TG_NOST && act) store_rows(&ymap, xs + (ch >> 1) * BM * 64 + qq * 32 * 64, (ch >> 1) * 64, r0 + qq * 32, L, TRANS);
+             bulk_commit();
+           }
+         }
+@@ -344,9 +366,13 @@ torch::Tensor launch(const torch::Tensor& o, const torch::Tensor& x, const torch
+   CUtensorMap ym = make_rows_map(out.data_ptr(), CP, R, CP, 64, 32, CU_TENSOR_MAP_SWIZZLE_128B, "out", L, geo);
+   static bool attr = false;
+   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_tailg_sm100<CP, HD>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM)); attr = true; }
+-  const int ntiles = (int)(R / T::BM);
+-  launch_pdl(tri_tailg_sm100<CP, HD>, dim3(std::min(ntiles, num_sms(o.device().index()))), dim3(T::THREADS), T::SMEM, at::cuda::getCurrentCUDAStream(),
+-      ntiles, (int)L, (float)eps, om, xm, wm, wgm, ym, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()), lnw.data_ptr<float>(),
++  CUtensorMap om64 = make_map<2>(o.data_ptr(), {(uint64_t)HD, (uint64_t)R}, {(uint64_t)HD}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "o");
++  CUtensorMap xm64 = make_rows_map(x.data_ptr(), CP, R, CP, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B, "x", L, geo);
++  const int ntiles = (int)(R / T::BM), nsm = num_sms(o.device().index());
++  int nfull;
++  const int nitems = hsplit(ntiles, nsm, nfull);
++  launch_pdl(tri_tailg_sm100<CP, HD>, dim3(std::min(nitems, nsm)), dim3(T::THREADS), T::SMEM, at::cuda::getCurrentCUDAStream(),
++      nitems, (int)L, (float)eps, nfull, om, xm, om64, xm64, wm, wgm, ym, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()), lnw.data_ptr<float>(),
+       lnb.data_ptr<float>(), hg ? gb.data_ptr<float>() : nullptr, ho ? ob.data_ptr<float>() : nullptr, geo);
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+   return out;
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
+index e6d40973e..040743e47 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
+@@ -59,7 +59,9 @@ template <int CX, int HD> struct Cfg {
+ template <int CX, int HD, int NOUT>
+ __global__ void __launch_bounds__(fr::Cfg<CX, HD>::THREADS, 1) tri_front_sm100(
+     int R, int L, int ntiles, float eps,
++    const int nfull,                                      // work items >= nfull are half tiles of 64 rows (the last wave split, see hsplit)
+     const __grid_constant__ CUtensorMap xmap,             // x [R][CX] bf16, box (64, 128), 128B swizzle
++    const __grid_constant__ CUtensorMap xmap64,           // the same, box (64, 64): a half tile's rows
+     const __grid_constant__ CUtensorMap wmap,             // W [4 HD][CX] bf16, box (64, min(4 HD, 256)), 128B swizzle
+     const __grid_constant__ CUtensorMap qmap,             // q / k / v / g [R][HD], box (32, 32), 64B swizzle (TMA stores)
+     const __grid_constant__ CUtensorMap kmap,
+@@ -107,6 +109,10 @@ __global__ void __launch_bounds__(fr::Cfg<CX, HD>::THREADS, 1) tri_front_sm100(
+   tc_fence_after();
+   const uint32_t tmem = *tslot;
+   pdl_trigger();                                   // the core (PDL) may start its set-up on SMs this grid leaves free / frees
++  // work item t: a 128-row tile (t < nfull) or a 64-row half tile (the last wave's tiles split in two, so that no CTA does a whole
++  // tile more than another; a half item computes all 128 rows of its buffer, the upper 64 stale, and loads / writes only its 64)
++  auto irow0 = [&](int t) { return t < nfull ? t * BM : nfull * BM + (t - nfull) * (BM / 2); };
++  auto irows = [&](int t) { return t < nfull ? BM : BM / 2; };
+ 
+   if (warp == 0) {
+     if (lane == 0) {
+@@ -118,8 +124,9 @@ __global__ void __launch_bounds__(fr::Cfg<CX, HD>::THREADS, 1) tri_front_sm100(
+       for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+         const int st = lt % NST;
+         if (lt >= NST) wait(xe + st, ((lt / NST) - 1) & 1);
+-        expect_tx(xf + st, XT * 2);
+-        for (int kh = 0; kh < CX / 64; ++kh) load_rows(&xmap, sX + st * XT + kh * BM * 64, xf + st, kh * 64, t * BM, L, TRANS);
++        const bool hf = t >= nfull;
++        expect_tx(xf + st, (hf ? XT / 2 : XT) * 2);
++        for (int kh = 0; kh < CX / 64; ++kh) load_rows(hf ? &xmap64 : &xmap, sX + st * XT + kh * BM * 64, xf + st, kh * 64, irow0(t), L, TRANS);
+       }
+     }
+   } else if (warp == 1) {
+@@ -203,8 +210,8 @@ __global__ void __launch_bounds__(fr::Cfg<CX, HD>::THREADS, 1) tri_front_sm100(
+       }
+ #pragma unroll
+       for (int h = 0; h < NH; ++h) bacc[h] += __shfl_xor_sync(0xffffffffu, bacc[h], 16);
+-      if (hf == 0) {
+-        const long row = (long)t * BM + r;       // (b, j, k)
++      if (hf == 0 && r < irows(t)) {             // (a half item: its 64 rows only)
++        const long row = (long)irow0(t) + r;     // (b, j, k)
+         if (STATS != nullptr) STATS[row] = make_float2(mean, rstd);
+         const int kx = (int)(row % L);
+         const long bj = row / L;
+@@ -259,7 +266,7 @@ __global__ void __launch_bounds__(fr::Cfg<CX, HD>::THREADS, 1) tri_front_sm100(
+           fence_proxy_async();
+           __syncwarp();
+           if (lane == 0) {
+-            if (!FR_NOST) store_2d(maps[half * 2 + k / CPT], buf, (k % CPT) * 32, t * BM + qq * 32);
++            if (!FR_NOST && qq * 32 < irows(t)) store_2d(maps[half * 2 + k / CPT], buf, (k % CPT) * 32, irow0(t) + qq * 32);
+             bulk_commit();
+           }
+           ++nst;
+@@ -1611,10 +1618,13 @@ static std::vector<torch::Tensor> launch_front(const torch::Tensor& x, const tor
+     C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm100<CX, HD, 3>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM));
+     attr = true;
+   }
+-  const int ntiles = (int)(R / T::BM);
+-  (g3 ? tri_front_sm100<CX, HD, 3> : tri_front_sm100<CX, HD, 4>)<<<std::min(ntiles, num_sms(x.device().index())), T::THREADS, T::SMEM,
++  CUtensorMap xm64 = make_rows_map(x.data_ptr(), CX, R, CX, 64, 64, CU_TENSOR_MAP_SWIZZLE_128B, "x", L, geo);
++  const int ntiles = (int)(R / T::BM), nsm = num_sms(x.device().index());
++  int nfull;
++  const int nitems = tailg::hsplit(ntiles, nsm, nfull);
++  (g3 ? tri_front_sm100<CX, HD, 3> : tri_front_sm100<CX, HD, 4>)<<<std::min(nitems, nsm), T::THREADS, T::SMEM,
+                                                                     at::cuda::getCurrentCUDAStream()>>>(
+-      (int)R, (int)L, ntiles, (float)eps, xm, wm, qm, km, vm, gm, lw.data_ptr<float>(), lb.data_ptr<float>(), wb, wb16, NHB, mp,
++      (int)R, (int)L, nitems, (float)eps, nfull, xm, xm64, wm, qm, km, vm, gm, lw.data_ptr<float>(), lb.data_ptr<float>(), wb, wb16, NHB, mp,
+       reinterpret_cast<__nv_bfloat16*>(bias.data_ptr<at::BFloat16>()), stats, geo, bt ? 1 : 0, (int)Lr);
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+   return {q, k, v, g, bias};

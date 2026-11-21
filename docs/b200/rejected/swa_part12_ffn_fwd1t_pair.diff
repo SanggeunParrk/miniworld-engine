@@ -1,0 +1,187 @@
+diff --git a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/ffn_fwd1t.cu b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/ffn_fwd1t.cu
+index 574afcfe1..e969c73b6 100644
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/ffn_fwd1t.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/ffn_fwd1t.cu
+@@ -27,7 +27,16 @@ constexpr int KBLK = 4096;                                                 // [3
+ constexpr int T_ = 2 * KBLK;                                               // one [32][128] tile
+ // Wmod[256:768] | Wo (first: staging slot B) | q -> q1 | g -> gated | o -> out | h (2 tiles) (q .. first h tile: staging slot A) | c -> a -> y
+ constexpr int O_WM = 0, O_WO = 4 * 32768, O_Q = O_WO + 2 * 16384, O_G = O_Q + T_, O_O = O_G + T_, O_H = O_O + T_, O_CT = O_H + 2 * T_, O_Y = O_CT;
+-constexpr int O_RED = O_CT + T_, O_RS = O_RED + 2 * 4 * 16 * 4, O_BAR = O_RS + 2 * 16 * 4;
++#ifndef PAIR
++#define PAIR 0
++#endif
++// PAIR (B200 2026-11-18, round 3 part 12): a cluster of 2 CTAs per tile (grid = 2 x tiles <= SMs). Both CTAs make the modulation, gated,
++// att, q1 and y; rank r loads and runs hidden units 128 r .. 128 r + 127 only (Wu units r, r + 2 and Wd unit r: 96 KB instead of 192),
++// a partial ffn (K = 128), sends the peer's output channels of it into the peer's exchange tile (st.shared::cluster, one remote arrive
++// per thread) and makes out for channels 64 r .. 64 r + 63 as q1 + gate_f rn(p_own + p_peer) (an fp32 add commutes: deterministic).
++constexpr int NU = PAIR ? 3 : 6;                                           // Wu / Wd units of a CTA
++constexpr int XST = 20;                                                    // exchange tile row stride in floats (16 rows + pad)
++constexpr int O_RED = O_CT + T_, O_RS = O_RED + 2 * 4 * 16 * 4, O_XB = O_RS + 2 * 16 * 4, O_BAR = O_XB + (PAIR ? 64 * 2 * XST * 4 : 0);
+ constexpr int SMEM = O_BAR + 256;
+ static_assert(O_CT - O_Q >= 32768, "staging slot A in the tile area, the c tile outside it");
+ static_assert(SMEM <= 232448, "shared memory");
+@@ -35,7 +44,7 @@ constexpr uint32_t T_WU = 0, T_WD = 256, T_ATT = 384, T_A = 416, T_B = 448, T_FF
+ constexpr uint32_t I_32 = idesc_bf16(128, 32);
+ 
+ struct Bars {
+-  uint64_t ufull[6], ufree[6], wofull, wmfull, cinfull, infull, cfull, modfull, gfull, attfull, yfull, abfull, hfull, ffull, ofull;
++  uint64_t ufull[6], ufree[6], xfull, wofull, wmfull, cinfull, infull, cfull, modfull, gfull, attfull, yfull, abfull, hfull, ffull, ofull;
+   uint32_t tmem;
+ };
+ DEVI float lds_bf16(uint32_t a) { unsigned short v; asm volatile("ld.shared.u16 %0, [%1];" : "=h"(v) : "r"(a) : "memory"); return __uint_as_float((uint32_t)v << 16); }
+@@ -70,19 +79,31 @@ swa_ffn_fwd1t_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+-  const int b = (int)blockIdx.x / nab, s0 = ((int)blockIdx.x % nab) * AT;
+-  auto wslot = [&](int u) -> uint32_t { return (u & 1) ? su + O_WO : su + O_Q; };   // staging slot of Wu / Wd unit u
++#if PAIR
++  const uint32_t rank = cluster_rank(), peer = rank ^ 1u;
++#else
++  constexpr uint32_t rank = 0;
++#endif
++  const int tile = (int)blockIdx.x >> PAIR;
++  const int b = tile / nab, s0 = (tile % nab) * AT;
++  auto wslot = [&](int i) -> uint32_t { return (i & 1) ? su + O_WO : su + O_Q; };   // staging slot of the i-th Wu / Wd unit
++  auto unit = [&](int i) { return PAIR ? (int)rank + 2 * i : i; };          // the i-th unit this CTA loads (PAIR: r, r + 2, r + 4)
+ 
+   if (tid == 0) {
+     for (int u = 0; u < 6; ++u) { mbar_init(&B.ufull[u], 1); mbar_init(&B.ufree[u], 1); }
+     mbar_init(&B.wofull, 1); mbar_init(&B.wmfull, 1); mbar_init(&B.cinfull, 1); mbar_init(&B.infull, 1);
+     mbar_init(&B.cfull, 2); mbar_init(&B.modfull, 1); mbar_init(&B.gfull, 2); mbar_init(&B.attfull, 1); mbar_init(&B.yfull, 2);
+     mbar_init(&B.abfull, 1); mbar_init(&B.hfull, 2); mbar_init(&B.ffull, 1); mbar_init(&B.ofull, 2);
++    mbar_init(&B.xfull, 128);                                              // PAIR: the peer's 128 senders
+     fence_barrier_init();
+   }
+   if (warp == 1) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
+   tc_fence_before();
++#if PAIR
++  cluster_sync();                                                          // the peer's xfull is initialised before any remote arrive
++#else
+   __syncthreads();
++#endif
+   tc_fence_after();
+   const uint32_t tmem = B.tmem;
+   TRP(1, tid == 0);
+@@ -95,19 +116,20 @@ swa_ffn_fwd1t_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+     __syncwarp();
+     if (lane < 16) tma_load_2d(su + O_WM + (lane >> 2) * 32768 + (lane & 3) * 8192, &mwm, &B.wmfull, 32 * (lane & 3), 128 * ((lane >> 2) + 2));
+     else if (lane < 18) tma_load_2d(su + O_CT + (lane - 16) * KBLK, &mc, &B.cinfull, (lane - 16) * 64, b * S + s0);
+-    for (int u = 0; u < 6; ++u) {                                          // Wu (units 0 - 3) / Wd (4, 5): K-major SW64 [128][32] atoms
++    for (int i = 0; i < NU; ++i) {                                         // Wu (units 0 - 3) / Wd (4, 5): K-major SW64 [128][32] atoms
++      const int u = unit(i);
+       if (lane == 0) {
+-        if (u >= 2) mbar_wait(&B.ufree[u - 2], 0);                         // the slot's previous unit is in TMEM
+-        mbar_expect_tx(&B.ufull[u], 32768);
++        if (i >= 2) mbar_wait(&B.ufree[i - 2], 0);                         // the slot's previous unit is in TMEM
++        mbar_expect_tx(&B.ufull[i], 32768);
+       }
+       __syncwarp();
+       if (lane < 4) {
+-        if (u < 4) tma_load_2d(wslot(u) + lane * 8192, &mwu, &B.ufull[u], 32 * lane, 128 * u);
+-        else tma_load_2d(wslot(u) + lane * 8192, &mwd, &B.ufull[u], 128 * (u - 4) + 32 * lane, 0);
++        if (u < 4) tma_load_2d(wslot(i) + lane * 8192, &mwu, &B.ufull[i], 32 * lane, 128 * u);
++        else tma_load_2d(wslot(i) + lane * 8192, &mwd, &B.ufull[i], 128 * (u - 4) + 32 * lane, 0);
+       }
+     }
+     if (lane == 0) {
+-      mbar_wait(&B.ufree[4], 0); mbar_wait(&B.ufree[5], 0);
++      mbar_wait(&B.ufree[NU - 2], 0); mbar_wait(&B.ufree[NU - 1], 0);
+       TRP(3, true);
+       mbar_expect_tx(&B.wofull, 2 * 16384);
+     }
+@@ -137,14 +159,15 @@ swa_ffn_fwd1t_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+       tc_commit(&B.modfull);
+     }
+     __syncwarp();
+-    for (int u = 0; u < 6; ++u) {                                          // Wu / Wd unit u -> TMEM (tcgen05.cp, 128 lanes x 32 B per K16 step)
+-      mbar_wait(&B.ufull[u], 0);
++    for (int i = 0; i < NU; ++i) {                                         // Wu / Wd unit u -> TMEM (tcgen05.cp, 128 lanes x 32 B per K16 step)
++      const int u = unit(i);
++      mbar_wait(&B.ufull[i], 0);
+       tc_fence_after();
+       if (elect_one()) {
+         const uint32_t col = u < 4 ? T_WU + 64 * u : T_WD + 64 * (u - 4);
+ #pragma unroll
+-        for (int ks = 0; ks < 8; ++ks) tmem_cp_128x256b(tmem + col + ks * 8, wdesc(wslot(u), ks));
+-        tc_commit(&B.ufree[u]);
++        for (int ks = 0; ks < 8; ++ks) tmem_cp_128x256b(tmem + col + ks * 8, wdesc(wslot(i), ks));
++        tc_commit(&B.ufree[i]);
+       }
+       __syncwarp();
+     }
+@@ -160,7 +183,7 @@ swa_ffn_fwd1t_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+     }
+     __syncwarp();
+     mbar_wait(&B.yfull, 0);                                                // y written; gate_a / shift_f / scale_f read out
+-    for (int hc = 0; hc < 2; ++hc) {
++    for (int hc = PAIR ? (int)rank : 0; hc < (PAIR ? (int)rank + 1 : 2); ++hc) {
+       tc_fence_after();
+       const uint32_t ta = hc ? T_ATT : T_A, tb = hc ? T_FF : T_B;
+       if (elect_one()) {
+@@ -177,8 +200,8 @@ swa_ffn_fwd1t_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+     tc_fence_after();
+     if (elect_one()) {
+ #pragma unroll
+-      for (int ks = 0; ks < 16; ++ks)
+-        umma_ts(tmem + T_FF, tmem + T_WD + ks * 8, bdesc(su + O_H + (ks >> 3) * 2 * KBLK, ks & 7), I_32, ks > 0 ? 1u : 0u);
++      for (int ks = PAIR ? 8 * (int)rank : 0; ks < (PAIR ? 8 * (int)rank + 8 : 16); ++ks)
++        umma_ts(tmem + T_FF, tmem + T_WD + ks * 8, bdesc(su + O_H + (ks >> 3) * 2 * KBLK, ks & 7), I_32, ks > (PAIR ? 8 * (int)rank : 0) ? 1u : 0u);
+       tc_commit(&B.ffull);
+     }
+     __syncwarp();
+@@ -187,7 +210,7 @@ swa_ffn_fwd1t_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+     pdl_wait();
+     if (lane == 0) mbar_wait(&B.ofull, 0);
+     __syncwarp();
+-    if (lane < 2) { tma_store_4d(&mout, su + O_O + lane * KBLK, lane * 64, s0, b, 0); tma_store_commit(); tma_store_wait0(); }
++    if (PAIR ? lane == (int)rank : lane < 2) { tma_store_4d(&mout, su + O_O + lane * KBLK, lane * 64, s0, b, 0); tma_store_commit(); tma_store_wait0(); }
+     TRP(15, lane == 0);
+   } else if (warp >= 4) {
+     // ------------------------------------------------------------------------------------------------ row-stage threads
+@@ -286,8 +309,8 @@ swa_ffn_fwd1t_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+     if (qw == 0 && lane == 0) mbar_arrive(&B.yfull);
+     TRP(10, tid == 128);
+     // ---- P3: h = rn(silu(a) b) for hidden unit 128 hc + c
+-    for (int hc = 0; hc < 2; ++hc) {
+-      mbar_wait(&B.abfull, hc & 1);
++    for (int hc = PAIR ? (int)rank : 0; hc < (PAIR ? (int)rank + 1 : 2); ++hc) {
++      mbar_wait(&B.abfull, PAIR ? 0 : hc & 1);
+       TRP(11, tid == 128 && hc == 0);
+       tc_fence_after();
+       uint32_t aa[16], bb[16];
+@@ -316,8 +339,34 @@ swa_ffn_fwd1t_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constan
+       uint32_t fv[16];
+       tmem_ld16(tl + T_FF, fv);
+       tmem_wait_ld();
++#if PAIR
++      const bool mine = (c >> 6) == (int)rank;                             // this thread's channel is one of this CTA's outputs
++      const uint32_t xe = (uint32_t)O_XB + (uint32_t)(((c & 63) * 2 + wg) * XST * 4);
++      if (!mine) {                                                         // the peer's channel: the partial into its exchange tile
++        uint32_t xr;
++        asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(xr) : "r"(su + xe), "r"(peer));
++#pragma unroll
++        for (int q = 0; q < 4; ++q)
++          asm volatile("st.shared::cluster.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(xr + 16u * q), "r"(fv[4 * q]), "r"(fv[4 * q + 1]),
++                       "r"(fv[4 * q + 2]), "r"(fv[4 * q + 3]) : "memory");
++        mbar_arrive_remote(&B.xfull, peer);                                // release: the stores above
++      } else {
++        mbar_wait_cl(&B.xfull, 0);
++#pragma unroll
++        for (int q = 0; q < 4; ++q) {
++          const float4 p = *reinterpret_cast<const float4*>(sm + xe + 16 * q);
++          fv[4 * q] = __float_as_uint(__uint_as_float(fv[4 * q]) + p.x);
++          fv[4 * q + 1] = __float_as_uint(__uint_as_float(fv[4 * q + 1]) + p.y);
++          fv[4 * q + 2] = __float_as_uint(__uint_as_float(fv[4 * q + 2]) + p.z);
++          fv[4 * q + 3] = __float_as_uint(__uint_as_float(fv[4 * q + 3]) + p.w);
++        }
++#pragma unroll
++        for (int j = 0; j < 16; ++j) sts_bf16(ea(su + O_O, j), q1[j] + gfr[j] * rnb(__uint_as_float(fv[j])));
++      }
++#else
+ #pragma unroll
+       for (int j = 0; j < 16; ++j) sts_bf16(ea(su + O_O, j), q1[j] + gfr[j] * rnb(__uint_as_float(fv[j])));
++#endif
+     }
+     fence_proxy_async();
+     tc_fence_before();

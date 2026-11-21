@@ -1,0 +1,353 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu
+index 1be94a111..978b13175 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu
+@@ -106,6 +106,14 @@ struct Args {
+   const float *xpf = nullptr, *xlo = nullptr;
+   float* xout = nullptr;
+   int xg = 0, xnf = 0, xnl = 0, xR = 0;
++  // gbar != null (2026-11-18 part 9, B7M_GRF): grad_reduce in this launch behind a grid barrier (cooperative launch, every CTA
++  // resident): each CTA, after its tile(s) or extra-CTA blocks, arrives on gbar[0]; when all have, grad_reduce's 128-output blocks
++  // k = blockIdx.x, + gridDim.x, ... are summed here with grad_reduce_kernel's arithmetic (GR_W = 16 warps: the same bits) into xout;
++  // gbar[1] counts exits, the last CTA resets both words. gns: the tile CTAs (rows of dw1 / lnpart); gskip: the output-side regions
++  // were summed by the extra CTAs (xg > 0); wls: RoseTTAFold3's factor of dW_l or null.
++  uint32_t* gbar = nullptr;
++  const float* wls = nullptr;
++  int gns = 0, gskip = 0;
+ };
+ 
+ #ifndef B7M_TRIG
+@@ -118,6 +126,12 @@ struct Args {
+ #ifndef B7M_ML
+ #define B7M_ML 0   // 1: the loader's TMA loads issued by several lanes (2026-11-17 part 5: D64 L256 0.0954 -> 0.0974, hidden 128 L256 0.1323 -> 0.1342 ms; L128 level; not taken)
+ #endif
++#ifndef B7M_GRF_PROBE
++#define B7M_GRF_PROBE 0   // experiments: 1 barrier only (no sums: wrong gradients), 2 no __threadfence before the arrive
++#endif
++#ifndef B7M_GRF_COOP
++#define B7M_GRF_COOP 1   // B7M_GRF: the cooperative attribute (0: grid <= SMs at one CTA per SM, resident once the previous kernels retire)
++#endif
+ #ifndef B7M_PDL
+ #define B7M_PDL 1   // a programmatic dependent of the contraction backward: set-up, weights, xn / x / dy / dGout loads overlap its tail
+ #endif
+@@ -733,14 +747,73 @@ DEV void xreduce(const Args& a, uint8_t* sm) {
+   }
+ }
+ 
++// B7M_GRF: grad_reduce behind a grid barrier (see Args::gbar). Partials of this launch (dw1 / lnpart, generic stores) are read with
++// ld.global.cg after the acquire; b1's (xpf / xlo) are older.
++DEV void gr_fused(const Args& a, uint8_t* sm) {
++  __syncthreads();
++  if (threadIdx.x == 0) {
++    if (B7M_GRF_PROBE != 2) __threadfence();
++    asm volatile("red.release.gpu.global.add.u32 [%0], 1;" ::"l"(a.gbar) : "memory");
++    uint32_t v;
++    do { asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(a.gbar) : "memory"); } while (v < gridDim.x);
++  }
++  __syncthreads();
++  float4(*part)[32] = reinterpret_cast<float4(*)[32]>(sm);
++  const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
++  const int R = a.xR, D = C, RD = R * D;
++  const int total = 4 * RD + D * D + D * R + 2 * D + 2 * R;
++  const int nb = a.gskip ? (4 * RD + 2 * D) / 128 : total / 128;
++  const long long st_f = (long long)D * (D + R);
++  for (int k = (int)blockIdx.x; k < (B7M_GRF_PROBE == 1 ? 0 : nb); k += (int)gridDim.x) {
++    const int blk = (a.gskip && k >= 4 * RD / 128) ? k + (D * D + D * R) / 128 : k;
++    const int e = blk * 128 + 4 * lane;
++    const float* p;
++    long long st;
++    int n;
++    if (e < 4 * RD) {
++      const int kk = e / RD, r = (e % RD) / D, c = e % D, idx = (kk >> 1) * R + r;   // kk: wl, wlg, wr, wrg
++      p = a.dw1 + (long long)(128 * (idx >> 6) + ((kk & 1) ? 0 : 64) + (idx & 63)) * D + c;
++      st = 4LL * RD; n = a.gns;
++    } else if (e < 4 * RD + D * D) {
++      const int f = e - 4 * RD;
++      p = a.xpf + (long long)(f / D) * (D + R) + f % D; st = st_f; n = a.xnf;
++    } else if (e < 4 * RD + D * D + D * R) {
++      const int f = e - 4 * RD - D * D;
++      p = a.xpf + (long long)(f / R) * (D + R) + D + f % R; st = st_f; n = a.xnf;
++    } else if (e < 4 * RD + D * D + D * R + 2 * D) {
++      p = a.lnpart + (e - 4 * RD - D * D - D * R); st = 2 * D; n = a.gns;
++    } else {
++      p = a.xlo + (e - 4 * RD - D * D - D * R - 2 * D); st = 2 * R; n = a.xnl;
++    }
++    float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
++#pragma unroll 4
++    for (int i = w; i < n; i += 16) {
++      const float4 v = __ldcg(reinterpret_cast<const float4*>(p + i * st));
++      acc.x += v.x; acc.y += v.y; acc.z += v.z; acc.w += v.w;
++    }
++    part[w][lane] = acc;
++    __syncthreads();
++    if (w == 0) {
++      float4 t = make_float4(0.f, 0.f, 0.f, 0.f);
++#pragma unroll
++      for (int q = 0; q < 16; ++q) { const float4 v = part[q][lane]; t.x += v.x; t.y += v.y; t.z += v.z; t.w += v.w; }
++      if (a.wls && e < RD) { const float f = *a.wls; t.x *= f; t.y *= f; t.z *= f; t.w *= f; }   // RF3: dW_l = f dW_l'
++      *reinterpret_cast<float4*>(a.xout + e) = t;
++    }
++    __syncthreads();
++  }
++  if (threadIdx.x == 0 && atomicAdd(a.gbar + 1, 1u) == gridDim.x - 1) { a.gbar[0] = 0u; a.gbar[1] = 0u; }
++}
++
+ template <int NCH, int SMJ>
+ __global__ void __launch_bounds__(512, 1)
+     b7m_kernel(const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mda, const __grid_constant__ CUtensorMap mw1,
+                const __grid_constant__ CUtensorMap mgo, const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap mdx,
+                const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mdy, const Args a) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+-  if (a.xg && (int)blockIdx.x >= (int)gridDim.x - a.xg) { xreduce(a, sm); return; }
+-  b7m_body<NCH, SMJ, false>(mxn, mda, mw1, mgo, mwg, mdx, mx, mdy, a, sm, (int)blockIdx.x, (int)gridDim.x - a.xg, 0u, nullptr, 0u);
++  if (a.xg && (int)blockIdx.x >= (int)gridDim.x - a.xg) xreduce(a, sm);
++  else b7m_body<NCH, SMJ, false>(mxn, mda, mw1, mgo, mwg, mdx, mx, mdy, a, sm, (int)blockIdx.x, (int)gridDim.x - a.xg, 0u, nullptr, 0u);
++  if (a.gbar) gr_fused(a, sm);
+ }
+ 
+ }  // namespace b7m
+@@ -751,7 +824,8 @@ __global__ void __launch_bounds__(512, 1)
+ void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Tensor dpl, torch::Tensor dgout,
+                   c10::optional<torch::Tensor> tmask, torch::Tensor w1, torch::Tensor wg, torch::Tensor gi, torch::Tensor dx,
+                   torch::Tensor dw1, torch::Tensor lnpart, double eps, int64_t L, c10::optional<torch::Tensor> xpf, int64_t xnf,
+-                  c10::optional<torch::Tensor> xlo, int64_t xnl, c10::optional<torch::Tensor> xout, int64_t xg) {
++                  c10::optional<torch::Tensor> xlo, int64_t xnl, c10::optional<torch::Tensor> xout, int64_t xg,
++                  c10::optional<torch::Tensor> gbar, c10::optional<torch::Tensor> wls) {
+   using namespace b7m;
+   const int64_t M = x.size(0);
+   const int P = (int)tmap::chmajor_channels(dpl), NCH = P / 64;   // dpl [P, M] or sample-major [P / 64, B, 64, L, L]
+@@ -787,10 +861,33 @@ void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Te
+     a.xpf = xpf->data_ptr<float>(); a.xlo = xlo->data_ptr<float>(); a.xout = xout->data_ptr<float>();
+     a.xg = (int)xg; a.xnf = (int)xnf; a.xnl = (int)xnl; a.xR = R;
+   }
++  // gbar (B7M_GRF): grad_reduce fused; xpf / xlo / xout are then grad_reduce's pf / lo / out (needed with or without extra CTAs)
++  if (gbar.has_value()) {
++    TORCH_CHECK(xpf.has_value() && xlo.has_value() && xout.has_value() && grid + xg <= nsm, "b7m: fused grad_reduce needs xpf / xlo / xout");
++    TORCH_CHECK(gbar->scalar_type() == torch::kInt32 && gbar->numel() >= 2 && gbar->is_contiguous());
++    const int R = (int)(xlo->size(-1) / 2);
++    TORCH_CHECK(R % 64 == 0 && xpf->numel() >= xnf * C * (C + R) && xlo->numel() >= xnl * 2 * R &&
++                xout->numel() == 4 * R * C + C * C + C * R + 2 * C + 2 * R, "b7m: fused grad_reduce operands");
++    a.xpf = xpf->data_ptr<float>(); a.xlo = xlo->data_ptr<float>(); a.xout = xout->data_ptr<float>();
++    a.xnf = (int)xnf; a.xnl = (int)xnl; a.xR = R;
++    a.gbar = reinterpret_cast<uint32_t*>(gbar->data_ptr<int>());
++    a.gns = grid; a.gskip = xg > 0 ? 1 : 0;
++    if (wls.has_value()) { TORCH_CHECK(wls->scalar_type() == torch::kFloat32 && wls->numel() == 1); a.wls = wls->data_ptr<float>(); }
++  }
+   auto st = at::cuda::getCurrentCUDAStream();
+   auto run = [&](auto kern, int smem, bool& attr) {
+     if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem)); attr = true; }
+-    tmap::launch_pdl(kern, dim3(grid + a.xg), dim3(512), smem, st, B7M_PDL, mxn, mda, mw1, mgo, mwg, mdx, mx, mdy, a);
++    if (a.gbar) {   // cooperative (every CTA resident or the launch fails: the grid barrier) + programmatic dependent
++      cudaLaunchConfig_t cfg = {};
++      cfg.gridDim = dim3(grid + a.xg); cfg.blockDim = dim3(512); cfg.dynamicSmemBytes = smem; cfg.stream = st;
++      cudaLaunchAttribute at[2];
++      at[0].id = cudaLaunchAttributeCooperative; at[0].val.cooperative = 1;
++      at[1].id = cudaLaunchAttributeProgrammaticStreamSerialization; at[1].val.programmaticStreamSerializationAllowed = 1;
++      cfg.attrs = B7M_GRF_COOP ? at : at + 1; cfg.numAttrs = (B7M_GRF_COOP ? 1 : 0) + (B7M_PDL ? 1 : 0);
++      C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kern, mxn, mda, mw1, mgo, mwg, mdx, mx, mdy, a));
++    } else {
++      tmap::launch_pdl(kern, dim3(grid + a.xg), dim3(512), smem, st, B7M_PDL, mxn, mda, mw1, mgo, mwg, mdx, mx, mdy, a);
++    }
+   };
+   static bool attr[4] = {false, false, false, false};
+   if (NCH == 2) {
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/bind_b200.cpp b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/bind_b200.cpp
+index e98017640..a25fb72b5 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/bind_b200.cpp
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/bind_b200.cpp
+@@ -60,7 +60,8 @@ void b1s_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::
+ void b7m_backward(torch::Tensor x, torch::Tensor xn, torch::Tensor dy, torch::Tensor dpl, torch::Tensor dgout,
+                   c10::optional<torch::Tensor> tmask, torch::Tensor w1, torch::Tensor wg, torch::Tensor gi, torch::Tensor dx,
+                   torch::Tensor dw1, torch::Tensor lnpart, double eps, int64_t L, c10::optional<torch::Tensor> xpf, int64_t xnf,
+-                  c10::optional<torch::Tensor> xlo, int64_t xnl, c10::optional<torch::Tensor> xout, int64_t xg);
++                  c10::optional<torch::Tensor> xlo, int64_t xnl, c10::optional<torch::Tensor> xout, int64_t xg,
++                  c10::optional<torch::Tensor> gbar, c10::optional<torch::Tensor> wls);
+ void b1g_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::Tensor ds, torch::Tensor mean_o, torch::Tensor rs_o,
+                   torch::Tensor wg, torch::Tensor wp, torch::Tensor wpf, torch::Tensor go, torch::Tensor bo, torch::Tensor dg, torch::Tensor dtri,
+                   torch::Tensor part, torch::Tensor lnpart, torch::Tensor ring, torch::Tensor flags, int64_t L, int64_t nf);
+@@ -130,7 +131,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("b7m_backward", &b7m_backward, py::arg("x"), py::arg("xn"), py::arg("dy"), py::arg("dpl"), py::arg("dgout"), py::arg("tmask"),
+         py::arg("w1"), py::arg("wg"), py::arg("gi"), py::arg("dx"), py::arg("dw1"), py::arg("lnpart"), py::arg("eps"), py::arg("L"),
+         py::arg("xpf") = py::none(), py::arg("xnf") = 0, py::arg("xlo") = py::none(), py::arg("xnl") = 0, py::arg("xout") = py::none(),
+-        py::arg("xg") = 0);
++        py::arg("xg") = 0, py::arg("gbar") = py::none(), py::arg("wls") = py::none());
+   m.def("b1g_backward", &b1g_backward);
+   m.def("b7g_backward", &b7g_backward);
+   m.def("cgb_backward", &cgb_backward);
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_train.py b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_train.py
+index 6efd3fd03..09ff6a387 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_train.py
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_train.py
+@@ -82,6 +82,9 @@ CGB_MAX_L = 256
+ #: gradient partials while the tiles run; grad_reduce then sums only b7m's partials (2026-11-17 part 6)
+ B7M_XR = True
+ B7M_XG = 32
++#: b7m sums the parameter-gradient partials itself behind a grid barrier (cooperative launch; b7m.cu ``gr_fused``, the arithmetic and
++#: bits of grad_reduce): one launch fewer in the D64 backward (2026-11-18 part 9)
++B7M_GRF = True
+ #: the fused small-L backward (b7m.cu ``b7f``: b1u, cgb, b7m and grad_reduce as phases of one persistent launch) for D64 one direction
+ #: hidden 64 up to this length. Measured slower (D64 L128 0.0564 -> 0.0749 ms; b7m alone in the fused grid 0.0626): off, and the kernel is
+ #: only built with -DB7F_BUILD=1 (``b200_infer.DEFS``)
+@@ -983,10 +986,13 @@ def _backward_small_body(leaves, mask, ds, direction, saved, dy, dx, wl_scale=No
+             lnp_i = x.new_empty((nc, 2 * d), dtype=f32)
+             # b7m tiles leave SMs free (one tile per CTA): extra CTAs there sum the output-side partials (B7M_XR)
+             xg = min(nsm - ns, B7M_XG) if B7M_XR and ns < nsm else 0
++            grf = B7M_GRF and ns + xg <= nsm
+             E.b7m_backward(
+                 x2, xn, dy2, dpl if sm else dpl.view(p, m), dg, mask, w1, wg, gi, dx.view(m, d), part_i, lnp_i, EPS, n,
+-                part_o, rows_o, lnp_o, nl_o, grads, xg,
++                part_o, rows_o, lnp_o, nl_o, grads, xg, flags[FLAG_WORDS - 2 :] if grf else None, wl_scale if grf else None,
+             )
++            if grf:
++                return [dx, grads]
+         E.grad_reduce(part_o, rows_o, lnp_o, nl_o, part_i, ns, lnp_i, nc, grads, wl_scale, xg > 0)
+     return [dx, grads]
+ 
+diff --git a/_tools/bnd/bnd.cu b/_tools/bnd/bnd.cu
+new file mode 100644
+index 000000000..59bbd0f9b
+--- /dev/null
++++ b/_tools/bnd/bnd.cu
+@@ -0,0 +1,101 @@
++// boundary cost: a chain of N PDL launches (128 CTAs x 512 threads, 1 CTA/SM, TMEM alloc + mbarrier init per launch) vs one
++// cooperative launch with N-1 grid barriers. Each stage: thread 0 of each CTA spins `ns` ns (globaltimer), then reads its
++// neighbour CTA's previous-stage word and writes its own (a cross-CTA dependency).
++#include <torch/extension.h>
++#include <c10/cuda/CUDAStream.h>
++#include "sm100.cuh"
++using namespace sm100;
++
++DEV uint64_t gtime() { uint64_t t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
++DEV uint32_t ld_acq(const uint32_t* p) { uint32_t v; asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(p) : "memory"); return v; }
++
++DEV void stage_work(int s, int ns, int* buf, int G) {
++  if (threadIdx.x == 0) {
++    const uint64_t t0 = gtime();
++    while (gtime() - t0 < (uint64_t)ns) {}
++    const int v = s ? ((volatile int*)buf)[(s - 1) * G + (blockIdx.x + 1) % G] : 0;
++    buf[s * G + blockIdx.x] = v + 1;
++  }
++  __syncthreads();
++}
++
++DEV void grid_sync(uint32_t* bar, uint32_t G) {
++  __syncthreads();
++  if (threadIdx.x == 0) {
++    const uint32_t gen = ld_acq(bar + 1);
++    __threadfence();
++    if (atomicAdd(bar, 1u) == G - 1) { bar[0] = 0; __threadfence(); atomicAdd(bar + 1, 1u); }
++    else { while (ld_acq(bar + 1) == gen) {} }
++  }
++  __syncthreads();
++}
++
++struct Sh { uint64_t b[8]; uint32_t tmem; };
++
++__global__ void __launch_bounds__(512, 1) stage_k(int s, int ns, int* buf, int trig) {
++  extern __shared__ __align__(1024) uint8_t sm[];
++  Sh& S = *reinterpret_cast<Sh*>(sm);
++  if (trig) pdl_trigger();
++  if (threadIdx.x == 0) { for (int i = 0; i < 8; ++i) mbar_init(&S.b[i], 1); fence_mbar_init(); }
++  if (threadIdx.x / 32 == 2) { tmem_alloc(&S.tmem, 256); tmem_relinquish(); }
++  tc_fence_before(); __syncthreads(); tc_fence_after();
++  pdl_wait();
++  stage_work(s, ns, buf, gridDim.x);
++  tc_fence_before(); __syncthreads();
++  if (threadIdx.x / 32 == 2) tmem_dealloc(S.tmem, 256);
++}
++
++// monotonic counter: red.release arrive, ld.acquire poll until s * G; the last CTA out resets it (bar[2] counter, bar[3] exits)
++DEV void grid_sync2(uint32_t* bar, uint32_t target) {
++  __syncthreads();
++  if (threadIdx.x == 0) {
++    asm volatile("red.release.gpu.global.add.u32 [%0], 1;" ::"l"(bar) : "memory");
++    while (ld_acq(bar) < target) {}
++  }
++  __syncthreads();
++}
++
++__global__ void __launch_bounds__(512, 1) coop_k(int n, int ns, int* buf, uint32_t* bar, int mode) {
++  extern __shared__ __align__(1024) uint8_t sm[];
++  Sh& S = *reinterpret_cast<Sh*>(sm);
++  if (threadIdx.x == 0) { for (int i = 0; i < 8; ++i) mbar_init(&S.b[i], 1); fence_mbar_init(); }
++  if (threadIdx.x / 32 == 2) { tmem_alloc(&S.tmem, 256); tmem_relinquish(); }
++  tc_fence_before(); __syncthreads(); tc_fence_after();
++  pdl_wait();
++  for (int s = 0; s < n; ++s) {
++    if (s) { if (mode) grid_sync2(bar + 2, s * gridDim.x); else grid_sync(bar, gridDim.x); }
++    stage_work(s, ns, buf, gridDim.x);
++  }
++  if (mode && threadIdx.x == 0 && atomicAdd(bar + 3, 1u) == gridDim.x - 1) { bar[2] = 0; bar[3] = 0; }
++  tc_fence_before(); __syncthreads();
++  if (threadIdx.x / 32 == 2) tmem_dealloc(S.tmem, 256);
++}
++
++constexpr int SMEM = 200 * 1024;
++
++void chain(int64_t n, int64_t ns, torch::Tensor buf, int64_t G, int64_t pdl) {
++  static bool a = false;
++  if (!a) { cudaFuncSetAttribute(stage_k, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM); a = true; }
++  auto st = at::cuda::getCurrentCUDAStream();
++  for (int s = 0; s < n; ++s) {
++    cudaLaunchConfig_t cfg = {};
++    cfg.gridDim = dim3(G); cfg.blockDim = dim3(512); cfg.dynamicSmemBytes = SMEM; cfg.stream = st;
++    cudaLaunchAttribute at[1];
++    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; at[0].val.programmaticStreamSerializationAllowed = 1;
++    cfg.attrs = at; cfg.numAttrs = (pdl && s) ? 1 : 0;
++    C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, stage_k, (int)s, (int)ns, buf.data_ptr<int>(), (int)(pdl & 2 ? 1 : 0)));
++  }
++}
++
++void coop(int64_t n, int64_t ns, torch::Tensor buf, torch::Tensor bar, int64_t G, int64_t mode) {
++  static bool a = false;
++  if (!a) { cudaFuncSetAttribute(coop_k, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM); a = true; }
++  cudaLaunchConfig_t cfg = {};
++  cfg.gridDim = dim3(G); cfg.blockDim = dim3(512); cfg.dynamicSmemBytes = SMEM; cfg.stream = at::cuda::getCurrentCUDAStream();
++  cudaLaunchAttribute at[1];
++  at[0].id = cudaLaunchAttributeCooperative; at[0].val.cooperative = 1;
++  cfg.attrs = at; cfg.numAttrs = 1;
++  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, coop_k, (int)n, (int)ns, buf.data_ptr<int>(), (uint32_t*)bar.data_ptr<int>(), (int)mode));
++}
++
++PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("chain", &chain); m.def("coop", &coop); }
+diff --git a/_tools/bnd/bnd.py b/_tools/bnd/bnd.py
+new file mode 100644
+index 000000000..cce9efa1f
+--- /dev/null
++++ b/_tools/bnd/bnd.py
+@@ -0,0 +1,35 @@
++import os, statistics, sys
++import torch
++from torch.utils.cpp_extension import load
++here = os.path.dirname(os.path.abspath(__file__))
++inc = os.path.join(here, "../../src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources")
++E = load("bnd_r3tt2", [os.path.join(here, "bnd.cu")], extra_include_paths=[inc], extra_cuda_cflags=["-O3", "-gencode=arch=compute_100a,code=sm_100a", "-std=c++17"], verbose=False)
++G = 128
++buf = torch.zeros(64 * G, dtype=torch.int32, device="cuda")
++bar = torch.zeros(4, dtype=torch.int32, device="cuda")
++def t_graph(fn, it=200):
++    s = torch.cuda.Stream(); s.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(s):
++        fn()
++    torch.cuda.synchronize()
++    g = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(g):
++        fn()
++    for _ in range(10): g.replay()
++    torch.cuda.synchronize()
++    res = []
++    for _ in range(5):
++        a, b = torch.cuda.Event(True), torch.cuda.Event(True)
++        a.record()
++        for _ in range(it): g.replay()
++        b.record(); torch.cuda.synchronize()
++        res.append(a.elapsed_time(b) * 1000 / it)
++    return statistics.median(res)
++for ns in (0, 2000):
++    for n in (1, 2, 4, 8):
++        c0 = t_graph(lambda: E.chain(n, ns, buf, G, 0))
++        c1 = t_graph(lambda: E.chain(n, ns, buf, G, 1))
++        c3 = t_graph(lambda: E.chain(n, ns, buf, G, 3))
++        k = t_graph(lambda: E.coop(n, ns, buf, bar, G, 0))
++        k2 = t_graph(lambda: E.coop(n, ns, buf, bar, G, 1))
++        print(f"[bnd] work {ns:5d} ns stages {n}: chain plain {c0:6.2f}  pdl {c1:6.2f}  pdl+trig {c3:6.2f}  coop {k:6.2f}  coop-mono {k2:6.2f} us per replay", flush=True)

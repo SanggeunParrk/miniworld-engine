@@ -1,0 +1,295 @@
+diff --git a/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu b/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
+index a08c24fd7..d9cc2bce9 100644
+--- a/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
++++ b/src/miniworld_engine/kernels/conditioned_transition/cuda/token_dit_train_rows_sm100.cu
+@@ -388,6 +388,63 @@ void final_rest100(std::vector<at::Tensor> outs, std::vector<bool> fill, at::Ten
+   C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
++// ---- the conditioning gradient of ONE conditioning shared by the A samples (2026-11-18, part 10) ----
++// dc[l] = sum over the samples s of (LN_bwd(dchat[s L + l]) + dcg[s L + l]) in fp32, rounded once: what cond_bwd + the caller's
++// expand backward (a sum over the samples of the A rounded rows: one more launch on the step's tail) computed. Block (NTC, SY): row y
++// of the block takes the samples y, y + SY, ... in order, then the SY partial rows are added in y order (bitwise repeatable).
++template <typename CT, typename OT, typename AT, int SY>
++__global__ void __launch_bounds__(NTC * SY) cond_bwd_shared100_k(const AT* __restrict__ DCHAT, const AT* __restrict__ DCG,
++    const CT* __restrict__ C, const float2* __restrict__ CST, OT* __restrict__ DCO, int L, int A) {
++  constexpr int NW = NTC / 32;
++  __shared__ float red[SY][NW][2];
++  __shared__ float4 accs[SY][NTC];
++  const int tx = threadIdx.x, y = threadIdx.y, col = tx * 4, warp = tx / 32, lane = tx % 32, l = blockIdx.x;
++  const float4 c = V4<CT>::load(C + (long)l * DC + col);
++  float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
++  for (int s0 = 0; s0 < A; s0 += SY) {
++    const long r = (long)(s0 + y) * L + l;
++    const float4 dch = V4<AT>::load(DCHAT + r * DC + col), dcg = V4<AT>::load(DCG + r * DC + col);
++    const float2 st = CST[r];
++    const float4 ch = make_float4((c.x - st.x) * st.y, (c.y - st.x) * st.y, (c.z - st.x) * st.y, (c.w - st.x) * st.y);
++    const float a1 = warp_sum(sum4(dch)), a2 = warp_sum(sum4(mul4(dch, ch)));
++    if (lane == 0) { red[y][warp][0] = a1; red[y][warp][1] = a2; }
++    __syncthreads();
++    float m1 = 0.f, m2 = 0.f;
++#pragma unroll
++    for (int w = 0; w < NW; ++w) { m1 += red[y][w][0]; m2 += red[y][w][1]; }
++    m1 /= DC; m2 /= DC;
++    __syncthreads();
++    acc = add4(acc, make_float4(st.y * (dch.x - m1 - ch.x * m2) + dcg.x, st.y * (dch.y - m1 - ch.y * m2) + dcg.y,
++                                st.y * (dch.z - m1 - ch.z * m2) + dcg.z, st.y * (dch.w - m1 - ch.w * m2) + dcg.w));
++  }
++  if (SY > 1) {
++    accs[y][tx] = acc;
++    __syncthreads();
++    if (y != 0) return;
++#pragma unroll
++    for (int j = 1; j < SY; ++j) acc = add4(acc, accs[j][tx]);
++  }
++  V4<OT>::store(DCO + (long)l * DC + col, acc);
++}
++void cond_bwd_shared100(at::Tensor dchat, at::Tensor dcg, at::Tensor c, at::Tensor cst, at::Tensor dc, int64_t A) {
++  const long M = dchat.size(0), L = dc.numel() / DC;
++  TORCH_CHECK(dc.is_contiguous() && dc.numel() == L * DC && M == A * L && dchat.is_contiguous() && dcg.is_contiguous() &&
++              dchat.size(1) == DC && dcg.size(1) == DC && c.stride(-1) == 1 && c.stride(-2) == DC && c.size(-2) == L &&
++              cst.numel() == 2 * M, "cond_bwd_shared: dchat / dcg [A L, DC], c [.., L, DC] (sample 0 read), dc [L, DC]");
++  const at::cuda::CUDAGuard g(c.device());
++  const int sy = A % 8 == 0 ? 8 : A % 4 == 0 ? 4 : A % 2 == 0 ? 2 : 1;
++  TDT_DISPATCH(dchat.scalar_type(), AT, [&] { TDT_DISPATCH(c.scalar_type(), CT, [&] { TDT_DISPATCH(dc.scalar_type(), OT, [&] {
++    auto go = [&](auto k, int s) {
++      k<<<(int)L, dim3(NTC, s), 0, S()>>>(CP<AT>(dchat), CP<AT>(dcg), CP<CT>(c), CP<float2>(cst), P<OT>(dc), (int)L, (int)A);
++    };
++    if (sy == 8) go(cond_bwd_shared100_k<CT, OT, AT, 8>, 8);
++    else if (sy == 4) go(cond_bwd_shared100_k<CT, OT, AT, 4>, 4);
++    else if (sy == 2) go(cond_bwd_shared100_k<CT, OT, AT, 2>, 2);
++    else go(cond_bwd_shared100_k<CT, OT, AT, 1>, 1);
++  }); }); });
++  C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++
+ // replace the shared binding ``name`` (module_::def would add an overload behind it)
+ template <typename F, typename... Extra>
+ void rebind(pybind11::module_& m, const char* name, F&& f, const Extra&... extra) {
+@@ -409,4 +466,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("final_lnw100", &final_lnw100);
+   m.def("final_reduce100", &final_reduce100);
+   m.def("final_rest100", &final_rest100);
++  m.def("cond_bwd_shared100", &cond_bwd_shared100);
+ }
+diff --git a/src/miniworld_engine/kernels/integrations/token_dit_train.py b/src/miniworld_engine/kernels/integrations/token_dit_train.py
+index 3298606b6..b4d795266 100644
+--- a/src/miniworld_engine/kernels/integrations/token_dit_train.py
++++ b/src/miniworld_engine/kernels/integrations/token_dit_train.py
+@@ -203,11 +203,39 @@ _STREAMS = os.environ.get("MINIWORLD_TOKEN_B200_STREAMS", "1") != "0"
+ #: B200: weight gradients straight into their leaves, the rest of the final gradients beside the chain (``_final_b200``; 0: one final kernel)
+ _FINAL_B200 = os.environ.get("MINIWORLD_TOKEN_B200_FINAL", "1") != "0"
+ #: B200 bf16, one sample (2026-11-17, part 7): attn_dkv reads the bias as stored (``sm100.backward(bias_nt=True)``, -DBIASNT=1) -- no
+-#: bias_transpose launch on the backward chain (the same values). MINIWORLD_TOKEN_B200_BIASNT=0: the transpose as before
+-_BIASNT_B200 = os.environ.get("MINIWORLD_TOKEN_B200_BIASNT", "1") != "0"
++#: bias_transpose launch on the backward chain (the same values). MINIWORLD_TOKEN_B200_BIASNT=0: the transpose as before.
++#: Part 10 (2026-11-18): 2 -- every sample count (the bias is shared by the samples: attn_dkv's bias tile does not depend on the sample)
++_BIASNT_B200 = int(os.environ.get("MINIWORLD_TOKEN_B200_BIASNT", "2"))
+ #: B200 bf16 training (part 7): attn_dqb on side stream 2 beside attn_dkv (both read only their inputs; dQ / dbias joined before
+ #: qknorm_bwd / the pair backward). The two grids are heads x (L / 128)^2 and A heads L / 128 work items: 16 + 16 CTAs at L 128.
+ _DQB_SIDE_B200 = os.environ.get("MINIWORLD_TOKEN_B200_DQB_SIDE", "1") != "0"
++#: B200 training, one conditioning shared by the samples (part 10): its gradient summed over the samples in the conditioning backward
++#: (``cond_bwd_shared100``), no expand-backward reduction after the step (MINIWORLD_TOKEN_B200_SHC=0: as before)
++_SHC_B200 = os.environ.get("MINIWORLD_TOKEN_B200_SHC", "0") != "0"
++#: B200 bf16 training (part 10): attn_fwd2 / attn_dkv built -DPDLW=1 and launched as programmatic dependents (APB v20) -- their prologue
++#: (barriers, TMEM, tensormap prefetch) under the previous kernel's tail (MINIWORLD_TOKEN_B200_PDL=0: plain launches)
++_PDL_B200 = os.environ.get("MINIWORLD_TOKEN_B200_PDL", "1") != "0"
++#: B200 training (part 10): the weight gradients of q | k | v | g, expand a | b and both to_scale leaves as ONE GEMM each, written
++#: into one buffer whose row blocks are the leaves (MINIWORLD_TOKEN_B200_WGM=0: one GEMM per leaf)
++_WGM_B200 = os.environ.get("MINIWORLD_TOKEN_B200_WGM", "0") != "0"
++#: B200 training (part 10): the to_scale weight gradients issued on side stream 0 right after dWo (dGg is complete there) instead of
++#: behind the q | k | v | g weight gradients at the end of side stream 2
++_GEARLY_B200 = os.environ.get("MINIWORLD_TOKEN_B200_GEARLY", "0") != "0"
++
++
++def _grouped(lf, ns):
++    """B200 (part 10): the leaves ``ns`` of ``lf`` (same trailing shape, all present) re-made as consecutive row blocks of ONE fp32 buffer,
++    returned for a single GEMM to write (the per-leaf GEMMs and the final kernels write the same views); None otherwise (lf unchanged)."""
++    if not all(n in lf for n in ns) or len({lf[n].shape[1:] for n in ns}) != 1 or any(lf[n].dim() != 2 for n in ns):
++        return None
++    t0 = lf[ns[0]]
++    buf = torch.empty(sum(lf[n].shape[0] for n in ns), t0.shape[1], device=t0.device, dtype=t0.dtype)
++    r = 0
++    for n in ns:
++        k = lf[n].shape[0]
++        lf[n] = buf[r : r + k]
++        r += k
++    return buf
+ 
+ 
+ class _Side:
+@@ -971,7 +999,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, extra=None,
+         sd.join()  # the bias and Gg are in
+         if not fp32 and mask is not None and not _pair_fused(h100, fp32, dpw):  # (the one-pass pair_bias wrote the mask)
+             bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
+-        O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
++        O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH, pdl=_PDL_B200)
+         og = torch.empty(M, D, device=dev, dtype=at)
+         T.gate_o(O, qkvg, og)
+     Wo = W["Wo"]
+@@ -1286,6 +1314,11 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+     par, up = bool(v[0]), bool(v[4])
+     if qk:
+         qkm = 1
++    # one conditioning for the A samples (``block``, B200 part 10): the kernels read it expanded; d cond is summed over the samples
++    shared = cond.shape[0] == 1 and single.shape[0] > 1
++    cbase = cond
++    if shared:
++        cond = cond.expand(single.shape[0], *cond.shape[1:])
+     mm, mm32, _addmm = _owned_gemms90(single)
+     from miniworld_engine.kernels.augmented_attention import cuda as sm90
+     from miniworld_engine.kernels.augmented_attention.cuda import sm100
+@@ -1378,6 +1411,11 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+         and all(p.dtype is torch.float32 and p.is_contiguous() for p in params)
+         else None
+     )
++    abn = ["transition.expand_a.weight", "transition.expand_b.weight", *([UP_LEAF[0]] if up else [])]
++    qkvgn = ["attention.to_query.weight", "attention.to_key.weight", "attention.to_value.weight", "attention.to_gate.weight"]
++    gn = ["attention.to_scale.weight", "transition.to_scale.weight"]
++    # B200 (part 10): leaves of one weight-gradient GEMM as row blocks of one buffer (``_WGM_B200``); None: one GEMM per leaf
++    wg = {k: _grouped(lf, ns) if lf is not None and _WGM_B200 else None for k, ns in (("ab", abn), ("qkvg", qkvgn), ("g", gn))}
+     # per-block column sums: bg2 bs2 bg1 bs1 bq | dwq dwk (per head); rows: the row kernels' block count (T.part_rows)
+     # (the flat q / k LayerNorm: dwq dwk dbq dbk, [D] each)
+     allp = torch.empty(T.part_rows(M, fp32), (9 if qkm == 2 else 7) * D, device=dev)
+@@ -1401,8 +1439,10 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+     # GEMMs return a fresh tensor, which the row kernels copy as before
+     direct = fp32 and mm is torch.mm
+     dxt = torch.mm(dab, Wab, out=dG[:, 3 * D :]) if direct else mm(dab, Wab)
+-    if lf is not None:  # expand_a | expand_b (| the up gate): one GEMM per leaf
+-        abn = ["transition.expand_a.weight", "transition.expand_b.weight", *([UP_LEAF[0]] if up else [])]
++    if lf is not None and wg["ab"] is not None and wg["ab"].shape[0] == dab.shape[1]:  # the leaves are the buffer's row blocks
++        sd.run(0, lambda: _mm32(dab.t(), xt, out=wg["ab"]))
++        dWab = None
++    elif lf is not None:  # expand_a | expand_b (| the up gate): one GEMM per leaf
+         sd.run(0, lambda: [_mm32(dab[:, i * nexp * D : (i + 1) * nexp * D].t(), xt, out=lf[n]) for i, n in enumerate(abn)])
+         dWab = None
+     else:
+@@ -1418,6 +1458,17 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+         dWo = None
+     else:
+         dWo = sd.run(0, lambda: mm32(dy.t(), og))
++    cg = c2 if cbf.numel() == 0 else cbf
++
++    def g_leaves(k):  # both to_scale leaves (lf): dGg -- complete after res_adaln_b_bwd -- against the conditioning rows, on side stream k
++        if wg["g"] is not None and wg["g"].shape[0] == dGg.shape[1]:
++            sd.run(k, lambda: _mm32(dGg.t(), cg, out=wg["g"]))
++        else:
++            sd.run(k, lambda: [_mm32(dGg[:, i * D : (i + 1) * D].t(), cg, out=lf[n]) for i, n in enumerate(gn)])
++
++    g_early = lf is not None and _GEARLY_B200  # (part 10) on stream 0 after dWo, not at the end of stream 2's q | k | v | g GEMMs
++    if g_early:
++        g_leaves(0)
+     dob = torch.empty(M, D, device=dev, dtype=at)
+     dd = torch.empty(A, H, L, device=dev)
+     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
+@@ -1462,8 +1513,9 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+                 H,
+                 DH,
+                 det=True,
+-                bias_nt=_BIASNT_B200,
++                bias_nt=_BIASNT_B200 >= 2 or (_BIASNT_B200 == 1 and A == 1),
+                 side=(lambda fn: sd.run(2, fn), lambda: sd.wait(2)) if _DQB_SIDE_B200 else None,
++                pdl=_PDL_B200,
+             )
+         )
+ 
+@@ -1479,8 +1531,10 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+     early = sd.run(1, pair_bwd) if not h100 and (fp32 or _pair_fused(h100, fp32, dpw)) else None
+     T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qkm)
+     dxa = torch.mm(dqkvg, Wqkvg, out=dG[:, D : 2 * D]) if direct else mm(dqkvg, Wqkvg)
+-    if lf is not None:
+-        qkvgn = ["attention.to_query.weight", "attention.to_key.weight", "attention.to_value.weight", "attention.to_gate.weight"]
++    if lf is not None and wg["qkvg"] is not None and wg["qkvg"].shape[0] == dqkvg.shape[1]:  # the leaves are the buffer's row blocks
++        sd.run(2, lambda: _mm32(dqkvg.t(), xa, out=wg["qkvg"]))
++        dWqkvg = None
++    elif lf is not None:
+         sd.run(2, lambda: [_mm32(dqkvg[:, i * D : (i + 1) * D].t(), xa, out=lf[n]) for i, n in enumerate(qkvgn)])
+         dWqkvg = None
+     else:
+@@ -1505,9 +1559,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+             fin, keep = _final_b200(T, sd, lf, names, qk, W, Pd, allp, dWn, early, D)
+         else:
+             fin, keep = _rest_b200(T, sd, lf, names, W, Pd, sums, dWn, early, qkm, D, H, DH)
+-        cg = c2 if cbf.numel() == 0 else cbf
+-        gn = ["attention.to_scale.weight", "transition.to_scale.weight"]
+-        sd.run(2, lambda: [_mm32(dGg[:, i * D : (i + 1) * D].t(), cg, out=lf[n]) for i, n in enumerate(gn)])
++        if not g_early:
++            g_leaves(2)
+         dWg = None
+     else:
+         dWg = sd.run(0, lambda: mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf))
+@@ -1520,16 +1573,25 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+         dchat = mm(dG, Wn)
+     dcg = mm(dGg, Wg)
+     dc = torch.empty(M, cond.shape[-1], device=dev, dtype=cdt)
++
++    def dcout(dc):  # d cond in the caller's shape: a shared conditioning's rows summed over the samples
++        return dc.view(A, 1, L, cond.shape[-1]).sum(0, keepdim=True) if shared else dc.view(cond.shape)
++
+     if fin is not None:  # B200: every leaf written beside the chain (``_final_b200`` / ``_rest_b200``)
+-        if opt & 1:  # the identity AdaLN: the raw conditioning (no LayerNorm of it)
++        if shared and not opt & 1:  # one conditioning for the samples: the LN backward of every sample summed in one pass
++            dc = torch.empty(cbase.shape, device=dev, dtype=cdt)
++            T.cond_bwd_shared100(dchat, dcg, cbase, cst, dc, A)
++        elif opt & 1:  # the identity AdaLN: the raw conditioning (no LayerNorm of it)
+             dc.copy_((dchat.float() + dcg.float()).view_as(dc))
++            dc = dcout(dc)
+         else:
+             T.cond_bwd90(dchat, dcg, cond, cst, dc)
++            dc = dcout(dc)
+         assert early is not None
+         dpair, _ = early
+         sd.join()
+         del keep  # (read by the side streams until the join)
+-        return [dx.view(A, 1, L, D), dc.view(cond.shape), dpair.view(1, L, L, dpw), *fin, *_xgrad(DB, extra, H, L)]
++        return [dx.view(A, 1, L, D), dc, dpair.view(1, L, L, dpw), *fin, *_xgrad(DB, extra, H, L)]
+     # (the weight-gradient buffers of the paths below: ``lf`` is None there)
+     assert dWsq is not None and dWab is not None and dWo is not None and dWqkvg is not None and dWg is not None and dWn is not None
+     if nfinal:
+@@ -1555,7 +1617,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+             outs = [*outs, dWab[2 * nexp * D :].to(params[len(outs)].dtype, copy=True)]
+         return [
+             dx.view(A, 1, L, D),
+-            dc.view(cond.shape),
++            dcout(dc),
+             dpair.view(1, L, L, dpw),
+             *outs,
+             *_xgrad(DB, extra, H, L),
+@@ -1625,13 +1687,15 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
+     torch._foreach_copy_(  # pyright: ignore[reportPrivateImportUsage]  -- torch internal, on purpose
+         outs, [grads[n].reshape(p.shape) for n, p in zip(names, params, strict=False)]
+     )
+-    return [dx.view(A, 1, L, D), dc.view(cond.shape), dpair.view(1, L, L, dpw), *outs, *_xgrad(DB, extra, H, L)]
++    return [dx.view(A, 1, L, D), dcout(dc), dpair.view(1, L, L, dpw), *outs, *_xgrad(DB, extra, H, L)]
+ 
+ 
+ class _Block(torch.autograd.Function):
+     @staticmethod
+     def forward(ctx, single, cond, pair, mask, qk, eq, ek, fp32, heads, extra, variant, *params):
+-        out, *saved = _fwd(single, cond, pair, mask, list(params), qk, eq, ek, fp32, heads, extra, variant)
++        # one conditioning for the A samples (``block``, B200): the kernels read it expanded (stride 0); its gradient is [1, 1, L, cond]
++        ce = cond.expand(single.shape[0], *cond.shape[1:]) if cond.shape[0] == 1 and single.shape[0] > 1 else cond
++        out, *saved = _fwd(single, ce, pair, mask, list(params), qk, eq, ek, fp32, heads, extra, variant)
+         ctx.save_for_backward(single, cond, pair, *params, *saved, extra)
+         ctx.meta = (mask, qk, eq, ek, fp32, len(params), heads, extra is not None and ctx.needs_input_grad[9], variant)
+         return out
+@@ -1717,6 +1781,19 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None, extra=None)
+         cond,
+         pair,
+     )  # the caller's tensors: the native hooks attach to their autograd edges, not the pads'
++    if (
++        _SHC_B200
++        and not padded
++        and A > 1
++        and cond.shape[0] == A
++        and cond.stride(0) == 0
++        and not _sm90(single.device)
++        and torch.cuda.get_device_capability(single.device) == (10, 0)
++    ):
++        # B200 (2026-11-18, part 10): ONE conditioning expanded over the samples (stride 0: a shared conditioning) enters the block as
++        # its [1, 1, L, cond] base -- the backward sums its gradient over the samples itself (``cond_bwd_shared100``) instead of
++        # returning A rows for autograd's expand backward (a reduction launch on the step's tail)
++        cond = cond[:1]
+     if padded:
+         single, cond, pair, mask = _pad(single, cond, pair, mask, Ap, Lp)
+         if extra is not None:

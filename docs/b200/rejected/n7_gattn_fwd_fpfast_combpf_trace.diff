@@ -1,0 +1,161 @@
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_fwd.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_fwd.cu (with the rejected variants)
+@@ -67,9 +67,16 @@
+ #ifndef FPCNT
+ #define FPCNT (F32IO ? 1 : 0)
+ #endif
++template <bool V> struct BoolC { static constexpr bool value = V; };
+ #ifndef CMBS
+-#define CMBS (F32IO ? 0 : 2)             // N7: split-mode combine through shared-memory staging, CMBS foreign pieces a round (0: off; F32IO: its staging does not fit beside the raw tiles, and measured level)
++#define CMBS 0                           // N7: split-mode combine through shared-memory staging, CMBS pieces a round (0: off)
+ #endif
++#ifndef COMBPF
++#define COMBPF 0                         // N7: split-mode combine: partials of COMBPF pieces loaded at once (0: one piece a round trip)
++#endif
++#ifndef FPFAST
++#define FPFAST 0                         // N7: 1 = the polynomial exponentials of an UNMASKED block (every score finite, exponent in [-8.2, 8.2]) without the
++#endif                                   // -126 clamp and the masked-entry selects (8 instead of ~17 issue slots a pair)
+ DEVI f2 fsub2(f2 a, f2 b) { f2 r; asm("sub.rn.f32x2 %0, %1, %2;" : "=l"(r.v) : "l"(a.v), "l"(b.v)); return r; }
+ // 2^x of a pair on the FMA pipe (gattn_bwd.cu ex2_poly2); x >= -126 (callers clamp; masked -inf entries selected to 0 after)
+ DEVI f2 fex2_poly2(f2 x) {
+@@ -84,7 +91,11 @@
+ #ifndef TRACE
+ #define TRACE 0                          // -DTRACE=1: clock64 stamps of CTA 0 into TRb[16 G + k] (k < 8: softmax row 0 of warpgroup 0; 8 ..: its MMA warp)
+ #endif
+-#define EV(k) do { if (TRACE && blockIdx.x == 0 && w == 0 && r == 0 && G < 128) TRb[16 * G + (k)] = clock64(); } while (0)
++#ifndef TRCTA
++#define TRCTA 0                          // N7: the CTA whose timeline TRACE records
++#endif
++#define EV(k) do { if (TRACE && blockIdx.x == TRCTA && w == 0 && r == 0 && G < 128) TRb[16 * G + (k)] = clock64(); } while (0)
++#define EV2(k) do { if (TRACE && blockIdx.x == TRCTA && w == 0 && r == 0) TRb[2043 + (k)] = clock64(); } while (0)
+ #define EVM(k, g) do { if (TRACE && blockIdx.x == 0 && w == 0 && lane == 0 && (g) < 128) TRb[16 * (g) + (k)] = clock64(); } while (0)
+ DEVI void cp_async16(uint32_t d, const void* s) { asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(d), "l"(s) : "memory"); }
+ DEVI void cp_async_wait_all() { asm volatile("cp.async.commit_group;\ncp.async.wait_group 0;" ::: "memory"); }
+@@ -179,6 +190,7 @@
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+   int* PF = reinterpret_cast<int*>(sm + O_PF);                             // split: key-block prefix over the samples [N + 1]
+   int4* PL = reinterpret_cast<int4*>(sm + O_PL);                           // split: this CTA's pieces {n, item of the sample, b0, nb}
++  if (TRACE && blockIdx.x == TRCTA && threadIdx.x == 0) { TRb[2040] = clock64(); { unsigned long long gt; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(gt)); TRb[2059] = gt; } }
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int mt = S / QM, npt = (mt + 1) >> 1;
+   // CL > 1: a cluster takes CL consecutive tile pairs of one (sample, head) at a time -- the same K | V block sequence, each CTA loading
+@@ -460,10 +472,13 @@
+           for (int j = 0; j < BN; ++j) v[j] = j < kv ? v[j] : 0xff800000u;
+         }
+         tc_fence_after();                                                  // keeps the exp turn's arithmetic after it (without: +4 - 6 %)
++        const bool unmasked = sq - (P.b0 + b) * BN >= BN;                  // warp-uniform (sq, b are per item)
+         EV(3);
+         if (PP) named_bar_sync(3 + w, 256);                                // my exp turn: the other warpgroup's exps are done
+         EV(4);
+         f2 ssp[4] = {mk2(0.f, 0.f), mk2(0.f, 0.f), mk2(0.f, 0.f), mk2(0.f, 0.f)};
++        auto expcc = [&](auto uc) {
++          constexpr bool UNM = decltype(uc)::value;
+ #pragma unroll
+         for (int cc = 0; cc < BN / 32; ++cc) {                              // 32 keys -> 16 packed P columns
+           uint32_t pk[16];
+@@ -480,6 +495,10 @@
+               continue;
+             }
+             float p0, p1;
++            if (FPFAST && UNM && FPCNT > 0 && (k % FPMOD) < FPCNT) {
++              const f2 pe = fex2_poly2(e);
++              p0 = lo2(pe); p1 = hi2(pe);
++            } else
+             if (FPCNT > 0 && (k % FPMOD) < FPCNT) {                        // FMA pipe; masked (-inf) entries 0
+               const float x0 = lo2(e), x1 = hi2(e);
+               const f2 pe = fex2_poly2(mk2(fmaxf(x0, -126.f), fmaxf(x1, -126.f)));
+@@ -493,6 +512,8 @@
+           }
+           tmem_st16(trow + t_p(w, G & 1) + cc * 16, pk);
+         }
++        };
++        if (FPFAST && unmasked) expcc(BoolC<true>{}); else expcc(BoolC<false>{});
+         EV(5);
+         if (PP) named_bar_arrive(4 - w, 256);                              // hand the MUFU to the other warpgroup
+         const f2 ss = add2(add2(ssp[0], ssp[1]), add2(ssp[2], ssp[3]));
+@@ -507,8 +528,10 @@
+           mbar_wait(&B.o_done[w], li & 1);
+           tc_fence_after();
+           uint32_t ov[DH];
++          EV2(0);
+           tmem_ld32(trow + t_o(w), ov);
+           tmem_wait_ld();
++          EV2(1);
+           tc_fence_before();
+           __syncwarp();
+           if (lane == 0) mbar_arrive(&B.o_free[w]);
+@@ -575,9 +598,11 @@
+                                                                               __uint_as_float(ov[4 * q + 2]), __uint_as_float(ov[4 * q + 3])));
+             __stcg(wo + QM * DH + r, l_i);
+             __threadfence();
++            EV2(2);
+             named_bar_sync(1 + w, 128);
+             if (r == 0) B.last[w] = atomicAdd(CNT + 2 * P.it + w, 1) == P.c1 - P.c0;
+             named_bar_sync(1 + w, 128);
++            EV2(3);
+             if (!*reinterpret_cast<volatile int*>(&B.last[w])) continue;     // not the last piece: nothing to store
+             __threadfence();
+             // every piece's partial from WS, this one's included (written above): ov / l_i are free accumulators, CTA order
+@@ -631,7 +656,37 @@
+               }
+             }
+ #else
++#if COMBPF
++            // N7: the pieces' partials loaded COMBPF at a time (all loads in flight, then added in CTA order: the same fp32 adds, bitwise the same
++            // result; one load round trip a piece took 3.8 us of the 66 at N 1 S 6144)
++            for (int cc0 = P.c0; cc0 <= P.c1; cc0 += COMBPF) {
++              float4 pa[COMBPF][8];
++              float pl[COMBPF];
++#pragma unroll
++              for (int j = 0; j < COMBPF; ++j) {
++                if (cc0 + j <= P.c1) {
++                  const int cc = cc0 + j;
++                  const float* src = WS + ((size_t)(cc * 2 + (start_of(cc) >= P.ist ? 0 : 1)) * 2 + w) * WSF;
++#pragma unroll
++                  for (int q = 0; q < 8; ++q) pa[j][q] = __ldcg(reinterpret_cast<const float4*>(src + r * DH + 4 * q));
++                  pl[j] = __ldcg(src + QM * DH + r);
++                }
++              }
++#pragma unroll
++              for (int j = 0; j < COMBPF; ++j) {
++                if (cc0 + j <= P.c1) {
++#pragma unroll
++                  for (int q = 0; q < 8; ++q) {
++                    ov[4 * q] = __float_as_uint(__uint_as_float(ov[4 * q]) + pa[j][q].x); ov[4 * q + 1] = __float_as_uint(__uint_as_float(ov[4 * q + 1]) + pa[j][q].y);
++                    ov[4 * q + 2] = __float_as_uint(__uint_as_float(ov[4 * q + 2]) + pa[j][q].z); ov[4 * q + 3] = __float_as_uint(__uint_as_float(ov[4 * q + 3]) + pa[j][q].w);
++                  }
++                  l_i += pl[j];
++                }
++              }
++            }
++#else
+             for (int cc = P.c0; cc <= P.c1; ++cc) {
++              EV2(6 + min(cc - P.c0, 3));
+               const float* src = WS + ((size_t)(cc * 2 + (start_of(cc) >= P.ist ? 0 : 1)) * 2 + w) * WSF;
+ #pragma unroll
+               for (int q = 0; q < 8; ++q) {
+@@ -640,9 +695,12 @@
+                 ov[4 * q + 2] = __float_as_uint(__uint_as_float(ov[4 * q + 2]) + x.z); ov[4 * q + 3] = __float_as_uint(__uint_as_float(ov[4 * q + 3]) + x.w);
+               }
+               l_i += __ldcg(src + QM * DH + r);
++              EV2(10 + min(cc - P.c0, 3));
+             }
+ #endif
++#endif
+             if (r == 0) CNT[2 * P.it + w] = 0;                              // every piece has counted: ready for the next launch
++            EV2(4);
+           }
+           const bool ok = i < sq && l_i > 0.f;
+           const float inv = ok ? 1.f / l_i : 0.f;
+@@ -676,9 +734,11 @@
+       }
+     }
+     if (r == 0) tma_store_wait0();
++    EV2(5);
+   }
+   tc_fence_before();
+   __syncthreads();
+   if (CL > 1 || CSPLIT) cluster_sync();                                    // CSPLIT: no rank exits while its peers may still write it
+   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
++  if (TRACE && blockIdx.x == TRCTA && threadIdx.x == 0) { TRb[2041] = clock64(); unsigned long long gt; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(gt)); TRb[2060] = gt; }
+ }

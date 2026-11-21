@@ -1,0 +1,215 @@
+--- /tmp/claude-1019/-home-psk6950-miniworld-engine/c6d88caf-785a-4514-a99f-3ac1c2843bd4/scratchpad/b2/tsx_expand2p_prefold.cu	2026-11-18 14:53:19.992340734 +0900
++++ src/miniworld_engine/kernels/transition/cuda/sm100/widths/tsx_expand2p.cu	2026-11-18 15:00:26.742651460 +0900
+@@ -32,11 +32,22 @@
+ constexpr int AKB = ROWS * 128;                                 // one K-block of this CTA's 128 xn rows, 16 KB
+ constexpr int WKB = 2 * UH * 128;                                // one K-block of [Wa_r; Wb_r]
+ constexpr int NS = NKB / KBX, AST = KBX * AKB, WBYTES = NKB * WKB;
+-constexpr int SMEM_MAX = 232448 - 1024, BARB = 512;
+-constexpr int CAP = (SMEM_MAX - WBYTES - BARB) / AST;
++// -DFOLD=1 (part 19): the input LayerNorm FOLDED into the expand (no tsx_ln launch): the A operand is the raw x, the weights are
++// Wa' = bf16(Wa gamma), Wb' = bf16(Wb gamma), and the epilogue applies a = rs (x Wa'^T) - rs mean u_a + v_a (u_a = sum_k Wa'_k,
++// v_a = Wa beta: fp32 [4][H] uv = u_a | v_a | u_b | v_b, made with the weight forms). Four statistics warps (12-15, one row per thread)
++// read every A stage after the products that used it (a commit per stage on cons[s]), accumulate pivot-shifted sums and release the
++// stage (empty[s]); per block they leave rs and rs mean in shared memory for the epilogue. With xcopy they also copy x into xo
++// (xcopy != 0; pair j the K-blocks kb with kb % NP == j): the cuBLAS squeeze accumulates onto it.
++#ifndef FOLD
++#define FOLD 0
++#endif
++constexpr int NTHR = FOLD ? 512 : 384;
++constexpr int SMEM_MAX = 232448 - 1024, BARB = 512, EXTRA = FOLD ? 4096 : 0;
++constexpr int CAP = (SMEM_MAX - WBYTES - BARB - EXTRA) / AST;
+ constexpr int STG = CAP < 32 ? CAP : 32;
+ static_assert(STG >= 2, "at least two A ring stages beside the resident weights");
+-constexpr int O_W = 0, O_A = WBYTES, O_BAR = O_A + STG * AST, SMEM_BYTES = O_BAR + BARB;
++constexpr int O_W = 0, O_A = WBYTES, O_BAR = O_A + STG * AST, O_ST = O_BAR + BARB, O_UV = O_ST + 2048, SMEM_BYTES = O_BAR + BARB + EXTRA;
++static_assert(!FOLD || 2 * UH * 16 <= 2048, "uv table");
+ constexpr uint32_t TC = 4 * UH;                                  // columns of one accumulator buffer [a_0 | b_0 | a_1 | b_1]
+ constexpr uint32_t TCOLS = 2 * TC;                               // double buffer (256 / 512)
+ constexpr uint32_t IDESC = idesc_bf16(256, 4 * UH);
+@@ -50,6 +61,9 @@
+ 
+ struct Bars {
+   uint64_t full[STG], empty[STG], wfull[NS], acc_full[2], acc_empty[2];
++#if FOLD
++  uint64_t fwd[STG], stat_full[2], stat_empty[2];
++#endif
+   uint32_t tmem;
+ };
+ static_assert(sizeof(Bars) <= BARB, "barrier block");
+@@ -58,15 +72,25 @@
+   asm volatile("cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
+                :: "r"(dst), "l"(m), "r"(smem_u32(bar) & 0xFEFFFFFFu), "r"(c0), "r"(c1), "r"(c2) : "memory");
+ }
++DEVI void sts64f(uint32_t a, float x, float y) { asm volatile("st.shared.v2.f32 [%0], {%1, %2};" :: "r"(a), "f"(x), "f"(y) : "memory"); }
++DEVI float4 lds128f(uint32_t a) {
++  float4 v;
++  asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];" : "=f"(v.x), "=f"(v.y), "=f"(v.z), "=f"(v.w) : "r"(a) : "memory");
++  return v;
++}
+ DEVI void load_a(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int st, int row) {
+   if (KBX == 1) tma_load_2d_2sm(dst, m, bar, st * 64, row); else tma_load_3d_2sm(dst, m, bar, 0, row, st * KBX);
+ }
+ 
+ // maps: xn [M][D] (box 64 x 128 x KBX, the kb_box map); wa, wb [H][D] (box 64 x UH). h [M][H]. Grid: 2 x NP x tg CTAs (pairs (j, g),
+ // j fastest); m rows (256-row blocks: (m + 255) / 256).
+-extern "C" __global__ void __launch_bounds__(384, 1)
++extern "C" __global__ void __launch_bounds__(NTHR, 1)
+ transition_sx_expand2p(const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mwa,
+-                       const __grid_constant__ CUtensorMap mwb, ACT* __restrict__ hs, int m, int tg TSX_STAMP_ARG) {
++                       const __grid_constant__ CUtensorMap mwb, ACT* __restrict__ hs, int m, int tg
++#if FOLD
++                       , const float4* __restrict__ uv, ACT* __restrict__ xo, int xcopy, float eps
++#endif
++                       TSX_STAMP_ARG) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+@@ -80,8 +104,12 @@
+   if (tid == 0) TSX_ST(0);
+ 
+   if (tid == 0) {
+-    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
++    for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], FOLD ? 5 : 1); }
+     for (int s = 0; s < NS; ++s) mbar_init(&B.wfull[s], 1);
++#if FOLD
++    for (int s = 0; s < STG; ++s) mbar_init(&B.fwd[s], 1);
++    for (int b = 0; b < 2; ++b) { mbar_init(&B.stat_full[b], 4); mbar_init(&B.stat_empty[b], 8); }
++#endif
+     for (int b = 0; b < 2; ++b) { mbar_init(&B.acc_full[b], 1); mbar_init(&B.acc_empty[b], NEPI); }
+     fence_barrier_init();
+     prefetch_map(&mxn); prefetch_map(&mwa); prefetch_map(&mwb);
+@@ -137,6 +165,9 @@
+           if (k == 0) mbar_wait(&B.wfull[st], 0);
+           mbar_wait(&B.full[s], (it / STG) & 1);
+           if (lane == 0 && st == 0 && k < 4) TSX_ST(9 + k);
++#if FOLD
++          if (lane == 0) mbar_arrive_remote(&B.fwd[s], 1);       // the stage landed: the peer's statistics warps may read it
++#endif
+           tc_fence_after();
+           if (elect_one()) {
+ #pragma unroll
+@@ -154,7 +185,16 @@
+       }
+       if (lane == 0) TSX_ST(4);
+     }
+-  } else if (warp >= 4) {
++  } else if (warp >= 4 && warp < 12) {
++#if FOLD
++    if (tid - 128 < 2 * UH) {                                  // this pair's units' (u_a, v_a, u_b, v_b): parameters, before the wait
++      const int u = j * 2 * UH + tid - 128;
++      reinterpret_cast<float4*>(sm + O_UV)[tid - 128] =
++          make_float4(__ldg(reinterpret_cast<const float*>(uv) + u), __ldg(reinterpret_cast<const float*>(uv) + H_ + u),
++                      __ldg(reinterpret_cast<const float*>(uv) + 2 * H_ + u), __ldg(reinterpret_cast<const float*>(uv) + 3 * H_ + u));
++    }
++    named_bar_sync(1, 256);
++#endif
+     pdl_wait();
+     pdl_launch();
+     // ------------------------------------------------------------------------------------------ SwiGLU, one row per thread: warps 4-7
+@@ -170,6 +210,13 @@
+       if (warp == 4 && lane == 0 && k < 3) TSX_ST(13 + k);
+       tc_fence_after();
+       const uint32_t tb = trow + b * TC;
++#if FOLD
++      mbar_wait(&B.stat_full[b], (k >> 1) & 1);                // this row's rs, rs mean
++      const float2 st2 = lds64f(smem_u32(sm + O_ST) + (uint32_t)((b * 128 + r) * 8));
++      const float rs = st2.x, nrm = -st2.y;
++      __syncwarp();
++      if (lane == 0) mbar_arrive(&B.stat_empty[b]);
++#endif
+ #pragma unroll
+       for (int p = 0; p < NPASS; ++p) {
+         uint32_t av[ES], bv[ES], hp[NW];
+@@ -183,7 +230,17 @@
+         }
+ #pragma unroll
+         for (int kk = 0; kk < NW; ++kk) {
++#if FOLD
++          const int ul = q2 * UH + p * ES + 2 * kk;                // local unit index (the uv table)
++          const float4 w0 = lds128f(smem_u32(sm + O_UV) + ul * 16), w1 = lds128f(smem_u32(sm + O_UV) + ul * 16 + 16);
++          const float a0 = fmaf(rs, __uint_as_float(av[2 * kk]), fmaf(nrm, w0.x, w0.y));
++          const float a1 = fmaf(rs, __uint_as_float(av[2 * kk + 1]), fmaf(nrm, w1.x, w1.y));
++          const float b0 = fmaf(rs, __uint_as_float(bv[2 * kk]), fmaf(nrm, w0.z, w0.w));
++          const float b1 = fmaf(rs, __uint_as_float(bv[2 * kk + 1]), fmaf(nrm, w1.z, w1.w));
++#else
+           const float a0 = __uint_as_float(av[2 * kk]), a1 = __uint_as_float(av[2 * kk + 1]);
++          const float b0 = __uint_as_float(bv[2 * kk]), b1 = __uint_as_float(bv[2 * kk + 1]);
++#endif
+ #if ESIG == 0
+           const float s0 = sigmoid_kit(a0), s1 = sigmoid_kit(a1);
+ #elif ESIG == 2
+@@ -193,7 +250,7 @@
+           const f2 s2 = sigmoid2(mk2(a0, a1));
+           const float s0 = lo2(s2), s1 = hi2(s2);
+ #endif
+-          hp[kk] = pack_bf16(a0 * s0 * __uint_as_float(bv[2 * kk]), a1 * s1 * __uint_as_float(bv[2 * kk + 1]));
++          hp[kk] = pack_bf16(a0 * s0 * b0, a1 * s1 * b1);
+         }
+ #ifdef XP_NOSTORE                                                       // probe builds only: no h stores
+         if (hp[0] == 0x7fc17fc1u) hs[r] = ACT();
+@@ -209,6 +266,65 @@
+       }
+     }
+     if (warp == 4 && lane == 0) TSX_ST(5);
++#if FOLD
++  } else if (warp >= 12) {
++    // ------------------------------------------------------------------------------------------ the LayerNorm statistics of this CTA's
++    // 128 rows (one per thread), from every A stage once the products that read it are done (cons[s]); pivot-shifted sums (the row's
++    // first value as pivot): mean = p + S1 / D, var = S2 / D - (S1 / D)^2
++    pdl_wait();
++    pdl_launch();
++    const int r = (warp - 12) * 32 + lane;
++    const uint32_t rsw = (uint32_t)(r & 7);
++#pragma unroll 1
++    for (int k = 0, it = 0; k < nt; ++k) {
++      const int b = k & 1, arow = ((g + k * tg) * 2 + rank) * ROWS;
++      const bool copy = xcopy && arow + r < m;
++      float p = 0.f;
++      f2 a1[4], a2[4], p2 = mk2(0.f, 0.f);                        // four independent f32x2 chains of S1 and S2 (latency)
++#pragma unroll
++      for (int e = 0; e < 4; ++e) { a1[e] = mk2(0.f, 0.f); a2[e] = mk2(0.f, 0.f); }
++#pragma unroll 1
++      for (int st = 0; st < NS; ++st, ++it) {
++        const int s = it % STG;
++        if (leader) mbar_wait(&B.full[s], (it / STG) & 1); else mbar_wait_cl(&B.fwd[s], (it / STG) & 1);
++        uint4 vs[KBX][8];                                        // the stage's row segments into registers, then the stage is released
++#pragma unroll
++        for (int i = 0; i < KBX; ++i)
++#pragma unroll
++          for (int c = 0; c < 8; ++c) vs[i][c] = lds128(su + O_A + s * AST + i * AKB + (uint32_t)r * 128u + ((((uint32_t)c) ^ rsw) << 4));
++        fence_proxy_async();                                     // generic reads before the async-proxy refill (WAR)
++        __syncwarp();
++        if (lane == 0) mbar_arrive(&B.empty[s]);
++#pragma unroll
++        for (int i = 0; i < KBX; ++i) {
++          const int kb = st * KBX + i;
++          const uint4* v = vs[i];
++          if (kb == 0) { p = bf16lo(v[0].x); p2 = mk2(-p, -p); }
++#pragma unroll
++          for (int c = 0; c < 8; ++c) {
++            const uint32_t w[4] = {v[c].x, v[c].y, v[c].z, v[c].w};
++#pragma unroll
++            for (int e = 0; e < 4; ++e) {
++              const f2 dd = add2(mk2u(w[e] << 16, w[e] & 0xffff0000u), p2);
++              a1[e] = add2(a1[e], dd);
++              a2[e] = fma2(dd, dd, a2[e]);
++            }
++          }
++          if (copy && kb % NP == j)
++#pragma unroll
++            for (int c = 0; c < 8; ++c) stg128(xo + (size_t)(arow + r) * D_ + kb * 64 + 8 * c, v[c]);
++        }
++      }
++      const f2 t1 = add2(add2(a1[0], a1[1]), add2(a1[2], a1[3])), t2 = add2(add2(a2[0], a2[1]), add2(a2[2], a2[3]));
++      const float s1 = lo2(t1) + hi2(t1), s2 = lo2(t2) + hi2(t2);
++      const float mu = s1 * (1.f / D_), var = fmaxf(s2 * (1.f / D_) - mu * mu, 0.f), mean = p + mu;
++      const float rs = rsqrtf(var + eps);
++      if (k >= 2) mbar_wait(&B.stat_empty[b], ((k >> 1) - 1) & 1);
++      sts64f(smem_u32(sm + O_ST) + (uint32_t)((b * 128 + r) * 8), rs, rs * mean);
++      __syncwarp();
++      if (lane == 0) mbar_arrive(&B.stat_full[b]);
++    }
++#endif
+   } else {
+     pdl_wait();
+     pdl_launch();

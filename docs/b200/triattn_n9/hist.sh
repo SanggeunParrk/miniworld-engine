@@ -1,0 +1,2 @@
+#!/bin/bash
+for so in "$@"; do echo "== $(basename $(dirname $so))"; /usr/local/cuda/bin/cuobjdump -sass $so 2>/dev/null | awk "/Function :/{f=\$3; keep=(f ~ /fwd/)} keep && /^[ \t]*\/\*[0-9a-f]+\*\//{op=\$2; if(op ~ /^@/) op=\$3; sub(/;.*/,\"\",op); split(op,a,\".\"); n[a[1]]++; t++} END{printf \"total %d:\", t; for(k in n) if(k ~ /^(MUFU|FHADD|FFMA2|FADD2|FMNMX|F2FP|FFMA|FADD|FMUL|HFMA2|LDS|LDTM|STTM|FMNMX3|PRMT|SEL|FSETP|HMUL2|HADD2|HFMA2|IMAD|LOP3|LEA|VOTE|MOV|FMUL2|R2UR|SHF)$/ ) printf \" %s %d\", k, n[k]; print \"\"}"; done

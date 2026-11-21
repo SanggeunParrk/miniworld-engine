@@ -1,0 +1,76 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+index 0d9e2119b..1772c4c25 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+@@ -797,6 +797,10 @@ KSPLIT_MAX = 16
+ _KSPLIT_FORCED = os.environ.get("MINIWORLD_APB_B200_KSPLIT")
+ #: the shortest L the rule splits at
+ _KSPLIT_MIN_L = 384
++#: v26: the -DPDLW level of the inference core's programmatic-dependent builds (1: wait after the prologue; 2: also the tensor maps
++#: prefetched before the wait and launch_dependents right after it, so the key-split combine launches under the core).
++#: MINIWORLD_APB_B200_INF_PDLW overrides.
++APB_INF_PDLW = int(os.environ.get("MINIWORLD_APB_B200_INF_PDLW", "1"))
+ 
+ 
+ def apb_ksplit(L: int, heads: int, nsm: int = 148) -> int:
+@@ -854,21 +858,21 @@ class ApbInferenceCore:
+         mq, mk, mv, mg = t3(q, 128), t3(k, 64), t3(v, 64), t3(g, 128)
+         mb = _tmn(bias, [L, L, H_], [L * es, L * L * es], [64, 128, 1])
+         grid = (min(self.nsm, ((-(-L // 128) + 1) // 2) * H_ * ns), 1, 1)
++        pw = f"PDLW={APB_INF_PDLW}"
+         if ns == 1 and pdl:
+-            if self.kp is None:
+-                self.kp = _sm100_kernel(
+-                    "attn_inf", "augattn_inf_sm100", self.dev, pdl=True, defs=(*_apb_defs(self.heads, True, self.d), "PDLW=1")
+-                )
+-            kp = self.kp  # bind() packs plain launches only: the PDL launch goes through __call__
++            if self.kp is None or self.kp[0] != pw:
++                self.kp = (pw, _sm100_kernel("attn_inf", "augattn_inf_sm100", self.dev, pdl=True, defs=(*_apb_defs(self.heads, True, self.d), pw)))
++            kp = self.kp[1]  # bind() packs plain launches only: the PDL launch goes through __call__
+             return lambda: kp(grid, (384, 1, 1), mq, mk, mv, mb, mg, mq, int(L), 1)
+         if ns == 1:
+             return self.k.bind(grid, (384, 1, 1), mq, mk, mv, mb, mg, mq, int(L), 1)
+         if pdl:  # v20 (2026-11-17): the key-split build as a programmatic dependent too (-DPDLW=1; bind() takes PDL launches)
+-            if self.ksp is None:
+-                self.ksp = _sm100_kernel(
+-                    "attn_inf", "augattn_inf_sm100", self.dev, pdl=True, defs=(*_apb_defs(self.heads, True, self.d), "KSPLIT=1", "PDLW=1")
++            if self.ksp is None or self.ksp[0] != pw:
++                self.ksp = (
++                    pw,
++                    _sm100_kernel("attn_inf", "augattn_inf_sm100", self.dev, pdl=True, defs=(*_apb_defs(self.heads, True, self.d), "KSPLIT=1", pw)),
+                 )
+-            kk = self.ksp
++            kk = self.ksp[1]
+         else:
+             if self.ks is None:
+                 self.ks = _sm100_kernel("attn_inf", "augattn_inf_sm100", self.dev, defs=(*_apb_defs(self.heads, True, self.d), "KSPLIT=1"))
+@@ -903,6 +907,7 @@ class ApbInferenceCore:
+                 None if op is None else op.data_ptr(),
+                 None if lp is None else lp.data_ptr(),
+                 pdl,
++                APB_INF_PDLW if pdl else 0,
+             ),
+             lambda: self._bind(qkvg, bias, L, ns, op, lp, pdl),
+         )()
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_inf.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_inf.cu
+index 89ef7a236..9ee034f34 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_inf.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_inf.cu
+@@ -183,8 +183,16 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
+ 
+   if (warp < 4) setmaxnreg_dec<56>();
+ #if PDLW
++  if (PDLW >= 2 && warp == 3 && lane == 0) {  // -DPDLW=2 (APB v26): the tensor maps fetched under the previous kernel's tail
++    prefetch_map(&mq); prefetch_map(&mk); prefetch_map(&mv); prefetch_map(&mb); prefetch_map(&mg); prefetch_map(&mo);
++#if KSPLIT
++    prefetch_map(&mpa); prefetch_map(&mpb);
++#endif
++  }
+   asm volatile("griddepcontrol.wait;" ::: "memory");  // -DPDLW=1 (AttentionPairBias part 6): launched as a programmatic dependent; the
+-#endif                                                 // prologue above (barriers, TMEM) overlaps the previous kernel's tail
++                                                      // prologue above (barriers, TMEM) overlaps the previous kernel's tail
++  if (PDLW >= 2) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // -DPDLW=2: the key-split combine's launch under this core
++#endif
+   if (warp == 0) {
+     if (lane == 0) {
+       int g = 0;

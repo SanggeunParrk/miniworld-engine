@@ -1,0 +1,46 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
+index ee66d37f4..f0236cd92 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k1w.cu
+@@ -30,6 +30,9 @@ static __device__ unsigned long long g_tl[160][16];
+ #define TL(slot) {}
+ #endif
+ 
++#ifndef WST_MAXD
++#define WST_MAXD 256
++#endif
+ namespace k1w {
+ 
+ constexpr int TOK = 128, KBB = TOK * 64 * 2;   // one [128][64] bf16 K-block, SW128 = 16 KB
+@@ -575,8 +578,12 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+         tc_fence_after();
+         if (warp == 8 && lane == 0 && i == 0 && c == 0) TL(6)
+         if (warp == 12 && lane == 0 && i == 0 && c == 1) TL(7)
++#ifdef KW_LATEA
++        if (wst) {} else { if (lane == 0) bulk_wait_read<0>(); __syncwarp(); }
++#else
+         if (wst) { if (hq == 0 && lane == 0) bulk_wait_read<0>(); __syncwarp(); named_bar_sync(2 + 2 * pi, 64); }
+         else { if (lane == 0) bulk_wait_read<0>(); __syncwarp(); }
++#endif
+         __syncwarp();
+         const uint32_t tq = tmem + G_::T_ACC + acc * 128 + ((uint32_t)(q * 32) << 16);
+         uint32_t ga[16], pa[16], gb[16], pb[16];
+@@ -624,6 +631,9 @@ __global__ void __launch_bounds__(NTHREADS, 1)
+         ldg(0, ga, pa);
+         tmem_wait_ld();
+         ldg(1, gb, pb);
++#ifdef KW_LATEA
++        if (wst) { if (hq == 0 && lane == 0) bulk_wait_read<0>(); __syncwarp(); named_bar_sync(2 + 2 * pi, 64); }
++#endif
+         work(0, ga, pa);
+         tmem_wait_ld();
+         ldg(2, ga, pa);
+@@ -815,7 +825,7 @@ void k1w_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Te
+   // S90: inference planes written as [64 ch][64 tok] SW128 boxes (128-byte rows; flags bit 14) instead of [64 ch][32 tok] SW64 boxes (64-byte
+   // rows). env TRIMUL_K1W_WST = 0 off (A/B)
+   const char* wst_env = std::getenv("TRIMUL_K1W_WST");
+-  const bool wst = grid < 0 && n2 == 0 && D <= 256 && !(wst_env != nullptr && wst_env[0] == '0');
++  const bool wst = grid < 0 && n2 == 0 && D <= WST_MAXD && !(wst_env != nullptr && wst_env[0] == '0');
+   auto mp = n2 ? tmap::make_chmajor(planes, n2, 32u, 64, CU_TENSOR_MAP_SWIZZLE_64B)
+                : (wst ? tmap::make(planes.data_ptr(), bf, {(uint64_t)M, (uint64_t)P}, {(uint64_t)M * 2}, {64u, 64}, CU_TENSOR_MAP_SWIZZLE_128B)
+                       : tmap::make(planes.data_ptr(), bf, {(uint64_t)M, (uint64_t)P}, {(uint64_t)M * 2}, {32u, 64}, CU_TENSOR_MAP_SWIZZLE_64B));

@@ -227,12 +227,8 @@ bo_cond_tables_sm100(const __grid_constant__ CUtensorMap mc, const __grid_consta
         uint32_t p[16];
 #pragma unroll
         for (int q = 0; q < 8; ++q) {
-#ifdef NOLDS
-          const uint4 bq = make_uint4(0u, 0u, 0u, 0u), cq = bq;
-#else
           const uint4 bq = lds128(pb + (ch * 32 + 4 * q) * 4);
           const uint4 cq = lds128(pb + NT * 4 + (ch * 32 + 4 * q) * 4);
-#endif
           const uint32_t bw[4] = {bq.x, bq.y, bq.z, bq.w}, cw[4] = {cq.x, cq.y, cq.z, cq.w};
 #pragma unroll
           for (int h = 0; h < 2; ++h) {
@@ -240,9 +236,7 @@ bo_cond_tables_sm100(const __grid_constant__ CUtensorMap mc, const __grid_consta
             f2 a = mk2u(v[2 * k], v[2 * k + 1]);
             if (g1) a = mul2(fma2(nmu, mk2u(cw[2 * h], cw[2 * h + 1]), a), rs2);
             a = add2(a, mk2u(bw[2 * h], bw[2 * h + 1]));
-#ifndef NOSIG
             if (sig) a = sigmoid_pair(a);
-#endif
             p[k] = pack_bf16(lo2(a), hi2(a));
           }
         }

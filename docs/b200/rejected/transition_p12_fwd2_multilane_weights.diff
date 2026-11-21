@@ -1,0 +1,49 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
+index b514f506a..f35057fc5 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_fwd_sm100.cu
+@@ -16,6 +16,10 @@ using namespace s100;
+ #ifndef LNH
+ #define LNH 0
+ #endif
++// WML (round 3 part 12): the weight rings' TMA loads issued by one lane per slot (same bits). WML=0: one issuing lane (A/B)
++#ifndef WML
++#define WML 1
++#endif
+ #ifdef PROBE
+ #define STAMP(k) do { unsigned long long _t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(_t)); reinterpret_cast<unsigned long long*>(c1)[cta * 96 + (k)] = _t; } while (0)
+ #else
+@@ -130,7 +134,33 @@ transition_fwd2_sm100(const __grid_constant__ CUtensorMap mx, const __grid_const
+   } else if (warp == 3) {
+     // ------------------------------------------------------------------------------------------ weight producer: this CTA's half of
+     // every chunk; the transactions complete on the leader's barriers, which the leader armed with the pair's total bytes
++#if WML
++    // (round 3 part 12) one lane per ring slot: lanes 0 .. NW - 1 the [Wa | Wb] slots, NW .. 2 NW - 1 the Ws slots, each walking its
++    // slot's chunks c = s, s + NW, ... (one issuing thread takes ~600 clocks a TMA load whatever the box size: with one lane the 24
++    // loads of a tile's weights, 8 KB each, took ~7 us of a ~10 us tile at one tile per CTA)
++    if (lane < 2 * NW) {
++      const CUtensorMap* mab = leader ? &mwa : &mwb;
++      const bool isab = lane < NW;
++      const int s = isab ? lane : lane - NW;
++      for (int c = s; c < nch; c += NW) {
++        const int j = c & (NCH - 1);
++        if (isab) {
++          if (c >= NW) mbar_wait(&B.wab_empty[s], ((c / NW) - 1) & 1);
++          if (leader) mbar_expect_tx(&B.wab_full[s], 2 * WAB_SLOT);
++          const uint32_t slot = su + O_WAB + s * WAB_SLOT;
++          tma_load_2d_2sm(slot, mab, &B.wab_full[s], 0, j * HS);
++          tma_load_2d_2sm(slot + 8192, mab, &B.wab_full[s], 64, j * HS);
++        } else {
++          if (c >= NW) mbar_wait(&B.ws_empty[s], ((c / NW) - 1) & 1);
++          if (leader) mbar_expect_tx(&B.ws_full[s], 2 * WS_SLOT);
++          tma_load_2d_2sm(su + O_WS + s * WS_SLOT, &mws, &B.ws_full[s], j * HS, crank * 64);
++        }
++      }
++    }
++    if (false) {
++#else
+     if (lane == 0) {
++#endif
+       const CUtensorMap* mab = leader ? &mwa : &mwb;
+       int ca = 0, cs = 0;
+       while (ca < nch || cs < nch) {

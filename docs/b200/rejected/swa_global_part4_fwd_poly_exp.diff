@@ -1,0 +1,66 @@
+--- a/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_fwd.cu
++++ b/src/miniworld_engine/kernels/swa_dit/cuda/sm100/gattn_fwd.cu
+@@ -108,6 +108,25 @@
+                                           pack_bf16(__uint_as_float(b.x), __uint_as_float(b.y)), pack_bf16(__uint_as_float(b.z), __uint_as_float(b.w))));
+   }
+ }
++#ifndef FPMOD
++#define FPMOD 4                          // of every FPMOD exponential pairs of an unmasked block, FPCNT on the FMA pipe (ex2_poly2), the rest on MUFU
++#endif
++#ifndef FPCNT
++#define FPCNT 0
++#endif
++template <bool V> struct BoolC { static constexpr bool value = V; };
++DEVI f2 sub2(f2 a, f2 b) { f2 r; asm("sub.rn.f32x2 %0, %1, %2;" : "=l"(r.v) : "l"(a.v), "l"(b.v)); return r; }
++// 2^x for a pair on the FMA pipe (gattn_bwd.cu's, FA4's technique): degree-3 fit of 2^f, f = x - round(x), the exponent added to the bit
++// pattern; x in [-8.2, 8.2] here (no running maximum; unmasked blocks only)
++DEVI f2 ex2_poly2(f2 x) {
++  const f2 C = mk2(12582912.f, 12582912.f);
++  const f2 j = add2(x, C);
++  const f2 f = sub2(x, sub2(j, C));
++  f2 p = fma2(mk2(0.0555041086648216f, 0.0555041086648216f), f, mk2(0.2402264923172785f, 0.2402264923172785f));
++  p = fma2(p, f, mk2(0.6931471805599453f, 0.6931471805599453f));
++  p = fma2(p, f, mk2(1.0f, 1.0f));
++  return mk2(__int_as_float(__float_as_int(lo2(p)) + (__float_as_int(lo2(j)) << 23)), __int_as_float(__float_as_int(hi2(p)) + (__float_as_int(hi2(j)) << 23)));
++}
+ DEVI uint32_t bf2h2(uint32_t u) { return f2h2(__uint_as_float(u << 16), __uint_as_float(u & 0xffff0000u)); }
+ constexpr float LOG2E = 1.4426950408889634f, LN2 = 0.6931471805599453f;
+ 
+@@ -395,19 +414,27 @@
+         if (PP) named_bar_sync(3 + w, 256);                                // my exp turn: the other warpgroup's exps are done
+         EV(4);
+         f2 ssp[4] = {mk2(0.f, 0.f), mk2(0.f, 0.f), mk2(0.f, 0.f), mk2(0.f, 0.f)};
++        // FULL: no key of the block masked -- FPCNT of every FPMOD exponential pairs on the FMA pipe (ex2_poly2; -inf would give NaN there)
++        auto exps = [&](auto fullc) {
++          constexpr bool FULL = decltype(fullc)::value;
+ #pragma unroll
+-        for (int cc = 0; cc < BN / 32; ++cc) {                              // 32 keys -> 16 packed P columns
+-          uint32_t pk[16];
++          for (int cc = 0; cc < BN / 32; ++cc) {                            // 32 keys -> 16 packed P columns
++            uint32_t pk[16];
+ #pragma unroll
+-          for (int k = 0; k < 16; ++k) {
+-            const f2 e = mul2(mk2u(v[cc * 32 + 2 * k], v[cc * 32 + 2 * k + 1]), SC2);
+-            if (NOEXP) { pk[k] = pack_bf16(lo2(e) * 1e-3f, hi2(e) * 1e-3f); continue; }
+-            const float p0 = ex2f(lo2(e)), p1 = ex2f(hi2(e));
+-            pk[k] = P16 ? f2h2(p0, p1) : pack_bf16(p0, p1);
+-            ssp[k & 3] = add2(ssp[k & 3], LSUMR ? (P16 ? mk2(h2f2(pk[k]).x, h2f2(pk[k]).y) : mk2(bf16lo(pk[k]), bf16hi(pk[k]))) : mk2(p0, p1));   // LSUMR: the sum of the P the MMA reads
++            for (int k = 0; k < 16; ++k) {
++              const f2 e = mul2(mk2u(v[cc * 32 + 2 * k], v[cc * 32 + 2 * k + 1]), SC2);
++              if (NOEXP) { pk[k] = pack_bf16(lo2(e) * 1e-3f, hi2(e) * 1e-3f); continue; }
++              float p0, p1;
++              if (FULL && (k % FPMOD) < FPCNT) { const f2 q2 = ex2_poly2(e); p0 = lo2(q2); p1 = hi2(q2); }
++              else { p0 = ex2f(lo2(e)); p1 = ex2f(hi2(e)); }
++              pk[k] = P16 ? f2h2(p0, p1) : pack_bf16(p0, p1);
++              ssp[k & 3] = add2(ssp[k & 3], LSUMR ? (P16 ? mk2(h2f2(pk[k]).x, h2f2(pk[k]).y) : mk2(bf16lo(pk[k]), bf16hi(pk[k]))) : mk2(p0, p1));   // LSUMR: the sum of the P the MMA reads
++            }
++            tmem_st16(trow + t_p(w, G & 1) + cc * 16, pk);
+           }
+-          tmem_st16(trow + t_p(w, G & 1) + cc * 16, pk);
+-        }
++        };
++        if (FPCNT > 0 && sq - (P.b0 + b) * BN >= BN) exps(BoolC<true>{});
++        else exps(BoolC<false>{});
+         EV(5);
+         if (PP) named_bar_arrive(4 - w, 256);                              // hand the MUFU to the other warpgroup
+         const f2 ss = add2(add2(ssp[0], ssp[1]), add2(ssp[2], ssp[3]));

@@ -58,15 +58,17 @@ EXTERNAL = ("anthropic", "cueq")
 #: groups that tools/slurm/cycle.sh runs through the card's kit-stack wrapper (K* groups), takes their tokens only from records of that
 #: stack (``on_kit_stack``), and compares their environment with ``kit_stack_env(card)`` (2026-11-13).
 #:   h100_sm90  third_party/anthropic/kit_stack.sh: torch 2.13.0+cu130 (a kit venv) inside the kits' CUDA-13.0 container.
+#:   b200_sm100 third_party/anthropic/kit_stack_b200.sh (2026-11-17): a kit venv (torch 2.13.0+cu130, triton 3.7.1, the esmfold2 venv130 package set) on the
+#:              B200 host, whose driver (580, CUDA 13.1) loads the CUDA-13 cubins natively; the engine worktree on PYTHONPATH.
 #:   a100_sm80  third_party/anthropic/kit_stack_compat.sh: the engine's own environment (torch cu129) with the CUDA-13.0 forward-compatible
 #:              libcuda in front of the host's (cssb3: driver 570 = CUDA 12.8) and the release's sm_80 triangle-attention extension built
 #:              for cu129 by build_local.sh. Measured equal to the kit venv130 on the same GPU within 2 % (TriMul / TriAttn, L 768 / 1024).
-KIT_STACK_BACKENDS = {"h100_sm90": ("anthropic",), "a100_sm80": ("anthropic",)}
+KIT_STACK_BACKENDS = {"h100_sm90": ("anthropic",), "a100_sm80": ("anthropic",), "b200_sm100": ("anthropic",)}
 #: The H100 kit stack's environment as records state it (env keys of the judge): the esmfold2 kit venv130 in the cu130 container.
 KIT_STACK_ENV = {"torch": "2.13.0+cu130", "cuda": "13.0", "triton": "3.7.1"}
 #: Per card: the judge's env keys a kit-stack record differs in from this process's environment (A100: none -- the engine's environment;
 #: what makes it the kit stack is the CUDA-13 driver library, which records state as ``cuda_driver`` and tokens keep as evidence).
-KIT_STACK_ENVS = {"h100_sm90": KIT_STACK_ENV, "a100_sm80": {}}
+KIT_STACK_ENVS = {"h100_sm90": KIT_STACK_ENV, "a100_sm80": {}, "b200_sm100": KIT_STACK_ENV}
 
 
 def kit_stack(gpu: str, backend: str) -> bool:

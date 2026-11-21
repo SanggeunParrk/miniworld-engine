@@ -25,6 +25,10 @@ from miniworld_engine.kernels._shape_key import token_key
 C = 256
 NBLK = 192  # pair slices of the table-gradient kernel (fixed)
 RB = 8  # rows of pairs per program of the backward row kernel (one partial per program)
+#: B200 (capability (10, 0)) only: rows of pairs per program of the backward row kernel by (most rows B * n, RB); None: RB everywhere.
+#: 2026-11-17 (measurer timing, fp32 training, RB 8 / 1 / 2 / 4, us): L128 S1 511 / 162 / 198 / 299, S5 616 / 450 / 376 / 444; L256 S1 1003 / 332 /
+#: 391 / 584, S5 1492 / 1209 / 1207 / 1116; L384 S1 1560 / 604 / 676 / 928, S5 2499 / 2362 / 2154 / 2078 (RB 8: 16 - 48 programs at S1)
+RB_B200: tuple | None = ((384, 1), (640, 2), (1 << 30, 4))
 DX_CHUNK_BYTES = 1 << 29  # scratch for d(table sum): at most this many bytes of pairs at a time
 _HAS_SC = 1 << 24
 
@@ -284,6 +288,13 @@ def portable_forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim
     return out, bins
 
 
+def _rows_per_program(B: int, n: int, dev) -> int:
+    """RB, or on a B200 the first RB_B200 entry whose program count B * n / RB is at most its bound."""
+    if RB_B200 is None or torch.cuda.get_device_capability(dev) != (10, 0):
+        return RB
+    return next((rb for most, rb in RB_B200 if B * n <= most), RB)
+
+
 def portable_backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2):
     """(dtbl [NT, 256], dln_w, dln_b [256], dgamma, dbeta [B, 256]) fp32 from d pair = ``dout`` [B, n, n, 256] bf16, as ``cuda.sm90.backward``."""
     B, n = bins.shape[:2]
@@ -294,7 +305,8 @@ def portable_backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2):
     key = token_key(n)
     chunk_b = max(1, min(B, DX_CHUNK_BYTES // (n * n * C * 2)))
     nchunk = -(-B // chunk_b)
-    nrb = -(-n // RB)
+    rb = _rows_per_program(B, n, dev)
+    nrb = -(-n // rb)
     dx = torch.empty(chunk_b, n, n, C, device=dev, dtype=torch.bfloat16)
     part = torch.empty(B * nrb * 1024, device=dev, dtype=torch.float32)
     tpart = torch.empty(nchunk * NBLK, NT, C, device=dev, dtype=torch.float32)
@@ -303,7 +315,7 @@ def portable_backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2):
         b0 = ch * chunk_b
         Bc = min(chunk_b, B - b0)
         _adaln_bwd[(nrb, Bc)](
-            tbl, lnw, lnb, gamma, bins, dout, dx, part, b0, n, nrb, float(eps1), float(eps2), nS=nS, nX=nX, RB=RB, shape_key=key
+            tbl, lnw, lnb, gamma, bins, dout, dx, part, b0, n, nrb, float(eps1), float(eps2), nS=nS, nX=nX, RB=rb, shape_key=key
         )
         P = Bc * n * n
         _adaln_dw[(C // 32, NBLK)](

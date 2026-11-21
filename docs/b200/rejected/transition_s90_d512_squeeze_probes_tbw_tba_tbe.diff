@@ -1,0 +1,77 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 1a75000fb..52d3e9f6f 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -258,7 +258,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             ("swiglu_is", "widths/tswiglu_w.cu", (*dim, "-DITEM_SCHED")),
+             ("swiglu_ab", "widths/tswiglu_w.cu", (*dim, "-DSAVE_AB")),
+             ("swiglu_abis", "widths/tswiglu_w.cu", (*dim, "-DSAVE_AB", "-DITEM_SCHED")),
+-            ("squeeze", "widths/tgemm_nd.cu", (f"-DDIM={nd}", f"-DKDIM={h}")),
++            ("squeeze", "widths/tgemm_nd.cu", (f"-DDIM={nd}", f"-DKDIM={h}", *SQ_FLAGS)),
+             *(
+                 (
+                     ("stat", "widths/tstat_w.cu", (f"-DDIM={d}", f"-DLPR={STAT_LPR}")),
+@@ -422,6 +422,7 @@ X2_RESID = True
+ FWD_X2 = {(256, 2), (256, 4)}
+ #: (S90) the LayerNorm folded into the D 512 inference expand (tstat_w.cu + tswiglu_w.cu -DFOLD) from this many rows
+ FOLD_LN = True
++SQ_FLAGS: tuple[str, ...] = ()
+ #: (S90) the LayerNorm folded into the fused D 384 inference kernel (tfwd_d384.cu -DFOLD, K16 correction MMA)
+ FOLD_D384 = True
+ #: from this many rows (in-process A/B, graph medians fold / unfolded, [M, 384]: n 2 16 384 rows 1.133, 65 536 0.967, 262 144 0.948, 589 824 0.947, 1 048 576 0.920, 2 359 296 0.927; n 4 16 384 1.141, 65 536 1.000,
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgemm_nd.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgemm_nd.cu
+index 84b8d135e..f5e77a867 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgemm_nd.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgemm_nd.cu
+@@ -11,6 +11,17 @@
+ // SPDX-License-Identifier: Apache-2.0
+ #include "sm100.cuh"
+ using namespace s100;
++// timing probes (S90, wrong numbers): TBW 1 the B (Ws) boxes are loaded for the first ring fill only; TBE 1 the epilogue releases the accumulator right after its TMEM loads and stores nothing; TBA 1 the A boxes
++// (h) are loaded for the first ring fill only
++#ifndef TBW
++#define TBW 0
++#endif
++#ifndef TBE
++#define TBE 0
++#endif
++#ifndef TBA
++#define TBA 0
++#endif
+ 
+ #ifndef DIM
+ #define DIM 384
+@@ -87,15 +98,18 @@ transition_gemm_nd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_co
+         for (int kb = 0; kb < NKB; ++kb, ++st) {
+           const int s = st % NST;
+           if (st >= NST) mbar_wait(&B.empty[s], ((st / NST) - 1) & 1);
+-          if (leader) mbar_expect_tx(&B.full[s], 2 * STAGE);
+           const uint32_t base = su + O_ST + s * STAGE;
++          const bool lw = !(TBW && st >= NST), la = !(TBA && st >= NST);
++          if (leader) mbar_expect_tx(&B.full[s], (la ? 2 * KBT : 0) + (lw ? 2 * BHALF : 0));
++          if (la) {
+ #pragma unroll
+-          for (int h = 0; h < 2; ++h) tma_load_2d_2sm(base + S_A + h * 8192, &ma, &B.full[s], kb * 64, row + h * 64);
++            for (int h = 0; h < 2; ++h) tma_load_2d_2sm(base + S_A + h * 8192, &ma, &B.full[s], kb * 64, row + h * 64);
++          }
+           uint32_t boff = S_B;
+ #pragma unroll
+           for (int p = 0; p < NP; ++p) {
+             const int half = part_len(p) / 2, r0 = part_n0(p) + crank * half;
+-            for (int b = 0; b < half / 64; ++b) tma_load_2d_2sm(base + boff + b * 8192, &mbt, &B.full[s], kb * 64, r0 + b * 64);
++            if (lw) { for (int b = 0; b < half / 64; ++b) tma_load_2d_2sm(base + boff + b * 8192, &mbt, &B.full[s], kb * 64, r0 + b * 64); }
+             boff += half * 128;
+           }
+         }
+@@ -161,6 +175,11 @@ transition_gemm_nd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_co
+         tmem_ld32(trow + s * 256 + cb * 64, *reinterpret_cast<uint32_t(*)[32]>(acc));
+         tmem_ld32(trow + s * 256 + cb * 64 + 32, *reinterpret_cast<uint32_t(*)[32]>(acc + 32));
+         tmem_wait_ld();
++        if (TBE) {
++          if (k == nblk - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) mbar_arrive_remote_relaxed(&B.acc_empty[s], 0); }
++          if (acc[0] == 0x7f7fffffu) sts128(su, make_uint4(acc[1], 2, 3, 4));   // keep the loads alive
++          continue;
++        }
+         if (k == nblk - 1) {                                    // this warpgroup has read all its columns of the buffer
+           tc_fence_before();
+           __syncwarp();

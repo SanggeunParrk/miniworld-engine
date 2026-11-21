@@ -1,0 +1,3 @@
+L256: pair 17 MB | clone (r+w 34 MB) 13.2 us (0.00 TB/s) | ln_fwd 17.5 us (0.00 TB/s; floor@clone 13.2) | ln_bwd 35.1 us (0.00 TB/s, 84 MB; floor@clone-rate 32.9)
+L512: pair 67 MB | clone (r+w 134 MB) 29.0 us (0.00 TB/s) | ln_fwd 43.2 us (0.00 TB/s; floor@clone 29.0) | ln_bwd 87.4 us (0.00 TB/s, 336 MB; floor@clone-rate 72.6)
+L768: pair 151 MB | clone (r+w 302 MB) 54.5 us (0.01 TB/s) | ln_fwd 85.1 us (0.00 TB/s; floor@clone 54.5) | ln_bwd 171.2 us (0.00 TB/s, 755 MB; floor@clone-rate 136.3)

@@ -1,0 +1,140 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 1a75000fb..d694a6d5f 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -259,6 +259,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+             ("swiglu_ab", "widths/tswiglu_w.cu", (*dim, "-DSAVE_AB")),
+             ("swiglu_abis", "widths/tswiglu_w.cu", (*dim, "-DSAVE_AB", "-DITEM_SCHED")),
+             ("squeeze", "widths/tgemm_nd.cu", (f"-DDIM={nd}", f"-DKDIM={h}")),
++            *((("squeezex", "widths/tgemm_nd.cu", (f"-DDIM={nd}", f"-DKDIM={h}", "-DRX=1", *SQ_FLAGS)),) if d == 512 else ()),
+             *(
+                 (
+                     ("stat", "widths/tstat_w.cu", (f"-DDIM={d}", f"-DLPR={STAT_LPR}")),
+@@ -422,6 +423,9 @@ X2_RESID = True
+ FWD_X2 = {(256, 2), (256, 4)}
+ #: (S90) the LayerNorm folded into the D 512 inference expand (tstat_w.cu + tswiglu_w.cu -DFOLD) from this many rows
+ FOLD_LN = True
++#: (S90) extra -D flags of the D >= 512 squeeze GEMM (tgemm_nd.cu); with RX the call also passes x and out
++SQ_FLAGS: tuple[str, ...] = ()
++SQ_RX = True   # (S90) the D 512 inference squeeze with the register epilogue (tgemm_nd.cu -DRX)
+ #: (S90) the LayerNorm folded into the fused D 384 inference kernel (tfwd_d384.cu -DFOLD, K16 correction MMA)
+ FOLD_D384 = True
+ #: from this many rows (in-process A/B, graph medians fold / unfolded, [M, 384]: n 2 16 384 rows 1.133, 65 536 0.967, 262 144 0.948, 589 824 0.947, 1 048 576 0.920, 2 359 296 0.927; n 4 16 384 1.141, 65 536 1.000,
+@@ -708,8 +712,9 @@ def _fwd_launch(
+             (*maps, tiles),
+         )
+     for c0, nd in k.halves():
++        rx = SQ_RX and not save and d == 512 and nd == d
+         k.run(
+-            "squeeze",
++            "squeezex" if rx else "squeeze",
+             "transition_gemm_nd_sm100",
+             k.grid,
+             (
+@@ -718,6 +723,7 @@ def _fwd_launch(
+                 k.cols(x, c0, nd),
+                 k.cols(out, c0, nd),
+                 tiles,
++                *((x, out) if rx else ()),
+             ),
+         )
+     if not save:
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgemm_nd.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgemm_nd.cu
+index 84b8d135e..2e7678810 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgemm_nd.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tgemm_nd.cu
+@@ -10,7 +10,14 @@
+ // warpgroups that take alternate 64-column blocks, each prefetching its x blocks through a 2-slot ring and TMA-storing the result.
+ // SPDX-License-Identifier: Apache-2.0
+ #include "sm100.cuh"
++#include "tsx_store.cuh"
+ using namespace s100;
++// RX 1 (S90, EPI_RESID only, N = the whole row width): the epilogue reads the residual x from global memory into registers (128-B row segments, one block ahead) and writes y the same way (store_t),
++// no x-block ring in shared memory, no TMA store / refill round trips: the accumulator (single-buffered at D >= 512, so the next tile's MMAs wait for the last TMEM read) is released
++// ~2x sooner, and the freed shared memory takes a fourth ring stage. The kernel's last two arguments are x and out (bf16 [M][D]).
++#ifndef RX
++#define RX 0
++#endif
+ 
+ #ifndef DIM
+ #define DIM 384
+@@ -31,11 +38,11 @@ constexpr int NEPI = 2;
+ #ifdef NST_
+ constexpr int NST = NST_;
+ #else
+-constexpr int NST = D_ >= 512 ? 3 : (NEPI == 3 ? 3 : 4);
++constexpr int NST = RX ? 4 : (D_ >= 512 ? 3 : (NEPI == 3 ? 3 : 4));
+ #endif
+ constexpr int NACC = D_ <= 256 ? 2 : 1;
+ constexpr int O_ST = 0, O_X = NST * STAGE;                     // epilogue x-block rings: NEPI warpgroups x 2 slots x 16 KB
+-constexpr int O_BAR = O_X + NEPI * 2 * KBT;
++constexpr int O_BAR = O_X + (RX ? 0 : NEPI * 2 * KBT);
+ constexpr int SMEM_BYTES = O_BAR + 512;
+ static_assert(SMEM_BYTES <= 232448, "shared memory budget");
+ static_assert(STAGE % 1024 == 0 && D_ % 128 == 0 && K_ % 64 == 0, "tile shapes");
+@@ -52,7 +59,11 @@ struct Bars {
+ // maps: A [M][K] (box 64 x 64); Bt [D][K] (box 64 x 64); x, out [M][D] (box 64 x 64)
+ extern "C" __global__ void __launch_bounds__(512, 1)
+ transition_gemm_nd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mbt,
+-                         const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mout, int tiles) {
++                         const __grid_constant__ CUtensorMap mx, const __grid_constant__ CUtensorMap mout, int tiles
++#if RX
++                         , const uint16_t* __restrict__ Xr, uint16_t* __restrict__ Yr
++#endif
++                         ) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+   const uint32_t su = smem_u32(sm);
+   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
+@@ -139,6 +150,7 @@ transition_gemm_nd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_co
+     const bool lead = (warp & 3) == 0 && lane == 0;
+     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
+     const int nblk = (NCB - g + NEPI - 1) / NEPI;                // this warpgroup's blocks per tile
++
+     int slot = 0;                                               // running x-slot use count of this warpgroup
+     auto issue_x = [&](int i, int k, int sl) {                  // x block k of tile i into slot sl
+ #ifdef EPI_PLAIN
+@@ -150,7 +162,43 @@ transition_gemm_nd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_co
+ #pragma unroll
+       for (int h = 0; h < 2; ++h) tma_load_2d(dst + h * 8192, &mx, &B.xfull[g][sl], cb * 64, row + h * 64);
+     };
+-    if (lead && n_local > 0) { issue_x(0, 0, 0); if (nblk > 1) issue_x(0, 1, 1); }
++    if (!RX && lead && n_local > 0) { issue_x(0, 0, 0); if (nblk > 1) issue_x(0, 1, 1); }
++#if RX
++    for (int i = 0; i < n_local; ++i) {
++      const int s = i % NACC, u = i / NACC;
++      const size_t off0 = ((size_t)tile_of(i) * ROWS + (r & ~7u)) * D_ + (size_t)(lane & 7) * 8;
++      uint4 xr[2][8];
++      load_t<32>(Xr + off0 + (size_t)g * 64, (size_t)D_, xr[0], lane);
++      mbar_wait(&B.acc_full[s], u & 1);
++      tc_fence_after();
++#pragma unroll
++      for (int k = 0; k < nblk; ++k) {
++        const int cb = g + NEPI * k;
++        if (k + 1 < nblk) load_t<32>(Xr + off0 + (size_t)(g + NEPI * (k + 1)) * 64, (size_t)D_, xr[(k + 1) & 1], lane);
++        uint32_t o[32];
++#pragma unroll
++        for (int hh = 0; hh < 2; ++hh) {
++          uint32_t acc[32];
++          tmem_ld32(trow + s * 256 + cb * 64 + hh * 32, acc);
++          tmem_wait_ld();
++          if (k == nblk - 1 && hh == 1) {
++            tc_fence_before();
++            __syncwarp();
++            if (lane == 0) mbar_arrive_remote_relaxed(&B.acc_empty[s], 0);
++          }
++#pragma unroll
++          for (int t = 4 * hh; t < 4 * hh + 4; ++t) {
++            const uint32_t xw[4] = {xr[k & 1][t].x, xr[k & 1][t].y, xr[k & 1][t].z, xr[k & 1][t].w};
++#pragma unroll
++            for (int e = 0; e < 4; ++e)
++              o[4 * t + e] = pack_bf16(bf16lo(xw[e]) + __uint_as_float(acc[(t - 4 * hh) * 8 + 2 * e]), bf16hi(xw[e]) + __uint_as_float(acc[(t - 4 * hh) * 8 + 2 * e + 1]));
++          }
++        }
++        if (i < n_valid) store_t<32>(Yr + off0 + (size_t)cb * 64, (size_t)D_, o, lane);
++      }
++    }
++    if (false)
++#endif
+     for (int i = 0; i < n_local; ++i) {
+       const int s = i % NACC, u = i / NACC;
+       mbar_wait(&B.acc_full[s], u & 1);

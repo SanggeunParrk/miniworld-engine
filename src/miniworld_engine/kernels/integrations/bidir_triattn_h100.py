@@ -33,7 +33,7 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None
     """Why the H100 path does not serve this call (None: it does). Shapes / dtypes / flags only."""
     if not pair.is_cuda:
         return "the kernels run on CUDA tensors only"
-    if torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0), (12, 0)):
+    if torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0), (12, 0), (10, 0)):
         return "the cuda backend of BidirectionalTriangleAttention is the H100 (sm_90a), A100 (sm_80) and RTX 5090 (sm_120a) path"
     if module.use_self_attention:
         return "self-attention (use_self_attention=True) is not part of the H100 path (the bias-only block is)"
@@ -59,7 +59,44 @@ def _a100() -> bool:
     return torch.cuda.get_device_capability() in ((8, 0), (12, 0))  # A100, or the RTX 5090 (the same sources built for sm_120a)
 
 
+def _b200() -> bool:
+    return torch.cuda.get_device_capability() == (10, 0)  # B200: the same sources built for sm_100a (b200_bidir)
+
+
+#: B200: the ending node's per-head contractions (forward O_e, backward dV_e and dP_e) and the softmax backward's row dot on the
+#: sm_100a kernels of ``b200_bidir.bo`` -- one launch for every head instead of a cuBLAS batched GEMM (+ a torch sum) per head.
+#: MINIWORLD_BIDIR_B200_NATIVE=0 switches back to the torch ops (H100 / A100 / RTX 5090 never take this path).
+B200_NATIVE = os.environ.get("MINIWORLD_BIDIR_B200_NATIVE", "1") != "0"
+
+#: (S90 training, cuda:b200_sm100 61) the single-direction (use_self_attention=False) LayerNorm backward's input gradient dyln = dc^T W written as bf16 instead of fp32 (2 x 67 MB less traffic at L512): row 188 training step -2.4 .. -3.0 % (L256 199.7 -> 193.7 us, L512 568.7 -> 553.6, L768 1201.1 -> 1164.7, starting; ending -2.5 .. -2.7 %); the bf16 dyln rounds the cotangent once before the LayerNorm backward (accuracy: row 188 training, 8 cases, no RED, GREEN / YELLOW as before).
+DYLN_BF16 = os.environ.get("MINIWORLD_BIDIR_B200_DYLN_BF16", "1") != "0"
+
+
+#: the native ending GEMMs up to this length: they win at L128 (one launch for 4 heads instead of 4-8) and tie at L256; from L384 on
+#: cuBLAS's batched GEMM per head is faster (B200 2026-11-17, measurer: ending eval L384 0.132 vs 0.151 ms, L768 0.422 vs 0.559)
+BO_GEMM_MAX_L = 256
+
+
+def _bo(L: int = 0):
+    """The native B200 kernels (None: not a B200, switched off, or L > BO_GEMM_MAX_L when the caller passes the length)."""
+    if not (B200_NATIVE and _b200()) or L > BO_GEMM_MAX_L:
+        return None
+    from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir
+
+    return b200_bidir.bo()
+
+
+def _b200_wide():
+    from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn
+
+    return b200_triattn._wide()  # tri_scale_rows: the dropout scale (and residual) of the bias-only update on the B200
+
+
 def _glue():
+    if _b200():
+        from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir
+
+        return b200_bidir.glue()
     if _a100():  # the same sources built for sm_80 (sm_120a on the 5090)
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
 
@@ -70,6 +107,10 @@ def _glue():
 
 
 def _ext():
+    if _b200():
+        from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir
+
+        return b200_bidir.ext()
     if _a100():
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_bidir
 
@@ -79,8 +120,79 @@ def _ext():
     return h100_bidir.ext()
 
 
+#: (N1, cuda:b200_sm100 71 / Bidirectional 5) the bias-only paths' LayerNorm forward / backward and fused gate backward (C = 128, K = 128) on the B200 kernels of
+#: ``b200_sources/lnbwd_sm100.cu``: x / dyln / dy of a row in flight together and a row step ahead, 2 CTAs an SM (fewer partial rows for the
+#: column sum). forward y / mean / rstd and dx bitwise equal, d gamma / d beta fp32 sums regrouped. MINIWORLD_BIDIR_B200_LNBWD=0 turns it off.
+B200_LNBWD = os.environ.get("MINIWORLD_BIDIR_B200_LNBWD", "1") != "0"
+
+
+#: (N1) the single-direction training backward's two weight-gradient GEMMs (dWo = dt^T u, dW = dc^T y: tall-K split-K GEMMs of 9-12 us at L128, 36 us at L512
+#: with their reduce) off the main chain as branches of the captured graph (they read tensors the chain already has and nothing reads their results before the
+#: end): the dWo GEMM beside the gate backward / core GEMMs, the dW GEMM beside the dyln GEMM and the LayerNorm backward. One sample (B = 1), B200, graph capture only.
+#: MINIWORLD_BIDIR_B200_SIDE=0 turns it off.
+B200_SIDE = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch
+B200_SIDE_MAX_L = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE_MAX_L", "256"))   # the dWo branch only up to this length (beyond it the core GEMMs fill the SMs: it slows the chain); the dW branch at every length
+
+
+def _ln_fwd(g, x, lnw, lnb, eps, L):
+    """-> (y, mean, rstd) of the LayerNorm forward in the starting layout (the shared glue's ``ln_fwd``; C = 128 on the B200 kernel)."""
+    if B200_LNBWD and _b200() and x.shape[1] == 128:
+        from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir
+
+        return b200_bidir.lnb().ln_fwd128(x, lnw.float().contiguous(), lnb.float().contiguous(), eps, 4)
+    return g.ln_fwd(x, lnw.float().contiguous(), lnb.float().contiguous(), eps, L, False)
+
+
+def _ln_bwd(g, bo, dyln, x, dy, lnw, mean, rstd, L):
+    """-> (dx, [d gamma; d beta] fp32 [2, C]) of the LayerNorm backward + the residual's dy (the shared glue's ``ln_bwd`` in the starting layout,
+    its partial rows summed by ``bo_colsum``; C = 128 on the B200 kernel)."""
+    if B200_LNBWD and _b200() and x.shape[1] == 128:
+        from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir
+
+        dx, part = b200_bidir.lnb().ln_bwd128(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False, 2, False)
+        return dx, b200_bidir.lnb().colsum256(part)  # one launch (the shared colsum: two)
+    else:
+        dx, part = g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)
+    return dx, (bo.bo_colsum(part) if bo is not None else part.sum(0))  # B200: one deterministic launch (torch: a slow tall reduce)
+
+
+#: (N1, cuda:b200_sm100 71 / Bidirectional 5) the tall-K fp32-output contractions of the bias-only backward (dWo, dW, dP: K = 16384 .. L L) on tuned cublasLt
+#: algorithms (``b200_sources/ltmm_sm100.cu``, chosen per shape by a deterministic / accurate timing sweep at the first eager call). MINIWORLD_BIDIR_B200_LT=0 turns it off.
+B200_LT = os.environ.get("MINIWORLD_BIDIR_B200_LT", "1") != "0"
+
+
+def _lt():
+    if not (B200_LT and _b200()):
+        return None
+    from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir
+
+    return b200_bidir.ltmm()
+
+
 def _mm_f32(a, b):
+    e = _lt()
+    if e is not None and a.shape[1] >= 16384 and (a.stride(-1) == 1 or a.stride(-2) == 1) and (b.stride(-1) == 1 or b.stride(-2) == 1):
+        r = e.lt_mm(a, b, a)
+        if r.numel():  # an empty result: shape not calibrated yet (graph capture) or no accurate candidate
+            return r
     return torch.mm(a, b, out_dtype=torch.float32)
+
+
+def _bmm_f32(a, b):
+    e = _lt()
+    if e is not None and a.shape[2] >= 16384 and (a.stride(-1) == 1 or a.stride(-2) == 1) and (b.stride(-1) == 1 or b.stride(-2) == 1):
+        r = e.lt_mm(a, b, a)
+        if r.numel():  # an empty result: shape not calibrated yet (graph capture) or no accurate candidate
+            return r
+    return torch.bmm(a, b, out_dtype=torch.float32)
+
+
+def _acc(acc, t):
+    """acc += t; None (the B200's first sample) takes t itself: no zero fill and add launches, the same values."""
+    if acc is None:
+        return t
+    acc += t
+    return acc
 
 
 #: the H100 path's host-side tails: False = the torch ops the engine 2.5.9 ran (cat / masked_fill / addmm / copies); both give the same
@@ -129,6 +241,10 @@ def _gate_bwd(dy, wo, g, o, dg):
     """-> dO [K, L L] (dG written into ``dg``): ``gate_bwd(torch.mm(wo.t(), dy.t()), g, o, dg)``; dy [L L, C] rows of one sample, wo [C, K]."""
     K = wo.shape[1]
     if FUSED_GBWD and wo.shape[0] == 128 and K in (128, 256) and dy.shape[0] % 64 == 0 and _planes_ext("gbwd") is not None:
+        if B200_LNBWD and _b200() and K == 128:  # (N1) the same kernel with the gate / o loads of a tile issued before its GEMM: bitwise equal
+            from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir
+
+            return b200_bidir.lnb().gate_bwd128(dy.contiguous(), wo, g, o, dg, 2)
         return _ext().gate_bwd_fused(dy.contiguous(), wo, g, o, dg)
     return _ext().gate_bwd(torch.mm(wo.t(), dy.t()), g, o, dg)
 
@@ -141,7 +257,8 @@ FUSED_SMBWD = os.environ.get("BIDIR_FUSED_SMBWD", "1") != "0"
 def _softmax_bwd(p, dp, db, nstart):
     """db [P, L L] (rows of the gradient planes) = d logits of the softmax P (p [P, L, L] bf16, dp [P, L, L] fp32): planes < nstart as they are, the
     others transposed ([i, k] -> [k, i]); d logits = p (dp - (p dp).sum(-1))."""
-    s = torch.mul(p, dp).sum(-1, keepdim=True)
+    bo = _bo()
+    s = bo.bo_rowdot(p, dp) if bo is not None else torch.mul(p, dp).sum(-1, keepdim=True)  # B200: one launch (torch: a multiply + a reduce)
     e = _planes_ext("smbwd") if FUSED_SMBWD else None
     if e is not None:
         e.softmax_bwd_planes(p, dp, s, db, nstart)
@@ -185,7 +302,7 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
     B, L, _, C = pair.shape
     LL, dh = L * L, Dh // H
     x = pair.contiguous().view(-1, C)
-    y, mean, rstd = g.ln_fwd(x, lnw.float().contiguous(), lnb.float().contiguous(), eps, L, False)
+    y, mean, rstd = _ln_fwd(g, x, lnw, lnb, eps, L)
     out = torch.empty_like(x)
     planes, probs, os_, us = [], [], [], []
     for b in range(B):
@@ -195,9 +312,13 @@ def _forward(pair, mask, lnw, lnb, eps, w, wo, H, Dh, save):
         ps, pe = p16[:H], p16[H:]
         o = torch.empty(2 * Dh, LL, device=x.device, dtype=torch.bfloat16)
         torch.bmm(c[:Dh].view(H, dh * L, L), ps.transpose(1, 2), out=o[:Dh].view(H, dh * L, L))
-        for h in range(H):
-            ch = slice(Dh + h * dh, Dh + (h + 1) * dh)
-            torch.bmm(pe[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
+        bo = _bo(L)
+        if bo is not None:  # B200: every ending head in one launch
+            bo.bo_pv(pe, c[Dh : 2 * Dh], dh, False, o[Dh:])
+        else:
+            for h in range(H):
+                ch = slice(Dh + h * dh, Dh + (h + 1) * dh)
+                torch.bmm(pe[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
         if _fused_tail(save, C, 2 * Dh, LL):
             u = torch.empty(2 * Dh, LL, device=x.device, dtype=torch.bfloat16) if save else None
             _ext().tail(c[2 * Dh : 4 * Dh], o, wo, x[rows], out[rows], u)
@@ -220,33 +341,66 @@ def _backward(dy, pair, lnw, w, wo, saved, H, Dh):
     LL, dh = L * L, Dh // H
     x = pair.contiguous().view(-1, C)
     dy = dy.contiguous().view(-1, C)
-    dW = torch.zeros(w.shape, device=x.device, dtype=torch.float32)
-    dWo = torch.zeros(wo.shape, device=x.device, dtype=torch.float32)
+    bo = _bo()
+    dW = dWo = None  # the first sample's products start the sums (the torch-ops path: zeros + add, the same values)
+    if bo is None:
+        dW = torch.zeros(w.shape, device=x.device, dtype=torch.float32)
+        dWo = torch.zeros(wo.shape, device=x.device, dtype=torch.float32)
     dyln = torch.empty(B * LL, C, device=x.device, dtype=torch.float32)
     dc = torch.empty(w.shape[0], LL, device=x.device, dtype=torch.bfloat16)
     for b in range(B):
         rows = slice(b * LL, (b + 1) * LL)
         c, p16, o, u = planes[b], probs[b], os_[b], us[b]
         ps, pe = p16[:H], p16[H:]
-        dWo += _mm_f32(dy[rows].t(), u.t())
+        s_wo = None
+        if (B200_SIDE & 1) and B == 1 and L <= B200_SIDE_MAX_L and dWo is None and _b200():
+            from miniworld_engine.kernels.bias_only_dit.cuda import side
+
+            s_wo = side.fork(x.device)
+        if s_wo is not None:  # branch: dWo beside the gate backward and the core GEMMs
+            with side.on(s_wo):
+                dWo = _mm_f32(dy[rows].t(), u.t())
+        else:
+            dWo = _acc(dWo, _mm_f32(dy[rows].t(), u.t()))
         do = _gate_bwd(dy[rows], wo, c[2 * Dh : 4 * Dh], o, dc[2 * Dh : 4 * Dh])  # dO; dG into dc
         # starting: O_s[h] = V_s[h] P_s[h]^T
         dos = do[:Dh].view(H, dh * L, L)
         torch.bmm(dos, ps, out=dc[:Dh].view(H, dh * L, L))
-        dps = torch.bmm(dos.transpose(1, 2), c[:Dh].view(H, dh * L, L), out_dtype=torch.float32)  # [H, j, k]
-        # ending: O_e[c] = P_e[h] V_e[c]
         dp = torch.empty(2 * H, L, L, device=x.device, dtype=torch.float32)  # d P: starting [H, j, k], ending [H, i, k]
-        dp[:H] = dps
-        for h in range(H):
-            ch = slice(Dh + h * dh, Dh + (h + 1) * dh)
-            doe = do[ch].view(dh, L, L)
-            torch.bmm(pe[h].t().expand(dh, L, L), doe, out=dc[ch].view(dh, L, L))
-            torch.sum(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32), 0, out=dp[H + h])  # [i, k]
+        if bo is not None:  # B200: straight into dp (no copy)
+            torch.bmm(dos.transpose(1, 2), c[:Dh].view(H, dh * L, L), out_dtype=torch.float32, out=dp[:H])  # [H, j, k]
+        else:
+            dp[:H] = torch.bmm(dos.transpose(1, 2), c[:Dh].view(H, dh * L, L), out_dtype=torch.float32)  # [H, j, k]
+        # ending: O_e[c] = P_e[h] V_e[c]
+        if (
+            bo is not None and L <= BO_GEMM_MAX_L
+        ):  # B200: every ending head in one launch each (dP: a deterministic cluster sum over the head's channels)
+            bo.bo_pv(pe, do[Dh : 2 * Dh], dh, True, dc[Dh : 2 * Dh])
+            bo.bo_dp(do[Dh : 2 * Dh], c[Dh : 2 * Dh], dh, dp[H:])
+        else:
+            for h in range(H):
+                ch = slice(Dh + h * dh, Dh + (h + 1) * dh)
+                doe = do[ch].view(dh, L, L)
+                torch.bmm(pe[h].t().expand(dh, L, L), doe, out=dc[ch].view(dh, L, L))
+                torch.sum(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32), 0, out=dp[H + h])  # [i, k]
         _softmax_bwd(p16, dp, dc[4 * Dh :], H)  # d logits -> the bias planes' gradient (the ending half back to [k, i])
-        dW += _mm_f32(dc, y[rows])
+        s_w = None
+        if (B200_SIDE & 2) and B == 1 and dW is None and _b200():
+            from miniworld_engine.kernels.bias_only_dit.cuda import side
+
+            s_w = side.fork(x.device)
+        if s_w is not None:  # branch: dW beside the dyln GEMM and the LayerNorm backward
+            with side.on(s_w):
+                dW = _mm_f32(dc, y[rows])
+        else:
+            dW = _acc(dW, _mm_f32(dc, y[rows]))
         _mm_f32_into(dyln[rows], dc.t(), w)
-    dx, part = g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)  # + the residual's dy
-    dgb = part.sum(0)
+    dx, dgb = _ln_bwd(g, bo, dyln, x, dy, lnw, mean, rstd, L)  # + the residual's dy
+    if B == 1 and (s_wo is not None or s_w is not None):
+        from miniworld_engine.kernels.bias_only_dit.cuda import side
+
+        side.join(x.device, s_wo)
+        side.join(x.device, s_w)
     return dx.view(B, L, L, C), dgb[0], dgb[1], dW, dWo
 
 
@@ -275,6 +429,7 @@ class _BidirFn(torch.autograd.Function):
         pair, lnw, w, wo16 = ctx.saved_tensors
         H, Dh = ctx.H, ctx.Dh
         dx, dlw, dlb, dW, dWo = _backward(dy, pair, lnw, w, wo16, ctx.saved, H, Dh)
+        assert dlw is not None and dlb is not None and dW is not None and dWo is not None
         ctx.saved = None
         dWv, dWg, dWb = dW[: 2 * Dh], dW[2 * Dh : 4 * Dh], dW[4 * Dh :]
         grads = [t.to(d) for t, d in zip((dlw, dlb, dWv, dWb, dWg, dWo), ctx.dtypes, strict=True)]
@@ -314,7 +469,8 @@ def single_refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str
         (9, 0),
         (8, 0),
         (12, 0),
-    ):  # 12.0: the sm_80 glue built for sm_120a (sm80_bidir)
+        (10, 0),
+    ):  # 12.0: the sm_80 glue built for sm_120a (sm80_bidir); 10.0: the glue built for sm_100a (b200_bidir)
         return "the bias-only TriangleAttention cuda path is the H100 (sm_90a), A100 (sm_80) and RTX 5090 (sm_120a) one"
     if pair.dtype != torch.bfloat16:
         return f"dtype {pair.dtype}: bf16 activations only (the bias-only path's glue kernels)"
@@ -345,7 +501,7 @@ def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
     B, L, _, C = pair.shape
     LL, dh = L * L, Dh // H
     x = pair.contiguous().view(-1, C)
-    y, mean, rstd = g.ln_fwd(x, lnw.float().contiguous(), lnb.float().contiguous(), eps, L, False)
+    y, mean, rstd = _ln_fwd(g, x, lnw, lnb, eps, L)
     out = torch.empty_like(x)
     planes, probs, os_, us = [], [], [], []
     for b in range(B):
@@ -365,9 +521,13 @@ def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
         if starting:
             torch.bmm(c[:Dh].view(H, dh * L, L), p.transpose(1, 2), out=o.view(H, dh * L, L))
         else:
-            for h in range(H):
-                ch = slice(h * dh, (h + 1) * dh)
-                torch.bmm(p[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
+            bo = _bo(L)
+            if bo is not None:  # B200: every head in one launch
+                bo.bo_pv(p, c[:Dh], dh, False, o)
+            else:
+                for h in range(H):
+                    ch = slice(h * dh, (h + 1) * dh)
+                    torch.bmm(p[h].expand(dh, L, L), c[ch].view(dh, L, L), out=o[ch].view(dh, L, L))
         if drop is None and _fused_tail(save, C, Dh, LL):
             u = torch.empty(Dh, LL, device=x.device, dtype=torch.bfloat16) if save else None
             _ext().tail(c[Dh : 2 * Dh], o, wo, x[rows], out[rows], u)
@@ -375,6 +535,12 @@ def _forward1(pair, mask, drop, lnw, lnb, eps, w, wo, H, Dh, starting, save):
             u = g.gate_u(c[Dh : 2 * Dh], o, 0)
             if drop is None:
                 _out_proj(x[rows], u, wo, out[rows])
+            elif _b200():  # B200: scale and residual in one pass (the broadcast torch ops took ~3x the bandwidth time)
+                t = _b200_wide().tri_scale_rows(torch.mm(u.t(), wo.t()), drop[b].reshape(L, C), L, not starting, x[rows])
+                if B == 1:
+                    out = t
+                else:
+                    out[rows] = t
             else:
                 t = torch.mm(u.t(), wo.t()).view(L, L, C)
                 out[rows] = (x[rows].view(L, L, C) + t * drop[b]).view(LL, C)
@@ -394,32 +560,69 @@ def _backward1(dy, pair, drop, lnw, w, wo, saved, H, Dh, starting):
     LL, dh = L * L, Dh // H
     x = pair.contiguous().view(-1, C)
     dy = dy.contiguous().view(-1, C)
-    dW = torch.zeros(w.shape, device=x.device, dtype=torch.float32)
-    dWo = torch.zeros(wo.shape, device=x.device, dtype=torch.float32)
-    dyln = torch.empty(B * LL, C, device=x.device, dtype=torch.float32)
+    bo = _bo()
+    dW = dWo = None  # the first sample's products start the sums (the torch-ops path: zeros + add, the same values)
+    if bo is None:
+        dW = torch.zeros(w.shape, device=x.device, dtype=torch.float32)
+        dWo = torch.zeros(wo.shape, device=x.device, dtype=torch.float32)
+    dyln = torch.empty(B * LL, C, device=x.device, dtype=torch.bfloat16 if (DYLN_BF16 and _b200()) else torch.float32)
     dc = torch.empty(w.shape[0], LL, device=x.device, dtype=torch.bfloat16)
     for b in range(B):
         rows = slice(b * LL, (b + 1) * LL)
         c, p, o, u = planes[b], probs[b], os_[b], us[b]
-        dt = dy[rows] if drop is None else (dy[rows].view(L, L, C) * drop[b]).view(LL, C)  # the update's gradient
-        dWo += _mm_f32(dt.t(), u.t())
+        if drop is None:
+            dt = dy[rows]
+        elif _b200():  # B200: one bandwidth pass (the broadcast torch multiply took ~3x)
+            dt = _b200_wide().tri_scale_rows(dy[rows], drop[b].reshape(L, C), L, not starting)
+        else:
+            dt = (dy[rows].view(L, L, C) * drop[b]).view(LL, C)  # the update's gradient
+        s_wo = None
+        if (B200_SIDE & 1) and B == 1 and L <= B200_SIDE_MAX_L and dWo is None and _b200():
+            from miniworld_engine.kernels.bias_only_dit.cuda import side
+
+            s_wo = side.fork(x.device)
+        if s_wo is not None:  # branch: dWo beside the gate backward and the core GEMMs
+            with side.on(s_wo):
+                dWo = _mm_f32(dt.t(), u.t())
+        else:
+            dWo = _acc(dWo, _mm_f32(dt.t(), u.t()))
         do = _gate_bwd(dt, wo, c[Dh : 2 * Dh], o, dc[Dh : 2 * Dh])  # dO; dG into dc
         if starting:  # O[h] = V[h] P[h]^T
             dos = do.view(H, dh * L, L)
             torch.bmm(dos, p, out=dc[:Dh].view(H, dh * L, L))
-            dp = torch.bmm(dos.transpose(1, 2), c[:Dh].view(H, dh * L, L), out_dtype=torch.float32)  # [H, j, k]
+            dp = _bmm_f32(dos.transpose(1, 2), c[:Dh].view(H, dh * L, L))  # [H, j, k]
         else:  # O[c] = P[h] V[c]
             dp = torch.empty(H, L, L, device=x.device, dtype=torch.float32)
-            for h in range(H):
-                ch = slice(h * dh, (h + 1) * dh)
-                doe = do[ch].view(dh, L, L)
-                torch.bmm(p[h].t().expand(dh, L, L), doe, out=dc[ch].view(dh, L, L))
-                torch.sum(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32), 0, out=dp[h])  # [i, k]
+            if bo is not None and L <= BO_GEMM_MAX_L:  # B200: every head in one launch each
+                bo.bo_pv(p, do, dh, True, dc[:Dh])
+                bo.bo_dp(do, c[:Dh], dh, dp)
+            else:
+                for h in range(H):
+                    ch = slice(h * dh, (h + 1) * dh)
+                    doe = do[ch].view(dh, L, L)
+                    torch.bmm(p[h].t().expand(dh, L, L), doe, out=dc[ch].view(dh, L, L))
+                    torch.sum(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32), 0, out=dp[h])  # [i, k]
         _softmax_bwd(p, dp, dc[2 * Dh :], H if starting else 0)  # d logits -> the bias plane's layout
-        dW += _mm_f32(dc, y[rows])
-        _mm_f32_into(dyln[rows], dc.t(), w)
-    dx, part = g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)  # + the residual's dy
-    dgb = part.sum(0)
+        s_w = None
+        if (B200_SIDE & 2) and B == 1 and dW is None and _b200():
+            from miniworld_engine.kernels.bias_only_dit.cuda import side
+
+            s_w = side.fork(x.device)
+        if s_w is not None:  # branch: dW beside the dyln GEMM and the LayerNorm backward
+            with side.on(s_w):
+                dW = _mm_f32(dc, y[rows])
+        else:
+            dW = _acc(dW, _mm_f32(dc, y[rows]))
+        if dyln.dtype == torch.bfloat16:
+            torch.mm(dc.t(), w, out=dyln[rows])
+        else:
+            _mm_f32_into(dyln[rows], dc.t(), w)
+    dx, dgb = _ln_bwd(g, bo, dyln, x, dy, lnw, mean, rstd, L)  # + the residual's dy
+    if B == 1 and (s_wo is not None or s_w is not None):
+        from miniworld_engine.kernels.bias_only_dit.cuda import side
+
+        side.join(x.device, s_wo)
+        side.join(x.device, s_w)
     return dx.view(B, L, L, C), dgb[0], dgb[1], dW, dWo
 
 
@@ -442,10 +645,43 @@ class _SingleFn(torch.autograd.Function):
         pair, lnw, w, wo16 = ctx.saved_tensors
         H, Dh = ctx.H, ctx.Dh
         dx, dlw, dlb, dW, dWo = _backward1(dy, pair, ctx.drop, lnw, w, wo16, ctx.saved, H, Dh, ctx.starting)
+        assert dlw is not None and dlb is not None and dW is not None and dWo is not None
         ctx.saved = ctx.drop = None
         dWv, dWg, dWb = dW[:Dh], dW[Dh : 2 * Dh], dW[2 * Dh :]
         grads = [t.to(d) for t, d in zip((dlw, dlb, dWv, dWb, dWg, dWo), ctx.dtypes, strict=True)]
         return (dx, None, None, *grads, None, None, None, None)
+
+
+#: B200 (S90), inference at one 128-token tile (L <= 128), d_pair = d_hidden = 128 with 4 heads: the bias-only update is the self-attention
+#: update with q = k = 0 (the logits are the bias alone, softmax(b_jk) is the same for every row i), so it runs on the fused one-kernel
+#: L128 path of ``b200_triattn.fused_forward`` with zero Wq / Wk (one launch instead of the eight-launch plane chain; the redundant
+#: q.k exponentials are 1.8 us of MUFU at L128). MINIWORLD_TRIATTN_B200_BO_L128=0 switches it off. Above one tile the L^3 exponentials
+#: and the extra q / k stores are not free: the chain stays.
+B200_BO_L128 = os.environ.get("MINIWORLD_TRIATTN_B200_BO_L128", "1") != "0"
+_ZERO_QK: dict = {}
+
+
+def _b200_one_tile(module, pair: torch.Tensor, mask: torch.Tensor | None, params) -> torch.Tensor | None:
+    from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as k
+
+    ln_w, ln_b, wv, wb, wg, wo = params
+    one_tile = k.L128_FUSED and pair.shape[1] <= k.TOK
+    planes = k.BO_PLANES and not one_tile and pair.shape[0] == 1 and pair.shape[1] % k.TOK == 0
+    if not ((one_tile or planes) and pair.shape[-1] == k.C and module.n_head == k.H):
+        return None
+    if tuple(wv.shape) != (k.C, k.C) or tuple(wg.shape) != (k.C, k.C) or tuple(wo.shape) != (k.C, k.C) or tuple(wb.shape) != (k.H, k.C):
+        return None
+    if module.to_gate.bias is not None or module.to_out.bias is not None or module.dual_output or module.untransposed_output:
+        return None
+    key = (wv.device, wv.dtype)
+    z = _ZERO_QK.get(key)
+    if z is None:
+        z = _ZERO_QK[key] = torch.zeros(k.C, k.C, device=wv.device, dtype=wv.dtype)
+    starting = module.starting
+    if planes:
+        return k.bias_only_planes(pair, ln_w, ln_b, wv, wg, wb, wo, mask, module.ln_pair.eps, starting, z)
+    y, _ = k.fused_forward(pair, ln_w, ln_b, z, z, wv, wg, wb, wo, mask, module.ln_pair.eps, None, False, None, not starting, False)
+    return y
 
 
 def forward_single(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
@@ -465,8 +701,18 @@ def forward_single(module, pair: torch.Tensor, mask: torch.Tensor | None) -> tor
     mask = None if mask is None else mask.contiguous()
     drop = None
     if module.p_drop > 0.0 and module.training:
-        drop = dropout_scale(pair, module.p_drop, module._drop_dim).to(pair.dtype)  # [B, L, 1, 1] / [B, 1, L, 1]
+        if _b200():  # B200: the H100 Philox kernel built for sm_100a, one launch (bitwise the torch draw; None: not a BF16 square pair)
+            from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn
+
+            drop = b200_triattn.drop_scale(pair, module.p_drop)
+            drop = None if drop is None else drop.unsqueeze(module._drop_dim)
+        if drop is None:
+            drop = dropout_scale(pair, module.p_drop, module._drop_dim).to(pair.dtype)  # [B, 1, L, C] / [B, L, 1, C]
     grad = torch.is_grad_enabled() and (pair.requires_grad or any(p.requires_grad for p in params))
+    if not grad and drop is None and B200_BO_L128 and _b200():
+        y = _b200_one_tile(module, pair, mask, params)
+        if y is not None:
+            return y
     if not grad:
         w, wo = _weights1(*params[2:])
         return _forward1(pair, mask, drop, params[0], params[1], module.ln_pair.eps, w, wo, H, Dh, module.starting, False)[0]

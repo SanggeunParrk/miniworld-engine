@@ -333,6 +333,22 @@ DEVI f2 sigmoid2(f2 a) {
   const f2 t = mk2(tanhf_approx(lo2(h)), tanhf_approx(hi2(h)));
   return fma2(t, mk2(0.5f, 0.5f), mk2(0.5f, 0.5f));
 }
+// the SwiGLU sigmoid of the D = 64 / 128 Transition kernels (tr_fwd / tr_bwd / tfwd_d64 / tbwd_d64): the forward and both backward roles
+// evaluate this one function, so the backward's s (and the h it recomputes for dW_s) are the forward's.
+//   TR_SIG 1 (default): 0.5 tanh.approx(a / 2) + 0.5, one MUFU op per unit. The forward is MUFU-bound on the sigmoid; this form takes
+//            the D64 [4, 768, 768] forward 0.376 -> 0.296 ms and the D128 [1, 768, 768] one 0.212 -> 0.182 ms, and every Transition
+//            accuracy bar holds with the same margins (forward and gradients vs fp64 at 0.56-0.81x the bf16 PyTorch statements' error).
+//   TR_SIG 0: the kit form rcp.approx(1 + ex2.approx(-a log2 e)), two MUFU ops per unit (bit-identical to the engine before; A/B runs)
+#ifndef TR_SIG
+#define TR_SIG 1
+#endif
+DEVI f2 sigmoid_tr(f2 a) {
+#if TR_SIG == 0
+  return mk2(sigmoid_kit(lo2(a)), sigmoid_kit(hi2(a)));
+#else
+  return sigmoid2(a);
+#endif
+}
 }  // namespace s100
 
 // ------------------------------------------------------------------ L2 cache-policy hints for TMA
@@ -349,5 +365,45 @@ DEVI void tma_load_2d_mc_h(uint32_t dst, const CUtensorMap* m, uint64_t* bar, in
 }
 DEVI void tma_store_2d_h(const CUtensorMap* m, uint32_t src, int c0, int c1, uint64_t pol) {
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group.L2::cache_hint [%0, {%2, %3}], [%1], %4;" :: "l"(m), "r"(src), "r"(c0), "r"(c1), "l"(pol) : "memory");
+}
+// (N9) the SwiGLU sigmoid of the wide / small expand's epilogue on pairs (packed f32x2), accurate (no tanh): per pair one of
+//   0: ex2.approx + rcp.approx on MUFU (the kit form, 2 MUFU ops an element)
+//   1: ex2.approx on MUFU, the reciprocal on the FMA pipe (packed Newton, 1 MUFU an element)
+//   2: the exponential on the FMA pipe (packed degree-6 polynomial), rcp.approx on MUFU (1 MUFU an element)
+// z = -a log2(e) (the caller folds every scale into it). Same value as the kit form to <= 1 ulp (modes 1 / 2: ~1.5e-7 relative).
+DEVI f2 rcp_nr2(f2 d) {
+  const f2 one = mk2(1.f, 1.f), two = mk2(2.f, 2.f), md = neg2(d);
+  f2 r = mk2(__int_as_float(0x7EF311C3 - __float_as_int(lo2(d))), __int_as_float(0x7EF311C3 - __float_as_int(hi2(d))));
+  r = mul2(r, fma2(md, r, two));
+  r = mul2(r, fma2(md, r, two));
+  r = mul2(r, fma2(md, r, two));
+  return fma2(r, fma2(md, r, one), r);
+}
+DEVI f2 ex2_poly2(f2 x) {
+  const f2 mag = mk2(12582912.f, 12582912.f), nmag = mk2(-12582912.f, -12582912.f), m1 = mk2(-1.f, -1.f);
+  x = mk2(fminf(fmaxf(lo2(x), -125.f), 125.f), fminf(fmaxf(hi2(x), -125.f), 125.f));
+  const f2 j = add2(x, mag);
+  const f2 f = fma2(add2(j, nmag), m1, x);
+  f2 p = fma2(mk2(0.0001533770700916648f, 0.0001533770700916648f), f, mk2(0.0013399861054494977f, 0.0013399861054494977f));
+  p = fma2(p, f, mk2(0.009618518874049187f, 0.009618518874049187f));
+  p = fma2(p, f, mk2(0.05550329014658928f, 0.05550329014658928f));
+  p = fma2(p, f, mk2(0.24022646248340607f, 0.24022646248340607f));
+  p = fma2(p, f, mk2(0.6931471824645996f, 0.6931471824645996f));
+  p = fma2(p, f, mk2(1.0f, 1.0f));
+  return mk2(__int_as_float(__float_as_int(lo2(p)) + (__float_as_int(lo2(j)) << 23)),
+             __int_as_float(__float_as_int(hi2(p)) + (__float_as_int(hi2(j)) << 23)));
+}
+DEVI f2 sigmoid_z2(f2 z, int smode) {
+  const f2 one = mk2(1.f, 1.f);
+  if (smode == 3) {  // probe / relaxed: 0.5 tanh(a / 2) + 0.5, one MUFU op an element (tanh.approx: |error| up to 2^-12 absolute)
+    const f2 hz = mul2(z, mk2(-0.34657359027997264f, -0.34657359027997264f));
+    return fma2(mk2(tanhf_approx(lo2(hz)), tanhf_approx(hi2(hz))), mk2(0.5f, 0.5f), mk2(0.5f, 0.5f));
+  }
+  z = mk2(fminf(lo2(z), 125.f), fminf(hi2(z), 125.f));
+  f2 d;
+  if (smode == 2) d = add2(ex2_poly2(z), one);
+  else d = add2(mk2(ex2f(lo2(z)), ex2f(hi2(z))), one);
+  if (smode == 1) return rcp_nr2(d);
+  return mk2(rcpf(lo2(d)), rcpf(hi2(d)));
 }
 }  // namespace s100

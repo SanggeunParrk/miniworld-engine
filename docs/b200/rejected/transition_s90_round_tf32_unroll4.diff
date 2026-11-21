@@ -1,0 +1,51 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_rows.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_rows.cu
+index f61ca30c8..4405973eb 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_rows.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_rows.cu
+@@ -339,11 +339,16 @@ LN_INST(2, 32, 6) LN_INST(2, 32, 10) LN_INST(2, 32, 14) LN_INST(2, 32, 18) LN_IN
+ 
+ // fp32 values -> the TF32 grid (round to nearest, ties away), 4 per thread: the backward's dy, the A operand of the GATE GEMM, whose MMA
+ // would otherwise truncate it (a biased error: measured 1.5x the PyTorch TF32 error on dgamma at a single-track shape)
++// S90: four vectors per thread and round, their loads issued together (one load in flight per thread ran 537 MB in 622 us, 1.7 TB/s of read + write)
+ extern "C" __global__ void __launch_bounds__(256) tg_round_tf32(const float4* __restrict__ X, float4* __restrict__ Y, int n4) {   // ints are 32-bit at the launch surface
+   PDL_ENTRY();
+-  for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long)gridDim.x * blockDim.x) {
+-    const float4 v = X[i];
+-    Y[i] = make_float4(tf32r(v.x), tf32r(v.y), tf32r(v.z), tf32r(v.w));
++  const long st = (long)gridDim.x * blockDim.x;
++  for (long i0 = (long)blockIdx.x * blockDim.x + threadIdx.x; i0 < n4; i0 += 4 * st) {
++    float4 v[4];
++#pragma unroll
++    for (int u = 0; u < 4; ++u) { const long i = i0 + u * st; if (i < n4) v[u] = X[i]; }
++#pragma unroll
++    for (int u = 0; u < 4; ++u) { const long i = i0 + u * st; if (i < n4) Y[i] = make_float4(tf32r(v[u].x), tf32r(v[u].y), tf32r(v[u].z), tf32r(v[u].w)); }
+   }
+ }
+ 
+@@ -353,11 +358,21 @@ extern "C" __global__ void __launch_bounds__(256) tg_round_tf32(const float4* __
+ extern "C" __global__ void __launch_bounds__(256) tg_split_tf32(const float4* __restrict__ X, float4* __restrict__ Y, float4* __restrict__ L,
+                                                                int n4) {
+   PDL_ENTRY();
+-  for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long)gridDim.x * blockDim.x) {
+-    const float4 v = X[i];
+-    const float4 h = make_float4(tf32r(v.x), tf32r(v.y), tf32r(v.z), tf32r(v.w));
+-    Y[i] = h;
+-    L[i] = make_float4(tf32r(v.x - h.x), tf32r(v.y - h.y), tf32r(v.z - h.z), tf32r(v.w - h.w));
++  const long st = (long)gridDim.x * blockDim.x;
++  for (long i0 = (long)blockIdx.x * blockDim.x + threadIdx.x; i0 < n4; i0 += 4 * st) {
++    float4 xv[4];
++#pragma unroll
++    for (int u = 0; u < 4; ++u) { const long i = i0 + u * st; if (i < n4) xv[u] = X[i]; }
++#pragma unroll
++    for (int u = 0; u < 4; ++u) {
++      const long i = i0 + u * st;
++      if (i < n4) {
++        const float4 v = xv[u];
++        const float4 h = make_float4(tf32r(v.x), tf32r(v.y), tf32r(v.z), tf32r(v.w));
++        Y[i] = h;
++        L[i] = make_float4(tf32r(v.x - h.x), tf32r(v.y - h.y), tf32r(v.z - h.z), tf32r(v.w - h.w));
++      }
++    }
+   }
+ }
+ 

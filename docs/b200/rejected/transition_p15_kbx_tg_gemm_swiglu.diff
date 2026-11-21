@@ -1,0 +1,116 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
+index 08a5e80cf..c59dd013e 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
+@@ -75,6 +75,9 @@ _BNS2 = {"swiglu_ab": 128, "resid": 256}
+ _BNS2_F32 = {"swiglu_ab": 128, "resid": 256}
+ #: A/B switch for the pair builds
+ CTA2 = True
++#: (round 3 part 15) bf16 SWIGLU (single CTA): K-blocks per ring stage, A / Wa / Wb of a stage as ONE 3-D TMA box each (part 14: the
++#: per-SM box count paces the operand intake). 1: the old build (A/B; set before the first ``_load``)
++SWIGLU_KBX = 2
+ 
+ 
+ def _tf32_allowed() -> bool:
+@@ -87,6 +90,8 @@ def _specs(f32: bool) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+     for name, mode in _MODE.items():
+         for bn in (_BNS_F32 if f32 else _BNS)[name]:
+             specs.append((f"{name}{bn}", "generic/tg_gemm.cu", (f"-DMODE={mode}", f"-DF32={int(f32)}", f"-DBN={bn}")))
++    if not f32 and SWIGLU_KBX > 1:
++        specs += [(f"swiglu{bn}k", "generic/tg_gemm.cu", ("-DMODE=0", "-DF32=0", f"-DBN={bn}", f"-DKBX={SWIGLU_KBX}")) for bn in _BNS["swiglu"]]
+     for name, bn in (_BNS2_F32 if f32 else _BNS2).items():
+         specs.append((f"{name}{bn}x2", "generic/tg_gemm.cu", (f"-DMODE={_MODE[name]}", f"-DF32={int(f32)}", f"-DBN={bn}", "-DCTA2=1")))
+     nts = DW_NTS_F32 if f32 else DW_NTS  # fp32: the -DSPL builds (dy as two TF32 values; the extra A slot leaves room for NT <= 128)
+@@ -539,8 +544,15 @@ class _K:
+             )
+             return
+         tiles = -(-m // 128) * -(-n // bn) * ks
++        kname = f"{name}{bn}"
++        if name == "swiglu" and self.tag == "bf16" and SWIGLU_KBX > 1 and ks == 1 and (k0 // 64) % SWIGLU_KBX == 0:
++            kx = SWIGLU_KBX  # (part 15) the 3-D box build: A / Wa / Wb maps with kb_box
++            kname += "k"
++            ma0 = ma1 = t(a0, k0, m, 64, 128, -1, 0, kx)
++            mb0 = t(b0, b0.shape[1], b0.shape[0], 64, bb, -1, 0, kx)
++            mb1 = mb2 = t(b1, b1.shape[1], b1.shape[0], 64, bb, -1, 0, kx)
+         self.ext.launch_kernel(
+-            f"generic_{self.tag}_{name}{bn}",
++            f"generic_{self.tag}_{kname}",
+             "tg_gemm_sm100",
+             max(1, min(self.nsm, tiles)),
+             320,
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_gemm.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_gemm.cu
+index 3801215fa..8fd5ffd9f 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_gemm.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_gemm.cu
+@@ -87,7 +87,11 @@ constexpr int SL_A = MODE == 7 ? 0 : 1, SL_B = SL_A + 1;   // staging slots of d
+ // three-output bf16 epilogues (SWIGLU_AB, GATE, GATE_AB) fit double-buffered staging too
+ constexpr int NOWN = UPG == 1 ? 8 : 4;                 // (8 = NEPI, defined below)
+ constexpr int STG_PAR = (NOUT == 3 && UPG == 1) ? 1 : 2;   // staging buffers per output
+-constexpr int A_BYTES = 128 * 128, B_BYTES = BNL * 128, STAGE = A_BYTES + NBS * B_BYTES;
++#ifndef KBX
++#define KBX 1                                        // (round 3 part 15, inference SWIGLU) K-blocks per ring stage: A and each B in ONE 3-D TMA box
++#endif
++static_assert(KBX == 1 || (MODE == 0 && !CTA2 && !BMN), "KBX: the single-CTA SWIGLU build only");
++constexpr int A_BYTES = 128 * 128, B_BYTES = BNL * 128, STAGE = KBX * (A_BYTES + NBS * B_BYTES);
+ constexpr int SLAB = 32 * 128;                       // one warp's staging slab: 32 rows x 128 B
+ constexpr int NEPI = 8;                              // epilogue warps: two per TMEM lane quarter, splitting the columns
+ constexpr int STG_BYTES = NOWN * NOUT * STG_PAR * SLAB;
+@@ -144,6 +148,11 @@ DEVI void commit_all(uint64_t* bar) {
+   tc_commit(bar);
+ #endif
+ }
++// (part 15, KBX > 1) a 3-D (element, row, K-block) box into this CTA
++DEVI void tg_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
+ DEVI void load_op(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1) {
+ #if CTA2
+   tma_load_2d_2sm(dst, m, bar, c0, c1);          // completes on the leader's barrier
+@@ -278,6 +287,19 @@ DEVI void tg_gemm_roles(const CUtensorMap* pA0, const CUtensorMap* pA1, const CU
+         for (int p = 0; p < NPH; ++p) {
+           const CUtensorMap* ma = p == 0 ? pA0 : pA1;
+           const int nk = (p == 0 ? K0 : K1) / BKE / KS, a0 = ph_acc0(p), na = ph_nacc(p), kb0 = ks * nk;
++#if KBX > 1
++          // (part 15) stage = KBX K-blocks: [A slabs][B0 slabs][B1 slabs], one 3-D box each (maps built with kb_box = KBX)
++          for (int k = kb0; k < kb0 + nk; k += KBX, ++it) {
++            const int s = it % NST;
++            mbar_wait(&B.empty[s], ((it / NST) & 1) ^ 1);
++            mbar_expect_tx(&B.full[s], STAGE);
++            const uint32_t base = su + O_ST + s * STAGE;
++            tg_load_3d(base, ma, &B.full[s], 0, m0, k);
++            for (int j = 0; j < na; ++j)
++              tg_load_3d(base + KBX * (A_BYTES + j * B_BYTES), j == 0 ? pB0 : pB1, &B.full[s], 0, n0, k);
++          }
++          continue;
++#endif
+           for (int k = kb0; k < kb0 + nk; ++k, ++it) {
+             const int s = it % NST;
+             mbar_wait(&B.empty[s], ((it / NST) & 1) ^ 1);
+@@ -314,6 +336,26 @@ DEVI void tg_gemm_roles(const CUtensorMap* pA0, const CUtensorMap* pA1, const CU
+ #pragma unroll
+         for (int p = 0; p < NPH; ++p) {
+           const int nk = (p == 0 ? K0 : K1) / BKE / KS, a0 = ph_acc0(p), na = ph_nacc(p);
++#if KBX > 1
++          for (int k = 0; k < nk; k += KBX, ++it) {
++            const int s = it % NST;
++            mbar_wait(&B.full[s], (it / NST) & 1);
++            tc_fence_after();
++            const uint32_t base = su + O_ST + s * STAGE;
++#pragma unroll
++            for (int i = 0; i < KBX; ++i) {
++              const uint64_t da = desc_k128(base + i * A_BYTES);
++              for (int j = 0; j < na; ++j) {
++                const uint64_t db = desc_k128(base + KBX * (A_BYTES + j * B_BYTES) + i * B_BYTES);
++#pragma unroll
++                for (int kk = 0; kk < 4; ++kk)
++                  umma(dbase + (a0 + j) * BN, da + (uint64_t)(kk * 2), db + (uint64_t)(kk * 2), (k > 0 || i > 0 || kk > 0) ? 1u : 0u);
++              }
++            }
++            commit_all(&B.empty[s]);
++          }
++          continue;
++#endif
+           for (int k = 0; k < nk; ++k, ++it) {
+             const int s = it % NST;
+             mbar_wait(&B.full[s], (it / NST) & 1);

@@ -1,0 +1,151 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+index 426bedeef..53da0a8a2 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/k3w.cu
+@@ -58,11 +58,14 @@ struct Sched {
+ };
+ // SAVE (training): the epilogue also stores p and g (bf16) for the backward, through two more [128 tok][128 ch] staging tiles;
+ // the stage ring shrinks from 5 to 3 to make room.
+-template <int SAVE, int OST = 0>
++template <int SAVE, int OST = 0, int LITE = 0>
+ struct Lay {
+-  static constexpr int NST = SAVE ? 3 : 5;
+-  static constexpr int O_ST = 0, O_XR = O_ST + NST * STAGE, O_PS = O_XR + 2 * KBB, O_GS = O_PS + (SAVE ? 2 * KBB : 0),
+-                       O_VEC = O_GS + (SAVE ? 2 * KBB : 0),
++  // SAVE 1: training forward saving p / g through staging tiles; 2: p / g by direct row stores (no staging tiles). LITE (S90): a CTA that fits
++  // twice on an SM (2-slot ring, one accumulator buffer = 256 TMEM columns): one channel item a CTA, 2 CTAs / SM at L128 where the grid
++  // has no more items than 2 x SMs.
++  static constexpr int NST = LITE ? 2 : (SAVE == 1 ? 3 : 5);
++  static constexpr int O_ST = 0, O_XR = O_ST + NST * STAGE, O_PS = O_XR + 2 * KBB, O_GS = O_PS + (SAVE == 1 ? 2 * KBB : 0),
++                       O_VEC = O_GS + (SAVE == 1 ? 2 * KBB : 0),
+                        O_SP = O_VEC + 4 * NTILE * 4,                 // OST: [NSTW warps][2 (mean, M2)][TOK] partials
+                        O_SB = O_SP + (OST ? NSTW * 2 * TOK * 4 : 0), // OST: [2 items][2 (mu, rs)][TOK]
+                        O_BAR = O_SB + (OST ? 2 * 2 * TOK * 4 : 0);
+@@ -95,15 +98,17 @@ DEV float2 lds2f(uint32_t a) { float2 v; asm volatile("ld.shared.v2.f32 {%0,%1},
+ 
+ 
+ // flags (the host's pdl argument): bit 0 launched as a programmatic dependent
+-template <int D, int H, int SAVE, int OST>
++template <int D, int H, int SAVE, int OST, int LITE = 0>
+ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+     k3w_kernel(const __grid_constant__ CUtensorMap mt, const __grid_constant__ CUtensorMap mwp, const __grid_constant__ CUtensorMap mx,
+                const __grid_constant__ CUtensorMap mwg, const __grid_constant__ CUtensorMap my, const __grid_constant__ CUtensorMap mps,
+                const __grid_constant__ CUtensorMap mgs, const float* __restrict__ vec,
+                const float* __restrict__ mu_o, const float* __restrict__ rs_o, const float* __restrict__ mu_i,
+-               const float* __restrict__ rs_i, const __nv_bfloat16* __restrict__ ds, int items, int L, int grouped, int flags, float eps) {
++               const float* __restrict__ rs_i, const __nv_bfloat16* __restrict__ ds, int items, int L, int grouped, int flags, float eps,
++               __nv_bfloat16* __restrict__ pout, __nv_bfloat16* __restrict__ gout) {
+   constexpr int KBT = H / 64, KBX = D / 64, NKB = KBT + KBX, NTL = D / NTILE;
+-  using LY = Lay<SAVE, OST>;
++  using LY = Lay<SAVE, OST, LITE>;
++  auto bpar = [](int i) { return LITE ? (i & 1) : ((i >> 1) & 1); };   // accumulator buffer b's phase of item i
+   constexpr int NST = LY::NST, O_ST = LY::O_ST, O_XR = LY::O_XR, O_PS = LY::O_PS, O_GS = LY::O_GS, O_VEC = LY::O_VEC, O_BAR = LY::O_BAR;
+   const int pdl = flags & 1;
+   // flags bit 4 (XF, OST inference, pass 15): the x / Wg' stages of a CTA's first item are loaded and multiplied BEFORE griddepcontrol.wait,
+@@ -127,7 +132,7 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+     fence_mbar_init();
+     prefetch_tmap(&mt); prefetch_tmap(&mwp); prefetch_tmap(&mx); prefetch_tmap(&mwg); prefetch_tmap(&my);
+   }
+-  if (warp == 2) { tmem_alloc(&B.tmem, 512); tmem_relinquish(); }
++  if (warp == 2) { tmem_alloc(&B.tmem, LITE ? 256 : 512); tmem_relinquish(); }
+   tc_fence_before();
+   __syncthreads();
+   tc_fence_after();
+@@ -178,8 +183,8 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+     const bool ldr = elect_one();
+     int s = 0, m0, n0; uint32_t ph = 0;
+     for (int i = 0; S.get(i, m0, n0); ++i) {
+-      const int b = i & 1;
+-      mbar_wait(&B.acc_empty[b], ((i >> 1) & 1) ^ 1);
++      const int b = LITE ? 0 : (i & 1);
++      mbar_wait(&B.acc_empty[b], bpar(i) ^ 1);
+       tc_fence_after();
+       const uint32_t dp = tmem + b * 256, dg = dp + 128;
+ #pragma unroll 1
+@@ -308,7 +313,7 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+     if (pdl) pdl_wait();   // mu_o / rs_o are the previous kernel's (wide_ln_stats) output (OST: mu_i / rs_i, older); t, x, the weights and vec are older
+     int m0, n0;
+     for (int i = 0; S.get(i, m0, n0); ++i) {
+-      const int b = i & 1, tok = m0 + r;
++      const int b = LITE ? 0 : (i & 1), tok = m0 + r;
+       named_bar_sync(1, 32 * EPW);                       // the previous item's epilogue has finished with vs
+       for (int k = et; k < 4 * NTILE; k += 32 * EPW) vs[k] = vec[(k / NTILE) * D + n0 + (k % NTILE)];
+       named_bar_sync(1, 32 * EPW);
+@@ -327,7 +332,7 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+       const float2 ro2 = make_float2(ro, ro), nmo2 = make_float2(-mo, -mo), ri2 = make_float2(ri, ri), nmi2 = make_float2(-mi, -mi);
+       // ds [B L, D]: pair row tok = (s L + i) L + j reads row s L + j (tokens b-major; s = 0 for one sample)
+       const __nv_bfloat16* dsr = ds ? ds + ((size_t)(tok / (L * L)) * L + tok % L) * D + n0 : nullptr;
+-      mbar_wait(&B.acc_full[b], (i >> 1) & 1);
++      mbar_wait(&B.acc_full[b], bpar(i));
+       if (et == 0 && i < 2) K3TL(8 + 2 * i)
+       tc_fence_after();
+       mbar_wait(&B.xr_full, i & 1);
+@@ -377,7 +382,11 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+           }
+           sts128(addr, o[0], o[1], o[2], o[3]);
+           if (et == 0 && i < 2 && cq == c0 / 32 && q2 == 0) K3TL(20 + i)
+-          if (SAVE) {
++          if (SAVE == 2) {   // p / g rows written by the thread that owns the token
++            *reinterpret_cast<uint4*>(pout + (size_t)tok * D + n0 + cl) = make_uint4(po[0], po[1], po[2], po[3]);
++            *reinterpret_cast<uint4*>(gout + (size_t)tok * D + n0 + cl) = make_uint4(go[0], go[1], go[2], go[3]);
++          }
++          if (SAVE == 1) {
+             const uint32_t off = addr - (su + O_XR);
+             sts128(su + O_PS + off, po[0], po[1], po[2], po[3]);
+             sts128(su + O_GS + off, go[0], go[1], go[2], go[3]);
+@@ -391,7 +400,7 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+         if (i < 2) K3TL(9 + 2 * i)
+         tma_store_2d(&my, sm + O_XR, n0, m0);
+         tma_store_2d(&my, sm + O_XR + KBB, n0 + 64, m0);
+-        if (SAVE) {
++        if (SAVE == 1) {
+           tma_store_2d(&mps, sm + O_PS, n0, m0);
+           tma_store_2d(&mps, sm + O_PS + KBB, n0 + 64, m0);
+           tma_store_2d(&mgs, sm + O_GS, n0, m0);
+@@ -407,7 +416,7 @@ __global__ void __launch_bounds__(OST ? NTHR_OST : NTHR, 1)
+   tc_fence_before();
+   __syncthreads();
+   if (tid == 0) { K3TL(14) }
+-  if (warp == 2) tmem_dealloc(tmem, 512);
++  if (warp == 2) tmem_dealloc(tmem, LITE ? 256 : 512);
+ }
+ 
+ int num_sms() {
+@@ -446,7 +455,8 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
+   TORCH_CHECK(save == g_out.has_value());
+   auto mps = save ? tmap::make(p_out->data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B) : my;
+   auto mgs = save ? tmap::make(g_out->data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B) : my;
+-  const int items = (int)(M / TOK * (D / NTILE)), tiles = (int)(M / TOK);
++  int items = (int)(M / TOK * (D / NTILE)); const int tiles = (int)(M / TOK);
++  if (const char* idv = std::getenv("TRIMUL_K3W_ITEMS_DIV")) items = std::max(1, items / std::atoi(idv));   // experiment: the per-CTA work of an M64 split (a lower bound)
+   // pdl bit 3 (inference, with OST; 2026-11-18 pass 13): the tile-grouped schedule at every length -- a CTA runs all D / 128 channel
+   // items of a token tile back to back, so the LN_out statistics of a tile are computed once (OST) and its t / x K-blocks are L2 hits
+   // for the later items -- on min(tiles, SMs) CTAs (L128: one tile a CTA). env TRIMUL_K3W_GRID / TRIMUL_K3W_GROUPED override (A/B).
+@@ -454,19 +464,23 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
+   const char* gp_env = std::getenv("TRIMUL_K3W_GROUPED");
+   const bool grp_req = gp_env != nullptr ? gp_env[0] == '1' : ((pdl >> 3) & 1) != 0;
+   if (grid <= 0 && gr_env != nullptr) grid = std::atoi(gr_env);
++  const char* le_env = std::getenv("TRIMUL_K3W_LITE");
++  const bool lite = save && items <= 2 * num_sms() && (le_env == nullptr ? true : le_env[0] == '1');   // S90: training at L128: one item per CTA, two CTAs per SM
+   int g = grid > 0 ? (int)grid : (grp_req ? std::min(num_sms(), tiles) : num_sms());
+-  g = std::min(g, items);
+-  const int grouped = grp_req || tiles >= 4LL * g;   // enough token tiles: a CTA takes all channel items of a tile in a row (Sched)
++  g = lite ? items : std::min(g, items);
++  const int grouped = lite ? 0 : (grp_req || tiles >= 4LL * g);   // enough token tiles: a CTA takes all channel items of a tile in a row (Sched)
+   auto st = at::cuda::getCurrentCUDAStream();
+   const __nv_bfloat16* dsp = ds.has_value() ? reinterpret_cast<const __nv_bfloat16*>(ds->data_ptr()) : nullptr;
+   auto launch = [&](auto kern, int smem, int nthr) {
+     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+     tmap::launch_pdl(kern, dim3(g), dim3(nthr), smem, st, (pdl & 1) != 0, mt, mwp, mx, mwg, my, mps, mgs, (const float*)vec.data_ptr<float>(),
+                      (const float*)mu_o.data_ptr<float>(), (const float*)rs_o.data_ptr<float>(), (const float*)mu_i.data_ptr<float>(),
+-                     (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L, grouped, (int)(pdl & 1) | (int)(pdl & 16), 1e-5f);   // LN eps 1e-5 (the route's contract)
++                     (const float*)rs_i.data_ptr<float>(), dsp, items, (int)L, grouped, (int)(pdl & 1) | (int)(pdl & 16), 1e-5f,   // LN eps 1e-5 (the route's contract)
++                     save ? reinterpret_cast<__nv_bfloat16*>(p_out->data_ptr()) : nullptr, save ? reinterpret_cast<__nv_bfloat16*>(g_out->data_ptr()) : nullptr);
+   };
+ #define K3W_CASE(DD, HH) if (D == DD && H == HH) { \
+-    if (save) launch(k3w_kernel<DD, HH, 1, 0>, Lay<1>::SMEM, NTHR); \
++    if (save && lite) launch(k3w_kernel<DD, HH, 2, 0, 1>, Lay<2, 0, 1>::SMEM, NTHR); \
++    else if (save) launch(k3w_kernel<DD, HH, 1, 0>, Lay<1>::SMEM, NTHR); \
+     else if (ost) launch(k3w_kernel<DD, HH, 0, 1>, Lay<0, 1>::SMEM, NTHR_OST); \
+     else launch(k3w_kernel<DD, HH, 0, 0>, Lay<0>::SMEM, NTHR); \
+     C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }

@@ -1,0 +1,276 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 1a75000fb..e36ee8eb4 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -428,7 +428,7 @@ FOLD_D384 = True
+ #: 262 144 0.908, 589 824 0.938, 1 048 576 0.952, 2 359 296 0.986): below it the prep launch (4.5 us) costs more than the shorter tile saves
+ FOLD_D384_MIN_ROWS = 65536
+ #: the statistics pass: lanes a row (16: two rows a warp, 4 x 16-B loads a lane) and blocks an SM
+-FOLD_N4 = False  # n 4 (row 34) kept on the LayerNorm launch: with the fold its expand takes 1437 us against 1328 (L 640) although the statistics pass saves 73 us (76 against 149)
++FOLD_N4 = True  # (A/B) n 4
+ STAT_LPR = 16
+ STAT_BPS = 8
+ FOLD_MIN_ROWS = 1 << 16
+@@ -631,8 +631,8 @@ def _fwd_launch(
+         if fold:  # (S90) the LayerNorm folded into the expand with a K16 correction MMA: raw x as A, W gamma as B (one prep launch also makes the correction images)
+             wp = torch.empty((2 * h, d), dtype=x.dtype, device=x.device)
+             u, v = (torch.empty(2 * h, **f32) for _ in range(2))
+-            aug = torch.zeros(h // 64 * 2 * 64 * 8, dtype=torch.bfloat16, device=x.device)
+-            k.run("stat", "transition_ln_stats_w", k.nsm, (x, gamma, beta, wa, wb, wp, u, v, rstd, c1, 0, h, float(eps), 0, aug, 1), 256, 1)
++            aug = torch.empty(h // 64 * 2 * 64 * 8, dtype=torch.bfloat16, device=x.device)
++            k.run("stat", "transition_ln_stats_w", k.nsm, (x, gamma, beta, wa, wb, wp, u, v, rstd, c1, 0, h, float(eps), 0, aug, 1, wp), 256, 1)
+             wa_, wb_ = wp[:h], wp[h:]
+         else:
+             wa_, wb_ = wa, wb
+@@ -672,12 +672,14 @@ def _fwd_launch(
+         u, v = (torch.empty(2 * h, **f32) for _ in range(2))
+         rstd, c1 = torch.empty(m, **f32), torch.empty(m, **f32)
+         nrb = min(m // 16, k.nsm * STAT_BPS)
+-        k.run("stat", "transition_ln_stats_w", nrb + 32, (x, gamma, beta, wa, wb, wp, u, v, rstd, c1, m, h, float(eps), nrb, wp, 0), 256, 1)
++        aug_a = torch.empty((tiles * 128, 8), dtype=x.dtype, device=x.device)   # the K16 correction's A plane of every row: [-mean_hi -mean_hi -mean_lo q_hi q_hi q_lo 0 0]
++        aug_b = torch.empty((h // 128 * 2 * 128, 8), dtype=x.dtype, device=x.device)   # its B plane images of every (chunk, CTA rank)
++        k.run("stat", "transition_ln_stats_w", nrb + 32, (x, gamma, beta, wa, wb, wp, u, v, rstd, c1, m, h, float(eps), nrb, aug_b, 1, aug_a), 256, 1)
+         k.run(
+             "swiglu_fold_is" if item else "swiglu_fold",
+             "transition_swiglu_w_sm100",
+             k.nsm if item else k.grid,
+-            (k.rows(x), k.tmap(wp[:h], d, h, 64, 128), k.tmap(wp[h:], d, h, 64, 128), mh, tiles, rstd, c1, u, v),
++            (k.rows(x), k.tmap(wp[:h], d, h, 64, 128), k.tmap(wp[h:], d, h, 64, 128), mh, tiles, rstd, aug_a, aug_b),
+         )
+     else:
+         xn = torch.empty_like(x)  # D >= 512: the expand's A operand, always materialised
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tstat_w.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tstat_w.cu
+index 8ad19ee22..c4b8ea782 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tstat_w.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tstat_w.cu
+@@ -23,7 +23,7 @@ extern "C" __global__ void __launch_bounds__(256)
+ transition_ln_stats_w(const __nv_bfloat16* __restrict__ x, const float* __restrict__ gamma, const float* __restrict__ beta,
+                       const __nv_bfloat16* __restrict__ wa, const __nv_bfloat16* __restrict__ wb, __nv_bfloat16* __restrict__ wp,
+                       float* __restrict__ u, float* __restrict__ v, float* __restrict__ rstd, float* __restrict__ c1, int M, int H, float eps, int nrb,
+-                      uint16_t* __restrict__ aug, int aug_on) {
++                      uint16_t* __restrict__ aug, int aug_on, uint16_t* __restrict__ aug_a) {
+   if (blockIdx.x < nrb) {
+     const int lane = threadIdx.x % LPR;
+     const int rpb = (blockDim.x >> 5) * RPW;
+@@ -49,7 +49,16 @@ transition_ln_stats_w(const __nv_bfloat16* __restrict__ x, const float* __restri
+ #pragma unroll
+       for (int o = LPR / 2; o; o >>= 1) q += __shfl_xor_sync(0xffffffffu, q, o);
+       const float rs = rsqrtf(q * (1.f / D_) + eps);
+-      if (lane == 0) { rstd[row] = rs; c1[row] = mean * rs; }
++      if (lane == 0) {
++        rstd[row] = rs; c1[row] = mean * rs;
++        if (aug_a) {                                          // (S90, K16 correction) the row of the A plane: [-mean_hi -mean_hi -mean_lo q_hi q_hi q_lo 0 0], q = 1 / rstd
++          const float qq = 1.f / rs;
++          const __nv_bfloat16 mh = __float2bfloat16(-mean), qh = __float2bfloat16(qq);
++          const __nv_bfloat16 ml = __float2bfloat16(-mean - __bfloat162float(mh)), ql = __float2bfloat16(qq - __bfloat162float(qh));
++          const uint32_t e0 = *reinterpret_cast<const uint16_t*>(&mh), e2 = *reinterpret_cast<const uint16_t*>(&ml), e3 = *reinterpret_cast<const uint16_t*>(&qh), e5 = *reinterpret_cast<const uint16_t*>(&ql);
++          *reinterpret_cast<uint4*>(aug_a + (size_t)row * 8) = make_uint4(e0 | (e0 << 16), e2 | (e3 << 16), e3 | (e5 << 16), 0u);
++        }
++      }
+     }
+   } else {
+     const int pb = blockIdx.x - nrb, npb = gridDim.x - nrb, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+@@ -79,7 +88,13 @@ transition_ln_stats_w(const __nv_bfloat16* __restrict__ x, const float* __restri
+       if (aug_on && lane == 0) {
+         // (S90, tfwd_d384.cu -DFOLD) the K16 correction operand of this weight row: [u_hi u_lo u_hi v_hi v_lo v_hi 0 0] (bf16 hi / lo pairs: -mean u and v / rstd are rank-1 terms of the expand's K loop),
+         // laid out as the chunk image the kernel bulk-copies: image (j, q) = 64 rows [32 Wa | 32 Wb] of the CTA rank q's 32 units of chunk j (64 units), 16 bytes a row
++#if DIM == 384
+         const int unit = n < H ? n : n - H, j = unit >> 6, w = unit & 63, q = w >> 5, i = (n < H ? 0 : 32) + (w & 31);
++        const size_t img = (size_t)((j * 2 + q) * 64 + i) * 8;
++#else   // D 512 (tswiglu_w.cu): image (j, crank) = the 128 units of chunk j of Wa (crank 0) or Wb (crank 1)
++        const int unit = n < H ? n : n - H, j = unit >> 7, i = unit & 127, q = n < H ? 0 : 1;
++        const size_t img = (size_t)((j * 2 + q) * 128 + i) * 8;
++#endif
+         auto hi_lo = [](float f, uint16_t& h, uint16_t& l) {
+           const __nv_bfloat16 bh = __float2bfloat16(f);
+           const __nv_bfloat16 bl = __float2bfloat16(f - __bfloat162float(bh));
+@@ -89,7 +104,7 @@ transition_ln_stats_w(const __nv_bfloat16* __restrict__ x, const float* __restri
+         hi_lo(su, uh, ul); hi_lo(sv, vh, vl);
+         const uint16_t e[8] = {uh, ul, uh, vh, vl, vh, 0, 0};
+         uint4 pk8 = make_uint4(e[0] | ((uint32_t)e[1] << 16), e[2] | ((uint32_t)e[3] << 16), e[4] | ((uint32_t)e[5] << 16), 0u);
+-        *reinterpret_cast<uint4*>(aug + (size_t)((j * 2 + q) * 64 + i) * 8) = pk8;
++        *reinterpret_cast<uint4*>(aug + img) = pk8;
+       }
+     }
+   }
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tswiglu_w.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tswiglu_w.cu
+index b51b8e15d..e3515a16d 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tswiglu_w.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/widths/tswiglu_w.cu
+@@ -31,8 +31,10 @@ constexpr int O_BAR = O_AB + 4 * KBT;
+ constexpr int O_BAR = O_OUT + 2 * KBT;
+ #endif
+ #ifdef FOLD
+-constexpr int O_UV = O_BAR + 512;                               // [2 warpgroups][2 buffers][ua | va | ub | vb of the item's 64 units]
+-constexpr int SMEM_BYTES = O_UV + 2 * 2 * 256 * 4;
++// (S90, the LayerNorm fold, K16 correction) correction operands: [2 slots x B plane 2 KB][2 slots x A plane 2 KB][zero plane 2 KB], bulk-copied per item (no-swizzle K-major, 16 B a row)
++constexpr int O_AUG = O_BAR + 512;
++constexpr int O_BP = O_AUG, O_AP = O_AUG + 4096, O_AZ = O_AUG + 8192;
++constexpr int SMEM_BYTES = O_AUG + 10240;
+ #else
+ constexpr int SMEM_BYTES = O_BAR + 512;
+ #endif
+@@ -41,7 +43,18 @@ constexpr uint32_t IDESC = idesc_bf16(256, 256);
+ 
+ #define SIGF(a) sigmoid_kit(a)
+ 
++#ifdef FOLD
++__device__ __forceinline__ uint64_t desc_none(uint32_t saddr, uint32_t lbo, uint32_t sbo) {
++  return (uint64_t)((saddr >> 4) & 0x3FFFu) | ((uint64_t)((lbo >> 4) & 0x3FFFu) << 16) | ((uint64_t)((sbo >> 4) & 0x3FFFu) << 32) | ((uint64_t)1 << 46);
++}
++__device__ __forceinline__ void bulk_g2s(uint32_t dst, const void* src, uint32_t bytes, uint64_t* bar) {
++  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" :: "r"(dst), "l"(src), "r"(bytes), "r"(smem_u32(bar)) : "memory");
++}
++#endif
+ struct Bars {
++#ifdef FOLD
++  uint64_t aug_full[2], aug_all[2], aug_empty[2];               // this CTA's planes landed / both CTAs' (leader) / the K16 MMA has read the slot
++#endif
+   uint64_t full[NST];
+   uint64_t empty[NST], acc_full[2];
+   uint64_t acc_empty[2];
+@@ -58,7 +71,7 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
+ #endif
+                           int tiles
+ #ifdef FOLD
+-                          , const float* __restrict__ rs_row, const float* __restrict__ c1_row, const float* __restrict__ uu, const float* __restrict__ vv
++                          , const float* __restrict__ rs_row, const uint8_t* __restrict__ aug_a, const uint8_t* __restrict__ aug_b
+ #endif
+                           ) {
+   extern __shared__ __align__(1024) uint8_t sm[];
+@@ -91,9 +104,16 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
+     for (int s = 0; s < NST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
+     for (int s = 0; s < 2; ++s) { mbar_init(&B.acc_full[s], 1); mbar_init(&B.acc_empty[s], 16); }   // 8 warps (both warpgroups) in each CTA of the pair
+     for (int g = 0; g < 2; ++g) { mbar_init(&B.staged[g], 4); mbar_init(&B.stage_free[g], 1); }
++#ifdef FOLD
++    for (int s = 0; s < 2; ++s) { mbar_init(&B.aug_full[s], 1); mbar_init(&B.aug_all[s], 2); mbar_init(&B.aug_empty[s], 1); }
++#endif
+     fence_barrier_init();
+     prefetch_map(&mxn); prefetch_map(&mwa); prefetch_map(&mwb); prefetch_map(&mh);
+   }
++#ifdef FOLD
++  if (tid < 128) *reinterpret_cast<uint4*>(sm + O_AZ + tid * 16) = make_uint4(0, 0, 0, 0);   // the zero plane (K 8 .. 15 of both operands)
++  fence_proxy_async();
++#endif
+   if (warp == 2) { tmem_alloc2(smem_u32(&B.tmem), 512); tmem_relinquish2(); }
+   tc_fence_before();
+   __syncthreads();
+@@ -103,11 +123,25 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
+ 
+   if (warp < 4) setmaxnreg_dec<56>();
+   if (warp == 0) {
++#ifdef FOLD
++    if (lane == 1) {                                            // forwards "this CTA's correction planes have landed" to the leader's barrier
++      for (int q = 0; q < nitem; ++q) { mbar_wait(&B.aug_full[q & 1], (q >> 1) & 1); mbar_arrive_remote_cta(&B.aug_all[q & 1], 0); }
++    }
++#endif
+     if (lane == 0) {
+       const CUtensorMap* mab = leader ? &mwa : &mwb;
+       int st = 0;
+       for (int q = 0; q < nitem; ++q) {
+         const int j = item_j(q), row = item_row(q);
++#ifdef FOLD
++        {
++          const int sl = q & 1;
++          if (q >= 2) mbar_wait(&B.aug_empty[sl], ((q >> 1) - 1) & 1);
++          mbar_expect_tx(&B.aug_full[sl], 4096);
++          bulk_g2s(su + O_BP + sl * 2048, aug_b + (size_t)(j * 2 + crank) * 2048, 2048, &B.aug_full[sl]);
++          bulk_g2s(su + O_AP + sl * 2048, aug_a + (size_t)row * 16, 2048, &B.aug_full[sl]);
++        }
++#endif
+         for (int kb = 0; kb < NKB; ++kb, ++st) {
+           const int s = st % NST;
+           if (st >= NST) mbar_wait(&B.empty[s], ((st / NST) - 1) & 1);
+@@ -131,6 +165,24 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
+           tc_fence_after();
+           const uint32_t base = su + O_ST + sg * STAGE;
+           const uint64_t dxn = desc_k128(base + S_XN), dw = desc_k128(base + S_W);
++#ifdef FOLD
++          if (elect_one()) {
++#pragma unroll
++            for (int ks = 0; ks < 4; ++ks)
++              umma_ss2(tmem + s * 256, dxn + (uint64_t)(ks * 2), dw + (uint64_t)(ks * 2), IDESC, (kb > 0 || ks > 0) ? 1u : 0u);
++          }
++          __syncwarp();
++          if (kb == NKB - 1) {                                    // the K16 correction MMA: [-mean q] x [u v] of this item's tile and units (rank-1 terms of the LayerNorm fold)
++            mbar_wait_cl(&B.aug_all[q & 1], (q >> 1) & 1);
++            tc_fence_after();
++            if (elect_one()) umma_ss2(tmem + s * 256, desc_none(su + O_AP + (q & 1) * 2048, O_AZ - O_AP - (q & 1) * 2048, 128), desc_none(su + O_BP + (q & 1) * 2048, O_AZ - O_BP - (q & 1) * 2048, 128), IDESC, 1u);
++            __syncwarp();
++          }
++          if (elect_one()) {
++            tc_commit2_mc(&B.empty[sg], 3);
++            if (kb == NKB - 1) { tc_commit2_mc(&B.aug_empty[q & 1], 3); tc_commit2_mc(&B.acc_full[s], 3); }
++          }
++#else
+           if (elect_one()) {
+ #pragma unroll
+             for (int ks = 0; ks < 4; ++ks)
+@@ -138,6 +190,7 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
+             tc_commit2_mc(&B.empty[sg], 3);
+             if (kb == NKB - 1) tc_commit2_mc(&B.acc_full[s], 3);
+           }
++#endif
+           __syncwarp();
+         }
+       }
+@@ -150,23 +203,7 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
+     for (int q = 0; q < nitem; ++q) {
+       const int s = q & 1, u = q >> 1;
+ #ifdef FOLD
+-      // (S90, the LayerNorm fold) a_n = rstd (x . Wp_n) - c1 u_n + v_n: this thread's row statistics, the columns' u / v read as uniform loads
+-      const int frow = item_row(q) + (int)r;
+-      const float rsr = __ldg(rs_row + frow), c1r = __ldg(c1_row + frow);
+-      const float* uvs = reinterpret_cast<const float*>(sm + O_UV) + (half * 2 + (q & 1)) * 256;
+-      if (q == 0) {                                          // the first item's columns: this warpgroup's 128 threads load 256 floats
+-        const int idx = (int)(r & 127) * 2, vec = idx >> 6;
+-        const float* src = (vec == 0 ? uu : vec == 1 ? vv : vec == 2 ? uu + H_ : vv + H_) + item_j(0) * HC + half * 64 + (idx & 63);
+-        const float2 w = __ldg(reinterpret_cast<const float2*>(src));
+-        float* d0 = reinterpret_cast<float*>(sm + O_UV) + (half * 2) * 256 + idx;
+-        d0[0] = w.x; d0[1] = w.y;
+-        named_bar_sync(3 + half, 128);
+-      }
+-      float2 pre = make_float2(0.f, 0.f);
+-      if (q + 1 < nitem) {                                   // the next item's columns, in flight under this item's accumulator wait / math
+-        const int idx = (int)(r & 127) * 2, vec = idx >> 6;
+-        pre = __ldg(reinterpret_cast<const float2*>((vec == 0 ? uu : vec == 1 ? vv : vec == 2 ? uu + H_ : vv + H_) + item_j(q + 1) * HC + half * 64 + (idx & 63)));
+-      }
++      const float rsr = __ldg(rs_row + item_row(q) + (int)r);   // a_n = rstd acc (the accumulator already holds x . Wp - mean u + q v)
+ #endif
+       mbar_wait(&B.acc_full[s], u & 1);
+       tc_fence_after();
+@@ -181,18 +218,8 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
+         tmem_ld32(trow + s * 256 + 128 + half * 64 + st2 * 32, bv);
+         tmem_wait_ld();
+ #ifdef FOLD
+-        {
+ #pragma unroll
+-          for (int k = 0; k < 16; ++k) {
+-            const int cu = st2 * 32 + 2 * k;                  // the column's position among this warpgroup's 64 units
+-            const float2 ua = *reinterpret_cast<const float2*>(uvs + cu), va = *reinterpret_cast<const float2*>(uvs + 64 + cu);
+-            const float2 ub = *reinterpret_cast<const float2*>(uvs + 128 + cu), vb = *reinterpret_cast<const float2*>(uvs + 192 + cu);
+-            av[2 * k] = __float_as_uint(fmaf(rsr, __uint_as_float(av[2 * k]), fmaf(-c1r, ua.x, va.x)));
+-            av[2 * k + 1] = __float_as_uint(fmaf(rsr, __uint_as_float(av[2 * k + 1]), fmaf(-c1r, ua.y, va.y)));
+-            bv[2 * k] = __float_as_uint(fmaf(rsr, __uint_as_float(bv[2 * k]), fmaf(-c1r, ub.x, vb.x)));
+-            bv[2 * k + 1] = __float_as_uint(fmaf(rsr, __uint_as_float(bv[2 * k + 1]), fmaf(-c1r, ub.y, vb.y)));
+-          }
+-        }
++        for (int k = 0; k < 32; ++k) { av[k] = __float_as_uint(__uint_as_float(av[k]) * rsr); bv[k] = __float_as_uint(__uint_as_float(bv[k]) * rsr); }
+ #endif
+ #ifdef SAVE_AB
+ #pragma unroll
+@@ -224,14 +251,6 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
+       fence_proxy_async();
+       __syncwarp();
+       if (lane == 0) mbar_arrive(&B.staged[half]);
+-#ifdef FOLD
+-      if (q + 1 < nitem) {
+-        const int idx = (int)(r & 127) * 2;
+-        float* d1 = reinterpret_cast<float*>(sm + O_UV) + (half * 2 + ((q + 1) & 1)) * 256 + idx;
+-        d1[0] = pre.x; d1[1] = pre.y;
+-        named_bar_sync(3 + half, 128);                       // this item's reads of the other buffer are long done (barrier each item)
+-      }
+-#endif
+     }
+   } else if (warp == 8 || warp == 9) {
+     // one store thread per SwiGLU warpgroup (t = its 64 units): the two stage and store independently

@@ -1,0 +1,427 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_rg_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_rg_tf32.cu
+index b7d5f0286..5052c5a89 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_rg_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_rg_tf32.cu
+@@ -77,18 +77,22 @@ atom_gemm_rg_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant_
+   pdl_launch();
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
++    if (lane < 2 * ST) {                                             // stage s from lanes 2 s (A) and 2 s + 1 (B): gemm_tf32.cu (part 8)
+       const uint32_t tx = (uint32_t)A_BYTES + (uint32_t)B_BYTES;
++      const int ls = lane >> 1;
++      const unsigned pm = 3u << (2 * ls);
+       int g = 0;
+       for (int i = 0; i < my; ++i) {
+         const int m0 = tile_m0(i);
+         for (int ks = 0; ks < nk; ++ks, ++g) {
+           const int s = g % ST;
++          if (s != ls) continue;
+           if (g >= ST) mbar_wait(&B.empty[s], ((g / ST) - 1) & 1);
+           const uint32_t st = su + s * STB;
+-          mbar_expect_tx(&B.full[s], tx);
+-          tma_load_2d(st, &ma, &B.full[s], 32 * ks, m0);
+-          tma_load_2d(st + A_BYTES, &mb, &B.full[s], 32 * ks, 0);
++          if ((lane & 1) == 0) mbar_expect_tx(&B.full[s], tx);
++          __syncwarp(pm);
++          if ((lane & 1) == 0) tma_load_2d(st, &ma, &B.full[s], 32 * ks, m0);
++          else tma_load_2d(st + A_BYTES, &mb, &B.full[s], 32 * ks, 0);
+         }
+       }
+     }
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu
+index b7b187848..16042d219 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/gemm_tf32.cu
+@@ -100,8 +100,12 @@ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ C
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer
+-    if (lane == 0) {
++    // stage s is issued by lanes 2 s (A) and 2 s + 1 (B) (round 3 part 8: one thread issues about one TMA load per ~600 clk whatever the
++    // box); lane 2 s posts the stage's bytes first
++    if (lane < 2 * ST) {
+       const uint32_t tx = (uint32_t)A_BYTES + (uint32_t)NT * 128u;
++      const int ls = lane >> 1;
++      const unsigned pm = 3u << (2 * ls);
+       int g = 0;
+       for (int i = 0; i < my; ++i) {
+         int m0, n0;
+@@ -109,11 +113,13 @@ atom_gemm_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ C
+         const int ac = a_col0 + (a_grp > 0 ? (n0 / a_grp) * K : 0);   // grouped A: this tile's A column block
+         for (int ks = 0; ks < nk; ++ks, ++g) {
+           const int s = g % ST;
++          if (s != ls) continue;
+           if (g >= ST) mbar_wait(&B.empty[s], ((g / ST) - 1) & 1);
+           const uint32_t st = su + s * STB;
+-          mbar_expect_tx(&B.full[s], tx);
+-          tma_load_2d(st, &ma, &B.full[s], ac + 32 * ks, m0);
+-          tma_load_2d(st + A_BYTES, &mb, &B.full[s], b_col0 + 32 * ks, b_row0 + n0);
++          if ((lane & 1) == 0) mbar_expect_tx(&B.full[s], tx);
++          __syncwarp(pm);
++          if ((lane & 1) == 0) tma_load_2d(st, &ma, &B.full[s], ac + 32 * ks, m0);
++          else tma_load_2d(st + A_BYTES, &mb, &B.full[s], b_col0 + 32 * ks, b_row0 + n0);
+         }
+       }
+     }
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_dkv_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_dkv_tf32.cu
+index 05f96fc44..ba2db40da 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_dkv_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_dkv_tf32.cu
+@@ -108,20 +108,22 @@ local_attn_dkv_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
+ 
+   auto loadX = [&](int it) {                                         // k, v, K-major q, K-major dO of sample it
+     const int a = a_lo + it;
+-    mbar_expect_tx(fullX, TXX);
+-    tma_load_3d(su + X_K, &tm_k, fullX, h * DH, kb, a);
+-    tma_load_3d(su + X_V, &tm_v, fullX, h * DH, kb, a);
+-    tma_load_3d(su + X_Q, &tm_q, fullX, h * DH, q0, a);
+-    tma_load_3d(su + X_DO, &tm_do, fullX, h * DH, q0, a);
++    if (lane == 0) mbar_expect_tx(fullX, TXX);                       // (round 3 part 8: lanes 0..3 one load each -- one thread issues
++    __syncwarp(0xfu);                                                //  about one TMA load per ~600 clk)
++    if (lane == 0) tma_load_3d(su + X_K, &tm_k, fullX, h * DH, kb, a);
++    else if (lane == 1) tma_load_3d(su + X_V, &tm_v, fullX, h * DH, kb, a);
++    else if (lane == 2) tma_load_3d(su + X_Q, &tm_q, fullX, h * DH, q0, a);
++    else tma_load_3d(su + X_DO, &tm_do, fullX, h * DH, q0, a);
+   };
+   auto loadY = [&](int it) {                                         // MN-major q, MN-major dO, LSE, D of sample it into Y slot it & 1
+     const int y = it & 1, a = a_lo + it;
+     const uint32_t yb = su + O_Y + y * YB;
+-    mbar_expect_tx(&fullY[y], TXY);
+-    tma_load_3d(yb + Y_QM, &tm_qm, &fullY[y], h * DH, q0, a);
+-    tma_load_3d(yb + Y_DOM, &tm_dom, &fullY[y], h * DH, q0, a);
+-    tma_load_3d(yb + Y_L, &tm_l, &fullY[y], q0, h, a);
+-    tma_load_3d(yb + Y_D, &tm_d, &fullY[y], q0, h, a);
++    if (lane == 0) mbar_expect_tx(&fullY[y], TXY);
++    __syncwarp(0xfu);
++    if (lane == 0) tma_load_3d(yb + Y_QM, &tm_qm, &fullY[y], h * DH, q0, a);
++    else if (lane == 1) tma_load_3d(yb + Y_DOM, &tm_dom, &fullY[y], h * DH, q0, a);
++    else if (lane == 2) tma_load_3d(yb + Y_L, &tm_l, &fullY[y], q0, h, a);
++    else tma_load_3d(yb + Y_D, &tm_d, &fullY[y], q0, h, a);
+   };
+   auto mma_s = [&](int it) {                                         // S^T, dP^T of sample it
+     mbar_wait(fullX, it & 1);
+@@ -155,7 +157,7 @@ local_attn_dkv_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
+     __syncwarp();
+   };
+   if (ctl) {
+-    if (lane == 0 && nit > 0) {
++    if (lane < 4 && nit > 0) {
+       loadX(0);
+       loadY(0);
+       if (nit > 1) loadY(1);
+@@ -165,7 +167,7 @@ local_attn_dkv_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
+     for (int it = 0; it < nit; ++it) {
+       if (it + 1 < nit) {                                            // X(it + 1) loads during the softmax of it
+         mbar_wait(emptyX, it & 1);
+-        if (lane == 0) loadX(it + 1);
++        if (lane < 4) loadX(it + 1);
+         __syncwarp();
+       }
+       mbar_wait(tready, it & 1);                                     // P^T / dS^T(it) in TMEM, dK / dV(it - 1) drained
+@@ -174,7 +176,7 @@ local_attn_dkv_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
+       if (it + 1 < nit) mma_s(it + 1);                               // after dK / dV(it) in the MMA order
+       if (it + 2 < nit) {
+         mbar_wait(&yempty[it & 1], (it >> 1) & 1);                   // the drain of it has left Y slot it & 1
+-        if (lane == 0) loadY(it + 2);
++        if (lane < 4) loadY(it + 2);
+         __syncwarp();
+       }
+     }
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_dq_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_dq_tf32.cu
+index 06774cb7a..62e3c8abd 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_dq_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_dq_tf32.cu
+@@ -97,15 +97,17 @@ local_attn_dq_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_consta
+   auto load1 = [&](int it) {                                         // q, dO, k, v, LSE, D of sample it into stage it % 2
+     const int s = it % NST, a = a_lo + it;
+     const uint32_t st = su + s * STAGE;
+-    mbar_expect_tx(&full1[s], TX1);
+-    tma_load_3d(st + T_Q, &tm_q, &full1[s], h * DH, q0, a);
+-    tma_load_3d(st + T_DO, &tm_do, &full1[s], h * DH, q0, a);
+-    tma_load_3d(st + T_K, &tm_k, &full1[s], h * DH, kb, a);
+-    tma_load_3d(st + T_V, &tm_v, &full1[s], h * DH, kb, a);
+-    tma_load_3d(st + T_L, &tm_l, &full1[s], q0, h, a);
+-    tma_load_3d(st + T_D, &tm_d, &full1[s], q0, h, a);
++    if (lane == 0) mbar_expect_tx(&full1[s], TX1);                   // (round 3 part 8: lanes 0..5 one load each -- one thread issues
++    __syncwarp(0x3fu);                                               //  about one TMA load per ~600 clk)
++    if (lane == 0) tma_load_3d(st + T_Q, &tm_q, &full1[s], h * DH, q0, a);
++    else if (lane == 1) tma_load_3d(st + T_DO, &tm_do, &full1[s], h * DH, q0, a);
++    else if (lane == 2) tma_load_3d(st + T_K, &tm_k, &full1[s], h * DH, kb, a);
++    else if (lane == 3) tma_load_3d(st + T_V, &tm_v, &full1[s], h * DH, kb, a);
++    else if (lane == 4) tma_load_3d(st + T_L, &tm_l, &full1[s], q0, h, a);
++    else tma_load_3d(st + T_D, &tm_d, &full1[s], q0, h, a);
+   };
+   auto load2 = [&](int it) {                                         // the MN-major k of sample it
++    if (lane != 0) return;
+     mbar_expect_tx(full2, TX2);
+     tma_load_3d(su + O_KM, &tm_km, full2, h * DH, kb, a_lo + it);
+   };
+@@ -138,7 +140,7 @@ local_attn_dq_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_consta
+     __syncwarp();
+   };
+   if (ctl) {
+-    if (lane == 0) {
++    if (lane < 6) {
+       for (int i = 0; i < NST && i < nit; ++i) load1(i);
+       if (nit > 0) load2(0);
+     }
+@@ -148,7 +150,7 @@ local_attn_dq_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_consta
+       mbar_wait(tready, it & 1);                                     // dS(it) in TMEM, dQ(it - 1) drained, LSE / D of stage it read
+       tc_fence_after();
+       if (it + NST < nit) {                                          // the S / dP MMAs of it are done (the threads waited for them)
+-        if (lane == 0) load1(it + NST);
++        if (lane < 6) load1(it + NST);
+         __syncwarp();
+       }
+       mma_d(it);                                                     // commits dready and empty2
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_fwd.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_fwd.cu
+index 59d876763..f6d08b27a 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_fwd.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_fwd.cu
+@@ -198,10 +198,11 @@ local_attn_fwd(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__
+   auto load = [&](int it) {
+     const int s = it % NST, a = (a_lo + it) * NF + (int)blockIdx.y;
+     const uint32_t st = su + s * STAGE;
+-    mbar_expect_tx(&full[s], TX);
+-    tma_load_3d(st + T_Q, &tm_q, &full[s], h * DH, q0, a);
+-    tma_load_3d(st + T_K, &tm_k, &full[s], h * DH, kb, a);
+-    tma_load_3d(st + T_V, &tm_v, &full[s], h * DH, kb, a);
++    if (lane == 0) mbar_expect_tx(&full[s], TX);                     // (round 3 part 8: q, k, v from lanes 0, 1, 2 -- one thread
++    __syncwarp(7u);                                                  //  issues about one TMA load per ~600 clk)
++    if (lane == 0) tma_load_3d(st + T_Q, &tm_q, &full[s], h * DH, q0, a);
++    else if (lane == 1) tma_load_3d(st + T_K, &tm_k, &full[s], h * DH, kb, a);
++    else tma_load_3d(st + T_V, &tm_v, &full[s], h * DH, kb, a);
+   };
+   auto mma_s = [&](int it) {                                         // S of sample it into buffer it & 1
+     const int s = it % NST;
+@@ -228,7 +229,7 @@ local_attn_fwd(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__
+     __syncwarp();
+   };
+   if (ctl) {
+-    if (lane == 0) for (int i = 0; i < NST && i < nit; ++i) load(i);
++    if (lane < 3) for (int i = 0; i < NST && i < nit; ++i) load(i);
+     __syncwarp();
+     if (nit > 0) mma_s(0);
+     if (nit > 1) mma_s(1);
+@@ -239,7 +240,7 @@ local_attn_fwd(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__
+       if (it + 2 < nit) mma_s(it + 2);
+       if (it + NST < nit) {
+         mbar_wait(&empty[it % NST], (it / NST) & 1);
+-        if (lane == 0) load(it + NST);
++        if (lane < 3) load(it + NST);
+         __syncwarp();
+       }
+     }
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_fwd_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_fwd_tf32.cu
+index f381524f2..a80d0d7cc 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_fwd_tf32.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/lattn_fwd_tf32.cu
+@@ -106,10 +106,11 @@ local_attn_fwd_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
+   auto load = [&](int it) {                                          // lane 0 of the control warp; stage it % 2
+     const int s = it % NST, a = a_lo + it;
+     const uint32_t st = su + s * STAGE;
+-    mbar_expect_tx(&full[s], TX);
+-    tma_load_3d(st + T_Q, &tm_q, &full[s], h * DH, q0, a);
+-    tma_load_3d(st + T_K, &tm_k, &full[s], h * DH, kb, a);
+-    tma_load_3d(st + T_V, &tm_v, &full[s], h * DH, kb, a);
++    if (lane == 0) mbar_expect_tx(&full[s], TX);                     // (round 3 part 8: q, k, v from lanes 0, 1, 2 -- one thread
++    __syncwarp(7u);                                                  //  issues about one TMA load per ~600 clk)
++    if (lane == 0) tma_load_3d(st + T_Q, &tm_q, &full[s], h * DH, q0, a);
++    else if (lane == 1) tma_load_3d(st + T_K, &tm_k, &full[s], h * DH, kb, a);
++    else tma_load_3d(st + T_V, &tm_v, &full[s], h * DH, kb, a);
+   };
+   auto mma_s = [&](int it) {                                         // S of sample it into TMEM buffer it & 1 (= its stage)
+     const int s = it % NST;
+@@ -137,7 +138,7 @@ local_attn_fwd_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
+     __syncwarp();
+   };
+   if (ctl) {
+-    if (lane == 0) for (int i = 0; i < NST && i < nit; ++i) load(i);
++    if (lane < 3) for (int i = 0; i < NST && i < nit; ++i) load(i);
+     __syncwarp();
+     if (nit > 0) mma_s(0);
+     if (nit > 1) mma_s(1);
+@@ -147,7 +148,7 @@ local_attn_fwd_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
+       mma_o(it);                                                     // commits oready and empty[stage of it]
+       if (it + NST < nit) {
+         mbar_wait(&empty[it % NST], (it / NST) & 1);                 // PV(it) done: the stage and the S buffer of it are free
+-        if (lane == 0) load(it + NST);
++        if (lane < 3) load(it + NST);
+         __syncwarp();
+         mma_s(it + NST);
+       }
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/dw_atom.cu b/tmp/claude-1019/-home-psk6950-miniworld-engine/c6d88caf-785a-4514-a99f-3ac1c2843bd4/scratchpad/dw_ml.cu
+index 9f860769b..6141cfb15 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/dw_atom.cu
++++ b/tmp/claude-1019/-home-psk6950-miniworld-engine/c6d88caf-785a-4514-a99f-3ac1c2843bd4/scratchpad/dw_ml.cu
+@@ -82,16 +82,19 @@ atom_dw(const __grid_constant__ Maps maps, const __grid_constant__ Tab tab, floa
+   pdl_launch();
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
+-      pdl_wait();                                                          // the operands come from the previous kernels
+-      for (int blk = 0; blk < nblk; ++blk) {
+-        const int s = blk % NS;
+-        if (blk >= NS) mbar_wait(&B.empty[s], ((blk / NS) - 1) & 1);
+-        const uint32_t st = su + s * STG;
+-        mbar_expect_tx(&B.full[s], (uint32_t)(aa + bb) * ABOX);
+-        const int row = r0 + blk * BKR;
+-        for (int i = 0; i < aa; ++i) tma_load_2d(st + i * ABOX, mA, &B.full[s], ATOM * i, row);
+-        for (int j = 0; j < bb; ++j) tma_load_2d(st + (aa + j) * ABOX, mB, &B.full[s], ATOM * j, row);
++    // the whole warp issues, box i of a stage from lane i % 32 (round 3 part 8: one thread issues about one TMA load per ~600 clk whatever
++    // the box -- the fp32 build's 2 KB boxes from one lane capped the kernel near 3.4 B/clk per SM); lane 0 posts the bytes first
++    pdl_wait();                                                            // the operands come from the previous kernels
++    for (int blk = 0; blk < nblk; ++blk) {
++      const int s = blk % NS;
++      if (blk >= NS) mbar_wait(&B.empty[s], ((blk / NS) - 1) & 1);
++      const uint32_t st = su + s * STG;
++      if (lane == 0) mbar_expect_tx(&B.full[s], (uint32_t)(aa + bb) * ABOX);
++      __syncwarp();
++      const int row = r0 + blk * BKR;
++      for (int i = lane; i < aa + bb; i += 32) {
++        if (i < aa) tma_load_2d(st + i * ABOX, mA, &B.full[s], ATOM * i, row);
++        else tma_load_2d(st + i * ABOX, mB, &B.full[s], ATOM * (i - aa), row);
+       }
+     }
+   } else if (warp == 1) {
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/cond_fwd.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/cond_fwd.cu
+index 090e6e2b2..810dd1681 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/cond_fwd.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/cond_fwd.cu
+@@ -292,17 +292,19 @@ atom_cond_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constan
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer
+-    if (lane == 0) {
+-      mbar_expect_tx(&B.wfull, 3 * 32768);                                // W_p: K-major SW64 [128][32] atoms, 32 KB per projection
+-      for (int p = 0; p < 3; ++p)
+-        for (int ka = 0; ka < 4; ++ka) tma_load_2d(su + p * 32768 + ka * 8192, &mw, &B.wfull, 32 * ka, 384 * hk + 128 * p);
++    // (round 3 part 8: the whole warp issues, one box per lane -- one thread issues about one TMA load per ~600 clk whatever the box)
++    {
++      if (lane == 0) mbar_expect_tx(&B.wfull, 3 * 32768);                // W_p: K-major SW64 [128][32] atoms, 32 KB per projection
++      __syncwarp();
++      if (lane < 12) tma_load_2d(su + (lane >> 2) * 32768 + (lane & 3) * 8192, &mw, &B.wfull, 32 * (lane & 3), 384 * hk + 128 * (lane >> 2));
+       mbar_wait(&B.wfree, 0);
+       pdl_wait();                                                          // c comes from the previous kernels
+       for (int T = 0; T < ntT; ++T) {
+         const int s = T % NI;
+         if (T >= NI) mbar_wait(&B.infree[s], ((T / NI) - 1) & 1);
+-        mbar_expect_tx(&B.infull[s], 2 * KBLK);
+-        for (int kb = 0; kb < 2; ++kb) tma_load_2d(su + O_IN + s * T_ + kb * KBLK, &mc, &B.infull[s], 64 * kb, row0(T));
++        if (lane == 0) mbar_expect_tx(&B.infull[s], 2 * KBLK);
++        __syncwarp();
++        if (lane < 2) tma_load_2d(su + O_IN + s * T_ + lane * KBLK, &mc, &B.infull[s], 64 * lane, row0(T));
+       }
+     }
+   } else if (warp == 1) {
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/post_fwd.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/post_fwd.cu
+index 86bbabfcd..ec1689bfd 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/post_fwd.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/post_fwd.cu
+@@ -480,22 +480,28 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
+   if (warp == 0 || warp == 2) {
+     // ------------------------------------------------------------------------------------------------ TMA producers (warp 0: warpgroup 0, 2: 1)
+     const int w = warp >> 1;
+-    if (lane == 0) {
++    // Loads from 15 lanes (0, 2..15; lane 1 is the store thread), one box per lane (round 3 part 8: one thread issues about one TMA
++    // load per ~600 clk whatever the box); lane 0 posts each barrier's expected bytes before the others issue (__syncwarp(LM)).
++    constexpr unsigned LM = 0x0000FFFDu;
++    if (lane < 16 && lane != 1) {
++      const int li = lane == 0 ? 0 : lane - 1;                             // 0..14
+       if (w == 0) {
+         // Wa | Wb (units 0-3: rows 128 u ..) and Ws (units 4-5: k 128 (u - 4) ..) as K-major SW64 [128][32] atoms into the idle rings
+-        mbar_expect_tx(&B.wfull, 6 * 32768);
+-        for (int i = 0; i < 24; ++i) {
++        if (li == 0) mbar_expect_tx(&B.wfull, 6 * 32768);
++        __syncwarp(LM);
++        for (int i = li; i < 24; i += 15) {
+           const int u = i >> 2, ka = i & 3;
+           tma_load_2d(su + u * 32768 + ka * 8192, u < 4 ? &mwu : &mwd, &B.wfull, u < 4 ? 32 * ka : 128 * (u - 4) + 32 * ka, u < 4 ? 128 * u : 0);
+         }
+       }
+       mbar_wait(&B.wfree, 0);
+       if (w == 0) {
+-        mbar_expect_tx(&B.wofull, UP ? 3 * 32768 : 32768);
+-        for (int kb = 0; kb < 2; ++kb) tma_load_2d(su + O_WO + kb * 16384, &mwo, &B.wofull, 64 * kb, 0);
++        if (li == 0) mbar_expect_tx(&B.wofull, UP ? 3 * 32768 : 32768);
++        __syncwarp(LM);
++        if (li < 2) tma_load_2d(su + O_WO + li * 16384, &mwo, &B.wofull, 64 * li, 0);
+ #if UP
+-        for (int hu = 0; hu < 2; ++hu)                                     // Wu: hidden 128 hu .., as Wo (K-major SW128, two 64-wide K blocks)
+-          for (int kb = 0; kb < 2; ++kb) tma_load_2d(su + O_WU + hu * 32768 + kb * 16384, &mwup, &B.wofull, 64 * kb, 128 * hu);
++        else if (li < 6)                                                   // Wu: hidden 128 hu .., as Wo (K-major SW128, two 64-wide K blocks)
++          tma_load_2d(su + O_WU + ((li - 2) >> 1) * 32768 + ((li - 2) & 1) * 16384, &mwup, &B.wofull, 64 * ((li - 2) & 1), 128 * ((li - 2) >> 1));
+ #endif
+       }
+       pdl_wait();                                                          // a / o / g / mod come from the previous kernels
+@@ -504,13 +510,14 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
+         if (i >= NSW) mbar_wait(&B.infree[w][s], ((i / NSW) - 1) & 1);
+         const uint32_t st = stage(w, i);
+         uint64_t* bar = &B.infull[w][s];
+-        mbar_expect_tx(bar, 14 * KB);
+-        for (int kb = 0; kb < 2; ++kb) {
+-          tma_load_2d(st + O_A + kb * KB, &ma, bar, 64 * kb, r0);
+-          tma_load_2d(st + O_O + kb * KB, &mo, bar, 64 * kb, r0);
+-          tma_load_2d(st + O_G + kb * KB, &mg, bar, 64 * kb, r0);
++        if (li == 0) mbar_expect_tx(bar, 14 * KB);
++        __syncwarp(LM);
++        if (li < 6) {
++          const int kb = li / 3, wh = li % 3;
++          tma_load_2d(st + (wh == 0 ? O_A : wh == 1 ? O_O : O_G) + kb * KB, wh == 0 ? &ma : wh == 1 ? &mo : &mg, bar, 64 * kb, r0);
++        } else if (li < 14) {
++          tma_load_2d(st + O_M + (li - 6) * KB, &mmod, bar, 256 + 64 * (li - 6), r0 % mrows);   // os | sc2 | bi2 | ts
+         }
+-        for (int kb = 0; kb < 8; ++kb) tma_load_2d(st + O_M + kb * KB, &mmod, bar, 256 + 64 * kb, r0 % mrows);   // os | sc2 | bi2 | ts
+       }
+     } else if (lane == 1) {
+       // the TMA stores of this warpgroup's tiles: issued (and waited for) off the compute threads, which go on to the next tile's row work
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
+index 406fdb77e..e27ae22cc 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
+@@ -301,26 +301,27 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ TMA producer
+-    if (lane == 0) {
+-      mbar_expect_tx(&B.wfull, 4 * 32768);                                // W_p: K-major SW64 [128][32] atoms, 32 KB per projection
+-      for (int p = 0; p < 4; ++p)
+-        for (int ka = 0; ka < 4; ++ka) tma_load_2d(su + p * 32768 + ka * 8192, &mw, &B.wfull, 32 * ka, 128 * p);
+-      mbar_wait(&B.wfree, 0);
+-      pdl_wait();                                                          // a / mod come from the previous kernels
+-      for (int T = 0; T < ntT; ++T) {
+-        const int s = T % NI, r0 = row0(T);
+-        if (T >= NI) mbar_wait(&B.infree[s], ((T / NI) - 1) & 1);
+-        const uint32_t st = su + O_IN + s * IST;
++    // (round 3 part 8: the whole warp issues, one box per lane -- one thread issues about one TMA load per ~600 clk whatever the box;
++    // lane 0 posts the expected bytes first)
++    if (lane == 0) mbar_expect_tx(&B.wfull, 4 * 32768);                  // W_p: K-major SW64 [128][32] atoms, 32 KB per projection
++    __syncwarp();
++    if (lane < 16) tma_load_2d(su + (lane >> 2) * 32768 + (lane & 3) * 8192, &mw, &B.wfull, 32 * (lane & 3), 128 * (lane >> 2));
++    mbar_wait(&B.wfree, 0);
++    pdl_wait();                                                          // a / mod come from the previous kernels
++    for (int T = 0; T < ntT; ++T) {
++      const int s = T % NI, r0 = row0(T);
++      if (T >= NI) mbar_wait(&B.infree[s], ((T / NI) - 1) & 1);
++      const uint32_t st = su + O_IN + s * IST;
+ #if DIAG == 2
+-        mbar_arrive(&B.infull[s]); (void)st; (void)r0;
++      if (lane == 0) mbar_arrive(&B.infull[s]);
++      (void)st; (void)r0;
+ #else
+-        mbar_expect_tx(&B.infull[s], (CROSS ? 10 : 6) * KBLK);
+-        if (CROSS)
+-          for (int kb = 0; kb < 4; ++kb) tma_load_2d(st + 3 * T_ + kb * KBLK, &mMKV, &B.infull[s], 64 * kb, r0 % mrows);   // pre | shift
+-        for (int kb = 0; kb < 2; ++kb) tma_load_2d(st + kb * KBLK, &ma, &B.infull[s], 64 * kb, r0);
+-        for (int kb = 0; kb < 4; ++kb) tma_load_2d(st + T_ + kb * KBLK, &mmod, &B.infull[s], 64 * kb, r0 % mrows);   // s1 | bi1
++      if (lane == 0) mbar_expect_tx(&B.infull[s], (CROSS ? 10 : 6) * KBLK);
++      __syncwarp();
++      if (lane < 2) tma_load_2d(st + lane * KBLK, &ma, &B.infull[s], 64 * lane, r0);
++      else if (lane < 6) tma_load_2d(st + T_ + (lane - 2) * KBLK, &mmod, &B.infull[s], 64 * (lane - 2), r0 % mrows);   // s1 | bi1
++      else if (CROSS && lane < 10) tma_load_2d(st + 3 * T_ + (lane - 6) * KBLK, &mMKV, &B.infull[s], 64 * (lane - 6), r0 % mrows);   // pre | shift
+ #endif
+-      }
+     }
+   } else if (warp == 1) {
+     // ------------------------------------------------------------------------------------------------ MMA issuer

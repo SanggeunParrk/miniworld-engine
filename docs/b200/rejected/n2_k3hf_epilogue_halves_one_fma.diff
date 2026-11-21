@@ -1,0 +1,54 @@
+--- /tmp/k3h_pre.cu	2026-11-19 04:53:36.691724475 +0900
++++ /tmp/claude-1002/-home-psk6950-practice-MiniWorld/b70277b8-ff66-5282-bcae-5530314a7edb/scratchpad/n2/trimul_inproj/cuda/b200_sources/k3h.cu	2026-11-19 04:53:36.692724443 +0900
+@@ -418,6 +418,9 @@
+ // shared tables) and both groups run every tile's epilogue (half the channels each). Accumulators and t are double buffered
+ // (256 TMEM columns: 2 x [p | g]), so the next tile's MMAs overlap this tile's epilogue. Not the same bits as k3h (no bf16
+ // rounding of xn / xo; inside the accuracy standard, as k3w).
++#ifndef K3HF_FOLDH
++#define K3HF_FOLDH 1   // (n2 2026-11-18) epilogue on 0.5 p / 0.5 g (see k3w.cu K3W_FOLDH): 9 instead of 11 f32x2 / MUFU instructions a channel pair
++#endif
+ namespace k3hf {
+ #ifdef TM_TL
+ static __device__ unsigned long long g_tlf[480][16];
+@@ -480,7 +483,7 @@
+     for (int kb = 0; kb < H / 64; ++kb) tma_load_2d(sm + GG::O_WP + kb * GG::WGB, &mwp, &B.w_full, kb * 64, 0, EVICT_LAST);
+     for (int b = 0; b < nx0; ++b) xload(b, b);
+   }
+-  for (int k = tid; k < 4 * C; k += NTHREADS) reinterpret_cast<float*>(sm + GG::O_VEC)[k] = vec[k];   // sp, ep, sg, eg
++  for (int k = tid; k < 4 * C; k += NTHREADS) reinterpret_cast<float*>(sm + GG::O_VEC)[k] = (K3HF_FOLDH && ((k / C) & 1)) ? 0.5f * vec[k] : vec[k];   // sp, ep, sg, eg (K3HF_FOLDH: ep, eg halved)
+   if (warp == 2) { tmem_alloc(&B.tmem, ACCB * 128); tmem_relinquish(); }
+   tc_fence_before();
+   __syncthreads();
+@@ -545,8 +548,8 @@
+ #pragma unroll
+     for (int tb = 0; tb < 2; ++tb) {
+       const int r = 16 * q + tr + 8 * tb;
+-      mi[tb] = sti[b * 2 * TOK + r]; ri[tb] = sti[b * 2 * TOK + TOK + r];
+-      mo[tb] = sto[b * 2 * TOK + r]; ro[tb] = sto[b * 2 * TOK + TOK + r];
++      mi[tb] = sti[b * 2 * TOK + r]; ri[tb] = (K3HF_FOLDH ? 0.5f : 1.f) * sti[b * 2 * TOK + TOK + r];
++      mo[tb] = sto[b * 2 * TOK + r]; ro[tb] = (K3HF_FOLDH ? 0.5f : 1.f) * sto[b * 2 * TOK + TOK + r];
+     }
+     const int ab = ACCB == 2 ? b : 0; mbar_wait(&B.acc_full[ab], ACCB == 2 ? ph : (i & 1));
+     if (warp == 8 && lane == 0) TLF(i, 3)
+@@ -574,6 +577,13 @@
+           const float2 ga = make_float2(__uint_as_float(gv[4 * j + 2 * tb]), __uint_as_float(gv[4 * j + 2 * tb + 1]));
+           const float2 pp = __ffma2_rn(make_float2(ro[tb], ro[tb]), __ffma2_rn(make_float2(-mo[tb], -mo[tb]), sp, pa), ep);
+           const float2 gg = __ffma2_rn(make_float2(ri[tb], ri[tb]), __ffma2_rn(make_float2(-mi[tb], -mi[tb]), sg, ga), eg);
++#if K3HF_FOLDH   // pp = 0.5 p, gg = 0.5 g (ro, ri, ep, eg halved: exact): sigmoid(g) p = tanh(gg) pp + pp, one fma
++          float2 th;
++          asm("tanh.approx.f32 %0, %1;" : "=f"(th.x) : "f"(gg.x));
++          asm("tanh.approx.f32 %0, %1;" : "=f"(th.y) : "f"(gg.y));
++          {
++            const float2 pr = __ffma2_rn(th, pp, pp);
++#else
+           const float2 h = __fmul2_rn(gg, make_float2(0.5f, 0.5f));   // sigmoid(g) = 0.5 tanh(g / 2) + 0.5
+           float2 th;
+           asm("tanh.approx.f32 %0, %1;" : "=f"(th.x) : "f"(h.x));
+@@ -581,6 +591,7 @@
+           const float2 sgm = __ffma2_rn(th, make_float2(0.5f, 0.5f), make_float2(0.5f, 0.5f));
+           {   // y = bf16(x + bf16(sigmoid(g) p)) as one packed bf16 add of the two bf16 words (the fp32 sum of two bf16 values rounded once)
+             const float2 pr = __fmul2_rn(sgm, pp);
++#endif
+             uint32_t yw;
+             asm("add.rn.bf16x2 %0, %1, %2;" : "=r"(yw) : "r"(xw), "r"(pack_bf16(pr.x, pr.y)));
+             k3h::sts32(a, yw);

@@ -1,0 +1,20 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n1-base/src/miniworld_engine/kernels/integrations/triattn_b200.py	2026-11-18 14:30:27.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n1-triattn/src/miniworld_engine/kernels/integrations/triattn_b200.py	2026-11-18 15:57:32.000000000 +0000
+@@ -30,6 +30,8 @@
+ from miniworld_engine.kernels._compile import device_constant, opaque
+ 
+ FUSED, GENERIC = 0, 1
++import os as _os
++D128_WIDE = int(_os.environ.get("MINIWORLD_TRIATTN_B200_D128_WIDE", "0"))   # (N1 experiment) training at L <= this: d_pair 128 on the wide path
+ #: Shortest length served: shorter pairs run the module's PyTorch statements (a 16-token pair padded to one 128 tile is already 64x
+ #: the work; below it the reference is as fast)
+ MIN_LENGTH = 16
+@@ -105,7 +107,7 @@
+     bt, biases, mode = _options(module)
+     training = _needs_grad(module, pair)
+     # RoseTTAFold3's gate / out biases: the fused inference tail adds them (tri_tailg, fp32 before each rounding); training: the wide path
+-    if module.n_head == 4 and d_pair == 128 and d_hidden == 128 and not mode and not (training and (biases or bt)):
++    if module.n_head == 4 and d_pair == 128 and d_hidden == 128 and not mode and not (training and (biases or bt)) and not (D128_WIDE and training and pair.shape[1] <= D128_WIDE):
+         return FUSED
+     from miniworld_engine.kernels.triangle_attention.cuda.b200_triattn import (
+         wide_supports,

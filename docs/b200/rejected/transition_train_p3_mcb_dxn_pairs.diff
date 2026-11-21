@@ -1,0 +1,220 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
+index 345e340ca..774222422 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_generic_sm100a.py
+@@ -936,10 +936,16 @@ SB_PLAN_TUNED: dict[tuple[int, int, int, bool], tuple[int, int, int, int]] = {
+     (640, 768, 1536, False): (256, 2, 256, 30),
+     (768, 768, 1536, False): (256, 2, 256, 36),
+ }
++#: (round 3, training part 3) phase-2 plans with the d_xn tiles on 2-CTA clusters (``-DSBMC=1``: a pair's two M tiles share the
++#: [Wa; Wb] panel, each CTA TMA-multicasting half of it; the launch takes 2-CTA clusters): (d_xn width, K slices, dW width, d_xn CTAs)
++SB_MCB_TUNED: dict[tuple[int, int, int, bool], tuple[int, int, int, int]] = {}
++#: (A/B) SB_PLAN_FORCE as an SBMC plan
++SB_MCB_FORCE = False
+ #: measured gate plans (tile width, K slices; 1: the unsplit GATE_AB tiles; ``b200cfg/sbsweep.py`` GATES=, last-CTA end, us, auto ->
+ #: tuned): bf16 [256 / 384 / 512 / 640 / 768, 768] n 2 22.1 -> 21.3, 24.3 -> 22.2, 26.8 -> 23.8, 28.5 -> 26.8, 29.1 -> 27.1 (the split's
+ #: elementwise pass over the dh slabs costs more than the unsplit tiles' per-CTA intake from 384 rows)
+ SB_GATE_TUNED: dict[tuple[int, int, int, bool], tuple[int, int]] = {
++    (128, 768, 1536, True): (64, 6),  # fp32 [128, 768]: 22.5 -> 21.2
+     (256, 768, 1536, False): (64, 3),
+     (384, 768, 1536, False): (64, 1),
+     (512, 768, 1536, False): (64, 1),
+@@ -977,8 +983,13 @@ def _small_spec(f32: bool, d: int, hid: int, bng: int, bnp: int, ntw: int, probe
+ def _small_config(m: int, d: int, hid: int, f32: bool, nsm: int) -> tuple[int, int, int, int, int, int, tuple[str, ...]]:
+     """(gate width, d_xn width, d_xn K slices, dW width, d_xn CTAs, gate K slices (0: GATE_AB tiles), build flags) of one call."""
+     bng, bnp, ksp, ntw, npc = _small_plan(m, d, hid, f32, nsm)
++    mcb = False
+     if SB_PLAN_FORCE is not None:  # (A/B) (d_xn width, K slices, dW width, d_xn CTAs)
+         bnp, ksp, ntw, npc = SB_PLAN_FORCE
++        mcb = SB_MCB_FORCE
++    elif nsm == 148 and (m, d, hid, f32) in SB_MCB_TUNED:
++        bnp, ksp, ntw, npc = SB_MCB_TUNED[(m, d, hid, f32)]
++        mcb = True
+     elif nsm == 148 and (m, d, hid, f32) in SB_PLAN_TUNED:
+         bnp, ksp, ntw, npc = SB_PLAN_TUNED[(m, d, hid, f32)]
+     ksg = 0
+@@ -993,6 +1004,9 @@ def _small_config(m: int, d: int, hid: int, f32: bool, nsm: int) -> tuple[int, i
+     if -(-m // nsm) > 2 or d % 768:  # (several warps per LayerNorm row: D 768 at <= 2 rows per CTA only; measured slower at D 384
+         # [384, 384] fp32 +0.7 us and, with the build serving it, at D 768 L 640 / 768 +2 us)
+         flags += ("-DLNW=0",)
++    if mcb:  # the d_xn tiles on 2-CTA clusters sharing the weight panel (the launch takes 2-CTA clusters)
++        assert npc % 2 == 0 and nsm % 2 == 0
++        flags += ("-DSBMC=1",)
+     return bng, bnp, ksp, ntw, npc, ksg, flags
+ 
+ 
+@@ -1154,7 +1168,7 @@ def _bwd_small(k, dy, x, xn, mean, rstd, gamma, ws_, wab, ab):
+         gp,
+         max(ksg, 1),
+     ]
+-    ext.launch_kernel(name, "tg_bwd_small_sm100", g, 320, 1, args, PDL)
++    ext.launch_kernel(name, "tg_bwd_small_sm100", g, 320, 2 if "-DSBMC=1" in flags else 1, args, PDL)
+     if SB_PROBE:
+         global SB_STAMPS
+         SB_STAMPS = part[g * 2 * d :].view(torch.int64).view(g, 40)
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_bwd_small.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_bwd_small.cu
+index a7e64ad27..b955e53bc 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_bwd_small.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_bwd_small.cu
+@@ -55,6 +55,9 @@ using namespace s100;
+ #ifndef PROBE
+ #define PROBE 0
+ #endif
++#ifndef SBMC
++#define SBMC 0                                     // P2 d_xn on CTA pairs (launched as 2-CTA clusters): each pair's two M tiles share the
++#endif                                             // [Wa; Wb] panel, each CTA multicasting half of it (per-CTA intake (128 + BNP / 2) K)
+ #ifndef LNW
+ #define LNW 1                                      // P3: several warps per row where the CTA's rows leave warps idle (A/B: 0 = one per warp)
+ #endif
+@@ -108,11 +111,14 @@ namespace plain {
+ #define BN BNP
+ #define BMN 1
+ #define GSTORE GST
++#undef MCB
++#define MCB SBMC                                   // the d_xn tiles in CTA pairs sharing the weight panel (multicast halves)
+ #include "tg_gemm.cu"
+ #undef MODE
+ #undef BMN
+ #undef GSTORE
+ #undef BN
++#undef MCB
+ }  // namespace plain
+ namespace dw {
+ #define NT NTW
+@@ -371,6 +377,7 @@ tg_bwd_small_sm100(const __grid_constant__ CUtensorMap gA, const __grid_constant
+   if (warp == 1) { tmem_alloc(smem_u32(&tmem_s), 512); tmem_relinquish(); }
+   tc_fence_before();
+   __syncthreads();
++  if (SBMC) cluster_sync_relaxed();                // (SBMC) the peer's barriers exist before its multicast loads / commits target them
+   tc_fence_after();
+   const uint32_t tmem = tmem_s;
+   ST(0);
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_gemm.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_gemm.cu
+index 3801215fa..9a687280c 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_gemm.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/generic/tg_gemm.cu
+@@ -64,8 +64,14 @@ static_assert(!H16 || (!F32 && (MODE == 0 || MODE == 1)), "H16: the SWIGLU / RES
+ #ifndef CTA2
+ #define CTA2 0                                       // 1: CTA pairs (cta_group::2): M = 256 products, B split by N across the pair
+ #endif
+-constexpr int NCTA = CTA2 ? 2 : 1;
+-constexpr int BNL = BN / NCTA;                       // B rows (output columns) each CTA of a pair brings
++#ifndef MCB
++#define MCB 0                                        // (round 3, training part 3) CTA pairs along M on cta_group::1 MMAs: the pair's two 128-row
++#endif                                               // tiles share the B panel, each CTA TMA-multicasts half of it into both (BMN only)
++static_assert(!(MCB && CTA2), "MCB: single-CTA MMAs");
++constexpr int NCTA = (CTA2 || MCB) ? 2 : 1;          // CTAs per tile (tile rows 128 NCTA)
++constexpr int MCTA = CTA2 ? 2 : 1;                   // CTAs per MMA
++constexpr int BNL = BN / MCTA;                       // B rows (output columns) each CTA's ring stage holds
++constexpr int BNI = BN / NCTA;                       // B rows each CTA loads (MCB: half of them, multicast to both)
+ 
+ constexpr bool SWG = MODE == 0 || MODE == 5;                             // the SwiGLU forward epilogues
+ constexpr bool GAT = MODE == 3 || MODE == 6 || MODE == 7;                             // the gate (SwiGLU backward) epilogues: h, dA, dB
+@@ -104,7 +110,7 @@ static_assert(STAGE % 1024 == 0 && SLAB % 1024 == 0, "128-B swizzle atoms");
+ 
+ #if F32
+ // kind::tf32 instruction descriptor: TF32 A / B (format 2), fp32 D, K-major both, N, M
+-constexpr uint32_t IDESC = (1u << 4) | (2u << 7) | (2u << 10) | (BMN ? (1u << 16) : 0u) | ((uint32_t)(BN >> 3) << 17) | ((uint32_t)((128 * NCTA) >> 4) << 24);
++constexpr uint32_t IDESC = (1u << 4) | (2u << 7) | (2u << 10) | (BMN ? (1u << 16) : 0u) | ((uint32_t)(BN >> 3) << 17) | ((uint32_t)((128 * MCTA) >> 4) << 24);
+ DEVI void umma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) {
+ #if CTA2
+   asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; tcgen05.mma.cta_group::2.kind::tf32 [%0], %1, %2, %3, p; }"
+@@ -115,7 +121,7 @@ DEVI void umma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) {
+ #endif
+ }
+ #else
+-constexpr uint32_t IDESC = idesc_bf16(128 * NCTA, BN, 0, BMN) & ~(H16 ? ((1u << 7) | (1u << 10)) : 0u);   // H16: fp16 A / B
++constexpr uint32_t IDESC = idesc_bf16(128 * MCTA, BN, 0, BMN) & ~(H16 ? ((1u << 7) | (1u << 10)) : 0u);   // H16: fp16 A / B
+ DEVI void umma(uint32_t d, uint64_t a, uint64_t b, uint32_t acc) {
+ #if CTA2
+   umma_ss2(d, a, b, IDESC, acc);
+@@ -144,6 +150,14 @@ DEVI void commit_all(uint64_t* bar) {
+   tc_commit(bar);
+ #endif
+ }
++DEVI void commit_empty(uint64_t* bar) {             // a ring slot consumed: MCB releases it in both CTAs (the peer multicasts into it)
++#if MCB
++  tc_commit_mc(bar, (uint16_t)3);
++#else
++  commit_all(bar);
++#endif
++}
++static_assert(!MCB || (BMN && BNI % BKE == 0), "MCB: MN-major B, whole 128-B N blocks per CTA");
+ DEVI void load_op(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1) {
+ #if CTA2
+   tma_load_2d_2sm(dst, m, bar, c0, c1);          // completes on the leader's barrier
+@@ -240,8 +254,8 @@ DEVI void load_res32(const void* res, long off, bool ok, float (&v)[32]) {
+ 
+ // the barriers of one CTA (thread 0)
+ DEVI void tg_gemm_init(Bars& B) {
+-  for (int s = 0; s < NST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
+-  for (int s = 0; s < 2; ++s) { mbar_init(&B.accf[s], 1); mbar_init(&B.acce[s], NEPI * NCTA); }
++  for (int s = 0; s < NST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], MCB ? 2 : 1); }
++  for (int s = 0; s < 2; ++s) { mbar_init(&B.accf[s], 1); mbar_init(&B.acce[s], NEPI * MCTA); }
+ #if MODE == 6 || MODE == 7
+   for (int o = 0; o < NOWN; ++o) { mbar_init(&B.ldab[o][0], 1); mbar_init(&B.ldab[o][1], 1); }
+ #endif
+@@ -264,8 +278,8 @@ DEVI void tg_gemm_roles(const CUtensorMap* pA0, const CUtensorMap* pA1, const CU
+   // a tile is 128 NCTA rows x BN columns; CTA `rank` of a pair owns rows rank * 128 .. of it (its TMEM lanes), and brings its A rows and
+   // BNL of the BN B rows; the pair walks the same tile sequence
+   const int NT = (N + BN - 1) / BN, MNT = ((M + 128 * NCTA - 1) / (128 * NCTA)) * NT, tiles = MNT * KS;
+-  const uint32_t rank = CTA2 ? cluster_rank() : 0u;
+-  const bool leader = rank == 0;
++  const uint32_t rank = (CTA2 || MCB) ? cluster_rank() : 0u;
++  const bool leader = MCB || rank == 0;           // (MCB: each CTA issues its own MMAs)
+ 
+   if (warp == 0) {
+     // ------------------------------------------------------------------------------------------------ producer
+@@ -273,7 +287,7 @@ DEVI void tg_gemm_roles(const CUtensorMap* pA0, const CUtensorMap* pA1, const CU
+       int it = 0;
+       for (int t = cta / NCTA; t < tiles; t += ncta / NCTA) {
+         const int ks = t / MNT, tt = t % MNT;
+-        const int m0 = (tt / NT) * 128 * NCTA + (int)rank * 128, n0 = (tt % NT) * BN + (int)rank * BNL;
++        const int m0 = (tt / NT) * 128 * NCTA + (int)rank * 128, n0 = (tt % NT) * BN + (int)rank * BNI;
+ #pragma unroll
+         for (int p = 0; p < NPH; ++p) {
+           const CUtensorMap* ma = p == 0 ? pA0 : pA1;
+@@ -281,15 +295,21 @@ DEVI void tg_gemm_roles(const CUtensorMap* pA0, const CUtensorMap* pA1, const CU
+           for (int k = kb0; k < kb0 + nk; ++k, ++it) {
+             const int s = it % NST;
+             mbar_wait(&B.empty[s], ((it / NST) & 1) ^ 1);
+-            if (leader) mbar_expect_tx(&B.full[s], (A_BYTES + na * B_BYTES) * NCTA);   // the pair's bytes land on the leader's barrier
++            if (leader) mbar_expect_tx(&B.full[s], (A_BYTES + na * B_BYTES) * MCTA);   // the pair's bytes land on the leader's barrier
+             const uint32_t base = su + O_ST + s * STAGE;
+             load_op(base, ma, &B.full[s], k * BKE, m0);
+             for (int j = 0; j < na; ++j) {
+               const int acc = a0 + j;
+               const CUtensorMap* mb = acc == 0 ? pB0 : acc == 1 ? pB1 : pB2;
+ #if BMN
+-              for (int q = 0; q < BNL / BKE; ++q)            // [K][N] weights: BNL / BKE 128-B N blocks of BKE K rows
+-                load_op(base + A_BYTES + j * B_BYTES + q * BKE * 128, mb, &B.full[s], n0 + q * BKE, k * BKE);
++              for (int q = 0; q < BNI / BKE; ++q) {          // [K][N] weights: BNI / BKE 128-B N blocks of BKE K rows
++                const uint32_t dq = base + A_BYTES + j * B_BYTES + (uint32_t)((MCB ? (int)rank * (BNI / BKE) : 0) + q) * BKE * 128;
++#if MCB
++                tma_load_2d_mc(dq, mb, &B.full[s], n0 + q * BKE, k * BKE, (uint16_t)3);   // into both CTAs' stage s
++#else
++                load_op(dq, mb, &B.full[s], n0 + q * BKE, k * BKE);
++#endif
++              }
+ #else
+               load_op(base + A_BYTES + j * B_BYTES, mb, &B.full[s], k * BKE, n0);
+ #endif
+@@ -326,7 +346,7 @@ DEVI void tg_gemm_roles(const CUtensorMap* pA0, const CUtensorMap* pA1, const CU
+               for (int kk = 0; kk < 4; ++kk)
+                 umma(dbase + (a0 + j) * BN, da + (uint64_t)(kk * 2), db + (uint64_t)(kk * B_KSTEP), (k > 0 || kk > 0) ? 1u : 0u);
+             }
+-            commit_all(&B.empty[s]);
++            commit_empty(&B.empty[s]);
+           }
+         }
+         commit_all(&B.accf[buf]);
+@@ -488,7 +508,8 @@ DEVI void tg_gemm_roles(const CUtensorMap* pA0, const CUtensorMap* pA1, const CU
+ #endif
+           TG_TRACE(3);
+ #if GSTORE
+-          {                                                  // (whole 32-row groups: the caller's M is a multiple of 128)
++          if (m0 < M) {                                      // (whole 32-row groups: the caller's M is a multiple of 128; MCB: an odd tile
++                                                             // count leaves the last pair's second tile past M -- zero-filled, not stored)
+             const int u = UPG == 1 ? 0 : half;
+             const long rr = (long)ks * MSTR + m0 + q4 * 32;    // the warp's first row
+ #if MODE != 7

@@ -1,0 +1,99 @@
+diff --git a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py b/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
+index e69050f52..1cc5b9a08 100644
+--- a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
++++ b/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
+@@ -391,6 +391,19 @@ def _fwd_reserve(dp: int, L: int) -> int:
+     return _FWD_RESERVE if _STREAMS and dp == DP and 384 <= L <= 640 else 0
+ 
+ 
++#: B200 bf16 inference, d_pair 128 (v21, 2026-11-17): the pair pass as ``pair_bias_fwd2`` (apb_pair_fwd_rows_sm100.cuh: the shared pass with
++#: each warp's 16 rows loaded by its own lane / mbarrier) -- "stages:blocks per SM" (0: the occupancy); None: the shared pass.
++#: MINIWORLD_APB_B200_PF2 forces (0: off).
++_PF2 = os.environ.get("MINIWORLD_APB_B200_PF2", "2:0")
++
++
++def _pf2(dp: int, L: int, heads: int) -> tuple[int, int] | None:
++    if _PF2 is None or _PF2 == "0" or dp != DP:
++        return None
++    s, b = _PF2.split(":")
++    return int(s), int(b)
++
++
+ def _pair_tc(dp: int, L: int, heads: int, train: bool = False) -> bool:
+     """Whether the bf16 pair -> bias pass runs on tcgen05 (MINIWORLD_APB_B200_PAIR_TC=0 / 1 forces). Measured (2026-11-17, master eval step,
+     graph timing, the shared pass -> tcgen05): d_pair 256 L 512 / 768 59.3 / 94.1 -> 59.9 / 94.7 us, L 1024 / 1536 / 2048 139.7 / 274.3 / 458.6
+@@ -478,6 +491,17 @@ def _pdl_on(L: int) -> bool:
+     return L <= _PDL_MAX
+ 
+ 
++#: B200 bf16 training backward (v21, 2026-11-17): dxa = dqkvg Wpack as the gate quarter (on side stream 0 as soon as the gate backward has
++#: run, beside attn_dqb / attn_dkv) + the q | k | v part (addmm onto it after qkv_bwd, K = 3 W on the chain). MINIWORLD_APB_B200_DXA_SPLIT forces.
++_DXA_SPLIT = os.environ.get("MINIWORLD_APB_B200_DXA_SPLIT")
++
++
++def _dxa_split(L: int) -> bool:
++    if _DXA_SPLIT is not None:
++        return _DXA_SPLIT not in ("0", False)
++    return False
++
++
+ def _pdl_call(E, pdl: bool, fn, *args) -> None:
+     """fn(*args) with the extension's PDL launches on when ``pdl``, then the previous setting."""
+     if not pdl:
+@@ -586,7 +610,12 @@ def _inference_b200(single, pair, mask, params, leaves, eps_s, eps_p, gate_bias,
+                     bias = _sm100().apb_pair_fwd(p2, wf, None, 1.0, _row(mask, b), L0, eps_p, NEG)
+                 else:
+                     was = E.sm_reserve(_fwd_reserve(wf_dp, L0))
+-                    made = _rows().pair_bias(p2, wf, _row(mask, b), L0, eps_p, NEG)
++                    pf2 = _pf2(wf_dp, L0, H)
++                    if pf2 is not None:  # v21: the B200 form of the d_pair 128 pass (per-warp tile loads)
++                        made = torch.empty(H, L0, L0, device=dev, dtype=torch.bfloat16)
++                        E.pair_bias_fwd2(p2, wf, _row(mask, b), made, L0, eps_p, NEG, *pf2, 0)
++                    else:
++                        made = _rows().pair_bias(p2, wf, _row(mask, b), L0, eps_p, NEG)
+                     E.sm_reserve(was)
+                     assert isinstance(made, torch.Tensor)
+                     bias = made
+@@ -908,7 +937,11 @@ def _forward_b200(single, pair, mask, leaves, eps_s, eps_p, gate_bias):
+             m = _row(mask, b)
+             with torch.cuda.stream(side):
+                 wide: list[torch.Tensor] = []  # a wide pair: (row stats, unmasked bias) for its backward
+-                if dp == DP:
++                pf2 = _pf2(dp, L, H)
++                if pf2 is not None:  # v21: the B200 form of the d_pair 128 pass (the same bits)
++                    bias = pair.new_empty((H, L, L))
++                    E.pair_bias_fwd2(pair[b].view(L * L, DP), wf, m, bias, L, eps_p, NEG, *pf2, 0)
++                elif dp == DP:
+                     bias = rows.pair_bias(pair[b].view(L * L, DP), wf, m, L, eps_p, NEG)
+                 elif _pair_tc(dp, L, H, True):  # the tcgen05 pass, with the row stats and the unmasked bias its backward reads
+                     wide = [pair.new_empty((L * L, 2), dtype=torch.float32), pair.new_empty((H, L, L), dtype=torch.float32)]
+@@ -1008,6 +1041,15 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+                     _rec(transposed, s1)
+             dog = dy2 @ wo
+             _pdl_call(E, pdl, E.gate_bwd2 if _P5 and H == 12 else E.gate_bwd_p, dog, O, qkvg, dob, dd, dqkvg)
++            dxa_g = None
++            if _dxa_split(L):  # v21: dxa's gate quarter (dg is ready now) on side stream 0 beside the cores; the tail GEMM then has K = 3 W
++                g_ready = torch.cuda.Event()
++                _rec(g_ready, main)
++                _after(s1, g_ready)
++                with torch.cuda.stream(s1):
++                    dxa_g = dqkvg[:, 3 * W :] @ wpack[3 * W :]
++                    g_done = torch.cuda.Event()
++                    _rec(g_done, s1)
+             _join(s2, main)
+             with torch.cuda.stream(s2):
+                 dqb()
+@@ -1027,7 +1069,12 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+             if _DXA_FIRST:  # dxa leads the tail (-> ln_bwd -> finalize); dW q|k|v|g is issued after it, on the side stream
+                 qkv_done = torch.cuda.Event()
+                 _rec(qkv_done, main)
+-                dxa = dqkvg @ wpack
++                if dxa_g is not None:
++                    _after(main, g_done)
++                    dxa = torch.addmm(dxa_g, dqkvg[:, : 3 * W], wpack[: 3 * W])
++                    dxa_g.record_stream(main)
++                else:
++                    dxa = dqkvg @ wpack
+                 _after(s1, qkv_done)
+             else:
+                 _join(s1, main)

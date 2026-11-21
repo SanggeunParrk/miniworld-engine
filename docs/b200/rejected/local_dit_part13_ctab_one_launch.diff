@@ -1,0 +1,291 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+index 055353cb6..0bc888d5d 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+@@ -909,6 +909,7 @@ KERNELS_TF32 = {
+     "gemm_rg": ("gemm_rg_tf32", "atom_gemm_rg_tf32", 229632),
+     "gemm_sb": ("gemm_sb_tf32", "atom_gemm_sb_tf32", 229632),  # (round 3 part 11: dh product + SwiGLU backward)
+     "gemm_k64": ("gemm_tf32", "atom_gemm_tf32", 229632, ("K64=1",)),  # (round 3 part 11: K = 64 stages from 3-D boxes)
++    "ctab": ("ctab_tf32", "atom_ctab_tf32", 229632),  # (round 3 part 13: the inference conditioning tables, LN / silu + product in one launch)
+     "ln": ("rows_tf32", "f32_ln_aff", 0),
+     "adaln": ("rows_tf32", "f32_adaln", 0),
+     "gate": ("rows_tf32", "f32_gate", 0),
+@@ -1370,6 +1371,43 @@ def gemm32(
+     return out
+ 
+ 
++def ctab32(c, w, bias, gammas=(), grp=0, sigmask=0, silu=False, eps=1e-5, out=None):
++    """The inference conditioning tables in one launch (``ctab_tf32.cu``): out[:, j] = act(op_g(c) @ w[j]^T + bias[j]), g = j // grp
++    (grp 0: one group), op_g(c) = LN(c) * gammas[g] when gammas[g] is not None, else silu(c) (``silu``) or c; sigmoid on the 128-column
++    blocks set in sigmask. c fp32 [M, 128] (M a multiple of 128), w the tf32-rounded K-major pack [N, 128]. Bit for bit ``ln32`` (or
++    ``silu32``) + the grouped ``gemm32`` it replaces."""
++    import os
++
++    M, N = c.shape[0], w.shape[0]
++    d = _dev(c)
++    assert c.dtype == F32 and c.is_contiguous() and c.shape[1] == DM and M % 128 == 0 and w.shape[1] == DM, (c.shape, w.shape)
++    g = list(gammas) + [None] * (4 - len(gammas))
++    assert len(g) == 4 and (grp == 0 or N <= 4 * grp)
++    nt = int(os.environ.get("MW_LD13_NT", "0"))
++    if nt == 0:  # the widest tile whose grid still covers ~the SMs (one tile a CTA)
++        nt = next((x for x in (256, 128) if (M // 128) * (N // x) >= num_sms(d) * 3 // 4 and (grp == 0 or grp % x == 0)), 64)
++    assert N % nt == 0 and (grp == 0 or grp % nt == 0), (N, nt, grp)
++    if out is None:
++        out = torch.empty(M, N, device=c.device, dtype=F32)
++    atom_kernel32("ctab", d)(
++        ((M // 128) * (N // nt), 1, 1),
++        (256, 1, 1),
++        _tm32(w, (32, nt)),
++        _tm32(out, (32, 32)),
++        c,
++        *g,
++        bias,
++        int(M),
++        int(N),
++        int(nt),
++        int(grp),
++        int(sigmask),
++        int(silu),
++        float(eps),
++    )
++    return out
++
++
+ def round_tf32(t):
+     """t (fp32) rounded to tf32, to nearest with ties away from zero (cvt.rna.tf32.f32): add half a tf32 ulp to the magnitude bits, drop
+     the low 13. For the weight operands of gemm32, once per pack (kind::tf32 MMAs truncate)."""
+diff --git a/src/miniworld_engine/kernels/integrations/local_dit_b200.py b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+index 5958e12bd..6c9d0444a 100644
+--- a/src/miniworld_engine/kernels/integrations/local_dit_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_b200.py
+@@ -1253,6 +1253,14 @@ def _weights32_bwd(weights):
+     return _cached32(_pack32_bwd, weights)
+ 
+ 
++def _ctab() -> bool:
++    """The fp32 inference conditioning tables by ``b200_atom.ctab32`` (one launch) instead of ``ln32`` / ``silu32`` + ``gemm32``
++    (MW_LD13_CTAB=0: the two-launch form, A / B)."""
++    import os
++
++    return os.environ.get("MW_LD13_CTAB", "1") != "0"
++
++
+ def _cond_tables32(cond, c2_fn, n, weights, pk, cross, save):
+     """The fp32 conditioning tables of a call: mod32 [rows, 768] and, in the cross mode, mkv [rows, 256]; with ``save`` also the
+     LayerNorms cn1, cn2 (and cnkv) the weight gradients read. An inference call takes them from the hoist (``_cond_tables``)."""
+@@ -1260,6 +1268,9 @@ def _cond_tables32(cond, c2_fn, n, weights, pk, cross, save):
+ 
+     def build():
+         c2 = c2_fn()
++        if not save and _ctab():  # inference: ONE launch (round 3 part 13: ctab_tf32, the LayerNorms made in the product's CTAs)
++            tab = rows.ctab32(c2, pk.wcond, pk.bcond, (pk.g1, pk.g2, None, pk.gkv if cross else None), 2 * DS_, _SIG_MOD | (0b1000000 if cross else 0))
++            return tab[:, : 6 * DS_], None, None, None, (tab[:, 6 * DS_ :] if cross else None)
+         if not save:  # inference: two launches, the tables only
+             # cat = [cn1 | cn2 | c | cnkv] (one LayerNorm launch), then ONE grouped GEMM: column group g (256 wide) of [mod | mkv] reads
+             # cat's 128-column block g against wcond's rows 256 g .. -- mod and mkv are column views of one [M, 1024] (768) table
+@@ -2008,6 +2019,10 @@ def _var_fwd32(
+ 
+         def tables():
+             c2 = _padded(cond, n).reshape(cond.shape[0] * n, DC_).contiguous()
++            if _ctab():  # (round 3 part 13: one launch)
++                if ident:
++                    return rows.ctab32(c2, pk.wcond, pk.bcond, (), 0, 0b110000)
++                return rows.ctab32(c2, pk.wcond, pk.bcond, (pk.g1, pk.g2, None), 2 * DS_, _SIG_MOD)
+             if ident:  # Chai-1: every table from the raw c, only the output gates (so, st: blocks 4, 5) as sigmoids
+                 return rows.gemm32(c2, pk.wcond, bias=pk.bcond, sigmask=0b110000)
+             cat = torch.empty(c2.shape[0], 3 * DS_, device=dev, dtype=F32)
+diff --git a/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py b/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
+index 688de4284..1238cd0ba 100644
+--- a/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
+@@ -33,6 +33,7 @@ from miniworld_engine.kernels._tf32 import tf32_grid
+ from miniworld_engine.kernels.integrations.local_dit_b200 import (
+     _B1,
+     _B2,
++    _ctab,
+     _dpair,
+     _GAMMA,
+     _S1,
+@@ -839,6 +840,9 @@ def _esm_fwd32(
+ 
+         def tables():  # (training with a shared conditioning: [N, 1024], read at row r % N)
+             c2 = _padded(cond, n).reshape(cond.shape[0] * n, DC_).contiguous()
++            if not save and _ctab():  # inference: silu + the product in one launch (round 3 part 13, ctab_tf32)
++                sc_.append(None)
++                return rows.ctab32(c2, pk.wcond, pk.bcond, silu=True)
+             sc_.append(rows.silu32(c2))  # (training: saved for the tables' weight gradients)
+             return rows.gemm32(sc_[0], pk.wcond, bias=pk.bcond)
+ 
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/ctab_tf32.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/ctab_tf32.cu
+new file mode 100644
+index 000000000..7dd58fb6c
+--- /dev/null
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/ctab_tf32.cu
+@@ -0,0 +1,167 @@
++// ctab_tf32.cu — the fp32 path's inference conditioning tables in ONE launch (sm_100a, tcgen05 kind::tf32), round 3 part 13 (2026-11-18).
++//
++//   tab[:, j] = act_blk(A_g . W[j, :]^T + bias[j]),   A_g = op_g(c) [M, 128],  g = j / grp (grp 0: one group)
++//   op_g(c) = LN(c) * gamma_g (gamma_g given) | silu(c) (act_silu) | c,  rounded to tf32 (RNA) before the MMA
++//   act_blk = sigmoid on the 128-column blocks set in sigmask (else identity)
++//
++// What it replaces: f32_ln_aff (cn1 | cn2 | c | cnkv into a [M, 512] table) + the grouped gemm_tf32 (or f32_silu + gemm_tf32: ESMFold2).
++// The timeline (Protenix fp32 1024 atoms, tables [1024, 1024]) had the LayerNorm 0 - 2.9 us and the product to 10.8 us: 64 CTAs of
++// 128 x 128 x K 128 whose single TMA lane moved 128 KB (8 boxes) after the LN's end, then one tile of epilogue. Here every CTA is ONE
++// tile of 128 rows x NT (64 / 128 / 256) columns (NT picked so the grid covers the SMs: 128 CTAs at 1024 x 1024): its 8 warps load the
++// conditioning rows themselves (no TMA, no copy of c), make op_g(c) in registers and write it into the 128-B swizzled K-major A tile;
++// the weight slice (4 boxes of 32 x NT) is loaded by 4 lanes at once; 16 MMAs; the epilogue as gemm_tf32's mode 0.
++// The arithmetic is f32_ln_aff's (norm128 two-pass, x * g), f32_silu's (x / (1 + exp(-x))), the GEMM's RNA rounding and K order (4
++// slices x 4 MMAs), its bias / sigmoid / rounding epilogue: the tables are the two-launch path's bit for bit.
++// SPDX-License-Identifier: Apache-2.0
++#include "../sm100/sm100.cuh"
++using namespace s100;
++
++constexpr int C = 128, A_BYTES = 4 * 128 * 128, EPB = 4096;
++constexpr int SMEM_BYTES = 229632;                                   // A 64 KB | B NT x 512 B (<= 128 KB) | 8 x 4 KB staging | barriers
++
++struct Bars {
++  uint64_t bfull, accfull;
++  uint32_t tmem;
++};
++
++DEVI float wsum(float v) {
++#pragma unroll
++  for (int o = 16; o >= 1; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
++  return v;
++}
++DEVI float sigf(float x) { return rcpf(1.f + __expf(-x)); }
++DEVI uint32_t rna_tf32(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
++
++extern "C" __global__ void __launch_bounds__(256, 1)
++atom_ctab_tf32(const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mo, const float* __restrict__ c,
++               const float* __restrict__ gam0, const float* __restrict__ gam1, const float* __restrict__ gam2,
++               const float* __restrict__ gam3, const float* __restrict__ bias, int M, int N, int NT, int grp, int sigmask, int act_silu,
++               float eps) {
++  extern __shared__ __align__(1024) uint8_t sm[];
++  const uint32_t su = smem_u32(sm);
++  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  const uint32_t sA = su, sB = su + A_BYTES, sE = sB + (uint32_t)NT * 512u;
++  Bars& B = *reinterpret_cast<Bars*>(sm + SMEM_BYTES - 256);
++  const int ntn = N / NT, t = blockIdx.x;
++  const int m0 = (t / ntn) * 128, n0 = (t % ntn) * NT;
++
++  if (tid == 0) {
++    mbar_init(&B.bfull, 1);
++    mbar_init(&B.accfull, 1);
++    fence_barrier_init();
++  }
++  if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), (uint32_t)NT); tmem_relinquish(); }
++  tc_fence_before();
++  __syncthreads();
++  tc_fence_after();
++  const uint32_t tmem = B.tmem;
++  pdl_wait();                                                        // c, the weights and the bias are complete
++  pdl_launch();
++
++  if (warp == 0) {                                                   // the weight slice: 4 boxes [NT rows x 32] from 4 lanes
++    if (lane == 0) mbar_expect_tx(&B.bfull, (uint32_t)NT * 512u);
++    __syncwarp();
++    if (lane < 4) tma_load_2d(sB + (uint32_t)(lane * NT * 128), &mb, &B.bfull, 32 * lane, n0);
++  }
++  // ---------------------------------------------------------------------------------------------- A = op_g(c): a warp per 16 rows
++  {
++    const int g = grp > 0 ? n0 / grp : 0;
++    const float* gm = g == 0 ? gam0 : g == 1 ? gam1 : g == 2 ? gam2 : gam3;
++    float gv[4] = {0.f, 0.f, 0.f, 0.f};
++    if (gm != nullptr) {
++      const float4 v = __ldg(reinterpret_cast<const float4*>(gm) + lane);
++      gv[0] = v.x; gv[1] = v.y; gv[2] = v.z; gv[3] = v.w;
++    }
++    const uint32_t aq = sA + (uint32_t)(lane >> 3) * 16384u;         // K-slice of this lane's 4 channels
++    float4 x[16];
++#pragma unroll
++    for (int i = 0; i < 16; ++i) {
++      const int r = m0 + 16 * warp + i;
++      x[i] = r < M ? __ldg(reinterpret_cast<const float4*>(c + (size_t)r * C) + lane) : make_float4(0.f, 0.f, 0.f, 0.f);
++    }
++#pragma unroll
++    for (int i = 0; i < 16; ++i) {
++      float y[4] = {x[i].x, x[i].y, x[i].z, x[i].w};
++      if (gm != nullptr) {                                           // f32_ln_aff: norm128, then x * g
++        const float mean = wsum(y[0] + y[1] + y[2] + y[3]) * (1.f / C);
++        float v = 0.f;
++#pragma unroll
++        for (int k = 0; k < 4; ++k) { y[k] -= mean; v += y[k] * y[k]; }
++        const float rstd = 1.f / sqrtf(wsum(v) * (1.f / C) + eps);
++#pragma unroll
++        for (int k = 0; k < 4; ++k) { y[k] *= rstd; y[k] = y[k] * gv[k]; }
++      } else if (act_silu) {                                         // f32_silu
++#pragma unroll
++        for (int k = 0; k < 4; ++k) y[k] = y[k] / (1.f + __expf(-y[k]));
++      }
++      const uint32_t r = (uint32_t)(16 * warp + i);
++      sts128(aq + sw128(r, (uint32_t)(lane & 7)), make_uint4(rna_tf32(y[0]), rna_tf32(y[1]), rna_tf32(y[2]), rna_tf32(y[3])));
++    }
++  }
++  fence_proxy_async();                                               // generic-proxy writes -> the MMA's (async-proxy) reads
++  __syncthreads();
++
++  if (warp == 1) {
++    mbar_wait(&B.bfull, 0);
++    tc_fence_after();
++    if (elect_one()) {
++      const uint32_t idesc = idesc_tf32(128, NT);
++#pragma unroll
++      for (int j = 0; j < 4; ++j) {
++        const uint64_t da = desc_k128(sA + (uint32_t)(j * 16384)), db = desc_k128(sB + (uint32_t)(j * NT * 128));
++#pragma unroll
++        for (int kk = 0; kk < 4; ++kk) umma_ss_tf32(tmem, da + (uint64_t)(2 * kk), db + (uint64_t)(2 * kk), idesc, (j | kk) ? 1u : 0u);
++      }
++      tc_commit(&B.accfull);
++    }
++    __syncwarp();
++  }
++  // ---------------------------------------------------------------------------------------------- epilogue (gemm_tf32 mode 0)
++  {
++    const int qd = warp & 3, wg = warp >> 2;
++    const uint32_t buf = sE + (uint32_t)warp * EPB;
++    mbar_wait(&B.accfull, 0);
++    tc_fence_after();
++    const uint32_t tacc = tmem + ((uint32_t)(32 * qd) << 16);
++    const int r0 = m0 + 32 * qd;
++    bool used = false;
++    for (int cc = wg; cc < (NT >> 5); cc += 2) {
++      uint32_t rr[32];
++      tmem_ld32(tacc + 32 * cc, rr);
++      tmem_wait_ld();
++      float v[32];
++#pragma unroll
++      for (int j = 0; j < 32; ++j) v[j] = __uint_as_float(rr[j]);
++      const int nb = n0 + 32 * cc;
++      if (bias != nullptr) {
++        const float4* bp = reinterpret_cast<const float4*>(bias + nb);
++#pragma unroll
++        for (int q = 0; q < 8; ++q) {
++          const float4 b = __ldg(bp + q);
++          v[4 * q] += b.x; v[4 * q + 1] += b.y; v[4 * q + 2] += b.z; v[4 * q + 3] += b.w;
++        }
++      }
++      if ((sigmask >> (nb >> 7)) & 1) {
++#pragma unroll
++        for (int j = 0; j < 32; ++j) v[j] = sigf(v[j]);
++      }
++      if (lane == 0 && used) tma_store_wait_read0();
++      __syncwarp();
++#pragma unroll
++      for (int q = 0; q < 8; ++q)
++        sts128(buf + sw128((uint32_t)lane, (uint32_t)q),
++               make_uint4(__float_as_uint(v[4 * q]), __float_as_uint(v[4 * q + 1]), __float_as_uint(v[4 * q + 2]), __float_as_uint(v[4 * q + 3])));
++      fence_proxy_async();
++      __syncwarp();
++      if (lane == 0) {
++        tma_store_2d(&mo, buf, nb, r0);
++        tma_store_commit();
++      }
++      used = true;
++    }
++    if (lane == 0) tma_store_wait0();
++  }
++  tc_fence_before();
++  __syncthreads();
++  if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, (uint32_t)NT); }
++}

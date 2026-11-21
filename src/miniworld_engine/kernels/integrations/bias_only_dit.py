@@ -102,12 +102,12 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         cond.ndim != 4
         or tuple(cond.shape[1:3]) != (1, L)
         or cond.shape[3] != module.attention.ada_ln_in.ln_cond.weight.numel()
-        or not (cond.shape[3] == DC or (cond.shape[3] in DCS_H100 and torch.cuda.get_device_capability(single.device) == (9, 0)))
+        or not (cond.shape[3] == DC or (cond.shape[3] in DCS_H100 and torch.cuda.get_device_capability(single.device) in ((9, 0), (10, 0))))
         or cond.shape[0] not in (1, A)
     ):
         return False
     dp = module.attention.ln_pair.weight.shape[0]
-    if dp not in DPS or (dp != DP and torch.cuda.get_device_capability(single.device) != (9, 0)):
+    if dp not in DPS or (dp != DP and torch.cuda.get_device_capability(single.device) not in ((9, 0), (10, 0))):
         return False
     if bias is None and tuple(pair.shape) != (1, L, L, dp):
         return False
@@ -183,7 +183,7 @@ def _runner(single, weights):
                 node = getattr(node, name)
             setattr(node, names[-1], weight)
         block.attention.n_head = block.attention.to_bias.weight.shape[0]
-        return FusedBiasOnlyDiT([block], dtype=single.dtype)
+        return FusedBiasOnlyDiT([block], dtype=single.dtype, rows=single.shape[0] * single.shape[2])
 
     # The weights do not change between the calls of a sampling run; packing is tens of small kernels. Reuse the pack
     # while every weight's (pointer, version) is the same -- an in-place update bumps ``_version`` and misses. Scoped

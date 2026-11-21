@@ -1,0 +1,226 @@
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/pre_fwd.cu
+@@ -262,6 +262,100 @@
+ DEVI float eb_param(const void* p, int i, int bf) {
+   return bf ? __uint_as_float((uint32_t)reinterpret_cast<const unsigned short*>(p)[i] << 16) : reinterpret_cast<const float*>(p)[i];
+ }
++#endif
++#if EB == 2
++// ESMFold2 (EB = 2): lesm.cu local_esm_bias's elements [count E b / G, count E (b + 1) / G) of this CTA, statement for statement (the same
++// bits; n_real from the key mask's population count, taken by this CTA's compute threads)
++DEVI void eb_esm(const void* __restrict__ z, const void* __restrict__ gamma, const void* __restrict__ wb, const uint8_t* __restrict__ km,
++                 float* __restrict__ out, int N, int n0, float eps, int pflags, int ct, float* scr) {
++  constexpr int KEYS = 192, HALF = 64, SPAN = 160;
++  constexpr float LOG2E = 1.4426950408889634f;
++  float (*w)[16] = reinterpret_cast<float (*)[16]>(scr);
++  int* red = reinterpret_cast<int*>(scr + 64);
++  const int lane = ct & 31, warp = ct >> 5;
++  if (ct < 64) w[ct >> 4][ct & 15] = eb_param(wb, ct, pflags & 1) * eb_param(gamma, ct & 15, pflags & 2) * LOG2E;
++  int nr = n0;
++  if (km != nullptr) {
++    int c = 0;
++    for (int i = 16 * ct; i < N; i += 16 * 256) {
++      const uint4 b = *reinterpret_cast<const uint4*>(km + i);
++      const uint32_t w4[4] = {b.x, b.y, b.z, b.w};
++#pragma unroll
++      for (int j = 0; j < 4; ++j)
++        c += ((w4[j] & 0xffu) != 0) + ((w4[j] & 0xff00u) != 0) + ((w4[j] & 0xff0000u) != 0) + ((w4[j] >> 24) != 0);
++    }
++#pragma unroll
++    for (int off = 16; off >= 1; off >>= 1) c += __shfl_xor_sync(0xffffffffu, c, off);
++    if (lane == 0) red[warp] = c;
++  }
++  named_bar_sync(5, 256);
++  if (km != nullptr) {
++    nr = 0;
++#pragma unroll
++    for (int i = 0; i < 8; ++i) nr += red[i];
++  }
++  const int nwin = N / 32;
++  const int count = nwin * 32 * SPAN, plane = count;
++  const int lo = (int)((long long)count * blockIdx.x / gridDim.x), hi = (int)((long long)count * (blockIdx.x + 1) / gridDim.x);
++  constexpr int U = 4;
++  for (int e0 = lo + ct; e0 < hi; e0 += U * 256) {
++    float x[U][16];
++    bool ok[U];
++    uint8_t mk[U];
++#pragma unroll
++    for (int u = 0; u < U; ++u) {
++      const int e = min(e0 + 256 * u, hi - 1);
++      const int c = e % SPAN, i = (e / SPAN) % 32, wi = e / (32 * SPAN);
++      const int p = 32 * wi - HALF + c, qp = 32 * wi + i;
++      const int first = 32 * wi - (KEYS - 32) / 2;
++      const int start = first < 0 ? 0 : min(first, nr - KEYS);
++      const int slot = p - start;
++      ok[u] = e0 + 256 * u < hi && p >= 0 && p < N && p < nr && abs(p - qp) <= HALF && slot >= 0 && slot < KEYS;
++      mk[u] = (km == nullptr || !ok[u]) ? (uint8_t)1 : __ldg(km + p);
++      const size_t r = ((size_t)wi * 32 + i) * KEYS + min(max(slot, 0), KEYS - 1);
++      if (pflags & 4) {
++        const uint4* q = reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_bfloat16*>(z) + r * 16);
++#pragma unroll
++        for (int k = 0; k < 2; ++k) {
++          const uint4 v4 = __ldg(q + k);
++          const uint32_t v[4] = {v4.x, v4.y, v4.z, v4.w};
++#pragma unroll
++          for (int j = 0; j < 4; ++j) { x[u][8 * k + 2 * j] = __uint_as_float(v[j] << 16); x[u][8 * k + 2 * j + 1] = __uint_as_float(v[j] & 0xffff0000u); }
++        }
++      } else {
++        const float4* q = reinterpret_cast<const float4*>(reinterpret_cast<const float*>(z) + r * 16);
++#pragma unroll
++        for (int k = 0; k < 4; ++k) { const float4 v4 = __ldg(q + k); x[u][4 * k] = v4.x; x[u][4 * k + 1] = v4.y; x[u][4 * k + 2] = v4.z; x[u][4 * k + 3] = v4.w; }
++      }
++    }
++#pragma unroll
++    for (int u = 0; u < U; ++u) {
++      const int e = e0 + 256 * u;
++      if (e >= hi) break;
++      float s[4] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY};
++      if (ok[u] && mk[u]) {
++        float mean = 0.f;
++#pragma unroll
++        for (int k = 0; k < 16; ++k) mean += x[u][k];
++        mean *= 1.f / 16.f;
++        float var = 0.f;
++#pragma unroll
++        for (int k = 0; k < 16; ++k) { x[u][k] -= mean; var += x[u][k] * x[u][k]; }
++        const float rstd = rsqrtf(var * (1.f / 16.f) + eps);
++#pragma unroll
++        for (int hh = 0; hh < 4; ++hh) {
++          float acc = 0.f;
++#pragma unroll
++          for (int k = 0; k < 16; ++k) acc = fmaf(x[u][k], w[hh][k], acc);
++          s[hh] = acc * rstd;
++        }
++      }
++#pragma unroll
++      for (int hh = 0; hh < 4; ++hh) out[(size_t)hh * plane + e] = s[hh];
++    }
++  }
++}
++#elif EB
+ // the pair bias rows of this CTA (EB above): lbias.cu's load_row / normalise / head sums, statement for statement (the same bits), 4 rows of
+ // a thread in flight; ct = the compute thread 0..255
+ DEVI void eb_rows(const __nv_bfloat16* __restrict__ z, const void* __restrict__ wb, const void* __restrict__ gamma, float* __restrict__ bias,
+@@ -333,7 +427,10 @@
+ #if PF
+                    , const void* __restrict__ PFP
+ #endif
+-#if EB
++#if EB == 2
++                   , const void* __restrict__ EZ, const void* __restrict__ EG, const void* __restrict__ EWB, const uint8_t* __restrict__ EKM,
++                   float* __restrict__ EBIAS, int EN, int EN0, float EEPS, int EPF
++#elif EB
+                    , const __nv_bfloat16* __restrict__ EZ, const void* __restrict__ EWB, const void* __restrict__ EG, float* __restrict__ EBIAS,
+                    int ER, float EEPS, int EBF
+ #endif
+@@ -677,7 +774,9 @@
+       if (qw == 0 && lane == 0) { mbar_arrive(&B.accfree[ab]); mbar_arrive(&B.ofull[ob]); }
+ #endif
+     };
+-#if EB
++#if EB == 2
++    eb_esm(EZ, EG, EWB, EKM, EBIAS, EN, EN0, EEPS, EPF, ct, reinterpret_cast<float*>(sm + O_BAR + 256));
++#elif EB
+     eb_rows(EZ, EWB, EG, EBIAS, ER, EEPS, EBF, ct, reinterpret_cast<float*>(sm + O_BAR + 256));
+ #endif
+     if (ntT > 0) xphase(0);
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom/__init__.py
+@@ -148,6 +148,8 @@
+     # part 4: + the q / k RMSNorm and rotary on the staged Q / K rows (``rope``; local_esm_qkrope's launch removed from inference)
+     "pre_rms_raw_rope": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1", "PARALLEL=1", "RMS=1", "RAWSC=1", "QKROPE=1")),
+     "post_rms_raw": ("post_fwd", "atom_post_fwd_sm100", _SMEM, True, ("RMS=1", "RAWSC=1", "RES3=1")),
++    # round 3 part 12: + the position-indexed pair bias (lesm.cu local_esm_bias) made by the compute warps before their first tile (``eb=``)
++    "pre_rms_raw_rope_eb": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1", "PARALLEL=1", "RMS=1", "RAWSC=1", "QKROPE=1", "EB=2")),
+ }
+ #: ... and the backward builds of ESMFold2's training block (``-DRMS=1``: RMSNorm backward, raw scales and gates), loaded apart (``KERNELS_ESM_TRAIN``)
+ KERNELS_ESM_TRAIN = {
+@@ -485,7 +487,7 @@
+         extra = (*extra, qkr)
+     name = (("pre_rms_raw_rope_save" if qkr is not None else "pre_rms_raw_rope" if rope is not None else "pre_rms_raw") if raw else "pre_rms") if rms else "prexp" if parallel else "prex"
+     if eb is not None:  # (round 3 part 12: the pair bias in this launch -- the prex / prexp builds)
+-        assert name in ("prex", "prexp"), "eb: the prex_eb / prexp_eb builds"
++        assert name in ("prex", "prexp", "pre_rms_raw_rope"), "eb: the prex_eb / prexp_eb / pre_rms_raw_rope_eb builds"
+         name += "_eb"
+     atom_kernel(name, d)(
+         (min(num_sms(d), ntile), 1, 1),
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/esm.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/b200_atom_local/esm.py
+@@ -102,6 +102,22 @@
+     return out, launch
+ 
+ 
++def esm_bias_in_pre(z, gamma, wb, kmask, n0, eps=1e-5):
++    """``esm_bias`` made by the bf16 projection launch's compute warps before their first tile (round 3 part 12: ``b200_atom``
++    ``pre_rms_raw_rope_eb``, ``-DEB=2``): -> (bias2, the launch's trailing arguments). Call it before the chain's launches. Same bits."""
++    nwin = z.shape[0]
++    N = 32 * nwin
++    assert tuple(z.shape) == (nwin, 32, ESM_KEYS, DP) and z.is_contiguous() and N % 128 == 0
++    out = torch.empty(NH, nwin, 32, ESM_SPAN, device=z.device, dtype=torch.float32)
++    km = _u8(kmask)
++    if km is not None and km.data_ptr() % 16:
++        km = km.clone()
++    wb_, g_ = wb.contiguous(), gamma.contiguous()
++    flags = int(wb_.dtype == torch.bfloat16) | (int(g_.dtype == torch.bfloat16) << 1) | (int(z.dtype == torch.bfloat16) << 2)
++    assert {wb_.dtype, g_.dtype, z.dtype} <= {torch.bfloat16, torch.float32}
++    return out, (z, g_, wb_, km, out, int(N), int(n0), float(eps), flags)
++
++
+ def load_esm(device_index: int) -> None:
+     """Build and load ESMFold2's attention kernels on the device (raises on any failure)."""
+     for name in KERNELS_ESM:
+--- a/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
++++ b/src/miniworld_engine/kernels/integrations/local_dit_esm_b200.py
+@@ -234,6 +234,12 @@
+             torch.cuda.current_stream().wait_event(j)
+ 
+ 
++#: bf16 inference (round 3 part 12): the pair bias made by the projection launch's compute warps before their first tile
++#: (``pre_rms_raw_rope_eb``; it ran after pre_fwd: 11.1 us at 5120 atoms)
++_ESM_EB16 = os.environ.get("MW_LD12_EB", "1") != "0"
++_ESM_EB16_ROWS = int(os.environ.get("MW_LD12_EBR", str(1 << 30)))
++
++
+ def _esm_fwd_fake(single, cond, pair, mask, weights, qkw, cos, sin):
+     return torch.empty_like(single)
+ 
+@@ -277,18 +283,37 @@
+             mk = None if mask is None else _tkey(mask)
+             return _hoisted(_HOIST_BIAS, pair, ("esm", wkey[_GAMMA], wkey[_WBIAS], n, mk), bias, () if mask is None else (mask,))
+ 
++        eb = None
++        if _ESM_EB16 and m <= _ESM_EB16_ROWS:  # round 3 part 12: the bias inside the projection launch (ready now if hoisted: eb None)
++            st: dict = {"defer": True}
++
++            def bias_pre():
++                if st["defer"]:
++                    b, st["eb"] = local.esm_bias_in_pre(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS], keys, n0)
++                    return b
++                return bias()
++
++            if _hoisting():
++                mk = None if mask is None else _tkey(mask)
++                bias2 = _hoisted(_HOIST_BIAS, pair, ("esm", wkey[_GAMMA], wkey[_WBIAS], n, mk), bias_pre, () if mask is None else (mask,))
++            else:
++                bias2 = bias_pre()
++            st["defer"] = False
++            eb = st.pop("eb", None)
++
+         def chain():  # the atoms' chain up to the attention's operands
+             mod, mkv = _hoisted(_HOIST_COND, cond, ("esm", wkey, n), tables) if _hoisting() else tables()
+             bs = _kv_pack(weights, True)[1]
+             wq, wk = qkw  # (the affine-free q / k RMSNorm: constant fp32 ones)
+             # Q / K leave the projection kernel normalised and rotated (``-DQKROPE=1``; round 3 part 4: one launch fewer)
+             qn, kn, v, sg, _, _ = rows.pre_fwd_kv(
+-                s2, mod, wp[0], wp[1], mkv, bs, eps=RMS_EPS, parallel=True, rms=True, raw=True, rope=(wq, wk, cos, sin, RMS_EPS)
++                s2, mod, wp[0], wp[1], mkv, bs, eps=RMS_EPS, parallel=True, rms=True, raw=True, rope=(wq, wk, cos, sin, RMS_EPS), eb=eb
+             )
+             return mod, v, sg, qn, kn
+ 
+         mod, v, sg, qn, kn = chain()
+-        bias2 = side()
++        if not (_ESM_EB16 and m <= _ESM_EB16_ROWS):
++            bias2 = side()
+         o = local.attn_esm_sm100(qn.view(a, n, DS_), kn.view(a, n, DS_), v.view(a, n, DS_), bias2)
+         out = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, eps=RMS_EPS, rms=True, raw=True)[0]
+     return _unpadded(out.view(a, 1, n, DS_), single.shape)

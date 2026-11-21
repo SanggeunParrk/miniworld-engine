@@ -1,0 +1,115 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/__init__.py b/src/miniworld_engine/kernels/transition/cuda/__init__.py
+index 14898d572..39f607cd1 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/__init__.py
++++ b/src/miniworld_engine/kernels/transition/cuda/__init__.py
+@@ -214,6 +214,10 @@ def prebuild(target, rows):
+                     yield ft.partial(
+                         fused_sm100a.build_cubins, f"generic_{'f32' if f32 else 'bf16'}", fused_generic_sm100a.small_specs(f32)
+                     )
++        # (round 3 part 18) the bf16 inference chains of INFER_CELLS (with their CTA-pair squeeze / expand builds)
++        for d, n in fused_small_sm100a.INFER_CELLS:
++            if (d, n, False) not in fused_small_sm100a.CELLS and "eval" in half.get((d, n), set()):
++                yield ft.partial(fused_sm100a.build_cubins, fused_small_sm100a._tag(d, n, False), fused_small_sm100a._specs(d, n, False))
+         # the CTA-pair chains of the bf16 inference cells (round 3 part 14: tsx_expand2.cu / tsx_squeeze2.cu)
+         for d, n in fused_small_sm100a.PAIR_CELLS:
+             if "eval" in half.get((d, n), set()):
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+index 9afa9f0e5..5b22c491f 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_small_sm100a.py
+@@ -90,6 +90,16 @@ H16_PAIR_EX: dict[tuple[int, int, int], int] = {
+ H16_PAIR_EX_FORCE: int | None = None
+ H16_PAIR_UH = (16, 32, 64)
+ H16_PAIR_FORCE: int | None = None
++#: (round 3 part 18) bf16 INFERENCE cells beyond ``CELLS`` / ``PAIR_CELLS`` that take the bf16 chain: {(D, n): (fewest, most tiles)}
++#: (``takes`` only: the training forward keeps ``CELLS``); the bf16 expand builds per D; the bf16 pair squeeze (``tsx_squeeze2.cu``) /
++#: pair expand (``tsx_expand2.cu``) of the chain at {(D, n, tiles): NB / UH}; *_FORCE: A/B overrides (0 off)
++INFER_CELLS: dict[tuple[int, int], tuple[int, int]] = {}
++EXPAND_BF16 = {384: EXPAND_H16[384], 768: EXPAND}
++BF16_PAIR_SQ: dict[tuple[int, int, int], int] = {}
++BF16_PAIR_EX: dict[tuple[int, int, int], int] = {}
++BF16_PAIR_NB = (32, 64, 128)
++BF16_PAIR_SQ_FORCE: int | None = None
++BF16_PAIR_EX_FORCE: int | None = None
+ 
+ 
+ def _tf32_allowed() -> bool:
+@@ -109,10 +119,16 @@ def _specs(d: int, n: int, f32: bool, h16: bool = False) -> tuple[tuple[str, str
+             *((f"pex{u}", "widths/tsx_expand2.cu", (*dh, f"-DUH={u}", f"-DKBX={_kbx(d // 64)}")) for u in H16_PAIR_UH),
+         )
+     dim = (f"-DDIM={d}", f"-DHID={n * d}", f"-DF32={int(f32)}")
++    dh = (f"-DDIM={d}", f"-DHID={n * d}")
++    pair = () if f32 else (
++        *((f"psq{nb}", "widths/tsx_squeeze2.cu", (*dh, f"-DNBW={nb}", f"-DKBX={_kbx(n * d // 64)}")) for nb in BF16_PAIR_NB),
++        *((f"pex{u}", "widths/tsx_expand2.cu", (*dh, f"-DUH={u}", f"-DKBX={_kbx(d // 64)}")) for u in PAIR_UH),
++    )
+     return (
+         ("ln", "widths/tsx_ln.cu", (f"-DDIM={d}", f"-DF32={int(f32)}")),
+-        *((f"expand{c}_{k}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", f"-DSK={k}")) for c, k in (EXPAND_F32 if f32 else EXPAND)),
++        *((f"expand{c}_{k}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}", f"-DSK={k}")) for c, k in (EXPAND_F32 if f32 else EXPAND_BF16[d])),
+         *((f"sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}")) for nb, k in (SQUEEZE_F32[d] if f32 else SQUEEZE)),
++        *pair,
+     )
+ 
+ 
+@@ -153,7 +169,11 @@ def takes(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor, grad: bool) -> bo
+         return False
+     cell = (d, hid // d, f32)
+     cells = CELLS_H16 if _h16(d, rows, f32) else CELLS
+-    if cell not in cells or rows % ROWS or rows // ROWS > cells[cell]:
++    if rows % ROWS:
++        return False
++    tiles = rows // ROWS
++    lo, hi = INFER_CELLS.get(cell[:2], (1, 0)) if not f32 else (1, 0)
++    if not (cell in cells and tiles <= cells[cell]) and not lo <= tiles <= hi:
+         return False
+     if any(w.dtype not in (torch.bfloat16, torch.float32) for w in (wa, ws)) or (f32 and not _tf32_allowed()):
+         return False
+@@ -333,16 +353,37 @@ def chain(x, gamma, beta, wa, wb, ws, eps: float, save: bool, cast=None):
+         [x, gamma, beta, xn, rstd, mean, m, float(eps), 2 if save else 0, *(cast or (x, x, x)), wa, wb, ws, h * d if cast else 0],
+         True,
+     )
+-    ch, sk = EXPAND_FORCE or _pick(EXPAND_F32 if f32 else EXPAND, tiles, h, ROWS, d, esz, nsm, 2)
+-    ext.launch_kernel(
+-        f"{tag}_expand{ch}_{sk}",
+-        "transition_sx_expand",
+-        tiles * (h // ch) * sk,
+-        384,
+-        sk,
+-        [t(xn, d, m, bke, 128), t(wa, d, h, bke, ch), t(wb, d, h, bke, ch), hid, ab, ab, int(save), int(cast is None), 2 * h, h],
+-        True,
+-    )
++    key = (d, h // d, tiles)
++    infer16 = not f32 and not save and cast is None  # the bf16 inference chain: the CTA-pair builds of part 18 may serve it
++    puh = (BF16_PAIR_EX_FORCE if BF16_PAIR_EX_FORCE is not None else BF16_PAIR_EX.get(key, 0)) if infer16 else 0
++    pnb = (BF16_PAIR_SQ_FORCE if BF16_PAIR_SQ_FORCE is not None else BF16_PAIR_SQ.get(key, 0)) if infer16 else 0
++    if puh:
++        ke = _kbx(d // 64)
++        ext.launch_kernel(
++            f"{tag}_pex{puh}",
++            "transition_sx_expand2",
++            tiles * (h // puh),
++            256 if puh <= 32 else 384,
++            2,
++            [t(xn, d, m, 64, 64, -1, 0, ke), t(wa, d, h, 64, puh), t(wb, d, h, 64, puh), hid],
++            True,
++        )
++    else:
++        ch, sk = EXPAND_FORCE or _pick(EXPAND_F32 if f32 else EXPAND_BF16[d], tiles, h, ROWS, d, esz, nsm, 2)
++        ext.launch_kernel(
++            f"{tag}_expand{ch}_{sk}",
++            "transition_sx_expand",
++            tiles * (h // ch) * sk,
++            384,
++            sk,
++            [t(xn, d, m, bke, 128), t(wa, d, h, bke, ch), t(wb, d, h, bke, ch), hid, ab, ab, int(save), int(cast is None), 2 * h, h],
++            True,
++        )
++    if pnb:
++        kq = _kbx(h // 64)
++        sq_args = [t(hid, h, m, 64, 64, -1, 0, kq), t(ws, h, d, 64, pnb // 2), x, out]
++        ext.launch_kernel(f"{tag}_psq{pnb}", "transition_sx_squeeze2", tiles * (d // pnb) * 2, 256, 2, sq_args, True)
++        return out, xn, mean, rstd, ab
+     nb, sq = SQUEEZE_FORCE or _pick(SQUEEZE_F32[d] if f32 else SQUEEZE, tiles, d, ROWS, h, esz, nsm, 1)
+     ext.launch_kernel(
+         f"{tag}_sq{nb}_{sq}",

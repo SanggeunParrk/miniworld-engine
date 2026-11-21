@@ -1,0 +1,564 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_sm100a.py
+index 8668639e5..d67adcd04 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_sm100a.py
+@@ -307,6 +307,11 @@ def _bwd_launch(
+     """(dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch."""
+     if _is_fake(dy, x):
+         return _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws)
++    from .fused_wide_sm100a import dxg_bwd  # (round 3, training part 4) small M: the DXG two-role backward
++
++    r = dxg_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws)
++    if r is not None:
++        return r
+     return tuple(_ext().transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws, _repl()))
+ 
+ 
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 339629d02..8e8f82cb5 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -639,6 +639,118 @@ def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hid, a, b, wst, wab
+     )
+ 
+ 
++#: (round 3, training part 4) D = 128 two-role backward whose input role does not recompute the gate (``tr_bwd_sm100.cu -DDXG``): the
++#: weight role stores each (tile, slice) [dA | dB] to global memory and releases a per-tile counter; the input role loads them and runs
++#: only d_xn + the LayerNorm backward. {(D, n): (weight-role replicas per hidden slice, most row tiles)}; above the tile bound (more
++#: [dA | dB] traffic than the gate recompute costs) and for other shapes the one-kernel build. A module constant (A/B runs edit it).
++DXG: dict[tuple[int, int], tuple[int, int]] = {(128, 2): (30, 128), (128, 4): (15, 128)}
++#: per (device, stream) counter buffers of the DXG build (zero between calls: the input role resets each tile's counter it consumed)
++_DXG_FLAGS: dict[tuple[int, int], torch.Tensor] = {}
++_DXG_MAX_TILES = 4096
++DXG_FLAGS_MODE = "dev"
++
++
++#: extra nvcc flags of the DXG build (A/B runs)
++DXG_EXTRA: tuple[str, ...] = ()
++
++
++@functools.lru_cache(maxsize=16)
++def _load_dxg(d: int, n: int, extra: tuple[str, ...] = ()) -> tuple:
++    ext = _ext()
++    tag = "bwdg" + "".join(f.replace("-D", "_").replace("=", "") for f in extra)
++    # the reduce launches from the one-kernel build ("bwd"): the DXG cubin's 227 KB of dynamic shared memory is opted in for every
++    # kernel of its module, which leaves no room for the reduce's static array
++    specs = ((tag, "tr_bwd_sm100.cu", (f"-DHID={n * d}", "-DDXG", *extra)), ("bwd", "tr_bwd_sm100.cu", (f"-DHID={n * d}",)))
++    for nm, path in build_cubins(f"d{d}n{n}", specs).items():
++        ext.load_cubin(f"d{d}n{n}_{nm}", path)
++    return ext, f"d{d}n{n}_{tag}"
++
++
++def dxg_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws):
++    """(dx, dgamma, dbeta, dWa, dWb, dWs) of the D = 128 DXG two-role backward (fp32 gradients), or None when ``DXG`` does not take the
++    call (shape, tile count, or a counter buffer not made yet outside a CUDA-graph capture)."""
++    d = x.shape[1]
++    n = wa.shape[0] // d
++    m = x.shape[0]
++    tiles = m // ROWS
++    cfg = DXG.get((d, n))
++    if cfg is None or tiles > min(cfg[1], _DXG_MAX_TILES):
++        return None
++    dev = x.device.index if x.device.index is not None else torch.cuda.current_device()
++    if DXG_FLAGS_MODE == "zeros":
++        flags = torch.zeros((tiles,), dtype=torch.int32, device=x.device)
++    else:
++        key = (dev,)
++        flags = _DXG_FLAGS.get(key)
++        if flags is None:
++            if torch.cuda.is_current_stream_capturing():
++                return None  # a captured zero fill would not run before the first eager call
++            flags = _DXG_FLAGS[key] = torch.zeros((_DXG_MAX_TILES,), dtype=torch.int32, device=x.device)
++    repl, h = cfg[0], n * d
++    nsm = num_sms(dev)
++    ndw = (h // 64) * repl
++    ndx = nsm - ndw
++    if ndx < 2 or ndx % 2:
++        return None
++    ext, name = _load_dxg(d, n, DXG_EXTRA)
++    f32 = dict(dtype=torch.float32, device=x.device)
++    dx = torch.empty_like(x)
++    dab = torch.empty((m, 2 * h), dtype=x.dtype, device=x.device)
++    partab = torch.empty((ndw, 128, d), **f32)
++    parts = torch.empty((ndw, d, 64), **f32)
++    nrows_dg = ndx * 4
++    dgbw = torch.empty((nrows_dg, 2 * d), **f32)
++    dwa, dwb, dws = (torch.empty(w.shape, **f32) for w in (wa, wb, ws))
++    dgam, dbeta = torch.empty((d,), **f32), torch.empty((d,), **f32)
++
++    def tm(t, inner, outer, box_outer=64, kb=1):
++        return ext.tmap(t, inner, outer, 64, box_outer, -1, 0, kb)
++
++    # wa / wb also as 3-D [64 units][2 x 64] boxes (the input role's Wa_j / Wb_j, one TMA each); [dA | dB] as [128 rows][2 x 64] boxes
++    ext.launch_kernel(
++        name,
++        "transition_bwd_dxg_sm100",
++        nsm,
++        512,
++        2,
++        [
++            tm(dy, d, m),
++            tm(xn, d, m),
++            tm(ws, h, d),
++            tm(wa, d, h),
++            tm(wb, d, h),
++            tm(dab, 2 * h, m, 128, 2),
++            tm(dab, 2 * h, m, 128),
++            tm(wa, d, h, 64, 2),
++            tm(wb, d, h, 64, 2),
++            tm(x, d, m, 128, 2),
++            tm(dy, d, m, 128, 2),
++            tm(dx, d, m, 128, 2),
++            rstd,
++            c1,
++            gamma,
++            partab,
++            parts,
++            dgbw,
++            flags,
++            tiles,
++            ndw,
++        ],
++        False,
++    )
++    nred = 3 * h * d + 2 * d
++    ext.launch_kernel(
++        f"d{d}n{n}_bwd",
++        "transition_bwd_reduce",
++        (nred + 255) // 256,
++        256,
++        1,
++        [partab, parts, dgbw, dwa, dwb, dws, dgam, dbeta, ndw, nrows_dg],
++        True,
++    )
++    return dx, dgam, dbeta, dwa, dwb, dws
++
++
+ @opaque(fake=_bwd_launch_fake, name="transition_wide_bwd_sm100a")
+ def _bwd_launch(
+     dy: torch.Tensor,
+@@ -665,6 +777,8 @@ def _bwd_launch(
+     d, h, m, tiles = k.d, k.h, k.m, k.tiles
+     f32 = dict(dtype=torch.float32, device=x.device)
+     dx = torch.empty_like(x)
++    if d == 128 and (r := dxg_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws)) is not None:
++        return r
+     if d in (64, 128):  # the fused two-role backward
+         ndw = _ndw(d, k.n)
+         ndx = k.nsm - ndw
+diff --git a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu
+index 456192f9c..e8aadc522 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu
++++ b/src/miniworld_engine/kernels/transition/cuda/sm100/tr_bwd_sm100.cu
+@@ -66,10 +66,42 @@ struct Par {
+   const __nv_bfloat16* xg;
+   float *partab, *parts, *dgbw;
+   int tiles, ndw;
++  // DXG builds: the weight role's [dA | dB] tiles stored to global ([M][2H] bf16) with one release per (tile, slice) on flags[tile]
++  const CUtensorMap* dab = nullptr;                           // [M][2H] as [128 rows][2 x 64] boxes (the weight role's store)
++  const CUtensorMap* dab2 = nullptr;                          // the same as [128 rows][64] boxes (the input role's half-chunks)
++  unsigned* flags = nullptr;
++  const CUtensorMap *wa3 = nullptr, *wb3 = nullptr;           // wa / wb as [64 units][2 x 64] 3-D boxes
++  const CUtensorMap *x3 = nullptr, *dy3 = nullptr, *dx3 = nullptr;   // [M][128] as [128 rows][2 x 64] boxes
+ };
+ 
++#ifdef DXG
++// (round 3, training part 4) the input role does not recompute the gate: it waits for the NCH slices of a tile ([dA | dB] stored by
++// the weight roles, one release add each), loads them by TMA and runs d_xn = [dA | dB] [Wa; Wb] with both operands in shared memory
++DEVI unsigned ld_acquire_gpu(const unsigned* p) { unsigned v; asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(p) : "memory"); return v; }
++DEVI void st_relaxed_gpu(unsigned* p, unsigned v) { asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" :: "l"(p), "r"(v) : "memory"); }
++DEVI void red_release_gpu(unsigned* p, unsigned v) { asm volatile("red.release.gpu.global.add.u32 [%0], %1;" :: "l"(p), "r"(v) : "memory"); }
++DEVI void fence_proxy_async_global() { asm volatile("fence.proxy.async.global;" ::: "memory"); }
++// 3-D boxes (64 elements x rows x K-blocks; tmap kb_box): one TMA per 16 / 32 KB (a lane issues about one TMA per ~600 clocks, BRIEF6)
++DEVI void tma_load_3d(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++DEVI void tma_load_3d_mc(uint32_t dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2, uint16_t mask) {
++  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4, %5}], [%2], %6;"
++               :: "r"(dst), "l"(m), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2), "h"(mask) : "memory");
++}
++DEVI void tma_store_3d(const CUtensorMap* m, uint32_t src, int c0, int c1, int c2) {
++  asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.bulk_group [%0, {%2, %3, %4}], [%1];" :: "l"(m), "r"(src), "r"(c0), "r"(c1), "r"(c2) : "memory");
++}
++#endif
++
+ struct BarsW { uint64_t w_full, xn_full[2], dy_full[2], xn_empty[2], dy_empty[2], dhab_full, gate_read, g_full[2], g_empty[2], wg_done; uint32_t tmem; };
+ constexpr int GDB = 1;
++#ifdef DXG
++constexpr uint32_t G_EMPTY_N = 2;                             // the dW MMAs + the [dA | dB] store
++#else
++constexpr uint32_t G_EMPTY_N = 1;
++#endif
+ struct BarsX {
+   uint64_t ws_full[2], ws_empty[2], wab_full[NWAB], wab_empty[NWAB], in_full[2], in_empty[2], x_full[2], xn_dead[2], dh_full[2], g_full[2], dh_free[2];
+   uint64_t ab_full, ab_read, dxn_full[2], dxn_empty[2]; uint32_t tmem;
+@@ -106,7 +138,7 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+       mbar_init(&B.xn_full[s], 1); mbar_init(&B.dy_full[s], 1); mbar_init(&B.xn_empty[s], CL); mbar_init(&B.dy_empty[s], CL);
+     }
+     mbar_init(&B.dhab_full, 1); mbar_init(&B.gate_read, 8); mbar_init(&B.wg_done, 1);
+-    for (int s = 0; s < 2; ++s) { mbar_init(&B.g_full[s], 8); mbar_init(&B.g_empty[s], 1); }
++    for (int s = 0; s < 2; ++s) { mbar_init(&B.g_full[s], 8); mbar_init(&B.g_empty[s], G_EMPTY_N); }
+     fence_barrier_init();
+   }
+   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
+@@ -206,6 +238,24 @@ DEVI void weight_role(const Par& p, uint8_t* sm, int cta, int warp, int lane) {
+     }
+     if (n_local == 0 && elect_one()) mbar_arrive(&B.wg_done);
+     __syncwarp();
++#ifdef DXG
++  } else if (warp == 3) {
++    // [dA | dB] of each (tile, slice) to global for the input role: one 32 KB box (K-blocks 2 slice = dA, 2 slice + 1 = dB of the
++    // [M][2H] buffer); g_empty counts this lane once the store has read the tile, then the counter release once it is written
++    if (lane == 0) {
++      for (int k = 0; k < n_local; ++k) {
++        const int tile = repl + k * R;
++        mbar_wait(&B.g_full[k % GDB], (k / GDB) & 1);
++        tma_store_3d(p.dab, su + W_DAB, 0, tile * ROWS, 2 * slice);
++        tma_store_commit();
++        tma_store_wait_read0();
++        mbar_arrive(&B.g_empty[k % GDB]);
++        tma_store_wait0();
++        fence_proxy_async_global();
++        red_release_gpu(p.flags + tile, 1u);
++      }
++    }
++#endif
+   } else if ((warp >= 4 && warp < 8) || warp >= 12) {
+     // gate, split by columns over two warpgroups: warps 4-7 hidden units 0..31 of the slice, warps 12-15 units 32..63
+     setmaxnreg_inc<REG_GATE>();
+@@ -623,6 +673,325 @@ DEVI void input_role(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int
+   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
+ }
+ 
++#ifdef DXG
++// ================================================================================================ DX role, DXG build
++// Half-chunk e of tile i = (chunk j, part): [dA_j] or [dB_j] (16 KB [128 rows][64] K-block of the weight role's [M][2H] store) and Wa_j or
++// Wb_j (16 KB, [64 units][2 x 64] as two 8 KB D slabs, multicast over the CTA pair: rank `part` issues it) through two rings whose
++// slots each have their own issuing lane (BRIEF6: one lane issues about one TMA per ~600 clocks); d_xn accumulates in TMEM buffer
++// i & 1. x / dy of tile i land in shared-memory buffer i & 1 (one 32 KB 3-D box each) and the LayerNorm backward of tile i runs on
++// epilogue warpgroup i & 1 (warps 4-7 / 8-11) from shared memory, dx staged over dy and stored by one 32 KB box (row-per-thread
++// global access was L1-bound: 59.4 -> 41.0 us with the epilogue skipped, [16384, 128] n 2 step).
++#ifndef NAB
++#define NAB 3
++#endif
++#ifndef NWG
++#define NWG 3
++#endif
++constexpr int NBX = 2;                                         // epilogue warpgroups = d_xn TMEM buffers = x / dy buffers
++#ifdef PROBE
++__device__ unsigned long long g_dxp[160][256];   // (probe builds) %globaltimer stamps per input-role CTA
++#define DXP(c, idx) do { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); g_dxp[c][idx] = t_; } while (0)
++#else
++#define DXP(c, idx) do { } while (0)
++#endif
++constexpr int G_AB = 0, G_WAB = NAB * 16384, G_XD = G_WAB + NWG * 16384, G_GAM = G_XD + NBX * 65536, G_RED = G_GAM + 512;
++constexpr int G_BAR = G_RED + 2048;
++constexpr int SMEM_DXG = 232448;                              // the input role needs more than the one-kernel build
++static_assert(G_BAR + 256 <= SMEM_DXG && SMEM_BYTES <= SMEM_DXG, "DXG input role shared memory");
++struct BarsG {
++  uint64_t ab_full[NAB], ab_empty[NAB], wab_full[NWG], wab_empty[NWG], dxn_full[NBX], dxn_empty[NBX], xd_full[NBX], xd_empty[NBX];
++  uint32_t tmem;
++};
++
++DEVI void input_role_g(const Par& p, uint8_t* sm, int cta, int ndx, int warp, int lane) {
++  const uint32_t su = smem_u32(sm);
++  BarsG& B = *reinterpret_cast<BarsG*>(sm + G_BAR);
++  auto count = [&](int k) { return (p.tiles > k) ? (p.tiles - k + ndx - 1) / ndx : 0; };
++  const int n_valid = count(cta), n_local = count(cta & ~1);
++  const int nh = n_local * NCH * 2;                            // half-chunks
++  auto tile_of = [&](int i) { return i < n_valid ? cta + i * ndx : (n_valid > 0 ? cta + (n_valid - 1) * ndx : 0); };
++  const int crank = (int)cluster_rank();
++  const uint32_t tid = threadIdx.x;
++  if (tid == 0) {
++    for (int s = 0; s < NAB; ++s) { mbar_init(&B.ab_full[s], 1); mbar_init(&B.ab_empty[s], 1); }
++    for (int s = 0; s < NWG; ++s) { mbar_init(&B.wab_full[s], 1); mbar_init(&B.wab_empty[s], CL); }
++    for (int s = 0; s < NBX; ++s) {
++      mbar_init(&B.dxn_full[s], 1); mbar_init(&B.dxn_empty[s], 8); mbar_init(&B.xd_full[s], 1); mbar_init(&B.xd_empty[s], 1);
++    }
++    fence_barrier_init();
++  }
++  if (tid < 128) reinterpret_cast<float*>(sm + G_GAM)[tid] = p.gamma[tid];
++  if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), 512); tmem_relinquish(); }
++  tc_fence_before();
++  __syncthreads();
++  cluster_sync_relaxed();
++  tc_fence_after();
++  const uint32_t tmem = B.tmem;
++
++  if (warp == 0) {
++    // [dA_j] / [dB_j]: lane s issues the half-chunks of ring slot s; before its first load of a tile a lane waits until every slice
++    // of the tile is stored (the counter is reset by the epilogue once the tile's d_xn is complete)
++    if (lane < NAB) {
++      int seen = -1;
++      for (int e = lane; e < nh; e += NAB) {
++        const int i = e >> (LNCH + 1), kb = e & (2 * NCH - 1), u = e / NAB;    // kb: K-block 2 j + part of the [M][2H] buffer
++        if (u >= 1) mbar_wait(&B.ab_empty[lane], (u - 1) & 1);
++        const int t = tile_of(i);
++        if (i != seen) {
++          seen = i;
++          if (i < n_valid) {
++#ifndef DXG_NOWAIT
++            while (ld_acquire_gpu(p.flags + t) < (unsigned)NCH) { }
++#endif
++            if (lane == 0 && i < 16) DXP(cta, 192 + i);
++            fence_proxy_async_global();
++          }
++        }
++        mbar_expect_tx(&B.ab_full[lane], 16384);
++        tma_load_2d(su + G_AB + lane * 16384, p.dab2, &B.ab_full[lane], kb * 64, t * ROWS);
++      }
++    }
++  } else if (warp == 1) {
++    if (lane == 0) {                                           // x / dy of tile i into buffer i & 1
++      for (int i = 0; i < n_local; ++i) {
++        const int b = i & 1, t = tile_of(i);
++        if (i >= 2) mbar_wait(&B.xd_empty[b], ((i >> 1) - 1) & 1);
++        const uint32_t dst = su + G_XD + b * 65536;
++        mbar_expect_tx(&B.xd_full[b], 65536);
++        tma_load_3d(dst, p.dy3, &B.xd_full[b], 0, t * ROWS, 0);
++        tma_load_3d(dst + 32768, p.x3, &B.xd_full[b], 0, t * ROWS, 0);
++      }
++    }
++  } else if (warp == 3) {
++    if (lane < NWG) {                                          // Wa_j / Wb_j: lane s owns slot s; rank `part` issues, both expect it
++      for (int e = lane; e < nh; e += NWG) {
++        const int j = (e >> 1) & (NCH - 1), part = e & 1, u = e / NWG;
++        if (u >= 1) mbar_wait(&B.wab_empty[lane], (u - 1) & 1);
++        mbar_expect_tx(&B.wab_full[lane], 16384);
++        if (part == crank) tma_load_3d_mc(su + G_WAB + lane * 16384, part ? p.wb3 : p.wa3, &B.wab_full[lane], 0, j * HS, 0, CL_MASK);
++      }
++    }
++  } else if (warp == 2) {
++    // d_xn += [dA_j] Wa_j + [dB_j] Wb_j, tile i into TMEM buffer i & 1 (B MN-major: two 64-column D slabs 8 KB apart)
++    for (int e = 0; e < nh; ++e) {
++      const int i = e >> (LNCH + 1), first = (e & (2 * NCH - 1)) == 0, last = (e & (2 * NCH - 1)) == 2 * NCH - 1;
++      const int s = e % NAB, sw = e % NWG, b = i & 1;
++      mbar_wait(&B.ab_full[s], (e / NAB) & 1);
++      mbar_wait(&B.wab_full[sw], (e / NWG) & 1);
++      if (first && i >= 2) mbar_wait(&B.dxn_empty[b], ((i >> 1) - 1) & 1);
++      if (lane == 0 && e < 128) DXP(cta, e);
++      tc_fence_after();
++      const uint64_t da = desc_k128(su + G_AB + s * 16384), dw = desc_mn128(su + G_WAB + sw * 16384, 8192);
++      if (elect_one()) {
++#pragma unroll
++        for (int ks = 0; ks < 4; ++ks)
++          umma_ss(tmem + (uint32_t)b * 128, da + (uint64_t)(ks * 32 >> 4), dw + (uint64_t)(ks * 2048 >> 4), I_DXN, (!first || ks > 0) ? 1u : 0u);
++        tc_commit(&B.ab_empty[s]);
++        tc_commit_mc(&B.wab_empty[sw], CL_MASK);
++        if (last) tc_commit(&B.dxn_full[b]);
++      }
++      __syncwarp();
++    }
++  } else if (warp < 12) {
++    // ------------------------------------------------------------------------------------ LayerNorm backward + residual
++    // Both warpgroups work on every tile, split by columns: warpgroup w owns d_xn column groups 2 w, 2 w + 1 (64 columns). The row sums
++    // of pass 1 meet in shared memory (warpgroup 0's part + warpgroup 1's, in that order); each thread keeps its row's dgamma | dbeta
++    // terms of its 64 columns summed over the CTA's tiles in TMEM columns 256 + 128 w (64 dgamma, 64 dbeta), reduced over the rows once
++    // at the end (no per-tile warp reductions).
++    setmaxnreg_inc<REG_EPI>();
++    const int wg = (warp - 4) >> 2, t2 = (int)tid - 128;
++    const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
++    const uint32_t gam_u = su + G_GAM;
++    float* red = reinterpret_cast<float*>(sm + G_RED);             // [warpgroup][pa, pb][128 rows]
++    const uint32_t tacc = trow + 256 + (uint32_t)wg * 128;
++    bool acc0 = true;                                              // no tile accumulated yet
++    auto load_dn = [&](uint32_t col, uint32_t (&dn)[16]) {
++      uint32_t v[32];
++      tmem_ld32(col, v);
++      tmem_wait_ld();
++#pragma unroll
++      for (int k = 0; k < 16; ++k) dn[k] = pack_bf16(__uint_as_float(v[2 * k]), __uint_as_float(v[2 * k + 1]));
++    };
++    auto acc32 = [&](uint32_t col, const float (&w)[32]) {         // TMEM columns col .. col + 31 of this row += w
++      uint32_t v[32];
++      if (!acc0) {
++        tmem_ld32(col, v);
++        tmem_wait_ld();
++#pragma unroll
++        for (int k = 0; k < 32; ++k) v[k] = __float_as_uint(__uint_as_float(v[k]) + w[k]);
++      } else {
++#pragma unroll
++        for (int k = 0; k < 32; ++k) v[k] = __float_as_uint(w[k]);
++      }
++      uint32_t lo[16], hi[16];
++#pragma unroll
++      for (int k = 0; k < 16; ++k) { lo[k] = v[k]; hi[k] = v[16 + k]; }
++      tmem_st16(col, lo);
++      tmem_st16(col + 16, hi);
++    };
++    for (int i = 0; i < n_local; ++i) {
++      const int b = i & 1, t = tile_of(i), grow = t * ROWS + (int)r;
++      const bool real = i < n_valid;
++      const uint32_t tdxn = trow + (uint32_t)b * 128;
++      const float rs = p.rstd[grow], mean = p.c1[grow] / rs;
++      if (t2 == 0 && i < 16) DXP(cta, 128 + 4 * i);
++      mbar_wait(&B.dxn_full[b], (i >> 1) & 1);
++      tc_fence_after();
++      mbar_wait(&B.xd_full[b], (i >> 1) & 1);
++      if (t2 == 0 && i < 16) DXP(cta, 128 + 4 * i + 1);
++      if (t2 == 0 && real) st_relaxed_gpu(p.flags + t, 0u);   // every load of this tile is done: reset its counter for the next call
++      const uint32_t dyb = su + G_XD + b * 65536, xb = dyb + 32768;
++      const f2 RS = mk2(rs, rs), NMR = mk2(-mean * rs, -mean * rs);
++      f2 pa2[2] = {mk2(0.f, 0.f), mk2(0.f, 0.f)}, pb2[2] = {mk2(0.f, 0.f), mk2(0.f, 0.f)};
++#pragma unroll
++      for (int gg = 0; gg < 2; ++gg) {
++        const int g = 2 * wg + gg;
++        uint32_t dn[16];
++        load_dn(tdxn + g * 32, dn);
++        float work[32];
++#pragma unroll
++        for (int qq = 0; qq < 4; ++qq) {
++          const uint4 xv = lds128_nv(xb + (g >> 1) * KB + sw128(r, (g & 1) * 4 + qq));
++          const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
++#pragma unroll
++          for (int kk = 0; kk < 4; ++kk) {
++            const int e = qq * 4 + kk, pr = g * 16 + e;
++            const uint32_t n = dn[e];
++            const f2 N = mk2(bf16lo(n), bf16hi(n));
++            const f2 XH = fma2(mk2(bf16lo(xw[kk]), bf16hi(xw[kk])), RS, NMR);
++            const float2 gm = lds64f_nv(gam_u + pr * 8);
++            const f2 W = mul2(mk2(gm.x, gm.y), N);
++            pa2[kk & 1] = fma2(XH, W, pa2[kk & 1]); pb2[kk & 1] = add2(pb2[kk & 1], W);
++            const f2 NX = mul2(N, XH);
++            work[2 * e] = lo2(NX); work[2 * e + 1] = hi2(NX);
++          }
++        }
++        if (real) {
++          acc32(tacc + gg * 32, work);
++#pragma unroll
++          for (int e = 0; e < 16; ++e) { const uint32_t n = dn[e]; work[2 * e] = bf16lo(n); work[2 * e + 1] = bf16hi(n); }
++          acc32(tacc + 64 + gg * 32, work);
++        }
++      }
++      if (real) acc0 = false;
++      {
++        const f2 PA = add2(pa2[0], pa2[1]), PB = add2(pb2[0], pb2[1]);
++        red[(wg * 2 + 0) * 128 + r] = lo2(PA) + hi2(PA);
++        red[(wg * 2 + 1) * 128 + r] = lo2(PB) + hi2(PB);
++      }
++      named_bar_sync(1, 256);
++      const float ca = (red[r] + red[256 + r]) * (1.f / D_), cbv = (red[128 + r] + red[384 + r]) * (1.f / D_);
++      const f2 NCA = mk2(-ca, -ca), NCB = mk2(-cbv, -cbv);
++#pragma unroll
++      for (int gg = 0; gg < 2; ++gg) {
++        const int g = 2 * wg + gg;
++        uint32_t dn[16];
++        load_dn(tdxn + g * 32, dn);
++        if (gg == 1) {                                     // this warp's columns of the d_xn buffer are read (8 arrivals free it)
++          tc_fence_before();
++          __syncwarp();
++          if (lane == 0) mbar_arrive(&B.dxn_empty[b]);
++        }
++#pragma unroll
++        for (int qq = 0; qq < 4; ++qq) {
++          const uint32_t off = (g >> 1) * KB + sw128(r, (g & 1) * 4 + qq);
++          const uint4 xv = lds128(xb + off), dv = lds128(dyb + off);
++          const uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w}, dw[4] = {dv.x, dv.y, dv.z, dv.w};
++          uint32_t o[4];
++#pragma unroll
++          for (int k = 0; k < 4; ++k) {
++            const int pr = g * 16 + qq * 4 + k;
++            const uint32_t n = dn[qq * 4 + k];
++            const f2 XH = fma2(mk2(bf16lo(xw[k]), bf16hi(xw[k])), RS, NMR);
++            const float2 gm = lds64f(gam_u + pr * 8);
++            const f2 W = mul2(mk2(gm.x, gm.y), mk2(bf16lo(n), bf16hi(n)));
++            const f2 T = mul2(fma2(XH, NCA, add2(W, NCB)), RS);
++            const uint32_t tt = pack_bf16(lo2(T), hi2(T));
++            o[k] = pack_bf16(bf16lo(tt) + bf16lo(dw[k]), bf16hi(tt) + bf16hi(dw[k]));
++          }
++          sts128(dyb + off, make_uint4(o[0], o[1], o[2], o[3]));
++        }
++      }
++      tmem_wait_st();
++      fence_proxy_async();
++      named_bar_sync(2, 256);                              // dx of the whole tile staged; `red` free for the next tile
++      if (t2 == 0) {
++        if (real) {
++          tma_store_3d(p.dx3, dyb, 0, t * ROWS, 0);
++          tma_store_commit();
++          tma_store_wait_read0();
++        }
++        mbar_arrive(&B.xd_empty[b]);
++        if (i < 16) DXP(cta, 128 + 4 * i + 3);
++      }
++    }
++    // this CTA's dgamma | dbeta of the warp's 32 rows: lane l gets column l of each 32-column group
++    float* row = p.dgbw + ((size_t)cta * 4 + (warp & 3)) * 256;
++#pragma unroll
++    for (int q = 0; q < 4; ++q) {                          // q: dgamma gg 0, 1, dbeta gg 0, 1
++      const int gg = q & 1, col = (q >> 1) * 128 + (2 * wg + gg) * 32 + lane;
++      float w[32];
++      if (!acc0) {
++        uint32_t v[32];
++        tmem_ld32(tacc + (q >> 1) * 64 + gg * 32, v);
++        tmem_wait_ld();
++#pragma unroll
++        for (int k = 0; k < 32; ++k) w[k] = __uint_as_float(v[k]);
++      } else {
++#pragma unroll
++        for (int k = 0; k < 32; ++k) w[k] = 0.f;
++      }
++      row[col] = reduce_scatter32(w, lane);
++    }
++    if (t2 == 0) tma_store_wait0();
++  }
++  tc_fence_before();
++  __syncthreads();
++  cluster_sync_relaxed();
++  if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, 512); }
++}
++
++extern "C" __global__ void __launch_bounds__(512, 1)
++transition_bwd_dxg_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_constant__ CUtensorMap mxn,
++                         const __grid_constant__ CUtensorMap mws, const __grid_constant__ CUtensorMap mwa, const __grid_constant__ CUtensorMap mwb,
++                         const __grid_constant__ CUtensorMap mdab, const __grid_constant__ CUtensorMap mdab2,
++                         const __grid_constant__ CUtensorMap mwa3, const __grid_constant__ CUtensorMap mwb3,
++                         const __grid_constant__ CUtensorMap mx3, const __grid_constant__ CUtensorMap mdy3, const __grid_constant__ CUtensorMap mdx3,
++                         const float* __restrict__ rstd, const float* __restrict__ c1, const float* __restrict__ gamma,
++                         float* __restrict__ partab, float* __restrict__ parts, float* __restrict__ dgbw, unsigned* __restrict__ flags,
++                         int tiles, int ndw) {
++  Par p{&mdy, &mxn, nullptr, &mws, &mwa, &mwb, nullptr, nullptr, rstd, c1, gamma, nullptr, partab, parts, dgbw, tiles, ndw};
++  p.dab = &mdab; p.dab2 = &mdab2; p.wa3 = &mwa3; p.wb3 = &mwb3; p.x3 = &mx3; p.dy3 = &mdy3; p.dx3 = &mdx3; p.flags = flags;
++  extern __shared__ __align__(1024) uint8_t sm[];
++  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
++  pdl_launch();
++  if (warp < 4) setmaxnreg_dec<REG_LOW>();
++#ifdef PROBE
++  unsigned long long t0;
++  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t0));
++#endif
++  if ((int)blockIdx.x < ndw) weight_role(p, sm, blockIdx.x, warp, lane);
++  else input_role_g(p, sm, blockIdx.x - ndw, gridDim.x - ndw, warp, lane);
++#ifdef PROBE
++  __syncthreads();
++  if (threadIdx.x == 0) {
++    unsigned long long t1;
++    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t1));
++    printf("PRB %d %d %llu %llu\n", (int)blockIdx.x, (int)blockIdx.x < ndw ? 1 : 0, t0, t1);
++    if ((int)blockIdx.x >= ndw) {
++      const int c = (int)blockIdx.x - ndw;
++      for (int k = 0; k < 256; ++k)
++        if (g_dxp[c][k] >= t0 && g_dxp[c][k] <= t1) printf("DXP %d %d %llu\n", c, k, g_dxp[c][k]);
++    }
++    if (blockIdx.x == 0)
++      for (int r = 0; r < 4; ++r)
++        for (int i = 0; i < 2048; ++i)
++          if (g_trb[0][r][i] >= t0 && g_trb[0][r][i] <= t1) printf("TRB %d %d %llu\n", r, i, g_trb[0][r][i]);
++  }
++#endif
++}
++#endif
++
+ extern "C" __global__ void __launch_bounds__(512, 1)
+ transition_bwd_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mx,
+                      const __grid_constant__ CUtensorMap mws, const __grid_constant__ CUtensorMap mwa, const __grid_constant__ CUtensorMap mwb,
+@@ -735,4 +1104,8 @@ extern "C" __device__ int transition_bwd_reduce_blocks = RED_WBLK + RED_GBLK;
+ // ================================================================================== wiring surface
+ // Built into a cubin by the newest nvcc that knows sm_100a and launched through the driver API from `transition_sm100.cu`;
+ // the dynamic shared-memory size the launch must request is exported here so the host never restates it.
++#ifdef DXG
++extern "C" __device__ int transition_sm100_bwd_smem_bytes = SMEM_DXG;
++#else
+ extern "C" __device__ int transition_sm100_bwd_smem_bytes = SMEM_BYTES;
++#endif

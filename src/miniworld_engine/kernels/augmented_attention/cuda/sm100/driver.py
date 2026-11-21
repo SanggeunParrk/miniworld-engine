@@ -176,8 +176,25 @@ class Kernel:
                 holders.append(h)
                 ptrs.append(ctypes.addressof(h))
         arr = (ctypes.c_void_p * len(ptrs))(*ptrs)
-        assert not (self.cluster or self.pdl), "bind: plain launches only"
+        assert not self.cluster, "bind: no cluster launches"
         func, smem, g, b, addr = self.func, self.smem, grid, block, ctypes.addressof(arr)
+        if self.pdl:  # 2026-11-17 (AttentionPairBias part 7): a bound programmatic-dependent launch (cuLaunchKernelEx)
+
+            def run_pdl():
+                cfg = cu.CUlaunchConfig()
+                cfg.gridDimX, cfg.gridDimY, cfg.gridDimZ = g[0], g[1], g[2]
+                cfg.blockDimX, cfg.blockDimY, cfg.blockDimZ = b[0], b[1], b[2]
+                cfg.sharedMemBytes = smem
+                cfg.hStream = cu.CUstream(torch.cuda.current_stream().cuda_stream)
+                ap = cu.CUlaunchAttribute()
+                ap.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
+                ap.value.programmaticStreamSerializationAllowed = 1
+                cfg.attrs = [ap]
+                cfg.numAttrs = 1
+                _chk(cu.cuLaunchKernelEx(cfg, func, addr, 0), "cuLaunchKernelEx")
+
+            run_pdl.keep = (holders, arr)
+            return run_pdl
 
         def run():
             st = torch.cuda.current_stream().cuda_stream

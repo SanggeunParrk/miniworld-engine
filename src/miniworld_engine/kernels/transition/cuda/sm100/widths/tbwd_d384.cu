@@ -483,7 +483,14 @@ extern "C" __global__ void __launch_bounds__(256) transition_bwd_d384_reduce(con
   __shared__ float s4[4][64];
   const int t = threadIdx.x & 63, rg = threadIdx.x >> 6, col = blockIdx.x * 64 + t;
   float v = 0.f;
-  for (int k = rg; k < nblk; k += 4) v += part[(size_t)k * 2 * D_ + col];
+  for (int k0 = rg; k0 < nblk; k0 += 4 * 16) {                 // rows rg, rg + 4, ... in order, 16 loads in flight
+    float tv[16];
+#pragma unroll
+    for (int q = 0; q < 16; ++q) tv[q] = k0 + 4 * q < nblk ? part[(size_t)(k0 + 4 * q) * 2 * D_ + col] : 0.f;
+#pragma unroll
+    for (int q = 0; q < 16; ++q)
+      if (k0 + 4 * q < nblk) v += tv[q];
+  }
   s4[rg][t] = v;
   __syncthreads();
   if (threadIdx.x < 64) dgb[col] = (s4[0][t] + s4[1][t]) + (s4[2][t] + s4[3][t]);

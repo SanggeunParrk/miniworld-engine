@@ -1,0 +1,62 @@
+diff --git a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+index 7d3231c1e..49c81a9d5 100644
+--- a/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
++++ b/src/miniworld_engine/kernels/transition/cuda/fused_wide_sm100a.py
+@@ -73,6 +73,9 @@ REPL = {(64, 4): 20, (64, 2): 30, (128, 2): 14}
+ #: backward's prologue (barriers, tensor memory, cluster sync) runs as the forward's CTAs leave, griddepcontrol.wait before its first
+ #: read. A module constant (A/B runs edit it); D 128 n 4 (`transition_sm100.cu`) always.
+ BWD_PDL = True
++
++#: (S90 experiment) D 512 training: the forward keeps no a, b and the backward gate recomputes them (tgate_w.cu); False: keep a, b (tgate_ab.cu)
++D512_RECOMPUTE = False
+ #: (training part 5) A/B builds of the two-role backwards (D 64 `widths/tbwd_d64.cu`, D 128 n 2 `tr_bwd_sm100.cu`): None runs "bwd"; a flag
+ #: tuple (e.g. ("-DGOV=0",)) builds and runs cubin "bwdab" with those flags. A module constant (A/B runs edit it).
+ BWD_AB_FLAGS: tuple[str, ...] | None = None
+@@ -257,6 +260,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+         *fwd,
+         *sx,
+         ("gate", "widths/tgate_ab.cu", (*dim, "-DNO_H")),
++        *((("gatew", "widths/tgate_w.cu", (*dim,)),) if d == 512 else ()),
+         ("gate_is", "widths/tgate_ab.cu", (*dim, "-DNO_H", "-DITEM_SCHED")),
+         dxn,
+         lnb,
+@@ -492,7 +496,7 @@ def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
+     m, d = x.shape
+     rows = m if save else 1
+     f32 = dict(dtype=torch.float32, device=x.device)
+-    keep = save and d >= 384
++    keep = save and d >= 384 and not (d == 512 and D512_RECOMPUTE)
+     hab = [x.new_empty((m, wa.shape[0])) if keep else x.new_empty((1, 1)) for _ in range(3)]
+     return (
+         torch.empty_like(x),
+@@ -603,7 +607,7 @@ def _fwd_launch(
+     item = tiles <= ITEM_TILES
+     mh = k.tmap(hid, h, m)
+     maps = (k.rows(xn), k.tmap(wa, d, h, 64, 128), k.tmap(wb, d, h, 64, 128), mh)
+-    if save:
++    if save and not (d == 512 and D512_RECOMPUTE):
+         a, b = torch.empty_like(hid), torch.empty_like(hid)
+         k.run(
+             "swiglu_abis" if item else "swiglu_ab",
+@@ -631,6 +635,8 @@ def _fwd_launch(
+                 tiles,
+             ),
+         )
++    if save and d == 512 and D512_RECOMPUTE:
++        return out, xn, rstd, c1, hid, ph(), ph()
+     if not save:
+         return out, xn.new_empty((1, d)), rstd, c1, ph(), ph(), ph()
+     return out, xn, rstd, c1, hid, a, b
+@@ -782,10 +788,10 @@ def _bwd_launch(
+     wab_t = wabt if have_t else torch.cat((wa, wb), 0).t().contiguous()  # [D, 2H]
+     dab = torch.empty((m, 2 * h), dtype=x.dtype, device=x.device)
+     mdab = k.tmap(dab, 2 * h, m)
+-    if d == 256:
++    if d == 256 or (d == 512 and D512_RECOMPUTE):
+         hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
+         k.run(
+-            "gate",
++            "gate" if d == 256 else "gatew",
+             "transition_gate_w_sm100",
+             k.grid,
+             (

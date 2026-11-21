@@ -20,6 +20,8 @@ import torch
 _dir = Path(__file__).parent
 #: switches of the exact-fp32 fusions (A-B tests in one process; all on in a release): "logits" saves the fp32 logits (no re-forming
 #: in the backward), "bwd" the one-pass hoist backward of a block, "fwd" the one-pass logits of a block
+#: devices of the tensor-core logits / hoist backward (TF32 mma.sync, split fp32 operands): H100 and B200 (mma.sync runs on sm_100)
+_TC_CAPS = ((9, 0), (10, 0))
 OPT = {
     "logits": True,
     "bwd": True,
@@ -27,6 +29,7 @@ OPT = {
     "rows": True,
     "bwd_rg": 2,
     "eval_tc": True,
+    "sm100_logits": True,
     "train_tc": True,
     "bwd_tc": True,
     "bwd_mb": 0,
@@ -159,6 +162,9 @@ def logits_tc(p2: torch.Tensor, wf32: torch.Tensor, out: torch.Tensor, pst: torc
     (``logits_tc_k``): LN0 in fp32 on chip, the products on TF32 tensor cores with the split fp32 operands (all 4 hi / lo products, a fresh
     partial per k-step added in round-to-nearest fp32), the
     inference hoist's logits (max-abs error 0.4x the FMA GEMM's against fp64: tests/gpu/test_bias_only_fp32_logits.py)."""
+    if logits_sm100_ok(p2, wf32):
+        logits_sm100(p2, wf32, out, pst)
+        return
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32
 
     # launch bounds (blocks of 8 warps an SM): 2 at 128 channels; 1 at 256 (register file: 2 spilled 360 bytes, 190 us against 295 us at L 768)
@@ -166,8 +172,51 @@ def logits_tc(p2: torch.Tensor, wf32: torch.Tensor, out: torch.Tensor, pst: torc
     tf32.rows32().logits_tc_cuda(p2, wf32, out, 1e-5, mb, out.new_empty(0) if pst is None else pst)
 
 
+_SM100_RUNS = None
+
+
+def logits_sm100_ok(p2: torch.Tensor, wf32: torch.Tensor) -> bool:
+    """``logits_sm100`` (the tcgen05 kernel ``bo_logits_sm100.cu``) serves bf16 pair rows of width 128 / 256, R a multiple of 128, on a B200."""
+    return (
+        OPT["sm100_logits"]
+        and p2.dtype is torch.bfloat16
+        and p2.dim() == 2
+        and p2.shape[1] in (128, 256)
+        and p2.shape[0] % 128 == 0
+        and p2.is_contiguous()
+        and wf32.dtype is torch.float32
+        and tuple(wf32.shape) == (16, p2.shape[1])
+        and wf32.is_contiguous()
+        and torch.cuda.get_device_capability(p2.device) == (10, 0)
+    )
+
+
+def logits_sm100(p2: torch.Tensor, wf32: torch.Tensor, out: torch.Tensor, pst: torch.Tensor | None = None) -> None:
+    """out [16, R] fp32 <- one block's 16-head logits of the bf16 pair rows p2 [R, 128 | 256] and W' wf32 [16, C] fp32 (and the row statistics (mean, rstd)
+    float [R, 2] in ``pst``) in one pass on a tcgen05 kernel: a row whose |mean| <= std / 2 as rs (sum W' x - mean sum W') on the bf16 tensor core with W' in
+    three bf16 pieces (x exact, every product exact in fp32, the pieces and 64-column slabs added in fp32), other rows from their exact fp32 LN0 values on the
+    FMA pipe: the error class of the exact fp32 FMA GEMM either way (tests/gpu/test_bias_only_fp32_logits.py)."""
+    global _SM100_RUNS
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from miniworld_engine.kernels.bias_only_dit.cuda import PTR, _descriptors, _Launch, _Runs
+
+    if _SM100_RUNS is None:
+        _SM100_RUNS = _Runs()
+    R, cp = p2.shape
+    dev = p2.device.index if p2.device.index is not None else torch.cuda.current_device()
+
+    def bind():
+        k = sm100._sm100_kernel("bo_logits_sm100", "bo_logits_sm100", dev, src_dir=str(_dir), defs=(f"CP={cp}",), smem=232448)
+        nsm = torch.cuda.get_device_properties(dev).multi_processor_count
+        m = sm100._tm(p2, [cp, R], cp * 2, [64, 128])
+        return _Launch(k, (min(nsm, R // 128), 1, 1), (384, 1, 1), *_descriptors(m), PTR, PTR, PTR, R, 0 if pst is None else 1)
+
+    key = (dev, p2.data_ptr(), R, cp, pst is not None)
+    _SM100_RUNS.bind(key, bind)(wf32, out, out if pst is None else pst)
+
+
 def logits_tc_ok(p2: torch.Tensor, wf32: torch.Tensor) -> bool:
-    """``logits_tc`` serves a 16-head block on an H100 with contiguous bf16 / fp32 pair rows of width 128 or 256, R a multiple of 16."""
+    """``logits_tc`` serves a 16-head block on an H100 / B200 with contiguous bf16 / fp32 pair rows of width 128 or 256, R a multiple of 16."""
     return (
         OPT["eval_tc"]
         and tuple(wf32.shape) == (16, p2.shape[1])
@@ -176,12 +225,12 @@ def logits_tc_ok(p2: torch.Tensor, wf32: torch.Tensor) -> bool:
         and p2.is_contiguous()
         and p2.dtype in (torch.bfloat16, torch.float32)
         and wf32.is_contiguous()
-        and torch.cuda.get_device_capability(p2.device) == (9, 0)
+        and torch.cuda.get_device_capability(p2.device) in _TC_CAPS
     )
 
 
 def hoist_bwd_tc_ok(x: torch.Tensor, dball: torch.Tensor, wf32: torch.Tensor) -> bool:
-    """``hoist_bwd_tc`` serves one block's 16 heads on an H100: x [R, 128 | 256] bf16 / fp32 contiguous (R a multiple of 16), dbias [16, R] fp32."""
+    """``hoist_bwd_tc`` serves one block's 16 heads on an H100 / B200: x [R, 128 | 256] bf16 / fp32 contiguous (R a multiple of 16), dbias [16, R] fp32."""
     return (
         OPT["bwd_tc"]
         and tuple(dball.shape[:1]) == (16,)
@@ -193,7 +242,7 @@ def hoist_bwd_tc_ok(x: torch.Tensor, dball: torch.Tensor, wf32: torch.Tensor) ->
         and dball.dtype is torch.float32
         and dball.is_contiguous()
         and wf32.is_contiguous()
-        and torch.cuda.get_device_capability(x.device) == (9, 0)
+        and torch.cuda.get_device_capability(x.device) in _TC_CAPS
     )
 
 
@@ -224,6 +273,8 @@ def kernel_attrs() -> list[tuple[str, int, int]]:
 
 __all__ = [
     "dbias_rows",
+    "logits_sm100",
+    "logits_sm100_ok",
     "logits_tc",
     "logits_tc_ok",
     "pair_logits",

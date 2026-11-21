@@ -1,0 +1,171 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+index 66ce9830c..005a09d7c 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/__init__.py
+@@ -956,6 +956,7 @@ def apb_backward_stages(
+     bias_t: torch.Tensor | None = None,
+     bias_nt: bool = False,
+     dkv_pdl: bool = False,
++    dqb_pdl: bool = False,
+ ):
+     """``apb_backward``'s three launches, unlaunched: ((bias_transpose, attn_dkv, attn_dqb), (dQ, dK, dV, dbias, bias^T)). The caller
+     holds bias^T until attn_dkv has run (2026-11-17: it was not returned, so the caching allocator handed its block to the next allocation on
+@@ -1012,8 +1013,9 @@ def apb_backward_stages(
+             int(L),
+             1,
+         )  # no dQ zero fill
+-        dqb_defs = defs + ("DQPART=1",)
+-        dqb = _sm100_kernel("attn_dqb", "augattn_dqb_sm100", dev, defs=dqb_defs).bind(
++        # dqb_pdl (v21): the -DPDLW=1 build launched as a programmatic dependent of the previous kernel on the stream
++        dqb_defs = defs + ("DQPART=1",) + (("PDLW=1",) if dqb_pdl else ())
++        dqb = _sm100_kernel("attn_dqb", "augattn_dqb_sm100", dev, pdl=dqb_pdl, defs=dqb_defs).bind(
+             _grid(heads * (L // 128) * (L // 128), dev),
+             (384, 1, 1),
+             *dqb_maps,
+@@ -1032,6 +1034,7 @@ def apb_backward_stages(
+         made_t,
+         bias_nt,
+         dkv_pdl,
++        dqb_pdl,
+         heads,
+         d,
+         dev,
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dqb.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dqb.cu
+index 7a861f78c..3ad53bcf8 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dqb.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/sm100/attn_dqb.cu
+@@ -42,6 +42,9 @@ using namespace s100;
+ #ifndef NHEAD
+ #define NHEAD 16                         // heads (AttentionPairBias: 8, rows NHEAD * 48 wide)
+ #endif
++#ifndef PDLW
++#define PDLW 0                           // 1 (AttentionPairBias v21, 2026-11-17): griddepcontrol.wait after the prologue (barriers, TMEM, zeroed dQ)
++#endif
+ #ifndef DQPART
+ #define DQPART 0                         // 1: each key chunk's dQ partial is STORED to its own slice DQ[chunk][a L + row] (deterministic;
+ #endif                                   // the caller adds the L / 128 slices in order) instead of reduce-added into one zeroed dQ
+@@ -154,6 +157,10 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
+   tc_fence_before();
+   __syncthreads();
+   tc_fence_after();
++#if PDLW
++  pdl_wait();                                                              // v21: launched as a programmatic dependent (AttentionPairBias)
++  pdl_launch();
++#endif
+ 
+   if (warp < 4) setmaxnreg_dec<56>();
+   if (warp == 0) {
+diff --git a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py b/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
+index e69050f52..d8d6151fa 100644
+--- a/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
++++ b/src/miniworld_engine/kernels/integrations/attention_pair_bias_b200.py
+@@ -391,6 +391,19 @@ def _fwd_reserve(dp: int, L: int) -> int:
+     return _FWD_RESERVE if _STREAMS and dp == DP and 384 <= L <= 640 else 0
+ 
+ 
++#: B200 bf16 inference, d_pair 128 (v21, 2026-11-17): the pair pass as ``pair_bias_fwd2`` (apb_pair_fwd_rows_sm100.cuh: the shared pass with
++#: each warp's 16 rows loaded by its own lane / mbarrier) -- "stages:blocks per SM" (0: the occupancy); None: the shared pass.
++#: MINIWORLD_APB_B200_PF2 forces (0: off).
++_PF2 = os.environ.get("MINIWORLD_APB_B200_PF2")
++
++
++def _pf2(dp: int, L: int, heads: int) -> tuple[int, int] | None:
++    if _PF2 is None or _PF2 == "0" or dp != DP:
++        return None
++    s, b = _PF2.split(":")
++    return int(s), int(b)
++
++
+ def _pair_tc(dp: int, L: int, heads: int, train: bool = False) -> bool:
+     """Whether the bf16 pair -> bias pass runs on tcgen05 (MINIWORLD_APB_B200_PAIR_TC=0 / 1 forces). Measured (2026-11-17, master eval step,
+     graph timing, the shared pass -> tcgen05): d_pair 256 L 512 / 768 59.3 / 94.1 -> 59.9 / 94.7 us, L 1024 / 1536 / 2048 139.7 / 274.3 / 458.6
+@@ -478,6 +491,17 @@ def _pdl_on(L: int) -> bool:
+     return L <= _PDL_MAX
+ 
+ 
++#: B200 bf16 training backward (v21, 2026-11-17): attn_dqb on the main stream as a programmatic dependent of the gate backward (-DPDLW=1),
++#: attn_dkv on side stream 1 beside it (was: dkv on the main stream, dqb on the side). MINIWORLD_APB_B200_DQB_MAIN=0 / 1 forces.
++_DQB_MAIN = os.environ.get("MINIWORLD_APB_B200_DQB_MAIN")
++
++
++def _dqb_main(L: int) -> bool:
++    if _DQB_MAIN is not None:
++        return _DQB_MAIN not in ("0", False)
++    return False
++
++
+ def _pdl_call(E, pdl: bool, fn, *args) -> None:
+     """fn(*args) with the extension's PDL launches on when ``pdl``, then the previous setting."""
+     if not pdl:
+@@ -586,7 +610,12 @@ def _inference_b200(single, pair, mask, params, leaves, eps_s, eps_p, gate_bias,
+                     bias = _sm100().apb_pair_fwd(p2, wf, None, 1.0, _row(mask, b), L0, eps_p, NEG)
+                 else:
+                     was = E.sm_reserve(_fwd_reserve(wf_dp, L0))
+-                    made = _rows().pair_bias(p2, wf, _row(mask, b), L0, eps_p, NEG)
++                    pf2 = _pf2(wf_dp, L0, H)
++                    if pf2 is not None:  # v21: the B200 form of the d_pair 128 pass (per-warp tile loads)
++                        made = torch.empty(H, L0, L0, device=dev, dtype=torch.bfloat16)
++                        E.pair_bias_fwd2(p2, wf, _row(mask, b), made, L0, eps_p, NEG, *pf2, 0)
++                    else:
++                        made = _rows().pair_bias(p2, wf, _row(mask, b), L0, eps_p, NEG)
+                     E.sm_reserve(was)
+                     assert isinstance(made, torch.Tensor)
+                     bias = made
+@@ -954,6 +983,7 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+     sm = _sm100()
+     pdl = _pdl_on(L)  # v20: the main stream's own kernels as programmatic dependents
+     lnw, lnpw = leaves[0], leaves[8]
++    dqb_main = _dqb_main(L)
+     H, _, W, D = _geometry(leaves)
+     dp = leaves[9].shape[1]
+     r = _row_saved(dp, True)
+@@ -998,7 +1028,8 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+                 D,
+                 bias_t=rest[-1] if fwd_t else None,
+                 bias_nt=not fwd_t and _bias_nt(H, L),
+-                dkv_pdl=pdl,
++                dkv_pdl=pdl and not dqb_main,
++                dqb_pdl=pdl and dqb_main,
+             )
+             transposed = torch.cuda.Event()
+             with torch.cuda.stream(s1):
+@@ -1009,10 +1040,20 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+             dog = dy2 @ wo
+             _pdl_call(E, pdl, E.gate_bwd2 if _P5 and H == 12 else E.gate_bwd_p, dog, O, qkvg, dob, dd, dqkvg)
+             _join(s2, main)
+-            with torch.cuda.stream(s2):
++            dq_done = torch.cuda.Event()
++            if dqb_main:  # v21: attn_dqb (the longer core, on the dq -> qkv_bwd -> dxa chain) leads the main stream; attn_dkv beside it
+                 dqb()
+-                dq_done = torch.cuda.Event()
+-                _rec(dq_done, s2)
++                _rec(dq_done, main)
++                kv_done = torch.cuda.Event()
++                with torch.cuda.stream(s2):
++                    _after(s2, transposed)
++                    dkv()
++                    _rec(kv_done, s2)
++                    _after(s2, dq_done)
++            with torch.cuda.stream(s2):
++                if not dqb_main:
++                    dqb()
++                    _rec(dq_done, s2)
+                 if pbtc:  # tcgen05: its block partial rows go into the dWf | dbias-sum columns of acc
+                     z2, dz2 = pair[b].view(L * L, dp), dz_all[b].view(L * L, dp)
+                     sm.apb_pair_bwd(z2, DB, wf, L, eps_p, acc[:, 2 * D + W :], dz2, _pbtc_reserve(H, L))
+@@ -1020,9 +1061,12 @@ def _backward_b200(single, pair, mask, leaves, eps_p, saved, dy):
+                     was = E.sm_reserve(_bwd_reserve(dp, L))
+                     rows.pair_bias_bwd(pair[b].view(L * L, dp), DB, wf, L, eps_p, acc, D, saved=wide, out=dz_all[b].view(L * L, dp))
+                     E.sm_reserve(was)
+-            _after(main, transposed)
+-            dkv()
+-            _after(main, dq_done)
++            if dqb_main:
++                _after(main, kv_done)
++            else:
++                _after(main, transposed)
++                dkv()
++                _after(main, dq_done)
+             _pdl_call(E, pdl, E.qkv_bwd_p, DQ, DK, DV, dqkvg, acc, D)
+             if _DXA_FIRST:  # dxa leads the tail (-> ln_bwd -> finalize); dW q|k|v|g is issued after it, on the side stream
+                 qkv_done = torch.cuda.Event()

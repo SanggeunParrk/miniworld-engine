@@ -110,6 +110,13 @@ extern "C" __global__ void transition_lnbwd_w_reduce(const float* __restrict__ p
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   if (col >= 2 * D_) return;
   float v = 0.f;
-  for (int b = 0; b < nblk; ++b) v += part[(size_t)b * 2 * D_ + col];
+  for (int b0 = 0; b0 < nblk; b0 += 16) {                     // in block order, 16 loads in flight (one at a time: nblk x the L2 latency)
+    float t[16];
+#pragma unroll
+    for (int k = 0; k < 16; ++k) t[k] = b0 + k < nblk ? part[(size_t)(b0 + k) * 2 * D_ + col] : 0.f;
+#pragma unroll
+    for (int k = 0; k < 16; ++k)
+      if (b0 + k < nblk) v += t[k];
+  }
   dgb[col] = v;
 }

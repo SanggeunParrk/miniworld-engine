@@ -1,0 +1,301 @@
+diff --git a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
+index a42445027..d842b28b6 100644
+--- a/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
++++ b/src/miniworld_engine/kernels/augmented_attention/cuda/apb/apb_rows_sm100.cu
+@@ -1119,6 +1119,16 @@ void gate_bwd2(at::Tensor dog, at::Tensor o, at::Tensor qkvg, at::Tensor dob, at
+ // NB = 1, no stats / unmasked planes) over the grid - G blocks. The GEMM blocks come first in the grid, so they are dispatched with the
+ // first pair blocks instead of queueing behind the persistent pass. The step was LN, then [pair beside GEMM], each a launch.
+ constexpr int S1_BM = 32, S1_BN = 64, S1_NT = 256;
++// FR_TL (probe builds only, -DFR_TL=1): per-block stage stamps (globaltimer) of inf_front_k into g_frtl; 0 in every product build
++#ifndef FR_TL
++#define FR_TL 0
++#endif
++#if FR_TL
++__device__ unsigned long long g_frtl[1024][8];
++#define FRT(i, v) do { if (threadIdx.x == 0 && blockIdx.x < 1024) { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); g_frtl[blockIdx.x][i] = (v) ? (unsigned long long)(v) : t_; } } while (0)
++#else
++#define FRT(i, v)
++#endif
+ template <int V> constexpr int s1_ld() { return 128 * V + 8; }  // padded row (conflict-free fragment reads)
+ template <int V> constexpr int s1_gemm_smem() { return (S1_BM + S1_BN) * s1_ld<V>() * 2 + 16; }  // + the copies' mbarrier
+ template <int NH, int DPW, int V> constexpr int s1_smem() {
+@@ -1142,14 +1152,10 @@ __device__ __forceinline__ void s1_gemm(int tile, const bf* __restrict__ X, cons
+   bf* Bs = As + S1_BM * LD;
+   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+   uint64_t* bar = reinterpret_cast<uint64_t*>(smem + (S1_BM + S1_BN) * LD * 2);
+-  if (threadIdx.x == 0) { mbar_init(bar, 1); mbar_fence_init(); }
+-  __syncthreads();
+-  uint32_t bvw = 0;
+-  auto issue_b = [&]() {  // the tile's weight rows (bulk copies); the epilogue's bias
+-    if (warp == 0) bulk_rows(Bs, LD * 2, WP + (long)n0 * D, (long)D * 2, D * 2, S1_BN, S1_BN, bar);
+-    bvw = __ldcg(reinterpret_cast<const unsigned int*>(BV + n0 + 8 * warp + 2 * (lane & 3)));
+-  };
+-  issue_b();
++  // v24 (2026-11-18): every first-touch load is issued before anything waits (stamps after an L2 flush: a bulk-copy issue holds its
++  // thread ~1 us, so the rows' loads issued after warp 0's copies started 2 us late): the rows, LayerNorm's weights and the epilogue's
++  // bias into registers first, then the weight rows by bulk copies, one per lane over the eight warps (S1_BN = 64 rows).
++  FRT(0, 0);
+   constexpr int RPW = S1_BM / (S1_NT / 32);  // rows per warp (4)
+   uint2 xr[RPW][V];  // the rows' raw bf16 words, every load issued before any use
+   const int cl = 4 * V * lane;
+@@ -1159,17 +1165,24 @@ __device__ __forceinline__ void s1_gemm(int tile, const bf* __restrict__ X, cons
+ #pragma unroll
+     for (int k = 0; k < V; ++k) xr[rr][k] = r < M ? *reinterpret_cast<const uint2*>(X + r * D + cl + 4 * k) : make_uint2(0u, 0u);
+   }
++  float4 w[V], b[V];
++  ldv<V>(LW, w); ldv<V>(LB, b);
++  const uint32_t bvw = __ldcg(reinterpret_cast<const unsigned int*>(BV + n0 + 8 * warp + 2 * (lane & 3)));
++  static_assert(S1_BN == 8 * (S1_NT / 32), "s1_gemm: one weight row per lane 0..7 of each warp");
++  if (threadIdx.x == 0) { mbar_init(bar, 1); mbar_fence_init(); mbar_expect_tx(bar, (uint32_t)(S1_BN * D * 2)); }
++  __syncthreads();
++  if (lane < 8) bulk_g2s(Bs + (8 * warp + lane) * LD, WP + (long)(n0 + 8 * warp + lane) * D, (uint32_t)(D * 2), bar);
++  FRT(1, 0);
+ #pragma unroll
+   for (int rr = 0; rr < RPW; ++rr) {  // ln_rows_k's statements
+     const int lr = warp * RPW + rr;
+     const long r = r0 + lr;
+-    float4 x[V], w[V], b[V];
++    float4 x[V];
+ #pragma unroll
+     for (int k = 0; k < V; ++k) {
+       const float2 lo = unpack2(xr[rr][k].x), hi = unpack2(xr[rr][k].y);
+       x[k] = make_float4(lo.x, lo.y, hi.x, hi.y);
+     }
+-    ldv<V>(LW, w); ldv<V>(LB, b);
+     if (Y && nt == 0 && r < M) {
+ #pragma unroll
+       for (int k = 0; k < V; ++k) *reinterpret_cast<uint2*>(Y + r * D + cl + 4 * k) = xr[rr][k];
+@@ -1185,7 +1198,9 @@ __device__ __forceinline__ void s1_gemm(int tile, const bf* __restrict__ X, cons
+     stv<V>(As + lr * LD, x);
+   }
+   __syncthreads();  // the normalised rows are in shared memory
++  FRT(2, 0);
+   mbar_wait(bar, 0);  // the weight rows have landed
++  FRT(3, 0);
+   const int g = lane >> 2, q = lane & 3;
+   float c[2][4] = {};
+ #pragma unroll 8
+@@ -1207,11 +1222,45 @@ __device__ __forceinline__ void s1_gemm(int tile, const bf* __restrict__ X, cons
+     if (ra < M) *reinterpret_cast<uint32_t*>(QKVG + ra * NC + col) = pack2(c[m][0] + bb.x, c[m][1] + bb.y);
+     if (rb < M) *reinterpret_cast<uint32_t*>(QKVG + rb * NC + col) = pack2(c[m][2] + bb.x, c[m][3] + bb.y);
+   }
++  FRT(4, 0);
++  FRT(7, 1);
++}
++// wf_frags (apb_rows.cu) in two halves, the same statements: the loads (issued before the pair tiles' bulk copies, v24) and the sums
++template <int NT8, int NH, int DPW>
++__device__ __forceinline__ void wf_raw(const bf* W, uint32_t (&b)[NT8][DPW / 16][2]) {
++  const int lane = threadIdx.x & 31, g = lane >> 2, q = lane & 3;
++#pragma unroll
++  for (int nt = 0; nt < NT8; ++nt) {
++#pragma unroll
++    for (int s = 0; s < DPW / 16; ++s) {
++      const bool live = g + 8 * nt < NH;
++      const uint32_t* wp = reinterpret_cast<const uint32_t*>(W + (live ? g + 8 * nt : 0) * DPW + 32 * (s >> 1) + 8 * q + 4 * (s & 1));
++      b[nt][s][0] = live ? wp[0] : 0u; b[nt][s][1] = live ? wp[1] : 0u;
++    }
++  }
++}
++template <int NT8, int DPW>
++__device__ __forceinline__ void wf_sums(const uint32_t (&b)[NT8][DPW / 16][2], float (&sw0)[NT8], float (&sw1)[NT8]) {
++  const int lane = threadIdx.x & 31, q = lane & 3;
++#pragma unroll
++  for (int nt = 0; nt < NT8; ++nt) {
++    float sw = 0.f;
++#pragma unroll
++    for (int s = 0; s < DPW / 16; ++s) {
++      const float2 u = unpack2(b[nt][s][0]), v = unpack2(b[nt][s][1]);
++      sw += u.x + u.y + v.x + v.y;
++    }
++    sw = quad_sum(sw);
++    sw0[nt] = __shfl_sync(0xffffffffu, sw, 8 * q); sw1[nt] = __shfl_sync(0xffffffffu, sw, 8 * q + 4);
++  }
+ }
+ // pair_bias_fwd_k's pass (statement for statement; NB = 1, no ST / BU) as block `bid` of `nblk`
+-template <int NH, int DPW>
++// DYN (v24, the front's work queue): the tiles come from the launch's counter Q (pair tile = claim - G; `bid` is the block's first one,
++// claimed by the caller); tq [NSF] in shared memory holds the tile of each ring slot (-1: none left). Tiles are claimed in increasing
++// order, so the first slot without a tile ends the walk. Every tile is computed as in the static walk (the same bits).
++template <int NH, int DPW, bool DYN = false>
+ __device__ __forceinline__ void s1_pair(int bid, int nblk, const bf* __restrict__ Z, const bf* __restrict__ W, const bool* __restrict__ MASK,
+-    bf* __restrict__ OUT, int L, float eps, float neg, uint8_t* smem, int* klen_s) {
++    bf* __restrict__ OUT, int L, float eps, float neg, uint8_t* smem, int* klen_s, unsigned* Q = nullptr, int G = 0, int* tq = nullptr) {
+   constexpr int NT8 = nhp<NH>() / 8, NHP = nhp<NH>(), NSF = fwd_stages<DPW>(), FT = fwd_tile<DPW>(), UU = DPW / 32;
+   constexpr int TR = fwd_rows<DPW>(), NTH = 32 * fwd_warps<DPW>(), TC = TR / 8;
+   static_assert(NTH == S1_NT, "s1_pair: the 8-warp pair passes (d_pair 128 / 256)");
+@@ -1222,34 +1271,53 @@ __device__ __forceinline__ void s1_pair(int bid, int nblk, const bf* __restrict_
+   const long ntiles = (long)L * ntj;
+   const bool skip_dead = MASK != nullptr;
+   auto dead_tile = [&](long n, int j0) { return skip_dead && n >= NSF && j0 >= klen_s[0]; };
++  auto tile_of = [&](long n) -> long { if constexpr (DYN) return tq[n % NSF]; else return bid + n * nblk; };
+   auto issue = [&](long n) {
+-    const long t = bid + n * nblk;
+-    if (t >= ntiles) return;
++    if constexpr (DYN) {  // claim the slot's tile (slots 1 .. NSF - 1: one claim by thread 0, below)
++      if (n >= NSF) { const long c = (long)atomicAdd(Q, 1u) - G; tq[n % NSF] = c < ntiles ? (int)c : -1; }
++    }
++    const long t = tile_of(n);
++    if (t < 0 || t >= ntiles) return;
+     const int i = (int)(t / ntj), j0 = (int)(t % ntj) * TR, rows = min(TR, L - j0);
+     uint64_t* fb = &full[n % NSF];
+     if (dead_tile(n, j0)) { mbar_expect_tx(fb, 0); return; }
+     mbar_expect_tx(fb, (uint32_t)rows * DPW * 2);
+     bulk_g2s(smem + (n % NSF) * FT, Z + ((long)i * L + j0) * DPW, (uint32_t)rows * DPW * 2, fb);
+   };
++  FRT(0, 0);
++  // v24: Wf's words are loaded first and the ring's first NSF tiles are issued by NSF lanes of warp 0 (one copy each): after an L2
++  // flush a bulk-copy issue holds its thread ~1 us, which delayed thread 0's own Wf loads (stamps: Wf ready 3 us after entry)
++  uint32_t b[NT8][DPW / 16][2];
++  float sw0[NT8], sw1[NT8];
++  wf_raw<NT8, NH, DPW>(W, b);
+   if (threadIdx.x == 0) {
+     for (int k = 0; k < NSF; ++k) mbar_init(&full[k], 1);
+     mbar_fence_init();
+   }
++  if constexpr (DYN) {
++    if (threadIdx.x == 0) {
++      const long c = (long)atomicAdd(Q, (unsigned)(NSF - 1)) - G;  // slots 1 .. NSF - 1 in one claim (increasing)
++      tq[0] = bid;
++      for (int k = 1; k < NSF; ++k) tq[k] = c + k - 1 < ntiles ? (int)(c + k - 1) : -1;
++    }
++  }
+   __syncthreads();
+-  if (threadIdx.x == 0)
+-    for (int k = 0; k < NSF; ++k) issue(k);
++  if (threadIdx.x < NSF) issue(threadIdx.x);
+   if (skip_dead && warp == 0) {
+     const int kl = warp_key_len(reinterpret_cast<const uint8_t*>(MASK), L);
+     if (lane == 0) klen_s[0] = kl;
+   }
+-  uint32_t b[NT8][DPW / 16][2];
+-  float sw0[NT8], sw1[NT8];
+-  wf_frags<NT8, NH, DPW>(W, b, sw0, sw1);
++  wf_sums<NT8, DPW>(b, sw0, sw1);
++#if FR_TL
++  if (threadIdx.x == 0) g_frtl[blockIdx.x < 1024 ? blockIdx.x : 0][1] = (unsigned long long)(sw0[0] != 1.2345f ? 0 : 1);
++  FRT(1, 0);
++#endif
+   for (long n = 0;; ++n) {
+-    const long t = bid + n * nblk;
+-    if (t >= ntiles) break;
++    const long t = tile_of(n);
++    if (t < 0 || t >= ntiles) break;
+     const int i = (int)(t / ntj), j0 = (int)(t % ntj) * TR, rows = min(TR, L - j0), st = (int)(n % NSF);
+     mbar_wait(&full[st], (uint32_t)((n / NSF) & 1));
++    if (n == 0) FRT(2, 0);
+     const bool dead = dead_tile(n, j0);
+     const uint8_t* tile = smem + st * FT;
+     float (*os)[128 + 4] = out_s[n & 1];
+@@ -1284,6 +1352,7 @@ __device__ __forceinline__ void s1_pair(int bid, int nblk, const bf* __restrict_
+       }
+     }
+     __syncthreads();
++    if (n == 0) FRT(3, 0);
+     if (threadIdx.x == 0) issue(n + NSF);
+     for (int task = threadIdx.x; task < NH * TC; task += NTH) {
+       const int h = task / TC, ch = task % TC, j = j0 + ch * 8;
+@@ -1303,6 +1372,8 @@ __device__ __forceinline__ void s1_pair(int bid, int nblk, const bf* __restrict_
+       *reinterpret_cast<uint4*>(OUT + ((long)h * L + i) * L + j) = make_uint4(o[0], o[1], o[2], o[3]);
+     }
+   }
++  FRT(4, 0);
++  FRT(7, 2);
+ }
+ template <int NH, int DPW, int V>
+ __global__ void __launch_bounds__(S1_NT, DPW == DP ? 2 : 1) inf_front_k(const bf* __restrict__ Z, const bf* __restrict__ WF,
+@@ -1312,9 +1383,53 @@ __global__ void __launch_bounds__(S1_NT, DPW == DP ? 2 : 1) inf_front_k(const bf
+   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // the core (a programmatic dependent) may be scheduled now; it waits
+   extern __shared__ __align__(128) uint8_t smem[];
+   __shared__ int klen_s[1];
++#if FR_TL
++  { unsigned s_; asm volatile("mov.u32 %0, %%smid;" : "=r"(s_)); FRT(6, s_ + 1); FRT(5, 0); }
++#endif
+   if ((int)blockIdx.x < G) { s1_gemm<V>((int)blockIdx.x, X, LW, LB, WP, BV, Y, QKVG, L, NC, eps_s, smem); return; }
+   s1_pair<NH, DPW>((int)blockIdx.x - G, (int)gridDim.x - G, Z, WF, MASK, BIAS, L, eps_p, neg, smem, klen_s);
+ }
++// inf_frontq_k (v24): inf_front_k with a work queue instead of fixed roles. At L 256 the GEMM tiles (192-256) and the pair blocks did not fit
++// in one wave (2 blocks per SM), so most pair blocks started only after the GEMM blocks ended (stamps: pair work from 6 us on, the
++// front 13-15 us against 8 / 8-10 us for either role alone). Here every block claims items from a counter: the GEMM tiles first
++// (items 0 .. G - 1), then pair tiles (s1_pair DYN), so a block that finishes its GEMM tile joins the pair walk. Each GEMM tile and each
++// pair tile is computed as in inf_front_k (the same bits; only which block computes it changes). The counter pair Q (claims, finished
++// blocks) is reset by the last block to finish; launches on one stream are ordered, and a stream gets its own slot (host: by the stream).
++__device__ unsigned g_frontq[64][2];
++template <int NH, int DPW, int V>
++__global__ void __launch_bounds__(S1_NT, DPW == DP ? 2 : 1) inf_frontq_k(const bf* __restrict__ Z, const bf* __restrict__ WF,
++    const bool* __restrict__ MASK, bf* __restrict__ BIAS, int L, float eps_p, float neg, int G, const bf* __restrict__ X,
++    const float* __restrict__ LW, const float* __restrict__ LB, const bf* __restrict__ WP, const bf* __restrict__ BV, bf* __restrict__ Y,
++    bf* __restrict__ QKVG, int NC, float eps_s, int slot) {
++  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++  extern __shared__ __align__(128) uint8_t smem[];
++  __shared__ int klen_s[1], tq_s[4];
++  __shared__ unsigned it_s;
++#if FR_TL
++  { unsigned s_; asm volatile("mov.u32 %0, %%smid;" : "=r"(s_)); FRT(6, s_ + 1); FRT(5, 0); }
++#endif
++  unsigned* Q = g_frontq[slot];
++  const long ntiles = (long)L * ((L + fwd_rows<DPW>() - 1) / fwd_rows<DPW>());
++  if (threadIdx.x == 0) it_s = atomicAdd(Q, 1u);
++  __syncthreads();
++  unsigned it = it_s;
++  while ((long)it < G) {
++    s1_gemm<V>((int)it, X, LW, LB, WP, BV, Y, QKVG, L, NC, eps_s, smem);
++    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");  // the tile's generic shared accesses before later bulk copies land there
++    __syncthreads();
++    if (threadIdx.x == 0) {
++      asm volatile("mbarrier.inval.shared::cta.b64 [%0];" ::"r"(su32(smem + (S1_BM + S1_BN) * s1_ld<V>() * 2)) : "memory");
++      it_s = atomicAdd(Q, 1u);
++    }
++    __syncthreads();
++    it = it_s;
++  }
++  if ((long)it - G < ntiles) s1_pair<NH, DPW, true>((int)((long)it - G), 0, Z, WF, MASK, BIAS, L, eps_p, neg, smem, klen_s, Q, G, tq_s);
++  if (threadIdx.x == 0) {
++    __threadfence();
++    if (atomicAdd(Q + 1, 1u) == gridDim.x - 1) { Q[0] = 0u; Q[1] = 0u; __threadfence(); }
++  }
++}
+ template <int NH, int DPW, int V>
+ void inf_front_t(const at::Tensor& z, const at::Tensor& wf, const c10::optional<at::Tensor>& mask, at::Tensor& bias, int64_t L, double eps_p,
+                  double neg, const at::Tensor& x, const at::Tensor& lw, const at::Tensor& lb, const at::Tensor& wp, const at::Tensor& bv,
+@@ -1323,12 +1438,21 @@ void inf_front_t(const at::Tensor& z, const at::Tensor& wf, const c10::optional<
+   constexpr int SMB = s1_smem<NH, DPW, V>();
+   if (!attr) {
+     C10_CUDA_CHECK(cudaFuncSetAttribute(inf_front_k<NH, DPW, V>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMB));
++    C10_CUDA_CHECK(cudaFuncSetAttribute(inf_frontq_k<NH, DPW, V>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMB));
+     attr = true;
+   }
+   const int NC = (int)qkvg.size(1);
+   int G = (int)((L + S1_BM - 1) / S1_BM) * (NC / S1_BN);
+   const long ntiles = L * ((L + fwd_rows<DPW>() - 1) / fwd_rows<DPW>());
+   const long per_sm = DPW == DP ? 2 : 1, nsm = nsm_of(z);
++  if (pblocks == -3) {  // the work queue (inf_frontq_k): every block of the first wave, the stream's counter slot
++    const long grid = std::min<long>(per_sm * nsm, G + ntiles);
++    const int slot = (int)(std::hash<const void*>{}(static_cast<const void*>(S())) % 64);
++    inf_frontq_k<NH, DPW, V><<<(unsigned)grid, S1_NT, SMB, S()>>>(CP<bf>(z), CP<bf>(wf), mask ? CP<bool>(*mask) : nullptr, P<bf>(bias),
++        (int)L, (float)eps_p, (float)neg, G, CP<bf>(x), CP<float>(lw), CP<float>(lb), CP<bf>(wp), CP<bf>(bv), y ? P<bf>(*y) : nullptr,
++        P<bf>(qkvg), NC, (float)eps_s, slot);
++    return;
++  }
+   // default: the pair blocks that fit beside the GEMM blocks in the first wave (at least one SM's worth)
+   long PB = pblocks > 0 ? pblocks : std::max<long>(per_sm * nsm - G, nsm);
+   PB = std::min<long>(PB, ntiles);
+@@ -1340,7 +1464,7 @@ void inf_front_t(const at::Tensor& z, const at::Tensor& wf, const c10::optional<
+ }
+ // z [L L, dp] bf16, wf [H, dp] bf16, mask [L] bool or None -> bias [H, L, L] bf16 (exp2 units as packed); x [L, D] bf16, lw / lb [D] fp32,
+ // wp [4 W, D] bf16 (the pack), bv [4 W] bf16 -> qkvg [L, 4 W] = LN(x) wp^T + bv, y [L, D] = x (residual seed). d_pair 128 (8 / 12 / 16 / 24
+-// heads) or 256 (8 / 16 heads); D 384 / 512. ``pblocks``: pair blocks (0: the default rule).
++// heads) or 256 (8 / 16 heads); D 384 / 512. ``pblocks``: pair blocks (0: the default rule; -3: the work queue, inf_frontq_k).
+ void inf_front(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> mask, at::Tensor bias, int64_t L, double eps_p, double neg, at::Tensor x,
+                at::Tensor lw, at::Tensor lb, at::Tensor wp, at::Tensor bv, c10::optional<at::Tensor> y, at::Tensor qkvg, double eps_s,
+                int64_t pblocks) {
+@@ -1783,6 +1907,10 @@ void dqb_small(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor dob, at::Ten
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("small_core", &small_core);
+   m.def("dqb_small", &dqb_small);
++#if FR_TL
++  m.def("fr_tl", []() { std::vector<unsigned long long> v(1024 * 8); cudaMemcpyFromSymbol(v.data(), g_frtl, sizeof(unsigned long long) * 1024 * 8); return v; });
++  m.def("fr_tl_clear", []() { std::vector<unsigned long long> v(1024 * 8, 0ull); cudaMemcpyToSymbol(g_frtl, v.data(), sizeof(unsigned long long) * 1024 * 8); });
++#endif
+ #if SC_TL
+   m.def("sc_tl", []() { std::vector<unsigned long long> v(128 * 8); cudaMemcpyFromSymbol(v.data(), g_sctl, sizeof(unsigned long long) * 128 * 8); return v; });
+ #endif

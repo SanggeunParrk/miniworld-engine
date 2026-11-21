@@ -1,0 +1,61 @@
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b1s.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b1s.cu
+index 6e740ec33..2e459b459 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b1s.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b1s.cu
+@@ -744,6 +744,12 @@ __device__ unsigned long long g_pt1[160][16];
+ // The kernel's body as a device function (2026-11-17 part 5): b1u_kernel calls it with (blockIdx.x, gridDim.x); the fused small-L
+ // backward (b7m.cu, b7f) calls it with FU = true as its first phase, with a virtual CTA id and the TMEM it allocated itself (no
+ // dependent trigger, no TMEM allocation here).
++#ifndef B1U_PFL2
++#define B1U_PFL2 1   // S90: the next tile's xn / dy boxes requested into L2 by the loader warp
++#endif
++DEV void prefetch_l2_2d(const CUtensorMap* m, int c0, int c1) {
++  asm volatile("cp.async.bulk.prefetch.tensor.2d.L2.global.tile [%0, {%1, %2}];" ::"l"(reinterpret_cast<uint64_t>(m)), "r"(c0), "r"(c1) : "memory");
++}
+ template <int SMJ, bool FU>
+ DEV void b1u_body(const CUtensorMap& mxn, const CUtensorMap& mtri, const CUtensorMap& mwp, const CUtensorMap& mwg, const CUtensorMap& mdg,
+                   const CUtensorMap& mdtri, const CUtensorMap& mdy, const Args& a, uint8_t* sm, const int cta, const int G,
+@@ -842,6 +848,10 @@ DEV void b1u_body(const CUtensorMap& mxn, const CUtensorMap& mtri, const CUtenso
+       else if (lane < 2) tri_load<SMJ>(pt + lane * (TT / 2), &mtri, &B.t_full[ts], row0 + 64 * lane, a.n2, EVICT_FIRST);
+       if (lane == 2) tma_load_2d(px, &mxn, &B.x_full[xs], 0, row0, EVICT_NORMAL);
+       else if (lane == 3) tma_load_2d(px + XT, &mdy, &B.x_full[xs], 0, row0, EVICT_NORMAL);
++      if (B1U_PFL2 && i + 1 < n_local) {
++        if (lane == 4) prefetch_l2_2d(&mxn, 0, (cta + G * (i + 1)) * TOK);
++        else if (lane == 5) prefetch_l2_2d(&mdy, 0, (cta + G * (i + 1)) * TOK);
++      }
+       __syncwarp();
+     }
+   } else if (warp == 0) {
+diff --git a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu
+index 0ca82dd60..16818fdfb 100644
+--- a/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu
++++ b/src/miniworld_engine/kernels/trimul_inproj/cuda/b200_sources/b7m.cu
+@@ -14,6 +14,12 @@
+ using namespace sm100;
+ 
+ namespace b7m {
++#ifndef B7M_PFL2
++#define B7M_PFL2 1   // S90: the next tile's xn / x / dy boxes requested into L2 while this tile is worked on
++#endif
++DEV void prefetch_l2_2d(const CUtensorMap* m, int c0, int c1) {
++  asm volatile("cp.async.bulk.prefetch.tensor.2d.L2.global.tile [%0, {%1, %2}];" ::"l"(reinterpret_cast<uint64_t>(m)), "r"(c0), "r"(c1) : "memory");
++}
+ DEV void tma_load_5d(void* dst, const CUtensorMap* m, uint64_t* bar, int c0, int c1, int c2, int c3, int c4, uint64_t hint) {
+   asm volatile(
+       "cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;" ::"r"(
+@@ -416,6 +422,7 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+           mbar_expect_tx(&B.x_full[b], XT);
+           tma_load_2d(sm + G_::S_X + b * XT, &mxn, &B.x_full[b], 0, row0, EVICT_NORMAL);
+         }
++        if (B7M_PFL2 && i + 1 < n_local) prefetch_l2_2d(&mxn, 0, (cta + G * (i + 1)) * TOK);
+         for (int c = 0; c < NCH; ++c) {
+           const int u = i * NCH + c, db = u & 1;
+           if (u >= 2) PW(1, mbar_wait(&B.da_free[db], ((u >> 1) - 1) & 1));
+@@ -513,6 +520,7 @@ DEV void b7m_body(const CUtensorMap& mxn, const CUtensorMap& mda, const CUtensor
+         mbar_expect_tx(&B.xi_full[xb], 2 * XT);
+         tma_load_2d(sm + G_::S_XI + xb * XT, &mx, &B.xi_full[xb], 0, row0, EVICT_FIRST);
+         tma_load_2d(sm + G_::S_DY + xb * XT, &mdy, &B.xi_full[xb], 0, row0, EVICT_FIRST);
++        if (B7M_PFL2 && i + 1 < n_local) { prefetch_l2_2d(&mx, 0, (cta + G * (i + 1)) * TOK); prefetch_l2_2d(&mdy, 0, (cta + G * (i + 1)) * TOK); }
+       }
+     }
+   } else if (warp >= 4 && warp < 12) {

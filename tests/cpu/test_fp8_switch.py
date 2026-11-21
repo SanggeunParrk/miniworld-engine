@@ -17,7 +17,7 @@ import pytest
 from miniworld_engine import fp8
 
 _STATUS = "import json; from miniworld_engine import fp8; print(json.dumps(fp8.status()))"
-_ROUTE_VARS = ("MINIWORLD_FP8", *fp8.PRESETS["safe"])  # "MINIWORLD_FP8" also covers MINIWORLD_FP8_MODEL
+_ROUTE_VARS = ("MINIWORLD_FP8", *fp8.PRESETS["safe"], "MINIWORLD_ATOMDIT_FP8_B200", "MINIWORLD_TOKEN_DIT_FP8_B200")  # "MINIWORLD_FP8" also covers MINIWORLD_FP8_MODEL
 _PKG = Path(fp8.__file__).resolve().parent
 
 
@@ -48,7 +48,7 @@ SAFE = {
     "pwa": True,
     "transition": "calib",
     "token_dit": ["expand"],
-    "atom_dit": ["post", "pre"],
+    "atom_dit": [] if fp8.arch() == "sm100" else ["post", "pre"],  # B200: status lists the b200_atom.f8 stages (opt-in, not in the preset)
 }
 #: the TriAttn part per validated model (af3 / openfold3: PV fused + unfused and q / k; protenix1: PV fused + q / k; the others: PV only, on their checked kinds)
 TRIATTN_OF = {
@@ -60,6 +60,7 @@ TRIATTN_OF = {
     "rosettafold3": {"pv": ["fused"], "qk": True},
     "chai1": {"pv": ["d64", "unfused"], "qk": False},
 }
+# (the B200 TriAttn route builds and serves e4m3 q / k since docs/b200/fp8.md "TriAttn e4m3 q / k": status reports the whitelist's qk on both archs; the gate is S >= 1024)
 
 
 def _routes(status: dict) -> dict:
@@ -307,3 +308,72 @@ def test_engine_fp8_scope(env, model):
     )  # direct _forward_cuda call; copies follow their module
     # training calls (train mode, or grad on): every part with the process's switches, as on cuda
     assert [r for _, r in out["train"]] == [base] * 15 and len(out["train"]) == 15
+
+
+# ------------------------------------------------------------------------------------------------------------------ B200 (sm_100a) routes
+def test_b200_route_table():
+    assert fp8.SLOTS == ("triattn", "trimul", "opm", "pwa", "transition", "token_dit", "atom_dit")
+    assert set(fp8.B200_ROUTES) <= set(fp8.SLOTS)
+    assert fp8.serves_sm100("transition")
+    assert fp8.arch() in ("sm90", "sm100")
+
+
+_B200_POLICY = (
+    "from miniworld_engine.kernels.transition.cuda import fp8_sm100a as m; print(repr(m.POLICY))"
+)
+
+
+def test_b200_transition_route_follows_the_preset():
+    def policy(**env):
+        out = subprocess.run([sys.executable, "-c", _B200_POLICY], env={**_clean_env(), **env}, capture_output=True, text=True, check=True)
+        return out.stdout.strip().splitlines()[-1]
+
+    assert policy() == "None"  # default: off
+    assert policy(MINIWORLD_FP8="safe") == "'calib'"
+    assert policy(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8="") == "None"  # an explicitly set per-route variable wins
+    assert policy(MINIWORLD_TRANSITION_FP8="calib") == "'calib'"
+
+
+# ---- the final B200 route table (n14 integration: TriMul / TriAttn / Transition replace the slot module, the atom DiT rows route is opt-in)
+def test_b200_final_route_table():
+    assert set(fp8.B200_ROUTES) == {"triattn", "trimul", "transition"}
+    assert set(fp8.B200_OPTIN) == {"atom_dit"} and not set(fp8.B200_OPTIN) & set(fp8.B200_ROUTES)
+    for slot in ("triattn", "trimul", "transition", "atom_dit"):
+        assert fp8.serves_sm100(slot), slot
+    # OPM / PWA / token DiT keep their H100-named module in the slot: their B200 forms live behind the same switches (opm_sm100 / pwa_sm100 / token_dit_fp8)
+    for slot in ("opm", "pwa", "token_dit"):
+        assert not fp8.serves_sm100(slot), slot
+    # the atom DiT rows route is NOT in the preset (measured effect <= 0.3 percent, outside the judge): no variable of the preset names it
+    assert "MINIWORLD_ATOMDIT_FP8_B200" not in fp8.PRESETS["safe"]
+
+
+_B200_SWITCHES = (
+    "import json; from miniworld_engine.kernels.trimul_inproj.cuda import b200_fp8 as tm; from miniworld_engine.kernels.transition.cuda import fp8_sm100a as tr;"
+    "from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as td; from miniworld_engine.kernels.integrations import opm_fp8 as opm, pwa_fp8 as pwa;"
+    "from miniworld_engine.kernels.augmented_attention.cuda.b200_atom import f8;"
+    "print(json.dumps({'trimul': tm.POLICY, 'transition': tr.POLICY, 'widths': sorted(tr.WIDTHS), 'opm': opm.POLICY, 'pwa': pwa.ENABLED, 'td': sorted(td.PLACES),"
+    " 'td_b200': sorted(td.B200_PLACES) if hasattr(td, 'B200_PLACES') else None, 'up': td.B200_UP, 'rf3': td.B200_RF3, 'atom_b200': sorted(f8.ENABLED)}))"
+)
+
+
+def _b200_switches(**env) -> dict:
+    out = subprocess.run([sys.executable, "-c", _B200_SWITCHES], env={**_clean_env(), **env}, capture_output=True, text=True, check=True)
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_b200_routes_follow_the_preset_with_per_route_precedence():
+    off = _b200_switches()
+    assert off["trimul"] is None and off["transition"] is None and off["opm"] is None and off["pwa"] is False and off["td"] == [] and off["atom_b200"] == []
+    assert off["widths"] == [128, 256, 512, 768]  # agent F: the Transition WIDTHS default
+    on = _b200_switches(MINIWORLD_FP8="safe")
+    assert (on["trimul"], on["transition"], on["opm"], on["pwa"], on["td"]) == ("calib", "calib", "bound", True, ["expand"])
+    assert on["atom_b200"] == []  # not in the preset
+    assert on["up"] is True and on["rf3"] is True  # token DiT B200_UP / B200_RF3 ride on the `expand` placement
+    # an explicitly set per-route variable wins over the preset (also set to "")
+    p = _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_TRIMUL_FP8="", MINIWORLD_OPM_FP8="", MINIWORLD_PWA_FP8="0", MINIWORLD_TRANSITION_FP8="", MINIWORLD_TOKEN_DIT_FP8="")
+    assert (p["trimul"], p["transition"], p["opm"], p["pwa"], p["td"]) == (None, None, None, False, [])
+    # the atom DiT rows route is switched by its own variable only (with or without the preset)
+    assert _b200_switches(MINIWORLD_ATOMDIT_FP8_B200="1")["atom_b200"] == ["post", "pre"]
+    assert _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_ATOMDIT_FP8_B200="pre")["atom_b200"] == ["pre"]
+    assert _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_ATOMDIT_FP8="1")["atom_b200"] == []  # the H100 variable does not reach the B200 route
+    assert _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_TOKEN_DIT_FP8_B200_UP="0")["up"] is False

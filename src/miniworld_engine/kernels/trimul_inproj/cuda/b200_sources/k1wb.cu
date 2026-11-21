@@ -1,4 +1,5 @@
-// k1wb.cu -- backward of the B200 wide TriMul front (D = 256 / 384 / 512): recomputes k1w's pre-activations
+// k1wb.cu -- backward of the B200 wide TriMul front (D = 256 / 384 / 512; and D64 at P = 512, the bidirectional hidden-128 block,
+// whose output-side backward does not fit b1s): recomputes k1w's pre-activations
 //   g_c = xn Wg_c^T, p_c = xn Wp_c^T (same transform, same TMEM products, masked token rows zero)
 // and turns the plane gradient da [P, L*L] (channel-major, from the contraction backward) into the pre-activation gradients
 //   dg_c = da_c p_c sigmoid(g_c) (1 - sigmoid(g_c)),   dp_c = da_c sigmoid(g_c)          (0 for a masked pair)
@@ -196,7 +197,10 @@ __global__ void __launch_bounds__(NTHREADS, 1)
     int s = 0; uint32_t ph = 0;
     for (int i = 0; i < n_local; ++i) {
       const int row = (cta + i * G) * TOK + r, b = (NXN == 1) ? 0 : (i & 1);
-      const uint32_t kmask = (tokmask == nullptr || (tokmask[row / L] && tokmask[row % L])) ? 0xffffffffu : 0u;
+      // tokens b-major: row = (s L + i) L + j; the token mask is [B L]: tokens s L + i and s L + j. A tile lies in one sample (L^2 is a
+      // multiple of 128), whose first mask row sL is formed once per tile (0 for one sample)
+      const int sL = (cta + i * G) * TOK / (L * L) * L;
+      const uint32_t kmask = (tokmask == nullptr || (tokmask[row / L] && tokmask[sL + row % L])) ? 0xffffffffu : 0u;
       float mu, rs;
       if constexpr (D <= 128) {
         // whole row resident (KB <= 2 ring slots): two-pass statistics here, as k1.cu (packed f32x2 sums)
@@ -272,29 +276,38 @@ __global__ void __launch_bounds__(NTHREADS, 1)
     const int grp = (warp - 8) >> 2, q = warp & 3, ew = warp - 8;
     const uint32_t sda = su + G_::O_OUT + ew * OSTW, sdp = sda + DAB;     // da box, then dpre gate / proj boxes
     uint32_t dph = 0;
+    // S90: the da box of the NEXT chunk of this warp is requested as soon as the current one has been read (ldmatrix), before the dpre
+    // store: the da load latency no longer sits between two chunks. The first chunk's load is issued here.
+    auto issue_da = [&](int ii, int cc) {
+      mbar_expect_tx(&B.da_full[ew], DAB);
+      tma_load_2d(sm + G_::O_OUT + ew * OSTW, &mda, &B.da_full[ew], (cta + ii * G) * TOK + q * 32, cc * 64, EVICT_FIRST);
+    };
+#ifndef K1WB_PF
+#define K1WB_PF 1   // 1: the next chunk's da load issued once the current box is read (S90); 0: at the start of the chunk
+#endif
+    if (K1WB_PF && lane == 0 && n_local > 0 && grp < NCH) issue_da(0, grp);
     for (int i = 0; i < n_local; ++i) {
-      const int row0 = (cta + i * G) * TOK;
+      const int row0 = (cta + i * G) * TOK, sL = row0 / (L * L) * L;
+      // token mask of this thread's two fragment rows (t / 4 and t / 4 + 8 of each 16-token group), the same for every chunk
+      uint32_t km[2][2];
+#pragma unroll
+      for (int hh = 0; hh < 2; ++hh)
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+          const int tok = row0 + q * 32 + hh * 16 + e * 8 + (lane >> 2);
+          km[hh][e] = (tokmask == nullptr || (tokmask[tok / L] && tokmask[sL + tok % L])) ? 1u : 0u;
+        }
       for (int c = grp; c < NCH; c += 2) {
         const int ci = i * NCH + c, acc = ci % NACC;
         if (lane == 0) {
           bulk_wait_read<0>();                               // this warp's previous dpre store has left the staging tile
-          mbar_expect_tx(&B.da_full[ew], DAB);
-          tma_load_2d(sm + G_::O_OUT + ew * OSTW, &mda, &B.da_full[ew], row0 + q * 32, c * 64, EVICT_FIRST);
+          if (!K1WB_PF) issue_da(i, c);
         }
         __syncwarp();
         mbar_wait(&B.acc_full[acc], (ci / NACC) & 1);
         tc_fence_after();
         mbar_wait(&B.da_full[ew], dph);
         dph ^= 1;
-        // token mask of this thread's two fragment rows (t / 4 and t / 4 + 8 of each 16-token group)
-        uint32_t km[2][2];
-#pragma unroll
-        for (int hh = 0; hh < 2; ++hh)
-#pragma unroll
-          for (int e = 0; e < 2; ++e) {
-            const int tok = row0 + q * 32 + hh * 16 + e * 8 + (lane >> 2);
-            km[hh][e] = (tokmask == nullptr || (tokmask[tok / L] && tokmask[tok % L])) ? 1u : 0u;
-          }
         const uint32_t tq = tmem + G_::T_ACC + acc * 128 + ((uint32_t)(q * 32) << 16);
         uint32_t ga[16], pa[16], gb[16], pb[16];
         auto ldg = [&](int grp4, uint32_t (&g)[16], uint32_t (&p)[16]) {
@@ -351,6 +364,12 @@ __global__ void __launch_bounds__(NTHREADS, 1)
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.acc_empty[acc]);
         work(3, gb, pb);
+        fence_async_smem();   // the generic-proxy reads of the da box before the TMA that refills it
+        __syncwarp();
+        if (K1WB_PF && lane == 0) {                          // the da box is free: the next chunk's load (c + 2, else the next tile's first)
+          if (c + 2 < NCH) issue_da(i, c + 2);
+          else if (i + 1 < n_local) issue_da(i + 1, grp);
+        }
         fence_async_smem();
         __syncwarp();
         if (lane == 0) {
@@ -376,17 +395,20 @@ int num_sms() {
 
 }  // namespace k1wb
 
-// x [M, D]; wl, wlg, wr, wrg [P/2, D] (unit column stride); tokmask [L] or none; mean / rstd [M] (k1w_stats); gamma / beta [D];
-// da [P, L, L] bf16 (plane gradient); dpre [M, ldc] bf16 view, columns 0 .. 2P - 1 written.
+// x [M, D] (M = B L L, tokens b-major); wl, wlg, wr, wrg [P/2, D] (unit column stride); tokmask [B L] or none; mean / rstd [M]
+// (k1w_stats); gamma / beta [D]; da [P, (B,) L, L] bf16 (plane gradient); dpre [M, ldc] bf16 view, columns 0 .. 2P - 1 written.
 void k1wb_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tensor wrg,
                   c10::optional<torch::Tensor> tokmask, torch::Tensor mean, torch::Tensor rstd, torch::Tensor gamma, torch::Tensor beta,
                   torch::Tensor da, torch::Tensor dpre, int64_t grid) {
   using namespace k1wb;
   const int64_t M = x.size(0), D = x.size(1), P = da.size(0);
-  TORCH_CHECK(M % TOK == 0 && da.numel() == P * M && x.is_contiguous() && da.is_contiguous() && da.dim() == 3);
+  // da [P, L, L] (one sample) or [P, B, L, L]; the tokens of x are b-major, M = B L L
+  TORCH_CHECK(M % TOK == 0 && da.numel() == P * M && x.is_contiguous() && da.is_contiguous() && (da.dim() == 3 || da.dim() == 4));
   TORCH_CHECK(dpre.size(0) == M && dpre.size(1) >= 2 * P && dpre.stride(1) == 1 && (dpre.stride(0) * 2) % 16 == 0);
-  const int L = (int)da.size(1);
-  TORCH_CHECK(!tokmask.has_value() || (tokmask->numel() == L && tokmask->element_size() == 1 && tokmask->is_contiguous()));
+  const int L = (int)da.size(da.dim() - 1);
+  const int64_t nb = M / ((int64_t)L * L);
+  TORCH_CHECK(nb * L * L == M && da.size(da.dim() - 2) == L && ((int64_t)L * L) % TOK == 0);   // a 128-token tile lies in one sample
+  TORCH_CHECK(!tokmask.has_value() || (tokmask->numel() == nb * L && tokmask->element_size() == 1 && tokmask->is_contiguous()));
   const auto bf = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   auto mx = tmap::make(x.data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
   WMaps mw;
@@ -411,7 +433,7 @@ void k1wb_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::T
     k1wb_kernel<DD, PP><<<g, NTHREADS, Cfg<DD>::SMEM, st>>>(mx, mw, mda, mdp, mk, L, mean.data_ptr<float>(), rstd.data_ptr<float>(), \
         gamma.data_ptr<float>(), beta.data_ptr<float>(), tiles, 1e-5f, 0); \
     C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
-  K1WB_CASE(256, 1024) K1WB_CASE(256, 512) K1WB_CASE(384, 1536) K1WB_CASE(384, 768) K1WB_CASE(512, 2048) K1WB_CASE(512, 1024)
+  K1WB_CASE(64, 512) K1WB_CASE(256, 1024) K1WB_CASE(256, 512) K1WB_CASE(384, 1536) K1WB_CASE(384, 768) K1WB_CASE(512, 2048) K1WB_CASE(512, 1024)
 #undef K1WB_CASE
   TORCH_CHECK(false, "k1wb_forward: unsupported (D, P) = (", D, ", ", P, ")");
 }

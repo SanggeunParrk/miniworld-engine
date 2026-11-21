@@ -1,0 +1,6 @@
+L128 H4: P     16.8 MB | write     10.7 us (1.57 TB/s) | read     27.5 us (0.61 TB/s) | clone r+w     13.1 us | C traffic = 1 write + 2 reads =     65.7 us
+L256 H4: P    134.2 MB | write     40.2 us (3.34 TB/s) | read     55.0 us (2.44 TB/s) | clone r+w     51.1 us | C traffic = 1 write + 2 reads =    150.2 us
+L384 H4: P    453.0 MB | write    121.9 us (3.72 TB/s) | read    133.7 us (3.39 TB/s) | clone r+w    147.2 us | C traffic = 1 write + 2 reads =    389.3 us
+L512 H4: P   1073.7 MB | write    277.0 us (3.88 TB/s) | read    286.3 us (3.75 TB/s) | clone r+w    339.6 us | C traffic = 1 write + 2 reads =    849.6 us
+L640 H4: P   2097.2 MB | write    535.7 us (3.91 TB/s) | read    535.6 us (3.92 TB/s) | clone r+w    645.0 us | C traffic = 1 write + 2 reads =   1607.0 us
+L768 H4: P   3623.9 MB | write    924.5 us (3.92 TB/s) | read    917.5 us (3.95 TB/s) | clone r+w   1111.7 us | C traffic = 1 write + 2 reads =   2759.6 us

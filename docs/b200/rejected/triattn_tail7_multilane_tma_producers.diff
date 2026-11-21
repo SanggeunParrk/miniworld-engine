@@ -1,0 +1,307 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
+index fabfab421..f82d061b2 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_mod_sm100.cu
+@@ -544,9 +544,20 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
+   const int mytiles = (int)blockIdx.x < ntiles ? (ntiles - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
+ 
+   if (warp == 0) {
++    // the first loads (Wo, tile 0's dy | o and g: 8 boxes) spread over the lanes (B200 2026-11-17: one thread issues ~one TMA load per
++    // ~600 clk whatever the box; at L128 a CTA has one tile, so these are all of its loads); lane 0 runs the rest (seeds, later tiles)
++    const bool any = (int)blockIdx.x < ntiles;
++    if (lane == 0) { expect_tx(wf, C * C * 2); if (any) { expect_tx(af, 2 * XT * 2); expect_tx(bfb, XT * 2); } }
++    __syncwarp();
++    if (lane < 2) load_2d(&wmap, sW + lane * C * 64, wf, lane * 64, 0);
++    else if (any && lane < 8) {
++      const int kh = lane & 1, t0 = (int)blockIdx.x * BM;
++      if (lane < 4) load_rows(&dymap, sDy + kh * BM * 64, af, kh * 64, t0, L, TRANS);
++      else if (lane < 6) load_2d(&omap, sO + kh * BM * 64, af, kh * 64, t0);
++      else load_2d(&gmap, sG + kh * BM * 64, bfb, kh * 64, t0);
++    }
++    __syncwarp();
+     if (lane == 0) {
+-      expect_tx(wf, C * C * 2);
+-      for (int kh = 0; kh < 2; ++kh) load_2d(&wmap, sW + kh * C * 64, wf, kh * 64, 0);
+       // dy | o run one tile ahead of g: tile lt + 1's pair lands, seeds dpair and (dropout) is released to the grad warps (sr) while
+       // they work on tile lt, so they scale it in place mid-tile and its du GEMM follows tile lt's dWo GEMM without waiting for them
+       // (with dy scaled at the start of its own tile, the scale and the du GEMM ran in series with every tile: 1.5x the kernel time)
+@@ -557,10 +568,12 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
+           wait(dwd + b, ((lt >> 1) - 1) & 1);
+           bulk_wait_read<1>();                      // (the seed of lt - 1 may still be pending)
+         }
+-        expect_tx(af + b, 2 * XT * 2);
+-        for (int kh = 0; kh < 2; ++kh) {
+-          load_rows(&dymap, dy + kh * BM * 64, af + b, kh * 64, t * BM, L, TRANS);
+-          load_2d(&omap, sO + b * XT + kh * BM * 64, af + b, kh * 64, t * BM);
++        if (lt > 0) {                               // (tile 0's pair: the lanes above)
++          expect_tx(af + b, 2 * XT * 2);
++          for (int kh = 0; kh < 2; ++kh) {
++            load_rows(&dymap, dy + kh * BM * 64, af + b, kh * 64, t * BM, L, TRANS);
++            load_2d(&omap, sO + b * XT + kh * BM * 64, af + b, kh * 64, t * BM);
++          }
+         }
+         wait(af + b, (lt >> 1) & 1);                // dy landed: it seeds dpair
+         if (!GB_NOSEED) for (int kh = 0; kh < 2; ++kh) store_rows(&seedmap, dy + kh * BM * 64, kh * 64, t * BM, L, TRANS);
+@@ -570,9 +583,11 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
+       if ((int)blockIdx.x < ntiles) pair_in(blockIdx.x, 0);
+       int lt = 0;
+       for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+-        if (lt >= 1) wait(sd, (lt - 1) & 1);
+-        expect_tx(bfb, XT * 2);
+-        for (int kh = 0; kh < 2; ++kh) load_2d(&gmap, sG + kh * BM * 64, bfb, kh * 64, t * BM);
++        if (lt >= 1) {                              // (tile 0's g: the lanes above)
++          wait(sd, (lt - 1) & 1);
++          expect_tx(bfb, XT * 2);
++          for (int kh = 0; kh < 2; ++kh) load_2d(&gmap, sG + kh * BM * 64, bfb, kh * 64, t * BM);
++        }
+         if (t + (int)gridDim.x < ntiles) pair_in(t + gridDim.x, lt + 1);
+       }
+       bulk_wait<0>();
+@@ -789,22 +804,25 @@ __global__ void __launch_bounds__(hb::THREADS, 1) tri_head_bwd_sm100(
+   const CUtensorMap* dmaps[4] = {&d0map, &d1map, &d2map, &d3map};
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
+-      expect_tx(wf, 4 * C * C * 2);
+-      for (int kh = 0; kh < 2; ++kh)
+-        for (int nh = 0; nh < 2; ++nh) load_2d(&wmap, sW + kh * 4 * C * 64 + nh * 256 * 64, wf, kh * 64, nh * 256);
+-      int lt = 0, y = 0;
+-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+-        const int xb = lt % NX;
+-        if (lt >= NX) wait(xe + xb, ((lt / NX) - 1) & 1);
+-        expect_tx(xf + xb, XT * 2);
+-        for (int kh = 0; kh < 2; ++kh) load_rows(&xmap, sX + xb * XT + kh * BM * 64, xf + xb, kh * 64, t * BM, L, TRANS);
+-        for (int q8 = 0; q8 < 8; ++q8, ++y) {      // (tensor q8 >> 1, K half q8 & 1)
+-          const int sl = y % NR;
+-          if (y >= NR) wait(de + sl, ((y / NR) - 1) & 1);
+-          expect_tx(df + sl, HT * 2);
+-          load_2d(dmaps[q8 >> 1], sD + sl * HT, df + sl, (q8 & 1) * 64, t * BM);
+-        }
++    // the loads spread over the warp's lanes (B200 2026-11-17: one thread issues ~one TMA load per ~600 clk whatever the box; the
++    // kernel's start -- W, x and the first d tiles, 8 loads -- ran in series): lane 0 sets each barrier's byte count, then the lanes
++    // issue the loads of a group at once (an arrive.expect_tx before its complete_tx: __syncwarp orders them)
++    if (lane == 0) expect_tx(wf, 4 * C * C * 2);
++    __syncwarp();
++    if (lane < 4) load_2d(&wmap, sW + (lane >> 1) * 4 * C * 64 + (lane & 1) * 256 * 64, wf, (lane >> 1) * 64, (lane & 1) * 256);
++    int lt = 0, y = 0;
++    for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
++      const int xb = lt % NX;
++      if (lt >= NX) wait(xe + xb, ((lt / NX) - 1) & 1);
++      if (lane == 0) expect_tx(xf + xb, XT * 2);
++      __syncwarp();
++      if (lane == 4 || lane == 5) load_rows(&xmap, sX + xb * XT + (lane - 4) * BM * 64, xf + xb, (lane - 4) * 64, t * BM, L, TRANS);
++      for (int q8 = 0; q8 < 8; ++q8, ++y) {        // (tensor q8 >> 1, K half q8 & 1)
++        const int sl = y % NR;
++        if (y >= NR) wait(de + sl, ((y / NR) - 1) & 1);
++        if (lane == 0) expect_tx(df + sl, HT * 2);
++        __syncwarp();
++        if (lane == 8 + q8) load_2d(dmaps[q8 >> 1], sD + sl * HT, df + sl, (q8 & 1) * 64, t * BM);
+       }
+     }
+   } else if (warp == 1) {
+@@ -1008,25 +1026,26 @@ __global__ void __launch_bounds__(wg::THREADS, 1) tri_wgrad_sm100(
+   const int mytiles = split < ntiles ? (ntiles - 1 - split) / nsp + 1 : 0;
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
+-      int lt = 0, y = 0;
+-      for (int t = split; t < ntiles; t += nsp, ++lt) {
+-        const int xb = lt % NX;
+-        if (lt >= NX) wait(he + xb, ((lt / NX) - 1) & 1);
+-        expect_tx(xf + xb, XT * 2 + BM * NH * 4);
+-        for (int kh = 0; kh < 2; ++kh) load_rows(&xmap, sX + xb * XT + kh * BM * 64, xf + xb, kh * 64, t * BM, L, TRANS);
+-        {                                           // the tile's db rows: 4 planes x 128 contiguous floats (512 B each)
+-          const long row0 = (long)t * BM, bb = row0 / ((long)L * L), rr = row0 % ((long)L * L);
+-          for (int h = 0; h < NH; ++h)
+-            asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];\n"
+-                         :: "r"(sa(sDb + (xb * NH + h) * BM)), "l"(DB + (bb * NH + h) * (long)L * L + rr), "r"(BM * 4), "r"(sa(xf + xb)) : "memory");
+-        }
+-        for (int q8 = 0; q8 < 2 * TS; ++q8, ++y) {
+-          const int sl = y % NR;
+-          if (y >= NR) wait(de + sl, ((y / NR) - 1) & 1);
+-          expect_tx(df + sl, HT * 2);
+-          load_2d(dmaps[T0 + (q8 >> 1)], sD + sl * HT, df + sl, (q8 & 1) * 64, t * BM);
+-        }
++    // loads spread over the lanes (one thread issues ~one TMA load per ~600 clk on B200; see tri_head_bwd_sm100)
++    int lt = 0, y = 0;
++    for (int t = split; t < ntiles; t += nsp, ++lt) {
++      const int xb = lt % NX;
++      if (lt >= NX) wait(he + xb, ((lt / NX) - 1) & 1);
++      if (lane == 0) expect_tx(xf + xb, XT * 2 + BM * NH * 4);
++      __syncwarp();
++      if (lane < 2) load_rows(&xmap, sX + xb * XT + lane * BM * 64, xf + xb, lane * 64, t * BM, L, TRANS);
++      else if (lane < 2 + NH) {                    // the tile's db rows: 4 planes x 128 contiguous floats (512 B each)
++        const int h = lane - 2;
++        const long row0 = (long)t * BM, bb = row0 / ((long)L * L), rr = row0 % ((long)L * L);
++        asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];\n"
++                     :: "r"(sa(sDb + (xb * NH + h) * BM)), "l"(DB + (bb * NH + h) * (long)L * L + rr), "r"(BM * 4), "r"(sa(xf + xb)) : "memory");
++      }
++      for (int q8 = 0; q8 < 2 * TS; ++q8, ++y) {
++        const int sl = y % NR;
++        if (y >= NR) wait(de + sl, ((y / NR) - 1) & 1);
++        if (lane == 0) expect_tx(df + sl, HT * 2);
++        __syncwarp();
++        if (lane == 8 + q8) load_2d(dmaps[T0 + (q8 >> 1)], sD + sl * HT, df + sl, (q8 & 1) * 64, t * BM);
+       }
+     }
+   } else if (warp == 1) {
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index 4f19197c1..dd0d8841e 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -855,39 +855,44 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd_kv_sm100(
+   const int total = mytasks * SPT;
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
+-      int lt = 0, y = 0;
+-      for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
+-        int kt, g, bh; decode(t, kt, g, bh);
+-        const int b_ = bh / H, h_ = bh % H, kb = lt & 1;
+-        if (lt >= 2) wait(A(kve + kb), ((lt >> 1) - 1) & 1);
+-        expect_tx(A(kvf + kb), KR * 2 * KVT * 2);
+-        for (int r = 0; r < KR; ++r) {
+-          const int rw = (b_ * N + nrow(g, r)) * S + kt * BN;
+-          load_2d(&kmap, A(sKV + (kb * KR + r) * 2 * KVT), A(kvf + kb), h_ * D, rw);
+-          load_2d(&vmap, A(sKV + (kb * KR + r) * 2 * KVT + KVT), A(kvf + kb), h_ * D, rw);
+-        }
+-        for (int w = 0; w < SPT; ++w, ++y) {
+-          const int qs = w >> 1, r = w & 1, sl = y % KB_NQ;
+-          if (r == 0) {
+-            const int jb = lt * NQS + qs, bs = jb % KB_NB;
+-            if (jb >= KB_NB) wait(A(be + bs), ((jb / KB_NB) - 1) & 1);
+-            if (TA_BIAS1 && jb >= KB_NB) arrive(A(bf + bs));   // timing only
+-            else {
+-            expect_tx(A(bf + bs), KB_BT * 4);
+-            for (int hh = 0; hh < 2; ++hh) load_2d(&bmap, A(sB + bs * KB_BT + hh * BN * 32), A(bf + bs), qs * KB_QW + hh * 32, bh * S + kt * BN);
+-            }
+-          }
+-          if (y >= KB_NQ) wait(A(qe + sl), ((y / KB_NQ) - 1) & 1);
+-          if (TA_QD1 && y >= KB_NQ) { arrive(A(qf + sl)); continue; }   // timing only
++    // the whole warp runs the producer; the loads of a group go out from different lanes (B200 2026-11-17: one thread issues ~one TMA
++    // load per ~600 clk whatever the box: a task was ~24 loads in series); lane 0 sets each barrier's byte count first
++    int lt = 0, y = 0;
++    for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
++      int kt, g, bh; decode(t, kt, g, bh);
++      const int b_ = bh / H, h_ = bh % H, kb = lt & 1;
++      if (lt >= 2) wait(A(kve + kb), ((lt >> 1) - 1) & 1);
++      if (lane == 0) expect_tx(A(kvf + kb), KR * 2 * KVT * 2);
++      __syncwarp();
++      if (lane < 2 * KR) {                           // lane 2 r + j: K (j 0) / V (j 1) of row r
++        const int r = lane >> 1, rw = (b_ * N + nrow(g, r)) * S + kt * BN;
++        if ((lane & 1) == 0) load_2d(&kmap, A(sKV + (kb * KR + r) * 2 * KVT), A(kvf + kb), h_ * D, rw);
++        else load_2d(&vmap, A(sKV + (kb * KR + r) * 2 * KVT + KVT), A(kvf + kb), h_ * D, rw);
++      }
++      for (int w = 0; w < SPT; ++w, ++y) {
++        const int qs = w >> 1, r = w & 1, sl = y % KB_NQ;
++        const int jb = lt * NQS + qs, bs = jb % KB_NB;
++        const bool bias = r == 0 && !(TA_BIAS1 && jb >= KB_NB);
++        if (r == 0 && jb >= KB_NB) wait(A(be + bs), ((jb / KB_NB) - 1) & 1);
++        if (TA_BIAS1 && r == 0 && jb >= KB_NB && lane == 0) arrive(A(bf + bs));   // timing only
++        if (y >= KB_NQ) wait(A(qe + sl), ((y / KB_NQ) - 1) & 1);
++        if (TA_QD1 && y >= KB_NQ) { if (lane == 0) arrive(A(qf + sl)); continue; }   // timing only
++        if (lane == 0) {
++          if (bias) expect_tx(A(bf + bs), KB_BT * 4);
+           expect_tx(A(qf + sl), 2 * KB_QT * 2 + 2 * KB_QW * 4);
+-          const int rw = (b_ * N + nrow(g, r)) * S + qs * KB_QW;
+-          load_2d(&qmap, A(sQ + sl * 2 * KB_QT), A(qf + sl), h_ * D, rw);
+-          load_2d(&dmap, A(sQ + sl * 2 * KB_QT + KB_QT), A(qf + sl), h_ * D, rw);
+-          const size_t st = ((size_t)(b_ * N + nrow(g, r)) * H + h_) * S + qs * KB_QW;
+-          bulk_load(A(sLD + sl * 2 * KB_QW), LSE + st, KB_QW * 4, A(qf + sl));
+-          bulk_load(A(sLD + sl * 2 * KB_QW + KB_QW), DELTA + st, KB_QW * 4, A(qf + sl));
+         }
++        __syncwarp();
++        const int ln = 8 + 6 * (w & 3);              // six lanes a stage (2 bias halves, Q, dO, lse, delta), four stages in rotation
++        if (bias && (lane == ln || lane == ln + 1)) {
++          const int hh = lane - ln;
++          load_2d(&bmap, A(sB + bs * KB_BT + hh * BN * 32), A(bf + bs), qs * KB_QW + hh * 32, bh * S + kt * BN);
++        }
++        const int rw = (b_ * N + nrow(g, r)) * S + qs * KB_QW;
++        const size_t st = ((size_t)(b_ * N + nrow(g, r)) * H + h_) * S + qs * KB_QW;
++        if (lane == ln + 2) load_2d(&qmap, A(sQ + sl * 2 * KB_QT), A(qf + sl), h_ * D, rw);
++        else if (lane == ln + 3) load_2d(&dmap, A(sQ + sl * 2 * KB_QT + KB_QT), A(qf + sl), h_ * D, rw);
++        else if (lane == ln + 4) bulk_load(A(sLD + sl * 2 * KB_QW), LSE + st, KB_QW * 4, A(qf + sl));
++        else if (lane == ln + 5) bulk_load(A(sLD + sl * 2 * KB_QW + KB_QW), DELTA + st, KB_QW * 4, A(qf + sl));
+       }
+     }
+   } else if (warp == 1 || warp == 10) {
+@@ -1158,41 +1163,46 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
+   auto nrow = [&](int g, int r) { return min(g * QR + r, N - 1); };
+ 
+   if (warp == 0) {
+-    if (lane == 0) {
+-      auto staging = [&](int t) {                // Q / dO rows, lse, delta of task t -> staging
+-        int qt, g, bh; decode(t, qt, g, bh);
+-        const int b_ = bh / H, h_ = bh % H;
+-        expect_tx(A(af), QR * 2 * QT * 2 + QR * 2 * BM * 4);
+-        for (int r = 0; r < QR; ++r) {
+-          const int rw = (b_ * N + nrow(g, r)) * S + qt * BM;
+-          load_2d(&qmap, A(sA + r * 2 * QT), A(af), h_ * D, rw);
+-          load_2d(&dmap, A(sA + r * 2 * QT + QT), A(af), h_ * D, rw);
+-          const size_t st = ((size_t)(b_ * N + nrow(g, r)) * H + h_) * S + qt * BM;
+-          bulk_load(A(sLD + r * 2 * BM), LSE + st, BM * 4, A(af));
+-          bulk_load(A(sLD + r * 2 * BM + BM), DELTA + st, BM * 4, A(af));
+-        }
+-      };
+-      if (t0 < t1) staging(t0);
+-      const int st_at = min(SPT, QB_NKV) - 1;
+-      int lt = 0, y = 0;
+-      for (int t = t0; t < t1; ++t, ++lt) {
+-        int qt, g, bh; decode(t, qt, g, bh);
+-        const int b_ = bh / H, h_ = bh % H;
+-        for (int w = 0; w < SPT; ++w, ++y) {
+-          if (w == st_at && t + 1 < t1) { wait(A(ae), lt & 1); staging(t + 1); }
+-          const int ks = w / QR, r = w % QR, sl = y % QB_NKV;
+-          if (r == 0) {
+-            const int jb = lt * NKS + ks, bs = jb % QB_NB;
+-            if (jb >= QB_NB) wait(A(be + bs), ((jb / QB_NB) - 1) & 1);
+-            expect_tx(A(bf + bs), QB_BT * 2);
+-            load_2d(&bmap, A(sB + bs * QB_BT), A(bf + bs), ks * QB_KW, bh * S + qt * BM);
+-          }
+-          if (y >= QB_NKV) wait(A(kve + sl), ((y / QB_NKV) - 1) & 1);
++    // the whole warp runs the producer and the loads of a group go out from different lanes (B200 2026-11-17: one thread issues ~one
++    // TMA load per ~600 clk whatever the box: a task's staging alone was 4 QR loads in series); lane 0 sets each barrier's byte count
++    // first (__syncwarp orders the arrive.expect_tx before the lanes' complete_tx)
++    auto staging = [&](int t) {                  // Q / dO rows, lse, delta of task t -> staging: lane 4 r + j issues load j of row r
++      int qt, g, bh; decode(t, qt, g, bh);
++      const int b_ = bh / H, h_ = bh % H;
++      if (lane == 0) expect_tx(A(af), QR * 2 * QT * 2 + QR * 2 * BM * 4);
++      __syncwarp();
++      if (lane < 4 * QR) {
++        const int r = lane >> 2, j = lane & 3;
++        const int rw = (b_ * N + nrow(g, r)) * S + qt * BM;
++        const size_t st = ((size_t)(b_ * N + nrow(g, r)) * H + h_) * S + qt * BM;
++        if (j == 0) load_2d(&qmap, A(sA + r * 2 * QT), A(af), h_ * D, rw);
++        else if (j == 1) load_2d(&dmap, A(sA + r * 2 * QT + QT), A(af), h_ * D, rw);
++        else if (j == 2) bulk_load(A(sLD + r * 2 * BM), LSE + st, BM * 4, A(af));
++        else bulk_load(A(sLD + r * 2 * BM + BM), DELTA + st, BM * 4, A(af));
++      }
++    };
++    if (t0 < t1) staging(t0);
++    const int st_at = min(SPT, QB_NKV) - 1;
++    int lt = 0, y = 0;
++    for (int t = t0; t < t1; ++t, ++lt) {
++      int qt, g, bh; decode(t, qt, g, bh);
++      const int b_ = bh / H, h_ = bh % H;
++      for (int w = 0; w < SPT; ++w, ++y) {
++        if (w == st_at && t + 1 < t1) { wait(A(ae), lt & 1); staging(t + 1); }
++        const int ks = w / QR, r = w % QR, sl = y % QB_NKV;
++        const int jb = lt * NKS + ks, bs = jb % QB_NB;
++        if (r == 0 && jb >= QB_NB) wait(A(be + bs), ((jb / QB_NB) - 1) & 1);
++        if (y >= QB_NKV) wait(A(kve + sl), ((y / QB_NKV) - 1) & 1);
++        if (lane == 0) {
++          if (r == 0) expect_tx(A(bf + bs), QB_BT * 2);
+           expect_tx(A(kvf + sl), 2 * QB_KT * 2);
+-          const int rw = (b_ * N + nrow(g, r)) * S + ks * QB_KW;
+-          load_2d(&kmap, A(sKV + sl * 2 * QB_KT), A(kvf + sl), h_ * D, rw);
+-          load_2d(&vmap, A(sKV + sl * 2 * QB_KT + QB_KT), A(kvf + sl), h_ * D, rw);
+         }
++        __syncwarp();
++        const int ln = 16 + 3 * (w & 3);                // three lanes a stage (bias, K, V), four stages' lanes in rotation
++        const int rw = (b_ * N + nrow(g, r)) * S + ks * QB_KW;
++        if (r == 0 && lane == ln) load_2d(&bmap, A(sB + bs * QB_BT), A(bf + bs), ks * QB_KW, bh * S + qt * BM);
++        if (lane == ln + 1) load_2d(&kmap, A(sKV + sl * 2 * QB_KT), A(kvf + sl), h_ * D, rw);
++        if (lane == ln + 2) load_2d(&vmap, A(sKV + sl * 2 * QB_KT + QB_KT), A(kvf + sl), h_ * D, rw);
+       }
+     }
+   } else if (warp == 1) {

@@ -1,0 +1,33 @@
+diff --git a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+index fec23d6c0..e1e48dc31 100644
+--- a/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
++++ b/src/miniworld_engine/kernels/triangle_attention/cuda/b200_sources/triattn_sm100.cu
+@@ -33,8 +33,11 @@ using namespace sm100;
+ #ifndef TA_QR
+ #define TA_QR 4          // backward, query side: pair rows per task (even: the two grad groups take rows gi, gi + 2, ...)
+ #endif
++#ifndef TA_HJ
++#define TA_HJ 0          // forward: the bias pair's high key read as the 32-bit word (the low key's bits as sub-ulp noise; see logits)
++#endif
+ #ifndef TA_SPLIT
+-#define TA_SPLIT 1        // forward: 1 = two issue warps (1: QK^T, 14: PV), 0 = one warp issues both (see the issue loops)
++#define TA_SPLIT 1      // forward: 1 = two issue warps (1: QK^T, 14: PV), 0 = one warp issues both (see the issue loops)
+ #endif
+ namespace {
+ constexpr int D = 32, BM = 128, BN = 128, R = TA_R;
+@@ -336,7 +339,14 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
+ #pragma unroll
+               for (int k2 = 0; k2 < 4; ++k2) {
+                 const int i2 = e * 8 + k2 * 2;
+-                const float2 xx = fma2(bf2f(w[k2]), l2, fma2(make_float2(s32[i2], s32[i2 + 1]), sc2, nm0));
++#if TA_HJ
++                // the pair's high key read as the whole 32-bit word (its low half, the other key, lies under one bf16 ulp of it): one
++                // LOP3 a pair less; a masked key (bf16 min, 0xff7f) stays finite and times log2 e overflows to -inf as before
++                const float2 bb = make_float2(__uint_as_float(w[k2] << 16), __uint_as_float(w[k2]));
++#else
++                const float2 bb = bf2f(w[k2]);
++#endif
++                const float2 xx = fma2(bb, l2, fma2(make_float2(s32[i2], s32[i2 + 1]), sc2, nm0));
+                 s32[i2] = xx.x; s32[i2 + 1] = xx.y;
+               }
+             }

@@ -173,15 +173,24 @@ def _a100(single) -> bool:
     return single.is_cuda and torch.cuda.get_device_capability(single.device) in ((8, 0), (12, 0))
 
 
+def _atom_sm80(single) -> bool:
+    """The cards of the ATOM variants' sm_80 path: A100, RTX 5090 and the B200 (sm_100a builds of the same sources,
+    ``kernels/_sm120.building_sm100``; card ``b200_sm100``). The token variants keep :func:`_a100`."""
+    return single.is_cuda and torch.cuda.get_device_capability(single.device) in ((8, 0), (12, 0), (10, 0))
+
+
 def _card(single) -> str:
     """The card the sm_80 paths run on, for refusal reasons."""
-    return "RTX 5090 (sm_120a build of the sm_80 path)" if torch.cuda.get_device_capability(single.device) == (12, 0) else "A100"
+    cc = torch.cuda.get_device_capability(single.device)
+    if cc == (10, 0):
+        return "B200 (sm_100a build of the sm_80 path)"
+    return "RTX 5090 (sm_120a build of the sm_80 path)" if cc == (12, 0) else "A100"
 
 
 def _call_reason(module, single, cond, pair, mask, *, a100: bool = False) -> str | None:
     if not single.is_cuda:
         return "CUDA tensors only"
-    if _a100(single):
+    if _a100(single) or (a100 and _atom_sm80(single)):
         if not a100:
             return f"{_card(single)}: this call has no sm_80 path"
     elif torch.cuda.get_device_capability(single.device) != (9, 0):
@@ -397,8 +406,8 @@ class VariantAtomCuda:
         why = _call_reason(self, single, cond, pair, mask, a100=True)
         if why is not None:
             return None, why
-        if not _a100(single):
-            return None, "kernels/dit_variants serve the A100 and the RTX 5090 only (H100: the one atom DiT implementation)"
+        if not _atom_sm80(single):
+            return None, "kernels/dit_variants serve the A100, the RTX 5090 and the B200 only (H100: the one atom DiT implementation)"
         n = single.shape[2]
         if (single.shape[-1], self.attention.n_head, pair.shape[-1]) != (128, 4, 16) or self.transition.expand_a.weight.shape[0] != 2 * 128:
             return None, (
@@ -429,14 +438,21 @@ class VariantAtomCuda:
     def _h100(single) -> bool:
         return single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0)
 
+    def _b200_tc(self, single, cond, pair, mask, uid) -> bool:
+        """B200 (2026-11-17): the one-AdaLN variant block on the tcgen05 local atom block (``integrations/local_dit_b200``, its variant
+        builds) where it serves the call; the dit_variants path otherwise."""
+        from miniworld_engine.modules.atom_dit import _LocalAtomDiT
+
+        return _LocalAtomDiT._b200_tc(cast(_LocalAtomDiT, self), single, cond, pair, mask, uid)
+
     def _supports_cuda(self, single, cond, pair, mask=None, uid=None) -> str | None:
-        if self._h100(single):
+        if self._h100(single) or self._b200_tc(single, cond, pair, mask, uid):
             from miniworld_engine.modules.atom_dit import _LocalAtomDiT
 
             return _LocalAtomDiT._supports_cuda(cast(_LocalAtomDiT, self), single, cond, pair, mask, uid=uid)
         from miniworld_engine.modules.atom_dit import _fold, _folds, _multi_fold_reason
 
-        if _a100(single) and _folds(single) > 1:  # B > 1 folds: one sm_80 call per fold (the sm_80 atom paths take one pair)
+        if _atom_sm80(single) and _folds(single) > 1:  # B > 1 folds: one sm_80 call per fold (the sm_80 atom paths take one pair)
             why = _multi_fold_reason(cast(nn.Module, self), single, cond, pair, mask, uid)
             if why is not None:
                 return f"A100: {why}"
@@ -445,7 +461,7 @@ class VariantAtomCuda:
         return why if fn is None else None
 
     def _forward_cuda(self, single, cond, pair, mask=None, uid=None) -> torch.Tensor:
-        if self._h100(single):
+        if self._h100(single) or self._b200_tc(single, cond, pair, mask, uid):
             from miniworld_engine.modules.atom_dit import _LocalAtomDiT
 
             return _LocalAtomDiT._forward_cuda(cast(_LocalAtomDiT, self), single, cond, pair, mask, uid)

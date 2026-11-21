@@ -30,7 +30,12 @@ constexpr int O_BAR = O_AB + 4 * KBT;
 #else
 constexpr int O_BAR = O_OUT + 2 * KBT;
 #endif
+#ifdef FOLD
+constexpr int O_UV = O_BAR + 512;                               // [2 warpgroups][2 buffers][ua | va | ub | vb of the item's 64 units]
+constexpr int SMEM_BYTES = O_UV + 2 * 2 * 256 * 4;
+#else
 constexpr int SMEM_BYTES = O_BAR + 512;
+#endif
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
 constexpr uint32_t IDESC = idesc_bf16(256, 256);
 
@@ -51,7 +56,11 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
 #ifdef SAVE_AB
                           const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mb, int save_ab,
 #endif
-                          int tiles) {
+                          int tiles
+#ifdef FOLD
+                          , const float* __restrict__ rs_row, const float* __restrict__ c1_row, const float* __restrict__ uu, const float* __restrict__ vv
+#endif
+                          ) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -140,6 +149,25 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
     const int half = warp >= 12 ? 1 : 0;
     for (int q = 0; q < nitem; ++q) {
       const int s = q & 1, u = q >> 1;
+#ifdef FOLD
+      // (S90, the LayerNorm fold) a_n = rstd (x . Wp_n) - c1 u_n + v_n: this thread's row statistics, the columns' u / v read as uniform loads
+      const int frow = item_row(q) + (int)r;
+      const float rsr = __ldg(rs_row + frow), c1r = __ldg(c1_row + frow);
+      const float* uvs = reinterpret_cast<const float*>(sm + O_UV) + (half * 2 + (q & 1)) * 256;
+      if (q == 0) {                                          // the first item's columns: this warpgroup's 128 threads load 256 floats
+        const int idx = (int)(r & 127) * 2, vec = idx >> 6;
+        const float* src = (vec == 0 ? uu : vec == 1 ? vv : vec == 2 ? uu + H_ : vv + H_) + item_j(0) * HC + half * 64 + (idx & 63);
+        const float2 w = __ldg(reinterpret_cast<const float2*>(src));
+        float* d0 = reinterpret_cast<float*>(sm + O_UV) + (half * 2) * 256 + idx;
+        d0[0] = w.x; d0[1] = w.y;
+        named_bar_sync(3 + half, 128);
+      }
+      float2 pre = make_float2(0.f, 0.f);
+      if (q + 1 < nitem) {                                   // the next item's columns, in flight under this item's accumulator wait / math
+        const int idx = (int)(r & 127) * 2, vec = idx >> 6;
+        pre = __ldg(reinterpret_cast<const float2*>((vec == 0 ? uu : vec == 1 ? vv : vec == 2 ? uu + H_ : vv + H_) + item_j(q + 1) * HC + half * 64 + (idx & 63)));
+      }
+#endif
       mbar_wait(&B.acc_full[s], u & 1);
       tc_fence_after();
       uint32_t hp[32];
@@ -152,6 +180,20 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
         tmem_ld32(trow + s * 256 + half * 64 + st2 * 32, av);
         tmem_ld32(trow + s * 256 + 128 + half * 64 + st2 * 32, bv);
         tmem_wait_ld();
+#ifdef FOLD
+        {
+#pragma unroll
+          for (int k = 0; k < 16; ++k) {
+            const int cu = st2 * 32 + 2 * k;                  // the column's position among this warpgroup's 64 units
+            const float2 ua = *reinterpret_cast<const float2*>(uvs + cu), va = *reinterpret_cast<const float2*>(uvs + 64 + cu);
+            const float2 ub = *reinterpret_cast<const float2*>(uvs + 128 + cu), vb = *reinterpret_cast<const float2*>(uvs + 192 + cu);
+            av[2 * k] = __float_as_uint(fmaf(rsr, __uint_as_float(av[2 * k]), fmaf(-c1r, ua.x, va.x)));
+            av[2 * k + 1] = __float_as_uint(fmaf(rsr, __uint_as_float(av[2 * k + 1]), fmaf(-c1r, ua.y, va.y)));
+            bv[2 * k] = __float_as_uint(fmaf(rsr, __uint_as_float(bv[2 * k]), fmaf(-c1r, ub.x, vb.x)));
+            bv[2 * k + 1] = __float_as_uint(fmaf(rsr, __uint_as_float(bv[2 * k + 1]), fmaf(-c1r, ub.y, vb.y)));
+          }
+        }
+#endif
 #ifdef SAVE_AB
 #pragma unroll
         for (int k = 0; k < 16; ++k) {
@@ -182,6 +224,14 @@ transition_swiglu_w_sm100(const __grid_constant__ CUtensorMap mxn, const __grid_
       fence_proxy_async();
       __syncwarp();
       if (lane == 0) mbar_arrive(&B.staged[half]);
+#ifdef FOLD
+      if (q + 1 < nitem) {
+        const int idx = (int)(r & 127) * 2;
+        float* d1 = reinterpret_cast<float*>(sm + O_UV) + (half * 2 + ((q + 1) & 1)) * 256 + idx;
+        d1[0] = pre.x; d1[1] = pre.y;
+        named_bar_sync(3 + half, 128);                       // this item's reads of the other buffer are long done (barrier each item)
+      }
+#endif
     }
   } else if (warp == 8 || warp == 9) {
     // one store thread per SwiGLU warpgroup (t = its 64 units): the two stage and store independently

@@ -1,0 +1,50 @@
+--- /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/work/n1-triattn/bidir_triattn_h100.py.pre4	2026-11-18 16:20:05.000000000 +0000
++++ /NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n1-triattn/src/miniworld_engine/kernels/integrations/bidir_triattn_h100.py	2026-11-18 16:20:05.000000000 +0000
+@@ -130,7 +130,7 @@
+ #: with their reduce) off the main chain as branches of the captured graph (they read tensors the chain already has and nothing reads their results before the
+ #: end): the dWo GEMM beside the gate backward / core GEMMs, the dW GEMM beside the dyln GEMM and the LayerNorm backward. One sample (B = 1), B200, graph capture only.
+ #: MINIWORLD_BIDIR_B200_SIDE=0 turns it off.
+-B200_SIDE = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch
++B200_SIDE = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch, bit 2: the dV branch
+ B200_SIDE_MAX_L = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE_MAX_L", "256"))   # the dWo branch only up to this length (beyond it the core GEMMs fill the SMs: it slows the chain); the dW branch at every length
+ 
+ 
+@@ -560,14 +560,27 @@
+         else:
+             dWo = _acc(dWo, _mm_f32(dt.t(), u.t()))
+         do = _gate_bwd(dt, wo, c[Dh : 2 * Dh], o, dc[Dh : 2 * Dh])  # dO; dG into dc
++        s_dv = None
++        if (B200_SIDE & 4) and B == 1 and L <= B200_SIDE_MAX_L and (bo is not None or starting) and _b200():
++            from miniworld_engine.kernels.bias_only_dit.cuda import side
++
++            s_dv = side.fork(x.device)   # branch: the dV contraction beside the dP contraction, the row dot and the softmax backward
+         if starting:  # O[h] = V[h] P[h]^T
+             dos = do.view(H, dh * L, L)
+-            torch.bmm(dos, p, out=dc[:Dh].view(H, dh * L, L))
++            if s_dv is not None:
++                with side.on(s_dv):
++                    torch.bmm(dos, p, out=dc[:Dh].view(H, dh * L, L))
++            else:
++                torch.bmm(dos, p, out=dc[:Dh].view(H, dh * L, L))
+             dp = torch.bmm(dos.transpose(1, 2), c[:Dh].view(H, dh * L, L), out_dtype=torch.float32)  # [H, j, k]
+         else:  # O[c] = P[h] V[c]
+             dp = torch.empty(H, L, L, device=x.device, dtype=torch.float32)
+             if bo is not None and L <= BO_GEMM_MAX_L:  # B200: every head in one launch each
+-                bo.bo_pv(p, do, dh, True, dc[:Dh])
++                if s_dv is not None:
++                    with side.on(s_dv):
++                        bo.bo_pv(p, do, dh, True, dc[:Dh])
++                else:
++                    bo.bo_pv(p, do, dh, True, dc[:Dh])
+                 bo.bo_dp(do, c[:Dh], dh, dp)
+             else:
+                 for h in range(H):
+@@ -576,6 +589,8 @@
+                     torch.bmm(p[h].t().expand(dh, L, L), doe, out=dc[ch].view(dh, L, L))
+                     torch.sum(torch.bmm(doe, c[ch].view(dh, L, L).transpose(1, 2), out_dtype=torch.float32), 0, out=dp[h])  # [i, k]
+         _softmax_bwd(p, dp, dc[2 * Dh :], H if starting else 0)  # d logits -> the bias plane's layout
++        if s_dv is not None:
++            side.join(x.device, s_dv)   # dc[:Dh] (dV) is read by the dW and dyln GEMMs
+         s_w = None
+         if (B200_SIDE & 2) and B == 1 and dW is None and _b200():
+             from miniworld_engine.kernels.bias_only_dit.cuda import side
