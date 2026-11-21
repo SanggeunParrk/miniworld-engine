@@ -1,0 +1,4 @@
+upstream/
+.download/
+*.whl
+__pycache__/

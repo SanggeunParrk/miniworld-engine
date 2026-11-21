@@ -1,0 +1,19 @@
+# E5, triangle multiplication: the E2 TriMul grid (outgoing, L 128..2048 at d=128; d 64..512 at L=768; eval and train) with the external TriMul backends
+# of ext_trimul_registry.py (run through run_ext_trimul.py --ext fast_trimul gpumode geonn), next to the PyTorch reference and the engine's cuda.
+# A case a library does not serve is recorded `unsupported` with its reason.
+requirements: ../E2_sweeps/requirements_e2.csv   # relative to this file
+modules: [TriangleMultiplication]
+backends: [pytorch, cuda, fast_trimul, gpumode, geonn]
+external: [fast_trimul, gpumode, geonn]
+rows: [1, 2]
+dtypes: []
+modes: []
+lengths: all
+depths: min
+samples: min
+timing: [graph]
+warmup: 5
+iterations: 100
+flush_l2: true
+device: cuda
+seed: 0
