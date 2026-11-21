@@ -61,7 +61,21 @@ def _from(configs, live) -> bool:
 
 @configured("bias_only_attention_layernorm_gemm_triton", key=["shape_key"], default=dict(BR=64, num_warps=4, num_stages=2))
 @triton.jit
-def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, shape_key, C: tl.constexpr, N: tl.constexpr, NP: tl.constexpr, BR: tl.constexpr):
+def _ln_bias_fwd_kernel(
+    X,
+    W,
+    OUT,
+    MEAN,
+    RSTD,
+    R,
+    eps,
+    shape_key,
+    C: tl.constexpr,
+    N: tl.constexpr,
+    NP: tl.constexpr,
+    BR: tl.constexpr,
+    BF16_LOGITS: tl.constexpr = False,
+):
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BR + tl.arange(0, BR)
     rm = rows < R
@@ -73,7 +87,14 @@ def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, shape_key, C: tl.constexp
     xh = xc * rstd[:, None]  # fp32: the logits are exact fp32 (user rule 2026-11-19; a bf16 xh / W lost peptide bonds)
     hh = tl.arange(0, NP)
     w = tl.load(W + hh[:, None] * C + cols[None, :], mask=(hh < N)[:, None], other=0.0).to(tl.float32)
-    acc = tl.dot(w, tl.trans(xh), input_precision="ieee")  # [NP, BR] fp32 FMA products: logits of 1e3..2e5 need them (TF32 / bf16 do not)
+    if (
+        BF16_LOGITS
+    ):  # the opt-in inference mode (miniworld_engine.bias_logits "bf16"): bf16 operands, fp32 accumulate, bf16 store (OUT is bf16)
+        acc = tl.dot(w.to(tl.bfloat16), tl.trans(xh.to(tl.bfloat16)))
+    else:
+        acc = tl.dot(
+            w, tl.trans(xh), input_precision="ieee"
+        )  # [NP, BR] fp32 FMA products: logits of 1e3..2e5 need them (TF32 / bf16 do not)
     tl.store(OUT + hh.to(tl.int64)[:, None] * R + rows[None, :], acc.to(OUT.dtype.element_ty), mask=(hh < N)[:, None] & rm[None, :])
     tl.store(MEAN + rows, mean, mask=rm)
     tl.store(RSTD + rows, rstd, mask=rm)
@@ -153,6 +174,25 @@ def _fwd(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Ten
     return out, mean, rstd
 
 
+def _fwd_bf16_fake(x, w, eps=1e-5):
+    return x.new_empty((w.shape[0], x.shape[0]), dtype=torch.bfloat16)
+
+
+@opaque(fake=_fwd_bf16_fake, name="bias_only_attention_pair_bias_fwd_bf16")
+def _fwd_bf16(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+    """The ``"bf16"`` logits mode (miniworld_engine.bias_logits, inference): x [R, C] bf16, w [N, C] (the folded weights, fp32; rounded to bf16
+    in the kernel) -> logits^T [N, R] bf16 (bf16 operands, fp32 accumulation, bf16 store). No statistics (no backward)."""
+    r, c = x.shape
+    n = w.shape[0]
+    out = torch.empty((n, r), device=x.device, dtype=torch.bfloat16)
+    mean = torch.empty(r, device=x.device, dtype=torch.float32)
+    rstd = torch.empty_like(mean)
+    _ln_bias_fwd_kernel[lambda meta: (triton.cdiv(r, meta["BR"]),)](
+        x, w, out, mean, rstd, r, eps, shape_key=both_key(r, C=c, N=n), C=c, N=n, NP=_np(n), BF16_LOGITS=True
+    )
+    return out
+
+
 def _bwd_fake(x, w, dl, mean, rstd):
     """(dx like ``x``, dW' [N, C] fp32)."""
     return torch.empty_like(x), x.new_empty(w.shape, dtype=torch.float32)
@@ -200,4 +240,12 @@ def pair_bias_logits(pair: torch.Tensor, gamma: torch.Tensor, weight: torch.Tens
     """``to_bias(ln_pair(pair))`` as head-major logits ``[B, H, L, L]`` for ``pair`` [B, L, L, C] (a view of the kernel's [H, B*L*L] output)."""
     b, l1, l2, _ = pair.shape
     out = PairBiasFn.apply(pair, gamma, weight, eps)
+    return out.view(weight.shape[0], b, l1, l2).permute(1, 0, 2, 3)
+
+
+def pair_bias_logits_bf16(pair: torch.Tensor, gamma: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """:func:`pair_bias_logits` in the ``"bf16"`` mode (miniworld_engine.bias_logits; inference, bf16 ``pair``): bf16 ``[B, H, L, L]``, no autograd."""
+    b, l1, l2, c = pair.shape
+    wf = weight.float() * gamma.float()[None, :]
+    out = _fwd_bf16(pair.reshape(-1, c), wf, eps)
     return out.view(weight.shape[0], b, l1, l2).permute(1, 0, 2, 3)

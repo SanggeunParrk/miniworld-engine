@@ -61,6 +61,9 @@ EPS = 1e-5
 #: Code switches for two measured-slower kernel paths kept for A/B (formerly settings.bias_only_dit_cond / _resln, default off).
 _COND_TABLES = False
 _RESLN_GEMM = False
+#: the bf16 logits mode on H100 (``FusedBiasOnlyDiT.hoist_bf16``): the pair-bias kernel of the training rows (LN on chip, bf16 mma, one pass over the
+#: pair) in place of the LayerNorm rows + cuBLAS GEMM; both are the same bf16-logit arithmetic
+_BF16_ONE_PASS = True
 
 
 def _tf32():
@@ -142,12 +145,15 @@ class FusedBiasOnlyDiT:
         self._p3b = None  # the bf16 three-kernel step's weight pack
 
     # ------------------------------------------------------------------ once per sample()
-    def hoist(self, pair, mask=None):
+    def hoist(self, pair, mask=None, logits_bf16: bool = False):
         """pair [1, L, L, dp] -> every block's attention weights P [nb H, L, L] in the runner's dtype (rows sum to 1 over the keys).
-        ``mask`` [L] bool marks the real tokens; the other keys get zero weight."""
+        ``mask`` [L] bool marks the real tokens; the other keys get zero weight. ``logits_bf16``: the opt-in bf16 logits mode
+        (``miniworld_engine.bias_logits``; bf16 runner and bf16 pair only, else the exact fp32 logits as without it): ``hoist_bf16``."""
         L = pair.shape[1]
         z2d = pair.reshape(L * L, self.dp)
         m = None if mask is None else mask.reshape(L).to(torch.bool).contiguous()
+        if logits_bf16 and self.dtype is torch.bfloat16 and pair.dtype is torch.bfloat16:
+            return self.hoist_bf16(z2d, L, m)
         # The logits are EXACT fp32 (user rule 2026-11-19, bias-only DiT, every dtype): LN0(pair) in fp32 (one row pass), the gamma-folded
         # weights unrounded fp32, the products on the FMA pipe (cuBLAS fp32, TF32 off), the softmax over the keys fp32; only the finished
         # P is rounded to the runner's dtype. The logits are 1e3..2e5 with a key spread of ~500: bf16 (resolution 32..1024) or a TF32 /
@@ -174,6 +180,34 @@ class FusedBiasOnlyDiT:
             else:
                 C.softmax_hoist(lg.view(-1, L), P[sl].view(-1, L), m)  # fp32 logits -> fp32 softmax -> bf16 P
             del lg
+        return P
+
+    def hoist_bf16(self, z2d, L, m):
+        """The ``"bf16"`` logits mode of ``hoist`` (``miniworld_engine.bias_logits``, inference only; the engine's bf16 hoist before 2026-11-19): the
+        logits LN0(pair) W'^T computed and STORED in bf16 (LN0 rounded to bf16, W' bf16, fp32 accumulation, bf16 store), the softmax over the
+        keys in fp32 on those values, P rounded to bf16. H100, 12 / 16 / 24 heads, R a multiple of 128: ONE pass over the pair rows per block
+        (``train.pair_bias``: LN on chip, mma on bf16) else the LayerNorm rows + one cuBLAS GEMM for every block. Not bit-compatible with the fp32
+        mode (and it must not be: that is the mode's point)."""
+        dev = z2d.device
+        P = torch.empty(self.nb * self.h, L, L, device=dev, dtype=self.dtype)
+        z = z2d.contiguous()
+        if _BF16_ONE_PASS and C.h100_enabled(dev) and self.h in (12, 16, 24) and (L * L) % 128 == 0 and self.dp in (128, 256):
+            from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as train_ext
+
+            pst = torch.empty(L * L, 2, device=dev, dtype=torch.float32)  # the row statistics the kernel writes (unused here)
+            for b in range(self.nb):
+                train_ext().pair_bias_cuda(
+                    z, self.pw[b * self.h : (b + 1) * self.h].contiguous(), P[b * self.h : (b + 1) * self.h], pst, EPS
+                )
+        else:
+            zh = torch.empty(L * L, self.dp, device=dev, dtype=self.dtype)
+            if self.dp == 128:
+                _rows()._ext().layernorm128_rows(z, zh, EPS, False)
+            else:  # the same row kernel template at 256 channels (layernorm_rows_kernel<256>)
+                _rows()._ext().layernorm_rows_cuda(z, zh, EPS)
+            torch.mm(self.pw, zh.t(), out=P.view(self.nb * self.h, L * L))
+            del zh
+        C.softmax_hoist(P.view(-1, L), P.view(-1, L), m)  # bf16 logits -> fp32 softmax -> bf16 P, in place
         return P
 
     def _buffers(self, S, L, dev):

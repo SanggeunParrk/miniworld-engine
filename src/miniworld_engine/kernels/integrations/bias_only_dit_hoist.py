@@ -327,4 +327,22 @@ def pair_bias_all(attns, pair) -> tuple[torch.Tensor, ...]:
     return tuple(outs)
 
 
-__all__ = ["SINK_ATTR", "pair_bias_all", "serves"]
+def pair_bias_all_bf16(attns, pair) -> tuple[torch.Tensor, ...]:
+    """:func:`pair_bias_all` in the opt-in ``"bf16"`` logits mode (``miniworld_engine.bias_logits``): inference only (no autograd; the caller checked),
+    bf16 ``pair``. Each bias [1, H, L, L] is BF16: LN0 rounded to bf16 (``hoist.ln0_rows``), W'_all = W diag(gamma) rounded to bf16, one bf16 GEMM with
+    fp32 accumulation stored in bf16 -- the hoist the engine ran before 2026-11-19. The consumers' softmax is fp32 and rounds only P."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    nb, H, L, dp = len(attns), attns[0].to_bias.weight.shape[0], pair.shape[1], pair.shape[-1]
+    params = [p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)]
+    z = pair.reshape(L * L, dp).contiguous()
+    wf = _fold(params, BF)[2]
+    ln0 = torch.empty_like(z)
+    HK.ln0_rows(z, ln0, float(attns[0].ln_pair.eps))
+    with _gemms(BF):
+        ball = torch.mm(wf, ln0.t())  # [nb H, L L] bf16, head-major
+    del ln0
+    return tuple(ball[i * H : (i + 1) * H].view(1, H, L, L) for i in range(nb))
+
+
+__all__ = ["SINK_ATTR", "pair_bias_all", "pair_bias_all_bf16", "serves"]
