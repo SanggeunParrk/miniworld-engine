@@ -1,0 +1,27 @@
+{
+  "name": "geometric-nn-ops-trimul",
+  "repository": "https://github.com/ROCm/geometric-nn-ops",
+  "branch": "release/v1.0.0",
+  "revision": "c58e24cd3d776f99dfb31a8558be9a36c1b7c930",
+  "version": "1.0.0",
+  "license": "Apache-2.0 (LICENSE of the repository; files carry SPDX Apache-2.0, the reference trimul adapted from OpenFold-3)",
+  "files": [
+    {"path": "LICENSE", "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"},
+    {"path": "geometric_nn_ops_torch/__init__.py", "sha256": "29181c8483738ddb2c1076c731d46fa91a9ebba01fd96003f5fe3c8cc7dd8a2a"},
+    {"path": "geometric_nn_ops_torch/_precision.py", "sha256": "bd07419e272e38b0034661de8f4cf585eaec592983ac43569734b9d45a971960"},
+    {"path": "geometric_nn_ops_torch/triangle/__init__.py", "sha256": "2e0cf0006f557b3ee76315eab1606491bd89a28e0fa67640d4fac999b08e7f2b"},
+    {"path": "geometric_nn_ops_torch/triangle/_attention_pair_bias.py", "sha256": "ef1dec582bdc0c2ee9d521ea3dd4f9232c669582fd50e770b73b3b4126f3ad62"},
+    {"path": "geometric_nn_ops_torch/triangle/_kernels/__init__.py", "sha256": "d3b3ad0b763d5df0bc6f28f06d32bd6dee7b465621510e1b25a2863d97729f02"},
+    {"path": "geometric_nn_ops_torch/triangle/_kernels/triangle_attention.py", "sha256": "7feec7893db5f2d61bdde52841b8cdbefe8338ab2414fc0668524f944cbc6ccb"},
+    {"path": "geometric_nn_ops_torch/triangle/_kernels/trimul.py", "sha256": "77b0b20d80d0e9c77daec5ecc6c38eb324728952d825cdc0dd42b3ecdd1427c4"},
+    {"path": "geometric_nn_ops_torch/triangle/_masking.py", "sha256": "fc3375cf355a2b8777f89917e7b6a8e476b685471f767ad09d1851a38e8f2785"},
+    {"path": "geometric_nn_ops_torch/triangle/_reference/__init__.py", "sha256": "63a9f9ab57075125726be7cd6cca8f1ca16f0b0ed4a36f2a8abb111020452dab"},
+    {"path": "geometric_nn_ops_torch/triangle/_reference/attention_pair_bias.py", "sha256": "29018702e6dde35d4b7a7d9c75a83a4dfef1da823fce4be8c9b73b2c52b1b7f1"},
+    {"path": "geometric_nn_ops_torch/triangle/_reference/triangle_attention.py", "sha256": "937cdf9a72b135f20ea99064e9a461a98bb66891a48e0a269669b1e42a2d1263"},
+    {"path": "geometric_nn_ops_torch/triangle/_reference/trimul.py", "sha256": "f25aab054fd4a234e4567fa8736ae661ade55e0338b8cdf01f69f5aea86b6448"},
+    {"path": "geometric_nn_ops_torch/triangle/_triattn.py", "sha256": "5e3d7beec8fa8a7a1c2af6dd74db349ddb266ef1fb7f1020fac7264a0c7b4f4b"},
+    {"path": "geometric_nn_ops_torch/triangle/_trimul.py", "sha256": "6ce5336a635253c692fde96958ce34c9e344b61bb2fe62214c7afbabc7a0f02a"},
+    {"path": "pyproject.toml", "sha256": "e77593f76ed6f366adfe4809bf03d9f2065eef5c4346d9b76ff48e2473488a6f"}
+  ],
+  "patches": []
+}

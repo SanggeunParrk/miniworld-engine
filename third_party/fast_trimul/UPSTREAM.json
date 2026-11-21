@@ -1,0 +1,19 @@
+{
+  "name": "fast_trimul",
+  "repository": "https://github.com/tiagomonteiro0715/fast_trimul",
+  "repository_head_when_checked": "72a78998b59371c6ac2451b4ce782c26e5777d4c (2026-10-31)",
+  "pypi": "https://pypi.org/project/fast_trimul/3.0.6/",
+  "version": "3.0.6",
+  "license": "Apache-2.0 (LICENSE + NOTICE inside the wheel)",
+  "artifacts": [
+    {"file": "fast_trimul-3.0.6-py3-none-any.whl", "sha256": "2124ba64da111ec5ad5e8050a6945fc682a0c022f906b1146146b8cf0ac7a7be"}
+  ],
+  "optional_artifacts_for_hosts_without_cutlass_dsl": [
+    {"file": "nvidia_cutlass_dsl-4.8.0-py3-none-any.whl", "sha256": "24f996e0e5fa88c8b417f4893e615af135bdfdfdbdbed7e239faf36a88df711b"},
+    {"file": "nvidia_cutlass_dsl_libs_core-4.8.0-py3-none-any.whl", "sha256": "b32716d2ed10c185cdbbb6b5c6fca26a3113a60e6e2fe4e2f0cb15966422b621"},
+    {"file": "nvidia_cutlass_dsl_libs_base-4.8.0-cp312-cp312-manylinux_2_28_x86_64.whl", "sha256": "5bdc80989b0fbbac3d58960057e74e2ce8676fafa76b852d9422b9c4b9b74bdd"},
+    {"file": "nvidia_cutlass_dsl_libs_cu12-4.8.0-cp312-cp312-manylinux_2_28_x86_64.whl", "sha256": "2374cfdff635ceaf7e2c5bd17b4beb410830420a4fd65b12b7f24b5d5cbb9d4c"},
+    {"file": "protobuf-7.36.2-py3-none-any.whl", "sha256": "bdb3a345d48db958e6ce1f18e508beb0cc981d64f24088427549c866cd039f1e"}
+  ],
+  "patches": []
+}
