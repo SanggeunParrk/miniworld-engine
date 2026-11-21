@@ -164,7 +164,7 @@ def _check_long_free(single, pair, runner) -> None:
         raise BackendUnsupported(f"bias-only token DiT, H100 inference: {why}")
 
 
-def _fake(single, cond, pair, mask, weights):
+def _fake(single, cond, pair, mask, weights, logits_bf16=False):
     return torch.empty_like(single)
 
 
@@ -200,6 +200,7 @@ def _infer(
     pair: torch.Tensor,
     mask: torch.Tensor,
     weights: list[torch.Tensor],
+    logits_bf16: bool = False,
 ) -> torch.Tensor:
     with torch.cuda.device(single.device):
         runner = _runner(single, weights)
@@ -213,6 +214,7 @@ def _infer(
                 pair.stride(),
                 mask.data_ptr(),
                 mask._version,
+                logits_bf16,  # the pair-bias logits mode is part of the P cache key (miniworld_engine.bias_logits)
             )
         )
         hit = runner.__dict__.get("_p_cache")
@@ -221,10 +223,12 @@ def _infer(
             _capture.hold(hit, pkey[0] is None)  # a capture reads it: the next pair replacing the entry must not free it under the graph
             if pkey[0] is None and not hit[3] and torch.cuda.is_current_stream_capturing():
                 # a capture (static_weights) reads the eager P: kernels._capture.refresh_static_inputs remakes it in place
-                _capture.note_static_read((id(runner), "p", P.data_ptr()), P, lambda: runner.hoist(pair.contiguous(), mask), (pair, mask))
+                _capture.note_static_read(
+                    (id(runner), "p", P.data_ptr()), P, lambda: runner.hoist(pair.contiguous(), mask, logits_bf16), (pair, mask)
+                )
         else:
             _check_long_free(single, pair, runner)
-            P = runner.hoist(pair.contiguous(), mask)
+            P = runner.hoist(pair.contiguous(), mask, logits_bf16)
             if pkey is not None:
                 capturing = torch.cuda.is_current_stream_capturing()
                 # the entry keeps its key tensors alive: a freed address cannot alias another tensor; [3]: made inside a capture (its
@@ -267,7 +271,7 @@ def _infer_bias(
 _ALL_TRUE: dict = {}
 
 
-def update(module, single, cond, pair, mask, bias=None):
+def update(module, single, cond, pair, mask, bias=None, logits_bf16=False):
     if mask is None:  # one all-true mask per (L, device), so the P cache key stays stable
         k = (single.shape[2], single.device)
         mask = _ALL_TRUE.get(k)
@@ -276,7 +280,7 @@ def update(module, single, cond, pair, mask, bias=None):
     weights = [module.get_parameter(name) for name in WEIGHTS]
     if bias is not None:
         return _infer_bias(single.contiguous(), cond, bias.contiguous(), mask, weights)
-    return _infer(single.contiguous(), cond, pair, mask, weights)
+    return _infer(single.contiguous(), cond, pair, mask, weights, logits_bf16)
 
 
 __all__ = ["WEIGHTS", "serves", "update"]

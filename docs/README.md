@@ -12,6 +12,7 @@ Cards: H100 (sm_90a) and A100 (sm_80) are served, measured and judged. sm_100 (B
 | [init.md](init.md) | parameter initialisation: the init vocabulary, presets (`engine`, `miniworld`, `af3`), the `init:` config block, `apply_init` / `describe_init` |
 | [kernels.md](kernels.md) | kernel families, launch-config tables and shape keys, the prebuilder, the pretuner |
 | [measure.md](measure.md) | the accuracy measurer (fp64 gold, lights) and the speed measurer (CUDA-graph timing) |
+| [bias_logits.md](bias_logits.md) | the bias-only token DiT's pair-bias logit precision: `fp32` (default, training) and the opt-in inference mode `bf16`, the switch, per-backend implementation |
 | [judge.md](judge.md) | versions, tokens, verdicts (carried / owed / pending), the Slurm measurement cycle |
 | [ladder.md](ladder.md) | the performance ladder cuda < triton < pytorch: how it is checked, exceptions (LayerNorm, RMSNorm, L <= 256) |
 | [../benchmarks/](../benchmarks/README.md) | speed figures (L and D sweeps) and tables per card, generated from the speed tokens by `python -m miniworld_engine.measure.plot` |

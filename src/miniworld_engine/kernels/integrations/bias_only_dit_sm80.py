@@ -167,7 +167,7 @@ def _softmax(bias, mask, transpose: bool, pdt: torch.dtype = F32):
     return P, Pt
 
 
-def _fwd_fake(x, cond, pair, res, mask, params, heads, save):
+def _fwd_fake(x, cond, pair, res, mask, params, heads, save, logits_bf16=False):
     m, d = x.shape
     da = params[0].shape[0]
     length = pair.shape[1]
@@ -188,6 +188,7 @@ def _fwd(
     params: list[torch.Tensor],
     heads: int,
     save: bool,
+    logits_bf16: bool = False,
 ) -> list[torch.Tensor]:
     """The attention after the AdaLN: x [A L, d] (the AdaLN's output), cond [A L, dc], pair [1, L, L, dp], res [A L, d] (the residual), mask a bool [1, L] or None, params =
     (Wv, Wg, Wo, Ws, bs, ln_pair.weight, to_bias.weight). Returns [res + update], with ``save`` also vg, a, y, g2, P, P^T."""
@@ -204,7 +205,7 @@ def _fwd(
             main, side = torch.cuda.current_stream(), _side_stream(x.device)
             side.wait_stream(main)
             with torch.cuda.stream(side):
-                bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0, out_dtype=F32)  # [H, L, L], natural units
+                bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0, out_dtype=None if logits_bf16 else F32)  # [H, L, L], natural units
                 P, Pt = _softmax(bias, mask, save, x.dtype)
                 del bias
             vg = _mm120(x, wvg)  # [M, 2 da]
@@ -219,7 +220,7 @@ def _fwd(
                 _record_stream(mask, side)
         else:
             vg = torch.mm(x, wvg.t())  # [M, 2 da]
-            bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0, out_dtype=F32)  # [H, L, L], natural units
+            bias = _sm80().pair_bias_generic(pair[0], wcm, None, length, EPS, oscale=1.0, out_dtype=None if logits_bf16 else F32)  # [H, L, L], natural units
             P, Pt = _softmax(bias, mask, save, x.dtype)
             del bias
             g2 = None
@@ -591,8 +592,10 @@ def _side_stream(device: torch.device) -> torch.cuda.Stream:
     return _SIDE[device]
 
 
-def block(module, single, cond, pair, mask, grad: bool) -> torch.Tensor:
-    """The block on the sm_80 path (``refusal`` must have returned None): [A, 1, L, d] -> [A, 1, L, d]."""
+def block(module, single, cond, pair, mask, grad: bool, logits_bf16: bool = False) -> torch.Tensor:
+    """The block on the sm_80 path (``refusal`` must have returned None): [A, 1, L, d] -> [A, 1, L, d]. ``logits_bf16``: the opt-in bf16 pair-bias logits
+    (``miniworld_engine.bias_logits``; the caller passes it for bf16 activations without a gradient only): ``pair_bias_generic`` stores bf16, the softmax
+    is fp32 on them, P bf16. Never in a training call."""
     from miniworld_engine.kernels.integrations import adaln_sm80
     from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
 
@@ -601,7 +604,7 @@ def block(module, single, cond, pair, mask, grad: bool) -> torch.Tensor:
     a, _, length, d = single.shape
     with torch.autocast("cuda", enabled=False):
         if not grad and _fused_eval(module, single, cond):
-            return _block_eval_sm120(module, single, cond, pair, mask)
+            return _block_eval_sm120(module, single, cond, pair, mask, logits_bf16 and dt is BF)
         if not grad and _fused_eval_f32(module, single, cond):
             return _block_eval_sm120_f32(module, single, cond, pair, mask)
         if ADA_ATTN_120 and grad and _sm120(single) and d != 128:  # RTX 5090 training: the AdaLN inside the attention's Function (_AdaAttention120)
@@ -622,7 +625,7 @@ def block(module, single, cond, pair, mask, grad: bool) -> torch.Tensor:
         if grad:
             out = _Attention.apply(xs, cs, pr, rs, mask, at.n_head, *params)
         else:
-            out = _fwd(xs, cs, pr, rs, mask, params, at.n_head, False)[0]
+            out = _fwd(xs, cs, pr, rs, mask, params, at.n_head, False, logits_bf16 and dt is BF and not grad)[0]
         return ct_sm80.update(module.transition, out.view(a, 1, length, d), cond, True, dt, grad)
 
 
@@ -702,7 +705,7 @@ def _fused_eval(module, single: torch.Tensor, cond: torch.Tensor) -> bool:
     )
 
 
-def _block_eval_sm120(module, single, cond, pair, mask) -> torch.Tensor:
+def _block_eval_sm120(module, single, cond, pair, mask, logits_bf16: bool = False) -> torch.Tensor:
     from miniworld_engine.kernels.bias_only_dit.cuda.sm80 import EPI_ADALN, EPI_GATERES, EPI_PLAIN, EPI_SWIGLU, gemm120, row_stats120
     from miniworld_engine.kernels.integrations.adaln_sm80 import _kernels, cast_params
 
@@ -737,7 +740,7 @@ def _block_eval_sm120(module, single, cond, pair, mask) -> torch.Tensor:
 
         # below SIDE_COND_MAX_L the side stream also takes the cond work; from it on the pair bias alone outlasts the main stream's AdaLN and [v | g]
         with torch.cuda.stream(side):
-            bias = _sm80().pair_bias_generic(pr[0], wcm, None, length, EPS, oscale=1.0, out_dtype=F32)  # [H, L, L], natural units
+            bias = _sm80().pair_bias_generic(pr[0], wcm, None, length, EPS, oscale=1.0, out_dtype=None if logits_bf16 else F32)  # [H, L, L], natural units
             P, _ = _softmax(bias, mask, False, dt)
             del bias
             if length < SIDE_COND_MAX_L:

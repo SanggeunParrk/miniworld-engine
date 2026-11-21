@@ -35,6 +35,7 @@ from typing import Any, ClassVar, cast
 import torch
 import torch.nn.functional as F
 
+from miniworld_engine import bias_logits as _bias_logits
 from miniworld_engine.kernels import _capture
 from miniworld_engine.modules import _anthropic
 from miniworld_engine.modules.attention import (
@@ -1096,6 +1097,17 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
         single = self.attention(single, cond, pair, mask) if bias is None else self.attention(single, cond, pair, mask, bias=bias)
         return self.transition(single, cond)
 
+    def set_pair_bias_logits(self, mode: str | None):
+        """Precision of the pair-bias logits (:mod:`miniworld_engine.bias_logits`): ``"fp32"`` (default; training always), ``"bf16"`` (opt-in, inference
+        only, bf16 activations), ``None`` (the process default / ``MINIWORLD_BIAS_LOGITS``). Returns ``self``."""
+        self.attention.set_pair_bias_logits(mode)
+        return self
+
+    @property
+    def pair_bias_logits(self) -> str | None:
+        """This block's own logits mode (None: follows the process default)."""
+        return self.attention.pair_bias_logits
+
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
         return _token_dit_inputs(
             self, length=length, samples=samples, dtype=dtype, device=device, generator=generator, depth=depth, stream=stream
@@ -1173,10 +1185,12 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
 
     def _forward_cuda(self, single, cond, pair=None, mask=None, *, bias=None) -> torch.Tensor:
         route, _ = self._cuda_route(single, cond, pair, mask, bias)
+        # the opt-in bf16 pair-bias logits (inference; miniworld_engine.bias_logits)
+        lb = self.attention._logits_mode(single, cond, pair, bias) == "bf16"
         if route == "a100":
             from miniworld_engine.kernels.integrations import bias_only_dit_sm80
 
-            return bias_only_dit_sm80.block(self, single, cond, pair, mask, _wants_grad(self, single, cond, pair, bias))
+            return bias_only_dit_sm80.block(self, single, cond, pair, mask, _wants_grad(self, single, cond, pair, bias), logits_bf16=lb)
         view = _kernel_view(self)
         if route == "train":
             from miniworld_engine.kernels.integrations import bias_only_dit_train
@@ -1184,7 +1198,7 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
             return bias_only_dit_train.block(view, single, cond, pair, mask, bias=bias)
         from miniworld_engine.kernels.integrations import bias_only_dit
 
-        return bias_only_dit.update(view, single, cond, pair, mask, bias=bias)
+        return bias_only_dit.update(view, single, cond, pair, mask, bias=bias, logits_bf16=lb)
 
 
 def pair_bias_all(blocks, pair: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -1217,6 +1231,10 @@ def pair_bias_all(blocks, pair: torch.Tensor) -> tuple[torch.Tensor, ...]:
             raise ValueError(
                 "pair_bias_all: the blocks must share eps and head count, ln_pair must have a weight and no offset, to_bias no bias"
             )
+    # The opt-in bf16 logits mode (miniworld_engine.bias_logits; the first block's setting, else the process default): inference only (no autograd
+    # through the pair or any block parameter) and a bf16 pair -- the bias comes back bf16 (one bf16 GEMM, bf16 store), the consumers' softmax is fp32
+    grad = torch.is_grad_enabled() and (pair.requires_grad or any(p.requires_grad for a in attns for p in a.parameters()))
+    bf16_logits = _bias_logits.effective(attns[0].pair_bias_logits, grad=grad, dtype=pair.dtype) == "bf16"
     # the "cuda" backend on a B200 or an H100: the fused hoist (one LayerNorm and one GEMM for every block, the blocks' bias gradients
     # written into one buffer, each block's bias a contiguous head-major [1, H, L, L] slice); pair [1, L, L, 128] (or 256 on H100) bf16 or
     # fp32 -- any other pair (and the A100) takes the PyTorch fold below, whose per-block biases are permuted views
@@ -1224,11 +1242,18 @@ def pair_bias_all(blocks, pair: torch.Tensor) -> tuple[torch.Tensor, ...]:
         from miniworld_engine.kernels.integrations import bias_only_dit_hoist
 
         if bias_only_dit_hoist.serves("miniworld", attns, pair):
-            return bias_only_dit_hoist.pair_bias_all(attns, pair)
+            return (bias_only_dit_hoist.pair_bias_all_bf16 if bf16_logits else bias_only_dit_hoist.pair_bias_all)(attns, pair)
     # LN0 in at least fp32 (as the engine's LayerNorm computes), one matmul against W'_all, per-block head-major views [B, H, L, L] of the
     # [B, L, L, N] product
     # The logits are fp32 whatever the pair dtype (user rule 2026-11-19: 1e3..2e5, key spread ~500; bf16 broke the peptide bonds): LN0 and
     # the folded weights fp32 (not rounded to the pair dtype), exact fp32 products (TF32 off in the forward and the backward)
+    # the PyTorch fold in bf16: LN0 and the folded weights rounded to bf16, one bf16 GEMM stored in bf16 (the cuda hoist's arithmetic)
+    if bf16_logits:
+        with torch.autocast("cuda", enabled=False):
+            ln0 = F.layer_norm(pair.float(), (pair.shape[-1],), None, None, eps).to(torch.bfloat16)
+            wf = torch.cat([(a.to_bias.weight.float() * a.ln_pair.weight.float()[None, :]).to(torch.bfloat16) for a in attns], 0)
+            b = ln0 @ wf.t()  # [B, L, L, N] bf16
+        return tuple(b[..., i * H : (i + 1) * H].permute(0, 3, 1, 2) for i in range(len(attns)))
     dp = pair.shape[-1]
     with torch.autocast("cuda", enabled=False):
         dt = torch.promote_types(pair.dtype, torch.float32)  # at least fp32

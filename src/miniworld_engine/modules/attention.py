@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from miniworld_engine import bias_logits as _bias_logits
 from miniworld_engine.kernels import _capture
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, RMSNorm, _activation_dtype_reason, _wants_grad, triton_unsupported
@@ -66,6 +67,16 @@ def exact_pair_bias_logits(pair: torch.Tensor, gamma: torch.Tensor, weight: torc
         dt = torch.promote_types(pair.dtype, torch.float32)  # at least fp32 (an fp64 reference stays fp64)
         ln = F.layer_norm(pair.to(dt), (pair.shape[-1],), None, None, eps) * gamma.to(dt)
         return _ExactFp32Linear.apply(ln, weight.to(dt)).permute(0, 3, 1, 2)
+
+
+def bf16_pair_bias_logits(pair: torch.Tensor, gamma: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """The ``"bf16"`` mode of the pair-bias logits (:mod:`miniworld_engine.bias_logits`, inference only): head-major bf16 ``[B, H, L, L]``,
+    LN0(pair) (statistics in fp32) and the gamma-folded weight each rounded to bf16, one bf16 GEMM (fp32 accumulation) stored in bf16 -- the
+    arithmetic of the engine's bf16 hoist before 2026-11-19, so the cross-backend comparison of the mode is meaningful."""
+    with torch.autocast("cuda", enabled=False):
+        ln = F.layer_norm(pair.float(), (pair.shape[-1],), None, None, eps).to(torch.bfloat16)
+        wf = (weight.float() * gamma.float()[None, :]).to(torch.bfloat16)
+        return (ln @ wf.t()).permute(0, 3, 1, 2)
 
 
 # ------------------------------------------------------------------------------------------------------------------- "triton" core
@@ -903,15 +914,34 @@ class BiasOnlyAttention(BackendModule):
         self.to_scale = Linear(d_cond, d_single, bias=True, init="default", bias_init=-2.0)  # sigmoid(-2) ~ 0.1: the update starts small
         self.set_backend(backend)
 
-    def _attention_weights(self, pair, mask, bias, dtype):
+    #: ``None``: follow :func:`miniworld_engine.bias_logits.default`; ``"fp32"`` / ``"bf16"``: this module's own pair-bias logits mode
+    pair_bias_logits: str | None = None
+
+    def set_pair_bias_logits(self, mode: str | None):
+        """Pair-bias logits precision of this module (:mod:`miniworld_engine.bias_logits`): ``"fp32"`` (default; training always), ``"bf16"``
+        (inference only), ``None`` (the process default / ``MINIWORLD_BIAS_LOGITS``). Returns ``self``."""
+        if mode is not None:
+            _bias_logits._check(mode, "set_pair_bias_logits")
+        self.pair_bias_logits = None if mode is None else mode.strip().lower()
+        return self
+
+    def _logits_mode(self, single, cond, pair, bias) -> str:
+        """The mode this call runs: bf16 only when asked for, bf16 activations and no autograd (:func:`miniworld_engine.bias_logits.effective`)."""
+        return _bias_logits.effective(self.pair_bias_logits, grad=_wants_grad(self, single, cond, pair, bias), dtype=single.dtype)
+
+    def _attention_weights(self, pair, mask, bias, dtype, mode: str = "fp32"):
         """softmax over the keys of the pair bias (masked keys at the largest negative finite logit): [B, H, L, L], shared by every sample.
 
         The logits and the softmax are fp32 whatever the module dtype (user rule 2026-11-19: the logits are 1e3..2e5 with a key spread of
         ~500, bf16 resolves 32..1024 there and broke the peptide bonds); only the attention weights are rounded to ``dtype``, for the
-        product with the values."""
+        product with the values. ``mode="bf16"`` (inference, see :mod:`miniworld_engine.bias_logits`): the logits are rounded to bf16 first
+        (:func:`bf16_pair_bias_logits`), the softmax is still fp32."""
         # (B, H, L, L) fp32 from the pair, or the hoisted bias (pair_bias_all), head-major already
         if bias is None:
-            logits = exact_pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
+            if mode == "bf16":
+                logits = bf16_pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps).float()
+            else:
+                logits = exact_pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
         else:
             logits = bias.to(torch.promote_types(bias.dtype, torch.float32))
         if mask is not None:
@@ -933,7 +963,7 @@ class BiasOnlyAttention(BackendModule):
         value, gate = self.to_value(single), self.to_gate(single)
         value = rearrange(value, "A B L (H D) -> A B L H D", H=self.n_head)
         # one softmax for every sample: the logits carry no augmentation axis
-        attention = self._attention_weights(pair, mask, bias, value.dtype)
+        attention = self._attention_weights(pair, mask, bias, value.dtype, self._logits_mode(single, cond, pair, bias))
         out = torch.einsum("bhij,abjhd->abihd", attention, value).flatten(-2)
         out = self.to_out(sigmoid_gate(gate, out))
         return single_res + sigmoid_gate(self.to_scale(cond), out)
@@ -976,7 +1006,7 @@ class BiasOnlyAttention(BackendModule):
 
     def _forward_triton(self, single, cond, pair=None, mask=None, *, bias=None) -> torch.Tensor:
         from miniworld_engine.kernels.bias_only_attention.triton.core_t import bias_only_core_t
-        from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits
+        from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits, pair_bias_logits_bf16
 
         x, single_res = self.ada_ln_in.forward_with_stream(single, cond)  # the AdaLN's "triton" backend (set_backend)
         dt = single.dtype
@@ -985,7 +1015,10 @@ class BiasOnlyAttention(BackendModule):
             # [B, H, L, L], head-major: the one-pass pair LayerNorm + projection, or the hoisted bias
             if bias is None:
                 assert pair is not None, "the pair or its hoisted bias"
-                logits = pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
+                if self._logits_mode(single, cond, pair, bias) == "bf16":  # inference, opt-in (miniworld_engine.bias_logits)
+                    logits = pair_bias_logits_bf16(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps).float()
+                else:
+                    logits = pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
             else:
                 logits = bias.to(torch.promote_types(bias.dtype, torch.float32))
             if mask is not None:
