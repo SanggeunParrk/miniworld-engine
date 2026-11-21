@@ -20,7 +20,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
-KEYS = {"h100": ("H100", "h100_sm90"), "a100": ("A100", "a100_sm80"), "rtx5090": ("RTX 5090", "5090_sm120")}
+KEYS = {"h100": ("H100", "h100_sm90"), "a100": ("A100", "a100_sm80"), "rtx5090": ("RTX 5090", "5090_sm120"), "b200": ("B200", "b200_sm100")}
 OTHERS = {"pytorch": "pytorch", "triton": "triton", "anthropic": "anthropic", "cueq": "cueq"}
 
 

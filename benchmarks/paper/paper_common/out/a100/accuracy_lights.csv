@@ -1,0 +1,6 @@
+card,backend,measured,GREEN,YELLOW,RED
+A100,anthropic,2136,1790,333,13
+A100,cuda,3969,2827,1140,2
+A100,cueq,1882,1451,431,0
+A100,pytorch,7929,7878,51,0
+A100,triton,3959,2829,1128,2
