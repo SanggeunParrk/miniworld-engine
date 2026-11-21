@@ -27,8 +27,10 @@ INNER=$WORK/inner_$$.sh
   echo "export MODEL_OPT_JIT_ROOT=$WORK/jit TMPDIR=$WORK/tmp PYTHONUNBUFFERED=1 CUDA_HOME=$KITS_DIR/cuda13home"
   echo "export CC=$FF_SCRATCH/cuda13tk/.pixi/envs/default/bin/gcc CXX=$FF_SCRATCH/cuda13tk/.pixi/envs/default/bin/g++"
   echo "export PATH=$KIT_VENV/bin:$KITS_DIR/cuda13home/bin:/usr/bin:/bin"
-  echo "export PYTHONPATH=$REPO/src MINIWORLD_ANTHROPIC_ROOT=$ROOT"
+  echo "export PYTHONPATH=${ENGINE_PYTHONPATH:-$REPO/src} MINIWORLD_ANTHROPIC_ROOT=$ROOT"
   echo ". $KIT_VENV/bin/activate"
+  [ -n "${MWE_COMMIT:-}" ] && echo "export MWE_COMMIT=$MWE_COMMIT"
+  [ -n "${MWE_VERSION:-}" ] && echo "export MWE_VERSION=$MWE_VERSION"
   echo "cd $PWD"
   printf '%q ' "$@"
   echo

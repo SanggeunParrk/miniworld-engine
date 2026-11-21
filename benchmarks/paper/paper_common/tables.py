@@ -20,7 +20,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
-KEYS = {"h100": ("H100", "h100_sm90"), "a100": ("A100", "a100_sm80"), "rtx5090": ("RTX5090", "5090_sm120")}
+KEYS = {"h100": ("H100", "h100_sm90"), "a100": ("A100", "a100_sm80"), "rtx5090": ("RTX 5090", "5090_sm120")}
 OTHERS = {"pytorch": "pytorch", "triton": "triton", "anthropic": "anthropic", "cueq": "cueq"}
 
 
@@ -99,7 +99,7 @@ def sweeps(cards: list[str], out: Path) -> None:
             d, length = int(r["d"]), int(r["L"])
             for sweep, hit in (("L", d == 128), ("D", length == 768)):
                 if hit:
-                    res.append(dict(card=upper, module=r["module"].replace("TriangleMultiplication", "TriangleMultiplication"), mode=r["mode"],
+                    res.append(dict(card=upper, module=r["module"], mode=r["mode"],
                                     sweep=sweep, d=d, L=length, backend=r["backend"], ms=r["ms_median"]))  # fmt: skip
     if res:
         _write(out / "sweeps.csv", res, ["card", "module", "mode", "sweep", "d", "L", "backend", "ms"])
@@ -111,7 +111,7 @@ def accuracy(cards: list[str], out: Path) -> None:
         rows = _read("E3_accuracy", "E3", card)
         c: dict[str, Counter] = defaultdict(Counter)
         for r in rows:
-            if r["status"] == "measured" and r["backend"] != "pytorch":
+            if r["status"] == "measured":   # pytorch rows included (the paper table has them: pytorch vs float64 sets the tolerance)
                 c[r["backend"]][r["light"]] += 1
         for be, n in sorted(c.items()):
             res.append(dict(card=KEYS[card][0], backend=be, measured=sum(n.values()), GREEN=n["GREEN"], YELLOW=n["YELLOW"], RED=n["RED"]))

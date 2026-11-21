@@ -1,0 +1,26 @@
+# EXP REP STAGE  (priority order; E1 and E3 first, then E2, E6, E4, E5)
+E1_operator_speed 1 engine
+E1_operator_speed 2 engine
+E1_operator_speed 3 engine
+E3_accuracy 1 engine
+E1_operator_speed 1 kit
+E3_accuracy 1 kit
+E1_operator_speed 2 kit
+E1_operator_speed 3 kit
+E2_sweeps 1 engine
+E2_sweeps 2 engine
+E2_sweeps 3 engine
+E2_sweeps 1 kit
+E6_memory 1 engine
+E6_memory 1 kit
+E2_sweeps 2 kit
+E2_sweeps 3 kit
+E4_fp8 1 shipped
+E4_fp8 1 none
+E4_fp8 2 shipped
+E4_fp8 2 none
+E4_fp8 3 shipped
+E4_fp8 3 none
+E5_other_kernels 1 ext
+E5_other_kernels 2 ext
+E5_other_kernels 3 ext
