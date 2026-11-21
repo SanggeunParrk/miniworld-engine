@@ -11,7 +11,7 @@ depths: min
 samples: min
 timing: [graph]
 warmup: 5
-iterations: 100
+iterations: 20
 flush_l2: true
 device: cuda
 seed: 0

@@ -32,7 +32,9 @@ Each folder has `README.md` (what, conditions, commands, output), config `*.yaml
 
 ## Measurement conditions (E1, E2, E5, E6 speed)
 
-`timing: graph` (CUDA graph replay), cold L2 flush, warmup 5, 100 iterations, median; TF32 rule and inputs as in `measure/speed.py`.
+`timing: graph` (CUDA graph replay), cold L2 flush, warmup 5, 20 iterations (the configs; 100 before commit d9e8a3105), median; TF32 rule and inputs as in `measure/speed.py`.
+
+**RTX 5090 (cssb-rtx) iteration note.** The configs were switched from 100 to 20 iterations at 2026-11-21 ~11:30 KST (d9e8a3105), while the campaign was running. Records made before that point stay at 100 iterations (not re-measured): E1 repeat 1 (engine + kit), E2 repeats 1-3, and the first passes of E1 repeat 2; passes started afterwards (rest of E1 repeats 2/3, E5) use 20. A raw `.jsonl` of E1 repeat 2/3 can therefore hold both (warmup 5 in both); each record carries its own `iterations`. E5 on the 5090: the first (100-iteration, full E2-grid) E5 records are kept in `E5_other_kernels/records/rtx5090/old_it100/` (not in the CSV); the CSV is the AF3-only 20-iteration run.
 Anthropic kernels run through each card's kit stack: H100 `third_party/anthropic/kit_stack.sh` (CUDA-13 container; needs `KITS_DIR`, `FF_SCRATCH`,
 `MINIWORLD_ANTHROPIC_ROOT`), A100 `third_party/anthropic/kit_stack_compat.sh` with `MINIWORLD_ANTHROPIC_ROOT` = a release root holding the
 cu129 / py312 prebuilt (cssb3: `~/w45-jobs/upstream`) and `KIT_COMPAT_DIR` (CUDA-13 compat libcuda, default `~/cuda-compat-13.0`); the RTX 5090
