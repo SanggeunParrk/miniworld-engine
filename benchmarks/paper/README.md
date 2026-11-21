@@ -69,3 +69,12 @@ Smoke caveats: kernels were JIT-built on first use in the worktree (a cold cache
 before a campaign (`python -m miniworld_engine.kernels._prebuild --arch sm90a`, sm80 on the A100; `tools/slurm/cycle.sh` shows the job shape).
 Where there is no `.git` (cssb3, cssb-rtx copies) set `MWE_COMMIT=<tag commit>` (and `MWE_VERSION` if the tree has no pyproject) so records carry the commit.
 Library accuracy of the E5 adapters is not verified against float64 (speed only).
+
+## A100 campaign note: mixed iteration counts (iterations 100 for the first N cases, then 20)
+
+The A100 campaign started with `iterations: 100`; on 2026-11-21 (about 11:29 KST) the harness was changed to `iterations: 20` (warmup 5 unchanged; commit d9e8a3105).
+Resumable E1 / E2 record files (`records/a100/*.jsonl`) therefore hold the cases measured before the change with 100 iterations and the later ones with 20
+(Slurm jobs already running at the change finish their job with 100). Cases at the change were not re-measured. At the change the files held:
+E1 engine r1/r2/r3 = 12250 / 12026 / 12354 records, E1 kit r1/r2/r3 = 5322 / 5460 / 5527, E2 kit r1/r2/r3 = 34 / 48 / 50 (E2 engine and E3, E6 done with 100 / n.a.).
+Each job's own settings are in the `.meta.json` next to the records. E5 (A100) was re-run entirely with 20 iterations on the AF3 setup only
+(TriAttn d_pair=128, 4 heads, L 512 / 1024 / 2048); the earlier 100-iteration E5 records are kept under `E5_other_kernels/records/a100/old_it100/`.

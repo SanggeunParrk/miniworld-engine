@@ -1,0 +1,10 @@
+# EXP REP STAGE  (tasks without .done on 2026-11-21; E4 n/a on A100; E5 runs as its own small chain, 20 iterations)
+E1_operator_speed 1 engine
+E1_operator_speed 2 engine
+E1_operator_speed 3 engine
+E1_operator_speed 1 kit
+E1_operator_speed 2 kit
+E1_operator_speed 3 kit
+E2_sweeps 1 kit
+E2_sweeps 2 kit
+E2_sweeps 3 kit
