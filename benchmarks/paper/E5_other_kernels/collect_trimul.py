@@ -1,6 +1,6 @@
 """E5 triangle multiplication: records/<card>/ext_trimul.r*.jsonl -> a markdown table (median over the repeats, ms) with the ratio to the engine's cuda.
 
-    python E5_other_kernels/collect_trimul.py records/h100 [records/a100 ...] > table.md
+    python E5_other_kernels/collect_trimul.py [--e5] records/h100 [records/a100 ...] > table.md   (--e5: d_pair 128, L 512 / 1024 / 2048 only)
 
 Columns: pytorch, cuda, then each external backend as ``ms (x ratio)`` where ratio = backend / cuda (> 1: slower than the engine's cuda); a case a backend
 does not serve shows ``-`` (reasons: the records' ``reason``).
@@ -34,12 +34,15 @@ def load(card_dir: Path):
 
 
 def main(argv) -> int:
-    for d in argv or ["records/h100"]:
+    only = "--e5" in argv  # the reduced E5 scope: d_pair 128, L 512 / 1024 / 2048
+    for d in [a for a in argv if a != "--e5"] or ["records/h100"]:
         cells, reasons, reps = load(Path(d))
         print(f"\n### {Path(d).name}  (repeats: {', '.join(reps) or 'none'}; median of the repeats' medians, ms; ratio = backend / cuda)\n")
         print("| mode | d | L | " + " | ".join(BACKENDS) + " |")
         print("|---|---|---|" + "---|" * len(BACKENDS))
         for key in sorted(cells, key=lambda k: (k[0], k[1] != 128, k[1], k[2])):
+            if only and not (key[1] == 128 and key[2] in (512, 1024, 2048)):
+                continue
             row = {b: statistics.median(v) for b, v in cells[key].items()}
             cuda = row.get("cuda")
             out = []

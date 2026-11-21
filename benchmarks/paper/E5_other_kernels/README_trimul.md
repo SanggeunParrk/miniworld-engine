@@ -16,3 +16,12 @@ Checked and not connected: Hugging Face `kernels-community/trimul_gpumode` `kern
 Install on a card: `third_party/<entry>/fetch.sh [TARGET]`; the adapters look in `$PAPER_EXT_PATH` and `third_party/<entry>/upstream`.
 Run: `python E5_other_kernels/run_ext_trimul.py E5_other_kernels/cfg_trimul.yaml --kind speed --out E5_other_kernels/records/<card>/ext_trimul.r<N>.jsonl --ext fast_trimul gpumode geonn`
 (`--kind accuracy` for the accuracy against the fp64 reference).
+
+## Records and scope
+
+`records/<card>/ext_trimul.r{1,2,3}.jsonl` (three repeats, a different job each), `records/ext_trimul_table.md` (`collect_trimul.py --e5`), `records/acc/ext_trimul_acc.<card>.jsonl`
+(`acc_trimul.py --grads`: error against the module's own fp64 PyTorch result). Reported scope: TriMul outgoing AF3 setup (d_pair=128, p_drop 0.25), L 512 / 1024 / 2048,
+eval and train where the backend serves them, 20 timed iterations (`requirements_trimul_e5.csv`, `cfg_trimul.yaml`). The H100 and A100 records were taken with that config;
+the 5090 records were taken before the scope reduction on the wider E2 grid with 100 iterations (same cells included; `ext_trimul.r*.jsonl.meta.json` has the settings): the
+cells of the reported scope are reused. Not connected as separate operator classes: LayerNorm / gate kernels of fast_trimul are internal helpers of its fused module (no
+module-level API to wrap), the other libraries expose only the whole update.
