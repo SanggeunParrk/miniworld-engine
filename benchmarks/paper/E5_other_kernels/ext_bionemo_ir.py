@@ -52,9 +52,31 @@ def evo(q, k, v, keep, bias):
     return out
 
 
+_NATIVE: list = []
+
+
+def native_refusal() -> str | None:
+    """The CuTeDSL kernels of triangle attention / OPM on SM80-SM103 live in the wheel's native library ``bionemo_ir.libs._cutedsl_kernels`` (a glibc >= 2.34
+    binary): where it cannot be imported (the EL8 cluster hosts have glibc 2.28) those calls are ``unsupported`` (the library raises at the first call). SM120
+    does not use it (cuEquivariance / Triton)."""
+    if torch.cuda.get_device_capability()[0] >= 12:
+        return None
+    if not _NATIVE:
+        stub_package()
+        try:
+            importlib.import_module("bionemo_ir.libs._cutedsl_kernels")
+            _NATIVE.append(None)
+        except BaseException as exc:
+            why = str(exc).split(" (required")[0][:120]
+            _NATIVE.append(f"native library bionemo_ir.libs._cutedsl_kernels cannot be loaded on this host ({why}): its CuTeDSL kernels are unavailable")
+    return _NATIVE[0]
+
+
 def reason(dtype, head_dim, length, grad):
     if grad:
         return "BioIR kernels are inference only (no backward)"
+    if (why := native_refusal()) is not None:
+        return why
     if dtype not in (torch.bfloat16, torch.float16):
         return f"dtype {dtype}: the CuTeDSL kernels take fp16 / bf16"
     if ((head_dim + 31) // 32) * 32 not in (32, 64, 128, 256):
@@ -95,6 +117,8 @@ def _opm_supports(self, msa, mask=None, token_asym_id=None, residual=None):
     dt = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else msa.dtype
     if dt not in (torch.bfloat16, torch.float16):
         return f"dtype {dt}: bf16 / fp16"
+    if (why := native_refusal()) is not None:
+        return why
     d_hidden, d_pair = self.to_left.weight.shape[0], self.to_out.weight.shape[0]
     if (d_hidden, d_hidden) != (ops._KERNEL_C, ops._KERNEL_D) or d_pair not in ops._SUPPORTED_CZ:
         return f"d_hidden {d_hidden}, d_pair {d_pair}: the op ships d_hidden 32 with d_pair in {ops._SUPPORTED_CZ}"

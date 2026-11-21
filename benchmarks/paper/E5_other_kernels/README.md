@@ -47,4 +47,6 @@ and a case outside a library's range is recorded `unsupported` with the reason (
 | `ligo_pwa` | Ligo AlphaFold3 Triton PWA kernel (Apache-2.0, patched: zero-init) | MSAPairWeightedAveraging | fwd + bwd | all |
 | `megafold_tr` | MegaFold fused Transition (MIT) | Transition | fwd + bwd, bf16 | all |
 
+Results: ext_attn_results.md (speed + accuracy per card). Reduced scope (coordinator): AF3 setup only (TriAttn d_pair 128 x 4 heads; AttentionPairBias 384 and the 768-channel x 16 heads token-DiT row; OPM / PWA / Transition AF3 rows), L 512 / 1024 / 2048, 20 iterations, 3 repeats. LayerNorm: no candidate has a standalone LayerNorm op (BioIR / MegaFold fuse it into LN+projection kernels), so no LayerNorm row.
+
 Not connected: FlashBias (low-rank bias: not applicable to a dense pair bias; third_party/flashbias/README.md). `trifast` / `ds4sci` stay in `externals.py` (their pinned install is also recorded under third_party/).

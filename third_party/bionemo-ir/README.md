@@ -15,3 +15,6 @@ Triton on SM120; pair-weighted averaging CuTeDSL; transition MLP (silu_gate) CuT
 | LayerNorm | fused LN only inside AdaLN / LN+proj kernels (no standalone LN op) | no |
 
 Library fallbacks: a call outside a kernel envelope silently runs the library own PyTorch formula; the adapters check the envelope and report such calls `unsupported`.
+
+Measured here (E5 ext_attn, see benchmarks/paper/E5_other_kernels/ext_attn_results.md): the wheel's native library `bionemo_ir/libs/_cutedsl_kernels.abi3.so` needs glibc >= 2.34 (the H100 cluster hosts have 2.28: import fails) and a CUDA driver >= 580 for its CUBINs (A100 hosts: 570: cuModuleLoadData fails),
+so on H100 / A100 triangle attention and OPM are `unsupported` with that reason; pair-weighted averaging (python CUBIN launch) runs on all three cards. RTX 5090 (Ubuntu 24.04, driver 595): triangle attention (cuEquivariance route), OPM (Triton), PWA run; transition MLP has no sm_120 / (width 64 / 128, hidden 256 / 512) variant on any card. Inference only everywhere.
