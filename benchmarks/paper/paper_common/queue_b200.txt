@@ -1,0 +1,26 @@
+# EXP REP STAGE  (priority order: repeat 1 of everything first, then repeats 2 and 3; kit tasks need the Anthropic kernels on the B200 stack)
+E1_operator_speed 1 engine
+E3_accuracy 1 engine
+E4_fp8 1 shipped
+E4_fp8 1 none
+E5_other_kernels 1 ext
+E2_sweeps 1 engine
+E6_memory 1 engine
+E1_operator_speed 1 kit
+E3_accuracy 1 kit
+E2_sweeps 1 kit
+E6_memory 1 kit
+E1_operator_speed 2 engine
+E2_sweeps 2 engine
+E4_fp8 2 shipped
+E4_fp8 2 none
+E5_other_kernels 2 ext
+E1_operator_speed 2 kit
+E2_sweeps 2 kit
+E1_operator_speed 3 engine
+E2_sweeps 3 engine
+E4_fp8 3 shipped
+E4_fp8 3 none
+E5_other_kernels 3 ext
+E1_operator_speed 3 kit
+E2_sweeps 3 kit

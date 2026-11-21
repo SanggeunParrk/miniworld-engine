@@ -27,7 +27,7 @@ def rows(card: str) -> list[dict]:
         ok = [(r, m) for r, m in items if r["status"] == "ok"]
         rec, meta = (ok or items)[-1]
         d, h = csvio.dims_of(rec["kwargs"])
-        no_route = rec["status"] == "ok" and meta.get("card") != "h100" and not rec["fp8_route_fired"]
+        no_route = rec["status"] == "ok" and meta.get("card") not in ("h100", "b200") and not rec["fp8_route_fired"]
         for backend in ("cuda", "engine-fp8"):
             row = {
                 "id": "E4", "card": card, "gpu": meta.get("gpu", ""), "engine_version": meta.get("engine_version", ""),
@@ -52,6 +52,6 @@ def rows(card: str) -> list[dict]:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--card", required=True, choices=["h100", "a100", "rtx5090"])
+    p.add_argument("--card", required=True, choices=["h100", "a100", "rtx5090", "b200"])
     card = p.parse_args().card
     csvio.write(csvio.csv_path(HERE, f"E4_{card}.csv"), rows(card), EXTRA)

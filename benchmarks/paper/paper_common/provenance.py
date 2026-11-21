@@ -9,7 +9,7 @@ import subprocess
 from functools import cache
 from pathlib import Path
 
-CARDS = {"h100_sm90": "h100", "a100_sm80": "a100", "5090_sm120": "rtx5090"}  # engine card key -> short card name used in file names
+CARDS = {"h100_sm90": "h100", "a100_sm80": "a100", "5090_sm120": "rtx5090", "b200_sm100": "b200"}  # engine card key -> short card name used in file names
 
 
 def _engine_root() -> Path:

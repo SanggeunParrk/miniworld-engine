@@ -10,7 +10,7 @@ version, the commit, torch / CUDA / driver, the GPU and the node.
 | E1 | `E1_operator_speed/` | speed of all 39 operator classes (every requirements row), inference + training; backends pytorch, cuda, triton, cueq, anthropic | Fig 1c, Supp 2-4, abstract | H100, A100, 5090 |
 | E2 | `E2_sweeps/` | TriMul (outgoing) / TriAttn (starting, 32 channels per head): L sweep (d=128) and D sweep (L=768), inference + training | Supp 5-7 | H100, A100, 5090 |
 | E3 | `E3_accuracy/` | accuracy against float64 (judge tolerances), the E1 cases | Methods | H100, A100, 5090 |
-| E4 | `E4_fp8/` | FP8 path of TriMul / TriAttn inference against the default path, same process, alternating | Fig 1c, Supp 5 | H100 (5090: no sm120 FP8 path; A100 n/a) |
+| E4 | `E4_fp8/` | FP8 path of TriMul / TriAttn inference against the default path, same process, alternating | Fig 1c, Supp 5 | H100, B200 (5090: no sm120 FP8 path; A100 n/a) |
 | E5 | `E5_other_kernels/` | 12 other public candidates (ds4sci, trifast, fast_trimul, gpumode, geonn, gnops, of3tri, megafold, megafold_tr, bionemo_ir, turbopf, ligo_pwa) + cuEquivariance as external backends of every Pairformer operator class (TriAttn, TriMul, AttentionPairBias, OPM, PWA, Transition); results in `E5_other_kernels/E5_results.md` | Fig 1c, Supp 2-7 | H100, A100, 5090 |
 | E6 | `E6_memory/` | peak memory per operator / backend on the E2 grid, inference + training | new (Supp) | H100, A100, 5090 |
 
@@ -22,7 +22,7 @@ Each folder has `README.md` (what, conditions, commands, output), config `*.yaml
 - raw records: `<ID folder>/records/<card>/<stage>.r<k>.jsonl` (+ `.meta.json` provenance, `.done` marker when a file is complete);
   stage `engine` = engine environment (pytorch, cuda, triton, cueq), `kit` = the Anthropic kernels on the card's kit stack;
   `r<k>` = repeat k (1-3), each in a different Slurm job / ssh run;
-- CSV: `<ID folder>/<ID>_<card>.csv` with `card` in `h100 | a100 | rtx5090`. Columns:
+- CSV: `<ID folder>/<ID>_<card>.csv` with `card` in `h100 | a100 | rtx5090 | b200`. Columns:
   `id, card, gpu, engine_version, commit, module, mode, backend, L, d, n_head, dtype, ms_median, ms_min, ms_max, peak_mem_gib, status, reason`,
   then experiment-specific trailing columns (`stack, row, variant, samples, depth, repeats, timed_as` for speed; light and errors for E3; ...).
   `ms_median` = median over the repeats of the per-repeat medians, `ms_min` / `ms_max` = their min / max. `mode` is `eval` (inference) or `train`.
@@ -49,6 +49,10 @@ needs none (driver is CUDA 13). The `pytorch` reference of the `kit` stage is me
    - **A100** (cssb3): the same with `a100.sbatch` (E4 not applicable).
    - **RTX 5090** (cssb-rtx): `REP=1 benchmarks/paper/E1_operator_speed/rtx5090.sh` (flock + 16 GB cap via `~/mwe/gpu.sh`; run again to resume).
    - E5 first needs the libraries: see `E5_other_kernels/README.md`.
+   - **B200** (host `b200`, no Slurm, shared account: GPUs 0-3 only): from a clone of the source tree (the PyPI wheels carry no sm100 kernels), prebuild
+     (`python -m miniworld_engine.kernels._prebuild --arch sm100 --jobs N`), then `nohup paper_common/b200_driver.sh 0 1 2 3 &` (one lane per GPU, tasks of
+     `paper_common/queue_b200.txt` via `b200_lane.sh` / `b200_task.sh`; environment `paper_common/env_b200.sh`; resumable, `.done` markers, logs in `logs_b200/`).
+     Kit stack: `third_party/anthropic/kit_stack_b200.sh` with a torch 2.13.0+cu130 venv (`KIT_VENV`). E5 graph check: `E5_other_kernels/gc_b200.sh`.
 3. Collect: in a CPU job, `python <ID folder>/collect.py --card h100` (E4 likewise), then `python paper_common/tables.py --card h100 ...`.
 
 Smoke run (1-2 cases, no records committed): `EXTRA="--module TriangleMultiplication --lengths 128 --max-cases 2" RECORDS=$SCRATCH/smoke sbatch --export=ALL,EXTRA,RECORDS,REP=1 ...`.
