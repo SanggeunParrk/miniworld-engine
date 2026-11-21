@@ -1,0 +1,12 @@
+{
+  "name": "DeepSpeed (DS4Sci_EvoformerAttention)",
+  "repo": "https://github.com/deepspeedai/DeepSpeed",
+  "pypi": "deepspeed 0.20.0 (sdist)",
+  "sdist_sha256": "67195f94b2bc63350f15f2da9126b489122261d2c858f34120f4aa33910bca7d",
+  "license": "Apache-2.0",
+  "fetch": "fetch.sh (pip install --target, --require-hashes, --no-deps; same recipe as ~/paper-ext: hjson 3.1.0, py-cpuinfo 9.0.0, psutil 7.2.2, ninja 1.13.2, msgpack 1.2.4)",
+  "needs": "CUTLASS_PATH, nvcc, ninja at the first call (the Evoformer op JIT-builds)",
+  "e5_backend": "ds4sci",
+  "adapter": "benchmarks/paper/E5_other_kernels/externals.py (existing; unchanged)",
+  "runtime_path_in_use": "~/paper-ext (PAPER_EXT_PATH) - the running E5 campaigns import from there; this record only documents the pinned install"
+}

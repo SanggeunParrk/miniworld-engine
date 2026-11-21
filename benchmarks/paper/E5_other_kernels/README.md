@@ -24,3 +24,27 @@ untested), trifast is Triton (any card).
     cd benchmarks/paper && REP=1 paper_common/chain.sh 6 E5_other_kernels/h100.sbatch ; python E5_other_kernels/collect.py --card h100
 
 Output `E5_<card>.csv` (columns as E1). Status: see `../README.md` (adapters smoke-run; library versions to be pinned at the campaign).
+
+## ext_attn: the Pairformer-operator candidates of third_party/ (branch third-party-attn)
+
+Further public kernels as external backends of the measurer, one adapter file each (`ext_<name>.py`), registered by one line in `ext_attn_registry.py`; nothing under `src/` changes.
+Run through `run_ext_attn.py` (it is `paper_common/run_measure.py` with the registry's names accepted by `--ext`; the coordinator merges the registry into `externals.py` later):
+
+    python E5_other_kernels/run_ext_attn.py E5_other_kernels/cfg_ext_attn.yaml --kind speed --out E5_other_kernels/records/<card>/ext_attn.r1.jsonl --ext gnops of3tri megafold bionemo_ir turbopf ligo_pwa megafold_tr
+    python E5_other_kernels/run_ext_attn.py E5_other_kernels/cfg_ext_attn_acc.yaml --kind accuracy --out ... --ext ...     # vs the float64 gold of the module's reference
+
+The upstream trees are installed per card by `third_party/<name>/fetch.sh` into `$PAPER_EXT_ATTN` (default `~/paper-ext-attn`; not `~/paper-ext`, which the trifast / ds4sci campaigns use).
+Cases: `requirements_ext_attn.csv` (E1 / E2 rows of the classes below; lengths 256 | 768 | 1536 for the E1 rows, the E2 sweeps for TriAttn); a backend serves only the classes its adapter attaches to,
+and a case outside a library's range is recorded `unsupported` with the reason (never re-routed).
+
+| backend | library (license) | classes | modes / dtypes | cards |
+|---|---|---|---|---|
+| `gnops` | ROCm geometric-nn-ops Triton (Apache-2.0) | TriangleAttention, AttentionPairBias | fwd + bwd, bf16 / fp16 / fp32 | all |
+| `of3tri` | OpenFold3 Triton evoformer attention (Apache-2.0) | TriangleAttention, AttentionPairBias | fwd + bwd, bf16 / fp16 / fp32 | all |
+| `megafold` | MegaFold EvoAttention Triton (MIT) | TriangleAttention, AttentionPairBias | fwd + bwd | all |
+| `bionemo_ir` | NVIDIA BioNeMo Inference Runtime (Apache-2.0, CuTeDSL CUBIN) | TriangleAttention, OuterProductMean, MSAPairWeightedAveraging, Transition | inference, bf16 / fp16 | A100, H100 (5090: cuEquivariance / Triton fallbacks) |
+| `turbopf` | TurboPairFormer (Apache-2.0, CUDA, built locally) | TriangleAttention | fwd + bwd, bf16, d <= 64 | H100 only |
+| `ligo_pwa` | Ligo AlphaFold3 Triton PWA kernel (Apache-2.0, patched: zero-init) | MSAPairWeightedAveraging | fwd + bwd | all |
+| `megafold_tr` | MegaFold fused Transition (MIT) | Transition | fwd + bwd, bf16 | all |
+
+Not connected: FlashBias (low-rank bias: not applicable to a dense pair bias; third_party/flashbias/README.md). `trifast` / `ds4sci` stay in `externals.py` (their pinned install is also recorded under third_party/).

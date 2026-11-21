@@ -1,0 +1,10 @@
+{
+  "name": "MegaFold (EvoFlash-3D Triton EvoAttention, fused Transition)",
+  "repo": "https://github.com/Supercomputing-System-AI-Lab/MegaFold",
+  "revision": "845905e7c707cf4004404354156df97f2efc4fde",
+  "license": "MIT",
+  "paper": "arXiv 2506.20686",
+  "fetch": "fetch.sh (git, pinned; + liger-kernel 0.8.5 BSD-2-Clause wheel, sha256 in the script)",
+  "e5_backends": ["megafold", "megafold_tr"],
+  "adapters": ["benchmarks/paper/E5_other_kernels/ext_megafold.py", "benchmarks/paper/E5_other_kernels/ext_megafold_tr.py"]
+}

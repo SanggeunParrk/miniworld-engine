@@ -1,0 +1,10 @@
+{
+  "name": "NVIDIA BioNeMo Inference Runtime (bionemo-ir)",
+  "repo": "https://github.com/NVIDIA-BioNeMo/BioNeMo-Inference-Runtime",
+  "pypi": "bionemo-ir 0.2.2 (cp312-abi3-manylinux_2_34_x86_64.whl)",
+  "wheel_sha256": "fa58528015d111c5c4bbacddb79110c814999f4a0d6f09ca5a5db2f3cb6e4fe0",
+  "license": "Apache-2.0 for the NVIDIA-authored BioIR code (wheel: LICENSE, THIRD_PARTY_NOTICES.md); the CuTeDSL kernel SOURCE is not published (precompiled CUBINs only)",
+  "fetch": "fetch.sh (curl + sha256 + unzip, no pip, no dependencies)",
+  "e5_backend": "bionemo_ir",
+  "adapter": "benchmarks/paper/E5_other_kernels/ext_bionemo_ir.py"
+}

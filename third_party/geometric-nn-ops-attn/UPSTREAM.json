@@ -1,0 +1,10 @@
+{
+  "name": "geometric-nn-ops (triangle attention)",
+  "repo": "https://github.com/ROCm/geometric-nn-ops",
+  "revision": "232ed824269b55cc26f533cc951ac14ee6cd4007",
+  "version": "1.0.0 (not on PyPI)",
+  "license": "Apache-2.0",
+  "fetch": "fetch.sh (git, pinned)",
+  "e5_backend": "gnops",
+  "adapter": "benchmarks/paper/E5_other_kernels/ext_gnops.py"
+}
