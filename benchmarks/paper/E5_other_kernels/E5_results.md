@@ -6,22 +6,22 @@ Source: `E5_<card>.csv` (collect.py) from the existing records only: the first E
 
 The measurer times `graph.replay()` of a step captured on a side stream. A library that launches its kernels on the legacy default stream (DeepSpeed `evoformer_attn`: attention_cu.cu / attention_back.cu launch without a stream argument) leaves the capture: the replay then times an empty graph. `graph_check.py` runs each (backend, case) with the same step and checks (a) two replays give the eager output, (b) train: parameter gradients non-zero and of the eager norm, (c) replay time not below half of the eager GPU kernel time, (d) the largest eager kernels appear in the profile of the replay. A cell that fails is `invalid_graph` in the CSV (excluded from the tables' graph columns); its corrected eager time (CUDA events, same warmup / iterations / L2 flush) is shown with an `e` and compared with the engine's eager time. `pytorch` is not checked (plain torch ops).
 
-| backend | H100 (sm_90) | A100 (sm_80) | RTX 5090 (sm_120) |
-|---|---|---|---|
-| `cuda` | valid (47 cells) | valid (52 cells); 1 ok cells: check could not run (out of memory / crash / library error) | valid (46 cells); 6 ok cells: check could not run (out of memory / crash / library error) |
-| `cueq` | valid (12 cells) | valid (12 cells) | valid (9 cells); 3 ok cells: check could not run (out of memory / crash / library error) |
-| `ds4sci` | INVALID 6 of 6 cells ((a) graph output differs from eager: relative rms 1.27e-01); valid 0 | INVALID 6 of 6 cells ((a) graph output differs from eager: relative rms 1.27e-01); valid 0 | no ok cell (unsupported / failed / skipped) |
-| `trifast` | valid (6 cells) | valid (6 cells) | valid (5 cells); 1 ok cells: check could not run (out of memory / crash / library error) |
-| `fast_trimul` | valid (6 cells) | valid (6 cells) | valid (4 cells); 2 ok cells: check could not run (out of memory / crash / library error) |
-| `gpumode` | valid (3 cells) | valid (3 cells) | valid (2 cells); 1 ok cells: check could not run (out of memory / crash / library error) |
-| `geonn` | valid (3 cells) | valid (3 cells) | valid (2 cells); 1 ok cells: check could not run (out of memory / crash / library error) |
-| `gnops` | valid (24 cells) | valid (24 cells) | valid (23 cells); 1 ok cells: check could not run (out of memory / crash / library error) |
-| `of3tri` | valid (24 cells) | valid (24 cells) | valid (23 cells); 1 ok cells: check could not run (out of memory / crash / library error) |
-| `megafold` | valid (24 cells) | valid (24 cells) | valid (22 cells); 2 ok cells: check could not run (out of memory / crash / library error) |
-| `bionemo_ir` | valid (3 cells) | valid (3 cells) | valid (8 cells); 1 ok cells: check could not run (out of memory / crash / library error) |
-| `turbopf` | valid (5 cells); 1 ok cells: check could not run (out of memory / crash / library error) | no ok cell (unsupported / failed / skipped) | no ok cell (unsupported / failed / skipped) |
-| `ligo_pwa` | valid (6 cells) | valid (6 cells) | valid (5 cells); 1 ok cells: check could not run (out of memory / crash / library error) |
-| `megafold_tr` | valid (12 cells) | valid (12 cells) | valid (10 cells); 2 ok cells: check could not run (out of memory / crash / library error) |
+| backend | H100 (sm_90) | A100 (sm_80) | RTX 5090 (sm_120) | B200 (sm_100) |
+|---|---|---|---|---|
+| `cuda` | valid (47 cells) | valid (52 cells); 1 ok cells: check could not run (out of memory / crash / library error) | valid (46 cells); 6 ok cells: check could not run (out of memory / crash / library error) | valid (48 cells) |
+| `cueq` | valid (12 cells) | valid (12 cells) | valid (9 cells); 3 ok cells: check could not run (out of memory / crash / library error) | valid (30 cells) |
+| `ds4sci` | INVALID 6 of 6 cells ((a) graph output differs from eager: relative rms 1.27e-01); valid 0 | INVALID 6 of 6 cells ((a) graph output differs from eager: relative rms 1.27e-01); valid 0 | no ok cell (unsupported / failed / skipped) | INVALID 6 of 6 cells ((a) graph output differs from eager: relative rms 1.04e-01); valid 0 |
+| `trifast` | valid (6 cells) | valid (6 cells) | valid (5 cells); 1 ok cells: check could not run (out of memory / crash / library error) | valid (6 cells) |
+| `fast_trimul` | valid (6 cells) | valid (6 cells) | valid (4 cells); 2 ok cells: check could not run (out of memory / crash / library error) | valid (6 cells) |
+| `gpumode` | valid (3 cells) | valid (3 cells) | valid (2 cells); 1 ok cells: check could not run (out of memory / crash / library error) | valid (3 cells) |
+| `geonn` | valid (3 cells) | valid (3 cells) | valid (2 cells); 1 ok cells: check could not run (out of memory / crash / library error) | valid (3 cells) |
+| `gnops` | valid (24 cells) | valid (24 cells) | valid (23 cells); 1 ok cells: check could not run (out of memory / crash / library error) | valid (24 cells) |
+| `of3tri` | valid (24 cells) | valid (24 cells) | valid (23 cells); 1 ok cells: check could not run (out of memory / crash / library error) | valid (24 cells) |
+| `megafold` | valid (24 cells) | valid (24 cells) | valid (22 cells); 2 ok cells: check could not run (out of memory / crash / library error) | valid (24 cells) |
+| `bionemo_ir` | valid (3 cells) | valid (3 cells) | valid (8 cells); 1 ok cells: check could not run (out of memory / crash / library error) | valid (15 cells) |
+| `turbopf` | valid (5 cells); 1 ok cells: check could not run (out of memory / crash / library error) | no ok cell (unsupported / failed / skipped) | no ok cell (unsupported / failed / skipped) | no ok cell (unsupported / failed / skipped) |
+| `ligo_pwa` | valid (6 cells) | valid (6 cells) | valid (5 cells); 1 ok cells: check could not run (out of memory / crash / library error) | valid (6 cells) |
+| `megafold_tr` | valid (12 cells) | valid (12 cells) | valid (10 cells); 2 ok cells: check could not run (out of memory / crash / library error) | valid (12 cells) |
 
 ## 1. Cells where a candidate is faster than the engine
 
@@ -34,6 +34,12 @@ Cells where the engine's `cuda` backend has no number (no kernel for the shape: 
 | card | class | mode | L | engine cuda | best candidate | its ms |
 |---|---|---|---|---|---|---|
 | a100 | PWA | train | 2048 | unsupported | `ligo_pwa` | 2578.6 |
+| b200 | AttentionPairBias-768 | eval | 512 | unsupported | `megafold` | 0.514 |
+| b200 | AttentionPairBias-768 | eval | 1024 | unsupported | `of3tri` | 1.785 |
+| b200 | AttentionPairBias-768 | eval | 2048 | unsupported | `of3tri` | 6.946 |
+| b200 | AttentionPairBias-768 | train | 512 | unsupported | `megafold` | 1.149 |
+| b200 | AttentionPairBias-768 | train | 1024 | unsupported | `of3tri` | 3.759 |
+| b200 | AttentionPairBias-768 | train | 2048 | unsupported | `of3tri` | 14.348 |
 | h100 | AttentionPairBias-768 | eval | 512 | unsupported | `megafold` | 0.712 |
 | h100 | AttentionPairBias-768 | eval | 1024 | unsupported | `of3tri` | 2.548 |
 | h100 | AttentionPairBias-768 | eval | 2048 | unsupported | `of3tri` | 10.228 |
@@ -74,6 +80,14 @@ Best candidate = the fastest `ok` backend other than `pytorch` and the engine's 
 | rtx5090 | PWA | `bionemo_ir` x7.32 | `bionemo_ir` x6.27 | `bionemo_ir` x5.60 | `ligo_pwa` x34.13 | `ligo_pwa` x41.35 | no engine number; `ligo_pwa` 579.1 |
 | rtx5090 | Transition-d128 | `megafold_tr` x3.37 | `megafold_tr` x4.07 | `megafold_tr` x4.31 | `megafold_tr` x2.30 | `megafold_tr` x2.35 | `megafold_tr` x2.35 |
 | rtx5090 | Transition-d64 | `megafold_tr` x6.12 | `megafold_tr` x6.96 | `megafold_tr` x7.56 | `megafold_tr` x2.97 | `megafold_tr` x2.97 | `megafold_tr` x3.16 |
+| b200 | TriAttn | `bionemo_ir` x2.96 | `bionemo_ir` x2.57 | `bionemo_ir` x1.82 | `trifast` x4.42 | `trifast` x4.12 | `trifast` x3.70 |
+| b200 | TriMul | `cueq` x2.35 | `cueq` x2.22 | `cueq` x1.91 | `cueq` x4.11 | `cueq` x3.78 | `cueq` x2.93 |
+| b200 | AttentionPairBias-384 | `megafold` x12.50 | `of3tri` x21.12 | `of3tri` x27.95 | `megafold` x8.63 | `of3tri` x11.14 | `of3tri` x11.95 |
+| b200 | AttentionPairBias-768 | no engine number; `megafold` 0.514 | no engine number; `of3tri` 1.785 | no engine number; `of3tri` 6.946 | no engine number; `megafold` 1.149 | no engine number; `of3tri` 3.759 | no engine number; `of3tri` 14.348 |
+| b200 | OPM | `bionemo_ir` x2.80 | `bionemo_ir` x1.88 | `bionemo_ir` x1.25 | - | - | - |
+| b200 | PWA | `bionemo_ir` x15.30 | `bionemo_ir` x16.45 | `bionemo_ir` x16.57 | `ligo_pwa` x72.72 | `ligo_pwa` x87.55 | `ligo_pwa` x139.55 |
+| b200 | Transition-d128 | `bionemo_ir` x5.85 | `bionemo_ir` x6.36 | `bionemo_ir` x6.14 | `megafold_tr` x3.91 | `megafold_tr` x3.82 | `megafold_tr` x3.38 |
+| b200 | Transition-d64 | `bionemo_ir` x7.57 | `bionemo_ir` x9.13 | `bionemo_ir` x10.14 | `megafold_tr` x5.86 | `megafold_tr` x6.15 | `megafold_tr` x6.25 |
 
 ## 3. Tables per operator class and card
 
@@ -395,20 +409,128 @@ Faster than the engine: none.
 
 Faster than the engine: none.
 
+### B200 (sm_100)
+
+**TriAttn (TriangleAttention, starting, d_pair 128, 4 heads of 32)**
+
+| mode | L | `pytorch` | `cuda` | `cueq` | `ds4sci` | `trifast` | `gnops` | `of3tri` | `megafold` | `bionemo_ir` | `turbopf` |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| eval | 512 | 5.200 | 0.287 | 1.949 (x6.80) | 2.491e (x8.78) INVALID-GRAPH | 1.483 (x5.17) | 1.251 (x4.37) | 1.248 (x4.36) | 2.049 (x7.15) | 0.850 (x2.96) | HW |
+| eval | 1024 | 36.388 | 1.497 | 11.019 (x7.36) | 16.231e (x10.86) INVALID-GRAPH | 7.650 (x5.11) | 6.905 (x4.61) | 6.902 (x4.61) | 11.799 (x7.88) | 3.854 (x2.57) | HW |
+| eval | 2048 | OOM | 10.994 | 71.373 (x6.49) | 118.0e (x10.95) INVALID-GRAPH | 44.594 (x4.06) | 43.765 (x3.98) | 43.748 (x3.98) | 77.125 (x7.02) | 19.960 (x1.82) | HW |
+| train | 512 | 11.534 | 1.194 | 7.062 (x5.91) | 9.126e (x7.32) INVALID-GRAPH | 5.274 (x4.42) | 7.084 (x5.93) | 7.084 (x5.93) | 6.392 (x5.35) | NOBWD | HW |
+| train | 1024 | 79.053 | 7.505 | 43.751 (x5.83) | 61.367e (x8.36) INVALID-GRAPH | 30.913 (x4.12) | 31.635 (x4.22) | 31.622 (x4.21) | 38.586 (x5.14) | NOBWD | HW |
+| train | 2048 | OOM | 54.836 | 331.8 (x6.05) | 457.7e (x8.59) INVALID-GRAPH | 203.1 (x3.70) | 203.2 (x3.71) | 203.2 (x3.70) | 266.8 (x4.87) | NOBWD | HW |
+
+Faster than the engine: none.
+
+**TriMul (TriangleMultiplication, outgoing, d_pair 128)**
+
+| mode | L | `pytorch` | `cuda` | `cueq` | `fast_trimul` | `gpumode` | `geonn` |
+|---|---|---|---|---|---|---|---|
+| eval | 512 | 1.867 | 0.142 | 0.333 (x2.35) | 1.936 (x13.64) | 1.078 (x7.59) | 1.349 (x9.51) |
+| eval | 1024 | 12.688 | 0.563 | 1.246 (x2.22) | 12.009 (x21.35) | 8.250 (x14.66) | 9.453 (x16.80) |
+| eval | 2048 | 53.736 | 2.963 | 5.648 (x1.91) | 52.793 (x17.82) | 42.379 (x14.30) | 41.870 (x14.13) |
+| train | 512 | 5.709 | 0.511 | 2.098 (x4.11) | 7.528 (x14.74) | NOBWD | NOBWD |
+| train | 1024 | 50.346 | 2.075 | 7.844 (x3.78) | 58.087 (x27.99) | NOBWD | NOBWD |
+| train | 2048 | 219.4 | 11.337 | 33.190 (x2.93) | 255.1 (x22.50) | NOBWD | NOBWD |
+
+Faster than the engine: none.
+
+**AttentionPairBias d_single 384, 16 heads (confidence / Pairformer single attention; master dtype)**
+
+| mode | L | `pytorch` | `cuda` | `cueq` | `gnops` | `of3tri` | `megafold` |
+|---|---|---|---|---|---|---|---|
+| eval | 512 | 0.518 | 0.041 | 0.565 (x13.80) | 0.518 (x12.65) | 0.514 (x12.55) | 0.512 (x12.50) |
+| eval | 1024 | 1.807 | 0.084 | 1.897 (x22.61) | 1.778 (x21.19) | 1.773 (x21.12) | 1.789 (x21.31) |
+| eval | 2048 | 7.144 | 0.248 | 7.399 (x29.85) | 6.931 (x27.96) | 6.927 (x27.95) | 7.092 (x28.61) |
+| train | 512 | 1.157 | 0.133 | 1.204 (x9.08) | 1.148 (x8.66) | 1.145 (x8.63) | 1.145 (x8.63) |
+| train | 1024 | 3.788 | 0.334 | 3.942 (x11.82) | 3.721 (x11.15) | 3.717 (x11.14) | 3.819 (x11.45) |
+| train | 2048 | 14.714 | 1.187 | 15.297 (x12.89) | 14.183 (x11.95) | 14.179 (x11.95) | 14.723 (x12.41) |
+
+Faster than the engine: none.
+
+**AttentionPairBias d_single 768, 16 heads x 48 channels (AF3 token DiT attention; master dtype)**
+
+| mode | L | `pytorch` | `cuda` | `cueq` | `gnops` | `of3tri` | `megafold` |
+|---|---|---|---|---|---|---|---|
+| eval | 512 | 0.527 | SHAPE | 0.575 | 0.528 | 0.524 | 0.514 |
+| eval | 1024 | 1.816 | SHAPE | 1.910 | 1.791 | 1.785 | 1.789 |
+| eval | 2048 | 7.166 | SHAPE | 7.430 | 6.949 | 6.946 | 7.025 |
+| train | 512 | 1.176 | SHAPE | 1.226 | 1.168 | 1.165 | 1.149 |
+| train | 1024 | 3.819 | SHAPE | 3.967 | 3.760 | 3.759 | 3.792 |
+| train | 2048 | 14.764 | SHAPE | 15.345 | 14.353 | 14.348 | 14.463 |
+
+Faster than the engine: none. Engine cuda without a number: eval L=512 (unsupported); eval L=1024 (unsupported); eval L=2048 (unsupported); train L=512 (unsupported); train L=1024 (unsupported); train L=2048 (unsupported).
+
+**OuterProductMean (d_msa 64, d_pair 128, d_hidden 32, depth 1024)**
+
+| mode | L | `pytorch` | `cuda` | `bionemo_ir` |
+|---|---|---|---|---|
+| eval | 512 | 2.069 | 0.467 | 1.306 (x2.80) |
+| eval | 1024 | 6.512 | 1.827 | 3.433 (x1.88) |
+| eval | 2048 | 22.823 | 8.272 | 10.321 (x1.25) |
+| train | 512 | 4.938 | 1.429 | NOBWD |
+| train | 1024 | 15.347 | 5.755 | NOBWD |
+| train | 2048 | 53.988 | 25.406 | NOBWD |
+
+Faster than the engine: none.
+
+**MSAPairWeightedAveraging (d_msa 64, d_pair 128, 8 heads, depth 1024)**
+
+| mode | L | `pytorch` | `cuda` | `bionemo_ir` | `ligo_pwa` |
+|---|---|---|---|---|---|
+| eval | 512 | 1.636 | 0.130 | 1.981 (x15.30) | 34.500 (x266.37) |
+| eval | 1024 | 3.834 | 0.294 | 4.840 (x16.45) | 86.225 (x292.96) |
+| eval | 2048 | 11.090 | 0.790 | 13.090 (x16.57) | 398.2 (x504.16) |
+| train | 512 | 3.484 | 0.544 | NOBWD | 39.546 (x72.72) |
+| train | 1024 | 8.611 | 1.196 | NOBWD | 104.7 (x87.55) |
+| train | 2048 | 24.246 | 3.217 | NOBWD | 449.0 (x139.55) |
+
+Faster than the engine: none.
+
+**Transition d_hidden 128, n 4 (pair transition)**
+
+| mode | L | `pytorch` | `cuda` | `bionemo_ir` | `megafold_tr` |
+|---|---|---|---|---|---|
+| eval | 512 | 0.987 | 0.086 | 0.504 (x5.85) | 0.741 (x8.61) |
+| eval | 1024 | 3.784 | 0.307 | 1.954 (x6.36) | 2.841 (x9.25) |
+| eval | 2048 | 14.969 | 1.259 | 7.734 (x6.14) | 11.247 (x8.93) |
+| train | 512 | 2.662 | 0.436 | NOBWD | 1.707 (x3.91) |
+| train | 1024 | 10.072 | 1.702 | NOBWD | 6.499 (x3.82) |
+| train | 2048 | 39.704 | 7.571 | NOBWD | 25.554 (x3.38) |
+
+Faster than the engine: none.
+
+**Transition d_hidden 64, n 4 (MSA transition, depth 384)**
+
+| mode | L | `pytorch` | `cuda` | `bionemo_ir` | `megafold_tr` |
+|---|---|---|---|---|---|
+| eval | 512 | 0.483 | 0.037 | 0.279 (x7.57) | 0.374 (x10.16) |
+| eval | 1024 | 0.950 | 0.061 | 0.558 (x9.13) | 0.723 (x11.83) |
+| eval | 2048 | 1.854 | 0.109 | 1.101 (x10.14) | 1.416 (x13.03) |
+| train | 512 | 1.229 | 0.141 | NOBWD | 0.828 (x5.86) |
+| train | 1024 | 2.395 | 0.256 | NOBWD | 1.574 (x6.15) |
+| train | 2048 | 4.600 | 0.485 | NOBWD | 3.032 (x6.25) |
+
+Faster than the engine: none.
+
 Reasons behind the codes (backend, code: recorded reason, cards):
 
 - `bionemo_ir` HW: native library bionemo_ir.libs._cutedsl_kernels cannot be loaded on this host (/lib64/libc.so.6: version `GLIBC_2.34' not found): its CuTeDSL kernels are unavailable (h100)
 - `bionemo_ir` HW: native library bionemo_ir.libs._cutedsl_kernels cannot be loaded on this host (cuModuleLoadData(015e13181a6001abecf6) failed: CUDA_ERROR_INVALID_IMAGE: device kernel imag (a100)
-- `bionemo_ir` NOBWD: BioIR kernels are inference only (no backward) (a100, h100, rtx5090)
+- `bionemo_ir` NOBWD: BioIR kernels are inference only (no backward) (a100, b200, h100, rtx5090)
 - `bionemo_ir` SHAPE: width 128, hidden 512: no shipped silu_gate (no bias / no mask / residual) variant on this SM (a100, h100, rtx5090)
 - `bionemo_ir` SHAPE: width 64, hidden 256: no shipped silu_gate (no bias / no mask / residual) variant on this SM (a100, h100, rtx5090)
 - `cuda` OOM: CUDA out of memory (allocation larger than the free memory of the card at that size) (rtx5090)
-- `cuda` SHAPE: 16 heads x d_single 768: the kernels are built for (heads, d_single) in ((8, 384), (12, 384), (16, 384), (24, 384), (16, 512)) with n_head * d_hidden == d_single (h100)
+- `cuda` SHAPE: 16 heads x d_single 768: the kernels are built for (heads, d_single) in ((8, 384), (12, 384), (16, 384), (24, 384), (16, 512)) with n_head * d_hidden == d_single (b200, h100)
 - `cuda` SHAPE: pwa_sm80: L 2048: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's shared-memory row; inference 8192) and a [1, L, L,  (a100, rtx5090)
 - `cuda` SHAPE: training past 1024 tokens: the H100 pair backward (pair3.cu pair_bwd3) holds N <= 1024, got N=2048 (inference serves N <= 8192) (h100)
 - `ds4sci` FAIL: RuntimeError: Unable to JIT load the evoformer_attn op due to it not being compatible due to hardware/software issue. None ; eager: RuntimeError: Unable to JIT load the e (rtx5090)
-- `geonn` NOBWD: training: the library has no backward kernel (its autograd path is its PyTorch reference) (a100, h100, rtx5090)
-- `gpumode` NOBWD: training: forward-only kernels (no backward) (a100, h100, rtx5090)
+- `geonn` NOBWD: training: the library has no backward kernel (its autograd path is its PyTorch reference) (a100, b200, h100, rtx5090)
+- `gpumode` NOBWD: training: forward-only kernels (no backward) (a100, b200, h100, rtx5090)
+- `pytorch` OOM: CUDA out of memory (allocation larger than the free memory of the card at that size) (b200)
+- `pytorch` OOM: CUDA out of memory (allocation larger than the free memory of the card at that size) (b200)
 - `pytorch` OOM: CUDA out of memory (allocation larger than the free memory of the card at that size) (rtx5090)
 - `pytorch` OOM: CUDA out of memory (allocation larger than the free memory of the card at that size) (rtx5090)
 - `pytorch` OOM: CUDA out of memory (allocation larger than the free memory of the card at that size) (h100)
@@ -420,6 +542,7 @@ Reasons behind the codes (backend, code: recorded reason, cards):
 - `pytorch` OOM: CUDA out of memory (allocation larger than the free memory of the card at that size) (h100)
 - `pytorch` OOM: CUDA out of memory (allocation larger than the free memory of the card at that size) (a100)
 - `pytorch` OOM: CUDA out of memory (allocation larger than the free memory of the card at that size) (rtx5090)
+- `turbopf` HW: turbopf: ImportError: Hopper (sm_90) only; this device is capability (10, 0) (see third_party/ README, fetch.sh) (b200)
 - `turbopf` HW: turbopf: ImportError: Hopper (sm_90) only; this device is capability (12, 0) (see third_party/ README, fetch.sh) (rtx5090)
 - `turbopf` HW: turbopf: ImportError: Hopper (sm_90) only; this device is capability (8, 0) (see third_party/ README, fetch.sh) (a100)
 
@@ -573,23 +696,27 @@ RTX 5090 (sm_120): part B (TriMul, L = 512, d_pair 128)
 | `gpumode` | 2.31e-03 | 5.40e-03 | 4.86e-03 | - | - |
 | `geonn` | 3.46e-03 | 5.56e-03 | 7.30e-03 | - | - |
 
+### B200 (sm_100)
+
+No E5 accuracy record exists for B200 (sm_100): the B200 campaign ran the speed stages and the graph check; the E5 accuracy stages (`e5acc`, `acc_trimul.py`) were not run there. The engine's own accuracy against float64 on this card (cuda, triton, cueq, pytorch; E1 cases) is in `E3_accuracy/E3_b200.csv`; the candidates' accuracy is not measured on B200.
+
 ## 5. Candidates
 
 | candidate (`backend`) | library | license | classes it serves | cards with a measured cell (ok / cells) | why not elsewhere |
 |---|---|---|---|---|---|
-| `ds4sci` | DeepSpeed4Science `DS4Sci_EvoformerAttention` (deepspeed 0.20.0) | Apache-2.0 | TriAttn | h100 0/6 (+6 eager-timing only, graph invalid); a100 0/6 (+6 eager-timing only, graph invalid); rtx5090 0/6 | RTX 5090: the CUTLASS extension does not JIT-load on sm_120 (`evoformer_attn op ... not compatible`); needs CUTLASS headers + nvcc |
-| `trifast` | trifast 0.1.13 (Triton) | MIT | TriAttn | h100 6/6; a100 6/6; rtx5090 6/6 | none recorded |
-| `cueq` | NVIDIA cuEquivariance (engine's external baseline) | Apache-2.0 | TriAttn, TriMul | h100 12/12; a100 12/12; rtx5090 12/12 | TriAttn and TriMul only |
-| `fast_trimul` | fast_trimul 3.0.6 (CuTe DSL, fp16) | Apache-2.0 | TriMul | h100 6/6; a100 6/6; rtx5090 6/6 | fp16 kernels (bf16 cast), L % 8 == 0, no mask; training = kernel forward + torch-recompute backward |
-| `gpumode` | GPU MODE TriMul competition kernels (arseniivanov/trimul, Triton) | MIT | TriMul | h100 3/6; a100 3/6; rtx5090 3/6 | forward only (no backward): training cells unsupported; its output-gate placement is remapped by the adapter |
-| `geonn` | AMD geometric-nn-ops `triangle_multiplicative_update` (Triton) | Apache-2.0 | TriMul | h100 3/6; a100 3/6; rtx5090 3/6 | forward only (autograd path is its PyTorch reference): training cells unsupported |
-| `gnops` | AMD geometric-nn-ops `triangle_attention` (Triton) | Apache-2.0 | TriAttn, AttentionPairBias-384, AttentionPairBias-768 | h100 24/24; a100 24/24; rtx5090 24/24 | none recorded (TriAttn + AttentionPairBias; its `attention_pair_bias` op is pure torch and not used) |
-| `of3tri` | OpenFold3 Triton Evoformer attention | Apache-2.0 | TriAttn, AttentionPairBias-384, AttentionPairBias-768 | h100 24/24; a100 24/24; rtx5090 24/24 | none recorded |
-| `megafold` | MegaFold EvoAttention (Triton) | MIT | TriAttn, AttentionPairBias-384, AttentionPairBias-768 | h100 24/24; a100 24/24; rtx5090 24/24 | none recorded |
-| `bionemo_ir` | NVIDIA BioNeMo Inference Runtime (CuTeDSL CUBINs) | Apache-2.0 | TriAttn, OPM, PWA | h100 3/30; a100 3/30; rtx5090 9/30 | H100: the host glibc 2.28 < 2.34 required by its CuTeDSL library; A100: CUDA_ERROR_INVALID_IMAGE (its CUBINs do not load on driver 570); inference only (no backward); Transition: no shipped silu_gate variant for width 128 / hidden 512 or 64 / 256 |
-| `turbopf` | TurboPairFormer Hopper triangle attention (CUDA) | Apache-2.0 | TriAttn | h100 6/6; a100 0/6; rtx5090 0/6 | Hopper (sm_90) only: A100 and RTX 5090 refuse; TriAttn only; d <= 64 |
-| `ligo_pwa` | Ligo AlphaFold3 Triton PWA kernel (patched) | Apache-2.0 | PWA | h100 6/6; a100 6/6; rtx5090 6/6 | PWA only |
-| `megafold_tr` | MegaFold fused Transition (Triton) | MIT | Transition-d128, Transition-d64 | h100 12/12; a100 12/12; rtx5090 12/12 | Transition only (bf16) |
+| `ds4sci` | DeepSpeed4Science `DS4Sci_EvoformerAttention` (deepspeed 0.20.0) | Apache-2.0 | TriAttn | h100 0/6 (+6 eager-timing only, graph invalid); a100 0/6 (+6 eager-timing only, graph invalid); rtx5090 0/6; b200 0/6 (+6 eager-timing only, graph invalid) | RTX 5090: the CUTLASS extension does not JIT-load on sm_120 (`evoformer_attn op ... not compatible`); needs CUTLASS headers + nvcc; B200: loads, but the graph timing is invalid (eager timings used, section 0) |
+| `trifast` | trifast 0.1.13 (Triton) | MIT | TriAttn | h100 6/6; a100 6/6; rtx5090 6/6; b200 6/6 | none recorded |
+| `cueq` | NVIDIA cuEquivariance (engine's external baseline) | Apache-2.0 | TriAttn, TriMul, AttentionPairBias-384, AttentionPairBias-768 | h100 12/12; a100 12/12; rtx5090 12/12; b200 30/30 | TriAttn and TriMul only |
+| `fast_trimul` | fast_trimul 3.0.6 (CuTe DSL, fp16) | Apache-2.0 | TriMul | h100 6/6; a100 6/6; rtx5090 6/6; b200 6/6 | fp16 kernels (bf16 cast), L % 8 == 0, no mask; training = kernel forward + torch-recompute backward |
+| `gpumode` | GPU MODE TriMul competition kernels (arseniivanov/trimul, Triton) | MIT | TriMul | h100 3/6; a100 3/6; rtx5090 3/6; b200 3/6 | forward only (no backward): training cells unsupported; its output-gate placement is remapped by the adapter |
+| `geonn` | AMD geometric-nn-ops `triangle_multiplicative_update` (Triton) | Apache-2.0 | TriMul | h100 3/6; a100 3/6; rtx5090 3/6; b200 3/6 | forward only (autograd path is its PyTorch reference): training cells unsupported |
+| `gnops` | AMD geometric-nn-ops `triangle_attention` (Triton) | Apache-2.0 | TriAttn, AttentionPairBias-384, AttentionPairBias-768 | h100 24/24; a100 24/24; rtx5090 24/24; b200 24/24 | none recorded (TriAttn + AttentionPairBias; its `attention_pair_bias` op is pure torch and not used) |
+| `of3tri` | OpenFold3 Triton Evoformer attention | Apache-2.0 | TriAttn, AttentionPairBias-384, AttentionPairBias-768 | h100 24/24; a100 24/24; rtx5090 24/24; b200 24/24 | none recorded |
+| `megafold` | MegaFold EvoAttention (Triton) | MIT | TriAttn, AttentionPairBias-384, AttentionPairBias-768 | h100 24/24; a100 24/24; rtx5090 24/24; b200 24/24 | none recorded |
+| `bionemo_ir` | NVIDIA BioNeMo Inference Runtime (CuTeDSL CUBINs) | Apache-2.0 | TriAttn, OPM, PWA, Transition-d128, Transition-d64 | h100 3/30; a100 3/30; rtx5090 9/30; b200 15/30 | H100: the host glibc 2.28 < 2.34 required by its CuTeDSL library; A100: CUDA_ERROR_INVALID_IMAGE (its CUBINs do not load on driver 570); B200: runs (inference only); inference only (no backward); Transition: no shipped silu_gate variant for width 128 / hidden 512 or 64 / 256 |
+| `turbopf` | TurboPairFormer Hopper triangle attention (CUDA) | Apache-2.0 | TriAttn | h100 6/6; a100 0/6; rtx5090 0/6; b200 0/6 | Hopper (sm_90) only: A100, RTX 5090 and B200 refuse; TriAttn only; d <= 64 |
+| `ligo_pwa` | Ligo AlphaFold3 Triton PWA kernel (patched) | Apache-2.0 | PWA | h100 6/6; a100 6/6; rtx5090 6/6; b200 6/6 | PWA only |
+| `megafold_tr` | MegaFold fused Transition (Triton) | MIT | Transition-d128, Transition-d64 | h100 12/12; a100 12/12; rtx5090 12/12; b200 12/12 | Transition only (bf16) |
 | FlashBias | low-rank-bias attention | MIT | none | not connected | NOT APPLICABLE: the pair bias of AF3 attention is dense (not low-rank) |
 
 Checked and not connected (documented in README_trimul.md / ext_attn_results.md): Hugging Face `trimul_gpumode` `kernel_global` (derived from a repository without a license), the TTT-Discover H100 TriMul kernel (printed in a paper appendix only), Anthropic kits (E1 / E2 baseline, outside E5).

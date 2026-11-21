@@ -102,7 +102,7 @@ def main():
       "`anthropic` (Anthropic kernels, kit stack; the engine-stack cuda is paired with the kit-stack row of the same case).\n"
       "- dtype: `master` = fp32 master weights under bf16 autocast, shown as **bf16**; `float32` = **fp32** (measure/config.py: DTYPES master -> torch.bfloat16). "
       "mode `eval` = inference, `train` = forward + backward.\n"
-      "- Timing: CUDA-graph replay median; E1/E2/E3/E6 H100 records 100 iterations, A100 / 5090 mixed 100 / 20, E5 20 (`benchmarks/paper/README.md`, iteration note). "
+      "- Timing: CUDA-graph replay median; E1/E2/E3/E6 H100 records 100 iterations, A100 / 5090 mixed 100 / 20, B200 E1 and E5 20, E5 20 (`benchmarks/paper/README.md`, iteration note). "
       "Nothing from paper/mac_20261119 is used.\n"
       "- Operator class = the E1 `module` column (every module of the requirements table).\n")
 
@@ -219,6 +219,23 @@ def main():
             w = min(xs, key=lambda x: x["ratio"])
             body.append([k[0], k[1], k[2], k[3], len(xs), f(w["ratio"], 3), f"L={w['L']} row={w['row']} {w['variant'][:60]}", f(w["engine_ms"] * 1e3, 1) + " us"])
         P(table(["class", "mode", "dtype", "baseline", "cases", "worst ratio", "worst case", "engine time"], body))
+    if "b200" in cards:
+        EXC = {"LayerNorm": "user-declared exception (known limit)", "SmoothLddtLoss": "user-declared exception"}
+        sl = [x for x in slower if x["card"] == "b200"]
+        P("#### 1.3a B200: every cell where a baseline (pytorch / triton / cueq / anthropic) is faster than the engine cuda\n")
+        P("Rule: a baseline faster than the engine is a bug to investigate, except for the user-declared exceptions LayerNorm and SmoothLddtLoss (marked). "
+          f"{len(sl)} paired cells in total (ratio = baseline / engine < 1); every cell is in `paper_common/out/b200/engine_not_fastest_cells.csv`.\n")
+        g = defaultdict(list)
+        for x in sl:
+            g[(x["module"], x["baseline"])].append(x)
+        body = []
+        for (m, v), xs in sorted(g.items(), key=lambda kv: (kv[0][0] in EXC, kv[0])):
+            body.append([m, v, len(xs), sum(x["ratio"] < 0.97 for x in xs), f(min(x["ratio"] for x in xs), 3), EXC.get(m, "NOT an exception: investigate")])
+        P(table(["class", "baseline", "cells", "clear (< 0.97)", "worst ratio", "status"], body))
+        rest = sorted([x for x in sl if x["module"] not in EXC], key=lambda x: x["ratio"])
+        P(f"Cells outside the exceptions ({len(rest)}; all within the +-3 % noise band if the worst ratio is >= 0.97):\n")
+        P(table(["class", "mode", "dtype", "baseline", "L", "row", "variant", "engine us", "baseline us", "ratio"],
+                [[x["module"], x["mode"], x["dtype"], x["baseline"], x["L"], x["row"], x["variant"][:50], f(x["engine_ms"] * 1e3, 1), f(x["baseline_ms"] * 1e3, 1), f(x["ratio"], 3)] for x in rest]) if rest else "None.\n")  # fmt: skip
     P("Engine `cuda` without an ok number while a baseline has one (the engine's kernel table does not serve the case, skipped, or failed); lists in `paper_common/out/<card>/engine_missing_number_cells.csv`:\n")
     cnt = Counter((x["card"], x["module"], x["engine_status"]) for x in noengine)
     P(table(["card", "class", "engine cuda status", "cases"], [[NAME[a], m, s, n] for (a, m, s), n in sorted(cnt.items())]) if cnt else "None.\n")

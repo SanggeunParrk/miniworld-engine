@@ -7,12 +7,12 @@ version, the commit, torch / CUDA / driver, the GPU and the node.
 
 | ID | Folder | Measures | Paper location | Cards |
 |---|---|---|---|---|
-| E1 | `E1_operator_speed/` | speed of all 39 operator classes (every requirements row), inference + training; backends pytorch, cuda, triton, cueq, anthropic | Fig 1c, Supp 2-4, abstract | H100, A100, 5090 |
-| E2 | `E2_sweeps/` | TriMul (outgoing) / TriAttn (starting, 32 channels per head): L sweep (d=128) and D sweep (L=768), inference + training | Supp 5-7 | H100, A100, 5090 |
-| E3 | `E3_accuracy/` | accuracy against float64 (judge tolerances), the E1 cases | Methods | H100, A100, 5090 |
+| E1 | `E1_operator_speed/` | speed of all 39 operator classes (every requirements row), inference + training; backends pytorch, cuda, triton, cueq, anthropic | Fig 1c, Supp 2-4, abstract | H100, A100, 5090, B200 |
+| E2 | `E2_sweeps/` | TriMul (outgoing) / TriAttn (starting, 32 channels per head): L sweep (d=128) and D sweep (L=768), inference + training | Supp 5-7 | H100, A100, 5090, B200 |
+| E3 | `E3_accuracy/` | accuracy against float64 (judge tolerances), the E1 cases | Methods | H100, A100, 5090, B200 |
 | E4 | `E4_fp8/` | FP8 path of TriMul / TriAttn inference against the default path, same process, alternating | Fig 1c, Supp 5 | H100, B200 (5090: no sm120 FP8 path; A100 n/a) |
-| E5 | `E5_other_kernels/` | 12 other public candidates (ds4sci, trifast, fast_trimul, gpumode, geonn, gnops, of3tri, megafold, megafold_tr, bionemo_ir, turbopf, ligo_pwa) + cuEquivariance as external backends of every Pairformer operator class (TriAttn, TriMul, AttentionPairBias, OPM, PWA, Transition); results in `E5_other_kernels/E5_results.md` | Fig 1c, Supp 2-7 | H100, A100, 5090 |
-| E6 | `E6_memory/` | peak memory per operator / backend on the E2 grid, inference + training | new (Supp) | H100, A100, 5090 |
+| E5 | `E5_other_kernels/` | 12 other public candidates (ds4sci, trifast, fast_trimul, gpumode, geonn, gnops, of3tri, megafold, megafold_tr, bionemo_ir, turbopf, ligo_pwa) + cuEquivariance as external backends of every Pairformer operator class (TriAttn, TriMul, AttentionPairBias, OPM, PWA, Transition); results in `E5_other_kernels/E5_results.md` | Fig 1c, Supp 2-7 | H100, A100, 5090, B200 |
+| E6 | `E6_memory/` | peak memory per operator / backend on the E2 grid, inference + training | new (Supp) | H100, A100, 5090, B200 |
 
 Each folder has `README.md` (what, conditions, commands, output), config `*.yaml` / extra requirements CSV, one script per card
 (`h100.sbatch`, `a100.sbatch`, `rtx5090.sh`), `collect.py` (raw records -> CSV). `paper_common/` holds the shared code.
@@ -34,11 +34,30 @@ Each folder has `README.md` (what, conditions, commands, output), config `*.yaml
 
 `timing: graph` (CUDA graph replay), cold L2 flush, warmup 5, 20 iterations (the configs), median; TF32 rule and inputs as in `measure/speed.py`.
 
-**Iteration note (methodology).** The kernel timing was changed from 100 to 20 iterations (commit d9e8a3105) while the campaigns were running; nothing was re-measured because of it. H100 E1-E4 and E6 were measured at 100 iterations (before the change); E5 (all cards) was measured at 20. On A100 and RTX 5090 the records are a mix, because the change landed mid-campaign: E1 (the later passes, and on the 5090 repeat 3) and the A100 kit stage of E2 hold 20-iteration records, the rest (E2 engine, E1 repeat 1 on the 5090, most of E1 on the A100) 100. Every raw record carries its own `iterations`. All reported numbers are medians (of the per-repeat medians), so the iteration count changes the noise of a sample, not its expected value; the 100- and 20-iteration records are not biased against each other and are not corrected or re-measured.
+**Iteration note (methodology).** The kernel timing was changed from 100 to 20 iterations (commit d9e8a3105) while the campaigns were running; nothing was re-measured because of it. B200 E1 and E5 were measured at 20 iterations. H100 E1-E4 and E6 were measured at 100 iterations (before the change); E5 (all cards) was measured at 20. On A100 and RTX 5090 the records are a mix, because the change landed mid-campaign: E1 (the later passes, and on the 5090 repeat 3) and the A100 kit stage of E2 hold 20-iteration records, the rest (E2 engine, E1 repeat 1 on the 5090, most of E1 on the A100) 100. Every raw record carries its own `iterations`. All reported numbers are medians (of the per-repeat medians), so the iteration count changes the noise of a sample, not its expected value; the 100- and 20-iteration records are not biased against each other and are not corrected or re-measured.
 Anthropic kernels run through each card's kit stack: H100 `third_party/anthropic/kit_stack.sh` (CUDA-13 container; needs `KITS_DIR`, `FF_SCRATCH`,
 `MINIWORLD_ANTHROPIC_ROOT`), A100 `third_party/anthropic/kit_stack_compat.sh` with `MINIWORLD_ANTHROPIC_ROOT` = a release root holding the
 cu129 / py312 prebuilt (cssb3: `~/w45-jobs/upstream`) and `KIT_COMPAT_DIR` (CUDA-13 compat libcuda, default `~/cuda-compat-13.0`); the RTX 5090
 needs none (driver is CUDA 13). The `pytorch` reference of the `kit` stage is measured in that same process (pairing within a stack).
+
+## B200 campaign (4th card, sm_100a)
+
+Cards in this directory: H100 (sm_90), A100 (sm_80), RTX 5090 (sm_120), **B200 (sm_100)**. B200 CSVs: `E1_b200.csv` (21934 rows), `E2_b200.csv` (312), `E3_b200.csv` (21934), `E4_b200.csv` (104), `E5_b200.csv` (294), `E6_b200.csv` (312);
+tables `paper_common/out/b200/`, summary `PAPER_DATA_SUMMARY.md` (4 cards), `E5_other_kernels/E5_results.md` (B200 sections 0-3 and 5).
+
+How it was run (engine 3.0.6, commit d967378a2 of main): host `b200` (8 x B200, shared account, **no Slurm**; GPUs 0-3 only), reached through `ssh -J cssb b200` with one ControlMaster connection
+(no polling floods). Kernels prebuilt for `sm100a` from the main source (`python -m miniworld_engine.kernels._prebuild --arch sm100 ...`; the PyPI wheels carry no sm100 kernels). **4 lanes on GPUs 0-3**
+(`paper_common/b200_driver.sh 0 1 2 3`, one `b200_lane.sh` per GPU, tasks from `paper_common/queue_b200.txt` through `b200_task.sh`, resumable with `.done` markers, claims per task). Engine stage: pixi env of an earlier B200 checkout
+(torch 2.13.0+cu129, triton 3.7.1, cuequivariance 0.12). Kit stage (Anthropic kernels): `third_party/anthropic/kit_stack_b200.sh` with a venv of torch 2.13.0+cu130 **with cuequivariance** (`KIT_VENV`); the earlier
+kit run without cueq is archived as `records/b200/kit_nocueq/` (not used in the CSVs). Raw records `<ID folder>/records/b200/` (git-ignored). Repeats: E1, E2, E4, E5 three repeats; E3 and E6 one repeat (so far).
+Iterations: E1 and E5 B200 records are 20 timed iterations (warmup 5, L2 flush); the other experiments carry their count in every record.
+
+B200 coverage and caveats:
+- **Concurrent lanes**: the 4 lanes ran at the same time on one node, so a timing may include cross-lane load (shared host memory bandwidth / CPU / power; every GPU had its own process only). The H100 lanes were concurrent too (several jobs at once); no correction was applied.
+- E5 on B200: speed (3 repeats) and the CUDA-graph validity check only; **no E5 accuracy records** (`e5acc`, `acc_trimul.py` not run), so `E5_results.md` section 4 has no B200 accuracy table (the engine's own accuracy is in E3).
+- `turbopf` is Hopper-only (unsupported on B200); `ds4sci` runs but its graph timing is invalid (eager timings used, marked `e`); `bionemo_ir`, `gpumode`, `geonn` have no backward (training cells unsupported).
+- Engine `cuda` has no number for LayerNorm rows on B200 (50 unsupported cases) and for AttentionPairBias d_single 768; baselines without an engine number are listed in `engine_missing_number_cells.csv`.
+- Baselines faster than the engine on B200: `PAPER_DATA_SUMMARY.md` section 1.3a (LayerNorm = user-declared exception; the remaining cells are within +-3 %).
 
 ## Run order
 
@@ -61,6 +80,8 @@ Smoke run (1-2 cases, no records committed): `EXTRA="--module TriangleMultiplica
 ## Status (3.0.6 candidate; full measurements wait for the released tag)
 
 Smoke = 1-2 cases, 1 repeat, on the 3.0.6 candidate tree (rc-3.0.6 c40a761ef + this harness). **Full measurement: not yet, pending the 3.0.6 tag, on every card.**
+
+B200 (4th card) is not in the table below: its full campaign is complete (E1-E6 CSVs; see "B200 campaign" above). The smoke table below predates the campaigns.
 
 | ID | H100 | A100 | RTX 5090 |
 |---|---|---|---|

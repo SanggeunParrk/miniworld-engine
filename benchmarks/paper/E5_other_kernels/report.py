@@ -1,5 +1,5 @@
 """E5_<card>.csv (collect.py) + the accuracy records -> E5_results.md: one table per operator class per card, the cells where a candidate beats the engine, the accuracy
-against fp64 per candidate, and the candidates table.    python report.py   (reads E5_{h100,a100,rtx5090}.csv and records/ next to this file; writes E5_results.md)"""
+against fp64 per candidate, and the candidates table.    python report.py   (reads E5_{h100,a100,rtx5090,b200}.csv and records/ next to this file; writes E5_results.md)"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import externals
 from collect import class_of
 from paper_common import csvio
 
-CARDS = [("h100", "H100 (sm_90)"), ("a100", "A100 (sm_80)"), ("rtx5090", "RTX 5090 (sm_120)")]
+CARDS = [("h100", "H100 (sm_90)"), ("a100", "A100 (sm_80)"), ("rtx5090", "RTX 5090 (sm_120)"), ("b200", "B200 (sm_100)")]
 CLASSES = ["TriAttn", "TriMul", "AttentionPairBias-384", "AttentionPairBias-768", "OPM", "PWA", "Transition-d128", "Transition-d64"]
 TITLE = {
     "TriAttn": "TriAttn (TriangleAttention, starting, d_pair 128, 4 heads of 32)",
@@ -281,6 +281,13 @@ def main() -> None:
                         continue
                     cls = class_of(r["module"], r["kwargs"])
                     recs[(cls, r["backend"], r["mode"])] = (r, stem)
+        if not recs:
+            w(f"### {label}\n")
+            w(
+                f"No E5 accuracy record exists for {label}: the B200 campaign ran the speed stages and the graph check; the E5 accuracy stages (`e5acc`, `acc_trimul.py`) were not run there. "
+                "The engine's own accuracy against float64 on this card (cuda, triton, cueq, pytorch; E1 cases) is in `E3_accuracy/E3_b200.csv`; the candidates' accuracy is not measured on B200.\n"
+            )
+            continue
         w(f"### {label}: part A (L = 512)\n")
         w("| class | backend | eval error (light) | train error (light, tensor) | note |\n|---|---|---|---|---|")
         backs = sorted(
@@ -309,6 +316,8 @@ def main() -> None:
             w(f"| {cls} | `{b}` | {cells[0]} | {cells[1]} | {note} |")
         w("")
         f = HERE / "records" / "acc" / f"ext_trimul_acc.{card}.jsonl"
+        if not recs:
+            continue
         w(f"{label}: part B (TriMul, L = 512, d_pair 128)\n")
         w("| backend | output rel rms | output rel max | update rel rms | dx rel rms | dWo rel rms |\n|---|---|---|---|---|---|")
         out_rows, gr = {}, {}
@@ -347,9 +356,9 @@ def main() -> None:
         "cueq": ("NVIDIA cuEquivariance (engine's external baseline)", "Apache-2.0"),
     }
     why_not = {
-        "bionemo_ir": "H100: the host glibc 2.28 < 2.34 required by its CuTeDSL library; A100: CUDA_ERROR_INVALID_IMAGE (its CUBINs do not load on driver 570); inference only (no backward); Transition: no shipped silu_gate variant for width 128 / hidden 512 or 64 / 256",
-        "turbopf": "Hopper (sm_90) only: A100 and RTX 5090 refuse; TriAttn only; d <= 64",
-        "ds4sci": "RTX 5090: the CUTLASS extension does not JIT-load on sm_120 (`evoformer_attn op ... not compatible`); needs CUTLASS headers + nvcc",
+        "bionemo_ir": "H100: the host glibc 2.28 < 2.34 required by its CuTeDSL library; A100: CUDA_ERROR_INVALID_IMAGE (its CUBINs do not load on driver 570); B200: runs (inference only); inference only (no backward); Transition: no shipped silu_gate variant for width 128 / hidden 512 or 64 / 256",
+        "turbopf": "Hopper (sm_90) only: A100, RTX 5090 and B200 refuse; TriAttn only; d <= 64",
+        "ds4sci": "RTX 5090: the CUTLASS extension does not JIT-load on sm_120 (`evoformer_attn op ... not compatible`); needs CUTLASS headers + nvcc; B200: loads, but the graph timing is invalid (eager timings used, section 0)",
         "gpumode": "forward only (no backward): training cells unsupported; its output-gate placement is remapped by the adapter",
         "geonn": "forward only (autograd path is its PyTorch reference): training cells unsupported",
         "fast_trimul": "fp16 kernels (bf16 cast), L % 8 == 0, no mask; training = kernel forward + torch-recompute backward",

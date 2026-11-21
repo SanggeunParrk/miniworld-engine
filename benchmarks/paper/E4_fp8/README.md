@@ -10,7 +10,7 @@ Two passes (two files): `--gates shipped` (the production gates of `engine-fp8`)
 `MINIWORLD_TRIMUL_FP8_MINL=0` and the h100_sm90 TriAttn gates cleared, as the 3.0-tree measurements did).
 Training is not measured: there is no FP8 backward and `engine-fp8` runs the default path in training.
 
-**Cards.** H100 (sm_90a) and B200 (sm_100a: `fp8.B200_ROUTES` TriMul / TriAttn / Transition, `docs/b200/fp8.md`; the `none` pass also sets `MINIWORLD_TRIATTN_B200_FP8_MINS=0`; run `paper_common/b200_driver.sh`). **RTX 5090: no sm120 FP8 path** (checked: `miniworld_engine/fp8.py` states the
+**Cards.** H100 (sm_90a) and B200 (4th card of the paper set, 3 repeats, no Slurm: 4 lanes on GPUs 0-3 of host `b200` through `paper_common/b200_driver.sh`, ssh ControlMaster, kernels prebuilt for sm100a from main source d967378a2, records in `records/b200/`; the lanes ran concurrently on one node, so timings may include cross-lane load, as the H100 jobs did; the number of timed iterations per round is in each record) (sm_100a: `fp8.B200_ROUTES` TriMul / TriAttn / Transition, `docs/b200/fp8.md`; the `none` pass also sets `MINIWORLD_TRIATTN_B200_FP8_MINS=0`; run `paper_common/b200_driver.sh`). **RTX 5090: no sm120 FP8 path** (checked: `miniworld_engine/fp8.py` states the
 routes are H100 / sm_90a only and no `sm120` kernel under `kernels/` has an e4m3 route; `engine-fp8` resolves to the default `cuda`
 kernels there). **RTX 5090: no FP8 route (checked in code: `fp8.py` is sm_90a only); not measured, no E4 CSV for this card** (the smoke / repeat-1 pair records, `routes_fired: false`, ratio ~ 1, are not part of the results). **A100: n/a** (no script).
 
