@@ -101,3 +101,10 @@ def test_a100_plan_ships_fused_sm80_transition():
     carry as master rows: it was missing from the 3.0.0 .. 3.0.5 kernels wheels (a ``KernelBuildError`` on an installed A100). The RTX 5090 does not serve it (shared memory)."""
     assert "transition_fused_sm80" in _list_names("sm80")
     assert "transition_fused_sm80" not in _list_names("sm120a")
+
+
+def test_h100_plan_ships_ieee_f32_sm90():
+    """The H100 fp32 Transition with TF32 off runs the IEEE fp32 chain (``kernels/ieee_f32`` built for sm_90a; every float32 requirements row reaches it): the
+    sm90a plan carries ``ieee_f32_sm90`` so the wheel ships it (no first-call compile), and the other cards' plans keep their own builds."""
+    assert "ieee_f32_sm90" in _list_names("sm90a")
+    assert "ieee_f32_sm90" not in _list_names("sm80")

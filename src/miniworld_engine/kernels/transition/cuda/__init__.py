@@ -15,6 +15,14 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n, fp8=True):
     from . import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
     training = torch.is_grad_enabled() and any(t.requires_grad for t in (x, ln_weight, wa, wb, ws))
+    if x.dtype is torch.float32 and not fused_generic_sm90a._tf32_allowed():  # fp32 with TF32 off = IEEE products: the engine's IEEE fp32 CUDA chain (kernels/ieee_f32: FFMA GEMMs, fused SwiGLU / residual / SwiGLU-backward epilogues, LayerNorm row kernels), forward and backward
+        from miniworld_engine.kernels import ieee_f32
+
+        f = torch.float32
+        w = [t.to(f) for t in (ln_weight, ln_bias, wa, wb, ws)]  # a cast stays in autograd: a bf16 master's gradient comes back in its dtype
+        if not ieee_f32.supported_transition(x, w[2], w[4], hopper=True):
+            return None
+        return ieee_f32.transition_ieee(x, w[0].contiguous(), w[1].contiguous(), w[2].contiguous(), w[3].contiguous(), w[4].contiguous(), float(eps))
     if fp8 and not training:  # opt-in FP8 (MINIWORLD_TRANSITION_FP8; off by default: the check below is all the default route sees)
         from . import fp8_sm90a
 
@@ -215,6 +223,11 @@ def prebuild(target, rows):
 
         for d, n in sorted(k for k, v in shapes.items() if f32(*k, v)):
             yield ft.partial(fused_wide_sm90a._f32_ext, d, n)
+        # fp32 with TF32 off (every float32 row): the IEEE fp32 chain (kernels/ieee_f32), the sm_80 sources built for sm_90a
+        if any(dt == "float32" for v in shapes.values() for (dt, _m) in v):
+            from miniworld_engine.kernels import ieee_f32
+
+            yield ieee_f32._ext_sm90
     elif target.arch == "sm100":
         from . import fused_sm100a, fused_wide_sm100a
 

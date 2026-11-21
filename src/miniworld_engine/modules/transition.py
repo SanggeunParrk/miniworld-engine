@@ -48,7 +48,7 @@ class Transition(BackendModule, MasterWeights):
         ``"cuda"`` (H100): the engine's sm_90a Transition kernels (``kernels/transition/cuda.transition_sm90a``: LayerNorm + SwiGLU expand +
         squeeze with the residual in its epilogue, forward and backward): ``fused_sm90a`` (d 128, n 2 / 4), ``fused_wide_sm90a`` (d 64 /
         256 / 384 / 512 with n 2 / 4, d 768 with n 2; whole 128-row tiles) and ``fused_generic_sm90a`` (d a multiple of 64 up to 1024,
-        hidden a multiple of 128, any row count; fp32 activations on TF32 tensor cores, so only where torch allows TF32); fp32 at d 64 / 128
+        hidden a multiple of 128, any row count; fp32 activations on TF32 tensor cores, so only where torch allows TF32); fp32 with TF32 off (IEEE products) runs the engine's IEEE fp32 chain (``kernels/ieee_f32``: FFMA GEMMs with fused SwiGLU / residual epilogues and LayerNorm row kernels, forward and backward, d a multiple of 4 up to 1024); fp32 at d 64 / 128
         (n 2 / 4), 256 / 512 (n 2) inference and d 128 / 256 / 512 (n 2) training runs ``fused_wide_sm90a.transition_f32_sm90a`` instead
         (the bf16 builds' fused forwards with fp16 products at TF32's rounding; the generic TF32 backward). bf16 / fp32
         parameters (fp32 masters cast inside, their gradients fp32). ``"triton"``: the Triton split Transition
@@ -64,7 +64,7 @@ class Transition(BackendModule, MasterWeights):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 3,
         "anthropic:a100_sm80": 4,  # 2026-11-13: the A100 kit stack; the pair_c256_n4 exclusion is capability 9.0 only (A100: the provider cell serves)
-        "cuda:h100_sm90": 7,
+        "cuda:h100_sm90": 8,  # 2026-11-21 (8): fp32 with TF32 off (training and inference) runs on the engine's IEEE fp32 CUDA chain (kernels/ieee_f32 built for sm_90a, as the A100 / RTX 5090 7; was refused to Triton / PyTorch); TF32-allowed fp32 and bf16 unchanged
         "cuda:a100_sm80": 8,  # 2026-11-20 (8): bf16 one-kernel forward (fused_fwd_sm80 / fused_sm80, D 64 / 128) keeps its f16 squeeze finite for |x| up to 1e6 (residual and Ws carried x 2^-4; was inf at |x| >= 65504: AF3 5I28 msa_transition); results otherwise within 1 bf16 ulp of 7; 2026-11-19 (7): fp32 with TF32 off runs on the engine's IEEE fp32 CUDA chain (kernels/ieee_f32; was refused to Triton / PyTorch); TF32 and bf16 unchanged
         "triton:a100_sm80": 2,
         "cuda:5090_sm120": 10,  # 2026-11-20 (10): the same bf16 one-kernel forward fix as cuda:a100_sm80 8 (inf at |x| >= 65504 in the D 64 / 128 f16 squeeze); (9): 2026-11-20 (9): fp32 inference (d 128, n 2, float32 TF32-allowed) squeezes in f16 accumulation with 32 rows a warp and up to two half tiles a CTA (kernels/transition/cuda/sm80/tr_fwd_sm80.cuh F32H, 0.97-1.03 -> 0.94-0.96 of anthropic; rms vs float64 5.9e-4, PyTorch TF32 3.4e-4); (8): 2026-11-19 (8): bf16 inference at D >= 256 and >= 32768 rows folds the LayerNorm into the dual GEMM (statistics kernel + gamma-folded weights, xn never written; kernels/transition/cuda/fused_wide_sm80._dual_ln), -80 us of the L 512 d 256 n 2 call, outputs differ from 7 within the accuracy standard; (7): see the comment below; (6): bf16 training on the one-kernel backward does not save xn (rebuilt by ln_apply from the saved (mean, rstd), -36 MiB at L 384; gradients bitwise unchanged); (5): the same IEEE fp32 chain (fp32 TF32-off training at 2048 / 4096 / 8192 rows and the 384-row no-grad calls fell to Triton)
@@ -378,10 +378,14 @@ class Transition(BackendModule, MasterWeights):
         if any(p.dtype not in (torch.bfloat16, torch.float32) for p in matrices) or len({p.dtype for p in matrices}) != 1:
             return "the projections must share one dtype, bfloat16 or float32"
         wa, ws = self.expand_a.weight, self.squeeze.weight
+        if x.dtype is torch.float32 and not fused_generic_sm90a._tf32_allowed():  # TF32 off: the IEEE fp32 chain (kernels/ieee_f32)
+            from miniworld_engine.kernels import ieee_f32
+
+            if ieee_f32.supported_transition(x, wa, self.squeeze.weight, hopper=True):
+                return None
+            return f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no IEEE fp32 build takes it (D a multiple of 4 up to {ieee_f32.MAX_D}, hidden a multiple of 4)"
         if any(k.supported(x, wa, ws) for k in (fused_sm90a, fused_wide_sm90a, fused_generic_sm90a)):
             return None
-        if x.dtype is torch.float32 and not fused_generic_sm90a._tf32_allowed():
-            return "float32 activations run on TF32 tensor cores only (torch does not allow TF32 here)"
         return (
             f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}, {x.numel() // self.d_hidden} rows: no sm_90a build takes it (generic: d a "
             "multiple of 64 up to 1024, hidden a multiple of 128)"

@@ -15,6 +15,7 @@ def _card() -> bool:
 
 
 skip = pytest.mark.skipif(not _card(), reason="A100 / RTX 5090 (the sm_80 sources)")
+skip_h100 = pytest.mark.skipif(not (torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)), reason="H100 (the sources built for sm_90a)")
 
 
 @pytest.fixture(autouse=True)
@@ -148,3 +149,27 @@ def test_linear_autograd(bias: bool) -> None:
     y64.backward(dy.double())
     for got, ref in ((y, y64), (x.grad, x64.grad), (w.grad, w64.grad), *(((b.grad, b64.grad),) if bias else ())):  # pyright: ignore[reportOptionalMemberAccess]
         assert _err(got, ref.detach()) < 1e-5  # pyright: ignore[reportArgumentType, reportOptionalMemberAccess]
+
+
+@skip_h100
+@pytest.mark.parametrize(("shape", "d", "h"), [((16384, 128), 128, 256), ((384, 384), 384, 768), ((3, 130, 128), 128, 512), ((17, 256), 256, 512), ((300, 768), 768, 1536)])
+def test_transition_ieee_h100_train(shape: tuple[int, ...], d: int, h: int) -> None:
+    """H100, fp32 with TF32 off: the Transition's cuda backend serves training (forward + the gradients) on the IEEE fp32 chain (it was refused to Triton)."""
+    m = _module(d, h)
+    ref64 = Transition(d_hidden=d, n=h // d, master_weights=True, backend="pytorch").cuda().double()
+    ref64.load_state_dict({k: v.double() for k, v in m.state_dict().items()})
+    g = torch.Generator(device="cuda").manual_seed(1)
+    x = (torch.randn(shape, device="cuda", generator=g) * 2 + 0.3).requires_grad_(True)
+    dy = torch.randn(shape, device="cuda", generator=g)
+    assert m.unsupported(x) is None, m.unsupported(x)
+    y = m(x)
+    y.backward(dy)
+    x3 = x.detach().double().requires_grad_(True)
+    y64 = ref64(x3)
+    y64.backward(dy.double())
+    got = {"y": y, "dx": x.grad, **{n_: p.grad for n_, p in m.named_parameters()}}
+    ref = {"y": y64, "dx": x3.grad, **{n_: p.grad for n_, p in ref64.named_parameters()}}
+    for name, v in got.items():
+        assert v is not None and _err(v, ref[name]) < 1e-5, (name, _err(v, ref[name]))
+    with torch.no_grad():  # inference
+        assert _err(m(x.detach()), y64.detach()) < 1e-5
