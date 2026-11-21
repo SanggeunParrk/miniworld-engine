@@ -36,4 +36,4 @@ src/miniworld_engine/_prebuilt/
 !.claude/agents/
 
 # the Anthropic release is cloned locally (third_party/anthropic/UPSTREAM.json pins it); never tracked
-third_party/anthropic/upstream/
+third_party/*/upstream/
