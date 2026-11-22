@@ -91,6 +91,9 @@ constexpr int THREADS = WARPS * 32;
 #ifndef MWP_D3CH_PWE
 #define MWP_D3CH_PWE 48  // values a lane holds over its rows (PW * CH * VEC) at most
 #endif
+#ifndef MWP_RED_H100_PMAX
+#define MWP_RED_H100_PMAX 192  // per-CTA partial rows up to which it runs (P = 264 at bf16 N = 384: 4.2 us against pipe_reduce 4.0 us; P = 132: 3.0 against 3.8)
+#endif
 #ifndef MWP_RED_H100
 #define MWP_RED_H100 1  // the 1024-thread backward reduce on sm_90
 #endif
@@ -1238,7 +1241,7 @@ void launch_bwd_wg(const T* dy, const T* x, const void* w, const float2* stats, 
   k<<<grid > 0 ? grid : 1, THREADS, smem, s>>>(dy, x, w, stats, dx, ws, dw, db, wcode, M, N);
 #ifndef MWP_NOREDUCE
   if constexpr (WG) {
-    const bool h100 = sm_major() == 9 && MWP_RED_H100;
+    const bool h100 = sm_major() == 9 && MWP_RED_H100 && grid <= MWP_RED_H100_PMAX;
     cudaLaunchConfig_t cfg = {};
     cfg.gridDim = h100 ? dim3((N + 31) / 32, RMS ? 1 : 2) : dim3((N + 31) / 32);
     cfg.blockDim = dim3(h100 ? 1024 : 512);
