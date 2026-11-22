@@ -346,12 +346,14 @@ std::vector<torch::Tensor> gate_bwd(torch::Tensor a, torch::Tensor wa, torch::Te
 // dxn [M, D] f32 -> (dx [M, D] like x: bf16, or fp32 for the fp32 Transition (x / dy fp32), dgamma, dbeta in adt)
 std::vector<torch::Tensor> ln_bwd_impl(torch::Tensor dxn, torch::Tensor x, torch::Tensor stats, torch::Tensor gamma, torch::Tensor dy, at::ScalarType adt,
                                        const float* dscale, const a100::Scale2* sj = nullptr) {
-  TORCH_CHECK(dxn.is_cuda() && dxn.is_contiguous() && dxn.scalar_type() == at::kFloat && dxn.dim() == 2, "dxn: [M, D] f32");
+  TORCH_CHECK(dxn.is_cuda() && dxn.is_contiguous() && (dxn.scalar_type() == at::kFloat || dxn.scalar_type() == at::kBFloat16) && dxn.dim() == 2, "dxn: [M, D] f32 (bf16 rows: or bf16)");
+  const bool dxb = dxn.scalar_type() == at::kBFloat16;
   const bool has_dy = dy.numel() > 0;                                       // an empty dy: no residual branch (the bare LayerNorm + Linear backward)
   TORCH_CHECK(x.is_contiguous() && dy.is_contiguous() && x.sizes() == dxn.sizes() && (!has_dy || dy.sizes() == dxn.sizes()), "x / dy: [M, D]");
   TORCH_CHECK(stats.is_contiguous() && stats.size(0) == dxn.size(0) && stats.scalar_type() == at::kFloat && gamma.scalar_type() == at::kFloat, "stats / gamma");
   TORCH_CHECK(adt == at::kFloat || adt == at::kBFloat16, "f32 / bf16 affine gradients");
   const bool f32 = x.scalar_type() == at::kFloat;
+  TORCH_CHECK(!(dxb && f32), "bf16 dxn: bf16 rows only");
   TORCH_CHECK((f32 || x.scalar_type() == at::kBFloat16) && (!has_dy || dy.scalar_type() == x.scalar_type()), "x / dy: bf16 or fp32, one dtype");
   const int64_t M = dxn.size(0);
   const int D = (int)dxn.size(1);
@@ -368,16 +370,22 @@ std::vector<torch::Tensor> ln_bwd_impl(torch::Tensor dxn, torch::Tensor x, torch
     nb = std::max(1, std::min((tot + 4 * rpw - 1) / (4 * rpw), 2 * num_sms()));                                                                        \
     part = torch::empty({nb, 2, DV}, x.options().dtype(at::kFloat));                                                                                   \
     if (f32 && has_dy)                                                                                                                                 \
-      a100::ln_bwd_kernel<DV, true, true><<<nb, 128, 0, st>>>(cptr<float>(dxn), x.data_ptr(), cptr<float2>(stats), cptr<float>(gamma), dy.data_ptr(),   \
+      a100::ln_bwd_kernel<DV, true, true><<<nb, 128, 0, st>>>(dxn.data_ptr(), x.data_ptr(), cptr<float2>(stats), cptr<float>(gamma), dy.data_ptr(),   \
                                                                dx.data_ptr(), mptr<float>(part), tot, dscale);                                                \
     else if (f32)                                                                                                                                      \
-      a100::ln_bwd_kernel<DV, false, true><<<nb, 128, 0, st>>>(cptr<float>(dxn), x.data_ptr(), cptr<float2>(stats), cptr<float>(gamma), x.data_ptr(),  \
+      a100::ln_bwd_kernel<DV, false, true><<<nb, 128, 0, st>>>(dxn.data_ptr(), x.data_ptr(), cptr<float2>(stats), cptr<float>(gamma), x.data_ptr(),  \
                                                                 dx.data_ptr(), mptr<float>(part), tot, dscale);                                               \
+    else if (dxb && has_dy)                                                                                                                            \
+      a100::ln_bwd_kernel<DV, true, false, true><<<nb, 128, 0, st>>>(dxn.data_ptr(), cptr<__nv_bfloat16>(x), cptr<float2>(stats), cptr<float>(gamma), \
+                                                         cptr<__nv_bfloat16>(dy), mptr<__nv_bfloat16>(dx), mptr<float>(part), tot);                     \
+    else if (dxb)                                                                                                                                      \
+      a100::ln_bwd_kernel<DV, false, false, true><<<nb, 128, 0, st>>>(dxn.data_ptr(), cptr<__nv_bfloat16>(x), cptr<float2>(stats), cptr<float>(gamma),\
+                                                          cptr<__nv_bfloat16>(x), mptr<__nv_bfloat16>(dx), mptr<float>(part), tot);                     \
     else if (has_dy)                                                                                                                                   \
-      a100::ln_bwd_kernel<DV, true><<<nb, 128, 0, st>>>(cptr<float>(dxn), cptr<__nv_bfloat16>(x), cptr<float2>(stats), cptr<float>(gamma),           \
+      a100::ln_bwd_kernel<DV, true><<<nb, 128, 0, st>>>(dxn.data_ptr(), cptr<__nv_bfloat16>(x), cptr<float2>(stats), cptr<float>(gamma),           \
                                                          cptr<__nv_bfloat16>(dy), mptr<__nv_bfloat16>(dx), mptr<float>(part), tot);                     \
     else                                                                                                                                               \
-      a100::ln_bwd_kernel<DV, false><<<nb, 128, 0, st>>>(cptr<float>(dxn), cptr<__nv_bfloat16>(x), cptr<float2>(stats), cptr<float>(gamma),          \
+      a100::ln_bwd_kernel<DV, false><<<nb, 128, 0, st>>>(dxn.data_ptr(), cptr<__nv_bfloat16>(x), cptr<float2>(stats), cptr<float>(gamma),          \
                                                           cptr<__nv_bfloat16>(x), mptr<__nv_bfloat16>(dx), mptr<float>(part), tot);                     \
     break;                                                                                                                                             \
   }
@@ -596,6 +604,23 @@ std::vector<torch::Tensor> dy_f16(torch::Tensor dy, torch::Tensor sc) {
   return {dy16, bs};
 }
 
+// t *= s (fp32 [n], n % 4 == 0, s: fp32 [>= 1] on the device), in place, on the current stream
+void scale_inplace(torch::Tensor t, torch::Tensor s) {
+  TORCH_CHECK(t.is_cuda() && t.is_contiguous() && t.scalar_type() == at::kFloat && t.numel() % 4 == 0, "scale_inplace: contiguous fp32, numel % 4");
+  TORCH_CHECK(s.is_cuda() && s.scalar_type() == at::kFloat && s.numel() >= 1, "scale_inplace: fp32 scale");
+  const long long n4 = t.numel() / 4;
+  const int blocks = (int)std::max<long long>(1, std::min<long long>((n4 + 255) / 256, 4 * (long long)num_sms()));
+  a100::scale_inplace_kernel<<<blocks, 256, 0, at::cuda::getCurrentCUDAStream()>>>(mptr<float4>(t), n4, cptr<float>(s));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// ln_bwd_scaled without the weight-gradient scaling (``scale_inplace`` applies it, on the weight-gradient streams): d_xn scaled by *dscale inside the kernel only
+std::vector<torch::Tensor> ln_bwd_dscaled(torch::Tensor dxn, torch::Tensor x, torch::Tensor stats, torch::Tensor gamma, torch::Tensor dy, at::ScalarType adt,
+                                          torch::Tensor dscale) {
+  TORCH_CHECK(x.scalar_type() == at::kFloat && dscale.is_cuda() && dscale.scalar_type() == at::kFloat && dscale.numel() >= 1, "ln_bwd_dscaled: fp32 rows, fp32 scale");
+  return ln_bwd_impl(dxn, x, stats, gamma, dy, adt, dscale.data_ptr<float>(), nullptr);
+}
+
 std::vector<torch::Tensor> ln_fwd_f32(torch::Tensor x, torch::Tensor gamma, torch::Tensor beta, torch::Tensor sc, double eps, bool save) {
   TORCH_CHECK(x.is_cuda() && x.is_contiguous() && x.dim() == 2 && x.scalar_type() == at::kFloat, "x: [M, D] fp32");
   TORCH_CHECK(gamma.scalar_type() == at::kFloat && beta.scalar_type() == at::kFloat && gamma.is_contiguous() && beta.is_contiguous(), "f32 affine");
@@ -715,6 +740,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dy_f16", &dy_f16);
   m.def("gate_f16", &gate_f16);
   m.def("ln_bwd_scaled", &ln_bwd_scaled);
+  m.def("ln_bwd_dscaled", &ln_bwd_dscaled);
+  m.def("scale_inplace", &scale_inplace);
   m.def("grad_cast", &grad_cast);
   m.def("add_res", &add_res);
   m.def("gemm_res", &gemm_res, pybind11::arg("a"), pybind11::arg("w"), pybind11::arg("res"), pybind11::arg("cfg"), pybind11::arg("out") = pybind11::none());

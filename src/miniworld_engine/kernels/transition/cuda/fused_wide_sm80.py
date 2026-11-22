@@ -209,8 +209,19 @@ SM120_FOLD_BIG_WORK = 200_000_000
 SM120_FOLD_BIG_H = 1536
 
 
-def _fold_tiles(m: int, h: int, dual: int, res: int) -> tuple[int, int]:
-    return (14, 13) if m * h >= SM120_FOLD_BIG_WORK or h >= SM120_FOLD_BIG_H else (dual, res)
+#: ... and the dual config 14 alone (the squeeze keeps its 64-row tile) below ``SM120_FOLD_14_ROWS`` rows (L 256 pair, 65536 rows: the 64 x 64 dual tile's 18 % smaller warp tiles
+#: leave it behind Triton's fused expand there: interleaved A-B-A-B, d 256 n 2 / n 4 L 256 1.044 / 0.990 -> 1.064 / 1.018, d 512 n 2 1.022 -> 1.032) and, from d 512, from
+#: ``SM120_FOLD_14_WORK_D512`` rows x hidden width (d 512 n 2 L 384: 0.997 -> 1.019)
+SM120_FOLD_14_ROWS = 98304
+SM120_FOLD_14_WORK_D512 = 100_000_000
+
+
+def _fold_tiles(m: int, h: int, dual: int, res: int, d: int = 0) -> tuple[int, int]:
+    if m * h >= SM120_FOLD_BIG_WORK or h >= SM120_FOLD_BIG_H:
+        return 14, 13
+    if m < SM120_FOLD_14_ROWS or (d >= 512 and m * h >= SM120_FOLD_14_WORK_D512):
+        return 14, res
+    return dual, res
 
 
 def _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual):
@@ -256,6 +267,26 @@ def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         return torch.mm(a, b, out_dtype=torch.float32)
     except TypeError:
         return torch.mm(a, b).float()
+
+
+#: bf16 training: the d_xn GEMM [M, D] = [dA | dB] [Wa; Wb] writes bf16 (what the Triton backend and PyTorch's bf16 autograd round to, accumulated in fp32), and ``ln_bwd``
+#: reads it as such: half the bytes of the fp32 d_xn through the GEMM's store and the LayerNorm backward's load (fp32 d_xn: 151 MB at L 384 d 256, 1.2-2 % of the
+#: RTX 5090 d 256 .. 512 step, the cells that trailed the Triton backend).
+DXN_BF16 = True
+#: the saved-activation backward runs d_xn GEMM -> ln_bwd on the high-priority stream and [dWa; dWb] on the main one (see ``_bwd_saved_overlap``)
+DXN_CHAIN_FIRST = True
+#: A100: d 256 n 2 at 200 k .. 350 k rows (L 512 pair) keeps the previous order (d_xn beside [dWa; dWb] on the weight stream; 4 % faster there, A-B-A-B vs the chain-first order; at 147 k and 410 k rows chain-first is 2-6 % faster)
+A100_CHAIN_FIRST_OFF_ROWS = (200_000, 350_000)
+
+
+def _chain_first(m: int, d: int, h: int, device: torch.device) -> bool:
+    lo, hi = A100_CHAIN_FIRST_OFF_ROWS
+    return DXN_CHAIN_FIRST and not (not is_sm120(device) and d == 256 and h == 512 and lo <= m <= hi)
+
+
+def _dxn_gemm(dab: torch.Tensor, wab: torch.Tensor) -> torch.Tensor:
+    """d_xn = [dA | dB] [Wa; Wb]: bf16 rows (``DXN_BF16``) bf16, else fp32 (``ln_bwd`` takes either)."""
+    return torch.mm(dab, wab) if DXN_BF16 and dab.dtype is torch.bfloat16 else _mm_f32(dab, wab)
 
 
 # ------------------------------------------------------------------------------------------------------------------------ launches
@@ -405,7 +436,7 @@ def _fwd_launch(
             13,
         )  # the training forward takes the 128-row tiles as well (interleaved A-B-A-B vs Triton, train D 256 .. 512 at 65 k .. 590 k rows: 18 -> 35 of 42 cells <= 1.00; same bits)
     if ln and not save and _fused_ln(m, d, dual, x):
-        dual, res = _fold_tiles(m, wa.shape[0], dual, res)
+        dual, res = _fold_tiles(m, wa.shape[0], dual, res, d)
         hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
         return (
             _squeeze(ext, hid, ws, x, ln, res),
@@ -467,7 +498,7 @@ def forward_into(
         m, d, wa.shape[0]
     )  # the RTX 5090 takes its own tile table (the A100 one is 20-30 % slower there)
     if _fused_ln(m, d, dual, x):
-        dual, res = _fold_tiles(m, wa.shape[0], dual, res)
+        dual, res = _fold_tiles(m, wa.shape[0], dual, res, d)
         hid = _dual_ln(ext, x, gamma, beta, wa, wb, eps, dual)
     else:
         xn, _ = ext.ln_fwd(x, gamma, beta, eps, False)
@@ -534,7 +565,7 @@ def _bwd_launch(
     dwab, dws = dwab.to(wdt), dws.to(wdt)  # (the grad_cast kernel of the extension is the opt-in alternative; not used)
     wab = _wab(wa, wb)  # [2H, D]
     if ln:
-        dxn = _mm_f32(dab, wab)  # [M, D] f32
+        dxn = _dxn_gemm(dab, wab)  # [M, D] bf16 or f32
         dx, dgam, dbeta = ext.ln_bwd(dxn, x, stats, gamma, dy, gdt)
     else:
         dx = torch.mm(dab, wab)
@@ -557,6 +588,18 @@ def _weight_stream(device: torch.device) -> torch.cuda.Stream:
     return s
 
 
+_weight_streams2: dict = {}
+
+
+def _weight_stream2(device: torch.device) -> torch.cuda.Stream:
+    """A second (default-priority) side stream per device: the fp32 few-rows backward's third chain next to ``_weight_stream`` and the main stream."""
+    key = device.index if device.index is not None else torch.cuda.current_device()
+    s = _weight_streams2.get(key)
+    if s is None:
+        s = _weight_streams2[key] = torch.cuda.Stream(device=device)
+    return s
+
+
 def _bwd_saved_overlap(ext, dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, gdt, wdt, mm_w):
     """The saved-activation (``_save_ab``) Transition backward with its weight-gradient GEMMs on a high-priority side stream:
     dWs = dy^T h runs alongside ``gate_dh`` (half memory-bound), [dWa; dWb] = dAB^T xn alongside the d_xn GEMM and ``ln_bwd`` (memory-bound).
@@ -570,10 +613,24 @@ def _bwd_saved_overlap(ext, dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, gdt, w
     dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h, is_sm120(x.device)))  # dA | dB [M, 2H]
     ready = torch.cuda.Event()
     ready.record(main)
+    if _chain_first(m, d, h, x.device):
+        # the d_xn GEMM -> ln_bwd chain (the critical path) on the high-priority stream, so its GEMM takes the SMs first and the memory-bound ln_bwd runs
+        # inside the weight-gradient GEMM [dWa; dWb] = dAB^T xn of the main stream (low priority)
+        with torch.cuda.stream(side):
+            side.wait_event(ready)
+            dxn = _dxn_gemm(dab, _wab(wa, wb))
+            dx, dgam, dbeta = ext.ln_bwd(dxn, x, stats, gamma, dy, gdt)
+        dwab = mm_w(dab.t(), xn)  # [2H, D] = [dWa; dWb]
+        main.wait_stream(side)
+        for t in (dws, dx, dgam, dbeta):
+            _record_stream(t, main)
+        for t in (dy, hid, dab, xn):
+            _record_stream(t, side)
+        return dx, dgam, dbeta, dwab.to(wdt), dws.to(wdt)
     with torch.cuda.stream(side):
         side.wait_event(ready)
         dwab = mm_w(dab.t(), xn)  # [2H, D] = [dWa; dWb]
-    dxn = _mm_f32(dab, _wab(wa, wb))  # [M, D] f32
+    dxn = _dxn_gemm(dab, _wab(wa, wb))  # [M, D] bf16 or f32
     dx, dgam, dbeta = ext.ln_bwd(dxn, x, stats, gamma, dy, gdt)
     main.wait_stream(side)
     # the side stream's outputs are used (and freed) on the main stream, its operands were read on the side stream
@@ -613,7 +670,7 @@ def _bwd_dx(
     wab = _wab(wa, wb)
     if not ln:
         return torch.mm(dab, wab)
-    dx, _, _ = ext.ln_bwd(_mm_f32(dab, wab), x, stats, _f32(gamma, False), dy, gamma.dtype)
+    dx, _, _ = ext.ln_bwd(_dxn_gemm(dab, wab), x, stats, _f32(gamma, False), dy, gamma.dtype)
     return dx
 
 
@@ -835,6 +892,8 @@ def swiglu_ffn_sm80(x, wa, wb, ws):
 F32_WIDTHS = WIDTHS
 #: rows up to which the fp32 path runs its few-rows tiles (64-row tiles of 32 hidden units, the squeeze split over K): the token-single rows (128 .. 768)
 F32_SMALL_ROWS = 4096
+#: the few-rows fp32 backward runs its two weight-gradient GEMMs (and their scalings) on side streams next to the d_xn GEMM -> ln_bwd chain (see ``_f32_bwd``)
+F32_WGRAD_STREAMS = True
 
 
 def f32_supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
@@ -971,6 +1030,30 @@ def _f32_bwd(
     dab, h16 = ext.gate_f16(
         xn16, wab16[:hid], wab16[hid:], dy16, wst16, sc, bs, 2 if dual != 12 else 12
     )  # [dA | dB] / s_dab [M, 2H], h / s_h [M, H]
+    if F32_WGRAD_STREAMS and m <= F32_SMALL_ROWS:
+        # few rows: three short chains the SMs hold at once (64 .. 108 CTAs of the GEMMs): dWs = dy16^T h16 and its scaling, [dWa; dWb] = dab16^T xn16 and its scaling,
+        # d_xn = dab16 Wab16 -> ln_bwd (the scales of the weight gradients are applied by ``scale_inplace`` of their own chains, not by ln_bwd's finalize launch)
+        main = torch.cuda.current_stream(x.device)
+        sa, sb = _weight_stream(x.device), _weight_stream2(x.device)
+        ready = torch.cuda.Event()
+        ready.record(main)
+        with torch.cuda.stream(sa):
+            sa.wait_event(ready)
+            dwab = _mm16(dab.t(), xn16)  # [2H, D] = [dWa; dWb]
+            ext.scale_inplace(dwab, bs[1:2])
+        with torch.cuda.stream(sb):
+            sb.wait_event(ready)
+            dws = _mm16(dy16.t(), h16)  # [D, H]
+            ext.scale_inplace(dws, bs[0:1])
+        dx, dgam, dbeta = ext.ln_bwd_dscaled(_mm16(dab, wab16), x, stats, gamma, dy, gdt, bs[2:3])
+        main.wait_stream(sa)
+        main.wait_stream(sb)
+        for t in (dws, dwab):
+            _record_stream(t, main)
+        for t in (dy16, h16, dab, xn16, bs):
+            _record_stream(t, sa)
+            _record_stream(t, sb)
+        return dx, dgam, dbeta, dwab, dws
     dws = _mm16(dy16.t(), h16)  # [D, H]
     dwab = _mm16(dab.t(), xn16)  # [2H, D] = [dWa; dWb]
     # d_xn, the LayerNorm backward; its finalize launch also applies the weight gradients' scales

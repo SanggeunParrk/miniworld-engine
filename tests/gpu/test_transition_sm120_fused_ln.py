@@ -110,6 +110,8 @@ def test_big_work_tiles_give_the_same_bits(monkeypatch: pytest.MonkeyPatch, d: i
     for work in (0, 10**18):
         monkeypatch.setattr(fw, "SM120_FOLD_BIG_WORK", work)
         monkeypatch.setattr(fw, "SM120_FOLD_BIG_H", 0 if work == 0 else 10**9)
+        monkeypatch.setattr(fw, "SM120_FOLD_14_ROWS", 0)  # (the dual-14-alone rules off: this test is about the 14 / 13 pair)
+        monkeypatch.setattr(fw, "SM120_FOLD_14_WORK_D512", 10**18)
         assert fw._fold_tiles(rows, n * 2 * d // 2 * 1, 2, 2) == ((14, 13) if work == 0 else (2, 2))
         with torch.no_grad():
             outs.append(kern(x))
@@ -133,3 +135,22 @@ def test_training_forward_with_128_row_tiles_keeps_the_bits(monkeypatch: pytest.
         results.append([y.detach(), x.grad] + [p.grad for p in kern.parameters() if p.grad is not None])
     for a, b in zip(*results, strict=True):
         assert torch.equal(a, b)
+
+
+@pytest.mark.parametrize(
+    ("m", "d", "h", "expected"),
+    [
+        (65536, 256, 512, (14, 2)),  # L 256 pair: dual 14, the 64-row squeeze
+        (65536, 512, 1024, (14, 2)),
+        (147456, 256, 512, (2, 2)),  # L 384, below the work: the 64-row tiles
+        (147456, 512, 1024, (14, 2)),  # d 512 from 1e8 rows x hidden
+        (147456, 256, 1024, (2, 2)),
+        (262144, 512, 1024, (14, 13)),  # the big-work tiles
+        (65536, 512, 2048, (14, 13)),  # a hidden width of SM120_FOLD_BIG_H
+    ],
+)
+def test_fold_tile_rules(m: int, d: int, h: int, expected: tuple[int, int]) -> None:
+    """The folded-LayerNorm inference tiles: dual 14 below ``SM120_FOLD_14_ROWS`` rows and, from d 512, from ``SM120_FOLD_14_WORK_D512``; 14 / 13 from the big work."""
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+
+    assert fw._fold_tiles(m, h, 2, 2, d) == expected

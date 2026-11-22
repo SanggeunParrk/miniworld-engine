@@ -103,8 +103,20 @@ __global__ void __launch_bounds__(256) ln_fwd_kernel(const void* __restrict__ x_
 // One row per warp (lanes spread over the chunks) or several rows per warp for D <= 128; dgamma / dbeta are summed per lane over the rows the lane's warp visits, then per CTA.
 
 // F32IO (the fp32 Transition): x, dy and dx fp32.
-template <int D, bool RES = true, bool F32IO = false>
-__global__ void __launch_bounds__(128) ln_bwd_kernel(const float* __restrict__ dxn, const void* __restrict__ x_, const float2* __restrict__ stats,
+// DXB (bf16 rows only): d_xn is the bf16 output of the d_xn GEMM (half the bytes of the fp32 one: the GEMM's store and this kernel's load), read 8 per lane.
+DEVI void load_dxn8(const void* p, size_t off, bool bf, float4& a, float4& b) {
+  if (bf) {
+    const uint4 u = *reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_bfloat16*>(p) + off);
+    a = make_float4(bf16lo(u.x), bf16hi(u.x), bf16lo(u.y), bf16hi(u.y));
+    b = make_float4(bf16lo(u.z), bf16hi(u.z), bf16lo(u.w), bf16hi(u.w));
+  } else {
+    a = *reinterpret_cast<const float4*>(reinterpret_cast<const float*>(p) + off);
+    b = *reinterpret_cast<const float4*>(reinterpret_cast<const float*>(p) + off + 4);
+  }
+}
+
+template <int D, bool RES = true, bool F32IO = false, bool DXB = false>
+__global__ void __launch_bounds__(128) ln_bwd_kernel(const void* __restrict__ dxn, const void* __restrict__ x_, const float2* __restrict__ stats,
                                                      const float* __restrict__ gamma, const void* __restrict__ dy_, void* __restrict__ dx_,
                                                      float* __restrict__ part, int M, const float* __restrict__ dscale = nullptr) {
   // F32IO: dscale (if given) multiplies dxn (the fp16 d_xn GEMM's output scale)
@@ -154,8 +166,7 @@ __global__ void __launch_bounds__(128) ln_bwd_kernel(const float* __restrict__ d
           d0[r][i] = d1[r][i] = make_float4(0.f, 0.f, 0.f, 0.f);
           if (valid[r] && c < CH) {
             u[r][i] = *reinterpret_cast<const uint4*>(x + (size_t)row * D + c * 8);
-            d0[r][i] = *reinterpret_cast<const float4*>(dxn + (size_t)row * D + c * 8);
-            d1[r][i] = *reinterpret_cast<const float4*>(dxn + (size_t)row * D + c * 8 + 4);
+            load_dxn8(dxn, (size_t)row * D + c * 8, DXB, d0[r][i], d1[r][i]);
             if (RES) y[r][i] = *reinterpret_cast<const uint4*>(dy + (size_t)row * D + c * 8);
           }
         }
@@ -224,8 +235,7 @@ __global__ void __launch_bounds__(128) ln_bwd_kernel(const float* __restrict__ d
         } else {
           u = *reinterpret_cast<const uint4*>(x + (size_t)row * D + c * 8);
         }
-        d0 = *reinterpret_cast<const float4*>(dxn + (size_t)row * D + c * 8);
-        d1 = *reinterpret_cast<const float4*>(dxn + (size_t)row * D + c * 8 + 4);
+        load_dxn8(dxn, (size_t)row * D + c * 8, DXB, d0, d1);
         if constexpr (F32IO) {
           d0.x *= ds; d0.y *= ds; d0.z *= ds; d0.w *= ds; d1.x *= ds; d1.y *= ds; d1.z *= ds; d1.w *= ds;
         }
@@ -1009,6 +1019,19 @@ __global__ void __launch_bounds__(256) dy_convert_kernel(const float4* __restric
     bs[0] = s_dy * s_h; bs[1] = s_dab * s_x; bs[2] = s_dab * s_w; bs[3] = 1.f / s_dy; bs[4] = 1.f / s_dab; bs[5] = s_dy * s_ws; bs[6] = 0.f; bs[7] = 0.f;
   }
   for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long long)gridDim.x * blockDim.x) dy16[i] = pack_f16x4(__ldg(dy + i), s_dy);
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------- the fp32 backward's weight-gradient scaling, apart
+// t *= *s, in place (16-byte vectors): the scaling pass of ``ln_finalize_kernel`` as a launch of its own, so the two weight-gradient GEMMs and their scalings can run on
+// side streams next to the d_xn GEMM and the LayerNorm backward (the few-rows step is launch- and tail-bound, not bandwidth-bound)
+__global__ void __launch_bounds__(256) scale_inplace_kernel(float4* __restrict__ t, long long n4, const float* __restrict__ s) {
+  const float f = __ldg(s);
+  for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long long)gridDim.x * blockDim.x) {
+    float4 v = t[i];
+    v.x *= f; v.y *= f; v.z *= f; v.w *= f;
+    t[i] = v;
+  }
 }
 
 }  // namespace a100
