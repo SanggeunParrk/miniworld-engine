@@ -50,6 +50,12 @@ SIGN_EPS = tl.constexpr(8e-6)
 
 
 @triton.jit
+def _mul_rn(a, b):
+    """a * b rounded to fp32, never fused into a following add (an explicit ``mul.rn``: the error-free transforms below need the rounded product)."""
+    return tl.inline_asm_elementwise("mul.rn.f32 $0, $1, $2;", "=r,r,r", [a, b], dtype=tl.float32, is_pure=True, pack=1)
+
+
+@triton.jit
 def _two_sum(a, b):
     """Error-free a + b in fp32: (s, e) with s + e == a + b exactly (Knuth)."""
     s = a + b
@@ -75,8 +81,8 @@ def _exact_sign(xi0, xi1, xi2, xj0, xj1, xj2, gi0, gi1, gi2, gj0, gj1, gj2):
                 b = gj0 if c == 0 else (gj1 if c == 1 else gj2)
                 sg = -1.0
             eh, el = _two_sum(a, -b)
-            ph = eh * eh
-            pl = tl.fma(eh, eh, -ph) + 2.0 * eh * el
+            ph = _mul_rn(eh, eh)
+            pl = tl.fma(eh, eh, -ph) + _mul_rn(2.0 * eh, el)
             s, e = _two_sum(s, sg * ph)
             lo += e + sg * pl
     t = s + lo
