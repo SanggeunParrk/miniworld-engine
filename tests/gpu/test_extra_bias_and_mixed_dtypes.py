@@ -111,7 +111,9 @@ def test_chai1_atom_dit_mixed_layout(stream: str, key_window: str) -> None:
     assert _rel(y, ref) < 3e-2
 
 
-@pytest.mark.skipif(not (torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)), reason="A100 (sm_80)")
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() and torch.cuda.get_device_capability() in ((8, 0), (12, 0))), reason="A100 (sm_80) or RTX 5090 (sm_120)"
+)
 @pytest.mark.parametrize("dtype", ["master", "float32"])
 @pytest.mark.parametrize("samples", [1, 5])
 def test_token_dit_protenix_extra_pair_bias_a100(dtype: str, samples: int) -> None:
