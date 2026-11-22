@@ -178,7 +178,8 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
     cz = wo.shape[0]
     dz2 = dz.reshape(n * n, cz).contiguous()
     lnw32, lnb32, wlr, wf, _ = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo)
-    dy = torch.mm(dz2, wf)  # [N N, 512] = dz W'
+    fused = getattr(cuda, "chai_bwd_fused", None) if cz == 256 and dz2.dtype == torch.bfloat16 and n % 64 == 0 else None  # H100: dy = dz W' is computed inside the LayerNorm-backward pass (no [N N, 512] dy tensor)
+    dy = None if fused is not None else torch.mm(dz2, wf)  # [N N, 512] = dz W'
     dbo = torch.mm(dz2.new_ones((1, n * n)), dz2, out_dtype=f32).reshape(-1)  # sum over the pairs
     dwp = torch.mm(dz2.t(), y, out_dtype=f32)  # dW' = dz^T y
     # the RTX 5090: fewer, fused small kernels (dWo / dgamma / dbeta in one, split-K dW, one-launch column sums, dx returned without a copy)
@@ -192,7 +193,7 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
         dwo = dwp * gam.float()[None, :] + dbo[:, None] * bet.float()[None, :]  # W' = W gamma, b' = b + W beta
         dgam = (w32 * dwp).sum(0)
         dbet = w32.t() @ dbo
-    do = cuda.chai_bwd(dy, y, st, n)
+    do = fused(dz2, wf.t().contiguous(), y, st, n) if fused is not None else cuda.chai_bwd(dy, y, st, n)
     del dy
     bwd_products = getattr(cuda, "chai_bwd_products", None)  # A100 / RTX 5090: the card's batched GEMMs
     if bwd_products is not None:

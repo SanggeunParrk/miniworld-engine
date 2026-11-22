@@ -227,6 +227,10 @@ __global__ void __launch_bounds__(LW * 32, 2048 / (LW * 32)) fwd_lean(const T* _
     for (int c = 0; c < CH; ++c)
       raw[k][c] = row < M ? ld_stream<T, VEC>(x + row * N + (c * TPR + lane) * VEC) : zero_pack<T, VEC>();
   }
+  // the affine loads go out right behind the row loads (read after the reductions, their latency sat on the CTA's critical path)
+  float wr[CH * VEC], br[CH * VEC];
+  load_affine<TPR, CH, VEC>(w, wbf, 1.f, lane, N, wr);
+  if constexpr (!RMS) load_affine<TPR, CH, VEC>(b, bbf, 0.f, lane, N, br);
   float mean[RPT], rs[RPT];
 #pragma unroll
   for (int k = 0; k < RPT; ++k) {
@@ -252,12 +256,6 @@ __global__ void __launch_bounds__(LW * 32, 2048 / (LW * 32)) fwd_lean(const T* _
   }
 #pragma unroll
   for (int c = 0; c < CH; ++c) {
-    float wr[VEC], br[VEC];
-    load_affine<TPR, 1, VEC>(w ? static_cast<const char*>(w) + size_t(c) * TPR * VEC * (wbf ? 2 : 4) : nullptr, wbf, 1.f, lane,
-                             N - c * TPR * VEC, wr);
-    if constexpr (!RMS)
-      load_affine<TPR, 1, VEC>(b ? static_cast<const char*>(b) + size_t(c) * TPR * VEC * (bbf ? 2 : 4) : nullptr, bbf, 0.f, lane,
-                               N - c * TPR * VEC, br);
 #pragma unroll
     for (int k = 0; k < RPT; ++k) {
       const int64_t row = t * RT + k * RPC + r_in;
@@ -266,7 +264,7 @@ __global__ void __launch_bounds__(LW * 32, 2048 / (LW * 32)) fwd_lean(const T* _
 #pragma unroll
       for (int i = 0; i < VEC; ++i) {
         const float xn = (to_f<T>(raw[k][c].v[i]) - mean[k]) * rs[k];
-        o[i] = RMS ? xn * wr[i] : xn * wr[i] + br[i];
+        o[i] = RMS ? xn * wr[c * VEC + i] : xn * wr[c * VEC + i] + br[c * VEC + i];
       }
       st_stream<T, VEC>(y + row * N + (c * TPR + lane) * VEC, o);
     }

@@ -235,7 +235,7 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
         "cuda:h100_sm90": 4,
         "cuda:a100_sm80": 3,
         "cuda:5090_sm120": 3,  # triton:5090_sm120 stays at the default 1: the 2026-11-19 5090 table commits only ADD launch-config keys for shapes absent from the requirements rows (no token result changes)
-        "cuda:b200_sm100": 22,
+        "cuda:b200_sm100": 23,
     }  # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward;
     # 2026-11-22: H100 (cuda:h100_sm90 4): fp32 odd-width rows (651 / 831 / 267 ...) from 4096 rows: the backward through a shared-memory cp.async ring (ln_stage_bwd_kernel), 2.5-3x faster at 651; dx equal up to fp32 rounding, dw / db unchanged
     # 2026-11-20: H100 (cuda:h100_sm90 3): the odd-width row backward (ln_rows.cu) -- CTA tail of the affine partials in one barrier pair a pass for rows of 17+ values a lane, one col_reduce launch; outputs bit-identical
@@ -256,6 +256,8 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
     # statistics and dy after it; the column pass a dependent of the backward; forwards under 8 MB): training steps one 2 us timer step shorter in many small cells
     # 2026-11-18: B200 (cuda:b200_sm100 22, round 8): fp32 768 training under 4096 rows runs the fused backward (column CTAs in thread-block clusters
     # sum dw / db beside the dx CTAs, DSMEM fold; no column-pass launch): [384 / 640 / 768, 768] 14.1-16.2 -> 12.1-14.1 us
+    # 2026-11-23: B200 (cuda:b200_sm100 23): the lean one-warp forward loads the affine parameters right behind the row loads (not after the reductions: that latency sat on every CTA's
+    # critical path) and takes bf16 D 64 / 128 / 256 from 65 536 rows at four rows a thread: bf16 D 64 / 128 inference now level with or ahead of Triton (the CUDA route no longer refuses them)
 
     def __init__(
         self,
