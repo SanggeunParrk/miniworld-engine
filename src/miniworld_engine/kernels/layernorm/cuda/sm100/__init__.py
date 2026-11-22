@@ -95,7 +95,7 @@ FWD_DIRECT4: set[tuple[int, int]] = {(64, 4), (128, 4), (256, 4), (384, 4), (512
 #: bf16 widths whose inference forward from the given row count is the lean one-warp grid (``fwd_lean``, ``ctas`` -1) at the given rows
 #: a thread (round 6, graph timing): bf16 [147456 / 589824, 384] 51.0 / 172.0 -> 46.9 / 155.5 us (row kernels' resident grid), [147456 /
 #: 589824 / 1048576, 512] 59.2 / 204.7 / 356.4 -> 57.2 / 194.3 / 337.7. {(n, element bytes): (min rows, rpt)}
-LEAN_FROM: dict[tuple[int, int], tuple[int, int]] = {(384, 2): (65_536, 4), (512, 2): (65_536, 2)}
+LEAN_FROM: dict[tuple[int, int], tuple[int, int]] = {(384, 2): (65_536, 4), (512, 2): (65_536, 2), (64, 2): (65_536, 4), (128, 2): (65_536, 4), (256, 2): (65_536, 4)}
 
 
 @functools.lru_cache(maxsize=4096)
