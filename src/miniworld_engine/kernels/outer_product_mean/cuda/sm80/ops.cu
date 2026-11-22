@@ -197,30 +197,6 @@ void epilogue(torch::Tensor O, torch::Tensor norm, double norm_const, torch::Ten
   }
 }
 
-// The epilogue over a chunk of ``rows`` pair rows i (rows a multiple of 4): O [rows 32, >= L 32] (the chunk's O_c = A[:, i0 32 : i1 32]^T B, row stride O.stride(0)), norm / residual /
-// out point at the chunk's first row (norm [rows, L], residual / out [rows, L, CZ]); the kernel's i index is local to the chunk. Shipped schedule only (variant 0).
-void epilogue_rows(torch::Tensor O, torch::Tensor norm, double norm_const, torch::Tensor wo, torch::Tensor bias, torch::Tensor residual, torch::Tensor out, int64_t norm_first,
-                   double norm_min, double norm_add) {
-  check_bf16(O, "O"); check_bf16(wo, "wo"); check_bf16(out, "out"); check_f32(bias, "bias");
-  const int rows = (int)out.size(0), L = (int)out.size(1), CZ = (int)out.size(2);
-  TORCH_CHECK(out.dim() == 3 && rows % 4 == 0 && O.dim() == 2 && O.size(0) == (int64_t)rows * 32 && O.size(1) >= (int64_t)L * 32 && O.stride(1) == 1, "O / out shapes (rows a multiple of 4)");
-  TORCH_CHECK(wo.sizes() == torch::IntArrayRef({CZ, 1024}) && bias.numel() == CZ, "wo / bias");
-  TORCH_CHECK(norm.numel() == 0 || (norm.is_cuda() && norm.scalar_type() == at::kFloat && norm.is_contiguous() && norm.numel() == (int64_t)rows * L), "norm: fp32 [rows, L]");
-  TORCH_CHECK(residual.numel() == 0 || (residual.is_cuda() && residual.scalar_type() == at::kBFloat16 && residual.is_contiguous() && residual.numel() == out.numel()), "residual");
-  TORCH_CHECK(CZ == 128 || CZ == 256 || CZ == 384 || CZ == 512, "epilogue_rows: d_pair must be 128, 256, 384 or 512");
-  const at::cuda::CUDAGuard guard(O.device());
-  opm80::EpilogueParams p;
-  p.O = ptr<__nv_bfloat16>(O); p.norm = norm.numel() ? norm.data_ptr<float>() : nullptr; p.wo = ptr<__nv_bfloat16>(wo); p.bias = bias.data_ptr<float>();
-  p.residual = residual.numel() ? ptr<__nv_bfloat16>(residual) : nullptr; p.out = reinterpret_cast<__nv_bfloat16*>(out.data_ptr());
-  p.ldo = O.stride(0); p.L = L; p.norm_const = (float)norm_const; p.norm_first = (int)norm_first; p.cz = CZ; p.ntile = CZ / 128;
-  p.norm_min = (float)norm_min; p.norm_add = (float)norm_add;
-  using C = opm80::EpCfg<128, 2, 2>;
-  raise_smem(opm80::opm_epilogue_kernel<128, 2, 2, false>, C::SMEM);
-  dim3 grid(((L + C::BJ - 1) / C::BJ) * p.ntile, rows / C::BI);
-  opm80::opm_epilogue_kernel<128, 2, 2, false><<<grid, C::NTHR, C::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
 // dz [L, L, CZ] bf16, norm (as above), wo [CZ, 1024] -> dO [L 32, L 32] bf16, dzn [L, L, CZ] bf16, dbo_part fp32 [ceil(L / 32) * ceil(L / 4), CZ]
 void dgrad(torch::Tensor dz, torch::Tensor norm, double norm_const, torch::Tensor wo, torch::Tensor dO, torch::Tensor dzn, torch::Tensor dbo_part, int64_t norm_first,
            int64_t variant, double norm_min, double norm_add) {
@@ -340,7 +316,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
   mod.def("lt_mm", &lt_mm);
   mod.def("prologue", &prologue);
   mod.def("epilogue", &epilogue);
-  mod.def("epilogue_rows", &epilogue_rows);
   mod.def("dgrad", &dgrad);
   mod.def("dwo", &dwo);
   mod.def("prologue_bwd", &prologue_bwd);
