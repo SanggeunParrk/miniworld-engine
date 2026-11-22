@@ -410,7 +410,13 @@ def transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps):
             # an inference loop calls with the same weights: reuse the cached Ws^T instead of a prepare launch per call
             wst = transposed_contiguous(ws)
         else:
-            wa, wb, ws, wst = _cuda_prepare(wa, wb, ws)
+            # fp32 masters: cast / transposed once per parameter version, a capture reads the entry its warm-up made (no prepare launch
+            # per replay: ~3 us and its launch gap on a 15 us kernel)
+            from miniworld_engine.kernels import _capture
+
+            wa, wb, ws, wst = _capture.param_forms(
+                "transition_d128_bf16_forms", (wa, wb, ws), lambda: _cuda_prepare(wa, wb, ws), capture_reads_eager=True
+            )
         out, _, _, _ = _fwd_launch(
             x.reshape(-1, shape[-1]).contiguous(),
             gamma.float().contiguous(),

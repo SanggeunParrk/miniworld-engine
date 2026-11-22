@@ -577,7 +577,7 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
     saves, decided here and not inside the autograd Function, for the reason ``fused_sm90a`` documents."""
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
-        if shape[-1] == 64:
+        if shape[-1] in (64, 256):
             # The forward consumes Ws transposed. bf16 weights reuse a cached transpose (an inference loop calls with the same
             # weights); fp32 masters are cast and transposed together, as the training entry does.
             if all(w.dtype == torch.bfloat16 for w in (wa, wb, ws)):

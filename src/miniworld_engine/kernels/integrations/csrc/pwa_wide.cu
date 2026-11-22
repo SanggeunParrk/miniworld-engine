@@ -37,6 +37,8 @@ using bf16 = __nv_bfloat16;
 constexpr int H = 8, C = PW_C, D = PW_D, HC = H * C, TS = 64, NWG = PW_NWG, NT = 128 * NWG;
 constexpr int NKD = D / 64, NKH = HC / 64, NK2 = 2 * HC / 64, NCD = D / 64, NCH = HC / 64;
 constexpr int TILE = TS * 64;                              // elements of one [64 rows][64 cols] block
+constexpr int YB = 3;                                      // gate_big_kernel: y tile buffers (the BIG build: y(t + 2) in flight while tile t runs)
+constexpr int AB = 3;                                      // out_big_kernel: a tile buffers
 static_assert(D % 64 == 0 && HC % 64 == 0 && C % 8 == 0, "d_msa must be a multiple of 64, 8 * d_hidden of 64");
 // The BIG build (8 x 32 = 256 hidden channels at d_msa 256, IntelliFold2): one 128 KiB weight is what fits next to a double-buffered
 // tile, so gate_out_w is split at the gated product into gate_w (Wg resident) and out_w (Wo resident), the gate backward reads the
@@ -642,25 +644,35 @@ __global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O
                                                       const float* __restrict__ LNW, const float* __restrict__ LNB, float eps,
                                                       bf16* __restrict__ A, bf16* __restrict__ G, int N, int S, int ntile) {
   extern __shared__ unsigned char smem_raw[];
-  bf16* sY = reinterpret_cast<bf16*>(align1k(smem_raw));         // [2][NKD][TILE]; after the GEMM the tile stages a, then g
-  bf16* sWg = sY + NWG * 2 * NKD * TILE;                        // [NKD][HC][64]      Wg [HC][D]: rows = hidden, k = d
+  bf16* sY = reinterpret_cast<bf16*>(align1k(smem_raw));         // [YB][NKD][TILE] ring; after the GEMM the tile stages a, then g
+  bf16* sWg = sY + NWG * YB * NKD * TILE;                       // [NKD][HC][64]      Wg [HC][D]: rows = hidden, k = d
   const int tid = threadIdx.x, wgi = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
-  bf16* sO = sWg + NKD * HC * 64 + wgi * H * TS * C;            // [H][TS][C] the o tile, 16-byte chunks XOR-swizzled by row (OSW)
-  // the o tile of (n, s0) staged while the gate GEMM runs: [H][TS][C] in 16-byte chunks, chunk q of row r at q ^ ((r >> 1) & 3), so the
-  // epilogue's 4-byte reads (8 rows x 4 lanes per warp) hit 8 distinct bank quads; the global reads are whole 64-byte rows
-  auto load_o = [&](int n, int s0) {
-    for (int v = wtid; v < H * TS * (C / 8); v += 128) {
-      const int h = v / (TS * (C / 8)), r = (v / (C / 8)) % TS, q = v % (C / 8);
-      const bool ok = s0 + r < S;
-      cp16(sa(sO + ((h * TS + r) * (C / 8) + (q ^ ((r >> 1) & 3))) * 8), ok ? O + ((long)h * N + n) * ((long)S * C) + (long)(s0 + r) * C + q * 8 : O, ok);
-    }
+  const int r0 = warp * 16 + (lane >> 2), q2 = (lane & 3) * 2;
+  // The o tile of (n, s0) is read straight from global memory into registers (4-byte loads in the accumulator layout, 64 registers):
+  // it used to be staged in 32 KiB of shared memory loaded at the top of the tile's iteration, so its whole latency was exposed.  Now the
+  // next tile's o loads are issued as soon as this tile's epilogue has consumed the registers, and they fly during the flush, the y wait
+  // and the GEMM; the 32 KiB freed became a third y buffer (y(t + 2) is in flight while tile t runs).
+  uint32_t ou[NCH][8][2];
+  auto load_o = [&](int t) {
+    const int n = t % N, s0 = (t / N) * TS;
+#pragma unroll
+    for (int j = 0; j < NCH; ++j)
+#pragma unroll
+      for (int nl = 0; nl < 8; ++nl) {
+        const int col = j * 64 + nl * 8 + q2, h = col / C, c = col % C;
+#pragma unroll
+        for (int rr = 0; rr < 2; ++rr) {
+          const int s = s0 + r0 + rr * 8;
+          ou[j][nl][rr] = s < S ? __ldg(reinterpret_cast<const uint32_t*>(O + ((long)h * N + n) * ((long)S * C) + (long)s * C + c)) : 0u;
+        }
+      }
   };
   auto load = [&](int buf, int t) {
     const int n = t % N, s0 = (t / N) * TS;
     for (int v = wtid; v < TS * (D / 8); v += 128) {
       const int row = v / (D / 8), ch = v % (D / 8);
       const bool ok = s0 + row < S;
-      cp16(sa(sY + (wgi * 2 + buf) * NKD * TILE + so(ch >> 3, TS, row, ch & 7)), ok ? Y + ((long)(s0 + row) * N + n) * D + ch * 8 : Y, ok);
+      cp16(sa(sY + (wgi * YB + buf) * NKD * TILE + so(ch >> 3, TS, row, ch & 7)), ok ? Y + ((long)(s0 + row) * N + n) * D + ch * 8 : Y, ok);
     }
   };
   for (int v = tid; v < HC * (D / 8); v += NT) {
@@ -673,20 +685,21 @@ __global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O
   cp_commit();                                                   // the weights
   cp_wait<0>();
   __syncthreads();                                               // (the only block-wide barrier)
-  if ((int)(blockIdx.x * NWG + wgi) < ntile) load(0, blockIdx.x * NWG + wgi);
+  const int tstep = (int)(gridDim.x * NWG), t0 = (int)(blockIdx.x * NWG + wgi);
+  if (t0 < ntile) load(0, t0);
   cp_commit();
-  const int r0 = warp * 16 + (lane >> 2), q2 = (lane & 3) * 2;
+  if (t0 + tstep < ntile) load(1, t0 + tstep);
+  cp_commit();
+  if (t0 < ntile) load_o(t0);
   for (int it = 0;; ++it) {
-    const int t = (int)(blockIdx.x * NWG + wgi) + it * (int)(gridDim.x * NWG);
+    const int t = t0 + it * tstep;
     if (t >= ntile) break;
-    const int buf = it & 1, tn = t + (int)(gridDim.x * NWG);
+    const int buf = it % YB, tn2 = t + 2 * tstep;
     const int n = t % N, s0 = (t / N) * TS;
-    load_o(n, s0);                                               // the o tile first: it lands during the y wait and the gate GEMM
+    if (tn2 < ntile) load((it + 2) % YB, tn2);
     cp_commit();
-    if (tn < ntile) load(buf ^ 1, tn);
-    cp_commit();
-    cp_wait<2>();                                                // groups in flight: y(t), o(t), y(t + 1) -> y(t) landed
-    bf16* sy = sY + (wgi * 2 + buf) * NKD * TILE;
+    cp_wait<2>();                                                // groups in flight: y(t), y(t + 1), y(t + 2) -> y(t) landed
+    bf16* sy = sY + (wgi * YB + buf) * NKD * TILE;
     if (LN) {
       wg_sync(wgi);                                              // the tile landed: normalise it in place
       float g[32], b[32];
@@ -709,7 +722,6 @@ __global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O
     for (int j = 0; j < NCH; ++j)
 #pragma unroll
       for (int k = 0; k < 32; ++k) gacc[j][k] = rbf(1.f / (1.f + __expf(-rbf(gacc[j][k]))));   // g = bf16(sigmoid(bf16(gate)))
-    cp_wait<1>();                                                // o(t) landed (y(t + 1) may still be in flight)
     wg_sync(wgi);                                                // every warp is past the gate GEMM: the y tile becomes the staging
 #pragma unroll 1
     for (int round = 0; round < (G != nullptr ? 2 : 1); ++round) {
@@ -724,9 +736,7 @@ __global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O
             const float g0 = gacc[j][nl * 4 + rr * 2], g1 = gacc[j][nl * 4 + rr * 2 + 1];
             uint32_t v;
             if (round == 0) {
-              const int r = r0 + rr * 8;
-              const float2 o = s < S ? unpack2(*reinterpret_cast<const uint32_t*>(sO + ((h * TS + r) * (C / 8) + ((c >> 3) ^ ((r >> 1) & 3))) * 8 + (c & 7)))
-                                     : make_float2(0.f, 0.f);
+              const float2 o = unpack2(ou[j][nl][rr]);
               v = pack2(o.x * g0, o.y * g1);
             } else {
               v = pack2(g0, g1);
@@ -734,6 +744,7 @@ __global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O
             st_put(sy, r0 + rr * 8, col, v);
           }
         }
+      if (round == 0 && t + tstep < ntile) load_o(t + tstep);   // the o registers are consumed: the next tile's o flies during the flush, the y wait and the GEMM
       wg_sync(wgi);
       st_flush_nat<HC>(sy, wtid, round == 0 ? A : G, HC, 0, n, N, s0, S);
       wg_sync(wgi);
@@ -748,15 +759,22 @@ __global__ void __launch_bounds__(NT) gate_big_kernel(const bf16* __restrict__ O
 __global__ void __launch_bounds__(NT) out_big_kernel(const bf16* __restrict__ A, const bf16* __restrict__ X, const bf16* __restrict__ WO,
                                                      const bf16* __restrict__ DMASK, float dscale, bf16* __restrict__ OUT, int N, int S, int ntile) {
   extern __shared__ unsigned char smem_raw[];
-  bf16* sA = reinterpret_cast<bf16*>(align1k(smem_raw));         // [2][NKH][TILE]; after the GEMM the tile stages the output
-  bf16* sWo = sA + NWG * 2 * NKH * TILE;                        // [NKH][D][64]       Wo [D][HC]: rows = d, k = hidden
+  bf16* sA = reinterpret_cast<bf16*>(align1k(smem_raw));         // [AB][NKH][TILE] ring; after the GEMM the tile stages the output
+  bf16* sWo = sA + NWG * AB * NKH * TILE;                       // [NKH][D][64]       Wo [D][HC]: rows = d, k = hidden
   const int tid = threadIdx.x, wgi = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
-  bf16* sX = sWo + NKH * D * 64 + wgi * NCD * TILE;             // [NCD][TILE] the residual tile, staged while the GEMM runs (128-byte swizzle)
-  auto load_x = [&](int n, int s0) {
-    for (int v = wtid; v < TS * (D / 8); v += 128) {
-      const int row = v / (D / 8), ch = v % (D / 8);
-      const bool ok = s0 + row < S;
-      cp16(sa(sX + so(ch >> 3, TS, row, ch & 7)), ok ? X + ((long)(s0 + row) * N + n) * D + ch * 8 : X, ok);
+  const int r0 = warp * 16 + (lane >> 2), q2 = (lane & 3) * 2;
+  // The residual tile is read from global memory straight into registers as the flush will want it (16-byte chunks, a warp reads whole
+  // 512-byte rows: 16 x uint4 = 64 registers) instead of a 32 KiB staging tile: the next tile's loads are issued as soon as this tile's
+  // flush has consumed the registers and fly during the a wait and the GEMM; the freed shared memory became a third a buffer
+  // (a(t + 2) is in flight while tile t runs).  The residual add moves into the flush: the staged update is already a bf16 value (the
+  // module rounds it before the add), so adding the bf16 residual to it in fp32 and rounding is the same arithmetic as before.
+  uint4 xr[16];
+  auto load_x = [&](int t) {
+    const int n = t % N, s0 = (t / N) * TS;
+#pragma unroll
+    for (int q = 0; q < 16; ++q) {
+      const int s = s0 + (wtid >> 5) + 4 * q;
+      xr[q] = s < S ? __ldg(reinterpret_cast<const uint4*>(X + ((long)s * N + n) * D + (wtid & 31) * 8)) : make_uint4(0u, 0u, 0u, 0u);
     }
   };
   auto load = [&](int buf, int t) {
@@ -764,7 +782,7 @@ __global__ void __launch_bounds__(NT) out_big_kernel(const bf16* __restrict__ A,
     for (int v = wtid; v < TS * (HC / 8); v += 128) {
       const int row = v / (HC / 8), ch = v % (HC / 8);
       const bool ok = s0 + row < S;
-      cp16(sa(sA + (wgi * 2 + buf) * NKH * TILE + so(ch >> 3, TS, row, ch & 7)), ok ? A + ((long)(s0 + row) * N + n) * HC + ch * 8 : A, ok);
+      cp16(sa(sA + (wgi * AB + buf) * NKH * TILE + so(ch >> 3, TS, row, ch & 7)), ok ? A + ((long)(s0 + row) * N + n) * HC + ch * 8 : A, ok);
     }
   };
   for (int v = tid; v < D * (HC / 8); v += NT) {
@@ -774,22 +792,23 @@ __global__ void __launch_bounds__(NT) out_big_kernel(const bf16* __restrict__ A,
   cp_commit();                                                   // the weights
   cp_wait<0>();
   __syncthreads();                                               // (the only block-wide barrier)
-  if ((int)(blockIdx.x * NWG + wgi) < ntile) load(0, blockIdx.x * NWG + wgi);
+  const int tstep = (int)(gridDim.x * NWG), t0 = (int)(blockIdx.x * NWG + wgi);
+  if (t0 < ntile) load(0, t0);
   cp_commit();
-  const int r0 = warp * 16 + (lane >> 2), q2 = (lane & 3) * 2;
+  if (t0 + tstep < ntile) load(1, t0 + tstep);
+  cp_commit();
+  if (t0 < ntile) load_x(t0);
   for (int it = 0;; ++it) {
-    const int t = (int)(blockIdx.x * NWG + wgi) + it * (int)(gridDim.x * NWG);
+    const int t = t0 + it * tstep;
     if (t >= ntile) break;
-    const int buf = it & 1, tn = t + (int)(gridDim.x * NWG);
+    const int buf = it % AB, tn2 = t + 2 * tstep;
     const int n = t % N, s0 = (t / N) * TS;
-    load_x(n, s0);                                               // the residual tile first: it lands during the a wait and the GEMM
+    if (tn2 < ntile) load((it + 2) % AB, tn2);
     cp_commit();
-    if (tn < ntile) load(buf ^ 1, tn);
-    cp_commit();
-    cp_wait<2>();                                                // groups in flight: a(t), x(t), a(t + 1) -> a(t) landed
+    cp_wait<2>();                                                // groups in flight: a(t), a(t + 1), a(t + 2) -> a(t) landed
     wgw::proxy_fence();
     wg_sync(wgi);
-    bf16* sa_ = sA + (wgi * 2 + buf) * NKH * TILE;
+    bf16* sa_ = sA + (wgi * AB + buf) * NKH * TILE;
     float oacc[NCD][32];
     wgw::fence();
 #pragma unroll
@@ -799,7 +818,6 @@ __global__ void __launch_bounds__(NT) out_big_kernel(const bf16* __restrict__ A,
         wgw::ss64(wgw::desc(sa_ + (kk >> 2) * TILE + (kk & 3) * 16), wgw::desc(sWo + ((kk >> 2) * D + 64 * jn) * 64 + (kk & 3) * 16), oacc[jn], kk == 0 ? 0 : 1);
     wgw::commit();
     wgw::wait();
-    cp_wait<1>();                                                // x(t) landed (a(t + 1) may still be in flight)
     wg_sync(wgi);                                                // every warp is past the GEMM: the a tile becomes the output staging
 #pragma unroll
     for (int jn = 0; jn < NCD; ++jn)
@@ -810,17 +828,27 @@ __global__ void __launch_bounds__(NT) out_big_kernel(const bf16* __restrict__ A,
         if (DMASK != nullptr) { dm = unpack2(*reinterpret_cast<const uint32_t*>(DMASK + (long)n * D + col)); dm.x *= dscale; dm.y *= dscale; }
 #pragma unroll
         for (int rr = 0; rr < 2; ++rr) {
-          const int s = s0 + r0 + rr * 8;
           // the stock module rounds the update to bf16 before the (dropout and the) residual add
           float u0 = rbf(oacc[jn][nt * 4 + rr * 2]), u1 = rbf(oacc[jn][nt * 4 + rr * 2 + 1]);
           if (DMASK != nullptr) { u0 = rbf(u0 * dm.x); u1 = rbf(u1 * dm.y); }
-          const int rx = r0 + rr * 8;
-          const float2 xr = s < S ? unpack2(*reinterpret_cast<const uint32_t*>(sX + so(col >> 6, TS, rx, (col & 63) >> 3) + (col & 7))) : make_float2(0.f, 0.f);
-          st_put(sa_, r0 + rr * 8, col, pack2(xr.x + u0, xr.y + u1));
+          st_put(sa_, r0 + rr * 8, col, pack2(u0, u1));
         }
       }
     wg_sync(wgi);
-    st_flush_nat<D>(sa_, wtid, OUT, D, 0, n, N, s0, S);
+#pragma unroll
+    for (int q = 0; q < 16; ++q) {                              // flush: out = bf16(x + u), 16-byte chunks, whole rows per warp
+      const int row = (wtid >> 5) + 4 * q, ch = wtid & 31;
+      if (s0 + row < S) {
+        const uint4 uu = st_get(sa_, row, ch);
+        uint4 o;
+        o.x = pack2(unpack2(uu.x).x + unpack2(xr[q].x).x, unpack2(uu.x).y + unpack2(xr[q].x).y);
+        o.y = pack2(unpack2(uu.y).x + unpack2(xr[q].y).x, unpack2(uu.y).y + unpack2(xr[q].y).y);
+        o.z = pack2(unpack2(uu.z).x + unpack2(xr[q].z).x, unpack2(uu.z).y + unpack2(xr[q].z).y);
+        o.w = pack2(unpack2(uu.w).x + unpack2(xr[q].w).x, unpack2(uu.w).y + unpack2(xr[q].w).y);
+        *reinterpret_cast<uint4*>(OUT + ((long)(s0 + row) * N + n) * D + ch * 8) = o;
+      }
+    }
+    if (t + tstep < ntile) load_x(t + tstep);                    // the residual registers are consumed: the next tile's fly during the a wait and the GEMM
     wg_sync(wgi);
   }
 }
@@ -1105,7 +1133,7 @@ std::vector<torch::Tensor> gate_w(torch::Tensor o, torch::Tensor y, torch::Tenso
   auto a = torch::empty({S, N, (long)HC}, y.options());
   auto g = save_g ? torch::empty({S, N, (long)HC}, y.options()) : torch::empty({0}, y.options());
   const int ntile = N * ((S + TS - 1) / TS);
-  const int smem = 1024 + (NWG * 2 * NKD * TILE + NKD * HC * 64 + NWG * H * TS * C) * 2;   // + the staged o tile
+  const int smem = 1024 + (NWG * YB * NKD * TILE + NKD * HC * 64) * 2;   // (o is read into registers)
   const float* gp = ln ? lnw->data_ptr<float>() : nullptr;
   const float* bp = ln ? lnb->data_ptr<float>() : nullptr;
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -1130,7 +1158,7 @@ torch::Tensor out_w(torch::Tensor a, torch::Tensor m, torch::Tensor wo, c10::opt
   if (dmask.has_value()) { check_bf16(*dmask, "dmask"); TORCH_CHECK(dmask->sizes() == torch::IntArrayRef({N, D}), "dmask: [N, D]"); }
   auto out = torch::empty_like(m);
   const int ntile = N * ((S + TS - 1) / TS);
-  const int smem = 1024 + (NWG * 2 * NKH * TILE + NKH * D * 64 + NWG * NCD * TILE) * 2;   // + the staged residual tile
+  const int smem = 1024 + (NWG * AB * NKH * TILE + NKH * D * 64) * 2;   // (the residual is read into registers)
   const int grid = grid_for(out_big_kernel, smem, (ntile + NWG - 1) / NWG, m.device().index());
   out_big_kernel<<<grid, NT, smem, at::cuda::getCurrentCUDAStream()>>>(P(a), P(m), P(wo), dmask.has_value() ? P(*dmask) : nullptr, (float)dscale, W(out), N, S, ntile);
   C10_CUDA_KERNEL_LAUNCH_CHECK();

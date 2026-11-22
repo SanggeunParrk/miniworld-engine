@@ -66,6 +66,11 @@ def chai_bwd(dy, y, stats, n):
     return chai_ext().chai_bwd(dy, y, stats, int(n))
 
 
+def chai_bwd_fused(dz, wft, y, stats, n):
+    """dz [N N, 256] bf16, wft = W'^T [512, 256] bf16, the forward's y and stats -> dO [8, N K, N K] bf16: ``chai_bwd(dz W', y, stats)`` with the dy GEMM in the kernel (no [N N, 512] dy tensor)."""
+    return chai_ext().chai_bwd_fused(dz, wft, y, stats, int(n))
+
+
 def chai_projbwd(x, mask, da, db, gamma, beta, stats, wlr):
     """Backward of ``chai_proj``: -> [dcat [T, 128], ln16 [T, 64], dx [T, 64], per-block [dgamma | dbeta] partials [T / 64, 128] fp32]."""
     return chai_ext().chai_projbwd(x, mask, da, db, gamma, beta, stats, wlr)
