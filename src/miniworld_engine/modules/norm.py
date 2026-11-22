@@ -233,10 +233,11 @@ class LayerNorm(_Fp32ParamsMixin, BackendModule, nn.LayerNorm):
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
         "cuda:h100_sm90": 4,
-        "cuda:a100_sm80": 3,
-        "cuda:5090_sm120": 3,  # triton:5090_sm120 stays at the default 1: the 2026-11-19 5090 table commits only ADD launch-config keys for shapes absent from the requirements rows (no token result changes)
+        "cuda:a100_sm80": 4,
+        "cuda:5090_sm120": 4,  # triton:5090_sm120 stays at the default 1: the 2026-11-19 5090 table commits only ADD launch-config keys for shapes absent from the requirements rows (no token result changes)
         "cuda:b200_sm100": 23,
     }  # 2026-11-10: kits; H100 odd-width rows kernels; 2026-11-11: A100 staged odd-width forward;
+    # 2026-11-23: A100 (cuda:a100_sm80 4) and RTX 5090 (cuda:5090_sm120 4): the sm80 row backward -- the bf16 rows of 3-4 chunks a lane (d 384 / 512 / 768) without register spills, rows walked last to first (L2 reuse of the forward), a quarter-size kernel for a call of one row group a warp, next-batch load prefetch; dx bit-identical, dw / db equal up to fp32 summation order
     # 2026-11-22: H100 (cuda:h100_sm90 4): fp32 odd-width rows (651 / 831 / 267 ...) from 4096 rows: the backward through a shared-memory cp.async ring (ln_stage_bwd_kernel), 2.5-3x faster at 651; dx equal up to fp32 rounding, dw / db unchanged
     # 2026-11-20: H100 (cuda:h100_sm90 3): the odd-width row backward (ln_rows.cu) -- CTA tail of the affine partials in one barrier pair a pass for rows of 17+ values a lane, one col_reduce launch; outputs bit-identical
     # 2026-11-13: RTX 5090 (cuda:5090_sm120 2): the staged odd-width forward from 16 rows on, fp32 d 768 rows with early parameters and two row groups a warp;

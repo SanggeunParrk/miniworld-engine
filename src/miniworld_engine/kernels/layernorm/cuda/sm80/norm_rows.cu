@@ -13,7 +13,9 @@
 //             the partials in a fixed order.  The grid is one wave of CTAs, no more than one per 64 rows (every CTA is a partial row to write and read back: that is what a small
 //             M pays for).  Large M: the persistent warps take chunks of row groups from a work counter (static assignment left 10-30 % on the table at wide rows: the CTAs
 //             finish at different times), which makes the order of the rows inside the partial rows -- dw / db, not dx -- vary from run to run (fp32 rounding); small M: static
-//             assignment, bit-reproducible.
+//             assignment, bit-reproducible.  Every backward walks the rows from the last to the first (the forward wrote them last: they are still in L2); a small call (a row group a warp at most)
+//             runs a quarter-size kernel (UN = 1: the code of a call this small comes from DRAM), a call of rows of one or two chunks a lane keeps the loads of the next batch in flight while it
+//             computes this one; the bf16 kernels of 3-4 chunks a lane are compiled for one CTA a SM (the register cap of two 256-thread CTAs spilled their dw / db accumulators).
 // Scalar path (any other width / alignment): a warp per row, lane l on columns l, l + 32, ...; with the row cached in registers up to 32 * VS columns.  Every load of a row and of its weight / bias is a volatile
 //             read-only load issued up front (the compiler left to itself issued them in groups of six and waited for each group).  The weight / bias dtype is a template constant of every
 //             forward kernel (a runtime flag put each parameter load behind a predicated convert that waited for it: a DRAM round trip per chunk).
@@ -39,6 +41,18 @@ namespace {
 constexpr int NTF = 128;      // threads per CTA, forward kernels
 constexpr int NTB = 256;      // threads per CTA, vector backward
 constexpr int CHUNK_GROUPS = 4;   // row groups a persistent backward warp takes from the work counter at a time
+// the backward walks the rows from the last to the first: the forward touched the last rows most recently, so they are the ones still in L2 (5090: 96 MB, d 64 / 256 / 384 training 5-8 % faster)
+#ifndef BWD_NOREV
+#define BWD_ROW(i, M) ((M) - 1 - (i))
+#else
+#define BWD_ROW(i, M) (i)
+#endif
+#ifndef BWD_MINB_WIDE
+#define BWD_MINB_WIDE 1   // CTAs a SM the bf16 backward (V >= 2) is compiled for (the launch bound the compiler sees): a cap of 128 registers (two 256-thread CTAs) spilled the dw / db accumulators of the rows of 3 and 4 chunks a lane (d 384 / 512 bf16: 96-820 bytes of local memory, 10 % behind Triton on the 5090)
+#endif
+#ifndef BWD_NT_WIDE
+#define BWD_NT_WIDE 128   // threads of its CTA (1 CTA is bounded by 255 registers: 3-4 CTAs of 4 warps a SM at the 150-170 it takes)
+#endif
 
 // the (lane group, chunks per lane) pairs the vector kernels are built for: G = the largest power of two dividing NV (cap 32), V = NV / G
 #define NORMS_PAIRS_FWD(X) X(2, 1) X(4, 1) X(8, 1) X(16, 1) X(32, 1) X(2, 3) X(4, 3) X(8, 3) X(16, 3) X(32, 2) X(32, 3) X(32, 4) X(32, 6) X(32, 8) X(32, 10)
@@ -137,44 +151,59 @@ __global__ void __launch_bounds__(NTF) fwd_vec(const XT* __restrict__ X, XT* __r
   }
 }
 
-// UN row groups (a warp's 32 / G rows each, at rg0, rg0 + step, ...; the first `cnt` of them valid): the loads of all of them are issued before any is computed (a warp keeps UN groups
-// in flight: narrow rows move little data per group), then dx and the dw / db column partials added into the lane's registers.  The x / dy chunks stay packed (widened where used).
-// MODE 0: LayerNorm with db, 1: LayerNorm without db, 2: RMSNorm.
-template <typename XT, int G, int V, int MODE, int UN>
-__device__ __forceinline__ void bwd_groups(long rg0, long step, int cnt, const XT* __restrict__ DY, const XT* __restrict__ X, const float (&w)[V][Chunk<XT>::CE],
-                                           const XT* __restrict__ RS, const float* __restrict__ MEAN, const float* __restrict__ RSTD, XT* __restrict__ DX,
-                                           float (&aw)[V][Chunk<XT>::CE], float (&ab)[MODE == 0 ? V : 1][MODE == 0 ? Chunk<XT>::CE : 1], long M, int N, float invN, int g, int sub) {
-  constexpr int CE = Chunk<XT>::CE, RPW = 32 / G;
-  constexpr bool RMS = MODE == 2, DB = MODE == 0;
+// the registers of one batch of UN row groups of a warp, loaded ahead of their arithmetic
+template <typename XT, int V, int UN> struct BwdRegs {
   uint4 xr[UN][V], dr[UN][V];
   long row[UN];
   bool valid[UN];
   float mean[UN], rstd[UN], rs[UN];
+};
+
+// UN row groups (a warp's 32 / G rows each, at rg0, rg0 + step, ...; the first `cnt` of them valid): the loads of all of them are issued before any is computed (a warp keeps UN groups
+// in flight: narrow rows move little data per group).  The x / dy chunks stay packed (widened where used).
+template <typename XT, int G, int V, int MODE, int UN>
+__device__ __forceinline__ void bwd_load(BwdRegs<XT, V, UN>& R, long rg0, long step, int cnt, const XT* __restrict__ DY, const XT* __restrict__ X, const XT* __restrict__ RS,
+                                         const float* __restrict__ MEAN, const float* __restrict__ RSTD, long M, int N, int g, int sub) {
+  constexpr int CE = Chunk<XT>::CE, RPW = 32 / G;
+  constexpr bool RMS = MODE == 2;
 #pragma unroll
   for (int u = 0; u < UN; ++u) {
-    row[u] = (rg0 + (long)u * step) * RPW + sub;
-    valid[u] = u < cnt && row[u] < M;
+#ifndef BWD_NOREV
+    R.row[u] = ((M + RPW - 1) / RPW - 1 - (rg0 + (long)u * step)) * RPW + sub;   // last rows first: the forward touched them last (L2)
+#else
+    R.row[u] = (rg0 + (long)u * step) * RPW + sub;
+#endif
+    R.valid[u] = u < cnt && R.row[u] < M;
 #pragma unroll
     for (int v = 0; v < V; ++v) {
-      xr[u][v] = valid[u] ? Chunk<XT>::load_raw(X + row[u] * N + (long)(g + G * v) * CE) : make_uint4(0u, 0u, 0u, 0u);
-      dr[u][v] = valid[u] ? Chunk<XT>::load_raw(DY + row[u] * N + (long)(g + G * v) * CE) : make_uint4(0u, 0u, 0u, 0u);
+      R.xr[u][v] = R.valid[u] ? Chunk<XT>::load_raw(X + R.row[u] * N + (long)(g + G * v) * CE) : make_uint4(0u, 0u, 0u, 0u);
+      R.dr[u][v] = R.valid[u] ? Chunk<XT>::load_raw(DY + R.row[u] * N + (long)(g + G * v) * CE) : make_uint4(0u, 0u, 0u, 0u);
     }
-    mean[u] = (RMS || !valid[u]) ? 0.f : MEAN[row[u]];
-    rstd[u] = valid[u] ? RSTD[row[u]] : 0.f;
-    rs[u] = (RS && valid[u]) ? to_f(RS[row[u]]) : 1.f;
+    R.mean[u] = (RMS || !R.valid[u]) ? 0.f : MEAN[R.row[u]];
+    R.rstd[u] = R.valid[u] ? RSTD[R.row[u]] : 0.f;
+    R.rs[u] = (RS && R.valid[u]) ? to_f(RS[R.row[u]]) : 1.f;
   }
+}
+
+// dx of the loaded groups and their dw / db column partials added into the lane's registers.
+// MODE 0: LayerNorm with db, 1: LayerNorm without db, 2: RMSNorm.
+template <typename XT, int G, int V, int MODE, int UN>
+__device__ __forceinline__ void bwd_compute(const BwdRegs<XT, V, UN>& R, const float (&w)[V][Chunk<XT>::CE], XT* __restrict__ DX, float (&aw)[V][Chunk<XT>::CE],
+                                            float (&ab)[MODE == 0 ? V : 1][MODE == 0 ? Chunk<XT>::CE : 1], int N, float invN, int g) {
+  constexpr int CE = Chunk<XT>::CE;
+  constexpr bool RMS = MODE == 2, DB = MODE == 0;
 #pragma unroll
   for (int u = 0; u < UN; ++u) {
     float s1 = 0.f, s2 = 0.f;
 #pragma unroll
     for (int v = 0; v < V; ++v) {
       float xf[CE], df[CE];
-      Chunk<XT>::unpack(xr[u][v], xf);
-      Chunk<XT>::unpack(dr[u][v], df);
+      Chunk<XT>::unpack(R.xr[u][v], xf);
+      Chunk<XT>::unpack(R.dr[u][v], df);
 #pragma unroll
       for (int e = 0; e < CE; ++e) {
-        const float wdy = w[v][e] * (df[e] * rs[u]);
-        s1 += wdy * ((xf[e] - mean[u]) * rstd[u]);
+        const float wdy = w[v][e] * (df[e] * R.rs[u]);
+        s1 += wdy * ((xf[e] - R.mean[u]) * R.rstd[u]);
         s2 += wdy;
       }
     }
@@ -184,33 +213,75 @@ __device__ __forceinline__ void bwd_groups(long rg0, long step, int cnt, const X
 #pragma unroll
     for (int v = 0; v < V; ++v) {
       float xf[CE], df[CE], o[CE];
-      Chunk<XT>::unpack(xr[u][v], xf);
-      Chunk<XT>::unpack(dr[u][v], df);
+      Chunk<XT>::unpack(R.xr[u][v], xf);
+      Chunk<XT>::unpack(R.dr[u][v], df);
 #pragma unroll
       for (int e = 0; e < CE; ++e) {
-        const float xh = (xf[e] - mean[u]) * rstd[u];
-        const float d = df[e] * rs[u];
-        o[e] = (w[v][e] * d - (xh * c1 + c2)) * rstd[u];
+        const float xh = (xf[e] - R.mean[u]) * R.rstd[u];
+        const float d = df[e] * R.rs[u];
+        o[e] = (w[v][e] * d - (xh * c1 + c2)) * R.rstd[u];
         aw[v][e] = fmaf(d, xh, aw[v][e]);
         if constexpr (DB) ab[v][e] += d;
       }
-      if (valid[u]) Chunk<XT>::store(DX + row[u] * N + (long)(g + G * v) * CE, o);
+      if (R.valid[u]) Chunk<XT>::store(DX + R.row[u] * N + (long)(g + G * v) * CE, o);
     }
   }
 }
 
-// row groups in flight per iteration of a backward warp: more when a group is little data
-template <int V> constexpr int bwd_unroll() { return V == 1 ? 4 : (V == 2 ? 2 : 1); }
+template <typename XT, int G, int V, int MODE, int UN>
+__device__ __forceinline__ void bwd_groups(long rg0, long step, int cnt, const XT* __restrict__ DY, const XT* __restrict__ X, const float (&w)[V][Chunk<XT>::CE],
+                                           const XT* __restrict__ RS, const float* __restrict__ MEAN, const float* __restrict__ RSTD, XT* __restrict__ DX,
+                                           float (&aw)[V][Chunk<XT>::CE], float (&ab)[MODE == 0 ? V : 1][MODE == 0 ? Chunk<XT>::CE : 1], long M, int N, float invN, int g, int sub) {
+  BwdRegs<XT, V, UN> R;
+  bwd_load<XT, G, V, MODE, UN>(R, rg0, step, cnt, DY, X, RS, MEAN, RSTD, M, N, g, sub);
+  bwd_compute<XT, G, V, MODE, UN>(R, w, DX, aw, ab, N, invN, g);
+}
+
+// the CTA's partial row of dw / db: into the partial-sum matrix, or -- a call of one CTA, where the partial row is the answer -- straight into the gradient (its dtype), which saves the reduction kernel
+__device__ __forceinline__ void store_partial(float* __restrict__ P, void* __restrict__ Out, bool o_bf, int N, int t, float s) {
+  if (Out) {
+    if (o_bf) reinterpret_cast<bf*>(Out)[t] = __float2bfloat16_rn(s);
+    else reinterpret_cast<float*>(Out)[t] = s;
+  } else {
+    P[(long)blockIdx.x * N + t] = s;
+  }
+}
+
+// row groups in flight per iteration of a backward warp: more when a group is little data; every knob below was measured on both cards (A-B-A-B, CUDA graph, flushed L2)
+#ifndef BWD_SMALL_GROUPS
+#define BWD_SMALL_GROUPS 2048   // up to this many row groups: CTAs of 128 threads
+#endif
+#ifndef BWD_ROWS_CTA
+#if defined(MWE_SM120)
+#define BWD_ROWS_CTA 64         // rows a CTA at least (every CTA is a partial row of dw / db); RTX 5090: 32 / 64 / 128 the same
+#else
+#define BWD_ROWS_CTA 32         // A100: 16384 x 128 / 64 fp32 and 8192 x 128 training 2-5 % faster than 64 (more warps in flight), 128 slower
+#endif
+#endif
+#ifndef BWD_PREFETCH
+#define BWD_PREFETCH 1          // the loads of the next batch of a warp issued before this batch is computed (rows of one chunk a lane; with two the doubled registers cost 10 % at d 256 fp32)
+#endif
+#ifndef BWD_UN_V1
+#if defined(MWE_SM120)
+#define BWD_UN_V1 4             // row groups a warp has in flight, rows of one chunk a lane (d 64 / 128 bf16, d 128 fp32); RTX 5090: 4 (1 / 2 / 8 / 16 slower)
+#else
+#define BWD_UN_V1 2             // A100: 2 (4 was 3 % slower, 8 / 16 6-20 % slower: the kernel's code grows with it and a small call runs it cold)
+#endif
+#endif
+#ifndef BWD_UN_V2
+#define BWD_UN_V2 2
+#endif
+template <int V> constexpr int bwd_unroll() { return V == 1 ? BWD_UN_V1 : (V == 2 ? BWD_UN_V2 : 1); }
 
 // DYN: the warps take chunks of CHUNK_GROUPS row groups from the work counter CTR (zeroed by the host); otherwise a static grid-stride assignment.
 // The CTA is capped at two per SM (128 registers) for V >= 2, which is what a row of 768 bf16 needs (V = 3 chunks per lane, 24 dw and 24 db partials).
-template <typename XT, int G, int V, int MODE, bool DYN>
-__global__ void __launch_bounds__(NTB, V >= 2 ? 2 : 1) bwd_vec(const XT* __restrict__ DY, const XT* __restrict__ X, const void* __restrict__ W, bool w_bf,
+template <typename XT, int G, int V, int MODE, bool DYN, bool ONE = false>
+__global__ void __launch_bounds__(NTB, (V >= 2 && sizeof(XT) == 2) ? BWD_MINB_WIDE : (V >= 2 ? 2 : 1)) bwd_vec(const XT* __restrict__ DY, const XT* __restrict__ X, const void* __restrict__ W, bool w_bf,
                                                                const XT* __restrict__ RS, const float* __restrict__ MEAN, const float* __restrict__ RSTD, XT* __restrict__ DX,
-                                                               float* __restrict__ PDW, float* __restrict__ PDB, int* __restrict__ CTR, long M, int N) {
+                                                               float* __restrict__ PDW, float* __restrict__ PDB, int* __restrict__ CTR, long M, int N, void* DWo, void* DBo, bool o_bf) {
   constexpr int CE = Chunk<XT>::CE, RPW = 32 / G;
   constexpr bool DB = MODE == 0;
-  constexpr int UN = bwd_unroll<V>();
+  constexpr int UN = ONE ? 1 : bwd_unroll<V>();   // ONE: every warp has at most one row group (a small M): the code is a quarter of the size (1784 -> ~500 instructions of d 256 bf16), which is most of such a call: its instructions come from DRAM through a flushed L2
   extern __shared__ float red[];                    // [warps][N]
   const int nthr = blockDim.x, nwarp = nthr >> 5;
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
@@ -244,8 +315,26 @@ __global__ void __launch_bounds__(NTB, V >= 2 ? 2 : 1) bwd_vec(const XT* __restr
     }
   } else {
     const long stride = (long)gridDim.x * nwarp;
-    for (long rg = (long)blockIdx.x * nwarp + warp; rg < ngroups; rg += stride * UN)
-      bwd_groups<XT, G, V, MODE, UN>(rg, stride, (int)min((long)UN, (ngroups - rg + stride - 1) / stride), DY, X, w, RS, MEAN, RSTD, DX, aw, ab, M, N, invN, g, sub);
+    long rg = (long)blockIdx.x * nwarp + warp;
+    if constexpr (BWD_PREFETCH && !ONE && V == 1) {
+      // software pipeline: the loads of the next batch are in flight while this one is computed (a warp is otherwise idle for one DRAM round trip a batch, and a small call has 2-4 batches)
+      if (rg < ngroups) {
+        BwdRegs<XT, V, UN> cur, nxt;
+        bwd_load<XT, G, V, MODE, UN>(cur, rg, stride, (int)min((long)UN, (ngroups - rg + stride - 1) / stride), DY, X, RS, MEAN, RSTD, M, N, g, sub);
+        for (;;) {
+          const long rgn = rg + stride * UN;
+          const bool more = rgn < ngroups;
+          if (more) bwd_load<XT, G, V, MODE, UN>(nxt, rgn, stride, (int)min((long)UN, (ngroups - rgn + stride - 1) / stride), DY, X, RS, MEAN, RSTD, M, N, g, sub);
+          bwd_compute<XT, G, V, MODE, UN>(cur, w, DX, aw, ab, N, invN, g);
+          if (!more) break;
+          cur = nxt;
+          rg = rgn;
+        }
+      }
+    } else {
+      for (; rg < ngroups; rg += stride * UN)
+        bwd_groups<XT, G, V, MODE, UN>(rg, stride, (int)min((long)UN, (ngroups - rg + stride - 1) / stride), DY, X, w, RS, MEAN, RSTD, DX, aw, ab, M, N, invN, g, sub);
+    }
   }
   // the rows of a warp's sub-groups -> one row of partial sums per warp (every sub-group gets the sum), then one per CTA through shared memory
   if constexpr (RPW > 1) {
@@ -259,7 +348,7 @@ __global__ void __launch_bounds__(NTB, V >= 2 ? 2 : 1) bwd_vec(const XT* __restr
           if constexpr (DB) ab[v][e] += __shfl_xor_sync(0xffffffffu, ab[v][e], o);
         }
   }
-  if (PDW) {
+  if (PDW || DWo) {
     if (sub == 0) {
 #pragma unroll
       for (int v = 0; v < V; ++v)
@@ -270,12 +359,12 @@ __global__ void __launch_bounds__(NTB, V >= 2 ? 2 : 1) bwd_vec(const XT* __restr
     for (int t = threadIdx.x; t < N; t += nthr) {
       float s = 0.f;
       for (int k = 0; k < nwarp; ++k) s += red[k * N + t];
-      PDW[(long)blockIdx.x * N + t] = s;
+      store_partial(PDW, DWo, o_bf, N, t, s);
     }
     __syncthreads();
   }
   if constexpr (DB) {
-    if (PDB) {
+    if (PDB || DBo) {
       if (sub == 0) {
 #pragma unroll
         for (int v = 0; v < V; ++v)
@@ -286,7 +375,7 @@ __global__ void __launch_bounds__(NTB, V >= 2 ? 2 : 1) bwd_vec(const XT* __restr
       for (int t = threadIdx.x; t < N; t += nthr) {
         float s = 0.f;
         for (int k = 0; k < nwarp; ++k) s += red[k * N + t];
-        PDB[(long)blockIdx.x * N + t] = s;
+        store_partial(PDB, DBo, o_bf, N, t, s);
       }
     }
   }
@@ -637,7 +726,7 @@ __global__ void __launch_bounds__(NTG) bwd_stage(const XT* __restrict__ DY, cons
   }
   const long ntiles = (Mfull + R - 1) / R;
   auto issue = [&](long t, int stage) {
-    const long row0 = t * R;
+    const long row0 = BWD_ROW(t, ntiles) * R;
     const int nr = (int)min((long)R, Mfull - row0);
     const int nchunks = (int)((long)nr * rowb / 16);
     const unsigned char* gx = reinterpret_cast<const unsigned char*>(X) + row0 * rowb;
@@ -654,7 +743,7 @@ __global__ void __launch_bounds__(NTG) bwd_stage(const XT* __restrict__ DY, cons
   if (tile < ntiles) issue(tile, 0);
   for (; tile < ntiles; tile += gridDim.x, s ^= 1) {
     const long nxt = tile + gridDim.x;
-    const long row0 = tile * R;
+    const long row0 = BWD_ROW(tile, ntiles) * R;
     const int nr = (int)min((long)R, Mfull - row0);
     // this warp's rows' statistics, loaded while the tile is in flight
     float mr[RPT], sr[RPT];                              // this warp's rows of the tile (RPT >= R / NWG)
@@ -736,7 +825,8 @@ __global__ void __launch_bounds__(NTS) bwd_scalar(const XT* __restrict__ DY, con
   for (int c = lane; c < N; c += 32) { sdw[c] = 0.f; sdb[c] = 0.f; }
   __syncwarp();
   const float invN = 1.f / (float)N;
-  for (long row = (long)blockIdx.x * NWS + warp; row < M; row += (long)gridDim.x * NWS) {
+  for (long rowi = (long)blockIdx.x * NWS + warp; rowi < M; rowi += (long)gridDim.x * NWS) {
+    const long row = BWD_ROW(rowi, M);
     const XT* x = X + row * N;
     const XT* dy = DY + row * N;
     const float mean = RMS ? 0.f : MEAN[row];
@@ -788,8 +878,10 @@ __global__ void __launch_bounds__(NTS) bwd_scalar_reg(const XT* __restrict__ DY,
     aw[k] = 0.f;
     ab[k] = 0.f;
   }
-  for (long row = (long)blockIdx.x * NWS + warp; row < M; row += (long)gridDim.x * NWS)
+  for (long rowi = (long)blockIdx.x * NWS + warp; rowi < M; rowi += (long)gridDim.x * NWS) {
+    const long row = BWD_ROW(rowi, M);
     bwd_row_scalar<XT, VS, RMS>(X + row * N, DY + row * N, DX + row * N, N, lane, wreg, RMS ? 0.f : MEAN[row], RSTD[row], RS ? to_f(RS[row]) : 1.f, aw, ab);
+  }
   if (PDW) {
 #pragma unroll
     for (int k = 0; k < VS; ++k) {
@@ -844,7 +936,8 @@ __global__ void __launch_bounds__(NTS) bwd_wide(const XT* __restrict__ DY, const
     if (W) prefetch_l1(param_ptr(W, w_bf, (long)(lane + 32 * v) * CE));      // the weight chunks are read twice a row: warm L1 together
   }
   const float invN = 1.f / (float)N;
-  for (long row = (long)blockIdx.x * NWS + warp; row < M; row += (long)gridDim.x * NWS) {
+  for (long rowi = (long)blockIdx.x * NWS + warp; rowi < M; rowi += (long)gridDim.x * NWS) {
+    const long row = BWD_ROW(rowi, M);
     uint4 xr[V], dr[V];
 #pragma unroll
     for (int v = 0; v < V; ++v) {
@@ -1167,23 +1260,32 @@ void run_bwd_vec(const XT* DY, const XT* X, const void* W, bool w_bf, const XT* 
   const int sms = sm_count();
   // the persistent grid: at most one wave of CTAs of NTB threads.  Little work (a small M) takes smaller CTAs and, past one CTA per SM, no more than one per 64 rows: every CTA
   // costs one partial row of dw / db (written, then read by the reduction kernel, whose latency is what a small M pays for), and a warp keeps several row groups in flight anyway.
-  const int nt = groups <= 2048 ? 128 : NTB;
+  const int nt = groups <= BWD_SMALL_GROUPS ? 128 : ((V >= 2 && sizeof(XT) == 2) ? BWD_NT_WIDE : NTB);
   const size_t dyn = (size_t)(nt / 32) * N * sizeof(float);
   auto stat = bwd_vec<XT, G, V, MODE, false>;
   const int resident = sms * blocks_per_sm(stat, nt, dyn);
-  const int grid = (int)std::min<long>({(groups + nt / 32 - 1) / (nt / 32), (long)resident, std::max<long>(sms, (M + 63) / 64)});
+  const int grid = (int)std::min<long>({(groups + nt / 32 - 1) / (nt / 32), (long)resident, std::max<long>(sms, (M + BWD_ROWS_CTA - 1) / BWD_ROWS_CTA)});
   const bool dyn_sched = groups > 32 * (long)grid * (nt / 32);
+  const bool direct = grid == 1;                 // one CTA: its partial row is the gradient (no reduction kernel)
   at::Tensor pdw, pdb, ctr;
   float *PDW = nullptr, *PDB = nullptr;
-  if (need_dw) { pdw = at::empty({grid, N}, like.options().dtype(at::kFloat)); PDW = pdw.data_ptr<float>(); }
-  if (need_db) { pdb = at::empty({grid, N}, like.options().dtype(at::kFloat)); PDB = pdb.data_ptr<float>(); }
+  if (need_dw && !direct) { pdw = at::empty({grid, N}, like.options().dtype(at::kFloat)); PDW = pdw.data_ptr<float>(); }
+  if (need_db && !direct) { pdb = at::empty({grid, N}, like.options().dtype(at::kFloat)); PDB = pdb.data_ptr<float>(); }
+  void* DWo = direct && need_dw ? DW : nullptr;
+  void* DBo = direct && need_db ? DB : nullptr;
   if (dyn_sched) {
     ctr = at::zeros({1}, like.options().dtype(at::kInt));
-    bwd_vec<XT, G, V, MODE, true><<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, ctr.data_ptr<int>(), M, N);
+    bwd_vec<XT, G, V, MODE, true><<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, ctr.data_ptr<int>(), M, N, DWo, DBo, o_bf);
   } else {
-    stat<<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, nullptr, M, N);
+#ifdef BWD_NOONE
+    if (false)
+#else
+    if (groups <= (long)grid * (nt / 32))
+#endif
+      bwd_vec<XT, G, V, MODE, false, true><<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, nullptr, M, N, DWo, DBo, o_bf);
+    else stat<<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, nullptr, M, N, DWo, DBo, o_bf);
   }
-  if (need_dw || need_db) run_reduce(PDW, PDB, DW, DB, o_bf, grid, N, st);
+  if (!direct && (need_dw || need_db)) run_reduce(PDW, PDB, DW, DB, o_bf, grid, N, st);
 }
 
 // the wide-row backward (bf16, V = 6, 8, 10)
