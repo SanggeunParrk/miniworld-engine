@@ -328,11 +328,11 @@ def _b200_options(module) -> bool:
 
 
 def serves_extra_bias(single, extra) -> bool:
-    """The [L, L] extra pair bias is folded into the Hopper (BF16 and FP32) CUDA path's hoisted bias, and nowhere else."""
+    """The [L, L] extra pair bias is folded into the hoisted bias of the Hopper and Blackwell (B200) CUDA paths (bf16 and fp32), and nowhere else."""
     return (
         single.is_cuda
         and single.dtype in (torch.bfloat16, torch.float32)
-        and torch.cuda.get_device_capability(single.device) == (9, 0)
+        and torch.cuda.get_device_capability(single.device) in ((9, 0), (10, 0))
         and tuple(extra.shape) == (single.shape[2], single.shape[2])
     )
 
@@ -434,7 +434,7 @@ def _infer_launch(
         # the caller's pair / mask tensors (pointer, version, layout): a new pair, or an in-place change of it, misses.
         # Scoped as the pack: a capture computes the bias once (recorded), so each replay recomputes it from the pair it has.
         assert mask is not None  # off sm_90 ``update`` fills a missing mask with all-True
-        pinned = (pair, mask)  # the cache entry below keeps the caller's tensors alive
+        pinned = (pair, mask, extra)  # the cache entry below keeps the caller's tensors alive
         bkey = _capture.scoped(
             (
                 pair.data_ptr(),
@@ -443,6 +443,7 @@ def _infer_launch(
                 pair.stride(),
                 mask.data_ptr(),
                 mask._version,
+                None if extra is None else (extra.data_ptr(), extra._version, tuple(extra.shape)),
             )
         )
         # several entries (B200: the per-trunk_seed steps of a B > 1 call each read their own pair's bias), the newest kept and the older
@@ -456,21 +457,21 @@ def _infer_launch(
             if bkey[0] is None and not hit[3] and torch.cuda.is_current_stream_capturing():
                 # a capture (static_weights) reads the eager bias: kernels._capture.refresh_static_inputs remakes it in place, from the
                 # caller's pair and mask as the miss below does
-                p0, m0 = pair, mask
+                p0, m0, e0 = pair, mask, extra
 
                 def rebuild():
                     p, m = p0, m0
                     if L8 != L:
                         p = torch.nn.functional.pad(p, (0, 0, 0, L8 - L, 0, L8 - L))
                         m = torch.nn.functional.pad(m.to(torch.bool), (0, L8 - L), value=False)
-                    return runner.hoist(p.contiguous(), m)
+                    return _hoist_extra(runner, p.contiguous(), m, e0, L8)
 
                 _capture.note_static_read((id(runner), "bias", bias.data_ptr()), bias, rebuild, (pair, mask))
         else:
             if L8 != L:  # padded keys: zero pair rows / columns, masked out of every softmax
                 pair = torch.nn.functional.pad(pair, (0, 0, 0, L8 - L, 0, L8 - L))
                 mask = torch.nn.functional.pad(mask.to(torch.bool), (0, L8 - L), value=False)
-            bias = runner.hoist(pair.contiguous(), mask)
+            bias = _hoist_extra(runner, pair.contiguous(), mask, extra, L8)
             if bkey is not None:
                 # (an attribute of this cache, not of the runner class); [3]: made inside a capture (a replay remakes it: no refresh)
                 entry = store[bkey] = (bkey, bias, pinned, torch.cuda.is_current_stream_capturing())
@@ -562,3 +563,20 @@ def update(module, single, cond, pair, mask, extra=None, args=None):
         ]
         return torch.cat(outs, dim=1)
     return run(single.contiguous(), cond, pair, mask, weights, qk, eq, ek, heads, extra, opts)
+
+
+def _hoist_extra(runner, pair, mask, extra, L8):
+    """``runner.hoist(pair, mask)`` plus the [L, L] ``extra`` logit bias on every head of every block (the planes are in the attention's base-2 domain:
+    ``extra`` x log2 e, added in fp32 and rounded once; a masked key stays -inf). B200 composed runner; ``L8`` the padded length (the pair is padded)."""
+    bias = runner.hoist(pair, mask)
+    if extra is None:
+        return bias
+    e = extra.float() * 1.4426950408889634
+    L = e.shape[0]
+    if L8 != L:
+        e = torch.nn.functional.pad(e, (0, L8 - L, 0, L8 - L))
+    if getattr(runner, "_bias_perm", False):  # the TF32 core reads the key columns permuted
+        from miniworld_engine.kernels.conditioned_transition.cuda import key_perm
+
+        e = e[:, key_perm(L8, e.device)]
+    return bias.add_(e)

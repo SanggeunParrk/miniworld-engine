@@ -108,3 +108,9 @@ def test_h100_plan_ships_ieee_f32_sm90():
     sm90a plan carries ``ieee_f32_sm90`` so the wheel ships it (no first-call compile), and the other cards' plans keep their own builds."""
     assert "ieee_f32_sm90" in _list_names("sm90a")
     assert "ieee_f32_sm90" not in _list_names("sm80")
+
+
+def test_b200_plan_ships_ieee_f32_sm100():
+    """The B200 fp32 Transition with TF32 off runs the IEEE fp32 chain (``kernels/ieee_f32`` built for sm_100a): the sm100 plan carries ``ieee_f32_sm100``."""
+    assert "ieee_f32_sm100" in _list_names("sm100")
+    assert "ieee_f32_sm100" not in _list_names("sm90a")

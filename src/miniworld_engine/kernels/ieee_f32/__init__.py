@@ -53,13 +53,31 @@ def _ext_sm90():
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _ext_sm100():
+    """The same sources built for sm_100a (B200): plain FFMA, no sm_100 feature; used by the B200 fp32 Transition (``transition_ieee``) only."""
+    ensure_cuda_home()
+    return load_extension(
+        name="ieee_f32_sm100",
+        sources=[str(_dir / "ieee_f32.cu")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("100a")],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
+    )
+
+
 def _hopper(device: torch.device | None = None) -> bool:
     """The card of ``device`` (default: the current one) is an H100 (capability 9.0)."""
     return (device is None or device.type == "cuda") and _cc(_index(device)) == (9, 0)
 
 
+def _blackwell(device: torch.device | None = None) -> bool:
+    """The card of ``device`` (default: the current one) is a B200 (capability 10.0)."""
+    return (device is None or device.type == "cuda") and _cc(_index(device)) == (10, 0)
+
+
 def _ext():
-    return _ext_sm90() if _hopper() else _ext_a()
+    return _ext_sm90() if _hopper() else _ext_sm100() if _blackwell() else _ext_a()
 
 
 def _x() -> Any:
@@ -79,9 +97,9 @@ def loads() -> bool:
 
 
 def available(x: torch.Tensor, *, hopper: bool = False) -> bool:
-    """fp32 CUDA tensor on a card the sm_80 sources serve (A100, RTX 5090); ``hopper=True`` also the H100 (the Transition's fp32 chain, nothing else:
+    """fp32 CUDA tensor on a card the sm_80 sources serve (A100, RTX 5090); ``hopper=True`` also the H100 and the B200 (sm_90a / sm_100a builds; the Transition's fp32 chain, nothing else:
     the other fp32 callers keep cuBLAS there)."""
-    return x.is_cuda and x.dtype is torch.float32 and (served(x.device) or (hopper and _hopper(x.device))) and loads()
+    return x.is_cuda and x.dtype is torch.float32 and (served(x.device) or (hopper and (_hopper(x.device) or _blackwell(x.device)))) and loads()
 
 
 # ---------------------------------------------------------------------------------------------------------------------------- generic mm

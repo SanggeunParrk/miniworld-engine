@@ -79,6 +79,14 @@ def transition_sm100a(
     """``x + W_s(silu(W_a LN(x)) * (W_b LN(x)))`` on the B200 kernels, or ``None`` when none takes the call."""
     tuned = _TUNED
     grad = _wants_grad(x, gamma, beta, wa, wb, ws)
+    if x.dtype is torch.float32 and not fused_generic_sm100a._tf32_allowed():  # fp32 with TF32 off = IEEE products: the engine's IEEE fp32 CUDA chain (kernels/ieee_f32, built for sm_100a)
+        from miniworld_engine.kernels import ieee_f32
+
+        f = torch.float32
+        w = [t.to(f) for t in (gamma, beta, wa, wb, ws)]  # a cast stays in autograd: a bf16 master's gradient comes back in its dtype
+        if not ieee_f32.supported_transition(x, w[2], w[4], hopper=True):
+            return None
+        return ieee_f32.transition_ieee(x, w[0].contiguous(), w[1].contiguous(), w[2].contiguous(), w[3].contiguous(), w[4].contiguous(), float(eps))
     if _fp8 and fp8_sm100a.POLICY is not None and not grad and fp8_sm100a.serves(x, wa, ws):  # opt-in e4m3 route (docs/b200/fp8.md); POLICY is None by default
         return fp8_sm100a.inference(x, gamma, beta, wa, wb, ws, eps)
     if FOLD_FIRST and not grad and fused_wide_sm100a.fold_first(x, wa, ws):  # (N1) the LayerNorm-folded D 384 chain (2 launches) before the small-M chains (3 launches)

@@ -231,6 +231,12 @@ def prebuild(target, rows):
     elif target.arch == "sm100":
         from . import fused_sm100a, fused_wide_sm100a
 
+        # fp32 with TF32 off (every float32 row): the IEEE fp32 chain (kernels/ieee_f32), the sm_80 sources built for sm_100a
+        if any(dt == "float32" for v in shapes.values() for (dt, _m) in v):
+            from miniworld_engine.kernels import ieee_f32
+
+            yield ieee_f32._ext_sm100
+
         if any(half.values()):
             yield fused_sm100a._cubins
             yield fused_sm100a._ext

@@ -69,7 +69,7 @@ class Transition(BackendModule, MasterWeights):
         "cuda:a100_sm80": 8,  # 2026-11-20 (8): bf16 one-kernel forward (fused_fwd_sm80 / fused_sm80, D 64 / 128) keeps its f16 squeeze finite for |x| up to 1e6 (residual and Ws carried x 2^-4; was inf at |x| >= 65504: AF3 5I28 msa_transition); results otherwise within 1 bf16 ulp of 7; 2026-11-19 (7): fp32 with TF32 off runs on the engine's IEEE fp32 CUDA chain (kernels/ieee_f32; was refused to Triton / PyTorch); TF32 and bf16 unchanged
         "triton:a100_sm80": 2,
         "cuda:5090_sm120": 10,  # 2026-11-20 (10): the same bf16 one-kernel forward fix as cuda:a100_sm80 8 (inf at |x| >= 65504 in the D 64 / 128 f16 squeeze); (9): 2026-11-20 (9): fp32 inference (d 128, n 2, float32 TF32-allowed) squeezes in f16 accumulation with 32 rows a warp and up to two half tiles a CTA (kernels/transition/cuda/sm80/tr_fwd_sm80.cuh F32H, 0.97-1.03 -> 0.94-0.96 of anthropic; rms vs float64 5.9e-4, PyTorch TF32 3.4e-4); (8): 2026-11-19 (8): bf16 inference at D >= 256 and >= 32768 rows folds the LayerNorm into the dual GEMM (statistics kernel + gamma-folded weights, xn never written; kernels/transition/cuda/fused_wide_sm80._dual_ln), -80 us of the L 512 d 256 n 2 call, outputs differ from 7 within the accuracy standard; (7): see the comment below; (6): bf16 training on the one-kernel backward does not save xn (rebuilt by ln_apply from the saved (mean, rstd), -36 MiB at L 384; gradients bitwise unchanged); (5): the same IEEE fp32 chain (fp32 TF32-off training at 2048 / 4096 / 8192 rows and the 384-row no-grad calls fell to Triton)
-        "cuda:b200_sm100": 66,
+        "cuda:b200_sm100": 67,  # 2026-11-22 (67): fp32 with TF32 off (training and inference) runs on the engine's IEEE fp32 CUDA chain (kernels/ieee_f32 built for sm_100a, as the H100 8 / A100 7; was refused to Triton: the AF3 / Protenix diffusion-head conditioning transitions); TF32-allowed fp32 and bf16 unchanged
         "triton:b200_sm100": 22,
     }
     # 2026-11-19 (B200, N9, inference): cuda:b200_sm100 66 = the bf16 expand epilogue (tsx_expand.cu: the D 384 / D 768 small-M chains, the fold, the K-split cluster) on packed f32x2 pairs with the one-MUFU tanh sigmoid (0.5 tanh(a / 2) + 0.5, the TR_SIG 1 / SIGT 1 form of the other bf16 kernels) in place of ex2 + rcp (4 MUFU ops a pair -> 2): row 36 / 37 chains -0.3 - -0.6 us device time; end-to-end error vs fp64 unchanged to 3 digits (rms), fp32 / fp16 expands untouched
@@ -607,9 +607,13 @@ class Transition(BackendModule, MasterWeights):
         matrices = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight)
         if any(p.dtype not in (torch.bfloat16, torch.float32) for p in matrices) or len({p.dtype for p in matrices}) != 1:
             return "the projections must share one dtype, bfloat16 or float32"
-        if x.dtype is torch.float32 and not fused_generic_sm100a._tf32_allowed():
-            return "float32 activations run on TF32 tensor cores only (torch does not allow TF32 here)"
         wa, ws = self.expand_a.weight, self.squeeze.weight
+        if x.dtype is torch.float32 and not fused_generic_sm100a._tf32_allowed():  # TF32 off: the IEEE fp32 chain (kernels/ieee_f32 built for sm_100a)
+            from miniworld_engine.kernels import ieee_f32
+
+            if ieee_f32.supported_transition(x, wa, ws, hopper=True):
+                return None
+            return f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no IEEE fp32 build takes it (D a multiple of 4 up to {ieee_f32.MAX_D}, hidden a multiple of 4)"
         if not route_sm100a.supported(x, wa, ws):
             return (
                 f"d_hidden {self.d_hidden}, hidden {wa.shape[0]}: no sm_100a build takes it (generic: d a multiple of 64 up to 1024, hidden a "
