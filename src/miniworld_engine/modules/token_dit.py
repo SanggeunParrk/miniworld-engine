@@ -682,7 +682,7 @@ class TokenDiTProtenix(BackendModule):
         from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
 
         grad = _wants_grad(self, single, cond, pair)
-        extra = None if extra_pair_bias is None else extra_pair_bias[None, None].expand(single.shape[1], self.attention.n_head, *extra_pair_bias.shape)
+        extra = None if extra_pair_bias is None else extra_pair_bias[None, None]  # broadcast over B and H
         single = augattn_sm80.forward(self.attention, single, cond, pair, mask, extra)
         with torch.autocast("cuda", enabled=False):
             return ct_sm80.update(self.transition, single, cond, True, single.dtype, grad)

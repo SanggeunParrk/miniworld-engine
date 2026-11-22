@@ -397,7 +397,7 @@ def _fwd(
     flat_eps: float = 1e-5,
     extra: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
-    """``extra`` [B, H, L, L] (``extra_pair_bias``, inference only: ``save`` False): an additive logit term added to the bias in the core's units.
+    """``extra`` broadcastable to [B, H, L, L] (``extra_pair_bias``, inference only: ``save`` False): an additive logit term added to the bias in the core's units.
     The module's update after the AdaLN: x [A, B, L, d] (the AdaLN's output), cond [A, B, L, dc], pair [B, L, L, dp], res [A, B, L, d] or None (the residual), kmask
     a bool [B, L] / [A, B, L] key mask or None (``mask_kind`` 1 / 2 / 0), bias_in a pair bias made earlier (the compute dtype [1, H, Lp, Lp]: ``cache_pair_bias``) or None, params =
     (Wq, bq, Wk, Wv, Wg, Wo, Ws, bs, ln_pair.weight, to_bias.weight). Returns ``[out]``, or with ``save`` also the activations of the backward: qkvg, o, lse, og, y, g2, bias."""
@@ -492,7 +492,7 @@ def _fwd(
         if bias_in is not None:
             bias = bias.clone()
         view = bias[:, :, :length, :length]
-        view.copy_(view.float() + extra.float() * (1.0 if f32 else math.sqrt(hd)))
+        view.add_(extra.float() * (1.0 if f32 else math.sqrt(hd)))  # one pass; extra broadcasts over B and H ([1, 1, L, L]); bf16: one rounding
     kpen =_penalties(cast(torch.Tensor, kmask), a, batch, length, padded) if mask_kind == 2 else None
     # inference: the key tiles past each fold's (kind 2: each sample's) last attended key are skipped by the core, which reads the mask
     # (``kernels._key_len``; the same bits)
