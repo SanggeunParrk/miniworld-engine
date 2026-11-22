@@ -110,8 +110,10 @@ __global__ void __launch_bounds__(cta_threads<TPR>()) ln_bwd_kernel(
   }
 }
 
-// out[col] = sum over the P partial rows, 32 columns x 8 row slices per CTA, fixed order.
-__global__ void __launch_bounds__(256) ln_col_reduce(const float* __restrict__ part, int P, int N, float* __restrict__ out) {
+// out[col] = sum over the P partial rows, 32 columns x 8 row slices per CTA, fixed order. blockIdx.y 0: dw, 1: db (partial rows `stride` apart): one launch for both.
+__global__ void __launch_bounds__(256) ln_col_reduce(const float* __restrict__ part_in, int64_t stride, int P, int N, float* __restrict__ out_dw, float* __restrict__ out_db) {
+  const float* part = part_in + int64_t(blockIdx.y) * stride * N;
+  float* out = blockIdx.y == 0 ? out_dw : out_db;
   __shared__ float sm[8][33];
   const int tx = threadIdx.x & 31, sl = threadIdx.x >> 5;
   const int col = blockIdx.x * 32 + tx;
@@ -191,9 +193,13 @@ std::vector<torch::Tensor> ln_bwd(torch::Tensor dy, torch::Tensor x, torch::Tens
   }
   if (w.numel() && reinterpret_cast<uintptr_t>(w.data_ptr()) % 16) w = w.clone();
   auto part = wgrad ? torch::empty({rms ? 1 : 2, grid_cap, N}, f32) : torch::empty({0}, f32);
-  auto dw = wgrad ? torch::zeros({N}, f32) : torch::empty({0}, f32);
-  auto db = wgrad && !rms ? torch::zeros({N}, f32) : torch::empty({0}, f32);
-  if (M == 0) return {dx, dw, db};
+  auto dw = wgrad ? torch::empty({N}, f32) : torch::empty({0}, f32);  // ln_col_reduce writes every column
+  auto db = wgrad && !rms ? torch::empty({N}, f32) : torch::empty({0}, f32);
+  if (M == 0) {
+    if (wgrad) dw.zero_();
+    if (wgrad && !rms) db.zero_();
+    return {dx, dw, db};
+  }
   const float* wp = w.numel() ? w.data_ptr<float>() : nullptr;
   const float* mp = rms ? nullptr : mean.data_ptr<float>();
   const float* rp = rstd.data_ptr<float>();
@@ -220,8 +226,7 @@ std::vector<torch::Tensor> ln_bwd(torch::Tensor dy, torch::Tensor x, torch::Tens
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   if (wgrad) {
     const int blocks = (N + 31) / 32;
-    mwln::ln_col_reduce<<<blocks, 256, 0, s>>>(dwp, grid, N, dw.data_ptr<float>());
-    if (!rms) mwln::ln_col_reduce<<<blocks, 256, 0, s>>>(dbp, grid, N, db.data_ptr<float>());
+    mwln::ln_col_reduce<<<dim3(blocks, rms ? 1 : 2), 256, 0, s>>>(dwp, grid_cap, grid, N, dw.data_ptr<float>(), rms ? nullptr : db.data_ptr<float>());
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return {dx, dw, db};
