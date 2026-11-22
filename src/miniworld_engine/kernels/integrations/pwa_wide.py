@@ -172,15 +172,24 @@ def _forward_math(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: 
         if _f8.serves_wide(d_msa, hc // H, m.shape[0], m.shape[1]):
             wv16, wg16, wo16 = (t.detach().to(bf).contiguous() for t in (wv, wg, wo))
             return _f8.forward_wide(m, wv, lnw, lnb, wv16, wg16, wo16, eps_m, w16, kv)
+    if save:
+        wv16 = wv.detach().to(bf).contiguous()
+    else:  # inference: the bf16 weight forms are made while the weights are unchanged (a capture reads the entry its eager warm-up made: no cast kernels in the graph)
+        from miniworld_engine.kernels import _capture
+
+        wv16, wg16, wo16 = _capture.param_forms(
+            "pwa_wide_w16", [wv, wg, wo], lambda: tuple(t.detach().to(bf).contiguous() for t in (wv, wg, wo)), capture_reads_eager=True
+        )
     v, y, stats = kv.ln_vg_w(
-        m, lnw, lnb, wv.detach().to(bf).contiguous(), eps_m, save or (big and BIG_INFER_Y)
+        m, lnw, lnb, wv16, eps_m, save or (big and BIG_INFER_Y)
     )  # inference keeps no y: gate_out_w normalises m again (the BIG build: BIG_INFER_Y)
     o = torch.bmm(w16, v)  # [H, N, N] x [H, N, S*C]: the contraction on cuBLAS
     dmask, dscale = None, 1.0
     if p_drop > 0:  # the module's drop_msa: one keep-mask per (token, channel) shared over the MSA rows
         dmask = (torch.rand(m.shape[1], d_msa, device=m.device, dtype=bf) > p_drop).to(bf)
         dscale = 1.0 / (1.0 - p_drop)
-    wg16, wo16 = wg.detach().to(bf).contiguous(), wo.detach().to(bf).contiguous()
+    if save:
+        wg16, wo16 = wg.detach().to(bf).contiguous(), wo.detach().to(bf).contiguous()
     if is_big(d_msa, hc // H):  # gate_out_w split at the gated product; training keeps the sigmoid gate g for the backward
         if not save:
             a, _ = kv.gate_w(o, y, wg16, False) if BIG_INFER_Y else kv.gate_w(o, m, wg16, False, lnw, lnb, eps_m)
