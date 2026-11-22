@@ -18,11 +18,18 @@
 
 void backward(torch::Tensor g, torch::Tensor codes, torch::Tensor tpart, torch::Tensor dtbl, int64_t mode, int64_t impl);
 #define backward(...) backward_h100(__VA_ARGS__)   // the H100 definition only: the pybind entry `&backward` names the one below
+// MWE_HAS_GT2: the one-launch inference forwards (gt 2, section at the end) are built: always for the RTX 5090 (MWE_SM120), and for the A100 by
+// -DMWE_FWD_GT2 (sm80/__init__.py; griddepcontrol is sm_90+: pdl_wait / pdl_trigger are no-ops below it)
+#if defined(MWE_SM120) || defined(MWE_FWD_GT2)
+#define MWE_HAS_GT2 1
+#endif
 #ifdef MWE_SM120
 // RTX 5090 (sm_120a, 99 KB of shared memory a block): the LayerNorm backward of the encoder pair (mode 0) cannot keep its 317-row table
 // (162 KB) in shared memory; `ln_backward` below reads it through the L1 there (mode 1, 80 KB, keeps the H100 kernel).
 void ln_backward(torch::Tensor tbl, torch::Tensor codes, torch::Tensor dh, torch::Tensor dx, int64_t mode, double eps);
 #define ln_backward(...) ln_backward_h100(__VA_ARGS__)
+#endif
+#ifdef MWE_HAS_GT2
 // the two forwards: `forward` / `forward_ca` below (gt 2: the RTX 5090 inference launches, sm120 section at the end); the H100 host functions
 // serve gt 0 / 1
 void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::Tensor idx, torch::Tensor dlim, torch::Tensor out, torch::Tensor codes,
@@ -37,6 +44,8 @@ void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tenso
 #undef backward
 #ifdef MWE_SM120
 #undef ln_backward
+#endif
+#ifdef MWE_HAS_GT2
 #undef forward_ca
 #undef forward
 #endif
@@ -495,6 +504,8 @@ void ln_table_grad_sm120(torch::Tensor tbl, torch::Tensor codes, torch::Tensor d
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+#endif  // MWE_SM120
+#ifdef MWE_HAS_GT2
 // ---- RTX 5090 inference forwards (gt 2) -------------------------------------------------------------------------------------------------
 // The forward-only launches of the two modules without their per-call preparation kernels (modules/pair_embed.py `_prepared`: the transposed
 // bf16 table, the uint8 masks, the int32 indices): the table is the module's weight [256, NT] (fp32 or bf16), transposed and rounded to bf16
@@ -505,8 +516,13 @@ __device__ __forceinline__ float as_f32(float v) { return v; }
 __device__ __forceinline__ float as_f32(__nv_bfloat16 v) { return __bfloat162float(v); }
 // programmatic dependent launch: the forwards are launched with programmatic stream serialization behind pg120_table and wait for it only
 // before their first table read (their binning overlaps the transpose); griddepcontrol.wait is a no-op for a launch without a primary
+#if __CUDA_ARCH__ >= 900
 __device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
 __device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
+#else  // sm_80 (the A100 build): no programmatic dependent launch (the launches run with pdl false there)
+__device__ __forceinline__ void pdl_wait() {}
+__device__ __forceinline__ void pdl_trigger() {}
+#endif
 
 template <typename TI>
 __global__ void pg120_table(const TI* __restrict__ w, __nv_bfloat16* __restrict__ t, int nt) {   // w [256][nt] -> t [nt][256] bf16
@@ -537,7 +553,13 @@ void launch_pdl(void (*kernel)(KArgs...), dim3 grid, dim3 block, cudaStream_t st
   attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
   attr[0].val.programmaticStreamSerializationAllowed = 1;
   cfg.attrs = attr;
-  cfg.numAttrs = pdl ? 1 : 0;
+  static const bool pdl_ok = [] {  // programmatic stream serialization is sm_90+ (the A100 build launches plainly: pdl_wait is a no-op there)
+    int d = 0, major = 0;
+    cudaGetDevice(&d);
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, d);
+    return major >= 9;
+  }();
+  cfg.numAttrs = pdl && pdl_ok ? 1 : 0;
   C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kernel, std::forward<Args>(args)...));
 }
 
@@ -784,6 +806,95 @@ pg120_fwd_ca_blk(const __nv_bfloat16* __restrict__ tbl, const float* __restrict_
   }
 }
 
+
+// The decoder with the bf16x2 forms (A100 / any sm_80+): as pg120_fwd_ca_blk, but the two table rows are summed packed (__hadd2: the sum of two
+// bf16 rounded once to bf16, the value the fp32 sum rounds to) and the LayerNorm reads the packed words, so a pair is ~half the instructions;
+// without the LayerNorm the packed sums are stored as they are.
+__device__ __forceinline__ uint32_t add2_bf16(uint32_t a, uint32_t b) {
+  __nv_bfloat162 x = __hadd2(*reinterpret_cast<__nv_bfloat162*>(&a), *reinterpret_cast<__nv_bfloat162*>(&b));
+  return *reinterpret_cast<uint32_t*>(&x);
+}
+template <typename IdxT, int PB, int FAST, int LPP>
+__global__ void __launch_bounds__(PB * LPP)
+pg80_fwd_ca_pk(const __nv_bfloat16* __restrict__ tbl, const float* __restrict__ ca, const uint8_t* __restrict__ mask, const IdxT* __restrict__ idx,
+               const float* __restrict__ dlim, __nv_bfloat16* __restrict__ out, uint4* codes, int n, long long P, int nd, int ln, float eps) {
+  // LPP lanes a pair, NK = 32 / LPP chunks of 8 channels a lane: lane l holds channels 8 l + 8 LPP k .. + 7 (k < NK), so that LPP lanes store 16 LPP contiguous bytes
+  constexpr int NK = 32 / LPP, NW = 4 * NK, NE = 8 * NK;
+  __shared__ float dlim_s[32];
+  if (threadIdx.x < 32) dlim_s[threadIdx.x] = threadIdx.x < nd ? dlim[threadIdx.x] : 0.f;
+  __syncthreads();
+  const int hl = threadIdx.x & (LPP - 1), cc = hl * 8;
+  const long long p = (long long)blockIdx.x * PB + (threadIdx.x / LPP);
+  if (p >= P) return;
+  const long long row = p / n;
+  const int j = (int)(p - row * n), i = (int)(row % n);
+  const long long b = row / n;
+  uint32_t w0 = MASKED;
+  if (mask[b * n + i] && mask[b * n + j]) {
+    const float* pi = ca + (size_t)row * 3;
+    const float* pj = ca + ((size_t)b * n + j) * 3;
+    const float dx = pi[0] - pj[0], dy = pi[1] - pj[1], dz = pi[2] - pj[2];
+    const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+    const long long s = (long long)idx[b * n + i] - (long long)idx[b * n + j] + 63;
+    w0 = (uint32_t)min(max(s, 0LL), 126LL) | ((uint32_t)bucket(d, dlim_s, nd) << 8);
+  }
+  if (codes != nullptr && hl == 0) codes[p] = make_uint4(w0 ^ MASKED, 0u, 0u, 0u);
+  uint32_t q[NW];
+#pragma unroll
+  for (int e = 0; e < NW; e++) q[e] = 0u;
+  pdl_wait();
+  if (!(w0 & MASKED)) {
+    const int r0 = w0 & 127, r1 = R_CAD + ((w0 >> 8) & 31);
+    uint4 v[NK], u[NK];
+#pragma unroll
+    for (int k = 0; k < NK; k++) { v[k] = trow<true>(tbl, r0, cc + 8 * LPP * k); u[k] = trow<true>(tbl, r1, cc + 8 * LPP * k); }
+#pragma unroll
+    for (int k = 0; k < NK; k++) {
+      q[4 * k] = add2_bf16(v[k].x, u[k].x); q[4 * k + 1] = add2_bf16(v[k].y, u[k].y); q[4 * k + 2] = add2_bf16(v[k].z, u[k].z); q[4 * k + 3] = add2_bf16(v[k].w, u[k].w);
+    }
+  }
+  if (ln) {
+    const unsigned hm = ((1u << LPP) - 1u) << (threadIdx.x & 31 & ~(LPP - 1));
+    float x[NE];
+#pragma unroll
+    for (int e = 0; e < NW; e++) { x[2 * e] = bf_lo(q[e]); x[2 * e + 1] = bf_hi(q[e]); }
+    if constexpr (FAST == 1) {  // sum and sum of squares of the (bf16-valued) channels in one pass and one shuffle round; normalized by one fma
+      float s = 0.f, s2 = 0.f;
+#pragma unroll
+      for (int e = 0; e < NE; e++) { s += x[e]; s2 = fmaf(x[e], x[e], s2); }
+#pragma unroll
+      for (int o = LPP / 2; o; o >>= 1) { s += __shfl_xor_sync(hm, s, o); s2 += __shfl_xor_sync(hm, s2, o); }
+      const float mean = s * (1.f / C);
+      const float rs = rsqrtf(fmaxf(s2 * (1.f / C) - mean * mean, 0.f) + eps), nb = -mean * rs;
+#pragma unroll
+      for (int e = 0; e < NW; e++) {
+        const __nv_bfloat162 h = __floats2bfloat162_rn(fmaf(x[2 * e], rs, nb), fmaf(x[2 * e + 1], rs, nb));
+        q[e] = *reinterpret_cast<const uint32_t*>(&h);
+      }
+    } else {
+      float s = 0.f;
+#pragma unroll
+      for (int e = 0; e < NE; e++) s += x[e];
+#pragma unroll
+      for (int o = LPP / 2; o; o >>= 1) s += __shfl_xor_sync(hm, s, o);
+      s *= 1.f / C;
+      float qq = 0.f;
+#pragma unroll
+      for (int e = 0; e < NE; e++) { const float d = x[e] - s; qq += d * d; }
+#pragma unroll
+      for (int o = LPP / 2; o; o >>= 1) qq += __shfl_xor_sync(hm, qq, o);
+      const float rs = rsqrtf(qq * (1.f / C) + eps);
+#pragma unroll
+      for (int e = 0; e < NW; e++) {
+        const __nv_bfloat162 h = __floats2bfloat162_rn((x[2 * e] - s) * rs, (x[2 * e + 1] - s) * rs);
+        q[e] = *reinterpret_cast<const uint32_t*>(&h);
+      }
+    }
+  }
+#pragma unroll
+  for (int k = 0; k < NK; k++)
+    *reinterpret_cast<uint4*>(out + (size_t)p * C + cc + 8 * LPP * k) = make_uint4(q[4 * k], q[4 * k + 1], q[4 * k + 2], q[4 * k + 3]);
+}
 }  // namespace
 
 void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::Tensor idx, torch::Tensor dlim, torch::Tensor out, torch::Tensor codes,
@@ -806,12 +917,32 @@ void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::
   const int nd = (int)dlim.numel(), l = (int)ln;
   const float e = (float)eps;
   if (gt == 2) {                                              // the launch: CTAs of 32 pairs
-    const dim3 grid((unsigned)((P + 31) / 32)), block(512);
-    if (idx.scalar_type() == at::kLong)
-      launch_pdl(pg120_fwd_ca_blk<long long, 32>, grid, block, st, pdl, tp, xp, mp, reinterpret_cast<const long long*>(idx.data_ptr<int64_t>()), lp, op, cp, n,
-                 P, nd, l, e);
-    else
-      launch_pdl(pg120_fwd_ca_blk<int, 32>, grid, block, st, pdl, tp, xp, mp, (const int*)idx.data_ptr<int>(), lp, op, cp, n, P, nd, l, e);
+    // jp (variant): 0 = the card's choice: the RTX 5090 pg120_fwd_ca_blk (32 pairs a CTA), else (A100) the packed kernel pg80_fwd_ca_pk with 8 lanes a pair
+    // (16 pairs a CTA) and the two-pass LayerNorm statistics. Measured on the A100 (L2 flushed, one sample, L 256 / 384, with the LayerNorm): 25.3 / 48.5 us
+    // against 35.3 / 75.0 for pg120_fwd_ca_blk and 30.0 / 57.9 for the Triton kernel; 5 samples: 101.6 / 227.7 against 166.5 / 375 and 117.6 / 260 us.
+    // 1: pg120_fwd_ca_blk; 2: the packed kernel with one-pass statistics (sum and sum of squares, one fma to normalize)
+    int var = (int)jp;
+#ifndef MWE_SM120
+    if (var == 0) var = 3;
+#endif
+    auto go = [&](auto ip, auto pbc, auto fastc, auto lppc) {
+      using I = std::remove_cv_t<std::remove_pointer_t<decltype(ip)>>;
+      constexpr int PB = decltype(pbc)::value, FAST = decltype(fastc)::value, LPP = decltype(lppc)::value;
+      const dim3 grid((unsigned)((P + PB - 1) / PB)), block(PB * LPP);
+      launch_pdl(pg80_fwd_ca_pk<I, PB, FAST, LPP>, grid, block, st, pdl, tp, xp, mp, ip, lp, op, cp, n, P, nd, l, e);
+    };
+    auto pick = [&](auto ip) {
+      switch (var) {
+        case 2: go(ip, std::integral_constant<int, 16>{}, std::integral_constant<int, 1>{}, std::integral_constant<int, 8>{}); break;
+        case 3: go(ip, std::integral_constant<int, 16>{}, std::integral_constant<int, 0>{}, std::integral_constant<int, 8>{}); break;
+        default: {
+          const dim3 grid((unsigned)((P + 31) / 32)), block(512);
+          launch_pdl(pg120_fwd_ca_blk<std::remove_cv_t<std::remove_pointer_t<decltype(ip)>>, 32>, grid, block, st, pdl, tp, xp, mp, ip, lp, op, cp, n, P, nd, l, e);
+        }
+      }
+    };
+    if (idx.scalar_type() == at::kLong) pick(reinterpret_cast<const long long*>(idx.data_ptr<int64_t>()));
+    else pick(static_cast<const int*>(idx.data_ptr<int>()));
     return;
   }
   TORCH_CHECK(false, "forward_ca: gt 0 / 1 (the H100 launches) or 2 (the RTX 5090 launch)");

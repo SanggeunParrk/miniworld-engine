@@ -19,13 +19,14 @@ _dir = Path(__file__).parent
 @functools.lru_cache(maxsize=None)
 def ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags
-    from miniworld_engine.kernels._sm120 import sm80_load_extension as load_extension  # RTX 5090: the same source for sm_120a (kernels/_sm120.py)
+    from miniworld_engine.kernels._sm120 import building_sm120, sm80_load_extension as load_extension  # RTX 5090: the same source for sm_120a (kernels/_sm120.py)
 
     ensure_cuda_home()
     return load_extension(
         name="pair_embed_geom_sm80",
         sources=[str(_dir / "pair_embed_geom_sm80.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80"), f"-I{_dir}"],
+        # the A100 build: the one-launch inference forwards of pair_embed_geom_sm80.cu (the sm_120a build has them always)
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80"), f"-I{_dir}", *(() if building_sm120() else ("-DMWE_FWD_GT2",))],
         extra_cflags=["-std=c++17"],
         verbose=False,
     )
@@ -53,6 +54,9 @@ BWD_IMPL = {0: 1, 1: 3}
 #: impl 3 (the A100's choice: pg_bwd_mma's 32-row feature groups, 416 / 160 rows, on 4 x 33 x KS CTAs) lost to it on the 170 SMs.
 BWD_IMPL_SM120 = {0: 4, 1: 5}
 KS = 2  # pair_embed_geom_sm80.cu
+#: A100 inference: the modules whose forward is the one-launch gt-2 build (a table kernel and the forward from the module's own inputs, no per-call
+#: preparation kernels; pair_embed_geom_sm80.cu -DMWE_FWD_GT2): the decoder pair (``PairEmbedCA``)
+A100_ONE_LAUNCH = frozenset({"ca"})
 #: impl 4 / 5: the pair slices (= fp32 partials) of pg120_bwd per mode: 4 x 42 = 168 CTAs (one per SM) / 2 x 85 = 170
 NB_SM120 = {0: 42, 1: 85}
 
