@@ -100,11 +100,22 @@ def _serves_kind(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train
     return sm80_wide.supports(pair, kind[1], weights, wo, ln.weight, ln.bias, mask, train=train) and sm80_wide.loads(kind[1])
 
 
-def _features(module, *, train: bool = True) -> bool:
-    """The module has a variant feature the fused / wide paths lack: the ending node's AF3 bias orientation (training only: the inference fronts write
-    the flipped bias themselves), projection biases, Chai-1's output layouts."""
+def _flip_on_wide(module, pair: torch.Tensor) -> bool:
+    """AlphaFold 3's ending-node bias in training rides the wide rows engine (``sm80_wide.trainable(flip=True)``: the fused fronts write the bias planes
+    transposed, the backward transposes dbias) where that engine serves the geometry; the d_pair 128 / 4 x 32 fused ``sm80`` path has no flip."""
+    from miniworld_engine.kernels.triangle_attention.cuda import sm80_arch, sm80_wide
+
+    d_hidden, d_pair = module.to_query.weight.shape
+    if (d_pair, d_hidden, module.n_head) == (128, 128, 4) and not sm80_arch.on_sm120(pair):
+        return False
+    return sm80_wide.cfg_for(d_pair, d_hidden, module.n_head) is not None
+
+
+def _features(module, pair: torch.Tensor, *, train: bool = True) -> bool:
+    """The module has a variant feature the fused / wide paths lack: the ending node's AF3 bias orientation (training only, off the wide engine: the inference
+    fronts write the flipped bias themselves), projection biases, Chai-1's output layouts."""
     return (
-        (module._bias_untransposed and train)
+        (module._bias_untransposed and train and not _flip_on_wide(module, pair))
         or module.to_gate.bias is not None
         or module.to_out.bias is not None
         or module.dual_output
@@ -115,7 +126,7 @@ def _features(module, *, train: bool = True) -> bool:
 def _is_variant(module, pair: torch.Tensor, *, train: bool = True) -> bool:
     """The call goes to the variant path: a variant feature, or a geometry only it takes (heads of 64 channels). Plain modules the fused / wide paths
     serve stay there."""
-    if _features(module, train=train):
+    if _features(module, pair, train=train):
         return True
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
 
@@ -316,6 +327,7 @@ def forward_train(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torc
             mask,
             transposed=not module.starting,
             ds=ds,
+            flip=module._bias_untransposed,
         )
     from miniworld_engine.kernels.triangle_attention.cuda import sm80
 

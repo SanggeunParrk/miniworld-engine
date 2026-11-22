@@ -861,7 +861,7 @@ def _accurate_training_forward_ops(
 def forward_ops(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save, flip=False):
     if save and fused:
         cfg = Cfg(x.shape[-1], n_head, hd, fused)
-        if _accurate_front.eligible(x, weights, ln_w, ln_b, cfg.d, cfg.dhp, cfg.lhd, x.shape[1]):
+        if not flip and _accurate_front.eligible(x, weights, ln_w, ln_b, cfg.d, cfg.dhp, cfg.lhd, x.shape[1]):
             return _accurate_training_forward_ops(
                 x,
                 weights,
@@ -1178,7 +1178,7 @@ def _attention_backward(y, bias, lse, delta, dov, dqkvg, cfg: Cfg, b: int, lengt
     return db
 
 
-def _backward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, saved, dout, transposed, n_head, hd, fused):
+def _backward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, saved, dout, transposed, n_head, hd, fused, flip=False):
     """[dpair, dwq, dwk, dwv, dwg, dwb, dwo, dln_w, dln_b] in the leaves' shapes and dtypes."""
     return [
         x.new_empty(x.shape),
@@ -1204,8 +1204,9 @@ def backward_ops(
     n_head: int,
     hd: int,
     fused: bool,
+    flip: bool = False,
 ) -> list[torch.Tensor]:
-    """The gradients of ``forward_ops`` (``saved`` = its [xh, stats, y, bias, o, lse]; xh empty on the 5090: rebuilt by the front's backward row kernel): [dpair, dwq, dwk, dwv, dwg, dwb, dwo, dln_w, dln_b], the weights' and the LayerNorm
+    """The gradients of ``forward_ops`` (``flip``: AlphaFold 3's ending-node bias, the core's bias is the transpose of the projected planes; ``saved`` = its [xh, stats, y, bias, o, lse]; xh empty on the 5090: rebuilt by the front's backward row kernel): [dpair, dwq, dwk, dwv, dwg, dwb, dwo, dln_w, dln_b], the weights' and the LayerNorm
     parameters' gradients in their dtypes."""
     rows = _rows()
     xh, stats, y, bias, o, lse = saved
@@ -1261,6 +1262,8 @@ def backward_ops(
     del a
     db = _attention_backward(y, bias, lse, delta, dov, dqkvg, cfg, b, length)
     del dov, delta
+    if flip:  # the core's bias was the transpose of the projected planes
+        db = db.transpose(-1, -2).contiguous()
     dpair = torch.empty_like(x)
     if fused:
         rows.fused_front_bwd(
@@ -1334,6 +1337,7 @@ class _Training(torch.autograd.Function):
         n_head,
         hd,
         fused,
+        flip,
     ):
         weights = [wq, wk, wv, wg, wb]
         out, *saved = forward_ops(
@@ -1350,9 +1354,10 @@ class _Training(torch.autograd.Function):
             hd,
             fused,
             True,
+            flip,
         )
         ctx.save_for_backward(x, wq, wk, wv, wg, wb, wo, ln_w, ln_b, mask, ds, *saved)
-        ctx.cfg = (transposed, n_head, hd, fused)
+        ctx.cfg = (transposed, n_head, hd, fused, flip)
         return out
 
     @staticmethod
@@ -1371,7 +1376,7 @@ class _Training(torch.autograd.Function):
             dout.contiguous(),
             *ctx.cfg,
         )
-        return (*grads, None, None, None, None, None, None, None)
+        return (*grads, None, None, None, None, None, None, None, None)
 
 
 def trainable(
@@ -1386,6 +1391,7 @@ def trainable(
     *,
     transposed: bool = False,
     ds: torch.Tensor | None = None,
+    flip: bool = False,
 ) -> torch.Tensor:
     """``pair + drop(TriangleAttention(pair))`` with autograd: ``weights`` = (q, k, v, g, bias), ``ds`` the dropout scale ``[B, L, D]`` (indexed by the token's second index) or None.
     Call ``supports()`` first."""
@@ -1407,8 +1413,9 @@ def trainable(
             cfg.hd,
             cfg.fused,
             False,
+            bool(flip),
         )[0]
-    return _Training.apply(*leaves, mk, d, float(eps), bool(transposed), cfg.h, cfg.hd, cfg.fused)
+    return _Training.apply(*leaves, mk, d, float(eps), bool(transposed), cfg.h, cfg.hd, cfg.fused, bool(flip))
 
 
 # ------------------------------------------------------------------------------------------------------------------------------ the variants
