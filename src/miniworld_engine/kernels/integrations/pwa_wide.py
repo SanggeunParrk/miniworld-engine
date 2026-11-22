@@ -132,6 +132,21 @@ def _value(d_msa: int, d_hidden: int):
 BIG_INFER_Y = True
 
 
+_ZERO32: dict = {}
+
+
+def _zeros32(like: torch.Tensor) -> torch.Tensor:
+    """fp32 zeros shaped like ``like`` (the pair LayerNorm's absent beta): made once per (device, shape), not by a fill kernel a call (a graph
+    replay pays ~1.5 us per node). Never evicted (a captured graph reads it); a first call inside a capture makes a fresh one."""
+    key = (like.device, tuple(like.shape))
+    t = _ZERO32.get(key)
+    if t is None:
+        t = torch.zeros(like.shape, dtype=torch.float32, device=like.device)
+        if not torch.cuda.is_current_stream_capturing() and len(_ZERO32) < 64:
+            _ZERO32[key] = t
+    return t
+
+
 def _forward_math(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float, save: bool):
     msa, pair, pm, lnm_w, lnm_b, wv, wg, lnz_w, wb, wo = args
     bf = torch.bfloat16
@@ -144,7 +159,7 @@ def _forward_math(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: 
         z,
         pm,
         lnz_w.detach().float().contiguous(),
-        torch.zeros_like(lnz_w, dtype=torch.float32),
+        _zeros32(lnz_w),
         eps_z,
         wb.detach(),
     )
@@ -339,7 +354,9 @@ def _prepare(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor |
         if pn:
             km[n:] = 0
     else:
-        km = F.pad(mask[0].to(torch.bfloat16), (0, pn))
+        km = mask[0].to(torch.bfloat16)
+        if pn:
+            km = F.pad(km, (0, pn))
     return msa.contiguous(), pair.contiguous(), km.contiguous(), n
 
 
