@@ -109,3 +109,23 @@ def test_chai1_atom_dit_mixed_layout(stream: str, key_window: str) -> None:
     y, ref = _both(m, inp, autocast=True)
     assert y.dtype == inp["single"].dtype
     assert _rel(y, ref) < 3e-2
+
+
+@pytest.mark.skipif(not (torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)), reason="A100 (sm_80)")
+@pytest.mark.parametrize("dtype", ["master", "float32"])
+@pytest.mark.parametrize("samples", [1, 5])
+def test_token_dit_protenix_extra_pair_bias_a100(dtype: str, samples: int) -> None:
+    """OpenDDE's TokenDiTProtenix + ``extra_pair_bias`` [L, L] is served by the sm_80 attention (it was refused, and fell to Triton)."""
+    from miniworld_engine.modules.token_dit import TokenDiTProtenix
+
+    m = _built(TokenDiTProtenix(), dtype)
+    act = torch.bfloat16 if dtype == "master" else torch.float32
+    g = torch.Generator(device="cuda").manual_seed(1)
+    inp = m.make_inputs(length=256, samples=samples, depth=None, dtype=act, device="cuda", generator=g)
+    inp["extra_pair_bias"] = torch.randn(256, 256, device="cuda", generator=g).to(act)
+    with torch.no_grad():
+        assert m._supports_cuda(inp["single"], inp["cond"], inp["pair"], inp["mask"], extra_pair_bias=inp["extra_pair_bias"]) is None
+    y, ref = _both(m, inp, autocast=dtype == "master")
+    assert _rel(y, ref) < (2e-2 if dtype == "master" else 2e-3)  # fp32: the TF32 attention core
+    y0, _ = _both(m, {**inp, "extra_pair_bias": None}, autocast=dtype == "master")
+    assert _rel(y0, y) > 1e-2  # not dropped

@@ -357,7 +357,7 @@ def _bias_into(
             out[:, length:, :].zero_()
 
 
-def _fwd_fake(x, cond, pair, res, kmask, bias_in, params, a, batch, length, heads, mask_kind, save, flat_eps=1e-5):
+def _fwd_fake(x, cond, pair, res, kmask, bias_in, params, a, batch, length, heads, mask_kind, save, flat_eps=1e-5, extra=None):
     padded = _pad(length)
     d = x.shape[-1]
     m = a * batch * padded
@@ -395,8 +395,10 @@ def _fwd(
     mask_kind: int,
     save: bool,
     flat_eps: float = 1e-5,
+    extra: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
-    """The module's update after the AdaLN: x [A, B, L, d] (the AdaLN's output), cond [A, B, L, dc], pair [B, L, L, dp], res [A, B, L, d] or None (the residual), kmask
+    """``extra`` [B, H, L, L] (``extra_pair_bias``, inference only: ``save`` False): an additive logit term added to the bias in the core's units.
+    The module's update after the AdaLN: x [A, B, L, d] (the AdaLN's output), cond [A, B, L, dc], pair [B, L, L, dp], res [A, B, L, d] or None (the residual), kmask
     a bool [B, L] / [A, B, L] key mask or None (``mask_kind`` 1 / 2 / 0), bias_in a pair bias made earlier (the compute dtype [1, H, Lp, Lp]: ``cache_pair_bias``) or None, params =
     (Wq, bq, Wk, Wv, Wg, Wo, Ws, bs, ln_pair.weight, to_bias.weight). Returns ``[out]``, or with ``save`` also the activations of the backward: qkvg, o, lse, og, y, g2, bias."""
     sm80 = _sm80()
@@ -485,7 +487,13 @@ def _fwd(
                 padded,
                 cast(torch.Tensor, kmask)[b] if mask_kind == 1 else None,
             )
-    kpen = _penalties(cast(torch.Tensor, kmask), a, batch, length, padded) if mask_kind == 2 else None
+    if extra is not None:
+        # the bias is in the core's raw units (bf16: natural x sqrt(hd); fp32: natural); the sum in fp32, rounded once. Masked keys stay at the fill.
+        if bias_in is not None:
+            bias = bias.clone()
+        view = bias[:, :, :length, :length]
+        view.copy_(view.float() + extra.float() * (1.0 if f32 else math.sqrt(hd)))
+    kpen =_penalties(cast(torch.Tensor, kmask), a, batch, length, padded) if mask_kind == 2 else None
     # inference: the key tiles past each fold's (kind 2: each sample's) last attended key are skipped by the core, which reads the mask
     # (``kernels._key_len``; the same bits)
     kms = None if save or mask_kind == 0 else cast(torch.Tensor, kmask)
@@ -958,7 +966,7 @@ def _flat_eps(module, dtype=F32) -> float:
     return float(rms[0].effective_eps(dtype)) if rms else EPS
 
 
-def _fused_update(module, x, cond, pair, mask, res):
+def _fused_update(module, x, cond, pair, mask, res, extra=None):
     """The fused path on the AdaLN's output ``x`` (the caller has checked ``serves``): ``res`` + the update, or the update alone when ``res`` is None."""
     a, batch, length, _ = x.shape
     kind = cast(int, _mask_kind(mask, a, batch, length))  # not None: serves() / serves_ops() refused such a mask
@@ -970,6 +978,8 @@ def _fused_update(module, x, cond, pair, mask, res):
         pair.contiguous(),
     )  # the AdaLN of fp32 masters may hand back fp32
     if torch.is_grad_enabled() and any(t.requires_grad for t in (x, cond, pair, *([] if res is None else [res]), *params)):
+        if extra is not None:
+            raise ValueError("extra_pair_bias: the sm_80 attention takes it at inference only")
         return _Fused.apply(x, cond, pair, res, kmask, a, batch, length, module.n_head, kind, _flat_eps(module), *params)
     bias_in = None
     if batch == 1 and kind in (0, 1) and (module.n_head, x.shape[-1] // module.n_head, pair.shape[-1]) == _ATOM:
@@ -990,6 +1000,7 @@ def _fused_update(module, x, cond, pair, mask, res):
         kind,
         False,
         _flat_eps(module),
+        extra,
     )[0]
 
 
@@ -1363,14 +1374,14 @@ def _adaln(module, single, cond):
     return ada(single, cond)
 
 
-def delta(module, single, cond, pair, mask):
-    """``AugmentedAttentionPairBias.delta`` on the sm_80 path (the update alone); call ``serves`` first."""
-    return _fused_update(module, _adaln(module, single, cond), cond, pair, mask, None)
+def delta(module, single, cond, pair, mask, extra=None):
+    """``AugmentedAttentionPairBias.delta`` on the sm_80 path (the update alone); call ``serves`` first. ``extra``: [B, H, L, L] logit planes (inference)."""
+    return _fused_update(module, _adaln(module, single, cond), cond, pair, mask, None, extra)
 
 
-def forward(module, single, cond, pair, mask):
-    """``AugmentedAttentionPairBias.forward`` on the sm_80 path: ``single + delta`` with the residual inside the last pass; call ``serves`` first."""
-    return _fused_update(module, _adaln(module, single, cond), cond, pair, mask, single.contiguous())
+def forward(module, single, cond, pair, mask, extra=None):
+    """``AugmentedAttentionPairBias.forward`` on the sm_80 path: ``single + delta`` with the residual inside the last pass; call ``serves`` first. ``extra``: [B, H, L, L] logit planes (inference)."""
+    return _fused_update(module, _adaln(module, single, cond), cond, pair, mask, single.contiguous(), extra)
 
 
 __all__ = [

@@ -478,7 +478,7 @@ class TokenDiTProtenix(BackendModule):
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
-        "cuda:a100_sm80": 5,  # 2026-11-19: fp32 with TF32 off is IEEE (the AdaLN / SwiGLU GEMMs no longer force TF32; kernels/ieee_f32)
+        "cuda:a100_sm80": 6,  # 2026-11-22: extra_pair_bias (OpenDDE's [L, L] logit bias) at inference on the sm_80 attention (was refused -> Triton); 5: 2026-11-19: fp32 with TF32 off is IEEE (the AdaLN / SwiGLU GEMMs no longer force TF32; kernels/ieee_f32)
         "cuda:5090_sm120": 2,  # 2026-11-19: the same (TF32 was forced under a caller with TF32 off)
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
@@ -622,7 +622,7 @@ class TokenDiTProtenix(BackendModule):
     def _forward_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> torch.Tensor:
         route, km = self._cuda_route(single, cond, pair, mask, compute_dtype, extra_pair_bias)
         if route == "a100":
-            return self._forward_a100(single, cond, pair, mask)
+            return self._forward_a100(single, cond, pair, mask, extra_pair_bias)
         view = _kernel_view(self)
         if route == "train":
             from miniworld_engine.kernels.integrations import token_dit_train
@@ -649,7 +649,12 @@ class TokenDiTProtenix(BackendModule):
         from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
 
         if extra_pair_bias is not None:
-            return None, f"{_card(single)}: extra_pair_bias (not an input of the sm_80 attention kernels)"
+            # the block's contract (AugmentedAttentionPairBias.delta): one [L, L] logit bias shared by every head, sample and fold
+            n = single.shape[-2]
+            if single.ndim != 4 or not extra_pair_bias.is_floating_point() or tuple(extra_pair_bias.shape) != (n, n):
+                return None, f"{_card(single)}: extra_pair_bias must be a floating [L, L] = ({n}, {n}), got {tuple(extra_pair_bias.shape)}"
+            if _wants_grad(self, single, cond, pair, extra_pair_bias):
+                return None, f"{_card(single)}: extra_pair_bias with a gradient (the sm_80 attention takes it at inference only)"
         dt, why = _a100_dtype(single, cond, pair, compute_dtype)
         if why is not None:
             return None, why
@@ -672,12 +677,13 @@ class TokenDiTProtenix(BackendModule):
             )
         return "a100", None
 
-    def _forward_a100(self, single, cond, pair, mask):
+    def _forward_a100(self, single, cond, pair, mask, extra_pair_bias=None):
         from miniworld_engine.kernels.integrations import augattn_sm80
         from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
 
         grad = _wants_grad(self, single, cond, pair)
-        single = augattn_sm80.forward(self.attention, single, cond, pair, mask)
+        extra = None if extra_pair_bias is None else extra_pair_bias[None, None].expand(single.shape[1], self.attention.n_head, *extra_pair_bias.shape)
+        single = augattn_sm80.forward(self.attention, single, cond, pair, mask, extra)
         with torch.autocast("cuda", enabled=False):
             return ct_sm80.update(self.transition, single, cond, True, single.dtype, grad)
 
