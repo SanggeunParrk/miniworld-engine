@@ -77,6 +77,15 @@ def _forms(lnw, lnb, wl, wr, gam, bet, wo, bo, infer: bool = False):
     from miniworld_engine.kernels import _capture
 
     def build():
+        if (
+            wl.is_cuda
+            and torch.cuda.get_device_capability(wl.device) == (9, 0)
+            and all(t.dtype is torch.float32 and t.is_contiguous() for t in (lnw, lnb, wl, wr, gam, bet, wo, bo))
+            and wl.numel() == wr.numel() == G * K * CM
+            and gam.numel() == 512
+        ):  # H100, fp32 master parameters: one launch (chai.cu chai_prep) instead of eight small kernels
+            w, wf, bf = _kernels(wl).chai_prep(wl, wr, gam, bet, wo, bo)
+            return lnw.contiguous(), lnb.contiguous(), w, wf, bf
         wf, bf = _fold(wo, gam, bet, bo)
         return lnw.float().contiguous(), lnb.float().contiguous(), torch.cat([wl, wr]).to(torch.bfloat16).contiguous(), wf, bf
 
@@ -214,11 +223,17 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
             dbo.to(bo.dtype),
         ]
     dw = torch.mm(dcat.t(), ln16, out_dtype=f32)  # [128, 64]
-    dlw, dlb = part[:, :CM].sum(0), part[:, CM:].sum(0)
+    # chai_projbwd's dx is a fresh tensor of its own: on the H100 it is returned as it is (the clone was a 17 MB, ~10 us copy a step at L 128)
+    own_dx = torch.cuda.get_device_capability(msa.device) == (9, 0)
+    if own_dx:  # one column reduction of the per-block partials instead of two (dgamma | dbeta); the halves alias: copied below
+        ps = part.sum(0)
+        dlw, dlb = ps[:CM].to(lnw.dtype, copy=True), ps[CM:].to(lnb.dtype, copy=True)
+    else:
+        dlw, dlb = part[:, :CM].sum(0).to(lnw.dtype), part[:, CM:].sum(0).to(lnb.dtype)
     return [
-        dx.view(1, s, n, CM).clone(),
-        dlw.to(lnw.dtype),
-        dlb.to(lnb.dtype),
+        dx.view(1, s, n, CM) if own_dx else dx.view(1, s, n, CM).clone(),
+        dlw,
+        dlb,
         dw[: G * K].to(wl.dtype).clone(),
         dw[G * K :].to(wr.dtype).clone(),
         dgam.to(gam.dtype),

@@ -56,6 +56,11 @@ def chai_proj(x, mask, gamma, beta, w, eps=1e-5, save=False):
     return chai_ext().chai_proj(x, mask, gamma, beta, w, float(eps), bool(save))
 
 
+def chai_prep(wl, wr, gamma, beta, wo, bo):
+    """The weight forms in one launch (all fp32): -> [[W_left; W_right] [128, 64] bf16, W' = W_out . gamma [CZ, 512] bf16, b' = b_out + W_out beta [CZ] fp32]."""
+    return chai_ext().chai_prep(wl, wr, gamma, beta, wo, bo)
+
+
 def chai_bwd(dy, y, stats, n):
     """dy [N N, 512] bf16 (dz W'), the forward's y and stats -> dO [8, N K, N K] bf16 (the product LayerNorm's backward in the grouped layout)."""
     return chai_ext().chai_bwd(dy, y, stats, int(n))
