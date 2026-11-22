@@ -478,7 +478,7 @@ class TokenDiTProtenix(BackendModule):
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
-        "cuda:a100_sm80": 6,  # 2026-11-22: extra_pair_bias (OpenDDE's [L, L] logit bias) at inference on the sm_80 attention (was refused -> Triton); 5: 2026-11-19: fp32 with TF32 off is IEEE (the AdaLN / SwiGLU GEMMs no longer force TF32; kernels/ieee_f32)
+        "cuda:a100_sm80": 7,  # 2026-11-23: the token pair bias hoisted per (pair, weights, mask) at inference (augattn_sm80 TOKEN_BIAS: one pair-bias pass per fold instead of per block and step; the bias bits are the same kernel's; ESMFold2 / Protenix / OpenDDE samplers on the A100); 6: 2026-11-22: extra_pair_bias (OpenDDE's [L, L] logit bias) at inference on the sm_80 attention (was refused -> Triton); 5: 2026-11-19: fp32 with TF32 off is IEEE (the AdaLN / SwiGLU GEMMs no longer force TF32; kernels/ieee_f32)
         "cuda:5090_sm120": 3,  # 2026-11-22: extra_pair_bias at inference (shared sm_80 route); 2: 2026-11-19: the same (TF32 was forced under a caller with TF32 off)
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
@@ -788,9 +788,9 @@ class TokenDiTMiniWorld(TokenDiTProtenix):
     #: was the general composition with a materialised-score attention (a100_families.token)
     backend_versions: ClassVar[dict[str, int]] = {
         **TokenDiTProtenix.backend_versions,
-        "cuda:a100_sm80": 7,
+        "cuda:a100_sm80": 8,
         "cuda:5090_sm120": 3,
-    }  # 7 (2026-11-22): as the base class (extra_pair_bias at inference); 6 (2026-11-19): as the base class (IEEE fp32 with TF32 off); 5 (2026-11-13): as the base class (the key-tile skip)
+    }  # 8 (2026-11-23): as the base class (the hoisted token pair bias); 7 (2026-11-22): as the base class (extra_pair_bias at inference); 6 (2026-11-19): as the base class (IEEE fp32 with TF32 off); 5 (2026-11-13): as the base class (the key-tile skip)
 
     backends = ("pytorch", "cuda", "triton")
     qk_norm = True
