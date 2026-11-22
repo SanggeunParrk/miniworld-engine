@@ -781,6 +781,7 @@ class TriangleAttention(_TriangleAttentionBase):
         **_TriangleAttentionBase.backend_versions,
         "cuda:a100_sm80": 8,  # 8 (2026-11-19): training (forward_train) passes key_mask=None to the sm_80 attention op: every cuda train call raised before (rows recorded the error); inference unchanged
         "cuda:h100_sm90": 12,
+        "cuda:5090_sm120": 6,  # 6 (2026-11-23): the bias-only form (use_self_attention=False): the P v contraction and the out-projection with its residual on CUTLASS tiles from L 256 (cuBLAS picks 32 x 32 WMMA tiles there; L 256 inference 204 -> 178 us, Triton 177; within bf16 rounding); 5: see the base class
         # 71 (2026-11-18, N1 triattn, training; the base entry stays 69: only the single-direction bias-only form changes): the bias-only paths' LayerNorm
         # forward / backward and gate backward (C = 128, K = 128) on B200 kernels (b200_sources/lnbwd_sm100.cu: loads issued together and a row step ahead,
         # 2-4 CTAs an SM, d gamma / d beta column sum in one launch), the dW / dWo GEMMs as graph branches at L <= 256 (dW alone above): row 188 training
@@ -1097,7 +1098,7 @@ class BidirectionalTriangleAttention(BackendModule, MasterWeights):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:a100_sm80": 2,
-        "cuda:5090_sm120": 1,
+        "cuda:5090_sm120": 2,  # 2 (2026-11-23): the starting direction's P v and the out-projection with its residual on CUTLASS tiles from L 256 (L 512 inference 1.74 -> 1.44 ms; within bf16 rounding)
         "cuda:b200_sm100": 6,  # 6 (2026-11-19, n9 triattn-b, training): the tall-K fp32 GEMMs (ltmm_sm100.cu) calibrate and fall back against a plain fp32 reference with TF32 switched off (the measurer allows TF32 for the cuda backend: at L768 every cublasLt candidate failed the TF32 reference and dW took a bf16 -> fp32 cast + TF32 GEMM; training step L768 3.27 -> 1.89 ms, bitwise deterministic, graph == eager); 5 (2026-11-18, N1 triattn, training): the LayerNorm forward / backward and gate backward (C = 128) on B200 kernels (b200_sources/lnbwd_sm100.cu, shared with the single-direction bias-only path of TriangleAttention), the dW / dWo GEMMs as graph branches at L <= 256 (dW alone above), outputs and gradients bitwise equal;
         # 4 (2026-11-17, triattn fronts / tails part 3): the ending direction's per-head contractions (O_e, dV_e, dP_e) on sm_100a tcgen05 kernels, one launch each for every head (bidir_sm100.cu; dP a deterministic cluster reduction), the softmax backward's row dot and the LayerNorm parameter partials in one launch each (measurer, L128 training 0.196 -> 0.139 ms, eval 0.0551 -> 0.0490; L256 training 0.352 -> 0.311; native GEMMs at L <= 256); 1 (2026-11-16): the same glue / gate-backward sources built for sm_100a (b200_bidir); 2 (2026-11-17): no batch-buffer copy of the LayerNorm input gradient at B = 1; 3 (2026-11-17): 2.5.12's fused tails / planes kernels built for sm_100a (L768 eval 0.727 -> 0.643 ms, training 2.04 -> 1.97 ms)
     }  # 2026-11-10: the sm_80 build of the H100 path; 2026-11-12: its sm_120a build
