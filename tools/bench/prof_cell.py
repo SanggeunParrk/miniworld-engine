@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks" / "paper"))
-from paper_common import cfg as cfgmod  # noqa: E402
+from paper_common import cfg as cfgmod
 
 
 def main() -> int:
@@ -33,8 +33,16 @@ def main() -> int:
         module = copy.deepcopy(base)
         with unpadded_masks():
             inputs = config.inputs(case, module, device=dev)
-        step = make_step(module, inputs, backend=backend, train=case.mode == "train", autocast=config.autocast(case),
-                         seed=config.seed(case), compile_mode=None, keep_expanded=config.keeps_expanded(case))
+        step = make_step(
+            module,
+            inputs,
+            backend=backend,
+            train=case.mode == "train",
+            autocast=config.autocast(case),
+            seed=config.seed(case),
+            compile_mode=None,
+            keep_expanded=config.keeps_expanded(case),
+        )
         for _ in range(5):
             step()
         torch.cuda.synchronize()

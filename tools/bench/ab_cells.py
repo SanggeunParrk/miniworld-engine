@@ -19,7 +19,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks" / "paper"))
-from paper_common import cfg as cfgmod  # noqa: E402
+from paper_common import cfg as cfgmod
 
 
 def main() -> int:
@@ -31,8 +31,8 @@ def main() -> int:
     p.add_argument("--reps", type=int, default=20)
     p.add_argument("--reset", default="", help="statement run after each capture (undoes the variants' switches)")
     args = p.parse_args()
-    from miniworld_engine.measure import config, speed
-    from miniworld_engine.measure.speed import _Timer, _capture, make_step, unpadded_masks
+    from miniworld_engine.measure import config
+    from miniworld_engine.measure.speed import _capture, _Timer, make_step, unpadded_masks
 
     cfg = cfgmod.load(args.config, args)
     dev = torch.device("cuda")
@@ -45,12 +45,20 @@ def main() -> int:
             backend, _, stmt = v.partition("|")
             try:
                 if stmt:
-                    exec(stmt, {})  # noqa: S102
+                    exec(stmt, {})
                 module = copy.deepcopy(base)
                 with unpadded_masks():
                     inputs = config.inputs(case, module, device=dev)
-                step = make_step(module, inputs, backend=backend, train=case.mode == "train", autocast=config.autocast(case),
-                                 seed=config.seed(case), compile_mode=None, keep_expanded=config.keeps_expanded(case))
+                step = make_step(
+                    module,
+                    inputs,
+                    backend=backend,
+                    train=case.mode == "train",
+                    autocast=config.autocast(case),
+                    seed=config.seed(case),
+                    compile_mode=None,
+                    keep_expanded=config.keeps_expanded(case),
+                )
                 side.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(side):
                     for _ in range(5):
@@ -68,7 +76,7 @@ def main() -> int:
                 print(f"  variant {v!r} failed: {type(exc).__name__}: {str(exc)[:200]}")
             finally:
                 if args.reset:
-                    exec(args.reset, {})  # noqa: S102
+                    exec(args.reset, {})
         times = [[] for _ in graphs]
         for _ in range(args.rounds):
             for i, (g, *_r) in enumerate(graphs):
@@ -78,7 +86,7 @@ def main() -> int:
         print(f"{label}")
         for n, t in zip(names, times):
             m = statistics.median(t)
-            print(f"   {n:60s} {m*1e3:9.2f} us  min {min(t)*1e3:9.2f}  ratio_vs_first {m/base_t:.4f}")
+            print(f"   {n:60s} {m * 1e3:9.2f} us  min {min(t) * 1e3:9.2f}  ratio_vs_first {m / base_t:.4f}")
         del graphs, base
         torch.cuda.empty_cache()
     return 0
