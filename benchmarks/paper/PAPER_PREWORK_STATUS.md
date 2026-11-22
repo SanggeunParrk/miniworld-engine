@@ -29,13 +29,13 @@ Timing: CUDA graph, cold L2, medians; the iteration count (100 or 20) does not c
 | experiment | H100 | A100 | RTX 5090 | B200 |
 |---|---|---|---|---|
 | F1 / F2 FoldBench (AF3) | done (3.0.1; 32 targets > 2048 tokens re-run on 3.0.6); launch mode stated (multi, GPU-h = 2 x wall) | n/a | n/a | n/a |
-| F3 5I28 time | 3.0.1 / 3.0.2 values (labelled) | 3.0.6, 33/33 | 3.0.6 (ESMFold2 family not measured: 16 GB host RAM) | done (boltz2 / chai1 / rosettafold3 per-size processes) |
-| F4 27 targets | 3.0.1 (labelled; largest target 2008 tokens, outside the PWA hole) | 3.0.6 + OpenDDE 3.0.8, 22/22 | 3.0.6 + OpenDDE 3.0.8 | done, engine 291 ok / PyTorch 268 ok |
-| F5 sample comparison | 3.0.1 | done | done | done (1,340 pairs) |
+| F3 5I28 time | 3.0.1 / 3.0.2 values (labelled) | 3.0.6, 33/33 | 3.0.6 (9 of 11 predictors; ESMFold2 and ESMFold2-Fast not feasible: ESM-C 6B loading exceeds the 16 GB host RAM cap) | done (boltz2 / chai1 / rosettafold3 per-size processes) |
+| F4 27 targets | 3.0.1 (labelled; largest target 2008 tokens, outside the PWA hole) | 3.0.6 + OpenDDE 3.0.8, 22/22 | 3.0.6 + OpenDDE 3.0.8 (9 of 11 predictors; ESMFold2 family not feasible) | done, engine 291 ok / PyTorch 268 ok |
+| F5 sample comparison | 3.0.1 | done | done (9 of 11 predictors) | done (1,340 pairs) |
 | F6 training speed | engine arm re-measured, Transition on CUDA (0.8121 / 0.7870 s per example) | 3.0.6 | 3.0.6 | done (8/8 configurations) |
 | F7 finetune loss | PyTorch run 433 steps vs engine 1424: compared on the 433 common steps | n/a | n/a | n/a |
 | F8 finetuned FoldBench | done | n/a | n/a | n/a |
-| F9 inference limit | 3.0.6 | 22/22 | 9 predictors (ESMFold2 family not measured) | done (22 limits; chai1 n=40 CUDA IMA at 98 % reserved classified OOM) |
+| F9 inference limit | 3.0.6 | 22/22 | 9 of 11 predictors (ESMFold2 and ESMFold2-Fast not feasible: 16 GB host RAM cap) | done (22 limits; chai1 n=40 CUDA IMA at 98 % reserved classified OOM) |
 | F10 training limit | dropped from the paper | | | |
 | F11 FP8 accuracy | done | n/a | n/a | n/a |
 
