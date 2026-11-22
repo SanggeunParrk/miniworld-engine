@@ -853,7 +853,8 @@ class TriangleAttentionAF3(_TriangleAttentionBase):
     # (two pair rows a CTA sum their dS in shared memory: bf16 dbias planes S / 2; outputs change within rounding)
     backend_versions: ClassVar[dict[str, int]] = {
         **_TriangleAttentionBase.backend_versions,
-        "cuda:a100_sm80": 7,
+        "cuda:5090_sm120": 6,  # 6 (2026-11-22): the ending node's training on the wide fused rows engine (flip in sm80_wide.trainable): d_pair 64 L 384 1.885 -> 1.091 ms; gradients within bf16 rounding
+        "cuda:a100_sm80": 8,  # 8 (2026-11-22): as 5090_sm120 6 (shared sm80 source)
         "cuda:h100_sm90": 13,
     }  # a100_sm80 7 (2026-11-19): as TriangleAttention 8 (training key_mask), base 6 otherwise
 
