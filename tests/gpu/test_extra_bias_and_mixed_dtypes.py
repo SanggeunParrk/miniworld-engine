@@ -129,3 +129,39 @@ def test_token_dit_protenix_extra_pair_bias_a100(dtype: str, samples: int) -> No
     assert _rel(y, ref) < (2e-2 if dtype == "master" else 2e-3)  # fp32: the TF32 attention core
     y0, _ = _both(m, {**inp, "extra_pair_bias": None}, autocast=dtype == "master")
     assert _rel(y0, y) > 1e-2  # not dropped
+
+
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() and torch.cuda.get_device_capability() in ((8, 0), (12, 0))), reason="A100 (sm_80) or RTX 5090 (sm_120)"
+)
+@pytest.mark.parametrize("dtype", ["master", "float32"])
+def test_token_dit_protenix_extra_pair_bias_masked_keys(dtype: str) -> None:
+    """A padded (masked) key stays masked under ``extra_pair_bias``: the sm_80 path matches an fp64 reference with padded keys, and a huge
+    extra on the masked key columns changes nothing."""
+    import copy
+
+    from miniworld_engine.modules.token_dit import TokenDiTProtenix
+
+    length, pad = 256, 40
+    m = _built(TokenDiTProtenix(), dtype)
+    act = torch.bfloat16 if dtype == "master" else torch.float32
+    g = torch.Generator(device="cuda").manual_seed(3)
+    inp = m.make_inputs(length=length, samples=2, depth=None, dtype=act, device="cuda", generator=g)
+    mask = torch.ones(1, length, dtype=torch.bool, device="cuda")
+    mask[:, length - pad :] = False
+    inp["mask"] = mask
+    extra = torch.randn(length, length, device="cuda", generator=g).to(act)
+    huge = extra.clone()
+    huge[:, length - pad :] = 1e3  # a large positive logit on every masked key: it must not unmask them
+    ref = copy.deepcopy(m).double().eval()
+    ref.set_backend("pytorch")
+    with torch.no_grad():
+        rinp = {k: (v.double() if torch.is_tensor(v) and v.is_floating_point() else v) for k, v in {**inp, "extra_pair_bias": extra}.items()}
+        r = ref(**rinp)
+        assert m._supports_cuda(inp["single"], inp["cond"], inp["pair"], mask, extra_pair_bias=extra) is None
+        m.set_backend("cuda")
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=dtype == "master"):
+            y = m(**{**inp, "extra_pair_bias": extra})
+            yh = m(**{**inp, "extra_pair_bias": huge})
+    assert _rel(y, r) < (2e-2 if dtype == "master" else 2e-3)
+    assert _rel(yh, y) < (2e-2 if dtype == "master" else 2e-3)  # masked columns' extra is inert
