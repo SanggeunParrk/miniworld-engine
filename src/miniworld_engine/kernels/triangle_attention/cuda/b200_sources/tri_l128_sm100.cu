@@ -27,7 +27,7 @@ __device__ __forceinline__ float ex2f(float x) { float y; asm("ex2.approx.ftz.f3
 #define L1_POLY 4       // this many of a chunk's 16 exponential pairs on the FMA pipe (the softmax's second pass is MUFU-bound)
 #endif
 __device__ __forceinline__ float2 ex2_poly2(float2 x) {   // triattn_sm100.cu's degree-3 2^x on the FMA pipe, two at a time
-  x.x = fmaxf(x.x, -126.f); x.y = fmaxf(x.y, -126.f);
+  x.x = fminf(fmaxf(x.x, -126.f), 128.f); x.y = fminf(fmaxf(x.y, -126.f), 128.f);  // upper clamp 128: a logit >= 2^128 above the offset must come out as inf / NaN (the guard's `hi` test then recomputes the tile exactly); without it n >= 129 carries out of the exponent field (garbage, often a tiny finite P: the spike key silently vanishes or the row turns NaN)
   const float2 t = add2(x, make_float2(12582912.f, 12582912.f));
   const float2 rr = add2(t, make_float2(-12582912.f, -12582912.f));
   const float2 f = add2(x, make_float2(-rr.x, -rr.y));

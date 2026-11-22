@@ -189,7 +189,7 @@ constexpr float TA_PMAX = 0x1p64f, TA_PMIN = 0x1p-64f;
 // 2^x on the FMA pipe, two at a time: n = round(x) by the 1.5 * 2^23 add, 2^f (|f| <= 1/2) by a degree-3 minimax polynomial
 // (relative error 7.5e-5, well under P's bf16 rounding), n added into the exponent bits: (bits(t) << 23) == n << 23 exactly.
 __device__ __forceinline__ float2 ex2_poly2(float2 x) {
-  x.x = fmaxf(x.x, -126.f); x.y = fmaxf(x.y, -126.f);
+  x.x = fminf(fmaxf(x.x, -126.f), 128.f); x.y = fminf(fmaxf(x.y, -126.f), 128.f);  // upper clamp 128: a logit >= 2^128 above the offset must come out as inf / NaN (the guard's `hi` test then recomputes the tile exactly); without it n >= 129 carries out of the exponent field (garbage, often a tiny finite P: the spike key silently vanishes or the row turns NaN)
   const float2 t = add2(x, make_float2(12582912.f, 12582912.f));
   const float2 rr = add2(t, make_float2(-12582912.f, -12582912.f));
 #if TA_PSUB

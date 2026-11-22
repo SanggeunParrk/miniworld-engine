@@ -79,7 +79,7 @@ __device__ __forceinline__ float2 logit2hb(uint32_t w, float s0, float s1, float
 template <bool B> struct BC { static constexpr bool value = B; };
 __device__ __forceinline__ float2 logit2q(uint32_t w, float s0, float s1) { return make_float2(badd_lo(w, s0), badd_hi(w, s1)); }
 __device__ __forceinline__ float2 ex2_poly2(float2 x) {
-  x.x = fmaxf(x.x, -126.f); x.y = fmaxf(x.y, -126.f);
+  x.x = fminf(fmaxf(x.x, -126.f), 128.f); x.y = fminf(fmaxf(x.y, -126.f), 128.f);  // upper clamp 128: a logit >= 2^128 above the offset must come out as inf / NaN (the guard's `hi` test then recomputes the tile exactly); without it n >= 129 carries out of the exponent field (garbage, often a tiny finite P: the spike key silently vanishes or the row turns NaN)
   const float2 t = add2(x, make_float2(12582912.f, 12582912.f));
   const float2 rr = add2(t, make_float2(-12582912.f, -12582912.f));
   const float2 f = add2(x, make_float2(-rr.x, -rr.y));
