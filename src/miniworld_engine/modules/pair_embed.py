@@ -58,6 +58,10 @@ def _eval_sm120(weight: torch.Tensor, x: torch.Tensor, kind: str) -> bool:
         from miniworld_engine.kernels.pair_embed_geom.cuda.sm80 import A100_ONE_LAUNCH
 
         return kind in A100_ONE_LAUNCH
+    if x.device.type == "cuda" and torch.cuda.get_device_capability(x.device) == (9, 0):  # H100: the sm_80 source built for sm_90a (sm80/ H100_ONE_LAUNCH)
+        from miniworld_engine.kernels.pair_embed_geom.cuda.sm80 import H100_ONE_LAUNCH
+
+        return kind in H100_ONE_LAUNCH
     return False
 
 
@@ -442,7 +446,9 @@ class PairEmbedGeom(BackendModule):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build; cuda:5090_sm120 2 (2026-11-13): the RTX 5090's own
     # table gradient (pg120_bwd), the fused LayerNorm + table gradient, the one-launch inference forward (pg120_fwd_blk)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:5090_sm120": 2, "cuda:b200_sm100": 20}
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 2, "cuda:5090_sm120": 2, "cuda:b200_sm100": 20}
+    # cuda:h100_sm90 2 (2026-11-23, thin-margins): inference by the one-launch encoder forward of pair_embed_geom_sm80.cu built for sm_90a (no per-call preparation kernels):
+    # S1 L 128 / 256 / 384 with the LayerNorm 36.2 / 62.1 / 106.0 us -> 24.7 / 47.4 / 83.9 (Triton 36.6 / 61.9 / 104.8); the same outputs as the Triton kernel; training unchanged
     # cuda:a100_sm80 3 (2026-11-23, thin-margins): inference by the one-launch encoder forward of the sm_80 build (as the decoder pair: no per-call preparation
     # kernels): S1 L128 / 256 with the LayerNorm 45.1 / 86.0 us -> 32.8 / 70.9 (Triton 46.1 / 88.1); the same outputs (accuracy GREEN at L128 / 256); training unchanged
     # cuda:b200_sm100 20 (2026-11-17, round 3 restart): above 128^2 pairs the encoder forward reads the bf16 table from shared memory
@@ -578,7 +584,9 @@ class PairEmbedCA(BackendModule):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build; cuda:5090_sm120 2 (2026-11-13): the RTX 5090's own
     # table gradient (pg120_bwd), the fused LayerNorm + table gradient, the one-launch inference forward (pg120_fwd_ca_blk)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 2, "cuda:5090_sm120": 2, "cuda:b200_sm100": 20}
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:h100_sm90": 3, "cuda:5090_sm120": 2, "cuda:b200_sm100": 20}
+    # cuda:h100_sm90 3 (2026-11-23, thin-margins): inference by the one-launch decoder forward of pair_embed_geom_sm80.cu built for sm_90a (a table kernel + one forward from the module's own inputs;
+    # no per-call preparation kernels): S1 L 128 / 256 / 384 with the LayerNorm 16.6 / 26.6 / 41.7 us -> 11.3 / 19.7 / 32.3 (Triton 17.8 / 26.5 / 41.7); the same outputs as the Triton kernel; training unchanged
     # cuda:h100_sm90 2 (2026-11-22): the bin limits made once per device, not by a linspace kernel a call (bit-identical outputs; L 256 ln_eps inference 0.963 -> 1.012 of the Triton backend)
     # cuda:a100_sm80 3 (2026-11-22, ladder): inference by the one-launch decoder forward of the sm_80 build (a table kernel + pg80_fwd_ca_pk: 8 lanes a pair,
     # packed bf16x2 sum and LayerNorm; no per-call preparation kernels): L 128 / 256 / 384 with the LayerNorm 10.9 / 25.7 / 48.4 us against the Triton
