@@ -29,6 +29,7 @@ NOT_WEIGHT_DERIVED = {
     "kernels/integrations/bidir_triattn_h100.py:_ZERO_QK": "B200 zero q / k buffers per shape",
     "kernels/integrations/local_dit_esm_b200.py:_ESM_BCOND32": "B200 constant ESM conditioning rows per device",
     "kernels/integrations/pwa_sm100.py:_CTR": "B200 PWA grid counters per (device, size)",
+    "kernels/integrations/pwa_wide.py:_ZERO32": "H100 PWA zero fp32 tensors per (shape, device), not weight derived (filled outside a capture, at most 64)",
     "kernels/transition/cuda/fused_generic_sm100a.py:_BARS": "B200 transition barrier buffers per device",
     "kernels/transition/cuda/fused_generic_sm100a.py:_SBARS": "B200 transition small-chain barrier buffers per device",
     "kernels/transition/cuda/fused_small_sm100a.py:H16_MIN_TILES": "B200 fp16-chain tile thresholds (constant table)",
