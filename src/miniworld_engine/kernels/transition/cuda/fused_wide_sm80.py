@@ -275,6 +275,13 @@ def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 DXN_BF16 = True
 #: the saved-activation backward runs d_xn GEMM -> ln_bwd on the high-priority stream and [dWa; dWb] on the main one (see ``_bwd_saved_overlap``)
 DXN_CHAIN_FIRST = True
+#: A100: d 256 n 2 at 200 k .. 350 k rows (L 512 pair) keeps the previous order (d_xn beside [dWa; dWb] on the weight stream; 4 % faster there, A-B-A-B vs the chain-first order; at 147 k and 410 k rows chain-first is 2-6 % faster)
+A100_CHAIN_FIRST_OFF_ROWS = (200_000, 350_000)
+
+
+def _chain_first(m: int, d: int, h: int, device: torch.device) -> bool:
+    lo, hi = A100_CHAIN_FIRST_OFF_ROWS
+    return DXN_CHAIN_FIRST and not (not is_sm120(device) and d == 256 and h == 512 and lo <= m <= hi)
 
 
 def _dxn_gemm(dab: torch.Tensor, wab: torch.Tensor) -> torch.Tensor:
@@ -606,7 +613,7 @@ def _bwd_saved_overlap(ext, dy, x, xn, stats, gamma, wa, wb, ws, hid, ab, gdt, w
     dab = ext.gate_dh(dy, ws.t().contiguous(), ab, _dh_cfg(m, d, h, is_sm120(x.device)))  # dA | dB [M, 2H]
     ready = torch.cuda.Event()
     ready.record(main)
-    if DXN_CHAIN_FIRST:
+    if _chain_first(m, d, h, x.device):
         # the d_xn GEMM -> ln_bwd chain (the critical path) on the high-priority stream, so its GEMM takes the SMs first and the memory-bound ln_bwd runs
         # inside the weight-gradient GEMM [dWa; dWb] = dAB^T xn of the main stream (low priority)
         with torch.cuda.stream(side):
