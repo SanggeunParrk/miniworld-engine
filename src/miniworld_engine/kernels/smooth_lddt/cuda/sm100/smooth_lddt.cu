@@ -57,6 +57,55 @@ __device__ __forceinline__ float rat_n(float w) {
     n = fmaf(n, w, 0.000830352031f);
     return fmaf(n, w, 2.02979066e-05f);
 }
+// ---- the sign of d_pred - d_gt at the kink --------------------------------------------------------------------------------------------
+// The fp32 distances carry up to ~1e-5 A of error (d < 30 A), so a pair with |d_pred - d_gt| below SIGN_EPS (8e-6: the largest fp32 error of d_pred - d_gt measured over 3e7 random pairs, d < 30 A, was 7.5e-6) can take the wrong sign of the
+// |.| in the gradient (a wrong-signed pair is an error of ~1e-3 of the gradient that no accumulation order removes; the fp64 reference and
+// PyTorch's fp32 take the sign of the exact difference by luck). The hot loop only COUNTS such pairs and remembers the last (branch-free:
+// a branch with a fp64 body in the loop costs 7-9 % in registers and scheduling); after the loop the row takes the exact sign for them:
+// the correction coef(exact sign) - coef(fp32 sign) of each pair, with the sign of |x_i - x_j|^2 - |g_i - g_j|^2 in fp64 of the fp32
+// inputs (the reference's own number). Two or more such pairs in a row (~1e-4 of the rows) rescan the row's pair mask.
+constexpr float SIGN_EPS = 8e-6f;
+
+__device__ __noinline__ void slddt_fix_pair(const float* __restrict__ xb, const float* __restrict__ gb, const int8_t* __restrict__ nucb, int i, int j,
+                                            float& a0, float& a1, float& a2) {
+    const float xi0 = xb[i * 3], xi1 = xb[i * 3 + 1], xi2 = xb[i * 3 + 2], xj0 = xb[j * 3], xj1 = xb[j * 3 + 1], xj2 = xb[j * 3 + 2];
+    const float gi0 = gb[i * 3], gi1 = gb[i * 3 + 1], gi2 = gb[i * 3 + 2], gj0 = gb[j * 3], gj1 = gb[j * 3 + 1], gj2 = gb[j * 3 + 2];
+    const float ci = nucb[i] ? NUC_CUT : OTHER_CUT, cj = nucb[j] ? NUC_CUT : OTHER_CUT;
+    const float h0 = gi0 - gj0, h1 = gi1 - gj1, h2 = gi2 - gj2;
+    const float g2 = h0 * h0 + h1 * h1 + h2 * h2;
+    const float wgt = (g2 < ci * ci ? 1.f : 0.f) + (g2 < cj * cj ? 1.f : 0.f);
+    const float e0 = xi0 - xj0, e1 = xi1 - xj1, e2 = xi2 - xj2;
+    const float d = sqrtf(e0 * e0 + e1 * e1 + e2 * e2);
+    const float df = d - sqrtf(g2);
+    if (!(fabsf(df) < SIGN_EPS)) return;
+    const float s32 = df > 0.f ? 1.f : (df < 0.f ? -1.f : 0.f);
+    const double E0 = (double)xi0 - (double)xj0, E1 = (double)xi1 - (double)xj1, E2 = (double)xi2 - (double)xj2;
+    const double H0 = (double)gi0 - (double)gj0, H1 = (double)gi1 - (double)gj1, H2 = (double)gi2 - (double)gj2;
+    const double t = (E0 * E0 + E1 * E1 + E2 * E2) - (H0 * H0 + H1 * H1 + H2 * H2);
+    const float sx = t > 0.0 ? 1.f : (t < 0.0 ? -1.f : 0.f);
+    const float ew = __expf(-fabsf(df));
+    const float qv = rat_q(ew);
+    const float coef = wgt * (-(sx - s32)) * (0.25f * ew * rat_n(ew)) * __fdividef(1.f, qv * qv * fmaxf(d, 1e-6f));
+    a0 += coef * e0; a1 += coef * e1; a2 += coef * e2;
+}
+
+// after the loop of row i: the exact sign for the ``nn`` pairs counted (the last of them is remembered: j1)
+__device__ __forceinline__ void slddt_fix_row(const float* __restrict__ xb, const float* __restrict__ gb, const int8_t* __restrict__ nucb,
+                                              const uint32_t* __restrict__ umrow, int wlo, int whi, int i, int nn, int j1, float& a0, float& a1, float& a2) {
+    if (__builtin_expect(nn == 0, 1)) return;
+    if (nn == 1) {
+        slddt_fix_pair(xb, gb, nucb, i, j1, a0, a1, a2);
+        return;
+    }
+    for (int w = wlo; w < whi; ++w) {
+        uint32_t u = umrow[w];
+        while (u) {
+            const uint32_t low = u & (0u - u);
+            slddt_fix_pair(xb, gb, nucb, i, w * 32 + __popc(low - 1u), a0, a1, a2);
+            u ^= low;
+        }
+    }
+}
 // sum over the four thresholds of sigmoid(t - x) / 4 for w = exp(-x)
 __device__ __forceinline__ float pair_score(float w) { return 0.25f * w * rat_dq(w) * __fdividef(1.f, rat_q(w)); }
 
@@ -180,6 +229,7 @@ __device__ __forceinline__ void slddt_bwd_impl(const float* __restrict__ X, cons
     const float ci = NUC[b * N + i] ? NUC_CUT : OTHER_CUT;
     const float ci2 = ci * ci;
     float a0 = 0.f, a1 = 0.f, a2 = 0.f;
+    int nn = 0, j1 = 0;  // pairs next to the kink of |.|: their number and the last
     for (int jb = jb0; jb < jb1; ++jb) {
         if (!(TILE[((size_t)b * NB + ib) * NB + jb] & 2)) continue;
         __syncthreads();
@@ -207,11 +257,15 @@ __device__ __forceinline__ void slddt_bwd_impl(const float* __restrict__ X, cons
                 const float ew = __expf(-fabsf(df));
                 const float qv = rat_q(ew);
                 const float sgn = df > 0.f ? 1.f : (df < 0.f ? -1.f : 0.f);
+                const bool nr = fabsf(df) < SIGN_EPS;  // the pair is next to the kink: counted, fixed after the loop
+                j1 = nr ? jb * BLK + k : j1;
+                nn += nr;
                 const float coef = wgt * (-sgn) * (0.25f * ew * rat_n(ew)) * __fdividef(1.f, qv * qv * fmaxf(d, 1e-6f));
                 a0 += coef * e0; a1 += coef * e1; a2 += coef * e2;
             }
         }
     }
+    slddt_fix_row(xb, gb, NUC + (size_t)b * N, UM + ((size_t)b * N + i) * W, jb0 * 4, jb1 * 4, i, nn, j1, a0, a1, a2);
     const float go = GO[ab];
     float* gx = GX + ((size_t)ks * gridDim.x + ab) * N * 3;   // part ks of [KS, A * B, N, 3]
     gx[i * 3] = a0 * go; gx[i * 3 + 1] = a1 * go; gx[i * 3 + 2] = a2 * go;
@@ -310,6 +364,7 @@ __device__ __forceinline__ void bwd_full_impl(const float* __restrict__ X, const
     const float4 xi = sx[i], gi = sg[i];
     const float ci2 = xi.w;
     float a0 = 0.f, a1 = 0.f, a2 = 0.f;
+    int nn = 0, j1 = 0;  // pairs next to the kink of |.|: their number and the last
     const uint4* row = reinterpret_cast<const uint4*>(UM + ((size_t)b * N + i) * W);
     for (int q = 0; q < W / 4; ++q) {
         const uint4 uw = row[q];
@@ -332,11 +387,15 @@ __device__ __forceinline__ void bwd_full_impl(const float* __restrict__ X, const
                 const float ew = __expf(-fabsf(df));
                 const float qv = rat_q(ew);
                 const float sgn = df > 0.f ? 1.f : (df < 0.f ? -1.f : 0.f);
+                const bool nr = fabsf(df) < SIGN_EPS;
+                j1 = nr ? k : j1;
+                nn += nr;
                 const float coef = wgt * (-sgn) * (0.25f * ew * rat_n(ew)) * __fdividef(1.f, qv * qv * fmaxf(d, 1e-6f));
                 a0 += coef * e0; a1 += coef * e1; a2 += coef * e2;
             }
         }
     }
+    slddt_fix_row(xb, gb, NUC + (size_t)b * N, UM + ((size_t)b * N + i) * W, 0, W, i, nn, j1, a0, a1, a2);
     const float go = GO[ab];
     float* gx = GX + (size_t)ab * N * 3;
     gx[i * 3] = a0 * go; gx[i * 3 + 1] = a1 * go; gx[i * 3 + 2] = a2 * go;

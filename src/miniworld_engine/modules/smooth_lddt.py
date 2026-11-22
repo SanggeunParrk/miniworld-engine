@@ -43,10 +43,17 @@ class SmoothLddtLoss(BackendModule):
 
     version = 2  # human-managed: bump when a change alters this class's accuracy or speed results
     backend_versions: ClassVar[dict[str, int]] = {
-        "cuda:a100_sm80": 2,
-        "cuda:5090_sm120": 1,
-        "cuda:b200_sm100": 2,
+        "cuda:a100_sm80": 3,
+        "cuda:h100_sm90": 2,
+        "cuda:5090_sm120": 2,
+        "cuda:b200_sm100": 3,
+        "triton:a100_sm80": 2,
+        "triton:h100_sm90": 2,
+        "triton:5090_sm120": 2,
+        "triton:b200_sm100": 2,
     }  # 2026-11-10: A100 split tile launches (KS column parts); 2026-11-12: the sm_120a cubin
+    # 2026-11-22 (every cuda:* +1, every triton:* 1 -> 2): the gradient takes the sign of the EXACT d_pred - d_gt for the pairs next to the kink of |.|
+    # (the fp32 sign is wrong for ~1 pair in 1e6; fp32-train grad:x_pred at N 5120 / 7168 was off by 1.3e-3 against fp64, now ~1e-7)
     # cuda:b200_sm100 1 (2026-11-16): the B200 takes the split tile launches (KS column parts, the A100's fill) at every length
     # cuda:b200_sm100 2 (2026-11-17): slddt_prep4 (four threads a row) for prep grids of at most 4 CTAs per SM (N <= 3072 at B1)
 

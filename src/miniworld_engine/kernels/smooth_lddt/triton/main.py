@@ -43,6 +43,52 @@ def _score(w):
     return 0.25 * w * dq / q
 
 
+#: |d_pred - d_gt| (fp32) below which the sign of the difference is decided again, exactly. The fp32 distances carry up to ~7.5e-6 A of error
+#: (measured, d < 30 A), so near the kink of |.| a pair can take the wrong sign: an error of ~1e-3 of the gradient that no sum order of the
+#: rest removes (fp64 and PyTorch's fp32 take the sign of the exact difference, the latter by luck).
+SIGN_EPS = tl.constexpr(8e-6)
+
+
+@triton.jit
+def _mul_rn(a, b):
+    """a * b rounded to fp32, never fused into a following add (an explicit ``mul.rn``: the error-free transforms below need the rounded product)."""
+    return tl.inline_asm_elementwise("mul.rn.f32 $0, $1, $2;", "=r,r,r", [a, b], dtype=tl.float32, is_pure=True, pack=1)
+
+
+@triton.jit
+def _two_sum(a, b):
+    """Error-free a + b in fp32: (s, e) with s + e == a + b exactly (Knuth)."""
+    s = a + b
+    bb = s - a
+    return s, (a - (s - bb)) + (b - bb)
+
+
+@triton.jit
+def _exact_sign(xi0, xi1, xi2, xj0, xj1, xj2, gi0, gi1, gi2, gj0, gj1, gj2):
+    """sign(|x_i - x_j|^2 - |g_i - g_j|^2) of the exact fp32 inputs, from error-free fp32 arithmetic (differences by two-sum, squares by
+    fma, the sum of the six squares by two-sum): double-single, ~1e-14 relative; as the sign of the fp64 distances' difference it
+    does not depend on the card's fp64 rate."""
+    s = tl.zeros_like(xi0 - xj0)
+    lo = tl.zeros_like(s)
+    for k in tl.static_range(2):
+        for c in tl.static_range(3):
+            if k == 0:
+                a = xi0 if c == 0 else (xi1 if c == 1 else xi2)
+                b = xj0 if c == 0 else (xj1 if c == 1 else xj2)
+                sg = 1.0
+            else:
+                a = gi0 if c == 0 else (gi1 if c == 1 else gi2)
+                b = gj0 if c == 0 else (gj1 if c == 1 else gj2)
+                sg = -1.0
+            eh, el = _two_sum(a, -b)
+            ph = _mul_rn(eh, eh)
+            pl = tl.fma(eh, eh, -ph) + _mul_rn(2.0 * eh, el)
+            s, e = _two_sum(s, sg * ph)
+            lo += e + sg * pl
+    t = s + lo
+    return tl.where(t > 0.0, 1.0, tl.where(t < 0.0, -1.0, 0.0))
+
+
 @triton.jit
 def _dscore(w):
     """-d(score)/dx for w = exp(-x): ``w N(w) / (4 Q(w)^2)``."""
@@ -227,6 +273,12 @@ def smooth_lddt_bwd_kernel(
             ok = mi[:, None] & mj[None, :] & (ri[:, None] != rj[None, :])
             wgt = tl.where(ok & (g2 < ci2[:, None]), 1.0, 0.0) + tl.where(ok & (g2 < cj2[None, :]), 1.0, 0.0)
             sgn = tl.where(df > 0.0, 1.0, tl.where(df < 0.0, -1.0, 0.0))
+            if tl.min(tl.abs(df)) < SIGN_EPS:  # rare (a few tiles in a hundred): the exact sign of the pairs next to the kink
+                ex = _exact_sign(
+                    xi0[:, None], xi1[:, None], xi2[:, None], xj0[None, :], xj1[None, :], xj2[None, :],
+                    gi0[:, None], gi1[:, None], gi2[:, None], gj0[None, :], gj1[None, :], gj2[None, :],
+                )
+                sgn = tl.where(tl.abs(df) < SIGN_EPS, ex, sgn)
             coef = -wgt * sgn * _dscore(tl.exp(-tl.abs(df))) / tl.maximum(d, 1e-6)
             a0 += tl.sum(coef * e0, axis=1)
             a1 += tl.sum(coef * e1, axis=1)
