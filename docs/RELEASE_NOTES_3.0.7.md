@@ -1,6 +1,6 @@
-# miniworld-engine 3.0.7 (DRAFT, local candidate `rc-3.0.7`; wheels built and verified, not released)
+# miniworld-engine 3.0.7
 
-Base: 3.0.6 (tag `v3.0.6`, `main` = `477d48073` + the work merged since). Candidate branch `rc-3.0.7` = `main` at `ba5994b03` + four commits (version bump, one bug fix, one test fix, these notes / README). Not pushed, not tagged, not uploaded.
+Base: 3.0.6 (tag `v3.0.6`, `main` = `477d48073` + the work merged since). Release branch `rc-3.0.7` = `main` at `ba5994b03` + four commits (version bump, one bug fix, one test fix, these notes / README); tag `v3.0.7` sits on the notes commit.
 
 **What this release is.** A feature and repair step on top of 3.0.6: the H100 fp32 Transition now runs on CUDA when TF32 is off (training and inference), the bias-only token DiT gets an opt-in bf16 pair-bias-logits inference mode (fp32 stays the default and the only training mode), the B200 (sm_100a) kernel set is in the tree (source / JIT only), and the paper benchmark harness is extended. No module `version` changed; one `backend_versions` entry for a shipped card changed (H100 Transition).
 
