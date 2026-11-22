@@ -139,7 +139,7 @@ class ParallelResidual(BackendModule):
     backend_versions: ClassVar[dict[str, int]] = {
         "cuda:h100_sm90": 2,  # 2 (2026-11-20): ld.global.nc loads on the H100 (the streaming-hinted ones ran 3-4 % under the Triton kernel); same outputs
         "cuda:a100_sm80": 2,  # 2 (2026-11-19): plain loads / stores on the A100 (the streaming-hinted ones ran 5-8 % under the Triton kernel); same outputs
-        "cuda:5090_sm120": 1,  # 2026-11-12: the sm_120a build (RTX 5090)
+        "cuda:5090_sm120": 2,  # 2 (2026-11-22): the sm_120a build with PR_UNROLL=4 (4 vectors a thread and tensor: L 128 3 branches 0.934 -> 1.012 of Triton, 2 branches 0.986 -> 1.09); same outputs. 1 (2026-11-12): the sm_120a build (RTX 5090)
         "cuda:b200_sm100": 2,  # 2 (2026-11-17): parallel_residual_sm100.cu (the B200 build; see the notes below)
     }
     # cuda:b200_sm100 1 (2026-11-16): the sm_100a build of parallel_residual.cu (B200)
