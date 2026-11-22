@@ -234,7 +234,9 @@ environments:
       - pypi: https://download.pytorch.org/whl/zipp-3.19.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/09/86/63cdd5740f566fd9de2cadc106529adee0566f2fcafe69a65767eedc1681/onnx-1.23.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/12/1c/2f7a13626af1edfefb5ad69234d47e3b212064a42ad2e6db59351b5ae002/nvidia_cutlass_dsl_libs_base-4.8.0-cp312-cp312-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/13/42/8e92e810a6cd7263f7464ef1a55491692ad89b631147cf76624c3589cc8d/miniworld_engine_kernels_sm120_cu129-3.0.9-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/13/a0/fdde64cc231f52a716107bf1a1246db9dde8cb11b28278b8d9c05f7c87bd/nvidia_cutlass_dsl_libs_cu12-4.8.0-cp312-cp312-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/21/55/3965463ffe02c3f6e8fcc4975af4f120f9a85fb770b4bf1bf00b1ee3bb50/miniworld_engine_kernels_sm80_cu129-3.0.9-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/23/cd/066e86230ae37ed0be70aae89aabf03ca8d9f39c8aea0dec8029455b5540/opt_einsum-3.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/28/50/f203ff3a3ddfe19308efc83c5a3a29ed02bf786732ec35e68bf9162f3365/safetensors-0.8.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl
@@ -254,7 +256,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/6d/56/3c862bdd297a272a37e2ba1149da01446fd3f387ee80855699bb939bf5b2/fonttools-4.66.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/6e/53/ebfed7b689c338dd8ebeec9c0730c8d56821292f14e2536e5f3ef1a05744/ninja-1.13.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/78/f9/b6831508960d559581c448532ba4df312217072975486dbf2b24fcc5b76f/contourpy-1.4.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/7e/09/3e2cc7dafcba66b4a131a6ff9c4bce0d31127b3c1ae498596f73e8549e07/miniworld_engine_kernels_sm90_cu129-3.0.8-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/84/21/a35af28dcc61f37ed850a2d64c65c701321dfbf25085e469d5559360cbbf/pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/85/66/d05f0ae372b80fc757e59d5211d93483c6ff721f574cb68cad84ceb87157/nvidia_cutlass_dsl_libs_core-4.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/85/ad/cea0d0211de48fedc365e364a8d0d173f04b1c831adcffb55a990ec45ef0/cuequivariance_ops_torch_cu12-0.12.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
@@ -269,7 +270,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/a7/51/1e539ee71070358642e11e0782ccb861e0d25053787fc481080b98638ec5/miniworld_engine_kernels_sm120_cu129-3.0.8-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/a7/8e/50f46a9c0ce8d2861a394c1347caae037ea0431d2f67d7feb151cbc4649a/filelock-3.32.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a8/af/48ac8483240de756d2438c380746e7130d1c6f75802ef22f3c6d49982787/huggingface_hub-0.36.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b8/90/2b3fd67ee273163faeda6d514be70b5596eaa0fd77b60ffc294ad0b34f5f/matplotlib-3.11.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
@@ -279,11 +279,11 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c0/a4/eb9409ec0736e50aa70a412f16c204ed149516846912f7e6724d4c73ee53/pydantic_core-2.46.5-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/c7/f9/7d76c1eae866f5d4636401b31b6d6dd90e4b4ced1fa7cfdfcca9c60e4bd3/ml_dtypes-0.6.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/d7/ba/18b6e682ead424ad24bcc134339ae5d1b931cd9ae260540592a058a91279/pyright-1.1.414-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/d9/f0/7a9683e74a3b472ec0a2300540529d82fddba844f95f4017ef7110ad76d3/miniworld_engine_kernels_sm80_cu129-3.0.8-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/db/f3/3996583dd2906297a637af12114deddf7658af6e683fedb83be061983fb5/protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/df/64/ff35eb9e54894cf471ff4716abd3c81eb0a0626869217ce3e6ba4ccf17d7/scipy-1.18.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/df/75/6c52c58fc0fdab223feb9162886736390a6f902183d24df1508ac620a69d/nvidia_cutlass_dsl_libs_cu13-4.8.0-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/e4/f4/e96f452f7975dd2fd4d2a4af88c63205431dad7efbe63aff6e3a4b1ada17/nvidia_cutlass_dsl-4.8.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e6/b2/5a63c8f67d07348ca77bd10f1a3399a255bd205a38859e281b6b732499f9/miniworld_engine_kernels_sm90_cu129-3.0.9-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/e7/05/c19819d5e3d95294a6f5947fb9b9629efb316b96de511b418c53d245aae6/cycler-0.12.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e8/db/68786fdc0bfb3a9782df7304c1e577b9c5a7d14c75e98e06571cc1869b3f/apache_tvm_ffi-0.1.14.post1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/eb/47/c95ffc2009878c7aac0c5e08528022dcb885933252a88b5f170058014464/pydantic-2.13.5-py3-none-any.whl
@@ -3029,9 +3029,9 @@ packages:
   - pyyaml
   - cuda-bindings
   - ninja
-  - miniworld-engine-kernels-sm90-cu129==3.0.8 ; python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'
-  - miniworld-engine-kernels-sm80-cu129==3.0.8 ; python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'
-  - miniworld-engine-kernels-sm120-cu129==3.0.8 ; python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'
+  - miniworld-engine-kernels-sm90-cu129==3.0.9 ; python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'
+  - miniworld-engine-kernels-sm80-cu129==3.0.9 ; python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'
+  - miniworld-engine-kernels-sm120-cu129==3.0.9 ; python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'
   - cuequivariance-torch>=0.12,<0.13 ; extra == 'baselines'
   - flash-attn-4 ; extra == 'flash'
   - ruff==0.16.9 ; extra == 'dev'
@@ -3698,6 +3698,13 @@ packages:
   - nvidia-cutlass-dsl-libs-core==4.8.0
   - nvidia-cuda-nvdisasm>=13.4.0rc1,<14 ; extra == 'sass'
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/13/42/8e92e810a6cd7263f7464ef1a55491692ad89b631147cf76624c3589cc8d/miniworld_engine_kernels_sm120_cu129-3.0.9-cp312-cp312-manylinux_2_28_x86_64.whl
+  name: miniworld-engine-kernels-sm120-cu129
+  version: 3.0.9
+  sha256: b91b50d8af9721739abce620c6c1f7ccabab3478a19fce54990b4e31e60754c4
+  requires_dist:
+  - torch==2.13.*
+  requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/13/a0/fdde64cc231f52a716107bf1a1246db9dde8cb11b28278b8d9c05f7c87bd/nvidia_cutlass_dsl_libs_cu12-4.8.0-cp312-cp312-manylinux_2_28_x86_64.whl
   name: nvidia-cutlass-dsl-libs-cu12
   version: 4.8.0
@@ -3710,6 +3717,13 @@ packages:
   - nvidia-cutlass-dsl-libs-base==4.8.0
   - nvidia-cuda-nvdisasm>=13.4.0rc1,<14 ; extra == 'sass'
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/21/55/3965463ffe02c3f6e8fcc4975af4f120f9a85fb770b4bf1bf00b1ee3bb50/miniworld_engine_kernels_sm80_cu129-3.0.9-cp312-cp312-manylinux_2_28_x86_64.whl
+  name: miniworld-engine-kernels-sm80-cu129
+  version: 3.0.9
+  sha256: 6c4dd5ea3536cd21c6d0f17ae20d2c164e16c946cbd07adfb78bc5d23fce8518
+  requires_dist:
+  - torch==2.13.*
+  requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/23/cd/066e86230ae37ed0be70aae89aabf03ca8d9f39c8aea0dec8029455b5540/opt_einsum-3.4.0-py3-none-any.whl
   name: opt-einsum
   version: 3.4.0
@@ -3940,13 +3954,6 @@ packages:
   - pytest-xdist ; extra == 'test-no-images'
   - wurlitzer ; extra == 'test-no-images'
   requires_python: '>=3.12'
-- pypi: https://files.pythonhosted.org/packages/7e/09/3e2cc7dafcba66b4a131a6ff9c4bce0d31127b3c1ae498596f73e8549e07/miniworld_engine_kernels_sm90_cu129-3.0.8-cp312-cp312-manylinux_2_28_x86_64.whl
-  name: miniworld-engine-kernels-sm90-cu129
-  version: 3.0.8
-  sha256: ebaf1427f11db9d46556d5824f67053aef8060a6282504fce383fae0b68b6c84
-  requires_dist:
-  - torch==2.13.*
-  requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/84/21/a35af28dcc61f37ed850a2d64c65c701321dfbf25085e469d5559360cbbf/pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
   name: pillow
   version: 12.3.0
@@ -4158,13 +4165,6 @@ packages:
   - pytest>=7.1.0 ; extra == 'dev'
   - hypothesis>=6.70.0 ; extra == 'dev'
   requires_python: '>=3.9'
-- pypi: https://files.pythonhosted.org/packages/a7/51/1e539ee71070358642e11e0782ccb861e0d25053787fc481080b98638ec5/miniworld_engine_kernels_sm120_cu129-3.0.8-cp312-cp312-manylinux_2_28_x86_64.whl
-  name: miniworld-engine-kernels-sm120-cu129
-  version: 3.0.8
-  sha256: 90c196fd7b310101a203e040f1a6fe3ef5a97d0de896d2e34924847c8aee238e
-  requires_dist:
-  - torch==2.13.*
-  requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/a7/8e/50f46a9c0ce8d2861a394c1347caae037ea0431d2f67d7feb151cbc4649a/filelock-3.32.3-py3-none-any.whl
   name: filelock
   version: 3.32.3
@@ -4383,13 +4383,6 @@ packages:
   - twine>=3.4.1 ; extra == 'all'
   - nodejs-wheel-binaries ; extra == 'all'
   requires_python: '>=3.7'
-- pypi: https://files.pythonhosted.org/packages/d9/f0/7a9683e74a3b472ec0a2300540529d82fddba844f95f4017ef7110ad76d3/miniworld_engine_kernels_sm80_cu129-3.0.8-cp312-cp312-manylinux_2_28_x86_64.whl
-  name: miniworld-engine-kernels-sm80-cu129
-  version: 3.0.8
-  sha256: 998c3006951eacccd1667525880d92be926b32cdffe03d5ef1589e4db9946aa5
-  requires_dist:
-  - torch==2.13.*
-  requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/db/f3/3996583dd2906297a637af12114deddf7658af6e683fedb83be061983fb5/protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl
   name: protobuf
   version: 7.36.2
@@ -4464,6 +4457,13 @@ packages:
   - nvidia-cutlass-dsl-libs-qnx-cu12==4.8.0 ; extra == 'qnx'
   - nvidia-cutlass-dsl-libs-qnx-cu13==4.8.0 ; extra == 'qnx-cu13'
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/e6/b2/5a63c8f67d07348ca77bd10f1a3399a255bd205a38859e281b6b732499f9/miniworld_engine_kernels_sm90_cu129-3.0.9-cp312-cp312-manylinux_2_28_x86_64.whl
+  name: miniworld-engine-kernels-sm90-cu129
+  version: 3.0.9
+  sha256: 4adb6fd3b36fb5a903e2ccd8382a1364a2f3032172ecc8cf65d089fb46c9e8ed
+  requires_dist:
+  - torch==2.13.*
+  requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/e7/05/c19819d5e3d95294a6f5947fb9b9629efb316b96de511b418c53d245aae6/cycler-0.12.1-py3-none-any.whl
   name: cycler
   version: 0.12.1
