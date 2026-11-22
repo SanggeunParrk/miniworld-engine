@@ -809,6 +809,8 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
     backend_versions: ClassVar[dict[str, int]] = {
         **TokenDiTProtenix.backend_versions,
         "cuda:h100_sm90": 7,
+        "cuda:a100_sm80": 5,  # unchanged by 2026-11-22 (this block refuses extra_pair_bias on the sm_80 cards, as before)
+        "cuda:5090_sm120": 2,
     }  # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
 
     backends = (
@@ -911,6 +913,8 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
     backend_versions: ClassVar[dict[str, int]] = {
         **TokenDiTProtenix.backend_versions,
         "cuda:h100_sm90": 7,
+        "cuda:a100_sm80": 5,  # unchanged by 2026-11-22 (this block refuses extra_pair_bias on the sm_80 cards, as before)
+        "cuda:5090_sm120": 2,
     }  # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
 
     backends = (
