@@ -304,6 +304,12 @@ def inference(
                 a, b, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first, dmin=dmin, doff=doff
             )
             return out.unsqueeze(0)
+        if sm.L2_ROWS and not _card.sm120() and mk is not None and wo.shape[0] == 128 and m.shape[1] >= 512:
+            norm, nconst = _norm(mk, m.shape[0], clamp=dmin > 0)
+            out = sm.epilogue_l2(
+                a, b, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first, sm.L2_ROWS, dmin=dmin, doff=doff
+            )
+            return out.unsqueeze(0)
         o = _outer(sm, a, b, mk)
         del a, b
         if mk is not None and _mask_epilogue_enabled(m, wo):
