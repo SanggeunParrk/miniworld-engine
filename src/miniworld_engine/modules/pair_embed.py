@@ -442,7 +442,9 @@ class PairEmbedGeom(BackendModule):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build; cuda:5090_sm120 2 (2026-11-13): the RTX 5090's own
     # table gradient (pg120_bwd), the fused LayerNorm + table gradient, the one-launch inference forward (pg120_fwd_blk)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 2, "cuda:b200_sm100": 20}
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 3, "cuda:5090_sm120": 2, "cuda:b200_sm100": 20}
+    # cuda:a100_sm80 3 (2026-11-23, thin-margins): inference by the one-launch encoder forward of the sm_80 build (as the decoder pair: no per-call preparation
+    # kernels): S1 L128 / 256 with the LayerNorm 45.1 / 86.0 us -> 32.8 / 70.9 (Triton 46.1 / 88.1); the same outputs (accuracy GREEN at L128 / 256); training unchanged
     # cuda:b200_sm100 20 (2026-11-17, round 3 restart): above 128^2 pairs the encoder forward reads the bf16 table from shared memory
     # (pe_geom_sm100.cuh fwd_smt: one CTA of 16 warps per SM, the table by four bulk copies while the first chunk is binned, 32-pair chunks,
     # 16 lanes a pair; the same adds in the same order: bitwise the L1 forward); S1 L256 eval 38.8 -> 30.6 us, L384 with LayerNorm 73.6 -> 61.3
