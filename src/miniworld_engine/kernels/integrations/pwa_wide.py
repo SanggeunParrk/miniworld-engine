@@ -132,6 +132,21 @@ def _value(d_msa: int, d_hidden: int):
 BIG_INFER_Y = True
 
 
+_ZERO32: dict = {}
+
+
+def _zeros32(like: torch.Tensor) -> torch.Tensor:
+    """fp32 zeros shaped like ``like`` (the pair LayerNorm's absent beta): made once per (device, shape), not by a fill kernel a call (a graph
+    replay pays ~1.5 us per node). Never evicted (a captured graph reads it); a first call inside a capture makes a fresh one."""
+    key = (like.device, tuple(like.shape))
+    t = _ZERO32.get(key)
+    if t is None:
+        t = torch.zeros(like.shape, dtype=torch.float32, device=like.device)
+        if not torch.cuda.is_current_stream_capturing() and len(_ZERO32) < 64:
+            _ZERO32[key] = t
+    return t
+
+
 def _forward_math(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float, save: bool):
     msa, pair, pm, lnm_w, lnm_b, wv, wg, lnz_w, wb, wo = args
     bf = torch.bfloat16
@@ -144,7 +159,7 @@ def _forward_math(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: 
         z,
         pm,
         lnz_w.detach().float().contiguous(),
-        torch.zeros_like(lnz_w, dtype=torch.float32),
+        _zeros32(lnz_w),
         eps_z,
         wb.detach(),
     )
@@ -157,15 +172,24 @@ def _forward_math(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: 
         if _f8.serves_wide(d_msa, hc // H, m.shape[0], m.shape[1]):
             wv16, wg16, wo16 = (t.detach().to(bf).contiguous() for t in (wv, wg, wo))
             return _f8.forward_wide(m, wv, lnw, lnb, wv16, wg16, wo16, eps_m, w16, kv)
+    if save:
+        wv16 = wv.detach().to(bf).contiguous()
+    else:  # inference: the bf16 weight forms are made while the weights are unchanged (a capture reads the entry its eager warm-up made: no cast kernels in the graph)
+        from miniworld_engine.kernels import _capture
+
+        wv16, wg16, wo16 = _capture.param_forms(
+            "pwa_wide_w16", [wv, wg, wo], lambda: tuple(t.detach().to(bf).contiguous() for t in (wv, wg, wo)), capture_reads_eager=True
+        )
     v, y, stats = kv.ln_vg_w(
-        m, lnw, lnb, wv.detach().to(bf).contiguous(), eps_m, save or (big and BIG_INFER_Y)
+        m, lnw, lnb, wv16, eps_m, save or (big and BIG_INFER_Y)
     )  # inference keeps no y: gate_out_w normalises m again (the BIG build: BIG_INFER_Y)
     o = torch.bmm(w16, v)  # [H, N, N] x [H, N, S*C]: the contraction on cuBLAS
     dmask, dscale = None, 1.0
     if p_drop > 0:  # the module's drop_msa: one keep-mask per (token, channel) shared over the MSA rows
         dmask = (torch.rand(m.shape[1], d_msa, device=m.device, dtype=bf) > p_drop).to(bf)
         dscale = 1.0 / (1.0 - p_drop)
-    wg16, wo16 = wg.detach().to(bf).contiguous(), wo.detach().to(bf).contiguous()
+    if save:
+        wg16, wo16 = wg.detach().to(bf).contiguous(), wo.detach().to(bf).contiguous()
     if is_big(d_msa, hc // H):  # gate_out_w split at the gated product; training keeps the sigmoid gate g for the backward
         if not save:
             a, _ = kv.gate_w(o, y, wg16, False) if BIG_INFER_Y else kv.gate_w(o, m, wg16, False, lnw, lnb, eps_m)
@@ -339,7 +363,9 @@ def _prepare(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor |
         if pn:
             km[n:] = 0
     else:
-        km = F.pad(mask[0].to(torch.bfloat16), (0, pn))
+        km = mask[0].to(torch.bfloat16)
+        if pn:
+            km = F.pad(km, (0, pn))
     return msa.contiguous(), pair.contiguous(), km.contiguous(), n
 
 

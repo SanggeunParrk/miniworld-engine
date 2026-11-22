@@ -662,7 +662,57 @@ std::vector<at::Tensor> chai_projbwd(at::Tensor x, c10::optional<at::Tensor> mas
   return {dcat, ln16, dx, part};
 }
 
+// The weight forms of a training / inference step in ONE launch (they were eight small PyTorch kernels, ~14 us of a ~370 us step at L 128):
+//   w [128, 64] bf16 = [W_left; W_right],  W' [CZ, 512] bf16 = W_out . gamma (columns),  b' [CZ] fp32 = b_out + W_out . beta.
+// One block a row of W_out (blocks < CZ), the last 32 blocks cast the projections. All inputs fp32.
+namespace {
+__global__ void __launch_bounds__(128) chai_prep_kernel(const float* __restrict__ wl, const float* __restrict__ wr, const float* __restrict__ gam,
+                                                        const float* __restrict__ bet, const float* __restrict__ wo, const float* __restrict__ bo,
+                                                        bf16* __restrict__ w, bf16* __restrict__ wf, float* __restrict__ bf, int cz) {
+  const int b = blockIdx.x, t = threadIdx.x;
+  if (b >= cz) {
+    const int idx = (b - cz) * 256 + t * 2;       // 128 x 64 = 8192 elements, 32 blocks of 256
+    const float* src = idx < 4096 ? wl + idx : wr + (idx - 4096);
+    *reinterpret_cast<__nv_bfloat162*>(w + idx) = __floats2bfloat162_rn(src[0], src[1]);
+    return;
+  }
+  __shared__ float red[4];
+  float acc = 0.f;
+#pragma unroll
+  for (int k = 0; k < P / 128; k++) {
+    const int p = k * 128 + t;
+    const float v = wo[(long)b * P + p];
+    wf[(long)b * P + p] = __float2bfloat16_rn(v * gam[p]);
+    acc = fmaf(v, bet[p], acc);
+  }
+#pragma unroll
+  for (int o = 16; o; o >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, o);
+  if ((t & 31) == 0) red[t >> 5] = acc;
+  __syncthreads();
+  if (t == 0) bf[b] = bo[b] + ((red[0] + red[1]) + (red[2] + red[3]));
+}
+}  // namespace
+
+std::vector<at::Tensor> chai_prep(at::Tensor wl, at::Tensor wr, at::Tensor gam, at::Tensor bet, at::Tensor wo, at::Tensor bo) {
+  const long cz = wo.size(0);
+  TORCH_CHECK(wl.is_cuda() && wl.scalar_type() == at::kFloat && wr.scalar_type() == at::kFloat && gam.scalar_type() == at::kFloat
+              && bet.scalar_type() == at::kFloat && wo.scalar_type() == at::kFloat && bo.scalar_type() == at::kFloat && wl.is_contiguous()
+              && wr.is_contiguous() && gam.is_contiguous() && bet.is_contiguous() && wo.is_contiguous() && bo.is_contiguous()
+              && wl.numel() == 4096 && wr.numel() == 4096 && gam.numel() == P && bet.numel() == P && wo.size(1) == P && bo.numel() == cz,
+              "chai_prep: fp32 contiguous wl / wr [64, 64], gamma / beta [512], wo [CZ, 512], bo [CZ]");
+  const at::cuda::OptionalCUDAGuard guard(wl.device());
+  auto w = at::empty({128, 64}, wl.options().dtype(at::kBFloat16));
+  auto wf = at::empty({cz, P}, wl.options().dtype(at::kBFloat16));
+  auto bf = at::empty({cz}, wl.options());
+  chai_prep_kernel<<<(unsigned)(cz + 32), 128, 0, at::cuda::getCurrentCUDAStream()>>>(
+      wl.data_ptr<float>(), wr.data_ptr<float>(), gam.data_ptr<float>(), bet.data_ptr<float>(), wo.data_ptr<float>(), bo.data_ptr<float>(),
+      reinterpret_cast<bf16*>(w.data_ptr()), reinterpret_cast<bf16*>(wf.data_ptr()), bf.data_ptr<float>(), (int)cz);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {w, wf, bf};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("chai_prep", &chai_prep);
   m.def("chai_epilogue", &chai_epilogue);
   m.def("chai_proj", &chai_proj);
   m.def("chai_bwd", &chai_bwd);

@@ -1857,6 +1857,7 @@ constexpr int PB_PW = 2 * CH * CM_MSA + 2 * CH;
 constexpr int PB_RED = CM_MSA + 12;      // padded stride of the cross-warpgroup reduction buffer: 72 columns, 8 rows per bank cycle
 
 // d_msa 256: one block per SM (the dW accumulator is 132 registers, the shared tiles 145 KiB)
+template <int PB_SBT>
 __global__ __launch_bounds__(PB_THREADS, (CM_MSA == 64 ? 3 : CM_MSA == 128 ? 2 : 1)) void opm_prologue_bwd_kernel(   // asking for four
                                           // instead spills 48 more bytes per thread and loses:
                                           // 0.143 -> 0.165 ms   // three blocks per SM (asking
@@ -1943,7 +1944,7 @@ __global__ __launch_bounds__(PB_THREADS, (CM_MSA == 64 ? 3 : CM_MSA == 128 ? 2 :
   static_assert(((PB_THREADS / 4) & 7) == 0, "the second slot must share the first one's swizzle");
   static_assert(PB_BI == 4, "one 8-byte mask copy per s row");
   auto stage = [&](int sb, int buf) {
-    const int t0 = (blockIdx.y * PB_SB + sb) * PB_BS;
+    const int t0 = (blockIdx.y * PB_SBT + sb) * PB_BS;
     if (tid < PB_BS) __pipeline_memcpy_async(&smk[buf][tid * PB_BI], MASK + (long)(t0 + tid) * N + i0, 8);
     __nv_bfloat16* dst = sdab + buf * (PB_ROWS * PB_DAB);
     const long g0 = (long)t0 * N * CH + st_g, g1 = g0 + ST_G1 * N * CH;
@@ -1955,8 +1956,8 @@ __global__ __launch_bounds__(PB_THREADS, (CM_MSA == 64 ? 3 : CM_MSA == 128 ? 2 :
   };
   stage(0, 0);
 
-  for (int sbk = 0; sbk < PB_SB; ++sbk) {
-  const int s0 = (blockIdx.y * PB_SB + sbk) * PB_BS;
+  for (int sbk = 0; sbk < PB_SBT; ++sbk) {
+  const int s0 = (blockIdx.y * PB_SBT + sbk) * PB_BS;
   const int buf = sbk & 1;
   __nv_bfloat16* sdb_ = sdab + buf * (PB_ROWS * PB_DAB);
   const __nv_bfloat16* mk_ = smk[buf];
@@ -1964,7 +1965,7 @@ __global__ __launch_bounds__(PB_THREADS, (CM_MSA == 64 ? 3 : CM_MSA == 128 ? 2 :
   // also separates the previous pass's dW GEMM from the prefetch below, which refills the buffer it
   // was reading two iterations ago
   __syncthreads();
-  if (sbk + 1 < PB_SB) stage(sbk + 1, buf ^ 1);
+  if (sbk + 1 < PB_SBT) stage(sbk + 1, buf ^ 1);
 
   // dy = [da db] . [Wa; Wb] as ONE m128 x n64 x k64 GEMM -- the stacked tile makes the two
   // projections a single contraction.  It runs in two halves of n so the accumulator stays at
@@ -2394,18 +2395,21 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
   TORCH_CHECK(stats.is_contiguous() && stats.scalar_type() == torch::kFloat32 && stats.numel() == S * N * 2,
               "stats: contiguous fp32 [S, N, 2] (mean, rstd) from the forward prologue");
   TORCH_CHECK(mask.is_contiguous() && mask.scalar_type() == torch::kBFloat16, "mask: contiguous bf16 [S, N]");
-  TORCH_CHECK(N % PB_BI == 0 && S % (PB_BS * PB_SB) == 0,
-              "the kernel tiles ", PB_BI, " tokens x ", PB_BS * PB_SB, " rows");
+  // 8 s blocks of 32 rows a CTA (S % 256 == 0), or 4 (S % 128 == 0: the depth 384 of Boltz-2 / MiniWorld runs unpadded)
+  const bool sb8 = S % (PB_BS * PB_SB) == 0;
+  TORCH_CHECK(N % PB_BI == 0 && (sb8 || S % (PB_BS * PB_SB / 2) == 0),
+              "the kernel tiles ", PB_BI, " tokens x ", PB_BS * PB_SB / 2, " rows");
   auto opts = m.options();
   auto dm = torch::empty({1, S, N, (long)CM_MSA}, opts);
-  dim3 grid(N / PB_BI, S / (PB_BS * PB_SB));
+  dim3 grid(N / PB_BI, S / (PB_BS * (sb8 ? PB_SB : PB_SB / 2)));
   TORCH_CHECK(bwp.numel() == CM_MSA * 2 * CH, "bwp: [CM, 2*CH] = (gamma*Wa)^T | (gamma*Wb)^T");
   // one extra KiB so the wgmma operand tiles can start on a 1 KiB boundary
   const int pb_smem = 1024 + (2 * PB_ROWS * PB_DAB + CM_MSA * PB_DAB + (CM_MSA / 64 + 1) * PB_ROWS * 64) * 2;   // sdab x2, sw, sdy (= sy), mask block
   static bool pb_attr = false;
   if (!pb_attr) {
     // d_msa 256 needs 146 KiB (four xh blocks); the narrower builds keep their 128 KiB carve-out
-    cudaFuncSetAttribute(opm_prologue_bwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, pb_smem > 128 * 1024 ? pb_smem : 128 * 1024);
+    cudaFuncSetAttribute(opm_prologue_bwd_kernel<PB_SB>, cudaFuncAttributeMaxDynamicSharedMemorySize, pb_smem > 128 * 1024 ? pb_smem : 128 * 1024);
+    cudaFuncSetAttribute(opm_prologue_bwd_kernel<PB_SB / 2>, cudaFuncAttributeMaxDynamicSharedMemorySize, pb_smem > 128 * 1024 ? pb_smem : 128 * 1024);
     pb_attr = true;
   }
   auto fopts = opts.dtype(torch::kFloat32);
@@ -2413,7 +2417,8 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
   auto part = torch::empty({blocks, (long)PB_PW}, fopts);
   float* pbase = part.data_ptr<float>();
   constexpr long W = CH * CM_MSA;
-  opm_prologue_bwd_kernel<<<grid, PB_THREADS, pb_smem, at::cuda::getCurrentCUDAStream()>>>(
+  auto pb_launch = [&](auto kernel) {
+    kernel<<<grid, PB_THREADS, pb_smem, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(dA.data_ptr<at::BFloat16>()),
       reinterpret_cast<const __nv_bfloat16*>(dB.data_ptr<at::BFloat16>()),
       reinterpret_cast<const __nv_bfloat16*>(m.data_ptr<at::BFloat16>()),
@@ -2423,6 +2428,8 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
       reinterpret_cast<const __nv_bfloat16*>(bwp.data_ptr<at::BFloat16>()),
       reinterpret_cast<__nv_bfloat16*>(dm.data_ptr<at::BFloat16>()),
       pbase, pbase + W, (int)N, (int)S);
+  };
+  if (sb8) pb_launch(opm_prologue_bwd_kernel<PB_SB>); else pb_launch(opm_prologue_bwd_kernel<PB_SB / 2>);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   auto red = reduce_partials(part);
   if (native_finish) {
@@ -2875,7 +2882,7 @@ std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor
  std::vector<torch::Tensor> p,double eps,bool save_stats,bool with_norm,double dmin=1.0,double doff=0.0){
  TORCH_CHECK(m.is_cuda()&&m.is_contiguous()&&m.scalar_type()==torch::kBFloat16&&m.dim()==3&&m.size(2)==64,"TMA prologue BF16 [S,N,64]");
  int S=m.size(0),N=m.size(1);
- TORCH_CHECK(S%256==0&&N%64==0&&mask.is_contiguous()&&mask.scalar_type()==torch::kBool&&mask.device()==m.device()&&mask.numel()==S*N&&p.size()==8,"TMA prologue shape/mask");
+ TORCH_CHECK(S%128==0&&N%64==0&&mask.is_contiguous()&&mask.scalar_type()==torch::kBool&&mask.device()==m.device()&&mask.numel()==S*N&&p.size()==8,"TMA prologue shape/mask");
  auto fo=m.options().dtype(torch::kFloat32);
  auto a=torch::empty({N*32,S},m.options()),b=torch::empty_like(a),mk=torch::empty({S,N},m.options());
  auto norm=torch::empty({N,N},fo),stats=torch::empty(save_stats?std::vector<int64_t>{S,N,2}:std::vector<int64_t>{0},fo);

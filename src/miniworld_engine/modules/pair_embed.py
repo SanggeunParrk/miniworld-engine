@@ -61,6 +61,10 @@ def _first(*reasons: str | None) -> str | None:
     return next((r for r in reasons if r is not None), None)
 
 
+def _h100(device: torch.device) -> bool:
+    return device.type == "cuda" and torch.cuda.get_device_capability(device) == (9, 0)
+
+
 def _b200(device: torch.device) -> bool:
     return device.type == "cuda" and torch.cuda.get_device_capability(device) == (10, 0)
 
@@ -568,7 +572,8 @@ class PairEmbedCA(BackendModule):
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
     # 2026-11-10: the sm_80 build of the H100 kernels; 2026-11-12: its sm_120a build; cuda:5090_sm120 2 (2026-11-13): the RTX 5090's own
     # table gradient (pg120_bwd), the fused LayerNorm + table gradient, the one-launch inference forward (pg120_fwd_ca_blk)
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:5090_sm120": 2, "cuda:b200_sm100": 20}
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 2, "cuda:h100_sm90": 2, "cuda:5090_sm120": 2, "cuda:b200_sm100": 20}
+    # cuda:h100_sm90 2 (2026-11-22): the bin limits made once per device, not by a linspace kernel a call (bit-identical outputs; L 256 ln_eps inference 0.963 -> 1.012 of the Triton backend)
     # cuda:b200_sm100 20 (2026-11-17, round 3 restart): the LayerNorm backward at <= 128^2 pairs with 8 lanes a pair (was 16; its sums in
     # another fixed order): S1 L128 training with the LayerNorm 32.6 -> 30.6 us
     # cuda:b200_sm100 1 (2026-11-16): the sm_100a build of the A100 source (kernels/pair_embed_geom/cuda/sm100)
@@ -639,8 +644,9 @@ class PairEmbedCA(BackendModule):
     def _supports_triton(self, ca, mask, residue_idx=None) -> str | None:
         return self._supports_kernels(ca, mask, residue_idx)
 
-    def _prepared(self, ca, mask, residue_idx, lean: bool = False) -> tuple:
-        """The kernels' inputs: the bf16 table W^T, fp32 CA coordinates, uint8 mask, int32 indices, the bin limits, the LayerNorm eps (-1: none), train."""
+    def _prepared(self, ca, mask, residue_idx, lean: bool = False, consts: bool = False) -> tuple:
+        """The kernels' inputs: the bf16 table W^T, fp32 CA coordinates, uint8 mask, int32 indices, the bin limits, the LayerNorm eps (-1: none), train.
+        ``consts`` (H100 cuda route): the bin limits are made once per device, not by a kernel per call (a graph replay pays ~1.5 us per node)."""
         dev = ca.device
         b, n = mask.shape
         train = torch.is_grad_enabled() and self.weight.requires_grad
@@ -655,7 +661,7 @@ class PairEmbedCA(BackendModule):
             ca.float().contiguous(),
             m8,
             idx,
-            _linspace(dev, 0.1, 3.0, 29, lean),
+            _linspace(dev, 0.1, 3.0, 29, lean or consts),
             -1.0 if self.ln_eps is None else float(self.ln_eps),
             train,
         )
@@ -675,7 +681,7 @@ class PairEmbedCA(BackendModule):
             return pair_embed_ca_eval_sm120(self.weight, ca, mask, residue_idx, eps)
         from miniworld_engine.kernels.pair_embed_geom.cuda.function import pair_embed_ca_cuda
 
-        return pair_embed_ca_cuda(*self._prepared(ca, mask, residue_idx, lean=_b200(ca.device)))
+        return pair_embed_ca_cuda(*self._prepared(ca, mask, residue_idx, lean=_b200(ca.device), consts=_h100(ca.device)))
 
     def _forward_triton(self, ca, mask, residue_idx=None):
         from miniworld_engine.kernels.pair_embed_geom.triton.function import pair_embed_ca_triton

@@ -64,7 +64,7 @@ def _h100_path(s: int, n: int, *, training: bool, wide: bool = False) -> str:
     # depth 512 (Boltz-2 / MiniWorld's depth 384, padded to 512): the TMA prologue beats the native one (inference 0.067 / 0.111 ms,
     # training 0.254 / 0.298 ms at L 128; H100 2026-11-10)
     if training:
-        return "tma" if s in (512, 1024, 2048, 4096) else "native"
+        return "tma" if s in (384, 512, 1024, 2048, 4096) else "native"
     if s == 512:
         return "tma"
     if (s, n) in (
@@ -1052,7 +1052,22 @@ def outer_product_mean(
     n0 = msa.shape[2]
     msa_in = msa
     dmin, doff = divisor_params(module, msa.shape[1])  # before the depth is padded
-    pn, ps = -n0 % 64, -msa.shape[1] % 256
+    # Training at MiniWorld's widths (AF3 normalisation order, no projection bias, the BF16 products): the TMA prologue and the prologue
+    # backward take a depth that is a multiple of 128 (depth 384 of Boltz-2 / MiniWorld: no 33 % padded rows in the products), else 256.
+    from miniworld_engine.kernels.integrations import opm_fp8_train as _fp8
+
+    fp8_train = _fp8.MODE is not None
+    s_mult = (
+        128
+        if torch.is_grad_enabled()
+        and not after
+        and (msa.shape[3], cz) == (CM, CZ)
+        and not (with_bias and module.to_left.bias is not None)
+        and not fp8_train
+        and torch.cuda.get_device_capability(msa.device) == (9, 0)
+        else 256
+    )
+    pn, ps = -n0 % 64, -msa.shape[1] % s_mult
     if pn or ps:
         msa = torch.nn.functional.pad(msa, (0, 0, 0, pn, 0, ps))
         mask = torch.nn.functional.pad(mask, (0, pn, 0, ps))
