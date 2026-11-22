@@ -348,12 +348,194 @@ __global__ void __launch_bounds__(256) ln_rw_bwd_col_reduce(const float* __restr
   }
 }
 
+// Staged fp32 backward (rows that are not a 16-byte multiple, many rows): the warp-per-row backward above has one row's x and dy in flight per
+// warp (184 registers a thread, one CTA of 8 warps an SM: 26 % of the DRAM peak at 651). Here U consecutive rows (a whole number of 16-byte
+// chunks) of x and dy, and their mean / rstd, travel to shared memory in tiles of R rows through a ST-stage cp.async ring a persistent CTA
+// keeps full (16-byte copies, no register cost), and the CTA's NW warps take the rows of the tile in turn (warp w: rows w, w + NW, ...: a fixed
+// assignment, a fixed order: a replay is bit-identical). dx is stored from registers (a warp's row is one coalesced run); dw / db are per-lane
+// column sums in registers, one partial row per CTA exactly as in ln_rw_bwd_kernel (the same tail through shared memory). The M mod U rows
+// past the last whole tile are done by CTA 0's warps straight from global memory.
+__device__ __forceinline__ void cp_async16(unsigned dst, const void* src) {
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(dst), "l"(src) : "memory");
+}
+__device__ __forceinline__ void cp_async4(unsigned dst, const void* src) {
+  asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(dst), "l"(src) : "memory");
+}
+template <int ST_WAIT>
+__device__ __forceinline__ void cp_async_wait() {
+  asm volatile("cp.async.wait_group %0;\n" ::"n"(ST_WAIT) : "memory");
+}
+
+template <int EPL, int NW, int ST>
+__global__ void __launch_bounds__(NW * 32) ln_stage_bwd_kernel(const float* __restrict__ dy, const float* __restrict__ x, const float* __restrict__ w,
+                                                              const float* __restrict__ mean, const float* __restrict__ rstd,
+                                                              float* __restrict__ dx, float* __restrict__ dw_part, float* __restrict__ db_part,
+                                                              int64_t M, int64_t Mfull, int N, int R) {
+  constexpr int NT = NW * 32;
+  extern __shared__ __align__(16) unsigned char sm_raw[];
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int64_t rowb = int64_t(N) * 4;
+  const int tile_f = R * N;                                   // floats of one tensor's tile
+  const int stage_f = 2 * tile_f + 2 * ((R + 3) & ~3);        // x, dy, mean, rstd (floats)
+  float* sbase = reinterpret_cast<float*>(sm_raw);
+  const unsigned s0 = static_cast<unsigned>(__cvta_generic_to_shared(sm_raw));
+  const bool wgrad = dw_part != nullptr;
+  const float inv_n = 1.f / float(N);
+  const int64_t ntiles = (Mfull + R - 1) / R;
+
+  auto issue = [&](int64_t t, int st) {
+    const int64_t row0 = t * R;
+    const int nr = int(Mfull - row0 < R ? Mfull - row0 : R);
+    const int nchunks = int(nr * rowb / 16);
+    const unsigned dst_x = s0 + 4u * unsigned(st * stage_f);
+    const unsigned dst_d = dst_x + 4u * unsigned(tile_f);
+    const unsigned dst_m = dst_d + 4u * unsigned(tile_f);
+    const unsigned dst_r = dst_m + 4u * unsigned((R + 3) & ~3);
+    const unsigned char* gx = reinterpret_cast<const unsigned char*>(x) + row0 * rowb;
+    const unsigned char* gd = reinterpret_cast<const unsigned char*>(dy) + row0 * rowb;
+    for (int c = tid; c < nchunks; c += NT) {
+      cp_async16(dst_x + 16u * c, gx + 16 * int64_t(c));
+      cp_async16(dst_d + 16u * c, gd + 16 * int64_t(c));
+    }
+    for (int r = tid; r < nr; r += NT) {
+      cp_async4(dst_m + 4u * r, mean + row0 + r);
+      cp_async4(dst_r + 4u * r, rstd + row0 + r);
+    }
+  };
+
+  float wr[EPL], aw[EPL], ab[EPL];
+#pragma unroll
+  for (int k = 0; k < EPL; ++k) {
+    const int col = k * 32 + lane;
+    wr[k] = (w != nullptr && col < N) ? __ldg(w + col) : 1.f;
+    aw[k] = ab[k] = 0.f;
+  }
+
+#pragma unroll
+  for (int s = 0; s < ST - 1; ++s) {
+    const int64_t t = int64_t(blockIdx.x) + int64_t(s) * gridDim.x;
+    if (t < ntiles) issue(t, s);
+    asm volatile("cp.async.commit_group;\n" ::: "memory");
+  }
+  int st = 0;
+  for (int64_t t = blockIdx.x, i = 0; t < ntiles; t += gridDim.x, ++i) {
+    cp_async_wait<ST - 2>();
+    __syncthreads();
+    {
+      const int64_t tn = t + int64_t(ST - 1) * gridDim.x;
+      int sn = st + ST - 1;
+      if (sn >= ST) sn -= ST;
+      if (tn < ntiles) issue(tn, sn);
+      asm volatile("cp.async.commit_group;\n" ::: "memory");
+    }
+    const int64_t row0 = t * R;
+    const int nr = int(Mfull - row0 < R ? Mfull - row0 : R);
+    const float* sx = sbase + st * stage_f;
+    const float* sd = sx + tile_f;
+    const float* sm_ = sd + tile_f;
+    const float* sr = sm_ + ((R + 3) & ~3);
+    for (int r = warp; r < nr; r += NW) {
+      const float mu = sm_[r], rs = sr[r];
+      const float* xr = sx + r * N;
+      const float* dr = sd + r * N;
+      float s1 = 0.f, s2 = 0.f;
+#pragma unroll
+      for (int k = 0; k < EPL; ++k) {
+        const int col = k * 32 + lane;
+        if (col < N) {
+          const float dv = dr[col];
+          const float xh = (xr[col] - mu) * rs;
+          const float g = dv * wr[k];
+          s1 += g;
+          s2 = fmaf(g, xh, s2);
+          aw[k] = fmaf(dv, xh, aw[k]);
+          ab[k] += dv;
+        }
+      }
+#pragma unroll
+      for (int o = 16; o > 0; o >>= 1) {
+        s1 += __shfl_xor_sync(0xffffffffu, s1, o);
+        s2 += __shfl_xor_sync(0xffffffffu, s2, o);
+      }
+      s1 *= inv_n;
+      s2 *= inv_n;
+      float* dxr = dx + (row0 + r) * int64_t(N);
+#pragma unroll
+      for (int k = 0; k < EPL; ++k) {
+        const int col = k * 32 + lane;
+        if (col < N) dxr[col] = rs * (dr[col] * wr[k] - s1 - (xr[col] - mu) * rs * s2);
+      }
+    }
+    if (++st == ST) st = 0;
+  }
+  asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+  // the rows past the last whole tile (fewer than U): CTA 0, a row per warp, from global memory
+  if (blockIdx.x == 0) {
+    for (int64_t row = Mfull + warp; row < M; row += NW) {
+      const float* xr = x + row * int64_t(N);
+      const float* dr = dy + row * int64_t(N);
+      const float mu = mean[row], rs = rstd[row];
+      float s1 = 0.f, s2 = 0.f;
+#pragma unroll
+      for (int k = 0; k < EPL; ++k) {
+        const int col = k * 32 + lane;
+        if (col < N) {
+          const float dv = dr[col];
+          const float xh = (xr[col] - mu) * rs;
+          const float g = dv * wr[k];
+          s1 += g;
+          s2 = fmaf(g, xh, s2);
+          aw[k] = fmaf(dv, xh, aw[k]);
+          ab[k] += dv;
+        }
+      }
+#pragma unroll
+      for (int o = 16; o > 0; o >>= 1) {
+        s1 += __shfl_xor_sync(0xffffffffu, s1, o);
+        s2 += __shfl_xor_sync(0xffffffffu, s2, o);
+      }
+      s1 *= inv_n;
+      s2 *= inv_n;
+      float* dxr = dx + row * int64_t(N);
+#pragma unroll
+      for (int k = 0; k < EPL; ++k) {
+        const int col = k * 32 + lane;
+        if (col < N) dxr[col] = rs * (dr[col] * wr[k] - s1 - (xr[col] - mu) * rs * s2);
+      }
+    }
+  }
+  if (!wgrad) return;
+  __syncthreads();  // the ring is idle: its shared memory holds the warps' column partials
+  float* rw = sbase;
+#pragma unroll
+  for (int pass = 0; pass < 2; ++pass) {
+    float* out = (pass == 0 ? dw_part : db_part) + int64_t(blockIdx.x) * N;
+#pragma unroll
+    for (int k = 0; k < EPL; ++k) rw[warp * (EPL * 32) + k * 32 + lane] = pass == 0 ? aw[k] : ab[k];
+    __syncthreads();
+    for (int col = tid; col < N; col += NT) {
+      float t = 0.f;
+#pragma unroll
+      for (int wi = 0; wi < NW; ++wi) t += rw[wi * (EPL * 32) + col];
+      out[col] = t;
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace mwln
 
 // the values per lane the kernels are built for: exact fits of the requirement widths (9: 267, 15: 451, 21: 651, 27: 831 / 833; an idle
 // slot is wasted arithmetic: the 2-byte kernels are issue bound) and multiples of 4 for any other width up to 1024
 #define MWLN_RW_EPLS(M_, ...) M_(4, __VA_ARGS__) M_(8, __VA_ARGS__) M_(9, __VA_ARGS__) M_(12, __VA_ARGS__) M_(15, __VA_ARGS__) \
   M_(16, __VA_ARGS__) M_(20, __VA_ARGS__) M_(21, __VA_ARGS__) M_(24, __VA_ARGS__) M_(27, __VA_ARGS__) M_(28, __VA_ARGS__) M_(32, __VA_ARGS__)
+
+#define MWLN_RW_EPLS4(M_, ...) M_(4, __VA_ARGS__) M_(8, __VA_ARGS__) M_(12, __VA_ARGS__) M_(16, __VA_ARGS__) M_(20, __VA_ARGS__) \
+  M_(24, __VA_ARGS__) M_(28, __VA_ARGS__) M_(32, __VA_ARGS__)
+
+//: the staged fp32 backward (ln_stage_bwd_kernel): from this many rows; default geometry: warps per CTA, ring stages, units of U rows a tile
+constexpr int64_t STAGE_BWD_MIN_ROWS = 4096;
+constexpr int STAGE_BWD_NW = 8, STAGE_BWD_ST = 3, STAGE_BWD_UNITS = 2;
 
 static int rw_epl(int N) {
   const int need = (N + 31) / 32;
@@ -480,8 +662,7 @@ std::vector<torch::Tensor> ln_rows_fwd(torch::Tensor x, torch::Tensor w, torch::
 // dy, x [M, N] contiguous of one dtype; w fp32 [N] or empty; mean / rstd [M] fp32 from the forward. Returns (dx, dw, db): dw / db fp32 [N]
 // when `wgrad`, else empty. `ctas_per_sm` bounds the persistent grid (0: as many as fit).
 std::vector<torch::Tensor> ln_rows_bwd(torch::Tensor dy, torch::Tensor x, torch::Tensor w, torch::Tensor mean, torch::Tensor rstd, bool wgrad,
-                                       int64_t unused, int64_t ctas_per_sm) {
-  (void)unused;
+                                       int64_t mode, int64_t ctas_per_sm) {
   TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous() && dy.is_contiguous() && dy.sizes() == x.sizes() &&
                   dy.scalar_type() == x.scalar_type(),
               "dy, x must be contiguous CUDA [M, N] of one dtype");
@@ -506,6 +687,65 @@ std::vector<torch::Tensor> ln_rows_bwd(torch::Tensor dy, torch::Tensor x, torch:
   auto s = at::cuda::getCurrentCUDAStream();
   int grid = 0;
   torch::Tensor part;
+  // fp32 rows, many of them, 16-byte-aligned tensors: the staged kernel (mode 0: default geometry; 1: the warp-per-row kernel below;
+  // NW * 100000 + ST * 10000 + units: that geometry, forced)
+  if (x.scalar_type() == torch::kFloat32 && mode != 1 && (mode >= 100000 || M >= STAGE_BWD_MIN_ROWS) &&
+      reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0 && reinterpret_cast<uintptr_t>(dy.data_ptr()) % 16 == 0) {
+    int nw = STAGE_BWD_NW, st = STAGE_BWD_ST, units = STAGE_BWD_UNITS;
+    if (mode >= 100000) {
+      nw = int(mode / 100000);
+      st = int(mode / 10000 % 10);
+      units = int(mode % 10000);
+    }
+    const int rowb = N * 4;
+    const int U = 16 / gcd_int(16, rowb % 16 == 0 ? 16 : rowb % 16);
+    const int R = U * units;
+    const int64_t Mfull = (M / U) * U;
+    const int64_t ntiles = (Mfull + R - 1) / R;
+    const int smem = st * (2 * R * N + 2 * ((R + 3) & ~3)) * 4;
+    if (ntiles > 0 && smem <= 227 * 1024 && smem >= nw * epl * 32 * 4 && (nw == 4 || nw == 8) && (st == 2 || st == 3 || st == 4)) {
+      int occ = 1;
+      auto fill = [&](auto kern) {
+        if (smem > 48 * 1024) cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, kern, nw * 32, smem);
+        if (occ < 1) occ = 1;
+      };
+      int64_t cap = 0;
+      grid = 0;
+      const float* mp = mean.data_ptr<float>();
+      const float* rp = rstd.data_ptr<float>();
+      auto run = [&](auto kern) {
+        fill(kern);
+        const int per = ctas_per_sm > 0 && ctas_per_sm < occ ? int(ctas_per_sm) : occ;
+        cap = int64_t(mwln::num_sms()) * per;
+        grid = int(ntiles < cap ? ntiles : cap);
+        part = wgrad ? torch::empty({2, grid, N}, f32) : torch::empty({0}, f32);
+        float* dwp = wgrad ? part.data_ptr<float>() : nullptr;
+        float* dbp = wgrad ? part.data_ptr<float>() + int64_t(grid) * N : nullptr;
+        kern<<<grid, nw * 32, smem, s>>>(dy.data_ptr<float>(), x.data_ptr<float>(), wp, mp, rp, dx.data_ptr<float>(), dwp, dbp, M, Mfull, N, R);
+      };
+#define MWLN_STB(E, ...)                                                                                       \
+  if (epl == E) {                                                                                              \
+    if (nw == 4 && st == 2) run(mwln::ln_stage_bwd_kernel<E, 4, 2>);                                           \
+    else if (nw == 4 && st == 3) run(mwln::ln_stage_bwd_kernel<E, 4, 3>);                                      \
+    else if (nw == 4 && st == 4) run(mwln::ln_stage_bwd_kernel<E, 4, 4>);                                      \
+    else if (nw == 8 && st == 2) run(mwln::ln_stage_bwd_kernel<E, 8, 2>);                                      \
+    else if (nw == 8 && st == 3) run(mwln::ln_stage_bwd_kernel<E, 8, 3>);                                      \
+    else if (nw == 8 && st == 4) run(mwln::ln_stage_bwd_kernel<E, 8, 4>);                                      \
+  }
+      MWLN_RW_EPLS4(MWLN_STB, 0)
+#undef MWLN_STB
+      if (grid > 0) {
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        if (wgrad) {
+          const int blocks = (N + 31) / 32;
+          mwln::ln_rw_bwd_col_reduce<<<dim3(blocks, 2), 256, 0, s>>>(part.data_ptr<float>(), grid, N, dw.data_ptr<float>(), db.data_ptr<float>());
+          C10_CUDA_KERNEL_LAUNCH_CHECK();
+        }
+        return {dx, dw, db};
+      }
+    }
+  }
 #define MWLN_RW_B(E, CT)                                                                                                    \
   if (epl == E) {                                                                                                          \
     auto k = mwln::ln_rw_bwd_kernel<CT, E>;                                                                                \
