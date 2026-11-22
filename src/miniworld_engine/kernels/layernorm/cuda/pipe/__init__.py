@@ -54,6 +54,20 @@ def serves(x: torch.Tensor) -> bool:
     return supported(x) and torch.cuda.get_device_capability(x.device) == (9, 0)
 
 
+#: Rows of this many bytes (bf16 / fp16 64, fp32 32 values) have an inference-only forward (eight lanes a row, ``ln_pipe.cu`` direct forward);
+#: nothing else of this module takes them (the ring and the backward start at ``MIN_ROW_BYTES``)
+SMALL_ROW_BYTES = 128
+
+
+def serves_small(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tensor | None) -> bool:
+    """H100 inference forward of 128-byte rows (``SMALL_ROW_BYTES``): the activation, and weight / bias in its dtype or fp32."""
+    if not x.is_cuda or x.dtype not in _DTYPES or x.dim() < 1 or x.numel() == 0 or x.shape[-1] * x.element_size() != SMALL_ROW_BYTES:
+        return False
+    if any(t is not None and t.dtype not in (x.dtype, torch.float32) for t in (weight, bias)):
+        return False
+    return torch.cuda.get_device_capability(x.device) == (9, 0)
+
+
 def _affine_args(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tensor | None):
     """(w, b, wcode): both in one dtype the kernel reads (bf16 / fp16 / fp32), empty tensors when absent (an unaligned one is copied inside the kernel launcher)."""
     ref = weight if weight is not None else bias
@@ -145,4 +159,4 @@ def rmsnorm_pipe(x: torch.Tensor, weight: torch.Tensor | None, eps: float = 1e-5
     return _Norm.apply(x2, weight, None, float(eps), True).reshape(shape)
 
 
-__all__ = ["layernorm_pipe", "rmsnorm_pipe", "serves", "supported"]
+__all__ = ["layernorm_pipe", "rmsnorm_pipe", "serves", "serves_small", "supported"]

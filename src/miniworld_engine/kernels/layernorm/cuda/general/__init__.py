@@ -215,6 +215,8 @@ def layernorm_cuda(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Ten
 
     if pipe.serves(x):
         return pipe.layernorm_pipe(x, weight, bias, eps)
+    if pipe.serves_small(x, weight, bias) and not (torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, weight, bias))):
+        return pipe.layernorm_pipe(x, weight, bias, eps)  # 128-byte rows, inference: the eight-lane direct forward
     shape = x.shape
     x2 = x.reshape(-1, shape[-1]).contiguous()
     if rows_serves(x2):

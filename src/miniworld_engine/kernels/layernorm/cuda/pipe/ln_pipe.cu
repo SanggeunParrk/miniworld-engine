@@ -70,6 +70,21 @@ constexpr int THREADS = WARPS * 32;
 #ifndef MWP_D2PW
 #define MWP_D2PW 2  // row passes per warp
 #endif
+#ifndef MWP_D3
+#define MWP_D3 1  // the lean inference direct forward (direct3_fwd)
+#endif
+#ifndef MWP_D3PW
+#define MWP_D3PW 2  // row passes per warp
+#endif
+#ifndef MWP_D3PW2
+#define MWP_D3PW2 4  // row passes per warp when the PW-2 grid would be more than one wave of resident CTAs
+#endif
+#ifndef MWP_D3W
+#define MWP_D3W 4  // warps per CTA
+#endif
+#ifndef MWP_D2PDL
+#define MWP_D2PDL 1  // programmatic dependent launch of the direct2 forward (small activations)
+#endif
 #ifndef MWP_D2W
 #define MWP_D2W 4  // warps per CTA
 #endif
@@ -307,8 +322,22 @@ __global__ void __launch_bounds__(THREADS) direct_fwd(const T* __restrict__ x, c
 // Exact-fit single-chunk rows whose weight / bias have the activation's dtype (the common case): the direct forward again, written the way a
 // plain copy kernel is -- no per-element dtype branches, vector affine loads -- which keeps it at 40 registers (the generic one needs 56: 4
 // resident CTAs of 8 warps per SM instead of 6), which is worth 2-3% on the pair LayerNorm forward (within ~1% of a plain copy). PW row passes per warp, DW warps per CTA.
-template <typename T, int TPR, int VEC, bool RMS, int PW, int DW>
-__global__ void __launch_bounds__(DW * 32) direct2_fwd(const T* __restrict__ x, const T* __restrict__ w, const T* __restrict__ b, T* __restrict__ y,
+template <typename WT, int VEC> __device__ __forceinline__ void load_vec_f(const WT* p, float* o) {
+  if constexpr (std::is_same<WT, float>::value) {  // fp32 affine values of 2-byte activations (the master-weight regime): VEC / 4 float4 loads
+#pragma unroll
+    for (int j = 0; j < VEC / 4; ++j) {
+      const float4 v = *reinterpret_cast<const float4*>(p + 4 * j);
+      o[4 * j] = v.x, o[4 * j + 1] = v.y, o[4 * j + 2] = v.z, o[4 * j + 3] = v.w;
+    }
+  } else {
+    const Pack<WT, VEC> pk = *reinterpret_cast<const Pack<WT, VEC>*>(p);
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) o[i] = to_f<WT>(pk.v[i]);
+  }
+}
+
+template <typename T, typename WT, int TPR, int VEC, bool RMS, int PW, int DW>
+__global__ void __launch_bounds__(DW * 32) direct2_fwd(const T* __restrict__ x, const WT* __restrict__ w, const WT* __restrict__ b, T* __restrict__ y,
                                                        float* __restrict__ ws, float2* __restrict__ stats, int64_t M, int N, float eps) {
   constexpr int RPP = 32 / TPR;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
@@ -333,14 +362,10 @@ __global__ void __launch_bounds__(DW * 32) direct2_fwd(const T* __restrict__ x, 
 #pragma unroll
   for (int i = 0; i < VEC; ++i) { wr[i] = 1.f; br[i] = 0.f; }
   if (w != nullptr) {
-    const Pack<T, VEC> pw = *reinterpret_cast<const Pack<T, VEC>*>(w + l * VEC);
-#pragma unroll
-    for (int i = 0; i < VEC; ++i) wr[i] = to_f<T>(pw.v[i]);
+    load_vec_f<WT, VEC>(w + l * VEC, wr);
   }
   if (!RMS && b != nullptr) {
-    const Pack<T, VEC> pb = *reinterpret_cast<const Pack<T, VEC>*>(b + l * VEC);
-#pragma unroll
-    for (int i = 0; i < VEC; ++i) br[i] = to_f<T>(pb.v[i]);
+    load_vec_f<WT, VEC>(b + l * VEC, br);
   }
   const float inv_n = 1.f / float(N);
 #pragma unroll
@@ -372,6 +397,100 @@ __global__ void __launch_bounds__(DW * 32) direct2_fwd(const T* __restrict__ x, 
       *reinterpret_cast<Pack<T, VEC>*>(y + row * N + l * VEC) = o;
     }
   }
+}
+
+// The inference direct forward written for the fewest instructions (the cold-cache small calls are latency, not bandwidth, bound: at
+// x[1, 4096, 128] fp32 the Triton kernel issues 65 instructions a row against direct2's 117, and finishes 0.4 us sooner). N = TPR * VEC is
+// a compile-time constant (no division), no statistics / flag stores, the reductions of the PW rows of a warp run interleaved (one shuffle
+// chain for all of them, not one after the other behind branches), a CTA whose rows are all in range takes the guard-free path (FULL), and
+// rsqrt is the bare approximate instruction (var + eps >= eps, never denormal).
+__device__ __forceinline__ float rsqrt_fast(float a) {
+  float r;
+  asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(a));
+  return r;
+}
+
+template <typename T, typename WT, int TPR, int VEC, bool RMS, int PW, int DW, bool FULL>
+__device__ __forceinline__ void d3_body(const T* __restrict__ x, const WT* __restrict__ w, const WT* __restrict__ b, T* __restrict__ y, int64_t M, float eps) {
+  constexpr int RPP = 32 / TPR;
+  constexpr int N = TPR * VEC;
+  constexpr float inv_n = 1.f / float(N);
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int g = lane / TPR, l = lane % TPR;
+  const int64_t row0 = (int64_t(blockIdx.x) * DW + warp) * (PW * RPP) + g;
+  const T* xp = x + row0 * N + l * VEC;
+  T* yp = y + row0 * N + l * VEC;
+  uint4 raw[PW];
+#pragma unroll
+  for (int p = 0; p < PW; ++p) {
+    raw[p] = make_uint4(0, 0, 0, 0);
+    if (FULL || row0 + p * RPP < M)
+      asm volatile("ld.global.v4.u32 {%0,%1,%2,%3}, [%4];\n" : "=r"(raw[p].x), "=r"(raw[p].y), "=r"(raw[p].z), "=r"(raw[p].w) : "l"(xp + p * RPP * N));
+  }
+  float wr[VEC], br[VEC];
+#pragma unroll
+  for (int i = 0; i < VEC; ++i) { wr[i] = 1.f; br[i] = 0.f; }
+  if (w != nullptr) load_vec_f<WT, VEC>(w + l * VEC, wr);
+  if (!RMS && b != nullptr) load_vec_f<WT, VEC>(b + l * VEC, br);
+  float v[PW][VEC], mean[PW], q[PW];
+#pragma unroll
+  for (int p = 0; p < PW; ++p) {
+    const Pack<T, VEC> pk = *reinterpret_cast<const Pack<T, VEC>*>(&raw[p]);
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) v[p][i] = to_f<T>(pk.v[i]);
+    mean[p] = 0.f;
+  }
+  if constexpr (!RMS) {
+#pragma unroll
+    for (int p = 0; p < PW; ++p) {
+      float s0 = v[p][0], s1 = v[p][1];
+#pragma unroll
+      for (int i = 2; i < VEC; i += 2) { s0 += v[p][i]; s1 += v[p][i + 1]; }
+      mean[p] = s0 + s1;
+    }
+#pragma unroll
+    for (int o = TPR / 2; o > 0; o >>= 1) {
+#pragma unroll
+      for (int p = 0; p < PW; ++p) mean[p] += __shfl_xor_sync(0xffffffffu, mean[p], o);
+    }
+#pragma unroll
+    for (int p = 0; p < PW; ++p) mean[p] *= inv_n;
+  }
+#pragma unroll
+  for (int p = 0; p < PW; ++p) {
+    float q0 = 0.f, q1 = 0.f;
+#pragma unroll
+    for (int i = 0; i < VEC; i += 2) {
+      const float d0 = v[p][i] - mean[p], d1 = v[p][i + 1] - mean[p];
+      q0 = fmaf(d0, d0, q0);
+      q1 = fmaf(d1, d1, q1);
+    }
+    q[p] = q0 + q1;
+  }
+#pragma unroll
+  for (int o = TPR / 2; o > 0; o >>= 1) {
+#pragma unroll
+    for (int p = 0; p < PW; ++p) q[p] += __shfl_xor_sync(0xffffffffu, q[p], o);
+  }
+#pragma unroll
+  for (int p = 0; p < PW; ++p) {
+    const float rstd = rsqrt_fast(fmaf(q[p], inv_n, eps));
+    Pack<T, VEC> o;
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) o.v[i] = from_f<T>((v[p][i] - mean[p]) * rstd * wr[i] + br[i]);
+    if (FULL || row0 + p * RPP < M) *reinterpret_cast<Pack<T, VEC>*>(yp + p * RPP * N) = o;
+  }
+}
+
+template <typename T, typename WT, int TPR, int VEC, bool RMS, int PW, int DW>
+__global__ void __launch_bounds__(DW * 32) direct3_fwd(const T* __restrict__ x, const WT* __restrict__ w, const WT* __restrict__ b, T* __restrict__ y, int64_t M, float eps) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900  // programmatic dependent launch (see launch_direct2)
+  asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory");
+  asm volatile("griddepcontrol.wait;\n" ::: "memory");
+#endif
+  constexpr int RPP = 32 / TPR;
+  if ((int64_t(blockIdx.x) + 1) * (DW * PW * RPP) <= M) d3_body<T, WT, TPR, VEC, RMS, PW, DW, true>(x, w, b, y, M, eps);
+  else d3_body<T, WT, TPR, VEC, RMS, PW, DW, false>(x, w, b, y, M, eps);
 }
 
 // Inference forward of multi-chunk rows (CH = 2..4 chunks of 16 bytes per lane, a warp per row): the direct forward for wide rows. The
@@ -471,7 +590,7 @@ __global__ void __launch_bounds__(MWP_DCHW * 32) directch_fwd(const T* __restric
 // times), x[1, L, L, 128] bf16: L256 (17 MB) 0.98x and L384 (38 MB) 0.96x the Triton kernel where the direct forward is 1.03x / 1.01x; at
 // L128 (4 MB) the persistent ring does not fill (1.14x) and from ~75 MB (L768, or L384 at 256 columns) it falls behind the direct forward.
 #ifndef MWP_BK_MIN
-#define MWP_BK_MIN (int64_t(8) << 20)
+#define MWP_BK_MIN (int64_t(12) << 20)  // was 8 MB: from the lean direct3 forward the 8.4 MB calls (16384 rows of 512 bytes, fp32 weights) are 10% faster than the bulk kernel; 16.8 MB and up stay ahead on it
 #endif
 #ifndef MWP_BK_MAX
 #define MWP_BK_MAX (int64_t(48) << 20)
@@ -804,6 +923,69 @@ template <typename K> int resident_ctas(K kernel, size_t smem) {
   return n < 1 ? 1 : n;
 }
 
+// direct3_fwd with PW row passes a warp: its launch (PDL for small activations, see launch_direct2), and the CTAs it takes
+template <typename T, typename WT, int TPR, int VEC, bool RMS, int PW>
+void launch_d3(const T* x, const WT* w, const WT* b, T* y, int64_t M, int N, float eps, cudaStream_t s, int64_t* grid_out) {
+  constexpr int RPP = 32 / TPR;
+  const int64_t grid = (((M + RPP - 1) / RPP + PW - 1) / PW + MWP_D3W - 1) / MWP_D3W;
+  if (grid_out != nullptr) {
+    *grid_out = grid;
+    return;
+  }
+  if (MWP_D2PDL && sm_major() >= 9 && M * int64_t(N) * int64_t(sizeof(T)) < MWP_BK_MIN) {
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(unsigned(grid));
+    cfg.blockDim = dim3(MWP_D3W * 32);
+    cfg.stream = s;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[0].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = at;
+    cfg.numAttrs = 1;
+    cudaLaunchKernelEx(&cfg, direct3_fwd<T, WT, TPR, VEC, RMS, PW, MWP_D3W>, x, w, b, y, M, eps);
+    return;
+  }
+  direct3_fwd<T, WT, TPR, VEC, RMS, PW, MWP_D3W><<<int(grid), MWP_D3W * 32, 0, s>>>(x, w, b, y, M, eps);
+}
+
+// The direct2 forward's launch: PDL on sm_90+ for small activations (see MWP_BK_MIN), plain otherwise. WT: the dtype of the affine values.
+template <typename T, typename WT, int TPR, int VEC, bool RMS>
+void launch_direct2(const T* x, const WT* w, const WT* b, T* y, float* ws, float2* stats, int64_t M, int N, float eps, cudaStream_t s) {
+  constexpr int RPP = 32 / TPR;
+  if (MWP_D3 && ws == nullptr && stats == nullptr) {  // inference: the lean kernel, MWP_D3PW (2) row passes a warp when its grid is one wave of resident CTAs, else MWP_D3PW2 (4):
+    // the 48-register 2-byte builds hold 10 CTAs an SM, so 2048 CTAs of PW 2 would be two waves with a tail (9.1 us against 7.7 us at 16384 rows)
+    static int occ = 0;
+    if (!occ) {
+      cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, direct3_fwd<T, WT, TPR, VEC, RMS, MWP_D3PW, MWP_D3W>, MWP_D3W * 32, 0);
+      if (occ < 1) occ = 1;
+    }
+    int64_t g = 0;
+    launch_d3<T, WT, TPR, VEC, RMS, MWP_D3PW>(x, w, b, y, M, N, eps, s, &g);
+    if (g <= int64_t(num_sms()) * occ) launch_d3<T, WT, TPR, VEC, RMS, MWP_D3PW>(x, w, b, y, M, N, eps, s, nullptr);
+    else launch_d3<T, WT, TPR, VEC, RMS, MWP_D3PW2>(x, w, b, y, M, N, eps, s, nullptr);
+    return;
+  }
+  constexpr int PW2 = MWP_D2PW;
+  const int64_t units2 = ((M + RPP - 1) / RPP + PW2 - 1) / PW2;
+  const int64_t grid2 = (units2 + MWP_D2W - 1) / MWP_D2W;
+  // programmatic dependent launch only for small activations, where overlapping the predecessor's tail pays: past MWP_BK_MIN every
+  // CTA of a launch this large waiting at griddepcontrol.wait cost 0.4-0.8% at the HBM floor (and 1.7x with one-warp CTAs)
+  if (MWP_D2PDL && sm_major() >= 9 && M * int64_t(N) * int64_t(sizeof(T)) < MWP_BK_MIN) {
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(unsigned(grid2));
+    cfg.blockDim = dim3(MWP_D2W * 32);
+    cfg.stream = s;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[0].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = at;
+    cfg.numAttrs = 1;
+    cudaLaunchKernelEx(&cfg, direct2_fwd<T, WT, TPR, VEC, RMS, PW2, MWP_D2W>, x, w, b, y, ws, stats, M, N, eps);
+    return;
+  }
+  direct2_fwd<T, WT, TPR, VEC, RMS, PW2, MWP_D2W><<<int(grid2), MWP_D2W * 32, 0, s>>>(x, w, b, y, ws, stats, M, N, eps);
+}
+
 template <typename T, int TPR, int CH, int VEC, bool RMS, bool PAD>
 void launch_fwd_pad(const T* x, const void* w, const void* b, int wcode, T* y, float* ws, float2* stats, int64_t M, int N, float eps, int per_sm,
                 cudaStream_t s) {
@@ -832,27 +1014,14 @@ void launch_fwd_pad(const T* x, const void* w, const void* b, int wcode, T* y, f
         }
 #endif
         if (wcode == WC) {
-          constexpr int PW2 = MWP_D2PW;
-          const int64_t units2 = ((M + RPP - 1) / RPP + PW2 - 1) / PW2;
-          const int64_t grid2 = (units2 + MWP_D2W - 1) / MWP_D2W;
-          // programmatic dependent launch only for small activations, where overlapping the predecessor's tail pays: past MWP_BK_MIN every
-          // CTA of a launch this large waiting at griddepcontrol.wait cost 0.4-0.8% at the HBM floor (and 1.7x with one-warp CTAs)
-          if (sm_major() >= 9 && M * int64_t(N) * int64_t(sizeof(T)) < MWP_BK_MIN) {
-            cudaLaunchConfig_t cfg = {};
-            cfg.gridDim = dim3(unsigned(grid2));
-            cfg.blockDim = dim3(MWP_D2W * 32);
-            cfg.stream = s;
-            cudaLaunchAttribute at[1];
-            at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-            at[0].val.programmaticStreamSerializationAllowed = 1;
-            cfg.attrs = at;
-            cfg.numAttrs = 1;
-            cudaLaunchKernelEx(&cfg, direct2_fwd<T, TPR, VEC, RMS, PW2, MWP_D2W>, x, static_cast<const T*>(w), static_cast<const T*>(b), y, ws, stats, M,
-                               N, eps);
+          launch_direct2<T, T, TPR, VEC, RMS>(x, static_cast<const T*>(w), static_cast<const T*>(b), y, ws, stats, M, N, eps, s);
+          return;
+        }
+        if constexpr (WC != 0) {  // fp32 affine values on 2-byte activations (master weights)
+          if (wcode == 0) {
+            launch_direct2<T, float, TPR, VEC, RMS>(x, static_cast<const float*>(w), static_cast<const float*>(b), y, ws, stats, M, N, eps, s);
             return;
           }
-          direct2_fwd<T, TPR, VEC, RMS, PW2, MWP_D2W><<<int(grid2), MWP_D2W * 32, 0, s>>>(x, static_cast<const T*>(w), static_cast<const T*>(b), y, ws, stats, M, N, eps);
-          return;
         }
       }
 #endif
@@ -954,6 +1123,21 @@ inline bool pick(int nchunk, int& tpr, int& ch) {
 template <typename T, int VEC, bool RMS>
 bool dispatch_fwd(int tpr, int ch, const T* x, const void* w, const void* b, int wcode, T* y, float* ws, float2* stats, int64_t M, int N,
                   float eps, int gm, cudaStream_t s) {
+  if (tpr == 8) {  // 128-byte rows (bf16 / fp16 64, fp32 32 values): the inference forward only, eight lanes a row (the backward and the ring have no such build)
+    constexpr int WC = std::is_same<T, float>::value ? 0 : (std::is_same<T, __nv_bfloat16>::value ? 1 : 2);
+    if (stats != nullptr || ws != nullptr) return false;
+    if (wcode == WC) {
+      launch_direct2<T, T, 8, VEC, RMS>(x, static_cast<const T*>(w), static_cast<const T*>(b), y, ws, stats, M, N, eps, s);
+      return true;
+    }
+    if constexpr (WC != 0) {
+      if (wcode == 0) {
+        launch_direct2<T, float, 8, VEC, RMS>(x, static_cast<const float*>(w), static_cast<const float*>(b), y, ws, stats, M, N, eps, s);
+        return true;
+      }
+    }
+    return false;
+  }
 #define MWP_CASE(TPR_, CH_, ...)                                                                                         \
   if (tpr == TPR_ && ch == CH_) {                                                                                       \
     launch_fwd<T, TPR_, CH_, VEC, RMS>(x, w, b, wcode, y, ws, stats, M, N, eps, gm, s);                                 \
@@ -994,7 +1178,12 @@ torch::Tensor pipe_forward(torch::Tensor x, torch::Tensor w, torch::Tensor b, do
   auto y = torch::empty_like(x);
   if (M == 0) return y;
   int tpr = 0, ch = 0;
-  TORCH_CHECK(mwpipe::pick(N * esz / 16, tpr, ch), "width ", N, " is beyond the pipelined kernels");
+  if (N * esz == 128) {  // 128-byte rows: the eight-lane direct forward (inference only, see dispatch_fwd)
+    tpr = 8, ch = 1;
+    TORCH_CHECK(ws.numel() == 0 && stats.numel() == 0, "128-byte rows: inference forward only");
+  } else {
+    TORCH_CHECK(mwpipe::pick(N * esz / 16, tpr, ch), "width ", N, " is beyond the pipelined kernels");
+  }
   const auto wt = w.numel() ? w.scalar_type() : b.scalar_type();
   const int wcode = w.numel() || b.numel() ? (wt == torch::kFloat32 ? 0 : wt == torch::kBFloat16 ? 1 : 2) : 0;
   TORCH_CHECK(!(w.numel() && b.numel()) || w.scalar_type() == b.scalar_type(), "weight and bias must share a dtype");
