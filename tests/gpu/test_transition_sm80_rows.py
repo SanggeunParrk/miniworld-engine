@@ -71,7 +71,7 @@ def _train_grads(m: Transition, x: torch.Tensor, dy: torch.Tensor) -> list[torch
 @pytest.mark.skipif(not _a100(), reason="A100 (sm_80) Transition")
 @pytest.mark.parametrize(("d_hidden", "n"), [(256, 2), (384, 2), (512, 4)])
 def test_transition_sm80_train_overlap_backward_bits(d_hidden: int, n: int) -> None:
-    """The saved-activation backward runs its weight-gradient GEMMs on a side stream (``fused_wide_sm80._bwd_saved_overlap``) and ``ln_bwd``
+    """The saved-activation backward runs d_xn (a bf16 GEMM output, ``fused_wide_sm80._dxn_gemm``) -> ``ln_bwd`` on a side stream next to [dWa; dWb] (``fused_wide_sm80._bwd_saved_overlap``) and ``ln_bwd``
     keeps two rows in flight: the gradients equal the one-stream order of the same kernels bit for bit, run to run and under a graph."""
     from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
@@ -96,7 +96,7 @@ def test_transition_sm80_train_overlap_backward_bits(d_hidden: int, n: int) -> N
     dab = ext.gate_dh(dyf, ws16.t().contiguous(), ab, fw._dh_cfg(flat.shape[0], d_hidden, h))
     dws = fw._mm_f32(dyf.t(), hid)
     dwab = fw._mm_f32(dab.t(), xn)
-    dx, dgam, dbeta = ext.ln_bwd(fw._mm_f32(dab, fw._wab(wa16, wb16)), flat, stats, m.ln_in.weight.float(), dyf, torch.float32)
+    dx, dgam, dbeta = ext.ln_bwd(fw._dxn_gemm(dab, fw._wab(wa16, wb16)), flat, stats, m.ln_in.weight.float(), dyf, torch.float32)
     ref = {
         "dx": dx,
         "ln_in.weight": dgam,
@@ -132,3 +132,48 @@ def test_transition_sm80_train_overlap_backward_bits(d_hidden: int, n: int) -> N
     torch.cuda.synchronize()
     assert torch.equal(typing.cast("torch.Tensor", xs.grad), first[1])
     assert all(torch.equal(typing.cast("torch.Tensor", p.grad), r) for p, r in zip(m.parameters(), first[2:], strict=True))
+
+
+@pytest.mark.skipif(not _a100(), reason="A100 (sm_80) Transition")
+@pytest.mark.parametrize(("d_hidden", "n", "rows"), [(768, 2, 128), (384, 2, 384)])
+def test_transition_sm80_fp32_few_rows_streams_bits(monkeypatch: pytest.MonkeyPatch, d_hidden: int, n: int, rows: int) -> None:
+    """The fp32 (TF32-allowed) few-rows backward runs its two weight-gradient GEMMs and their scalings on side streams (``fused_wide_sm80._f32_bwd``,
+    ``F32_WGRAD_STREAMS``): the same kernels on the same operands as the one-stream order (the scalings inside ``ln_bwd``'s finalize launch), the same bits, eager and under a graph."""
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    m = Transition(d_hidden=d_hidden, n=n).cuda().float()
+    C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
+    m = m.train().set_backend("cuda")
+    g = torch.Generator(device="cuda").manual_seed(3)
+    x = torch.randn(1, rows, d_hidden, device="cuda", generator=g)
+    dy = torch.randn(1, rows, d_hidden, device="cuda", generator=g)
+    assert fw.f32_available(x.reshape(-1, d_hidden), m.expand_a.weight, m.squeeze.weight)
+
+    def grads() -> list[torch.Tensor]:
+        for p in m.parameters():
+            p.grad = None
+        xi = x.clone().requires_grad_(True)
+        y = m(xi)
+        y.backward(dy)
+        return [typing.cast("torch.Tensor", xi.grad)] + [typing.cast("torch.Tensor", p.grad) for p in m.parameters()]
+
+    results = {}
+    for streams in (False, True):
+        monkeypatch.setattr(fw, "F32_WGRAD_STREAMS", streams)
+        grads()
+        results[streams] = grads()
+    assert all(torch.equal(a, b) for a, b in zip(results[False], results[True], strict=True))
+
+    monkeypatch.setattr(fw, "F32_WGRAD_STREAMS", True)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        grads()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = grads()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert all(torch.equal(a, b) for a, b in zip(captured, results[True], strict=True))
