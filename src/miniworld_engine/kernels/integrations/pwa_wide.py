@@ -19,6 +19,7 @@ Every kernel is built per (d_msa, d_hidden) / d_pair. The MiniWorld shape (64 / 
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -120,11 +121,16 @@ def _aux():
     return _load("miniworld_pwa_wide_aux", "pwa_wide_aux.cu", [])
 
 
+#: experiments: warpgroups a CTA of ln_vg_kernel (None: the build's default, csrc/pwa_wide.cu PW_LWG)
+LN_VG_LWG: int | None = int(os.environ["MWE_PWA_LWG"]) if os.environ.get("MWE_PWA_LWG") else None
+
+
 def _value(d_msa: int, d_hidden: int):
+    extra = [] if LN_VG_LWG is None else [f"-DPW_LWG={LN_VG_LWG}"]
     return _load(
-        f"miniworld_pwa_wide_{d_msa}_{d_hidden}",
+        f"miniworld_pwa_wide_{d_msa}_{d_hidden}" + ("" if LN_VG_LWG is None else f"_lwg{LN_VG_LWG}"),
         "pwa_wide.cu",
-        [f"-DPW_D={d_msa}", f"-DPW_C={d_hidden}"],
+        [f"-DPW_D={d_msa}", f"-DPW_C={d_hidden}", *extra],
     )
 
 

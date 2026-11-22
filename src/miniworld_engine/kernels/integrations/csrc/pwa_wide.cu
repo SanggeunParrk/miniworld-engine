@@ -49,6 +49,14 @@ static_assert(HC == 256 && D == 256, "the BIG build is written for d_msa 256 x (
 static_assert(HC <= 128 && D * HC <= 16384, "register / shared budget of the wide kernels");
 #endif
 
+// ln_vg_kernel: warpgroups per CTA (LWG) and tile buffers per warpgroup (LBUF).  The BIG build keeps a 128 KiB weight next to the tiles, so it runs
+// PW_LWG warpgroups on ONE tile buffer each: a warpgroup loads its next tile as soon as its GEMM has read the last one, and the other warpgroups
+// overlap its LayerNorm / epilogue with their own GEMMs (one warpgroup a CTA left the tensor cores idle through every LayerNorm and epilogue).
+#ifndef PW_LWG
+#define PW_LWG (PW_BIG ? 2 : PW_NWG)
+#endif
+constexpr int LWG = PW_LWG, LNT = 128 * LWG, LBUF = (PW_BIG && LWG > 1) ? 1 : 2;
+
 __device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
 // 16-byte chunk `chunk` of row r in a [rows][64] block of block-index kb, 128-byte swizzle (element offset)
 __device__ __forceinline__ int so(int kb, int rows, int r, int chunk) { return ((kb * rows + r) * 8 + (chunk ^ (r & 7))) * 8; }
@@ -146,29 +154,29 @@ __device__ __forceinline__ void st_flush_hm(const bf16* st, int wtid, bf16* base
 // ---------------------------------------------------------------------------------------------------------------
 // K1: LayerNorm + value projection
 // ---------------------------------------------------------------------------------------------------------------
-__global__ void __launch_bounds__(NT) ln_vg_kernel(const bf16* __restrict__ X, const float* __restrict__ LNW, const float* __restrict__ LNB, float eps,
+__global__ void __launch_bounds__(LNT) ln_vg_kernel(const bf16* __restrict__ X, const float* __restrict__ LNW, const float* __restrict__ LNB, float eps,
                                                    const bf16* __restrict__ WV, bf16* __restrict__ Y, bf16* __restrict__ V, float* __restrict__ STATS,
                                                    int N, int S, int ntile) {
   extern __shared__ unsigned char smem_raw[];
   bf16* sX = reinterpret_cast<bf16*>(align1k(smem_raw));         // [2][NKD][TILE]
-  bf16* sW = sX + NWG * 2 * NKD * TILE;                         // [NKD][HC][64]
+  bf16* sW = sX + LWG * LBUF * NKD * TILE;                         // [NKD][HC][64]
   const int tid = threadIdx.x, wgi = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
   auto load = [&](int buf, int t) {
     const int n = t % N, s0 = (t / N) * TS;
     for (int v = wtid; v < TS * (D / 8); v += 128) {
       const int row = v / (D / 8), ch = v % (D / 8);
       const bool ok = s0 + row < S;
-      cp16(sa(sX + (wgi * 2 + buf) * NKD * TILE + so(ch >> 3, TS, row, ch & 7)), ok ? X + ((long)(s0 + row) * N + n) * D + ch * 8 : X, ok);
+      cp16(sa(sX + (wgi * LBUF + buf) * NKD * TILE + so(ch >> 3, TS, row, ch & 7)), ok ? X + ((long)(s0 + row) * N + n) * D + ch * 8 : X, ok);
     }
   };
-  for (int v = tid; v < HC * (D / 8); v += NT) {
+  for (int v = tid; v < HC * (D / 8); v += LNT) {
     const int n = v / (D / 8), c8 = v % (D / 8);
     cp16(sa(sW + so(c8 >> 3, HC, n, c8 & 7)), WV + (long)n * D + c8 * 8, true);
   }
   cp_commit();                                                   // the weights
   cp_wait<0>();
   __syncthreads();                                               // (the only block-wide barrier: every thread arrives before any warpgroup runs out of tiles)
-  if ((int)(blockIdx.x * NWG + wgi) < ntile) load(0, blockIdx.x * NWG + wgi);
+  if ((int)(blockIdx.x * LWG + wgi) < ntile) load(0, blockIdx.x * LWG + wgi);
   cp_commit();
   constexpr int TPR = D / 32;
   const int tq = wtid % TPR;
@@ -177,15 +185,19 @@ __global__ void __launch_bounds__(NT) ln_vg_kernel(const bf16* __restrict__ X, c
   for (int k = 0; k < 32; ++k) { g[k] = LNW[tq * 32 + k]; b[k] = LNB[tq * 32 + k]; }
   const int r0 = warp * 16 + (lane >> 2), q2 = (lane & 3) * 2;
   for (int it = 0;; ++it) {
-    const int t = (int)(blockIdx.x * NWG + wgi) + it * (int)(gridDim.x * NWG);
+    const int t = (int)(blockIdx.x * LWG + wgi) + it * (int)(gridDim.x * LWG);
     if (t >= ntile) break;
-    const int buf = it & 1, tn = t + (int)(gridDim.x * NWG);
-    if (tn < ntile) load(buf ^ 1, tn);
-    cp_commit();
-    cp_wait<1>();
+    const int buf = LBUF == 1 ? 0 : (it & 1), tn = t + (int)(gridDim.x * LWG);
+    if constexpr (LBUF == 2) {
+      if (tn < ntile) load(buf ^ 1, tn);
+      cp_commit();
+      cp_wait<1>();
+    } else {
+      cp_wait<0>();                                              // the one buffer: this tile (its next tile is requested after the last GEMM below)
+    }
     wg_sync(wgi);
     const int n = t % N, s0 = (t / N) * TS;
-    bf16* sx = sX + (wgi * 2 + buf) * NKD * TILE;
+    bf16* sx = sX + (wgi * LBUF + buf) * NKD * TILE;
     ln_tile(sx, wtid, g, b, eps, Y, STATS, n, s0, S, N);
     wgw::proxy_fence();
     wg_sync(wgi);
@@ -203,6 +215,12 @@ __global__ void __launch_bounds__(NT) ln_vg_kernel(const bf16* __restrict__ X, c
         wgw::ss64(wgw::desc(sx + (ks >> 2) * TILE + (ks & 3) * 16), wgw::desc(sW + ((ks >> 2) * HC + 64 * (jb + j)) * 64 + (ks & 3) * 16), acc[j], ks == 0 ? 0 : 1);
     wgw::commit();
     wgw::wait();
+    if constexpr (LBUF == 1) {
+      if (jb + NCB >= NCH) {                                     // the GEMM has read the tile: the next one streams in under the epilogue
+        if (tn < ntile) load(0, tn);
+        cp_commit();
+      }
+    }
 #pragma unroll
     for (int j = 0; j < NCB; ++j)
 #pragma unroll
@@ -970,7 +988,7 @@ __global__ void __launch_bounds__(LB_WARPS * 32) ln_bwd_big_kernel(const float* 
 // persistent grid: one CTA per resident slot; the launch attribute and the occupancy are queried once per kernel (keyed by the
 // function, not its type: gate_out_kernel<true> and <false> share one)
 template <typename K>
-int grid_for(K kernel, int smem, int ntile, int device) {
+int grid_for(K kernel, int smem, int ntile, int device, int nthreads = NT) {
   static std::map<const void*, int> bps_of;
   static int sms = 0;
   const void* key = reinterpret_cast<const void*>(kernel);
@@ -978,7 +996,7 @@ int grid_for(K kernel, int smem, int ntile, int device) {
   if (it == bps_of.end()) {
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
     int bps = 0;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, NT, smem);
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, nthreads, smem);
     cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device);
     it = bps_of.emplace(key, bps < 1 ? 1 : bps).first;
   }
@@ -1001,9 +1019,9 @@ std::vector<torch::Tensor> ln_vg_w(torch::Tensor m, torch::Tensor lnw, torch::Te
   auto v = torch::empty({H, (long)N, (long)S * C}, m.options());
   auto stats = save_y ? torch::empty({S, N, 2}, m.options().dtype(torch::kFloat)) : torch::empty({0}, m.options().dtype(torch::kFloat));
   const int ntile = N * ((S + TS - 1) / TS);
-  const int smem = 1024 + (NWG * 2 * NKD * TILE + NKD * HC * 64) * 2;
-  const int grid = grid_for(ln_vg_kernel, smem, (ntile + NWG - 1) / NWG, m.device().index());
-  ln_vg_kernel<<<grid, NT, smem, at::cuda::getCurrentCUDAStream()>>>(P(m), lnw.data_ptr<float>(), lnb.data_ptr<float>(), (float)eps, P(wv), save_y ? W(y) : nullptr, W(v), save_y ? stats.data_ptr<float>() : nullptr, N, S, ntile);
+  const int smem = 1024 + (LWG * LBUF * NKD * TILE + NKD * HC * 64) * 2;
+  const int grid = grid_for(ln_vg_kernel, smem, (ntile + LWG - 1) / LWG, m.device().index(), LNT);
+  ln_vg_kernel<<<grid, LNT, smem, at::cuda::getCurrentCUDAStream()>>>(P(m), lnw.data_ptr<float>(), lnb.data_ptr<float>(), (float)eps, P(wv), save_y ? W(y) : nullptr, W(v), save_y ? stats.data_ptr<float>() : nullptr, N, S, ntile);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {v, y, stats};
 }

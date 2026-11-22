@@ -134,6 +134,13 @@ def pair_embed_geom_ln_bwd(tbl: torch.Tensor, codes: torch.Tensor, dh: torch.Ten
     return device_build().ln_backward(tbl, codes, dh, mode, eps)
 
 
+def _eval_build():
+    """The build of the one-launch inference forwards: this card's device build; on an H100 the sm_80 source built for sm_90a (the training launchers stay the sm90 build)."""
+    from miniworld_engine.kernels.pair_embed_geom.cuda import sm80
+
+    return sm80 if torch.cuda.get_device_capability() == (9, 0) else sm80.device_build()
+
+
 def _eval_fake(weight, a, *rest):
     B, n = a.shape[:2]
     return torch.empty((B, n, n, D_PAIR), dtype=torch.bfloat16, device=a.device)
@@ -151,17 +158,13 @@ def pair_embed_geom_eval_sm120(
     eps: float,
 ) -> torch.Tensor:
     """RTX 5090 inference: the encoder pair (its LayerNorm when ``eps`` >= 0) straight from the module's inputs and weight (sm80/__init__.py forward_eval)."""
-    from miniworld_engine.kernels.pair_embed_geom.cuda.sm80 import device_build
-
-    return device_build().forward_eval(weight, bb, ca_mask, has_cb, mask, residue_idx, chains, eps)
+    return _eval_build().forward_eval(weight, bb, ca_mask, has_cb, mask, residue_idx, chains, eps)
 
 
 @opaque(fake=_eval_fake, name="pair_embed_ca_eval_sm120")
 def pair_embed_ca_eval_sm120(weight: torch.Tensor, ca: torch.Tensor, mask: torch.Tensor, residue_idx: torch.Tensor, eps: float) -> torch.Tensor:
     """RTX 5090 inference: the decoder pair (its LayerNorm when ``eps`` >= 0) straight from the module's inputs and weight (sm80/__init__.py forward_ca_eval)."""
-    from miniworld_engine.kernels.pair_embed_geom.cuda.sm80 import device_build
-
-    return device_build().forward_ca_eval(weight, ca, mask, residue_idx, eps)
+    return _eval_build().forward_ca_eval(weight, ca, mask, residue_idx, eps)
 
 
 @opaque(fake=_bwd_fake, name="pair_embed_geom_ln_tbl_bwd_sm120")

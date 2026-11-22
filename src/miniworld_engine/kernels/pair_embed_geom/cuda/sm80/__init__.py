@@ -22,11 +22,12 @@ def ext():
     from miniworld_engine.kernels._sm120 import building_sm120, sm80_load_extension as load_extension  # RTX 5090: the same source for sm_120a (kernels/_sm120.py)
 
     ensure_cuda_home()
+    h100 = not building_sm120() and torch.cuda.get_device_capability() == (9, 0)  # the H100's inference forwards: this source built for sm_90a (the training launchers stay the sm90 build)
     return load_extension(
-        name="pair_embed_geom_sm80",
+        name="pair_embed_geom_sm90gt2" if h100 else "pair_embed_geom_sm80",
         sources=[str(_dir / "pair_embed_geom_sm80.cu")],
-        # the A100 build: the one-launch inference forwards of pair_embed_geom_sm80.cu (the sm_120a build has them always)
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80"), f"-I{_dir}", *(() if building_sm120() else ("-DMWE_FWD_GT2",))],
+        # the A100 / H100 inference builds: the one-launch forwards of pair_embed_geom_sm80.cu (the sm_120a build has them always)
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a" if h100 else "80"), f"-I{_dir}", *(() if building_sm120() else ("-DMWE_FWD_GT2",))],
         extra_cflags=["-std=c++17"],
         verbose=False,
     )
@@ -55,8 +56,10 @@ BWD_IMPL = {0: 1, 1: 3}
 BWD_IMPL_SM120 = {0: 4, 1: 5}
 KS = 2  # pair_embed_geom_sm80.cu
 #: A100 inference: the modules whose forward is the one-launch gt-2 build (a table kernel and the forward from the module's own inputs, no per-call
-#: preparation kernels; pair_embed_geom_sm80.cu -DMWE_FWD_GT2): the decoder pair (``PairEmbedCA``)
-A100_ONE_LAUNCH = frozenset({"ca"})
+#: preparation kernels; pair_embed_geom_sm80.cu -DMWE_FWD_GT2): the decoder pair (``PairEmbedCA``) and the encoder pair (``PairEmbedGeom``)
+A100_ONE_LAUNCH = frozenset({"ca", "geom"})
+#: H100 inference: the same one-launch forwards, this source built for sm_90a (``ext``); the modules (kinds) that take it
+H100_ONE_LAUNCH = frozenset({"ca", "geom"})
 #: impl 4 / 5: the pair slices (= fp32 partials) of pg120_bwd per mode: 4 x 42 = 168 CTAs (one per SM) / 2 x 85 = 170
 NB_SM120 = {0: 42, 1: 85}
 

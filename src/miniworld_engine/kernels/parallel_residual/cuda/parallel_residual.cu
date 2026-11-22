@@ -50,7 +50,10 @@ constexpr int kUnroll = 4;  // 16-byte vectors per thread of the backward (one t
 #ifndef PR_UNROLL
 #define PR_UNROLL 0  // 0: the default (2 vectors a thread for one branch, else 1); N > 0: N vectors a thread and tensor (an arch build sets it)
 #endif
-__host__ __device__ constexpr int fwd_unroll(int nb) { return PR_UNROLL > 0 ? PR_UNROLL : (nb == 1 ? 2 : 1); }
+#ifndef PR_UNROLL3
+#define PR_UNROLL3 0  // N > 0: N vectors a thread for three branches (overrides PR_UNROLL there)
+#endif
+__host__ __device__ constexpr int fwd_unroll(int nb) { return nb == 3 && PR_UNROLL3 > 0 ? PR_UNROLL3 : PR_UNROLL > 0 ? PR_UNROLL : (nb == 1 ? 2 : 1); }
 constexpr int kMaxBranches = 5;  // 5: Chai-1's parallel PairformerBlock (two triangle multiplications, two triangle attentions, the transition)
 
 struct Branches {

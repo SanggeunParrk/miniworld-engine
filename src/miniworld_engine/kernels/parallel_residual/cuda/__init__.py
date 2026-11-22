@@ -25,7 +25,7 @@ _ARCH = {
 # pair d 256 L 2048 n 2: 2.827 vs 2.728 ms); nc loads / plain loads equal it (bit-identical outputs; 2 a hair ahead at small sizes). sm120 keeps the hinted default.
 # sm100 (B200): its own source (parallel_residual_sm100.cu), default hints (no PR_HINT flag)
 # sm120 (RTX 5090, 2026-11-22): PR_UNROLL=4 (4 vectors a thread and tensor; the default 1 left the small calls under the Triton kernel: pair d 256 L 128, 3 branches 30.7 vs 28.7 us, 2 branches 24.9 vs 24.6 us -> 28.7 / 22.5 us)
-_FLAGS = {"sm80": ("-DPR_HINT=1",), "sm90": ("-DPR_HINT=2",), "sm120": ("-DPR_UNROLL=4",)}
+_FLAGS = {"sm80": ("-DPR_HINT=1",), "sm90": ("-DPR_HINT=2",), "sm120": ("-DPR_UNROLL=8", "-DPR_HINT=2", "-DPR_UNROLL3=4")}
 
 
 @functools.lru_cache(maxsize=None)
