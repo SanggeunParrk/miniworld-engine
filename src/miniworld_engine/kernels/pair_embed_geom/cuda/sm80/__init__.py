@@ -55,8 +55,8 @@ BWD_IMPL = {0: 1, 1: 3}
 BWD_IMPL_SM120 = {0: 4, 1: 5}
 KS = 2  # pair_embed_geom_sm80.cu
 #: A100 inference: the modules whose forward is the one-launch gt-2 build (a table kernel and the forward from the module's own inputs, no per-call
-#: preparation kernels; pair_embed_geom_sm80.cu -DMWE_FWD_GT2): the decoder pair (``PairEmbedCA``)
-A100_ONE_LAUNCH = frozenset({"ca"})
+#: preparation kernels; pair_embed_geom_sm80.cu -DMWE_FWD_GT2): the decoder pair (``PairEmbedCA``) and the encoder pair (``PairEmbedGeom``)
+A100_ONE_LAUNCH = frozenset({"ca", "geom"})
 #: impl 4 / 5: the pair slices (= fp32 partials) of pg120_bwd per mode: 4 x 42 = 168 CTAs (one per SM) / 2 x 85 = 170
 NB_SM120 = {0: 42, 1: 85}
 
