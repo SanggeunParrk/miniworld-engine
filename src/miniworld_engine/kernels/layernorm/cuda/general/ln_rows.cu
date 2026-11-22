@@ -533,9 +533,11 @@ __global__ void __launch_bounds__(NW * 32) ln_stage_bwd_kernel(const float* __re
 #define MWLN_RW_EPLS4(M_, ...) M_(4, __VA_ARGS__) M_(8, __VA_ARGS__) M_(12, __VA_ARGS__) M_(16, __VA_ARGS__) M_(20, __VA_ARGS__) \
   M_(24, __VA_ARGS__) M_(28, __VA_ARGS__) M_(32, __VA_ARGS__)
 
-//: the staged fp32 backward (ln_stage_bwd_kernel): from this many rows; default geometry: warps per CTA, ring stages, units of U rows a tile
-constexpr int64_t STAGE_BWD_MIN_ROWS = 4096;
-constexpr int STAGE_BWD_NW = 8, STAGE_BWD_ST = 3, STAGE_BWD_UNITS = 2;
+//: the staged fp32 backward (ln_stage_bwd_kernel): from this many rows (it beat the warp-per-row backward at every M measured, 128 .. 590 k rows, widths 267 .. 833); default geometry: warps per CTA, ring stages, units of U rows a tile
+constexpr int64_t STAGE_BWD_MIN_ROWS = 1;
+constexpr int STAGE_BWD_NW = 8, STAGE_BWD_ST = 3, STAGE_BWD_UNITS = 2;           // from STAGE_BWD_BIG_ROWS rows
+constexpr int64_t STAGE_BWD_BIG_ROWS = 16384;
+constexpr int STAGE_BWD_NW_SMALL = 4, STAGE_BWD_ST_SMALL = 3, STAGE_BWD_UNITS_SMALL = 1;  // fewer rows: a tile of U rows, 4 warps (11.1 vs 11.4 us at 651 x 128)
 
 static int rw_epl(int N) {
   const int need = (N + 31) / 32;
@@ -583,6 +585,7 @@ static void launch_stage_fwd(int epl, const CT* xp, const float* wp, const float
 constexpr int64_t STAGE_MIN_ROWS = 4096;
 //: rows up to which the forward runs a CTA per row (ln_small_fwd_kernel: the token streams, latency bound)
 constexpr int64_t SMALL_MAX_ROWS = 1024;
+constexpr int64_t SMALL_MAX_ROWS_WIDE_F32 = 16384;
 //: the staged forward's default geometry: warps per CTA, bytes per tile
 constexpr int STAGE_NW = 2;
 constexpr int STAGE_TILE = 16384;
@@ -597,7 +600,9 @@ static void rows_fwd_impl(int64_t mode, int epl, const CT* xp, const float* wp, 
     nw = int(mode / 100000);
     target = int(mode % 100000);
   }
-  if (mode == 3 || (mode == 0 && M <= SMALL_MAX_ROWS)) {  // few rows: a CTA per row
+  // few rows: a CTA per row; fp32 rows of 449+ values: up to SMALL_MAX_ROWS_WIDE_F32 rows (the warp-per-row kernel is 1-1.7 us behind there, a tie from ~64 k rows)
+  const int64_t small_max = (sizeof(CT) == 4 && N > 448) ? SMALL_MAX_ROWS_WIDE_F32 : SMALL_MAX_ROWS;
+  if (mode == 3 || (mode == 0 && M <= small_max)) {
     const int pt = (N + mwln::SM_THREADS - 1) / mwln::SM_THREADS;
 #define MWLN_SM_F(P) \
   if (pt == P) mwln::ln_small_fwd_kernel<CT, P><<<unsigned(M), mwln::SM_THREADS, 0, s>>>(xp, wp, bp, yp, mp, rp, N, eps);
@@ -691,7 +696,8 @@ std::vector<torch::Tensor> ln_rows_bwd(torch::Tensor dy, torch::Tensor x, torch:
   // NW * 100000 + ST * 10000 + units: that geometry, forced)
   if (x.scalar_type() == torch::kFloat32 && mode != 1 && (mode >= 100000 || M >= STAGE_BWD_MIN_ROWS) &&
       reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0 && reinterpret_cast<uintptr_t>(dy.data_ptr()) % 16 == 0) {
-    int nw = STAGE_BWD_NW, st = STAGE_BWD_ST, units = STAGE_BWD_UNITS;
+    const bool big = M >= STAGE_BWD_BIG_ROWS;
+    int nw = big ? STAGE_BWD_NW : STAGE_BWD_NW_SMALL, st = big ? STAGE_BWD_ST : STAGE_BWD_ST_SMALL, units = big ? STAGE_BWD_UNITS : STAGE_BWD_UNITS_SMALL;
     if (mode >= 100000) {
       nw = int(mode / 100000);
       st = int(mode / 10000 % 10);
