@@ -237,6 +237,16 @@ __device__ __forceinline__ void bwd_groups(long rg0, long step, int cnt, const X
   bwd_compute<XT, G, V, MODE, UN>(R, w, DX, aw, ab, N, invN, g);
 }
 
+// the CTA's partial row of dw / db: into the partial-sum matrix, or -- a call of one CTA, where the partial row is the answer -- straight into the gradient (its dtype), which saves the reduction kernel
+__device__ __forceinline__ void store_partial(float* __restrict__ P, void* __restrict__ Out, bool o_bf, int N, int t, float s) {
+  if (Out) {
+    if (o_bf) reinterpret_cast<bf*>(Out)[t] = __float2bfloat16_rn(s);
+    else reinterpret_cast<float*>(Out)[t] = s;
+  } else {
+    P[(long)blockIdx.x * N + t] = s;
+  }
+}
+
 // row groups in flight per iteration of a backward warp: more when a group is little data; every knob below was measured on both cards (A-B-A-B, CUDA graph, flushed L2)
 #ifndef BWD_SMALL_GROUPS
 #define BWD_SMALL_GROUPS 2048   // up to this many row groups: CTAs of 128 threads
@@ -249,7 +259,7 @@ __device__ __forceinline__ void bwd_groups(long rg0, long step, int cnt, const X
 #endif
 #endif
 #ifndef BWD_PREFETCH
-#define BWD_PREFETCH 1          // the loads of the next batch of a warp issued before this batch is computed (rows of up to 2 chunks a lane)
+#define BWD_PREFETCH 1          // the loads of the next batch of a warp issued before this batch is computed (rows of one chunk a lane; with two the doubled registers cost 10 % at d 256 fp32)
 #endif
 #ifndef BWD_UN_V1
 #if defined(MWE_SM120)
@@ -268,7 +278,7 @@ template <int V> constexpr int bwd_unroll() { return V == 1 ? BWD_UN_V1 : (V == 
 template <typename XT, int G, int V, int MODE, bool DYN, bool ONE = false>
 __global__ void __launch_bounds__(NTB, (V >= 2 && sizeof(XT) == 2) ? BWD_MINB_WIDE : (V >= 2 ? 2 : 1)) bwd_vec(const XT* __restrict__ DY, const XT* __restrict__ X, const void* __restrict__ W, bool w_bf,
                                                                const XT* __restrict__ RS, const float* __restrict__ MEAN, const float* __restrict__ RSTD, XT* __restrict__ DX,
-                                                               float* __restrict__ PDW, float* __restrict__ PDB, int* __restrict__ CTR, long M, int N) {
+                                                               float* __restrict__ PDW, float* __restrict__ PDB, int* __restrict__ CTR, long M, int N, void* DWo, void* DBo, bool o_bf) {
   constexpr int CE = Chunk<XT>::CE, RPW = 32 / G;
   constexpr bool DB = MODE == 0;
   constexpr int UN = ONE ? 1 : bwd_unroll<V>();   // ONE: every warp has at most one row group (a small M): the code is a quarter of the size (1784 -> ~500 instructions of d 256 bf16), which is most of such a call: its instructions come from DRAM through a flushed L2
@@ -306,7 +316,7 @@ __global__ void __launch_bounds__(NTB, (V >= 2 && sizeof(XT) == 2) ? BWD_MINB_WI
   } else {
     const long stride = (long)gridDim.x * nwarp;
     long rg = (long)blockIdx.x * nwarp + warp;
-    if constexpr (BWD_PREFETCH && !ONE && V <= 2) {
+    if constexpr (BWD_PREFETCH && !ONE && V == 1) {
       // software pipeline: the loads of the next batch are in flight while this one is computed (a warp is otherwise idle for one DRAM round trip a batch, and a small call has 2-4 batches)
       if (rg < ngroups) {
         BwdRegs<XT, V, UN> cur, nxt;
@@ -338,7 +348,7 @@ __global__ void __launch_bounds__(NTB, (V >= 2 && sizeof(XT) == 2) ? BWD_MINB_WI
           if constexpr (DB) ab[v][e] += __shfl_xor_sync(0xffffffffu, ab[v][e], o);
         }
   }
-  if (PDW) {
+  if (PDW || DWo) {
     if (sub == 0) {
 #pragma unroll
       for (int v = 0; v < V; ++v)
@@ -349,12 +359,12 @@ __global__ void __launch_bounds__(NTB, (V >= 2 && sizeof(XT) == 2) ? BWD_MINB_WI
     for (int t = threadIdx.x; t < N; t += nthr) {
       float s = 0.f;
       for (int k = 0; k < nwarp; ++k) s += red[k * N + t];
-      PDW[(long)blockIdx.x * N + t] = s;
+      store_partial(PDW, DWo, o_bf, N, t, s);
     }
     __syncthreads();
   }
   if constexpr (DB) {
-    if (PDB) {
+    if (PDB || DBo) {
       if (sub == 0) {
 #pragma unroll
         for (int v = 0; v < V; ++v)
@@ -365,7 +375,7 @@ __global__ void __launch_bounds__(NTB, (V >= 2 && sizeof(XT) == 2) ? BWD_MINB_WI
       for (int t = threadIdx.x; t < N; t += nthr) {
         float s = 0.f;
         for (int k = 0; k < nwarp; ++k) s += red[k * N + t];
-        PDB[(long)blockIdx.x * N + t] = s;
+        store_partial(PDB, DBo, o_bf, N, t, s);
       }
     }
   }
@@ -1256,23 +1266,26 @@ void run_bwd_vec(const XT* DY, const XT* X, const void* W, bool w_bf, const XT* 
   const int resident = sms * blocks_per_sm(stat, nt, dyn);
   const int grid = (int)std::min<long>({(groups + nt / 32 - 1) / (nt / 32), (long)resident, std::max<long>(sms, (M + BWD_ROWS_CTA - 1) / BWD_ROWS_CTA)});
   const bool dyn_sched = groups > 32 * (long)grid * (nt / 32);
+  const bool direct = grid == 1;                 // one CTA: its partial row is the gradient (no reduction kernel)
   at::Tensor pdw, pdb, ctr;
   float *PDW = nullptr, *PDB = nullptr;
-  if (need_dw) { pdw = at::empty({grid, N}, like.options().dtype(at::kFloat)); PDW = pdw.data_ptr<float>(); }
-  if (need_db) { pdb = at::empty({grid, N}, like.options().dtype(at::kFloat)); PDB = pdb.data_ptr<float>(); }
+  if (need_dw && !direct) { pdw = at::empty({grid, N}, like.options().dtype(at::kFloat)); PDW = pdw.data_ptr<float>(); }
+  if (need_db && !direct) { pdb = at::empty({grid, N}, like.options().dtype(at::kFloat)); PDB = pdb.data_ptr<float>(); }
+  void* DWo = direct && need_dw ? DW : nullptr;
+  void* DBo = direct && need_db ? DB : nullptr;
   if (dyn_sched) {
     ctr = at::zeros({1}, like.options().dtype(at::kInt));
-    bwd_vec<XT, G, V, MODE, true><<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, ctr.data_ptr<int>(), M, N);
+    bwd_vec<XT, G, V, MODE, true><<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, ctr.data_ptr<int>(), M, N, DWo, DBo, o_bf);
   } else {
 #ifdef BWD_NOONE
     if (false)
 #else
     if (groups <= (long)grid * (nt / 32))
 #endif
-      bwd_vec<XT, G, V, MODE, false, true><<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, nullptr, M, N);
-    else stat<<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, nullptr, M, N);
+      bwd_vec<XT, G, V, MODE, false, true><<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, nullptr, M, N, DWo, DBo, o_bf);
+    else stat<<<grid, nt, dyn, st>>>(DY, X, W, w_bf, RS, MEAN, RSTD, DX, PDW, PDB, nullptr, M, N, DWo, DBo, o_bf);
   }
-  if (need_dw || need_db) run_reduce(PDW, PDB, DW, DB, o_bf, grid, N, st);
+  if (!direct && (need_dw || need_db)) run_reduce(PDW, PDB, DW, DB, o_bf, grid, N, st);
 }
 
 // the wide-row backward (bf16, V = 6, 8, 10)
