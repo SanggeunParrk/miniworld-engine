@@ -294,7 +294,7 @@ def _probs(bias: torch.Tensor, keep: torch.Tensor | None, H: int, L: int) -> tor
 #: The RTX 5090 (sm_120a): the plane contractions on CUTLASS tensor-op tiles (``pair_weighted_averaging.cuda.gemm_sm120``) instead of cuBLAS, whose heuristic picks 32 x 32 WMMA
 #: tiles there for these shapes (L 256, 4 x 32-channel heads: the P v contraction 51 -> 41 us, the out-projection with its residual 63 -> 43 us; L 512: 348 -> 209, 248 -> 137 us)
 #: and copies the residual into the output first (addmm). The same accumulation (bf16 products, fp32 sums rounded once): within bf16 rounding of the cuBLAS bits.
-#: MINIWORLD_BIDIR_SM120_GEMM=0 switches it off (the A100 and H100 never take it).
+#: From L 256 (at L 128 the call is the same speed). MINIWORLD_BIDIR_SM120_GEMM=0 switches it off (the A100 and H100 never take it).
 SM120_GEMM = os.environ.get("MINIWORLD_BIDIR_SM120_GEMM", "1") != "0"
 _PV_CFG, _OUT_CFG = 0, 2  # gemm_sm120.CFGS: 128 x 128 x 32 (P v); 256 x 128 x 32 (the out-projection, N = d_pair 128)
 
@@ -305,7 +305,7 @@ def _sm120_gemm() -> bool:
 
 def _pv(a, p, out):
     """out[h] = a[h] p[h]^T (a [H, dh L, L] the value planes of the heads, p [H, L, L] the softmax rows, out [H, dh L, L])."""
-    if _sm120_gemm() and a.is_contiguous() and p.is_contiguous() and out.is_contiguous():
+    if _sm120_gemm() and p.shape[-1] >= 256 and a.is_contiguous() and p.is_contiguous() and out.is_contiguous():
         from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120
 
         e = a.new_empty((0,))
@@ -316,7 +316,7 @@ def _pv(a, p, out):
 
 def _out_proj(x, u, wo, out):
     """out = x + u^T wo^T (x, out: [L L, C] rows of one sample; u [K, L L] planes; wo [C, K])."""
-    if _sm120_gemm() and wo.shape[0] == 128 and wo.shape[1] % 8 == 0 and u.is_contiguous() and wo.is_contiguous() and x.is_contiguous() and out.is_contiguous():
+    if _sm120_gemm() and u.shape[1] >= 256 * 256 and wo.shape[0] == 128 and wo.shape[1] % 8 == 0 and u.is_contiguous() and wo.is_contiguous() and x.is_contiguous() and out.is_contiguous():
         from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120
 
         e = x.new_empty((0,))

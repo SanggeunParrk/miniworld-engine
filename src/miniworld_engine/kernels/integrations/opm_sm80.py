@@ -29,6 +29,8 @@ from miniworld_engine.kernels._nvcc import build_failed
 CH = 32
 #: The port's E053 short training pipeline (``pipeline_sm80``), an opt-in experiment: off.
 _PIPELINE = False
+#: The RTX 5090 runs the plain product (cuBLAS) instead of the live-token skip kernel from this length (tokens) on, when no token is masked.
+_LIVE_MM_MIN_L = 384
 
 
 @torch.compiler.assume_constant_result
@@ -236,7 +238,7 @@ def _outer(sm, a, b, mk):
     from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
 
     # nothing to skip: cuBLAS.  The RTX 5090 from L 384 only (s5090/four: rows 55 / 63 at L 384 1.93 -> 1.82 / 1.72 -> 1.69 ms; at L 128 the skip kernel leads: 0.25 vs 0.27 ms)
-    if (not _card.sm120() or a.shape[1] >= 32 * 384) and ogemm_sm80.all_live(mk):
+    if (not _card.sm120() or a.shape[1] >= 32 * _LIVE_MM_MIN_L) and ogemm_sm80.all_live(mk):
         return torch.mm(a.t(), b)
     return ogemm_sm80.outer(a, b, ogemm_sm80.live_tokens(mk))
 
