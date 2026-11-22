@@ -531,6 +531,190 @@ at::Tensor chai_bwd(at::Tensor dy, at::Tensor y, at::Tensor stats, int64_t N) {
 
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
+// The same backward with dy = dz W' fused in (H100, CZ = 256): dy never visits HBM.  A tile = 64 pairs (rows i, i + 1 x 32 columns j): y and dz
+// arrive by TMA (128 B swizzle), dy [64 x 512] = dz [64 x 256] W' is four wgmma m64n128 chains (K = 256, W'^T streamed through a two-slot ring)
+// whose bf16-rounded result is staged in shared memory (the rounding of the cuBLAS dy the old pass read), then the LayerNorm backward as in
+// chai_bwd_kernel, with dO written straight to global memory as 16-byte chunks (a warp = 32 consecutive j = 512 contiguous bytes).
+namespace {
+constexpr int FBM = 64, FCZ = 256, FKB = FCZ / 64, FNC = P / 128;
+constexpr size_t FSMEM = size_t(2 * FBM * P + FBM * FCZ + 2 * B_EL) * 2 + 1024 + 256;
+
+__global__ void __launch_bounds__(160, 1) chai_bwd_fused_kernel(const __grid_constant__ CUtensorMap zmap, const __grid_constant__ CUtensorMap wtmap,
+                                                                 const __grid_constant__ CUtensorMap ymap, const float* __restrict__ stats,
+                                                                 bf16* __restrict__ dO, int N, int tiles) {
+  extern __shared__ __align__(1024) unsigned char raw_[];
+  bf16* sY = reinterpret_cast<bf16*>(raw_);                   // [8 g][64 m][64]
+  bf16* sDY = sY + FBM * P;                                   // [8 g][64 m][64]
+  bf16* sZ = sDY + FBM * P;                                   // [4 kb][64 m][64]
+  bf16* sB = sZ + FBM * FCZ;                                  // [2][128 n][64]
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sB + 2 * B_EL);
+  uint64_t* z_full = bars; uint64_t* z_empty = bars + 1; uint64_t* y_full = bars + 2; uint64_t* y_empty = bars + 3;
+  uint64_t* b_full = bars + 4; uint64_t* b_empty = bars + 6;
+  __shared__ float sred[2][64][2];
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int tpr = N / 32;
+  if (tid == 0) {
+    mb_init(z_full, 1); mb_init(z_empty, 1); mb_init(y_full, 1); mb_init(y_empty, 1);
+    for (int k = 0; k < 2; ++k) { mb_init(b_full + k, 1); mb_init(b_empty + k, 4); }
+    fence_init();
+  }
+  __syncthreads();
+  if (warp == 4) {                                            // producer
+    if (lane == 0) {
+      int n = 0, gb = 0;
+      auto load_b = [&](int c, int kb) {
+        const int slot = gb % 2;
+        if (gb >= 2) mb_wait(b_empty + slot, ((gb / 2) - 1) & 1);
+        mb_expect(b_full + slot, B_EL * 2);
+        tma_ld2(&wtmap, sB + slot * B_EL, b_full + slot, kb * 64, c * 128);
+        ++gb;
+      };
+      for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++n) {
+        const long pairA = (long)((t / tpr) * 2) * N + (t % tpr) * 32;
+        if (n > 0) mb_wait(z_empty, (n - 1) & 1);
+        mb_expect(z_full, FBM * FCZ * 2);
+#pragma unroll
+        for (int kb = 0; kb < FKB; ++kb) {
+          tma_ld2(&zmap, sZ + kb * (FBM * 64), z_full, kb * 64, (int)pairA);
+          tma_ld2(&zmap, sZ + kb * (FBM * 64) + 32 * 64, z_full, kb * 64, (int)(pairA + N));
+        }
+        load_b(0, 0); load_b(0, 1);
+        if (n > 0) mb_wait(y_empty, (n - 1) & 1);
+        mb_expect(y_full, FBM * P * 2);
+#pragma unroll
+        for (int g = 0; g < G; ++g) {
+          tma_ld2(&ymap, sY + g * (FBM * 64), y_full, g * 64, (int)pairA);
+          tma_ld2(&ymap, sY + g * (FBM * 64) + 32 * 64, y_full, g * 64, (int)(pairA + N));
+        }
+        for (int s = 2; s < FNC * FKB; ++s) load_b(s / FKB, s % FKB);
+      }
+    }
+  } else {                                                    // consumers: one warpgroup
+    int n = 0, gb = 0;
+    for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++n) {
+      const int i0 = (t / tpr) * 2, j0 = (t % tpr) * 32;
+      mb_wait(z_full, n & 1);
+      const int r0 = warp * 16 + (lane >> 2);
+      for (int c = 0; c < FNC; ++c) {
+        float acc[64];
+        wg_fence();
+        for (int kb = 0; kb < FKB; ++kb, ++gb) {
+          const int bslot = gb % 2;
+          mb_wait(b_full + bslot, (gb / 2) & 1);
+          const bf16* B = sB + bslot * B_EL;
+#pragma unroll
+          for (int ks = 0; ks < 4; ++ks)
+            mma_m64n128k16(wg_desc(sZ + kb * (FBM * 64) + ks * 16), wg_desc(B + ks * 16), acc, (kb | ks) != 0);
+          wg_commit();
+          wg_wait<0>();
+          if (lane == 0) mb_arrive(b_empty + bslot);
+        }
+#pragma unroll
+        for (int nt = 0; nt < 16; ++nt) {
+          const int p = c * 128 + nt * 8 + (lane & 3) * 2, g = p >> 6, ch = (p & 63) >> 3;
+#pragma unroll
+          for (int hh = 0; hh < 2; ++hh) {
+            const int m = r0 + hh * 8;
+            *reinterpret_cast<__nv_bfloat162*>(sDY + (g * FBM + m) * 64 + ((ch ^ (m & 7)) << 3) + (p & 7)) = __floats2bfloat162_rn(acc[nt * 4 + hh * 2], acc[nt * 4 + hh * 2 + 1]);
+          }
+        }
+      }
+      if (tid == 0) mb_arrive(z_empty);                       // (the dz tile has been read by every warp's last wgmma: it retired above)
+      bar_sync(1, 128);
+      mb_wait(y_full, n & 1);
+      // ---- LayerNorm backward of the 512 products of every pair; thread = (pair j, half h of the groups)
+      {
+        const int j = tid & 63, h = tid >> 6;
+        float s1 = 0.f, s2 = 0.f;
+#pragma unroll
+        for (int gg = 0; gg < 4; ++gg) {
+          const int g = h * 4 + gg;
+#pragma unroll
+          for (int k = 0; k < 8; ++k) {
+            const int off = ((g * FBM + j) * 8 + (k ^ (j & 7))) * 8;
+            const uint4 ud = *reinterpret_cast<const uint4*>(sDY + off), uy = *reinterpret_cast<const uint4*>(sY + off);
+            const __nv_bfloat162* pd = reinterpret_cast<const __nv_bfloat162*>(&ud);
+            const __nv_bfloat162* py = reinterpret_cast<const __nv_bfloat162*>(&uy);
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+              const float2 d = __bfloat1622float2(pd[e]), y = __bfloat1622float2(py[e]);
+              s1 += d.x + d.y; s2 += d.x * y.x + d.y * y.y;
+            }
+          }
+        }
+        sred[h][j][0] = s1; sred[h][j][1] = s2;
+        bar_sync(1, 128);
+        s1 += sred[h ^ 1][j][0]; s2 += sred[h ^ 1][j][1];
+        const int im = i0 + (j >> 5), jm = j0 + (j & 31);
+        const float c1 = s1 * (1.f / P), c2 = s2 * (1.f / P), rstd = stats[((long)im * N + jm) * 2 + 1];
+        const long nk = (long)N * KK;
+#pragma unroll
+        for (int gg = 0; gg < 4; ++gg) {
+          const int g = h * 4 + gg;
+#pragma unroll
+          for (int k = 0; k < 8; ++k) {
+            const int off = ((g * FBM + j) * 8 + (k ^ (j & 7))) * 8;
+            const uint4 ud = *reinterpret_cast<const uint4*>(sDY + off), uy = *reinterpret_cast<const uint4*>(sY + off);
+            const __nv_bfloat162* pd = reinterpret_cast<const __nv_bfloat162*>(&ud);
+            const __nv_bfloat162* py = reinterpret_cast<const __nv_bfloat162*>(&uy);
+            uint4 uo;
+            __nv_bfloat162* po = reinterpret_cast<__nv_bfloat162*>(&uo);
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+              const float2 d = __bfloat1622float2(pd[e]), y = __bfloat1622float2(py[e]);
+              po[e] = __floats2bfloat162_rn(rstd * (d.x - c1 - y.x * c2), rstd * (d.y - c1 - y.y * c2));
+            }
+            *reinterpret_cast<uint4*>(dO + ((long)g * nk + (long)im * KK + k) * nk + (long)jm * KK) = uo;
+          }
+        }
+      }
+      bar_sync(1, 128);                                       // sY / sDY are free: the next tile's y may land, its dy may be staged
+      if (tid == 0) mb_arrive(y_empty);
+    }
+  }
+}
+}  // namespace
+
+// dz [N N, 256] bf16, wft [512, 256] bf16 (W'^T), y [N N, 512] bf16 and stats [N N, 2] fp32 (the forward's) -> dO [8, N K, N K] bf16
+// = chai_bwd(dz W', y, stats) without the [N N, 512] dy tensor
+at::Tensor chai_bwd_fused(at::Tensor dz, at::Tensor wft, at::Tensor y, at::Tensor stats, int64_t N) {
+  TORCH_CHECK(dz.is_cuda() && dz.is_contiguous() && dz.scalar_type() == at::kBFloat16 && dz.dim() == 2 && dz.size(0) == N * N && dz.size(1) == FCZ
+              && wft.is_cuda() && wft.is_contiguous() && wft.scalar_type() == at::kBFloat16 && wft.size(0) == P && wft.size(1) == FCZ
+              && y.is_cuda() && y.is_contiguous() && y.scalar_type() == at::kBFloat16 && y.size(0) == N * N && y.size(1) == P && N % 64 == 0,
+              "chai_bwd_fused: dz [N N, 256], wft [512, 256], y [N N, 512] contiguous bf16");
+  const at::cuda::OptionalCUDAGuard guard(dz.device());
+  const int64_t nk = N * KK;
+  auto dO = at::empty({G, nk, nk}, dz.options());
+  alignas(64) CUtensorMap zmap{}, wtmap{}, ymap{};
+  {
+    uint64_t dims[2] = {(uint64_t)FCZ, (uint64_t)(N * N)};
+    uint64_t strides[1] = {FCZ * 2};
+    uint32_t box[2] = {64, 32};
+    encode(&zmap, dz.data_ptr(), 2, dims, strides, box, true);
+  }
+  {
+    uint64_t dims[2] = {(uint64_t)FCZ, (uint64_t)P};
+    uint64_t strides[1] = {FCZ * 2};
+    uint32_t box[2] = {64, 128};
+    encode(&wtmap, wft.data_ptr(), 2, dims, strides, box, true);
+  }
+  {
+    uint64_t dims[2] = {P, (uint64_t)(N * N)};
+    uint64_t strides[1] = {P * 2};
+    uint32_t box[2] = {64, 32};
+    encode(&ymap, y.data_ptr(), 2, dims, strides, box, true);
+  }
+  const int tiles = (int)(N * N / FBM);
+  const int sms = mw::sm_count();
+  cudaFuncSetAttribute(chai_bwd_fused_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)FSMEM);
+  chai_bwd_fused_kernel<<<std::min(tiles, sms), 160, FSMEM, at::cuda::getCurrentCUDAStream()>>>(zmap, wtmap, ymap, stats.data_ptr<float>(),
+                                                                                                reinterpret_cast<bf16*>(dO.data_ptr()), (int)N, tiles);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return dO;
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
 // Chai-1 backward of the prologue: dA, dB [8, T, 8] (the gradients of the group-major projections) -> dcat [T, 128] (masked, the operand of dW), the
 // LayerNorm output ln16 [T, 64] (bf16), dx [T, 64] and per-block sums of dgamma / dbeta; dln = dcat Wlr (mma.sync), then the LayerNorm backward on
 // the accumulator rows (statistics of the forward).  A block = 4 warps x 16 rows.
@@ -716,5 +900,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("chai_epilogue", &chai_epilogue);
   m.def("chai_proj", &chai_proj);
   m.def("chai_bwd", &chai_bwd);
+  m.def("chai_bwd_fused", &chai_bwd_fused);
   m.def("chai_projbwd", &chai_projbwd);
 }

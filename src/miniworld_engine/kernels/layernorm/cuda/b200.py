@@ -30,10 +30,9 @@ from miniworld_engine.kernels.layernorm.cuda import general, pipe, sm100
 _BF16, _F32 = torch.bfloat16, torch.float32
 NEVER = 1 << 62
 SLOWER: dict[tuple[int, torch.dtype, bool], tuple[int, int]] = {
-    (64, _BF16, False): (65_536, 1 << 62),
-    (128, _BF16, False): (262_144, 1 << 62),
+    # 2026-11-23: bf16 64 / 128 inference are served at every size (lean forward with early affine loads: [65536 .. 4194304, 64] 10.2 .. 166 us against Triton 10.2 .. 168, [327680 .. 5242880, 128] 34.7 .. 405 against 34.7 .. 416)
     (256, _BF16, False): (147_456, 1 << 62),
-    (384, _BF16, False): (147_456, 1 << 62),
+    (384, _BF16, False): (524_288, 1 << 62),  # 2026-11-23: [147456 / 262144, 384] level with Triton (45.0 / 71.6 us), [1048576, 384] 253.8 against 247.7
 }
 
 
