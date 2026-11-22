@@ -788,8 +788,8 @@ class TokenDiTMiniWorld(TokenDiTProtenix):
     #: was the general composition with a materialised-score attention (a100_families.token)
     backend_versions: ClassVar[dict[str, int]] = {
         **TokenDiTProtenix.backend_versions,
-        "cuda:a100_sm80": 6,
-    }  # 6 (2026-11-19): as the base class (IEEE fp32 with TF32 off); 5 (2026-11-13): as the base class (the key-tile skip)
+        "cuda:a100_sm80": 7,
+    }  # 7 (2026-11-22): as the base class (extra_pair_bias at inference); 6 (2026-11-19): as the base class (IEEE fp32 with TF32 off); 5 (2026-11-13): as the base class (the key-tile skip)
 
     backends = ("pytorch", "cuda", "triton")
     qk_norm = True
