@@ -696,9 +696,63 @@ RTX 5090 (sm_120): part B (TriMul, L = 512, d_pair 128)
 | `gpumode` | 2.31e-03 | 5.40e-03 | 4.86e-03 | - | - |
 | `geonn` | 3.46e-03 | 5.56e-03 | 7.30e-03 | - | - |
 
-### B200 (sm_100)
+### B200 (sm_100): part A (L = 512)
 
-No E5 accuracy record exists for B200 (sm_100): the B200 campaign ran the speed stages and the graph check; the E5 accuracy stages (`e5acc`, `acc_trimul.py`) were not run there. The engine's own accuracy against float64 on this card (cuda, triton, cueq, pytorch; E1 cases) is in `E3_accuracy/E3_b200.csv`; the candidates' accuracy is not measured on B200.
+| class | backend | eval error (light) | train error (light, tensor) | note |
+|---|---|---|---|---|
+| TriAttn | `pytorch` | 3.86e-03 (GREEN) | 8.67e-03 (GREEN, grad:ln_pair.weight) |  |
+| TriAttn | `cuda` | 3.03e-03 (GREEN) [pytorch 3.86e-03] | 9.06e-03 (GREEN, grad:to_query.weight) [pytorch 1.04e-02] |  |
+| TriAttn | `cueq` | 3.67e-03 (GREEN) [pytorch 3.86e-03] | 7.93e-03 (GREEN, grad:ln_pair.weight) [pytorch 8.67e-03] |  |
+| TriAttn | `ds4sci` | 3.67e-03 (GREEN) [pytorch 3.86e-03] | 7.19e-03 (GREEN, grad:pair) [pytorch 7.50e-03] | new in this integration |
+| TriAttn | `trifast` | 3.67e-03 (GREEN) [pytorch 3.86e-03] | 7.99e-03 (GREEN, grad:ln_pair.weight) [pytorch 8.67e-03] | new in this integration |
+| TriAttn | `gnops` | 3.67e-03 (GREEN) [pytorch 3.86e-03] | 9.32e-03 (YELLOW, grad:ln_pair.weight) [pytorch 8.67e-03] |  |
+| TriAttn | `of3tri` | 3.67e-03 (GREEN) [pytorch 3.86e-03] | 9.33e-03 (YELLOW, grad:ln_pair.weight) [pytorch 8.67e-03] |  |
+| TriAttn | `megafold` | 3.67e-03 (GREEN) [pytorch 3.86e-03] | 7.19e-03 (GREEN, grad:pair) [pytorch 7.50e-03] |  |
+| TriAttn | `bionemo_ir` | 3.67e-03 (GREEN) [pytorch 3.86e-03] | unsupported: NOBWD |  |
+| TriAttn | `turbopf` | unsupported: HW | unsupported: HW |  |
+| TriMul | `pytorch` | 7.01e-03 (GREEN) | 8.60e-03 (GREEN, grad:pair) |  |
+| TriMul | `cuda` | 5.10e-03 (GREEN) [pytorch 7.01e-03] | 6.25e-03 (GREEN, grad:to_right.weight) [pytorch 6.27e-03] |  |
+| TriMul | `cueq` | 5.10e-03 (GREEN) [pytorch 7.01e-03] | 7.77e-03 (GREEN, grad:pair) [pytorch 8.60e-03] |  |
+| TriMul | `fast_trimul` | unsupported: SHAPE | unsupported: SHAPE |  |
+| TriMul | `gpumode` | 7.01e-03 (GREEN) [pytorch 7.01e-03] | unsupported: NOBWD |  |
+| TriMul | `geonn` | 5.75e-03 (GREEN) [pytorch 7.01e-03] | unsupported: NOBWD |  |
+| AttentionPairBias-384 | `pytorch` | 2.69e-03 (GREEN) | 1.21e-02 (GREEN, grad:pair) |  |
+| AttentionPairBias-384 | `cuda` | 2.69e-03 (GREEN) [pytorch 2.69e-03] | 8.40e-03 (YELLOW, grad:ln_single.weight) [pytorch 7.07e-03] |  |
+| AttentionPairBias-384 | `cueq` | 2.69e-03 (GREEN) [pytorch 2.69e-03] | 2.01e-02 (YELLOW, grad:pair) [pytorch 1.21e-02] |  |
+| AttentionPairBias-384 | `gnops` | 2.69e-03 (GREEN) [pytorch 2.69e-03] | 8.88e-03 (YELLOW, grad:ln_single.weight) [pytorch 7.07e-03] |  |
+| AttentionPairBias-384 | `of3tri` | 2.69e-03 (GREEN) [pytorch 2.69e-03] | 8.88e-03 (YELLOW, grad:ln_single.weight) [pytorch 7.07e-03] |  |
+| AttentionPairBias-384 | `megafold` | 2.69e-03 (GREEN) [pytorch 2.69e-03] | 8.30e-03 (YELLOW, grad:ln_single.weight) [pytorch 7.07e-03] |  |
+| AttentionPairBias-768 | `pytorch` | 2.93e-03 (GREEN) | 8.63e-03 (GREEN, grad:ln_single.weight) |  |
+| AttentionPairBias-768 | `cuda` | unsupported: SHAPE | unsupported: SHAPE |  |
+| AttentionPairBias-768 | `cueq` | 2.93e-03 (GREEN) [pytorch 2.93e-03] | 1.64e-02 (YELLOW, grad:to_query.bias) [pytorch 7.09e-03] |  |
+| AttentionPairBias-768 | `gnops` | 2.93e-03 (GREEN) [pytorch 2.93e-03] | 9.96e-03 (YELLOW, grad:pair) [pytorch 7.82e-03] |  |
+| AttentionPairBias-768 | `of3tri` | 2.93e-03 (GREEN) [pytorch 2.93e-03] | 9.96e-03 (YELLOW, grad:pair) [pytorch 7.82e-03] |  |
+| AttentionPairBias-768 | `megafold` | 2.93e-03 (GREEN) [pytorch 2.93e-03] | 9.96e-03 (YELLOW, grad:pair) [pytorch 7.82e-03] |  |
+| OPM | `pytorch` | 3.13e-03 (GREEN) | 7.38e-03 (GREEN, grad:msa) |  |
+| OPM | `cuda` | 3.08e-03 (GREEN) [pytorch 3.13e-03] | 5.41e-03 (GREEN, grad:msa) [pytorch 7.38e-03] |  |
+| OPM | `bionemo_ir` | 3.13e-03 (GREEN) [pytorch 3.13e-03] | unsupported: NOBWD |  |
+| PWA | `pytorch` | 3.01e-03 (GREEN) | 1.14e-02 (GREEN, grad:pair) |  |
+| PWA | `cuda` | 3.04e-03 (GREEN) [pytorch 3.01e-03] | 8.69e-03 (GREEN, grad:pair) [pytorch 1.14e-02] |  |
+| PWA | `bionemo_ir` | 7.58e-04 (GREEN) [pytorch 3.01e-03] | unsupported: NOBWD |  |
+| PWA | `ligo_pwa` | 2.98e-03 (GREEN) [pytorch 3.01e-03] | 8.11e-03 (YELLOW, grad:ln_pair.weight) [pytorch 7.11e-03] |  |
+| Transition-d128 | `pytorch` | 6.88e-03 (GREEN) | 7.93e-03 (GREEN, grad:x) |  |
+| Transition-d128 | `cuda` | 3.80e-03 (GREEN) [pytorch 6.88e-03] | 7.50e-03 (GREEN, grad:x) [pytorch 7.93e-03] |  |
+| Transition-d128 | `bionemo_ir` | 3.80e-03 (GREEN) [pytorch 6.88e-03] | unsupported: NOBWD |  |
+| Transition-d128 | `megafold_tr` | 8.12e-03 (YELLOW) [pytorch 6.88e-03] | 1.09e-02 (YELLOW, grad:x) [pytorch 7.93e-03] |  |
+| Transition-d64 | `pytorch` | 6.09e-03 (GREEN) | 8.75e-03 (GREEN, grad:x) |  |
+| Transition-d64 | `cuda` | 4.46e-03 (GREEN) [pytorch 6.09e-03] | 6.38e-03 (GREEN, grad:x) [pytorch 8.75e-03] |  |
+| Transition-d64 | `bionemo_ir` | 4.46e-03 (GREEN) [pytorch 6.09e-03] | unsupported: NOBWD |  |
+| Transition-d64 | `megafold_tr` | 8.12e-03 (YELLOW) [pytorch 6.09e-03] | 1.07e-02 (YELLOW, grad:x) [pytorch 8.75e-03] |  |
+
+B200 (sm_100): part B (TriMul, L = 512, d_pair 128)
+
+| backend | output rel rms | output rel max | update rel rms | dx rel rms | dWo rel rms |
+|---|---|---|---|---|---|
+| `pytorch` | 3.65e-03 | 6.51e-03 | 7.69e-03 | 5.47e-03 | 6.69e-03 |
+| `cuda` | 3.12e-03 | 5.41e-03 | 6.57e-03 | 4.47e-03 | 5.12e-03 |
+| `fast_trimul` | 1.98e-03 | 3.82e-03 | 4.18e-03 | 2.75e-03 | 1.88e-03 |
+| `gpumode` | 2.31e-03 | 6.26e-03 | 4.86e-03 | - | - |
+| `geonn` | 3.46e-03 | 6.26e-03 | 7.30e-03 | - | - |
 
 ## 5. Candidates
 

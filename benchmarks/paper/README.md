@@ -54,7 +54,7 @@ Iterations: E1 and E5 B200 records are 20 timed iterations (warmup 5, L2 flush);
 
 B200 coverage and caveats:
 - **Concurrent lanes**: the 4 lanes ran at the same time on one node, so a timing may include cross-lane load (shared host memory bandwidth / CPU / power; every GPU had its own process only). The H100 lanes were concurrent too (several jobs at once); no correction was applied.
-- E5 on B200: speed (3 repeats) and the CUDA-graph validity check only; **no E5 accuracy records** (`e5acc`, `acc_trimul.py` not run), so `E5_results.md` section 4 has no B200 accuracy table (the engine's own accuracy is in E3).
+- E5 on B200: speed (3 repeats), the CUDA-graph validity check, and the accuracy records (`e5acc.r1`, `records/acc/ext_trimul_acc.b200.jsonl`, taken 2026-11-22 on GPU 0; `turbopf` unsupported on sm_100, `ds4sci` eager) are present; `E5_results.md` section 4 has the B200 tables.
 - `turbopf` is Hopper-only (unsupported on B200); `ds4sci` runs but its graph timing is invalid (eager timings used, marked `e`); `bionemo_ir`, `gpumode`, `geonn` have no backward (training cells unsupported).
 - Engine `cuda` has no number for LayerNorm rows on B200 (50 unsupported cases) and for AttentionPairBias d_single 768; baselines without an engine number are listed in `engine_missing_number_cells.csv`.
 - Baselines faster than the engine on B200: `PAPER_DATA_SUMMARY.md` section 1.3a (LayerNorm = user-declared exception; the remaining cells are within +-3 %).

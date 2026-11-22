@@ -1,0 +1,18 @@
+{
+ "engine_version": "3.0.6",
+ "commit": "d967378a299850a87c7c7d63723e3448619537fe",
+ "card": "b200",
+ "card_key": "b200_sm100",
+ "gpu": "NVIDIA B200",
+ "torch": "2.13.0+cu129",
+ "cuda": "12.9",
+ "cuda_driver": "13.1",
+ "driver": "580.95.05",
+ "triton": "3.7.1",
+ "python": "3.12.13",
+ "node": "DCTN-0831174147-1",
+ "slurm_job": null,
+ "paper_bench_commit": "d967378a299850a87c7c7d63723e3448619537fe",
+ "config": "/NHNHOME/WORKSPACE/26mohw002_A/psk6950/paper-b200/engine/benchmarks/paper/E5_other_kernels/cfg_e5_all_acc.yaml",
+ "settings": {}
+}
