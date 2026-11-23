@@ -18,3 +18,8 @@ kernels there). **RTX 5090: no FP8 route (checked in code: `fp8.py` is sm_90a on
 
 Output `E4_<card>.csv`: two rows per case and gate setting (`backend` `cuda` = default path, `engine-fp8`), common columns +
 `gates,model,ratio_default_over_fp8,fp8_route_fired,saturated,stack,row,variant,samples,repeats`.
+
+**Token DiT / atom DiT / Transition / OPM / PWA (H100, 2026-11-23).** `fp8_pair.py --config cfg_tokendit.yaml` (TokenDiT registry rows; `td_h100.sbatch` with `GATES`, `TAG`, `STATIC`,
+`CFG`, `EXTRA`, `RECORDS` in the environment; `--static-weights` captures under `static_weights()`), `td_table.py` (pivot of the ratios), `td_profile.py` (per-kernel profile of the graph
+replay of one case), `td_err.py` (error against fp64). `fp8_route_fired` of these modules = the route calls of the graph captures (the eager warm-up calls of `speed.measure` count
+too: a case below the row gate can read `True` with ratio 1.00). Findings and numbers: docs/fp8.md "Token DiT / atom DiT FP8 in graphs captured without `static_weights()`".
