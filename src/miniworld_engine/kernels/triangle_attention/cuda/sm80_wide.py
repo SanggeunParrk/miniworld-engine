@@ -650,7 +650,7 @@ def _original_forward_ops(
             and sm120
             and (_f8 := _sm120_f8()) is not None
             and _f8.serves(x, d, cfg.h, hd, length)
-            and _f8.route(q, k, v, bias, g, a, mask, weights[2], b, length, cfg.h)
+            and _f8.route(q, k, v, bias, g, a, mask, weights[2], b, length, cfg.h, d)
         ):
             pass  # opt-in e4m3 P / V core (sm120_fp8; the switch is off by default: the branches below, bit for bit)
         elif not save and mask.numel() and length >= 384 and length % 384 == 0:
