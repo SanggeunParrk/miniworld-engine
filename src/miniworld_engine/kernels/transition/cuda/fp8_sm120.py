@@ -75,6 +75,10 @@ SHAPES = ((128, 256), (128, 512), (256, 512), (256, 1024))
 #: (``token_f8_sm120``: LayerNorm + quantisation in one pass, SwiGLU + quantisation in one pass) and two cuBLASLt e4m3 GEMMs (``torch._scaled_mm``,
 #: row-wise scales); no calibration, no guard (nothing saturates)
 WIDE_SHAPES = ((384, 768), (384, 1536), (512, 1024), (512, 2048))
+#: the wide chain runs row blocks whose bf16 [a | b] intermediate is at most this many bytes (32768 rows at D512 n4: 1.25x in the A-B)
+WIDE_BLOCK_BYTES = 256 << 20
+#: rows per block of the wide chain (its bf16 [a | b] of a block: 32768 x 2 H x 2 bytes = 256 MiB at D 512 n 4; A-B 1.246 at 32768 rows)
+WIDE_BLOCK = 32768
 #: rows per CTA tile (8 warps x 16 rows) and the work-list bound of one launch (tr_fwd_f8_kernel: MAX_ITEMS - 2 tiles a CTA)
 BM = 128
 _MAX_ITEMS = 253
@@ -251,17 +255,24 @@ def _wide(x, gamma, beta, wa, wb, ws, eps):
     x2 = x.reshape(-1, d).contiguous()
     M = x2.shape[0]
     tab = cached("tr8w_tab", (gamma, beta), lambda: torch.cat([gamma.float() - 1.0, beta.float()]).to(torch.bfloat16).view(1, 2 * d).contiguous())
-    xn8 = torch.empty((M, d), device=x.device, dtype=torch.float8_e4m3fn)
-    sx = torch.empty((M, 1), device=x.device, dtype=torch.float32)
-    T.ext().adaln_q8(x2, tab, tab.new_empty(0), xn8, sx, float(eps))
-    ab = T.mm(xn8, sx, T.weight8("tr8w_ab", wa, wb))
-    h8 = torch.empty((M, h), device=x.device, dtype=torch.float8_e4m3fn)
-    sh = torch.empty((M, 1), device=x.device, dtype=torch.float32)
-    T.ext().swiglu_q8(ab, h8, sh, False)
-    del ab
-    y = T.mm(h8, sh, T.weight8("tr8w_s", ws))
+    wab, wsq = T.weight8("tr8w_ab", wa, wb), T.weight8("tr8w_s", ws)
+    out = torch.empty_like(x2)
+    # blocks of WIDE_BLOCK rows: the bf16 [a | b] of a whole L512 D512 n4 pair stack is 2 GiB (IntelliFold2 / OpenDDE 5I28 n = 4 ran out of memory
+    # inside the CUDA-graph pools); rows are independent
+    for r in range(0, M, WIDE_BLOCK):
+        xs = x2[r : r + WIDE_BLOCK]
+        m = xs.shape[0]
+        xn8 = torch.empty((m, d), device=x.device, dtype=torch.float8_e4m3fn)
+        sx = torch.empty((m, 1), device=x.device, dtype=torch.float32)
+        T.ext().adaln_q8(xs, tab, tab.new_empty(0), xn8, sx, float(eps))
+        ab = T.mm(xn8, sx, wab)
+        h8 = torch.empty((m, h), device=x.device, dtype=torch.float8_e4m3fn)
+        sh = torch.empty((m, 1), device=x.device, dtype=torch.float32)
+        T.ext().swiglu_q8(ab, h8, sh, False)
+        del ab
+        torch.add(T.mm(h8, sh, wsq), xs, out=out[r : r + m])
     GUARD_STATS["calls"] += 1
-    return y.add_(x2).reshape(x.shape)
+    return out.reshape(x.shape)
 
 
 def _default(x, gamma, beta, wa, wb, ws, eps):
