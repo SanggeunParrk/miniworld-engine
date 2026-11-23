@@ -345,6 +345,22 @@ Against the H100 matrix (n = 4): TriMul / OPM / PWA / token DiT `expand` counts 
 
 **End level on the 5090 (the H100 rule: same-seed bf16-vs-FP8 RMSD max <= max(1.1 x bf16 trunk-seed pair max, 0.5 A)).** `e2e_5090.py`: FoldForge `miniworld` backend, bf16, eager, bucketing, 200 steps, diffusion_seed 0, 1 sample, trunk seeds 0-3, the whole `safe` set (`MINIWORLD_FP8=safe`, `MINIWORLD_FP8_MODEL=<model>`, sync guards + `fp8.check()` after every forward: no saturation in any case), targets 8ad9 / 8ee9 / 7y37 / 8gn4 (the H100 OpenFold3 / AF3 / RoseTTAFold3 set; FoldBench specs on cssb-rtx with the `~/data/foldbench` MSA / template LMDBs), all-atom Kabsch RMSD (`e2e_5090_an.py`). bf16 is bit-deterministic (a second bf16 run: 0.00 A on 8 cases). Per model see the summary table of the report; AF3: 2 / 4 inside (8ad9 1.66 A against a threshold of 0.65 A, 8gn4 1.58 against 1.03, both at trunk seed 0). Per-route ablation on those two targets (same seeds): Transition FP8 off -> 2 / 2 inside (max 0.33 / 0.83 A); TriMul off -> 0 / 2 (2.04 / 1.25); OPM + PWA off -> 1 / 2 (0.80 / 1.02). The AF3 excursions come from the e4m3 pair Transition, the route FoldForge F11 found behind the H100's antibody-antigen loss (FoldForge `benchmarks/paper/F11_fp8_accuracy`; recommendation there: trunk in bf16 for antibody-antigen). The 5090 Transition route has the H100 route's module error (update rms 6.6 %), so this is the same effect, not a 5090 defect; no preset change here (owner decision).
 
+End-level table (whole `safe` set; same-seed FP8-vs-bf16 RMSD max per target in A, against the threshold max(1.1 x bf16 pair max, 0.5); seeds of the excursion in brackets):
+
+| model | 7y37 | 8ad9 | 8ee9 | 8gn4 | inside | max abs d ipTM |
+|---|---|---|---|---|---|---|
+| af3 | 0.14 / 0.50 | **1.66** / 0.65 (t0) | 0.35 / 0.53 | **1.58** / 1.03 (t0) | 2 / 4 | 0.061 |
+| boltz2 | 0.34 / 5.32 | 4.01 / 4.69 | 0.87 / 4.72 | 0.83 / 3.30 | 4 / 4 | 0.158 |
+| chai1 | 0.22 / 4.87 | **4.85** / 4.03 (t0) | 1.15 / 4.34 | 2.73 / 3.27 | 3 / 4 | 0.139 |
+| intellifold2 | 0.35 / 0.50 | 4.29 / 4.92 | **1.28** / 0.52 (all seeds 1.08-1.28) | **1.28** / 1.23 | 2 / 4 | 0.028 |
+| opendde | **0.54** / 0.50 (t3) | 1.32 / 4.63 | **6.19** / 5.13 (t1) | 2.07 / 4.13 | 2 / 4 | 0.005 |
+| openfold3 | 0.44 / 0.56 | **1.17** / 0.58 (t0, t3) | 0.48 / 0.50 | 1.95 / 2.55 | 3 / 4 | 0.024 |
+| protenix1 | 0.11 / 0.50 | **2.65** / 2.57 (t3) | 0.17 / 1.94 | **3.36** / 1.51 (t0) | 2 / 4 | 0.011 |
+| protenix2 | **4.28** / 0.50 (t1; others 0.04-0.05) | 1.97 / 2.41 | 0.88 / 3.27 | 0.68 / 2.98 | 3 / 4 | 0.024 |
+| rosettafold3 | **1.68** / 1.35 (t0) | 1.87 / 2.43 | 0.21 / 0.50 | 0.40 / 0.50 | 3 / 4 | 0.011 |
+
+24 / 36 targets inside; no saturation flag in any of the 144 FP8 forwards. Most excursions are one trunk seed of four (a flip between modes: the other seeds sit at the bf16 seed spread or below, e.g. protenix2 7y37 0.04 / 4.28 / 0.05 / 0.04 — the H100 section above saw the same 4.26 A flip on protenix2 7y37 and needed 12 bf16 seeds to judge it); IntelliFold2 8ee9 is a uniform 1.1-1.3 A shift on all seeds where the bf16 seeds agree to 0.47 A. IntelliFold2 ablation (8ee9 / 8gn4, same seeds): Transition off 1.07 / 1.30 (8ee9 seeds 0.13 / 1.07 / 0.26 / 0.23: the uniform shift is gone), D384 / 512 Transition off 1.10 / 0.92, TriMul off 1.27 / 1.35, OPM + PWA off 1.29 / 1.12: the uniform shift on 8ee9 comes from the e4m3 Transition. No H100 run of the whole `safe` set on these 4 targets with this rule exists in this file (the H100 end-level rows above are per route, mostly TriAttn), so the 5090 numbers have no H100 twin yet; the module errors of every 5090 route are at the H100 route's level.
+
 **H100 per-model pieces and the 5090 (what `safe` turns on on the H100).**
 
 | piece (H100 section) | on the H100 `safe` | RTX 5090 |
