@@ -3,7 +3,7 @@
 Everything here is opt-in and off by default: FP8 is the backend `engine-fp8`; the default remains the bf16 / fp16 engine. Base: engine 2.5.14 (branch `rel/3.0.0` = 2.5.14 + `fp8/3.0.0-all`; the routes were built on 2.5.12, branch `fp8/3.0.0-on-2512`). With no switch set, every route is bit-identical to 2.5.14 (see "Release line 3.0.0"; before: 169 / 169 against 2.5.12, "Verification on the 2.5.12 base").
 
 
-## RTX 5090 (sm_120a): the e4m3-plane TriMul route and the e4m3 TriAttn core (2026-11-23, branch `fp8-5090`)
+## RTX 5090 (sm_120a): the e4m3-plane TriMul route, the e4m3 TriAttn core and the strictly opt-in e4m3 Transition (2026-11-23, branch `fp8-5090`)
 
 Opt-in like the H100 / B200 routes (`MINIWORLD_FP8=safe` or `backend="engine-fp8"`; `fp8.arch()` is `"sm120"` there, `fp8.SM120_ROUTES` puts `kernels/trimul_inproj/cuda/sm120_fp8.py` into the `trimul` slot; every other slot keeps its H100 module, whose `serves()` is False off sm_90). With the switch off the default route is bit-identical to the base (`integ-ladder` a0aa7f1aa, 12 outputs compared byte for byte: D128 / D256 x outgoing / incoming / bidirectional x L256 / 512); no module `version` / `backend_versions` entry changes.
 
@@ -40,11 +40,43 @@ The attention core is the share e4m3 shortens; the projections (LN + front GEMM 
 
 **Accuracy** (update error rms / max of (y - y64) relative to the update y64 - x, against the float64 module on the PyTorch backend, random weights N(0, 0.1), bf16 input; `triattn_ab.py` and `tests/gpu/test_triattn_fp8_sm120.py`): d128 (P / V + q / k) L256 / 384 / 512: **5.1 % / 6.2-7.1 %** (masked L512 5.1 % / 6.9 %), bf16 default 1.2-1.4 % / 1.0-1.5 %; H100 e4m3 q / k route 4.4 % / 6.8 % at L512 (table above, `f8qk`). PV only: d128 L512 2.9 % / 3.5 %, d256 L512 2.9 % / 2.7 % (H100 PV hi: 3.3 % / 4.7 %, 3.4 % / 3.5 %). Tests (14, pass on the 5090): accuracy cells d128 / d256 x L256 / 512 x masked (tolerance 8 % and 8x the default), PV only below PV + q / k, default untouched byte for byte after the route ran, gates / models, graph == eager, V saturation through a captured graph and the sync redo, q / k saturation drop, the shipped PV-only gate.
 
-### Transition (not built: judgement)
+### Transition: strictly opt-in e4m3 one-kernel forward (`kernels/transition/cuda/fp8_sm120.py`, `sm80/tr_fwd_f8_sm120.cuh`, `sm80/transition_fwd_f8_sm120.cu`)
 
-The default `transition_wide_sm120` (D128 / D256, n = 4, inference) runs at 190-248 TFLOPS (D128 L256 / 512 / 1024: 190 / 235 / 248; D256: 188-197; `benchmarks/fp8_5090/transition_rate.py`), i.e. at the bf16 `mma.sync` rate of the card (218 measured): it is compute bound, so e4m3 `mma.m16n8k32` (459) can shorten both GEMMs; with the quantisation of x in the LN prologue and of the SwiGLU hidden in registers the expected module gain is 1.4-1.7x (the H100 Transition FP8 route: 1.44x over 73 cases >= 256 tokens). It needs a new register-resident kernel (the m16n8k32 A fragment differs from the bf16 C layout: the down weight's K order has to be permuted to match), static scales and the guard as for the other routes. Accuracy: the FoldForge F11 study attributes the antibody-antigen accuracy loss of FP8 to e4m3 rounding in the trunk pair Transition, so such a route would have to stay strictly opt-in, outside `safe`. Not in the E4 module set.
+**Not in `safe` and not in `engine-fp8`.** FoldForge F11 attributes the antibody-antigen accuracy loss of FP8 to e4m3 rounding in the trunk pair Transition, so this route has its own switch only: `MINIWORLD_TRANSITION_FP8_SM120=calib` (read at import) or `fp8_sm120.POLICY = "calib"` at run time. `fp8.SM120_OPTIN["transition"]` lists it (like `B200_OPTIN`): `fp8.enable()` and the `engine-fp8` scope leave its switch as it is, `fp8.disable()` turns it off, `fp8.check()` reads its lazy guard, `fp8.route_stats()["transition"]` is its counter dict on an RTX 5090 (`fp8.status()` keeps the slot's switches; read `fp8_sm120.POLICY`). The H100 route `fp8_sm90a` (in `safe`) is a different module and does not serve sm_120. Other switches: `MINIWORLD_TRANSITION_FP8_SM120_GUARD` (`sync` / `lazy` / `off`), `_HEADROOM` (16), `_MINROWS` (0 = no gate), `_WIDTHS` (`128,256`). Hook: `transition_sm80(..., fp8=True)` (bf16 inference only; one `POLICY` check on the default path).
 
-Not done: Transition (judgement above) / OPM / PWA / token DiT routes on sm_120 (no e4m3 kernel; their slots run the default); the TriAttn d_pair-64 core (Chai-1); a custom `mma.sync` e4m3 contraction (cuBLASLt TN is used; the non-block-scaled path works on sm_120 with CUDA 13 driver / torch 2.13 cu129, only the block-scaled forms were reported failing); the plane formation of the grouped long-L path (L > ~3000) stays bf16.
+**Kernel.** The structure of `fused_fwd_sm80` (warp-owned rows across the whole hidden width, weights through a cp.async ring of 32-hidden chunks, FULL / EMPTY mbarriers, no CTA barrier) with both GEMMs on `mma.sync.m16n8k32` e4m3, fp32 accumulation: 8 warps x 16 rows (one m16 tile: the fp32 output accumulator takes the registers of the bf16 kernel's second tile), LayerNorm in fp32 straight into the e4m3 A fragments (xn x sx, sx = power of two of the LayerNorm bound sqrt(D-1) max|gamma| + max|beta|: cannot saturate; GEMM1's K permuted on the host so a thread's own 4 x 16 B of x per row are its fragment words), per 32 hidden units GEMM1 (8 n8 tiles) -> SwiGLU in fp32 (one tanh.approx) -> h x sh quantised in registers into the k32 A fragment of GEMM2 (the thread's C columns {2q, 2q+1, 8+2q, 9+2q} are its 4 A bytes; Ws's K permuted to match, the H100 `_perm_k` order) -> GEMM2 (D / 8 MMAs); output accumulator starts at x (sh s2) (D 128) or the residual is re-read at the store (D 256: keeps 255 registers without a spill). Weights e4m3 once per parameter version (per-tensor power-of-two scales). h scale: calibrated on the first eager call (probe with sh = 1, x 16 headroom), static afterwards, guarded as the H100 route (`sync`: redo the eager call with a lower scale; `lazy` / capture: `overflow_peak` / `rescale_all` through `fp8.check()`); a capture before calibration runs the default. One extension `transition_fwd_f8_sm120`, (D, H) = (128, 256 / 512), (256, 512 / 1024); 254 / 255 registers, no local memory.
+
+**Gate** (from the A-B below): bf16 inference, D 128 / 256, n 2 / 4, at least **12288 rows** (8192 rows: 0.91 / 0.90, the 128-row CTA tiles leave SMs idle while every tile streams the whole weight set; 12288: 1.54 / 1.40).
+
+**Speed** (same process, alternating A-B, CUDA-graph replay of 3 calls, 128 MB L2 flush, median of 7 replays, 6 rounds; `benchmarks/fp8_5090/transition_ab.py`, log `transition_ab_rtx5090.log`; default / e4m3, > 1 = e4m3 faster; TFLOPS = 2 x (2 D x nD + nD x D) per row):
+
+| rows (pair L) | D128 n4 | D128 n2 | D256 n4 | D256 n2 |
+|---|---|---|---|---|
+| 8192 | 0.91 | | 0.90 | |
+| 12288 | 1.54 | | 1.40 | |
+| 16384 (L128) | 1.57 | 1.74 | 1.78 | 1.61 |
+| 65536 (L256) | 1.71 | 1.87 | 1.64 | 1.62 |
+| 147456 (L384) | 1.58 | | | |
+| 262144 (L512) | 1.58 | 1.56 | 2.02 | 2.01 |
+| 589824 (L768) | 1.61 | | | |
+| 1048576 (L1024) | 1.60 | 1.53 | 2.16 | 2.10 |
+| 2359296 (L1536) | 1.58 | | | |
+| 4194304 (L2048) | 1.50 | | | |
+
+e4m3 rate 293-440 TFLOPS (D128 n4 L1024: 399 against the default 250; D256 n4 L1024: 440 against 204; the e4m3 `mma.sync` peak of the card is 459). The H100 route measured 1.44x over 73 cases.
+
+**Accuracy** (against the module in float64 on the PyTorch backend; weights N(0, 1/fan_in), LayerNorm weight 1 +- 0.1, bias +- 0.1, x ~ N(0, 1); judge = max|y - y64| / max|y64|, rms = rms(y - y64) / rms(y64), update = rms(y - y64) / rms(y64 - x); the columns of the H100 table "Error against fp64"; rows 8192 .. 262144):
+
+| route | judge | rms | update rms |
+|---|---|---|---|
+| default (5090) | 0.0042-0.0065 | 0.0027-0.0030 | 0.0052-0.0056 |
+| e4m3 D128 n4 / n2 | 0.037-0.049 | 0.034-0.035 | 0.066 |
+| e4m3 D256 n4 / n2 | 0.035-0.040 | 0.034-0.035 | 0.066 |
+| H100 e4m3 D128 full (for comparison) | 0.041-0.045 | 0.034-0.035 | 0.066 |
+
+The same level as the H100 route (both GEMM inputs are e4m3 activations); no saturation (guard peak 14-28 against 448), no retry or fallback. Tests `tests/gpu/test_transition_fp8_sm120.py` (on the 5090): fragment permutations, error vs fp64 for D 128 / 256 x n 2 / 4 x 16384 / 38477 rows (judge < 8 %, rms < 5 %, update < 9 %), not switched on by `safe` / `engine-fp8`, `disable()` turns it off, sync redo and lazy guard through `fp8.check()`, graph == eager and a capture before calibration = the default bytes, rows independent (one call == two calls), default route untouched byte for byte while off. Not in the E4 module set (README: TriMul / TriAttn).
+
+Not done: OPM / PWA / token DiT routes on sm_120 (no e4m3 kernel; their slots run the default); the TriAttn d_pair-64 core (Chai-1); a custom `mma.sync` e4m3 contraction (cuBLASLt TN is used; the non-block-scaled path works on sm_120 with CUDA 13 driver / torch 2.13 cu129, only the block-scaled forms were reported failing); the plane formation of the grouped long-L path (L > ~3000) stays bf16.
 
 
 ## Combined tree `fp8c/all` (2026-11-19, base engine 3.0.1 = origin/main f5be1df46): branches, route matrix, 5I28

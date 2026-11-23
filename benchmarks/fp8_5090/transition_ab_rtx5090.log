@@ -1,0 +1,26 @@
+NVIDIA GeForce RTX 5090, 2415 MHz, 45
+NVIDIA GeForce RTX 5090 guard sync
+d128 n4 rows 16384: default 32 us (203 TFLOPS) e4m3 20 us (319 TFLOPS) ratio 1.573 fired True peak-guard 27 | default judge 0.0065 rms 0.0029 upd 0.0053 | e4m3 judge 0.0410 rms 0.0353 upd 0.0661
+d128 n4 rows 65536: default 134 us (192 TFLOPS) e4m3 79 us (328 TFLOPS) ratio 1.712 fired True peak-guard 14 | default judge 0.0063 rms 0.0029 upd 0.0053 | e4m3 judge 0.0397 rms 0.0353 upd 0.0661
+d128 n4 rows 147456: default 243 us (239 TFLOPS) e4m3 154 us (378 TFLOPS) ratio 1.580 fired True peak-guard 15 | default judge 0.0063 rms 0.0029 upd 0.0053 | e4m3 judge 0.0436 rms 0.0353 upd 0.0661
+d128 n4 rows 262144: default 439 us (235 TFLOPS) e4m3 278 us (370 TFLOPS) ratio 1.578 fired True peak-guard 18 | default judge 0.0062 rms 0.0029 upd 0.0053 | e4m3 judge 0.0444 rms 0.0353 upd 0.0661
+d128 n4 rows 589824: default 964 us (241 TFLOPS) e4m3 600 us (386 TFLOPS) ratio 1.605 fired True peak-guard 18
+d128 n4 rows 1048576: default 1652 us (250 TFLOPS) e4m3 1034 us (399 TFLOPS) ratio 1.598 fired True peak-guard 18
+d128 n4 rows 2359296: default 3484 us (266 TFLOPS) e4m3 2207 us (420 TFLOPS) ratio 1.578 fired True peak-guard 19
+d128 n4 rows 4194304: default 5869 us (281 TFLOPS) e4m3 3917 us (421 TFLOPS) ratio 1.498 fired True peak-guard 21
+d128 n2 rows 16384: default 12 us (264 TFLOPS) e4m3 7 us (460 TFLOPS) ratio 1.742 fired True peak-guard 28 | default judge 0.0042 rms 0.0027 upd 0.0052 | e4m3 judge 0.0446 rms 0.0341 upd 0.0663
+d128 n2 rows 65536: default 65 us (199 TFLOPS) e4m3 35 us (372 TFLOPS) ratio 1.868 fired True peak-guard 16 | default judge 0.0046 rms 0.0027 upd 0.0052 | e4m3 judge 0.0491 rms 0.0341 upd 0.0663
+d128 n2 rows 262144: default 216 us (239 TFLOPS) e4m3 138 us (373 TFLOPS) ratio 1.562 fired True peak-guard 17 | default judge 0.0044 rms 0.0027 upd 0.0052 | e4m3 judge 0.0430 rms 0.0341 upd 0.0663
+d128 n2 rows 1048576: default 867 us (238 TFLOPS) e4m3 565 us (365 TFLOPS) ratio 1.534 fired True peak-guard 18
+d256 n4 rows 16384: default 156 us (165 TFLOPS) e4m3 88 us (293 TFLOPS) ratio 1.777 fired True peak-guard 14 | default judge 0.0050 rms 0.0029 upd 0.0056 | e4m3 judge 0.0349 rms 0.0347 upd 0.0659
+d256 n4 rows 65536: default 545 us (189 TFLOPS) e4m3 333 us (310 TFLOPS) ratio 1.637 fired True peak-guard 15 | default judge 0.0042 rms 0.0029 upd 0.0056 | e4m3 judge 0.0389 rms 0.0347 upd 0.0659
+d256 n4 rows 262144: default 2047 us (201 TFLOPS) e4m3 1016 us (406 TFLOPS) ratio 2.016 fired True peak-guard 18 | default judge 0.0043 rms 0.0029 upd 0.0056 | e4m3 judge 0.0369 rms 0.0347 upd 0.0659
+d256 n4 rows 1048576: default 8104 us (204 TFLOPS) e4m3 3749 us (440 TFLOPS) ratio 2.162 fired True peak-guard 18
+d256 n2 rows 16384: default 69 us (188 TFLOPS) e4m3 43 us (302 TFLOPS) ratio 1.608 fired True peak-guard 26 | default judge 0.0047 rms 0.0029 upd 0.0056 | e4m3 judge 0.0389 rms 0.0340 upd 0.0660
+d256 n2 rows 65536: default 283 us (182 TFLOPS) e4m3 175 us (294 TFLOPS) ratio 1.616 fired True peak-guard 16 | default judge 0.0043 rms 0.0029 upd 0.0056 | e4m3 judge 0.0375 rms 0.0340 upd 0.0660
+d256 n2 rows 262144: default 1127 us (183 TFLOPS) e4m3 561 us (368 TFLOPS) ratio 2.009 fired True peak-guard 18 | default judge 0.0045 rms 0.0029 upd 0.0056 | e4m3 judge 0.0397 rms 0.0340 upd 0.0660
+d256 n2 rows 1048576: default 4322 us (191 TFLOPS) e4m3 2059 us (401 TFLOPS) ratio 2.099 fired True peak-guard 18
+d128 n4 rows 8192: default 18 us (182 TFLOPS) e4m3 19 us (166 TFLOPS) ratio 0.913 fired True peak-guard 27 | default judge 0.0050 rms 0.0030 upd 0.0056 | e4m3 judge 0.0373 rms 0.0353 upd 0.0661
+d256 n4 rows 8192: default 68 us (190 TFLOPS) e4m3 76 us (170 TFLOPS) ratio 0.895 fired True peak-guard 28 | default judge 0.0052 rms 0.0029 upd 0.0056 | e4m3 judge 0.0364 rms 0.0347 upd 0.0659
+d128 n4 rows 12288: default 31 us (156 TFLOPS) e4m3 20 us (241 TFLOPS) ratio 1.539 fired True peak-guard 27 | default judge 0.0044 rms 0.0029 upd 0.0053 | e4m3 judge 0.0379 rms 0.0353 upd 0.0661
+d256 n4 rows 12288: default 116 us (167 TFLOPS) e4m3 83 us (234 TFLOPS) ratio 1.398 fired True peak-guard 28 | default judge 0.0050 rms 0.0029 upd 0.0056 | e4m3 judge 0.0349 rms 0.0347 upd 0.0659

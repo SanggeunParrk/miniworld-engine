@@ -50,7 +50,7 @@ HEADROOM = float(os.environ.get("MINIWORLD_TRANSITION_FP8_SM120_HEADROOM", "16")
 _MINROWS_ENV = os.environ.get("MINIWORLD_TRANSITION_FP8_SM120_MINROWS")
 MIN_ROWS: int | None = int(_MINROWS_ENV) if _MINROWS_ENV else None  # replaces ROW_GATE for every width when set (0 = no gate)
 #: smallest row count routed per width (below it the default route runs): same-process A-B, docs/fp8.md "RTX 5090" (Transition)
-ROW_GATE = {128: 16384, 256: 16384}
+ROW_GATE = {128: 12288, 256: 12288}  # 8192 rows: 0.91 (D 128 n 4) / 0.90 (D 256 n 4); 12288: 1.54 / 1.40
 WIDTHS = tuple(int(w) for w in os.environ.get("MINIWORLD_TRANSITION_FP8_SM120_WIDTHS", "128,256").split(",") if w)
 #: (D, H) with a kernel build (transition_fwd_f8_sm120.cu)
 SHAPES = ((128, 256), (128, 512), (256, 512), (256, 1024))
