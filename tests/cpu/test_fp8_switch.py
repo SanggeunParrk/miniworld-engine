@@ -46,7 +46,7 @@ SAFE = {
     "trimul": "calib",
     "opm": "bound",
     "pwa": True,
-    "transition": "calib",
+    "transition": None if fp8.arch() == "sm120" else "calib",  # RTX 5090: the Transition is not in the preset (SM120_PRESET_EXCLUDED)
     "token_dit": ["expand"],
     "atom_dit": [] if fp8.arch() == "sm100" else ["post", "pre"],  # B200: status lists the b200_atom.f8 stages (opt-in, not in the preset)
 }
@@ -389,8 +389,9 @@ def test_sm120_route_table():
     assert fp8.SM120_ROUTES["token_dit"] == "miniworld_engine.kernels.conditioned_transition.cuda.token_dit_fp8_sm120"
     assert fp8.SM120_ROUTES["atom_dit"] == "miniworld_engine.kernels.dit_variants.cuda.atom_fp8_sm120"
     assert not fp8.SM120_OPTIN  # nothing outside the preset on the 5090 any more
-    # the 5090 slots are switched by the H100 preset variables: every H100 preset slot with a 5090 module is on under `safe`
-    assert fp8.PRESETS["safe"]["MINIWORLD_TRANSITION_FP8"] == "calib"
+    # the 5090 slots are switched by the H100 preset variables, except the Transition (SM120_PRESET_EXCLUDED: explicit opt-in on the 5090)
+    assert fp8.PRESETS["safe"]["MINIWORLD_TRANSITION_FP8"] == "calib"  # (the H100 preset value; the 5090 does not read it)
+    assert fp8.SM120_PRESET_EXCLUDED == frozenset({"transition"})
 
 
 _SM120_TR = (
@@ -404,10 +405,11 @@ def _sm120_tr(**env) -> dict:
     return json.loads(out.stdout.strip().splitlines()[-1])
 
 
-def test_sm120_transition_route_follows_the_preset():
+def test_sm120_transition_route_is_explicit_opt_in():
     off = _sm120_tr()
     assert off == {"policy": None, "guard": "sync", "minrows": None, "widths": [128, 256, 384, 512], "headroom": 16.0}
-    assert _sm120_tr(MINIWORLD_FP8="safe")["policy"] == "calib"  # as the H100 route (fp8_sm90a)
+    assert _sm120_tr(MINIWORLD_FP8="safe")["policy"] is None  # NOT in the safe preset on the 5090 (owner decision 2026-11-23, docs/fp8.md)
+    assert _sm120_tr(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8="calib")["policy"] == "calib"  # the explicit variable turns it on
     assert _sm120_tr(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8="")["policy"] is None  # an explicitly set per-route variable wins
     assert _sm120_tr(MINIWORLD_TRANSITION_FP8="calib")["policy"] == "calib"
     # the guard contract variables of the H100 route

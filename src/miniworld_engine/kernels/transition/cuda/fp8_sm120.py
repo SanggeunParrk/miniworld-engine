@@ -1,17 +1,17 @@
-"""e4m3 Transition inference forward on the GeForce RTX 5090 (sm_120a), D 128 / 256 (n 2 / 4); docs/fp8.md "RTX 5090", Transition.
+"""e4m3 Transition inference forward on the GeForce RTX 5090 (sm_120a), D 128 / 256 / 384 / 512 (n 2 / 4); docs/fp8.md "RTX 5090", Transition.
 
-The module of the ``transition`` slot of ``fp8.SM120_ROUTES`` (same interface and switch as the H100 route ``fp8_sm90a``): ``MINIWORLD_FP8=safe`` /
-``engine-fp8`` / ``fp8.enable("safe")`` turn it on exactly as they turn the H100 route on (preset variable ``MINIWORLD_TRANSITION_FP8=calib``; an
-explicitly set variable, also the empty string, wins over the preset), ``fp8.disable()`` turns it off, ``fp8.check()`` reads its guard,
-``fp8.status()["transition"]`` is its ``POLICY`` and ``fp8.route_stats()["transition"]`` its counters on an RTX 5090::
+The module of the ``transition`` slot of ``fp8.SM120_ROUTES`` (the H100 route ``fp8_sm90a``'s interface), but NOT part of the ``safe`` preset /
+``engine-fp8`` scope on the 5090 (owner decision 2026-11-23: FoldForge end level 24 / 36 targets inside with it, 33 / 36 without, the H100 F11
+finding): ``MINIWORLD_FP8=safe`` / ``engine-fp8`` / ``fp8.enable("safe")`` leave it off; it runs only when ``MINIWORLD_TRANSITION_FP8=calib`` (or the
+alias ``MINIWORLD_TRANSITION_FP8_SM120``) is set explicitly, or ``POLICY`` is set at run time. ``fp8.disable()`` turns it off, ``fp8.check()`` reads its
+guard, ``fp8.status()["transition"]`` is its ``POLICY`` and ``fp8.route_stats()["transition"]`` its counters on an RTX 5090::
 
-    MINIWORLD_FP8=safe python run.py                          # with every other route of the preset
-    MINIWORLD_TRANSITION_FP8=calib python run.py              # this route alone (as on the H100)
+    MINIWORLD_FP8=safe MINIWORLD_TRANSITION_FP8=calib python run.py   # the preset's routes + this one
+    MINIWORLD_TRANSITION_FP8=calib python run.py                      # this route alone
     miniworld_engine.kernels.transition.cuda.fp8_sm120.POLICY = "calib"   # run time
 
-The ``_SM120`` variables of the first (opt-in only) form stay as aliases: when set they win over the generic names (``MINIWORLD_TRANSITION_FP8_SM120=calib``
-turns the route on, ``MINIWORLD_TRANSITION_FP8_SM120=`` keeps it off under ``safe``). Accuracy note: FoldForge F11 attributes the antibody-antigen accuracy
-loss of FP8 to e4m3 rounding in the trunk pair Transition (docs/fp8.md); that note is about the H100 route in ``safe``, and this route follows the same preset.
+The ``_SM120`` variables stay as aliases and win over the generic names when set. Accuracy note: FoldForge F11 attributes the antibody-antigen
+accuracy loss of FP8 to e4m3 rounding in the trunk pair Transition (docs/fp8.md); the 5090 end level shows the same route behind most excursions.
 
 The kernel (``sm80/tr_fwd_f8_sm120.cuh``) is the register-resident one-kernel forward of ``fused_fwd_sm80`` (warp-owned rows across the whole
 hidden width, weights streaming through a cp.async ring of 32-hidden chunks) with both GEMMs on ``mma.sync.m16n8k32`` e4m3, fp32 accumulation:
@@ -23,7 +23,7 @@ like the H100 route (``overflow_peak`` / ``rescale_all``; ``sync``: an eager cal
 Environment (read at import; a set ``MINIWORLD_TRANSITION_FP8_SM120*`` alias wins over the generic name):
 
 ==============================================================  ====================================================================================
-``MINIWORLD_TRANSITION_FP8`` (alias ``_FP8_SM120``) ``=calib``   route bf16 inference calls at D 128 / 256 (n 2 / 4) through the e4m3 kernel (unset: the preset's value)
+``MINIWORLD_TRANSITION_FP8`` (alias ``_FP8_SM120``) ``=calib``   route bf16 inference calls through the e4m3 route (explicit opt-in: NOT in ``safe``)
 ``MINIWORLD_TRANSITION_FP8_GUARD`` (``_FP8_SM120_GUARD``)        ``sync`` (default, eager: redo an overflowing call) | ``lazy`` (no host sync; CUDA graphs) | ``off``
 ``MINIWORLD_TRANSITION_FP8_HEADROOM`` (``_FP8_SM120_HEADROOM``)  h scale headroom over the calibration amax (16)
 ``MINIWORLD_TRANSITION_FP8_MINROWS`` (``_FP8_SM120_MINROWS``)    smallest row count routed, every width (default :data:`ROW_GATE`; 0 = no gate)
@@ -61,7 +61,17 @@ def _var(name: str, default: str | None = None) -> str | None:
     return _fp8_env(generic, default) if not name else os.environ.get(generic, default)
 
 
-POLICY = _var("") or None  # None = off; "calib" = static h scale from the first eager call (the safe preset's value, as on the H100)
+def explicit_policy() -> str | None:
+    """The switch as set EXPLICITLY in the environment (``MINIWORLD_TRANSITION_FP8_SM120``, else ``MINIWORLD_TRANSITION_FP8``; "" = off): the RTX 5090
+    route is not in the ``safe`` preset / ``engine-fp8`` scope (owner decision 2026-11-23, docs/fp8.md "RTX 5090": FoldForge end level 24 / 36 targets
+    inside with it, 33 / 36 without; the H100 FoldForge F11 finding), so the preset's value never turns it on."""
+    for name in ("MINIWORLD_TRANSITION_FP8_SM120", "MINIWORLD_TRANSITION_FP8"):
+        if name in os.environ:
+            return os.environ[name] or None
+    return None
+
+
+POLICY = explicit_policy()  # None = off; "calib" = static h scale from the first eager call (explicit opt-in only, see explicit_policy)
 GUARD = _var("_GUARD", "sync")
 HEADROOM = float(_var("_HEADROOM", "16"))
 _MINROWS_ENV = _var("_MINROWS")

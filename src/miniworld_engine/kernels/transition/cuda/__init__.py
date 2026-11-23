@@ -65,7 +65,7 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps, fp8=True):
     rows = x.numel() // x.shape[-1] if x.dim() else 0
     limit = fused_fwd_sm80.max_rows(x.device, x.dtype)
     grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, ln_weight, ln_bias, wa, wb, ws))
-    if fp8 and not grad and x.dtype is torch.bfloat16:  # the RTX 5090 e4m3 route (fp8.SM120_ROUTES: MINIWORLD_TRANSITION_FP8 / the safe preset, as the H100 route; off by default)
+    if fp8 and not grad and x.dtype is torch.bfloat16:  # the RTX 5090 e4m3 route (fp8.SM120_ROUTES slot; explicit MINIWORLD_TRANSITION_FP8 only, not in safe: fp8.SM120_PRESET_EXCLUDED)
         from . import fp8_sm120
 
         if fp8_sm120.POLICY is not None and fp8_sm120.serves(x, wa, ws):

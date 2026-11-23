@@ -93,23 +93,40 @@ def test_error_vs_fp64(F, d: int, n: int, rows: int) -> None:
     assert F.GUARD_STATS["fallbacks"] == 0
 
 
-def test_safe_preset_turns_it_on() -> None:
-    """The 5090 preset covers what the H100 preset covers: ``fp8.enable("safe")`` and the ``engine-fp8`` backend switch this route on (the slot module of
-    ``fp8.SM120_ROUTES``), with or without a model; ``status()`` / ``route_stats()`` / ``enable(guard=)`` report and set this module; ``disable()`` turns it off."""
+def test_safe_preset_leaves_it_off_explicit_variable_turns_it_on(monkeypatch) -> None:
+    """RTX 5090: the e4m3 Transition is NOT in the ``safe`` preset / ``engine-fp8`` scope (``fp8.SM120_PRESET_EXCLUDED``; owner decision 2026-11-23,
+    docs/fp8.md "RTX 5090": FoldForge end level 24 / 36 inside with it, 33 / 36 without). ``fp8.enable("safe")`` and the ``engine-fp8`` backend leave it
+    off; with ``MINIWORLD_TRANSITION_FP8=calib`` set explicitly they turn it on; ``status()`` / ``route_stats()`` / ``enable(guard=)`` / ``disable()``
+    act on this module (the slot of ``fp8.SM120_ROUTES``)."""
     _needs_5090()
     from miniworld_engine import fp8
     from miniworld_engine.kernels.transition.cuda import fp8_sm120 as F
 
-    assert fp8.SM120_ROUTES["transition"] == F.__name__ and not fp8.SM120_OPTIN
+    assert fp8.SM120_ROUTES["transition"] == F.__name__ and "transition" in fp8.SM120_PRESET_EXCLUDED
     assert F.POLICY is None  # off by default
     m = _module(4)
     x = torch.randn(1, 16384, 128, device="cuda").bfloat16()  # above the 12288-row gate
     guard = F.GUARD
     try:
+        monkeypatch.delenv("MINIWORLD_TRANSITION_FP8", raising=False)
+        monkeypatch.delenv("MINIWORLD_TRANSITION_FP8_SM120", raising=False)
         for model in (None, "af3", "boltz2"):
             fp8.enable("safe", model=model)
-            assert F.POLICY == "calib" and fp8.status()["transition"] == "calib", model
+            assert F.POLICY is None and fp8.status()["transition"] is None, model
+        fp8.reset_route_stats()
+        with torch.no_grad():
+            m(x)
+        assert fp8.route_stats()["transition"]["calls"] == 0  # safe: the default Transition
+        m.set_backend("engine-fp8")
+        with torch.no_grad():
+            m(x)
+        assert fp8.route_stats()["transition"]["calls"] == 0  # engine-fp8 scope: the default Transition
+        m.set_backend("cuda")
+        fp8.disable()
+        # the explicit variable: on under safe and inside the engine-fp8 scope
+        monkeypatch.setenv("MINIWORLD_TRANSITION_FP8", "calib")
         fp8.enable("safe", guard="lazy")
+        assert F.POLICY == "calib" and fp8.status()["transition"] == "calib"
         assert F.GUARD == "lazy" and fp8.status()["guard"]["transition"] == "lazy"
         fp8.enable("safe", guard="sync")
         fp8.reset_route_stats()
@@ -120,29 +137,27 @@ def test_safe_preset_turns_it_on() -> None:
         assert not fp8.check()
         fp8.disable()
         assert F.POLICY is None and fp8.status()["transition"] is None
-        # the engine-fp8 backend (scope per call): on inside the call, the process's switch (off) after it
         m.set_backend("engine-fp8")
         fp8.reset_route_stats()
         with torch.no_grad():
             m(x)
         assert fp8.route_stats()["transition"]["calls"] >= 1
+        assert F.POLICY is None  # the process's switch after the scope
+        monkeypatch.setenv("MINIWORLD_TRANSITION_FP8_SM120", "")  # the alias wins over the generic name
+        fp8.enable("safe")
         assert F.POLICY is None
-        m.set_backend("cuda")
-        fp8.reset_route_stats()
-        with torch.no_grad():
-            m(x)
-        assert fp8.route_stats()["transition"]["calls"] == 0
     finally:
         fp8.disable()
         F.GUARD = guard
         m.set_backend("cuda")
 
 
-def test_disable_turns_it_off(F) -> None:
+def test_disable_turns_it_off(F, monkeypatch) -> None:
     from miniworld_engine import fp8
 
     fp8.disable()
     assert F.POLICY is None
+    monkeypatch.setenv("MINIWORLD_TRANSITION_FP8", "calib")  # the explicit opt-in (the route is not in safe on the 5090)
     fp8.enable("safe")
     assert F.POLICY == "calib"
     fp8.disable()

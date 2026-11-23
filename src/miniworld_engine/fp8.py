@@ -157,12 +157,9 @@ B200_ROUTES: dict[str, str] = {
 B200_OPTIN: dict[str, str] = {
     "atom_dit": "miniworld_engine.kernels.augmented_attention.cuda.b200_atom.f8",
 }
-
-
 #: RTX 5090 (sm_120a, capability (12, 0)) route modules: slot -> module path (same interface as the H100 module of the slot; the same preset
-#: variables, so ``MINIWORLD_FP8=safe`` / ``engine-fp8`` turn on the same slots as on the H100 wherever a 5090 module exists). The Transition joined
-#: on 2026-11-23 (it was opt-in before, ``MINIWORLD_TRANSITION_FP8_SM120``, now an alias of ``MINIWORLD_TRANSITION_FP8``): the 5090 preset covers
-#: what the H100 preset covers. Slots without an entry keep the H100 module, whose ``serves()`` is False off sm_90.
+#: variables, so ``MINIWORLD_FP8=safe`` / ``engine-fp8`` turn on the same slots as on the H100, except the ones in :data:`SM120_PRESET_EXCLUDED`:
+#: the Transition is an explicit opt-in on the 5090, ``MINIWORLD_TRANSITION_FP8`` / alias ``_SM120``). Slots without an entry keep the H100 module.
 SM120_ROUTES: dict[str, str] = {
     "triattn": "miniworld_engine.kernels.triangle_attention.cuda.sm120_fp8",
     "trimul": "miniworld_engine.kernels.trimul_inproj.cuda.sm120_fp8",
@@ -174,6 +171,10 @@ SM120_ROUTES: dict[str, str] = {
 }
 #: RTX 5090 routes outside any slot and preset (as :data:`B200_OPTIN`): none (the e4m3 Transition moved into :data:`SM120_ROUTES`).
 SM120_OPTIN: dict[str, str] = {}
+#: RTX 5090 slots whose module stays in SM120_ROUTES (status / route_stats / check / disable) but which a preset does NOT turn on: the e4m3 Transition
+#: (owner decision 2026-11-23, docs/fp8.md "RTX 5090": FoldForge end level 24 / 36 targets inside with it, 33 / 36 without; the H100 F11 finding).
+#: It runs only with ``MINIWORLD_TRANSITION_FP8=calib`` (alias ``_SM120``) set explicitly or ``fp8_sm120.POLICY`` set at run time.
+SM120_PRESET_EXCLUDED: frozenset[str] = frozenset({"transition"})
 
 
 def arch() -> str:
@@ -372,7 +373,8 @@ def enable(name: str = "safe", *, model: str | None = None, guard: str | None = 
     tm.POLICY = env_of.get("MINIWORLD_TRIMUL_FP8") or None
     opm.POLICY = env_of.get("MINIWORLD_OPM_FP8") or None
     pwa.ENABLED = env_of.get("MINIWORLD_PWA_FP8") == "1"
-    tr.POLICY = env_of.get("MINIWORLD_TRANSITION_FP8") or None
+    # RTX 5090: the e4m3 Transition is outside the presets (SM120_PRESET_EXCLUDED): only its explicitly set variable turns it on
+    tr.POLICY = tr.explicit_policy() if arch() == "sm120" and "transition" in SM120_PRESET_EXCLUDED else env_of.get("MINIWORLD_TRANSITION_FP8") or None
     td.PLACES = td._parse(env_of.get("MINIWORLD_TOKEN_DIT_FP8", ""))
     ad.enable_fp8(ad._fp8_parts(env_of.get("MINIWORLD_ATOMDIT_FP8", "")))
     a8 = _atom_b200()
