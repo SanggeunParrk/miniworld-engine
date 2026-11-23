@@ -137,8 +137,8 @@ def _q8(M: int, W: int, dev) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def block(x, tab, bias2, widx, keys, ebias, tinfo, tb, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, cfg, use) -> torch.Tensor:
-    """:func:`_block` as ONE opaque op (``dit_variants_atom_fp8_sm120``, as the default block's ``atom_fwd``): Dynamo must not trace into it -- a
-    compiled FoldForge run (AF3, 5I28 n = 4) traced the glue between the extension launches and gave non-finite coordinates. Autocast off inside
+    """:func:`_block` as ONE opaque op (``dit_variants_atom_fp8_sm120``, as the default block's ``atom_fwd``): Dynamo does not trace the launches
+    and e4m3 buffers of the block (no graph breaks in a compiled sampler). Autocast off inside
     (the e4m3 operands are its own)."""
     par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, *rest = cfg
     chain = bool(rest and rest[0])
