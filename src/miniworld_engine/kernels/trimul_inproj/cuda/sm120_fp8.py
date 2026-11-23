@@ -34,7 +34,7 @@ GUARD = os.environ.get("MINIWORLD_TRIMUL_FP8_GUARD", "sync")  # "sync" | "lazy" 
 HEADROOM = float(os.environ.get("MINIWORLD_TRIMUL_FP8_HEADROOM", "16"))
 _MINL_ENV = os.environ.get("MINIWORLD_TRIMUL_FP8_MINL")
 #: smallest L the e4m3 chain takes (below it the default route runs): measured same-process A-B, docs/fp8.md "RTX 5090"
-MIN_L = 384
+MIN_L = 256
 GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0, "calibrations": 0}
 _CACHES: dict = {}  # per module (key: data_ptr of its to_left weight)
 _PEAK: dict = {}  # per device: int32 [2] -- max scaled plane value (fp32 bits) of a / b since the last read
@@ -130,9 +130,9 @@ def contract(planes8: torch.Tensor, x: torch.Tensor, scales: torch.Tensor, hs: i
 
 
 # ------------------------------------------------------------------------------------------------------------------------ route
-def serves(z: torch.Tensor, hs: int, n: int, fuse_z: bool, grouped: bool) -> bool:
-    """Python-level test: does the e4m3 chain take this inference call (bf16, the in-kernel-statistics front, no grouped plane formation, L >= MIN_L)?"""
-    if POLICY is None or z.dtype != torch.bfloat16 or not fuse_z or grouped or torch.is_grad_enabled():
+def serves(z: torch.Tensor, hs: int, n: int, grouped: bool) -> bool:
+    """Python-level test: does the e4m3 chain take this inference call (bf16, no grouped plane formation, L >= MIN_L)?"""
+    if POLICY is None or z.dtype != torch.bfloat16 or grouped or torch.is_grad_enabled():
         return False
     d = z.shape[-1]
     if d not in (128, 256, 384) or hs % 64 or n % 32:
@@ -140,7 +140,7 @@ def serves(z: torch.Tensor, hs: int, n: int, fuse_z: bool, grouped: bool) -> boo
     return n >= (int(_MINL_ENV) if _MINL_ENV is not None else MIN_L)
 
 
-def run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, key) -> bool:
+def run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, key, fuse_z) -> bool:
     """Front + contraction on e4m3 planes into ``x`` ([hs, n, n] bf16), ``st_in`` filled; False = the caller runs the default route."""
     dev = zf.device
     capturing = torch.cuda.is_current_stream_capturing()
@@ -149,8 +149,11 @@ def run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, key) -> bool:
     peak = _peak_buffer(dev)
     planes8 = zf.new_empty((2 * hs, T), dtype=torch.uint8)
 
+    if not fuse_z:
+        E.stats_rows(zf, st_in, eps_in)  # (hs 256 at D128: the statistics kernel, then the plain front)
+
     def front(qinv):
-        E.k1w8(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes8, n, eps_in, qinv, peak, direction)
+        E.k1w8(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes8, n, eps_in, qinv, peak, direction, fuse_z)
 
     if cache is None or POLICY == "dynamic":
         if capturing:

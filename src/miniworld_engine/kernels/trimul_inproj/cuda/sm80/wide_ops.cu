@@ -231,20 +231,21 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
 }
 
 // E8 (opt-in, RTX 5090 inference): the in-kernel-statistics front of k1w with e4m3 planes: planes8 [2 Hs, T] uint8, qinv [2] float (1 / scale of a, b), peak [2] int32 (bits of max scaled |value|, zeroed by the caller)
-void k1w8(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, torch::Tensor st, torch::Tensor mask, torch::Tensor planes8, int64_t L, double eps, torch::Tensor qinv, torch::Tensor peak, int64_t direction) {
+void k1w8(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, torch::Tensor st, torch::Tensor mask, torch::Tensor planes8, int64_t L, double eps, torch::Tensor qinv, torch::Tensor peak, int64_t direction, bool fuse) {
   const int T = (int)z.size(0), D = (int)z.size(1), ncol = (int)w1.size(0);
-  TORCH_CHECK(!is_f32(z) && T % 128 == 0 && D % 32 == 0 && D > 32 * a100::K1wTile::ST && D <= 384 && ncol % 256 == 0 && planes8.size(0) == ncol / 2 && planes8.size(1) == T &&
+  TORCH_CHECK(!is_f32(z) && T % 128 == 0 && D % 32 == 0 && (!fuse || (D > 32 * a100::K1wTile::ST && D <= 384)) && ncol % 256 == 0 && planes8.size(0) == ncol / 2 && planes8.size(1) == T &&
               planes8.scalar_type() == torch::kUInt8 && st.numel() == 2 * T && qinv.numel() >= 2 && peak.numel() >= 2 && (ncol / 4) % 64 == 0, "k1w8: shapes");
   a100::K1wParams p;
-  p.z = cbf(z); p.w1 = cbf(w1); p.vs = vs.data_ptr<float>(); p.vb = vb.data_ptr<float>(); p.st = nullptr; p.stw = mf2(st); p.eps = (float)eps;
+  p.z = cbf(z); p.w1 = cbf(w1); p.vs = vs.data_ptr<float>(); p.vb = vb.data_ptr<float>(); p.st = fuse ? nullptr : f2(st); p.stw = fuse ? mf2(st) : nullptr; p.eps = (float)eps;
   p.mask = mask.numel() ? mask.data_ptr<uint8_t>() : nullptr;
   p.planes = nullptr; p.planes8 = planes8.data_ptr<uint8_t>(); p.qinv = qinv.data_ptr<float>(); p.peak = peak.data_ptr<int>();
   p.direction = (int)direction;
   TORCH_CHECK(direction != 0 && direction != 2 || L % 32 == 0, "k1w8: incoming channels need L % 32 == 0");
   p.T = T; p.D = D; p.L = (int)L; p.ncol = ncol;
   static bool set = false;
-  if (!set) { set_smem(a100::k1w_kernel<true, false, true, true>, a100::K1W_STATS_SMEM); set = true; }
-  a100::k1w_kernel<true, false, true, true><<<(T / 128) * (ncol / 128), 128, a100::K1W_STATS_SMEM, stream()>>>(p);
+  if (!set) { set_smem(a100::k1w_kernel<true, false, true, true>, a100::K1W_STATS_SMEM); set_smem(a100::k1w_kernel<false, false, false, true>, a100::K1wTile::SMEM); set = true; }
+  if (fuse) a100::k1w_kernel<true, false, true, true><<<(T / 128) * (ncol / 128), 128, a100::K1W_STATS_SMEM, stream()>>>(p);
+  else a100::k1w_kernel<false, false, false, true><<<(T / 128) * (ncol / 128), 128, a100::K1wTile::SMEM, stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

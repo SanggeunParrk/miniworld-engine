@@ -29,11 +29,13 @@ for d,L,out in cases:
     fp8.disable(); y0=run().float()
     fp8.enable("safe"); fp8.reset_route_stats(); y1=run().float(); y1=run().float(); st=fp8.route_stats()["trimul"]; chk=fp8.check()
     # fp64 reference
-    m64=copy.deepcopy(m).double(); m64.set_backend("pytorch")
-    with torch.no_grad(): ref=m64(x.double(),mk).double()
+    if L<=1024:
+        m64=copy.deepcopy(m).double(); m64.set_backend("pytorch")
+        with torch.no_grad(): ref=m64(x.double(),mk).double()
+    else: ref=None
     def err(y): 
         e=(y.double()-ref); return (e.pow(2).mean().sqrt()/ref.pow(2).mean().sqrt()).item(), (e.abs().max()/ref.abs().max()).item()
-    e0,e1=err(y0),err(y1)
+    e0,e1=(err(y0),err(y1)) if ref is not None else ((float("nan"),)*2,)*2
     # timing: A-B alternate
     ta=[];tb=[]
     for r in range(3):

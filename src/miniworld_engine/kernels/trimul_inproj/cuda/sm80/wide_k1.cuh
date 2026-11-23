@@ -157,7 +157,9 @@ __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
     }
     __syncthreads();
   } else {
-    tl.run_fast(s0, p.D >> 5, GemmOps{p.z, (size_t)p.D, t0, p.T, p.w1, (size_t)p.D, j0, p.ncol});
+    GemmOps gop{p.z, (size_t)p.D, t0, p.T, p.w1, (size_t)p.D, j0, p.ncol};
+    if (E8 && tr8) { gop.i0 = r0 * p.L + c0; gop.rstep = p.L; gop.estep = 1; }
+    tl.run_fast(s0, p.D >> 5, gop);
   }
   if constexpr (STATS && !INLOOP) {
     const int nk = p.D >> 5;
@@ -200,6 +202,7 @@ __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
       const int tok = t0 + 64 * wm + 16 * mt + 2 * g8 + rh;
       float2 s;
       if constexpr (STATS) { const uint2 u = lds64(s0 + K1wTile::SMEM + (64 * wm + 16 * mt + 2 * g8 + rh) * 8); s = make_float2(__uint_as_float(u.x), __uint_as_float(u.y)); }
+      else if (E8 && tr8) { const int mm = 64 * wm + 16 * mt + 2 * g8 + rh; s = __ldg(p.st + (size_t)(r0 + (mm & 31)) * p.L + c0 + (mm >> 5)); }
       else s = __ldg(p.st + tok);
       rs[mt][rh] = s.y; mr[mt][rh] = s.x * s.y;
       float m = 1.f;

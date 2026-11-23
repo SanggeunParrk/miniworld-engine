@@ -341,9 +341,9 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     if sm120 and not save and not tile:  # opt-in e4m3 planes (sm120_fp8; POLICY None = off: the default route below, bit for bit)
         from . import sm120_fp8 as _f8
 
-        if _f8.POLICY is not None and _f8.serves(z, hs, n, fuse_z, _grouped(z, hs, direction, save)):
+        if _f8.POLICY is not None and _f8.serves(z, hs, n, _grouped(z, hs, direction, save)):
             x = zf.new_empty((hs, n, n))
-            f8_done = _f8.run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, _f8.register_key(leaves[1]))
+            f8_done = _f8.run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, _f8.register_key(leaves[1]), fuse_z)
     if f8_done:
         pass
     elif _grouped(z, hs, direction, save):  # RTX 5090 inference only (save=False): no plane pair is kept
