@@ -67,10 +67,14 @@ HEADROOM = float(_var("_HEADROOM", "16"))
 _MINROWS_ENV = _var("_MINROWS")
 MIN_ROWS: int | None = int(_MINROWS_ENV) if _MINROWS_ENV else None  # replaces ROW_GATE for every width when set (0 = no gate)
 #: smallest row count routed per width (below it the default route runs): same-process A-B, docs/fp8.md "RTX 5090" (Transition)
-ROW_GATE = {128: 12288, 256: 12288}  # 8192 rows: 0.91 (D 128 n 4) / 0.90 (D 256 n 4); 12288: 1.54 / 1.40
-WIDTHS = tuple(int(w) for w in (_var("_WIDTHS", "128,256") or "").split(",") if w)
+ROW_GATE = {128: 12288, 256: 12288, 384: 4096, 512: 4096}  # 8192 rows: 0.91 (D 128 n 4) / 0.90 (D 256 n 4); 12288: 1.54 / 1.40; wide chain D 384 / 512: 1.25-1.29 at 4096 rows, 1.03-1.37 up to 262144 (smallest measured: the gate)
+WIDTHS = tuple(int(w) for w in (_var("_WIDTHS", "128,256,384,512") or "").split(",") if w)
 #: (D, H) with a kernel build (transition_fwd_f8_sm120.cu)
 SHAPES = ((128, 256), (128, 512), (256, 512), (256, 1024))
+#: (D, H) of the WIDE chain (5090-int, as the H100 route's D 384 / 512 two-kernel chain): dynamic per-row e4m3 rows of the token DiT extension
+#: (``token_f8_sm120``: LayerNorm + quantisation in one pass, SwiGLU + quantisation in one pass) and two cuBLASLt e4m3 GEMMs (``torch._scaled_mm``,
+#: row-wise scales); no calibration, no guard (nothing saturates)
+WIDE_SHAPES = ((384, 768), (384, 1536), (512, 1024), (512, 2048))
 #: rows per CTA tile (8 warps x 16 rows) and the work-list bound of one launch (tr_fwd_f8_kernel: MAX_ITEMS - 2 tiles a CTA)
 BM = 128
 _MAX_ITEMS = 253
@@ -103,7 +107,7 @@ def serves(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     if POLICY is None or not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
     d, h = x.shape[-1], wa.shape[0]
-    if d not in WIDTHS or (d, h) not in SHAPES or wa.shape != (h, d) or ws.shape != (d, h):
+    if d not in WIDTHS or ((d, h) not in SHAPES and (d, h) not in WIDE_SHAPES) or wa.shape != (h, d) or ws.shape != (d, h):
         return False
     if not is_sm120(x.device):
         return False
@@ -236,6 +240,30 @@ def _launch(x2, cache, peak, eps):
     return out
 
 
+def _wide(x, gamma, beta, wa, wb, ws, eps):
+    """The D 384 / 512 chain (:data:`WIDE_SHAPES`): ``adaln_q8`` of the token DiT extension in its identity form (g = 1 + S with the table
+    [gamma - 1 | beta], one row for every token) = LayerNorm(x) gamma + beta as e4m3 rows with a dynamic row scale -> [a | b] = xn [Wa; Wb]^T on
+    cuBLASLt e4m3 (per-channel weight scales, fp32 accumulation, bf16 out) -> ``swiglu_q8`` (silu(a) b as e4m3 rows) -> h Ws^T on e4m3 -> x + y."""
+    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as T
+    from miniworld_engine.kernels.integrations.adaln_sm80 import cached
+
+    d, h = x.shape[-1], wa.shape[0]
+    x2 = x.reshape(-1, d).contiguous()
+    M = x2.shape[0]
+    tab = cached("tr8w_tab", (gamma, beta), lambda: torch.cat([gamma.float() - 1.0, beta.float()]).to(torch.bfloat16).view(1, 2 * d).contiguous())
+    xn8 = torch.empty((M, d), device=x.device, dtype=torch.float8_e4m3fn)
+    sx = torch.empty((M, 1), device=x.device, dtype=torch.float32)
+    T.ext().adaln_q8(x2, tab, tab.new_empty(0), xn8, sx, float(eps))
+    ab = T.mm(xn8, sx, T.weight8("tr8w_ab", wa, wb))
+    h8 = torch.empty((M, h), device=x.device, dtype=torch.float8_e4m3fn)
+    sh = torch.empty((M, 1), device=x.device, dtype=torch.float32)
+    T.ext().swiglu_q8(ab, h8, sh, False)
+    del ab
+    y = T.mm(h8, sh, T.weight8("tr8w_s", ws))
+    GUARD_STATS["calls"] += 1
+    return y.add_(x2).reshape(x.shape)
+
+
 def _default(x, gamma, beta, wa, wb, ws, eps):
     """The default route of the call (the guard's and the capture's fallback)."""
     from . import transition_sm80
@@ -253,6 +281,8 @@ def inference(
 ) -> torch.Tensor:
     """y = x + transition(x) through the e4m3 kernel. Eager or under CUDA-graph capture (calibrate eagerly first: a capture with no
     calibration takes the default route)."""
+    if (x.shape[-1], wa.shape[0]) in WIDE_SHAPES:
+        return _wide(x, gamma, beta, wa, wb, ws, eps)
     capturing = torch.cuda.is_current_stream_capturing()
     key = wa.data_ptr()
     cache = _CACHES.get(key)

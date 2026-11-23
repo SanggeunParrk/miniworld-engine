@@ -69,7 +69,7 @@ def test_perms_are_permutations() -> None:
     assert sorted(_perm_k2(512, "cpu").tolist()) == list(range(512))
 
 
-@pytest.mark.parametrize("d,n", [(128, 4), (128, 2), (256, 4), (256, 2)])
+@pytest.mark.parametrize("d,n", [(128, 4), (128, 2), (256, 4), (256, 2), (384, 4), (384, 2), (512, 4), (512, 2)])
 @pytest.mark.parametrize("rows", [16384, 300 * 128 + 77])
 def test_error_vs_fp64(F, d: int, n: int, rows: int) -> None:
     torch.manual_seed(0)

@@ -163,6 +163,8 @@ static void check_rows(const torch::Tensor& x, const torch::Tensor& out, const t
     case 1536: { constexpr int DD = 1536; __VA_ARGS__; } break; \
     case 384: { constexpr int DD = 384; __VA_ARGS__; } break;   \
     case 1024: { constexpr int DD = 1024; __VA_ARGS__; } break; \
+    case 512: { constexpr int DD = 512; __VA_ARGS__; } break;   \
+    case 2048: { constexpr int DD = 2048; __VA_ARGS__; } break; \
     default: TORCH_CHECK(false, "token_f8_sm120: width ", D, " not built"); \
   }
 

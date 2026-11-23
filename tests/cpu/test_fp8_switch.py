@@ -406,7 +406,7 @@ def _sm120_tr(**env) -> dict:
 
 def test_sm120_transition_route_follows_the_preset():
     off = _sm120_tr()
-    assert off == {"policy": None, "guard": "sync", "minrows": None, "widths": [128, 256], "headroom": 16.0}
+    assert off == {"policy": None, "guard": "sync", "minrows": None, "widths": [128, 256, 384, 512], "headroom": 16.0}
     assert _sm120_tr(MINIWORLD_FP8="safe")["policy"] == "calib"  # as the H100 route (fp8_sm90a)
     assert _sm120_tr(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8="")["policy"] is None  # an explicitly set per-route variable wins
     assert _sm120_tr(MINIWORLD_TRANSITION_FP8="calib")["policy"] == "calib"
