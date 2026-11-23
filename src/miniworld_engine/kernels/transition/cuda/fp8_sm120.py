@@ -75,8 +75,6 @@ SHAPES = ((128, 256), (128, 512), (256, 512), (256, 1024))
 #: (``token_f8_sm120``: LayerNorm + quantisation in one pass, SwiGLU + quantisation in one pass) and two cuBLASLt e4m3 GEMMs (``torch._scaled_mm``,
 #: row-wise scales); no calibration, no guard (nothing saturates)
 WIDE_SHAPES = ((384, 768), (384, 1536), (512, 1024), (512, 2048))
-#: the wide chain runs row blocks whose bf16 [a | b] intermediate is at most this many bytes (32768 rows at D512 n4: 1.25x in the A-B)
-WIDE_BLOCK_BYTES = 256 << 20
 #: rows per block of the wide chain (its bf16 [a | b] of a block: 32768 x 2 H x 2 bytes = 256 MiB at D 512 n 4; A-B 1.246 at 32768 rows)
 WIDE_BLOCK = 32768
 #: rows per CTA tile (8 warps x 16 rows) and the work-list bound of one launch (tr_fwd_f8_kernel: MAX_ITEMS - 2 tiles a CTA)
