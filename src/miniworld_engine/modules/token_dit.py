@@ -687,9 +687,9 @@ class TokenDiTProtenix(BackendModule):
 
         if token_cond_sm80.serves(self, single, cond, grad):  # inference: the block's six conditioning projections as two small GEMMs on the distinct rows
             return token_cond_sm80.forward(self, single, cond, pair, mask, extra)
-        single = augattn_sm80.forward(self.attention, single, cond, pair, mask, extra)
+        single = augattn_sm80.forward(self.attention, single, cond, pair, mask, extra, token=True)
         with torch.autocast("cuda", enabled=False):
-            return ct_sm80.update(self.transition, single, cond, True, single.dtype, grad)
+            return ct_sm80.update(self.transition, single, cond, True, single.dtype, grad, token=True)
 
     # ------------------------------------------------------------------------------------------------------------ "anthropic"
     #: the release op this class's attention core runs on, and whether that op fuses the gating query's sigmoid

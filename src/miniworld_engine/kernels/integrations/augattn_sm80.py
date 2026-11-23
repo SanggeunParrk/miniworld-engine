@@ -384,7 +384,21 @@ def _bias_into(
             out[:, length:, :].zero_()
 
 
-def _fwd_fake(x, cond, pair, res, kmask, bias_in, params, a, batch, length, heads, mask_kind, save, flat_eps=1e-5, extra=None, g2_table=None):
+def _f8_qkvg(xs, wqkvg, bvec):
+    """The ``qkvg`` placement of the RTX 5090 token DiT FP8 route (``f8 & 1``): the projection on e4m3 (``token_dit_fp8_sm120.qkvg``)."""
+    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as _tf8
+
+    return _tf8.qkvg(xs, wqkvg, bvec)
+
+
+def _f8_out(og, wo):
+    """The ``out`` placement of the RTX 5090 token DiT FP8 route (``f8 & 2``): the out projection on e4m3 (``token_dit_fp8_sm120.out``)."""
+    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as _tf8
+
+    return _tf8.out(og, wo)
+
+
+def _fwd_fake(x, cond, pair, res, kmask, bias_in, params, a, batch, length, heads, mask_kind, save, flat_eps=1e-5, extra=None, g2_table=None, f8=0):
     padded = _pad(length)
     d = x.shape[-1]
     m = a * batch * padded
@@ -424,6 +438,7 @@ def _fwd(
     flat_eps: float = 1e-5,
     extra: torch.Tensor | None = None,
     g2_table: torch.Tensor | None = None,
+    f8: int = 0,
 ) -> list[torch.Tensor]:
     """``g2_table`` ([P, d] gate logits, P dividing the rows; inference, with a residual, ``a * batch * padded`` rows with batch 1 and no padding): the output gate's logits made by the caller from
     the conditioning rows (``cond`` is then not read: any tensor), ``out = res + sigmoid(g2_table[r % P]) y`` by the transition's gate kernel.
@@ -481,7 +496,7 @@ def _fwd(
         cfg = 1 if m == 10240 or m >= 393216 else 3 if m >= 20480 else 0
         qkvg = atom_qkvg_resident_sm80.result(xs, wqkvg, bvec, cfg)
     else:
-        qkvg = _ieee.torch_addmm(bvec, xs, wqkvg.t())  # [M, 4 d]
+        qkvg = _f8_qkvg(xs, wqkvg, bvec) if f8 & 1 else _ieee.torch_addmm(bvec, xs, wqkvg.t())  # [M, 4 d]
     qk_saved = None
     if len(flat) == 2:  # the per-head RMSNorm of q and k (one weight [hd] each, shared by the heads), in fp32, written over their columns
         cols = qkvg[:, : 2 * d].view(m, 2, heads, hd)
@@ -680,7 +695,7 @@ def _fwd(
     if g2_table is not None:
         from miniworld_engine.kernels.conditioned_transition.cuda import sm80 as _ct80
 
-        y = _ieee.torch_mm(og, wo.t())
+        y = _f8_out(og, wo) if f8 & 2 else _ieee.torch_mm(og, wo.t())
         out = _ct80.gate_res_fwd(rs, y, g2_table)
     elif dt is BF and d == 128 and cs.shape[1] == 128 and output_tiled:
         from miniworld_engine.kernels.augmented_attention.cuda import (
@@ -697,7 +712,7 @@ def _fwd(
         cfg = 1 if save else (0 if m <= 5120 else 2 if m <= 10240 else 4)
         out, y, g2 = atom_output_fused_sm80.result(og, cs, wo, ws, bs, rs, save, cfg)
     else:
-        y = _ieee.torch_mm(og, wo.t())
+        y = _f8_out(og, wo) if f8 & 2 else _ieee.torch_mm(og, wo.t())
         g2 = _ieee.torch_addmm(bs, cs, ws.t())
         out = torch.empty(m, d, device=dev, dtype=dt)
         sm80.res_gate(y, g2, rs, out)
@@ -1019,9 +1034,10 @@ def _flat_eps(module, dtype=F32) -> float:
     return float(rms[0].effective_eps(dtype)) if rms else EPS
 
 
-def _fused_update(module, x, cond, pair, mask, res, extra=None, g2_table=None):
+def _fused_update(module, x, cond, pair, mask, res, extra=None, g2_table=None, token=False):
     """The fused path on the AdaLN's output ``x`` (the caller has checked ``serves``): ``res`` + the update, or the update alone when ``res`` is None.
-    ``g2_table`` [P, d]: the output gate's logits made by the caller (inference with a residual; ``cond`` is then only a dtype carrier and is not made contiguous)."""
+    ``g2_table`` [P, d]: the output gate's logits made by the caller (inference with a residual; ``cond`` is then only a dtype carrier and is not made contiguous).
+    ``token``: the attention of a token DiT block (the RTX 5090's opt-in e4m3 qkvg / out placements, ``token_dit_fp8_sm120``, may take it)."""
     a, batch, length, _ = x.shape
     kind = cast(int, _mask_kind(mask, a, batch, length))  # not None: serves() / serves_ops() refused such a mask
     kmask = None if kind == 0 else (mask[0] if mask.ndim == 3 and kind == 1 else mask)
@@ -1039,6 +1055,13 @@ def _fused_update(module, x, cond, pair, mask, res, extra=None, g2_table=None):
     if batch == 1 and kind in (0, 1) and (module.n_head, x.shape[-1] // module.n_head, pair.shape[-1]) == _ATOM:
         cached = _cached_bias(module, pair, mask)
         bias_in = None if cached is None else cached.unsqueeze(0)
+    f8 = 0
+    if token:  # the RTX 5090 token DiT FP8 route (opt-in: PLACES empty = f8 0, the default route)
+        from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as _tf8
+
+        if _tf8.PLACES:
+            pl = _tf8.attn_places(a * batch * _pad(length), x.shape[-1], x.dtype, params[4].shape[0] > 0, len(params) - 10, x.device)
+            f8 = (1 if "qkvg" in pl else 0) | (2 if "out" in pl else 0)
     return _fwd(
         x,
         cond,
@@ -1056,6 +1079,7 @@ def _fused_update(module, x, cond, pair, mask, res, extra=None, g2_table=None):
         _flat_eps(module),
         extra,
         g2_table,
+        f8,
     )[0]
 
 
@@ -1434,9 +1458,10 @@ def delta(module, single, cond, pair, mask, extra=None):
     return _fused_update(module, _adaln(module, single, cond), cond, pair, mask, None, extra)
 
 
-def forward(module, single, cond, pair, mask, extra=None):
-    """``AugmentedAttentionPairBias.forward`` on the sm_80 path: ``single + delta`` with the residual inside the last pass; call ``serves`` first. ``extra``: [B, H, L, L] logit planes (inference)."""
-    return _fused_update(module, _adaln(module, single, cond), cond, pair, mask, single.contiguous(), extra)
+def forward(module, single, cond, pair, mask, extra=None, *, token=False):
+    """``AugmentedAttentionPairBias.forward`` on the sm_80 path: ``single + delta`` with the residual inside the last pass; call ``serves`` first. ``extra``: [B, H, L, L] logit planes (inference).
+    ``token``: the attention of a token DiT block (the RTX 5090's opt-in e4m3 placements may take it)."""
+    return _fused_update(module, _adaln(module, single, cond), cond, pair, mask, single.contiguous(), extra, token=token)
 
 
 __all__ = [

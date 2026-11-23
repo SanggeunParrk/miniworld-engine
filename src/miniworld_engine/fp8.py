@@ -168,6 +168,8 @@ SM120_ROUTES: dict[str, str] = {
     "trimul": "miniworld_engine.kernels.trimul_inproj.cuda.sm120_fp8",
     "opm": "miniworld_engine.kernels.integrations.opm_fp8_sm120",
     "pwa": "miniworld_engine.kernels.integrations.pwa_fp8_sm120",
+    "token_dit": "miniworld_engine.kernels.conditioned_transition.cuda.token_dit_fp8_sm120",  # e4m3 expand (+ opt-in squeeze / qkvg / out) on cuBLASLt row-wise e4m3
+    "atom_dit": "miniworld_engine.kernels.dit_variants.cuda.atom_fp8_sm120",  # e4m3 pre / post GEMMs of the dit_variants atom block (every 5090 atom DiT)
     "transition": "miniworld_engine.kernels.transition.cuda.fp8_sm120",
 }
 #: RTX 5090 routes outside any slot and preset (as :data:`B200_OPTIN`): none (the e4m3 Transition moved into :data:`SM120_ROUTES`).

@@ -1388,8 +1388,22 @@ def _prebuild_sm80(rows):
 _SM120_TOKEN = frozenset({"TokenDiTProtenix", "TokenDiTMiniWorld", "TokenDiTMiniWorldBiasOnly", "TokenDiTRoseTTAFold3"})
 
 
+#: token DiT classes the RTX 5090 e4m3 route (``token_dit_fp8_sm120``, opt-in) serves at width 768 bf16 inference
+_SM120_F8_TOKEN = frozenset({"TokenDiTProtenix", "TokenDiTMiniWorld", "TokenDiTBoltz2", "TokenDiTRoseTTAFold3", "TokenDiTChai1"})
+
+
 def _prebuild_sm120(rows):
-    """The RTX 5090 builds of the AdaLN rows and the ConditionedTransition tail (the sm_80 sources for sm_120a)."""
+    """The RTX 5090 builds of the AdaLN rows and the ConditionedTransition tail (the sm_80 sources for sm_120a), and the opt-in token DiT
+    e4m3 row passes (``token_dit_fp8_sm120``: bf16 inference rows at width 768)."""
+    from miniworld_engine.kernels._prebuild import _kv
+
+    if any(
+        r["module"] in _SM120_F8_TOKEN and r["mode"] == "eval" and r["dtype"] != "float32" and _kv(r["dims"]).get("d_single") == "768"
+        for r in rows
+    ):
+        from . import token_dit_fp8_sm120
+
+        yield token_dit_fp8_sm120.ext
     if not any(r["module"] in _SM120_TOKEN for r in rows):
         return
     from miniworld_engine.kernels.adaln.cuda import sm80 as adaln_sm80

@@ -587,8 +587,11 @@ def update(
     residual: bool,
     compute_dtype: torch.dtype,
     grad: bool,
+    *,
+    token: bool = False,
 ) -> torch.Tensor:
-    """``ConditionedTransition`` on the sm_80 path (``serves`` must have accepted the call): ``x + delta`` (``residual``) or ``delta``; ``grad`` = ``needs_backward``."""
+    """``ConditionedTransition`` on the sm_80 path (``serves`` must have accepted the call): ``x + delta`` (``residual``) or ``delta``; ``grad`` = ``needs_backward``.
+    ``token``: the transition of a token DiT block (the RTX 5090's opt-in e4m3 placements, ``token_dit_fp8_sm120``, may take it; off: no effect)."""
     d, dc = x.shape[-1], cond.shape[-1]
     xs = x.to(compute_dtype).reshape(-1, d).contiguous()
     if grad:  # one conditioning per row (a shared one is expanded: autograd sums the per-row gradients)
@@ -599,6 +602,14 @@ def update(
     ada = module.ada_ln_in
     eps = (float(ada.ln_in.eps), 0.0 if is_identity(ada) else float(ada.ln_cond.eps))
     up = _up(module)
+    if token and not grad:  # the RTX 5090 token DiT FP8 route (opt-in: PLACES empty = the lines below unchanged)
+        from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as _tf8
+
+        if _tf8.PLACES & {"expand", "squeeze"}:
+            places = _tf8.transition_places(xs, is_identity(ada), not residual, up is not None)
+            if places:
+                return _tf8.transition(module, xs, cs, eps, residual, places).reshape(x.shape)
+            _tf8.STATS["declined"] += 1
     if up is not None:  # Boltz-2's up-gated transition: inference only (``serves``)
         p = _params(module)
         return inference_up(xs, cs, *p[:6], up.weight, *p[6:], *eps, residual).reshape(x.shape)  # pyright: ignore[reportCallIssue]  -- the parameters, in inference_up's order
