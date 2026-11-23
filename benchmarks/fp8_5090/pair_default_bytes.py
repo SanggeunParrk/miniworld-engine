@@ -15,7 +15,8 @@ assert not any("FP8" in k for k in os.environ if k.startswith("MINIWORLD")), "un
 CASES = [
     "trimul:128:1:256", "trimul:128:2:512", "trimulrf3:128:1:256", "trimulrf3:128:2:384", "trimul:512:1:256", "trimul:64:2:384", "trimul:64:0:256", "trimul:128:0:384", "trimul:256:1:384", "trimul:384:2:256", "trimul:64:1:256",
     "triattn:128:4:256", "triattn:128:4:512", "triattn:256:8:256", "triattn:64:4:256", "triattn:128:4:200",
-    "transition:128:4:16384", "transition:128:2:38477", "transition:256:4:16384", "transition:256:2:8192",
+    "transition:128:4:16384", "transition:128:2:38477", "transition:256:4:16384", "transition:256:2:8192", "transition:384:4:8192", "transition:512:4:8192",
+    "transition:512:2:4096",
 ]  # fmt: skip
 
 
