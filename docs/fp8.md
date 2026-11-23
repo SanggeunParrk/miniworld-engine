@@ -901,6 +901,58 @@ guard. Tests: `test_graph_capture_with_sync_guard` (native 8 x 32; wide 64 x 8, 
 After (same harness, `cfg_other.yaml`, `--module MSAPairWeightedAveraging`, non-static, shipped gates, rows 48-54, L 128 .. 2048): 56 of 56 cases captured,
 47 fired 1.000 .. 1.424 (D384 r49 1.150 .. 1.319 from L512; D1024 1.000 .. 1.424, rising with L), 9 not fired 0.993 .. 1.009 (noise).
 
+**Protenix v1 non-finite coordinates with `MINIWORLD_FP8=safe` (fixed 2026-11-23, a8ddeaac5).** F3 protenix1 `engine_fp8`: non-finite coordinates at
+every n (Slurm 65944); the 3.0.9 release and b21c7152f were fine, fae47745a (the `quant_rows` weight pack above) and later failed; the same tree with
+the weight quantised by `quant_weight_ref` was fine. Cause: Protenix v1's token DiT expand weights carry 30-875 dead output rows per block with
+max |w| ~5e-37 (AF3: none). `token_dit_fp8_rows.cu` took the row scale as `amax / 448` = ~1.4e-39 (subnormal), `1 / scale` = inf and the row's zeros
+became `0 * inf = NaN` in the e4m3 bytes (weight scan: 5 Protenix v1 packs with NaN, 0 for AF3). Fix: both row-scale sites of `token_dit_fp8_rows.cu`
+(`quant_rows` and the adaln / resgate activation pass) take `fmaxf(amax, 1e-30f) / 448`, the floor of `quant_weight_ref` and of the training kernels.
+Test `test_quant_rows_near_zero_rows_stay_finite` (zero rows, ~6e-37 and ~1e-38 rows: finite bytes, the reference scale, zero rows stay zero).
+F3 protenix1 FP8 after the fix (Slurm 66000): n = 1 0.343 s .. n = 16 13.20 s, FP8 / bf16 0.985 .. 0.809.
+
+**Why `qkvg` is not in `safe`: the key, not a bug (AF3, 2026-11-23).** FoldForge AF3 FoldBench (8j62, 2008 tokens, A5), every token DiT call of the
+first sampler steps compared with a float64 copy of the block (`~/miniworld-engine-scratch/td-qkvg-diag/diag.py`, raw `vg1.jsonl`, 49 calls; upd =
+rms of the update error / rms of the update): default bf16 0.0092 median (0.0417 max), `expand` 0.0245 (0.0552), `qkvg` 0.0254 (**0.1049**).
+Decomposition by emulating the e4m3 rounding of one operand at a time (`diag2.py`, raw `d2.jsonl`, 60 calls, block output rms error): default 0.0106,
+qkvg kernel 0.0511, emulation of all 0.0505; weights only 0.0113, the activation rows only 0.0495; per projection q 0.0097, **k 0.0489**, v 0.0083,
+g 0.0057. The kernel matches its emulation (no kernel bug); the error is the e4m3 rounding of the rows that make the keys, amplified by the logits:
+|q k| max per call 28 .. 2442 (median 284), so a relative key error of ~2^-4 moves the softmax. This is the placement that moved FoldBench
+(lDDT drop, "fp8safe" history above).
+`v | g` only in e4m3 (`vg`, q | k bf16; patch `~/miniworld-engine-scratch/fp8-h100-tokendit-records/vg_experiment.patch`, not merged): accurate
+(upd 0.0181 median, 0.0438 max) but slower: the module time against the default (`speed.py`, CUDA graph, cool / sustained, 5:512 .. 5:2048) is
+1.141 .. 1.160 for `vg` and 1.091 .. 1.112 for `vg + expand`, against 0.955 .. 0.965 for `expand` and 0.934 .. 0.954 for `qkvg + expand`. One q | k | v | g
+GEMM becomes two (bf16 q | k into a strided slice: M 5120 34.0 us against 22.2 us contiguous; e4m3 g | v 19.8 us; whole bf16 qkvg 41.8 us), so splitting
+costs more than the e4m3 half saves.
+
+**Eager runs: host time of the FP8 diffusion routes, and the sync guard (2026-11-23, 4a143d10c).** FoldForge F4 (FoldBench 27, eager, 200 steps,
+`MINIWORLD_FP8=safe`) had FP8 6-16 % slower than bf16 below ~1000 tokens (AF3 28 tokens 2.76 -> 3.00 s) and the 27-target sums at 0.92 .. 1.03.
+Two causes, separated on AF3 (`~/foldforge-scratch/paper_recheck_20261123/f4diag`): (1) F4's `FFPAPER_FP8_GUARD=sync`: a host read of the overflow
+flag after every trunk FP8 call, 0.1-0.35 s per forward (628 tokens: sync 3.71 s, lazy 3.36 s, bf16 3.27 s); FoldForge's F4 runner already calls
+`fp8.check()` after every forward and redoes a saturated one, so the lazy guard keeps the contract (FoldForge 13729ed makes it F4's default).
+(2) Small eager forwards are host-bound (28 tokens: 0.85 s of kernel time in a 2.8 s forward) and the FP8 diffusion routes added host work per call:
+token DiT ~12 us x 9600 calls (`weight_pack`: `get_device_capability` 2.2 us, the scoped lookup ~4 us, `_f8_wab`'s tiling lookup before it),
+atom DiT ~25 us x 2400 calls (`pack8`: a second `pack` lookup and a 27-tensor key). Route switches off one at a time (lazy guard, 28 / 628 / 992
+tokens): all routes 2.981 / 3.356 / 4.741 s, token DiT off 2.858 / 3.190 / 4.564, atom DiT off 2.920 / 3.261 / 4.664, Transition off 2.952 / 3.326 / 4.767,
+trunk routes only 2.796 / 3.158 / 4.521 (bf16 2.790 / 3.269 / 4.967). Fix (outputs unchanged): `weight_pack` caches the sm_90 check per device,
+serves an eager hit straight from the eager entry (what `lookup` serves outside a capture), and takes the expand tiling as a callable made only with
+the pack; `local_dit_h100` keeps an eager call's e4m3 pack in the bf16 pack entry of the same weights (`_pack8_on`; captures keep `pack8`'s rules).
+Tests `test_eager_hit_skips_the_lookup_and_the_expand_tiling`, `test_fp8_pack_rides_on_the_eager_bf16_pack`. AF3, lazy guard, 3 repetitions,
+FP8 / bf16: 28 tokens 1.066 -> 1.035, 628 1.020 -> 0.987, 992 0.945 -> 0.929.
+F4 re-run with both (engine 4a143d10c, lazy guard; bf16 arm of the same campaign), 27-target sums FP8 / bf16 before -> after: AF3 0.998 -> 0.951,
+Boltz-2 1.008 -> 0.961, Chai-1 0.987 -> 0.948, IntelliFold2 0.954 -> 0.936, OpenDDE 0.922 -> 0.892, OpenFold3 0.983 -> 0.953, OpenFold3-preview2
+1.026 -> 0.982, Protenix v1 1.001 -> 0.962, Protenix v2 0.971 -> 0.935, RoseTTAFold3 0.982 -> 0.954 (Protenix v1 / RoseTTAFold3: 4 cells re-measured;
+in the campaign their warm forward was 2-3x the cold one while other jobs loaded node01, re-measured on node01 both arms 0.87 .. 1.04). Left: the
+smallest targets (<= 300 tokens) stay 2-7 % slower in eager (host time with no e4m3 gain there); CUDA-graph runs (F3) do not see it.
+Accuracy of that F4 re-run against the experimental structures (FoldForge F5 (b) evaluator: OpenStructure + DockQ v2, CPU; FP8 arm against the bf16
+arm of the same campaign, `collect.py --reference engine`; one trunk seed, 5 samples, 27 targets, 10 predictors; raw
+`~/foldforge-scratch/paper_recheck_20261123/F5x/F5x_h100_gt.csv`): mean FP8 - bf16 interface DockQ -0.0009 (180 keys, 0.9056 inside bf16's s.d. over its
+5 samples), ligand lDDT-PLI +0.0006 (40, 0.95), monomer lDDT -0.0068 (90, 0.744); all keys median |diff| 0.0046, r 0.990. Per predictor and kind every
+mean is within +-0.016 except AF3 interfaces +0.046 and **OpenDDE monomers -0.037** (8 of 9 outside bf16's s.d.: DNA -0.012 .. -0.060, protein
+-0.014 .. -0.021, RNA -0.043 .. -0.083). RNA monomer 7sxp (161 nt) drops for several predictors (AF3 -0.082, OpenDDE -0.083, Protenix v2 -0.080; bf16
+s.d. 0.011-0.022). Largest interface drops: Protenix v2 8gjg A|B -0.21 (s.d. 0.08), antibody-antigen 8b7h -0.12 .. -0.13 (Protenix v1, Chai-1; s.d.
+0.18-0.29). One seed per arm: these are indications, not the seed-controlled verdict of F11 (AF3 antibody-antigen there: a precision loss from the trunk
+pair Transition, protein-RNA inside the between-seed spread). The 4a143d10c fix does not change outputs, so the scores are those of the FP8 route.
+
 ## Release line 3.0.0: verification (branch `rel/3.0.0`, 2026-11-17)
 
 - Merge: 2.5.14 (9dd18e507) + `fp8/3.0.0-all` (e5ce31d0c). One conflict (`h100_b200style._contract`: 2.5.13's `table` argument and FP8's
