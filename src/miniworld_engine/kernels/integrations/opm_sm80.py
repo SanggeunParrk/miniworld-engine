@@ -228,6 +228,13 @@ def _native128_pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -
     )
 
 
+def _f8_sm120():
+    """The opt-in RTX 5090 e4m3 product (``opm_fp8_sm120``, ``fp8.SM120_ROUTES["opm"]``; its ``POLICY`` is the switch)."""
+    from miniworld_engine.kernels.integrations import opm_fp8_sm120
+
+    return opm_fp8_sm120
+
+
 def _outer(sm, a, b, mk):
     """O = A^T B: with a mask the CUTLASS product that skips the tokens masked in every MSA row (``ogemm_sm80``: their O blocks are exactly 0;
     padding is the common case), else cuBLAS (``sm.lt_mm``)."""
@@ -304,7 +311,11 @@ def inference(
                 a, b, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first, dmin=dmin, doff=doff
             )
             return out.unsqueeze(0)
-        o = _outer(sm, a, b, mk)
+        o = None
+        if _card.sm120() and (f8 := _f8_sm120()).POLICY is not None and f8.serves(m.shape[0], m.shape[1]):  # opt-in e4m3 product (docs/fp8.md "RTX 5090")
+            o = f8.outer(a, b, leaves, m.shape[1])
+        if o is None:
+            o = _outer(sm, a, b, mk)
         del a, b
         if mk is not None and _mask_epilogue_enabled(m, wo):
             from miniworld_engine.kernels.outer_product_mean.cuda import (

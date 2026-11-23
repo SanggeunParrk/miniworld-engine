@@ -163,7 +163,14 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
     if not _sm120():
         v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
         e.to_hm(vg, v_hm, S, L)
-    o_hm = _gemm_sm120().contract(w, v_hm) if _sm120() else torch.bmm(w, v_hm)
+    o_hm = None
+    if not save and _sm120():
+        from miniworld_engine.kernels.integrations import pwa_fp8_sm120 as f8
+
+        if f8.ENABLED and f8.serves_big(S, L):  # opt-in e4m3 contraction (docs/fp8.md "RTX 5090")
+            o_hm = f8.contract_big(v_hm, w, leaves[2])
+    if o_hm is None:
+        o_hm = _gemm_sm120().contract(w, v_hm) if _sm120() else torch.bmm(w, v_hm)
     e.gate_fwd(o_hm, vg, _gcol(vg), u, S, L)
     if keep is None:  # m + u Wo^T in one cublasLt call (D != C: no copy of m into the output first)
         out = _mm_sm120(u, wo, mf) if _sm120() else _lt().lt_mm(u, wo, mf, 0, False, None, None)

@@ -96,6 +96,14 @@ def prebuild_sm120(rows_opm: bool = True, rows_pwa: bool = True, rows_chai: bool
         from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _lt
 
         loaders += [wide_sm80.ext, pwa_wide_sm80._glue_sm120, _lt, gemm_sm120.ext]
+    if rows_opm or rows_pwa or rows_wide:  # the opt-in e4m3 routes (docs/fp8.md "RTX 5090": opm_fp8_sm120 / pwa_fp8_sm120): the sm_120a cast / ln_vt8 extension
+        from miniworld_engine.kernels.integrations import msa_f8_sm120
+
+        loaders.append(msa_f8_sm120.ext)
+    if rows_opm:  # and the cuBLASLt e4m3 product of the OPM route (opm_fp8.product: host code only)
+        from miniworld_engine.kernels.integrations import opm_fp8
+
+        loaders.append(opm_fp8._lt_ext)
     seen = set()
     for fn in loaders:
         if fn not in seen:

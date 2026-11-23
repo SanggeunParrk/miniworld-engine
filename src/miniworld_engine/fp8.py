@@ -163,6 +163,8 @@ B200_OPTIN: dict[str, str] = {
 SM120_ROUTES: dict[str, str] = {
     "triattn": "miniworld_engine.kernels.triangle_attention.cuda.sm120_fp8",
     "trimul": "miniworld_engine.kernels.trimul_inproj.cuda.sm120_fp8",
+    "opm": "miniworld_engine.kernels.integrations.opm_fp8_sm120",
+    "pwa": "miniworld_engine.kernels.integrations.pwa_fp8_sm120",
 }
 #: RTX 5090 routes served at capability (12, 0) that are NOT in a slot replacement and NOT in any preset (own switch variable; as :data:`B200_OPTIN`):
 #: the e4m3 Transition (``MINIWORLD_TRANSITION_FP8_SM120``; FoldForge F11: e4m3 in the trunk pair Transition costs antibody-antigen accuracy, so
