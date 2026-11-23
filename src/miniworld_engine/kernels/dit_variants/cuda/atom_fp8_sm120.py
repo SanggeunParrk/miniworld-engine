@@ -54,8 +54,9 @@ FP8_ROWS: frozenset = _fp8_parts(_fp8_env("MINIWORLD_ATOMDIT_FP8", ""))
 #: ``why_rows``: below :data:`MIN_ROWS`); ``why_opts`` / ``why_cond`` kept for the H100 keys (never counted here: every option and per-sample
 #: conditioning tables are served).
 STATS = {"calls": 0, "pre": 0, "post": 0, "fallbacks": 0, "why_save": 0, "why_tf32": 0, "why_opts": 0, "why_cond": 0, "why_rows": 0}
-#: the fewest block rows M = A N the route takes (RTX 5090, same-process A-B, docs/fp8.md "RTX 5090" atom DiT)
-MIN_ROWS = 0
+#: the fewest block rows M = A N the route takes (RTX 5090, same-process A-B, 6 rounds, docs/fp8.md "RTX 5090" atom DiT): pre + post 0.98 at 1024
+#: rows (A1 N1024, Protenix and OpenFold3), 1.08-1.13 from 4096 (A1 N4096, A5 N1024), 1.15-1.42 from 10240
+MIN_ROWS = 4096
 
 
 def enable_fp8(on: bool | str | Iterable[str] = True) -> frozenset:

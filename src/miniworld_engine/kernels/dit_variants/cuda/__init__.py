@@ -36,6 +36,10 @@ def edge_ext():
     )
 
 
+#: the atom DiT classes whose RTX 5090 bf16 inference the opt-in e4m3 route (``atom_fp8_sm120``) serves
+_SM120_F8_ATOM = frozenset({"AtomDiTProtenix", "AtomDiTOpenFold3", "AtomDiTBoltz2", "AtomDiTRoseTTAFold3", "AtomDiTChai1"})
+
+
 def prebuild(target, rows):
     """Every build of the DiT-variant family (kernels/_prebuild.py) the requirements rows ask for (the builds take no model dims). H100:
     ``edge_ext`` (the slid edge windows of local_dit_h100) and, for AtomDiTESMFold2Pair's train rows, ``sm80.train_ext_sm90`` (its training
@@ -58,6 +62,12 @@ def prebuild(target, rows):
             yield sm80.edge_ext
             yield ft.partial(sm80.cubin, "lattn90")
             yield ft.partial(sm80.cubin, "lattn90_tf32")
+        if target.arch == "sm120" and any(
+            r["mode"] == "eval" and r["dtype"] != "float32" and r["module"] in _SM120_F8_ATOM for r in other
+        ):  # the opt-in RTX 5090 atom DiT e4m3 route (atom_fp8_sm120): its row-pass extension
+            from . import atom_fp8_sm120
+
+            yield atom_fp8_sm120.ext
         if esm:  # AtomDiTESMFold2Pair: the 192-key rank-window attention and the q / k RMSNorm + rotary for sm_80
             yield ft.partial(sm80.cubin, "lattn90_esm")
             yield sm80.qknorm_ext
