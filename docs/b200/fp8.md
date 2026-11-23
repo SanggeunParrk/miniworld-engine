@@ -35,6 +35,34 @@ Caveats found in the integration: (1) token DiT e4m3 weight forms are rebuilt pe
 * Token DiT: qkvg / out / squeeze e4m3 forms measured 0.99-1.05 (not served); weight forms need `static_weights()` captures.
 * backend_versions not bumped (default routes bit-identical with FP8 off).
 
+## End-to-end measurement on engine main (2026-11-23)
+
+5I28, FoldForge F3 protocol (real MSA + 4 templates, 4 trunk passes, 200 steps, 5 samples, bf16, compile + CUDA graphs, steady median), real
+weights, engine main 1ac962f49 / a553001e1, `MINIWORLD_FP8=safe` + `MINIWORLD_FP8_MODEL=<predictor>`; rented B200 (AF3, Protenix v1 n <= 4) and
+the shared B200 host (the rest). Ratio = FP8 / bf16 steady time (< 1 is faster). `fp8.check()` was False in every cell.
+
+| predictor | n = 1 | n = 4 | n = 8 | n = 16 |
+|---|---|---|---|---|
+| AF3 | 0.342 -> 0.345 (1.006) | 0.899 -> 0.853 (0.948) | 2.532 -> 2.334 (0.922) | 11.09 -> 9.44 (**0.852**) |
+| Protenix v1 | 0.330 -> 0.328 (0.99) | 0.862 -> 0.819 (0.95) | 2.358 -> 2.190 (0.929) | 10.10 -> 8.78 (**0.869**) |
+| Boltz-2 | 0.354 -> 0.354 (1.00) | 1.008 -> 0.965 (0.957) | 2.944 -> 2.801 (0.951) | 13.83 -> 12.78 (0.924) |
+| OpenFold3 | 0.340 -> 0.342 (1.006) | 0.906 -> 0.871 (0.961) | 2.466 -> 2.273 (0.922) | 10.78 -> 9.16 (**0.850**) |
+| Chai-1 | 0.269 -> 0.265 (0.988) | 0.991 -> 0.953 (0.962) | 3.428 -> **non-finite** | 17.36 -> 16.28 (0.938) |
+
+- Routes that fire from n = 8: TriAttn PV (q / k declined on B200), TriMul, OPM, Transition, token DiT expand (declined at n <= 4 / n = 1),
+  PWA from n = 16. Boltz-2 is not in `TRIATTN_MODELS`; Chai-1's D256 n2 pair Transition is not served (36-112 Transition calls only); OPM fires
+  for Chai-1 but is not counted by `route_stats()`.
+- **Structure (end-level, the first B200 FP8 end-level check)**, n = 1, same seed, all-atom Kabsch RMSD FP8 vs bf16 (bf16 vs bf16 is bit-identical):
+  AF3 0.093 A (the model's own sample-to-sample spread 0.44 A), Protenix v1 0.078 A (0.60), Boltz-2 0.057 A (0.68), OpenFold3 0.096 A (0.48),
+  Chai-1 0.073 A (0.74); mean |dpLDDT| 0.04-0.12. n >= 4 was not judged here because B200 bf16 itself was wrong under CUDA-graph capture at
+  n = 4 / 8 until a553001e1 (`_streams._skips_in_capture` skipped `record_stream` on the B200; see that commit message).
+- **Chai-1 n = 8 FP8: non-finite coordinates** (FloatingPointError in decode) with `fp8.check()` False, also with CUDA graphs off; bf16 n = 8 and
+  FP8 n = 16 are finite. Not localized (minus-TriAttn / minus-PWA variants not run). Open: do not offer FP8 for Chai-1 until fixed.
+- AF3 eager profile, n = 16 (11.6 s): Pairformer ~64 % (TriAttn 6.1 s, TriMul 1.4 s), token DiT 17 %, atom DiT 0.5 s, Transition 3 %, OPM 0.11 s,
+  PWA 0.014 s: the FP8 ceiling is set by TriAttn; at n = 8 the token DiT (expand-only FP8, block 0.93-0.99) leads.
+- Transition D128: the gate now serves only the row windows where e4m3 is faster (commit 6189cf1e0, `fp8_sm100a.py` ROW_GATE / ROW_MAX:
+  n 2 65536 <= rows < 1474560, n 4 147456 <= rows < 1179648); the old gates lost up to 9 % at 1.6-2.4 M rows (e.g. AF3 pair transitions at 5I28 n = 12).
+
 ## Verification of the combined tree (n14-all)
 FP8-off bit identity against n14-base, eager and graph, sha1, separate processes: token DiT + APB 398 / 398 (eager and graph), atom DiT 258 / 258 eager and 258 graph (4 float32 L4096 cases are nondeterministic in the base itself), OPM + PWA 174 / 174 (both), TriMul 24 / 24 (eager + graph, max abs 0),
 Transition 23 shapes (all inference shas equal; the last parameter-gradient hash of each training case differs between two runs of the BASE as well), TriAttn 90 cases eager + graph 0 differ.
