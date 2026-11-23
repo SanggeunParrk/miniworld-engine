@@ -90,3 +90,38 @@ def test_scoped_capture_row_gates() -> None:
         assert _active_in_capture(F, 128, 768, False, True) == e  # the explicit override wins
     finally:
         F.PLACES, F.MIN_ROWS = old, old_min
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+def test_capture_reads_the_eager_pack_with_grad_off() -> None:
+    """With grad off a capture is served the e4m3 pack its eager warm-up made (no remake per replay): the eager row gates apply; with no eager pack
+    (or with grad on) the scoped gates do."""
+    F = _F()
+    g = torch.Generator(device="cuda").manual_seed(3)
+    mk = lambda n, k: (torch.randn(n, k, device="cuda", generator=g) * 0.05).bfloat16()  # noqa: E731
+    args = (mk(3072, 768), mk(768, 768), mk(768, 1536), (mk(3072, 768), 128), mk(3072, 1).reshape(-1))
+    old, old_min = F.PLACES, F.MIN_ROWS
+    F.PLACES, F.MIN_ROWS = frozenset(("expand",)), None
+    F._F8_PACKS.clear()
+    try:
+        e = frozenset(("expand",))
+        with torch.no_grad():
+            assert _active_in_capture(F, 1920, 768, False, True) == frozenset()  # no eager pack yet: remade at every replay
+            eager = F.weight_pack(("t-eager",), *args)
+            assert _active_in_capture(F, 1920, 768, False, True) == e
+            # inside a capture the very eager entry is served: no kernel recorded for the pack
+            g1 = torch.cuda.CUDAGraph()
+            x = torch.zeros(1, device="cuda")
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                x += 1
+            torch.cuda.current_stream().wait_stream(s)
+            with torch.cuda.graph(g1):
+                x += 1
+                cap = F.weight_pack(("t-eager",), *args)
+            assert cap["expand"][0].data_ptr() == eager["expand"][0].data_ptr()
+        assert _active_in_capture(F, 1920, 768, False, True) == frozenset()  # grad on: the weights are remade at every replay
+    finally:
+        F.PLACES, F.MIN_ROWS = old, old_min
+        F._F8_PACKS.clear()

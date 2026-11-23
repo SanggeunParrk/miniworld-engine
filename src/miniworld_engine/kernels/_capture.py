@@ -186,8 +186,15 @@ def _evict(store: dict, pinned: set, limit: int, keep) -> None:
         del store[k]
 
 
-def lookup(store: dict, key, build, limit: int = 64):
-    """``build()``, cached in ``store`` under ``key`` within the current scope (see the module docstring)."""
+def lookup(store: dict, key, build, limit: int = 64, capture_reads_eager: bool = False):
+    """``build()``, cached in ``store`` under ``key`` within the current scope (see the module docstring). ``capture_reads_eager``: with grad
+    off a capture is served the eager entry its warm-up made, without ``static_weights()`` (the contract of ``param_forms(capture_reads_eager=True)``:
+    for forms of an inference-only route; the entry is held for good). Without an eager entry, or with grad on, the scoped rule above."""
+    if capture_reads_eager and not torch.is_grad_enabled() and _graph_capture_id() is not None:
+        eager = store.get((None, key))
+        if eager is not None:
+            _HELD_BY_CAPTURES[id(eager)] = eager
+            return hold(eager)
     sk = scoped(key)
     if sk is None:
         return build()
