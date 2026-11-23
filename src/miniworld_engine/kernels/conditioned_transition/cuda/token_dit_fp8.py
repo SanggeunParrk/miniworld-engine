@@ -57,6 +57,9 @@ MIN_ROWS_PER: dict[str, int] = {"qkvg": 2560, "expand": 640, "out": 2560, "squee
 #: (11.4 -> 8.4 us at M = 1920, 26.6 -> 19.1 us at 5120), but the block in a CUDA graph (H100, 2026-11-18, A = 5) is slower below M = 2560 (1920: +2.7 %,
 #: 1280: +3.2 %, 640: +5.6 %), level at 2560 (0.998), faster above (3840 0.991, 5120 0.965, 7680 0.954): gate 2560
 MIN_ROWS_UP = 2560
+#: the same gates inside a CUDA graph captured WITHOUT ``static_weights()`` (the e4m3 weights are remade at every replay: see :func:`active`); RoseTTAFold3 = parallel, k-q LayerNorm
+MIN_ROWS_SCOPED = 3200
+MIN_ROWS_SCOPED_RF3 = 10240
 #: one override for every placement (``MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS``; 0 = no gate), None: ``MIN_ROWS_PER``
 MIN_ROWS: int | None = int(os.environ["MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS"]) if os.environ.get("MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS") else None
 
@@ -135,9 +138,21 @@ def active(
             for p in places
             if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_B200_UP if up and p == "expand" else MIN_ROWS_B200_RF3 if rf3 else MIN_ROWS_B200[p])
         )
-    return frozenset(
-        p for p in places if M >= (MIN_ROWS if MIN_ROWS is not None else MIN_ROWS_UP if up and p == "expand" else MIN_ROWS_PER[p])
-    )
+    # a graph captured without ``static_weights()`` remakes the e4m3 weights at every replay (one ``quant_rows`` pass, ~6 us for the expand weight):
+    # it pays only from MIN_ROWS_SCOPED rows (H100 module A-B, CUDA graph, 2026-11-23: default / FP8 = 0.97-0.98 at 1280, 0.994-1.000 at 1920 / 2560,
+    # 1.004-1.009 from 3200 for the default / Chai-1 / MiniWorld / Protenix blocks, Boltz-2's up-gate 1.012 at 2560); RoseTTAFold3's parallel block
+    # (rows_q8 + expand) reaches 1.0 only at 7680 rows and 1.006 at 10240
+    scoped = _capture.capture_id() is not None
+
+    def gate(p: str) -> int:
+        if MIN_ROWS is not None:
+            return MIN_ROWS
+        if up and p == "expand":
+            return MIN_ROWS_UP
+        g = MIN_ROWS_PER[p]
+        return max(g, MIN_ROWS_SCOPED_RF3 if not (plain or identity) else MIN_ROWS_SCOPED) if scoped else g
+
+    return frozenset(p for p in places if M >= gate(p))
 
 
 def quant_weight_ref(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

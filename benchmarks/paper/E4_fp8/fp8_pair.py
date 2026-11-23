@@ -150,6 +150,7 @@ def main(argv=None) -> int:
                 torch.cuda.synchronize(dev)
                 sat0 = fp8.check()
                 eager_stats = fp8.route_stats()
+                fp8.reset_route_stats()  # the graph captures below count their route calls (a replay does not): the routes a CUDA graph really contains
                 ms = {"cuda": [], "engine-fp8": []}
                 for r in range(args.rounds):
                     for name, step in (
@@ -157,6 +158,7 @@ def main(argv=None) -> int:
                     ):
                         torch._dynamo.reset()
                         ms[name].append(speed.measure(step, timer, timing="graph", warmup=warmup, iterations=iterations)["median_ms"])
+                graph_stats = fp8.route_stats()
                 sat1 = fp8.check()
                 fired = {
                     "trimul": eager_stats["trimul"]["calls"] > 0,
@@ -166,7 +168,7 @@ def main(argv=None) -> int:
                     "transition": eager_stats["transition"]["calls"] > 0,
                 }
                 own = {"TriangleMultiplication": "trimul", "TriangleAttention": "triattn"}.get(
-                    case.module, "token_dit" if case.module.startswith("TokenDiT") else "atom_dit" if case.module.startswith("AtomDiT") else "transition"
+                    case.module, "token_dit" if case.module.startswith("TokenDiT") else "atom_dit" if case.module.startswith("AtomDiT") else "opm" if case.module == "OuterProductMean" else "pwa" if case.module.startswith("MSAPair") else "transition"
                 )
                 rec.update(
                     status="ok",
@@ -175,8 +177,9 @@ def main(argv=None) -> int:
                     saturated_calibration=sat0,
                     saturated_replay=sat1,
                     routes_fired=fired,
-                    fp8_route_fired=fired[own],
-                    route_stats={k: v for k, v in eager_stats.items() if k in ("trimul", "triattn", "token_dit", "atom_dit", "transition")},
+                    fp8_route_fired=(graph_stats[own]["calls"] + graph_stats[own].get("wide_calls", 0) > 0) if own in ("token_dit", "atom_dit", "transition", "opm", "pwa") else fired[own],
+                    route_stats_graph={k: v for k, v in graph_stats.items() if k in ("token_dit", "atom_dit", "transition", "opm", "pwa")},
+                    route_stats={k: v for k, v in eager_stats.items() if k in ("trimul", "triattn", "token_dit", "atom_dit", "transition", "opm", "pwa")},
                 )
             except Exception as exc:  # recorded, never re-routed
                 oom = isinstance(exc, torch.cuda.OutOfMemoryError)
