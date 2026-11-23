@@ -18,8 +18,8 @@ from miniworld_engine.measure import config as C
 pytestmark = [pytest.mark.gpu]
 
 
-def _a100() -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
+def _a100() -> bool:  # the sm_80 route: A100 and RTX 5090 (the same sources built for sm_120a)
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() in ((8, 0), (12, 0))
 
 
 def _token(dtype: str) -> typing.Any:

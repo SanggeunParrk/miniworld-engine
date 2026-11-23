@@ -276,7 +276,7 @@ def _hoist_token_bias(save: bool, batch: int, mask_kind: int, heads: int, padded
         and not (torch.is_grad_enabled() and pair.requires_grad)
         and heads * padded * padded * dt.itemsize <= TOKEN_BIAS_HOIST_MAX_BYTES
         and os.environ.get("MINIWORLD_TOKEN_BIAS_HOIST", "1") != "0"
-        and torch.cuda.get_device_capability(pair.device) == (8, 0)  # measured on the A100 only: the RTX 5090 (same sources, sm_120a) keeps the per-call bias (cuda:5090_sm120 unchanged)
+        and torch.cuda.get_device_capability(pair.device) in ((8, 0), (12, 0))  # A100 and RTX 5090 (same sources, sm_120a; 5090 measured 2026-11-23: cuda:5090_sm120 bumped)
     )
 
 
