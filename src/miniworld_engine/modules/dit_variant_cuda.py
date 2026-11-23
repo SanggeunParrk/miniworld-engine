@@ -31,7 +31,7 @@ from torch.multiprocessing.reductions import StorageWeakRef
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.modules.norm import IdentityAdaptiveLayerNorm
-from miniworld_engine.modules.transition import ConditionedTransition
+from miniworld_engine.modules.transition import ConditionedTransition, UpGatedConditionedTransition
 
 _BF, _F32 = torch.bfloat16, torch.float32
 
@@ -383,6 +383,14 @@ class VariantTokenCuda:
 
             single_a = augattn_sm80.forward(self.attention, single, cond, pair, mask)
             if not self.parallel:
+                from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
+
+                # RTX 5090: Boltz-2's up-gated transition at inference on the sm_80 transition (AdaLN rows, one [a | b | u] GEMM, silu(a) b u)
+                if type(self.transition) is UpGatedConditionedTransition and ct_sm80.serves(
+                    self.transition, single_a, cond, single_a.dtype, _wants_grad(self, single, cond)
+                ):
+                    with torch.autocast("cuda", enabled=False):
+                        return ct_sm80.update(self.transition, single_a, cond, True, single_a.dtype, False)
                 return self.transition(single_a, cond)
             return single_a + self._a100_transition_delta(single, cond)
         # H100: the one token DiT algorithm (TokenDiTProtenix's "cuda" route with this block's options), inference and training

@@ -2,6 +2,7 @@
 (``sm80/ct_rows.cuh``), the GEMMs between them cuBLAS (``integrations/conditioned_transition_sm80.py`` composes them with the AdaLN of ``kernels/adaln/cuda/sm80``).
 
     swiglu_fwd / swiglu_bwd     h = silu(a) b;  da | db and h (recomputed for the squeeze's weight gradient)
+    swiglu_up_fwd               h = silu(a) b u (Boltz-2's up-gated transition, inference)
     gate_res_fwd / gate_res_bwd y = x + sigmoid(g) z (x optional);  dz, dg and the column sums of dg
 
 Rows are fp32 or bf16.  Built on first use (``load_extension``), never at import.
@@ -56,6 +57,13 @@ def swiglu_fwd(ab: torch.Tensor) -> torch.Tensor:
     """``h [M, N] = silu(a) b`` for ``ab = [a | b]`` [M, 2 N]."""
     h = torch.empty(ab.shape[0], ab.shape[1] // 2, device=ab.device, dtype=ab.dtype)
     _ext().swiglu_fwd(ab, h)
+    return h
+
+
+def swiglu_up_fwd(abu: torch.Tensor) -> torch.Tensor:
+    """``h [M, N] = silu(a) b u`` for ``abu = [a | b | u]`` [M, 3 N] (Boltz-2's up-gated transition; the product in fp32, rounded once)."""
+    h = torch.empty(abu.shape[0], abu.shape[1] // 3, device=abu.device, dtype=abu.dtype)
+    _ext().swiglu_up_fwd(abu, h)
     return h
 
 

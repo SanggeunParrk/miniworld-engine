@@ -19,6 +19,7 @@ autocast) run the TF32 kernels; bf16 activations take bf16 or fp32 (master) para
 
 from __future__ import annotations
 
+import os
 from typing import cast
 
 import torch
@@ -343,6 +344,75 @@ def _train_fwd(
     return [res[name] for name in _TRAIN_NAMES]
 
 
+def _infer_a100_fake(x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, wa, wb, wsq, length, tl=0):
+    return [torch.empty_like(x)]
+
+
+@opaque(fake=_infer_a100_fake, name="local_dit_esm_a100_infer")
+def _infer_a100(
+    x: torch.Tensor,
+    tab: torch.Tensor,
+    bias2: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    wq: torch.Tensor,
+    bq: torch.Tensor,
+    wk: torch.Tensor,
+    wv: torch.Tensor,
+    wg: torch.Tensor,
+    wo: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    wsq: torch.Tensor,
+    length: int,
+    tl: int = 0,
+) -> list[torch.Tensor]:
+    """``_train_fwd`` without what only the backward reads, for an inference call (no autograd): the same kernels in the same order, so the same bits. A sampler calls the block at
+    every step: the dtype casts and the packed `[Wa; Wb]` are made once per parameter version (`_capture.param_forms`) instead of 8 copies and 3
+    concatenations per call (the saved packs of the backward are not made)."""
+    if os.environ.get("MINIWORLD_ESM_A100_INFER", "1") == "0":  # A / B switch: the training block's forward
+        return _train_fwd(x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, torch.cat([wa, wb]), wsq, length, tl)[:1]
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
+
+    ext, qk = _rows(x.device), _qk_kernels(x.device)
+    m = x.shape[0]
+    n, a = length, m // length
+    tl = tl or n
+    cols = lambda c: c * DS
+    at = x.dtype
+
+    def forms():
+        w_q, w_k, w_v, w_g, w_o, w_a, w_b, w_sq = (w.to(at, copy=True) for w in (wq, wk, wv, wg, wo, wa, wb, wsq))
+        return w_q, w_k, w_v, w_g, w_o, w_sq, torch.cat([w_a, w_b]), bq.to(at)
+
+    w_q, w_k, w_v, w_g, w_o, w_sq, w_exp, bq_c = _capture.param_forms(("local_dit_esm.a100_infer", at), (wq, wk, wv, wg, wo, wa, wb, wsq, bq), forms)
+    new = lambda *shape, d=at: torch.empty(*shape, device=x.device, dtype=d)
+    xq, xk, xt, g, k, v = new(m, DS), new(m, DS), new(m, DS), new(m, DS), new(m, DS), new(m, DS)
+    st1, st2, xp = new(m, 2, d=F32), new(m, 2, d=F32), new(m, DS, d=F32)
+    with torch.cuda.device(x.device):
+        ext.ln_mod_fwd(x, tab, [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SH_Q), cols(A_SH_K)], [xq, xk], st1, tl, RMS_EPS, _RMS_MODE)
+        q = torch.addmm(bq_c, xq, w_q.t())
+        torch.mm(xk, w_k.t(), out=k)
+        torch.mm(xk, w_v.t(), out=v)
+        torch.mm(xq, w_g.t(), out=g)
+        qn, kn = torch.empty_like(q), torch.empty_like(k)
+        one = _const(x.device, 1.0, DS // NH)
+        qk.qknorm_rope_fwd(q, k, one, one, RMS_EPS, RMS_EPS, cos, sin, qn, kn)
+        o, _lse = local.attn_esm_fwd_lse(qn.view(a, n, DS), kn.view(a, n, DS), v.view(a, n, DS), bias2)
+        o = o.view(m, DS)
+        og = torch.empty_like(o)
+        ext.gate_fwd(o, g, og)
+        ya = torch.mm(og, w_o.t())
+        ext.res_ln_fwd(x, ya, tab, cols(A_G_A), cols(A_SC_T), cols(A_SH_T), xp, xt, st2, tl, RMS_EPS, _RMS_MODE)
+        ab = torch.mm(xt, w_exp.t())
+        h = new(m, 2 * DS)
+        ext.glu_fwd(ab, h, False)
+        y2 = torch.mm(h, w_sq.t())
+        out = torch.empty_like(x)
+        ext.res_out_fwd(xp, y2, tab, cols(A_G_T), None, 0, out, tl, True)
+    return [out]
+
+
 def _train_bwd_fake(dout, x, tab, bias2, cos, sin, saved, length, tl=0):
     e = lambda *s: x.new_empty(s, dtype=F32)
     return [torch.empty_like(x), tab.new_empty(tab.shape, dtype=F32), bias2.new_empty(bias2.shape, dtype=F32), e(DS, DS), e(DS),
@@ -497,9 +567,65 @@ def _block(module, single, cond, pair, kmask, cos, sin):
     tab = torch.mm(Fn.silu(c), torch.cat(ws).to(dt).t()) + ones
     z = _ld._trunk(pair, n)
     bias2 = _PairBias.apply(z.contiguous(), att.ln_pair.weight, att.to_bias.weight, kmask, nreal)
+    if not torch.is_grad_enabled():  # inference (the A100 sampler): no saved activations, the weight casts / packs cached per parameter version
+        out = _infer_a100(x, tab, bias2, cos, sin, att.to_query.weight, att.to_query.bias, att.to_key.weight, att.to_value.weight, att.to_gate.weight,
+                          att.to_out.weight, tr.expand_a.weight, tr.expand_b.weight, tr.squeeze.weight, n, n if shared else m)[0]  # fmt: skip
+        return _ld._unpadded(out.view(a, 1, n, DS), single.shape)
     wexp = torch.cat([tr.expand_a.weight, tr.expand_b.weight])
     out = _Block.apply(x, tab, bias2, cos, sin, att.to_query.weight, att.to_query.bias, att.to_key.weight, att.to_value.weight,
                        att.to_gate.weight, att.to_out.weight, wexp, tr.squeeze.weight, n, n if shared else m)  # fmt: skip
+    return _ld._unpadded(out.view(a, 1, n, DS), single.shape)
+
+
+def _a100_weights(module) -> list[torch.Tensor]:
+    """The parameters of the A100 inference block (``_infer_a100_hoisted``): the eight table blocks' weights in the order of ``_block``'s table, then the block's own."""
+    att, tr = module.attention, module.transition
+    return [att.ada_ln_in.to_scale.weight, att.ada_ln_in.to_bias.weight, att.ada_ln_kv.to_scale.weight, att.ada_ln_kv.to_bias.weight, att.to_scale.weight,
+            tr.ada_ln_in.to_scale.weight, tr.ada_ln_in.to_bias.weight, tr.to_scale.weight, att.to_query.weight, att.to_query.bias, att.to_key.weight,
+            att.to_value.weight, att.to_gate.weight, att.to_out.weight, tr.expand_a.weight, tr.expand_b.weight, tr.squeeze.weight, att.ln_pair.weight,
+            att.to_bias.weight]  # fmt: skip
+
+
+@opaque(fake=_infer_fake, name="local_dit_esm_a100_hoisted")
+def _infer_a100_hoisted(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    weights: list[torch.Tensor],
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """``_block``'s inference branch with its per-fold tables hoisted as the H100 op's are (``_infer_h100``): the conditioning table (silu(cond) x the eight table weights, 17 us of a
+    sampler step's launches per block) once per (cond, weights) and the windowed pair bias (10 us per block call) once per (pair, weights, key mask), instead of at every step of every block.
+    The builds are ``_block``'s own statements, so the output bits are the same; the weight pack and ones are made once per parameter version."""
+    sc1, bi1, kv_sc, kv_bi, so, sc2, bi2, st, wq, bq, wk, wv, wg, wo, wa, wb, wsq, lnp, wbias = weights
+    a, n0 = single.shape[0], single.shape[2]
+    n = _ld._padded_length(n0)
+    m = a * n
+    dt = single.dtype
+    x = _ld._padded(single, n).reshape(m, DS).contiguous()
+    shared = a == 1 or _shared(cond)
+    wkey = tuple((w.data_ptr(), w._version) for w in weights)
+
+    def tables():
+        c = _ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)
+        ones = torch.zeros(8 * DS, device=single.device, dtype=dt)
+        for blk in (A_SC_Q, A_SC_K, A_SC_T):
+            ones[blk * DS : (blk + 1) * DS] = 1
+        return torch.mm(Fn.silu(c), torch.cat([sc1, bi1, kv_sc, kv_bi, so, sc2, bi2, st]).to(dt).t()) + ones
+
+    def pair_bias():
+        z = _ld._trunk(pair, n).contiguous()
+        kmask = _ld._keys(mask, n0, n)
+        nreal = kmask.sum(dtype=torch.int32) if kmask is not None else torch.full((), n0, device=single.device, dtype=torch.int32)
+        return _pb_fwd(z, lnp, wbias, kmask, nreal)
+
+    with torch.cuda.device(single.device):
+        tab = _ld._hoisted(_HOIST_COND, cond, (wkey, n, "a100", dt), tables)
+        mk = (n0, None if mask is None else _ld._tkey(mask))
+        bias2 = _ld._hoisted(_HOIST_BIAS, pair, (wkey, n, mk, "a100"), pair_bias, () if mask is None else (mask,))
+        out = _infer_a100(x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, wa, wb, wsq, n, n if shared else m)[0]
     return _ld._unpadded(out.view(a, 1, n, DS), single.shape)
 
 
@@ -515,4 +641,6 @@ def run_block(module, single, cond, pair, mask=None, rope=None):
         if not (cond.is_contiguous() or _shared(cond)):
             cond = cond.contiguous()
         return _infer_h100(single.contiguous(), cond, pair.contiguous(), mask, _weights(module), cos, sin)
+    if not grad and os.environ.get("MINIWORLD_ESM_A100_HOIST", "1") != "0":  # A100 inference: the conditioning table and the windowed pair bias per fold, not per step
+        return _infer_a100_hoisted(single.contiguous(), cond, pair.contiguous(), mask, _a100_weights(module), cos, sin)
     return _block(module, single.contiguous(), cond, pair.contiguous(), _ld._keys(mask, n0, n), cos, sin)

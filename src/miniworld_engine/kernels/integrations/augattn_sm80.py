@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import functools
 import math
+import os
 from typing import cast
 
 import torch
@@ -251,6 +252,32 @@ def _penalties(kmask: torch.Tensor, a: int, batch: int, length: int, padded: int
 
 
 _PACKS: dict = _capture.weight_cache("augattn_sm80.packs")
+#: (pair tensor, pair-norm / bias weights, key mask) -> the token-width pair bias [1, H, Lp, Lp] of an inference call: every step of a sampler reads the same one
+_TOKEN_BIAS: dict = _capture.weight_cache("augattn_sm80.token_bias")
+#: a hoisted bias larger than this stays recomputed per call (OpenDDE's 3968 structural tokens: 24 blocks x 0.5 GiB); 2,048 tokens x 16 heads in bf16 is 128 MiB
+TOKEN_BIAS_HOIST_MAX_BYTES = 192 << 20
+
+
+def _wkey(t: torch.Tensor):
+    """A weight's or mask's identity for a cache key (storage address, in-place version, shape)."""
+    return (t.data_ptr(), t._version, tuple(t.shape))
+
+
+def _hoist_token_bias(save: bool, batch: int, mask_kind: int, heads: int, padded: int, dt: torch.dtype, pair: torch.Tensor) -> bool:
+    """Whether this inference call takes the pair bias from the per-pair hoist (``MINIWORLD_TOKEN_BIAS_HOIST=0`` switches it off, for A / B): one fold (batch 1), a key
+    mask shared by the samples or none, no autograd, an ordinary (version-counted) pair, and a bias that fits ``TOKEN_BIAS_HOIST_MAX_BYTES``. The atom width has its own
+    explicit cache (``cache_pair_bias``) and is not hoisted here."""
+    return (
+        not save
+        and batch == 1
+        and mask_kind in (0, 1)
+        and (heads, pair.shape[-1]) != (_ATOM[0], _ATOM[2])
+        and not pair.is_inference()
+        and not (torch.is_grad_enabled() and pair.requires_grad)
+        and heads * padded * padded * dt.itemsize <= TOKEN_BIAS_HOIST_MAX_BYTES
+        and os.environ.get("MINIWORLD_TOKEN_BIAS_HOIST", "1") != "0"
+        and torch.cuda.get_device_capability(pair.device) in ((8, 0), (12, 0))  # A100 and RTX 5090 (same sources, sm_120a; 5090 measured 2026-11-23: cuda:5090_sm120 bumped)
+    )
 
 
 def _pack(params: list[torch.Tensor], heads: int, dt: torch.dtype, save: bool = True):
@@ -357,7 +384,7 @@ def _bias_into(
             out[:, length:, :].zero_()
 
 
-def _fwd_fake(x, cond, pair, res, kmask, bias_in, params, a, batch, length, heads, mask_kind, save, flat_eps=1e-5, extra=None):
+def _fwd_fake(x, cond, pair, res, kmask, bias_in, params, a, batch, length, heads, mask_kind, save, flat_eps=1e-5, extra=None, g2_table=None):
     padded = _pad(length)
     d = x.shape[-1]
     m = a * batch * padded
@@ -396,8 +423,11 @@ def _fwd(
     save: bool,
     flat_eps: float = 1e-5,
     extra: torch.Tensor | None = None,
+    g2_table: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
-    """``extra`` broadcastable to [B, H, L, L] (``extra_pair_bias``, inference only: ``save`` False): an additive logit term added to the bias in the core's units.
+    """``g2_table`` ([P, d] gate logits, P dividing the rows; inference, with a residual, ``a * batch * padded`` rows with batch 1 and no padding): the output gate's logits made by the caller from
+    the conditioning rows (``cond`` is then not read: any tensor), ``out = res + sigmoid(g2_table[r % P]) y`` by the transition's gate kernel.
+    ``extra`` broadcastable to [B, H, L, L] (``extra_pair_bias``, inference only: ``save`` False): an additive logit term added to the bias in the core's units.
     The module's update after the AdaLN: x [A, B, L, d] (the AdaLN's output), cond [A, B, L, dc], pair [B, L, L, dp], res [A, B, L, d] or None (the residual), kmask
     a bool [B, L] / [A, B, L] key mask or None (``mask_kind`` 1 / 2 / 0), bias_in a pair bias made earlier (the compute dtype [1, H, Lp, Lp]: ``cache_pair_bias``) or None, params =
     (Wq, bq, Wk, Wv, Wg, Wo, Ws, bs, ln_pair.weight, to_bias.weight). Returns ``[out]``, or with ``save`` also the activations of the backward: qkvg, o, lse, og, y, g2, bias."""
@@ -410,14 +440,15 @@ def _fwd(
     m = a * batch * padded
     n = a * padded  # rows of one batch element
     dev = x.device
-    wo, ws, bs = (
-        params[5].to(dt),
-        params[6].to(dt),
-        params[7].to(dt),
-    )  # no copies for bf16 parameters (the autograd function hands cast ones for fp32)
+    out_params = params[5:8]
+    if save or all(p.dtype is dt for p in out_params):
+        wo, ws, bs = (p.to(dt) for p in out_params)  # no copies for bf16 parameters (the autograd function hands cast ones for fp32)
+    else:  # an inference call over fp32 master weights: the three casts once per parameter version (a sampler calls the block at every step)
+        wo, ws, bs = _capture.param_forms(("augattn_sm80.out", dt), out_params, lambda: tuple(p.to(dt) for p in out_params))
     pack = _pack(params, heads, dt, save=save)
     wqkvg, bvec = pack[0], pack[1]
-    xs, cs = _stage(x, batch, padded), _stage(cond, batch, padded)
+    xs = _stage(x, batch, padded)
+    cs = None if g2_table is not None else _stage(cond, batch, padded)
     rs = None if res is None else _stage(res, batch, padded)
     gated = params[4].shape[0] > 0  # an ungated attention packs [Wq; Wk; Wv] (params[4] is an empty stand-in)
     flat = params[
@@ -472,8 +503,25 @@ def _fwd(
             stats[2 * i].copy_(mu.view(m, 1))
             stats[2 * i + 1].copy_(rs_.view(m, 1))
     q, k, v, g = (qkvg[:, i * d : (i + 1) * d] for i in range(4))
+    shared_bias = bias_in is not None
     if bias_in is not None:
         bias = bias_in
+    elif _hoist_token_bias(save, batch, mask_kind, heads, padded, dt, pair):
+        # a sampler calls the block with the SAME pair at every step (the pair bias is step-invariant): one bias per (pair, weights, key mask)
+        def make_bias() -> torch.Tensor:
+            out = torch.empty(1, heads, padded, padded, device=dev, dtype=dt)
+            _bias_into(out[0], pair[0], pack, heads, hd, length, padded, cast(torch.Tensor, kmask)[0] if mask_kind == 1 else None)
+            return out
+
+        bias = _capture.hoisted_table(
+            _TOKEN_BIAS,
+            pair,
+            (_wkey(params[8]), _wkey(params[9]), heads, padded, dt, _wkey(kmask) if mask_kind == 1 else None),
+            make_bias,
+            limit=_capture.BLOCK_CACHE_LIMIT,
+            also=() if mask_kind != 1 else (cast(torch.Tensor, kmask),),
+        )
+        shared_bias = True
     else:
         bias = torch.empty(batch, heads, padded, padded, device=dev, dtype=dt)
         for b in range(batch):
@@ -489,7 +537,7 @@ def _fwd(
             )
     if extra is not None:
         # the bias is in the core's raw units (bf16: natural x sqrt(hd); fp32: natural); the sum in fp32, rounded once. Masked keys stay at the fill.
-        if bias_in is not None:
+        if shared_bias:
             bias = bias.clone()
         view = bias[:, :, :length, :length]
         view.add_(extra.float() * (1.0 if f32 else math.sqrt(hd)))  # one pass; extra broadcasts over B and H ([1, 1, L, L]); bf16: one rounding
@@ -629,7 +677,12 @@ def _fwd(
     # The small A1 inference rows qualify own 32-channel output tiles;
     # larger rows retain the existing faster full-output fusion.
     output_tiled = not save and batch == 1 and hd == 32 and (a, length) in ((1, 1024), (1, 2048))
-    if dt is BF and d == 128 and cs.shape[1] == 128 and output_tiled:
+    if g2_table is not None:
+        from miniworld_engine.kernels.conditioned_transition.cuda import sm80 as _ct80
+
+        y = _ieee.torch_mm(og, wo.t())
+        out = _ct80.gate_res_fwd(rs, y, g2_table)
+    elif dt is BF and d == 128 and cs.shape[1] == 128 and output_tiled:
         from miniworld_engine.kernels.augmented_attention.cuda import (
             atom_output_tiled_sm80,
         )
@@ -966,15 +1019,16 @@ def _flat_eps(module, dtype=F32) -> float:
     return float(rms[0].effective_eps(dtype)) if rms else EPS
 
 
-def _fused_update(module, x, cond, pair, mask, res, extra=None):
-    """The fused path on the AdaLN's output ``x`` (the caller has checked ``serves``): ``res`` + the update, or the update alone when ``res`` is None."""
+def _fused_update(module, x, cond, pair, mask, res, extra=None, g2_table=None):
+    """The fused path on the AdaLN's output ``x`` (the caller has checked ``serves``): ``res`` + the update, or the update alone when ``res`` is None.
+    ``g2_table`` [P, d]: the output gate's logits made by the caller (inference with a residual; ``cond`` is then only a dtype carrier and is not made contiguous)."""
     a, batch, length, _ = x.shape
     kind = cast(int, _mask_kind(mask, a, batch, length))  # not None: serves() / serves_ops() refused such a mask
     kmask = None if kind == 0 else (mask[0] if mask.ndim == 3 and kind == 1 else mask)
     params = _params(module)
     x, cond, pair = (
         x.to(cond.dtype).contiguous(),
-        cond.contiguous(),
+        cond if g2_table is not None else cond.contiguous(),
         pair.contiguous(),
     )  # the AdaLN of fp32 masters may hand back fp32
     if torch.is_grad_enabled() and any(t.requires_grad for t in (x, cond, pair, *([] if res is None else [res]), *params)):
@@ -1001,6 +1055,7 @@ def _fused_update(module, x, cond, pair, mask, res, extra=None):
         False,
         _flat_eps(module),
         extra,
+        g2_table,
     )[0]
 
 

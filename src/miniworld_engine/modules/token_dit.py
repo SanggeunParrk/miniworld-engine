@@ -478,8 +478,8 @@ class TokenDiTProtenix(BackendModule):
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
-        "cuda:a100_sm80": 6,  # 2026-11-22: extra_pair_bias (OpenDDE's [L, L] logit bias) at inference on the sm_80 attention (was refused -> Triton); 5: 2026-11-19: fp32 with TF32 off is IEEE (the AdaLN / SwiGLU GEMMs no longer force TF32; kernels/ieee_f32)
-        "cuda:5090_sm120": 3,  # 2026-11-22: extra_pair_bias at inference (shared sm_80 route); 2: 2026-11-19: the same (TF32 was forced under a caller with TF32 off)
+        "cuda:a100_sm80": 7,  # A100 only (sm_80 capability gate; the RTX 5090 keeps 3). 2026-11-23 (also): bf16 inference with a conditioning shared by the samples packs the block's six conditioning projections into two GEMMs on the distinct rows (token_cond_sm80; the LayerNorm weight folded into the bf16 weights: outputs change at bf16 rounding; A100 only); 2026-11-23: the token pair bias hoisted per (pair, weights, mask) at inference (augattn_sm80 TOKEN_BIAS: one pair-bias pass per fold instead of per block and step; the bias bits are the same kernel's; ESMFold2 / Protenix / OpenDDE samplers on the A100); 6: 2026-11-22: extra_pair_bias (OpenDDE's [L, L] logit bias) at inference on the sm_80 attention (was refused -> Triton); 5: 2026-11-19: fp32 with TF32 off is IEEE (the AdaLN / SwiGLU GEMMs no longer force TF32; kernels/ieee_f32)
+        "cuda:5090_sm120": 4,  # 2026-11-23: the token pair bias hoisted per (pair, weights, mask) at inference (augattn_sm80 TOKEN_BIAS, as cuda:a100_sm80 7; every subclass); 3: 2026-11-22: extra_pair_bias at inference (shared sm_80 route); 2: 2026-11-19: the same (TF32 was forced under a caller with TF32 off)
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
         "cuda:h100_sm90": 6,
@@ -683,6 +683,10 @@ class TokenDiTProtenix(BackendModule):
 
         grad = _wants_grad(self, single, cond, pair)
         extra = None if extra_pair_bias is None else extra_pair_bias[None, None]  # broadcast over B and H
+        from miniworld_engine.kernels.integrations import token_cond_sm80
+
+        if token_cond_sm80.serves(self, single, cond, grad):  # inference: the block's six conditioning projections as two small GEMMs on the distinct rows
+            return token_cond_sm80.forward(self, single, cond, pair, mask, extra)
         single = augattn_sm80.forward(self.attention, single, cond, pair, mask, extra)
         with torch.autocast("cuda", enabled=False):
             return ct_sm80.update(self.transition, single, cond, True, single.dtype, grad)
@@ -788,9 +792,9 @@ class TokenDiTMiniWorld(TokenDiTProtenix):
     #: was the general composition with a materialised-score attention (a100_families.token)
     backend_versions: ClassVar[dict[str, int]] = {
         **TokenDiTProtenix.backend_versions,
-        "cuda:a100_sm80": 7,
-        "cuda:5090_sm120": 3,
-    }  # 7 (2026-11-22): as the base class (extra_pair_bias at inference); 6 (2026-11-19): as the base class (IEEE fp32 with TF32 off); 5 (2026-11-13): as the base class (the key-tile skip)
+        "cuda:a100_sm80": 8,
+        "cuda:5090_sm120": 4,  # 4 (2026-11-23): as the base class (the hoisted token pair bias)
+    }  # 8 (2026-11-23): as the base class (the hoisted token pair bias); 7 (2026-11-22): as the base class (extra_pair_bias at inference); 6 (2026-11-19): as the base class (IEEE fp32 with TF32 off); 5 (2026-11-13): as the base class (the key-tile skip)
 
     backends = ("pytorch", "cuda", "triton")
     qk_norm = True
@@ -810,7 +814,8 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
         **TokenDiTProtenix.backend_versions,
         "cuda:h100_sm90": 7,
         "cuda:a100_sm80": 5,  # unchanged by 2026-11-22 (this block refuses extra_pair_bias on the sm_80 cards, as before)
-        "cuda:5090_sm120": 2,
+        "cuda:5090_sm120": 4,  # 4 (2026-11-23): the hoisted token pair bias (as the base class); 3 (2026-11-23): inference runs the up-gate transition on the sm_80 transition kernels (AdaLN rows, one
+        # [a | b | u] GEMM, silu(a) b u in one row pass, cached bf16 weights) instead of the module's own statements (per-call weight casts)
     }  # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
 
     backends = (
@@ -914,7 +919,7 @@ class TokenDiTRoseTTAFold3(VariantTokenCuda, TokenDiTProtenix):
         **TokenDiTProtenix.backend_versions,
         "cuda:h100_sm90": 7,
         "cuda:a100_sm80": 5,  # unchanged by 2026-11-22 (this block refuses extra_pair_bias on the sm_80 cards, as before)
-        "cuda:5090_sm120": 2,
+        "cuda:5090_sm120": 3,  # 3 (2026-11-23): the hoisted token pair bias (as the base class)
     }  # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
 
     backends = (
@@ -965,7 +970,7 @@ class TokenDiTChai1(MasterEntryCast, VariantTokenCuda, TokenDiTProtenix):
         **TokenDiTProtenix.backend_versions,
         "cuda:h100_sm90": 7,
         "cuda:a100_sm80": 7,  # 2026-11-19: 6 = the fp32 call no longer reaches ln_cond of the identity AdaLN (gates refused it); 7 = the identity AdaLN (attention part) and the transition with it run on the sm_80 row kernels (adaln_epi / adaln_bwd_x identity form + cuBLAS), forward and backward
-        "cuda:5090_sm120": 4,  # 2026-11-19: 3 = the same as a100 6; 4 = as a100 7 (the identity AdaLN on the sm_80 sources built for sm_120a)
+        "cuda:5090_sm120": 5,  # 5 (2026-11-23): the hoisted token pair bias (as the base class); 2026-11-19: 3 = the same as a100 6; 4 = as a100 7 (the identity AdaLN on the sm_80 sources built for sm_120a)
         "cuda:b200_sm100": 25,  # as the base class (extra_pair_bias at inference)
     }  # cuda:b200_sm100 24 / 23 / 22 / 21 / 20: as the base class (round 3 part 10 / 9 / 8 / 7 / 6); 6 (2026-11-13): as the base class (the key-tile skip); cuda:b200_sm100 6 (2026-11-17, round 3 part 4): fp32 inference writes the
     # gate columns (no gating query: zero rows, bias +1e4 in the static pack) with the q | k GEMM -- no strided fill / bias copy per call
