@@ -4,10 +4,11 @@
 // (torch._scaled_mm). Inference only (no statistics saved); the conditioning table tab [T, 8 D] (row r reads tab row r % T) in bf16.
 //
 //   ln_mod_q8   xhat = LN(x);  out_i = xhat f(sc_i) + sh_i  (i < n; chain: out_1 = LN(out_0) f(sc_1) + sh_1, Protenix's K / V AdaLN)
-//   res_ln_q8   xp = x + sigmoid(gA) ya (fp32, stored for the residual-out pass);  xt = LN(xp) f(scT) + shT
+//   res_ln_q8   xp = x + sigmoid(gA) ya (fp32, stored for the residual-out pass; gA raw in mode bit 1);  xt = LN(xp) f(scT) + shT
 //   gate_q8     og = sigmoid(g) o
 //   glu_q8      h = silu(a) b (up: silu(a) b u),  H = 256
-// f(s) = sigmoid(s) (``sig``) or s.
+// f(s) = sigmoid(s) (``mode`` bit 0) or s. ``mode`` bit 1 = ESMFold2 (AtomDiTESMFold2Pair, train_rows.cu's RMS mode): every AdaLN an affine-free
+// RMSNorm (mean 0: xhat = x rstd) and the residual gate gA raw (no sigmoid).
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
@@ -57,8 +58,8 @@ __device__ __forceinline__ void store_q8(const float4 (&y)[NV], uint8_t* __restr
   for (int v = 0; v < NV; ++v) *reinterpret_cast<uint32_t*>(out + v * 128 + 4 * lane) = q4(y[v], inv);
   if (lane == 0) *srow = am > 0.f ? am / 448.f : 1.f;
 }
-__device__ __forceinline__ float4 ln4(float4 x, float eps) {
-  const float mean = warp_sum(x.x + x.y + x.z + x.w) / D;
+__device__ __forceinline__ float4 ln4(float4 x, float eps, bool rms = false) {
+  const float mean = rms ? 0.f : warp_sum(x.x + x.y + x.z + x.w) / D;
   const float4 d = make_float4(x.x - mean, x.y - mean, x.z - mean, x.w - mean);
   const float rstd = rsqrtf(warp_sum(d.x * d.x + d.y * d.y + d.z * d.z + d.w * d.w) / D + eps);
   return make_float4(d.x * rstd, d.y * rstd, d.z * rstd, d.w * rstd);
@@ -72,20 +73,21 @@ struct ModQ {
   int n;
 };
 
-__global__ void __launch_bounds__(RPB * 32) ln_mod_q8_k(const __nv_bfloat16* __restrict__ X, ModQ m, long sTab, int T, float eps, long M, bool sg,
+__global__ void __launch_bounds__(RPB * 32) ln_mod_q8_k(const __nv_bfloat16* __restrict__ X, ModQ m, long sTab, int T, float eps, long M, int mode,
                                                        bool chain) {
   const int lane = threadIdx.x & 31;
   const long row = (long)blockIdx.x * RPB + (threadIdx.x >> 5);
   if (row >= M) return;
   const long tok = row % T;
   const int col = 4 * lane;
-  const float4 xh = ln4(ld4(X + row * D + col), eps);
+  const bool sg = mode & 1, rms = mode & 2;
+  const float4 xh = ln4(ld4(X + row * D + col), eps, rms);
   float4 prev = xh;
 #pragma unroll
   for (int i = 0; i < 3; ++i) {
     if (i < m.n) {
       const float4 s = ld4(m.sc[i] + tok * sTab + col), h = ld4(m.sh[i] + tok * sTab + col);
-      const float4 base = (chain && i == 1) ? ln4(prev, eps) : xh;
+      const float4 base = (chain && i == 1) ? ln4(prev, eps, rms) : xh;
       const float4 y[1] = {fma4(base, sg ? sig4(s) : s, h)};
       store_q8<1>(y, m.out[i] + row * D, m.s[i] + row, lane);
       prev = y[0];
@@ -96,16 +98,18 @@ __global__ void __launch_bounds__(RPB * 32) ln_mod_q8_k(const __nv_bfloat16* __r
 __global__ void __launch_bounds__(RPB * 32) res_ln_q8_k(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ YA,
                                                        const __nv_bfloat16* __restrict__ GA, const __nv_bfloat16* __restrict__ SC,
                                                        const __nv_bfloat16* __restrict__ SH, long sTab, float* __restrict__ XP, uint8_t* __restrict__ XT8,
-                                                       float* __restrict__ SXT, int T, float eps, long M, bool sg) {
+                                                       float* __restrict__ SXT, int T, float eps, long M, int mode) {
   const int lane = threadIdx.x & 31;
   const long row = (long)blockIdx.x * RPB + (threadIdx.x >> 5);
   if (row >= M) return;
   const long tok = row % T;
   const int col = 4 * lane;
-  const float4 x = fma4(sig4(ld4(GA + tok * sTab + col)), ld4(YA + row * D + col), ld4(X + row * D + col));
+  const bool sg = mode & 1, rms = mode & 2;
+  const float4 ga = ld4(GA + tok * sTab + col);
+  const float4 x = fma4(rms ? ga : sig4(ga), ld4(YA + row * D + col), ld4(X + row * D + col));
   *reinterpret_cast<float4*>(XP + row * D + col) = x;
   const float4 s = ld4(SC + tok * sTab + col), h = ld4(SH + tok * sTab + col);
-  const float4 y[1] = {fma4(ln4(x, eps), sg ? sig4(s) : s, h)};
+  const float4 y[1] = {fma4(ln4(x, eps, rms), sg ? sig4(s) : s, h)};
   store_q8<1>(y, XT8 + row * D, SXT + row, lane);
 }
 
@@ -171,7 +175,7 @@ static void q_rows(const at::Tensor& o, const at::Tensor& s, int64_t M, int64_t 
 
 // x [M, 128] bf16; tab [T, 8 D] bf16; cols: the first column of each scale / shift block; outs / scales: n e4m3 [M, 128] / fp32 [M]
 void ln_mod_q8(at::Tensor x, at::Tensor tab, std::vector<int64_t> sc_cols, std::vector<int64_t> sh_cols, std::vector<at::Tensor> outs,
-               std::vector<at::Tensor> scales, int64_t T, double eps, bool sg, bool chain) {
+               std::vector<at::Tensor> scales, int64_t T, double eps, int64_t mode, bool chain) {
   bf_rows(x, D, "x");
   const long M = x.size(0);
   TORCH_CHECK(tab.scalar_type() == at::kBFloat16 && tab.stride(1) == 1 && tab.size(0) == T, "tab: bf16 [T, 8 D]");
@@ -187,12 +191,12 @@ void ln_mod_q8(at::Tensor x, at::Tensor tab, std::vector<int64_t> sc_cols, std::
     m.s[i] = scales[i].data_ptr<float>();
   }
   if (M == 0) return;
-  ln_mod_q8_k<<<grid(M), RPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(bp(x), m, tab.stride(0), (int)T, (float)eps, M, sg, chain);
+  ln_mod_q8_k<<<grid(M), RPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(bp(x), m, tab.stride(0), (int)T, (float)eps, M, (int)mode, chain);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void res_ln_q8(at::Tensor x, at::Tensor ya, at::Tensor tab, int64_t g_col, int64_t sc_col, int64_t sh_col, at::Tensor xp, at::Tensor xt8, at::Tensor sxt,
-               int64_t T, double eps, bool sg) {
+               int64_t T, double eps, int64_t mode) {
   bf_rows(x, D, "x");
   bf_rows(ya, D, "ya");
   const long M = x.size(0);
@@ -201,7 +205,7 @@ void res_ln_q8(at::Tensor x, at::Tensor ya, at::Tensor tab, int64_t g_col, int64
   if (M == 0) return;
   const auto t = bp(tab);
   res_ln_q8_k<<<grid(M), RPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(bp(x), bp(ya), t + g_col, t + sc_col, t + sh_col, tab.stride(0), xp.data_ptr<float>(),
-                                                                           u8(xt8), sxt.data_ptr<float>(), (int)T, (float)eps, M, sg);
+                                                                           u8(xt8), sxt.data_ptr<float>(), (int)T, (float)eps, M, (int)mode);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

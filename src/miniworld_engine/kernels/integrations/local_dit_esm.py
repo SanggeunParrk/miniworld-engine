@@ -372,6 +372,14 @@ def _infer_a100(
     concatenations per call (the saved packs of the backward are not made)."""
     if os.environ.get("MINIWORLD_ESM_A100_INFER", "1") == "0":  # A / B switch: the training block's forward
         return _train_fwd(x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, torch.cat([wa, wb]), wsq, length, tl)[:1]
+    # the opt-in RTX 5090 e4m3 rows (fp8.SM120_ROUTES["atom_dit"], the H100 RMS option's switch MINIWORLD_ATOMDIT_FP8; docs/fp8.md "RTX 5090",
+    # atom DiT): off (the default) or off the 5090, parts() is empty and this block runs below unchanged
+    from miniworld_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as _a8
+
+    if _a8.FP8_ROWS:
+        use = _a8.parts(x, tab, esm=True)
+        if use:
+            return [_a8.esm_block(x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, wa, wb, wsq, length, tl or length, use)]
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
 
     ext, qk = _rows(x.device), _qk_kernels(x.device)

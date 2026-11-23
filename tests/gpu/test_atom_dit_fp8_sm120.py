@@ -86,10 +86,10 @@ def _err(y, gold, x):
 def f8():
     from miniworld_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as F
 
-    old = (F.FP8_ROWS, F.MIN_ROWS)
-    F.MIN_ROWS = 0
+    old = (F.FP8_ROWS, F.MIN_ROWS, F.ESM_MIN_ROWS)
+    F.MIN_ROWS = F.ESM_MIN_ROWS = 0
     yield F
-    F.FP8_ROWS, F.MIN_ROWS = old
+    F.FP8_ROWS, F.MIN_ROWS, F.ESM_MIN_ROWS = old
 
 
 def _on(F, parts):
@@ -188,5 +188,121 @@ def test_safe_preset_and_route_stats(f8):
         assert st["calls"] >= 1 and st["pre"] >= 1 and st["post"] >= 1, st
         fp8.disable()
         assert f8.FP8_ROWS == frozenset()
+    finally:
+        fp8._restore(snap)
+
+
+# ------------------------------------------------------------------------------------------------------------ ESMFold2 (the H100 RMS option)
+def _esm(n: int, a: int, shared: bool = True):
+    """``AtomDiTESMFold2Pair`` (the H100 test's block: fp32 parameters, bf16 inputs, 40 masked atoms) and its float64 PyTorch twin."""
+    from miniworld_engine.modules import AtomDiTESMFold2Pair
+
+    torch.manual_seed(0)
+    m = AtomDiTESMFold2Pair(backend="cuda").cuda().eval()
+    with torch.no_grad():
+        for p in m.parameters():
+            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else 1 + torch.randn_like(p) * 0.1)
+    g = torch.Generator(device="cuda").manual_seed(1)
+    single = torch.randn(a, 1, n, 128, device="cuda", generator=g).bfloat16()
+    cond = torch.randn(1 if shared else a, 1, n, 128, device="cuda", generator=g).bfloat16().expand(a, 1, n, 128)
+    pair = torch.randn(1, (n + 31) // 32, 32, 192, 16, device="cuda", generator=g).bfloat16()
+    mask = torch.zeros(1, n, dtype=torch.bool, device="cuda")
+    mask[:, : n - 40] = True
+    angle = 3 * torch.randn(1, n, 16, device="cuda", generator=g)
+    return m, (single, cond, pair, mask), (angle.cos(), angle.sin())
+
+
+def _esm_gold(m, inputs, rope):
+    ref = copy.deepcopy(m).set_backend("pytorch").double()
+    with torch.no_grad():
+        return ref(*(t.double() if t.is_floating_point() else t for t in inputs), rope=tuple(t.double() for t in rope))
+
+
+def _esm_run(m, inputs, rope):
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        return m(*inputs, rope=rope).float().clone()
+
+
+def _esm_err(y, y64, x, real):
+    """(update rms, rms_rel, judge) over the real atoms."""
+    y, y64, x = y[:, :, :real].double(), y64[:, :, :real], x[:, :, :real].double()
+    return _err(y, y64, x)
+
+
+@pytest.mark.parametrize("n", [1024, 2048])
+@pytest.mark.parametrize("parts", ["1", "pre", "post"])
+def test_esmfold2_accuracy_and_parts(f8, n, parts):
+    """ESMFold2's atom block on the e4m3 rows (RMS mode of ``atom_f8_sm120``): finite, the e4m3 route really ran and was counted, the error
+    against the float64 module inside the H100 RMS route's bound (rms_rel < 6 %, the H100 test's; H100 measured 3.8e-2 / 6.4e-2 rms / max)."""
+    m, inputs, rope = _esm(n, 5)
+    y64 = _esm_gold(m, inputs, rope)
+    f8.enable_fp8(False)
+    y0 = _esm_run(m, inputs, rope)
+    _on(f8, parts)
+    y1 = _esm_run(m, inputs, rope)
+    want = {"pre": ("pre",), "post": ("post",), "1": ("pre", "post")}[parts]
+    assert f8.STATS["calls"] >= 1 and all(f8.STATS[p] >= 1 for p in want) and f8.STATS["fallbacks"] == 0, f8.STATS
+    e0, e1 = _esm_err(y0, y64, inputs[0], n - 40), _esm_err(y1, y64, inputs[0], n - 40)
+    print("esmfold2", n, parts, "default (upd rms, rms_rel, judge):", e0, "e4m3:", e1)
+    assert torch.isfinite(y1).all() and not torch.equal(y0, y1)
+    assert e1[1] < 0.06 and e1[2] < 0.1 and e1[1] > e0[1], (e0, e1)
+    f8.enable_fp8(False)
+    assert torch.equal(_esm_run(m, inputs, rope), y0)  # switched off: the default again, byte for byte
+
+
+def test_esmfold2_per_sample_rows_gate_training(f8):
+    """A per-sample conditioning is served (the H100 RMS route takes a shared one only); below the row gate and with a gradient the default
+    runs byte for byte (counted as ``why_rows``), a forward with a gradient never reaches the e4m3 block."""
+    m, inputs, rope = _esm(1024, 3, shared=False)
+    y64 = _esm_gold(m, inputs, rope)
+    f8.enable_fp8(False)
+    y0 = _esm_run(m, inputs, rope)
+    _on(f8, "1")
+    e1 = _esm_err(_esm_run(m, inputs, rope), y64, inputs[0], 1024 - 40)
+    assert f8.STATS["calls"] >= 1 and e1[1] < 0.06, (f8.STATS, e1)
+    _on(f8, "1")
+    f8.ESM_MIN_ROWS = 3 * 1024 + 1  # the ESMFold2 gate (ESM_MIN_ROWS), not the other classes' MIN_ROWS
+    assert torch.equal(_esm_run(m, inputs, rope), y0) and f8.STATS["why_rows"] >= 1 and f8.STATS["calls"] == 0, f8.STATS
+    f8.ESM_MIN_ROWS = 0
+    f8.STATS.update({k: 0 for k in f8.STATS})
+    x = inputs[0].detach().clone().requires_grad_(True)
+    with torch.enable_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        m(x, *inputs[1:], rope=rope).float().sum().backward()
+    assert f8.STATS["calls"] == 0, f8.STATS  # the training block (_Block autograd) never reaches the inference op
+
+
+def test_esmfold2_graph_equals_eager_and_safe(f8):
+    """A CUDA-graph replay equals the eager e4m3 call bit for bit; ``fp8.enable("safe")`` turns the ESMFold2 rows on (``route_stats``)."""
+    from miniworld_engine import fp8
+    from miniworld_engine.kernels import _capture
+
+    m, inputs, rope = _esm(1024, 5)
+    _on(f8, "1")
+    y_e = _esm_run(m, inputs, rope)
+
+    def step():
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            return m(*inputs, rope=rope)
+
+    with torch.no_grad(), _capture.static_weights(), _capture.static_inputs():
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            step()
+        torch.cuda.current_stream().wait_stream(s)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            o = step()
+        g.replay()
+        g.replay()
+        torch.cuda.synchronize()
+    assert torch.equal(o.float(), y_e)
+    snap = fp8._snapshot()
+    try:
+        fp8.enable("safe")
+        fp8.reset_route_stats()
+        _esm_run(m, inputs, rope)
+        st = fp8.route_stats()["atom_dit"]
+        assert st["calls"] >= 1 and st["pre"] >= 1 and st["post"] >= 1, st
     finally:
         fp8._restore(snap)

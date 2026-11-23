@@ -57,6 +57,9 @@ STATS = {"calls": 0, "pre": 0, "post": 0, "fallbacks": 0, "why_save": 0, "why_tf
 #: the fewest block rows M = A N the route takes (RTX 5090, same-process A-B, 6 rounds, docs/fp8.md "RTX 5090" atom DiT): pre + post 0.98 at 1024
 #: rows (A1 N1024, Protenix and OpenFold3), 1.08-1.13 from 4096 (A1 N4096, A5 N1024), 1.15-1.42 from 10240
 MIN_ROWS = 4096
+#: the same gate for ESMFold2's atom block (:func:`esm_block`; its 192-key window attention is cheaper, so the GEMMs are a smaller share): pre + post
+#: 0.65 at 1024 rows, 0.94 at 4096 (A1), 0.99 at 5120 (A5 N1024), 1.17-1.20 at 10240 / 16384, 1.27-1.49 from 20480 (same-process A-B, 6 rounds)
+ESM_MIN_ROWS = 8192
 
 
 def enable_fp8(on: bool | str | Iterable[str] = True) -> frozenset:
@@ -82,7 +85,7 @@ def ext():
     )
 
 
-def parts(x: torch.Tensor, tab: torch.Tensor) -> frozenset:
+def parts(x: torch.Tensor, tab: torch.Tensor, esm: bool = False) -> frozenset:
     """The parts this block call takes (and the counters): bf16 inference on an RTX 5090 with a bf16 conditioning table."""
     if not FP8_ROWS:
         return frozenset()
@@ -95,7 +98,7 @@ def parts(x: torch.Tensor, tab: torch.Tensor) -> frozenset:
         why = "why_save"
     elif x.dtype is not BF or tab.dtype is not BF:
         why = "why_tf32"
-    elif x.shape[0] < MIN_ROWS:
+    elif x.shape[0] < (ESM_MIN_ROWS if esm else MIN_ROWS):
         why = "why_rows"
     if why is not None:
         STATS["fallbacks"] += 1
@@ -165,7 +168,7 @@ def _block(x, tab, bias2, widx, keys, ebias, tinfo, tb, wq, bq, wk, wv, wg, wo, 
         if n_out == 3:
             xt8, sxt = _q8(M, D, dev)
             outs.append(xt8), scs.append(sxt), sc_c.append(cols(T.A_SC_T)), sh_c.append(cols(T.A_SH_T))
-        f8.ln_mod_q8(x, tab, sc_c, sh_c, outs, [s.view(-1) for s in scs], TR, eps, sig, chain and not par)
+        f8.ln_mod_q8(x, tab, sc_c, sh_c, outs, [s.view(-1) for s in scs], TR, eps, int(bool(sig)), chain and not par)
         if par and not post:
             xt = torch.empty_like(x)
             rx.ln_mod_fwd(x, tab, [cols(T.A_SC_T)], [cols(T.A_SH_T)], [xt], torch.empty(M, 2, device=dev), TR, eps, sig)
@@ -226,7 +229,7 @@ def _block(x, tab, bias2, widx, keys, ebias, tinfo, tb, wq, bq, wk, wv, wg, wo, 
         else:
             xp = torch.empty(M, D, device=dev, dtype=torch.float32)
             xt8, sxt = _q8(M, D, dev)
-            f8.res_ln_q8(x, ya, tab, cols(T.A_G_A), cols(T.A_SC_T), cols(T.A_SH_T), xp, xt8, sxt.view(-1), TR, eps, sig)
+            f8.res_ln_q8(x, ya, tab, cols(T.A_G_A), cols(T.A_SC_T), cols(T.A_SH_T), xp, xt8, sxt.view(-1), TR, eps, int(bool(sig)))
         ab = _mm(xt8, sxt, _w8("exp", *wexp))
         h8, sh = _q8(M, 256, dev)
         f8.glu_q8(ab, h8, sh.view(-1), up)
@@ -255,6 +258,75 @@ def _block(x, tab, bias2, widx, keys, ebias, tinfo, tb, wq, bq, wk, wv, wg, wo, 
     return out
 
 
+def esm_block(*args) -> torch.Tensor:
+    """:func:`_esm_block` with autocast off."""
+    with torch.autocast("cuda", enabled=False):
+        return _esm_block(*args)
+
+
+def _esm_block(x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, wa, wb, wsq, length, tl, use) -> torch.Tensor:
+    """ESMFold2's atom block (``AtomDiTESMFold2Pair``) at inference with the e4m3 parts ``use``: ``integrations.local_dit_esm._infer_a100`` (the
+    block the RTX 5090 runs: train_rows' RMS mode, cuBLAS GEMMs, the q / k RMSNorm + rotary, the 192-key rank-window attention) with the rows
+    that feed a GEMM written as e4m3 by this extension in its RMS mode (``mode`` 2: RMSNorm statistics, raw residual gate), as :func:`_block` does
+    for the other classes: ``pre`` = the AdaLN rows of q / gate and k / v inputs + q (bias in the GEMM), gate, k, v on e4m3; ``post`` = the gated
+    core output, the transition input (xp = x + gA ya in fp32, RMSNorm(xp) sc + sh as e4m3) and the SwiGLU hidden on e4m3 (out, expand [Wa; Wb],
+    squeeze). The q / k norm + rotary, the window attention, the tables and the pair bias are the default's. Returns the block stream [A N, 128]."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
+    from miniworld_engine.kernels.integrations import local_dit_esm as E
+
+    rx, qk, f8 = E._rows(x.device), E._qk_kernels(x.device), ext()
+    M = x.shape[0]
+    N, A = length, M // length
+    TR = tl or N
+    dev = x.device
+    eps, mode = E.RMS_EPS, E._RMS_MODE
+    cols = lambda c: c * D  # noqa: E731
+    pre, post = "pre" in use, "post" in use
+    if pre:
+        xq8, sxq = _q8(M, D, dev)
+        xk8, sxk = _q8(M, D, dev)
+        f8.ln_mod_q8(x, tab, [cols(E.A_SC_Q), cols(E.A_SC_K)], [cols(E.A_SH_Q), cols(E.A_SH_K)], [xq8, xk8], [sxq.view(-1), sxk.view(-1)], TR, eps, mode, False)
+        q = _mm(xq8, sxq, _w8("esm_q", wq), bias=_bf("esm_bq", bq))
+        k = _mm(xk8, sxk, _w8("esm_k", wk))
+        v = _mm(xk8, sxk, _w8("esm_v", wv))
+        g = _mm(xq8, sxq, _w8("esm_g", wg))
+    else:
+        xq, xk = torch.empty_like(x), torch.empty_like(x)
+        rx.ln_mod_fwd(x, tab, [cols(E.A_SC_Q), cols(E.A_SC_K)], [cols(E.A_SH_Q), cols(E.A_SH_K)], [xq, xk], torch.empty(M, 2, device=dev), TR, eps, mode)
+        q = torch.addmm(_bf("esm_bq", bq), xq, _bf("esm_wq", wq).t())
+        k, v = torch.mm(xk, _bf("esm_wk", wk).t()), torch.mm(xk, _bf("esm_wv", wv).t())
+        g = torch.mm(xq, _bf("esm_wg", wg).t())
+    qn, kn = torch.empty_like(q), torch.empty_like(k)
+    one = E._const(dev, 1.0, D // E.NH)
+    qk.qknorm_rope_fwd(q, k, one, one, eps, eps, cos, sin, qn, kn)
+    o, _lse = local.attn_esm_fwd_lse(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2)
+    o = o.view(M, D)
+    xp = torch.empty(M, D, device=dev, dtype=torch.float32)
+    if post:
+        og8, sog = _q8(M, D, dev)
+        f8.gate_q8(o, g, og8, sog.view(-1))
+        ya = _mm(og8, sog, _w8("esm_o", wo))
+        xt8, sxt = _q8(M, D, dev)
+        f8.res_ln_q8(x, ya, tab, cols(E.A_G_A), cols(E.A_SC_T), cols(E.A_SH_T), xp, xt8, sxt.view(-1), TR, eps, mode)
+        ab = _mm(xt8, sxt, _w8("esm_exp", wa, wb))
+        h8, sh = _q8(M, 256, dev)
+        f8.glu_q8(ab, h8, sh.view(-1), False)
+        y2 = _mm(h8, sh, _w8("esm_sq", wsq))
+    else:
+        og = torch.empty_like(o)
+        rx.gate_fwd(o, g, og)
+        ya = torch.mm(og, _bf("esm_wo", wo).t())
+        xt = torch.empty_like(x)
+        rx.res_ln_fwd(x, ya, tab, cols(E.A_G_A), cols(E.A_SC_T), cols(E.A_SH_T), xp, xt, torch.empty(M, 2, device=dev), TR, eps, mode)
+        ab = torch.mm(xt, _forms_cat("esm_exp", (wa, wb)).t())
+        h = torch.empty(M, 256, device=dev, dtype=BF)
+        rx.glu_fwd(ab, h, False)
+        y2 = torch.mm(h, _bf("esm_wsq", wsq).t())
+    out = torch.empty_like(x)
+    rx.res_out_fwd(xp, y2, tab, cols(E.A_G_T), None, 0, out, TR, True)
+    return out
+
+
 def _forms_cat(tag: str, ws) -> torch.Tensor:
     from miniworld_engine.kernels.integrations.adaln_sm80 import cached
 
@@ -265,4 +337,4 @@ def prebuild_items():
     yield ext
 
 
-__all__ = ["FP8_ROWS", "MIN_ROWS", "STATS", "block", "enable_fp8", "ext", "parts"]
+__all__ = ["ESM_MIN_ROWS", "FP8_ROWS", "MIN_ROWS", "STATS", "block", "enable_fp8", "esm_block", "ext", "parts"]
