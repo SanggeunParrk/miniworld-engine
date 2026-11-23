@@ -37,6 +37,26 @@ def test_quant_weight_matches_torch_reference(shape) -> None:
 
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+def test_quant_rows_near_zero_rows_stay_finite() -> None:
+    """Rows of near-zero values (Protenix v1's expand weights have hundreds of rows with max |w| ~5e-37) and all-zero rows: finite e4m3 bytes and
+    the reference scale (clamp_min(1e-30) / 448). Before the floor the scale was subnormal, 1 / scale inf and 0 * inf NaN (F3 protenix1 FP8:
+    non-finite coordinates at every size, 2026-11-23)."""
+    F = _F()
+    w = (torch.randn(64, 768, device="cuda", generator=torch.Generator(device="cuda").manual_seed(2)) * 0.05).bfloat16()
+    w[3] = 0
+    w[5] = (torch.randn(768, device="cuda") * 6e-37).bfloat16()
+    w[5, :100] = 0
+    w[9] = (torch.randn(768, device="cuda") * 1e-38).bfloat16()
+    a8, sa = F.quant_weight(w)
+    r8, sr = F.quant_weight_ref(w)
+    assert torch.isfinite(a8.float()).all() and torch.isfinite(sa).all()
+    torch.testing.assert_close(sa, sr, rtol=1e-6, atol=0)
+    assert torch.equal(a8[3].float(), torch.zeros(768, device="cuda")) and torch.equal(a8[5, :100].float(), torch.zeros(100, device="cuda"))
+    x8, sx = F.rows_q8(w)  # the activation row pass (same kernel)
+    assert torch.isfinite(x8.float()).all() and torch.isfinite(sx).all()
+
+
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
 def test_weight_pack_builds_only_the_placements_in_force() -> None:
     F = _F()
     g = torch.Generator(device="cuda").manual_seed(2)
