@@ -706,14 +706,14 @@ Filter: E1 paired cases (engine-stack `cuda` ok and baseline ok) with `baseline_
 | LayerNorm | eval | fp32 | anthropic | 5 | 0.703 | L=640 row=13 normalized_shape=384;bias=True;elementwise_affine=True | 6.1 us |
 | LayerNorm | train | bf16 | triton | 14 | 0.770 | L=128 row=198 normalized_shape=384;bias=True;elementwise_affine=True | 56.3 us |
 | LayerNorm | eval | fp32 | cueq | 3 | 0.917 | L=256 row=1 normalized_shape=64;bias=True;elementwise_affine=True | 24.6 us |
-| TriangleAttentionAF3 | train | bf16 | cueq | 1 | 0.922 | L=384 row=248 d_pair=64;n_head=4;starting=False;p_drop=0.25 | 1848.4 us |
-| OuterProductMean | eval | bf16 | anthropic | 2 | 0.929 | L=256 row=55 d_msa=64;d_pair=128;d_hidden=32;normalize_before_proj=False | 897.1 us |
+| TriangleAttentionAF3 | train | bf16 | cueq | 1 | 0.922 (paired 2026-11-24: 1.659, see 1.3b) | L=384 row=248 d_pair=64;n_head=4;starting=False;p_drop=0.25 | 1848.4 us |
+| OuterProductMean | eval | bf16 | anthropic | 2 | 0.929 (paired 2026-11-24: 1.031 / 1.086, see 1.3b) | L=256 row=55 d_msa=64;d_pair=128;d_hidden=32;normalize_before_proj=False | 897.1 us |
 | ParallelResidual | eval | bf16 | triton | 2 | 0.932 | L=128 row=164 d=256;branches=2 | 24.6 us |
 | LayerNorm | train | fp32 | triton | 3 | 0.941 | L=384 row=191 normalized_shape=64;bias=True;elementwise_affine=True | 133.1 us |
 | LayerNorm | train | bf16 | anthropic | 1 | 0.945 | L=128 row=198 normalized_shape=384;bias=True;elementwise_affine=True | 56.3 us |
 | LayerNorm | eval | fp32 | pytorch | 1 | 0.948 | L=1536 row=13 normalized_shape=384;bias=True;elementwise_affine=True | 6.4 us |
 | LayerNorm | eval | fp32 | triton | 2 | 0.953 | L=1024 row=20 normalized_shape=128;bias=False;elementwise_affine=True | 6.4 us |
-| OuterProductMean | eval | bf16 | triton | 1 | 0.953 | L=256 row=57 d_msa=64;d_pair=128;d_hidden=32;normalize_before_proj=True | 479.1 us |
+| OuterProductMean | eval | bf16 | triton | 1 | 0.953 (paired 2026-11-24: 0.984, see 1.3b) | L=256 row=57 d_msa=64;d_pair=128;d_hidden=32;normalize_before_proj=True | 479.1 us |
 | Transition | train | bf16 | triton | 1 | 0.964 | L=384 row=215 d_hidden=256;n=2 | 2373.2 us |
 | TriangleAttention | eval | bf16 | triton | 1 | 0.968 | L=256 row=190 d_pair=128;n_head=4;starting=True;use_self_attention=False;p | 190.5 us |
 | AtomDiTESMFold2 | eval | bf16 | triton | 1 | 0.968 | L=3072 row=119 d_single=128;d_cond=128;n_head=4;n=2 | 63.5 us |
@@ -756,6 +756,39 @@ Cells outside the exceptions (8; all within the +-3 % noise band if the worst ra
 | ParallelResidual | eval | bf16 | triton | 1536 | 162 | d=64;branches=2 | 122.9 | 122.8 | 0.999 |
 | ParallelResidual | eval | bf16 | triton | 2048 | 164 | d=256;branches=2 | 1181.6 | 1180.6 | 0.999 |
 | ParallelResidual | eval | bf16 | triton | 256 | 164 | d=256;branches=2 | 28.5 | 28.5 | 0.999 |
+
+
+#### 1.3b RTX 5090: paired re-measure of TriangleAttentionAF3 and OuterProductMean (2026-11-24; hand-added, `summarize.py` does not regenerate it)
+
+Why: the 1.3 tables above put the engine stack (pytorch / cuda / triton / cueq) and the Anthropic kit (pytorch / anthropic) in two separate processes, so an engine-vs-kit ratio is cross-process; on the RTX 5090 (clocks unlocked) the kit process's own pytorch reference ran 4-9 % faster than the engine process's on the same cases. The TriangleAttentionAF3 cueq cell also predates the engine fix 5f9fae307 (wide-engine ending-node training).
+Protocol: branch `5090-int`, tree eff985cfe (engine 3.0.9 dev), cssb-rtx, torch 2.13.0+cu129; `E1_operator_speed/paired.py` with `cfg_paired.yaml` (same cases as the campaign: every requirements row of the two classes, all lengths, minimum depth / samples): every backend of a case built once (same seeded weights / inputs) in ONE process, 6 rounds with the backend order rotated per round, each round = the campaign's timing (CUDA graph, cold L2, warmup 5, 20 iterations, median); backend ms = median of the round medians; ratio = baseline / engine cuda per round, then the median. 330 cases (TriangleAttentionAF3 108, OuterProductMean 222). Rows: `E1_operator_speed/E1_rtx5090_paired_triattn_opm.csv` (`stack = paired`, `repeats` = rounds); raw records `E1_operator_speed/records_paired/rtx5090/`; every paired ratio < 1 (and every case the campaign had < 0.97): `paper_common/out/rtx5090/engine_not_fastest_cells_paired_triattn_opm.csv`.
+
+| cell | campaign ratio (cross-process, 3.0.6 fc7d602d9) | paired ratio [min-max of rounds] | engine ms | baseline ms |
+|---|---|---|---|---|
+| TriangleAttentionAF3 train bf16 L=384 row 248 d_pair 64 starting=False vs cueq | 0.922 | 1.659 [1.646-1.668] | 1.001 | 1.667 |
+| OuterProductMean eval bf16 L=256 row 55 vs anthropic | 0.929 | 1.031 [1.010-1.064] | 0.869 | 0.908 |
+| OuterProductMean eval bf16 L=384 row 55 vs anthropic | 0.958 | 1.086 [1.021-1.155] | 1.702 | 1.873 |
+| OuterProductMean eval bf16 L=256 row 57 vs triton (engine's own Triton) | 0.953 | 0.984 [0.982-0.987] | 0.476 | 0.469 |
+| TriangleAttentionAF3 train bf16 L=512 / 640 / 768 row 248 vs cueq | 0.994 / 0.992 / 0.999 | 1.742 / 1.778 / 1.789 (ratio of medians) | 2.044 / 3.617 / 5.892 | 3.560 / 6.432 / 10.538 |
+
+Per class, mode and baseline (geometric mean [min-max] of the paired ratios, cases, cases < 1, cases < 0.97):
+
+| class | mode | baseline | geomean [min-max] | cases | < 1 | < 0.97 |
+|---|---|---|---|---|---|---|
+| TriangleAttentionAF3 | eval | pytorch | 8.00 [1.97-31.40] | 44 | 0 | 0 |
+| TriangleAttentionAF3 | eval | triton | 1.66 [1.14-2.67] | 60 | 0 | 0 |
+| TriangleAttentionAF3 | eval | cueq | 1.63 [1.12-2.71] | 58 | 0 | 0 |
+| TriangleAttentionAF3 | eval | anthropic | 1.13 [0.979-1.29] | 36 | 1 | 0 |
+| TriangleAttentionAF3 | train | pytorch | 5.22 [1.68-15.32] | 36 | 0 | 0 |
+| TriangleAttentionAF3 | train | triton | 1.62 [1.15-2.59] | 48 | 0 | 0 |
+| TriangleAttentionAF3 | train | cueq | 1.46 [1.12-2.40] | 46 | 0 | 0 |
+| OuterProductMean | eval | pytorch | 1.82 [1.35-3.12] | 126 | 0 | 0 |
+| OuterProductMean | eval | triton | 1.04 [0.984-1.33] | 126 | 14 | 0 |
+| OuterProductMean | eval | anthropic | 1.09 [1.03-1.19] | 27 | 0 | 0 |
+| OuterProductMean | train | pytorch | 1.61 [1.28-2.45] | 96 | 0 | 0 |
+| OuterProductMean | train | triton | 1.15 [0.994-1.47] | 96 | 2 | 0 |
+
+Result: no external baseline is ahead of the engine by more than 3 % in these two classes on the RTX 5090; the only external cell < 1 is TriangleAttentionAF3 eval bf16 L=256 row 78 (d_pair 64, n_head 4) vs the Anthropic kit, 0.979 [0.976-0.981] (campaign 1.061: noise band). The 16 Triton cells < 1 are 0.984-1.000 (inside the +-3 % band). Not ok rows, as in the campaign: Anthropic kit `failed` with Triton `OutOfResources: shared memory` (needs 194 / 136 KB, the 5090 has 99 KB) in 18 OuterProductMean and 12 TriangleAttentionAF3 cases, 1 TriangleAttentionAF3 kit `failed` (pair_fused refused at run time), kit `unsupported` for every train case (inference-only kit); the kit's TriAttn cell table has no bf16 D64H8 cell on cc 12.0 (`NAMED_FALLBACK ... refused=fast:no_cell:bf16_D64 served=caller:cueq note=raised`: the kit raises, nothing is served silently; external backend, recorded only); pytorch `skipped` (out of memory) in 28 TriangleAttentionAF3 cases.
 
 
 Engine `cuda` without an ok number while a baseline has one (the engine's kernel table does not serve the case, skipped, or failed); lists in `paper_common/out/<card>/engine_missing_number_cells.csv`:

@@ -1,0 +1,29 @@
+{
+ "engine_version": "3.0.9",
+ "commit": "eff985cfe (rsync copy of branch 5090-int, no .git)",
+ "card": "rtx5090",
+ "card_key": "5090_sm120",
+ "gpu": "NVIDIA GeForce RTX 5090",
+ "torch": "2.13.0+cu129",
+ "cuda": "12.9",
+ "cuda_driver": "13.2",
+ "driver": "595.99.02",
+ "triton": "3.7.1",
+ "python": "3.12.3",
+ "node": "cssb-rtx",
+ "slurm_job": null,
+ "paper_bench_commit": "unknown",
+ "config": "/home/psk6950/mwe/agents/e1_5090/benchmarks/paper/E1_operator_speed/cfg_paired.yaml",
+ "paired": {
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.13.0+cu129",
+  "cuda": "12.9",
+  "host": "cssb-rtx",
+  "tf32_matmul": false,
+  "tf32_cudnn": true,
+  "flush_l2": true,
+  "warmup": 5,
+  "iterations": 20,
+  "rounds": 6
+ }
+}

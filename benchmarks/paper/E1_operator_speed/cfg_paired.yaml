@@ -1,0 +1,18 @@
+# E1, paired re-measure (paired.py): the engine stack AND the Anthropic kit in one process, interleaved rounds. Same cases and timing
+# protocol as cfg_engine.yaml / cfg_kit.yaml (CUDA graph, cold L2, warmup 5, 20 iterations per round); for a card whose kit runs in the
+# engine environment (RTX 5090). Select the modules on the command line (--module ...).
+modules: all
+backends: [pytorch, cuda, triton, cueq, anthropic]
+external: [cueq, anthropic]
+rows: []
+dtypes: []
+modes: []
+lengths: all
+depths: min
+samples: min
+timing: [graph]
+warmup: 5
+iterations: 20
+flush_l2: true
+device: cuda
+seed: 0

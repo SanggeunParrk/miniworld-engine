@@ -9,6 +9,11 @@ The paper numbers are ratios against PyTorch, geometric mean per class over the 
 
 Files: `cfg_engine.yaml`, `cfg_kit.yaml`, `h100.sbatch`, `a100.sbatch`, `rtx5090.sh`, `collect.py`.
 
+Paired re-measure (single classes, engine stack + Anthropic kit in ONE process, interleaved rounds; the campaign's engine-vs-kit ratio is
+cross-process): `paired.py` + `cfg_paired.yaml`, RTX 5090 runner `rtx5090_paired.sh` (`MODULES="..." TAG=... ./rtx5090_paired.sh`), summary
+`paired_summary.py` -> `E1_<card>_paired_<tag>.csv` and `paper_common/out/<card>/engine_not_fastest_cells_paired_<tag>.csv`. Done for the
+RTX 5090 TriangleAttentionAF3 + OuterProductMean (2026-11-24, `PAPER_DATA_SUMMARY.md` 1.3b).
+
     cd benchmarks/paper
     REP=1 paper_common/chain.sh 12 E1_operator_speed/h100.sbatch      # REP=1,2,3: three repeats (different Slurm jobs); resumable
     python E1_operator_speed/collect.py --card h100                    # in a CPU job -> E1_h100.csv
