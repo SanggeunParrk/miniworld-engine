@@ -577,6 +577,58 @@ def _block(module, single, cond, pair, kmask, cos, sin):
     return _ld._unpadded(out.view(a, 1, n, DS), single.shape)
 
 
+def _a100_weights(module) -> list[torch.Tensor]:
+    """The parameters of the A100 inference block (``_infer_a100_hoisted``): the eight table blocks' weights in the order of ``_block``'s table, then the block's own."""
+    att, tr = module.attention, module.transition
+    return [att.ada_ln_in.to_scale.weight, att.ada_ln_in.to_bias.weight, att.ada_ln_kv.to_scale.weight, att.ada_ln_kv.to_bias.weight, att.to_scale.weight,
+            tr.ada_ln_in.to_scale.weight, tr.ada_ln_in.to_bias.weight, tr.to_scale.weight, att.to_query.weight, att.to_query.bias, att.to_key.weight,
+            att.to_value.weight, att.to_gate.weight, att.to_out.weight, tr.expand_a.weight, tr.expand_b.weight, tr.squeeze.weight, att.ln_pair.weight,
+            att.to_bias.weight]  # fmt: skip
+
+
+@opaque(fake=_infer_fake, name="local_dit_esm_a100_hoisted")
+def _infer_a100_hoisted(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    weights: list[torch.Tensor],
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """``_block``'s inference branch with its per-fold tables hoisted as the H100 op's are (``_infer_h100``): the conditioning table (silu(cond) x the eight table weights, 17 us of a
+    sampler step's launches per block) once per (cond, weights) and the windowed pair bias (10 us per block call) once per (pair, weights, key mask), instead of at every step of every block.
+    The builds are ``_block``'s own statements, so the output bits are the same; the weight pack and ones are made once per parameter version."""
+    sc1, bi1, kv_sc, kv_bi, so, sc2, bi2, st, wq, bq, wk, wv, wg, wo, wa, wb, wsq, lnp, wbias = weights
+    a, n0 = single.shape[0], single.shape[2]
+    n = _ld._padded_length(n0)
+    m = a * n
+    dt = single.dtype
+    x = _ld._padded(single, n).reshape(m, DS).contiguous()
+    shared = a == 1 or _shared(cond)
+    wkey = tuple((w.data_ptr(), w._version) for w in weights)
+
+    def tables():
+        c = _ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)
+        ones = torch.zeros(8 * DS, device=single.device, dtype=dt)
+        for blk in (A_SC_Q, A_SC_K, A_SC_T):
+            ones[blk * DS : (blk + 1) * DS] = 1
+        return torch.mm(Fn.silu(c), torch.cat([sc1, bi1, kv_sc, kv_bi, so, sc2, bi2, st]).to(dt).t()) + ones
+
+    def pair_bias():
+        z = _ld._trunk(pair, n).contiguous()
+        kmask = _ld._keys(mask, n0, n)
+        nreal = kmask.sum(dtype=torch.int32) if kmask is not None else torch.full((), n0, device=single.device, dtype=torch.int32)
+        return _pb_fwd(z, lnp, wbias, kmask, nreal)
+
+    with torch.cuda.device(single.device):
+        tab = _ld._hoisted(_HOIST_COND, cond, (wkey, n, "a100", dt), tables)
+        mk = (n0, None if mask is None else _ld._tkey(mask))
+        bias2 = _ld._hoisted(_HOIST_BIAS, pair, (wkey, n, mk, "a100"), pair_bias, () if mask is None else (mask,))
+        out = _infer_a100(x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, wa, wb, wsq, n, n if shared else m)[0]
+    return _ld._unpadded(out.view(a, 1, n, DS), single.shape)
+
+
 def run_block(module, single, cond, pair, mask=None, rope=None):
     """The block's output stream; :func:`reason` must have accepted the call. H100 without a gradient: the fused row kernels; otherwise
     (a gradient, or an A100) the row-pass block."""
@@ -589,4 +641,6 @@ def run_block(module, single, cond, pair, mask=None, rope=None):
         if not (cond.is_contiguous() or _shared(cond)):
             cond = cond.contiguous()
         return _infer_h100(single.contiguous(), cond, pair.contiguous(), mask, _weights(module), cos, sin)
+    if not grad and os.environ.get("MINIWORLD_ESM_A100_HOIST", "1") != "0":  # A100 inference: the conditioning table and the windowed pair bias per fold, not per step
+        return _infer_a100_hoisted(single.contiguous(), cond, pair.contiguous(), mask, _a100_weights(module), cos, sin)
     return _block(module, single.contiguous(), cond, pair.contiguous(), _ld._keys(mask, n0, n), cos, sin)
