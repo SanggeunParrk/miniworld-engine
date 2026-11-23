@@ -298,7 +298,7 @@ def _recompute_gate(z: torch.Tensor) -> bool:
     return z.dtype is torch.bfloat16 and _d128.on_sm120()
 
 
-def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
+def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save, lfac=None):
     E = _lib()
     z = leaves[0]
     n, d = z.shape[1], z.shape[-1]
@@ -343,7 +343,7 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
 
         if _f8.POLICY is not None and _f8.serves(z, hs, n, _grouped(z, hs, direction, save)):
             x = zf.new_empty((hs, n, n))
-            f8_done = _f8.run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, _f8.register_key(leaves[1]), fuse_z)
+            f8_done = _f8.run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, _f8.register_key(leaves[1]), fuse_z, lfac)
     if f8_done:
         pass
     elif _grouped(z, hs, direction, save):  # RTX 5090 inference only (save=False): no plane pair is kept
@@ -363,6 +363,8 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
         x = zf.new_empty((hs, n, n))
         with _tf32(z):
             _contract(planes, x, hs, n, direction, None if save or ds.numel() else mask, transposed)
+    if lfac is not None and not f8_done:  # RoseTTAFold3 through the 5090 e4m3 entry (forward_nograd_rf3) when the e4m3 chain declined: its 1 / n on the contraction
+        x.mul_(lfac.reshape(()).to(x.dtype))
     saved_planes = planes if save else None
     del planes  # inference: dead once contracted -- freed before the output is allocated (peak z + planes + X, not + out)
     st_out = torch.empty((T, 2), dtype=torch.float32, device=z.device)
@@ -414,6 +416,26 @@ def forward_nograd(
 ) -> torch.Tensor:
     """z + drop_row(trimul(z)) without the backward's saves.  ``mask`` [L] uint8 or empty, ``ds`` [L, D] bf16 or empty."""
     return _run_forward(leaves, mask, ds, direction, eps_in, eps_out, save=False)[0]
+
+
+def _forward_nograd_rf3_fake(leaves, lfac, mask, ds, direction, eps_in, eps_out):
+    return torch.empty_like(leaves[0])
+
+
+@opaque(fake=_forward_nograd_rf3_fake, name="trimul_sm80_wide_forward_rf3_f8")
+def forward_nograd_rf3(
+    leaves: list[torch.Tensor],
+    lfac: torch.Tensor,
+    mask: torch.Tensor,
+    ds: torch.Tensor,
+    direction: int,
+    eps_in: float,
+    eps_out: float,
+) -> torch.Tensor:
+    """RTX 5090 e4m3 planes for RoseTTAFold3's TriMul (opt-in, ``sm120_fp8``; reached from ``integrations.trimul_sm80.update`` only while the route serves
+    the call): ``leaves`` hold the PARAMETER ``to_left.weight`` (a stable calibration key and weight pack), ``lfac`` [1] the sample's 1 / n factor, applied
+    to the contraction (the e4m3 a-plane scale; ``x * lfac`` if the chain declines)."""
+    return _run_forward(leaves, mask, ds, direction, eps_in, eps_out, save=False, lfac=lfac)[0]
 
 
 def _forward_train_fake(leaves, mask, ds, direction, eps_in, eps_out):

@@ -35,6 +35,13 @@ HEADROOM = float(os.environ.get("MINIWORLD_TRIMUL_FP8_HEADROOM", "16"))
 _MINL_ENV = os.environ.get("MINIWORLD_TRIMUL_FP8_MINL")
 #: smallest L the e4m3 chain takes (below it the default route runs): measured same-process A-B, docs/fp8.md "RTX 5090"
 MIN_L = 256
+#: d_pair widths of the route (D64: the template stacks, D512: IntelliFold2's trunk, both added on 5090-int 2026-11-23 as on the H100: k1w8 with the
+#: statistics pass first); FUSED_WIDTHS: the widths whose k1w8 computes the input statistics in-kernel
+WIDTHS = (64, 128, 256, 384, 512)
+FUSED_WIDTHS = (128, 256, 384)
+#: per-width smallest L (overrides MIN_L; measured same-process A-B, docs/fp8.md "RTX 5090")
+#: D64: L256 / 384 one direction 0.88-1.00, L512 1.07, L768 1.08-1.11, L1024 1.18 (bidirectional 1.09-1.16 from L256); D512 1.03-1.04 at L256 / 384, 1.05-1.15 at L512 .. 1024
+MIN_L_D: dict = {64: 512}
 GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0, "calibrations": 0}
 _CACHES: dict = {}  # per module (key: data_ptr of its to_left weight)
 _PEAK: dict = {}  # per device: int32 [2] -- max scaled plane value (fp32 bits) of a / b since the last read
@@ -135,12 +142,12 @@ def serves(z: torch.Tensor, hs: int, n: int, grouped: bool) -> bool:
     if POLICY is None or z.dtype != torch.bfloat16 or grouped or torch.is_grad_enabled():
         return False
     d = z.shape[-1]
-    if d not in (128, 256, 384) or hs % 64 or n % 32:
+    if d not in WIDTHS or hs % 64 or n % 32:
         return False
-    return n >= (int(_MINL_ENV) if _MINL_ENV is not None else MIN_L)
+    return n >= (int(_MINL_ENV) if _MINL_ENV is not None else MIN_L_D.get(d, MIN_L))
 
 
-def run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, key, fuse_z) -> bool:
+def run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, key, fuse_z, lfac=None) -> bool:
     """Front + contraction on e4m3 planes into ``x`` ([hs, n, n] bf16), ``st_in`` filled; False = the caller runs the default route."""
     dev = zf.device
     capturing = torch.cuda.is_current_stream_capturing()
@@ -149,6 +156,8 @@ def run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, key, fuse_z) -> boo
     peak = _peak_buffer(dev)
     planes8 = zf.new_empty((2 * hs, T), dtype=torch.uint8)
 
+    # the in-kernel input statistics of k1w8 need the ring not to hold the whole K (D128 / 256 / 384); D64 and D512 take the statistics pass first
+    fuse_z = fuse_z and zf.shape[-1] in FUSED_WIDTHS
     if not fuse_z:
         E.stats_rows(zf, st_in, eps_in)  # (hs 256 at D128: the statistics kernel, then the plain front)
 
@@ -178,7 +187,9 @@ def run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, key, fuse_z) -> boo
             peak.zero_()
         front(cache["qinv"])
         GUARD_STATS["calls"] += 1
-        contract(planes8, x, cache["s"], hs, n, direction)
+        # RoseTTAFold3 (``lfac``: its 1 / n length factor on W_l, a device scalar): the planes are those of the parameter (one calibration, a stable key),
+        # the factor rides on the a-plane scale the contraction reads (x = sa lfac sb sum a b), so a captured graph follows the mask at replay
+        contract(planes8, x, cache["s"] if lfac is None else cache["s"] * torch.cat([lfac.reshape(1).float(), cache["s"].new_ones(1)]), hs, n, direction)
         if lazy or POLICY == "dynamic":
             return True
         pv = float(peak.view(torch.float32).max().item())

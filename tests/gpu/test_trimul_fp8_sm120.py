@@ -62,7 +62,7 @@ def f8():
     F8._CACHES.clear()
 
 
-@pytest.mark.parametrize("d,kind", [(128, 1), (128, 2), (128, 0), (256, 1), (256, 2), (256, 0), (384, 1)])
+@pytest.mark.parametrize("d,kind", [(64, 1), (64, 2), (64, 0), (128, 1), (128, 2), (128, 0), (256, 1), (256, 2), (256, 0), (384, 1), (512, 1), (512, 2)])
 @pytest.mark.parametrize("n", [256, 384])
 def test_accuracy_against_float64(f8, d, kind, n):
     """update error < 6 % of the update (the e4m3 storage error, ~6x the bf16 floor) and < 9x the bf16 default's; no saturation, the route ran."""

@@ -72,6 +72,20 @@ def refusal(module, pair: torch.Tensor, mask: torch.Tensor | None) -> str | None
     )
 
 
+def _rf3_f8(kernels, pair: torch.Tensor, module, direction: int) -> bool:
+    """RoseTTAFold3's TriMul on the RTX 5090 e4m3 planes: the route is on (``sm120_fp8.POLICY``), inference, the wide kernels and their serve test."""
+    from miniworld_engine.kernels.trimul_inproj.cuda import sm120_fp8
+
+    if sm120_fp8.POLICY is None or torch.is_grad_enabled() or not pair.is_cuda or torch.cuda.get_device_capability(pair.device) != (12, 0):
+        return False
+    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+
+    if kernels is not sm80_wide:
+        return False
+    hs = _wide_hs(module)
+    return sm120_fp8.serves(pair, hs, pair.shape[1], sm80_wide._grouped(pair, hs, direction, False))
+
+
 def update(
     module,
     pair: torch.Tensor,
@@ -102,6 +116,15 @@ def update(
     direction = sm80.BIDIR if bidirectional else sm80.OUTGOING if module.outgoing else sm80.INCOMING
     ds = pair.new_empty((0,)) if dropscale is None else dropscale.reshape(n, pair.shape[-1]).to(pair.dtype).contiguous()
     kernels = sm80 if sm80.supports(pair, module.d_hidden, mask) else _wide_kernels(pair)
+    lfac = getattr(module, "left_length_factor", None)
+    if lfac is not None and dropscale is None and _rf3_f8(kernels, pair, module, direction):
+        # RoseTTAFold3 on the opt-in RTX 5090 e4m3 planes: the parameter W_l (not the per-call product W_l / n: a stable calibration key) and the factor
+        # on the contraction, as the H100 route does (docs/fp8.md "RF3 TriMul: calibration on the parameter")
+        from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+
+        leaves = [pair, module.left_base_weight, module.to_left_gate.weight, module.to_right.weight, module.to_right_gate.weight, module.to_gate.weight,
+                  module.to_out.weight, module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight, module.ln_out.bias]  # fmt: skip
+        return sm80_wide.forward_nograd_rf3(leaves, lfac.reshape(1), sm80.token_mask(mask, n, pair.device), ds, direction, float(module.ln_pair.eps), float(module.ln_out.eps))
     return kernels.trimul(
         pair,
         module.to_left.weight,
