@@ -52,6 +52,13 @@ def _sm80():
     return sm80
 
 
+def _f8_sm120():
+    """The opt-in RTX 5090 e4m3 contraction (``pwa_fp8_sm120``, ``fp8.SM120_ROUTES["pwa"]``; its ``ENABLED`` is the switch)."""
+    from miniworld_engine.kernels.integrations import pwa_fp8_sm120
+
+    return pwa_fp8_sm120
+
+
 def _gemm_sm120():
     """The RTX 5090's batched GEMMs of the contraction (``pair_weighted_averaging/cuda/gemm_sm120.py``)."""
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120
@@ -225,6 +232,14 @@ def inference(
             wb.contiguous(),
             eps_z,
         )
+        if (
+            _card.sm120() and (f8 := _f8_sm120()).ENABLED and f8.serves(m.shape[2], wv.shape[0] // 8, m.shape[0], m.shape[1])
+        ):  # opt-in e4m3 contraction (docs/fp8.md "RTX 5090")
+            o = f8.contract_native(m, w, lnm_w.contiguous(), lnm_b.contiguous(), wv.contiguous(), eps_m, leaves[2])
+            if o is not None:
+                del w
+                out = sm.gate_out(m, o, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wo.contiguous(), None, eps_m, 1.0)
+                return out.unsqueeze(0)
         ns = sm.pick_split(m.shape[0])
         v, _ = sm.ln_v(m, lnm_w.contiguous(), lnm_b.contiguous(), wv.contiguous(), eps_m, False, ns)
         if _fused_contract_enabled(m, wg, False):

@@ -52,7 +52,7 @@ of each site (calibration) and kept for the process. A value past the e4m3 range
 :func:`check` once (one host sync per route): True means some route saturated and was rescaled -- run that forward again (at most 3 times).
 OuterProductMean (``bound``), token DiT and atom DiT (exact per-row scales) cannot saturate.
 
-The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: the TriMul, TriAttn and Transition slots, :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090";
+The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: every slot of :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090";
 the same preset variables as on the H100) and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
 default route, whose outputs are bit-identical with FP8 off.
 """
@@ -162,10 +162,12 @@ B200_OPTIN: dict[str, str] = {
 #: RTX 5090 (sm_120a, capability (12, 0)) route modules: slot -> module path (same interface as the H100 module of the slot; the same preset
 #: variables, so ``MINIWORLD_FP8=safe`` / ``engine-fp8`` turn on the same slots as on the H100 wherever a 5090 module exists). The Transition joined
 #: on 2026-11-23 (it was opt-in before, ``MINIWORLD_TRANSITION_FP8_SM120``, now an alias of ``MINIWORLD_TRANSITION_FP8``): the 5090 preset covers
-#: what the H100 preset covers. Slots without an entry (OPM, PWA, token DiT, atom DiT) keep the H100 module, whose ``serves()`` is False off sm_90.
+#: what the H100 preset covers. Slots without an entry keep the H100 module, whose ``serves()`` is False off sm_90.
 SM120_ROUTES: dict[str, str] = {
     "triattn": "miniworld_engine.kernels.triangle_attention.cuda.sm120_fp8",
     "trimul": "miniworld_engine.kernels.trimul_inproj.cuda.sm120_fp8",
+    "opm": "miniworld_engine.kernels.integrations.opm_fp8_sm120",
+    "pwa": "miniworld_engine.kernels.integrations.pwa_fp8_sm120",
     "transition": "miniworld_engine.kernels.transition.cuda.fp8_sm120",
 }
 #: RTX 5090 routes outside any slot and preset (as :data:`B200_OPTIN`): none (the e4m3 Transition moved into :data:`SM120_ROUTES`).
@@ -226,7 +228,7 @@ def _modules() -> tuple[Any, ...]:
     from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as tm
 
     mods = dict(zip(SLOTS, (ta, tm, opm, pwa, tr, td, ad), strict=True))
-    if a == "sm120":  # RTX 5090: the SM120_ROUTES modules (TriAttn, TriMul, Transition) take their slots (every other slot keeps the H100 module, whose serves() is False off sm_90)
+    if a == "sm120":  # RTX 5090: the SM120_ROUTES modules take their slots (every slot listed there; a slot without an entry keeps the H100 module, whose serves() is False off sm_90)
         import importlib
 
         for slot, path in SM120_ROUTES.items():

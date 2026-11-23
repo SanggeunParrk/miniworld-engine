@@ -3,9 +3,9 @@
 Everything here is opt-in and off by default: FP8 is the backend `engine-fp8`; the default remains the bf16 / fp16 engine. Base: engine 2.5.14 (branch `rel/3.0.0` = 2.5.14 + `fp8/3.0.0-all`; the routes were built on 2.5.12, branch `fp8/3.0.0-on-2512`). With no switch set, every route is bit-identical to 2.5.14 (see "Release line 3.0.0"; before: 169 / 169 against 2.5.12, "Verification on the 2.5.12 base").
 
 
-## RTX 5090 (sm_120a): the e4m3-plane TriMul route, the e4m3 TriAttn core and the e4m3 Transition (2026-11-23, branches `fp8-5090`, `fp8-5090-sw`)
+## RTX 5090 (sm_120a): e4m3 routes for every H100 slot: TriMul planes, TriAttn core, Transition, OPM product, PWA contraction, token DiT and atom DiT GEMMs (2026-11-23, branches `fp8-5090`, `fp8-5090-sw`, `fp8-5090-msa`, `fp8-5090-dit`, integrated on `5090-int`)
 
-Opt-in like the H100 / B200 routes (`MINIWORLD_FP8=safe` or `backend="engine-fp8"`; `fp8.arch()` is `"sm120"` there, `fp8.SM120_ROUTES` puts `kernels/triangle_attention/cuda/sm120_fp8.py`, `kernels/trimul_inproj/cuda/sm120_fp8.py` and `kernels/transition/cuda/fp8_sm120.py` into the `triattn`, `trimul` and `transition` slots; the OPM, PWA, token DiT and atom DiT slots keep their H100 module, whose `serves()` is False off sm_90, until their 5090 routes land). **The 5090 now follows the H100 preset:** the same variables (`MINIWORLD_FP8=safe` with its per-route values, `MINIWORLD_FP8_MODEL`, an explicitly set per-route variable winning over the preset), the same `engine-fp8` scope and the same guard contract (`fp8.check()` after every forward); `fp8.SM120_OPTIN` is empty. Census of one FoldForge predictor per slot: `benchmarks/fp8_5090/route_census.py` (not run end to end yet: after the OPM / PWA / DiT routes). With the switch off the default route is bit-identical to the base (`integ-ladder` a0aa7f1aa, 12 outputs compared byte for byte: D128 / D256 x outgoing / incoming / bidirectional x L256 / 512); no module `version` / `backend_versions` entry changes.
+Opt-in like the H100 / B200 routes (`MINIWORLD_FP8=safe` or `backend="engine-fp8"`; `fp8.arch()` is `"sm120"` there and `fp8.SM120_ROUTES` puts a 5090 module into every slot: `trimul` (`kernels/trimul_inproj/cuda/sm120_fp8.py`), `triattn` (`kernels/triangle_attention/cuda/sm120_fp8.py`), `transition` (`kernels/transition/cuda/fp8_sm120.py`), `opm` (`integrations/opm_fp8_sm120.py`), `pwa` (`integrations/pwa_fp8_sm120.py`), `token_dit` and `atom_dit` (sections below)). **The 5090 follows the H100 preset:** the same variables (`MINIWORLD_FP8=safe` with its per-route values, `MINIWORLD_FP8_MODEL`, an explicitly set per-route variable winning over the preset), the same `engine-fp8` scope and the same guard contract (`fp8.check()` after every forward); `fp8.SM120_OPTIN` is empty. Census of one FoldForge predictor per slot: `benchmarks/fp8_5090/route_census.py`. With the switch off the default route is bit-identical to the base (byte comparisons per branch below); no module `version` / `backend_versions` entry changes.
 
 **Phase 0 (rates, 5090 sm_120a, CUDA graph, 128 MB L2 flush; `benchmarks/fp8_5090/p0_*.py`).** `mma.sync` fp32 accumulate: bf16 m16n8k16 **217.6 TFLOPS**, e4m3 m16n8k32 **459.2 TFLOPS** (2.11x). cuBLASLt batched e4m3 (TN, per-tensor scale pointers, bf16 out) against the engine's bf16 contraction rate: L512 x 128 channels 292 TFLOPS vs 103 (bf16 bmm), L1024 354 vs 191, L1536 378 vs 199, L2048 390 vs 204 (1.9x at L >= 1024). The TriMul contraction is 53 % (L1024) .. 66 % (L2048) of the D128 module (profile: contract 1366 us of 2551 us at L1024; k1w 869, k3w 573), so the e4m3 contraction is the dominant GEMM; the in-projection GEMMs (K = 128, N = 512 .. 1024) are bandwidth bound at 1.2-1.3x as plain e4m3 GEMMs (quantisation of a separate input pass cancels that), hence the route quantises in the front's epilogue (free) and leaves the projections bf16. cuBLASLt e4m3 supports TN only on sm_120.
 
@@ -95,7 +95,103 @@ The same level as the H100 route (both GEMM inputs are e4m3 activations); no sat
 
 **Prebuild (sm120 bundle).** `_prebuild --arch sm120` now plans the two opt-in extensions, so a first opt-in call does not JIT: `triattn_sm120_f8` (`triangle_attention/cuda/__init__.py`, sm120 branch) and `transition_fwd_f8_sm120` (`transition/cuda/__init__.py`, sm120 branch, when a bf16 eval row has (D, nD) in `fp8_sm120.SHAPES`). Plan diff against the base `a0aa7f1aa` (`--list`, same environment, CPU on cssb-rtx): 67 -> 69 artifacts; added `transition_fwd_f8_sm120` [f2e73f1e] and `triattn_sm120_f8` [c2163cab] (the keys the runtime JIT computed for the same sources); re-keyed `trimul_sm80_wide_sm120` b99f5ace -> 486690f4 and `trimul_sm80_wide512_sm120` b95b78e4 -> 836ca0bc (the TriMul route's edits of `wide_k1.cuh` / `wide_gemm.cuh` / `wide_ops.cu`: the prebuilt-sm120 bundle must be rebuilt for them); every other key unchanged (the default Transition builds `transition_wide_sm120` / `transition_fwd_sm120` included). `--check` lists the same problems as on the base (it exits 1 there too) plus 2 call sites / 2 sources now reached. No module `version` / `backend_versions` change: every new path is opt-in and the default outputs are unchanged.
 
-Not done: OPM / PWA / token DiT routes on sm_120 (no e4m3 kernel; their slots run the default); the TriAttn d_pair-64 core (Chai-1); a custom `mma.sync` e4m3 contraction (cuBLASLt TN is used; the non-block-scaled path works on sm_120 with CUDA 13 driver / torch 2.13 cu129, only the block-scaled forms were reported failing); the plane formation of the grouped long-L path (L > ~3000) stays bf16.
+### OuterProductMean: the e4m3 grouped product (`kernels/integrations/opm_fp8_sm120.py`, `csrc/sm120/msa_f8_sm120.cu`; branch `fp8-5090-msa`)
+
+`fp8.SM120_ROUTES["opm"]`, the H100 route's switches and recipe: `MINIWORLD_OPM_FP8=bound` (in `safe`; `calib` also served), `MINIWORLD_OPM_FP8_GUARD`, `MINIWORLD_OPM_FP8_HEADROOM`; own gate override `MINIWORLD_OPM_FP8_SM120_MINS` (0 = no gate). Counters `fp8.route_stats()["opm"]` (`calls`, `retries`, `fallbacks`, `capture_fallbacks`, `calibrations`, `declined`). Coverage = the H100 route's: inference of every `opm_sm80` form (groups 1, d_hidden 32, d_msa 64 / 128 / 256, d_pair 128 / 256 / 384 / 512, both normalisation orders, `count_offset`, projection biases, the pair residual, batch 1); the row-chunked inference past L 2048 and training run the default.
+
+**Where the time goes (default, `benchmarks/fp8_5090/msa_profile.py`).** The grouped product O = A^T B (K = S; `ogemm_sm80` CUTLASS / cuBLAS) is 82 % of the call at L256 S1024, 91 % at L384 S4096, 96 % at L768 S16384 (226-240 TFLOPS bf16); prologue 2-9 %, epilogue 1-21 % (d_pair 512). cuBLASLt e4m3 TN on the same product (`p0_msa_gemms.py`): 387-455 TFLOPS, 1.95-2.08x the bf16 GEMM.
+
+**Chain** (`opm_sm80.inference`, one `POLICY` check on the default path): the default prologue (A, B [S, 32 L] bf16, s-major) -> `transpose_quant` (A2q, BTq [32 L, Sp] e4m3, K-major: the 5090's cuBLASLt takes e4m3 in the TN form only; Sp = S rounded up to 16 with zero rows; max |scaled value| per operand for the guard; one memory-bound pass, 2-4 % of the FP8 call) -> `opm_fp8.product` (the H100 cuBLASLt e4m3 TN GEMM, fp32 accumulation with promotion, scale pointers) -> the default epilogue (mask counts, / n, W_o, bias, residual). Scales: `bound` = `opm_fp8.bound_scales` (cannot saturate: no calibration, no host sync); `calib` = the first eager call's max |A|, |B| x `HEADROOM`, `sync` guard re-quantises an overflowing call, `lazy` / capture through `fp8.check()`; a capture before calibration runs the default.
+
+**Gate: depth >= 1024, every L** (the H100 route's served depths; the judge error grows below, see the accuracy table). Speed is >= 1.09x at every measured cell, also below the gate.
+
+**Speed** (same process, alternating A-B with the order flipped every round, 6 rounds, CUDA-graph replay of 3 calls, 128 MB L2 flush, median of 7; `msa_ab.py --nogate`, raw `fp8_5090_msa-run/sw_opm.jsonl`, `sw3.jsonl`; default / FP8, > 1 = FP8 faster). d_msa 64 / d_pair 128, Boltz order (default ms in brackets):
+
+| L \ S | 128 | 256 | 512 | 1024 | 2048 | 4096 | 16384 |
+|---|---|---|---|---|---|---|---|
+| 64 | | 1.09 (0.059) | | | | | |
+| 128 | 1.21 (0.076) | 1.38 (0.103) | 1.44 (0.157) | 1.55 (0.257) | 1.61 (0.481) | 1.58 (0.922) | |
+| 192 | | | | 1.56 (0.455) | | | |
+| 256 | 1.24 (0.271) | 1.33 (0.356) | 1.52 (0.537) | 1.64 (0.875) | 1.63 (1.58) | 1.70 (2.94) | 1.64 (10.5) |
+| 384 | | 1.42 (0.709) | 1.52 (1.12) | 1.68 (1.89) | 1.70 (3.23) | 1.71 (5.83) | |
+| 768 | | 1.41 (2.48) | 1.43 (3.78) | 1.53 (6.44) | 1.74 (11.9) | 1.74 (22.5) | 1.73 (86.3) |
+| 1024 | | | | | | 1.76 (39.8) | |
+| 2048 | | | | | | 1.79 (158.0) | |
+
+AF3 order and the wide widths: 64 / 128 AF3 L384 S2048 1.61, L768 S16384 1.73; 128 / 256 AF3 (Protenix-v2) L128 S1024 1.45, L384 S512 1.38, S1024 1.47, S4096 1.64, L768 S1024 1.44; 128 / 384 AF3 (ESMFold2) L384 S1024 1.40, L768 S4096 1.63; 256 / 512 Boltz order (IntelliFold2) L128 S256 1.15, L384 S512 1.26, S1024 1.35, S16384 1.63, L768 S4096 1.60. (H100 FP8 / default 0.49-0.86, i.e. 1.16-2.0x.) No saturation (peak 5.4-24.5 of 448).
+
+**Accuracy** (`msa_ab.py --err`, raw `err3.jsonl`; the H100 table's columns: rms = rms(y - y64) / rms(y64), judge = max|y - y64| / max|y64|, tol = max(PyTorch bf16 judge, 8e-3)):
+
+| case (cm:cz:L:S[:a]) | PyTorch bf16 judge | default rms / judge | e4m3 rms / judge (/ tol) | H100 `bound` rms / judge |
+|---|---|---|---|---|
+| 64:128:384:1024 | 6.0e-3 | 2.6e-3 / 5.2e-3 | 1.11e-2 / 1.09e-2 (1.36) | 1.11e-2 / 1.15e-2 |
+| 64:128:384:1024:a | 5.2e-3 | 4.9e-3 / 4.2e-3 | 3.55e-2 / 1.28e-2 (1.60) | |
+| 64:128:384:4096:a | 5.3e-3 | 4.7e-3 / 4.6e-3 | 3.03e-2 / 8.4e-3 (1.05) | 3.01e-2 / 8.2e-3 |
+| 64:128:768:2048 | 5.9e-3 | 2.4e-3 / 5.4e-3 | 8.2e-3 / 9.2e-3 (1.15) | 8.1e-3 / 9.5e-3 |
+| 64:128:256:16384 | 5.8e-3 | 2.3e-3 / 5.8e-3 | 3.6e-3 / 6.7e-3 (0.83) | 3.6e-3 / 6.2e-3 |
+| 64:128:768:4096:a | 5.9e-3 | 4.7e-3 / 4.6e-3 | 3.12e-2 / 8.3e-3 (1.04) | |
+| 128:256:384:4096:a | 6.0e-3 | 4.8e-3 / 4.2e-3 | 3.50e-2 / 1.02e-2 (1.28) | 3.48e-2 / 1.01e-2 |
+| 128:384:384:4096:a | 6.4e-3 | 4.8e-3 / 5.0e-3 | 3.51e-2 / 1.05e-2 (1.31) | 3.49e-2 / 1.01e-2 |
+| 256:512:384:2048 | 5.2e-3 | 2.6e-3 / 5.2e-3 | 9.2e-3 / 1.37e-2 (1.71) | 9.1e-3 / 1.33e-2 |
+| 64:128:128:256 (below the gate) | 5.1e-3 | 3.2e-3 / 5.1e-3 | 1.96e-2 / 1.89e-2 (2.36) | |
+
+The same numbers as the H100 route to two digits where both exist (the same e4m3 operands: one rounding of the fp32-accumulated projections, cuBLASLt promotion). Below depth 1024 the product averages fewer rows and the judge error reaches 2.4x tol at S 256: the gate keeps the H100 route's depths.
+
+### PWA: the e4m3 key contraction (`kernels/integrations/pwa_fp8_sm120.py`, `csrc/sm120/msa_f8_sm120.cu`; branch `fp8-5090-msa`)
+
+`fp8.SM120_ROUTES["pwa"]`, the H100 switches: `MINIWORLD_PWA_FP8=1` (in `safe`), `MINIWORLD_PWA_FP8_GUARD`, `MINIWORLD_PWA_FP8_HEADROOM`; own gate overrides `MINIWORLD_PWA_FP8_SM120_MINSN` (native widths) / `_BIG_MINSN`. Counters `fp8.route_stats()["pwa"]` (`calls` native widths, `wide_calls` BIG, `retries`, `declined`, `calibrations`). Coverage = the H100 routes' (8 x 32 `forward`, the AF3-family wide widths and the BIG build of `forward_wide`), all widths the 5090 default serves: d_msa 64 x (8 x 8 / 16 / 32) at d_pair 128 / 256 / 384, d_msa 128 x (8 x 8 / 16), and the BIG width 256 x 8 x 32 / d_pair 512; inference, one sample, N % 16.
+
+**Where the time goes (default).** S1024 N768: 8 x 32 contraction 65 % (`gemm_sm120` 1.58 ms), `gate_out` 16 %, `ln_v` 15 %; 64 x 8: contraction 48 %, gate_out 25 %, ln_v 14 %, pair 12 %; 128 x 16: 45 / 29 / 15 / 11 %; BIG: contraction 19 %, the [v | g] GEMM 20 %, gate 18 %, out GEMM 25 %. cuBLASLt e4m3 TN on the contraction: 1.19x (8 x 32 N384) .. 1.91x (N2048), 1.7-1.8x for C 8 / 16 at N768.
+
+**Chain.** Native widths (`pwa_sm80.inference`): `pair_fwd` (default) -> `w_quant` (256 w as e4m3) -> **`ln_vt8`** (new, replaces `ln_v`: one MSA row x 64 tokens per tile, LayerNorm in place in shared memory, vT tile = Wv . y^T on `mma.sync` bf16 (M = 8 C, N = tokens, K = d_msa), fp32 x vinv -> e4m3 pairs, stored as 16-byte runs of the K-major vT [8, S C, N]: no bf16 v, no transpose pass) -> `pwa_fp8.contract` (the H100 cuBLASLt e4m3 batched TN GEMM, o bf16 [8, N, S C]) -> `gate_out` (default). BIG width (`pwa_wide_sm80`): LN (default) -> g = y Wg^T alone (the default tile) and **`vt8_y`** (new: v = y Wv^T straight into e4m3 vT; Wv (128 KiB) does not fit 99 KiB, so neighbouring CTAs hold one 64 KiB half each and read the same 32-token tile, the second read from L2) -> the same contraction -> `gate_fwd` / out GEMM (default). Scales and guard: the H100 route's (w x 2^8 fixed; v static power of two from the first eager call x `HEADROOM` 16, `vscale_from_amax`; scale pointers; `take_overflow` / `rescale_all`; `sync` redo, `lazy` under capture; a capture before calibration runs the default).
+
+**Gates** (from the A-B below): native widths S N >= 2^15 (S128 N128 64 x 8: 0.97; S128 N256: 1.05); BIG S N >= 2^14 (the smallest measured cell; every measured BIG cell gains).
+
+**Speed** (`msa_ab.py --nogate`, same protocol as OPM; raw `sw_pwa.jsonl`, `sw3.jsonl`; default / FP8):
+
+| width (D x C, d_pair) | S1024 N128 | N256 | N384 | N512 | N768 | N1024 | N1536 | N2048 | other |
+|---|---|---|---|---|---|---|---|---|---|
+| 64 x 32, 128 (Boltz-2 / MiniWorld / RF3) | 1.20 | 1.30 | 1.20 | 1.40 | 1.51 | 1.50 | | 1.58 | S128 N384 1.32, N768 1.30; S512 N768 1.47; S4096 N384 1.20, N768 1.47; S16384 N384 1.29; d_pair 256 (Chai-1) N768 1.43; S128 N256 1.12 |
+| 64 x 8, 128 (AF3 / OpenFold3 / Protenix-v1) | 1.25 | 1.33 | 1.18 | 1.28 | 1.31 | 1.35 | 1.40 | 1.39 | N400 1.25, N784 1.23; S128 N256 1.05, N768 1.16; S512 N768 1.29; S4096 N768 1.35; S16384 N256 1.18, N768 1.30; S128 N128 0.97 (gated) |
+| 128 x 8, 256 (Protenix-v2) | | 1.24 | 1.10 | | 1.21 | | 1.27 | | S512 N768 1.17, S4096 N768 1.22; d_pair 384 (OpenDDE) N768 1.18 |
+| 128 x 16, 256 (ESMFold2) | | 1.17 | 1.11 | | 1.28 | | 1.34 | | S512 N768 1.23, S4096 N768 1.29; S128 N256 1.02 |
+| 256 x 32, 512 BIG (IntelliFold2) | 1.04 | 1.05 | 1.04 | 1.10 | 1.13 | 1.16 | 1.21 | | N400 1.07; S512 N640 1.08; S64 N256 1.03, N768 1.05; S256 N384 1.05, N768 1.12; S4096 N768 1.13 |
+
+(BIG with the first version, bf16 v + a transposing cast pass: 0.95-1.12, losing at N <= 512: replaced by `vt8_y`.) H100 for comparison (FP8 / default): 8 x 32 0.71-0.96 at N >= 384, wide 0.74-0.97, BIG 0.84-0.96. No saturation (peak |v / scale| 19.6-25.9 of 448), no retry.
+
+**Accuracy** (`msa_ab.py --err`, raw `err3.jsonl`, `err4.jsonl`; the H100 tables' columns: update error rms / max of (y - y64) relative to y64 - x, judge = max|y - y64| / max|y64|, in %; random weights, 3 masked keys):
+
+| case (D:C:cz:S:N) | PyTorch bf16 | default | e4m3 | H100 e4m3 |
+|---|---|---|---|---|
+| 64:32:128:1024:256 | 2.53 / 4.00 / 0.296 | 2.52 / 4.00 / 0.296 | 3.99 / 5.19 / 0.384 | 3.18 / 4.29 / 0.37 |
+| 64:32:128:1024:384 | 2.83 / 4.22 / 0.297 | 2.82 / 4.14 / 0.291 | 4.03 / 5.33 / 0.374 | 3.06 / 4.60 / 0.33 |
+| 64:32:128:1024:512 | 3.04 / 4.88 / 0.298 | 3.03 / 4.76 / 0.291 | 4.05 / 5.68 / 0.347 | 2.99 / 4.60 / 0.35 |
+| 64:32:128:1024:768 | 3.31 / 5.93 / 0.279 | 3.31 / 5.93 / 0.279 | 4.09 / 6.87 / 0.323 | 2.89 / 5.00 / 0.32 |
+| 64:32:128:1024:1024 | 3.49 / 6.12 / 0.273 | 3.48 / 6.13 / 0.274 | 4.12 / 6.88 / 0.307 | 2.84 / 4.95 / 0.31 |
+| 64:32:128:2048:384 | 2.83 / 4.67 / 0.283 | 2.82 / 4.67 / 0.283 | 4.02 / 6.20 / 0.376 | 3.06 / 4.35 / 0.31 |
+| 64:32:128:2048:768 | 3.31 / 5.56 / 0.279 | 3.31 / 5.56 / 0.279 | 4.09 / 6.46 / 0.325 | |
+| 64:32:256:1024:768 (Chai-1) | 2.94 / 5.25 / 0.274 | 2.94 / 5.29 / 0.277 | 3.59 / 6.27 / 0.328 | 2.92 / 5.35 / 0.31 |
+| 64:8:128:1024:256 | 2.24 / 4.06 / 0.297 | 2.23 / 4.06 / 0.297 | 3.44 / 5.06 / 0.370 | 3.46 / 4.39 / 0.38 |
+| 64:8:128:1024:384 | 2.43 / 4.26 / 0.304 | 2.43 / 4.13 / 0.295 | 3.37 / 4.88 / 0.348 | 3.39 / 4.18 / 0.34 |
+| 64:8:128:1024:400 | 2.45 / 4.19 / 0.299 | 2.44 / 4.19 / 0.299 | 3.36 / 4.90 / 0.350 | 3.38 / 4.27 / 0.35 |
+| 64:8:128:1024:768 | 2.68 / 4.89 / 0.286 | 2.68 / 4.88 / 0.285 | 3.25 / 5.89 / 0.344 | 3.26 / 5.65 / 0.34 |
+| 64:8:128:1024:1536 | 2.85 / 5.64 / 0.293 | 2.85 / 5.45 / 0.283 | 3.17 / 5.87 / 0.305 | 3.17 / 5.43 / 0.31 |
+| 64:8:128:4096:768 | 2.69 / 4.27 / 0.285 | 2.68 / 4.27 / 0.285 | 3.25 / 4.77 / 0.318 | 3.27 / 5.39 / 0.35 |
+| 128:8:256:1024:768 | 2.84 / 4.80 / 0.281 | 2.84 / 4.78 / 0.280 | 3.52 / 5.57 / 0.326 | 3.01 / 4.78 / 0.31 |
+| 128:16:256:1024:768 | 2.51 / 4.51 / 0.290 | 2.50 / 4.42 / 0.284 | 3.08 / 5.28 / 0.339 | 3.22 / 5.24 / 0.32 |
+| 128:8:384:1024:768 | 2.86 / 4.51 / 0.282 | 2.86 / 4.55 / 0.285 | 3.54 / 5.20 / 0.325 | 3.04 / 4.96 / 0.33 |
+| 256:32:512:1024:384 (BIG) | 2.46 / 4.13 / 0.281 | 2.44 / 4.14 / 0.282 | 3.49 / 5.16 / 0.351 | 3.61 / 5.18 / 0.35 |
+| 256:32:512:1024:768 | 2.76 / 4.81 / 0.280 | 2.74 / 4.81 / 0.280 | 3.39 / 5.73 / 0.333 | 3.54 / 5.97 / 0.35 |
+| 256:32:512:2048:384 | 2.46 / 4.03 / 0.286 | 2.45 / 3.99 / 0.283 | 3.49 / 5.26 / 0.374 | |
+| 256:32:512:256:400 | 2.48 / 4.09 / 0.293 | 2.46 / 4.09 / 0.293 | 3.48 / 4.84 / 0.347 | 3.60 / 4.98 / 0.34 |
+
+Judge metric of the e4m3 route 0.305-0.384 % at every width (H100 0.30-0.38 %), inside the engine tolerance 8e-3 everywhere. Update rms: the wide and BIG widths match the H100 route to 0.1-0.5 % (3.08-3.54 against 3.01-3.61); the 8 x 32 width reads 0.6-1.5 % above the bf16 floor here against 0.2-1.1 % on the H100 (3.6-4.1 % absolute against 2.8-3.2 %; this case builder's 8 x 32 modules have a higher bf16 floor, 2.5-3.5 % against 2.0-2.5 %, and the e4m3 rounding of v is the H100 route's: same scale rule, one rounding of the fp32 projection). No NaN / inf, no saturation, no retry.
+
+**Tests** (`tests/gpu/test_opm_fp8_sm120.py`, `tests/gpu/test_pwa_fp8_sm120.py`, on the 5090): `transpose_quant` / `w_quant` / `vt8_y` against torch, `ln_vt8` against the default `ln_v` at the five native widths x 32 / 64-token tiles with a clipped token tail, error vs fp64 (OPM 5 cases: judge < 2.5 % and < 8x the default; PWA 6 widths x (S256 N384, S33 N400): judge < 8e-3, update < 6 % and < 2.5x the default), `safe` turns each on and `disable()` off, the slot module is the sm120 one, sync guard redo (headroom 2^-6), lazy guard through `fp8.check()` + graph replay == eager (bytes), a capture before calibration = the default bytes, default bytes unchanged after the route ran, gates: **45 passed** (both files, final tree). `tests/gpu/test_fp8_route_stats.py`, `test_engine_fp8_backend.py`: 9 skipped on the 5090 (H100-only). `tests/cpu/test_fp8_switch.py`: 27 passed. **Default bytes** (`msa_bit.py`, sha1 of 11 outputs, base `5090-int` a24401b61 against this branch in separate processes: 5 OPM forms incl. AF3 order / d_pair 256 / 512 / padded depth, 6 PWA widths incl. BIG): identical. No module `version` / `backend_versions` change.
+
+**Prebuild (sm120).** `_msa_card.prebuild_sm120` plans `msa_f8_sm120` [e78bd1d6] and `miniworld_opm_lt_f8` [ad9f597f] (the keys the runtime JIT computed); `--list` 69 -> 71 artifacts, every other key unchanged (the default sources are not touched: the new kernels are a new file); `--check` lists the base's problems (exit 1 there too) plus 2 call sites / 1 source now reached.
+
+Not done: token DiT routes on sm_120 (no e4m3 kernel; their slots run the default); the TriAttn d_pair-64 core (Chai-1); a custom `mma.sync` e4m3 contraction (cuBLASLt TN is used; the non-block-scaled path works on sm_120 with CUDA 13 driver / torch 2.13 cu129, only the block-scaled forms were reported failing); the plane formation of the grouped long-L path (L > ~3000) stays bf16.
 
 
 ## Combined tree `fp8c/all` (2026-11-19, base engine 3.0.1 = origin/main f5be1df46): branches, route matrix, 5I28
