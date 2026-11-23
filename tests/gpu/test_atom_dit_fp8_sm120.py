@@ -192,6 +192,26 @@ def test_safe_preset_and_route_stats(f8):
         fp8._restore(snap)
 
 
+@pytest.mark.parametrize("module,pick", [("AtomDiTOpenFold3", None), ("AtomDiTProtenix", None)])
+def test_compiled_block_is_finite_and_equals_eager(f8, module, pick):
+    """Regression (5090-int, FoldForge AF3 5I28 n = 4 under torch.compile gave non-finite coordinates): the e4m3 block is ONE opaque op, so a
+    compiled step runs the eager launches: finite and at the eager e4m3 call (the compiled glue around the op may round differently)."""
+    import torch._dynamo
+
+    rig = Rig(_case(module, 1024, pick=pick))
+    _on(f8, "1")
+    y_e = rig.run()
+    torch._dynamo.reset()
+    step = rig.S.make_step(rig.m, rig.inp, backend="cuda", train=False, autocast=rig.C.autocast(rig.case), seed=0, compile_mode="default")
+    with torch.no_grad():
+        for _ in range(2):
+            o = step()
+    torch.cuda.synchronize()
+    y_c = (o if torch.is_tensor(o) else o[0]).float()
+    assert f8.STATS["calls"] >= 1 and torch.isfinite(y_c).all()
+    assert ((y_c - y_e).abs().max() / y_e.abs().max()).item() < 2e-2, (y_c - y_e).abs().max()  # the glue around the op may fuse differently
+
+
 # ------------------------------------------------------------------------------------------------------------ ESMFold2 (the H100 RMS option)
 def _esm(n: int, a: int, shared: bool = True):
     """``AtomDiTESMFold2Pair`` (the H100 test's block: fp32 parameters, bf16 inputs, 40 masked atoms) and its float64 PyTorch twin."""
