@@ -114,6 +114,17 @@ for n in args.sizes:
         result = None
     except Exception as error:  # noqa: BLE001 - a failed size is data
         rec |= {"status": "failed", "error": str(error).splitlines()[0][:300] if str(error) else type(error).__name__}
+    # which backend served every engine class (FoldForge's helper, when the checkout has it): a Triton / PyTorch route in an engine run is a bug
+    try:
+        sys.path.insert(0, str(args.ff_repo / "benchmarks/paper/common"))
+        import ffpaper
+
+        bt = ffpaper.backend_table(predictor)
+        rec["all_cuda"] = None if bt is None else bt["all_cuda"]
+        if bt is not None and not bt["all_cuda"]:
+            rec["not_cuda"] = {c: v for c, v in bt["classes"].items() if set(v["set"]) - {"cuda"} or set(v["served"]) - {"cuda"} or v["refused"]}
+    except ImportError:
+        rec["all_cuda"] = None
     stats = fp8.route_stats()
     rec |= {"saturated": fp8.check(), "wall_s": round(time.time() - t0, 1), "modules": MODS, "status_fp8": fp8.status(), "route_stats": stats}
     print(f"=== {args.model} n={n} ({rec['tokens']} tokens) {rec['status']} wall={rec['wall_s']}s saturated={rec['saturated']}", flush=True)

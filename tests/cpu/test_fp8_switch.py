@@ -381,9 +381,13 @@ def test_b200_routes_follow_the_preset_with_per_route_precedence():
 
 # ---- RTX 5090 (sm_120a): TriAttn / TriMul / Transition replace the slot module; the Transition follows the preset exactly as on the H100 (2026-11-23)
 def test_sm120_route_table():
-    assert set(fp8.SM120_ROUTES) == {"triattn", "trimul", "transition"}
-    assert set(fp8.SM120_ROUTES) <= set(fp8.SLOTS)
+    # every H100 slot has a 5090 module (5090-int: fp8-5090 TriMul / TriAttn / Transition, fp8-5090-msa OPM / PWA, fp8-5090-dit token / atom DiT)
+    assert set(fp8.SM120_ROUTES) == set(fp8.SLOTS)
     assert fp8.SM120_ROUTES["transition"] == "miniworld_engine.kernels.transition.cuda.fp8_sm120"
+    assert fp8.SM120_ROUTES["opm"] == "miniworld_engine.kernels.integrations.opm_fp8_sm120"
+    assert fp8.SM120_ROUTES["pwa"] == "miniworld_engine.kernels.integrations.pwa_fp8_sm120"
+    assert fp8.SM120_ROUTES["token_dit"] == "miniworld_engine.kernels.conditioned_transition.cuda.token_dit_fp8_sm120"
+    assert fp8.SM120_ROUTES["atom_dit"] == "miniworld_engine.kernels.dit_variants.cuda.atom_fp8_sm120"
     assert not fp8.SM120_OPTIN  # nothing outside the preset on the 5090 any more
     # the 5090 slots are switched by the H100 preset variables: every H100 preset slot with a 5090 module is on under `safe`
     assert fp8.PRESETS["safe"]["MINIWORLD_TRANSITION_FP8"] == "calib"
