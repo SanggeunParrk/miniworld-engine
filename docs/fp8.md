@@ -890,8 +890,16 @@ judge 0.0322 / 0.0322, rms_rel 0.021464 / 0.021462; L768 0.0266 / 0.0266, 0.0214
 Boltz-2 L768 0.0510 / 0.0510, 0.02906 / 0.02906; RoseTTAFold3 L384 0.0305 / 0.0305, 0.02160 / 0.02160 (the FP8 expand error of the table above, unchanged).
 
 Other H100 FP8 routes in the same harness (non-static, shipped gates, `cfg_other.yaml`): Transition 40 fired cases 1.064 .. 1.723 (median 1.39; the 0.985-0.993 cells are S1 tiny blocks,
-noise); OPM / PWA never below 0.971 (the 0.971 is noise: repeated 0.98-1.00, route not served for that row); TriMul / TriAttn (`E4_h100.csv`, shipped gates, fired cases): TriMul 12 cases 1.060 .. , TriAttn 10 cases 1.053 .., none below 0.99; with every gate removed only L128 is slower (TriMul 0.970, TriAttn 0.923: the min-L gates cover them). **Open:** the PWA wide FP8 route
-(`pwa_fp8.forward_wide`, d_msa 64-256, N >= 256) raises `cudaErrorStreamCaptureUnsupported` inside a CUDA-graph capture of the harness (20 of 28 PWA cases, N >= 256, D1024 rows; the default route captures fine); not changed here.
+noise); OPM / PWA never below 0.971 (the 0.971 is noise: repeated 0.98-1.00, route not served for that row); TriMul / TriAttn (`E4_h100.csv`, shipped gates, fired cases): TriMul 12 cases 1.060 .. , TriAttn 10 cases 1.053 .., none below 0.99; with every gate removed only L128 is slower (TriMul 0.970, TriAttn 0.923: the min-L gates cover them).
+
+**PWA FP8 inside a CUDA-graph capture (fixed 2026-11-23).** The PWA wide FP8 route (`pwa_fp8.forward_wide`, d_msa 64-256, N >= 256) failed the
+capture of the harness (20 of 28 PWA cases: `cudaErrorStreamCaptureUnsupported`, then `...Invalidated`; the default route captured fine). Cause: the
+default guard `MINIWORLD_PWA_FP8_GUARD=sync` calls `take_overflow()` (`.item()`, a host sync) after every call, also inside a capture; the tests
+set `GUARD="lazy"` and never saw it. The native-width `forward` had the same check. Fix: a call inside a capture takes the lazy form
+(`GUARD != "sync" or torch.cuda.is_current_stream_capturing()`), as the OPM / TriMul / Transition FP8 routes already do; eager calls keep the sync
+guard. Tests: `test_graph_capture_with_sync_guard` (native 8 x 32; wide 64 x 8, 128 x 16, BIG 256 x 32) capture with the sync guard, replay = eager.
+After (same harness, `cfg_other.yaml`, `--module MSAPairWeightedAveraging`, non-static, shipped gates, rows 48-54, L 128 .. 2048): 56 of 56 cases captured,
+47 fired 1.000 .. 1.424 (D384 r49 1.150 .. 1.319 from L512; D1024 1.000 .. 1.424, rising with L), 9 not fired 0.993 .. 1.009 (noise).
 
 ## Release line 3.0.0: verification (branch `rel/3.0.0`, 2026-11-17)
 
