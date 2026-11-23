@@ -11,7 +11,7 @@ Switch: `MINIWORLD_FP8=safe` (or `fp8.enable("safe", model=...)`, backend `engin
 |---|---|---|---|---|---|---|
 | trimul | `trimul_inproj.cuda.b200_fp8` planes e4m3 | D 64-512, L >= MIN_L ((128,out/in) 512, (128,bidir) 384 [G, quiet GPU], (384,out/in) 256, (384,bidir) 128 [G], D256 out/in 384 / bidir 256, D512 128, D64 out/in 512 / bidir 384); RF3 (D <= 128, B 1) L >= `MIN_L_RF3` {64: 1280, 128: 1024} [G]; L/ceil128(L) >= 0.9 | D128 out L2048 0.85 / 0.85; L1024 0.94 / 0.92; bidir L2048 0.84 | 0.80-0.90 | 0.025-0.027 | `MINIWORLD_TRIMUL_FP8=calib`; `B200_ROUTES["trimul"]` |
 | triattn | `triangle_attention.cuda.b200_fp8` e4m3 P and V (tcgen05 f8f6f4) | head dim 32 sites (fused d_pair 128; unfused 64 / 256 / 384), padded S >= 1024 (`MINIWORLD_TRIATTN_B200_FP8_MINS`), HB build, model in `TRIATTN_MODELS`; 64-channel core built, gate closed; e4m3 q / k (front-written rows) from S >= 1024 for the models whose whitelist lists qk (D.7) | L1024 1.013 / 0.973; L2048 0.957 / 0.908 | 0.97 (L1024), 0.90 (L2048) | 0.005 | `enable_triattn` via `MINIWORLD_FP8_MODEL` (h100_sm90 switches); `B200_ROUTES["triattn"]` (registered in this integration) |
-| transition | `transition.cuda.fp8_sm100a` (chain 3 launches; fused one-kernel forward for D128 and D256 n4 >= 12288 rows) | `ROW_GATE` {(128,4) 4096, (128,2) 16384, (256,4) 1024, (256,2) 1024 (< 8192), (512,4) 1024, (512,2) 4096, (768,4) 4096, (768,2) 4096} [F re-measured D512 / D768 on a quiet GPU]; `WIDTHS` default 128,256,512,768 (F); D384 / D64 / D1024 unserved | D512 n4 65536 rows 0.78; D768 n4 0.63; D128 n4 65536 0.97-0.99 gap, 0.85-0.95 sustained | D128 0.79-0.86; D512/768 0.5-0.8 | 0.033-0.040 | `MINIWORLD_TRANSITION_FP8=calib` (+ `_WIDTHS`, `_FUSED`, `_PAIRB`); `B200_ROUTES["transition"]` |
+| transition | `transition.cuda.fp8_sm100a` (chain 3 launches; fused one-kernel forward for D128 and D256 n4 >= 12288 rows) | `ROW_GATE` {(128,4) 147456 (< 1179648), (128,2) 65536 (< 1474560) [2026-11-23 re-measure, see `fp8_sm100a.py`], (256,4) 1024, (256,2) 1024 (< 8192), (512,4) 1024, (512,2) 4096, (768,4) 4096, (768,2) 4096} [F re-measured D512 / D768 on a quiet GPU]; `WIDTHS` default 128,256,512,768 (F); D384 / D64 / D1024 unserved | D512 n4 65536 rows 0.78; D768 n4 0.63; D128 n4 65536 0.97-0.99 gap, 0.85-0.95 sustained | D128 0.79-0.86; D512/768 0.5-0.8 | 0.033-0.040 | `MINIWORLD_TRANSITION_FP8=calib` (+ `_WIDTHS`, `_FUSED`, `_PAIRB`); `B200_ROUTES["transition"]` |
 | token_dit | `conditioned_transition.cuda.token_dit_fp8(_b200)` e4m3 expand + SwiGLU (plain, Boltz-2 up gate [E], RF3 parallel non-identity [E]) | placement `expand`; rows >= gate (Protenix / Chai-1 plain, Boltz-2 up `MIN_ROWS_B200_UP` 1280, RF3 `MIN_ROWS_B200_RF3` 2560); qkvg / out / squeeze not served (measured 0.99-1.05) | block 0.94-0.97 at M 2560; Boltz-2 0.89-0.96 from 1280; RF3 0.95-0.99 from 2560 | 0.91-0.96 | 0.031-0.047 | `MINIWORLD_TOKEN_DIT_FP8=expand`; `_B200_UP`, `_B200_RF3` default on; weight forms are cached only under `static_weights()` (see caveat) |
 | opm | `integrations.opm_fp8_b200` e4m3 product (wide prologue, fused S <= 512 [G], Chai-1 grouped [G]) | `_gate`: padded S gate / wide builds from padded S 256; fused padded S >= 256; Chai-1 (N >= 384 and S >= 1024) or (N >= 256 and S >= 2048) or (N >= 768 and S >= 512) | 64/128 L384 S2048 0.635; 128/256 0.66; fused S256-512 0.78-0.95; Chai-1 0.62-0.90 | ~0.6-0.9 | 0.010 | `MINIWORLD_OPM_FP8=bound` (H100-named module, B200 branch inside `opm_sm100`) |
 | pwa | `integrations.pwa_fp8_b200` e4m3 contraction (narrow, wide + BIG [G], dual [G], `pwa8_forward` one launch [G]) | padded N^2 S >= 2.4e9 (8x8), 1.1e9 (8x16), 6e8 (8x32 / BIG) | 8x32 N1536 S512 0.79 (d_pair 256 N1536: 0.73) | 0.8-0.9 | 0.0055 | `MINIWORLD_PWA_FP8=1` |
@@ -34,6 +34,37 @@ Caveats found in the integration: (1) token DiT e4m3 weight forms are rebuilt pe
 * OPM: O as e4m3 not built (bound 4-12 % of the product); Chai-1 below its (N, S) rule loses. PWA: head dim 8 not served; above per-head N^2 S C 1.5e10 two-stream per-head GEMMs.
 * Token DiT: qkvg / out / squeeze e4m3 forms measured 0.99-1.05 (not served); weight forms need `static_weights()` captures.
 * backend_versions not bumped (default routes bit-identical with FP8 off).
+
+## End-to-end measurement on engine main (2026-11-23)
+
+5I28, FoldForge F3 protocol (real MSA + 4 templates, 4 trunk passes, 200 steps, 5 samples, bf16, compile + CUDA graphs, steady median), real
+weights, engine main 1ac962f49 / a553001e1, `MINIWORLD_FP8=safe` + `MINIWORLD_FP8_MODEL=<predictor>`; rented B200 (AF3, Protenix v1 n <= 4) and
+the shared B200 host (the rest). Ratio = FP8 / bf16 steady time (< 1 is faster). `fp8.check()` was False in every cell.
+
+| predictor | n = 1 | n = 4 | n = 8 | n = 16 |
+|---|---|---|---|---|
+| AF3 | 0.342 -> 0.345 (1.006) | 0.899 -> 0.853 (0.948) | 2.532 -> 2.334 (0.922) | 11.09 -> 9.44 (**0.852**) |
+| Protenix v1 | 0.330 -> 0.328 (0.99) | 0.862 -> 0.819 (0.95) | 2.358 -> 2.190 (0.929) | 10.10 -> 8.78 (**0.869**) |
+| Boltz-2 | 0.354 -> 0.354 (1.00) | 1.008 -> 0.965 (0.957) | 2.944 -> 2.801 (0.951) | 13.83 -> 12.78 (0.924) |
+| OpenFold3 | 0.340 -> 0.342 (1.006) | 0.906 -> 0.871 (0.961) | 2.466 -> 2.273 (0.922) | 10.78 -> 9.16 (**0.850**) |
+| Chai-1 | 0.269 -> 0.265 (0.988) | 0.991 -> 0.953 (0.962) | 3.428 -> **non-finite** | 17.36 -> 16.28 (0.938) |
+
+- Routes that fire from n = 8: TriAttn PV (q / k declined on B200), TriMul, OPM, Transition, token DiT expand (declined at n <= 4 / n = 1),
+  PWA from n = 16. Boltz-2 is not in `TRIATTN_MODELS`; Chai-1's D256 n2 pair Transition is not served (36-112 Transition calls only); OPM fires
+  for Chai-1 but is not counted by `route_stats()`.
+- **Structure (end-level, the first B200 FP8 end-level check)**, n = 1, same seed, all-atom Kabsch RMSD FP8 vs bf16 (bf16 vs bf16 is bit-identical):
+  AF3 0.093 A (the model's own sample-to-sample spread 0.44 A), Protenix v1 0.078 A (0.60), Boltz-2 0.057 A (0.68), OpenFold3 0.096 A (0.48),
+  Chai-1 0.073 A (0.74); mean |dpLDDT| 0.04-0.12. n >= 4 was not judged here because B200 bf16 itself was wrong under CUDA-graph capture at
+  n = 4 / 8 until a553001e1 (`_streams._skips_in_capture` skipped `record_stream` on the B200; see that commit message).
+- **Chai-1 n = 8 FP8: non-finite coordinates** (FloatingPointError in decode) with `fp8.check()` False, also with CUDA graphs off; bf16 n = 8 and
+  FP8 n = 16 are finite. Re-checked on engine main a553001e1 (after the token DiT e4m3 scale floor a8ddeaac5): still non-finite (bf16 n = 8
+  ok, 3.43 s). Not localized (the minus-TriAttn / -PWA / -TriMul / -token-DiT variants were not run: the shared host's GPUs were taken).
+  **Blocked in code**: `fp8.B200_BLOCKED_MODELS` = {chai1}: on a B200 `MINIWORLD_FP8` reads as off and `fp8.enable()` acts as `disable()` for
+  Chai-1 (tests/cpu/test_fp8_b200_blocked_models.py). Remove the entry only after an end-level check on the B200.
+- AF3 eager profile, n = 16 (11.6 s): Pairformer ~64 % (TriAttn 6.1 s, TriMul 1.4 s), token DiT 17 %, atom DiT 0.5 s, Transition 3 %, OPM 0.11 s,
+  PWA 0.014 s: the FP8 ceiling is set by TriAttn; at n = 8 the token DiT (expand-only FP8, block 0.93-0.99) leads.
+- Transition D128: the gate now serves only the row windows where e4m3 is faster (commit 6189cf1e0, `fp8_sm100a.py` ROW_GATE / ROW_MAX:
+  n 2 65536 <= rows < 1474560, n 4 147456 <= rows < 1179648); the old gates lost up to 9 % at 1.6-2.4 M rows (e.g. AF3 pair transitions at 5I28 n = 12).
 
 ## Verification of the combined tree (n14-all)
 FP8-off bit identity against n14-base, eager and graph, sha1, separate processes: token DiT + APB 398 / 398 (eager and graph), atom DiT 258 / 258 eager and 258 graph (4 float32 L4096 cases are nondeterministic in the base itself), OPM + PWA 174 / 174 (both), TriMul 24 / 24 (eager + graph, max abs 0),

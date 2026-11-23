@@ -2,13 +2,13 @@
 //
 // The attention kernels run the windows the slide moves in edge CTAs of their own launches (slide.cuh): the forward writes their O / LSE,
 // dQ their dQ rows, dK / dV their dbias windows -- and, since the clipped-window CTAs own the dK / dV rows of every key, the edge CTAs'
-// dK / dV of the slid keys go to an fp32 partial spart [2 groups][A][4 heads][dK 32 | dV 32 channels][128 keys] (key-contiguous: the
-// edge CTAs' lanes are keys). This kernel adds them: dk[key] = rn(dk[key] + (group 0's partial + group 1's partial)), in a fixed order
+// dK / dV of the slid keys go to an fp32 partial spart [NG groups][A][4 heads][dK 32 | dV 32 channels][128 keys] (key-contiguous: the
+// edge CTAs' lanes are keys). This kernel adds them: dk[key] = rn(dk[key] + (group 0's + (group 1's + .. + group NG-1's))), in a fixed order
 // (deterministic; group 0 = keys [0, 128), group 1 = [max(n_real - 128, 0), ..) when it has a window, the two overlapping when
 // n_real < 256). A block takes (sample, 32 slots of a group): the partial in through shared memory (coalesced over the keys), then a warp
 // per key row read-modify-writes its dK | dV columns (coalesced over the channels). n_real (the key mask's population count) is the one
 // the dK / dV kernel's first edge CTA took, stored after the partial.
-//   spart [2 A 4 64 128 + 4] fp32 (the last 16 B: n_real as an int); dkv [A N, *] rows ldd elements apart, dK at columns kcol .., dV at vcol .. (bf16, or fp32 on the fp32 path).
+//   spart [NG A 4 64 128 + 4] fp32 (the last 16 B: n_real as an int); dkv [A N, *] rows ldd elements apart, dK at columns kcol .., dV at vcol .. (bf16, or fp32 on the fp32 path).
 // SPDX-License-Identifier: Apache-2.0
 #include <cuda_bf16.h>
 #include <cstdint>
@@ -26,14 +26,23 @@ __device__ __forceinline__ uint32_t bf2(float lo, float hi) {
   return *reinterpret_cast<const uint32_t*>(&r);
 }
 
+// NG = slide_ngroups(nwin) groups of partials (slide.cuh: group 0, group 1 and the tail as groups 2 .. NG - 1 on the tensor cores):
+// every group >= 1 covers group 1's keys; the live ones are added in group order.
 template <typename T>
 __device__ __forceinline__ void slide_add(const float* __restrict__ spart, T* __restrict__ dkv, int ldd,
-                                          int kcol, int vcol, int N, int A) {
+                                          int kcol, int vcol, int N, int A, int NG) {
   __shared__ float tile[32][NC + 1];                                  // [key of the tile][channel]
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int nr = __ldg(reinterpret_cast<const int*>(spart) + 2 * A * NC * KR);   // n_real, as the dK / dV kernel's edge CTAs took it
+  const int nr = __ldg(reinterpret_cast<const int*>(spart) + (size_t)NG * A * NC * KR);   // n_real, as the dK / dV kernel's edge CTAs took it
+  const int nwin = (N + 31) >> 5;
   int wf1, kb1;
-  const bool g1 = slide_group(1, nr, wf1, kb1);
+  const bool g1 = slide_group_x(1, nr, nwin, wf1, kb1);
+  int ngl = 1;                                                        // live groups: 0 .. ngl - 1
+  for (int g = 2; g < NG; ++g) {
+    int wf, kb;
+    if (slide_group_x(g, nr, nwin, wf, kb)) ngl = g + 1;
+  }
+  if (g1 && ngl < 2) ngl = 2;
   if (nr <= 0) return;
   for (int u = blockIdx.x; u < A * 8; u += gridDim.x) {               // (sample, group, 32-slot tile)
     const int a = u >> 3, g = (u >> 2) & 1, key0 = (g == 0 ? 0 : kb1) + 32 * (u & 3);
@@ -52,8 +61,16 @@ __device__ __forceinline__ void slide_add(const float* __restrict__ spart, T* __
         x[i] = in0 ? __ldg(p0 + hc * KR) : 0.f;
       }
       if (in1) {
+        float y[PER];                                                 // groups 1 .. ngl - 1 summed in order, then onto group 0's
 #pragma unroll
-        for (int i = 0; i < PER; ++i) x[i] += __ldg(p1 + ((tid >> 5) + (NT / 32) * i) * KR);
+        for (int i = 0; i < PER; ++i) y[i] = __ldg(p1 + ((tid >> 5) + (NT / 32) * i) * KR);
+        for (int g = 2; g < ngl; ++g) {
+          const float* pg = p1 + (size_t)(g - 1) * A * NC * KR;
+#pragma unroll
+          for (int i = 0; i < PER; ++i) y[i] += __ldg(pg + ((tid >> 5) + (NT / 32) * i) * KR);
+        }
+#pragma unroll
+        for (int i = 0; i < PER; ++i) x[i] += y[i];
       }
 #pragma unroll
       for (int i = 0; i < PER; ++i) tile[kk][(tid >> 5) + (NT / 32) * i] = x[i];
@@ -109,9 +126,9 @@ __device__ __forceinline__ void slide_add(const float* __restrict__ spart, T* __
 
 extern "C" __global__ void __launch_bounds__(NT)
 local_slide_add(const float* spart, __nv_bfloat16* dkv, int ldd, int kcol, int vcol, int N, int A) {
-  slide_add(spart, dkv, ldd, kcol, vcol, N, A);
+  slide_add(spart, dkv, ldd, kcol, vcol, N, A, slide_ngroups((N + 31) >> 5));
 }
 extern "C" __global__ void __launch_bounds__(NT)
 local_slide_add_f32(const float* spart, float* dkv, int ldd, int kcol, int vcol, int N, int A) {
-  slide_add(spart, dkv, ldd, kcol, vcol, N, A);
+  slide_add(spart, dkv, ldd, kcol, vcol, N, A, slide_ngroups((N + 31) >> 5));
 }

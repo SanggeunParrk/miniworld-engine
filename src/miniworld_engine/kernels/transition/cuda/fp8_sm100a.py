@@ -49,9 +49,14 @@ MIN_ROWS: int | None = int(_MINROWS_ENV) if _MINROWS_ENV else None
 #: x0.83-0.86); D 128 n 2 x0.93 at 65536, 0.87-0.94 from 147456; D 256 n 4 x0.92 at 4096-16384, 0.83-0.84 from 65536 (energy x0.73-0.83).
 #: Not routed by default (no gain or a loss, measured with the built kernels): D 128 n 2 below 65536 rows (x1.00, energy x0.88-0.95), D 256 n 2 (sustained x1.00-1.09 to 0.95, cool graph 1.00-1.11),
 #: D 384 (chain x0.99-1.05 at 65536-262144 rows n 4, 1.16 n 2, 1.5 at 1024). ``MINIWORLD_TRANSITION_FP8_MINROWS`` + ``_WIDTHS`` switch them on for experiments.
-ROW_GATE = {(512, 4): 1024, (512, 2): 4096, (768, 4): 4096, (768, 2): 4096, (128, 4): 4096, (128, 2): 16384, (256, 4): 1024, (256, 2): 1024}
+#: D 128 (2026-11-23, re-measured on a B200 through the measure harness, master inference, graph replay, 5 interleaved rounds, two separate
+#: sweeps of 16 sizes, rows = L^2 of a [1, L, L, 128] pair; ratio = e4m3 / default): n 2 0.91-0.96 from 65536 to 1327104 rows in both sweeps, 1.00 below
+#: 65536, 0.96-1.05 flipping between the sweeps from 1638400; n 4 0.96-0.98 from 147456 to 1048576 (one 1.04 at 409600), 0.98-1.00 below,
+#: 1.015-1.09 from 1327104 (4194304: 0.956 / 1.045). Served only inside the window both sweeps agree on (the old gates 16384 / 4096 served the
+#: whole range: a loss of up to 9 % at 1.6-2.4 M rows, e.g. AF3 pair transitions of 5I28 n 12).
+ROW_GATE = {(512, 4): 1024, (512, 2): 4096, (768, 4): 4096, (768, 2): 4096, (128, 4): 147456, (128, 2): 65536, (256, 4): 1024, (256, 2): 1024}
 #: (D, n) cells served only BELOW a row count (the default wins above it): D 256 n 2 (3-launch chain x0.78 at 1024-4096 rows, 1.00 at 8192, 1.39 at 16384; the fused kernel 1.07-1.11)
-ROW_MAX = {(256, 2): 8192}
+ROW_MAX = {(256, 2): 8192, (128, 4): 1179648, (128, 2): 1474560}
 #: smallest row count at which the FUSED kernel runs a (D, n) (below it the 3-launch chain: the fused kernel has a ~24.6 us floor at D 256 n 4 below ~12000 rows where the chain takes 14.4 us at 1024 rows .. 22.7 us at 8192
 #: against the default 26.7 us): D 256 n 4 12288, D 256 n 2 never (chain below ROW_MAX, default above). D 128: fused from its gate.
 FUSED_MIN_ROWS = {(256, 4): 12288, (256, 2): 1 << 60}

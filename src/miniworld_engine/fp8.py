@@ -106,14 +106,33 @@ TRIATTN_MODELS = MappingProxyType(
 )
 _NO_TRIATTN: tuple[frozenset[str], bool] = (frozenset(), False)
 
+#: Models whose FP8 run is wrong on the B200 (capability (10, 0)): every FP8 route stays off for them there (``MINIWORLD_FP8`` reads as off,
+#: :func:`enable` acts as :func:`disable`), whatever the preset. Remove an entry only after an end-level check on the B200.
+B200_BLOCKED_MODELS = MappingProxyType(
+    {
+        # 2026-11-23: 5I28 n = 8 (1,024 tokens) FP8 'safe' gives non-finite coordinates with fp8.check() False, with and without CUDA graphs,
+        # on engine main a553001e1 too (after the token DiT e4m3 scale floor a8ddeaac5); bf16 n = 8 and FP8 n = 1 / 4 / 16 are finite. The
+        # route at fault is not localized (docs/b200/fp8.md "End-to-end measurement on engine main").
+        "chai1": "non-finite 5I28 n = 8 coordinates under FP8 on the B200 (route not localized)",
+    }
+)
+
+
+def _b200_blocked(model_name: str | None) -> bool:
+    """Whether FP8 must stay off for ``model_name`` on this device (a B200 and a model of :data:`B200_BLOCKED_MODELS`)."""
+    return bool(model_name) and model_name.strip().lower() in B200_BLOCKED_MODELS and arch() == "sm100"
+
 
 def preset() -> str | None:
-    """The preset ``MINIWORLD_FP8`` names (None: unset, ``0``, ``off`` or ``none``)."""
+    """The preset ``MINIWORLD_FP8`` names (None: unset, ``0``, ``off`` or ``none``; also None on a B200 for a model of
+    :data:`B200_BLOCKED_MODELS` named by ``MINIWORLD_FP8_MODEL``)."""
     v = os.environ.get("MINIWORLD_FP8", "").strip().lower()
     if v in ("", "0", "off", "none"):
         return None
     if v not in PRESETS:
         raise ValueError(f"MINIWORLD_FP8={v!r}: unknown preset (use one of {', '.join(PRESETS)}, or off)")
+    if _b200_blocked(model()):
+        return None
     return v
 
 
@@ -368,6 +387,9 @@ def enable(name: str = "safe", *, model: str | None = None, guard: str | None = 
     are on regardless of ``model``). ``guard``: ``"sync"`` / ``"lazy"`` for TriMul / OPM / PWA / Transition (None: as they are)."""
     if name not in PRESETS:
         raise ValueError(f"unknown FP8 preset {name!r} (use one of {', '.join(PRESETS)})")
+    if _b200_blocked(model if model is not None else backend_model()):  # B200: FP8 stays off for this model (B200_BLOCKED_MODELS)
+        disable()
+        return
     _ta, tm, opm, pwa, tr, td, ad = _modules()
     env_of = PRESETS[name]
     tm.POLICY = env_of.get("MINIWORLD_TRIMUL_FP8") or None

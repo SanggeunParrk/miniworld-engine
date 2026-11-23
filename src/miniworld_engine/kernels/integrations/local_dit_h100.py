@@ -55,6 +55,19 @@ STATS = {"calls": 0, "pre": 0, "post": 0, "fallbacks": 0, "why_save": 0, "why_tf
 FP8_UP_MIN_N = 2048
 
 
+def _pack8_on(p: dict, weights: list, f8mod) -> dict:
+    """The e4m3 pack of the block whose bf16 pack is ``p``. An eager call keeps it in ``p`` (the bf16 entry of the same weights at the same
+    version, so the same lifetime): a sampler's next calls read one dict key instead of a second pack lookup and the 27-tensor key of
+    ``f8.pack8`` (eager AF3 FoldBench, 2400 calls per forward: ~0.06 s of host time at 28 tokens, 2026-11-23). A capture always asks
+    ``pack8`` (its scope rules: a capture with grad off reads the eager entry)."""
+    if _capture._graph_capture_id() is not None:
+        return f8mod.pack8(weights)
+    p8 = p.get("_f8")
+    if p8 is None:
+        p8 = p["_f8"] = f8mod.pack8(weights)
+    return p8
+
+
 def enable_fp8(on: bool | str | Iterable[str] = True) -> frozenset:
     """Switch the e4m3 row-kernel route: True / "all" (both kernels), "pre", "post", an iterable of those, or False; returns the previous parts."""
     global FP8_ROWS
@@ -351,7 +364,7 @@ def _fwd(
         elif FP8_ROWS:
             STATS["fallbacks"] += 1
             STATS["why_save" if save else "why_tf32" if tf32 else "why_opts" if not set(opts) <= f8mod.OPTIONS else "why_cond"] += 1
-        p8 = f8mod.pack8([*weights, wup] if up else weights) if f8 else None
+        p8 = _pack8_on(p, [*weights, wup] if up else weights, f8mod) if f8 else None
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
         nmod = groups * n if shared else m  # shared: one conditioning per (group, atom), read modulo G N (rows are [A][G][N])

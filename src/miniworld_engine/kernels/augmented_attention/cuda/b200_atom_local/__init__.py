@@ -13,11 +13,10 @@ The attention stage of ``modules/atom_local``'s block, forward and backward; mma
   lattn_dq.cu    dQ (window-local).
   lattn_dkv.cu   dK, dV and dbias (key-centric: 16 keys see exactly 4 query windows = 128 queries; dbias is summed over the samples).
   slide.cuh      AlphaFold 3's slid key window inside lattn_fwd / dq / dkv (and their tf32 twins): the windows whose slid keys differ
-                 from the clipped ones run as edge CTAs of the same launches.
-  lslide.cu      the slid keys' dK / dV partials of those edge CTAs, added into dk / dv (deterministic).
-  ltail.cuh      the slid window's TAIL (the query windows of padding atoms past the edge CTAs' own: they read the last 128 real keys),
-                 run on CUDA cores by the group-1 edge CTAs of lattn_fwd / dq / dkv (+ tf32) after their windows: O / LSE, dQ, dbias and
-                 the slid keys' dK / dV (into the partial lslide.cu adds). No launch of its own; nothing runs without a tail window.
+                 from the clipped ones run as edge CTAs of the same launches, on the tensor cores -- the TAIL too (the query windows of
+                 padding atoms, which read the last 128 real keys: groups of 4 windows, slide_ngroups; 2026-11-23, before: CUDA cores in
+                 the one group-1 CTA per head, ~114 ms dQ + dK / dV at N = 4096, 2,048 real atoms, 48 samples).
+  lslide.cu      the slid keys' dK / dV partials of those edge CTAs (one per group), added into dk / dv in group order (deterministic).
   lattn_esm.cu, lattn_esm_dq.cu, lattn_esm_dkv.cu, lesm.cu   ESMFold2's 192-key rank-window attention (forward; dQ + bias gradient;
                  dK / dV) and its q / k RMSNorm + rotary, position-indexed pair bias and conditioning SiLU (inference and training).
                  Their fp32 twins: lattn_esm_tf32.cu, lattn_esm_dq_tf32.cu, lattn_esm_dkv_tf32.cu (tcgen05 kind::tf32).
@@ -264,14 +263,20 @@ def _slide_mask(km):
     return km.clone() if km is not None and km.data_ptr() % 16 else km
 
 
-def _edge_split(main_ctas, sp, A, d, cap=None):
-    """Sample splits of the slid window's edge CTAs (2 groups x 4 heads each, ``slide.cuh``; they come after the clipped-window CTAs in the
-    grid). In sample-times: the clipped-window CTAs take tm = ceil(A / sp); edge CTAs that fit the SMs the last wave leaves free run beside
-    them (makespan max(tm, ceil(A / f))), more of them run partly as a tail (~ tm + ceil(A / s)). The better of the two, at most ``cap``
-    (the dK / dV kernel: 2, its dbias adds exactly)."""
+def slide_ngroups(nwin: int) -> int:
+    """Edge groups of the fp32 path's launches (``slide.cuh`` slide_ngroups: group 0, group 1 and the tail as groups of 4 windows on the
+    tensor cores), on the bf16 and the fp32 path alike."""
+    return 1 + (nwin + 1) // 4
+
+
+def _edge_split(main_ctas, sp, A, d, cap=None, groups=2):
+    """Sample splits of the slid window's edge CTAs (``groups`` groups x 4 heads each, ``slide.cuh``; they come after the clipped-window CTAs
+    in the grid). In sample-times: the clipped-window CTAs take tm = ceil(A / sp); edge CTAs that fit the SMs the last wave leaves free run
+    beside them (makespan max(tm, ceil(A / f))), more of them run partly as a tail (~ tm + ceil(A / s)). The better of the two, at most
+    ``cap`` (the dK / dV kernel: 2, its dbias adds exactly)."""
     hi = min(A, cap or A)
     tm = -(-A // sp)
-    f = min(hi, (-main_ctas % num_sms(d)) // (2 * NH))
+    f = min(hi, (-main_ctas % num_sms(d)) // (groups * NH))
     s = min(hi, 2 * sp)
     if f >= 1 and max(tm, -(-A // f)) <= tm + -(-A // s):
         return f
@@ -322,12 +327,12 @@ def attn_fwd(q, k, v, bias, kmask=None, slide=False, qblock=False, folds=1, pdl=
         return o, lse
     nq = (N + 127) // 128
     sp = max(1, min(A, num_sms(d) // (nq * NH * nf)))
-    spe = _edge_split(nq * NH * sp * nf, sp, A, d) if slide else 0
+    spe = _edge_split(nq * NH * sp * nf, sp, A, d, groups=slide_ngroups(nwin)) if slide else 0
     if slide:
         km = _slide_mask(km)
     out = _tmap(o, (DM, N, A_all), (DM * 2, N * DM * 2), (16, 32, 1), 0)
     (_load_pdl_fwd(d) if pdl else _load("fwd", d))(
-        ((nq * sp + 2 * spe) * NH, nf, 1),
+        ((nq * sp + slide_ngroups(nwin) * spe) * NH, nf, 1),
         (544, 1, 1),
         _rows(q, 128),
         _rows(k, 224),
@@ -343,7 +348,7 @@ def attn_fwd(q, k, v, bias, kmask=None, slide=False, qblock=False, folds=1, pdl=
         int(spe),
         int(bool(qblock)),
         nf,
-        q,  # the raw operands: the slid window's tail rows (ltail.cuh, group-1 edge CTAs)
+        q,  # the raw operands (unused since the tail runs as edge groups on the tensor cores, slide.cuh)
         k,
         v,
         o,
@@ -471,11 +476,11 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None, slide=False, qblock=Fa
     out = _tmap(dkv, (dkv.shape[1], N, A), (ldd * 2, N * ldd * 2), (16, 32, 1), 0)
     nq = (N + 127) // 128
     sp = max(1, min(A, num_sms(d) // (nq * NH)))  # split the samples when there are few chunks
-    spe = _edge_split(nq * NH * sp, sp, A, d) if slide else 0
+    spe = _edge_split(nq * NH * sp, sp, A, d, groups=slide_ngroups(nwin)) if slide else 0
     if slide:
         km = _slide_mask(km)
     _load("dq", d)(
-        ((nq * sp + 2 * spe) * NH, 1, 1),
+        ((nq * sp + slide_ngroups(nwin) * spe) * NH, 1, 1),
         (544, 1, 1),
         _rows(q, 128),
         _rows(k, 224),
@@ -492,7 +497,7 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None, slide=False, qblock=Fa
         int(sp),
         int(spe),
         int(bool(qblock)),
-        q,  # the raw operands and dQ: the slid window's tail rows (ltail.cuh)
+        q,  # the raw operands and dQ (unused since the tail runs as edge groups on the tensor cores, slide.cuh)
         k,
         v,
         do,
@@ -503,10 +508,10 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None, slide=False, qblock=Fa
     )
     nk = (N + 112 + 127) // 128
     sp = 2 if 2 * nk * NH <= num_sms(d) and A > 1 else 1  # two sample halves add into dbias exactly (0 + a + b)
-    spe = _edge_split(nk * NH * sp, sp, A, d, cap=2) if slide else 0  # (<= 2: the moved windows' dbias adds exactly too)
-    spart = torch.empty(2 * A * NH * 64 * 128 + 4, device=q.device, dtype=torch.float32) if slide else None  # (+ n_real)
+    spe = _edge_split(nk * NH * sp, sp, A, d, cap=2, groups=slide_ngroups(nwin)) if slide else 0  # (<= 2: the moved windows' dbias adds exactly too)
+    spart = torch.empty(slide_ngroups(nwin) * A * NH * 64 * 128 + 4, device=q.device, dtype=torch.float32) if slide else None  # (+ n_real)
     _load("dkv", d)(
-        ((nk * sp + 2 * spe) * NH, 1, 1),
+        ((nk * sp + slide_ngroups(nwin) * spe) * NH, 1, 1),
         (512, 1, 1),
         _rows(q, 224),
         _rows(k, 128),
@@ -527,7 +532,7 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None, slide=False, qblock=Fa
         int(sp),
         int(spe),
         int(bool(qblock)),
-        q,  # the raw operands: the slid window's tail (ltail.cuh)
+        q,  # the raw operands (unused since the tail runs as edge groups on the tensor cores, slide.cuh)
         k,
         v,
         do,
@@ -875,12 +880,13 @@ def attn_fwd32(q, k, v, bias, kmask=None, slide=False, qblock=False):
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
     km = _u8(kmask)
     nq = (N + 127) // 128
+    ng = slide_ngroups(nwin)
     sp = max(1, min(A, num_sms(d) // (nq * NH)))
-    spe = _edge_split(nq * NH * sp, sp, A, d) if slide else 0
+    spe = _edge_split(nq * NH * sp, sp, A, d, groups=ng) if slide else 0
     if slide:
         km = _slide_mask(km)
     _load32("fwd32", d)(
-        ((nq * sp + 2 * spe) * NH, 1, 1),
+        ((nq * sp + ng * spe) * NH, 1, 1),
         (544, 1, 1),
         _rows32(q, 128),
         _rows32(k, 224),
@@ -895,7 +901,7 @@ def attn_fwd32(q, k, v, bias, kmask=None, slide=False, qblock=False):
         int(sp),
         int(spe),
         int(bool(qblock)),
-        q,  # the raw operands: the slid window's tail rows (ltail.cuh)
+        q,  # the raw operands (unused since the tail runs as edge groups on the tensor cores, slide.cuh)
         k,
         v,
         o,
@@ -915,13 +921,14 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None, slide=False, qb
     dbias = torch.zeros(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
     out = _out32(dp.view(A, N, dp.shape[1]))
     qcol, kcol, vcol = cols
+    ng = slide_ngroups(nwin)
     nq = (N + 127) // 128
     sp = max(1, min(A, num_sms(d) // (nq * NH)))  # split the samples when there are few chunks
-    spe = _edge_split(nq * NH * sp, sp, A, d) if slide else 0
+    spe = _edge_split(nq * NH * sp, sp, A, d, groups=ng) if slide else 0
     if slide:
         km = _slide_mask(km)
     _load32("dq32", d)(
-        ((nq * sp + 2 * spe) * NH, 1, 1),
+        ((nq * sp + ng * spe) * NH, 1, 1),
         (544, 1, 1),
         _rows32(q, 128),
         _rows32(k, 224),
@@ -940,7 +947,7 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None, slide=False, qb
         int(sp),
         int(spe),
         int(bool(qblock)),
-        q,  # the raw operands and dQ: the slid window's tail rows (ltail.cuh)
+        q,  # the raw operands and dQ (unused since the tail runs as edge groups on the tensor cores, slide.cuh)
         k,
         v,
         do,
@@ -953,10 +960,10 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None, slide=False, qb
     )
     nk = (N + 112 + 127) // 128
     sp = 2 if 2 * nk * NH <= num_sms(d) and A > 1 else 1  # two sample halves add into dbias exactly (0 + a + b)
-    spe = _edge_split(nk * NH * sp, sp, A, d, cap=2) if slide else 0
-    spart = torch.empty(2 * A * NH * 64 * 128 + 4, device=q.device, dtype=torch.float32) if slide else None  # (+ n_real)
+    spe = _edge_split(nk * NH * sp, sp, A, d, cap=2, groups=ng) if slide else 0
+    spart = torch.empty(ng * A * NH * 64 * 128 + 4, device=q.device, dtype=torch.float32) if slide else None  # (+ n_real)
     _load32("dkv32", d)(
-        ((nk * sp + 2 * spe) * NH, 1, 1),
+        ((nk * sp + ng * spe) * NH, 1, 1),
         (544, 1, 1),
         _rows32(q, 224),
         _rows32(q, 224, "128a32"),
@@ -981,7 +988,7 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None, slide=False, qb
         int(sp),
         int(spe),
         int(bool(qblock)),
-        q,  # the raw operands: the slid window's tail (ltail.cuh)
+        q,  # the raw operands (unused since the tail runs as edge groups on the tensor cores, slide.cuh)
         k,
         v,
         do,

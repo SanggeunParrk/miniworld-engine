@@ -148,9 +148,10 @@ def _bf16_wab64(wab, up=False):
 
 
 def _f8_wab(wab, M: int, H: int, device_index):
-    """The bf16 SwiGLU operand in the tiling the e4m3 expand GEMM takes for M rows (the bf16 kernel's ``_swiglu_ht`` rule) and that ht."""
+    """The bf16 SwiGLU operand in the tiling the e4m3 expand GEMM takes for M rows (the bf16 kernel's ``_swiglu_ht`` rule) and that ht. The
+    64-row tiling as a callable: ``token_dit_fp8.weight_pack`` makes it only when it makes the pack (its lookup is host time at every call)."""
     ht = _swiglu_ht(M, H, _fp8_nsm(device_index), bf16=True)
-    return (wab if ht == 128 else _bf16_wab64(wab)), ht
+    return (wab if ht == 128 else functools.partial(_bf16_wab64, wab)), ht
 
 
 def _fp8_nsm(device_index) -> int:

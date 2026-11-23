@@ -97,7 +97,9 @@ __device__ __forceinline__ void adaln_q8(float a, float b, float c, float d, flo
   o.z = c * rstd * scl<SIG>(m.z) + h.z;
   o.w = d * rstd * scl<SIG>(m.w) + h.w;
   const float amax = block_max<NT>(fmaxf(fmaxf(fabsf(o.x), fabsf(o.y)), fmaxf(fabsf(o.z), fabsf(o.w))), red);
-  const float sc = amax > 0.f ? amax / 448.f : 1.f, inv = 1.f / sc;
+  // floor of the scale as quant_weight_ref (clamp_min(1e-30) / 448): a row of near-zero values (Protenix v1 has expand rows of max |w| ~5e-37) gave a
+  // subnormal scale, 1 / scale = inf and 0 * inf = NaN in the e4m3 bytes
+  const float sc = fmaxf(amax, 1e-30f) / 448.f, inv = 1.f / sc;
   const __nv_fp8x2_storage_t lo = __nv_cvt_float2_to_fp8x2(make_float2(o.x * inv, o.y * inv), __NV_SATFINITE, __NV_E4M3);
   const __nv_fp8x2_storage_t hi = __nv_cvt_float2_to_fp8x2(make_float2(o.z * inv, o.w * inv), __NV_SATFINITE, __NV_E4M3);
   *reinterpret_cast<uint32_t*>(out8 + col) = (uint32_t)lo | ((uint32_t)hi << 16);
@@ -196,7 +198,9 @@ __global__ void __launch_bounds__(NT) quant_rows_kernel(const __nv_bfloat16* __r
     amax = fmaxf(amax, fmaxf(fmaxf(fabsf(x.x), fabsf(x.y)), fmaxf(fabsf(x.z), fabsf(x.w))));
   }
   amax = block_max<NT>(amax, red);
-  const float sc = amax > 0.f ? amax / 448.f : 1.f, inv = 1.f / sc;
+  // floor of the scale as quant_weight_ref (clamp_min(1e-30) / 448): a row of near-zero values (Protenix v1 has expand rows of max |w| ~5e-37) gave a
+  // subnormal scale, 1 / scale = inf and 0 * inf = NaN in the e4m3 bytes
+  const float sc = fmaxf(amax, 1e-30f) / 448.f, inv = 1.f / sc;
 #pragma unroll
   for (int i = 0; i < VPT; ++i) {
     const int col = (i * NT + threadIdx.x) * 4;

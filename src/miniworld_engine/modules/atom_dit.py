@@ -878,7 +878,10 @@ class AtomDiTProtenix(_LocalAtomDiT):
     #: epilogue (gemm_rg_tf32 -DGATEB); the same bits
     #: cuda:b200_sm100 27 (2026-11-18, round 3 part 15, r3-local-dit; all six AtomDiT classes): fp32 inference, the 64-row fp16-exact units:
     #: the pre's two row rounds from one load round, the post's x2 inputs one round ahead (-DPRE1R / -DPOST1R); the same bits
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4, "cuda:b200_sm100": 27}
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4, "cuda:b200_sm100": 28}
+    # cuda:b200_sm100 28 (2026-11-23): the slid window's TAIL (query windows of padding atoms past the last real ones) runs on the tensor
+    # cores as extra edge groups of 4 windows (b200_atom_local slide.cuh; was CUDA cores in one CTA per head: F6 Protenix v1 1.149 ->
+    # 0.436 s / example). Real rows unchanged; the padding rows at the tf32 / bf16 level of the other windows (were fp32 CUDA-core).
 
 
 class AtomDiTOpenFold3(_LocalAtomDiT):
@@ -913,7 +916,7 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     #: cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the pair bias launched beside atom_pre_tf32 as its
     #: programmatic dependent (local_bias_fwd_f32_early; <= 6144 rows, 16384 with a shared conditioning); the fused TF32 kernels stream their weights from several lanes and
     #: before the grid-dependency wait (the same bits)
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4, "cuda:b200_sm100": 27}
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4, "cuda:b200_sm100": 28}  # 28 (2026-11-23): as AtomDiTProtenix 28 (the slid tail on the tensor cores)
     #: 2026-11-17: cuda:b200_sm100 5: as AtomDiTProtenix 5 (the slid window's padding-only query windows)
     #: 2026-11-17: cuda:b200_sm100 6: as AtomDiTProtenix 6 (the pair bias by its own launch at eight CTAs an SM)
     #: 2026-11-17: cuda:b200_sm100 7: as AtomDiTProtenix 7 (the fused TF32 kernels in quarter units at few tiles)
@@ -1009,7 +1012,7 @@ class AtomDiTBoltz2(VariantAtomCuda, _LocalAtomDiT):
     #: cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the pair bias launched beside atom_pre_tf32 as its
     #: programmatic dependent (local_bias_fwd_f32_early; <= 6144 rows, 16384 with a shared conditioning); the fused TF32 kernels stream their weights from several lanes and
     #: before the grid-dependency wait (the same bits)
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 5, "cuda:b200_sm100": 27}
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 5, "cuda:b200_sm100": 28}  # 28 (2026-11-23): as AtomDiTProtenix 28 (the slid-window tail on the tensor cores; reached with key_window='slide')
     # cuda:b200_sm100 7 (2026-11-17, round 3 part 5, r3-local-dit): as AtomDiTProtenix 7 (fp32 inference: the fused TF32 kernels in quarter units)
     # cuda:b200_sm100 6 (2026-11-17, round 3 part 4, r3-local-dit): the stand-alone bf16 pair bias at eight CTAs an SM (lbias.cu)
     # cuda:b200_sm100 5 (2026-11-17, round 3, r3-local-dit): as AtomDiTProtenix 5 (the slid window's padding-only query windows)
@@ -1101,7 +1104,7 @@ class AtomDiTRoseTTAFold3(VariantAtomCuda, _LocalAtomDiT):
     #: cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the pair bias launched beside atom_pre_tf32 as its
     #: programmatic dependent (local_bias_fwd_f32_early; <= 6144 rows, 16384 with a shared conditioning); the fused TF32 kernels stream their weights from several lanes and
     #: before the grid-dependency wait (the same bits)
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 5, "cuda:b200_sm100": 27}
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 5, "cuda:b200_sm100": 28}  # 28 (2026-11-23): as AtomDiTProtenix 28 (the slid-window tail on the tensor cores; reached with key_window='slide')
     # cuda:b200_sm100 7 (2026-11-17, round 3 part 5, r3-local-dit): as AtomDiTProtenix 7 (fp32 inference: the fused TF32 kernels in quarter units)
     # cuda:b200_sm100 6 (2026-11-17, round 3 part 4, r3-local-dit): the stand-alone bf16 pair bias at eight CTAs an SM (lbias.cu)
     # cuda:b200_sm100 5 (2026-11-17, round 3, r3-local-dit): as AtomDiTProtenix 5 (the slid window's padding-only query windows)
@@ -1140,7 +1143,7 @@ class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
     #: cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the pair bias launched beside atom_pre_tf32 as its
     #: programmatic dependent (local_bias_fwd_f32_early; <= 6144 rows, 16384 with a shared conditioning); the fused TF32 kernels stream their weights from several lanes and
     #: before the grid-dependency wait (the same bits)
-    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4, "cuda:b200_sm100": 27}
+    backend_versions: ClassVar[dict[str, int]] = {**_LocalAtomDiT.backend_versions, "cuda:h100_sm90": 4, "cuda:b200_sm100": 28}  # 28 (2026-11-23): as AtomDiTProtenix 28 (the slid-window tail on the tensor cores; reached with key_window='slide')
     # cuda:b200_sm100 7 (2026-11-17, round 3 part 5, r3-local-dit): as AtomDiTProtenix 7 (fp32 inference: the fused TF32 kernels in quarter units)
     # cuda:b200_sm100 6 (2026-11-17, round 3 part 4, r3-local-dit): the stand-alone bf16 pair bias at eight CTAs an SM (lbias.cu)
     # cuda:b200_sm100 5 (2026-11-17, round 3, r3-local-dit): as AtomDiTProtenix 5 (the slid window's padding-only query windows)

@@ -47,25 +47,28 @@ __device__ __forceinline__ int slide_nreal(const uint8_t* __restrict__ km, int N
 __device__ __forceinline__ bool slide_moved(int w, int nr) {
   return nr > 0 && (w < 2 || 32 * w + 80 > nr);
 }
-// the edge CTAs' group g: its first window wf (query rows 32 wf ..) and key start kb; false when the group has no window. Group 1 holds
-// the moved windows wf .. wf + 3 (wf = max(2, last - 2): the moved real windows and the first padding ones); the windows from
-// slide_tail0 on (padding queries only) are ltail.cu's.
-__device__ __forceinline__ bool slide_group(int g, int nr, int& wf, int& kb) {
+// The edge groups (2026-11-23: the TAIL on the tensor cores). Group 0 holds windows 0 and 1 (keys [0, 128)); group 1 the moved windows
+// wf1 .. wf1 + 3 (wf1 = max(2, last - 2), last = the last window holding a real atom: the moved real windows and the first padding ones);
+// the TAIL (every window of padding queries past them) reads group 1's slid keys [kb, kb + 128) too, so it is more groups of the same
+// shape: group g >= 1 holds the windows wf1 + 4 (g - 1) .. + 3, and every group runs the kernel's own tcgen05 edge program (before: the
+// tail ran on CUDA cores in the one group-1 CTA per head, ~114 ms of dQ + dK / dV at N = 4096, 2,048 real atoms, 48 samples).
+// The launch carries slide_ngroups(nwin) groups (the most any n_real needs: wf1 >= 2); a group without a window returns at once (n_real is
+// a device value, so the grid cannot follow it: CUDA-graph capturable, a replay with another mask is right).
+__host__ __device__ __forceinline__ constexpr int slide_ngroups(int nwin) { return 1 + (nwin + 1) / 4; }
+// group g's first window wf and key start kb; false when the group has no window (group 1 always has one when n_real > 0)
+__device__ __forceinline__ bool slide_group_x(int g, int nr, int nwin, int& wf, int& kb) {
   wf = 0;
   kb = 0;
   if (nr <= 0) return false;
   if (g == 0) return true;
-  const int last = (nr - 1) >> 5;
-  wf = max(2, last - 2);
+  wf = max(2, ((nr - 1) >> 5) - 2) + 4 * (g - 1);
   kb = max(nr - 128, 0);
-  return true;
+  return g == 1 || wf < nwin;
 }
-// the first window of the slid TAIL (moved windows past group 1's four: padding queries only; ltail.cu runs them over the keys
-// [max(n_real - 128, 0), ..)); nwin when nr <= 0
-__device__ __forceinline__ int slide_tail0(int nr, int nwin) {
-  return nr <= 0 ? nwin : max(2, ((nr - 1) >> 5) - 2) + 4;
-}
-// window w belongs to group g's edge CTA
-__device__ __forceinline__ bool slide_mine(int g, int w, int nr) {
-  return slide_moved(w, nr) && (g == 0 ? w < 2 : (w >= 2 && w < slide_tail0(nr, 1 << 30)));
+// window w belongs to group g's edge CTA (every moved window has exactly one group)
+__device__ __forceinline__ bool slide_mine_x(int g, int w, int nr) {
+  if (!slide_moved(w, nr)) return false;
+  if (g == 0) return w < 2;
+  const int wf = max(2, ((nr - 1) >> 5) - 2) + 4 * (g - 1);
+  return w >= 2 && w >= wf && w < wf + 4;
 }

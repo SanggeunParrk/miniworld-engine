@@ -1282,6 +1282,122 @@ judge = max|y - y64| / max|y64|, tol = max(err_pytorch, 8e-3), rms_rel = ||y - y
 - Atom DiT: the shared-conditioning gate holds; every shared case wins with pre + post (0.895-0.968), pre only (0.943-0.992), post only
   (0.911-0.989); no case needs a new gate.
 
+## Token DiT / atom DiT FP8 in graphs captured without `static_weights()` (H100, 2026-11-23)
+
+Reported by the paper harness (Slurm 65634-65636): token DiT FP8 0.73x of the default (0.57x at 256 tokens, 0.82x at 1,024, 0.94x at 2,048).
+Reproduced and fixed on branch `fp8-h100-tokendit` (base `integ-ladder` b21c7152f).
+
+**Cause.** A CUDA graph captured without `static_weights()` records the weight-pack kernels and remakes every pack at every replay (`_capture.py`).
+The default route pays that for its bf16 packs (36 us at 256 tokens); the FP8 route paid it for four e4m3 forms (`qkvg`, `out`, `squeeze`,
+`expand`: ~7 torch ops each, +110 us per block call) although `safe` reads only `expand`. Per-kernel profile (`td_profile.py`, TokenDiTProtenix L256 S5,
+graph replay, one block): default 16 kernels / 133 us kernel sum; FP8 44 kernels / 240 us: 7 `direct_copy` 42 us, 4 `BinaryFunctor` 22 us, 4 `reduce`
+17 us, 4 `abs` 14 us, 4 `ConvertToFloat8E4M3` 13 us, 4 `clamp` 5 us, 4 `BUnaryFunctor` 5 us (weight quantization), against the e4m3 expand
+kernel saving 2.7 us (12.1 -> 9.4 us) and the quantizing resgate pass costing +0.9 us. Under `static_weights()` both routes are 10 kernels and FP8 is
+1.02-1.03x. No quantize / amax pass on the activations, no lazy-guard sync (the token DiT route has no guard), no launch-count problem beyond the weight pack.
+
+**Fix.** (1) `token_dit_fp8.weight_pack` builds only the placements in force (`PLACES`; `safe` = `expand`) and quantizes with one `quant_rows` pass per
+weight (`quant_weight`; `quant_weight_ref` keeps the torch-op form; scales equal to 1e-7, 0.2 % of the e4m3 values differ by one rounding tie).
+(2) `_capture.lookup(..., capture_reads_eager=True)` (the contract of `param_forms(capture_reads_eager=True)`, already used by the B200 atom DiT FP8 pack):
+with grad off a graph captured without `static_weights()` reads the e4m3 pack its eager warm-up made; token DiT `weight_pack` and the atom DiT
+`sm90_atom.f8.pack8` use it (inference-only routes: no e4m3 backward exists; weights changed after the capture are not seen by the FP8 packs of that graph,
+capture again). (3) Row gates for a graph that finds no eager pack (grad on, or no eager call before the capture): `MIN_ROWS_SCOPED` 3200,
+RoseTTAFold3 `MIN_ROWS_SCOPED_RF3` 10240 (measured with the pack remade at every replay: 0.97-0.98 at 1280 rows, 0.994-1.000 at 1920 / 2560, 1.004-1.009 from 3200;
+RoseTTAFold3 1.000 at 7680, 1.006 at 10240). (4) RoseTTAFold3 eager gate `MIN_ROWS_RF3` 1920 (0.994 at 640 rows, 1.001 at 1280, 1.011 from 1920 with every pack made once).
+The e4m3 routes stay opt-in (default OFF), default route and versions unchanged.
+
+**Protocol.** `benchmarks/paper/E4_fp8/fp8_pair.py --config cfg_tokendit.yaml` (`td_h100.sbatch`): registry TokenDiT rows, eval, `master` dtype (bf16 activations;
+the float32 rows decline the route), S in {1, 5}, L 128 .. 2048; per case two copies of the module (`cuda`, `engine-fp8` = safe), two eager calls, then 6 rounds
+alternating (order flips), each one `speed.measure` (CUDA graph, 256 MB L2 flush, warmup 5, median of 20 replays); ratio = default time / FP8 time (> 1 = FP8 faster).
+`--static-weights` captures under `static_weights()`. `*` = the route did not fire (default kernels both sides; ratio 1 +- 0.005 is the noise).
+
+| case (S5) | | L128 | L256 | L512 | L1024 | L2048 |
+|---|---|---|---|---|---|---|
+| Protenix d_pair 128 | before | 0.673 | 0.778 | 0.644 | 0.786 | 0.914 |
+| | after | 1.029 | 1.037 | 1.028 | 1.030 | 1.020 |
+| Protenix d_pair 256 | before | 0.494 | 0.547 | 0.670 | 0.820 | 0.937 |
+| | after | 1.014 | 1.012 | 1.023 | 1.022 | 1.019 |
+| Chai-1 | before | 0.439 | 0.500 | 0.636 | 0.801 | 0.934 |
+| | after | 0.999 | 1.017 | 1.024 | 1.022 | 1.018 |
+| Boltz-2 (up gate, gate 2560 rows) | before | 0.995* | 1.001* | 0.642 | 0.781 | 0.913 |
+| | after | 0.999* | 1.004* | 1.034 | 1.031 | 1.024 |
+| RoseTTAFold3 | before | 0.438 | 0.488 | 0.608 | 0.766 | 0.906 |
+| | after | 0.999* | 1.001* | 1.009 | 1.017 | 1.011 |
+
+Non-static capture, shipped gates, 67 fired cases before (all below 1.0, 0.438 .. 0.937) / 65 after (0.995 .. 1.044, median 1.018, 4 below 1.0: S1 rows at 640 rows 0.995-0.996).
+Under `static_weights()`: before 0.997 .. 1.042 (median 1.021), after 1.009 .. 1.045 (median 1.022, none below 1.0). The module gain is 1.01-1.05x, not more: only the
+expand GEMM (about a seventh of the block) is e4m3; qkvg / out / squeeze are not in `safe` (docs above: accuracy and no gain below 5120 rows).
+
+Atom DiT FP8 (shared conditioning rows; `AtomDiT*` N 1024 .. 4096, S5) had the same defect, non-static before / after: Protenix 0.349 / 0.406 / 0.517 -> 1.023 / 1.043 / 1.063,
+Protenix slide 0.450 / 0.492 / 0.584 -> 1.011 / 1.026 / 1.052, OpenFold3 0.452 / 0.498 / 0.585 -> 1.031 / 1.042 / 1.054, Chai-1 0.409 / 0.462 / 0.545 -> 1.037 / 1.042 / 1.031 (static: 1.016 .. 1.079).
+
+Error against fp64 (`td_err.py`, A5, docs' judge = max|y - y64| / max|y64|, rms_rel = ||y - y64|| / ||y64||; default bf16 route 0.0037-0.0047 / 0.0026): FP8 expand before / after, Protenix d_pair 128 L384:
+judge 0.0322 / 0.0322, rms_rel 0.021464 / 0.021462; L768 0.0266 / 0.0266, 0.021450 / 0.021449; L1536 0.0301 / 0.0305, 0.021448 / 0.021448; Chai-1 L384 0.0518 / 0.0518, 0.03734 / 0.03735;
+Boltz-2 L768 0.0510 / 0.0510, 0.02906 / 0.02906; RoseTTAFold3 L384 0.0305 / 0.0305, 0.02160 / 0.02160 (the FP8 expand error of the table above, unchanged).
+
+Other H100 FP8 routes in the same harness (non-static, shipped gates, `cfg_other.yaml`): Transition 40 fired cases 1.064 .. 1.723 (median 1.39; the 0.985-0.993 cells are S1 tiny blocks,
+noise); OPM / PWA never below 0.971 (the 0.971 is noise: repeated 0.98-1.00, route not served for that row); TriMul / TriAttn (`E4_h100.csv`, shipped gates, fired cases): TriMul 12 cases 1.060 .. , TriAttn 10 cases 1.053 .., none below 0.99; with every gate removed only L128 is slower (TriMul 0.970, TriAttn 0.923: the min-L gates cover them).
+
+**PWA FP8 inside a CUDA-graph capture (fixed 2026-11-23).** The PWA wide FP8 route (`pwa_fp8.forward_wide`, d_msa 64-256, N >= 256) failed the
+capture of the harness (20 of 28 PWA cases: `cudaErrorStreamCaptureUnsupported`, then `...Invalidated`; the default route captured fine). Cause: the
+default guard `MINIWORLD_PWA_FP8_GUARD=sync` calls `take_overflow()` (`.item()`, a host sync) after every call, also inside a capture; the tests
+set `GUARD="lazy"` and never saw it. The native-width `forward` had the same check. Fix: a call inside a capture takes the lazy form
+(`GUARD != "sync" or torch.cuda.is_current_stream_capturing()`), as the OPM / TriMul / Transition FP8 routes already do; eager calls keep the sync
+guard. Tests: `test_graph_capture_with_sync_guard` (native 8 x 32; wide 64 x 8, 128 x 16, BIG 256 x 32) capture with the sync guard, replay = eager.
+After (same harness, `cfg_other.yaml`, `--module MSAPairWeightedAveraging`, non-static, shipped gates, rows 48-54, L 128 .. 2048): 56 of 56 cases captured,
+47 fired 1.000 .. 1.424 (D384 r49 1.150 .. 1.319 from L512; D1024 1.000 .. 1.424, rising with L), 9 not fired 0.993 .. 1.009 (noise).
+
+**Protenix v1 non-finite coordinates with `MINIWORLD_FP8=safe` (fixed 2026-11-23, a8ddeaac5).** F3 protenix1 `engine_fp8`: non-finite coordinates at
+every n (Slurm 65944); the 3.0.9 release and b21c7152f were fine, fae47745a (the `quant_rows` weight pack above) and later failed; the same tree with
+the weight quantised by `quant_weight_ref` was fine. Cause: Protenix v1's token DiT expand weights carry 30-875 dead output rows per block with
+max |w| ~5e-37 (AF3: none). `token_dit_fp8_rows.cu` took the row scale as `amax / 448` = ~1.4e-39 (subnormal), `1 / scale` = inf and the row's zeros
+became `0 * inf = NaN` in the e4m3 bytes (weight scan: 5 Protenix v1 packs with NaN, 0 for AF3). Fix: both row-scale sites of `token_dit_fp8_rows.cu`
+(`quant_rows` and the adaln / resgate activation pass) take `fmaxf(amax, 1e-30f) / 448`, the floor of `quant_weight_ref` and of the training kernels.
+Test `test_quant_rows_near_zero_rows_stay_finite` (zero rows, ~6e-37 and ~1e-38 rows: finite bytes, the reference scale, zero rows stay zero).
+F3 protenix1 FP8 after the fix (Slurm 66000): n = 1 0.343 s .. n = 16 13.20 s, FP8 / bf16 0.985 .. 0.809.
+
+**Why `qkvg` is not in `safe`: the key, not a bug (AF3, 2026-11-23).** FoldForge AF3 FoldBench (8j62, 2008 tokens, A5), every token DiT call of the
+first sampler steps compared with a float64 copy of the block (`~/miniworld-engine-scratch/td-qkvg-diag/diag.py`, raw `vg1.jsonl`, 49 calls; upd =
+rms of the update error / rms of the update): default bf16 0.0092 median (0.0417 max), `expand` 0.0245 (0.0552), `qkvg` 0.0254 (**0.1049**).
+Decomposition by emulating the e4m3 rounding of one operand at a time (`diag2.py`, raw `d2.jsonl`, 60 calls, block output rms error): default 0.0106,
+qkvg kernel 0.0511, emulation of all 0.0505; weights only 0.0113, the activation rows only 0.0495; per projection q 0.0097, **k 0.0489**, v 0.0083,
+g 0.0057. The kernel matches its emulation (no kernel bug); the error is the e4m3 rounding of the rows that make the keys, amplified by the logits:
+|q k| max per call 28 .. 2442 (median 284), so a relative key error of ~2^-4 moves the softmax. This is the placement that moved FoldBench
+(lDDT drop, "fp8safe" history above).
+`v | g` only in e4m3 (`vg`, q | k bf16; patch `~/miniworld-engine-scratch/fp8-h100-tokendit-records/vg_experiment.patch`, not merged): accurate
+(upd 0.0181 median, 0.0438 max) but slower: the module time against the default (`speed.py`, CUDA graph, cool / sustained, 5:512 .. 5:2048) is
+1.141 .. 1.160 for `vg` and 1.091 .. 1.112 for `vg + expand`, against 0.955 .. 0.965 for `expand` and 0.934 .. 0.954 for `qkvg + expand`. One q | k | v | g
+GEMM becomes two (bf16 q | k into a strided slice: M 5120 34.0 us against 22.2 us contiguous; e4m3 g | v 19.8 us; whole bf16 qkvg 41.8 us), so splitting
+costs more than the e4m3 half saves.
+
+**Eager runs: host time of the FP8 diffusion routes, and the sync guard (2026-11-23, 4a143d10c).** FoldForge F4 (FoldBench 27, eager, 200 steps,
+`MINIWORLD_FP8=safe`) had FP8 6-16 % slower than bf16 below ~1000 tokens (AF3 28 tokens 2.76 -> 3.00 s) and the 27-target sums at 0.92 .. 1.03.
+Two causes, separated on AF3 (`~/foldforge-scratch/paper_recheck_20261123/f4diag`): (1) F4's `FFPAPER_FP8_GUARD=sync`: a host read of the overflow
+flag after every trunk FP8 call, 0.1-0.35 s per forward (628 tokens: sync 3.71 s, lazy 3.36 s, bf16 3.27 s); FoldForge's F4 runner already calls
+`fp8.check()` after every forward and redoes a saturated one, so the lazy guard keeps the contract (FoldForge 13729ed makes it F4's default).
+(2) Small eager forwards are host-bound (28 tokens: 0.85 s of kernel time in a 2.8 s forward) and the FP8 diffusion routes added host work per call:
+token DiT ~12 us x 9600 calls (`weight_pack`: `get_device_capability` 2.2 us, the scoped lookup ~4 us, `_f8_wab`'s tiling lookup before it),
+atom DiT ~25 us x 2400 calls (`pack8`: a second `pack` lookup and a 27-tensor key). Route switches off one at a time (lazy guard, 28 / 628 / 992
+tokens): all routes 2.981 / 3.356 / 4.741 s, token DiT off 2.858 / 3.190 / 4.564, atom DiT off 2.920 / 3.261 / 4.664, Transition off 2.952 / 3.326 / 4.767,
+trunk routes only 2.796 / 3.158 / 4.521 (bf16 2.790 / 3.269 / 4.967). Fix (outputs unchanged): `weight_pack` caches the sm_90 check per device,
+serves an eager hit straight from the eager entry (what `lookup` serves outside a capture), and takes the expand tiling as a callable made only with
+the pack; `local_dit_h100` keeps an eager call's e4m3 pack in the bf16 pack entry of the same weights (`_pack8_on`; captures keep `pack8`'s rules).
+Tests `test_eager_hit_skips_the_lookup_and_the_expand_tiling`, `test_fp8_pack_rides_on_the_eager_bf16_pack`. AF3, lazy guard, 3 repetitions,
+FP8 / bf16: 28 tokens 1.066 -> 1.035, 628 1.020 -> 0.987, 992 0.945 -> 0.929.
+F4 re-run with both (engine 4a143d10c, lazy guard; bf16 arm of the same campaign), 27-target sums FP8 / bf16 before -> after: AF3 0.998 -> 0.951,
+Boltz-2 1.008 -> 0.961, Chai-1 0.987 -> 0.948, IntelliFold2 0.954 -> 0.936, OpenDDE 0.922 -> 0.892, OpenFold3 0.983 -> 0.953, OpenFold3-preview2
+1.026 -> 0.982, Protenix v1 1.001 -> 0.962, Protenix v2 0.971 -> 0.935, RoseTTAFold3 0.982 -> 0.954 (Protenix v1 / RoseTTAFold3: 4 cells re-measured;
+in the campaign their warm forward was 2-3x the cold one while other jobs loaded node01, re-measured on node01 both arms 0.87 .. 1.04). Left: the
+smallest targets (<= 300 tokens) stay 2-7 % slower in eager (host time with no e4m3 gain there); CUDA-graph runs (F3) do not see it.
+Accuracy of that F4 re-run against the experimental structures (FoldForge F5 (b) evaluator: OpenStructure + DockQ v2, CPU; FP8 arm against the bf16
+arm of the same campaign, `collect.py --reference engine`; one trunk seed, 5 samples, 27 targets, 10 predictors; raw
+`~/foldforge-scratch/paper_recheck_20261123/F5x/F5x_h100_gt.csv`): mean FP8 - bf16 interface DockQ -0.0009 (180 keys, 0.9056 inside bf16's s.d. over its
+5 samples), ligand lDDT-PLI +0.0006 (40, 0.95), monomer lDDT -0.0068 (90, 0.744); all keys median |diff| 0.0046, r 0.990. Per predictor and kind every
+mean is within +-0.016 except AF3 interfaces +0.046 and **OpenDDE monomers -0.037** (8 of 9 outside bf16's s.d.: DNA -0.012 .. -0.060, protein
+-0.014 .. -0.021, RNA -0.043 .. -0.083). RNA monomer 7sxp (161 nt) drops for several predictors (AF3 -0.082, OpenDDE -0.083, Protenix v2 -0.080; bf16
+s.d. 0.011-0.022). Largest interface drops: Protenix v2 8gjg A|B -0.21 (s.d. 0.08), antibody-antigen 8b7h -0.12 .. -0.13 (Protenix v1, Chai-1; s.d.
+0.18-0.29). One seed per arm: these are indications, not the seed-controlled verdict of F11 (AF3 antibody-antigen there: a precision loss from the trunk
+pair Transition, protein-RNA inside the between-seed spread). The 4a143d10c fix does not change outputs, so the scores are those of the FP8 route.
+
 ## Release line 3.0.0: verification (branch `rel/3.0.0`, 2026-11-17)
 
 - Merge: 2.5.14 (9dd18e507) + `fp8/3.0.0-all` (e5ce31d0c). One conflict (`h100_b200style._contract`: 2.5.13's `table` argument and FP8's

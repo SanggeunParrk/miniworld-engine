@@ -50,7 +50,8 @@ ENABLED = _fp8_env("MINIWORLD_PWA_FP8") == "1"
 #: ``declined`` = calls the route is on for but whose shape gate (:func:`serves` / :func:`serves_wide`) sent to the bf16 route.
 STATS = {"calls": 0, "wide_calls": 0, "retries": 0, "declined": 0}
 #: "sync" (default): a saturating call raises the scale (x RESCALE) and redoes itself (one host sync per call); "lazy": no host sync
-#: (required with CUDA graphs) -- the caller runs ``take_overflow()`` / ``rescale_all()`` / redo once per forward, outside the graph
+#: (required with CUDA graphs) -- the caller runs ``take_overflow()`` / ``rescale_all()`` / redo once per forward, outside the graph.
+#: A call inside a CUDA-graph capture always takes the lazy form (no host sync can be captured), as the OPM / TriMul / Transition FP8 routes
 GUARD = os.environ.get("MINIWORLD_PWA_FP8_GUARD", "sync")
 HEADROOM = float(os.environ.get("MINIWORLD_PWA_FP8_HEADROOM", "16"))
 #: shortest N served (below it the bf16 route runs; measured on 2.5.12: N256 +8 %, N384 -5 % at S1024); 0 = no gate
@@ -249,7 +250,7 @@ def forward(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16):
         contract(wq, vt, o, _VS[key], ws)
         del vt
         out = gate.pwa_gateout(o, y, wg16, wo16, m, 1, 4, None, 1.0)
-        if GUARD != "sync" or not take_overflow():
+        if GUARD != "sync" or torch.cuda.is_current_stream_capturing() or not take_overflow():
             break
         STATS["retries"] += 1
         rescale_all()
@@ -316,7 +317,7 @@ def forward_wide(m, key_tensor, lnm_w, lnm_b, wv16, wg16, wo16, eps_m, w16, kv):
             out = kv.out_w(a, m, wo16, None, 1.0)
         else:
             out = kv.gate_out_w(o, m, m, wg16, wo16, None, 1.0, lnm_w, lnm_b, eps_m)
-        if GUARD != "sync" or not take_overflow():
+        if GUARD != "sync" or torch.cuda.is_current_stream_capturing() or not take_overflow():
             break
         STATS["retries"] += 1
         rescale_all()

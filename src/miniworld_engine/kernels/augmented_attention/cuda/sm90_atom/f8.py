@@ -111,7 +111,8 @@ def pack8(weights) -> dict:
             "bs": p["bs"],
         }
 
-    return _capture.param_forms("sm90_atom_pack_f8", list(weights), build)
+    # inference only (the route declines a saving forward): a graph captured with grad off reads the entry its eager warm-up made (as the B200 atom DiT FP8 pack)
+    return _capture.param_forms("sm90_atom_pack_f8", list(weights), build, capture_reads_eager=not torch.is_grad_enabled())
 
 
 def _split_for(tiles: int, choices: tuple = (1, 2, 4, 8)) -> int:

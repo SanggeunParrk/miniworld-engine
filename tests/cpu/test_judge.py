@@ -255,6 +255,16 @@ def test_kit_stack_records_are_told_by_the_cuda_13_torch_or_driver_library():
     assert cfgmod.on_kit_stack({"cuda": "12.9", "cuda_driver": "13.0"})
     assert not cfgmod.on_kit_stack({"cuda": "12.9", "cuda_driver": "12.8"})
     assert not cfgmod.on_kit_stack({"cuda": "12.9"})  # a record made before ``cuda_driver`` was recorded
+    # the A100's kit stack is the engine env under the compat libcuda: told by the driver library
+    assert cfgmod.on_kit_stack({"cuda": "12.9", "cuda_driver": "13.0"}, "a100_sm80")
+    assert not cfgmod.on_kit_stack({"cuda": "12.9", "cuda_driver": "12.8"}, "a100_sm80")
+    # the B200 host's own driver is CUDA 13: an engine (cu129) record there is NOT a kit-stack record; its kit venv (cu130) is
+    assert not cfgmod.on_kit_stack({"cuda": "12.9", "cuda_driver": "13.1"}, "b200_sm100")
+    assert cfgmod.on_kit_stack({"cuda": "13.0", "cuda_driver": "13.1"}, "b200_sm100")
+    # the H100 kit stack is the cu130 container; the RTX 5090 has none (native CUDA-13 driver)
+    assert not cfgmod.on_kit_stack({"cuda": "12.9", "cuda_driver": "13.0"}, "h100_sm90")
+    assert cfgmod.on_kit_stack({"cuda": "13.0"}, "h100_sm90")
+    assert not cfgmod.on_kit_stack({"cuda": "12.9", "cuda_driver": "13.0"}, "5090_sm120")
     assert cfgmod.kit_stack("a100_sm80", "anthropic") and cfgmod.kit_stack("h100_sm90", "anthropic")
     assert not cfgmod.kit_stack("a100_sm80", "cuda")
     assert cfgmod.kit_stack_env("a100_sm80") == {} and cfgmod.kit_stack_env("h100_sm90") == cfgmod.KIT_STACK_ENV

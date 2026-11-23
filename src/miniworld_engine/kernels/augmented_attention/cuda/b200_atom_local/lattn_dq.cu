@@ -104,7 +104,6 @@ void local_attn_dq_sm90(const __grid_constant__ CUtensorMap mq,
 // SPDX-License-Identifier: Apache-2.0
 #include "../sm100/sm100.cuh"
 #include "slide.cuh"
-#include "ltail.cuh"
 using namespace s100;
 
 constexpr int NH = 4, DH = 32, WQ = 32, WK = 128, KOFF = 48, QN = 128, KN = 224, NST = 3;
@@ -136,14 +135,14 @@ local_attn_dq(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ 
   uint32_t* tptr = reinterpret_cast<uint32_t*>(sm + O_BAR + 128);
   float* sbias = reinterpret_cast<float*>(sm + O_B);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int nmain = (int)gridDim.x - 2 * NH * SPE;                  // the slid window's edge CTAs come last (slide.cuh; SPE = 0: none)
+  const int nmain = (int)gridDim.x - slide_ngroups(nwin) * NH * SPE;   // the slid window's edge CTAs come last (slide.cuh; SPE = 0: none)
   const bool edge = (int)blockIdx.x >= nmain;
   const int sp = edge ? SPE : SP, bx = (int)blockIdx.x - (edge ? nmain : 0);
   const int pair = bx / sp, part = bx - pair * sp;
   const int jc = pair >> 2, h = pair & 3;                            // (an edge CTA: jc = its group)
   const int nr = SPE > 0 ? slide_nreal(kmask, N, sred, QB) : N;
   int wf = 0, kbe = 0;
-  const bool live = !edge || slide_group(jc, nr, wf, kbe);
+  const bool live = !edge || slide_group_x(jc, nr, nwin, wf, kbe);
   const int q0 = edge ? 32 * wf : 128 * jc, kb = edge ? kbe : q0 - KOFF;
   const int a_lo = (int)((long)A * part / sp), a_hi = (int)((long)A * (part + 1) / sp);
   const int nit = live ? a_hi - a_lo : 0;
@@ -159,7 +158,7 @@ local_attn_dq(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ 
   const int qd = warp & 3, qt = warp >> 2;
   const int wq = (q0 >> 5) + qd;                                     // this quadrant's window; lane = query qq of it
   const int qdb = edge ? 0 : qd;                                     // the window's first band cell (an edge CTA: its keys start the range)
-  const bool keep = SPE == 0 || (edge ? wq < nwin && slide_mine(jc, wq, nr) : !slide_moved(wq, nr));   // this CTA writes the window's dQ
+  const bool keep = SPE == 0 || (edge ? wq < nwin && slide_mine_x(jc, wq, nr) : !slide_moved(wq, nr));   // this CTA writes the window's dQ
   if (!ctl) {                                                                  // lane = key offset jj (coalesced rows of the bias), loop over the queries
     const int key = kb + 32 * qdb + 32 * qt + lane;
     const bool kok = key >= 0 && key < N && (kmask == nullptr || kmask[key]);
@@ -294,7 +293,5 @@ local_attn_dq(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ 
   if (lane == 0) tma_store_wait0();
   tc_fence_before(); __syncthreads(); tc_fence_after();
   if (warp == 0) tmem_dealloc(tm, 512);
-  if (SPE > 0 && edge && jc == 1 && live)                            // the slid window's tail windows (ltail.cuh)
-    ltail::tail_dq(qp, kp, vp, dop, lsep, ddp, gbias, kmask, dqp, nr, N, nwin, h, a_lo, a_hi, 128L, (long)N * 128, 128L, (long)N * 128, ldq, reinterpret_cast<float*>(sm));
 }
 #endif
