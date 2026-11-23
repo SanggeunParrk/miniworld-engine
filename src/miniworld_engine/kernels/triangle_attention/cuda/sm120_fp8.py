@@ -20,6 +20,7 @@ by ``fp8.check()`` outside the graph, the scale is widened in place so captured 
 from __future__ import annotations
 
 import functools
+import hashlib
 import os
 import weakref
 from pathlib import Path
@@ -55,10 +56,12 @@ def __getattr__(name):
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
+    defs = os.environ.get("MW_F8_DEFS", "").split()  # experiment macros (-DRF8_ST=3, ...): never set in production
+    tag = "" if not defs else "_" + hashlib.md5(" ".join(defs).encode()).hexdigest()[:6]
     return load_extension(
-        name="triattn_sm120_f8",
+        name="triattn_sm120_f8" + tag,
         sources=[str(_SRC / "triattn_f8_ops.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *_arch.gencode(), f"-I{_SRC}"]
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *_arch.gencode(), f"-I{_SRC}", *defs]
         + (["-Xptxas", "-v"] if os.environ.get("MW_F8_PTXAS") else []),
         extra_cflags=["-std=c++17", "-O3"],
         verbose=bool(os.environ.get("MW_F8_PTXAS")),
