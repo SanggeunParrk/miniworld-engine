@@ -44,6 +44,7 @@ def _parse(argv):
         "--model", default="af3", help="the model whose TriAttn FP8 routes engine-fp8 runs (miniworld_engine.fp8.TRIATTN_MODELS)"
     )
     p.add_argument("--rounds", type=int, default=ROUNDS)
+    p.add_argument("--static-weights", action="store_true", help="capture under miniworld_engine.capture.static_weights() (a served inference graph: weight packs made once)")
     p.add_argument("--budget-seconds", type=float, default=0.0)
     cfgmod.add_selection_args(p)
     return p.parse_args(argv)
@@ -73,6 +74,7 @@ def main(argv=None) -> int:
     if args.gates == "none":
         os.environ["MINIWORLD_TRIMUL_FP8_MINL"] = "0"  # before the first import of the kernels
         os.environ["MINIWORLD_TRIATTN_B200_FP8_MINS"] = "0"  # the B200 TriAttn gate (a no-op on every other card)
+        os.environ.setdefault("MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS", "0")  # the token DiT row gates
     import torch
     from paper_common import cfg as cfgmod
     from paper_common import provenance
@@ -106,6 +108,10 @@ def main(argv=None) -> int:
         except Exception as exc:  # recorded in the sidecar: the TriAttn gates could not be cleared on this card
             meta["triattn_gates_not_cleared"] = f"{type(exc).__name__}: {exc}"
             Path(f"{out}.meta.json").write_text(json.dumps(meta, indent=1, default=str))
+    if args.static_weights:
+        from miniworld_engine.kernels import _capture
+
+        _capture.set_static_weights(True)
     fp8.set_model(args.model)
     dev = torch.device(cfg.device)
     speed_cfg = config.speed_settings(cfg)
@@ -121,7 +127,7 @@ def main(argv=None) -> int:
                 finished = False
                 print("[fp8] budget used up", flush=True)
                 break
-            rec = {**config.describe(case, cfg), "gates": args.gates, "model": args.model, "meta": {"env": config.environment()}}
+            rec = {**config.describe(case, cfg), "static_weights": args.static_weights, "gates": args.gates, "model": args.model, "meta": {"env": config.environment()}}
             try:
                 base = config.build(case, device=dev)
                 with unpadded_masks():
@@ -155,7 +161,13 @@ def main(argv=None) -> int:
                 fired = {
                     "trimul": eager_stats["trimul"]["calls"] > 0,
                     "triattn": any(v > 0 for k, v in eager_stats["triattn"].items() if k.startswith("pv") or k == "qk"),
+                    "token_dit": eager_stats["token_dit"]["calls"] > 0,
+                    "atom_dit": eager_stats["atom_dit"]["calls"] > 0,
+                    "transition": eager_stats["transition"]["calls"] > 0,
                 }
+                own = {"TriangleMultiplication": "trimul", "TriangleAttention": "triattn"}.get(
+                    case.module, "token_dit" if case.module.startswith("TokenDiT") else "atom_dit" if case.module.startswith("AtomDiT") else "transition"
+                )
                 rec.update(
                     status="ok",
                     ms=dict(ms),
@@ -163,8 +175,8 @@ def main(argv=None) -> int:
                     saturated_calibration=sat0,
                     saturated_replay=sat1,
                     routes_fired=fired,
-                    fp8_route_fired=fired["trimul"] if case.module == "TriangleMultiplication" else fired["triattn"],
-                    route_stats={k: v for k, v in eager_stats.items() if k in ("trimul", "triattn")},
+                    fp8_route_fired=fired[own],
+                    route_stats={k: v for k, v in eager_stats.items() if k in ("trimul", "triattn", "token_dit", "atom_dit", "transition")},
                 )
             except Exception as exc:  # recorded, never re-routed
                 oom = isinstance(exc, torch.cuda.OutOfMemoryError)
