@@ -131,6 +131,10 @@ def prebuild(target, rows):
         yield ft.partial(b200_fp8._f8, ("-DTF_D=64", "-DTF_Q8=1"))  # (the 64-channel-head form: built by the prebuild, gate closed)
     elif target.arch in ("sm80", "sm120"):  # the 5090 builds the same sources for sm_120a (sm80_arch)
         yield from _sm80(rows)
+        if target.arch == "sm120":
+            from . import sm120_fp8
+
+            yield sm120_fp8._ext  # the opt-in e4m3 core of the RTX 5090 (docs/fp8.md "RTX 5090": sm120_fp8.route, off unless fp8.enable_triattn): no JIT on its first call
 
 
 #: the classes whose A100 calls (some or all) take the variant path (AF3 bias orientation, projection biases, Chai-1 output layouts)

@@ -44,7 +44,7 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n, fp8=True):
     return None
 
 
-def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
+def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps, fp8=True):
     """The sm_80 (A100) Transition dispatch of ``modules.Transition``'s ``cuda`` backend: ``x + transition(x)`` from ``fused_sm80`` (D = 128 /
     hidden 512, whole 256-row tiles, at least ``fused_wide_sm80.FUSED_MIN_ROWS`` rows: one forward kernel, a two-kernel backward) or else
     ``fused_wide_sm80`` (D in ``fused_wide_sm80.WIDTHS``, hidden a multiple of 64, any row count), or ``None`` when neither takes the call
@@ -65,6 +65,11 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps):
     rows = x.numel() // x.shape[-1] if x.dim() else 0
     limit = fused_fwd_sm80.max_rows(x.device, x.dtype)
     grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, ln_weight, ln_bias, wa, wb, ws))
+    if fp8 and not grad and x.dtype is torch.bfloat16:  # the strictly opt-in RTX 5090 e4m3 route (MINIWORLD_TRANSITION_FP8_SM120, not in a preset; off by default)
+        from . import fp8_sm120
+
+        if fp8_sm120.POLICY is not None and fp8_sm120.serves(x, wa, ws):
+            return fp8_sm120.inference(x, ln_weight, ln_bias, wa, wb, ws, eps)
     if x.dtype is torch.bfloat16 and not grad and is_sm120(x.device) and not fused_fwd_sm80.supports(x.shape[-1], wa.shape[0]):
         # RTX 5090 inference of the wide chain (D 256 and up; the D 64 / 128 one-kernel forward takes any row count in one launch): no call past the rows the 64-row tile
         # configs take (fused_wide_sm80._rows64_ok): a 4 M-row call (L 2048 pair) ran the 128-row tiles, 8-10 % slower
@@ -325,3 +330,8 @@ def prebuild(target, rows):
             yield fused_fwd_sm80._ext_sm120
         if any((d, d * n) in fused_fwd_sm80.SHAPES and "train" in modes for (d, n), modes in served.items()):
             yield fused_bwd_sm80._ext_sm120
+        # the strictly opt-in e4m3 inference forward (fp8_sm120, MINIWORLD_TRANSITION_FP8_SM120; docs/fp8.md "RTX 5090"): one extension, every (D, H) it serves
+        from . import fp8_sm120
+
+        if any((d, d * n) in fp8_sm120.SHAPES and "eval" in modes for (d, n), modes in served.items()):
+            yield fp8_sm120._ext
