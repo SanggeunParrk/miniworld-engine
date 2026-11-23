@@ -88,13 +88,14 @@ class Rig:
 
 
 def err(y, gold, x):
-    """(update rms, update max, judge): rms(y - y64) / rms(y64 - x), max|y - y64| / max|y64 - x|, max|y - y64| / max|y64|."""
+    """(update rms, update max, judge, rms_rel): rms(y - y64) / rms(y64 - x), max|y - y64| / max|y64 - x|, max|y - y64| / max|y64|, ||y - y64|| / ||y64||."""
     d = y.double() - gold
     u = gold - x
     return (
         float(d.pow(2).mean().sqrt() / u.pow(2).mean().sqrt()),
         float(d.abs().max() / u.abs().max()),
         float(d.abs().max() / gold.abs().max()),
+        float(d.pow(2).sum().sqrt() / gold.pow(2).sum().sqrt()),
     )
 
 

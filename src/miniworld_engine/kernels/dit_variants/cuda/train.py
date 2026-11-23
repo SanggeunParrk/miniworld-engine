@@ -898,6 +898,32 @@ def atom_stack_train(stack, single, cond, pair, mask, uid):
         )
         wg = blk.to_g.weight if blk.gating else empty
         wo = blk.to_out.weight if blk.project_output else empty
+        from . import atom_fp8_sm120 as _af8  # the RTX 5090 atom DiT FP8 route (opt-in: FP8_ROWS empty = the default below)
+
+        use = _af8.parts(x, tab) if _af8.FP8_ROWS else frozenset()
+        if use:
+            x = _af8.block(
+                x,
+                tab,
+                bias2,
+                widx if (slide or core) else empty,
+                keys if (slide and not core) else empty,
+                ebias,
+                tinfo if slide else empty,
+                tb,
+                blk.to_q.weight,
+                blk.to_q.bias,
+                blk.to_k.weight,
+                blk.to_v.weight,
+                wg,
+                wo,
+                (blk.expand.weight, *((blk.up.weight,) if blk.up_gate else ())),
+                blk.squeeze.weight,
+                list(qk) if blk.kq_norm else [],
+                cfg,
+                use,
+            )
+            continue
         wexp = torch.cat([blk.expand.weight, *((blk.up.weight,) if blk.up_gate else ())])
         x = _AtomBlock.apply(
             x,

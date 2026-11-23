@@ -45,7 +45,7 @@ for spec in args.cases:
             for v in variants:
                 F.PLACES = F._parse(v)
                 e.append((v, err(rig.run(scale), gold, x)))
-            print(f"  err x{scale}: " + "  ".join(f"{k} {a * 100:.2f}/{b * 100:.2f}% ({c:.1e})" for k, (a, b, c) in e), flush=True)
+            print(f"  err x{scale}: " + "  ".join(f"{k} {a * 100:.2f}/{b * 100:.2f}% ({c:.1e})" for k, (a, b, c, *_r) in e), flush=True)
             del gold, x
     gs = {}
     F.PLACES = frozenset()
