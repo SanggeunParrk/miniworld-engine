@@ -33,7 +33,9 @@ def test_quant_weight_matches_torch_reference(shape) -> None:
     # multiply by the reciprocal against a divide: a rounding tie of the e4m3 cast may fall the other way (a fraction of a percent of the values)
     assert (a8.float() != r8.float()).float().mean() < 1e-2
     deq = a8.float() * sa[:, None]
-    assert ((deq - w.float()).abs().max(1).values / w.float().abs().max(1).values).max() < 0.07  # 3 mantissa bits: half a step = 2^-4 relative
+    assert (
+        (deq - w.float()).abs().max(1).values / w.float().abs().max(1).values
+    ).max() < 0.07  # 3 mantissa bits: half a step = 2^-4 relative
 
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
