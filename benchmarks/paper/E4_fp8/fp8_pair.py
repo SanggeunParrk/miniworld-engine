@@ -73,6 +73,7 @@ def main(argv=None) -> int:
     if args.gates == "none":
         os.environ["MINIWORLD_TRIMUL_FP8_MINL"] = "0"  # before the first import of the kernels
         os.environ["MINIWORLD_TRIATTN_B200_FP8_MINS"] = "0"  # the B200 TriAttn gate (a no-op on every other card)
+        os.environ["MINIWORLD_TRIATTN_SM120_FP8_MINL"] = "0"  # the RTX 5090 e4m3 TriAttn gate (a no-op on every other card)
     import torch
     from paper_common import cfg as cfgmod
     from paper_common import provenance
