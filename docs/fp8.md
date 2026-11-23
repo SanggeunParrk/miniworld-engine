@@ -34,7 +34,7 @@ Opt-in like the H100 / B200 routes (`MINIWORLD_FP8=safe` or `backend="engine-fp8
 | d256 L512 / 768 / 1024 / 1536 | | 0.975 / 0.990 / 1.004 / 1.034 |
 | d384 L768, d512 L768 | | 1.002, 1.014 |
 
-**Model whitelist on the 5090 (checked 2026-11-23, `fp8-5090-sw`).** The route reads only the switches `fp8.enable_triattn` sets from `fp8.TRIATTN_MODELS` (`MINIWORLD_FP8_MODEL` at import, or `enable(preset, model=)` / `fp8.set_model` for `engine-fp8`): kind `fused` = the d_pair-128 / 4 x 32 site (`sm120_fp8.kind_of`), `unfused` = every other 32-channel-head width, e4m3 q / k only on `fused` and only where the table has it; no model or a model outside the table (Boltz-2, IntelliFold2, ESMFold2): nothing. The 5090 gate then keeps the calls with e4m3 q / k (L >= 640, L % 128 == 0); a whitelisted kind without q / k runs on the 5090 only with `MINIWORLD_TRIATTN_SM120_FP8_PVONLY=1`; the d64 kind (64-channel heads) has no 5090 core. Small fix: a site whose V was calibrated while q / k was not wanted (another model's switches, or `QK` off) now takes its q / k scales on its first eager call with q / k wanted (`_calibrate_qk`; not after a saturation drop). Which models get TriAttn FP8 on the 5090:
+**Model whitelist on the 5090 (checked 2026-11-23, `fp8-5090-sw`).** The route reads only the switches `fp8.enable_triattn` sets from `fp8.TRIATTN_MODELS` (`MINIWORLD_FP8_MODEL` at import, or `enable(preset, model=)` / `fp8.set_model` for `engine-fp8`): kind `fused` = the d_pair-128 / 4 x 32 site (`sm120_fp8.kind_of`), `unfused` = every other 32-channel-head width, e4m3 q / k only on `fused` and only where the table has it; no model or a model outside the table (Boltz-2, IntelliFold2, ESMFold2): nothing. The 5090 gate then keeps the calls with e4m3 q / k (L >= 640, L % 128 == 0); a whitelisted kind without q / k runs on the 5090 only with `MINIWORLD_TRIATTN_SM120_FP8_PVONLY=1`; the d64 kind (64-channel heads, Chai-1) runs its own e4m3 P / V core from L 256 (section "Chai-1 d64" below). Small fix: a site whose V was calibrated while q / k was not wanted (another model's switches, or `QK` off) now takes its q / k scales on its first eager call with q / k wanted (`_calibrate_qk`; not after a saturation drop). Which models get TriAttn FP8 on the 5090:
 
 | model | table kinds / q k | 5090, shipped gate | 5090 with `_PVONLY=1` |
 |---|---|---|---|
@@ -44,16 +44,64 @@ Opt-in like the H100 / B200 routes (`MINIWORLD_FP8=safe` or `backend="engine-fp8
 | rosettafold3 | fused / yes | fused (P / V + q / k), L >= 640 | same |
 | opendde | unfused / no | none | unfused (PV only) |
 | protenix2 | unfused / no | none (its d_pair-256 sites are unfused) | unfused (PV only) |
-| chai1 | d64 + unfused / no | none | template stack (unfused, PV only); d64 trunk never |
+| chai1 | d64 + unfused / no | d64 trunk + confidence head (P / V e4m3, q / k bf16), L >= 256 | + template stack (unfused, PV only) |
 | boltz2, intellifold2, no model | - | none | none |
 
 Test `test_model_whitelist_table` (every row above x shipped / PV-only, fused d128 and unfused d256 sites, counters `pv_front` / `qk`), `test_env_model_at_import` (fresh processes: `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=af3` fires q / k at L640; boltz2, no model, model without preset: nothing), `test_late_qk_calibration`.
 
-The attention core is the share e4m3 shortens; the projections (LN + front GEMM + bias planes, out projection; bf16) are about 60 % of the default module at L512 (profile: core 480 of 1215 us) and are not changed (they are K = 128 GEMMs, bandwidth bound: quantising them would not pay, as for the TriMul projections). d_pair 64 (2 x 32, Chai-1 d64 heads) has no sm120 FP8 core (1.00).
+The attention core is the share e4m3 shortens; the projections (LN + front GEMM + bias planes, out projection; bf16) are about 60 % of the default module at L512 (profile: core 480 of 1215 us) and are not changed (they are K = 128 GEMMs, bandwidth bound: quantising them would not pay, as for the TriMul projections). d_pair 64 (2 x 32 heads) has no sm120 FP8 core (1.00); the Chai-1 64-channel heads (d_pair 256 x 4 x 64) do since `fp8-5090-chai` (below).
 
 **E4 rows** (`E4_rtx5090.csv`, `fp8_pair.py --module TriangleAttention --rounds 6`, 3 repeats, model af3; shipped gates): d128 L128 .. L512 1.00 (not fired; 0.99-1.01), **L640 1.03, L768 1.06, L1024 1.10, L1536 1.14, L2048 1.19**; d64 / d256 / d384 / d512 L768: not fired, 1.00. `none` pass (every gate off, PV-only on): d128 L256 0.99, L384 1.00, L512 1.01, L640 1.02, L768 1.06, L1024 1.08, L1536 1.15, L2048 1.19; d256 / d384 / d512 L768 1.00 / 1.01 / 1.01. Geomean over the 5 firing cases 1.10 (H100 E4: 1.196 over 10 cases, max 1.339). No saturation in any row.
 
 **Accuracy** (update error rms / max of (y - y64) relative to the update y64 - x, against the float64 module on the PyTorch backend, random weights N(0, 0.1), bf16 input; `triattn_ab.py` and `tests/gpu/test_triattn_fp8_sm120.py`): d128 (P / V + q / k) L256 / 384 / 512: **5.1 % / 6.2-7.1 %** (masked L512 5.1 % / 6.9 %), bf16 default 1.2-1.4 % / 1.0-1.5 %; H100 e4m3 q / k route 4.4 % / 6.8 % at L512 (table above, `f8qk`). PV only: d128 L512 2.9 % / 3.5 %, d256 L512 2.9 % / 2.7 % (H100 PV hi: 3.3 % / 4.7 %, 3.4 % / 3.5 %). Tests (14, pass on the 5090): accuracy cells d128 / d256 x L256 / 512 x masked (tolerance 8 % and 8x the default), PV only below PV + q / k, default untouched byte for byte after the route ran, gates / models, graph == eager, V saturation through a captured graph and the sync redo, q / k saturation drop, the shipped PV-only gate.
+
+### TriAttn, Chai-1 d64: the e4m3 P / V core of 64-channel heads (2026-11-24, branch `fp8-5090-chai`; `sm120_fp8.serves_d64` / `route(hd=64)`, `attn_rf8_sm120.cuh` HD 64, `triattn_f8_ops.cu` `quant_hd` / `attn_f8_gate_hd`)
+
+The H100 piece it mirrors: `fp8.TRIATTN_MODELS["chai1"]` = kind `d64` (the trunk and confidence-head triangle attention, d_pair 256 = 4 heads x 64 channels) + `unfused` (template stack); on the H100 the d64 kind is the e4m3 PV of the wgmma core, q / k / bias fp16 (section "Chai-1's option block" / "Parity extension"). On the 5090 those sites run `sm80_wide.variant_forward_ops` (Chai-1's untransposed / dual outputs): `ln_rows`, the bare front GEMM, `bias_planes`, the `sm80_core2` core (the register-resident rf core of 64-channel heads from L 512, the attn2 core below), `gate_rows`, the out projection(s).
+
+**Profile of the default 5090 path** (`triattn_d64_profile.py`, chai1 starting node, 1/8 keys masked, torch profiler kernel time per call): L256 723 us (front GEMM 55 %, attn2 core 147 us = 20 %), L512 2759 us (front 36 %, rf core 739 us = 27 %, `gate_rows` 8 %), L768 6475 us (core 36 %, `gate_rows` 8.5 %), L1024 12655 us (core 5312 us = 42 %, front 36 %, `gate_rows` 8 %, `out_rows` 8 %, `ln_rows` 6 %); the ending node at L1024: core 45 %. The rf core runs at the bf16 `mma.sync` rate (L1024: 1.1 TFLOP in 5.3 ms, ~207 TFLOPS of 218), so it is MMA bound; `gate_rows` (a separate pass over o and g) is 8 % on top.
+
+**Route** (inference, bf16, kind `d64` on, 1 / 2 / 4 / 8 heads of 64, L % 128 == 0, L >= `D64_MIN_L`): `quant_hd` (V x vinv[h] -> e4m3 tiles [pair row][head][32-key block][64 channels][32 permuted keys], 2 KiB each; one standalone pass, as the 32-channel route) -> `attn_f8_gate_hd`: the 32-channel e4m3 core generalised to HD 64 on the default core's geometry (`AttnRCfg<2, 1, 2, 2, GATE, 64, BCVT>`: 2 x 2 warps, 2 pair rows x 64 queries, the bias C operand converted in registers): S = bias / scale + Q K^T on bf16 `mma.m16n8k16` (4 per 8-key column), P = 2^(S - m + 8) as e4m3 bytes (running row max per 32-key slot), P V on e4m3 `mma.m16n8k32` (8 per slot and m tile, half the default's), row sums from the same bytes, the sigmoid gate in the epilogue (bf16(sigmoid(g) bf16(o)), `gate_rows`' statement: that pass is gone). New in HD 64: the running max moves only when a row of the warp gains more than `RF8_TAU` = 0.75 (weights <= 2^8.75 < 448; a warp-uniform branch skips the O / sum rescale in most slots). Scales, guard, calibration, capture fallback and counters are the 32-channel route's (static per-head power of two from the first eager call, 4 x headroom; `sync` / `lazy`; `fp8.check()`; `fp8.route_stats()["triattn"]["pv_d64"]`, the H100 counter name). The 32-channel instantiations compile to the same code: their outputs are byte-identical to `5090-int` (af3 fused P / V + q / k L640, PV-only d256 L512 and d128 L768, masked: 3 / 3 equal). Switches: `MINIWORLD_TRIATTN_SM120_FP8_D64_MINL` (default 256 = every L the core takes), `MINIWORLD_TRIATTN_SM120_FP8_D64_QK` (default off, below). `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=chai1` (or `engine-fp8` with model chai1) turns it on exactly as on the H100; af3 / opendde / no model: never (tests).
+
+**P · V and / or Q · K e4m3.** Both were built (`quant_hd` also writes e4m3 K tiles [key][64 channels], the two k32 steps interleaved per lane so one 16-byte shared load feeds both `mma.m16n8k32` of the score column; q is converted from its bf16 fragments in registers). Core alone (`triattn_d64_core_ab.py`, 4 x 64, random q / k / v / g, bias 2 N(0, 1), 3 rounds; default = rf / attn2 core + `gate_rows`; us):
+
+| L | default | P / V (quant + core) | core only | P / V + q / k | core only | default / P V | default / P V + q k | gated-output error vs fp64 (L256): default / P V / + q k |
+|---|---|---|---|---|---|---|---|---|
+| 256 | 199 | 145 | 113 | 152 | 94 | 1.37 | 1.31 | 0.25 % / 2.9 % / 4.1 % rms |
+| 512 | 1068 | 873 | 706 | 804 | 537 | 1.22 | 1.33 | |
+| 1024 | 6995 | 5611 | 5134 | 4790 | 3828 | 1.25 | 1.46 | |
+
+Tried (core alone, L512 / L1024): the lazy max (shipped) +0.5-1 % over the exact per-slot rescale; 3 ring slots -1 %; the bias-scaling mma instead of the register conversion -3..-5 %. The P / V core alone is only ~1.15x the bf16 core (its Q K^T is still the bf16 one, 4 mma per column); most of the P / V route's module gain is the fused gate.
+
+**Decision: P / V e4m3 shipped (q / k bf16, as the H100 d64 route); e4m3 q / k opt-in** (`MINIWORLD_TRIATTN_SM120_FP8_D64_QK=1`): it is faster (1.04-1.27x) but its update error, 4.2-4.4 % rms / 4.3-4.6 % max, is above the H100 d64 route's 3.3-3.7 % / 3.0-4.3 %; the P / V route is at that level.
+
+**Module A-B** (`triattn_d64_ab.py`, `TriangleAttention(256, 4, model=...)` in bf16 as FoldForge runs it, same process, alternating default / FP8, CUDA graph, 128 MB L2 flush, 6 rounds, median; default / FP8, > 1 = FP8 faster; error = update rms / max of (y - y64) against the float64 module on the PyTorch backend, random weights, 1/8 keys masked except where noted):
+
+| case | L256 | L384 | L512 | L640 | L768 | L1024 | L1536 |
+|---|---|---|---|---|---|---|---|
+| chai1 starting, P / V (shipped) | 1.036 | 1.095 | 1.070 | 1.088 | 1.096 | 1.128 | 1.135 |
+| chai1 ending, no mask, P / V | 1.046 | | 1.074 | | | 1.136 | |
+| chai1_confidence starting, P / V | 1.034 | | 1.063 | | | 1.109 | |
+| chai1_confidence ending, P / V | | | 1.060 | | | | |
+| chai1 starting, P / V + q / k (opt-in) | 1.042 | | 1.105 | | | 1.197 | 1.272 |
+
+Absolute (chai1 starting, default -> P / V): L512 2685 -> 2509 us, L1024 12508 -> 11091 us, L1536 34361 -> 30282 us. No row below 1.0, so the gate is the core's own floor (L >= 256). For comparison the H100 d64 route measured 0.93-1.12 with its gate at S 1024.
+
+| update error vs fp64 (rms / max) | default bf16 | 5090 P / V (shipped) | 5090 P / V + q / k (opt-in) | H100 d64 route (FP8 PV) / H100 default fp16 |
+|---|---|---|---|---|
+| chai1 starting L256 / 384 / 512 | 1.7-1.9 % / 1.5-1.7 % | 3.0-3.1 % / 2.4-2.7 % | 4.2-4.4 % / 4.3-4.6 % | 3.3-3.7 % / 3.0-4.3 % (default 1.1-1.8 % / 1.4-2.1 %) |
+| chai1 ending L256 / 512 (no mask) | 1.7-2.0 % / 1.7-1.8 % | 3.0-3.1 % / 2.5-3.2 % | | |
+| chai1_confidence starting / ending L256 / 512 | 1.3-1.5 % / 1.6-1.9 % | 2.8-3.0 % / 2.6-3.0 % | | |
+
+No saturation in any row (`fp8.check()` False, the V peak 1/4 of 448 as calibrated).
+
+**Default path untouched** (FP8 off): `pair_default_bytes.py` (eager, CUDA-graph replay, eager after the capture; the 23 earlier cases + `chai1` L256 / L512, `chai1end` L512, `chai1conf` L512) equal against `5090-int` (separate processes). The variant forward only allocates `o` / `lse` inside the default branch now.
+
+**Route census** (`route_census.py --model chai1 --sizes 1 4`, FoldForge on cssb-rtx with this tree, 5I28 real MSA + templates, compile + CUDA graphs, `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=chai1`, lazy guards): n = 4 (512 tokens) TriAttn `pv_d64` **960** (112 calibrations), 0 fallbacks, 0 capture fallbacks, not saturated (H100 with its gate removed: `pv_d64` 848 + template `pv_front` 140; the 5090 leaves the template stack's PV-only kind off); n = 1 (128 tokens): 0 (below the core's L 256 floor). Every other slot as in the census above. Not re-run here: the F3 5I28 timing and the end level of chai1 with this route.
+
+**Prebuild.** `_prebuild --arch sm120 --list`: 73 artifacts as before; `triattn_sm120_f8` re-keyed c2163cab -> 0fa5f6aa (the generalised header and the HD 64 ops in the same extension), every other key unchanged. No module `version` / `backend_versions` change (opt-in route; default bytes equal).
+
+**Tests** (`tests/gpu/test_triattn_fp8_sm120.py`, on the 5090, 49 passed): new `test_d64_accuracy_against_float64` (chai1 / chai1_confidence x starting / ending x L256 / 512, masked: rms < 6 %, max < 8 %, < 8x the default's, no saturation), `test_d64_default_untouched_when_off` (bytes), `test_d64_gates_and_models` (D64_MIN_L, af3 / opendde / no model, training, L % 128), `test_d64_graph_equals_eager_and_saturation` (replay == eager, V saturation flagged by `fp8.check()` and widened in place, sync redo), `test_d64_capture_before_calibration_runs_default`, `test_d64_env_model_at_import` (fresh processes: `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=chai1` fires `pv_d64`, af3 / no model / model without preset do not); `test_model_whitelist_table` now checks the d64 kind per model; every 32-channel test unchanged and passing. `tests/cpu/test_fp8_switch.py` 29 passed (CUDA visible and hidden).
 
 ### Transition: e4m3 one-kernel forward (D128 / 256) and wide chain (D384 / 512); explicit opt-in on the 5090, NOT in `safe` (`kernels/transition/cuda/fp8_sm120.py`, `sm80/tr_fwd_f8_sm120.cuh`, `sm80/transition_fwd_f8_sm120.cu`)
 
@@ -397,7 +445,7 @@ FP8 is faster in every cell (0.79-0.97 of bf16 without the Transition); the Tran
 | ESMFold2 atom block (RMS) | yes | yes (this branch) |
 | TriAttn fused d_pair-128 PV + q / k (af3, protenix1, openfold3, rosettafold3) | yes | yes (L >= 640, L % 128) |
 | TriAttn PV-only kinds (`unfused`: opendde, protenix2, chai1 templates; af3 / openfold3 templates) | yes | no in `safe`: PV-only measured no gain on the 5090 (opt-in `MINIWORLD_TRIATTN_SM120_FP8_PVONLY=1`) |
-| Chai-1 TriAttn d64 core (64-channel heads, S >= 1024) | yes | no: the 5090 core is 32-channel heads only (`attn_rf8_sm120.cuh` static_assert HD == 32); a d64 PV-only core would also sit behind the PV-only no-gain finding |
+| Chai-1 TriAttn d64 core (64-channel heads, S >= 1024) | yes | yes (`fp8-5090-chai`: e4m3 P / V core of 64-channel heads + gate in the epilogue, q / k bf16 as on the H100, L >= 256, 1.03-1.14x; e4m3 q / k opt-in `MINIWORLD_TRIATTN_SM120_FP8_D64_QK=1`, 1.04-1.27x, error above the H100 d64 level) |
 
 
 ## Combined tree `fp8c/all` (2026-11-19, base engine 3.0.1 = origin/main f5be1df46): branches, route matrix, 5I28

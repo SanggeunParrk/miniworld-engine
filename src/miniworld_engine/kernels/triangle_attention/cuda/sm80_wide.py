@@ -1623,27 +1623,36 @@ def variant_forward_ops(
     else:
         rows.bias_planes(y, mask, bias, 4 * dhp, h, length, int(flip))
     lay_y, lay_o, _ = _v_lays(vc, length, y.shape[1])
-    o = torch.empty((t, dhp), dtype=BF, device=dev)
-    lse = torch.empty((b, h, length, length), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
     q, k, v, g = (y[:, i * dhp : (i + 1) * dhp] for i in range(4))
-    _core2.forward(
-        q,
-        k,
-        v,
-        bias,
-        x.new_empty((0,), dtype=torch.uint8),
-        o,
-        lse,
-        (lay_y, lay_y, lay_y, lay_o),
-        length,
-        h,
-        b,
-        ch,
-        1.0 / math.sqrt(hd),
-        key_mask=None if save else mask,
-    )
-    a = torch.empty((t, dhp), dtype=BF, device=dev)
-    rows.gate_rows(o, g, a)
+    a = None
+    if not save and hd == 64 and _arch.on_sm120(x) and (_f8 := _sm120_f8()) is not None and _f8.serves_d64(x, h, hd, length):
+        # opt-in e4m3 core of 64-channel heads (sm120_fp8, kind d64; the switch is off by default: the branch below, bit for bit), the gate in its epilogue
+        a = torch.empty((t, dhp), dtype=BF, device=dev)
+        if not _f8.route(q, k, v, bias, g, a, mask, weights[2], b, length, h, d, hd):
+            a = None
+    if a is None:
+        o = torch.empty((t, dhp), dtype=BF, device=dev)
+        lse = torch.empty((b, h, length, length), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
+        _core2.forward(
+            q,
+            k,
+            v,
+            bias,
+            x.new_empty((0,), dtype=torch.uint8),
+            o,
+            lse,
+            (lay_y, lay_y, lay_y, lay_o),
+            length,
+            h,
+            b,
+            ch,
+            1.0 / math.sqrt(hd),
+            key_mask=None if save else mask,
+        )
+        a = torch.empty((t, dhp), dtype=BF, device=dev)
+        rows.gate_rows(o, g, a)
+    else:
+        o = lse = x.new_empty((0,))  # (not saved: inference)
     wo_p = _core.eval_form(("triattn_sm80w_variant_wo", pc), (wo,), lambda: _wo_padded(wo, pc), save)
     bo_ = bo if bo.numel() else None
 

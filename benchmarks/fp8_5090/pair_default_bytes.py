@@ -15,6 +15,7 @@ assert not any("FP8" in k for k in os.environ if k.startswith("MINIWORLD")), "un
 CASES = [
     "trimul:128:1:256", "trimul:128:2:512", "trimulrf3:128:1:256", "trimulrf3:128:2:384", "trimul:512:1:256", "trimul:64:2:384", "trimul:64:0:256", "trimul:128:0:384", "trimul:256:1:384", "trimul:384:2:256", "trimul:64:1:256",
     "triattn:128:4:256", "triattn:128:4:512", "triattn:256:8:256", "triattn:64:4:256", "triattn:128:4:200",
+    "chai1:256:4:256", "chai1:256:4:512", "chai1end:256:4:512", "chai1conf:256:4:512",
     "transition:128:4:16384", "transition:128:2:38477", "transition:256:4:16384", "transition:256:2:8192", "transition:384:4:8192", "transition:512:4:8192",
     "transition:512:2:4096",
 ]  # fmt: skip
@@ -52,6 +53,10 @@ def build(spec):
             m = BidirectionalTriangleMultiplication(d, d_hidden=d, master_weights=True, backend="cuda")
         else:
             m = TriangleMultiplication(d, outgoing=k == 1, master_weights=True, backend="cuda", **({"model": "rf3"} if kind == "trimulrf3" else {}))
+    elif kind.startswith("chai1"):  # Chai-1's 64-channel heads (sm80_wide.variant_forward_ops; kind d64 of the e4m3 route)
+        d, h, L = a
+        model = "chai1_confidence" if kind == "chai1conf" else "chai1"
+        m = TriangleAttention(d, h, model=model, starting=kind != "chai1end", p_drop=0.0, master_weights=True, backend="cuda")
     else:
         d, h, L = a
         m = TriangleAttention(d, n_head=h, master_weights=True, backend="cuda")
