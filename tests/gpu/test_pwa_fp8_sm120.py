@@ -85,7 +85,7 @@ def test_ln_vt8_matches_ln_v(d: int, c: int, nt: int) -> None:
     got = vt.float()
     # one e4m3 rounding of (nearly) the same value: the default's bf16 v and this kernel's fp32 v differ by a bf16 rounding, so compare within e4m3 steps
     rel = ((got - ref).abs() / ref.abs().clamp_min(2.0**-6)).max().item()
-    assert rel < 0.07
+    assert rel < 0.13  # at most one e4m3 step (12.5 % at a power of two): bf16 then e4m3 against fp32 then e4m3 (double rounding)
     assert ((got - ref).pow(2).mean().sqrt() / ref.pow(2).mean().sqrt()).item() < 0.03
     assert amax.item() == pytest.approx(ref.abs().max().item(), rel=0.02)
 

@@ -38,7 +38,9 @@ _LAZY: dict = {}
 
 
 def _gate(s: int, n: int) -> bool:
-    """The (depth, length) cells the route takes (same-process A-B, docs/fp8.md "RTX 5090"); MIN_S replaces it."""
+    """The (depth, length) cells the route takes; MIN_S replaces it. Depth >= 1024 at every length: the H100 route's served range for accuracy (the
+    5090 A-B gains at every measured cell, 1.09-1.79x down to S 128 / 256, but the judge error grows below depth 1024: 1.9e-2 at L 128 S 256 against
+    1.1e-2 at S 1024; docs/fp8.md "RTX 5090", OPM)."""
     if MIN_S is not None:
         return s >= MIN_S
     return s >= 1024

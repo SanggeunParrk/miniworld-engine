@@ -174,9 +174,12 @@ def test_capture_before_calibration_runs_default(F) -> None:
     assert torch.equal(y_g, y0)
 
 
+@torch.no_grad()
 def test_gate(F) -> None:
     F.MIN_S = None
     assert not F.serves(512, 256)
-    assert F.serves(1024, 256)
+    assert F.serves(1024, 128)
     F.MIN_S = 0
     assert F.serves(16, 16)
+    with torch.enable_grad():
+        assert not F.serves(4096, 256)  # inference only

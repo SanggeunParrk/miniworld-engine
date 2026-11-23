@@ -45,10 +45,10 @@ def _env_int(name: str, default: int) -> int:
 
 
 #: smallest S * N served per (d_msa, C) at the native widths (same-process A-B, docs/fp8.md "RTX 5090"); 0 = no gate
-MIN_SN: dict = {}
+MIN_SN: dict = {(64, 8): 1 << 15, (64, 16): 1 << 15, (64, 32): 1 << 15, (128, 8): 1 << 15, (128, 16): 1 << 15}  # S128 N128: 0.97 (64 x 8); S128 N256: 1.05
 MIN_SN_ALL: int | None = int(os.environ["MINIWORLD_PWA_FP8_SM120_MINSN"]) if os.environ.get("MINIWORLD_PWA_FP8_SM120_MINSN") else None
 #: smallest S * N served at the BIG width
-BIG_MIN_SN = _env_int("MINIWORLD_PWA_FP8_SM120_BIG_MINSN", 0)
+BIG_MIN_SN = _env_int("MINIWORLD_PWA_FP8_SM120_BIG_MINSN", 1 << 14)  # the smallest measured cell (S64 N256: 1.03); every measured BIG cell gains
 #: ln_vt8 tile (tokens) and resident CTAs per SM, per (d_msa, C)
 VT8_CFG: dict = {}
 
