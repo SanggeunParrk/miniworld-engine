@@ -12,10 +12,11 @@ from dit_common import Rig, case, graph, time_graph
 E4 = torch.float8_e4m3fn
 
 
-def gemm():
+def gemm(atom=False):
     print(torch.cuda.get_device_name(), torch.__version__)
-    for K, N, name in ((768, 3072, "expand a|b"), (768, 4608, "expand a|b|u"), (768, 3072, "qkvg"), (1536, 768, "squeeze"), (768, 768, "out")):
-        for M in (1280, 2560, 5120, 10240):
+    shapes = ((128, 256, "atom q|g"), (128, 256, "atom k|v"), (128, 128, "atom out"), (128, 512, "atom expand"), (256, 128, "atom squeeze")) if atom else ((768, 3072, "expand a|b"), (768, 4608, "expand a|b|u"), (768, 3072, "qkvg"), (1536, 768, "squeeze"), (768, 768, "out"))
+    for K, N, name in shapes:
+        for M in (5120, 20480, 81920) if atom else (1280, 2560, 5120, 10240):
             x = torch.randn(M, K, device="cuda").bfloat16()
             w = torch.randn(N, K, device="cuda").bfloat16()
             x8, w8 = x.to(E4), w.to(E4)
@@ -61,8 +62,9 @@ def prof(spec):
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "gemm":
-        gemm()
+    if sys.argv[1] in ("gemm", "gemm_atom"):
+        gemm(sys.argv[1] == "gemm_atom")
+
     else:
         for sp in sys.argv[2:]:
             prof(sp)

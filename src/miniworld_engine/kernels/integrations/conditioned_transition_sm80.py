@@ -605,7 +605,7 @@ def update(
     if token and not grad:  # the RTX 5090 token DiT FP8 route (opt-in: PLACES empty = the lines below unchanged)
         from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as _tf8
 
-        if _tf8.PLACES:
+        if _tf8.PLACES & {"expand", "squeeze"}:
             places = _tf8.transition_places(xs, is_identity(ada), not residual, up is not None)
             if places:
                 return _tf8.transition(module, xs, cs, eps, residual, places).reshape(x.shape)

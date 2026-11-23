@@ -40,13 +40,15 @@ BF = torch.bfloat16
 
 #: the e4m3 placements in force (empty: the default bf16 route); the H100 module's variable
 PLACES: frozenset[str] = _parse(_fp8_env("MINIWORLD_TOKEN_DIT_FP8", "") or "")
-#: route call counters (``fp8.route_stats()["token_dit"]``, plain ints at Python call time): ``calls`` = transition calls that took e4m3
-#: placements, ``declined`` = token transition calls with ``PLACES`` set sent to the bf16 route; per placement the calls that took it.
+#: route call counters (``fp8.route_stats()["token_dit"]``, plain ints at Python call time): ``calls`` = token transition calls that took an
+#: e4m3 placement (expand / squeeze), ``declined`` = token transition calls with a transition placement in ``PLACES`` sent to the bf16 route
+#: (fp32, width, row gate); per placement the calls that took it (``qkvg`` / ``out``: attention calls).
 STATS = {"calls": 0, "declined": 0, "expand": 0, "qkvg": 0, "out": 0, "squeeze": 0}
-#: per placement, the fewest step rows M = A B L that take it (RTX 5090, same-process A-B, docs/fp8.md "RTX 5090" token DiT)
-MIN_ROWS_PER: dict[str, int] = {"qkvg": 1280, "expand": 1280, "out": 1280, "squeeze": 1280}
+#: per placement, the fewest step rows M = A B L that take it (RTX 5090, same-process A-B, 6 rounds, docs/fp8.md "RTX 5090" token DiT): expand
+#: 1.04-1.27x and qkvg 1.11-1.18x already at M 640 / 768 (the smallest measured); squeeze 0.98-0.99 and out 0.98-0.99 at 640, 1.02-1.05 from 1280
+MIN_ROWS_PER: dict[str, int] = {"qkvg": 640, "expand": 640, "out": 1280, "squeeze": 1280}
 #: Boltz-2's up-gated expand (its own GEMM shape [a | b | u])
-MIN_ROWS_UP = 1280
+MIN_ROWS_UP = 640
 #: one override for every placement (``MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS``; 0 = no gate), None: ``MIN_ROWS_PER``
 MIN_ROWS: int | None = int(os.environ["MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS"]) if os.environ.get("MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS") else None
 #: the widths built (the token DiT's d = 768; its hidden 1536)
@@ -177,7 +179,6 @@ def transition(module, xs: torch.Tensor, cs: torch.Tensor, eps: tuple, residual:
     with torch.cuda.device(xs.device):
         sb1, ws, wsc, bsc = cast_params((sb1, ws, wsc, bsc), BF, True)
         wcat = _forms("tdf8_wcat", (ws1, wb1), lambda: torch.cat([ws1, wb1]).to(BF))
-        w8 = weight8("expand_up" if up is not None else "expand", wa, wb, *((up.weight,) if up is not None else ()))
         br = Branch(xs.device)
         g = br.run(lambda: ct._gate_logits(cs, wsc, bsc), cs, wsc, bsc)  # the gate GEMM beside the chain below
         if identity:  # Chai-1: (1 + S) LN(x) + B on the raw conditioning
@@ -187,10 +188,14 @@ def transition(module, xs: torch.Tensor, cs: torch.Tensor, eps: tuple, residual:
             aff, _ = ka.cond_ln(cs, lnw, BF, eps[1])
             sbt, sb = _mm_op(aff, wcat.t()), sb1
         M = xs.shape[0]
-        x8 = torch.empty((M, xs.shape[1]), device=xs.device, dtype=E4M3)
-        sx = torch.empty((M, 1), device=xs.device, dtype=torch.float32)
-        ext().adaln_q8(xs, sbt, sb, x8, sx, float(eps[0]))
-        ab = mm(x8, sx, w8)
+        if "expand" in places:
+            x8 = torch.empty((M, xs.shape[1]), device=xs.device, dtype=E4M3)
+            sx = torch.empty((M, 1), device=xs.device, dtype=torch.float32)
+            ext().adaln_q8(xs, sbt, sb, x8, sx, float(eps[0]))
+            ab = mm(x8, sx, weight8("expand_up" if up is not None else "expand", wa, wb, *((up.weight,) if up is not None else ())))
+        else:  # squeeze alone: the default bf16 AdaLN epilogue and expand GEMM
+            xa = ka.epilogue_identity(xs, sbt, eps[0])[0] if identity else ka.epilogue(xs, sbt, sb, eps[0])[0]
+            ab = _mm_op(xa, _forms("tdf8_wab", (wa, wb, *((up.weight,) if up is not None else ())), lambda: torch.cat([wa, wb, *((up.weight,) if up is not None else ())]).to(BF)).t())
         if "squeeze" in places:
             H = ws.shape[1]
             h8 = torch.empty((M, H), device=xs.device, dtype=E4M3)
