@@ -327,6 +327,22 @@ Not done (state of `fp8-5090-dit`; OPM / PWA came with `fp8-5090-msa`, ESMFold2'
 
 **Transition D384 / 512 (OpenDDE's pair stack D384, IntelliFold2's D512).** The census showed OpenDDE 40 / IntelliFold2 99 Transition calls on the 5090 against 534 / 585 on the H100: the 5090 route had D128 / 256 only. Now `fp8_sm120.WIDE_SHAPES` (D384 / 512, n 2 / 4) run a wide chain inside the same `inference` op: `token_f8_sm120.adaln_q8` in its identity form (table [gamma - 1 | beta], one row) = LayerNorm(x) gamma + beta as e4m3 rows with a dynamic row scale, [a | b] on cuBLASLt e4m3 (`torch._scaled_mm`, per-channel weight scales), `swiglu_q8`, the squeeze on e4m3, + x; no calibration, no guard (`GUARD_STATS["calls"]` counts it); blocks of `WIDE_BLOCK` = 32768 rows (the whole-call bf16 [a | b] of an L512 D512 n4 stack is 2 GiB: IntelliFold2 / OpenDDE 5I28 n = 4 ran out of memory inside their CUDA-graph pools before; blocked: 1.20 at 262144 rows D512 n4, 1.09 D384 n4, 1.21 D512 n2 65536). The token extension gained the widths 512 / 2048. A-B (`transition_ab.py`, 6 rounds, default / e4m3): D512 n4 4096 / 8192 / 16384 / 32768 / 65536 / 147456 / 262144 rows 1.285 / 1.373 / 1.229 / 1.246 / 1.168 / 1.164 / 1.164, D512 n2 16384 / 65536 1.371 / 1.138, D384 n4 4096 / 16384 / 65536 / 262144 1.250 / 1.241 / 1.103 / 1.033, D384 n2 16384 1.279; gate 4096 rows (`ROW_GATE`). Error against the float64 module (judge / rms / update rms): D512 n4 0.034-0.036 / 0.034 / 0.065, D512 n2 0.037 / 0.034 / 0.065, D384 0.038 / 0.034 / 0.065 (default 0.004-0.005 / 0.003 / 0.006; H100 e4m3 0.041-0.045 / 0.034-0.035 / 0.066). Tests: `test_transition_fp8_sm120.py::test_error_vs_fp64` D384 / 512 cells (38 passed), `test_fp8_switch.py` (`WIDTHS` default 128, 256, 384, 512).
 
+**Route census on the 5090 (`route_census.py`, FoldForge 49d41bbf on cssb-rtx with this tree as `ENGINE_SRC`, 5I28 real MSA + templates, compile + CUDA graphs, `MINIWORLD_FP8=safe` + `MINIWORLD_FP8_MODEL`, lazy guards; counters at Python / capture time; `all_cuda` = FoldForge's backend table: every engine class set to and served by `cuda`).** Columns as the H100 matrix above; TriAttn columns are all 0 at n <= 4 (the 5090 serves e4m3 q / k only from L640, and PV-only kinds are not in `safe`).
+
+| model | n | TriMul | OPM | PWA (wide) | Transition | token DiT expand | atom DiT (fallbacks) | TriAttn | route fallbacks | all_cuda | saturated |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| af3 | 1 / 4 | 0 / 1200 | 36 / 36 | 36 / 36 | 536 / 548 | 72 / 72 | 18 (6) / 24 (0) | 0 | 0 | yes | no |
+| boltz2 | 1 / 4 | 0 / 1416 | 36 / 36 | 36 / 36 | 640 / 640 | 72 / 72 | 18 (6) / 24 (0) | 0 | 0 | yes | no |
+| chai1 | 1 / 4 | 0 / 1104 | 0 / 0 | 27 / 27 | 532 / 484 | 48 / 48 | 18 (6) / 24 (0) | 0 | 0 | yes | no |
+| intellifold2 | 1 / 4 | 0 / 1104 | 36 / 36 | (27) / (27) | 635 / 599 | 72 / 72 | 18 (6) / 24 (0) | 0 | 0 | yes | no |
+| opendde | 1 / 4 | 16 / 1117 | 36 / 36 | 36 / 36 | 584 / 556 | 72 / 72 | 18 (6) / 24 (0) | 0 | 0 | yes | no |
+| openfold3 | 1 / 4 | 0 / 1200 | 36 / 36 | 27 / 27 | 536 / 548 | 72 / 72 | 18 (6) / 24 (0) | 0 | 0 | yes | no |
+| protenix1 | 1 / 4 | 0 / 1170 | 36 / 36 | 27 / 27 | 521 / 533 | 72 / 72 | 18 (6) / 24 (0) | 0 | 0 | yes | no |
+| protenix2 | 1 / 4 | 0 / 1098 | 36 / 36 | 27 / 27 | 548 / 524 | 72 / 72 | 18 (6) / 24 (0) | 0 | 0 | yes | no |
+| rosettafold3 | 1 / 4 | 0 / 1092 | 36 / 36 | 36 / 36 | 536 / 548 | 72 / 72 | 18 (6) / 24 (0) | 0 | 0 | yes | no |
+
+Against the H100 matrix (n = 4): TriMul / OPM / PWA / token DiT `expand` counts are the H100's (IntelliFold2 1104 incl. the D512 planes, RoseTTAFold3 1092 with no recalibration per call); atom DiT serves the per-sample-conditioning calls too (24 vs 18 + 9 declined); TriAttn is the gap (H100 af3 / openfold3 / rosettafold3 / protenix1 936-1056 `pv_fused` + 832-950 `qk`, opendde / protenix2 `pv_front` 140): the 5090 q / k gate starts at L640 (n >= 5) and PV-only kinds are off on the 5090. ESMFold2 could not run on the 5090 (the process ends while loading ESMC 6B under the 16 GB RAM cap); its atom route is verified at module level only.
+
 **H100 per-model pieces and the 5090 (what `safe` turns on on the H100).**
 
 | piece (H100 section) | on the H100 `safe` | RTX 5090 |
