@@ -52,7 +52,7 @@ of each site (calibration) and kept for the process. A value past the e4m3 range
 :func:`check` once (one host sync per route): True means some route saturated and was rescaled -- run that forward again (at most 3 times).
 OuterProductMean (``bound``), token DiT and atom DiT (exact per-row scales) cannot saturate.
 
-The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: the TriMul and TriAttn slots, :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090"; the e4m3 Transition there is
+The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: the TriMul, TriAttn, token DiT and atom DiT slots, :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090"; the e4m3 Transition there is
 :data:`SM120_OPTIN`, its own switch only, never a preset) and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
 default route, whose outputs are bit-identical with FP8 off.
 """
@@ -239,7 +239,7 @@ def _modules() -> tuple[Any, ...]:
     from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as tm
 
     mods = dict(zip(SLOTS, (ta, tm, opm, pwa, tr, td, ad), strict=True))
-    if a == "sm120":  # RTX 5090: the e4m3-plane TriMul chain of sm120_fp8 takes the slot (every other slot keeps the H100 module, whose serves() is False off sm_90)
+    if a == "sm120":  # RTX 5090: the SM120_ROUTES modules take their slots (TriMul, TriAttn, token DiT, atom DiT; every other slot keeps the H100 module, whose serves() is False off sm_90)
         import importlib
 
         for slot, path in SM120_ROUTES.items():

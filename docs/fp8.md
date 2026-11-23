@@ -3,9 +3,9 @@
 Everything here is opt-in and off by default: FP8 is the backend `engine-fp8`; the default remains the bf16 / fp16 engine. Base: engine 2.5.14 (branch `rel/3.0.0` = 2.5.14 + `fp8/3.0.0-all`; the routes were built on 2.5.12, branch `fp8/3.0.0-on-2512`). With no switch set, every route is bit-identical to 2.5.14 (see "Release line 3.0.0"; before: 169 / 169 against 2.5.12, "Verification on the 2.5.12 base").
 
 
-## RTX 5090 (sm_120a): the e4m3-plane TriMul route, the e4m3 TriAttn core and the strictly opt-in e4m3 Transition (2026-11-23, branch `fp8-5090`)
+## RTX 5090 (sm_120a): the e4m3-plane TriMul route, the e4m3 TriAttn core, the token DiT / atom DiT e4m3 GEMMs and the strictly opt-in e4m3 Transition (2026-11-23, branches `fp8-5090`, `fp8-5090-dit`)
 
-Opt-in like the H100 / B200 routes (`MINIWORLD_FP8=safe` or `backend="engine-fp8"`; `fp8.arch()` is `"sm120"` there, `fp8.SM120_ROUTES` puts `kernels/trimul_inproj/cuda/sm120_fp8.py` into the `trimul` slot; every other slot keeps its H100 module, whose `serves()` is False off sm_90). With the switch off the default route is bit-identical to the base (`integ-ladder` a0aa7f1aa, 12 outputs compared byte for byte: D128 / D256 x outgoing / incoming / bidirectional x L256 / 512); no module `version` / `backend_versions` entry changes.
+Opt-in like the H100 / B200 routes (`MINIWORLD_FP8=safe` or `backend="engine-fp8"`; `fp8.arch()` is `"sm120"` there, `fp8.SM120_ROUTES` puts `kernels/trimul_inproj/cuda/sm120_fp8.py` into the `trimul` slot, `triangle_attention/cuda/sm120_fp8.py` into `triattn`, `conditioned_transition/cuda/token_dit_fp8_sm120.py` into `token_dit` and `dit_variants/cuda/atom_fp8_sm120.py` into `atom_dit` (sections below); every other slot keeps its H100 module, whose `serves()` is False off sm_90). With the switch off the default route is bit-identical to the base (`integ-ladder` a0aa7f1aa, 12 outputs compared byte for byte: D128 / D256 x outgoing / incoming / bidirectional x L256 / 512); no module `version` / `backend_versions` entry changes.
 
 **Phase 0 (rates, 5090 sm_120a, CUDA graph, 128 MB L2 flush; `benchmarks/fp8_5090/p0_*.py`).** `mma.sync` fp32 accumulate: bf16 m16n8k16 **217.6 TFLOPS**, e4m3 m16n8k32 **459.2 TFLOPS** (2.11x). cuBLASLt batched e4m3 (TN, per-tensor scale pointers, bf16 out) against the engine's bf16 contraction rate: L512 x 128 channels 292 TFLOPS vs 103 (bf16 bmm), L1024 354 vs 191, L1536 378 vs 199, L2048 390 vs 204 (1.9x at L >= 1024). The TriMul contraction is 53 % (L1024) .. 66 % (L2048) of the D128 module (profile: contract 1366 us of 2551 us at L1024; k1w 869, k3w 573), so the e4m3 contraction is the dominant GEMM; the in-projection GEMMs (K = 128, N = 512 .. 1024) are bandwidth bound at 1.2-1.3x as plain e4m3 GEMMs (quantisation of a separate input pass cancels that), hence the route quantises in the front's epilogue (free) and leaves the projections bf16. cuBLASLt e4m3 supports TN only on sm_120.
 
@@ -78,7 +78,126 @@ The same level as the H100 route (both GEMM inputs are e4m3 activations); no sat
 
 **Prebuild (sm120 bundle).** `_prebuild --arch sm120` now plans the two opt-in extensions, so a first opt-in call does not JIT: `triattn_sm120_f8` (`triangle_attention/cuda/__init__.py`, sm120 branch) and `transition_fwd_f8_sm120` (`transition/cuda/__init__.py`, sm120 branch, when a bf16 eval row has (D, nD) in `fp8_sm120.SHAPES`). Plan diff against the base `a0aa7f1aa` (`--list`, same environment, CPU on cssb-rtx): 67 -> 69 artifacts; added `transition_fwd_f8_sm120` [f2e73f1e] and `triattn_sm120_f8` [c2163cab] (the keys the runtime JIT computed for the same sources); re-keyed `trimul_sm80_wide_sm120` b99f5ace -> 486690f4 and `trimul_sm80_wide512_sm120` b95b78e4 -> 836ca0bc (the TriMul route's edits of `wide_k1.cuh` / `wide_gemm.cuh` / `wide_ops.cu`: the prebuilt-sm120 bundle must be rebuilt for them); every other key unchanged (the default Transition builds `transition_wide_sm120` / `transition_fwd_sm120` included). `--check` lists the same problems as on the base (it exits 1 there too) plus 2 call sites / 2 sources now reached. No module `version` / `backend_versions` change: every new path is opt-in and the default outputs are unchanged.
 
-Not done: OPM / PWA / token DiT routes on sm_120 (no e4m3 kernel; their slots run the default); the TriAttn d_pair-64 core (Chai-1); a custom `mma.sync` e4m3 contraction (cuBLASLt TN is used; the non-block-scaled path works on sm_120 with CUDA 13 driver / torch 2.13 cu129, only the block-scaled forms were reported failing); the plane formation of the grouped long-L path (L > ~3000) stays bf16.
+### Token DiT: e4m3 GEMMs on cuBLASLt row-wise e4m3 (`kernels/conditioned_transition/cuda/token_dit_fp8_sm120.py`, `sm80/token_f8_sm120.cu`; branch `fp8-5090-dit`)
+
+`fp8.SM120_ROUTES["token_dit"]`: the H100 module's switch and interface (`MINIWORLD_TOKEN_DIT_FP8` = `expand` in `safe` / `engine-fp8`; any of `qkvg`, `expand`, `out`, `squeeze`, `1`, `all`; `PLACES`, `STATS`, `MIN_ROWS`, `MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS`). Every token DiT class the H100 route covers: TokenDiTProtenix / MiniWorld (default block), Boltz-2 (up-gated transition, `conditioned_transition_sm80.inference_up` of `boltz2-5090`), RoseTTAFold3 (parallel block, k-q LayerNorm), Chai-1 (identity AdaLN, parallel). TokenDiTMiniWorldBiasOnly is not covered (not on the H100 route either).
+
+**Where the time goes (default 5090 block, profile of one A5 L512 call, M = 2560, `benchmarks/fp8_5090/dit_profile.py`).** The sm_80 block (`augattn_sm80` + `conditioned_transition_sm80`) spends 40-45 % in four bf16 cuBLAS GEMMs: q | k | v | g and expand (768 -> 3072, 88 us each, 137 TFLOPS), squeeze (1536 -> 768, 44 us), out (768 -> 768, 25 us); the attention core 41 us (9 %), the rest row passes, the AdaLN / gate GEMMs on the conditioning rows and copies. `torch._scaled_mm` with row-wise scales works on sm_120 (torch 2.13 cu129): the same GEMMs on e4m3 run 2.0-2.8x faster (graph, 10 calls back to back: M 2560 expand 88.0 -> 37.8 us, 320 TFLOPS; M 10240 263 -> 140 us; squeeze 44.0 -> 24.0; out 25.5 -> 14.1; Boltz-2's [a | b | u] 131 -> 60), so the route puts the GEMMs on cuBLASLt e4m3 and writes the operands from the row passes:
+
+* `expand` (`safe`): the transition's AdaLN epilogue `adaln_q8` (y = sigmoid(S + sb) LN(x) + B, or (1 + S) LN(x) + B for Chai-1's identity AdaLN, in fp32 -> e4m3 with the row scale; the bf16 xa is never written) -> `[a | b (| u)] = xa8 W8^T` (bf16 out) -> the default SwiGLU pass -> bf16 squeeze -> the default gate pass; the conditioning LayerNorm / [S | B] GEMM / gate GEMM as the default.
+* `squeeze`: h = silu(a) b (u) quantised in the SwiGLU pass (`swiglu_q8`), the squeeze on e4m3. Not for RoseTTAFold3 (the H100 rule: the parallel block takes `expand` only).
+* `qkvg`: `quant_rows` of the attention's AdaLN output, q | k | v | g on e4m3 with the bias in the GEMM epilogue (MiniWorld's per-head RMSNorm follows as before). Gated blocks without the flat q / k LayerNorm: not Chai-1 (no gating query; the H100 rule, its AdaLN scale is unbounded), not RoseTTAFold3.
+* `out`: `quant_rows` of og, the out projection on e4m3. Not RoseTTAFold3.
+
+Scales: the H100 recipe (activations a dynamic per-row scale row max / 448, weights per output channel max / 448 once per weight version): nothing saturates, no calibration, no guard. The pair bias and its step-invariant hoist (`augattn_sm80` TOKEN_BIAS of `boltz2-5090`), the attention core and every other pass are unchanged; the hooks are `conditioned_transition_sm80.update(..., token=True)` and `augattn_sm80.forward(..., token=True)` from the token DiT blocks (`token_dit._forward_a100`, `dit_variant_cuda.VariantTokenCuda`), each one `PLACES` check on the default path.
+
+**Gates** (`MIN_ROWS_PER`, from the sweep below): `expand` and `qkvg` from 640 rows (the smallest measured: expand 1.04-1.27x, qkvg 1.11-1.18x at M 640 / 768), `out` and `squeeze` from 1280 (0.98-0.99 at 640, 1.02-1.09 from 1280). bf16 inference at width 768 only.
+
+**Speed** (`benchmarks/fp8_5090/token_dit_ab.py`: registry rows, eval, master weights, conditioning shared by the A samples, every row gate removed; one CUDA graph per variant captured under `static_weights()` + `static_inputs()` in the same process, 3 calls per replay after a 128 MB L2 flush (subtracted), median of 7 replays, 6 rounds alternating the order; default / variant, > 1 = e4m3 faster; the same-cubin control 0.98-1.03; raw `tok2.log`):
+
+| block A:L (M) | default us | expand (`safe`) | squeeze | qkvg | out | qkvg + expand | all four |
+|---|---|---|---|---|---|---|---|
+| Protenix 5:128 (640) | 154.7 | 1.067 | 0.993 | 1.162 | 0.984 | 1.253 | 1.244 |
+| Protenix 1:768 (768) | 195.7 | 1.052 | 0.994 | 1.178 | 1.004 | 1.246 | 1.270 |
+| Protenix 5:256 (1280) | 239.8 | 1.211 | 1.049 | 1.041 | 1.033 | 1.282 | 1.424 |
+| Protenix 1:1536 (1536) | 367.4 | 1.177 | 1.015 | 1.071 | 1.033 | 1.268 | 1.316 |
+| Protenix 5:384 (1920) | 365.5 | 1.208 | 1.085 | 1.066 | 1.063 | 1.304 | 1.510 |
+| Protenix 5:512 (2560) | 405.2 | 1.135 | 1.065 | 1.160 | 1.046 | 1.343 | 1.477 |
+| Protenix 5:768 (3840) | 606.3 | 1.116 | 1.058 | 1.116 | 1.039 | 1.280 | 1.488 |
+| Protenix 5:1024 (5120) | 736.7 | 1.114 | 1.080 | 1.110 | 1.060 | 1.205 | 1.370 |
+| Protenix 5:1536 (7680) | 1187.1 | 1.106 | 1.066 | 1.107 | 1.065 | 1.220 | 1.392 |
+| Protenix 5:2048 (10240) | 1548.4 | 1.075 | 1.060 | 1.068 | 1.021 | 1.157 | 1.278 |
+| Boltz-2 5:128 (640) | 204.8 | 1.044 | 0.989 | 1.112 | 0.990 | 1.174 | 1.165 |
+| Boltz-2 5:256 (1280) | 301.1 | 1.276 | 1.038 | 1.026 | 1.027 | 1.336 | 1.455 |
+| Boltz-2 5:384 (1920) | 395.9 | 1.106 | 1.073 | 1.036 | 1.029 | 1.147 | 1.327 |
+| Boltz-2 5:768 (3840) | 719.1 | 1.141 | 1.055 | 1.103 | 1.034 | 1.258 | 1.404 |
+| Boltz-2 5:1024 (5120) | 882.1 | 1.137 | 1.044 | 1.071 | 1.046 | 1.228 | 1.365 |
+| Chai-1 5:128 (640) | 120.4 | 1.271 | 0.977 | (n/a) | 0.989 | 1.277 | 1.042 |
+| Chai-1 5:256 (1280) | 210.7 | 1.382 | 1.039 | (n/a) | 1.031 | 1.382 | 1.378 |
+| Chai-1 5:384 (1920) | 313.5 | 1.326 | 1.085 | (n/a) | 1.031 | 1.329 | 1.491 |
+| Chai-1 5:1024 (5120) | 629.5 | 1.143 | 1.064 | (n/a) | 1.045 | 1.121 | 1.246 |
+| RoseTTAFold3 5:128 (640) | 170.6 | 1.061 | (n/a) | (n/a) | (n/a) | 1.036 | 1.038 |
+| RoseTTAFold3 5:256 (1280) | 258.5 | 1.193 | (n/a) | (n/a) | (n/a) | 1.215 | 1.215 |
+| RoseTTAFold3 5:384 (1920) | 397.0 | 1.183 | (n/a) | (n/a) | (n/a) | 1.187 | 1.212 |
+| RoseTTAFold3 5:1024 (5120) | 765.9 | 1.082 | (n/a) | (n/a) | (n/a) | 1.083 | 1.087 |
+| MiniWorld 5:128 (640) | 176.5 | 1.049 | 0.994 | 1.141 | 0.992 | 1.214 | 1.196 |
+| MiniWorld 5:256 (1280) | 274.4 | 1.186 | 1.042 | 1.033 | 1.023 | 1.248 | 1.367 |
+| MiniWorld 5:1024 (5120) | 807.2 | 1.089 | 1.058 | 1.088 | 1.050 | 1.158 | 1.298 |
+
+(n/a: the placement does not serve the class; those cells are the default again, 0.997-1.007 = the noise floor.) The `safe` placement alone (`expand`) gives 1.04-1.38x per block (H100: 0.94-0.98 of the time = 1.02-1.06x); the opt-in set 1.04-1.51x. Against the H100 route the 5090 gains more because its bf16 cuBLAS GEMMs reach only 137-185 TFLOPS of the 218 the card has, while the e4m3 ones reach 320-375 of 459.
+
+**Accuracy** (against the module in float64 on the PyTorch backend, the registry's random weights, the docs' err.py columns: update rms / update max relative to the update y64 - x, judge = max|y - y64| / max|y64|; every gate removed, all finite; raw `tok3.log`):
+
+| case | default (5090) | expand | squeeze | qkvg | out | qkvg + expand | all four | H100 expand / all four (table above) |
+|---|---|---|---|---|---|---|---|---|
+| Protenix A5 L384 | 0.87 / 0.92 % (5.1e-3) | 5.38 / 5.46 % (3.1e-2) | 3.74 / 3.76 % (2.1e-2) | 1.37 / 2.04 % (1.1e-2) | 1.03 / 1.77 % (9.9e-3) | 5.47 / 5.48 % (3.1e-2) | 6.61 / 6.94 % (3.9e-2) | 5.35 / 5.64 % (3.1e-2) / 6.58 / 7.83 % (4.4e-2) |
+| Protenix A5 L768 | 0.87 / 0.75 % (4.9e-3) | 5.31 / 4.53 % (3.0e-2) | 3.71 / 3.03 % (2.0e-2) | 1.87 / 1.96 % (1.3e-2) | 1.18 / 1.58 % (1.0e-2) | 5.56 / 4.80 % (3.2e-2) | 6.67 / 5.79 % (3.8e-2) | 5.36 / 5.61 % (3.4e-2) / 6.56 / 7.2 % (4.4e-2) |
+| Protenix A5 L1536 | 0.86 / 1.00 % (5.8e-3) | 5.40 / 5.62 % (3.3e-2) | 3.77 / 3.95 % (2.3e-2) | 1.10 / 2.23 % (1.3e-2) | 0.93 / 1.76 % (1.0e-2) | 5.44 / 5.40 % (3.1e-2) | 6.57 / 6.89 % (4.0e-2) | 5.39 / 5.51 % (2.8e-2) / 6.57 / 6.39 % (3.2e-2) |
+| Protenix A1 L768 | 0.88 / 0.88 % (5.2e-3) | 5.40 / 4.84 % (2.9e-2) | 3.77 / 4.54 % (2.7e-2) | 1.23 / 1.42 % (8.4e-3) | 0.99 / 1.48 % (8.8e-3) | 5.47 / 4.84 % (2.9e-2) | 6.58 / 5.86 % (3.5e-2) | 5.38 / 4.57 % (3.2e-2) / 6.57 / 5.85 % (4.1e-2) |
+| Protenix A5 L384, input x 0.05 | 0.82 / 0.85 % (8.4e-3) | 5.35 / 5.50 % (5.5e-2) | 3.73 / 3.48 % (3.5e-2) | 3.92 / 4.12 % (4.1e-2) | 2.15 / 2.22 % (2.2e-2) | 6.59 / 6.69 % (6.7e-2) | 7.79 / 7.60 % (7.6e-2) | 5.36 / 6.03 % (6.1e-2) / 7.58 / 8.33 % (8.5e-2) (L768) |
+| Protenix A5 L384, input x 20 | 12.68 / 19.91 % (6.3e-3) | 13.75 / 19.91 % (6.3e-3) | 13.19 / 19.91 % (6.3e-3) | 12.73 / 19.91 % (6.3e-3) | 12.69 / 19.91 % (6.3e-3) | 13.78 / 19.91 % (6.3e-3) | 14.25 / 19.91 % (6.3e-3) | 9.37 / 10.7 % (3.5e-3) / 10.1 / 10.7 % (3.5e-3) (L768) |
+| Boltz-2 A5 L384 | 0.94 / 0.78 % (6.6e-3) | 6.53 / 5.37 % (4.6e-2) | 3.72 / 2.94 % (2.5e-2) | 1.34 / 1.67 % (1.4e-2) | 1.07 / 1.34 % (1.1e-2) | 6.60 / 5.54 % (4.7e-2) | 7.52 / 6.17 % (5.3e-2) | |
+| Chai-1 A5 L384 | 0.75 / 0.80 % (6.8e-3) | 4.97 / 5.66 % (4.8e-2) | 3.47 / 3.52 % (3.0e-2) | (n/a) | 1.63 / 2.15 % (1.8e-2) | 4.97 / 5.66 % (4.8e-2) | 6.18 / 6.43 % (5.5e-2) | (B200 table: 4.95 % / 4.5e-2) |
+| RoseTTAFold3 A5 L384 | 0.88 / 1.03 % (5.9e-3) | 5.38 / 5.28 % (3.0e-2) | (n/a) | (n/a) | (n/a) | 5.38 / 5.28 % (3.0e-2) | 5.38 / 5.28 % (3.0e-2) | |
+| MiniWorld A5 L384 | 0.86 / 0.84 % (5.2e-3) | 5.38 / 5.28 % (3.2e-2) | 3.77 / 3.58 % (2.2e-2) | 1.13 / 2.00 % (1.2e-2) | 0.97 / 1.88 % (1.2e-2) | 5.42 / 4.91 % (3.0e-2) | 6.56 / 6.50 % (4.0e-2) | |
+
+The e4m3 placements land on the H100 route's errors (expand 5.3-5.4 % update rms, judge 3e-2; the all-four set 6.6 %); Boltz-2's up gate (three e4m3-rounded factors) 6.5 %. At input x 20 the update is a few % of the stream and the default's own update error is 12.7 % (bf16 of the 20x stream): e4m3 adds about 1 point there (H100: 7.7 -> 9.4). Tests `tests/gpu/test_token_dit_fp8_sm120.py` (15, pass on the 5090): expand accuracy / stress (x 0.05, x 20) / counters for the five classes, the opt-in placements per class (which ones serve, error bound), the default untouched byte for byte after e4m3 calls and below the gate, graph == eager (bit-equal), the `safe` preset (`fp8.enable("safe")` -> `PLACES == {"expand"}`, `route_stats()["token_dit"]`, `disable()`).
+
+### Atom DiT: e4m3 pre / post GEMMs of the atom block (`kernels/dit_variants/cuda/atom_fp8_sm120.py`, `atom_f8_sm120.cu`; branch `fp8-5090-dit`)
+
+`fp8.SM120_ROUTES["atom_dit"]`: the H100 module's switch and interface (`MINIWORLD_ATOMDIT_FP8` = `1` in `safe` / `engine-fp8`; `pre`, `post`, `1` / `all`; `FP8_ROWS`, `enable_fp8`, `STATS` with the H100 keys + `why_rows`). On the 5090 every atom DiT block of the H100 route's classes (Protenix: chained K / V AdaLN; OpenFold3: parallel K / V; Boltz-2: up gate; RoseTTAFold3: q / k LayerNorm; Chai-1: slid window) runs `dit_variants/cuda/train.atom_stack_train` (the sm_80 row passes of `train_rows.cu`, cuBLAS for every projection, the mma.sync window attention; `local_dit_sm80_block` is A100 / B200 only: its weights do not fit the 99 KB of shared memory). ESMFold2's atom blocks (H100 `RMS` option) run other kernels on the 5090 and are not covered.
+
+**Where the time goes (default, A5 N4096, M = 20480, profile `prof2.log`).** The projections are K = 128 / 256 GEMMs on which cuBLAS picks 64x64 / wmma kernels (50-110 TFLOPS): about 40 % of the block (55 us 64x64 x 6, 34 + 28 us wmma); at N16384 the wmma GEMMs are 413 of 880 us. The same GEMMs on e4m3 (`_scaled_mm` row-wise, `dit_profile.py gemm_atom`, M 20480 / 81920): expand 30.8 -> 15.3 / 122.5 -> 50.4 us, q | g 12.1 -> 8.9 / 59.2 -> 27.4, out 7.6 -> 5.8 / 29.2 -> 15.2, squeeze 12.8 -> 7.9 / 55.4 -> 22.4.
+
+**Route.** A bf16 inference block call (no gradient; bf16 activations and conditioning table; at least `MIN_ROWS` = 4096 rows A N) runs `atom_fp8_sm120.block` instead of the autograd Function: the same algorithm with `pre` = the AdaLN rows of the query / key-value inputs written as e4m3 with the row scale (`ln_mod_q8`, Protenix's chained K / V AdaLN from the fp32 query rows), q (bias in the GEMM) / gate / k / v on e4m3; `post` = the gated core output (`gate_q8`), the transition input (`res_ln_q8`: the residual xp in fp32 and LN(xp) f(sc) + sh as e4m3; the parallel block: the block input's AdaLN rows) and the SwiGLU hidden (`glu_q8`, Boltz-2: silu(a) b u) as e4m3, out projection / expand / squeeze on e4m3. Scales as the token DiT (dynamic per row, weights per channel, once per weight version): no calibration, no guard. The window attention, the pair bias / edge / tail windows, RoseTTAFold3's q / k LayerNorm, the residual passes are the default kernels. A per-sample conditioning table ([A N, 8 d]) is served as well (the H100 route takes a shared one only). Training, fp32 and an fp32 table run the default (counted `why_save` / `why_tf32`).
+
+**Gate** `MIN_ROWS` = 4096 rows: pre + post 0.98 at A1 N1024 (Protenix / OpenFold3; pre or post alone 1.02-1.09, inside the noise of 1024-row blocks), 1.08-1.13 from 4096 rows.
+
+**Speed** (`benchmarks/fp8_5090/atom_dit_ab.py`, the protocol of the token DiT table: registry rows, eval, master weights, shared conditioning, CUDA graphs under `static_weights()` + `static_inputs()`, L2 flushed, 6 rounds; default / variant; raw `atom2.log`):
+
+| block A:N (M) | default us | pre + post (`safe`) | pre | post | control |
+|---|---|---|---|---|---|
+| Protenix 1:1024 (1024) | 89.8 | 0.982 | 1.047 | 1.088 | 1.016 |
+| Protenix 1:4096 (4096) | 144.7 | 1.090 | 1.072 | 1.113 | 1.005 |
+| Protenix 5:1024 (5120) | 114.3 | 1.126 | 1.084 | 1.157 | 0.996 |
+| Protenix 5:2048 (10240) | 163.8 | 1.206 | 1.093 | 1.198 | 1.004 |
+| Protenix 5:4096 (20480) | 237.6 | 1.230 | 1.099 | 1.192 | 0.997 |
+| Protenix 5:8192 (40960) | 419.6 | 1.263 | 1.090 | 1.200 | 1.001 |
+| Protenix 5:16384 (81920) | 850.8 | 1.398 | 1.135 | 1.251 | 0.998 |
+| Protenix 1:16384 (16384) | 364.7 | 1.084 | 1.014 | 1.040 | 0.962 |
+| OpenFold3 1:1024 (1024) | 133.2 | 0.978 | 1.019 | 1.049 | 0.992 |
+| OpenFold3 5:1024 (5120) | 160.4 | 1.086 | 1.060 | 1.111 | 1.010 |
+| OpenFold3 5:2048 (10240) | 209.3 | 1.154 | 1.065 | 1.144 | 1.004 |
+| OpenFold3 5:8192 (40960) | 470.0 | 1.225 | 1.077 | 1.193 | 0.996 |
+| OpenFold3 5:16384 (81920) | 902.3 | 1.365 | 1.113 | 1.228 | 1.006 |
+| Boltz-2 5:1024 (5120) | 102.2 | 1.125 | 1.076 | 1.160 | 0.997 |
+| Boltz-2 5:2048 (10240) | 164.4 | 1.218 | 1.098 | 1.215 | 1.004 |
+| Boltz-2 5:16384 (81920) | 925.6 | 1.343 | 1.106 | 1.209 | 1.002 |
+| Chai-1 slide 5:1024 (5120) | 157.5 | 1.090 | 1.034 | 1.091 | 1.001 |
+| Chai-1 slide 5:16384 (81920) | 750.4 | 1.393 | 1.104 | 1.178 | 0.989 |
+| RoseTTAFold3 5:1024 (5120) | 106.3 | 1.124 | 1.067 | 1.115 | 1.007 |
+| RoseTTAFold3 5:16384 (81920) | 862.2 | 1.422 | 1.143 | 1.215 | 1.022 |
+
+H100 for comparison: pre + post 0.895-0.968 of the time (1.03-1.12x). The 5090 gains more because its default projections run on poor cuBLAS kernels for K = 128 (the e4m3 GEMMs reach 150-240 TFLOPS there).
+
+**Accuracy** (against the module in float64 on the PyTorch backend, registry weights; update rms / update max, judge = max|y - y64| / max|y64|, rms_rel = ||y - y64|| / ||y64|| (the H100 table's column); raw `atom1.log`):
+
+| case | default (5090) | pre + post | pre | post | H100 pre + post judge / rms_rel |
+|---|---|---|---|---|---|
+| Protenix A5 N1024 | 0.76 / 0.74 % (5.4e-3), rel 0.32 % | 6.44 / 5.90 % (4.3e-2), rel 2.73 % | 1.76 / 1.66 % (1.2e-2), rel 0.75 % | 6.25 / 6.14 % (4.5e-2), rel 2.65 % | (OpenFold3 N1024) 5.73e-2 / 2.87 % |
+| OpenFold3 A5 N4096 | 0.76 / 0.89 % (6.5e-3), rel 0.32 % | 6.46 / 5.87 % (4.3e-2), rel 2.72 % | 1.77 / 1.93 % (1.4e-2), rel 0.75 % | 6.26 / 6.78 % (4.9e-2), rel 2.64 % | 4.83e-2 / 2.86 % |
+| Protenix A5 N4096 | 0.76 / 0.80 % (5.7e-3), rel 0.32 % | 6.45 / 6.90 % (4.9e-2), rel 2.72 % | 1.80 / 2.25 % (1.6e-2), rel 0.76 % | 6.26 / 7.29 % (5.2e-2), rel 2.64 % | 4.78e-2 / 2.86 % |
+| Chai-1 slide A5 N4096 | 0.74 / 1.08 % (9.7e-3), rel 0.57 % | 6.88 / 8.89 % (8.0e-2), rel 5.36 % | 4.33 / 8.30 % (7.5e-2), rel 3.37 % | 5.40 / 7.03 % (6.3e-2), rel 4.20 % | 9.77e-2 / 5.64 % |
+| Boltz-2 A5 N4096 | 0.84 / 0.70 % (6.9e-3), rel 0.40 % | 7.39 / 6.77 % (6.6e-2), rel 3.50 % | 1.73 / 2.34 % (2.3e-2), rel 0.82 % | 7.23 / 6.82 % (6.7e-2), rel 3.42 % | |
+| RoseTTAFold3 A5 N4096 | 0.76 / 0.73 % (5.0e-3), rel 0.31 % | 6.39 / 5.88 % (4.0e-2), rel 2.61 % | 1.30 / 1.38 % (9.4e-3), rel 0.53 % | 6.30 / 5.63 % (3.8e-2), rel 2.58 % | |
+| OpenFold3 A5 N4096, input x 0.05 | 0.82 / 0.83 % (8.2e-3) | 7.81 / 8.42 % (8.3e-2) | 4.29 / 5.00 % (4.9e-2) | 6.60 / 6.13 % (6.0e-2) | |
+| OpenFold3 A5 N4096, input x 20 | 10.30 / 11.29 % (4.9e-3) | 12.12 / 13.00 % (5.6e-3) | 10.41 / 11.19 % (4.8e-3) | 12.02 / 13.00 % (5.6e-3) | |
+
+The H100 route's level (rms_rel 2.6-2.7 % against 2.86 %, Chai-1 5.4 % against 5.6 %; judge 4-5e-2, Chai-1 8e-2 against 9.8e-2); post (the SwiGLU hidden and the transition input) carries most of it, as on the H100. Tests `tests/gpu/test_atom_dit_fp8_sm120.py`: accuracy and counters per class and part at input x 1 / 0.05 / 20, the default untouched byte for byte after e4m3 calls and below the row gate, training not served (`why_save`), graph == eager (bit-equal; Protenix, Chai-1 slide), a per-sample conditioning, the `safe` preset (`FP8_ROWS == {pre, post}`, `status()["atom_dit"]`, `route_stats()["atom_dit"]`, `disable()`).
+
+**Token / atom DiT: default bytes, prebuild, tests.** With the switches off the default outputs are byte-identical to the base `5090-int` a24401b61 (`benchmarks/fp8_5090/default_bytes.py`, eager before and after a CUDA-graph capture: TokenDiTProtenix / MiniWorld / Boltz-2 / RoseTTAFold3 / Chai-1 A5 L384 and Protenix A1 L768, AtomDiTProtenix / OpenFold3 / Boltz-2 / RoseTTAFold3 / Chai-1 slide A5 N1024 and Protenix A5 N4096: 12 / 12 equal); no module `version` / `backend_versions` change. `_prebuild --arch sm120 --list` (CPU, same environment): 69 -> 71 artifacts, added `token_f8_sm120` [ac4158ed] (`conditioned_transition/cuda/__init__._prebuild_sm120`: a bf16 eval row of a token DiT class at width 768) and `atom_f8_sm120` [1e0dc57f] (`dit_variants/cuda/__init__.prebuild`: a bf16 eval row of the five atom classes), the keys the runtime JIT built; every other key unchanged (the default sources are untouched; the hooks are Python). Tests on the 5090: `test_token_dit_fp8_sm120.py` 15, `test_atom_dit_fp8_sm120.py` 11, with `test_transition_fp8_sm120.py`, `test_boltz2_upgate_transition_sm120.py`, `test_token_pair_bias_hoist_sm80.py`: 51 passed; `tests/cpu/test_fp8_switch.py` 27 passed.
+
+Not done: OPM / PWA routes on sm_120 (no e4m3 kernel; their slots run the default); ESMFold2's atom DiT and TokenDiTMiniWorldBiasOnly (no 5090 FP8 form; the latter has none on the H100 either); a fused e4m3 expand + SwiGLU kernel (the expand writes [a | b] in bf16 and the default SwiGLU pass reads it back: about 6 + 10 us at M 2560 a block); the TriAttn d_pair-64 core (Chai-1); a custom `mma.sync` e4m3 contraction (cuBLASLt TN is used; the non-block-scaled path works on sm_120 with CUDA 13 driver / torch 2.13 cu129, only the block-scaled forms were reported failing); the plane formation of the grouped long-L path (L > ~3000) stays bf16; end-level (FoldForge) runs of the token / atom DiT routes on the 5090.
 
 
 ## Combined tree `fp8c/all` (2026-11-19, base engine 3.0.1 = origin/main f5be1df46): branches, route matrix, 5I28
