@@ -44,6 +44,9 @@ QK_HEADROOM = 2.0  # q / k scales: |q| / sq, |k| sq <= 448 / QK_HEADROOM at the 
 #: smallest L the e4m3 core takes (below it the default core runs): measured same-process A-B, docs/fp8.md "RTX 5090"
 QK = os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_QK", "1") != "0"  # e4m3 q / k where the model whitelist has them (the fused d_pair-128 kind)
 MIN_L = int(os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_MINL", "640"))
+#: the PV-only core (no e4m3 q / k: the unfused kinds, QK off, or a site whose q / k saturated) is 0.97-1.05x of the default on the 5090 (same-process A-B, docs/fp8.md
+#: "RTX 5090"): off unless MINIWORLD_TRIATTN_SM120_FP8_PVONLY=1; without it such calls run the default core
+PV_ONLY = os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_PVONLY", "0") == "1"
 _DELEGATED = frozenset({"FP8_PV", "FP8_PV_FUSED", "FP8_PV_UNFUSED", "FP8_PV_D64", "FP8_PV_HL", "FP8_VSCALE_AUTO", "FP8_PV_MIN_S", "FP8_PV_FRONT_MIN_S", "FP8_QK"})
 
 
@@ -149,11 +152,13 @@ def kind_of(d_pair: int, heads: int) -> str:
 
 
 def serves(x: torch.Tensor, d_pair: int, heads: int, hd: int, length: int) -> bool:
-    """Python-level test: does the e4m3 core take this inference call (switch on for the call-site kind, bf16, 32-channel heads, L % 128 == 0, L >= MIN_L)?"""
+    """Python-level test: does the e4m3 core take this inference call (switch on for the call-site kind, e4m3 q / k on it unless PV_ONLY, bf16, 32-channel heads, L % 128 == 0, L >= MIN_L)?"""
     if not _hs.FP8_PV or x.dtype != torch.bfloat16 or torch.is_grad_enabled():
         return False
     if not (_hs.FP8_PV_FUSED if kind_of(d_pair, heads) == "fused" else _hs.FP8_PV_UNFUSED):
         return False
+    if not PV_ONLY and not (QK and _hs.FP8_QK and kind_of(d_pair, heads) == "fused"):
+        return False  # PV-only: no measured gain on the 5090
     return hd == 32 and heads in (1, 2, 3, 4, 6, 8, 12, 16) and length % 128 == 0 and length >= max(MIN_L, 256)
 
 
@@ -174,6 +179,8 @@ def route(q, k, v, bias, g, a, mask, site, b: int, length: int, heads: int, d_pa
             return False
         s = _calibrate(dev, site, q, k, v, heads, want_qk)
     qk = want_qk and s.qk
+    if not qk and not PV_ONLY:
+        return False  # q / k dropped after a saturation (or no room at calibration): the PV-only core is no gain, the default core runs
     ext = _ext()
     peak = _guard(dev)
     rows = b * length
@@ -200,6 +207,8 @@ def route(q, k, v, bias, g, a, mask, site, b: int, length: int, heads: int, d_pa
         if flags[2] or flags[3]:
             _drop_qk()
             qk = False
+            if not PV_ONLY:
+                return False  # the default core redoes the call
             k8 = v8.new_empty((0,))
             peak[2:4].zero_()
         if flags[1]:

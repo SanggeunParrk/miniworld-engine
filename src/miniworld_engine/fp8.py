@@ -52,7 +52,7 @@ of each site (calibration) and kept for the process. A value past the e4m3 range
 :func:`check` once (one host sync per route): True means some route saturated and was rescaled -- run that forward again (at most 3 times).
 OuterProductMean (``bound``), token DiT and atom DiT (exact per-row scales) cannot saturate.
 
-The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: the TriMul slot only, :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090") and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
+The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: the TriMul and TriAttn slots, :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090") and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
 default route, whose outputs are bit-identical with FP8 off.
 """
 

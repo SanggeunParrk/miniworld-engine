@@ -44,13 +44,14 @@ def f8():
     from miniworld_engine import fp8
     from miniworld_engine.kernels.triangle_attention.cuda import sm120_fp8 as F8
 
-    old = (F8.MIN_L, F8.GUARD, F8.QK)
+    old = (F8.MIN_L, F8.GUARD, F8.QK, F8.PV_ONLY)
+    F8.PV_ONLY = True  # the tests below exercise the PV-only core too; test_pv_only_gate checks the shipped setting
     F8._SITES.clear()
     fp8.disable()
     fp8.reset_route_stats()
     yield F8
     fp8.disable()
-    F8.MIN_L, F8.GUARD, F8.QK = old
+    F8.MIN_L, F8.GUARD, F8.QK, F8.PV_ONLY = old
     F8._SITES.clear()
 
 
@@ -220,3 +221,38 @@ def test_qk_saturation_drops_qk(f8):
     assert not site.qk
     assert torch.isfinite(y).all()
     assert fp8.route_stats()["triattn"]["retries"] >= 1
+
+
+def test_pv_only_gate(f8):
+    """shipped setting (PV_ONLY off): only calls with e4m3 q / k take the e4m3 core; the unfused kind, QK off, and a site whose q / k saturated run the default core."""
+    from miniworld_engine import fp8
+
+    f8.PV_ONLY = False
+    f8.MIN_L = 0
+    n = 256
+    mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+    _on()
+    m256 = _make(256, 8)
+    _run(m256, torch.randn(1, n, n, 256, device="cuda").bfloat16(), mask)
+    assert fp8.route_stats()["triattn"]["pv_front"] == 0  # unfused kind: PV only
+    m = _make(128, 4)
+    x = torch.randn(1, n, n, 128, device="cuda").bfloat16()
+    f8.QK = False
+    _run(m, x, mask)
+    assert fp8.route_stats()["triattn"]["pv_front"] == 0
+    f8.QK = True
+    y0 = _run(m, x, mask)
+    assert fp8.route_stats()["triattn"]["qk"] == 1
+    (site,) = [s for s in f8._SITES.values() if s.qk]
+    site.ks.mul_(2.0**10)
+    site.qs.mul_(2.0**10)
+    y = _run(m, x, mask)  # saturates, q / k dropped, the default core redoes the call
+    assert not site.qk and torch.isfinite(y).all()
+    fp8.disable()
+    y_def = _run(m, x, mask)
+    assert torch.equal(y, y_def), "after the q / k drop the call is the default core's"
+    _on()
+    st = dict(fp8.route_stats()["triattn"])
+    _run(m, x, mask)
+    assert fp8.route_stats()["triattn"]["pv_front"] == st["pv_front"]
+    assert torch.isfinite(y0).all()

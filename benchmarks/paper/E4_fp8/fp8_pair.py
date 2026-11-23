@@ -72,6 +72,7 @@ def main(argv=None) -> int:
     args = _parse(argv)
     if args.gates == "none":
         os.environ["MINIWORLD_TRIMUL_FP8_MINL"] = "0"  # before the first import of the kernels
+        os.environ["MINIWORLD_TRIATTN_SM120_FP8_PVONLY"] = "1"  # and its PV-only core (unfused kinds; off when shipped)
         os.environ["MINIWORLD_TRIATTN_B200_FP8_MINS"] = "0"  # the B200 TriAttn gate (a no-op on every other card)
         os.environ["MINIWORLD_TRIATTN_SM120_FP8_MINL"] = "0"  # the RTX 5090 e4m3 TriAttn gate (a no-op on every other card)
     import torch
