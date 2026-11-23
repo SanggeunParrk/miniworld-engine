@@ -48,7 +48,7 @@ def test_quant_rows_near_zero_rows_stay_finite() -> None:
     w[5, :100] = 0
     w[9] = (torch.randn(768, device="cuda") * 1e-38).bfloat16()
     a8, sa = F.quant_weight(w)
-    r8, sr = F.quant_weight_ref(w)
+    _, sr = F.quant_weight_ref(w)
     assert torch.isfinite(a8.float()).all() and torch.isfinite(sa).all()
     torch.testing.assert_close(sa, sr, rtol=1e-6, atol=0)
     assert torch.equal(a8[3].float(), torch.zeros(768, device="cuda")) and torch.equal(a8[5, :100].float(), torch.zeros(100, device="cuda"))
@@ -60,7 +60,7 @@ def test_quant_rows_near_zero_rows_stay_finite() -> None:
 def test_weight_pack_builds_only_the_placements_in_force() -> None:
     F = _F()
     g = torch.Generator(device="cuda").manual_seed(2)
-    mk = lambda n, k: (torch.randn(n, k, device="cuda", generator=g) * 0.05).bfloat16()  # noqa: E731
+    mk = lambda n, k: (torch.randn(n, k, device="cuda", generator=g) * 0.05).bfloat16()
     args = (mk(3072, 768), mk(768, 768), mk(768, 1536), (mk(3072, 768), 128), mk(3072, 1).reshape(-1))
     old = F.PLACES
     try:
@@ -118,7 +118,7 @@ def test_capture_reads_the_eager_pack_with_grad_off() -> None:
     (or with grad on) the scoped gates do."""
     F = _F()
     g = torch.Generator(device="cuda").manual_seed(3)
-    mk = lambda n, k: (torch.randn(n, k, device="cuda", generator=g) * 0.05).bfloat16()  # noqa: E731
+    mk = lambda n, k: (torch.randn(n, k, device="cuda", generator=g) * 0.05).bfloat16()
     args = (mk(3072, 768), mk(768, 768), mk(768, 1536), (mk(3072, 768), 128), mk(3072, 1).reshape(-1))
     old, old_min = F.PLACES, F.MIN_ROWS
     F.PLACES, F.MIN_ROWS = frozenset(("expand",)), None
