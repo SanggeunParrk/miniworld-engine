@@ -12,7 +12,7 @@ the modules that select it (every other module, and every module by default, run
 (an instance attribute ``set_backend`` installs, so ``forward`` and a runtime that calls ``_forward_<backend>`` directly both reach it) runs
 inside :class:`BackendScope`, which turns the routes on for the call and restores the switches after it (a module on another backend called
 through its ``forward`` inside it runs with the switches as they were before). Its range is ``cuda``'s; calls the FP8 routes do not take (fp32, cards other than
-H100) run the default kernels.
+H100 / B200 / the RTX 5090 TriMul route) run the default kernels.
 
 ``engine-fp8`` accelerates inference; training under ``engine-fp8`` runs the default bf16 path: every FP8 route is a forward (inference)
 path with no FP8 backward, so a call in train mode (``module.training``, dropout live) or with autograd on (``torch.is_grad_enabled()``)
@@ -52,7 +52,7 @@ of each site (calibration) and kept for the process. A value past the e4m3 range
 :func:`check` once (one host sync per route): True means some route saturated and was rescaled -- run that forward again (at most 3 times).
 OuterProductMean (``bound``), token DiT and atom DiT (exact per-row scales) cannot saturate.
 
-The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a) and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
+The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: the TriMul slot only, :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090") and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
 default route, whose outputs are bit-identical with FP8 off.
 """
 

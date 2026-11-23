@@ -315,7 +315,7 @@ def test_b200_route_table():
     assert fp8.SLOTS == ("triattn", "trimul", "opm", "pwa", "transition", "token_dit", "atom_dit")
     assert set(fp8.B200_ROUTES) <= set(fp8.SLOTS)
     assert fp8.serves_sm100("transition")
-    assert fp8.arch() in ("sm90", "sm100")
+    assert fp8.arch() in ("sm90", "sm100", "sm120")
 
 
 _B200_POLICY = (
