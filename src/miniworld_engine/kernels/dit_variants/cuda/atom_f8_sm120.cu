@@ -53,6 +53,9 @@ __device__ __forceinline__ void store_q8(const float4 (&y)[NV], uint8_t* __restr
 #pragma unroll
   for (int v = 0; v < NV; ++v) am = fmaxf(am, amax4(y[v]));
   am = warp_max(am);
+  // floor 1e-30 (the H100 rows' quant_weight_ref rule): a row of tiny values (am ~1e-39, e.g. the gated output of a masked atom) made
+  // 448 / am = inf and 0 x inf = NaN bytes (AF3 5I28 n = 4: non-finite coordinates)
+  if (am > 0.f) am = fmaxf(am, 1e-30f);
   const float inv = am > 0.f ? 448.f / am : 1.f;
 #pragma unroll
   for (int v = 0; v < NV; ++v) *reinterpret_cast<uint32_t*>(out + v * 128 + 4 * lane) = q4(y[v], inv);

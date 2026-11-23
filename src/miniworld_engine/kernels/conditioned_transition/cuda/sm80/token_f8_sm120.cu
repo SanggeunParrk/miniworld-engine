@@ -53,7 +53,9 @@ __device__ __forceinline__ float sig(float v) { return 1.f / (1.f + __expf(-v));
 // Store the row's NV float4 (column vcol = v * 128 + 4 lane) as e4m3 with the row scale amax / 448.
 template <int NV>
 __device__ __forceinline__ void store_q8(const float4 (&y)[NV], float am, uint8_t* __restrict__ out, float* __restrict__ srow, int lane) {
+  // floor 1e-30 (the H100 rows' quant_weight_ref rule): a row of tiny values (am 1e-39) made 448 / am = inf and 0 x inf = NaN bytes
   am = warp_max(am);
+  if (am > 0.f) am = fmaxf(am, 1e-30f);
   const float s = am > 0.f ? am / 448.f : 1.f;
   const float inv = am > 0.f ? 448.f / am : 1.f;
 #pragma unroll

@@ -326,3 +326,44 @@ def test_esmfold2_graph_equals_eager_and_safe(f8):
         assert st["calls"] >= 1 and st["pre"] >= 1 and st["post"] >= 1, st
     finally:
         fp8._restore(snap)
+
+
+# ------------------------------------------------------------------------------------------------------------ tiny rows (regression)
+def _tiny_rows(width: int) -> torch.Tensor:
+    """bf16 rows: zeros, values ~1e-39 (fp32 / bf16 subnormal: 448 / amax overflowed to inf, 0 x inf = NaN bytes), ~1e-31, and N(0, 1)."""
+    g = torch.Generator(device="cuda").manual_seed(0)
+    r = torch.randn(4, width, device="cuda", generator=g)
+    rows = torch.stack([torch.zeros(width, device="cuda"), r[0] * 1e-39, r[1] * 1e-31, r[2]])
+    rows[1, ::7] = 0.0  # zeros inside a subnormal row
+    return rows.repeat(64, 1).bfloat16().contiguous()
+
+
+@pytest.mark.parametrize("width", [128, 256])
+def test_row_quant_of_tiny_rows_is_finite(width):
+    """Regression (5090-int: AF3 5I28 n = 4, the atom block's gated output of masked atoms): rows of subnormal values quantise to finite e4m3
+    bytes (amax floored at 1e-30, the H100 rule) and dequantise to the input within e4m3 rounding; atom (quant_q8, gate_q8) and token (quant_rows)."""
+    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as T
+    from miniworld_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as A
+
+    x = _tiny_rows(width)
+    M = x.shape[0]
+    outs = []
+    o8, s = torch.empty(M, width, device="cuda", dtype=torch.float8_e4m3fn), torch.empty(M, device="cuda")
+    A.ext().quant_q8(x, o8, s)
+    outs.append((o8.clone(), s.clone(), x))
+    if width == 128:
+        o8, s = torch.empty(M, 128, device="cuda", dtype=torch.float8_e4m3fn), torch.empty(M, device="cuda")
+        g = torch.full_like(x, 30.0)  # sigmoid(g) = 1: gate_q8 output = x
+        A.ext().gate_q8(x, g, o8, s)
+        outs.append((o8.clone(), s.clone(), x))
+    o8, s = torch.empty(M, width, device="cuda", dtype=torch.float8_e4m3fn), torch.empty(M, device="cuda")
+    T.ext().quant_rows(x, o8, s)
+    outs.append((o8.clone(), s.clone(), x))
+    for o8, s, ref in outs:
+        y = o8.float() * s[:, None]
+        assert torch.isfinite(y).all() and torch.isfinite(s).all()
+        err = (y - ref.float()).abs().amax(1) / ref.float().abs().amax(1).clamp_min(1e-45)
+        am = ref.float().abs().amax(1)
+        assert (err[am >= 1e-30] < 0.07).all(), err.view(64, 4)[0]
+        assert ((y - ref.float()).abs()[am < 1e-30] <= 1e-30).all()  # below the floor: flushed toward 0, absolutely negligible
+        assert (y[am == 0] == 0).all()
