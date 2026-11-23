@@ -158,3 +158,36 @@ def test_ln_vt8_big_keeps_y(f8) -> None:
     vd = vt.float().transpose(1, 2) / 8.0
     ref = v.float()
     assert float((vd - ref).pow(2).mean().sqrt() / ref.pow(2).mean().sqrt()) < 0.04
+
+
+def _capture_matches_eager(kern, inp) -> None:
+    with torch.no_grad():
+        eager = kern(**inp)  # calibrates
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            kern(**inp)
+        torch.cuda.current_stream().wait_stream(s)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):  # raised cudaErrorStreamCaptureUnsupported (take_overflow's .item()) before the capture check
+            out = kern(**inp)
+        g.replay()
+        torch.cuda.synchronize()
+    assert torch.equal(out, eager)
+
+
+@pytest.mark.skipif(not _H100, reason="H100")
+@pytest.mark.parametrize(("d_msa", "d_pair", "c", "n", "s"), [(64, 128, 8, 384, 128), (128, 256, 16, 272, 64), (256, 512, 32, 384, 64)])
+def test_graph_capture_with_sync_guard(f8, d_msa: int, d_pair: int, c: int, n: int, s: int) -> None:
+    """The default guard ("sync") inside a CUDA-graph capture: the call takes the lazy form (no host sync), replay = eager."""
+    f8.GUARD = "sync"
+    base, inp = _case(d_msa, d_pair, c, n, s)
+    kern = copy.deepcopy(base).set_backend("cuda")
+    f8.ENABLED = True
+    calls = f8.STATS["wide_calls"]
+    try:
+        _capture_matches_eager(kern, inp)
+    finally:
+        f8.ENABLED = False
+    assert f8.STATS["wide_calls"] == calls + 3  # the route ran eager, warm-up and in the capture
+    assert not f8.take_overflow()

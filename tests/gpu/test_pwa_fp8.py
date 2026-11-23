@@ -122,3 +122,31 @@ def test_gates() -> None:
         assert not F8.serves(4096, 768)
     finally:
         F8.ENABLED, F8.MIN_N, F8.MIN_S = saved
+
+
+@pytest.mark.skipif(not _H100, reason="H100")
+def test_graph_capture_with_sync_guard(f8) -> None:
+    """The default guard ("sync") inside a CUDA-graph capture: the call takes the lazy form (no host sync), replay = eager."""
+    f8.GUARD = "sync"
+    base, inp = _case(128, 512, 64)
+    kern = copy.deepcopy(base).set_backend("cuda")
+    f8.ENABLED = True
+    calls = f8.STATS["calls"]
+    try:
+        with torch.no_grad():
+            eager = kern(**inp)
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                kern(**inp)
+            torch.cuda.current_stream().wait_stream(s)
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                out = kern(**inp)
+            g.replay()
+            torch.cuda.synchronize()
+    finally:
+        f8.ENABLED = False
+    assert f8.STATS["calls"] == calls + 3
+    assert torch.equal(out, eager)
+    assert not f8.take_overflow()
