@@ -567,3 +567,31 @@ def test_d64_env_model_at_import():
     for env in ({"MINIWORLD_FP8": "safe", "MINIWORLD_FP8_MODEL": "af3"}, {"MINIWORLD_FP8": "safe"}, {"MINIWORLD_FP8_MODEL": "chai1"}):
         st = stats(**env)
         assert st.get("pv_d64", 0) == 0, (env, st)
+
+
+def test_d64_env_model_at_import():
+    """MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=chai1 (read at import, as on the H100) fires the 64-channel e4m3 core on Chai-1's trunk node at L 256; af3 / no model do not."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    _needs_5090()
+    code = (
+        "import json, torch; from miniworld_engine import fp8; from miniworld_engine.modules.triangle import TriangleAttention\n"
+        "torch.manual_seed(0); m = TriangleAttention(256, 4, model='chai1', p_drop=0.0).cuda().eval().to(torch.bfloat16); m.set_backend('cuda')\n"
+        "x = torch.randn(1, 256, 256, 256, device='cuda').bfloat16(); mk = torch.ones(1, 256, dtype=torch.bool, device='cuda')\n"
+        "with torch.no_grad(): m(x, mk)\n"
+        "print(json.dumps(fp8.route_stats()['triattn']))"
+    )
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("MINIWORLD_FP8", "MINIWORLD_TRIATTN"))}
+
+    def stats(**env):
+        out = subprocess.run([sys.executable, "-c", code], env={**base, **env}, capture_output=True, text=True, check=True)
+        return json.loads(out.stdout.strip().splitlines()[-1])
+
+    a = stats(MINIWORLD_FP8="safe", MINIWORLD_FP8_MODEL="chai1")
+    assert a.get("pv_d64", 0) == 1 and a.get("qk", 0) == 0, a
+    for env in ({"MINIWORLD_FP8": "safe", "MINIWORLD_FP8_MODEL": "af3"}, {"MINIWORLD_FP8": "safe"}, {"MINIWORLD_FP8_MODEL": "chai1"}):
+        st = stats(**env)
+        assert st.get("pv_d64", 0) == 0, (env, st)

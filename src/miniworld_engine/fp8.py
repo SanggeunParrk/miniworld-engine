@@ -101,7 +101,7 @@ TRIATTN_MODELS = MappingProxyType(
         "protenix2": (frozenset({"unfused"}), False),
         "openfold3": (frozenset({"fused", "unfused"}), True),
         "rosettafold3": (frozenset({"fused"}), True),
-        "chai1": (frozenset({"d64", "unfused"}), False),  # d64: the 64-channel-head core (trunk + confidence; shipped gate S >= 1024), unfused: the template stack
+        "chai1": (frozenset({"d64", "unfused"}), False),  # d64: the 64-channel-head core (trunk + confidence; H100 gate S >= 1024, RTX 5090 L >= 256), unfused: the template stack
     }
 )
 _NO_TRIATTN: tuple[frozenset[str], bool] = (frozenset(), False)

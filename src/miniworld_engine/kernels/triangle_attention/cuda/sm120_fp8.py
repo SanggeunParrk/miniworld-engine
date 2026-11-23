@@ -13,6 +13,9 @@ Chain (the rows engine of ``sm80_wide._original_forward_ops``, inference, gated 
                                             ``mma.m16n8k32`` (e4m3), row sums from the same bytes, running max per 32-key slot, gate in the epilogue
     out projection                          unchanged
 
+64-channel heads (kind ``d64``: Chai-1's trunk / confidence head, ``sm80_wide.variant_forward_ops``; ``serves_d64`` / ``route(..., hd=64)``): the same chain with HD 64 tiles, q / k
+bf16 (as the H100 d64 route; e4m3 q / k opt-in ``MINIWORLD_TRIATTN_SM120_FP8_D64_QK=1``), the gate in the core's epilogue instead of ``gate_rows``, from L ``D64_MIN_L``.
+
 Guard: ``sync`` (eager calls: a saturated V redoes the call after widening the scale) or ``lazy`` (inside a capture / ``MINIWORLD_TRIATTN_SM120_FP8_GUARD=lazy``: the flag is read
 by ``fp8.check()`` outside the graph, the scale is widened in place so captured graphs follow); a capture of an uncalibrated site runs the default route.
 """
