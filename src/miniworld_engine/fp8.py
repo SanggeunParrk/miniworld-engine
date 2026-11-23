@@ -160,6 +160,7 @@ B200_OPTIN: dict[str, str] = {
 
 #: RTX 5090 (sm_120a, capability (12, 0)) route modules: slot -> module path (same interface as the H100 module of the slot).
 SM120_ROUTES: dict[str, str] = {
+    "triattn": "miniworld_engine.kernels.triangle_attention.cuda.sm120_fp8",
     "trimul": "miniworld_engine.kernels.trimul_inproj.cuda.sm120_fp8",
 }
 

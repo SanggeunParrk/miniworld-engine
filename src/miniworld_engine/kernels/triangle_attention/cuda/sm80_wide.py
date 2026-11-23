@@ -471,6 +471,17 @@ def _chunked_inference(x, weights, wo, ln_w, ln_b, mask, eps, transposed, cfg: C
     return out
 
 
+def _sm120_f8():
+    """The opt-in e4m3 P / V core module (``sm120_fp8``) when its switch (``h100_sm90.FP8_PV``) is on, else None: the default path never imports it."""
+    from . import h100_sm90 as _hs
+
+    if not _hs.FP8_PV:
+        return None
+    from . import sm120_fp8 as _f8
+
+    return _f8
+
+
 @opaque(fake=_original_forward_ops_fake, name="triangle_attention_sm80w_forward")
 def _original_forward_ops(
     x: torch.Tensor,
@@ -497,6 +508,7 @@ def _original_forward_ops(
     ):  # RTX 5090, past CHUNK_TOKENS: chunks of rows (the monolithic transient does not fit 32 GB next to a trunk)
         return [_chunked_inference(x, weights, wo, ln_w, ln_b, mask, eps, transposed, cfg._replace(fused=False), flip)]
     rows, core = _rows(), (None if cfg.native else _core._ext())
+    sm120 = _arch.on_sm120(x)
     b, length = x.shape[0], x.shape[1]
     t, d, dhp, n = b * length * length, cfg.d, cfg.dhp, cfg.n
     x2 = x.view(t, d)
@@ -633,7 +645,15 @@ def _original_forward_ops(
         # the gate is fused into the core's epilogue: a = bf16(sigmoid(g) o) is the output projection's operand, the plain output only when the backward needs it
         o = torch.empty((t, dhp), dtype=BF, device=dev) if save else x.new_empty((0,))
         a = torch.empty((t, dhp), dtype=BF, device=dev)
-        if not save and mask.numel() and length >= 384 and length % 384 == 0:
+        if (
+            not save
+            and sm120
+            and (_f8 := _sm120_f8()) is not None
+            and _f8.serves(x, d, cfg.h, hd, length)
+            and _f8.route(q, k, v, bias, g, a, mask, weights[2], b, length, cfg.h)
+        ):
+            pass  # opt-in e4m3 P / V core (sm120_fp8; the switch is off by default: the branches below, bit for bit)
+        elif not save and mask.numel() and length >= 384 and length % 384 == 0:
             indices = torch.empty((b, length), dtype=torch.int32, device=dev)
             counts = torch.empty((b,), dtype=torch.int32, device=dev)
             compact_bias = torch.empty_like(bias)
