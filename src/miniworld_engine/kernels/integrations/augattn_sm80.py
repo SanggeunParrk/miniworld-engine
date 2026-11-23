@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import functools
 import math
+import os
 from typing import cast
 
 import torch
@@ -251,6 +252,31 @@ def _penalties(kmask: torch.Tensor, a: int, batch: int, length: int, padded: int
 
 
 _PACKS: dict = _capture.weight_cache("augattn_sm80.packs")
+#: (pair tensor, pair-norm / bias weights, key mask) -> the token-width pair bias [1, H, Lp, Lp] of an inference call: every step of a sampler reads the same one
+_TOKEN_BIAS: dict = _capture.weight_cache("augattn_sm80.token_bias")
+#: a hoisted bias larger than this stays recomputed per call (OpenDDE's 3968 structural tokens: 24 blocks x 0.5 GiB); 2,048 tokens x 16 heads in bf16 is 128 MiB
+TOKEN_BIAS_HOIST_MAX_BYTES = 192 << 20
+
+
+def _wkey(t: torch.Tensor):
+    """A weight's or mask's identity for a cache key (storage address, in-place version, shape)."""
+    return (t.data_ptr(), t._version, tuple(t.shape))
+
+
+def _hoist_token_bias(save: bool, batch: int, mask_kind: int, heads: int, padded: int, dt: torch.dtype, pair: torch.Tensor) -> bool:
+    """Whether this inference call takes the pair bias from the per-pair hoist (``MINIWORLD_TOKEN_BIAS_HOIST=0`` switches it off, for A / B): one fold (batch 1), a key
+    mask shared by the samples or none, no autograd, an ordinary (version-counted) pair, and a bias that fits ``TOKEN_BIAS_HOIST_MAX_BYTES``. The atom width has its own
+    explicit cache (``cache_pair_bias``) and is not hoisted here."""
+    return (
+        not save
+        and batch == 1
+        and mask_kind in (0, 1)
+        and (heads, pair.shape[-1]) != (_ATOM[0], _ATOM[2])
+        and not pair.is_inference()
+        and not (torch.is_grad_enabled() and pair.requires_grad)
+        and heads * padded * padded * dt.itemsize <= TOKEN_BIAS_HOIST_MAX_BYTES
+        and os.environ.get("MINIWORLD_TOKEN_BIAS_HOIST", "1") != "0"
+    )
 
 
 def _pack(params: list[torch.Tensor], heads: int, dt: torch.dtype, save: bool = True):
@@ -410,11 +436,11 @@ def _fwd(
     m = a * batch * padded
     n = a * padded  # rows of one batch element
     dev = x.device
-    wo, ws, bs = (
-        params[5].to(dt),
-        params[6].to(dt),
-        params[7].to(dt),
-    )  # no copies for bf16 parameters (the autograd function hands cast ones for fp32)
+    out_params = params[5:8]
+    if save or all(p.dtype is dt for p in out_params):
+        wo, ws, bs = (p.to(dt) for p in out_params)  # no copies for bf16 parameters (the autograd function hands cast ones for fp32)
+    else:  # an inference call over fp32 master weights: the three casts once per parameter version (a sampler calls the block at every step)
+        wo, ws, bs = _capture.param_forms(("augattn_sm80.out", dt), out_params, lambda: tuple(p.to(dt) for p in out_params))
     pack = _pack(params, heads, dt, save=save)
     wqkvg, bvec = pack[0], pack[1]
     xs, cs = _stage(x, batch, padded), _stage(cond, batch, padded)
@@ -472,8 +498,25 @@ def _fwd(
             stats[2 * i].copy_(mu.view(m, 1))
             stats[2 * i + 1].copy_(rs_.view(m, 1))
     q, k, v, g = (qkvg[:, i * d : (i + 1) * d] for i in range(4))
+    shared_bias = bias_in is not None
     if bias_in is not None:
         bias = bias_in
+    elif _hoist_token_bias(save, batch, mask_kind, heads, padded, dt, pair):
+        # a sampler calls the block with the SAME pair at every step (the pair bias is step-invariant): one bias per (pair, weights, key mask)
+        def make_bias() -> torch.Tensor:
+            out = torch.empty(1, heads, padded, padded, device=dev, dtype=dt)
+            _bias_into(out[0], pair[0], pack, heads, hd, length, padded, cast(torch.Tensor, kmask)[0] if mask_kind == 1 else None)
+            return out
+
+        bias = _capture.hoisted_table(
+            _TOKEN_BIAS,
+            pair,
+            (_wkey(params[8]), _wkey(params[9]), heads, padded, dt, _wkey(kmask) if mask_kind == 1 else None),
+            make_bias,
+            limit=_capture.BLOCK_CACHE_LIMIT,
+            also=() if mask_kind != 1 else (cast(torch.Tensor, kmask),),
+        )
+        shared_bias = True
     else:
         bias = torch.empty(batch, heads, padded, padded, device=dev, dtype=dt)
         for b in range(batch):
@@ -489,7 +532,7 @@ def _fwd(
             )
     if extra is not None:
         # the bias is in the core's raw units (bf16: natural x sqrt(hd); fp32: natural); the sum in fp32, rounded once. Masked keys stay at the fill.
-        if bias_in is not None:
+        if shared_bias:
             bias = bias.clone()
         view = bias[:, :, :length, :length]
         view.add_(extra.float() * (1.0 if f32 else math.sqrt(hd)))  # one pass; extra broadcasts over B and H ([1, 1, L, L]); bf16: one rounding

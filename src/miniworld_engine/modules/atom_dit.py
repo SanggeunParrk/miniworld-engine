@@ -2663,6 +2663,7 @@ class AtomDiTESMFold2Pair(BackendModule):
     # cuda:b200_sm100 21 (2026-11-18, round 3 part 8, r3-local-dit): fp32 inference: the fused TF32 kernels issue their TMA loads from several lanes
     # (the fp32 weights also before the grid-dependency wait; the same bits)
     backend_versions: ClassVar[dict[str, int]] = {
+        "cuda:a100_sm80": 2,  # 2026-11-23: the A100 inference block (local_dit_esm._infer_a100) casts and packs its weights once per parameter version, no saved activations; same bits
         "cuda:5090_sm120": 1,
         "cuda:b200_sm100": 29,
     }  # 2026-11-12: the sm_80 paths built for sm_120a (bias tile / band read from global memory)
