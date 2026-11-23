@@ -158,13 +158,23 @@ B200_OPTIN: dict[str, str] = {
 }
 
 
+#: RTX 5090 (sm_120a, capability (12, 0)) route modules: slot -> module path (same interface as the H100 module of the slot).
+SM120_ROUTES: dict[str, str] = {
+    "trimul": "miniworld_engine.kernels.trimul_inproj.cuda.sm120_fp8",
+}
+
+
 def arch() -> str:
-    """``"sm100"`` when the current CUDA device is a B200 (capability (10, 0)), else ``"sm90"`` (the H100 modules; also what a CPU-only process sees)."""
+    """``"sm100"`` when the current CUDA device is a B200 (capability (10, 0)), ``"sm120"`` on an RTX 5090 (12, 0), else ``"sm90"`` (the H100 modules; also what a CPU-only process sees)."""
     try:
         import torch
 
-        if torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0):
-            return "sm100"
+        if torch.cuda.is_available():
+            cap = torch.cuda.get_device_capability()
+            if cap == (10, 0):
+                return "sm100"
+            if cap == (12, 0):
+                return "sm120"
     except Exception:  # noqa: BLE001 -- no usable CUDA: the H100 modules (their serves() is False off sm_90)
         pass
     return "sm90"
@@ -208,6 +218,11 @@ def _modules() -> tuple[Any, ...]:
     from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as tm
 
     mods = dict(zip(SLOTS, (ta, tm, opm, pwa, tr, td, ad), strict=True))
+    if a == "sm120":  # RTX 5090: the e4m3-plane TriMul chain of sm120_fp8 takes the slot (every other slot keeps the H100 module, whose serves() is False off sm_90)
+        import importlib
+
+        for slot, path in SM120_ROUTES.items():
+            mods[slot] = importlib.import_module(path)
     if a == "sm100":
         import importlib
 

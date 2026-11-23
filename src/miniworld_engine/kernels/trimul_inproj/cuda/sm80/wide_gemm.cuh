@@ -26,6 +26,8 @@ template <int BM> DEVI uint32_t wmmaj(uint32_t row, uint32_t c) { return row * (
 struct GemmOps {
   const __nv_bfloat16* A;  size_t lda;  int i0, Mlim;      // tile origin (rows of C) and the number of valid rows
   const __nv_bfloat16* B;  size_t ldb;  int j0, Nlim;      // tile origin (columns of C = rows of B) and the number of valid columns
+  int rstep = 1, estep = 0;   // token-row strides of the A tile (run_fast, K-major A): tile row rb sits rstep rows after row rb - 1, the granule step e estep rows (0 = the default NTHR / 4); k1w E8 reads
+                              // a tile of 4 columns x 32 rows of the pair (rstep = L, estep = 1) so the plane stores come out transposed
 };
 
 // A hook adds work to the ring: ``load(stage_base, k-tile)`` issues extra cp.async (EXTRA bytes of shared memory per stage, after the A and B tiles) and
@@ -186,8 +188,8 @@ struct WTile {
     size_t eA, kA;
     if constexpr (!AM) {
       dA0 = wkmaj(rb, cb);
-      pA = reinterpret_cast<const char*>(o.A) + ((size_t)(o.i0 + rb) * o.lda + 8 * cb) * 2;
-      eA = (size_t)(NTHR / 4) * o.lda * 2; kA = 64;
+      pA = reinterpret_cast<const char*>(o.A) + ((size_t)(o.i0 + rb * o.rstep) * o.lda + 8 * cb) * 2;
+      eA = (size_t)(o.estep ? o.estep : NTHR / 4) * o.lda * 2; kA = 64;
     } else {
       const int ra = tid / GPR, ca = tid % GPR;
       dA0 = wmmaj<BM>(ra, ca);

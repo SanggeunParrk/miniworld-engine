@@ -337,7 +337,16 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
         and direction == OUTGOING
         and ((tile and n % 128 == 0) or (fuse_z and d == 64 and n >= _TR64_MIN_L.get(hs, 1 << 30)))
     )
-    if _grouped(z, hs, direction, save):  # RTX 5090 inference only (save=False): no plane pair is kept
+    f8_done = False
+    if sm120 and not save and not tile:  # opt-in e4m3 planes (sm120_fp8; POLICY None = off: the default route below, bit for bit)
+        from . import sm120_fp8 as _f8
+
+        if _f8.POLICY is not None and _f8.serves(z, hs, n, fuse_z, _grouped(z, hs, direction, save)):
+            x = zf.new_empty((hs, n, n))
+            f8_done = _f8.run(E, zf, pk, st_in, mask, x, hs, n, direction, eps_in, _f8.register_key(leaves[1]))
+    if f8_done:
+        pass
+    elif _grouped(z, hs, direction, save):  # RTX 5090 inference only (save=False): no plane pair is kept
         if not fuse_z:
             E.stats_rows(zf, st_in, eps_in)
         x = zf.new_empty((hs, n, n))

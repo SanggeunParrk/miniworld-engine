@@ -43,6 +43,12 @@ struct K1wParams {
   __nv_bfloat16* planes;       // [4 Hs / 2][T]
   int T, L, D, ncol;           // ncol = 4 Hs packed rows
   int tr = 0;                  // k1t / k1w64: plane (r, c) holds token (c, r) (the input rows are read transposed; L % 128 == 0)
+  // E8 (opt-in e4m3 planes, RTX 5090): planes8 [2 Hs][T] bytes, qinv[2] = 1 / scale of the a / b plane tensors (device, read at run time), peak[2] = int32 bits of the
+  // largest scaled |plane value| per tensor (atomic max; guard)
+  uint8_t* planes8 = nullptr;
+  const float* qinv = nullptr;
+  int* peak = nullptr;
+  int direction = 1;   // E8: 0 bidirectional, 1 outgoing, 2 incoming: incoming channels are written transposed (plane (c, r) = token (r, c); needs L % 32 == 0), so every plane contracts K-major
 };
 
 // ring depth: 4 stages (64 KB, two CTAs per SM in the A100's 164 KB); the RTX 5090 build (MWE_SM120: 100 KB per SM) takes 3 (48 KB) to keep two CTAs
@@ -56,6 +62,7 @@ struct K1wParams {
 #endif
 using K1wTile = WTile<128, 128, 2, 2, K1W_ST, false, true>;
 constexpr int K1W_STG = 272;   // bytes per staged channel row: 256 + 16
+constexpr int K1W_STG8 = 144;   // e4m3 planes: 128 token bytes + 16 per staged channel row
 constexpr int K1W_STATS_SMEM = K1wTile::SMEM + 128 * 8;     // + (mean, rstd) of the tile's 128 tokens
 
 // STATS: the input row statistics come from the tile itself instead of ln_stats_rows (D <= 128: every k-tile of the A operand is still in its ring slot when the mainloop
@@ -92,7 +99,7 @@ struct K1StatHook {
   }
 };
 
-template <bool STATS, bool ROW_MASK = false, bool INLOOP = false>
+template <bool STATS, bool ROW_MASK = false, bool INLOOP = false, bool E8 = false>
 __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
   extern __shared__ __align__(128) uint8_t smem[];
   const uint32_t s0 = smem_u32(smem);
@@ -115,12 +122,22 @@ __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
       return;
     }
   }
+  // E8, incoming channels: this CTA's 128 tokens are 4 columns x 32 rows of the pair (token (r0 + m % 32, c0 + m / 32) for tile row m), so a (channel, column) store is 32 contiguous plane bytes
+  bool tr8 = false;
+  int r0 = 0, c0 = 0;
+  if constexpr (E8) {
+    const int hsz = p.ncol >> 2, chan = ntile * 64;
+    tr8 = p.direction == 2 || (p.direction == 0 && (chan % hsz) >= hsz / 2);
+    if (tr8) { const int nrt = p.L >> 5, rt = mtile % nrt; r0 = rt * 32; c0 = (mtile / nrt) * 4; }
+  }
   K1wTile tl;
   const int tid0 = threadIdx.x;
   if constexpr (INLOOP) {
     static_assert(STATS && !ROW_MASK, "in-loop statistics feed the STATS epilogue and skip no rows");
     K1StatHook hook;
-    tl.run_fast(s0, p.D >> 5, GemmOps{p.z, (size_t)p.D, t0, p.T, p.w1, (size_t)p.D, j0, p.ncol}, hook);
+    GemmOps gop{p.z, (size_t)p.D, t0, p.T, p.w1, (size_t)p.D, j0, p.ncol};
+    if (E8 && tr8) { gop.i0 = r0 * p.L + c0; gop.rstep = p.L; gop.estep = 1; }
+    tl.run_fast(s0, p.D >> 5, gop, hook);
     const float n = p.D * 0.25f, inv = 1.f / p.D;
 #pragma unroll
     for (int e = 0; e < 4; ++e) {
@@ -135,7 +152,7 @@ __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
       const int row = (tid0 >> 2) + 32 * e;
       if ((tid0 & 3) == 0) {
         sts64(s0 + K1wTile::SMEM + row * 8, make_uint2(__float_as_uint(mean), __float_as_uint(rstd)));
-        if (ntile == 0) p.stw[t0 + row] = make_float2(mean, rstd);
+        if (ntile == 0) p.stw[(E8 && tr8) ? (size_t)(r0 + (row & 31)) * p.L + c0 + (row >> 5) : (size_t)(t0 + row)] = make_float2(mean, rstd);
       }
     }
     __syncthreads();
@@ -172,6 +189,10 @@ __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, wm = warp >> 1, wn = warp & 1, g8 = lane >> 2, q = lane & 3;
   constexpr int MT = K1wTile::MT, NP = K1wTile::NP;
   float rs[MT][2], mr[MT][2], mk[MT][2];
+  // E8: this CTA's 64 plane channels are all of tensor a (plane channel < Hs) or all of b (Hs is a multiple of 64): one inverse scale, one peak slot
+  float qv = 1.f, pk = 0.f;
+  int slot = 0;
+  if constexpr (E8) { slot = (ntile * 64 >= (p.ncol >> 2)) ? 1 : 0; qv = __ldg(p.qinv + slot); }
 #pragma unroll
   for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
@@ -187,7 +208,8 @@ __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
           const int j = first_col + 64 * wm + 16 * mt + 2 * g8 + rh;
           m = __ldg(p.mask + j) != 0 ? 1.f : 0.f;
         } else {
-          const int i = tok / p.L, j = tok - i * p.L;
+          int i = tok / p.L, j = tok - i * p.L;
+          if (E8 && tr8) { const int mm = 64 * wm + 16 * mt + 2 * g8 + rh; i = r0 + (mm & 31); j = c0 + (mm >> 5); }
           m = (__ldg(p.mask + i) != 0 && __ldg(p.mask + j) != 0) ? 1.f : 0.f;
         }
       }
@@ -212,11 +234,39 @@ __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
           u[rh][cc] = round_bf16f(fmaf(pp, tanh_approx(g), pp)) * mk[mt][rh];
         }
       const int tw = 32 * wm + 8 * mt + g8;                            // 4-byte word of the 128-token row: tokens (64 wm + 16 mt + 2 g8, + 1)
+      if constexpr (E8) {
+        // tokens (2 tw, 2 tw + 1) of channel ch / ch + 1 as two e4m3 bytes (token 2 tw in the low byte); satfinite clamps, the peak records the unclamped scaled value
+#pragma unroll
+        for (int cc = 0; cc < 2; ++cc) {
+          const float v0 = u[0][cc] * qv, v1 = u[1][cc] * qv;
+          pk = fmaxf(pk, fmaxf(fabsf(v0), fabsf(v1)));
+          unsigned short w;
+          asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(w) : "f"(v1), "f"(v0));
+          asm volatile("st.shared.u16 [%0], %1;" ::"r"(s0 + (ch + cc) * K1W_STG8 + tw * 2), "h"(w) : "memory");
+        }
+      } else {
       sts32(s0 + ch * K1W_STG + tw * 4, pack_bf16(u[0][0], u[1][0]));
       sts32(s0 + (ch + 1) * K1W_STG + tw * 4, pack_bf16(u[0][1], u[1][1]));
+      }
     }
   }
+  if constexpr (E8) {
+    pk = fmaxf(pk, __shfl_xor_sync(0xffffffffu, pk, 1)); pk = fmaxf(pk, __shfl_xor_sync(0xffffffffu, pk, 2)); pk = fmaxf(pk, __shfl_xor_sync(0xffffffffu, pk, 4));
+    pk = fmaxf(pk, __shfl_xor_sync(0xffffffffu, pk, 8)); pk = fmaxf(pk, __shfl_xor_sync(0xffffffffu, pk, 16));
+    if (lane == 0) atomicMax(p.peak + slot, __float_as_int(pk));   // non-negative floats order as their bits
+  }
   __syncthreads();
+  if constexpr (E8) {
+    uint8_t* out8 = p.planes8 + (size_t)(ntile * 64) * p.T + (tr8 ? (size_t)c0 * p.L + r0 : (size_t)t0);
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      const int idx = tid + 128 * e, r = idx >> 3, gk = idx & 7;
+      // tr8: byte m = 32 cl + rw of the row: plane byte (c0 + cl) L + r0 + rw, a 16-byte half of a 32-byte segment per granule
+      const size_t off = tr8 ? (size_t)(gk >> 1) * p.L + 16 * (gk & 1) : (size_t)16 * gk;
+      stg128(out8 + (size_t)r * p.T + off, lds128(s0 + r * K1W_STG8 + gk * 16));
+    }
+    return;
+  }
   __nv_bfloat16* out = p.planes + (size_t)(ntile * 64) * p.T + t0;
 #pragma unroll
   for (int e = 0; e < 8; ++e) {
