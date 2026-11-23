@@ -188,13 +188,21 @@ def quant_weight(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 def weight_pack(key, wqkvg, wo, ws, wab_ht, bqkvg, places=None):
     """The e4m3 forms of the block's packed weights, once per weight version (``key``: the bf16 pack's key; scoped as every pack).
-    ``wab_ht`` = (the expand weight packed for the SwiGLU kernel's tiles, ht). ``places``: build only these placements' forms (None: H100 = ``PLACES``, B200 = all four;
+    ``wab_ht`` = (the expand weight packed for the SwiGLU kernel's tiles, or a callable making it -- called only when the pack is made, ht).
+    ``places``: build only these placements' forms (None: H100 = ``PLACES``, B200 = all four;
     ``safe`` takes ``expand`` alone -- the other three are never read there, and each costs a quantising pass at every replay of a graph
     captured without ``static_weights()``)."""
     wab, ht = wab_ht
-    if places is None and torch.cuda.get_device_capability(wqkvg.device) == (9, 0):
+    if places is None and _is_sm90(wqkvg.device.index if wqkvg.device.index is not None else torch.cuda.current_device()):
         places = PLACES  # H100: a call only takes placements of PLACES (``active``), so the other forms are never read
-    want = _ALL if places is None else tuple(p for p in _ALL if p in places)
+    want = _want(places if places is None or isinstance(places, frozenset) else frozenset(places))
+    k = ("f8", ht, want, *key)
+    if _capture._graph_capture_id() is None:
+        # an eager call: the eager entry, as ``lookup`` serves it outside a capture (nothing to scope, pin or hold) without its three capture
+        # queries -- the host side of a sampler's token DiT call is its cost in eager runs (AF3 FoldBench 28 tokens, 9600 calls per forward)
+        hit = _F8_PACKS.get((None, k))
+        if hit is not None:
+            return hit
 
     def build():
         out = {}
@@ -210,12 +218,22 @@ def weight_pack(key, wqkvg, wo, ws, wab_ht, bqkvg, places=None):
             s8, ss = quant_weight(ws)
             out["squeeze"] = (s8.t(), ss.view(1, -1))
         if "expand" in want:
-            a8, as_ = quant_weight(wab)
+            a8, as_ = quant_weight(wab() if callable(wab) else wab)
             out["expand"] = (a8, as_, ht)
         return out
 
     # inference only (no e4m3 backward exists): a graph captured with grad off reads the entry its eager warm-up made, so a replay remakes nothing
-    return _capture.lookup(_F8_PACKS, ("f8", ht, want, *key), build, limit=_capture.BLOCK_CACHE_LIMIT, capture_reads_eager=True)
+    return _capture.lookup(_F8_PACKS, k, build, limit=_capture.BLOCK_CACHE_LIMIT, capture_reads_eager=True)
+
+
+@functools.lru_cache(maxsize=16)
+def _is_sm90(index: int) -> bool:
+    return torch.cuda.get_device_capability(index) == (9, 0)
+
+
+@functools.lru_cache(maxsize=64)
+def _want(places: frozenset | None) -> tuple:
+    return _ALL if places is None else tuple(p for p in _ALL if p in places)
 
 
 def rows_q8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

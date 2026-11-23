@@ -216,3 +216,24 @@ def test_boltz2_up_gate_on_atoms() -> None:
     assert torch.equal(_run(m, inputs, True), _run(m, inputs, False))
     m, inputs = _block(A.AtomDiTBoltz2, 2048, 5)
     assert not torch.equal(_run(m, inputs, True), _run(m, inputs, False))
+
+
+def test_fp8_pack_rides_on_the_eager_bf16_pack(monkeypatch) -> None:
+    """Eager calls make the e4m3 pack once and read it from the bf16 pack entry afterwards (same output bitwise); a weight written in place
+    (a new version: a new bf16 entry) makes a new e4m3 pack, and the output follows the new weights."""
+    _needs_h100()
+    from miniworld_engine.kernels.augmented_attention.cuda.sm90_atom import f8 as f8mod
+    from miniworld_engine.modules import atom_dit as A
+
+    made = []
+    real = f8mod.pack8
+    monkeypatch.setattr(f8mod, "pack8", lambda w: made.append(1) or real(w))
+    m, inputs = _block(A.AtomDiTOpenFold3, 1024, 5)
+    y1 = _run(m, inputs, True)
+    y2 = _run(m, inputs, True)
+    assert len(made) == 1 and torch.equal(y1, y2)
+    with torch.no_grad():
+        next(p for p in m.parameters() if p.dim() > 1).mul_(0.5)
+    y3 = _run(m, inputs, True)
+    assert len(made) == 2 and not torch.equal(y3, y1)
+    assert torch.isfinite(y3).all()

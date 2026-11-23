@@ -76,6 +76,35 @@ def test_weight_pack_builds_only_the_placements_in_force() -> None:
         F.PLACES = old
 
 
+@pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
+def test_eager_hit_skips_the_lookup_and_the_expand_tiling() -> None:
+    """An eager call is served the eager entry directly, and the expand operand passed as a callable is made only when the pack is made."""
+    F = _F()
+    g = torch.Generator(device="cuda").manual_seed(4)
+    mk = lambda n, k: (torch.randn(n, k, device="cuda", generator=g) * 0.05).bfloat16()
+    wab = mk(3072, 768)
+    calls = []
+
+    def tiled():
+        calls.append(1)
+        return wab
+
+    args = (mk(3072, 768), mk(768, 768), mk(768, 1536))
+    old = F.PLACES
+    F.PLACES = frozenset(("expand",))
+    F._F8_PACKS.clear()
+    try:
+        with torch.no_grad():
+            first = F.weight_pack(("t-lazy",), *args, (tiled, 64), mk(3072, 1).reshape(-1))
+            again = F.weight_pack(("t-lazy",), *args, (tiled, 64), mk(3072, 1).reshape(-1))
+        assert again is first and len(calls) == 1
+        r8, rs = F.quant_weight(wab)
+        assert torch.equal(first["expand"][0].float(), r8.float()) and torch.equal(first["expand"][1], rs) and first["expand"][2] == 64
+    finally:
+        F.PLACES = old
+        F._F8_PACKS.clear()
+
+
 def _active_in_capture(F, *a, **kw):
     out = []
     g = torch.cuda.CUDAGraph()
