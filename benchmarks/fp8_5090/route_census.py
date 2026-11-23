@@ -39,6 +39,8 @@ ap.add_argument("--guard", choices=["lazy", "sync"], default="lazy")
 ap.add_argument("--no-fp8", action="store_true", help="no FP8 variable: the default route (every counter 0)")
 ap.add_argument("--dry", action="store_true", help="print the slot table (modules and switches) and exit: no predictor")
 ap.add_argument("--any-arch", action="store_true", help="do not refuse a card other than the RTX 5090")
+ap.add_argument("--no-compile", action="store_true", help="diagnostics: execution.compile off (CUDA graphs kept)")
+ap.add_argument("--patch", action="append", default=[], help="diagnostics: module:ATTR=literal set after the engine is imported")
 args = ap.parse_args()
 
 # ---- the engine_fp8 arm's environment, before the engine is imported
@@ -55,6 +57,15 @@ import torch  # noqa: E402
 
 from miniworld_engine import fp8  # noqa: E402
 
+# diagnostics: --patch module:ATTR=python-literal (e.g. miniworld_engine.kernels.trimul_inproj.cuda.sm120_fp8:POLICY=None), after the preset was read
+for spec in args.patch:
+    import ast
+    import importlib
+
+    mod_name, assign = spec.split(":", 1)
+    attr, value = assign.split("=", 1)
+    setattr(importlib.import_module(mod_name), attr, ast.literal_eval(value))
+    print(f"PATCH {mod_name}.{attr} = {value}", flush=True)
 ARCH = fp8.arch()
 if ARCH != "sm120" and not args.any_arch:
     sys.exit(f"route_census: this card is {ARCH} ({torch.cuda.get_device_name() if torch.cuda.is_available() else 'no CUDA'}), not the RTX 5090 (--any-arch to run anyway)")
@@ -100,7 +111,10 @@ import foldforge as ff  # noqa: E402
 out = args.out or Path(tempfile.mkdtemp(prefix="route_census_"))
 out.mkdir(parents=True, exist_ok=True)
 recycles, template_n, extra = H.MODELS[args.model]
-predictor = ff.load_model(args.model, config=H.make_config(recycles, extra, args.repeats))
+config = H.make_config(recycles, extra, args.repeats)
+if args.no_compile:
+    config["execution"]["compile"] = False
+predictor = ff.load_model(args.model, config=config)
 fp8.check()  # clear a flag left from loading
 for n in args.sizes:
     spec = out / f"x{n}.yaml"

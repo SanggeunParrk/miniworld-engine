@@ -136,10 +136,67 @@ def _q8(M: int, W: int, dev) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty((M, W), device=dev, dtype=E4M3), torch.empty((M, 1), device=dev, dtype=torch.float32)
 
 
-def block(*args) -> torch.Tensor:
-    """:func:`_block` with autocast off (the e4m3 operands are its own; a caller's bf16 autocast must not recast the glue)."""
+def block(x, tab, bias2, widx, keys, ebias, tinfo, tb, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, cfg, use) -> torch.Tensor:
+    """:func:`_block` as ONE opaque op (``dit_variants_atom_fp8_sm120``, as the default block's ``atom_fwd``): Dynamo must not trace into it -- a
+    compiled FoldForge run (AF3, 5I28 n = 4) traced the glue between the extension launches and gave non-finite coordinates. Autocast off inside
+    (the e4m3 operands are its own)."""
+    par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, *rest = cfg
+    chain = bool(rest and rest[0])
+    core = bool(len(rest) > 1 and rest[1])
+    return _block_op(x, tab, bias2, widx, keys, ebias, tinfo, tb, wq, bq, wk, wv, wg, wo, list(wexp), wsq, list(qkw), bool(par), bool(sig), bool(gating),
+                     bool(proj), bool(kq), bool(up), bool(slide), int(length), float(eps), float(eps_qk), chain, core, "pre" in use, "post" in use)  # fmt: skip
+
+
+def _block_fake(x, *args):
+    return torch.empty_like(x)
+
+
+def _block_op_impl(
+    x: torch.Tensor,
+    tab: torch.Tensor,
+    bias2: torch.Tensor,
+    widx: torch.Tensor,
+    keys: torch.Tensor,
+    ebias: torch.Tensor,
+    tinfo: torch.Tensor,
+    tb: torch.Tensor,
+    wq: torch.Tensor,
+    bq: torch.Tensor,
+    wk: torch.Tensor,
+    wv: torch.Tensor,
+    wg: torch.Tensor,
+    wo: torch.Tensor,
+    wexp: list[torch.Tensor],
+    wsq: torch.Tensor,
+    qkw: list[torch.Tensor],
+    par: bool,
+    sig: bool,
+    gating: bool,
+    proj: bool,
+    kq: bool,
+    up: bool,
+    slide: bool,
+    length: int,
+    eps: float,
+    eps_qk: float,
+    chain: bool,
+    core: bool,
+    pre: bool,
+    post: bool,
+) -> torch.Tensor:
+    use = frozenset(p for p, on in (("pre", pre), ("post", post)) if on)
+    cfg = (par, sig, gating, proj, kq, up, slide, length, eps, eps_qk, chain, core)
     with torch.autocast("cuda", enabled=False):
-        return _block(*args)
+        return _block(x, tab, bias2, widx, keys, ebias, tinfo, tb, wq, bq, wk, wv, wg, wo, tuple(wexp), wsq, qkw, cfg, use)
+
+
+def _opaque_block():
+    from ..._compile import opaque
+
+    return opaque(fake=_block_fake, name="dit_variants_atom_fp8_sm120")(_block_op_impl)
+
+
+_block_op = _opaque_block()
 
 
 def _block(x, tab, bias2, widx, keys, ebias, tinfo, tb, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, cfg, use) -> torch.Tensor:
