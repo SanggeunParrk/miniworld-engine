@@ -1,4 +1,4 @@
-"""RTX 5090: the opt-in e4m3 Transition (fp8_sm120, MINIWORLD_TRANSITION_FP8_SM120) against the default route, same process, alternating A-B.
+"""RTX 5090: the e4m3 Transition (fp8_sm120, fp8.SM120_ROUTES; MINIWORLD_TRANSITION_FP8 / the safe preset) against the default route, same process, alternating A-B.
 
     python transition_ab.py [--rounds 6] [--err] d,n,rows ...      (rows: the call's token rows, e.g. 65536 = an L256 pair stack)
 

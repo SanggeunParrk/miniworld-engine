@@ -1,7 +1,7 @@
-"""RTX 5090: the strictly opt-in e4m3 Transition inference forward (``kernels/transition/cuda/fp8_sm120``, docs/fp8.md "RTX 5090"): error against the
-float64 module at the level of the H100 e4m3 Transition route (update rms 6.6 %, judge 4.5 % there), NOT switched on by ``MINIWORLD_FP8=safe`` /
-``engine-fp8`` (only by its own ``POLICY``), the guard (sync redo, lazy ``overflow_peak`` / ``rescale_all`` through ``fp8.check``), graph == eager,
-a capture before calibration runs the default, ragged rows, and the default route untouched (bytes) while the switch is off."""
+"""RTX 5090: the e4m3 Transition inference forward (``kernels/transition/cuda/fp8_sm120``, ``fp8.SM120_ROUTES["transition"]``, docs/fp8.md "RTX 5090"): error against the
+float64 module at the level of the H100 e4m3 Transition route (update rms 6.6 %, judge 4.5 % there), switched on by ``MINIWORLD_FP8=safe`` / ``engine-fp8`` exactly as
+the H100 route, the guard (sync redo, lazy ``overflow_peak`` / ``rescale_all`` through ``fp8.check``), graph == eager, a capture before calibration runs the default,
+ragged rows, and the default route untouched (bytes) while the switch is off."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def F():
     _needs_5090()
     from miniworld_engine.kernels.transition.cuda import fp8_sm120 as F
 
-    assert F.POLICY is None  # off unless its own variable is set
+    assert F.POLICY is None  # off unless the preset / its variable is set
     saved = (F.GUARD, F.MIN_ROWS)
     F.POLICY, F.MIN_ROWS = "calib", 0
     yield F
@@ -93,36 +93,58 @@ def test_error_vs_fp64(F, d: int, n: int, rows: int) -> None:
     assert F.GUARD_STATS["fallbacks"] == 0
 
 
-def test_not_in_safe_preset() -> None:
+def test_safe_preset_turns_it_on() -> None:
+    """The 5090 preset covers what the H100 preset covers: ``fp8.enable("safe")`` and the ``engine-fp8`` backend switch this route on (the slot module of
+    ``fp8.SM120_ROUTES``), with or without a model; ``status()`` / ``route_stats()`` / ``enable(guard=)`` report and set this module; ``disable()`` turns it off."""
     _needs_5090()
     from miniworld_engine import fp8
     from miniworld_engine.kernels.transition.cuda import fp8_sm120 as F
 
-    assert "MINIWORLD_TRANSITION_FP8_SM120" not in fp8.PRESETS["safe"]
-    assert fp8.SM120_OPTIN["transition"] == F.__name__
+    assert fp8.SM120_ROUTES["transition"] == F.__name__ and not fp8.SM120_OPTIN
+    assert F.POLICY is None  # off by default
     m = _module(4)
-    x = torch.randn(1, 16384, 128, device="cuda").bfloat16()
-    calls = F.GUARD_STATS["calls"]
+    x = torch.randn(1, 16384, 128, device="cuda").bfloat16()  # above the 12288-row gate
+    guard = F.GUARD
     try:
-        fp8.enable("safe", model="af3")
-        assert F.POLICY is None  # safe does not switch the opt-in route on
+        for model in (None, "af3", "boltz2"):
+            fp8.enable("safe", model=model)
+            assert F.POLICY == "calib" and fp8.status()["transition"] == "calib", model
+        fp8.enable("safe", guard="lazy")
+        assert F.GUARD == "lazy" and fp8.status()["guard"]["transition"] == "lazy"
+        fp8.enable("safe", guard="sync")
+        fp8.reset_route_stats()
         with torch.no_grad():
             m(x)
+        st = fp8.route_stats()["transition"]
+        assert st["calls"] >= 1 and st == F.GUARD_STATS, st
+        assert not fp8.check()
+        fp8.disable()
+        assert F.POLICY is None and fp8.status()["transition"] is None
+        # the engine-fp8 backend (scope per call): on inside the call, the process's switch (off) after it
         m.set_backend("engine-fp8")
+        fp8.reset_route_stats()
         with torch.no_grad():
             m(x)
+        assert fp8.route_stats()["transition"]["calls"] >= 1
+        assert F.POLICY is None
+        m.set_backend("cuda")
+        fp8.reset_route_stats()
+        with torch.no_grad():
+            m(x)
+        assert fp8.route_stats()["transition"]["calls"] == 0
     finally:
         fp8.disable()
+        F.GUARD = guard
         m.set_backend("cuda")
-    assert F.GUARD_STATS["calls"] == calls
-    assert F.POLICY is None
 
 
 def test_disable_turns_it_off(F) -> None:
     from miniworld_engine import fp8
 
+    fp8.disable()
+    assert F.POLICY is None
     fp8.enable("safe")
-    assert F.POLICY == "calib"  # enable() leaves the opt-in switch as it is
+    assert F.POLICY == "calib"
     fp8.disable()
     assert F.POLICY is None
 

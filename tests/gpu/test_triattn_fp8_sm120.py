@@ -256,3 +256,99 @@ def test_pv_only_gate(f8):
     _run(m, x, mask)
     assert fp8.route_stats()["triattn"]["pv_front"] == st["pv_front"]
     assert torch.isfinite(y0).all()
+
+
+#: every model of the whitelist plus two deliberately absent ones and no model (2026-11-23: the 5090 route honours fp8.TRIATTN_MODELS exactly)
+_MODELS = [None, "boltz2", "intellifold2", "af3", "protenix1", "opendde", "protenix2", "openfold3", "rosettafold3", "chai1"]
+
+
+def _expect(model, kind: str, pv_only: bool) -> tuple[bool, bool]:
+    """(the e4m3 core fires, with e4m3 q / k) for a 32-channel-head site of ``kind`` under ``model``, from the table alone: the kind listed for the model; q / k only on the fused
+    kind and only where the table has them; without q / k only with the PV-only switch (the 5090 gate). The d64 kind (64-channel heads) has no 5090 core."""
+    from miniworld_engine import fp8
+
+    kinds, qk = fp8.triattn_for(model)
+    if kind not in kinds:
+        return False, False
+    with_qk = qk and kind == "fused"
+    return (with_qk or pv_only), with_qk
+
+
+@pytest.mark.parametrize("pv_only", [False, True], ids=["shipped", "pvonly"])
+@pytest.mark.parametrize("model", _MODELS, ids=[str(m) for m in _MODELS])
+def test_model_whitelist_table(f8, model, pv_only):
+    """fp8.enable("safe", model=m): the 5090 core fires exactly on the call-site kinds TRIATTN_MODELS lists for m (fused = d_pair 128 / 4 x 32, unfused = d_pair 256 / 8 x 32),
+    with e4m3 q / k exactly where the table has them; nothing for no model / an unlisted one; a 64-channel-head site (Chai-1 d64) never; disable() = nothing."""
+    from miniworld_engine import fp8
+
+    f8.PV_ONLY = pv_only
+    f8.MIN_L = 0
+    n = 256
+    mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+    fp8.enable("safe", model=model)
+    for (d, h), kind in (((128, 4), "fused"), ((256, 8), "unfused")):
+        f8._SITES.clear()
+        fp8.reset_route_stats()
+        m = _make(d, h)
+        _run(m, torch.randn(1, n, n, d, device="cuda").bfloat16(), mask)
+        st = fp8.route_stats()["triattn"]
+        fires, with_qk = _expect(model, kind, pv_only)
+        assert (st["pv_front"] > 0, st.get("qk", 0) > 0) == (fires, with_qk), (model, kind, st)
+    # the d64 kind: 64-channel heads are not served on the 5090 (Python-level gate; no 5090 core for them)
+    x = torch.empty(1, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        assert not f8.serves(x, 128, 2, 64, 1024)
+    fp8.disable()
+    fp8.reset_route_stats()
+    _run(_make(128, 4), torch.randn(1, n, n, 128, device="cuda").bfloat16(), mask)
+    assert fp8.route_stats()["triattn"]["pv_front"] == 0
+
+
+def test_env_model_at_import():
+    """MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=<m> (read at import): af3 fires the e4m3 q / k core at L640, boltz2 / no model do not (one fresh process each)."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    _needs_5090()
+    code = (
+        "import json, torch; from miniworld_engine import fp8; from miniworld_engine.modules import TriangleAttention\n"
+        "torch.manual_seed(0); m = TriangleAttention(128, n_head=4, master_weights=True, backend='cuda').cuda().eval()\n"
+        "x = torch.randn(1, 640, 640, 128, device='cuda').bfloat16(); mk = torch.ones(1, 640, dtype=torch.bool, device='cuda')\n"
+        "with torch.no_grad(), torch.autocast('cuda', torch.bfloat16): m(x, mk)\n"
+        "print(json.dumps(fp8.route_stats()['triattn']))"
+    )
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("MINIWORLD_FP8", "MINIWORLD_TRIATTN"))}
+
+    def stats(**env):
+        out = subprocess.run([sys.executable, "-c", code], env={**base, **env}, capture_output=True, text=True, check=True)
+        return json.loads(out.stdout.strip().splitlines()[-1])
+
+    a = stats(MINIWORLD_FP8="safe", MINIWORLD_FP8_MODEL="af3")
+    assert a["pv_front"] == 1 and a.get("qk", 0) == 1, a
+    for env in ({"MINIWORLD_FP8": "safe", "MINIWORLD_FP8_MODEL": "boltz2"}, {"MINIWORLD_FP8": "safe"}, {"MINIWORLD_FP8_MODEL": "af3"}):
+        st = stats(**env)
+        assert st["pv_front"] == 0 and st.get("qk", 0) == 0, (env, st)
+
+
+def test_late_qk_calibration(f8):
+    """a fused site calibrated while q / k was not wanted (QK off) takes its q / k scales on the first call with q / k wanted (no stale PV-only site)."""
+    from miniworld_engine import fp8
+
+    f8.MIN_L = 0
+    f8.PV_ONLY = True
+    m = _make(128, 4)
+    n = 256
+    x = torch.randn(1, n, n, 128, device="cuda").bfloat16()
+    mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+    _on()
+    f8.QK = False
+    _run(m, x, mask)
+    (site,) = list(f8._SITES.values())
+    assert not site.qk and not site.qk_cal
+    f8.QK = True
+    f8.PV_ONLY = False
+    fp8.reset_route_stats()
+    _run(m, x, mask)
+    assert site.qk and fp8.route_stats()["triattn"]["qk"] == 1

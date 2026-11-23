@@ -1,13 +1,17 @@
-"""STRICTLY OPT-IN e4m3 Transition inference forward on the GeForce RTX 5090 (sm_120a), D 128 / 256 (n 2 / 4); docs/fp8.md "RTX 5090", Transition.
+"""e4m3 Transition inference forward on the GeForce RTX 5090 (sm_120a), D 128 / 256 (n 2 / 4); docs/fp8.md "RTX 5090", Transition.
 
-NOT part of ``MINIWORLD_FP8=safe`` / ``engine-fp8`` (unlike the H100 route ``fp8_sm90a``, which is in ``safe``): FoldForge F11 traced the
-antibody-antigen accuracy loss of FP8 to e4m3 rounding in the trunk pair Transition, so this route runs only when its own switch is set::
+The module of the ``transition`` slot of ``fp8.SM120_ROUTES`` (same interface and switch as the H100 route ``fp8_sm90a``): ``MINIWORLD_FP8=safe`` /
+``engine-fp8`` / ``fp8.enable("safe")`` turn it on exactly as they turn the H100 route on (preset variable ``MINIWORLD_TRANSITION_FP8=calib``; an
+explicitly set variable, also the empty string, wins over the preset), ``fp8.disable()`` turns it off, ``fp8.check()`` reads its guard,
+``fp8.status()["transition"]`` is its ``POLICY`` and ``fp8.route_stats()["transition"]`` its counters on an RTX 5090::
 
-    MINIWORLD_TRANSITION_FP8_SM120=calib python run.py        # environment (read at import), or at run time:
-    miniworld_engine.kernels.transition.cuda.fp8_sm120.POLICY = "calib"
+    MINIWORLD_FP8=safe python run.py                          # with every other route of the preset
+    MINIWORLD_TRANSITION_FP8=calib python run.py              # this route alone (as on the H100)
+    miniworld_engine.kernels.transition.cuda.fp8_sm120.POLICY = "calib"   # run time
 
-``fp8.SM120_OPTIN`` lists it: ``fp8.enable()`` / ``engine-fp8`` leave it as it is (no preset sets it), ``fp8.disable()`` turns it off, ``fp8.check()``
-reads its guard and ``fp8.route_stats()["transition"]`` is this module's counters on an RTX 5090 (``fp8.status()`` does not list it: read ``POLICY``).
+The ``_SM120`` variables of the first (opt-in only) form stay as aliases: when set they win over the generic names (``MINIWORLD_TRANSITION_FP8_SM120=calib``
+turns the route on, ``MINIWORLD_TRANSITION_FP8_SM120=`` keeps it off under ``safe``). Accuracy note: FoldForge F11 attributes the antibody-antigen accuracy
+loss of FP8 to e4m3 rounding in the trunk pair Transition (docs/fp8.md); that note is about the H100 route in ``safe``, and this route follows the same preset.
 
 The kernel (``sm80/tr_fwd_f8_sm120.cuh``) is the register-resident one-kernel forward of ``fused_fwd_sm80`` (warp-owned rows across the whole
 hidden width, weights streaming through a cp.async ring of 32-hidden chunks) with both GEMMs on ``mma.sync.m16n8k32`` e4m3, fp32 accumulation:
@@ -16,15 +20,15 @@ version (per-tensor power-of-two scales; GEMM1's K permuted so the thread's own 
 order of h = silu(a) b, as ``fp8_sm90a._perm_k``), h quantised in the GEMM1 epilogue with a static calibrated scale (``HEADROOM``) and guarded
 like the H100 route (``overflow_peak`` / ``rescale_all``; ``sync``: an eager call that saturated is redone with a lower scale).
 
-Environment (read at import):
+Environment (read at import; a set ``MINIWORLD_TRANSITION_FP8_SM120*`` alias wins over the generic name):
 
-=============================================  ======================================================================================
-``MINIWORLD_TRANSITION_FP8_SM120=calib``        route bf16 inference calls at D 128 / 256 (n 2 / 4) through the e4m3 kernel (unset: off)
-``MINIWORLD_TRANSITION_FP8_SM120_GUARD``        ``sync`` (default, eager: redo an overflowing call) | ``lazy`` (no host sync; CUDA graphs) | ``off``
-``MINIWORLD_TRANSITION_FP8_SM120_HEADROOM``     h scale headroom over the calibration amax (16)
-``MINIWORLD_TRANSITION_FP8_SM120_MINROWS``      smallest row count routed, every width (default :data:`ROW_GATE`; 0 = no gate)
-``MINIWORLD_TRANSITION_FP8_SM120_WIDTHS``       widths routed (``128,256``)
-=============================================  ======================================================================================
+==============================================================  ====================================================================================
+``MINIWORLD_TRANSITION_FP8`` (alias ``_FP8_SM120``) ``=calib``   route bf16 inference calls at D 128 / 256 (n 2 / 4) through the e4m3 kernel (unset: the preset's value)
+``MINIWORLD_TRANSITION_FP8_GUARD`` (``_FP8_SM120_GUARD``)        ``sync`` (default, eager: redo an overflowing call) | ``lazy`` (no host sync; CUDA graphs) | ``off``
+``MINIWORLD_TRANSITION_FP8_HEADROOM`` (``_FP8_SM120_HEADROOM``)  h scale headroom over the calibration amax (16)
+``MINIWORLD_TRANSITION_FP8_MINROWS`` (``_FP8_SM120_MINROWS``)    smallest row count routed, every width (default :data:`ROW_GATE`; 0 = no gate)
+``MINIWORLD_TRANSITION_FP8_WIDTHS`` (``_FP8_SM120_WIDTHS``)      widths routed (default ``128,256``; a width without a 5090 build is not served)
+==============================================================  ====================================================================================
 """
 
 from __future__ import annotations
@@ -38,20 +42,33 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.fp8 import env as _fp8_env
+
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 from ..._sm120_builds import SM120, is_sm120
 
 _dir = Path(__file__).parent / "sm80"
 
-POLICY = os.environ.get("MINIWORLD_TRANSITION_FP8_SM120") or None  # None = off; "calib" = static h scale from the first eager call (NOT a preset variable)
-GUARD = os.environ.get("MINIWORLD_TRANSITION_FP8_SM120_GUARD", "sync")
-HEADROOM = float(os.environ.get("MINIWORLD_TRANSITION_FP8_SM120_HEADROOM", "16"))
-_MINROWS_ENV = os.environ.get("MINIWORLD_TRANSITION_FP8_SM120_MINROWS")
+
+def _var(name: str, default: str | None = None) -> str | None:
+    """``MINIWORLD_TRANSITION_FP8<name>``: the ``_SM120`` alias when it is set (also to ""), else the generic variable (the switch itself through
+    ``fp8.env``: an explicitly set variable, else the ``MINIWORLD_FP8`` preset's value, as for the H100 route), else ``default``."""
+    alias = "MINIWORLD_TRANSITION_FP8_SM120" + name
+    if alias in os.environ:
+        return os.environ[alias]
+    generic = "MINIWORLD_TRANSITION_FP8" + name
+    return _fp8_env(generic, default) if not name else os.environ.get(generic, default)
+
+
+POLICY = _var("") or None  # None = off; "calib" = static h scale from the first eager call (the safe preset's value, as on the H100)
+GUARD = _var("_GUARD", "sync")
+HEADROOM = float(_var("_HEADROOM", "16"))
+_MINROWS_ENV = _var("_MINROWS")
 MIN_ROWS: int | None = int(_MINROWS_ENV) if _MINROWS_ENV else None  # replaces ROW_GATE for every width when set (0 = no gate)
 #: smallest row count routed per width (below it the default route runs): same-process A-B, docs/fp8.md "RTX 5090" (Transition)
 ROW_GATE = {128: 12288, 256: 12288}  # 8192 rows: 0.91 (D 128 n 4) / 0.90 (D 256 n 4); 12288: 1.54 / 1.40
-WIDTHS = tuple(int(w) for w in os.environ.get("MINIWORLD_TRANSITION_FP8_SM120_WIDTHS", "128,256").split(",") if w)
+WIDTHS = tuple(int(w) for w in (_var("_WIDTHS", "128,256") or "").split(",") if w)
 #: (D, H) with a kernel build (transition_fwd_f8_sm120.cu)
 SHAPES = ((128, 256), (128, 512), (256, 512), (256, 1024))
 #: rows per CTA tile (8 warps x 16 rows) and the work-list bound of one launch (tr_fwd_f8_kernel: MAX_ITEMS - 2 tiles a CTA)

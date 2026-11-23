@@ -72,7 +72,7 @@ def _ext():
 
 
 class _Site:
-    __slots__ = ("vinv", "vsc", "qs", "ks", "qk", "ref", "version", "__weakref__")
+    __slots__ = ("vinv", "vsc", "qs", "ks", "qk", "qk_cal", "ref", "version", "__weakref__")
 
 
 _SITES: dict = {}  # (device, V weight address, heads) -> _Site (per-head static scales, calibrated on the first eager call)
@@ -95,7 +95,7 @@ def _drop_qk() -> None:
     """Some q / k value saturated: every site goes back to the bf16 score product (the product-1 q / k scales cannot widen; the H100 FP8_QK does the same). New calls and
     captures run the PV-only core; a graph captured before keeps its e4m3 scores (it is flagged again, ``fp8.check()`` re-runs the forward)."""
     for s in _SITES.values():
-        s.qk = False
+        s.qk, s.qk_cal = False, True  # (and no late q / k calibration after the drop)
 
 
 def take_overflow() -> bool:
@@ -120,25 +120,32 @@ def _drop(key, s):
         _hs._VINV.pop(("sm120_fp8", *key), None)
 
 
+def _absmax(t: torch.Tensor, heads: int) -> torch.Tensor:
+    tt = t.view(-1, heads, 32)
+    return torch.maximum(tt.amax(dim=(0, 2)), -tt.amin(dim=(0, 2))).float()
+
+
+def _calibrate_qk(s: _Site, q: torch.Tensor, k: torch.Tensor, heads: int) -> None:
+    """The q / k scales of a site (eager only), once: a site whose V was calibrated while e4m3 q / k was not wanted (a model with PV only, or ``QK`` off) gets
+    them on its first eager call with q / k wanted; after a saturation drop (``_drop_qk``) they are not taken again."""
+    s.qk_cal = True
+    sq = _hs.qk_scale_from_amax(_absmax(q, heads), _absmax(k, heads), QK_HEADROOM)  # per-head power of two, q8 = q / sq, k8 = k sq (None: no room)
+    if sq is not None:
+        s.qs, s.ks, s.qk = (1.0 / sq).contiguous(), sq.contiguous(), True
+        STATS["qk_calibrations"] = STATS.get("qk_calibrations", 0) + 1
+
+
 def _calibrate(dev: int, site: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, heads: int, want_qk: bool) -> _Site:
     s = _Site()
     s.ref, s.version = weakref.ref(site), site._version
     key = (dev, site.data_ptr(), heads)
     weakref.finalize(site, _drop, key, s)
-
-    def absmax(t):
-        tt = t.view(-1, heads, 32)
-        return torch.maximum(tt.amax(dim=(0, 2)), -tt.amin(dim=(0, 2))).float()
-
-    amax = absmax(v).clamp_min(1e-12)  # eager only: one sync per tensor
+    amax = _absmax(v, heads).clamp_min(1e-12)  # eager only: one sync per tensor
     s.vinv = torch.exp2(torch.floor(torch.log2(448.0 / (HEADROOM * amax)))).clamp_max(2.0**60).contiguous()
     s.vsc = (1.0 / s.vinv).contiguous()
-    s.qk, s.qs, s.ks = False, None, None
+    s.qk, s.qs, s.ks, s.qk_cal = False, None, None, False
     if want_qk:
-        sq = _hs.qk_scale_from_amax(absmax(q), absmax(k), QK_HEADROOM)  # per-head power of two, q8 = q / sq, k8 = k sq (None: no room)
-        if sq is not None:
-            s.qs, s.ks, s.qk = (1.0 / sq).contiguous(), sq.contiguous(), True
-            STATS["qk_calibrations"] = STATS.get("qk_calibrations", 0) + 1
+        _calibrate_qk(s, q, k, heads)
     _SITES[key] = s
     _hs._VS_AUTO[("sm120_fp8", *key)] = s.vsc  # fp8.check() -> h100_sm90.rescale_all multiplies it and recomputes vinv in place
     _hs._VINV[("sm120_fp8", *key)] = s.vinv
@@ -178,6 +185,8 @@ def route(q, k, v, bias, g, a, mask, site, b: int, length: int, heads: int, d_pa
             STATS["capture_fallbacks"] += 1
             return False
         s = _calibrate(dev, site, q, k, v, heads, want_qk)
+    elif want_qk and not s.qk_cal and not capturing:
+        _calibrate_qk(s, q, k, heads)  # V calibrated before without q / k (another model's switches): the q / k scales now, as at a first call
     qk = want_qk and s.qk
     if not qk and not PV_ONLY:
         return False  # q / k dropped after a saturation (or no room at calibration): the PV-only core is no gain, the default core runs

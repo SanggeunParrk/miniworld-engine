@@ -65,7 +65,7 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps, fp8=True):
     rows = x.numel() // x.shape[-1] if x.dim() else 0
     limit = fused_fwd_sm80.max_rows(x.device, x.dtype)
     grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, ln_weight, ln_bias, wa, wb, ws))
-    if fp8 and not grad and x.dtype is torch.bfloat16:  # the strictly opt-in RTX 5090 e4m3 route (MINIWORLD_TRANSITION_FP8_SM120, not in a preset; off by default)
+    if fp8 and not grad and x.dtype is torch.bfloat16:  # the RTX 5090 e4m3 route (fp8.SM120_ROUTES: MINIWORLD_TRANSITION_FP8 / the safe preset, as the H100 route; off by default)
         from . import fp8_sm120
 
         if fp8_sm120.POLICY is not None and fp8_sm120.serves(x, wa, ws):
@@ -330,7 +330,7 @@ def prebuild(target, rows):
             yield fused_fwd_sm80._ext_sm120
         if any((d, d * n) in fused_fwd_sm80.SHAPES and "train" in modes for (d, n), modes in served.items()):
             yield fused_bwd_sm80._ext_sm120
-        # the strictly opt-in e4m3 inference forward (fp8_sm120, MINIWORLD_TRANSITION_FP8_SM120; docs/fp8.md "RTX 5090"): one extension, every (D, H) it serves
+        # the e4m3 inference forward of the FP8 preset (fp8_sm120, fp8.SM120_ROUTES; docs/fp8.md "RTX 5090"): one extension, every (D, H) it serves
         from . import fp8_sm120
 
         if any((d, d * n) in fp8_sm120.SHAPES and "eval" in modes for (d, n), modes in served.items()):

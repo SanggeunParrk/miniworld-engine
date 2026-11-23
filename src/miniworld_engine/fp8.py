@@ -52,8 +52,8 @@ of each site (calibration) and kept for the process. A value past the e4m3 range
 :func:`check` once (one host sync per route): True means some route saturated and was rescaled -- run that forward again (at most 3 times).
 OuterProductMean (``bound``), token DiT and atom DiT (exact per-row scales) cannot saturate.
 
-The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: the TriMul and TriAttn slots, :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090"; the e4m3 Transition there is
-:data:`SM120_OPTIN`, its own switch only, never a preset) and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
+The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: the TriMul, TriAttn and Transition slots, :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090";
+the same preset variables as on the H100) and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
 default route, whose outputs are bit-identical with FP8 off.
 """
 
@@ -159,19 +159,17 @@ B200_OPTIN: dict[str, str] = {
 }
 
 
-#: RTX 5090 (sm_120a, capability (12, 0)) route modules: slot -> module path (same interface as the H100 module of the slot).
+#: RTX 5090 (sm_120a, capability (12, 0)) route modules: slot -> module path (same interface as the H100 module of the slot; the same preset
+#: variables, so ``MINIWORLD_FP8=safe`` / ``engine-fp8`` turn on the same slots as on the H100 wherever a 5090 module exists). The Transition joined
+#: on 2026-11-23 (it was opt-in before, ``MINIWORLD_TRANSITION_FP8_SM120``, now an alias of ``MINIWORLD_TRANSITION_FP8``): the 5090 preset covers
+#: what the H100 preset covers. Slots without an entry (OPM, PWA, token DiT, atom DiT) keep the H100 module, whose ``serves()`` is False off sm_90.
 SM120_ROUTES: dict[str, str] = {
     "triattn": "miniworld_engine.kernels.triangle_attention.cuda.sm120_fp8",
     "trimul": "miniworld_engine.kernels.trimul_inproj.cuda.sm120_fp8",
-}
-#: RTX 5090 routes served at capability (12, 0) that are NOT in a slot replacement and NOT in any preset (own switch variable; as :data:`B200_OPTIN`):
-#: the e4m3 Transition (``MINIWORLD_TRANSITION_FP8_SM120``; FoldForge F11: e4m3 in the trunk pair Transition costs antibody-antigen accuracy, so
-#: ``safe`` / ``engine-fp8`` never turn it on). Its own ``POLICY`` (the variable at import, or set at run time) is the only switch: :func:`enable` and the
-#: ``engine-fp8`` scope leave it as it is, :func:`disable` turns it off; :func:`check` reads its guard, :func:`route_stats` reports
-#: it in the ``transition`` entry on an RTX 5090 (:func:`status` keeps the slot's switches: read ``fp8_sm120.POLICY``).
-SM120_OPTIN: dict[str, str] = {
     "transition": "miniworld_engine.kernels.transition.cuda.fp8_sm120",
 }
+#: RTX 5090 routes outside any slot and preset (as :data:`B200_OPTIN`): none (the e4m3 Transition moved into :data:`SM120_ROUTES`).
+SM120_OPTIN: dict[str, str] = {}
 
 
 def arch() -> str:
@@ -215,15 +213,6 @@ def _atom_b200():
     return importlib.import_module(B200_OPTIN["atom_dit"])
 
 
-def _tr_sm120():
-    """The RTX 5090 e4m3 Transition module (``fp8_sm120``, :data:`SM120_OPTIN`) on an RTX 5090, else None."""
-    if arch() != "sm120":
-        return None
-    import importlib
-
-    return importlib.import_module(SM120_OPTIN["transition"])
-
-
 def _modules() -> tuple[Any, ...]:
     a = arch()
     if a in _MODULES:
@@ -237,7 +226,7 @@ def _modules() -> tuple[Any, ...]:
     from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as tm
 
     mods = dict(zip(SLOTS, (ta, tm, opm, pwa, tr, td, ad), strict=True))
-    if a == "sm120":  # RTX 5090: the e4m3-plane TriMul chain of sm120_fp8 takes the slot (every other slot keeps the H100 module, whose serves() is False off sm_90)
+    if a == "sm120":  # RTX 5090: the SM120_ROUTES modules (TriAttn, TriMul, Transition) take their slots (every other slot keeps the H100 module, whose serves() is False off sm_90)
         import importlib
 
         for slot, path in SM120_ROUTES.items():
@@ -402,8 +391,6 @@ def disable() -> None:
     a8 = _atom_b200()
     if a8 is not None:
         a8.enable(False)
-    if (t8 := _tr_sm120()) is not None:  # the opt-in RTX 5090 Transition route (SM120_OPTIN): off as well
-        t8.POLICY = None
     enable_triattn(frozenset(), False)
 
 
@@ -427,13 +414,12 @@ def status() -> dict:
 def _stat_dicts() -> dict[str, dict]:
     ta, tm, opm, pwa, tr, td, ad = _modules()
     a8 = _atom_b200()
-    t8 = _tr_sm120()
     return {
         "triattn": ta.STATS,
         "trimul": tm.GUARD_STATS,
         "opm": opm.GUARD_STATS,
         "pwa": pwa.STATS,
-        "transition": tr.GUARD_STATS if t8 is None else t8.GUARD_STATS,  # RTX 5090: the opt-in fp8_sm120 route (SM120_OPTIN)
+        "transition": tr.GUARD_STATS,
         "token_dit": td.STATS,
         "atom_dit": ad.STATS if a8 is None else a8.STATS,  # B200: pre / post / pre_declined / post_declined of b200_atom.f8
     }
@@ -463,8 +449,7 @@ def check() -> bool:
     caller runs that forward again."""
     ta, tm, opm, pwa, tr, _td, _ad = _modules()
     hit = False
-    t8 = _tr_sm120()
-    for m in (tm, opm, tr) if t8 is None else (tm, opm, tr, t8):
+    for m in (tm, opm, tr):
         peak = m.overflow_peak()
         if peak > 448.0:
             m.rescale_all(peak)

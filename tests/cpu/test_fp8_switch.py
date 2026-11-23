@@ -377,3 +377,41 @@ def test_b200_routes_follow_the_preset_with_per_route_precedence():
     assert _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_ATOMDIT_FP8_B200="pre")["atom_b200"] == ["pre"]
     assert _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_ATOMDIT_FP8="1")["atom_b200"] == []  # the H100 variable does not reach the B200 route
     assert _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_TOKEN_DIT_FP8_B200_UP="0")["up"] is False
+
+
+# ---- RTX 5090 (sm_120a): TriAttn / TriMul / Transition replace the slot module; the Transition follows the preset exactly as on the H100 (2026-11-23)
+def test_sm120_route_table():
+    assert set(fp8.SM120_ROUTES) == {"triattn", "trimul", "transition"}
+    assert set(fp8.SM120_ROUTES) <= set(fp8.SLOTS)
+    assert fp8.SM120_ROUTES["transition"] == "miniworld_engine.kernels.transition.cuda.fp8_sm120"
+    assert not fp8.SM120_OPTIN  # nothing outside the preset on the 5090 any more
+    # the 5090 slots are switched by the H100 preset variables: every H100 preset slot with a 5090 module is on under `safe`
+    assert fp8.PRESETS["safe"]["MINIWORLD_TRANSITION_FP8"] == "calib"
+
+
+_SM120_TR = (
+    "import json; from miniworld_engine.kernels.transition.cuda import fp8_sm120 as m;"
+    "print(json.dumps({'policy': m.POLICY, 'guard': m.GUARD, 'minrows': m.MIN_ROWS, 'widths': list(m.WIDTHS), 'headroom': m.HEADROOM}))"
+)
+
+
+def _sm120_tr(**env) -> dict:
+    out = subprocess.run([sys.executable, "-c", _SM120_TR], env={**_clean_env(), **env}, capture_output=True, text=True, check=True)
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_sm120_transition_route_follows_the_preset():
+    off = _sm120_tr()
+    assert off == {"policy": None, "guard": "sync", "minrows": None, "widths": [128, 256], "headroom": 16.0}
+    assert _sm120_tr(MINIWORLD_FP8="safe")["policy"] == "calib"  # as the H100 route (fp8_sm90a)
+    assert _sm120_tr(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8="")["policy"] is None  # an explicitly set per-route variable wins
+    assert _sm120_tr(MINIWORLD_TRANSITION_FP8="calib")["policy"] == "calib"
+    # the guard contract variables of the H100 route
+    g = _sm120_tr(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8_GUARD="lazy", MINIWORLD_TRANSITION_FP8_MINROWS="0")
+    assert (g["guard"], g["minrows"]) == ("lazy", 0)
+    # the former opt-in variables stay as aliases and win over the generic names when set
+    assert _sm120_tr(MINIWORLD_TRANSITION_FP8_SM120="calib")["policy"] == "calib"
+    assert _sm120_tr(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8_SM120="")["policy"] is None
+    a = _sm120_tr(MINIWORLD_TRANSITION_FP8_GUARD="lazy", MINIWORLD_TRANSITION_FP8_SM120_GUARD="off", MINIWORLD_TRANSITION_FP8_SM120_MINROWS="4096")
+    assert (a["guard"], a["minrows"]) == ("off", 4096)
+    assert _sm120_tr(MINIWORLD_TRANSITION_FP8_SM120_WIDTHS="128")["widths"] == [128]
