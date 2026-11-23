@@ -52,7 +52,8 @@ of each site (calibration) and kept for the process. A value past the e4m3 range
 :func:`check` once (one host sync per route): True means some route saturated and was rescaled -- run that forward again (at most 3 times).
 OuterProductMean (``bound``), token DiT and atom DiT (exact per-row scales) cannot saturate.
 
-The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: the TriMul and TriAttn slots, :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090") and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
+The routes take inference calls in bf16 (``master`` modules) on H100 (sm_90a), on the RTX 5090 (sm_120a: the TriMul and TriAttn slots, :data:`SM120_ROUTES`, docs/fp8.md "RTX 5090"; the e4m3 Transition there is
+:data:`SM120_OPTIN`, its own switch only, never a preset) and, for the slots of :data:`B200_ROUTES` (TriMul, TriAttn, Transition; docs/b200/fp8.md; the atom DiT rows route via :data:`B200_OPTIN`), on B200 (sm_100a); everything else (training, fp32, other GPUs) runs the
 default route, whose outputs are bit-identical with FP8 off.
 """
 
@@ -166,8 +167,8 @@ SM120_ROUTES: dict[str, str] = {
 #: RTX 5090 routes served at capability (12, 0) that are NOT in a slot replacement and NOT in any preset (own switch variable; as :data:`B200_OPTIN`):
 #: the e4m3 Transition (``MINIWORLD_TRANSITION_FP8_SM120``; FoldForge F11: e4m3 in the trunk pair Transition costs antibody-antigen accuracy, so
 #: ``safe`` / ``engine-fp8`` never turn it on). Its own ``POLICY`` (the variable at import, or set at run time) is the only switch: :func:`enable` and the
-#: ``engine-fp8`` scope leave it as it is, :func:`disable` turns it off; :func:`check` reads its guard, :func:`route_stats` / :func:`status` report
-#: it in the ``transition`` entry on an RTX 5090.
+#: ``engine-fp8`` scope leave it as it is, :func:`disable` turns it off; :func:`check` reads its guard, :func:`route_stats` reports
+#: it in the ``transition`` entry on an RTX 5090 (:func:`status` keeps the slot's switches: read ``fp8_sm120.POLICY``).
 SM120_OPTIN: dict[str, str] = {
     "transition": "miniworld_engine.kernels.transition.cuda.fp8_sm120",
 }
@@ -411,9 +412,6 @@ def status() -> dict:
     ta, tm, opm, pwa, tr, td, ad = _modules()
     kinds = sorted(k for k, on in (("d64", ta.FP8_PV_D64), ("fused", ta.FP8_PV_FUSED), ("unfused", ta.FP8_PV_UNFUSED)) if on) if ta.FP8_PV else []
     a8 = _atom_b200()
-    t8 = _tr_sm120()  # RTX 5090: the Transition entry is the opt-in fp8_sm120 route (SM120_OPTIN), the slot's H100 module serves nothing there
-    if t8 is not None:
-        tr = t8
     return {
         "triattn": {"pv": kinds, "qk": bool(ta.FP8_QK and ta.FP8_PV)},
         "trimul": tm.POLICY,

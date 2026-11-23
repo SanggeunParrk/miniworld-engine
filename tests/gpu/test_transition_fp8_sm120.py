@@ -105,7 +105,7 @@ def test_not_in_safe_preset() -> None:
     calls = F.GUARD_STATS["calls"]
     try:
         fp8.enable("safe", model="af3")
-        assert fp8.status()["transition"] is None
+        assert F.POLICY is None  # safe does not switch the opt-in route on
         with torch.no_grad():
             m(x)
         m.set_backend("engine-fp8")
@@ -122,7 +122,7 @@ def test_disable_turns_it_off(F) -> None:
     from miniworld_engine import fp8
 
     fp8.enable("safe")
-    assert F.POLICY == "calib" and fp8.status()["transition"] == "calib"  # enable() leaves the opt-in switch as it is
+    assert F.POLICY == "calib"  # enable() leaves the opt-in switch as it is
     fp8.disable()
     assert F.POLICY is None
 

@@ -6,8 +6,8 @@ antibody-antigen accuracy loss of FP8 to e4m3 rounding in the trunk pair Transit
     MINIWORLD_TRANSITION_FP8_SM120=calib python run.py        # environment (read at import), or at run time:
     miniworld_engine.kernels.transition.cuda.fp8_sm120.POLICY = "calib"
 
-``fp8.SM120_OPTIN`` lists it: ``fp8.enable()`` re-reads the variable (a preset never sets it), ``fp8.disable()`` turns it off, ``fp8.check()``
-reads its guard and ``fp8.route_stats()["transition"]`` / ``fp8.status()["transition"]`` are this module's on an RTX 5090.
+``fp8.SM120_OPTIN`` lists it: ``fp8.enable()`` / ``engine-fp8`` leave it as it is (no preset sets it), ``fp8.disable()`` turns it off, ``fp8.check()``
+reads its guard and ``fp8.route_stats()["transition"]`` is this module's counters on an RTX 5090 (``fp8.status()`` does not list it: read ``POLICY``).
 
 The kernel (``sm80/tr_fwd_f8_sm120.cuh``) is the register-resident one-kernel forward of ``fused_fwd_sm80`` (warp-owned rows across the whole
 hidden width, weights streaming through a cp.async ring of 32-hidden chunks) with both GEMMs on ``mma.sync.m16n8k32`` e4m3, fp32 accumulation:
