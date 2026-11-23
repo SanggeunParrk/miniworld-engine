@@ -33,7 +33,7 @@ def rows(card: str) -> list[dict]:
                 "id": "E4", "card": card, "gpu": meta.get("gpu", ""), "engine_version": meta.get("engine_version", ""),
                 "commit": meta.get("commit", ""), "module": rec["module"], "mode": rec["mode"], "backend": backend, "L": rec["length"],
                 "d": d, "n_head": h, "dtype": rec["dtype"], "status": "ok" if ok else rec["status"],
-                "reason": rec.get("reason", "") if not ok else ("no FP8 route on this card: engine-fp8 ran the default kernels" if no_route else ""),
+                "reason": rec.get("reason", "") if not ok else ("the FP8 route did not fire (no route for this case on this card, or below its gate): engine-fp8 ran the default kernels" if no_route else ""),
                 "gates": rec["gates"], "model": rec["model"], "stack": "engine", "row": rec["row"], "variant": csvio.variant_of(rec["kwargs"]),
                 "samples": rec.get("samples", ""), "repeats": len(ok),
             }  # fmt: skip
