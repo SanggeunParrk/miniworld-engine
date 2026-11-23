@@ -57,7 +57,10 @@ the shared B200 host (the rest). Ratio = FP8 / bf16 steady time (< 1 is faster).
   Chai-1 0.073 A (0.74); mean |dpLDDT| 0.04-0.12. n >= 4 was not judged here because B200 bf16 itself was wrong under CUDA-graph capture at
   n = 4 / 8 until a553001e1 (`_streams._skips_in_capture` skipped `record_stream` on the B200; see that commit message).
 - **Chai-1 n = 8 FP8: non-finite coordinates** (FloatingPointError in decode) with `fp8.check()` False, also with CUDA graphs off; bf16 n = 8 and
-  FP8 n = 16 are finite. Not localized (minus-TriAttn / minus-PWA variants not run). Open: do not offer FP8 for Chai-1 until fixed.
+  FP8 n = 16 are finite. Re-checked on engine main a553001e1 (after the token DiT e4m3 scale floor a8ddeaac5): still non-finite (bf16 n = 8
+  ok, 3.43 s). Not localized (the minus-TriAttn / -PWA / -TriMul / -token-DiT variants were not run: the shared host's GPUs were taken).
+  **Blocked in code**: `fp8.B200_BLOCKED_MODELS` = {chai1}: on a B200 `MINIWORLD_FP8` reads as off and `fp8.enable()` acts as `disable()` for
+  Chai-1 (tests/cpu/test_fp8_b200_blocked_models.py). Remove the entry only after an end-level check on the B200.
 - AF3 eager profile, n = 16 (11.6 s): Pairformer ~64 % (TriAttn 6.1 s, TriMul 1.4 s), token DiT 17 %, atom DiT 0.5 s, Transition 3 %, OPM 0.11 s,
   PWA 0.014 s: the FP8 ceiling is set by TriAttn; at n = 8 the token DiT (expand-only FP8, block 0.93-0.99) leads.
 - Transition D128: the gate now serves only the row windows where e4m3 is faster (commit 6189cf1e0, `fp8_sm100a.py` ROW_GATE / ROW_MAX:
