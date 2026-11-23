@@ -368,7 +368,7 @@ class VariantTokenCuda:
         grad = _wants_grad(self, single, cond)
         if type(self.transition) is ConditionedTransition and ct_sm80.serves(self.transition, single, cond, single.dtype, grad):
             with torch.autocast("cuda", enabled=False):
-                return ct_sm80.update(self.transition, single, cond, False, single.dtype, grad)
+                return ct_sm80.update(self.transition, single, cond, False, single.dtype, grad, token=True)
         return self.transition.delta(single, cond)
 
     def _supports_cuda(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
@@ -381,7 +381,7 @@ class VariantTokenCuda:
         if _a100(single):
             from miniworld_engine.kernels.integrations import augattn_sm80
 
-            single_a = augattn_sm80.forward(self.attention, single, cond, pair, mask)
+            single_a = augattn_sm80.forward(self.attention, single, cond, pair, mask, token=True)
             if not self.parallel:
                 from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
 
@@ -390,7 +390,7 @@ class VariantTokenCuda:
                     self.transition, single_a, cond, single_a.dtype, _wants_grad(self, single, cond)
                 ):
                     with torch.autocast("cuda", enabled=False):
-                        return ct_sm80.update(self.transition, single_a, cond, True, single_a.dtype, False)
+                        return ct_sm80.update(self.transition, single_a, cond, True, single_a.dtype, False, token=True)
                 return self.transition(single_a, cond)
             return single_a + self._a100_transition_delta(single, cond)
         # H100: the one token DiT algorithm (TokenDiTProtenix's "cuda" route with this block's options), inference and training
