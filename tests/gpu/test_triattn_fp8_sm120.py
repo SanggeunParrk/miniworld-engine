@@ -44,14 +44,14 @@ def f8():
     from miniworld_engine import fp8
     from miniworld_engine.kernels.triangle_attention.cuda import sm120_fp8 as F8
 
-    old = (F8.MIN_L, F8.GUARD, F8.QK, F8.PV_ONLY)
+    old = (F8.MIN_L, F8.GUARD, F8.QK, F8.PV_ONLY, F8.D64_MIN_L, F8.D64_QK)
     F8.PV_ONLY = True  # the tests below exercise the PV-only core too; test_pv_only_gate checks the shipped setting
     F8._SITES.clear()
     fp8.disable()
     fp8.reset_route_stats()
     yield F8
     fp8.disable()
-    F8.MIN_L, F8.GUARD, F8.QK, F8.PV_ONLY = old
+    F8.MIN_L, F8.GUARD, F8.QK, F8.PV_ONLY, F8.D64_MIN_L, F8.D64_QK = old
     F8._SITES.clear()
 
 
@@ -294,10 +294,16 @@ def test_model_whitelist_table(f8, model, pv_only):
         st = fp8.route_stats()["triattn"]
         fires, with_qk = _expect(model, kind, pv_only)
         assert (st["pv_front"] > 0, st.get("qk", 0) > 0) == (fires, with_qk), (model, kind, st)
-    # the d64 kind: 64-channel heads are not served on the 5090 (Python-level gate; no 5090 core for them)
+    # the d64 kind (64-channel heads, Chai-1): the 32-channel gate never takes them; the 64-channel core exactly where the table lists d64 (chai1), at L 512
     x = torch.empty(1, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         assert not f8.serves(x, 128, 2, 64, 1024)
+        f8._SITES.clear()
+        fp8.reset_route_stats()
+        mc, _ = _make_chai()
+        xc, mkc = _chai_x(512)
+        mc(xc, mkc)
+    assert (fp8.route_stats()["triattn"].get("pv_d64", 0) > 0) == ("d64" in fp8.triattn_for(model)[0]), model
     fp8.disable()
     fp8.reset_route_stats()
     _run(_make(128, 4), torch.randn(1, n, n, 128, device="cuda").bfloat16(), mask)
@@ -352,3 +358,212 @@ def test_late_qk_calibration(f8):
     fp8.reset_route_stats()
     _run(m, x, mask)
     assert site.qk and fp8.route_stats()["triattn"]["qk"] == 1
+
+
+# ---------------------------------------------------------------------------------------------------------------- 64-channel heads (kind d64)
+# Chai-1's trunk / confidence-head triangle attention (d_pair 256, 4 heads x 64 channels) on the RTX 5090 runs sm80_wide.variant_forward_ops; the e4m3 core of 64-channel heads
+# (sm120_fp8.serves_d64 / route(hd=64)) replaces its core + gate_rows when fp8.TRIATTN_MODELS turns the d64 kind on (MINIWORLD_FP8_MODEL=chai1).
+
+
+def _make_chai(model="chai1", starting=True, seed=1):
+    from miniworld_engine.modules.triangle import TriangleAttention
+
+    m = TriangleAttention(256, 4, model=model, starting=starting, p_drop=0.0).cuda().eval()
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    with torch.no_grad():
+        for nm, p in m.named_parameters():
+            if p.dim() > 1:
+                p.copy_(torch.randn(p.shape, generator=g) * p.shape[-1] ** -0.5)
+            elif nm.endswith("bias"):
+                p.copy_(0.1 * torch.randn(p.shape, generator=g))
+            else:
+                p.copy_(1.0 + 0.1 * torch.randn(p.shape, generator=g))
+    m64 = copy.deepcopy(m).double().set_backend("pytorch")
+    m = m.to(torch.bfloat16)
+    m.set_backend("cuda")
+    return m, m64
+
+
+def _chai_x(n, seed=5, masked=True):
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    x = torch.randn(1, n, n, 256, generator=g).cuda().to(torch.bfloat16)
+    mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+    if masked:
+        mask[:, n - n // 8 :] = False
+    return x, mask
+
+
+def _upd_err(y, y64, x):
+    u = y64 - x.double()
+    e = y.double() - y64
+    return (e.pow(2).mean().sqrt() / u.pow(2).mean().sqrt()).item(), (e.abs().max() / u.abs().max()).item()
+
+
+@pytest.mark.parametrize("model", ["chai1", "chai1_confidence"])
+@pytest.mark.parametrize("starting", [True, False])
+@pytest.mark.parametrize("n", [256, 512])
+def test_d64_accuracy_against_float64(f8, model, starting, n):
+    """update error of the e4m3 P / V core of 64-channel heads (q / k bf16, as the H100 d64 route: rms 3.3-3.7 %, max 3.0-4.3 %): rms < 6 %, max < 8 %, < 8x the bf16 default's;
+    the route ran, nothing saturated."""
+    from miniworld_engine import fp8
+
+    m, m64 = _make_chai(model, starting)
+    x, mask = _chai_x(n)
+    with torch.no_grad():
+        y0 = m(x, mask)
+        y64 = m64(x.double(), mask).double()
+    f8.D64_MIN_L = 0
+    _on("chai1")
+    with torch.no_grad():
+        m(x, mask)  # calibrates
+        y1 = m(x, mask)
+    st = fp8.route_stats()["triattn"]
+    assert st.get("pv_d64", 0) >= 2 and st.get("qk", 0) == 0, st
+    assert not fp8.check()
+    e0, e1 = _upd_err(y0, y64, x), _upd_err(y1, y64, x)
+    assert e1[0] < 0.06 and e1[1] < 0.08, (e0, e1)
+    assert e1[0] < 8 * e0[0], (e0, e1)
+
+
+def test_d64_default_untouched_when_off(f8):
+    """switch off (and after the route ran): the default core, byte for byte; no pv_d64 call."""
+    from miniworld_engine import fp8
+
+    m, _ = _make_chai()
+    x, mask = _chai_x(512)
+    with torch.no_grad():
+        y0 = m(x, mask)
+    f8.D64_MIN_L = 0
+    _on("chai1")
+    with torch.no_grad():
+        m(x, mask)
+        m(x, mask)
+    assert fp8.route_stats()["triattn"].get("pv_d64", 0) == 2
+    fp8.disable()
+    fp8.reset_route_stats()
+    with torch.no_grad():
+        y2 = m(x, mask)
+    assert torch.equal(y0, y2)
+    assert fp8.route_stats()["triattn"].get("pv_d64", 0) == 0
+
+
+def test_d64_gates_and_models(f8):
+    """below D64_MIN_L, a model without the d64 kind (af3, opendde, no model), training (grad): the default core; L % 128 != 0 refused by serves_d64."""
+    from miniworld_engine import fp8
+
+    m, _ = _make_chai()
+    x, mask = _chai_x(256)
+    _on("chai1")
+    f8.D64_MIN_L = 512
+    with torch.no_grad():
+        m(x, mask)
+    assert fp8.route_stats()["triattn"].get("pv_d64", 0) == 0  # 256 < D64_MIN_L
+    f8.D64_MIN_L = 0
+    with torch.no_grad():
+        m(x, mask)
+    assert fp8.route_stats()["triattn"].get("pv_d64", 0) == 1
+    for model in ("af3", "opendde", None):
+        fp8.reset_route_stats()
+        _on(model)
+        with torch.no_grad():
+            m(x, mask)
+        assert fp8.route_stats()["triattn"].get("pv_d64", 0) == 0, model
+    _on("chai1")
+    fp8.reset_route_stats()
+    xg = x.clone().requires_grad_(True)
+    m(xg, mask).float().sum().backward()
+    assert fp8.route_stats()["triattn"].get("pv_d64", 0) == 0
+    x1 = torch.empty(1, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        assert f8.serves_d64(x1, 4, 64, 1024) and not f8.serves_d64(x1, 4, 32, 1024) and not f8.serves_d64(x1, 4, 64, 1000)
+
+
+def test_d64_graph_equals_eager_and_saturation(f8):
+    """a captured graph (lazy guard) replays the eager bytes; a V scale made too small saturates inside the graph: fp8.check() flags it and widens the scale in place, the replay
+    follows; the eager sync guard redoes a saturating call."""
+    from miniworld_engine import fp8
+
+    m, _ = _make_chai(starting=False)
+    x, mask = _chai_x(256)
+    f8.D64_MIN_L = 0
+    _on("chai1")
+    with torch.no_grad():
+        y_e = m(x, mask).clone()  # calibrates
+        assert not fp8.check()
+        m(x, mask)
+        g = torch.cuda.CUDAGraph()
+        out = {}
+        with torch.cuda.graph(g):
+            out["y"] = m(x, mask)
+    g.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(out["y"], y_e)
+    assert not fp8.check()
+    (site,) = list(f8._SITES.values())
+    site.vinv.mul_(2.0**12)
+    site.vsc.copy_(1.0 / site.vinv)
+    g.replay()
+    torch.cuda.synchronize()
+    assert fp8.check()
+    for _ in range(8):
+        g.replay()
+        if not fp8.check():
+            break
+    assert not fp8.check()
+    assert torch.isfinite(out["y"]).all()
+    site.vinv.mul_(2.0**12)
+    site.vsc.copy_(1.0 / site.vinv)
+    st0 = dict(fp8.route_stats()["triattn"])
+    with torch.no_grad():
+        y = m(x, mask)
+    st1 = fp8.route_stats()["triattn"]
+    assert st1["retries"] > st0["retries"] or st1["fallbacks"] > st0["fallbacks"]
+    assert torch.isfinite(y).all()
+
+
+def test_d64_capture_before_calibration_runs_default(f8):
+    """a capture of an uncalibrated d64 site runs the default core (capture_fallbacks); the replay equals the default bytes."""
+    from miniworld_engine import fp8
+
+    m, _ = _make_chai()
+    x, mask = _chai_x(256)
+    with torch.no_grad():
+        y_def = m(x, mask).clone()
+    f8.D64_MIN_L = 0
+    _on("chai1")
+    g = torch.cuda.CUDAGraph()
+    out = {}
+    with torch.no_grad(), torch.cuda.graph(g):
+        out["y"] = m(x, mask)
+    g.replay()
+    torch.cuda.synchronize()
+    assert fp8.route_stats()["triattn"]["capture_fallbacks"] >= 1
+    assert torch.equal(out["y"], y_def)
+
+
+def test_d64_env_model_at_import():
+    """MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=chai1 (read at import) turns the d64 core on exactly as on the H100; af3 / no model leave the Chai-1 module on the default core."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    _needs_5090()
+    code = (
+        "import json, torch; from miniworld_engine import fp8; from miniworld_engine.modules.triangle import TriangleAttention\n"
+        "torch.manual_seed(0); m = TriangleAttention(256, 4, model='chai1', p_drop=0.0).cuda().eval().to(torch.bfloat16); m.set_backend('cuda')\n"
+        "x = torch.randn(1, 512, 512, 256, device='cuda').bfloat16(); mk = torch.ones(1, 512, dtype=torch.bool, device='cuda')\n"
+        "with torch.no_grad(): m(x, mk)\n"
+        "print(json.dumps(fp8.route_stats()['triattn']))"
+    )
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("MINIWORLD_FP8", "MINIWORLD_TRIATTN"))}
+
+    def stats(**env):
+        out = subprocess.run([sys.executable, "-c", code], env={**base, **env}, capture_output=True, text=True, check=True)
+        return json.loads(out.stdout.strip().splitlines()[-1])
+
+    a = stats(MINIWORLD_FP8="safe", MINIWORLD_FP8_MODEL="chai1")
+    assert a.get("pv_d64", 0) == 1 and a.get("qk", 0) == 0, a
+    for env in ({"MINIWORLD_FP8": "safe", "MINIWORLD_FP8_MODEL": "af3"}, {"MINIWORLD_FP8": "safe"}, {"MINIWORLD_FP8_MODEL": "chai1"}):
+        st = stats(**env)
+        assert st.get("pv_d64", 0) == 0, (env, st)

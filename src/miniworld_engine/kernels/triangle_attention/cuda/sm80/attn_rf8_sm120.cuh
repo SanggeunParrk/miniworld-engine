@@ -24,6 +24,12 @@
 
 namespace a100 {
 
+#ifndef RF8_LAZY64
+#define RF8_LAZY64 1
+#endif
+#ifndef RF8_TAU
+#define RF8_TAU 0.75
+#endif
 #ifndef RF8_ST
 #define RF8_ST 2
 #endif
@@ -59,18 +65,30 @@ struct Attn8Params {
 // [0] the running max of |v vinv| (float bits, positive floats order as ints), [1] 1 when a value of v or k exceeded 448 (saturated by the cvt).
 // Position of index j (0..31; a key of V, a channel of K) inside a tile row: 8 (j >> 1 & 3) + 4 (j >> 4) + 2 (j >> 3 & 1) + (j & 1).
 DEVI int rf8_keypos(int j) { return 8 * ((j >> 1) & 3) + 4 * (j >> 4) + 2 * ((j >> 3) & 1) + (j & 1); }
+// The byte of channel c inside a key's K row (QK8).  HD 32: rf8_keypos(c) (lane t's 8 bytes at 8 t = b0 | b1 of the k32 step).  HD 64: the two k32 steps
+// (channels 0-31, 32-63) interleaved per lane, so ONE 16-byte load at 16 t is (b0, b1) of step 0 then (b0, b1) of step 1.
+template <int HD>
+DEVI int rf8_kpos(int c) {
+  if constexpr (HD == 32) return rf8_keypos(c);
+  else { const int p = rf8_keypos(c & 31); return 16 * (p >> 3) + 8 * (c >> 5) + (p & 7); }
+}
 
-template <int H, bool QK8>
+// HD = 32 or 64 channels per head: per (pair row, head, 32-key block) a V tile of [HD channels][32 permuted keys] (HD 32 bytes) and with QK8 a K tile of
+// [32 keys][HD channels at rf8_kpos] (HD 32 bytes).
+template <int H, bool QK8, int HD = 32>
 __global__ void __launch_bounds__(256) quant_kernel(const __nv_bfloat16* __restrict__ v, long long ldv, const float* __restrict__ vinv, uint8_t* __restrict__ out,
                                                   const __nv_bfloat16* __restrict__ k, long long ldk, const float* __restrict__ ks, uint8_t* __restrict__ out_k, int L, int* peak) {
-  __shared__ __align__(16) uint8_t tile[(QK8 ? 2 : 1) * H * 1024];
+  static_assert(HD == 32 || HD == 64, "e4m3 tiles: heads of 32 or 64 channels");
+  constexpr int TB = HD * 32;                     // bytes of one tile
+  __shared__ __align__(16) uint8_t tile[(QK8 ? 2 : 1) * H * TB];
   const int u = blockIdx.x, row = blockIdx.y;     // key block, pair row (z L + i)
   const int tid = threadIdx.x;
   float pk = 0.f, pkk = 0.f;
-  constexpr int CPT = H * 4;                      // 16-byte chunks (8 channels) per token
+  constexpr int GH = HD / 8;                      // 16-byte chunks (8 channels) per head
+  constexpr int CPT = H * GH;                     // 16-byte chunks per token
   const long long tok = (long long)row * (long long)(gridDim.x * 32) + u * 32;
   for (int c = tid; c < 32 * CPT; c += 256) {
-    const int j = c / CPT, cc = c % CPT, h = cc >> 2;
+    const int j = c / CPT, cc = c % CPT, h = cc / GH;
     {
       const uint4 raw = __ldg(reinterpret_cast<const uint4*>(v + (tok + j) * ldv + cc * 8));
       const float inv = __ldg(vinv + h);
@@ -80,9 +98,9 @@ __global__ void __launch_bounds__(256) quant_kernel(const __nv_bfloat16* __restr
       for (int e = 0; e < 4; ++e) {
         const float a = bf16lo(w[e]) * inv, b = bf16hi(w[e]) * inv;
         pk = fmaxf(pk, fmaxf(fabsf(a), fabsf(b)));
-        const int ch = (cc & 3) * 8 + 2 * e;
-        tile[h * 1024 + ch * 32 + pos] = __nv_cvt_float_to_fp8(a, __NV_SATFINITE, __NV_E4M3);
-        tile[h * 1024 + (ch + 1) * 32 + pos] = __nv_cvt_float_to_fp8(b, __NV_SATFINITE, __NV_E4M3);
+        const int ch = (cc % GH) * 8 + 2 * e;
+        tile[h * TB + ch * 32 + pos] = __nv_cvt_float_to_fp8(a, __NV_SATFINITE, __NV_E4M3);
+        tile[h * TB + (ch + 1) * 32 + pos] = __nv_cvt_float_to_fp8(b, __NV_SATFINITE, __NV_E4M3);
       }
     }
     if constexpr (QK8) {
@@ -93,21 +111,22 @@ __global__ void __launch_bounds__(256) quant_kernel(const __nv_bfloat16* __restr
       for (int e = 0; e < 4; ++e) {
         const float a = bf16lo(w[e]) * sk, b = bf16hi(w[e]) * sk;
         pkk = fmaxf(pkk, fmaxf(fabsf(a), fabsf(b)));
-        const int ch = (cc & 3) * 8 + 2 * e;                         // channel ch, ch + 1 of key j: bytes rf8_keypos(ch), + 1 of the key's 32-byte row
+        const int ch = (cc % GH) * 8 + 2 * e;                        // channel ch, ch + 1 of key j: bytes rf8_kpos(ch), + 1 of the key's HD-byte row
         const unsigned short pr = (unsigned short)(__nv_cvt_float_to_fp8(a, __NV_SATFINITE, __NV_E4M3) | (__nv_cvt_float_to_fp8(b, __NV_SATFINITE, __NV_E4M3) << 8));
-        *reinterpret_cast<unsigned short*>(&tile[H * 1024 + h * 1024 + j * 32 + rf8_keypos(ch)]) = pr;
+        *reinterpret_cast<unsigned short*>(&tile[H * TB + h * TB + j * HD + rf8_kpos<HD>(ch)]) = pr;
       }
     }
   }
   __syncthreads();
   const long long nb = gridDim.x;
-  for (int c = tid; c < H * 64; c += 256) {
-    const int h = c >> 6, q = c & 63;
-    const uint4 val = *reinterpret_cast<const uint4*>(tile + h * 1024 + q * 16);
-    *reinterpret_cast<uint4*>(out + (((long long)row * H + h) * nb + u) * 1024 + q * 16) = val;
+  constexpr int QT = TB / 16;                     // 16-byte chunks per tile
+  for (int c = tid; c < H * QT; c += 256) {
+    const int h = c / QT, q = c % QT;
+    const uint4 val = *reinterpret_cast<const uint4*>(tile + h * TB + q * 16);
+    *reinterpret_cast<uint4*>(out + (((long long)row * H + h) * nb + u) * TB + q * 16) = val;
     if constexpr (QK8) {
-      const uint4 kv = *reinterpret_cast<const uint4*>(tile + H * 1024 + h * 1024 + q * 16);
-      *reinterpret_cast<uint4*>(out_k + (((long long)row * H + h) * nb + u) * 1024 + q * 16) = kv;
+      const uint4 kv = *reinterpret_cast<const uint4*>(tile + H * TB + h * TB + q * 16);
+      *reinterpret_cast<uint4*>(out_k + (((long long)row * H + h) * nb + u) * TB + q * 16) = kv;
     }
   }
 #pragma unroll
@@ -122,16 +141,17 @@ __global__ void __launch_bounds__(256) quant_kernel(const __nv_bfloat16* __restr
 }
 
 template <class G, bool QK8>
-struct F8Lay {   // G = AttnRCfg<1, 2, 4, ST, GATE, 32>: the slot with a 1 KiB e4m3 V tile (and K tile) per pair row
-  static constexpr int V8ROW = 1024;
+struct F8Lay {   // G = AttnRCfg<1, 2, 4, ST, GATE, 32> (32-channel heads) or AttnRCfg<2, 1, 2, ST, GATE, 64, BCVT> (64): the slot with an HD x 32-byte e4m3 V tile (and K tile) per pair row
+  static constexpr int V8ROW = G::HD * 32;
+  static constexpr int QV = V8ROW / 16;                  // 16-byte chunks of one tile
   static constexpr int KOFF = G::BIAS_BYTES;
   static constexpr int KB = QK8 ? G::R * V8ROW : G::R * G::KV_ROW;
   static constexpr int VOFF = KOFF + KB;
   static constexpr int SLOT_RAW = VOFF + G::R * V8ROW;
   static constexpr int SLOT = SLOT_RAW > G::Q_BYTES ? SLOT_RAW : G::Q_BYTES;   // Q rides in through one slot; the epilogue stages O and g in the ring
   static constexpr int SMEM = G::ST * SLOT;
-  static constexpr int V_IT = G::R * 64 / G::NTHR;
-  static_assert(G::HD == 32 && G::R * 64 % G::NTHR == 0, "e4m3 core: 32-channel heads, whole 16-byte V chunk steps");
+  static constexpr int V_IT = G::R * QV / G::NTHR;
+  static_assert((G::HD == 32 || G::HD == 64) && G::R * QV % G::NTHR == 0, "e4m3 core: 32- / 64-channel heads, whole 16-byte V chunk steps");
   static_assert(2 * G::Q_BYTES <= G::ST * SLOT, "the epilogue stages O and g in the ring");
 };
 
@@ -139,7 +159,9 @@ template <class G, bool QK8>
 __global__ void __launch_bounds__(G::NTHR, 2) attn_rf8_kernel(const Attn8Params a8, float sinv_hi, float sinv_lo) {
   using F = F8Lay<G, QK8>;
   constexpr int RW = G::RW, ST = G::ST, HD = G::HD, GR = G::GR, KK = G::KK, DN = G::DN;
-  static_assert(RW == 2 && DN == 4 && KK == 2, "32-channel heads, two rows per warp");
+  constexpr int KS = HD / 32;                             // k32 steps of Q K^T (QK8)
+  constexpr bool LAZY = HD == 64 && RF8_LAZY64;           // 64-channel heads: the running max moves only past RF8_TAU (below)
+  static_assert((HD == 32 && RW == 2 && DN == 4 && KK == 2) || (HD == 64 && DN == 8 && KK == 4), "32-channel heads two rows per warp, or 64-channel heads");
   const AttnParams& p = a8.p;
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sbase = smem_u32(smem_raw);
@@ -158,8 +180,8 @@ __global__ void __launch_bounds__(G::NTHR, 2) attn_rf8_kernel(const Attn8Params 
   const uint32_t kdst = F::KOFF + cr * G::KV_ROW + rf_swz<HD>(ck, cg), bdst = swz64(tid >> 2, tid & 3);
   const long long kadv = (long long)G::KEYS * p.ldk;
   const long long nkb = L / 32;
-  // e4m3 tiles (V, and K with QK8): thread c = tid + NTHR i -> pair row c / 64, 16-byte chunk c % 64 of that row's 1 KiB tile
-  const long long tile0 = ((((long long)z * L + row0) * p.H + h) * nkb) * 1024;
+  // e4m3 tiles (V, and K with QK8): thread c = tid + NTHR i -> pair row c / QV, 16-byte chunk c % QV of that row's tile (HD x 32 bytes)
+  const long long tile0 = ((((long long)z * L + row0) * p.H + h) * nkb) * F::V8ROW;
   const uint8_t* vsrc = a8.v8 + tile0;
   const uint8_t* k8src = QK8 ? a8.k8 + tile0 : nullptr;
   auto issue = [&](int u) {
@@ -176,9 +198,9 @@ __global__ void __launch_bounds__(G::NTHR, 2) attn_rf8_kernel(const Attn8Params 
       }
 #pragma unroll
       for (int i = 0; i < F::V_IT; ++i) {
-        const int c = tid + G::NTHR * i, r = c >> 6, q = c & 63;
-        cp_async16(s + F::VOFF + r * F::V8ROW + q * 16, vsrc + ((long long)r * p.H * nkb + u) * 1024 + q * 16);
-        if constexpr (QK8) cp_async16(s + F::KOFF + r * F::V8ROW + q * 16, k8src + ((long long)r * p.H * nkb + u) * 1024 + q * 16);
+        const int c = tid + G::NTHR * i, r = c / F::QV, q = c % F::QV;
+        cp_async16(s + F::VOFF + r * F::V8ROW + q * 16, vsrc + ((long long)r * p.H * nkb + u) * F::V8ROW + q * 16);
+        if constexpr (QK8) cp_async16(s + F::KOFF + r * F::V8ROW + q * 16, k8src + ((long long)r * p.H * nkb + u) * F::V8ROW + q * 16);
       }
 #pragma unroll
       for (int i = 0; i < G::B_IT; ++i) cp_async16(s + bdst + i * (G::NTHR / 4) * G::ROWB, bsrc + (long long)i * (G::NTHR / 4) * L);
@@ -214,8 +236,9 @@ __global__ void __launch_bounds__(G::NTHR, 2) attn_rf8_kernel(const Attn8Params 
         for (int kk = 0; kk < KK; ++kk)
           ldsm_x4(qa[w][mt][kk], qs + (wr * RW + w) * G::BM * G::RB + rf_swz<HD>(qw + 16 * mt + lrow, 2 * kk + (lane >> 4)));
   }
-  // QK8: the A fragments of the k32 step from the bf16 ones: register 0 / 1 (rows g / g + 8) = channels {2t, 2t+1, 8+2t, 9+2t} of k step 0, register 2 / 3 = those of k step 1
-  uint32_t qa8[RW][2][4];
+  // QK8: the A fragments of the k32 step(s) from the bf16 ones: register 0 / 1 (rows g / g + 8) = channels {2t, 2t+1, 8+2t, 9+2t} of k16 step 2 s, register 2 / 3 = those
+  // of k16 step 2 s + 1 (k32 step s = channels [32 s, 32 s + 32))
+  uint32_t qa8[RW][2][KS][4];
   if constexpr (QK8) {
     const float qsc = __ldg(a8.qs + h);
     float pq = 0.f;
@@ -230,7 +253,7 @@ __global__ void __launch_bounds__(G::NTHR, 2) attn_rf8_kernel(const Attn8Params 
             const uint32_t lo_pair = qa[w][mt][kk][rr], hi_pair = qa[w][mt][kk][rr + 2];   // rr = row g / g + 8; the pair {2t, 2t+1}, then {8+2t, 9+2t}
             const float x0 = bf16lo(lo_pair) * qsc, x1 = bf16hi(lo_pair) * qsc, x2 = bf16lo(hi_pair) * qsc, x3 = bf16hi(hi_pair) * qsc;
             pq = fmaxf(pq, fmaxf(fmaxf(fabsf(x0), fabsf(x1)), fmaxf(fabsf(x2), fabsf(x3))));
-            qa8[w][mt][2 * kk + rr] = pack_e4m3x4(x0, x1, x2, x3);
+            qa8[w][mt][kk >> 1][2 * (kk & 1) + rr] = pack_e4m3x4(x0, x1, x2, x3);
           }
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) pq = fmaxf(pq, __shfl_xor_sync(0xffffffffu, pq, o));
@@ -259,30 +282,50 @@ __global__ void __launch_bounds__(G::NTHR, 2) attn_rf8_kernel(const Attn8Params 
 
   const uint32_t a_off = swz64(qw + lrow, 0);
   const uint32_t k_off = rf_swz<HD>(lane & 7, (lane >> 3) & (GR - 1));
-  const uint32_t vb_off = (uint32_t)(gq * 32 + 8 * tq);   // + 256 dn + 1024 row: this lane's 8 bytes (b0, b1) of channel 8 dn + g
+  const uint32_t k_off_hi = rf_swz<HD>(lane & 7, ((lane >> 3) + 4) & (GR - 1));   // HD 64 (bf16 K): channels 32-63 of the column
+  const uint32_t vb_off = (uint32_t)(gq * 32 + 8 * tq);   // + 256 dn + V8ROW row: this lane's 8 bytes (b0, b1) of channel 8 dn + g
+  const float sinv = sinv_hi + sinv_lo;
 
   auto s_column = [&](uint32_t sb, int jj, float (&sc)[RW][2][4][4]) {
     float cb[2][4];
+    if constexpr (G::BCVT) {                                  // the C fragment read and scaled per element (as the default 64-channel core)
 #pragma unroll
-    for (int mt = 0; mt < 2; ++mt) {
-      uint32_t a[4];
-      ldsm_x4(a, sb + mt * 16 * G::ROWB + (a_off ^ (jj << 4)));
-      const float zero[4] = {0.f, 0.f, 0.f, 0.f};
-      mma_c(cb[mt], a, bs0, bs1, zero);
+      for (int mt = 0; mt < 2; ++mt) {
+        const uint32_t r0 = sb + swz64(qw + 16 * mt + gq, jj) + 4 * tq;
+        const uint32_t u0 = lds32(r0), u1 = lds32(r0 + 8 * G::ROWB);
+        cb[mt][0] = bf16lo(u0) * sinv; cb[mt][1] = bf16hi(u0) * sinv; cb[mt][2] = bf16lo(u1) * sinv; cb[mt][3] = bf16hi(u1) * sinv;
+      }
+    } else {
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt) {
+        uint32_t a[4];
+        ldsm_x4(a, sb + mt * 16 * G::ROWB + (a_off ^ (jj << 4)));
+        const float zero[4] = {0.f, 0.f, 0.f, 0.f};
+        mma_c(cb[mt], a, bs0, bs1, zero);
+      }
     }
 #pragma unroll
     for (int w = 0; w < RW; ++w) {
-      if constexpr (QK8) {
+      if constexpr (QK8 && HD == 32) {
         const uint2 kb = lds64(sb + F::KOFF + (wr * RW + w) * F::V8ROW + (8 * jj + gq) * 32 + 8 * tq);   // key 8 jj + g, channel bytes 8 t .. 8 t + 7
 #pragma unroll
-        for (int mt = 0; mt < 2; ++mt) mma_e4c(sc[w][mt][jj], qa8[w][mt], kb.x, kb.y, cb[mt]);
+        for (int mt = 0; mt < 2; ++mt) mma_e4c(sc[w][mt][jj], qa8[w][mt][0], kb.x, kb.y, cb[mt]);
+      } else if constexpr (QK8) {
+        const uint4 kb = lds128(sb + F::KOFF + (wr * RW + w) * F::V8ROW + (8 * jj + gq) * HD + 16 * tq);   // key 8 jj + g: (b0, b1) of k32 step 0, then of step 1
+#pragma unroll
+        for (int mt = 0; mt < 2; ++mt) {
+          mma_e4c(sc[w][mt][jj], qa8[w][mt][0], kb.x, kb.y, cb[mt]);
+          mma_e4(sc[w][mt][jj], qa8[w][mt][KS - 1], kb.z, kb.w);
+        }
       } else {
-        uint32_t kb[4];
-        ldsm_x4(kb, sb + F::KOFF + (wr * RW + w) * G::KV_ROW + jj * 8 * G::RB + k_off);
+        uint32_t kb[2 * KK];
+        ldsm_x4(*reinterpret_cast<uint32_t(*)[4]>(kb), sb + F::KOFF + (wr * RW + w) * G::KV_ROW + jj * 8 * G::RB + k_off);
+        if constexpr (KK == 4) ldsm_x4(*reinterpret_cast<uint32_t(*)[4]>(kb + 4), sb + F::KOFF + (wr * RW + w) * G::KV_ROW + jj * 8 * G::RB + k_off_hi);
 #pragma unroll
         for (int mt = 0; mt < 2; ++mt) {
           mma_c(sc[w][mt][jj], qa[w][mt][0], kb[0], kb[1], cb[mt]);
-          mma_acc(sc[w][mt][jj], qa[w][mt][1], kb[2], kb[3]);
+#pragma unroll
+          for (int kk = 1; kk < KK; ++kk) mma_acc(sc[w][mt][jj], qa[w][mt][kk], kb[2 * kk], kb[2 * kk + 1]);
         }
       }
     }
@@ -291,6 +334,41 @@ __global__ void __launch_bounds__(G::NTHR, 2) attn_rf8_kernel(const Attn8Params 
   // P bytes (A fragments of the k32 step) of row w of the slot, after raising the running max; the row sums by the e4m3 ones mma
   auto weights = [&](float (&sc)[RW][2][4][4], int w, uint32_t (&pa)[2][4]) {
     float off[2][2];
+    if constexpr (LAZY) {
+      // 64-channel heads: the running max (and the rescale of O and the sums) moves only when some row of the warp gains more than RF8_TAU over it; the weights stay
+      // <= 2^(8 + RF8_TAU) < 448 otherwise.  A warp-uniform branch: most slots after the first few skip the 72 multiplies per row pair.
+      float mxs[2][2];
+      bool up = false;
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+        for (int hh = 0; hh < 2; ++hh) {
+          float mx = fmaxf(fmaxf(fmaxf(sc[w][mt][0][2 * hh], sc[w][mt][0][2 * hh + 1]), fmaxf(sc[w][mt][1][2 * hh], sc[w][mt][1][2 * hh + 1])),
+                           fmaxf(fmaxf(sc[w][mt][2][2 * hh], sc[w][mt][2][2 * hh + 1]), fmaxf(sc[w][mt][3][2 * hh], sc[w][mt][3][2 * hh + 1])));
+          mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
+          mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
+          mxs[mt][hh] = mx * c1;
+          up |= mxs[mt][hh] > m[w][mt][hh] + (float)RF8_TAU;
+        }
+      if (__any_sync(0xffffffffu, up)) {
+#pragma unroll
+        for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+          for (int hh = 0; hh < 2; ++hh) {
+            const float mnew = fmaxf(m[w][mt][hh], mxs[mt][hh]);
+            const float mu = mnew == -INFINITY ? 0.f : mnew;
+            const float alpha = ex2f(m[w][mt][hh] - mu);
+            m[w][mt][hh] = mnew;
+            l4[w][mt][2 * hh] *= alpha; l4[w][mt][2 * hh + 1] *= alpha;
+#pragma unroll
+            for (int dn = 0; dn < DN; ++dn) { o[w][mt][dn][2 * hh] *= alpha; o[w][mt][dn][2 * hh + 1] *= alpha; }
+          }
+      }
+#pragma unroll
+      for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+        for (int hh = 0; hh < 2; ++hh) off[mt][hh] = 8.f - (m[w][mt][hh] == -INFINITY ? 0.f : m[w][mt][hh]);
+    } else {
 #pragma unroll
     for (int mt = 0; mt < 2; ++mt)
 #pragma unroll
@@ -308,6 +386,7 @@ __global__ void __launch_bounds__(G::NTHR, 2) attn_rf8_kernel(const Attn8Params 
 #pragma unroll
         for (int dn = 0; dn < DN; ++dn) { o[w][mt][dn][2 * hh] *= alpha; o[w][mt][dn][2 * hh + 1] *= alpha; }
       }
+    }
 #pragma unroll
     for (int mt = 0; mt < 2; ++mt) {
       float pw[4][4];
