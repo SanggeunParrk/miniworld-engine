@@ -532,6 +532,27 @@ Still above 0.667 after this part (H100 >= 20 us on every case of these classes,
 - Protenix fp32 eval: the fused TF32 pre / post kernels (the atom-dit agent is redesigning `atom_post_tf32`); fp32
   training at 48 samples, ESMFold2Pair inference and training: as written above, not touched in this part.
 
+### The slid window's TAIL on the tensor cores (2026-11-23; `cuda:b200_sm100` 28 of AtomDiTProtenix / AtomDiTOpenFold3)
+
+The CUDA-core tail of the part below (`ltail.cuh`, one group-1 edge CTA per head and sample range) made AF3 / Protenix training with
+padded atoms far slower than the H100: FoldForge's F6 bench pads every example to 4,096 atoms (268-384 real tokens), and at 48 samples
+`local_attn_dkv_tf32` took 77 ms a call (3.7 s of the 8.8 s step; the forward kernel 0.9 ms). The E1 cases never showed it: their real
+count is N (no tail), and they measure `slide` only at 1 and 8 samples.
+
+- Every tail window reads group 1's slid keys `[max(R - 128, 0), R)`, so the tail is more edge groups of group 1's shape: group `g >= 1`
+  holds windows `wf1 + 4 (g - 1) .. + 3` (`slide.cuh`: `slide_ngroups(nwin) = 1 + (nwin + 1) / 4` groups launched, the most any `R`
+  needs; `slide_group_x` / `slide_mine_x`; a group without a window has nothing to do, so the grid does not depend on `R`: still
+  CUDA-graph capturable). Every group runs the kernel's own tcgen05 edge program, fp32 / tf32 and bf16 kernels alike (all six).
+- dK / dV: one fp32 partial per group (`spart [NG][A][4][64][128]`); `lslide.cu` adds groups 1 .. NG - 1 in order onto group 0's
+  (deterministic). dbias: each group writes its own windows (the edge sample split stays <= 2: exact). `ltail.cuh` is gone.
+- Kernel times (N 4,096, 48 samples, slide, vast.ai B200): R = 2,048: fp32 forward 12.8 -> 0.178 ms, backward (dQ + dK / dV) 114.2 ->
+  0.54 ms; bf16 12.7 -> 0.130 / 56.3 -> 0.37 ms; R = N unchanged (fp32 0.132 / 0.338 ms, bf16 0.095 / 0.226 ms).
+- Accuracy against an fp64 PyTorch transcription of the slid window (R 4,096 / 3,500 / 2,048 / 1,000 / 100): every output (O, LSE, dQ,
+  dK, dV, dbias) at the error of the no-tail case (fp32 O rms 1.06e-3, bf16 3.4e-3); the padding rows are now at the tf32 / bf16 level
+  of the other windows (they were fp32 on CUDA cores). Real rows: unchanged.
+- F6 (H100 protocol: 6 steps x 8 micro steps, 48 augmentations in one pass, step graph, H100 stand-in pools, 3 repeats; random weights
+  on the rented card): Protenix v1 1.149 -> 0.436 s / example (H100 engine 0.787).
+
 ### Round 3, third part (2026-11-17, after the merge of base 11c7f17b0: merge commit b2ce12ab0)
 
 Records `$W/b2511/work/r3-local-dit/` (`tail*.out`, `oddv.out`, `v1.out`, `san.out`, `spd_sl_{base,new}.jsonl`, `acc_esm_res1*.jsonl`).

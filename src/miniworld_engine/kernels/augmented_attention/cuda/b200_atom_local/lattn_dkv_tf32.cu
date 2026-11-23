@@ -25,7 +25,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "../sm100/sm100.cuh"
 #include "slide.cuh"
-#include "ltail.cuh"
 using namespace s100;
 
 constexpr int NH = 4, DH = 32, WQ = 32, WK = 128, KOFF = 48, QR = 224, KR = 128;
@@ -65,19 +64,19 @@ local_attn_dkv_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
   uint64_t *fullX = bars, *emptyX = bars + 1, *fullY = bars + 2, *yempty = bars + 4, *sready = bars + 6, *tready = bars + 7, *dready = bars + 8;
   uint32_t* tptr = reinterpret_cast<uint32_t*>(sm + O_BAR + 128);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int nmain = (int)gridDim.x - 2 * NH * SPE;                  // the slid window's edge CTAs come last (slide.cuh; SPE = 0: none)
+  const int nmain = (int)gridDim.x - slide_ngroups(nwin) * NH * SPE;   // the slid window's edge CTAs come last (slide.cuh; SPE = 0: none)
   const bool edge = (int)blockIdx.x >= nmain;
   const int sp = edge ? SPE : SP, bx = (int)blockIdx.x - (edge ? nmain : 0);
   const int pair = bx / sp, part = bx - pair * sp;
   const int jc = pair >> 2, h = pair & 3;                            // (an edge CTA: jc = its group)
   const int nr = SPE > 0 ? slide_nreal(kmask, N, sred, QB) : N;
   int wf = 0, kbe = 0;
-  const bool live = !edge || slide_group(jc, nr, wf, kbe);
+  const bool live = !edge || slide_group_x(jc, nr, nwin, wf, kbe);
   // an edge CTA: the group's 128 slid keys, its windows from wf (every key sees all of them: band offset 0)
   const int kb = edge ? kbe : 128 * jc - 112, W0 = edge ? wf : 4 * jc - 5, q0 = 32 * W0;
   const int a_lo = (int)((long)A * part / sp), a_hi = (int)((long)A * (part + 1) / sp);
   const int nit = live ? a_hi - a_lo : 0;
-  if (edge && bx == 0 && tid == 0) reinterpret_cast<int*>(spart)[2 * A * NH * 64 * KR] = nr;   // n_real for lslide.cu, after the partial
+  if (edge && bx == 0 && tid == 0) reinterpret_cast<int*>(spart)[slide_ngroups(nwin) * A * NH * 64 * KR] = nr;   // n_real for lslide.cu, after the partial
   const bool ctl = warp == 16;                                       // TMA + MMA warp (no TMEM lanes)
 
   if (tid == 0) {
@@ -93,7 +92,7 @@ local_attn_dkv_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
   const int wq = W0 + qdb + qt;                                      // this warp's band quarter = one window, queries 32 wq ..
   const bool wok = wq >= 0 && wq < nwin;
   // this CTA's window (its cells and dbias); the others' cells are masked: a moved window in a clipped-window CTA, an unmoved one in an edge CTA
-  const bool wmine = SPE == 0 ? wok : edge ? wok && slide_mine(jc, wq, nr) : wok && !slide_moved(wq, nr);   // (group 1 may reach past nwin)
+  const bool wmine = SPE == 0 ? wok : edge ? wok && slide_mine_x(jc, wq, nr) : wok && !slide_moved(wq, nr);   // (group 1 may reach past nwin)
   const int rr = key - (edge ? kb : 32 * wq - KOFF);                 // the key's column in window wq's 128 keys (0..127)
   const bool kok = key >= 0 && key < N && (kmask == nullptr || kmask[key]);
   const bool bok = wmine && kok;                                      // read the bias; else -inf (invalid key, not this CTA's) or 0 (no such window)
@@ -269,6 +268,4 @@ local_attn_dkv_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_const
   if (lane == 0) tma_store_wait0();
   tc_fence_before(); __syncthreads(); tc_fence_after();
   if (warp == 0) tmem_dealloc(tm, 512);
-  if (SPE > 0 && edge && jc == 1 && live)                            // the slid window's tail windows (ltail.cuh)
-    ltail::tail_dkv(qp, kp, vp, dop, lsep, ddp, gbias, kmask, dbias, spart, nr, N, A, nwin, h, a_lo, a_hi, (long)sN, (long)sA, (long)dN, (long)dA, reinterpret_cast<float*>(sm));
 }
