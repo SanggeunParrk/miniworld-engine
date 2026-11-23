@@ -25,6 +25,8 @@ ap.add_argument("--out", type=Path, required=True)
 ap.add_argument("--specs", type=Path, required=True)
 ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3])
 ap.add_argument("--deadline", type=float, default=1e9, help="stop starting new cases after this many seconds (resumable)")
+ap.add_argument("--env", action="append", default=[], help="K=V set after the arm environment (ablations, e.g. MINIWORLD_TRANSITION_FP8= to switch one route off)")
+ap.add_argument("--tag", default=None, help="case name prefix instead of the arm (ablation runs: <tag>_t<seed>)")
 ap.add_argument("targets", nargs="+")
 args = ap.parse_args()
 for key in [k for k in os.environ if k.startswith("MINIWORLD_") and "FP8" in k]:
@@ -32,6 +34,9 @@ for key in [k for k in os.environ if k.startswith("MINIWORLD_") and "FP8" in k]:
 if args.arm == "fp8":
     os.environ["MINIWORLD_FP8"] = "safe"
     os.environ["MINIWORLD_FP8_MODEL"] = args.model
+for kv in args.env:
+    k, v = kv.split("=", 1)
+    os.environ[k] = v
 
 import torch  # noqa: E402
 
@@ -53,7 +58,7 @@ with ff.load_model(args.model, config=cfg, device="cuda:0") as model:
     for t in args.targets:
         inputs = None
         for ts in args.seeds:
-            name = f"{args.arm}_t{ts}"
+            name = f"{args.tag or args.arm}_t{ts}"
             f = args.out / f"{t}.{name}.json"
             if f.exists():
                 continue

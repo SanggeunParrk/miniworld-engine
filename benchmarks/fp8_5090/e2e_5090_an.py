@@ -28,6 +28,7 @@ def ld(p):
     return c, (None if d["iptm"] is None else float(d["iptm"].float().mean()))
 
 
+MODE = os.environ.get("E2E_MODE", "fp8")
 for dr in sys.argv[1:]:
     files: dict = {}
     for p in glob.glob(f"{dr}/*.pt"):
@@ -44,7 +45,7 @@ for dr in sys.argv[1:]:
         D = {n: ld(C[n]) for n in bf}
         sp = [kabsch(D[a][0], D[b][0]) for a, b in itertools.combinations(bf, 2)]
         thr = max(1.1 * max(sp), 0.5)
-        fs = sorted(c for c in C if c.startswith("fp8_t") and "bf16_t" + c.split("_t")[-1] in D)
+        fs = sorted(c for c in C if c.startswith(MODE + "_t") and "bf16_t" + c.split("_t")[-1] in D)
         if not fs:
             print(f"{t[:4]} bf16 n={len(bf)} {max(sp):.2f}/{st.mean(sp):.2f} | fp8: -")
             continue
