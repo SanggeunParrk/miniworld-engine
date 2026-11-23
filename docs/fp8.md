@@ -43,6 +43,7 @@ The attention core is the share e4m3 shortens; the projections (LN + front GEMM 
 ### Transition (not built: judgement)
 
 The default `transition_wide_sm120` (D128 / D256, n = 4, inference) runs at 190-248 TFLOPS (D128 L256 / 512 / 1024: 190 / 235 / 248; D256: 188-197; `benchmarks/fp8_5090/transition_rate.py`), i.e. at the bf16 `mma.sync` rate of the card (218 measured): it is compute bound, so e4m3 `mma.m16n8k32` (459) can shorten both GEMMs; with the quantisation of x in the LN prologue and of the SwiGLU hidden in registers the expected module gain is 1.4-1.7x (the H100 Transition FP8 route: 1.44x over 73 cases >= 256 tokens). It needs a new register-resident kernel (the m16n8k32 A fragment differs from the bf16 C layout: the down weight's K order has to be permuted to match), static scales and the guard as for the other routes. Accuracy: the FoldForge F11 study attributes the antibody-antigen accuracy loss of FP8 to e4m3 rounding in the trunk pair Transition, so such a route would have to stay strictly opt-in, outside `safe`. Not in the E4 module set.
+
 Not done: Transition (judgement above) / OPM / PWA / token DiT routes on sm_120 (no e4m3 kernel; their slots run the default); the TriAttn d_pair-64 core (Chai-1); a custom `mma.sync` e4m3 contraction (cuBLASLt TN is used; the non-block-scaled path works on sm_120 with CUDA 13 driver / torch 2.13 cu129, only the block-scaled forms were reported failing); the plane formation of the grouped long-L path (L > ~3000) stays bf16.
 
 
