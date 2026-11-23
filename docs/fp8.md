@@ -151,9 +151,24 @@ The same numbers as the H100 route to two digits where both exist (the same e4m3
 | 64:32:128:1024:512 | 3.04 / 4.88 / 0.298 | 3.03 / 4.76 / 0.291 | 4.05 / 5.68 / 0.347 | 2.99 / 4.60 / 0.35 |
 | 64:32:128:1024:768 | 3.31 / 5.93 / 0.279 | 3.31 / 5.93 / 0.279 | 4.09 / 6.87 / 0.323 | 2.89 / 5.00 / 0.32 |
 | 64:32:128:1024:1024 | 3.49 / 6.12 / 0.273 | 3.48 / 6.13 / 0.274 | 4.12 / 6.88 / 0.307 | 2.84 / 4.95 / 0.31 |
-PWA_ERR_ROWS
+| 64:32:128:2048:384 | 2.83 / 4.67 / 0.283 | 2.82 / 4.67 / 0.283 | 4.02 / 6.20 / 0.376 | 3.06 / 4.35 / 0.31 |
+| 64:32:128:2048:768 | 3.31 / 5.56 / 0.279 | 3.31 / 5.56 / 0.279 | 4.09 / 6.46 / 0.325 | |
+| 64:32:256:1024:768 (Chai-1) | 2.94 / 5.25 / 0.274 | 2.94 / 5.29 / 0.277 | 3.59 / 6.27 / 0.328 | 2.92 / 5.35 / 0.31 |
+| 64:8:128:1024:256 | 2.24 / 4.06 / 0.297 | 2.23 / 4.06 / 0.297 | 3.44 / 5.06 / 0.370 | 3.46 / 4.39 / 0.38 |
+| 64:8:128:1024:384 | 2.43 / 4.26 / 0.304 | 2.43 / 4.13 / 0.295 | 3.37 / 4.88 / 0.348 | 3.39 / 4.18 / 0.34 |
+| 64:8:128:1024:400 | 2.45 / 4.19 / 0.299 | 2.44 / 4.19 / 0.299 | 3.36 / 4.90 / 0.350 | 3.38 / 4.27 / 0.35 |
+| 64:8:128:1024:768 | 2.68 / 4.89 / 0.286 | 2.68 / 4.88 / 0.285 | 3.25 / 5.89 / 0.344 | 3.26 / 5.65 / 0.34 |
+| 64:8:128:1024:1536 | 2.85 / 5.64 / 0.293 | 2.85 / 5.45 / 0.283 | 3.17 / 5.87 / 0.305 | 3.17 / 5.43 / 0.31 |
+| 64:8:128:4096:768 | 2.69 / 4.27 / 0.285 | 2.68 / 4.27 / 0.285 | 3.25 / 4.77 / 0.318 | 3.27 / 5.39 / 0.35 |
+| 128:8:256:1024:768 | 2.84 / 4.80 / 0.281 | 2.84 / 4.78 / 0.280 | 3.52 / 5.57 / 0.326 | 3.01 / 4.78 / 0.31 |
+| 128:16:256:1024:768 | 2.51 / 4.51 / 0.290 | 2.50 / 4.42 / 0.284 | 3.08 / 5.28 / 0.339 | 3.22 / 5.24 / 0.32 |
+| 128:8:384:1024:768 | 2.86 / 4.51 / 0.282 | 2.86 / 4.55 / 0.285 | 3.54 / 5.20 / 0.325 | 3.04 / 4.96 / 0.33 |
+| 256:32:512:1024:384 (BIG) | 2.46 / 4.13 / 0.281 | 2.44 / 4.14 / 0.282 | 3.49 / 5.16 / 0.351 | 3.61 / 5.18 / 0.35 |
+| 256:32:512:1024:768 | 2.76 / 4.81 / 0.280 | 2.74 / 4.81 / 0.280 | 3.39 / 5.73 / 0.333 | 3.54 / 5.97 / 0.35 |
+| 256:32:512:2048:384 | 2.46 / 4.03 / 0.286 | 2.45 / 3.99 / 0.283 | 3.49 / 5.26 / 0.374 | |
+| 256:32:512:256:400 | 2.48 / 4.09 / 0.293 | 2.46 / 4.09 / 0.293 | 3.48 / 4.84 / 0.347 | 3.60 / 4.98 / 0.34 |
 
-Judge metric of the e4m3 route 0.31-0.38 % at the 8 x 32 width (H100 0.30-0.37 %), inside the engine tolerance 8e-3 everywhere; the update error is e4m3 + 1 % over this build's bf16 floor, as on the H100 (the bf16 floor of these random modules is higher here: different random draws of the case builder, the PyTorch bf16 column moves with it). No NaN / inf, no saturation.
+Judge metric of the e4m3 route 0.305-0.384 % at every width (H100 0.30-0.38 %), inside the engine tolerance 8e-3 everywhere. Update rms: the wide and BIG widths match the H100 route to 0.1-0.5 % (3.08-3.54 against 3.01-3.61); the 8 x 32 width reads 0.6-1.5 % above the bf16 floor here against 0.2-1.1 % on the H100 (3.6-4.1 % absolute against 2.8-3.2 %; this case builder's 8 x 32 modules have a higher bf16 floor, 2.5-3.5 % against 2.0-2.5 %, and the e4m3 rounding of v is the H100 route's: same scale rule, one rounding of the fp32 projection). No NaN / inf, no saturation, no retry.
 
 **Tests** (`tests/gpu/test_opm_fp8_sm120.py`, `tests/gpu/test_pwa_fp8_sm120.py`, on the 5090): `transpose_quant` / `w_quant` / `vt8_y` against torch, `ln_vt8` against the default `ln_v` at the five native widths x 32 / 64-token tiles with a clipped token tail, error vs fp64 (OPM 5 cases: judge < 2.5 % and < 8x the default; PWA 6 widths x (S256 N384, S33 N400): judge < 8e-3, update < 6 % and < 2.5x the default), `safe` turns each on and `disable()` off, the slot module is the sm120 one, sync guard redo (headroom 2^-6), lazy guard through `fp8.check()` + graph replay == eager (bytes), a capture before calibration = the default bytes, default bytes unchanged after the route ran, gates. TEST_RESULT. `tests/cpu/test_fp8_switch.py`: 27 passed. **Default bytes** (`msa_bit.py`, sha1 of 11 outputs, base `5090-int` a24401b61 against this branch in separate processes: 5 OPM forms incl. AF3 order / d_pair 256 / 512 / padded depth, 6 PWA widths incl. BIG): identical. No module `version` / `backend_versions` change.
 

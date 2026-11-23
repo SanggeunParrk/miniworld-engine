@@ -83,9 +83,9 @@ def test_ln_vt8_matches_ln_v(d: int, c: int, nt: int) -> None:
     assert vt.shape == (8, s * c, n)
     ref = (v.float() * 4.0).transpose(1, 2)
     got = vt.float()
-    # one e4m3 rounding of (nearly) the same value: the default's bf16 v and this kernel's fp32 v differ by a bf16 rounding, so compare within e4m3 steps
-    rel = ((got - ref).abs() / ref.abs().clamp_min(2.0**-6)).max().item()
-    assert rel < 0.13  # at most one e4m3 step (12.5 % at a power of two): bf16 then e4m3 against fp32 then e4m3 (double rounding)
+    # one e4m3 rounding (at most one step, 12.5 % at a power of two) of nearly the same value: the default's v is bf16 and sums in another order, which
+    # moves the smallest values (near-cancelling sums) by up to ~1 % of max |v| in absolute terms (diag_vt8.py: 2 subnormal steps at |v| 0.014 of ~4)
+    assert ((got - ref).abs() <= 0.13 * ref.abs() + 0.01 * ref.abs().max()).all()
     assert ((got - ref).pow(2).mean().sqrt() / ref.pow(2).mean().sqrt()).item() < 0.03
     assert amax.item() == pytest.approx(ref.abs().max().item(), rel=0.02)
 
