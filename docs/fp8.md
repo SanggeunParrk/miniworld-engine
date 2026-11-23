@@ -363,6 +363,22 @@ End-level table (whole `safe` set; same-seed FP8-vs-bf16 RMSD max per target in 
 
 The same runs with the Transition route off (`safe` + `MINIWORLD_TRANSITION_FP8=` : TriMul, TriAttn, OPM, PWA, token DiT, atom DiT on e4m3; same targets and seeds): **33 / 36 inside** — af3 / boltz2 / chai1 / opendde / openfold3 / protenix1 / protenix2 4 / 4, rosettafold3 3 / 4 (7y37 5.70 A at seed 3: the H100 RF3 section calls 7y37 a bad probe, ipTM 0.10), intellifold2 2 / 4 (8ee9 1.07 / 0.52 and 8gn4 1.30 / 1.23, one seed each; the uniform 8ee9 shift is gone). With the whole `safe` set 24 / 36. On the 5090, as in the H100's FoldForge F11 study, the e4m3 pair Transition is the route that moves the end-level results beyond the trunk-seed spread; whether it stays in `safe` (both cards follow the same preset) is the owner's decision — not changed here.
 
+**F3 5I28 on the 5090: engine-fp8 / bf16 warm forward** (FoldForge 49d41bbf F3 harness `run_ff.py` unchanged: real MSA + 4 templates, compile + CUDA graphs, 200 steps, 5 samples, 6 warm repeats, steady = median after dropping cold and the 2nd; `rtx5090.sh` copy without its "FP8 is H100 only" refusal; this tree as `ENGINE_SRC`; under the GPU lock after the boltz2_5090 campaign; 3 repetitions per arm, median over them). **Official = `safe` without the Transition** (the 5090 preset after the decision above; `MINIWORLD_TRANSITION_FP8=` on top of the `engine_fp8` arm, every one of the 27 runs logged `transition: None`, 0 Transition calls); in parentheses `safe` with the Transition. bf16 = the boltz2_5090 F3 re-measure of 2026-11-23 (3 reps, engine 3.0.9 + `boltz2-5090` = the default route of this branch; one bf16 repetition of this chain agreed with it to <= 0.9 % on af3 / boltz2 at every n). No cell saturated (`fp8.check()` per cell); the oom cells are oom in bf16 too (32 GB). Raw: `benchmarks/fp8_5090/f3_5i28_rtx5090_fp8.csv` (`f3_table.py`).
+
+| model | n=1 | n=2 | n=4 | n=8 | n=12 | n=16 |
+|---|---|---|---|---|---|---|
+| af3 | **0.958** (0.953) | **0.834** (0.827) | **0.907** (0.897) | **0.897** (0.886) | **0.865** (0.853) | **0.840** (0.829) |
+| boltz2 | **0.959** (0.955) | **0.791** (0.783) | **0.898** (0.888) | **0.912** (0.899) | **0.915** (0.902) | **0.914** (0.902) |
+| chai1 | **0.887** (0.877) | **0.851** (0.830) | **0.926** (0.884) | **0.943** (0.902) | oom | oom |
+| intellifold2 | **0.967** (0.946) | **0.914** (0.884) | **0.965** (0.928) | **0.949** (0.900) | oom | oom |
+| opendde | **0.850** (0.844) | **0.920** (0.909) | **0.950** (0.935) | oom | oom | oom |
+| openfold3 | **0.954** (0.949) | **0.830** (0.822) | **0.904** (0.894) | **0.891** (0.879) | **0.860** (0.847) | **0.835** (0.824) |
+| protenix1 | **0.949** (0.942) | **0.821** (0.815) | **0.900** (0.891) | **0.898** (0.886) | **0.867** (0.856) | **0.847** (0.837) |
+| protenix2 | **0.957** (0.939) | **0.852** (0.818) | **0.929** (0.865) | **0.941** (0.872) | **0.933** (0.842) | oom |
+| rosettafold3 | **0.966** (0.962) | **0.846** (0.839) | **0.912** (0.902) | **0.928** (0.916) | **0.916** (0.904) | **0.915** (0.904) |
+
+FP8 is faster in every cell (0.79-0.97 of bf16 without the Transition); the Transition is worth 0.4-1.3 points for most models and 3-9 points for the D384 / D512 / templates-heavy pair stacks (chai1, intellifold2, protenix2).
+
 **H100 per-model pieces and the 5090 (what `safe` turns on on the H100).**
 
 | piece (H100 section) | on the H100 `safe` | RTX 5090 |
