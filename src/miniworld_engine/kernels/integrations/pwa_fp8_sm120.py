@@ -9,7 +9,8 @@ Native widths (``pwa_sm80.inference``: d_msa 64 / 128, 8 heads x 8 / 16 / 32 -- 
 
 BIG width (``pwa_wide_sm80``: d_msa 256, d_pair 512, 8 x 32 -- IntelliFold2)::
 
-    LN + the [v | g] GEMM (default, v head-major) -> transpose_quant (v_hm [8, N, S 32] -> e4m3 vT [8, S 32, N]) -> the same contraction -> gate_fwd / out (default)
+    LN (default) -> g = y Wg^T (the default GEMM tile, g alone) and vt8_y (v = y Wv^T straight into e4m3 vT [8, S 32, N]; Wv held in two halves of
+      64 KiB by neighbouring CTAs) -> the same contraction -> gate_fwd / out (default)
 
 Scales: w are probabilities (fixed 2^8, no saturation); v takes a static power-of-two scale (``h100_sm90.vscale_from_amax``, ``HEADROOM`` x the absmax of
 the module's first eager call; keyed by the value weight). Both are cuBLASLt scale pointers (device scalars: ``rescale_all`` updates them in place,
@@ -153,21 +154,22 @@ def contract_native(m, w16, lnw, lnb, wv16, eps, key_tensor):
     return None
 
 
-def contract_big(v_hm, w16, key_tensor):
-    """o_hm [8, N, S 32] bf16 = w v from the BIG width's head-major v [8, N, S 32] (bf16); None: the default contraction runs."""
+def contract_big(y, wv16, w16, key_tensor, depth: int, length: int):
+    """o_hm [8, N, S 32] bf16 = w v at the BIG width from its LayerNorm output y [S N, 256] and Wv [256, 256] (``vt8_y``: v straight into the
+    e4m3 vT, no bf16 v); None: the caller runs the default v and contraction."""
     from miniworld_engine.kernels.integrations import msa_f8_sm120 as X
     from miniworld_engine.kernels.integrations import pwa_fp8
 
-    st = _state(v_hm.device, key_tensor, lambda vinv, am: X.transpose_quant(v_hm, vinv, am))
+    st = _state(y.device, key_tensor, lambda vinv, am: X.vt8_y(y, wv16, vinv, am, depth, length))
     if st is None:
         return None
     amax, ws, key = st
     STATS["wide_calls"] += 1
     wq = X.w_quant(w16)
     lazy = GUARD in ("lazy", "off") or torch.cuda.is_current_stream_capturing()
-    o = torch.empty_like(v_hm)
+    o = torch.empty((8, length, depth * 32), dtype=torch.bfloat16, device=y.device)
     for _ in range(4):
-        vt = X.transpose_quant(v_hm, _VINV[key], amax)
+        vt = X.vt8_y(y, wv16, _VINV[key], amax, depth, length)
         pwa_fp8.contract(wq, vt, o, _VS[key], ws)
         del vt
         if lazy or not take_overflow():

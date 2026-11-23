@@ -358,9 +358,121 @@ void ln_vt8(torch::Tensor m, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor
   TORCH_CHECK(false, "ln_vt8: unsupported (d_msa, C, NT)");
 }
 
+// ------------------------------------------------------------------------------------------------------------ vt8_y (BIG width)
+// vT[h][s 32 + c][j] = e4m3( (y[s, j, :] . Wv[h 32 + c, :]) * vinv ) from the already normalised y [S, N, 256] (the BIG width's LayerNorm output), Wv [256, 256]:
+// Wv does not fit the 5090's shared memory whole, so a CTA keeps one half of its rows (128 channels = 4 heads, 64 KiB) and the two halves of a tile run on
+// neighbouring CTAs (y read twice, the second time mostly from L2). Tiles of 32 tokens of one MSA row, double-buffered; the e4m3 tile is staged in the y
+// buffer just consumed.
+constexpr int VY_K = 256, VY_NCH = VY_K / 8, VY_NT = 32, VY_HALF = 128, VY_YB = VY_NT * VY_K * 2, VY_WB = VY_HALF * VY_K * 2;
+constexpr int VY_SMEM = 2 * VY_YB + VY_WB;
+static_assert(VY_SMEM <= 101376, "sm_120 shared memory");
+
+struct Vt8YParams {
+  const __nv_bfloat16* y;   // [S][N][256]
+  const __nv_bfloat16* wv;  // [256][256]
+  uint8_t* vt;              // [8][S 32][N]
+  const float* vinv;
+  float* amax;
+  int S, N, ntj, ntile;
+};
+
+DEVI void vy_load(const Vt8YParams& p, uint32_t dst, int tl, int tid) {
+  const int s = tl / p.ntj, j0 = (tl - s * p.ntj) * VY_NT;
+#pragma unroll
+  for (int it = 0; it < VY_NT * VY_NCH / 256; ++it) {
+    const int u = it * 256 + tid, t = u / VY_NCH, ch = u % VY_NCH;
+    const bool ok = j0 + t < p.N;
+    cp_async16(dst + swzn<VY_NCH>(t, ch), p.y + (ok ? ((long)s * p.N + j0 + t) * VY_K + ch * 8 : 0), ok ? 16u : 0u);
+  }
+}
+
+__global__ void __launch_bounds__(256, 1) vt8_y_kernel(const Vt8YParams p) {
+  extern __shared__ __align__(128) unsigned char smem[];
+  const uint32_t sm0 = smem_u32(smem), sw = sm0 + 2 * VY_YB;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gq = lane >> 2, q = lane & 3;
+  const int half = blockIdx.x & 1, nblk = gridDim.x >> 1;
+  for (int u = tid; u < VY_HALF * VY_NCH; u += 256) {
+    const int row = u / VY_NCH, ch = u % VY_NCH;
+    cp_async16(sw + swzn<VY_NCH>(row, ch), p.wv + (long)(half * VY_HALF + row) * VY_K + ch * 8, 16u);
+  }
+  int tl = blockIdx.x >> 1, buf = 0;
+  if (tl < p.ntile) vy_load(p, sm0, tl, tid);
+  cp_async_commit();
+  const float vinv = *p.vinv;
+  float mx = 0.f;
+#pragma unroll 1
+  for (; tl < p.ntile; tl += nblk, buf ^= 1) {
+    const int s = tl / p.ntj, j0 = (tl - s * p.ntj) * VY_NT;
+    if (tl + nblk < p.ntile) vy_load(p, sm0 + (buf ^ 1) * VY_YB, tl + nblk, tid);
+    cp_async_commit();
+    cp_async_wait<1>();
+    __syncthreads();
+    const uint32_t sm = sm0 + buf * VY_YB;
+    float acc[4][4];
+#pragma unroll
+    for (int b = 0; b < 4; ++b) acc[b][0] = acc[b][1] = acc[b][2] = acc[b][3] = 0.f;
+#pragma unroll
+    for (int ks = 0; ks < VY_K / 16; ++ks) {
+      uint32_t af[4];
+      ldsm_x4(af, sw + swzn<VY_NCH>(warp * 16 + (lane & 15), 2 * ks + (lane >> 4)));
+#pragma unroll
+      for (int bp = 0; bp < 2; ++bp) {
+        uint32_t bf[4];
+        ldsm_x4(bf, sm + swzn<VY_NCH>(16 * bp + (lane & 7) + ((lane >> 4) << 3), 2 * ks + ((lane >> 3) & 1)));
+        mma16816(acc[2 * bp], af, bf[0], bf[1]);
+        mma16816(acc[2 * bp + 1], af, bf[2], bf[3]);
+      }
+    }
+    __syncthreads();   // every warp is done with this y buffer: it becomes the staging tile [128 rows][32 B]
+    const int r0 = warp * 16 + gq, r1 = r0 + 8;
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+      const int tok = 8 * b + 2 * q;
+      const float v0 = acc[b][0] * vinv, v1 = acc[b][1] * vinv, v2 = acc[b][2] * vinv, v3 = acc[b][3] * vinv;
+      if (j0 + tok < p.N) mx = fmaxf(mx, fmaxf(fmaxf(fabsf(v0), fabsf(v1)), fmaxf(fabsf(v2), fabsf(v3))));
+      const uint32_t ch = tok >> 4, byte = tok & 15;
+      asm volatile("st.shared.u16 [%0], %1;\n" ::"r"(sm + swzo<VY_NT>(r0, ch) + byte), "h"(e4m3x2(v0, v1)) : "memory");
+      asm volatile("st.shared.u16 [%0], %1;\n" ::"r"(sm + swzo<VY_NT>(r1, ch) + byte), "h"(e4m3x2(v2, v3)) : "memory");
+    }
+    __syncthreads();
+    {
+      const int row = tid >> 1, ch = tid & 1, j = j0 + 16 * ch;
+      if (j < p.N) {
+        const int hc = half * VY_HALF + row, h = hc >> 5, c = hc & 31;
+        uint4 v;
+        asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];\n" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "r"(sm + swzo<VY_NT>(row, ch)));
+        *reinterpret_cast<uint4*>(p.vt + (((long)h * p.S + s) * 32 + c) * p.N + j) = v;
+      }
+    }
+    __syncthreads();   // the staging tile is the buffer of the prefetch two tiles ahead
+  }
+  cp_async_wait<0>();
+  mx = warp_max(mx);
+  if (lane == 0 && mx > 0.f) amax_store(p.amax, mx);
+}
+
+void vt8_y(torch::Tensor y, torch::Tensor wv, torch::Tensor vinv, torch::Tensor amax, torch::Tensor vt, int64_t S, int64_t N) {
+  TORCH_CHECK(y.is_cuda() && y.scalar_type() == at::kBFloat16 && y.is_contiguous() && y.numel() == S * N * VY_K, "vt8_y: y bf16 [S N, 256]");
+  TORCH_CHECK(wv.scalar_type() == at::kBFloat16 && wv.is_contiguous() && wv.numel() == 256 * VY_K, "vt8_y: wv bf16 [256, 256]");
+  TORCH_CHECK(vt.element_size() == 1 && vt.is_contiguous() && vt.numel() == 8 * S * 32 * N && N % 16 == 0, "vt8_y: vt 1-byte [8, S 32, N], N % 16");
+  const c10::cuda::CUDAGuard guard(y.device());
+  Vt8YParams p{};
+  p.y = reinterpret_cast<const __nv_bfloat16*>(y.data_ptr());
+  p.wv = reinterpret_cast<const __nv_bfloat16*>(wv.data_ptr());
+  p.vt = reinterpret_cast<uint8_t*>(vt.data_ptr());
+  p.vinv = vinv.data_ptr<float>(); p.amax = amax.data_ptr<float>();
+  p.S = (int)S; p.N = (int)N; p.ntj = (int)((N + VY_NT - 1) / VY_NT); p.ntile = (int)(S * p.ntj);
+  static bool attr = false;
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(vt8_y_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, VY_SMEM)); attr = true; }
+  const int grid = 2 * std::min(p.ntile, std::max(1, mw::sm_count() / 2));
+  vt8_y_kernel<<<grid, 256, VY_SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
+  mod.def("vt8_y", &vt8_y);
   mod.def("transpose_quant", &transpose_quant);
   mod.def("w_quant", &w_quant);
   mod.def("ln_vt8", &ln_vt8);

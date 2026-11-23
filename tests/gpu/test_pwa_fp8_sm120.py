@@ -90,6 +90,25 @@ def test_ln_vt8_matches_ln_v(d: int, c: int, nt: int) -> None:
     assert amax.item() == pytest.approx(ref.abs().max().item(), rel=0.02)
 
 
+def test_vt8_y_matches_torch() -> None:
+    _needs_5090()
+    from miniworld_engine.kernels.integrations import msa_f8_sm120 as X
+
+    s, n = 70, 208  # a clipped token tail
+    torch.manual_seed(2)
+    y = torch.randn(s * n, 256, device="cuda").bfloat16()
+    wv = (torch.randn(256, 256, device="cuda") / 16).bfloat16()
+    vinv = torch.tensor([2.0], device="cuda")
+    amax = torch.zeros(1, device="cuda")
+    vt = X.vt8_y(y, wv, vinv, amax, s, n)
+    v = (y.float() @ wv.float().t()) * 2.0  # [S N, 256]
+    ref = v.view(s, n, 8, 32).permute(2, 0, 3, 1).reshape(8, s * 32, n)
+    got = vt.float()
+    assert ((got - ref.clamp(-448, 448)).pow(2).mean().sqrt() / ref.pow(2).mean().sqrt()).item() < 0.03
+    assert ((got - ref).abs() / ref.abs().clamp_min(2.0**-6)).max().item() < 0.07
+    assert amax.item() == pytest.approx(ref.abs().max().item(), rel=1e-3)
+
+
 def test_w_quant() -> None:
     _needs_5090()
     from miniworld_engine.kernels.integrations import msa_f8_sm120 as X

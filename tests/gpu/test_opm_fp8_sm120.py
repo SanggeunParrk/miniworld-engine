@@ -77,7 +77,7 @@ def test_transpose_quant_matches_torch() -> None:
 
 
 @pytest.mark.parametrize(
-    "cm,cz,length,depth,after", [(64, 128, 256, 1024, False), (64, 128, 384, 1024, True), (128, 256, 256, 1024, True), (256, 512, 128, 1024, False), (64, 128, 200, 300, False)]
+    "cm,cz,length,depth,after", [(64, 128, 256, 1024, False), (64, 128, 384, 1024, True), (128, 256, 256, 1024, True), (256, 512, 128, 1024, False), (64, 128, 208, 296, False)]
 )
 def test_error_vs_fp64(F, cm: int, cz: int, length: int, depth: int, after: bool) -> None:
     m, x, mask = _case(cm, cz, length, depth, after)

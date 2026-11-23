@@ -153,7 +153,15 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
         _record_stream(w, main)
     mf = msa[0].reshape(S * L, D_MSA)
     y, mmean, mrstd = g.ln_fwd(mf, lnm_w, lnm_b, eps_m, L, False)
-    if _sm120():  # the RTX 5090: one CUTLASS GEMM stores v head-major and g natural ("vg" is then g alone: its gate column 0)
+    f8 = None
+    if not save and _sm120():
+        from miniworld_engine.kernels.integrations import pwa_fp8_sm120
+
+        if pwa_fp8_sm120.ENABLED and pwa_fp8_sm120.serves_big(S, L):  # opt-in e4m3 contraction (docs/fp8.md "RTX 5090"): g alone here, v as e4m3 below
+            f8 = pwa_fp8_sm120
+    if f8 is not None:
+        v_hm, vg = None, _mm_sm120(y, wvg[HC:])
+    elif _sm120():  # the RTX 5090: one CUTLASS GEMM stores v head-major and g natural ("vg" is then g alone: its gate column 0)
         v_hm, vg = _gemm_sm120().vg_head_major(y, wvg, S, L)
     else:
         vg = _lt().lt_mm(y, wvg, None, 0, False, None, None)  # [S L, 512] = [v | g] (cublasLt, the timed algorithm)
@@ -163,13 +171,10 @@ def _forward(msa, pair, mask, leaves, eps_m, eps_z, keep, dscale, save):
     if not _sm120():
         v_hm = torch.empty(HEADS, L, S * D_HIDDEN, device=msa.device, dtype=torch.bfloat16)
         e.to_hm(vg, v_hm, S, L)
-    o_hm = None
-    if not save and _sm120():
-        from miniworld_engine.kernels.integrations import pwa_fp8_sm120 as f8
-
-        if f8.ENABLED and f8.serves_big(S, L):  # opt-in e4m3 contraction (docs/fp8.md "RTX 5090")
-            o_hm = f8.contract_big(v_hm, w, leaves[2])
+    o_hm = None if f8 is None else f8.contract_big(y, wvg[:HC], w, leaves[2], S, L)
     if o_hm is None:
+        if v_hm is None:  # (the e4m3 route declined after all: a capture before calibration, or saturation every time)
+            v_hm, vg = _gemm_sm120().vg_head_major(y, wvg, S, L)
         o_hm = _gemm_sm120().contract(w, v_hm) if _sm120() else torch.bmm(w, v_hm)
     e.gate_fwd(o_hm, vg, _gcol(vg), u, S, L)
     if keep is None:  # m + u Wo^T in one cublasLt call (D != C: no copy of m into the output first)

@@ -44,6 +44,13 @@ def w_quant(w: torch.Tensor, scale: float = 256.0) -> torch.Tensor:
     return out
 
 
+def vt8_y(y, wv, vinv, amax, depth: int, length: int) -> torch.Tensor:
+    """The BIG width: y [S N, 256] bf16 (LayerNorm output), Wv [256, 256] -> e4m3 vT [8, S 32, N] = (y Wv^T)^T * vinv; max |v vinv| into amax."""
+    vt = torch.empty((8, depth * 32, length), device=y.device, dtype=E4M3)
+    ext().vt8_y(y, wv, vinv, amax, vt, int(depth), int(length))
+    return vt
+
+
 def ln_vt8(m, lnw, lnb, wv, eps, vinv, amax, nt: int = 64, blocks_per_sm: int = 2) -> torch.Tensor:
     """m [S, N, D] bf16 -> e4m3 vT [8, S C, N] = (LN(m) Wv^T)^T * vinv (C = Wv rows / 8); max |v vinv| into amax."""
     s, n, _ = m.shape
