@@ -2,6 +2,7 @@
 // them are cuBLAS; the AdaLN in front of the tail is ``kernels/adaln/cuda/sm80``.
 //
 //   h = silu(a) b,  [a | b] = xa [Wa; Wb]^T                  swiglu_fwd / swiglu_bwd (the backward recomputes h for the weight gradient of the squeeze)
+//   h = silu(a) b u, [a | b | u] = xa [Wa; Wb; Wu]^T         swiglu_up_fwd (Boltz-2's up-gated transition, inference)
 //   y = x + sigmoid(g) z,  g = cond Wsc^T + bsc, z = h Ws^T   gate_res_fwd (x optional: the update alone) / gate_res_bwd
 //
 // Elementwise passes are flat (a thread owns 4 consecutive columns); the column sums of the gate backward leave a block as one row of a [blocks, d] fp32 partial buffer.
@@ -18,6 +19,18 @@ __global__ void __launch_bounds__(256) swiglu_fwd_kernel(const T* __restrict__ A
     const int c = (int)(i - row * N4) * 4;
     const float4 a = V4<T>::load(AB + row * sab + c), b = V4<T>::load(AB + row * sab + 4 * N4 + c);
     V4<T>::store(H + row * 4 * N4 + c, mul4(mul4(a, sig4(a)), b));
+  }
+}
+
+// Boltz-2's up-gated SwiGLU: H [M, N] = silu(a) b u; ABU [M, 3N] = [a | b | u] (row stride sab), the product in fp32, rounded once
+template <typename T>
+__global__ void __launch_bounds__(256) swiglu_up_fwd_kernel(const T* __restrict__ ABU, long sab, T* __restrict__ H, long M, int N4) {
+  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < M * N4; i += (long)gridDim.x * 256) {
+    const long row = i / N4;
+    const int c = (int)(i - row * N4) * 4;
+    const T* r = ABU + row * sab + c;
+    const float4 a = V4<T>::load(r), b = V4<T>::load(r + 4 * N4), u = V4<T>::load(r + 8 * N4);
+    V4<T>::store(H + row * 4 * N4 + c, mul4(mul4(mul4(a, sig4(a)), b), u));
   }
 }
 

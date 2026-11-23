@@ -86,9 +86,17 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
         return False
     if torch.cuda.get_device_capability(x.device) not in ((8, 0), (12, 0)):  # A100, or the RTX 5090 (the same sources built for sm_120a)
         return False
+    up = _up(module)  # Boltz-2's up-gated transition: inference on the RTX 5090 (the A100 keeps the module's own statements)
+    if up is not None and (grad or is_identity(ada) or up.bias is not None or torch.cuda.get_device_capability(x.device) != (12, 0)):
+        return False
     # update() expands shared conditioning in autograd before the training
     # launch, so its gradient is reduced back to the shared input shape.
     return _period(x, cond, False) is not None and _loads()
+
+
+def _up(module):
+    """The up-gate projection ``W_u`` of Boltz-2's ``UpGatedConditionedTransition`` (``hidden = silu(W_a h) (W_b h) (W_u h)``), else None."""
+    return getattr(module, "up", None)
 
 
 def _params(module) -> list[torch.Tensor]:
@@ -239,6 +247,46 @@ def inference(
             aff, _ = ka.cond_ln(cond, lnw, x.dtype, eps_c)
             xa, _ = ka.epilogue(x, _mm_op(aff, wcat.t()), sb1, eps_x)
         h = kt.swiglu_fwd(_mm_op(xa, wab.t()))
+        z = _mm_op(h, ws.t())
+        br.join()
+        return kt.gate_res_fwd(x if residual else None, z, g)
+
+
+@opaque(
+    fake=lambda x, cond, lnw, ws1, sb1, wb1, wa, wb, wu, ws, wsc, bsc, eps_x, eps_c, residual: torch.empty_like(x),
+    name="conditioned_transition_sm80_inference_up",
+)
+def inference_up(
+    x: torch.Tensor,
+    cond: torch.Tensor,
+    lnw: torch.Tensor,
+    ws1: torch.Tensor,
+    sb1: torch.Tensor,
+    wb1: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    wu: torch.Tensor,
+    ws: torch.Tensor,
+    wsc: torch.Tensor,
+    bsc: torch.Tensor,
+    eps_x: float,
+    eps_c: float,
+    residual: bool,
+) -> torch.Tensor:
+    """Boltz-2's up-gated transition (``UpGatedConditionedTransition``), inference: :func:`inference`'s row passes + cuBLAS with the expand GEMM
+    widened to ``[a | b | u] = xa [Wa; Wb; Wu]^T`` (one GEMM) and the SwiGLU pass taking the third factor, ``h = silu(a) b u``."""
+    ka, kt = _adaln(), _tail()
+    with torch.cuda.device(x.device):
+        dt = x.dtype
+        sb1, ws, wsc, bsc = cast_params((sb1, ws, wsc, bsc), dt, True)
+        # the packs are cast from the parameters directly (no cached per-weight casts beside them: one bf16 copy of each weight)
+        wcat = cached(f"wcat_up_{dt}", (ws1, wb1), lambda: torch.cat([ws1, wb1]).to(dt))
+        wabu = cached(f"pack_up_{dt}", (wa, wb, wu), lambda: torch.cat([wa, wb, wu]).to(dt))
+        br = Branch(x.device)
+        g = br.run(lambda: _gate_logits(cond, wsc, bsc), cond, wsc, bsc)  # the gate GEMM beside the chain below
+        aff, _ = ka.cond_ln(cond, lnw, x.dtype, eps_c)
+        xa, _ = ka.epilogue(x, _mm_op(aff, wcat.t()), sb1, eps_x)
+        h = kt.swiglu_up_fwd(_mm_op(xa, wabu.t()))
         z = _mm_op(h, ws.t())
         br.join()
         return kt.gate_res_fwd(x if residual else None, z, g)
@@ -550,5 +598,9 @@ def update(
         cs = cs.to(compute_dtype).reshape(-1, dc).contiguous()
     ada = module.ada_ln_in
     eps = (float(ada.ln_in.eps), 0.0 if is_identity(ada) else float(ada.ln_cond.eps))
+    up = _up(module)
+    if up is not None:  # Boltz-2's up-gated transition: inference only (``serves``)
+        p = _params(module)
+        return inference_up(xs, cs, *p[:6], up.weight, *p[6:], *eps, residual).reshape(x.shape)  # pyright: ignore[reportCallIssue]  -- the parameters, in inference_up's order
     y = _Training.apply(residual, *eps, xs, cs, *_params(module)) if grad else inference(xs, cs, *_params(module), *eps, residual)  # pyright: ignore[reportCallIssue]  -- *_params(module): the parameters, in inference's order
     return y.reshape(x.shape)

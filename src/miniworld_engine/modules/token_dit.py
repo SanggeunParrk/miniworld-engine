@@ -814,7 +814,8 @@ class TokenDiTBoltz2(VariantTokenCuda, TokenDiTProtenix):
         **TokenDiTProtenix.backend_versions,
         "cuda:h100_sm90": 7,
         "cuda:a100_sm80": 5,  # unchanged by 2026-11-22 (this block refuses extra_pair_bias on the sm_80 cards, as before)
-        "cuda:5090_sm120": 2,
+        "cuda:5090_sm120": 3,  # 3 (2026-11-23): inference runs the up-gate transition on the sm_80 transition kernels (AdaLN rows, one
+        # [a | b | u] GEMM, silu(a) b u in one row pass, cached bf16 weights) instead of the module's own statements (per-call weight casts)
     }  # 7 (2026-11-18): as TokenDiTProtenix 5 (the pair bias on the AttentionPairBias kernels); 6 (2026-11-13): as the base class (the key-tile skip)
 
     backends = (

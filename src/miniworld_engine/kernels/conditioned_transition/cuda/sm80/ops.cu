@@ -49,6 +49,20 @@ void swiglu_fwd(at::Tensor ab, at::Tensor h) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// h [M, N] = silu(a) b u, abu [M, 3 N]
+void swiglu_up_fwd(at::Tensor abu, at::Tensor h) {
+  const int64_t M = abu.size(0), N = abu.size(1) / 3;
+  check_rows(abu, "swiglu_up_fwd abu", 3 * N);
+  check_rows(h, "swiglu_up_fwd h", N);
+  TORCH_CHECK(N % 4 == 0 && h.is_contiguous() && h.size(0) == M && h.scalar_type() == abu.scalar_type(), "swiglu_up_fwd: h [M, N] contiguous like abu");
+  const at::cuda::CUDAGuard g(abu.device());
+  with_dtype(abu, "swiglu_up_fwd", [&](auto t) {
+    using T = decltype(t);
+    swiglu_up_fwd_kernel<T><<<flat_grid(M * N / 4), 256, 0, S_()>>>(CP_<T>(abu), abu.stride(0), P_<T>(h), M, (int)(N / 4));
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // dab [M, 2 N] = [da | db], h [M, N] from dh [M, N] and ab [M, 2 N]
 void swiglu_bwd(at::Tensor dh, at::Tensor ab, at::Tensor dab, at::Tensor h) {
   const int64_t M = dh.size(0), N = dh.size(1);
@@ -218,6 +232,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ct_bwd_grid", &ct_bwd_grid);
   m.def("swiglu_fwd", &swiglu_fwd);
   m.def("swiglu_bwd", &swiglu_bwd);
+  m.def("swiglu_up_fwd", &swiglu_up_fwd);
   m.def("gate_res_fwd", &gate_res_fwd);
   m.def("gate_res_bwd", &gate_res_bwd);
 }
