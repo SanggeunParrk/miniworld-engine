@@ -140,33 +140,62 @@ def active(
     )
 
 
-def quant_weight(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """[N, K] -> (e4m3 [N, K], fp32 [N]): per output channel, scale = row max / 448."""
+def quant_weight_ref(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """[N, K] -> (e4m3 [N, K], fp32 [N]): per output channel, scale = row max / 448 (the torch-op form: ~7 small kernels)."""
     wf = w.float()
     s = wf.abs().amax(1).clamp_min(1e-30) / 448.0
     return (wf / s[:, None]).to(E4M3).contiguous(), s.contiguous()
 
 
-def weight_pack(key, wqkvg, wo, ws, wab_ht, bqkvg):
+def quant_weight(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """[N, K] -> (e4m3 [N, K], fp32 [N]): per output channel, scale = row max / 448. H100, bf16 [N, K <= 2048]: one ``quant_rows`` row pass (amax +
+    cast in one kernel, the pack is remade at every replay of a graph captured without ``static_weights()``); anything else: :func:`quant_weight_ref`."""
+    if (
+        w.dtype == torch.bfloat16
+        and w.dim() == 2
+        and w.is_cuda
+        and w.stride(1) == 1
+        and w.stride(0) % 4 == 0
+        and w.shape[1] % 4 == 0
+        and w.shape[1] <= 2048
+        and torch.cuda.get_device_capability(w.device) == (9, 0)
+    ):
+        w8 = torch.empty(w.shape, device=w.device, dtype=E4M3)
+        s = torch.empty(w.shape[0], device=w.device, dtype=torch.float32)
+        ext().quant_rows(w, w8, s, False)
+        return w8, s
+    return quant_weight_ref(w)
+
+
+def weight_pack(key, wqkvg, wo, ws, wab_ht, bqkvg, places=None):
     """The e4m3 forms of the block's packed weights, once per weight version (``key``: the bf16 pack's key; scoped as every pack).
-    ``wab_ht`` = (the expand weight packed for the SwiGLU kernel's tiles, ht)."""
+    ``wab_ht`` = (the expand weight packed for the SwiGLU kernel's tiles, ht). ``places``: build only these placements' forms (None: H100 = ``PLACES``, B200 = all four;
+    ``safe`` takes ``expand`` alone -- the other three are never read there, and each costs a quantising pass at every replay of a graph
+    captured without ``static_weights()``)."""
     wab, ht = wab_ht
+    if places is None and torch.cuda.get_device_capability(wqkvg.device) == (9, 0):
+        places = PLACES  # H100: a call only takes placements of PLACES (``active``), so the other forms are never read
+    want = _ALL if places is None else tuple(p for p in _ALL if p in places)
 
     def build():
-        q8, qs = quant_weight(wqkvg)
-        o8, os_ = quant_weight(wo)
-        s8, ss = quant_weight(ws)
-        a8, as_ = quant_weight(wab)
-        # torch._scaled_mm takes B column-major: the [N, K] row-major weight transposed is exactly that
-        return {
-            "qkvg": (q8.t(), qs.view(1, -1)),
-            "bqkvg": bqkvg.to(torch.bfloat16).contiguous(),
-            "out": (o8.t(), os_.view(1, -1)),
-            "squeeze": (s8.t(), ss.view(1, -1)),
-            "expand": (a8, as_, ht),
-        }
+        out = {}
+        if "qkvg" in want:
+            q8, qs = quant_weight(wqkvg)
+            # torch._scaled_mm takes B column-major: the [N, K] row-major weight transposed is exactly that
+            out["qkvg"] = (q8.t(), qs.view(1, -1))
+            out["bqkvg"] = bqkvg.to(torch.bfloat16).contiguous()
+        if "out" in want:
+            o8, os_ = quant_weight(wo)
+            out["out"] = (o8.t(), os_.view(1, -1))
+        if "squeeze" in want:
+            s8, ss = quant_weight(ws)
+            out["squeeze"] = (s8.t(), ss.view(1, -1))
+        if "expand" in want:
+            a8, as_ = quant_weight(wab)
+            out["expand"] = (a8, as_, ht)
+        return out
 
-    return _capture.lookup(_F8_PACKS, ("f8", ht, *key), build, limit=_capture.BLOCK_CACHE_LIMIT)
+    return _capture.lookup(_F8_PACKS, ("f8", ht, want, *key), build, limit=_capture.BLOCK_CACHE_LIMIT)
 
 
 def rows_q8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
