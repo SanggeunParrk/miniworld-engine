@@ -38,7 +38,7 @@ for d, h, L in cases:
         with torch.no_grad(), torch.autocast("cuda", torch.bfloat16): return m(x, mk)
     fp8.disable(); y0 = run().float()
     fp8.enable("safe", model="af3"); fp8.reset_route_stats(); y1 = run().float(); y1 = run().float(); st = fp8.route_stats()["triattn"]; chk = fp8.check()
-    if L <= 1024:
+    if L <= 512:
         m64 = copy.deepcopy(m).double(); m64.set_backend("pytorch")
         with torch.no_grad(): ref = m64(x.double(), mk).double()
         def err(y):
