@@ -1,0 +1,222 @@
+"""RTX 5090: the opt-in e4m3 TriAttn core (``sm120_fp8``: e4m3 V (and, on the fused d_pair-128 kind, e4m3 q / k) in the register-resident core, V / K quantisation pass,
+static per-head scales): accuracy against the float64 module next to the bf16 default's, route statistics and gates, saturation / rescale (eager redo, captured graph), graph
+replay == eager, masks, and the default route untouched with the switch off (bit for bit)."""
+
+from __future__ import annotations
+
+import copy
+
+import pytest
+import torch
+
+pytestmark = [pytest.mark.gpu]
+
+
+def _needs_5090() -> None:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (12, 0):
+        pytest.skip("needs an RTX 5090 (sm_120)")
+
+
+def _make(d, h, seed=7):
+    from miniworld_engine.modules import TriangleAttention
+
+    torch.manual_seed(seed)
+    m = TriangleAttention(d, n_head=h, master_weights=True, backend="cuda").cuda().eval()
+    with torch.no_grad():
+        for p in m.parameters():
+            if p.dim() > 1:
+                p.normal_(0, 0.1)
+    return m
+
+
+def _run(m, x, mask):
+    with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+        return m(x, mask)
+
+
+def _rel(y, y64, x) -> float:
+    return ((y.double() - y64).norm() / (y64 - x.double()).norm()).item()
+
+
+@pytest.fixture()
+def f8():
+    _needs_5090()
+    from miniworld_engine import fp8
+    from miniworld_engine.kernels.triangle_attention.cuda import sm120_fp8 as F8
+
+    old = (F8.MIN_L, F8.GUARD, F8.QK)
+    F8._SITES.clear()
+    fp8.disable()
+    fp8.reset_route_stats()
+    yield F8
+    fp8.disable()
+    F8.MIN_L, F8.GUARD, F8.QK = old
+    F8._SITES.clear()
+
+
+def _on(model="af3"):
+    from miniworld_engine import fp8
+
+    fp8.enable("safe", model=model)
+
+
+@pytest.mark.parametrize("d,h", [(128, 4), (256, 8)])
+@pytest.mark.parametrize("n", [256, 512])
+@pytest.mark.parametrize("masked", [False, True])
+def test_accuracy_against_float64(f8, d, h, n, masked):
+    """update error < 8 % of the update and < 8x the bf16 default's (e4m3 P / V, plus e4m3 q / k on the d_pair-128 kind); no saturation, the route ran."""
+    from miniworld_engine import fp8
+
+    m = _make(d, h)
+    torch.manual_seed(3)
+    x = torch.randn(1, n, n, d, device="cuda").bfloat16()
+    mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+    if masked:
+        mask[:, n - 5 :] = False
+    y0 = _run(m, x, mask)
+    m64 = copy.deepcopy(m).double().set_backend("pytorch")
+    with torch.no_grad():
+        y64 = m64(x.double(), mask).double()
+    f8.MIN_L = 0
+    _on()
+    y1 = _run(m, x, mask)
+    y1 = _run(m, x, mask)
+    st = fp8.route_stats()["triattn"]
+    assert st["pv_front"] >= 2, st
+    assert not fp8.check()
+    e0, e1 = _rel(y0, y64, x), _rel(y1, y64, x)
+    assert e1 < 0.08, (e0, e1)
+    assert e1 < 8 * e0, (e0, e1)
+    assert (st.get("qk", 0) > 0) == (d == 128), st
+
+
+def test_pv_only_is_closer(f8):
+    """with e4m3 q / k off the error is the P / V one only (H100 route: ~3 %), below the P / V + q / k route's."""
+    m = _make(128, 4)
+    torch.manual_seed(3)
+    n = 256
+    x = torch.randn(1, n, n, 128, device="cuda").bfloat16()
+    mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+    m64 = copy.deepcopy(m).double().set_backend("pytorch")
+    with torch.no_grad():
+        y64 = m64(x.double(), mask).double()
+    f8.MIN_L = 0
+    _on()
+    f8.QK = False
+    f8._SITES.clear()
+    e_pv = _rel(_run(m, x, mask), y64, x)
+    f8.QK = True
+    f8._SITES.clear()
+    e_pvqk = _rel(_run(m, x, mask), y64, x)
+    assert e_pv < 0.045 and e_pv < e_pvqk, (e_pv, e_pvqk)
+
+
+def test_default_untouched_when_off(f8):
+    """with the switch off (and after the route ran) the default core runs: outputs equal byte for byte."""
+    from miniworld_engine import fp8
+
+    m = _make(128, 4)
+    x = torch.randn(1, 768, 768, 128, device="cuda").bfloat16()
+    mask = torch.ones(1, 768, dtype=torch.bool, device="cuda")
+    y0 = _run(m, x, mask)
+    f8.MIN_L = 0
+    _on()
+    _run(m, x, mask)
+    _run(m, x, mask)
+    fp8.disable()
+    fp8.reset_route_stats()
+    y2 = _run(m, x, mask)
+    assert torch.equal(y0, y2)
+    assert fp8.route_stats()["triattn"]["pv_front"] == 0
+
+
+def test_gates_and_models(f8):
+    """below MIN_L, for a model without the call-site kind, for L % 128 != 0, in training: the default core."""
+    from miniworld_engine import fp8
+
+    m = _make(128, 4)
+    mask = lambda n: torch.ones(1, n, dtype=torch.bool, device="cuda")  # noqa: E731
+    _on()
+    x = torch.randn(1, 384, 384, 128, device="cuda").bfloat16()
+    _run(m, x, mask(384))
+    assert fp8.route_stats()["triattn"]["pv_front"] == 0  # 384 < MIN_L (640)
+    f8.MIN_L = 0
+    _run(m, x, mask(384))
+    assert fp8.route_stats()["triattn"]["pv_front"] == 1
+    fp8.reset_route_stats()
+    _on(model=None)  # no model: TriAttn stays default
+    _run(m, x, mask(384))
+    assert fp8.route_stats()["triattn"]["pv_front"] == 0
+    _on("opendde")  # PV only on the unfused kind: the d_pair-128 / 4-head site is the fused kind
+    _run(m, x, mask(384))
+    assert fp8.route_stats()["triattn"]["pv_front"] == 0
+    _on()
+    x2 = torch.randn(1, 200, 200, 128, device="cuda").bfloat16()
+    _run(m, x2, mask(200))
+    assert fp8.route_stats()["triattn"]["pv_front"] == 0
+
+
+def test_graph_equals_eager_and_saturation(f8):
+    """a captured graph (lazy guard) replays the eager bytes; a V scale made too small saturates: the flag is read by fp8.check(), the scale widened in place, the replay follows;
+    the eager guard (sync) redoes a saturating call."""
+    from miniworld_engine import fp8
+
+    m = _make(128, 4)
+    n = 256
+    torch.manual_seed(5)
+    x = torch.randn(1, n, n, 128, device="cuda").bfloat16()
+    mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+    f8.MIN_L = 0
+    _on()
+    y_e = _run(m, x, mask).clone()  # calibrates
+    assert not fp8.check()
+    g = torch.cuda.CUDAGraph()
+    out = {}
+    _run(m, x, mask)
+    with torch.cuda.graph(g):
+        out["y"] = _run(m, x, mask)
+    g.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(out["y"], y_e)
+    assert not fp8.check()
+    (site,) = list(f8._SITES.values())
+    site.vinv.mul_(2.0**12)  # now |v vinv| >> 448: saturates (lazy, in the graph)
+    site.vsc.copy_(1.0 / site.vinv)
+    g.replay()
+    torch.cuda.synchronize()
+    assert fp8.check()  # flagged, V scales widened by 4 in place
+    for _ in range(8):
+        g.replay()
+        if not fp8.check():
+            break
+    assert not fp8.check()
+    assert torch.isfinite(out["y"]).all()
+    # eager sync guard: the saturating call is redone with widened scales
+    site.vinv.mul_(2.0**12)
+    site.vsc.copy_(1.0 / site.vinv)
+    st0 = dict(fp8.route_stats()["triattn"])
+    y = _run(m, x, mask)
+    st1 = fp8.route_stats()["triattn"]
+    assert st1["retries"] > st0["retries"] or st1["fallbacks"] > st0["fallbacks"]
+    assert torch.isfinite(y).all()
+
+
+def test_qk_saturation_drops_qk(f8):
+    """a q / k scale made too small saturates: the sync guard drops e4m3 q / k (PV-only core) and redoes the call."""
+    from miniworld_engine import fp8
+
+    m = _make(128, 4)
+    n = 256
+    x = torch.randn(1, n, n, 128, device="cuda").bfloat16()
+    mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+    f8.MIN_L = 0
+    _on()
+    _run(m, x, mask)
+    (site,) = list(f8._SITES.values())
+    assert site.qk
+    site.ks.mul_(2.0**10)
+    site.qs.mul_(2.0**10)
+    y = _run(m, x, mask)
+    assert not site.qk
+    assert torch.isfinite(y).all()
+    assert fp8.route_stats()["triattn"]["retries"] >= 1

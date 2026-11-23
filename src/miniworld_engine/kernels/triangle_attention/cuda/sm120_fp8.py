@@ -43,7 +43,7 @@ HEADROOM = 4.0  # V scale: |v| * vinv <= 448 / HEADROOM at the calibration absma
 QK_HEADROOM = 2.0  # q / k scales: |q| / sq, |k| sq <= 448 / QK_HEADROOM at the calibration absmax (the H100 FP8_QK_HEADROOM)
 #: smallest L the e4m3 core takes (below it the default core runs): measured same-process A-B, docs/fp8.md "RTX 5090"
 QK = os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_QK", "1") != "0"  # e4m3 q / k where the model whitelist has them (the fused d_pair-128 kind)
-MIN_L = int(os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_MINL", "512"))
+MIN_L = int(os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_MINL", "640"))
 _DELEGATED = frozenset({"FP8_PV", "FP8_PV_FUSED", "FP8_PV_UNFUSED", "FP8_PV_D64", "FP8_PV_HL", "FP8_VSCALE_AUTO", "FP8_PV_MIN_S", "FP8_PV_FRONT_MIN_S", "FP8_QK"})
 
 
