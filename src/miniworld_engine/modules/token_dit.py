@@ -478,7 +478,7 @@ class TokenDiTProtenix(BackendModule):
     backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
     backend_versions: ClassVar[dict[str, int]] = {
         "anthropic": 2,
-        "cuda:a100_sm80": 7,  # 2026-11-23: the token pair bias hoisted per (pair, weights, mask) at inference (augattn_sm80 TOKEN_BIAS: one pair-bias pass per fold instead of per block and step; the bias bits are the same kernel's; ESMFold2 / Protenix / OpenDDE samplers on the A100); 6: 2026-11-22: extra_pair_bias (OpenDDE's [L, L] logit bias) at inference on the sm_80 attention (was refused -> Triton); 5: 2026-11-19: fp32 with TF32 off is IEEE (the AdaLN / SwiGLU GEMMs no longer force TF32; kernels/ieee_f32)
+        "cuda:a100_sm80": 7,  # 2026-11-23 (also): bf16 inference with a conditioning shared by the samples packs the block's six conditioning projections into two GEMMs on the distinct rows (token_cond_sm80; the LayerNorm weight folded into the bf16 weights: outputs change at bf16 rounding; A100 only); 2026-11-23: the token pair bias hoisted per (pair, weights, mask) at inference (augattn_sm80 TOKEN_BIAS: one pair-bias pass per fold instead of per block and step; the bias bits are the same kernel's; ESMFold2 / Protenix / OpenDDE samplers on the A100); 6: 2026-11-22: extra_pair_bias (OpenDDE's [L, L] logit bias) at inference on the sm_80 attention (was refused -> Triton); 5: 2026-11-19: fp32 with TF32 off is IEEE (the AdaLN / SwiGLU GEMMs no longer force TF32; kernels/ieee_f32)
         "cuda:5090_sm120": 3,  # 2026-11-22: extra_pair_bias at inference (shared sm_80 route); 2: 2026-11-19: the same (TF32 was forced under a caller with TF32 off)
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
@@ -683,6 +683,10 @@ class TokenDiTProtenix(BackendModule):
 
         grad = _wants_grad(self, single, cond, pair)
         extra = None if extra_pair_bias is None else extra_pair_bias[None, None]  # broadcast over B and H
+        from miniworld_engine.kernels.integrations import token_cond_sm80
+
+        if token_cond_sm80.serves(self, single, cond, grad):  # inference: the block's six conditioning projections as two small GEMMs on the distinct rows
+            return token_cond_sm80.forward(self, single, cond, pair, mask, extra)
         single = augattn_sm80.forward(self.attention, single, cond, pair, mask, extra)
         with torch.autocast("cuda", enabled=False):
             return ct_sm80.update(self.transition, single, cond, True, single.dtype, grad)
