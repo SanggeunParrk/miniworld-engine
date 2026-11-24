@@ -58,6 +58,44 @@ Selected by import of the changed modules (the `dev code-graph` CLI is not in th
 
 The 5090 commits change only `TokenDiTBoltz2` (the up-gated transition, intended; accuracy re-verified with its tokens) and 3 `InputFeatureEmbedder` fp32 cases that differ between two runs of the 3.0.9 wheel itself (run-to-run noise); the pair-bias hoist leaves the bytes unchanged. Every other difference to 3.0.9 is the token DiT family (`TokenDiTProtenix` / `MiniWorld` / `Chai1` / `RoseTTAFold3`, `TokenDiTMiniWorldBiasOnly`) and comes from `origin/main` (see "Open" above).
 
+## Release build (dist)
+
+Built from `rc-3.0.10` `9a18c8501` (worktree `~/miniworld-engine-scratch/rc3010`; build dir `~/miniworld-engine-scratch/release3010`, the 3.0.9 scripts): relcache = the 3.0.9 relcache + the missing artifacts built on the cluster CPU partition (`MINIWORLD_ENGINE_HOST_CXX` and `CXX` = GCC 12.4, CUTLASS 4.2, mathdx). Plans: sm90 581 (3.0.9 580), sm80 75, sm120 73.
+
+| file | sha256 |
+|---|---|
+| `miniworld_engine-3.0.10-py3-none-any.whl` | `7095eb02cb4a52fb5f71dcfd6339767f28060e582707d055c5941501cf182052` |
+| `miniworld_engine-3.0.10.tar.gz` | `3d23779e579e73222a119e3d637cc16179d2e666747625a6cbd4eb32373126d6` |
+| `miniworld_engine_kernels_sm90_cu129-3.0.10-cp312-cp312-manylinux_2_28_x86_64.whl` | `1af54858b84f09c42a087dbc0e164da2d8bc4fe7c12b0dc5a60ad6d70bce6d08` |
+| `miniworld_engine_kernels_sm80_cu129-3.0.10-cp312-cp312-manylinux_2_28_x86_64.whl` | `12bff9fd02dac1a40536f272cab90c10df1a034e54acacd60225844835f57788` |
+| `miniworld_engine_kernels_sm120_cu129-3.0.10-cp312-cp312-manylinux_2_28_x86_64.whl` | `d3fb5b9c3e95c75d8fac86da9e712fe19bb6f2e327b4d30186b96e92b7e61508` |
+
+`twine check` 5 / 5 PASSED; the engine METADATA pins the three kernels wheels `==3.0.10`, no git URLs. Manifest names against the 3.0.9 wheels: sm90 365 -> 366 (added `pair_embed_geom_sm90gt2`, dropped 0; the 8 carried names byte-identical), sm80 75 -> 75, sm120 67 -> 73 (added the 6 FP8 extensions), dropped 0 everywhere. `ldd` of every staged `.so`: 0 link a CUDA 13 library, 0 unresolved, no RPATH; highest symbol versions GLIBCXX_3.4.21 / CXXABI_1.3.11. The sm120 `pwa_gemm_sm120.so` is the nvcc 12.8 override (as 3.0.9).
+
+Found while building: `layernorm_general_cuda_v4` (new sm90 key from `origin/main`) first came out of a build without `CXX` pinned: its `bind.cpp` was compiled by the pixi GCC 14.3 and needed CXXABI_1.3.15, so it did not load with the RHEL 8 system libstdc++ (H100 load check with `/usr/lib64/libstdc++.so.6` preloaded: 164 / 165). Rebuilt with `CXX` = GCC 12.4: 165 / 165. A release build must set `CXX` together with `MINIWORLD_ENGINE_HOST_CXX` (3.0.9 built nothing new, so it did not show).
+
+## Installed-wheel verification (extracted final wheels, empty JIT cache, no nvcc, no repo on the path)
+
+| item | H100 (cluster) | A100 (cssb3) | RTX 5090 (cssb-rtx) |
+|---|---|---|---|
+| every indexed artifact loads, 0 builds | sm90 581 of 581 (165 + 190 + 226); with the system libstdc++ preloaded 165 / 165 | sm80 75 of 75 | sm120 73 of 73 |
+| accuracy per module (pytorch / cuda / triton), RED / error / builds | 7 modules incl. LayerNorm (94 GREEN), 0 / 0 / 0 | 13 modules, 0 / 0 / 0 | 18 modules, 0 / 0 / 0 |
+| `test_restored_triton_backends` | 63 passed | 63 passed | 59 passed, 4 skipped |
+| `test_extra_bias_and_mixed_dtypes` | 12 passed, 6 skipped | 18 passed | 6 passed, 12 skipped |
+| `test_ieee_f32` | 5 passed, 49 skipped | 49 passed, 5 skipped | 49 passed, 5 skipped |
+| `test_bias_only_logit_modes` | 24 passed, 4 skipped | 20 passed, 8 skipped | 20 passed, 8 skipped |
+| `test_bias_only_fp32_logits` (_sm80 on A100) | 82 passed, 8 skipped | 6 passed | 90 skipped |
+| `test_large_magnitude_inference_sm90` / `_sm80` | 98 passed, 1 xfailed (documented TriAttn limit) | 282 passed, 7 skipped | 282 passed, 7 skipped |
+| `test_pwa_long_inference_sm90` / `_sm80` | 26 passed | 27 passed, 3 skipped | 25 passed, 5 skipped |
+| `test_bias_only_long_inference_sm90` | 21 passed | | |
+| `test_bias_only_mid_inference` | 25 passed, 6 skipped | 18 passed, 13 skipped | 18 passed, 13 skipped |
+| `test_transition_sm80_resid_overflow` | | 4 passed | 4 passed |
+| `test_gated_core_cache` | 19 skipped (B200 only) | 19 skipped | 19 skipped |
+| new in 3.0.10 | | `test_trimul_sm80_k1tw` 9, `_k3s` 16, `test_token_cond_pack_sm80` 9, `test_token_pair_bias_hoist_sm80` 4 passed | `test_boltz2_upgate_transition_sm120` 7, `test_token_pair_bias_hoist_sm80` 4; FP8 sm120: TriMul 35, TriMul RF3 14, TriAttn 49, Transition 23, OPM 12, PWA 33, token DiT 15, atom DiT 24 passed |
+| kernel-build lines in all logs | 0 | 0 | 0 |
+
+H100: the first verification round (sm90 wheel with the GCC 14 LayerNorm build) ran every row above (acc 14 modules RED 0, tests as listed); after the LayerNorm rebuild the load checks and accuracy set 1 (incl. LayerNorm) were re-run on the final wheel. Known failing test (pre-existing, as in 3.0.8 / 3.0.9): `tests/gpu/test_chai1_identity_adaln_sm80.py::test_identity_kernels_vs_fp64[True-dtype1-transition]` on the A100 (13 passed, this 1 failed).
+
 ## Known limits
 
 - The e4m3 Transition is not in the 5090 `safe` preset (end level 24 / 36 with it); the H100 `safe` still contains its Transition (same F11 finding; H100 owner decision).
