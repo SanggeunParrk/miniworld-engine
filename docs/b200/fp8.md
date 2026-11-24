@@ -61,6 +61,22 @@ the shared B200 host (the rest). Ratio = FP8 / bf16 steady time (< 1 is faster).
   ok, 3.43 s). Not localized (the minus-TriAttn / -PWA / -TriMul / -token-DiT variants were not run: the shared host's GPUs were taken).
   **Blocked in code**: `fp8.B200_BLOCKED_MODELS` = {chai1}: on a B200 `MINIWORLD_FP8` reads as off and `fp8.enable()` acts as `disable()` for
   Chai-1 (tests/cpu/test_fp8_b200_blocked_models.py). Remove the entry only after an end-level check on the B200.
+  **Unblocked 2026-11-24 (37f357dbf)**: with the PWA e4m3 route off (below) Chai-1 n = 8 FP8 is finite (3.34 s, bf16 3.43 s).
+
+### 2026-11-24: two B200 faults under CUDA graphs, both switched off in engine main
+
+- **RoseTTAFold3 5I28 n = 12 / 16 FP8 non-finite** (F3, compile + CUDA graphs, one size per process). Route isolation at n = 12, one process per
+  variant: every route alone finite except **PWA e4m3 alone -> non-finite**; `safe` without PWA finite (4.92 s, bf16 5.48 s); all routes off with
+  the FP8 arm finite. A hook on `pwa_fp8_b200` saw the eager calls in range (max |v8| 20 of 448, no NaN in v8 / o): the fault is in the captured
+  replay, not localized. Fix (a888a8143): the B200 PWA e4m3 route serves only with `MINIWORLD_PWA_FP8_B200=1` (on top of `safe`); its v-scale cache
+  is keyed on the weights' versions / shapes (was the wv pointer alone; not the cause: forced on with the new key it is still non-finite).
+- **bf16 non-finite with several shapes' sampler graphs in one process** (FoldForge F4 under compile + CUDA graphs: AF3 bf16 9 / 27 targets).
+  Execution bisect (12 targets): FoldForge's per-shape sampler-graph cache off -> finite; compile alone, trunk graphs alone -> finite. Engine
+  switch bisect: `MINIWORLD_TOKEN_B200_STREAMS=0` or `_BF16_FORK=0` -> 12 / 12 finite; PAR / FOLDS / FINAL / GEARLY / the atom DiT early bias
+  -> still non-finite; keeping the token packs per capture -> still non-finite; recording the side-stream outputs (bias table, gates) on the caller's
+  stream -> still non-finite. Fix (4915ee25a): the bf16 fork of the pair pass off by default (same kernels in program order, outputs unchanged;
+  the fork had been 1-8 % faster at L 128-512); TokenDiT* `cuda:b200_sm100` 25 -> 26 (900d8d355). fp32 keeps its fork (not seen failing).
+  F4 under graphs on the fixed engine: 21 / 21 runs finite, FP8 / bf16 27-target sums 0.914-0.978.
 - AF3 eager profile, n = 16 (11.6 s): Pairformer ~64 % (TriAttn 6.1 s, TriMul 1.4 s), token DiT 17 %, atom DiT 0.5 s, Transition 3 %, OPM 0.11 s,
   PWA 0.014 s: the FP8 ceiling is set by TriAttn; at n = 8 the token DiT (expand-only FP8, block 0.93-0.99) leads.
 - Transition D128: the gate now serves only the row windows where e4m3 is faster (commit 6189cf1e0, `fp8_sm100a.py` ROW_GATE / ROW_MAX:
