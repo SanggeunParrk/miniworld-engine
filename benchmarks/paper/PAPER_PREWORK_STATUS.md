@@ -50,10 +50,10 @@ F4 now runs under compile + CUDA graphs (`scope: trunk`, as F1 / F3; FoldForge 1
 |---|---|---|---|
 | H100 | 3.0.10, 11 predictors, FP8 / bf16 n = 16 0.777-0.922 | 11 predictors, 0.842-0.939; F5 337 keys, monomer -0.0087 | 3.0.10, both arms |
 | RTX 5090 | FP8 arm on 5090-int (= 3.0.10) | 10 predictors, 0.852-0.965 (105 OOM cells on 32 GB under graphs); F5 230 keys | 3.0.10, both arms |
-| B200 | main fixes (a888a8143 + 4915ee25a), 0.802-0.966 at n = 16 | 0.914-0.978, 21 / 21 finite | FP8 3.0.10; re-run on the fixes queued |
-| A100 | -- | bf16 graph re-run (cssb3) | -- |
+| B200 | main fixes (a888a8143 + 4915ee25a), 0.802-0.966 at n = 16 | 0.914-0.978, 21 / 21 finite (Chai-1 FP8 added after 37f357dbf) | bf16 + FP8 on the fixes, 11 predictors |
+| A100 | -- | bf16 (no FP8 on sm_80), 11 predictors, 294 / 297 ok (3 OOM under graphs); eager 3.0.6 / graph 3.0.10 1.95-4.08x | -- |
 
-FoldBench AF3 (F1 / F2) on 3.0.10: FP8 and bf16 arms re-run (multi mode, 2 GPUs).
+FoldBench AF3 (F1 / F2) on 3.0.10 (multi mode, 2 GPUs, 1522 / 1522 both arms): GPU-h bf16 9.969 vs FP8 8.244 (0.827x); F2 top-1 bf16 / FP8 within a few points per task (antibody-antigen 48.8 / 45.8, protein-ligand 64.4 / 64.1, monomer protein lDDT 88.3 / 88.5); FoldForge 0859e57.
 
 ## Defects found by the end-to-end runs and fixed (all on `main`)
 
