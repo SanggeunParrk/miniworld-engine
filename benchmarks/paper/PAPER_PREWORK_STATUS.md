@@ -10,6 +10,8 @@ Everything below is on `main`: engine `miniworld-engine` (this repo) and FoldFor
 | 3.0.7 | H100 fp32 Transition with TF32 off on CUDA, bf16 opt-in for the bias-only pair-bias logits (fp32 default), B200 kernel set (source / JIT only) | tag `v3.0.7` |
 | 3.0.8 | A100 / RTX 5090: OpenDDE `TokenDiTProtenix` `extra_pair_bias` on CUDA (was Triton) | tag `v3.0.8` |
 | 3.0.9 | B200: TriAttn `ex2_poly2` upper clamp (non-finite on real AF3 / Chai-1), fp32 Transition `ieee_f32_sm100`, OpenDDE `extra_pair_bias` | tag `v3.0.9` |
+| 3.0.10 | RTX 5090 FP8 routes (every H100 slot; e4m3 Transition opt-in only), Boltz-2 up-gate + token pair-bias hoist on sm_120 | tag `v3.0.10` |
+| main after 3.0.10 (unreleased) | capability cache (host time), B200 PWA e4m3 off by default (a888a8143), B200 bf16 token DiT fork off by default (4915ee25a, TokenDiT* b200 26), Chai-1 unblocked on the B200 (37f357dbf) | -- |
 
 There is no B200 kernels wheel: B200 rows are measured on source trees (labels in the CSVs, `engine_label`).
 
@@ -19,7 +21,7 @@ There is no B200 kernels wheel: B200 rows are measured on source trees (labels i
 |---|---|---|---|---|---|---|
 | H100 | done | done | done | done | done (+ ds4sci eager correction) | done |
 | A100 | done | done | done | n/a | done | done |
-| RTX 5090 | done | done | done | n/a (no sm120 FP8 route) | done | done |
+| RTX 5090 | done | done | done | FP8 routes since 3.0.10 (module-level E4 not re-run; end level: F3 / F4 / F5 / F9 FP8 arms in FoldForge) | done | done |
 | B200 | done | done | done | done | done (+ fp64 accuracy) | done |
 
 Timing: CUDA graph, cold L2, medians; the iteration count (100 or 20) does not change the quantity measured and is not a caveat. E5: AF3 setup (d_pair 128, 4 heads), L 512 / 1024 / 2048, inference and training, all op classes, 13 external candidates; cells without a candidate (OPM, LayerNorm) or without support are marked, not missing.
@@ -38,6 +40,20 @@ Timing: CUDA graph, cold L2, medians; the iteration count (100 or 20) does not c
 | F9 inference limit | 3.0.6 | 22/22 | 9 of 11 predictors (ESMFold2 and ESMFold2-Fast not feasible: 16 GB host RAM cap) | done (22 limits; chai1 n=40 CUDA IMA at 98 % reserved classified OOM) |
 | F10 training limit | dropped from the paper | | | |
 | F11 FP8 accuracy | done | n/a | n/a | n/a |
+
+### 2026-11-24 update: engine 3.0.10, FP8 arms everywhere, F4 under compile + CUDA graphs
+
+F4 now runs under compile + CUDA graphs (`scope: trunk`, as F1 / F3; FoldForge 16d094c): eager timing measured host overhead (B200 FP8 looked
+1.10-1.27x slower than bf16 eager, faster everywhere under graphs). New FoldForge data files (`*_3010*.csv`; bf16 and FP8 arms on the same engine):
+
+| card | F3 | F4 (graph) + F5 (FP8 vs bf16) | F9 |
+|---|---|---|---|
+| H100 | 3.0.10, 11 predictors, FP8 / bf16 n = 16 0.777-0.922 | 11 predictors, 0.842-0.939; F5 337 keys, monomer -0.0087 | 3.0.10, both arms |
+| RTX 5090 | FP8 arm on 5090-int (= 3.0.10) | 10 predictors, 0.852-0.965 (105 OOM cells on 32 GB under graphs); F5 230 keys | 3.0.10, both arms |
+| B200 | main fixes (a888a8143 + 4915ee25a), 0.802-0.966 at n = 16 | 0.914-0.978, 21 / 21 finite | FP8 3.0.10; re-run on the fixes queued |
+| A100 | -- | bf16 graph re-run (cssb3) | -- |
+
+FoldBench AF3 (F1 / F2) on 3.0.10: FP8 and bf16 arms re-run (multi mode, 2 GPUs).
 
 ## Defects found by the end-to-end runs and fixed (all on `main`)
 
