@@ -178,6 +178,7 @@ NOT_WEIGHT_DERIVED = {
     "modules/norm.py:_FASTLN_STATE": "fast LayerNorm availability",
     "modules/_cueq.py:_STATE": "cuEquivariance availability",
     "modules/triangle.py:_PAIR_FUSED_REFUSED": "refused library cells",
+    "kernels/_device.py:_CAPABILITY": "compute capability per CUDA device index (a device constant)",
 }
 
 #: directories whose sources are not engine runtime caches (measurement state, the judge)
