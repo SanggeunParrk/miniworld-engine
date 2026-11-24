@@ -110,10 +110,9 @@ _NO_TRIATTN: tuple[frozenset[str], bool] = (frozenset(), False)
 #: :func:`enable` acts as :func:`disable`), whatever the preset. Remove an entry only after an end-level check on the B200.
 B200_BLOCKED_MODELS = MappingProxyType(
     {
-        # 2026-11-23: 5I28 n = 8 (1,024 tokens) FP8 'safe' gives non-finite coordinates with fp8.check() False, with and without CUDA graphs,
-        # on engine main a553001e1 too (after the token DiT e4m3 scale floor a8ddeaac5); bf16 n = 8 and FP8 n = 1 / 4 / 16 are finite. The
-        # route at fault is not localized (docs/b200/fp8.md "End-to-end measurement on engine main").
-        "chai1": "non-finite 5I28 n = 8 coordinates under FP8 on the B200 (route not localized)",
+        # (empty since 2026-11-24) chai1 was blocked for non-finite 5I28 n = 8 coordinates under FP8 (2026-11-23); with the B200 PWA e4m3 route
+        # off by default (a888a8143: the route alone gave RoseTTAFold3 n = 12 / 16 non-finite) Chai-1 n = 8 FP8 is finite on the B200 (3.34 s,
+        # bf16 3.43 s, compile + CUDA graphs).
     }
 )
 
