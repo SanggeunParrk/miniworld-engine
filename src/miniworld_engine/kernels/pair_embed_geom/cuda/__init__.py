@@ -9,6 +9,9 @@ def prebuild(target, rows):
 
     if rows and target.arch == "sm90":
         yield ext
+        from .sm80 import ext as sm80_ext  # the H100 inference forwards (sm80/__init__.py: this source built for sm_90a, pair_embed_geom_sm90gt2)
+
+        yield sm80_ext
     elif rows and target.arch in ("sm80", "sm120"):  # the A100 build of the same source (sm80/__init__.py; sm_120a on the RTX 5090: _sm120.py)
         from .sm80 import ext as sm80_ext
 

@@ -5,6 +5,7 @@ the sm_80 forms of its sm_90-only helpers (``pe_sm80.cuh``: the table gradient's
 from __future__ import annotations
 
 import functools
+import os
 import sys
 import types
 from pathlib import Path
@@ -22,7 +23,10 @@ def ext():
     from miniworld_engine.kernels._sm120 import building_sm120, sm80_load_extension as load_extension  # RTX 5090: the same source for sm_120a (kernels/_sm120.py)
 
     ensure_cuda_home()
-    h100 = not building_sm120() and torch.cuda.get_device_capability() == (9, 0)  # the H100's inference forwards: this source built for sm_90a (the training launchers stay the sm90 build)
+    # the H100's inference forwards: this source built for sm_90a (the training launchers stay the sm90 build). The target comes from
+    # MINIWORLD_ENGINE_BUILD_ARCH when set (a GPU-less prebuild: kernels/_prebuild.py sets it for every arch), else from the device.
+    forced = os.environ.get("MINIWORLD_ENGINE_BUILD_ARCH", "").lower().removeprefix("sm").removeprefix("_").rstrip("a")
+    h100 = forced == "90" if forced else (not building_sm120() and torch.cuda.get_device_capability() == (9, 0))
     return load_extension(
         name="pair_embed_geom_sm90gt2" if h100 else "pair_embed_geom_sm80",
         sources=[str(_dir / "pair_embed_geom_sm80.cu")],

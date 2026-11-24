@@ -623,6 +623,8 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["MINIWORLD_ENGINE_BUILD_ARCH"] = "sm120"
     elif t.arch == "sm100":  # B200: the sm_80 builders it reuses (ProteinMPNN) compile for sm_100a under <name>_sm100 on any build host
         os.environ["MINIWORLD_ENGINE_BUILD_ARCH"] = "sm100"
+    elif t.arch in ("sm80", "sm90"):  # builders that pick a variant by the device (pair_embed_geom sm80/: the A100 vs the H100 gt2 build) plan the target on a GPU-less host
+        os.environ["MINIWORLD_ENGINE_BUILD_ARCH"] = t.arch
     if args.cutlass:
         os.environ["CUTLASS_PATH"] = args.cutlass
     if args.mathdx:
