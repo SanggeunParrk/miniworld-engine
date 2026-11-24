@@ -373,8 +373,11 @@ _NO_GATE = 1.0e4  # gate logits of a block without a gating query: sigmoid(1e4) 
 #: B200 bf16 inference with B trunk_seeds: every fold in one core launch (0: one launch per fold)
 _B200_FOLDS = os.environ.get("MINIWORLD_TOKEN_B200_FOLDS", "1") != "0"
 #: B200 bf16 inference: the pair pass on a side stream too, issued after the folded conditioning GEMM (part 3: 1-8 % faster at L 128 -
-#: 512; part 2 had measured the fork 1-10 % slower with the pair pass issued first, where it held the SMs the chain needed)
-_B200_BF16_FORK = os.environ.get("MINIWORLD_TOKEN_B200_BF16_FORK", "1") != "0"
+#: 512; part 2 had measured the fork 1-10 % slower with the pair pass issued first, where it held the SMs the chain needed).
+#: OFF by default since 2026-11-24 (MINIWORLD_TOKEN_B200_BF16_FORK=1 turns it on): with several shapes' sampler graphs alive in one process
+#: (FoldForge's per-shape sampler-graph cache, F4) the bf16 fork gave non-finite coordinates (AF3 12 FoldBench targets in one process: 1 of 12,
+#: 27 targets: 9 of 27); with the fork off 12 / 12 finite. Recording the side-stream outputs on the caller's stream did not fix it: cause open.
+_B200_BF16_FORK = os.environ.get("MINIWORLD_TOKEN_B200_BF16_FORK", "0") == "1"
 #: B200 fp32 inference inside a capture, one sample: the v^T GEMM on the chain (0: beside it)
 _B200_VT_MAIN = os.environ.get("MINIWORLD_TOKEN_B200_VT_MAIN", "1") != "0"
 #: B200 fp32 inference inside a capture, several samples (round 3 part 6, measured per row): v^T on the chain at L 128 when the
