@@ -97,7 +97,27 @@ No saturation in any row (`fp8.check()` False, the V peak 1/4 of 448 as calibrat
 
 **Default path untouched** (FP8 off): `pair_default_bytes.py` (eager, CUDA-graph replay, eager after the capture; the 23 earlier cases + `chai1` L256 / L512, `chai1end` L512, `chai1conf` L512) equal against `5090-int` (separate processes). The variant forward only allocates `o` / `lse` inside the default branch now.
 
-**Route census** (`route_census.py --model chai1 --sizes 1 4`, FoldForge on cssb-rtx with this tree, 5I28 real MSA + templates, compile + CUDA graphs, `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=chai1`, lazy guards): n = 4 (512 tokens) TriAttn `pv_d64` **960** (112 calibrations), 0 fallbacks, 0 capture fallbacks, not saturated (H100 with its gate removed: `pv_d64` 848 + template `pv_front` 140; the 5090 leaves the template stack's PV-only kind off); n = 1 (128 tokens): 0 (below the core's L 256 floor). Every other slot as in the census above. Not re-run here: the F3 5I28 timing and the end level of chai1 with this route.
+**Route census** (`route_census.py --model chai1 --sizes 1 4`, FoldForge on cssb-rtx with this tree, 5I28 real MSA + templates, compile + CUDA graphs, `MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=chai1`, lazy guards): n = 4 (512 tokens) TriAttn `pv_d64` **960** (112 calibrations), 0 fallbacks, 0 capture fallbacks, not saturated (H100 with its gate removed: `pv_d64` 848 + template `pv_front` 140; the 5090 leaves the template stack's PV-only kind off); n = 1 (128 tokens): 0 (below the core's L 256 floor). Every other slot as in the census above.
+
+**End level of chai1 with this route (2026-11-24, release prep on `5090-int` after the main merge).** Protocol of the 5090 end level in section "5090-int" (`e2e_5090.py`, FoldForge `miniworld` backend, bf16, eager, 200 steps, diffusion_seed 0, trunk seeds 0-3, targets 8ad9 / 8ee9 / 7y37 / 8gn4, rule max(1.1 x bf16 trunk-seed pair max, 0.5 A), `e2e_5090_an.py`); FP8 arm = the 5090 `safe` (no Transition) with `MINIWORLD_FP8_MODEL=chai1`, so TriAttn `pv_d64` is on; both arms re-run on this tree. **4 / 4 inside**, no saturation flag in the 16 FP8 forwards; `pv_d64` 1048 calls a forward on 8ad9 / 8ee9 / 7y37 (8gn4 is below the core's L 256 floor: 0):
+
+| target | bf16 pair max / mean (A) | FP8 same-seed max / mean (A), per seed | threshold | max abs d ipTM |
+|---|---|---|---|---|
+| 7y37 | 4.43 / 3.66 | 0.20 / 0.12 [0.20 0.09 0.03 0.17] | 4.87 | 0.001 |
+| 8ad9 | 3.67 / 3.06 | 1.94 / 1.75 [1.78 1.94 1.59 1.69] | 4.03 | 0.096 |
+| 8ee9 | 3.95 / 2.20 | 3.11 / 1.95 [1.21 3.11 0.41 3.07] | 4.34 | 0.001 |
+| 8gn4 | 2.97 / 2.11 | 0.95 / 0.37 [0.95 0.28 0.15 0.10] | 3.27 | 0.004 |
+
+**F3 5I28 chai1 engine-fp8 with this route** (same F3 harness and protocol as the 5090 F3 table in section "5090-int": `run_ff.py`, real MSA + 4 templates, compile + CUDA graphs, 200 steps, 5 samples, 6 warm repeats, steady median; cssb-rtx under the GPU lock, 3 repetitions, median; FP8 arm = 5090 `safe` without the Transition; bf16 = the same boltz2_5090 re-measure the table above uses; no cell saturated, 0 kernel builds):
+
+| n | bf16 (s) | FP8 before d64 (s, ratio) | FP8 with d64 (s) [reps] | FP8 / bf16 |
+|---|---|---|---|---|
+| 1 | 0.6603 | 0.5858 (0.887) | **0.5857** [0.5859 0.5854 0.5857] | **0.887** |
+| 2 | 1.4637 | 1.2453 (0.851) | **1.2303** [1.2316 1.2269 1.2303] | **0.841** |
+| 4 | 3.9523 | 3.6615 (0.926) | **3.5598** [3.5651 3.5514 3.5598] | **0.901** |
+| 8 | 15.267 | 14.3942 (0.943) | **13.6544** [13.6804 13.6543 13.6194] | **0.894** |
+
+The d64 route takes 1.2 % (n = 2), 2.8 % (n = 4) and 5.1 % (n = 8) off the chai1 FP8 forward; n = 1 (128 tokens) is below its L 256 floor (unchanged). Repetitions agree within 0.5 %.
 
 **Prebuild.** `_prebuild --arch sm120 --list`: 73 artifacts as before; `triattn_sm120_f8` re-keyed c2163cab -> 0fa5f6aa (the generalised header and the HD 64 ops in the same extension), every other key unchanged. No module `version` / `backend_versions` change (opt-in route; default bytes equal).
 
@@ -418,6 +438,7 @@ The same runs with the Transition route off (`safe` + `MINIWORLD_TRANSITION_FP8=
 | af3 | **0.958** (0.953) | **0.834** (0.827) | **0.907** (0.897) | **0.897** (0.886) | **0.865** (0.853) | **0.840** (0.829) |
 | boltz2 | **0.959** (0.955) | **0.791** (0.783) | **0.898** (0.888) | **0.912** (0.899) | **0.915** (0.902) | **0.914** (0.902) |
 | chai1 | **0.887** (0.877) | **0.851** (0.830) | **0.926** (0.884) | **0.943** (0.902) | oom | oom |
+| chai1 with the d64 TriAttn route (2026-11-24, section "TriAttn, Chai-1 d64") | **0.887** | **0.841** | **0.901** | **0.894** | oom | oom |
 | intellifold2 | **0.967** (0.946) | **0.914** (0.884) | **0.965** (0.928) | **0.949** (0.900) | oom | oom |
 | opendde | **0.850** (0.844) | **0.920** (0.909) | **0.950** (0.935) | oom | oom | oom |
 | openfold3 | **0.954** (0.949) | **0.830** (0.822) | **0.904** (0.894) | **0.891** (0.879) | **0.860** (0.847) | **0.835** (0.824) |
