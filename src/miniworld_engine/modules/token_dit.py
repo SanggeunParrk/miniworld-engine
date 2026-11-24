@@ -1100,7 +1100,9 @@ class TokenDiTMiniWorldBiasOnly(BackendModule):
     # cuda:a100_sm80 6 / cuda:5090_sm120 7 (2026-11-20, speed of the exact fp32 path): the training pair-bias backward (d_pair 128 / 256) on TF32 tensor cores in one pass (pair_bias_gen_bwd_tc3: the
     # pair gradient and, for an fp32 pair, dW' in 3xTF32; bf16 pair: dW' in 1xTF32 on the rounded xh), two CTAs an SM; was the fp32-FFMA pair_bias_gen_bwd; gradients differ by fp32 / TF32 rounding noise
     # cuda:h100_sm90 9 (2026-11-20, inference length): L > 3072 up to 8192 (the softmax rows run two passes past the 3072 keys a warp holds in registers; pv_cta / pv_cta_tf32 bound 3072 -> 8192; a call past 3072 must fit the device memory, else a refusal) and the bf16 hoist takes softmax_rows past 1024 (softmax_t held 1024: bf16 / master inference at 1024 < L <= 3072 raised); L <= 3072 outputs bit-identical (fp32; bf16 at L <= 1024), logits and softmax stay fp32
-    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 6, "cuda:h100_sm90": 9, "cuda:5090_sm120": 7, "triton:5090_sm120": 2, "cuda:b200_sm100": 4}
+    # cuda:5090_sm120 8 (2026-11-24, release 3.0.10 prep): the 5090 inference outputs differ from 3.0.9 (bytes; error vs fp64 unchanged, e.g. L384 fp32 max 1.735e-3 -> 1.729e-3,
+    # rel-rms 2.078e-4 both) since origin/main 588e87b9d / 4d9003870 (sm_80 token attention: out-projection casts of fp32 masters cached), which also runs on sm_120; tokens re-issued
+    backend_versions: ClassVar[dict[str, int]] = {"cuda:a100_sm80": 6, "cuda:h100_sm90": 9, "cuda:5090_sm120": 8, "triton:5090_sm120": 2, "cuda:b200_sm100": 4}
 
     def __init__(
         self,
