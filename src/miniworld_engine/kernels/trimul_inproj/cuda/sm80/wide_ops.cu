@@ -230,6 +230,7 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+#ifdef MWE_SM120  // the e4m3 conversions of E8 (cvt .e4m3x2) need sm_89+: the sm_80 (A100) build has no k1w8
 // E8 (opt-in, RTX 5090 inference): the in-kernel-statistics front of k1w with e4m3 planes: planes8 [2 Hs, T] uint8, qinv [2] float (1 / scale of a, b), peak [2] int32 (bits of max scaled |value|, zeroed by the caller)
 void k1w8(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, torch::Tensor st, torch::Tensor mask, torch::Tensor planes8, int64_t L, double eps, torch::Tensor qinv, torch::Tensor peak, int64_t direction, bool fuse) {
   const int T = (int)z.size(0), D = (int)z.size(1), ncol = (int)w1.size(0);
@@ -248,6 +249,7 @@ void k1w8(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb,
   else a100::k1w_kernel<false, false, false, true><<<(T / 128) * (ncol / 128), 128, a100::K1wTile::SMEM, stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+#endif
 
 // D256 bf16 inference front (k1tw_kernel): z [T, 256], w1 [4 Hs, 256], vs / vb, mask [L] uint8 or empty -> planes [2 Hs, T] and the input statistics st [T, 2] (an OUTPUT).
 // tr: the planes hold the transposed tokens (plane (r, c) = token (c, r); needs L % 128 == 0).  The weight ring has 4 slots (two CTAs per SM; 3 measured 0-2 % slower).
@@ -543,7 +545,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("wpack", &wpack);
   m.def("k1w", &k1w<false>);
   m.def("k1w_row_mask", &k1w<true>);
+#ifdef MWE_SM120
   m.def("k1w8", &k1w8);
+#endif
   m.def("k1t_set", &k1t_set);
   m.def("k1nz_set", &k1nz_set);
   m.def("k1tw", &k1tw);
