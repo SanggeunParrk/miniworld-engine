@@ -21,21 +21,41 @@ Base: 3.0.9 (tag `v3.0.9`). Candidate tree: branch `5090-int` = every RTX 5090 b
 | token DiT | cuBLASLt row-wise e4m3 expand (+ opt-in squeeze / qkvg / out) | 640 rows | see docs | see docs |
 | atom DiT | e4m3 pre / post GEMMs (incl. ESMFold2 RMS block) | 4096 rows (ESM 8192) | ESM 1.17-1.49 | ESM 3.6 % (3.8 %) |
 
-   End level (H100 rule: same-seed bf16-vs-FP8 RMSD max <= max(1.1 x bf16 trunk-seed pair max, 0.5 A); FoldForge, 9 predictors x 4 targets x 4 trunk seeds): `safe` without the Transition **33 / 36** inside (with the e4m3 Transition 24 / 36: the H100 F11 effect; owner decision: Transition out of the 5090 `safe`). Chai-1 with the d64 route: PENDING (see "Chai-1 re-check").
-   F3 5I28 engine-fp8 / bf16 (official = `safe` without the Transition, 3 reps): every cell faster, **0.79-0.97** of bf16. Chai-1 with d64: PENDING.
-4. **Release-prep fixes on `5090-int`:** `tests/cpu/test_capture_api.py` lists the sm120 FP8 route dicts (`2b1ffa630`); the sm_80 (A100) build of `trimul_sm80_wide` / `_wide512` failed (`cvt .e4m3x2` of the 5090-only `k1w8` needs sm_89+): `k1w8` and its binding are now under `MWE_SM120` (PENDING commit / SASS check).
+   End level (H100 rule: same-seed bf16-vs-FP8 RMSD max <= max(1.1 x bf16 trunk-seed pair max, 0.5 A); FoldForge, 9 predictors x 4 targets x 4 trunk seeds): `safe` without the Transition **33 / 36** inside (with the e4m3 Transition 24 / 36: the H100 F11 effect; owner decision: Transition out of the 5090 `safe`). Chai-1 re-checked with the d64 TriAttn route on (2026-11-24): **4 / 4 inside**, no saturation (docs/fp8.md "TriAttn, Chai-1 d64").
+   F3 5I28 engine-fp8 / bf16 (official = `safe` without the Transition, 3 reps): every cell faster, **0.79-0.97** of bf16. Chai-1 with d64 (3 reps): n 1 / 2 / 4 / 8 = **0.887 / 0.841 / 0.901 / 0.894** (before d64 0.887 / 0.851 / 0.926 / 0.943).
+4. **Release-prep fixes on `5090-int`:** `tests/cpu/test_capture_api.py` lists the sm120 FP8 route dicts (`2b1ffa630`). **The sm_80 (A100) build of `trimul_sm80_wide` / `_wide512` failed** in ptxas (`cvt .e4m3x2` of the 5090-only `k1w8` needs sm_89+): `k1w8` and its binding are now compiled only with `MWE_SM120` (`01090340d`); the sm_80 SASS of every pre-existing kernel equals `origin/main` (k1w_kernel 7 instantiations: 0 differing lines; conditioned_transition_sm80 19 kernels equal + 2 new `swiglu_up_fwd`).
 
 ## Versions (`backend_versions`)
 
-From the 5090 branches (only `cuda:5090_sm120`): `TokenDiTProtenix` 3 -> 4, `TokenDiTMiniWorld` 3 -> 4, `TokenDiTBoltz2` 2 -> 4, `TokenDiTRoseTTAFold3` 2 -> 3, `TokenDiTChai1` 4 -> 5. No module `version` changed; the FP8 routes are opt-in and change no entry. Judge (`owed`, this tree): PENDING table.
+From the 5090 branches (only `cuda:5090_sm120`): `TokenDiTProtenix` 3 -> 4, `TokenDiTMiniWorld` 3 -> 4, `TokenDiTBoltz2` 2 -> 4, `TokenDiTRoseTTAFold3` 2 -> 3, `TokenDiTChai1` 4 -> 5. No module `version` changed; the FP8 routes are opt-in and change no entry.
+
+Judge `owed` on this tree (accuracy / speed): `5090_sm120` 0 / 0, `h100_sm90` 0 / 0, `a100_sm80` 0 / 0, `b200_sm100` 0 / 0 (17,815 carried each). The 5090 commits are sm_120-gated in Python; they owe no token on another card.
+
+**Open (needs a decision):** `TokenDiTMiniWorldBiasOnly` `cuda:5090_sm120` outputs changed between 3.0.9 and `origin/main` (other session's sm_80 token-attention commit `588e87b9d` / `4d9003870`, "cache the out-projection casts of fp32 masters", which also runs on the 5090), without a `cuda:5090_sm120` bump; its error vs float64 is unchanged (e.g. L384 float32 max 1.735e-3 -> 1.729e-3, rel-rms 2.078e-4 both; master rel-rms 3.110e-3 both). Its 5090 tokens are carried from the 3.0.9 outputs. Options: bump `cuda:5090_sm120` and re-issue its 5090 tokens (accuracy + speed on cssb-rtx), or accept as is.
 
 ## Prebuilt artifacts
 
-PENDING (sm120 plan, re-keyed artifacts per card, compiled = 0 check).
+- **sm120** (`_prebuild --arch sm120 --list`): 3.0.9 67 -> `origin/main` 67 -> this tree **73** artifacts. New (opt-in FP8 extensions): `atom_f8_sm120`, `token_f8_sm120`, `msa_f8_sm120`, `miniworld_opm_lt_f8`, `transition_fwd_f8_sm120`, `triattn_sm120_f8`; re-keyed by the 5090 commits: `conditioned_transition_sm120`, `trimul_sm80_wide_sm120`, `trimul_sm80_wide512_sm120` (plus the re-keys `origin/main` brought). Built from scratch on the cluster CPU partition (sbatch, `MINIWORLD_ENGINE_BUILD_ARCH=sm120`, pixi nvcc 12.9): 73 of 73.
+- **`pwa_gemm_sm120` must stay the nvcc 12.8 override** (as in 3.0.9; key `52fb2fc514a0061a` unchanged): with the cluster nvcc 12.9 build, `tests/gpu/test_pwa_fp8_sm120.py` fails two cases and then segfaults (5090, empty copy of the cluster cache); with the 3.0.9 override `.so` substituted, 33 passed.
+- **sm80**: 3.0.9 75 -> 74 (`origin/main`); the 5090 commits re-key 3 artifacts (`conditioned_transition_sm80`, `trimul_sm80_wide`, `trimul_sm80_wide512`; SASS of existing kernels identical, see above) -> **the A100 kernels wheel must be rebuilt** for these 3 names.
+- **sm90**: the 5090 commits change nothing (580 -> 580).
+- **Clean-cache check on the RTX 5090** (vast5090, empty copy of the cluster-built cache + the `pwa_gemm` override, no repo cache): every registry module (40) through `measure.accuracy` on `cuda` (L 128, or the smallest length for the 14 modules without an L 128 row; train + eval) **compiled = 0**, 0 RED / 0 error; the 7 FP8 route test files (TriMul, TriMul RF3, TriAttn incl. d64, OPM, PWA, token DiT, Transition = the explicit opt-in; atom DiT on cssb-rtx) **compiled = 0**, all passed.
+
+## Tests (RTX 5090)
+
+Selected by import of the changed modules (the `dev code-graph` CLI is not in this tree), narrowed to the 5090-relevant diff: CPU 29 files all passed (incl. the fixed `test_capture_api`); GPU 41 files: 33 non-FP8 files 177 passed / 317 skipped / 0 failed (vast5090), FP8 sm120 files TriMul 35, TriMul RF3 14, TriAttn 49, OPM 12, PWA 33 (with the override), token DiT 15, Transition 23, atom DiT 24 passed; `test_fp8_switch` 29 passed (CUDA visible). H100 / B200-only suites not re-run.
 
 ## Byte identity of the default path vs 3.0.9 (RTX 5090)
 
-PENDING.
+`ident3.py` dumps of every registry module (cuda, eval; lengths min and 384 / 768; 314 + 424 cases) of the 3.0.9 wheel, `origin/main` and this tree:
+
+| comparison | min | 384 / 768 |
+|---|---|---|
+| 3.0.9 vs this tree | 270 identical / 36 different | 345 / 79 |
+| 3.0.9 vs `origin/main` | 272 / 34 | 349 / 75 |
+| `origin/main` vs this tree (= the 5090 commits) | 299 / 7 | 416 / 8 |
+
+The 5090 commits change only `TokenDiTBoltz2` (the up-gated transition, intended; accuracy re-verified with its tokens) and 3 `InputFeatureEmbedder` fp32 cases that differ between two runs of the 3.0.9 wheel itself (run-to-run noise); the pair-bias hoist leaves the bytes unchanged. Every other difference to 3.0.9 is the token DiT family (`TokenDiTProtenix` / `MiniWorld` / `Chai1` / `RoseTTAFold3`, `TokenDiTMiniWorldBiasOnly`) and comes from `origin/main` (see "Open" above).
 
 ## Known limits
 
