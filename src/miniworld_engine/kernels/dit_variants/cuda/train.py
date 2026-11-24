@@ -18,6 +18,7 @@ from miniworld_engine.kernels import ieee_f32 as _ieee
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._device import capability as _devcap
 
 LOG2E = 1.4426950408889634
 #: rows per block of the dq / dk / dv backward kernel (its column sums leave as one partial row per block)
@@ -99,7 +100,7 @@ def _edge(t: torch.Tensor):
 # of the same launches: no edge.cu edge windows; the tail past the last real window stays on edge.cu's tail kernels). Taken where the
 # atoms are a multiple of the kernels' 128-row tile and the window is "pad" or "slide" (``slide_qblock`` keeps the sm_80 core).
 def _b200_core(t: torch.Tensor, key_window: str, n: int) -> bool:
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (10, 0) and key_window in ("pad", "slide") and n % 128 == 0
+    return t.is_cuda and _devcap(t.device) == (10, 0) and key_window in ("pad", "slide") and n % 128 == 0
 
 
 def _b200_local():
@@ -779,7 +780,7 @@ def atom_serves(stack, single, cond, pair, mask, uid, *, need_grad: bool = True)
     if need_grad and not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
         return False
     # A100, RTX 5090 (sm_120a build) or B200 (sm_100a build) (H100: the one atom DiT implementation, local_dit_h100)
-    if torch.cuda.get_device_capability(single.device) not in ((8, 0), (12, 0), (10, 0)):
+    if _devcap(single.device) not in ((8, 0), (12, 0), (10, 0)):
         return False
     a, n, d = single.shape
     return (

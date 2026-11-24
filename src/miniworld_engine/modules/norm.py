@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Size
 
+from miniworld_engine.kernels._device import capability as _devcap
 from miniworld_engine.modules.primitives import BackendModule, Linear, master_linear, random_input, stream_shape, wide
 
 _shape_t = int | list[int] | Size
@@ -30,7 +31,7 @@ def h100_unsupported(*tensors: torch.Tensor) -> str | None:
     t = tensors[0]
     if t.device.type != "cuda":
         return "the CUDA kernels run on CUDA tensors only"
-    cc = torch.cuda.get_device_capability(t.device)
+    cc = _devcap(t.device)
     if cc != (9, 0):
         return f"the hand-written CUDA kernels are the H100 (sm_90) ones, got sm_{cc[0]}{cc[1]}"
     return None
@@ -39,19 +40,19 @@ def h100_unsupported(*tensors: torch.Tensor) -> str | None:
 def a100(t: torch.Tensor) -> bool:
     """A CUDA tensor on an A100 (capability 8.0): the ``"cuda"`` backends of the classes that have sm_80 builds route there to them (the H100
     path is unchanged). Device only: capture-safe."""
-    return t.device.type == "cuda" and torch.cuda.get_device_capability(t.device) == (8, 0)
+    return t.device.type == "cuda" and _devcap(t.device) == (8, 0)
 
 
 def sm120(t: torch.Tensor) -> bool:
     """A CUDA tensor on a GeForce RTX 5090 (capability 12.0, card key ``5090_sm120``): the ``"cuda"`` backends of the classes that have sm_120a
     builds route there to them (the H100 and A100 paths are unchanged). Device only: capture-safe."""
-    return t.device.type == "cuda" and torch.cuda.get_device_capability(t.device) == (12, 0)
+    return t.device.type == "cuda" and _devcap(t.device) == (12, 0)
 
 
 def b200(t: torch.Tensor) -> bool:
     """A CUDA tensor on an NVIDIA B200 (capability 10.0, card key ``b200_sm100``): the ``"cuda"`` backends of the classes that have sm_100a
     kernels route there to them (the H100, A100 and RTX 5090 paths are unchanged). Device only: capture-safe."""
-    return t.device.type == "cuda" and torch.cuda.get_device_capability(t.device) == (10, 0)
+    return t.device.type == "cuda" and _devcap(t.device) == (10, 0)
 
 
 def triton_unsupported(*tensors: torch.Tensor) -> str | None:
@@ -144,7 +145,7 @@ def _fastln():
     ]
     # sm_80 / sm_90 builds; on the RTX 5090 the same sources as ``..._sm120`` (sm_120a), whose card the sm_80 / sm_90 images do not run on
     # 2026-11-16: on the B200 the same sources as ``..._sm100`` (sm_100a; the sm_80 / sm_90 images do not run there either)
-    on_b200 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0)
+    on_b200 = torch.cuda.is_available() and _devcap() == (10, 0)
     ext = sm80_load_extension(
         name="anthropic_protenix_fast_layer_norm_v1" + ("_sm100" if on_b200 else ""),
         sources=[str(base / "layer_norm_cuda.cpp"), str(base / "layer_norm_cuda_kernel.cu")],

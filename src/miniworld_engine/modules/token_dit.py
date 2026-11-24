@@ -37,6 +37,7 @@ import torch.nn.functional as F
 
 from miniworld_engine import bias_logits as _bias_logits
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels._device import capability as _devcap
 from miniworld_engine.modules import _anthropic
 from miniworld_engine.modules.attention import (
     AugmentedAttentionPairBias,
@@ -300,7 +301,7 @@ _PROVIDER_WORD = "fast"
 def _provider_selection(n: int, samples: int, d: int, h: int, dtype: torch.dtype, device, cell: str = "dit_h16d48"):
     """``(Selection, None)`` or ``(None, reason)``: the row opt_core's pair-bias provider (``opt_core.kernels.apb``) selects for the call."""
     provider = _anthropic.load("opt_core.kernels.apb")
-    cc = tuple(torch.cuda.get_device_capability(device))
+    cc = tuple(_devcap(device))
     return _anthropic.kernel_selection(
         provider,
         cc,
@@ -402,7 +403,7 @@ def _native_reason(single: torch.Tensor) -> str | None:
     a tensor on this device, or ``None``. Their own ``serves`` gates state each card's range."""
     if not single.is_cuda:
         return "CUDA tensors only"
-    if torch.cuda.get_device_capability(single.device) not in ((9, 0), (10, 0)):
+    if _devcap(single.device) not in ((9, 0), (10, 0)):
         return "the H100 (sm_90) / B200 (sm_100a) kernels only"
     return None
 
@@ -410,12 +411,12 @@ def _native_reason(single: torch.Tensor) -> str | None:
 def _a100(single: torch.Tensor) -> bool:
     """A CUDA tensor on an A100 (sm_80) or an RTX 5090 (sm_120a builds of the same sources, ``kernels/_sm120.py``): the cards of the
     ``"cuda"`` backend's sm_80 paths (``kernels/integrations/*_sm80.py``)."""
-    return single.is_cuda and torch.cuda.get_device_capability(single.device) in ((8, 0), (12, 0))
+    return single.is_cuda and _devcap(single.device) in ((8, 0), (12, 0))
 
 
 def _card(single: torch.Tensor) -> str:
     """The card the sm_80 paths run on, for refusal reasons."""
-    return "RTX 5090 (sm_120a build of the sm_80 path)" if torch.cuda.get_device_capability(single.device) == (12, 0) else "A100"
+    return "RTX 5090 (sm_120a build of the sm_80 path)" if _devcap(single.device) == (12, 0) else "A100"
 
 
 def _a100_dtype(
@@ -661,7 +662,7 @@ class TokenDiTProtenix(BackendModule):
         if single.ndim != 4 or cond.ndim != 4:
             return None, f"{_card(single)}: single / cond must be [A, B, L, d], got {tuple(single.shape)} / {tuple(cond.shape)}"
         if not ct_sm80.serves(self.transition, single, cond, cast(torch.dtype, dt), _wants_grad(self, single, cond, pair)):
-            if torch.cuda.get_device_capability(single.device) == (12, 0):
+            if _devcap(single.device) == (12, 0):
                 return None, (
                     f"{_card(single)}: the transition -- kernels/integrations/conditioned_transition_sm80 has no sm_120a build yet "
                     "(the ConditionedTransition / AdaLN port), or the call is outside its range"

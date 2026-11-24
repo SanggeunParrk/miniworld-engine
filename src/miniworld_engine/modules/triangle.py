@@ -35,6 +35,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
+from miniworld_engine.kernels._device import capability as _devcap
 from miniworld_engine.modules.functional import dropout_scale, inverse_length, sigmoid_gate
 from miniworld_engine.modules.norm import LayerNorm, RMSNorm
 from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWeights, master_autocast, pair_inputs, wide
@@ -284,7 +285,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
         prov = _anthropic.load("opt_core.kernels.triattn")
         return prov, _anthropic.kernel_selection(
             prov,
-            "{}.{}".format(*torch.cuda.get_device_capability(pair.device)),
+            "{}.{}".format(*_devcap(pair.device)),
             {torch.bfloat16: "bf16", torch.float32: "fp32"}[pair.dtype],
             self._head_dim(),
             self.n_head,
@@ -421,7 +422,7 @@ class _TriangleAttentionBase(BackendModule, MasterWeights):
 
             why = bidir_triattn_h100.single_refusal(self, pair, mask)
             return (None, why) if why is not None else ("bias_only", None)
-        cap = torch.cuda.get_device_capability(pair.device)
+        cap = _devcap(pair.device)
         if cap == (10, 0):  # B200: the sm_100a kernels (kernels/integrations/triattn_b200)
             return self._cuda_route_sm100(pair, mask)
         if cap in ((8, 0), (12, 0)):  # A100, or the RTX 5090: the same sm_80 sources built for sm_120a
@@ -1250,7 +1251,7 @@ def _trimul_cuda_route(module, pair, mask, dropout_p, *, bidirectional: bool) ->
     ``(None, reason)``. bf16 only (the H100 TriMul policy: no fp32 TriMul kernel). Shapes / dtypes / flags only."""
     if not pair.is_cuda:
         return None, "the kernels run on CUDA tensors only"
-    cap = torch.cuda.get_device_capability(pair.device)
+    cap = _devcap(pair.device)
     if cap in ((8, 0), (12, 0)):  # A100 and RTX 5090: the sm_80 sources (built for sm_120a on the 5090)
         return _trimul_cuda_route_sm80(module, pair, mask)
     if cap == (10, 0):  # B200: the sm_100a kernels (kernels/integrations/trimul_b200)
@@ -1625,7 +1626,7 @@ class TriangleMultiplication(_TriangleMultiplicationBase):
         from miniworld_engine.modules import _anthropic
 
         prov = _anthropic.load("opt_core.kernels.trimul")
-        cc = torch.cuda.get_device_capability(pair.device)
+        cc = _devcap(pair.device)
         return prov, _anthropic.kernel_selection(
             prov,
             "{}.{}".format(*cc),
@@ -1725,7 +1726,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     # (2026-11-12): the training row-dropout scale by the H100 Philox kernel, the small-L inference tiles of the TriMul table; cuda:h100_sm90 3 (2026-11-13): fp32-master weight casts once per parameter version
 
     def _supports_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> str | None:
-        if pair.is_cuda and torch.cuda.get_device_capability(pair.device) not in ((9, 0), (8, 0), (12, 0), (10, 0)):
+        if pair.is_cuda and _devcap(pair.device) not in ((9, 0), (8, 0), (12, 0), (10, 0)):
             return "the RF3 length factor is wired to the H100 (sm_90a) / A100 (sm_80) / RTX 5090 (sm_120a) / B200 (sm_100a) TriMul kernels only"
         one = pair[:1] if mask is not None and pair.shape[0] > 1 else pair  # per-sample launches: one sample's contract
         return _trimul_cuda_route(self, one, None if mask is None else mask[: one.shape[0]], dropout_p, bidirectional=False)[1]
@@ -1733,7 +1734,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
     def _forward_cuda(self, pair: torch.Tensor, mask: torch.Tensor | None = None, dropout_p: float | None = None) -> torch.Tensor:
         if self.dead and not (self.training or torch.is_grad_enabled()):
             return pair
-        if pair.shape[0] == 1 and pair.shape[-1] <= 128 and torch.cuda.get_device_capability(pair.device) == (10, 0):
+        if pair.shape[0] == 1 and pair.shape[-1] <= 128 and _devcap(pair.device) == (10, 0):
             # B200, one sample, D64 / D128: the factor is formed with the weight forms in one launch from the token mask (b200_train
             # forms_rf3_op: bf16(1 / n) times W_l as the reference's product, W_l's gradient scaled by it) -- 2026-11-17
             route = _trimul_cuda_route(self, pair, mask, dropout_p, bidirectional=False)[0]
@@ -1747,7 +1748,7 @@ class TriangleMultiplicationRF3(_TriangleMultiplicationBase):
         from miniworld_engine.kernels.integrations import trimul_h100
 
         p = self.p_drop if dropout_p is None else dropout_p
-        b200 = torch.cuda.get_device_capability(pair.device) == (10, 0)
+        b200 = _devcap(pair.device) == (10, 0)
         if b200:  # B200: the reference's torch draw (no H100 Philox kernel on sm_100a), compare / cast / divide fused
             from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import dropout_scale as b200_drop
 

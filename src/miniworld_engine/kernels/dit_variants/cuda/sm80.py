@@ -135,6 +135,7 @@ def _dev(t: torch.Tensor) -> int:
     return t.device.index if t.device.index is not None else torch.cuda.current_device()
 
 
+@functools.lru_cache(maxsize=32)
 def _sms(d: int) -> int:
     return torch.cuda.get_device_properties(d).multi_processor_count
 

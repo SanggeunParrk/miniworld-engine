@@ -16,6 +16,7 @@ from einops import rearrange, repeat
 
 from miniworld_engine import bias_logits as _bias_logits
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels._device import capability as _devcap
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, RMSNorm, _activation_dtype_reason, _wants_grad, triton_unsupported
 from miniworld_engine.modules.primitives import BackendModule, Linear, MasterWeights, key_mask, master_autocast, random_input
@@ -413,7 +414,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
             # the training Functions keep the bias inside their passes and return no gradient for an additive logit term ("triton" does)
             return "extra_pair_bias with a gradient: the cuda backend folds it into the inference ops' bias planes only (eval)"
         padded = not grad and single.shape[1] % 128 != 0  # inference pads L to a multiple of 128 (``_forward_cuda``)
-        if single.is_cuda and torch.cuda.get_device_capability(single.device) in _SM80_BUILDS:  # A100, or the RTX 5090 (sm_120a build)
+        if single.is_cuda and _devcap(single.device) in _SM80_BUILDS:  # A100, or the RTX 5090 (sm_120a build)
             from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
             if extra_pair_bias is not None:  # the fused C++ step makes its bias inside the step: the composed path, whose bias is a tensor
@@ -425,7 +426,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
     def _pads(self, single, pair, mask, extra_pair_bias) -> bool:
         """Whether a ``cuda`` inference call at L % 128 != 0 runs padded: H100 always (its kernels take whole 128-token tiles); A100 on the
         composed path (extra_pair_bias, or what the fused C++ step refuses; the step itself takes any L)."""
-        if torch.cuda.get_device_capability(single.device) not in _SM80_BUILDS:  # (the RTX 5090 runs the A100 sources)
+        if _devcap(single.device) not in _SM80_BUILDS:  # (the RTX 5090 runs the A100 sources)
             return True
         from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
@@ -435,7 +436,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
     def _reads_ragged(single) -> bool:
         """H100 bf16 inference takes a ragged L (L % 128 != 0) as it is: the pair pass writes the real block of the padded bias planes
         (``kernels.augmented_attention.cuda.apb.pair_bias_padded``), so the call pads only single / mask -- never the [L, L, d_pair] pair."""
-        return single.dtype != torch.float32 and torch.cuda.get_device_capability(single.device) == (9, 0)
+        return single.dtype != torch.float32 and _devcap(single.device) == (9, 0)
 
     def _cuda_grad(self, single, pair, extra_pair_bias=None) -> bool:
         return torch.is_grad_enabled() and (
@@ -461,7 +462,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
             # call runs at the next multiple of 128 -- zero single rows and pair entries, the pad keys masked (-inf: no weight), the pad
             # query rows dropped. Every real row attends over the same keys with the same logits as unpadded.
             lp = -(-L // 128) * 128
-            if torch.cuda.get_device_capability(single.device) in _SM80_BUILDS:
+            if _devcap(single.device) in _SM80_BUILDS:
                 # A100 / RTX 5090 (the composed path): the pair stays as it is -- its bias kernel writes the [H, Lp, Lp] planes from the [L, L] pair,
                 # the pad keys masked, the pad query rows 0 -- so only single / mask / extra_pair_bias are padded (no padded pair copy)
                 from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
@@ -469,7 +470,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
                 single_p, _, mask_p, extra_p = _pad_tokens(single, None, mask, extra_pair_bias, lp)
                 extra = None if extra_p is None else _extra_planes(extra_p, single.shape[0], self.n_head, lp)
                 return sm80.update_generic(self, single_p, pair, mask_p, False, extra=extra)[:, :L].contiguous()
-            if torch.cuda.get_device_capability(single.device) == (10, 0) and L % 32 == 0:
+            if _devcap(single.device) == (10, 0) and L % 32 == 0:
                 # B200 (2026-11-17): the pair pass runs at L and its bias planes are padded to lp (planes_fix, with extra_pair_bias in the
                 # same launch): no padded copy of the pair (at L 2976 x d_pair 384 that copy was most of the call)
                 extra = None if extra_pair_bias is None else _extra_planes(extra_pair_bias, single.shape[0], self.n_head, L)
@@ -478,7 +479,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
             return self._forward_cuda(single_p, pair_p, mask_p, extra_p)[:, :L].contiguous()
         # extra_pair_bias (eval only, ``_supports_cuda``): [B, H, L, L] planes added to the kernels' hoisted bias before the core (FoldForge R3)
         extra = None if extra_pair_bias is None else _extra_planes(extra_pair_bias, single.shape[0], self.n_head, single.shape[1])
-        if torch.cuda.get_device_capability(single.device) in _SM80_BUILDS:
+        if _devcap(single.device) in _SM80_BUILDS:
             from miniworld_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
 
             if extra is not None:
@@ -527,7 +528,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
             cell,
             _anthropic.kernel_selection(
                 prov,
-                tuple(torch.cuda.get_device_capability(single.device)),
+                tuple(_devcap(single.device)),
                 dt,
                 cell,
                 int(single.shape[1]),
@@ -547,7 +548,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
         # no producer cell for this geometry: the producer boundary's stock row by name (a cell-less tier word would name the CORE's stock row)
         word = "fast" if cell is not None else prov.STOCK_OF_BOUNDARY["producer"]
         return _anthropic.kernel_selection(
-            prov, tuple(torch.cuda.get_device_capability(pair.device)), pair.dtype, cell, int(pair.shape[1]), word=word, c_z=c, heads=h
+            prov, tuple(_devcap(pair.device)), pair.dtype, cell, int(pair.shape[1]), word=word, c_z=c, heads=h
         )
 
     def _anthropic_producer_params(self):
@@ -865,7 +866,7 @@ class AugmentedAttentionPairBias(BackendModule):
         if compute_dtype is not None:
             query, key, value, bias = (t.to(compute_dtype) for t in (query, key, value, bias))
         # B200 (2026-11-17): dbias as the head-major view (no sum over A = 1, no transposing copy), as the A100 / H100 always had it
-        b200 = query.is_cuda and torch.cuda.get_device_capability(query.device) == (10, 0)
+        b200 = query.is_cuda and _devcap(query.device) == (10, 0)
         return _triton_core(query, key, value, bias, mask, head_major=b200)
 
     def _supports_triton(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:

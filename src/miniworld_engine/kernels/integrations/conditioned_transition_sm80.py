@@ -21,6 +21,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._device import capability as _devcap
 from miniworld_engine.kernels._nvcc import build_failed
 from miniworld_engine.kernels.integrations.adaln_sm80 import (
     WIDTHS,
@@ -84,10 +85,10 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
         return False
     if any(w.bias is not None for w in (module.expand_a, module.expand_b, module.squeeze)):
         return False
-    if torch.cuda.get_device_capability(x.device) not in ((8, 0), (12, 0)):  # A100, or the RTX 5090 (the same sources built for sm_120a)
+    if _devcap(x.device) not in ((8, 0), (12, 0)):  # A100, or the RTX 5090 (the same sources built for sm_120a)
         return False
     up = _up(module)  # Boltz-2's up-gated transition: inference on the RTX 5090 (the A100 keeps the module's own statements)
-    if up is not None and (grad or is_identity(ada) or up.bias is not None or torch.cuda.get_device_capability(x.device) != (12, 0)):
+    if up is not None and (grad or is_identity(ada) or up.bias is not None or _devcap(x.device) != (12, 0)):
         return False
     # update() expands shared conditioning in autograd before the training
     # launch, so its gradient is reduced back to the shared input shape.

@@ -30,6 +30,7 @@ import torch.nn as nn
 from torch.multiprocessing.reductions import StorageWeakRef
 
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels._device import capability as _devcap
 from miniworld_engine.modules.norm import IdentityAdaptiveLayerNorm
 from miniworld_engine.modules.transition import ConditionedTransition, UpGatedConditionedTransition
 
@@ -170,18 +171,18 @@ def _eps_reason(module) -> str | None:
 
 def _a100(single) -> bool:
     """An A100 (sm_80) or an RTX 5090 (sm_120a builds of the same sm_80 sources, ``kernels/_sm120.py``)."""
-    return single.is_cuda and torch.cuda.get_device_capability(single.device) in ((8, 0), (12, 0))
+    return single.is_cuda and _devcap(single.device) in ((8, 0), (12, 0))
 
 
 def _atom_sm80(single) -> bool:
     """The cards of the ATOM variants' sm_80 path: A100, RTX 5090 and the B200 (sm_100a builds of the same sources,
     ``kernels/_sm120.building_sm100``; card ``b200_sm100``). The token variants keep :func:`_a100`."""
-    return single.is_cuda and torch.cuda.get_device_capability(single.device) in ((8, 0), (12, 0), (10, 0))
+    return single.is_cuda and _devcap(single.device) in ((8, 0), (12, 0), (10, 0))
 
 
 def _card(single) -> str:
     """The card the sm_80 paths run on, for refusal reasons."""
-    cc = torch.cuda.get_device_capability(single.device)
+    cc = _devcap(single.device)
     if cc == (10, 0):
         return "B200 (sm_100a build of the sm_80 path)"
     return "RTX 5090 (sm_120a build of the sm_80 path)" if cc == (12, 0) else "A100"
@@ -193,7 +194,7 @@ def _call_reason(module, single, cond, pair, mask, *, a100: bool = False) -> str
     if _a100(single) or (a100 and _atom_sm80(single)):
         if not a100:
             return f"{_card(single)}: this call has no sm_80 path"
-    elif torch.cuda.get_device_capability(single.device) != (9, 0):
+    elif _devcap(single.device) != (9, 0):
         return "the H100 (sm_90) kernels only"
     if torch.is_autocast_enabled("cuda") and (torch.get_autocast_dtype("cuda") != _BF or single.dtype != _BF):
         # the master-weight layout (fp32 parameters, bf16 activations under bf16 autocast) is served, as the pre-redesign engine did
@@ -444,7 +445,7 @@ class VariantAtomCuda:
 
     @staticmethod
     def _h100(single) -> bool:
-        return single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0)
+        return single.is_cuda and _devcap(single.device) == (9, 0)
 
     def _b200_tc(self, single, cond, pair, mask, uid) -> bool:
         """B200 (2026-11-17): the one-AdaLN variant block on the tcgen05 local atom block (``integrations/local_dit_b200``, its variant

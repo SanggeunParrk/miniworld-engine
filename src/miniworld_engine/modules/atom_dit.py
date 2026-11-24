@@ -64,6 +64,7 @@ from pydantic import BaseModel
 from torch.utils.checkpoint import checkpoint_sequential
 
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels._device import capability as _devcap
 from miniworld_engine.modules import _anthropic
 from miniworld_engine.modules.attention import (
     AugmentedAttentionPairBias,
@@ -102,24 +103,24 @@ _BF, _F32 = torch.bfloat16, torch.float32
 
 def _h100(t: torch.Tensor) -> bool:
     """A CUDA tensor on an H100 (sm_90): the device the ``"cuda"`` backends' hand-written kernels are built for."""
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (9, 0)
+    return t.is_cuda and _devcap(t.device) == (9, 0)
 
 
 def _a100(t: torch.Tensor) -> bool:
     """A CUDA tensor on an A100 (sm_80) or an RTX 5090 (sm_120a builds of the same sources, ``kernels/_sm120.py``): the cards of the
     ``"cuda"`` backends' sm_80 paths (``kernels/integrations/*_sm80.py``)."""
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0))
+    return t.is_cuda and _devcap(t.device) in ((8, 0), (12, 0))
 
 
 def _local_sm80(t: torch.Tensor) -> bool:
     """The cards of the block-local atom DiTs' sm_80 paths: A100, RTX 5090 (sm_120a builds) and the B200 (sm_100a builds of the same
     sources, ``kernels/_sm120.building_sm100``; card ``b200_sm100``)."""
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0), (10, 0))
+    return t.is_cuda and _devcap(t.device) in ((8, 0), (12, 0), (10, 0))
 
 
 def _sm120(t: torch.Tensor) -> bool:
     """A CUDA tensor on an RTX 5090 (sm_120a): where an sm_80 path cannot take its fused kernels (99 KB of shared memory per block)."""
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (12, 0)
+    return t.is_cuda and _devcap(t.device) == (12, 0)
 
 
 class _A100View:
@@ -643,7 +644,7 @@ class _LocalAtomDiT(BackendModule):
     def _provider_selection(self, single):
         provider = _anthropic.load("opt_core.kernels.apb")
         h, c = self.attention.n_head, single.shape[-1]
-        cc = tuple(torch.cuda.get_device_capability(single.device))
+        cc = tuple(_devcap(single.device))
         dt = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else single.dtype
         return _anthropic.kernel_selection(
             provider,
@@ -1846,7 +1847,7 @@ class AtomDiTMiniWorld(BackendModule):
             return self._a100_reason(x, cond, attention_params)
         if b200(x):
             return self._b200_reason(x, cond, attention_params)
-        if not x.is_cuda or torch.cuda.get_device_capability(x.device) != (9, 0):
+        if not x.is_cuda or _devcap(x.device) != (9, 0):
             return "the H100 (sm_90) kernels only"
         if len(attention_params) != 6:
             return "attention_params must be the 6-tuple of build_attention_params"

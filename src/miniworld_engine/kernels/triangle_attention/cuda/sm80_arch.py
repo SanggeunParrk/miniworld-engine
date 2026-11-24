@@ -11,6 +11,8 @@ import os
 
 import torch
 
+from miniworld_engine.kernels._device import capability as _devcap
+
 #: max dynamic shared memory per block on the RTX 5090 (cudaDevAttrMaxSharedMemoryPerBlockOptin, measured)
 SM120_SMEM = 101376
 
@@ -18,7 +20,7 @@ SM120_SMEM = 101376
 def _device_is_sm120() -> bool | None:
     if not torch.cuda.is_available():
         return None
-    return torch.cuda.get_device_capability(torch.cuda.current_device()) == (12, 0)
+    return _devcap(torch.cuda.current_device()) == (12, 0)
 
 
 def sm120_build() -> bool:
@@ -36,11 +38,11 @@ def sm120_build() -> bool:
 
 def is_card(index: int) -> bool:
     """The device runs the sm_80 TriangleAttention path: an A100 (8.0) or an RTX 5090 (12.0)."""
-    return torch.cuda.get_device_capability(index) in ((8, 0), (12, 0))
+    return _devcap(index) in ((8, 0), (12, 0))
 
 
 def is_sm120(index: int) -> bool:
-    return torch.cuda.get_device_capability(index) == (12, 0)
+    return _devcap(index) == (12, 0)
 
 
 def name(base: str) -> str:
@@ -59,4 +61,4 @@ def gencode() -> list[str]:
 
 def on_sm120(t: torch.Tensor) -> bool:
     """``t`` is a CUDA tensor on an RTX 5090."""
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (12, 0)
+    return t.is_cuda and _devcap(t.device) == (12, 0)

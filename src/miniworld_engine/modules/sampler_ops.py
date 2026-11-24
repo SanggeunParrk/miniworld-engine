@@ -9,6 +9,7 @@ from typing import ClassVar
 
 import torch
 
+from miniworld_engine.kernels._device import capability as _devcap
 from miniworld_engine.modules import _anthropic
 from miniworld_engine.modules.functional import align_euler, augment_noise, pool_atoms
 from miniworld_engine.modules.primitives import BackendModule, random_input
@@ -18,7 +19,7 @@ def _cuda_h100(device: torch.device) -> str | None:
     """Why the hand-written CUDA kernels cannot run on ``device`` (they are built for the H100, sm_90a, the A100, sm_80, the RTX 5090, sm_120a: the sm_80 source, and the B200, sm_100a: the H100 source), or ``None``."""
     if device.type != "cuda":
         return "the kernels run on CUDA tensors only"
-    cc = torch.cuda.get_device_capability(device)
+    cc = _devcap(device)
     if cc not in ((9, 0), (8, 0), (12, 0), (10, 0)):
         return f"the CUDA kernels are the H100 (sm_90a), A100 (sm_80), RTX 5090 (sm_120a) and B200 (sm_100a) builds, got sm_{cc[0]}{cc[1]}"
     return None
@@ -26,7 +27,7 @@ def _cuda_h100(device: torch.device) -> str | None:
 
 def _sm80_class(device: torch.device) -> bool:
     """A100 / RTX 5090: the cards of the sm_80 sources."""
-    return device.type == "cuda" and torch.cuda.get_device_capability(device) in ((8, 0), (12, 0))
+    return device.type == "cuda" and _devcap(device) in ((8, 0), (12, 0))
 
 
 def _fp32_cuda(name: str, t: torch.Tensor, ndim: int, shape: tuple | None = None) -> str | None:

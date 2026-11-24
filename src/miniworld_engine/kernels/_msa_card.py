@@ -13,6 +13,8 @@ from collections.abc import Iterator
 
 import torch
 
+from miniworld_engine.kernels._device import capability as _devcap
+
 _SM80_LITERAL = "-gencode=arch=compute_80,code=sm_80"
 _SM120_LITERAL = "-gencode=arch=compute_120a,code=sm_120a"
 DEFINE = "-DMWE_SM120=1"
@@ -34,7 +36,7 @@ def sm120() -> bool:
     """The builds are the RTX 5090's (sm_120a)."""
     if _FORCED:
         return _FORCED[-1] == "sm120"
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 0)
+    return torch.cuda.is_available() and _devcap() == (12, 0)
 
 
 def name(base: str) -> str:
@@ -63,7 +65,7 @@ def cflags(flags: list[str]) -> list[str]:
 
 def device_ok(t: torch.Tensor) -> bool:
     """A CUDA tensor on an A100 (8.0) or an RTX 5090 (12.0): the cards these builds serve."""
-    return t.is_cuda and torch.cuda.get_device_capability(t.device) in ((8, 0), (12, 0))
+    return t.is_cuda and _devcap(t.device) in ((8, 0), (12, 0))
 
 
 def prebuild_sm120(rows_opm: bool = True, rows_pwa: bool = True, rows_chai: bool = True, rows_wide: bool = True):

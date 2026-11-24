@@ -43,6 +43,7 @@ import torch.nn.functional as F
 from miniworld_engine.kernels import _capture, _sm120
 from miniworld_engine.kernels import ieee_f32 as _ieee
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._device import capability as _devcap
 from miniworld_engine.kernels._nvcc import build_failed
 
 BF = torch.bfloat16
@@ -276,7 +277,7 @@ def _hoist_token_bias(save: bool, batch: int, mask_kind: int, heads: int, padded
         and not (torch.is_grad_enabled() and pair.requires_grad)
         and heads * padded * padded * dt.itemsize <= TOKEN_BIAS_HOIST_MAX_BYTES
         and os.environ.get("MINIWORLD_TOKEN_BIAS_HOIST", "1") != "0"
-        and torch.cuda.get_device_capability(pair.device) in ((8, 0), (12, 0))  # A100 and RTX 5090 (same sources, sm_120a; 5090 measured 2026-11-23: cuda:5090_sm120 bumped)
+        and _devcap(pair.device) in ((8, 0), (12, 0))  # A100 and RTX 5090 (same sources, sm_120a; 5090 measured 2026-11-23: cuda:5090_sm120 bumped)
     )
 
 

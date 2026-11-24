@@ -23,6 +23,7 @@ import os
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._device import capability as _devcap
 from miniworld_engine.kernels.integrations import adaln_sm80 as _ad
 from miniworld_engine.kernels.integrations import augattn_sm80 as _aa
 from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as _ct
@@ -35,7 +36,7 @@ def serves(block, single: torch.Tensor, cond: torch.Tensor, grad: bool) -> bool:
     the sigmoid form of one LayerNorm epsilon."""
     if grad or os.environ.get("MINIWORLD_TOKEN_COND_PACK", "1") == "0":
         return False
-    if torch.cuda.get_device_capability(single.device) != (8, 0):  # measured and tested on the A100 only; the RTX 5090 keeps its unpacked path (cuda:5090_sm120 unchanged)
+    if _devcap(single.device) != (8, 0):  # measured and tested on the A100 only; the RTX 5090 keeps its unpacked path (cuda:5090_sm120 unchanged)
         return False
     if single.dtype is not BF or cond.dtype is not BF or single.ndim != 4 or single.shape[1] != 1 or cond.ndim != 4:
         return False
