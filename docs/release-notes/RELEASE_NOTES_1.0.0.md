@@ -21,13 +21,13 @@ Everything that enters a prebuilt kernel's key or is compiled into a binary: eve
 ## Verification
 
 ```
-65ad5c9912cb124026dc2d7bc1044b2c1971f1baff30592986c243d3a2bced6c  foldjet_engine-1.0.0-py3-none-any.whl
+079637a7da53c4de116e143b364881e9f073ab654f1674a20ac8b8448e23cb99  foldjet_engine-1.0.0-py3-none-any.whl
 2e1482e3937651d9da76b0152c9c5c79a5dd7d028235b62e44c5a8b7ef00d9f9  foldjet_engine_kernels_sm100_cu129-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
 3c62a8b710de541368c149a4a8f18b58600ec5eed6bd2b045668663ce2403981  foldjet_engine_kernels_sm100_cu129_part2-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
 300898a56be9de006139c0fd31170c6f5405a91e18d0c34dd1fe42573018aadb  foldjet_engine_kernels_sm120_cu129-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
 c4e225cbd0cfd8bc046edc11610369d5e4417e3548f98e4ab836ee05f9e788b6  foldjet_engine_kernels_sm80_cu129-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
 2d4351cd362b060dd70b3583284ef00f69ed218258c40fcaed2bbb4d7e547ccb  foldjet_engine_kernels_sm90_cu129-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
-c292432dbafa1c0068cc32fbf3bba1cdb4be3b760aae62a64590d37d11f5cd3e  foldjet_engine-1.0.0.tar.gz
+82e0376323c9c8d35f4418be4c9cf29570caea40a3a8ea7b1269614ae01a2ca3  foldjet_engine-1.0.0.tar.gz
 ```
 
 - H100, installed wheels (empty site directory, no repo, no nvcc, empty JIT cache): 581 / 581 sm90 artifacts resolved from `foldjet_engine/_prebuilt`, 0 compiled, JIT cache empty; `import miniworld_engine.kernels._nvcc is foldjet_engine.kernels._nvcc`: True; capture API imports.
