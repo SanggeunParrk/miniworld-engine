@@ -1,5 +1,5 @@
 """A100: pwa_sm80 past L 2048 -- accuracy vs a chunked fp64 gold and time vs the pytorch / triton backends (same process, A-B-A-B, CUDA graph, L2 flush).
-usage: python pwa_long_bench.py d_msa d_pair d_hidden L [L ...]   (one line per case, flushed)"""
+usage: python tools/bench/pwa_long_bench.py d_msa d_pair d_hidden L [L ...]   (one line per case, flushed)"""
 
 import copy
 import sys

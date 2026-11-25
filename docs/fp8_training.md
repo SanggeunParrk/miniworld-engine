@@ -192,7 +192,7 @@ clear them for real models.
 Base: `fp8t2/tokendit` (round 2: `nox` / `hsave` byte reductions, behind `MINIWORLD_TOKEN_DIT_FP8_TRAIN`) merged with origin/main 3.0.1 (shared
 conditioning on L rows, pair bias on the APB kernels). The baseline is now the 3.0.1 default (A48 L384 3.03 ms; it was 3.43 ms on 2.5.14).
 Training placements live in `token_dit_fp8_train.py`, separate from the inference gate `token_dit_fp8.active()`.
-Scripts: `tools/fp8_train_bench/` (`speed.py`, `run.sh`); raw rows `~/miniworld-engine-scratch/fp8t3-tokendit/res/`.
+Scripts: `tools/fp8_train/tokendit/` (`speed.py`, `run.sh`); raw rows `~/miniworld-engine-scratch/fp8t3-tokendit/res/`.
 
 Placements: `nox` (no fp32 residual copy: the backward reads the block input) and `hsave` (the forward keeps h; swiglu_bwd does not rewrite it)
 are byte reductions, bit-identical (no FP8; the fp64 error table below shows identical numbers); `expand` / `squeeze` are the e4m3 forward GEMMs.
@@ -258,7 +258,7 @@ round; the e4m3 `expand` is the placement that the inference `safe` preset alrea
 ## Token DiT round 4 (branch `fp8t4/tokendit`): bytes, finer scales, fused cast, real end-level check
 
 Base `fp8t3/tokendit` (71d7d86d4). Scripts `~/miniworld-engine-scratch/fp8t4-tokendit/{scripts,res,ft}`; same-process CUDA-graph timing as round 3
-(`tools/fp8_train_bench/`), baseline = the 3.0.1 default. H100 node01 / node02, 2026-11-19.
+(`tools/fp8_train/tokendit/`), baseline = the 3.0.1 default. H100 node01 / node02, 2026-11-19.
 
 ### (1) Byte ledger (default route, bf16 master, 3.0.1)
 
@@ -585,11 +585,11 @@ Everything below is opt-in (`MINIWORLD_OPM_FP8_TRAIN=e4m3`), default OFF; with t
   restored in round 3).
 - shape gate `MIN_L_BY_CZ` (served only where the step is faster, see below): d128 from L128, d256 from L256, d384 from L384, d512 never.
   `MAX_CZ = 0` turns the gate off (benchmarks / tests).
-- `tools/bench_opm_fp8_train.py` (ready to run, see its docstring).
+- `tools/fp8_train/opm_step_bench.py` (ready to run, see its docstring).
 
 ### Step time vs the 3.0.1 default (CUDA graph fwd + bwd, same process, interleaved, same-cubin control, S 1024 unless noted)
 
-`tools/bench_opm_fp8_train.py`, raw `scratch fp8t3/res/bench_final.jsonl`. Cells = e4m3 / default, `cool / sustained`; ctl = default again (same cubin),
+`tools/fp8_train/opm_step_bench.py`, raw `scratch fp8t3/res/bench_final.jsonl`. Cells = e4m3 / default, `cool / sustained`; ctl = default again (same cubin),
 its sustained ratio shows the run-to-run + thermal order bias (1.00-1.04): read the sustained column against ctl.
 
 | d_msa/d_pair | order | L | default ms (cool) | ctl cool / sus | e4m3 cool / sus | served by gate |
