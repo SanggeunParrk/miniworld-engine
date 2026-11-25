@@ -32,7 +32,7 @@ def _fill(m: torch.nn.Module, seed: int) -> None:
 
 
 def _off() -> dict:
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     return {k: v for k, v in fp8.status().items() if k != "guard"}
 
@@ -41,13 +41,13 @@ _OFF = {"triattn": {"pv": [], "qk": False}, "trimul": None, "opm": None, "pwa": 
 
 
 def _case(kind: str):
-    from miniworld_engine.modules.transition import Transition
-    from miniworld_engine.modules.triangle import TriangleMultiplication
+    from foldjet_engine.modules.transition import Transition
+    from foldjet_engine.modules.triangle import TriangleMultiplication
 
     n, d = 256, 128
     g = torch.Generator(device="cuda").manual_seed(1)
     if kind == "trimul":
-        from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as route
+        from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as route
 
         m = TriangleMultiplication(d, outgoing=True, master_weights=True, backend="cuda")
         x = torch.randn(1, n, n, d, device="cuda", generator=g).bfloat16()
@@ -55,7 +55,7 @@ def _case(kind: str):
         mask[0, n - 20 :] = False
         args = (x, mask)
     else:
-        from miniworld_engine.kernels.transition.cuda import fp8_sm90a as route
+        from foldjet_engine.kernels.transition.cuda import fp8_sm90a as route
 
         m = Transition(d, 4, master_weights=True, backend="cuda")
         args = (torch.randn(1, n, n, d, device="cuda", generator=g).bfloat16(),)
@@ -89,10 +89,10 @@ def test_engine_fp8_composite_and_default_bytes() -> None:
     """A Pairformer block selected as engine-fp8 runs its parts' FP8 routes; a block on cuda (same weights) in the same process gives the
     same bytes before and after it, and takes no FP8 route."""
     _needs_h100()
-    from miniworld_engine import fp8
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as tr
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as tm
-    from miniworld_engine.modules.pairformer import PairformerBlock, PairformerConfig
+    from foldjet_engine import fp8
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as tr
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as tm
+    from foldjet_engine.modules.pairformer import PairformerBlock, PairformerConfig
 
     cfg = PairformerConfig(d_pair=128, model="af3")
     a = PairformerBlock(cfg, master_weights=True, backend="cuda")

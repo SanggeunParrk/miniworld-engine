@@ -6,8 +6,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import TokenPairInit, TriangleAttentionAF3, TriangleAttentionChai1
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import TokenPairInit, TriangleAttentionAF3, TriangleAttentionChai1
 
 pytestmark = [
     pytest.mark.gpu,
@@ -58,7 +58,7 @@ def test_token_pair_init_persistent_forward_matches_reference(length: int) -> No
 
 @pytest.mark.parametrize("length", [128, 256])
 def test_rf3_gate_bias_folded_into_the_front_shift(length: int, monkeypatch: pytest.MonkeyPatch) -> None:
-    from miniworld_engine.modules import TriangleAttentionRF3
+    from foldjet_engine.modules import TriangleAttentionRF3
 
     module = TriangleAttentionRF3(d_pair=64, d_hidden=256, n_head=4, starting=True, p_drop=0.0, master_weights=True).cuda().float()
     C.randomize(module, torch.Generator(device="cuda").manual_seed(0))
@@ -83,7 +83,7 @@ def test_rf3_gate_bias_folded_into_the_front_shift(length: int, monkeypatch: pyt
 def test_rf3_d128_front_split_into_two_gemms(length: int, starting: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     """s5090/four: inference at D 128 with four 32-channel heads runs q | k | v | g (N 512) and the bias heads (N 8) as two GEMMs on ``ln_rows``' padded rows
     (K = 128): within the bf16 rounding of the folded shift of the single K = 136 / N = 520 GEMM, and no further from the reference than it."""
-    from miniworld_engine.modules import TriangleAttentionRF3
+    from foldjet_engine.modules import TriangleAttentionRF3
 
     module = TriangleAttentionRF3(d_pair=128, n_head=4, starting=starting, p_drop=0.0, master_weights=True).cuda().float()
     C.randomize(module, torch.Generator(device="cuda").manual_seed(0))

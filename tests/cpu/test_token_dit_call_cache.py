@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels import _capture
-from miniworld_engine.kernels.integrations import token_dit as integ
-from miniworld_engine.modules.token_dit import _CALL_CACHE, TokenDiTProtenix, _call_cache, _kernel_view
+from foldjet_engine.kernels import _capture
+from foldjet_engine.kernels.integrations import token_dit as integ
+from foldjet_engine.modules.token_dit import _CALL_CACHE, TokenDiTProtenix, _call_cache, _kernel_view
 
 
 def _block() -> TokenDiTProtenix:

@@ -11,10 +11,10 @@
 import pytest
 import torch
 
-from miniworld_engine.kernels.integrations import pwa_train as PT
-from miniworld_engine.kernels.integrations import pwa_wide as PW
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import MSAPairWeightedAveraging
+from foldjet_engine.kernels.integrations import pwa_train as PT
+from foldjet_engine.kernels.integrations import pwa_wide as PW
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import MSAPairWeightedAveraging
 
 pytestmark = [pytest.mark.gpu]
 

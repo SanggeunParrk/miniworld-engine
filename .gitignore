@@ -18,7 +18,7 @@ dist/
 # built kernels and profiler dumps (the prebuilder writes to ~/.cache/miniworld_engine_jit; a release bundle is added by the wheel build)
 *.so
 *.cubin
-src/miniworld_engine/_prebuilt/
+src/foldjet_engine/_prebuilt/
 *.nsys-rep
 *.ncu-rep
 *.sqlite

@@ -10,11 +10,11 @@
 import pytest
 import torch
 
-from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as H
-from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm_lt_uni as U
-from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as PORT
-from miniworld_engine.kernels.trimul_inproj.cuda import h100_inference as HI
-from miniworld_engine.modules.triangle import TriangleMultiplication as TM
+from foldjet_engine.kernels.trimul_inproj.cuda import _h100_bmm as H
+from foldjet_engine.kernels.trimul_inproj.cuda import _h100_bmm_lt_uni as U
+from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style as PORT
+from foldjet_engine.kernels.trimul_inproj.cuda import h100_inference as HI
+from foldjet_engine.modules.triangle import TriangleMultiplication as TM
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 
@@ -101,8 +101,8 @@ def test_bidirectional_no_mask_off_grid_is_bit_identical_to_nearest_cell(
     d: int, batch: int, length: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The output at an off-grid length is the same with the kernel default (now) as with the nearest cell's tiles (2.5.12)."""
-    from miniworld_engine.kernels import _launch_config as LC
-    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication as BTM
+    from foldjet_engine.kernels import _launch_config as LC
+    from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication as BTM
 
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("needs an H100 (sm_90)")

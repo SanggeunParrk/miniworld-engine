@@ -1,6 +1,6 @@
 import sys, json, torch
 import numpy as np
-from miniworld_engine.modules import triangle as T
+from foldjet_engine.modules import triangle as T
 tag = sys.argv[1]
 res = {}
 for kw, L in [({"d_pair": 64, "n_head": 4, "p_drop": 0.0, "starting": True}, 128), ({"d_pair": 64, "n_head": 2, "p_drop": 0.0, "starting": False}, 256), ({"d_pair": 256, "n_head": 8, "p_drop": 0.0, "starting": True}, 128), ({"d_pair": 64, "n_head": 4, "p_drop": 0.0, "starting": True}, 384)]:

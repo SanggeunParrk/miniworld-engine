@@ -10,9 +10,9 @@ import pytest
 import torch
 from torch.autograd import DeviceType  # pyright: ignore[reportPrivateImportUsage]
 
-from miniworld_engine.kernels import _capture
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import BidirectionalTriangleMultiplication, Transition, TriangleMultiplication
+from foldjet_engine.kernels import _capture
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import BidirectionalTriangleMultiplication, Transition, TriangleMultiplication
 
 pytestmark = [pytest.mark.gpu]
 

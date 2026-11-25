@@ -25,18 +25,18 @@ from portable_helpers import randomize
 from portable_helpers import relative_fp64 as relative
 from portable_helpers import tf32_matmul_flag as tf32
 
-from miniworld_engine import settings
-from miniworld_engine.kernels.integrations import bias_only_dit as INF
-from miniworld_engine.kernels.integrations import bias_only_dit_hoist as HO
-from miniworld_engine.kernels.integrations import bias_only_dit_train as TR
-from miniworld_engine.modules.bias_only_dit import (
+from foldjet_engine import settings
+from foldjet_engine.kernels.integrations import bias_only_dit as INF
+from foldjet_engine.kernels.integrations import bias_only_dit_hoist as HO
+from foldjet_engine.kernels.integrations import bias_only_dit_train as TR
+from foldjet_engine.modules.bias_only_dit import (
     BiasOnlyAttention,
     BiasOnlyDiTBlock,
     pair_bias_all,
 )
-from miniworld_engine.modules.bias_only_dit import hoist as hoist_mod
-from miniworld_engine.modules.bias_only_dit import module as bo_module
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.bias_only_dit import hoist as hoist_mod
+from foldjet_engine.modules.bias_only_dit import module as bo_module
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,
@@ -232,7 +232,7 @@ def test_ln0_backward_rows_against_fp64(R, xdt, odt):
     """ln0_bwd_rows: d x and the dW' operand y (bf16: [hi | lo], hi + lo = LN0 to ~2^-17; fp32: LN0) -- every row written
     (NaN-filled outputs; R off the 16-row block grain), d x within its output rounding of fp64, hi + lo within 3e-5, bit-identical on
     reruns; no local memory. y takes the path's dtype (that of x)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+    from foldjet_engine.kernels.bias_only_dit.cuda import hoist as HK
 
     for name, regs, lmem in HK.kernel_attrs():
         assert lmem == 0, (name, regs, lmem)
@@ -518,7 +518,7 @@ def test_hoisted_block_launches_no_pair_kernels(dtype, n_head, d_head):
     merged into pair_bias_bwd_fin."""
     from tests.cuda_graph_nodes import graph_kernels
 
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     _, fast = stacks(1, n_head, d_head, seed=8)
     blk = fast[0].to(dtype)

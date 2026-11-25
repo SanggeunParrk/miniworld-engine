@@ -17,8 +17,8 @@ def _pre_ref(a, mod, W, bq):
 @pytest.mark.parametrize("M", [32, 1024, 5120])
 @pytest.mark.parametrize("scale,offset", [(1.0, 0.0), (1e-3, 0.0), (40.0, 0.0), (1.0, 25.0)])
 def test_pre_f8(M, scale, offset):
-    from miniworld_engine.kernels.augmented_attention.cuda import b200_atom as R
-    from miniworld_engine.kernels.augmented_attention.cuda.b200_atom import f8
+    from foldjet_engine.kernels.augmented_attention.cuda import b200_atom as R
+    from foldjet_engine.kernels.augmented_attention.cuda.b200_atom import f8
 
     torch.manual_seed(0)
     dev = "cuda"
@@ -41,8 +41,8 @@ def test_pre_f8(M, scale, offset):
 @pytest.mark.parametrize("M", [32, 1024, 5120])
 @pytest.mark.parametrize("scale", [1e-3, 1.0, 40.0])
 def test_post_f8(M, scale):
-    from miniworld_engine.kernels.augmented_attention.cuda import b200_atom as R
-    from miniworld_engine.kernels.augmented_attention.cuda.b200_atom import f8
+    from foldjet_engine.kernels.augmented_attention.cuda import b200_atom as R
+    from foldjet_engine.kernels.augmented_attention.cuda.b200_atom import f8
 
     torch.manual_seed(0)
     dev = "cuda"
@@ -75,8 +75,8 @@ def test_post_f8(M, scale):
 @pytest.mark.parametrize("scale", [1e-3, 1.0, 40.0])
 def test_post_f8_up_gate(M, scale):
     """Boltz-2's up-gated block (``wup``): h = silu(a) b u."""
-    from miniworld_engine.kernels.augmented_attention.cuda import b200_atom as R
-    from miniworld_engine.kernels.augmented_attention.cuda.b200_atom import f8
+    from foldjet_engine.kernels.augmented_attention.cuda import b200_atom as R
+    from foldjet_engine.kernels.augmented_attention.cuda.b200_atom import f8
 
     torch.manual_seed(1)
     dev = "cuda"

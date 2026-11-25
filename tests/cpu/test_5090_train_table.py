@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-KERNELS = Path(__file__).resolve().parents[2] / "src" / "miniworld_engine" / "kernels"
+KERNELS = Path(__file__).resolve().parents[2] / "src" / "foldjet_engine" / "kernels"
 
 KEYS = {
     ("transition", "transition_expand_swiglu_triton"): [

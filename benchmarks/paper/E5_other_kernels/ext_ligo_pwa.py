@@ -41,7 +41,7 @@ def _supports(self, msa, pair, mask=None):
 def _forward(self, msa, pair, mask=None):
     from einops import rearrange
 
-    from miniworld_engine.modules.primitives import master_autocast
+    from foldjet_engine.modules.primitives import master_autocast
 
     if self.dead and not (self.training or torch.is_grad_enabled()):
         return msa
@@ -63,7 +63,7 @@ def _forward(self, msa, pair, mask=None):
 
 
 def install() -> None:
-    from miniworld_engine.modules import msa
+    from foldjet_engine.modules import msa
 
     cls = msa.MSAPairWeightedAveraging
     if NAME not in cls.backends:

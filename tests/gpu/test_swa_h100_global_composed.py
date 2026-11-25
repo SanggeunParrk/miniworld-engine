@@ -9,7 +9,7 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.modules.atom_dit import AtomDiTMiniWorld
+from foldjet_engine.modules.atom_dit import AtomDiTMiniWorld
 
 pytestmark = [pytest.mark.gpu]
 
@@ -23,7 +23,7 @@ def _rel(x: torch.Tensor, gold: torch.Tensor) -> float:
 def test_swa_block_global_bf16_composed(grad, samples):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("the H100 (sm_90) path")
-    from miniworld_engine.kernels.swa_dit import dispatch
+    from foldjet_engine.kernels.swa_dit import dispatch
 
     torch.manual_seed(0)
     m = AtomDiTMiniWorld(half_window=500000).cuda()

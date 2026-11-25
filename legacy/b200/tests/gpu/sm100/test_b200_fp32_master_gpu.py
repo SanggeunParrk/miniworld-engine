@@ -57,9 +57,9 @@ def _r(*shape):
 
 
 def test_trimul_bidirectional_and_outgoing():
-    from miniworld_engine.modules.exceptions import ImplementationType as IT
-    from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
-    from miniworld_engine.modules.triangle_multiplication.bidirectional import (
+    from foldjet_engine.modules.exceptions import ImplementationType as IT
+    from foldjet_engine.modules.triangle_multiplication import TriangleMultiplication
+    from foldjet_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
     )
 
@@ -71,7 +71,7 @@ def test_trimul_bidirectional_and_outgoing():
 
 @pytest.mark.parametrize("d", [64, 128])
 def test_transition_sm100(d):
-    from miniworld_engine.kernels.transition.cuda import fused_sm100a, fused_wide_sm100a
+    from foldjet_engine.kernels.transition.cuda import fused_sm100a, fused_wide_sm100a
 
     class T(torch.nn.Module):
         def __init__(self):
@@ -90,30 +90,30 @@ def test_transition_sm100(d):
 
 
 def test_attention_pair_bias():
-    from miniworld_engine.modules import AttentionPairBias
-    from miniworld_engine.modules.exceptions import ImplementationType as IT
+    from foldjet_engine.modules import AttentionPairBias
+    from foldjet_engine.modules.exceptions import ImplementationType as IT
 
     _check(lambda: AttentionPairBias(384, 128, 16, implementation=IT.MINIWORLD), [_r(1, 256, 384), _r(1, 256, 256, 128)],
            lambda m, v: m(v[0], v[1], None))
 
 
 def test_outer_product_mean():
-    from miniworld_engine.modules import OuterProductMean
-    from miniworld_engine.modules.exceptions import ImplementationType as IT
+    from foldjet_engine.modules import OuterProductMean
+    from foldjet_engine.modules.exceptions import ImplementationType as IT
 
     _check(lambda: OuterProductMean(64, 128, 32, implementation=IT.MINIWORLD), [_r(1, 256, 256, 64)], lambda m, v: m(v[0], None))
 
 
 def test_local_atom_dit():
-    from miniworld_engine.modules.exceptions import ImplementationType as IT
-    from miniworld_engine.modules.local_dit import LocalDiTBlock
+    from foldjet_engine.modules.exceptions import ImplementationType as IT
+    from foldjet_engine.modules.local_dit import LocalDiTBlock
 
     _check(lambda: LocalDiTBlock(128, 128, 16, 4, n=2, cross_attention=True, implementation=IT.MINIWORLD),
            [_r(8, 1, 1024, 128), _r(8, 1, 1024, 128), _r(1, 32, 32, 128, 16)], lambda m, v: m(v[0], v[1], v[2], None))
 
 
 def test_swa_dit_block_and_modulation():
-    from miniworld_engine.kernels.swa_dit.interface import (
+    from foldjet_engine.kernels.swa_dit.interface import (
         refusal,
         swa_dit_block,
         swa_dit_hoist_modulation,
@@ -141,7 +141,7 @@ def test_swa_dit_block_and_modulation():
 def test_token_pair_init_bf16_streams_fp32_weights():
     """A bf16-autocast embedder hands bf16 left / right and fp32 master weights: served, computed in fp32 on the bf16 values,
     the stream gradients bf16 and the weight gradients fp32 and unrounded -- the same numbers as the all-fp32 call on those values."""
-    from miniworld_engine.kernels.token_pair_init import refusal, token_pair_init
+    from foldjet_engine.kernels.token_pair_init import refusal, token_pair_init
 
     g = torch.Generator().manual_seed(0)
     b, l, p = 1, 256, 128
@@ -174,9 +174,9 @@ def test_token_pair_init_bf16_streams_fp32_weights():
 
 
 def test_pair_weighted_averaging():
-    from miniworld_engine.kernels.integrations import pwa_train
-    from miniworld_engine.modules import MSAPairWeightedAveraging
-    from miniworld_engine.modules.exceptions import ImplementationType as IT
+    from foldjet_engine.kernels.integrations import pwa_train
+    from foldjet_engine.modules import MSAPairWeightedAveraging
+    from foldjet_engine.modules.exceptions import ImplementationType as IT
 
     served = pwa_train.STATS["served"]
     _check(lambda: MSAPairWeightedAveraging(64, 128, n_head=8, d_hidden=32, p_drop=0.0, implementation=IT.MINIWORLD),

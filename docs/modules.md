@@ -1,6 +1,6 @@
 # Modules and backends
 
-`miniworld_engine.modules`: one file per op family (see the module docstring of `modules/__init__.py` for the map). Every op is a
+`foldjet_engine.modules`: one file per op family (see the module docstring of `modules/__init__.py` for the map). Every op is a
 `BackendModule` (`modules/primitives.py`).
 
 ## The BackendModule contract
@@ -194,10 +194,10 @@ bound), so it belongs to the model side that loads checkpoints (FoldForge `modul
 other checkpoint conversions. The engine's contract is only the flag: set `module.dead = True` after loading and the module returns its
 input at inference; `False` (the default) runs it. Decision 2026-11-11 (FoldForge request R15: declined, scope).
 
-## Public CUDA-graph capture API (`miniworld_engine.capture`)
+## Public CUDA-graph capture API (`foldjet_engine.capture`)
 
-`miniworld_engine` is a namespace package (no `__init__.py`: the prebuilt kernel wheels install into it), so nothing can be exported
-from the package root; the public capture API is the module `miniworld_engine.capture`:
+`foldjet_engine` is a namespace package (no `__init__.py`: the prebuilt kernel wheels install into it), so nothing can be exported
+from the package root; the public capture API is the module `foldjet_engine.capture`:
 
 | name | meaning |
 |---|---|

@@ -6,8 +6,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine.measure import accuracy
-from miniworld_engine.measure import config as cfgmod
+from foldjet_engine.measure import accuracy
+from foldjet_engine.measure import config as cfgmod
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

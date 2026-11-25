@@ -15,8 +15,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
 
 pytestmark = [pytest.mark.gpu]
 
@@ -34,7 +34,7 @@ def _free_cuda_between_cases():
     gc.collect()
     torch.cuda.empty_cache()
     yield
-    from miniworld_engine.kernels.integrations import bias_only_dit
+    from foldjet_engine.kernels.integrations import bias_only_dit
 
     bias_only_dit._RUNNERS.clear()  # a runner keeps the last hoisted pair-bias P and its (pair, mask) key tensors alive: tens of GiB at these lengths
     gc.collect()
@@ -200,8 +200,8 @@ def test_refuses_what_cannot_fit_in_memory() -> None:
 def test_softmax_rows_two_pass(length: int) -> None:
     """The two-pass rows past the register softmax: bf16 P of fp32 logits (huge, key spread ~500) and fp32 P, masked keys, a fully masked row,
     against the float64 softmax (the fp32 logits are NOT rounded: a bf16 logit would move P by O(1))."""
-    from miniworld_engine.kernels.bias_only_dit import cuda as K
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+    from foldjet_engine.kernels.bias_only_dit import cuda as K
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32
 
     g = torch.Generator(device="cuda").manual_seed(3)
     rows = 64

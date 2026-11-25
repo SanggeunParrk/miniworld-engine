@@ -9,8 +9,8 @@ import inspect
 import pytest
 import torch
 
-from miniworld_engine.autotune.module_registry import ModuleRow, module_rows
-from miniworld_engine.build import bundle_coverage, registry_calls
+from foldjet_engine.autotune.module_registry import ModuleRow, module_rows
+from foldjet_engine.build import bundle_coverage, registry_calls
 
 
 def row(**kw) -> ModuleRow:
@@ -82,7 +82,7 @@ def test_every_row_of_the_real_registry_expands_or_says_why_not():
 
 
 def test_every_declared_module_has_a_builder_case():
-    from miniworld_engine.autotune.builder import cases
+    from foldjet_engine.autotune.builder import cases
 
     names = {c.name for c in cases()}
     assert {r.module for r in module_rows()} <= names
@@ -129,7 +129,7 @@ def test_a_module_the_trunk_runs_both_ways_is_called_in_both_directions():
 
 
 def test_the_default_descriptors_can_be_dealt_to_workers():
-    from miniworld_engine.build import kernel_bundle
+    from foldjet_engine.build import kernel_bundle
 
     default = bundle_coverage.cases("sm90")
     assert len(kernel_bundle._interleave(default)) == len(default)
@@ -145,7 +145,7 @@ def test_the_transition_runs_fp32_on_sm90_and_not_on_the_bf16_only_cards():
 
 
 def test_master_is_a_precision_of_its_own():
-    from miniworld_engine.autotune.module_registry import torch_dtypes
+    from foldjet_engine.autotune.module_registry import torch_dtypes
 
     assert torch_dtypes("master") == (torch.float32, torch.bfloat16)
     assert torch_dtypes("bfloat16") == (torch.bfloat16, torch.bfloat16)
@@ -155,7 +155,7 @@ def test_master_is_a_precision_of_its_own():
 
 
 def test_the_fp32_matmul_precision_switch_acts_on_fp32_calls_only():
-    from miniworld_engine.autotune.builder import switch_applies
+    from foldjet_engine.autotune.builder import switch_applies
 
     assert switch_applies("matmul_precision", "train", "float32")
     assert not switch_applies("matmul_precision", "train", "bfloat16")

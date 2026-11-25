@@ -2,8 +2,8 @@
 # back-to-back time per launch (timing only; probe flags give wrong outputs).  Flag syntax NAME=VAL (VAL optional: NAME alone = -DNAME).
 import sys, statistics
 import torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
-from miniworld_engine.kernels.transition.cuda.fused_sm100a import build_cubins
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.kernels.transition.cuda.fused_sm100a import build_cubins
 SRC = {64: "widths/tfwd_d64.cu", 128: "tr_fwd_sm100.cu", 256: "widths/tfwd_d256.cu"}
 FIRST = {}
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")

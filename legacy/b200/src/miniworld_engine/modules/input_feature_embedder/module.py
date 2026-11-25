@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
 from torch import nn
 
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.exceptions import ImplementationType
 
 #: Reference features per atom: position (3), mask, element, arcsinh(charge).
 N_ATOM_FEATURES = 6
@@ -99,8 +99,8 @@ class InputFeatureEmbedder(nn.Module):
         implementation: ImplementationType = ImplementationType.MINIWORLD,
     ) -> None:
         super().__init__()
-        from miniworld_engine.modules.swa_atom_transformer import SWAAtomTransformer
-        from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
+        from foldjet_engine.modules.swa_atom_transformer import SWAAtomTransformer
+        from foldjet_engine.modules.primitives import LayerNorm, Linear, RMSNorm
 
         if features not in ("legacy", "esmfold2"):
             message = f"features must be 'legacy' or 'esmfold2', got {features!r}"
@@ -160,7 +160,7 @@ class InputFeatureEmbedder(nn.Module):
         atom_mask: Bool[torch.Tensor, "B N"],
     ) -> Float[torch.Tensor, "B N d_atom"]:
         """The atom stream after the transformer and the terminal norm (none for ``"esmfold2"``)."""
-        from miniworld_engine.modules.swa_atom_attention.module import build_attention_params
+        from foldjet_engine.modules.swa_atom_attention.module import build_attention_params
 
         if self.features == "esmfold2":
             projected = self.to_atom_single_cond(atom_single_features_esmfold2(pos, charge, atom_mask, element))

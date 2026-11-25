@@ -1,7 +1,7 @@
 # qs_chk16.py DPAIR NHEAD : QS (TA_QS in the 16 / 32-channel-head cores) vs the old core vs the fp32 pytorch reference, typical weights, big logits, masks
 import sys, torch
-from miniworld_engine.modules import triangle as T
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.modules import triangle as T
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
 DP, NH = int(sys.argv[1]), int(sys.argv[2]); QSMIN = K.QS_MIN_L16 if DP == 64 and NH == 4 else K.QS_MIN_L
 def build(starting, bias_mul=1.0, wqk_mul=1.0, seed=5):
     torch.manual_seed(seed)

@@ -2,8 +2,8 @@
 
     python paper_common/run_measure.py CONFIG.yaml --kind speed --out records/<card>/<stage>.r<k>.jsonl [--ext trifast ds4sci] [selection overrides]
 
-``--kind speed``: miniworld_engine.measure.speed.run (timing graph, L2 flush, warmup / iterations from the config), unchanged;
-``--kind accuracy``: miniworld_engine.measure.accuracy.run (float64 gold, judge light), unchanged; ``--kind memory``: paper_common/memory.py (E6).
+``--kind speed``: foldjet_engine.measure.speed.run (timing graph, L2 flush, warmup / iterations from the config), unchanged;
+``--kind accuracy``: foldjet_engine.measure.accuracy.run (float64 gold, judge light), unchanged; ``--kind memory``: paper_common/memory.py (E6).
 
 Resumable: cases whose records (every backend) are already in ``--out`` are skipped, ``--budget-seconds N`` stops starting new cases after N
 seconds (exit 0, no ``.done`` marker), and ``<out>.done`` marks a finished file (a later call exits at once): chain 10-minute jobs
@@ -50,7 +50,7 @@ def main(argv=None) -> int:
     if not torch.cuda.is_available():
         print("[paper] no CUDA device", file=sys.stderr)
         return 2
-    from miniworld_engine.measure import accuracy, config, speed
+    from foldjet_engine.measure import accuracy, config, speed
 
     t0 = time.time()
     cfg = cfgmod.load(args.config, args)

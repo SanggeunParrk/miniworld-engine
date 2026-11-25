@@ -12,8 +12,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure.config import randomize
-from miniworld_engine.modules.triangle import (
+from foldjet_engine.measure.config import randomize
+from foldjet_engine.modules.triangle import (
     BidirectionalTriangleAttention,
     TriangleAttention,
     TriangleAttentionAF3,
@@ -127,8 +127,8 @@ def test_three_row_core(cls, d, h, kw, train) -> None:
 def test_drop_scale_is_the_torch_draw(p, dim) -> None:
     """The B200 build of the H100 Philox kernel draws the module's dropout scale bit for bit as the torch statements, eager and captured."""
     _needs_b200()
-    from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn
-    from miniworld_engine.modules.functional import dropout_scale
+    from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn
+    from foldjet_engine.modules.functional import dropout_scale
 
     pair = torch.zeros(2, 200, 200, 64, device="cuda", dtype=torch.bfloat16)
     torch.manual_seed(11)
@@ -191,7 +191,7 @@ def test_bias_only_native_ending_kernels(L) -> None:
     """The B200-native ending contractions (``b200_bidir.bo``): O = P V and dV = P^T dO equal the per-head batched GEMMs, dP = sum_c dO
     V^T matches fp64 and is the same bits at every call (cluster reduction in rank order), the row dot matches torch."""
     _needs_b200()
-    from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir
+    from foldjet_engine.kernels.triangle_attention.cuda import b200_bidir
 
     bo = b200_bidir.bo()
     g = torch.Generator(device="cuda").manual_seed(7)

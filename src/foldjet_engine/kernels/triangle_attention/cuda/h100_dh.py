@@ -1,0 +1,283 @@
+"""H100 TriangleAttention inference for what the sm90 kernels (``h100_sm90`` / ``h100_sm90_generic``: heads of 16 / 32 channels, the
+standard output) do not take: heads of 64 channels (Chai-1's trunk, RoseTTAFold3's template stack) and Chai-1's output variants.
+
+    y = LN(pair) (the generic glue kernel; the ending node reads the pair transposed)  ->  q | k | v | g = y W^T and the pair bias
+    (cuBLAS; the bias from the transposed pair or, ``transposed_bias=False``, from the pair as it is; masked keys -inf)  ->  the core
+    (u = sigmoid(g [+ gate bias]) softmax(q k^T / sqrt(d) + bias) v; the key tiles past each sample's last attended key skipped):
+    64-channel heads at L a multiple of 128 on the fp16 wgmma core ``h100_sources/triattn_d64_sm90.cu`` (``ext_d64``: y, q | k | v | g and
+    bias / scale in fp16 from the glue's fp16 LayerNorm / bias kernels and fp16 GEMMs (``_front_fp16``); two pair rows per CTA share the
+    bias tile, fp16 score accumulator initialised with the bias, f16x2 exponentials), else the mma.sync core
+    ``h100_sources/triattn_dh_sm90.cu`` (bf16 operands)  ->  u Wo^T [+ out bias] (cuBLAS), back into the pair's layout:
+
+    standard           the ending node's update transposed back
+    untransposed       Chai-1's ending node: the update as the transposed pair has it (``untransposed_output``)
+    dual               Chai-1's confidence head: kept = u Wo^T, other = u Wo_t^T; starting: kept + other^T, ending: kept^T + other
+                       (``dual_output``)
+
+``forward`` is inference only (no grad, no dropout). ``train_core`` / ``backward``: the same core in training, for 64-channel heads of the
+width-generic training path (``h100_sm90_generic``).
+"""
+
+from __future__ import annotations
+
+import functools
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+
+from foldjet_engine.kernels import _capture
+from foldjet_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
+_SRC = Path(__file__).parent / "h100_sources"
+HEAD_DIMS = (32, 64)
+_PACKS: dict = _capture.weight_cache("triangle_attention_h100_dh.packs")
+
+
+@functools.lru_cache(maxsize=None)
+def ext():
+    ensure_cuda_home()
+    return load_extension(
+        name="triattn_h100_dh",
+        sources=[str(_SRC / "triattn_dh_sm90.cu")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), "--use_fast_math", "-DNDEBUG"],
+        verbose=False,
+    )
+
+
+#: query tile of the inference core: 128 (4 warps x 32 queries) for 64-channel heads once the length is a multiple of 128 and at least
+#: this, else 64 (4 x 16). A 16-query warp tile is bound by its ldmatrix traffic (every K | V fragment feeds one MMA); 32 queries per warp
+#: halve it (H100, core alone: 0.98 / 0.93 / 0.87 / 0.94 / 0.83 / 0.86 of the 64 tile at S 384 / 512 / 768 / 1024 / 1536 / 2048; 1.04 at
+#: S 256). 32-channel heads keep 64 (the 128 tile is 1.17-1.30x slower there: 4 x 16 queries already fit its registers twice over).
+QUERY_TILE_128_MIN = 384
+
+
+#: inference of 64-channel heads on the wgmma core (h100_sources/triattn_d64_sm90.cu: fp16 operands and scores, two pair rows per CTA share
+#: the bias tile, TMA) for L a multiple of 128 from this length on, else the mma.sync core.  2.5.13 candidate (cand/ta-d64): the fp16 core
+#: replaced the bf16-operand / fp32-softmax wgmma core (2.5.12), core alone 1.18-1.44x faster (L 512-2048; see docs/h100/triangle_attention.md)
+D64_WGMMA_MIN = 128
+
+
+@functools.lru_cache(maxsize=None)
+def ext_d64():
+    """The wgmma inference core of 64-channel heads (fp16 operands: ``_front_fp16`` makes them)."""
+    from foldjet_engine.kernels.triangle_attention.cuda.h100_sm90 import _flags
+
+    ensure_cuda_home()
+    return load_extension(name="triattn_h100_d64", sources=[str(_SRC / "triattn_d64_sm90.cu")], extra_cuda_cflags=_flags(), verbose=False)
+
+
+@functools.lru_cache(maxsize=None)
+def ext_d64_f8():
+    """The FP8 PV variant of the 64-channel-head wgmma core (-DTE_F8PV=1: V on e4m3 V^T planes, p as e4m3 bytes; docs/fp8.md)."""
+    from foldjet_engine.kernels.triangle_attention.cuda.h100_sm90 import _flags
+
+    ensure_cuda_home()
+    return load_extension(
+        name="triattn_h100_d64_f8pv",
+        sources=[str(_SRC / "triattn_d64_sm90.cu")],
+        extra_cuda_cflags=[*_flags(), "-DTE_F8PV=1"],
+        verbose=False,
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def ext_d64t():
+    """The wgmma training forward of 64-channel heads (bf16 operands; o, lse and u)."""
+    from foldjet_engine.kernels.triangle_attention.cuda.h100_sm90 import _flags
+
+    ensure_cuda_home()
+    return load_extension(name="triattn_h100_d64t", sources=[str(_SRC / "triattn_d64t_sm90.cu")], extra_cuda_cflags=_flags(), verbose=False)
+
+
+@torch.autocast("cuda", enabled=False)  # the fp16 GEMMs as made: an enclosing bf16 autocast (master weights) would turn them bf16
+def _front_fp16(module, pack, x, lnw, lnb, mask, B: int, L: int, H: int, trans: bool):
+    """The fp16 core's operands: proj = y [Wq; Wk; Wv; Wg]^T fp16 (y = LN(x) in fp16, the attention's row layout) and the head-major
+    sbias = bias / scale fp16 (masked keys -inf) from the rows the attention reads or (an ending node on ``transposed_bias=False``) the
+    pair as it is -- the width-generic glue's fp16 LayerNorm / bias kernels, cuBLAS fp16 GEMMs."""
+    from foldjet_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _glue
+
+    g = _glue()
+    C = x.shape[1]
+    eps = module.ln_pair.eps
+    scale = head_dim(module) ** -0.5
+    flip = trans and not module.transposed_bias
+    m = mask if mask is not None else x.new_empty(0, dtype=torch.bool)
+    wide = 128 < C <= 512 and C % 16 == 0  # the LayerNorm kernel that also makes the bias (ln_bias_fwd / ln_bias_blocks)
+    if wide and not flip:
+        y, sbias = g.ln_bias_fwd(x, lnw, lnb, pack["wb16"], m, eps, L, trans, H, scale)
+    else:
+        y = g.ln_fwd(x, lnw, lnb, eps, L, trans, True)[0]
+        if wide:  # the flipped bias from the pair as it is, sample by sample (no y of those rows written)
+            sbias = x.new_empty(B, H, L, L, dtype=torch.float16)
+            for b in range(B):
+                mb = m[b : b + 1] if m.numel() else m
+                g.ln_bias_blocks(x[b * L * L : (b + 1) * L * L], lnw, lnb, pack["wb16"], mb, sbias[b : b + 1], 0, eps, L, H, scale)
+        else:
+            yb = g.ln_fwd(x, lnw, lnb, eps, L, False, True)[0] if flip else y
+            sbias = g.front_bias(torch.mm(yb, pack["wb16"].t()), m, B, L, H, 0, scale)
+    return torch.mm(y, pack["wcat16"].t()), sbias
+
+
+def _f8_planes(module, proj16: torch.Tensor, B: int, L: int, H: int, D: int):
+    """(vt, vscale) of the FP8 PV core, or None (the fp16 core): the route is on (``h100_sm90.FP8_PV_D64``), ``L`` is past its gate, and the call is not a CUDA-graph
+    capture of a site whose static V scale is not taken yet (the first, eager, call of a site takes it: ``quantize_v_static``)."""
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+
+    if not (hs.FP8_PV and hs.FP8_PV_D64 and hs.FP8_VSCALE_AUTO and D == 64 and L >= hs.FP8_PV_D64_MIN_S):
+        return None
+    w = module.to_value.weight
+    key = ("vq", w.data_ptr(), H, D)
+    if key not in hs._VS_AUTO and torch.cuda.is_current_stream_capturing():
+        return None
+    v = proj16.view(B, L, L, 4, H, D)[:, :, :, 2]  # [B, N, S, H, D] fp16 at the proj row stride
+    hs._SITE, hs._SITE_T = w.data_ptr(), w
+    try:
+        if key not in hs._VS_AUTO:
+            hs.STATS["calibrations"] += 1
+        else:
+            hs.STATS["pv_d64"] += 1
+        return hs.quantize_v_static(v, w.data_ptr())
+    finally:
+        hs._SITE = hs._SITE_T = None
+
+
+def wgmma_d64(length: int, d: int) -> bool:
+    """64-channel heads take the wgmma core at ``length`` (the padded S): a pure function of the shape."""
+    return d == 64 and length % 128 == 0 and length >= D64_WGMMA_MIN
+
+
+def query_tile(length: int, d: int) -> int:
+    """The inference core's query tile at ``length`` (the padded S) and head width ``d``: a pure function of the shape."""
+    return 128 if d == 64 and length % 128 == 0 and length >= QUERY_TILE_128_MIN else 64
+
+
+def train_core(proj, bias, n_head, d, scale):
+    """The training forward of the core (``h100_sm90_generic`` at 64-channel heads): proj [M, 4 H d] (q | k | v | g, the gate as it
+    is), bias [B, H, S, S] bf16 natural units (masked keys -inf) -> (o [M, H d], lse fp32 [B, S, H, S] base 2, u = sigmoid(g) o).
+    S % 128 == 0 on the wgmma core (``TRAIN_WGMMA``), else the mma.sync core."""
+    if TRAIN_WGMMA and d == 64 and bias.shape[-1] % 128 == 0:
+        return ext_d64t().triattn_d64_forward_train(proj, bias, n_head, scale)
+    return ext().triattn_dh_forward_train(proj, bias, n_head, d, scale)
+
+
+#: the training forward of 64-channel heads on the wgmma core (``triattn_d64t_sm90.cu``) at S % 128 == 0; False: the mma.sync core
+TRAIN_WGMMA = True
+
+
+#: pair rows one CTA of the query-side backward takes (1 or 2): the rows' dS tiles are summed in shared memory before the bf16 dbias plane is
+#: written, so the planes (written, then read back by the sum) are 1 / BWD_Q_ROWS of one plane per pair row
+BWD_Q_ROWS = 2
+
+
+def backward(proj, bias, do, lse, delta, dall, n_head, d, scale):
+    """The core backward: dq / dk / dv into columns 0 / H d / 2 H d of ``dall``; -> dbias fp32 [B, H, S, S] (natural units): the bf16 planes
+    (the dS sums of ``BWD_Q_ROWS`` pair rows each, the Triton backward's data flow) summed in fp32 in order."""
+    nr = BWD_Q_ROWS if bias.shape[-1] % BWD_Q_ROWS == 0 else 1
+    planes = ext().triattn_dh_backward(proj, bias, do, lse, delta, dall, 0, n_head * d, 2 * n_head * d, n_head, d, scale, nr)
+    return planes.sum(0, dtype=torch.float32) if planes.shape[0] > 1 else planes[0].float()
+
+
+def head_dim(module) -> int:
+    return module.to_query.weight.shape[0] // module.n_head
+
+
+def serves(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
+    if torch.is_grad_enabled() or (module.training and module.p_drop > 0.0):
+        return False
+
+    if getattr(module, "_backend", None) != "portable":
+        return False  # the engine implementation only (implementation="pytorch" keeps the torch statements)
+    if not module.use_self_attention or module.use_qk_norm:
+        return False
+    if not pair.is_cuda or pair.dtype != torch.bfloat16 or pair.ndim != 4 or pair.shape[1] != pair.shape[2]:
+        return False
+    if torch.cuda.get_device_capability(pair.device) != (9, 0):
+        return False
+    if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(pair.shape[:2])):
+        return False
+    c = pair.shape[-1]
+    return head_dim(module) in HEAD_DIMS and c % 8 == 0 and c <= 512 and module.to_query.weight.shape[1] == c
+
+
+def _pack(module):
+    bf = torch.bfloat16
+    w = [module.to_query.weight, module.to_key.weight, module.to_value.weight, module.to_gate.weight]
+    out = {
+        "wcat": torch.cat([t.to(bf) for t in w]).contiguous(),
+        "wb": module.to_bias.weight.to(bf).contiguous(),
+        "wo": module.to_out.weight.to(bf).contiguous(),
+        "gb": module.to_gate.bias.float().contiguous() if module.to_gate.bias is not None else None,
+        "bo": module.to_out.bias.to(bf) if module.to_out.bias is not None else None,
+    }
+    if getattr(module, "dual_output", False):
+        out["wo_t"] = module.to_out_t.weight.to(bf).contiguous()
+    if head_dim(module) == 64:  # the fp16 core's front: the weights rounded to fp16 from the module's own (fp32 master) values
+        wb = module.to_bias.weight
+        out["wcat16"] = torch.cat([t.half() for t in w]).contiguous()
+        out["wb16"] = F.pad(wb.half(), (0, 0, 0, -wb.shape[0] % 8)).contiguous()  # the bias rows, zero-padded to a multiple of 8
+    return out
+
+
+def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    from foldjet_engine.kernels.triangle_attention.cuda.h100_sm90 import key_tiles
+    from foldjet_engine.kernels.triangle_attention.cuda.h100_sm90_generic import _glue
+
+    B, L0, _, C = pair.shape
+    L = (L0 + 63) // 64 * 64
+    if L != L0:
+        pair_p = F.pad(pair, (0, 0, 0, L - L0, 0, L - L0))
+        keep = torch.zeros(B, L, dtype=torch.bool, device=pair.device)
+        keep[:, :L0] = True if mask is None else mask
+        mask = keep
+    else:
+        pair_p = pair
+    H, D = module.n_head, head_dim(module)
+    params = list(module.parameters())
+    pack = _capture.lookup(_PACKS, (id(module), *((p.data_ptr(), p._version) for p in params)), lambda: _pack(module), limit=64)
+    trans = not module.starting
+    x = pair_p.contiguous().view(-1, C)
+    lnw, lnb = module.ln_pair.weight.float().contiguous(), module.ln_pair.bias.float().contiguous()
+    gb = pack["gb"] if pack["gb"] is not None else x.new_empty(0, dtype=torch.float32)
+    if wgmma_d64(L, D):  # the fp16 front and core; the KEY_TILE-key tiles past each sample's last attended key skipped (the same bits)
+        proj16, sbias = _front_fp16(module, pack, x, lnw, lnb, mask, B, L, H, trans)
+        core = ext_d64()
+        kt = key_tiles(mask, L, core.KEY_TILE)
+        f8 = _f8_planes(module, proj16, B, L, H, D)
+        if f8 is not None:  # the opt-in FP8 PV core (h100_sm90.FP8_PV_D64): V as e4m3 V^T planes with the site's static scale
+            u = ext_d64_f8().triattn_d64_forward(proj16, sbias, gb, H, D**-0.5, kt, *f8)
+        else:
+            u = core.triattn_d64_forward(proj16, sbias, gb, H, D**-0.5, kt)
+        return _tail(module, pack, u, pair_p, B, L, L0, C, trans)
+    y = _glue().ln_fwd(x, lnw, lnb, module.ln_pair.eps, L, trans)[0]  # the attention's row layout
+    proj = torch.mm(y, pack["wcat"].t())
+    # the pair bias [B, H, L, L]: from the rows the attention reads, or (an ending node on ``transposed_bias=False``) the pair as it is
+    yb = _glue().ln_fwd(x, lnw, lnb, module.ln_pair.eps, L, False)[0] if trans and not module.transposed_bias else y
+    bias = torch.mm(yb, pack["wb"].t()).view(B, L, L, H).permute(0, 3, 1, 2)
+    if mask is not None:
+        bias = bias.masked_fill(~mask[:, None, None, :], float("-inf"))
+    # the 64-key tiles past each sample's last attended key (masked in every row, the padding included) skipped: the same bits
+    kt = key_tiles(mask, L, 64)
+    u = ext().triattn_dh_forward(proj, bias.contiguous(), gb, H, D, D**-0.5, query_tile(L, D), kt)
+    return _tail(module, pack, u, pair_p, B, L, L0, C, trans)
+
+
+def _tail(module, pack, u, pair_p, B: int, L: int, L0: int, C: int, trans: bool) -> torch.Tensor:
+    """u Wo^T [+ out bias] (cuBLAS), back into the pair's layout (standard / untransposed / dual), + the pair."""
+
+    def project(w):
+        t = torch.mm(u, w.t())
+        if pack["bo"] is not None:
+            t += pack["bo"]
+        return t.view(B, L, L, C)
+
+    kept = project(pack["wo"])
+    if getattr(module, "dual_output", False):
+        other = torch.mm(u, pack["wo_t"].t()).view(B, L, L, C)
+        delta = kept.transpose(1, 2) + other if trans else kept + other.transpose(1, 2)
+    elif trans and not getattr(module, "untransposed_output", False):
+        delta = kept.transpose(1, 2)
+    else:
+        delta = kept
+    out = pair_p + delta
+    return out[:, :L0, :L0].contiguous() if L != L0 else out

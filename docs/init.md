@@ -1,9 +1,9 @@
 # Parameter initialisation: presets and config
 
 Every engine module declares the init of each of its projections in code, in team-gm's vocabulary
-(`src/miniworld_engine/modules/primitives.py`, `Linear(..., init=...)`). That is the module's default, and **construction never changes**:
+(`src/foldjet_engine/modules/primitives.py`, `Linear(..., init=...)`). That is the module's default, and **construction never changes**:
 building a module draws exactly what it drew before (MiniWorld and every checkpoint path keep reproducing). After construction,
-`apply_init(model, cfg)` (`miniworld_engine.modules`, code in `modules/init.py`) re-initialises the model from a **preset** (a YAML file
+`apply_init(model, cfg)` (`foldjet_engine.modules`, code in `modules/init.py`) re-initialises the model from a **preset** (a YAML file
 shipped with the package, or your own) and **overrides** from config. `describe_init(model, cfg)` lists what every parameter gets.
 
 Initialisation does not affect any measurement: the accuracy and speed measurers redraw every floating parameter of every case
@@ -33,7 +33,7 @@ PairEmbed* / TokenPairInit) is listed as `unmanaged` and never touched.
 
 ## Presets
 
-`src/miniworld_engine/modules/init_presets/<name>.yaml` (package data; `**/*.yaml` in `[tool.setuptools.package-data]`), or any YAML path:
+`src/foldjet_engine/modules/init_presets/<name>.yaml` (package data; `**/*.yaml` in `[tool.setuptools.package-data]`), or any YAML path:
 
 ```yaml
 description: ...
@@ -78,7 +78,7 @@ init:
 ```
 
 ```python
-from miniworld_engine.modules import apply_init, describe_init
+from foldjet_engine.modules import apply_init, describe_init
 
 model = build_model(...)                       # construction as today
 apply_init(model, cfg["init"])                 # a dict, a YAML path (a whole config: its `init:` block is read), "af3", or None

@@ -9,11 +9,11 @@ from portable_helpers import randomize
 from portable_helpers import relative_fp64 as relative64
 from settings_helpers import override_setting
 
-from miniworld_engine import settings
-from miniworld_engine.kernels.integrations import bias_only_dit_train as TR
-from miniworld_engine.kernels.bias_only_dit import cuda as C
-from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine import settings
+from foldjet_engine.kernels.integrations import bias_only_dit_train as TR
+from foldjet_engine.kernels.bias_only_dit import cuda as C
+from foldjet_engine.modules.bias_only_dit import BiasOnlyDiTBlock
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,
@@ -339,7 +339,7 @@ def test_defaults_and_their_switches(monkeypatch, off):
     """At the defaults the weight pack is one pack16 launch, the LayerNorm backward rows get dxt / dxa as dG's own d-shift columns,
     and the L768 bias gradient runs on CTA pairs; with the three switches at 0, the torch pack, separate dxt / dxa and dpb_sm100. The
     fused backward is pinned off here (it replaces res_adaln_b_bwd: test_fused_backward_* below)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import train as TRN
+    from foldjet_engine.kernels.bias_only_dit.cuda import train as TRN
 
     for v in SWITCHES[:3]:
         if off:
@@ -416,7 +416,7 @@ def test_one_launch_weight_pack_matches_the_torch_pack(monkeypatch, fp32_norms, 
         torch.cuda.synchronize()
     TR._PACKS.clear()
     ref, one = packs
-    from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
+    from foldjet_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
     assert set(one) == set(ref), sorted(set(one) ^ set(ref))
     assert ("WnT3" in ref) == BWF.mid_on(), sorted(
@@ -531,7 +531,7 @@ def _sig(t):
 
 def _tail_case(L, A, H, DH, seed):
     """Random inputs of bo_bwd_tail.cu at the step's shapes (row statistics of x1 the real ones) and its fp64 reference."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
+    from foldjet_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
     D, DA, M, bf = 768, H * DH, A * L, torch.bfloat16
     g = torch.Generator(device="cuda").manual_seed(seed)
@@ -727,7 +727,7 @@ def test_fused_backward_wgrad_kernel_against_fp64(da, M, f32):
     _sm100_only()
     """bo_wgrad.cu alone: the six weight gradients (bf16 or fp32 out) and the unfold (dWraw = dWn w, the cond-LN partials over 16
     rows) against fp64; bit-identical on a rerun; no local memory."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
+    from foldjet_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
     D, DC, bf = 768, 384, torch.bfloat16
     g = torch.Generator(device="cuda").manual_seed(M + da)
@@ -783,8 +783,8 @@ def test_fused_backward_pbfin_kernel_against_two_launches(nh, L, odt):
     """pair_bias_bwd_fin_k (settings.bias_only_dit_bwd_pbfin) against pair_bias_bwd + finalize on the same inputs: d pair
     bit-identical (the same body), the finalize outputs equal up to the order of the fp32 partial sums, every output written
     (NaN-filled), the barrier counters back at zero, bit-identical over five reruns (the counters reused)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
-    from miniworld_engine.kernels.bias_only_dit.cuda import train as TRN
+    from foldjet_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
+    from foldjet_engine.kernels.bias_only_dit.cuda import train as TRN
 
     BT = TRN.ext()
     D, DC, R, M, bf = 768, 384, L * L, 4 * L, torch.bfloat16
@@ -842,7 +842,7 @@ def test_fused_backward_pvdpb_kernel_bit_identical_to_two_launches(
     on reruns. Where the bias gradient belongs on CTA pairs (L768) the op launches nothing and returns False; ``single`` forces the
     fused launch there (compared with DpbKernel at settings.bias_only_dit_dpb_pair=0)."""
     _sm100_only()
-    from miniworld_engine.kernels.bias_only_dit import cuda as C
+    from foldjet_engine.kernels.bias_only_dit import cuda as C
 
     pair = C.dpb_pair_on(
         L,
@@ -904,7 +904,7 @@ def test_fused_backward_mid_kernel_against_fp64(L, A, n_head, d_head):
     and the bs1 partials (NaN-filled outputs show a missing write), dG's transition half untouched; bit-identical on a rerun; no
     local memory."""
     _sm100_only()
-    from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
+    from foldjet_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
     H, DA, D, DC, M, bf, nan = (
         n_head,
@@ -1047,8 +1047,8 @@ def test_fused_backward_launch_count(
     bo_bwd_mid on (_BWD_MID=1); the per-step path launches 23 (BWD_FUSED=0)."""
     from tests.cuda_graph_nodes import graph_kernels
 
-    from miniworld_engine.kernels import _capture
-    from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
+    from foldjet_engine.kernels import _capture
+    from foldjet_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
     for k, v in (
         ("FUSED", fused),

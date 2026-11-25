@@ -7,10 +7,10 @@ import torch
 from portable_helpers import randomize_half_std as _randomize
 from settings_helpers import override_setting
 
-from miniworld_engine import settings
-from miniworld_engine.kernels.integrations import token_dit_train
-from miniworld_engine.modules.dit import DiTBlock
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine import settings
+from foldjet_engine.kernels.integrations import token_dit_train
+from foldjet_engine.modules.dit import DiTBlock
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,

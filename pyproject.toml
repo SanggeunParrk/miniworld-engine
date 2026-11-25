@@ -1,6 +1,6 @@
 [project]
-name = "miniworld-engine"
-version = "3.0.12"
+name = "foldjet-engine"
+version = "1.0.0"
 requires-python = ">=3.10"
 readme = "README.md"
 description = "H100 + A100 CUDA / Triton kernels for AlphaFold3-style modules, with a PyTorch reference backend per module, accuracy and speed measurers, and a version-based judge."
@@ -8,7 +8,7 @@ license = "MIT AND Apache-2.0 AND BSD-3-Clause"
 license-files = ["LICENSE", "licenses/THIRD_PARTY_NOTICES.md", "licenses/Anthropic-Apache-2.0.txt", "licenses/Anthropic-NOTICE",
                  "licenses/anthropic-trimul-native-v5-UPSTREAM.json",
                  "licenses/CUTLASS-LICENSE.txt", "licenses/FlashAttention-LICENSE.txt"]
-# The runtime: what `miniworld_engine.modules` and `miniworld_engine.kernels` import. Measurement (measure/, judge/) adds pyyaml only.
+# The runtime: what `foldjet_engine.modules` and `foldjet_engine.kernels` import. Measurement (measure/, judge/) adds pyyaml only.
 dependencies = [
   "torch>=2.8",
   "triton>=3.3",
@@ -21,14 +21,14 @@ dependencies = [
   "cuda-bindings",  # kernels/trimul_inproj/cuda: the H100 TriMul driver API
   "ninja",          # torch.utils.cpp_extension: every JIT build of a CUDA kernel (A100, or a Python / torch without prebuilt kernels)
   # The prebuilt H100 (sm90), A100 (sm80), RTX 5090 (sm120) and B200 (sm100, two wheels) kernels (CUDA 12.9 / torch 2.13 / CPython 3.12), all installed into
-  # miniworld_engine/_prebuilt/ (content-keyed paths; the few arch-independent artifacts, multi-arch fatbins / host-only glue, share a
+  # foldjet_engine/_prebuilt/ (content-keyed paths; the few arch-independent artifacts, multi-arch fatbins / host-only glue, share a
   # key and are shipped by both, either copy serves both GPUs); elsewhere a kernel
   # JIT-builds on first use (needs a CUDA toolkit; the CUTLASS / MathDx headers are fetched by kernels/_headers.py, see docs/install.md).
-  'miniworld-engine-kernels-sm90-cu129==3.0.12; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
-  'miniworld-engine-kernels-sm80-cu129==3.0.12; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
-  'miniworld-engine-kernels-sm120-cu129==3.0.12; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',   # RTX 5090 (sm_120a), from 2.5.8
-  'miniworld-engine-kernels-sm100-cu129==3.0.12; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',   # B200 (sm_100a), from 3.0.12; two wheels (PyPI 100 MiB per file)
-  'miniworld-engine-kernels-sm100-cu129-part2==3.0.12; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
+  'foldjet-engine-kernels-sm90-cu129==1.0.0; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
+  'foldjet-engine-kernels-sm80-cu129==1.0.0; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
+  'foldjet-engine-kernels-sm120-cu129==1.0.0; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',   # RTX 5090 (sm_120a), from 2.5.8
+  'foldjet-engine-kernels-sm100-cu129==1.0.0; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',   # B200 (sm_100a), from 3.0.12; two wheels (PyPI 100 MiB per file)
+  'foldjet-engine-kernels-sm100-cu129-part2==1.0.0; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"',
 ]
 
 [project.optional-dependencies]
@@ -60,9 +60,9 @@ exclude = ["*.swa_dit.cuda.gen"]
 #   requirements/*.csv                      the requirement lists the measurers, the judge and the prebuild plan read
 #   measure/configs/*.yaml                  the canonical measurement configs
 # Not shipped: judge/tokens/ and judge/answers.jsonl (the judge's measurement state, kept in the repository, not runtime).
-miniworld_engine = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.inc", "**/*.json", "**/*.csv", "**/*.yaml"]
+foldjet_engine = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.inc", "**/*.json", "**/*.csv", "**/*.yaml"]
 [tool.setuptools.exclude-package-data]
-miniworld_engine = ["judge/tokens/**", "judge/answers.jsonl"]
+foldjet_engine = ["judge/tokens/**", "judge/answers.jsonl"]
 
 # ----------------------------------------------------------------------------------------------------------------------------- ruff
 [tool.ruff]
@@ -100,9 +100,9 @@ ban-relative-imports = "all"
 
 [tool.ruff.lint.per-file-ignores]
 # Kernel bodies are faithful copies (team-gm branches, FlashAttentionBias, Anthropic kits): not linted, as the originals are not.
-"src/miniworld_engine/kernels/**/triton/*.py" = ["ALL"]
-"src/miniworld_engine/kernels/**/cuda/*.py" = ["ALL"]
-"src/miniworld_engine/kernels/**/cuda/gen/*.py" = ["ALL"]
+"src/foldjet_engine/kernels/**/triton/*.py" = ["ALL"]
+"src/foldjet_engine/kernels/**/cuda/*.py" = ["ALL"]
+"src/foldjet_engine/kernels/**/cuda/gen/*.py" = ["ALL"]
 
 [tool.ruff.format]
 docstring-code-format = false
@@ -112,7 +112,7 @@ docstring-code-format = false
 # tests/cpu run anywhere (no GPU); tests/gpu need a CUDA device and skip cleanly without one (or without the card a marker names).
 #   CPU:  pytest -m "not gpu"        GPU (one H100 job):  pytest tests/gpu -m gpu
 testpaths = ["tests"]
-pythonpath = ["src"]             # the checkout under test, ahead of any installed miniworld-engine
+pythonpath = ["src"]             # the checkout under test, ahead of any installed foldjet-engine
 addopts = "-ra --strict-markers --import-mode=importlib -p no:cacheprovider"
 markers = [
   "gpu: needs a CUDA device (skipped without one)",
@@ -132,8 +132,8 @@ include = ["src", "tests"]
 exclude = [
   ".pixi", "**/.pixi", "**/__pycache__",
   # the same vendored kernel bodies ruff leaves alone
-  "src/miniworld_engine/kernels/**/triton/**",
-  "src/miniworld_engine/kernels/**/cuda/**",
+  "src/foldjet_engine/kernels/**/triton/**",
+  "src/foldjet_engine/kernels/**/cuda/**",
 ]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
@@ -164,7 +164,7 @@ extra-index-urls = ["https://download.pytorch.org/whl/cu129"]
 no-build-isolation = ["transformer-engine-torch"]
 
 [tool.pixi.pypi-dependencies]
-miniworld-engine = { path = ".", editable = true, extras = ["baselines", "dev"] }
+foldjet-engine = { path = ".", editable = true, extras = ["baselines", "dev"] }
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "ef32577f55da19a4989cd7b22e004dc43a4998cb" }   # Anthropic esmfold2 kit (baselines)
 torch = { version = "==2.13.0", index = "https://download.pytorch.org/whl/cu129" }
 transformer-engine = { version = "==2.19.*", extras = ["pytorch", "core-cu12"] }
@@ -186,6 +186,6 @@ check = "tools/check.sh"
 test = "pytest tests/cpu -m 'not gpu'"
 test-gpu = "pytest tests/gpu -m gpu"
 # Everything below needs Slurm (never the login node): prebuild on a CPU node, pretune / measure on an H100.
-prebuild = "python -m miniworld_engine.kernels._prebuild"
-pretune = "python -m miniworld_engine.kernels._pretune"
-judge = "python -m miniworld_engine.judge"
+prebuild = "python -m foldjet_engine.kernels._prebuild"
+pretune = "python -m foldjet_engine.kernels._pretune"
+judge = "python -m foldjet_engine.judge"

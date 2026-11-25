@@ -7,8 +7,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import TriangleMultiplication
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import TriangleMultiplication
 
 pytestmark = [
     pytest.mark.gpu,
@@ -37,7 +37,7 @@ def _step(module, inputs, saved_bytes: list[int]):
 
 @pytest.mark.parametrize("outgoing", [True, False])
 def test_gate_recompute_saves_one_gate_tensor_and_matches(outgoing: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+    from foldjet_engine.kernels.trimul_inproj.cuda import sm80_wide
 
     module = TriangleMultiplication(d_pair=128, d_hidden=128, outgoing=outgoing, p_drop=0.0).cuda().float().train()
     C.randomize(module, torch.Generator(device="cuda").manual_seed(0))
@@ -64,7 +64,7 @@ def test_gate_recompute_saves_one_gate_tensor_and_matches(outgoing: bool, monkey
 @pytest.mark.parametrize("length", [128, 256])
 def test_repicked_plane_gemm_tile_is_bitwise_the_old_tile(mode: int, length: int) -> None:
     """Hidden 128, L 128 / 256 (modes 0 / 1): the 64 x 64 tile the table names now gives the bits of the 128 x 128 tile it replaced (the k order per element is the same)."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import contract_sm80
+    from foldjet_engine.kernels.trimul_inproj.cuda import contract_sm80
 
     assert contract_sm80.SM120_TILES[(mode, 128, length)] == 4
     g = torch.Generator(device="cuda").manual_seed(0)

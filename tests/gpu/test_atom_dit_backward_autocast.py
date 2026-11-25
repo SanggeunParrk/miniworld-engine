@@ -11,8 +11,8 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.atom_dit import AtomDiTProtenix
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.atom_dit import AtomDiTProtenix
 
 pytestmark = [pytest.mark.gpu]
 

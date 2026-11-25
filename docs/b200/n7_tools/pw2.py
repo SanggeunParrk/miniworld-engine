@@ -1,5 +1,5 @@
 import sys, time, torch
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 S=int(sys.argv[1]); fl=tuple(sys.argv[2:]); N=1; H,D,C=4,32,128; dev=torch.device("cuda")
 sm100.CUBINS["p_w"]=("gattn_fwd",("-DSPLITB=0",)+fl); sm100.CUBINS["p_s"]=("gattn_fwd",("-DSPLITB=1",)+fl); sm100.CUBINS["p_c"]=("gattn_fwd",("-DSPLITB=0","-DCSPLIT=1")+fl)
 g=sm100.GattnFwd("p_w",split_cubin="p_s",csplit_cubin="p_c")

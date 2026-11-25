@@ -1,7 +1,7 @@
 #!/bin/bash
 W=/NHNHOME/WORKSPACE/26mohw002_A/psk6950; . $W/b2511/env.sh
 cd $W/b2511/agents/s90-transition-inf
-$W/b2511/dev.sh -g 2 -t 1200 s90-transition-inf python -m miniworld_engine.measure.accuracy b200cfg/acc3132.yaml --out out/acc3132_f.jsonl > out/acc3132_f.log 2>&1
+$W/b2511/dev.sh -g 2 -t 1200 s90-transition-inf python -m foldjet_engine.measure.accuracy b200cfg/acc3132.yaml --out out/acc3132_f.jsonl > out/acc3132_f.log 2>&1
 echo "acc rc=$?"; grep -o '"light": "[A-Z]*"' out/acc3132_f.jsonl | sort | uniq -c
 CUDA_VISIBLE_DEVICES= $ENV/bin/python -I - <<EOT
 import json

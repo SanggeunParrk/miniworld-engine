@@ -33,12 +33,12 @@ def _rel(a, b):
 
 
 def _cases():
-    from miniworld_engine.modules import (
+    from foldjet_engine.modules import (
         AttentionPairBias,
         Transition,
         TriangleMultiplication,
     )
-    from miniworld_engine.modules.exceptions import ImplementationType as IT
+    from foldjet_engine.modules.exceptions import ImplementationType as IT
 
     return {
         "apb": (lambda: AttentionPairBias(384, 128, 16, implementation=IT.MINIWORLD), lambda: [_r(1, 256, 384), _r(1, 256, 256, 128)],
@@ -95,7 +95,7 @@ def test_graph_without_static_weights_replays_current_weights():
 
 def test_graph_under_static_weights_does_not_recast():
     """Under ``static_weights()`` the capture shares the eager entries: no cast kernel is in the replayed graph."""
-    from miniworld_engine.kernels._capture import static_weights
+    from foldjet_engine.kernels._capture import static_weights
 
     make, inputs, call = _cases()["apb"]
     master = _randomize(make()).cuda().float().eval()

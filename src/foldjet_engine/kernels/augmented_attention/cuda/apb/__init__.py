@@ -1,0 +1,222 @@
+"""CUDA passes of AttentionPairBias (the Pairformer single track) on B200 (``apb_rows.cu``): the pair -> bias projection
+with its LayerNorm (mma.sync), its backward, and the row passes of the single track (LayerNorm, sigmoid gate, their
+backwards). Its attention cores are this family's sm_100a kernels (``../sm100``). Built on first use (``load_extension``),
+never at import; ``kernels/integrations/attention_pair_bias_b200.py`` drives them."""
+
+from __future__ import annotations
+
+import functools
+from pathlib import Path
+
+import torch
+
+_dir = Path(__file__).parent
+RW = 4  # rows per block of the row kernels (a warp each)
+DP = 128  # d_pair of the 128-wide pair kernels (256 / 384 / 512: the wide forms, 8 or 16 heads)
+# (heads, d_single) -> (real head dim, head width in memory: 16 x 24 is padded to 32)
+GEOMETRY = {(8, 384): (48, 48), (12, 384): (32, 32), (16, 384): (24, 32), (24, 384): (16, 16), (16, 512): (32, 32)}
+#: d_pair -> the head counts the pair kernels are built for (forward; the wide backward takes the same)
+PAIR_WIDTHS = {128: (8, 12, 16, 24), 256: (8, 16), 384: (8, 16), 512: (16,)}
+
+
+def width(heads: int, d: int = 384) -> int:
+    """Row width of q / k / v / g / O and their gradients: d_single, or 512 for 16 x 24 (padded to 32)."""
+    return heads * GEOMETRY[(heads, d)][1]
+
+
+def acc_n(heads: int, d: int = 384, dp: int = DP) -> int:
+    """The backward's fp32 accumulator: dlnw [d] | dlnb [d] | dbq [W] | dWf [heads, dp] | per-head dbias sums [heads]."""
+    return 2 * d + width(heads, d) + heads * dp + heads
+
+
+def ext(shadow: bool = False):
+    """The row / pair extension. ``shadow`` (H100 only) also builds the fp32 pair-weight oracle (``integrations.attention_pair_bias_b200.EXACT_DWB``), which
+    needs CUTLASS 4.2 headers (``CUTLASS_PATH``); the default build has no such dependency. An A100 gets the sm_80 build (``ext_sm80``)."""
+    cap = torch.cuda.get_device_capability()
+    if cap in ((8, 0), (12, 0)):  # the RTX 5090 (sm_120a) runs the sm_80 build of the same sources (kernels/_sm120.py)
+        return ext_sm80()
+    arch = "90a" if cap == (9, 0) else "100"
+    return _ext(arch, shadow and arch == "90a")
+
+
+@functools.lru_cache(maxsize=None)
+def ext_sm80():
+    """The A100 (sm_80) build: ``apb_rows_sm80.cu`` with ``-DAPB_SM80`` (its pair passes from ``apb_pair_bias_sm80.cuh``, the C++ steps from
+    ``step_sm80.cuh``); driven by ``kernels/integrations/attention_pair_bias_sm80.py``."""
+    from ...._nvcc import ensure_cuda_home, gencodes, host_flags
+    from foldjet_engine.kernels._sm120 import sm80_load_extension as load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="apb_rows_cuda_sm80",
+        sources=[str(_dir / "apb_rows_sm80.cu")],
+        extra_include_paths=[str(_dir)],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            "-DAPB_SM80",
+            *gencodes("80"),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _ext(arch: str, shadow: bool = False):
+    from ...._nvcc import cutlass_include, ensure_cuda_home, gencodes, host_flags, load_extension
+
+    ensure_cuda_home()
+    includes, shadow_flags = [], []
+    if shadow:
+        # only a build needs the headers: unset, the stand-in keys as the pinned CUTLASS 4.2 and the prebuilt artifact loads
+        # (a build without them raises _nvcc.CutlassMissing)
+        includes = [str(cutlass_include())]
+        shadow_flags = ["-DAPB_H100_FP32_SHADOW=1"]
+    return load_extension(
+        name=f"apb_rows_cuda_sm{arch}" + ("_shadow" if shadow else ""),
+        # B200: the shared source plus its B200-only passes (apb_rows_sm100.cu includes apb_rows.cu); H100 builds the shared file as is
+        sources=[str(_dir / ("apb_rows_sm100.cu" if arch == "100" else "apb_rows.cu"))],
+        extra_include_paths=includes,
+        extra_ldflags=["-lcublas", "-lcublasLt"],
+        extra_cuda_cflags=[
+            *host_flags(),
+            *shadow_flags,
+            "-O3",
+            "-std=c++17",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            *gencodes(arch, ptx=() if arch == "90a" else ("100",)),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
+def pair_bias(
+    pair2d: torch.Tensor,
+    wf: torch.Tensor,
+    mask: torch.Tensor | None,
+    L: int,
+    eps: float,
+    neg: float,
+    saved: bool = False,
+    padded: int | None = None,
+):
+    """bias [H, L, L] bf16 = wf . LN(pair) (no LN affine: fold its weight into ``wf`` [H, dp] bf16; dp 128 with H = 8, 12, 16 or 24,
+    or a wide pair of ``PAIR_WIDTHS``), ``neg`` on the keys where ``mask`` [L] is False. pair2d [L L, dp] bf16 contiguous, L a
+    multiple of 16. ``saved`` (a wide pair's training forward): returns (bias, row stats [L L, 2], unmasked bias [H, L, L] fp32),
+    what ``pair_bias_bwd`` reads for a wide pair.
+
+    On an A100 (H = 8, 12 or 16; dp 128; any L): ``padded`` (default L) is the attention core's length, L rounded up to a multiple of
+    128; the bias is [H, padded, padded] with ``neg`` on every key >= L and in every query row >= L."""
+    n = L if padded is None else padded
+    out = torch.empty(wf.shape[0], n, n, device=pair2d.device, dtype=torch.bfloat16)
+    if not saved:
+        ext().pair_bias_fwd(pair2d, wf, mask, out, int(L), float(eps), float(neg))
+        return out
+    st = torch.empty(L * L, 2, device=pair2d.device, dtype=torch.float32)
+    bu = torch.empty(wf.shape[0], L, L, device=pair2d.device, dtype=torch.float32)
+    ext().pair_bias_fwd_train(pair2d, wf, mask, out, st, bu, int(L), float(eps), float(neg))
+    return out, st, bu
+
+
+def pair_bias_batch(pair: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, eps: float, neg: float) -> torch.Tensor:
+    """``pair_bias`` over a batch of pairs in one launch (H100 / B200 builds): pair [NB, L, L, dp] bf16 contiguous, mask [NB, L] bool
+    contiguous or None -> bias [H, NB, L, L] bf16 (head-major, then the batch row: the inference core's per-sample bias groups,
+    ``attn_inf(..., S=NB, nbg=NB)``); batch row b's planes are exactly ``pair_bias(pair[b], ..., mask[b])``'s."""
+    nb, L = pair.shape[0], pair.shape[1]
+    out = torch.empty(wf.shape[0], nb, L, L, device=pair.device, dtype=torch.bfloat16)
+    ext().pair_bias_fwd_batch(pair.view(nb * L * L, wf.shape[1]), wf, mask, out, int(nb), int(L), float(eps), float(neg))
+    return out
+
+
+def pair_bias_padded(pair: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, eps: float, neg: float, lo: int) -> torch.Tensor:
+    """``pair_bias`` / ``pair_bias_batch`` (H100 / B200 builds) of a ragged length: pair [NB, L, L, dp] bf16 contiguous, mask [NB, L] bool or
+    None -> bias [H, NB, lo, lo] bf16 with ``lo`` >= L (a multiple of 8). The pair is read as it is (no padded copy): the kernel writes the
+    real [L, L] block of every plane (the same bits as ``pair_bias`` at length L), the rest is filled here: ``neg`` on every key >= L, 0 on
+    the real keys of the pad query rows (finite rows: the caller drops them)."""
+    nb, L = pair.shape[0], pair.shape[1]
+    out = torch.empty(wf.shape[0], nb, lo, lo, device=pair.device, dtype=torch.bfloat16)
+    ext().pair_bias_fwd_batch_ld(pair.view(nb * L * L, wf.shape[1]), wf, mask, out, int(nb), int(L), int(lo), float(eps), float(neg))
+    if lo > L:
+        out[:, :, L:, :L] = 0
+        out[..., L:] = neg
+    return out
+
+
+def pair_bias_raw(
+    pair2d: torch.Tensor,
+    wb: torch.Tensor,
+    lpw: torch.Tensor,
+    ws: float,
+    mask: torch.Tensor | None,
+    L: int,
+    eps: float,
+    neg: float,
+    padded: int,
+) -> torch.Tensor:
+    """``pair_bias`` (A100) with Wf formed in the kernel from the parameters as they are: ``wb`` = to_bias.weight [H, 128] (bf16 or fp32), ``lpw`` = ln_pair.weight [128]
+    fp32, Wf = bf16(wb lpw ws). Nothing to pack beforehand, so the pass can start with the step on a stream of its own."""
+    out = torch.empty(wb.shape[0], padded, padded, device=pair2d.device, dtype=torch.bfloat16)
+    ext().pair_bias_fwd_raw(pair2d, wb, lpw, float(ws), mask, out, int(L), float(eps), float(neg))
+    return out
+
+
+def pair_bias_bwd(
+    pair2d: torch.Tensor,
+    dbias: torch.Tensor,
+    wf: torch.Tensor,
+    L: int,
+    eps: float,
+    acc: torch.Tensor | None = None,
+    d: int = 384,
+    saved: tuple[torch.Tensor, torch.Tensor] | None = None,
+    grid: int = 0,
+    out: torch.Tensor | None = None,
+):
+    """(dpair [L L, dp] bf16, dWf [H, dp] fp32, per-head dbias sums [H]) of ``pair_bias`` (without the mask: masked keys
+    carry zero dbias). dWf and the sums are added into ``acc`` (``acc_n(H, d, dp)`` floats, zeroed by the caller) when given; the
+    returned dWf / sums are views of it. A wide pair (dp > 128) takes ``saved`` = (row stats, unmasked bias) of its forward.
+    A100: ``grid`` CTAs of the persistent pass (0: the full occupancy). ``out``: a contiguous [L L, dp] buffer dpair is written into
+    (a batch row of the caller's gradient; default a new tensor)."""
+    heads, dp = wf.shape
+    if acc is None:
+        acc = torch.zeros(acc_n(heads, d, dp), device=pair2d.device)
+    dz = torch.empty_like(pair2d) if out is None else out
+    if dp == DP and grid > 0:
+        ext().pair_bias_bwd_grid(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d), int(grid))
+    elif dp == DP:
+        ext().pair_bias_bwd(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d))
+    else:
+        st, bu = saved
+        e = ext()
+        # B200: every 128-column chunk in one launch (apb_rows_sm100.cu pair_bias_bwd_wide1; its partial rows: pair_bwd_wide1_blocks)
+        wide = getattr(e, "pair_bias_bwd_wide1", None)
+        (wide or e.pair_bias_bwd_wide)(pair2d, dbias.contiguous(), wf, st, bu, dz, acc, int(L), int(d))
+    if acc.ndim == 2:
+        return dz, None, None  # Hopper block partials are reduced by finalize.
+    o = 2 * d + width(heads, d)
+    return dz, acc[o : o + heads * dp].view(heads, dp), acc[o + heads * dp :]
+
+
+__all__ = [
+    "DP",
+    "GEOMETRY",
+    "PAIR_WIDTHS",
+    "RW",
+    "acc_n",
+    "ext",
+    "ext_sm80",
+    "pair_bias",
+    "pair_bias_batch",
+    "pair_bias_bwd",
+    "pair_bias_padded",
+    "pair_bias_raw",
+    "width",
+]

@@ -1,6 +1,6 @@
 # Measurement
 
-`miniworld_engine.measure`: two measurers and their config. They only measure: one record per case and backend to stdout and to a
+`foldjet_engine.measure`: two measurers and their config. They only measure: one record per case and backend to stdout and to a
 JSONL file. They judge, cache and skip nothing; [the judge](judge.md) reads the records.
 
 ## Config (`measure/config.py`)
@@ -8,7 +8,7 @@ JSONL file. They judge, cache and skip nothing; [the judge](judge.md) reads the 
 A YAML or TOML file. Every key but `modules` / `backends` is optional:
 
 ```yaml
-modules: all                         # class names of miniworld_engine.modules, or "all"
+modules: all                         # class names of foldjet_engine.modules, or "all"
 backends: [pytorch, cuda, triton, anthropic, cueq]   # "pytorch" is always added (the reference)
 external: [anthropic, cueq]          # baselines: informational light
 rows: []                             # requirements_module.csv data-row numbers (1 = first row under the header); [] = all
@@ -56,7 +56,7 @@ measures each case exactly as the full run does.
 ## Accuracy (`measure/accuracy.py`)
 
 ```sh
-python -m miniworld_engine.measure.accuracy CONFIG.yaml --out DIR_OR_FILE.jsonl [--module X ...] [--backend B ...] [--rows N ...] [--lengths min|all|128,256]
+python -m foldjet_engine.measure.accuracy CONFIG.yaml --out DIR_OR_FILE.jsonl [--module X ...] [--backend B ...] [--rows N ...] [--lengths min|all|128,256]
 ```
 
 Per case the module is built once and deep-copied for each run:
@@ -93,7 +93,7 @@ card key of the device measured on, `h100_sm90` / `a100_sm80`), `versions` (for 
 ## Speed (`measure/speed.py`)
 
 ```sh
-python -m miniworld_engine.measure.speed CONFIG.yaml --out FILE.jsonl [--timing graph compile+graph]
+python -m foldjet_engine.measure.speed CONFIG.yaml --out FILE.jsonl [--timing graph compile+graph]
 ```
 
 One record per (case, backend, timing mode): `median_ms`, `p10_ms`, `p90_ms`, `n`, `speedup_vs_pytorch` (pytorch median / backend

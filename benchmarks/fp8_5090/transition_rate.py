@@ -1,7 +1,7 @@
 """5090 default Transition (D128 n4 inference): time and achieved TFLOPS vs the mma peaks (bf16 218, e4m3 459 measured in p0_rates_gemm). python transition_rate.py rows ..."""
 import sys, torch
-import miniworld_engine
-from miniworld_engine.modules import Transition
+import foldjet_engine
+from foldjet_engine.modules import Transition
 flush = torch.empty(128 << 20, dtype=torch.uint8, device="cuda")
 def bench(f, n=3):
     f(); torch.cuda.synchronize()

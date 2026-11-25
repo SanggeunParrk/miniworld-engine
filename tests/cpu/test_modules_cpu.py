@@ -1,5 +1,5 @@
 """Every requirements module class constructs with the reference backend, runs a tiny forward on CPU, and keeps the
-:class:`~miniworld_engine.modules.primitives.BackendModule` contract (primitives.py module docstring):
+:class:`~foldjet_engine.modules.primitives.BackendModule` contract (primitives.py module docstring):
 
 - an unknown backend is a ``ValueError``;
 - a call outside a backend's range raises :class:`BackendUnsupported` with a reason, never a silent fallback (on CPU every engine kernel
@@ -16,8 +16,8 @@ import inspect
 import pytest
 import torch
 
-from miniworld_engine.measure import config as cfgmod
-from miniworld_engine.modules.primitives import BackendModule, BackendUnsupported
+from foldjet_engine.measure import config as cfgmod
+from foldjet_engine.modules.primitives import BackendModule, BackendUnsupported
 
 with open(cfgmod.REQUIREMENTS, newline="") as _fh:
     ROWS = list(enumerate(csv.DictReader(_fh), 1))

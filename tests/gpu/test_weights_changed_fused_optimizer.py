@@ -1,4 +1,4 @@
-"""``miniworld_engine.capture.weights_changed`` after a fused optimizer step (the documented contract).
+"""``foldjet_engine.capture.weights_changed`` after a fused optimizer step (the documented contract).
 
 ``Adam(fused=True)`` writes the parameters without bumping their ``_version``; the engine's weight packs are keyed on
 ``(data_ptr, _version)``, so the next eager forward of an H100 token DiT block would read the packs of the old weights. After
@@ -12,9 +12,9 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine import capture
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.token_dit import TokenDiTProtenix
+from foldjet_engine import capture
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.token_dit import TokenDiTProtenix
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

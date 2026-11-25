@@ -3,7 +3,7 @@ this route alone, 2026-11-24), and its scale cache is keyed on the weights' vers
 
 import torch
 
-from miniworld_engine.kernels.integrations import pwa_fp8_b200 as F
+from foldjet_engine.kernels.integrations import pwa_fp8_b200 as F
 
 
 def _args(n=2048, s=64, d_msa=256, c=32):

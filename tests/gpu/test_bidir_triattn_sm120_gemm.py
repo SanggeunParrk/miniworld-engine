@@ -17,7 +17,7 @@ pytestmark.append(
 
 
 def _module(kind, starting, backend, seed=0):
-    from miniworld_engine.modules.triangle import BidirectionalTriangleAttention, TriangleAttention
+    from foldjet_engine.modules.triangle import BidirectionalTriangleAttention, TriangleAttention
 
     torch.manual_seed(seed)
     if kind == "bi":
@@ -52,7 +52,7 @@ def _rms(a, b):
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("train", [False, True])
 def test_cutlass_contractions_as_accurate_as_cublas(kind, starting, length, masked, train):
-    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as k
+    from foldjet_engine.kernels.integrations import bidir_triattn_h100 as k
 
     torch.manual_seed(1)
     x = torch.randn(1, length, length, 128, device="cuda", dtype=torch.bfloat16)
@@ -81,7 +81,7 @@ def test_cutlass_contractions_as_accurate_as_cublas(kind, starting, length, mask
 
 
 def test_route_is_taken_from_l256_only():
-    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as k
+    from foldjet_engine.kernels.integrations import bidir_triattn_h100 as k
 
     assert k._sm120_gemm()
     c = torch.randn(4, 32 * 128, 128, device="cuda", dtype=torch.bfloat16)

@@ -26,10 +26,10 @@ def main() -> int:
     a = p.parse_args()
     import torch
     from paper_common import cfg as cfgmod
-    from miniworld_engine import fp8
-    from miniworld_engine.kernels import _capture
-    from miniworld_engine.measure import config
-    from miniworld_engine.modules.primitives import unpadded_masks
+    from foldjet_engine import fp8
+    from foldjet_engine.kernels import _capture
+    from foldjet_engine.measure import config
+    from foldjet_engine.modules.primitives import unpadded_masks
     from torch.profiler import ProfilerActivity, profile
 
     if a.static_weights:

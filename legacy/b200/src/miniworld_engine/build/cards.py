@@ -37,7 +37,7 @@ EXEMPT_KINDS: dict[str, frozenset[str]] = {"sm90": frozenset({"triton-cache"})}
 #: card-independent. A frozenset (not a string) so ``cards & other`` works; use :func:`expand` before intersecting.
 ALL: frozenset[str] = frozenset({"*"})
 
-SRC = "src/miniworld_engine"
+SRC = "src/foldjet_engine"
 #: where this repo is developed: an H100 (docs/gpus/h100/h100.md). Used when no card is named and no GPU is visible (a login node, a CPU job).
 DEFAULT_ACCESSIBLE = ("sm90",)
 ENV_ACCESSIBLE = "MINIWORLD_ACCESSIBLE_CARDS"

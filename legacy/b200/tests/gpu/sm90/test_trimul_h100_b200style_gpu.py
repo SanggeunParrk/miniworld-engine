@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from portable_helpers import relative
 
-from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as K
+from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style as K
 
 pytestmark = [
     pytest.mark.gpu,
@@ -144,11 +144,11 @@ def test_changed_graph_inputs_weights_mask_dropout_dy(d, direction):
 @pytest.mark.parametrize("bidirectional", [False, True])
 @pytest.mark.parametrize("master", [False, True])
 def test_module_dispatch_and_all_gradients(d, bidirectional, master, monkeypatch):
-    from miniworld_engine import settings
-    from miniworld_engine.kernels.integrations import trimul_h100
-    from miniworld_engine.modules.exceptions import ImplementationType
-    from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
-    from miniworld_engine.modules.triangle_multiplication.bidirectional import (
+    from foldjet_engine import settings
+    from foldjet_engine.kernels.integrations import trimul_h100
+    from foldjet_engine.modules.exceptions import ImplementationType
+    from foldjet_engine.modules.triangle_multiplication import TriangleMultiplication
+    from foldjet_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
     )
 

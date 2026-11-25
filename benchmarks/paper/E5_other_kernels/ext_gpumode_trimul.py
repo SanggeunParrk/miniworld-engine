@@ -74,8 +74,8 @@ def _weights(self):
 
 
 def forward(self, pair, mask, dropout_p):
-    from miniworld_engine.modules.functional import dropout_scale, sigmoid_gate
-    from miniworld_engine.modules.primitives import master_autocast
+    from foldjet_engine.modules.functional import dropout_scale, sigmoid_gate
+    from foldjet_engine.modules.primitives import master_autocast
 
     if self.dead and not (self.training or torch.is_grad_enabled()):
         return pair

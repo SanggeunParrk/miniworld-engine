@@ -19,8 +19,8 @@ import torch
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 from _msa_common import err, graph_time, opm_case, pwa_case  # noqa: E402
 
-from miniworld_engine.kernels.integrations import opm_fp8_sm120 as FO  # noqa: E402
-from miniworld_engine.kernels.integrations import pwa_fp8_sm120 as FP  # noqa: E402
+from foldjet_engine.kernels.integrations import opm_fp8_sm120 as FO  # noqa: E402
+from foldjet_engine.kernels.integrations import pwa_fp8_sm120 as FP  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("cases", nargs="+")

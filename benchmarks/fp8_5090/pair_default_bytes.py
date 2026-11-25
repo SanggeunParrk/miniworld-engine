@@ -35,9 +35,9 @@ def _init(m, seed):
 
 
 def build(spec):
-    from miniworld_engine.modules import TriangleAttention
-    from miniworld_engine.modules.transition import Transition
-    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
+    from foldjet_engine.modules import TriangleAttention
+    from foldjet_engine.modules.transition import Transition
+    from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
 
     kind, *a = spec.split(":")
     a = [int(v) for v in a]

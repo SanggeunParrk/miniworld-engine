@@ -12,11 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from miniworld_engine.build import cards as cm
-from miniworld_engine.build import repo_graph as rg
-from miniworld_engine.build import symbols as sy
+from foldjet_engine.build import cards as cm
+from foldjet_engine.build import repo_graph as rg
+from foldjet_engine.build import symbols as sy
 
-SRC = "src/miniworld_engine"
+SRC = "src/foldjet_engine"
 PY310 = "tests/cpu/layout/test_the_source_parses_on_python_310.py"
 KERNEL = f"{SRC}/kernels/adaln/triton/inference.py"
 TRITON_CACHE = f"{SRC}/autotune/data/adaln_gemm_gate_triton/NVIDIA H100 80GB HBM3 (sm90).json"
@@ -62,11 +62,11 @@ MINI = {
         def g(x):
             return x
     """),
-    B: "from miniworld_engine.a import f\nfrom miniworld_engine import a\n\ndef use_f():\n    return f(1)\n\ndef use_g():\n    return a.g(2)\n",
-    C: "import miniworld_engine.a\n\ndef anything():\n    return miniworld_engine.a.g(1)\n",
-    T1: "from miniworld_engine.b import use_f\n\ndef test_f():\n    assert use_f()\n",
-    T2: "from miniworld_engine.b import use_g\n\ndef test_g():\n    assert use_g()\n",
-    T3: "from miniworld_engine.c import anything\n\ndef test_c():\n    assert anything()\n",
+    B: "from foldjet_engine.a import f\nfrom foldjet_engine import a\n\ndef use_f():\n    return f(1)\n\ndef use_g():\n    return a.g(2)\n",
+    C: "import foldjet_engine.a\n\ndef anything():\n    return foldjet_engine.a.g(1)\n",
+    T1: "from foldjet_engine.b import use_f\n\ndef test_f():\n    assert use_f()\n",
+    T2: "from foldjet_engine.b import use_g\n\ndef test_g():\n    assert use_g()\n",
+    T3: "from foldjet_engine.c import anything\n\ndef test_c():\n    assert anything()\n",
 }
 
 
@@ -240,7 +240,7 @@ class _Row:
 
 @pytest.fixture
 def triton_result(graph: rg.Graph, monkeypatch):
-    from miniworld_engine.autotune import plan
+    from foldjet_engine.autotune import plan
 
     monkeypatch.setattr(plan, "status", lambda path=None: {"units": 0, "stale": {}, "schema": 2})
     monkeypatch.setattr(rg, "derivation_plans", dict)
@@ -251,7 +251,7 @@ def triton_result(graph: rg.Graph, monkeypatch):
 
 
 def test_stale_triton_caches_are_neither_pending_on_sm90_nor_hidden(graph, triton_result, monkeypatch) -> None:
-    from miniworld_engine.autotune import cache_status
+    from foldjet_engine.autotune import cache_status
 
     rows = [_Row("adaln_gemm_gate_triton", "NVIDIA H100 80GB HBM3 (sm90)"), _Row("adaln_fwd_triton", "NVIDIA H100 80GB HBM3 (sm90)"),
             _Row("adaln_fwd_triton", "NVIDIA RTX A6000 (sm86)")]
@@ -281,7 +281,7 @@ def test_stale_triton_caches_are_neither_pending_on_sm90_nor_hidden(graph, trito
 
 
 def test_check_on_sm90_does_not_fail_on_stale_triton_caches(graph, triton_result, monkeypatch) -> None:
-    from miniworld_engine.autotune import cache_status
+    from foldjet_engine.autotune import cache_status
 
     rows = [_Row(op, "NVIDIA H100 80GB HBM3 (sm90)") for op in ("adaln_gemm_gate_triton", "adaln_fwd_triton", "adaln_epilogue_triton")]
     monkeypatch.setattr(cache_status, "scan", lambda: rows)

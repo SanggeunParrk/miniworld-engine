@@ -8,8 +8,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import MSAPairWeightedAveraging
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import MSAPairWeightedAveraging
 
 pytestmark = [pytest.mark.gpu]
 

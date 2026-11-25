@@ -3,7 +3,7 @@
 This is the single home for two things the modules used to each re-implement:
 
 1. **Public vs internal backend split.**
-   :class:`~miniworld_engine.modules.exceptions.ImplementationType` is the
+   :class:`~foldjet_engine.modules.exceptions.ImplementationType` is the
    *public* module option. The user-facing values are:
 
      * ``PYTORCH``  — the readable reference (also the autograd oracle).
@@ -19,7 +19,7 @@ This is the single home for two things the modules used to each re-implement:
      * H100 (sm_90) / B200 (sm_100): the native CUDA path; a call it does not serve runs the PyTorch
        reference. Never portable (:func:`restricted_card`).
      * every other card: a native CUDA path that serves the call, else the portable family IF the engine
-       holds a record for that exact card (:mod:`miniworld_engine.autotune.records`), else a
+       holds a record for that exact card (:mod:`foldjet_engine.autotune.records`), else a
        :class:`UnrecordedCardWarning` (once per op and card) and the PyTorch reference.
 
    ``settings.force_portable_kernels`` is the internal A/B switch that forces the portable family on every card.
@@ -50,7 +50,7 @@ from enum import Enum
 
 import torch
 
-from miniworld_engine.modules.exceptions import (
+from foldjet_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
@@ -242,7 +242,7 @@ def _trimul_known_best(device: torch.device | None) -> KernelBackend:
     backend: the modules try ``kernels.integrations.trimul_h100`` first and fall through to this
     family for every shape it does not serve. ``settings.trimul_impl`` pins a backend for
     debug/A-B."""
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     override = settings.current().trimul_impl
     if override:
@@ -256,7 +256,7 @@ def restricted_card(device: torch.device | None = None) -> bool:
     untuned portable kernel. ``settings.portable_on_hopper_blackwell`` (or ``force_portable_kernels=True``) lifts it for A/B work."""
     if not torch.cuda.is_available():
         return False
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     current = settings.current()
     if current.portable_on_hopper_blackwell or current.force_portable_kernels:
@@ -283,7 +283,7 @@ def fallback_autocast(x: torch.Tensor, module: torch.nn.Module, active: bool = T
 
 def portable_forced(impl: ImplementationType | str = ImplementationType.MINIWORLD) -> bool:
     """Is the portable family forced for ``impl``'s modules (``settings.force_portable_kernels``, ``MINIWORLD`` only)?"""
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     return settings.current().force_portable_kernels and _coerce(impl) == ImplementationType.MINIWORLD
 
@@ -299,7 +299,7 @@ def portable_leg_allowed(
         return False
     if op is None:
         return True
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     if settings.current().force_portable_kernels:
         return True
@@ -312,7 +312,7 @@ def _torch_on_hopper_blackwell(default: KernelBackend) -> Callable[[torch.device
     when the module is built."""
 
     def pick(device: torch.device | None) -> KernelBackend:
-        from miniworld_engine import settings
+        from foldjet_engine import settings
 
         if restricted_card(device):
             index = device.index if device is not None and device.type == "cuda" else None
@@ -441,7 +441,7 @@ def route_for_card(
     """Where ``miniworld`` runs ``op`` on the card ``name`` / ``capability`` for a call in ``mode`` (``"inference"``: no backward is
     recorded, only the forward kernels run; ``"training"``: all of them), given the forced-portable switch is off.
 
-    The pure rule (no GPU needed; the manifests are the only input, see :mod:`miniworld_engine.autotune.records`):
+    The pure rule (no GPU needed; the manifests are the only input, see :mod:`foldjet_engine.autotune.records`):
 
       * H100 / B200 (capability major 9 or 10): ``PORTABLE`` is returned unchanged -- these cards never reach a portable kernel
         through ``miniworld`` (:func:`restricted_card`), the modules take their CUDA or PyTorch leg, and no record is consulted.
@@ -453,11 +453,11 @@ def route_for_card(
         A missing backward kernel therefore blocks training calls only.
       * otherwise: :class:`UnrecordedCardWarning` once per (op, card, mode) when ``warn``, and ``PYTORCH``.
     """
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     if capability[0] in (9, 10) or native_cuda or settings.current().capture or _assume_recorded:
         return KernelBackend.PORTABLE
-    from miniworld_engine.autotune import records
+    from foldjet_engine.autotune import records
 
     holes = records.missing(op, name, capability, dtype, mode)
     if not holes:
@@ -468,7 +468,7 @@ def route_for_card(
 
 
 def _warn_unrecorded(op: str, name: str, capability: tuple[int, int], mode: str, holes: tuple[str, ...]) -> None:
-    from miniworld_engine.autotune import records
+    from foldjet_engine.autotune import records
 
     key = (op, records.card_key(name, capability), mode)
     if key in _unrecorded_warned:
@@ -480,7 +480,7 @@ def _warn_unrecorded(op: str, name: str, capability: tuple[int, int], mode: str,
         f"{op}: this GPU ({name}, sm_{capability[0]}{capability[1]}) is not recorded in the engine for {calls} (no 'ok' row in "
         f"autotune/manifests for: {shown}) and miniworld has no native CUDA path for it here, so it runs the PyTorch reference: "
         f"correct, but not the engine's speed, and nothing was validated on this card. Verify the output and speed yourself, or "
-        f"record the card with `python -m miniworld_engine.autotune.run_all`. Only to force the engine's portable kernels anyway "
+        f"record the card with `python -m foldjet_engine.autotune.run_all`. Only to force the engine's portable kernels anyway "
         f"(A/B work), pass settings.force_portable_kernels=True.",
         UnrecordedCardWarning,
         stacklevel=5,
@@ -517,7 +517,7 @@ def dtype_gate(op: str, device: torch.device | None, dtype: str, *, training: bo
     """The per-CALL record check for a dtype the module-level resolve (bf16) did not vouch for: ``PORTABLE`` when the engine holds ``ok`` rows
     for what the call launches on this card at ``dtype`` (``"fp32"``), or when the A/B switch / an autotune build asks for the portable family,
     else a warning (once) and ``PYTORCH``. H100 / B200 are not asked (their modules take their CUDA or PyTorch leg first)."""
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     if settings.current().force_portable_kernels:
         return KernelBackend.PORTABLE
@@ -561,7 +561,7 @@ def train_gate(
 ) -> TrainGate | None:
     """The :class:`TrainGate` of a ``miniworld`` module whose build-time ``backend`` is the portable family but whose card lacks ``ok``
     rows for the kernels a backward launches; None when nothing narrows (store it as ``module._train_gate``)."""
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     if backend is not KernelBackend.PORTABLE or _coerce(impl) != ImplementationType.MINIWORLD:
         return None
@@ -570,7 +570,7 @@ def train_gate(
     card = _card_of(device)
     if card is None or card[1][0] in (9, 10) or native_cuda:
         return None
-    from miniworld_engine.autotune import records
+    from foldjet_engine.autotune import records
 
     holes = records.missing(op, card[0], card[1], "bf16", "training")
     return TrainGate(op, card[0], card[1], holes) if holes else None
@@ -600,7 +600,7 @@ def portable_blocked(op: str, device: torch.device | None, *tensors: torch.Tenso
     launches (inference; training when a tensor needs a gradient; ``dtype`` is the precision the rows are asked at, by default the first
     tensor's, :func:`record_dtype`), unless the A/B switch is on: the caller then runs the PyTorch statements, with the same warning as
     the modules. False everywhere else (H100 / B200 keep their own rule, no card keeps the kernel)."""
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     if settings.current().force_portable_kernels:
         return False
@@ -630,7 +630,7 @@ def resolve(
     engine serves this very call on this card. Single entry point behind the per-op ``resolve_*`` wrappers kept below for
     the modules / benchmark harness."""
     impl = _coerce(impl)
-    from miniworld_engine import settings
+    from foldjet_engine import settings
     if settings.current().force_portable_kernels:
         if impl == ImplementationType.ANTHROPIC:
             raise ValueError(f"{op}: {impl.value} conflicts with force_portable_kernels=True")

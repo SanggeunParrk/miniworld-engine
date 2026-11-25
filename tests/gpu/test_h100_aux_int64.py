@@ -44,7 +44,7 @@ def _free():
 
 
 def _tr():
-    from miniworld_engine.kernels.transition.cuda.fused_sm90a import _native_ext
+    from foldjet_engine.kernels.transition.cuda.fused_sm90a import _native_ext
 
     return _native_ext()
 
@@ -189,13 +189,13 @@ def test_big_transition_weight_prep():
 
 
 def _pk():
-    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_pack as P
+    from foldjet_engine.kernels.trimul_inproj.cuda import _h100_pack as P
 
     return P
 
 
 def _ctx():
-    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
+    from foldjet_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
     return T.native_context(torch.device("cuda", torch.cuda.current_device()))
 

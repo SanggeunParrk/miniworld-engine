@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine.kernels.smooth_lddt import (
+from foldjet_engine.kernels.smooth_lddt import (
     refusal,
     smooth_lddt,
     smooth_lddt_reference,
@@ -35,7 +35,7 @@ def _rel(a, e):
                                         (2, 1, 3000, False), (2, 1, 3600, False),   # whole-structure kernels up to N = 3520, tile kernels above
                                         (3, 2, 200, True), (4, 1, 1000, True)])     # the tile kernels forced
 def test_value_and_gradient_match_the_dense_reference(a, b, n, tile, monkeypatch):
-    from miniworld_engine.kernels.smooth_lddt.cuda import sm100
+    from foldjet_engine.kernels.smooth_lddt.cuda import sm100
 
     monkeypatch.setattr(sm100, "FORCE_TILE", tile)
     x, gt, nuc, mask = _case(a, b, n)

@@ -10,11 +10,11 @@ from pathlib import Path
 import pytest
 
 SRC = Path(__file__).resolve().parents[2] / "src"
-PACKAGE = SRC / "miniworld_engine"
+PACKAGE = SRC / "foldjet_engine"
 FILES = sorted(PACKAGE.rglob("*.py"))
 
 #: Build-time scripts, never imported at run time (pyproject excludes them from the wheel).
-NOT_MODULES = ("miniworld_engine.kernels.swa_dit.cuda.gen",)
+NOT_MODULES = ("foldjet_engine.kernels.swa_dit.cuda.gen",)
 #: Optional dependencies (pyproject extras ``flash`` / ``baselines``) a module may import at module level: an ImportError naming one of
 #: these is a missing extra, not a defect.
 OPTIONAL = (
@@ -43,7 +43,7 @@ MODULES = [m for m in (_module_name(p) for p in FILES) if not m.startswith(NOT_M
 
 def test_found_the_package():
     assert len(FILES) > 100
-    assert "miniworld_engine.modules" in MODULES
+    assert "foldjet_engine.modules" in MODULES
 
 
 @pytest.mark.parametrize("path", FILES, ids=[str(p.relative_to(SRC)) for p in FILES])

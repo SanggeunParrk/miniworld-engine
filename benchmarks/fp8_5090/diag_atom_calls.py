@@ -15,7 +15,7 @@ os.environ["MINIWORLD_FP8"] = "safe"
 
 import torch  # noqa: E402
 
-from miniworld_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as F  # noqa: E402
+from foldjet_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as F  # noqa: E402
 
 _orig = F.block
 _n = [0]

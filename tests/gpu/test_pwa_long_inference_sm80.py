@@ -9,9 +9,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import MSAPairWeightedAveraging
-from miniworld_engine.modules.primitives import key_mask, random_input
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import MSAPairWeightedAveraging
+from foldjet_engine.modules.primitives import key_mask, random_input
 
 pytestmark = [pytest.mark.gpu]  # A100 and RTX 5090: the tests skip on other cards themselves
 
@@ -65,7 +65,7 @@ def _free_cuda() -> None:
 
 
 def _longest(d_pair: int) -> int:
-    from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80
+    from foldjet_engine.kernels.pair_weighted_averaging.cuda import sm80
 
     return sm80.max_len(d_pair, False)
 
@@ -140,6 +140,6 @@ def test_pwa_sm120_refuses_past_its_limit(d_pair: int) -> None:
         1, 4, length, 64
     )  # expanded views: the shape without the memory
     pair = torch.empty(1, 1, 1, d_pair, dtype=torch.bfloat16, device="cuda").expand(1, length, length, d_pair)
-    from miniworld_engine.kernels.integrations import pwa_sm80
+    from foldjet_engine.kernels.integrations import pwa_sm80
 
     assert pwa_sm80.refusal(base, msa, pair, None) is not None

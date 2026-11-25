@@ -7,8 +7,8 @@ import math
 
 import pytest
 
-from miniworld_engine.measure import accuracy
-from miniworld_engine.measure import config as cfgmod
+from foldjet_engine.measure import accuracy
+from foldjet_engine.measure import config as cfgmod
 
 CSV_HEADER = "module,model,stream,lengths,depths,dims,options,dtypes,modes,eval_samples,train_samples,source\n"
 

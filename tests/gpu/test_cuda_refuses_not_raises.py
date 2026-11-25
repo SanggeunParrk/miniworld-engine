@@ -18,10 +18,10 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.primitives import BackendUnsupported
-from miniworld_engine.modules.token_dit import TokenDiTChai1, TokenDiTProtenix
-from miniworld_engine.modules.triangle import TriangleAttention
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.primitives import BackendUnsupported
+from foldjet_engine.modules.token_dit import TokenDiTChai1, TokenDiTProtenix
+from foldjet_engine.modules.triangle import TriangleAttention
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 
@@ -80,7 +80,7 @@ def test_token_dit_gate_refuses_what_the_launcher_rejects() -> None:
 @pytest.mark.parametrize(("d_pair", "n_head"), [(384, 12), (64, 2)])  # OpenDDE's two triangle attentions
 @pytest.mark.parametrize("starting", [True, False])
 def test_triattn_row_blocks_under_autocast(monkeypatch: pytest.MonkeyPatch, d_pair: int, n_head: int, starting: bool) -> None:
-    from miniworld_engine.kernels.integrations import triattn_h100_sm90 as tri
+    from foldjet_engine.kernels.integrations import triattn_h100_sm90 as tri
 
     m = _master(TriangleAttention(d_pair=d_pair, n_head=n_head, starting=starting, model="opendde"))
     m.set_backend("cuda")

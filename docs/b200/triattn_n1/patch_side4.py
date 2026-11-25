@@ -1,5 +1,5 @@
 import sys
-p = sys.argv[1] + "/src/miniworld_engine/kernels/integrations/bidir_triattn_h100.py"; s = open(p).read()
+p = sys.argv[1] + "/src/foldjet_engine/kernels/integrations/bidir_triattn_h100.py"; s = open(p).read()
 i0 = s.index("def _backward1(")
 i1 = s.index("def _weights1(")
 body = s[i0:i1]
@@ -15,7 +15,7 @@ old = '''        if starting:  # O[h] = V[h] P[h]^T
 '''
 new = '''        s_dv = None
         if (B200_SIDE & 4) and B == 1 and L <= B200_SIDE_MAX_L and (bo is not None or starting) and _b200():
-            from miniworld_engine.kernels.bias_only_dit.cuda import side
+            from foldjet_engine.kernels.bias_only_dit.cuda import side
 
             s_dv = side.fork(x.device)   # branch: the dV contraction beside the dP contraction, the row dot and the softmax backward
         if starting:  # O[h] = V[h] P[h]^T

@@ -8,7 +8,7 @@ dispatch decision.
 
 So the knobs live here instead, as one explicit object:
 
-    from miniworld_engine import settings
+    from foldjet_engine import settings
     settings.configure(run_autotune=True, capture=True, autotune_kernels={"transition"})
 
 ``configure`` replaces the active settings wholesale and returns the previous value, so a caller can
@@ -392,7 +392,7 @@ class Settings:
     #: Print one ``[miniworld-engine build]`` line to stderr when a JIT build starts and one when it ends (nothing on a cache hit);
     #: False silences them. See docs/kernels/jit-cache.md.
     jit_build_log: bool = True
-    #: Use an installed prebuilt kernel bundle (``miniworld_engine_kernels_<arch>``) before the local JIT cache. See
+    #: Use an installed prebuilt kernel bundle (``foldjet_engine_kernels_<arch>``) before the local JIT cache. See
     #: docs/kernels/prebuilt-kernels.md.
     prebuilt_kernels: bool = True
     #: Compile an artifact the prebuilt bundle and the local cache do not have (development). False raises
@@ -775,7 +775,7 @@ def _warn_about_removed_environment() -> None:
         for n in present
     )
     warnings.warn(
-        "miniworld_engine no longer reads these environment variables; use miniworld_engine.settings.configure(...) "
+        "foldjet_engine no longer reads these environment variables; use foldjet_engine.settings.configure(...) "
         f"(MiniWorld: train.engine_settings): {detail}",
         UserWarning,
         stacklevel=2,

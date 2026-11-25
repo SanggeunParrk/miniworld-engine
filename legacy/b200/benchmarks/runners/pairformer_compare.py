@@ -6,7 +6,7 @@ Measures **inference** and **training** as two separate cases (never a single
   * training  = fwd + bwd (autograd; ours-trimul dispatches to its training
                 kernels inside the module)
 
-The Pairformer is a pure shell (miniworld_engine.modules.Pairformer): it only
+The Pairformer is a pure shell (foldjet_engine.modules.Pairformer): it only
 forwards ``implementation`` to its sub-modules, which each dispatch to the
 concrete kernel for the running GPU. So this measures the composed effect of
 every per-op backend choice under a realistic AF3 block stack.
@@ -36,8 +36,8 @@ import torch
 import torch.nn as nn
 import triton
 
-from miniworld_engine import settings
-from miniworld_engine.modules import ImplementationType, Pairformer, PairformerConfig
+from foldjet_engine import settings
+from foldjet_engine.modules import ImplementationType, Pairformer, PairformerConfig
 
 DEVICE = torch.device("cuda")
 IMPLS = {
@@ -68,7 +68,7 @@ def apply_stability_workarounds() -> list[str]:
     if cap[0] >= 10 and settings.current().transition_cuda_b2b:
         settings.configure(transition_cuda_b2b=False)
         notes.append("transition CUDA b2b disabled on sm_100 (build unsupported) -> triton path")
-    from miniworld_engine.kernels.bias_only_attention import dispatch as _bod
+    from foldjet_engine.kernels.bias_only_attention import dispatch as _bod
 
     # Deliberate monkeypatch of a module-level function; rebinding one is never
     # assignment-compatible to a checker, because the declared type of the name IS that

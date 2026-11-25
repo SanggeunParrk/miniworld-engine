@@ -15,7 +15,7 @@ def _needs_5090() -> None:
 
 
 def _make(d, kind, seed=7):
-    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
+    from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
 
     torch.manual_seed(seed)
     if kind == 0:
@@ -31,7 +31,7 @@ def _make(d, kind, seed=7):
 
 
 def _gold(m, d, kind, x, mask):
-    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
+    from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
 
     if kind == 0:
         r = BidirectionalTriangleMultiplication(d, d_hidden=d, backend="pytorch")
@@ -50,7 +50,7 @@ def _rel(y, y64, x) -> float:
 @pytest.fixture()
 def f8():
     _needs_5090()
-    from miniworld_engine.kernels.trimul_inproj.cuda import sm120_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import sm120_fp8 as F8
 
     old = (F8.POLICY, F8.GUARD, F8._MINL_ENV)
     F8._CACHES.clear()

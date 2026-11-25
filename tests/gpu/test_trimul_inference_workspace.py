@@ -10,8 +10,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import TriangleMultiplication
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import TriangleMultiplication
 
 pytestmark = [pytest.mark.gpu]
 
@@ -64,8 +64,8 @@ def test_wide_transition_row_chunks_are_bitwise(monkeypatch: pytest.MonkeyPatch)
     """The H100 wide Transition (D >= 384) runs a call whose hidden h passes ``_H_ONE_LAUNCH_BYTES`` in launches of whole 128-row tiles
     (OpenDDE's structural pair: h = 22.5 GiB in one launch). Every row is the same tile computation: the chunked output is bitwise the
     one-launch output. Forced here at a small size by lowering the bounds."""
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a as fw
-    from miniworld_engine.modules import Transition
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm90a as fw
+    from foldjet_engine.modules import Transition
 
     m = Transition(384, 2).cuda().float().eval()
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
@@ -89,7 +89,7 @@ def test_wide_transition_row_chunks_are_bitwise(monkeypatch: pytest.MonkeyPatch)
 def test_trimul_split_planes_matches_one_call(outgoing: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     """Planes past ``SPLIT_PLANES_BYTES`` run K1 / the contraction in two halves of the hidden channels: the same output as one call
     (each channel the same K1 dot product; the contraction a bmm over the half's planes) and no allocation of two pair sizes."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as BS
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style as BS
 
     m = TriangleMultiplication(384, outgoing=outgoing).cuda().float().eval()
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))

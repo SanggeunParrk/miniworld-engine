@@ -67,7 +67,7 @@ def _compare(ref_mod, cuda_mod, args, tol: float):
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("L", [128, 256])
 def test_triangle_attention_train_cuda_matches_pytorch(model, starting, masked, L):
-    from miniworld_engine.modules import TriangleAttention
+    from foldjet_engine.modules import TriangleAttention
 
     torch.manual_seed(0)
     ref = TriangleAttention(d_pair=128, n_head=4, d_hidden=128, starting=starting, p_drop=0.0, model=model).cuda().train()
@@ -81,7 +81,7 @@ def test_triangle_attention_train_cuda_matches_pytorch(model, starting, masked, 
 @skip
 @pytest.mark.parametrize("masked", [False, True])
 def test_pairformer_block_train_cuda_matches_pytorch(masked):
-    from miniworld_engine.modules import PairformerBlock, PairformerConfig
+    from foldjet_engine.modules import PairformerBlock, PairformerConfig
 
     torch.manual_seed(0)
     cfg = PairformerConfig(
@@ -100,7 +100,7 @@ def test_pairformer_block_train_cuda_matches_pytorch(masked):
 def test_pairformer_block_train_compiles_and_matches_eager():
     """torch.compile of a Protenix trunk block: the Transition refusal reads the SM count (``fused_fwd_sm80._num_sms``, a lazy module-dict cache); written
     inside the trace it raised ``AssertionError: Guard failed on the same frame it was created`` (``___dict_contains(0, ..._SMS)``)."""
-    from miniworld_engine.modules import PairformerBlock, PairformerConfig
+    from foldjet_engine.modules import PairformerBlock, PairformerConfig
 
     torch.manual_seed(0)
     cfg = PairformerConfig(
@@ -113,7 +113,7 @@ def test_pairformer_block_train_compiles_and_matches_eager():
     single = torch.randn(1, L, 384, device="cuda", generator=g).to(torch.bfloat16)
     args = (_pair(L, 128, 3), _mask(L, False), single)
     eo, eg = _train(eager, args)
-    from miniworld_engine.kernels.transition.cuda import fused_fwd_sm80
+    from foldjet_engine.kernels.transition.cuda import fused_fwd_sm80
 
     fused_fwd_sm80._SMS.clear()  # the cache cold, as in a fresh process whose first call is the compiled one (the eager call above filled it)
     comp.compile()

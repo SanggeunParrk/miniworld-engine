@@ -1,4 +1,4 @@
-"""H100: ``miniworld_engine.fp8.route_stats()`` -- the per-route call counters (observability only). Every route has a counter dict, a reset
+"""H100: ``foldjet_engine.fp8.route_stats()`` -- the per-route call counters (observability only). Every route has a counter dict, a reset
 zeroes them, an ``engine-fp8`` Pairformer block moves the TriMul / Transition / TriAttn counters, and the default (cuda) block moves none and
 returns the same bytes before and after."""
 
@@ -24,7 +24,7 @@ def _total(stats: dict) -> int:
 
 def test_route_stats_shape_and_reset() -> None:
     _needs_h100()
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     s = fp8.route_stats()
     assert set(s) == _ROUTES
@@ -41,8 +41,8 @@ def test_route_stats_shape_and_reset() -> None:
 
 def test_route_stats_follow_engine_fp8_calls() -> None:
     _needs_h100()
-    from miniworld_engine import fp8
-    from miniworld_engine.modules.pairformer import PairformerBlock, PairformerConfig
+    from foldjet_engine import fp8
+    from foldjet_engine.modules.pairformer import PairformerBlock, PairformerConfig
 
     cfg = PairformerConfig(d_pair=128, model="af3")
     a = PairformerBlock(cfg, master_weights=True, backend="cuda")

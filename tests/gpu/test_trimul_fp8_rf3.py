@@ -27,7 +27,7 @@ def _rel(a, b) -> float:
 
 @pytest.fixture
 def fp8_calib():
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     old = (F8.POLICY, F8.GUARD, F8._MINL_ENV)
     F8.POLICY, F8.GUARD, F8._MINL_ENV = "calib", "lazy", "0"
@@ -38,7 +38,7 @@ def fp8_calib():
 
 
 def _make(d: int, outgoing: bool, seed: int = 0):
-    from miniworld_engine.modules.triangle import TriangleMultiplication
+    from foldjet_engine.modules.triangle import TriangleMultiplication
 
     torch.manual_seed(seed)
     m = TriangleMultiplication(d, outgoing=outgoing, master_weights=True, backend="cuda", model="rf3").cuda().eval()

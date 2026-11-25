@@ -8,8 +8,8 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.atom_dit import AtomDiTOpenFold3
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.atom_dit import AtomDiTOpenFold3
 
 pytestmark = [pytest.mark.gpu]
 

@@ -7,8 +7,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import Transition
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import Transition
 
 pytestmark = [
     pytest.mark.gpu,
@@ -24,7 +24,7 @@ def _module(d: int, n: int) -> Transition:
 
 
 def test_inference_row_blocks_equal_the_single_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     kern = copy.deepcopy(_module(256, 2)).set_backend("cuda").eval()
     x = torch.randn(1, 20480, 256, device="cuda", generator=torch.Generator(device="cuda").manual_seed(1)).to(torch.bfloat16)
@@ -36,7 +36,7 @@ def test_inference_row_blocks_equal_the_single_call(monkeypatch: pytest.MonkeyPa
 
 
 def test_xn_is_saved_above_the_recompute_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     module = _module(128, 2)
     kern = copy.deepcopy(module).set_backend("cuda")

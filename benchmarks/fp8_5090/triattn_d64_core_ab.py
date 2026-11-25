@@ -6,9 +6,9 @@ import sys
 
 import torch
 
-from miniworld_engine.kernels.triangle_attention.cuda import sm80_core2 as c2
-from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide as W
-from miniworld_engine.kernels.triangle_attention.cuda import sm120_fp8 as F
+from foldjet_engine.kernels.triangle_attention.cuda import sm80_core2 as c2
+from foldjet_engine.kernels.triangle_attention.cuda import sm80_wide as W
+from foldjet_engine.kernels.triangle_attention.cuda import sm120_fp8 as F
 
 args = sys.argv[1:]
 rounds, H = 6, 4

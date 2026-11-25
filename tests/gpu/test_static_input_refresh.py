@@ -1,4 +1,4 @@
-"""FoldForge R26: one sampler CUDA graph per shape, reused across folds (``miniworld_engine.capture.refresh_static_inputs``).
+"""FoldForge R26: one sampler CUDA graph per shape, reused across folds (``foldjet_engine.capture.refresh_static_inputs``).
 
 A small sampler step -- a token DiT stack (3 blocks) and an atom DiT stack (2 blocks), conditioning shared by the S = 5 samples (stride 0),
 L = 128 tokens -- on static input tensors:
@@ -53,7 +53,7 @@ class Step(torch.nn.Module):
 
     def __init__(self, token_key: str, atom_key: str, n_atoms: int):
         super().__init__()
-        from miniworld_engine.modules import AtomDiT, AtomDiTStack, TokenDiTStack
+        from foldjet_engine.modules import AtomDiT, AtomDiTStack, TokenDiTStack
 
         dc, dp = TOKEN[token_key]
         self.token = _init(TokenDiTStack(token_key, 3, 768, dc, dp, 16, 2, backend="cuda")).float().cuda().eval().requires_grad_(False)
@@ -114,7 +114,7 @@ class Step(torch.nn.Module):
 
 def _capture(step: Step):
     """Fold A's warm-up (2 eager steps) and capture; returns (graph, its outputs, the StaticTables handle)."""
-    from miniworld_engine.capture import static_inputs, static_weights
+    from foldjet_engine.capture import static_inputs, static_weights
 
     graph = torch.cuda.CUDAGraph()
     side = torch.cuda.Stream()
@@ -158,7 +158,7 @@ def _same(out, ref) -> bool:
     ],
 )
 def test_refresh_then_replay_is_eager_on_the_new_fold(token_key, atom_key, n_atoms):
-    from miniworld_engine.capture import clear_weight_caches, refresh_static_inputs, release_static_inputs
+    from foldjet_engine.capture import clear_weight_caches, refresh_static_inputs, release_static_inputs
 
     step = Step(token_key, atom_key, n_atoms)
     try:
@@ -210,7 +210,7 @@ def test_refresh_then_replay_is_eager_on_the_new_fold(token_key, atom_key, n_ato
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) path")
 def test_refresh_refuses_changed_weights_and_reports_timing():
-    from miniworld_engine.capture import StaleStaticInputs, clear_weight_caches, refresh_static_inputs
+    from foldjet_engine.capture import StaleStaticInputs, clear_weight_caches, refresh_static_inputs
 
     step = Step("protenix", "protenix", 128)
     try:
@@ -253,9 +253,9 @@ def test_padded_n_replay_builds_no_tables(atom_key, n_atoms):
     The tables were keyed on a padded copy of the key mask / conformer ids made per call: every call missed, and every replay remade them."""
     from torch.profiler import ProfilerActivity, profile
 
-    from miniworld_engine.capture import clear_weight_caches
-    from miniworld_engine.kernels import _capture as cap
-    from miniworld_engine.kernels.integrations import local_dit_esm, local_dit_h100
+    from foldjet_engine.capture import clear_weight_caches
+    from foldjet_engine.kernels import _capture as cap
+    from foldjet_engine.kernels.integrations import local_dit_esm, local_dit_h100
 
     step = Step("protenix", atom_key, n_atoms)
     stores = (

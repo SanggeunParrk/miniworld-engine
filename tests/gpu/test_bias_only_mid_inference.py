@@ -15,8 +15,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly, pair_bias_all
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly, pair_bias_all
 
 pytestmark = [pytest.mark.gpu]
 
@@ -28,7 +28,7 @@ requires_cuda_card = pytest.mark.skipif(_CARD not in ((9, 0), (8, 0), (12, 0)), 
 def _free_cuda_between_cases():
     """A bias-only runner keeps its last hoisted P and the (pair, mask) key tensors alive: drop the runners and the cache after each case, so the long-L tests of the same process fit."""
     yield
-    from miniworld_engine.kernels.integrations import bias_only_dit
+    from foldjet_engine.kernels.integrations import bias_only_dit
 
     bias_only_dit._RUNNERS.clear()
     gc.collect()
@@ -127,7 +127,7 @@ def test_hoisted_bias_inference_past_1024(dtype: str, length: int, pad: int) -> 
 @pytest.mark.parametrize("length", [1024, 1152, 2048, 3072])
 def test_softmax_hoist_every_length(length: int) -> None:
     """``softmax_hoist`` = the fp32 softmax of fp32 logits (huge, key spread ~500), P rounded to bf16, at the lengths either side of softmax_t's 1024."""
-    from miniworld_engine.kernels.bias_only_dit import cuda as K
+    from foldjet_engine.kernels.bias_only_dit import cuda as K
 
     g = torch.Generator(device="cuda").manual_seed(3)
     lg = 4000.0 + 120.0 * torch.randn(length, length, device="cuda", generator=g)  # [R, L] with R a multiple of L (softmax_t's [H L, L])

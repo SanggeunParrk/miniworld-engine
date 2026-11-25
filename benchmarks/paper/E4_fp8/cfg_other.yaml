@@ -1,5 +1,5 @@
 # E4 other H100 FP8 routes (Transition, atom DiT, OPM, PWA): same harness, fp8_pair.py --config cfg_other.yaml
-requirements: ../../../src/miniworld_engine/requirements/requirements_module.csv
+requirements: ../../../src/foldjet_engine/requirements/requirements_module.csv
 modules: [Transition, AtomDiTProtenix, AtomDiTChai1, AtomDiTOpenFold3, OuterProductMean, MSAPairWeightedAveraging]
 backends: [pytorch, cuda]
 external: []

@@ -68,7 +68,7 @@ def _library_module(self):
 def forward(self, pair, mask, dropout_p):
     from fast_trimul._kernels import _TrainableTriMul
 
-    from miniworld_engine.modules.functional import dropout_scale
+    from foldjet_engine.modules.functional import dropout_scale
 
     if self.dead and not (self.training or torch.is_grad_enabled()):
         return pair

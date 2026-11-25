@@ -1,6 +1,6 @@
 import sys, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension
 L = int(sys.argv[2]); dv = [d for d in sys.argv[1].split(",") if d]; H = 4
 def build(defs, r):
     tag = "_".join(d.replace("=", "") for d in defs) or "base"

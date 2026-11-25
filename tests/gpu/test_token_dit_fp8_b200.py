@@ -14,7 +14,7 @@ YAML = "modules: [TokenDiTProtenix, TokenDiTChai1, TokenDiTRoseTTAFold3, TokenDi
 
 
 def _case(tmp_path, module, L, S=5):
-    from miniworld_engine.measure import config as C
+    from foldjet_engine.measure import config as C
 
     p = tmp_path / "c.yaml"
     p.write_text(YAML)
@@ -28,7 +28,7 @@ def _case(tmp_path, module, L, S=5):
 
 class Rig:
     def __init__(self, case):
-        from miniworld_engine.measure import config as C, speed as S
+        from foldjet_engine.measure import config as C, speed as S
 
         dev = torch.device("cuda")
         self.m = copy.deepcopy(C.build(case, device=dev))
@@ -65,7 +65,7 @@ def _err(y, gold, x):
 
 @pytest.fixture
 def f8():
-    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as F
+    from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as F
 
     old = (F.PLACES, F.MIN_ROWS)
     yield F
@@ -98,7 +98,7 @@ def test_route_accuracy_stress_and_stats(tmp_path, f8, module):
 
 @pytest.mark.parametrize("module", ["TokenDiTProtenix", "TokenDiTChai1"])
 def test_off_and_gated_are_bit_equal(tmp_path, f8, module):
-    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as F
+    from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as F
 
     rig = Rig(_case(tmp_path, module, 128))  # M = 640: below the B200 row gate
     f8.PLACES, f8.MIN_ROWS = frozenset(), None
@@ -144,7 +144,7 @@ def test_rf3_and_boltz2_up_gate_served(tmp_path, f8, monkeypatch):
 
 
 def test_graph_equals_eager(tmp_path, f8):
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     rig = Rig(_case(tmp_path, "TokenDiTProtenix", 384))
     f8.PLACES, f8.MIN_ROWS = f8._parse("expand"), 0

@@ -1,7 +1,7 @@
 """Kernel breakdown of the default TriAttn eval on the 5090 (E4 rows): python triattn_profile.py D,L,H ..."""
 import sys, torch
-import miniworld_engine
-from miniworld_engine.modules import TriangleAttention
+import foldjet_engine
+from foldjet_engine.modules import TriangleAttention
 from torch.profiler import profile, ProfilerActivity
 for c in sys.argv[1:]:
     d, L, h = map(int, c.split(","))

@@ -9,7 +9,7 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.modules import (
+from foldjet_engine.modules import (
     AtomDiT,
     AtomDiTBoltz2,
     AtomDiTChai1,
@@ -27,9 +27,9 @@ from miniworld_engine.modules import (
     from_shared_pair,
     parallel_residual,
 )
-from miniworld_engine.modules.attention import FlatQKNormAugmentedAttention
-from miniworld_engine.modules.primitives import BackendUnsupported
-from miniworld_engine.modules.triangle import TriangleAttentionRF3
+from foldjet_engine.modules.attention import FlatQKNormAugmentedAttention
+from foldjet_engine.modules.primitives import BackendUnsupported
+from foldjet_engine.modules.triangle import TriangleAttentionRF3
 
 
 def _gen(seed: int = 0) -> torch.Generator:

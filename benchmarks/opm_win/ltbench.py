@@ -5,7 +5,7 @@ import argparse, json, statistics, time
 from pathlib import Path
 import torch
 import pynvml
-from miniworld_engine.kernels._nvcc import load_extension, ensure_cuda_home
+from foldjet_engine.kernels._nvcc import load_extension, ensure_cuda_home
 
 ap = argparse.ArgumentParser()
 ap.add_argument("L", type=int); ap.add_argument("S", type=int); ap.add_argument("out")

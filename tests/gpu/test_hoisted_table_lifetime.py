@@ -29,7 +29,7 @@ def _h100() -> bool:
 
 
 def _blocks(n: int = 4):
-    from miniworld_engine.modules import TokenDiT
+    from foldjet_engine.modules import TokenDiT
 
     torch.manual_seed(0)
     out = []
@@ -42,7 +42,7 @@ def _blocks(n: int = 4):
 
 
 def _bias_entries(pair: torch.Tensor) -> int:
-    from miniworld_engine.kernels.conditioned_transition import cuda as C
+    from foldjet_engine.kernels.conditioned_transition import cuda as C
 
     cdata = pair.untyped_storage()._cdata
     return sum(1 for e in C._PAIR_BIAS.values() if not e[1].expired() and e[1].cdata == cdata)
@@ -50,8 +50,8 @@ def _bias_entries(pair: torch.Tensor) -> int:
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) path")
 def test_dropped_capture_handle_frees_the_fold_with_its_pair():
-    from miniworld_engine.capture import static_inputs, static_weights
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.capture import static_inputs, static_weights
+    from foldjet_engine.kernels import _capture
 
     blocks = _blocks()
     g = torch.Generator(device="cuda").manual_seed(1)

@@ -5,7 +5,7 @@ FMA polynomial (``TA_POLY16``) -- deterministic run to run, and inside the engin
 import pytest
 import torch
 
-from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

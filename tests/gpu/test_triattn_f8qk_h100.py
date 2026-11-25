@@ -26,13 +26,13 @@ pytestmark.append(pytest.mark.skipif(not _h100(), reason="H100 (sm_90a)"))
 
 
 def test_switch_is_off_by_default():
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     assert hs.FP8_QK is False
 
 
 def test_qk_scale_is_product_one_and_refuses_out_of_range():
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     sq = hs.qk_scale_from_amax(torch.tensor([16.0, 1.0, 4.0, 0.0]), torch.tensor([1.0, 16.0, 4.0, 3.0]))
     assert sq is not None
@@ -43,7 +43,7 @@ def test_qk_scale_is_product_one_and_refuses_out_of_range():
 
 @pytest.mark.parametrize(("heads", "length"), [(4, 256), (8, 512), (12, 256)])
 def test_f8qk_core_matches_the_f8pv_core_on_dequantized_qk(heads, length):
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     torch.manual_seed(heads + length)
     n = 4
@@ -72,8 +72,8 @@ def test_f8qk_core_matches_the_f8pv_core_on_dequantized_qk(heads, length):
 
 
 def test_module_route_front_and_torch_pass(monkeypatch):
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
-    from miniworld_engine.modules.triangle import TriangleAttention
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.modules.triangle import TriangleAttention
 
     torch.manual_seed(0)
     L = 512

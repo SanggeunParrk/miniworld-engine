@@ -1,8 +1,8 @@
 # poison_gen.py: the training step of TriangleMultiplication / Transition (cuda) with the allocator's free memory pre-filled with 0x00 / 0xFF / 0x7F, eager and graph
 import sys, torch
 import numpy as np
-from miniworld_engine.modules import triangle as T
-from miniworld_engine.modules.transition import Transition
+from foldjet_engine.modules import triangle as T
+from foldjet_engine.modules.transition import Transition
 def poison(b):
     big = torch.empty(40 << 30, dtype=torch.uint8, device="cuda"); big.fill_(b); del big
     small = [torch.empty(1 << 16, dtype=torch.uint8, device="cuda").fill_(b) for _ in range(3000)]; del small

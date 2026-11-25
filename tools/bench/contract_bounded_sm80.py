@@ -11,10 +11,10 @@ import time
 import torch
 from torch.utils.cpp_extension import load
 
-from miniworld_engine.kernels._nvcc import cutlass_include, ensure_cuda_home
+from foldjet_engine.kernels._nvcc import cutlass_include, ensure_cuda_home
 
 ensure_cuda_home()
-SRC = os.path.join(os.path.dirname(__file__), "../../src/miniworld_engine/kernels/trimul_inproj/cuda/sm80/contract_bounded.cu")
+SRC = os.path.join(os.path.dirname(__file__), "../../src/foldjet_engine/kernels/trimul_inproj/cuda/sm80/contract_bounded.cu")
 t0 = time.time()
 ext = load(
     "contract_bounded_sm80_bench4",

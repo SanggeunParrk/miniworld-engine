@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine.modules import ParallelResidual, parallel_residual
+from foldjet_engine.modules import ParallelResidual, parallel_residual
 
 pytestmark = pytest.mark.gpu
 
@@ -42,7 +42,7 @@ def _reference(n, kmask, n0, qblock, uid):
 @pytest.mark.parametrize("variant", ["none", "kmask", "uid_kmask", "uid_only"])
 @pytest.mark.parametrize("uid_dtype", [torch.int32, torch.int64])
 def test_edge_index_equals_the_torch_arithmetic(n, n0, qblock, variant, uid_dtype):
-    from miniworld_engine.kernels.dit_variants import cuda
+    from foldjet_engine.kernels.dit_variants import cuda
 
     if n0 > n:
         pytest.skip("n0 <= n")

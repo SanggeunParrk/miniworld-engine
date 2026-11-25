@@ -14,9 +14,9 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.kernels.integrations import token_dit_train as TT
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.token_dit import TokenDiTProtenix
+from foldjet_engine.kernels.integrations import token_dit_train as TT
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.token_dit import TokenDiTProtenix
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 
@@ -116,8 +116,8 @@ def test_apb_pair_bias_is_deterministic(dp) -> None:
 @pytest.mark.parametrize("dp", [256, 512])
 def test_wide_inference_bias_matches_the_ln_rows_route(dp) -> None:
     """The hoisted bias of a 256 / 512-wide pair: the one-pass kernel against LN rows + cuBLAS (``_pair_bias_wide``), masked keys at -1e30."""
-    from miniworld_engine.kernels.augmented_attention.cuda import apb
-    from miniworld_engine.kernels.conditioned_transition.cuda import _pair_bias_wide
+    from foldjet_engine.kernels.augmented_attention.cuda import apb
+    from foldjet_engine.kernels.conditioned_transition.cuda import _pair_bias_wide
 
     L = 256
     g = torch.Generator(device="cuda").manual_seed(5)

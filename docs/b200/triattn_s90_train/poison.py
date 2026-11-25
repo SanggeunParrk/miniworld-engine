@@ -1,7 +1,7 @@
 # poison.py [graph]: the training step with the allocator's free memory pre-filled with different byte patterns; any output / gradient difference = an uninitialised read
 import sys, torch
 import numpy as np
-from miniworld_engine.modules import triangle as T
+from foldjet_engine.modules import triangle as T
 graph = len(sys.argv) > 1 and sys.argv[1] == "graph"
 RAND = len(sys.argv) > 2 and sys.argv[2] == "rand"
 cases = [({"d_pair": 64, "n_head": 4, "p_drop": 0.0, "starting": True}, 128), ({"d_pair": 64, "n_head": 4, "p_drop": 0.25, "starting": True}, 128),

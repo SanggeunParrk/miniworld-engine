@@ -8,8 +8,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import MSAPairWeightedAveraging
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import MSAPairWeightedAveraging
 
 pytestmark = [pytest.mark.gpu]
 
@@ -18,7 +18,7 @@ _H100 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 
 
 @pytest.fixture
 def f8():
-    from miniworld_engine.kernels.integrations import pwa_fp8 as F8
+    from foldjet_engine.kernels.integrations import pwa_fp8 as F8
 
     saved = (F8.ENABLED, F8.GUARD, F8.WIDE_MIN_N, F8.WIDE_MIN_SN, F8.BIG_N_MULT, F8.BIG_MIN_SN)
     F8.GUARD, F8.WIDE_MIN_N, F8.WIDE_MIN_SN, F8.BIG_N_MULT, F8.BIG_MIN_SN = "lazy", 0, 0, 16, 0
@@ -38,7 +38,7 @@ def _case(d_msa: int, d_pair: int, c: int, n: int, s: int):
 @pytest.mark.skipif(not _H100, reason="H100")
 @pytest.mark.parametrize(("d_msa", "c"), [(64, 8), (128, 8), (128, 16), (256, 32)])
 def test_ln_vt8_wide_matches_ln_vg_w(f8, d_msa: int, c: int) -> None:
-    from miniworld_engine.kernels.integrations import pwa_wide as PW
+    from foldjet_engine.kernels.integrations import pwa_wide as PW
 
     torch.manual_seed(0)
     s, n = 70, 208  # S not a multiple of 64, N a multiple of 16 but not of 64 (the clipped token tail)
@@ -123,7 +123,7 @@ def test_graph_replay_and_guard(f8) -> None:
 
 
 def test_gates_wide() -> None:
-    from miniworld_engine.kernels.integrations import pwa_fp8 as F8
+    from foldjet_engine.kernels.integrations import pwa_fp8 as F8
 
     saved = (F8.ENABLED, F8.WIDE_MIN_N, F8.WIDE_MIN_SN, F8.BIG_N_MULT, F8.BIG_MIN_SN)
     try:
@@ -144,7 +144,7 @@ def test_gates_wide() -> None:
 @pytest.mark.skipif(not _H100, reason="H100")
 def test_ln_vt8_big_keeps_y(f8) -> None:
     """BIG (256 x 8 x 32): with store_y the y bytes are ``ln_vg_w``'s y, and v matches its v."""
-    from miniworld_engine.kernels.integrations import pwa_wide as PW
+    from foldjet_engine.kernels.integrations import pwa_wide as PW
 
     torch.manual_seed(0)
     s, n, d, c = 70, 192, 256, 32

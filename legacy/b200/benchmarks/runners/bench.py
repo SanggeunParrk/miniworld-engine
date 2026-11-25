@@ -13,7 +13,7 @@ from typing import Any, Literal, NamedTuple, Protocol, TypedDict, cast
 # When run as `python benchmarks/runners/bench.py`, sys.path[0] is
 # `.../benchmarks/runners`, which can
 # shadow stdlib `profile`. Point it at the repo root and add `src/` so the
-# `miniworld_engine` package imports without an editable install.
+# `foldjet_engine` package imports without an editable install.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if sys.path and Path(sys.path[0]).resolve() == Path(__file__).resolve().parent:
     sys.path[0] = str(_REPO_ROOT)
@@ -46,7 +46,7 @@ from omegaconf import DictConfig
 from pydantic import BaseModel, model_validator
 from triton.runtime.autotuner import Autotuner
 
-from miniworld_engine.modules import (
+from foldjet_engine.modules import (
     AdaptiveLayerNorm,
     AugmentedAttentionPairBias,
     ConditionedTransition,
@@ -55,15 +55,15 @@ from miniworld_engine.modules import (
     TriangleAttention,
     TriangleMultiplication,
 )
-from miniworld_engine.modules.swa_atom_attention import SWA3DRoPEAttention
-from miniworld_engine.modules.swa_atom_attention.module import build_attention_params
-from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import (
+from foldjet_engine.modules.swa_atom_attention import SWA3DRoPEAttention
+from foldjet_engine.modules.swa_atom_attention.module import build_attention_params
+from foldjet_engine.modules.triangle_multiplication.baseline_dtv1 import (
     fused_triangle_multiplicative_update_dtv1,
 )
-from miniworld_engine.modules.triangle_multiplication.baseline_dtv1_bidir import (
+from foldjet_engine.modules.triangle_multiplication.baseline_dtv1_bidir import (
     fused_bidirectional_dtv1,
 )
-from miniworld_engine.modules.triangle_multiplication.bidirectional import (
+from foldjet_engine.modules.triangle_multiplication.bidirectional import (
     BidirectionalTriangleMultiplication,
 )
 
@@ -810,7 +810,7 @@ def _payload_refusal(exc: BaseException) -> str | None:
         seen.add(id(current))
         if type(current).__name__ == "PayloadUnavailable" and type(
             current
-        ).__module__.startswith("miniworld_engine.baselines.anthropic"):
+        ).__module__.startswith("foldjet_engine.baselines.anthropic"):
             return f"{type(current).__module__}.PayloadUnavailable: {current}"
         if (
             type(current).__name__ == "FPFFallback"
@@ -839,7 +839,7 @@ def implementation_environment(implementation: str):
     key = implementation.strip().lower()
     names = (*_ANTHROPIC_PAYLOAD_ENV, *_ENGINE_MSA_PATH_ENV, *_UPSTREAM_CFG_ENV)
     saved = {name: os.environ.get(name) for name in names}
-    from miniworld_engine import settings as _settings
+    from foldjet_engine import settings as _settings
 
     previous_settings = (
         _settings.configure(force_portable_kernels=True) if key in PORTABLE_FAMILY_SPECS else None
@@ -938,7 +938,7 @@ def _anthropic_upstream_or_unsupported():
     The module-adapter rows (TriangleAttention, Transition) need the release's `common/opt_core`
     runtime: `MINIWORLD_ANTHROPIC_ROOT` names the checkout that contains `common/opt_core`.
     """
-    from miniworld_engine.baselines import anthropic as upstream
+    from foldjet_engine.baselines import anthropic as upstream
 
     try:
         upstream.configure()
@@ -969,7 +969,7 @@ def capture_cudagraph(
     # — and are silently skipped. A couple of eager fwd(+bwd) iters here fixes that; it's a no-op
     # for normal timing runs (guarded on the capture patch being installed).
     try:
-        from miniworld_engine.autotune import capture as _cap
+        from foldjet_engine.autotune import capture as _cap
 
         _capturing = _cap._orig_bench is not None
     except Exception:
@@ -1487,7 +1487,7 @@ def bench_module_triangle_attention(
         ImplementationType.CUEQUIVARIANCE: "cuequivariance_torch.triangle_attention",
     }.get(spec.impl, spec.impl.value)
     if spec.impl == ImplementationType.MINIWORLD:
-        from miniworld_engine.kernels.integrations import triattn_b200
+        from foldjet_engine.kernels.integrations import triattn_b200
 
         layer0 = layers[0]
         if triattn_b200.serves(layer0, pair, mask):
@@ -1818,7 +1818,7 @@ def bench_module_conditioned_transition(
             # width it recorded the fused b2b path while the composed one ran. The threshold is
             # imported rather than re-typed: a bench that keeps its own copy of a dispatch constant
             # is a second place for it to drift.
-            from miniworld_engine.kernels.conditioned_transition.triton.dispatch import (
+            from foldjet_engine.kernels.conditioned_transition.triton.dispatch import (
                 ATOM_D_MAX,
             )
 
@@ -1987,7 +1987,7 @@ def bench_module_augmented_attention_token(
         def forward(self, single, cond, pair, mask=None, *, compute_dtype=None):
             # Imported here, not at module scope: this file carries `torch` and `nn` only, and
             # an implementation reaches for what it needs at its own branch.
-            from miniworld_engine.modules.functional import sigmoid_gate
+            from foldjet_engine.modules.functional import sigmoid_gate
 
             single = self.ada_ln_in(single, cond)
             pair = self.ln_pair(pair)
@@ -2157,7 +2157,7 @@ def bench_module_swa_atom_attention(
         return y
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
-    from miniworld_engine.modules.swa_atom_attention.module import _flash_backend
+    from foldjet_engine.modules.swa_atom_attention.module import _flash_backend
 
     backend = _flash_backend(DEVICE)
     execution_path = (
@@ -2317,8 +2317,8 @@ def _nondefault_parameters(model: nn.Module) -> None:
 
 def _chai_serves(msa, d_hidden, d_pair) -> bool:
     """Chai-1's grouped OPM runs the fused H100 passes (``kernels.outer_product_mean.chai``) unless the A/B switch forces the portable kernels."""
-    from miniworld_engine import settings
-    from miniworld_engine.kernels.outer_product_mean import chai
+    from foldjet_engine import settings
+    from foldjet_engine.kernels.outer_product_mean import chai
 
     return not settings.current().force_portable_kernels and chai.serves_dims(msa, 8, d_hidden // 8, d_pair)
 
@@ -2341,9 +2341,9 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
     cuequivariance has no OuterProductMean kernel, and triton/cuda are not separate module
     options here (the module only swaps its LayerNorm for them), so both are `unsupported`.
     """
-    from miniworld_engine.baselines import anthropic_msa
-    from miniworld_engine.kernels.integrations import opm_train
-    from miniworld_engine.modules import OuterProductMean
+    from foldjet_engine.baselines import anthropic_msa
+    from foldjet_engine.kernels.integrations import opm_train
+    from foldjet_engine.modules import OuterProductMean
 
     key = implementation.strip().lower()
     anthropic_key = ImplementationType.ANTHROPIC.value
@@ -2584,9 +2584,9 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
       `unsupported`. Needs OPT_CORE_DIR; pwa_train is pinned off for the row (it would otherwise
       serve implementation="anthropic" first).
     """
-    from miniworld_engine.baselines import anthropic_msa
-    from miniworld_engine.kernels.integrations import pwa_train
-    from miniworld_engine.modules import MSAPairWeightedAveraging
+    from foldjet_engine.baselines import anthropic_msa
+    from foldjet_engine.kernels.integrations import pwa_train
+    from foldjet_engine.modules import MSAPairWeightedAveraging
 
     key = implementation.strip().lower()
     anthropic_key = ImplementationType.ANTHROPIC.value
@@ -2836,7 +2836,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
       residual around them (`_anthropic_apb_composition`). `+apb_anthropic_core=fpf_apb` swaps the
       core for `fpf_apb.apb_views` (the token DiT comparison's core; the mask folded into the bias).
     """
-    from miniworld_engine.modules import AttentionPairBias
+    from foldjet_engine.modules import AttentionPairBias
 
     key = implementation.strip().lower()
     supported = {
@@ -3280,7 +3280,7 @@ def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
 
         path = "pytorch"
     elif implementation == "triton_tm1":
-        from miniworld_engine.kernels.tm1.triton.main import triton_tm1
+        from foldjet_engine.kernels.tm1.triton.main import triton_tm1
 
         def run(x):
             # The pair activation, NOT its (M, D) flattening: TritonTM1Function reads
@@ -3341,14 +3341,14 @@ def bench_kernel_gemm_epilogue(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch"
     elif implementation == "layernorm_linear_triton":
-        from miniworld_engine.kernels.layernorm_linear.interface import (
+        from foldjet_engine.kernels.layernorm_linear.interface import (
             layernorm_linear_triton,
         )
 
         kfn = lambda x: layernorm_linear_triton(x, lw, lb, w, None, eps)
         path = "kernels.layernorm_linear.triton.fused"
     elif implementation == "layernorm_linear_te":
-        from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
+        from foldjet_engine.kernels.layernorm_linear.triton.te_style import (
             layernorm_linear_te_fn,
         )
 
@@ -3383,8 +3383,8 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
         )
     dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
     tname = str(dtype).replace("torch.", "")
-    from miniworld_engine.modules.exceptions import ImplementationType
-    from miniworld_engine.modules.transition import Transition
+    from foldjet_engine.modules.exceptions import ImplementationType
+    from foldjet_engine.modules.transition import Transition
 
     D, L, n = conf.d_pair, seq_len, 4
     torch.manual_seed(0)
@@ -3416,12 +3416,12 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref_fn, "module.reference.torch"
     elif implementation == "triton_transition_fused":
-        from miniworld_engine.kernels import triton_transition_fused
+        from foldjet_engine.kernels import triton_transition_fused
 
         kfn = lambda x: triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
         path = "kernels.transition.triton.fused"
     elif implementation == "transition_b2b_ktiled":
-        from miniworld_engine.kernels.transition.triton.fused import (
+        from foldjet_engine.kernels.transition.triton.fused import (
             transition_b2b_ktiled,
         )
 
@@ -3472,17 +3472,17 @@ def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "torch.nn.functional.layer_norm"
     elif implementation == "triton_layernorm":
-        from miniworld_engine.kernels import triton_layernorm
+        from foldjet_engine.kernels import triton_layernorm
 
         kfn = lambda x: triton_layernorm(x, w, b, eps)
         path = "kernels.layernorm.triton.main"
     elif implementation == "layernorm_dispatch":
-        from miniworld_engine.kernels.layernorm.interface import layernorm_kernel
+        from foldjet_engine.kernels.layernorm.interface import layernorm_kernel
 
         kfn = lambda x: layernorm_kernel(x, w, b, eps)
         path = "kernels.layernorm.interface"
     elif implementation == "triton_layernorm_lowreg":
-        from miniworld_engine.kernels.layernorm.triton.lowreg import (
+        from foldjet_engine.kernels.layernorm.triton.lowreg import (
             triton_layernorm_lowreg,
         )
 
@@ -3509,8 +3509,8 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
     """Adaptive LayerNorm forward: y = sigma(scale)*LN(x) + bias, scale/bias = Linear(LN(cond)).
     Rows: pytorch, adaln_inference. `triton_adaln` and `adaln_fused3` are
     gone: no module dispatched to either, so they were deleted with main.py and fused3.py."""
-    from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
-    from miniworld_engine.modules.exceptions import ImplementationType
+    from foldjet_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
+    from foldjet_engine.modules.exceptions import ImplementationType
 
     # The ATOM side: the model's atom DiT builds both adaln and ConditionedTransition at
     # d_hidden = d_cond = 128 (AlphaFold-3's c_atom). The number was already right; the name
@@ -3561,7 +3561,7 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = (lambda x, c: ref_mod(x, c)), "module.reference.torch"
     elif implementation == "adaln_inference":
-        from miniworld_engine.kernels.adaln.triton.inference import adaln_inference
+        from foldjet_engine.kernels.adaln.triton.inference import adaln_inference
 
         kfn = lambda x, c: adaln_inference(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.inference"
@@ -3613,12 +3613,12 @@ def bench_kernel_triangle_attention(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch.sdpa"
     elif implementation == "triton_triangle_attention":
-        from miniworld_engine.kernels import triton_triangle_attention_pair_bias as fn
+        from foldjet_engine.kernels import triton_triangle_attention_pair_bias as fn
 
         kfn = lambda q, k, v, b: fn(q, k, v, b)
         path = "kernels.triangle_attention.triton.main"
     elif implementation == "triton_triangle_attention_atomic":
-        from miniworld_engine.kernels.triangle_attention.triton.atomic import (
+        from foldjet_engine.kernels.triangle_attention.triton.atomic import (
             triton_triangle_attention_pair_bias as fn,
         )
 
@@ -3679,7 +3679,7 @@ def bench_kernel_bias_only_attention(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch.einsum"
     elif implementation == "triton_bias_only_attention":
-        from miniworld_engine.kernels import triton_bias_only_attention
+        from foldjet_engine.kernels import triton_bias_only_attention
 
         kfn = lambda v, b: triton_bias_only_attention(v, b)
         path = "kernels.bias_only_attention.triton.main"
@@ -3735,14 +3735,14 @@ def bench_kernel_augmented_attention(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch.einsum"
     elif implementation == "triton_augmented_attention":
-        from miniworld_engine.kernels import triton_augmented_attention_pair_bias
+        from foldjet_engine.kernels import triton_augmented_attention_pair_bias
 
         # The dispatch wrapper's default: the compute-efficient backend in triton/main.py. The
         # memory-efficient one is the augmented_attention_memory_efficient row below.
         kfn = lambda q, k, v, b: triton_augmented_attention_pair_bias(q, k, v, b)
         path = "kernels.augmented_attention.triton.main"
     elif implementation == "augmented_attention_memory_efficient":
-        from miniworld_engine.kernels.augmented_attention.triton.memory_efficient import (
+        from foldjet_engine.kernels.augmented_attention.triton.memory_efficient import (
             triton_augmented_attention_pair_bias as fn,
         )
 
@@ -3795,7 +3795,7 @@ def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch"
     elif implementation == "triton_tm2":
-        from miniworld_engine.kernels.tm2.triton.main import triton_tm2
+        from foldjet_engine.kernels.tm2.triton.main import triton_tm2
 
         wgt, wpt = (
             wg.t().contiguous(),
@@ -3825,11 +3825,11 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
     artifact named ``..._bf16-mixed_...``. The op is tuned at both precisions -- the A100 cache
     holds ``bfloat16|...`` and ``float32|...`` entries for ``cond_transition_fwd_b2b_triton`` --
     so the bf16 half was declared, cached, and never measured."""
-    from miniworld_engine import kernels
-    from miniworld_engine.modules.conditioned_transition.module import (
+    from foldjet_engine import kernels
+    from foldjet_engine.modules.conditioned_transition.module import (
         ConditionedTransition,
     )
-    from miniworld_engine.modules.exceptions import ImplementationType
+    from foldjet_engine.modules.exceptions import ImplementationType
 
     # The atom side, as in the adaln kernel benches. n is the transition's expansion factor:
     # the model sets `condition.transition_n: 2`, so 4 measured a shape twice as wide as the
@@ -3902,7 +3902,7 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
     triton_persistent. CSV metrics cover dx/dw/db together; logs also report each gradient."""
     import json
 
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     D, L = conf.d_pair, seq_len
     dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
@@ -3949,7 +3949,7 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
         # No `triton_partial`: 3d5a0a2c deleted the partial backward path and `_bwd_partial_impl`
         # with it -- `_VALID_BWD_PATHS` is {"persistent", "atomic", "cuda"}. The import named it
         # anyway, so all three rows died on the import, not just the one that no longer exists.
-        from miniworld_engine.kernels.layernorm.compile_native import _dispatch_bwd
+        from foldjet_engine.kernels.layernorm.compile_native import _dispatch_bwd
 
         # Use the same opaque entry as production autograd in every execution regime.
         # Tracing the private launchers enters shape-key construction and graph-breaks.
@@ -3962,7 +3962,7 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
             raise UnsupportedBenchmark(
                 f"{conf.target}/{implementation}: unsupported configuration"
             )
-        from miniworld_engine.kernels.layernorm.compile_native import _dispatch_bwd
+        from foldjet_engine.kernels.layernorm.compile_native import _dispatch_bwd
 
         kfn = lambda: _dispatch_bwd(dy, x, w, mean, rstd)
         path = "kernels.layernorm.compile_native._dispatch_bwd[cuda]"
@@ -4057,7 +4057,7 @@ def bench_kernel_gemm_gate_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = torch_bwd, "pytorch"
     elif implementation == "gate_elem_bwd":
-        from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
+        from foldjet_engine.kernels.trimul_inproj.triton.gate_elem import (
             gate_elem_bwd,
         )
 
@@ -4140,7 +4140,7 @@ def bench_kernel_dual_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = torch_bwd, "pytorch"
     elif implementation == "front_bwd_fused":
-        from miniworld_engine.kernels.trimul_inproj.triton.back_fused import (
+        from foldjet_engine.kernels.trimul_inproj.triton.back_fused import (
             front_bwd_fused,
         )
 
@@ -4217,8 +4217,8 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
         raise UnsupportedBenchmark(
             "backward-only autograd uses a prebuilt eager graph; compiled backward is unsupported"
         )
-    from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
-    from miniworld_engine.modules.exceptions import ImplementationType
+    from foldjet_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
+    from foldjet_engine.modules.exceptions import ImplementationType
 
     # The ATOM side: the model's atom DiT builds both adaln and ConditionedTransition at
     # d_hidden = d_cond = 128 (AlphaFold-3's c_atom). The number was already right; the name
@@ -4262,7 +4262,7 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         out, path = ref_mod(x, c), "module.reference.torch"
     elif implementation == "adaln_train":
-        from miniworld_engine.kernels.adaln.triton.training import adaln_train
+        from foldjet_engine.kernels.adaln.triton.training import adaln_train
 
         out = adaln_train(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.training"
@@ -4309,8 +4309,8 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
         )
     dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
     tname = str(dtype).replace("torch.", "")
-    from miniworld_engine.modules.exceptions import ImplementationType
-    from miniworld_engine.modules.transition import Transition
+    from foldjet_engine.modules.exceptions import ImplementationType
+    from foldjet_engine.modules.transition import Transition
 
     D, L, n = conf.d_pair, seq_len, 4
     torch.manual_seed(0)
@@ -4352,7 +4352,7 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         out, path = ref_mod._torch_forward(x) + x, "module.reference.torch"
     elif implementation == "triton_transition_fused":
-        from miniworld_engine.kernels import triton_transition_fused
+        from foldjet_engine.kernels import triton_transition_fused
 
         out = triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
         path = "kernels.transition.triton.fused"
@@ -4428,7 +4428,7 @@ def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         out, path = F.linear(F.layer_norm(x, (D,), lw, lb, eps), w), "pytorch.autograd"
     elif implementation == "layernorm_linear_te":
-        from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
+        from foldjet_engine.kernels.layernorm_linear.triton.te_style import (
             layernorm_linear_te_fn,
         )
 
@@ -4450,7 +4450,7 @@ def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
     )
 
 
-# A kernel target is named after the kernel FAMILY in `src/miniworld_engine/kernels/registry/registry.csv`
+# A kernel target is named after the kernel FAMILY in `src/foldjet_engine/kernels/registry/registry.csv`
 # that it benches -- `triangle_attention`, `bias_only_attention`, `augmented_attention`,
 # `layernorm`, `adaln`, `conditioned_transition` (whose target benches the
 # post-AdaLN `_tail` of the family). The four exceptions bench a fused OP SHAPE that several
@@ -4493,7 +4493,7 @@ def _bench_dit_variant(conf, seq_len, implementation, fabric, *, atom: bool):
     * triton -- the same module under `settings.force_portable_kernels` (the A/B switch, any card): the portable path.
     `execution_path` says which one ran.
     The conditioning is shared by the samples (the variants' contract); a tenth of the keys are padding (`mask_prob`)."""
-    from miniworld_engine.modules import dit_variant as dv
+    from foldjet_engine.modules import dit_variant as dv
 
     if implementation.strip().lower() == ImplementationType.ANTHROPIC.value:
         raise UnsupportedBenchmark("the DiT variants have no Anthropic composition")
@@ -4550,9 +4550,9 @@ def _bench_dit_variant(conf, seq_len, implementation, fabric, *, atom: bool):
     if spec.impl == ImplementationType.PYTORCH:
         execution_path = "kernels.dit_variants.reference[torch]"
     else:
-        from miniworld_engine.kernels.dit_variants import interface
-        from miniworld_engine.kernels.dit_variants.cuda import infer32, train
-        from miniworld_engine.kernels.dit_variants.triton import portable
+        from foldjet_engine.kernels.dit_variants import interface
+        from foldjet_engine.kernels.dit_variants.cuda import infer32, train
+        from foldjet_engine.kernels.dit_variants.triton import portable
 
         with torch.set_grad_enabled(is_train):
             h100 = (interface.atom_serves(model, single, cond, pair, mask, uid) if atom else interface.serves(model, single, cond, pair, mask))
@@ -4653,7 +4653,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     """
     if conf.dit_variant:
         return _bench_dit_variant(conf, seq_len, implementation, fabric, atom=False)
-    from miniworld_engine.modules.dit import DiTBlock
+    from foldjet_engine.modules.dit import DiTBlock
 
     length = seq_len
     d_single = conf.d_single_token
@@ -4760,7 +4760,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         fwd_kw = {"extra_pair_bias": torch.randn(length, length, device=DEVICE, dtype=dtype)}
 
     def _token_dit_train_serves(block, single, cond, pair, mask) -> bool:
-        from miniworld_engine.kernels.integrations import token_dit_train
+        from foldjet_engine.kernels.integrations import token_dit_train
 
         with torch.enable_grad():
             return token_dit_train.serves(block, single, cond, pair, mask)
@@ -4769,8 +4769,8 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         """None when `integrations.token_dit.serves()` takes this call (the fused H100 token
         runner), else why not, named from the conditions `serves()` checks. Nested: the CPU
         contract tests execute the bench_module_* functions in a namespace of their own."""
-        from miniworld_engine import settings
-        from miniworld_engine.kernels.integrations import token_dit
+        from foldjet_engine import settings
+        from foldjet_engine.kernels.integrations import token_dit
 
         with torch.set_grad_enabled(is_train):  # the grad mode the timed step runs in
             if token_dit.serves(block, single, cond, pair):
@@ -5122,10 +5122,10 @@ def bench_swa_component_audit(conf, seq_len, implementation, fabric):
 
     import torch.nn.functional as F
 
-    from miniworld_engine import kernels, ops
-    from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
-    from miniworld_engine.modules.swa_atom_attention.module import apply_rotary_emb_3d
-    from miniworld_engine.modules.swa_dit import SWADiTBlock
+    from foldjet_engine import kernels, ops
+    from foldjet_engine.kernels.rope.interface import qk_norm_rope_3d
+    from foldjet_engine.modules.swa_atom_attention.module import apply_rotary_emb_3d
+    from foldjet_engine.modules.swa_dit import SWADiTBlock
 
     names = {"modulation", "rope", "swiglu", "residual", "sigmoid_gate"}
     requested = set(conf.swa_kernels if conf.swa_kernels is not None else names)
@@ -5464,10 +5464,10 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
         or conf.swa_active_gates
     ):
         return bench_swa_component_audit(conf, seq_len, implementation, fabric)
-    from miniworld_engine.modules.swa_atom_attention.module import (
+    from foldjet_engine.modules.swa_atom_attention.module import (
         build_attention_params,
     )
-    from miniworld_engine.modules.swa_dit import SWADiTBlock
+    from foldjet_engine.modules.swa_dit import SWADiTBlock
 
     anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
     if anthropic:
@@ -5489,7 +5489,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     n_head = 4
     if not conf.swa_dit_fused:
-        from miniworld_engine import settings as _settings
+        from foldjet_engine import settings as _settings
 
         _settings.configure(swa_dit_fused=False)
 
@@ -5635,7 +5635,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
         fabric.backward(y, dy)
         return y
 
-    from miniworld_engine.modules.swa_atom_attention.module import _flash_backend
+    from foldjet_engine.modules.swa_atom_attention.module import _flash_backend
 
     backend = _flash_backend(DEVICE)
     return measured_result(
@@ -5861,8 +5861,8 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
     """
     if conf.dit_variant:
         return _bench_dit_variant(conf, seq_len, implementation, fabric, atom=True)
-    from miniworld_engine.modules.local_dit import LocalDiTBlock
-    from miniworld_engine.modules.local_dit.module import KEYS, QUERIES, windows
+    from foldjet_engine.modules.local_dit import LocalDiTBlock
+    from foldjet_engine.modules.local_dit.module import KEYS, QUERIES, windows
 
     anthropic = implementation.strip().lower() == ImplementationType.ANTHROPIC.value
     if anthropic:
@@ -5890,7 +5890,7 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
         raise UnsupportedBenchmark(f"local_dit_preset must be '' or 'esmfold2', got {conf.local_dit_preset!r}")
     if esm and anthropic:
         raise UnsupportedBenchmark("the Anthropic atom block is the AF3 one, not ESMFold2's")
-    from miniworld_engine.modules.local_dit import ESMFOLD2
+    from foldjet_engine.modules.local_dit import ESMFOLD2
 
     block_kw = dict(ESMFOLD2) if esm else {"cross_attention": True}
     n_keys = 192 if esm else KEYS
@@ -5984,11 +5984,11 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
     elif spec.impl == ImplementationType.PYTORCH:
         execution_path = "module.reference.torch"
     else:
-        from miniworld_engine.kernels.integrations import local_dit as fused
+        from foldjet_engine.kernels.integrations import local_dit as fused
 
         with torch.set_grad_enabled(is_train):
             if esm:
-                from miniworld_engine.kernels.integrations import local_dit_h100 as _h100
+                from foldjet_engine.kernels.integrations import local_dit_h100 as _h100
 
                 served = bool(_h100.matches(model.layers[0], single, cond, pair, mask, fwd_kw["rope"]))
             else:
@@ -6094,7 +6094,7 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
     channels).
     Inference rows carry accuracy columns against an fp32 PyTorch block on the same (non-default) weights and inputs.
     """
-    from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
+    from foldjet_engine.modules.bias_only_dit import BiasOnlyDiTBlock
 
     spec = portable_miniworld_spec(
         implementation
@@ -6132,7 +6132,7 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
 
         def forward(self, single, cond, pair, mask=None):
             if conf.per_sample_pair:  # a pair per sample: every block's bias from ONE LayerNorm + GEMM (the stack's hoist), then the blocks
-                from miniworld_engine.modules.bias_only_dit import pair_bias_all
+                from foldjet_engine.modules.bias_only_dit import pair_bias_all
 
                 biases = pair_bias_all(list(self.layers), pair)
                 for layer, bias in zip(self.layers, biases, strict=True):
@@ -6198,7 +6198,7 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
     if spec.impl == ImplementationType.PYTORCH:
         execution_path = "module.reference.torch"
     elif per_sample:
-        from miniworld_engine.kernels.integrations import bias_only_dit as fused_infer
+        from foldjet_engine.kernels.integrations import bias_only_dit as fused_infer
 
         with torch.set_grad_enabled(is_train):
             served = (
@@ -6219,8 +6219,8 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
             else "modules.bias_only_dit.BiasOnlyDiTBlock[reference composition: the per-sample bias path declined]"
         )
     else:
-        from miniworld_engine.kernels.integrations import bias_only_dit as fused
-        from miniworld_engine.kernels.integrations import bias_only_dit_train as fused_train
+        from foldjet_engine.kernels.integrations import bias_only_dit as fused
+        from foldjet_engine.kernels.integrations import bias_only_dit_train as fused_train
 
         with torch.set_grad_enabled(is_train):
             served = (fused_train if is_train else fused).serves(
@@ -6481,7 +6481,7 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
 #: -- `registry.csv`'s `arch`, gated by `run_all.meets_arch` -- and did not have for bench
 #: implementations. Neither derivation works: an implementation's `path=` string names a function
 #: or a package as often as a file (22 of 34 map), and its imports go through the flat
-#: `miniworld_engine.kernels` re-export (16 of 32). So it is declared, and a test holds every key
+#: `foldjet_engine.kernels` re-export (16 of 32). So it is declared, and a test holds every key
 #: against the real target and implementation names so it cannot drift into naming nothing.
 #:
 #: Every entry must be the message that card actually produced, not a guess. An implementation
@@ -6514,7 +6514,7 @@ def runnable_here(target: str, implementation: str) -> bool:
     written twice, which is exactly how a CuTe transition row once stayed ungated on the backward
     target after the forward one was fixed.
     """
-    from miniworld_engine.autotune.run_all import meets_arch
+    from foldjet_engine.autotune.run_all import meets_arch
 
     want = min_arch_for(target, implementation)
     return True if want is None else meets_arch({"arch": want})
@@ -6566,43 +6566,43 @@ def target_dir(level: str, target: str) -> Path:
 # now that the two namespaces share names (`triangle_attention` is both).
 AUTOTUNE_MODULES = {
     "triangle_multiplication": [
-        "miniworld_engine.modules.triangle_multiplication.baseline_dtv1",
-        "miniworld_engine.kernels.layernorm.triton.main",
-        "miniworld_engine.kernels.tm1.triton.main",
-        "miniworld_engine.kernels.tm2.triton.main",
+        "foldjet_engine.modules.triangle_multiplication.baseline_dtv1",
+        "foldjet_engine.kernels.layernorm.triton.main",
+        "foldjet_engine.kernels.tm1.triton.main",
+        "foldjet_engine.kernels.tm2.triton.main",
     ],
     "triangle_multiplication_bidirectional": [
-        "miniworld_engine.modules.triangle_multiplication.baseline_dtv1",
-        "miniworld_engine.kernels.layernorm.triton.main",
-        "miniworld_engine.kernels.tm1.triton.main",
-        "miniworld_engine.kernels.tm2.triton.main",
-        "miniworld_engine.kernels.trimul_inproj.triton.back_fused",
+        "foldjet_engine.modules.triangle_multiplication.baseline_dtv1",
+        "foldjet_engine.kernels.layernorm.triton.main",
+        "foldjet_engine.kernels.tm1.triton.main",
+        "foldjet_engine.kernels.tm2.triton.main",
+        "foldjet_engine.kernels.trimul_inproj.triton.back_fused",
     ],
     "triangle_attention": [
-        "miniworld_engine.kernels.layernorm.triton.main",
-        "miniworld_engine.kernels.bias_only_attention.triton.gate_out",
-        "miniworld_engine.kernels.triangle_attention.triton.main",
+        "foldjet_engine.kernels.layernorm.triton.main",
+        "foldjet_engine.kernels.bias_only_attention.triton.gate_out",
+        "foldjet_engine.kernels.triangle_attention.triton.main",
     ],
     "transition": [
-        "miniworld_engine.kernels.layernorm.triton.main",
-        "miniworld_engine.kernels.transition.triton.main",
-        "miniworld_engine.kernels.transition.triton.fused",
+        "foldjet_engine.kernels.layernorm.triton.main",
+        "foldjet_engine.kernels.transition.triton.main",
+        "foldjet_engine.kernels.transition.triton.fused",
     ],
     "conditioned_transition": [
-        "miniworld_engine.kernels.conditioned_transition.triton.inference",
-        "miniworld_engine.kernels.conditioned_transition.triton.composed",
-        "miniworld_engine.kernels.conditioned_transition.triton.training",
+        "foldjet_engine.kernels.conditioned_transition.triton.inference",
+        "foldjet_engine.kernels.conditioned_transition.triton.composed",
+        "foldjet_engine.kernels.conditioned_transition.triton.training",
     ],
     "adaptive_layernorm": [
-        "miniworld_engine.kernels.adaln.triton.main",
+        "foldjet_engine.kernels.adaln.triton.main",
     ],
     "augmented_attention_token": [
-        "miniworld_engine.kernels.layernorm.triton.main",
-        "miniworld_engine.kernels.augmented_attention.triton.main",
+        "foldjet_engine.kernels.layernorm.triton.main",
+        "foldjet_engine.kernels.augmented_attention.triton.main",
     ],
     "augmented_attention_atom": [
-        "miniworld_engine.kernels.layernorm.triton.main",
-        "miniworld_engine.kernels.augmented_attention.triton.main",
+        "foldjet_engine.kernels.layernorm.triton.main",
+        "foldjet_engine.kernels.augmented_attention.triton.main",
     ],
 }
 
@@ -6713,7 +6713,7 @@ def _compile_wrap_now() -> str:
     (see kernels._compile), so by the time a row is written it is a fact about this process, not
     a request that might not have been honoured.
     """
-    from miniworld_engine import settings as _s
+    from foldjet_engine import settings as _s
 
     return _s.current().compile_wrap
 
@@ -6992,7 +6992,7 @@ def main(cfg: DictConfig) -> None:
             raise SystemExit(1)
         return
     # The config set is chosen at import time via MINIWORLD_CONFIG_DIR (see autotune.configs):
-    # this module's own header imports miniworld_engine.modules, which pulls kernel modules in,
+    # this module's own header imports foldjet_engine.modules, which pulls kernel modules in,
     # so selecting here would already be too late for every op registered by that chain.
     _cfgdir = str(getattr(cfg, "config_dir", "") or "")
     if _cfgdir and _cfgdir != os.environ.get("MINIWORLD_CONFIG_DIR", ""):
@@ -7026,7 +7026,7 @@ def main(cfg: DictConfig) -> None:
             "cudagraph=manual|graphed, or allow_eager=true for the ref1 eager floor."
         )
         raise ValueError(msg)
-    from miniworld_engine.autotune.capture import install_launch_recorder
+    from foldjet_engine.autotune.capture import install_launch_recorder
 
     install_launch_recorder()  # coverage accounting; no effect on what or how anything is benched
     conf.implementations = expand_implementations(
@@ -7064,7 +7064,7 @@ def main(cfg: DictConfig) -> None:
     # autotuner so every config benched during this sweep is recorded per (op, dtype, bucket)
     # and written to the runtime cache at the end. Pair with settings.run_autotune so the full
     # grid (not a cached top-K) is benched. No-op otherwise; never affects benchmark numbers.
-    from miniworld_engine import settings as _settings
+    from foldjet_engine import settings as _settings
 
     _capture_on = (
         _settings.current().capture
@@ -7073,8 +7073,8 @@ def main(cfg: DictConfig) -> None:
         )  # shard build turns capture on by itself
     )
     if _capture_on:
-        from miniworld_engine import settings as _settings
-        from miniworld_engine.autotune import capture as _capture
+        from foldjet_engine import settings as _settings
+        from foldjet_engine.autotune import capture as _capture
 
         _pin = (getattr(conf, "pin_gate_backend", "") or "").strip().lower()
         # A capture MUST bench the full grid: with run_autotune off, make_cache_prune narrows the
@@ -7139,7 +7139,7 @@ def main(cfg: DictConfig) -> None:
 
     if conf.mode == "inference":
         # inference weights never change between graph replays: no repacking inside the captured graph (kernels/_capture.py)
-        from miniworld_engine.kernels import _capture as _kernel_capture
+        from foldjet_engine.kernels import _capture as _kernel_capture
 
         _kernel_capture.set_static_weights(True)
         # and the conditioning / pair tensors are the sampler's per-item inputs: hoisted tables are served, not recomputed, in a replay
@@ -7252,7 +7252,7 @@ def main(cfg: DictConfig) -> None:
         print(_capture.summary())
         shard = getattr(conf, "autotune_shard", "") or ""
         if shard:
-            # Dedicated parallel builder (miniworld_engine.autotune.builder): dump this run's
+            # Dedicated parallel builder (foldjet_engine.autotune.builder): dump this run's
             # timings to its OWN shard file instead of the in-repo cache, so many parallel
             # capture jobs never race on the committed tree. A single merge step folds shards in.
             n_ops = _capture.dump_shard(shard)
@@ -7272,7 +7272,7 @@ def main(cfg: DictConfig) -> None:
     )
     # Which ops this target actually launched -- the coverage denominator for any claim that a
     # sweep "tested the kernels". Identified by config-list identity (autotune.configs.op_of).
-    from miniworld_engine.autotune.capture import launched_ops
+    from foldjet_engine.autotune.capture import launched_ops
 
     _lo = launched_ops()
     if _lo:

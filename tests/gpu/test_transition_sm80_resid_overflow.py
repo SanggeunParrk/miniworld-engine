@@ -7,8 +7,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine.kernels.transition.cuda import fused_fwd_sm80
-from miniworld_engine.modules.transition import Transition
+from foldjet_engine.kernels.transition.cuda import fused_fwd_sm80
+from foldjet_engine.modules.transition import Transition
 
 pytestmark = [pytest.mark.gpu]  # the sm_80 family: A100 and RTX 5090 (skipped elsewhere below)
 

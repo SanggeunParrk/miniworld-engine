@@ -4,7 +4,7 @@
 # driver (580, CUDA 13.1) loads the release's CUDA-13.0 code natively, so no container and no forward-compatible libcuda are needed.
 # The kits' B200 cells in the release tables were measured on this stack (column NVIDIA_B200:2.13.0+cu130/3.7.1).
 #
-#   KIT_VENV=/path/to/kitvenv130 third_party/anthropic/kit_stack_b200.sh python -m miniworld_engine.measure.speed CONFIG --out OUT.jsonl
+#   KIT_VENV=/path/to/kitvenv130 third_party/anthropic/kit_stack_b200.sh python -m foldjet_engine.measure.speed CONFIG --out OUT.jsonl
 #
 # Environment: KIT_VENV (the kit venv, required), MINIWORLD_ANTHROPIC_ROOT (the release root; default the worktree's upstream copy).
 set -euo pipefail

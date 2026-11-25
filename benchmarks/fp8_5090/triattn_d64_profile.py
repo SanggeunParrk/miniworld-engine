@@ -5,8 +5,8 @@ import sys
 import torch
 from torch.profiler import ProfilerActivity, profile
 
-import miniworld_engine  # noqa: F401
-from miniworld_engine.modules.triangle import TriangleAttention
+import foldjet_engine  # noqa: F401
+from foldjet_engine.modules.triangle import TriangleAttention
 
 args = sys.argv[1:]
 model = "chai1"

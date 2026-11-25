@@ -7,7 +7,7 @@ float32 reference on those rows only.
 import pytest
 import torch
 
-from miniworld_engine.kernels._wide import needs_wide
+from foldjet_engine.kernels._wide import needs_wide
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 EPS = 1e-5
@@ -32,7 +32,7 @@ def _rows(m: int) -> torch.Tensor:
 @requires_card
 def test_layernorm_stats_mmajor_past_2_31() -> None:
     """``stats_triton`` on an m-major (M, 512) view of 2.18e9 elements: (K - 1) * M passes 2**31."""
-    from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
+    from foldjet_engine.kernels.layernorm_linear.triton.stats import stats_triton
 
     k, m = 512, 2**22 + 2**16
     gen = torch.Generator(device="cuda").manual_seed(0)
@@ -51,8 +51,8 @@ def test_layernorm_stats_mmajor_past_2_31() -> None:
 def test_gate_out_channel_major_past_2_31() -> None:
     """The gated output projection (bias-only attention ``_fwd`` and the SWA wrapper on the same body) reading channel-major gate /
     out_r operands of (M, 128) with 127 * M >= 2**31."""
-    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import _fwd
-    from miniworld_engine.kernels.gated_projection.triton.swa import _forward as swa_forward
+    from foldjet_engine.kernels.bias_only_attention.triton.gate_out import _fwd
+    from foldjet_engine.kernels.gated_projection.triton.swa import _forward as swa_forward
 
     dh, n = 128, 64
     m = 2**31 // (dh - 1) + 2**16
@@ -75,7 +75,7 @@ def test_gate_out_channel_major_past_2_31() -> None:
 def test_bias_only_pair_bias_head_major_past_2_31() -> None:
     """``pair_bias_logits`` with 64 heads over R = 34.6M pair rows (C 16): the head-major logits [64, R] have 2.2e9 elements, so
     ``head * R`` passes 2**31 in the forward store and the backward load."""
-    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import _bwd, _fwd
+    from foldjet_engine.kernels.bias_only_attention.triton.pair_bias import _bwd, _fwd
 
     c, n = 16, 64
     r = 2**25 + 2**20

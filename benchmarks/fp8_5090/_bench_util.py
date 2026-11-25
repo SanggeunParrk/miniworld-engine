@@ -14,8 +14,8 @@ def bench(f,n=2):
             e0=torch.cuda.Event(True);e1=torch.cuda.Event(True);e0.record();gr.replay();e1.record();torch.cuda.synchronize();ts.append(e0.elapsed_time(e1))
         return min(ts)
     return (t(g)-t(gf))/n*1e3
-import miniworld_engine
-from miniworld_engine.modules import TriangleMultiplication
+import foldjet_engine
+from foldjet_engine.modules import TriangleMultiplication
 for d in (128,256):
   for L in (256,512,1024,2048):
     try:

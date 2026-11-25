@@ -15,8 +15,8 @@ from portable_helpers import randomize_half_std as _randomize
 from settings_helpers import override_setting
 from settings_helpers import policy_blackwell_portable_off as policy  # noqa: F401
 
-from miniworld_engine.modules.dit import DiTBlock
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.dit import DiTBlock
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,
@@ -49,7 +49,7 @@ def _ref(q, k, v, bias, mask=None):
 @pytest.mark.parametrize("masked", [False, True])
 def test_training_core_tf32(heads, L, masked):
     """attn_fwd_tf32, then attn_dkv_tf32 + attn_dqb_tf32, built for the layout: O, LSE, dq, dk, dv, dbias against fp64."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     H, dh = heads
     A, W = 4, H * dh
@@ -119,7 +119,7 @@ def test_training_core_tf32(heads, L, masked):
 def test_inference_core_tf32(heads, L):
     """attn_inf_tf32 built for the layout: q | k | g [S L, 3 W] with pre-scaled logits, v^T [W, S L], block 1 of a two-block
     hoisted bias; sigmoid(g) * o written over q, against fp64."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     H, dh = heads
     S, W, nb = 3, H * dh, 2
@@ -194,7 +194,7 @@ class _TF32:
     ("S", "L", "qk"), [(5, 384, False), (4, 200, True), (3, 333, False)]
 )
 def test_fused_inference_fp32(layout, S, L, qk, monkeypatch):
-    from miniworld_engine.kernels.integrations import token_dit
+    from foldjet_engine.kernels.integrations import token_dit
 
     _, d = layout
     ref, eng = _pair_of_blocks(layout, qk, seed=11)
@@ -245,7 +245,7 @@ def _run(m, single, cond, pair, mask, w):
 def test_fused_training_fp32(layout, A, L, qk, monkeypatch):
     """The fused fp32 training block (TF32 kernels; L = 200 and odd A through the internal padding) against the fp32 IEEE
     block: output and every gradient within 1.5x the module path's error in the same TF32 regime."""
-    from miniworld_engine.kernels.integrations import token_dit_train
+    from foldjet_engine.kernels.integrations import token_dit_train
 
     _, d = layout
     ref, eng = _pair_of_blocks(layout, qk, seed=21)
@@ -282,7 +282,7 @@ def test_fused_training_fp32(layout, A, L, qk, monkeypatch):
 def test_fused_training_fp32_under_bf16_autocast(layout, monkeypatch):
     """bf16-mixed training runs the model under bf16 autocast: an fp32 block still takes the fp32 (TF32) kernels -- the
     precision follows the tensors -- with the same result as without autocast."""
-    from miniworld_engine.kernels.integrations import token_dit_train
+    from foldjet_engine.kernels.integrations import token_dit_train
 
     _, d = layout
     _, eng = _pair_of_blocks(layout, True, seed=31)

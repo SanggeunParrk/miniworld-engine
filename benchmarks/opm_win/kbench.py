@@ -3,7 +3,7 @@
 cluster 1.  python kbench.py L S OUT.jsonl [--rounds 4] [--variants cl1,cl2,cublas]"""
 import argparse, json, statistics, sys, time
 import torch
-from miniworld_engine.kernels.integrations import opm_train as ot
+from foldjet_engine.kernels.integrations import opm_train as ot
 
 ap = argparse.ArgumentParser()
 ap.add_argument("L", type=int); ap.add_argument("S", type=int); ap.add_argument("out")
@@ -32,15 +32,15 @@ if any(v in a.variants for v in ("pro_s", "nt_unfused", "cnt")):   # the s-major
     V["pro_s"] = lambda: ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False, smajor=True)
     V["nt_mm"] = lambda: torch.mm(a_s.t(), b_s)
     V["nt_unfused"] = lambda: ext.opm_epilogue(torch.mm(a_s.t(), b_s), norm, wo, ob, L, L, res, 1)
-    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+    from foldjet_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
     og = owned_gemm_ext()
     V["cnt"] = lambda: ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, True)   # (prologue + count kernel; minus pro_s)
     V["cnt_mm"] = lambda: og.owned_mm(mask16s.t(), mask16s, False, True)
     cm_ = og.owned_mm(mask16s.t(), mask16s, False, True).clamp_min(1.0)
     print("count by mm == count kernel table", bool(torch.equal(cm_, ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, True)[4])), flush=True)
 if any(v.startswith("chain") or v == "triton" for v in a.variants.split(",")):   # whole inference chains (eager), as the routes run them
-    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext as _og
-    from miniworld_engine.kernels.outer_product_mean.triton.main import triton_outer_product_mean
+    from foldjet_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext as _og
+    from foldjet_engine.kernels.outer_product_mean.triton.main import triton_outer_product_mean
     og2 = _og()
     def _chain(nt):
         p = ext.opm_prologue_wide(m, mk, gam, bet, wa, wb, 1e-5, False, None, False, smajor=nt)

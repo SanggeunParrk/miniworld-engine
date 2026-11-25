@@ -12,10 +12,10 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
-from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
-from miniworld_engine.measure.config import randomize
-from miniworld_engine.modules.triangle import (
+from foldjet_engine.kernels.triangle_attention.cuda import h100_dh
+from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+from foldjet_engine.measure.config import randomize
+from foldjet_engine.modules.triangle import (
     TriangleAttentionAF3,
     TriangleAttentionChai1,
     TriangleAttentionChai1Confidence,

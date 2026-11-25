@@ -24,12 +24,12 @@ from portable_helpers import relative_fp64 as relative
 from portable_helpers import tf32_matmul_flag as tf32
 from settings_helpers import override_setting
 
-from miniworld_engine import settings
-from miniworld_engine.kernels.integrations import bias_only_dit as INF
-from miniworld_engine.kernels.integrations import bias_only_dit_train as TR
-from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
-from miniworld_engine.modules.bias_only_dit import module as bo_module
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine import settings
+from foldjet_engine.kernels.integrations import bias_only_dit as INF
+from foldjet_engine.kernels.integrations import bias_only_dit_train as TR
+from foldjet_engine.modules.bias_only_dit import BiasOnlyDiTBlock
+from foldjet_engine.modules.bias_only_dit import module as bo_module
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,
@@ -380,7 +380,7 @@ def test_declines_what_it_does_not_serve():
 @pytest.mark.parametrize("L", [128, 256, 384, 512, 640, 768])
 @pytest.mark.parametrize("S", [1, 2, 3, 5, 8])
 def test_core_and_softmax_match_fp64(L, S, n_head, d_head):
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T
 
     torch.manual_seed(L + S)
     H, DA = n_head, n_head * d_head
@@ -409,7 +409,7 @@ def test_core_and_softmax_match_fp64(L, S, n_head, d_head):
 @pytest.mark.parametrize("batch", ["1", "0"])
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 def test_every_sample_group_of_the_core(monkeypatch, n_head, d_head, batch):
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T
 
     override_setting(
         monkeypatch, "bias_only_dit_pv_batch", batch
@@ -447,7 +447,7 @@ def test_every_sample_group_of_the_core(monkeypatch, n_head, d_head, batch):
 def test_dpb32_repeatable(L, n_head, d_head):
     """dpb32_sm100.cu (the fp32 port of dpb_sm100.cu): the bias gradient is a fixed-order sum, so reruns are bit-identical (its
     predecessor dpb_tf32.cu was not from L640: several items per CTA); within 3e-3 of fp64 on four input draws; no spills."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T
 
     dev, A, H, DH = torch.cuda.current_device(), 6, n_head, d_head
     DA, M = H * DH, A * L
@@ -485,7 +485,7 @@ def test_dpb32_repeatable(L, n_head, d_head):
 def test_core_tf32_repeatable(L, n_head, d_head):
     """pv_gate_tf32.cu (double-buffered accumulators, several items per CTA from L640 at A = 6): reruns bit-identical, gated and
     ungated (the training dV)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T
 
     dev, A, H, DH = torch.cuda.current_device(), 6, n_head, d_head
     DA, M = H * DH, A * L
@@ -507,7 +507,7 @@ def test_core_tf32_repeatable(L, n_head, d_head):
 def test_swiglu_gemms_match_fp64(M):
     """gemm_glu_tf32.cu: the expand GEMM with the SwiGLU in its epilogue (h, a | b) and the dh GEMM with the SwiGLU backward in its
     epilogue (da | db), TF32 products against fp64; M = 384: an odd number of 128-row tiles (a pair's missing tile)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T
 
     dev, D, H = torch.cuda.current_device(), 768, 1536
     torch.manual_seed(M)
@@ -545,7 +545,7 @@ def test_swiglu_gemms_match_fp64(M):
 def test_fp32_row_kernels_fit_128_registers():
     """Every kernel of the fp32 row extension (defaults and opt-in builds): at most 128 registers, no local memory (spills). The
     three-warp res_adaln_b_bwd is built for two 192-thread blocks per SM: up to 168 registers."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T
 
     cap = {"res_adaln_b_bwd_k": 168}
     bad = [
@@ -559,8 +559,8 @@ def test_fp32_row_kernels_fit_128_registers():
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 @pytest.mark.parametrize("L", [128, 384, 640, 768])
 def test_training_kernels_match_fp64(L, n_head, d_head):
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
-    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as bo_ext
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T
+    from foldjet_engine.kernels.bias_only_dit.cuda.train import ext as bo_ext
 
     F, dev = T.rows32(), torch.cuda.current_device()
     A, H, DH = 6, n_head, d_head
@@ -684,7 +684,7 @@ DEFAULT_ROWS = ("adaln_in_rows", "resgate_adaln_rows", "resgate_out_rows", "swig
 def inf3(monkeypatch):
     """The step on (explicitly, though it is the default), and a spy that the runner really took it (a failed build would fall
     back silently)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import runner as RN
+    from foldjet_engine.kernels.bias_only_dit.cuda import runner as RN
 
     override_setting(monkeypatch, "bias_only_dit_inf3", "1")
     calls = []
@@ -796,7 +796,7 @@ def test_front_kernel_matches_fp64(monkeypatch, da, cl, M, T):
         pytest.skip("front CL 6: 768 attention channels only")
     """bo_front_tf32.cu alone: v | g = (LN(x) s1 + sh1) [Wv; Wg]^T against fp64 (TF32 products: 3e-3), on a table slice with a
     multi-block row stride; v leaves rounded to TF32 (it is the core's MMA operand), g as accumulated."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T32
 
     override_setting(monkeypatch, "bias_only_dit_inf3_cl", str(cl))
     torch.manual_seed(M + da + cl)
@@ -833,7 +833,7 @@ def test_front_kernel_matches_fp64(monkeypatch, da, cl, M, T):
 def test_tail_kernel_matches_fp64(cl, da, M, T):
     """bo_tail_tf32.cu alone: out = x1 + gate2 (silu(xt Wa^T) (xt Wb^T)) Wsq^T, x1 = x + gate1 a Wo^T, xt = LN(x1) s2 + sh2, against
     fp64 -- the block update out - x within 3e-3 (TF32 products) -- and bit-identical on a rerun."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T32
 
     torch.manual_seed(M + da)
     dev = torch.cuda.current_device()
@@ -888,7 +888,7 @@ def test_tail2_kernel_matches_fp64(da, M, T):
     """bo_tail2_tf32.cu (the pair tail: two row tiles x 4 column groups per cluster of 8, tcgen05 cta_group::2) alone against fp64 at
     the CL 8 tail's bounds, its padded scratch fully written (an odd tile count: the missing tile writes its own padding rows and no
     output -- M 128, 640, 3200 = A 5 x L640), and bit-identical on a rerun."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T32
 
     torch.manual_seed(M + da + 7)
     dev = torch.cuda.current_device()
@@ -975,7 +975,7 @@ def test_inf3_graph_is_three_kernels_and_replays(inf3, static, n_head, d_head):
     conditioning tables) are recorded too and the three kernels close the graph. The default step's row kernels never appear."""
     from tests.cuda_graph_nodes import graph_kernels
 
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     _, fast, _ = blocks(seed=5, n_head=n_head, d_head=d_head)
     fast.eval()
@@ -1047,7 +1047,7 @@ def test_inf3_tables_follow_the_conditioning(inf3):
         second = fast(x, c, p)
         assert not torch.equal(first, second)
         assert relative(second, ref(x, c, p)) < 1e-2
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     with torch.no_grad(), _capture.static_weights(), _capture.static_inputs():
         fast(x, c, p)
@@ -1059,7 +1059,7 @@ def test_inf3_tables_follow_the_conditioning(inf3):
 def test_inf3_two_blocks_match_two_single_block_steps(inf3, monkeypatch):
     """FusedBiasOnlyDiT over two blocks (the ping-pong residual buffers, per-block table slices) against the 12-launch step's runner and
     against two single-block three-kernel runners."""
-    from miniworld_engine.kernels.bias_only_dit.cuda.runner import FusedBiasOnlyDiT
+    from foldjet_engine.kernels.bias_only_dit.cuda.runner import FusedBiasOnlyDiT
 
     b1, b2 = blocks(seed=31)[1], blocks(seed=32)[1]
     L, S = 384, 5
@@ -1097,7 +1097,7 @@ def test_inf3_kernels_do_not_spill(n_head, d_head):
     1): up to 168 registers), the PDL core for every sample group (<= 128 registers, its __launch_bounds__(256, 2)). The bar is the
     served cubins: the -DTRACE builds (bench_scripts/bo32_inf3_trace.py only) may spill a few bytes for the %globaltimer stamps
     (front CL 4: 4 B), which this does not check."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T32
 
     dev, da = torch.cuda.current_device(), n_head * d_head
     front, tail = T32.FrontTF32(dev, da), T32.TailTF32(dev, da)
@@ -1195,7 +1195,7 @@ def test_pair_tail_switch_selects_bo_tail2(inf3, monkeypatch, on, L, pair_L):
     """A = 5: the pair tail at L640 / L768 (25 / 30 tiles: one round of clusters of two tiles instead of two), the CL 6 / CL 8 tail at
     L512 / L384; settings.bias_only_dit_inf3_2cta=0 keeps CL 8 / CL 6 everywhere. Read off the runner's choice (a profiler kernel list came back without kernel names late in
     this file's run)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T32
 
     override_setting(monkeypatch, "bias_only_dit_inf3_2cta", on)
     want = pair_L and on == "1"
@@ -1243,7 +1243,7 @@ def _dpb32_case(L, A, H, DH, seed):
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 def test_dpb_pair_tf32_kernel_does_not_spill(n_head, d_head):
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T32
 
     k = T32.Dpb32(torch.cuda.current_device(), nh=n_head, dh=d_head).pair_kernel()
     assert k.lmem == 0, (k.regs, k.lmem)
@@ -1254,7 +1254,7 @@ def test_dpb_pair_tf32_kernel_does_not_spill(n_head, d_head):
 @pytest.mark.parametrize(("L", "A"), [(256, 6), (768, 6), (384, 6)])
 def test_dpb_pair_tf32_matches_fp64(monkeypatch, L, A, n_head, d_head):
     """The TF32 CTA-pair bias gradient where 256 divides L (L384 keeps dpb32_sm100.cu), within 3e-3 of fp64 einsum."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T32
 
     override_setting(monkeypatch, "bias_only_dit_tf32_dpb_pair", "1")
     H, DH = n_head, d_head
@@ -1277,7 +1277,7 @@ def test_dpb_pair_tf32_bit_identical_with_a_poisoned_allocator(
 ):
     """20 runs of the TF32 CTA-pair bias gradient (L768, A48), the allocator's free memory filled with NaN before each, dbias
     allocated afresh (the bound launch rebuilt every fifth run): finite and bit-identical."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+    from foldjet_engine.kernels.bias_only_dit.cuda import tf32 as T32
 
     override_setting(monkeypatch, "bias_only_dit_tf32_dpb_pair", "1")
     L, A, H, DH = 768, 48, n_head, d_head

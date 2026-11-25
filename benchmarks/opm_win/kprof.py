@@ -3,8 +3,8 @@ Calls are spaced by 0.3 s idle (cool-ish clocks); prints kernel name, calls per 
 import argparse, copy, dataclasses, time
 from collections import defaultdict
 import torch
-from miniworld_engine.measure import config, speed
-from miniworld_engine.modules.primitives import unpadded_masks
+from foldjet_engine.measure import config, speed
+from foldjet_engine.modules.primitives import unpadded_masks
 
 ap = argparse.ArgumentParser()
 ap.add_argument("row", type=int); ap.add_argument("L", type=int); ap.add_argument("S", type=int); ap.add_argument("backends", nargs="+")

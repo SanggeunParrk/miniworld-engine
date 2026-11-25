@@ -15,10 +15,10 @@ from portable_helpers import relative_fp64 as relative64
 from portable_helpers import tf32_matmul_flag as tf32
 from settings_helpers import override_setting
 
-from miniworld_engine import settings
-from miniworld_engine.kernels.integrations import bias_only_dit_train as T
-from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine import settings
+from foldjet_engine.kernels.integrations import bias_only_dit_train as T
+from foldjet_engine.modules.bias_only_dit import BiasOnlyDiTBlock
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,

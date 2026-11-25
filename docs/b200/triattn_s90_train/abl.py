@@ -1,7 +1,7 @@
 # abl.py : the head-dim-32 core backward (bwd_kv, bwd_q) with compile-time ablations; per-kernel device time, graph replay (L512 / L768, 4 heads)
 import sys, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension
 from torch.profiler import profile, ProfilerActivity
 VARS = [v.split("+") if v != "base" else [] for v in (sys.argv[1] if len(sys.argv) > 1 else "base").split(",")]
 LS = [int(x) for x in (sys.argv[2] if len(sys.argv) > 2 else "512,768").split(",")]

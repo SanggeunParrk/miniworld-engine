@@ -1,4 +1,4 @@
-"""The prebuilder's plan (``python -m miniworld_engine.kernels._prebuild --list``) on a CPU node: it plans without a GPU and without
+"""The prebuilder's plan (``python -m foldjet_engine.kernels._prebuild --list``) on a CPU node: it plans without a GPU and without
 building, reports no problem, and two runs plan the same artifacts (names and content keys). ``--check`` (the plan against the code and
 requirements_kernel.csv) passes.
 
@@ -24,7 +24,7 @@ ENTRY = re.compile(r"^\[prebuild\]\s+(have|todo) (\S+)\s+(\S+)\s+\[([0-9a-f]{8})
 def _run(*args: str) -> subprocess.CompletedProcess:
     env = {**os.environ, "PYTHONPATH": f"{SRC}{os.pathsep}{os.environ.get('PYTHONPATH', '')}", "CUDA_VISIBLE_DEVICES": ""}
     return subprocess.run(
-        [sys.executable, "-m", "miniworld_engine.kernels._prebuild", "--arch", "sm90a", *args],
+        [sys.executable, "-m", "foldjet_engine.kernels._prebuild", "--arch", "sm90a", *args],
         capture_output=True,
         text=True,
         env=env,
@@ -71,7 +71,7 @@ def test_check_runs(runs):
 def test_plan_is_reentrant():
     """Two plans in one process record the same artifacts: the ``cast`` family's loader is an ``lru_cache``, which kept the first
     plan's stand-in and made the second plan record nothing before ``plan_session`` cleared it."""
-    from miniworld_engine.kernels import _nvcc, _prebuild
+    from foldjet_engine.kernels import _nvcc, _prebuild
 
     _nvcc.ensure_cuda_home()  # as the CLI does before planning
     t = _prebuild.target("sm90a")
@@ -85,7 +85,7 @@ def test_plan_is_reentrant():
 def _list_names(arch: str) -> set[str]:
     env = {**os.environ, "PYTHONPATH": f"{SRC}{os.pathsep}{os.environ.get('PYTHONPATH', '')}", "CUDA_VISIBLE_DEVICES": ""}
     done = subprocess.run(
-        [sys.executable, "-m", "miniworld_engine.kernels._prebuild", "--arch", arch, "--list"],
+        [sys.executable, "-m", "foldjet_engine.kernels._prebuild", "--arch", arch, "--list"],
         capture_output=True,
         text=True,
         env=env,

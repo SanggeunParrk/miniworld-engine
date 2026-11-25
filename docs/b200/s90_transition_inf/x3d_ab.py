@@ -1,8 +1,8 @@
 # x3d_ab.py D,n,M ... : D 384 inference, graph median (L2 flushed) with the 3-D x box (X3D_D384 True) vs the 12 boxes, alternated 3 times in one process; outputs must be bit-identical
 import statistics, sys, torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
-from miniworld_engine.kernels.transition.cuda.fused_sm100a import build_cubins
-from miniworld_engine.modules import Transition
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.kernels.transition.cuda.fused_sm100a import build_cubins
+from foldjet_engine.modules import Transition
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
 def graph(fn):
     s = torch.cuda.Stream(); s.wait_stream(torch.cuda.current_stream())

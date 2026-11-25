@@ -7,8 +7,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import MSAPairWeightedAveraging
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import MSAPairWeightedAveraging
 
 pytestmark = [pytest.mark.gpu]
 
@@ -17,7 +17,7 @@ _H100 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 
 
 @pytest.fixture
 def f8():
-    from miniworld_engine.kernels.integrations import pwa_fp8 as F8
+    from foldjet_engine.kernels.integrations import pwa_fp8 as F8
 
     saved = (F8.ENABLED, F8.GUARD, F8.MIN_N, F8.MIN_S)
     F8.GUARD, F8.MIN_N, F8.MIN_S = "lazy", 0, 0
@@ -36,7 +36,7 @@ def _case(d_pair: int, n: int, s: int):
 
 @pytest.mark.skipif(not _H100, reason="H100")
 def test_ln_vt8_matches_ln_vg(f8) -> None:
-    from miniworld_engine.kernels.integrations import pwa_train as P
+    from foldjet_engine.kernels.integrations import pwa_train as P
 
     torch.manual_seed(0)
     s, n = 96, 256
@@ -109,7 +109,7 @@ def test_graph_replay_and_guard(f8) -> None:
 
 
 def test_gates() -> None:
-    from miniworld_engine.kernels.integrations import pwa_fp8 as F8
+    from foldjet_engine.kernels.integrations import pwa_fp8 as F8
 
     saved = (F8.ENABLED, F8.MIN_N, F8.MIN_S)
     try:

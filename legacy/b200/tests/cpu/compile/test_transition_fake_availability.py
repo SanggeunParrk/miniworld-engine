@@ -6,7 +6,7 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 
 @pytest.mark.parametrize("wide", [False, True])
 def test_supported_fake_transition_never_builds(monkeypatch, wide):
-    from miniworld_engine.kernels.transition.cuda import fused_sm90a, fused_wide_sm90a
+    from foldjet_engine.kernels.transition.cuda import fused_sm90a, fused_wide_sm90a
 
     backend = fused_wide_sm90a if wide else fused_sm90a
     monkeypatch.setattr(backend, "supported", lambda *args: True)
@@ -23,7 +23,7 @@ def test_supported_fake_transition_never_builds(monkeypatch, wide):
 
 @pytest.mark.parametrize("wide", [False, True])
 def test_compiled_availability_never_traces_extension_builder(monkeypatch, wide):
-    from miniworld_engine.kernels.transition.cuda import fused_sm90a, fused_wide_sm90a
+    from foldjet_engine.kernels.transition.cuda import fused_sm90a, fused_wide_sm90a
 
     backend = fused_wide_sm90a if wide else fused_sm90a
     monkeypatch.setattr(backend, "supported", lambda *args: True)
@@ -45,7 +45,7 @@ def test_compiled_availability_never_traces_extension_builder(monkeypatch, wide)
 @pytest.mark.parametrize("wide", [False, True])
 def test_sm100a_fake_and_compiled_availability_never_build(monkeypatch, wide):
     """The same two guarantees for the B200 paths (``fused_sm100a`` at D128, ``fused_wide_sm100a`` at the other widths)."""
-    from miniworld_engine.kernels.transition.cuda import fused_sm100a, fused_wide_sm100a
+    from foldjet_engine.kernels.transition.cuda import fused_sm100a, fused_wide_sm100a
 
     backend, builder = (fused_wide_sm100a, "_load") if wide else (fused_sm100a, "_ext")
     monkeypatch.setattr(backend, "supported", lambda *args: True)
@@ -69,7 +69,7 @@ def test_sm100a_fake_and_compiled_availability_never_build(monkeypatch, wide):
 
 def test_generic_sm90a_fake_and_compiled_availability_never_build(monkeypatch):
     """The same two guarantees for the generic sm_90a kernels (``fused_generic_sm90a``, built on first real launch)."""
-    from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a as backend
+    from foldjet_engine.kernels.transition.cuda import fused_generic_sm90a as backend
 
     monkeypatch.setattr(backend, "supported", lambda *args: True)
     monkeypatch.setattr(backend, "_BUILD_FAILED", False)

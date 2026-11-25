@@ -5,7 +5,7 @@
 Atom ``i`` belongs to query window ``w = i // 32`` and attends to the 128 atoms ``[32 w - 48, 32 w + 80)`` (the window clipped to
 ``[0, N)``), with a per-window pair bias. The pair tensor is the *trunked* atom pair ``[B, nwin, 32, 128, d_pair]``,
 ``pair[b, w, i, j] = z[b, 32 w + i, 32 w - 48 + j]`` with ``nwin = ceil(N / 32)`` (:func:`to_windows` makes it from a dense pair;
-entries outside ``[0, N)`` are never read). The block has the parameters of :class:`~miniworld_engine.modules.dit.DiTBlock` at atom
+entries outside ``[0, N)`` are never read). The block has the parameters of :class:`~foldjet_engine.modules.dit.DiTBlock` at atom
 widths (d_single = d_cond = 128, d_pair = 16, 4 heads, transition n = 2), so the dense and the local block share a checkpoint layout;
 only the attention differs. With ``cross_attention=True`` (AF3's / Protenix's atom blocks) the keys and values are projected from a second
 AdaLN of the already normalised atoms, ``attention.ada_ln_kv`` (four more parameters). ``single`` and ``cond`` carry the augmentation axis ``[A, B, N, d]``, the pair does not.
@@ -24,13 +24,13 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.utils import h100_master as _master
-from miniworld_engine.kernels.integrations import local_dit as _local
-from miniworld_engine.modules.adaptive_layernorm import AdaptiveLayerNorm
-from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS, AdaptiveRMSNorm
-from miniworld_engine.modules.dit import DiTBlock
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.primitives import Linear
+from foldjet_engine.utils import h100_master as _master
+from foldjet_engine.kernels.integrations import local_dit as _local
+from foldjet_engine.modules.adaptive_layernorm import AdaptiveLayerNorm
+from foldjet_engine.modules.adaptive_layernorm.module import RMS_EPS, AdaptiveRMSNorm
+from foldjet_engine.modules.dit import DiTBlock
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.primitives import Linear
 
 QUERIES, KEYS, KEY_OFFSET = 32, 128, 48
 
@@ -189,7 +189,7 @@ class LocalDiTBlock(DiTBlock):
         gradient), never on H100 / B200 (PyTorch is the fallback there by design) unless ``settings.force_portable_kernels`` is on. A
         card without a record warns once and runs the PyTorch core; a call the kernel refuses (head width > 64, more than 256 keys,
         float64) warns once (``KernelRefusedWarning``) and does the same."""
-        from miniworld_engine.modules import dispatch
+        from foldjet_engine.modules import dispatch
 
         if self.attention.implementation != ImplementationType.MINIWORLD or not x.is_cuda:
             return False
@@ -216,7 +216,7 @@ class LocalDiTBlock(DiTBlock):
     def _window_core_triton(self, q, k, v, bias, keep, a, b, n, h, d, dtype) -> torch.Tensor:
         """The window attention on the Triton kernel. ``q, k, v``: [A, B, N, H*D] (norm and rotary already applied), ``bias``
         [B, H, nwin, 32, keys], ``keep`` [B, N] bool (real atoms first). Returns [A, B, N, H*D] in ``dtype``."""
-        from miniworld_engine.kernels.augmented_attention.triton import (
+        from foldjet_engine.kernels.augmented_attention.triton import (
             window as _window,
         )
 
@@ -258,7 +258,7 @@ class LocalDiTBlock(DiTBlock):
         use_triton = self._window_triton(x, d)
         if use_triton and not _needs_grad(pair, att.ln_pair.weight, att.to_bias.weight):
             # inference: LayerNorm + the 16 -> 4 projection in one pass, stored [H, rows] (torch's LayerNorm over 16-wide rows is ~20x slower)
-            from miniworld_engine.kernels.layernorm_linear.triton.fused import (
+            from foldjet_engine.kernels.layernorm_linear.triton.fused import (
                 layernorm_linear_triton_fwd_t,
             )
 

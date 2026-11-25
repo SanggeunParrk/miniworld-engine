@@ -41,7 +41,7 @@ for kv in args.env:
 import torch  # noqa: E402
 
 import foldforge as ff  # noqa: E402
-from miniworld_engine import fp8  # noqa: E402
+from foldjet_engine import fp8  # noqa: E402
 
 T0 = time.time()
 EXTRA = {"rosettafold3": {"debug": {"dense_spec_override": {"use_input_templates": True}}}}

@@ -34,7 +34,7 @@ if [ "${1:-}" = "--job" ]; then                       # inside a measurement job
     [ -e "$PLAN/done/$kind.$module" ] && continue
     left=$(( 570 - ($(date +%s) - start) )); [ $left -lt 60 ] && { echo "TIME UP before $kind $module"; exit 0; }
     echo "=== $kind $module (budget ${left}s) $(date +%T)"
-    timeout $left $RUN python -m miniworld_engine.measure.$kind "$cfg" --out "$PLAN/out/$kind.$module.jsonl" \
+    timeout $left $RUN python -m foldjet_engine.measure.$kind "$cfg" --out "$PLAN/out/$kind.$module.jsonl" \
       > "$PLAN/logs/$kind.$module.${SLURM_JOB_ID:-local}.log" 2>&1; rc=$?
     echo "=== $kind $module rc=$rc $(date +%T)"
     # done either way: a module cut by the time limit keeps the records it wrote and its other cases are owed again next cycle
@@ -61,9 +61,9 @@ cpu() {  # cpu NAME CPUS MEM COMMAND... : one CPU job, waited for, its log print
   wait_job "$j"; grep -h "\[judge\]\|\[prebuild\] done\|Error\|Traceback" "$PLAN/logs/$1-$j.log"
 }
 
-say "plan"; cpu judge-owed 8 32G "python -m miniworld_engine.judge --gpu ${CARD:-h100_sm90} owed $* --groups ${PLAN_GROUPS:-${PARALLEL:-4}} --plan $PLAN"
+say "plan"; cpu judge-owed 8 32G "python -m foldjet_engine.judge --gpu ${CARD:-h100_sm90} owed $* --groups ${PLAN_GROUPS:-${PARALLEL:-4}} --plan $PLAN"
 say "prebuild"; for round in 1 2 3; do
-  out=$(cpu prebuild ${PREBUILD_CPUS:-48} ${PREBUILD_MEM:-240G} "python -m miniworld_engine.kernels._prebuild --arch ${ARCH:-sm90a} --stop-after 480")
+  out=$(cpu prebuild ${PREBUILD_CPUS:-48} ${PREBUILD_MEM:-240G} "python -m foldjet_engine.kernels._prebuild --arch ${ARCH:-sm90a} --stop-after 480")
   echo "$out" | tee -a "$S" | grep -q " 0 of .* still absent" && break
 done
 run_group() {
@@ -81,5 +81,5 @@ for g in $(ls "$PLAN" | grep -E '^[GK][0-9]+$'); do
   while [ "$(jobs -rp | wc -l)" -ge "${PARALLEL:-4}" ]; do sleep 15; done
   run_group "$g" &
 done; wait
-say "issue"; cpu judge-issue 8 32G "python -m miniworld_engine.judge --gpu ${CARD:-h100_sm90} issue $PLAN/out && python -m miniworld_engine.judge --gpu ${CARD:-h100_sm90} owed"
+say "issue"; cpu judge-issue 8 32G "python -m foldjet_engine.judge --gpu ${CARD:-h100_sm90} issue $PLAN/out && python -m foldjet_engine.judge --gpu ${CARD:-h100_sm90} owed"
 say "cycle finished (run again while owed > 0)"

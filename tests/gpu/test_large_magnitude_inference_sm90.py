@@ -25,7 +25,7 @@ import pytest
 import torch
 from torch.utils import _pytree as pytree
 
-from miniworld_engine.measure import config as C
+from foldjet_engine.measure import config as C
 
 pytestmark = [pytest.mark.gpu]
 
@@ -275,7 +275,7 @@ FP8_CASES = [
 def test_engine_fp8_large_magnitude_sm90(case) -> None:
     """The opt-in ``engine-fp8`` backend (static e4m3 scales taken on the first call): a normal first call, then a call with 1e5 spikes -- finite (after
     the lazy guard's re-run when a route saturated: ``fp8.check()``) and within the e4m3 routes' own error of the float64 gold."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     _, module, kwargs, keys, length, samples, depth = case
     base, gen = _build(module, kwargs)

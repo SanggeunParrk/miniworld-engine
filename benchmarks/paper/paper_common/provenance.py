@@ -13,7 +13,7 @@ CARDS = {"h100_sm90": "h100", "a100_sm80": "a100", "5090_sm120": "rtx5090", "b20
 
 
 def _engine_root() -> Path:
-    from miniworld_engine.measure import config  # miniworld_engine is a namespace package: no __file__
+    from foldjet_engine.measure import config  # foldjet_engine is a namespace package: no __file__
 
     return Path(config.__file__).resolve().parents[3]
 
@@ -52,7 +52,7 @@ def engine_commit() -> str:
 
 
 def card_key() -> str:
-    from miniworld_engine.measure.config import result_gpu
+    from foldjet_engine.measure.config import result_gpu
 
     return result_gpu()
 
@@ -65,7 +65,7 @@ def describe() -> dict:
     """The provenance block written next to every raw record file."""
     import torch
 
-    from miniworld_engine.measure import config
+    from foldjet_engine.measure import config
 
     env = dict(config.environment())
     return {

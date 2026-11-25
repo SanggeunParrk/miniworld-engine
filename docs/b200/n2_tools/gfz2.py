@@ -1,7 +1,7 @@
 # gfz2.py S : split gattn_fwd time vs the placement of CNT (atomic counters): adjacent small block after L, big isolated block, 128B-offset variants
 import statistics, sys, torch
 from torch.profiler import profile, ProfilerActivity
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 S = int(sys.argv[1]); H, D, C, N = 4, 32, 128, 1
 dev = torch.device("cuda"); torch.manual_seed(0)
 Qh, Kh, Vh = (torch.randn(N, H, S, D, device=dev, dtype=torch.bfloat16) for _ in range(3))

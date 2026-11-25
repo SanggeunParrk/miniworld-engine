@@ -6,8 +6,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.modules import AttentionPairBias
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules import AttentionPairBias
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,
@@ -39,7 +39,7 @@ SHAPES = [(8, 384), (12, 384), (16, 384), (24, 384), (16, 512)]  # (heads, d_sin
 @pytest.mark.parametrize("master", [False, True], ids=["bf16", "master"])
 def test_apb_h100_inference_graph(shape, L, master):
     """Strict PyTorch cosine, repeat equality and live graph inputs/parameters."""
-    from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
+    from foldjet_engine.kernels.integrations import attention_pair_bias_b200 as native
 
     ref, ours, _ = _modules(seed=419, shape=shape)
     if master:
@@ -124,7 +124,7 @@ def _inputs(L, masked, seed=1, d=384):
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("L", [128, 208, 384, 768])
 def test_apb_b200_inference(L, masked, shape):
-    from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as b200
+    from foldjet_engine.kernels.integrations import attention_pair_bias_b200 as b200
 
     ref, ours, tb = _modules(shape=shape)
     single, pair, mask = _inputs(L, masked, d=shape[1])
@@ -161,7 +161,7 @@ def _train(mod, single, pair, mask, dy):
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("L", [128, 384])
 def test_apb_b200_training(L, masked, shape):
-    from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as b200
+    from foldjet_engine.kernels.integrations import attention_pair_bias_b200 as b200
 
     ref, ours, tb = _modules(shape=shape)
     single, pair, mask = _inputs(L, masked, d=shape[1])

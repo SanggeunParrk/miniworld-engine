@@ -1,6 +1,6 @@
 import sys, torch
-from miniworld_engine.modules import triangle as T
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.modules import triangle as T
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
 L = 384
 for starting in (True, False):
   for s in (1.0, 4.0, 10.0, 25.0):

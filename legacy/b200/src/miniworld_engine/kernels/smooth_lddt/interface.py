@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine import settings
-from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels.smooth_lddt.reference import smooth_lddt_reference
+from foldjet_engine import settings
+from foldjet_engine.kernels._compile import opaque
+from foldjet_engine.kernels.smooth_lddt.reference import smooth_lddt_reference
 
 BLK = 128
 PORTABLE_BLK = 128   # N is padded to the largest tile edge of the portable kernels (``triton/main.py``: BLOCK_I, BLOCK_J, BLOCK_P up to 128)
@@ -49,7 +49,7 @@ def _backend(x_pred: torch.Tensor) -> str:
     """``"cuda"`` (H100 / B200), ``"portable"`` (A/B switch, or a recorded card) or ``"reference"`` (an unrecorded card: one warning)."""
     if settings.current().force_portable_kernels:
         return "portable"
-    from miniworld_engine.modules import dispatch
+    from foldjet_engine.modules import dispatch
 
     card = dispatch._card_of(x_pred.device)
     if card is None:
@@ -76,7 +76,7 @@ def _smooth_lddt_prep_fake(gt, nuc, mask):
 @opaque(fake=_smooth_lddt_prep_fake, name="smooth_lddt_prep")
 def smooth_lddt_prep(gt: torch.Tensor, nuc: torch.Tensor, mask: torch.Tensor) -> list[torch.Tensor]:
     """Ground-truth pair set of gt [B, N, 3] fp32 (N % 128 == 0): [tile flags, per-row pair counts, FM, UM bit masks]."""
-    from miniworld_engine.kernels.smooth_lddt.cuda import sm100
+    from foldjet_engine.kernels.smooth_lddt.cuda import sm100
 
     return list(sm100.prep(gt, nuc, mask))
 
@@ -89,7 +89,7 @@ def _smooth_lddt_fwd_fake(x, gt, tile, fm):
 @opaque(fake=_smooth_lddt_fwd_fake, name="smooth_lddt_fwd")
 def smooth_lddt_fwd(x: torch.Tensor, gt: torch.Tensor, tile: torch.Tensor, fm: torch.Tensor) -> torch.Tensor:
     """Partial sums of the pair scores per (augment * batch, row block), [A * B, NB] fp32."""
-    from miniworld_engine.kernels.smooth_lddt.cuda import sm100
+    from foldjet_engine.kernels.smooth_lddt.cuda import sm100
 
     return sm100.forward(x, gt, tile, fm)
 
@@ -103,7 +103,7 @@ def _smooth_lddt_bwd_fake(x, gt, nuc, tile, um, go):
 def smooth_lddt_bwd(x: torch.Tensor, gt: torch.Tensor, nuc: torch.Tensor, tile: torch.Tensor, um: torch.Tensor,
                     go: torch.Tensor) -> torch.Tensor:
     """d(sum of the pair scores)/dx [A, B, N, 3] fp32 for the upstream gradient ``go`` [A * B] fp32."""
-    from miniworld_engine.kernels.smooth_lddt.cuda import sm100
+    from foldjet_engine.kernels.smooth_lddt.cuda import sm100
 
     return sm100.backward(x, gt, nuc, tile, um, go)
 
@@ -127,7 +127,7 @@ class PortableSmoothLddtFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, gt, nuc, mask):
         """``(sum of the pair scores [A, B], number of ground-truth pairs [B])``; the second output carries no gradient."""
-        from miniworld_engine.kernels.smooth_lddt.triton.main import (
+        from foldjet_engine.kernels.smooth_lddt.triton.main import (
             smooth_lddt_fwd_portable,
             smooth_lddt_prep_portable,
         )
@@ -143,7 +143,7 @@ class PortableSmoothLddtFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_sum, _grad_denom):
-        from miniworld_engine.kernels.smooth_lddt.triton.main import (
+        from foldjet_engine.kernels.smooth_lddt.triton.main import (
             smooth_lddt_bwd_portable,
         )
 

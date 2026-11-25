@@ -1,5 +1,5 @@
 import torch
-from miniworld_engine.modules import triangle as T
+from foldjet_engine.modules import triangle as T
 for cfg in (dict(d_pair=128, n_head=4), dict(d_pair=256, n_head=8)):
   for starting in (True, False):
     torch.manual_seed(3)

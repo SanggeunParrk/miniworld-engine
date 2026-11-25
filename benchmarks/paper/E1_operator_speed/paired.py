@@ -6,7 +6,7 @@ Why: the E1 campaign (``rtx5090.sh`` etc.) times the engine stack (pytorch / cud
 anthropic) in two separate processes, one backend after the other, one timing run each. The engine-vs-kit ratio is then a cross-process
 ratio, and on a card without locked clocks (RTX 5090) the clock state of the two processes differs by several percent (the kit process's own
 pytorch reference ran 4-9 % faster than the engine process's on the same cases). Here every backend of a case is built once (same seeded
-weights / inputs as ``miniworld_engine.measure.speed.run``) and timed ``--rounds`` times, the backend order rotated every round, so all
+weights / inputs as ``foldjet_engine.measure.speed.run``) and timed ``--rounds`` times, the backend order rotated every round, so all
 backends of a case share the clock state; the per-backend number is the median of the per-round medians, and a ratio is taken per round
 (``baseline_round / cuda_round``) before its median (``paired_summary.py``).
 
@@ -48,8 +48,8 @@ def main(argv=None) -> int:
     if Path(f"{out}.done").exists():
         print(f"[paired] {out}.done exists: nothing to do")
         return 0
-    from miniworld_engine.measure import config, speed
-    from miniworld_engine.modules.primitives import BackendUnsupported, unpadded_masks
+    from foldjet_engine.measure import config, speed
+    from foldjet_engine.modules.primitives import BackendUnsupported, unpadded_masks
 
     t0 = time.time()
     cfg = cfgmod.load(args.config, args)

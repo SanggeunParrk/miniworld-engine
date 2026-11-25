@@ -23,8 +23,8 @@ dev = "cuda"
 P_DROP = float(os.environ.get("P_DROP", "0.15"))
 PROFILE = os.environ.get("PROFILE", "1") == "1"
 
-from miniworld_engine.kernels.integrations import pwa_fp8_train as F
-from miniworld_engine.modules.msa import MSAPairWeightedAveraging
+from foldjet_engine.kernels.integrations import pwa_fp8_train as F
+from foldjet_engine.modules.msa import MSAPairWeightedAveraging
 
 VARIANTS = []
 for item in os.environ.get("VARIANTS", "bwd=dv,dw/fused/e4m3;bwdo8=dv,dw/fused/e4m3+o8;f8e4=fwd,dv,dw/fused/e4m3").split(";"):

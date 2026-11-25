@@ -31,8 +31,8 @@ def main() -> int:
     p.add_argument("--reps", type=int, default=20)
     p.add_argument("--reset", default="", help="statement run after each capture (undoes the variants' switches)")
     args = p.parse_args()
-    from miniworld_engine.measure import config
-    from miniworld_engine.measure.speed import _capture, _Timer, make_step, unpadded_masks
+    from foldjet_engine.measure import config
+    from foldjet_engine.measure.speed import _capture, _Timer, make_step, unpadded_masks
 
     cfg = cfgmod.load(args.config, args)
     dev = torch.device("cuda")

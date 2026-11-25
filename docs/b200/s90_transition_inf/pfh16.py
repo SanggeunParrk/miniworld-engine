@@ -1,7 +1,7 @@
 # pfh16.py D,M ... : fp32 tg_fused_h16 built with -DPROBE=1 launched directly (inference); per-CTA stamps of tile 0, us from the earliest CTA start (median / max over CTAs)
 import sys, statistics, torch
-from miniworld_engine.kernels.transition.cuda import fused_generic_sm100a as fg
-from miniworld_engine.kernels.transition.cuda.fused_sm100a import build_cubins
+from foldjet_engine.kernels.transition.cuda import fused_generic_sm100a as fg
+from foldjet_engine.kernels.transition.cuda.fused_sm100a import build_cubins
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
 names = [(1, "kernel start"), (0, "setup done (TMEM, barriers)"), (2, "first weight box issued"), (3, "first Ws box issued"), (14, "LN0 warps: x staged"), (15, "LN0 stats done"), (16, "LN0 xn stored"),
          (11, "LN: x staged (tile 0)"), (7, "LN: stats done (tile 0)"), (8, "LN: xn in TMEM, xfull"), (4, "MMA sees xfull"), (20, "expand c0 start"), (21, "expand c1 start"), (52, "SwiGLU c0 abfull"), (53, "SwiGLU c1 abfull"),

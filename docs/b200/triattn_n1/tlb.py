@@ -1,7 +1,7 @@
 import sys, torch
 from pathlib import Path
-from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir as BB
-from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_bidir as BB
+from foldjet_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 ensure_cuda_home()
 src = Path(BB.__file__).parent / "b200_sources"
 new = load_extension(name="n1_tl_t", sources=[str(src / "lnbwd_sm100.cu")], extra_cuda_cflags=[*host_flags(), *BB._FLAGS, *gencodes("100a")], verbose=False)

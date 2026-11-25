@@ -414,7 +414,7 @@ def cmd_cache_status(args: argparse.Namespace) -> int:
     launch. Returns 1 if any cache is grid/scheme-stale, so CI and a pre-bench check both catch a
     grid edit that was never followed by a rebuild (the failure mode that silently benched the
     heuristic fallback)."""
-    from miniworld_engine.autotune import cache_status
+    from foldjet_engine.autotune import cache_status
 
     rows = cache_status.scan(gpu_substr=args.gpu or None)
     print(cache_status.format_report(rows, gpu_substr=args.gpu or None))
@@ -431,7 +431,7 @@ def cmd_space_backfill(args: argparse.Namespace) -> int:
     Without it every shipped cache answers "what have you already searched?" with silence, and
     ``build`` re-measures kernels whose search was finished months ago -- which is what it did.
     """
-    from miniworld_engine.autotune import space_backfill
+    from foldjet_engine.autotune import space_backfill
 
     rows = space_backfill.backfill(apply=args.apply)
     print(space_backfill.format_report(rows, applied=args.apply))
@@ -443,7 +443,7 @@ def cmd_space_backfill(args: argparse.Namespace) -> int:
 def cmd_cache_backfill(args: argparse.Namespace) -> int:
     """Recover ``driver_identity`` for caches written before the field existed, from the commit
     that last wrote each one -- so the guard turns on now instead of after every cache is rebuilt."""
-    from miniworld_engine.autotune import cache_backfill
+    from foldjet_engine.autotune import cache_backfill
 
     rows = cache_backfill.backfill(apply=args.apply)
     print(cache_backfill.format_report(rows, applied=args.apply))
@@ -454,8 +454,8 @@ def cmd_cache_backfill(args: argparse.Namespace) -> int:
 
 def cmd_merge(args: argparse.Namespace) -> int:
     """Fold shards into the in-repo cache. Sole writer, so it never runs inside a capture worker."""
-    from miniworld_engine.autotune import capture
-    from miniworld_engine.autotune.cache import gpu_key
+    from foldjet_engine.autotune import capture
+    from foldjet_engine.autotune.cache import gpu_key
 
     shard_dir = Path(args.shards).expanduser()
     paths = sorted(str(p) for p in shard_dir.glob("*.json"))
@@ -508,7 +508,7 @@ def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
     # be a third -- the repo's own `configs/<name>`, where the A/B sets lived while `grid` was
     # packaged -- so a short name resolved against a different root depending on the caller, and a
     # wheel install could reach only one of them. Every set is packaged now, so the branch is gone.
-    from miniworld_engine.autotune import configs as _configs  # heavy; import at use
+    from foldjet_engine.autotune import configs as _configs  # heavy; import at use
 
     packaged_root = _configs.CONFIG_ROOT
     given = Path(config_type).expanduser()
@@ -543,12 +543,12 @@ def apply_config_dir(directory: Path) -> int:
     at all (``dynamic_func() missing ... 'BLOCK_M1'``). So the directory has to be set BEFORE the
     kernel modules import and their decorators run.
     """
-    from miniworld_engine.autotune.configs import (
+    from foldjet_engine.autotune.configs import (
         missing_ops,
         registered_ops,
         use_config_dir,
     )
-    from miniworld_engine.build.audit import import_all_kernels
+    from foldjet_engine.build.audit import import_all_kernels
 
     os.environ["MINIWORLD_CONFIG_DIR"] = str(directory)  # inherited by every child process
     use_config_dir(directory, require_all=False)   # sets the directory; nothing registered yet
@@ -628,7 +628,7 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
     Split out of the build command so the partial-merge policy is testable without a GPU:
     which units count as bad, whether a bad one blocks the merge, and what the exit code is.
     """
-    from miniworld_engine.autotune import capture  # heavy; import at use
+    from foldjet_engine.autotune import capture  # heavy; import at use
 
     bad = [r for r in results if is_bad_unit(r)]
     skipped = [r for r in results if r.get("skipped")]
@@ -702,7 +702,7 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
     with a full grid the autotuner sweeps mid-measurement, so the number is a tuning run with a
     benchmark wrapped around it.
     """
-    from miniworld_engine.autotune import builder
+    from foldjet_engine.autotune import builder
 
     if getattr(args, "no_build", False):
         # `build all` decomposes into one unit per (op, dtype, shape bucket) -- 2,101 of them, with
@@ -813,10 +813,10 @@ def _reject_unknown_build_target(args: argparse.Namespace, repo: Path) -> int:
 
     Which name space applies is the same choice `cmd_build` makes below: `--per-op` (and `all`,
     which defaults to it) selects ops, anything else selects cases. Read from the declarations,
-    never by importing: :data:`~miniworld_engine.autotune.builder.CASE_NAMES` is a literal tuple
+    never by importing: :data:`~foldjet_engine.autotune.builder.CASE_NAMES` is a literal tuple
     and the ops are the first column of ``kernels/registry/registry.csv``.
     """
-    from miniworld_engine.autotune.builder import CASE_NAMES  # literal, no imports
+    from foldjet_engine.autotune.builder import CASE_NAMES  # literal, no imports
 
     if args.case in ("all", *STACKS):
         return 0
@@ -847,7 +847,7 @@ def _kernels_choice(args: argparse.Namespace) -> str:
 
 def cmd_build(args: argparse.Namespace) -> int:
     """Build the cache. The builder owns decomposition and multi-GPU execution; this only parses."""
-    from miniworld_engine.autotune import builder
+    from foldjet_engine.autotune import builder
 
     os.environ["MINIWORLD_BUILD_SCOPE"] = ("all" if getattr(args, "include_alternatives", False) else "production")
     os.environ["MINIWORLD_BUILD_MODE"] = getattr(args, "mode", "both")
@@ -863,7 +863,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     if rc:
         return rc
 
-    from miniworld_engine.autotune.preflight import cache_write_access
+    from foldjet_engine.autotune.preflight import cache_write_access
     try:
         cache_write_access()
     except ValueError as exc:
@@ -894,10 +894,10 @@ def cmd_build(args: argparse.Namespace) -> int:
         units = builder.op_units(only, config_dir=directory, stack=stack)
         backend = _kernels_choice(args)
         if backend != "auto":
-            from miniworld_engine.autotune.native import BUILD_OPS, build_ops_for_arch
+            from foldjet_engine.autotune.native import BUILD_OPS, build_ops_for_arch
             native_ops = build_ops_for_arch((builder.device_sm() or "").replace("_", ""))
             units = [u for u in units if (u.op in native_ops if backend == "native" else u.op not in BUILD_OPS)]
-        from miniworld_engine.autotune import policy
+        from foldjet_engine.autotune import policy
         units = policy.filter_op_units(units)
         if not units:
             print(f"no kernel op with a driver matched {args.case!r}", file=sys.stderr)
@@ -941,14 +941,14 @@ def cmd_build(args: argparse.Namespace) -> int:
     module_pass = args.per_module or (not args.per_op and args.case not in STACKS)
 
     if module_pass:
-        from miniworld_engine.autotune import plan
+        from foldjet_engine.autotune import plan
         sm = builder.device_sm()
         if sm is None:
             print("Module builds require an available CUDA GPU.", file=sys.stderr)
             return 2
         try:
             if args.case == "all":
-                from miniworld_engine.autotune.preflight import native_dependencies
+                from foldjet_engine.autotune.preflight import native_dependencies
                 native_dependencies(sm)
             plan.ensure(sm, workers=min(4, max(1, args.compile_jobs or
                         len(os.sched_getaffinity(0)))))
@@ -1027,8 +1027,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     # the merge itself follows. The exit code is the only thing a batch job's caller sees.
     sm = builder.device_sm()
     if module_pass and args.case == "all" and sm is not None:
-        from miniworld_engine.autotune import derive, plan
-        from miniworld_engine.autotune.cache import gpu_key
+        from foldjet_engine.autotune import derive, plan
+        from foldjet_engine.autotune.cache import gpu_key
         try:
             plan.load(sm)
             report = derive.coverage(sm, gpu_key())
@@ -1120,7 +1120,7 @@ def _empty_triton_cache(dry_run: bool) -> int:
     """
     import os
 
-    from miniworld_engine.autotune import triton_cache
+    from foldjet_engine.autotune import triton_cache
 
     raw = os.environ.get("TRITON_CACHE_DIR")
     if not raw:
@@ -1206,7 +1206,7 @@ def cmd_buckets(args: argparse.Namespace) -> int:
     import csv
     from pathlib import Path
 
-    from miniworld_engine.autotune import builder, width_evidence
+    from foldjet_engine.autotune import builder, width_evidence
 
     rows = {r["kernel"]: r for r in csv.DictReader(
         (Path(builder.__file__).resolve().parent.parent
@@ -1247,14 +1247,14 @@ def cmd_buckets(args: argparse.Namespace) -> int:
 
 def cmd_import_anthropic(args: argparse.Namespace) -> int:
     """`dev import-anthropic`: see ``tools/import_anthropic.py``."""
-    from miniworld_engine.utils.tools import import_anthropic
+    from foldjet_engine.utils.tools import import_anthropic
     import_anthropic.main([args.source, args.destination])
     return 0
 
 
 def cmd_build_anthropic_sm100a(args: argparse.Namespace) -> int:
     """`dev build-anthropic-sm100a`: see ``kernels.integrations.anthropic_trimul.build_sm100a``."""
-    from miniworld_engine.baselines.anthropic_trimul import build_sm100a
+    from foldjet_engine.baselines.anthropic_trimul import build_sm100a
 
     for key in build_sm100a(args.build_dir, nvcc=args.nvcc or None):
         print(f"built {key}")
@@ -1263,14 +1263,14 @@ def cmd_build_anthropic_sm100a(args: argparse.Namespace) -> int:
 
 def cmd_make_default_configs(args: argparse.Namespace) -> int:
     """`dev make-default-configs`: see ``tools/make_default_configs.py``."""
-    from miniworld_engine.utils.tools import make_default_configs
+    from foldjet_engine.utils.tools import make_default_configs
     make_default_configs.generate()
     return 0
 
 
 def cmd_audit_thresholds(args: argparse.Namespace) -> int:
     """`dev audit-thresholds`: see ``tools/audit_thresholds.py``."""
-    from miniworld_engine.utils.tools import audit_thresholds
+    from foldjet_engine.utils.tools import audit_thresholds
     return audit_thresholds.main()
 
 
@@ -1280,7 +1280,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     No GPU, no replay: `dev derive` already ran the same dispatch, so the answer is a set
     difference between two files.
     """
-    from miniworld_engine.autotune import derive, plan
+    from foldjet_engine.autotune import derive, plan
 
     try:
         plan.load(args.arch)
@@ -1310,14 +1310,14 @@ def cmd_coverage(args: argparse.Namespace) -> int:
 
 def cmd_bundle_kernels(args: argparse.Namespace) -> int:
     """Build and package the prebuilt kernel bundle (``build.kernel_bundle``)."""
-    from miniworld_engine.build.kernel_bundle import bundle_kernels
+    from foldjet_engine.build.kernel_bundle import bundle_kernels
 
     return bundle_kernels(args)
 
 
 def cmd_bundle_verify(args: argparse.Namespace) -> int:
     """The release gate: every call ``registry_module.csv`` declares, under the installed wheels (``build.registry_verify``)."""
-    from miniworld_engine.build.registry_verify import verify
+    from foldjet_engine.build.registry_verify import verify
 
     if bool(args.wheels) == bool(args.tree):
         print("bundle-verify: give exactly one of --wheels and --tree", file=sys.stderr)
@@ -1327,14 +1327,14 @@ def cmd_bundle_verify(args: argparse.Namespace) -> int:
 
 def cmd_build_wheel(args: argparse.Namespace) -> int:
     """Build the engine wheel carrying the prebuilt kernels (``build.kernel_bundle``)."""
-    from miniworld_engine.build.kernel_bundle import build_wheel
+    from foldjet_engine.build.kernel_bundle import build_wheel
 
     return build_wheel(args)
 
 
 def cmd_code_graph(args: argparse.Namespace) -> int:
     """Print an artifact's code graph and key, or the artifacts a file reaches (``build.kernel_bundle``)."""
-    from miniworld_engine.build.kernel_bundle import code_graph
+    from foldjet_engine.build.kernel_bundle import code_graph
 
     return code_graph(args)
 
@@ -1348,7 +1348,7 @@ def cmd_restamp_native(args: argparse.Namespace) -> int:
     the identity string changes. ``--dry-run`` lists them; ``--check`` exits 1 when any differs."""
     import json
 
-    from miniworld_engine.autotune import cache_status, native
+    from foldjet_engine.autotune import cache_status, native
 
     todo = []
     for op in sorted(native.BUILD_OPS):
@@ -1386,8 +1386,8 @@ def cmd_derive(args: argparse.Namespace) -> int:
     """
     import json
 
-    from miniworld_engine.utils.atomic import write_json
-    from miniworld_engine.autotune import derive, plan
+    from foldjet_engine.utils.atomic import write_json
+    from foldjet_engine.autotune import derive, plan
 
     out = Path(args.out) if args.out else derive.REGISTRY_KERNEL
     evidence = out.with_suffix(".units.json")
@@ -1475,8 +1475,8 @@ def cmd_callers(args: argparse.Namespace) -> int:
     if not torch.cuda.is_available():
         print("dev callers runs the production cases; this machine has no CUDA device")
         return 2
-    from miniworld_engine import settings
-    from miniworld_engine.autotune import builder, capture
+    from foldjet_engine import settings
+    from foldjet_engine.autotune import builder, capture
 
     settings.configure(run_autotune=False, capture=False)
     capture.install_launch_recorder()
@@ -1508,7 +1508,7 @@ def cmd_callers(args: argparse.Namespace) -> int:
 
 def cmd_audit(args: argparse.Namespace) -> int:
     """Verify the build system AND that every declared (op, bucket) is in the shipped cache."""
-    from miniworld_engine.build import audit as _audit  # imports every kernel
+    from foldjet_engine.build import audit as _audit  # imports every kernel
 
     if args.replay:
         return _replay_audit()
@@ -1539,7 +1539,7 @@ def _replay_audit() -> int:
     if not torch.cuda.is_available():
         print("--replay runs the build matrix; this machine has no CUDA device")
         return 2
-    from miniworld_engine.autotune import builder
+    from foldjet_engine.autotune import builder
 
     misses = builder.audit(builder.cases())
     for op, gpu, key in misses:
@@ -1583,7 +1583,7 @@ def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
 
 def _bench_visible_device(gpu: int) -> str:
     """Map a logical device to its token in the parent's CUDA visibility mask."""
-    from miniworld_engine.autotune.builder import visible_device
+    from foldjet_engine.autotune.builder import visible_device
 
     return visible_device(gpu)
 
@@ -1658,8 +1658,8 @@ def _report_coverage(targets: tuple[str, ...], repo: Path, level: str, *,
 
     Nothing here decides whether a kernel *could* run. A kernel either launched or it did not.
     """
-    from miniworld_engine.autotune import devices
-    from miniworld_engine.autotune.cache import gpu_key
+    from foldjet_engine.autotune import devices
+    from foldjet_engine.autotune.cache import gpu_key
 
     key = gpu_key()
     launched: set[str] = set()
@@ -1780,8 +1780,8 @@ def cmd_ladder(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     """`status`: what every release action would do now, from the code graph (``build.actions``). Does nothing."""
-    from miniworld_engine.build import actions
-    from miniworld_engine.build.action_records import Refused
+    from foldjet_engine.build import actions
+    from foldjet_engine.build.action_records import Refused
 
     try:
         return actions.cmd_status(args)
@@ -1791,8 +1791,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def _run_action(name: str, args: argparse.Namespace) -> int:
-    from miniworld_engine.build import actions
-    from miniworld_engine.build.action_records import Refused
+    from foldjet_engine.build import actions
+    from foldjet_engine.build.action_records import Refused
 
     try:
         return getattr(actions, f"cmd_{name}")(args)

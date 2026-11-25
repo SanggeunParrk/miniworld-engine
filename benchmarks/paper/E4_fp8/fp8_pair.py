@@ -3,10 +3,10 @@
     python fp8_pair.py --out records/<card>/fp8.<gates>.r<k>.jsonl [--gates shipped|none] [--model af3] [selection overrides]
 
 Per case of the E2 grid (inference, ``master`` dtype: fp32 masters, bf16 activations, bf16 autocast), two copies of one module with the same
-weights and inputs: ``cuda`` (the default route) and ``engine-fp8`` (``miniworld_engine.fp8``: the engine ``cuda`` backend with the ``safe``
+weights and inputs: ``cuda`` (the default route) and ``engine-fp8`` (``foldjet_engine.fp8``: the engine ``cuda`` backend with the ``safe``
 preset's FP8 routes on; the TriAttn FP8 routes are validated per model, ``--model``, default ``af3``). The FP8 copy is calibrated first (two eager
 calls: static scales are taken on a process's first call of each site) and ``fp8.check()`` is read after them; then ROUNDS rounds alternate
-the two routes (order flips each round), each round one ``miniworld_engine.measure.speed.measure`` (CUDA-graph capture, replay, L2 flush,
+the two routes (order flips each round), each round one ``foldjet_engine.measure.speed.measure`` (CUDA-graph capture, replay, L2 flush,
 warmup, median of ``iterations`` replays). ``fp8.check()`` is read again after the replays: True = some route saturated the e4m3 range
 (``saturated``) and its scales were raised: the case is recorded, never re-routed. ``fp8.route_stats()`` says which FP8 routes fired
 (``routes_fired``): a case below a route's length gate runs the default kernels in both copies (ratio ~ 1) and says so.
@@ -41,10 +41,10 @@ def _parse(argv):
     p.add_argument("--config", default=str(Path(__file__).resolve().parent / "cfg_pair.yaml"))
     p.add_argument("--gates", choices=["shipped", "none"], default="shipped")
     p.add_argument(
-        "--model", default="af3", help="the model whose TriAttn FP8 routes engine-fp8 runs (miniworld_engine.fp8.TRIATTN_MODELS)"
+        "--model", default="af3", help="the model whose TriAttn FP8 routes engine-fp8 runs (foldjet_engine.fp8.TRIATTN_MODELS)"
     )
     p.add_argument("--rounds", type=int, default=ROUNDS)
-    p.add_argument("--static-weights", action="store_true", help="capture under miniworld_engine.capture.static_weights() (a served inference graph: weight packs made once)")
+    p.add_argument("--static-weights", action="store_true", help="capture under foldjet_engine.capture.static_weights() (a served inference graph: weight packs made once)")
     p.add_argument("--budget-seconds", type=float, default=0.0)
     cfgmod.add_selection_args(p)
     return p.parse_args(argv)
@@ -85,9 +85,9 @@ def main(argv=None) -> int:
     if not torch.cuda.is_available():
         print("[fp8] no CUDA device", file=sys.stderr)
         return 2
-    from miniworld_engine import fp8
-    from miniworld_engine.measure import config, speed
-    from miniworld_engine.modules.primitives import unpadded_masks
+    from foldjet_engine import fp8
+    from foldjet_engine.measure import config, speed
+    from foldjet_engine.modules.primitives import unpadded_masks
 
     t0 = time.time()
     cfg = cfgmod.load(args.config, args)
@@ -104,14 +104,14 @@ def main(argv=None) -> int:
         have = {case_key(json.loads(x)) for x in out.read_text().splitlines() if x.strip()}
     if args.gates == "none":
         try:
-            from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+            from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
             hs.FP8_PV_MIN_S, hs.FP8_PV_FRONT_MIN_S, hs.FP8_PV_FUSED_MIN_S = {}, {}, 0
         except Exception as exc:  # recorded in the sidecar: the TriAttn gates could not be cleared on this card
             meta["triattn_gates_not_cleared"] = f"{type(exc).__name__}: {exc}"
             Path(f"{out}.meta.json").write_text(json.dumps(meta, indent=1, default=str))
     if args.static_weights:
-        from miniworld_engine.kernels import _capture
+        from foldjet_engine.kernels import _capture
 
         _capture.set_static_weights(True)
     fp8.set_model(args.model)

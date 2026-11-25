@@ -39,23 +39,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
 
-from miniworld_engine import settings
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.modules.exceptions import (
+from foldjet_engine import settings
+from foldjet_engine.utils.typecheck import typecheck
+from foldjet_engine.kernels._compile import opaque
+from foldjet_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
-from miniworld_engine.modules.primitives import Linear, MPLinear
+from foldjet_engine.modules.primitives import Linear, MPLinear
 
 
 # FlashAttention-4 (CuTeDSL) is the Hopper/Blackwell windowed-attention backend
 # (FA2 has no sm_100 / B200 support). Its import pulls CUTLASS, so we only *probe*
 # availability here — ``find_spec`` locates the module without executing it — and
 # import ``flash_attn_varlen_func`` lazily inside :func:`flash_window_seqused`. This
-# keeps ``import miniworld_engine.modules`` PyTorch-first (SDPA fallback) and free of any GPU
+# keeps ``import foldjet_engine.modules`` PyTorch-first (SDPA fallback) and free of any GPU
 # backend until the flash path actually runs. Optimizing this via a
-# ``miniworld_engine`` op is the intended future path; for now the fallback is torch.
+# ``foldjet_engine`` op is the intended future path; for now the fallback is torch.
 #: Which flash backend this process can actually use: "fa4", "fa2" or None.
 #:
 #: Resolved once, from what is INSTALLED and what the card can run -- not from the package name
@@ -65,7 +65,7 @@ from miniworld_engine.modules.primitives import Linear, MPLinear
 #: support, which is why both are kept rather than one replacing the other.
 #:
 #: Probed with `find_spec`, which locates a module without executing it: importing FA4 pulls
-#: CUTLASS, and `import miniworld_engine.modules` stays PyTorch-first and GPU-backend-free until
+#: CUTLASS, and `import foldjet_engine.modules` stays PyTorch-first and GPU-backend-free until
 #: the flash path actually runs. The real import stays lazy, inside `flash_window_seqused`.
 def _has_submodule(parent: str, child: str) -> bool:
     """Is ``parent.child`` installed, WITHOUT importing either.
@@ -638,7 +638,7 @@ class SWA3DRoPEAttention(nn.Module):
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)  # each [N, S, H, D]
         engine_pointwise = self.implementation != ImplementationType.PYTORCH and not getattr(self, "torch_pointwise", False)
         if engine_pointwise and q.is_cuda:
-            from miniworld_engine.modules.dispatch import (
+            from foldjet_engine.modules.dispatch import (
                 needs_backward,
                 portable_leg_allowed,
                 record_dtype,
@@ -650,7 +650,7 @@ class SWA3DRoPEAttention(nn.Module):
                 q.device, "swa_atom_attention", training=needs_backward(self, q, k, v), dtype=record_dtype(q)
             )
         if q.is_cuda and engine_pointwise:
-            from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
+            from foldjet_engine.kernels.rope.interface import qk_norm_rope_3d
             q, k = qk_norm_rope_3d(q, k, cos, sin)
         else:
             eps = torch.finfo(torch.float32).eps
@@ -681,7 +681,7 @@ class SWA3DRoPEAttention(nn.Module):
         out = out.reshape(n, s, -1)
         gate = self.gate_proj(x)
         if engine_pointwise and self._can_fuse_output_projection(gate, out):
-            from miniworld_engine.kernels.gated_projection.triton.swa import (
+            from foldjet_engine.kernels.gated_projection.triton.swa import (
                 swa_gate_out_inference,
             )
 
@@ -692,7 +692,7 @@ class SWA3DRoPEAttention(nn.Module):
             # `_sigmul`, already public as `kernels.sigmoid_gate_fused` and already tuned on this
             # card -- nothing new to build or register. It carries its own autograd, and its
             # shape_key is `both_key(rows_of(...))`, which is the convention its own family uses.
-            from miniworld_engine import kernels
+            from foldjet_engine import kernels
 
             out = kernels.sigmoid_gate_fused(gate, out)
         else:

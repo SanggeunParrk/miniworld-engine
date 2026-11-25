@@ -13,7 +13,7 @@ YAML = "modules: [AtomDiTProtenix, AtomDiTOpenFold3, AtomDiTChai1, AtomDiTBoltz2
 
 
 def _case(tmp_path, module, L, S=5, mode="eval", dtype="master"):
-    from miniworld_engine.measure import config as C
+    from foldjet_engine.measure import config as C
 
     p = tmp_path / "c.yaml"
     p.write_text(YAML)
@@ -27,7 +27,7 @@ def _case(tmp_path, module, L, S=5, mode="eval", dtype="master"):
 
 class Rig:
     def __init__(self, case):
-        from miniworld_engine.measure import config as C, speed as S
+        from foldjet_engine.measure import config as C, speed as S
 
         dev = torch.device("cuda")
         self.m = copy.deepcopy(C.build(case, device=dev))
@@ -64,7 +64,7 @@ def _err(y, gold, x):
 
 @pytest.fixture
 def f8():
-    from miniworld_engine.kernels.augmented_attention.cuda.b200_atom import f8 as F
+    from foldjet_engine.kernels.augmented_attention.cuda.b200_atom import f8 as F
 
     old = (F.ENABLED, F.MIN_ROWS, F.MAX_ROWS)
     F.MIN_ROWS, F.MAX_ROWS = 0, 1 << 30
@@ -103,7 +103,7 @@ def test_route_off_is_bit_identical_and_deterministic(tmp_path, f8):
 
 
 def test_graph_equals_eager(tmp_path, f8):
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     rig = Rig(_case(tmp_path, "AtomDiTOpenFold3", 1024))
     f8.enable("all")

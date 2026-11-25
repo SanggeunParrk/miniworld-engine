@@ -8,8 +8,8 @@ import statistics
 
 import torch
 
-from miniworld_engine.kernels.trimul_inproj.cuda import _bounded
-from miniworld_engine.modules.triangle import TriangleMultiplication
+from foldjet_engine.kernels.trimul_inproj.cuda import _bounded
+from foldjet_engine.modules.triangle import TriangleMultiplication
 
 ROUNDS = int(os.environ.get("ROUNDS", "7"))
 CASES = [tuple(map(int, x.split("x"))) for x in os.environ.get("CASES", "128x768,128x1024,128x1536,128x2048,256x1024,256x2048").split(",")]

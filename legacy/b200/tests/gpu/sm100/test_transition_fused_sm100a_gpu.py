@@ -9,7 +9,7 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = pytest.mark.gpu
 
@@ -30,7 +30,7 @@ def _weights(d=128, h=512, dev="cuda", dtype=torch.bfloat16):
 
 @pytest.mark.skipif(not CUDA, reason="needs a GPU to build the operands")
 def test_gate_rejects_everything_it_is_not_built_for():
-    from miniworld_engine.kernels.transition.cuda import fused_sm100a
+    from foldjet_engine.kernels.transition.cuda import fused_sm100a
 
     wa, ws = _weights()
     x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
@@ -57,7 +57,7 @@ def test_gate_rejects_everything_it_is_not_built_for():
 
 @pytest.mark.skipif(not CUDA, reason="needs a GPU to build the operands")
 def test_env_switch_turns_the_gate_off(monkeypatch):
-    from miniworld_engine.kernels.transition.cuda import fused_sm100a
+    from foldjet_engine.kernels.transition.cuda import fused_sm100a
 
     wa, ws = _weights()
     override_setting(monkeypatch, "transition_fused_sm100a", "0")
@@ -67,7 +67,7 @@ def test_env_switch_turns_the_gate_off(monkeypatch):
 
 
 def _build(shape, seed=72):
-    from miniworld_engine.modules import Transition
+    from foldjet_engine.modules import Transition
 
     torch.manual_seed(seed)
     module = (
@@ -154,7 +154,7 @@ def test_fewer_tiles_than_weight_replicas(shape, monkeypatch):
 
 @needs_b200
 def test_the_module_actually_dispatches_to_it(monkeypatch):
-    from miniworld_engine.kernels.transition.cuda import fused_sm100a
+    from foldjet_engine.kernels.transition.cuda import fused_sm100a
 
     calls = []
     original = fused_sm100a.transition_fused_sm100a
@@ -171,7 +171,7 @@ def test_the_module_actually_dispatches_to_it(monkeypatch):
 @needs_b200
 def test_inference_matches_training_forward():
     """No grad -> the forward skips the xn / statistics stores (runtime guard); the output bits must not change."""
-    from miniworld_engine.kernels.transition.cuda import fused_sm100a
+    from foldjet_engine.kernels.transition.cuda import fused_sm100a
 
     module, x, _ = _build((1, 40, 48, 128))
     args = (
@@ -190,7 +190,7 @@ def test_inference_matches_training_forward():
 
 @needs_b200
 def test_replay_is_bit_identical():
-    from miniworld_engine.kernels.transition.cuda import fused_sm100a
+    from foldjet_engine.kernels.transition.cuda import fused_sm100a
 
     torch.manual_seed(11)
     d, h, m = 128, 512, 128 * 150

@@ -61,10 +61,10 @@ import torch
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
-from miniworld_engine import settings
-from miniworld_engine.kernels import _capture
-from miniworld_engine.kernels._compile import device_constant, opaque
-from miniworld_engine.kernels._tf32 import tf32_grid
+from foldjet_engine import settings
+from foldjet_engine.kernels import _capture
+from foldjet_engine.kernels._compile import device_constant, opaque
+from foldjet_engine.kernels._tf32 import tf32_grid
 
 # ------------------------------------------------------------------------------------------------------------ weights
 # The block's parameters and the kernels' weight packs (stacked / transposed bf16 packs and the backward's transposed A operands).
@@ -121,7 +121,7 @@ def _namespace(weights) -> SimpleNamespace:
 def _pack(weights, backward=False):
     """The kernels' stacked bf16 weights and the backward's transposed A operands (Hopper: the live CUDA pack, ``backward`` adds the
     transposes)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as sm100
 
     if sm100._hopper(
         weights[0].device.index
@@ -208,8 +208,8 @@ def _kernels_ready(index: int) -> bool:
         return False
     if index in _LOADED:
         return True
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 
@@ -244,8 +244,8 @@ def _kernels32_ready(index: int) -> bool:
         return False
     if index in _LOADED32:
         return True
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 
@@ -275,7 +275,7 @@ def _fused32_ready(device) -> bool:
     global _FUSED32_FAILED
     if _FUSED32_FAILED or (not settings.current().local_dit_tf32_fused):
         return False
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
 
     try:
         rows.load_fused32(
@@ -316,7 +316,7 @@ def _esm_variant(module) -> bool:
 
 
 def serves(module, single, cond, pair, mask, rope=None) -> bool:
-    from miniworld_engine.kernels.integrations import local_dit_h100
+    from foldjet_engine.kernels.integrations import local_dit_h100
 
     if local_dit_h100.matches(module, single, cond, pair, mask, rope):
         return True
@@ -335,7 +335,7 @@ def serves(module, single, cond, pair, mask, rope=None) -> bool:
         or settings.current().force_portable_kernels
     ):
         return False
-    from miniworld_engine.modules.dispatch import KernelBackend
+    from foldjet_engine.modules.dispatch import KernelBackend
 
     a, tr = module.attention, module.transition
     if a._backend != KernelBackend.PORTABLE or a.use_qk_norm:
@@ -416,7 +416,7 @@ def _serves_hopper_inference(module, single, cond, pair, mask):
 
 def _require_hopper_training(module, single, cond, pair, mask):
     """Required Hopper training geometry: native CUDA or an explicit error."""
-    from miniworld_engine.modules.dispatch import KernelBackend
+    from foldjet_engine.modules.dispatch import KernelBackend
 
     a, tr = module.attention, module.transition
     if (
@@ -513,7 +513,7 @@ def _require_hopper_training(module, single, cond, pair, mask):
 
 def _require_hopper_inference(module, single, cond, pair, mask):
     """The required inference cells use native CUDA, including recorded losses."""
-    from miniworld_engine.modules.dispatch import KernelBackend
+    from foldjet_engine.modules.dispatch import KernelBackend
 
     a, tr = module.attention, module.transition
     if (
@@ -642,7 +642,7 @@ def _kv_pack(weights, packed_pre=None):
 
     def build():
         if hopper:
-            from miniworld_engine.kernels.augmented_attention.cuda import (
+            from foldjet_engine.kernels.augmented_attention.cuda import (
                 sm100_atom_local as local,
             )
 
@@ -685,8 +685,8 @@ def _cond_tables(
     tensor (pointer, version) and weights, scoped to the CUDA-graph capture (``kernels._capture.lookup_inputs``).
     Hopper: ``wp`` (the pack's input-projection operands) feeds the KV pack, ``packed_infer`` picks the persistent conditioning
     schedule."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 
@@ -717,7 +717,7 @@ def _cond_tables(
 
 def _pair_bias(pair, n, weights, save):
     """The windowed pair bias LN(z) Wb of the trunked pair, once per pair tensor in an inference call (it depends on the pair and two weights)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 
@@ -791,8 +791,8 @@ def _block_fwd(
 ) -> list[torch.Tensor]:
     """The block output [A, 1, N, 128] bf16 and, when ``save``, the activations the backward reads (mod, q, k, v, sg, x1, bias, O, LSE,
     u, a2, x2, t: all fresh tensors)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 
@@ -863,7 +863,7 @@ def _fused_wgrads(spec, weights, names, f32, dev, rows_r):
     """The weight gradients ``spec`` names -- (A, B, [(weight name, 128-row block), ...]) per product D = A^T B -- in one split-K launch
     (``sm100_atom.AtomDw``), each written straight into a fresh buffer of its weight's shape and dtype; -> {name: gradient}. A weight made of
     several 128-row blocks (expand_a / expand_b: 256 rows) lists the block index of each destination."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
 
     wmap = dict(zip(names, weights, strict=True))
     out = {}
@@ -912,8 +912,8 @@ def _block_bwd(
     saved: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """d single, d cond, d pair, then one gradient per weight in ``WEIGHTS`` order, in the weight's dtype (all fresh tensors)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 
@@ -1206,7 +1206,7 @@ class _LocalBlock(torch.autograd.Function):
         saved, weights = rest[: ctx.n_saved], rest[ctx.n_saved :]
         grads = _block_bwd(dy, single, cond, pair, mask, list(weights), list(saved))
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
-            from miniworld_engine.kernels.integrations.token_dit_train import (
+            from foldjet_engine.kernels.integrations.token_dit_train import (
                 _activate_native_caller,
             )
 
@@ -1220,7 +1220,7 @@ def _infer(single, cond, pair, mask, weights):
 
 def block(module, single, cond, pair, mask=None, rope=None):
     """The block's output stream (both residuals included), on the sm_100a kernels; ``serves()`` must have accepted the call."""
-    from miniworld_engine.kernels.integrations import local_dit_h100
+    from foldjet_engine.kernels.integrations import local_dit_h100
 
     if local_dit_h100.matches(module, single, cond, pair, mask, rope):
         return local_dit_h100.run_block(module, single, cond, pair, mask, rope)
@@ -1239,7 +1239,7 @@ def block(module, single, cond, pair, mask=None, rope=None):
     ):
         out = _LocalBlock.apply(mask, single, cond, pair, *weights)
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
-            from miniworld_engine.kernels.integrations.token_dit_train import (
+            from foldjet_engine.kernels.integrations.token_dit_train import (
                 _native_caller_hooks,
             )
 
@@ -1447,7 +1447,7 @@ def _weights32_bwd(weights):
 def _cond_tables32(cond, c2_fn, n, weights, pk, cross, save):
     """The fp32 conditioning tables of a call: mod32 [rows, 768] and, in the cross mode, mkv [rows, 256]; with ``save`` also the
     LayerNorms cn1, cn2 (and cnkv) the weight gradients read. An inference call takes them from the hoist (``_cond_tables``)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
 
     def build():
         c2 = c2_fn()
@@ -1500,7 +1500,7 @@ def _cond_tables32(cond, c2_fn, n, weights, pk, cross, save):
 
 def _pair_bias32(pair, n, weights, save):
     """The windowed pair bias of an fp32 trunked pair, hoisted per pair tensor in an inference call (``_pair_bias``)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 
@@ -1564,8 +1564,8 @@ def _block_fwd32(
 ) -> list[torch.Tensor]:
     """The fp32 path's forward: the block output [A, 1, N, 128] fp32 and, when ``save``, the activations the backward reads (mod32, cn1,
     cn2, x1, P32, bias, O, LSE, gated, y, a1, x2, u, t; cross mode: cnkv, mkv, xkv -- all fresh fp32 tensors)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 
@@ -1693,8 +1693,8 @@ def _block_bwd32(
     saved: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """The fp32 path's backward: d single, d cond, d pair, then one gradient per weight (``WEIGHTS`` order, the weight's dtype)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 

@@ -1,7 +1,7 @@
 # bitscan.py OUTFILE : inference outputs of TriangleAttention-family modules (random NON-ZERO weights, real shapes, key masks, ragged lengths,
 # both orientations) of the tree on PYTHONPATH, saved for a bitwise comparison between trees (cmpscan.py).
 import sys, torch, itertools
-from miniworld_engine.modules import triangle as T
+from foldjet_engine.modules import triangle as T
 
 out = {}
 torch.backends.cuda.matmul.allow_tf32 = True

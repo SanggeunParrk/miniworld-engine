@@ -3,9 +3,9 @@
    python ltab.py ROW L S IDX... --out OUT.jsonl   (IDX -1 = torch.mm)"""
 import argparse, copy, dataclasses, json, statistics, time
 import torch
-from miniworld_engine.measure import config, speed
-from miniworld_engine.modules.primitives import unpadded_masks
-from miniworld_engine.kernels.integrations import opm_train as ot
+from foldjet_engine.measure import config, speed
+from foldjet_engine.modules.primitives import unpadded_masks
+from foldjet_engine.kernels.integrations import opm_train as ot
 
 ap = argparse.ArgumentParser()
 ap.add_argument("row", type=int); ap.add_argument("L", type=int); ap.add_argument("S", type=int); ap.add_argument("idx", type=int, nargs="+")

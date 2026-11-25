@@ -24,7 +24,7 @@ pytestmark.append(pytest.mark.skipif(not _h100(), reason="H100 (sm_90a)"))
 
 
 def _module(kind, starting, seed=0, w_std=0.1):
-    from miniworld_engine.modules.triangle import BidirectionalTriangleAttention, TriangleAttention
+    from foldjet_engine.modules.triangle import BidirectionalTriangleAttention, TriangleAttention
 
     torch.manual_seed(seed)
     if kind == "bi":
@@ -70,7 +70,7 @@ KINDS = [("bi", True), ("tri", True), ("tri", False)]
 )
 @pytest.mark.parametrize("masked", [False, True])
 def test_host_tails_equal_the_torch_ops(monkeypatch, kind, starting, length, batch, train, masked):
-    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+    from foldjet_engine.kernels.integrations import bidir_triattn_h100 as I
 
     m = _module(kind, starting)
     x, mask = _inputs(batch, length, masked)
@@ -87,7 +87,7 @@ def test_host_tails_equal_the_torch_ops(monkeypatch, kind, starting, length, bat
 @pytest.mark.parametrize("length", [128, 144, 256, 384, 512, 640, 768])
 @pytest.mark.parametrize(("batch", "masked", "w_std", "x_scale"), [(1, False, 0.1, 2.0), (1, True, 0.5, 0.5), (2, True, 0.1, 4.0)])
 def test_fused_tail_equals_the_unfused_tail(monkeypatch, kind, starting, length, batch, masked, w_std, x_scale):
-    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+    from foldjet_engine.kernels.integrations import bidir_triattn_h100 as I
 
     if length >= 640 and batch > 1:
         pytest.skip("memory")
@@ -101,7 +101,7 @@ def test_fused_tail_equals_the_unfused_tail(monkeypatch, kind, starting, length,
 
 
 def test_fused_tail_is_the_default_and_refuses_what_it_cannot_take():
-    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+    from foldjet_engine.kernels.integrations import bidir_triattn_h100 as I
 
     assert I.FUSED_TAIL is True and I.LEGACY is False
     assert I._fused_tail(False, 128, 256, 128 * 128)
@@ -115,7 +115,7 @@ def test_fused_tail_is_the_default_and_refuses_what_it_cannot_take():
 @pytest.mark.parametrize(("batch", "masked", "w_std", "x_scale"), [(1, False, 0.1, 2.0), (1, True, 0.5, 0.5), (2, True, 0.1, 4.0)])
 def test_fused_tail_with_saved_u_equals_the_unfused_training(monkeypatch, kind, starting, length, batch, masked, w_std, x_scale):
     """Training: the fused tail also writes u; output, dx and every parameter gradient equal the gate_u + addmm route's bits."""
-    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+    from foldjet_engine.kernels.integrations import bidir_triattn_h100 as I
 
     if length >= 384 and batch > 1:
         pytest.skip("memory")
@@ -134,7 +134,7 @@ def test_fused_tail_with_saved_u_equals_the_unfused_training(monkeypatch, kind, 
 @pytest.mark.parametrize(("batch", "masked", "w_std", "x_scale"), [(1, False, 0.1, 2.0), (1, True, 0.5, 0.5), (2, True, 0.1, 4.0)])
 def test_fused_gate_backward_equals_the_unfused_one(monkeypatch, kind, starting, length, batch, masked, w_std, x_scale):
     """Training backward: du = Wo^T dy^T fused into the gate's backward; dx and every parameter gradient equal the torch.mm + gate_bwd bits."""
-    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+    from foldjet_engine.kernels.integrations import bidir_triattn_h100 as I
 
     if length >= 384 and batch > 1:
         pytest.skip("memory")
@@ -153,7 +153,7 @@ def test_fused_gate_backward_equals_the_unfused_one(monkeypatch, kind, starting,
 @pytest.mark.parametrize(("batch", "masked", "w_std", "x_scale"), [(1, False, 0.1, 2.0), (1, True, 0.5, 0.5), (2, True, 0.1, 4.0)])
 def test_fused_softmax_backward_equals_the_torch_ops(monkeypatch, kind, starting, length, batch, masked, w_std, x_scale):
     """Training backward: the softmax gradient's last step in one kernel; dx and every parameter gradient equal the torch ops' bits."""
-    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+    from foldjet_engine.kernels.integrations import bidir_triattn_h100 as I
 
     if length >= 384 and batch > 1:
         pytest.skip("memory")
@@ -171,7 +171,7 @@ def test_fused_softmax_backward_equals_the_torch_ops(monkeypatch, kind, starting
 def test_fused_kernels_equal_the_unfused_bits_on_random_planes(trial):
     """Kernel level, random planes of several scales and tails (Gaussian, heavy-tailed, sparse with outliers): the fused tail (with and without
     the saved u) and the fused du + gate backward equal gate_u + torch.addmm and torch.mm + gate_bwd, bit for bit."""
-    from miniworld_engine.kernels.integrations import bidir_triattn_h100 as I
+    from foldjet_engine.kernels.integrations import bidir_triattn_h100 as I
 
     e, glue = I._ext(), I._glue()
     gen = torch.Generator(device="cuda")

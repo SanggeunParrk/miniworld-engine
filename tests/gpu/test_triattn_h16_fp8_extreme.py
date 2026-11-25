@@ -81,7 +81,7 @@ NAMES = ["qk50", "qk300", "qk1000", "qk1500", "bias300", "bias3000", "bias20000"
 @pytest.mark.parametrize(("heads", "dh", "length"), [(4, 32, 256), (4, 16, 256), (8, 32, 512)])
 @pytest.mark.parametrize("name", NAMES)
 def test_f8pv_core_extreme_logits(monkeypatch, name, heads, dh, length):
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     q, k, v, sbias, keep, scale = _case(name, length, heads, dh, seed=zlib.crc32(f"{name}{heads}{dh}".encode()) % 1000)
     monkeypatch.setattr(hs, "FP8_PV", True)

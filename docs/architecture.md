@@ -35,7 +35,7 @@ records that row as `unsupported` (visible in the tokens).
 
 ## 1. Requirements
 
-`src/miniworld_engine/requirements/`. `requirements_module.csv` has one row per distinct (module class, stream, dims, options) that a
+`src/foldjet_engine/requirements/`. `requirements_module.csv` has one row per distinct (module class, stream, dims, options) that a
 downstream model constructor builds (FoldForge's AF3-family models and MiniWorld), plus rows the engine keeps itself (`engine-own`).
 `requirements_kernel.csv` lists every kernel a module backend launches, with its family, its role (`forward`, `forward_infer`,
 `forward_train`, `backward`) and a human-managed `version`. A kernel's range is the union of its module rows, under the derive rule.
@@ -46,7 +46,7 @@ card-independent kernel. 2026-11-12: 697 kernel rows (377 sm_90, 192 sm_80, 128 
 
 ## 2. Modules and backends
 
-`src/miniworld_engine/modules/`, one file per op family (the map is the docstring of `modules/__init__.py`). Every op is a
+`src/foldjet_engine/modules/`, one file per op family (the map is the docstring of `modules/__init__.py`). Every op is a
 `BackendModule` (`modules/primitives.py`):
 
 - `backends` lists the backends the class implements, each one a `_forward_<name>` method. `pytorch` is always present and is the
@@ -95,7 +95,7 @@ does not change them to make them pass anything.
 ### Kernel builds fail loudly
 
 CUDA kernels are torch extensions or driver-API cubins, built through `kernels/_nvcc.py` (`load_extension`, `load_inline_extension`,
-`cubin`). The runtime first looks for the prebuilt bundle (`miniworld_engine/_prebuilt/`, installed by the per-arch kernels wheel),
+`cubin`). The runtime first looks for the prebuilt bundle (`foldjet_engine/_prebuilt/`, installed by the per-arch kernels wheel),
 then for the local JIT cache (`~/.cache/miniworld_engine_jit`). If neither has the artifact, the runtime compiles it. If a build or
 load fails, the runtime raises `_nvcc.KernelBuildError`, chained to the original exception. A build failure is never a reason to
 take another path. Support decisions (shape, dtype, arch, a missing toolkit) are made before any build and come back as
@@ -103,7 +103,7 @@ take another path. Support decisions (shape, dtype, arch, a missing toolkit) are
 
 ## 3. Kernel families per card
 
-`src/miniworld_engine/kernels/<family>/` holds `cuda/` (hand-written CUDA), `triton/` (Triton kernels) and `configs/` (launch-config
+`src/foldjet_engine/kernels/<family>/` holds `cuda/` (hand-written CUDA), `triton/` (Triton kernels) and `configs/` (launch-config
 tables and the pretuner's `candidates.json`). The `_*.py` files next to the families are shared infrastructure.
 
 | card | key | arch | status | where the code is |
@@ -142,7 +142,7 @@ See [kernels.md](kernels.md).
 - `judge/` (CPU) issues a token per case from records made by the current versions. It reports every required case as `carried`,
   `owed` or `pending`, and `--plan` writes the owed run as Slurm work groups. `tools/slurm/cycle.sh` runs one plan → prebuild →
   measure → issue cycle (`CARD=a100_sm80 ARCH=sm80` for an A100 cluster).
-- Tokens are kept per card: `src/miniworld_engine/judge/tokens/<card>/<Module>.jsonl`. The answers to the judge's questions are in
+- Tokens are kept per card: `src/foldjet_engine/judge/tokens/<card>/<Module>.jsonl`. The answers to the judge's questions are in
   `judge/answers.jsonl`.
 
 See [measure.md](measure.md) and [judge.md](judge.md). The speed order the engine's backends must keep (cuda < triton < pytorch) is in
@@ -150,7 +150,7 @@ See [measure.md](measure.md) and [judge.md](judge.md). The speed order the engin
 
 ## 6. Benchmarks
 
-`python -m miniworld_engine.measure.plot --gpu <card>` reads the card's speed tokens and regenerates `benchmarks/<card>/`: summary
+`python -m foldjet_engine.measure.plot --gpu <card>` reads the card's speed tokens and regenerates `benchmarks/<card>/`: summary
 figures and tables, plus the L and D sweeps per class. It never measures. See [../benchmarks/README.md](../benchmarks/README.md).
 
 ## Directory map
@@ -162,7 +162,7 @@ docs/                                    this documentation; docs/h100/ = per-fa
 benchmarks/<card>/                       generated speed figures and tables (h100_sm90, a100_sm80)
 tools/slurm/cycle.sh                     one judge cycle on a Slurm cluster
 third_party/anthropic/                   UPSTREAM.json / INVENTORY.md of the Anthropic release; the release itself goes in upstream/ (not in git)
-src/miniworld_engine/
+src/foldjet_engine/
   requirements/                          requirements_module.csv, requirements_kernel.csv, README.md (the rules)
   modules/                               BackendModule classes (one file per op family; mpnn/ for ProteinMPNN)
     primitives.py                        BackendModule, BackendUnsupported, MasterWeights, Linear, wide(), ...
@@ -181,7 +181,7 @@ src/miniworld_engine/
   judge/                                 __init__.py (the judge), tokens/<card>/, answers.jsonl
 ```
 
-Size (2026-11-11): about 116k lines of Python and 187k lines of CUDA (`.cu` / `.cuh`) under `src/miniworld_engine`, plus the
+Size (2026-11-11): about 116k lines of Python and 187k lines of CUDA (`.cu` / `.cuh`) under `src/foldjet_engine`, plus the
 generated tokens and benchmarks.
 
 ## Where to start reading
@@ -192,4 +192,4 @@ generated tokens and benchmarks.
 | which kernels run for X on H100 / A100? | `_supports_cuda` / `_forward_cuda` of the class, then the family's `cuda/__init__.py` or `kernels/integrations/`; the kernel rows of X in `requirements_kernel.csv` |
 | why was a call refused? | the `BackendUnsupported` text; in records and tokens it is `status: unsupported` with `reason` |
 | is X accurate / fast on card C? | `judge/tokens/<C>/X.jsonl` (`kind: accuracy` → `light`, `kind: speed` → `median_ms`, `speedup_vs_pytorch`); `benchmarks/<C>/X/README.md` |
-| what must be re-measured after a change? | `python -m miniworld_engine.judge --gpu <C> owed` and the "When to bump what" table in [judge.md](judge.md) |
+| what must be re-measured after a change? | `python -m foldjet_engine.judge --gpu <C> owed` and the "When to bump what" table in [judge.md](judge.md) |

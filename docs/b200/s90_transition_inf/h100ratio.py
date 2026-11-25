@@ -2,7 +2,7 @@
 import collections, glob, json, math, sys
 tag = sys.argv[1]
 h = {}
-for line in open("src/miniworld_engine/judge/tokens/h100_sm90/Transition.jsonl"):
+for line in open("src/foldjet_engine/judge/tokens/h100_sm90/Transition.jsonl"):
     t = json.loads(line); c = t["case"]; r = t.get("result", {})
     if t["kind"] != "speed" or c["backend"] != "cuda" or r.get("status") != "ok" or c["mode"] != "eval": continue
     h[(c["row"], c["dtype"], c["length"], c.get("depth"))] = r["median_ms"]

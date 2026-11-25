@@ -17,7 +17,7 @@ Switch: `MINIWORLD_FP8=safe` (or `fp8.enable("safe", model=...)`, backend `engin
 | pwa | `integrations.pwa_fp8_b200` e4m3 contraction (narrow, wide + BIG [G], dual [G], `pwa8_forward` one launch [G]) | padded N^2 S >= 2.4e9 (8x8), 1.1e9 (8x16), 6e8 (8x32 / BIG) | 8x32 N1536 S512 0.79 (d_pair 256 N1536: 0.73) | 0.8-0.9 | 0.0055 | `MINIWORLD_PWA_FP8=1` |
 | atom_dit | `augmented_attention.cuda.b200_atom.f8` rows route (pre + post) | rows <= 10240 (2048 atoms x 5) | 0.93-0.99 at 1024 atoms x 5, 1.00 at 2048 x 5, 1.02-1.06 above | -4 .. -9 % per block | update error 5.5 % rms (6x the bf16 route; outside the judge) | NOT in `safe` (effect on the whole model <= 0.3 %, E's decision): `MINIWORLD_ATOMDIT_FP8_B200` (1 / all / pre / post), `fp8.B200_OPTIN["atom_dit"]` |
 
-Framework (`src/miniworld_engine/fp8.py`, this integration): `B200_ROUTES` = trimul, triattn, transition (slot replacement: `_modules()` returns the B200 module on capability (10, 0)); `B200_OPTIN` = atom_dit (opt-in, own
+Framework (`src/foldjet_engine/fp8.py`, this integration): `B200_ROUTES` = trimul, triattn, transition (slot replacement: `_modules()` returns the B200 module on capability (10, 0)); `B200_OPTIN` = atom_dit (opt-in, own
 variable, not in a preset; `serves_sm100("atom_dit")` True; `enable()` / `disable()` / `status()` / `route_stats()["atom_dit"]` follow `b200_atom.f8` on a B200: `ENABLED` stages and `{pre, post, pre_declined, post_declined}`);
 OPM / PWA / token DiT keep their H100-named modules in the slot (their B200 forms sit behind the same switches). The TriAttn switches stay on `h100_sm90` (`_snapshot` / `_restore` / `enable_triattn` write there; the B200 module delegates reads).
 `check()` covers trimul, opm, transition (peak) and pwa / triattn (flag) through captured graphs.
@@ -93,7 +93,7 @@ Prebuild sm100: 835 artifacts, 0 not built.
 # FP8 (e4m3) on the B200 (sm_100a) — opt-in inference routes (engine 3.0.3 + B200 kernel set, agent A, 2026-11-19)
 
 Everything here is **opt-in and off by default**. With FP8 off the B200 default routes are bit-identical to the tree without it (section 6).
-Scope of this document (agent A): the foundation facts (tcgen05 e4m3 vs bf16 under the power cap), the framework (`src/miniworld_engine/fp8.py`) and the **Transition**
+Scope of this document (agent A): the foundation facts (tcgen05 e4m3 vs bf16 under the power cap), the framework (`src/foldjet_engine/fp8.py`) and the **Transition**
 route (`kernels/transition/cuda/fp8_sm100a.py`, `sm100/fp8/tf8_gemm.cu`, `sm100/fp8/tf8_ln.cu`). TriMul (agent B) and the token / atom DiT (agent C) have their own sections
 in their trees; the shared facts are in section 2 and `work/n13-fp8-a/mb_results.txt`.
 
@@ -109,7 +109,7 @@ in their trees; the shared facts are in section 2 and `work/n13-fp8-a/mb_results
 
 ## 1. H100 design digest (what 3.0.3 does and what transfers)
 
-### 1.1 Framework (`src/miniworld_engine/fp8.py`, 3.0.3)
+### 1.1 Framework (`src/foldjet_engine/fp8.py`, 3.0.3)
 * `PRESETS["safe"]` maps per-route env names to values (TRIMUL=calib, OPM=bound, PWA=1, TRANSITION=calib, TOKEN_DIT=expand, ATOMDIT=1; TriAttn per validated model).
   `MINIWORLD_FP8=safe` selects it; `env(name, default)`: a variable present in `os.environ` (even `""` = off) wins, else the preset value, else `default`. Route modules read it **at import**
   (`POLICY = fp8.env("MINIWORLD_X_FP8") or None`); `enable()` / `disable()` set the module attributes at run time.

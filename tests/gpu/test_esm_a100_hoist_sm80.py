@@ -6,7 +6,7 @@ conditioning or pair tensor, an in-place weight change and another key mask must
 import pytest
 import torch
 
-from miniworld_engine.modules import AtomDiTESMFold2Pair
+from foldjet_engine.modules import AtomDiTESMFold2Pair
 
 pytestmark = [pytest.mark.gpu]
 

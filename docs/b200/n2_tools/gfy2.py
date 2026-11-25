@@ -1,7 +1,7 @@
 # gfy2.py S MODE TAG... : like gfy but MODE: seq (each object 15 reps in turn), il (interleaved 3 rounds x 15), il1 (interleaved, 3 reps per visit)
 import statistics, sys, torch
 from torch.profiler import profile, ProfilerActivity
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 S = int(sys.argv[1]); mode = sys.argv[2]; tags = sys.argv[3:]
 H, D, C, N = 4, 32, 128, 1
 dev = torch.device("cuda"); torch.manual_seed(0)

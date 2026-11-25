@@ -1,5 +1,5 @@
 import sys, re
-root = sys.argv[1]; C = root + "/src/miniworld_engine/kernels/triangle_attention/cuda/"
+root = sys.argv[1]; C = root + "/src/foldjet_engine/kernels/triangle_attention/cuda/"
 p = C + "b200_sources/sm100.cuh"; s = open(p).read()
 a = "// bf16 / fp32 reduce-add of a row tile into the caller's tensor"
 helper = '''// (N1) tile visiting order of the persistent row-tile kernels. The ending node's x / y tiles are 128 rows (b, n, s0 .. s0 + 127) at the caller's

@@ -1,6 +1,6 @@
 import sys, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension, ensure_cuda_home
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension, ensure_cuda_home
 ensure_cuda_home()
 e = load_extension(name="n1_tmab2", sources=[sys.argv[1]], extra_cuda_cflags=[*K._flags(), "-I" + sys.argv[2]], verbose=False)
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")

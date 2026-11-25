@@ -1,7 +1,7 @@
 # chk512f.py n M mean ... : the fused D 512 pair kernel (FWD512) vs the generic chain vs fp64
 import sys, torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
-from miniworld_engine.modules import Transition
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.modules import Transition
 D = 512
 for c in sys.argv[1:]:
     n, M, mu = c.split(","); n, M, mu = int(n), int(M), float(mu)

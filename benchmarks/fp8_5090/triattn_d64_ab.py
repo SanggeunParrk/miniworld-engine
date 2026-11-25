@@ -6,10 +6,10 @@ import sys
 
 import torch
 
-import miniworld_engine  # noqa: F401
-from miniworld_engine import fp8
-from miniworld_engine.kernels.triangle_attention.cuda import sm120_fp8 as F
-from miniworld_engine.modules.triangle import TriangleAttention
+import foldjet_engine  # noqa: F401
+from foldjet_engine import fp8
+from foldjet_engine.kernels.triangle_attention.cuda import sm120_fp8 as F
+from foldjet_engine.modules.triangle import TriangleAttention
 
 args = sys.argv[1:]
 rounds, model = 6, "chai1"

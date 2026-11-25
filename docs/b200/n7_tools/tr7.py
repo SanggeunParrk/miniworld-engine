@@ -1,5 +1,5 @@
 import sys, torch, statistics
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 S=int(sys.argv[1]); N=int(sys.argv[2]); bf=int(sys.argv[3]); fl=tuple(sys.argv[4:])
 H,D,C=4,32,128; dev=torch.device("cuda")
 io=() if bf else (f"-DF32IO={sm100.F32IO_MODE}",)

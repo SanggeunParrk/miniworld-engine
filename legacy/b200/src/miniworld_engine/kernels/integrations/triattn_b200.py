@@ -6,9 +6,9 @@ from __future__ import annotations
 import torch
 from einops import rearrange
 
-from miniworld_engine import settings
-from miniworld_engine.kernels import _capture
-from miniworld_engine.modules.dispatch import KernelBackend
+from foldjet_engine import settings
+from foldjet_engine.kernels import _capture
+from foldjet_engine.modules.dispatch import KernelBackend
 
 
 def serves(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
@@ -31,7 +31,7 @@ def serves(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool
         return False
     if mask is not None and (mask.dtype != torch.bool or mask.shape != pair.shape[:2]):
         return False
-    from miniworld_engine.kernels.triangle_attention.cuda.b200_triattn import supports
+    from foldjet_engine.kernels.triangle_attention.cuda.b200_triattn import supports
 
     if not supports(pair.shape[1]):
         return False
@@ -40,7 +40,7 @@ def serves(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool
 
 def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """pair + TriangleAttention(pair). The casts stay in autograd so the module's parameters receive gradients."""
-    from miniworld_engine.kernels.triangle_attention.cuda.b200_triattn import (
+    from foldjet_engine.kernels.triangle_attention.cuda.b200_triattn import (
         triangle_attention,
     )
 
@@ -75,7 +75,7 @@ def serves_wide(module, pair: torch.Tensor, mask: torch.Tensor | None = None) ->
         return False
     if mask is not None and (mask.dtype != torch.bool or mask.shape != pair.shape[:2]):
         return False
-    from miniworld_engine.kernels.triangle_attention.cuda.b200_triattn import (
+    from foldjet_engine.kernels.triangle_attention.cuda.b200_triattn import (
         wide_supports,
     )
 
@@ -88,7 +88,7 @@ def serves_wide(module, pair: torch.Tensor, mask: torch.Tensor | None = None) ->
 def forward_wide(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     """pair + TriangleAttention(pair) on the wide path (inference, or training with the module's dropout); the packed bf16
     weights are cached until a parameter changes (data pointer or version: an optimizer step re-packs)."""
-    from miniworld_engine.kernels.triangle_attention.cuda.b200_triattn import (
+    from foldjet_engine.kernels.triangle_attention.cuda.b200_triattn import (
         pack_wide_weights,
         wide_inference,
         wide_train,

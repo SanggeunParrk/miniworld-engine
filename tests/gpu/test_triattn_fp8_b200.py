@@ -16,11 +16,11 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine import fp8
-from miniworld_engine.kernels.triangle_attention.cuda import b200_fp8
-from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
-from miniworld_engine.measure.config import randomize
-from miniworld_engine.modules.triangle import TriangleAttention, TriangleAttentionAF3, TriangleAttentionChai1
+from foldjet_engine import fp8
+from foldjet_engine.kernels.triangle_attention.cuda import b200_fp8
+from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+from foldjet_engine.measure.config import randomize
+from foldjet_engine.modules.triangle import TriangleAttention, TriangleAttentionAF3, TriangleAttentionChai1
 
 pytestmark = [pytest.mark.gpu]
 
@@ -145,7 +145,7 @@ def test_off_is_untouched() -> None:
 def test_large_logits_finite(which) -> None:
     """Wq / Wk x3 and bias x25 (the n7 qs_big stress): no NaN / inf; the error against the fp32 statements within a small multiple of the bf16 route's."""
     _needs_b200()
-    from miniworld_engine.modules import triangle as T
+    from foldjet_engine.modules import triangle as T
 
     torch.manual_seed(5)
     m = T.TriangleAttention(d_pair=128, n_head=4, starting=True, backend="cuda").cuda().float().eval()

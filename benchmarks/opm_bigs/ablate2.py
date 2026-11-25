@@ -1,13 +1,13 @@
 """Removal ablations of opm_fused_kernel vs cuBLAS product, cuda-event timed, standalone. python ablate.py L S"""
 import sys, torch
-from miniworld_engine.kernels.integrations import opm_train as ot
+from foldjet_engine.kernels.integrations import opm_train as ot
 L, S = int(sys.argv[1]), int(sys.argv[2]); dev = torch.device("cuda"); bf = torch.bfloat16
 torch.manual_seed(0)
 m = torch.randn(S, L, 64, device=dev, dtype=bf); mk = torch.rand(S, L, device=dev) > 0.1
 gam = torch.ones(64, device=dev); bet = torch.zeros(64, device=dev)
 wa = (torch.randn(32, 64, device=dev) * 0.1).to(bf); wb = (torch.randn(32, 64, device=dev) * 0.1).to(bf)
 wo = (torch.randn(128, 1024, device=dev) * 0.02).to(bf); ob = torch.zeros(128, device=dev)
-from miniworld_engine.kernels._nvcc import load_extension as load
+from foldjet_engine.kernels._nvcc import load_extension as load
 from pathlib import Path
 flags = sys.argv[3:]
 csrc = Path(ot.__file__).with_name("csrc")

@@ -18,7 +18,7 @@ def _a100() -> bool:
 @pytest.mark.parametrize("rows", [1, 7, 384, 1024, 2048, 3000])
 @pytest.mark.parametrize("length", [4, 36, 100, 128, 384, 640])
 def test_live_tokens_matches_the_row_max(rows: int, length: int) -> None:
-    from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
+    from foldjet_engine.kernels.outer_product_mean.cuda import ogemm_sm80
 
     gen = torch.Generator(device="cuda").manual_seed(rows * 1000 + length)
     mask = (torch.rand(rows, length, device="cuda", generator=gen) > 0.7).to(torch.uint8)
@@ -29,7 +29,7 @@ def test_live_tokens_matches_the_row_max(rows: int, length: int) -> None:
 @pytest.mark.skipif(not _a100(), reason="an A100 (sm_80)")
 @pytest.mark.parametrize("tokens,depth", [(384, 128), (512, 256), (768, 64)])
 def test_batched_skip_product_is_the_per_group_launches(tokens: int, depth: int) -> None:
-    from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
+    from foldjet_engine.kernels.outer_product_mean.cuda import ogemm_sm80
 
     gen = torch.Generator(device="cuda").manual_seed(tokens)
     a = torch.randn(8, depth, 8 * tokens, device="cuda", dtype=torch.bfloat16, generator=gen)
@@ -52,9 +52,9 @@ def test_batched_skip_product_is_the_per_group_launches(tokens: int, depth: int)
 def _opm_outputs(length: int, depth: int, padded: bool, probe: str, monkeypatch) -> tuple[torch.Tensor, torch.Tensor]:
     import contextlib
 
-    from miniworld_engine.kernels.outer_product_mean.cuda import ogemm_sm80
-    from miniworld_engine.modules.msa import OuterProductMean
-    from miniworld_engine.modules.primitives import unpadded_masks
+    from foldjet_engine.kernels.outer_product_mean.cuda import ogemm_sm80
+    from foldjet_engine.modules.msa import OuterProductMean
+    from foldjet_engine.modules.primitives import unpadded_masks
 
     monkeypatch.setenv("MINIWORLD_OPM_PROBE", probe)
     ogemm_sm80._PROBES.clear()
@@ -85,7 +85,7 @@ def test_all_live_mask_takes_the_dense_product_and_padding_the_skip_product(monk
 
 @pytest.mark.skipif(not _a100(), reason="an A100 (sm_80)")
 def test_chai_products_per_group_route_table_and_values() -> None:
-    from miniworld_engine.kernels.outer_product_mean.cuda import chai_sm80, ogemm_sm80
+    from foldjet_engine.kernels.outer_product_mean.cuda import chai_sm80, ogemm_sm80
 
     per_group = chai_sm80._per_group
     assert not per_group(1024, 1280) and per_group(1024, 1536) and per_group(1024, 2048)

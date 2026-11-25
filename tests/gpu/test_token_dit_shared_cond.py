@@ -13,9 +13,9 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.kernels.integrations import token_dit_train as TT
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.token_dit import TokenDiTProtenix
+from foldjet_engine.kernels.integrations import token_dit_train as TT
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.token_dit import TokenDiTProtenix
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 
@@ -97,7 +97,7 @@ def test_dense_conditioning_keeps_the_per_sample_route() -> None:
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("A,n1,n2", [(1, 64, 32), (5, 1536, 768), (48, 384 * 3072 // 8, 384 * 1536 // 8)])
 def test_sample_sum2_is_the_fixed_order_sum(dtype, A, n1, n2) -> None:
-    from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
+    from foldjet_engine.kernels.conditioned_transition.cuda.train import ext
 
     T = ext(768, 48, rpb=TT._native_rpb(), empty_uniform=False, dc=384, n=2, dp=128)
     g = torch.Generator(device="cuda").manual_seed(0)

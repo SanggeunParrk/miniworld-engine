@@ -11,7 +11,7 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = pytest.mark.gpu
 
@@ -56,7 +56,7 @@ def _weights(d, n=4, dev="cuda", dtype=torch.bfloat16):
 @pytest.mark.skipif(not CUDA, reason="needs a GPU to build the operands")
 @pytest.mark.parametrize(("d", "n"), SHAPES)
 def test_gate_rejects_everything_it_is_not_built_for(d, n):
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as w
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as w
 
     wa, ws = _weights(d, n)
     x = torch.randn(256, d, device="cuda", dtype=torch.bfloat16)
@@ -75,7 +75,7 @@ def test_gate_rejects_everything_it_is_not_built_for(d, n):
 
 @pytest.mark.skipif(not CUDA, reason="needs a GPU to build the operands")
 def test_gate_leaves_the_other_shapes_alone():
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as w
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as w
 
     x128 = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
     assert not w.supported(x128, *_weights(128, 4))  # D = 128, n = 4: fused_sm100a
@@ -85,7 +85,7 @@ def test_gate_leaves_the_other_shapes_alone():
 
 @pytest.mark.skipif(not CUDA, reason="needs a GPU to build the operands")
 def test_env_switch_turns_the_gate_off(monkeypatch):
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as w
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as w
 
     wa, ws = _weights(256)
     override_setting(monkeypatch, "transition_fused_sm100a", "0")
@@ -95,7 +95,7 @@ def test_env_switch_turns_the_gate_off(monkeypatch):
 
 
 def _build(shape, n=4, seed=72):
-    from miniworld_engine.modules import Transition
+    from foldjet_engine.modules import Transition
 
     torch.manual_seed(seed)
     module = (
@@ -193,7 +193,7 @@ def test_two_role_backward_with_fewer_tiles_than_weight_replicas(case, monkeypat
 @needs_b200
 @pytest.mark.parametrize(("d", "n"), SHAPES)
 def test_the_module_actually_dispatches_to_it(d, n, monkeypatch):
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as w
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as w
 
     calls = []
     original = w.transition_wide_sm100a
@@ -223,7 +223,7 @@ def _args(module):
 def test_inference_matches_training_forward(d, n):
     """No grad -> the forward skips the saves (and at D >= 384 runs the SwiGLU build without a / b stores); the output bits must
     not change."""
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as w
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as w
 
     module, x, _ = _build((1, 40, 48, d), n)
     with torch.no_grad():
@@ -235,7 +235,7 @@ def test_inference_matches_training_forward(d, n):
 @needs_b200
 @pytest.mark.parametrize(("d", "n"), SHAPES)
 def test_replay_is_bit_identical(d, n):
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as w
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as w
 
     torch.manual_seed(11)
     h, m = n * d, 128 * 150

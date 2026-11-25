@@ -14,10 +14,10 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.kernels.integrations import opm_fp8 as F
-from miniworld_engine.kernels.integrations import opm_train
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import OuterProductMean
+from foldjet_engine.kernels.integrations import opm_fp8 as F
+from foldjet_engine.kernels.integrations import opm_train
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import OuterProductMean
 
 pytestmark = [pytest.mark.gpu]
 

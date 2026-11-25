@@ -1,7 +1,7 @@
 # tlkv.py L [DEFS]: clock64 timeline of CTA 1 of triattn_bwd_kv (steady-state stage averages)
 import sys, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension
 L = int(sys.argv[1]); dv = [d for d in (sys.argv[2] if len(sys.argv) > 2 else "").split(",") if d]
 H = 4; torch.manual_seed(0)
 sh = (1, L, L, H, 32)

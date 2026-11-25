@@ -8,7 +8,7 @@ import weakref
 
 import torch
 
-from miniworld_engine.kernels.augmented_attention.cuda.sm100 import BoundedRuns
+from foldjet_engine.kernels.augmented_attention.cuda.sm100 import BoundedRuns
 
 
 def _run(nbytes: int = 0):

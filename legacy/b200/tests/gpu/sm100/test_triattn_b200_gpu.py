@@ -9,9 +9,9 @@ import torch
 from portable_helpers import randomize, relative
 from settings_helpers import policy_b200_portable_off as policy  # noqa: F401
 
-from miniworld_engine.kernels.integrations import triattn_b200
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.triangle_attention.module import TriangleAttention
+from foldjet_engine.kernels.integrations import triattn_b200
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.triangle_attention.module import TriangleAttention
 
 pytestmark = [
     pytest.mark.gpu,

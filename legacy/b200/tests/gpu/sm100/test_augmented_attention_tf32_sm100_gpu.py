@@ -44,7 +44,7 @@ def _reference(q, k, v, bias, A, L):
 @pytest.mark.parametrize(("A", "L"), [(2, 128), (4, 256), (2, 384)])
 @pytest.mark.parametrize("masked", [False, True])
 def test_forward_tf32_matches_fp64(A, L, masked):
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     q, k, v, bias = _inputs(A, L, masked, A * 1000 + L + masked)
     O, LSE = sm100.forward_tf32(q, k, v, bias, A, L)
@@ -60,7 +60,7 @@ def test_forward_tf32_matches_fp64(A, L, masked):
 @pytest.mark.parametrize("masked", [False, True])
 def test_backward_tf32_matches_fp64(A, L, masked):
     """dQ, dK, dV and dbias (summed over the samples) of the fp32 kernels against fp64 autograd, from the kernels' own O / LSE."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     q, k, v, bias = _inputs(A, L, masked, A * 1000 + L + masked + 7)
     do = torch.randn(A * L, H * DH, device="cuda", generator=torch.Generator(device="cuda").manual_seed(L))
@@ -83,7 +83,7 @@ def test_backward_tf32_into_column_blocks_and_sample_groups(A, L):
     alternate query blocks onto one dK / dV accumulator in the order they get there, so two identical calls differ in the last
     bits), and fp64 everywhere. A = 8, L = 128 takes attn_dqb_tf32's sample groups (32 items x NS = 4 on the B200's SMs: dbias as
     reductions into a zeroed buffer)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     q, k, v, bias = _inputs(A, L, True, A * 100 + L)
     do = torch.randn(A * L, H * DH, device="cuda", generator=torch.Generator(device="cuda").manual_seed(L + 1))

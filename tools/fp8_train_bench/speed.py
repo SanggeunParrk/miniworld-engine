@@ -12,7 +12,7 @@ import time
 import common
 import torch
 
-from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_train as F8
+from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8_train as F8
 
 VARS = (
     os.environ.get("VARIANTS")

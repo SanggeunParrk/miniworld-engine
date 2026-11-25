@@ -620,10 +620,10 @@ FP8 is the opt-in backend **`engine-fp8`**; the default remains the bf16 / fp16 
 
 ```
 TriangleMultiplication(128, backend="engine-fp8")    # or module.set_backend("engine-fp8"); a composite passes it to its parts
-miniworld_engine.fp8.set_model("af3")                 # the TriAttn FP8 routes validated for that model (or MINIWORLD_FP8_MODEL=af3)
+foldjet_engine.fp8.set_model("af3")                 # the TriAttn FP8 routes validated for that model (or MINIWORLD_FP8_MODEL=af3)
 with torch.inference_mode():
     out = model(x)
-    if miniworld_engine.fp8.check():                  # guard contract as below
+    if foldjet_engine.fp8.check():                  # guard contract as below
         out = model(x)
 ```
 
@@ -647,27 +647,27 @@ with torch.inference_mode():
   engine modules it would put on `cuda`, calling `fp8.set_model(<model>)` once, and `fp8.check()` after every forward. Until a runtime knows the name,
   the lower-level switch below does the same process wide.
 
-## The lower-level switch (`miniworld_engine.fp8`, process wide)
+## The lower-level switch (`foldjet_engine.fp8`, process wide)
 
 ```
 MINIWORLD_FP8=safe                                   # environment, before the engine's kernels are imported: every route but TriAttn
 MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=af3           # + the TriAttn FP8 routes validated for that model
-miniworld_engine.fp8.enable("safe")                  # or at run time; fp8.disable(), fp8.status()
-miniworld_engine.fp8.enable("safe", model="af3")     # + the TriAttn FP8 routes validated for that model
+foldjet_engine.fp8.enable("safe")                  # or at run time; fp8.disable(), fp8.status()
+foldjet_engine.fp8.enable("safe", model="af3")     # + the TriAttn FP8 routes validated for that model
 ```
 
 `safe` is the set validated end to end ("fp8safe2", AF3 FoldBench below): `MINIWORLD_TRIMUL_FP8=calib`, `MINIWORLD_OPM_FP8=bound`, `MINIWORLD_PWA_FP8=1`,
 `MINIWORLD_TRANSITION_FP8=calib`, `MINIWORLD_TOKEN_DIT_FP8=expand` (not `qkvg`: the one placement that moved FoldBench), `MINIWORLD_ATOMDIT_FP8=1` for every
 model, and TriAttn FP8 (PV on the fused and the unfused / front-made sites, e4m3 q / k on the fused d_pair-128 route) **only for a validated model**.
 The per-route variables keep working; with `MINIWORLD_FP8` set, a per-route variable set explicitly (also to "") wins over the preset. Guard contract: after
-every forward, outside any graph, `if miniworld_engine.fp8.check(): redo the forward` (at most 3 times): one host sync per static-scale route (TriAttn V / q k,
+every forward, outside any graph, `if foldjet_engine.fp8.check(): redo the forward` (at most 3 times): one host sync per static-scale route (TriAttn V / q k,
 TriMul, Transition, PWA); the routes' eager `sync` guards (default) already redo an overflowing call themselves, under graph capture they record it for
 `check()`. Calibration: the static scales are taken on each site's first eager call in a process and kept (two runs with a different first target are not
 byte-identical).
 
 ### Which routes fired: `fp8.route_stats()`
 
-`miniworld_engine.fp8.route_stats()` returns a copy of the call counters of every FP8 route (`fp8.reset_route_stats()` zeroes them), so "which FP8
+`foldjet_engine.fp8.route_stats()` returns a copy of the call counters of every FP8 route (`fp8.reset_route_stats()` zeroes them), so "which FP8
 routes did this model take" is read directly instead of from a profiler kernel census:
 
 | key | counters |
@@ -688,7 +688,7 @@ atom DiT `declined` / `fallbacks` tells which). Test: `tests/gpu/test_fp8_route_
 1. **TriAttn FP8 only for validated models.** The model is named once: `MINIWORLD_FP8_MODEL=<model>` next to `MINIWORLD_FP8` (read when the TriAttn kernels
    are imported) or `fp8.enable(preset, model=<model>)` (run time; `enable()` does not read `MINIWORLD_FP8_MODEL`, and `enable("safe")` without `model=`
    turns the TriAttn part off). Without a model, or for a model not in the table, TriAttn runs the default fp16 core (bit-identical to FP8 off) while the
-   other `safe` routes are on. The table is `miniworld_engine.fp8.TRIATTN_MODELS` (`h100_sm90.FP8_PV_WHITELIST` is derived from it):
+   other `safe` routes are on. The table is `foldjet_engine.fp8.TRIATTN_MODELS` (`h100_sm90.FP8_PV_WHITELIST` is derived from it):
 
    | model | TriAttn FP8 PV call sites | e4m3 q / k | end-level evidence |
    |---|---|---|---|
@@ -706,7 +706,7 @@ atom DiT `declined` / `fallbacks` tells which). Test: `tests/gpu/test_fp8_route_
 3. **No FP8 registry rows / tolerances.** FP8 is an opt-in path outside the judge: the registry dtype vocabulary is `float32|master` only, the FP8 planes /
    e4m3 V are internal intermediates of the `master` route, no `backend_versions` entry exists, and the judge tokens cover the default bf16 route only
    (`tests/cpu/test_fp8_switch.py::test_fp8_is_outside_the_judge` keeps the judge / measure / requirements code free of FP8). Do not run the judge or
-   `miniworld_engine.measure` with an FP8 switch set. Several routes are outside the module tolerance; the recommendation rests on the end-level evidence.
+   `foldjet_engine.measure` with an FP8 switch set. Several routes are outside the module tolerance; the recommendation rests on the end-level evidence.
 4. **Experiment harnesses are not in the release tree.** `benchmarks/fp8_e2e/` (end-level FoldForge runs: `probe.py`, `e2e2.py`, `an3.py`, `bz.py`,
    `scales.py`, `results.txt`) and `benchmarks/opm_fp8/` (OPM FP8 `stages.py`, `speed.py`, `err.py`, `lead.py`, `bit.py`, raw rows) were removed from
    `rel/3.0.0`; they live on branch `fp8/3.0.0-all` (e5ce31d0c; added in bd6fe26ef / 5c3db813a) and in the `rel/3.0.0` history up to 80ecfe71f
@@ -1215,7 +1215,7 @@ Error against fp64 (`... err`; judge = max|y - y64| / max|y64|, rms, update rms;
 ### Token DiT / atom DiT FP8 routes on the 3.0.0 release tree — base 2.5.14
 
 Tree: `wt-300` (branch rel/3.0.0, HEAD 77cd55eb0 = merge of fp8/3.0.0-all onto 2.5.14 9dd18e507, plus the uncommitted working-tree
-changes present at run time: `fp8.py` one switch etc., 17 paths). `miniworld_engine` pinned to `wt-300/src` (`scripts/wtpin.py`), every
+changes present at run time: `fp8.py` one switch etc., 17 paths). `foldjet_engine` pinned to `wt-300/src` (`scripts/wtpin.py`), every
 `MINIWORLD_*FP8*` env variable unset. H100 node02, 2026-11-17, jobs 57643 (token DiT) and 57654 (atom DiT).
 Scripts: copies of `fp8x-tokendit/scripts` (speed.py, err.py, tdcommon.py) and `fp8x-atomdit/scripts` (speed.py, err.py, common.py,
 tab_*.py) with only the tree pin and the output paths changed; drivers `scripts/run_tok.sh`, `scripts/run_atom.sh`. Raw rows in `res/`.
@@ -1454,7 +1454,7 @@ pair Transition, protein-RNA inside the between-seed spread). The 4a143d10c fix 
 Scope: bf16 inference, D64 / D128 / D256 / D384 / D512 (hidden = pair), one direction or (D64 - D384) the bidirectional block (`BidirectionalTriangleMultiplication`, from 2026-11-16, branch `fp8/bidir-tm`), 1-16 samples per call.
 D64 / D384 and B > 1 are from the 3.0.0 exploration (branch `fp8x/trimul`, see "TriMul: where else e4m3 can go"); D512 (IntelliFold2 trunk; one direction, L % 128 == 0) is from branch `fp8c/if2-d512` ("IntelliFold2 D512: TriMul planes" below); training stays bf16.
 
-Enable (environment, read at import, set before `import miniworld_engine`):
+Enable (environment, read at import, set before `import foldjet_engine`):
 
 | env | effect |
 |---|---|
@@ -1850,7 +1850,7 @@ shipped D128 / D256 route does); the bf16 default 0.42-0.63 %. No NaN, inf or sa
 Not a general route. Use the whitelist API:
 
 ```python
-from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
 # True only for whitelisted models; sets FP8_PV, FP8_PV_FUSED, FP8_VSCALE_AUTO (+ FP8_PV_UNFUSED / the S gate for "unfused" models)
 if hs.enable_fp8_pv_for("protenix1"):
@@ -1860,7 +1860,7 @@ if hs.enable_fp8_pv_for("protenix1"):
 hs.disable_fp8_pv()
 ```
 
-`FP8_PV_WHITELIST` maps a model to the call-site kinds whose end-level accuracy was checked: `{"protenix1": {"fused"}, "opendde": {"unfused"}, "af3": {"fused", "unfused"}, "protenix2": {"unfused"}, "openfold3": {"fused", "unfused"}}` (3.0.0: derived from `miniworld_engine.fp8.TRIATTN_MODELS`, which the one switch uses); Boltz-2 is absent on purpose (9c90, see limits).
+`FP8_PV_WHITELIST` maps a model to the call-site kinds whose end-level accuracy was checked: `{"protenix1": {"fused"}, "opendde": {"unfused"}, "af3": {"fused", "unfused"}, "protenix2": {"unfused"}, "openfold3": {"fused", "unfused"}}` (3.0.0: derived from `foldjet_engine.fp8.TRIATTN_MODELS`, which the one switch uses); Boltz-2 is absent on purpose (9c90, see limits).
 `enable_fp8_pv_for(model, hl=False)`: `hl=True` writes the hi + lo planes (output error about half, see below). Default (non-FP8) route: bit-identical to 2.5.9 (10 shapes / orientations / head counts compared as bytes; branch `fp8/vt`, whose default builds of `front_fused3_sm90.cu` and `triattn_mod_sm90.cu` changed in source (the V^T code is `#ifdef` / a template instance): 14 more shapes d_pair 64 / 128 / 256 / 384, start / end, flip, masked, L256..1536, as bytes against main ec11768fc). The FP8 route with front-made planes equals the standalone-pass FP8 route as bytes (hi: 64:4:32 / 64:2:32 / 64:4:16 L256..1536 with a padded key mask, trans; hi + lo L256..1024; 256:8:32 L256..2048, trans).
 
 Three kinds of call sites (branch `fp8/vt`: the first two make the planes in the front, the pass only remains where the front is cuBLAS):

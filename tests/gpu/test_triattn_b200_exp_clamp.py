@@ -23,7 +23,7 @@ import gc
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
+from foldjet_engine.measure import config as C
 
 pytestmark = [pytest.mark.gpu]
 

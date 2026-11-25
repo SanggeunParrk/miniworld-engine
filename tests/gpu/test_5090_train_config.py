@@ -12,10 +12,10 @@ import warnings
 import pytest
 import torch
 
-from miniworld_engine.kernels import _launch_config
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.norm import LayerNorm
-from miniworld_engine.modules.transition import Transition
+from foldjet_engine.kernels import _launch_config
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.norm import LayerNorm
+from foldjet_engine.modules.transition import Transition
 
 pytestmark = [pytest.mark.gpu, pytest.mark.rtx5090]
 
@@ -74,7 +74,7 @@ def test_train_step_fits_shared_memory_and_hits_the_table(chunk, make, width):
 
 def test_table_keys_for_the_chunk_rows_exist():
     """The keys themselves (a table edit that drops one fails here without running a kernel)."""
-    from miniworld_engine.kernels.transition.triton import main
+    from foldjet_engine.kernels.transition.triton import main
 
     keys = main.transition_fwd_kernel._entries("5090_sm120")
     flags = {(dt, flag) for (dt, _, flag) in keys}

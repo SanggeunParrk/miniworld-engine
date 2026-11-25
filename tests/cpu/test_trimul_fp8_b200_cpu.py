@@ -6,7 +6,7 @@ import os
 import pytest
 import torch
 
-from miniworld_engine.kernels.trimul_inproj.cuda import b200_fp8 as F8
+from foldjet_engine.kernels.trimul_inproj.cuda import b200_fp8 as F8
 
 
 def test_off_by_default():

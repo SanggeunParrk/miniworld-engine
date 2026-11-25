@@ -1,6 +1,6 @@
 import torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
-from miniworld_engine.modules import Transition
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.modules import Transition
 D=512; M=256
 torch.manual_seed(0)
 m = Transition(D, n=2, backend="cuda").cuda().eval()

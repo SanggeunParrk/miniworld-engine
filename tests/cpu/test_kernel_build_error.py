@@ -7,7 +7,7 @@ import importlib
 
 import pytest
 
-from miniworld_engine.kernels import _nvcc
+from foldjet_engine.kernels import _nvcc
 
 
 def test_build_failed_raises_chained():
@@ -32,7 +32,7 @@ def test_build_failed_returns_while_planning():
 
 def test_kernel_build_error_is_not_backend_unsupported():
     """A build failure must not be caught as an unsupported call (the measurers record BackendUnsupported as 'unsupported')."""
-    from miniworld_engine.modules.primitives import BackendUnsupported
+    from foldjet_engine.modules.primitives import BackendUnsupported
 
     assert not issubclass(_nvcc.KernelBuildError, BackendUnsupported)
 
@@ -54,8 +54,8 @@ def failing_build(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ("module", "loader", "cache"),
     [
-        ("miniworld_engine.kernels.rope.cuda.sm80", "loads", "ext"),
-        ("miniworld_engine.kernels.layernorm_linear.cuda.sm80", "_loads", "_ext"),
+        ("foldjet_engine.kernels.rope.cuda.sm80", "loads", "ext"),
+        ("foldjet_engine.kernels.layernorm_linear.cuda.sm80", "_loads", "_ext"),
     ],
 )
 def test_loader_raises_kernel_build_error(failing_build, module: str, loader: str, cache: str):

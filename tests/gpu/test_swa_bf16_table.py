@@ -15,8 +15,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.kernels.swa_dit import dispatch
-from miniworld_engine.modules.atom_dit import AtomDiTMiniWorld
+from foldjet_engine.kernels.swa_dit import dispatch
+from foldjet_engine.modules.atom_dit import AtomDiTMiniWorld
 
 pytestmark = [pytest.mark.gpu]
 

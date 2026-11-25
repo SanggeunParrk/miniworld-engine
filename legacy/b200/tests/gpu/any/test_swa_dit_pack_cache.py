@@ -13,8 +13,8 @@ import gc
 import pytest
 import torch
 
-from miniworld_engine.kernels import _capture
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels import _capture
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 
 
 def _packs():

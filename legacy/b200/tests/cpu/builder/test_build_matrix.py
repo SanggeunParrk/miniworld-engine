@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from miniworld_engine import build as matrix
-from miniworld_engine.autotune import builder
+from foldjet_engine import build as matrix
+from foldjet_engine.autotune import builder
 
 FLEET = ("sm_80", "sm_86", "sm_90", "sm_100")
 
@@ -133,8 +133,8 @@ def test_the_sweep_still_enumerates_every_declared_unit() -> None:
     import csv
     from pathlib import Path
 
-    from miniworld_engine.autotune.builder import op_units
-    from miniworld_engine.kernels import __file__ as kernels_init
+    from foldjet_engine.autotune.builder import op_units
+    from foldjet_engine.kernels import __file__ as kernels_init
 
     reg = Path(kernels_init).parent / "registry" / "registry.csv"
     with reg.open(newline="") as fh:

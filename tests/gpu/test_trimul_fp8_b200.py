@@ -15,7 +15,7 @@ def _needs_b200() -> None:
 
 
 def _make(d, kind, seed=7, rf3=False):
-    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
+    from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
 
     torch.manual_seed(seed)
     if kind == 0:
@@ -33,7 +33,7 @@ def _make(d, kind, seed=7, rf3=False):
 
 
 def _gold(m, d, kind, x, mask, rf3=False):
-    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
+    from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
 
     if kind == 0:
         r = BidirectionalTriangleMultiplication(d, d_hidden=d, backend="pytorch")
@@ -54,7 +54,7 @@ def _rel(y, y64, x) -> float:
 @pytest.fixture()
 def f8():
     _needs_b200()
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_fp8 as F8
 
     old = (F8.POLICY, F8.GUARD, F8._MINL_ENV)
     F8._CACHES.clear()
@@ -231,7 +231,7 @@ def test_batched_equals_per_sample_scales(f8):
 @pytest.mark.parametrize("d,hid,kind,n", [(64, 128, 1, 256), (64, 128, 2, 512), (64, 128, 0, 256), (128, 256, 1, 256)])
 def test_hidden_twice_the_pair_width(f8, d, hid, kind, n):
     """AF3 / Protenix template blocks (pair 64, hidden 128) and the D128 hidden-256 form: the plane counts follow the hidden width."""
-    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
+    from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
 
     torch.manual_seed(7)
     if kind == 0:

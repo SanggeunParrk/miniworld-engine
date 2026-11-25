@@ -78,7 +78,7 @@ def write(path: Path, rows: list[dict], extra: list[str]) -> None:
 
 
 def speed_rows(exp_id: str, exp_dir: Path, card: str) -> list[dict]:
-    """Aggregate the speed records of ``records/<card>/`` (miniworld_engine.measure.speed): the per-repeat medians give ms_median (their
+    """Aggregate the speed records of ``records/<card>/`` (foldjet_engine.measure.speed): the per-repeat medians give ms_median (their
     median), ms_min and ms_max; a case no repeat measured keeps the status and reason of its last record (never re-routed)."""
     groups: dict[tuple, list[tuple[dict, dict]]] = defaultdict(list)
     for f in record_files(exp_dir, card):
@@ -131,7 +131,7 @@ ACCURACY_EXTRA = ["stack", "row", "variant", "samples", "depth", "light", "err_b
 
 
 def accuracy_rows(exp_id: str, exp_dir: Path, card: str) -> list[dict]:
-    """The accuracy records (miniworld_engine.measure.accuracy) of ``records/<card>/`` as rows: status ``measured`` with the light
+    """The accuracy records (foldjet_engine.measure.accuracy) of ``records/<card>/`` as rows: status ``measured`` with the light
     (GREEN / YELLOW / RED), the errors against the float64 gold, the tolerance and the worst tensor; ``unsupported`` / ``skipped`` / ``error`` with
     their reason. A case measured twice keeps its last record."""
     last: dict[tuple, tuple[dict, dict, str]] = {}

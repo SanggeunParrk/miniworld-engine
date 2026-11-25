@@ -1,6 +1,6 @@
 """Speed of OuterProductMean / MSAPairWeightedAveraging at large MSA depth (measurement only).
 
-Reuses the committed measurer (miniworld_engine.measure.speed: graph timing, 256 MB L2 flush before every call, CUDA events, percentiles)
+Reuses the committed measurer (foldjet_engine.measure.speed: graph timing, 256 MB L2 flush before every call, CUDA events, percentiles)
 and the requirements cases (measure.config: same module construction, seeded weights, bf16 autocast "master" dtype, inputs without padding),
 only overriding the MSA depth, adding peak memory and the error against the PyTorch backend. One JSONL record per
 (module, row, L, depth, backend), written as each finishes; records already in --out are skipped (resumable).
@@ -21,8 +21,8 @@ import time
 
 import torch
 
-from miniworld_engine.measure import config, speed
-from miniworld_engine.modules.primitives import BackendUnsupported, unpadded_masks
+from foldjet_engine.measure import config, speed
+from foldjet_engine.modules.primitives import BackendUnsupported, unpadded_masks
 
 
 def _first(x):

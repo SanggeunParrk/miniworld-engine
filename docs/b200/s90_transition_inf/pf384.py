@@ -1,7 +1,7 @@
 # pf384.py n,M: tfwd_d384 built with -DPROBE=1 launched directly (inference); per-CTA stamps (median over CTAs, us from the earliest tile-0 start)
 import sys, statistics, torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
-from miniworld_engine.kernels.transition.cuda.fused_sm100a import build_cubins
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.kernels.transition.cuda.fused_sm100a import build_cubins
 D = 384
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
 names = {8: "MMA expand starts tile", 14: "last expand issued tile", 20: "LN x landed tile", 26: "LN done tile", 32: "SW last chunk done tile", 38: "epi out_full tile", 44: "epi end tile"}

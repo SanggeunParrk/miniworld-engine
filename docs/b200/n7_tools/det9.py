@@ -1,6 +1,6 @@
 # det9.py: forward race hunt + bit comparison of the default (CMBS 2) build against the CMBS=0 build; R launches per shape (default 200), full and ragged seqused
 import os, sys, torch
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 R = int(os.environ.get("R", "200")); H, D, C = 4, 32, 128; dev = torch.device("cuda")
 sm100.CUBINS["o_w"] = ("gattn_fwd", ("-DSPLITB=0", "-DCMBS=0")); sm100.CUBINS["o_s"] = ("gattn_fwd", ("-DSPLITB=1", "-DCMBS=0")); sm100.CUBINS["o_c"] = ("gattn_fwd", ("-DSPLITB=0", "-DCSPLIT=1", "-DCMBS=0"))
 sm100.CUBINS["n_w"] = ("gattn_fwd", ("-DSPLITB=0",)); sm100.CUBINS["n_s"] = ("gattn_fwd", ("-DSPLITB=1",)); sm100.CUBINS["n_c"] = ("gattn_fwd", ("-DSPLITB=0", "-DCSPLIT=1"))

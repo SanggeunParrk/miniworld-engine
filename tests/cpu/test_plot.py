@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("matplotlib")
 
-from miniworld_engine.measure import plot
+from foldjet_engine.measure import plot
 
 
 def _rec(backend: str, length: int, ms: float | None, *, mode: str = "eval", status: str = "ok", **extra) -> dict:
@@ -89,7 +89,7 @@ def test_no_points_is_exit_1(tmp_path):
 
 def test_tokens_source_draws_only_required_cases(tmp_path, monkeypatch):
     """A token of a case the requirements no longer ask for (kept by the judge, reported unused) is neither drawn nor summarized."""
-    from miniworld_engine import judge
+    from foldjet_engine import judge
 
     required = {**_rec("cuda", 128, 1.0), "gpu": None}
     stale = {**_rec("cuda", 128, 1.0), "length": 4096}

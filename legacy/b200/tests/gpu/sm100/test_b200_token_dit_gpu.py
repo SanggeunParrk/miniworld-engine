@@ -7,9 +7,9 @@ from portable_helpers import randomize, relative
 from settings_helpers import override_setting
 from settings_helpers import policy_blackwell_portable_off as policy  # noqa: F401
 
-from miniworld_engine.kernels.integrations import token_dit
-from miniworld_engine.modules.dit import DiTBlock
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine.kernels.integrations import token_dit
+from foldjet_engine.modules.dit import DiTBlock
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,
@@ -76,7 +76,7 @@ def test_token_dit_inference_live_inputs_weights_and_mask(dtype, qk):
 def test_token_dit_step_runs_the_sm100_core(dtype, monkeypatch):
     """The step on B200 launches the sm_100a gated core (bf16, or TF32 for fp32), and matches the Triton gated core it
     replaces (the runner cache is dropped between the two, so the second call really rebuilds without the sm100 core)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     torch.manual_seed(812)
     m = randomize(
@@ -173,7 +173,7 @@ def test_token_dit_any_length(dtype, S, L, shared):
 def test_token_dit_qk_norm(dtype, S, L, shared, monkeypatch):
     """QK-norm blocks take the fused step on B200 (one in-place CUDA RMSNorm pass over the q / k heads, the logit scale in the
     q norm's weight), match the reference, and the norm weights are live (a change reaches the output)."""
-    from miniworld_engine.kernels.conditioned_transition import cuda as cuda_rows
+    from foldjet_engine.kernels.conditioned_transition import cuda as cuda_rows
 
     torch.manual_seed(815)
     m = randomize(

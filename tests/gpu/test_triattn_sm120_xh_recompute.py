@@ -7,8 +7,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import TriangleAttention
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import TriangleAttention
 
 pytestmark = [
     pytest.mark.gpu,
@@ -37,7 +37,7 @@ def _step(module, inputs, saved_bytes: list[int]):
 
 @pytest.mark.parametrize("starting", [True, False])
 def test_xh_recompute_saves_one_tensor_and_is_bitwise(starting: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
+    from foldjet_engine.kernels.triangle_attention.cuda import sm80_wide
 
     module = TriangleAttention(d_pair=128, n_head=4, starting=starting, p_drop=0.0, master_weights=True).cuda().float().train()
     C.randomize(module, torch.Generator(device="cuda").manual_seed(0))

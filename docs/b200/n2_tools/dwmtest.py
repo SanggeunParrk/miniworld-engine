@@ -1,6 +1,6 @@
 # dwmtest.py : DwModTf32 (dw_tf32.cu DWM=1) against the cuBLAS TF32 GEMM and fp64, random non-zero data, determinism
 import torch
-from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+from foldjet_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
 dev = torch.device("cuda"); torch.manual_seed(3)
 K = tf32_bwd.kernels_bwd(0)
 ok = True

@@ -23,10 +23,10 @@ def main() -> int:
     a = ap.parse_args()
     import torch
     from paper_common import cfg as cfgmod
-    from miniworld_engine import fp8
-    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as td
-    from miniworld_engine.measure import config
-    from miniworld_engine.modules.primitives import unpadded_masks
+    from foldjet_engine import fp8
+    from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as td
+    from foldjet_engine.measure import config
+    from foldjet_engine.modules.primitives import unpadded_masks
 
     dev = torch.device("cuda")
     torch.backends.cuda.matmul.allow_tf32 = True

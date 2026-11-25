@@ -1,6 +1,6 @@
 # dwtest.py : _FeatB200 backward: swa_embed_dwf_sm100 against the cuBLAS GEMM path (and fp64), random non-zero data, ragged masks, elements -3 .. 130, determinism
 import sys, torch
-import miniworld_engine.modules.embedder as E
+import foldjet_engine.modules.embedder as E
 dev = torch.device("cuda"); torch.manual_seed(1)
 ok = True
 for esm, M in ((True, 4096), (True, 3072), (True, 6144), (True, 8192), (False, 4096), (False, 5120), (True, 4104)):

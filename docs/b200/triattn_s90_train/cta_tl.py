@@ -1,7 +1,7 @@
 # cta_tl.py : per-CTA %globaltimer timeline (entry / prologue done / end) of triattn_bwd_kv, triattn_bwd_q, triattn_db_slabs in the L128 / L256 core backward
 import sys, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension
 H = 4
 for L in [int(x) for x in sys.argv[1:]] or [128]:
     torch.manual_seed(0); sh = (1, L, L, H, 32)

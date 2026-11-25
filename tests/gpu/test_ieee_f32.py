@@ -4,8 +4,8 @@ Accuracy standard: max|y - y64| / max|y64| against float64, tolerance max(err of
 import pytest
 import torch
 
-from miniworld_engine.modules import PoolAtoms, Transition
-from miniworld_engine.modules.functional import pool_atoms
+from foldjet_engine.modules import PoolAtoms, Transition
+from foldjet_engine.modules.functional import pool_atoms
 
 pytestmark = [pytest.mark.gpu]
 
@@ -35,7 +35,7 @@ def _err(y: torch.Tensor, y64: torch.Tensor) -> float:
 @pytest.mark.parametrize("tb", [False, True])
 @pytest.mark.parametrize(("m", "n", "k"), [(384, 512, 384), (36, 20, 124), (256, 128, 9000), (384, 768, 384), (3072, 384, 768), (4096, 128, 128), (128, 128, 4096), (512, 128, 32768), (1536, 768, 3072), (3072, 3072, 768)])
 def test_mm_layouts(ta: bool, tb: bool, m: int, n: int, k: int) -> None:
-    from miniworld_engine.kernels import ieee_f32
+    from foldjet_engine.kernels import ieee_f32
 
     g = torch.Generator(device="cuda").manual_seed(0)
     a = torch.randn((k, m) if ta else (m, k), device="cuda", generator=g)
@@ -111,7 +111,7 @@ def test_pool_atoms_fp32(length: int) -> None:
 @skip
 def test_torch_mm_drop_in() -> None:
     """``ieee_f32.torch_mm`` / ``torch_addmm`` (the engine's own fp32 ``torch.mm`` / ``torch.addmm`` calls): the IEEE chain with TF32 off, ``out=`` into a column slice, the bias in the epilogue."""
-    from miniworld_engine.kernels import ieee_f32
+    from foldjet_engine.kernels import ieee_f32
 
     g = torch.Generator(device="cuda").manual_seed(0)
     a = torch.randn((4096, 128), device="cuda", generator=g)
@@ -134,7 +134,7 @@ def test_torch_mm_drop_in() -> None:
 @pytest.mark.parametrize("bias", [True, False])
 def test_linear_autograd(bias: bool) -> None:
     """``ieee_f32.linear``: forward and the three gradients against float64, IEEE fp32 (TF32 stays off)."""
-    from miniworld_engine.kernels import ieee_f32
+    from foldjet_engine.kernels import ieee_f32
 
     g = torch.Generator(device="cuda").manual_seed(0)
     x = torch.randn((4096, 128), device="cuda", generator=g, requires_grad=True)

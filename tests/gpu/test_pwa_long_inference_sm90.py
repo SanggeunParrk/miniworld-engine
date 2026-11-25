@@ -10,8 +10,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import MSAPairWeightedAveraging
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import MSAPairWeightedAveraging
 
 pytestmark = [pytest.mark.gpu]
 
@@ -91,7 +91,7 @@ def test_pwa_sm90_inference_4096(d_msa: int, d_pair: int, d_hidden: int) -> None
 @pytest.mark.parametrize("d_pair", [128, 256, 384, 512])
 def test_pair_fwd3_output_rows_equal_shared_memory_row(d_pair: int) -> None:
     """At N <= 2048 (both paths build) the logits staged in the output rows give the shared-memory path's weights bit for bit."""
-    from miniworld_engine.kernels.integrations import pwa_wide
+    from foldjet_engine.kernels.integrations import pwa_wide
 
     n = 1024
     gen = torch.Generator(device="cuda").manual_seed(1)

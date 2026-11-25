@@ -21,7 +21,7 @@ def _rel(a, b) -> float:
 
 
 def _module(d: int):
-    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication
+    from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication
 
     torch.manual_seed(0)
     m = BidirectionalTriangleMultiplication(d, master_weights=True, backend="cuda").cuda().eval()
@@ -35,7 +35,7 @@ def _module(d: int):
 
 
 def _leaves(m, x):
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_training_weights
+    from foldjet_engine.kernels.trimul_inproj.cuda._h100_pack import cast_training_weights
 
     mats = [m.to_left.weight, m.to_left_gate.weight, m.to_right.weight, m.to_right_gate.weight, m.to_gate.weight, m.to_out.weight]
     return [x, *cast_training_weights(mats), m.ln_pair.weight, m.ln_pair.bias, m.ln_out.weight, m.ln_out.bias]
@@ -45,7 +45,7 @@ def _leaves(m, x):
 @pytest.mark.parametrize("n", [40, 100, 256, 300, 771])
 def test_bidirectional_fp8_planes_accuracy(d: int, n: int) -> None:
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     assert F8.POLICY is None
     m, ref = _module(d)
@@ -63,7 +63,7 @@ def test_bidirectional_fp8_planes_accuracy(d: int, n: int) -> None:
 def test_bidirectional_fp8_k3_pipe_bit_identical(d: int) -> None:
     """The K3 pipeline macros (K3_EXTRA) on the bidirectional FP8 K3 (h = 2 d, per-channel scales) are bit-identical to the plain K3."""
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     m, _ = _module(d)
     n = 300
@@ -88,7 +88,7 @@ def test_bidirectional_calibrated_route_graph_and_guard(d: int, n: int) -> None:
     """Module hook, calibrated scales: eager call = graph replay (static device tensors), the update stays at the e4m3 level, the guard peak is below 448,
     ``rescale_all`` keeps the route finite and consistent, and the bf16 default is untouched once the policy is off."""
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     m, ref = _module(d)
     old = (F8.POLICY, F8.GUARD)
@@ -124,7 +124,7 @@ def test_bidirectional_calibrated_route_graph_and_guard(d: int, n: int) -> None:
 
 def test_bidirectional_below_min_l_is_the_default_route() -> None:
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     m, _ = _module(128)
     n = 192  # below the D128 bidirectional gate
@@ -147,7 +147,7 @@ def test_bidirectional_below_min_l_is_the_default_route() -> None:
 def test_pow2_scale_floor() -> None:
     """A channel whose amax is 0 or denormal-sized must not get 2^-99 (saturates the e4m3 cast on any later input); normal channels are unchanged."""
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_fp8 as F
+    from foldjet_engine.kernels.trimul_inproj.cuda import _h100_fp8 as F
 
     amax = torch.tensor([0.0, 1e-38, 1e-12, 1e-6, 1e-3, 0.5, 448.0, 1000.0], device="cuda")
     s = F.pow2_scale(amax)

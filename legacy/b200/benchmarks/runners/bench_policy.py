@@ -39,7 +39,7 @@ BF16 = "bf16"
 
 _REGISTRY = (
     Path(__file__).resolve().parents[2]
-    / "src" / "miniworld_engine" / "kernels" / "registry" / "registry.csv"
+    / "src" / "foldjet_engine" / "kernels" / "registry" / "registry.csv"
 )
 
 # kernel bench target -> registry family whose dtypes it inherits. A target absent here (the gemm

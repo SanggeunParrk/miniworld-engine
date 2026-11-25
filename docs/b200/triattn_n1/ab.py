@@ -1,7 +1,7 @@
 # ab.py FLAGSPEC L cfgjson... : module training step graph, variants interleaved (>=3 rounds); FLAGSPEC "name:KQ_MERGE=0,KQ_PDL=1;name2:..." set attrs of b200_triattn at capture
 import sys, json, torch
-from miniworld_engine.modules import triangle as T
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.modules import triangle as T
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
 variants = [(v.split(":")[0], dict(kv.split("=") for kv in v.split(":")[1].split(",") if kv)) for v in sys.argv[1].split(";")]
 L = int(sys.argv[2]); B = int(sys.argv[3])
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")

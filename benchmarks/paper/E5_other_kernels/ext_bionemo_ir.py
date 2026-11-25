@@ -131,7 +131,7 @@ def _opm_supports(self, msa, mask=None, token_asym_id=None, residual=None):
 
 
 def _opm_forward(self, msa, mask=None, token_asym_id=None, residual=None):
-    from miniworld_engine.modules.primitives import master_autocast
+    from foldjet_engine.modules.primitives import master_autocast
 
     if self.dead and residual is not None and not (self.training or torch.is_grad_enabled()):
         return residual
@@ -177,7 +177,7 @@ def _pwa_supports(self, msa, pair, mask=None):
 def _pwa_forward(self, msa, pair, mask=None):
     import torch.nn.functional as F
 
-    from miniworld_engine.modules.primitives import master_autocast
+    from foldjet_engine.modules.primitives import master_autocast
 
     if self.dead and not (self.training or torch.is_grad_enabled()):
         return msa
@@ -217,7 +217,7 @@ _W1: dict = {}
 
 
 def _tr_forward(self, x):
-    from miniworld_engine.modules.primitives import master_autocast
+    from foldjet_engine.modules.primitives import master_autocast
 
     if self.dead and not (self.training or torch.is_grad_enabled()):
         return x
@@ -244,7 +244,7 @@ def _tr_forward(self, x):
 
 
 def _attach_ops() -> None:
-    from miniworld_engine.modules import msa, transition
+    from foldjet_engine.modules import msa, transition
 
     for cls, sup, fwd in (
         (msa.OuterProductMean, _opm_supports, _opm_forward),

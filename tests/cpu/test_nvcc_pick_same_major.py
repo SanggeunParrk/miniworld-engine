@@ -3,7 +3,7 @@ cu129 torch links libcublasLt.so.13 and crashed cublasLtMatmulAlgoGetHeuristic: 
 
 import warnings
 
-from miniworld_engine.kernels import _nvcc
+from foldjet_engine.kernels import _nvcc
 
 
 def _t(rel):

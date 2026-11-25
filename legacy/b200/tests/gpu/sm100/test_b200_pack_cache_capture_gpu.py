@@ -8,16 +8,16 @@ import torch
 from portable_helpers import relative_float as relative
 from settings_helpers import policy_b200_portable_off as policy  # noqa: F401
 
-from miniworld_engine.kernels import _capture
-from miniworld_engine.modules import (
+from foldjet_engine.kernels import _capture
+from foldjet_engine.modules import (
     AttentionPairBias,
     PairformerBlock,
     PairformerConfig,
 )
-from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
-from miniworld_engine.modules.dit import DiTBlock
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.local_dit import LocalDiTBlock
+from foldjet_engine.modules.bias_only_dit import BiasOnlyDiTBlock
+from foldjet_engine.modules.dit import DiTBlock
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.local_dit import LocalDiTBlock
 
 pytestmark = [
     pytest.mark.gpu,

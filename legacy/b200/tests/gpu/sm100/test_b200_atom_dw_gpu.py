@@ -6,8 +6,8 @@ sums match fp64."""
 import pytest
 import torch
 
-from miniworld_engine.kernels.integrations import local_dit
-from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+from foldjet_engine.kernels.integrations import local_dit
+from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
 
 pytestmark = [
     pytest.mark.gpu,

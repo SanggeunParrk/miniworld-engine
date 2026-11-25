@@ -19,14 +19,14 @@ import torch
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
 LAUNCHERS = (
-    "miniworld_engine.kernels.adaln.triton.inference",
-    "miniworld_engine.kernels.adaln.triton.training",
-    "miniworld_engine.kernels.conditioned_transition.triton.composed",
-    "miniworld_engine.kernels.conditioned_transition.triton.fwd_saveact",
-    "miniworld_engine.kernels.conditioned_transition.triton.inference",
-    "miniworld_engine.kernels.conditioned_transition.triton.training",
-    "miniworld_engine.kernels.rmsnorm.triton.main",
-    "miniworld_engine.kernels.rope.triton.qk_norm",
+    "foldjet_engine.kernels.adaln.triton.inference",
+    "foldjet_engine.kernels.adaln.triton.training",
+    "foldjet_engine.kernels.conditioned_transition.triton.composed",
+    "foldjet_engine.kernels.conditioned_transition.triton.fwd_saveact",
+    "foldjet_engine.kernels.conditioned_transition.triton.inference",
+    "foldjet_engine.kernels.conditioned_transition.triton.training",
+    "foldjet_engine.kernels.rmsnorm.triton.main",
+    "foldjet_engine.kernels.rope.triton.qk_norm",
 )
 
 
@@ -72,7 +72,7 @@ def _randn(*shape, dtype=torch.bfloat16, grad=False, scale=1.0):
 @requires_card
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_rmsnorm_wide(monkeypatch, dtype) -> None:
-    from miniworld_engine.kernels.rmsnorm.triton.main import triton_rmsnorm
+    from foldjet_engine.kernels.rmsnorm.triton.main import triton_rmsnorm
 
     torch.manual_seed(0)
     x = _randn(3, 257, 128, dtype=dtype, grad=True)
@@ -82,7 +82,7 @@ def test_rmsnorm_wide(monkeypatch, dtype) -> None:
 
 @requires_card
 def test_rmsnorm_adamod_wide(monkeypatch) -> None:
-    from miniworld_engine.kernels.rmsnorm.triton.main import triton_rmsnorm_adamod
+    from foldjet_engine.kernels.rmsnorm.triton.main import triton_rmsnorm_adamod
 
     torch.manual_seed(1)
     q = _randn(2, 300, 128, grad=True)
@@ -95,7 +95,7 @@ def test_rmsnorm_adamod_wide(monkeypatch) -> None:
 @pytest.mark.parametrize(("nx", "dtype"), [(128, torch.bfloat16), (768, torch.bfloat16), (768, torch.float32)])
 def test_adaln_inference_wide(monkeypatch, nx, dtype) -> None:
     """d <= 256: the fused kernel; wide d: LN(cond) + the GEMM + gate kernel (16-bit, TF32) or the materialize path (strict fp32)."""
-    from miniworld_engine.kernels.adaln.triton.inference import adaln_inference
+    from foldjet_engine.kernels.adaln.triton.inference import adaln_inference
 
     torch.manual_seed(2)
     nc = 128 if nx == 128 else 384
@@ -117,7 +117,7 @@ def test_adaln_inference_wide(monkeypatch, nx, dtype) -> None:
 @pytest.mark.parametrize("nx", [128, 768])
 @pytest.mark.parametrize("mode", ["cublas", "fused"])
 def test_adaln_train_wide(monkeypatch, nx, mode) -> None:
-    from miniworld_engine.kernels.adaln.triton import training
+    from foldjet_engine.kernels.adaln.triton import training
 
     torch.manual_seed(3)
     nc = 128 if nx == 128 else 384
@@ -148,8 +148,8 @@ def _ct_inputs(d: int, dc: int, m: int, dtype=torch.bfloat16, grad=False):
 @requires_card
 def test_conditioned_transition_inference_wide(monkeypatch) -> None:
     """The fused b2b kernel (atom width 128) and the composed two-kernel path (token width 768)."""
-    from miniworld_engine.kernels.conditioned_transition.triton.composed import cond_transition_inference_composed
-    from miniworld_engine.kernels.conditioned_transition.triton.inference import cond_transition_inference
+    from foldjet_engine.kernels.conditioned_transition.triton.composed import cond_transition_inference_composed
+    from foldjet_engine.kernels.conditioned_transition.triton.inference import cond_transition_inference
 
     torch.manual_seed(4)
     with torch.no_grad():
@@ -162,7 +162,7 @@ def test_conditioned_transition_inference_wide(monkeypatch) -> None:
 @pytest.mark.parametrize(("d", "dc"), [(128, 128), (768, 384)])
 def test_conditioned_transition_train_wide(monkeypatch, d, dc) -> None:
     """The fused training forwards (b2b saveact at the atom width, the composed saveact pair at the token width) and the backward."""
-    from miniworld_engine.kernels.conditioned_transition.triton import training
+    from foldjet_engine.kernels.conditioned_transition.triton import training
 
     torch.manual_seed(5)
     training.set_forward_mode("fused")
@@ -175,7 +175,7 @@ def test_conditioned_transition_train_wide(monkeypatch, d, dc) -> None:
 @requires_card
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_qk_norm_rope_wide(monkeypatch, dtype) -> None:
-    from miniworld_engine.kernels.rope.triton.qk_norm import qk_norm_rope_3d
+    from foldjet_engine.kernels.rope.triton.qk_norm import qk_norm_rope_3d
 
     torch.manual_seed(6)
     n, s, h, d, half = 2, 96, 4, 32, 12

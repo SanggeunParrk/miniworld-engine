@@ -1,7 +1,7 @@
 # cmpb.py DEFS [L...]: core backward, base build vs build with -D DEFS: bitwise equality of dq dk dv dbias, device time (graph), 2 runs determinism
 import sys, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension
 dv = [d for d in sys.argv[1].split(",") if d]; LS = [int(x) for x in (sys.argv[2:] or ["128", "256", "512", "768"])]
 H = 4
 def build(defs, r):

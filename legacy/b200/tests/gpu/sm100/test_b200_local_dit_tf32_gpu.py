@@ -14,9 +14,9 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine.kernels.integrations import local_dit
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.local_dit import LocalDiTBlock, to_windows
+from foldjet_engine.kernels.integrations import local_dit
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.local_dit import LocalDiTBlock, to_windows
 
 pytestmark = [
     pytest.mark.gpu,
@@ -259,7 +259,7 @@ def test_fused_inference_matches_the_unfused_kernels(A, N, masked, cross, monkey
 def test_fused_mixed_units_match():
     """A mixed schedule -- the first tiles whole, the rest as half units (what the host picks for a tail, e.g. 4096 atoms) -- gives the
     bits of the all-full schedule, for both fused kernels."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
 
     _, eng = _block(5, True)
     single, cond, pair = _inputs(5, 1024, 9)
@@ -469,7 +469,7 @@ def test_the_tf32_cuda_kernels_run_and_no_triton(cross):
 
 
 def test_the_tf32_kernels_do_not_spill():
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom,
         sm100_atom_local,
     )
@@ -556,7 +556,7 @@ def test_static_inputs_replay_launches_the_block_kernels_only(cross):
     remakes the tables in a handful of launches, and sees an in-place update of the conditioning."""
     from tests.cuda_graph_nodes import graph_kernels
 
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     _, eng = _block(cross=cross)
     single, cond, pair = _inputs(3, 384)

@@ -6,10 +6,10 @@ import torch
 from portable_helpers import randomize, relative
 from settings_helpers import policy_b200_portable_off as policy  # noqa: F401
 
-from miniworld_engine.kernels.integrations import trimul_b200
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
-from miniworld_engine.modules.triangle_multiplication.bidirectional import (
+from foldjet_engine.kernels.integrations import trimul_b200
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.triangle_multiplication import TriangleMultiplication
+from foldjet_engine.modules.triangle_multiplication.bidirectional import (
     BidirectionalTriangleMultiplication,
 )
 
@@ -194,7 +194,7 @@ def test_wide_training(length, width, kind):
 
 def test_wide_training_dropout():
     """The row-dropout scale enters the output and every gradient: compare with ds applied to the fp32 reference by hand."""
-    from miniworld_engine.kernels.trimul_inproj.cuda.b200_train import trimul_train
+    from foldjet_engine.kernels.trimul_inproj.cuda.b200_train import trimul_train
 
     torch.manual_seed(343)
     width, length = 256, 128
@@ -248,7 +248,7 @@ def test_small_training(width, length, kind):
 @pytest.mark.parametrize(("width", "kind"), [(64, "out"), (128, "out"), (128, "bidir")])
 def test_small_training_dropout(width, kind):
     """D64 / D128: the row-dropout scale enters the output and every gradient (ds applied to the fp32 reference by hand)."""
-    from miniworld_engine.kernels.trimul_inproj.cuda.b200_train import trimul_train
+    from foldjet_engine.kernels.trimul_inproj.cuda.b200_train import trimul_train
 
     torch.manual_seed(349)
     length = 256

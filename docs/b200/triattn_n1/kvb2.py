@@ -1,6 +1,6 @@
 import sys, os, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension
 H = int(os.environ.get("H", "4")); B = int(os.environ.get("B", "1"))
 DEFS = [["N1_DRAIN_EARLY"], []]
 for L in [int(x) for x in sys.argv[1:]]:

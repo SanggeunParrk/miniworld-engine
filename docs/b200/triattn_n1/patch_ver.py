@@ -1,7 +1,7 @@
 import sys
 root = sys.argv[1]; base = sys.argv[2]
-p = root + "/src/miniworld_engine/modules/triangle.py"
-s = open(base + "/src/miniworld_engine/modules/triangle.py").read()   # start again from the base file
+p = root + "/src/foldjet_engine/modules/triangle.py"
+s = open(base + "/src/foldjet_engine/modules/triangle.py").read()   # start again from the base file
 b = '        "cuda:b200_sm100": 4,  # 4 ('
 assert s.count(b) == 1
 s = s.replace(b, '        "cuda:b200_sm100": 5,  # 5 (2026-11-18, N1 triattn, training): the LayerNorm forward / backward and gate backward (C = 128) on B200 kernels (b200_sources/lnbwd_sm100.cu, shared with the single-direction bias-only path of TriangleAttention), the dW / dWo GEMMs as graph branches at L <= 256 (dW alone above), outputs and gradients bitwise equal;\n        # 4 (', 1)

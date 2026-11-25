@@ -1,7 +1,7 @@
 # chk384.py n M ... : fold (K16 correction) vs the unfolded D 384 kernel vs fp64: max |diff|, error vs fp64 (random non-zero weights, gamma / beta random, x with a non-zero mean)
 import sys, torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
-from miniworld_engine.modules import Transition
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.modules import Transition
 D = 384
 for c in sys.argv[1:]:
     n, M, mu = c.split(","); n, M, mu = int(n), int(M), float(mu)

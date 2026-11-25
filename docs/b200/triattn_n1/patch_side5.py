@@ -1,5 +1,5 @@
 import sys
-p = sys.argv[1] + "/src/miniworld_engine/kernels/integrations/bidir_triattn_h100.py"; s = open(p).read()
+p = sys.argv[1] + "/src/foldjet_engine/kernels/integrations/bidir_triattn_h100.py"; s = open(p).read()
 # _forward1: optional wait() after the LayerNorm
 i0 = s.index("def _forward1(")
 i1 = s.index("def _backward1(")
@@ -16,7 +16,7 @@ old = '''        w, wo16 = _weights1(wv, wb, wg, wo)
 '''
 new = '''        s_c = None
         if (B200_SIDE & 8) and pair.shape[0] == 1 and pair.shape[1] <= B200_SIDE_MAX_L and _b200():
-            from miniworld_engine.kernels.bias_only_dit.cuda import side
+            from foldjet_engine.kernels.bias_only_dit.cuda import side
 
             s_c = side.fork(pair.device)
         if s_c is not None:  # branch: the fp32 -> bf16 weight cast beside the LayerNorm forward

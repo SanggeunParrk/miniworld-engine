@@ -17,9 +17,9 @@ import pytest
 import torch
 from fake_card import fake_card
 
-from miniworld_engine import settings
-from miniworld_engine.modules import dispatch
-from miniworld_engine.modules.dispatch import KernelBackend
+from foldjet_engine import settings
+from foldjet_engine.modules import dispatch
+from foldjet_engine.modules.dispatch import KernelBackend
 
 #: (op, the engine kernel every card but a B200 keeps)
 _NORMS = [("layernorm", KernelBackend.CUDA), ("rmsnorm", KernelBackend.PORTABLE)]
@@ -111,7 +111,7 @@ def test_an_explicit_backend_is_never_rewritten(monkeypatch, op, engine):
 def test_the_pytorch_stand_in_for_rmsnorm_returns_the_input_dtype(monkeypatch):
     """Torch's rms_norm runs in fp32 under autocast and returns fp32 (torch 2.13); the Triton kernel the B200 policy replaces
     returns the input dtype. A qk-norm feeds the attention kernels, which need q and k in the same dtype."""
-    from miniworld_engine.modules import RMSNorm
+    from foldjet_engine.modules import RMSNorm
 
     def autocast_like(self, x):  # what ``nn.RMSNorm.forward`` returns under CUDA autocast
         return torch.nn.functional.rms_norm(x.float(), self.normalized_shape, self.weight, self.eps)

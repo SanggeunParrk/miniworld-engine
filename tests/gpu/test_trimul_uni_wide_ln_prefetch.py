@@ -5,8 +5,8 @@ every parameter gradient of the module (outgoing / incoming, L384 and L768, fp32
 import pytest
 import torch
 
-from miniworld_engine.kernels.trimul_inproj.cuda import h100_uni_wide_training as UWT
-from miniworld_engine.modules.triangle import TriangleMultiplication
+from foldjet_engine.kernels.trimul_inproj.cuda import h100_uni_wide_training as UWT
+from foldjet_engine.modules.triangle import TriangleMultiplication
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

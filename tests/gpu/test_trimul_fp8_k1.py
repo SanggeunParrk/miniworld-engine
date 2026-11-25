@@ -21,9 +21,9 @@ def _rel(a, b) -> float:
 
 @pytest.mark.parametrize("d", [128, 256])
 def test_k1_planes_fp8_compute(d: int) -> None:
-    from miniworld_engine.kernels import _device  # noqa: F401
-    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_direct as Dm
+    from foldjet_engine.kernels import _device  # noqa: F401
+    from foldjet_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_direct as Dm
 
     _needs_h100()
     torch.manual_seed(0)
@@ -61,9 +61,9 @@ def test_k1_planes_fp8_compute(d: int) -> None:
 @pytest.mark.parametrize("outgoing", [True, False])
 def test_module_fp8_compute(d: int, outgoing: bool) -> None:
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_training_weights
-    from miniworld_engine.modules.triangle import TriangleMultiplication
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda._h100_pack import cast_training_weights
+    from foldjet_engine.modules.triangle import TriangleMultiplication
 
     torch.manual_seed(0)
     n = 256

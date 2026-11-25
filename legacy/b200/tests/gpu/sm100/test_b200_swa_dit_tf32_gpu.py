@@ -15,14 +15,14 @@ import torch
 import torch.nn.functional as F
 from settings_helpers import override_setting
 
-from miniworld_engine.kernels.swa_dit import dispatch
-from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
-from miniworld_engine.kernels.swa_dit.interface import (
+from foldjet_engine.kernels.swa_dit import dispatch
+from foldjet_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
+from foldjet_engine.kernels.swa_dit.interface import (
     FP32_EPS,
     swa_dit_block,
     swa_dit_hoist_modulation,
 )
-from miniworld_engine.kernels.swa_dit.reference import (
+from foldjet_engine.kernels.swa_dit.reference import (
     swa_dit_block_reference,
     swa_dit_hoist_modulation_reference,
 )
@@ -512,8 +512,8 @@ def test_bwd_training_matches_the_triton_path(a, b, s, tf32_spy, monkeypatch):
 # ------------------------------------------------------------------------------------------------ torch.compile(fullgraph=True)
 def _stack(n_blocks, seed):
     """n_blocks fp32 SWADiTBlocks on the engine implementation, the adaLN projection drawn (zero-init would hide both branches)."""
-    from miniworld_engine.modules.exceptions import ImplementationType
-    from miniworld_engine.modules.swa_dit import SWADiTBlock
+    from foldjet_engine.modules.exceptions import ImplementationType
+    from foldjet_engine.modules.swa_dit import SWADiTBlock
 
     torch.manual_seed(seed)
     blocks = torch.nn.ModuleList(
@@ -533,7 +533,7 @@ def _stack(n_blocks, seed):
 
 def _stack_inputs(a, s, seed):
     """x [A, S, C], the augment-invariant conditioning [1, S, C] and the attention params of front-packed ragged rows."""
-    from miniworld_engine.modules.swa_atom_attention import build_attention_params
+    from foldjet_engine.modules.swa_atom_attention import build_attention_params
 
     g = torch.Generator().manual_seed(seed)
     x = torch.randn(a, s, C, generator=g).to(DEV)
@@ -586,7 +586,7 @@ def test_fwd_compile_fullgraph_training_matches_eager(tf32_spy, monkeypatch):
     import copy
 
     tf32_bwd = importlib.import_module(
-        "miniworld_engine.kernels.swa_dit.cuda.sm100.tf32_bwd"
+        "foldjet_engine.kernels.swa_dit.cuda.sm100.tf32_bwd"
     )
 
     bwd_calls = []

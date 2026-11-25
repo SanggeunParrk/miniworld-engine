@@ -42,7 +42,7 @@ def _weights(gen: torch.Generator, n: int):
 
 @requires_card
 def test_edge_dropout_pack_and_backward_past_2_31() -> None:
-    from miniworld_engine.kernels.mpnn_edge_dropout.triton.main import _backward_op, _pack_op
+    from foldjet_engine.kernels.mpnn_edge_dropout.triton.main import _backward_op, _pack_op
 
     n = 2**31 + 4096
     gen = torch.Generator(device="cuda").manual_seed(0)
@@ -57,7 +57,7 @@ def test_edge_dropout_pack_and_backward_past_2_31() -> None:
 
 @requires_card
 def test_edge_mlp_forward_past_2_31() -> None:
-    from miniworld_engine.kernels.mpnn_edge_mlp.triton.main import _forward_impl
+    from foldjet_engine.kernels.mpnn_edge_mlp.triton.main import _forward_impl
 
     rows = G * K
     gen = torch.Generator(device="cuda").manual_seed(1)
@@ -72,7 +72,7 @@ def test_edge_mlp_forward_past_2_31() -> None:
 
 @requires_card
 def test_message_inference_past_2_31() -> None:
-    from miniworld_engine.kernels.mpnn_message.triton.inference import triton_message_hidden_reduce_inference
+    from foldjet_engine.kernels.mpnn_message.triton.inference import triton_message_hidden_reduce_inference
 
     gen = torch.Generator(device="cuda").manual_seed(2)
     (wt,), (b,) = _weights(gen, 1)
@@ -102,7 +102,7 @@ def _preactivation(edge, query, neighbor, index, we):
 
 @requires_card
 def test_node_message_forward_past_2_31() -> None:
-    from miniworld_engine.kernels.mpnn_node_message.triton.main import _forward_op
+    from foldjet_engine.kernels.mpnn_node_message.triton.main import _forward_op
 
     gen = torch.Generator(device="cuda").manual_seed(3)
     edge, query, neighbor, index, mask = _node_inputs(gen)
@@ -119,7 +119,7 @@ def test_node_message_forward_past_2_31() -> None:
 
 @requires_card
 def test_edge_tail_forward_past_2_31() -> None:
-    from miniworld_engine.kernels.mpnn_edge_tail.triton.main import _forward_op
+    from foldjet_engine.kernels.mpnn_edge_tail.triton.main import _forward_op
 
     gen = torch.Generator(device="cuda").manual_seed(4)
     edge, query, neighbor, index, _ = _node_inputs(gen)
@@ -141,7 +141,7 @@ def test_edge_tail_forward_past_2_31() -> None:
 
 @requires_card
 def test_relative_position_reduce_past_2_31() -> None:
-    from miniworld_engine.kernels.mpnn_relative_position.triton.main import triton_bucket_reduce
+    from foldjet_engine.kernels.mpnn_relative_position.triton.main import triton_bucket_reduce
 
     width, buckets = 16, 66
     rows = 2**31 // width + 4096

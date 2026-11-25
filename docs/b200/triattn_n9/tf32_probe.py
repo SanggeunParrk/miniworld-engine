@@ -1,6 +1,6 @@
 import sys, torch, time, os
-from miniworld_engine.modules import triangle as T
-from miniworld_engine.measure import speed
+from foldjet_engine.modules import triangle as T
+from foldjet_engine.measure import speed
 from torch.profiler import profile, ProfilerActivity
 L=int(sys.argv[1]); tf=os.environ.get("TF","1")=="1"
 torch.manual_seed(0)

@@ -1,7 +1,7 @@
 # sqab.py n,M ... : D 512 inference chain: graph median of the step and squeeze kernel duration for the squeeze variants (orig / PARTS / RX), alternated in one process (cubins built per variant on first use)
 import statistics, sys, torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
-from miniworld_engine.modules import Transition
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.modules import Transition
 fw.FOLD_LN = False
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
 CFG = {"orig": (False, False), "parts": (False, True), "rx": (True, False)}

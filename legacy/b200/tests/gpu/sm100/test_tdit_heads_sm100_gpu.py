@@ -32,7 +32,7 @@ def _ref(q, k, v, bias, mask=None):
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("L", [128, 384])
 def test_training_core(L, layout):
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     H, dh = layout
     A, W = 2, H * dh
@@ -59,7 +59,7 @@ def test_training_core(L, layout):
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("L", [128, 200, 384])
 def test_inference_core(L, layout):
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     H, dh = layout
     S, W, nb = 3, H * dh, 2

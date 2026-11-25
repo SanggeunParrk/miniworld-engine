@@ -13,8 +13,8 @@ pytestmark = [
 
 @pytest.fixture(scope="module")
 def exts():
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
-    from miniworld_engine.kernels.parallel_residual import cuda as prc
+    from foldjet_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from foldjet_engine.kernels.parallel_residual import cuda as prc
 
     ensure_cuda_home()
     old = load_extension(
@@ -48,7 +48,7 @@ def test_backward_bitwise(exts, dtype, copies):
 
 
 def test_h100_flag_is_the_read_only_load():
-    from miniworld_engine.kernels.parallel_residual import cuda as prc
+    from foldjet_engine.kernels.parallel_residual import cuda as prc
 
     assert prc._FLAGS["sm90"] == ("-DPR_HINT=2",)
     assert prc._FLAGS["sm80"] == ("-DPR_HINT=1",)

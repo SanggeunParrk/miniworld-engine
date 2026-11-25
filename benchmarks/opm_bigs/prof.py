@@ -1,8 +1,8 @@
 """Profile driver: one OPM case (row, L, S, backend) run N times inside cudaProfilerStart/Stop (for nsys / ncu --profile-from-start off).
    python prof.py ROW L S [backend] [iters]"""
 import copy, dataclasses, sys, torch
-from miniworld_engine.measure import config, speed
-from miniworld_engine.modules.primitives import unpadded_masks
+from foldjet_engine.measure import config, speed
+from foldjet_engine.modules.primitives import unpadded_masks
 
 row, L, S = map(int, sys.argv[1:4]); backend = sys.argv[4] if len(sys.argv) > 4 else "cuda"; iters = int(sys.argv[5]) if len(sys.argv) > 5 else 3
 dev = torch.device("cuda")

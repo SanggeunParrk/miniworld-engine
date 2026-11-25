@@ -16,9 +16,9 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import AttentionPairBias, TriangleAttention
-from miniworld_engine.modules.attention import EXTRA_BIAS_STREAM
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import AttentionPairBias, TriangleAttention
+from foldjet_engine.modules.attention import EXTRA_BIAS_STREAM
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
@@ -128,7 +128,7 @@ def test_triangle_attention_triton_rows_match_whole(starting: bool, monkeypatch:
 def test_triangle_attention_sm80_rows_match_whole(starting: bool, masked: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     """``sm80_wide.forward_rows`` against the whole-pair ``sm80_wide.forward`` at L 512 (blocks of 130 rows: a partial last block), and
     deterministic."""
-    from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
+    from foldjet_engine.kernels.triangle_attention.cuda import sm80_wide
 
     base = _triattn(starting)
     kern = copy.deepcopy(base).set_backend("cuda")
@@ -185,8 +185,8 @@ def test_transition_refiner_sizes_rows(backend: str, S: int) -> None:
     """Transition d_hidden 384 n 2 (master) at the refiner's pair rows (S^2: past one sm_80 launch's rows, the call is split): the module is
     row-wise, so the float32 reference on the first / last rows and on both sides of each block boundary checks the whole call, at the measurer's
     GREEN bound there. On A100 the cuda rows also equal (bitwise) one unsplit call on the same rows."""
-    from miniworld_engine.kernels.transition.cuda import fused_fwd_sm80, fused_wide_sm80
-    from miniworld_engine.modules import Transition
+    from foldjet_engine.kernels.transition.cuda import fused_fwd_sm80, fused_wide_sm80
+    from foldjet_engine.modules import Transition
 
     base = Transition(384, n=2).cuda().float().eval()
     C.randomize(base, torch.Generator(device="cuda").manual_seed(0))

@@ -5,7 +5,7 @@ keys and a fully masked query row included."""
 import pytest
 import torch
 
-from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+from foldjet_engine.kernels.triangle_attention.cuda import h100_dh
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

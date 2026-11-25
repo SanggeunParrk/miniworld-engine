@@ -8,10 +8,10 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine import settings
-from miniworld_engine.kernels.integrations import pwa_train as pt
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.msa_pair_weighted_averaging import (
+from foldjet_engine import settings
+from foldjet_engine.kernels.integrations import pwa_train as pt
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.msa_pair_weighted_averaging import (
     MSAPairWeightedAveraging,
 )
 
@@ -281,7 +281,7 @@ def test_inference_takes_the_same_kernels(module, inputs):
 
 
 def test_default_auto_path_compiles_forward_and_backward(module, inputs, monkeypatch):
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     override_setting(monkeypatch, "pwa_train", None)
     assert (not settings.current().force_portable_kernels)
@@ -385,8 +385,8 @@ def test_native_inference_default_runs_the_reference_on_an_unserved_shape(module
     """No Triton fallback on H100: a shape the native kernels do not serve runs the PyTorch statements (and matches them)."""
     import copy
 
-    from miniworld_engine.modules.dispatch import KernelBackend
-    from miniworld_engine.modules.exceptions import ImplementationType
+    from foldjet_engine.modules.dispatch import KernelBackend
+    from foldjet_engine.modules.exceptions import ImplementationType
 
     override_setting(monkeypatch, "pwa_train", None)
     args = (inputs["msa"][:, :, :320], inputs["pair"][:, :320, :320], inputs["full"][:, :320])

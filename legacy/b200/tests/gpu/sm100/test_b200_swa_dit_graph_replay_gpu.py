@@ -22,9 +22,9 @@ pytestmark = [
 
 _SCRIPT = textwrap.dedent("""
     import sys, torch
-    from miniworld_engine.modules.exceptions import ImplementationType
-    from miniworld_engine.modules.swa_atom_attention.module import build_attention_params
-    from miniworld_engine.modules.swa_dit import SWADiTBlock
+    from foldjet_engine.modules.exceptions import ImplementationType
+    from foldjet_engine.modules.swa_atom_attention.module import build_attention_params
+    from foldjet_engine.modules.swa_dit import SWADiTBlock
     n, s, shared, replays = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3] == "shared", int(sys.argv[4])
     torch.manual_seed(0)
     block = SWADiTBlock(128, 128, 4, implementation=ImplementationType.MINIWORLD)

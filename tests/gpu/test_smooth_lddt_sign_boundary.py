@@ -7,7 +7,7 @@ ground truth (d_pred == d_gt up to the rounding of the coordinates), the rest is
 import pytest
 import torch
 
-from miniworld_engine.modules.smooth_lddt import SmoothLddtLoss
+from foldjet_engine.modules.smooth_lddt import SmoothLddtLoss
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 

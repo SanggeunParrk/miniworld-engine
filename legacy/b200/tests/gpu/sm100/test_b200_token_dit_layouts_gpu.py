@@ -6,9 +6,9 @@ import torch
 from portable_helpers import randomize, relative
 from settings_helpers import policy_blackwell_portable_off as policy  # noqa: F401
 
-from miniworld_engine.kernels.integrations import token_dit
-from miniworld_engine.modules.dit import DiTBlock
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine.kernels.integrations import token_dit
+from foldjet_engine.modules.dit import DiTBlock
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
 LAYOUTS = [(24, 768), (12, 768), (16, 1024)]          # (heads, d_single)
@@ -68,7 +68,7 @@ def _train_step(mod, x, c, p, mask, dy):
 @pytest.mark.parametrize(("L", "qk"), [(128, False), (384, True), (384, False), (128, True)])
 def test_training(layout, L, qk):
     """The fused training block (bf16) against the fp32 PyTorch block, held to the bf16 PyTorch block's own error."""
-    from miniworld_engine.kernels.integrations import token_dit_train
+    from foldjet_engine.kernels.integrations import token_dit_train
 
     H, d = layout
     m, tb = _blocks(layout, qk, seed=2)

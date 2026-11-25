@@ -6,10 +6,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine import fp8
-from miniworld_engine.kernels.triangle_attention.cuda import h100_dh as dh
-from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
-from miniworld_engine.modules.triangle import TriangleAttention
+from foldjet_engine import fp8
+from foldjet_engine.kernels.triangle_attention.cuda import h100_dh as dh
+from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+from foldjet_engine.modules.triangle import TriangleAttention
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

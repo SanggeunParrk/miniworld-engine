@@ -14,8 +14,8 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.attention import AttentionPairBias
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.attention import AttentionPairBias
 
 pytestmark = [pytest.mark.gpu]
 
@@ -147,7 +147,7 @@ def _pair_bias_backward_fp64(z, wcm, db, mask, eps):
 def test_tc_pair_backward(channels: int, heads: int) -> None:
     """The A100 composed fp32 path's pair backward (``pair_bias_generic_backward_tc``, one launch for the batch): dz at ~fp32 accuracy (3xTF32),
     dW' at TF32-GEMM accuracy; each batch row's result equals the one-row launch's bitwise, and a replay is bit-identical."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm80
+    from foldjet_engine.kernels.augmented_attention.cuda import sm80
 
     g = torch.Generator(device="cuda").manual_seed(4)
     batch, length = 3, 128
@@ -171,7 +171,7 @@ def test_tc_pair_backward(channels: int, heads: int) -> None:
 def test_h100_batched_chunks_equal_rows(monkeypatch, d_pair: int, heads: int, extra: bool) -> None:
     """H100 bf16 inference runs the batch rows together (one launch per stage), in chunks of rows bounded by ``BATCH_BIAS_BYTES``: with
     the bound forcing chunks of 2 rows out of 5 (and the last of 1), every row still equals its one-row call bitwise."""
-    from miniworld_engine.kernels.integrations import attention_pair_bias_b200 as native
+    from foldjet_engine.kernels.integrations import attention_pair_bias_b200 as native
 
     m = AttentionPairBias(d_single=384, d_pair=d_pair, n_head=heads).cuda().float()
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))

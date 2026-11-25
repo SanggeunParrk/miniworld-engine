@@ -7,13 +7,13 @@ import sys
 import torch
 
 sys.path.insert(0, sys.argv[0].rsplit("/", 1)[0])
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import MSAPairWeightedAveraging
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import MSAPairWeightedAveraging
 
 sys.path.insert(0, "tests/gpu")
 from test_pwa_long_inference_sm80 import gold_f64, make_inputs_chunked  # pyright: ignore[reportMissingImports]
 
-import miniworld_engine.modules.msa as _msa_mod
+import foldjet_engine.modules.msa as _msa_mod
 
 
 def _chunked_random(shape, *, dtype, device, generator, scale=1.0):

@@ -1,7 +1,7 @@
 import sys, torch
 from pathlib import Path
-from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir as BB
-from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_bidir as BB
+from foldjet_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 ensure_cuda_home()
 e = load_extension(name="n1_ltmm_t", sources=[sys.argv[1]], extra_cuda_cflags=[*host_flags(), *BB._FLAGS, *gencodes("100a")], verbose=False)
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")

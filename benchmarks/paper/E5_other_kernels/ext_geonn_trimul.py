@@ -26,7 +26,7 @@ def supports(self, pair, mask, dropout_p):
 def forward(self, pair, mask, dropout_p):
     from geometric_nn_ops_torch.triangle import triangle_multiplicative_update
 
-    from miniworld_engine.modules.functional import dropout_scale
+    from foldjet_engine.modules.functional import dropout_scale
 
     if self.dead and not (self.training or torch.is_grad_enabled()):
         return pair

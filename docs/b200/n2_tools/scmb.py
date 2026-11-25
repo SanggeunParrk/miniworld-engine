@@ -1,7 +1,7 @@
 # scmb.py M : swa_embed_scatter vs scatter8 alone (graph, CUPTI kernel us, L2 flushed) + bitwise check on contiguous, ragged-run and masked layouts
 import statistics, sys, torch
 from torch.profiler import profile, ProfilerActivity
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 M = int(sys.argv[1]); T = 384; dev = torch.device("cuda"); torch.manual_seed(0)
 K = sm100.embed_glue(0); ns = sm100.num_sms()
 flush = torch.empty(256 << 20, dtype=torch.uint8, device=dev)

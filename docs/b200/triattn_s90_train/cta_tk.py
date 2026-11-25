@@ -1,11 +1,11 @@
 import sys, json, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels import _nvcc
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels import _nvcc
 orig = _nvcc.load_extension
 def patched(*a, **kw):
     kw["extra_cuda_cflags"] = [*kw.get("extra_cuda_cflags", []), "-DS90_TL=1", "-DTA_TL=1"]; kw["name"] = kw["name"] + "_s90tl"; return orig(*a, **kw)
 K.load_extension = patched
-from miniworld_engine.modules import triangle as T
+from foldjet_engine.modules import triangle as T
 kw, L = json.loads(sys.argv[1]), int(sys.argv[2]); torch.manual_seed(0)
 mod = T.TriangleAttention(**kw, backend="cuda").cuda().float().train()
 x = torch.randn(1, L, L, kw["d_pair"], device="cuda", dtype=torch.bfloat16, requires_grad=True); dy = torch.randn_like(x)

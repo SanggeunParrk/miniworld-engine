@@ -12,8 +12,8 @@ import argparse
 import torch
 from dit_common import ab, graph
 
-from miniworld_engine.kernels.trimul_inproj.cuda import sm120_fp8 as F
-from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
+from foldjet_engine.kernels.trimul_inproj.cuda import sm120_fp8 as F
+from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
 
 ap = argparse.ArgumentParser()
 ap.add_argument("cases", nargs="+")

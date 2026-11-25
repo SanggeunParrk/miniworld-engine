@@ -1,6 +1,6 @@
 # gfa32.py S [N] [bf]: GattnFwd modes alone for the F32IO (training / fp32) build (bf=0) or the bf16 build (bf=1): auto / whole / split / cs2 / cs4, graph median (L2 flushed)
 import statistics, sys, torch
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 S = int(sys.argv[1]); N = int(sys.argv[2]) if len(sys.argv) > 2 else 1; bf = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 H, D, C = 4, 32, 128
 dev = torch.device("cuda"); K = sm100.kernels(0); g = K.gattn if bf else K.gattn32

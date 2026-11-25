@@ -20,7 +20,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly, pair_bias_all
+from foldjet_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly, pair_bias_all
 
 pytestmark = [pytest.mark.gpu]
 
@@ -135,12 +135,12 @@ def test_attention_distribution_fp32(case: str, dtype: torch.dtype) -> None:
     mp = copy.deepcopy(mq).set_backend("pytorch")
     out["pytorch fold"] = (_softmax(pair_bias_all([mp], ins[2])[0], mask), bound)
     # Triton one-pass pair bias
-    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits
+    from foldjet_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits
 
     a = mq.attention
     out["triton"] = (_softmax(pair_bias_logits(ins[2], a.ln_pair.weight, a.to_bias.weight, EPS), mask), bound)
     # H100 cuda: the inference hoist (P of the fused block, rounded to the dtype) and the hoisted bias
-    from miniworld_engine.kernels.bias_only_dit.cuda.runner import FusedBiasOnlyDiT
+    from foldjet_engine.kernels.bias_only_dit.cuda.runner import FusedBiasOnlyDiT
 
     mc = copy.deepcopy(mq).set_backend("cuda")
     P = FusedBiasOnlyDiT([mc], dtype=dtype).hoist(ins[2].contiguous(), mask).view(1, H, L, L)
@@ -194,7 +194,7 @@ def test_logits_tc_error_class_of_fma(case: str, dtype: torch.dtype, dp: int) ->
     """``hoist.logits_tc`` (the inference hoist's one-pass logits: LN0 in fp32 on chip, TF32 mma with the split fp32 operands, all four
     products, a fresh partial per k-step added in fp32) against fp64: its logits' max-abs error and the max-row TV of softmax stay within
     the error class of the exact fp32 FMA-pipe GEMM it replaces (max-abs within 2x, TV within 1.5x, plus the floors of the fp32 data)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+    from foldjet_engine.kernels.bias_only_dit.cuda import hoist as HK
 
     sw, w0, off, tv_floor = CASES[case]
     g = torch.Generator(device="cuda").manual_seed(1)
@@ -239,8 +239,8 @@ def test_logits_tc_error_class_of_fma(case: str, dtype: torch.dtype, dp: int) ->
 def test_hoist_bwd_tc_error_class_of_fma(dtype: torch.dtype, dp: int, off: float) -> None:
     """``hoist.hoist_bwd_tc`` (d LN0, the LN0 backward and dW' of one block in one pass, error-compensated TF32 mma) against fp64: d pair and dW'
     stay within 2x of the exact fp32 FMA / GEMM path's error (max-abs relative to the max)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
-    from miniworld_engine.kernels.integrations.bias_only_dit_hoist import hoist_bwd_exact
+    from foldjet_engine.kernels.bias_only_dit.cuda import hoist as HK
+    from foldjet_engine.kernels.integrations.bias_only_dit_hoist import hoist_bwd_exact
 
     g = torch.Generator(device="cuda").manual_seed(2)
     n = 256 * 256
@@ -277,7 +277,7 @@ def test_hoist_bwd_tc_error_class_of_fma(dtype: torch.dtype, dp: int, off: float
 def test_logits_tc_large_row_mean(dtype: torch.dtype, dp: int, mean_shift: float) -> None:
     """The bf16 rows' two-product logits path (``logits_tc_k``: sum W' x - mean sum W') is taken only where |mean| <= std / 2; rows with a large common offset
     (mean_shift x std, every channel) go the LN0-first path. Either way the error against fp64 stays within 2x of the exact fp32 FMA path's (mixed tiles: half the rows shifted)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+    from foldjet_engine.kernels.bias_only_dit.cuda import hoist as HK
 
     g = torch.Generator(device="cuda").manual_seed(3)
     n = 256 * 256

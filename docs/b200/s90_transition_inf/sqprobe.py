@@ -1,8 +1,8 @@
 # sqprobe.py FLAG... -- n,M ... : kernel durations (profiler, one flushed graph replay) of the D 512 chain with extra -D flags on the squeeze GEMM
 import sys, statistics, torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
 a = sys.argv[1:]; i = a.index("--"); fw.SQ_FLAGS = tuple(a[:i]); fw.FOLD_LN = False; cases = a[i + 1:]
-from miniworld_engine.modules import Transition
+from foldjet_engine.modules import Transition
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
 for c in cases:
     n, M = (int(v) for v in c.split(","))

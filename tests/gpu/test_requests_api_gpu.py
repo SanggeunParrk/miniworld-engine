@@ -8,10 +8,10 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine import capture
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import AtomDiT, ParallelResidual, TokenDiT, parallel_residual
-from miniworld_engine.modules.primitives import BackendUnsupported
+from foldjet_engine import capture
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import AtomDiT, ParallelResidual, TokenDiT, parallel_residual
+from foldjet_engine.modules.primitives import BackendUnsupported
 
 pytestmark = pytest.mark.gpu
 
@@ -182,7 +182,7 @@ def test_parallel_residual_cuda_refuses_outside_its_range():
 def test_multi_fold_atom_pair_bias_is_hoisted_once():
     """The sampler calls a block many times with the same pair / mask objects: the multi-fold call's pair bias is made once (the folds'
     expanded key mask is read as its one row, not copied per call)."""
-    from miniworld_engine.kernels.integrations import local_dit_h100
+    from foldjet_engine.kernels.integrations import local_dit_h100
 
     block = _block(lambda: AtomDiT("protenix")).set_backend("cuda")
     inp = block.make_inputs(length=512, samples=2, depth=3, dtype=torch.bfloat16, device="cuda", generator=_gen(), stream="atom_folds")

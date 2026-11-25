@@ -60,9 +60,9 @@ def _global_gate() -> str | None:
     """Why global attention cannot run in this process (it has no Triton fallback, unlike the windowed block), or None: the switches
     that turn the sm_100a stages off, an earlier build / load failure of them, and a missing FlashAttention-4."""
 
-    from miniworld_engine import settings
-    from miniworld_engine.kernels.swa_dit import dispatch
-    from miniworld_engine.kernels.swa_dit.cuda import sm100
+    from foldjet_engine import settings
+    from foldjet_engine.kernels.swa_dit import dispatch
+    from foldjet_engine.kernels.swa_dit.cuda import sm100
 
     if (
         not settings.current().swa_dit_sm100
@@ -90,11 +90,11 @@ def highest_fp32_on_hopper_blackwell(q: torch.Tensor, half_window: int) -> bool:
     stages stay (fp32 rows, cuBLAS projections in exact fp32 under "highest", bf16 attention operands as the per-op path has them)."""
     if q.dtype != torch.float32 or not q.is_cuda or _matmul_precision() != "highest":
         return False
-    from miniworld_engine.kernels.swa_dit.dispatch import (
+    from foldjet_engine.kernels.swa_dit.dispatch import (
         _h100_global,
         native_h100_enabled,
     )
-    from miniworld_engine.modules.dispatch import restricted_card
+    from foldjet_engine.modules.dispatch import restricted_card
 
     return restricted_card(q.device) and not (native_h100_enabled(q) or _h100_global(q, half_window))
 
@@ -157,7 +157,7 @@ def refusal(
         hopper = q.is_cuda and torch.cuda.get_device_capability(q.device) == (9, 0)
         if hopper:
             # H100: the native sm_90a stages (bf16 or fp32 activations) around a FlashAttention-4 global attention
-            from miniworld_engine.kernels.swa_dit.cuda import sm100
+            from foldjet_engine.kernels.swa_dit.cuda import sm100
 
             if not sm100.FA4_AVAILABLE:
                 return "global attention needs FlashAttention-4 (flash_attn.cute), which is not installed"
@@ -211,7 +211,7 @@ def _mod_sm100(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
     """Whether the hoisted modulation runs on the sm_100a kernels: B200, bf16 c, bf16 or fp32 Wmod, d_cond = C = 128, rows a multiple
     of 128, and the kernels load (``settings.swa_dit_sm100=0`` or ``force_portable_kernels=True`` keep the fp32 GEMM)."""
 
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     if (
         not settings.current().swa_dit_sm100
@@ -231,7 +231,7 @@ def _mod_sm100(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
         return False
     if torch.cuda.get_device_capability(c_base.device) != (10, 0):
         return False
-    from miniworld_engine.kernels.swa_dit.dispatch import _sm100
+    from foldjet_engine.kernels.swa_dit.dispatch import _sm100
 
     return (
         _sm100(c_base.reshape(1, -1, D_ATOM), N_HIDDEN, HALF_WINDOW, FP32_EPS)
@@ -254,7 +254,7 @@ def _mod_tf32(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
         or (c_base.numel() // D_ATOM) % 128
     ):
         return False
-    from miniworld_engine.kernels.swa_dit.dispatch import _tf32_ready
+    from foldjet_engine.kernels.swa_dit.dispatch import _tf32_ready
 
     grad = torch.is_grad_enabled() and (c_base.requires_grad or wmod.requires_grad)
     return _tf32_ready(c_base.device, grad)
@@ -271,12 +271,12 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
     accumulated and kept in fp32 (as the engine's rmsnorm_adamod keeps its projections in registers). Differentiable. On B200 a
     bf16 call runs the sm_100a mod_fwd / mod_bwd kernels, an fp32 call without a gradient the TF32 mod_fwd_tf32 kernel.
     """
-    from miniworld_engine.kernels.swa_dit.dispatch import (
+    from foldjet_engine.kernels.swa_dit.dispatch import (
         native_h100_enabled,
         native_h100_mod_fwd,
     )
     if native_h100_enabled(c_base):
-        from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationH100
+        from foldjet_engine.kernels.swa_dit.autograd import SWADiTModulationH100
         if (c_base.ndim != 3 or c_base.shape[-1] != 128 or c_base.numel() == 0
                 or not c_base.is_contiguous() or not wmod.is_contiguous()
                 or c_base.dtype not in (torch.bfloat16, torch.float32)
@@ -285,14 +285,14 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
             raise ValueError("native H100 SWA modulation requires contiguous BF16/FP32 width128 and [768,128] weights")
         c = c_base.reshape(-1, c_base.shape[-1])
         if torch.is_grad_enabled() and (c.requires_grad or wmod.requires_grad):
-            from miniworld_engine.kernels.integrations.token_dit_train import (
+            from foldjet_engine.kernels.integrations.token_dit_train import (
                 _native_caller_output,
             )
             out = SWADiTModulationH100.apply(c, wmod)
             return _native_caller_output(out, c_base, wmod, force=True)
         # No gradient: the table is a function of the conditioning and the adaLN weight only, so a sampler's steps (eager) and a captured step
         # under ``_capture.static_inputs()`` (a replay) read it from the hoist instead of making it again (silu + casts + GEMM, 16-22 us).
-        from miniworld_engine.kernels import _capture
+        from foldjet_engine.kernels import _capture
 
         if torch.compiler.is_compiling():         # the hoist reads storage addresses: a traced graph keeps the opaque op
             return native_h100_mod_fwd(c, wmod)[0]
@@ -304,14 +304,14 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
     if _mod_sm100(
         c_base, wmod
     ):  # B200, bf16, d_cond 128: the sm_100a mod_fwd / mod_bwd kernels
-        from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationSm100
-        from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_sm100
+        from foldjet_engine.kernels.swa_dit.autograd import SWADiTModulationSm100
+        from foldjet_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_sm100
 
         c2 = c_base.reshape(-1, c_base.shape[-1]).contiguous()
         w = wmod.contiguous()
         if torch.is_grad_enabled() and (c2.requires_grad or w.requires_grad):
             return SWADiTModulationSm100.apply(c2, w)
-        from miniworld_engine.kernels import _capture
+        from foldjet_engine.kernels import _capture
 
         return swa_dit_mod_fwd_sm100(
             c2, _capture.param_forms("swa_mod", (w,), lambda: w.to(c2.dtype))
@@ -319,16 +319,16 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
     if _mod_tf32(
         c_base, wmod
     ):  # B200, fp32, d_cond 128, no gradient: the TF32 mod_fwd_tf32 kernel
-        from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_tf32
+        from foldjet_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_tf32
 
         return swa_dit_mod_fwd_tf32(
             c_base.reshape(-1, c_base.shape[-1]).contiguous(), wmod.contiguous()
         )
-    from miniworld_engine.kernels.swa_dit.dispatch import mod_sm90
+    from foldjet_engine.kernels.swa_dit.dispatch import mod_sm90
 
     if mod_sm90(c_base, wmod):                           # H100, bf16 or fp32 (TF32 allowed): the sm_90a mod_fwd / mod_bwd kernels
-        from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationSm90
-        from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_sm90
+        from foldjet_engine.kernels.swa_dit.autograd import SWADiTModulationSm90
+        from foldjet_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_sm90
 
         c2 = c_base.reshape(-1, c_base.shape[-1]).contiguous()
         w = wmod.contiguous()
@@ -360,8 +360,8 @@ def swa_dit_block(
     augments, so ``cos[:B]`` of its output is this argument; ``seqused`` [N] int32 (valid atoms front-packed per row).
     Check :func:`refusal` first. A call that records no gradient runs the inference forward (nothing saved).
     """
-    from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction
-    from miniworld_engine.kernels.swa_dit.dispatch import (
+    from foldjet_engine.kernels.swa_dit.autograd import SWADiTBlockFunction
+    from foldjet_engine.kernels.swa_dit.dispatch import (
         native_h100_enabled,
         swa_dit_block_fwd,
     )
@@ -389,7 +389,7 @@ def swa_dit_block(
         return SWADiTBlockFunction.apply(
             q, mod, cos, sin, seqused, *weights, B, half_window
         )
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     dt = q.dtype
     wk = _capture.param_forms(

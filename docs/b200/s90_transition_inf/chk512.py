@@ -1,7 +1,7 @@
 # chk512.py n M mean ... : the D 512 inference chain with the LayerNorm fold (FOLD_LN, K16 correction) vs unfolded vs fp64
 import sys, torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
-from miniworld_engine.modules import Transition
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.modules import Transition
 D = 512
 for c in sys.argv[1:]:
     n, M, mu = c.split(","); n, M, mu = int(n), int(M), float(mu)

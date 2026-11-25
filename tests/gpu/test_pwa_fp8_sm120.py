@@ -22,7 +22,7 @@ def _needs_5090() -> None:
 
 
 def _case(d: int, c: int, cz: int, s: int, n: int, seed: int = 0):
-    from miniworld_engine.modules.msa import MSAPairWeightedAveraging
+    from foldjet_engine.modules.msa import MSAPairWeightedAveraging
 
     m = MSAPairWeightedAveraging(d, cz, n_head=8, d_hidden=c, master_weights=True, backend="cuda").cuda().eval()
     g = torch.Generator(device="cpu").manual_seed(seed + d + c + cz)
@@ -45,7 +45,7 @@ def _case(d: int, c: int, cz: int, s: int, n: int, seed: int = 0):
 @pytest.fixture
 def P():
     _needs_5090()
-    from miniworld_engine.kernels.integrations import pwa_fp8_sm120 as P
+    from foldjet_engine.kernels.integrations import pwa_fp8_sm120 as P
 
     assert not P.ENABLED  # off unless switched on
     saved = (P.GUARD, P.MIN_SN_ALL, P.BIG_MIN_SN, P.HEADROOM)
@@ -67,8 +67,8 @@ def _run(m, inp):
 @pytest.mark.parametrize("nt", [32, 64])
 def test_ln_vt8_matches_ln_v(d: int, c: int, nt: int) -> None:
     _needs_5090()
-    from miniworld_engine.kernels.integrations import msa_f8_sm120 as X
-    from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80
+    from foldjet_engine.kernels.integrations import msa_f8_sm120 as X
+    from foldjet_engine.kernels.pair_weighted_averaging.cuda import sm80
 
     s, n = 70, 208  # 208 = 3 x 64 + 16: a clipped tail tile
     torch.manual_seed(1)
@@ -92,7 +92,7 @@ def test_ln_vt8_matches_ln_v(d: int, c: int, nt: int) -> None:
 
 def test_vt8_y_matches_torch() -> None:
     _needs_5090()
-    from miniworld_engine.kernels.integrations import msa_f8_sm120 as X
+    from foldjet_engine.kernels.integrations import msa_f8_sm120 as X
 
     s, n = 70, 208  # a clipped token tail
     torch.manual_seed(2)
@@ -111,7 +111,7 @@ def test_vt8_y_matches_torch() -> None:
 
 def test_w_quant() -> None:
     _needs_5090()
-    from miniworld_engine.kernels.integrations import msa_f8_sm120 as X
+    from foldjet_engine.kernels.integrations import msa_f8_sm120 as X
 
     w = torch.rand(8, 208, 208, device="cuda").bfloat16()
     assert torch.equal(X.w_quant(w).float(), (w.float() * 256).to(torch.float8_e4m3fn).float())
@@ -156,7 +156,7 @@ def test_default_untouched_after_route(P, d: int, c: int, cz: int) -> None:
 
 
 def test_safe_preset_and_disable(P) -> None:
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     P.ENABLED = False
     assert fp8._modules()[fp8.SLOTS.index("pwa")] is P
@@ -182,7 +182,7 @@ def test_sync_guard_redo(P, d: int, c: int, cz: int) -> None:
 
 @pytest.mark.parametrize("d,c,cz", [(64, 8, 128), (256, 32, 512)])
 def test_lazy_guard_through_check_and_graph(P, d: int, c: int, cz: int) -> None:
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m, inp = _case(d, c, cz, 128, 256, seed=4)
     P.ENABLED = False

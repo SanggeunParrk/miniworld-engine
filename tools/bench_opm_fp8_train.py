@@ -12,9 +12,9 @@ import time
 
 import torch
 
-from miniworld_engine.kernels.integrations import opm_fp8_train as F8
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import OuterProductMean
+from foldjet_engine.kernels.integrations import opm_fp8_train as F8
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import OuterProductMean
 
 
 def case(L, S, cm, cz, after, seed=0):

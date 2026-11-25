@@ -1,7 +1,7 @@
 # kq.py L...: core backward which=0 (two kernels) vs which=3 (one grid): bitwise equality, determinism, graph time, 3+ interleaved rounds
 import sys, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension
 LS = [int(x) for x in (sys.argv[1:] or ["128"])]; H = 4
 def build(r):
     return load_extension(name=f"n1kq_r{r}", sources=[str(K._SRC / "triattn_sm100.cu")], extra_cuda_cflags=[*K._flags(), f"-DTA_R={r}"])

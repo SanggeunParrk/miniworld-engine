@@ -13,9 +13,9 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
-from miniworld_engine.measure.config import randomize
-from miniworld_engine.modules.triangle import TriangleAttentionChai1, TriangleAttentionChai1Confidence, TriangleAttentionRF3
+from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+from foldjet_engine.measure.config import randomize
+from foldjet_engine.modules.triangle import TriangleAttentionChai1, TriangleAttentionChai1Confidence, TriangleAttentionRF3
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 
@@ -99,7 +99,7 @@ def test_d64_wgmma_core_matches_the_mma_sync_core(L: int) -> None:
     exact in fp16; the bias / scale is a power-of-two scaling): two samples (one with a hole and half its keys padded), a gate bias; they
     differ by the rounding of the scores (fp16) and of P (fp16 against bf16), a few bf16 ulps of u."""
     _needs_h100()
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_dh
 
     H, D, B = 4, 64, 2
     g = torch.Generator(device="cuda").manual_seed(7)

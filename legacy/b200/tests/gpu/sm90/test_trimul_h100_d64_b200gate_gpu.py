@@ -14,15 +14,15 @@ pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(),
 def test_dispatch_and_all_gradients(length, direction, master, monkeypatch):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("Hopper required")
-    from miniworld_engine import settings
-    from miniworld_engine.modules.exceptions import ImplementationType
-    from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
-    from miniworld_engine.modules.triangle_multiplication.bidirectional import (
+    from foldjet_engine import settings
+    from foldjet_engine.modules.exceptions import ImplementationType
+    from foldjet_engine.modules.triangle_multiplication import TriangleMultiplication
+    from foldjet_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
     )
 
     helpers = runpy.run_path(str(Path(__file__).with_name("test_trimul_h100_b200style_gpu.py")))
-    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
+    from foldjet_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
     for constant in ("_TRAIN_CUDA_UNSCOPED", "_TRAIN_FUSED_PREP_UNSCOPED", "_CUDA_AUX_UNSCOPED"):
         monkeypatch.setattr(T, constant, True)
@@ -86,7 +86,7 @@ def test_dispatch_and_all_gradients(length, direction, master, monkeypatch):
 @pytest.mark.parametrize("length", [384, 768])
 @pytest.mark.parametrize("master", [False, True])
 def test_forced_affine_split_keeps_qualified_pipeline(length, master, monkeypatch):
-    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
+    from foldjet_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
     monkeypatch.setattr(T, "_D64_UNI_AFFINE_FORCED", True)
     test_dispatch_and_all_gradients(length, 1, master, monkeypatch)

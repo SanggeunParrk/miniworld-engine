@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from miniworld_engine.baselines import anthropic_trimul
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
-from miniworld_engine.modules.triangle_multiplication.bidirectional import (
+from foldjet_engine.baselines import anthropic_trimul
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.triangle_multiplication import TriangleMultiplication
+from foldjet_engine.modules.triangle_multiplication.bidirectional import (
     BidirectionalTriangleMultiplication,
 )
 

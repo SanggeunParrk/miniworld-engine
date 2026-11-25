@@ -9,7 +9,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_
 
 
 def _have_prebuilt() -> bool:
-    from miniworld_engine.modules import _anthropic
+    from foldjet_engine.modules import _anthropic
 
     if _anthropic.missing("opt_core.kernels.triattn") is not None:
         return False
@@ -24,8 +24,8 @@ def _have_prebuilt() -> bool:
 def test_triattn_anthropic_serves_the_kit_core(length):
     if not _have_prebuilt():
         pytest.skip("the release's triattn_native has no prebuilt for this stack")
-    from miniworld_engine.modules import _anthropic
-    from miniworld_engine.modules.triangle import TriangleAttention
+    from foldjet_engine.modules import _anthropic
+    from foldjet_engine.modules.triangle import TriangleAttention
 
     torch.manual_seed(0)
     m = TriangleAttention(d_pair=128, n_head=4, starting=True, master_weights=True).cuda().eval()

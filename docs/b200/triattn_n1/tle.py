@@ -1,5 +1,5 @@
 import sys, json, torch
-from miniworld_engine.modules import triangle as T
+from foldjet_engine.modules import triangle as T
 kw = json.loads(sys.argv[1]); L = int(sys.argv[2])
 torch.manual_seed(0)
 mod = T.TriangleAttention(**kw, backend="cuda").cuda().float().eval()

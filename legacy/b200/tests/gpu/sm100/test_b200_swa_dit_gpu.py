@@ -9,12 +9,12 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine.kernels.swa_dit.cuda import sm100
-from miniworld_engine.kernels.swa_dit.interface import (
+from foldjet_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.interface import (
     swa_dit_block,
     swa_dit_hoist_modulation,
 )
-from miniworld_engine.kernels.swa_dit.reference import (
+from foldjet_engine.kernels.swa_dit.reference import (
     swa_dit_block_reference,
     swa_dit_hoist_modulation_reference,
 )

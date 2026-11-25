@@ -20,7 +20,7 @@ def _needs_5090() -> None:
 
 
 def _case(cm: int, cz: int, length: int, depth: int, after: bool = False, seed: int = 0):
-    from miniworld_engine.modules.msa import OuterProductMean
+    from foldjet_engine.modules.msa import OuterProductMean
 
     m = OuterProductMean(cm, d_hidden=32, d_pair=cz, normalize_before_proj=not after, master_weights=True, backend="cuda").cuda().eval()
     g = torch.Generator(device="cpu").manual_seed(seed + cm + cz)
@@ -42,7 +42,7 @@ def _case(cm: int, cz: int, length: int, depth: int, after: bool = False, seed: 
 @pytest.fixture
 def F():
     _needs_5090()
-    from miniworld_engine.kernels.integrations import opm_fp8_sm120 as F
+    from foldjet_engine.kernels.integrations import opm_fp8_sm120 as F
 
     assert F.POLICY is None  # off unless switched on
     saved = (F.GUARD, F.MIN_S, F.HEADROOM)
@@ -61,7 +61,7 @@ def _run(m, x, mask):
 
 def test_transpose_quant_matches_torch() -> None:
     _needs_5090()
-    from miniworld_engine.kernels.integrations import msa_f8_sm120 as X
+    from foldjet_engine.kernels.integrations import msa_f8_sm120 as X
 
     for b, r, n in ((1, 1000, 32 * 77), (3, 70, 256 * 2 + 8), (8, 208, 1024)):
         x = (torch.randn(b, r, n, device="cuda") * 30).bfloat16()
@@ -116,7 +116,7 @@ def test_default_untouched_after_route(F) -> None:
 
 
 def test_safe_preset_and_disable(F) -> None:
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     F.POLICY = None
     assert fp8._modules()[fp8.SLOTS.index("opm")] is F
@@ -140,7 +140,7 @@ def test_sync_guard_redo(F) -> None:
 
 
 def test_lazy_guard_through_check_and_graph(F) -> None:
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m, x, mask = _case(64, 128, 256, 1024)
     F.POLICY = None

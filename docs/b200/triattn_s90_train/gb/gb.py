@@ -1,5 +1,5 @@
 import torch, os
-from miniworld_engine.kernels._nvcc import load_extension, ensure_cuda_home, gencodes, host_flags
+from foldjet_engine.kernels._nvcc import load_extension, ensure_cuda_home, gencodes, host_flags
 ensure_cuda_home()
 e = load_extension(name="s90_gb_v1", sources=[os.path.join(os.path.dirname(os.path.abspath(__file__)), "gb.cu")], extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("100a")], verbose=False)
 for nb in (32, 74, 128, 148):

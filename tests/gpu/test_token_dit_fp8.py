@@ -9,8 +9,8 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.token_dit import TokenDiTProtenix
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.token_dit import TokenDiTProtenix
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 
@@ -20,7 +20,7 @@ def _h100() -> bool:
 
 
 def _F():
-    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8
+    from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8
 
     return token_dit_fp8
 
@@ -123,7 +123,7 @@ def test_below_min_rows_is_default_route() -> None:
 def test_parallel_schedule_takes_expand_only() -> None:
     """RoseTTAFold3's block (parallel schedule, flat q / k LayerNorm: ``plain`` False) takes the e4m3 ``expand`` placement (the transition's
     AdaLN rows quantised in one row pass); the attention-side placements stay bf16 (the output is the bf16 route's bit for bit)."""
-    from miniworld_engine.modules.token_dit import TokenDiTRoseTTAFold3
+    from foldjet_engine.modules.token_dit import TokenDiTRoseTTAFold3
 
     module = TokenDiTRoseTTAFold3(d_single=768, d_cond=384, d_pair=128, n_head=16, n=2).cuda().float()
     C.randomize(module, torch.Generator(device="cuda").manual_seed(7))
@@ -164,7 +164,7 @@ def test_active_placements_of_the_chai1_block() -> None:
 
 
 def _chai1(seed: int = 0) -> typing.Any:
-    from miniworld_engine.modules.token_dit import TokenDiTChai1
+    from foldjet_engine.modules.token_dit import TokenDiTChai1
 
     module = TokenDiTChai1(d_single=768, d_cond=384, d_pair=256, n_head=16, n=2).cuda().float()
     C.randomize(module, torch.Generator(device="cuda").manual_seed(seed))
@@ -208,7 +208,7 @@ def test_chai1_qkvg_and_off_are_default_route() -> None:
 def test_chai1_parallel_rows_kernel_matches_reference() -> None:
     """``adaln_in_rows_cf_par_q8``: out = the bf16 pass's AdaLN (tables 0, 1) bit for bit; out8 / srow = the e4m3 image of the transition's
     AdaLN (tables 2, 3) with its row max / 448 scale."""
-    from miniworld_engine.kernels.conditioned_transition import cuda as T
+    from foldjet_engine.kernels.conditioned_transition import cuda as T
 
     F = _F()
     g = torch.Generator(device="cuda").manual_seed(11)
@@ -238,7 +238,7 @@ def test_chai1_parallel_rows_kernel_matches_reference() -> None:
 
 # ---------------------------------------------------------------------------------------------------------- Boltz-2 (up-gate transition)
 def _master_boltz2(seed: int = 0) -> typing.Any:
-    from miniworld_engine.modules.token_dit import TokenDiTBoltz2
+    from foldjet_engine.modules.token_dit import TokenDiTBoltz2
 
     module = TokenDiTBoltz2(d_single=768, d_cond=768, d_pair=128, n_head=16, n=2).cuda().float()
     C.randomize(module, torch.Generator(device="cuda").manual_seed(seed))

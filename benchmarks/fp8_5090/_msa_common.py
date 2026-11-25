@@ -23,7 +23,7 @@ def init_params(m, seed):
 
 
 def opm_case(spec, dev="cuda"):
-    from miniworld_engine.modules.msa import OuterProductMean
+    from foldjet_engine.modules.msa import OuterProductMean
 
     p = spec.split(":")
     cm, cz, L, S = map(int, p[:4])
@@ -38,7 +38,7 @@ def opm_case(spec, dev="cuda"):
 
 
 def pwa_case(spec, dev="cuda"):
-    from miniworld_engine.modules.msa import MSAPairWeightedAveraging
+    from foldjet_engine.modules.msa import MSAPairWeightedAveraging
 
     D, C, cz, S, N = map(int, spec.split(":"))
     m = MSAPairWeightedAveraging(D, cz, n_head=8, d_hidden=C, master_weights=True, backend="cuda").to(dev).eval()

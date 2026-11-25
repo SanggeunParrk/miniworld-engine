@@ -22,7 +22,7 @@ import externals as reg
 
 
 def build(d: int, seed: int):
-    from miniworld_engine.modules.triangle import TriangleMultiplication
+    from foldjet_engine.modules.triangle import TriangleMultiplication
 
     g = torch.Generator(device="cuda").manual_seed(seed)
     m = TriangleMultiplication(d, outgoing=True, master_weights=True, p_drop=0.0).cuda()

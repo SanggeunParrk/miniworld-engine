@@ -15,7 +15,7 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
+from foldjet_engine.measure import config as C
 
 pytestmark = [pytest.mark.gpu]
 
@@ -29,7 +29,7 @@ def _h100() -> bool:
 
 
 def _block(dtype: str) -> typing.Any:
-    from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
+    from foldjet_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
 
     m = TokenDiTMiniWorldBiasOnly(d_single=768, d_cond=384, d_pair=128, n_head=16, n=2).cuda().float()
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
@@ -64,7 +64,7 @@ def _inputs(m, L: int, dtype: str):
 @pytest.mark.parametrize("dtype", ["master", "float32"])
 @pytest.mark.parametrize("L", [384, 512])
 def test_skip_bitwise(dtype: str, L: int, monkeypatch: pytest.MonkeyPatch) -> None:
-    from miniworld_engine.kernels.integrations import bias_only_dit as I
+    from foldjet_engine.kernels.integrations import bias_only_dit as I
 
     m = _block(dtype)
     inp = _inputs(m, L, dtype)
@@ -83,8 +83,8 @@ def test_skip_bitwise(dtype: str, L: int, monkeypatch: pytest.MonkeyPatch) -> No
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90): the hoisted-bias path")
 @pytest.mark.parametrize("dtype", ["master", "float32"])
 def test_skip_bitwise_hoisted_bias(dtype: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    from miniworld_engine.kernels.integrations import bias_only_dit as I
-    from miniworld_engine.modules.token_dit import pair_bias_all
+    from foldjet_engine.kernels.integrations import bias_only_dit as I
+    from foldjet_engine.modules.token_dit import pair_bias_all
 
     L = 512
     m = _block(dtype)
@@ -121,8 +121,8 @@ def test_padded_against_reference(dtype: str) -> None:
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) static input refresh")
 def test_refresh_with_another_live_count() -> None:
-    from miniworld_engine.capture import refresh_static_inputs, release_static_inputs, static_inputs, static_weights
-    from miniworld_engine.modules import TokenDiTStack
+    from foldjet_engine.capture import refresh_static_inputs, release_static_inputs, static_inputs, static_weights
+    from foldjet_engine.modules import TokenDiTStack
 
     S, L = 5, 512
     torch.manual_seed(0)

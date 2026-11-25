@@ -13,8 +13,8 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.kernels.integrations import token_cond_sm80
-from miniworld_engine.measure import config as C
+from foldjet_engine.kernels.integrations import token_cond_sm80
+from foldjet_engine.measure import config as C
 
 pytestmark = [pytest.mark.gpu]
 
@@ -24,7 +24,7 @@ def _a100() -> bool:
 
 
 def _models(d_cond: int) -> tuple[typing.Any, typing.Any]:
-    from miniworld_engine.modules.token_dit import TOKEN_DIT_MODELS
+    from foldjet_engine.modules.token_dit import TOKEN_DIT_MODELS
 
     m = TOKEN_DIT_MODELS["protenix"](d_single=768, d_cond=d_cond, d_pair=128, n_head=16, n=2).cuda().float()
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))

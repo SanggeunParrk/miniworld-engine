@@ -20,7 +20,7 @@ CASES = [("AtomDiTProtenix", None), ("AtomDiTOpenFold3", None), ("AtomDiTBoltz2"
 
 
 def _case(module, N, S=5, pick=None, shared=True):
-    from miniworld_engine.measure import config as C
+    from foldjet_engine.measure import config as C
 
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         f.write(YAML.format(m=module))
@@ -39,8 +39,8 @@ def _case(module, N, S=5, pick=None, shared=True):
 
 class Rig:
     def __init__(self, case):
-        from miniworld_engine.measure import config as C
-        from miniworld_engine.measure import speed as S
+        from foldjet_engine.measure import config as C
+        from foldjet_engine.measure import speed as S
 
         dev = torch.device("cuda")
         self.m = copy.deepcopy(C.build(case, device=dev))
@@ -84,7 +84,7 @@ def _err(y, gold, x):
 
 @pytest.fixture
 def f8():
-    from miniworld_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as F
+    from foldjet_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as F
 
     old = (F.FP8_ROWS, F.MIN_ROWS, F.ESM_MIN_ROWS)
     F.MIN_ROWS = F.ESM_MIN_ROWS = 0
@@ -145,7 +145,7 @@ def test_default_untouched_training_and_rows(f8):
 
 @pytest.mark.parametrize("module,pick", [("AtomDiTProtenix", None), ("AtomDiTChai1", "key_window=slide")])
 def test_graph_equals_eager(f8, module, pick):
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     rig = Rig(_case(module, 1024, pick=pick))
     _on(f8, "1")
@@ -175,7 +175,7 @@ def test_per_sample_conditioning(f8):
 
 
 def test_safe_preset_and_route_stats(f8):
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     assert fp8.arch() == "sm120" and fp8.SM120_ROUTES["atom_dit"] == f8.__name__
     snap = fp8._snapshot()
@@ -217,7 +217,7 @@ def test_compiled_block_is_finite_and_equals_eager(f8, module, pick):
 # ------------------------------------------------------------------------------------------------------------ ESMFold2 (the H100 RMS option)
 def _esm(n: int, a: int, shared: bool = True):
     """``AtomDiTESMFold2Pair`` (the H100 test's block: fp32 parameters, bf16 inputs, 40 masked atoms) and its float64 PyTorch twin."""
-    from miniworld_engine.modules import AtomDiTESMFold2Pair
+    from foldjet_engine.modules import AtomDiTESMFold2Pair
 
     torch.manual_seed(0)
     m = AtomDiTESMFold2Pair(backend="cuda").cuda().eval()
@@ -295,8 +295,8 @@ def test_esmfold2_per_sample_rows_gate_training(f8):
 
 def test_esmfold2_graph_equals_eager_and_safe(f8):
     """A CUDA-graph replay equals the eager e4m3 call bit for bit; ``fp8.enable("safe")`` turns the ESMFold2 rows on (``route_stats``)."""
-    from miniworld_engine import fp8
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine import fp8
+    from foldjet_engine.kernels import _capture
 
     m, inputs, rope = _esm(1024, 5)
     _on(f8, "1")
@@ -344,8 +344,8 @@ def _tiny_rows(width: int) -> torch.Tensor:
 def test_row_quant_of_tiny_rows_is_finite(width):
     """Regression (5090-int: AF3 5I28 n = 4, the atom block's gated output of masked atoms): rows of subnormal values quantise to finite e4m3
     bytes (amax floored at 1e-30, the H100 rule) and dequantise to the input within e4m3 rounding; atom (quant_q8, gate_q8) and token (quant_rows)."""
-    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as T
-    from miniworld_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as A
+    from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as T
+    from foldjet_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as A
 
     x = _tiny_rows(width)
     atom, token = width in (128, 256), width in (384, 768, 1024, 1536)  # the widths each extension is built for

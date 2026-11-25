@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.conditioned_transition import cuda as C
+from foldjet_engine.kernels.conditioned_transition import cuda as C
 
 
 def test_swiglu_tile_choice():

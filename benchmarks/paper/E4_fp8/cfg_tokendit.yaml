@@ -1,5 +1,5 @@
 # E4 token DiT: default cuda route against engine-fp8 on the TokenDiT rows of the registry (inference), fp8_pair.py --config cfg_tokendit.yaml
-requirements: ../../../src/miniworld_engine/requirements/requirements_module.csv
+requirements: ../../../src/foldjet_engine/requirements/requirements_module.csv
 modules: [TokenDiTProtenix, TokenDiTMiniWorld, TokenDiTBoltz2, TokenDiTRoseTTAFold3, TokenDiTChai1]
 backends: [pytorch, cuda]
 external: []

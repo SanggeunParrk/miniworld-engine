@@ -14,10 +14,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.modules import AtomDiT, AtomDiTESMFold2, AtomDiTESMFold2Pair
-from miniworld_engine.modules.atom_dit import QUERIES, windows
-from miniworld_engine.modules.functional import slide_starts
-from miniworld_engine.modules.primitives import BackendUnsupported
+from foldjet_engine.modules import AtomDiT, AtomDiTESMFold2, AtomDiTESMFold2Pair
+from foldjet_engine.modules.atom_dit import QUERIES, windows
+from foldjet_engine.modules.functional import slide_starts
+from foldjet_engine.modules.primitives import BackendUnsupported
 
 KEYS, HALF = 192, 64
 EPS = torch.finfo(torch.float32).eps

@@ -21,8 +21,8 @@ def main() -> int:
     args = p.parse_args()
     from torch.profiler import ProfilerActivity, profile
 
-    from miniworld_engine.measure import config
-    from miniworld_engine.measure.speed import make_step, unpadded_masks
+    from foldjet_engine.measure import config
+    from foldjet_engine.measure.speed import make_step, unpadded_masks
 
     cfg = cfgmod.load(args.config, args)
     dev = torch.device("cuda")

@@ -37,7 +37,7 @@ def _block(cls, n, a, shared: bool = True, kw: dict | None = None):
 
 
 def _run(m, inputs, fp8):
-    from miniworld_engine.kernels.integrations import local_dit_h100 as H
+    from foldjet_engine.kernels.integrations import local_dit_h100 as H
 
     prev = H.enable_fp8(fp8)
     try:
@@ -51,10 +51,10 @@ def _run(m, inputs, fp8):
 @pytest.mark.parametrize("model", ["openfold3", "protenix", "chai1", "rf3", "boltz2"])
 def test_fp8_rows_error(model: str, n: int, monkeypatch) -> None:
     _needs_h100()
-    from miniworld_engine.kernels.integrations import local_dit_h100 as H
+    from foldjet_engine.kernels.integrations import local_dit_h100 as H
 
     monkeypatch.setattr(H, "FP8_UP_MIN_N", 0)  # Boltz-2: the shipped gate (2048 atoms) would keep the small cases on bf16
-    from miniworld_engine.modules import atom_dit as A
+    from foldjet_engine.modules import atom_dit as A
 
     cls = {
         "openfold3": A.AtomDiTOpenFold3,
@@ -90,7 +90,7 @@ def test_fp8_rows_fallbacks() -> None:
     """A per-sample conditioning is outside the route: FP8 on gives the bf16 output bitwise; a training forward ignores the switch (Boltz-2
     included)."""
     _needs_h100()
-    from miniworld_engine.modules import atom_dit as A
+    from foldjet_engine.modules import atom_dit as A
 
     m, inputs = _block(A.AtomDiTBoltz2, 1024, 5, shared=False)
     assert torch.equal(_run(m, inputs, True), _run(m, inputs, False))
@@ -98,7 +98,7 @@ def test_fp8_rows_fallbacks() -> None:
     assert torch.equal(_run(m, inputs, True), _run(m, inputs, False))
     m, inputs = _block(A.AtomDiTOpenFold3, 1024, 4, shared=False)
     m.train()
-    from miniworld_engine.kernels.integrations import local_dit_h100 as H
+    from foldjet_engine.kernels.integrations import local_dit_h100 as H
 
     outs = []
     for on in (False, True):
@@ -115,7 +115,7 @@ def test_fp8_rows_fallbacks() -> None:
 
 
 def test_fp8_parts_switch() -> None:
-    from miniworld_engine.kernels.integrations import local_dit_h100 as H
+    from foldjet_engine.kernels.integrations import local_dit_h100 as H
 
     prev = H.enable_fp8("pre,post")
     try:
@@ -132,7 +132,7 @@ def test_fp8_parts_switch() -> None:
 
 # ------------------------------------------------------------------------------------------------------------ ESMFold2 (RMS option)
 def _esm_block(n: int, a: int, shared: bool = True):
-    from miniworld_engine.modules import AtomDiTESMFold2Pair
+    from foldjet_engine.modules import AtomDiTESMFold2Pair
 
     torch.manual_seed(0)
     m = AtomDiTESMFold2Pair(backend="cuda").cuda().eval()
@@ -150,7 +150,7 @@ def _esm_block(n: int, a: int, shared: bool = True):
 
 
 def _run_esm(m, inputs, rope, fp8):
-    from miniworld_engine.kernels.integrations import local_dit_h100 as H
+    from foldjet_engine.kernels.integrations import local_dit_h100 as H
 
     prev = H.enable_fp8(fp8)
     try:
@@ -193,8 +193,8 @@ def test_fp8_rows_rf3_kqln_served() -> None:
     """RoseTTAFold3's atom block (KQLN, the flat q / k LayerNorm) is served by the e4m3 rows: ``why_opts`` stays 0, ``calls`` / ``pre`` /
     ``post`` count it, and the split grid of small row counts keeps both 64-column units of q and of k in one CTA."""
     _needs_h100()
-    from miniworld_engine.kernels.integrations import local_dit_h100 as H
-    from miniworld_engine.modules import atom_dit as A
+    from foldjet_engine.kernels.integrations import local_dit_h100 as H
+    from foldjet_engine.modules import atom_dit as A
 
     for a, n in ((5, 200), (2, 64), (5, 1024)):
         m, inputs = _block(A.AtomDiTRoseTTAFold3, n, a)
@@ -208,8 +208,8 @@ def test_fp8_rows_rf3_kqln_served() -> None:
 def test_boltz2_up_gate_on_atoms() -> None:
     """Boltz-2 (UP) takes the e4m3 route from ``FP8_UP_MIN_N`` atoms per sample: below it the output is the bf16 route's, bitwise."""
     _needs_h100()
-    from miniworld_engine.kernels.integrations import local_dit_h100 as H
-    from miniworld_engine.modules import atom_dit as A
+    from foldjet_engine.kernels.integrations import local_dit_h100 as H
+    from foldjet_engine.modules import atom_dit as A
 
     m, inputs = _block(A.AtomDiTBoltz2, 1024, 5)
     assert H.FP8_UP_MIN_N > 1024
@@ -222,8 +222,8 @@ def test_fp8_pack_rides_on_the_eager_bf16_pack(monkeypatch) -> None:
     """Eager calls make the e4m3 pack once and read it from the bf16 pack entry afterwards (same output bitwise); a weight written in place
     (a new version: a new bf16 entry) makes a new e4m3 pack, and the output follows the new weights."""
     _needs_h100()
-    from miniworld_engine.kernels.augmented_attention.cuda.sm90_atom import f8 as f8mod
-    from miniworld_engine.modules import atom_dit as A
+    from foldjet_engine.kernels.augmented_attention.cuda.sm90_atom import f8 as f8mod
+    from foldjet_engine.modules import atom_dit as A
 
     made = []
     real = f8mod.pack8

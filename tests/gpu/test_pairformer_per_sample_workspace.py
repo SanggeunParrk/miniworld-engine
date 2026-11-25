@@ -5,7 +5,7 @@ composition, and temporaries of one sample instead of B."""
 import pytest
 import torch
 
-from miniworld_engine.modules.pairformer import PairformerBlock, PairformerConfig
+from foldjet_engine.modules.pairformer import PairformerBlock, PairformerConfig
 
 pytestmark = [pytest.mark.gpu]
 

@@ -22,7 +22,7 @@ def _rel(a, b):
 @pytest.mark.parametrize("heads", [8, 12, 16, 24])
 @pytest.mark.parametrize("L", [128, 256, 384, 768])
 def test_pair_bias_forward_and_backward(L, heads):
-    from miniworld_engine.kernels.augmented_attention.cuda import apb
+    from foldjet_engine.kernels.augmented_attention.cuda import apb
 
     g = torch.Generator(device="cuda").manual_seed(L)
     pair = (torch.randn(L, L, 128, device="cuda", generator=g) * 1.5 + 0.3).to(torch.bfloat16)
@@ -84,7 +84,7 @@ def _ref_attn(q, k, v, bias, mask):
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("L", [128, 200, 256, 384, 640, 768])
 def test_apb_inference_core(L, shape):
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     q, k, v, gt, bias, mask = _core_inputs(L, L, shape)
     c = math.log2(math.e)
@@ -106,7 +106,7 @@ def test_apb_inference_core(L, shape):
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("L", [128, 256, 384, 768])
 def test_apb_training_core(L, shape):
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     heads, d = shape
     q, k, v, _, bias, mask = _core_inputs(L, L + 1, shape)

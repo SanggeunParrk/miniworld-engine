@@ -548,7 +548,7 @@ Reasons behind the codes (backend, code: recorded reason, cards):
 
 ## 4. Accuracy against the float64 gold, per candidate
 
-Two harnesses, both against the module's own float64 PyTorch result with the same weights and inputs. Part A (`miniworld_engine.measure.accuracy`, the engine's accuracy standard; smallest length L = 512, master dtype): relative error of the checked tensor (`out` for eval, the worst gradient tensor for train) and the PyTorch backend's own error on the same case; the light compares with the tolerance (GREEN within, YELLOW slightly above, RED far above; backends that are external baselines are informational). The accuracy runs are eager (not graph) runs: the CUDA-graph problem of `ds4sci` does not touch them. Part B (TriMul, `acc_trimul.py`): relative rms of the output and of the gradients (`dx`, `dWo`) at L = 512, d_pair 128, no padding.
+Two harnesses, both against the module's own float64 PyTorch result with the same weights and inputs. Part A (`foldjet_engine.measure.accuracy`, the engine's accuracy standard; smallest length L = 512, master dtype): relative error of the checked tensor (`out` for eval, the worst gradient tensor for train) and the PyTorch backend's own error on the same case; the light compares with the tolerance (GREEN within, YELLOW slightly above, RED far above; backends that are external baselines are informational). The accuracy runs are eager (not graph) runs: the CUDA-graph problem of `ds4sci` does not touch them. Part B (TriMul, `acc_trimul.py`): relative rms of the output and of the gradients (`dx`, `dWo`) at L = 512, d_pair 128, no padding.
 
 ### H100 (sm_90): part A (L = 512)
 

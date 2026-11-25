@@ -8,7 +8,7 @@
 # docs in modules/_anthropic.cuda13_cubins_load).
 #
 #   srun -A cssb -p h100 -q cssb_h100 --gres=gpu:h100:1 -c 16 --mem=96G -t 00:10:00 \
-#     third_party/anthropic/kit_stack.sh python -m miniworld_engine.measure.speed CONFIG --out OUT.jsonl
+#     third_party/anthropic/kit_stack.sh python -m foldjet_engine.measure.speed CONFIG --out OUT.jsonl
 #
 # Environment: KITS_DIR (the kit installs: cu130run.sh, cuda13home, libstdcxx, <kit>/venv130), FF_SCRATCH (cuda13tk), KIT_VENV (default
 # $KITS_DIR/esmfold2/venv130: CPython 3.12 as the engine), WORK (caches; default a temp dir), MINIWORLD_ANTHROPIC_ROOT (the release root).

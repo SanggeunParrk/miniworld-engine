@@ -13,28 +13,28 @@ import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float
 
-from miniworld_engine import kernels, settings
-from miniworld_engine.kernels import _capture
-from miniworld_engine.kernels.bias_only_attention import dispatch as _bo_dispatch
-from miniworld_engine.kernels.integrations import triattn_b200 as _b200
-from miniworld_engine.modules import dispatch as _dispatch
-from miniworld_engine.modules.dispatch import (
+from foldjet_engine import kernels, settings
+from foldjet_engine.kernels import _capture
+from foldjet_engine.kernels.bias_only_attention import dispatch as _bo_dispatch
+from foldjet_engine.kernels.integrations import triattn_b200 as _b200
+from foldjet_engine.modules import dispatch as _dispatch
+from foldjet_engine.modules.dispatch import (
     KernelBackend,
     resolve_triangle_attention,
 )
-from miniworld_engine.modules.exceptions import (
+from foldjet_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
-from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import (
+from foldjet_engine.modules.functional import sigmoid_gate
+from foldjet_engine.modules.primitives import (
     ImplementationSwitch,
     LayerNorm,
     Linear,
     MasterWeights,
 )
-from miniworld_engine.utils import h100_master as _master
-from miniworld_engine.utils.typecheck import typecheck
+from foldjet_engine.utils import h100_master as _master
+from foldjet_engine.utils.typecheck import typecheck
 
 
 @contextmanager
@@ -211,7 +211,7 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
         ``gating_query`` / ``output_projection``; see ``modules.released``). ``gate_bias`` / ``out_bias`` / ``dual_output`` follow from the
         weights. ``options``: ``transposed_bias=False`` for AlphaFold 3's ending-node bias orientation, ``untransposed_output``,
         ``implementation`` ..."""
-        from miniworld_engine.modules import released
+        from foldjet_engine.modules import released
 
         converted = released.triangle_attention_from_released(state_dict, prefix=prefix)
         d_hidden, d_pair = converted["to_query.weight"].shape[0], converted["to_query.weight"].shape[1]
@@ -243,7 +243,7 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
                 and not self.use_qk_norm
                 and not settings.current().force_portable_kernels  # hand-CUDA grouped-bias backward: not on the portable rung
             ):
-                from miniworld_engine.kernels.triangle_attention.cuda.bias_backward import (
+                from foldjet_engine.kernels.triangle_attention.cuda.bias_backward import (
                     attention,
                     can_use,
                 )
@@ -264,7 +264,7 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
             )
 
         if backend == KernelBackend.ANTHROPIC:
-            from miniworld_engine.baselines.anthropic import triangle_attention
+            from foldjet_engine.baselines.anthropic import triangle_attention
 
             q, k, v = (
                 t.permute(0, 2, 1, 3, 4).contiguous() for t in (query, key, value)
@@ -359,7 +359,7 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
         fused backward loses to (layernorm_kernel + cuBLAS) for training, so it is
         gated on ``not torch.is_grad_enabled()``.
         """
-        from miniworld_engine.kernels.layernorm_linear import layernorm_linear_triton
+        from foldjet_engine.kernels.layernorm_linear import layernorm_linear_triton
 
         H = self.n_head
         B, L, _, _d = pair.shape
@@ -416,8 +416,8 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
             return pair
         if variant_output or self.to_gate.bias is not None or self.to_out.bias is not None:
             # RoseTTAFold3's biases, Chai-1's output variants: the H100 kernels for inference, else the torch statements
-            from miniworld_engine.kernels.integrations import triattn_h100_sm90
-            from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+            from foldjet_engine.kernels.integrations import triattn_h100_sm90
+            from foldjet_engine.kernels.triangle_attention.cuda import h100_dh
 
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 if not variant_output and triattn_h100_sm90.serves(self, pair, mask):
@@ -432,12 +432,12 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
             return pair + out
         if self._backend == KernelBackend.ANTHROPIC:
             if self.anthropic_row.startswith("block:"):
-                from miniworld_engine.baselines.anthropic import (
+                from foldjet_engine.baselines.anthropic import (
                     module_triangle_attention,
                 )
 
                 return module_triangle_attention(self, pair, mask)
-            from miniworld_engine.baselines.anthropic import _inference
+            from foldjet_engine.baselines.anthropic import _inference
 
             _inference()
             if self.training and self.p_drop:
@@ -450,7 +450,7 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
         if not self._bias_untransposed and _b200.serves_wide(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward_wide(self, pair, mask)
-        from miniworld_engine.kernels.integrations import (
+        from foldjet_engine.kernels.integrations import (
             triattn_h100,
             triattn_h100_sm90,
         )
@@ -458,7 +458,7 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
         if triattn_h100_sm90.serves(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return triattn_h100_sm90.forward(self, pair, mask)
-        from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+        from foldjet_engine.kernels.triangle_attention.cuda import h100_dh
 
         if h100_dh.head_dim(self) == 64 and h100_dh.serves(self, pair, mask):  # 64-channel heads (Chai-1): the sm90 kernels take 16 / 32
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
@@ -488,7 +488,7 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
             and self.n_head == 4
             and _bo_dispatch.use_kernels(pair.shape[1])
         ):
-            from miniworld_engine.kernels.triangle_attention.cuda import ln_backward
+            from foldjet_engine.kernels.triangle_attention.cuda import ln_backward
 
             weights = (
                 self.to_query.weight,
@@ -518,7 +518,7 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
             or _dispatch.restricted_card(pair.device)
         ):
             return None
-        from miniworld_engine.kernels.triangle_attention.triton.variants import (
+        from foldjet_engine.kernels.triangle_attention.triton.variants import (
             refusal,
             triton_triangle_attention_variant,
         )
@@ -635,7 +635,7 @@ class TriangleAttention(MasterWeights, ImplementationSwitch):
                 and not self.use_qk_norm
                 and self.n_head == 4
             ):
-                from miniworld_engine.kernels.triangle_attention.cuda import (
+                from foldjet_engine.kernels.triangle_attention.cuda import (
                     can_use,
                     projections,
                 )

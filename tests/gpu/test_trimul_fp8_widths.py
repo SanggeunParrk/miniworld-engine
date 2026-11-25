@@ -20,7 +20,7 @@ def _rel(a, b) -> float:
 
 
 def _modules(d, outgoing, bidirectional=False):
-    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
+    from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
 
     if bidirectional:
         m = BidirectionalTriangleMultiplication(d, d_hidden=d, master_weights=True, backend="cuda").cuda().eval()
@@ -38,7 +38,7 @@ def _modules(d, outgoing, bidirectional=False):
 
 def _route(m, x, mask):
     """y of the module with the FP8 route on (calibrated on a first eager call, every min-L gate off), restored afterwards."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     old = (F8.POLICY, F8.GUARD, F8._MINL_ENV)
     try:
@@ -76,7 +76,7 @@ def test_n64_block_widths(d: int, outgoing: bool, n: int) -> None:
 def test_samples_equal_one_sample_calls(d: int, outgoing: bool) -> None:
     """B > 1 runs the one-sample route per sample with the module's static scales: each sample's rows equal a B = 1 call of the same module."""
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     torch.manual_seed(1)
     n = 256

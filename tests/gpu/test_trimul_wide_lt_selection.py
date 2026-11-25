@@ -8,8 +8,8 @@ import warnings
 import pytest
 import torch
 
-from miniworld_engine.kernels.trimul_inproj.cuda import h100_wide_training as W
-from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication
+from foldjet_engine.kernels.trimul_inproj.cuda import h100_wide_training as W
+from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

@@ -43,14 +43,14 @@ def transition(
     residual path on every other card. LayerNorm is folded into the kernel on every kernel path, never a separate native
     ``F.layer_norm``.
     """
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     if expand_a_weight.shape[0] != n * x.shape[-1]:
         msg = (f"transition: expand_a_weight has {expand_a_weight.shape[0]} rows, expected "
                f"n * d_hidden = {n} * {x.shape[-1]}")
         raise ValueError(msg)
     if not settings.current().force_portable_kernels:
-        from miniworld_engine.kernels.transition.cuda import transition_sm90a
+        from foldjet_engine.kernels.transition.cuda import transition_sm90a
 
         out = transition_sm90a(
             x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps, n)
@@ -58,43 +58,43 @@ def transition(
             return out
 
     if (not settings.current().force_portable_kernels):
-        from miniworld_engine.kernels.transition.cuda import fused_sm100a
+        from foldjet_engine.kernels.transition.cuda import fused_sm100a
 
         if fused_sm100a.available(x, expand_a_weight, squeeze_weight):
             return fused_sm100a.transition_fused_sm100a(
                 x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
 
-        from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a
+        from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a
 
         if fused_wide_sm100a.available(x, expand_a_weight, squeeze_weight):
             return fused_wide_sm100a.transition_wide_sm100a(
                 x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
 
-    from miniworld_engine.modules.dispatch import restricted_card
+    from foldjet_engine.modules.dispatch import restricted_card
 
     if x.is_cuda and restricted_card(x.device):
         # H100 / B200 have no Triton fallback: a call no CUDA kernel serves runs the PyTorch reference (an explicit
         # force_portable_kernels=True or settings.portable_on_hopper_blackwell lifts this and keeps Triton). The weights are cast to the
         # activation dtype, as the Triton path's caller does in modules.Transition.
-        from miniworld_engine.kernels.transition.reference import transition_pytorch
+        from foldjet_engine.kernels.transition.reference import transition_pytorch
 
         return transition_pytorch(
             x, ln_in_weight, ln_in_bias, expand_a_weight.to(x.dtype), expand_b_weight.to(x.dtype),
             squeeze_weight.to(x.dtype), n, eps,
         )
 
-    from miniworld_engine.modules.dispatch import portable_blocked
+    from foldjet_engine.modules.dispatch import portable_blocked
 
     if x.is_cuda and portable_blocked("transition", x.device, x, ln_in_weight, expand_a_weight, expand_b_weight, squeeze_weight):
         # a card the engine holds no record for: the PyTorch reference, as modules.Transition runs (one UnrecordedCardWarning)
-        from miniworld_engine.kernels.transition.reference import transition_pytorch
+        from foldjet_engine.kernels.transition.reference import transition_pytorch
 
         return transition_pytorch(
             x, ln_in_weight, ln_in_bias, expand_a_weight.to(x.dtype), expand_b_weight.to(x.dtype),
             squeeze_weight.to(x.dtype), n, eps,
         )
 
-    from miniworld_engine.kernels.transition.triton.residual import transition_residual
+    from foldjet_engine.kernels.transition.triton.residual import transition_residual
 
     return transition_residual(
         x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps,

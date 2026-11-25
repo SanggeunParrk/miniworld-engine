@@ -1,6 +1,6 @@
 # preload2.py K YAML OUT : launch K dummy gattn_fwd split modules once (distinct cubins gz_X*), then run measure.speed YAML --out OUT in this process
 import runpy, sys, torch
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 K = int(sys.argv[1]); yaml, out = sys.argv[2], sys.argv[3]
 dev = torch.device("cuda"); S, H, D, C, N = 1024, 4, 32, 128, 1
 Qh, Kh, Vh = (torch.randn(N, H, S, D, device=dev, dtype=torch.bfloat16) for _ in range(3))
@@ -15,4 +15,4 @@ for t in tags[:K]:
     run, _, _ = g.bind(Qh, Kh, Vh, seq, O=O, LSE=L, log2=True); run(); torch.cuda.synchronize()
     keep.append((g, O, L))
 sys.argv = ["speed", yaml, "--out", out]
-runpy.run_module("miniworld_engine.measure.speed", run_name="__main__")
+runpy.run_module("foldjet_engine.measure.speed", run_name="__main__")

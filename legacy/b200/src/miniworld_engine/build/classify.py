@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 SRC = Path("src")
-REG = SRC / "miniworld_engine/kernels/registry/registry.csv"
+REG = SRC / "foldjet_engine/kernels/registry/registry.csv"
 
 GEMM = ((r"\btorch\.(?:mm|bmm|matmul)\s*\(", "torch GEMM"),
         (r"\b_H100_BMM\.bmm\s*\(", "torch GEMM"),   # trimul_inproj/cuda/_h100_bmm: the same cuBLAS strided-batched GEMM with a zero workspace
@@ -153,7 +153,7 @@ def source_closure(path: Path, symbol: str, seen: set | None = None) -> str:
         return ""
     tree = ast.parse(text)
     imports = {}
-    package_root = next((p.parent for p in path.parents if p.name == "miniworld_engine"), None)
+    package_root = next((p.parent for p in path.parents if p.name == "foldjet_engine"), None)
     for node in tree.body:
         if isinstance(node, ast.ImportFrom):
             if node.level:

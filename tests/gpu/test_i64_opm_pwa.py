@@ -63,7 +63,7 @@ def _opm_params(rnd: _Rand, cm: int, ch: int, p: int, cz: int) -> list[torch.Ten
 @requires_card
 def test_opm_triton_past_2_31() -> None:
     """Ungrouped OPM (normalize_before_proj, no mask) at L 1472, d_hidden 32: O / dO are [47104, 47104] = 2.2e9 elements."""
-    from miniworld_engine.kernels.outer_product_mean.triton.main import triton_outer_product_mean
+    from foldjet_engine.kernels.outer_product_mean.triton.main import triton_outer_product_mean
 
     S, L, CM, CH, CZ = 4, 1472, 64, 32, 128
     assert (L * CH) ** 2 > 2**31
@@ -105,7 +105,7 @@ def test_opm_triton_past_2_31() -> None:
 def test_opm_triton_grouped_past_2_31() -> None:
     """Grouped OPM (Chai-1: groups 8, d_hidden 64, products LayerNorm'd) at L 2056: O / dO are [8, 16448, 16448] = 2.16e9 elements and
     the products y [L L, 512] 2.16e9."""
-    from miniworld_engine.kernels.outer_product_mean.triton.main import triton_outer_product_mean
+    from foldjet_engine.kernels.outer_product_mean.triton.main import triton_outer_product_mean
 
     S, L, CM, CH, G, CZ = 4, 2056, 64, 64, 8, 256
     K = CH // G
@@ -159,7 +159,7 @@ def test_opm_triton_grouped_past_2_31() -> None:
 def test_pwa_triton_past_2_31() -> None:
     """PWA (row 48's widths: d_msa 64, d_pair 128, 8 heads x 8) at L 4160: the pair is [4160, 4160, 128] = 2.2e9 elements. The output rows
     and the pair-gradient rows at the highest offsets against a float32 autograd reference on those rows (pair row i reaches only row i)."""
-    from miniworld_engine.kernels.pair_weighted_averaging.triton.main import triton_pair_weighted_averaging
+    from foldjet_engine.kernels.pair_weighted_averaging.triton.main import triton_pair_weighted_averaging
 
     S, L, D, DZ, NH, C = 4, 4160, 64, 128, 8, 8
     HC = NH * C

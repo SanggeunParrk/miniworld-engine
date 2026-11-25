@@ -1,8 +1,8 @@
 """fused kernel: new defaults (5/2/16) vs old (4/4/8) bitwise, plus error vs fp64 reference of the product+projection on a small slice."""
 import sys, torch
 from pathlib import Path
-from miniworld_engine.kernels.integrations import opm_train as ot
-from miniworld_engine.kernels._nvcc import load_extension as load
+from foldjet_engine.kernels.integrations import opm_train as ot
+from foldjet_engine.kernels._nvcc import load_extension as load
 dev = torch.device("cuda"); bf = torch.bfloat16
 csrc = Path(ot.__file__).with_name("csrc")
 def mk(name, flags):

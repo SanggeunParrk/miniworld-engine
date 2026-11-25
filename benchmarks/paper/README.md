@@ -1,7 +1,7 @@
 # Paper experiments (E1-E6)
 
 The engine-side experiments of the paper, one folder each, re-runnable on every card with the commands below. Everything here only *calls*
-the engine's measurers (`miniworld_engine.measure.speed` / `accuracy`) or small drivers built on the same pieces; nothing under `src/` is
+the engine's measurers (`foldjet_engine.measure.speed` / `accuracy`) or small drivers built on the same pieces; nothing under `src/` is
 changed, no judge token is touched. All experiments are measured on **one release** (one tag); every raw record and CSV row carries the engine
 version, the commit, torch / CUDA / driver, the GPU and the node.
 
@@ -46,7 +46,7 @@ Cards in this directory: H100 (sm_90), A100 (sm_80), RTX 5090 (sm_120), **B200 (
 tables `paper_common/out/b200/`, summary `PAPER_DATA_SUMMARY.md` (4 cards), `E5_other_kernels/E5_results.md` (B200 sections 0-3 and 5).
 
 How it was run (engine 3.0.6, commit d967378a2 of main): host `b200` (8 x B200, shared account, **no Slurm**; GPUs 0-3 only), reached through `ssh -J cssb b200` with one ControlMaster connection
-(no polling floods). Kernels prebuilt for `sm100a` from the main source (`python -m miniworld_engine.kernels._prebuild --arch sm100 ...`; the PyPI wheels carry no sm100 kernels). **4 lanes on GPUs 0-3**
+(no polling floods). Kernels prebuilt for `sm100a` from the main source (`python -m foldjet_engine.kernels._prebuild --arch sm100 ...`; the PyPI wheels carry no sm100 kernels). **4 lanes on GPUs 0-3**
 (`paper_common/b200_driver.sh 0 1 2 3`, one `b200_lane.sh` per GPU, tasks from `paper_common/queue_b200.txt` through `b200_task.sh`, resumable with `.done` markers, claims per task). Engine stage: pixi env of an earlier B200 checkout
 (torch 2.13.0+cu129, triton 3.7.1, cuequivariance 0.12). Kit stage (Anthropic kernels): `third_party/anthropic/kit_stack_b200.sh` with a venv of torch 2.13.0+cu130 **with cuequivariance** (`KIT_VENV`); the earlier
 kit run without cueq is archived as `records/b200/kit_nocueq/` (not used in the CSVs). Raw records `<ID folder>/records/b200/` (git-ignored). Repeats: E1, E2, E4, E5 three repeats; E3 and E6 one repeat (so far).
@@ -69,7 +69,7 @@ B200 coverage and caveats:
    - **RTX 5090** (cssb-rtx): `REP=1 benchmarks/paper/E1_operator_speed/rtx5090.sh` (flock + 16 GB cap via `~/mwe/gpu.sh`; run again to resume).
    - E5 first needs the libraries: see `E5_other_kernels/README.md`.
    - **B200** (host `b200`, no Slurm, shared account: GPUs 0-3 only): from a clone of the source tree (the PyPI wheels carry no sm100 kernels), prebuild
-     (`python -m miniworld_engine.kernels._prebuild --arch sm100 --jobs N`), then `nohup paper_common/b200_driver.sh 0 1 2 3 &` (one lane per GPU, tasks of
+     (`python -m foldjet_engine.kernels._prebuild --arch sm100 --jobs N`), then `nohup paper_common/b200_driver.sh 0 1 2 3 &` (one lane per GPU, tasks of
      `paper_common/queue_b200.txt` via `b200_lane.sh` / `b200_task.sh`; environment `paper_common/env_b200.sh`; resumable, `.done` markers, logs in `logs_b200/`).
      Kit stack: `third_party/anthropic/kit_stack_b200.sh` with a torch 2.13.0+cu130 venv (`KIT_VENV`). E5 graph check: `E5_other_kernels/gc_b200.sh`.
 3. Collect: in a CPU job, `python <ID folder>/collect.py --card h100` (E4 likewise), then `python paper_common/tables.py --card h100 ...`.
@@ -93,6 +93,6 @@ B200 (4th card) is not in the table below: its full campaign is complete (E1-E6 
 | E6 | smoke queued | smoke yes | smoke yes |
 
 Smoke caveats: kernels were JIT-built on first use in the worktree (a cold cache ate a 10-minute job on H100): prebuild the tag's kernels
-before a campaign (`python -m miniworld_engine.kernels._prebuild --arch sm90a`, sm80 on the A100; `tools/slurm/cycle.sh` shows the job shape).
+before a campaign (`python -m foldjet_engine.kernels._prebuild --arch sm90a`, sm80 on the A100; `tools/slurm/cycle.sh` shows the job shape).
 Where there is no `.git` (cssb3, cssb-rtx copies) set `MWE_COMMIT=<tag commit>` (and `MWE_VERSION` if the tree has no pyproject) so records carry the commit.
 Library accuracy of the E5 candidates against float64: `E5_other_kernels/E5_results.md` section 4 (E5 speed records are graph timings; a candidate whose kernels leave the CUDA graph is `invalid_graph`, section 0 of that file).

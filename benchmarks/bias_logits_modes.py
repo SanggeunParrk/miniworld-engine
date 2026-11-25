@@ -1,4 +1,4 @@
-"""Bias-only token DiT pair-bias logit modes (``miniworld_engine.bias_logits``): the speed / memory comparison and the cross-version bit-identity dump.
+"""Bias-only token DiT pair-bias logit modes (``foldjet_engine.bias_logits``): the speed / memory comparison and the cross-version bit-identity dump.
 
     python benchmarks/bias_logits_modes.py bench [--lengths 384 768 2048 3072] [--configs 384:128 768:256] [--out FILE.jsonl]
     python benchmarks/bias_logits_modes.py dump  FILE.pt      # fp32-mode outputs of the judge's eval cells (runs on 3.0.6 too: no switch is touched)
@@ -37,8 +37,8 @@ def _card() -> str:
 
 
 def _block(dc: int, dp: int, dtype: str = "bfloat16", backend: str = "cuda", wide: bool = False):
-    from miniworld_engine.measure import config as C
-    from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
+    from foldjet_engine.measure import config as C
+    from foldjet_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
 
     m = TokenDiTMiniWorldBiasOnly(d_single=768, d_cond=dc, d_pair=dp, n_head=16, n=2).to(DEV).float()
     g = torch.Generator(device=DEV).manual_seed(0)
@@ -113,15 +113,15 @@ def _pbuild_fns(m, inp, length: int):
     card = _card()
     pair, mask = inp["pair"], inp["mask"]
     if card in ("h100_sm90", "b200_sm100"):
-        from miniworld_engine.kernels.integrations import bias_only_dit as bo
-        from miniworld_engine.modules.token_dit import _kernel_view
+        from foldjet_engine.kernels.integrations import bias_only_dit as bo
+        from foldjet_engine.modules.token_dit import _kernel_view
 
         view = _kernel_view(m)
         weights = [view.get_parameter(n) for n in bo.WEIGHTS]
         runner = bo._runner(inp["single"], weights)
         pc = pair.contiguous()
         return {mode: (lambda mode=mode: runner.hoist(pc, mask, mode == "bf16")) for mode in ("fp32", "bf16")}
-    from miniworld_engine.kernels.integrations import bias_only_dit_sm80 as sm
+    from foldjet_engine.kernels.integrations import bias_only_dit_sm80 as sm
 
     at = m.attention
     wcm = (at.to_bias.weight.float() * at.ln_pair.weight.float()[None, :]).t().contiguous()
@@ -193,7 +193,7 @@ def bench(args) -> None:
             except torch.OutOfMemoryError as e:
                 print(f"{card} cond{dc}/pair{dp} L{length}: out of memory ({str(e)[:80]})", flush=True)
             finally:
-                from miniworld_engine.kernels.integrations import bias_only_dit
+                from foldjet_engine.kernels.integrations import bias_only_dit
 
                 bias_only_dit._RUNNERS.clear()
                 gc.collect()
@@ -216,7 +216,7 @@ def dump(path: str) -> None:
                         continue
                     m = _block(dc, dp, "float32" if dtype == "master" else dtype, "pytorch")
                     if dtype == "master":
-                        from miniworld_engine.measure import config as C
+                        from foldjet_engine.measure import config as C
 
                         C.cast(m, "master")
                     m.set_backend(backend)
@@ -238,7 +238,7 @@ def dump(path: str) -> None:
                     del m
                 gc.collect()
     # the hoisted bias path and one training cell
-    from miniworld_engine.modules.token_dit import pair_bias_all
+    from foldjet_engine.modules.token_dit import pair_bias_all
 
     m = _block(384, 128, "bfloat16", "cuda")
     inp = _inputs(m, 256, 5, "bfloat16")

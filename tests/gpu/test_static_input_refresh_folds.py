@@ -1,5 +1,5 @@
 """FoldForge R26 on the grouped multi-fold sampler layout (FoldForge R18, ``foldforge.models.grouped.GroupedSampler``): one sampler CUDA
-graph per shape, reused across fold sets (``miniworld_engine.capture.refresh_static_inputs``).
+graph per shape, reused across fold sets (``foldjet_engine.capture.refresh_static_inputs``).
 
 The grouped step runs the DiT blocks once over ``[S, F, ...]``: F folds (trunk_seeds) x S samples, each fold with its own pair, its own
 conditioning (one per fold, ``[1, F, ., d]`` expanded stride 0 over the S samples) and its own atom pair; one key mask expanded over the
@@ -53,7 +53,7 @@ class GroupedStep(torch.nn.Module):
 
     def __init__(self, token_key: str, atom_key: str, n_atoms: int, folds: int = F):
         super().__init__()
-        from miniworld_engine.modules import AtomDiTStack, TokenDiTStack
+        from foldjet_engine.modules import AtomDiTStack, TokenDiTStack
 
         dc, dp = TOKEN[token_key]
         self.token = _init(TokenDiTStack(token_key, 3, 768, dc, dp, 16, 2, backend="cuda"))
@@ -109,7 +109,7 @@ class GroupedStep(torch.nn.Module):
 
 
 def _capture(step: GroupedStep):
-    from miniworld_engine.capture import static_inputs, static_weights
+    from foldjet_engine.capture import static_inputs, static_weights
 
     graph = torch.cuda.CUDAGraph()
     side = torch.cuda.Stream()
@@ -150,7 +150,7 @@ def _per_fold_differs(out) -> bool:
     ],
 )
 def test_grouped_refresh_then_replay_is_eager_on_the_new_fold_set(token_key, atom_key, n_atoms):
-    from miniworld_engine.capture import clear_weight_caches, refresh_static_inputs, release_static_inputs
+    from foldjet_engine.capture import clear_weight_caches, refresh_static_inputs, release_static_inputs
 
     step = GroupedStep(token_key, atom_key, n_atoms)
     try:
@@ -208,7 +208,7 @@ def test_grouped_fold_count_change_is_a_new_signature_and_stale():
     """Another fold count is another graph: ``signature`` of the static tensors differs, and a graph captured on 5 folds whose static tensors
     now hold 3 folds' layout (re-pointed in place with ``set_``) refuses the refresh (``StaleStaticInputs``). The graph is not replayed after that: it
     reads the 5-fold storage the tensors no longer hold."""
-    from miniworld_engine.capture import StaleStaticInputs, clear_weight_caches, signature
+    from foldjet_engine.capture import StaleStaticInputs, clear_weight_caches, signature
 
     step = GroupedStep("protenix", "protenix", 160)
     try:

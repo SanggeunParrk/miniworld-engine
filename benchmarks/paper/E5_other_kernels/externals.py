@@ -117,7 +117,7 @@ def _supports(name: str, probe: str):
 
 def _forward(core):
     def fwd(self, pair, mask=None):
-        from miniworld_engine.modules.primitives import master_autocast
+        from foldjet_engine.modules.primitives import master_autocast
 
         with master_autocast(pair, self):
             return self._residual(pair, mask, core)
@@ -157,7 +157,7 @@ def import_error(module: str, probe: str) -> str | None:
 
 
 def _install_trimul(names) -> None:
-    import miniworld_engine.modules.triangle as tri
+    import foldjet_engine.modules.triangle as tri
 
     for name in names:
         mod = importlib.import_module(TRIMUL_REGISTRY[name])
@@ -182,7 +182,7 @@ def _install_attn(names) -> None:
 
 
 def _install_inline(names) -> None:
-    import miniworld_engine.modules.triangle as tri
+    import foldjet_engine.modules.triangle as tri
 
     ext = os.environ.get("PAPER_EXT_PATH") or os.path.expanduser("~/paper-ext")
     if os.path.isdir(ext) and ext not in sys.path:

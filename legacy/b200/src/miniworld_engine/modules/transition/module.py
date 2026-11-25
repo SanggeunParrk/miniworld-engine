@@ -4,24 +4,24 @@ import torch
 import torch.nn.functional as F
 from jaxtyping import Float
 
-from miniworld_engine.modules import dispatch as _dispatch
-from miniworld_engine.modules.dispatch import KernelBackend, resolve_transition
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.functional import swish_gate
-from miniworld_engine.modules.primitives import (
+from foldjet_engine.modules import dispatch as _dispatch
+from foldjet_engine.modules.dispatch import KernelBackend, resolve_transition
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.functional import swish_gate
+from foldjet_engine.modules.primitives import (
     ImplementationSwitch,
     LayerNorm,
     Linear,
     MasterWeights,
 )
-from miniworld_engine.utils.typecheck import typecheck
+from foldjet_engine.utils.typecheck import typecheck
 
 
 def _fused_sm90a_enabled() -> bool:
     """Whether to route the d=128/n=4 bf16 residual path on sm_90 through the fused hand-CUDA
     forward and backward (two launches instead of five, ~1.9x the Triton residual path on both
     sides). Off only with ``force_portable_kernels``."""
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     return not settings.current().force_portable_kernels
 
@@ -30,7 +30,7 @@ def _fused_sm100a_enabled() -> bool:
     """Whether to route the n=4 bf16 residual path on sm_100 (B200) through the hand-CUDA kernels: ``fused_sm100a`` at d=128
     (module training step 2.5x / 2.3x the Triton residual path at L384 / L768) and ``fused_wide_sm100a`` at d=64/256/384/512.
     Default on; settings.transition_fused_sm100a=0 to A/B against Triton."""
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     return (not settings.current().force_portable_kernels)
 
@@ -38,7 +38,7 @@ def _fused_sm100a_enabled() -> bool:
 def _fused_sm80_enabled() -> bool:
     """Whether to route the d=128/n=4 bf16 residual path on sm_80 through the fused hand-CUDA forward and two-kernel backward
     (training step ~1.44x the Triton residual path).  Default on; settings.transition_fused_sm80=0 to A/B against Triton."""
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     return (not settings.current().force_portable_kernels)
 
@@ -110,7 +110,7 @@ class Transition(MasterWeights, ImplementationSwitch):
                       **options) -> "Transition":
         """The module from a released checkpoint's transition (``input_layer_norm`` / the single ``transition1`` of ``2 n c`` rows /
         ``transition2``; see ``modules.released``). ``n`` follows from the weights."""
-        from miniworld_engine.modules import released
+        from foldjet_engine.modules import released
 
         converted = released.transition_from_released(state_dict, prefix=prefix)
         d_hidden = converted["ln_in.weight"].shape[0]
@@ -173,7 +173,7 @@ class Transition(MasterWeights, ImplementationSwitch):
         """The portable fp32 path runs on TF32 tensor cores, and only where torch allows TF32 (``torch.backends.cuda.matmul.allow_tf32`` or
         ``set_float32_matmul_precision`` not ``"highest"``): the same switch the H100 generic kernels obey. With full-precision fp32 the call
         keeps the PyTorch reference (cuBLAS fp32), as on H100."""
-        from miniworld_engine.kernels._dot_precision import tf32_allowed
+        from foldjet_engine.kernels._dot_precision import tf32_allowed
 
         return tf32_allowed()
 
@@ -181,7 +181,7 @@ class Transition(MasterWeights, ImplementationSwitch):
         """A hand-written CUDA path serves this layer on the current card without a Triton record: the sm_80 (A100) fused kernels at
         d = 128, n = 4 (``kernels.transition.cuda.fused_sm80``; whole 256-row tiles, bf16 are checked per call). Resolved once, when
         the module is built, by ``dispatch.resolve`` (``native_cuda``)."""
-        from miniworld_engine import settings
+        from foldjet_engine import settings
 
         card = _dispatch._card_of(None)
         return (
@@ -206,7 +206,7 @@ class Transition(MasterWeights, ImplementationSwitch):
         """Whether the generic sm_90a kernels take this activation (fp32 / TF32 included)."""
         if not _fused_sm90a_enabled():
             return False
-        from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a
+        from foldjet_engine.kernels.transition.cuda import fused_generic_sm90a
 
         return fused_generic_sm90a.available(
             x, self.expand_a.weight, self.squeeze.weight
@@ -228,7 +228,7 @@ class Transition(MasterWeights, ImplementationSwitch):
         master gets unrounded fp32 gradients; the other paths take the casts in autograd.
         """
         if _fused_sm100a_enabled():
-            from miniworld_engine.kernels.transition.cuda import (
+            from foldjet_engine.kernels.transition.cuda import (
                 fused_sm100a,
                 fused_wide_sm100a,
             )
@@ -250,7 +250,7 @@ class Transition(MasterWeights, ImplementationSwitch):
                     )
 
         if _fused_sm90a_enabled():
-            from miniworld_engine.kernels.transition.cuda import transition_sm90a
+            from foldjet_engine.kernels.transition.cuda import transition_sm90a
 
             # the parameters as they are (fp32 masters included), then the copies cast to the activation dtype below
             out = transition_sm90a(
@@ -272,7 +272,7 @@ class Transition(MasterWeights, ImplementationSwitch):
         wb = self.expand_b.weight.to(x.dtype)
         ws = self.squeeze.weight.to(x.dtype)
         if _fused_sm90a_enabled():
-            from miniworld_engine.kernels.transition.cuda import transition_sm90a
+            from foldjet_engine.kernels.transition.cuda import transition_sm90a
 
             out = transition_sm90a(
                 x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps, self.n
@@ -281,7 +281,7 @@ class Transition(MasterWeights, ImplementationSwitch):
                 return out
 
         if _fused_sm80_enabled():
-            from miniworld_engine.kernels.transition.cuda import fused_sm80
+            from foldjet_engine.kernels.transition.cuda import fused_sm80
 
             if fused_sm80.available(x, wa, ws):
                 return fused_sm80.transition_fused_sm80(
@@ -295,7 +295,7 @@ class Transition(MasterWeights, ImplementationSwitch):
             # kernels need the card's record like any other call (one UnrecordedCardWarning, the PyTorch reference)
             return self._torch_forward(x) + x
 
-        from miniworld_engine.kernels.transition.triton.residual import (
+        from foldjet_engine.kernels.transition.triton.residual import (
             transition_residual,
         )
 

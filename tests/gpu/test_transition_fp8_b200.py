@@ -9,7 +9,7 @@ import math
 import pytest
 import torch
 
-from miniworld_engine import fp8
+from foldjet_engine import fp8
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0), reason="needs a B200 (sm_100a)"
@@ -19,8 +19,8 @@ EPS = 1e-5
 
 
 def _mods():
-    from miniworld_engine.kernels.transition.cuda import fp8_sm100a as f8
-    from miniworld_engine.kernels.transition.cuda import route_sm100a as r
+    from foldjet_engine.kernels.transition.cuda import fp8_sm100a as f8
+    from foldjet_engine.kernels.transition.cuda import route_sm100a as r
 
     return f8, r
 
@@ -254,7 +254,7 @@ def test_ragged_rows(route, rows):
 
 def test_module_engine_fp8_backend_serves_the_route(route):
     """``Transition(backend="engine-fp8")`` (the framework scope) reaches the B200 route; the cuda backend after it is the default route's bytes; training stays default."""
-    from miniworld_engine.modules import Transition
+    from foldjet_engine.modules import Transition
 
     f8, _r = route
     f8.MIN_ROWS, f8.POLICY = None, None  # the process default: every route off; only the engine-fp8 scope turns it on

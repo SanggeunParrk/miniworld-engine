@@ -55,9 +55,9 @@ if not args.no_fp8:
 
 import torch  # noqa: E402
 
-from miniworld_engine import fp8  # noqa: E402
+from foldjet_engine import fp8  # noqa: E402
 
-# diagnostics: --patch module:ATTR=python-literal (e.g. miniworld_engine.kernels.trimul_inproj.cuda.sm120_fp8:POLICY=None), after the preset was read
+# diagnostics: --patch module:ATTR=python-literal (e.g. foldjet_engine.kernels.trimul_inproj.cuda.sm120_fp8:POLICY=None), after the preset was read
 for spec in args.patch:
     import ast
     import importlib

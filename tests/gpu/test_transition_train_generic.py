@@ -4,8 +4,8 @@ inside the engine accuracy standard against a float64 reference (tolerance max(e
 import pytest
 import torch
 
-from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a as G
-from miniworld_engine.modules.transition import Transition
+from foldjet_engine.kernels.transition.cuda import fused_generic_sm90a as G
+from foldjet_engine.modules.transition import Transition
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0), reason="H100 (sm_90) only")
 

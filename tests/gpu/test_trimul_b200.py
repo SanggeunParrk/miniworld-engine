@@ -11,8 +11,8 @@ from typing import Any
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import BidirectionalTriangleMultiplication, TriangleMultiplication, TriangleMultiplicationRF3
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import BidirectionalTriangleMultiplication, TriangleMultiplication, TriangleMultiplicationRF3
 
 pytestmark = [
     pytest.mark.gpu,
@@ -201,8 +201,8 @@ def test_b200_graph_replay_matches_eager(kind, d) -> None:
 def test_b200_dropout_scale_is_the_reference_draw(p) -> None:
     """``b200_infer.dropout_scale`` (the draw + one compare / cast / scale kernel): the reference's bits for the same generator state,
     draw after draw."""
-    from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import dropout_scale
-    from miniworld_engine.modules.functional import dropout_scale as reference
+    from foldjet_engine.kernels.trimul_inproj.cuda.b200_infer import dropout_scale
+    from foldjet_engine.modules.functional import dropout_scale as reference
 
     pair = torch.empty(2, 128, 128, 64, device="cuda", dtype=torch.bfloat16)
     torch.manual_seed(11)
@@ -220,8 +220,8 @@ def test_b200_dropout_scale_is_the_reference_draw(p) -> None:
 def test_b200_rf3_factor_in_forms(d, masked, train) -> None:
     """RoseTTAFold3 on one sample, D64 / D128: the length factor formed in the forms launch (``forms_rf3_op``, the gradient of W_l scaled in
     ``grad_reduce``) gives the bits of the ``_LeftScaled`` path (the factor as torch ops on the weight)."""
-    from miniworld_engine.modules import triangle as T
-    from miniworld_engine.modules.functional import inverse_length
+    from foldjet_engine.modules import triangle as T
+    from foldjet_engine.modules.functional import inverse_length
 
     m = _module("rf3", d).set_backend("cuda").train(train)
     assert isinstance(m, TriangleMultiplicationRF3)
@@ -328,7 +328,7 @@ def test_b200_pdl_chain_graph_matches_eager(kind, d, length, train) -> None:
 def test_b200_wide_forms_and_grad_pack(d, r) -> None:
     """D256-512 training: ``wide_forms`` (one launch) is bitwise the six bf16 casts and the packed [W1; Wg] operand it replaced (fp32
     masters, one column-major); ``wide_grad_pack`` is bitwise the unpack / dWp expression / copies it replaced (2026-11-17)."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as T
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as T
 
     g = torch.Generator(device="cuda").manual_seed(3)
     rnd = lambda *s: torch.randn(*s, device="cuda", generator=g)
@@ -359,8 +359,8 @@ def test_b200_wide_forms_and_grad_pack(d, r) -> None:
 def test_b200_dropout_scale_graph_replays() -> None:
     """Captured in a CUDA graph, ``b200_infer.dropout_scale`` draws, replay after replay, what the reference's captured draw gives from
     the same seed (2026-11-17)."""
-    from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import dropout_scale
-    from miniworld_engine.modules.functional import dropout_scale as reference
+    from foldjet_engine.kernels.trimul_inproj.cuda.b200_infer import dropout_scale
+    from foldjet_engine.modules.functional import dropout_scale as reference
 
     pair = torch.empty(1, 256, 256, 64, device="cuda", dtype=torch.bfloat16)
 
@@ -391,7 +391,7 @@ def test_b200_unified_b1_matches_ring_b1s(kind, length, samples) -> None:
     """D64 one direction: the unified B1 (``b1u``: front epilogue and LN_out backward in one CTA, no ring / flags / cooperative launch)
     gives the ring b1s path's y, dx and parameter gradients up to the bf16 rounding of the (S1 | S2) column partials' order, and
     is bitwise repeatable (five backwards; B = 2: the sample-major 4-D maps)."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     m = _module(kind, 64).set_backend("cuda").train()
     x, mask = _inputs(m, length, samples=samples)
@@ -423,7 +423,7 @@ def test_b200_unified_b1_h128_matches_ring_b1s(kind, hidden, length, samples) ->
     """D64 at contraction width 128 (hidden 128 one direction, bidirectional): the unified B1 at H = 128 (``b1v``: A^T on 128 TMEM
     lanes, dnr in a two-slot ring of 64-channel halves) gives the ring b1s path's y, dx and parameter gradients up to the bf16 rounding
     of the per-tile sums' order, and is bitwise repeatable (five backwards; B = 2: two samples per launch)."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     m = _module(kind, 64, hidden=hidden).set_backend("cuda").train()
     x, mask = _inputs(m, length, samples=samples)
@@ -453,7 +453,7 @@ def test_b200_unified_b1_d128_matches_ring_b1g(kind, length, samples) -> None:
     """D128 one direction: the unified B1 at C = 128 (``b1w``: front epilogue and LN_out backward in one CTA, dnr in G's TMEM columns, no
     ring / flags / cooperative launch) gives the ring b1g path's y, dx and parameter gradients up to the order of the per-CTA sums, and is
     bitwise repeatable (five backwards). B = 2 at L128 and L256 run several tiles per CTA (the single-buffered stages in sequence)."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     m = _module(kind, 128).set_backend("cuda").train()
     x, mask = _inputs(m, length, samples=samples)
@@ -485,7 +485,7 @@ def test_b200_contraction_backward_one_launch(direction, sm, length, samples) ->
     """``cgb_backward`` (every product of the contraction backward in one tcgen05 launch) against the cuBLAS products it replaces
     (``_contract_bwd_sm`` / ``_contract_bwd``): equal up to the order of the fp32 sums over L before the one bf16 rounding (rel <= 1e-2
     on random planes), and bitwise repeatable."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     g = torch.Generator(device="cuda").manual_seed(11)
     k = 64 if sm else 128  # channels per contraction operand
@@ -516,7 +516,7 @@ def test_b200_m64_tiles(kind, d, hidden, length, monkeypatch) -> None:
     """The M = 64 tcgen05 kernels (k1h front, k3h output at D64; forced in every cell here, one tile per CTA at L128, several at
     L256): inside the fp32 statements' tolerance, within bf16 rounding of the k1w / k3g path, the same bits on repeated calls, and ten
     replays of a captured eval step give the eager bits."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_infer as BI
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_infer as BI
 
     base = _module(kind, d, hidden=hidden).eval()
     x, mask = _inputs(base, length)
@@ -552,8 +552,8 @@ def test_b200_philox_forms_draw_is_torch_rand(samples, length, d) -> None:
     """``forms_philox_op`` (the draw made inside the forms launch, 2026-11-17 part 6): the row-dropout scale is bitwise the reference's
     torch.rand draw turned into the scale, and the generator stands where torch.rand leaves it (the next draw is equal), draw after
     draw; (8, 640, 128) covers more elements than one pass of torch's grid (several Philox calls per thread)."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
-    from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import drop_scale_op
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda.b200_infer import drop_scale_op
 
     m = _module("out", d)
     params = [
@@ -582,8 +582,8 @@ def test_b200_philox_forms_draw_is_torch_rand(samples, length, d) -> None:
 def test_b200_philox_forms_graph_replays(writer) -> None:
     """Captured in a CUDA graph, the in-forms draw gives, replay after replay, the reference's captured draw from the same seed, with the
     graph RNG prologue served by this extension's writer (one programmatic launch) or by ATen's two fills."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
-    from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import drop_scale_op
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda.b200_infer import drop_scale_op
 
     m = _module("out", 64)
     params = [
@@ -627,7 +627,7 @@ def test_b200_philox_forms_graph_replays(writer) -> None:
 def test_b200_philox_in_forms_step_bits(kind, d, hidden) -> None:
     """A dropout training step with the draw in the forms launch (``PHILOX_IN_FORMS``) gives the torch.rand draw's y, dx and parameter
     gradients bitwise, two steps in a row (the generator advances alike)."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     m = _module(kind, d, hidden=hidden).set_backend("cuda").train()
     m.p_drop = 0.25
@@ -650,7 +650,7 @@ def test_b200_philox_in_forms_step_bits(kind, d, hidden) -> None:
 def test_b200_b7m_extra_ctas_reduce_bits(kind, hidden, masked) -> None:
     """D64 L128 (b7m tiles < SMs): b7m's extra CTAs summing the B1 kernel's parameter-gradient partials (``B7M_XR``, 2026-11-17 part 6)
     give grad_reduce's bits for every gradient, and repeated backwards stay bitwise equal."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     m = _module(kind, 64, hidden=hidden).set_backend("cuda").train()
     m.p_drop = 0.0
@@ -675,9 +675,9 @@ def test_b200_graph_rng_writer_shared_with_triattn(writer) -> None:
     that registered its fill_ override last served only its own scalars)."""
     from torch.profiler import ProfilerActivity, profile
 
-    from miniworld_engine.kernels import _graph_rng_sm100
-    from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels import _graph_rng_sm100
+    from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     m = _module("out", 64)
     params = [
@@ -754,7 +754,7 @@ def test_b200_graph_rng_writer_shared_with_triattn(writer) -> None:
 def test_b200_k1wt_master_front_bits(kind, hidden, length) -> None:
     """The training front from the fp32 master weights right after the forms launch (``k1wt``, 2026-11-18 part 8): a dropout training
     step's y, dx and parameter gradients are bitwise those of the k1w path, two steps in a row, eager and replayed in a CUDA graph."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     m = _module(kind, 64, hidden=hidden).set_backend("cuda").train()
     m.p_drop = 0.25
@@ -827,7 +827,7 @@ def test_b200_l128_one_launch(kind, masked) -> None:
     """D64 L = 128 inference through ``tf_sm100.cu`` (one cluster launch) against the three-kernel chain (TRIMUL_B200_L128 off) and an
     fp64 reference of the same module: the one-launch error is the chain's (not bitwise: the contraction sums in another order), a
     CUDA-graph replay gives the eager bits, and repeated runs (the plane-row counters are monotonic across launches) do not change a bit."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_infer as BI
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_infer as BI
 
     m = _module(kind, 64)
     m.set_backend("cuda")
@@ -874,7 +874,7 @@ def test_b200_l128_train_one_launch(kind, masked) -> None:
     k1w -> cuBLAS -> k3g chain (``TRAIN_TF`` off) and an fp64 reference: y, dx and every parameter gradient (the unchanged backward on
     the one-launch saved set) carry the chain's error (not bitwise: the contraction sums in another order); repeated steps and a
     CUDA-graph replay give the same bits."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     m = _module(kind, 64).set_backend("cuda").train()
     m.p_drop = 0.0
@@ -949,7 +949,7 @@ def test_b200_l128_train_master_after_forms(kind, hidden, chain, masked) -> None
     hidden 128: k1wt after such a forms launch (``K1WT_AF``) -- with a live row dropout: y, dx and every parameter gradient bitwise those
     of the forms-fed route, eager (the forms launch's steps and a cached-forms step) and in a CUDA-graph replay under the same
     generator seed."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     saved_chain = BT.TFT_CHAIN
     BT.TFT_CHAIN = chain
@@ -1036,7 +1036,7 @@ def test_b200_folded_front(kind, d, length, samples, masked) -> None:
     """The LN_in-folded k1w front (D256 / D384 inference, ``b200_infer.fold_cell``; raw x into TMEM, one correction MMA per chunk):
     the folded call is at least as close to the fp32 statements as the normalise-then-MMA front, several tiles a CTA included; it is
     deterministic and a graph replay gives the eager bits."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_infer as BI
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_infer as BI
 
     m = _module(kind, d).eval().set_backend("cuda")
     m.p_drop = 0.0
@@ -1075,7 +1075,7 @@ def test_b200_wide_philox_in_forms_step_bits(kind, d, length) -> None:
     """S90: a D256-512 dropout training step with the draw and its scale made by the wide forms launch (``wide_forms_philox_op``) gives the
     torch.rand draw's y, dx and parameter gradients bitwise (two steps in a row: the generator advances alike), and the same bits again from
     the same seed."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
 
     m = _module(kind, d).set_backend("cuda").train()
     m.p_drop = 0.25
@@ -1099,8 +1099,8 @@ def test_b200_wide_philox_in_forms_step_bits(kind, d, length) -> None:
 @pytest.mark.parametrize("writer", [2, 0], ids=["writer_pdl", "aten_fill"])
 def test_b200_wide_philox_forms_graph_replays(writer) -> None:
     """S90: captured in a CUDA graph, the wide forms launch's draw gives, replay after replay, the reference's captured draw from the same seed."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import b200_train as BT
-    from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import drop_scale_op
+    from foldjet_engine.kernels.trimul_inproj.cuda import b200_train as BT
+    from foldjet_engine.kernels.trimul_inproj.cuda.b200_infer import drop_scale_op
 
     m = _module("out", 256)
     params = [m.to_left.weight, m.to_left_gate.weight, m.to_right.weight, m.to_right_gate.weight, m.to_gate.weight, m.to_out.weight]

@@ -73,7 +73,7 @@ def _tri_core(evo):
 
 
 def _tri_classes():
-    import miniworld_engine.modules.triangle as tri
+    import foldjet_engine.modules.triangle as tri
 
     out, todo = [], [tri._TriangleAttentionBase]
     while todo:
@@ -85,8 +85,8 @@ def _tri_classes():
 
 def attach(name: str, evo, reason, probe, *, triangle: bool = True, apb: bool = True) -> None:
     """Attach backend ``name`` (evo core ``evo``, range ``reason``, import check ``probe`` raising on failure)."""
-    from miniworld_engine.modules import attention as attn
-    from miniworld_engine.modules.primitives import master_autocast
+    from foldjet_engine.modules import attention as attn
+    from foldjet_engine.modules.primitives import master_autocast
 
     def import_error():
         try:

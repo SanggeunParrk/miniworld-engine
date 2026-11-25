@@ -16,7 +16,7 @@ tiles.
 `ConditionedTransition` / `UpGatedConditionedTransition` (AF3 Alg. 25 and Boltz-2's up-gated form) have only the `pytorch` backend. The
 `conditioned_transition` kernel family is launched by the token DiT classes (`TokenDiT*`), not by the module; see the last section.
 
-Judging: accuracy and speed of every backend come from `miniworld_engine.measure` / `judge` ([measure](../measure.md),
+Judging: accuracy and speed of every backend come from `foldjet_engine.measure` / `judge` ([measure](../measure.md),
 [modules](../modules.md), [kernels](../kernels.md)).
 
 ## Kernels

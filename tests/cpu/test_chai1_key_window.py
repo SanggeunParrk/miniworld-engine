@@ -16,8 +16,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.atom_dit import AtomDiTChai1
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.atom_dit import AtomDiTChai1
 
 
 def _release_mask(atom_mask: torch.Tensor, uid: torch.Tensor) -> torch.Tensor:

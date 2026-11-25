@@ -2,8 +2,8 @@
 
 import torch
 
-from miniworld_engine.measure import speed
-from miniworld_engine.modules.primitives import key_mask, pair_inputs, unpadded_masks
+from foldjet_engine.measure import speed
+from foldjet_engine.modules.primitives import key_mask, pair_inputs, unpadded_masks
 
 
 def test_default_mask_pads_the_tail():

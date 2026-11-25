@@ -8,8 +8,8 @@ from typing import cast
 
 import pytest
 
-from miniworld_engine import judge
-from miniworld_engine.measure import config as cfgmod
+from foldjet_engine import judge
+from foldjet_engine.measure import config as cfgmod
 
 SETTINGS = {"seed": 0, "fixed": {"bfloat16": 0.008, "float32": 1e-05, "master": 0.008}, "speed": {}}
 ENV = {"capability": [9, 0], "torch": "2.13.0+cu129", "cuda": "12.9", "triton": "3.7.1"}

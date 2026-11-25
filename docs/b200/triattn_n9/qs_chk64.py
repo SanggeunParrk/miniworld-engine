@@ -1,7 +1,7 @@
 # qs_chk64.py : head-dim-64 core (TriangleAttention d_pair 128, n_head 2, d_hidden 128), QS vs old vs the fp32 pytorch reference
 import sys, torch
-from miniworld_engine.modules import triangle as T
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.modules import triangle as T
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
 K.QS_MIN_L64 = int(sys.argv[1]) if len(sys.argv) > 1 else K.QS_MIN_L64
 def build(starting, bias_mul=1.0, wqk_mul=1.0, seed=5):
     torch.manual_seed(seed)

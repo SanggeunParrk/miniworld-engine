@@ -1,4 +1,4 @@
-"""The bias-only token DiT's two pair-bias logit modes (``miniworld_engine.bias_logits``): ``"fp32"`` (default; the only training mode) and the
+"""The bias-only token DiT's two pair-bias logit modes (``foldjet_engine.bias_logits``): ``"fp32"`` (default; the only training mode) and the
 opt-in inference mode ``"bf16"`` (logits computed and stored in bf16, fp32 softmax over them, P rounded to bf16).
 
 Checked on whatever card runs the file (H100 / A100 / RTX 5090: the ``cuda`` backend; every card: ``pytorch`` and ``triton``):
@@ -26,8 +26,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine import bias_logits
-from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly, pair_bias_all
+from foldjet_engine import bias_logits
+from foldjet_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly, pair_bias_all
 
 pytestmark = [pytest.mark.gpu]
 
@@ -230,8 +230,8 @@ def test_bf16_mode_accuracy(case: str, backend: str, hoist: bool) -> None:
 @requires_cuda
 def test_bf16_logits_distribution_mild() -> None:
     """The PyTorch / Triton bf16 logits against fp64 on mild logits: max-row total variation of P (the kernels' own P is inside the block test)."""
-    from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits_bf16
-    from miniworld_engine.modules.attention import bf16_pair_bias_logits
+    from foldjet_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits_bf16
+    from foldjet_engine.modules.attention import bf16_pair_bias_logits
 
     mq, m64, ins, i64, mask, _ = _build("mild")
     a = mq.attention

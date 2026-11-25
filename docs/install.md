@@ -40,7 +40,7 @@ Developers of the repository use the pixi environment in `pyproject.toml` (`pixi
 Every hand-written CUDA artifact is identified by a content key (its sources and the headers they reach, the flags, torch / CUDA /
 Python versions, the CUTLASS / MathDx release; `kernels/_codegraph.py`). An artifact is looked up, in order, in
 
-1. `miniworld_engine/_prebuilt/` -- filled by the `miniworld-engine-kernels-sm90-cu129`, `miniworld-engine-kernels-sm80-cu129` and `miniworld-engine-kernels-sm120-cu129`
+1. `foldjet_engine/_prebuilt/` -- filled by the `miniworld-engine-kernels-sm90-cu129`, `miniworld-engine-kernels-sm80-cu129` and `miniworld-engine-kernels-sm120-cu129`
    wheels, which `pip` installs automatically on Linux x86_64 with CPython 3.12 (the versions are pinned to the engine's; the sm80 wheel from
    2.5.2 on -- with 2.5.1 an A100 JIT-builds). They hold
    the H100 (sm_90a) and A100 (sm_80) builds for torch 2.13 / CUDA 12.9 (one directory, content-keyed paths: no per-arch subdirectory).
@@ -48,7 +48,7 @@ Python versions, the CUTLASS / MathDx release; `kernels/_codegraph.py`). An arti
 
 A key found in neither is compiled on first use into the JIT cache, under a file lock (one process builds, the others wait). Each build
 prints one line when it starts and one when it ends (`[miniworld-engine build] ...`); a run that prints nothing reused every artifact.
-A build failure raises `miniworld_engine.kernels._nvcc.KernelBuildError`; nothing falls back to another backend silently.
+A build failure raises `foldjet_engine.kernels._nvcc.KernelBuildError`; nothing falls back to another backend silently.
 
 What that means in practice:
 
@@ -57,7 +57,7 @@ What that means in practice:
 - **H100 / A100 with another Python / torch / CUDA version**: the keys differ, so the CUDA kernels JIT-build on first use (minutes per
   family; once per machine and cache). Needs the build requirements above.
 
-Prebuild ahead of time (a CPU node is enough, no GPU): `python -m miniworld_engine.kernels._prebuild --arch sm90a` (or `--arch sm80`),
+Prebuild ahead of time (a CPU node is enough, no GPU): `python -m foldjet_engine.kernels._prebuild --arch sm90a` (or `--arch sm80`),
 `--list` to see the plan and what is missing. Triton kernels compile in seconds on first use and are cached by Triton.
 
 ## CUTLASS and MathDx headers
@@ -88,14 +88,14 @@ release is honoured for builds; a prebuilt artifact of the pinned release is sti
 Machines without network access (e.g. offline cluster compute nodes), any one of:
 
 ```sh
-python -m miniworld_engine.kernels._headers fetch            # on a node with network access, into a cache the build nodes share
+python -m foldjet_engine.kernels._headers fetch            # on a node with network access, into a cache the build nodes share
 pip download --no-deps nvidia-cutlass==4.2.0.0 -d wheels/    # elsewhere; then, on the offline machine:
-python -m miniworld_engine.kernels._headers fetch cutlass --wheel wheels/nvidia_cutlass-4.2.0.0-py3-none-any.whl
+python -m foldjet_engine.kernels._headers fetch cutlass --wheel wheels/nvidia_cutlass-4.2.0.0-py3-none-any.whl
 pip install --no-deps nvidia-cutlass==4.2.0.0 nvidia-mathdx==25.6.0   # into the environment (no cuda-python pulled in)
 export CUTLASS_PATH=/path/to/cutlass-v4.2.0                  # or point at a checkout
 ```
 
-`python -m miniworld_engine.kernels._headers show` prints what is found. `MINIWORLD_ENGINE_NO_DOWNLOAD=1` forbids the download (a
+`python -m foldjet_engine.kernels._headers show` prints what is found. `MINIWORLD_ENGINE_NO_DOWNLOAD=1` forbids the download (a
 build that needs missing headers then fails with the options above).
 
 ## Environment variables
@@ -117,7 +117,7 @@ build that needs missing headers then fails with the options above).
 - **`cuBLASDx headers not found`**: as above, for `mathdx`.
 - **Every first call compiles on an H100 / A100**: the prebuilt wheel is absent or does not match. Check `pip show
   miniworld-engine-kernels-sm90-cu129` / `miniworld-engine-kernels-sm80-cu129` (CPython 3.12 only), `torch.__version__` (2.13) and `torch.version.cuda` (12.9).
-  `python -m miniworld_engine.kernels._prebuild --arch sm90a --list` shows `have` / `todo` per artifact.
+  `python -m foldjet_engine.kernels._prebuild --arch sm90a --list` shows `have` / `todo` per artifact.
 - **`nvcc fatal: Unsupported gpu architecture`** or a toolkit mismatch: set `CUDA_HOME` to a toolkit of the same release as
   `torch.version.cuda`.
 - **Host-compiler parse errors in libstdc++ headers** (`__is_array`, `0.0bf16`): GCC 14 with nvcc 12.x; install GCC <= 13 and/or set

@@ -14,10 +14,10 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.kernels.integrations import adaln_sm80
-from miniworld_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.token_dit import TokenDiTChai1
+from foldjet_engine.kernels.integrations import adaln_sm80
+from foldjet_engine.kernels.integrations import conditioned_transition_sm80 as ct_sm80
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.token_dit import TokenDiTChai1
 
 pytestmark = [pytest.mark.gpu]
 

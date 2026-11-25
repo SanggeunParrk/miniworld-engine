@@ -13,14 +13,14 @@ from typing import TypeGuard, TypeVar
 import pytest
 import torch
 
-from miniworld_engine.modules.atom_dit import AtomDiTMiniWorld
-from miniworld_engine.modules.attention import BiasOnlyAttention
-from miniworld_engine.modules.embedder import InputFeatureEmbedder
-from miniworld_engine.modules.norm import AdaptiveLayerNorm, AdaptiveRMSNorm
-from miniworld_engine.modules.primitives import BackendModule
-from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
-from miniworld_engine.modules.transition import ConditionedTransition
-from miniworld_engine.modules.triangle import TriangleAttention
+from foldjet_engine.modules.atom_dit import AtomDiTMiniWorld
+from foldjet_engine.modules.attention import BiasOnlyAttention
+from foldjet_engine.modules.embedder import InputFeatureEmbedder
+from foldjet_engine.modules.norm import AdaptiveLayerNorm, AdaptiveRMSNorm
+from foldjet_engine.modules.primitives import BackendModule
+from foldjet_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
+from foldjet_engine.modules.transition import ConditionedTransition
+from foldjet_engine.modules.triangle import TriangleAttention
 
 pytestmark = [pytest.mark.gpu]
 

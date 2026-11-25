@@ -5,9 +5,9 @@ cubin) under a CUDA-13 driver; below it those rows are excluded by name (a launc
 
 import pytest
 
-from miniworld_engine.modules import _anthropic
-from miniworld_engine.modules.transition import Transition
-from miniworld_engine.modules.triangle import TriangleMultiplication
+from foldjet_engine.modules import _anthropic
+from foldjet_engine.modules.transition import Transition
+from foldjet_engine.modules.triangle import TriangleMultiplication
 
 
 @pytest.fixture

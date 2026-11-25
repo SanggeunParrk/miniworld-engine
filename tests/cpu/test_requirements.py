@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from miniworld_engine.measure import config as cfgmod
-from miniworld_engine.modules.primitives import BackendModule
+from foldjet_engine.measure import config as cfgmod
+from foldjet_engine.modules.primitives import BackendModule
 
 REQ = Path(cfgmod.REQUIREMENTS).parent
 KERNELS_DIR = REQ.parent / "kernels"
@@ -168,7 +168,7 @@ def test_launch_table_versions_are_human(path: Path):
 
 def test_versions_of_every_class_resolve():
     """``measure.config.versions`` (what every record carries) works for every class, mode and card the judge keeps."""
-    from miniworld_engine import judge
+    from foldjet_engine import judge
 
     for module in CLASSES:
         for mode in ("eval", "train"):

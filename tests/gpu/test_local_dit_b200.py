@@ -41,7 +41,7 @@ CASES = [
 _SCRIPT = r"""
 import hashlib, json, sys
 import torch
-from miniworld_engine.modules import atom_dit as ad
+from foldjet_engine.modules import atom_dit as ad
 
 def digest(t):
     return hashlib.sha256(t.detach().contiguous().cpu().view(torch.uint8).numpy().tobytes()).hexdigest()

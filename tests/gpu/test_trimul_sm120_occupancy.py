@@ -7,8 +7,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import TriangleMultiplication
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import TriangleMultiplication
 
 pytestmark = [
     pytest.mark.gpu,
@@ -22,7 +22,7 @@ pytestmark = [
 @pytest.mark.parametrize("outgoing", [True, False])
 @pytest.mark.parametrize("d_pair,d_hidden", [(64, 64), (64, 128), (128, 128)])
 def test_two_per_sm_forms_bitwise(d_pair: int, d_hidden: int, outgoing: bool, length: int) -> None:
-    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+    from foldjet_engine.kernels.trimul_inproj.cuda import sm80_wide
 
     ext = sm80_wide._lib()
     module = TriangleMultiplication(d_pair=d_pair, d_hidden=d_hidden, outgoing=outgoing).cuda().float().eval()

@@ -1,6 +1,6 @@
 """Core-only: default gated rf core vs the e4m3 cores (PV; PV + QK) and their quant pass, d=128 4x32, no mask. python triattn_core_ab.py L ..."""
 import sys, math, torch
-from miniworld_engine.kernels.triangle_attention.cuda import sm80 as core, sm120_fp8 as F
+from foldjet_engine.kernels.triangle_attention.cuda import sm80 as core, sm120_fp8 as F
 flush = torch.empty(128 << 20, dtype=torch.uint8, device="cuda")
 def bench(f, n=2):
     f(); torch.cuda.synchronize()

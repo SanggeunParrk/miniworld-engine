@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels._key_len import kernel_mask
+from foldjet_engine.kernels._key_len import kernel_mask
 
 
 def test_kernel_mask_views_and_copies() -> None:

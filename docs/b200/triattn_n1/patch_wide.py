@@ -1,5 +1,5 @@
 import sys
-p = sys.argv[1] + "/src/miniworld_engine/kernels/triangle_attention/cuda/b200_triattn.py"; s = open(p).read()
+p = sys.argv[1] + "/src/foldjet_engine/kernels/triangle_attention/cuda/b200_triattn.py"; s = open(p).read()
 old = '''    if TALLK and R <= TALLK_MAX_ROWS and C <= 256:
         G, dwo = _tallk().tallk(Dall, xh, dys, u)
     else:

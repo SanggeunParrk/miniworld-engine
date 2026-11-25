@@ -1,6 +1,6 @@
 """Shared harness of the RTX 5090 token DiT / atom DiT FP8 benchmarks (``token_dit_ab.py``, ``atom_dit_ab.py``, ``dit_profile.py``).
 
-Blocks come from the measurers' registry rows (``miniworld_engine.measure.config``): eval, ``master`` (fp32 parameters, bf16 activations), the
+Blocks come from the measurers' registry rows (``foldjet_engine.measure.config``): eval, ``master`` (fp32 parameters, bf16 activations), the
 module's first eval / master row (Token DiT: ``d_pair = 128`` where the class has it), with the length / samples replaced and the conditioning
 shared by the samples (the ``*_shared_cond`` stream: FoldForge's samplers call the blocks that way)."""
 
@@ -22,7 +22,7 @@ YAML = (
 def case(module: str, length: int, samples: int = 5, shared: bool = True, pick: str | None = None):
     """The registry case of ``module`` (eval, master), ``length`` / ``samples`` replaced. ``pick``: a substring the case label must hold (e.g.
     ``key_window=slide``); without it the case with no ``key_window`` / ``mask_form`` option is preferred, then ``d_pair=128``."""
-    from miniworld_engine.measure import config as C
+    from foldjet_engine.measure import config as C
 
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         f.write(YAML.format(mods=module))
@@ -53,8 +53,8 @@ class Rig:
     """One block + its inputs + a callable step on the ``cuda`` backend (eval, no grad); ``gold()`` = the module in float64 on PyTorch."""
 
     def __init__(self, c):
-        from miniworld_engine.measure import config as C
-        from miniworld_engine.measure import speed as S
+        from foldjet_engine.measure import config as C
+        from foldjet_engine.measure import speed as S
 
         dev = torch.device("cuda")
         self.m = copy.deepcopy(C.build(c, device=dev))
@@ -106,7 +106,7 @@ def graph(f, n: int = 3, flush: bool = True):
     """A CUDA graph of ``n`` calls of ``f`` (each after a 128 MB L2 flush when ``flush``) and one of the flushes alone, captured under
     ``static_weights()`` + ``static_inputs()`` (as FoldForge's sampler graphs: weight forms and hoisted tables are made by the eager warm-up,
     a replay reads them). Returns (graph, flush graph, the static-tables handle: keep it while the graph is replayed)."""
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     if not _FLUSH:
         _FLUSH.append(torch.empty(128 << 20, dtype=torch.uint8, device="cuda"))

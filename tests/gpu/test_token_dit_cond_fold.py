@@ -24,7 +24,7 @@ def _h100() -> bool:
 
 
 def _block(model: str, dc: int, dp: int):
-    from miniworld_engine.modules import TokenDiT
+    from foldjet_engine.modules import TokenDiT
 
     torch.manual_seed(0)
     b = TokenDiT(model, 768, dc, dp, 16, 2)
@@ -67,7 +67,7 @@ def test_folded_conditioning_matches_reference(model, dc, dp, bound, shared):
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) path")
 @pytest.mark.parametrize(("model", "dc", "dp"), [("esmfold2", 768, 256), ("boltz2", 768, 128)])
 def test_pipelined_conditioning_replay_sees_new_conditioning(model, dc, dp):
-    from miniworld_engine.capture import static_inputs, static_weights
+    from foldjet_engine.capture import static_inputs, static_weights
 
     blocks = [_block(model, dc, dp) for _ in range(4)]
     for b in blocks:
@@ -109,7 +109,7 @@ def test_pipelined_conditioning_replay_sees_new_conditioning(model, dc, dp):
 @pytest.mark.parametrize("M", [640, 1280, 1920])
 @pytest.mark.parametrize("up", [False, True])
 def test_swiglu_gemm_tiles(M, up):
-    from miniworld_engine.kernels.conditioned_transition import cuda as C
+    from foldjet_engine.kernels.conditioned_transition import cuda as C
 
     op = C._token_swiglu(torch.cuda.current_device())
     K, H = 768, 1536

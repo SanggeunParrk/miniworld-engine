@@ -9,8 +9,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90_generic as gen
-from miniworld_engine.modules.triangle import TriangleAttention
+from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90_generic as gen
+from foldjet_engine.modules.triangle import TriangleAttention
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

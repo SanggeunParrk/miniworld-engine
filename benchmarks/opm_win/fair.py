@@ -24,8 +24,8 @@ import time
 
 import torch
 
-from miniworld_engine.measure import config, speed
-from miniworld_engine.modules.primitives import BackendUnsupported, unpadded_masks
+from foldjet_engine.measure import config, speed
+from foldjet_engine.modules.primitives import BackendUnsupported, unpadded_masks
 
 
 def _nvml():

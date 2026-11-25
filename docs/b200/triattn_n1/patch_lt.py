@@ -1,5 +1,5 @@
 import sys
-root = sys.argv[1]; K = root + "/src/miniworld_engine/kernels/"
+root = sys.argv[1]; K = root + "/src/foldjet_engine/kernels/"
 src = open(sys.argv[2]).read()
 open(K + "triangle_attention/cuda/b200_sources/ltmm_sm100.cu", "w").write(src)
 p = K + "triangle_attention/cuda/b200_bidir.py"; s = open(p).read()
@@ -33,7 +33,7 @@ B200_LT = os.environ.get("MINIWORLD_BIDIR_B200_LT", "1") != "0"
 def _lt():
     if not (B200_LT and _b200()):
         return None
-    from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir
+    from foldjet_engine.kernels.triangle_attention.cuda import b200_bidir
 
     return b200_bidir.ltmm()
 

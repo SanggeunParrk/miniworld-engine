@@ -11,7 +11,7 @@ or the kernel has a performance bug. A violation is never resolved by dropping a
 ## How it is checked
 
 - Per card: the check runs on one card's tokens; the cards are not compared with each other.
-- Data: the speed tokens of the card (`src/miniworld_engine/judge/tokens/<gpu>/*.jsonl`, `kind: speed`, `timing: graph`,
+- Data: the speed tokens of the card (`src/foldjet_engine/judge/tokens/<gpu>/*.jsonl`, `kind: speed`, `timing: graph`,
   `status: ok`), i.e. the measurer's CUDA-graph timing with the L2 cache flushed before every call (docs/measure.md).
 - Pairs: for one case (`case_key` without the backend), compare the medians of `cuda` vs `triton`, `triton` vs `pytorch` and
   `cuda` vs `pytorch`. A pair counts as a violation when the faster rung is more than 2 % slower (`slow > fast * 1.02`); the

@@ -1,6 +1,6 @@
 import sys, torch
-from miniworld_engine.modules import triangle as T
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.modules import triangle as T
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
 torch.manual_seed(1)
 cfgs = [dict(d_pair=256, n_head=8), dict(d_pair=64, n_head=2), dict(d_pair=64, n_head=4, d_hidden=128), dict(d_pair=384, n_head=12)]
 for cfg in cfgs:

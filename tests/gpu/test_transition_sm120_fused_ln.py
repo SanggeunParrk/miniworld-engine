@@ -7,8 +7,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import Transition
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import Transition
 
 pytestmark = [
     pytest.mark.gpu,
@@ -27,7 +27,7 @@ def _module(d: int, n: int) -> Transition:
     ("d", "n", "rows", "offset"), [(256, 2, 40000, 0.0), (384, 2, 33000, 0.0), (512, 4, 40001, 0.0), (256, 4, 65536, 12.0)]
 )
 def test_fused_layernorm_within_the_unfused_error(monkeypatch: pytest.MonkeyPatch, d: int, n: int, rows: int, offset: float) -> None:
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     module = _module(d, n)
     kern = copy.deepcopy(module).set_backend("cuda").eval()
@@ -46,7 +46,7 @@ def test_fused_layernorm_within_the_unfused_error(monkeypatch: pytest.MonkeyPatc
 
 
 def test_few_rows_and_training_keep_the_unfused_chain() -> None:
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     x = torch.zeros(1, 16384, 256, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
@@ -58,7 +58,7 @@ def test_few_rows_and_training_keep_the_unfused_chain() -> None:
 
 def test_row_blocks_with_the_fused_layernorm_stay_accurate(monkeypatch: pytest.MonkeyPatch) -> None:
     """An inference call past ``SM120_INFER_MAX_ROWS`` (``forward_into`` per row block: two fused blocks and one unfused remainder here) is as accurate as the single call."""
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     module = _module(256, 2)
     kern = copy.deepcopy(module).set_backend("cuda").eval()
@@ -76,7 +76,7 @@ def test_row_blocks_with_the_fused_layernorm_stay_accurate(monkeypatch: pytest.M
 
 def test_statistics_overlap_matches_the_serial_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     """Above ``SM120_STATS_OVERLAP_MIN_ROWS`` the statistics run on a side stream in row chunks (and under a CUDA graph): the output bits of the serial pass."""
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     module = _module(256, 2)
     kern = copy.deepcopy(module).set_backend("cuda").eval()
@@ -101,7 +101,7 @@ def test_statistics_overlap_matches_the_serial_pass(monkeypatch: pytest.MonkeyPa
 @pytest.mark.parametrize(("d", "n", "rows"), [(256, 4, 70001), (384, 2, 66000), (512, 4, 65536)])
 def test_big_work_tiles_give_the_same_bits(monkeypatch: pytest.MonkeyPatch, d: int, n: int, rows: int) -> None:
     """The 128-row tiles of the fused LayerNorm path (dual config 14, squeeze config 13) accumulate every output element in the order of the 64-row ones: the same bits."""
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     module = _module(d, n)
     kern = copy.deepcopy(module).set_backend("cuda").eval()
@@ -120,7 +120,7 @@ def test_big_work_tiles_give_the_same_bits(monkeypatch: pytest.MonkeyPatch, d: i
 
 def test_training_forward_with_128_row_tiles_keeps_the_bits(monkeypatch: pytest.MonkeyPatch) -> None:
     """The training forward at D >= 256 takes dual config 14 / squeeze config 13 (``SM120_FUSED_LN_MIN_ROWS`` and up): outputs and gradients of the 64-row tiles' bits."""
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     module = _module(256, 4)
     x0 = (torch.randn(1, 40000, 256, device="cuda", generator=torch.Generator(device="cuda").manual_seed(8))).to(torch.bfloat16)
@@ -151,6 +151,6 @@ def test_training_forward_with_128_row_tiles_keeps_the_bits(monkeypatch: pytest.
 )
 def test_fold_tile_rules(m: int, d: int, h: int, expected: tuple[int, int]) -> None:
     """The folded-LayerNorm inference tiles: dual 14 below ``SM120_FOLD_14_ROWS`` rows and, from d 512, from ``SM120_FOLD_14_WORK_D512``; 14 / 13 from the big work."""
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     assert fw._fold_tiles(m, h, 2, 2, d) == expected

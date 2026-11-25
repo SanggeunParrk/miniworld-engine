@@ -9,7 +9,7 @@
 # Checked against the kits' own venv (torch 2.13.0+cu130, same compat libcuda) on one A100 80GB PCIe, 2026-11-13: TriMul d_pair 64 / 128 /
 # 256 and TriAttn (4 rows) at L 768 / 1024 within 2 % of each other, either sign (run-to-run noise) -- see LOCAL_BUILD.json.
 #
-#   sbatch -p A100 --gres=gpu:A100:1 ... --wrap "third_party/anthropic/kit_stack_compat.sh python -m miniworld_engine.measure.speed CONFIG --out OUT.jsonl"
+#   sbatch -p A100 --gres=gpu:A100:1 ... --wrap "third_party/anthropic/kit_stack_compat.sh python -m foldjet_engine.measure.speed CONFIG --out OUT.jsonl"
 #
 # Environment: KIT_COMPAT_DIR (the directory of the CUDA-13.0 forward-compatible libcuda.so.1: NVIDIA's cuda-compat-13-0 package,
 # .../cuda-13.0/compat; default $HOME/cuda-compat-13.0), MINIWORLD_ANTHROPIC_ROOT (the release root, with the sm_80 extension installed).

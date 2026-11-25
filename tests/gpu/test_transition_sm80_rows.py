@@ -12,10 +12,10 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.kernels.transition.cuda import fused_fwd_sm80
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.primitives import BackendUnsupported
-from miniworld_engine.modules.transition import Transition
+from foldjet_engine.kernels.transition.cuda import fused_fwd_sm80
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.primitives import BackendUnsupported
+from foldjet_engine.modules.transition import Transition
 
 pytestmark = [pytest.mark.gpu, pytest.mark.a100, pytest.mark.slow]
 
@@ -73,7 +73,7 @@ def _train_grads(m: Transition, x: torch.Tensor, dy: torch.Tensor) -> list[torch
 def test_transition_sm80_train_overlap_backward_bits(d_hidden: int, n: int) -> None:
     """The saved-activation backward runs d_xn (a bf16 GEMM output, ``fused_wide_sm80._dxn_gemm``) -> ``ln_bwd`` on a side stream next to [dWa; dWb] (``fused_wide_sm80._bwd_saved_overlap``) and ``ln_bwd``
     keeps two rows in flight: the gradients equal the one-stream order of the same kernels bit for bit, run to run and under a graph."""
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     m = _master(Transition(d_hidden=d_hidden, n=n)).train()
     m.set_backend("cuda")
@@ -139,7 +139,7 @@ def test_transition_sm80_train_overlap_backward_bits(d_hidden: int, n: int) -> N
 def test_transition_sm80_fp32_few_rows_streams_bits(monkeypatch: pytest.MonkeyPatch, d_hidden: int, n: int, rows: int) -> None:
     """The fp32 (TF32-allowed) few-rows backward runs its two weight-gradient GEMMs and their scalings on side streams (``fused_wide_sm80._f32_bwd``,
     ``F32_WGRAD_STREAMS``): the same kernels on the same operands as the one-stream order (the scalings inside ``ln_bwd``'s finalize launch), the same bits, eager and under a graph."""
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fw
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fw
 
     torch.backends.cuda.matmul.allow_tf32 = True
     m = Transition(d_hidden=d_hidden, n=n).cuda().float()

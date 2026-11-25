@@ -8,7 +8,7 @@ import pytest
 import torch
 from portable_helpers import relative_float as relative
 
-from miniworld_engine.kernels.trimul_inproj.cuda import b200_infer, b200_train
+from foldjet_engine.kernels.trimul_inproj.cuda import b200_infer, b200_train
 
 pytestmark = [
     pytest.mark.gpu,

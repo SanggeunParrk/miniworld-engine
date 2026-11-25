@@ -40,7 +40,7 @@ def _rel(a, b):
 
 @pytest.mark.skipif(not CUDA, reason="needs a GPU to build the operands")
 def test_gate_rejects_what_the_tiles_cannot_take():
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     q, _, _, bias = _inputs(4, 128)
     assert sm100.supported(q, bias) is BLACKWELL
@@ -63,7 +63,7 @@ def test_gate_rejects_what_the_tiles_cannot_take():
     (4, 128, 1.0, True),       # one query tile per head
 ])
 def test_matches_fp64_at_the_bf16_input_floor(A, L, bias_scale, head_major):
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     q, k, v, bias = _inputs(A, L, seed=A * 1000 + L, bias_scale=bias_scale)
     do = torch.randn(A, 1, L, 16, 48, device="cuda")
@@ -86,7 +86,7 @@ def test_matches_fp64_at_the_bf16_input_floor(A, L, bias_scale, head_major):
 
 @needs_blackwell
 def test_graph_capture_replays_the_same_forward():
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     q, k, v, bias = _inputs(4, 256)
     with torch.no_grad():
@@ -104,10 +104,10 @@ def test_graph_capture_replays_the_same_forward():
 def test_module_bf16_core_takes_the_kernels_and_keeps_the_triton_error():
     """AugmentedAttentionPairBias with compute_dtype=bf16 on a supported shape runs the sm_100 kernels; its error
     against the fp32 PyTorch module is no worse than the bf16 Triton core's (the switch is off in the second run)."""
-    from miniworld_engine import settings
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
-    from miniworld_engine.modules import AugmentedAttentionPairBias
-    from miniworld_engine.modules.exceptions import ImplementationType
+    from foldjet_engine import settings
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.modules import AugmentedAttentionPairBias
+    from foldjet_engine.modules.exceptions import ImplementationType
 
     torch.manual_seed(0)
     A, L = 4, 256
@@ -157,7 +157,7 @@ def test_gated_inference_core_matches_fp64(dtype, tol, S, L):
     """The step's gated core alone (bf16 attn_inf on q | k | v | g / fp32 TF32 attn_inf_tf32 on q | k | g and v^T) against
     fp64: o = sigmoid(g) softmax_2(q k^T + bias) v written over q, logits in exp2 units; odd S exercises the clamped partner
     sample, L not a multiple of 128 the zero-filled / clipped tile tails and the masked keys of the last block."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     g = torch.Generator(device="cuda").manual_seed(S * 100 + L)
     M, D = S * L, 768

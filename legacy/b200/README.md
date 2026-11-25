@@ -5,5 +5,5 @@ B200 (sm_100a) code removed by the 2.5.0 redesign (65f37dc3c), restored for refe
 
 - Files that exist at HEAD with the B200 parts stripped (e.g. kernels/transition/interface.py) are the
   pre-redesign versions here; HEAD's copies are untouched.
-- The sm_100a kernel sources the redesign kept are still in src/miniworld_engine/kernels (sm100/ folders,
+- The sm_100a kernel sources the redesign kept are still in src/foldjet_engine/kernels (sm100/ folders,
   *_sm100*.cu, integrations/csrc/sm100/).

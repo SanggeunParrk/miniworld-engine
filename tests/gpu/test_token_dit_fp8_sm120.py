@@ -20,7 +20,7 @@ CLASSES = ["TokenDiTProtenix", "TokenDiTMiniWorld", "TokenDiTBoltz2", "TokenDiTR
 
 
 def _case(module, L, S=5):
-    from miniworld_engine.measure import config as C
+    from foldjet_engine.measure import config as C
 
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         f.write(YAML.format(m=module))
@@ -39,8 +39,8 @@ def _case(module, L, S=5):
 
 class Rig:
     def __init__(self, case):
-        from miniworld_engine.measure import config as C
-        from miniworld_engine.measure import speed as S
+        from foldjet_engine.measure import config as C
+        from foldjet_engine.measure import speed as S
 
         dev = torch.device("cuda")
         self.m = copy.deepcopy(C.build(case, device=dev))
@@ -80,7 +80,7 @@ def _err(y, gold, x):
 
 @pytest.fixture
 def f8():
-    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as F
+    from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as F
 
     old = (F.PLACES, F.MIN_ROWS)
     yield F
@@ -153,7 +153,7 @@ def test_default_untouched_and_gate(f8, module):
 
 @pytest.mark.parametrize("module", ["TokenDiTProtenix", "TokenDiTChai1"])
 def test_graph_equals_eager(f8, module):
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     rig = Rig(_case(module, 256))
     _on(f8, "all")
@@ -175,7 +175,7 @@ def test_graph_equals_eager(f8, module):
 
 
 def test_safe_preset_and_route_stats(f8):
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     assert fp8.arch() == "sm120"
     snap = fp8._snapshot()

@@ -15,7 +15,7 @@ Cards: H100 (sm_90a) and A100 (sm_80) are served, measured and judged. sm_100 (B
 | [bias_logits.md](bias_logits.md) | the bias-only token DiT's pair-bias logit precision: `fp32` (default, training) and the opt-in inference mode `bf16`, the switch, per-backend implementation |
 | [judge.md](judge.md) | versions, tokens, verdicts (carried / owed / pending), the Slurm measurement cycle |
 | [ladder.md](ladder.md) | the performance ladder cuda < triton < pytorch: how it is checked, exceptions (LayerNorm, RMSNorm, L <= 256) |
-| [../benchmarks/](../benchmarks/README.md) | speed figures (L and D sweeps) and tables per card, generated from the speed tokens by `python -m miniworld_engine.measure.plot` |
+| [../benchmarks/](../benchmarks/README.md) | speed figures (L and D sweeps) and tables per card, generated from the speed tokens by `python -m foldjet_engine.measure.plot` |
 
 ## H100 kernel notes
 

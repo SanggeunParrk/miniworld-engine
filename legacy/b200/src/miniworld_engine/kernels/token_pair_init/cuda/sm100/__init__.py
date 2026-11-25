@@ -43,7 +43,7 @@ def n_rel(r_max: int, s_max: int) -> int:
 @functools.lru_cache(maxsize=None)
 def cubin(ri: int = 2) -> str:
     """Path of the cubin, built on first use; rebuilt only when the source, a flag or the toolchain changes."""
-    from miniworld_engine.kernels import _nvcc
+    from foldjet_engine.kernels import _nvcc
 
     flags = (
         "-std=c++17",
@@ -59,7 +59,7 @@ def cubin(ri: int = 2) -> str:
 
 @functools.lru_cache(maxsize=16)
 def _kernels(index: int, nbin: int, L: int):
-    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+    from foldjet_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     with torch.cuda.device(index):
         ri = bwd_rows(L)

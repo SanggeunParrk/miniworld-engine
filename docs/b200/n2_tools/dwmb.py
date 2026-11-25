@@ -1,7 +1,7 @@
 # dwmb.py M : swa_embed_dwf / colsum / featbwd alone (graph, CUPTI kernel us, L2 flushed): full grid, dense-only grid (40 CTAs), hot groups only
 import statistics, sys, torch
 from torch.profiler import profile, ProfilerActivity
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 M = int(sys.argv[1]); dev = torch.device("cuda"); torch.manual_seed(0)
 K = sm100.embed_glue(0)
 dp = torch.randn(M, 128, device=dev); pos = torch.randn(1, M, 3, device=dev)

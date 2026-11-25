@@ -19,24 +19,24 @@ import torch
 import torch.nn as nn
 from jaxtyping import Bool, Float
 
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.baselines import anthropic_trimul as _anthropic
-from miniworld_engine.kernels.integrations import trimul_b200 as _b200
-from miniworld_engine.kernels.integrations import trimul_h100 as _h100
-from miniworld_engine.modules import dispatch as _dispatch
-from miniworld_engine.modules.dispatch import (
+from foldjet_engine.utils.typecheck import typecheck
+from foldjet_engine.baselines import anthropic_trimul as _anthropic
+from foldjet_engine.kernels.integrations import trimul_b200 as _b200
+from foldjet_engine.kernels.integrations import trimul_h100 as _h100
+from foldjet_engine.modules import dispatch as _dispatch
+from foldjet_engine.modules.dispatch import (
     KernelBackend,
 )
-from miniworld_engine.modules import dispatch as _dispatch
-from miniworld_engine.modules.dispatch import (
+from foldjet_engine.modules import dispatch as _dispatch
+from foldjet_engine.modules.dispatch import (
     resolve_triangle_multiplication as _resolve_trimul_backend,
 )
-from miniworld_engine.modules.exceptions import (
+from foldjet_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
-from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import (
+from foldjet_engine.modules.functional import sigmoid_gate
+from foldjet_engine.modules.primitives import (
     ImplementationSwitch,
     LayerNorm,
     Linear,
@@ -181,7 +181,7 @@ class BidirectionalTriangleMultiplication(MasterWeights, ImplementationSwitch):
         if backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
         if backend == KernelBackend.PORTABLE and not no_triton and self.d_hidden != pair.shape[-1] and pair.is_cuda:
-            from miniworld_engine.kernels.trimul_inproj.triton.contract import hidden_refusal
+            from foldjet_engine.kernels.trimul_inproj.triton.contract import hidden_refusal
 
             why = hidden_refusal(pair.shape[-1], self.d_hidden)
             if why is not None:
@@ -286,7 +286,7 @@ class BidirectionalTriangleMultiplication(MasterWeights, ImplementationSwitch):
                     (dropscale if dropscale.shape[0] == 1 else dropscale[i:i + 1]),
                 ) for i in range(pair.shape[0])
             ], dim=0)
-        from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
+        from foldjet_engine.kernels.trimul_inproj.triton.bidirectional import (
             bidirectional_trimul_triton,
         )
 

@@ -11,10 +11,10 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.kernels.integrations import opm_fp8_train as F8
-from miniworld_engine.kernels.integrations import opm_train
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import OuterProductMean
+from foldjet_engine.kernels.integrations import opm_fp8_train as F8
+from foldjet_engine.kernels.integrations import opm_train
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import OuterProductMean
 
 pytestmark = [pytest.mark.gpu]
 
@@ -151,7 +151,7 @@ def test_gradients_against_fp64(mode, length, depth, cm, cz, after, fmt) -> None
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90a)")
 @pytest.mark.parametrize("cm,bias", [(64, False), (128, True)])
 def test_weight_scales_match_bound_scales(cm, bias) -> None:
-    from miniworld_engine.kernels.integrations import opm_fp8
+    from foldjet_engine.kernels.integrations import opm_fp8
 
     cz = 128 if cm == 64 else 256
     ext = opm_train._ext(torch.device("cuda"), native=True, tma=False, cm=cm, cz=cz, fp8=True)

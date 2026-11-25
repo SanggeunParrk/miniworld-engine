@@ -1,7 +1,7 @@
 # fold_ab.py D,n,M ... : graph median (L2 flushed) of the Transition cuda inference call with the fold (FOLD_D384) on / off, alternated 3 times in one process
 import statistics, sys, torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
-from miniworld_engine.modules import Transition
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.modules import Transition
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
 def graph(fn):
     s = torch.cuda.Stream(); s.wait_stream(torch.cuda.current_stream())

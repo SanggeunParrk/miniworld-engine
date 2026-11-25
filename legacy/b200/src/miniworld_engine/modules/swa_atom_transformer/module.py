@@ -6,7 +6,7 @@ the conditioning predicts ``shift / scale / gate`` for both the attention and th
 FFN sub-layer; the residual branches are gated by a zero-initialised modulation
 so they start as the identity. This is intentionally *not* the AF3 conditioning
 (``sigmoid``-scale AdaLN + ``bias=-2`` output gate) used by
-:class:`~miniworld_engine.modules.AugmentedAttentionPairBias`; it mirrors ESMFold2,
+:class:`~foldjet_engine.modules.AugmentedAttentionPairBias`; it mirrors ESMFold2,
 which reverts the atom transformer to the original DiT block while keeping AF3's
 ``AttentionPairBias`` only at the token level.
 """
@@ -20,17 +20,17 @@ from jaxtyping import Float, Int
 from pydantic import BaseModel
 from torch.utils.checkpoint import checkpoint_sequential
 
-from miniworld_engine import kernels, settings
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.modules import RMSNorm
-from miniworld_engine.modules.dispatch import (
+from foldjet_engine import kernels, settings
+from foldjet_engine.utils.typecheck import typecheck
+from foldjet_engine.modules import RMSNorm
+from foldjet_engine.modules.dispatch import (
     fallback_autocast,
     portable_blocked,
     restricted_card,
 )
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.primitives import Linear
-from miniworld_engine.modules.swa_atom_attention.module import (
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.primitives import Linear
+from foldjet_engine.modules.swa_atom_attention.module import (
     SWA3DRoPEAttention,
     build_3d_rope,
 )
@@ -305,7 +305,7 @@ class SWAAtomTransformer(nn.Module):
         mp_residual: bool = False
         residual_t: float = 0.3
         implementation: ImplementationType | None = None
-        # Fused engine path (miniworld_engine.kernels.swa_dit; bf16 or fp32 activations, the weights in that dtype or fp32 (an
+        # Fused engine path (foldjet_engine.kernels.swa_dit; bf16 or fp32 activations, the weights in that dtype or fp32 (an
         # fp32 master over bf16 activations), d_atom 128 / 4 heads / window 128 /
         # SwiGLU hidden 256, no MP options): three kernels per block forward (bf16: CUDA wgmma on H100, Triton elsewhere;
         # fp32: Triton), the adaLN modulation hoisted to the augment-invariant conditioning. Same parameters (checkpoint
@@ -371,7 +371,7 @@ class SWAAtomTransformer(nn.Module):
 
     def _is_global(self) -> bool:
         try:
-            from miniworld_engine.kernels.swa_dit.interface import is_global
+            from foldjet_engine.kernels.swa_dit.interface import is_global
         except ImportError:  # an engine without the global-attention block
             return False
         return is_global(self.config.swa_window_size // 2)
@@ -382,7 +382,7 @@ class SWAAtomTransformer(nn.Module):
         cfg = self.config
         if not cfg.fused_triton or not q.is_cuda:
             return False
-        from miniworld_engine.kernels.swa_dit.interface import (
+        from foldjet_engine.kernels.swa_dit.interface import (
             highest_fp32_on_hopper_blackwell,
         )
 
@@ -440,7 +440,7 @@ class SWAAtomTransformer(nn.Module):
 
     def _forward_fused(self, q, c, attention_params, c_base):
         # The fused block lives in the engine (kernels/swa_dit, moved from team-gm 14f2c73).
-        from miniworld_engine.kernels.swa_dit.interface import (
+        from foldjet_engine.kernels.swa_dit.interface import (
             swa_dit_block,
             swa_dit_hoist_modulation,
         )

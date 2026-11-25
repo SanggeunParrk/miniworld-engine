@@ -6,7 +6,7 @@ dq / dk / dv bitwise the same, dbias within the bf16 rounding of the planes, eve
 import pytest
 import torch
 
-from miniworld_engine.kernels.triangle_attention.cuda import h100_dh as dh
+from foldjet_engine.kernels.triangle_attention.cuda import h100_dh as dh
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 D = 64

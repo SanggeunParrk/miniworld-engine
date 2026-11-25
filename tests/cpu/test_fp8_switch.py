@@ -1,5 +1,5 @@
 """The FP8 backend ``engine-fp8`` (name resolution, its scope per module call, outside the judge) and the lower-level switch
-(``miniworld_engine.fp8``): ``MINIWORLD_FP8=<preset>`` / ``fp8.enable(preset)`` map to the per-route switches;
+(``foldjet_engine.fp8``): ``MINIWORLD_FP8=<preset>`` / ``fp8.enable(preset)`` map to the per-route switches;
 an explicitly set per-route variable wins; unset = every route off (the default route). TriAttn FP8 only for a model in
 ``fp8.TRIATTN_MODELS`` (``MINIWORLD_FP8_MODEL`` / ``enable(model=)``); FP8 is outside the judge (no registry dtype, no judge / measure path)."""
 
@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from miniworld_engine import fp8
+from foldjet_engine import fp8
 
-_STATUS = "import json; from miniworld_engine import fp8; print(json.dumps(fp8.status()))"
+_STATUS = "import json; from foldjet_engine import fp8; print(json.dumps(fp8.status()))"
 _ROUTE_VARS = ("MINIWORLD_FP8", *fp8.PRESETS["safe"], "MINIWORLD_ATOMDIT_FP8_B200", "MINIWORLD_TOKEN_DIT_FP8_B200")  # "MINIWORLD_FP8" also covers MINIWORLD_FP8_MODEL
 _PKG = Path(fp8.__file__).resolve().parent
 
@@ -112,7 +112,7 @@ def test_env_safe_with_model(model):
 
 def test_enable_disable_api():
     code = (
-        "import json; from miniworld_engine import fp8; out = []\n"
+        "import json; from foldjet_engine import fp8; out = []\n"
         "fp8.enable('safe', guard='lazy'); out.append(fp8.status())\n"
         "for m in ('af3', 'protenix1', 'opendde', 'protenix2', 'openfold3', 'rosettafold3', 'chai1', 'intellifold2', 'boltz2'):\n"
         "    fp8.enable('safe', model=m); out.append(fp8.status())\n"
@@ -132,7 +132,7 @@ def test_enable_disable_api():
 
 
 def test_pv_whitelist_is_derived():
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as ta
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as ta
 
     derived = {m: kinds for m, (kinds, _qk) in fp8.TRIATTN_MODELS.items()}
     assert derived == ta.FP8_PV_WHITELIST
@@ -153,10 +153,10 @@ def test_fp8_is_outside_the_judge():
 
 # ------------------------------------------------------------------------------------------------------------- the engine-fp8 backend
 def _backend_classes() -> list[type]:
-    import miniworld_engine.modules as mods
-    from miniworld_engine.modules.primitives import BackendModule
+    import foldjet_engine.modules as mods
+    from foldjet_engine.modules.primitives import BackendModule
 
-    for info in __import__("pkgutil").walk_packages(mods.__path__, "miniworld_engine.modules."):
+    for info in __import__("pkgutil").walk_packages(mods.__path__, "foldjet_engine.modules."):
         __import__("importlib").import_module(info.name)
     out, todo = [], [BackendModule]
     while todo:
@@ -167,8 +167,8 @@ def _backend_classes() -> list[type]:
 
 
 def test_engine_fp8_name_resolution():
-    from miniworld_engine.modules.primitives import BackendModule
-    from miniworld_engine.modules.triangle import TriangleMultiplication
+    from foldjet_engine.modules.primitives import BackendModule
+    from foldjet_engine.modules.triangle import TriangleMultiplication
 
     assert (fp8.BACKEND, fp8.BACKEND_ID, fp8.BASE_BACKEND) == ("engine-fp8", "engine_fp8", "cuda")
     assert fp8.resolve_backend("engine-fp8") == ("cuda", True) == fp8.resolve_backend("engine_fp8")
@@ -190,7 +190,7 @@ def test_engine_fp8_name_resolution():
 
 
 def test_engine_fp8_reaches_a_composite_s_parts():
-    from miniworld_engine.modules.pairformer import PairformerBlock, PairformerConfig
+    from foldjet_engine.modules.pairformer import PairformerBlock, PairformerConfig
 
     block = PairformerBlock(
         PairformerConfig(d_pair=32, d_hidden_tri_multi=32, d_hidden_tri_attention=8, n_head_tri_attention=4), backend="engine-fp8"
@@ -215,9 +215,9 @@ def test_engine_fp8_is_not_a_judged_backend():
 
 _SCOPE = """
 import json, torch
-from miniworld_engine import fp8
-from miniworld_engine.modules.primitives import BackendModule, BackendUnsupported
-from miniworld_engine.modules.triangle import TriangleMultiplication
+from foldjet_engine import fp8
+from foldjet_engine.modules.primitives import BackendModule, BackendUnsupported
+from foldjet_engine.modules.triangle import TriangleMultiplication
 
 seen = []
 def routes():
@@ -319,7 +319,7 @@ def test_b200_route_table():
 
 
 _B200_POLICY = (
-    "from miniworld_engine.kernels.transition.cuda import fp8_sm100a as m; print(repr(m.POLICY))"
+    "from foldjet_engine.kernels.transition.cuda import fp8_sm100a as m; print(repr(m.POLICY))"
 )
 
 
@@ -348,9 +348,9 @@ def test_b200_final_route_table():
 
 
 _B200_SWITCHES = (
-    "import json; from miniworld_engine.kernels.trimul_inproj.cuda import b200_fp8 as tm; from miniworld_engine.kernels.transition.cuda import fp8_sm100a as tr;"
-    "from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as td; from miniworld_engine.kernels.integrations import opm_fp8 as opm, pwa_fp8 as pwa;"
-    "from miniworld_engine.kernels.augmented_attention.cuda.b200_atom import f8;"
+    "import json; from foldjet_engine.kernels.trimul_inproj.cuda import b200_fp8 as tm; from foldjet_engine.kernels.transition.cuda import fp8_sm100a as tr;"
+    "from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as td; from foldjet_engine.kernels.integrations import opm_fp8 as opm, pwa_fp8 as pwa;"
+    "from foldjet_engine.kernels.augmented_attention.cuda.b200_atom import f8;"
     "print(json.dumps({'trimul': tm.POLICY, 'transition': tr.POLICY, 'widths': sorted(tr.WIDTHS), 'opm': opm.POLICY, 'pwa': pwa.ENABLED, 'td': sorted(td.PLACES),"
     " 'td_b200': sorted(td.B200_PLACES) if hasattr(td, 'B200_PLACES') else None, 'up': td.B200_UP, 'rf3': td.B200_RF3, 'atom_b200': sorted(f8.ENABLED)}))"
 )
@@ -383,11 +383,11 @@ def test_b200_routes_follow_the_preset_with_per_route_precedence():
 def test_sm120_route_table():
     # every H100 slot has a 5090 module (5090-int: fp8-5090 TriMul / TriAttn / Transition, fp8-5090-msa OPM / PWA, fp8-5090-dit token / atom DiT)
     assert set(fp8.SM120_ROUTES) == set(fp8.SLOTS)
-    assert fp8.SM120_ROUTES["transition"] == "miniworld_engine.kernels.transition.cuda.fp8_sm120"
-    assert fp8.SM120_ROUTES["opm"] == "miniworld_engine.kernels.integrations.opm_fp8_sm120"
-    assert fp8.SM120_ROUTES["pwa"] == "miniworld_engine.kernels.integrations.pwa_fp8_sm120"
-    assert fp8.SM120_ROUTES["token_dit"] == "miniworld_engine.kernels.conditioned_transition.cuda.token_dit_fp8_sm120"
-    assert fp8.SM120_ROUTES["atom_dit"] == "miniworld_engine.kernels.dit_variants.cuda.atom_fp8_sm120"
+    assert fp8.SM120_ROUTES["transition"] == "foldjet_engine.kernels.transition.cuda.fp8_sm120"
+    assert fp8.SM120_ROUTES["opm"] == "foldjet_engine.kernels.integrations.opm_fp8_sm120"
+    assert fp8.SM120_ROUTES["pwa"] == "foldjet_engine.kernels.integrations.pwa_fp8_sm120"
+    assert fp8.SM120_ROUTES["token_dit"] == "foldjet_engine.kernels.conditioned_transition.cuda.token_dit_fp8_sm120"
+    assert fp8.SM120_ROUTES["atom_dit"] == "foldjet_engine.kernels.dit_variants.cuda.atom_fp8_sm120"
     assert not fp8.SM120_OPTIN  # nothing outside the preset on the 5090 any more
     # the 5090 slots are switched by the H100 preset variables, except the Transition (SM120_PRESET_EXCLUDED: explicit opt-in on the 5090)
     assert fp8.PRESETS["safe"]["MINIWORLD_TRANSITION_FP8"] == "calib"  # (the H100 preset value; the 5090 does not read it)
@@ -395,7 +395,7 @@ def test_sm120_route_table():
 
 
 _SM120_TR = (
-    "import json; from miniworld_engine.kernels.transition.cuda import fp8_sm120 as m;"
+    "import json; from foldjet_engine.kernels.transition.cuda import fp8_sm120 as m;"
     "print(json.dumps({'policy': m.POLICY, 'guard': m.GUARD, 'minrows': m.MIN_ROWS, 'widths': list(m.WIDTHS), 'headroom': m.HEADROOM}))"
 )
 

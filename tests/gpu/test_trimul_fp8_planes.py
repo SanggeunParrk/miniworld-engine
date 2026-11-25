@@ -23,9 +23,9 @@ def _rel(a, b) -> float:
 @pytest.mark.parametrize("n", [40, 100, 256, 300, 771])
 def test_fused_fp8_planes(d: int, outgoing: bool, n: int) -> None:
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_training_weights
-    from miniworld_engine.modules.triangle import TriangleMultiplication
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda._h100_pack import cast_training_weights
+    from foldjet_engine.modules.triangle import TriangleMultiplication
 
     assert F8.POLICY is None
     torch.manual_seed(0)
@@ -53,10 +53,10 @@ def test_fused_fp8_planes(d: int, outgoing: bool, n: int) -> None:
 def test_fp8_route_k3_pipe_and_fast_accum(d: int, outgoing: bool) -> None:
     """The K3 pipeline macros of the FP8 route are bit-identical to the plain K3; cuBLASLt fast accumulation stays within 1 % of the update of the exact-accumulation route."""
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_fp8 as F
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import cast_training_weights
-    from miniworld_engine.modules.triangle import TriangleMultiplication
+    from foldjet_engine.kernels.trimul_inproj.cuda import _h100_fp8 as F
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda._h100_pack import cast_training_weights
+    from foldjet_engine.modules.triangle import TriangleMultiplication
 
     torch.manual_seed(0)
     n = 300
@@ -95,8 +95,8 @@ def test_calibration_state_follows_the_module_lifetime() -> None:
     _needs_h100()
     import gc
 
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
-    from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication, TriangleMultiplication
 
     def make(kind, seed):
         torch.manual_seed(seed)

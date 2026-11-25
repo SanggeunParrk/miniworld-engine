@@ -7,32 +7,32 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from jaxtyping import Bool, Float
 
-from miniworld_engine import kernels
-from miniworld_engine.utils.typecheck import typecheck
-from miniworld_engine.modules import dispatch as _dispatch
-from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
-from miniworld_engine.modules.dispatch import (
+from foldjet_engine import kernels
+from foldjet_engine.utils.typecheck import typecheck
+from foldjet_engine.modules import dispatch as _dispatch
+from foldjet_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
+from foldjet_engine.modules.dispatch import (
     KernelBackend,
     resolve_augmented_attention,
 )
-from miniworld_engine.modules.exceptions import (
+from foldjet_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
-from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
+from foldjet_engine.modules.functional import sigmoid_gate
+from foldjet_engine.modules.primitives import LayerNorm, Linear, RMSNorm
 
 
 def _bf16_sm90_enabled() -> bool:
     """Whether a bf16 attention core on sm_90 may use the hand-CUDA kernels (not with ``force_portable_kernels``)."""
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     return not settings.current().force_portable_kernels
 
 
 def _bf16_sm100_enabled() -> bool:
     """Whether a bf16 attention core on sm_100 may use the hand-CUDA kernels (settings.augmented_attention_bf16_sm100)."""
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     return settings.current().augmented_attention_bf16_sm100 and (not settings.current().force_portable_kernels)
 
@@ -134,13 +134,13 @@ class AugmentedAttentionPairBias(nn.Module):
         m1 = None if mask is None else mask[0]
         dt = compute_dtype or query.dtype
         if dt is torch.bfloat16:
-            from miniworld_engine.kernels.augmented_attention.cuda import (
+            from foldjet_engine.kernels.augmented_attention.cuda import (
                 fused_pair as mod,
             )
 
             fn = mod.attention_pair_fused
         elif dt is torch.float32 and compute_dtype is None and not torch.is_autocast_enabled("cuda"):
-            from miniworld_engine.kernels.augmented_attention.cuda import (
+            from foldjet_engine.kernels.augmented_attention.cuda import (
                 fused_pair_tf32 as mod,
             )
 
@@ -153,7 +153,7 @@ class AugmentedAttentionPairBias(nn.Module):
         """sigmoid(gate) * attention as one node where the fp32 TF32 pair-fused core serves the call (no QK norm), else None."""
         if self.use_qk_norm or not self._packed_ok(single, compute_dtype, extra_pair_bias) or (mask is not None and mask.ndim != 2):
             return None
-        from miniworld_engine.kernels.augmented_attention.cuda import (
+        from foldjet_engine.kernels.augmented_attention.cuda import (
             fused_pair_tf32 as mod,
         )
 
@@ -184,7 +184,7 @@ class AugmentedAttentionPairBias(nn.Module):
         )
 
     def _packed_weights_ok(self, single, wq, bq, wk, wv, wg) -> bool:
-        from miniworld_engine.kernels.augmented_attention.cuda import (
+        from foldjet_engine.kernels.augmented_attention.cuda import (
             fused_pair_tf32 as mod,
         )
 
@@ -194,7 +194,7 @@ class AugmentedAttentionPairBias(nn.Module):
         """The packed q / k / v / gate projection (one GEMM) where the fp32 TF32 pair-fused core will run, else None."""
         if not self._packed_ok(single, compute_dtype, extra_pair_bias):
             return None
-        from miniworld_engine.kernels.augmented_attention.cuda import (
+        from foldjet_engine.kernels.augmented_attention.cuda import (
             fused_pair_tf32 as mod,
         )
 
@@ -237,14 +237,14 @@ class AugmentedAttentionPairBias(nn.Module):
         """
         if ((compute_dtype or query.dtype) is torch.bfloat16 and self._backend == KernelBackend.PORTABLE
                 and _bf16_sm90_enabled()):
-            from miniworld_engine.kernels.augmented_attention import cuda as cuda_sm90
+            from foldjet_engine.kernels.augmented_attention import cuda as cuda_sm90
 
             if cuda_sm90.available(query, bias):
                 # Takes the fp32 (or bf16) tensors as they are: the bf16 cast happens in the kernels' one prep pass.
                 return cuda_sm90.augmented_attention_bf16_sm90(query, key, value, bias, mask)
         if (compute_dtype is torch.bfloat16 and self._backend == KernelBackend.PORTABLE
                 and _bf16_sm100_enabled()):
-            from miniworld_engine.kernels.augmented_attention.cuda import (
+            from foldjet_engine.kernels.augmented_attention.cuda import (
                 sm100 as cuda_sm100,
             )
 
@@ -368,7 +368,7 @@ class AugmentedAttentionPairBias(nn.Module):
         whole = self._proj_core_gate(single, pair, mask, compute_dtype, extra_pair_bias)
         if whole is not None:
             # H100 fp32 (TF32): packed projection + pair-fused core + output gate as one autograd node (sigmoid(g) * attention)
-            from miniworld_engine.kernels.augmented_attention.cuda.fused_pair_tf32 import (
+            from foldjet_engine.kernels.augmented_attention.cuda.fused_pair_tf32 import (
                 gate_mul,
             )
 
@@ -404,7 +404,7 @@ class AugmentedAttentionPairBias(nn.Module):
             if self._fused_pair_bias_ok(pair, query):
                 # training on the Triton attention core: LayerNorm + head projection in one pass over the pair (the normalised pair never
                 # reaches HBM, and its backward recomputes it), instead of a LayerNorm kernel, a GEMM and their two backwards
-                from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import (
+                from foldjet_engine.kernels.layernorm_linear.triton.pair_bias import (
                     triton_layer_norm_linear,
                 )
 
@@ -427,7 +427,7 @@ class AugmentedAttentionPairBias(nn.Module):
 
         if packed is not None:
             # one pass each way for sigmoid(g) * x (instead of a sigmoid, a product and their backward passes), both gates
-            from miniworld_engine.kernels.augmented_attention.cuda.fused_pair_tf32 import (
+            from foldjet_engine.kernels.augmented_attention.cuda.fused_pair_tf32 import (
                 gate_mul,
             )
 

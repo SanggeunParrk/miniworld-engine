@@ -1,7 +1,7 @@
 """A backend's range check takes exactly what its forward takes (FoldForge 5I28 run, A100: ``AtomDiTChai1.unsupported(single, cond,
 pair, mask, uid)`` raised ``TypeError`` -- the inherited ``_supports_triton`` had no positional ``uid``).
 
-FoldForge asks :meth:`~miniworld_engine.modules.primitives.BackendModule.unsupported` with the forward's own arguments, positionally,
+FoldForge asks :meth:`~foldjet_engine.modules.primitives.BackendModule.unsupported` with the forward's own arguments, positionally,
 before each call; a range check that cannot bind them is a crash where a refusal (or ``None``) was due. For every requirements class and
 every backend it lists:
 
@@ -17,8 +17,8 @@ import inspect
 
 import pytest
 
-from miniworld_engine.measure import config as cfgmod
-from miniworld_engine.modules.primitives import BackendModule
+from foldjet_engine.measure import config as cfgmod
+from foldjet_engine.modules.primitives import BackendModule
 
 with open(cfgmod.REQUIREMENTS, newline="") as _fh:
     FIRST: dict[str, tuple[int, dict]] = {}

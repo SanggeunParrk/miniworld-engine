@@ -2,7 +2,7 @@
    python builds.py NAME...   compiles them (no GPU needed)."""
 import sys
 from pathlib import Path
-from miniworld_engine.kernels.integrations import opm_train as ot
+from foldjet_engine.kernels.integrations import opm_train as ot
 
 BUILDS = {
     "g2": ["-DOPM_FUSED_GROUP=2"],
@@ -23,7 +23,7 @@ BUILDS = {
 
 
 def build(name):
-    from miniworld_engine.kernels._nvcc import load_extension as load
+    from foldjet_engine.kernels._nvcc import load_extension as load
     csrc = Path(ot.__file__).with_name("csrc")
     return load(name=f"miniworld_opm_fused_v_{name}", sources=[str(csrc / "opm_epilogue.cu")],
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-DMINIWORLD_OPM_FUSED=1", *BUILDS[name]], extra_cflags=["-O3"])
@@ -36,7 +36,7 @@ if __name__ == "__main__":
 
 def build_old():
     """The fused-kernel build of the opm-bigs snapshot (benchmarks/opm_win/jobb.sh: git archive of 0ac874471)."""
-    from miniworld_engine.kernels._nvcc import load_extension as load
-    src = Path("/home/psk6950/miniworld-engine-scratch/opm-win-before/src/miniworld_engine/kernels/integrations/csrc/opm_epilogue.cu")
+    from foldjet_engine.kernels._nvcc import load_extension as load
+    src = Path("/home/psk6950/miniworld-engine-scratch/opm-win-before/src/foldjet_engine/kernels/integrations/csrc/opm_epilogue.cu")
     return load(name="miniworld_opm_fused_old", sources=[str(src)],
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-DMINIWORLD_OPM_FUSED=1"], extra_cflags=["-O3"])

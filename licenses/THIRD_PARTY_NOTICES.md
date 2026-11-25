@@ -27,7 +27,7 @@ The upstream release itself is not redistributed: `third_party/anthropic/upstrea
 backends) is a local clone that is git-ignored and is in no sdist or wheel; `third_party/anthropic/` in the repository holds
 only its pin (`UPSTREAM.json`), a source inventory and local build records.
 
-What MiniWorld Engine carries from it (all paths under `src/miniworld_engine/kernels/`; upstream paths under
+What MiniWorld Engine carries from it (all paths under `src/foldjet_engine/kernels/`; upstream paths under
 `common/opt_core/opt_core/kernels/`):
 
 | MiniWorld file(s) | Upstream file(s) | Changes |
@@ -52,7 +52,7 @@ Several Triton kernels and the SWA atom-transformer CUDA/Triton path were moved 
 
 ## Compiled kernels in the `miniworld-engine-kernels-*` wheels
 
-Each kernels wheel (`miniworld_engine/_prebuilt/`; docs/install.md, "Prebuilt kernels vs JIT") carries torch extensions and cubins
+Each kernels wheel (`foldjet_engine/_prebuilt/`; docs/install.md, "Prebuilt kernels vs JIT") carries torch extensions and cubins
 compiled by nvcc from this repository's CUDA sources. No library is bundled. Besides the MIT and Anthropic Apache-2.0 code
 above, the binaries contain object code compiled from:
 

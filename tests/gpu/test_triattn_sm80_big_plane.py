@@ -12,8 +12,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import TriangleAttention
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import TriangleAttention
 
 pytestmark = [pytest.mark.gpu, pytest.mark.a100, pytest.mark.slow]
 

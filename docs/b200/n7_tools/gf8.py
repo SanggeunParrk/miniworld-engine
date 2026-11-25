@@ -2,7 +2,7 @@
 import statistics, sys, torch, time, os
 GAP = float(os.environ.get("GAP", "0"))
 from torch.profiler import profile, ProfilerActivity
-from miniworld_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda import sm100
 S = int(sys.argv[1]); N = int(sys.argv[2]); bf = int(sys.argv[3])
 H, D, C = 4, 32, 128
 dev = torch.device("cuda")

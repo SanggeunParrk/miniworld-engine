@@ -39,9 +39,9 @@ import os
 import pytest
 import torch
 
-from miniworld_engine.measure import accuracy as acc
-from miniworld_engine.measure import config as cfgmod
-from miniworld_engine.modules.primitives import BackendUnsupported
+from foldjet_engine.measure import accuracy as acc
+from foldjet_engine.measure import config as cfgmod
+from foldjet_engine.modules.primitives import BackendUnsupported
 
 pytestmark = [pytest.mark.gpu]  # the sm_80 family only: A100 and RTX 5090 (skipped elsewhere below)
 

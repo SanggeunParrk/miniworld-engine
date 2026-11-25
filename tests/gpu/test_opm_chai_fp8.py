@@ -6,9 +6,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine.kernels.integrations import opm_fp8
-from miniworld_engine.kernels.outer_product_mean import chai
-from miniworld_engine.modules.msa import OuterProductMean
+from foldjet_engine.kernels.integrations import opm_fp8
+from foldjet_engine.kernels.outer_product_mean import chai
+from foldjet_engine.modules.msa import OuterProductMean
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

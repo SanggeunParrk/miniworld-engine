@@ -1,5 +1,5 @@
 import sys, torch
-from miniworld_engine.modules import triangle as T
+from foldjet_engine.modules import triangle as T
 L=int(sys.argv[1]); torch.backends.cuda.matmul.allow_tf32=True
 for name, mk in (("bidir", lambda: T.BidirectionalTriangleAttention(d_pair=128, backend="cuda")), ("ta_bo", lambda: T.TriangleAttention(d_pair=128, n_head=4, starting=True, use_self_attention=False, p_drop=0.0, backend="cuda"))):
     torch.manual_seed(0)

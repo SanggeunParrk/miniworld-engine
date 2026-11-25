@@ -5,7 +5,7 @@ training structure: a / b written, [Wa; Wb] packed per call -- 1.6 - 2.1x slower
 import pytest
 import torch
 
-from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a as G
+from foldjet_engine.kernels.transition.cuda import fused_generic_sm90a as G
 
 
 @pytest.mark.parametrize("rows", [128, 768, 1000, 1024, 1536, 2048, 4096, 8192, 16384])

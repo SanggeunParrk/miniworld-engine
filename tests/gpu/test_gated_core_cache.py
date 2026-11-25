@@ -22,7 +22,7 @@ STEPS = 60
 
 
 def _sm100():
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     return sm100
 
@@ -145,7 +145,7 @@ def test_captured_graph_survives_eviction_and_matches_eager(fp32: bool, S: int, 
 
 def test_gemm_swiglu_runs_do_not_pin_fresh_tensors() -> None:
     """The token DiT inference's expand GEMM (``GemmSwiglu.runs``) had the same unbounded, tensor-owning cache."""
-    from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
+    from foldjet_engine.kernels.conditioned_transition.cuda import gemm_swiglu
 
     K, Hh, M = 768, 1536, 640
     g = torch.Generator(device="cuda").manual_seed(0)
@@ -175,8 +175,8 @@ def test_gemm_swiglu_runs_do_not_pin_fresh_tensors() -> None:
 def test_token_dit_sampler_steps_keep_memory_flat(dtype) -> None:
     """The module level: a token DiT inference block called for 50 'diffusion steps' with fresh inputs (B200 CUDA path, both precisions) keeps
     allocated memory flat, and its output at the last step for the first step's inputs is the first step's output, bit for bit."""
-    from miniworld_engine.measure import config as C
-    from miniworld_engine.modules.token_dit import TokenDiTProtenix
+    from foldjet_engine.measure import config as C
+    from foldjet_engine.modules.token_dit import TokenDiTProtenix
 
     m0 = TokenDiTProtenix(d_single=768, d_cond=384, d_pair=128, n_head=16, n=2).cuda().float()
     C.randomize(m0, torch.Generator(device="cuda").manual_seed(0))

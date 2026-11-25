@@ -13,7 +13,7 @@ YAML = "modules: [MSAPairWeightedAveraging]\nbackends: [pytorch, cuda]\nexternal
 
 
 def _rig(tmp_path, dims, L, D):
-    from miniworld_engine.measure import config as C, speed as S
+    from foldjet_engine.measure import config as C, speed as S
 
     p = tmp_path / "p.yaml"
     p.write_text(YAML)
@@ -50,7 +50,7 @@ def _run(step):
 
 @pytest.fixture
 def route():
-    from miniworld_engine.kernels.integrations import pwa_fp8 as H, pwa_fp8_b200 as B
+    from foldjet_engine.kernels.integrations import pwa_fp8 as H, pwa_fp8_b200 as B
 
     old = (H.ENABLED, B.MIN_N)
     B._CACHES.clear()
@@ -103,7 +103,7 @@ def test_off_and_below_gate_are_bit_equal(tmp_path, route):
 
 
 def test_graph_equals_eager(tmp_path, route):
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     H, B = route
     m, inp, step, S = _rig(tmp_path, "d_hidden=32;p_drop=0.15", 1280, 512)
@@ -173,7 +173,7 @@ def test_wide_below_gate_is_bit_equal(tmp_path, route):
 
 
 def test_wide_graph_equals_eager(tmp_path, route):
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     H, B = route
     m, inp, step, S = _rig(tmp_path, "d_msa=128;d_pair=256;n_head=8;d_hidden=16;p_drop=0.25", 1280, 1024)
@@ -209,7 +209,7 @@ def test_wide_input_stress_scale_offset(tmp_path, route, xs, off, dims, L, D):
     for k, v in inp.items():
         if torch.is_tensor(v) and v.is_floating_point() and v.dim() == 4:
             inp2[k] = (v.float() * xs + off).to(v.dtype)
-    from miniworld_engine.measure import config as C
+    from foldjet_engine.measure import config as C
 
     step2 = S.make_step(m, inp2, backend="cuda", train=False, autocast=None, seed=0, compile_mode=None)
     H.ENABLED, B.MIN_N = False, None

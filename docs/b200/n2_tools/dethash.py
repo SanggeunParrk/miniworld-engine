@@ -1,7 +1,7 @@
 # dethash.py CFG FILTER : sha1 of the outputs + every parameter gradient of one measurer step (eager, then graph replay), for run-to-run (process-to-process) determinism
 import copy, hashlib, sys, torch
-from miniworld_engine.measure import config
-from miniworld_engine.measure.speed import make_step, unpadded_masks
+from foldjet_engine.measure import config
+from foldjet_engine.measure.speed import make_step, unpadded_masks
 cfg = config.load(sys.argv[1]); flt = sys.argv[2]
 dev = torch.device("cuda")
 for case in config.cases(cfg):

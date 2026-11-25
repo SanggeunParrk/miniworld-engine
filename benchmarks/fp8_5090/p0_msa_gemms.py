@@ -13,8 +13,8 @@ import torch
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 from _msa_common import graph_time  # noqa: E402
 
-from miniworld_engine.kernels.integrations import opm_fp8, pwa_fp8  # noqa: E402
-from miniworld_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120  # noqa: E402
+from foldjet_engine.kernels.integrations import opm_fp8, pwa_fp8  # noqa: E402
+from foldjet_engine.kernels.pair_weighted_averaging.cuda import gemm_sm120  # noqa: E402
 
 E4 = torch.float8_e4m3fn
 print(torch.cuda.get_device_name(), flush=True)

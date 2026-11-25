@@ -1,0 +1,1091 @@
+"""Attentions over the token / atom single stream, each with its residual: ``AttentionPairBias`` (the Pairformer's single attention: AlphaFold 3
+Algorithm 24 without the conditioning), ``AugmentedAttentionPairBias`` (Algorithm 24 with the adaptive conditioning: the DiT's attention) with
+its model variants ``FlatQKNormAugmentedAttention`` (RoseTTAFold3: LayerNorm of the flat q / k) and ``UngatedAugmentedAttention`` (Chai-1: no
+gating query), and ``BiasOnlyAttention`` (the bias-only DiT's attention: the pair bias alone is the logits, no query and no key).
+
+Each is a :class:`~foldjet_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
+"""
+
+from __future__ import annotations
+
+from typing import ClassVar
+
+import torch
+import torch.nn.functional as F
+from einops import rearrange, repeat
+
+from foldjet_engine import bias_logits as _bias_logits
+from foldjet_engine.kernels import _capture
+from foldjet_engine.kernels._device import capability as _devcap
+from foldjet_engine.modules.functional import sigmoid_gate
+from foldjet_engine.modules.norm import AdaptiveLayerNorm, LayerNorm, RMSNorm, _activation_dtype_reason, _wants_grad, triton_unsupported
+from foldjet_engine.modules.primitives import BackendModule, Linear, MasterWeights, key_mask, master_autocast, random_input
+
+_capture.instance_cache_attr("_anthropic_params")  # the anthropic producer's fp32 parameter copies (clear_weight_caches)
+
+
+# ------------------------------------------------------------------------------------------------------------------- exact fp32 pair bias
+class _ExactFp32Linear(torch.autograd.Function):
+    """``x @ w.T`` in fp32 with TF32 OFF in the forward AND the backward (autograd would run the backward GEMMs under whatever the global
+    flag is then), for the bias-only attention's logits: ``to_bias(ln_pair(pair))`` is 1e3..2e5 with a key spread of ~500, so any
+    TF32 / bf16 product moves which keys the softmax picks."""
+
+    @staticmethod
+    def forward(ctx, x, w):
+        ctx.save_for_backward(x, w)
+        with _exact_matmul():
+            return x @ w.t()
+
+    @staticmethod
+    def backward(ctx, g):
+        x, w = ctx.saved_tensors
+        with _exact_matmul():
+            dx = g @ w if ctx.needs_input_grad[0] else None
+            dw = g.reshape(-1, g.shape[-1]).t() @ x.reshape(-1, x.shape[-1]) if ctx.needs_input_grad[1] else None
+        return dx, dw
+
+
+class _exact_matmul:
+    """fp32 matmuls at full precision (TF32 off, autocast off) inside the block; restores the flags."""
+
+    def __enter__(self):
+        self._tf32 = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = False
+        self._ac = torch.autocast("cuda", enabled=False)
+        self._ac.__enter__()
+
+    def __exit__(self, *exc):
+        self._ac.__exit__(*exc)
+        torch.backends.cuda.matmul.allow_tf32 = self._tf32
+        return False
+
+
+def exact_pair_bias_logits(pair: torch.Tensor, gamma: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """``to_bias(ln_pair(pair))`` as head-major fp32 logits ``[B, H, L, L]`` for ``pair`` ``[B, L, L, C]``: the LayerNorm in fp32, the
+    projection against the fp32 ``weight`` (not rounded to the module dtype) with exact fp32 products, whatever the activation dtype and
+    autocast. User rule 2026-11-19: bf16 logits (resolution 32..1024 at 1e3..2e5) broke the peptide bonds."""
+    with torch.autocast("cuda", enabled=False):
+        dt = torch.promote_types(pair.dtype, torch.float32)  # at least fp32 (an fp64 reference stays fp64)
+        ln = F.layer_norm(pair.to(dt), (pair.shape[-1],), None, None, eps) * gamma.to(dt)
+        return _ExactFp32Linear.apply(ln, weight.to(dt)).permute(0, 3, 1, 2)
+
+
+def bf16_pair_bias_logits(pair: torch.Tensor, gamma: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """The ``"bf16"`` mode of the pair-bias logits (:mod:`foldjet_engine.bias_logits`, inference only): head-major bf16 ``[B, H, L, L]``,
+    LN0(pair) (statistics in fp32) and the gamma-folded weight each rounded to bf16, one bf16 GEMM (fp32 accumulation) stored in bf16 -- the
+    arithmetic of the engine's bf16 hoist before 2026-11-19, so the cross-backend comparison of the mode is meaningful."""
+    with torch.autocast("cuda", enabled=False):
+        ln = F.layer_norm(pair.float(), (pair.shape[-1],), None, None, eps).to(torch.bfloat16)
+        wf = (weight.float() * gamma.float()[None, :]).to(torch.bfloat16)
+        return (ln @ wf.t()).permute(0, 3, 1, 2)
+
+
+# ------------------------------------------------------------------------------------------------------------------- "triton" core
+#: the head widths the Triton pair-bias attention core (kernels/augmented_attention/triton/main.py) is built for
+TRITON_MAX_HEAD_DIM = 64
+#: the cards whose ``cuda`` backend runs the sm_80 sources: the A100 and the RTX 5090 (sm_120a builds of them, kernels/_sm120.py)
+_SM80_BUILDS = ((8, 0), (12, 0))
+
+
+def _triton_core_reason(x: torch.Tensor, head_dim: int) -> str | None:
+    """Why the Triton pair-bias attention core cannot take a call on ``x`` (its activations), or None. Forward and backward (autograd)."""
+    if not x.is_cuda:
+        return "CUDA tensors only"
+    dt = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else x.dtype
+    if dt not in (torch.bfloat16, torch.float32):
+        return f"dtype {dt} (bfloat16 / float32 only)"
+    if head_dim > TRITON_MAX_HEAD_DIM:
+        return f"head dim {head_dim} > {TRITON_MAX_HEAD_DIM} (the Triton core's limit)"
+    return None
+
+
+def _triton_core(q, k, v, bias, mask, head_major: bool = False):
+    """``softmax(q k^T / sqrt(D) + bias) v`` on the Triton kernel: q / k / v [A, B, L, H, D], bias [B, L, L, H] (shared by the A samples),
+    mask [A, B, L] bool or None (masked keys off). Differentiable in q, k, v and bias. ``head_major``: the backward hands dbias back as the
+    head-major view on any card (``TritonAugmentedAttentionHeadMajor``; False: the card's default)."""
+    from foldjet_engine.kernels.augmented_attention.triton.main import (
+        triton_augmented_attention_pair_bias,
+        triton_augmented_attention_pair_bias_head_major,
+    )
+
+    dt = q.dtype
+    core = triton_augmented_attention_pair_bias_head_major if head_major else triton_augmented_attention_pair_bias
+    return core(q, k.to(dt), v.to(dt), bias.to(dt), mask)
+
+
+#: the requirements stream whose ``make_inputs`` adds an ``extra_pair_bias`` (OpenDDE's structural-token refiner: an [L, L] logit bias on every
+#: head, FoldForge R3)
+EXTRA_BIAS_STREAM = "token_single_extra_bias"
+
+
+def _extra_planes_reason(extra: torch.Tensor, b: int, h: int, n: int) -> str | None:
+    """Why ``extra_pair_bias`` cannot be read as ``[B, H, L, L]`` head-major logit planes, or None: ``[L, L]``, ``[H | 1, L, L]`` or
+    ``[B | 1, H | 1, L, L]`` (a size-1 axis is shared; stride-0 expanded views are fine), a floating dtype."""
+    if not extra.is_floating_point():
+        return f"extra_pair_bias dtype {extra.dtype} (a floating dtype)"
+    if extra.ndim not in (2, 3, 4) or tuple(extra.shape[-2:]) != (n, n):
+        return f"extra_pair_bias must be [L, L], [H, L, L] or [B, H, L, L] with L = {n}, got {tuple(extra.shape)}"
+    lead = (1,) * (4 - extra.ndim) + tuple(extra.shape[:-2])
+    if lead[0] not in (1, b) or lead[1] not in (1, h):
+        return f"extra_pair_bias {tuple(extra.shape)} does not broadcast to [B, H, L, L] = [{b}, {h}, {n}, {n}]"
+    return None
+
+
+def _extra_planes(extra: torch.Tensor, b: int, h: int, n: int) -> torch.Tensor:
+    """``extra_pair_bias`` as an (expanded, possibly stride-0) ``[B, H, L, L]`` view (:func:`_extra_planes_reason` must be None)."""
+    return extra.reshape((1,) * (4 - extra.ndim) + tuple(extra.shape)).expand(b, h, n, n)
+
+
+def _pad_tokens(single, pair, mask, extra, n):
+    """``single`` [B, L, d], ``pair`` [B, L, L, d_pair], the key mask and ``extra_pair_bias`` at ``n`` >= L tokens: zero rows / entries,
+    the pad keys masked."""
+    import torch.nn.functional as F
+
+    b, L = single.shape[:2]
+    p = n - L
+    keys = torch.zeros((b, n), dtype=torch.bool, device=single.device)
+    keys[:, :L] = True if mask is None else mask
+    return (
+        F.pad(single, (0, 0, 0, p)).contiguous(),
+        None if pair is None else F.pad(pair, (0, 0, 0, p, 0, p)).contiguous(),
+        keys,
+        None if extra is None else F.pad(extra, (0, p, 0, p)),
+    )
+
+
+class AttentionPairBias(BackendModule, MasterWeights):
+    """Attention with pair bias::
+
+        s = LN(single); q = W_q s + b_q, k = W_k s, v = W_v s       # [B, H, L, D] (q, k RMS-normed with ``use_qk_norm``)
+        bias = W_b LN_p(pair) [+ extra_pair_bias], masked keys at the dtype's min
+        o = sigmoid(W_g s + gate_bias) * sdpa(q, k, v, bias)
+        return single + W_o o
+
+    ``ln_pair`` has no offset: it feeds only the logits (``to_bias`` has no bias), and an offset adds one constant per head to every logit,
+    which the softmax cancels.
+
+    Parameters
+    ----------
+    d_single : int
+        Dimension of single representation.
+    d_pair : int
+        Dimension of pair representation.
+    n_head : int
+        Number of attention heads.
+    d_hidden : int, optional
+        Per-head hidden dimension. Defaults to ``d_single // n_head``.
+    use_qk_norm : bool
+        Whether to apply RMSNorm to query and key projections.
+    gate_bias : float
+        A constant added to the gate logits (Chai-1's pairformer single attention: 1.0).
+    master_weights : bool
+        Keep fp32 master parameters under a bf16 cast (:class:`MasterWeights`).
+    backend : str
+        See :class:`BackendModule`.
+
+    """
+
+    version = 3  # human-managed: bump when a change alters this class's accuracy or speed results
+
+    backends = ("pytorch", "anthropic", "cueq", "cuda", "triton")
+    backend_versions: ClassVar[dict[str, int]] = {
+        "anthropic": 2,
+        "cuda:a100_sm80": 9,  # 2026-11-19 (9; 5090 4): the fp32 GEMMs of the fused update follow the caller's TF32 setting (IEEE fp32: the engine's own GEMM, kernels/ieee_f32)
+        "cuda:h100_sm90": 6,  # 6 (2026-11-20): the fp32 TF32 training backward's gate / dO / dd glue in one kernel (eight launches before; dd summed in order, agrees to fp32 rounding)
+        "cuda:b200_sm100": 29,  # 29 (2026-11-18): 24-head training (d_pair 128, L 256-768) with finalize_red in its three parts per stream, the pair backward reserve 16 at L 256; 28 (2026-11-18): training forward -- prep_ln one wave at d_single 512 (__launch_bounds__(256, 5)), the q | k | v | g GEMM captured before the side pair pass (L 256-768), pair_bias_fwd2 from L 256 at 16 heads; 27 (2026-11-18): training L 128 / 256 attention backward in one launch (small_core_bwd: gate_bwd + dkv + dqb + qkv_bwd), the pair backward reserve 80 (L 128) / 48 (L 256), finalize_red split into its three parts per stream (16 heads, L <= 512); 26 (2026-11-18): inference small_core fused with to_out at L 128 (16 queries a CTA, st.async o exchange; 24 heads 2 a CTA), core-only small_core at L 384 / 512 / 640 (128-key chunks, no key split / combine) and 32 queries a CTA at L 256; 25 (2026-11-18): training 16 x 32 at d_single 512: no dW copies (finalize_red_nc beside the dW GEMMs, the gradients views of their outputs); 24 (2026-11-18): inf_front loads before waits, one tensor-map box per GEMM tile, overlapped roles (inf_fronto_k) at L 256 / 384 for 12 / 24 heads; 21 (2026-11-17): pair_bias_fwd2, the PDL row kernels as B200 copies; 22: its pair loads L2 evict_first in inference from L 512; 23 (2026-11-18): L 128 / 256 dqb_small / dkv_small (training), small_core (inference L 256, d_pair 256 L 128)
+        "cuda:5090_sm120": 4,
+        "triton:a100_sm80": 2,
+        "triton:h100_sm90": 2,
+    }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100; cuda:a100_sm80 4 / cuda:h100_sm90 2 (2026-11-11): B > 1 served (one step per batch row, FoldForge 5I28 confidence head); cuda:a100_sm80 5 (2026-11-12): the composed fp32 path's pair backward is one TF32 tensor-core launch for the batch (pair_bias_gen_bwd_tc); cuda:a100_sm80 6 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd, bf16 pairs) 1.4-2.1x faster, the same values; cuda:5090_sm120 2 (2026-11-12): the pair-bias backwards fit 99 KB on sm_120a (TF32 tensor-core kernel at 2 stages, d_pair 512 x 16 / 24 heads on the one-pass kernel with 8-element tiles)
+    # cuda:b200_sm100 20 (2026-11-17, v20): bf16 / master training at L <= 256: the main stream's own kernels (attn_fwd2, gate_rows,
+    # gate_bwd, attn_dkv, qkv_bwd, ln_bwd, finalize_red) launched as programmatic dependents (same values, bitwise); the tcgen05 pair backward
+    # leaves 96 SMs at L 128 (partial-row count changes: same sums, another fixed order); bf16 inference: the core and its key-split combine
+    # as programmatic dependents, the key split from L 384 (was 512). (Part 7's PDL pair backward measured level and reverted; its fp32
+    # one-sample key split for the token DiT, ksplit_combine32, kept.)
+    # cuda:b200_sm100 9 (2026-11-17, round 3 part 6): bf16 inference at d_pair 128, L <= 256: LayerNorm(single), the q | k | v | g GEMM and
+    # the pair pass in ONE launch (inf_front), the core after it as a programmatic dependent; training at 24 heads L > 256: attn_dkv reads
+    # the bias as stored (-DBIASNT=1, no transpose launch); fp32 inference 8 heads x d_pair 384 from L 512: the pair pass on tcgen05
+    # kind::tf32 (pair_fwd32.cu); the fp32 core keeps its -DKPERM build after the token DiT's QPAIR change (it raised AttributeError)
+    # cuda:b200_sm100 8 (2026-11-17, round 3 part 5): bf16 / master training: acc_reduce + finalize in one launch (finalize_red, <= 16
+    # heads), the gate backward with every lane busy at 12 heads (gate_bwd2), bias^T made by the forward beside its core (bias_transpose64,
+    # <= 16 heads or L <= 256: no transpose launch in the backward), the d_pair 128 pair backward with a = a_hi + a_lo (PB_SPLIT, <= 16 heads:
+    # row 148 L 128 grad:pair 1.25 -> 1.00 x tol)
+    # cuda:b200_sm100 7 (2026-11-17, round 3 part 4, second half): training, d_pair 128: the pair backward on tcgen05 (sm100/pair_bwd.cu:
+    # a Wf and X^T a on the tensor core, the row sums of squares in the epilogue, a store warp; it leaves 32 SMs to the row passes / GEMMs
+    # at <= 16 heads and L <= 512, else 8); the tcgen05 pair -> bias pass reads Wf before its first tiles' loads (start-up), and serves
+    # d_pair 512 at every L, d_pair 384 from L 256 at 16 heads (384 at 8), d_pair 256 from L 256 in training (768 in inference)
+    # cuda:b200_sm100 6 (2026-11-17, round 3 part 4): inference (bf16 and fp32): the weight packs through param_forms(capture_reads_eager):
+    # a capture reads the pack its eager warm-up made, no pack launch per replay (grad off); d_pair 128 inference at L 384-640: the pair pass
+    # leaves 8 SMs so the q | k | v | g GEMM runs under it; the tcgen05 pair pass thresholds re-measured (d_pair 384 / 512 from L 384, 256
+    # from L 1024); bf16 inference: the pair pass starts when LayerNorm(single) has ended (it ran starved beside the pass); training backward:
+    # dxa issued before dW q|k|v|g (the head of the tail)
+    # cuda:b200_sm100 5 (2026-11-17, round 3 part 3): a wide bf16 pair's pair -> bias pass on tcgen05 (sm100/pair_fwd.cu: X X^T and X Wf^T
+    # per 16 columns, row statistics from the Gram diagonal, 192 KB of pair in flight per SM, Wf formed in the kernel so inference starts
+    # it with the step): d_pair 384 from L 384, 256 / 512 from L 512, inference and the training forward; the key-split inference core is
+    # the -DKSPLIT=1 build of the shared sm100/attn_inf.cu (one source)
+    # cuda:b200_sm100 4 (2026-11-17, round 3 continued): extra_pair_bias and the L % 128 pad on the bias planes in one launch (planes_fix: no
+    # sort / gather / cast launches, no padded copy of the pair), fp32 inference on three streams (the packs + pair pass, LN + the q | k | g
+    # GEMM, the v^T GEMM), the key-split bf16 inference core from L 512 (attn_inf -DKSPLIT=1 + ksplit_combine), the pair backward leaves
+    # 8 SMs to the row passes beside it (d_pair 128; wide up to L 256), fp32 training dQ bitwise repeatable (attn_dqb_tf32 -DDQPART=1 -DDET=1)
+    # cuda:b200_sm100 3 (2026-11-17, round 3): bf16 / master: no weight casts (fp32 masters into prep_dp), the pack and LayerNorm(single) in
+    # one launch (prep_ln), the pack / pair pass and the independent backward stages on side streams, a wide pair's backward in one launch
+    # (pair_bias_bwd_wide1, was one per 128 columns); fp32: the pair pass on the TF32 tensor cores (pair_bias32_tc: inference at L >= 256
+    # where it is faster, training always, natural key order: no gathers), the training glue in single launches (pack2_rna, gate32,
+    # gate32_bwd, the packs), dq / dk / dv written into their column blocks
+    # cuda:b200_sm100 2 (2026-11-17): fp32 inference: the TF32 core reads the pair pass's key order itself (-DKPERM=1: no k / v gathers), the
+    # row-wise stages batched over B, the inference packs in one launch; fp32 L 128 served (was refused: slower than triton)
+    # cuda:b200_sm100 1 (2026-11-16): B200 (sm_100a): bf16 / master inference and training on the sm_100a path of attention_pair_bias_b200.py;
+    # fp32 inference on the B200 TF32 gated core (attn_inf_tf32 built per head layout); fp32 training refused
+    # cuda:5090_sm120 3 (2026-11-13, main merge): the padded L % 128 inference and batched B > 1 paths above on the sm_120a build
+    # cuda:a100_sm80 7 / cuda:h100_sm90 3 (2026-11-12): inference at L % 128 != 0 runs padded to a multiple of 128 (FoldForge OpenDDE n = 12: 2976)
+    # cuda:h100_sm90 4 (2026-11-12): bf16 inference at B > 1 runs the batch rows together, one launch per stage (5 launches per chunk of
+    # rows instead of 5 per row; the per-row values bit for bit): engine 2.4.4 parity at L 128 for the confidence head's S = 5 / 8
+    # cuda:a100_sm80 8 / cuda:h100_sm90 5 (2026-11-13): inference skips what a padded key mask makes dead (bitwise the same outputs): the
+    # core's key tiles past each row's last attended key (kernels._key_len; H100 attn_inf / attn_tf32_inf, A100 the fused step's and the
+    # composed path's sm_80 core) and the pair-bias tiles whose keys are all masked (written as the mask value without reading the pair)
+
+    #: A numerically dead instance of a checkpoint (set by a model's checkpoint loader): inference returns the residual input.
+    dead: bool = False
+
+    def __init__(
+        self,
+        d_single: int = 384,
+        d_pair: int = 128,
+        n_head: int = 8,
+        d_hidden: int | None = None,
+        *,
+        use_qk_norm: bool = False,
+        gate_bias: float = 0.0,
+        master_weights: bool = False,
+        backend: str = "pytorch",
+    ) -> None:
+        super().__init__()
+        self.n_head = n_head
+        self.gate_bias = float(gate_bias)
+        self.use_qk_norm = use_qk_norm
+        if d_hidden is None:
+            if d_single % n_head != 0:
+                msg = f"{d_single=} must be divisible by {n_head=}"
+                raise ValueError(msg)
+            d_hidden = d_single // n_head
+
+        self.ln_single = LayerNorm(d_single)
+        self.to_query = Linear(d_single, d_hidden * n_head, bias=True, init="glorot")
+        self.to_key = Linear(d_single, d_hidden * n_head, bias=False, init="glorot")
+        self.to_value = Linear(d_single, d_hidden * n_head, bias=False, init="glorot")
+
+        if use_qk_norm:
+            self.norm_query = RMSNorm(d_hidden)
+            self.norm_key = RMSNorm(d_hidden)
+
+        self.ln_pair = LayerNorm(d_pair, bias=False)
+        self.to_bias = Linear(d_pair, n_head, bias=False, init="default")
+        self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
+        self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
+        if master_weights:
+            self.set_master_weights()
+        self.set_backend(backend)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # checkpoints written before the offset was removed carry ln_pair.bias; it had no effect on the output, so dropping it is exact
+        state_dict.pop(prefix + "ln_pair.bias", None)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def _forward_pytorch(
+        self,
+        single: torch.Tensor,
+        pair: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        extra_pair_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """``single`` ``[B, L, d_single]``, ``pair`` ``[B, L, L, d_pair]``, ``mask`` ``[B, L]`` (bool). ALWAYS returns the residual output
+        ``single + attention_pair_bias(single, pair)``.
+
+        ``extra_pair_bias`` ``[B, n_head, L, L]`` (head-major; a head axis of 1 is shared by every head) is added to the pair-bias logits
+        after ``to_bias``, before the key mask and the softmax; gradient flows to it."""
+        if self.dead and not (self.training or torch.is_grad_enabled()):
+            return single
+        with master_autocast(single, self):
+            single_res = single  # residual == the ORIGINAL input (before ln_single rebinds `single`)
+            single = self.ln_single(single)
+            query = self.to_query(single)
+            key = self.to_key(single)
+            value = self.to_value(single)
+
+            query = rearrange(query, "B L (H D) -> B H L D", H=self.n_head)
+            key = rearrange(key, "B L (H D) -> B H L D", H=self.n_head)
+            value = rearrange(value, "B L (H D) -> B H L D", H=self.n_head)
+
+            if self.use_qk_norm:
+                query = self.norm_query(query)
+                key = self.norm_key(key)
+
+            pair = self.ln_pair(pair)
+            bias = self.to_bias(pair)
+            bias = rearrange(bias, "B L L2 H -> B H L L2")
+            if extra_pair_bias is not None:  # before the key mask: a masked key stays at the minimum
+                bias = bias + extra_pair_bias.to(bias.dtype)
+            if mask is not None:
+                bias = bias.masked_fill(~mask[:, None, None, :], torch.finfo(bias.dtype).min)
+            out = F.scaled_dot_product_attention(query, key, value, bias)
+
+            gate = self.to_gate(single)
+            if self.gate_bias:
+                gate = gate + self.gate_bias
+            out = rearrange(out, "B H L D -> B L (H D)")
+            out = sigmoid_gate(gate, out)
+            out = self.to_out(out)
+            return single_res + out
+
+    def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
+        d_single, d_pair = self.ln_single.normalized_shape[0], self.ln_pair.normalized_shape[0]
+        return {
+            "single": random_input((samples, length, d_single), dtype=dtype, device=device, generator=generator),
+            "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            "mask": key_mask(samples, length, device=device),
+            # OpenDDE's refiner (FoldForge R3): one [L, L] bias expanded over the samples and the heads, as FoldForge hands it
+            **(
+                {
+                    "extra_pair_bias": random_input((length, length), dtype=dtype, device=device, generator=generator)[None, None].expand(
+                        samples, self.n_head, length, length
+                    )
+                }
+                if stream == EXTRA_BIAS_STREAM
+                else {}
+            ),
+        }
+
+    def _extra_reason(self, single, extra_pair_bias) -> str | None:
+        if extra_pair_bias is None or single.dim() != 3:
+            return None
+        return _extra_planes_reason(extra_pair_bias, single.shape[0], self.n_head, single.shape[1])
+
+    # ------------------------------------------------------------------------------------------------------------- "triton"
+    # The reference's statements with the attention core (q k^T / sqrt(D) + pair bias [+ extra], key mask, softmax, P v) on the Triton
+    # pair-bias attention kernel (forward and backward); the LayerNorms / projections are the module's. bf16 / fp32 / master, head dim <= 64.
+    def _supports_triton(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
+        why = self._call_refusal(single, pair, mask) if single.dim() == 3 else "single must be [B, L, d]"
+        return why or self._extra_reason(single, extra_pair_bias) or _triton_core_reason(single, self._head_dim())
+
+    def _forward_triton(self, single, pair, mask=None, extra_pair_bias=None):
+        if self.dead and not (self.training or torch.is_grad_enabled()):
+            return single
+        with master_autocast(single, self):
+            b, n = single.shape[:2]
+            h, d = self.n_head, self._head_dim()
+            s = self.ln_single(single)
+            q, k, v = (t.view(b, n, h, d) for t in (self.to_query(s), self.to_key(s), self.to_value(s)))
+            if self.use_qk_norm:
+                q, k = self.norm_query(q), self.norm_key(k)
+            bias = self.to_bias(self.ln_pair(pair))  # [B, L, L, H]
+            if extra_pair_bias is not None:
+                bias = bias + _extra_planes(extra_pair_bias, b, h, n).to(bias.dtype).permute(0, 2, 3, 1)
+            out = _triton_core(q[None], k[None], v[None], bias, None if mask is None else mask[None])[0]
+            gate = self.to_gate(s)
+            if self.gate_bias:
+                gate = gate + self.gate_bias
+            out = sigmoid_gate(gate, out.reshape(b, n, h * d).to(gate.dtype))
+            return single + self.to_out(out)
+
+    # ------------------------------------------------------------------------------------------------------------- "cuda"
+    # H100 (sm_90): the whole op as hand CUDA + cuBLAS (kernels/integrations/attention_pair_bias_b200.py, its H100 branches; the residual is
+    # folded there). No gradient -> the inference op (LayerNorm rows, one packed q | k | v | g GEMM, pair LayerNorm + head projection pass,
+    # the gated sm_90a wgmma core, to_out accumulated onto the residual); a gradient -> one autograd Function (forward + backward on the same
+    # rows / cores, fp32 weight gradients onto the parameters). Range = ``refusal``: bf16 activations (parameters bf16 or fp32 masters) or
+    # float32 activations with float32 parameters (the TF32 path: attn_tf32 core, fp32 row / pair kernels, fp32 GEMMs), any batch B
+    # (the one-row step per batch row inside each op, the weight packs made once; FoldForge 5I28 confidence head: its samples as B),
+    # 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 heads at d_single 384 or 16 x 32 at 512, d_pair 128, 256 / 384 (8 or 16 heads) or 512 (16 heads),
+    # gate_bias, no QK-norm, L a multiple of 128; everything else is refused, never run elsewhere. extra_pair_bias (eval only, FoldForge R3:
+    # OpenDDE's refiner): added to the bias planes the pair pass writes, before the core, in the core's units (exp2; the fp32 core's key order).
+    # A100 (sm_80): kernels/integrations/attention_pair_bias_sm80.py -- the fused C++ step (bf16 activations, any B, the same head layouts,
+    # d_pair 128, any L, no gate_bias) and, for fp32 (TF32 core), the wider pairs (256 / 384 / 512) and gate_bias, the path composed from
+    # the sm_80 attention kernels (any B, L a multiple of 128, head dims 16-64; both one step per batch row); no QK-norm; inference and
+    # training (the weight gradients summed over B). extra_pair_bias (eval only): the composed path, its planes added to the bias tensor
+    # it makes.
+    # Its ``refusal`` is the range there.
+    def _supports_cuda(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
+        from foldjet_engine.kernels.integrations import attention_pair_bias_b200 as native
+
+        why = self._call_refusal(single, pair, mask) or self._extra_reason(single, extra_pair_bias)
+        if why is not None:
+            return why
+        grad = self._cuda_grad(single, pair, extra_pair_bias)
+        if extra_pair_bias is not None and grad:
+            # the training Functions keep the bias inside their passes and return no gradient for an additive logit term ("triton" does)
+            return "extra_pair_bias with a gradient: the cuda backend folds it into the inference ops' bias planes only (eval)"
+        padded = not grad and single.shape[1] % 128 != 0  # inference pads L to a multiple of 128 (``_forward_cuda``)
+        if single.is_cuda and _devcap(single.device) in _SM80_BUILDS:  # A100, or the RTX 5090 (sm_120a build)
+            from foldjet_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
+
+            if extra_pair_bias is not None:  # the fused C++ step makes its bias inside the step: the composed path, whose bias is a tensor
+                generic = sm80._generic_refusal(self, single, pair, mask, False, padded)
+                return None if generic is None else f"extra_pair_bias (A100: the composed path only): {generic}"
+            return sm80.refusal(self, single, pair, mask, grad, padded)
+        return native.refusal(self, single, pair, mask, grad, padded)
+
+    def _pads(self, single, pair, mask, extra_pair_bias) -> bool:
+        """Whether a ``cuda`` inference call at L % 128 != 0 runs padded: H100 always (its kernels take whole 128-token tiles); A100 on the
+        composed path (extra_pair_bias, or what the fused C++ step refuses; the step itself takes any L)."""
+        if _devcap(single.device) not in _SM80_BUILDS:  # (the RTX 5090 runs the A100 sources)
+            return True
+        from foldjet_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
+
+        return extra_pair_bias is not None or sm80._step_refusal(self, single, pair, mask, False) is not None
+
+    @staticmethod
+    def _reads_ragged(single) -> bool:
+        """H100 bf16 inference takes a ragged L (L % 128 != 0) as it is: the pair pass writes the real block of the padded bias planes
+        (``kernels.augmented_attention.cuda.apb.pair_bias_padded``), so the call pads only single / mask -- never the [L, L, d_pair] pair."""
+        return single.dtype != torch.float32 and _devcap(single.device) == (9, 0)
+
+    def _cuda_grad(self, single, pair, extra_pair_bias=None) -> bool:
+        return torch.is_grad_enabled() and (
+            single.requires_grad
+            or pair.requires_grad
+            or (extra_pair_bias is not None and extra_pair_bias.requires_grad)
+            or any(p.requires_grad for p in self.parameters())
+        )
+
+    def _forward_cuda(self, single, pair, mask=None, extra_pair_bias=None):
+        from foldjet_engine.kernels.integrations import attention_pair_bias_b200 as native
+
+        if self.dead and not (self.training or torch.is_grad_enabled()):
+            return single
+        L = single.shape[1]
+        if (
+            L % 128
+            and not self._cuda_grad(single, pair, extra_pair_bias)
+            and self._pads(single, pair, mask, extra_pair_bias)
+            and not self._reads_ragged(single)
+        ):
+            # inference at L % 128 != 0 (FoldForge OpenDDE n = 12: 2976 structural tokens): the kernels take whole 128-token tiles, so the
+            # call runs at the next multiple of 128 -- zero single rows and pair entries, the pad keys masked (-inf: no weight), the pad
+            # query rows dropped. Every real row attends over the same keys with the same logits as unpadded.
+            lp = -(-L // 128) * 128
+            if _devcap(single.device) in _SM80_BUILDS:
+                # A100 / RTX 5090 (the composed path): the pair stays as it is -- its bias kernel writes the [H, Lp, Lp] planes from the [L, L] pair,
+                # the pad keys masked, the pad query rows 0 -- so only single / mask / extra_pair_bias are padded (no padded pair copy)
+                from foldjet_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
+
+                single_p, _, mask_p, extra_p = _pad_tokens(single, None, mask, extra_pair_bias, lp)
+                extra = None if extra_p is None else _extra_planes(extra_p, single.shape[0], self.n_head, lp)
+                return sm80.update_generic(self, single_p, pair, mask_p, False, extra=extra)[:, :L].contiguous()
+            if _devcap(single.device) == (10, 0) and L % 32 == 0:
+                # B200 (2026-11-17): the pair pass runs at L and its bias planes are padded to lp (planes_fix, with extra_pair_bias in the
+                # same launch): no padded copy of the pair (at L 2976 x d_pair 384 that copy was most of the call)
+                extra = None if extra_pair_bias is None else _extra_planes(extra_pair_bias, single.shape[0], self.n_head, L)
+                return native.update_inference(self, single, pair, mask, extra=extra, lp=lp)
+            single_p, pair_p, mask_p, extra_p = _pad_tokens(single, pair, mask, extra_pair_bias, lp)
+            return self._forward_cuda(single_p, pair_p, mask_p, extra_p)[:, :L].contiguous()
+        # extra_pair_bias (eval only, ``_supports_cuda``): [B, H, L, L] planes added to the kernels' hoisted bias before the core (FoldForge R3)
+        extra = None if extra_pair_bias is None else _extra_planes(extra_pair_bias, single.shape[0], self.n_head, single.shape[1])
+        if _devcap(single.device) in _SM80_BUILDS:
+            from foldjet_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
+
+            if extra is not None:
+                return sm80.update_generic(self, single, pair, mask, False, extra=extra)
+            if self._cuda_grad(single, pair):
+                return sm80.update_train(self, single, pair, mask)
+            return sm80.update_inference(self, single, pair, mask)
+        if self._cuda_grad(single, pair):
+            return native.update_train(self, single, pair, mask)
+        return native.update_inference(self, single, pair, mask, extra=extra)
+
+    # ------------------------------------------------------------------------------------------------------------- library backends
+    def _head_dim(self) -> int:
+        return self.to_query.weight.shape[0] // self.n_head
+
+    def _call_refusal(self, single, pair, mask) -> str | None:
+        if single.dim() != 3 or pair.dim() != 4 or pair.shape[:3] != (single.shape[0], single.shape[1], single.shape[1]):
+            return f"single must be [B, L, d] and pair [B, L, L, d_pair], got {tuple(single.shape)} / {tuple(pair.shape)}"
+        if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != tuple(single.shape[:2])):
+            return "mask must be a bool [B, L] key mask"
+        if single.dtype not in (torch.bfloat16, torch.float32):
+            return f"dtype {single.dtype}: bfloat16 / float32 only"
+        return None
+
+    # "anthropic": the kits' Pairformer single attention (af3_torch's lever ``apb``: ``_pair_logits_fused`` / ``_apb_planes`` + ``_selfattn_forward`` /
+    # ``_apb_attention``; openfold3's ``cells/apb_trunk`` and protenix's ``pf_attn`` bind the same two faces) on the shared core's pair-bias
+    # provider (opt_core.kernels.apb), by the kits' tier word "fast":
+    #   * the PRODUCER ``pair_bias_planes`` -- bias = W_b LN_p(pair), head-major, on the row the provider selects for the cell
+    #     bias_c<d_pair>h<H> (ln_proj / lnl_ln_linear / fpf_pf_bias; a geometry no cell lists: the provider names its stock row);
+    #   * the CORE ``pair_bias_attention`` -- sigmoid(g) * softmax(q k^T / sqrt(D) + bias) v, the cell pf_h16d24 (other geometries: no cell
+    #     word, the provider names its boundary's row), the key mask folded as -1e9 as the kits do.
+    # Every row served as the release serves it; LN(single), q / k / v / gate and the out-projection are the module's statements (the kits'
+    # too). The module is model-agnostic and every kit binds the same provider, so one wiring serves every requirement row. ``ln_pair`` has no
+    # offset: the producer gets a zero LayerNorm bias (exact). Forward only: no kit carries a backward for this op (every carried row of the
+    # provider's table is ``backward: false``; only its stock rows -- SDPA, cuEquivariance, torch -- differentiate), so a call with a
+    # gradient is refused.
+    def _anthropic_core_select(self, single):
+        from foldjet_engine.modules import _anthropic
+
+        prov = _anthropic.load("opt_core.kernels.apb")
+        h, d = self.n_head, self._head_dim()
+        cell = prov.cell_word("pf", h, d)
+        dt = torch.bfloat16 if (single.dtype == torch.bfloat16 or torch.is_autocast_enabled("cuda")) else single.dtype
+        return (
+            prov,
+            cell,
+            _anthropic.kernel_selection(
+                prov,
+                tuple(_devcap(single.device)),
+                dt,
+                cell,
+                int(single.shape[1]),
+                word="fast",
+                samples=int(single.shape[0]),
+                head_dim=d,
+                heads=h,
+            ),
+        )
+
+    def _anthropic_producer_select(self, pair):
+        from foldjet_engine.modules import _anthropic
+
+        prov = _anthropic.load("opt_core.kernels.apb")
+        h, c = self.n_head, int(pair.shape[-1])
+        cell = prov.cell_word("bias", heads=h, c_z=c)
+        # no producer cell for this geometry: the producer boundary's stock row by name (a cell-less tier word would name the CORE's stock row)
+        word = "fast" if cell is not None else prov.STOCK_OF_BOUNDARY["producer"]
+        return _anthropic.kernel_selection(
+            prov, tuple(_devcap(pair.device)), pair.dtype, cell, int(pair.shape[1]), word=word, c_z=c, heads=h
+        )
+
+    def _anthropic_producer_params(self):
+        """fp32 contiguous LayerNorm weight / zero offset / projection the producer rows pack or cast from (the kits hand fp32 copies too),
+        rebuilt only when a parameter changes (identity + version), so the provider's packed-weight cache keeps hitting."""
+        w_ln, w_b = self.ln_pair.weight, self.to_bias.weight
+        key = (id(w_ln), w_ln._version, id(w_b), w_b._version)
+        held = self.__dict__.get("_anthropic_params")
+        if held is None or held[0] != key:
+            lnw = w_ln.detach().float().contiguous()
+            held = (key, (lnw, torch.zeros_like(lnw), w_b.detach().float().contiguous()), {})
+            self.__dict__["_anthropic_params"] = held
+        return held[1], held[2]
+
+    def _supports_anthropic(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
+        from foldjet_engine.modules import _anthropic
+
+        why = _anthropic.unavailable("opt_core.kernels.apb", single.device) or self._call_refusal(single, pair, mask)
+        if why is not None:
+            return why
+        if torch.is_grad_enabled():
+            return (
+                "inference only: no kit carries a backward for the pair-bias attention (the provider's carried rows are all forward only): "
+                "call under torch.no_grad() / inference_mode"
+            )
+        why = self._anthropic_producer_select(pair)[1]
+        if why is not None:
+            return f"pair-bias producer: {why}"
+        return self._anthropic_core_select(single)[2][1]
+
+    def _forward_anthropic(self, single, pair, mask=None, extra_pair_bias=None):
+        if self.dead:
+            return single
+        with master_autocast(single, self):
+            prov, cell, (sel, _why) = self._anthropic_core_select(single)
+            psel, _pwhy = self._anthropic_producer_select(pair)
+            b, n = single.shape[:2]
+            h, d = self.n_head, self._head_dim()
+            s = self.ln_single(single)
+            q, k, v = (t.view(b, n, h, d) for t in (self.to_query(s), self.to_key(s), self.to_value(s)))
+            if self.use_qk_norm:
+                q, k = self.norm_query(q), self.norm_key(k)
+            gate = self.to_gate(s)
+            if self.gate_bias:
+                gate = gate + self.gate_bias
+            (lnw, lnb, w_b), cache = self._anthropic_producer_params()
+            bias, _served = prov.pair_bias_planes(
+                pair.contiguous(), lnw, lnb, w_b, selection=psel, eps=self.ln_pair.eps, out_layout="hij", out_dtype=q.dtype, cache=cache
+            )
+            bias = bias[..., :h, :, :n]  # rows writing [B, H, L, ld] planes (ld = L rounded to 8)
+            if extra_pair_bias is not None:
+                bias = bias + extra_pair_bias.to(bias.dtype)
+            if mask is not None:
+                bias = bias.masked_fill(~mask[:, None, None, :], -1e9)
+            bias = bias.to(q.dtype).expand(b, h, n, n).contiguous()
+            o, _served = prov.pair_bias_attention(
+                q.contiguous(),
+                k.contiguous(),
+                v.contiguous(),
+                bias,
+                None,
+                gate=gate.view(b, n, h, d).contiguous(),
+                selection=sel,
+                scale=d**-0.5,
+                layout="snhd",
+                cell=cell,
+            )
+            return single + self.to_out(o.reshape(b, n, h * d))
+
+    # "cueq": cuequivariance_torch.attention_pair_bias -- the whole op (LayerNorm of single and pair, q / k / v / gate / pair-bias projections,
+    # masked softmax attention, gate, out-projection) on the module's parameters; the residual is the module's. Which route the library takes
+    # for a call (a kernel, or its own native PyTorch formula) is the library's choice.
+    def _supports_cueq(self, single, pair, mask=None, extra_pair_bias=None) -> str | None:
+        from foldjet_engine.modules import _cueq
+
+        why = _cueq.unavailable(single.device) or self._call_refusal(single, pair, mask)
+        if why is not None:
+            return why
+        if self.use_qk_norm:
+            return "the per-head q / k RMSNorm: the op's q / k norm is one LayerNorm over all heads"
+        if extra_pair_bias is not None:
+            return "extra_pair_bias: the op has no additive logit input"
+        if self.ln_single.eps != self.ln_pair.eps:
+            return "the op takes one LayerNorm epsilon for the single and the pair"
+        return None
+
+    def _forward_cueq(self, single, pair, mask=None, extra_pair_bias=None):
+        from foldjet_engine.modules import _cueq
+
+        if self.dead and not (self.training or torch.is_grad_enabled()):
+            return single
+        with master_autocast(single, self):
+            gate_bias = None
+            if self.gate_bias:
+                gate_bias = torch.full(
+                    (self.to_gate.weight.shape[0],), self.gate_bias, dtype=self.to_gate.weight.dtype, device=single.device
+                )
+            out = _cueq.torch_api().attention_pair_bias(
+                single,
+                pair,
+                None if mask is None else mask.to(single.dtype),
+                self.n_head,
+                self.ln_single.weight,
+                self.ln_single.bias,
+                self.to_query.weight,
+                self.to_query.bias,
+                self.to_key.weight,
+                self.to_value.weight,
+                self.to_gate.weight,
+                self.to_out.weight,
+                w_proj_z=self.to_bias.weight,
+                w_ln_z=self.ln_pair.weight,
+                b_ln_z=None,
+                eps=self.ln_single.eps,
+                b_proj_g=gate_bias,
+            )
+            out = out[0] if isinstance(out, tuple) else out
+            return single + out.to(single.dtype)
+
+
+class AugmentedAttentionPairBias(BackendModule):
+    """Augmented attention with pair bias and adaptive conditioning (AlphaFold 3 Algorithm 24), with the residual::
+
+        a = AdaLN(single, cond); q = W_q a + b_q, k = W_k a, v = W_v a     # [A, B, L, H, D] (q, k RMS-normed with ``use_qk_norm``)
+        logits = q k^T / sqrt(D) + W_b LN_p(pair) [+ extra_pair_bias], masked keys at the dtype's min
+        o = sigmoid(W_g a) * softmax(logits) v
+        return single + sigmoid(W_sc cond + b_sc) * W_o o
+
+    ``single`` / ``cond`` carry the augmentation axis ``A`` (the diffusion samples) in front of the batch; the pair bias is shared by them.
+    ``ln_pair`` has no offset: its bias reaches the loss only through ``to_bias`` as a per-head constant on every logit, which the softmax
+    cancels (AlphaFold 3: ``create_offset=False``).
+
+    Parameters
+    ----------
+    d_single : int
+        Dimension of single representation.
+    d_cond : int
+        Dimension of conditioning representation.
+    d_pair : int
+        Dimension of pair representation.
+    n_head : int
+        Number of attention heads.
+    use_qk_norm : bool
+        Whether to apply RMSNorm to query and key projections.
+    query_bias : bool
+        Whether the query projection carries a bias (AlphaFold 3: yes; RoseTTAFold3's ``to_q``: no).
+    backend : str
+        See :class:`BackendModule`.
+
+    """
+
+    backends = ("pytorch", "triton")
+    #: The K / V AdaLN of the atom DiT blocks whose keys and values have their own conditioning (set by modules/atom_dit.py; absent
+    #: otherwise). Declared for the type checker only.
+    ada_ln_kv: AdaptiveLayerNorm
+
+    def __init__(
+        self,
+        d_single: int,
+        d_cond: int,
+        d_pair: int,
+        n_head: int,
+        *,
+        use_qk_norm: bool = False,
+        query_bias: bool = True,
+        backend: str = "pytorch",
+    ) -> None:
+        super().__init__()
+        self.n_head = n_head
+        self.use_qk_norm = use_qk_norm
+
+        d_hidden = d_single // n_head
+
+        self.ada_ln_in = AdaptiveLayerNorm(d_single, d_cond)
+        self.to_query = Linear(d_single, d_hidden * n_head, bias=query_bias)
+        self.to_key = Linear(d_single, d_hidden * n_head, bias=False)
+        self.to_value = Linear(d_single, d_hidden * n_head, bias=False)
+
+        if use_qk_norm:
+            self.norm_query = RMSNorm(d_hidden)
+            self.norm_key = RMSNorm(d_hidden)
+
+        self.ln_pair = LayerNorm(d_pair, bias=False)
+        self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
+        self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
+        self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
+
+        self.to_scale = Linear(d_cond, d_single, bias=True, init="default", bias_init=-2.0)  # sigmoid(-2) ~ 0.1: the update starts small
+        self.set_backend(backend)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs) -> None:
+        """Drop ``ln_pair.bias`` from checkpoints written before it was removed (its gradient was identically zero, so a trained checkpoint
+        carries it at its zero init and discarding it changes nothing numerically)."""
+        state_dict.pop(f"{prefix}ln_pair.bias", None)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def _attention_core(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        bias: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        compute_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        """``softmax(q k^T / sqrt(D) + bias) v`` on ``query`` / ``key`` / ``value`` ``[A, B, L, H, D]``, ``bias`` ``[B, L, L, H]``, ``mask``
+        ``[A, B, L]``. ``compute_dtype`` is the precision the core runs in (``None``: the caller's)."""
+        if compute_dtype is not None:
+            query, key, value, bias = (t.to(compute_dtype) for t in (query, key, value, bias))
+        query = query * query.shape[-1] ** -0.5
+        attention = torch.einsum("abihd,abjhd->abhij", query, key)
+        bias = bias.permute(0, 3, 1, 2).contiguous()  # (B, H, L, L)
+        attention = attention + bias[None]
+        if mask is not None:
+            # finfo.min (not -inf): a fully-masked row of -inf softmaxes to NaN
+            attention = attention.masked_fill(~mask[:, :, None, None, :], torch.finfo(attention.dtype).min)
+        attention = F.softmax(attention, dim=-1)
+        return torch.einsum("abhij,abjhd->abihd", attention, value)
+
+    def _forward_pytorch(
+        self,
+        single: torch.Tensor,
+        cond: torch.Tensor,
+        pair: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        *,
+        compute_dtype: torch.dtype | None = None,
+        extra_pair_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """``single`` ``[A, B, L, d_single]``, ``cond`` ``[A, B, L, d_cond]``, ``pair`` ``[B, L, L, d_pair]``, ``mask`` ``[B, L]`` or
+        ``[A, B, L]`` (bool). ALWAYS returns the residual output ``single + delta(single, cond, pair, mask)``; a caller that composes the
+        update some other way takes :meth:`delta`."""
+        return single + self.delta(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
+
+    #: the fp32 attention logits one call may hold, A x B x H x L x L x 4 bytes: above it the augmentation axis is sliced (``delta``)
+    LOGIT_BUDGET_BYTES = 8 << 30
+
+    def augment_chunk(self, single: torch.Tensor) -> int:
+        """How many samples (the augmentation axis A) one call takes: all of them, unless their logits exceed ``LOGIT_BUDGET_BYTES``."""
+        a, b, length = single.shape[:3]
+        per_sample = b * self.n_head * length * length * 4
+        return max(1, min(a, self.LOGIT_BUDGET_BYTES // max(per_sample, 1)))
+
+    def delta(
+        self,
+        single: torch.Tensor,
+        cond: torch.Tensor,
+        pair: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        *,
+        compute_dtype: torch.dtype | None = None,
+        extra_pair_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """The update alone (no residual).
+
+        ``extra_pair_bias`` ``[L, L]``: an additive logit term for every head, sample and batch row, on top of the pair's own bias and before
+        the key mask, in the dtype of the bias; differentiable.
+
+        ``compute_dtype`` sets the precision the attention core runs in, per call (``None``: the caller's dtype). The projections, the gate
+        and the output stay in the module's dtype; the core's result comes back in the input dtype.
+        """
+        chunk = self.augment_chunk(single)
+        if chunk < single.shape[0]:
+            # The logits [A, B, H, L, L] would not fit: the samples are independent, so the call runs on slices of the augmentation axis
+            # (a slice size that is a function of the shape only) and the outputs are concatenated. Under autograd every slice is
+            # checkpointed, so the backward does not keep every slice's attention at once.
+            from torch.utils.checkpoint import checkpoint
+
+            parts = []
+            grad = torch.is_grad_enabled() and (single.requires_grad or any(p.requires_grad for p in self.parameters()))
+            for i in range(0, single.shape[0], chunk):
+                m = mask[i : i + chunk] if mask is not None and mask.dim() == 3 else mask
+
+                def piece(s, c, _m=m):
+                    return self.delta(s, c, pair, _m, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
+
+                s, c = single[i : i + chunk], cond[i : i + chunk]
+                parts.append(checkpoint(piece, s, c, use_reentrant=False) if grad else piece(s, c))
+            return torch.cat(parts)
+        in_dtype = single.dtype
+        single = self.ada_ln_in(single, cond)
+        query = self.to_query(single)
+        key = self.to_key(single)
+        value = self.to_value(single)
+        query, key = self.flat_qk_norm(query, key)
+
+        num_aug, batch, len_res = query.shape[:3]
+        n_head, hidden_dim = self.n_head, query.shape[-1] // self.n_head
+
+        query, key, value = [x.view(num_aug, batch, len_res, n_head, hidden_dim) for x in (query, key, value)]
+        if self.use_qk_norm:
+            query = self.norm_query(query)
+            key = self.norm_key(key)
+
+        bias = self.to_bias(self.ln_pair(pair))
+        if extra_pair_bias is not None:
+            if extra_pair_bias.ndim != 2 or tuple(extra_pair_bias.shape) != tuple(bias.shape[1:3]):
+                raise ValueError(f"extra_pair_bias must be [L, L] = {tuple(bias.shape[1:3])}, got {tuple(extra_pair_bias.shape)}")
+            bias = bias + extra_pair_bias.to(bias.dtype)[None, :, :, None]  # [B, L, L, H]: the same term for every head
+        if mask is not None and mask.ndim == 2:
+            mask = repeat(mask, "B L -> A B L", A=single.shape[0])
+        core = self._attention_core_triton if self.backend == "triton" else self._attention_core
+        out = core(query, key, value, bias, mask, compute_dtype=compute_dtype)
+        # back to the caller's precision before the gate / out projections (the cast is scoped to the core)
+        out = out.to(in_dtype)
+        out = rearrange(out, "A B L H D -> A B L (H D)")
+
+        out = self.gate_project(single, out)
+        return sigmoid_gate(self.to_scale(cond), out)
+
+    # ------------------------------------------------------------------------------------------------------------- "triton"
+    # ``_forward_pytorch`` / ``delta`` with the attention core on the Triton pair-bias attention kernel (forward and backward); the AdaLN,
+    # projections, q / k norms and gates are the module's statements. bf16 / fp32 / master, head dim <= 64.
+    def _attention_core_triton(self, query, key, value, bias, mask=None, compute_dtype=None):
+        if compute_dtype is not None:
+            query, key, value, bias = (t.to(compute_dtype) for t in (query, key, value, bias))
+        # B200 (2026-11-17): dbias as the head-major view (no sum over A = 1, no transposing copy), as the A100 / H100 always had it
+        b200 = query.is_cuda and _devcap(query.device) == (10, 0)
+        return _triton_core(query, key, value, bias, mask, head_major=b200)
+
+    def _supports_triton(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None) -> str | None:
+        if compute_dtype not in (None, torch.bfloat16, torch.float32):
+            return f"compute_dtype {compute_dtype} (bfloat16 / float32 only)"
+        if mask is not None and (mask.dtype != torch.bool or mask.ndim not in (2, 3)):
+            return "mask must be a bool [B, L] or [A, B, L] key mask"
+        return _triton_core_reason(single, self.to_query.weight.shape[0] // self.n_head)
+
+    def _forward_triton(self, single, cond, pair, mask=None, *, compute_dtype=None, extra_pair_bias=None):
+        return self._forward_pytorch(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
+
+    # ------------------------------------------------------------------------------------------- the parts a model's variant replaces
+    def flat_qk_norm(self, query: torch.Tensor, key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """A norm of the FLAT q / k projections ``[..., n_head * d]``, before the head split: none here (the per-head RMSNorm of
+        ``use_qk_norm`` follows the split); :class:`FlatQKNormAugmentedAttention`: one LayerNorm over all heads."""
+        return query, key
+
+    def gate_project(self, a: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        """The gating query and the output projection of the attention's result ``out``: ``W_o (sigmoid(W_g a) * out)``, ``a`` the
+        AdaLN output. (:class:`UngatedAugmentedAttention`: no gating query.)"""
+        return self.to_out(sigmoid_gate(self.to_gate(a), out))
+
+
+class FlatQKNormAugmentedAttention(AugmentedAttentionPairBias):
+    """RoseTTAFold3's DiT attention: :class:`AugmentedAttentionPairBias` with an affine LayerNorm of the flat q / k, over all heads at once
+    (``norm_query`` / ``norm_key``, each ``LayerNorm(n_head * d)``, computed in fp32) in place of the per-head RMSNorm, and a bias-free query
+    projection (RF3 ``AttentionPairBiasDiffusion.to_q``: ``MultiDimLinear(..., bias=False)``).
+
+    Invariant: ``to_query.bias is None`` (the release has no query bias). A checkpoint layout that stores one for RoseTTAFold3 (an all-zero
+    tensor) is the bias-free query: drop it after checking it is zero; a non-zero value is a conversion error. Used by
+    :class:`~foldjet_engine.modules.token_dit.TokenDiTRoseTTAFold3` and :class:`~foldjet_engine.modules.atom_dit.AtomDiTRoseTTAFold3`."""
+
+    def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int, *, backend: str = "pytorch") -> None:
+        super().__init__(d_single, d_cond, d_pair, n_head, query_bias=False, backend=backend)
+        d_hidden = d_single // n_head
+        self.norm_query = LayerNorm(d_hidden * n_head)
+        self.norm_key = LayerNorm(d_hidden * n_head)
+
+    def flat_qk_norm(self, query, key):
+        return self.norm_query(query), self.norm_key(key)
+
+
+class UngatedAugmentedAttention(AugmentedAttentionPairBias):
+    """Chai-1's DiT attention: :class:`AugmentedAttentionPairBias` without the gating query (no ``to_gate``): ``W_o out``."""
+
+    def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int, *, backend: str = "pytorch") -> None:
+        super().__init__(d_single, d_cond, d_pair, n_head, backend=backend)
+        del self.to_gate
+
+    def gate_project(self, a, out):
+        return self.to_out(out)
+
+
+class BiasOnlyAttention(BackendModule):
+    """Pair-bias attention without queries and keys, with adaptive conditioning (the bias-only token DiT's attention).
+
+    ``out = single + sigmoid(to_scale(cond)) * to_out(sigmoid(g) * softmax(bias) v)`` (the residual is the module's own input), with
+    ``bias = to_bias(LN(pair))`` [B, H, L, L] shared by every augmented sample, ``v`` and ``g`` projections of ``AdaLN(single, cond)``. A key
+    mask [B, L] enters as the largest negative finite logit (a fully masked row is uniform, not NaN). ``bias=`` [B, H, L, L] given (a hoisted
+    pair bias, :func:`~foldjet_engine.modules.token_dit.pair_bias_all`): those are the logits, and ``ln_pair`` / ``to_bias`` / ``pair`` are
+    not read.
+
+    Everything around the core is :class:`AugmentedAttentionPairBias`'s (AdaLN, the value and gate projections, both sigmoid gates, the
+    conditioning scale), minus ``to_query``, ``to_key`` and the QK-norm. With no query and no key the attention weights depend on neither the
+    sample nor the single representation, only on the pair: ONE softmax serves every augmented sample.
+
+    ``backend="triton"`` (engine 2.4's portable path, ``kernels/bias_only_attention/triton``): the AdaLN on its ``"triton"`` backend, the pair
+    LayerNorm + bias projection in one pass (``pair_bias.pair_bias_logits``, head-major logits, forward and backward), the value and gate
+    projections as ONE GEMM over the concatenated weights; with a gradient the feature-major training core (``core_t.bias_only_core_t``: the
+    value / gate GEMM, ``softmax(bias) v`` as a batched GEMM over the heads, the sigmoid gate in Triton, ``to_out``; no permute copies), one pair
+    for every sample or a pair per sample; inference: the batched einsum (one softmax for every sample, a cuBLAS GEMM per head -- the flash
+    bias-only kernel of ``triton/main.py`` does not beat it, as engine 2.4 measured). bf16 or fp32 activations, CUDA.
+    """
+
+    backends = ("pytorch", "triton")
+
+    def __init__(
+        self,
+        d_single: int,
+        d_cond: int,
+        d_pair: int,
+        n_head: int,
+        d_head: int | None = None,
+        *,
+        backend: str = "pytorch",
+    ) -> None:
+        super().__init__()
+        self.n_head = n_head
+        d_hidden = d_head or d_single // n_head  # the head width; n_head x d_head may differ from d_single
+        self.ada_ln_in = AdaptiveLayerNorm(d_single, d_cond)
+        self.to_value = Linear(d_single, d_hidden * n_head, bias=False)
+        self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
+        # no offset, as in AugmentedAttentionPairBias: a per-head constant on every logit cancels in the softmax
+        self.ln_pair = LayerNorm(d_pair, bias=False)
+        self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
+        self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
+        self.to_scale = Linear(d_cond, d_single, bias=True, init="default", bias_init=-2.0)  # sigmoid(-2) ~ 0.1: the update starts small
+        self.set_backend(backend)
+
+    #: ``None``: follow :func:`foldjet_engine.bias_logits.default`; ``"fp32"`` / ``"bf16"``: this module's own pair-bias logits mode
+    pair_bias_logits: str | None = None
+
+    def set_pair_bias_logits(self, mode: str | None):
+        """Pair-bias logits precision of this module (:mod:`foldjet_engine.bias_logits`): ``"fp32"`` (default; training always), ``"bf16"``
+        (inference only), ``None`` (the process default / ``MINIWORLD_BIAS_LOGITS``). Returns ``self``."""
+        if mode is not None:
+            _bias_logits._check(mode, "set_pair_bias_logits")
+        self.pair_bias_logits = None if mode is None else mode.strip().lower()
+        return self
+
+    def _logits_mode(self, single, cond, pair, bias) -> str:
+        """The mode this call runs: bf16 only when asked for, bf16 activations and no autograd (:func:`foldjet_engine.bias_logits.effective`)."""
+        return _bias_logits.effective(self.pair_bias_logits, grad=_wants_grad(self, single, cond, pair, bias), dtype=single.dtype)
+
+    def _attention_weights(self, pair, mask, bias, dtype, mode: str = "fp32"):
+        """softmax over the keys of the pair bias (masked keys at the largest negative finite logit): [B, H, L, L], shared by every sample.
+
+        The logits and the softmax are fp32 whatever the module dtype (user rule 2026-11-19: the logits are 1e3..2e5 with a key spread of
+        ~500, bf16 resolves 32..1024 there and broke the peptide bonds); only the attention weights are rounded to ``dtype``, for the
+        product with the values. ``mode="bf16"`` (inference, see :mod:`foldjet_engine.bias_logits`): the logits are rounded to bf16 first
+        (:func:`bf16_pair_bias_logits`), the softmax is still fp32."""
+        # (B, H, L, L) fp32 from the pair, or the hoisted bias (pair_bias_all), head-major already
+        if bias is None:
+            if mode == "bf16":
+                logits = bf16_pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps).float()
+            else:
+                logits = exact_pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
+        else:
+            logits = bias.to(torch.promote_types(bias.dtype, torch.float32))
+        if mask is not None:
+            logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
+        return torch.softmax(logits, dim=-1).to(dtype)
+
+    def _forward_pytorch(
+        self,
+        single: torch.Tensor,
+        cond: torch.Tensor,
+        pair: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
+        *,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """``single`` ``[A, B, L, d_single]``, ``cond`` ``[A, B, L, d_cond]``, ``pair`` ``[B, L, L, d_pair]``, ``mask`` ``[B, L]``."""
+        # residual == the ORIGINAL input
+        single, single_res = self.ada_ln_in.forward_with_stream(single, cond)
+        value, gate = self.to_value(single), self.to_gate(single)
+        value = rearrange(value, "A B L (H D) -> A B L H D", H=self.n_head)
+        # one softmax for every sample: the logits carry no augmentation axis
+        attention = self._attention_weights(pair, mask, bias, value.dtype, self._logits_mode(single, cond, pair, bias))
+        out = torch.einsum("bhij,abjhd->abihd", attention, value).flatten(-2)
+        out = self.to_out(sigmoid_gate(gate, out))
+        return single_res + sigmoid_gate(self.to_scale(cond), out)
+
+    # ------------------------------------------------------------------------------------------------------------- "triton"
+    def set_backend(self, backend: str = "pytorch"):
+        super().set_backend(backend)
+        ada = getattr(self, "ada_ln_in", None)  # absent while nn.Module.__init__ runs the first set_backend
+        if isinstance(ada, BackendModule):
+            ada.set_backend(backend if ada.has_backend(backend) else "pytorch")
+        return self
+
+    def _triton_core_t(self, single: torch.Tensor, src: torch.Tensor | None) -> bool:
+        """The feature-major training core takes the call: a gradient, ``single`` [A, B, L, d] with ONE pair (B = 1) or a pair per sample
+        (A = 1, the logits' batch = B)."""
+        if single.ndim != 4 or not _wants_grad(self, single):
+            return False
+        return single.shape[1] == 1 or (single.shape[0] == 1 and src is not None and src.shape[0] == single.shape[1])
+
+    def _supports_triton(self, single, cond, pair=None, mask=None, *, bias=None) -> str | None:
+        from foldjet_engine.kernels.bias_only_attention.triton.pair_bias import supported as pair_bias_supported
+
+        why = triton_unsupported(single) or _activation_dtype_reason(single, cond)
+        if why is not None:
+            return why
+        if single.ndim != 4 or tuple(single.shape[:-1]) != tuple(cond.shape[:-1]):
+            return f"single / cond must be [A, B, L, d] with the same leading shape, got {tuple(single.shape)} / {tuple(cond.shape)}"
+        if bias is None:
+            if pair is None:
+                return "the pair or the block's precomputed bias"
+            if pair.dtype != single.dtype:
+                return f"pair dtype {pair.dtype} (the activations': {single.dtype})"
+            if self.ln_pair.bias is not None or self.to_bias.bias is not None or self.ln_pair.weight is None:
+                return "ln_pair with a weight and no offset, to_bias without a bias (the one-pass pair-bias kernel)"
+            if not pair_bias_supported(pair, self.n_head):
+                return "pair must be contiguous with a power-of-two width 16 .. 512 and at most 64 heads (the one-pass pair-bias kernel)"
+        if mask is not None and (mask.dtype != torch.bool or mask.ndim != 2):
+            return "mask must be a bool [B, L] key mask"
+        return self.ada_ln_in._supports_triton(single, cond)
+
+    def _forward_triton(self, single, cond, pair=None, mask=None, *, bias=None) -> torch.Tensor:
+        from foldjet_engine.kernels.bias_only_attention.triton.core_t import bias_only_core_t
+        from foldjet_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits, pair_bias_logits_bf16
+
+        x, single_res = self.ada_ln_in.forward_with_stream(single, cond)  # the AdaLN's "triton" backend (set_backend)
+        dt = single.dtype
+        wv, wg, wo = (m.weight.to(dt) for m in (self.to_value, self.to_gate, self.to_out))
+        with torch.autocast("cuda", enabled=False):
+            # [B, H, L, L], head-major: the one-pass pair LayerNorm + projection, or the hoisted bias
+            if bias is None:
+                assert pair is not None, "the pair or its hoisted bias"
+                if self._logits_mode(single, cond, pair, bias) == "bf16":  # inference, opt-in (foldjet_engine.bias_logits)
+                    logits = pair_bias_logits_bf16(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps).float()
+                else:
+                    logits = pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
+            else:
+                logits = bias.to(torch.promote_types(bias.dtype, torch.float32))
+            if mask is not None:
+                logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
+            attention = torch.softmax(logits, dim=-1).to(
+                dt
+            )  # logits and softmax fp32 (user rule 2026-11-19)  # [B, H, L, L], one softmax for every sample
+            if self._triton_core_t(single, pair if bias is None else bias):
+                p = attention[0] if single.shape[1] == 1 else attention
+                out = bias_only_core_t(x.reshape(-1, x.shape[-1]), wv, wg, wo, p).reshape(single.shape)
+            else:
+                value, gate = F.linear(x, torch.cat([wv, wg], 0)).split(wv.shape[0], dim=-1)
+                value = rearrange(value, "A B L (H D) -> A B L H D", H=self.n_head)
+                out = torch.einsum("bhij,abjhd->abihd", attention, value).flatten(-2)
+                out = F.linear(sigmoid_gate(gate, out), wo)
+            scale = F.linear(cond, self.to_scale.weight.to(dt), self.to_scale.bias.to(dt))
+            return single_res + sigmoid_gate(scale, out)

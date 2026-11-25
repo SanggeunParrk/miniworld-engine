@@ -1,8 +1,8 @@
 """ln_vt8 against the default ln_v: where the largest element differences sit (diagnostic)."""
 import torch
 
-from miniworld_engine.kernels.integrations import msa_f8_sm120 as X
-from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80
+from foldjet_engine.kernels.integrations import msa_f8_sm120 as X
+from foldjet_engine.kernels.pair_weighted_averaging.cuda import sm80
 
 for d, c, nt in ((64, 8, 64), (128, 8, 64), (128, 16, 32)):
     s, n = 70, 208

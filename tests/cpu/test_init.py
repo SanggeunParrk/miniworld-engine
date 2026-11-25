@@ -1,5 +1,5 @@
 # ruff: noqa: NPY002  -- numpy's legacy global state is what construction draws from (rng: legacy)
-"""Parameter initialisation from presets / config (miniworld_engine.modules.init, docs/init.md) over every requirements module class."""
+"""Parameter initialisation from presets / config (foldjet_engine.modules.init, docs/init.md) over every requirements module class."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from miniworld_engine.measure import config as cfgmod
-from miniworld_engine.modules import apply_init, describe_init
-from miniworld_engine.modules.init import PRESET_DIR, load_preset, preset_names
-from miniworld_engine.modules.primitives import Linear
-from miniworld_engine.modules.token_dit import TokenDiTBoltz2, TokenDiTProtenix
-from miniworld_engine.modules.triangle import BidirectionalTriangleAttention
+from foldjet_engine.measure import config as cfgmod
+from foldjet_engine.modules import apply_init, describe_init
+from foldjet_engine.modules.init import PRESET_DIR, load_preset, preset_names
+from foldjet_engine.modules.primitives import Linear
+from foldjet_engine.modules.token_dit import TokenDiTBoltz2, TokenDiTProtenix
+from foldjet_engine.modules.triangle import BidirectionalTriangleAttention
 
 with open(cfgmod.REQUIREMENTS, newline="") as _fh:
     _ROWS = list(csv.DictReader(_fh))
@@ -63,9 +63,9 @@ def _managed(m: nn.Module) -> list[str]:
 # --------------------------------------------------------------------------------------------------------------------- the presets
 def test_presets_ship_as_package_data():
     assert preset_names() == ["af3", "engine", "miniworld"]
-    assert PRESET_DIR.resolve() == Path(__file__).resolve().parents[2] / "src" / "miniworld_engine" / "modules" / "init_presets"
+    assert PRESET_DIR.resolve() == Path(__file__).resolve().parents[2] / "src" / "foldjet_engine" / "modules" / "init_presets"
     pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
-    globs = next(line for line in pyproject.splitlines() if line.startswith("miniworld_engine = [") and ".cu" in line)
+    globs = next(line for line in pyproject.splitlines() if line.startswith("foldjet_engine = [") and ".cu" in line)
     assert '"**/*.yaml"' in globs  # [tool.setuptools.package-data]: init_presets/*.yaml ship in the wheel
     assert load_preset("engine") == ({}, "legacy")
 
@@ -231,7 +231,7 @@ def test_most_specific_pattern_wins():
                 "TokenDiTBoltz2.attention.to_out": {"init": "default"},  # no wildcard
                 "AdaptiveLayerNorm.ln_cond": {"init": "zero"},  # a LayerNorm target
                 "AdaptiveLayerNorm.to_bias": {"init": "relu"},
-                "miniworld_engine.modules.norm:AdaptiveLayerNorm.to_bias": {"init": "glorot"},  # module-qualified beats the bare name
+                "foldjet_engine.modules.norm:AdaptiveLayerNorm.to_bias": {"init": "glorot"},  # module-qualified beats the bare name
             }
         },
     )

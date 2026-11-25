@@ -1,5 +1,5 @@
 import sys
-p = sys.argv[1] + "/src/miniworld_engine/kernels/integrations/bidir_triattn_h100.py"; s = open(p).read()
+p = sys.argv[1] + "/src/foldjet_engine/kernels/integrations/bidir_triattn_h100.py"; s = open(p).read()
 old = '''        return b200_bidir.lnb().ln_bwd128(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False, 2)
     dx, part = g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)
     return dx, (bo.bo_colsum(part) if bo is not None else part.sum(0))  # B200: one deterministic launch (torch: a slow tall reduce)'''

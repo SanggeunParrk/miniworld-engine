@@ -14,7 +14,7 @@ pytestmark = [
 @pytest.mark.parametrize("heads,dhp", [(24, 32), (12, 32), (16, 32), (8, 48), (16, 48)])
 @pytest.mark.parametrize("L", [128, 384])
 def test_gate32_bwd_matches_the_statements(heads, dhp, L):
-    from miniworld_engine.kernels.augmented_attention.cuda import apb
+    from foldjet_engine.kernels.augmented_attention.cuda import apb
 
     W = heads * dhp
     g = torch.Generator(device="cuda").manual_seed(7)

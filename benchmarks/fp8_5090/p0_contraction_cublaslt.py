@@ -1,6 +1,6 @@
 import torch
-exec(open(__import__("os").path.join(__import__("os").path.dirname(__file__), "_bench_util.py")).read().split("import miniworld_engine")[0])
-from miniworld_engine.kernels.trimul_inproj.cuda import _h100_fp8 as F
+exec(open(__import__("os").path.join(__import__("os").path.dirname(__file__), "_bench_util.py")).read().split("import foldjet_engine")[0])
+from foldjet_engine.kernels.trimul_inproj.cuda import _h100_fp8 as F
 fp8=torch.float8_e4m3fn
 for L,C in ((256,128),(512,128),(1024,128),(1536,64),(2048,32)):
     a=torch.randn(C,L,L,device="cuda",dtype=torch.bfloat16); b=torch.randn(C,L,L,device="cuda",dtype=torch.bfloat16)

@@ -99,7 +99,7 @@ Branch `b200opt-triattn`. `backend_versions["cuda:b200_sm100"]`: `_TriangleAtten
 `TriangleAttention*` classes), `BidirectionalTriangleAttention` 1 -> 2. Records: `$W/b2511/agents/opt-triattn/_o/out/`
 (`spd_<class>.jsonl` = every requirement case, cuda + the pytorch reference, after the changes; `acc_core.jsonl`, `acc_bo_v2.jsonl`;
 `sum_before.txt` / `sum_after.txt` = the summaries below; "before" = the speed tokens of the ladder round in
-`$W/eng-2511/src/miniworld_engine/judge/tokens/b200_sm100/`).
+`$W/eng-2511/src/foldjet_engine/judge/tokens/b200_sm100/`).
 
 **Ladder** (`docs/ladder.md`, the coordinator's ladder of 2026-11-16 with the B200 Triton tables): no violation in any of the six
 classes before or after (cuda < triton < pytorch in every timed case). The only miss against an external baseline was d_pair 256 x 8
@@ -187,7 +187,7 @@ Target of the round: on every requirement case both cards serve, B200 `cuda` med
 `b200r3-triattn`. `backend_versions["cuda:b200_sm100"]`: `_TriangleAttentionBase` 4 -> 5. Records:
 `$W/b2511/agents/r3-triattn/_r/out/` (`spd_<class>_v17.jsonl`: every requirement case, cuda, after the changes; `spd_tr_v18.jsonl`: training L128 / L256 on the final tree; `cb*.log`: the
 core's variants; `ftl*.log`: the time buckets; `acc_core_v17.jsonl`; `packchk.log`); "before" = the speed tokens in
-`$W/eng-2511/src/miniworld_engine/judge/tokens/b200_sm100/`, the H100 medians from `tokens/h100_sm90/`.
+`$W/eng-2511/src/foldjet_engine/judge/tokens/b200_sm100/`, the H100 medians from `tokens/h100_sm90/`.
 
 ### What bounds the forward core (head dim 32, L768, 4 heads: 661 us)
 

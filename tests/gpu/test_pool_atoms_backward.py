@@ -5,8 +5,8 @@ grad is refused."""
 import pytest
 import torch
 
-from miniworld_engine.modules import PoolAtoms
-from miniworld_engine.modules.functional import pool_atoms
+from foldjet_engine.modules import PoolAtoms
+from foldjet_engine.modules.functional import pool_atoms
 
 pytestmark = [pytest.mark.gpu]
 

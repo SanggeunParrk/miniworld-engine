@@ -9,11 +9,11 @@ from portable_helpers import randomize, relative
 from settings_helpers import override_setting
 from settings_helpers import policy_blackwell_portable_off as policy  # noqa: F401
 
-from miniworld_engine.kernels.integrations import bias_only_dit
-from miniworld_engine.kernels.bias_only_dit import cuda as C
-from miniworld_engine.kernels.bias_only_dit import reference as R
-from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
-from miniworld_engine.modules.exceptions import ImplementationType
+from foldjet_engine.kernels.integrations import bias_only_dit
+from foldjet_engine.kernels.bias_only_dit import cuda as C
+from foldjet_engine.kernels.bias_only_dit import reference as R
+from foldjet_engine.modules.bias_only_dit import BiasOnlyDiTBlock
+from foldjet_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,
@@ -168,7 +168,7 @@ INF3B = ("bo_front_bf16_sm100", "bo_pv_gate_inf_sm100", "bo_tail")  # front, cor
 def inf3b(monkeypatch):
     """The switch on (the default, set explicitly), and a spy that the runner really took the bf16 three-kernel step (a failed build
     would fall back silently)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import runner as RN
+    from foldjet_engine.kernels.bias_only_dit.cuda import runner as RN
 
     override_setting(monkeypatch, "bias_only_dit_inf3_bf16", "1")
     calls = []
@@ -185,7 +185,7 @@ def inf3b(monkeypatch):
 @pytest.mark.parametrize(("env", "want"), [(None, True), ("1", True), ("0", False)])
 def test_inf3_bf16_is_the_default(monkeypatch, env, want):
     """No switch set: the runner takes the three-kernel step; settings.bias_only_dit_inf3_bf16=0: the 12-launch step."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import runner as RN
+    from foldjet_engine.kernels.bias_only_dit.cuda import runner as RN
 
     if env is None:
         override_setting(monkeypatch, "bias_only_dit_inf3_bf16", None)
@@ -226,7 +226,7 @@ def test_tail_bf16_kernel_matches_fp64(xbf, obf, cl, da, M, T):
     """bo_tail_bf16.cu alone: out = x1 + gate2 (silu(xt Wa^T) (xt Wb^T)) Wsq^T, x1 = x + gate1 a Wo^T, xt = LN(x1) s2 + sh2 against
     fp64 on the same bf16 inputs -- the block update out - x within 1.5e-2 (bf16 xt and h, unit roundoff 2^-9), xt / h within their
     one bf16 rounding -- for x fp32 / bf16 and out fp32 / bf16; the scratch fully written; bit-identical on a rerun."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+    from foldjet_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
 
     bf = torch.bfloat16
     torch.manual_seed(M + da + cl)
@@ -291,7 +291,7 @@ def test_tail2_bf16_kernel_matches_fp64(xbf, obf, da, M, T):
     """bo_tail2_bf16.cu (the pair tail: two row tiles x 4 column groups per cluster of 8, tcgen05 cta_group::2) alone against fp64 at
     bo_tail_bf16.cu's bounds; its padded scratch fully written (an odd tile count -- M 128, 640, 3200 -- leaves the last pair one
     tile short: that tile writes its own padding rows and no output); bit-identical on a rerun."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+    from foldjet_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
 
     bf = torch.bfloat16
     torch.manual_seed(M + da + 3)
@@ -351,7 +351,7 @@ def test_front_bf16_kernel_matches_fp64(xbf, da, cl, M, T):
     """bo_front_bf16.cu alone: v | g = (LN(x) s1 + sh1) [Wv; Wg]^T against fp64 on the same bf16 inputs (within 1e-2: xa and v | g
     rounded to bf16), its xa scratch fully written and within its one bf16 rounding, bit-identical on a rerun; every cluster size,
     x fp32 / bf16."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+    from foldjet_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
 
     if cl == 6 and da == 1024:
         pytest.skip("front CL 6 splits 1536 v|g columns: 768 attention channels only")
@@ -465,7 +465,7 @@ def test_inf3_bf16_graph_is_three_kernels_and_replays(inf3b, static, n_head, d_h
 
     from tests.cuda_graph_nodes import graph_kernels
 
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     _, fast, _ = blocks(seed=5, n_head=n_head, d_head=d_head)
     S, bf = 5, torch.bfloat16
@@ -522,7 +522,7 @@ def test_inf3_bf16_kernels_do_not_spill(n_head, d_head):
     """No local memory in the bf16 three-kernel step's cubins (the served, non-TRACE builds): every front (CL 8 / 6 / 4, x fp32 /
     bf16), every tail (CL 8 / 6 and the pair tail, x fp32 / bf16, out fp32 / bf16) within __launch_bounds__(384, 1)'s 168 registers,
     and the PDL core for every sample group."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+    from foldjet_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
 
     dev, da = torch.cuda.current_device(), n_head * d_head
     tail, front = B16.TailBF16(dev, da), B16.FrontBF16(dev, da)
@@ -550,7 +550,7 @@ def test_inf3_bf16_cluster_choice(inf3b, monkeypatch, L, want, want_front):
     """A = 5, read off the runner's choices (spies, not the profiler). Tail: CL 8 at L384 (15 tiles, one round), CL 6 at L512 (20
     tiles: one round of 22 against two of 15), the pair tail (4) at L640 / L768 (25 / 30 tiles: one round of clusters of two tiles
     against two). Front: 8 / 6 / 4 / 4 (rounds of ~15 / 22 / 33 resident clusters x 8 / CL, ties to fewer rounds)."""
-    from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+    from foldjet_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
 
     picked, picked_front = [], []
     orig, orig_front = B16.TailBF16.cluster, B16.FrontBF16.cluster
@@ -710,8 +710,8 @@ def test_pv_core_p_early_selection(inf3b, monkeypatch, env):
     """Spies: the inference step's core takes the P_EARLY build at every block and the step's first front (only) launches without
     the programmatic attribute -- settings.bias_only_dit_inf3_p_early=0: neither; the training cores (forward / dV, PDL or not)
     and bo_pvdpb never take it."""
-    from miniworld_engine.kernels.integrations import bias_only_dit_train as TR
-    from miniworld_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
+    from foldjet_engine.kernels.integrations import bias_only_dit_train as TR
+    from foldjet_engine.kernels.bias_only_dit.cuda import inf3_bf16 as B16
 
     if env is None:
         override_setting(monkeypatch, "bias_only_dit_inf3_p_early", None)

@@ -13,7 +13,7 @@ YAML = "modules: [OuterProductMean]\nbackends: [pytorch, cuda]\nexternal: []\nro
 
 
 def _rig(tmp_path, dims, L, D, tag):
-    from miniworld_engine.measure import config as C, speed as S
+    from foldjet_engine.measure import config as C, speed as S
 
     p = tmp_path / "o.yaml"
     p.write_text(YAML)
@@ -46,7 +46,7 @@ def _err(y, g):
 
 @pytest.fixture
 def route():
-    from miniworld_engine.kernels.integrations import opm_fp8 as H, opm_fp8_b200 as B
+    from foldjet_engine.kernels.integrations import opm_fp8 as H, opm_fp8_b200 as B
 
     old = (H.POLICY, B.MIN_S)
     B._CACHES.clear()
@@ -110,7 +110,7 @@ def test_below_gate_and_off_are_bit_equal(tmp_path, route):
 
 
 def test_graph_equals_eager(tmp_path, route):
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     H, B = route
     m, inp, step, S, C, case = _rig(tmp_path, "d_msa=64;d_pair=128", 256, 1024, "normalize_before_proj=False)")
@@ -162,7 +162,7 @@ def test_wide_prologue_accuracy_and_stress(tmp_path, route, dims, tag):
 
 
 def test_wide_graph_equals_eager(tmp_path, route):
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     H, B = route
     m, inp, step, S, C, case = _rig(tmp_path, "d_msa=128;d_pair=256", 256, 1024, "normalize_before_proj=False)")
@@ -224,7 +224,7 @@ def test_fused_e4m3_below_gate_is_bit_equal(tmp_path, route):
 
 
 def _graph_replay_equals(step, ye):
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())

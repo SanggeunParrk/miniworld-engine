@@ -1,6 +1,6 @@
 import sys, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension
 L = 128; H = 4; cta = int(sys.argv[1])
 r = 2
 e = load_extension(name=f"n1tl_r{r}_c{cta}", sources=[str(K._SRC / "triattn_sm100.cu")], extra_cuda_cflags=[*K._flags(), f"-DTA_R={r}", f"-DTA_TL={cta}"])

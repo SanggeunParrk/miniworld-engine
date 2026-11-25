@@ -1,7 +1,7 @@
 import sys, copy, torch
-import miniworld_engine
-from miniworld_engine import fp8
-from miniworld_engine.modules import TriangleMultiplication
+import foldjet_engine
+from foldjet_engine import fp8
+from foldjet_engine.modules import TriangleMultiplication
 cases=[tuple(map(int,c.split(","))) for c in sys.argv[1:]]  # d,L,outgoing(1/0)
 flush=torch.empty(128<<20,dtype=torch.uint8,device="cuda")
 def graph_time(f,n=3):

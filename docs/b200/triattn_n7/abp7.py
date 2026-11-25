@@ -1,9 +1,9 @@
 # abp.py "MAC=v,MAC2=v" L cfgjson... : ONE variant per process (two extensions of one build in one process break the tail launch: invalid argument).
 # prints graph median (60 samples, L2 flushed) and the kernel spans. Macros are -D for the mod (front / tail) and core extensions.
 import sys, json, torch, hashlib
-from miniworld_engine.modules import triangle as T
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension
+from foldjet_engine.modules import triangle as T
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension
 d = [kv for kv in sys.argv[1].split(",") if kv]; L = int(sys.argv[2])
 tag = hashlib.md5(",".join(d).encode()).hexdigest()[:6] if d else ""
 dc = [x for x in d if x.startswith("TA_")]; dm = [x for x in d if not x.startswith("TA_")]; tagc = hashlib.md5(",".join(dc).encode()).hexdigest()[:6]; tagm = hashlib.md5(",".join(dm).encode()).hexdigest()[:6]

@@ -99,8 +99,8 @@ def _checked(device: torch.device) -> dict[str, Any]:
 def wanted(implementation) -> bool:
     """Should this module even ask the payload?  ``anthropic`` always (and refuses if it cannot serve); ``miniworld`` only when a payload
     is named and the engine is not pinned to Triton; every other option is the caller's explicit choice and is left alone."""
-    from miniworld_engine import settings
-    from miniworld_engine.modules.exceptions import ImplementationType
+    from foldjet_engine import settings
+    from foldjet_engine.modules.exceptions import ImplementationType
     if implementation == ImplementationType.ANTHROPIC:
         return True
     if implementation != ImplementationType.MINIWORLD:

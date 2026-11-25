@@ -28,19 +28,19 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine import settings
-from miniworld_engine.kernels.swa_dit.interface import (
+from foldjet_engine import settings
+from foldjet_engine.kernels.swa_dit.interface import (
     swa_dit_block,
     swa_dit_hoist_modulation,
 )
-from miniworld_engine.kernels.swa_dit.reference import (
+from foldjet_engine.kernels.swa_dit.reference import (
     swa_dit_block_reference,
     swa_dit_hoist_modulation_reference,
 )
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.swa_atom_attention import build_attention_params
-from miniworld_engine.modules.swa_atom_attention.module import _flash_backend
-from miniworld_engine.modules.swa_dit import SWADiTBlock
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.swa_atom_attention import build_attention_params
+from foldjet_engine.modules.swa_atom_attention.module import _flash_backend
+from foldjet_engine.modules.swa_dit import SWADiTBlock
 
 pytestmark = [
     pytest.mark.gpu,
@@ -87,7 +87,7 @@ def restore_settings():
 
 
 def _needs_cuda_stages():
-    from miniworld_engine.kernels.swa_dit.cuda.loader import ERRORS, extension, is_sm90
+    from foldjet_engine.kernels.swa_dit.cuda.loader import ERRORS, extension, is_sm90
 
     if not is_sm90():
         pytest.skip("the hand-CUDA stages are sm_90a kernels")
@@ -239,16 +239,16 @@ def test_the_attention_side_cuda_kernels_match_triton_kernel_by_kernel():
     forward is single-pass where Triton rescales online, and both round p / ds to bf16 at the same points)."""
     import triton
 
-    from miniworld_engine.autotune.shape_key import atom_key
-    from miniworld_engine.kernels.swa_dit.cuda.loader import extension
-    from miniworld_engine.kernels.swa_dit.interface import FP32_EPS
-    from miniworld_engine.kernels.swa_dit.triton.backward import (
+    from foldjet_engine.autotune.shape_key import atom_key
+    from foldjet_engine.kernels.swa_dit.cuda.loader import extension
+    from foldjet_engine.kernels.swa_dit.interface import FP32_EPS
+    from foldjet_engine.kernels.swa_dit.triton.backward import (
         _swa_attn_bwd_dkv_kernel,
         _swa_attn_bwd_dq_kernel,
         _swa_oproj_bwd_kernel,
         _swa_qkvg_bwd_kernel,
     )
-    from miniworld_engine.kernels.swa_dit.triton.forward import _swa_attn_fwd_kernel
+    from foldjet_engine.kernels.swa_dit.triton.forward import _swa_attn_fwd_kernel
 
     _needs_cuda_stages()
     ea, ep = extension("attn"), extension("slab")
@@ -616,7 +616,7 @@ def matmul_precision():
 
 
 def _needs_fp32_cuda():
-    from miniworld_engine.kernels.swa_dit.cuda.loader import ERRORS, extension, is_sm90
+    from foldjet_engine.kernels.swa_dit.cuda.loader import ERRORS, extension, is_sm90
 
     if not is_sm90():
         pytest.skip("the fp32 CUDA stages are sm_90a kernels")
@@ -630,7 +630,7 @@ def _needs_fp32_cuda():
 def _fp32_path(path: str):
     """The fp32 block on ``path`` for the duration: "triton" pins force_portable_kernels; "cuda" runs the extension under "high"
     matmul precision (TF32 allowed -- the only precision it serves) and checks that it really is what serves."""
-    from miniworld_engine.kernels.swa_dit.dispatch import _fp32_cuda
+    from foldjet_engine.kernels.swa_dit.dispatch import _fp32_cuda
 
     previous = torch.get_float32_matmul_precision()
     if path == "cuda":
@@ -876,14 +876,14 @@ def test_the_fp32_fused_module_compiles_fullgraph(path):
 def test_the_fp32_ops_satisfy_their_contract(path):
     """Schema and fake against the fp32 forward (both save modes) and backward: the fakes carry the per-output dtypes
     (bf16 attention operands, q's dtype elsewhere), which only an fp32 call can tell apart."""
-    from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_block_fwd
+    from foldjet_engine.kernels.swa_dit.dispatch import swa_dit_block_fwd
 
     leaves, cos, sin, seqused = _case(3, 2, 200, dtype=F32)
     q, c_base, wmod, *weights = (t.detach() for t in leaves)
     mod = swa_dit_hoist_modulation(c_base, wmod)
     cos, sin = cos.reshape(-1, cos.shape[-1]), sin.reshape(-1, sin.shape[-1])
-    fwd_op = torch.ops.miniworld_engine.swa_dit_block_fwd.default
-    bwd_op = torch.ops.miniworld_engine.swa_dit_block_bwd.default
+    fwd_op = torch.ops.foldjet_engine.swa_dit_block_fwd.default
+    bwd_op = torch.ops.foldjet_engine.swa_dit_block_bwd.default
     with _fp32_path(path):
         for save in (False, True):
             torch.library.opcheck(

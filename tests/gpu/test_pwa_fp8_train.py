@@ -8,7 +8,7 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.modules import MSAPairWeightedAveraging
+from foldjet_engine.modules import MSAPairWeightedAveraging
 
 pytestmark = [pytest.mark.gpu]
 
@@ -17,7 +17,7 @@ _H100 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 
 
 @pytest.fixture
 def f8t():
-    from miniworld_engine.kernels.integrations import pwa_fp8_train as F
+    from foldjet_engine.kernels.integrations import pwa_fp8_train as F
 
     saved = (F.PLACES, F.IMPL, F.DO_FMT, F.MIN_S, F.O8)
     F.MIN_S = 0  # the tests run small S
@@ -66,7 +66,7 @@ def _rel(a, b):
 
 @pytest.mark.skipif(not _H100, reason="H100")
 def test_fused_producers_match_pytorch_quantization(f8t) -> None:
-    from miniworld_engine.kernels.integrations import pwa_train as P
+    from foldjet_engine.kernels.integrations import pwa_train as P
 
     torch.manual_seed(0)
     s, n = 64, 256
@@ -85,7 +85,7 @@ def test_fused_producers_match_pytorch_quantization(f8t) -> None:
     assert _rel(v8.float() / 8.0, ref) < 0.04
     assert abs(float(amax) - 8 * float(ref.abs().max())) <= 0.02 * float(amax)
     w = torch.softmax(torch.randn(8, n, n, device="cuda"), -1).bfloat16()
-    from miniworld_engine.kernels.integrations import pwa_fp8 as I
+    from foldjet_engine.kernels.integrations import pwa_fp8 as I
 
     assert torch.equal(f8t._glue8().w_quant_t(w).view(torch.uint8), f8t._t8(I._ext().w_quant(w)).view(torch.uint8))
 
@@ -172,7 +172,7 @@ def test_bwd_only_producer_and_route(f8t) -> None:
     """Round 2 (backward-only FP8: bf16 forward, FP8 dv / dw): the VT_BF producer's bf16 v is ln_vg's v (bit for bit), its e4m3 v the
     same bytes as the full route's; the forward output equals the bf16 native default's; gradients stay inside the FP8 budget; the
     step is deterministic and graph replay equals eager."""
-    from miniworld_engine.kernels.integrations import pwa_train as P
+    from foldjet_engine.kernels.integrations import pwa_train as P
 
     torch.manual_seed(0)
     s, n = 64, 256

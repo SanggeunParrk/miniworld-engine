@@ -82,13 +82,13 @@ TriAttn 67 (training; 66 inference)).
 
 ## Where the code is
 
-- Sources: `src/miniworld_engine/kernels/<family>/cuda/` (`sm100*`, `b200_*` directories and files), the integrations
+- Sources: `src/foldjet_engine/kernels/<family>/cuda/` (`sm100*`, `b200_*` directories and files), the integrations
   `kernels/integrations/*_b200.py` / `*_sm100.py`, the shared graph RNG writer `kernels/_graph_rng_sm100.{py,cu}` (the one
   `aten::fill_.Scalar` override on the B200).
-- Prebuild: `python -m miniworld_engine.kernels._prebuild --arch sm100 --list | --check | --jobs N` plans and builds every cubin /
+- Prebuild: `python -m foldjet_engine.kernels._prebuild --arch sm100 --list | --check | --jobs N` plans and builds every cubin /
   extension the routed shapes need, from the requirements rows.
 - Tests: `tests/gpu/test_*_b200.py` (GPU), the CPU gate is the repository's `tests/cpu`.
-- Tokens: `src/miniworld_engine/judge/tokens/b200_sm100/`; `python -m miniworld_engine.judge --gpu b200_sm100 owed` says what a
+- Tokens: `src/foldjet_engine/judge/tokens/b200_sm100/`; `python -m foldjet_engine.judge --gpu b200_sm100 owed` says what a
   version change owes.
 
 ## Debug / probe switches

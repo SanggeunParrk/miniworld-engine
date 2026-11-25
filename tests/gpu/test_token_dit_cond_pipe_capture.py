@@ -32,7 +32,7 @@ def _h100() -> bool:
 
 def _stack(model: str):
     """24 blocks of ``model``'s token DiT (built once per model and test session)."""
-    from miniworld_engine.modules import TokenDiT
+    from foldjet_engine.modules import TokenDiT
 
     if model not in _STACKS:
         _STACKS.clear()  # one model's stack at a time
@@ -50,7 +50,7 @@ def _stack(model: str):
 
 @contextlib.contextmanager
 def _mode(mode: str):
-    from miniworld_engine.capture import static_inputs, static_weights
+    from foldjet_engine.capture import static_inputs, static_weights
 
     with contextlib.ExitStack() as stack:
         if mode in ("weights", "weights+inputs"):
@@ -66,8 +66,8 @@ def _mode(mode: str):
 @pytest.mark.parametrize("mode", ["none", "weights", "inputs", "weights+inputs"])
 @pytest.mark.parametrize("model", list(MODELS))
 def test_capture_replay_equals_eager(model, mode, nb, shared, L):
-    from miniworld_engine.capture import clear_weight_caches
-    from miniworld_engine.kernels.conditioned_transition import cuda as C
+    from foldjet_engine.capture import clear_weight_caches
+    from foldjet_engine.kernels.conditioned_transition import cuda as C
 
     dc, dp = MODELS[model]
     blocks = _stack(model)[:nb]

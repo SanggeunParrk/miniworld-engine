@@ -55,7 +55,7 @@ class Model(torch.nn.Module):
 
     def __init__(self, stack: str):
         super().__init__()
-        from miniworld_engine.modules import AtomDiTStack, AttentionPairBias, TokenDiTStack
+        from foldjet_engine.modules import AtomDiTStack, AttentionPairBias, TokenDiTStack
 
         tkey, dc, dp, akey = STACKS[stack]
         self.dc, self.dp = dc, dp
@@ -110,7 +110,7 @@ class Captured:
     """A step's graph, its outputs and the ``static_inputs()`` handle (kept together, as FoldForge's per-shape cache entry)."""
 
     def __init__(self, step: Step, seed: int):
-        from miniworld_engine.capture import static_inputs, static_weights
+        from foldjet_engine.capture import static_inputs, static_weights
 
         self.step = step
         step.write_fold(seed)
@@ -163,7 +163,7 @@ def _replay_new_fold(c: Captured, seed: int) -> tuple[torch.Tensor, ...]:
 
 
 def _run(stack: str, lengths: tuple[int, ...]) -> None:
-    from miniworld_engine.capture import clear_weight_caches
+    from foldjet_engine.capture import clear_weight_caches
 
     model = Model(stack)
     graphs: list[Captured] = []
@@ -205,9 +205,9 @@ def test_first_shape_replays_after_lru_eviction(stack):
 def test_holds_go_with_the_handle():
     """The holds live exactly as long as the handle: the capture's reads (the conditioning chunks among them) are held by it, nothing is
     held process-wide, and ``release()`` lets them go -- the chunks another shape's capture evicted are then freed."""
-    from miniworld_engine.capture import clear_weight_caches
-    from miniworld_engine.kernels import _capture
-    from miniworld_engine.kernels.conditioned_transition import cuda as ct
+    from foldjet_engine.capture import clear_weight_caches
+    from foldjet_engine.kernels import _capture
+    from foldjet_engine.kernels.conditioned_transition import cuda as ct
 
     model = Model("boltz2")
     try:

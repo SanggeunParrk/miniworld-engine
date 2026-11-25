@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine import settings
-from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels.transition.triton import fused as _tf
+from foldjet_engine import settings
+from foldjet_engine.kernels._compile import opaque
+from foldjet_engine.kernels.transition.triton import fused as _tf
 
 __all__ = ["triton_transition_fused"]
 
@@ -39,7 +39,7 @@ def _ln_bwd_hook(dxn, x2, rstd, c1, gamma):
         and dxn.is_contiguous()
     ):
         try:
-            from miniworld_engine.kernels.layernorm.cuda import layer_norm_bwd_cuda
+            from foldjet_engine.kernels.layernorm.cuda import layer_norm_bwd_cuda
 
             return layer_norm_bwd_cuda(dxn, x2, gamma, c1 / rstd, rstd)
         except Exception:  # noqa: BLE001 (build unavailable / dtype edge) -> Triton
@@ -56,7 +56,7 @@ def _gatebwd_hook(x2, rstd, c1, ln_weight, ln_bias, expand_a_weight, expand_b_we
         and x2.shape[0] % 128 == 0
     ):
         try:
-            from miniworld_engine.kernels.transition.cuda import transition_expand_gatebwd_wgmma
+            from foldjet_engine.kernels.transition.cuda import transition_expand_gatebwd_wgmma
 
             return transition_expand_gatebwd_wgmma(x2, rstd, c1, ln_weight, ln_bias, expand_a_weight, expand_b_weight, grad_expand)
         except Exception:  # noqa: BLE001 build/launch unavailable -> Triton
@@ -109,11 +109,11 @@ def _fused_fwd_cuda(
         and _cuda_b2b_train_enabled()
         and K in (128, 256)
     ):
-        from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
+        from foldjet_engine.kernels.layernorm_linear.triton.stats import stats_triton
 
         rstd, c1 = stats_triton(x2, eps, shape_key=shape_key)
         try:
-            from miniworld_engine.kernels.transition.cuda import transition_b2b_fwd
+            from foldjet_engine.kernels.transition.cuda import transition_b2b_fwd
 
             out = transition_b2b_fwd(
                 x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),

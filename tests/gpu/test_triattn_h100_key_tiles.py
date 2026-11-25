@@ -7,8 +7,8 @@ The core counts the live tiles from the key mask itself (``h100_sm90.key_args``)
 import pytest
 import torch
 
-from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
-from miniworld_engine.modules.triangle import TriangleAttention
+from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+from foldjet_engine.modules.triangle import TriangleAttention
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

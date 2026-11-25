@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine.modules import Transition
+from foldjet_engine.modules import Transition
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0), reason="needs a B200 (sm_100)"

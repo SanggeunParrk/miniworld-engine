@@ -1,6 +1,6 @@
 """Removal ablations of opm_fused_kernel vs cuBLAS product, cuda-event timed, standalone. python ablate.py L S"""
 import sys, torch
-from miniworld_engine.kernels.integrations import opm_train as ot
+from foldjet_engine.kernels.integrations import opm_train as ot
 L, S = int(sys.argv[1]), int(sys.argv[2]); dev = torch.device("cuda"); bf = torch.bfloat16
 torch.manual_seed(0)
 m = torch.randn(S, L, 64, device=dev, dtype=bf); mk = torch.rand(S, L, device=dev) > 0.1

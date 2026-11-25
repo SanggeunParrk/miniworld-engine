@@ -12,8 +12,8 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.kernels.integrations import augattn_sm80
-from miniworld_engine.measure import config as C
+from foldjet_engine.kernels.integrations import augattn_sm80
+from foldjet_engine.measure import config as C
 
 pytestmark = [pytest.mark.gpu]
 
@@ -23,7 +23,7 @@ def _a100() -> bool:  # the sm_80 route: A100 and RTX 5090 (the same sources bui
 
 
 def _token(dtype: str) -> typing.Any:
-    from miniworld_engine.modules.token_dit import TOKEN_DIT_MODELS
+    from foldjet_engine.modules.token_dit import TOKEN_DIT_MODELS
 
     m = TOKEN_DIT_MODELS["protenix"](d_single=768, d_cond=384, d_pair=128, n_head=16, n=2).cuda().float()
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))

@@ -40,7 +40,7 @@ def _need_card():
 
 
 def _build(case: str):
-    from miniworld_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
+    from foldjet_engine.modules.token_dit import TokenDiTMiniWorldBiasOnly
 
     sw, w0, off, spike = CASES[case]
     dev = "cuda"
@@ -112,8 +112,8 @@ def test_logits_softmax_fp32(case: str, dtype: str):
     i64 = [t.double() for t in ins]
     gy_q = gy.to(act)
     # 1. the attention distribution of the block, from the kernels' own P: ours (eval) vs the fp64 softmax of the exact logits
-    from miniworld_engine.kernels.augmented_attention.cuda import sm80 as aa
-    from miniworld_engine.kernels.integrations import bias_only_dit_sm80 as bo
+    from foldjet_engine.kernels.augmented_attention.cuda import sm80 as aa
+    from foldjet_engine.kernels.integrations import bias_only_dit_sm80 as bo
 
     lg = _logits64(m64, i64[2])
     ref = torch.softmax(lg.masked_fill(~mask[:, None, None, :], float("-inf")), -1)
@@ -125,7 +125,7 @@ def test_logits_softmax_fp32(case: str, dtype: str):
     tv32 = 0.5 * (P32.double().view(1, H, L, L) - ref).abs().sum(-1).max().item()
     tv5090 = None
     if dtype == "fp32" and torch.cuda.get_device_capability() == (12, 0):  # the RTX 5090's fp32 inference path: the pair bias and the softmax in one pass (pair_softmax_f32)
-        from miniworld_engine.kernels.bias_only_dit.cuda import sm80 as core
+        from foldjet_engine.kernels.bias_only_dit.cuda import sm80 as core
 
         P5 = core.pair_softmax_f32(ins[2][0].contiguous(), wcm, mask, L, 1e-5, 0)
         tv5090 = 0.5 * (P5.double().view(1, H, L, L) - ref).abs().sum(-1).max().item()

@@ -16,8 +16,8 @@ def _rel(a, b):
 
 
 def _mods():
-    from miniworld_engine.kernels.conditioned_transition import cuda as C
-    from miniworld_engine.kernels.conditioned_transition.triton import (
+    from foldjet_engine.kernels.conditioned_transition import cuda as C
+    from foldjet_engine.kernels.conditioned_transition.triton import (
         token_dit_kernels as T,
     )
 
@@ -108,8 +108,8 @@ def test_pair_bias_all_matches_triton(dtype):
 def test_runner_takes_the_cuda_rows_on_b200():
     from types import SimpleNamespace
 
-    from miniworld_engine.kernels.conditioned_transition import cuda as C
-    from miniworld_engine.kernels.conditioned_transition.cuda.token_dit_composed import (
+    from foldjet_engine.kernels.conditioned_transition import cuda as C
+    from foldjet_engine.kernels.conditioned_transition.cuda.token_dit_composed import (
         _row_kernels,
     )
 
@@ -125,7 +125,7 @@ def test_runner_takes_the_cuda_rows_on_b200():
 def test_gemm_swiglu_sm100_matches_fp32(M, monkeypatch):
     """The sm_100a expand GEMM with the SwiGLU epilogue against silu(x Wa^T) (x Wb^T) in fp32 on the same bf16 operands;
     M = 200 exercises the partial row tile (TMA clips the store)."""
-    from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
+    from foldjet_engine.kernels.conditioned_transition.cuda import gemm_swiglu
 
     g = torch.Generator(device="cuda").manual_seed(M)
     K, H = 768, 1536
@@ -153,7 +153,7 @@ def test_gemm_swiglu_sm100_matches_fp32(M, monkeypatch):
 @pytest.mark.parametrize("M", [128, 1920])
 def test_gemm_swiglu_sm90_matches_fp32(M):
     """The restored H100 fused GEMM follows upstream's [Wa; Wb] pack and supports the minimum tile."""
-    from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
+    from foldjet_engine.kernels.conditioned_transition.cuda import gemm_swiglu
 
     g = torch.Generator(device="cuda").manual_seed(M)
     K, H = 768, 1536
@@ -198,7 +198,7 @@ def test_narrow_pair_bias_with_mask_matches_triton(dtype, nb):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_qknorm_rows_matches_rms_norm(dtype):
     """In place on the q | k columns of a q|k|v|g row, v and g untouched; per 48-wide head against torch's rms_norm."""
-    from miniworld_engine.kernels.conditioned_transition import cuda as C
+    from foldjet_engine.kernels.conditioned_transition import cuda as C
 
     g = torch.Generator(device="cuda").manual_seed(3)
     M, D = 1000, 768
@@ -221,7 +221,7 @@ def test_qknorm_rows_matches_rms_norm(dtype):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_cond_rows_matches_layer_norm(dtype):
     """cn = LayerNorm(c) without affine and cc = c, from one pass, against torch."""
-    from miniworld_engine.kernels.conditioned_transition import cuda as C
+    from foldjet_engine.kernels.conditioned_transition import cuda as C
 
     g = torch.Generator(device="cuda").manual_seed(4)
     c = (torch.randn(384, 384, device="cuda", generator=g) * 3 + 1).to(dtype)

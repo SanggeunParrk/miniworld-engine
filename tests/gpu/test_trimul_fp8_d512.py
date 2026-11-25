@@ -20,7 +20,7 @@ def _rel(a, b) -> float:
 
 
 def _module(outgoing):
-    from miniworld_engine.modules.triangle import TriangleMultiplication
+    from foldjet_engine.modules.triangle import TriangleMultiplication
 
     d = 512
     m = TriangleMultiplication(d, outgoing=outgoing, master_weights=True, backend="cuda").cuda().eval()
@@ -34,7 +34,7 @@ def _module(outgoing):
 
 
 def _route(m, x, mask):
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     old = (F8.POLICY, F8.GUARD, F8._MINL_ENV)
     try:
@@ -71,7 +71,7 @@ def test_d512_planes_accuracy(outgoing: bool, n: int) -> None:
 def test_d512_gates() -> None:
     """One direction at L % 128 == 0 only; bidirectional D512 and other lengths keep the bf16 default route."""
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     m, _ = _module(True)
     old = (F8.POLICY, F8._MINL_ENV)
@@ -96,7 +96,7 @@ def test_d512_gates() -> None:
 def test_d512_default_untouched_when_off() -> None:
     """FP8 off (POLICY None): the default route's output does not depend on the FP8 module state."""
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     assert F8.POLICY is None
     torch.manual_seed(2)
@@ -113,7 +113,7 @@ def test_d512_default_untouched_when_off() -> None:
 
 def test_d512_graph_replay_equals_eager() -> None:
     _needs_h100()
-    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
+    from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style_fp8 as F8
 
     torch.manual_seed(3)
     m, _ = _module(True)

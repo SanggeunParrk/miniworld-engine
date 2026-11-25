@@ -1,5 +1,5 @@
 import json,sys,glob,collections
-root="/NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-merge/src/miniworld_engine/judge/tokens/h100_sm90"
+root="/NHNHOME/WORKSPACE/26mohw002_A/psk6950/b2511/agents/n2-merge/src/foldjet_engine/judge/tokens/h100_sm90"
 h={}
 for f in glob.glob(root+"/*.jsonl"):
     for l in open(f):

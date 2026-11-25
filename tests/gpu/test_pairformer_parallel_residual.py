@@ -9,10 +9,10 @@ reference's arithmetic (``test_requests_api_gpu.py``)."""
 import pytest
 import torch
 
-import miniworld_engine.modules.pairformer as pf
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.pairformer import PairformerBlock, PairformerConfig
-from miniworld_engine.modules.primitives import key_mask
+import foldjet_engine.modules.pairformer as pf
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.pairformer import PairformerBlock, PairformerConfig
+from foldjet_engine.modules.primitives import key_mask
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device")]
 

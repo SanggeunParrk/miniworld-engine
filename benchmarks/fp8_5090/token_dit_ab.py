@@ -13,7 +13,7 @@ import argparse
 import torch
 from dit_common import Rig, ab, case, err, graph
 
-from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as F
+from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8_sm120 as F
 
 ap = argparse.ArgumentParser()
 ap.add_argument("cases", nargs="+")

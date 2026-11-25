@@ -9,10 +9,10 @@
 import pytest
 import torch
 
-from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as H
-from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm_lt_bidir as T
-from miniworld_engine.kernels.trimul_inproj.cuda import h100_inference as HI
-from miniworld_engine.modules.triangle import BidirectionalTriangleMultiplication as BT
+from foldjet_engine.kernels.trimul_inproj.cuda import _h100_bmm as H
+from foldjet_engine.kernels.trimul_inproj.cuda import _h100_bmm_lt_bidir as T
+from foldjet_engine.kernels.trimul_inproj.cuda import h100_inference as HI
+from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication as BT
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

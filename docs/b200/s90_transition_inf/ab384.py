@@ -1,9 +1,9 @@
 # ab384.py FLAG... -- CASE...: graph median (L2 flushed) of Transition cuda inference at D,n,M,bf16 cases with the D 384 inference build flags FLAG... (-DSTAG=3 ...)
 import statistics, sys
 import torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
 a = sys.argv[1:]; i = a.index("--"); fw.D384_INFER_FLAGS = tuple(a[:i]); cases = a[i + 1:]
-from miniworld_engine.modules import Transition
+from foldjet_engine.modules import Transition
 torch.backends.cuda.matmul.allow_tf32 = True
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
 def graph(fn):

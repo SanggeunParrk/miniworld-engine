@@ -19,7 +19,7 @@ def _needs_h100() -> None:
 
 
 def _module(n: int, d: int = 128):
-    from miniworld_engine.modules.transition import Transition
+    from foldjet_engine.modules.transition import Transition
 
     m = Transition(d, n, master_weights=True, backend="cuda").cuda().eval()
     g = torch.Generator(device="cpu").manual_seed(n)
@@ -40,7 +40,7 @@ def _variant(F, g1=1, g2=1, sigt=1, slots=4, guard="sync"):
 
 def test_perm_k_is_the_fragment_order() -> None:
     """Logical position 4 t + q of an e4m3 k32 fragment reads the physical column a bf16 / fp32 fragment thread t holds at its q-th slot."""
-    from miniworld_engine.kernels.transition.cuda.fp8_sm90a import _perm_k
+    from foldjet_engine.kernels.transition.cuda.fp8_sm90a import _perm_k
 
     p = _perm_k(64, "cpu").tolist()
     assert sorted(p) == list(range(64))
@@ -56,7 +56,7 @@ def test_perm_k_is_the_fragment_order() -> None:
 @pytest.mark.parametrize("cfg", [(1, 1, 1), (1, 0, 1), (0, 1, 1), (1, 1, 0)])
 def test_fp8_error_vs_fp64(n: int, rows: int, cfg) -> None:
     _needs_h100()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as F
 
     assert F.POLICY is None
     torch.manual_seed(0)
@@ -84,7 +84,7 @@ def test_fp8_error_vs_fp64(n: int, rows: int, cfg) -> None:
 def test_wide_fp8_error_vs_fp64(d: int, n: int, g1: int) -> None:
     """D 384 / 512: e4m3 h + e4m3 squeeze (and the e4m3 expand with G1): inside the e4m3 storage error, finite, no guard fallback."""
     _needs_h100()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as F
 
     m = _module(n, d)
     x = torch.randn(1, 300 * 128, d, device="cuda").bfloat16()
@@ -108,7 +108,7 @@ def test_wide_fp8_error_vs_fp64(d: int, n: int, g1: int) -> None:
 def test_bf16_build_reproduces_default(n: int) -> None:
     """G1 = G2 = 0 with the 2.5.12 sigmoid: the same products, roundings and accumulation order as the default kernel -> the same bytes."""
     _needs_h100()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as F
 
     m = _module(n)
     x = torch.randn(1, 64 * 128, 128, device="cuda").bfloat16()
@@ -124,7 +124,7 @@ def test_bf16_build_reproduces_default(n: int) -> None:
 
 def test_guard_rescales_a_saturated_h_scale() -> None:
     _needs_h100()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as F
 
     m = _module(4)
     x = torch.randn(1, 4096, 128, device="cuda").bfloat16()
@@ -156,7 +156,7 @@ def test_guard_rescales_a_saturated_h_scale() -> None:
 
 def test_default_route_untouched_when_off() -> None:
     _needs_h100()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as F
 
     assert F.POLICY is None
     m = _module(4)

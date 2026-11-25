@@ -1,6 +1,6 @@
 # Judge
 
-`miniworld_engine.judge` decides, from the measurers' records and human-managed versions, which requirement cases have a current
+`foldjet_engine.judge` decides, from the measurers' records and human-managed versions, which requirement cases have a current
 result (a **token**) and which are owed a measurement. It never measures; the measurers never decide. Every comparison is of version
 numbers and plain values a person sets or can read.
 
@@ -38,8 +38,8 @@ another kernel in a way that changes results bumps its own `version`.
 A pending difference is one question per (part, old, new), answered once for every case it affects:
 
 ```sh
-python -m miniworld_engine.judge sign measurer:speed 1 2 keep --reason "statistics refactor, same timing"
-python -m miniworld_engine.judge sign env:torch 2.13.0+cu129 2.13.1+cu129 remeasure --reason "new cuBLAS"
+python -m foldjet_engine.judge sign measurer:speed 1 2 keep --reason "statistics refactor, same timing"
+python -m foldjet_engine.judge sign env:torch 2.13.0+cu129 2.13.1+cu129 remeasure --reason "new cuBLAS"
 ```
 
 Answers are appended to `judge/answers.jsonl` (the latest answer wins).
@@ -63,11 +63,11 @@ token of the same case.
 ## Commands
 
 ```sh
-python -m miniworld_engine.judge [--gpu h100_sm90|a100_sm80] owed [--plan DIR] [--groups N] [--redo failed ...]
+python -m foldjet_engine.judge [--gpu h100_sm90|a100_sm80] owed [--plan DIR] [--groups N] [--redo failed ...]
                                    [--again pytorch cueq anthropic ...] [--again-module M ...] [--again-kind accuracy|speed]
-python -m miniworld_engine.judge [--gpu CARD] issue RECORDS...    # files or directories of *.jsonl (*.plans.jsonl ignored)
-python -m miniworld_engine.judge sign PART OLD NEW keep|remeasure --reason TEXT
-python -m miniworld_engine.judge [--gpu CARD] status               # token counts per (kind, backend, status)
+python -m foldjet_engine.judge [--gpu CARD] issue RECORDS...    # files or directories of *.jsonl (*.plans.jsonl ignored)
+python -m foldjet_engine.judge sign PART OLD NEW keep|remeasure --reason TEXT
+python -m foldjet_engine.judge [--gpu CARD] status               # token counts per (kind, backend, status)
 ```
 
 - `owed` prints carried / owed / pending counts per kind, the reasons for owed cases, and the open questions with the `sign` command
@@ -87,11 +87,11 @@ python -m miniworld_engine.judge [--gpu CARD] status               # token count
 
 Run the cycle on the card the results are for (records carry the card they were measured on, and `issue` drops records of another card).
 
-1. On a CPU allocation: `python -m miniworld_engine.judge --gpu CARD owed --plan DIR`.
+1. On a CPU allocation: `python -m foldjet_engine.judge --gpu CARD owed --plan DIR`.
 2. One job per group, each **1 GPU, `--time=00:10:00`**. The job reads `DIR/G<i>` and for every line runs
-   `python -m miniworld_engine.measure.<kind> <cfg> --out DIR/out/<kind>.<Module>.jsonl`. Records are appended and flushed one by one, so
+   `python -m foldjet_engine.measure.<kind> <cfg> --out DIR/out/<kind>.<Module>.jsonl`. Records are appended and flushed one by one, so
    a job stopped at its time limit keeps every case it finished.
-3. On a CPU allocation: `python -m miniworld_engine.judge --gpu CARD issue DIR/out`.
+3. On a CPU allocation: `python -m foldjet_engine.judge --gpu CARD issue DIR/out`.
 4. Repeat from step 1: cases a job did not reach are still owed and go into the next plan. Stop when `owed` reports 0 owed; answer
    any pending questions with `sign`.
 

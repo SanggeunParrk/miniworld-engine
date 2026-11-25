@@ -9,9 +9,9 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import BidirectionalTriangleMultiplication, TriangleAttention, TriangleMultiplication
-from miniworld_engine.modules.functional import dropout_scale
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import BidirectionalTriangleMultiplication, TriangleAttention, TriangleMultiplication
+from foldjet_engine.modules.functional import dropout_scale
 
 pytestmark = [pytest.mark.gpu]
 
@@ -20,7 +20,7 @@ needs_h100 = pytest.mark.skipif(not H100, reason="H100 (sm_90) kernel")
 
 
 def _kernel():
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_triattn
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_triattn
 
     return h100_triattn
 
@@ -121,7 +121,7 @@ def _module_case(cls, kwargs, n):
 )
 def test_module_training_outputs_unchanged(cls, kwargs, monkeypatch):
     """The cuda training path with the kernel's draw == the same path drawing with torch (the same seed): outputs and gradients."""
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_triattn
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_triattn
 
     m, pair, mask = _module_case(cls, kwargs, 128)
     with torch.no_grad():

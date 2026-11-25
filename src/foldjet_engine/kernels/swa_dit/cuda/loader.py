@@ -1,0 +1,129 @@
+"""JIT build of the sm_90a bf16 CUDA kernels of the fused SWA atom DiT block.
+
+Five extensions (``SOURCES``): team-gm's three wgmma kernels (``qkvg``, ``fwd``, ``bwd``, below), the window attention
+forward + backward (``attn``: ``swa_attn.cu``) and the slab kernels (``slab``: ``swa_slab.cu`` -- qkvg fwd / bwd, out-projection
+fwd / bwd, FFN fwd / bwd for small row counts). The two engine sources use mma.sync + cp.async and share this module's flags.
+
+Moved from team-gm ``swa_fused_triton._cuda_ext`` (commit 14f2c73). Same sources, same nvcc flags (``-O3``,
+``-gencode=arch=compute_90a,code=sm_90a``, ``--use_fast_math``); what changed is where and how they build:
+
+* under ``$settings.engine_jit_root/<extension>`` (default ``~/.cache/miniworld_engine_jit``), one directory per
+  extension, instead of torch's extension cache or team-gm's ``SWA_CUDA_BUILD``. Set the root per checkout/GPU so
+  concurrent builds do not collide;
+* through ``kernels._nvcc.load_extension``, which reclaims a lock left by a killed build (NFS-safe: it trusts the
+  server's ctime, not an NFS create verifier) and bounds the wait on a live one;
+* with ``kernels._nvcc.host_flags()``, so nvcc is driven by a host g++ it can parse.
+
+``extension(which)`` returns None on a card that is not sm_90 (the caller takes the Triton kernel; the reason is kept in
+``ERRORS[which]``); a failed build or load on sm_90 raises ``_nvcc.KernelBuildError`` -- never a silent fallback.
+
+The bf16 kernels (``swa_qkvg_fwd.cu``, ``swa_ffn_fwd.cu``, ``swa_ffn_bwd.cu``) serve d_atom 128, 4 heads x 32,
+SwiGLU hidden 256, bf16 operands with fp32 accumulate and an fp32 [B*S, 768] modulation.
+``swa_fp32.cu`` (stage "fp32") is the whole fp32 block,
+forward and backward, on tf32 wgmma with a bf16 window attention; its header says what each kernel does.
+"""
+
+from __future__ import annotations
+
+import functools
+import os
+from pathlib import Path
+from typing import Any
+
+import torch
+
+_DIR = Path(__file__).resolve().parent
+
+#: stage -> source file stem (and the python-visible entry point it defines).
+SOURCES = {
+    "qkvg": "swa_qkvg_fwd",
+    "fwd": "swa_ffn_fwd",
+    "bwd": "swa_ffn_bwd",
+    # bf16 window attention fwd + bwd, and the out-projection / qkvg backwards (mma.sync; see the files' headers)
+    "attn": "swa_attn",
+    "slab": "swa_slab",
+    "fp32": "swa_fp32",  # every fp32 stage (tf32 wgmma + bf16 attention), see swa_fp32.cu
+    "mod": "swa_mod",
+    "wgrad": "swa_wgrad",
+    "wgwg": "swa_wgrad_wg",
+    "wgwg32": "swa_wgrad_wg_f32",
+}
+SOURCES.update(qkvg_small="swa_qkvg_fwd", fwd_small="swa_ffn_fwd", bwd_overwrite="swa_ffn_bwd")
+
+# Separate build identities preserve the legacy kernels and their schedules.
+_VARIANT_FLAGS = {
+    "qkvg_small": ["-DMW_SWA_QKVG_SP=2", "-DMW_SWA_FWD_STAGES=2"],
+    "fwd_small": ["-DMW_SWA_FFN_SP=4", "-DMW_SWA_FWD_STAGES=2"],
+    "bwd_overwrite": ["-DMW_SWA_FFN_OVERWRITE=1"],
+}
+
+_EXT: dict[str, Any] = {}
+#: stage -> why the extension is unavailable (repr of the build exception).
+ERRORS: dict[str, str] = {}
+
+
+@functools.lru_cache(maxsize=16)
+def _capability(index: int) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(index)
+
+
+def is_sm90(device: torch.device | None = None) -> bool:
+    """True on Hopper (sm_90) exactly: the kernels are sm_90a wgmma/TMA code."""
+    if not torch.cuda.is_available():
+        return False
+    if device is not None and device.type != "cuda":
+        return False
+    index = device.index if device is not None and device.index is not None else torch.cuda.current_device()
+    return _capability(index) == (9, 0)
+
+
+def extension(which: str) -> Any:
+    """The built extension for stage ``which`` ("qkvg", "fwd", "bwd" or "fp32"), or None on a card that is not sm_90.
+
+    Built once per process on first use; a failed build or load raises ``_nvcc.KernelBuildError``.
+    """
+    if which in _EXT:
+        return _EXT[which]
+    if not is_sm90():
+        ERRORS[which] = "not an sm_90 device"
+        _EXT[which] = None
+        return None
+    try:
+        ext = _build(which)
+    except Exception as ex:  # a build / load failure is an error, never a fallback
+        from foldjet_engine.kernels._nvcc import build_failed
+
+        build_failed(f"sm_90a SWA atom DiT extension {which!r}", ex)
+        return None  # reached only while planning (build_failed returns there)
+    _EXT[which] = ext
+    return ext
+
+
+def _build(which: str) -> Any:
+    """Build (or load) the extension of stage ``which`` (no device check: ``extension`` asks the device, this does not)."""
+    from foldjet_engine.kernels._nvcc import (
+        ensure_cuda_home,
+        host_flags,
+        load_extension,
+    )
+
+    ensure_cuda_home()
+    src = SOURCES[which]
+    name = f"miniworld_swa_dit_{src}"
+    if which in _VARIANT_FLAGS:
+        name += f"_{which}"
+    return load_extension(
+        name,
+        [str(_DIR / f"{src}.cu")],
+        extra_include_paths=[str(_DIR)],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-gencode=arch=compute_90a,code=sm_90a",
+            "--use_fast_math",
+            *_VARIANT_FLAGS.get(which, []),
+        ],
+        extra_cflags=["-O3"],
+        extra_ldflags=["-lcublas"],
+        verbose=False,
+    )

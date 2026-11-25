@@ -1,7 +1,7 @@
 # cmpgrad.py: training step under CUDA-graph capture with the kv / q graph branch off vs on: output, dx and every parameter gradient bitwise equal; 3 replays of the branched graph bitwise equal
 import torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.modules import triangle as T
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.modules import triangle as T
 cases = [({"d_pair": 64, "n_head": 4, "p_drop": 0.0, "starting": s}, L) for s in (True, False) for L in (128, 256)] + [
     ({"d_pair": 64, "n_head": 2, "p_drop": 0.0, "starting": True}, 128), ({"d_pair": 128, "n_head": 4, "p_drop": 0.0, "starting": True}, 128),
     ({"d_pair": 128, "n_head": 4, "p_drop": 0.0, "starting": False}, 256), ({"d_pair": 256, "n_head": 8, "p_drop": 0.0, "starting": True}, 256),

@@ -1,6 +1,6 @@
 # E4: FP8 path of TriMul / TriAttn (inference)
 
-`fp8_pair.py` measures, in one process and alternating, the default path (`cuda`) and the FP8 path (`engine-fp8`, `miniworld_engine.fp8`)
+`fp8_pair.py` measures, in one process and alternating, the default path (`cuda`) and the FP8 path (`engine-fp8`, `foldjet_engine.fp8`)
 of the same module on the E2 grid (inference). The FP8 copy is calibrated by two eager calls first; then three rounds alternate the routes
 (order flips each round), each round a `measure.speed.measure` (graph replay, L2 flush, warmup 5, 100 iterations). Recorded per case:
 both times, the ratio default / FP8, `routes_fired` (`fp8.route_stats()`: did a FP8 route run, or did a length gate keep the default kernels),

@@ -18,8 +18,8 @@ BF = torch.bfloat16
 
 
 def _blocks(d_pair: int, n: int = 3):
-    from miniworld_engine.measure import config as C
-    from miniworld_engine.modules import TokenDiT
+    from foldjet_engine.measure import config as C
+    from foldjet_engine.modules import TokenDiT
 
     out = []
     for i in range(n):
@@ -32,8 +32,8 @@ def _blocks(d_pair: int, n: int = 3):
 @pytest.mark.skipif(not H100, reason="H100 (sm_90)")
 @pytest.mark.parametrize(("d_pair", "dtype"), [(128, BF), (256, BF), (128, torch.float32)])
 def test_hoist_is_fused_head_major(d_pair: int, dtype: torch.dtype) -> None:
-    from miniworld_engine.kernels.integrations import bias_only_dit_hoist
-    from miniworld_engine.modules.token_dit import pair_bias_all
+    from foldjet_engine.kernels.integrations import bias_only_dit_hoist
+    from foldjet_engine.modules.token_dit import pair_bias_all
 
     blocks = [b.eval().requires_grad_(False) for b in _blocks(d_pair)]
     L = 256
@@ -53,7 +53,7 @@ def test_hoist_is_fused_head_major(d_pair: int, dtype: torch.dtype) -> None:
 @pytest.mark.skipif(not H100, reason="H100 (sm_90)")
 def test_hoist_training_gradients() -> None:
     """bf16 training through the fused hoist and the H100 training block on the bias vs the PyTorch block on the pair."""
-    from miniworld_engine.modules.token_dit import pair_bias_all
+    from foldjet_engine.modules.token_dit import pair_bias_all
 
     blocks = [b.train() for b in _blocks(128)]
     L = 128
@@ -91,7 +91,7 @@ def test_hoist_training_gradients() -> None:
 def test_pool_atoms_sub_choice_same_bits(samples: int, atoms: int) -> None:
     """Below 1024 CTAs the wide kernel runs SUB 8, from 1024 on SUB 4; both sum the atoms in the same order: a call on each side of the
     threshold equals the PyTorch reference to bf16 rounding, and the two SUBs agree bitwise on the rows they share."""
-    from miniworld_engine.modules import sampler_ops as so
+    from foldjet_engine.modules import sampler_ops as so
 
     g = torch.Generator(device="cuda").manual_seed(3)
     T, rows = atoms // 8, atoms + 64

@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine.kernels.trimul_inproj.cuda import _bounded
+from foldjet_engine.kernels.trimul_inproj.cuda import _bounded
 
 pytestmark = [pytest.mark.gpu]
 
@@ -62,7 +62,7 @@ def test_live_bounds() -> None:
 
 
 def _module(d: int, outgoing: bool):
-    from miniworld_engine.modules.triangle import TriangleMultiplication
+    from foldjet_engine.modules.triangle import TriangleMultiplication
 
     torch.manual_seed(0)
     m = TriangleMultiplication(d, outgoing=outgoing, master_weights=True, backend="cuda").cuda().eval()

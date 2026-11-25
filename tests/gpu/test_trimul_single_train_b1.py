@@ -5,8 +5,8 @@ parameter gradient of the module (outgoing / incoming, B 1 and 2, fp32 masters a
 import pytest
 import torch
 
-from miniworld_engine.kernels.trimul_inproj.cuda import h100_single_output as SO
-from miniworld_engine.modules.triangle import TriangleMultiplication
+from foldjet_engine.kernels.trimul_inproj.cuda import h100_single_output as SO
+from foldjet_engine.modules.triangle import TriangleMultiplication
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

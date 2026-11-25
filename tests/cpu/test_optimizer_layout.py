@@ -1,11 +1,11 @@
-"""``miniworld_engine.utils.optimizer.align_optimizer_state_layout_``: optimizer moments saved for a column-major parameter (engine 2.4.x
+"""``foldjet_engine.utils.optimizer.align_optimizer_state_layout_``: optimizer moments saved for a column-major parameter (engine 2.4.x
 TriMul D128 front matrices) are re-laid to the row-major parameter of 2.5 on resume, values preserved."""
 
 from __future__ import annotations
 
 import torch
 
-from miniworld_engine.utils.optimizer import align_optimizer_state_layout_
+from foldjet_engine.utils.optimizer import align_optimizer_state_layout_
 
 
 def _column_major(t: torch.Tensor) -> torch.Tensor:

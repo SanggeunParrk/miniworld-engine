@@ -1,9 +1,9 @@
-"""Override ``miniworld_engine.settings`` fields for one test (what ``monkeypatch.setenv`` did for the old switches)."""
+"""Override ``foldjet_engine.settings`` fields for one test (what ``monkeypatch.setenv`` did for the old switches)."""
 
 import dataclasses
 import typing
 
-from miniworld_engine import settings
+from foldjet_engine import settings
 
 
 def _coerce(name: str, value):

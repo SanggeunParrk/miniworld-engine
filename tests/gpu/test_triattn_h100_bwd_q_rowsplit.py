@@ -5,7 +5,7 @@ dq bitwise the same, dbias within fp32 summation order, both runs bitwise equal 
 import pytest
 import torch
 
-from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

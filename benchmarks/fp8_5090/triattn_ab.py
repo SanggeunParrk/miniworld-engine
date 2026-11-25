@@ -1,9 +1,9 @@
 """TriAttn default vs e4m3 route, same process, alternating, CUDA graph, 128 MB L2 flush; error vs the float64 module.
 python triattn_ab.py [--mask] [--rounds N] d,h,L ...   (d_pair, heads of 32, L)"""
 import copy, sys, torch
-import miniworld_engine
-from miniworld_engine import fp8
-from miniworld_engine.modules import TriangleAttention
+import foldjet_engine
+from foldjet_engine import fp8
+from foldjet_engine.modules import TriangleAttention
 args = sys.argv[1:]
 use_mask = "--mask" in args; args = [a for a in args if a != "--mask"]
 rounds = 6

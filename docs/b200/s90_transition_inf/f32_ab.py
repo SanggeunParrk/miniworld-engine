@@ -1,7 +1,7 @@
 # d256_ab.py n,M ... : D 256 inference graph median (L2 flushed), 3-D boxes (X3D_F32) vs per-K-block boxes, alternated 3 times in one process; outputs compared
 import statistics, sys, torch
-from miniworld_engine.kernels.transition.cuda import fused_generic_sm100a as fw
-from miniworld_engine.modules import Transition
+from foldjet_engine.kernels.transition.cuda import fused_generic_sm100a as fw
+from foldjet_engine.modules import Transition
 torch.backends.cuda.matmul.allow_tf32 = True
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
 def graph(fn):

@@ -8,9 +8,9 @@ import csv
 import pytest
 import torch
 
-from miniworld_engine.measure import accuracy, speed
-from miniworld_engine.measure import config as cfgmod
-from miniworld_engine.modules.primitives import shared_cond_stream
+from foldjet_engine.measure import accuracy, speed
+from foldjet_engine.measure import config as cfgmod
+from foldjet_engine.modules.primitives import shared_cond_stream
 
 with open(cfgmod.REQUIREMENTS, newline="") as _fh:
     SHARED_ROWS = [(n, r) for n, r in enumerate(csv.DictReader(_fh), 1) if shared_cond_stream(r["stream"])[1]]

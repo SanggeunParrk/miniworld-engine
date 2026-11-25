@@ -15,7 +15,7 @@ def _quant_rows(x):
 
 @pytest.mark.parametrize("M", [128, 640, 1280, 3840, 5120])
 def test_expand_kernel_matches_reference(M):
-    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as f8
+    from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8 as f8
 
     torch.manual_seed(M)
     x = (torch.randn(M, D, device="cuda") * (1 + 3 * torch.rand(M, 1, device="cuda"))).to(torch.bfloat16)

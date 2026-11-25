@@ -1,4 +1,6 @@
-# miniworld-engine
+# foldjet-engine
+
+Renamed from `miniworld-engine` (last release 3.0.12) in 1.0.0: the package is `foldjet_engine` (`import miniworld_engine` still works and warns), the PyPI distributions are `foldjet-engine` and `foldjet-engine-kernels-*`. The prebuilt kernels are the 3.0.12 files, unchanged.
 
 GPU kernels for the building blocks of AlphaFold 3-style structure-prediction models: the pair stack (triangle multiplication and
 attention, outer product mean, MSA pair-weighted averaging, transitions, layer norms), the token and atom diffusion transformers of
@@ -14,13 +16,13 @@ decides, from human-managed version numbers, which results are current (the judg
 |---|---|---|---|
 | NVIDIA H100 | `h100_sm90` | sm_90a kernels (wgmma, TMA, CUTLASS / cuBLASDx where used) | supported: every requirement case has a current result (judge: 0 owed) ([benchmarks](benchmarks/h100_sm90/README.md)) |
 | NVIDIA A100 | `a100_sm80` | sm_80 kernels (mma.sync) | supported: every requirement case has a current result (judge: 0 owed) ([benchmarks](benchmarks/a100_sm80/README.md)) |
-| NVIDIA B200 | `b200_sm100` | sm_100a kernel set and FP8 routes in the tree ([docs/b200](docs/b200/README.md)) | prebuilt kernels wheels since 3.0.12 (`miniworld-engine-kernels-sm100-cu129` + `-part2`: the sm_100a set is split in two for PyPI's 100 MiB per-file limit); `b200_sm100` judge tokens owed 0 |
+| NVIDIA B200 | `b200_sm100` | sm_100a kernel set and FP8 routes in the tree ([docs/b200](docs/b200/README.md)) | prebuilt kernels wheels since 3.0.12 (foldjet-engine 1.0.0) (`foldjet-engine-kernels-sm100-cu129` + `-part2`: the sm_100a set is split in two for PyPI's 100 MiB per-file limit); `b200_sm100` judge tokens owed 0 |
 | other CUDA GPUs | — | refused (`BackendUnsupported`) | the `triton` and `pytorch` backends run; Triton launch configs are tuned only for H100 / A100 |
 
 ## Modules and the models that use them
 
-Every class is in `miniworld_engine.modules`. The models are the ones whose constructors produce the class's requirement rows
-(`source` column of [requirements_module.csv](src/miniworld_engine/requirements/requirements_module.csv)): AF3-family models built by
+Every class is in `foldjet_engine.modules`. The models are the ones whose constructors produce the class's requirement rows
+(`source` column of [requirements_module.csv](src/foldjet_engine/requirements/requirements_module.csv)): AF3-family models built by
 FoldForge, and MiniWorld. `engine-own` rows are shapes the engine keeps although no current downstream constructor builds them.
 
 | group | classes | used by (requirement `source`) |
@@ -90,7 +92,7 @@ A few rows (eval / train, Engine CUDA vs PyTorch; in brackets the Anthropic and 
 | PairformerBlock | 12.83x (8.24x, —) | 7.84x | 9.57x (6.92x, —) | 6.19x |
 
 These are module-level numbers on the requirement shapes, not end-to-end model speedups. Accuracy: every engine-backend accuracy token
-of both cards is in `src/miniworld_engine/judge/tokens/<card>/` (`kind: accuracy`, `light`, `err_backend`, `err_pytorch`, `tol`).
+of both cards is in `src/foldjet_engine/judge/tokens/<card>/` (`kind: accuracy`, `light`, `err_backend`, `err_pytorch`, `tol`).
 
 ## Installation
 
@@ -106,8 +108,8 @@ See [docs/install.md](docs/install.md). In short:
 
 ```python
 import torch
-from miniworld_engine.modules import TriangleMultiplication, TokenDiT
-from miniworld_engine.modules.primitives import BackendUnsupported
+from foldjet_engine.modules import TriangleMultiplication, TokenDiT
+from foldjet_engine.modules.primitives import BackendUnsupported
 
 tri = TriangleMultiplication(128, backend="cuda").cuda()     # H100 or A100 kernels, picked from the input's device
 ref = TriangleMultiplication(128).cuda()                     # backend="pytorch", the reference
@@ -126,18 +128,18 @@ Every Python step below runs on a compute node (the measurers need a GPU of the 
 
 ```sh
 # ahead-of-time CUDA builds for a card, planned from the code and the requirements
-python -m miniworld_engine.kernels._prebuild --list                 # H100 (sm90a): plan and what is missing
-python -m miniworld_engine.kernels._prebuild --arch sm80 --jobs 16 --cutlass $CUTLASS_PATH
+python -m foldjet_engine.kernels._prebuild --list                 # H100 (sm90a): plan and what is missing
+python -m foldjet_engine.kernels._prebuild --arch sm80 --jobs 16 --cutlass $CUTLASS_PATH
 
 # which requirement cases lack a current result, as Slurm work groups
-python -m miniworld_engine.judge --gpu h100_sm90 owed --plan $DIR
+python -m foldjet_engine.judge --gpu h100_sm90 owed --plan $DIR
 # for each line "<kind> <Module> <cfg>" of $DIR/G<i>, on the card:
-python -m miniworld_engine.measure.<kind> <cfg> --out $DIR/out/<kind>.<Module>.jsonl
-python -m miniworld_engine.judge --gpu h100_sm90 issue $DIR/out   # records made by the current versions -> tokens
-python -m miniworld_engine.judge --gpu h100_sm90 status
+python -m foldjet_engine.measure.<kind> <cfg> --out $DIR/out/<kind>.<Module>.jsonl
+python -m foldjet_engine.judge --gpu h100_sm90 issue $DIR/out   # records made by the current versions -> tokens
+python -m foldjet_engine.judge --gpu h100_sm90 status
 
 # figures and tables from the tokens (never measures)
-python -m miniworld_engine.measure.plot --gpu a100_sm80
+python -m foldjet_engine.measure.plot --gpu a100_sm80
 ```
 
 `tools/slurm/cycle.sh PLAN_DIR` runs one plan → prebuild → measure → issue cycle on a Slurm cluster (`CARD=a100_sm80 ARCH=sm80` for
@@ -147,11 +149,11 @@ A100). Details: [docs/judge.md](docs/judge.md), [docs/measure.md](docs/measure.m
 
 | path | what |
 |---|---|
-| `src/miniworld_engine/requirements/` | `requirements_module.csv` (what to serve), `requirements_kernel.csv` (which kernels serve it, with versions), the rules |
-| `src/miniworld_engine/modules/` | the `BackendModule` classes, one file per op family; loaders of the external baselines |
-| `src/miniworld_engine/kernels/` | ~40 kernel families (`cuda/`, `triton/`, `configs/` per card), `integrations/` (module-level compositions per card), the build, prebuild and pretune infrastructure |
-| `src/miniworld_engine/measure/` | accuracy and speed measurers, their configs, the benchmark plotter |
-| `src/miniworld_engine/judge/` | the judge, the tokens per card, the recorded answers |
+| `src/foldjet_engine/requirements/` | `requirements_module.csv` (what to serve), `requirements_kernel.csv` (which kernels serve it, with versions), the rules |
+| `src/foldjet_engine/modules/` | the `BackendModule` classes, one file per op family; loaders of the external baselines |
+| `src/foldjet_engine/kernels/` | ~40 kernel families (`cuda/`, `triton/`, `configs/` per card), `integrations/` (module-level compositions per card), the build, prebuild and pretune infrastructure |
+| `src/foldjet_engine/measure/` | accuracy and speed measurers, their configs, the benchmark plotter |
+| `src/foldjet_engine/judge/` | the judge, the tokens per card, the recorded answers |
 | `benchmarks/<card>/` | generated speed figures and tables |
 | `docs/` | documentation ([index](docs/README.md), [architecture](docs/architecture.md)); `docs/h100/` per-family H100 design notes |
 | `tools/slurm/` | the measurement cycle script |
@@ -173,9 +175,9 @@ locally under `third_party/anthropic/upstream/` (git-ignored, not redistributed)
 A paper describing the engine is in preparation. Until then, please cite the repository:
 
 ```bibtex
-@software{miniworld_engine,
+@software{foldjet_engine,
   author  = {Park, Sanggeun},
-  title   = {miniworld-engine: GPU kernels for AlphaFold 3-style modules},
+  title   = {foldjet-engine: GPU kernels for AlphaFold 3-style modules},
   year    = {2026},
   version = {3.0.9},
   note    = {TODO: replace with the paper reference}

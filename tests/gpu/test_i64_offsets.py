@@ -8,7 +8,7 @@ kernel's tensors).
 import pytest
 import torch
 
-from miniworld_engine.kernels._wide import needs_wide
+from foldjet_engine.kernels._wide import needs_wide
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
@@ -51,7 +51,7 @@ def _ln_ref(x: torch.Tensor, g: torch.Tensor, b: torch.Tensor):
 def test_layernorm_linear_mmajor_past_2_31() -> None:
     """te_style ``_ln_materialize`` (fwd), the three m-major LN backward kernels (te_style atomic, mmajor_bwd persistent, layernorm
     persistent) and the recompute kernels, on an m-major (M, 512) view of 2.18e9 elements."""
-    from miniworld_engine.kernels.layernorm_linear.triton import mmajor_bwd, recompute, te_style
+    from foldjet_engine.kernels.layernorm_linear.triton import mmajor_bwd, recompute, te_style
 
     gen = torch.Generator(device="cuda").manual_seed(0)
     x = _mmajor(gen)
@@ -86,7 +86,7 @@ def test_layernorm_linear_mmajor_past_2_31() -> None:
 @requires_card
 def test_layernorm_transpose_past_2_31() -> None:
     """``_ln_transpose_dbn_bnd``: a channel-major (D, B, N) input normalised over D into (B, N, D)."""
-    from miniworld_engine.kernels.layernorm.triton.transpose import _ln_transpose_dbn_bnd
+    from foldjet_engine.kernels.layernorm.triton.transpose import _ln_transpose_dbn_bnd
 
     gen = torch.Generator(device="cuda").manual_seed(1)
     x = torch.randn(K, 1, M, device="cuda", dtype=torch.bfloat16, generator=gen)
@@ -100,7 +100,7 @@ def test_layernorm_transpose_past_2_31() -> None:
 @requires_card
 def test_pwa_train_pair_past_2_31() -> None:
     """pwa_train ``pair_fwd`` / ``pair_bwd`` at N 4160, d_pair 128 (z: 2.2e9 elements): the last rows' softmax weights and dz."""
-    from miniworld_engine.kernels.integrations.pwa_train import pair_bwd, pair_fwd
+    from foldjet_engine.kernels.integrations.pwa_train import pair_bwd, pair_fwd
 
     n, dz, h = 4160, 128, 8
     gen = torch.Generator(device="cuda").manual_seed(2)
@@ -160,21 +160,21 @@ def _check_attn(fn, ins, ref_fn, what):
 
 @requires_card
 def test_triangle_attention_backward_grid_past_65535_rows() -> None:
-    from miniworld_engine.kernels.triangle_attention.triton.main import triton_triangle_attention_pair_bias
+    from foldjet_engine.kernels.triangle_attention.triton.main import triton_triangle_attention_pair_bias
 
     _check_attn(triton_triangle_attention_pair_bias, _attn_inputs(3, 3), _attn_ref, "triattn")
 
 
 @requires_card
 def test_triangle_attention_atomic_backward_grid_past_65535_rows() -> None:
-    from miniworld_engine.kernels.triangle_attention.triton.atomic import TritonTriangleAttentionPairBiasFunction
+    from foldjet_engine.kernels.triangle_attention.triton.atomic import TritonTriangleAttentionPairBiasFunction
 
     _check_attn(TritonTriangleAttentionPairBiasFunction.apply, _attn_inputs(4, 3), _attn_ref, "triattn atomic")
 
 
 @requires_card
 def test_bias_only_attention_backward_grid_past_65535_rows() -> None:
-    from miniworld_engine.kernels.bias_only_attention.triton.main import triton_bias_only_attention
+    from foldjet_engine.kernels.bias_only_attention.triton.main import triton_bias_only_attention
 
     def ref(v, bias):
         return torch.einsum("bhimn,bhind->bhimd", torch.softmax(bias[:, :, None].expand(-1, -1, L, -1, -1), -1), v)

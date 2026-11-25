@@ -7,7 +7,7 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.modules import AtomDiTESMFold2Pair
+from foldjet_engine.modules import AtomDiTESMFold2Pair
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
 

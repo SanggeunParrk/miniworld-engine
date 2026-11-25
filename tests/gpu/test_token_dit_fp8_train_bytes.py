@@ -9,8 +9,8 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.token_dit import TokenDiTProtenix
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.token_dit import TokenDiTProtenix
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 
@@ -20,7 +20,7 @@ def _h100() -> bool:
 
 
 def _F():
-    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8_train
+    from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8_train
 
     return token_dit_fp8_train
 
@@ -71,7 +71,7 @@ def test_bytes_are_bit_identical(A: int, L: int, places: str) -> None:
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) token DiT")
 def test_nox_keeps_no_fp32_residual() -> None:
-    from miniworld_engine.kernels.integrations import token_dit_train as TT
+    from foldjet_engine.kernels.integrations import token_dit_train as TT
 
     F = _F()
     m = _master()

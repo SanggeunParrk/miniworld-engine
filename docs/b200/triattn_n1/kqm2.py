@@ -1,6 +1,6 @@
 import sys, os, torch
-from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as K
-from miniworld_engine.kernels._nvcc import load_extension
+from foldjet_engine.kernels.triangle_attention.cuda import b200_triattn as K
+from foldjet_engine.kernels._nvcc import load_extension
 L = 128; H = 4; which = int(sys.argv[1]); nkv = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 r = 2
 DEF = [d for d in os.environ.get("N1_DEF", "").split(",") if d]

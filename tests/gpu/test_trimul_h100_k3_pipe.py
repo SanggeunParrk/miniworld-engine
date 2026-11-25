@@ -4,8 +4,8 @@ K3_DESC, K3_EPI2) is BIT-IDENTICAL to the plain K3 (one direction, a key mask, L
 import pytest
 import torch
 
-from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as BS
-from miniworld_engine.modules.triangle import TriangleMultiplication
+from foldjet_engine.kernels.trimul_inproj.cuda import h100_b200style as BS
+from foldjet_engine.modules.triangle import TriangleMultiplication
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

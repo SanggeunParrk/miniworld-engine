@@ -7,8 +7,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import Transition
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import Transition
 
 pytestmark = [
     pytest.mark.gpu,
@@ -36,7 +36,7 @@ def _step(module, x, saved_bytes: list[int]):
 
 
 def test_xn_recompute_saves_one_tensor_and_is_bitwise(monkeypatch: pytest.MonkeyPatch) -> None:
-    from miniworld_engine.kernels.transition.cuda import fused_wide_sm80 as fused_sm80
+    from foldjet_engine.kernels.transition.cuda import fused_wide_sm80 as fused_sm80
 
     module = Transition(d_hidden=128, n=4, master_weights=True).cuda().float().train()
     C.randomize(module, torch.Generator(device="cuda").manual_seed(0))

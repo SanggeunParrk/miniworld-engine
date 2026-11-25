@@ -56,7 +56,7 @@ def _supports(self, x, *args, **kwargs):
 def _forward(self, x):
     import torch.nn.functional as F
 
-    from miniworld_engine.modules.primitives import master_autocast
+    from foldjet_engine.modules.primitives import master_autocast
 
     if self.dead and not (self.training or torch.is_grad_enabled()):
         return x
@@ -74,7 +74,7 @@ def _forward(self, x):
 
 
 def install() -> None:
-    from miniworld_engine.modules import transition
+    from foldjet_engine.modules import transition
 
     cls = transition.Transition
     if NAME not in cls.backends:

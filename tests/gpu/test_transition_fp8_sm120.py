@@ -19,7 +19,7 @@ def _needs_5090() -> None:
 
 
 def _module(n: int, d: int = 128, seed: int = 0):
-    from miniworld_engine.modules.transition import Transition
+    from foldjet_engine.modules.transition import Transition
 
     m = Transition(d, n, master_weights=True, backend="cuda").cuda().eval()
     g = torch.Generator(device="cpu").manual_seed(seed + n + d)
@@ -37,7 +37,7 @@ def _module(n: int, d: int = 128, seed: int = 0):
 @pytest.fixture
 def F():
     _needs_5090()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm120 as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm120 as F
 
     assert F.POLICY is None  # off unless the preset / its variable is set
     saved = (F.GUARD, F.MIN_ROWS)
@@ -56,7 +56,7 @@ def _err(y, y64, x):
 
 
 def test_perms_are_permutations() -> None:
-    from miniworld_engine.kernels.transition.cuda.fp8_sm120 import _gb_cols, _o_perm, _perm_k1, _perm_k2
+    from foldjet_engine.kernels.transition.cuda.fp8_sm120 import _gb_cols, _o_perm, _perm_k1, _perm_k2
 
     for d in (128, 256):
         for p in (_perm_k1(d, "cpu"), _o_perm(d, "cpu"), _gb_cols(d, "cpu")):
@@ -99,8 +99,8 @@ def test_safe_preset_leaves_it_off_explicit_variable_turns_it_on(monkeypatch) ->
     off; with ``MINIWORLD_TRANSITION_FP8=calib`` set explicitly they turn it on; ``status()`` / ``route_stats()`` / ``enable(guard=)`` / ``disable()``
     act on this module (the slot of ``fp8.SM120_ROUTES``)."""
     _needs_5090()
-    from miniworld_engine import fp8
-    from miniworld_engine.kernels.transition.cuda import fp8_sm120 as F
+    from foldjet_engine import fp8
+    from foldjet_engine.kernels.transition.cuda import fp8_sm120 as F
 
     assert fp8.SM120_ROUTES["transition"] == F.__name__ and "transition" in fp8.SM120_PRESET_EXCLUDED
     assert F.POLICY is None  # off by default
@@ -153,7 +153,7 @@ def test_safe_preset_leaves_it_off_explicit_variable_turns_it_on(monkeypatch) ->
 
 
 def test_disable_turns_it_off(F, monkeypatch) -> None:
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     fp8.disable()
     assert F.POLICY is None
@@ -165,7 +165,7 @@ def test_disable_turns_it_off(F, monkeypatch) -> None:
 
 
 def test_guard_sync_and_lazy(F) -> None:
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m = _module(4)
     x = torch.randn(1, 16384, 128, device="cuda").bfloat16()
@@ -232,8 +232,8 @@ def test_rows_are_independent(F) -> None:
 
 def test_default_route_untouched_when_off() -> None:
     _needs_5090()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm120 as F
-    from miniworld_engine.kernels.transition.cuda import transition_sm80
+    from foldjet_engine.kernels.transition.cuda import fp8_sm120 as F
+    from foldjet_engine.kernels.transition.cuda import transition_sm80
 
     assert F.POLICY is None
     m = _module(4)

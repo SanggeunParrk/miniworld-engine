@@ -4,7 +4,7 @@ the output is bitwise the one-launch output."""
 import pytest
 import torch
 
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a as W
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm90a as W
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0), reason="H100 (sm_90) only")
 

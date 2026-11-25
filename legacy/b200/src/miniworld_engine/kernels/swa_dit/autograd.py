@@ -1,7 +1,7 @@
 """The fused SWA atom DiT block's ``autograd.Function`` (team-gm ``SWABlockFn``, commit 14f2c73).
 
 It owns what the backward needs: the forward op runs with ``save=True`` and its 13 intermediates are saved alongside the
-inputs, in the order :func:`~miniworld_engine.kernels.swa_dit.dispatch.swa_dit_block_bwd` takes them. The two launches are
+inputs, in the order :func:`~foldjet_engine.kernels.swa_dit.dispatch.swa_dit_block_bwd` takes them. The two launches are
 opaque ops (``kernels._compile``); Dynamo traces through this Function and stops only at them.
 
 Differentiable inputs: ``q``, ``mod`` (the hoisted modulation -- its gradient flows on to the conditioning and the adaLN
@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.utils.h100_master import is_h100
-from miniworld_engine.utils.h100_master import pack as pack_master
-from miniworld_engine.kernels.swa_dit.dispatch import (
+from foldjet_engine.utils.h100_master import is_h100
+from foldjet_engine.utils.h100_master import pack as pack_master
+from foldjet_engine.kernels.swa_dit.dispatch import (
     _h100_global,
     native_h100_cast,
     native_h100_mod_bwd,
@@ -26,7 +26,7 @@ from miniworld_engine.kernels.swa_dit.dispatch import (
     swa_dit_mod_fwd_sm90,
     swa_dit_mod_fwd_sm100,
 )
-from miniworld_engine.kernels.swa_dit.interface import FP32_EPS
+from foldjet_engine.kernels.swa_dit.interface import FP32_EPS
 
 
 class SWADiTBlockFunction(torch.autograd.Function):

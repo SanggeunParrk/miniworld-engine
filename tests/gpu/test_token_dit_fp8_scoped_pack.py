@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine import capture
+from foldjet_engine import capture
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 
@@ -17,7 +17,7 @@ def _h100() -> bool:
 
 
 def _F():
-    from miniworld_engine.kernels.conditioned_transition.cuda import token_dit_fp8
+    from foldjet_engine.kernels.conditioned_transition.cuda import token_dit_fp8
 
     return token_dit_fp8
 

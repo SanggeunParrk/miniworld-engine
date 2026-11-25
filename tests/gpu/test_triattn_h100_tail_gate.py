@@ -9,8 +9,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
-from miniworld_engine.modules.triangle import TriangleAttention
+from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+from foldjet_engine.modules.triangle import TriangleAttention
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 
@@ -128,8 +128,8 @@ def test_af3_compact_front_past_768(monkeypatch: pytest.MonkeyPatch) -> None:
     """AF3 d_pair 64 (4 heads x 16) beyond L768: the one-kernel front with compact heads (``_FRONT_L_COMPACT``) against the LN + GEMM
     + bias-glue front it replaced there -- the same update within bf16 rounding, bitwise run to run."""
     _needs_h100()
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90_generic as gen
-    from miniworld_engine.modules.triangle import TriangleAttentionAF3
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90_generic as gen
+    from foldjet_engine.modules.triangle import TriangleAttentionAF3
 
     torch.manual_seed(0)
     m = TriangleAttentionAF3(64, 4, starting=False, master_weights=True, backend="cuda").cuda().eval()
@@ -158,7 +158,7 @@ def test_af3_flip_bias_read_transposed(L: int) -> None:
     core reads its tiles transposed (``triattn_fwd_h16(bias_transposed=True)``).  Against the PyTorch reference with a ragged key mask with
     holes: the update within bf16 rounding (a wrong transpose or mask axis is O(1)), bitwise run to run."""
     _needs_h100()
-    from miniworld_engine.modules.triangle import TriangleAttentionAF3
+    from foldjet_engine.modules.triangle import TriangleAttentionAF3
 
     torch.manual_seed(0)
     m = TriangleAttentionAF3(64, 4, starting=False, master_weights=True, backend="cuda").cuda().eval()

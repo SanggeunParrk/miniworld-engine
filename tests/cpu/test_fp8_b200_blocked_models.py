@@ -6,7 +6,7 @@ from types import MappingProxyType
 
 import pytest
 
-from miniworld_engine import fp8
+from foldjet_engine import fp8
 
 BLOCKED = "blockedmodel"
 

@@ -23,6 +23,6 @@ device: cuda
 seed: 0
 fixed: {bfloat16: 0.008, master: 0.008, float32: 1.0e-05}
 EOY
-  $W/b2511/dev.sh -x -g ${GPU:-2} -t 2400 s90-transition-inf python -m miniworld_engine.measure.speed $c --out $o/m_${tag}_r3132_${mode}_$L.jsonl > $o/m_${tag}_r3132_${mode}_$L.log 2>&1
+  $W/b2511/dev.sh -x -g ${GPU:-2} -t 2400 s90-transition-inf python -m foldjet_engine.measure.speed $c --out $o/m_${tag}_r3132_${mode}_$L.jsonl > $o/m_${tag}_r3132_${mode}_$L.log 2>&1
   echo "$(date +%T) $tag $mode L$L rc=$? n=$(grep -c median_ms $o/m_${tag}_r3132_${mode}_$L.jsonl)"
 done

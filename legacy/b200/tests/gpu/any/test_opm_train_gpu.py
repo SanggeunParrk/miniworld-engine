@@ -4,10 +4,10 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine import settings
-from miniworld_engine.kernels.integrations import opm_train as ot
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.outer_product import OuterProductMean
+from foldjet_engine import settings
+from foldjet_engine.kernels.integrations import opm_train as ot
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.outer_product import OuterProductMean
 
 pytestmark = [
     pytest.mark.gpu,
@@ -158,7 +158,7 @@ def test_refusals(inputs):
 
 
 def test_default_auto_path_compiles_forward_and_backward(module, inputs, monkeypatch):
-    from miniworld_engine import settings
+    from foldjet_engine import settings
 
     override_setting(monkeypatch, "opm_train", None)
     override_setting(monkeypatch, "opm_train_save_o", "1")

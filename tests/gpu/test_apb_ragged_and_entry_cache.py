@@ -18,10 +18,10 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import dit_variant_cuda as dvc
-from miniworld_engine.modules.attention import AttentionPairBias
-from miniworld_engine.modules.token_dit import TokenDiTChai1
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import dit_variant_cuda as dvc
+from foldjet_engine.modules.attention import AttentionPairBias
+from foldjet_engine.modules.token_dit import TokenDiTChai1
 
 pytestmark = [pytest.mark.gpu]
 
@@ -168,6 +168,6 @@ def test_entry_form_not_cached_under_autograd() -> None:
 
 
 def test_entry_cache_is_a_registered_weight_cache() -> None:
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     assert _capture.weight_caches()["dit_variant_cuda.entry_bf16"] is dvc._ENTRY_BF16

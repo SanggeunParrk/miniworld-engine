@@ -22,19 +22,19 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.attention import AttentionPairBias
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.attention import AttentionPairBias
 
 pytestmark = [pytest.mark.gpu]
 
 #: the modules that hand the key mask to a core (``kernel_mask`` patched to None for the reference call)
 _SITES = (
-    "miniworld_engine.kernels.integrations.attention_pair_bias_b200",
-    "miniworld_engine.kernels.integrations.attention_pair_bias_sm80",
-    "miniworld_engine.kernels.conditioned_transition.cuda",
-    "miniworld_engine.kernels.integrations.augattn_sm80",
-    "miniworld_engine.kernels.integrations.bias_only_dit",
-    "miniworld_engine.kernels.integrations.bias_only_dit_sm80",
+    "foldjet_engine.kernels.integrations.attention_pair_bias_b200",
+    "foldjet_engine.kernels.integrations.attention_pair_bias_sm80",
+    "foldjet_engine.kernels.conditioned_transition.cuda",
+    "foldjet_engine.kernels.integrations.augattn_sm80",
+    "foldjet_engine.kernels.integrations.bias_only_dit",
+    "foldjet_engine.kernels.integrations.bias_only_dit_sm80",
 )
 
 
@@ -108,7 +108,7 @@ def test_apb_skip_bitwise(dtype: str, B: int, L: int, monkeypatch: pytest.Monkey
 
 
 def _token(key: str, dtype: str, d_cond: int = 384, d_pair: int = 128) -> typing.Any:
-    from miniworld_engine.modules.token_dit import TOKEN_DIT_MODELS
+    from foldjet_engine.modules.token_dit import TOKEN_DIT_MODELS
 
     m = TOKEN_DIT_MODELS[key](d_single=768, d_cond=d_cond, d_pair=d_pair, n_head=16, n=2).cuda().float()
     C.randomize(m, torch.Generator(device="cuda").manual_seed(0))
@@ -142,8 +142,8 @@ def test_token_dit_skip_bitwise(key: str, dtype: str, L: int, monkeypatch: pytes
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) static input refresh")
 def test_refresh_with_another_live_count() -> None:
     """FoldForge R26 with the key skip: one captured token stack step, folds whose masks drop different numbers of key blocks."""
-    from miniworld_engine.capture import refresh_static_inputs, release_static_inputs, static_inputs, static_weights
-    from miniworld_engine.modules import TokenDiTStack
+    from foldjet_engine.capture import refresh_static_inputs, release_static_inputs, static_inputs, static_weights
+    from foldjet_engine.modules import TokenDiTStack
 
     S, L = 5, 512
     torch.manual_seed(0)
@@ -202,7 +202,7 @@ def test_refresh_with_another_live_count() -> None:
 def test_atom_dead_windows(name: str, kw: dict | None, dtype: str) -> None:
     """A padded atom tail whose windows have no valid key: the window kernels write those CTAs' rows (0, LSE 1e30) without computing them.
     The block output against the PyTorch reference at every position (padded rows included), and two calls bitwise the same."""
-    from miniworld_engine.modules import atom_dit as AD
+    from foldjet_engine.modules import atom_dit as AD
 
     cls = getattr(AD, name)
     m: typing.Any = (cls() if kw is None else cls(d_single=128, d_cond=128, d_pair=16, n_head=4, n=2, **kw)).cuda().float()
@@ -213,7 +213,7 @@ def test_atom_dead_windows(name: str, kw: dict | None, dtype: str) -> None:
     g = torch.Generator(device="cuda").manual_seed(1)
     inp = m.make_inputs(length=N, samples=5, depth=None, dtype=act, device="cuda", generator=g)
     if "attention_params" in inp:  # the SWA block: its front-packed valid mask rebuilt for the padded count
-        from miniworld_engine.modules.functional import build_attention_params
+        from foldjet_engine.modules.functional import build_attention_params
 
         cos, sin = inp["attention_params"][0], inp["attention_params"][1]
         valid = (torch.arange(N, device="cuda") < n)[None].expand(cos.shape[0], N).contiguous()

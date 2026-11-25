@@ -18,7 +18,7 @@ def _needs_5090() -> None:
 
 
 def _make(d, h, seed=7):
-    from miniworld_engine.modules import TriangleAttention
+    from foldjet_engine.modules import TriangleAttention
 
     torch.manual_seed(seed)
     m = TriangleAttention(d, n_head=h, master_weights=True, backend="cuda").cuda().eval()
@@ -41,8 +41,8 @@ def _rel(y, y64, x) -> float:
 @pytest.fixture()
 def f8():
     _needs_5090()
-    from miniworld_engine import fp8
-    from miniworld_engine.kernels.triangle_attention.cuda import sm120_fp8 as F8
+    from foldjet_engine import fp8
+    from foldjet_engine.kernels.triangle_attention.cuda import sm120_fp8 as F8
 
     old = (F8.MIN_L, F8.GUARD, F8.QK, F8.PV_ONLY, F8.D64_MIN_L, F8.D64_QK)
     F8.PV_ONLY = True  # the tests below exercise the PV-only core too; test_pv_only_gate checks the shipped setting
@@ -56,7 +56,7 @@ def f8():
 
 
 def _on(model="af3"):
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     fp8.enable("safe", model=model)
 
@@ -66,7 +66,7 @@ def _on(model="af3"):
 @pytest.mark.parametrize("masked", [False, True])
 def test_accuracy_against_float64(f8, d, h, n, masked):
     """update error < 8 % of the update and < 8x the bf16 default's (e4m3 P / V, plus e4m3 q / k on the d_pair-128 kind); no saturation, the route ran."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m = _make(d, h)
     torch.manual_seed(3)
@@ -114,7 +114,7 @@ def test_pv_only_is_closer(f8):
 
 def test_default_untouched_when_off(f8):
     """with the switch off (and after the route ran) the default core runs: outputs equal byte for byte."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m = _make(128, 4)
     x = torch.randn(1, 768, 768, 128, device="cuda").bfloat16()
@@ -133,7 +133,7 @@ def test_default_untouched_when_off(f8):
 
 def test_gates_and_models(f8):
     """below MIN_L, for a model without the call-site kind, for L % 128 != 0, in training: the default core."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m = _make(128, 4)
     mask = lambda n: torch.ones(1, n, dtype=torch.bool, device="cuda")  # noqa: E731
@@ -160,7 +160,7 @@ def test_gates_and_models(f8):
 def test_graph_equals_eager_and_saturation(f8):
     """a captured graph (lazy guard) replays the eager bytes; a V scale made too small saturates: the flag is read by fp8.check(), the scale widened in place, the replay follows;
     the eager guard (sync) redoes a saturating call."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m = _make(128, 4)
     n = 256
@@ -204,7 +204,7 @@ def test_graph_equals_eager_and_saturation(f8):
 
 def test_qk_saturation_drops_qk(f8):
     """a q / k scale made too small saturates: the sync guard drops e4m3 q / k (PV-only core) and redoes the call."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m = _make(128, 4)
     n = 256
@@ -225,7 +225,7 @@ def test_qk_saturation_drops_qk(f8):
 
 def test_pv_only_gate(f8):
     """shipped setting (PV_ONLY off): only calls with e4m3 q / k take the e4m3 core; the unfused kind, QK off, and a site whose q / k saturated run the default core."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     f8.PV_ONLY = False
     f8.MIN_L = 0
@@ -265,7 +265,7 @@ _MODELS = [None, "boltz2", "intellifold2", "af3", "protenix1", "opendde", "prote
 def _expect(model, kind: str, pv_only: bool) -> tuple[bool, bool]:
     """(the e4m3 core fires, with e4m3 q / k) for a 32-channel-head site of ``kind`` under ``model``, from the table alone: the kind listed for the model; q / k only on the fused
     kind and only where the table has them; without q / k only with the PV-only switch (the 5090 gate). The d64 kind (64-channel heads) has no 5090 core."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     kinds, qk = fp8.triattn_for(model)
     if kind not in kinds:
@@ -279,7 +279,7 @@ def _expect(model, kind: str, pv_only: bool) -> tuple[bool, bool]:
 def test_model_whitelist_table(f8, model, pv_only):
     """fp8.enable("safe", model=m): the 5090 core fires exactly on the call-site kinds TRIATTN_MODELS lists for m (fused = d_pair 128 / 4 x 32, unfused = d_pair 256 / 8 x 32),
     with e4m3 q / k exactly where the table has them; nothing for no model / an unlisted one; a 64-channel-head site (Chai-1 d64) never; disable() = nothing."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     f8.PV_ONLY = pv_only
     f8.MIN_L = 0
@@ -319,7 +319,7 @@ def test_env_model_at_import():
 
     _needs_5090()
     code = (
-        "import json, torch; from miniworld_engine import fp8; from miniworld_engine.modules import TriangleAttention\n"
+        "import json, torch; from foldjet_engine import fp8; from foldjet_engine.modules import TriangleAttention\n"
         "torch.manual_seed(0); m = TriangleAttention(128, n_head=4, master_weights=True, backend='cuda').cuda().eval()\n"
         "x = torch.randn(1, 640, 640, 128, device='cuda').bfloat16(); mk = torch.ones(1, 640, dtype=torch.bool, device='cuda')\n"
         "with torch.no_grad(), torch.autocast('cuda', torch.bfloat16): m(x, mk)\n"
@@ -340,7 +340,7 @@ def test_env_model_at_import():
 
 def test_late_qk_calibration(f8):
     """a fused site calibrated while q / k was not wanted (QK off) takes its q / k scales on the first call with q / k wanted (no stale PV-only site)."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     f8.MIN_L = 0
     f8.PV_ONLY = True
@@ -366,7 +366,7 @@ def test_late_qk_calibration(f8):
 
 
 def _make_chai(model="chai1", starting=True, seed=1):
-    from miniworld_engine.modules.triangle import TriangleAttention
+    from foldjet_engine.modules.triangle import TriangleAttention
 
     m = TriangleAttention(256, 4, model=model, starting=starting, p_drop=0.0).cuda().eval()
     g = torch.Generator(device="cpu").manual_seed(seed)
@@ -405,7 +405,7 @@ def _upd_err(y, y64, x):
 def test_d64_accuracy_against_float64(f8, model, starting, n):
     """update error of the e4m3 P / V core of 64-channel heads (q / k bf16, as the H100 d64 route: rms 3.3-3.7 %, max 3.0-4.3 %): rms < 6 %, max < 8 %, < 8x the bf16 default's;
     the route ran, nothing saturated."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m, m64 = _make_chai(model, starting)
     x, mask = _chai_x(n)
@@ -427,7 +427,7 @@ def test_d64_accuracy_against_float64(f8, model, starting, n):
 
 def test_d64_default_untouched_when_off(f8):
     """switch off (and after the route ran): the default core, byte for byte; no pv_d64 call."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m, _ = _make_chai()
     x, mask = _chai_x(512)
@@ -449,7 +449,7 @@ def test_d64_default_untouched_when_off(f8):
 
 def test_d64_gates_and_models(f8):
     """below D64_MIN_L, a model without the d64 kind (af3, opendde, no model), training (grad): the default core; L % 128 != 0 refused by serves_d64."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m, _ = _make_chai()
     x, mask = _chai_x(256)
@@ -481,7 +481,7 @@ def test_d64_gates_and_models(f8):
 def test_d64_graph_equals_eager_and_saturation(f8):
     """a captured graph (lazy guard) replays the eager bytes; a V scale made too small saturates inside the graph: fp8.check() flags it and widens the scale in place, the replay
     follows; the eager sync guard redoes a saturating call."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m, _ = _make_chai(starting=False)
     x, mask = _chai_x(256)
@@ -523,7 +523,7 @@ def test_d64_graph_equals_eager_and_saturation(f8):
 
 def test_d64_capture_before_calibration_runs_default(f8):
     """a capture of an uncalibrated d64 site runs the default core (capture_fallbacks); the replay equals the default bytes."""
-    from miniworld_engine import fp8
+    from foldjet_engine import fp8
 
     m, _ = _make_chai()
     x, mask = _chai_x(256)
@@ -550,7 +550,7 @@ def test_d64_env_model_at_import():
 
     _needs_5090()
     code = (
-        "import json, torch; from miniworld_engine import fp8; from miniworld_engine.modules.triangle import TriangleAttention\n"
+        "import json, torch; from foldjet_engine import fp8; from foldjet_engine.modules.triangle import TriangleAttention\n"
         "torch.manual_seed(0); m = TriangleAttention(256, 4, model='chai1', p_drop=0.0).cuda().eval().to(torch.bfloat16); m.set_backend('cuda')\n"
         "x = torch.randn(1, 512, 512, 256, device='cuda').bfloat16(); mk = torch.ones(1, 512, dtype=torch.bool, device='cuda')\n"
         "with torch.no_grad(): m(x, mk)\n"
@@ -578,7 +578,7 @@ def test_d64_env_model_at_import():
 
     _needs_5090()
     code = (
-        "import json, torch; from miniworld_engine import fp8; from miniworld_engine.modules.triangle import TriangleAttention\n"
+        "import json, torch; from foldjet_engine import fp8; from foldjet_engine.modules.triangle import TriangleAttention\n"
         "torch.manual_seed(0); m = TriangleAttention(256, 4, model='chai1', p_drop=0.0).cuda().eval().to(torch.bfloat16); m.set_backend('cuda')\n"
         "x = torch.randn(1, 256, 256, 256, device='cuda').bfloat16(); mk = torch.ones(1, 256, dtype=torch.bool, device='cuda')\n"
         "with torch.no_grad(): m(x, mk)\n"

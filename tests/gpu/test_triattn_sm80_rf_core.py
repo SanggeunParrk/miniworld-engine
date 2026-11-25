@@ -52,7 +52,7 @@ def _reference(q, k, v, g, bias, rows, d: int, gate: bool) -> torch.Tensor:
 
 
 def _run32(mode: int, q, k, v, g, bias, gate: bool, key_mask: torch.Tensor | None = None) -> torch.Tensor:
-    from miniworld_engine.kernels.triangle_attention.cuda import sm80
+    from foldjet_engine.kernels.triangle_attention.cuda import sm80
 
     ext = sm80._ext()
     L, H = q.shape[1], bias.shape[1]
@@ -92,7 +92,7 @@ def _run32(mode: int, q, k, v, g, bias, gate: bool, key_mask: torch.Tensor | Non
 
 
 def _run16(mode: int, q, k, v, bias, key_mask: torch.Tensor | None = None, hd: int = 16) -> torch.Tensor:
-    from miniworld_engine.kernels.triangle_attention.cuda import sm80_core2 as c2
+    from foldjet_engine.kernels.triangle_attention.cuda import sm80_core2 as c2
 
     L, H = q.shape[1], bias.shape[1]
     out = torch.empty(1, L, L, H * hd, device="cuda", dtype=torch.bfloat16)
@@ -205,7 +205,7 @@ def test_dead_tail_keys_skipped_bitwise(d: int, mode: int) -> None:
     mask[1, 17] = False  # an interior hole is kept in the stream (only the tail is skipped)
     bias.masked_fill_(~mask[:, None, None, :], BF16_MIN)
     if d == 32:
-        from miniworld_engine.kernels.triangle_attention.cuda import sm80
+        from foldjet_engine.kernels.triangle_attention.cuda import sm80
 
         ext, L2Ed = sm80._ext(), L2E / math.sqrt(32)
         empty, out = torch.empty(0, device="cuda"), torch.empty(2, L, L, c, device="cuda", dtype=torch.bfloat16)
@@ -220,7 +220,7 @@ def test_dead_tail_keys_skipped_bitwise(d: int, mode: int) -> None:
 
         full, skipped = run(torch.empty(0, device="cuda", dtype=torch.uint8)), run(mask)
     else:
-        from miniworld_engine.kernels.triangle_attention.cuda import sm80_core2 as c2
+        from foldjet_engine.kernels.triangle_attention.cuda import sm80_core2 as c2
 
         lay, lay_o = c2.token_major(L, 4 * c, 16), c2.token_major(L, c, 16)
 

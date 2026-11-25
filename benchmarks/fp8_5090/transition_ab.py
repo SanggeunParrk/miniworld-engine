@@ -12,8 +12,8 @@ import statistics
 
 import torch
 
-from miniworld_engine.kernels.transition.cuda import fp8_sm120 as F
-from miniworld_engine.modules import Transition
+from foldjet_engine.kernels.transition.cuda import fp8_sm120 as F
+from foldjet_engine.modules import Transition
 
 ap = argparse.ArgumentParser()
 ap.add_argument("cases", nargs="+")

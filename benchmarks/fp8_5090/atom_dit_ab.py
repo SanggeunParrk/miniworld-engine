@@ -13,7 +13,7 @@ import argparse
 import torch
 from dit_common import Rig, ab, case, err, graph
 
-from miniworld_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as F
+from foldjet_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as F
 
 ap = argparse.ArgumentParser()
 ap.add_argument("cases", nargs="+")

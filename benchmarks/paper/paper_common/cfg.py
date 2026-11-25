@@ -1,11 +1,11 @@
-"""Load a measurement config of the harness with command-line overrides (the same keys as miniworld_engine.measure.config)."""
+"""Load a measurement config of the harness with command-line overrides (the same keys as foldjet_engine.measure.config)."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from miniworld_engine.measure import config
+from foldjet_engine.measure import config
 
 
 def add_selection_args(p: argparse.ArgumentParser) -> None:

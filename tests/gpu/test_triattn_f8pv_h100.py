@@ -31,7 +31,7 @@ def _reference(q, k, v, sbias, scale):
 
 
 def test_default_route_is_the_fp16_core():
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     assert hs.FP8_PV is False
     assert hs.core_h16() is hs._core_h16()
@@ -39,7 +39,7 @@ def test_default_route_is_the_fp16_core():
 
 @pytest.mark.parametrize(("heads", "dh", "length"), [(4, 32, 256), (8, 32, 512), (4, 16, 256), (12, 32, 256)])
 def test_f8pv_core_error_band(monkeypatch, heads, dh, length):
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     torch.manual_seed(length + heads)
     q, k, v = (torch.randn(1, length, length, heads, dh, device="cuda").mul(s).half() for s in (1.5, 1.5, 3.0))
@@ -61,7 +61,7 @@ def test_f8pv_core_error_band(monkeypatch, heads, dh, length):
 
 
 def test_vt_quant_matches_the_torch_reference():
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     for dh, nh in ((32, 4), (16, 4), (32, 12), (32, 16)):
         torch.manual_seed(dh + nh)
@@ -81,7 +81,7 @@ def test_vt_quant_matches_the_torch_reference():
 @pytest.mark.parametrize(("heads", "dh", "length"), [(4, 32, 256), (8, 32, 512), (4, 16, 256), (12, 32, 256)])
 def test_f8pv_hl_core_error_band(monkeypatch, heads, dh, length):
     """V as two e4m3 planes (hi, residual x16): the V rounding error drops, what is left is the e4m3 probabilities."""
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     torch.manual_seed(length + heads)
     q, k, v = (torch.randn(1, length, length, heads, dh, device="cuda").mul(s).half() for s in (1.5, 1.5, 3.0))
@@ -102,7 +102,7 @@ def test_f8pv_hl_core_error_band(monkeypatch, heads, dh, length):
 
 
 def test_vt_quant_hl_matches_the_torch_reference(monkeypatch):
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     monkeypatch.setattr(hs, "FP8_PV_HL", True)
     for dh, nh in ((32, 4), (16, 4), (32, 12), (32, 16)):
@@ -120,7 +120,7 @@ def test_vt_quant_hl_matches_the_torch_reference(monkeypatch):
 @pytest.mark.parametrize("planes", [1, 2])
 def test_fused_front_writes_the_v_planes(planes):
     """tri_front_vt: q / k / bias bit-identical to tri_front, V^T planes = the static-scale e4m3 hi (/ lo) of the projection."""
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     c, nh, d, length, batch = 128, 4, 32, 256, 2
     torch.manual_seed(planes)
@@ -152,7 +152,7 @@ def test_fused_front_writes_the_v_planes(planes):
 
 
 def test_whitelist_gates_the_route():
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     try:
         assert hs.enable_fp8_pv_for("boltz2") is False  # 9c90 bistable: not whitelisted
@@ -168,7 +168,7 @@ def test_whitelist_gates_the_route():
 def test_vt_quant_static_scale_and_overflow_flag(heads, dh):
     """The single-pass vt_quant with a static per-head scale equals the dynamic pass at the same scale (rounding ties aside), writes the scale it was given,
     and sets the flag when a value saturates."""
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     torch.manual_seed(heads + dh)
     v = torch.randn(2, 24, 256, heads, dh, device="cuda").mul(3).half()
@@ -222,8 +222,8 @@ def _module_args(dp, heads, dh, length, wv_scale=1.0, seed=0):
 def test_unfused_sites_are_gated_static_and_guarded(monkeypatch):
     """The whitelisted unfused route (d_pair 384, 12 heads: the generic front + the standalone V^T pass): below the S gate the default core runs (bit-identical),
     above it the FP8 core with a per-site static scale (calibrated on the first call); a V that outgrows the scale sets the overflow flag."""
-    from miniworld_engine.kernels.integrations import triattn_h100_sm90 as integ
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.integrations import triattn_h100_sm90 as integ
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     monkeypatch.setitem(hs.FP8_PV_WHITELIST, "unfused_probe", frozenset({"unfused"}))
     run = lambda args: integ._infer(integ.GENERIC, args, 1e-5, 12, 32, False)
@@ -264,8 +264,8 @@ def test_unfused_sites_are_gated_static_and_guarded(monkeypatch):
 def test_front_made_v_planes_equal_the_standalone_pass(monkeypatch, dp, heads, dh, length, hl):
     """The fronts that write the e4m3 V^T planes themselves (``FP8_FRONT_VT``: the d_pair-64 one-kernel fronts, the wide d_pair-256 front's V CTA) give the module output of the
     standalone pass bit for bit (same fp16-rounded V, same static scale, same cvt); the key mask is padded."""
-    from miniworld_engine.kernels.integrations import triattn_h100_sm90 as integ
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.integrations import triattn_h100_sm90 as integ
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     monkeypatch.setitem(hs.FP8_PV_WHITELIST, "front_probe", frozenset({"unfused"}))
     kind = integ.FUSED if (dp == 256 and heads == 8) else integ.GENERIC
@@ -292,7 +292,7 @@ def test_front_made_v_planes_equal_the_standalone_pass(monkeypatch, dp, heads, d
 
 
 def test_front_gates_are_below_the_standalone_gates():
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     for (_dp, _h, ch), gate in hs.FP8_PV_UNFUSED_FRONT_MIN_S.items():
         assert gate <= hs.FP8_PV_UNFUSED_MIN_S[ch]
@@ -301,7 +301,7 @@ def test_front_gates_are_below_the_standalone_gates():
 def test_vscale_floor_and_zero_heads():
     """The static V scale is never below 2^-30: a head whose calibration absmax is ~0 (all zero, or the dynamic pass's 1e-30 clamp) takes 1, not
     2^-99 .. 2^-107 (which saturated the e4m3 cast on any later V of that head); every other head keeps the power of two above headroom x amax / 448."""
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     amax = torch.tensor([0.0, 1e-30 * 448.0, 1e-12, 3.0, 448.0])
     got = hs.vscale_from_amax(amax, 4.0)
@@ -313,7 +313,7 @@ def test_vscale_floor_and_zero_heads():
 
 def test_static_scale_of_a_zero_head_does_not_saturate_later():
     """quantize_v_static calibrated on a V with one all-zero head: a later V with ordinary values in that head runs without the overflow flag."""
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
 
     torch.manual_seed(5)
     v = torch.randn(1, 8, 256, 4, 32, device="cuda").half()
@@ -338,8 +338,8 @@ def test_static_scale_of_a_zero_head_does_not_saturate_later():
 
 def test_fused_route_s_gate():
     """The fused d_pair-128 route (whitelist kind "fused") below FP8_PV_FUSED_MIN_S runs the fp16 core (output bytes of the default route); at the gate it is the FP8 route."""
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
-    from miniworld_engine.modules.triangle import TriangleAttention
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.modules.triangle import TriangleAttention
 
     torch.manual_seed(0)
     m = TriangleAttention(128, 4, master_weights=True, backend="cuda").cuda().eval()
@@ -372,8 +372,8 @@ def test_static_scales_follow_the_module_lifetime(dp, heads, dh):
     when the tensor is freed (a later module at the same address calibrates its own scale instead of reading a stale one)."""
     import gc
 
-    from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
-    from miniworld_engine.modules.triangle import TriangleAttention
+    from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90 as hs
+    from foldjet_engine.modules.triangle import TriangleAttention
 
     length = 1024
     torch.manual_seed(1)

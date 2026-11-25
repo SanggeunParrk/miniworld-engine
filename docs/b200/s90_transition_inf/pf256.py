@@ -1,7 +1,7 @@
 # pf256.py n,M : tfwd_d256 inference one-tile build (fwdi1 flags) + -DPROBE=1, launched as the host does; stamps of tile 0 (us from the earliest CTA start, median / max over leader CTAs)
 import sys, statistics, torch
-from miniworld_engine.kernels.transition.cuda import fused_wide_sm100a as fw
-from miniworld_engine.kernels.transition.cuda.fused_sm100a import build_cubins
+from foldjet_engine.kernels.transition.cuda import fused_wide_sm100a as fw
+from foldjet_engine.kernels.transition.cuda.fused_sm100a import build_cubins
 D = 256
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
 names = [(0, "kernel start"), (1, "setup done"), (4, "MMA expand c0 starts"), (5, "MMA expand c1 starts"), (52, "squeeze c0 waits h_full ok"), (100, "LN: x landed"), (106, "LN done"), (112, "epi sees out_full"), (118, "epi released out_empty"), (124, "epi end")]

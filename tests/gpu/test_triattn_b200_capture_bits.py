@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from miniworld_engine.modules.triangle import TriangleAttention
+from foldjet_engine.modules.triangle import TriangleAttention
 
 pytestmark = [pytest.mark.gpu]
 

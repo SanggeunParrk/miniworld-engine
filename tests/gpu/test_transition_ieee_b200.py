@@ -4,8 +4,8 @@ it was refused to Triton (the diffusion-head conditioning transitions of the AF3
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import Transition
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import Transition
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not (torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0)), reason="B200 (sm_100a)")]
 

@@ -6,9 +6,9 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine.kernels.integrations import local_dit
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.local_dit import LocalDiTBlock, to_windows
+from foldjet_engine.kernels.integrations import local_dit
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.local_dit import LocalDiTBlock, to_windows
 
 pytestmark = [
     pytest.mark.gpu,
@@ -228,8 +228,8 @@ def test_calls_it_does_not_serve_keep_the_module_path(monkeypatch):
 def _kernel_names(fn, monkeypatch):
     """The kernel launches of one eager call of ``fn``, counted at the launch functions the integration calls (one name per launch).
     Not the profiler: in a long pytest process it drops the records of these driver-API launches (all of them, at times)."""
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
-    from miniworld_engine.kernels.augmented_attention.cuda import (
+    from foldjet_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from foldjet_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 
@@ -331,7 +331,7 @@ def test_graph_replays_and_static_inputs(static, weights):
     """Default: a capture packs the tables once and every replay remakes them (so an in-place update between replays is seen) --
     also under ``static_weights()``, which declares the weights fixed, not the inputs. ``static_inputs()``: the capture serves from
     the eager entries and a replay launches none of those kernels."""
-    from miniworld_engine.kernels import _capture
+    from foldjet_engine.kernels import _capture
 
     _, eng = _block(cross=True)
     single, cond, pair = _bf(*_inputs(4, 384))

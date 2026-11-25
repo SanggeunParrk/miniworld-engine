@@ -1,6 +1,6 @@
 # E1: speed of every operator class
 
-All 39 operator classes, every row of `src/miniworld_engine/requirements/requirements_module.csv`, inference (`eval`) and training (`train`),
+All 39 operator classes, every row of `src/foldjet_engine/requirements/requirements_module.csv`, inference (`eval`) and training (`train`),
 dtypes of the row (`master`, `float32`, ...), all lengths of a row (`lengths: all`), minimum MSA depth / samples (the judge's canonical speed
 run, `measure/configs/speed.yaml`; iterations 100 instead of 50). Backends: `pytorch` (the reference, measured in the same process), `cuda`, `triton`,
 `cueq` (stage `engine`) and `anthropic` (stage `kit`, through the card's kit stack: H100 `kit_stack.sh`, A100 `kit_stack_compat.sh` with

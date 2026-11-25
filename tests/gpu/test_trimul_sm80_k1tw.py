@@ -13,8 +13,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import TriangleMultiplication, TriangleMultiplicationRF3
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import TriangleMultiplication, TriangleMultiplicationRF3
 
 pytestmark = [pytest.mark.gpu, pytest.mark.a100]
 
@@ -37,7 +37,7 @@ def _run(kern, inputs):
 
 @pytest.mark.parametrize("length", [512, 640])
 def test_k1tw_planes(length: int) -> None:
-    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+    from foldjet_engine.kernels.trimul_inproj.cuda import sm80_wide
 
     ext = sm80_wide._ext()
     m = _module(TriangleMultiplication, 256, True)
@@ -70,7 +70,7 @@ def test_k1tw_planes(length: int) -> None:
     ("cls", "d_hidden"), [(TriangleMultiplication, None), (TriangleMultiplication, 128), (TriangleMultiplicationRF3, None)]
 )
 def test_d64_transposed_bitwise(cls, d_hidden, length: int, monkeypatch) -> None:
-    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+    from foldjet_engine.kernels.trimul_inproj.cuda import sm80_wide
 
     base = _module(cls, 64, True, d_hidden)
     gen = torch.Generator(device="cuda").manual_seed(1)
@@ -86,7 +86,7 @@ def test_d64_transposed_bitwise(cls, d_hidden, length: int, monkeypatch) -> None
 @pytest.mark.parametrize("length", [528, 640])
 @pytest.mark.parametrize("outgoing", [True, False])
 def test_d256_k1tw_module(outgoing: bool, length: int, monkeypatch) -> None:
-    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+    from foldjet_engine.kernels.trimul_inproj.cuda import sm80_wide
 
     base = _module(TriangleMultiplication, 256, outgoing)
     gen = torch.Generator(device="cuda").manual_seed(2)

@@ -70,7 +70,7 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def check(step, module, timer, *, train: bool, warmup: int, iterations: int) -> dict:
-    from miniworld_engine.measure import speed
+    from foldjet_engine.measure import speed
 
     rec: dict = {}
     reasons: list[str] = []
@@ -188,8 +188,8 @@ def main(argv=None) -> int:
     if done.exists():
         print(f"[check] {done} exists")
         return 0
-    from miniworld_engine.measure import config, speed
-    from miniworld_engine.modules.primitives import BackendUnsupported, unpadded_masks
+    from foldjet_engine.measure import config, speed
+    from foldjet_engine.modules.primitives import BackendUnsupported, unpadded_masks
 
     t0 = time.time()
     cfg = cfgmod.load(args.config, args)

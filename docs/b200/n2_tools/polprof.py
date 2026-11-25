@@ -1,8 +1,8 @@
 # polprof.py CFG TARGET : walk every case of CFG in measurer order (build, graph, 30 timed replays), profile (CUPTI) the kernels of the case whose label contains TARGET
 import collections, copy, statistics, sys, torch
 from torch.profiler import profile, ProfilerActivity
-from miniworld_engine.measure import config
-from miniworld_engine.measure.speed import make_step, unpadded_masks
+from foldjet_engine.measure import config
+from foldjet_engine.measure.speed import make_step, unpadded_masks
 cfg = config.load(sys.argv[1]); target = sys.argv[2]
 dev = torch.device("cuda"); flush = torch.empty(256 << 20, dtype=torch.uint8, device=dev)
 for case in config.cases(cfg):

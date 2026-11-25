@@ -6,9 +6,9 @@ import pytest
 import torch
 from portable_helpers import relative
 
-from miniworld_engine.kernels.triangle_attention.cuda import h100_triattn as native
-from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.triangle_attention.module import TriangleAttention
+from foldjet_engine.kernels.triangle_attention.cuda import h100_triattn as native
+from foldjet_engine.modules.exceptions import ImplementationType
+from foldjet_engine.modules.triangle_attention.module import TriangleAttention
 
 pytestmark = [
     pytest.mark.gpu,
@@ -260,8 +260,8 @@ def test_cuda_dispatch_has_no_triton():
 
 
 def test_opt_in_module_dispatch():
-    from miniworld_engine.kernels.integrations import triattn_h100
-    from miniworld_engine.modules.dispatch import KernelBackend
+    from foldjet_engine.kernels.integrations import triattn_h100
+    from foldjet_engine.modules.dispatch import KernelBackend
 
     m = make(256).eval()
     m._backend = KernelBackend.PORTABLE

@@ -1,6 +1,6 @@
 # Kernels
 
-`miniworld_engine.kernels`: one directory per kernel family, plus shared infrastructure in `_*.py` files. Modules reach kernels only
+`foldjet_engine.kernels`: one directory per kernel family, plus shared infrastructure in `_*.py` files. Modules reach kernels only
 through their `cuda` / `triton` backends (see [modules.md](modules.md)); a kernel has no range or tolerance of its own (both come from
 its module rows, [requirements.md](requirements.md)).
 
@@ -84,7 +84,7 @@ Families with Triton kernels but no `h100_sm90.json` (2026-11-11: `bias_only_dit
 Builds every hand-written CUDA / C++ artifact ahead of time, in parallel, on a CPU node:
 
 ```sh
-python -m miniworld_engine.kernels._prebuild [--arch sm90a] [--jobs N] [--only FAMILY ...] [--match REGEX]
+python -m foldjet_engine.kernels._prebuild [--arch sm90a] [--jobs N] [--only FAMILY ...] [--match REGEX]
                                              [--list] [--check] [--rows] [--compare INDEX.json]
                                              [--stop-after SECONDS] [--reverse] [--cutlass DIR] [--mathdx DIR]
 ```
@@ -100,7 +100,7 @@ python -m miniworld_engine.kernels._prebuild [--arch sm90a] [--jobs N] [--only F
   `<family>/<stem>-<key>.cubin`. The key (`_codegraph.py`) is computed from the content each artifact compiles: the entry sources and the
   `#include` closure actually reached (normalised: comments and whitespace do not count), the flags, torch / CUDA / Python versions,
   library versions for CUTLASS / cuBLASDx. It decides only whether an artifact must be (re)built; it is never used to judge a result.
-  `miniworld_engine/_prebuilt/` (same layout) is looked up first, then the local cache.
+  `foldjet_engine/_prebuilt/` (same layout) is looked up first, then the local cache.
 - **Resumable.** An artifact already present in any root is skipped; a build writes to a temporary path and renames into place under a
   flock, so a killed job leaves no partial artifact. `--stop-after` starts no build after a time limit; resubmit to continue.
 - **Parallel.** A process pool, one compiler per worker; workers = min(CPUs, memory / `PEAK_GB`) with `PEAK_GB = 5.0`.
@@ -120,7 +120,7 @@ python -m miniworld_engine.kernels._prebuild [--arch sm90a] [--jobs N] [--only F
 ### Candidate prebuild (`_prebuild_cuda.py`, opt-in, for tuning)
 
 ```sh
-python -m miniworld_engine.kernels._prebuild_cuda [--arch sm90a] [--list] [--check] [--jobs N] [--match REGEX]
+python -m foldjet_engine.kernels._prebuild_cuda [--arch sm90a] [--list] [--check] [--jobs N] [--match REGEX]
                                                   [--stop-after SECONDS] [--cutlass DIR] [--mathdx DIR]
 ```
 
@@ -146,12 +146,12 @@ Every measurement record carries it; the judge asks once whether results made wi
 Fills the launch-config tables on the GPU from the launches the requirements reach (one table per card).
 
 ```sh
-python -m miniworld_engine.kernels._pretune --candidates                      # CPU: write kernels/<family>/configs/candidates.json
-python -m miniworld_engine.kernels._pretune [--run DIR] [--config YAML] [--modules M ...] [--rows N ...] \
+python -m foldjet_engine.kernels._pretune --candidates                      # CPU: write kernels/<family>/configs/candidates.json
+python -m foldjet_engine.kernels._pretune [--run DIR] [--config YAML] [--modules M ...] [--rows N ...] \
        [--deadline EPOCH] [--hard-deadline EPOCH]                             # GPU: tune, one process per GPU
-python -m miniworld_engine.kernels._pretune --status [--run DIR]
-python -m miniworld_engine.kernels._pretune --merge [--run DIR ...] [--dry-run] # CPU: shards -> <gpu>.json tables
-python -m miniworld_engine.kernels._pretune --list | --drop-mismatch | --drop-key OP KEY [--run DIR]   # units; reopen keys
+python -m foldjet_engine.kernels._pretune --status [--run DIR]
+python -m foldjet_engine.kernels._pretune --merge [--run DIR ...] [--dry-run] # CPU: shards -> <gpu>.json tables
+python -m foldjet_engine.kernels._pretune --list | --drop-mismatch | --drop-key OP KEY [--run DIR]   # units; reopen keys
 ```
 
 - **Candidates** (once, then a reviewed file `candidates.json`): per configured Triton op, its decorator default(s), the old engine's

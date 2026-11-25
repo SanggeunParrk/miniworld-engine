@@ -1,6 +1,6 @@
 # lnmb.py: bias-only glue kernels (ln_fwd, ln_bwd, gate_u, tri_scale_rows) vs byte floors; every timing with the L2 flushed
 import torch, sys
-from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir, b200_triattn
+from foldjet_engine.kernels.triangle_attention.cuda import b200_bidir, b200_triattn
 g = b200_bidir.glue(); w = b200_triattn._wide()
 C = 128
 flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")

@@ -8,9 +8,9 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.primitives import BackendUnsupported
-from miniworld_engine.modules.token_dit import _CALL_CACHE, TokenDiTProtenix
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.primitives import BackendUnsupported
+from foldjet_engine.modules.token_dit import _CALL_CACHE, TokenDiTProtenix
 
 pytestmark = [pytest.mark.gpu, pytest.mark.h100]
 

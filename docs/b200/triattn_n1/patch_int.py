@@ -1,6 +1,6 @@
 import re, sys
 root = sys.argv[1]
-K = root + "/src/miniworld_engine/kernels/"
+K = root + "/src/foldjet_engine/kernels/"
 # 1. loader
 p = K + "triangle_attention/cuda/b200_bidir.py"; s = open(p).read()
 s += '''
@@ -31,7 +31,7 @@ B200_LNBWD = os.environ.get("MINIWORLD_BIDIR_B200_LNBWD", "1") != "0"
 def _ln_bwd(g, dyln, x, dy, lnw, mean, rstd, L):
     """-> (dx, partials [n, 2, C]) of the LayerNorm backward + the residual's dy (the shared glue's ``ln_bwd`` in the starting layout)."""
     if B200_LNBWD and _b200() and x.shape[1] == 128:
-        from miniworld_engine.kernels.triangle_attention.cuda import b200_bidir
+        from foldjet_engine.kernels.triangle_attention.cuda import b200_bidir
 
         return b200_bidir.lnb().ln_bwd128(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False, 2)
     return g.ln_bwd(dyln, x, dy, lnw.float().contiguous(), mean, rstd, L, False)
@@ -45,7 +45,7 @@ assert s.count(old) == 2
 s = s.replace(old, "    dx, part = _ln_bwd(g, dyln, x, dy, lnw, mean, rstd, L)  # + the residual's dy")
 open(p, "w").write(s)
 # 3. versions
-p = root + "/src/miniworld_engine/modules/triangle.py"; s = open(p).read()
+p = root + "/src/foldjet_engine/modules/triangle.py"; s = open(p).read()
 a = '        "cuda:b200_sm100": 69,  # 69 ('
 assert s.count(a) == 1
 s = s.replace(a, '        "cuda:b200_sm100": 71,  # 71 (2026-11-18, N1 triattn, training): the bias-only paths\' LayerNorm backward (C = 128) on a B200 kernel (loads issued together and a row step ahead, 2 CTAs an SM): the single-direction row 188 step -2.2 .. -4 %, dx bitwise equal;\n        # 69 (', 1)

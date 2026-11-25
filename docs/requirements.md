@@ -1,7 +1,7 @@
 # Requirements
 
-`src/miniworld_engine/requirements/` states what the engine must serve. The rules are in
-[requirements/README.md](../src/miniworld_engine/requirements/README.md); this page summarises them and shows who reads the tables.
+`src/foldjet_engine/requirements/` states what the engine must serve. The rules are in
+[requirements/README.md](../src/foldjet_engine/requirements/README.md); this page summarises them and shows who reads the tables.
 
 ## requirements_module.csv
 
@@ -9,7 +9,7 @@ One row per distinct (module class, stream, dims, options):
 
 | column | meaning |
 |---|---|
-| `module` | a `BackendModule` class of `miniworld_engine.modules` (found by name, subpackages included) |
+| `module` | a `BackendModule` class of `foldjet_engine.modules` (found by name, subpackages included) |
 | `model` | the selector keys that build this class (`TokenDiT(model=...)`, `AtomDiT(model=...)`, `TriangleAttention(model=...)`, ...) |
 | `stream` | the activation layout of a row-wise op: `token_pair` `[S, L, L, w]`, `msa_token` / a depth `[S, D, L, w]`, else `[S, L, w]`; the DiT blocks' multi-fold layout `token_folds` / `atom_folds` `[S, F, L, w]` with F = the `depths` value (docs/modules.md, multi-fold contract); a suffix `_shared_cond` (`token_single_shared_cond`, `atom_single_shared_cond`, `token_folds_shared_cond`, `atom_folds_shared_cond`) gives the DiT `cond` as one tensor expanded (stride 0) over the S samples, FoldForge's layout, which the measurers keep expanded (docs/measure.md, shared conditioning) |
 | `lengths`, `depths` | `|`-separated token / atom lengths and MSA depths (the fold count F on a `token_folds` / `atom_folds` row) |

@@ -1,8 +1,8 @@
 import pin  # noqa: F401
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.token_dit import TokenDiTProtenix
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.token_dit import TokenDiTProtenix
 
 
 def block(seed=0, dp=128):

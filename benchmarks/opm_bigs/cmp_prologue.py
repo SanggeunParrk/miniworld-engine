@@ -1,8 +1,8 @@
 """Bitwise: AF3-order OPM inference at S>4096 with the native prologue (main default) vs the wide one."""
 import copy, dataclasses, sys, torch
-from miniworld_engine.measure import config, speed
-from miniworld_engine.modules.primitives import unpadded_masks
-from miniworld_engine.kernels.integrations import opm_train
+from foldjet_engine.measure import config, speed
+from foldjet_engine.modules.primitives import unpadded_masks
+from foldjet_engine.kernels.integrations import opm_train
 dev = torch.device("cuda")
 for row, L, S in [(57, 256, 8192), (57, 384, 6144), (57, 768, 16384), (57, 130, 5120)]:
     cfg = config.Config(modules=("OuterProductMean",), rows=(row,), lengths=(L,), depths="min", modes=("eval",), samples="min")

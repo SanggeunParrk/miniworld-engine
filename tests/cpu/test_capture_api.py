@@ -1,4 +1,4 @@
-"""R1 (FoldForge): the public capture / weight-cache API ``miniworld_engine.capture``.
+"""R1 (FoldForge): the public capture / weight-cache API ``foldjet_engine.capture``.
 
 - ``static_weights`` / ``static_inputs`` are the context managers of ``kernels._capture`` (same flags, restored on exit);
 - ``clear_weight_caches`` empties every registered store (a weight replaced without a version bump is picked up after it) and the
@@ -18,10 +18,10 @@ from pathlib import Path
 import torch
 from torch.multiprocessing.reductions import StorageWeakRef
 
-from miniworld_engine import capture
-from miniworld_engine.kernels import _capture
+from foldjet_engine import capture
+from foldjet_engine.kernels import _capture
 
-PACKAGE = Path(__file__).resolve().parents[2] / "src" / "miniworld_engine"
+PACKAGE = Path(__file__).resolve().parents[2] / "src" / "foldjet_engine"
 
 #: module-level dicts that are NOT derived from weights or per-item inputs ("<path under the package>:<name>" -> what they hold)
 NOT_WEIGHT_DERIVED = {
@@ -249,7 +249,7 @@ def test_static_contexts_set_and_restore():
 
 
 def test_registered_stores_include_the_known_ones():
-    for name in ("miniworld_engine.kernels._tf32", "miniworld_engine.kernels.integrations.token_dit"):
+    for name in ("foldjet_engine.kernels._tf32", "foldjet_engine.kernels.integrations.token_dit"):
         importlib.import_module(name)  # a store registers itself at import
     names = capture.weight_caches()
     assert names["capture.forms"] is _capture._FORMS
@@ -309,7 +309,7 @@ def test_lookup_store_cleared():
 
 def test_tf32_operand_cache_cleared():
     """The TF32 operand cache (``_tf32.tf32_cached``: CUDA only) is a registered store: ``clear_weight_caches`` empties it."""
-    from miniworld_engine.kernels import _tf32
+    from foldjet_engine.kernels import _tf32
 
     assert capture.weight_caches()["tf32.operands"] is _tf32._CACHE
     _tf32._CACHE[("test_capture_api",)] = (torch.ones(1),)
@@ -318,7 +318,7 @@ def test_tf32_operand_cache_cleared():
 
 
 def test_instance_cache_attributes_cleared():
-    from miniworld_engine.modules import TokenDiT
+    from foldjet_engine.modules import TokenDiT
 
     block = TokenDiT("protenix", 64, 32, 16, 4, 2)
     vars(block.attention)["_anthropic_pack"] = ("key", None, None)

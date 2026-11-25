@@ -15,10 +15,10 @@ import typing
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules.atom_dit import AtomDiTChai1
-from miniworld_engine.modules.attention import AttentionPairBias
-from miniworld_engine.modules.token_dit import TokenDiTChai1
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules.atom_dit import AtomDiTChai1
+from foldjet_engine.modules.attention import AttentionPairBias
+from foldjet_engine.modules.token_dit import TokenDiTChai1
 
 pytestmark = [pytest.mark.gpu]
 
@@ -118,7 +118,7 @@ def test_chai1_atom_dit_mixed_layout(stream: str, key_window: str) -> None:
 @pytest.mark.parametrize("samples", [1, 5])
 def test_token_dit_protenix_extra_pair_bias_a100(dtype: str, samples: int) -> None:
     """OpenDDE's TokenDiTProtenix + ``extra_pair_bias`` [L, L] is served by the sm_80 attention (it was refused, and fell to Triton)."""
-    from miniworld_engine.modules.token_dit import TokenDiTProtenix
+    from foldjet_engine.modules.token_dit import TokenDiTProtenix
 
     m = _built(TokenDiTProtenix(), dtype)
     act = torch.bfloat16 if dtype == "master" else torch.float32
@@ -142,7 +142,7 @@ def test_token_dit_protenix_extra_pair_bias_masked_keys(dtype: str) -> None:
     extra on the masked key columns changes nothing."""
     import copy
 
-    from miniworld_engine.modules.token_dit import TokenDiTProtenix
+    from foldjet_engine.modules.token_dit import TokenDiTProtenix
 
     length, pad = 256, 40
     m = _built(TokenDiTProtenix(), dtype)

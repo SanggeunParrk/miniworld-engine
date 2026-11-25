@@ -28,7 +28,7 @@ def _inputs(n: int, s: int, h: int, d: int, half: int, dtype: torch.dtype, share
 
 
 def _loads() -> bool:
-    from miniworld_engine.kernels.rope.cuda import sm80
+    from foldjet_engine.kernels.rope.cuda import sm80
 
     return torch.cuda.get_device_capability() == (8, 0) and sm80.loads()
 
@@ -38,7 +38,7 @@ def _loads() -> bool:
 def test_rope_and_qk_norm_rope(dtype, n, s, h, d, half) -> None:
     if not _loads():
         pytest.skip("needs an A100 and the sm_80 RoPE build")
-    from miniworld_engine.kernels.rope.cuda import sm80
+    from foldjet_engine.kernels.rope.cuda import sm80
 
     tol = 2e-2 if dtype == torch.bfloat16 else 1e-5
     eps = torch.finfo(torch.float32).eps

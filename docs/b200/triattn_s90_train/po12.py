@@ -1,5 +1,5 @@
 import sys, json, torch
-from miniworld_engine.modules import triangle as T
+from foldjet_engine.modules import triangle as T
 kw = json.loads(sys.argv[1]); L = int(sys.argv[2])
 torch.manual_seed(1)
 x0 = torch.randn(1, L, L, kw["d_pair"], device="cuda", dtype=torch.bfloat16); dy0 = torch.randn_like(x0)

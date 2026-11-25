@@ -1,9 +1,9 @@
 # dwplace.py : DwModTf32 kernel time (CUPTI, L2 flushed) against the placement of its workspace gws (and out) -- random MB pads before the allocations
 import random, statistics, sys, torch
 from torch.profiler import profile, ProfilerActivity
-from miniworld_engine.kernels.swa_dit.cuda import sm100
-from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
-from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd as _f
+from foldjet_engine.kernels.swa_dit.cuda import sm100
+from foldjet_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+from foldjet_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd as _f
 dev = torch.device("cuda"); torch.manual_seed(0); random.seed(5)
 M = int(sys.argv[1]) if len(sys.argv) > 1 else 4096; C = 128
 K = tf32_bwd.kernels_bwd(0)

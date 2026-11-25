@@ -7,8 +7,8 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.measure import config as C
-from miniworld_engine.modules import TriangleMultiplication, TriangleMultiplicationRF3
+from foldjet_engine.measure import config as C
+from foldjet_engine.modules import TriangleMultiplication, TriangleMultiplicationRF3
 
 pytestmark = [pytest.mark.gpu, pytest.mark.a100]
 
@@ -29,7 +29,7 @@ def _module(cls, outgoing: bool, d_hidden: int | None):
     ("cls", "d_hidden"), [(TriangleMultiplication, None), (TriangleMultiplication, 128), (TriangleMultiplicationRF3, None)]
 )
 def test_k3s_bitwise_k3w(cls, d_hidden, outgoing: bool, length: int) -> None:
-    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+    from foldjet_engine.kernels.trimul_inproj.cuda import sm80_wide
 
     ext = sm80_wide._ext()
     base = _module(cls, outgoing, d_hidden)
@@ -53,7 +53,7 @@ def test_k3s_bitwise_k3w(cls, d_hidden, outgoing: bool, length: int) -> None:
 def test_k1t_bitwise_k1w64(outgoing: bool, length: int) -> None:
     """The hidden-128 front in one CTA per token tile (``k1t_kernel``; 2 ring slots below L 1536, 3 from it) gives the output bits of the two-group
     persistent ``k1w64_kernel``."""
-    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+    from foldjet_engine.kernels.trimul_inproj.cuda import sm80_wide
 
     ext = sm80_wide._ext()
     base = _module(TriangleMultiplication, outgoing, 128)

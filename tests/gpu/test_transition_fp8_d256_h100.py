@@ -22,7 +22,7 @@ def _needs_h100() -> None:
 
 
 def _module(n: int):
-    from miniworld_engine.modules.transition import Transition
+    from foldjet_engine.modules.transition import Transition
 
     m = Transition(D, n, master_weights=True, backend="cuda").cuda().eval()
     g = torch.Generator(device="cpu").manual_seed(n)
@@ -51,7 +51,7 @@ def _errs(y: torch.Tensor, y64: torch.Tensor) -> tuple[float, float]:
 @pytest.mark.parametrize("g1", [1, 0])
 def test_d256_fp8_error_vs_fp64(n: int, rows: int, g1: int) -> None:
     _needs_h100()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as F
 
     assert F.POLICY is None
     torch.manual_seed(0)
@@ -79,7 +79,7 @@ def test_d256_fp8_error_vs_fp64(n: int, rows: int, g1: int) -> None:
 def test_d256_graph_replay_matches_eager(n: int) -> None:
     """Calibrated eagerly, then captured (lazy guard): the replay writes the eager call's bytes (the kernel is deterministic)."""
     _needs_h100()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as F
 
     m = _module(n)
     x = torch.randn(1, 64 * 128, D, device="cuda").bfloat16()
@@ -106,7 +106,7 @@ def test_d256_graph_replay_matches_eager(n: int) -> None:
 
 def test_d256_guard_rescales_a_saturated_h_scale() -> None:
     _needs_h100()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as F
 
     m = _module(4)
     x = torch.randn(1, 4096, D, device="cuda").bfloat16()
@@ -139,7 +139,7 @@ def test_d256_guard_rescales_a_saturated_h_scale() -> None:
 def test_d256_row_gate() -> None:
     """With MIN_ROWS unset, a D 256 call below ROW_GATE[256] rows takes the 2.5.12 route (no FP8 call counted); at the gate it is served."""
     _needs_h100()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as F
 
     m = _module(4)
     gate = F.ROW_GATE[D]
@@ -157,7 +157,7 @@ def test_d256_row_gate() -> None:
 
 def test_d256_default_route_untouched_when_off() -> None:
     _needs_h100()
-    from miniworld_engine.kernels.transition.cuda import fp8_sm90a as F
+    from foldjet_engine.kernels.transition.cuda import fp8_sm90a as F
 
     assert F.POLICY is None
     m = _module(4)

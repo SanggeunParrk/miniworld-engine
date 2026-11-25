@@ -8,7 +8,7 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.modules.atom_dit import AtomDiTMiniWorld
+from foldjet_engine.modules.atom_dit import AtomDiTMiniWorld
 
 pytestmark = [pytest.mark.gpu]
 
@@ -25,7 +25,7 @@ def test_chunked_fp32_training_equals_the_single_call(
 ) -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (12, 0):
         pytest.skip("the RTX 5090 (sm_120) path")
-    from miniworld_engine.kernels.swa_dit.cuda.sm80 import composed
+    from foldjet_engine.kernels.swa_dit.cuda.sm80 import composed
 
     torch.manual_seed(0)
     base = AtomDiTMiniWorld(half_window=half_window).cuda()

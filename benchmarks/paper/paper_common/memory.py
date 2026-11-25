@@ -1,7 +1,7 @@
 """E6: peak GPU memory of one step per case and backend.
 
 For every case of the config and every backend the case's class has: the module and its inputs are built as the speed measurer builds them
-(miniworld_engine.measure.config / speed.make_step), the step (eval: the forward under no_grad; train: forward + backward, the production
+(foldjet_engine.measure.config / speed.make_step), the step (eval: the forward under no_grad; train: forward + backward, the production
 step of speed.make_step) is run once warm (so lazily built weights, kernel tables and calibration are in place), the cache is emptied, then
 ``torch.cuda.reset_peak_memory_stats()`` and one step, and ``torch.cuda.max_memory_allocated()`` is the peak. The step runs eagerly on the
 default stream (no CUDA graph: a graph's private pool would hide the allocator's peak).
@@ -38,9 +38,9 @@ def _bytes(tree) -> int:
 
 
 def measure_backend(base, case, backend: str, dev) -> dict:
-    from miniworld_engine.measure import config
-    from miniworld_engine.measure.speed import make_step
-    from miniworld_engine.modules.primitives import unpadded_masks
+    from foldjet_engine.measure import config
+    from foldjet_engine.measure.speed import make_step
+    from foldjet_engine.modules.primitives import unpadded_masks
 
     module = copy.deepcopy(base)
     with unpadded_masks():
@@ -78,8 +78,8 @@ def measure_backend(base, case, backend: str, dev) -> dict:
 
 
 def run(cfg, out_path: str) -> list[dict]:
-    from miniworld_engine.measure import config
-    from miniworld_engine.modules.primitives import BackendUnsupported
+    from foldjet_engine.measure import config
+    from foldjet_engine.modules.primitives import BackendUnsupported
 
     dev = torch.device(cfg.device)
     meta = config.run_meta(cfg, "memory", "1")

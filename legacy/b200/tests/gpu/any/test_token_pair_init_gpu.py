@@ -7,7 +7,7 @@ import pytest
 import torch
 from portable_helpers import run_pair_init as _run
 
-from miniworld_engine.kernels.token_pair_init import (
+from foldjet_engine.kernels.token_pair_init import (
     refusal,
     token_pair_init,
     token_pair_init_reference,
@@ -119,7 +119,7 @@ def test_cuda_graph_capture():
 
 def test_bins_that_do_not_fit_eight_bits_are_refused():
     """The kernels pack three bins into 8 bits each (the largest is n_rel - 2): r_max = 64 does not fit and must not run silently wrong."""
-    from miniworld_engine.kernels.token_pair_init.cuda import sm100
+    from foldjet_engine.kernels.token_pair_init.cuda import sm100
 
     (left, right, _, w_bond), _ids, bond = _case(1, 32, grad=False)
     w_rel = torch.randn(P, 2 * (2 * 64 + 2) + (2 * 2 + 2) + 1, device=DEV)

@@ -9,7 +9,7 @@ import copy
 import pytest
 import torch
 
-from miniworld_engine.modules.atom_dit import AtomDiTMiniWorld
+from foldjet_engine.modules.atom_dit import AtomDiTMiniWorld
 
 pytestmark = [pytest.mark.gpu]
 
@@ -21,7 +21,7 @@ def _rel(x: torch.Tensor, gold: torch.Tensor) -> float:
 def _case(half_window: int, length: int, samples: int, grad: bool, monkeypatch, train_min_rows: int | None = None):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (12, 0):
         pytest.skip("the RTX 5090 (sm_120) path")
-    from miniworld_engine.kernels.swa_dit.cuda.sm80 import composed
+    from foldjet_engine.kernels.swa_dit.cuda.sm80 import composed
 
     if train_min_rows is not None:
         monkeypatch.setattr(composed, "TRAIN_FUSED_SM120_MIN_ROWS", train_min_rows)

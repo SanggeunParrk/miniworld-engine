@@ -5,7 +5,7 @@ residual and ProteinMPNN route on the card (no refusal on their requirement inpu
 import pytest
 import torch
 
-from miniworld_engine import modules as M
+from foldjet_engine import modules as M
 
 pytestmark = [
     pytest.mark.gpu,
@@ -122,7 +122,7 @@ def test_sampler_cluster_kernels_b200(length: int, samples: int) -> None:
 def test_pool_atoms_sort_free_backward_b200(length: int, samples: int, dup: int) -> None:
     """Round 3: the pooling backward without the sort (row buckets, slots added in slot order) gives the bits of the sorted H100 kernel -- also
     for rows with more slots than a bucket (``dup``: every index folded onto ``dup`` rows) -- and the forward the bits of the Triton kernel."""
-    from miniworld_engine.kernels.sampler_ops.cuda import ext_sm100
+    from foldjet_engine.kernels.sampler_ops.cuda import ext_sm100
 
     ext = ext_sm100()
     m = M.PoolAtoms(backend="cuda").cuda()
@@ -177,7 +177,7 @@ def _pair_step(m, inp, up):
 
 def _earlier_path(monkeypatch, on: bool) -> None:
     """``on``: the pair builders' route before the round-3 B200 kernels (the H100 / RTX 5090 sources built for sm_100a), the reference."""
-    from miniworld_engine.modules import pair_embed as pe
+    from foldjet_engine.modules import pair_embed as pe
 
     if on:
         monkeypatch.setattr(pe, "_b200", lambda device: False)
@@ -230,7 +230,7 @@ def test_pair_embed_geom_ca_b200_kernels(monkeypatch, cls, ln_eps, length: int, 
     """Round 3 (``pe_geom_sm100.cuh`` / ``pe_ln_sm100.cuh`` / the decoder forward with codes): against the earlier route, without the LayerNorm
     the pair and the weight gradient bitwise (the same rows in the same order, the same tcgen05 partials), with it to bf16 rounding; a step
     repeats bitwise; chains other than 0 exercise the chain row."""
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm100
+    from foldjet_engine.kernels.pair_embed_geom.cuda import sm100
 
     monkeypatch.setattr(sm100, "SMALL_PAIRS", 0)  # the reference's table gradient on tcgen05 at every size
     m = cls(ln_eps=ln_eps, backend="cuda").cuda().train()
@@ -240,7 +240,7 @@ def test_pair_embed_geom_ca_b200_kernels(monkeypatch, cls, ln_eps, length: int, 
         inp["chains"] = torch.randint(0, 3, inp["chains"].shape, device="cuda", generator=g)
     up = torch.randn((samples, length, length, 256), device="cuda", generator=g).to(torch.bfloat16)
     assert m.unsupported(**inp) is None
-    from miniworld_engine.modules import pair_embed as pe
+    from foldjet_engine.modules import pair_embed as pe
 
     monkeypatch.setattr(pe, "_b200", lambda device: False)
     o0, (w0,) = _pair_step(m, inp, up)
@@ -270,7 +270,7 @@ def test_pair_embed_fused_reduce_graph_b200(monkeypatch, cls, ln_eps, length: in
     """Round 3, second part: the table gradient with its reduce inside the launch (cooperative grid barrier, ``RED_V`` 2) and the training
     table made by pg120_table behind the forward (PDL): the weight gradient bitwise equal to the separate reduce launch on a separate table
     kernel, and a captured training step replays to the eager bits (twice: the barrier words are reused)."""
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm100
+    from foldjet_engine.kernels.pair_embed_geom.cuda import sm100
 
     m = cls(ln_eps=ln_eps, backend="cuda").cuda().train()
     g = torch.Generator(device="cuda").manual_seed(7 * length + samples)
@@ -314,7 +314,7 @@ def test_pair_embed_fused_reduce_graph_b200(monkeypatch, cls, ln_eps, length: in
 def test_pair_embed_adaln_stats_inference_b200(monkeypatch, length: int, samples: int, dtype, sc: bool) -> None:
     """Round 3, second part: PairEmbedAdaLN inference from the LayerNorm statistics tables (``fwd_s``) against the forward that reduces per
     pair: within a bf16 step or two; repeats bitwise; the tables follow a weight / LayerNorm-affine update."""
-    from miniworld_engine.kernels.pair_embed_adaln.cuda import sm100
+    from foldjet_engine.kernels.pair_embed_adaln.cuda import sm100
 
     m = M.PairEmbedAdaLN(backend="cuda").cuda().eval()
     g = torch.Generator(device="cuda").manual_seed(length + 11 * samples)

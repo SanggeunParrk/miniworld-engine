@@ -1,5 +1,5 @@
 import torch
-from miniworld_engine.modules import triangle as T
+from foldjet_engine.modules import triangle as T
 for cls, kw, L in (("TriangleAttention", dict(d_pair=128, n_head=4, p_drop=0.0, starting=True, use_self_attention=False), 128),
                    ("TriangleAttention", dict(d_pair=128, n_head=4, p_drop=0.0, starting=False, use_self_attention=False), 256),
                    ("TriangleAttention", dict(d_pair=128, n_head=4, p_drop=0.0, starting=True, use_self_attention=False), 384),

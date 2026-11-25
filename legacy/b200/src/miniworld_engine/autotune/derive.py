@@ -47,16 +47,16 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine.autotune.module_registry import (
+from foldjet_engine.autotune.module_registry import (
     REGISTRY_MODULE as REGISTRY_MODULE,
 )
-from miniworld_engine.autotune.module_registry import (
+from foldjet_engine.autotune.module_registry import (
     STREAM_LADDERS as STREAM_LADDERS,
 )
-from miniworld_engine.autotune.module_registry import (
+from foldjet_engine.autotune.module_registry import (
     ModuleRow as ModuleRow,
 )
-from miniworld_engine.autotune.module_registry import (
+from foldjet_engine.autotune.module_registry import (
     module_rows as module_rows,
 )
 
@@ -94,8 +94,8 @@ def units(rows: list[ModuleRow], arch: str | None = None) -> list[DeriveUnit]:
     selects among its own kernels, so pinning two at once records nothing the two single pins do
     not, and the cross product is what made the unit count explode.
     """
-    from miniworld_engine import build as build_matrix
-    from miniworld_engine.autotune.builder import switch_applies
+    from foldjet_engine import build as build_matrix
+    from foldjet_engine.autotune.builder import switch_applies
 
     sm = "sm_" + normalise_arch(arch).removeprefix("sm") if arch else None
 
@@ -120,7 +120,7 @@ def units(rows: list[ModuleRow], arch: str | None = None) -> list[DeriveUnit]:
             computes = row.computes or ("",)
             for compute in computes:
                 for option in (None, *row.options):
-                    from miniworld_engine.autotune import policy
+                    from foldjet_engine.autotune import policy
                     if not policy.allows(row.stream, length, mode, impl, option, row.impls):
                         continue
                     if not applies(option, mode, dtype):
@@ -190,8 +190,8 @@ def install_recorder(sink: list) -> None:
     import triton.runtime.autotuner as autotuner_mod
     import triton.runtime.jit as jit_mod
 
-    from miniworld_engine.autotune.cache import bucket_of_autotuner, dtype_of_args
-    from miniworld_engine.autotune.configs import op_of
+    from foldjet_engine.autotune.cache import bucket_of_autotuner, dtype_of_args
+    from foldjet_engine.autotune.configs import op_of
 
     def tuned_run(self, *args, **kwargs):
         _note_kernel(self)
@@ -225,7 +225,7 @@ def install_recorder(sink: list) -> None:
         sink.append((f"<unautotuned:{self.fn.__name__}>", "", ""))
         return
 
-    from miniworld_engine.autotune import native
+    from foldjet_engine.autotune import native
     def native_choice(op, candidates, *, dtype, bucket, **kwargs):
         if not candidates:
             raise ValueError(f"{op}: no declared native schedule")
@@ -242,8 +242,8 @@ def install_recorder(sink: list) -> None:
 @contextlib.contextmanager
 def _pin(option: tuple[str, str] | None):
     """Apply one option for the duration of a unit, then put the settings back."""
-    from miniworld_engine import settings
-    from miniworld_engine.autotune.builder import SWITCH_SETTINGS
+    from foldjet_engine import settings
+    from foldjet_engine.autotune.builder import SWITCH_SETTINGS
 
     if option is None:
         yield 0.0
@@ -253,7 +253,7 @@ def _pin(option: tuple[str, str] | None):
         yield float(raw)
         return
     if name not in SWITCH_SETTINGS:          # a torch-level switch (``builder.torch_switch``: the fp32 matmul precision)
-        from miniworld_engine.autotune.builder import torch_switch
+        from foldjet_engine.autotune.builder import torch_switch
 
         with torch_switch(name, raw):
             yield 0.0
@@ -391,7 +391,7 @@ def record(unit: DeriveUnit, cases: dict) -> tuple[list, str | None]:
 
     case = cases[unit.module]
     dims = dict(unit.dims)
-    from miniworld_engine.autotune.module_registry import torch_dtypes
+    from foldjet_engine.autotune.module_registry import torch_dtypes
 
     dtype, act = torch_dtypes(unit.dtype)          # parameters, activations (``master``: fp32 parameters, bf16 activations)
     compute = getattr(torch, unit.compute) if unit.compute else None
@@ -450,9 +450,9 @@ def install_no_calibration() -> None:
     ``NVIDIA_RTX_A6000_sm860``, ``_sm900``, ``_sm1000`` and ``_sm100`` and, worse, overwrote the
     REAL ``_sm86`` files with times measured off stubs.
     """
-    from miniworld_engine import settings
-    from miniworld_engine.kernels.bias_only_attention import dispatch as bias_dispatch
-    from miniworld_engine.kernels.layernorm import dispatch as ln_dispatch
+    from foldjet_engine import settings
+    from foldjet_engine.kernels.bias_only_attention import dispatch as bias_dispatch
+    from foldjet_engine.kernels.layernorm import dispatch as ln_dispatch
 
     # Fake launches cannot provide timing evidence, including in-memory choices.
     # Explicit backend pins still exercise each declared alternative.
@@ -469,7 +469,7 @@ def install_no_calibration() -> None:
 
 #: Module prefixes whose opaque hand-CUDA launches return their fakes during a derivation (see `install_native_recorders`).
 _FAKED_NATIVE_FAMILIES = tuple(
-    f"miniworld_engine.kernels.{family}"
+    f"foldjet_engine.kernels.{family}"
     for family in (
         "layernorm.cuda.general", "layernorm.cuda.pipe", "rmsnorm.cuda", "adaln.cuda", "conditioned_transition.cuda",
         "dit_variants.cuda", "augmented_attention.cuda", "trimul_inproj.cuda.", "triangle_attention.cuda.h100_triattn",
@@ -479,10 +479,10 @@ _FAKED_NATIVE_FAMILIES = tuple(
         # the SWA atom block: its launches (swa_dit_block_fwd / bwd, the native H100 modulation and casts) carry fakes and record no selector
         "swa_dit.",
     )
-) + ("miniworld_engine.kernels.integrations.",
+) + ("foldjet_engine.kernels.integrations.",
      # ProteinMPNN's feature op (`mpnn_features_radial_dw_v1`: a torch.compile'd backward-only region behind an opaque fake) launched its
      # inductor kernel on FakeTensors and failed every MPNN training unit with an illegal address
-     "miniworld_engine.modules.mpnn.")
+     "foldjet_engine.modules.mpnn.")
 
 
 @functools.cache
@@ -526,7 +526,7 @@ class _FakeGuard:
 
 def install_extension_guard() -> None:
     """Every extension ``_nvcc`` loads from here on is wrapped in :class:`_FakeGuard`."""
-    from miniworld_engine.kernels import _nvcc
+    from foldjet_engine.kernels import _nvcc
 
     if getattr(_nvcc._load, "_derive_guard", False):
         return
@@ -546,8 +546,8 @@ def install_native_recorders() -> None:
     alternatives. Calling a pybind extension on FakeTensors can fail into a different
     dispatch branch, or wait on a compiler lock, neither of which is valid evidence.
     """
-    from miniworld_engine.kernels.layernorm import cuda as ln_cuda
-    from miniworld_engine.kernels.transition import cuda as transition_cuda
+    from foldjet_engine.kernels.layernorm import cuda as ln_cuda
+    from foldjet_engine.kernels.transition import cuda as transition_cuda
 
     # Some pure tensor helpers carry @torch.compile. Their eager bodies are what
     # the recorder needs; Dynamo would create another, incompatible FakeTensorMode.
@@ -567,10 +567,10 @@ def install_native_recorders() -> None:
                 return fake(*args, **kwargs)
             return run
 
-        from miniworld_engine.kernels.trimul_inproj.cuda import b200_infer
+        from foldjet_engine.kernels.trimul_inproj.cuda import b200_infer
 
         b200_infer.inference = b200_contract(b200_infer._inference_fake)
-        from miniworld_engine.kernels.trimul_inproj.cuda import b200_train
+        from foldjet_engine.kernels.trimul_inproj.cuda import b200_train
 
         b200_train.forward = b200_contract(b200_train._forward_fake)
         b200_train.backward = b200_contract(b200_train._backward_fake)
@@ -583,7 +583,7 @@ def install_native_recorders() -> None:
     # contract this derivation needs (shapes and dtypes; the Triton launches the module makes around it are still recorded).
     # Only the families listed in ``_FAKED_NATIVE_FAMILIES``: an op whose body records a native selector (``native.choose_config``) or launches
     # a tuned Triton kernel of its own must run, and the sm90 composites below keep their explicit contracts.
-    from miniworld_engine.kernels import _compile
+    from foldjet_engine.kernels import _compile
 
     def native_fake(fn, args, kwargs) -> bool:
         from torch._subclasses.fake_tensor import is_fake
@@ -629,20 +629,20 @@ def install_native_recorders() -> None:
             return run
 
         for module_name, functions in contracts:
-            module = importlib.import_module("miniworld_engine." + module_name)
+            module = importlib.import_module("foldjet_engine." + module_name)
             for entry, fake in functions:
                 selector = getattr(module, "_select_config", None) if module_name.endswith("h100_inference") else None
                 setattr(module, entry, native_contract(getattr(module, fake), selector))
 
         # The fused / generic weight packs launch an extension on the parameters; their torch-statement forms give the same shapes.
-        from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90, h100_sm90_generic
+        from foldjet_engine.kernels.triangle_attention.cuda import h100_sm90, h100_sm90_generic
 
         h100_sm90._pack_params = h100_sm90._pack_params_torch  # ty: ignore[invalid-assignment]
         h100_sm90_generic.pack_weights = h100_sm90_generic.pack_weights_torch  # ty: ignore[invalid-assignment]
 
         # Hand-CUDA wrappers that are plain functions (no opaque op, so no fake of their own): the shapes and dtypes their callers read.
-        from miniworld_engine.kernels.outer_product_mean import cuda as opm_cuda
-        from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+        from foldjet_engine.kernels.outer_product_mean import cuda as opm_cuda
+        from foldjet_engine.kernels.triangle_attention.cuda import h100_dh
 
         bf, f32 = torch.bfloat16, torch.float32
 
@@ -655,7 +655,7 @@ def install_native_recorders() -> None:
         # The Boltz-2 / RoseTTAFold3 / Chai-1 / AF3 DiT stacks (``kernels.dit_variants.interface``): the native inference composes row
         # kernels, cubins launched through the driver and extensions with no fakes of their own (a cubin launch on FakeTensors was a sticky
         # illegal address that failed every later unit of its worker). The stack's contract is its output: the shape of ``single``.
-        from miniworld_engine.kernels.dit_variants import interface as dit_variants
+        from foldjet_engine.kernels.dit_variants import interface as dit_variants
 
         def stack_contract(stack, single, *args, **kwargs):
             require_fake(single)
@@ -691,10 +691,10 @@ def install_native_recorders() -> None:
         # TriangleAttention leaf extension calls without a fake of their own. Shapes and dtypes
         # mirror bias_fusion.cu / dq.cu: BF16 [1,L,L,128] buffers viewed
         # as (1,4,L,L,32) projection layout, FP32 logsumexp, BF16 bias gradient.
-        from miniworld_engine.kernels.triangle_attention.cuda import (
+        from foldjet_engine.kernels.triangle_attention.cuda import (
             bias_backward as tri_bias,
         )
-        from miniworld_engine.kernels.triangle_attention.cuda import (
+        from foldjet_engine.kernels.triangle_attention.cuda import (
             dq_backward as tri_dq,
         )
 
@@ -734,7 +734,7 @@ def install_native_recorders() -> None:
     # FlashAttention is an external kernel, with no MiniWorld autotune grid.
     # Retain its Q/K/V gradient connections so the surrounding RMSNorm/rope
     # backwards are recorded, without importing/launching architecture-specific FA.
-    from miniworld_engine.modules.swa_atom_attention import module as swa
+    from foldjet_engine.modules.swa_atom_attention import module as swa
 
     class FlashShape(torch.autograd.Function):
         @staticmethod
@@ -838,8 +838,8 @@ def _accumulate(entries: dict, unit: DeriveUnit, launches: list) -> None:
 def _collect(rows, on_unit, arch, reuse) -> tuple[dict, list, dict]:
     """Run (or take from ``reuse``) every unit of ``rows``: ``(entries, errors, records)``. ``reuse`` maps a unit label to the
     record of a prior derivation whose files still match (``plan.reusable_units``); those units are not run."""
-    from miniworld_engine.autotune import identity
-    from miniworld_engine.autotune.builder import cases
+    from foldjet_engine.autotune import identity
+    from foldjet_engine.autotune.builder import cases
 
     rows = module_rows() if rows is None else rows
     work = units(rows, arch=arch or sm_tag())
@@ -852,7 +852,7 @@ def _collect(rows, on_unit, arch, reuse) -> tuple[dict, list, dict]:
             target_arch(arch)
         # The derivation asks which kernels the modules launch, not whether this card is allowed to launch them: route as if the
         # card were recorded (a patched arch above carries a real card's name, which no manifest knows).
-        from miniworld_engine.modules import dispatch
+        from foldjet_engine.modules import dispatch
 
         dispatch.assume_every_card_recorded()
         install_no_calibration()
@@ -897,7 +897,7 @@ def _collect(rows, on_unit, arch, reuse) -> tuple[dict, list, dict]:
 
 def evidence_document(arch: str, records: dict, skipped: list) -> dict:
     """The ``units.json`` body (schema 2): keys per unit, launch counts, and the file table with one digest per file."""
-    from miniworld_engine.autotune import identity, plan
+    from foldjet_engine.autotune import identity, plan
 
     records = dict(sorted(records.items()))                 # a parallel run files its units in completion order: publish them in label order
     for label, r in records.items():
@@ -927,7 +927,7 @@ def derive_all(rows: list[ModuleRow] | None = None, *, on_unit=None,
         return _parallel_derive(rows, arch, per_unit, workers, reuse)
     entries, skipped, records = _collect(rows, on_unit, arch, reuse)
     if per_unit is not None:
-        from miniworld_engine.utils.atomic import write_json
+        from foldjet_engine.utils.atomic import write_json
         write_json(per_unit, evidence_document(arch or sm_tag(), records, skipped))
     return entries, skipped
 
@@ -942,7 +942,7 @@ def _parallel_derive(rows, arch, per_unit, workers, reuse):
     """Separate processes isolate monkeypatches and share only the CUDA context requirement."""
     import multiprocessing
 
-    from miniworld_engine.utils.atomic import write_json
+    from foldjet_engine.utils.atomic import write_json
 
     rows = module_rows() if rows is None else rows
     arch_tag = arch or sm_tag()
@@ -989,7 +989,7 @@ def _parallel_derive(rows, arch, per_unit, workers, reuse):
 def sm_tag() -> str:
     """The arch this derivation is FOR. Part of every row: dispatch reads it, so the kernel set
     a module row yields is not the same on sm_86 and sm_90."""
-    from miniworld_engine import build as build_matrix
+    from foldjet_engine import build as build_matrix
 
     if not torch.cuda.is_available():
         return "unknown"
@@ -1053,7 +1053,7 @@ def normalise_arch(sm: str) -> str:
 
 def registry_path(arch: str) -> Path:
     """Prefer the plan for this exact source revision; retain the shipped-plan fallback."""
-    from miniworld_engine.autotune import plan
+    from foldjet_engine.autotune import plan
     for path in plan.registry_candidates(arch):
         if plan.is_verified(arch, path):
             return path
@@ -1090,8 +1090,8 @@ def coverage(arch: str, gpu_key_name: str, data_dir: Path | None = None) -> dict
     """
     import json
 
-    from miniworld_engine.autotune import cache, cache_status
-    from miniworld_engine.autotune.configs import configs_for
+    from foldjet_engine.autotune import cache, cache_status
+    from foldjet_engine.autotune.configs import configs_for
 
     root = data_dir or (Path(__file__).resolve().parents[1] / "autotune" / "data")
     want = {(r["kernel"], f'{r["dtype"]}|{r["bucket"]}') for r in kernel_rows(arch)}
@@ -1113,7 +1113,7 @@ def coverage(arch: str, gpu_key_name: str, data_dir: Path | None = None) -> dict
         if op_dir.name not in wanted_ops:
             continue
         try:
-            from miniworld_engine.autotune import native
+            from foldjet_engine.autotune import native
             if op_dir.name in native.BUILD_OPS:
                 reason = cache.measurement_mismatch(op_dir.name, data, native.op_identity(op_dir.name))
                 if reason:
@@ -1177,7 +1177,7 @@ def uncovered_kernels(arch: str, registry: Path | None = None) -> set[str]:
     same shapes in the first place.
     """
     reg = registry or (Path(__file__).resolve().parents[1] / "kernels" / "registry" / "registry.csv")
-    from miniworld_engine.autotune.native import build_ops_for_arch
+    from foldjet_engine.autotune.native import build_ops_for_arch
     native = build_ops_for_arch(normalise_arch(arch))
     ceiling = _ARCH_ORDER.index(normalise_arch(arch))
     with reg.open(newline="") as fh:
