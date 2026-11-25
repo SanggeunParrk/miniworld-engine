@@ -1,7 +1,25 @@
 # Benchmarks
 
-Speed figures and tables of the engine's requirement cases, one folder per card (`h100_sm90/`, `a100_sm80/`, `5090_sm120/`). Everything here is
-**generated from results that already exist**; nothing in this folder measures:
+Two kinds of folders live here.
+
+| folder | kind | what |
+|---|---|---|
+| `h100_sm90/`, `a100_sm80/`, `5090_sm120/` | **generated** | speed figures and tables per card, regenerated from the judge's speed tokens by `foldjet_engine.measure.plot` (below). There is no `b200_sm100/` folder yet. |
+| `paper/` | paper data | the paper's experiments E1-E6: drivers, raw records, CSVs, figures ([paper/README.md](paper/README.md), [PAPER_DATA_SUMMARY.md](paper/PAPER_DATA_SUMMARY.md), [PAPER_PREWORK_STATUS.md](paper/PAPER_PREWORK_STATUS.md)) |
+| `opm_win/` | experiment record | OuterProductMean at large MSA depth on the H100 vs the Anthropic kits: protocol, findings, rejected variants ([README](opm_win/README.md); release 2.5.11; named by a comment in `kernels/integrations/opm_train.py`) |
+| `opm_bigs/` | experiment record | OuterProductMean large-S profiling drivers and their job logs (release 2.5.11) |
+| `msa_depth/` | experiment record | OuterProductMean / MSAPairWeightedAveraging speed at large MSA depth (`bench_msa_depth.py`; release 2.5.11) |
+| `fp8_5090/` | experiment record | RTX 5090 FP8 rate probes and A-B drivers named in [docs/fp8.md](../docs/fp8.md) |
+| `fp8_e2e/` | experiment record | raw table `results_rf3_triattn.txt` named in [docs/fp8.md](../docs/fp8.md) |
+| `bias_logits_modes.py` | experiment driver | speed / memory of the bias-only token DiT logit modes ([docs/bias_logits.md](../docs/bias_logits.md)) |
+
+The experiment records are kept as they were run (paths inside job scripts may name the scratch trees they ran in); nothing in the
+package imports them. Model-level benchmarks (FoldForge against the Anthropic kits, the 5I28 benchmark) belong to FoldForge, not here.
+
+## Generated per-card folders
+
+Speed figures and tables of the engine's requirement cases, one folder per card. Everything in them is
+**generated from results that already exist**; nothing in them measures:
 
     python -m foldjet_engine.measure.plot --gpu h100_sm90                 # from the card's speed tokens (judge/tokens/<gpu>/)
     python -m foldjet_engine.measure.plot --gpu a100_sm80
@@ -35,5 +53,4 @@ capture fallbacks (`eager`) are marked in the tables and left out of the figures
 How the numbers are taken: [docs/measure.md](../docs/measure.md); the order the engine's backends must keep:
 [docs/ladder.md](../docs/ladder.md).
 
-Regenerate the card's folder after every measurement cycle that changed speed results, and commit it with the tokens. Model-level
-benchmarks (FoldForge against the Anthropic kits, the 5I28 benchmark) belong to FoldForge, not here.
+Regenerate the card's folder after every measurement cycle that changed speed results, and commit it with the tokens.
