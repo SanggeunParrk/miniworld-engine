@@ -14,7 +14,7 @@ decides, from human-managed version numbers, which results are current (the judg
 |---|---|---|---|
 | NVIDIA H100 | `h100_sm90` | sm_90a kernels (wgmma, TMA, CUTLASS / cuBLASDx where used) | supported: every requirement case has a current result (judge: 0 owed) ([benchmarks](benchmarks/h100_sm90/README.md)) |
 | NVIDIA A100 | `a100_sm80` | sm_80 kernels (mma.sync) | supported: every requirement case has a current result (judge: 0 owed) ([benchmarks](benchmarks/a100_sm80/README.md)) |
-| NVIDIA B200 | `b200_sm100` | sm_100a kernel set and FP8 routes in the tree ([docs/b200](docs/b200/README.md)) | **source / JIT only, not a supported release target**: no prebuilt kernels wheel (kernels JIT-compile on first use, or via `_prebuild --arch sm100`); the `b200_sm100` judge tokens are owed (5119) |
+| NVIDIA B200 | `b200_sm100` | sm_100a kernel set and FP8 routes in the tree ([docs/b200](docs/b200/README.md)) | prebuilt kernels wheels since 3.0.12 (`miniworld-engine-kernels-sm100-cu129` + `-part2`: the sm_100a set is split in two for PyPI's 100 MiB per-file limit); `b200_sm100` judge tokens owed 0 |
 | other CUDA GPUs | — | refused (`BackendUnsupported`) | the `triton` and `pytorch` backends run; Triton launch configs are tuned only for H100 / A100 |
 
 ## Modules and the models that use them
