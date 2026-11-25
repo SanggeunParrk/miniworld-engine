@@ -8,7 +8,7 @@
 ``"bf16"`` (opt-in, inference only)
     The logits are computed and stored in bf16 (LN0 output and the folded weights rounded to bf16, bf16 GEMM with fp32 accumulation, bf16
     store: the engine's bias-only path before 2026-11-19), the softmax runs in fp32 over those bf16 values and P is rounded to bf16 as before.
-    Half the logit bytes and one pass less over them: faster and smaller at long L (docs/RELEASE_NOTES_*, ``benchmarks``). A model trained
+    Half the logit bytes and one pass less over them: faster and smaller at long L (docs/release-notes/, ``benchmarks``). A model trained
     with the fp32 logits showed no problem when its inference ran with bf16 logits (user experiment 2026-11-21); the engine does not
     re-validate that at model level.
 
