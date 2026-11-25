@@ -1,13 +1,13 @@
-# Installing miniworld-engine
+# Installing foldjet-engine
 
 ## Requirements
 
 | | |
 |---|---|
 | OS / CPU | Linux x86_64 |
-| Python | >= 3.10 (the prebuilt H100 kernels: CPython 3.12 only) |
-| PyTorch | >= 2.8 with CUDA 12.x (the prebuilt H100 kernels: torch 2.13 + CUDA 12.9, i.e. the `cu129` wheel) |
-| GPU | H100 (sm_90a): CUDA and Triton backends. A100 (sm_80): CUDA kernels JIT-built on first use (no prebuilt wheel), Triton backends. Other GPUs: Triton / PyTorch backends only |
+| Python | >= 3.10 (the prebuilt kernels: CPython 3.12 only) |
+| PyTorch | >= 2.8 with CUDA 12.x (the prebuilt kernels: torch 2.13 + CUDA 12.9, i.e. the `cu129` wheel) |
+| GPU | H100 (sm_90a), A100 (sm_80), RTX 5090 (sm_120a), B200 (sm_100a): CUDA kernels (prebuilt wheels for CPython 3.12 / torch 2.13 cu129, else JIT-built on first use) and Triton backends. Other GPUs: Triton / PyTorch backends only |
 | NVIDIA driver | one that runs your torch build's CUDA; for the prebuilt kernels (CUDA 12.9) R575 or newer |
 | To JIT-build kernels | a CUDA toolkit whose release matches `torch.version.cuda` (`nvcc`), a host `g++` 9 - 13 (nvcc 12.x cannot parse GCC 14's libstdc++; `ninja` comes with the install); network access once (or the alternatives below) for the CUTLASS / MathDx headers |
 
@@ -16,14 +16,14 @@ The PyTorch backend of every module (the reference) needs only torch.
 ## Install
 
 ```sh
-pip install miniworld-engine                     # from PyPI
+pip install foldjet-engine                      # from PyPI
 pip install .                                    # from a checkout
 ```
 
 The PyPI default torch wheel may target a newer CUDA than your driver supports; take torch from the matching PyTorch index, e.g.
 
 ```sh
-pip install --extra-index-url https://download.pytorch.org/whl/cu129 miniworld-engine
+pip install --extra-index-url https://download.pytorch.org/whl/cu129 foldjet-engine
 ```
 
 Extras: `baselines` (cuEquivariance and Anthropic's kit dependencies, for the external comparison backends `cueq` / `anthropic`),
@@ -40,24 +40,26 @@ Developers of the repository use the pixi environment in `pyproject.toml` (`pixi
 Every hand-written CUDA artifact is identified by a content key (its sources and the headers they reach, the flags, torch / CUDA /
 Python versions, the CUTLASS / MathDx release; `kernels/_codegraph.py`). An artifact is looked up, in order, in
 
-1. `foldjet_engine/_prebuilt/` -- filled by the `miniworld-engine-kernels-sm90-cu129`, `miniworld-engine-kernels-sm80-cu129` and `miniworld-engine-kernels-sm120-cu129`
-   wheels, which `pip` installs automatically on Linux x86_64 with CPython 3.12 (the versions are pinned to the engine's; the sm80 wheel from
-   2.5.2 on -- with 2.5.1 an A100 JIT-builds). They hold
-   the H100 (sm_90a) and A100 (sm_80) builds for torch 2.13 / CUDA 12.9 (one directory, content-keyed paths: no per-arch subdirectory).
-2. the JIT cache, `$XDG_CACHE_HOME/miniworld_engine_jit` (default `~/.cache/miniworld_engine_jit`).
+1. `foldjet_engine/_prebuilt/` -- filled by the `foldjet-engine-kernels-sm90-cu129` (H100), `-sm80-cu129` (A100), `-sm120-cu129`
+   (RTX 5090) and `-sm100-cu129` + `-sm100-cu129-part2` (B200; split in two for PyPI's 100 MiB per-file limit) wheels, which `pip`
+   installs automatically on Linux x86_64 with CPython 3.12 (the versions are pinned to the engine's). They hold the builds for
+   torch 2.13 / CUDA 12.9 (one directory, content-keyed paths: no per-arch subdirectory). Before 1.0.0 these wheels were
+   `miniworld-engine-kernels-*`.
+2. the JIT cache, `$XDG_CACHE_HOME/miniworld_engine_jit` (default `~/.cache/miniworld_engine_jit`; the cache and `MINIWORLD_*` names were kept
+   by the 1.0.0 rename so existing caches stay valid).
 
 A key found in neither is compiled on first use into the JIT cache, under a file lock (one process builds, the others wait). Each build
-prints one line when it starts and one when it ends (`[miniworld-engine build] ...`); a run that prints nothing reused every artifact.
+prints one line when it starts and one when it ends (`[foldjet-engine build] ...`); a run that prints nothing reused every artifact.
 A build failure raises `foldjet_engine.kernels._nvcc.KernelBuildError`; nothing falls back to another backend silently.
 
 What that means in practice:
 
-- **H100 or A100, CPython 3.12, torch 2.13 cu129**: everything the requirement lists need is prebuilt; nothing compiles, no toolkit or headers
+- **H100, A100, RTX 5090 or B200, CPython 3.12, torch 2.13 cu129**: everything the requirement lists need is prebuilt; nothing compiles, no toolkit or headers
   needed.
-- **H100 / A100 with another Python / torch / CUDA version**: the keys differ, so the CUDA kernels JIT-build on first use (minutes per
+- **These cards with another Python / torch / CUDA version**: the keys differ, so the CUDA kernels JIT-build on first use (minutes per
   family; once per machine and cache). Needs the build requirements above.
 
-Prebuild ahead of time (a CPU node is enough, no GPU): `python -m foldjet_engine.kernels._prebuild --arch sm90a` (or `--arch sm80`),
+Prebuild ahead of time (a CPU node is enough, no GPU): `python -m foldjet_engine.kernels._prebuild --arch sm90a` (or `sm80`, `sm120a`, `sm100a`),
 `--list` to see the plan and what is missing. Triton kernels compile in seconds on first use and are cached by Triton.
 
 ## CUTLASS and MathDx headers
@@ -78,7 +80,7 @@ PyPI (`nvidia-cutlass` 4.2.0.0: 6.4 MB; `nvidia-mathdx` 25.6.0: 23 MB), its SHA-
 `_headers.py`, and only the header tree unpacked into the cache. The `nvidia-cutlass` 4.2.0.0 wheel carries the complete `include/` tree
 of the CUTLASS v4.2.0 release, file for file identical to the v4.2.0 git tag the prebuilt kernels are built with.
 
-The headers are not a pip dependency on purpose: most installs (prebuilt H100 kernels) never read them, and `nvidia-cutlass` depends on
+The headers are not a pip dependency on purpose: most installs (prebuilt kernels) never read them, and `nvidia-cutlass` depends on
 `cuda-python`, whose current release pulls `cuda-bindings` 13 and the CUDA 13 runtime wheels into the environment.
 
 The artifact keys do not depend on where the headers come from (an include directory is keyed by its library version), so a checkout,
@@ -115,8 +117,8 @@ build that needs missing headers then fails with the options above).
 - **`CutlassMissing: ... is not prebuilt, and the pinned headers could not be fetched`**: no network on this machine. Use one of the
   offline options above.
 - **`cuBLASDx headers not found`**: as above, for `mathdx`.
-- **Every first call compiles on an H100 / A100**: the prebuilt wheel is absent or does not match. Check `pip show
-  miniworld-engine-kernels-sm90-cu129` / `miniworld-engine-kernels-sm80-cu129` (CPython 3.12 only), `torch.__version__` (2.13) and `torch.version.cuda` (12.9).
+- **Every first call compiles on a supported card**: the prebuilt wheel is absent or does not match. Check `pip show
+  foldjet-engine-kernels-sm90-cu129` (sm80 / sm120 / sm100 + `-part2` likewise; CPython 3.12 only), `torch.__version__` (2.13) and `torch.version.cuda` (12.9).
   `python -m foldjet_engine.kernels._prebuild --arch sm90a --list` shows `have` / `todo` per artifact.
 - **`nvcc fatal: Unsupported gpu architecture`** or a toolkit mismatch: set `CUDA_HOME` to a toolkit of the same release as
   `torch.version.cuda`.

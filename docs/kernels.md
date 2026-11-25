@@ -8,7 +8,7 @@ its module rows, [requirements.md](requirements.md)).
 
 A family directory holds `cuda/` (hand-written CUDA: torch extensions or driver-API cubins), `triton/` (Triton kernels, no TMA) or
 both, and `configs/` (launch-config tables per card, the pretuner's `candidates.json`). Inside `cuda/`, the card is in the file or folder
-name: `*sm90*` / `h100*` (H100, sm_90a), `*sm80*` / `sm80/` (A100), `*sm100*` / `sm100/` (B200, not supported: no module row reaches it).
+name: `*sm90*` / `h100*` (H100, sm_90a), `*sm80*` / `sm80/` (A100), `*sm100*` / `sm100/` / `b200_*` (B200, sm_100a); the RTX 5090 (sm_120a) builds the sm_80 sources (`_sm120.py`).
 `kernels/integrations/` holds the glue that composes several families into one module path, per card (H100: TriMul, triangle
 attention, token / bias-only / local DiT, OPM and PWA training, APB; A100: the `*_sm80.py` files).
 
@@ -37,7 +37,7 @@ point is exposed to `torch.compile`), `_device` (card checks, SM count), `_tf32`
 
 ## Launch configs (`_launch_config.py`)
 
-Tables: `kernels/<family>/configs/<gpu_key>.json`: `h100_sm90.json` (25 families) and `a100_sm80.json` (17 families); no B200 table:
+Tables: `kernels/<family>/configs/<gpu_key>.json`: `h100_sm90.json` (25 families), `a100_sm80.json` (17), `5090_sm120.json` (23) and `b200_sm100.json` (23):
 
 ```json
 {"gpu": "...", "source": "...", "version": 3,
@@ -94,8 +94,8 @@ python -m foldjet_engine.kernels._prebuild [--arch sm90a] [--jobs N] [--only FAM
   module rows of the classes that launch the family's kernels, by the derive rule. A kernel no row needs is not built. The calls run
   under `_nvcc.planning()`: each `load_extension` / `load_inline_extension` / `cubin` records what it would build and returns a stand-in.
   Nothing is recorded from a model run.
-- **Explicit arch.** `--arch` (default `sm90a` = H100; `sm80` = A100; `sm100` = B200, not supported) picks the variants and the SM
-  count (132 / 108 / 148) some builds specialise for; no device is queried. Builds run with `TORCH_CUDA_ARCH_LIST` set to the target.
+- **Explicit arch.** `--arch` (default `sm90a` = H100; `sm80` = A100; `sm120a` = RTX 5090; `sm100a` = B200) picks the variants and the SM
+  count (132 / 108 / 170 / 148) some builds specialise for; no device is queried. Builds run with `TORCH_CUDA_ARCH_LIST` set to the target.
 - **Build cache.** Artifacts go to `~/.cache/miniworld_engine_jit` (`$XDG_CACHE_HOME` respected): `torch_extensions/<name>-<key>/` and
   `<family>/<stem>-<key>.cubin`. The key (`_codegraph.py`) is computed from the content each artifact compiles: the entry sources and the
   `#include` closure actually reached (normalised: comments and whitespace do not count), the flags, torch / CUDA / Python versions,

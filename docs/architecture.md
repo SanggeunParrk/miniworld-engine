@@ -110,8 +110,9 @@ tables and the pretuner's `candidates.json`). The `_*.py` files next to the fami
 |---|---|---|---|---|
 | H100 | `h100_sm90` | sm_90a | served, measured, judged (tokens, benchmarks) | `kernels/<family>/cuda/` files with `sm90` / `h100` in the name or without a card suffix, `kernels/integrations/*h100*.py`, `token_dit*.py`, `local_dit_h100.py`, ... |
 | A100 | `a100_sm80` | sm_80 | served, measured, judged (tokens, benchmarks) | `*_sm80*` files and `sm80/` folders in the families, `kernels/integrations/*_sm80*.py` |
-| B200 | `b200_sm100` | sm_100a | **not supported.** About 100 sm_100a sources are in the tree (`sm100/` folders, `*_sm100*.cu`, `integrations/csrc/sm100/`), but almost every `_supports_cuda` refuses capability (10, 0), no kernel row names them, and there are no B200 tables, tokens or benchmarks | as named |
-| any CUDA card | — | — | the `triton` backend; launch configs only for H100 and A100 | `kernels/<family>/triton/` |
+| RTX 5090 | `5090_sm120` | sm_120a | served, measured, judged (tokens, benchmarks); prebuilt wheel `foldjet-engine-kernels-sm120-cu129` | the A100 (sm_80) sources compiled for sm_120a into `<name>_sm120` extensions (`kernels/_sm120.py`, `kernels/_sm120_builds.py`), `configs/5090_sm120.json` |
+| B200 | `b200_sm100` | sm_100a | served and judged (tokens `b200_sm100`, owed 0); prebuilt wheels since 3.0.12 (`foldjet-engine-kernels-sm100-cu129` + `-part2`); no `benchmarks/b200_sm100/` folder yet. Development log: [b200/README.md](b200/README.md) | `sm100/` folders, `*_sm100*` and `b200_*` files in the families, `integrations/csrc/sm100/`, `configs/b200_sm100.json` |
+| any CUDA card | — | — | the `triton` backend; launch-config tables only for the four cards above | `kernels/<family>/triton/` |
 
 Families and the module classes they serve are listed in [kernels.md](kernels.md#families). The H100 design notes are in
 [h100/](README.md#h100-kernel-notes).
@@ -121,8 +122,8 @@ Families and the module classes they serve are listed in [kernels.md](kernels.md
 - `kernels/_prebuild.py` (CPU node, no GPU): `RECIPES` maps each family to `prebuild(target, rows)`, which calls the family's own
   loaders under `_nvcc.planning()` for every variant its requirement rows need. The result is a plan of artifacts, each with a
   content key computed by `_codegraph.py` (from the sources and headers reached, the flags and the toolchain versions). The
-  prebuilder builds whatever the cache lacks, in parallel, and the run can be resumed. Targets: `--arch sm90a` (default) and
-  `sm80`. `sm100` exists as a target, but nothing measures what it builds.
+  prebuilder builds whatever the cache lacks, in parallel, and the run can be resumed. Targets: `--arch sm90a` (default),
+  `sm80`, `sm120a` and `sm100a` (one kernels wheel per target; two for sm100a).
 - `kernels/_prebuild_cuda.py`: builds every tuning candidate of the native `choose` sites. It is only needed for the pretuner.
 - `kernels/_pretune.py` (GPU): runs the speed config's cases once, and at each configured launch times the candidates
   (`configs/candidates.json`) whose outputs agree. `--merge` writes the top 4 per key into `configs/<card>.json` and increments the
@@ -158,9 +159,13 @@ figures and tables, plus the L and D sweeps per class. It never measures. See [.
 ```
 README.md, LICENSE, licenses/            front door; MIT for the engine, third-party notices
 pyproject.toml, pixi.lock                package metadata; the development environment
-docs/                                    this documentation; docs/h100/ = per-family H100 design notes
-benchmarks/<card>/                       generated speed figures and tables (h100_sm90, a100_sm80)
-tools/slurm/cycle.sh                     one judge cycle on a Slurm cluster
+docs/                                    this documentation (index: docs/README.md); h100/ design notes, b200/ B200 log, release-notes/
+benchmarks/<card>/                       generated speed figures and tables (h100_sm90, a100_sm80, 5090_sm120); paper/ and experiment records
+tools/                                   check.sh (the gate), slurm/cycle.sh (one judge cycle), bench/ and fp8_train/ helpers (tools/README.md)
+tests/cpu, tests/gpu                     pytest suites (CPU anywhere; GPU per card)
+third_party/                             metadata and fetch scripts of the external baselines (upstream trees not in git)
+legacy/b200/                             pre-2.5.0 B200 code, kept for reference (not imported)
+src/miniworld_engine/                    the pre-1.0.0 import name: an alias of foldjet_engine that warns
 third_party/anthropic/                   UPSTREAM.json / INVENTORY.md of the Anthropic release; the release itself goes in upstream/ (not in git)
 src/foldjet_engine/
   requirements/                          requirements_module.csv, requirements_kernel.csv, README.md (the rules)
