@@ -1,0 +1,14 @@
+[miniworld-engine build] compiling pwa_sm80 [5bf5a091] (torch extension) ...
+[miniworld-engine build] built pwa_sm80 [5bf5a091] in 116.8 s; 1 built in this process
+d 128/384/8 L 1024: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 916.5 us new 916.5 us ratio 1.000
+d 128/384/8 L 1536: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff nan | old 1867.8 us new 1866.8 us ratio 0.999
+d 128/384/8 L 2048: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff nan | old 3153.9 us new 3158.0 us ratio 1.001
+d 128/384/8 L 1024: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 940.0 us new 940.0 us ratio 1.000
+d 128/384/8 L 1536: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff nan | old 1868.8 us new 1868.8 us ratio 1.000
+d 128/384/8 L 2048: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff nan | old 3164.2 us new 3163.1 us ratio 1.000
+d 64/128/8 L 1024: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 300.0 us new 301.1 us ratio 1.003
+d 64/128/8 L 1536: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff nan | old 590.8 us new 589.8 us ratio 0.998
+d 64/128/8 L 2048: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff nan | old 989.2 us new 986.1 us ratio 0.997
+d 64/128/8 L 1024: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 306.2 us new 307.2 us ratio 1.003
+d 64/128/8 L 1536: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff nan | old 590.8 us new 590.8 us ratio 1.000
+d 64/128/8 L 2048: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff nan | old 986.1 us new 982.0 us ratio 0.996

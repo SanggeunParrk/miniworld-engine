@@ -1,0 +1,7 @@
+d_msa 64 d_pair 128 d_hidden 8 L 2304: | cuda max 3.04e-03 rms 1.74e-03 1.21 ms | pytorch max 3.04e-03 rms 1.75e-03 21.26 ms | triton max 2.91e-03 rms 1.71e-03 2.24 ms 
+d_msa 64 d_pair 128 d_hidden 8 L 2560: | cuda max 3.03e-03 rms 1.74e-03 1.49 ms | pytorch max 3.08e-03 rms 1.75e-03 26.33 ms | triton max 2.95e-03 rms 1.71e-03 2.83 ms 
+d_msa 64 d_pair 128 d_hidden 8 L 3200: | cuda max 3.28e-03 rms 1.74e-03 2.30 ms | pytorch max 2.97e-03 rms 1.75e-03 41.09 ms | triton max 2.87e-03 rms 1.71e-03 4.21 ms 
+d_msa 128 d_pair 384 d_hidden 8 L 2304: | cuda max 2.94e-03 rms 1.72e-03 3.91 ms | pytorch max 2.94e-03 rms 1.73e-03 38.98 ms | triton max 2.85e-03 rms 1.70e-03 9.59 ms 
+d_msa 128 d_pair 384 d_hidden 8 L 3200: | cuda max 2.94e-03 rms 1.72e-03 7.33 ms | pytorch max 2.94e-03 rms 1.73e-03 74.98 ms | triton max 2.83e-03 rms 1.70e-03 18.07 ms 
+......................                                                   [100%]
+22 passed, 5 deselected in 647.48s (0:10:47)

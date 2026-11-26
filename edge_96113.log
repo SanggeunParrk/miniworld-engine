@@ -1,0 +1,30 @@
+Consider using tensor.detach() first. (Triggered internally at /__w/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:822.)
+  print(f"d {dm}/{dp}/{dh} L {length}: cuda max {float((got - gold).abs().max() / sc):.2e} rms {float(((got - gold) ** 2).mean().sqrt() / rm):.2e} {ev[0].elapsed_time(ev[1]):.2f} ms (eager) extra peak {peak_extra:.2f} GiB over the inputs", flush=True)
+d 256/512/32 L 2050: cuda max 3.26e-03 rms 1.71e-03 6.79 ms (eager) extra peak 0.35 GiB over the inputs
+d 256/512/32 L 3001: cuda max 3.19e-03 rms 1.72e-03 15.54 ms (eager) extra peak 0.53 GiB over the inputs
+d 256/512/32 L 4096: cuda max 3.25e-03 rms 1.71e-03 26.21 ms (eager) extra peak 0.78 GiB over the inputs
+d 256/512/32 L 7680: cuda max 3.07e-03 rms 1.71e-03 91.24 ms (eager) extra peak 1.85 GiB over the inputs
+[W1120 15:36:46.239760067 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 536870912 bytes (free: 307167232, total: 85095874560).
+d 256/512/32 L 8192: cuda max 3.50e-03 rms 1.71e-03 103.69 ms (eager) extra peak 2.03 GiB over the inputs
+[W1120 15:36:48.976580732 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 2151677952 bytes (free: 1561264128, total: 85095874560).
+d 256/512/32 L 8208: cuda max 3.06e-03 rms 1.71e-03 106.74 ms (eager) extra peak 2.04 GiB over the inputs
+d 64/128/8 L 2050: refused: pwa_sm80: L 2050: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's s
+d 64/128/8 L 4104: refused: pwa_sm80: L 4104: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's s
+d 64/128/8 L 8192: refused: pwa_sm80: L 8192: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's s
+d 64/128/8 L 8208: refused: pwa_sm80: L 8208: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's s
+d 64/128/8 L 8704: refused: pwa_sm80: L 8704: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's s
+d 128/384/8 L 2064: refused: pwa_sm80: L 2064: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's s
+d 128/384/8 L 8192: refused: pwa_sm80: L 8192: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's s
+[W1120 15:36:57.978462517 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 51743031296 bytes (free: 28058779648, total: 85095874560).
+[W1120 15:36:57.096019654 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 51743031296 bytes (free: 32496353280, total: 85095874560).
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_edge.py", line 29, in <module>
+    inp = base.make_inputs(length=length, samples=1, depth=32, dtype=torch.bfloat16, device="cuda", generator=gen)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/msa.py", line 960, in make_inputs
+    "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_edge.py", line 15, in _chunked_random
+    out = torch.empty(tuple(shape), dtype=dtype, device=device)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 48.19 GiB. GPU 0 has a total capacity of 79.25 GiB of which 30.26 GiB is free. Including non-PyTorch memory, this process has 48.98 GiB memory in use. Of the allocated memory 48.13 GiB is allocated by PyTorch, and 385.65 MiB is reserved b

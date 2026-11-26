@@ -1,0 +1,51 @@
+d_msa 64 d_pair 128 d_hidden 8 L 5120: | cuda max 2.98e-03 rms 1.73e-03 5.41 ms | pytorch max 3.04e-03 rms 1.75e-03 104.84 ms | triton max 2.94e-03 rms 1.71e-03 10.50 ms 
+d_msa 64 d_pair 128 d_hidden 8 L 6144: | cuda max 2.99e-03 rms 1.73e-03 7.92 ms | pytorch max 2.99e-03 rms 1.74e-03 151.26 ms | triton max 3.00e-03 rms 1.71e-03 14.65 ms 
+[W1120 15:25:44.252205318 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 14311948288, total: 85095874560).
+[W1120 15:25:44.312080220 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 14314045440, total: 85095874560).
+d_msa 64 d_pair 128 d_hidden 8 L 8192: | cuda max 3.19e-03 rms 1.73e-03 20.39 ms | pytorch error: CUDA out of memory. Tried to allocate 32.00 GiB. GPU 0 has a total capacity of 79.25 GiB o | triton max 2.98e-03 rms 1.71e-03 27.21 ms 
+d_msa 64 d_pair 256 d_hidden 32 L 5120: | cuda max 2.93e-03 rms 1.72e-03 10.20 ms | pytorch max 2.96e-03 rms 1.73e-03 149.49 ms | triton max 2.93e-03 rms 1.70e-03 21.91 ms 
+[W1120 15:26:07.371872856 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 38654705664 bytes (free: 6074335232, total: 85095874560).
+[W1120 15:26:07.420738033 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 38654705664 bytes (free: 6076432384, total: 85095874560).
+d_msa 64 d_pair 256 d_hidden 32 L 6144: | cuda max 3.08e-03 rms 1.72e-03 19.69 ms | pytorch error: CUDA out of memory. Tried to allocate 36.00 GiB. GPU 0 has a total capacity of 79.25 GiB o | triton max 2.86e-03 rms 1.70e-03 32.26 ms 
+[W1120 15:26:13.494989649 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 68719476736 bytes (free: 15450701824, total: 85095874560).
+[W1120 15:26:13.568617546 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 68719476736 bytes (free: 15517810688, total: 85095874560).
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/pwa_long_bench.py", line 50, in <module>
+    inp = base.make_inputs(length=length, samples=1, depth=32, dtype=torch.bfloat16, device="cuda", generator=gen)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/msa.py", line 960, in make_inputs
+    "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 263, in random_input
+    return (scale * torch.randn(tuple(shape), device=device, generator=generator)).to(dtype)
+            ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 64.00 GiB. GPU 0 has a total capacity of 79.25 GiB of which 14.45 GiB is free. Including non-PyTorch memory, this process has 64.79 GiB memory in use. Of the allocated memory 64.28 GiB is allocated by PyTorch, and 33.80 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC
+[W1120 15:26:22.436259716 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 40265318400 bytes (free: 3081699328, total: 85095874560).
+[W1120 15:26:22.436527571 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 40265318400 bytes (free: 3081699328, total: 85095874560).
+d_msa 128 d_pair 384 d_hidden 8 L 5120: | cuda max 2.98e-03 rms 1.72e-03 22.27 ms | pytorch error: CUDA out of memory. Tried to allocate 37.50 GiB. GPU 0 has a total capacity of 79.25 GiB o | triton max 2.84e-03 rms 1.70e-03 45.40 ms 
+[W1120 15:26:28.334414009 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 57982058496 bytes (free: 26121011200, total: 85095874560).
+[W1120 15:26:28.397726256 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 57982058496 bytes (free: 26221674496, total: 85095874560).
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/pwa_long_bench.py", line 50, in <module>
+    inp = base.make_inputs(length=length, samples=1, depth=32, dtype=torch.bfloat16, device="cuda", generator=gen)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/msa.py", line 960, in make_inputs
+    "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 263, in random_input
+    return (scale * torch.randn(tuple(shape), device=device, generator=generator)).to(dtype)
+            ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 54.00 GiB. GPU 0 has a total capacity of 79.25 GiB of which 24.42 GiB is free. Including non-PyTorch memory, this process has 54.82 GiB memory in use. Of the allocated memory 54.30 GiB is allocated by PyTorch, and 49.89 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC
+[W1120 15:26:33.139803007 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 103079215104 bytes (free: 84035960832, total: 85095874560).
+[W1120 15:26:33.145716934 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 103079215104 bytes (free: 84170178560, total: 85095874560).
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/pwa_long_bench.py", line 50, in <module>
+    inp = base.make_inputs(length=length, samples=1, depth=32, dtype=torch.bfloat16, device="cuda", generator=gen)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/msa.py", line 960, in make_inputs
+    "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 263, in random_input
+    return (scale * torch.randn(tuple(shape), device=device, generator=generator)).to(dtype)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 96.00 GiB. GPU 0 has a total capacity of 79.25 GiB of which 78.39 GiB is free. Including non-PyTorch memory, this process has 876.00 MiB memory in use. Of the allocated memory 320.11 MiB is allocated by PyTorch, and 65.89 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALL

@@ -1,0 +1,7 @@
+d_msa 256 d_pair 512 d_hidden 32 L 1024: | cuda max 2.95e-03 rms 1.72e-03 1.56 ms | pytorch max 3.07e-03 rms 1.75e-03 9.81 ms | triton max 2.97e-03 rms 1.71e-03 2.30 ms 
+d_msa 256 d_pair 512 d_hidden 32 L 2048: | cuda max 2.92e-03 rms 1.72e-03 6.17 ms | pytorch max 2.95e-03 rms 1.74e-03 38.76 ms | triton max 2.97e-03 rms 1.71e-03 8.29 ms 
+d_msa 256 d_pair 512 d_hidden 32 L 2176: | cuda max 3.01e-03 rms 1.72e-03 6.97 ms | pytorch max 3.01e-03 rms 1.74e-03 44.08 ms | triton max 2.97e-03 rms 1.71e-03 9.47 ms 
+d_msa 256 d_pair 512 d_hidden 32 L 3072: | cuda max 2.97e-03 rms 1.72e-03 14.08 ms | pytorch max 3.01e-03 rms 1.74e-03 86.76 ms | triton max 3.01e-03 rms 1.70e-03 18.15 ms 
+[W1120 15:23:09.461431634 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 14379057152, total: 85095874560).
+[W1120 15:23:09.461911708 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 14379057152, total: 85095874560).
+d_msa 256 d_pair 512 d_hidden 32 L 4096: | cuda max 2.96e-03 rms 1.71e-03 25.58 ms | pytorch error: CUDA out of memory. Tried to allocate 32.00 GiB. GPU 0 has a total capacity of 79.25 GiB o | triton max 2.97e-03 rms 1.70e-03 32.11 ms 

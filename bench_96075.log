@@ -1,0 +1,26 @@
+GPU 0: NVIDIA A100 80GB PCIe (UUID: GPU-4c63d63c-a522-9e93-68e5-93cee99e0cc5)
+None
+[miniworld-engine build] compiling pwa_sm80 [3f626e0f] (torch extension) ...
+[miniworld-engine build] built pwa_sm80 [3f626e0f] in 123.6 s; 1 built in this process
+d_msa 64 d_pair 128 d_hidden 8 L 2048: | cuda max 3.02e-03 rms 1.74e-03 0.96 ms | pytorch max 2.91e-03 rms 1.75e-03 16.71 ms | triton max 2.91e-03 rms 1.71e-03 1.78 ms 
+d_msa 64 d_pair 128 d_hidden 8 L 2176: | cuda max 3.06e-03 rms 1.74e-03 1.10 ms | pytorch max 3.06e-03 rms 1.75e-03 19.13 ms | triton max 3.06e-03 rms 1.71e-03 2.07 ms 
+d_msa 64 d_pair 128 d_hidden 8 L 3072: | cuda max 3.02e-03 rms 1.74e-03 2.16 ms | pytorch max 3.06e-03 rms 1.75e-03 37.78 ms | triton max 2.94e-03 rms 1.71e-03 3.91 ms 
+d_msa 64 d_pair 128 d_hidden 8 L 4096: | cuda max 3.17e-03 rms 1.74e-03 3.56 ms | pytorch max 3.05e-03 rms 1.75e-03 67.75 ms | triton max 3.03e-03 rms 1.71e-03 6.68 ms 
+d_msa 64 d_pair 128 d_hidden 32 L 2048: | cuda max 2.75e-03 rms 1.73e-03 1.29 ms | pytorch max 2.89e-03 rms 1.74e-03 17.14 ms | triton max 2.75e-03 rms 1.70e-03 1.95 ms 
+d_msa 64 d_pair 128 d_hidden 32 L 2176: | cuda max 2.84e-03 rms 1.73e-03 1.47 ms | pytorch max 2.90e-03 rms 1.74e-03 19.62 ms | triton max 2.84e-03 rms 1.70e-03 2.27 ms 
+d_msa 64 d_pair 128 d_hidden 32 L 3072: | cuda max 2.87e-03 rms 1.72e-03 2.74 ms | pytorch max 2.84e-03 rms 1.74e-03 38.79 ms | triton max 2.84e-03 rms 1.70e-03 4.31 ms 
+d_msa 64 d_pair 128 d_hidden 32 L 4096: | cuda max 2.99e-03 rms 1.72e-03 4.51 ms | pytorch max 3.00e-03 rms 1.73e-03 69.04 ms | triton max 2.89e-03 rms 1.70e-03 7.41 ms 
+d_msa 64 d_pair 256 d_hidden 32 L 2048: | cuda max 2.78e-03 rms 1.73e-03 1.86 ms | pytorch max 3.01e-03 rms 1.74e-03 24.23 ms | triton max 2.79e-03 rms 1.70e-03 3.53 ms 
+d_msa 64 d_pair 256 d_hidden 32 L 2176: | cuda max 2.91e-03 rms 1.72e-03 2.13 ms | pytorch max 2.91e-03 rms 1.73e-03 27.66 ms | triton max 2.86e-03 rms 1.70e-03 4.15 ms 
+d_msa 64 d_pair 256 d_hidden 32 L 3072: | cuda max 3.04e-03 rms 1.72e-03 3.99 ms | pytorch max 3.04e-03 rms 1.74e-03 54.71 ms | triton max 2.85e-03 rms 1.70e-03 7.95 ms 
+d_msa 64 d_pair 256 d_hidden 32 L 4096: | cuda max 3.07e-03 rms 1.72e-03 6.61 ms | pytorch max 2.93e-03 rms 1.73e-03 96.97 ms | triton max 2.84e-03 rms 1.70e-03 13.44 ms 
+d_msa 128 d_pair 256 d_hidden 16 L 2048: | cuda max 2.88e-03 rms 1.73e-03 1.72 ms | pytorch max 2.89e-03 rms 1.73e-03 23.85 ms | triton max 2.81e-03 rms 1.70e-03 3.53 ms 
+d_msa 128 d_pair 256 d_hidden 16 L 2176: | cuda max 2.95e-03 rms 1.73e-03 2.00 ms | pytorch max 2.95e-03 rms 1.73e-03 27.31 ms | triton max 2.82e-03 rms 1.70e-03 4.15 ms 
+d_msa 128 d_pair 256 d_hidden 16 L 3072: | cuda max 2.93e-03 rms 1.72e-03 3.72 ms | pytorch max 2.90e-03 rms 1.73e-03 54.57 ms | triton max 2.83e-03 rms 1.70e-03 7.90 ms 
+d_msa 128 d_pair 256 d_hidden 16 L 4096: | cuda max 2.84e-03 rms 1.72e-03 6.18 ms | pytorch max 2.95e-03 rms 1.73e-03 96.34 ms | triton max 2.84e-03 rms 1.70e-03 13.40 ms 
+d_msa 128 d_pair 384 d_hidden 8 L 2048: | cuda max 2.92e-03 rms 1.72e-03 3.11 ms | pytorch max 2.94e-03 rms 1.73e-03 30.66 ms | triton max 2.92e-03 rms 1.70e-03 7.63 ms 
+d_msa 128 d_pair 384 d_hidden 8 L 2176: | cuda max 2.92e-03 rms 1.72e-03 3.66 ms | pytorch max 2.92e-03 rms 1.73e-03 35.27 ms | triton max 2.83e-03 rms 1.70e-03 8.74 ms 
+d_msa 128 d_pair 384 d_hidden 8 L 3072: | cuda max 3.00e-03 rms 1.72e-03 6.74 ms | pytorch max 2.99e-03 rms 1.73e-03 69.14 ms | triton max 2.89e-03 rms 1.70e-03 16.87 ms 
+[W1120 15:03:50.809652810 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 25769803776 bytes (free: 25720455168, total: 85095874560).
+[W1120 15:03:51.404166624 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 67108864 bytes (free: 17760256, total: 85095874560).
+d_msa 128 d_pair 384 d_hidden 8 L 4096: | cuda max 2.88e-03 rms 1.72e-03 13.77 ms | pytorch error: CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 79.25 GiB o | triton max 2.85e-03 rms 1.70e-03 29.51 ms 

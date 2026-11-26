@@ -1,0 +1,205 @@
+[miniworld-engine build] compiling pwa_sm80_old305 [4fcb34ec] (torch extension) ...
+[miniworld-engine build] failed to build pwa_sm80_old305 [4fcb34ec] after 64.3 s
+Traceback (most recent call last):
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2893, in _run_ninja_build
+    subprocess.run(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['ninja', '-v']' returned non-zero exit status 1.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 13, in <module>
+    old_ext = _nvcc.load_extension(name=_card.name("pwa_sm80_old305"), sources=[str(OLD / "ops.cu")], extra_include_paths=[str(OLD)],
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 1081, in load_extension
+    return _load("torch extension", name, kwargs, sources=[str(s) for s in sources])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 975, in _load
+    hit = _build_ext(kind_label, name, kwargs, sources, inline, key, material, graph)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 1046, in _build_ext
+    load(name=name, sources=sources or [], **call_kwargs)
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 1927, in load
+    return _jit_compile(
+           ^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2382, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2543, in _write_ninja_file_and_build_library
+    _run_ninja_build(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2910, in _run_ninja_build
+    raise RuntimeError(message) from e
+RuntimeError: Error building extension 'pwa_sm80_old305': [1/2] /home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF ops.cuda.o.d -DTORCH_EXTENSION_NAME=pwa_sm80_old305 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80 -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -lineinfo -gencode=arch=compute_80,code=sm_80 -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -c /home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu -o ops.cuda.o 
+FAILED: [code=1] ops.cuda.o 
+/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF ops.cuda.o.d -DTORCH_EXTENSION_NAME=pwa_sm80_old305 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80 -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -lineinfo -gencode=arch=compute_80,code=sm_80 -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -c /home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu -o ops.cuda.o 
+/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu:23:10: fatal error: ../../../_sm_count.cuh: No such file or directory
+   23 | #include "../../../_sm_count.cuh"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+ninja: build stopped: subcommand failed.
+
+[miniworld-engine build] compiling pwa_sm80_old305 [4fcb34ec] (torch extension) ...
+[miniworld-engine build] failed to build pwa_sm80_old305 [4fcb34ec] after 5.4 s
+Traceback (most recent call last):
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2893, in _run_ninja_build
+    subprocess.run(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['ninja', '-v']' returned non-zero exit status 1.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 13, in <module>
+    old_ext = _nvcc.load_extension(name=_card.name("pwa_sm80_old305"), sources=[str(OLD / "ops.cu")], extra_include_paths=[str(OLD)],
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 1081, in load_extension
+    return _load("torch extension", name, kwargs, sources=[str(s) for s in sources])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 975, in _load
+    hit = _build_ext(kind_label, name, kwargs, sources, inline, key, material, graph)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 1046, in _build_ext
+    load(name=name, sources=sources or [], **call_kwargs)
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 1927, in load
+    return _jit_compile(
+           ^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2382, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2543, in _write_ninja_file_and_build_library
+    _run_ninja_build(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2910, in _run_ninja_build
+    raise RuntimeError(message) from e
+RuntimeError: Error building extension 'pwa_sm80_old305': [1/2] /home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF ops.cuda.o.d -DTORCH_EXTENSION_NAME=pwa_sm80_old305 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80 -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -lineinfo -gencode=arch=compute_80,code=sm_80 -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -c /home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu -o ops.cuda.o 
+FAILED: [code=1] ops.cuda.o 
+/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF ops.cuda.o.d -DTORCH_EXTENSION_NAME=pwa_sm80_old305 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80 -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -lineinfo -gencode=arch=compute_80,code=sm_80 -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -c /home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu -o ops.cuda.o 
+/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu:23:10: fatal error: ../../../_sm_count.cuh: No such file or directory
+   23 | #include "../../../_sm_count.cuh"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+ninja: build stopped: subcommand failed.
+
+[miniworld-engine build] compiling pwa_sm80_old305 [4fcb34ec] (torch extension) ...
+[miniworld-engine build] failed to build pwa_sm80_old305 [4fcb34ec] after 5.5 s
+Traceback (most recent call last):
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2893, in _run_ninja_build
+    subprocess.run(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['ninja', '-v']' returned non-zero exit status 1.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 13, in <module>
+    old_ext = _nvcc.load_extension(name=_card.name("pwa_sm80_old305"), sources=[str(OLD / "ops.cu")], extra_include_paths=[str(OLD)],
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 1081, in load_extension
+    return _load("torch extension", name, kwargs, sources=[str(s) for s in sources])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 975, in _load
+    hit = _build_ext(kind_label, name, kwargs, sources, inline, key, material, graph)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 1046, in _build_ext
+    load(name=name, sources=sources or [], **call_kwargs)
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 1927, in load
+    return _jit_compile(
+           ^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2382, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2543, in _write_ninja_file_and_build_library
+    _run_ninja_build(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2910, in _run_ninja_build
+    raise RuntimeError(message) from e
+RuntimeError: Error building extension 'pwa_sm80_old305': [1/2] /home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF ops.cuda.o.d -DTORCH_EXTENSION_NAME=pwa_sm80_old305 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80 -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -lineinfo -gencode=arch=compute_80,code=sm_80 -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -c /home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu -o ops.cuda.o 
+FAILED: [code=1] ops.cuda.o 
+/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF ops.cuda.o.d -DTORCH_EXTENSION_NAME=pwa_sm80_old305 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80 -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -lineinfo -gencode=arch=compute_80,code=sm_80 -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -c /home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu -o ops.cuda.o 
+/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu:23:10: fatal error: ../../../_sm_count.cuh: No such file or directory
+   23 | #include "../../../_sm_count.cuh"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+ninja: build stopped: subcommand failed.
+
+[miniworld-engine build] compiling pwa_sm80_old305 [4fcb34ec] (torch extension) ...
+[miniworld-engine build] failed to build pwa_sm80_old305 [4fcb34ec] after 7.6 s
+Traceback (most recent call last):
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2893, in _run_ninja_build
+    subprocess.run(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['ninja', '-v']' returned non-zero exit status 1.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 13, in <module>
+    old_ext = _nvcc.load_extension(name=_card.name("pwa_sm80_old305"), sources=[str(OLD / "ops.cu")], extra_include_paths=[str(OLD)],
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 1081, in load_extension
+    return _load("torch extension", name, kwargs, sources=[str(s) for s in sources])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 975, in _load
+    hit = _build_ext(kind_label, name, kwargs, sources, inline, key, material, graph)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 1046, in _build_ext
+    load(name=name, sources=sources or [], **call_kwargs)
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 1927, in load
+    return _jit_compile(
+           ^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2382, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2543, in _write_ninja_file_and_build_library
+    _run_ninja_build(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2910, in _run_ninja_build
+    raise RuntimeError(message) from e
+RuntimeError: Error building extension 'pwa_sm80_old305': [1/2] /home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF ops.cuda.o.d -DTORCH_EXTENSION_NAME=pwa_sm80_old305 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80 -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -lineinfo -gencode=arch=compute_80,code=sm_80 -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -c /home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu -o ops.cuda.o 
+FAILED: [code=1] ops.cuda.o 
+/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF ops.cuda.o.d -DTORCH_EXTENSION_NAME=pwa_sm80_old305 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80 -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -lineinfo -gencode=arch=compute_80,code=sm_80 -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -c /home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu -o ops.cuda.o 
+/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu:23:10: fatal error: ../../../_sm_count.cuh: No such file or directory
+   23 | #include "../../../_sm_count.cuh"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+ninja: build stopped: subcommand failed.
+
+[miniworld-engine build] compiling pwa_sm80_old305 [4fcb34ec] (torch extension) ...
+[miniworld-engine build] failed to build pwa_sm80_old305 [4fcb34ec] after 8.1 s
+Traceback (most recent call last):
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2893, in _run_ninja_build
+    subprocess.run(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['ninja', '-v']' returned non-zero exit status 1.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 13, in <module>
+    old_ext = _nvcc.load_extension(name=_card.name("pwa_sm80_old305"), sources=[str(OLD / "ops.cu")], extra_include_paths=[str(OLD)],
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 1081, in load_extension
+    return _load("torch extension", name, kwargs, sources=[str(s) for s in sources])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 975, in _load
+    hit = _build_ext(kind_label, name, kwargs, sources, inline, key, material, graph)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/kernels/_nvcc.py", line 1046, in _build_ext
+    load(name=name, sources=sources or [], **call_kwargs)
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 1927, in load
+    return _jit_compile(
+           ^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2382, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2543, in _write_ninja_file_and_build_library
+    _run_ninja_build(
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2910, in _run_ninja_build
+    raise RuntimeError(message) from e
+RuntimeError: Error building extension 'pwa_sm80_old305': [1/2] /home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF ops.cuda.o.d -DTORCH_EXTENSION_NAME=pwa_sm80_old305 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80 -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -lineinfo -gencode=arch=compute_80,code=sm_80 -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -c /home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu -o ops.cuda.o 
+FAILED: [code=1] ops.cuda.o 
+/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/nvcc -MD -MF ops.cuda.o.d -DTORCH_EXTENSION_NAME=pwa_sm80_old305 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80 -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include -isystem /home/psk6950/practice/miniworld-engine/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -lineinfo -gencode=arch=compute_80,code=sm_80 -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -c /home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu -o ops.cuda.o 
+/home/psk6950/miniworld-engine-scratch/pwa-old-src/src/miniworld_engine/kernels/pair_weighted_averaging/cuda/sm80/ops.cu:23:10: fatal error: ../../../_sm_count.cuh: No such file or directory
+   23 | #include "../../../_sm_count.cuh"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+ninja: build stopped: subcommand failed.
+

@@ -1,0 +1,104 @@
+[miniworld-engine build] compiling pwa_sm80_old305 [d448332f] (torch extension) ...
+[miniworld-engine build] built pwa_sm80_old305 [d448332f] in 125.2 s; 1 built in this process
+[miniworld-engine build] compiling pwa_broadcast_native_sm80 [80f7490b] (torch extension) ...
+[miniworld-engine build] built pwa_broadcast_native_sm80 [80f7490b] in 100.5 s; 2 built in this process
+d 64/128/8 L 128: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 44.0 us new 44.0 us ratio 1.000
+d 64/128/8 L 256: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 67.6 us new 67.6 us ratio 1.000
+d 64/128/8 L 512: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 122.9 us new 122.9 us ratio 1.000
+d 64/128/8 L 1024: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 305.2 us new 306.2 us ratio 1.003
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 47, in <module>
+    o = kt(**{**inp, "msa": m, "pair": p})
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 211, in forward
+    return self._forward_selected(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 216, in _forward_selected
+    raise BackendUnsupported(f"{type(self).__name__} backend {self.backend!r}: {reason}")
+miniworld_engine.modules.primitives.BackendUnsupported: MSAPairWeightedAveraging backend 'cuda': pwa_sm80: L 1536: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's shared-memory row; inference 8192) and a [1, L, L, d_pair] pair
+d 64/128/32 L 128: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 66.6 us new 65.5 us ratio 0.985
+d 64/128/32 L 256: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 111.6 us new 111.6 us ratio 1.000
+d 64/128/32 L 512: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 179.2 us new 179.2 us ratio 1.000
+d 64/128/32 L 1024: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 414.7 us new 416.8 us ratio 1.005
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 47, in <module>
+    o = kt(**{**inp, "msa": m, "pair": p})
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 211, in forward
+    return self._forward_selected(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 216, in _forward_selected
+    raise BackendUnsupported(f"{type(self).__name__} backend {self.backend!r}: {reason}")
+miniworld_engine.modules.primitives.BackendUnsupported: MSAPairWeightedAveraging backend 'cuda': pwa_sm80: L 1536: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's shared-memory row; inference 8192) and a [1, L, L, d_pair] pair
+d 64/256/32 L 128: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 72.7 us new 72.7 us ratio 1.000
+d 64/256/32 L 256: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 129.0 us new 128.0 us ratio 0.992
+d 64/256/32 L 512: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 222.2 us new 222.2 us ratio 1.000
+d 64/256/32 L 1024: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 585.7 us new 585.7 us ratio 1.000
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 47, in <module>
+    o = kt(**{**inp, "msa": m, "pair": p})
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 211, in forward
+    return self._forward_selected(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 216, in _forward_selected
+    raise BackendUnsupported(f"{type(self).__name__} backend {self.backend!r}: {reason}")
+miniworld_engine.modules.primitives.BackendUnsupported: MSAPairWeightedAveraging backend 'cuda': pwa_sm80: L 1536: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's shared-memory row; inference 8192) and a [1, L, L, d_pair] pair
+d 128/256/16 L 128: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 69.6 us new 69.6 us ratio 1.000
+d 128/256/16 L 256: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 115.7 us new 116.7 us ratio 1.009
+d 128/256/16 L 512: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 210.9 us new 210.9 us ratio 1.000
+d 128/256/16 L 1024: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 560.1 us new 562.2 us ratio 1.004
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 47, in <module>
+    o = kt(**{**inp, "msa": m, "pair": p})
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 211, in forward
+    return self._forward_selected(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 216, in _forward_selected
+    raise BackendUnsupported(f"{type(self).__name__} backend {self.backend!r}: {reason}")
+miniworld_engine.modules.primitives.BackendUnsupported: MSAPairWeightedAveraging backend 'cuda': pwa_sm80: L 1536: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's shared-memory row; inference 8192) and a [1, L, L, d_pair] pair
+d 128/384/8 L 128: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 70.7 us new 70.7 us ratio 1.000
+d 128/384/8 L 256: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 134.1 us new 134.1 us ratio 1.000
+d 128/384/8 L 512: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 286.7 us new 284.7 us ratio 0.993
+d 128/384/8 L 1024: infer maxabsdiff 0.0e+00 train(fwd+grads) maxabsdiff 0.0e+00 | old 933.9 us new 946.2 us ratio 1.013
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 47, in <module>
+    o = kt(**{**inp, "msa": m, "pair": p})
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 211, in forward
+    return self._forward_selected(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/src/miniworld_engine/modules/primitives.py", line 216, in _forward_selected
+    raise BackendUnsupported(f"{type(self).__name__} backend {self.backend!r}: {reason}")
+miniworld_engine.modules.primitives.BackendUnsupported: MSAPairWeightedAveraging backend 'cuda': pwa_sm80: L 1536: the sm_80 kernels take L a multiple of 16 up to 1024 in training (training 1024: the pair backward's shared-memory row; inference 8192) and a [1, L, L, d_pair] pair

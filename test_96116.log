@@ -1,0 +1,80 @@
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/miniworld_engine/modules/primitives.py:211: in forward
+    return self._forward_selected(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/miniworld_engine/modules/primitives.py:223: in _forward_selected
+    return getattr(self, f"_forward_{self.backend}")(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/miniworld_engine/modules/norm.py:261: in _forward_pytorch
+    return F.layer_norm(input.to(w), self.normalized_shape, self.weight, self.bias, self.eps).to(input.dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+input = tensor([[[[ 0.8203, -0.6719,  0.0693,  ...,  0.3223,  0.4824,  0.6719],
+          [-0.4258, -0.2520, -0.6016,  ..., -1..., -0.9375,  0.4668],
+          [ 0.2090, -0.3223,  1.0078,  ...,  0.0442,  1.3516, -0.4551]]]],
+       device='cuda:0')
+normalized_shape = (512,)
+weight = Parameter containing:
+tensor([1.0352, 0.8583, 0.9165, 1.0310, 0.9185, 1.0727, 0.9556, 1.0412, 0.9869,
+        0.9751, ...7,
+        1.0253, 1.1112, 1.0303, 0.9704, 1.1583, 0.9386, 0.9745, 0.8839],
+       device='cuda:0', requires_grad=True)
+bias = None, eps = 1e-05
+
+    def layer_norm(
+        input: Tensor,
+        normalized_shape: list[int],
+        weight: Tensor | None = None,
+        bias: Tensor | None = None,
+        eps: float = 1e-5,
+    ) -> Tensor:
+        r"""Apply Layer Normalization for last certain number of dimensions.
+    
+        See :class:`~torch.nn.LayerNorm` for details.
+        """
+        if has_torch_function_variadic(input, weight, bias):
+            return handle_torch_function(
+                layer_norm,
+                (input, weight, bias),
+                input,
+                normalized_shape,
+                weight=weight,
+                bias=bias,
+                eps=eps,
+            )
+>       return torch.layer_norm(
+            input, normalized_shape, weight, bias, eps, torch.backends.cudnn.enabled
+        )
+E       torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 32.00 GiB. GPU 0 has a total capacity of 79.25 GiB of which 12.45 GiB is free. Including non-PyTorch memory, this process has 66.79 GiB memory in use. Of the allocated memory 48.45 GiB is allocated by PyTorch, and 17.83 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+
+../../practice/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/nn/functional.py:2987: OutOfMemoryError
+----------------------------- Captured stderr call -----------------------------
+[W1120 15:38:40.415587852 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 4778295296, total: 85095874560).
+[W1120 15:38:42.448544487 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 13366132736, total: 85095874560).
+[W1120 15:38:42.020357208 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 34359738368 bytes (free: 13370327040, total: 85095874560).
+============================= slowest 40 durations =============================
+3.20s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[2176-64-128-8]
+2.68s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[4096-256-512-32]
+2.13s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[3072-256-512-32]
+2.11s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[4096-128-384-8]
+0.49s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[4096-64-256-32]
+0.48s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[4096-128-256-16]
+0.36s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[4096-64-128-32]
+0.35s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[4096-64-128-8]
+0.34s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[3072-128-384-8]
+0.28s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[3072-64-256-32]
+0.27s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[3072-128-256-16]
+0.25s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[2176-256-512-32]
+0.21s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[3072-64-128-32]
+0.20s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[3072-64-128-8]
+0.17s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[2176-128-384-8]
+0.14s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[2176-64-256-32]
+0.14s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[2176-128-256-16]
+0.11s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[2176-64-128-32]
+
+(22 durations < 0.005s hidden.  Use -vv to show these durations.)
+=========================== short test summary info ============================
+FAILED tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[4096-256-512-32]
+======================== 1 failed, 22 passed in 16.30s =========================

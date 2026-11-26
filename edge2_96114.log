@@ -1,0 +1,12 @@
+d 64/128/8 L 2050: refused: pwa_sm80: L 2050: the sm_80 kernels take L a multiple of 16 up to 8192 in inference (training 1024: the pair backward's 
+d 64/128/8 L 4104: refused: pwa_sm80: L 4104: the sm_80 kernels take L a multiple of 16 up to 8192 in inference (training 1024: the pair backward's 
+Consider using tensor.detach() first. (Triggered internally at /__w/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:822.)
+  print(f"d {dm}/{dp}/{dh} L {length}: cuda max {float((got - gold).abs().max() / sc):.2e} rms {float(((got - gold) ** 2).mean().sqrt() / rm):.2e} {ev[0].elapsed_time(ev[1]):.2f} ms (eager) extra peak {peak_extra:.2f} GiB over the inputs", flush=True)
+d 64/128/8 L 8192: cuda max 3.30e-03 rms 1.73e-03 20.04 ms (eager) extra peak 1.07 GiB over the inputs
+d 64/128/8 L 8208: refused: pwa_sm80: L 8208: the sm_80 kernels take L a multiple of 16 up to 8192 in inference (training 1024: the pair backward's 
+d 64/128/8 L 8704: refused: pwa_sm80: L 8704: the sm_80 kernels take L a multiple of 16 up to 8192 in inference (training 1024: the pair backward's 
+Consider using tensor.detach() first. (Triggered internally at /__w/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:822.)
+  print(f"d {dm}/{dp}/{dh} L {length}: cuda max {float((got - gold).abs().max() / sc):.2e} rms {float(((got - gold) ** 2).mean().sqrt() / rm):.2e} {ev[0].elapsed_time(ev[1]):.2f} ms (eager) extra peak {peak_extra:.2f} GiB over the inputs", flush=True)
+d 128/384/8 L 2064: cuda max 3.60e-03 rms 1.73e-03 3.64 ms (eager) extra peak 0.09 GiB over the inputs
+d 128/384/8 L 8192: cuda max 3.19e-03 rms 1.73e-03 56.07 ms (eager) extra peak 1.06 GiB over the inputs
+d 128/384/8 L 8208: refused: pwa_sm80: L 8208: the sm_80 kernels take L a multiple of 16 up to 8192 in inference (training 1024: the pair backward's 

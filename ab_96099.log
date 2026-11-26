@@ -1,0 +1,20 @@
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 55
+    print(f"d {dm}/{dp}/{dh} L {L}: infer maxabsdiff {diff:.1e} train(fwd+grads) maxabsdiff {tdiff:.1e} | old {med(t[\"old\"])*1000:.1f} us new {med(t[\"new\"])*1000:.1f} us ratio {med(t[\"new\"])/med(t[\"old\"]):.3f}", flush=True)
+                                                                                                                      ^
+SyntaxError: unexpected character after line continuation character
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 55
+    print(f"d {dm}/{dp}/{dh} L {L}: infer maxabsdiff {diff:.1e} train(fwd+grads) maxabsdiff {tdiff:.1e} | old {med(t[\"old\"])*1000:.1f} us new {med(t[\"new\"])*1000:.1f} us ratio {med(t[\"new\"])/med(t[\"old\"]):.3f}", flush=True)
+                                                                                                                      ^
+SyntaxError: unexpected character after line continuation character
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 55
+    print(f"d {dm}/{dp}/{dh} L {L}: infer maxabsdiff {diff:.1e} train(fwd+grads) maxabsdiff {tdiff:.1e} | old {med(t[\"old\"])*1000:.1f} us new {med(t[\"new\"])*1000:.1f} us ratio {med(t[\"new\"])/med(t[\"old\"]):.3f}", flush=True)
+                                                                                                                      ^
+SyntaxError: unexpected character after line continuation character
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 55
+    print(f"d {dm}/{dp}/{dh} L {L}: infer maxabsdiff {diff:.1e} train(fwd+grads) maxabsdiff {tdiff:.1e} | old {med(t[\"old\"])*1000:.1f} us new {med(t[\"new\"])*1000:.1f} us ratio {med(t[\"new\"])/med(t[\"old\"]):.3f}", flush=True)
+                                                                                                                      ^
+SyntaxError: unexpected character after line continuation character
+  File "/home/psk6950/miniworld-engine-scratch/pwa-long-l/../pwa_ab_old_new.py", line 55
+    print(f"d {dm}/{dp}/{dh} L {L}: infer maxabsdiff {diff:.1e} train(fwd+grads) maxabsdiff {tdiff:.1e} | old {med(t[\"old\"])*1000:.1f} us new {med(t[\"new\"])*1000:.1f} us ratio {med(t[\"new\"])/med(t[\"old\"]):.3f}", flush=True)
+                                                                                                                      ^
+SyntaxError: unexpected character after line continuation character

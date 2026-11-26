@@ -1,0 +1,51 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin/python
+rootdir: /home/psk6950/miniworld-engine-scratch/pwa-long-l
+configfile: pyproject.toml
+plugins: platformdirs-4.12.0, hydra-core-1.3.7, jaxtyping-0.3.11
+collecting ... collected 22 items
+
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-8-2176] PASSED [  4%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-8-3072] PASSED [  9%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-8-4096] PASSED [ 13%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-32-2176] PASSED [ 18%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-32-3072] PASSED [ 22%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-32-4096] PASSED [ 27%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-256-32-2176] PASSED [ 31%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-256-32-3072] PASSED [ 36%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-256-32-4096] PASSED [ 40%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-256-16-2176] PASSED [ 45%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-256-16-3072] PASSED [ 50%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-256-16-4096] PASSED [ 54%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-384-8-2176] PASSED [ 59%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-384-8-3072] PASSED [ 63%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-384-8-4096] PASSED [ 68%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[256-512-32-2176] PASSED [ 72%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[256-512-32-3072] PASSED [ 77%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_gate[64-128-8] PASSED [ 81%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_gate[64-128-32] PASSED [ 86%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_gate[64-256-32] PASSED [ 90%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_gate[128-256-16] PASSED [ 95%]
+tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_gate[128-384-8] PASSED [100%]
+
+============================= slowest 40 durations =============================
+3.45s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-8-2176]
+1.53s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-384-8-4096]
+1.24s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-256-32-4096]
+0.48s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-256-16-4096]
+0.46s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[256-512-32-3072]
+0.36s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-32-4096]
+0.35s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-8-4096]
+0.34s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-384-8-3072]
+0.28s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-256-32-3072]
+0.27s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-256-16-3072]
+0.25s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[256-512-32-2176]
+0.21s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-32-3072]
+0.20s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-8-3072]
+0.18s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-384-8-2176]
+0.14s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[128-256-16-2176]
+0.14s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-256-32-2176]
+0.11s call     tests/gpu/test_pwa_long_inference_sm80.py::test_pwa_sm80_inference_past_2048[64-128-32-2176]
+
+(23 durations < 0.005s hidden.  Use -vv to show these durations.)
+============================= 22 passed in 12.18s ==============================
